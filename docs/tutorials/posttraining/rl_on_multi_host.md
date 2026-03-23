@@ -44,9 +44,9 @@ rely on the vLLM library.
 ## Table of Contents
 
 - [Prerequisites](#prerequisites)
+- [Build and Upload MaxText Docker Image](#build-and-upload-maxtext-docker-image)
 - [Setup Environment Variables](#setup-environment-variables)
 - [Get Your Model Checkpoint](#get-your-model-checkpoint)
-- [Build and Upload MaxText Docker Image](#build-and-upload-maxtext-docker-image-with-post-training-dependencies)
 - [Submit your RL workload via Pathways](#submit-your-rl-workload-via-pathways)
 - [Managing Workloads](#managing-workloads)
 - [Troubleshooting](#troubleshooting)
@@ -58,8 +58,13 @@ Before starting, ensure you have:
 - Access to a Google Cloud Project with TPU quotas.
 - A Hugging Face account with an access token for downloading models.
 - Permissions for Google Artifact Registry (Artifact Registry Writer role).
-- XPK installed (follow [official documentation](https://github.com/AI-Hypercomputer/xpk/blob/main/docs/installation.md)).
+- Prerequisites for XPK installed (follow [official documentation](https://github.com/AI-Hypercomputer/xpk/blob/main/docs/installation.md#1-prerequisites)).
 - A Pathways-ready GKE cluster (see [create GKE cluster](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster)).
+- **Docker** installed and configured for sudoless use. Follow the steps to [configure sudoless Docker](https://docs.docker.com/engine/install/linux-postinstall/).
+
+## Build and upload MaxText Docker image
+
+For instructions on building and uploading the MaxText Docker image with post-training dependencies, please refer to the [official documentation](https://maxtext.readthedocs.io/en/latest/build_maxtext.html).
 
 ## Setup Environment Variables
 
@@ -68,21 +73,19 @@ actual values.
 
 ```bash
 # -- Model configuration --
-export HF_MODEL=<Hugging Face Model> # e.g. 'llama3.1-70b-Instruct'
-export MODEL=<MaxText Model> # e.g. 'llama3.1-70b'
-export TOKENIZER=<Tokenizer> # e.g. 'meta-llama/Llama-3.1-70B-Instruct'
+export MODEL=<MaxText Model> # e.g. 'llama3.1-70b-Instruct'
 export HF_TOKEN=<Hugging Face access token>
 
 # -- MaxText configuration --
 export BASE_OUTPUT_DIRECTORY=<output directory to store run logs> # e.g., gs://my-bucket/my-output-directory
 export WORKLOAD=<Name for this run> # e.g., llama-3-70b-grpo
-export MAXTEXT_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/${WORKLOAD}/0/items
+export MAXTEXT_CKPT_PATH=${BASE_OUTPUT_DIRECTORY?}/${WORKLOAD?}/0/items
 
 # -- Workload configuration --
 export TPU_TYPE=<TPU Type> # e.g., 'v5p-128'
 export TPU_CLUSTER=<cluster name>
 export PROJECT_ID=<GCP project ID>
-export CLOUD_IMAGE_NAME=<your artifact registry image> # Name for the Docker image to be built
+export ZONE=<GCP zone>
 ```
 
 ## Get Your Model Checkpoint
@@ -104,90 +107,6 @@ Refer the steps in [Hugging Face to MaxText](../../guides/checkpointing_solution
 export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint> # e.g., gs://my-bucket/my-model-checkpoint/0/items
 ```
 
-## Build and upload MaxText Docker image with post-training dependencies
-
-Before building the Docker image, authenticate to
-[Google Artifact Registry](https://docs.cloud.google.com/artifact-registry/docs/docker/authentication#gcloud-helper)
-for permission to push your images and other access.
-
-```bash
-# Authenticate your user account for gcloud CLI access
-gcloud auth login
-
-# Configure application default credentials for Docker and other tools
-gcloud auth application-default login
-
-# Configure Docker credentials and test your access
-gcloud auth configure-docker
-docker run hello-world
-```
-
-### Option 1: Install stable releases of post-training dependencies
-
-> **Caution:** RL in MaxText is currently broken with stable releases of
-> post-training dependencies. We are working on fixing this and recommend
-> following
-> [Option 2: Install from Git repositories of post-training dependencies](#option-2-install-from-git-repositories-of-post-training-dependencies)
-> in the meantime.
-
-Run the following script to create a Docker image with stable releases of
-MaxText, [Tunix](https://github.com/google/tunix),
-[vLLM](https://github.com/vllm-project/vllm), and
-[tpu-inference](https://github.com/vllm-project/tpu-inference) dependencies.
-This installs `vllm-tpu` which provides TPU inference for vLLM with unified JAX
-and PyTorch support. The build process takes approximately 10-15 minutes.
-
-```bash
-bash dependencies/scripts/docker_build_dependency_image.sh WORKFLOW=post-training
-```
-
-For experimental features (such as improved pathwaysutils resharding API), use:
-
-```bash
-bash dependencies/scripts/docker_build_dependency_image.sh WORKFLOW=post-training-experimental
-```
-
-### Option 2: Install from Git repositories of post-training dependencies
-
-You can also locally clone the [tunix](https://github.com/google/tunix),
-[tpu-inference](https://github.com/vllm-project/tpu-inference), and
-[vllm](https://github.com/vllm-project/vllm.git) repositories and then build the
-docker image with these local sources. To get a set of compatible commit IDs for
-`maxtext`, `tunix`, `tpu-inference`, and `vllm`, follow these steps:
-
-1. Navigate to the
-   [MaxText Package Tests](https://github.com/AI-Hypercomputer/maxtext/actions/workflows/build_and_test_maxtext.yml?query=event%3Aschedule)
-   GitHub Actions workflow.
-
-2. Select the latest successful run.
-
-3. Within the workflow run, find and click on the `maxtext_jupyter_notebooks (py312)` job, then expand the `run` job.
-
-4. Locate the `Record Commit IDs` step. The commit SHAs for `maxtext`, `tunix`,
-   `tpu-inference`, and `vllm` that were used in that successful run are listed
-   in the logs of this step.
-
-5. Prior to installation, ensure that the `maxtext`, `tunix`, `vllm`, and `tpu-inference` repositories are synchronized to the specific commits recorded from the CI logs. For each repository, use the following command to switch to the correct commit: `git checkout <commit_id>`.
-
-**Note:** Clone these repositories as siblings of the `maxtext` directory (e.g.,
-in the same parent directory). After cloning, run the build from inside the
-`maxtext` repository so it picks up the local sources:
-
-```bash
-bash dependencies/scripts/docker_build_dependency_image.sh WORKFLOW=post-training POST_TRAINING_SOURCE=local
-```
-
-### Upload the Docker Image
-
-> **Note:** You will need the
-> [**Artifact Registry Writer**](https://docs.cloud.google.com/artifact-registry/docs/access-control#permissions)
-> role to push Docker images to your project's Artifact Registry. Contact your
-> project administrator if you don't have this permission.
-
-```bash
-bash dependencies/scripts/docker_upload_runner.sh CLOUD_IMAGE_NAME=${CLOUD_IMAGE_NAME}
-```
-
 ## Submit your RL workload via Pathways
 
 See the **Troubleshooting** section for concise instructions on how to retry or
@@ -203,35 +122,35 @@ submit the `train_rl.py` script via XPK.
 ### Submit GRPO workload
 
 ```bash
-xpk workload create-pathways --workload $WORKLOAD \
---docker-image gcr.io/$PROJECT_ID/$CLOUD_IMAGE_NAME --cluster $TPU_CLUSTER \
---tpu-type=$TPU_TYPE --num-slices=1 \
---project=$PROJECT_ID --priority=high \
---command "HF_TOKEN=${HF_TOKEN} TF_CPP_MIN_LOG_LEVEL=0 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' \
-python3 -m src.maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_train/rl.yml \
-  model_name=${MODEL} \
-  tokenizer_path=${TOKENIZER} \
-  load_parameters_path=${MAXTEXT_CKPT_PATH} \
-  run_name=${WORKLOAD} \
-  base_output_directory=${BASE_OUTPUT_DIRECTORY} \
-  hf_access_token=${HF_TOKEN}"
+xpk workload create-pathways --workload ${WORKLOAD?} \
+--docker-image gcr.io/${PROJECT_ID?}/${CLOUD_IMAGE_NAME?} --cluster ${TPU_CLUSTER?} \
+--tpu-type=${TPU_TYPE?} --num-slices=1 \
+--project=${PROJECT_ID?} --priority=high \
+--zone=${ZONE?} \
+--command "HF_TOKEN=${HF_TOKEN?} TF_CPP_MIN_LOG_LEVEL=0 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' \
+python3 -m maxtext.trainers.post_train.rl.train_rl \
+  model_name=${MODEL?} \
+  load_parameters_path=${MAXTEXT_CKPT_PATH?} \
+  run_name=${WORKLOAD?} \
+  base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+  hf_access_token=${HF_TOKEN?}"
 ```
 
 ### Submit GSPO workload
 
 ```bash
-xpk workload create-pathways --workload $WORKLOAD \
---docker-image gcr.io/$PROJECT_ID/$CLOUD_IMAGE_NAME --cluster $TPU_CLUSTER \
---tpu-type=$TPU_TYPE --num-slices=1 \
---project=$PROJECT_ID --priority=high \
---command "HF_TOKEN=${HF_TOKEN} TF_CPP_MIN_LOG_LEVEL=0 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' \
-python3 -m src.maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_train/rl.yml \
-  model_name=${MODEL} \
-  tokenizer_path=${TOKENIZER} \
-  load_parameters_path=${MAXTEXT_CKPT_PATH} \
-  run_name=${WORKLOAD} \
-  base_output_directory=${BASE_OUTPUT_DIRECTORY} \
-  hf_access_token=${HF_TOKEN} \
+xpk workload create-pathways --workload ${WORKLOAD?} \
+--docker-image gcr.io/${PROJECT_ID?}/${CLOUD_IMAGE_NAME?} --cluster ${TPU_CLUSTER?} \
+--tpu-type=${TPU_TYPE?} --num-slices=1 \
+--project=${PROJECT_ID?} --priority=high \
+--zone=${ZONE?} \
+--command "HF_TOKEN=${HF_TOKEN?} TF_CPP_MIN_LOG_LEVEL=0 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' \
+python3 -m maxtext.trainers.post_train.rl.train_rl \
+  model_name=${MODEL?} \
+  load_parameters_path=${MAXTEXT_CKPT_PATH?} \
+  run_name=${WORKLOAD?} \
+  base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+  hf_access_token=${HF_TOKEN?} \
   loss_algo=gspo-token"
 ```
 
@@ -241,9 +160,9 @@ python3 -m src.maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_
 - **Delete a workload**: To remove a failed or unwanted Pathways job, use XPK:
   ```bash
   xpk workload delete \
-      --workload $WORKLOAD \
-      --cluster $TPU_CLUSTER \
-      --project $PROJECT_ID
+      --workload ${WORKLOAD?} \
+      --cluster ${TPU_CLUSTER?} \
+      --project ${PROJECT_ID?}
   ```
   In case the job still lingers on, you can use
   `kubectl get pods` to obtain the name of the pod and then run: `kubectl delete pod <pod-name>`.

@@ -19,11 +19,13 @@
 import datetime
 import enum
 from enum import Enum
+from jinja2 import Environment, TemplateSyntaxError
 import logging
 import math
 from math import prod
 import os
 from tempfile import gettempdir
+import yaml
 from typing import Any, Literal, NewType, Optional
 
 import jax
@@ -81,6 +83,7 @@ class QuantizationType(str, Enum):
   """Supported quantization schemes."""
 
   NONE = ""
+  INT4 = "int4"
   INT8 = "int8"
   INTMP = "intmp"
   FP8 = "fp8"
@@ -203,7 +206,9 @@ ModelName = Literal[
     "llama2-13b",
     "llama2-70b",
     "llama3-8b",
+    "llama3.1-8b-Instruct",
     "llama3-70b",
+    "llama3.1-70b-Instruct",
     "llama3.1-8b",
     "llama3.1-70b",
     "llama3.1-405b",
@@ -228,14 +233,22 @@ ModelName = Literal[
     "gemma3-4b",
     "gemma3-12b",
     "gemma3-27b",
+    "qwen2.5-7b",
+    "qwen2.5-14b",
     "qwen3-0.6b",
+    "qwen3-1.7b",
+    "qwen3-1.7b-base",
     "qwen3-4b",
+    "qwen3-4b-base",
     "qwen3-4b-thinking-2507",
     "qwen3-8b",
+    "qwen3-8b-base",
     "qwen3-14b",
+    "qwen3-14b-base",
     "qwen3-32b",
     "qwen3-235b-a22b",
     "qwen3-30b-a3b",
+    "qwen3-30b-a3b-base",
     "qwen3-480b-a35b",
     "qwen3-next-80b-a3b",
     "qwen3-omni-30b-a3b",
@@ -529,10 +542,15 @@ class MlaAttention(BaseModel):
 class AttentionIndexer(BaseModel):
   """Configuration for DeepSeek Sparse Attention (DSA): DeepSeek3.2-style MLA with indexer."""
 
-  use_sparse_indexer: bool = Field(False, description="Whether to use sparse indexer for MLA.")
-  index_head_dim: NonNegativeInt = Field(128, description="Head dim for indexer query and key.")
-  index_n_heads: NonNegativeInt = Field(64, description="Number of query heads in indexer.")
-  index_topk: NonNegativeInt = Field(2048, description="Number of tokens selected by the query token in indexer.")
+  use_indexer: bool = Field(False, description="Whether to use sparse indexer for MLA.")
+  indexer_head_dim: NonNegativeInt = Field(128, description="Head dim for indexer query and key.")
+  indexer_n_heads: NonNegativeInt = Field(64, description="Number of query heads in indexer.")
+  indexer_topk: NonNegativeInt = Field(2048, description="Number of tokens selected by the query token in indexer.")
+  indexer_sparse_training: bool = Field(
+      False,
+      description="Determines the training strategy for the indexer: Dense Warm-up or Sparse Training stage.",
+  )
+  indexer_loss_scaling_factor: float = Field(0.0, description="Multiplier for the indexer KL divergence loss.")
 
 
 class Llama4Attention(BaseModel):
@@ -773,10 +791,12 @@ class HardwareAndMesh(BaseModel):
       description="Strategy for context parallelism ('all_gather' or 'ring').",
   )
   custom_mesh: str = Field("", description="Available options: ['hybrid_ring_64x4', 'hybrid_ring_32x8']")
+  custom_mesh_and_rule: str = Field("", description="Customized mesh and logical rules for granularity.")
   allow_split_physical_axes: bool = Field(False, description="Allow splitting physical axes for device mesh creation.")
   enable_nnx: bool = Field(False, description="Whether to use NNX for model definition.")
   optimize_mesh_for_tpu_v6e: bool = Field(False, description="Apply transformations to the mesh for TPU v6e.")
   shardy: bool = Field(True, description="Whether to use shardy XLA backend.")
+  pure_nnx_decoder: bool = Field(False, description="Whether to enable pure NNX decoder.")
 
 
 class LayoutAndSharding(BaseModel):
@@ -840,6 +860,9 @@ class IciParallelism(BaseModel):
 class PipelineParallelism(BaseModel):
   """Configuration for pipeline parallelism."""
 
+  pipeline_fsdp_ag_per_repeat: bool = Field(
+      False, description="Enable weight prefetching for circular pipeline parallelism."
+  )
   num_layers_per_pipeline_stage: int = Field(1, description="Number of layers to place on each pipeline stage.")
   num_pipeline_repeats: int = Field(
       -1,
@@ -855,6 +878,7 @@ class PipelineParallelism(BaseModel):
   )
   pipeline_fsdp_ag_once: bool = Field(False, description="If True, all-gather FSDP weights once per pipeline repeat.")
   scan_pipeline_iterations: bool = Field(True, description="Use jax.lax.scan over pipeline iterations.")
+  scan_pipeline_repeats: bool = Field(True, description="Use jax.lax.scan over pipeline repeats.")
   scan_layers_per_stage: bool = Field(False, description="Use jax.lax.scan over layers within a stage.")
   set_remat_policy_on_pipeline_iterations: bool = Field(True, description="Set remat policy on the pipeline scan.")
   set_remat_policy_on_layers_per_stage: bool = Field(False, description="Set remat policy on the inner layer scan.")
@@ -918,13 +942,16 @@ class Tokenizer(BaseModel):
   """Configuration for the tokenizer."""
 
   vocab_size: int = Field(32_000, description="The size of the vocabulary.")
-  tokenizer_path: PathStr = Field(
-      os.path.join("assets", "tokenizers", "tokenizer.llama2"),
+  tokenizer_path: None | PathStr = Field(
+      None,
       description="Path to the tokenizer model file.",
   )
   tokenizer_type: TokenizerType = Field(TokenizerType.SENTENCEPIECE, description="The type of tokenizer.")
   use_chat_template: bool = Field(False, description="Whether to use the chat template for tokenization.")
   chat_template_path: str = Field("", description="Path to chat template json file.")
+  chat_template: str = Field(
+      "", description="Chat template to use with HF tokenizers. It should be a valid Jinja2-formatted template."
+  )
   tokenize_train_data: bool = Field(True, description="If False, assumes the training dataset is pre-tokenized.")
   tokenize_eval_data: bool = Field(True, description="If False, assumes the evaluation dataset is pre-tokenized.")
   add_bos: bool = Field(True, description="Whether to add a beginning-of-sentence token.")
@@ -1014,17 +1041,13 @@ class GrainDataset(BaseModel):
       "",
       description="Path to a JSON file specifying the mixture weights for Grain training data.",
   )
-  grain_file_type: str = Field("arrayrecord", description="File type for Grain data.")
+  grain_file_type: str = Field(
+      "arrayrecord", description="File type for Grain data. Supported: arrayrecord, tfrecord, parquet."
+  )
   grain_worker_count: int = Field(1, description="Number of workers for Grain data loading.")
-  grain_per_worker_buffer_size: int = Field(
-      1,
-      description="Buffer size for each worker for Grain data loading during training.",
-  )
+  grain_per_worker_buffer_size: int = Field(1, description="Per-worker buffer size for Grain train data loading.")
   grain_worker_count_eval: int = Field(1, description="Number of workers for Grain eval data loading.")
-  grain_per_worker_buffer_size_eval: int = Field(
-      1,
-      description="Buffer size for each worker for Grain data loading during evaluation.",
-  )
+  grain_per_worker_buffer_size_eval: int = Field(1, description="Per-worker buffer size for Grain eval data loading.")
   grain_ram_budget_mb: int = Field(1024, description="RAM budget (MB) for auto-tuning worker count.")
   grain_num_threads: int = Field(16, description="Number of threads for Grain ReadOptions during training.")
   grain_prefetch_buffer_size: int = Field(500, description="Prefetch buffer size for Grain ReadOptions during training.")
@@ -1036,6 +1059,7 @@ class GrainDataset(BaseModel):
       16,
       description="Max workers for ThreadPoolExecutor when mixing multiple Grain data sources.",
   )
+  grain_shuffle_buffer_size: int = Field(100, description="Shuffle buffer size when using Parquet or TFRecord.")
 
 
 class FineTuning(BaseModel):
@@ -1064,6 +1088,11 @@ class Distillation(BaseModel):
   teacher_overrides: dict[str, Any] = Field(
       default_factory=dict,
       description="Overrides specific to the Teacher model (e.g., {'num_query_heads': 64}).",
+  )
+
+  # --- Offline Distillation Field ---
+  offline_data_dir: Optional[str] = Field(
+      None, description="GCS or local path to the pre-generated ArrayRecord teacher data."
   )
 
   # --- Loss Params ---
@@ -1155,6 +1184,13 @@ class Optimizer(BaseModel):
       -1,
       ge=-1,
       description="Total steps for the LR schedule. -1 defaults to `steps`.",
+  )
+  trainable_parameters_mask: list[str] = Field(
+      default_factory=list,
+      description=(
+          "List of parameter names/patterns to train. If non-empty, all other parameters will be frozen, "
+          "example: ['.*indexer.*']. If empty (default), all parameters are trained."
+      ),
   )
 
 
@@ -1628,6 +1664,7 @@ class RLDataset(BaseModel):
   batch_size: int = Field(1, description="Global batch size for the dataset loader in RL.")
   num_batches: int = Field(4, description="Number of batches for RL training.")
   num_test_batches: int = Field(5, description="Number of batches for RL evaluation.")
+  test_batch_start_index: int = Field(0, description="Start index for the test dataset")
   train_fraction: float = Field(1.0, description="Fraction of the dataset to be used for training.")
   micro_batch_size: int = Field(-1, description="Micro batch size for rollout and training.")
 
@@ -1950,6 +1987,24 @@ class MaxTextConfig(
     Computes all derived values and runs all cross-field validations after initial parsing.
     This logic is ported from the legacy pyconfig_deprecated.py system and adapted for Pydantic.
     """
+    if self.custom_mesh_and_rule:
+      custom_mesh_path = os.path.join(
+          os.path.dirname(os.path.abspath(__file__)),
+          "custom_mesh_and_rule",
+          f"{self.custom_mesh_and_rule}.yml",
+      )
+      if os.path.exists(custom_mesh_path):
+        with open(custom_mesh_path, "r") as f:  # pylint: disable=unspecified-encoding
+          custom_mesh_config = yaml.safe_load(f)
+          if "mesh_axes" in custom_mesh_config:
+            self.mesh_axes = custom_mesh_config["mesh_axes"]
+          if "logical_axis_rules" in custom_mesh_config:
+            self.logical_axis_rules = custom_mesh_config["logical_axis_rules"]
+          if "data_sharding" in custom_mesh_config:
+            self.data_sharding = custom_mesh_config["data_sharding"]
+      else:
+        raise NotImplementedError(f"Custom mesh config file not found at {custom_mesh_path}")
+
     # A. SET RUN NAME AND PATHS
     # If run_name is not set, generate one from the JOBSET_NAME environment variable (if available)
     # or create one from the model name and a timestamp.
@@ -1994,6 +2049,15 @@ class MaxTextConfig(
           tokenizer_path,
       )
       self.tokenizer_path = tokenizer_path
+
+    # validate chat_template format if defined
+    chat_template = getattr(self, "chat_template", "")
+    if chat_template:
+      try:
+        env = Environment()
+        env.parse(chat_template)
+      except TemplateSyntaxError as e:
+        raise ValueError(f"Specified chat_template is invalid: {e}") from e
 
     # C. SET PRIMARY DEPENDENCIES & DEFAULTS
     # If learning_rate_schedule_steps is -1, it defaults to the total number of training steps.
@@ -2241,6 +2305,17 @@ class MaxTextConfig(
         )
         self.num_pipeline_repeats = num_pipeline_repeats
 
+      if self.pipeline_fsdp_ag_per_repeat:
+        assert self.num_pipeline_repeats > 1, "Pipeline weight prefetching only supports circular pipeline."
+        assert (
+            self.num_layers_per_pipeline_stage == 1
+        ), "Pipeline weight prefetching currently only supports one layer per pipeline stage."
+        assert (
+            not self.pipeline_delay_activation_forwarding
+        ), "Pipeline weight prefetching does not support pipeline delay."
+        assert not self.quantization, "Quantization is currently not supported for pipeline prefetching."
+        assert not self.scan_layers_per_stage, "Pipeline weight prefetching currently does not support scan."
+
       assert (num_stages * self.num_pipeline_repeats * self.num_layers_per_pipeline_stage) == (
           self.pipeline_parallel_layers
       ), (
@@ -2325,7 +2400,7 @@ class MaxTextConfig(
         raise ValueError("`local_checkpoint_period` must be > 0 for emergency checkpointing.")
     if self.moba and self.attention not in ("dot_product"):
       raise ValueError("MoBA is only supported with dot_product attention.")
-    if self.use_sparse_indexer:
+    if self.use_indexer:
       if self.q_lora_rank == 0:
         raise NotImplementedError("Sparse indexer has not implemented for q_lora_rank = 0.")
       supports_dot_product = self.attention == "dot_product"
@@ -2499,6 +2574,15 @@ class MaxTextConfig(
       self.use_grpo = True
     else:
       self.use_grpo = False
+
+    if self.use_batch_split_schedule:
+      if not (self.decoder_block == DecoderBlockType.DEEPSEEK and self.sparse_matmul and self.use_tokamax_gmm):
+        raise ValueError("Batch split only supports deepseek, with `sparse_matmul=True` and `use_tokamax_gmm=True`")
+      if self.quantization and not (self.use_qwix_quantization and self.quantization == "fp8_full"):
+        raise ValueError(
+            "Batch split quantization only supports `use_qwix_quantization=True` and `quantization=fp8_full`"
+        )
+
     if self.opt_type == "muon" and self.decoder_block not in [
         DecoderBlockType.DEEPSEEK,
         DecoderBlockType.QWEN3,
@@ -2507,7 +2591,7 @@ class MaxTextConfig(
     ]:
       raise ValueError(
           "Muon dimension numbers haven't been tested for this model. Run this command first: "
-          f"`python3 -m MaxText.muon_utils {self.model_name} True`"
+          f"`python3 -m maxtext.utils.muon_utils {self.model_name} True`"
       )
     if self.force_q_layout and not self.use_jax_splash:
       raise ValueError("`force_q_layout` can only be true if `use_jax_splash` is also true.")
@@ -2530,78 +2614,45 @@ class MaxTextConfig(
       raise ValueError("`share_kv_projections` is not compatible with `attention_type='mla'`.")
 
     # I. FINAL TYPE CONVERSIONS AND DERIVED LISTS
-    # Create the ici_parallelism and dcn_parallelism lists for legacy compatibility.
-    if self.using_pipeline_parallelism and self.mesh_axes and self.mesh_axes[0] == "stage":
-      self.ici_parallelism = [
-          self.ici_diloco_parallelism,
-          self.ici_pipeline_parallelism,
-          self.ici_data_parallelism,
-          self.ici_fsdp_parallelism,
-          self.ici_fsdp_transpose_parallelism,
-          self.ici_sequence_parallelism,
-          self.ici_context_parallelism,
-          self.ici_context_autoregressive_parallelism,
-          self.ici_tensor_parallelism,
-          self.ici_tensor_transpose_parallelism,
-          self.ici_tensor_sequence_parallelism,
-          self.ici_expert_parallelism,
-          self.ici_autoregressive_parallelism,
-      ]
-      self.dcn_parallelism = [
-          self.dcn_diloco_parallelism,
-          self.dcn_pipeline_parallelism,
-          self.dcn_data_parallelism,
-          self.dcn_fsdp_parallelism,
-          self.dcn_fsdp_transpose_parallelism,
-          self.dcn_sequence_parallelism,
-          self.dcn_context_parallelism,
-          self.dcn_context_autoregressive_parallelism,
-          self.dcn_tensor_parallelism,
-          self.dcn_tensor_transpose_parallelism,
-          self.dcn_tensor_sequence_parallelism,
-          self.dcn_expert_parallelism,
-          self.dcn_autoregressive_parallelism,
-      ]
-    else:
-      ici_map = {
-          "diloco": self.ici_diloco_parallelism,
-          "data": self.ici_data_parallelism,
-          "stage": self.ici_pipeline_parallelism,
-          "fsdp": self.ici_fsdp_parallelism,
-          "fsdp_transpose": self.ici_fsdp_transpose_parallelism,
-          "sequence": self.ici_sequence_parallelism,
-          "context": self.ici_context_parallelism,
-          "context_autoregressive": self.ici_context_autoregressive_parallelism,
-          "tensor": self.ici_tensor_parallelism,
-          "tensor_transpose": self.ici_tensor_transpose_parallelism,
-          "tensor_sequence": self.ici_tensor_sequence_parallelism,
-          "model": self.ici_tensor_parallelism,
-          "expert": self.ici_expert_parallelism,
-          "autoregressive": self.ici_autoregressive_parallelism,
-          "attn_dp": 1,  # initialized to 1, vLLM will auto calculate this value based on TP and num_kv_heads
-          "attn_dp_expert": 1,  # initialized to 1, vLLM will auto calculate this value based on EP
-      }
-      self.ici_parallelism = [ici_map[axis] for axis in self.mesh_axes]
+    ici_map = {
+        "diloco": self.ici_diloco_parallelism,
+        "data": self.ici_data_parallelism,
+        "stage": self.ici_pipeline_parallelism,
+        "fsdp": self.ici_fsdp_parallelism,
+        "fsdp_transpose": self.ici_fsdp_transpose_parallelism,
+        "sequence": self.ici_sequence_parallelism,
+        "context": self.ici_context_parallelism,
+        "context_autoregressive": self.ici_context_autoregressive_parallelism,
+        "tensor": self.ici_tensor_parallelism,
+        "tensor_transpose": self.ici_tensor_transpose_parallelism,
+        "tensor_sequence": self.ici_tensor_sequence_parallelism,
+        "model": self.ici_tensor_parallelism,
+        "expert": self.ici_expert_parallelism,
+        "autoregressive": self.ici_autoregressive_parallelism,
+        "attn_dp": 1,  # initialized to 1, vLLM will auto calculate this value based on TP and num_kv_heads
+        "attn_dp_expert": 1,  # initialized to 1, vLLM will auto calculate this value based on EP
+    }
+    self.ici_parallelism = [ici_map[axis] for axis in self.mesh_axes]
 
-      dcn_map = {
-          "diloco": self.dcn_diloco_parallelism,
-          "data": self.dcn_data_parallelism,
-          "stage": self.dcn_pipeline_parallelism,
-          "fsdp": self.dcn_fsdp_parallelism,
-          "fsdp_transpose": self.dcn_fsdp_transpose_parallelism,
-          "sequence": self.dcn_sequence_parallelism,
-          "context": self.dcn_context_parallelism,
-          "context_autoregressive": self.dcn_context_autoregressive_parallelism,
-          "tensor": self.dcn_tensor_parallelism,
-          "tensor_transpose": self.dcn_tensor_transpose_parallelism,
-          "tensor_sequence": self.dcn_tensor_sequence_parallelism,
-          "model": self.dcn_tensor_parallelism,
-          "expert": self.dcn_expert_parallelism,
-          "autoregressive": self.dcn_autoregressive_parallelism,
-          "attn_dp": 1,  # initialized to 1, vLLM will auto calculate this value based on TP and num_kv_heads
-          "attn_dp_expert": 1,  # initialized to 1, vLLM will auto calculate this value based on EP
-      }
-      self.dcn_parallelism = [dcn_map[axis] for axis in self.mesh_axes]
+    dcn_map = {
+        "diloco": self.dcn_diloco_parallelism,
+        "data": self.dcn_data_parallelism,
+        "stage": self.dcn_pipeline_parallelism,
+        "fsdp": self.dcn_fsdp_parallelism,
+        "fsdp_transpose": self.dcn_fsdp_transpose_parallelism,
+        "sequence": self.dcn_sequence_parallelism,
+        "context": self.dcn_context_parallelism,
+        "context_autoregressive": self.dcn_context_autoregressive_parallelism,
+        "tensor": self.dcn_tensor_parallelism,
+        "tensor_transpose": self.dcn_tensor_transpose_parallelism,
+        "tensor_sequence": self.dcn_tensor_sequence_parallelism,
+        "model": self.dcn_tensor_parallelism,
+        "expert": self.dcn_expert_parallelism,
+        "autoregressive": self.dcn_autoregressive_parallelism,
+        "attn_dp": 1,  # initialized to 1, vLLM will auto calculate this value based on TP and num_kv_heads
+        "attn_dp_expert": 1,  # initialized to 1, vLLM will auto calculate this value based on EP
+    }
+    self.dcn_parallelism = [dcn_map[axis] for axis in self.mesh_axes]
 
     # Diloco params
     self.num_diloco_replicas = int(self.ici_diloco_parallelism * self.dcn_diloco_parallelism)

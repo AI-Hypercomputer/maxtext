@@ -52,6 +52,7 @@ from maxtext.models import (
     mistral,
     mixtral,
     olmo3,
+    qwen2,
     qwen3,
     simple_layer,
 )
@@ -307,7 +308,7 @@ class Decoder(nn.Module):
     if self.config.using_pipeline_parallelism:
       pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer)
       remat_policy = self.get_remat_policy()
-      self.pipeline_module = pipeline.Pipeline(
+      self.pipeline_module = pipeline.create_pipeline(
           config=self.config, mesh=self.mesh, layers=pipeline_stage_module, remat_policy=remat_policy
       )
 
@@ -467,6 +468,8 @@ class Decoder(nn.Module):
         return [gpt3.Gpt3DecoderLayerToLinen]
       case DecoderBlockType.GPT_OSS:
         return [gpt_oss.GptOssScannableBlockToLinen] if self.config.scan_layers else [gpt_oss.GptOssDecoderLayerToLinen]
+      case DecoderBlockType.QWEN2:
+        return [qwen2.Qwen2DecoderLayerToLinen]
       case DecoderBlockType.QWEN3:
         return [qwen3.Qwen3DecoderLayerToLinen]
       case DecoderBlockType.QWEN3_MOE:
@@ -525,6 +528,7 @@ class Decoder(nn.Module):
         DecoderBlockType.GEMMA,
         DecoderBlockType.GEMMA2,
         DecoderBlockType.GEMMA3,
+        DecoderBlockType.QWEN2,
         DecoderBlockType.QWEN3,
         DecoderBlockType.QWEN3_MOE,
         DecoderBlockType.GPT_OSS,
@@ -794,12 +798,11 @@ class Decoder(nn.Module):
         model_mode,
     )
     if cfg.using_pipeline_parallelism:
-      if cfg.pipeline_fsdp_ag_once:
-        logical_partition_spec = self.pipeline_module.get_weight_sharding(
-            y, decoder_segment_ids, decoder_positions, deterministic, model_mode
-        )
-      else:
-        logical_partition_spec = None  # This partition spec is only used for the fsdp_ag_once feature.
+      logical_partition_spec = (
+          self.pipeline_module.get_weight_sharding(y, decoder_segment_ids, decoder_positions, deterministic, model_mode)
+          if cfg.pipeline_fsdp_ag_once or cfg.pipeline_fsdp_ag_per_repeat
+          else None
+      )
       if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
         assert len(RemattedBlockLayers) == 2, "Scanned layers must have a length of 2 using deepseek."
         dense_layer = RemattedBlockLayers[0]
@@ -1078,7 +1081,10 @@ class Decoder(nn.Module):
     # When invoking from vLLM with RPA attention, logit computation is deferred to a later stage.
     if cfg.attention == "vllm_rpa":
       logits = None
-
+    # When in the Indexer Dense Warm-up stage, skip the expensive output head projection
+    # for efficiency, as the main model is frozen and the LM loss is not needed.
+    elif (cfg.use_indexer and not cfg.indexer_sparse_training) and self.model_mode == MODEL_MODE_TRAIN:
+      logits = None
     # When vocab tiling is enabled in training mode, full logits won't generate to reduce memory
     # Instead, we keep track on the hidden states, which has smaller size compared to full logits
     elif cfg.num_vocab_tiling > 1 and self.model_mode == MODEL_MODE_TRAIN:

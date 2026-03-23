@@ -33,13 +33,13 @@ fi
 
 # Set up network optimizations
 if [ "$RUN_PREFLIGHT" = "true" ]; then
-    bash preflight.sh
+    bash src/dependencies/scripts/preflight.sh
 fi
 
 # Train
 export LIBTPU_INIT_ARGS="--xla_tpu_scoped_vmem_limit_kib=122880 --xla_tpu_use_minor_sharding_for_major_trivial_input=true --xla_tpu_relayout_group_size_threshold_for_reduce_scatter=1 --xla_tpu_assign_all_reduce_scatter_layout --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true"
 
-python3 -m MaxText.$EXECUTABLE "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"/base.yml model_name=gemma3-27b\
+python3 -m maxtext.trainers.pre_train.$EXECUTABLE "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"/base.yml model_name=gemma3-27b\
   steps=15 per_device_batch_size=2 enable_checkpointing=false\
   remat_policy=full ici_fsdp_transpose_parallelism=256 ici_fsdp_parallelism=-1\
   max_target_length=8192 base_output_directory=$OUTPUT_PATH\

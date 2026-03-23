@@ -42,58 +42,23 @@ rely on the vLLM library.
 
 Let's get started!
 
-## Create virtual environment and Install MaxText dependencies
+## Install MaxText and post-training dependencies
 
-```bash
-# Create a virtual environment
-export VENV_NAME=<your virtual env name> # e.g., maxtext_venv
-pip install uv
-uv venv --python 3.12 --seed $VENV_NAME
-source $VENV_NAME/bin/activate
-```
-
-### Option 1: From PyPI releases (Recommended)
-
-Run the following commands to get all the necessary installations.
-
-```bash
-uv pip install maxtext[tpu-post-train] --resolution=lowest
-install_maxtext_tpu_post_train_extra_deps
-```
-
-It installs MaxText and then for post-training, it installs primarily the following:
-
-a. [Tunix](https://github.com/google/tunix) as the LLM Post-Training Library, and
-
-b. `vllm-tpu` which is
-[vllm](https://github.com/vllm-project/vllm) and
-[tpu-inference](https://github.com/vllm-project/tpu-inference) and thereby
-providing TPU inference for vLLM, with unified JAX and PyTorch support.
-
-### Option 2: From Github
-
-For using a version newer than the latest PyPI release, you could also install the latest vetted versions of the dependencies from MaxText in the following way:
-
-```bash
-# 1. Clone the repository
-git clone https://github.com/AI-Hypercomputer/maxtext.git
-cd maxtext
-
-# 2. Install dependencies in editable mode
-uv pip install -e .[tpu-post-train] --resolution=lowest
-install_maxtext_tpu_post_train_extra_deps
-```
+For instructions on installing MaxText with post-training dependencies on your VM, please refer to the [official documentation](https://maxtext.readthedocs.io/en/latest/install_maxtext.html) and use the `maxtext[tpu-post-train]` installation path to include all necessary post-training dependencies.
 
 ## Setup environment variables
+
+Follow the instructions [here](https://huggingface.co/docs/huggingface_hub/v0.21.2/guides/cli) to login to Hugging Face using your access token using
+
+```bash
+huggingface-cli login
+```
 
 Setup following environment variables before running GRPO/GSPO:
 
 ```bash
 # -- Model configuration --
-export HF_MODEL=<Hugging Face Model> # e.g. 'llama3.1-8b-Instruct'
-export MODEL=<MaxText Model> # e.g. 'llama3.1-8b'
-export TOKENIZER=<Tokenizer> # e.g. 'meta-llama/Llama-3.1-8B-Instruct'
-export HF_TOKEN=<Hugging Face access token>
+export MODEL=<MaxText Model> # e.g. 'llama3.1-8b-Instruct'
 
 # -- MaxText configuration --
 export BASE_OUTPUT_DIRECTORY=<output directory to store run logs> # e.g., gs://my-bucket/my-output-directory
@@ -133,14 +98,12 @@ export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint> # e.g., gs://my-bucke
 Run the following command for GRPO:
 
 ```
-python3 -m src.maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_train/rl.yml \
-  model_name=${MODEL} \
-  tokenizer_path=${TOKENIZER} \
-  load_parameters_path=${MAXTEXT_CKPT_PATH} \
-  run_name=${RUN_NAME} \
-  base_output_directory=${BASE_OUTPUT_DIRECTORY} \
-  hf_access_token=${HF_TOKEN} \
-  chips_per_vm=${CHIPS_PER_VM}
+python3 -m maxtext.trainers.post_train.rl.train_rl \
+  model_name=${MODEL?} \
+  load_parameters_path=${MAXTEXT_CKPT_PATH?} \
+  run_name=${RUN_NAME?} \
+  base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+  chips_per_vm=${CHIPS_PER_VM?}
 ```
 
 The overview of what this run will do is as follows:
@@ -157,15 +120,13 @@ The overview of what this run will do is as follows:
 Run the following command for GSPO:
 
 ```
-python3 -m src.maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_train/rl.yml \
-  model_name=${MODEL} \
-  tokenizer_path=${TOKENIZER} \
-  load_parameters_path=${MAXTEXT_CKPT_PATH} \
-  run_name=${RUN_NAME} \
-  base_output_directory=${BASE_OUTPUT_DIRECTORY} \
-  hf_access_token=${HF_TOKEN} \
+python3 -m maxtext.trainers.post_train.rl.train_rl \
+  model_name=${MODEL?} \
+  load_parameters_path=${MAXTEXT_CKPT_PATH?} \
+  run_name=${RUN_NAME?} \
+  base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
   loss_algo=gspo-token \
-  chips_per_vm=${CHIPS_PER_VM}
+  chips_per_vm=${CHIPS_PER_VM?}
 ```
 
 The overview of what this run will do is as follows:

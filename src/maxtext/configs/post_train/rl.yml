@@ -102,6 +102,7 @@ micro_batch_size: -1
 # Keep `num_test_batches` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
 num_test_batches: 5  # 200
+test_batch_start_index: 0
 train_fraction: 1.0
 
 eval_interval: 10  # this doesn't matter if `TRAIN_FRACTION = 1.0`.
@@ -155,7 +156,7 @@ max_num_seqs: null
 # If True, enables asynchronous scheduling in vLLM for faster generation
 async_scheduling: True
 # stop generation when any of these strings is generated
-stop_strings: [</answer>]
+stop_strings: null
 
 # ====== Checkpoint Configuration ======
 enable_checkpointing: True
@@ -178,7 +179,7 @@ reasoning_start_token: '<reasoning>'
 reasoning_end_token: '</reasoning>'
 solution_start_token: '<answer>'
 solution_end_token: '</answer>'
-chat_template_path: 'src/maxtext/examples/chat_templates/gsm8k_rl.json'
+chat_template_path: 'maxtext/examples/chat_templates/gsm8k_rl.json'
 skip_jax_distributed_system: True
 
 # # TODO(@mazumdera): fix this

@@ -34,17 +34,19 @@ from maxtext.common.common_types import (
     MODEL_MODE_AUTOREGRESSIVE,
     MODEL_MODE_PREFILL,
     MODEL_MODE_TRAIN,
+    DEFAULT_MASK_VALUE,
 )
 from maxtext.layers.attention_mla import MLA
 from maxtext.layers.attention_op import ChunkedCausalMask, _generate_chunk_attention_mask, _make_bidirectional_block_mask
 from maxtext.layers.attentions import Attention
+from maxtext.layers import embeddings
 from maxtext.configs import pyconfig
 from maxtext.models.qwen3 import Qwen3NextGatedDeltaNet
 import numpy as np
 import pytest
 
 from tests.utils import attention_test_util
-from tests.utils.test_helpers import get_test_config_path
+from tests.utils.test_helpers import get_test_config_path, get_decoupled_parallelism_overrides
 
 
 class BidirectionalBlockMaskTest(unittest.TestCase):
@@ -290,7 +292,7 @@ class AttentionTest(parameterized.TestCase):
     """Initializes the configuration for each test"""
     super().setUp()
     # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
-    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
+    extra_args = get_decoupled_parallelism_overrides()
     if not is_decoupled():
       jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
     config = pyconfig.initialize(
@@ -1335,7 +1337,7 @@ class MLATest(attention_test_util.MLATestBase):
     # Create a copy of the arguments and override the attention_type for the base model
     attention_config_args = self.config_arguments.copy()
     attention_config_args["attention_type"] = AttentionType.GLOBAL.value
-    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
+    extra_args = get_decoupled_parallelism_overrides()
     attention_cfg = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         **attention_config_args,
@@ -1371,10 +1373,9 @@ class MLATest(attention_test_util.MLATestBase):
 
     # 3. Initialize the MLA layer
     mla_config_args = self.config_arguments.copy()
-    mla_extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
+    mla_extra_args = get_decoupled_parallelism_overrides()
     mla_config_args.update(mla_extra_args)
     _, mla_layer = self.init_mla(mla_config_args, rope_type="default")
-    _, mla_layer = self.init_mla(self.config_arguments, rope_type="default")
 
     # 4. Assert that the MLA layer DOES NOT HAVE the base projections
     self.assertFalse(hasattr(mla_layer, "query"), "MLA should not have 'query' projection.")
@@ -1591,6 +1592,207 @@ class MLATest(attention_test_util.MLATestBase):
         f"ici_context_parallelism={ici_context_parallelism}, context_parallel_load_balance={context_parallel_load_balance},"
         f" ici_expert_parallelism={ici_expert_parallelism}, expert_shard_attention_option={expert_shard_attention_option}.",
     )
+
+  def get_indexer_test_data(self, batch_size, q_len, kv_len, num_heads, head_dim):
+    """Helper to generate random data for indexer tests."""
+    key_q, key_k, key_is = jax.random.split(self.rng, 3)
+    query = jax.random.normal(key_q, (batch_size, q_len, num_heads, head_dim))
+    key = jax.random.normal(key_k, (batch_size, kv_len, num_heads, head_dim))
+    indexer_score = jax.random.normal(key_is, (batch_size, q_len, kv_len))
+    return query, key, indexer_score
+
+  def get_causal_mask_for_indexer(self, batch_size, q_len, kv_len):
+    """Helper to generate a causal mask with DEFAULT_MASK_VALUE."""
+    row_ids = jnp.arange(q_len)[:, None]
+    col_ids = jnp.arange(kv_len)[None, :]
+    attention_mask = jnp.where(col_ids <= row_ids, 0.0, DEFAULT_MASK_VALUE)
+    attention_mask = jnp.broadcast_to(attention_mask, (batch_size, q_len, kv_len))
+    return attention_mask
+
+  def test_indexer_loss(self):
+    """Test indexer loss computation."""
+    mla_config_args = self.config_arguments.copy()
+    mla_config_args.update(get_decoupled_parallelism_overrides())
+    mla_config_args["use_indexer"] = True
+    mla_config_args["attention"] = "dot_product"
+    _, mla = self.init_mla(mla_config_args, rope_type="default")
+
+    batch_size = 2
+    q_len = 3
+    kv_len = 4
+    num_heads = 5
+    head_dim = 6
+    scaling_factor = 0.5
+
+    query, key, indexer_score = self.get_indexer_test_data(batch_size, q_len, kv_len, num_heads, head_dim)
+
+    # Causal mask
+    attention_mask = self.get_causal_mask_for_indexer(batch_size, q_len, kv_len)
+    indexer_score += attention_mask
+
+    topk_indices = jnp.array([[[0, 1], [0, 1], [0, 1]], [[0, 1], [0, 1], [0, 1]]])
+    indexer_mask = mla.indexer.generate_mask(topk_indices, kv_len) + attention_mask
+
+    loss_dense = mla.calculate_indexer_loss(
+        indexer_score=indexer_score,
+        query=query,
+        key=key,
+        attention_mask=attention_mask,
+        indexer_mask=indexer_mask,
+        sparse_loss=False,
+        scaling_factor=scaling_factor,
+    )
+
+    loss_sparse = mla.calculate_indexer_loss(
+        indexer_score=indexer_score,
+        query=query,
+        key=key,
+        attention_mask=attention_mask,
+        indexer_mask=indexer_mask,
+        sparse_loss=True,
+        scaling_factor=scaling_factor,
+    )
+
+    np.testing.assert_array_less(0.0, loss_dense)
+    np.testing.assert_array_less(0.0, loss_sparse)
+
+  def test_indexer_loss_kl_divergence_zero(self):
+    """Test that KL divergence is 0 when target and pred distributions match exactly."""
+    mla_config_args = self.config_arguments.copy()
+    mla_config_args.update(get_decoupled_parallelism_overrides())
+    mla_config_args["use_indexer"] = True
+    mla_config_args["attention"] = "dot_product"
+    _, mla = self.init_mla(mla_config_args, rope_type="default")
+
+    batch_size = 2
+    q_len = 3
+    kv_len = 4
+    num_heads = 5
+    head_dim = 6
+
+    # Setup perfectly matching distributions
+    # Make query and key such that einsum yields zeros (so softmax gives uniform distribution over unmasked)
+    query = jnp.zeros((batch_size, q_len, num_heads, head_dim))
+    key = jnp.zeros((batch_size, kv_len, num_heads, head_dim))
+
+    # Causal mask
+    attention_mask = self.get_causal_mask_for_indexer(batch_size, q_len, kv_len)
+
+    # Indexer score matches the shape and is uniform
+    indexer_score = jnp.zeros((batch_size, q_len, kv_len)) + attention_mask
+
+    topk_indices = jnp.array([[[0, 1], [0, 1], [0, 1]], [[0, 1], [0, 1], [0, 1]]])
+    indexer_mask = mla.indexer.generate_mask(topk_indices, kv_len) + attention_mask
+
+    loss = mla.calculate_indexer_loss(
+        indexer_score=indexer_score,
+        query=query,
+        key=key,
+        attention_mask=attention_mask,
+        indexer_mask=indexer_mask,
+        sparse_loss=False,
+        scaling_factor=1.0,
+    )
+
+    np.testing.assert_allclose(loss, 0.0, atol=1e-5)
+
+  def test_indexer_gradients(self):
+    # Test that gradients do NOT flow back to inputs
+    bsz, seqlen = 2, 8
+    inputs_positions = jnp.broadcast_to(jnp.arange(seqlen)[None, :], (bsz, seqlen))
+
+    for sparse_training in [False, True]:
+      with self.subTest(indexer_sparse_training=sparse_training):
+        argv = [
+            "",
+            get_test_config_path(),
+            "run_name=test",
+            "attention_type=mla",
+            "attention=dot_product",
+            "use_indexer=True",
+            f"indexer_sparse_training={sparse_training}",
+            "max_target_length=16",
+            "indexer_topk=4",
+            "indexer_n_heads=2",
+            "indexer_head_dim=8",
+            "emb_dim=16",
+            "qk_rope_head_dim=4",
+            "q_lora_rank=16",
+        ]
+        config = pyconfig.initialize(argv)
+        rngs = nnx.Rngs(0)
+        mesh = jax.sharding.Mesh(jax.devices(), ("data",))
+        rope = embeddings.RotaryEmbedding(
+            min_timescale=1,
+            max_timescale=10000,
+            mesh=mesh,
+            embedding_dims=config.qk_rope_head_dim,
+            fprop_dtype=jnp.float32,
+            rngs=rngs,
+        )
+        rope.interleave = False
+
+        mla = MLA(
+            config=config,
+            num_query_heads=config.num_query_heads,
+            num_kv_heads=config.num_kv_heads,
+            head_dim=config.head_dim,
+            max_target_length=config.max_target_length,
+            mesh=mesh,
+            attention_kernel="dot_product",
+            inputs_q_shape=(bsz, seqlen, config.emb_dim),
+            inputs_kv_shape=(bsz, seqlen, config.emb_dim),
+            dtype=jnp.float32,
+            weight_dtype=jnp.float32,
+            q_lora_rank=config.q_lora_rank,
+            kv_lora_rank=config.kv_lora_rank,
+            qk_nope_head_dim=config.qk_nope_head_dim,
+            qk_rope_head_dim=config.qk_rope_head_dim,
+            v_head_dim=config.v_head_dim,
+            rngs=rngs,
+        )
+
+        inputs_q = jnp.ones((bsz, seqlen, config.emb_dim))
+        inputs_kv = jnp.ones((bsz, seqlen, config.emb_dim))
+        low_rank_q = jnp.ones((bsz, seqlen, config.q_lora_rank))
+
+        def full_indexer_loss_fn(inputs_q, inputs_kv, low_rank_q, mla, sparse_training=sparse_training):
+          # 1. Main model projections
+          # We ignore the low_rank_q returned here and use the explicitly passed one
+          # to directly verify its gradients.
+          query, _ = mla.mla_query_projection(inputs_q, inputs_positions, MODEL_MODE_TRAIN)
+          key, _, _ = mla.mla_kv_projection(inputs_kv, inputs_positions, None, MODEL_MODE_TRAIN, None)
+
+          # 2. Indexer forward
+          indexer_mask, _, indexer_score = mla.indexer(
+              inputs_q=inputs_q,
+              low_rank_q=low_rank_q,
+              inputs_kv=inputs_kv,
+              inputs_positions=inputs_positions,
+          )
+
+          # 3. Calculate full KL loss
+          loss = mla.calculate_indexer_loss(
+              indexer_score=indexer_score,
+              query=query,
+              key=key,
+              attention_mask=None,
+              indexer_mask=indexer_mask,
+              sparse_loss=sparse_training,
+              scaling_factor=1.0,
+          )
+          return loss
+
+        # Calculate gradients with respect to input embeddings and low_rank_q
+        grad_fn = nnx.grad(full_indexer_loss_fn, argnums=(0, 1, 2))
+        grad_q, grad_kv, grad_low_rank_q = grad_fn(inputs_q, inputs_kv, low_rank_q, mla)
+
+        # Gradients should be exactly zero because:
+        # a) Indexer inputs are detached in Indexer.__call__
+        # b) Main model query/key are detached in calculate_indexer_loss
+        self.assertTrue(jnp.all(grad_q == 0.0))
+        self.assertTrue(jnp.all(grad_kv == 0.0))
+        self.assertTrue(jnp.all(grad_low_rank_q == 0.0))
 
 
 class Qwen3NextGatedDeltaNetTest(unittest.TestCase):

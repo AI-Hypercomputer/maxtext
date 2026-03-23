@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" Mixture of Experts (MoE) tests. """
+"""Mixture of Experts (MoE) tests."""
 
 import unittest
 
@@ -22,7 +22,6 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.configs import pyconfig
-from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.common.common_types import Config, DType
 from maxtext.layers import linears
 from maxtext.layers import moe
@@ -30,14 +29,15 @@ from maxtext.layers import nnx_wrappers
 from maxtext.layers.initializers import NdInitializer, nd_dense_init, variable_to_logically_partitioned
 from maxtext.layers.quantizations import Fp8Quantization
 from maxtext.utils import maxtext_utils
-from tests.utils.test_helpers import get_test_config_path
+from tests.utils.test_helpers import get_test_config_path, get_decoupled_parallelism_overrides
 import pytest
+
 
 class TokenDroppingTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
-    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
+    extra_args = get_decoupled_parallelism_overrides()
     self.cfg = pyconfig.initialize(
         [None, get_test_config_path()],
         run_name="token_dropping_test",
@@ -203,7 +203,7 @@ class DeepSeekRoutingTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
-    extra_args = {"ici_fsdp_parallelism": jax.device_count()} if is_decoupled() else {}
+    extra_args = get_decoupled_parallelism_overrides()
     self.cfg = pyconfig.initialize(
         [None, get_test_config_path()],
         run_name="deepseek_routing_test",
@@ -550,6 +550,39 @@ class RoutedMoeTest(unittest.TestCase):
         sparse_matmul=True,
         per_device_batch_size=4,  # TODO(b/450900273): sharding error if pdbs=1
         ici_expert_parallelism=4,
+        max_target_length=128,
+    )
+
+    rng = jax.random.PRNGKey(2345)
+    rng_model, rng_hidden_states = jax.random.split(rng)
+    device_count = jax.device_count()
+    hidden_states = jax.random.uniform(
+        rng_hidden_states,
+        (int(cfg.per_device_batch_size) * device_count, cfg.max_target_length, cfg.base_emb_dim),
+        dtype=cfg.dtype,
+    )
+
+    devices_array = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices_array, cfg.mesh_axes)
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg, mesh)
+      actual_output, _, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
+      self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
+
+  @pytest.mark.tpu_only
+  def test_ring_of_expert_and_tensor_parallelism(self):
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="moe_block_ring_ep_tp_test",
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        dtype="bfloat16",
+        megablox=True,
+        sparse_matmul=True,
+        per_device_batch_size=4,  # TODO(b/450900273): sharding error if pdbs=1
+        ici_expert_parallelism=2,
+        use_ring_of_experts=True,
+        ici_tensor_parallelism=2,
         max_target_length=128,
     )
 

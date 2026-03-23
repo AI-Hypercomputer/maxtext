@@ -64,8 +64,6 @@ jobs:
 
           # 2. Install MaxText package and all the post training dependencies
           uv pip install ${maxtext_wheel}[tpu-post-train] --resolution=lowest
-          #TODO: @mazumdera:  replace this with the following after release
-          # uv pip install maxtext[tpu-post-train] --resolution=lowest
           install_maxtext_tpu_post_train_extra_deps
           .venv/bin/python3 -m ipykernel install --user --name maxtext_venv
           
@@ -84,7 +82,7 @@ jobs:
 
           for notebook in "$MAXTEXT_NOTEBOOKS_ROOT"/{sft,rl}*.ipynb; do
             filename=$(basename "$notebook")
-            if [[ "$filename" == "sft_qwen3_demo.ipynb" ]]; then
+            if [[ "$filename" == "sft_qwen3_demo.ipynb" || "$filename" == "sft_llama3_demo_gpu.ipynb" ]]; then
               echo "Skipping $filename"
               continue
             fi
@@ -95,20 +93,6 @@ jobs:
             echo "------------------------------------------------------"
 
             papermill "$notebook" "$output_name" -k maxtext_venv
-          done
-      - name: Record Commit IDs
-        shell: bash
-        run: |
-          echo "--- MaxText and Post-Training Repositories Commit IDs ---"
-          echo "maxtext: ${GITHUB_SHA:0:7}"
-
-          declare -a repos=("tunix" "vllm" "tpu-inference")
-          for repo_dir in "${repos[@]}"; do
-            if [ -d "$repo_dir" ]; then
-              echo "$repo_dir: $(git -C "$repo_dir" rev-parse --short HEAD)"
-            else
-              echo "Warning: $repo_dir directory not found."
-            fi
           done
       - name: Upload Outputs
         if: always()

@@ -12,7 +12,7 @@
 
 set -euox pipefail
 
-bash preflight.sh PLATFORM=gke
+bash src/dependencies/scripts/preflight.sh PLATFORM=gke
 
 # flags set as default
 
@@ -40,7 +40,7 @@ if [[ "$EXECUTABLE" == "train_compile" ]]; then
   COMPILE_TOPOLOGY=${9}
   COMPILE_TOPOLOGY_NUM_SLICES=${10}
   
-  python3 -m MaxText."$EXECUTABLE" "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"/base.yml run_name="${RUNNAME}" model_name=gpt3-175b\
+  python3 -m maxtext.trainers.pre_train."$EXECUTABLE" "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"/base.yml run_name="${RUNNAME}" model_name=gpt3-175b\
     base_output_directory="${BASE_OUTPUT_DIRECTORY}"\
     enable_checkpointing=false async_checkpointing=false\
     steps=20\
@@ -53,7 +53,7 @@ if [[ "$EXECUTABLE" == "train_compile" ]]; then
     compile_topology="${COMPILE_TOPOLOGY}"\
     compile_topology_num_slices="${COMPILE_TOPOLOGY_NUM_SLICES}"
 else
-  python3 -m MaxText."$EXECUTABLE" "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"/base.yml run_name="${RUNNAME}" model_name=gpt3-175b\
+  python3 -m maxtext.trainers.pre_train."$EXECUTABLE" "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"/base.yml run_name="${RUNNAME}" model_name=gpt3-175b\
     base_output_directory="${BASE_OUTPUT_DIRECTORY}"\
     enable_checkpointing=false async_checkpointing=false\
     steps=20\

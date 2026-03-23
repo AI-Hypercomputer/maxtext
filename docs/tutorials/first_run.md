@@ -36,21 +36,12 @@ Local development is a convenient way to run MaxText on a single host. It doesn'
 multiple hosts but is a good way to learn about MaxText.
 
 1. [Create and SSH to the single host VM of your choice](https://cloud.google.com/tpu/docs/managing-tpus-tpu-vm). You can use any available single host TPU, such as `v5litepod-8`, `v5p-8`, or `v4-8`.
-2. Clone MaxText onto that TPU VM.
-3. Within the root directory of the cloned repo, install dependencies and pre-commit hook by running:
+2. For instructions on installing MaxText on your VM, please refer to the [official documentation](https://maxtext.readthedocs.io/en/latest/install_maxtext.html).
+3. After installation completes, run training on synthetic data with the following command:
 
 ```sh
-python3 -m venv ~/venv-maxtext
-source ~/venv-maxtext/bin/activate
-bash tools/setup/setup.sh
-pre-commit install
-```
-
-4. After installation completes, run training on synthetic data with the following command:
-
-```sh
-python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
-  run_name=$YOUR_JOB_NAME \
+python3 -m maxtext.trainers.pre_train.train \
+  run_name=${YOUR_JOB_NAME?} \
   base_output_directory=gs://<my-bucket> \
   dataset_type=synthetic \
   steps=10
@@ -58,11 +49,11 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
 
 Optional: If you want to try training on a Hugging Face dataset, see [Data Input Pipeline](../guides/data_input_pipeline.md) for data input options.
 
-5. To demonstrate model output, run the following command:
+4. To demonstrate model output, run the following command:
 
 ```sh
-python3 -m maxtext.inference.decode src/maxtext/configs/base.yml \
-  run_name=$YOUR_JOB_NAME \
+python3 -m maxtext.inference.decode \
+  run_name=${YOUR_JOB_NAME?} \
   base_output_directory=gs://<my-bucket> \
   per_device_batch_size=1
 ```
@@ -79,12 +70,12 @@ You can use [demo_decoding.ipynb](https://github.com/AI-Hypercomputer/maxtext/bl
 
 ### Run MaxText on NVIDIA GPUs
 
-1. Use `bash dependencies/scripts/docker_build_dependency_image.sh DEVICE=gpu` to build a container with the required dependencies.
+1. For instructions on installing MaxText on your VM, please refer to the [official documentation](https://maxtext.readthedocs.io/en/latest/install_maxtext.html).
 2. After installation is complete, run training with the following command on synthetic data:
 
 ```sh
-python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
-  run_name=$YOUR_JOB_NAME \
+python3 -m maxtext.trainers.pre_train.train \
+  run_name=${YOUR_JOB_NAME?} \
   base_output_directory=gs://<my-bucket> \
   dataset_type=synthetic \
   steps=10
@@ -93,8 +84,8 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
 3. To demonstrate model output, run the following command:
 
 ```sh
-python3 -m maxtext.inference.decode src/maxtext/configs/base.yml \
-  run_name=$YOUR_JOB_NAME \
+python3 -m maxtext.inference.decode \
+  run_name=${YOUR_JOB_NAME?} \
   base_output_directory=gs://<my-bucket> \
   per_device_batch_size=1
 ```

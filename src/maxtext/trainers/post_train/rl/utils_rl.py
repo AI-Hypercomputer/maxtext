@@ -105,8 +105,7 @@ def get_match_format_regex(tmvp_config):
   """Returns a compiled regex to extract the answer from a completion."""
   match_format = re.compile(
       (
-          r"^[\s]{0,}"
-          rf"{tmvp_config.reasoning_start_token}.+?{tmvp_config.reasoning_end_token}.*?"
+          rf"{tmvp_config.reasoning_start_token}.+{tmvp_config.reasoning_end_token}.*?"
           rf"{tmvp_config.solution_start_token}(.+?){tmvp_config.solution_end_token}"
       ),
       flags=re.MULTILINE | re.DOTALL,
@@ -117,6 +116,19 @@ def get_match_format_regex(tmvp_config):
         f" think!{tmvp_config.reasoning_end_token}{tmvp_config.solution_start_token}2{tmvp_config.solution_end_token}",
     )
   return match_format
+
+
+def get_answer_fallback_regex(tmvp_config):
+  """Returns a compiled regex that finds the *last* answer tag in a completion.
+
+  Used as a fallback when the full <reasoning>...</reasoning><answer>...</answer>
+  format is incomplete (e.g. missing the closing reasoning tag).  The result
+  reward can still be computed independently from the format reward.
+  """
+  return re.compile(
+      rf"{re.escape(tmvp_config.solution_start_token)}(.+?){re.escape(tmvp_config.solution_end_token)}",
+      flags=re.MULTILINE | re.DOTALL,
+  )
 
 
 def match_format_exactly(prompts, completions, tmvp_config, **kargs):

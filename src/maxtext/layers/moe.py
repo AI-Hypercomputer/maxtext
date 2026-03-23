@@ -368,7 +368,7 @@ class RoutedMoE(nnx.Module):
     else:
       self._tensor_parallelism_name = "tensor"
 
-    if self.config.attention == "vllm_rpa":
+    if self.config.attention == "vllm_rpa" and self.config.enable_dp_attention:
       self._expert_parallelism_name = "attn_dp_expert"
     else:
       self._expert_parallelism_name = "expert"
@@ -896,6 +896,14 @@ class RoutedMoE(nnx.Module):
     def gmm(
         inputs, kernel, tiling, group_sizes, expert_assignments, weight_gather_axes, input_buffer_count, combine_scopes
     ):
+      # TODO (b/491979205) pipeline fsdp ag per repeat fails tokamax gmm
+      if self.config.using_pipeline_parallelism and self.config.pipeline_fsdp_ag_per_repeat:
+        tokamax_group_sizes = group_sizes
+      else:
+        tokamax_group_sizes = tokamax.RaggedDotGroupSizes(
+            group_sizes,
+            max_utils.generate_representative_group_sizes(inputs.shape[0], kernel.shape[0]),
+        )
       pad_length = self.config.wi_tile_fwd_batch_seq
       hs_shape = inputs.shape
       # pad length is the 1st dimension of tiling size in gmm call
@@ -941,7 +949,7 @@ class RoutedMoE(nnx.Module):
           output = tokamax.ragged_dot(
               lhs=inputs,
               rhs=kernel,
-              group_sizes=group_sizes,
+              group_sizes=tokamax_group_sizes,
               precision=jax.lax.Precision.DEFAULT,
               preferred_element_type=self.dtype,
               implementation="mosaic",
@@ -1123,6 +1131,7 @@ class RoutedMoE(nnx.Module):
             pre_bias_logits,
             self.config.use_custom_sort_vjp,
             roll_to_expert_id=num_experts_per_shard * expert_shard_id,
+            rngs=rngs,
         )
 
         # Filter down to the group sizes that apply to only the experts in the
@@ -1314,7 +1323,7 @@ class RoutedMoE(nnx.Module):
         )
 
         # Sum up the partial outputs across the expert shards.
-        output = jnp.reshape(output, (-1, sequence_length, self.config.emb_dim))
+        output = jnp.reshape(output, (-1, sequence_length, self.config.emb_dim // self.get_tensor_parallelism_size()))
         output = jax.lax.psum_scatter(output, self._expert_parallelism_name, scatter_dimension=0, tiled=True)
 
       else:

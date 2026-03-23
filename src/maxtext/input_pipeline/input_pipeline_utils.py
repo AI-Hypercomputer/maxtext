@@ -21,17 +21,20 @@ from typing import Any, Iterable, TYPE_CHECKING
 
 if TYPE_CHECKING:
   import datasets
+  import tensorflow as tf
 
 import grain.python as grain
 import numpy as np
-import tensorflow as tf
+from grain._src.python.dataset.sources.tfrecord_dataset import _TFRecordReader, _TFRecordDatasetIterator  # pylint: disable=protected-access
+from grain.experimental import TFRecordIterDataset
+from maxtext.input_pipeline.protos import example_pb2
 from maxtext.input_pipeline import tokenizer
 from maxtext.multimodal import processor as mm_processor
 from maxtext.multimodal import utils as mm_utils
+from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 
-Features = dict[str, tf.Tensor]
-AUTOTUNE = tf.data.experimental.AUTOTUNE
+Features = dict[str, Any]
 INPUT_TOKENS_KEY = "input_ids"
 
 ########## Functions used by TFDS pipeline
@@ -58,6 +61,8 @@ def shift_data_by_truncation(x):
 
 
 def add_segmentation_and_position(x, data_columns, padding_token=0):
+  import tensorflow as tf  # pylint: disable=import-outside-toplevel
+
   for data_column in data_columns:
     x[f"{data_column}_segmentation"] = tf.cast(x[data_column] != padding_token, tf.int32)
     x[f"{data_column}_position"] = tf.broadcast_to(
@@ -68,6 +73,7 @@ def add_segmentation_and_position(x, data_columns, padding_token=0):
 
 def TokenizeOp(tokenizer_model, features: Features, data_keys: Iterable[str] = ("inputs", "targets")) -> Features:
   """Op for tokenization"""
+  import tensorflow as tf  # pylint: disable=import-outside-toplevel
 
   def _process_string(string_tensor):
     # Extract string value and decode it if necessary
@@ -415,26 +421,61 @@ class HFDataSource(grain.RandomAccessDataSource):
 ########## Functions used by Grain pipeline
 
 
+class _GCSTFRecordReader(_TFRecordReader):
+  """Extends Grain's _TFRecordReader to open TFRecord files from GCS via streaming BlobReader."""
+
+  def __init__(self, path: str):
+    # Skip parent __init__ (which calls open(path, "rb")) and open via GCS BlobReader instead.
+    bucket_name, blob_name = gcs_utils.parse_gcs_bucket_and_prefix(path)
+    self._reader = gcs_utils.storage.Client().bucket(bucket_name).blob(blob_name).open("rb")
+
+
+class _GCSTFRecordDatasetIterator(_TFRecordDatasetIterator):
+  """Extends Grain's _TFRecordDatasetIterator to use _GCSTFRecordReader for GCS paths."""
+
+  def __init__(self, path: str):
+    # Skip parent __init__ (which creates _TFRecordReader); use GCS-aware reader instead.
+    grain.DatasetIterator.__init__(self)
+    self._reader = _GCSTFRecordReader(path)
+
+
+class GCSTFRecordIterDataset(TFRecordIterDataset):
+  """Extends Grain's TFRecordIterDataset to support GCS paths."""
+
+  def __iter__(self) -> grain.DatasetIterator:  # pylint: disable=non-iterator-returned
+    return _GCSTFRecordDatasetIterator(self._path)
+
+
+def make_tfrecord_iter_dataset(path: str):
+  """Returns the appropriate TFRecordIterDataset for local or GCS paths."""
+  if path.startswith("gs://"):
+    return GCSTFRecordIterDataset(path)
+  return TFRecordIterDataset(path)
+
+
 @dataclasses.dataclass
 class ParseFeatures(grain.MapTransform):
   """Parse serialized example"""
 
   def __init__(self, data_columns, tokenize):
     self.data_columns = data_columns
-    if tokenize:
-      self.dtype = tf.string
-    else:
-      self.dtype = tf.int64
+    self.tokenize = tokenize
 
   def map(self, element):
-    def _parse(example):
-      parsed = tf.io.parse_example(
-          example,
-          {col: tf.io.FixedLenSequenceFeature([], dtype=self.dtype, allow_missing=True) for col in self.data_columns},
-      )
-      return parsed
+    """Parse a serialized tf.train.Example proto and extract features."""
+    example = example_pb2.Example()
+    example.ParseFromString(element)
+    features = example.features.feature
 
-    return _parse(element)
+    parsed = {}
+    for col in self.data_columns:
+      if col in features:
+        f = features[col]
+        if self.tokenize:
+          parsed[col] = np.array(f.bytes_list.value, dtype=object)
+        else:
+          parsed[col] = np.array(f.int64_list.value, dtype=np.int32)
+    return parsed
 
 
 @dataclasses.dataclass
@@ -447,9 +488,9 @@ class NormalizeFeatures(grain.MapTransform):
 
   def map(self, element):
     if self.tokenize:
-      return {col: element[col].numpy()[0].decode() for col in self.column_names}
+      return {col: element[col][0].decode() for col in self.column_names}
     else:
-      return {col: element[col].numpy() for col in self.column_names}
+      return {col: element[col] for col in self.column_names}
 
 
 @dataclasses.dataclass

@@ -18,6 +18,10 @@ This module contains adapter classes that bridge MaxText's data loading and
 model structures with Tunix's training interfaces.
 """
 
+import pickle
+import tensorflow as tf
+from array_record.python import array_record_module
+
 from typing import Any, Iterator, Optional, List, Callable
 
 import flax
@@ -30,8 +34,7 @@ from orbax import checkpoint
 from maxtext.utils import max_logging
 # Reuse MaxText's native checkpointing logic
 from maxtext.common.checkpointing import GrainCheckpointHandler, GrainCheckpointSave, GrainCheckpointRestore
-from tunix.distillation import distillation_trainer
-from tunix.distillation.strategies import logit
+from tunix.sft import peft_trainer
 from tunix.sft import checkpoint_manager as tunix_checkpoint_manager
 
 
@@ -51,7 +54,7 @@ class DistillationForwardOutput:
 
 
 @flax.struct.dataclass(frozen=True)
-class MaxTextTrainingInput(distillation_trainer.TrainingInput):
+class MaxTextTrainingInput(peft_trainer.TrainingInput):
   """Extended TrainingInput dataclass to carry MaxText-specific fields."""
 
   #: Position indices for the tokens (for RoPE).
@@ -60,11 +63,62 @@ class MaxTextTrainingInput(distillation_trainer.TrainingInput):
   decoder_segment_ids: jax.Array = None
   #: Ground truth target tokens (used for loss calculation and logging).
   targets: jax.Array = None
+  #: Position indices for the target tokens.
+  targets_position: jax.Array = None
+  #: Segment IDs for packed target tokens.
+  targets_segmentation: jax.Array = None
+  #: Top-K logits from the teacher model.
+  top_k_logits: jax.Array = None
+  top_k_indices: jax.Array = None
 
 
 # -----------------------------------------------------------------------------
 # Data Loading Adapter
 # -----------------------------------------------------------------------------
+
+
+class OfflineArrayRecordIterator:
+  """Reads the pre-generated global top-k logits file."""
+
+  def __init__(self, data_dir: str, epochs: int = 100):
+    self.filepath = data_dir
+
+    if not tf.io.gfile.exists(self.filepath):
+      raise FileNotFoundError(f"Offline distillation file not found: {self.filepath}")
+
+    self.reader = array_record_module.ArrayRecordReader(self.filepath)
+    self.num_records = self.reader.num_records()
+    self.epochs = epochs
+    self.current_epoch = 0
+    self.record_index = 0
+
+  def __iter__(self):
+    return self
+
+  def __next__(self):
+    if self.record_index >= self.num_records:
+      self.current_epoch += 1
+      if self.current_epoch >= self.epochs:
+        raise StopIteration
+
+      self.record_index = 0
+      self.reader = array_record_module.ArrayRecordReader(self.filepath)
+
+    record = self.reader.read()
+    self.record_index += 1
+    data = pickle.loads(record)
+
+    # Map the arrays to match MaxText's expected dictionary
+    batch = {
+        "inputs": data["tokens"],
+        "top_k_logits": data["top_k_logits"],
+        "top_k_indices": data["top_k_indices"],
+    }
+    for key in ["inputs_position", "inputs_segmentation", "targets_segmentation", "targets"]:
+      if key in data:
+        batch[key] = data[key]
+
+    return batch
 
 
 class MaxTextToTunixIterator:
@@ -106,22 +160,30 @@ class MaxTextToTunixIterator:
       input_mask = jnp.ones_like(batch["inputs"], dtype=bool)
       seg_ids = None
 
+    # If in SFT-mode, 'targets' contains prompts which should be masked out when computing the loss.
+    # If using with packing the targets_segmentation mask is supposed to be a combined target+packing mask
+    targets_segmentation = batch.get("targets_segmentation", jnp.ones_like(batch["targets"]))
+    targets_position = batch.get("targets_position", batch.get("inputs_position"))
+
     # pylint: disable=unexpected-keyword-arg
     return MaxTextTrainingInput(
         input_tokens=batch["inputs"],
         input_mask=input_mask,
-        teacher_output=None,
         positions=batch["inputs_position"],
         decoder_segment_ids=seg_ids,
         targets=batch["targets"],
+        targets_position=targets_position,
+        targets_segmentation=targets_segmentation,
+        top_k_logits=batch.get("top_k_logits"),
+        top_k_indices=batch.get("top_k_indices"),
     )
 
 
 # -----------------------------------------------------------------------------
 # Distillation Strategy
 # -----------------------------------------------------------------------------
-class CombinedDistillationStrategy(logit.LogitStrategy):
-  """Logit Strategy that returns detailed metrics for TensorBoard."""
+class CombinedDistillationStrategy:
+  """Strategy that returns detailed metrics for TensorBoard."""
 
   def __init__(
       self,
@@ -134,15 +196,16 @@ class CombinedDistillationStrategy(logit.LogitStrategy):
       layer_indices: Optional[List[int]] = None,
       feature_loss_fn: Callable[[jax.Array, jax.Array], jax.Array] | None = None,
       cosine_distance_axis: int | tuple[int, ...] = -1,
+      sft_mode: bool = False,
   ):
     """Initializes the Combined strategy using tunix logit.LogitStrategy.
 
     Args:
-        student_forward_fn: Inherited from `logit.LogitStrategy`. Function to compute student model outputs.
-        teacher_forward_fn: Inherited from `logit.LogitStrategy`. Function to compute teacher model outputs.
-        labels_fn: Inherited from `logit.LogitStrategy`. Function to compute labels from model inputs.
-        temperature: Inherited from `logit.LogitStrategy`. Temperature for softening probabilities (> 0).
-        alpha: Inherited from `logit.LogitStrategy`. Weight to balance distillation loss and task loss (0.0 to 1.0).
+        student_forward_fn: Function to compute student model outputs.
+        teacher_forward_fn: Function to compute teacher model outputs.
+        labels_fn: Function to compute labels from model inputs.
+        temperature: Temperature for softening probabilities (> 0).
+        alpha: Weight to balance distillation loss and task loss (0.0 to 1.0).
         beta_feature: Weight to balance feature loss (0.0 to 1.0). 0.0 disables feature loss.
         layer_indices: Layer indices to apply feature loss.
         feature_loss_fn: A function that takes two jax. Arrays (student_map,
@@ -150,13 +213,11 @@ class CombinedDistillationStrategy(logit.LogitStrategy):
         cosine_distance_axis: The axis to use for cosine distance computation if
           feature_loss_fn is not provided. Defaults to -1.
     """
-    super().__init__(
-        student_forward_fn=student_forward_fn,
-        teacher_forward_fn=teacher_forward_fn,
-        labels_fn=labels_fn,
-        temperature=temperature,
-        alpha=alpha,
-    )
+    self.student_forward_fn = student_forward_fn
+    self.teacher_forward_fn = teacher_forward_fn
+    self.labels_fn = labels_fn
+    self.temperature = temperature
+    self.alpha = alpha
     self.beta_feature = beta_feature
     self.layer_indices = jnp.array(layer_indices) if layer_indices is not None else None
 
@@ -165,6 +226,7 @@ class CombinedDistillationStrategy(logit.LogitStrategy):
       self.feature_loss_fn = lambda student_features, teacher_features: jnp.mean(
           optax.cosine_distance(student_features, teacher_features, axis=cosine_distance_axis)
       )
+    self.sft_mode = sft_mode
 
   def compute_loss(
       self,
@@ -192,19 +254,23 @@ class CombinedDistillationStrategy(logit.LogitStrategy):
     log_student_probs_temp = jax.nn.log_softmax(s_logits / self.temperature, axis=-1)
     teacher_probs_temp = jax.nn.softmax(t_logits / self.temperature, axis=-1)
 
+    # labels are supposed to have all sft masks applied by this moment
+    labels_mask = jnp.any(labels != 0, axis=-1, keepdims=True) if self.sft_mode else None
+    mean_mask = jnp.squeeze(labels_mask, axis=-1) if labels_mask is not None else None
+
     # KL(Teacher || Student)
-    kl_div = optax.kl_divergence(log_student_probs_temp, teacher_probs_temp)
+    kl_div = optax.kl_divergence(log_student_probs_temp, teacher_probs_temp, where=labels_mask)
 
     # Scale gradients by T^2 (Hinton et al.)
-    soft_loss = jnp.mean(kl_div) * (self.temperature**2)
+    soft_loss = jnp.mean(kl_div, where=mean_mask) * (self.temperature**2)
 
     # 1. Student Hard Loss (Existing)
-    ce_loss_student = optax.softmax_cross_entropy(logits=s_logits, labels=labels)
-    hard_loss = jnp.mean(ce_loss_student)
+    ce_loss_student = optax.softmax_cross_entropy(logits=s_logits, labels=labels, where=labels_mask)
+    hard_loss = jnp.mean(ce_loss_student, where=mean_mask)
 
     # 2. Teacher Hard Loss (For Verification)
-    ce_loss_teacher = optax.softmax_cross_entropy(logits=t_logits, labels=labels)
-    teacher_hard_loss = jnp.mean(ce_loss_teacher)
+    ce_loss_teacher = optax.softmax_cross_entropy(logits=t_logits, labels=labels, where=labels_mask)
+    teacher_hard_loss = jnp.mean(ce_loss_teacher, where=mean_mask)
 
     # 3. Combine losses
     base_logit_loss = (self.alpha * soft_loss) + ((1.0 - self.alpha) * hard_loss)
@@ -235,6 +301,9 @@ class CombinedDistillationStrategy(logit.LogitStrategy):
         "distill/teacher_loss": teacher_hard_loss,
         "distill/out_proj_feature_loss": feature_loss,
         "distill/total_loss": total_loss,
+        "distill/temperature": self.temperature,
+        "distill/alpha": self.alpha,
+        "distill/beta_feature": self.beta_feature,
     }
     return total_loss, metrics
 
@@ -308,9 +377,9 @@ class MaxTextCheckpointManager(tunix_checkpoint_manager.CheckpointManager):
 
     # Standard Tunix Logic for Model/Optimizer
     if save_only_lora_params:
-      params = nnx.state(model, nnx.LoRAParam)
+      params = nnx.state(model.student_model, nnx.LoRAParam)
     else:
-      params = nnx.state(model)
+      params = nnx.state(model.student_model)
 
     # Define standard SaveArgs once to reuse
     default_save_args = checkpoint.SaveArgs()

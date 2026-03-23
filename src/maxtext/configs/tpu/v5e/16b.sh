@@ -36,12 +36,12 @@ fi
 
 # Set up network optimizations
 if [ "$RUN_PREFLIGHT" = "true" ]; then
-    bash preflight.sh
+    bash src/dependencies/scripts/preflight.sh
 fi
 
 # Train
 export LIBTPU_INIT_ARGS="--xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true"
-python3 -m MaxText.$EXECUTABLE "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml\
+python3 -m maxtext.trainers.pre_train.$EXECUTABLE "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml\
     steps=15 per_device_batch_size=6 enable_checkpointing=false\
     remat_policy=full global_parameter_scale=16\
     max_target_length=2048 base_output_directory=$OUTPUT_PATH\

@@ -100,6 +100,7 @@ def score_responses(tmvp_config, question, responses, answer):
       Tuple of (is_correct, is_partially_correct, has_correct_format)
   """
   match_format = utils_rl.get_match_format_regex(tmvp_config)
+  answer_fallback = utils_rl.get_answer_fallback_regex(tmvp_config)
 
   if tmvp_config.debug.rl:
     max_logging.log("========================================")
@@ -113,10 +114,19 @@ def score_responses(tmvp_config, question, responses, answer):
   has_correct_format = False
 
   for response in responses:
-    # Extract numerical response
-    extracted_response = guess.group(1) if (guess := match_format.search(response)) is not None else "-1000000"
+    # Extract answer: prefer the full format match; fall back to the last
+    # <answer>...</answer> tag if full format match is not found, so result
+    # scoring is decoupled from format.
+    full_match = match_format.search(response)
+    if full_match is not None:
+      extracted_response = full_match.group(1)
+    else:
+      # Find the *last* occurrence of the answer tag (most likely the final answer).
+      fallback_matches = answer_fallback.findall(response)
+      extracted_response = fallback_matches[-1].strip() if fallback_matches else "-1000000"
     if tmvp_config.debug.rl:
-      max_logging.log(f"Evaluation extracted_response: {extracted_response}")
+      used = "full format" if full_match is not None else "answer-tag fallback"
+      max_logging.log(f"Evaluation extracted_response ({used}): {extracted_response}")
 
     # Check exact correctness
     try:
@@ -146,8 +156,8 @@ def score_responses(tmvp_config, question, responses, answer):
         max_logging.log(f"Evaluation Exception: {e}")
         max_logging.log("SKIPPED")
 
-    # Check format correctness
-    if match_format.search(response) is not None:
+    # Check format correctness (requires the full <reasoning>...</reasoning><answer>...</answer> structure)
+    if full_match is not None:
       has_correct_format = True
 
     # Early exit if all criteria are met

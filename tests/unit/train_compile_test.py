@@ -28,9 +28,8 @@ import pytest
 from maxtext.trainers.pre_train.train_compile import main as train_compile_main
 from tests.utils.test_helpers import get_test_config_path
 
-pytestmark = [pytest.mark.external_training, pytest.mark.tpu_backend]
 
-
+@pytest.mark.tpu_backend
 class TrainCompile(unittest.TestCase):
   """Tests for the Ahead of Time Compilation functionality, train_compile.py"""
 
@@ -429,6 +428,30 @@ class TrainCompile(unittest.TestCase):
     )
 
   @pytest.mark.cpu_only
+  def test_moe_megablox_ring_ep_random(self):
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_moe_megablox_ring_ep_random.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-16",
+            "use_iota_embed=true",
+            "compile_topology_num_slices=1",
+            "model_name=deepseek3-test",
+            "sparse_matmul=True",
+            "megablox=True",
+            "per_device_batch_size=4",
+            "max_target_length=128",
+            "use_ring_of_experts=True",
+            "use_random_routing=True",
+            "attention=flash",
+            "dtype=bfloat16",
+        )
+    )
+
+  @pytest.mark.cpu_only
   def test_moe_ragged_dot_bf16(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_ragged_dot_bf16.pickle")
@@ -778,6 +801,55 @@ class TrainCompile(unittest.TestCase):
     )
 
   @pytest.mark.cpu_only
+  def test_indexer_dense_warmup(self):
+    # test deepseek3.2 with sparse attention
+    compiled_trainstep_file = "/tmp/test_indexer_dense_warmup.pickle"
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-8",
+            "compile_topology_num_slices=1",
+            "model_name=deepseek-custom",
+            "per_device_batch_size=4",
+            "scan_layers=True",
+            "max_target_length=1024",
+            "attention=flash",
+            "use_tokamax_splash=True",
+            "engram_layers=[]",
+            # dense warmup
+            "indexer_sparse_training=False",
+            "indexer_loss_scaling_factor=0.1",
+            "trainable_parameters_mask=['.*indexer.*']",
+        )
+    )
+
+  @pytest.mark.cpu_only
+  def test_indexer_sparse_training(self):
+    # test deepseek3.2 with sparse attention
+    compiled_trainstep_file = "/tmp/test_indexer_sparse_training.pickle"
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-8",
+            "compile_topology_num_slices=1",
+            "model_name=deepseek-custom",
+            "per_device_batch_size=4",
+            "scan_layers=True",
+            "max_target_length=1024",
+            "attention=flash",
+            "use_tokamax_splash=True",
+            "engram_layers=[]",
+            # sparse training
+            "indexer_sparse_training=True",
+            "indexer_loss_scaling_factor=0.1",
+        )
+    )
+
+  @pytest.mark.cpu_only
   def test_olmo3_7b(self):
     """AOT test for Olmo3 7B implementation"""
     compiled_trainstep_file = "/tmp/test_olmo3_7b"
@@ -837,6 +909,32 @@ class TrainCompile(unittest.TestCase):
             "tokenizer_type=huggingface",
             "tokenizer_path=deepseek-ai/DeepSeek-V3.2",
             "hf_access_token=fake",
+        )
+    )
+
+  @pytest.mark.cpu_only
+  def test_circular_pipeline_ag_per_repeat_ep_ds(self):
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_circular_pipeline_ag_per_repeat_ep_ds.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-8",
+            "compile_topology_num_slices=1",
+            "per_device_batch_size=2",
+            "ici_pipeline_parallelism=2",
+            "ici_expert_parallelism=2",
+            "pipeline_parallel_layers=4",
+            "num_pipeline_microbatches=4",
+            "model_name=deepseek3-test",
+            "override_model_config=true",
+            "base_num_decoder_layers=7",
+            "use_ring_of_experts=true",
+            "use_random_routing=true",
+            "max_target_length=128",
+            "pipeline_fsdp_ag_per_repeat=true",
         )
     )
 

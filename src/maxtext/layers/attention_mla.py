@@ -73,6 +73,7 @@ from maxtext.inference import page_manager
 from maxtext.inference import paged_attention
 from maxtext.inference.kvcache import KVQuant
 from maxtext.utils.sharding import create_sharding
+from maxtext.utils.globals import EPS
 
 
 class Indexer(nnx.Module):
@@ -109,9 +110,9 @@ class Indexer(nnx.Module):
     self.dtype = config.dtype
     self.weight_dtype = config.weight_dtype
 
-    self.n_heads = config.index_n_heads
-    self.head_dim = config.index_head_dim
-    self.index_topk = config.index_topk
+    self.n_heads = config.indexer_n_heads
+    self.head_dim = config.indexer_head_dim
+    self.indexer_topk = config.indexer_topk
     self.emb_dim = config.emb_dim
     self.rope_head_dim = config.qk_rope_head_dim
     self.q_lora_rank = config.q_lora_rank
@@ -179,13 +180,13 @@ class Indexer(nnx.Module):
     2. Input Layout: Indexer uses concatenated layout (interleave=False), whereas MLA uses interleaved (interleave=True).
 
     Args:
-      inputs: Input array of shape [batch, seqlen, index_n_heads, index_head_dim].
+      inputs: Input array of shape [batch, seqlen, indexer_n_heads, indexer_head_dim].
       positions: Position array of shape [batch, seqlen].
 
     Returns:
-      Array with partial RoPE applied, with shape [batch, seqlen, index_n_heads, index_head_dim]
+      Array with partial RoPE applied, with shape [batch, seqlen, indexer_n_heads, indexer_head_dim]
     """
-    # index_head_dim -> [rope_head_dim, index_head_dim - rope_head_dim]
+    # indexer_head_dim -> [rope_head_dim, indexer_head_dim - rope_head_dim]
     x_pe, x_nope = jnp.split(inputs, [self.rope_head_dim], axis=-1)
     # x_pe [B, S, H, rope_head_dim], positions [B, S]
     x_pe = self.rotary_embedding(x_pe, position=inputs_positions)
@@ -246,23 +247,46 @@ class Indexer(nnx.Module):
         the inputs and configuration.
 
     Returns:
-      index_mask: A sparse mask [b, t, s] with 0.0 for top-k selected tokens
+      indexer_mask: A sparse mask [b, t, s] with 0.0 for top-k selected tokens
         and large negative values otherwise.
       topk_indices: Indices of the top-k selected tokens [b, t, k].
-      index_score: The computed relevance scores [b, t, s].
+      indexer_score: The computed relevance scores [b, t, s].
 
     Notation:
       b: Batch size
       t: Query Sequence Length (Target), note t = s here
       s: Key/Value Sequence Length (Source)
-      h: Number of Indexer Heads (index_n_heads)
-      d: Indexer Head Dimension (index_head_dim)
+      h: Number of Indexer Heads (indexer_n_heads)
+      d: Indexer Head Dimension (indexer_head_dim)
     """
     # NOTE: If sequence length <= topk, indexer always selects all tokens.
-    if self.config.max_target_length <= self.index_topk:
+    if self.config.max_target_length <= self.indexer_topk:
       return None, None, None
 
     bsz, seqlen, _ = inputs_q.shape  # s = t = seqlen
+    # ==============================================================================
+    # Gradient Isolation Strategy: Main Model vs. Indexer
+    # ==============================================================================
+    # This creates a barrier to train both components independently, and applies
+    # for both Dense Warm-up and Sparse Training stages:
+    #
+    # Forward Pass:
+    # - The Indexer receives a detached copy of the inputs (via `stop_gradient`)
+    #   to independently calculate its scores and `indexer_loss`.
+    #
+    # Backward Pass (Main Model):
+    # - The main model optimizes its weights based solely on the LM loss.
+    # - The `indexer_mask` in the Attention layer prevents gradients from the main
+    #   loss from flowing into the Indexer's weights.
+    #
+    # Backward Pass (Indexer):
+    # - Gradients from the `indexer_loss` flow back to update the Indexer's weights.
+    # - The `stop_gradient` applied to the inputs acts as a mathematical wall, dropping
+    #   gradients to 0.0 and preventing the Indexer loss from altering the main model's
+    #   earlier layers.
+    inputs_q = jax.lax.stop_gradient(inputs_q)
+    low_rank_q = jax.lax.stop_gradient(low_rank_q)
+    inputs_kv = jax.lax.stop_gradient(inputs_kv)
 
     # Query Processing: Project from Latent low_rank_q
     q = self.wq_b(low_rank_q)  # [b, t, q_lora_rank] -> [b, t, h * d]
@@ -283,27 +307,27 @@ class Indexer(nnx.Module):
     logits = jax.nn.relu(logits)
     # Compute head weights: project from input, [b, t, embed_dim] -> [b, t, h]
     weights = self.weights_proj(inputs_q)
-    # Weights scaling affect index_score, but does not affect topk_indices. Keep scaling for numerical stability.
+    # Weights scaling affect indexer_score, but does not affect topk_indices. Keep scaling for numerical stability.
     # https://github.com/deepseek-ai/DeepSeek-V3.2-Exp/blob/87e509a2e5a100d221c97df52c6e8be7835f0057/inference/model.py#L478-L480
     weights = weights * (self.n_heads**-0.5) * self.softmax_scale
     # Aggregate head-wise logits: logits @ weights
-    index_score = jnp.einsum("btsh, bth -> bts", logits, weights, precision=self.config.matmul_precision)  # [b, t, s]
+    indexer_score = jnp.einsum("btsh, bth -> bts", logits, weights, precision=self.config.matmul_precision)  # [b, t, s]
 
     # Apply attention mask before TopK
     if attention_mask is not None:
-      index_score += attention_mask
+      indexer_score += attention_mask
 
     # TopK selection based on index score
-    _, topk_indices = jax.lax.top_k(index_score, k=self.index_topk)  # topk_indices [b, t, k]
+    _, topk_indices = jax.lax.top_k(indexer_score, k=self.indexer_topk)  # topk_indices [b, t, k]
 
     # Create Sparse Index Mask: 0 and large negatives
-    index_mask = self.generate_mask(topk_indices, seqlen)  # [b, t, s]
+    indexer_mask = self.generate_mask(topk_indices, seqlen)  # [b, t, s]
 
     # Re-apply attention mask after TopK: in case number of unmasked tokens < TopK
     if attention_mask is not None:
-      index_mask += attention_mask
+      indexer_mask += attention_mask
 
-    return index_mask, topk_indices, index_score
+    return indexer_mask, topk_indices, indexer_score
 
 
 def mla_as_linen(
@@ -606,8 +630,8 @@ class MLA(Attention):
     )
 
     # Initialize Indexer
-    self.use_sparse_indexer = config.use_sparse_indexer
-    if self.use_sparse_indexer:
+    self.use_indexer = config.use_indexer
+    if self.use_indexer:
       # Need two versions of rope.
       # MLA applies yarn with interleave layout.
       # Indexer applies yarn with concatenate layout.
@@ -951,6 +975,78 @@ class MLA(Attention):
 
     return key, value, cached_values
 
+  def calculate_indexer_loss(
+      self,
+      indexer_score: Array,
+      query: Array,
+      key: Array,
+      attention_mask: Optional[Array | None],
+      indexer_mask: Array,
+      sparse_loss: bool,
+      scaling_factor: float,
+  ) -> Array:
+    """Calculates the indexer KL divergence loss.
+
+    This loss trains the indexer to predict which tokens are important by matching
+    the distribution of true attention scores from the main model.
+
+    The target distribution is derived through the following steps:
+    1. Compute raw attention scores via Q @ K^T.
+    2. Aggregate scores by summing across all attention heads.
+    3. Apply L1-normalization across the sequence dimension.
+
+    target_distribution = L1_Normalize(Sum_h(Softmax(Q @ K^T)))
+
+    Reference:
+    DeepSeek-V3.2 - https://arxiv.org/pdf/2512.02556
+
+    Args:
+      indexer_score: Scores predicted by indexer [batch, q_len, kv_len].
+      query: Query tensor from main model [batch, q_len, heads, dim].
+      key: Key tensor from main model [batch, kv_len, heads, dim].
+      attention_mask: Attention mask [batch, q_len, kv_len] or None.
+      indexer_mask: Indexer mask [batch, q_len, kv_len].
+      sparse_loss: Whether to use sparse loss.
+      scaling_factor: The scaling factor for the loss.
+
+    Returns:
+      The computed KL divergence loss.
+    """
+    # Detach main model components from the computational graph.
+    # The indexer should match the main model, but the main model should not be influenced
+    # by the indexer's learning progress via this loss in sparse training stage.
+    # We also apply this during the Dense Warm-up stage to save compute and memory.
+    query = jax.lax.stop_gradient(query)
+    key = jax.lax.stop_gradient(key)
+
+    # Compute attention scores: [b, t, h, d] @ [b, s, h, d] -> [b, h, t, s]
+    attention_scores = jnp.einsum("bthd, bshd -> bhts", query, key, precision=self.config.matmul_precision)
+
+    if sparse_loss:
+      # indexer_mask is already pre-filtered with the attention_mask if any
+      attention_scores = attention_scores + indexer_mask[:, None, :, :]
+      indexer_score = indexer_score + indexer_mask
+    elif attention_mask is not None:
+      # indexer_score already applies attention_mask; updating attention_scores only
+      attention_scores = attention_scores + attention_mask[:, None, :, :]
+
+    # Use float32 for softmax numerical stability.
+    attention_probs = jax.nn.softmax(attention_scores.astype(jnp.float32), axis=-1)
+    indexer_probs = jax.nn.softmax(indexer_score.astype(jnp.float32), axis=-1)
+
+    # Aggregate heads: [b, h, t, s] -> [b, t, s]
+    attention_probs = jnp.sum(attention_probs, axis=1)
+    # L1 normalize aggregated target distribution
+    attention_probs = attention_probs / (jnp.sum(attention_probs, axis=-1, keepdims=True) + EPS)
+
+    # KL Divergence: KL(attention || indexer)
+    log_attention_probs = jnp.log(attention_probs + EPS)
+    log_indexer_probs = jnp.log(indexer_probs + EPS)
+    kl_per_token = attention_probs * (log_attention_probs - log_indexer_probs)
+    indexer_loss = jnp.mean(jnp.sum(kl_per_token, axis=-1))
+
+    return indexer_loss * scaling_factor
+
   def __call__(
       self,
       inputs_q: Array,
@@ -1013,22 +1109,36 @@ class MLA(Attention):
     value = checkpoint_name(value, "value_proj")
 
     # Indexer Logic
-    index_mask = None
-    if self.use_sparse_indexer:
+    indexer_mask = None
+    if self.use_indexer:
       if model_mode != MODEL_MODE_TRAIN:
         raise NotImplementedError("Sparse indexer has not implemented for inference yet.")
       # generate mask: with 0 and large negative, [b, 1, 1, q_len, kv_len] -> [b, q_len, kv_len]
       attention_mask = self.attention_op.generate_attention_mask(
           query, key, decoder_segment_ids, model_mode, previous_chunk, bidirectional_mask
-      ).squeeze(axis=(1, 2))
-      # apply indexer, index_mask [b, q_len, kv_len]
-      index_mask, _, _ = self.indexer(
+      )
+      if attention_mask is not None:
+        attention_mask = attention_mask.squeeze(axis=(1, 2))
+      # apply indexer, indexer_mask [b, q_len, kv_len]
+      indexer_mask, _, indexer_score = self.indexer(
           inputs_q=inputs_q,
           low_rank_q=low_rank_q,
           inputs_kv=inputs_kv,
           inputs_positions=inputs_positions,
           attention_mask=attention_mask,
       )
+
+      if indexer_mask is not None and self.config.indexer_loss_scaling_factor > 0.0:
+        indexer_loss = self.calculate_indexer_loss(
+            indexer_score=indexer_score,
+            query=query,
+            key=key,
+            attention_mask=attention_mask,
+            indexer_mask=indexer_mask,
+            sparse_loss=self.config.indexer_sparse_training,
+            scaling_factor=self.config.indexer_loss_scaling_factor,
+        )
+        self.sow(nnx.Intermediate, "indexer_loss", indexer_loss)
 
     # Check if we need QK Clip stats
     use_qk_clip = self.model_mode == MODEL_MODE_TRAIN and self.config.use_qk_clip
@@ -1047,7 +1157,7 @@ class MLA(Attention):
           decoder_segment_ids,
           model_mode,
           cached_values,
-          index_mask=index_mask,
+          indexer_mask=indexer_mask,
           record_max_logits=use_qk_clip,
       )
 
