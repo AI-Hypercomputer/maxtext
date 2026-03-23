@@ -874,6 +874,13 @@ def compute(x, w0, w1, wo, group_sizes, weights, *, config, mesh):
   wi_combine_scopes = config.wi_combine_scopes
   wo_combine_scopes = config.wo_combine_scopes
   if config.use_qwix_quantization:
+    wi_tile_size = (256, 7168, 1024, 512, 1024, 7168, 256, 7168, 1024)
+    wi_input_buffer_count = (3, 2, 2)
+    wi_combine_scopes = True
+
+    wo_tile_size = (256, 1024, 7168, 512, 7168, 512, 512, 512, 7168)
+    wo_input_buffer_count = (4, 2, 4)
+    wo_combine_scopes = False
     gating_pspec, linear_pspec = moe_lib.get_batchsplit_init_kernel_axes()
     w0_pspec = nn.logical_to_mesh_axes(gating_pspec)
     wo_pspec = nn.logical_to_mesh_axes(linear_pspec)
