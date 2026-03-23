@@ -36,6 +36,7 @@ from maxtext.layers.initializers import NdInitializer, default_bias_init, nd_den
 from maxtext.kernels import megablox as mblx
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
+from maxtext.utils import sharding
 from maxtext.utils.sharding import maybe_shard_with_logical, create_sharding
 from maxtext.utils.sharding import logical_to_mesh_axes
 import numpy as np
@@ -1074,11 +1075,12 @@ class RoutedMoE(nnx.Module):
       w1_pspec = self._logical_to_mesh_axes(("embed_tensor_transpose", "mlp_no_fsdp", None))
       wo_pspec = self._logical_to_mesh_axes(("embed_tensor_transpose", "mlp_no_fsdp", None))
     else:
-      w0_pspec = self._logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
-      w1_pspec = self._logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
-      wo_pspec = self._logical_to_mesh_axes(("exp", "mlp_no_fsdp", "embed_tensor_transpose"))
+      # this will all gather of fsdp
+      sharding.remove_fsdp_sharding
+      w0_pspec = self._logical_to_mesh_axes(("exp", None, None))
+      w1_pspec = self._logical_to_mesh_axes(("exp", None, None))
+      wo_pspec = self._logical_to_mesh_axes(("exp", None, None))
       #breakpoint()
-
     if isinstance(w0_kernel, aqt.QTensor):
       w0_pspec = aqt.partition_spec(w0_pspec, (1,), w0_kernel.dtype, use_bias=False)
     if isinstance(w1_kernel, aqt.QTensor):
