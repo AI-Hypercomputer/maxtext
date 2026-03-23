@@ -509,6 +509,7 @@ def rl_train(argv: Sequence[str], kwargs: dict):
     max_logging.log("Policy Model initialized successfully")
     nnx.display(actor_model)
     max_logging.log(f"Policy mesh shape: {actor_mesh.shape}")
+    max_logging.log(f"Rollout_mesh shape: {rollout_mesh.shape}")
 
   rl_cluster, rl_trainer, _ = create_rl_components(
       trainer_config,
