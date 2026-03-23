@@ -36,7 +36,6 @@ from maxtext.layers.initializers import NdInitializer, default_bias_init, nd_den
 from maxtext.kernels import megablox as mblx
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
-from maxtext.utils import sharding
 from maxtext.utils.sharding import maybe_shard_with_logical, create_sharding
 from maxtext.utils.sharding import logical_to_mesh_axes
 import numpy as np

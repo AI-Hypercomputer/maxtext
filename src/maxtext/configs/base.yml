@@ -483,7 +483,6 @@ logical_axis_rules: [
                       ['embed_no_exp', ['fsdp', 'sequence', 'context']],
                       # For full solution should rename embed_no_exp to embed_moe
                       # May need remove_fsdp functionality tho
-                      ['embed_moe', ['fsdp', 'fsdp_transpose', 'sequence', 'context']],
                       ['embed_tensor_transpose', ['tensor_transpose']],
                       ['q_lora', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'tensor_transpose', 'expert']],
                       ['q_lora', ['fsdp', 'sequence', 'context', 'tensor_transpose', 'expert']],
