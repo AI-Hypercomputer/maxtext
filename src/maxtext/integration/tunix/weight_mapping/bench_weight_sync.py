@@ -37,7 +37,7 @@ _JAX_COMPILATION_CACHE_DIR = "/tmp/jax_cache"
 # Flags
 FLAGS = flags.FLAGS
 _XPROF = flags.DEFINE_bool('xprof', False, 'xprof')
-_RAND_INIT = flags.DEFINE_bool('rand_init', True, 'Whether to use random initialization instead of loading from checkpoint, for faster testing.')  
+_RAND_INIT = flags.DEFINE_bool('rand_init', False, 'Whether to use random initialization instead of loading from checkpoint, for faster testing.')  
 
 def _setup_jax_compilation_cache():
   jax_config.update("jax_compilation_cache_dir", _JAX_COMPILATION_CACHE_DIR)
@@ -81,7 +81,7 @@ def _get_maxtext_model(config):
     tunix_model = TunixMaxTextAdapter(base_model=model)
     # Use the appropriate model config based on the model name
     if config.model_name == "qwen3-30b-a3b":
-      model_config = qwen3_lib.ModelConfig.qwen3_30b()
+      model_config = qwen3_lib.ModelConfig.qwen3_30b_a3b()
     elif config.model_name == "qwen3-0.6b":
       model_config = qwen3_lib.ModelConfig.qwen3_0_6b()
     elif config.model_name == "qwen3-235b-a22b":
@@ -327,12 +327,12 @@ class MaxTextToVLLMConverter:
       @functools.partial(jax.jit, donate_argnums=(0,))
       @jax.shard_map(
         in_specs=P('expert', None, None, None), # [Expert, Layer, Hidden, Inter]
-        out_specs=P(None, 'expert', None, None), # [Layer, Expert, Inter, Hidden]
+        out_specs=P(None, 'expert', None, None), # [Layer, Expert, Hidden, Inter]
         mesh=self.mesh)
       def _transpose(param):
         def _single_layer(moe_slice):
-          # Transpose [Expert, Hidden, Inter] -> [Expert, Inter, Hidden]
-          return jnp.transpose(moe_slice, (0, 2, 1))
+          # vLLM >= 0.17.1: w2_weight shape is [Expert, Hidden, Inter] (no additional transpose)
+          return moe_slice
         return jax.vmap(_single_layer, 
                         in_axes=(1,))(param)  
       param = _transpose(param)
@@ -345,7 +345,7 @@ class MaxTextToVLLMConverter:
         out_specs=P(None, 'expert', None, None),
         mesh=self.mesh)
       def _transpose(x):
-        # (e, l, d_model, d_inner) -> (l, e, d_inner, d_model)
+        # (e, l, d_model, d_inner) -> (l, e, d_model, d_inner)
         return jnp.transpose(x, (1, 0, 2, 3))
       
       wi_0_layers = list(jnp.unstack(_transpose(wi_0)))
@@ -371,19 +371,18 @@ class MaxTextToVLLMConverter:
             out_specs=P('expert', None, None), 
         )
         def _fuse(wi_0, wi_1):
-          # [e_shard, d_model, d_inner] -> [e_shard, d_inner, d_model]
-          wi_0 = jnp.transpose(wi_0, (0, 2, 1))  # gate
-          wi_1 = jnp.transpose(wi_1, (0, 2, 1))  # up
-          e, d_inner, d_model = wi_0.shape
+          # [e_shard, d_model, d_inner]
+          e, d_model, d_inner = wi_0.shape
           # Chunk-level interleave to match vLLM TP sharding:
           # layout: [gate_chunk0, up_chunk0, gate_chunk1, up_chunk1, ...]
           num_chunks = 4  # tensor_parallel_size for vLLM
           chunk_size = d_inner // num_chunks
-          gate_chunks = wi_0.reshape(e, num_chunks, chunk_size, d_model)
-          up_chunks = wi_1.reshape(e, num_chunks, chunk_size, d_model)
-          # [e, num_chunks, 2, chunk_size, d_model] -> [e, 2*d_inner, d_model]
-          combined = jnp.stack([gate_chunks, up_chunks], axis=2)
-          return combined.reshape(e, 2 * d_inner, d_model)
+          gate_chunks = wi_0.reshape(e, d_model, num_chunks, chunk_size)
+          up_chunks = wi_1.reshape(e, d_model, num_chunks, chunk_size)
+          # [e, d_model, num_chunks, 2, chunk_size] -> [e, d_model, 2*d_inner]
+          # vLLM >= 0.17.1: w13_weight shape is [Expert, d_model, 2*d_inner]
+          combined = jnp.stack([gate_chunks, up_chunks], axis=3)
+          return combined.reshape(e, d_model, 2 * d_inner)
 
         layer_i = _fuse(wi_0_layer_i, wi_1_layer_i)
         self.vllm_state.update({f"{layer_key_prefix}.{i}.{layer_key_suffix}": layer_i})
@@ -452,7 +451,7 @@ def main():
     vllm_state = converter.convert(model_state)
   del model_state
   gc.collect()
-  save_dict_to_file(vllm_state, "vllm_state_shapes.txt")
+  # save_dict_to_file(vllm_state, "vllm_state_shapes.txt")
 
   # Load vLLM model and run generation test
   print("="*80)
