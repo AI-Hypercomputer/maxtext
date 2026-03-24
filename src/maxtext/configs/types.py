@@ -629,6 +629,24 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to use Ring of Experts for sparse matmul expert parallelism.",
   )
+  ring_paged_stash: bool = Field(
+      False,
+      description=(
+          "Enable paged stashing for ring-of-experts MoE layers. "
+          "Instead of checkpointing GMM activations at worst-case buffer size "
+          "(batch*EP*seq*top_k), compactly stores only the actual routed tokens "
+          "in a shared static buffer, reducing host-offload memory ~4x for EP=4. "
+          "See layers/paged_stash.py for details."
+      ),
+  )
+  ring_paged_stash_safety_margin: float = Field(
+      1.5,
+      description=(
+          "Safety margin multiplier on the expected-per-layer token count used to "
+          "size each layer's stash chunk (max_chunk = expected * margin). "
+          "1.0 = no slack; 1.5 = tolerate 50%% per-layer imbalance without dropping."
+      ),
+  )
   use_random_routing: bool = Field(False, description="Whether to use random routing for debugging.")
   interleave_moe_layer_step: int = Field(1, description="Frequency of MoE layers, e.g., 2 means every 2nd layer is MoE.")
   expert_shard_attention_option: Literal["fsdp", "context"] = Field(
