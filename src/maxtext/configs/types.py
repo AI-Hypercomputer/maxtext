@@ -310,6 +310,8 @@ class Checkpointing(BaseModel):
   enable_single_replica_ckpt_restoring: bool = Field(
       False, description="One replica reads and broadcasts the checkpoint."
   )
+  checkpoint_todelete_subdir: str = Field("", description="Subdirectory to move checkpoints to before deletion.")
+  checkpoint_todelete_full_path: str = Field("", description="Full path to move checkpoints to before deletion.")
   force_unroll: bool = Field(
       False,
       description="During param-only checkpoint generation, whether to unroll the loop.",
