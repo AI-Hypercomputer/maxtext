@@ -96,7 +96,7 @@ response_dict = {}
 response_lock = threading.Lock()
 
 # Batching configuration
-BATCH_TIMEOUT_S = 0.1  # 100ms
+BATCH_TIMEOUT_S = float(os.environ.get("MAXTEXT_BATCH_TIMEOUT_S", "1.0"))
 # Timeout for a client waiting for a response.
 REQUEST_TIMEOUT_S = int(os.environ.get("MAXTEXT_REQUEST_TIMEOUT_S", "36000"))
 
@@ -167,7 +167,7 @@ def run_server():
 
 # Define a maximum size for the request payload to be broadcasted.
 # This avoids broadcasting variable-sized arrays, which can be complex.
-MAX_REQUEST_SIZE = 65536 * 10
+MAX_REQUEST_SIZE = 1024 * 1024 * 10
 
 
 def _build_chat_completion_response(request, completion_result, llm):
@@ -271,7 +271,8 @@ def _collect_batched_requests():
   start_time = time.time()
   while len(batched_items) < LLM.batch_size and (time.time() - start_time) < BATCH_TIMEOUT_S:
     try:
-      item = request_queue.get(timeout=0.01)
+      # item = request_queue.get(timeout=0.01)
+      item = request_queue.get(timeout=1.0)
       batched_items.append(item)
     except queue.Empty:
       if batched_items:
