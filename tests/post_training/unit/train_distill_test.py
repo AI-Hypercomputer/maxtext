@@ -247,7 +247,7 @@ class TrainDistillTest(unittest.TestCase):
     )
 
     # Verify loss computation and optimizer update
-    trainer.strategy.labels_fn.assert_called_once_with(mock_batch["targets"], targets_segmentation=None)
+    trainer.strategy.create_labels.assert_called_once_with(mock_batch["targets"], targets_segmentation=None)
     trainer.strategy.compute_loss.assert_called_once()
     optimizer.update.assert_called_once_with(student_model, mock_grads)
 
@@ -291,7 +291,7 @@ class TrainDistillTest(unittest.TestCase):
     loss_wrapper(student_model, teacher_model, mock_batch)
 
     # 6. Assertions
-    trainer.strategy.labels_fn.assert_called_once_with(
+    trainer.strategy.create_labels.assert_called_once_with(
         mock_batch["targets"], targets_segmentation=mock_targets_segmentation
     )
     trainer.strategy.student_forward_fn.assert_called_once_with(
@@ -362,12 +362,11 @@ class TrainDistillTest(unittest.TestCase):
     strategy = distillation_utils.CombinedDistillationStrategy(
         student_forward_fn=lambda m, **k: None,
         teacher_forward_fn=lambda m, **k: None,
-        labels_fn=lambda t: t,
+        vocab_size=4,
         temperature=1.0,
         alpha=0.5,
         beta_feature=1.0,
         layer_indices=None,
-        sft_mode=sft_mode,
     )
 
     # Dummy inputs (batch=1, seq=2, vocab=4)
@@ -410,18 +409,15 @@ class TrainDistillTest(unittest.TestCase):
     self.assertLess(metrics["distill/kl_div"], 1e-5)
     self.assertLess(metrics["distill/out_proj_feature_loss"], 1e-5)
 
-  def test_strategy_compute_eval_loss(self):
-    self._verify_strategy_compute_eval_loss(sft_mode=False)
-
-  def _verify_strategy_compute_eval_loss(self, sft_mode):
+  def verify_strategy_compute_eval_loss(self):
     """Covers MonitoredLogitStrategy.compute_eval_loss."""
     strategy = distillation_utils.CombinedDistillationStrategy(
         student_forward_fn=mock.Mock(),
         teacher_forward_fn=mock.Mock(),
-        labels_fn=mock.Mock(),
+        vocab_size=4,
+        # student_config=mock_config,
         temperature=1.0,
         alpha=0.5,
-        sft_mode=sft_mode,
     )
     # Case where feature loss is enabled
     logits = distillation_utils.DistillationForwardOutput(
@@ -443,8 +439,51 @@ class TrainDistillTest(unittest.TestCase):
     self.assertTrue(isinstance(loss, jax.Array))
     self.assertEqual(aux, {})
 
-  def test_strategy_compute_eval_loss_sft(self):
-    self._verify_strategy_compute_eval_loss(sft_mode=True)
+  def test_strategy_ignores_segmentation_zero_tokens(self):
+    """Verifies that 0 tokens in targets_segmentation are ignored in loss computation."""
+    strategy = distillation_utils.CombinedDistillationStrategy(
+        student_forward_fn=mock.Mock(),
+        teacher_forward_fn=mock.Mock(),
+        vocab_size=4,
+        temperature=1.0,
+        alpha=0.5,
+        pad_id=0,
+    )
+
+    # 1. Leverage the targets_segmentation tensor and put a 0 token in between.
+    # Token 1 is a delimiter (targets_segmentation = 0).
+    targets = jnp.array([[2, 1, 3]])
+    targets_segmentation = jnp.array([[1, 0, 1]])
+
+    # 2. Create labels with the zeroed out segment delimiter mask.
+    labels = strategy.create_labels(targets, targets_segmentation=targets_segmentation)
+
+    # Student has all predictions incorrect
+    s_logits = jnp.array(
+        [
+            [
+                [10.0, -10.0, -10.0, -10.0],
+                [-10.0, 10.0, -10.0, -10.0],
+                [-10.0, 10.0, -10.0, -10.0],
+            ]
+        ]  # correct
+    )
+    student_output = distillation_utils.DistillationForwardOutput(logits=s_logits, out_projection_activations=None)
+
+    # Teacher perfectly predicts the target for Token 0 and Token 2, and class 1 for Token 1
+    t_logits = jnp.array([[[-10.0, -10.0, 10.0, -10.0], [10.0, -10.0, -10.0, -10.0], [-10.0, -10.0, -10.0, 10.0]]])
+    teacher_output = distillation_utils.DistillationForwardOutput(logits=t_logits, out_projection_activations=None)
+
+    # 3. Call compute_loss()
+    _, metrics = strategy.compute_loss(student_output, teacher_output, labels)
+
+    # all tokens are predicted incorrect so the loss should be 10*2 since
+    # token at position 1 should be excluded from the loss
+    # mean kl_div should also be equal to 20
+    self.assertTrue(19.0 < metrics["distill/hard_loss"] < 21.0)
+    self.assertTrue(19.0 < metrics["distill/soft_loss"] < 21.0)
+    self.assertTrue(19.0 < metrics["distill/kl_div"] < 21.0)
+    self.assertTrue(metrics["distill/teacher_loss"] == 0.0)
 
   def test_setup_pipeline_grain_enabled(self):
     """Covers _setup_and_restore_input_pipeline when Grain IS detected."""
@@ -515,6 +554,7 @@ class TrainDistillTest(unittest.TestCase):
         "attention_mask": mock.Mock(),
         "decoder_segment_ids": mock.Mock(),
         "targets": mock.Mock(),
+        "targets_segmentation": None,
     }
     trainer.gen_model_input_fn = mock.Mock(return_value=mock_batch)
 
@@ -528,7 +568,7 @@ class TrainDistillTest(unittest.TestCase):
     trainer.strategy.student_forward_fn.return_value = mock_student_output
 
     mock_labels = mock.Mock()
-    trainer.strategy.labels_fn.return_value = mock_labels
+    trainer.strategy.create_labels.return_value = mock_labels
 
     mock_loss = mock.Mock()
     trainer.strategy.compute_eval_loss.return_value = mock_loss
@@ -557,7 +597,7 @@ class TrainDistillTest(unittest.TestCase):
       trainer.strategy.teacher_forward_fn.assert_not_called()
 
     # Verify loss computation pipeline
-    trainer.strategy.labels_fn.assert_called_once_with(mock_batch["targets"])
+    trainer.strategy.create_labels.assert_called_once_with(mock_batch["targets"], targets_segmentation=None)
     trainer.strategy.compute_eval_loss.assert_called_once_with(mock_student_output, mock_labels)
 
     # Verify it returns the correct loss
@@ -643,7 +683,7 @@ class TrainDistillTest(unittest.TestCase):
         "teacher_output": jnp.array([1.0, 1.0]),
     }
     trainer.gen_model_input_fn = mock.Mock(return_value=dummy_batch)
-    trainer.strategy.labels_fn.return_value = None
+    trainer.strategy.create_labels.return_value = None
 
     # 4. Mock the forward pass to COUNT how many times it executes
     # We wrap the actual dummy model execution in a mock to track it.
