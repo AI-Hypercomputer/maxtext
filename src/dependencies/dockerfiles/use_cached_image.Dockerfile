@@ -1,0 +1,4 @@
+ARG OLD_DOCKER_IMAGE=python:3.12-slim-bullseye
+FROM $OLD_DOCKER_IMAGE
+
+COPY . .
