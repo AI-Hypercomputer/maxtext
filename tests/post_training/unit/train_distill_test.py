@@ -15,6 +15,7 @@
 
 """Unit tests for the Distillation Trainer."""
 
+import os
 import pytest
 
 pytest.importorskip("tunix")
@@ -36,6 +37,7 @@ from absl.testing import absltest
 from maxtext.trainers.post_train.distillation import train_distill
 from maxtext.trainers.post_train.distillation import distillation_utils
 from maxtext.configs import pyconfig
+from tests.utils.test_helpers import get_test_config_path
 
 
 # pylint: disable=protected-access
@@ -140,9 +142,12 @@ class TrainDistillTest(unittest.TestCase):
     # 5. Verify
     trainer.strategy.get_teacher_outputs.assert_not_called()
 
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.optax.global_norm")
   @mock.patch("maxtext.trainers.post_train.distillation.train_distill.jax.tree.map")
   @mock.patch("maxtext.trainers.post_train.distillation.train_distill.nnx.value_and_grad")
-  def test_train_step_skips_teacher_forward_when_output_present(self, mock_value_and_grad, mock_tree_map):
+  def test_train_step_skips_teacher_forward_when_output_present(
+      self, mock_value_and_grad, mock_tree_map, mock_global_norm
+  ):
     """Verifies teacher forward is skipped when model_output is already in the batch."""
     # 1. Initialize Trainer
     # pylint: disable=no-value-for-parameter
@@ -166,9 +171,10 @@ class TrainDistillTest(unittest.TestCase):
     optimizer, inputs = mock.Mock(), mock.Mock()
 
     # 4. Configure mocked nnx.value_and_grad
-    mock_loss, mock_aux, mock_grads = mock.Mock(), mock.Mock(), mock.Mock()
+    mock_loss, mock_aux, mock_grads = mock.Mock(), {}, mock.Mock()
     mock_grad_fn = mock.Mock(return_value=((mock_loss, mock_aux), mock_grads))
     mock_value_and_grad.return_value = mock_grad_fn
+    mock_global_norm.return_value = mock.Mock()
 
     # 5. Execute outer function & trigger inner loss_wrapper
     trainer._train_step(model_bundle, optimizer, inputs)
@@ -188,9 +194,12 @@ class TrainDistillTest(unittest.TestCase):
         cache=None,
     )
 
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.optax.global_norm")
   @mock.patch("maxtext.trainers.post_train.distillation.train_distill.jax.tree.map")
   @mock.patch("maxtext.trainers.post_train.distillation.train_distill.nnx.value_and_grad")
-  def test_train_step_calls_teacher_forward_when_output_missing(self, mock_value_and_grad, mock_tree_map):
+  def test_train_step_calls_teacher_forward_when_output_missing(
+      self, mock_value_and_grad, mock_tree_map, mock_global_norm
+  ):
     """Verifies teacher forward is called when model_output is missing from the batch."""
     # 1. Initialize Trainer
     # pylint: disable=no-value-for-parameter
@@ -214,12 +223,14 @@ class TrainDistillTest(unittest.TestCase):
     optimizer, inputs = mock.Mock(), mock.Mock()
 
     # 4. Configure mocked nnx.value_and_grad
-    mock_loss, mock_aux, mock_grads = mock.Mock(), mock.Mock(), mock.Mock()
+    mock_loss, mock_aux, mock_grads = mock.Mock(), {}, mock.Mock()
     mock_grad_fn = mock.Mock(return_value=((mock_loss, mock_aux), mock_grads))
     mock_value_and_grad.return_value = mock_grad_fn
+    mock_gn = mock.Mock()
+    mock_global_norm.return_value = mock_gn
 
     # 5. Execute outer function & trigger inner loss_wrapper
-    loss, aux = trainer._train_step(model_bundle, optimizer, inputs)
+    train_step_out = trainer._train_step(model_bundle, optimizer, inputs)
     loss_wrapper = mock_value_and_grad.call_args[0][0]
     loss_wrapper(student_model, teacher_model, mock_batch)
 
@@ -247,17 +258,21 @@ class TrainDistillTest(unittest.TestCase):
     )
 
     # Verify loss computation and optimizer update
-    trainer.strategy.labels_fn.assert_called_once_with(mock_batch["targets"], targets_segmentation=None)
+    trainer.strategy.create_labels.assert_called_once_with(mock_batch["targets"], targets_segmentation=None)
     trainer.strategy.compute_loss.assert_called_once()
     optimizer.update.assert_called_once_with(student_model, mock_grads)
 
     # Verify the final returns match what grad_fn produced
-    self.assertEqual(loss, mock_loss)
-    self.assertEqual(aux, mock_aux)
+    self.assertEqual(train_step_out[0], mock_loss)
+    if len(train_step_out) > 2:
+      self.assertEqual(train_step_out[2], mock_gn)
+    elif "distill/grad_norm" in train_step_out[1]:
+      self.assertEqual(train_step_out[1]["distill/grad_norm"], mock_gn)
 
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.optax.global_norm")
   @mock.patch("maxtext.trainers.post_train.distillation.train_distill.jax.tree.map")
   @mock.patch("maxtext.trainers.post_train.distillation.train_distill.nnx.value_and_grad")
-  def test_train_step_passes_targets_segmentation(self, mock_value_and_grad, mock_tree_map):
+  def test_train_step_passes_targets_segmentation(self, mock_value_and_grad, mock_tree_map, mock_global_norm):
     """Verifies strategy callbacks receive decoder_target_tokens and decoder_target_mask."""
     # 1. Initialize Trainer
     # pylint: disable=no-value-for-parameter
@@ -282,8 +297,9 @@ class TrainDistillTest(unittest.TestCase):
     optimizer, inputs = mock.Mock(), mock.Mock()
 
     # 4. Configure mocked nnx.value_and_grad
-    mock_grad_fn = mock.Mock(return_value=((mock.Mock(), mock.Mock()), mock.Mock()))
+    mock_grad_fn = mock.Mock(return_value=((mock.Mock(), {}), mock.Mock()))
     mock_value_and_grad.return_value = mock_grad_fn
+    mock_global_norm.return_value = mock.Mock()
 
     # 5. Execute outer function & trigger inner loss_wrapper
     trainer._train_step(model_bundle, optimizer, inputs)
@@ -291,7 +307,7 @@ class TrainDistillTest(unittest.TestCase):
     loss_wrapper(student_model, teacher_model, mock_batch)
 
     # 6. Assertions
-    trainer.strategy.labels_fn.assert_called_once_with(
+    trainer.strategy.create_labels.assert_called_once_with(
         mock_batch["targets"], targets_segmentation=mock_targets_segmentation
     )
     trainer.strategy.student_forward_fn.assert_called_once_with(
@@ -362,12 +378,11 @@ class TrainDistillTest(unittest.TestCase):
     strategy = distillation_utils.CombinedDistillationStrategy(
         student_forward_fn=lambda m, **k: None,
         teacher_forward_fn=lambda m, **k: None,
-        labels_fn=lambda t: t,
+        vocab_size=4,
         temperature=1.0,
         alpha=0.5,
         beta_feature=1.0,
         layer_indices=None,
-        sft_mode=sft_mode,
     )
 
     # Dummy inputs (batch=1, seq=2, vocab=4)
@@ -410,18 +425,15 @@ class TrainDistillTest(unittest.TestCase):
     self.assertLess(metrics["distill/kl_div"], 1e-5)
     self.assertLess(metrics["distill/out_proj_feature_loss"], 1e-5)
 
-  def test_strategy_compute_eval_loss(self):
-    self._verify_strategy_compute_eval_loss(sft_mode=False)
-
-  def _verify_strategy_compute_eval_loss(self, sft_mode):
+  def verify_strategy_compute_eval_loss(self):
     """Covers MonitoredLogitStrategy.compute_eval_loss."""
     strategy = distillation_utils.CombinedDistillationStrategy(
         student_forward_fn=mock.Mock(),
         teacher_forward_fn=mock.Mock(),
-        labels_fn=mock.Mock(),
+        vocab_size=4,
+        # student_config=mock_config,
         temperature=1.0,
         alpha=0.5,
-        sft_mode=sft_mode,
     )
     # Case where feature loss is enabled
     logits = distillation_utils.DistillationForwardOutput(
@@ -443,59 +455,120 @@ class TrainDistillTest(unittest.TestCase):
     self.assertTrue(isinstance(loss, jax.Array))
     self.assertEqual(aux, {})
 
-  def test_strategy_compute_eval_loss_sft(self):
-    self._verify_strategy_compute_eval_loss(sft_mode=True)
+  def test_strategy_ignores_segmentation_zero_tokens(self):
+    """Verifies that 0 tokens in targets_segmentation are ignored in loss computation."""
+    strategy = distillation_utils.CombinedDistillationStrategy(
+        student_forward_fn=mock.Mock(),
+        teacher_forward_fn=mock.Mock(),
+        vocab_size=4,
+        temperature=1.0,
+        alpha=0.5,
+        pad_id=0,
+    )
+
+    # 1. Leverage the targets_segmentation tensor and put a 0 token in between.
+    # Token 1 is a delimiter (targets_segmentation = 0).
+    targets = jnp.array([[2, 1, 3]])
+    targets_segmentation = jnp.array([[1, 0, 1]])
+
+    # 2. Create labels with the zeroed out segment delimiter mask.
+    labels = strategy.create_labels(targets, targets_segmentation=targets_segmentation)
+
+    # Student has all predictions incorrect
+    s_logits = jnp.array(
+        [
+            [
+                [10.0, -10.0, -10.0, -10.0],
+                [-10.0, 10.0, -10.0, -10.0],
+                [-10.0, 10.0, -10.0, -10.0],
+            ]
+        ]  # correct
+    )
+    student_output = distillation_utils.DistillationForwardOutput(logits=s_logits, out_projection_activations=None)
+
+    # Teacher perfectly predicts the target for Token 0 and Token 2, and class 1 for Token 1
+    t_logits = jnp.array([[[-10.0, -10.0, 10.0, -10.0], [10.0, -10.0, -10.0, -10.0], [-10.0, -10.0, -10.0, 10.0]]])
+    teacher_output = distillation_utils.DistillationForwardOutput(logits=t_logits, out_projection_activations=None)
+
+    # 3. Call compute_loss()
+    _, metrics = strategy.compute_loss(student_output, teacher_output, labels)
+
+    # all tokens are predicted incorrect so the loss should be 10*2 since
+    # token at position 1 should be excluded from the loss
+    # mean kl_div should also be equal to 20
+    self.assertTrue(19.0 < metrics["distill/hard_loss"] < 21.0)
+    self.assertTrue(19.0 < metrics["distill/soft_loss"] < 21.0)
+    self.assertTrue(19.0 < metrics["distill/kl_div"] < 21.0)
+    self.assertTrue(metrics["distill/teacher_loss"] == 0.0)
 
   def test_setup_pipeline_grain_enabled(self):
-    """Covers _setup_and_restore_input_pipeline when Grain IS detected."""
+    """Covers setup_checkpoint_manager_and_restore when Grain IS detected."""
     mock_trainer = mock.Mock()
     mock_trainer.checkpoint_manager = mock.Mock()
     # Mock restore returning None (no checkpoint yet)
     mock_trainer.checkpoint_manager.restore_iterator.return_value = None
+
+    mock_trainer.model.student_model = mock.Mock()
+    mock_trainer.optimizer = mock.Mock()
+    mock_trainer._lora_enabled = False
 
     mock_iter = mock.Mock()
     mock_iter.save = mock.Mock()  # Has save method
 
     config = mock.Mock()
     config.dataset_type = "grain"
+    config.checkpoint_dir = self.test_dir
 
     # Use real options to avoid Orbax validation errors caused by Mocks
     train_config = mock.Mock()
-    train_config.checkpoint_root_directory = self.test_dir
+    train_config.get_with_default.return_value = 1
+    train_config.checkpoint_root_directory = None
     train_config.checkpointing_options = ocp.CheckpointManagerOptions(max_to_keep=1, create=True)
+    mock_trainer.config = train_config
 
-    # Run function
-    result = train_distill._setup_and_restore_input_pipeline(mock_trainer, mock_iter, config, train_config)
+    result = train_distill.MaxTextDistillationTrainer.setup_checkpoint_manager_and_restore(
+        mock_trainer, mock_iter, config
+    )
 
     # Verify manager was swapped
     self.assertIsInstance(mock_trainer.checkpoint_manager, distillation_utils.MaxTextCheckpointManager)
     self.assertEqual(result, mock_iter)
 
   def test_setup_pipeline_restored(self):
-    """Covers _setup_and_restore_input_pipeline when restore succeeds."""
+    """Verifies that a checkpoint accurately restores the input pipeline iterator."""
     mock_trainer = mock.Mock()
-
-    # Mock successful restore
-    restored_iter = mock.Mock()
     mock_manager = mock.Mock()
+    restored_iter = mock.Mock()
     mock_manager.restore_iterator.return_value = restored_iter
+
+    # Use real options
+    train_config = mock.Mock()
+    train_config.get_with_default.return_value = 1
+    train_config.checkpoint_root_directory = None
+    train_config.checkpointing_options = ocp.CheckpointManagerOptions(max_to_keep=1, create=True)
+    mock_trainer.config = train_config  # set internally
 
     # We need to mock the constructor of MaxTextCheckpointManager to return our mock
     with mock.patch(
         "maxtext.trainers.post_train.distillation.distillation_utils.MaxTextCheckpointManager", return_value=mock_manager
     ):
 
+      mock_trainer.model = mock.Mock()
+      mock_trainer.optimizer = mock.Mock()
+      mock_trainer._lora_enabled = False
+      mock_trainer.config = train_config  # Set internal Tunix config
+
       mock_iter = mock.Mock()
       mock_iter.save = mock.Mock()
       config = mock.Mock()
       config.dataset_type = "grain"
+      config.checkpoint_dir = self.test_dir
 
-      # Use real options
-      train_config = mock.Mock()
-      train_config.checkpoint_root_directory = self.test_dir
-      train_config.checkpointing_options = ocp.CheckpointManagerOptions(max_to_keep=1, create=True)
+      mock_manager.maybe_restore.return_value = (10, {})
 
-      result = train_distill._setup_and_restore_input_pipeline(mock_trainer, mock_iter, config, train_config)
+      result = train_distill.MaxTextDistillationTrainer.setup_checkpoint_manager_and_restore(
+          mock_trainer, mock_iter, config
+      )
 
       # Verify it returned the restored iterator, NOT the raw one
       self.assertEqual(result, restored_iter)
@@ -515,6 +588,7 @@ class TrainDistillTest(unittest.TestCase):
         "attention_mask": mock.Mock(),
         "decoder_segment_ids": mock.Mock(),
         "targets": mock.Mock(),
+        "targets_segmentation": None,
     }
     trainer.gen_model_input_fn = mock.Mock(return_value=mock_batch)
 
@@ -528,7 +602,7 @@ class TrainDistillTest(unittest.TestCase):
     trainer.strategy.student_forward_fn.return_value = mock_student_output
 
     mock_labels = mock.Mock()
-    trainer.strategy.labels_fn.return_value = mock_labels
+    trainer.strategy.create_labels.return_value = mock_labels
 
     mock_loss = mock.Mock()
     trainer.strategy.compute_eval_loss.return_value = mock_loss
@@ -557,26 +631,40 @@ class TrainDistillTest(unittest.TestCase):
       trainer.strategy.teacher_forward_fn.assert_not_called()
 
     # Verify loss computation pipeline
-    trainer.strategy.labels_fn.assert_called_once_with(mock_batch["targets"])
+    trainer.strategy.create_labels.assert_called_once_with(mock_batch["targets"], targets_segmentation=None)
     trainer.strategy.compute_eval_loss.assert_called_once_with(mock_student_output, mock_labels)
 
     # Verify it returns the correct loss
     self.assertEqual(actual_loss, mock_loss)
 
   def test_setup_pipeline_disabled(self):
-    """Covers _setup_and_restore_input_pipeline when checkpoiting is disabled."""
+    """Covers setup_checkpoint_manager_and_restore when checkpointing is disabled."""
     mock_trainer = mock.Mock()
+    mock_trainer.model = mock.Mock()
+    mock_trainer.optimizer = mock.Mock()
+    mock_trainer._lora_enabled = False
+
     mock_iter = object()  # No save method
 
     config = mock.Mock()
     config.dataset_type = "tfds"  # Not grain
+    config.checkpoint_dir = self.test_dir
 
     # Use real options
     train_config = mock.Mock()
-    train_config.checkpoint_root_directory = self.test_dir
+    train_config.get_with_default.return_value = 1
+    train_config.checkpoint_root_directory = None
     train_config.checkpointing_options = ocp.CheckpointManagerOptions(max_to_keep=1, create=True)
+    mock_trainer.config = train_config
 
-    result = train_distill._setup_and_restore_input_pipeline(mock_trainer, mock_iter, config, train_config)
+    with mock.patch(
+        "maxtext.trainers.post_train.distillation.distillation_utils.MaxTextCheckpointManager.maybe_restore"
+    ) as mock_restore:
+      mock_restore.return_value = (10, {})
+
+      result = train_distill.MaxTextDistillationTrainer.setup_checkpoint_manager_and_restore(
+          mock_trainer, mock_iter, config
+      )
 
     # Should still swap manager (to MaxTextCheckpointManager) but with None iterator
     self.assertIsInstance(mock_trainer.checkpoint_manager, distillation_utils.MaxTextCheckpointManager)
@@ -624,7 +712,7 @@ class TrainDistillTest(unittest.TestCase):
     model_bundle = train_distill.ModelBundle(teacher_model=teacher, student_model=student)
 
     # Snapshot the initial weights
-    initial_weights = student.linear.kernel.value.copy()
+    initial_weights = student.linear.kernel.get_value().copy()
 
     # 2. Setup Optimizer with MultiSteps (Accumulate over 2 passes)
     base_optimizer = optax.sgd(learning_rate=0.1)
@@ -643,7 +731,7 @@ class TrainDistillTest(unittest.TestCase):
         "teacher_output": jnp.array([1.0, 1.0]),
     }
     trainer.gen_model_input_fn = mock.Mock(return_value=dummy_batch)
-    trainer.strategy.labels_fn.return_value = None
+    trainer.strategy.create_labels.return_value = None
 
     # 4. Mock the forward pass to COUNT how many times it executes
     # We wrap the actual dummy model execution in a mock to track it.
@@ -661,7 +749,7 @@ class TrainDistillTest(unittest.TestCase):
 
     # Verify weights are completely UNCHANGED
     np.testing.assert_allclose(
-        student.linear.kernel.value, initial_weights, err_msg="Weights should not update on the first pass."
+        student.linear.kernel.get_value(), initial_weights, err_msg="Weights should not update on the first pass."
     )
 
     # --- EXECUTE PASS 2 ---
@@ -673,7 +761,204 @@ class TrainDistillTest(unittest.TestCase):
 
     # Verify weights HAVE changed
     with self.assertRaises(AssertionError, msg="Weights should have updated on the second pass."):
-      np.testing.assert_allclose(student.linear.kernel.value, initial_weights)
+      np.testing.assert_allclose(student.linear.kernel.get_value(), initial_weights)
+
+  @mock.patch("clu.metric_writers.create_default_writer")
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.tokenizer.build_tokenizer")
+  def test_train_save_and_resume(self, mock_build_tokenizer, mock_writer):
+    """Verifies that the trainer can save a checkpoint and resume from it."""
+    # Provide a dummy tokenizer
+    mock_tok = mock.Mock()
+    mock_tok.pad_id = 0
+    mock_build_tokenizer.return_value = mock_tok
+
+    base_config_path = get_test_config_path()
+    base_args = [
+        "",
+        base_config_path,
+        f"base_output_directory={self.test_dir}",
+        "run_name=distill_resume_test",
+        'metrics_dir=""',
+        "dataset_type=synthetic",
+        "vocab_size=32",
+        "base_emb_dim=8",
+        "base_num_query_heads=1",
+        "base_num_kv_heads=1",
+        "base_mlp_dim=16",
+        "base_num_decoder_layers=1",
+        "head_dim=8",
+        "per_device_batch_size=1",
+        "max_target_length=16",
+        "enable_checkpointing=True",
+        "async_checkpointing=False",
+        "checkpoint_period=1",
+        "save_checkpoint_on_completion=True",
+        "log_period=1",
+        "eval_interval=0",
+        "use_sft=False",
+        "distill_beta=0.0",
+        "dataset_path=/",  # Not used for synthetic, but required by some checks
+        "enable_checkpointing=True",
+    ]
+
+    # Run 1: Train for 1 step
+    argv_run1 = base_args + ["steps=1"]
+    global_config_1 = pyconfig.initialize(argv_run1)
+    student_config_1 = pyconfig.initialize(argv_run1, **global_config_1.student_overrides)
+    teacher_config_1 = pyconfig.initialize(argv_run1, **global_config_1.teacher_overrides)
+
+    # Execute first run
+    train_distill.train_distill(student_config_1, teacher_config_1)
+
+    # Run 2: Resume and train up to step 2
+    argv_run2 = base_args + ["steps=2"]
+    global_config_2 = pyconfig.initialize(argv_run2)
+    student_config_2 = pyconfig.initialize(argv_run2, **global_config_2.student_overrides)
+    teacher_config_2 = pyconfig.initialize(argv_run2, **global_config_2.teacher_overrides)
+
+    # Wrap the checkpoint manager creation to spy on maybe_restore
+    original_maybe_restore = distillation_utils.MaxTextCheckpointManager.maybe_restore
+    with mock.patch.object(distillation_utils.MaxTextCheckpointManager, "maybe_restore", autospec=True) as mock_restore:
+      # Actually call the original to preserve behavior
+      def side_effect(self, *args, **kwargs):
+        return original_maybe_restore(self, *args, **kwargs)
+
+      mock_restore.side_effect = side_effect
+
+      # Execute second run
+      train_distill.train_distill(student_config_2, teacher_config_2)
+
+      # Verify that restore was called and returned train_steps = 1
+      self.assertTrue(mock_restore.called)
+      # Check the actual return value of the mocked call would be (1, ...) but it's hard to assert directly
+      # On the spy's return we know it was called. To be safe, we can check the checkpoint directory.
+
+    # Check that step 2 checkpoint was written
+    # The checkpoints should be stored in {test_dir}/distill_resume_test/checkpoints
+    checkpoint_dir = os.path.join(self.test_dir, "distill_resume_test", "checkpoints")
+    self.assertTrue(os.path.exists(checkpoint_dir), f"Checkpoint directory {checkpoint_dir} not found")
+
+    # List contents of checkpoint dir
+    checkpoints = os.listdir(checkpoint_dir)
+    # Checkpoints are usually named '0/', '1/', etc.
+    # With steps=1 and steps=2 and checkpoint_period=1, we should have '1' and '2' (or similar).
+    self.assertTrue(any(c == "1" or c.endswith("1") for c in checkpoints), f"Checkpoint 1 not found in {checkpoints}")
+    self.assertTrue(any(c == "2" or c.endswith("2") for c in checkpoints), f"Checkpoint 2 not found in {checkpoints}")
+
+  def test_checkpointing_and_resume(self):
+    """Trains a few steps, saves a checkpoint, and resumes from it."""
+
+    # 1. Setup minimal dummy model and models bundle
+    class DummyModel(nnx.Module):
+
+      def __init__(self):
+        self.linear = nnx.Linear(in_features=2, out_features=2, rngs=nnx.Rngs(0))
+
+      def __call__(self, input_tokens, **kwargs):
+        # We need an output compatible with the dummy strategy
+        return self.linear(jnp.ones((1, 2)))
+
+    student1 = DummyModel()
+    teacher1 = DummyModel()
+    bundle1 = train_distill.ModelBundle(teacher_model=teacher1, student_model=student1)
+
+    # 2. Setup strategy and trainer config
+    strategy = mock.Mock()
+    strategy.compute_loss.side_effect = lambda s_out, t_out, labels: (jnp.sum(s_out.logits), {"aux": 1.0})
+    strategy.labels_fn.return_value = None
+    strategy.student_forward_fn = lambda model, **kw: distillation_utils.DistillationForwardOutput(
+        logits=model(kw["input_tokens"])
+    )
+    strategy.teacher_forward_fn = lambda model, **kw: distillation_utils.DistillationForwardOutput(
+        logits=model(kw["input_tokens"])
+    )
+
+    config = mock.Mock()
+    config.checkpoint_dir = self.test_dir
+    config.dataset_type = "tfds"
+    config.lora_enabled = False
+
+    # pylint: disable=import-outside-toplevel
+    from tunix.sft import peft_trainer
+
+    train_config = peft_trainer.TrainingConfig(
+        max_steps=2,
+        eval_every_n_steps=0,
+        checkpointing_options=ocp.CheckpointManagerOptions(save_interval_steps=1, max_to_keep=2, create=True),
+        gradient_accumulation_steps=1,
+    )
+
+    optimizer1 = optax.sgd(0.1)
+
+    trainer1 = train_distill.MaxTextDistillationTrainer(
+        model=bundle1,
+        strategy=strategy,
+        optimizer=optimizer1,
+        training_config=train_config,
+    )
+    trainer1._lora_enabled = False
+    trainer1.is_managed_externally = True
+
+    # Mock input mapping
+    trainer1 = trainer1.with_gen_model_input_fn(
+        lambda batch: {
+            "input_tokens": batch.input_tokens,
+            "positions": batch.positions,
+            "attention_mask": batch.input_mask,
+            "decoder_segment_ids": batch.decoder_segment_ids,
+            "targets": batch.targets,
+            "targets_position": batch.targets_position,
+            "targets_segmentation": batch.targets_segmentation,
+            "cache": None,
+        }
+    )
+
+    # 3. Restore pipeline (creates the MaxTextCheckpointManager)
+    # pylint: disable=unexpected-keyword-arg
+    dummy_input = distillation_utils.MaxTextTrainingInput(
+        input_tokens=jnp.ones((1, 2)),
+        input_mask=jnp.ones((1, 2), dtype=bool),
+    )
+    dummy_iter = iter([dummy_input, dummy_input])
+
+    trainer1.setup_checkpoint_manager_and_restore(dummy_iter, config)
+
+    # Train for 2 steps
+    trainer1.train(dummy_iter, None)
+
+    trainer1.checkpoint_manager.wait_until_finished()
+
+    # Verify checkpoint exists
+    self.assertEqual(trainer1.checkpoint_manager.latest_step(), 2)
+    saved_weights = student1.linear.kernel.get_value().copy()
+
+    # 4. Resume
+    student2 = DummyModel()
+    teacher2 = DummyModel()
+    bundle2 = train_distill.ModelBundle(teacher_model=teacher2, student_model=student2)
+    optimizer2 = optax.sgd(0.1)
+
+    trainer2 = train_distill.MaxTextDistillationTrainer(
+        model=bundle2,
+        strategy=strategy,
+        optimizer=optimizer2,
+        training_config=train_config,
+    )
+    trainer2._lora_enabled = False
+
+    # Call setup_checkpoint_manager_and_restore to resume
+    trainer2.setup_checkpoint_manager_and_restore(iter([]), config)
+
+    # We expect _train_steps to be restored to 2
+    self.assertEqual(trainer2._train_steps, 2)
+
+    # Verify weights are identical to the trained ones, rather than the fresh ones
+    np.testing.assert_allclose(student2.linear.kernel.get_value(), saved_weights)
+
+    if hasattr(trainer1.checkpoint_manager, "wait_until_finished"):
+      trainer1.checkpoint_manager.wait_until_finished()
+    if hasattr(trainer2.checkpoint_manager, "wait_until_finished"):
+      trainer2.checkpoint_manager.wait_until_finished()
 
   @mock.patch("maxtext.trainers.post_train.distillation.train_distill.distillation_utils.OfflineArrayRecordIterator")
   @mock.patch("maxtext.trainers.post_train.distillation.train_distill.MaxTextDistillationTrainer")

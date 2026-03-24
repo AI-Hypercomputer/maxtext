@@ -542,11 +542,14 @@ class MlaAttention(BaseModel):
 class AttentionIndexer(BaseModel):
   """Configuration for DeepSeek Sparse Attention (DSA): DeepSeek3.2-style MLA with indexer."""
 
-  use_sparse_indexer: bool = Field(False, description="Whether to use sparse indexer for MLA.")
-  index_head_dim: NonNegativeInt = Field(128, description="Head dim for indexer query and key.")
-  index_n_heads: NonNegativeInt = Field(64, description="Number of query heads in indexer.")
-  index_topk: NonNegativeInt = Field(2048, description="Number of tokens selected by the query token in indexer.")
-  sparse_indexer_loss: bool = Field(False, description="Determines the token selection strategy for indexer loss.")
+  use_indexer: bool = Field(False, description="Whether to use sparse indexer for MLA.")
+  indexer_head_dim: NonNegativeInt = Field(128, description="Head dim for indexer query and key.")
+  indexer_n_heads: NonNegativeInt = Field(64, description="Number of query heads in indexer.")
+  indexer_topk: NonNegativeInt = Field(2048, description="Number of tokens selected by the query token in indexer.")
+  indexer_sparse_training: bool = Field(
+      False,
+      description="Determines the training strategy for the indexer: Dense Warm-up or Sparse Training stage.",
+  )
   indexer_loss_scaling_factor: float = Field(0.0, description="Multiplier for the indexer KL divergence loss.")
 
 
@@ -1038,17 +1041,13 @@ class GrainDataset(BaseModel):
       "",
       description="Path to a JSON file specifying the mixture weights for Grain training data.",
   )
-  grain_file_type: str = Field("arrayrecord", description="File type for Grain data.")
+  grain_file_type: str = Field(
+      "arrayrecord", description="File type for Grain data. Supported: arrayrecord, tfrecord, parquet."
+  )
   grain_worker_count: int = Field(1, description="Number of workers for Grain data loading.")
-  grain_per_worker_buffer_size: int = Field(
-      1,
-      description="Buffer size for each worker for Grain data loading during training.",
-  )
+  grain_per_worker_buffer_size: int = Field(1, description="Per-worker buffer size for Grain train data loading.")
   grain_worker_count_eval: int = Field(1, description="Number of workers for Grain eval data loading.")
-  grain_per_worker_buffer_size_eval: int = Field(
-      1,
-      description="Buffer size for each worker for Grain data loading during evaluation.",
-  )
+  grain_per_worker_buffer_size_eval: int = Field(1, description="Per-worker buffer size for Grain eval data loading.")
   grain_ram_budget_mb: int = Field(1024, description="RAM budget (MB) for auto-tuning worker count.")
   grain_num_threads: int = Field(16, description="Number of threads for Grain ReadOptions during training.")
   grain_prefetch_buffer_size: int = Field(500, description="Prefetch buffer size for Grain ReadOptions during training.")
@@ -1060,6 +1059,7 @@ class GrainDataset(BaseModel):
       16,
       description="Max workers for ThreadPoolExecutor when mixing multiple Grain data sources.",
   )
+  grain_shuffle_buffer_size: int = Field(100, description="Shuffle buffer size when using Parquet or TFRecord.")
 
 
 class FineTuning(BaseModel):
@@ -1184,6 +1184,13 @@ class Optimizer(BaseModel):
       -1,
       ge=-1,
       description="Total steps for the LR schedule. -1 defaults to `steps`.",
+  )
+  trainable_parameters_mask: list[str] = Field(
+      default_factory=list,
+      description=(
+          "List of parameter names/patterns to train. If non-empty, all other parameters will be frozen, "
+          "example: ['.*indexer.*']. If empty (default), all parameters are trained."
+      ),
   )
 
 
@@ -2388,7 +2395,7 @@ class MaxTextConfig(
         raise ValueError("`local_checkpoint_period` must be > 0 for emergency checkpointing.")
     if self.moba and self.attention not in ("dot_product"):
       raise ValueError("MoBA is only supported with dot_product attention.")
-    if self.use_sparse_indexer:
+    if self.use_indexer:
       if self.q_lora_rank == 0:
         raise NotImplementedError("Sparse indexer has not implemented for q_lora_rank = 0.")
       supports_dot_product = self.attention == "dot_product"

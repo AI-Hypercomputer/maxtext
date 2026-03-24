@@ -326,7 +326,7 @@ def calculate_llama4_attention_tflops(config):
   return attention_tflops
 
 
-def calculate_indexer_mask_ratio(index_topk, max_target_length):
+def calculate_indexer_mask_ratio(indexer_topk, max_target_length):
   """
   Calculates the sparse-to-dense ratio for Indexer TFLOPs.
 
@@ -367,7 +367,7 @@ def calculate_indexer_mask_ratio(index_topk, max_target_length):
   """
 
   T = float(max_target_length)
-  K = float(index_topk)
+  K = float(indexer_topk)
 
   ratio = K / T
   mask_multiplier = ratio - (0.5 * ratio**2)
@@ -379,20 +379,20 @@ def calculate_indexer_tflops_per_device(config):
   batch_len = config.per_device_batch_size * config.max_target_length
 
   # 1. Calculate projections flops
-  # Query: [batch, seq, q_lora_rank] @ [q_lora_rank, index_n_heads, index_head_dim]
-  q_flops = 2 * batch_len * config.q_lora_rank * config.index_n_heads * config.index_head_dim
-  # Key: [batch, seq, emb_dim] @ [emb_dim, index_head_dim]
-  k_flops = 2 * batch_len * config.emb_dim * config.index_head_dim
-  # Head weight: [batch, seq, emb_dim] @ [emb_dim, index_n_heads]
-  head_weight_flops = 2 * batch_len * config.emb_dim * config.index_n_heads
+  # Query: [batch, seq, q_lora_rank] @ [q_lora_rank, indexer_n_heads, indexer_head_dim]
+  q_flops = 2 * batch_len * config.q_lora_rank * config.indexer_n_heads * config.indexer_head_dim
+  # Key: [batch, seq, emb_dim] @ [emb_dim, indexer_head_dim]
+  k_flops = 2 * batch_len * config.emb_dim * config.indexer_head_dim
+  # Head weight: [batch, seq, emb_dim] @ [emb_dim, indexer_n_heads]
+  head_weight_flops = 2 * batch_len * config.emb_dim * config.indexer_n_heads
   proj_flops = q_flops + k_flops + head_weight_flops
 
   # 2. Calculate index score flops
-  # QK product [batch, seq, index_n_heads, index_head_dim] @ [batch, seq, index_head_dim]
-  # --> [batch, seq, seq, index_n_heads]
-  qk_product_flops = 2 * batch_len * config.max_target_length * config.index_n_heads * config.index_head_dim
-  # Aggregate heads [batch, seq, seq, index_n_heads] @ [batch, seq, index_n_heads]
-  head_reduction_flops = 2 * batch_len * config.max_target_length * config.index_n_heads
+  # QK product [batch, seq, indexer_n_heads, indexer_head_dim] @ [batch, seq, indexer_head_dim]
+  # --> [batch, seq, seq, indexer_n_heads]
+  qk_product_flops = 2 * batch_len * config.max_target_length * config.indexer_n_heads * config.indexer_head_dim
+  # Aggregate heads [batch, seq, seq, indexer_n_heads] @ [batch, seq, indexer_n_heads]
+  head_reduction_flops = 2 * batch_len * config.max_target_length * config.indexer_n_heads
   # Apply causal mask: Divide by 2 to account for triangular interactions
   # The mask restricts the indexer's search space prior to Top-K filtering
   scoring_flops = (qk_product_flops + head_reduction_flops) / 2
@@ -428,14 +428,14 @@ def calculate_mla_tflops_per_device(config):
   qkv_flops = q_flops + kv_flops
 
   # 3. calculate attention
-  if config.use_sparse_indexer and config.max_target_length > config.index_topk:
+  if config.use_indexer and config.max_target_length > config.indexer_topk:
     # get indexer flops
     indexer_proj_flops, indexer_scoring_flops = calculate_indexer_tflops_per_device(config)
     qkv_flops += indexer_proj_flops
 
     # calculate the proportion of the T x T causal matrix that the Indexer actually explores
-    # this follows the area: (TK - 0.5*K^2) / T^2 (T: max_target_length, K: index_topk)
-    multiplier = calculate_indexer_mask_ratio(config.index_topk, config.max_target_length)
+    # this follows the area: (TK - 0.5*K^2) / T^2 (T: max_target_length, K: indexer_topk)
+    multiplier = calculate_indexer_mask_ratio(config.indexer_topk, config.max_target_length)
     attention_flops = (
         2
         * batch_len
@@ -446,7 +446,7 @@ def calculate_mla_tflops_per_device(config):
     )
     attention_flops += indexer_scoring_flops
   else:
-    # standard MLA & max_target_length <= index_topk in sparse indexer
+    # standard MLA & max_target_length <= indexer_topk in sparse indexer
     # in both cases, the indexer is bypassed as the causal mask remains the efficient representation
     attention_flops = (
         2 * batch_len * config.max_target_length * config.num_query_heads * (qk_head_dim_sum + config.v_head_dim)

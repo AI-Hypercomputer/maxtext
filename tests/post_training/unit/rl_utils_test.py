@@ -236,12 +236,12 @@ class TestCheckNumbers(unittest.TestCase):
 
   @pytest.mark.cpu_only
   def test_extraction_fails_answer_tags_only(self):
-    """<answer> tag alone (no <reasoning> block) is not matched by the regex, score 0."""
+    """<answer> tag alone (no <reasoning> block) is matched by the regex as a fallback, score 1.5."""
     scores = self._check(
         completions=["<answer>42</answer>"],
         answer=["42"],
     )
-    self.assertEqual(scores[0], 0)
+    self.assertEqual(scores[0], 1.5)
 
   @pytest.mark.cpu_only
   def test_extraction_fails_reasoning_tags_only(self):
@@ -330,6 +330,43 @@ class TestExtractHashAnswer(unittest.TestCase):
     """Test extraction when #### is not present."""
     self.assertIsNone(utils_rl.extract_hash_answer("The answer is 42"))
     self.assertIsNone(utils_rl.extract_hash_answer(""))
+
+
+class TestGetOptimizer(unittest.TestCase):
+  """Tests for utils_rl.get_optimizer."""
+
+  def _make_optimizer_config(self, gradient_clipping_threshold=0.0):
+    return SimpleNamespace(
+        learning_rate=1e-4,
+        warmup_steps_fraction=0.1,
+        gradient_clipping_threshold=gradient_clipping_threshold,
+        adam_b1=0.9,
+        adam_b2=0.999,
+        adam_weight_decay=0.01,
+    )
+
+  @pytest.mark.cpu_only
+  def test_returns_optimizer_without_clipping(self):
+    """get_optimizer returns an optax optimizer when gradient clipping is disabled."""
+    import jax.numpy as jnp  # pylint: disable=import-outside-toplevel
+
+    config = self._make_optimizer_config(gradient_clipping_threshold=0.0)
+    opt = utils_rl.get_optimizer(config, max_train_steps=100)
+    # Should be usable: init on a simple param tree
+    params = {"w": jnp.ones(3)}
+    state = opt.init(params)
+    self.assertIn("learning_rate", state.hyperparams)
+
+  @pytest.mark.cpu_only
+  def test_returns_optimizer_with_clipping(self):
+    """get_optimizer includes gradient clipping when threshold > 0."""
+    import jax.numpy as jnp  # pylint: disable=import-outside-toplevel
+
+    config = self._make_optimizer_config(gradient_clipping_threshold=1.0)
+    opt = utils_rl.get_optimizer(config, max_train_steps=100)
+    params = {"w": jnp.ones(3)}
+    state = opt.init(params)
+    self.assertIn("learning_rate", state.hyperparams)
 
 
 if __name__ == "__main__":

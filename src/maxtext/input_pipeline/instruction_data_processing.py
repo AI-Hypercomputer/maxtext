@@ -24,6 +24,9 @@ from maxtext.utils import max_logging
 def load_template_from_file(template_path):
   """Loads a template from a file."""
   template_config = None
+  current_dir = os.path.dirname(os.path.abspath(__file__))
+  repo_root = os.path.abspath(os.path.join(current_dir, "..", ".."))
+  template_path = os.path.join(repo_root, template_path)
   if os.path.isfile(template_path) and template_path.endswith(".json"):
     with open(template_path, encoding="utf-8") as f:
       template_config = json.load(f)

@@ -96,9 +96,9 @@ class Config:
   rope_truncate: bool = True
   rope_attention_scaling: bool = False
   # indexer
-  use_sparse_indexer: bool = True
-  index_n_heads: int = 64
-  index_head_dim: int = 128  # > qk_rope_head_dim
+  use_indexer: bool = True
+  indexer_n_heads: int = 64
+  indexer_head_dim: int = 128  # > qk_rope_head_dim
 
 
 class ModelArgs:
@@ -128,8 +128,8 @@ class ModelArgs:
     self.beta_slow = config.beta_slow
     self.mscale = config.mscale
     # indexer
-    self.index_n_heads = config.index_n_heads
-    self.index_head_dim = config.index_head_dim
+    self.index_n_heads = config.indexer_n_heads
+    self.index_head_dim = config.indexer_head_dim
     self.index_topk = index_topk
 
 
@@ -751,7 +751,7 @@ def get_jax_mla_weights(pt_mla, cfg):
   }
 
 
-def get_cfg_and_mesh(config, run_name, dtype, batch_size, seq_len, attention, index_topk):
+def get_cfg_and_mesh(config, run_name, dtype, batch_size, seq_len, attention, indexer_topk):
   """Returns MaxText configuration and mesh."""
   cfg = pyconfig.initialize(
       [None, get_test_config_path()],
@@ -768,7 +768,7 @@ def get_cfg_and_mesh(config, run_name, dtype, batch_size, seq_len, attention, in
       max_target_length=seq_len,
       max_prefill_predict_length=seq_len,
       attention=attention,
-      index_topk=index_topk,
+      indexer_topk=indexer_topk,
       **asdict(config),
   )
   devices_array = maxtext_utils.create_device_mesh(cfg)
@@ -831,7 +831,7 @@ class DeepseekTestBase(parameterized.TestCase):
 class DeepseekV32IndexerTest(DeepseekTestBase):
   """Tests for the Sparse Indexer (Top-K Selection)."""
 
-  # index_topk=4
+  # indexer_topk=4
   def test_indexer_match(self, seq_len=8):
     """Verifies Indexer output matches PyTorch output."""
     torch_inputs, jax_inputs = self.get_data(seq_len)
@@ -864,7 +864,7 @@ class DeepseekV32IndexerTest(DeepseekTestBase):
         batch_size=self.batch_size,
         seq_len=self.seq_len,
         attention="dot_product",
-        index_topk=4,
+        indexer_topk=4,
     )
 
     # Indexer specific RoPE (interleave=False)
@@ -914,49 +914,49 @@ class DeepseekV32MLATest(DeepseekTestBase):
           "testcase_name": "dot_product_s2_k4",
           "attention": "dot_product",
           "seq_len": 2,
-          "index_topk": 4,
+          "indexer_topk": 4,
       },
       {
           "testcase_name": "dot_product_s8_k4",
           "attention": "dot_product",
           "seq_len": 8,
-          "index_topk": 4,
+          "indexer_topk": 4,
       },
       {
           "testcase_name": "dot_product_s128_k4",
           "attention": "dot_product",
           "seq_len": 128,
-          "index_topk": 4,
+          "indexer_topk": 4,
           "check_norm": True,
       },
       {
           "testcase_name": "dot_product_s128_k128",
           "attention": "dot_product",
           "seq_len": 128,
-          "index_topk": 128,
+          "indexer_topk": 128,
           "check_norm": True,
       },
       {
           "testcase_name": "flash_s128_k4",
           "attention": "flash",
           "seq_len": 128,
-          "index_topk": 4,
+          "indexer_topk": 4,
           "check_norm": True,
       },
       {
           "testcase_name": "flash_s128_k128",
           "attention": "flash",
           "seq_len": 128,
-          "index_topk": 128,
+          "indexer_topk": 128,
           "check_norm": True,
       },
   )
-  def test_mla_parity(self, attention, seq_len, index_topk, check_norm=False):
+  def test_mla_parity(self, attention, seq_len, indexer_topk, check_norm=False):
     """Verifies JAX MLA output against the PyTorch reference implementation."""
     torch_inputs, jax_inputs = self.get_data(seq_len)
 
     # 1. PyTorch Run
-    pt_mla = MLA(self.pt_args, index_topk)
+    pt_mla = MLA(self.pt_args, indexer_topk)
     init_torch_weights(pt_mla)
     pt_mla.eval()
 
@@ -977,7 +977,7 @@ class DeepseekV32MLATest(DeepseekTestBase):
         batch_size=self.batch_size,
         seq_len=self.seq_len,
         attention=attention,
-        index_topk=index_topk,
+        indexer_topk=indexer_topk,
     )
 
     jax_mla = attention_mla.MLA(

@@ -229,7 +229,16 @@ def check_answer(prompts, completions, answer, tmvp_config, **kargs):
   value.
   """
   match_format = get_match_format_regex(tmvp_config)
-  extracted_responses = [guess.group(1) if (guess := match_format.search(c)) is not None else None for c in completions]
+  answer_fallback = get_answer_fallback_regex(tmvp_config)
+
+  extracted_responses = []
+  for c in completions:
+    full_match = match_format.search(c)
+    if full_match is not None:
+      extracted_responses.append(full_match.group(1))
+    else:
+      fallback_matches = answer_fallback.findall(c)
+      extracted_responses.append(fallback_matches[-1].strip() if fallback_matches else None)
 
   scores = []
   for guess, true_answer in zip(extracted_responses, answer):
@@ -408,7 +417,16 @@ def check_numbers(prompts, completions, answer, tmvp_config, **kargs):
 
   # Extract full answer content from solution tags (not just first number)
   match_format = get_match_format_regex(tmvp_config)
-  extracted_responses = [guess.group(1) if (guess := match_format.search(c)) is not None else None for c in completions]
+  answer_fallback = get_answer_fallback_regex(tmvp_config)
+
+  extracted_responses = []
+  for c in completions:
+    full_match = match_format.search(c)
+    if full_match is not None:
+      extracted_responses.append(full_match.group(1))
+    else:
+      fallback_matches = answer_fallback.findall(c)
+      extracted_responses.append(fallback_matches[-1].strip() if fallback_matches else None)
 
   scores = []
   if tmvp_config.debug.rl:
@@ -460,32 +478,40 @@ def extract_hash_answer(text: str) -> str | None:
 
 def get_optimizer(tmvp_config, max_train_steps):
   """Function to obtain an optax optimizer, currently we use adamw."""
-  optimizer = optax.adamw(
-      learning_rate=optax.schedules.warmup_cosine_decay_schedule(
-          init_value=0.0,
-          peak_value=tmvp_config.learning_rate,
-          # Linearly increase learning rate from 0. to learning_rate in the first
-          # warmup_steps_fraction training steps, and then gradually decrease the
-          # learning rate to 0 using cosine scheduler.
-          warmup_steps=int(tmvp_config.warmup_steps_fraction * max_train_steps),
-          decay_steps=max_train_steps,
-          end_value=0.0,
-      ),
-      b1=tmvp_config.adam_b1,
-      b2=tmvp_config.adam_b2,
-      weight_decay=tmvp_config.adam_weight_decay,
+  schedule = optax.schedules.warmup_cosine_decay_schedule(
+      init_value=0.0,
+      peak_value=tmvp_config.learning_rate,
+      # Linearly increase learning rate from 0. to learning_rate in the first
+      # warmup_steps_fraction training steps, and then gradually decrease the
+      # learning rate to 0 using cosine scheduler.
+      warmup_steps=int(tmvp_config.warmup_steps_fraction * max_train_steps),
+      decay_steps=max_train_steps,
+      end_value=0.0,
   )
 
   # TODO: @mazumdera: try optimizer offloading with adamw
   # Add gradient clipping if specified
   # Grad clipping to prevent large gradients. We find this
   # important to keep KL divergence in check.
-  if tmvp_config.gradient_clipping_threshold > 0:
-    optimizer = optax.chain(
-        optax.clip_by_global_norm(max_norm=tmvp_config.gradient_clipping_threshold),
-        optimizer,
+  def make_optimizer(learning_rate):
+    transforms = []
+    if tmvp_config.gradient_clipping_threshold > 0:
+      transforms.append(optax.clip_by_global_norm(max_norm=tmvp_config.gradient_clipping_threshold))
+    transforms.append(
+        optax.adamw(
+            learning_rate=learning_rate,
+            b1=tmvp_config.adam_b1,
+            b2=tmvp_config.adam_b2,
+            weight_decay=tmvp_config.adam_weight_decay,
+        )
     )
-  return optimizer
+    return optax.chain(*transforms)
+
+  # Wrap the entire optimizer (including gradient clipping) with
+  # inject_hyperparams so opt_state.hyperparams['learning_rate'] is at the
+  # top level of the state tree. This is required for tunix's peft_trainer to
+  # automatically read and log the per-step learning rate.
+  return optax.inject_hyperparams(make_optimizer)(learning_rate=schedule)
 
 
 def process_data(dataset_name, model_tokenizer, template_config, tmvp_config, x):

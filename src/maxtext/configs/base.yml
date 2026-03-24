@@ -356,15 +356,15 @@ moba_topk: 8
 
 # DeepSeek Sparse Attention (DSA)
 # deepseek3.2 introduces indexer in MLA
-use_sparse_indexer: False
-index_head_dim: 128
-index_n_heads: 64
-index_topk: 2048
-# Determines the token selection strategy for indexer loss: 
-# - False: Uses all tokens (Dense Warm-up).
-# - True: Uses only top-k tokens (Sparse Training).
+use_indexer: False
+indexer_head_dim: 128
+indexer_n_heads: 64
+indexer_topk: 2048
+# Determines the training strategy for the indexer:
+# - False (Dense Warm-up): Computes indexer loss over all tokens. Used with `trainable_parameters_mask` to freeze other model parameters.
+# - True (Sparse Training): Computes indexer loss over top-k tokens only and detaches the indexer input for independent optimization.
 # Note: This is only active when `indexer_loss_scaling_factor` > 0.
-sparse_indexer_loss: False
+indexer_sparse_training: False
 # Multiplier for the indexer KL divergence loss
 indexer_loss_scaling_factor: 0.0
 
@@ -435,7 +435,9 @@ custom_mesh_and_rule: "" # replace default mesh and logical rule by specifying y
 mesh_axes: ['diloco', 'data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context', 'context_autoregressive', 'tensor', 'tensor_transpose', 'tensor_sequence', 'expert', 'autoregressive']
 logical_axis_rules: [
                       ['activation_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['activation_batch_moe', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_batch_no_exp', ['data', 'fsdp', 'fsdp_transpose']],
+                      ['activation_batch_no_exp_moe', ['data', 'fsdp', 'fsdp_transpose']],
                       ['activation_embed_and_logits_batch', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_embed_and_logits_batch_sequence', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context', 'expert']],
                       ['activation_heads', ['tensor', 'tensor_transpose', 'sequence','tensor_sequence','autoregressive']],
@@ -448,7 +450,10 @@ logical_axis_rules: [
                       ['activation_attn_length_no_exp', ['context']],
                       ['activation_length_no_exp', ['sequence', 'context']],
                       ['activation_length_no_exp', ['context']],
+                      ['activation_length_no_exp_moe', ['sequence', 'context']],
+                      ['activation_length_no_exp_moe', ['context']],
                       ['activation_norm_length', ['tensor_sequence', 'context', 'sequence']],
+                      ['activation_norm_length_moe', ['tensor_sequence', 'context', 'sequence']],
                       ['activation_q_length', ['context', 'expert']],
                       ['activation_q_length_no_exp', ['context']],
                       ['prefill_activation_length', ['sequence', 'context']],
@@ -456,6 +461,7 @@ logical_axis_rules: [
                       ['activation_kv_length', []],
                       ['activation_attn_embed', ['tensor', 'tensor_transpose']],
                       ['activation_embed', ['tensor', 'tensor_transpose']],
+                      ['activation_embed_moe', ['tensor', 'tensor_transpose']],
                       ['activation_mlp', ['tensor', 'tensor_transpose', 'tensor_sequence']],
                       ['activation_kv', ['tensor', 'tensor_transpose', 'tensor_sequence']],
                       ['activation_prefill_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
@@ -484,6 +490,14 @@ logical_axis_rules: [
                       ['embed_no_exp', ['fsdp', 'sequence', 'tensor_transpose', 'context']],
                       ['embed_no_exp', ['fsdp', 'fsdp_transpose', 'sequence', 'context']],
                       ['embed_no_exp', ['fsdp', 'sequence', 'context']],
+                      ['embed_moe', ['fsdp', 'fsdp_transpose', 'sequence', 'tensor_transpose', 'context', 'expert']],
+                      ['embed_moe', ['fsdp', 'sequence', 'tensor_transpose', 'context' , 'expert']],
+                      ['embed_moe', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'expert']],
+                      ['embed_moe', ['fsdp', 'sequence', 'context', 'expert']],
+                      ['embed_no_exp_moe', ['fsdp', 'fsdp_transpose', 'sequence', 'tensor_transpose', 'context']],
+                      ['embed_no_exp_moe', ['fsdp', 'sequence', 'tensor_transpose', 'context']],
+                      ['embed_no_exp_moe', ['fsdp', 'fsdp_transpose', 'sequence', 'context']],
+                      ['embed_no_exp_moe', ['fsdp', 'sequence', 'context']],
                       ['embed_tensor_transpose', ['tensor_transpose']],
                       ['q_lora', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'tensor_transpose', 'expert']],
                       ['q_lora', ['fsdp', 'sequence', 'context', 'tensor_transpose', 'expert']],
@@ -680,6 +694,7 @@ grain_ram_budget_mb: 1024 # RAM budget (MB) for auto-tuning worker count. Only u
 grain_num_threads_eval: 16
 grain_prefetch_buffer_size_eval: 500
 grain_data_source_max_workers: 16  # Max workers for ThreadPoolExecutor when mixing multiple Grain data sources.
+grain_shuffle_buffer_size: 100 # shuffle buffer when using sequential access formats such as Parquet, TFRecord.
 # for using pathways
 colocated_python_data_input: False  # experimental feature, under testing
 
@@ -789,6 +804,10 @@ gradient_clipping_threshold: 1.0
 gradient_accumulation_steps: 1
 
 opt_type: "adamw"  # one of "adamw", "adam_pax", "sgd", or "muon"
+# List of parameter names/patterns to train.
+# If non-empty, all other parameters will be frozen. Example: ['.*indexer.*'].
+# If empty (default), all parameters are trained.
+trainable_parameters_mask: []
 
 # AdamW optimizer parameters
 # We use AdamW following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2

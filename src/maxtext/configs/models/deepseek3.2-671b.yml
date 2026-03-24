@@ -53,7 +53,7 @@ rope_interleave: True
 rope_truncate: True
 rope_attention_scaling: False
 # Indexer for DeepSeek Sparse Attention
-use_sparse_indexer: True
-index_n_heads: 64
-index_head_dim: 128
-index_topk: 2048
+use_indexer: True
+indexer_n_heads: 64
+indexer_head_dim: 128
+indexer_topk: 2048
