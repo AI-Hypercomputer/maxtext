@@ -27,6 +27,7 @@ import os
 from absl import app
 
 import numpy as np
+import optax
 
 import pathwaysutils  # pylint: disable=unused-import
 
@@ -391,7 +392,20 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
             jax.tree_util.tree_map_with_path(move, state_mesh_shardings.params),
         )
     )
-  new_state = state.apply_gradients(grads=grads)
+
+  if getattr(config, "skip_step_on_spikes", False):
+    grad_norm = max_utils.l2norm_pytree(grads)
+    # TrainState.apply_gradients doesn't pass **kwargs to tx.update, so we unpack it manually.
+    updates, new_opt_state = state.tx.update(grads, state.opt_state, state.params, loss=loss, grad_norm=grad_norm)
+    new_params = optax.apply_updates(state.params, updates)
+
+    new_state = state.replace(
+        step=state.step + 1,
+        params=new_params,
+        opt_state=new_opt_state,
+    )
+  else:
+    new_state = state.apply_gradients(grads=grads)
 
   # Apply updates for Auxiliary-Loss-Free load balancing for DeepSeek family
   if config.routed_bias and config.routed_bias_update_rate > 0.0 and moe_bias_updates is not None:

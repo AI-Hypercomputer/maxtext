@@ -48,6 +48,119 @@ def get_adamw_mask(config):
   return _get_path_mask_fn(getattr(config, "adamw_mask", None), match_returns_true=False)
 
 
+def _compute_rolling_stats(arr: jax.Array, count: jax.Array, interval: int):
+  """Computes mean and unbiased std (Bessel's correction) over a rolling window."""
+  valid_elements = jnp.minimum(count, interval)
+  safe_elements = jnp.maximum(1, valid_elements)
+  mask = jnp.arange(interval) < valid_elements
+
+  mean = jnp.sum(jnp.where(mask, arr, 0.0)) / safe_elements
+  sq_diff = jnp.where(mask, (arr - mean) ** 2, 0.0)
+
+  # Use Bessel's correction (N - 1) for unbiased variance to align with torch.std
+  variance = jnp.sum(sq_diff) / jnp.maximum(1, valid_elements - 1)
+  std = jnp.sqrt(variance)
+  return mean, std
+
+
+def skip_step_on_spikes(
+    inner_opt: optax.GradientTransformation, interval: int, scaling_factor: float
+) -> optax.GradientTransformationExtraArgs:
+  """Wrapper that skips updates when loss or grad_norm spike.
+
+  This wrapper calculates a rolling mean and standard deviation (using
+  Bessel's correction) over the last `interval` steps for both the loss
+  and the gradient norm. If the current step's loss or gradient norm
+  exceeds `mean + scaling_factor * std`, the update is zeroed and the
+  optimizer state is not advanced, effectively skipping the step.
+
+  Reference implementation:
+  https://github.com/allenai/OLMo-core/blob/c757b7c3c15197154c753d883330afbfa4869dcc/src/olmo_core/optim/skip_step_optimizer.py#L12
+
+  Args:
+    inner_opt: The inner Optax gradient transformation to wrap.
+    interval: The number of recent steps to use for calculating mean and std.
+    scaling_factor: The multiplier for standard deviation to set the spike threshold.
+
+  Returns:
+    An optax.GradientTransformationExtraArgs that skips spikes.
+  """
+
+  def init_fn(params):
+    return {
+        "inner_state": inner_opt.init(params),
+        "losses": jnp.zeros(interval, dtype=jnp.float32),
+        "grad_norms": jnp.zeros(interval, dtype=jnp.float32),
+        "count": jnp.zeros((), dtype=jnp.int32),
+    }
+
+  def update_fn(updates, state, params=None, **extra_args):
+    # Using `pop()` removes `loss` and `grad_norm` from `extra_args` before they are
+    # passed downstream to `inner_opt.update()`. This prevents `TypeError` if the
+    # inner optimizer doesn't explicitly accept these as `kwargs`.
+    loss = extra_args.pop("loss", None)
+    grad_norm = extra_args.pop("grad_norm", None)
+
+    # Fallback to standard update if loss is not provided
+    if loss is None:
+      inner_updates, new_inner_state = inner_opt.update(updates, state["inner_state"], params, **extra_args)
+      return inner_updates, {
+          "inner_state": new_inner_state,
+          "losses": state["losses"],
+          "grad_norms": state["grad_norms"],
+          "count": state["count"],
+      }
+
+    count = state["count"]
+    losses = state["losses"]
+    grad_norms = state["grad_norms"]
+
+    # Compute rolling stats
+    loss_mean, loss_std = _compute_rolling_stats(losses, count, interval)
+    grad_norm_mean, grad_norm_std = _compute_rolling_stats(grad_norms, count, interval)
+
+    # Check if the current metrics are within the allowed thresholds
+    is_loss_ok = (loss - loss_mean) <= scaling_factor * loss_std
+    if grad_norm is not None:
+      is_grad_norm_ok = (grad_norm - grad_norm_mean) <= scaling_factor * grad_norm_std
+      is_ok = jnp.logical_and(is_loss_ok, is_grad_norm_ok)
+    else:
+      is_ok = is_loss_ok
+
+    # Only enforce skip if we have at least half the interval filled (or 2 elements minimum)
+    min_history = max(2, interval // 2)
+    is_warmup = (count + 1) < min_history
+    is_ok = jnp.logical_or(is_warmup, is_ok)
+
+    # Conditionally execute the inner optimizer to prevent momentum poisoning
+    def do_update():
+      return inner_opt.update(updates, state["inner_state"], params, **extra_args)
+
+    def skip_update():
+      inner_updates = jax.tree_util.tree_map(jnp.zeros_like, updates)
+      return inner_updates, state["inner_state"]
+
+    inner_updates, new_inner_state = jax.lax.cond(is_ok, do_update, skip_update)
+
+    # Update rolling buffers (append even if skipped so spikes can become the new baseline)
+    idx = count % interval
+    new_losses = losses.at[idx].set(loss)
+
+    new_grad_norms = grad_norms
+    if grad_norm is not None:
+      new_grad_norms = grad_norms.at[idx].set(grad_norm)
+
+    new_state = {
+        "inner_state": new_inner_state,
+        "losses": new_losses,
+        "grad_norms": new_grad_norms,
+        "count": count + 1,
+    }
+    return inner_updates, new_state
+
+  return optax.GradientTransformationExtraArgs(init_fn, update_fn)
+
+
 def get_optimizer(config, learning_rate_schedule, model=None):
   """Create optimizer."""
   if config.opt_type == "adamw":
@@ -99,6 +212,13 @@ def get_optimizer(config, learning_rate_schedule, model=None):
     base_opt = muon(**muon_kwargs)
   else:
     raise ValueError(f"{config.opt_type=} is not a supported.")
+
+  if getattr(config, "skip_step_on_spikes", False):
+    base_opt = skip_step_on_spikes(
+        base_opt,
+        interval=config.skip_step_interval,
+        scaling_factor=config.skip_step_scaling_factor,
+    )
 
   # If a whitelist of trainable parameters is provided, freeze everything else.
   # When trainable_parameters_mask is empty, freeze_mask_fn is None and all parameters are trained.

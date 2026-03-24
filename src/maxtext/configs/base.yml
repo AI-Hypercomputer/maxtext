@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -790,6 +790,15 @@ gradient_clipping_threshold: 1.0
 gradient_accumulation_steps: 1
 
 opt_type: "adamw"  # one of "adamw", "adam_pax", "sgd", or "muon"
+
+# If True, skip the training step when loss or gradient spike is detected
+# No updates for both weights and momentums (if applies)
+skip_step_on_spikes: False
+# The rolling interval to calculate the mean and standard deviation
+skip_step_interval: 128
+# The scaling factor to determine if a spike occurred
+skip_step_scaling_factor: 6.0
+
 # List of parameter names/patterns to train.
 # If non-empty, all other parameters will be frozen. Example: ['.*indexer.*'].
 # If empty (default), all parameters are trained.

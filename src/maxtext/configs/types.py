@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -1150,6 +1150,13 @@ class Optimizer(BaseModel):
   """Configuration for the optimizer and learning rate schedule."""
 
   opt_type: OptimizerType = Field(OptimizerType.ADAMW, description="The type of optimizer to use.")
+  skip_step_on_spikes: bool = Field(
+      False, description="If True, skip the training step when loss or gradient spike is detected."
+  )
+  skip_step_interval: PositiveInt = Field(
+      128, description="The rolling interval to calculate the mean and standard deviation."
+  )
+  skip_step_scaling_factor: float = Field(6.0, description="The scaling factor to determine if a spike occurred.")
   gradient_accumulation_steps: PositiveInt = Field(
       1, description="Number of steps to accumulate gradients before updating."
   )
