@@ -478,32 +478,40 @@ def extract_hash_answer(text: str) -> str | None:
 
 def get_optimizer(tmvp_config, max_train_steps):
   """Function to obtain an optax optimizer, currently we use adamw."""
-  optimizer = optax.adamw(
-      learning_rate=optax.schedules.warmup_cosine_decay_schedule(
-          init_value=0.0,
-          peak_value=tmvp_config.learning_rate,
-          # Linearly increase learning rate from 0. to learning_rate in the first
-          # warmup_steps_fraction training steps, and then gradually decrease the
-          # learning rate to 0 using cosine scheduler.
-          warmup_steps=int(tmvp_config.warmup_steps_fraction * max_train_steps),
-          decay_steps=max_train_steps,
-          end_value=0.0,
-      ),
-      b1=tmvp_config.adam_b1,
-      b2=tmvp_config.adam_b2,
-      weight_decay=tmvp_config.adam_weight_decay,
+  schedule = optax.schedules.warmup_cosine_decay_schedule(
+      init_value=0.0,
+      peak_value=tmvp_config.learning_rate,
+      # Linearly increase learning rate from 0. to learning_rate in the first
+      # warmup_steps_fraction training steps, and then gradually decrease the
+      # learning rate to 0 using cosine scheduler.
+      warmup_steps=int(tmvp_config.warmup_steps_fraction * max_train_steps),
+      decay_steps=max_train_steps,
+      end_value=0.0,
   )
 
   # TODO: @mazumdera: try optimizer offloading with adamw
   # Add gradient clipping if specified
   # Grad clipping to prevent large gradients. We find this
   # important to keep KL divergence in check.
-  if tmvp_config.gradient_clipping_threshold > 0:
-    optimizer = optax.chain(
-        optax.clip_by_global_norm(max_norm=tmvp_config.gradient_clipping_threshold),
-        optimizer,
+  def make_optimizer(learning_rate):
+    transforms = []
+    if tmvp_config.gradient_clipping_threshold > 0:
+      transforms.append(optax.clip_by_global_norm(max_norm=tmvp_config.gradient_clipping_threshold))
+    transforms.append(
+        optax.adamw(
+            learning_rate=learning_rate,
+            b1=tmvp_config.adam_b1,
+            b2=tmvp_config.adam_b2,
+            weight_decay=tmvp_config.adam_weight_decay,
+        )
     )
-  return optimizer
+    return optax.chain(*transforms)
+
+  # Wrap the entire optimizer (including gradient clipping) with
+  # inject_hyperparams so opt_state.hyperparams['learning_rate'] is at the
+  # top level of the state tree. This is required for tunix's peft_trainer to
+  # automatically read and log the per-step learning rate.
+  return optax.inject_hyperparams(make_optimizer)(learning_rate=schedule)
 
 
 def process_data(dataset_name, model_tokenizer, template_config, tmvp_config, x):
