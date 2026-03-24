@@ -164,13 +164,14 @@ max_num_checkpoints_to_keep: 10
 
 # ====== Reward ======
 
-reward_exact_format_match: 3.0
-reward_white_space_format_match: 1.5
-reward_partial_format_match: 0.5
-reward_ratio_guess_to_answer_high:  0.5
-reward_ratio_guess_to_answer_low: 0.25
-penalty_incorrect_format: -0.5
-penalty_incorrect_answer: -1.0
+reward_exact_answer: 1.0
+reward_white_space_format_match: 1.0
+reward_exact_format_match: 0.1
+reward_partial_format_match: 0.0
+reward_ratio_guess_to_answer_high:  0.0
+reward_ratio_guess_to_answer_low: 0.0
+penalty_incorrect_format: 0.0
+penalty_incorrect_answer: 0.0
 
 # ====== Special tokens/templates for GSM8K reasoning ======
 reasoning_start_token: '<reasoning>'

@@ -1686,6 +1686,7 @@ class RLEvaluation(BaseModel):
 class Reward(BaseModel):
   """Configuration for the reward/penalty model in RL."""
 
+  reward_exact_answer: float = Field(5.0, description="Reward for an exact answer match.")
   reward_exact_format_match: float = Field(3.0, description="Reward for an exact format match.")
   reward_white_space_format_match: float = Field(1.5, description="Reward for a format match ignoring whitespace.")
   reward_partial_format_match: float = Field(0.5, description="Reward for a partial format match.")
