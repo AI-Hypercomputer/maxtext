@@ -896,10 +896,6 @@ class RematAndOffload(BaseModel):
       RematLocation.REMAT,
       description="Remat policy for the second MLP layer's output.",
   )
-  moe_mlpwi: RematLocation = Field(
-      RematLocation.REMAT,
-      description="Remat policy for the first MoE layer's intermediate output.",
-  )
   moe_mlpwi_0: RematLocation = Field(
       RematLocation.REMAT,
       description="Remat policy for the first part of a gated MoE's output.",

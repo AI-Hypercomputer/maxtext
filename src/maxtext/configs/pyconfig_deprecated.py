@@ -516,7 +516,6 @@ def validate_and_assign_remat_tensors(keys):
       "mlpwi_0",
       "mlpwi_1",
       "mlpwo",
-      "moe_mlpwi",
       "moe_mlpwi_0",
       "moe_mlpwi_1",
       "moe_mlpwo",
