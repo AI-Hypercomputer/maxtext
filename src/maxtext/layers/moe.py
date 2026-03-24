@@ -25,6 +25,7 @@ from aqt.jax.v2 import aqt_tensor as aqt
 from flax import nnx
 import jax
 from jax import ad_checkpoint as adc
+from MaxText.layers import paged_stash as ps
 from jax.experimental import xla_metadata
 from jax.sharding import NamedSharding, Mesh
 from jax.sharding import PartitionSpec as P
@@ -1305,7 +1306,40 @@ class RoutedMoE(nnx.Module):
         )
       if self.config.mlp_bias:
         intermediate_output = intermediate_output + wo_bias
-      intermediate_output = adc.checkpoint_name(intermediate_output, "mlpwo")
+      if self.config.use_ring_of_experts and self.config.ring_paged_stash:
+        # -------------------------------------------------------------------
+        # Paged stashing: instead of checkpointing intermediate_output at
+        # worst-case size (batch*EP*seq*top_k, hidden), store only the actual
+        # routed tokens in a compact shared buffer passed through the scan
+        # carry.  This reduces host-offload memory ~4x for EP=4.
+        #
+        # stash_buf and write_ptr are threaded through the decoder scan carry.
+        # TODO: wire (stash_buf, write_ptr, layer_sizes) into the decoder
+        # __call__ signatures in decoders.py / deepseek.py.  For now this
+        # block shows the moe.py side of the integration.
+        #
+        # See layers/paged_stash.py for full documentation.
+        # -------------------------------------------------------------------
+        actual_tokens = jnp.sum(group_sizes)
+        expected = ps.expected_tokens_per_layer(
+            batch_size, num_expert_parallelism, sequence_length,
+            self.config.num_experts_per_tok,
+        )
+        max_chunk = int(expected * self.config.ring_paged_stash_safety_margin)
+        stash_fn, restore_fn = ps.make_stash_fns(max_chunk, self.config.emb_dim)
+
+        # Stash: compact intermediate_output into the shared buffer.
+        # stash_buf / write_ptr come from the scan carry (see TODO above).
+        stash_buf, write_ptr = stash_fn(
+            stash_buf, write_ptr, intermediate_output, actual_tokens
+        )
+        # intermediate_output is no longer needed; the backward will restore it.
+        intermediate_output = restore_fn(
+            stash_buf, write_ptr - actual_tokens, actual_tokens,
+            intermediate_output.shape[0],
+        )
+      else:
+        intermediate_output = adc.checkpoint_name(intermediate_output, "mlpwo")
 
       if self.config.use_ring_of_experts:
         # Set the outputs of tokens which were not processed to 0.
