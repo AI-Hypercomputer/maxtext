@@ -398,33 +398,75 @@ class NNXDecoder(nnx.Module):
   def _create_scanned_layers(
       self, decoder_layer_class, length: int, metadata_axis_name: str, rngs: nnx.Rngs, **layer_kwargs
   ):
-    """Creates a VMapped stack of layers, forcing parameter init for Compact modules."""
+    """Creates a scanned stack of layers using jax.lax.scan for memory-efficient initialization.
 
-    def create_layer_fn(rng):
-      layer = decoder_layer_class(
-          config=self.config, mesh=self.mesh, quant=self.quant, model_mode=self.model_mode, rngs=rng, **layer_kwargs
-      )
-      return nnx.split(layer, nnx.Param, ...)
-      # return layer
+    Uses jax.lax.scan instead of nnx.vmap to reduce peak memory during initialization.
+    With vmap, all layers' parameters are created simultaneously (O(N) peak memory).
+    With scan, parameters are created one layer at a time (O(1) peak intermediate memory),
+    which prevents OOM on memory-constrained devices like TPU v6e-4.
+    """
+    scan_axis = self.config.param_scan_axis
 
+    # Fork rngs to get per-layer RNG states for scanning
     try:
       forked_rngs = rngs.fork(split=length)
     except:  # pylint: disable=bare-except
       pass
 
-    graphdef, params, rest = nnx.vmap(
-        create_layer_fn,
-        in_axes=0,
-        out_axes=(None, self.config.param_scan_axis, 0),
-        axis_name=metadata_axis_name,
-        transform_metadata={
-            nnx.PARTITION_NAME: metadata_axis_name,
-            "param_scan_axis": self.config.param_scan_axis,
-        },
-    )(forked_rngs)
-    layers_vmapped = nnx.merge(graphdef, params, rest)
+    rngs_graphdef, rngs_state = nnx.split(forked_rngs)
 
-    return layers_vmapped
+    # Create a reference layer to capture the module graph structure (graphdef).
+    # This layer's params are discarded — only the structure is kept.
+    # Must use the first slice of the forked rngs (not a dummy Rngs(0)) so the
+    # graphdef has the same number of RNG state leaves as the scan-created layers.
+    first_rng_state = jax.tree.map(lambda x: x[0], rngs_state)
+    ref_rngs = nnx.merge(rngs_graphdef, first_rng_state)
+    ref_layer = decoder_layer_class(
+        config=self.config, mesh=self.mesh, quant=self.quant, model_mode=self.model_mode, rngs=ref_rngs, **layer_kwargs
+    )
+    layer_graphdef, _, _ = nnx.split(ref_layer, nnx.Param, ...)
+    del ref_layer
+
+    # Sequentially create each layer's parameters via jax.lax.scan.
+    # The scan body is traced once; XLA executes it N times with different RNG keys,
+    # keeping only one layer's intermediate state alive at a time.
+    def scan_body(carry, rng_state_slice):
+      layer_rngs = nnx.merge(rngs_graphdef, rng_state_slice)
+      layer = decoder_layer_class(
+          config=self.config,
+          mesh=self.mesh,
+          quant=self.quant,
+          model_mode=self.model_mode,
+          rngs=layer_rngs,
+          **layer_kwargs,
+      )
+      _, params, rest = nnx.split(layer, nnx.Param, ...)
+      return carry, (params, rest)
+
+    _, (stacked_params, stacked_rest) = jax.lax.scan(scan_body, None, rngs_state)
+
+    # jax.lax.scan stacks outputs along axis 0. Move params to the configured scan axis.
+    if scan_axis != 0:
+      stacked_params = jax.tree.map(lambda x: jnp.moveaxis(x, 0, scan_axis), stacked_params)
+
+    # Add partition metadata that nnx.vmap's transform_metadata would normally set.
+    # This metadata is read by variable_to_logically_partitioned() in initializers.py
+    # to insert the scan axis name into logical sharding specs.
+    def _add_scan_metadata(state, axis):
+      def _update_leaf(leaf):
+        if isinstance(leaf, nnx.VariableState):
+          metadata = leaf.get_metadata()
+          metadata[nnx.PARTITION_NAME] = metadata_axis_name
+          metadata["param_scan_axis"] = axis
+          return leaf.replace(**metadata)
+        return leaf
+
+      return jax.tree.map(_update_leaf, state, is_leaf=lambda x: isinstance(x, nnx.VariableState))
+
+    stacked_params = _add_scan_metadata(stacked_params, scan_axis)
+    stacked_rest = _add_scan_metadata(stacked_rest, 0)
+
+    return nnx.merge(layer_graphdef, stacked_params, stacked_rest)
 
   def _apply_layer_with_remat(self, layer: nnx.Module, y: jax.Array, policy: Any, prevent_cse: bool, **kwargs):
     """Helper to cleanly apply jax.checkpoint to a single unscanned layer or block."""
