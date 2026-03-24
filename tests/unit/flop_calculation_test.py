@@ -97,6 +97,80 @@ class FlopCalculation(unittest.TestCase):
 
     return attention_flops / 1e12  # return tflops
 
+  def compute_deepseek_custom_flops_training_per_device(self, kwargs: dict) -> float:
+    """Computes the total training TFLOPs per device for DeepSeek Custom model."""
+    B = kwargs["per_device_batch_size"]
+    S = kwargs["max_target_length"]
+    E = kwargs["base_emb_dim"]
+
+    total_ffn_flops = 0
+    total_qkv_proj_flops = 0
+    total_causal_attention_flops = 0
+
+    num_layers = kwargs["base_num_decoder_layers"]
+    for layer_idx in range(num_layers):
+      is_dense = layer_idx < kwargs["first_num_dense_layers"]
+
+      is_global = False
+      if not is_dense and kwargs["attention_layer_hybrid_ratio"] > 0:
+        is_global = (layer_idx + 1) % kwargs["attention_layer_hybrid_ratio"] == 0
+
+      # FFN
+      if is_dense:
+        # Dense layers use full emb_dim for both in and out.
+        # FFN1 + FFN2 ops: 2 (matmul) * 3 (due to silu + linear activations)
+        total_ffn_flops += 2 * B * S * kwargs["base_mlp_dim"] * E * 3
+      else:
+        # MoE layers operate over moe_model_dim rather than emb_dim
+        in_features = kwargs["moe_model_dim"]
+        gate = 2 * B * S * in_features * kwargs["num_experts"]
+        shared = 2 * B * S * kwargs["shared_expert_mlp_dim"] * in_features * 3
+        routed = 2 * B * S * kwargs["base_moe_mlp_dim"] * in_features * 3 * kwargs["num_experts_per_tok"]
+        total_ffn_flops += gate + shared + routed
+
+      # Attention Configuration Based on Hybrid Layer type
+      if is_global and kwargs["global_num_query_heads"] > 0:
+        H_q = kwargs["global_num_query_heads"]
+        H_kv = kwargs["global_num_kv_heads"]
+        W = None
+      elif not is_global and kwargs["local_num_query_heads"] > 0:
+        H_q = kwargs["local_num_query_heads"]
+        H_kv = kwargs["local_num_kv_heads"]
+        W = kwargs["sliding_window_size"]
+      else:
+        H_q = kwargs["base_num_query_heads"]
+        H_kv = kwargs["base_num_kv_heads"]
+        W = None
+
+      attention_output_dim = kwargs["attention_output_dim"] if (not is_dense and kwargs["attention_output_dim"] > 0) else E
+
+      # Attention Math
+      # QKV proj
+      qkv_flops = 2 * B * S * E * (H_q + 2 * H_kv) * kwargs["head_dim"]
+
+      # Core Attention (QK, SV)
+      if W is not None:
+        caus_attn = 4 * B * S * W * H_q * kwargs["head_dim"]
+      else:
+        caus_attn = (4 * B * S * S * H_q * kwargs["head_dim"]) / 2
+
+      # Out Proj
+      projection_flops = 2 * B * S * H_q * kwargs["head_dim"] * attention_output_dim
+
+      # Up proj (only for MoE layer)
+      up_proj = 0
+      if not is_dense and kwargs["attention_output_dim"] > 0 and kwargs["attention_output_dim"] != E:
+        up_proj = 2 * B * S * kwargs["attention_output_dim"] * E
+
+      total_qkv_proj_flops += qkv_flops + projection_flops + up_proj
+      total_causal_attention_flops += caus_attn
+
+    embedding_flops = 2 * B * S * E * kwargs["vocab_size"]
+
+    learnable_tflops = (total_ffn_flops + total_qkv_proj_flops + embedding_flops) * 3 / 1e12
+    attn_tflops = total_causal_attention_flops * 3 / 1e12
+    return learnable_tflops + attn_tflops
+
   def compute_qwen3_next_attention_flops_per_device(self, kwargs: dict) -> float:
     """
     Computes the total training TFLOPs per device for a Qwen3-Next model.
@@ -560,3 +634,51 @@ class FlopCalculation(unittest.TestCase):
     )
     calculated_tflops, _, _ = calculate_tflops_training_per_device(cfg)
     self.assertFlopsAlmostEqual(calculated_tflops, golden_tflops)
+
+  @pytest.mark.cpu_only
+  def test_deepseek_custom_flops(self):
+    """Test DeepSeek-Custom FLops calculation"""
+    kwargs = {
+        # Model bases
+        "model_name": "deepseek-custom",
+        "override_model_config": True,
+        # Core workload parameters
+        "per_device_batch_size": 4,
+        "max_target_length": 8192,
+        "num_experts": 256,
+        "num_experts_per_tok": 4,
+        "shared_experts": 1,
+        # Model dimensions
+        "base_emb_dim": 7168,
+        "moe_model_dim": 3072,
+        "base_moe_mlp_dim": 6144,
+        "shared_expert_mlp_dim": 15360,
+        "attention_output_dim": 3072,
+        "attention_layer_hybrid_ratio": 2,
+        "inhomogeneous_layer_cycle_interval": 2,
+        "head_dim": 256,
+        "local_num_query_heads": 64,
+        "local_num_kv_heads": 8,
+        "sliding_window_size": 1024,
+        "global_num_query_heads": 64,
+        "global_num_kv_heads": 4,
+        "base_num_decoder_layers": 61,
+        "first_num_dense_layers": 3,
+        "base_num_query_heads": 64,
+        "base_num_kv_heads": 8,
+        "base_mlp_dim": 6144,
+        "mlp_activations": ["silu", "linear"],
+        "vocab_size": 102400,
+        "skip_jax_distributed_system": True,
+        "decoder_block": "deepseek_custom",
+    }
+    
+    golden_tflops = self.compute_deepseek_custom_flops_training_per_device(kwargs)
+
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        **kwargs,
+    )
+    calculated_tflops, _, _ = calculate_tflops_training_per_device(cfg)
+    self.assertFlopsAlmostEqual(calculated_tflops, golden_tflops)
+
