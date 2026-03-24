@@ -2,6 +2,22 @@
 files: ^(.*\.(py|md|sh|yaml|yml|in|cfg|txt|rst|toml|precommit-toml|wordlist))$
 exclude: ^(\.[^/]*(cache|assets|uv|venv)/.*)$
 repos:
+  - repo: local
+    hooks:
+      - id: addlicense
+        name: Add license for all Python files
+        entry: addlicense
+        language: golang
+        additional_dependencies:
+          - github.com/google/addlicense@v1.1.1
+        args:
+          - -c
+          - "Google LLC"
+          - -f
+          - LICENSE_HEADER
+          - -y
+          - "2023-2026"
+        files: \.py$|\.bzl$|BUILD$|BUILD\.bazel$
   - repo: https://github.com/codespell-project/codespell
     rev: v2.4.1
     hooks:
