@@ -56,62 +56,52 @@ class BidirectionalBlockMaskTest(unittest.TestCase):
     bidirectional_mask = np.asarray([[0, 1, 1, 1, 0, 0]])
     # pylint: disable=protected-access
     block_mask = _make_bidirectional_block_mask(bidirectional_mask)
-    expected_mask = np.asarray(
-        [
-            [
-                [False, False, False, False, False, False],
-                [False, True, True, True, False, False],
-                [False, True, True, True, False, False],
-                [False, True, True, True, False, False],
-                [False, False, False, False, False, False],
-                [False, False, False, False, False, False],
-            ]
-        ]
-    )
+    expected_mask = np.asarray([[
+        [False, False, False, False, False, False],
+        [False, True, True, True, False, False],
+        [False, True, True, True, False, False],
+        [False, True, True, True, False, False],
+        [False, False, False, False, False, False],
+        [False, False, False, False, False, False],
+    ]])
     np.testing.assert_array_equal(block_mask, expected_mask)
 
   def test_two_blocks_mask(self):
     bidirectional_mask = np.asarray([[0, 1, 1, 0, 1, 1]])
     # pylint: disable=protected-access
     block_mask = _make_bidirectional_block_mask(bidirectional_mask)
-    expected_mask = np.asarray(
-        [
-            [
-                [False, False, False, False, False, False],
-                [False, True, True, False, False, False],
-                [False, True, True, False, False, False],
-                [False, False, False, False, False, False],
-                [False, False, False, False, True, True],
-                [False, False, False, False, True, True],
-            ]
-        ]
-    )
+    expected_mask = np.asarray([[
+        [False, False, False, False, False, False],
+        [False, True, True, False, False, False],
+        [False, True, True, False, False, False],
+        [False, False, False, False, False, False],
+        [False, False, False, False, True, True],
+        [False, False, False, False, True, True],
+    ]])
     np.testing.assert_array_equal(block_mask, expected_mask)
 
   def test_batch_block_masks(self):
     bidirectional_mask = np.asarray([[0, 1, 1, 1, 0, 0], [0, 1, 1, 0, 1, 1]])
     # pylint: disable=protected-access
     block_mask = _make_bidirectional_block_mask(bidirectional_mask)
-    expected_mask = np.asarray(
+    expected_mask = np.asarray([
         [
-            [
-                [False, False, False, False, False, False],
-                [False, True, True, True, False, False],
-                [False, True, True, True, False, False],
-                [False, True, True, True, False, False],
-                [False, False, False, False, False, False],
-                [False, False, False, False, False, False],
-            ],
-            [
-                [False, False, False, False, False, False],
-                [False, True, True, False, False, False],
-                [False, True, True, False, False, False],
-                [False, False, False, False, False, False],
-                [False, False, False, False, True, True],
-                [False, False, False, False, True, True],
-            ],
-        ]
-    )
+            [False, False, False, False, False, False],
+            [False, True, True, True, False, False],
+            [False, True, True, True, False, False],
+            [False, True, True, True, False, False],
+            [False, False, False, False, False, False],
+            [False, False, False, False, False, False],
+        ],
+        [
+            [False, False, False, False, False, False],
+            [False, True, True, False, False, False],
+            [False, True, True, False, False, False],
+            [False, False, False, False, False, False],
+            [False, False, False, False, True, True],
+            [False, False, False, False, True, True],
+        ],
+    ])
     np.testing.assert_array_equal(block_mask, expected_mask)
 
   def test_empty_block_mask(self):
@@ -119,7 +109,12 @@ class BidirectionalBlockMaskTest(unittest.TestCase):
     # pylint: disable=protected-access
     block_mask = _make_bidirectional_block_mask(bidirectional_mask)
     expected_mask = np.zeros(
-        (bidirectional_mask.shape[0], bidirectional_mask.shape[1], bidirectional_mask.shape[1]), dtype=bool
+        (
+            bidirectional_mask.shape[0],
+            bidirectional_mask.shape[1],
+            bidirectional_mask.shape[1],
+        ),
+        dtype=bool,
     )
     np.testing.assert_array_equal(block_mask, expected_mask)
 
@@ -128,7 +123,12 @@ class BidirectionalBlockMaskTest(unittest.TestCase):
     # pylint: disable=protected-access
     block_mask = _make_bidirectional_block_mask(bidirectional_mask)
     expected_mask = np.ones(
-        (bidirectional_mask.shape[0], bidirectional_mask.shape[1], bidirectional_mask.shape[1]), dtype=bool
+        (
+            bidirectional_mask.shape[0],
+            bidirectional_mask.shape[1],
+            bidirectional_mask.shape[1],
+        ),
+        dtype=bool,
     )
     np.testing.assert_array_equal(block_mask, expected_mask)
 
@@ -141,34 +141,24 @@ class BidirectionalBlockMaskTest(unittest.TestCase):
     # pylint: disable=protected-access
     image_mask = _make_bidirectional_block_mask(bidirectional_mask)
     combined_mask = causal_mask | image_mask[:, None, None, ...]
-    expected_mask = np.asarray(
-        [
-            [
-                [
-                    [
-                        [True, False, False, False, False, False],
-                        [True, True, True, True, False, False],
-                        [True, True, True, True, False, False],
-                        [True, True, True, True, False, False],
-                        [True, True, True, True, True, False],
-                        [True, True, True, True, True, True],
-                    ]
-                ]
-            ],
-            [
-                [
-                    [
-                        [True, False, False, False, False, False],
-                        [True, True, True, False, False, False],
-                        [True, True, True, False, False, False],
-                        [True, True, True, True, False, False],
-                        [True, True, True, True, True, True],
-                        [True, True, True, True, True, True],
-                    ]
-                ]
-            ],
-        ]
-    )
+    expected_mask = np.asarray([
+        [[[
+            [True, False, False, False, False, False],
+            [True, True, True, True, False, False],
+            [True, True, True, True, False, False],
+            [True, True, True, True, False, False],
+            [True, True, True, True, True, False],
+            [True, True, True, True, True, True],
+        ]]],
+        [[[
+            [True, False, False, False, False, False],
+            [True, True, True, False, False, False],
+            [True, True, True, False, False, False],
+            [True, True, True, True, False, False],
+            [True, True, True, True, True, True],
+            [True, True, True, True, True, True],
+        ]]],
+    ])
     np.testing.assert_array_equal(combined_mask, expected_mask)
 
 
@@ -347,7 +337,10 @@ class AttentionTest(parameterized.TestCase):
 
     decoder_segment_ids = jax.random.randint(self.rng, (self.global_batch_size, self.max_target_length), 0, 4)
     decoder_positions = jax.random.randint(
-        self.rng, (self.global_batch_size, self.max_target_length), 0, self.max_target_length
+        self.rng,
+        (self.global_batch_size, self.max_target_length),
+        0,
+        self.max_target_length,
     )
 
     return lnx, decoder_segment_ids, decoder_positions
@@ -399,7 +392,13 @@ class AttentionTest(parameterized.TestCase):
     )
 
     self.assertTrue(
-        jax.numpy.allclose(mha_prefill, mha_full[:, :prefill_length, :], rtol=1e-02, atol=1e-02, equal_nan=False)
+        jax.numpy.allclose(
+            mha_prefill,
+            mha_full[:, :prefill_length, :],
+            rtol=1e-02,
+            atol=1e-02,
+            equal_nan=False,
+        )
     )
 
     for idx in range(prefill_length, decode_total_length):
@@ -549,7 +548,13 @@ class AttentionTest(parameterized.TestCase):
     )
 
     self.assertTrue(
-        jax.numpy.allclose(mha_generic_output, mha_generic_flash_output, rtol=1e-01, atol=1e-01, equal_nan=False)
+        jax.numpy.allclose(
+            mha_generic_output,
+            mha_generic_flash_output,
+            rtol=1e-01,
+            atol=1e-01,
+            equal_nan=False,
+        )
     )
 
   def test_share_kv_projections(self):
@@ -593,7 +598,10 @@ class AttentionTest(parameterized.TestCase):
         model_mode=MODEL_MODE_TRAIN,
     )
 
-    self.assertEqual(output_shared.shape, (self.global_batch_size, self.max_target_length, self.embed_dim))
+    self.assertEqual(
+        output_shared.shape,
+        (self.global_batch_size, self.max_target_length, self.embed_dim),
+    )
 
     # 3. Equivalence Check with standard unshared Attention
     attention_no_share = Attention(
@@ -798,7 +806,13 @@ class AttentionTest(parameterized.TestCase):
     mha_generic_flash_cp_output = jax.device_get(mha_generic_flash_cp_output)
 
     self.assertTrue(
-        jax.numpy.allclose(mha_generic_output, mha_generic_flash_cp_output, rtol=1e-01, atol=1e-01, equal_nan=False),
+        jax.numpy.allclose(
+            mha_generic_output,
+            mha_generic_flash_cp_output,
+            rtol=1e-01,
+            atol=1e-01,
+            equal_nan=False,
+        ),
         msg="Logits from generic dot product and flash attention + context/expert parallelism are not close.\n"
         f"ici_context_parallelism={ici_context_parallelism}, context_parallel_load_balance={context_parallel_load_balance},"
         f" ici_expert_parallelism={ici_expert_parallelism}, expert_shard_attention_option={expert_shard_attention_option}.",
@@ -885,7 +899,11 @@ class AttentionTest(parameterized.TestCase):
         model_mode=MODEL_MODE_PREFILL,
     )
     self.assertTrue(
-        jax.numpy.allclose(attention_w_layout_full[:, :prefill_length, :], attention_w_layout_prefill, equal_nan=False)
+        jax.numpy.allclose(
+            attention_w_layout_full[:, :prefill_length, :],
+            attention_w_layout_prefill,
+            equal_nan=False,
+        )
     )
 
     for idx in range(prefill_length, decode_total_length):
@@ -904,7 +922,11 @@ class AttentionTest(parameterized.TestCase):
       self.assertTrue(attention_w_layout_full_this_idx.shape == attention_w_layout_idx.shape)
       self.assertTrue(
           jax.numpy.allclose(
-              attention_w_layout_full_this_idx, attention_w_layout_idx, rtol=rtol, atol=atol, equal_nan=False
+              attention_w_layout_full_this_idx,
+              attention_w_layout_idx,
+              rtol=rtol,
+              atol=atol,
+              equal_nan=False,
           )
       )
 
@@ -1009,7 +1031,9 @@ class AttentionTest(parameterized.TestCase):
     )
     self.assertTrue(
         jax.numpy.allclose(
-            attention_wo_reshape_q_full[:, :prefill_length, :], attention_wo_reshape_q_prefill, equal_nan=False
+            attention_wo_reshape_q_full[:, :prefill_length, :],
+            attention_wo_reshape_q_prefill,
+            equal_nan=False,
         )
     )
 
@@ -1023,11 +1047,19 @@ class AttentionTest(parameterized.TestCase):
     )
     self.assertTrue(
         jax.numpy.allclose(
-            attention_w_reshape_q_full[:, :prefill_length, :], attention_w_reshape_q_prefill, equal_nan=False
+            attention_w_reshape_q_full[:, :prefill_length, :],
+            attention_w_reshape_q_prefill,
+            equal_nan=False,
         )
     )
 
-    self.assertTrue(jax.numpy.allclose(attention_wo_reshape_q_prefill, attention_w_reshape_q_prefill, equal_nan=False))
+    self.assertTrue(
+        jax.numpy.allclose(
+            attention_wo_reshape_q_prefill,
+            attention_w_reshape_q_prefill,
+            equal_nan=False,
+        )
+    )
     self.assertTrue(
         jax.numpy.allclose(
             attention_wo_reshape_q_full[:, :prefill_length, :],
@@ -1052,7 +1084,11 @@ class AttentionTest(parameterized.TestCase):
       self.assertTrue(attention_wo_reshape_q_full_this_idx.shape == attention_wo_reshape_q_idx.shape)
       self.assertTrue(
           jax.numpy.allclose(
-              attention_wo_reshape_q_full_this_idx, attention_wo_reshape_q_idx, rtol=rtol, atol=atol, equal_nan=False
+              attention_wo_reshape_q_full_this_idx,
+              attention_wo_reshape_q_idx,
+              rtol=rtol,
+              atol=atol,
+              equal_nan=False,
           )
       )
 
@@ -1068,12 +1104,22 @@ class AttentionTest(parameterized.TestCase):
       self.assertTrue(attention_w_reshape_q_full_this_idx.shape == attention_w_reshape_q_idx.shape)
       self.assertTrue(
           jax.numpy.allclose(
-              attention_w_reshape_q_full_this_idx, attention_w_reshape_q_idx, rtol=rtol, atol=atol, equal_nan=False
+              attention_w_reshape_q_full_this_idx,
+              attention_w_reshape_q_idx,
+              rtol=rtol,
+              atol=atol,
+              equal_nan=False,
           )
       )
 
       self.assertTrue(
-          jax.numpy.allclose(attention_w_reshape_q_idx, attention_wo_reshape_q_idx, rtol=rtol, atol=atol, equal_nan=False)
+          jax.numpy.allclose(
+              attention_w_reshape_q_idx,
+              attention_wo_reshape_q_idx,
+              rtol=rtol,
+              atol=atol,
+              equal_nan=False,
+          )
       )
 
   def test_sliding_window_attention(self):
@@ -1148,7 +1194,10 @@ class AttentionTest(parameterized.TestCase):
     # Test if sliding window attention is different from global attention
     self.assertFalse(
         jax.numpy.allclose(
-            sliding_window_output.astype(jnp.bfloat16), global_attn_output.astype(jnp.bfloat16), rtol=1e-04, atol=1e-04
+            sliding_window_output.astype(jnp.bfloat16),
+            global_attn_output.astype(jnp.bfloat16),
+            rtol=1e-04,
+            atol=1e-04,
         )
     )
 
@@ -1199,7 +1248,10 @@ class AttentionTest(parameterized.TestCase):
 
   @pytest.mark.skip(reason="Requires `vllm-tpu` package which is not yet a MaxText dependency.")
   @pytest.mark.tpu_only
-  @mock.patch("tpu_inference.layers.jax.attention_interface.sharded_ragged_paged_attention", create=True)
+  @mock.patch(
+      "tpu_inference.layers.jax.attention_interface.sharded_ragged_paged_attention",
+      create=True,
+  )
   def test_forward_serve_vllm(self, mock_sharded_ragged_paged_attention):
     """Tests the forward_serve_vllm method with mocked RPA attention."""
     # Setup config for vLLM RPA
@@ -1312,7 +1364,13 @@ class MLATest(attention_test_util.MLATestBase):
     )
 
     self.assertTrue(
-        jax.numpy.allclose(mla_prefill, mla_full[:, :prefill_length, :], rtol=1e-02, atol=1e-02, equal_nan=False)
+        jax.numpy.allclose(
+            mla_prefill,
+            mla_full[:, :prefill_length, :],
+            rtol=1e-02,
+            atol=1e-02,
+            equal_nan=False,
+        )
     )
 
     for idx in range(prefill_length, decode_total_length):
@@ -1343,12 +1401,16 @@ class MLATest(attention_test_util.MLATestBase):
         **attention_config_args,
         **extra_args,
     )
-    dummy_inputs_q = jnp.ones(
-        (attention_cfg.global_batch_size_to_train_on, attention_cfg.max_target_length, attention_cfg.base_emb_dim)
-    )
-    dummy_inputs_kv = jnp.ones(
-        (attention_cfg.global_batch_size_to_train_on, attention_cfg.max_target_length, attention_cfg.base_emb_dim)
-    )
+    dummy_inputs_q = jnp.ones((
+        attention_cfg.global_batch_size_to_train_on,
+        attention_cfg.max_target_length,
+        attention_cfg.base_emb_dim,
+    ))
+    dummy_inputs_kv = jnp.ones((
+        attention_cfg.global_batch_size_to_train_on,
+        attention_cfg.max_target_length,
+        attention_cfg.base_emb_dim,
+    ))
 
     base_attention = Attention(
         config=attention_cfg,
@@ -1366,10 +1428,22 @@ class MLATest(attention_test_util.MLATestBase):
     )
 
     # 2. Assert that the base Attention layer HAS all its standard projections
-    self.assertTrue(hasattr(base_attention, "query"), "Base Attention should have 'query' projection.")
-    self.assertTrue(hasattr(base_attention, "key"), "Base Attention should have 'key' projection.")
-    self.assertTrue(hasattr(base_attention, "value"), "Base Attention should have 'value' projection.")
-    self.assertTrue(hasattr(base_attention, "out"), "Base Attention should have 'out' projection.")
+    self.assertTrue(
+        hasattr(base_attention, "query"),
+        "Base Attention should have 'query' projection.",
+    )
+    self.assertTrue(
+        hasattr(base_attention, "key"),
+        "Base Attention should have 'key' projection.",
+    )
+    self.assertTrue(
+        hasattr(base_attention, "value"),
+        "Base Attention should have 'value' projection.",
+    )
+    self.assertTrue(
+        hasattr(base_attention, "out"),
+        "Base Attention should have 'out' projection.",
+    )
 
     # 3. Initialize the MLA layer
     mla_config_args = self.config_arguments.copy()
@@ -1390,6 +1464,104 @@ class MLATest(attention_test_util.MLATestBase):
     self.assertTrue(hasattr(mla_layer, "q_norm"), "MLA should have 'q_norm' projection.")
     self.assertTrue(hasattr(mla_layer, "kv_norm"), "MLA should have 'kv_norm' projection.")
     self.assertTrue(hasattr(mla_layer, "out"), "MLA should have 'out' projection.")
+
+  def test_fused_mla_lora_proj_output_equivalence(self):
+    """Tests that fused_mla_lora_proj=True produces identical outputs to fused_mla_lora_proj=False."""
+    extra_args = get_decoupled_parallelism_overrides()
+
+    # Initialize the unfused model.
+    unfused_args = {
+        **self.config_arguments,
+        "fused_mla_lora_proj": False,
+        **extra_args,
+    }
+    cfg_unfused = pyconfig.initialize([sys.argv[0], get_test_config_path()], **unfused_args)
+    devices_array = maxtext_utils.create_device_mesh(cfg_unfused)
+    mesh = Mesh(devices_array, cfg_unfused.mesh_axes)
+    dummy_q = jnp.ones((
+        cfg_unfused.global_batch_size_to_train_on,
+        cfg_unfused.max_target_length,
+        cfg_unfused.base_emb_dim,
+    ))
+    mla_unfused = MLA(
+        config=cfg_unfused,
+        num_query_heads=cfg_unfused.num_query_heads,
+        num_kv_heads=cfg_unfused.num_kv_heads,
+        head_dim=cfg_unfused.head_dim,
+        inputs_q_shape=dummy_q.shape,
+        inputs_kv_shape=dummy_q.shape,
+        max_target_length=cfg_unfused.max_target_length,
+        max_prefill_predict_length=cfg_unfused.max_prefill_predict_length,
+        mesh=mesh,
+        attention_kernel="dot_product",
+        dtype=cfg_unfused.dtype,
+        dropout_rate=cfg_unfused.dropout_rate,
+        attention_type=cfg_unfused.attention_type,
+        q_lora_rank=cfg_unfused.q_lora_rank,
+        kv_lora_rank=cfg_unfused.kv_lora_rank,
+        qk_nope_head_dim=cfg_unfused.qk_nope_head_dim,
+        qk_rope_head_dim=cfg_unfused.qk_rope_head_dim,
+        v_head_dim=cfg_unfused.v_head_dim,
+        model_mode=MODEL_MODE_TRAIN,
+        rngs=nnx.Rngs(params=0, dropout=jax.random.PRNGKey(42)),
+    )
+
+    # Initialize the fused model.
+    fused_args = {
+        **self.config_arguments,
+        "fused_mla_lora_proj": True,
+        **extra_args,
+    }
+    cfg_fused = pyconfig.initialize([sys.argv[0], get_test_config_path()], **fused_args)
+    mla_fused = MLA(
+        config=cfg_fused,
+        num_query_heads=cfg_fused.num_query_heads,
+        num_kv_heads=cfg_fused.num_kv_heads,
+        head_dim=cfg_fused.head_dim,
+        inputs_q_shape=dummy_q.shape,
+        inputs_kv_shape=dummy_q.shape,
+        max_target_length=cfg_fused.max_target_length,
+        max_prefill_predict_length=cfg_fused.max_prefill_predict_length,
+        mesh=mesh,
+        attention_kernel="dot_product",
+        dtype=cfg_fused.dtype,
+        dropout_rate=cfg_fused.dropout_rate,
+        attention_type=cfg_fused.attention_type,
+        q_lora_rank=cfg_fused.q_lora_rank,
+        kv_lora_rank=cfg_fused.kv_lora_rank,
+        qk_nope_head_dim=cfg_fused.qk_nope_head_dim,
+        qk_rope_head_dim=cfg_fused.qk_rope_head_dim,
+        v_head_dim=cfg_fused.v_head_dim,
+        model_mode=MODEL_MODE_TRAIN,
+        rngs=nnx.Rngs(params=0, dropout=jax.random.PRNGKey(42)),
+    )
+
+    # Make both models mathematically equivalent:
+    # fused wq_kv_a = concat(unfused wq_a, unfused wkv_a) along the output axis.
+    mla_fused.wq_kv_a.kernel.value = jnp.concatenate(
+        [mla_unfused.wq_a.kernel.value, mla_unfused.wkv_a.kernel.value], axis=-1
+    )
+    mla_fused.wq_b.kernel.value = mla_unfused.wq_b.kernel.value
+    mla_fused.q_norm.scale.value = mla_unfused.q_norm.scale.value
+    mla_fused.wkv_b.kernel.value = mla_unfused.wkv_b.kernel.value
+    mla_fused.kv_norm.scale.value = mla_unfused.kv_norm.scale.value
+    mla_fused.out.kernel.value = mla_unfused.out.kernel.value
+
+    # Run both models on the same inputs and verify outputs are identical.
+    lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg_unfused, cfg_unfused.dtype)
+    common_kwargs = {
+        "decoder_segment_ids": decoder_segment_ids,
+        "inputs_positions": decoder_positions,
+        "deterministic": True,
+        "model_mode": MODEL_MODE_TRAIN,
+    }
+    output_unfused, _ = mla_unfused(lnx, lnx, **common_kwargs)
+    output_fused, _ = mla_fused(lnx, lnx, **common_kwargs)
+
+    self.assertTrue(
+        jax.numpy.allclose(output_unfused, output_fused, rtol=1e-05, atol=1e-05, equal_nan=False),
+        "fused_mla_lora_proj=True and fused_mla_lora_proj=False produced different outputs.",
+    )
 
   @parameterized.named_parameters(
       {
@@ -1587,7 +1759,13 @@ class MLATest(attention_test_util.MLATestBase):
     mla_generic_flash_cp_output = jax.device_get(mla_generic_flash_cp_output)
 
     self.assertTrue(
-        jax.numpy.allclose(mla_generic_output, mla_generic_flash_cp_output, rtol=1e-01, atol=1e-01, equal_nan=False),
+        jax.numpy.allclose(
+            mla_generic_output,
+            mla_generic_flash_cp_output,
+            rtol=1e-01,
+            atol=1e-01,
+            equal_nan=False,
+        ),
         msg="MLA Logits from generic dot product and flash attention + context/expert parallelism are not close.\n"
         f"ici_context_parallelism={ici_context_parallelism}, context_parallel_load_balance={context_parallel_load_balance},"
         f" ici_expert_parallelism={ici_expert_parallelism}, expert_shard_attention_option={expert_shard_attention_option}.",
@@ -1826,7 +2004,11 @@ class Qwen3NextGatedDeltaNetTest(unittest.TestCase):
     """get structured data for GDN (only requires hidden states)"""
     lnx = jax.random.normal(
         self.rng,
-        shape=(self.cfg.global_batch_size_to_train_on, self.cfg.max_target_length, self.cfg.emb_dim),
+        shape=(
+            self.cfg.global_batch_size_to_train_on,
+            self.cfg.max_target_length,
+            self.cfg.emb_dim,
+        ),
         dtype=dtype,
     )
     return lnx
@@ -1863,7 +2045,13 @@ class Qwen3NextGatedDeltaNetTest(unittest.TestCase):
     )
 
     self.assertTrue(
-        jax.numpy.allclose(gdn_prefill, gdn_full[:, :prefill_length, :], rtol=1e-02, atol=1e-02, equal_nan=False)
+        jax.numpy.allclose(
+            gdn_prefill,
+            gdn_full[:, :prefill_length, :],
+            rtol=1e-02,
+            atol=1e-02,
+            equal_nan=False,
+        )
     )
 
     # 5. Autoregressive mode

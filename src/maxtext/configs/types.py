@@ -444,6 +444,10 @@ class ModelArchitecture(BaseModel):
   )
   normalization_layer_epsilon: float = Field(1.0e-05, description="Epsilon value for normalization layers.")
   fused_qkv: bool = Field(False, description="If supported, fuse the Q, K, and V projections.")
+  fused_mla_lora_proj: bool = Field(
+      False,
+      description="Fuse MLA Q and KV LoRA up-projections (wq_a + wkv_a) into a single matmul. Requires q_lora_rank > 0.",
+  )
   attention_bias: bool = Field(
       False,
       description="If True, adds a learnable bias to the query, key, and value projections.",
@@ -2607,6 +2611,11 @@ class MaxTextConfig(
       raise ValueError("`share_kv_projections` is not compatible with `fused_qkv`.")
     if self.share_kv_projections and self.attention_type == "mla":
       raise ValueError("`share_kv_projections` is not compatible with `attention_type='mla'`.")
+
+    if self.fused_mla_lora_proj and self.q_lora_rank == 0:
+      raise ValueError("`fused_mla_lora_proj` requires `q_lora_rank > 0`.")
+    if self.fused_mla_lora_proj and self.attention_type != "mla":
+      raise ValueError("`fused_mla_lora_proj` is only valid with `attention_type='mla'`.")
 
     # I. FINAL TYPE CONVERSIONS AND DERIVED LISTS
     ici_map = {

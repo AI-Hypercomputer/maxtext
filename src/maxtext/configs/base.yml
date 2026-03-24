@@ -381,6 +381,7 @@ qk_clip_threshold: 100.0  # Threshold for clipping (tau in the paper)
 
 # Combine matmuls for QKV and MLP
 fused_qkv: False
+fused_mla_lora_proj: False  # Fuse MLA Q+KV LoRA up-projections (wq_a+wkv_a) into a single matmul. Requires q_lora_rank > 0.
 fused_mlp: False
 
 record_internal_nn_metrics: 0
