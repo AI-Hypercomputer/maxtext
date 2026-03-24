@@ -476,14 +476,13 @@ logical_axis_rules: [
                       ['heads', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
                       ['q_heads', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
                       ['kv_heads', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
-                      ['embed', ['fsdp', 'fsdp_transpose', 'sequence', 'tensor_transpose', 'context', 'expert']],
-                      ['embed', ['fsdp', 'sequence', 'tensor_transpose', 'context' , 'expert']],
-                      ['embed', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'expert']],
-                      ['embed', ['fsdp', 'sequence', 'context', 'expert']],
+                      ['embed', ['expert']], # Instead of using pure FSDP (both FSDP and EP act like FSDP during attn), we replace the FSDP by DP to shard less, otherwise we would be sharding too much (e.g. 512+ ways, and have small shard shape). We use EP since EP is 2D in the target config
                       ['embed_no_exp', ['fsdp', 'fsdp_transpose', 'sequence', 'tensor_transpose', 'context']],
                       ['embed_no_exp', ['fsdp', 'sequence', 'tensor_transpose', 'context']],
                       ['embed_no_exp', ['fsdp', 'fsdp_transpose', 'sequence', 'context']],
                       ['embed_no_exp', ['fsdp', 'sequence', 'context']],
+                      # For full solution should rename embed_no_exp to embed_moe
+                      # May need remove_fsdp functionality tho
                       ['embed_tensor_transpose', ['tensor_transpose']],
                       ['q_lora', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'tensor_transpose', 'expert']],
                       ['q_lora', ['fsdp', 'sequence', 'context', 'tensor_transpose', 'expert']],
@@ -522,6 +521,7 @@ logical_axis_rules: [
 # Axes used for DCN must be earlier in this list than ICI, see (b/339009148) for details
 data_sharding: [['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context', 'context_autoregressive', 'tensor', 'tensor_transpose', 'tensor_sequence', 'expert', 'autoregressive']]
 input_data_sharding_logical_axes: ['activation_embed_and_logits_batch', 'activation_norm_length']
+embed_shard: "expert_only" #Choose to shard embed (embed_attn) on both fsdp and expert, expert only, or fsdp only ("both", "expert_only", "fsdp_only")
 
 # sharding tolerance: float between 0.0 and 1.0 representing the allowed percentage of non-sharded parameters.
 sharding_tolerance: 0.02

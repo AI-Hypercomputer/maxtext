@@ -817,6 +817,7 @@ class LayoutAndSharding(BaseModel):
   shard_optimizer_over_data: bool = Field(False, description="Enable ZeRO-1 optimizer sharding over the data axis.")
   internal_compile: bool = Field(False, description="Use internal_compile to bypass open-source topology mappings.")
   internal_compile_num_devices: int = Field(-1, description="Number of devices when using internal_compile.")
+  embed_shard: str = Field("expert_only", description="Which axes to shard embed (embed_attention) on")
 
 
 class DcnParallelism(BaseModel):
@@ -2278,6 +2279,21 @@ class MaxTextConfig(
     if self.expert_shard_attention_option == "context":
       cp_size *= self.ici_expert_parallelism * self.dcn_expert_parallelism
     self.context_parallel_size = cp_size
+
+    # Modify embed - this is a VERY hacky (non-mergeable) implementation, to be replaced with some cool new way to share logical axis rules soon
+    for rule in self.logical_axis_rules:
+      if rule and rule[0] == "embed":
+        if self.embed_shard == "expert_only":
+          rule[1] = ["expert"]
+        elif self.embed_shard == "fsdp_only":
+          rule[1] = ["fsdp"]
+        elif self.embed_shard == "both":
+          rule[1] = ["fsdp", "expert"]
+        else:
+          # throw value error
+          raise ValueError(f"Invalid embed_shard: {self.embed_shard}. Must be 'expert_only', 'fsdp_only', or 'both'.")
+        break
+    
     if self.pipeline_parallel_layers == -1:
       if self.decoder_block == DecoderBlockType.DEEPSEEK:
         moe_layers = self.num_decoder_layers - self.first_num_dense_layers
