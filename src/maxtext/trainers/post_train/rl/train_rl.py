@@ -72,7 +72,6 @@ from tunix.sft import metrics_logger, profiler
 os.environ["SKIP_JAX_PRECOMPILE"] = "1"
 
 from maxtext.configs import pyconfig
-from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
 from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from maxtext.trainers.post_train.rl.evaluate_rl import evaluate
 from maxtext.trainers.post_train.rl import utils_rl
@@ -472,8 +471,7 @@ def create_rl_components(
         raise ValueError(f"Failed to parse additional_config JSON: {e}") from e
 
   # We need to parse vLLM config to get the logical axis rules for the sampler config.
-  vllm_config_path = os.path.join(MAXTEXT_CONFIGS_DIR, "inference", "vllm.yml")
-  argv_list = ["", str(vllm_config_path), "log_config=False"]
+  argv_list = ["", str(trainer_config.vllm_config_path), "log_config=False"]
   vllm_config = pyconfig.initialize(argv_list)
 
   cluster_config = rl_cluster_lib.ClusterConfig(
