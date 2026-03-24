@@ -59,6 +59,10 @@ max_num_checkpoints_to_keep: None
 enable_continuous_checkpointing: False
 # enables one replica to read the ckpt then broadcast to the rest
 enable_single_replica_ckpt_restoring: False
+# Subdirectory to move checkpoints to before deletion. For example: ".todelete" (Ignored if directory is prefixed with gs://)
+checkpoint_todelete_subdir: None
+# Full path to move checkpoints to before deletion.
+checkpoint_todelete_full_path: None
 
 force_unroll: False # during generate_param_only_checkpoint should we unroll the loop?
 
