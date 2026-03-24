@@ -44,6 +44,7 @@ python3 -m maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_trai
 """
 
 from __future__ import annotations
+from functools import wraps
 from typing import Sequence
 
 import collections
@@ -564,15 +565,24 @@ def create_rl_components(
       **rl_cluster_kwargs,
   )
 
+  def make_reward_fn(fn):
+    # pragma: no cover
+    @wraps(fn)
+    def _reward_fn(**kwargs):
+      return fn(tmvp_config=trainer_config, **kwargs)
+
+    return _reward_fn
+
   # Create RL trainer
   max_logging.log("Setting up RL trainer...")
   rl_trainer = GrpoLearner(
       rl_cluster=rl_cluster,
       reward_fns=[  # type: ignore
-          lambda **kwargs: utils_rl.match_format_exactly(tmvp_config=trainer_config, **kwargs),
-          lambda **kwargs: utils_rl.match_format_approximately(tmvp_config=trainer_config, **kwargs),
-          lambda **kwargs: utils_rl.check_answer(tmvp_config=trainer_config, **kwargs),
-          lambda **kwargs: utils_rl.check_numbers(tmvp_config=trainer_config, **kwargs),
+          make_reward_fn(utils_rl.match_format_exactly),
+          make_reward_fn(utils_rl.match_format_approximately),
+          # TODO(atwigg): comment out to simplify reward and overlap with check_numbers
+          make_reward_fn(utils_rl.check_answer),
+          make_reward_fn(utils_rl.check_numbers),
       ],
       algo_config=grpo_config,
   )
