@@ -2,20 +2,6 @@
 files: ^(.*\.(py|md|sh|yaml|yml|in|cfg|txt|rst|toml|precommit-toml|wordlist))$
 exclude: ^(\.[^/]*(cache|assets|uv|venv)/.*)$
 repos:
-  - repo: https://github.com/Lucas-C/pre-commit-hooks
-    rev: v1.5.5
-    hooks:
-      - id: insert-license
-        name: Add license for all Python files
-        files: \.py$|\.bzl$|BUILD$|BUILD\.bazel$
-        args:
-          - --comment-style
-          - "|#|"
-          - --license-filepath
-          - LICENSE_HEADER
-          - --use-current-year
-          - --allow-past-years
-
   - repo: https://github.com/codespell-project/codespell
     rev: v2.4.1
     hooks:
