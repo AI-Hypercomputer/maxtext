@@ -60,14 +60,18 @@ mesh_axes: ['data', 'stage', 'fsdp', 'fsdp_transpose', 'expert', 'context']
 data_sharding: [['data', 'stage', 'fsdp', 'fsdp_transpose', 'expert', 'context']]
 logical_axis_rules: [
     ['activation_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert', 'context']],
+    ['activation_batch_moe', ['data', 'fsdp', 'fsdp_transpose', 'expert', 'context']],
     ['activation_embed_and_logits_batch', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'expert', 'context']],
     ['activation_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert', 'context']],
     ['activation_embed_and_logits_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
     ['activation_norm_length', ['context']],
+    ['activation_norm_length_moe', ['context']],
     ['activation_heads', []],
     ['activation_stage', 'stage'],
     ['embed', ['fsdp']],
+    ['embed_moe', ['fsdp']],
     ['embed_no_exp', ['fsdp']],
+    ['embed_no_exp_moe', ['fsdp']],
     ['q_lora', ['fsdp']],
     ['kv_lora', ['fsdp']],
     ['layers', 'stage'],
