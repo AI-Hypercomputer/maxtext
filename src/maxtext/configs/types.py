@@ -912,9 +912,29 @@ class RematAndOffload(BaseModel):
       RematLocation.REMAT,
       description="Remat policy for the second MLP layer's output.",
   )
+  moe_mlpwi_0: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for the first part of a gated MoE's output.",
+  )
+  moe_mlpwi_1: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for the second part of a gated MoE's output.",
+  )
+  moe_mlpwo: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for the second MoE layer's output.",
+  )
   query_proj: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the query projection.")
   key_proj: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the key projection.")
   value_proj: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the value projection.")
+  query_wa_proj: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for the MLA query weighted attention projection.",
+  )
+  kv_wa_proj: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for the MLA key and value weighted attention projection.",
+  )
   qkv_proj: RematLocation = Field(RematLocation.REMAT, description="Remat policy for fused QKV projection.")
   out_proj: RematLocation = Field(
       RematLocation.REMAT,

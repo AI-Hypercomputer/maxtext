@@ -56,62 +56,52 @@ class BidirectionalBlockMaskTest(unittest.TestCase):
     bidirectional_mask = np.asarray([[0, 1, 1, 1, 0, 0]])
     # pylint: disable=protected-access
     block_mask = _make_bidirectional_block_mask(bidirectional_mask)
-    expected_mask = np.asarray(
-        [
-            [
-                [False, False, False, False, False, False],
-                [False, True, True, True, False, False],
-                [False, True, True, True, False, False],
-                [False, True, True, True, False, False],
-                [False, False, False, False, False, False],
-                [False, False, False, False, False, False],
-            ]
-        ]
-    )
+    expected_mask = np.asarray([[
+        [False, False, False, False, False, False],
+        [False, True, True, True, False, False],
+        [False, True, True, True, False, False],
+        [False, True, True, True, False, False],
+        [False, False, False, False, False, False],
+        [False, False, False, False, False, False],
+    ]])
     np.testing.assert_array_equal(block_mask, expected_mask)
 
   def test_two_blocks_mask(self):
     bidirectional_mask = np.asarray([[0, 1, 1, 0, 1, 1]])
     # pylint: disable=protected-access
     block_mask = _make_bidirectional_block_mask(bidirectional_mask)
-    expected_mask = np.asarray(
-        [
-            [
-                [False, False, False, False, False, False],
-                [False, True, True, False, False, False],
-                [False, True, True, False, False, False],
-                [False, False, False, False, False, False],
-                [False, False, False, False, True, True],
-                [False, False, False, False, True, True],
-            ]
-        ]
-    )
+    expected_mask = np.asarray([[
+        [False, False, False, False, False, False],
+        [False, True, True, False, False, False],
+        [False, True, True, False, False, False],
+        [False, False, False, False, False, False],
+        [False, False, False, False, True, True],
+        [False, False, False, False, True, True],
+    ]])
     np.testing.assert_array_equal(block_mask, expected_mask)
 
   def test_batch_block_masks(self):
     bidirectional_mask = np.asarray([[0, 1, 1, 1, 0, 0], [0, 1, 1, 0, 1, 1]])
     # pylint: disable=protected-access
     block_mask = _make_bidirectional_block_mask(bidirectional_mask)
-    expected_mask = np.asarray(
+    expected_mask = np.asarray([
         [
-            [
-                [False, False, False, False, False, False],
-                [False, True, True, True, False, False],
-                [False, True, True, True, False, False],
-                [False, True, True, True, False, False],
-                [False, False, False, False, False, False],
-                [False, False, False, False, False, False],
-            ],
-            [
-                [False, False, False, False, False, False],
-                [False, True, True, False, False, False],
-                [False, True, True, False, False, False],
-                [False, False, False, False, False, False],
-                [False, False, False, False, True, True],
-                [False, False, False, False, True, True],
-            ],
-        ]
-    )
+            [False, False, False, False, False, False],
+            [False, True, True, True, False, False],
+            [False, True, True, True, False, False],
+            [False, True, True, True, False, False],
+            [False, False, False, False, False, False],
+            [False, False, False, False, False, False],
+        ],
+        [
+            [False, False, False, False, False, False],
+            [False, True, True, False, False, False],
+            [False, True, True, False, False, False],
+            [False, False, False, False, False, False],
+            [False, False, False, False, True, True],
+            [False, False, False, False, True, True],
+        ],
+    ])
     np.testing.assert_array_equal(block_mask, expected_mask)
 
   def test_empty_block_mask(self):
@@ -141,34 +131,24 @@ class BidirectionalBlockMaskTest(unittest.TestCase):
     # pylint: disable=protected-access
     image_mask = _make_bidirectional_block_mask(bidirectional_mask)
     combined_mask = causal_mask | image_mask[:, None, None, ...]
-    expected_mask = np.asarray(
-        [
-            [
-                [
-                    [
-                        [True, False, False, False, False, False],
-                        [True, True, True, True, False, False],
-                        [True, True, True, True, False, False],
-                        [True, True, True, True, False, False],
-                        [True, True, True, True, True, False],
-                        [True, True, True, True, True, True],
-                    ]
-                ]
-            ],
-            [
-                [
-                    [
-                        [True, False, False, False, False, False],
-                        [True, True, True, False, False, False],
-                        [True, True, True, False, False, False],
-                        [True, True, True, True, False, False],
-                        [True, True, True, True, True, True],
-                        [True, True, True, True, True, True],
-                    ]
-                ]
-            ],
-        ]
-    )
+    expected_mask = np.asarray([
+        [[[
+            [True, False, False, False, False, False],
+            [True, True, True, True, False, False],
+            [True, True, True, True, False, False],
+            [True, True, True, True, False, False],
+            [True, True, True, True, True, False],
+            [True, True, True, True, True, True],
+        ]]],
+        [[[
+            [True, False, False, False, False, False],
+            [True, True, True, False, False, False],
+            [True, True, True, False, False, False],
+            [True, True, True, True, False, False],
+            [True, True, True, True, True, True],
+            [True, True, True, True, True, True],
+        ]]],
+    ])
     np.testing.assert_array_equal(combined_mask, expected_mask)
 
 
