@@ -40,19 +40,19 @@ source maxtext_venv/bin/activate
 # installation option from this list to fit your use case.
 
 # Option 1: Installing maxtext[tpu]
-uv pip install maxtext[tpu] --resolution=lowest
+uv pip install maxtext[tpu]==0.2.1 --resolution=lowest
 install_maxtext_tpu_github_deps
 
 # Option 2: Installing maxtext[cuda12]
-uv pip install maxtext[cuda12] --resolution=lowest
+uv pip install maxtext[cuda12]==0.2.1 --resolution=lowest
 install_maxtext_cuda12_github_dep
 
 # Option 3: Installing maxtext[tpu-post-train]
-uv pip install maxtext[tpu-post-train] --resolution=lowest
+uv pip install maxtext[tpu-post-train]==0.2.1 --resolution=lowest
 install_maxtext_tpu_post_train_extra_deps
 
 # Option 4: Installing maxtext[runner]
-uv pip install maxtext[runner] --resolution=lowest
+uv pip install maxtext[runner]==0.2.1 --resolution=lowest
 ```
 
 > **Note:** The `install_maxtext_tpu_github_deps`, `install_maxtext_cuda12_github_dep`, and
