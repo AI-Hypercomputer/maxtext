@@ -357,6 +357,8 @@ moba_topk: 8
 # DeepSeek Sparse Attention (DSA)
 # deepseek3.2 introduces indexer in MLA
 use_sparse_indexer: False
+# Whether to use Pallas kernel for indexer computation
+use_kernel_indexer: True
 index_head_dim: 128
 index_n_heads: 64
 index_topk: 2048

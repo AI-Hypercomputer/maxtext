@@ -532,6 +532,7 @@ class AttentionIndexer(BaseModel):
   """Configuration for DeepSeek Sparse Attention (DSA): DeepSeek3.2-style MLA with indexer."""
 
   use_sparse_indexer: bool = Field(False, description="Whether to use sparse indexer for MLA.")
+  use_kernel_indexer: bool = Field(True, description="Whether to use Pallas kernel for indexer computation.")
   index_head_dim: NonNegativeInt = Field(128, description="Head dim for indexer query and key.")
   index_n_heads: NonNegativeInt = Field(64, description="Number of query heads in indexer.")
   index_topk: NonNegativeInt = Field(2048, description="Number of tokens selected by the query token in indexer.")

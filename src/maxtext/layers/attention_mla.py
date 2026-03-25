@@ -17,6 +17,7 @@
 import math
 from typing import Any, Optional, Tuple
 import copy
+import functools
 
 import jax
 from jax.ad_checkpoint import checkpoint_name
@@ -306,7 +307,7 @@ def backward_computation(q: jnp.ndarray, k: jnp.ndarray, w: jnp.ndarray, d_score
     
     # Block sizes
     bT = 32
-    bS = 512
+    bS = 256
     
     # Padding
     pad_d = (128 - (D % 128)) % 128
@@ -445,6 +446,7 @@ class Indexer(nnx.Module):
       self,
       config: Any,
       rotary_embedding,
+      mesh: Optional[Mesh] = None,
       kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal"),
       quant: Optional[Quant] = None,
       model_mode: str = MODEL_MODE_TRAIN,
@@ -452,6 +454,7 @@ class Indexer(nnx.Module):
   ):
     self.config = config
     self.rotary_embedding = rotary_embedding
+    self.mesh = mesh
     self.quant = quant
     self.kernel_init = kernel_init
     self.model_mode = model_mode
@@ -661,7 +664,7 @@ class Indexer(nnx.Module):
       
       # Block sizes
       bT = 32
-      bS = 512
+      bS = 256
       
       # Pad D to multiple of 128 (TPU vector alignment)
       # TPU vector registers are 8x128 (for f32). The last dimension should be 128-aligned.
@@ -713,7 +716,7 @@ class Indexer(nnx.Module):
       else:
           # Dummy mask to satisfy Pallas signature
           # Create a small dummy mask
-          dummy_mask = jnp.zeros((1, 1), dtype=jnp.float32)
+          dummy_mask = jnp.zeros((B, 1, 1), dtype=jnp.float32)
           mask_spec = pl.BlockSpec(memory_space=None)
 
       # Outputs
@@ -738,15 +741,40 @@ class Indexer(nnx.Module):
       # If has_mask is False, we pass the dummy mask to the kernel
       mask_arg = mask if has_mask else dummy_mask
       
-      score = pl.pallas_call(
-          kernel_fn,
-          out_shape=out_shape,
-          grid=grid,
-          in_specs=[q_spec, k_spec, w_spec, mask_spec],
-          out_specs=o_score_spec,
-          scratch_shapes=scratch_shapes,
-          compiler_params=pltpu.CompilerParams(dimension_semantics=("parallel", "parallel"))
-      )(q, k, w, mask_arg)
+      # Wrap in shard_map to avoid partitioning error on TPU
+      # Map B to the first axis of the mesh (usually data/fsdp)
+      from jax.sharding import PartitionSpec as P
+      
+      # Use jax.shard_map if available (JAX 0.4.31+), otherwise fallback to experimental
+      shard_map = getattr(jax, "shard_map", None)
+      if shard_map is None:
+          from jax.experimental.shard_map import shard_map
+          kwargs = {}
+      else:
+          kwargs = {"check_vma": False}
+      
+      # Infer sharding axis from mesh_axes if possible, otherwise assume the first one
+      batch_axis = self.config.mesh_axes[1] if len(self.config.mesh_axes) > 1 else self.config.mesh_axes[0]
+      
+      @functools.partial(
+          shard_map,
+          mesh=self.mesh,
+          in_specs=(P(batch_axis, None, None, None), P(batch_axis, None, None), P(batch_axis, None, None), P(batch_axis, None, None)),
+          out_specs=P(batch_axis, None, None),
+          **kwargs
+      )
+      def sharded_pallas_call(q_s, k_s, w_s, m_s):
+          return pl.pallas_call(
+              kernel_fn,
+              out_shape=jax.ShapeDtypeStruct((q_s.shape[0], T_padded, S_padded), dtype=jnp.float32),
+              grid=(q_s.shape[0], T_padded // bT),
+              in_specs=[q_spec, k_spec, w_spec, mask_spec],
+              out_specs=o_score_spec,
+              scratch_shapes=scratch_shapes,
+              compiler_params=pltpu.CompilerParams(dimension_semantics=("parallel", "parallel"))
+          )(q_s, k_s, w_s, m_s)
+      
+      score = sharded_pallas_call(q, k, w, mask_arg)
       
       # Slice back to original dimensions
       score = score[:, :T, :S]
@@ -852,14 +880,16 @@ class Indexer(nnx.Module):
     k = self.apply_partial_rope(k, inputs_positions=inputs_positions)
     k = k.squeeze(2)  # [b, s, 1, d] -> [b, s, d]
 
-    if True:
+    if self.config.use_kernel_indexer:
       # early return
-      print("use kernel implementation")
       weights = self.weights_proj(inputs_q)
       weights = weights * (self.n_heads**-0.5) * self.softmax_scale
-      return self.computation(q, k, weights, attention_mask, self.config.index_topk)
+      indexer_score, topk_indices, _ = self.computation(q, k, weights, attention_mask, self.config.index_topk)
+      indexer_mask = self.generate_mask(topk_indices, seqlen)
+      if attention_mask is not None:
+        indexer_mask += attention_mask
+      return indexer_mask, topk_indices, indexer_score
 
-    print("use JAX implementation")
     # Compute Index Scores
     # QK product: relu(q @ k.T), [b, t, s, h]
     # Similar to MQA, each key is shared by h query head
@@ -1201,6 +1231,7 @@ class MLA(Attention):
           config,
           rngs=rngs,
           rotary_embedding=indexer_rope,
+          mesh=mesh,
           kernel_init=kernel_init,
           quant=quant,
           model_mode=model_mode,
