@@ -1834,6 +1834,11 @@ class DerivedValues(BaseModel):
       None,
       description="The full path to the checkpoint directory, derived from `run_name`.",
   )
+  convert_checkpoint_if_possible:bool = Field(
+      False,
+      description="Whether to convert checkpoint on the fly if not provided via\
+        load_parameters_path or base_output_directory"
+  )
   metrics_dir: None | str = Field(
       None,
       description="The full path to the metrics directory, derived from `run_name`.",
