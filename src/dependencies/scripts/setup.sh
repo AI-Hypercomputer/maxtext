@@ -187,7 +187,7 @@ install_custom_libtpu() {
     # Install 'crcmod' to download 'libtpu.so' from GCS reliably
     python3 -m uv pip install -U crcmod
     # Copy libtpu.so from GCS path
-    gsutil cp "$LIBTPU_GCS_PATH" "$libtpu_path"
+    gcloud storage cp "$LIBTPU_GCS_PATH" "$libtpu_path"
 }
 
 install_maxtext_package_without_deps() {
@@ -216,7 +216,7 @@ install_maxtext_with_deps() {
     fi
     echo "Installing requirements from $dep_name"
     python3 -m uv pip install --resolution=lowest -r "$dep_name" \
-        -r 'src/install_maxtext_extra_deps/extra_deps_from_github.txt'
+        -r 'src/dependencies/github_deps/pre_train_deps.txt'
 
     install_maxtext_package_without_deps
 }
@@ -230,7 +230,7 @@ install_post_training_deps() {
     dep_name='src/dependencies/requirements/generated_requirements/tpu-post-train-requirements.txt'
     echo "Installing requirements from $dep_name"
     python3 -m uv pip install --resolution=lowest -r "$dep_name"
-    python3 -m src.install_maxtext_extra_deps.install_post_train_extra_deps
+    python3 -m src.dependencies.github_deps.install_post_train_deps
 }
 
 # ---------- Post-Training workflow installation ----------

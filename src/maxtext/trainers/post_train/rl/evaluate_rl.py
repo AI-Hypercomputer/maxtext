@@ -245,9 +245,9 @@ def evaluate(
   to_return = (
       corr,
       total,
-      corr / total * 100,
-      partially_corr / total * 100,
-      corr_format / total * 100,
+      corr / total * 100 if total > 0 else 0,
+      partially_corr / total * 100 if total > 0 else 0,
+      corr_format / total * 100 if total > 0 else 0,
   )
 
   return to_return, response_lst

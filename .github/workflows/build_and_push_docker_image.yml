@@ -54,6 +54,7 @@ jobs:
     runs-on: linux-x86-n2-16-buildkit
     container: google/cloud-sdk:524.0.0
     if: >
+      github.event_name == 'release' ||
       github.event_name == 'schedule' ||
       github.event_name == 'pull_request' ||
       github.event_name == 'workflow_dispatch' && (
@@ -86,15 +87,8 @@ jobs:
           # This ensures that every job clones the exact same commit as "setup" job
           ref: ${{ inputs.maxtext_sha }}
 
-      - name: Checkout post-training dependencies
-        if: steps.check.outputs.should_run == 'true' && inputs.image_name == 'maxtext_post_training_nightly'
-        run: |
-          git clone https://github.com/google/tunix.git ./tunix
-          git clone https://github.com/vllm-project/vllm.git ./vllm
-          git clone https://github.com/vllm-project/tpu-inference.git ./tpu-inference
-
       - name: Mark git repositories as safe
-        run: git config --global --add safe.directory '*'
+        run: git config --global --add safe.directory ${GITHUB_WORKSPACE}
         if: steps.check.outputs.should_run == 'true'
 
       - name: Configure Docker
@@ -122,6 +116,7 @@ jobs:
             DEVICE=${{ inputs.device }}
             MODE=${{ inputs.build_mode }}
             WORKFLOW=${{ inputs.workflow }}
+            PACKAGE_DIR=./src
             JAX_VERSION=NONE
             LIBTPU_VERSION=NONE
             INCLUDE_TEST_ASSETS=true
@@ -147,16 +142,6 @@ jobs:
             # Add MaxText tag
             maxtext_hash=$(git rev-parse --short HEAD)
             gcloud container images add-tag "$SOURCE_IMAGE:${{ github.run_id }}" "$SOURCE_IMAGE:maxtext_${maxtext_hash}_${clean_date}" --quiet
-
-          # Add post-training dependencies tags
-          if [ "${{ inputs.workflow }}" == "post-training" ]; then
-            for dir in tunix vllm tpu-inference; do
-              if [ -d "./$dir" ]; then
-                dir_hash=$(git -C "$dir" rev-parse --short HEAD)
-                gcloud container images add-tag "$SOURCE_IMAGE:${{ github.run_id }}" "$SOURCE_IMAGE:${dir}_${dir_hash}_${clean_date}" --quiet
-                fi
-              done
-            fi
           fi
         env:
           INPUTS_IMAGE_NAME: ${{ inputs.image_name }}

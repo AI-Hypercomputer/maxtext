@@ -18,6 +18,7 @@
 
 import json
 import os
+import sys
 import queue
 import enum
 
@@ -123,6 +124,9 @@ class MetricLogger:
       if self.config.managed_mldiagnostics:
         self.write_metrics_to_managed_mldiagnostics(metrics, step)
 
+      if is_training:
+        self._maybe_abort_after_write_metrics(metrics)
+
   def log_metrics(self, metrics, step, is_training):
     """Logs metrics via max_logging."""
     if is_training:
@@ -214,6 +218,16 @@ class MetricLogger:
     }
     return step in boundary_steps
 
+  def _maybe_abort_after_write_metrics(self, metrics):
+    """ This function checks whether we have nan or inf values in training"""
+    loss = metrics["scalar"].get("learning/loss")
+    if self.config.abort_on_nan_loss and np.isnan(loss):
+      max_logging.log("Aborting training due to NaN loss.")
+      sys.exit(1)
+    if self.config.abort_on_inf_loss and np.isinf(loss):
+      max_logging.log("Aborting training due to Inf loss.")
+      sys.exit(1)
+    
   def write_metrics_locally(self, metrics, step):
     """Writes metrics locally for testing."""
     with open(self.config.metrics_file, "a", encoding="utf8") as local_metrics_file:

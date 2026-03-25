@@ -168,6 +168,126 @@ def merge(x, split_factor=2):
   return jnp.reshape(x, (-1,) + x.shape[2:])
 
 
+def gather_weights(weights, mesh):
+  """all-gathers FSDP sharded weights."""
+
+  def fn(weights):
+    (
+        (pre_attn_norm, post_attn_norm),
+        (wq_a, wq_b, q_norm, wkv_a, wkv_b, kv_norm, out),
+    ), (
+        (gate, bias),
+        (routed_wi_0, routed_wi_1, routed_wo),
+        (shared_wi_0, shared_wi_1, shared_wo),
+    ) = weights
+    # All-gather across FSDP axis. Expert axis is used for FSDP in attention.
+    wq_a = jax.lax.all_gather(wq_a, axis_name="expert", tiled=True, axis=1)
+    wq_a = jax.lax.all_gather(wq_a, axis_name="fsdp", tiled=True)
+    wq_b = jax.lax.all_gather(wq_b, axis_name="expert", tiled=True, axis=1)
+    wq_b = jax.lax.all_gather(wq_b, axis_name="fsdp", tiled=True)
+    wkv_a = jax.lax.all_gather(wkv_a, axis_name="expert", tiled=True, axis=1)
+    wkv_a = jax.lax.all_gather(wkv_a, axis_name="fsdp", tiled=True)
+    wkv_b = jax.lax.all_gather(wkv_b, axis_name="expert", tiled=True, axis=1)
+    wkv_b = jax.lax.all_gather(wkv_b, axis_name="fsdp", tiled=True)
+    out = jax.lax.all_gather(out, axis_name="expert", tiled=True)
+    out = jax.lax.all_gather(out, axis_name="fsdp", tiled=True, axis=2)
+    gate = jax.lax.all_gather(gate, axis_name="fsdp", tiled=True)
+    routed_wi_0 = jax.lax.all_gather(routed_wi_0, axis_name="fsdp", tiled=True)
+    routed_wi_1 = jax.lax.all_gather(routed_wi_1, axis_name="fsdp", tiled=True)
+    routed_wo = jax.lax.all_gather(routed_wo, axis_name="fsdp", tiled=True)
+    shared_wi_0 = jax.lax.all_gather(shared_wi_0, axis_name="expert", tiled=True, axis=1)
+    shared_wi_0 = jax.lax.all_gather(shared_wi_0, axis_name="fsdp", tiled=True)
+    shared_wi_1 = jax.lax.all_gather(shared_wi_1, axis_name="expert", tiled=True, axis=1)
+    shared_wi_1 = jax.lax.all_gather(shared_wi_1, axis_name="fsdp", tiled=True)
+    shared_wo = jax.lax.all_gather(shared_wo, axis_name="expert", tiled=True)
+    shared_wo = jax.lax.all_gather(shared_wo, axis_name="fsdp", tiled=True, axis=1)
+    return (
+        (
+            (pre_attn_norm, post_attn_norm),
+            (wq_a, wq_b, q_norm, wkv_a, wkv_b, kv_norm, out),
+        ),
+        (
+            (gate, bias),
+            (routed_wi_0, routed_wi_1, routed_wo),
+            (shared_wi_0, shared_wi_1, shared_wo),
+        ),
+    )
+
+  return jax.shard_map(
+      fn,
+      mesh=mesh,
+      in_specs=(
+          (
+              (
+                  (
+                      jax.sharding.PartitionSpec(None),
+                      jax.sharding.PartitionSpec(None),
+                  ),
+                  (
+                      jax.sharding.PartitionSpec("fsdp", "expert"),
+                      jax.sharding.PartitionSpec("fsdp", "expert", None),
+                      jax.sharding.PartitionSpec(None),
+                      jax.sharding.PartitionSpec("fsdp", "expert"),
+                      jax.sharding.PartitionSpec("fsdp", "expert", None),
+                      jax.sharding.PartitionSpec(None),
+                      jax.sharding.PartitionSpec("expert", None, "fsdp"),
+                  ),
+              ),
+              (
+                  (
+                      jax.sharding.PartitionSpec("fsdp", None),
+                      jax.sharding.PartitionSpec(None),
+                  ),
+                  (
+                      jax.sharding.PartitionSpec("fsdp", None, "expert"),
+                      jax.sharding.PartitionSpec("fsdp", None, "expert"),
+                      jax.sharding.PartitionSpec("fsdp", "expert", None),
+                  ),
+                  (
+                      jax.sharding.PartitionSpec("fsdp", "expert"),
+                      jax.sharding.PartitionSpec("fsdp", "expert"),
+                      jax.sharding.PartitionSpec("expert", "fsdp"),
+                  ),
+              ),
+          ),
+      ),
+      out_specs=(
+          (
+              (
+                  jax.sharding.PartitionSpec(None),
+                  jax.sharding.PartitionSpec(None),
+              ),
+              (
+                  jax.sharding.PartitionSpec(None, None),
+                  jax.sharding.PartitionSpec(None, None, None),
+                  jax.sharding.PartitionSpec(None),
+                  jax.sharding.PartitionSpec(None, None),
+                  jax.sharding.PartitionSpec(None, None, None),
+                  jax.sharding.PartitionSpec(None),
+                  jax.sharding.PartitionSpec(None, None, None),
+              ),
+          ),
+          (
+              (
+                  jax.sharding.PartitionSpec(None, None),
+                  jax.sharding.PartitionSpec(None),
+              ),
+              (
+                  jax.sharding.PartitionSpec(None, None, "expert"),
+                  jax.sharding.PartitionSpec(None, None, "expert"),
+                  jax.sharding.PartitionSpec(None, "expert", None),
+              ),
+              (
+                  jax.sharding.PartitionSpec(None, None),
+                  jax.sharding.PartitionSpec(None, None),
+                  jax.sharding.PartitionSpec(None, None),
+              ),
+          ),
+      ),
+      check_vma=False,
+  )(weights)
+
+
 def scan_batch_split_layers(
     inputs,
     params,
@@ -183,6 +303,7 @@ def scan_batch_split_layers(
   """Scans the layers with batch-split schedule."""
 
   def batch_split_scan_fn(inputs, weights, dpos, dseg):
+    weights = gather_weights(weights, mesh)
     xs = batch_split_schedule(
         inputs,
         weights,
@@ -285,6 +406,7 @@ def batch_split_schedule(
       rope_factor=cfg.rope_factor,
       mscale=cfg.mscale,
       dtype=cfg.dtype,
+      quant=quant,
   )
 
   xs = moe(
@@ -297,6 +419,7 @@ def batch_split_schedule(
       expert_axis_name="expert",
       use_gather_mosaic_kernel=False,
       config=cfg,
+      quant=quant,
   )
   return xs
 
@@ -319,7 +442,21 @@ def with_data_parallel_constraint(x, mesh):
   return jax.lax.with_sharding_constraint(x, jax.NamedSharding(mesh, activation_pspec))
 
 
-def dot(x, y, axes=1):
+def dot(x, y, quant=None, axes=1):
+  """Computes the dot product of two arrays, optionally using quantization."""
+  if quant is not None:
+    # Convert axes to jax.lax.dot_general dimension_numbers
+    if isinstance(axes, int):
+      x_contract = tuple(range(x.ndim - axes, x.ndim))
+      y_contract = tuple(range(axes))
+    else:
+      x_contract, y_contract = axes
+    dimension_numbers = ((x_contract, y_contract), ((), ()))
+    # Instantiate and call qwix dot_general
+    custom_dot = quant.dot_general_cls()()
+    return custom_dot(lhs=x, rhs=y, dimension_numbers=dimension_numbers)
+
+  # Unquantized
   return jnp.tensordot(x, y, axes=axes)
 
 
@@ -345,6 +482,7 @@ def mla_with_norms(
     rope_factor,
     mscale,
     dtype,
+    quant,
 ):
   """Performs MLA with pre- and post-normalization."""
   (pre_attn_scale, post_attn_scale), attn_ws = weights
@@ -379,6 +517,7 @@ def mla_with_norms(
             dtype=dtype,
             mscale=mscale,
             attention_op_fn=attn_op,
+            quant=quant,
         ),
         mesh,
     )
@@ -414,6 +553,7 @@ def mla(
     mscale,
     attention_op_fn,
     dtype,
+    quant,
 ):
   """Performs MLA."""
   (
@@ -442,6 +582,7 @@ def mla(
       dtype=dtype,
       qk_nope_head_dim=qk_nope_head_dim,
       mscale=mscale,
+      quant=quant,
   )
   query = jax.ad_checkpoint.checkpoint_name(query, "query_proj")
   key, value = kv_projection(
@@ -462,6 +603,7 @@ def mla(
       dtype=dtype,
       qk_nope_head_dim=qk_nope_head_dim,
       num_query_heads=num_query_heads,
+      quant=quant,
   )
   key = jax.ad_checkpoint.checkpoint_name(key, "key_proj")
   value = jax.ad_checkpoint.checkpoint_name(value, "value_proj")
@@ -474,7 +616,7 @@ def mla(
       cached_values=[None, None],
   )
   out = jax.ad_checkpoint.checkpoint_name(out, "attention_out")
-  out = dot(out, out_weights, axes=2)
+  out = dot(out, out_weights, quant=quant, axes=2)
   out = jax.ad_checkpoint.checkpoint_name(out, "out_proj")
   return out
 
@@ -497,6 +639,7 @@ def query_projection(
     rope_factor,
     dtype,
     mscale,
+    quant,
 ):
   """Performs query projection."""
   # Set softmax scaling.
@@ -507,7 +650,7 @@ def query_projection(
     softmax_scale = softmax_scale * m * m
 
   # LoRA path
-  low_rank_q = dot(inputs_q, wq_a_weights)
+  low_rank_q = dot(inputs_q, wq_a_weights, quant=quant)
   low_rank_q = rms_norm(
       low_rank_q,
       q_norm_scale_weights,
@@ -515,7 +658,7 @@ def query_projection(
       dtype=dtype,
   )
   low_rank_q = jax.ad_checkpoint.checkpoint_name(low_rank_q, "mla_q")
-  q = dot(low_rank_q, wq_b_weights)
+  q = dot(low_rank_q, wq_b_weights, quant=quant)
 
   # Split into non-positional and rotary parts.
   q_nope, q_pe = jnp.split(q, [qk_nope_head_dim], axis=-1)
@@ -554,9 +697,10 @@ def kv_projection(
     dtype,
     qk_nope_head_dim,
     num_query_heads,
+    quant,
 ):
   """Performs KV projection."""
-  low_rank = dot(inputs, wkv_a_weights)
+  low_rank = dot(inputs, wkv_a_weights, quant=quant)
   low_rank_main, low_rank_rope = jnp.split(low_rank, [kv_lora_rank], axis=-1)
   low_rank_main = rms_norm(
       low_rank_main,
@@ -585,12 +729,13 @@ def kv_projection(
       wkv_b_weights,
       qk_nope_head_dim=qk_nope_head_dim,
       num_query_heads=num_query_heads,
+      quant=quant,
   )
 
 
-def get_key_value(low_rank_main, key_rope, wkv_b_weights, *, qk_nope_head_dim, num_query_heads):
+def get_key_value(low_rank_main, key_rope, wkv_b_weights, *, qk_nope_head_dim, num_query_heads, quant):
   """Gets key and value from compressed KV latent vector and key rope."""
-  kv_out = dot(low_rank_main, wkv_b_weights)
+  kv_out = dot(low_rank_main, wkv_b_weights, quant=quant)
 
   # Split kv_out into key_nope and value parts.
   key_nope, value = jnp.split(kv_out, [qk_nope_head_dim], axis=-1)
@@ -686,6 +831,7 @@ def moe(
     expert_axis_name,
     use_gather_mosaic_kernel,
     config,
+    quant,
 ):
   """Performs dropless MoE with tensor/expert parallelism."""
   xs, ys = list(zip(*inputs))
@@ -700,6 +846,7 @@ def moe(
           expert_axis_name=expert_axis_name,
           use_gather_mosaic_kernel=use_gather_mosaic_kernel,
           config=config,
+          quant=quant,
       ),
       mesh,
   )
@@ -730,9 +877,10 @@ def expert_selection(
     num_experts,
     num_experts_per_tok,
     routed_scaling_factor,
+    quant,
 ):
   """Selects experts for each token and calculates group sizes for each expert."""
-  pre_bias_logits = jax.nn.sigmoid(dot(x, routing_kernel))
+  pre_bias_logits = jax.nn.sigmoid(dot(x, routing_kernel, quant=quant))
   logits = pre_bias_logits + routing_bias
 
   selected_experts, weights = expert_indices_and_weights(
@@ -946,6 +1094,7 @@ def route_compute_unroute(
     use_gather_mosaic_kernel,
     config,
     mesh,
+    quant,
 ):
   """Routes, processes, and unroutes activations."""
   orig_shape = xs[0].shape
@@ -957,7 +1106,9 @@ def route_compute_unroute(
 
   def route_fn(inputs):
     # Shared expert.
-    y = dot(jax.nn.silu(dot(inputs, shared_w0)) * dot(inputs, shared_w1), shared_wo)
+    y = dot(
+        jax.nn.silu(dot(inputs, shared_w0, quant=quant)) * dot(inputs, shared_w1, quant=quant), shared_wo, quant=quant
+    )
 
     inputs = jnp.reshape(inputs, (-1, inputs.shape[-1]))
     selected_experts, weights, group_sizes = expert_selection(
@@ -967,6 +1118,7 @@ def route_compute_unroute(
         num_experts=num_experts,
         num_experts_per_tok=num_experts_per_tok,
         routed_scaling_factor=routed_scaling_factor,
+        quant=quant,
     )
     x, selected_experts, weights, group_sizes = route(
         inputs,
@@ -1019,6 +1171,7 @@ def process_activations(
     expert_axis_name,
     use_gather_mosaic_kernel,
     config,
+    quant,
 ):
   """Processes activations, which are fully sharded on the batch axis, with tensor/expert sharded weights."""
   activation_pspec = jax.sharding.PartitionSpec(
@@ -1043,6 +1196,7 @@ def process_activations(
           use_gather_mosaic_kernel=use_gather_mosaic_kernel,
           config=config,
           mesh=mesh,
+          quant=quant,
       ),
       mesh=mesh,
       in_specs=(

@@ -25,6 +25,7 @@ import math
 from math import prod
 import os
 from tempfile import gettempdir
+import yaml
 from typing import Any, Literal, NewType, Optional
 
 import jax
@@ -235,13 +236,19 @@ ModelName = Literal[
     "qwen2.5-7b",
     "qwen2.5-14b",
     "qwen3-0.6b",
+    "qwen3-1.7b",
+    "qwen3-1.7b-base",
     "qwen3-4b",
+    "qwen3-4b-base",
     "qwen3-4b-thinking-2507",
     "qwen3-8b",
+    "qwen3-8b-base",
     "qwen3-14b",
+    "qwen3-14b-base",
     "qwen3-32b",
     "qwen3-235b-a22b",
     "qwen3-30b-a3b",
+    "qwen3-30b-a3b-base",
     "qwen3-480b-a35b",
     "qwen3-next-80b-a3b",
     "qwen3-omni-30b-a3b",
@@ -535,11 +542,14 @@ class MlaAttention(BaseModel):
 class AttentionIndexer(BaseModel):
   """Configuration for DeepSeek Sparse Attention (DSA): DeepSeek3.2-style MLA with indexer."""
 
-  use_sparse_indexer: bool = Field(False, description="Whether to use sparse indexer for MLA.")
-  index_head_dim: NonNegativeInt = Field(128, description="Head dim for indexer query and key.")
-  index_n_heads: NonNegativeInt = Field(64, description="Number of query heads in indexer.")
-  index_topk: NonNegativeInt = Field(2048, description="Number of tokens selected by the query token in indexer.")
-  sparse_indexer_loss: bool = Field(False, description="Determines the token selection strategy for indexer loss.")
+  use_indexer: bool = Field(False, description="Whether to use sparse indexer for MLA.")
+  indexer_head_dim: NonNegativeInt = Field(128, description="Head dim for indexer query and key.")
+  indexer_n_heads: NonNegativeInt = Field(64, description="Number of query heads in indexer.")
+  indexer_topk: NonNegativeInt = Field(2048, description="Number of tokens selected by the query token in indexer.")
+  indexer_sparse_training: bool = Field(
+      False,
+      description="Determines the training strategy for the indexer: Dense Warm-up or Sparse Training stage.",
+  )
   indexer_loss_scaling_factor: float = Field(0.0, description="Multiplier for the indexer KL divergence loss.")
 
 
@@ -781,6 +791,7 @@ class HardwareAndMesh(BaseModel):
       description="Strategy for context parallelism ('all_gather' or 'ring').",
   )
   custom_mesh: str = Field("", description="Available options: ['hybrid_ring_64x4', 'hybrid_ring_32x8']")
+  custom_mesh_and_rule: str = Field("", description="Customized mesh and logical rules for granularity.")
   allow_split_physical_axes: bool = Field(False, description="Allow splitting physical axes for device mesh creation.")
   enable_nnx: bool = Field(False, description="Whether to use NNX for model definition.")
   optimize_mesh_for_tpu_v6e: bool = Field(False, description="Apply transformations to the mesh for TPU v6e.")
@@ -901,9 +912,29 @@ class RematAndOffload(BaseModel):
       RematLocation.REMAT,
       description="Remat policy for the second MLP layer's output.",
   )
+  moe_mlpwi_0: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for the first part of a gated MoE's output.",
+  )
+  moe_mlpwi_1: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for the second part of a gated MoE's output.",
+  )
+  moe_mlpwo: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for the second MoE layer's output.",
+  )
   query_proj: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the query projection.")
   key_proj: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the key projection.")
   value_proj: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the value projection.")
+  query_wa_proj: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for the MLA query weighted attention projection.",
+  )
+  kv_wa_proj: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for the MLA key and value weighted attention projection.",
+  )
   qkv_proj: RematLocation = Field(RematLocation.REMAT, description="Remat policy for fused QKV projection.")
   out_proj: RematLocation = Field(
       RematLocation.REMAT,
@@ -1030,17 +1061,13 @@ class GrainDataset(BaseModel):
       "",
       description="Path to a JSON file specifying the mixture weights for Grain training data.",
   )
-  grain_file_type: str = Field("arrayrecord", description="File type for Grain data.")
+  grain_file_type: str = Field(
+      "arrayrecord", description="File type for Grain data. Supported: arrayrecord, tfrecord, parquet."
+  )
   grain_worker_count: int = Field(1, description="Number of workers for Grain data loading.")
-  grain_per_worker_buffer_size: int = Field(
-      1,
-      description="Buffer size for each worker for Grain data loading during training.",
-  )
+  grain_per_worker_buffer_size: int = Field(1, description="Per-worker buffer size for Grain train data loading.")
   grain_worker_count_eval: int = Field(1, description="Number of workers for Grain eval data loading.")
-  grain_per_worker_buffer_size_eval: int = Field(
-      1,
-      description="Buffer size for each worker for Grain data loading during evaluation.",
-  )
+  grain_per_worker_buffer_size_eval: int = Field(1, description="Per-worker buffer size for Grain eval data loading.")
   grain_ram_budget_mb: int = Field(1024, description="RAM budget (MB) for auto-tuning worker count.")
   grain_num_threads: int = Field(16, description="Number of threads for Grain ReadOptions during training.")
   grain_prefetch_buffer_size: int = Field(500, description="Prefetch buffer size for Grain ReadOptions during training.")
@@ -1052,6 +1079,7 @@ class GrainDataset(BaseModel):
       16,
       description="Max workers for ThreadPoolExecutor when mixing multiple Grain data sources.",
   )
+  grain_shuffle_buffer_size: int = Field(100, description="Shuffle buffer size when using Parquet or TFRecord.")
 
 
 class FineTuning(BaseModel):
@@ -1082,6 +1110,11 @@ class Distillation(BaseModel):
       description="Overrides specific to the Teacher model (e.g., {'num_query_heads': 64}).",
   )
 
+  # --- Offline Distillation Field ---
+  offline_data_dir: Optional[str] = Field(
+      None, description="GCS or local path to the pre-generated ArrayRecord teacher data."
+  )
+
   # --- Loss Params ---
   distill_alpha: float = Field(0.5, description="Weight for the distillation loss component.")
   distill_temperature: float = Field(1.0, description="Temperature for distillation softening.")
@@ -1110,6 +1143,8 @@ class TrainingLoop(BaseModel):
       0.0,
       description="If set, training will stop early when this evaluation loss is reached.",
   )
+  abort_on_nan_loss: bool = Field(True, description="Check for NaN values and abort training.")
+  abort_on_inf_loss: bool = Field(True, description="Check for Inf values and abort training.")
   enable_dropout: bool = Field(True, description="Enables dropout in the model.")
   dropout_rate: float = Field(0.0, ge=0.0, le=1.0, description="The dropout rate.")
   enable_data_shuffling: bool = Field(True, description="Enables shuffling of the training data.")
@@ -1171,6 +1206,13 @@ class Optimizer(BaseModel):
       -1,
       ge=-1,
       description="Total steps for the LR schedule. -1 defaults to `steps`.",
+  )
+  trainable_parameters_mask: list[str] = Field(
+      default_factory=list,
+      description=(
+          "List of parameter names/patterns to train. If non-empty, all other parameters will be frozen, "
+          "example: ['.*indexer.*']. If empty (default), all parameters are trained."
+      ),
   )
 
 
@@ -1666,6 +1708,7 @@ class RLEvaluation(BaseModel):
 class Reward(BaseModel):
   """Configuration for the reward/penalty model in RL."""
 
+  reward_exact_answer: float = Field(5.0, description="Reward for an exact answer match.")
   reward_exact_format_match: float = Field(3.0, description="Reward for an exact format match.")
   reward_white_space_format_match: float = Field(1.5, description="Reward for a format match ignoring whitespace.")
   reward_partial_format_match: float = Field(0.5, description="Reward for a partial format match.")
@@ -1962,6 +2005,24 @@ class MaxTextConfig(
     Computes all derived values and runs all cross-field validations after initial parsing.
     This logic is ported from the legacy pyconfig_deprecated.py system and adapted for Pydantic.
     """
+    if self.custom_mesh_and_rule:
+      custom_mesh_path = os.path.join(
+          os.path.dirname(os.path.abspath(__file__)),
+          "custom_mesh_and_rule",
+          f"{self.custom_mesh_and_rule}.yml",
+      )
+      if os.path.exists(custom_mesh_path):
+        with open(custom_mesh_path, "r") as f:  # pylint: disable=unspecified-encoding
+          custom_mesh_config = yaml.safe_load(f)
+          if "mesh_axes" in custom_mesh_config:
+            self.mesh_axes = custom_mesh_config["mesh_axes"]
+          if "logical_axis_rules" in custom_mesh_config:
+            self.logical_axis_rules = custom_mesh_config["logical_axis_rules"]
+          if "data_sharding" in custom_mesh_config:
+            self.data_sharding = custom_mesh_config["data_sharding"]
+      else:
+        raise NotImplementedError(f"Custom mesh config file not found at {custom_mesh_path}")
+
     # A. SET RUN NAME AND PATHS
     # If run_name is not set, generate one from the JOBSET_NAME environment variable (if available)
     # or create one from the model name and a timestamp.
@@ -2357,7 +2418,7 @@ class MaxTextConfig(
         raise ValueError("`local_checkpoint_period` must be > 0 for emergency checkpointing.")
     if self.moba and self.attention not in ("dot_product"):
       raise ValueError("MoBA is only supported with dot_product attention.")
-    if self.use_sparse_indexer:
+    if self.use_indexer:
       if self.q_lora_rank == 0:
         raise NotImplementedError("Sparse indexer has not implemented for q_lora_rank = 0.")
       supports_dot_product = self.attention == "dot_product"
@@ -2531,6 +2592,15 @@ class MaxTextConfig(
       self.use_grpo = True
     else:
       self.use_grpo = False
+
+    if self.use_batch_split_schedule:
+      if not (self.decoder_block == DecoderBlockType.DEEPSEEK and self.sparse_matmul and self.use_tokamax_gmm):
+        raise ValueError("Batch split only supports deepseek, with `sparse_matmul=True` and `use_tokamax_gmm=True`")
+      if self.quantization and not (self.use_qwix_quantization and self.quantization == "fp8_full"):
+        raise ValueError(
+            "Batch split quantization only supports `use_qwix_quantization=True` and `quantization=fp8_full`"
+        )
+
     if self.opt_type == "muon" and self.decoder_block not in [
         DecoderBlockType.DEEPSEEK,
         DecoderBlockType.QWEN3,
@@ -2539,7 +2609,7 @@ class MaxTextConfig(
     ]:
       raise ValueError(
           "Muon dimension numbers haven't been tested for this model. Run this command first: "
-          f"`python3 -m MaxText.muon_utils {self.model_name} True`"
+          f"`python3 -m maxtext.utils.muon_utils {self.model_name} True`"
       )
     if self.force_q_layout and not self.use_jax_splash:
       raise ValueError("`force_q_layout` can only be true if `use_jax_splash` is also true.")

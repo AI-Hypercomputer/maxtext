@@ -39,6 +39,7 @@ from maxtext.common.common_types import (
 from maxtext.layers.attention_mla import MLA
 from maxtext.layers.attention_op import ChunkedCausalMask, _generate_chunk_attention_mask, _make_bidirectional_block_mask
 from maxtext.layers.attentions import Attention
+from maxtext.layers import embeddings
 from maxtext.configs import pyconfig
 from maxtext.models.qwen3 import Qwen3NextGatedDeltaNet
 import numpy as np
@@ -55,62 +56,52 @@ class BidirectionalBlockMaskTest(unittest.TestCase):
     bidirectional_mask = np.asarray([[0, 1, 1, 1, 0, 0]])
     # pylint: disable=protected-access
     block_mask = _make_bidirectional_block_mask(bidirectional_mask)
-    expected_mask = np.asarray(
-        [
-            [
-                [False, False, False, False, False, False],
-                [False, True, True, True, False, False],
-                [False, True, True, True, False, False],
-                [False, True, True, True, False, False],
-                [False, False, False, False, False, False],
-                [False, False, False, False, False, False],
-            ]
-        ]
-    )
+    expected_mask = np.asarray([[
+        [False, False, False, False, False, False],
+        [False, True, True, True, False, False],
+        [False, True, True, True, False, False],
+        [False, True, True, True, False, False],
+        [False, False, False, False, False, False],
+        [False, False, False, False, False, False],
+    ]])
     np.testing.assert_array_equal(block_mask, expected_mask)
 
   def test_two_blocks_mask(self):
     bidirectional_mask = np.asarray([[0, 1, 1, 0, 1, 1]])
     # pylint: disable=protected-access
     block_mask = _make_bidirectional_block_mask(bidirectional_mask)
-    expected_mask = np.asarray(
-        [
-            [
-                [False, False, False, False, False, False],
-                [False, True, True, False, False, False],
-                [False, True, True, False, False, False],
-                [False, False, False, False, False, False],
-                [False, False, False, False, True, True],
-                [False, False, False, False, True, True],
-            ]
-        ]
-    )
+    expected_mask = np.asarray([[
+        [False, False, False, False, False, False],
+        [False, True, True, False, False, False],
+        [False, True, True, False, False, False],
+        [False, False, False, False, False, False],
+        [False, False, False, False, True, True],
+        [False, False, False, False, True, True],
+    ]])
     np.testing.assert_array_equal(block_mask, expected_mask)
 
   def test_batch_block_masks(self):
     bidirectional_mask = np.asarray([[0, 1, 1, 1, 0, 0], [0, 1, 1, 0, 1, 1]])
     # pylint: disable=protected-access
     block_mask = _make_bidirectional_block_mask(bidirectional_mask)
-    expected_mask = np.asarray(
+    expected_mask = np.asarray([
         [
-            [
-                [False, False, False, False, False, False],
-                [False, True, True, True, False, False],
-                [False, True, True, True, False, False],
-                [False, True, True, True, False, False],
-                [False, False, False, False, False, False],
-                [False, False, False, False, False, False],
-            ],
-            [
-                [False, False, False, False, False, False],
-                [False, True, True, False, False, False],
-                [False, True, True, False, False, False],
-                [False, False, False, False, False, False],
-                [False, False, False, False, True, True],
-                [False, False, False, False, True, True],
-            ],
-        ]
-    )
+            [False, False, False, False, False, False],
+            [False, True, True, True, False, False],
+            [False, True, True, True, False, False],
+            [False, True, True, True, False, False],
+            [False, False, False, False, False, False],
+            [False, False, False, False, False, False],
+        ],
+        [
+            [False, False, False, False, False, False],
+            [False, True, True, False, False, False],
+            [False, True, True, False, False, False],
+            [False, False, False, False, False, False],
+            [False, False, False, False, True, True],
+            [False, False, False, False, True, True],
+        ],
+    ])
     np.testing.assert_array_equal(block_mask, expected_mask)
 
   def test_empty_block_mask(self):
@@ -140,34 +131,24 @@ class BidirectionalBlockMaskTest(unittest.TestCase):
     # pylint: disable=protected-access
     image_mask = _make_bidirectional_block_mask(bidirectional_mask)
     combined_mask = causal_mask | image_mask[:, None, None, ...]
-    expected_mask = np.asarray(
-        [
-            [
-                [
-                    [
-                        [True, False, False, False, False, False],
-                        [True, True, True, True, False, False],
-                        [True, True, True, True, False, False],
-                        [True, True, True, True, False, False],
-                        [True, True, True, True, True, False],
-                        [True, True, True, True, True, True],
-                    ]
-                ]
-            ],
-            [
-                [
-                    [
-                        [True, False, False, False, False, False],
-                        [True, True, True, False, False, False],
-                        [True, True, True, False, False, False],
-                        [True, True, True, True, False, False],
-                        [True, True, True, True, True, True],
-                        [True, True, True, True, True, True],
-                    ]
-                ]
-            ],
-        ]
-    )
+    expected_mask = np.asarray([
+        [[[
+            [True, False, False, False, False, False],
+            [True, True, True, True, False, False],
+            [True, True, True, True, False, False],
+            [True, True, True, True, False, False],
+            [True, True, True, True, True, False],
+            [True, True, True, True, True, True],
+        ]]],
+        [[[
+            [True, False, False, False, False, False],
+            [True, True, True, False, False, False],
+            [True, True, True, False, False, False],
+            [True, True, True, True, False, False],
+            [True, True, True, True, True, True],
+            [True, True, True, True, True, True],
+        ]]],
+    ])
     np.testing.assert_array_equal(combined_mask, expected_mask)
 
 
@@ -1611,7 +1592,8 @@ class MLATest(attention_test_util.MLATestBase):
   def test_indexer_loss(self):
     """Test indexer loss computation."""
     mla_config_args = self.config_arguments.copy()
-    mla_config_args["use_sparse_indexer"] = True
+    mla_config_args.update(get_decoupled_parallelism_overrides())
+    mla_config_args["use_indexer"] = True
     mla_config_args["attention"] = "dot_product"
     _, mla = self.init_mla(mla_config_args, rope_type="default")
 
@@ -1657,7 +1639,8 @@ class MLATest(attention_test_util.MLATestBase):
   def test_indexer_loss_kl_divergence_zero(self):
     """Test that KL divergence is 0 when target and pred distributions match exactly."""
     mla_config_args = self.config_arguments.copy()
-    mla_config_args["use_sparse_indexer"] = True
+    mla_config_args.update(get_decoupled_parallelism_overrides())
+    mla_config_args["use_indexer"] = True
     mla_config_args["attention"] = "dot_product"
     _, mla = self.init_mla(mla_config_args, rope_type="default")
 
@@ -1692,6 +1675,104 @@ class MLATest(attention_test_util.MLATestBase):
     )
 
     np.testing.assert_allclose(loss, 0.0, atol=1e-5)
+
+  def test_indexer_gradients(self):
+    # Test that gradients do NOT flow back to inputs
+    bsz, seqlen = 2, 8
+    inputs_positions = jnp.broadcast_to(jnp.arange(seqlen)[None, :], (bsz, seqlen))
+
+    for sparse_training in [False, True]:
+      with self.subTest(indexer_sparse_training=sparse_training):
+        argv = [
+            "",
+            get_test_config_path(),
+            "run_name=test",
+            "attention_type=mla",
+            "attention=dot_product",
+            "use_indexer=True",
+            f"indexer_sparse_training={sparse_training}",
+            "max_target_length=16",
+            "indexer_topk=4",
+            "indexer_n_heads=2",
+            "indexer_head_dim=8",
+            "emb_dim=16",
+            "qk_rope_head_dim=4",
+            "q_lora_rank=16",
+        ]
+        config = pyconfig.initialize(argv)
+        rngs = nnx.Rngs(0)
+        mesh = jax.sharding.Mesh(jax.devices(), ("data",))
+        rope = embeddings.RotaryEmbedding(
+            min_timescale=1,
+            max_timescale=10000,
+            mesh=mesh,
+            embedding_dims=config.qk_rope_head_dim,
+            fprop_dtype=jnp.float32,
+            rngs=rngs,
+        )
+        rope.interleave = False
+
+        mla = MLA(
+            config=config,
+            num_query_heads=config.num_query_heads,
+            num_kv_heads=config.num_kv_heads,
+            head_dim=config.head_dim,
+            max_target_length=config.max_target_length,
+            mesh=mesh,
+            attention_kernel="dot_product",
+            inputs_q_shape=(bsz, seqlen, config.emb_dim),
+            inputs_kv_shape=(bsz, seqlen, config.emb_dim),
+            dtype=jnp.float32,
+            weight_dtype=jnp.float32,
+            q_lora_rank=config.q_lora_rank,
+            kv_lora_rank=config.kv_lora_rank,
+            qk_nope_head_dim=config.qk_nope_head_dim,
+            qk_rope_head_dim=config.qk_rope_head_dim,
+            v_head_dim=config.v_head_dim,
+            rngs=rngs,
+        )
+
+        inputs_q = jnp.ones((bsz, seqlen, config.emb_dim))
+        inputs_kv = jnp.ones((bsz, seqlen, config.emb_dim))
+        low_rank_q = jnp.ones((bsz, seqlen, config.q_lora_rank))
+
+        def full_indexer_loss_fn(inputs_q, inputs_kv, low_rank_q, mla, sparse_training=sparse_training):
+          # 1. Main model projections
+          # We ignore the low_rank_q returned here and use the explicitly passed one
+          # to directly verify its gradients.
+          query, _ = mla.mla_query_projection(inputs_q, inputs_positions, MODEL_MODE_TRAIN)
+          key, _, _ = mla.mla_kv_projection(inputs_kv, inputs_positions, None, MODEL_MODE_TRAIN, None)
+
+          # 2. Indexer forward
+          indexer_mask, _, indexer_score = mla.indexer(
+              inputs_q=inputs_q,
+              low_rank_q=low_rank_q,
+              inputs_kv=inputs_kv,
+              inputs_positions=inputs_positions,
+          )
+
+          # 3. Calculate full KL loss
+          loss = mla.calculate_indexer_loss(
+              indexer_score=indexer_score,
+              query=query,
+              key=key,
+              attention_mask=None,
+              indexer_mask=indexer_mask,
+              sparse_loss=sparse_training,
+              scaling_factor=1.0,
+          )
+          return loss
+
+        # Calculate gradients with respect to input embeddings and low_rank_q
+        grad_fn = nnx.grad(full_indexer_loss_fn, argnums=(0, 1, 2))
+        grad_q, grad_kv, grad_low_rank_q = grad_fn(inputs_q, inputs_kv, low_rank_q, mla)
+
+        # Gradients should be exactly zero because:
+        # a) Indexer inputs are detached in Indexer.__call__
+        # b) Main model query/key are detached in calculate_indexer_loss
+        self.assertTrue(jnp.all(grad_q == 0.0))
+        self.assertTrue(jnp.all(grad_kv == 0.0))
+        self.assertTrue(jnp.all(grad_low_rank_q == 0.0))
 
 
 class Qwen3NextGatedDeltaNetTest(unittest.TestCase):

@@ -3,7 +3,7 @@ echo "Running preflight.sh"
 # Command Flags:
 #
 # Example to invoke this script:
-# bash preflight.sh
+# bash src/dependencies/scripts/preflight.sh
 
 # Warning:
 # For any dependencies, please add them into `setup.sh` or `maxtext_tpu_dependencies.Dockerfile`. 
@@ -24,11 +24,11 @@ if command -v sudo >/dev/null 2>&1; then
     echo "running rto_setup.sh with sudo"
 
     # apply network settings.
-    sudo bash rto_setup.sh
+    sudo bash src/dependencies/scripts/rto_setup.sh
 else
     # sudo is not available, run the script without sudo
     echo "running rto_setup.sh without sudo"
 
     # apply network settings.
-    bash rto_setup.sh
+    bash src/dependencies/scripts/rto_setup.sh
 fi

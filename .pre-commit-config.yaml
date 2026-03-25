@@ -52,7 +52,6 @@ repos:
         args:
           - '--pyink-indentation=2'
           - '--line-length=122'
-          - '--check'
 
   - repo: https://github.com/executablebooks/mdformat
     rev: 0.7.22

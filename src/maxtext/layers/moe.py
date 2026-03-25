@@ -278,7 +278,7 @@ class GateLogit(nnx.Module):
 
     contract_ind = tuple(range(0, len(norm_axis)))
     output_sharding = (
-        create_sharding(self.mesh, ("activation_batch_no_exp", "activation_length_no_exp", None))
+        create_sharding(self.mesh, ("activation_batch_no_exp_moe", "activation_length_no_exp_moe", None))
         if self.shard_mode == ShardMode.EXPLICIT
         else None
     )
@@ -351,16 +351,16 @@ class RoutedMoE(nnx.Module):
 
     if self.config.shard_exp_on_fsdp:
       # special sharding for dsv3
-      self.wi_kernel_axes = ("embed_no_exp", None, "mlp")
-      self.wo_kernel_axes = ("embed_no_exp", "mlp", None)
+      self.wi_kernel_axes = ("embed_no_exp_moe", None, "mlp")
+      self.wo_kernel_axes = ("embed_no_exp_moe", "mlp", None)
     elif self.config.use_2d_fsdp_sharding:
-      self.wi_kernel_axes = ("embed_no_exp", "mlp", None)
-      self.wo_kernel_axes = ("embed_no_exp", "mlp", None)
+      self.wi_kernel_axes = ("embed_no_exp_moe", "mlp", None)
+      self.wo_kernel_axes = ("embed_no_exp_moe", "mlp", None)
     elif self.config.use_batch_split_schedule:
       self.wi_kernel_axes, self.wo_kernel_axes = get_batchsplit_init_kernel_axes()
     else:
-      self.wi_kernel_axes = ("exp", "embed_no_exp", "mlp")
-      self.wo_kernel_axes = ("exp", "mlp", "embed_no_exp")
+      self.wi_kernel_axes = ("exp", "embed_no_exp_moe", "mlp")
+      self.wo_kernel_axes = ("exp", "mlp", "embed_no_exp_moe")
 
     if self.config.attention == "vllm_rpa":
       # vLLM uses 'model' as the tensor parallelism axis name
@@ -437,7 +437,7 @@ class RoutedMoE(nnx.Module):
 
     if self.config.mlp_bias:
       wi_bias_axes = ("exp", "activation_mlp")
-      wo_bias_axes = ("exp", "activation_embed")
+      wo_bias_axes = ("exp", "activation_embed_moe")
       wi_bias_shape = (self.num_experts, self.intermediate_dim)
       wo_bias_shape = (self.num_experts, self.config.emb_dim)
       self.wi_0_bias = nnx.Param(
@@ -934,7 +934,7 @@ class RoutedMoE(nnx.Module):
           output = mblx.gmm(
               lhs=inputs,
               rhs=kernel,
-              group_sizes=tokamax_group_sizes,
+              group_sizes=group_sizes,
               preferred_element_type=self.dtype,
               tiling=tiling,
               lhs_quantize_dtype=lhs_quantize_dtype,
@@ -1018,7 +1018,7 @@ class RoutedMoE(nnx.Module):
           self._expert_parallelism_name
           in tuple(
               filter(
-                  lambda tup: tup[0] == "activation_batch",
+                  lambda tup: tup[0] == "activation_batch_moe",
                   self.config.logical_axis_rules,
               )
           )[
@@ -1028,26 +1028,26 @@ class RoutedMoE(nnx.Module):
     except:  # pylint: disable=bare-except
       is_batch_sharded_by_expert = False
     if is_batch_sharded_by_expert and inputs.shape[0] > 1:
-      batch_logical_axis = "activation_batch"
+      batch_logical_axis = "activation_batch_moe"
     else:
-      batch_logical_axis = "activation_batch_no_exp"
+      batch_logical_axis = "activation_batch_no_exp_moe"
 
     if self.get_tensor_transpose_parallelism_size() > 1:
       input_partition_pspec = self._logical_to_mesh_axes(
-          (batch_logical_axis, "activation_norm_length", "activation_embed")
+          (batch_logical_axis, "activation_norm_length_moe", "activation_embed_moe")
       )
       w0_bias_pspec = self._logical_to_mesh_axes(("exp", None))
       w1_bias_pspec = self._logical_to_mesh_axes(("exp", None))
-      wo_bias_pspec = self._logical_to_mesh_axes(("exp", "activation_embed"))
+      wo_bias_pspec = self._logical_to_mesh_axes(("exp", "activation_embed_moe"))
     else:
-      input_partition_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
+      input_partition_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length_moe", None))
       w0_bias_pspec = self._logical_to_mesh_axes(("exp", "activation_mlp"))
       w1_bias_pspec = self._logical_to_mesh_axes(("exp", "activation_mlp"))
-      wo_bias_pspec = self._logical_to_mesh_axes(("exp", "activation_embed"))
+      wo_bias_pspec = self._logical_to_mesh_axes(("exp", "activation_embed_moe"))
 
-    gate_logits_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
+    gate_logits_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length_moe", None))
     if self.config.model_name.startswith("deepseek3"):
-      pre_bias_logits_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
+      pre_bias_logits_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length_moe", None))
     else:
       # pre_bias_logits is None for non-DeepSeek v3 models
       pre_bias_logits_pspec = None
@@ -1099,7 +1099,7 @@ class RoutedMoE(nnx.Module):
             P(),  # Replicate the input key
         ),
         out_specs=(
-            self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", "activation_embed")),
+            self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length_moe", "activation_embed_moe")),
             P(),  # Handle None or replicate the output
             P(),  # Handle None or replicate the output
         ),
@@ -1274,7 +1274,7 @@ class RoutedMoE(nnx.Module):
         layer_w0 = jax.lax.psum(layer_w0, "tensor_transpose")
       if self.config.mlp_bias:
         layer_w0 = layer_w0 + w0_bias
-      layer_w0 = adc.checkpoint_name(layer_w0, "mlpwi_0")
+      layer_w0 = adc.checkpoint_name(layer_w0, "moe_mlpwi_0")
 
       layer_w1 = gmm_fn(
           x,
@@ -1288,7 +1288,7 @@ class RoutedMoE(nnx.Module):
         layer_w1 = jax.lax.psum(layer_w1, "tensor_transpose")
       if self.config.mlp_bias:
         layer_w1 = layer_w1 + w1_bias
-      layer_w1 = adc.checkpoint_name(layer_w1, "mlpwi_1")
+      layer_w1 = adc.checkpoint_name(layer_w1, "moe_mlpwi_1")
       intermediate_layer = self.apply_ffn_activation(layer_w0, layer_w1)
 
       intermediate_output = gmm_fn(
@@ -1305,7 +1305,7 @@ class RoutedMoE(nnx.Module):
         )
       if self.config.mlp_bias:
         intermediate_output = intermediate_output + wo_bias
-      intermediate_output = adc.checkpoint_name(intermediate_output, "mlpwo")
+      intermediate_output = adc.checkpoint_name(intermediate_output, "moe_mlpwo")
 
       if self.config.use_ring_of_experts:
         # Set the outputs of tokens which were not processed to 0.
@@ -1411,13 +1411,13 @@ class RoutedMoE(nnx.Module):
       wo_kernel = self._maybe_shard_with_logical(wo_kernel, ("exp_with_fsdp", "mlp_no_fsdp", "embed_tensor_transpose"))
 
     if self.get_tensor_transpose_parallelism_size() > 1:
-      input_axes = (batch_logical_axis, "activation_norm_length", "activation_embed")
+      input_axes = (batch_logical_axis, "activation_norm_length_moe", "activation_embed_moe")
     else:
-      input_axes = (batch_logical_axis, "activation_norm_length", None)
+      input_axes = (batch_logical_axis, "activation_norm_length_moe", None)
 
-    gate_logits_axes = (batch_logical_axis, "activation_norm_length", None)
+    gate_logits_axes = (batch_logical_axis, "activation_norm_length_moe", None)
     if self.config.model_name.startswith("deepseek3"):
-      pre_bias_logits_axes = (batch_logical_axis, "activation_norm_length", None)
+      pre_bias_logits_axes = (batch_logical_axis, "activation_norm_length_moe", None)
     else:
       pre_bias_logits_axes = None
 
@@ -1436,13 +1436,13 @@ class RoutedMoE(nnx.Module):
     update_weights = jnp.zeros((weights.shape[0], weights.shape[1], self.num_experts), dtype=self.dtype)
     index_update = (
         self._maybe_shard_with_logical(
-            jnp.arange(weights.shape[0])[:, None, None], ("activation_batch_no_exp", None, None)
+            jnp.arange(weights.shape[0])[:, None, None], ("activation_batch_no_exp_moe", None, None)
         ),
-        self._maybe_shard_with_logical(jnp.arange(weights.shape[1])[:, None], ("activation_length_no_exp", None)),
+        self._maybe_shard_with_logical(jnp.arange(weights.shape[1])[:, None], ("activation_length_no_exp_moe", None)),
         indices,
     )
     weight_sharding = (
-        create_sharding(self.mesh, ("activation_batch_no_exp", "activation_length_no_exp", None))
+        create_sharding(self.mesh, ("activation_batch_no_exp_moe", "activation_length_no_exp_moe", None))
         if self.config.shard_mode == ShardMode.EXPLICIT
         else None
     )
@@ -1497,7 +1497,7 @@ class RoutedMoE(nnx.Module):
         expert_mask,
         (batch_size, cp, sub_seq * self.num_experts_per_tok, self.num_experts),
     )
-    expert_mask_fused = self._maybe_shard_with_logical(expert_mask_fused, ("activation_batch", None, None, None))
+    expert_mask_fused = self._maybe_shard_with_logical(expert_mask_fused, ("activation_batch_moe", None, None, None))
     expert_token_count_fused = jnp.cumsum(expert_mask_fused, axis=2)
     expert_token_count = jnp.reshape(
         expert_token_count_fused,
@@ -1505,7 +1505,7 @@ class RoutedMoE(nnx.Module):
     )
     expert_token_count = self._maybe_shard_with_logical(
         expert_token_count,
-        ("activation_batch", "activation_norm_length", None, None, None),
+        ("activation_batch_moe", "activation_norm_length_moe", None, None, None),
     )
     trunc_expert_mask = expert_mask * jnp.less_equal(expert_token_count, expert_capacity_per_batch)
     combined_expert_mask = jnp.sum(trunc_expert_mask, axis=3)
@@ -1585,7 +1585,7 @@ class RoutedMoE(nnx.Module):
         expert_mask,
         (batch_size, seq_len * self.num_experts_per_tok, self.num_experts),
     )
-    expert_mask_fused = self._maybe_shard_with_logical(expert_mask_fused, ("activation_batch", None, None))
+    expert_mask_fused = self._maybe_shard_with_logical(expert_mask_fused, ("activation_batch_moe", None, None))
     expert_token_count_fused = jnp.cumsum(expert_mask_fused, axis=1)
     expert_token_count = jnp.reshape(
         expert_token_count_fused,
@@ -1593,7 +1593,7 @@ class RoutedMoE(nnx.Module):
     )
     expert_token_count = self._maybe_shard_with_logical(
         expert_token_count,
-        ("activation_batch", "activation_norm_length", None, None),
+        ("activation_batch_moe", "activation_norm_length_moe", None, None),
     )
     trunc_expert_mask = expert_mask * jnp.less_equal(expert_token_count, expert_capacity_per_batch)
     combined_expert_mask = jnp.sum(trunc_expert_mask, axis=2)
@@ -1691,11 +1691,13 @@ class RoutedMoE(nnx.Module):
   ) -> tuple[jax.Array, Optional[jax.Array], Optional[jax.Array]]:
     """Dense matrix multiplication."""
     # gate_logits: batch, length, expert
-    gate_logits = self._maybe_shard_with_logical(gate_logits, ("activation_batch", "activation_norm_length", None))
+    gate_logits = self._maybe_shard_with_logical(
+        gate_logits, ("activation_batch_moe", "activation_length_no_exp_moe", None)
+    )
     if self.config.model_name.startswith("deepseek3"):
       # pre_bias_logits is None for non-DeepSeek v3 models
       pre_bias_logits = self._maybe_shard_with_logical(
-          pre_bias_logits, ("activation_batch", "activation_norm_length", None)
+          pre_bias_logits, ("activation_batch_moe", "activation_length_no_exp_moe", None)
       )
     top_k_weights, top_k_indices = self.get_topk(gate_logits, pre_bias_logits, self.rngs)
     is_llama4_decoder_layer = self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4
@@ -1735,16 +1737,16 @@ class RoutedMoE(nnx.Module):
         dispatch_mask, combine_mask = self.generate_masks(
             top_k_indices, weights  # pylint: disable=undefined-variable,possibly-used-before-assignment
         )
-        mask_axes = ("activation_batch", "activation_norm_length", None, None)
+        mask_axes = ("activation_batch_moe", "activation_norm_length_moe", None, None)
         dispatch_axis = (
             "activation_exp",
-            "activation_batch_no_exp",
+            "activation_batch_no_exp_moe",
             None,
-            "activation_embed",
+            "activation_embed_moe",
         )
         mlp_axis = (
             "activation_exp",
-            "activation_batch_no_exp",
+            "activation_batch_no_exp_moe",
             None,
             "activation_mlp",
         )
@@ -1759,56 +1761,56 @@ class RoutedMoE(nnx.Module):
         dispatch_mask, combine_mask = self.generate_masks_subgroup(top_k_indices, softmax_probs)
         if self.get_context_autoregressive_parallelism_size() > 0 and cp == 1:
           mask_axes = (
-              "activation_norm_length",
-              "activation_batch",
+              "activation_norm_length_moe",
+              "activation_batch_moe",
               None,
               None,
               None,
           )
           input_axis = (
-              "activation_norm_length",
-              "activation_batch",
+              "activation_norm_length_moe",
+              "activation_batch_moe",
               None,
-              "activation_embed",
+              "activation_embed_moe",
           )
           dispatch_axis = (
               "activation_exp",
-              "activation_batch_no_exp",
+              "activation_batch_no_exp_moe",
               None,
               None,
-              "activation_embed",
+              "activation_embed_moe",
           )
           mlp_axis = (
               "activation_exp",
-              "activation_batch_no_exp",
+              "activation_batch_no_exp_moe",
               None,
               None,
               "activation_mlp",
           )
         else:
           mask_axes = (
-              "activation_batch",
-              "activation_norm_length",
+              "activation_batch_moe",
+              "activation_norm_length_moe",
               None,
               None,
               None,
           )
           input_axis = (
-              "activation_batch",
-              "activation_norm_length",
+              "activation_batch_moe",
+              "activation_norm_length_moe",
               None,
-              "activation_embed",
+              "activation_embed_moe",
           )
           dispatch_axis = (
               "activation_exp",
-              "activation_batch_no_exp",
+              "activation_batch_no_exp_moe",
               None,
               None,
-              "activation_embed",
+              "activation_embed_moe",
           )
           mlp_axis = (
               "activation_exp",
-              "activation_batch_no_exp",
+              "activation_batch_no_exp_moe",
               None,
               None,
               "activation_mlp",
@@ -1834,10 +1836,10 @@ class RoutedMoE(nnx.Module):
               dispatch,
               (
                   None,
-                  "activation_batch_no_exp",
-                  "activation_norm_length",
+                  "activation_batch_no_exp_moe",
+                  "activation_norm_length_moe",
                   None,
-                  "activation_embed",
+                  "activation_embed_moe",
               ),
           )
         dispatch = self._maybe_shard_with_logical(
@@ -1860,7 +1862,7 @@ class RoutedMoE(nnx.Module):
             layer_w0,
             mlp_axis,
         )
-        layer_w0 = adc.checkpoint_name(layer_w0, "mlpwi_0")
+        layer_w0 = adc.checkpoint_name(layer_w0, "moe_mlpwi_0")
       with jax.named_scope("wi_1"):
         w1_kernel_axes = ("exp", None, "mlp")
         w1_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w1_kernel, w1_kernel_axes)
@@ -1876,7 +1878,7 @@ class RoutedMoE(nnx.Module):
             layer_w1,
             mlp_axis,
         )
-        layer_w1 = adc.checkpoint_name(layer_w1, "mlpwi_1")
+        layer_w1 = adc.checkpoint_name(layer_w1, "moe_mlpwi_1")
       layer_multiply = self.apply_ffn_activation(layer_w0, layer_w1)
       with jax.named_scope("wo"):
         wo_kernel_axes = ("exp", "mlp", None)
@@ -1897,12 +1899,12 @@ class RoutedMoE(nnx.Module):
               intermediate_layer,
               (
                   "activation_exp",
-                  "activation_batch_no_exp",
+                  "activation_batch_no_exp_moe",
                   None,
-                  "activation_embed",
+                  "activation_embed_moe",
               ),
           )
-        intermediate_layer = adc.checkpoint_name(intermediate_layer, "mlpwo")
+        intermediate_layer = adc.checkpoint_name(intermediate_layer, "moe_mlpwo")
       with jax.named_scope("combine"):
         # Matmul & element wise operation
         output = self.get_einsum(rhs_mesh_axes=mask_axes, einsum_name=COMBINE)(
@@ -1922,7 +1924,9 @@ class RoutedMoE(nnx.Module):
           )
       return output, lb_loss, bias_updates
     else:
-      inputs = self._maybe_shard_with_logical(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
+      inputs = self._maybe_shard_with_logical(
+          inputs, ("activation_batch_moe", "activation_norm_length_moe", "activation_embed_moe")
+      )
       with jax.named_scope("wi_0"):
         layer_w0 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes)(
             "BSM,EMH -> BSEH", inputs, w0_kernel, precision=matmul_precision
@@ -1931,7 +1935,7 @@ class RoutedMoE(nnx.Module):
           layer_w0 = layer_w0 + w0_bias[None, None, :, :]
         if self.config.activations_in_float32:
           layer_w0 = layer_w0.astype(jnp.float32)
-        layer_w0 = adc.checkpoint_name(layer_w0, "mlpwi_0")
+        layer_w0 = adc.checkpoint_name(layer_w0, "moe_mlpwi_0")
       with jax.named_scope("wi_1"):
         layer_w1 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes)(
             "BSM,EMH -> BSEH", inputs, w1_kernel, precision=matmul_precision
@@ -1940,7 +1944,7 @@ class RoutedMoE(nnx.Module):
           layer_w1 = layer_w1 + w1_bias[None, None, :, :]
         if self.config.activations_in_float32:
           layer_w1 = layer_w1.astype(jnp.float32)
-        layer_w1 = adc.checkpoint_name(layer_w1, "mlpwi_1")
+        layer_w1 = adc.checkpoint_name(layer_w1, "moe_mlpwi_1")
       layer_multiply = self.apply_ffn_activation(layer_w0, layer_w1)
 
       with jax.named_scope("wo"):
@@ -1954,7 +1958,7 @@ class RoutedMoE(nnx.Module):
           intermediate_layer = intermediate_layer + wo_bias[None, None, :, :]
         if self.config.activations_in_float32:
           intermediate_layer = intermediate_layer.astype(jnp.float32)
-        intermediate_layer = adc.checkpoint_name(intermediate_layer, "mlpwo")
+        intermediate_layer = adc.checkpoint_name(intermediate_layer, "moe_mlpwo")
       with jax.named_scope("weight_sum"):
         if is_llama4_decoder_layer:
           weights = self.reshape_and_update_weights(jnp.ones_like(top_k_weights), top_k_indices)
@@ -2082,7 +2086,7 @@ class RoutedAndSharedMoE(nnx.Module):
         num_experts_per_tok=self.config.num_experts_per_tok,
         mesh=self.mesh,
         kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
-        kernel_axes=("embed", None),
+        kernel_axes=("embed_moe", None),
         intermediate_dim=self.config.moe_mlp_dim,
         dtype=self.config.dtype,
         weight_dtype=self.config.weight_dtype,

@@ -63,7 +63,7 @@ We include a script for convenient offline inference of MaxText models in `src/m
 An example of how to run this script can be found below:
 
 ```bash
-  python3 -m maxtext.inference.vllm_decode src/maxtext/configs/base.yml \
+  python3 -m maxtext.inference.vllm_decode \
       model_name=qwen3-30b-a3b \
       tokenizer_path=Qwen/Qwen3-30B-A3B \
       load_parameters_path=$CHECKPOINT_PATH \
@@ -133,7 +133,7 @@ curl http://localhost:8000/v1/completions \
 To use a MaxText model architecture for samplers in reinforcement learning algorithms like GRPO, we can override the vLLM model architecture and pass in MaxText specific config arguments similar to the [online inference](online-inference) use-case. An example of an RL command using the MaxText model for samplers can be found below:
 
 ```bash
-python3 -m src.maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_train/rl.yml \
+python3 -m src.maxtext.trainers.post_train.rl.train_rl \
   model_name=qwen3-0.6b \
   tokenizer_path=Qwen/Qwen3-0.6B \
   run_name=$WORKLOAD \
