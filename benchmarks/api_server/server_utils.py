@@ -32,6 +32,7 @@ from fastapi import HTTPException
 
 from benchmarks.api_server.maxtext_generator import MaxTextGenerator
 from benchmarks.api_server.server_models import LogProbsPayload
+from benchmarks.api_server.encoding import encoding_dsv32
 
 # ----------------------------
 # Debugging
@@ -114,6 +115,11 @@ def get_prompts_for_request(req: any, llm: MaxTextGenerator) -> List[str]:
       A list of string prompts.
   """
   if hasattr(req, "messages"):  # ChatCompletionRequest
+    if "deepseek3.2" in req.model.lower() and encoding_dsv32:
+      messages = [m.model_dump(exclude_none=True) for m in req.messages]
+      encode_config = dict(thinking_mode="thinking", drop_thinking=True, add_default_bos_token=True)
+      return [encoding_dsv32.encode_messages(messages, **encode_config)]
+
     messages = [m.model_dump() for m in req.messages]
     formatted_prompt = llm.tokenizer.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     return [formatted_prompt]
