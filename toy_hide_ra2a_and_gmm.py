@@ -21,8 +21,8 @@ assert EP * BATCH_PER_EP_SHARD == GLOBAL_BATCH, "Global Batch must be a multiple
 BATCH_PER_EP_SHARD_PER_EXP = BATCH_PER_EP_SHARD // NUM_EXP # aka block assignment per shard or something....
 assert NUM_EXP * BATCH_PER_EP_SHARD_PER_EXP == BATCH_PER_EP_SHARD, "Global Batch must be a multiple of (EP * EXP)"
 
-NUM_A2A_CHUNKS=4
-MODEL_CHUNK_SIZE = MODEL // NUM_A2A_CHUNKS
+print_a2a_input_vars=True
+
 
 
  # 1D EP mesh
@@ -51,9 +51,8 @@ x_sharding = NamedSharding(mesh, x_partition_spec)
 )
 def ra2a_gmm(x_input, output_shape, input_offsets, send_sizes, output_offsets, recv_sizes, group_sizes, weights):
     # remove singleton leading axis of x
-    x_input = x_input.reshape(x_input.shape[1:])
-    output_ra2a_chunk_shape = jnp.zeros((x_input.shape[0], MODEL_CHUNK_SIZE))
-                                                 
+    x = x_input.reshape(x_input.shape[1:])
+    output_shape = output_shape.reshape(output_shape.shape[1:])
     group_sizes = group_sizes.reshape(group_sizes.shape[1:])
 
     input_offsets = input_offsets.reshape(input_offsets.shape[1:])
@@ -61,41 +60,18 @@ def ra2a_gmm(x_input, output_shape, input_offsets, send_sizes, output_offsets, r
     output_offsets = output_offsets.reshape(output_offsets.shape[1:])
     recv_sizes = recv_sizes.reshape(recv_sizes.shape[1:])
 
-    def ra2a_chunk(ra2a_input):
-        return jax.lax.ragged_all_to_all(
-            ra2a_input,
-            output_ra2a_chunk_shape,
-            input_offsets,
-            send_sizes,
-            output_offsets,
-            recv_sizes,
-            axis_name="expert",
-        )
+    ra2a_output = jax.lax.ragged_all_to_all(
+        x,
+        output_shape,
+        input_offsets,
+        send_sizes,
+        output_offsets,
+        recv_sizes,
+        axis_name="expert",
+    )
 
-    def compute_and_ra2a(activation_chunk, weight_chunk, ra2a_input, gmm_accum):
-        gmm_output_partial = tokamax.ragged_dot(activation_chunk, weight_chunk, group_sizes, implementation="mosaic")
-        gmm_accum = gmm_accum + gmm_output_partial
-        ra2a_output = ra2a_chunk(ra2a_input)
-        return gmm_accum, ra2a_output
-
-
-    # first ra2a is exposed
-    first_chunk = jax.lax.dynamic_slice_in_dim(x_input, 0, MODEL_CHUNK_SIZE, 1)
-    ra2a_output = ra2a_chunk(first_chunk)
-    gmm_output = jnp.zeros((x_input.shape[0], FF), dtype=jnp.bfloat16) # initialize accumulation of chunks to zeros
-    next_ra2a_input = jax.lax.dynamic_slice_in_dim(x_input, MODEL_CHUNK_SIZE, MODEL_CHUNK_SIZE, 1)
-
-    for i in range(NUM_A2A_CHUNKS - 1):
-        weight_chunk = jax.lax.dynamic_slice_in_dim(weights, i * MODEL_CHUNK_SIZE, MODEL_CHUNK_SIZE, 1)
-        gmm_output, ra2a_output = compute_and_ra2a(ra2a_output, weight_chunk, next_ra2a_input, gmm_output)
-        next_ra2a_input = jax.lax.dynamic_slice_in_dim(x_input, MODEL_CHUNK_SIZE * (i + 2), MODEL_CHUNK_SIZE, 1)
-    
-    # last compute has no ra2a
-    last_weight_chunk = jax.lax.dynamic_slice_in_dim(weights, (NUM_A2A_CHUNKS - 1) * MODEL_CHUNK_SIZE, MODEL_CHUNK_SIZE, 1)
-    last_gmm_partial = tokamax.ragged_dot(ra2a_output, last_weight_chunk, group_sizes, implementation="mosaic")
-    gmm_output = gmm_output + last_gmm_partial
-    
-    output = jnp.expand_dims(gmm_output, axis=0)
+    output = tokamax.ragged_dot(ra2a_output, weights, group_sizes, implementation="mosaic")
+    output = jnp.expand_dims(output, axis=0)
 
     return output
 
