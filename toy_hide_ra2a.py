@@ -7,11 +7,42 @@ from jax.experimental import mesh_utils
 import functools
 from enum import Enum, auto
 from jax.sharding import PartitionSpec as P
-import tokamax
+from tokamax._src.ops.ragged_dot import pallas_mosaic_tpu
+#import tokamax
+import datetime
 
-GLOBAL_BATCH=1024
+def simple_timeit(f, *args, tries=3, task=None, enable_profile=True):
+  """Simple utility to time a function for multiple runs"""
+  assert task is not None
+
+  trace_name = f"{task}"  # + '_' ]+ ''.join(random.choice(string.ascii_uppercase + string.digits) for _ in range(10))
+  trace_dir = f"gs://mattdavidow-maxtext-br/mintext-mpmd/a8/{trace_name}"
+
+  outcomes_ms = []
+  jax.block_until_ready(f(*args))  # warm it up!
+  import time
+  time.sleep(5) #profile is messed up?
+  if enable_profile:
+    jax.profiler.start_trace(trace_dir)
+    print(f"{trace_dir=}")
+  for _ in range(tries):
+    s = datetime.datetime.now()
+    jax.block_until_ready(f(*args))
+    e = datetime.datetime.now()
+    outcomes_ms.append(1000 * (e - s).total_seconds())
+  if enable_profile:
+    jax.profiler.stop_trace()
+  average_time_ms = sum(outcomes_ms) / len(outcomes_ms)
+  print(f"Average time ms for mm for {task} is {round(average_time_ms, 3)}")
+  return average_time_ms / 1000
+
+
+
+
+
+GLOBAL_BATCH=1048576
 MODEL=2048
-FF=8192
+FF=16384
 NUM_EXP=8
 EP=8
 EXP_PER_SHARD = NUM_EXP // EP
@@ -32,12 +63,15 @@ x_partition_spec = jax.sharding.PartitionSpec("expert", None)
 explicit_ep_partition_spec = jax.sharding.PartitionSpec("expert", None, None)
 x_sharding = NamedSharding(mesh, x_partition_spec)
 
+# This usage (API) is surprisingly hard to discover
+config = pallas_mosaic_tpu.Config(tile_m=1024, tile_k=512, tile_n=2048)
+tpu_ragged_dot = pallas_mosaic_tpu.PallasMosaicTpuRaggedDot(config=config)
+
 @functools.partial(
     shard_map,
     mesh=mesh,
     in_specs=(
         explicit_ep_partition_spec,
-        x_partition_spec,
         x_partition_spec,
         x_partition_spec,
         x_partition_spec,
@@ -49,10 +83,10 @@ x_sharding = NamedSharding(mesh, x_partition_spec)
     out_specs=(explicit_ep_partition_spec),
     check_vma=False,
 )
-def ra2a_gmm(x_input, output_shape, input_offsets, send_sizes, output_offsets, recv_sizes, group_sizes, weights):
+def ra2a_gmm(x_input, input_offsets, send_sizes, output_offsets, recv_sizes, group_sizes, weights):
     # remove singleton leading axis of x
     x_input = x_input.reshape(x_input.shape[1:])
-    output_ra2a_chunk_shape = jnp.zeros((x_input.shape[0], MODEL_CHUNK_SIZE))
+    output_ra2a_chunk_shape = jnp.empty((x_input.shape[0], MODEL_CHUNK_SIZE), dtype=jnp.bfloat16)
                                                  
     group_sizes = group_sizes.reshape(group_sizes.shape[1:])
 
@@ -73,7 +107,8 @@ def ra2a_gmm(x_input, output_shape, input_offsets, send_sizes, output_offsets, r
         )
 
     def compute_and_ra2a(activation_chunk, weight_chunk, ra2a_input, gmm_accum):
-        gmm_output_partial = tokamax.ragged_dot(activation_chunk, weight_chunk, group_sizes, implementation="mosaic")
+        #gmm_output_partial = tokamax.ragged_dot(activation_chunk, weight_chunk, group_sizes, implementation="mosaic", tile_sizes=TILE_SIZE)
+        gmm_output_partial = tpu_ragged_dot(activation_chunk, weight_chunk, group_sizes=group_sizes)
         gmm_accum = gmm_accum + gmm_output_partial
         ra2a_output = ra2a_chunk(ra2a_input)
         return gmm_accum, ra2a_output
@@ -92,7 +127,8 @@ def ra2a_gmm(x_input, output_shape, input_offsets, send_sizes, output_offsets, r
     
     # last compute has no ra2a
     last_weight_chunk = jax.lax.dynamic_slice_in_dim(weights, (NUM_A2A_CHUNKS - 1) * MODEL_CHUNK_SIZE, MODEL_CHUNK_SIZE, 1)
-    last_gmm_partial = tokamax.ragged_dot(ra2a_output, last_weight_chunk, group_sizes, implementation="mosaic")
+    #last_gmm_partial = tokamax.ragged_dot(ra2a_output, last_weight_chunk, group_sizes, implementation="mosaic", tile_sizes=TILE_SIZE)
+    last_gmm_partial = tpu_ragged_dot(ra2a_output, last_weight_chunk, group_sizes=group_sizes)
     gmm_output = gmm_output + last_gmm_partial
     
     output = jnp.expand_dims(gmm_output, axis=0)
@@ -113,8 +149,7 @@ x = jnp.expand_dims(x, axis=1)
 x = jnp.tile(x, (1, MODEL))
 x = jnp.expand_dims(x, axis=0)
 x = jnp.tile(x, (EP, 1, 1))
-
-output_shape = x.copy()
+x = jnp.array(x, dtype=jnp.bfloat16)
 
 input_offsets = [[BATCH_PER_EP_SHARD_PER_EXP * exp_idx for exp_idx in range(NUM_EXP)] for _ in range(EP)]
 input_offsets = jnp.array(input_offsets, dtype=jnp.int32)
@@ -128,9 +163,11 @@ tokens_per_local_expert = BATCH_PER_EP_SHARD / EXP_PER_SHARD
 group_sizes = jnp.array([tokens_per_local_expert for _ in range(EXP_PER_SHARD)], dtype=jnp.int32)
 group_sizes = jnp.tile(jnp.expand_dims(group_sizes, axis=0), (EP, 1))
 
-weights = jnp.zeros([NUM_EXP, MODEL, FF])
+weights = jnp.zeros([NUM_EXP, MODEL, FF], dtype=jnp.bfloat16)
 
 jit_wrapper = jax.jit(ra2a_gmm)
-output = jit_wrapper(x, output_shape, input_offsets, send_sizes, output_offsets, recv_sizes, group_sizes, weights)
+output = jit_wrapper(x, input_offsets, send_sizes, output_offsets, recv_sizes, group_sizes, weights)
+simple_timeit(jit_wrapper, x, input_offsets, send_sizes, output_offsets, recv_sizes, group_sizes, weights, task="overlap_ra2a")
 
-breakpoint()
+
+
