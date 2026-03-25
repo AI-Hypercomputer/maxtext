@@ -34,7 +34,7 @@ You can set `per_device_batch_size` and `gradient_accumulation_steps` in `config
 
 `global_batch_to_load` = `global_batch_size_to_train_on x expansion_factor_real_data`
 
-When `expansion_factor_real_data > 1`, only a subset of hosts read data from the source (e.g., a GCS bucket). These "loading hosts" read more data than they need for their own devices and distribute the surplus to other "non-loading" hosts. This reduces the number of concurrent connections to the data source, which can significantly improve I/O throughput. When set to between 0 and 1, it's for grain pipeline to use a smaller chip count to read checkpoint from a larger chip count job. Details in https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/data_input_pipeline/data_input_grain.md#using-grain.
+When `expansion_factor_real_data > 1`, only a subset of hosts read data from the source (e.g., a GCS bucket). These "loading hosts" read more data than they need for their own devices and distribute the surplus to other "non-loading" hosts. This reduces the number of concurrent connections to the data source, which can significantly improve I/O throughput. When set to between 0 and 1, it's for grain pipeline to use a smaller chip count to read checkpoint from a larger chip count job. Details in https://maxtext.readthedocs.io/en/maxtext-v0.2.1/guides/data_input_pipeline/data_input_grain.html#using-grain.
 
 ## Gradient Accumulation Steps
 
