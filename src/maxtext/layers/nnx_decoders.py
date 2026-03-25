@@ -35,6 +35,7 @@ from maxtext.common.common_types import (
     MODEL_MODE_TRAIN,
     Config,
     DecoderBlockType,
+    MultimodalInput,
     ShardMode,
 )
 from maxtext.inference import page_manager
@@ -904,7 +905,14 @@ class NNXDecoder(nnx.Module):
       audio_embeddings: None | jnp.ndarray = None,
       audio_masks: None | jnp.ndarray = None,
       deepstack_visual_embeds: None | list[jnp.ndarray] = None,
+      multimodal_input: None | MultimodalInput = None,
   ):
+    if multimodal_input is not None:
+      image_embeddings = multimodal_input.image_embeddings
+      image_masks = multimodal_input.image_masks
+      audio_embeddings = multimodal_input.audio_embeddings
+      audio_masks = multimodal_input.audio_masks
+      bidirectional_mask = multimodal_input.bidirectional_mask
     cfg = self.config
     assert decoder_input_tokens.ndim == 2  # [batch, len]
 
