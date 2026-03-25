@@ -15,11 +15,13 @@
 """Tests for the common MaxText utilities"""
 
 import functools
-from typing import Any, Sequence
 from collections.abc import Callable
+from typing import Any, Sequence
 import unittest
 from unittest.mock import MagicMock, Mock, patch
 from dataclasses import dataclass, field
+import numpy as np
+import optax
 
 from flax import linen as nn
 from flax import nnx
@@ -29,6 +31,7 @@ import jax
 from jax import random, vmap
 import jax.numpy as jnp
 from jax.sharding import AxisType, Mesh, NamedSharding, PartitionSpec
+from jax.experimental import mesh_utils
 from maxtext.configs import pyconfig
 from maxtext.common.common_types import DecoderBlockType, MODEL_MODE_TRAIN, ShardMode
 from maxtext.inference import inference_utils
@@ -39,8 +42,7 @@ from maxtext.utils import maxtext_utils
 from maxtext.utils import sharding
 from maxtext.utils.sharding import assert_params_sufficiently_sharded, get_formatted_sharding_annotations
 from tests.utils.test_helpers import get_test_config_path, get_decoupled_parallelism_overrides
-import numpy as np
-import optax
+from maxtext.utils import maxtext_utils_nnx
 
 Transformer = models.transformer_as_linen
 
@@ -179,11 +181,7 @@ class UpdateStateParamTest(unittest.TestCase):
         "decoder": {"gate": {"bias": jnp.array([0.5, 0.5])}},
     }
     self.state = train_state.TrainState(
-        step=0,
-        apply_fn=self.model.apply,
-        params=self.initial_params,
-        tx=None,
-        opt_state={},
+        step=0, apply_fn=self.model.apply, params=self.initial_params, tx=None, opt_state={}
     )
 
   def test_update_mode_add(self):
@@ -196,10 +194,10 @@ class UpdateStateParamTest(unittest.TestCase):
     self.assertTrue(jnp.allclose(actual, expected))
 
     # Other values are untouched
-    original_layer_0 = self.state.params["layers"]["layer_0"]["bias"]
+    original_layer_0 = self.state.params["layers"]["layer_0"]["bias"]  # pylint: disable=unsubscriptable-object
     new_layer_0 = new_state.params["layers"]["layer_0"]["bias"]
     self.assertTrue(jnp.array_equal(original_layer_0, new_layer_0))
-    original_layer_1 = self.state.params["layers"]["layer_1"]["bias"]
+    original_layer_1 = self.state.params["layers"]["layer_1"]["bias"]  # pylint: disable=unsubscriptable-object
     new_layer_1 = new_state.params["layers"]["layer_1"]["bias"]
     self.assertTrue(jnp.array_equal(original_layer_1, new_layer_1))
 
@@ -264,7 +262,7 @@ class MaxUtilsInitState(unittest.TestCase):
 
 
 @nnx.register_variable_name("special_variables")
-class SpecialVariables(nnx.Variable):
+class SpecialVariables(nnx.Variable):  # pylint: disable=abstract-method
   pass
 
 
@@ -281,7 +279,7 @@ class ModelWithMultipleCollections(nnx.Module):
     return x
 
 
-class TrainState(train_state.TrainState):
+class TrainState(train_state.TrainState):  # pylint: disable=abstract-method
   other_variables: nnx.State
 
 
@@ -993,49 +991,63 @@ class TestGetFunctionalTrainWithSignature(unittest.TestCase):
 
     return train_step
 
+  def _make_mock_config(self, pure_nnx=False):
+    cfg = MagicMock()
+    cfg.pure_nnx = pure_nnx
+    return cfg
+
   def test_returns_five_tuple(self):
     step = self._make_mock_step()
     result = maxtext_utils.get_functional_train_with_signature(
-        step, "data_sharding", "state_shardings", "model", "config"
+        step, "data_sharding", "state_shardings", "model", self._make_mock_config()
     )
     self.assertEqual(len(result), 5)
 
   def test_functional_train_has_correct_name(self):
     step = self._make_mock_step()
     fn, _, _, _, _ = maxtext_utils.get_functional_train_with_signature(
-        step, "data_sharding", "state_shardings", "model", "config"
+        step, "data_sharding", "state_shardings", "model", self._make_mock_config()
     )
     self.assertEqual(fn.__name__, "train_step")
 
-  def test_in_shardings_structure(self):
+  def test_linen_in_shardings_includes_rng(self):
+    """pure_nnx=False: in_shardings should be (state, batch, rng)."""
     step = self._make_mock_step()
     _, in_shardings, _, _, _ = maxtext_utils.get_functional_train_with_signature(
-        step, "data_sharding", "state_shardings", "model", "config"
+        step, "data_sharding", "state_shardings", "model", self._make_mock_config(pure_nnx=False)
     )
-    # (state, batch, rng)
     self.assertEqual(len(in_shardings), 3)
     self.assertIsNone(in_shardings[2])  # rng sharding is None
+
+  def test_nnx_in_shardings_excludes_rng(self):
+    """pure_nnx=True: in_shardings should be (state, batch) — no rng slot."""
+    step = self._make_mock_step()
+    _, in_shardings, _, _, _ = maxtext_utils.get_functional_train_with_signature(
+        step, "data_sharding", "state_shardings", "model", self._make_mock_config(pure_nnx=True)
+    )
+    self.assertEqual(len(in_shardings), 2)
 
   def test_donate_argnums_is_zero(self):
     step = self._make_mock_step()
     _, _, _, _, donate_argnums = maxtext_utils.get_functional_train_with_signature(
-        step, "data_sharding", "state_shardings", "model", "config"
+        step, "data_sharding", "state_shardings", "model", self._make_mock_config()
     )
     self.assertEqual(donate_argnums, 0)
 
   def test_functional_train_is_partial(self):
     """functional_train should partially apply model and config."""
     received = {}
+    cfg = self._make_mock_config()
 
     def train_step(model, config, _state_shardings, _params_shardings, state, _batch, _rng=None):
       received["model"] = model
       received["config"] = config
       return state, {}
 
-    fn, _, _, _, _ = maxtext_utils.get_functional_train_with_signature(train_step, "ds", "ss", "my_model", "my_config")
+    fn, _, _, _, _ = maxtext_utils.get_functional_train_with_signature(train_step, "ds", "ss", "my_model", cfg)
     fn("state", "batch")
     self.assertEqual(received["model"], "my_model")
-    self.assertEqual(received["config"], "my_config")
+    self.assertEqual(received["config"], cfg)
 
 
 class TestGetFunctionalEvalWithSignature(unittest.TestCase):
@@ -1047,25 +1059,50 @@ class TestGetFunctionalEvalWithSignature(unittest.TestCase):
 
     return eval_step
 
+  def _make_mock_config(self, pure_nnx=False):
+    cfg = MagicMock()
+    cfg.pure_nnx = pure_nnx
+    return cfg
+
   def test_returns_five_tuple(self):
     step = self._make_mock_eval_step()
-    result = maxtext_utils.get_functional_eval_with_signature(step, "ds", "ss", "model", "config")
+    result = maxtext_utils.get_functional_eval_with_signature(step, "ds", "ss", "model", self._make_mock_config())
     self.assertEqual(len(result), 5)
 
   def test_functional_eval_has_correct_name(self):
     step = self._make_mock_eval_step()
-    fn, _, _, _, _ = maxtext_utils.get_functional_eval_with_signature(step, "ds", "ss", "model", "config")
+    fn, _, _, _, _ = maxtext_utils.get_functional_eval_with_signature(step, "ds", "ss", "model", self._make_mock_config())
     self.assertEqual(fn.__name__, "eval_step")
 
   def test_out_shardings_is_none(self):
     step = self._make_mock_eval_step()
-    _, _, out_shardings, _, _ = maxtext_utils.get_functional_eval_with_signature(step, "ds", "ss", "model", "config")
+    _, _, out_shardings, _, _ = maxtext_utils.get_functional_eval_with_signature(
+        step, "ds", "ss", "model", self._make_mock_config()
+    )
     self.assertIsNone(out_shardings)
 
   def test_donate_argnums_is_empty(self):
     step = self._make_mock_eval_step()
-    _, _, _, _, donate_argnums = maxtext_utils.get_functional_eval_with_signature(step, "ds", "ss", "model", "config")
+    _, _, _, _, donate_argnums = maxtext_utils.get_functional_eval_with_signature(
+        step, "ds", "ss", "model", self._make_mock_config()
+    )
     self.assertEqual(donate_argnums, ())
+
+  def test_nnx_in_shardings_excludes_rng(self):
+    """pure_nnx=True: in_shardings should be (state, batch) — no rng slot."""
+    step = self._make_mock_eval_step()
+    _, in_shardings, _, _, _ = maxtext_utils.get_functional_eval_with_signature(
+        step, "batch_sharding", "state_sharding", "model", self._make_mock_config(pure_nnx=True)
+    )
+    self.assertEqual(len(in_shardings), 2)
+
+  def test_linen_in_shardings_includes_rng(self):
+    """pure_nnx=False: in_shardings should be (state, batch, rng)."""
+    step = self._make_mock_eval_step()
+    _, in_shardings, _, _, _ = maxtext_utils.get_functional_eval_with_signature(
+        step, "batch_sharding", "state_sharding", "model", self._make_mock_config(pure_nnx=False)
+    )
+    self.assertEqual(len(in_shardings), 3)
 
 
 class TestGetShapedBatch(unittest.TestCase):
@@ -1412,6 +1449,106 @@ class TestPrintShardingsParams(unittest.TestCase):
     """logical_annotations=None should be handled (no logical column)."""
     params, param_sharding, _ = self._make_simple_params()
     maxtext_utils.print_shardings_params(params, param_sharding, mesh=self.mesh, logical_annotations=None)
+
+
+class TestNNXAbstractState(unittest.TestCase):
+  """Test the get_abstract_state_nnx func."""
+
+  @dataclass
+  class MockConfig:
+    init_weights_seed: int = 42
+    shard_optimizer_over_data: bool = False
+    optimizer_memory_host_offload: bool = False
+    parameter_memory_host_offload: bool = False
+    param_scan_axis: int = 0
+    logical_axis_rules: list = field(default_factory=lambda: [["data", ["data"]]])
+
+  class MockTrainState(nnx.Module):
+    """Simulates a TrainState with params and optimizer state."""
+
+    def __init__(self, rngs: nnx.Rngs):
+      # Model parameters
+      device_num = len(jax.local_devices())
+      self.params = nnx.Linear(
+          2, 4, kernel_init=nnx.with_partitioning(nnx.initializers.ones, sharding=("model",)), rngs=rngs
+      )
+      # Simulated optimizer state
+      self.optimizer = nnx.Variable(jnp.zeros((device_num,)), sharding=("model",))
+
+  def setUp(self):
+    # Create a real 1D mesh on local devices
+    devices = jax.local_devices()
+    self.mesh = Mesh(mesh_utils.create_device_mesh((len(devices), 1)), axis_names=("model", "data"))
+    self.config = self.MockConfig()
+
+  def nnx_init_trainstate_wrapper(self):
+    """Wrapper to initialize the mock NNX model."""
+    rngs = maxtext_utils_nnx.create_nnx_rngs(self.config)
+    return self.MockTrainState(rngs)
+
+  def test_basic_abstraction(self):
+    """Verifies the basic return structure and partition spec extraction."""
+    abstract_state, annotations, shardings = maxtext_utils.get_abstract_state_nnx(
+        self.config, self.mesh, self.nnx_init_trainstate_wrapper
+    )
+
+    # Check return types
+    self.assertIsInstance(abstract_state, nnx.State)
+    self.assertIsInstance(annotations, nnx.State)
+    self.assertIsInstance(shardings, nnx.State)
+
+    # Verify PartitionSpec was extracted correctly from the mock model's annotations
+    # Path: params -> kernel -> spec
+    self.assertEqual(
+        annotations.params.kernel.get_value(),
+        PartitionSpec(
+            "model",
+        ),
+    )
+
+  def test_shard_optimizer_over_data(self):
+    """Verifies that 'data' is added to optimizer sharding using the real utility."""
+    self.config.shard_optimizer_over_data = True
+
+    _, annotations, _ = maxtext_utils.get_abstract_state_nnx(self.config, self.mesh, self.nnx_init_trainstate_wrapper)
+
+    # Original Pspec for optimizer was PartitionSpec(None).
+    # add_data_to_sharding should find that dim 0 is compatible with mesh 'data'
+    # and update it to PartitionSpec(('data',)).
+    opt_spec = annotations.optimizer.get_value()
+
+    # Verify 'data' is now in the spec
+    self.assertEqual(opt_spec, PartitionSpec(("data", "model")))
+
+  def test_optimizer_host_offload(self):
+    """Verifies that optimizer memory is moved to host when configured."""
+    self.config.optimizer_memory_host_offload = True
+
+    _, _, shardings = maxtext_utils.get_abstract_state_nnx(self.config, self.mesh, self.nnx_init_trainstate_wrapper)
+
+    # Optimizer state should be pinned to host
+    opt_sharding = shardings.optimizer.get_value()
+    self.assertEqual(opt_sharding.memory_kind, "pinned_host")
+
+    # Params should still be on default memory (usually device)
+    param_sharding = shardings.params.kernel.get_value()
+    self.assertNotEqual(param_sharding.memory_kind, "pinned_host")
+
+  def test_parameter_host_offload(self):
+    """Verifies that parameter memory is moved to host when configured."""
+    self.config.parameter_memory_host_offload = True
+    self.config.param_scan_axis = 0
+
+    _, _, shardings = maxtext_utils.get_abstract_state_nnx(self.config, self.mesh, self.nnx_init_trainstate_wrapper)
+
+    # Parameters should be pinned to host
+    param_sharding = shardings.params.kernel.get_value()
+    self.assertEqual(param_sharding.memory_kind, "pinned_host")
+
+  def test_invalid_init_fn(self):
+    """Ensures function raises error if no init function is provided."""
+    with self.assertRaises(AssertionError):
+      maxtext_utils.get_abstract_state_nnx(self.config, self.mesh, None)
 
 
 if __name__ == "__main__":
