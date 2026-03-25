@@ -11,7 +11,7 @@ ZONE          := $(REGION)-b
 CLUSTER_NAME  ?= brahmai-v6e-lustre
 RESERVATION   := cloudtpu-20260317070000-2123307204
 NETWORK       := zenteiq-tpu-vpc
-WORKLOAD_NAME ?= moe-models-test
+WORKLOAD_NAME ?= brahmai-test
 
 DEVICE     := tpu
 TPU_TYPE   := v6e-16
