@@ -312,7 +312,7 @@ def sft_preprocessing_pipeline(
   tokenizer_model, pad_id = data_processing_utils.get_tokenizer_and_pad_id(config)
   base_tokenizer_model = tokenizer_model
 
-  tokenizer_model = tokenizer_model.tokenizer
+  tokenizer_model = getattr(tokenizer_model, "tokenizer", tokenizer_model)
 
   data_processing_utils.validate_and_configure_sft_columns(
       data_columns, tokenizer_model, getattr(config, "chat_template", None)
