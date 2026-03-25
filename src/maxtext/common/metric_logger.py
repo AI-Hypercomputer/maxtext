@@ -219,7 +219,7 @@ class MetricLogger:
     return step in boundary_steps
 
   def _maybe_abort_after_write_metrics(self, metrics):
-    """ This function checks whether we have nan or inf values in training"""
+    """This function checks whether we have nan or inf values in training"""
     loss = metrics["scalar"].get("learning/loss")
     if self.config.abort_on_nan_loss and np.isnan(loss):
       max_logging.log("Aborting training due to NaN loss.")
@@ -227,7 +227,7 @@ class MetricLogger:
     if self.config.abort_on_inf_loss and np.isinf(loss):
       max_logging.log("Aborting training due to Inf loss.")
       sys.exit(1)
-    
+
   def write_metrics_locally(self, metrics, step):
     """Writes metrics locally for testing."""
     with open(self.config.metrics_file, "a", encoding="utf8") as local_metrics_file:

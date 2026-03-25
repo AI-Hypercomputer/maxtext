@@ -478,7 +478,7 @@ class MaxTextCheckpointManager(tunix_checkpoint_manager.CheckpointManager):
 
     if self._iterator is not None:
       # Follow MaxText's logic to handle multi-process saving
-      # Logic extracted from src/MaxText/common/checkpointing.py:save_checkpoint
+      # Logic extracted from src/maxtext/common/checkpointing.py:save_checkpoint
       data_iterator = self._iterator
       if not isinstance(data_iterator, list):
         data_iterator = [data_iterator]

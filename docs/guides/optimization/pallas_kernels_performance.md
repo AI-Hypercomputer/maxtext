@@ -58,7 +58,7 @@ To maximize performance, MaxText uses custom Pallas kernels for memory-bandwidth
 
 - **Training Attention (Flash/Splash-style):** This kernel is the default for training Transformer models in MaxText, such as DeepSeek, Gemma and Llama. It avoids creating the large [L,L] attention matrix to save memory, processing data in smaller, tiled chunks with online softmax accumulation.
 
-  - [`src/MaxText/kernels/attention/splash_attention_kernel.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/kernels/attention/splash_attention_kernel.py)
+  - [`src/maxtext/kernels/attention/splash_attention_kernel.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/kernels/attention/splash_attention_kernel.py)
 
 - **Serving Attention (Paged & Ragged):** For high-throughput inference, this kernel efficiently fetches non-contiguous "pages" of the KV cache from memory. It is a key optimization for our serving stack and is used for models running on MaxText's inference engine.
 
@@ -69,9 +69,9 @@ To maximize performance, MaxText uses custom Pallas kernels for memory-bandwidth
 
   > This is an efficient computation method for Mixture-of-Experts (MoE) models like DeepSeek, Llama 4, Mixtral and Qwen-MoE. In MoE, each token is processed by only a few "experts," which is inefficient for standard matrix multiplication. Megablox solves this by having the CPU (**host**) first create a routing plan (**metadata**) that assigns tokens to experts. The accelerator (**device**) then uses this plan to perform many small, dense matrix multiplications in parallel (**Grouped Matrix Multiplication**), avoiding wasted work on unused experts.
 
-  - [`src/MaxText/kernels/megablox/gmm.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/kernels/megablox/gmm.py)
+  - [`src/maxtext/kernels/megablox/gmm.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/kernels/megablox/gmm.py)
 
-  **Note:** Megablox accelerates the grouped **matmul**; **routing/gating** is separate code ([`src/MaxText/layers/moe.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/layers/moe.py)).
+  **Note:** Megablox accelerates the grouped **matmul**; **routing/gating** is separate code ([`src/maxtext/layers/moe.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/layers/moe.py)).
 
 ## 🔧 The Pallas optimization workflow: code → profile → tune → repeat
 
@@ -83,11 +83,13 @@ Give the kernel a clear name in traces and capture a profile. Always use [`jax.b
 import jax
 from jax import profiler
 
-def my_op(...):
+
+def my_op(x):
     # This name shows up in Perfetto/TensorBoard traces
     with jax.named_scope("my_custom_kernel"):
-        out = my_kernel_wrapper(...)
+        out = my_kernel_wrapper(x)
     return out
+
 
 # Capture a Perfetto/TensorBoard trace
 with profiler.trace("/tmp/tb_profile"):

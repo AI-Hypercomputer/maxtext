@@ -25,11 +25,10 @@ import sys
 
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.append(parent_dir)
-from . import args_helper as helper
-from . import user_configs
-
 from benchmarks.disruption_management.disruption_handler import DisruptionMethod
-from .runner_utils import generate_and_run_workloads
+from benchmarks.recipes import args_helper as helper
+from benchmarks.recipes import user_configs
+from benchmarks.recipes.runner_utils import generate_and_run_workloads
 
 user_configs.USER_CONFIG.max_restarts = 3
 DISRUPTION_METHOD = DisruptionMethod.SIGTERM

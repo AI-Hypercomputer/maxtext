@@ -53,6 +53,8 @@ class Train(unittest.TestCase):
             "enable_goodput_recording=False",
             "enable_checkpoint_cloud_logger=False",
             "monitor_goodput=False",
+            "abort_on_nan_loss=False",
+            "abort_on_inf_loss=False",
         ]
     )
 

@@ -22,10 +22,10 @@
 import datetime
 import dataclasses
 import os
-import args_helper as helper
 
-from benchmarks import maxtext_trillium_model_configs as model_configs
 import benchmarks.maxtext_xpk_runner as mxr
+from benchmarks import maxtext_trillium_model_configs as model_configs
+from benchmarks.recipes import args_helper as helper
 from benchmarks.xpk_configs import XpkClusterConfig
 
 PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server"
@@ -185,7 +185,7 @@ def main() -> int:
   )
 
   # Handle command line arguments using args_helper
-  should_continue = helper.handle_cmd_args(cluster_config, helper.DELETE, xpk_path=XPK_PATH)
+  should_continue = helper.handle_cmd_args(cluster_config, helper.DELETE, os.environ["USER"], xpk_path=XPK_PATH)
 
   if not should_continue:
     return 0

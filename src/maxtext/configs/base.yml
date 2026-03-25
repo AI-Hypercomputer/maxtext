@@ -1141,7 +1141,7 @@ use_tokamax_splash: false
 use_jax_splash: false
 
 # vLLM Adapter Configurations
-# Path to the HuggingFace-style config directory for the adapter (e.g. src/MaxText/integration/vllm/maxtext_vllm_adapter)
+# Path to the HuggingFace-style config directory for the adapter (e.g. src/maxtext/integration/vllm/maxtext_vllm_adapter)
 vllm_hf_config_path: ""
 # A JSON string of overrides to apply to the HuggingFace-style config for the vLLM adapter.
 # This can be used to override specific settings without modifying the original config file. 
