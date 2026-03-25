@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,11 +13,12 @@
 # limitations under the License.
 
 """ Common LoRA utils needed to support LoRA adapters."""
-
 import inspect
 import json
+import os
 from typing import Any, Optional
 
+import omegaconf
 import jax
 import jax.numpy as jnp
 
@@ -362,10 +363,34 @@ def get_lora_abstract_state(base_abstract_params, lora_config):
 # --- Qwix LoRA Utils ---
 
 
+def _get_lora_module_path(mt_config: pyconfig.HyperParameters) -> str:
+  """Gets the regex for modules to apply LoRA on based on the model name."""
+  if mt_config.lora_module_path:
+    return mt_config.lora_module_path
+
+  config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "post_train", "lora_module_path.yml")
+  lora_configs = omegaconf.OmegaConf.load(config_path)
+  model_name = mt_config.model_name.lower()
+
+  for key, module_path in lora_configs.items():
+    if key != "default" and model_name.startswith(key):
+      max_logging.log(f"Auto-detected lora_module_path for model '{model_name}': {module_path}")
+      return str(module_path)
+
+  default_path = lora_configs.get("default", "decoder/layers/.*(self_attention/(query|key|value|out)|mlp/(wi_0|wi_1|wo))")
+  max_logging.log(
+      f"Warning: Model '{model_name}' is not in the list of verified LoRA models. "
+      "Auto-detection might not work. Please provide an explicit `lora_module_path` in your config if training fails."
+  )
+  max_logging.log(f"Falling back to default lora_module_path: {default_path}")
+  return str(default_path)
+
+
 def _build_lora_provider(mt_config: pyconfig.HyperParameters) -> qwix.LoraProvider:
   """Builds a Qwix LoRA provider from MaxText LoRA settings."""
+  lora_module_path = _get_lora_module_path(mt_config)
   lora_kwargs = {
-      "module_path": mt_config.lora_module_path,
+      "module_path": lora_module_path,
       "rank": mt_config.lora_rank,
       "alpha": mt_config.lora_alpha,
       "dropout": 0.0,
@@ -375,14 +400,14 @@ def _build_lora_provider(mt_config: pyconfig.HyperParameters) -> qwix.LoraProvid
   if mt_config.lora_weight_qtype is not None:
     lora_kwargs["weight_qtype"] = mt_config.lora_weight_qtype
     max_logging.log(
-        f"QLoRA configured: module_path={mt_config.lora_module_path} "
+        f"QLoRA configured: module_path={lora_module_path} "
         f"rank={mt_config.lora_rank} alpha={mt_config.lora_alpha} "
         f"weight_qtype={mt_config.lora_weight_qtype} "
         f"tile_size={mt_config.lora_tile_size}"
     )
   else:
     max_logging.log(
-        f"LoRA configured: module_path={mt_config.lora_module_path} "
+        f"LoRA configured: module_path={lora_module_path} "
         f"rank={mt_config.lora_rank} alpha={mt_config.lora_alpha} "
         f"tile_size={mt_config.lora_tile_size}"
     )
@@ -622,7 +647,8 @@ def _prepare_dummy_inputs() -> tuple[jnp.ndarray, jnp.ndarray]:
 
 def _verify_lora_parameters(lora_model: nnx.Module, mt_config: pyconfig.HyperParameters) -> None:
   """Validates that LoRA is active or that target modules were matched."""
-  compiled_module_path = re.compile(mt_config.lora_module_path)
+  lora_module_path = _get_lora_module_path(mt_config)
+  compiled_module_path = re.compile(lora_module_path)
   matched_module_paths = []
   sample_module_paths = []
 
@@ -634,16 +660,16 @@ def _verify_lora_parameters(lora_model: nnx.Module, mt_config: pyconfig.HyperPar
       matched_module_paths.append(module_path)
 
   from tunix.sft import utils as tunix_sft_utils  # pylint: disable=import-outside-toplevel
+
   is_lora_enabled = tunix_sft_utils.is_lora_enabled(lora_model)
-  
+
   if is_lora_enabled:
     max_logging.log("LoRA verification: is_lora_enabled=True")
     return
 
   if not matched_module_paths:
     max_logging.log(
-        f"LoRA module_path='{mt_config.lora_module_path}' did not match any weights. "
-        f"Sample module paths: {sample_module_paths}"
+        f"LoRA module_path='{lora_module_path}' did not match any weights. " f"Sample module paths: {sample_module_paths}"
     )
     raise ValueError("LoRA enabled but no LoRA parameters found in decoder/model state.")
 
@@ -786,6 +812,7 @@ def apply_lora_to_model(
           nnx.get_partition_spec(state),
       )
       from tunix.rl import reshard  # pylint: disable=import-outside-toplevel
+
       state = reshard.reshard_pytree(state, dst_shardings)
       lora_model = nnx.merge(graph_def, state)
 
@@ -819,10 +846,12 @@ def restore_lora_from_path(trainer: Any, mt_config: pyconfig.HyperParameters) ->
     return trainer
 
   from tunix.sft import utils as tunix_sft_utils  # pylint: disable=import-outside-toplevel
+
   if not tunix_sft_utils.is_lora_enabled(trainer.model):
+    lora_module_path = _get_lora_module_path(mt_config)
     raise ValueError(
         "lora_restore_path is set but LoRA is not enabled on the model. "
-        "Set enable_lora=True and verify lora_module_path matches model modules."
+        f"Set enable_lora=True and verify lora_module_path ('{lora_module_path}') matches model modules."
     )
 
   abstract_lora_params = nnx.state(trainer.model, nnx.LoRAParam)
