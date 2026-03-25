@@ -318,6 +318,9 @@ def preprocessing_pipeline(
       return jax.tree.map(np.asarray, x, is_leaf=lambda y: isinstance(y, (list, tuple)))
 
     operations.append(grain.MapOperation(lists2array))
+
+    rekey_dict = {"prompts": "input", "chosen_responses": "chosen", "rejected_responses": "rejected"}
+    operations.append(input_pipeline_utils.Rekey(rekey_dict))
   else:
     assert len(data_column_names) == 1
     operations.append(input_pipeline_utils.HFNormalizeFeatures(data_column_names[0]))

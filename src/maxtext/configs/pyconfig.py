@@ -53,6 +53,7 @@ _CONFIG_FILE_MAPPING: dict[str, str] = {
     "maxtext.trainers.pre_train.train_compile": "base.yml",
     "maxtext.trainers.post_train.distillation.train_distill": "post_train/distillation.yml",
     "maxtext.trainers.post_train.rl.train_rl": "post_train/rl.yml",
+    "maxtext.trainers.post_train.dpo.train_dpo": "post_train/dpo.yml",
     "maxtext.trainers.post_train.sft.train_sft": "post_train/sft.yml",
     "maxtext.trainers.post_train.sft.train_sft_deprecated": "post_train/sft.yml",
     "maxtext.inference.decode": "base.yml",
@@ -83,9 +84,7 @@ def _resolve_or_infer_config(argv: list[str]) -> tuple[str, list[str]]:
     return resolve_config_path(argv[1]), argv[2:]
   module = _module_from_path(argv[0])
   if module not in _CONFIG_FILE_MAPPING:
-    raise ValueError(
-        f"No config file provided and no default config found for module '{module}'"
-    )
+    raise ValueError(f"No config file provided and no default config found for module '{module}'")
   config_path = os.path.join(MAXTEXT_CONFIGS_DIR, _CONFIG_FILE_MAPPING[module])
   logger.warning("No config file provided, using default config mapping: %s", config_path)
   return config_path, argv[1:]
