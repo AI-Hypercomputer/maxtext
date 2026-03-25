@@ -15,16 +15,8 @@ export NETWORK_NAME="zenteiq-tpu-vpc"
 # DEVICE VARIABLES
 # ==============================================================================
 export DEVICE="tpu"
-export TPU_TYPE="v6e-32"
-export NUM_SLICES="1"
-export GPU_TYPE="h100-80gb-8"
-export NUM_NODES="1"
-
-# ==============================================================================
-# VM VARIABLES
-# ==============================================================================
-export VM_NAME="testnode"
-export TPU_VERSION="v2-alpha-tpuv6e"
+export TPU_TYPE="v6e-16"
+export NUM_SLICES="2"
 
 # ==============================================================================
 # VPC VARIABLES
@@ -41,16 +33,13 @@ export STORAGE_CAPACITY="36000"     # Minimum required capacity in GiB
 export STORAGE_FS="ziqfs"
 export LUSTRE_IP=""                 # IP Address from lustre mountPoint (populated by lustre-manifest-generate)
 export MOUNTPOINT="/lustre-data"
-export MANIFEST="./lustre-manifest.yaml"
+export MANIFEST="./lustre.yaml"
 
 # ==============================================================================
 # WORKLOAD / DOCKER VARIABLES
 # ==============================================================================
-export ARTIFACT_REGISTRY_REGION="us-central1"  # Artifact Registry region (may differ from compute REGION)
-export DOCKER_IMAGE_NAME="maxtext-custom:latest"  # Default; overridden per-script by workload commands
-export DOCKER_IMAGE="${ARTIFACT_REGISTRY_REGION}-docker.pkg.dev/${PROJECT_ID}/images/${DOCKER_IMAGE_NAME}"
-export BASE_OUTPUT_DIR=""
-export DATASET_PATH=""
+export REPOSITORY="asia-south1-docker.pkg.dev/zenteiq-lxp-1722918338008/maxtext-training"
+export DOCKER_IMAGE="${REPOSITORY}/brahmai:$(git rev-parse --short HEAD)"
 
 # ==============================================================================
 # ECHO ALL ENVIRONMENT VARIABLES
@@ -93,8 +82,7 @@ echo_vars() {
   echo "    MANIFEST                 = ${MANIFEST}"
   echo ""
   echo "  [Workload / Docker]"
-  echo "    ARTIFACT_REGISTRY_REGION = ${ARTIFACT_REGISTRY_REGION}"
-  echo "    DOCKER_IMAGE_NAME        = ${DOCKER_IMAGE_NAME}"
+  echo "    REPOSITORY               = ${REPOSITORY}"
   echo "    DOCKER_IMAGE             = ${DOCKER_IMAGE}"
   echo "    BASE_OUTPUT_DIR          = ${BASE_OUTPUT_DIR}"
   echo "    DATASET_PATH             = ${DATASET_PATH}"
@@ -109,7 +97,7 @@ login() {
   echo "[login] Authenticating with gcloud..."
   gcloud auth login
   gcloud auth application-default login
-  gcloud auth configure-docker "${ARTIFACT_REGISTRY_REGION}-docker.pkg.dev" --quiet
+  gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
 }
 
 setup() {
@@ -306,6 +294,9 @@ lustre-test() {
 # ==============================================================================
 # CLUSTER
 # ==============================================================================
+cluster-list() {
+  xpk cluster list
+}
 cluster-create() {
   echo "[cluster-create] Creating XPK cluster '${CLUSTER_NAME}'..."
   xpk cluster create \
@@ -367,100 +358,27 @@ cluster-delete() {
 # ==============================================================================
 workload-setup() {
   echo "[workload-setup] Setting up workspace and dependencies..."
-  mkdir -p ./workspace
-  pushd ./workspace > /dev/null
-  uv venv --python 3.12 --seed && source .venv/bin/activate
-  pip install xpk
-  git clone https://github.com/brahmai-model-training/brahmai.git
-  pushd brahmai > /dev/null
-  bash src/dependencies/scripts/docker_build_dependency_image.sh DEVICE="${DEVICE}" MODE=stable
-  popd > /dev/null
-  popd > /dev/null
-}
-
-# Derives a fully-qualified Docker image URL from a script path.
-# e.g. ./brahmai-27b.sh  →  <REGISTRY>/images/brahmai-27b:latest
-# Falls back to DOCKER_IMAGE if no script is given.
-_image_for_script() {
-  local SCRIPT="${1:-}"
-  if [[ -n "${SCRIPT}" ]]; then
-    local SCRIPT_NAME
-    SCRIPT_NAME="$(basename "${SCRIPT}" | sed 's/\.[^.]*$//')"
-    echo "${ARTIFACT_REGISTRY_REGION}-docker.pkg.dev/${PROJECT_ID}/images/${SCRIPT_NAME}:latest"
-  else
-    echo "${DOCKER_IMAGE}"
-  fi
+  uv venv --python 3.12 --seed && source .venv/bin/activate && pip install xpk
 }
 
 workload-build() {
-  local SCRIPT="${1:-}"
-  local IMAGE
-  IMAGE="$(_image_for_script "${SCRIPT}")"
-  echo "[workload-build] Building Docker image '${IMAGE}'..."
-  local MAXTEXT_DIR
-  if [[ -d "./workspace/brahmai" ]]; then
-    MAXTEXT_DIR="./workspace/brahmai"
-  elif [[ -d "./brahmai" ]]; then
-    MAXTEXT_DIR="./brahmai"
-  else
-    echo "Error: maxtext directory not found. Run 'workload-setup' first." >&2
-    return 1
-  fi
-  docker build -t "${IMAGE}" \
-    -f "${MAXTEXT_DIR}/dependencies/dockerfiles/maxtext_tpu_dependencies.Dockerfile" \
-    "${MAXTEXT_DIR}"
+  echo "[workload-build] Building Docker image '${DOCKER_IMAGE}'..."
+  exprt MAXTEXT_DIR="src/"
+  docker build -t "${DOCKER_IMAGE}" -f "${MAXTEXT_DIR}/dependencies/dockerfiles/maxtext_tpu_dependencies.Dockerfile" "${MAXTEXT_DIR}"
 }
 
 workload-push() {
-  local SCRIPT="${1:-}"
-  local IMAGE
-  IMAGE="$(_image_for_script "${SCRIPT}")"
-  echo "[workload-push] Creating artifact registry (if needed) and pushing image '${IMAGE}'..."
-  gcloud artifacts repositories create images \
-    --repository-format=docker \
-    --location="${ARTIFACT_REGISTRY_REGION}" \
-    --description="Docker repository for MaxText TPU training images" \
-    --project="${PROJECT_ID}" 2>/dev/null || true
-  docker push "${IMAGE}"
+  echo "[workload-push] Creating artifact registry (if needed) and pushing image '${DOCKER_IMAGE}'..."
+  # gcloud artifacts repositories create $REPOSITORY \
+  #   --repository-format=docker \
+  #   --location="${REGION}" \
+  #   --description="Docker repository for MaxText TPU training images" \
+  #   --project="${PROJECT_ID}" 2>/dev/null || true
+  docker push "${DOCKER_IMAGE}"
 }
 
-workload-create-tpu() {
-  local NAME="${1:?Usage: deploy.sh workload-create-tpu <n>}"
-  echo "[workload-create-tpu] Creating TPU workload '${NAME}'..."
-  xpk workload create \
-    --cluster "${CLUSTER_NAME}" \
-    --workload "${NAME}" \
-    --base-docker-image maxtext_base_image \
-    --tpu-type "${TPU_TYPE}" \
-    --num-slices "${NUM_SLICES}" \
-    --command "python3 -m maxtext.trainers.pre_train.train run_name=${NAME} base_output_directory=${BASE_OUTPUT_DIR} dataset_path=${DATASET_PATH} steps=100"
-}
-
-workload-create-gpu() {
-  local NAME="${1:?Usage: deploy.sh workload-create-gpu <n>}"
-  echo "[workload-create-gpu] Creating GPU workload '${NAME}'..."
-  xpk workload create \
-    --cluster "${CLUSTER_NAME}" \
-    --workload "${NAME}" \
-    --base-docker-image maxtext_base_image \
-    --device-type "${GPU_TYPE}" \
-    --num-nodes "${NUM_NODES}" \
-    --command "python3 -m maxtext.trainers.pre_train.train run_name=${NAME} base_output_directory=${BASE_OUTPUT_DIR} dataset_path=${DATASET_PATH} steps=100"
-}
-
-# Derives the workload name from the script filename (no path, no extension).
-# e.g. ./brahmai-27b.sh  →  brahmai-27b
 workload-deploy() {
-  local SCRIPT="${1:?Usage: deploy.sh workload-deploy <SCRIPT_PATH>}"
-  if [[ ! -f "${SCRIPT}" ]]; then
-    echo "Error: script '${SCRIPT}' not found." >&2
-    return 1
-  fi
-  local NAME
-  NAME="$(basename "${SCRIPT}" | sed 's/\.[^.]*$//')"
-  local IMAGE
-  IMAGE="$(_image_for_script "${SCRIPT}")"
-  echo "[workload-deploy] Deploying workload '${NAME}' using script '${SCRIPT}' and image '${IMAGE}'..."
+  echo "[workload-deploy] Deploying workload '${NAME}' using script '${SCRIPT}' and image '${DOCKER_IMAGE}'..."
   xpk workload create \
     --cluster "${CLUSTER_NAME}" \
     --workload "${NAME}" \
@@ -468,9 +386,9 @@ workload-deploy() {
     --reservation="${RESERVATION_NAME}" \
     --project="${PROJECT_ID}" \
     --zone="${ZONE}" \
-    --docker-image="${IMAGE}" \
+    --docker-image="${DOCKER_IMAGE}" \
     --skip-validation \
-    --command="bash ./${SCRIPT}"
+    --command="$(cat SCRIPT)"
 }
 
 workload-list() {
@@ -657,6 +575,7 @@ usage() {
   echo "    lustre-test                                  Run write/read/metadata I/O test pod on mountpoint"
   echo ""
   echo "  Cluster:"
+  echo "    cluster-list                                 List XPK Clusters"
   echo "    cluster-create                               Create XPK cluster"
   echo "    cluster-create-manual <TOPOLOGY> <MACHINE>   Manually create node pool + adapt cluster"
   echo "    cluster-enable-lustre                        Enable Lustre CSI driver on existing cluster"
@@ -666,9 +585,7 @@ usage() {
   echo "    workload-setup                               Clone repo and install deps"
   echo "    workload-build  [SCRIPT]                     Build Docker image (name derived from script, or default)"
   echo "    workload-push   [SCRIPT]                     Push image (name derived from script, or default)"
-  echo "    workload-create-tpu   <n>                 Create a TPU XPK workload"
-  echo "    workload-create-gpu   <n>                 Create a GPU XPK workload"
-  echo "    workload-deploy       <SCRIPT>            Deploy a cluster workload"
+  echo "    workload-deploy  <SCRIPT>                    Deploy a cluster workload"
   echo "                                                 Workload name derived from script filename"
   echo "    workload-list                                List all workloads in cluster"
   echo "    workload-delete       <WORKLOAD>             Delete a workload"
@@ -706,6 +623,7 @@ case "$COMMAND" in
   lustre-manifest-generate) lustre-manifest-generate ;;
   lustre-status)            lustre-status ;;
   lustre-test)              lustre-test ;;
+  cluster-list)             cluster-list ;;
   cluster-create)           cluster-create ;;
   cluster-create-manual)    cluster-create-manual "${2:-}" "${3:-}" ;;
   cluster-enable-lustre)    cluster-enable-lustre ;;
@@ -713,8 +631,6 @@ case "$COMMAND" in
   workload-setup)           workload-setup ;;
   workload-build)           workload-build "${2:-}" ;;
   workload-push)            workload-push "${2:-}" ;;
-  workload-create-tpu)      workload-create-tpu "${2:-}" ;;
-  workload-create-gpu)      workload-create-gpu "${2:-}" ;;
   workload-deploy)          workload-deploy "${2:-}" ;;
   workload-list)            workload-list ;;
   workload-delete)          workload-delete "${2:-}" ;;
