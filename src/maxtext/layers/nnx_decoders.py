@@ -307,10 +307,12 @@ class NNXDecoder(nnx.Module):
         dense_cls, moe_cls = decoder_block_classes
 
         num_dense = config.first_num_dense_layers
-        self.dense_layers = self._create_scanned_layers(dense_cls, length=num_dense, metadata_axis_name="dense_layers", rngs=rngs)
+        self.dense_layers = self._create_scanned_layers(
+            dense_cls, length=num_dense, metadata_axis_name="dense_layers", rngs=rngs
+        )
         num_moe = config.num_decoder_layers - config.first_num_dense_layers
-        self.moe_layers = self._create_scanned_layers(moe_cls, length=num_moe, metadata_axis_name="moe_layers", rngs=rngs)      
-      
+        self.moe_layers = self._create_scanned_layers(moe_cls, length=num_moe, metadata_axis_name="moe_layers", rngs=rngs)
+
       elif self.is_gemma3:
         attention_pattern_length = len(gemma3.GEMMA3_ATTENTION_PATTERN)
         scan_length = config.num_decoder_layers // attention_pattern_length
@@ -341,10 +343,10 @@ class NNXDecoder(nnx.Module):
         if num_layers > 0:
           self.layers = self._create_scanned_layers(
               layer_cls, length=num_layers, metadata_axis_name="layers", rngs=rngs, **layer_kwargs
-          )        
+          )
         else:
           self.layers = nnx.List([])
-   
+
     else:
       self.layers = nnx.List([])
 
@@ -393,7 +395,9 @@ class NNXDecoder(nnx.Module):
       )
       return nnx_wrappers.ToNNX(layer_linen, rngs=rngs)
 
-  def _create_scanned_layers(self, decoder_layer_class, length: int, metadata_axis_name: str, rngs: nnx.Rngs, **layer_kwargs):
+  def _create_scanned_layers(
+      self, decoder_layer_class, length: int, metadata_axis_name: str, rngs: nnx.Rngs, **layer_kwargs
+  ):
     """Creates a scanned stack of layers using jax.lax.scan for memory-efficient initialization.
 
     Uses jax.lax.scan instead of nnx.vmap to reduce peak memory during initialization.
@@ -418,8 +422,7 @@ class NNXDecoder(nnx.Module):
     first_rng_state = jax.tree.map(lambda x: x[0], rngs_state)
     ref_rngs = nnx.merge(rngs_graphdef, first_rng_state)
     ref_layer = decoder_layer_class(
-        config=self.config, mesh=self.mesh, quant=self.quant,
-        model_mode=self.model_mode, rngs=ref_rngs, **layer_kwargs
+        config=self.config, mesh=self.mesh, quant=self.quant, model_mode=self.model_mode, rngs=ref_rngs, **layer_kwargs
     )
     layer_graphdef, _, _ = nnx.split(ref_layer, nnx.Param, ...)
     del ref_layer
@@ -430,8 +433,12 @@ class NNXDecoder(nnx.Module):
     def scan_body(carry, rng_state_slice):
       layer_rngs = nnx.merge(rngs_graphdef, rng_state_slice)
       layer = decoder_layer_class(
-          config=self.config, mesh=self.mesh, quant=self.quant,
-          model_mode=self.model_mode, rngs=layer_rngs, **layer_kwargs
+          config=self.config,
+          mesh=self.mesh,
+          quant=self.quant,
+          model_mode=self.model_mode,
+          rngs=layer_rngs,
+          **layer_kwargs,
       )
       _, params, rest = nnx.split(layer, nnx.Param, ...)
       return carry, (params, rest)
@@ -461,6 +468,7 @@ class NNXDecoder(nnx.Module):
             metadata["out_sharding"] = tuple(sharding)
           return leaf.replace(**metadata)
         return leaf
+
       return jax.tree.map(_update_leaf, state, is_leaf=lambda x: isinstance(x, nnx.VariableState))
 
     stacked_params = _add_scan_metadata(stacked_params, scan_axis)
@@ -514,10 +522,10 @@ class NNXDecoder(nnx.Module):
       layer = nnx.merge(graphdef, current_params, current_state)
       layer_out = layer(carry, *args, **valid_kwargs)
       new_carry = layer_out[0] if isinstance(layer_out, tuple) else layer_out
-      
+
       new_full_state = nnx.state(layer)
       new_current_state = _extract_matching_state(current_state, new_full_state)
-      
+
       # ONLY return non-param state to prevent memory duplication of weights
       return new_carry, new_current_state
 
@@ -527,7 +535,7 @@ class NNXDecoder(nnx.Module):
 
     if scan_axis != 0:
       params = jax.tree.map(lambda x: jnp.moveaxis(x, 0, scan_axis), params)
-      
+
     scanned_state = nnx.State.merge(params, scanned_other)
     # Update the existing module in-place rather than creating a new one.
     # Creating a new module via nnx.merge and reassigning (self.layers = new_module)
@@ -1092,7 +1100,9 @@ class NNXDecoder(nnx.Module):
       else:
         scan_length = int(cfg.num_decoder_layers / cfg.inhomogeneous_layer_cycle_interval)
         if scan_length > 0:
-          y, self.layers = self._apply_layers_sequentially(self.layers, y, *layer_args, length=scan_length, **layer_kwargs)
+          y, self.layers = self._apply_layers_sequentially(
+              self.layers, y, *layer_args, length=scan_length, **layer_kwargs
+          )
     else:
       prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg)
 
