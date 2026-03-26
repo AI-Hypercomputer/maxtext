@@ -305,7 +305,12 @@ def prepare_datasets(trainer_config, model_tokenizer):
     os.makedirs(test_data_dir)
 
   # Prepare train and test data from training data for certain datasets
-  if trainer_config.dataset_name in ["nvidia/OpenMathInstruct-2", "nvidia/OpenMathReasoning", "open-r1/OpenR1-Math-220k", "bethgelab/CuratedThoughts"]:
+  if trainer_config.dataset_name in [
+      "nvidia/OpenMathInstruct-2",
+      "nvidia/OpenMathReasoning",
+      "open-r1/OpenR1-Math-220k",
+      "bethgelab/CuratedThoughts",
+  ]:
     import datasets  # pylint: disable=import-outside-toplevel
 
     def prepare_train_and_eval_dataset(
@@ -325,7 +330,7 @@ def prepare_datasets(trainer_config, model_tokenizer):
       )
 
       if "OpenMathReasoning" in trainer_config.dataset_name:
-            original_ds = original_ds.filter(lambda x: x.get("problem_type") == "has_answer_extracted")
+        original_ds = original_ds.filter(lambda x: x.get("problem_type") == "has_answer_extracted")
 
       # Split into train and validation sets using HF's train_test_split
       split_ds = original_ds.train_test_split(test_size=test_size, seed=seed)
