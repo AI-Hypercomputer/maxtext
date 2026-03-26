@@ -14,30 +14,25 @@
 
 # pylint: disable=bare-except, consider-using-generator, chained-comparison, broad-exception-caught
 """RL Utils Module."""
+import concurrent
+import json
 import re
 import optax
 from maxtext.utils import max_logging
 
-
 from math_verify.errors import TimeoutException
-from math_verify.metric import math_metric
 from math_verify.parser import ExprExtractionConfig, LatexExtractionConfig
-from math_verify import parse
+from math_verify import parse, verify
 
-# initialize math_verify_func once
-math_verify_func = math_metric(
-    gold_extraction_target=(LatexExtractionConfig(),),
-    pred_extraction_target=(
-        ExprExtractionConfig(),
-        LatexExtractionConfig(),
-    ),
+GOLD_EXTRACTION_TARGET = (
+    ExprExtractionConfig(),
+    LatexExtractionConfig(),
 )
 
-
-def boxed(x):
-  """Wraps the input string in a LaTeX boxed command if it's not already wrapped."""
-  return "\\boxed{" + x + "}" if not x.startswith("\\boxed{") else x
-
+PRED_EXTRACTION_TARGET = (
+    ExprExtractionConfig(),
+    LatexExtractionConfig(),
+)
 
 EPSILON = 1e-6
 # Constants for normalization
@@ -99,8 +94,37 @@ REMOVED_EXPRESSIONS = [
 ]
 
 
-# Let's define a RegEx for checking whether the format matches.
-#
+def math_verify_func(golds, predictions, timeout=5):
+  """Wrapper around math_verify's verify function to handle timeouts and exceptions gracefully."""
+  with concurrent.futures.ProcessPoolExecutor(max_workers=1) as executor:
+    future = executor.submit(verify_math, golds, predictions)
+    try:
+      return future.result(timeout=timeout)
+    except concurrent.futures.TimeoutError:
+      return 0.0
+    except Exception:
+      return 0.0
+
+
+def verify_math(golds, predictions):
+  """Runs mathematical expression evaluation on ground-truth and predictions."""
+
+  extracted_predictions = [parse(pred, PRED_EXTRACTION_TARGET, parsing_timeout=None) for pred in predictions]
+  extracted_golds = [parse(gold, GOLD_EXTRACTION_TARGET, parsing_timeout=None) for gold in golds]
+
+  return max(
+      [
+          (1.0 if any(verify(gold, pred, timeout_seconds=None) for gold in extracted_golds) else 0.0)
+          for pred in extracted_predictions
+      ]
+  )
+
+
+def boxed(x):
+  """Wraps the input string in a LaTeX boxed command if it's not already wrapped."""
+  return "\\boxed{" + x + "}" if not x.startswith("\\boxed{") else x
+
+
 def get_match_format_regex(tmvp_config):
   """Returns a compiled regex to extract the answer from a completion."""
   match_format = re.compile(
@@ -199,10 +223,20 @@ def normalize_final_answer(final_answer: str) -> str:
     final_answer = final_answer.replace(expr, "")
 
   # Extract and normalize LaTeX math
-  final_answer = re.sub(r"(.*?)(\$)(.*?)(\$)(.*)", "$\\3$", final_answer)
+  # converts "The answer is $\\frac{1}{2}$" -> "$\frac{1}{2}$"
+  # converts "The answer is 3 $\\frac{1}{2}$" -> "$3+\frac{1}{2}$"
+  final_answer = re.sub(
+      r".*?(\d+)?\s*\$\s*(\d+)?\s*(\\frac\{.*?\}\{.*?\}|\d+/\d+)\s*\$.*",
+      lambda m: f"${w}+{m.group(3)}$" if (w := (m.group(1) or m.group(2))) else f"${m.group(3)}$",
+      final_answer,
+  )
+  # converts "\text{hello}" -> "hello"
   final_answer = re.sub(r"(\\text\{)(.*?)(\})", "\\2", final_answer)
+  # converts "\textbf{hello}" -> "hello"
   final_answer = re.sub(r"(\\textbf\{)(.*?)(\})", "\\2", final_answer)
+  # converts "\overline{hello}" -> "hello"
   final_answer = re.sub(r"(\\overline\{)(.*?)(\})", "\\2", final_answer)
+  # converts "\boxed{100}" -> "100"
   final_answer = re.sub(r"(\\boxed\{)(.*)(\})", "\\2", final_answer)
 
   # Normalize shorthand TeX:
@@ -222,92 +256,14 @@ def normalize_final_answer(final_answer: str) -> str:
   return final_answer
 
 
-def check_answer(prompts, completions, answer, tmvp_config, **kargs):
-  """
-  Reward the model if the answer is correct. A reward is also given if the answer
-  does not match exactly, i.e., based on how close the answer is to the correct
-  value.
-  """
-  match_format = get_match_format_regex(tmvp_config)
-  answer_fallback = get_answer_fallback_regex(tmvp_config)
-
-  extracted_responses = []
-  for c in completions:
-    full_match = match_format.search(c)
-    if full_match is not None:
-      extracted_responses.append(full_match.group(1))
-    else:
-      fallback_matches = answer_fallback.findall(c)
-      extracted_responses.append(fallback_matches[-1].strip() if fallback_matches else None)
-
-  scores = []
-  for guess, true_answer in zip(extracted_responses, answer):
-    score = 0
-    if guess is None:
-      scores.append(0)
-      continue
-    # Normalize for certain datasets
-    if "DAPO" in tmvp_config.dataset_name or "OpenMathInstruct" in tmvp_config.dataset_name:
-      guess = normalize_final_answer(guess)
-      true_answer = normalize_final_answer(true_answer)
-    # Try math_verify first for robust comparison
-    verified_correct = False
-    mv_output = None
-    true_answer_fixed = true_answer
-    guess_fixed = guess
-    try:
-      # Fix LaTeX escaping issues for both ground truth and extracted answer
-      true_answer_fixed = fix_latex_escaping(true_answer)
-      guess_fixed = fix_latex_escaping(guess)
-
-      mv_output = math_verify_func([boxed(true_answer_fixed)], [boxed(guess_fixed)])
-      if mv_output and mv_output[0] > 0.1:
-        verified_correct = True
-    except (TimeoutException, Exception):
-      pass
-
-    # Correct answer gets tmvp_config.reward_exact_answer points!
-    if guess == true_answer:
-      score += tmvp_config.reward_exact_answer
-    # Give credit if spaces are seen but otherwise the answers match (useful for simple datasets like gsm8k)
-    elif guess.strip() == true_answer.strip():
-      score += tmvp_config.reward_white_space_format_match
-    # Answers match upon robust comparison with math_verify
-    elif verified_correct:
-      score += tmvp_config.reward_exact_answer
-    else:
-      # We also reward it if the answer is close via ratios!
-      # Ie if the answer is within some range, reward it!
-      try:
-        # Fix LaTeX escaping issues for both ground truth and extracted answer
-        true_answer_fixed = fix_latex_escaping(true_answer)
-        guess_fixed = fix_latex_escaping(guess)
-        val_true = parse(boxed(true_answer_fixed.strip()))
-        val_guess = parse(boxed(guess_fixed.strip()))
-
-        ratio = (val_guess[0] + EPSILON) / (val_true[0] + EPSILON)
-        if ratio >= 0.9 and ratio <= 1.1:
-          score += tmvp_config.reward_ratio_guess_to_answer_high
-        elif ratio >= 0.8 and ratio <= 1.2:
-          score += tmvp_config.reward_ratio_guess_to_answer_low
-        else:
-          score += tmvp_config.penalty_incorrect_answer  # Penalize wrong answers
-      except:
-        score += tmvp_config.penalty_incorrect_format  # Penalize
-    scores.append(score)
-  return scores
-
-
-# Sometimes, the text between `<answer>` and `</answer>` might not be one
-# number; it can be a sentence. So, we extract the number and compare the answer.
-
-
-def get_match_numbers_regex(tmvp_config):
-  """Returns a compiled regex to extract the answer from a completion."""
-  match_numbers = re.compile(rf"{tmvp_config.solution_start_token}.*?([\d\.]{{1,}})", flags=re.MULTILINE | re.DOTALL)
-  if tmvp_config.debug.rl:
-    match_numbers.findall(f"{tmvp_config.solution_start_token}  0.34  {tmvp_config.solution_end_token}")
-  return match_numbers
+def preprocess_math_string(dataset_name, text) -> str:
+  """Fix common formatting issues in text."""
+  # Normalize for certain datasets and parse
+  if any(name in dataset_name for name in ["DAPO", "OpenMathInstruct", "OpenR1-Math-220k", "CuratedThoughts"]):
+    text = normalize_final_answer(text).strip()
+  # Fix LaTeX escaping issues
+  text = fix_latex_escaping(text)
+  return text
 
 
 def fix_latex_escaping(text: str) -> str:
@@ -416,19 +372,8 @@ def check_numbers(prompts, completions, answer, tmvp_config, **kargs):
   question = kargs["question"]
 
   # Extract full answer content from solution tags (not just first number)
-  match_format = get_match_format_regex(tmvp_config)
-  answer_fallback = get_answer_fallback_regex(tmvp_config)
+  extracted_responses = [extract_answer(c, tmvp_config)[0] for c in completions]
 
-  extracted_responses = []
-  for c in completions:
-    full_match = match_format.search(c)
-    if full_match is not None:
-      extracted_responses.append(full_match.group(1))
-    else:
-      fallback_matches = answer_fallback.findall(c)
-      extracted_responses.append(fallback_matches[-1].strip() if fallback_matches else None)
-
-  scores = []
   if tmvp_config.debug.rl:
     max_logging.log("START ============================")
     max_logging.log(f"Question: {question[0]}")
@@ -437,36 +382,79 @@ def check_numbers(prompts, completions, answer, tmvp_config, **kargs):
     max_logging.log(f"Extracted: {extracted_responses[0]}")
     max_logging.log("END ==============================")
 
-  for guess, true_answer in zip(extracted_responses, answer):
+  scores = []
+  for guess, acceptable_answers in zip(extracted_responses, answer):
     if guess is None:
       scores.append(0)
       continue
 
-    # Try math_verify first for robust comparison of both numbers and expressions
-    try:
-      # Fix LaTeX escaping issues for both ground truth and extracted answer
-      true_answer_fixed = fix_latex_escaping(true_answer)
-      guess_fixed = fix_latex_escaping(guess)
+    norm_guess = preprocess_math_string(tmvp_config.dataset_name, guess)
 
-      # Normalize for certain datasets
-      if "DAPO" in tmvp_config.dataset_name or "OpenMathInstruct" in tmvp_config.dataset_name:
-        true_answer_fixed = normalize_final_answer(true_answer_fixed)
-        guess_fixed = normalize_final_answer(guess_fixed)
+    # decode the json-encoded list of acceptable answers
+    answers = json.loads(acceptable_answers) if isinstance(acceptable_answers, str) else acceptable_answers
+    unique_answers = list(dict.fromkeys(answers))
+    max_score = tmvp_config.penalty_incorrect_format
+    for true_answer in unique_answers:
+      norm_answer = preprocess_math_string(tmvp_config.dataset_name, true_answer)
 
-      # Use math_verify to compare answers (handles both numeric and expression comparison)
-      score, _ = math_verify_func([boxed(true_answer_fixed)], [boxed(guess_fixed)])
-      # Return scaled score: 1.5 for exact/correct, 0 otherwise
-      scores.append(tmvp_config.reward_exact_answer if score > 0.1 else 0.0)
-    except (TimeoutException, Exception):
-      # Fallback to simple numeric comparison if math_verify fails
+      # 1. Check for exact or whitespace-normalized match first for a quick reward
+      if guess == true_answer:
+        max_score = max(max_score, tmvp_config.reward_exact_answer)
+        continue
+      elif guess.strip() == true_answer.strip():
+        max_score = max(max_score, tmvp_config.reward_white_space_format_match)
+        continue
+      else:
+        try:
+          # 2. Try math_verify for robust comparison
+          if math_verify_func([boxed(norm_answer)], [boxed(norm_guess)]) > 0.1:
+            max_score = max(max_score, tmvp_config.reward_exact_answer)
+            continue
+        except (TimeoutException, Exception):
+          if tmvp_config.debug.rl:
+            max_logging.log(
+                f"math_verify_func failed for gold: {norm_answer} and prediction: "
+                f"{norm_guess}, falling back to numeric comparison."
+            )
+
+      # 3. As a fallback, try numeric comparison if both can be parsed as numbers
       try:
-        guess_val = float(normalize_final_answer(guess).strip())
-        true_val = float(normalize_final_answer(true_answer).strip())
-        scores.append(tmvp_config.reward_exact_answer if guess_val == true_val else 0.0)
+        predictions = parse(boxed(norm_guess))
+        golds = parse(boxed(norm_answer))
+        for gold in golds:
+          for pred in predictions:
+            ratio = (float(pred) + EPSILON) / (float(gold) + EPSILON)
+            if 0.9 <= ratio <= 1.1:
+              max_score = max(max_score, tmvp_config.reward_ratio_guess_to_answer_high)
+            elif 0.8 <= ratio <= 1.2:
+              max_score = max(max_score, tmvp_config.reward_ratio_guess_to_answer_low)
+            else:
+              max_score = max(max_score, tmvp_config.penalty_incorrect_answer)  # Penalize wrong answers
       except:
-        scores.append(0)
+        max_score = max(max_score, tmvp_config.penalty_incorrect_format)  # Penalize if we can't parse numbers at all
 
+    scores.append(max_score)
   return scores
+
+
+def extract_answer(response, tmvp_config) -> str | None:
+  """Function to extract the answer from the text based on the tmvp_config format."""
+  match_format = get_match_format_regex(tmvp_config)
+  answer_fallback = get_answer_fallback_regex(tmvp_config)
+
+  full_match = match_format.search(response)
+  if full_match is not None:
+    extracted_response = full_match.group(1)
+  else:
+    # Find the *last* occurrence of the answer tag (most likely the final answer).
+    fallback_matches = answer_fallback.findall(response)
+    extracted_response = fallback_matches[-1].strip() if fallback_matches else "-1000000"
+
+  match_method = "full format" if full_match is not None else "answer-tag fallback"
+  if tmvp_config.debug.rl:
+    max_logging.log(f"Evaluation extracted_response ({match_method}): {extracted_response}")
+
+  return extracted_response, match_method
 
 
 def extract_hash_answer(text: str) -> str | None:
@@ -474,6 +462,32 @@ def extract_hash_answer(text: str) -> str | None:
   if "####" not in text:
     return None
   return text.split("####")[1].strip()
+
+
+def check_correctness(extracted_response, acceptable_answers, tmvp_config):
+  """Handles math verification and partial correctness logic."""
+  for answer in acceptable_answers:
+    # Check exact correctness first
+    norm_answer = preprocess_math_string(tmvp_config.dataset_name, answer)
+    norm_extracted = preprocess_math_string(tmvp_config.dataset_name, extracted_response)
+    is_correct = math_verify_func([boxed(norm_answer)], [boxed(norm_extracted)]) > 0.1
+    if is_correct:
+      return True, True  # Exact correctness implies partial correctness
+
+  # Check partial correctness if values can be extracted (within 10%)
+  for answer in acceptable_answers:
+    norm_answer = preprocess_math_string(tmvp_config.dataset_name, answer)
+    norm_extracted = preprocess_math_string(tmvp_config.dataset_name, extracted_response)
+    val_extracted = parse(boxed(norm_extracted))
+    val_answer = parse(boxed(norm_answer))
+    if val_extracted and val_answer:
+      is_partially_correct = any(
+          0.9 <= (float(pred) + EPSILON) / (float(gold) + EPSILON) <= 1.1 for pred in val_extracted for gold in val_answer
+      )
+      if is_partially_correct:
+        return False, True  # Not exactly correct, but partially correct
+
+  return False, False  # Not correct at all
 
 
 def get_optimizer(tmvp_config, max_train_steps):
@@ -514,6 +528,60 @@ def get_optimizer(tmvp_config, max_train_steps):
   return optax.inject_hyperparams(make_optimizer)(learning_rate=schedule)
 
 
+def process_answer(question, answer, question_type):
+  """Function to process the answer based on the question type."""
+  if question_type == "MCQ":
+    # For MCQs, we need to process the response to get the acceptable answers
+    # e.g., returns "10" and "A" if answer="A" and question="What is 5+5? (A) 10, (B) 11, ..."
+    return process_mcq(question, answer)
+
+  return [answer, answer]
+
+
+def process_mcq(question, answer):
+  """Extracts options from MCQ question and returns a list of acceptable answers based on the provided answer key."""
+  pattern = r"""
+    (?:
+        \(?([A-E])\)?              # Matches (A) or A
+        |                          # OR
+        \\(?:text|mathrm|textbf)   # Matches \text, \mathrm, or \textbf
+        \{([A-E])\}                # Matches {A} or {B} or {C} etc.
+    )
+    [\s\.\:\}\$]*\s*               # Matches trailing punctuation/whitespace
+    (.*?)                          # The actual content of the option
+    (?=                            # Lookahead for the next option or end
+        \s*
+        (?:\\quad|\\qquad|\\hspace|\n|\r)
+        \s*
+        (?:\(?|\\(?:text|mathrm|textbf))
+        | $
+    )
+  """
+  matches = re.findall(pattern, question, re.DOTALL | re.VERBOSE)
+  options = {}
+  for m in matches:
+    letter = m[0] or m[1]
+    value = m[2].strip()
+    clean_value = re.sub(r"\\q?quad|\\textbf{|[~$]", "", value).strip()
+    options[letter] = clean_value
+
+  # List of answer formats that should be accepted
+  acceptable_answers = [answer]
+  if answer in options:
+    # If the answer is a Letter (e.g., "B"), add the corresponding value
+    acceptable_answers.append(options[answer])
+  else:
+    # If the answer is a value, find the corresponding letter
+    for letter, value in options.items():
+      norm_value = normalize_final_answer(value)
+      norm_answer = normalize_final_answer(answer)
+      if norm_answer == norm_value:
+        acceptable_answers.append(letter)
+        break
+
+  return acceptable_answers
+
+
 def process_data(dataset_name, model_tokenizer, template_config, tmvp_config, x):
   """Function to process input dataset"""
 
@@ -522,35 +590,29 @@ def process_data(dataset_name, model_tokenizer, template_config, tmvp_config, x)
       return val.decode("utf-8")
     return str(val)
 
-  # Handle DAPO dataset schema
-  # originally (prompt is a list, answer is in reward_model)
-  # https://huggingface.co/datasets/BytedTsinghua-SIA/DAPO-Math-17k/viewer/default/train?row=0
-  # but using https://huggingface.co/datasets/open-r1/DAPO-Math-17k-Processed/viewer/all/train?row=1
-  # so question is prompt and answer is solution
+  for key in ["problem", "prompt", "question"]:
+    if key in x:
+      question = _to_str(x[key])
+      break
 
-  question = x.get("question", x.get("prompt"))
-  answer = x.get("answer")
-  if answer is None and "solution" in x:
-    answer = x["solution"]
-
-  # Handle OpenMathInstruct-2
-  if "problem" in x:
-    question = x["problem"]
-  if "expected_answer" in x:
-    answer = x["expected_answer"]
+  for key in ["answer", "solution", "expected_answer"]:
+    if key in x:
+      answer = _to_str(x[key])
+      break
 
   # Handle AIME-2024
   if "extra_info" in x and isinstance(x["extra_info"], dict) and "raw_problem" in x["extra_info"]:
-    question = x["extra_info"]["raw_problem"]
-
+    question = _to_str(x["extra_info"]["raw_problem"])
   if "reward_model" in x and isinstance(x["reward_model"], dict) and "ground_truth" in x["reward_model"]:
-    answer = x["reward_model"]["ground_truth"]
-
-  question = _to_str(question)
-  answer = _to_str(answer)
+    answer = _to_str(x["reward_model"]["ground_truth"])
 
   if dataset_name == "gsm8k":
     answer = extract_hash_answer(answer)
+
+  question_type = "default"
+  if "question_type" in x:
+    question_type = _to_str(x["question_type"])
+  processed_answer = process_answer(question, answer, question_type)
 
   return {
       # passed to model forward pass
@@ -574,6 +636,8 @@ def process_data(dataset_name, model_tokenizer, template_config, tmvp_config, x)
       ),
       # passed to reward functions
       "question": question,
-      # passed to reward functions
-      "answer": answer,
+      # list of acceptable answers passed to reward functions
+      "answer": json.dumps(
+          processed_answer
+      ),  # json.dumps to string-encode the list to prevent grain from flattening it while batching
   }

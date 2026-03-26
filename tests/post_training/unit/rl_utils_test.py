@@ -67,7 +67,7 @@ class TestScoreResponses(unittest.TestCase):
             "<reasoning>Need to use <reasoning> and </reasoning>, "
             "<answer> and </answer></reasoning><answer>11/3</answer>"
         ],
-        answer="11/3",
+        answers=["11/3"],
     )
     self.assertTrue(is_correct)
     self.assertTrue(is_partially_correct)
@@ -89,7 +89,7 @@ class TestScoreResponses(unittest.TestCase):
             "shirts: $7500 + $1500 + $1800 = $10800.\n\n</reasoning>\n"
             "<answer>10800</answer><end_of_turn>"
         ],
-        answer="10,800",
+        answers=["10,800"],
     )
     self.assertTrue(is_correct)
     self.assertTrue(is_partially_correct)
@@ -103,11 +103,84 @@ class TestScoreResponses(unittest.TestCase):
         tmvp_config=self.config,
         question="What is the price of the item?",
         responses=["<reasoning>The item costs $16.<answer>$16</answer>"],
-        answer="16",
+        answers=["16"],
     )
     self.assertTrue(is_correct)
     self.assertTrue(is_partially_correct)
     self.assertFalse(has_correct_format)
+
+  @pytest.mark.cpu_only
+  def test_for_mcq_value(self):
+    """Test for MCQ, where model responds with a math value."""
+    is_correct, is_partially_correct, has_correct_format = evaluate_rl.score_responses(
+        tmvp_config=self.config,
+        question=(
+            r"What is the quantity of the item? "
+            r"(A) $2 \frac{1}{3}$ (B) $3 \frac{1}{3}$ "
+            r"(C) $1 \frac{2}{3}$ (D) $1 \frac{1}{3}$ (E) 2"
+        ),
+        responses=["<reasoning>The answer is 3\frac{1}{3}.<answer>3\frac{1}{3}</answer>"],
+        answers=["3\frac{1}{3}", "B"],
+    )
+    self.assertTrue(is_correct)
+    self.assertTrue(is_partially_correct)
+    self.assertFalse(has_correct_format)
+
+  @pytest.mark.cpu_only
+  def test_for_mcq_option(self):
+    """Test for MCQ, where model responds with an option."""
+    is_correct, is_partially_correct, has_correct_format = evaluate_rl.score_responses(
+        tmvp_config=self.config,
+        question=(
+            r"What is the quantity of the item? "
+            r"(A) $2 \frac{1}{3}$ (B) $3 \frac{1}{3}$ "
+            r"(C) $1 \frac{2}{3}$ (D) $1 \frac{1}{3}$ (E) 2"
+        ),
+        responses=["<reasoning>The answer is B.<answer>B</answer>"],
+        answers=["3\frac{1}{3}", "B"],
+    )
+    self.assertTrue(is_correct)
+    self.assertTrue(is_partially_correct)
+    self.assertFalse(has_correct_format)
+
+
+class TestProcessAnswer(unittest.TestCase):
+  """Tests for utils_rl.process_answer."""
+
+  @pytest.mark.cpu_only
+  def test_for_mcq(self):
+    self.assertEqual(len(utils_rl.process_answer("(A) 1\n(B) 2\n(C) 3\n", "B", "MCQ")), 2)
+    self.assertEqual(len(utils_rl.process_answer("A. 1\nB. 2\n(C) 3\n", "B", "MCQ")), 2)
+    self.assertEqual(
+        len(utils_rl.process_answer("$\\textbf{(A)}~\\frac{1}{24}\\qquad\\textbf{(B)}~\\frac{1}{12}$", "B", "MCQ")), 2
+    )
+    self.assertEqual(len(utils_rl.process_answer("$(\\mathrm {A}) \\ 1 \\qquad (\\mathrm {B}) \\ 2$", "B", "MCQ")), 2)
+
+
+class TestMathVerifyFunc(unittest.TestCase):
+  """Tests for utils_rl.verify_math."""
+
+  @pytest.mark.cpu_only
+  def test_support_for_relational(self):
+    self.assertEqual(utils_rl.verify_math(["$1 < x < 2$"], ["$(1,2)$"]), 1.0)
+
+  @pytest.mark.cpu_only
+  def test_ordered_tuples(self):
+    self.assertEqual(utils_rl.verify_math(["${1,2,3}$"], ["${3,2,1}$"]), 1.0)
+    self.assertEqual(utils_rl.verify_math(["$1,2,3$"], ["${3,2,1}$"]), 1.0)
+    self.assertEqual(utils_rl.verify_math(["$(1,2,3)$"], ["${3,2,1}$"]), 0.0)
+
+  @pytest.mark.cpu_only
+  def test_multiple_boxed(self):
+    self.assertEqual(utils_rl.verify_math(["$\\boxed{1},\\boxed{2}$"], ["${1,2}$"]), 1.0)
+
+  @pytest.mark.cpu_only
+  def test_list_of_numbers(self):
+    self.assertEqual(utils_rl.verify_math(["$1$ and $2$ and $3$"], ["$1,2,3$"]), 1.0)
+
+  @pytest.mark.cpu_only
+  def test_string_extraction(self):
+    self.assertEqual(utils_rl.verify_math(["$B$"], ["$B$"]), 1.0)
 
 
 class TestNormalizeFinalAnswer(unittest.TestCase):
@@ -138,6 +211,7 @@ class TestNormalizeFinalAnswer(unittest.TestCase):
   def test_dollar_math_extraction(self):
     # Content inside $...$ is extracted
     self.assertEqual(utils_rl.normalize_final_answer("The answer is $\\frac{1}{2}$"), "\\frac{1}{2}")
+    self.assertEqual(utils_rl.normalize_final_answer("The answer is 3 $\\frac{1}{2}$"), "3+\\frac{1}{2}")
 
   @pytest.mark.cpu_only
   def test_shorthand_frac_and_sqrt(self):
@@ -222,7 +296,7 @@ class TestCheckNumbers(unittest.TestCase):
     """Full <reasoning>…</reasoning><answer>…</answer> format allows extraction."""
     scores = self._check(
         completions=["<reasoning>40 + 2 = 42</reasoning><answer>42</answer>"],
-        answer=["42"],
+        answer=[["42"]],
     )
     self.assertEqual(scores[0], self.config.reward_exact_answer)
 
@@ -231,16 +305,16 @@ class TestCheckNumbers(unittest.TestCase):
     """Plain-text completion without any tags yields score 0 (cannot extract)."""
     scores = self._check(
         completions=["The answer is 42."],
-        answer=["42"],
+        answer=[["42"]],
     )
-    self.assertEqual(scores[0], 0)
+    self.assertEqual(scores[0], self.config.penalty_incorrect_format)
 
   @pytest.mark.cpu_only
   def test_extraction_fails_answer_tags_only(self):
     """<answer> tag alone (no <reasoning> block) is matched by the regex as a fallback, score 1.5."""
     scores = self._check(
         completions=["<answer>42</answer>"],
-        answer=["42"],
+        answer=[["42"]],
     )
     self.assertEqual(scores[0], self.config.reward_exact_answer)
 
@@ -249,9 +323,9 @@ class TestCheckNumbers(unittest.TestCase):
     """<reasoning> block with no <answer> tag cannot be extracted, score 0."""
     scores = self._check(
         completions=["<reasoning>The answer is 42.</reasoning>"],
-        answer=["42"],
+        answer=[["42"]],
     )
-    self.assertEqual(scores[0], 0)
+    self.assertEqual(scores[0], self.config.penalty_incorrect_format)
 
   @pytest.mark.cpu_only
   def test_extraction_batch_mixed(self):
@@ -261,10 +335,25 @@ class TestCheckNumbers(unittest.TestCase):
             "<reasoning>thinking</reasoning><answer>7</answer>",  # extractable
             "just 7",  # not extractable
         ],
-        answer=["7", "7"],
+        answer=[["7"], ["7"]],
     )
     self.assertEqual(scores[0], self.config.reward_exact_answer)
-    self.assertEqual(scores[1], 0)
+    self.assertEqual(scores[1], self.config.penalty_incorrect_format)
+
+  @pytest.mark.cpu_only
+  def test_extraction_for_mcq(self):
+    """Batch with two multiple-choice questions and one single-answer question."""
+    scores = self._check(
+        completions=[
+            "<reasoning>thinking</reasoning><answer>7</answer>",
+            "<reasoning>thinking</reasoning><answer>A</answer>",
+            "<reasoning>thinking</reasoning><answer>A</answer>",
+        ],
+        answer=[["7", "B"], ["7", "A"], ["7", "7"]],
+    )
+    self.assertEqual(scores[0], self.config.reward_exact_answer)
+    self.assertEqual(scores[1], self.config.reward_exact_answer)
+    self.assertEqual(scores[2], self.config.penalty_incorrect_answer)  # extracted "A" does not match "7"
 
   # ---------------------------------------------------------------
   # Scenario 2: extraction succeeds, value matches/mismatches the answer
@@ -275,7 +364,7 @@ class TestCheckNumbers(unittest.TestCase):
     """Extracted integer equal to reference answer earns 1.5."""
     scores = self._check(
         completions=["<reasoning>simple</reasoning><answer>100</answer>"],
-        answer=["100"],
+        answer=[["100"]],
     )
     self.assertEqual(scores[0], self.config.reward_exact_answer)
 
@@ -284,16 +373,16 @@ class TestCheckNumbers(unittest.TestCase):
     """Extracted number that differs from the reference answer earns 0.0."""
     scores = self._check(
         completions=["<reasoning>wrong path</reasoning><answer>99</answer>"],
-        answer=["42"],
+        answer=[["42"]],
     )
-    self.assertEqual(scores[0], 0.0)
+    self.assertEqual(scores[0], self.config.penalty_incorrect_answer)
 
   @pytest.mark.cpu_only
   def test_extracted_matches_comma_formatted_number(self):
     """Comma-formatted guess (e.g. '1,000') normalizes to match integer answer '1000'."""
     scores = self._check(
         completions=["<reasoning>cost calculation</reasoning><answer>1,000</answer>"],
-        answer=["1000"],
+        answer=[["1000"]],
     )
     self.assertEqual(scores[0], self.config.reward_exact_answer)
 
@@ -302,7 +391,7 @@ class TestCheckNumbers(unittest.TestCase):
     """Leading '$' in extracted answer is normalized away before comparison."""
     scores = self._check(
         completions=["<reasoning>price is $16</reasoning><answer>$16</answer>"],
-        answer=["16"],
+        answer=[["16"]],
     )
     self.assertEqual(scores[0], self.config.reward_exact_answer)
 
@@ -311,9 +400,9 @@ class TestCheckNumbers(unittest.TestCase):
     """Non-numeric extraction that cannot be float-converted and does not math-verify returns 0."""
     scores = self._check(
         completions=["<reasoning>thinking</reasoning><answer>blue</answer>"],
-        answer=["red"],
+        answer=[["red"]],
     )
-    self.assertEqual(scores[0], 0.0)
+    self.assertEqual(scores[0], self.config.penalty_incorrect_format)
 
 
 class TestExtractHashAnswer(unittest.TestCase):
