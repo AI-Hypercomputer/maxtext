@@ -71,7 +71,7 @@ from maxtext.utils.sharding import create_sharding
 
 class NNXDecoderLayer(nnx.Module):
   """
-  Transformer decoder layer converted to NNX.
+  Transformer decoder layer converted to NNX
   """
 
   def __init__(
@@ -451,13 +451,21 @@ class NNXDecoder(nnx.Module):
 
     # Add partition metadata that nnx.vmap's transform_metadata would normally set.
     # This metadata is read by variable_to_logically_partitioned() in initializers.py
-    # to insert the scan axis name into logical sharding specs.
+    # and by nnx.get_partition_spec() (via the updated out_sharding) to produce
+    # correct sharding specs that include the scan axis dimension.
     def _add_scan_metadata(state, axis):
       def _update_leaf(leaf):
         if isinstance(leaf, nnx.VariableState):
           metadata = leaf.get_metadata()
           metadata[nnx.PARTITION_NAME] = metadata_axis_name
           metadata["param_scan_axis"] = axis
+          # Insert the scan axis name into out_sharding so that
+          # nnx.get_partition_spec returns specs matching the actual tensor rank.
+          # Without this, scanned params are 3D but specs remain 2D.
+          if "out_sharding" in metadata and metadata["out_sharding"]:
+            out_sharding = list(metadata["out_sharding"])
+            out_sharding.insert(axis, metadata_axis_name)
+            metadata["out_sharding"] = tuple(out_sharding)
           return leaf.replace(**metadata)
         return leaf
 
@@ -529,7 +537,13 @@ class NNXDecoder(nnx.Module):
       params = jax.tree.map(lambda x: jnp.moveaxis(x, 0, scan_axis), params)
 
     scanned_state = nnx.State.merge(params, scanned_other)
-    return final_carry, nnx.merge(graphdef, scanned_state)
+    # Update the existing module in-place rather than creating a new one.
+    # Creating a new module via nnx.merge and reassigning (self.layers = new_module)
+    # would replace a child node in the NNX graph, which is detected as a graph
+    # structure mutation when the parent module is inside a JAX transformation
+    # (e.g., nnx.jit in PeftTrainer). In-place update preserves object identity.
+    nnx.update(layers, scanned_state)
+    return final_carry, layers
 
   def get_decoder_layers(self):
     """Retrieves decoder layer classes based on config using a dictionary lookup."""
@@ -1217,7 +1231,7 @@ def decoder_as_linen(
     model_mode: str,
     quant: None | Quant = None,
 ):
-  """Creates a Decoder module."""
+  """Creates a Decoder module"""
   module = nnx_wrappers.to_linen(
       NNXDecoder,
       config=config,
