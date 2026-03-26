@@ -40,11 +40,10 @@ Repository = "https://github.com/AI-Hypercomputer/maxtext.git"
 allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/MaxText", "src/maxtext", "src/dependencies"]
+packages = ["src/maxtext", "src/dependencies"]
 
-# TODO: Add this hook back when it handles device-type parsing
-# [tool.hatch.build.targets.wheel.hooks.custom]
-# path = "build_hooks.py"
+[tool.hatch.build.targets.wheel.hooks.custom]
+path = "build_hooks.py"
 
 [project.scripts]
 install_maxtext_tpu_github_deps = "dependencies.github_deps.install_pre_train_deps:main"
