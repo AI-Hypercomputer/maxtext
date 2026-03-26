@@ -12,23 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Registry mapping benchmark names to BenchmarkDataset classes."""
+"""Registry mapping benchmark names to BenchmarkDataset classes.
+
+MMLU, GPQA, MATH, and GSM-8K are handled by lm_eval_runner (loglikelihood)
+or evalchemy_runner (generation) and no longer have custom dataset loaders here.
+Custom loaders are retained only for benchmarks not covered by those runners
+(currently: MLPerf OpenOrca, which requires ROUGE scoring).
+"""
 
 from __future__ import annotations
 
 from maxtext.eval.datasets.base import BenchmarkDataset
-from maxtext.eval.datasets.gpqa import GpqaDataset
-from maxtext.eval.datasets.math_dataset import Gsm8kDataset, MathDataset
 from maxtext.eval.datasets.mlperf import MlperfOpenOrcaDataset
-from maxtext.eval.datasets.mmlu import MmluDataset
 
 DATASET_REGISTRY: dict[str, type[BenchmarkDataset]] = {
-    "mmlu": MmluDataset,
-    "mmlu_pro": MmluDataset,
-    "gpqa": GpqaDataset,
-    "gpqa_diamond": GpqaDataset,
-    "math": MathDataset,
-    "gsm8k": Gsm8kDataset,
     "mlperf_openorca": MlperfOpenOrcaDataset,
     "openorca": MlperfOpenOrcaDataset,
 }
@@ -38,7 +35,7 @@ def get_dataset(benchmark_name: str) -> BenchmarkDataset:
   """Instantiate and return the mapping for benchmark_name.
 
   Args:
-    benchmark_name: Benchmark identifier (e.g. "mmlu", "gpqa").
+    benchmark_name: Benchmark identifier (e.g. "mlperf_openorca").
 
   Returns:
     An instance of the corresponding BenchmarkDataset subclass.
@@ -50,7 +47,8 @@ def get_dataset(benchmark_name: str) -> BenchmarkDataset:
   if key not in DATASET_REGISTRY:
     raise KeyError(
         f"No dataset registered for benchmark '{benchmark_name}'. "
-        f"Available: {sorted(DATASET_REGISTRY)}"
+        f"Available: {sorted(DATASET_REGISTRY)}. "
+        f"For MMLU/GPQA/MATH use lm_eval_runner or evalchemy_runner instead."
     )
   return DATASET_REGISTRY[key]()
 

@@ -32,10 +32,9 @@ def write_results(
     config: dict,
     results_path: str = "./eval_results",
 ) -> dict:
-  """Write eval results to a JSON file under *results_path*.
+  """Write eval results to a JSON file under results_path.
 
-  The output filename is::
-
+  The output filename is:
       {results_path}/{benchmark}_{model_name}_{timestamp}.json
 
   Args:
@@ -48,13 +47,13 @@ def write_results(
 
   Returns:
     Dict with keys:
-      - ``results``: The full results dict written to disk.
-      - ``local_path``: Absolute path of the written file.
+      - results: The full results dict written to disk.
+      - local_path: Absolute path of the written file.
   """
   os.makedirs(results_path, exist_ok=True)
 
-  timestamp = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
-  # Sanitise model_name for use in a filename.
+  timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+  # Create filename.
   safe_model = model_name.replace("/", "_").replace(":", "_")
   filename = f"{benchmark}_{safe_model}_{timestamp}.json"
   local_path = os.path.join(results_path, filename)
@@ -70,6 +69,5 @@ def write_results(
 
   with open(local_path, "w") as f:
     json.dump(results, f, indent=2)
-
   logger.info("Results written to %s", local_path)
   return {"results": results, "local_path": os.path.abspath(local_path)}

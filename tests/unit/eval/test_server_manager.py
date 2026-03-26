@@ -12,10 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for maxtext.eval.runner.server_manager."""
+"""Unit tests for maxtext.eval.runner.server_manager.VllmServerManager.
 
-import signal
-import subprocess
+Tests cover the in-process LLM instantiation path (vLLM + uvicorn daemon
+thread), NOT a subprocess API.  vLLM, uvicorn, and JAX rank helpers are
+mocked so the suite runs without TPU hardware or installed vLLM.
+"""
+
+import os
 import unittest
 from unittest import mock
 
@@ -24,7 +28,7 @@ from maxtext.eval.runner.server_manager import VllmServerManager
 
 def _make_manager(**kwargs) -> VllmServerManager:
   defaults = dict(
-      hf_model_path="/fake/model",
+      model_path="/fake/model",
       host="localhost",
       port=8000,
       tensor_parallel_size=4,
@@ -34,97 +38,182 @@ def _make_manager(**kwargs) -> VllmServerManager:
   return VllmServerManager(**defaults)
 
 
-class TestVllmServerManagerCommand(unittest.TestCase):
+def _start_capturing_llm_kwargs(mgr: VllmServerManager, rank: int = 0) -> dict:
+  """Call mgr.start() with vLLM/uvicorn/JAX mocked; return kwargs passed to LLM(...)."""
+  mock_llm_cls = mock.MagicMock()
+  mock_vllm = mock.MagicMock()
+  mock_vllm.LLM = mock_llm_cls
+  mock_uvicorn = mock.MagicMock()
 
-  def _start_with_mock(self, mgr: VllmServerManager):
-    """Start the manager with Popen and health-check mocked out."""
-    with mock.patch("subprocess.Popen") as mock_popen, \
-         mock.patch.object(mgr, "_wait_until_healthy"):
-      mock_proc = mock.MagicMock()
-      mock_proc.poll.return_value = None
-      mock_popen.return_value = mock_proc
-      mgr.start()
-      return mock_popen.call_args[0][0]  # the cmd list
+  with mock.patch.dict("sys.modules", {"vllm": mock_vllm, "uvicorn": mock_uvicorn}), \
+       mock.patch("jax.process_index", return_value=rank), \
+       mock.patch("threading.Thread", return_value=mock.MagicMock()), \
+       mock.patch("maxtext.eval.runner.server_manager._build_app", return_value=mock.MagicMock()), \
+       mock.patch.object(mgr, "_wait_until_healthy"):
+    mgr.start()
 
-  def test_required_args_present(self):
-    mgr = _make_manager()
-    cmd = self._start_with_mock(mgr)
-    self.assertIn("vllm.entrypoints.openai.api_server", " ".join(cmd))
-    self.assertIn("--model", cmd)
-    self.assertIn("/fake/model", cmd)
-    self.assertIn("--tensor-parallel-size", cmd)
-    self.assertIn("4", cmd)
-    self.assertIn("--device", cmd)
-    self.assertIn("tpu", cmd)
+  return mock_llm_cls.call_args.kwargs
 
-  def test_max_num_batched_tokens_included_when_set(self):
+
+# ---------------------------------------------------------------------------
+# LLM constructor kwargs
+# ---------------------------------------------------------------------------
+
+
+class TestVllmServerManagerConfig(unittest.TestCase):
+  """Tests for vLLM LLM constructor kwargs built by start()."""
+
+  def test_required_vllm_kwargs(self):
+    mgr = _make_manager(tensor_parallel_size=4, max_model_len=8192)
+    kwargs = _start_capturing_llm_kwargs(mgr)
+    self.assertEqual(kwargs["model"], "/fake/model")
+    self.assertEqual(kwargs["tensor_parallel_size"], 4)
+    self.assertEqual(kwargs["max_model_len"], 8192)
+    self.assertEqual(kwargs["device"], "tpu")
+
+  def test_maxtext_adapter_mode_sets_hf_overrides(self):
+    mgr = _make_manager(
+        checkpoint_path="gs://bucket/run/0/items",
+        maxtext_model_name="llama3.1-8b",
+    )
+    kwargs = _start_capturing_llm_kwargs(mgr)
+    self.assertIn("hf_overrides", kwargs)
+    self.assertEqual(kwargs["hf_overrides"]["architectures"], ["MaxTextForCausalLM"])
+
+  def test_maxtext_adapter_mode_sets_additional_config(self):
+    mgr = _make_manager(
+        checkpoint_path="gs://bucket/run/0/items",
+        maxtext_model_name="llama3.1-8b",
+    )
+    kwargs = _start_capturing_llm_kwargs(mgr)
+    add_cfg = kwargs["additional_config"]["maxtext_config"]
+    self.assertEqual(add_cfg["load_parameters_path"], "gs://bucket/run/0/items")
+    self.assertEqual(add_cfg["model_name"], "llama3.1-8b")
+
+  def test_hf_mode_sets_load_format_auto(self):
+    mgr = _make_manager()  # no checkpoint_path → HF mode
+    kwargs = _start_capturing_llm_kwargs(mgr)
+    self.assertEqual(kwargs.get("load_format"), "auto")
+    self.assertNotIn("hf_overrides", kwargs)
+    self.assertNotIn("additional_config", kwargs)
+
+  def test_max_num_batched_tokens_forwarded(self):
     mgr = _make_manager(max_num_batched_tokens=2048)
-    cmd = self._start_with_mock(mgr)
-    self.assertIn("--max-num-batched-tokens", cmd)
-    idx = cmd.index("--max-num-batched-tokens")
-    self.assertEqual(cmd[idx + 1], "2048")
+    kwargs = _start_capturing_llm_kwargs(mgr)
+    self.assertEqual(kwargs["max_num_batched_tokens"], 2048)
 
   def test_max_num_batched_tokens_omitted_when_none(self):
     mgr = _make_manager(max_num_batched_tokens=None)
-    cmd = self._start_with_mock(mgr)
-    self.assertNotIn("--max-num-batched-tokens", cmd)
+    kwargs = _start_capturing_llm_kwargs(mgr)
+    self.assertNotIn("max_num_batched_tokens", kwargs)
 
-  def test_max_num_seqs_included_when_set(self):
+  def test_max_num_seqs_forwarded(self):
     mgr = _make_manager(max_num_seqs=256)
-    cmd = self._start_with_mock(mgr)
-    self.assertIn("--max-num-seqs", cmd)
-    idx = cmd.index("--max-num-seqs")
-    self.assertEqual(cmd[idx + 1], "256")
+    kwargs = _start_capturing_llm_kwargs(mgr)
+    self.assertEqual(kwargs["max_num_seqs"], 256)
 
   def test_max_num_seqs_omitted_when_none(self):
     mgr = _make_manager(max_num_seqs=None)
-    cmd = self._start_with_mock(mgr)
-    self.assertNotIn("--max-num-seqs", cmd)
+    kwargs = _start_capturing_llm_kwargs(mgr)
+    self.assertNotIn("max_num_seqs", kwargs)
 
-  def test_extra_vllm_args_appended(self):
-    mgr = _make_manager(extra_vllm_args=["--gpu-memory-utilization", "0.9"])
-    cmd = self._start_with_mock(mgr)
-    self.assertIn("--gpu-memory-utilization", cmd)
-    self.assertIn("0.9", cmd)
+  def test_env_applied_to_os_environ_before_llm_init(self):
+    mgr = _make_manager(env={"_TEST_EVAL_TOKEN": "abc123"})
+    env_at_init = {}
 
-  def test_hf_token_forwarded_in_env(self):
-    mgr = _make_manager(env={"HF_TOKEN": "hf_test123"})
-    with mock.patch("subprocess.Popen") as mock_popen, \
-         mock.patch.object(mgr, "_wait_until_healthy"):
-      mock_proc = mock.MagicMock()
-      mock_proc.poll.return_value = None
-      mock_popen.return_value = mock_proc
-      mgr.start()
-      _, kwargs = mock_popen.call_args
-      self.assertEqual(kwargs["env"]["HF_TOKEN"], "hf_test123")
+    def capture_env(**kwargs):  # pylint: disable=unused-argument
+      env_at_init.update(os.environ)
+      return mock.MagicMock()
 
-  def test_env_merges_with_os_environ(self):
-    mgr = _make_manager(env={"MY_VAR": "value"})
-    with mock.patch("subprocess.Popen") as mock_popen, \
+    mock_llm_cls = mock.MagicMock(side_effect=capture_env)
+    mock_vllm = mock.MagicMock()
+    mock_vllm.LLM = mock_llm_cls
+
+    with mock.patch.dict("sys.modules", {"vllm": mock_vllm, "uvicorn": mock.MagicMock()}), \
+         mock.patch("jax.process_index", return_value=0), \
+         mock.patch("threading.Thread", return_value=mock.MagicMock()), \
+         mock.patch("maxtext.eval.runner.server_manager._build_app", return_value=mock.MagicMock()), \
          mock.patch.object(mgr, "_wait_until_healthy"), \
-         mock.patch.dict("os.environ", {"EXISTING": "yes"}):
-      mock_proc = mock.MagicMock()
-      mock_proc.poll.return_value = None
-      mock_popen.return_value = mock_proc
+         mock.patch.dict("os.environ", {}, clear=False):
       mgr.start()
-      _, kwargs = mock_popen.call_args
-      self.assertIn("EXISTING", kwargs["env"])
-      self.assertIn("MY_VAR", kwargs["env"])
+
+    self.assertEqual(env_at_init.get("_TEST_EVAL_TOKEN"), "abc123")
+
+  def test_missing_maxtext_model_name_raises(self):
+    with self.assertRaises(ValueError):
+      VllmServerManager(model_path="/fake/model", checkpoint_path="gs://bucket/0/items")
+
+
+# ---------------------------------------------------------------------------
+# HTTP server threading
+# ---------------------------------------------------------------------------
+
+
+class TestVllmServerManagerHttp(unittest.TestCase):
+  """Tests that the HTTP server is started only on rank-0."""
+
+  def _start_capturing_thread_calls(self, mgr, rank):
+    mock_llm_cls = mock.MagicMock()
+    mock_vllm = mock.MagicMock()
+    mock_vllm.LLM = mock_llm_cls
+    mock_thread_cls = mock.MagicMock(return_value=mock.MagicMock())
+
+    with mock.patch.dict("sys.modules", {"vllm": mock_vllm, "uvicorn": mock.MagicMock()}), \
+         mock.patch("jax.process_index", return_value=rank), \
+         mock.patch("threading.Thread", mock_thread_cls), \
+         mock.patch("maxtext.eval.runner.server_manager._build_app", return_value=mock.MagicMock()), \
+         mock.patch.object(mgr, "_wait_until_healthy"):
+      mgr.start()
+
+    return mock_thread_cls
+
+  def test_rank0_starts_http_server_thread(self):
+    mgr = _make_manager()
+    mock_thread_cls = self._start_capturing_thread_calls(mgr, rank=0)
+    mock_thread_cls.assert_called_once()
+    _, kwargs = mock_thread_cls.call_args
+    self.assertTrue(kwargs.get("daemon"))
+
+  def test_non_rank0_does_not_start_http_server(self):
+    mgr = _make_manager()
+    mock_thread_cls = self._start_capturing_thread_calls(mgr, rank=1)
+    mock_thread_cls.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle
+# ---------------------------------------------------------------------------
 
 
 class TestVllmServerManagerLifecycle(unittest.TestCase):
 
-  def test_stop_sends_sigterm(self):
+  def test_stop_signals_uvicorn_should_exit(self):
     mgr = _make_manager()
-    mock_proc = mock.MagicMock()
-    mock_proc.poll.return_value = None
-    mgr._proc = mock_proc
-    mgr.stop()
-    mock_proc.send_signal.assert_called_once_with(signal.SIGTERM)
+    mock_server = mock.MagicMock()
+    mock_thread = mock.MagicMock()
+    mock_thread.is_alive.return_value = False
+    mgr._uvicorn_server = mock_server
+    mgr._server_thread = mock_thread
+    with mock.patch("jax.process_index", return_value=0):
+      mgr.stop()
+    self.assertTrue(mock_server.should_exit)
+
+  def test_stop_clears_references(self):
+    mgr = _make_manager()
+    mgr._llm = mock.MagicMock()
+    mgr._uvicorn_server = mock.MagicMock()
+    mgr._server_thread = mock.MagicMock()
+    mgr._server_thread.is_alive.return_value = False
+    with mock.patch("jax.process_index", return_value=0):
+      mgr.stop()
+    self.assertIsNone(mgr._llm)
+    self.assertIsNone(mgr._uvicorn_server)
+    self.assertIsNone(mgr._server_thread)
 
   def test_stop_is_noop_when_not_started(self):
     mgr = _make_manager()
-    mgr.stop()  # should not raise
+    with mock.patch("jax.process_index", return_value=0):
+      mgr.stop()  # should not raise
 
   def test_stop_called_on_context_exit(self):
     mgr = _make_manager()

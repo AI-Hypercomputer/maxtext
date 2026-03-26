@@ -14,16 +14,31 @@
 
 """CLI entry point for model evaluation.
 
-Usage::
+MaxTextForCausalLM mode (preferred):
+Load weights directly from the MaxText checkpoint, no HuggingFace weight
+conversion required. Flag --hf_path supplies the tokenizer (HF model ID
+or local tokenizer dir).
 
-  python -m maxtext.eval.runner.eval_runner \\
-      --config src/maxtext/eval/configs/mmlu.yml \\
-      --base_config src/maxtext/configs/post_train/rl.yml \\
-      --base_output_directory gs://<gcs_bucket>/ \\
-      --run_name my_run \\
-      --checkpoint_path gs://<gcs_bucket>/checkpoint/0/items \\
-      --model_name llama3.1-8b \\
-      --hf_path gs://<gcs_bucket>/hf/
+  python -m maxtext.eval.runner.eval_runner \
+      --config src/maxtext/eval/configs/mlperf.yml \
+      --base_config src/maxtext/configs/base.yml  \
+      --base_output_directory gs://<gcs_bucket>/ \
+      --run_name my_run \
+      --checkpoint_path gs://<gcs_bucket>/checkpoint/0/items \
+      --model_name llama3.1-8b \
+      --hf_path meta-llama/Llama-3.1-8B-Instruct
+
+HuggingFace safetensors mode:
+Pass --hf_mode and point --hf_path at an existing HF model directory.
+
+  python -m maxtext.eval.runner.eval_runner \
+      --config src/maxtext/eval/configs/mlperf.yml \
+      --hf_path TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
+      --model_name tinyllama \
+      --hf_mode \
+      --base_output_directory /tmp/eval/ \
+      --run_name smoke_test \
+      --tensor_parallel_size 1
 """
 
 from __future__ import annotations
@@ -31,9 +46,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import sys
 import time
-from pathlib import Path
 
 import yaml
 
@@ -87,40 +100,6 @@ def _build_results_path(cfg: dict) -> str:
   return f"{base_output_directory}/{run_name}/eval_results"
 
 
-def _convert_checkpoint(
-    checkpoint_path: str,
-    model_name: str,
-    hf_path: str,
-    hf_token: str | None = None,
-) -> str:
-  """Convert a MaxText checkpoint to HuggingFace format if needed."""
-  # pylint: disable=import-outside-toplevel
-  import subprocess
-
-  # Check if already converted.
-  config_json = os.path.join(hf_path, "config.json")
-  if os.path.exists(config_json):
-    logger.info("HF checkpoint already exists at %s, skipping conversion.", hf_path)
-    return hf_path
-
-  logger.info(
-      "Converting MaxText checkpoint %s to %s (model: %s) for eval.",
-      checkpoint_path, hf_path, model_name,
-  )
-  cmd = [
-      sys.executable, "-m",
-      "maxtext.checkpoint_conversion.to_huggingface",
-      f"MaxtextCheckpoint={checkpoint_path}",
-      f"HuggingFaceOutputDir={hf_path}",
-      f"model_name={model_name}",
-  ]
-  proc_env = os.environ.copy()
-  if hf_token:
-    proc_env["HF_TOKEN"] = hf_token
-  subprocess.run(cmd, check=True, env=proc_env)
-  logger.info("Checkpoint conversion for eval complete.")
-  return hf_path
-
 
 def run_eval(cfg: dict, hf_token: str | None = None) -> dict:
   """Execute all the evaluation steps.
@@ -163,16 +142,15 @@ def run_eval(cfg: dict, hf_token: str | None = None) -> dict:
   max_num_seqs = cfg.get("max_num_seqs")
   if max_num_seqs is not None:
     max_num_seqs = int(max_num_seqs)
-  skip_conversion = cfg.get("skip_conversion", False)
   gcs_results_path = cfg.get("gcs_results_path")
   token = hf_token or os.environ.get("HF_TOKEN") or None
-
-  # Convert Checkpoint.
   checkpoint_path = cfg.get("checkpoint_path")
-  if checkpoint_path and not skip_conversion:
-    hf_path = _convert_checkpoint(checkpoint_path, model_name, hf_path, hf_token=token)
+  hf_mode = cfg.get("hf_mode", False)
 
-  # Load tokenizer for chat templating.
+  # Determine loading mode.
+  use_maxtext_adapter = bool(checkpoint_path) and not hf_mode
+
+  # Load tokenizer for prompt formatting.
   logger.info("Loading tokenizer from %s.", hf_path)
   tokenizer = AutoTokenizer.from_pretrained(hf_path, token=token)
 
@@ -184,31 +162,27 @@ def run_eval(cfg: dict, hf_token: str | None = None) -> dict:
 
   prompts = [r.prompt for r in requests]
   references = [r.reference for r in requests]
-  metadata_list = [r.metadata for r in requests]
 
-  # Start vLLM server
-  extra_args = cfg.get("extra_vllm_args", [])
-  if isinstance(extra_args, str):
-    extra_args = extra_args.split()
-
+  # Start vLLM server.
   server_env = {"HF_TOKEN": token} if token else None
   with VllmServerManager(
-      hf_model_path=hf_path,
+      model_path=hf_path,
+      checkpoint_path=checkpoint_path if use_maxtext_adapter else None,
+      maxtext_model_name=model_name if use_maxtext_adapter else None,
       host=server_host,
       port=server_port,
       tensor_parallel_size=tensor_parallel_size,
       max_model_len=max_model_len,
       max_num_batched_tokens=max_num_batched_tokens,
       max_num_seqs=max_num_seqs,
-      extra_vllm_args=extra_args,
       env=server_env,
   ) as server:
     base_url = server.base_url
 
-    # Warmup server
-    warmup_server(base_url=base_url, model=model_name)
+    # Warmup server.
+    warmup_server(base_url=base_url, model=model_name, sample_requests=requests)
 
-    # Generate
+    # Generate responses.
     logger.info("Generating responses for %d prompts.", len(prompts))
     t0 = time.time()
     results = generate_batch(
@@ -222,20 +196,14 @@ def run_eval(cfg: dict, hf_token: str | None = None) -> dict:
     elapsed = time.time() - t0
     logger.info("Generation completed in %.1fs (%.1f samples/s).", elapsed, len(prompts) / elapsed)
 
-  # Score
+  # Score.
   responses = [r.text for r in results]
   errors = [r for r in results if r.error]
   if errors:
     logger.warning("%d generation errors (out of %d).", len(errors), len(results))
 
   scorer = get_scorer(benchmark)
-
-  # Pass subject_labels for MMLU per-subject breakdown if available.
-  scorer_kwargs: dict = {}
-  if benchmark in ("mmlu", "mmlu_pro") and metadata_list and metadata_list[0]:
-    scorer_kwargs["subject_labels"] = [m.get("subject", "") if m else "" for m in metadata_list]
-
-  scores = scorer(responses, references, **scorer_kwargs)
+  scores = scorer(responses, references)
   logger.info("Scores: %s", scores)
 
   # Write results
@@ -256,6 +224,7 @@ def run_eval(cfg: dict, hf_token: str | None = None) -> dict:
       results_path=results_path,
   )
 
+  # Optional GCS Upload.
   if gcs_results_path:
     from maxtext.eval.reporting.gcs_reporter import upload_results  # pylint: disable=import-outside-toplevel
     upload_results(output["local_path"], gcs_results_path)
@@ -273,9 +242,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
   parser.add_argument("--benchmark", help="Benchmark name.")
   parser.add_argument("--checkpoint_path", help="MaxText checkpoint path.")
   parser.add_argument("--model_name", help="MaxText model name.")
-  parser.add_argument("--hf_path", help="Path to write/read huggingface safetensors.")
+  parser.add_argument("--hf_path", help="HF model ID or tokenizer dir.")
   parser.add_argument("--base_output_directory", help="Base output directory.")
-  parser.add_argument("--base_output_directory", help="Run name/identifier.")
+  parser.add_argument("--run_name", help="Run name/identifier.")
   parser.add_argument("--gcs_results_path", help="Optional GCS path to upload results.")
   parser.add_argument("--num_samples", type=int, help="Number of eval samples.")
   parser.add_argument("--max_tokens", type=int, help="Max tokens per generation.")
@@ -285,8 +254,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
   parser.add_argument("--max_model_len", type=int, help="vLLM max context length.")
   parser.add_argument("--server_host", help="vLLM server host.")
   parser.add_argument("--server_port", type=int, help="vLLM server port.")
-  parser.add_argument("--skip_conversion", action="store_true", help="Skip checkpoint conversion.")
-  parser.add_argument("--hf_token", help="HuggingFace token for gated models. Falls back to HF_TOKEN env var.")
+  parser.add_argument("--hf_mode", action="store_true", help="Use HF safetensors mode.")
+  parser.add_argument("--hf_token", help="HuggingFace token for gated models.")
   parser.add_argument(
       "--log_level",
       default="INFO",

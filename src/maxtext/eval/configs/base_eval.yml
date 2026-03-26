@@ -6,4 +6,3 @@ server_host: "localhost"
 server_port: 8000
 tensor_parallel_size: 4
 num_samples: null
-skip_conversion: false

@@ -35,14 +35,13 @@ class MlperfOpenOrcaDataset(BenchmarkDataset):
     # pylint: disable=import-outside-toplevel
     import datasets as hf_datasets
 
-    ds = hf_datasets.load_dataset("Open-Orca/OpenOrca", split="train")
-    # Filter to rows with a non-empty reference response.
-    ds = ds.filter(lambda row: bool(row.get("response", "").strip()))
-    if num_samples is not None:
-      ds = ds.select(range(min(num_samples, len(ds))))
+    ds = hf_datasets.load_dataset("Open-Orca/OpenOrca", split="train", streaming=True)
 
     requests = []
     for row in ds:
+      if not row.get("response", "").strip():
+        continue
+
       system_prompt = row.get("system_prompt", _SYSTEM_PROMPT) or _SYSTEM_PROMPT
       question = row["question"]
       reference = row["response"]
@@ -57,5 +56,8 @@ class MlperfOpenOrcaDataset(BenchmarkDataset):
         prompt = f"{system_prompt}\n\nUser: {question}\nAssistant:"
 
       requests.append(SampleRequest(prompt=prompt, reference=reference))
+
+      if num_samples is not None and len(requests) >= num_samples:
+        break
 
     return requests

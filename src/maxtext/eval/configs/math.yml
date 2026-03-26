@@ -1,6 +1,0 @@
-# MATH-500 evaluation config.
-# 500 competition math problems.
-
-benchmark: "math"
-max_tokens: 2048
-concurrency: 32

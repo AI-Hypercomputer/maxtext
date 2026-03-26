@@ -1,5 +1,0 @@
-# GPQA Diamond evaluation config.
-# 198 graduate-level science questions.
-
-benchmark: "gpqa"
-max_tokens: 32

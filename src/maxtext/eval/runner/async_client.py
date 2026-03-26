@@ -12,24 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Async HTTP client — thin wrapper around the upstream tpu-inference backend_request_func.
+"""Async HTTP client for the /v1/completions endpoint.
 
-Delegates individual requests to
-eval.vllm.backend_request_func.async_request_openai_completions
-and fans out concurrently via asyncio.gather.
+Fans out requests concurrently with a semaphore-bounded asyncio pool and
+returns results in prompt order.  Uses aiohttp for non-blocking I/O.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
-
-from maxtext.eval.vllm.backend_request_func import (
-    RequestFuncInput,
-    RequestFuncOutput,
-    async_request_openai_completions,
-)
+import time
+from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
@@ -37,35 +31,26 @@ _DEFAULT_CONCURRENCY = 64
 _DEFAULT_MAX_TOKENS = 1024
 _DEFAULT_TEMPERATURE = 0.0
 _COMPLETIONS_PATH = "/v1/completions"
+_REQUEST_TIMEOUT_S = 600 # (TODO): Check if this is reasoanable.
 
 
 @dataclass
 class GenerationResult:
-  """Result of a single generation request.
+  """Result of a single /v1/completions request.
 
   Attributes:
-    text: The generated text (empty string on error).
-    prompt_tokens: Number of prompt tokens consumed.
-    completion_tokens: Number of completion tokens generated.
+    text: Generated text (empty string on error).
+    prompt_tokens: Tokens consumed by the prompt.
+    completion_tokens: Tokens in the generated completion.
     error: Non-empty error message if the request failed.
-    latency_s: E2E wall-clock latency in seconds.
+    latency_s: End-to-end wall-clock latency in seconds.
   """
 
   text: str = ""
   prompt_tokens: int = 0
   completion_tokens: int = 0
   error: str = ""
-  latency_s: float = 0.0
-
-
-def _to_generation_result(output: RequestFuncOutput) -> GenerationResult:
-  return GenerationResult(
-      text=output.generated_text,
-      prompt_tokens=output.prompt_len,
-      completion_tokens=output.output_tokens or 0,
-      error=output.error,
-      latency_s=output.latency,
-  )
+  latency_s: float = field(default=0.0)
 
 
 async def generate_batch_async(
@@ -75,37 +60,58 @@ async def generate_batch_async(
     max_tokens: int = _DEFAULT_MAX_TOKENS,
     temperature: float = _DEFAULT_TEMPERATURE,
     concurrency: int = _DEFAULT_CONCURRENCY,
+    request_timeout: int = _REQUEST_TIMEOUT_S,
 ) -> list[GenerationResult]:
-  """Send prompts concurrently via the tpu-inference completions request function.
+  """Send all prompts concurrently and return results in prompt order.
 
   Args:
-    prompts: List of fully-formatted prompt strings.
-    base_url: Base URL of the vLLM server.
-    model: Model name as registered with the vLLM server.
+    prompts: Formatted prompt strings.
+    base_url: Base URL of the server.
+    model: Model name to send in each request.
     max_tokens: Maximum tokens to generate per response.
     temperature: Sampling temperature.
-    concurrency: Maximum number of in-flight requests.
+    concurrency: Maximum number of in-flight requests at once.
+    request_timeout: Per-request wall-clock timeout in seconds.
 
   Returns:
-    List of GenerationResult in the order of prompts.
+    List of GenerationResult in the same order as prompts.
   """
+  import aiohttp  # pylint: disable=import-outside-toplevel
+
   api_url = f"{base_url}{_COMPLETIONS_PATH}"
   semaphore = asyncio.Semaphore(concurrency)
+  timeout = aiohttp.ClientTimeout(total=request_timeout)
 
-  async def _generate_single(prompt: str) -> GenerationResult:
-    req = RequestFuncInput(
-        prompt=prompt,
-        api_url=api_url,
-        prompt_len=0,
-        output_len=max_tokens,
-        model=model,
-        extra_body={"temperature": temperature},
-    )
+  async def _generate_one(session: aiohttp.ClientSession, prompt: str) -> GenerationResult:
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }
+    t0 = time.monotonic()
     async with semaphore:
-      output = await async_request_openai_completions(req)
-    return _to_generation_result(output)
+      try:
+        async with session.post(api_url, json=payload) as resp:
+          if resp.status != 200:
+            body = await resp.text()
+            return GenerationResult(error=f"HTTP {resp.status}: {body[:200]}")
+          data = await resp.json()
+      except aiohttp.ClientError as exc:
+        return GenerationResult(error=str(exc))
+    latency = time.monotonic() - t0
 
-  return await asyncio.gather(*[_generate_single(p) for p in prompts])
+    choice = data["choices"][0]
+    usage = data.get("usage", {})
+    return GenerationResult(
+        text=choice.get("text", ""),
+        prompt_tokens=usage.get("prompt_tokens", 0),
+        completion_tokens=usage.get("completion_tokens", 0),
+        latency_s=latency,
+    )
+
+  async with aiohttp.ClientSession(timeout=timeout) as session:
+    return list(await asyncio.gather(*[_generate_one(session, p) for p in prompts]))
 
 
 def generate_batch(
@@ -115,7 +121,7 @@ def generate_batch(
     max_tokens: int = _DEFAULT_MAX_TOKENS,
     temperature: float = _DEFAULT_TEMPERATURE,
     concurrency: int = _DEFAULT_CONCURRENCY,
-    request_timeout: int = 600,  # noqa: ARG001 (timeout handled by AIOHTTP_TIMEOUT in tpu-inference)
+    request_timeout: int = _REQUEST_TIMEOUT_S,
 ) -> list[GenerationResult]:
   """Synchronous wrapper around generate_batch_async."""
   return asyncio.run(
@@ -126,5 +132,6 @@ def generate_batch(
           max_tokens=max_tokens,
           temperature=temperature,
           concurrency=concurrency,
+          request_timeout=request_timeout,
       )
   )

@@ -12,52 +12,197 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""vLLM-TPU server lifecycle management (launch, health-poll, teardown)."""
+"""vLLM-TPU server lifecycle (in-process LLM + thin HTTP wrapper)."""
 
 from __future__ import annotations
 
 import logging
 import os
-import signal
-import subprocess
+import threading
 import time
+import uuid
+from typing import Any
 
+import jax
 import requests
 
 logger = logging.getLogger(__name__)
 
 _HEALTH_ENDPOINT = "/health"
-_MODELS_ENDPOINT = "/v1/models"
+
+def _build_app(llm: Any) -> Any:
+  """Return a FastAPI app that wraps an in-process vLLM LLM instance."""
+  import fastapi  # pylint: disable=import-outside-toplevel
+  from vllm.sampling_params import SamplingParams  # pylint: disable=import-outside-toplevel
+
+  app = fastapi.FastAPI()
+
+  @app.get("/health")
+  def health():
+    return {"status": "ok"}
+
+  @app.post("/v1/completions")
+  async def completions(request: fastapi.Request):
+    body = await request.json()
+
+    raw_prompt = body.get("prompt", "")
+    prompts = raw_prompt if isinstance(raw_prompt, list) else [raw_prompt]
+    model_name = body.get("model", "")
+    max_tokens = int(body.get("max_tokens") or 256)
+    temperature = float(body.get("temperature") or 0.0)
+    logprobs_n = body.get("logprobs")  # int | None
+    echo = bool(body.get("echo", False))
+    stop = body.get("stop")
+
+    sp_kwargs: dict = {"max_tokens": max_tokens, "temperature": temperature}
+    if logprobs_n is not None:
+      sp_kwargs["logprobs"] = int(logprobs_n)
+    if echo and logprobs_n is not None:
+      sp_kwargs["prompt_logprobs"] = int(logprobs_n)
+    if stop:
+      sp_kwargs["stop"] = [stop] if isinstance(stop, str) else list(stop)
+
+    outputs = llm.generate(prompts, SamplingParams(**sp_kwargs))
+    tokenizer = llm.get_tokenizer()
+
+    choices = []
+    total_prompt_tokens = 0
+    total_completion_tokens = 0
+
+    for idx, output in enumerate(outputs):
+      gen = output.outputs[0]
+      total_prompt_tokens += len(output.prompt_token_ids)
+      total_completion_tokens += len(gen.token_ids)
+
+      logprobs_payload = None
+      if logprobs_n is not None:
+        tok_strings: list[str] = []
+        tok_lps: list[float | None] = []
+        tok_offsets: list[int] = []
+        running_offset = 0
+
+        if echo:
+          prompt_lps = output.prompt_logprobs or []
+          for pos, tok_id in enumerate(output.prompt_token_ids):
+            tok_str = tokenizer.decode([tok_id])
+            tok_strings.append(tok_str)
+            tok_offsets.append(running_offset)
+            running_offset += len(tok_str)
+            lp_dict = prompt_lps[pos] if pos < len(prompt_lps) else None
+            lp_val = lp_dict[tok_id].logprob if (lp_dict and tok_id in lp_dict) else None
+            tok_lps.append(lp_val)
+
+        gen_lps = gen.logprobs or []
+        for pos, tok_id in enumerate(gen.token_ids):
+          tok_str = tokenizer.decode([tok_id])
+          tok_strings.append(tok_str)
+          tok_offsets.append(running_offset)
+          running_offset += len(tok_str)
+          lp_dict = gen_lps[pos] if pos < len(gen_lps) else None
+          lp_val = lp_dict[tok_id].logprob if (lp_dict and tok_id in lp_dict) else None
+          tok_lps.append(lp_val)
+
+        logprobs_payload = {
+            "tokens": tok_strings,
+            "token_logprobs": tok_lps,
+            "top_logprobs": None,
+            "text_offset": tok_offsets,
+        }
+
+      text_out = (prompts[idx] + gen.text) if echo else gen.text
+      choices.append({
+          "text": text_out,
+          "index": idx,
+          "logprobs": logprobs_payload,
+          "finish_reason": gen.finish_reason or "stop",
+      })
+
+    return {
+        "id": f"cmpl-{uuid.uuid4().hex}",
+        "object": "text_completion",
+        "created": int(time.time()),
+        "model": model_name,
+        "choices": choices,
+        "usage": {
+            "prompt_tokens": total_prompt_tokens,
+            "completion_tokens": total_completion_tokens,
+            "total_tokens": total_prompt_tokens + total_completion_tokens,
+        },
+    }
+
+  @app.post("/v1/chat/completions")
+  async def chat_completions(request: fastapi.Request):  # pylint: disable=unused-variable
+    """OpenAI-compatible chat completions endpoint.
+
+    Used by evalchemy and lm-eval chat tasks.
+    """
+    body = await request.json()
+    messages = body.get("messages", [])
+    model_name = body.get("model", "")
+    max_tokens = int(body.get("max_tokens") or 256)
+    temperature = float(body.get("temperature") or 0.0)
+    stop = body.get("stop")
+
+    tokenizer = llm.get_tokenizer()
+    prompt = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+
+    sp_kwargs: dict = {"max_tokens": max_tokens, "temperature": temperature}
+    if stop:
+      sp_kwargs["stop"] = [stop] if isinstance(stop, str) else list(stop)
+
+    outputs = llm.generate([prompt], SamplingParams(**sp_kwargs))
+    gen = outputs[0].outputs[0]
+    prompt_tokens = len(outputs[0].prompt_token_ids)
+    completion_tokens = len(gen.token_ids)
+
+    return {
+        "id": f"chatcmpl-{uuid.uuid4().hex}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model_name,
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": gen.text},
+            "finish_reason": gen.finish_reason or "stop",
+            "logprobs": None,
+        }],
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        },
+    }
+
+  return app
 
 
 class VllmServerManager:
-  """Manages a vLLM tpu-inference server subprocess.
-
-  Starts the server, polls until it is healthy, and tears it down on exit.
-
-  Usage::
-
-      with VllmServerManager(hf_model_path, host="localhost", port=8000) as mgr:
-          base_url = mgr.base_url
-          # request
+  """Manages an in-process vLLM-TPU LLM with an OpenAI-compatible HTTP layer.
 
   Args:
-    hf_model_path: Path to the huggingface model directory (local or GCS).
-    host: Hostname or IP the server binds to.
-    port: Port the server listens on.
-    tensor_parallel_size: Number of chips for tensor parallelism.
-    max_model_len: Maximum context length.
-    dtype: Torch dtype string passed to vLLM.
-    max_num_batched_tokens: Total tokens processed per scheduler step. Default None.
-    max_num_seqs: Maximum number of sequences the scheduler holds concurrently. Default None.
-    startup_timeout: Seconds to wait for the server to become healthy.
-    extra_vllm_args: Additional CLI arguments forwarded verbatim to vLLM.
-    env: Optional dict of environment variable overrides for the subprocess.
+    model_path: HF model ID or local path. 
+    checkpoint_path: MaxText orbax checkpoint path.
+    maxtext_model_name: MaxText model name (e.g. "llama3.1-8b").
+    host: Hostname the HTTP server binds to (rank-0 only).
+    port: Port the HTTP server listens on.
+    tensor_parallel_size: Tensor parallelism.
+    max_model_len: Maximum sequence length.
+    dtype: Activation dtype string passed to vLLM (e.g. "bfloat16").
+    max_num_batched_tokens: Tokens per scheduler step (None = vLLM default).
+    max_num_seqs: Max concurrent sequences (None = vLLM default).
+    startup_timeout: Seconds to wait for /health to return healthy.
+    env: Optional environment-variable overrides.
   """
 
   def __init__(
       self,
-      hf_model_path: str,
+      model_path: str,
+      checkpoint_path: str | None = None,
+      maxtext_model_name: str | None = None,
       host: str = "localhost",
       port: int = 8000,
       tensor_parallel_size: int = 4,
@@ -66,10 +211,13 @@ class VllmServerManager:
       max_num_batched_tokens: int | None = None,
       max_num_seqs: int | None = None,
       startup_timeout: int = 600,
-      extra_vllm_args: list[str] | None = None,
       env: dict[str, str] | None = None,
   ):
-    self.hf_model_path = hf_model_path
+    if checkpoint_path and not maxtext_model_name:
+      raise ValueError("maxtext_model_name is required when checkpoint_path is set.")
+    self.model_path = model_path
+    self.checkpoint_path = checkpoint_path
+    self.maxtext_model_name = maxtext_model_name
     self.host = host
     self.port = port
     self.tensor_parallel_size = tensor_parallel_size
@@ -78,41 +226,76 @@ class VllmServerManager:
     self.max_num_batched_tokens = max_num_batched_tokens
     self.max_num_seqs = max_num_seqs
     self.startup_timeout = startup_timeout
-    self.extra_vllm_args = extra_vllm_args or []
     self.env = env
-    self._proc: subprocess.Popen | None = None
+
+    self._llm: Any | None = None
+    self._uvicorn_server: Any | None = None
+    self._server_thread: threading.Thread | None = None
 
   @property
   def base_url(self) -> str:
     return f"http://{self.host}:{self.port}"
 
   def start(self) -> None:
-    """Launch the vLLM server subprocess."""
-    cmd = [
-        "python", "-m", "vllm.entrypoints.openai.api_server",
-        "--model", self.hf_model_path,
-        "--host", self.host,
-        "--port", str(self.port),
-        "--tensor-parallel-size", str(self.tensor_parallel_size),
-        "--max-model-len", str(self.max_model_len),
-        "--dtype", self.dtype,
-        "--device", "tpu",
-        "--disable-log-requests",
-    ]
-    if self.max_num_batched_tokens is not None:
-      cmd += ["--max-num-batched-tokens", str(self.max_num_batched_tokens)]
-    if self.max_num_seqs is not None:
-      cmd += ["--max-num-seqs", str(self.max_num_seqs)]
-    cmd += self.extra_vllm_args
+    """Initialise the in-process vLLM LLM and start the HTTP server."""
+    # pylint: disable=import-outside-toplevel
+    from vllm import LLM
 
-    proc_env = os.environ.copy()
     if self.env:
-      proc_env.update(self.env)
+      os.environ.update(self.env)
 
-    logger.info("Starting vLLM server: %s", " ".join(cmd))
-    # pylint: disable=consider-using-with
-    self._proc = subprocess.Popen(cmd, env=proc_env)
-    self._wait_until_healthy()
+    vllm_kwargs: dict = {
+        "model": self.model_path,
+        "tensor_parallel_size": self.tensor_parallel_size,
+        "max_model_len": self.max_model_len,
+        "dtype": self.dtype,
+        "device": "tpu",
+    }
+    if self.max_num_batched_tokens is not None:
+      vllm_kwargs["max_num_batched_tokens"] = self.max_num_batched_tokens
+    if self.max_num_seqs is not None:
+      vllm_kwargs["max_num_seqs"] = self.max_num_seqs
+
+    if self.checkpoint_path:
+      vllm_kwargs["hf_overrides"] = {"architectures": ["MaxTextForCausalLM"]}
+      vllm_kwargs["additional_config"] = {
+          "maxtext_config": {
+              "model_name": self.maxtext_model_name,
+              "load_parameters_path": self.checkpoint_path,
+              "log_config": False,
+          }
+      }
+    else:
+      vllm_kwargs["load_format"] = "auto"
+
+    logger.info(
+        "Rank %d: initialising in-process vLLM (tp=%d, max_len=%d)...",
+        jax.process_index(),
+        self.tensor_parallel_size,
+        self.max_model_len,
+    )
+    self._llm = LLM(**vllm_kwargs)
+    logger.info("Rank %d: vLLM LLM ready.", jax.process_index())
+
+    if jax.process_index() == 0:
+      import uvicorn  # pylint: disable=import-outside-toplevel
+
+      app = _build_app(self._llm)
+      config = uvicorn.Config(
+          app,
+          host=self.host,
+          port=self.port,
+          log_level="warning",
+          workers=1,
+      )
+      self._uvicorn_server = uvicorn.Server(config)
+      self._server_thread = threading.Thread(
+          target=self._uvicorn_server.run,
+          daemon=True,
+          name="vllm-http-server",
+      )
+      self._server_thread.start()
+      self._wait_until_healthy()
 
   def _wait_until_healthy(self) -> None:
     deadline = time.time() + self.startup_timeout
@@ -121,35 +304,30 @@ class VllmServerManager:
       try:
         resp = requests.get(health_url, timeout=5)
         if resp.status_code == 200:
-          logger.info("vLLM server is healthy at %s", self.base_url)
+          logger.info("vLLM HTTP server is healthy at %s", self.base_url)
           return
       except requests.exceptions.ConnectionError:
         pass
-      if self._proc is not None and self._proc.poll() is not None:
-        raise RuntimeError(
-            f"vLLM server process exited with code {self._proc.returncode} "
-            "before becoming healthy."
-        )
-      time.sleep(5)
+      if self._server_thread is not None and not self._server_thread.is_alive():
+        raise RuntimeError("vLLM HTTP server thread died before becoming healthy.")
+      time.sleep(2)
     raise TimeoutError(
-        f"vLLM server did not become healthy within {self.startup_timeout}s."
+        f"vLLM HTTP server did not become healthy within {self.startup_timeout}s."
     )
 
   def stop(self) -> None:
-    """Gracefully terminate the vLLM server subprocess."""
-    if self._proc is None:
-      return
-    if self._proc.poll() is None:
-      logger.info("Sending SIGTERM to vLLM server (pid=%d).", self._proc.pid)
-      self._proc.send_signal(signal.SIGTERM)
-      try:
-        self._proc.wait(timeout=30)
-      except subprocess.TimeoutExpired:
-        logger.warning("vLLM server did not exit after 30 s, sending SIGKILL.")
-        self._proc.kill()
-        self._proc.wait()
-    logger.info("vLLM server stopped.")
-    self._proc = None
+    """Stop the HTTP server and release the LLM."""
+    if jax.process_index() == 0 and self._uvicorn_server is not None:
+      logger.info("Stopping vLLM HTTP server...")
+      self._uvicorn_server.should_exit = True
+      if self._server_thread is not None:
+        self._server_thread.join(timeout=30)
+        if self._server_thread.is_alive():
+          logger.warning("vLLM HTTP server thread did not exit within 30 s.")
+    self._llm = None
+    self._uvicorn_server = None
+    self._server_thread = None
+    logger.info("Rank %d: VllmServerManager stopped.", jax.process_index())
 
   def __enter__(self) -> "VllmServerManager":
     self.start()
