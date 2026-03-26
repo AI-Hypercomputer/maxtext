@@ -304,16 +304,16 @@ def prepare_datasets(trainer_config, model_tokenizer):
   if not os.path.exists(test_data_dir):
     os.makedirs(test_data_dir)
 
-  # Load datasets
-  if trainer_config.dataset_name == "huggingface:nvidia/OpenMathInstruct-2":
+  # Prepare train and test data from training data for certain datasets
+  if trainer_config.dataset_name in ["nvidia/OpenMathInstruct-2", "open-r1/OpenR1-Math-220k"]:
     import datasets  # pylint: disable=import-outside-toplevel
 
-    def prepare_openinstructmath2_dataset(
+    def prepare_train_and_eval_dataset(
         split: str = "train_1M",
         seed: int = 42,
         test_size: float = 0.05,
     ):
-      """Load and split the OpenMathInstruct-2 dataset into train and validation sets using HF's train_test_split."""
+      """Load and split the dataset into train and validation sets using HF's train_test_split."""
       max_logging.log(
           "WARNING: For reproducible experiments, preprocess the dataset once and "
           "define your own HfDataset subclass that directly uses the preprocessed datasets."
@@ -321,8 +321,7 @@ def prepare_datasets(trainer_config, model_tokenizer):
 
       # Load the original dataset
       original_ds = datasets.load_dataset(
-          "parquet",
-          data_files={trainer_config.train_split: trainer_config.hf_train_files},
+          trainer_config.dataset_name,
           split=split,
           cache_dir=train_data_dir,
       )
@@ -335,8 +334,7 @@ def prepare_datasets(trainer_config, model_tokenizer):
           "validation": split_ds["test"],
       }
 
-    split_name = trainer_config.train_split if trainer_config.train_split != "train" else "train_1M"
-    splits = prepare_openinstructmath2_dataset(split=split_name)
+    splits = prepare_train_and_eval_dataset(split=trainer_config.train_split)
     template_config = load_template_from_file(trainer_config.chat_template_path)
 
     train_dataset = (

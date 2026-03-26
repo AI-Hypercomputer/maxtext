@@ -228,6 +228,8 @@ def check_answer(prompts, completions, answer, tmvp_config, **kargs):
   does not match exactly, i.e., based on how close the answer is to the correct
   value.
   """
+  print("check_answer called with: ", kargs)
+
   match_format = get_match_format_regex(tmvp_config)
   answer_fallback = get_answer_fallback_regex(tmvp_config)
 
@@ -246,8 +248,9 @@ def check_answer(prompts, completions, answer, tmvp_config, **kargs):
     if guess is None:
       scores.append(0)
       continue
+    guess = process_answer(kargs["question"], guess, kargs["question_type"])
     # Normalize for certain datasets
-    if "DAPO" in tmvp_config.dataset_name or "OpenMathInstruct" in tmvp_config.dataset_name:
+    if any(name in tmvp_config.dataset_name for name in ["DAPO", "OpenMathInstruct", "OpenR1-Math-220k"]):
       guess = normalize_final_answer(guess)
       true_answer = normalize_final_answer(true_answer)
     # Try math_verify first for robust comparison
@@ -414,6 +417,7 @@ def check_numbers(prompts, completions, answer, tmvp_config, **kargs):
   Handles both numeric values and mathematical expressions with LaTeX.
   """
   question = kargs["question"]
+  print("-------------- check_numbers called with: ", kargs)
 
   # Extract full answer content from solution tags (not just first number)
   match_format = get_match_format_regex(tmvp_config)
@@ -514,6 +518,56 @@ def get_optimizer(tmvp_config, max_train_steps):
   return optax.inject_hyperparams(make_optimizer)(learning_rate=schedule)
 
 
+def process_answer(question, answer, question_type):
+  if question_type == "MCQ":
+    # For MCQs, we need to process the response to get the acceptable format
+    # e.g., returns "10" if answer="A" and question="What is 5+5? (A) 10, (B) 11, ..."
+    return process_mcq(question, answer)
+    #return get_mcq_answer(question, answer)
+
+  return [answer, answer]
+
+
+def process_mcq(question, answer):
+  # This pattern matches: (A), A., \text{(A)}, \mathrm{(A)}, etc.
+  pattern = r"(?:\(?\b(?:\\text|\\mathrm)?\s*\(?([A-E])\)?\b\)?[\s\.\:\}\$]*\s*)(.*?)(?=\s*(?:\(?\b(?:\\text|\\mathrm)?\s*\(?[A-E]\)?\b\)?[\s\.\:\}\$]*\s*)|$)"
+  matches = re.findall(pattern, question)
+  options = {}
+  for letter, value in matches:
+    clean_value = re.sub(r"\\q?quad|\\textbf{|[~]", "", value).strip()
+    options[letter] = clean_value
+
+  # List of answer formats that should be accepted
+  acceptable_answers = [answer]
+  if answer in options:
+    # If the answer is a Letter (e.g., "B"), add the corresponding value
+    acceptable_answers.append(options[answer])
+  else:
+    # If the answer is a value, find the corresponding letter
+    for letter, value in options.items():
+      #if math_verify_func([value], [answer])[0] == 1.0:
+      if value==answer:
+        acceptable_answers.append(letter)
+        break
+
+  if len(acceptable_answers)!=2:
+    print("options: ", options, " answer: ", answer, " question: ", question)
+
+  return list(set(acceptable_answers))
+
+
+def get_mcq_answer(question, answer):
+  # Regex that matches: (A) 10, A. 10, [A] 10, or A: 10
+  option_pattern = r"[\(\[\s]([A-E])[\)\].\s:]\s*([^\(\[\n]+)"
+  options = dict(re.findall(option_pattern, question))
+  options = {k: v.strip() for k, v in options.items()}
+
+  if answer in options:
+    # If the answer is a Letter (e.g., "B"), return the corresponding value
+    return options[answer]
+  return answer  # If the answer is not a letter option, return as is
+
+
 def process_data(dataset_name, model_tokenizer, template_config, tmvp_config, x):
   """Function to process input dataset"""
 
@@ -522,35 +576,30 @@ def process_data(dataset_name, model_tokenizer, template_config, tmvp_config, x)
       return val.decode("utf-8")
     return str(val)
 
-  # Handle DAPO dataset schema
-  # originally (prompt is a list, answer is in reward_model)
-  # https://huggingface.co/datasets/BytedTsinghua-SIA/DAPO-Math-17k/viewer/default/train?row=0
-  # but using https://huggingface.co/datasets/open-r1/DAPO-Math-17k-Processed/viewer/all/train?row=1
-  # so question is prompt and answer is solution
+  for key in ["problem", "prompt", "question"]:
+    if key in x:
+      question = _to_str(x[key])
+      break
 
-  question = x.get("question", x.get("prompt"))
-  answer = x.get("answer")
-  if answer is None and "solution" in x:
-    answer = x["solution"]
-
-  # Handle OpenMathInstruct-2
-  if "problem" in x:
-    question = x["problem"]
-  if "expected_answer" in x:
-    answer = x["expected_answer"]
+  for key in ["answer", "solution", "expected_answer"]:
+    if key in x:
+      answer = _to_str(x[key])
+      break
 
   # Handle AIME-2024
   if "extra_info" in x and isinstance(x["extra_info"], dict) and "raw_problem" in x["extra_info"]:
-    question = x["extra_info"]["raw_problem"]
-
+    question = _to_str(x["extra_info"]["raw_problem"])
   if "reward_model" in x and isinstance(x["reward_model"], dict) and "ground_truth" in x["reward_model"]:
-    answer = x["reward_model"]["ground_truth"]
-
-  question = _to_str(question)
-  answer = _to_str(answer)
+    answer = _to_str(x["reward_model"]["ground_truth"])
 
   if dataset_name == "gsm8k":
     answer = extract_hash_answer(answer)
+
+  question_type = "default"
+  if "question_type" in x:
+    question_type = _to_str(x["question_type"])
+  processed_answer = process_answer(question, answer, question_type)
+  #print("processed_answer: ", processed_answer, "question: ", question, "answer: ", answer)
 
   return {
       # passed to model forward pass
@@ -575,5 +624,5 @@ def process_data(dataset_name, model_tokenizer, template_config, tmvp_config, x)
       # passed to reward functions
       "question": question,
       # passed to reward functions
-      "answer": answer,
+      "answer": processed_answer, # list of acceptable answers
   }
