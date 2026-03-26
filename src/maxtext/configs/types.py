@@ -306,9 +306,7 @@ class Checkpointing(BaseModel):
   async_checkpointing: bool = Field(True, description="If True, uses an asynchronous checkpointer for performance.")
   checkpoint_period: int = Field(10_000, description="The frequency (in steps) at which to save checkpoints.")
   max_num_checkpoints_to_keep: int | None = Field(None, description="Maximum number of checkpoints to keep.")
-  enable_single_replica_ckpt_restoring: bool = Field(
-      False, description="One replica reads and broadcasts the checkpoint."
-  )
+  enable_single_replica_ckpt_restoring: bool = Field(False, description="One replica reads and broadcasts the checkpoint.")
   force_unroll: bool = Field(
       False,
       description="During param-only checkpoint generation, whether to unroll the loop.",
@@ -340,9 +338,7 @@ class OrbaxStorage(BaseModel):
       2147483648, description="Target file size for chunking large arrays in Orbax."
   )
   checkpoint_storage_use_ocdbt: bool = Field(True, description="Whether to use the OCDbT storage format for checkpoints.")
-  checkpoint_storage_use_zarr3: bool = Field(
-      True, description="Whether to use Zarr3 with OCDbT. Requires use_ocdbt=True."
-  )
+  checkpoint_storage_use_zarr3: bool = Field(True, description="Whether to use Zarr3 with OCDbT. Requires use_ocdbt=True.")
   checkpoint_storage_concurrent_gb: int = Field(96, description="Concurrent GB for I/O operations during checkpointing.")
 
 
@@ -831,9 +827,7 @@ class DcnParallelism(BaseModel):
   dcn_context_autoregressive_parallelism: int = Field(1, description="DCN axis for context autoregressive parallelism.")
   dcn_tensor_parallelism: int = Field(1, description="DCN axis for tensor parallelism (not recommended).")
   dcn_tensor_transpose_parallelism: int = Field(1, description="DCN axis for tensor transpose parallelism.")
-  dcn_tensor_sequence_parallelism: int = Field(
-      1, description="DCN axis for tensor sequence parallelism (not recommended)."
-  )
+  dcn_tensor_sequence_parallelism: int = Field(1, description="DCN axis for tensor sequence parallelism (not recommended).")
   dcn_pipeline_parallelism: int = Field(1, description="DCN axis for pipeline parallelism.")
   dcn_expert_parallelism: int = Field(1, description="DCN axis for expert parallelism.")
   dcn_autoregressive_parallelism: int = Field(1, description="DCN axis for autoregressive parallelism (not recommended).")
@@ -892,9 +886,7 @@ class RematAndOffload(BaseModel):
       description="The rematerialization policy, trading off speed and memory.",
   )
   remat_policy_for_vit: str = Field("minimal", description="Remat policy for multimodal model's vision encoder.")
-  decoder_layer_input: RematLocation = Field(
-      RematLocation.DEVICE, description="Remat policy for the decoder layer's input."
-  )
+  decoder_layer_input: RematLocation = Field(RematLocation.DEVICE, description="Remat policy for the decoder layer's input.")
   context: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the attention context.")
   mlpwi: RematLocation = Field(
       RematLocation.REMAT,
@@ -1089,9 +1081,7 @@ class FineTuning(BaseModel):
   dpo_label_smoothing: float = Field(0.0, ge=0.0, le=1.0, description="Label smoothing for DPO.")
   dpo_beta: float = Field(0.1, description="Beta parameter for DPO.")
   use_sft: bool = Field(False, description="If True, enables Supervised Fine-Tuning.")
-  sft_train_on_completion_only: bool = Field(
-      False, description="If True, trains only on the completion part of the text."
-  )
+  sft_train_on_completion_only: bool = Field(False, description="If True, trains only on the completion part of the text.")
   use_grpo: None | bool = Field(None, description="If True, enables Group Relative Policy Optimization.")
 
 
@@ -1172,9 +1162,7 @@ class Optimizer(BaseModel):
   """Configuration for the optimizer and learning rate schedule."""
 
   opt_type: OptimizerType = Field(OptimizerType.ADAMW, description="The type of optimizer to use.")
-  gradient_accumulation_steps: PositiveInt = Field(
-      1, description="Number of steps to accumulate gradients before updating."
-  )
+  gradient_accumulation_steps: PositiveInt = Field(1, description="Number of steps to accumulate gradients before updating.")
   use_tunix_gradient_accumulation: bool = Field(
       False,
       description="Whether to use the Tunix implementation for gradient accumulation.",
@@ -1269,9 +1257,7 @@ class PositionalEmbedding(BaseModel):
       False,
       description="Use iota operator in Embed, an efficient way to represent positions.",
   )
-  use_untrainable_positional_embedding: bool = Field(
-      False, description="Use untrainable sinusoidal positional embeddings."
-  )
+  use_untrainable_positional_embedding: bool = Field(False, description="Use untrainable sinusoidal positional embeddings.")
   trainable_position_size: int = Field(
       -1,
       description="Enables GPT-3 style trainable positional embeddings if positive.",
@@ -1358,9 +1344,7 @@ class InferenceServer(BaseModel):
 class InferenceBenchmark(BaseModel):
   """Configuration for running inference microbenchmarks."""
 
-  inference_microbenchmark_prefill_lengths: str = Field(
-      "64,128,256,512,1024", description="Prefill lengths to benchmark."
-  )
+  inference_microbenchmark_prefill_lengths: str = Field("64,128,256,512,1024", description="Prefill lengths to benchmark.")
   inference_microbenchmark_stages: str = Field("prefill,generate", description="Stages to benchmark.")
   inference_microbenchmark_loop_iters: int = Field(10, description="Number of iterations for the benchmark loop.")
   inference_microbenchmark_log_file_path: PathStr = Field("", description="Path to log benchmark results.")
@@ -1518,9 +1502,7 @@ class Goodput(BaseModel):
 class GcpMonitoring(BaseModel):
   """Configuration for GCP-specific workload monitoring."""
 
-  report_heartbeat_metric_for_gcp_monitoring: bool = Field(
-      False, description="Report heartbeat metric for GCP monitoring."
-  )
+  report_heartbeat_metric_for_gcp_monitoring: bool = Field(False, description="Report heartbeat metric for GCP monitoring.")
   heartbeat_reporting_interval_in_seconds: int = Field(5, description="Interval for heartbeat metric.")
   report_performance_metric_for_gcp_monitoring: bool = Field(
       False, description="Report performance metric for GCP monitoring."
@@ -1850,16 +1832,12 @@ class DerivedValues(BaseModel):
   )
 
   rampup_end_step: None | int = Field(None, description="The step at which the batch size ramp-up phase concludes.")
-  tensors_on_device: None | list[str] = Field(
-      None, description="List of tensors to keep on device memory for custom remat."
-  )
+  tensors_on_device: None | list[str] = Field(None, description="List of tensors to keep on device memory for custom remat.")
   tensors_to_offload: None | list[str] = Field(
       None, description="List of tensors to offload to host memory for custom remat."
   )
   global_batch_size_to_load_start: None | int = Field(None, description="Starting global batch size for rampup.")
-  global_batch_size_to_load_increment: None | int = Field(
-      None, description="Increment for global batch size during rampup."
-  )
+  global_batch_size_to_load_increment: None | int = Field(None, description="Increment for global batch size during rampup.")
   rampup_samples_per_increment_to_load: None | float = Field(None, description="Samples per increment for rampup.")
 
 
@@ -2122,9 +2100,7 @@ class MaxTextConfig(
       if not os.environ.get("XLA_FLAGS") and not self.dump_hlo_xla_flags:
         self.dump_hlo_xla_flags = f"--xla_dump_to={self.dump_hlo_local_dir} --xla_dump_large_constants"
         if self.dump_hlo_local_module_name:
-          self.dump_hlo_xla_flags = (
-              f"{self.dump_hlo_xla_flags} --xla_dump_hlo_module_re={self.dump_hlo_local_module_name}"
-          )
+          self.dump_hlo_xla_flags = f"{self.dump_hlo_xla_flags} --xla_dump_hlo_module_re={self.dump_hlo_local_module_name}"
       if not self.dump_hlo_gcs_dir:
         self.dump_hlo_gcs_dir = os.path.join(self.base_output_directory, self.run_name, "xla_dump")
       else:
@@ -2333,9 +2309,7 @@ class MaxTextConfig(
         assert (
             self.num_layers_per_pipeline_stage == 1
         ), "Pipeline weight prefetching currently only supports one layer per pipeline stage."
-        assert (
-            not self.pipeline_delay_activation_forwarding
-        ), "Pipeline weight prefetching does not support pipeline delay."
+        assert not self.pipeline_delay_activation_forwarding, "Pipeline weight prefetching does not support pipeline delay."
         assert not self.quantization, "Quantization is currently not supported for pipeline prefetching."
         assert not self.scan_layers_per_stage, "Pipeline weight prefetching currently does not support scan."
 
@@ -2502,18 +2476,13 @@ class MaxTextConfig(
         )
       if self.quantization:
         raise ValueError("Quantization is not supported with 'explicit' sharding.")
-    if (
-        self.per_device_batch_size > 0
-        and (self.per_device_batch_size * self.max_target_length) % self.num_vocab_tiling != 0
-    ):
+    if self.per_device_batch_size > 0 and (self.per_device_batch_size * self.max_target_length) % self.num_vocab_tiling != 0:
       raise ValueError("Per device batch size times sequence length should be divisible by the number of vocab tiles.")
     if self.num_vocab_tiling > 1 and self.enable_nnx:
       raise ValueError("We currently don't support vocab tiling on NNX module.")
     if self.context_parallel_size > 1 and self.context_parallel_strategy.lower() == "ring":
       if "gpu" not in self.hardware:
-        raise ValueError(
-            "Ring context parallelism strategy (context_parallel_strategy='ring') is only supported on GPUs."
-        )
+        raise ValueError("Ring context parallelism strategy (context_parallel_strategy='ring') is only supported on GPUs.")
     if self.hardware == "gpu" and self.packing and self.attention == "cudnn_flash_te" and self.max_segments_per_seq <= 0:
       raise ValueError("max_segments_per_seq must be set when using TransformerEngine attention and packing")
     dcn_product = (
@@ -2602,9 +2571,7 @@ class MaxTextConfig(
       if not (self.decoder_block == DecoderBlockType.DEEPSEEK and self.sparse_matmul and self.use_tokamax_gmm):
         raise ValueError("Batch split only supports deepseek, with `sparse_matmul=True` and `use_tokamax_gmm=True`")
       if self.quantization and not (self.use_qwix_quantization and self.quantization == "fp8_full"):
-        raise ValueError(
-            "Batch split quantization only supports `use_qwix_quantization=True` and `quantization=fp8_full`"
-        )
+        raise ValueError("Batch split quantization only supports `use_qwix_quantization=True` and `quantization=fp8_full`")
 
     if self.opt_type == "muon" and self.decoder_block not in [
         DecoderBlockType.DEEPSEEK,
@@ -2637,6 +2604,39 @@ class MaxTextConfig(
       raise ValueError("`share_kv_projections` is not compatible with `attention_type='mla'`.")
 
     # I. FINAL TYPE CONVERSIONS AND DERIVED LISTS
+    # Create the ici_parallelism and dcn_parallelism lists for legacy compatibility.
+    # if self.using_pipeline_parallelism and self.mesh_axes and self.mesh_axes[0] == "stage":
+    #   self.ici_parallelism = [
+    #       self.ici_diloco_parallelism,
+    #       self.ici_pipeline_parallelism,
+    #       self.ici_data_parallelism,
+    #       self.ici_fsdp_parallelism,
+    #       self.ici_fsdp_transpose_parallelism,
+    #       self.ici_sequence_parallelism,
+    #       self.ici_context_parallelism,
+    #       self.ici_context_autoregressive_parallelism,
+    #       self.ici_tensor_parallelism,
+    #       self.ici_tensor_transpose_parallelism,
+    #       self.ici_tensor_sequence_parallelism,
+    #       self.ici_expert_parallelism,
+    #       self.ici_autoregressive_parallelism,
+    #   ]
+    #   self.dcn_parallelism = [
+    #       self.dcn_diloco_parallelism,
+    #       self.dcn_pipeline_parallelism,
+    #       self.dcn_data_parallelism,
+    #       self.dcn_fsdp_parallelism,
+    #       self.dcn_fsdp_transpose_parallelism,
+    #       self.dcn_sequence_parallelism,
+    #       self.dcn_context_parallelism,
+    #       self.dcn_context_autoregressive_parallelism,
+    #       self.dcn_tensor_parallelism,
+    #       self.dcn_tensor_transpose_parallelism,
+    #       self.dcn_tensor_sequence_parallelism,
+    #       self.dcn_expert_parallelism,
+    #       self.dcn_autoregressive_parallelism,
+    #   ]
+    # else:
     ici_map = {
         "diloco": self.ici_diloco_parallelism,
         "data": self.ici_data_parallelism,

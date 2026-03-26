@@ -14,7 +14,7 @@
 
 # model config for DeepSeek V3 - 671B that uses fsdp on two logical axes
 
-# For DeepSeek default device-limited routing, 
+# For DeepSeek default device-limited routing,
 # please set n_routing_groups=8 and topk_routing_group=4 in your command-line arguments.
 
 base_emb_dim: 7168
@@ -24,7 +24,7 @@ base_mlp_dim: 18432
 base_moe_mlp_dim: 2048
 base_num_decoder_layers: 61
 first_num_dense_layers: 3
-mlp_activations: ["silu","linear"]
+mlp_activations: ["silu", "linear"]
 vocab_size: 129280
 enable_dropout: False
 logits_via_embedding: False
@@ -56,31 +56,44 @@ rope_truncate: True
 rope_attention_scaling: False
 
 override_logical_axis_rules: True
-mesh_axes: ['data', 'stage', 'fsdp', 'fsdp_transpose', 'expert', 'context']
-data_sharding: [['data', 'stage', 'fsdp', 'fsdp_transpose', 'expert', 'context']]
-logical_axis_rules: [
-    ['activation_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert', 'context']],
-    ['activation_batch_moe', ['data', 'fsdp', 'fsdp_transpose', 'expert', 'context']],
-    ['activation_embed_and_logits_batch', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'expert', 'context']],
-    ['activation_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert', 'context']],
-    ['activation_embed_and_logits_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
-    ['activation_norm_length', ['context']],
-    ['activation_norm_length_moe', ['context']],
-    ['activation_heads', []],
-    ['activation_stage', 'stage'],
-    ['embed', ['fsdp']],
-    ['embed_moe', ['fsdp']],
-    ['embed_no_exp', ['fsdp']],
-    ['embed_no_exp_moe', ['fsdp']],
-    ['q_lora', ['fsdp']],
-    ['kv_lora', ['fsdp']],
-    ['layers', 'stage'],
-    ['q_lora_up_proj', ['fsdp_transpose', 'expert']],
-    ['kv_lora_up_proj', ['fsdp_transpose', 'expert']],
-    ['q_heads', ['fsdp_transpose', 'expert']],
-    ['kv_heads', ['fsdp_transpose', 'expert']],
-    ['heads', ['fsdp_transpose', 'expert']],
-    ['mlp', ['fsdp_transpose', 'expert']],
-    ['mlp_only_fsdp_transpose', ['fsdp_transpose']],
-    ['mlp_only_tensor', ['expert']],
-]
+mesh_axes: ["data", "stage", "fsdp", "fsdp_transpose", "expert", "context"]
+data_sharding:
+  [["data", "stage", "fsdp", "fsdp_transpose", "expert", "context"]]
+logical_axis_rules:
+  [
+    [
+      "activation_batch",
+      ["data", "fsdp", "fsdp_transpose", "expert", "context"],
+    ],
+    [
+      "activation_embed_and_logits_batch",
+      ["data", "stage", "fsdp", "fsdp_transpose", "expert", "context"],
+    ],
+    [
+      "activation_kv_batch",
+      ["data", "fsdp", "fsdp_transpose", "expert", "context"],
+    ],
+    [
+      "activation_embed_and_logits_batch",
+      ["data", "fsdp", "fsdp_transpose", "expert"],
+    ],
+    ["activation_norm_length", ["context"]],
+    ["activation_norm_length_moe", ["context"]],
+    ["activation_heads", []],
+    ["activation_stage", "stage"],
+    ["embed", ["fsdp"]],
+    ["embed_moe", ["fsdp"]],
+    ["embed_no_exp", ["fsdp"]],
+    ["embed_no_exp_moe", ["fsdp"]],
+    ["q_lora", ["fsdp"]],
+    ["kv_lora", ["fsdp"]],
+    ["layers", "stage"],
+    ["q_lora_up_proj", ["fsdp_transpose", "expert"]],
+    ["kv_lora_up_proj", ["fsdp_transpose", "expert"]],
+    ["q_heads", ["fsdp_transpose", "expert"]],
+    ["kv_heads", ["fsdp_transpose", "expert"]],
+    ["heads", ["fsdp_transpose", "expert"]],
+    ["mlp", ["fsdp_transpose", "expert"]],
+    ["mlp_only_fsdp_transpose", ["fsdp_transpose"]],
+    ["mlp_only_tensor", ["expert"]],
+  ]

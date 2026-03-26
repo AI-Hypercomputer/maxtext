@@ -29,7 +29,7 @@ import jax.numpy as jnp
 import omegaconf
 
 from maxtext.configs import pyconfig_deprecated
-from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_ASSETS_ROOT, HF_IDS, MAXTEXT_PKG_DIR
+from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_ASSETS_ROOT, HF_IDS
 from maxtext.common.common_types import DecoderBlockType, ShardMode
 from maxtext.configs import types
 from maxtext.configs.types import MaxTextConfig
@@ -83,9 +83,7 @@ def _resolve_or_infer_config(argv: list[str]) -> tuple[str, list[str]]:
     return resolve_config_path(argv[1]), argv[2:]
   module = _module_from_path(argv[0])
   if module not in _CONFIG_FILE_MAPPING:
-    raise ValueError(
-        f"No config file provided and no default config found for module '{module}'"
-    )
+    raise ValueError(f"No config file provided and no default config found for module '{module}'")
   config_path = os.path.join(MAXTEXT_CONFIGS_DIR, _CONFIG_FILE_MAPPING[module])
   logger.warning("No config file provided, using default config mapping: %s", config_path)
   return config_path, argv[1:]
@@ -242,9 +240,7 @@ class HyperParameters:
     final_dict["dtype"] = jnp.dtype(final_dict["dtype"])
     final_dict["grad_dtype"] = jnp.dtype(final_dict["grad_dtype"])
     final_dict["weight_dtype"] = jnp.dtype(final_dict["weight_dtype"])
-    final_dict["mu_dtype"] = (
-        final_dict["weight_dtype"] if not final_dict["mu_dtype"] else jnp.dtype(final_dict["mu_dtype"])
-    )
+    final_dict["mu_dtype"] = final_dict["weight_dtype"] if not final_dict["mu_dtype"] else jnp.dtype(final_dict["mu_dtype"])
 
     final_dict["logical_axis_rules"] = _lists_to_tuples(final_dict["logical_axis_rules"])
     final_dict["data_sharding"] = _lists_to_tuples(final_dict["data_sharding"])

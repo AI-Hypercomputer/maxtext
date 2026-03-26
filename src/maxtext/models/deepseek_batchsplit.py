@@ -790,12 +790,8 @@ def yarn(
   # (Note: We use jnp.arange with float32 for precision.)
   freqs = 1.0 / (rope_theta ** (2.0 * jnp.arange(0, half_dim, dtype=jnp.float32) / embedding_dims))
 
-  low = (
-      embedding_dims * math.log(original_max_position_embeddings / (beta_fast * 2 * math.pi)) / (2 * math.log(rope_theta))
-  )
-  high = (
-      embedding_dims * math.log(original_max_position_embeddings / (beta_slow * 2 * math.pi)) / (2 * math.log(rope_theta))
-  )
+  low = embedding_dims * math.log(original_max_position_embeddings / (beta_fast * 2 * math.pi)) / (2 * math.log(rope_theta))
+  high = embedding_dims * math.log(original_max_position_embeddings / (beta_slow * 2 * math.pi)) / (2 * math.log(rope_theta))
   low = max(math.floor(low), 0)
   high = min(math.ceil(high), embedding_dims - 1)
   diff = high - low if high > low else 0.001
@@ -952,6 +948,11 @@ def compute(x, w0, w1, wo, group_sizes, weights, *, config, mesh):
       input_buffer_count,
       combine_scopes,
   ):
+
+    tokamax_group_sizes = tokamax.RaggedDotGroupSizes(
+        group_sizes,
+        max_utils.generate_representative_group_sizes(inputs.shape[0], kernel.shape[0]),
+    )
     if config.use_qwix_quantization:
       output = megablox.gmm(
           lhs=inputs,
@@ -1106,9 +1107,7 @@ def route_compute_unroute(
 
   def route_fn(inputs):
     # Shared expert.
-    y = dot(
-        jax.nn.silu(dot(inputs, shared_w0, quant=quant)) * dot(inputs, shared_w1, quant=quant), shared_wo, quant=quant
-    )
+    y = dot(jax.nn.silu(dot(inputs, shared_w0, quant=quant)) * dot(inputs, shared_w1, quant=quant), shared_wo, quant=quant)
 
     inputs = jnp.reshape(inputs, (-1, inputs.shape[-1]))
     selected_experts, weights, group_sizes = expert_selection(

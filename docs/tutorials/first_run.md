@@ -40,6 +40,15 @@ multiple hosts but is a good way to learn about MaxText.
 3. After installation completes, run training on synthetic data with the following command:
 
 ```sh
+python3 -m venv ~/venv-maxtext
+source ~/venv-maxtext/bin/activate
+bash tools/setup/setup.sh
+pre-commit install
+```
+
+4. After installation completes, run training on synthetic data with the following command:
+
+```sh
 python3 -m maxtext.trainers.pre_train.train \
   run_name=${YOUR_JOB_NAME?} \
   base_output_directory=gs://<my-bucket> \
