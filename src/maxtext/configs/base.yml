@@ -877,6 +877,8 @@ decode_sampling_temperature: 1.
 eval_interval: -1  # the specific number of train step between eval_step
 eval_steps: -1  # run this number of steps for eval, recommend setting this to prevent error due to running out of evel data
 target_eval_loss: 0.  # early stop once reaching target eval_loss
+abort_on_nan_loss: True # Check for NaN and abort if found in training loss
+abort_on_inf_loss: True # Check for Inf and abort if found in training loss
 
 # Goodput parameters
 enable_goodput_recording: False
@@ -1139,7 +1141,7 @@ use_tokamax_splash: false
 use_jax_splash: false
 
 # vLLM Adapter Configurations
-# Path to the HuggingFace-style config directory for the adapter (e.g. src/MaxText/integration/vllm/maxtext_vllm_adapter)
+# Path to the HuggingFace-style config directory for the adapter (e.g. src/maxtext/integration/vllm/maxtext_vllm_adapter)
 vllm_hf_config_path: ""
 # A JSON string of overrides to apply to the HuggingFace-style config for the vLLM adapter.
 # This can be used to override specific settings without modifying the original config file. 

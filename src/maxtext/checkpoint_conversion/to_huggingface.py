@@ -44,7 +44,7 @@ Example Usage:
   To convert a gemma2-2b MaxText checkpoint and save it to a local directory:
 
   export HF_AUTH_TOKEN="hf_YOUR_TOKEN"
-  python src/MaxText/checkpoint_conversion/to_huggingface.py \
+  python src/maxtext/checkpoint_conversion/to_huggingface.py \
     src/maxtext/configs/base.yml \
     model_name="gemma2-2b" \
     load_parameters_path="/path/to/your/maxtext/checkpoint/" \

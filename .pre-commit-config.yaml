@@ -42,7 +42,7 @@ repos:
   #        args:
   #          - '--jobs=auto'
   #          - '--keep-going'
-  #          - 'src/MaxText/'
+  #          - 'src/maxtext/'
 
   - repo: https://github.com/google/pyink
     rev: 24.10.1

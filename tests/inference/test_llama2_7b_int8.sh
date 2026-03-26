@@ -1,8 +1,8 @@
 #!/bin/bash
 
-CONFIG_PATH="${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/configs/base.yml"
+CONFIG_PATH="${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext}/configs/base.yml"
 if [ "${DECOUPLE_GCLOUD^^}" = "TRUE" ]; then
-  CONFIG_PATH="${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/configs/decoupled_base_test.yml"
+  CONFIG_PATH="${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext}/configs/decoupled_base_test.yml"
 fi
 
 # Define the arguments in an array

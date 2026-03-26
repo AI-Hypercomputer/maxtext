@@ -54,6 +54,6 @@ ici_data_parallelism=${NUM_SAMPLERS} ici_tensor_parallelism=${DEVICES_PER_SAMPLE
 profiler=xplane skip_first_n_steps_for_profiler=10 profiler_steps=2"
 
 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' \
-    python3 src/MaxText/experimental/rl/grpo_trainer.py src/MaxText/experimental/rl/grpo.yml  \
-    ${COMMON_ARGS} ${TRAINING_ARGS} src/MaxText/experimental/rl/grpo_inference.yml \
+    python3 src/maxtext/experimental/rl/grpo_trainer.py src/maxtext/experimental/rl/grpo.yml  \
+    ${COMMON_ARGS} ${TRAINING_ARGS} src/maxtext/experimental/rl/grpo_inference.yml \
     ${COMMON_ARGS} ${INFERENCE_ARGS}

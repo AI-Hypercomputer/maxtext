@@ -20,8 +20,8 @@ export TOKENIZER_PATH='Qwen/Qwen3-Next-80B-A3B-Instruct'
 # Installing torch for checkpoint conversion and forward_pass_logit_checker.py
 python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
-# e.g., $HOME/maxtext/src/MaxText
-export MAXTEXT_PKG_DIR="${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}"
+# e.g., $HOME/maxtext/src/maxtext
+export MAXTEXT_PKG_DIR="${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext}"
 
 if [ -z "${BASE_OUTPUT_PATH}" ]; then
   # Non-Googlers please remember to point `BASE_OUTPUT_PATH` to GCS buckets that you own, this script uses internal buckets for testing.

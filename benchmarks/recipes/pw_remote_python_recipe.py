@@ -21,7 +21,7 @@ and sets up the model configuration for a Pathways-based run.
 
 import os
 
-import args_helper as helper
+import benchmarks.recipes.args_helper as helper
 
 from benchmarks import maxtext_trillium_model_configs as model_configs
 from benchmarks import maxtext_xpk_runner as mxr
@@ -40,7 +40,7 @@ def main():
   xpk_path = "xpk"
 
   # Handle command line arguments using args_helper
-  should_continue = helper.handle_cmd_args(cluster_config, helper.DELETE, xpk_path=xpk_path)
+  should_continue = helper.handle_cmd_args(cluster_config, helper.DELETE, os.environ["USER"], xpk_path=xpk_path)
 
   if not should_continue:
     return

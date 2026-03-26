@@ -25,7 +25,7 @@ Multimodal Large Language Models (LLMs) extend traditional text-only models by i
 
 ## Checkpoint Conversion
 
-Recently we have onboarded a new centralized tool for bidirectional checkpoint conversion between MaxText and HuggingFace ([README](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/checkpoint_conversion/README.md)).
+Recently we have onboarded a new centralized tool for bidirectional checkpoint conversion between MaxText and HuggingFace ([README](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/README.md)).
 
 Install pytorch:
 
@@ -153,12 +153,12 @@ python -m maxtext.trainers.post_train.sft.train_sft_deprecated \
 - **Setting appropriate prefill length**: To prevent truncation and ensure your full input (text + image) is processed, the prefill length should be set longer than the total combined length of your text tokens and image tokens. This combined length makes up the final sequence fed to the decoder. We recommend to estimate the combined sequence length from your full input and then add a buffer when setting your `max_prefill_predict_length` for decoding. Token estimation rules:
   - For text tokens, a good estimate is:
 
-    $\text{Text Tokens} \approx 1.3 \times \text{Number of Words in Prompt}$.
+    $\\text{Text Tokens} \\approx 1.3 \\times \\text{Number of Words in Prompt}$.
 
   - For Gemma3, each image is resized to 896\*896 and contributes 256 tokens:
 
-    $\text{Total Tokens} \approx \text{Text Tokens} + \text{Number of Images} * 256$.
+    $\\text{Total Tokens} \\approx \\text{Text Tokens} + \\text{Number of Images} * 256$.
 
   - For Llama4 models, each image is dynamically tiled based on its size, with each resulting tile contributing 144 tokens:
 
-    $\text{Total Tokens} \approx \text{Text Tokens} + 144 \times \sum_{i=1}^{N} \text{Number of Tiles of Image}_i$.
+    $\\text{Total Tokens} \\approx \\text{Text Tokens} + 144 \\times \\sum\_{i=1}^{N} \\text{Number of Tiles of Image}\_i$.

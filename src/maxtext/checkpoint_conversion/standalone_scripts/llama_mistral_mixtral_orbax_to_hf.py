@@ -25,7 +25,7 @@ python3 -m maxtext.checkpoint_conversion.standalone_scripts.llama_or_mistral_ckp
 
 python3 -m maxtext.checkpoint_conversion.standalone_scripts.llama_mistral_mixtral_orbax_to_hf src/maxtext/configs/base.yml
             base_output_directory=path/to/saving/intermediate_MaxText_files
-            load_parameters_path=/path/to/src/MaxText/checkpoint run_name=<your run name> model_name=<llama2 or mistral>
+            load_parameters_path=/path/to/src/maxtext/checkpoint run_name=<your run name> model_name=<llama2 or mistral>
             hardware=gpu
             hf_model_path=/local/path/to/save/HF/model/to
 

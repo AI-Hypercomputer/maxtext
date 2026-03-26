@@ -22,8 +22,8 @@ runner process.
 """
 
 import benchmarks.recipes.args_helper as helper
-from .. import maxtext_xpk_runner as mxr
-from ..recipes.user_configs import USER_CONFIG
+from benchmarks import maxtext_xpk_runner as mxr
+from benchmarks.recipes.user_configs import USER_CONFIG
 
 
 def main() -> int:

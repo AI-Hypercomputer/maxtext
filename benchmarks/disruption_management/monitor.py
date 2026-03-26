@@ -29,7 +29,6 @@ import subprocess
 import time
 
 from benchmarks.disruption_management.disruption_utils import wait_for_pod_to_start
-
 from benchmarks.disruption_management.disruption_handler import DisruptionConfig
 from benchmarks.disruption_management.disruption_handler import TriggerType
 
