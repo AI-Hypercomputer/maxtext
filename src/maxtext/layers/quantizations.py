@@ -286,7 +286,7 @@ class Fp8Quantization(Quantization):
 
   def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
     """Returns dot_general configured with aqt params."""
-    return nnx_wrappers.ToNNX(nn.Fp8DirectDotGeneralOp)
+    return nn.Fp8DirectDotGeneralOp
 
   def einsum(self, dtype: DType = jnp.float32):
     return _Fp8EinsumWrapper(dtype=dtype)
