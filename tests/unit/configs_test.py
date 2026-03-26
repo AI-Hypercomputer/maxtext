@@ -201,6 +201,7 @@ DEEPSEEK_CONFIGS = [
     os.path.join(CONFIGS_DIR, "models", "deepseek3-test.yml"),
     os.path.join(CONFIGS_DIR, "models", "deepseek3-671b.yml"),
     os.path.join(CONFIGS_DIR, "models", "deepseek3-671b-2dfsdp.yml"),
+    os.path.join(CONFIGS_DIR, "models", "deepseek3-671b-batchsplit.yml"),
 ]
 
 
