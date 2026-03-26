@@ -653,15 +653,17 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
 
   # Before we train the model, let's evaluate the model on the test set so we can
   # see the improvement post training.
-  (corr, total, accuracy, partial_accuracy, format_accuracy), _ = evaluate(
-      trainer_config,
-      test_dataset,
-      rl_cluster=rl_cluster,
-      num_passes=trainer_config.num_eval_passes,
-      corr_lst=trainer_config.eval_corr_lst,
-      make_lst=trainer_config.eval_make_lst,
-  )
-  max_logging.warning(f"Pre RL Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%," f" {format_accuracy=}%")
+  if trainer_config.num_test_batches > 0:
+    max_logging.warning("Starting evaluation before RL training...")
+    (corr, total, accuracy, partial_accuracy, format_accuracy), _ = evaluate(
+        trainer_config,
+        test_dataset,
+        rl_cluster=rl_cluster,
+        num_passes=trainer_config.num_eval_passes,
+        corr_lst=trainer_config.eval_corr_lst,
+        make_lst=trainer_config.eval_make_lst,
+    )
+    max_logging.warning(f"Pre RL Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%," f" {format_accuracy=}%")
 
   # Start training
   if trainer_config.load_checkpoint_only_once:
@@ -682,15 +684,17 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
   max_logging.warning("RL Training Completed Successfully!")
 
   # Let's evaluate our model!
-  (corr, total, accuracy, partial_accuracy, format_accuracy), _ = evaluate(
-      trainer_config,
-      test_dataset,
-      rl_cluster=rl_cluster,
-      num_passes=trainer_config.num_eval_passes,
-      corr_lst=trainer_config.eval_corr_lst,
-      make_lst=trainer_config.eval_make_lst,
-  )
-  max_logging.warning(f"Post RL Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%," f" {format_accuracy=}%")
+  if trainer_config.num_test_batches > 0:
+    max_logging.warning("Starting evaluation after RL training...")
+    (corr, total, accuracy, partial_accuracy, format_accuracy), _ = evaluate(
+        trainer_config,
+        test_dataset,
+        rl_cluster=rl_cluster,
+        num_passes=trainer_config.num_eval_passes,
+        corr_lst=trainer_config.eval_corr_lst,
+        make_lst=trainer_config.eval_make_lst,
+    )
+    max_logging.warning(f"Post RL Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%," f" {format_accuracy=}%")
 
 
 def main(argv: Sequence[str]) -> None:

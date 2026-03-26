@@ -114,10 +114,12 @@ def score_responses(tmvp_config, question, responses, answers):
   has_correct_format = False
 
   for response in responses:
-    # Extract answer: prefer the full format match; fall back to the last
-    # <answer>...</answer> tag if full format match is not found, so result
-    # scoring is decoupled from format.
-    extracted_response, match_method = utils_rl.extract_answer(response, tmvp_config)
+    # Check format correctness (requires the full <reasoning>...</reasoning><answer>...</answer> structure)
+    match_format = utils_rl.get_match_format_regex(tmvp_config)
+    if match_format.search(response) is not None:
+      has_correct_format = True
+
+    extracted_response = utils_rl.extract_answer(response, tmvp_config)
 
     # Check exact and partial correctness (within 10%)
     try:
@@ -129,10 +131,6 @@ def score_responses(tmvp_config, question, responses, answers):
       if tmvp_config.debug.rl:
         max_logging.log(f"Evaluation Exception: {e}")
         max_logging.log("SKIPPED")
-
-    # Check format correctness (requires the full <reasoning>...</reasoning><answer>...</answer> structure)
-    if match_method == "full format":
-      has_correct_format = True
 
     # Early exit if all criteria are met
     if is_correct and is_partially_correct and has_correct_format:
