@@ -311,11 +311,13 @@ def create_rematerialized_pipeline_stage(
     del w_curr
     return (loop_state, w_next), None
 
-  return nn.remat(
-      execute_pipeline_stage,
-      prevent_cse=not model.config.scan_pipeline_iterations,
-      policy=model.get_pipeline_remat_policy(),
-  )
+  return execute_pipeline_stage
+
+  # return nn.remat(
+  #     execute_pipeline_stage,
+  #     prevent_cse=not model.config.scan_pipeline_iterations,
+  #     policy=model.get_pipeline_remat_policy(),
+  # )
 
 
 def create_flax_pipeline_scan(pipeline_stage_fn, length):
@@ -344,4 +346,5 @@ def create_flax_pipeline_scan(pipeline_stage_fn, length):
       },
       split_rngs={"random": True},
       length=length,
+      unroll=length,
   )
