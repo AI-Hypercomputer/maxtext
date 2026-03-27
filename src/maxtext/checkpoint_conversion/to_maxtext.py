@@ -25,13 +25,15 @@ Key Parameters (to be set in the config file or as command-line overrides):
                          Defaults to "./mt_output/".
   scan_layers: (bool) Whether the MaxText model was trained with scanned layers.
                This must match the training configuration of the checkpoint.
-  lazy_load: (bool) If True, uses an on-demand loading strategy to minimize RAM
+  --lazy_load_tensors: (bool) If True, uses an on-demand loading strategy to minimize RAM
              usage during conversion. Recommended if, 2 * model_size (GB) >= system RAM
              Defaults to False.
   --hf_model_path: (Optional) Specifies a local or remote directory containing the model weights.
       If unspecified, we use the default Hugging Face repository ID
       (e.g., openai/gpt-oss-20b; see `HF_IDS[model_name]` in `maxtext.utils.globals`).
       This is necessary for locally dequantized models like GPT-OSS or DeepSeek.
+  --save_dtype: (Optional) Specifies the data type of saved model weights.
+             Default to `bfloat16` to save memory.
 
 Environment Variables:
   HF_AUTH_TOKEN: (Required) HuggingFace authentication token, needed to
@@ -40,7 +42,7 @@ Environment Variables:
 Example Usage:
   To convert a gemma2-2b model and save it to a specific directory:
 
-    /usr/bin/time -v python src/maxtext/checkpoint_conversion/to_maxtext.py \
+   python -m maxtext.checkpoint_conversion.to_maxtext \
     maxtext/configs/base.yml model_name="gemma2-2b" \
     base_output_directory="/path/to/your/output/directory" \
     hf_access_token=${HF_TOKEN?} hardware=cpu skip_jax_distributed_system=True \
@@ -51,7 +53,7 @@ Example Usage:
 
   To convert a 70B model with minimal RAM usage:
 
-   /usr/bin/time -v python src/maxtext/checkpoint_conversion/to_maxtext.py \
+   python -m maxtext.checkpoint_conversion.to_maxtext \
     maxtext/configs/base.yml model_name="llama3.1-70b" \
     base_output_directory="gs://my-bucket/maxtext-checkpoints" \
     hf_access_token=${HF_TOKEN?} hardware=cpu skip_jax_distributed_system=True \
@@ -67,14 +69,18 @@ import threading
 import time
 from typing import Any, Callable, List, Sequence
 import absl
+import ml_dtypes
+import torch
 import flax.linen as nn
 from huggingface_hub import hf_hub_download, list_repo_files
 import jax
 from maxtext.configs import pyconfig
+from maxtext.configs.types import DType
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.checkpoint_conversion.standalone_scripts.llama_or_mistral_ckpt import save_weights_to_checkpoint
+from maxtext.checkpoint_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS
 from maxtext.checkpoint_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
-from maxtext.checkpoint_conversion.utils.utils import MemoryMonitorTqdm, apply_hook_fns, get_hf_model, print_peak_memory, print_ram_usage, validate_and_filter_param_map_keys
+from maxtext.checkpoint_conversion.utils.utils import MemoryMonitorTqdm, apply_hook_fns, load_hf_dict_from_transformers, load_hf_dict_from_safetensors, print_peak_memory, print_ram_usage, validate_and_filter_param_map_keys
 from maxtext.inference.inference_utils import str2bool
 from maxtext.layers import quantizations
 from maxtext.models import models
@@ -83,7 +89,6 @@ from maxtext.utils.globals import HF_IDS
 import numpy as np
 from orbax.checkpoint import type_handlers
 from safetensors import safe_open
-from transformers import AutoConfig
 
 
 absl.logging.set_verbosity(absl.logging.INFO)  # for max_logging.log
@@ -498,7 +503,7 @@ def _get_maxtext_weight(
     mt_target_shape_or_shapes,
     mt_param_key_or_keys,
     final_mt_weights,
-    config,
+    save_dtype,
     use_lazy_load,
 ):
   """Loads Hugging Face parameters and converts them to MaxText parameters.
@@ -542,7 +547,7 @@ def _get_maxtext_weight(
     final_mt_tensor_numpy = LazyTensor(
         load_fn,
         mt_target_shape_or_shapes,
-        config.weight_dtype,
+        save_dtype,
         name=mt_param_key_or_keys,
     )
     if not is_composite_mt_key:
@@ -564,16 +569,18 @@ def _get_maxtext_weight(
         final_mt_weights[mt_target_idx] = LazyTensor(
             slicing_load_fn,
             mt_target_shape_or_shapes[i],
-            config.weight_dtype,
+            save_dtype,
             name=mt_param_key_or_keys[i],
         )
 
 
 def main(
     args: Sequence[str],
+    lazy_load_tensors: bool = False,
+    eager_load_method: str = "transformers",
     hf_model_path: str | None = None,
     revision: str | None = None,
-    lazy_load_tensors: bool = False,
+    save_dtype: str = "bfloat16",
     simulated_cpu_devices_count: int = 16,
 ) -> None:
   overall_start = time.time()
@@ -618,38 +625,81 @@ def main(
   if lazy_load_tensors:
     max_logging.log(f"Lazy loading ENABLED. Initializing LazyHFLoader for: {model_id}...")
     hf_loader = LazyHFLoader(model_id, hf_token, revision=revision)
-    hf_config_obj = AutoConfig.from_pretrained(model_id, token=hf_token, revision=revision)
+
     print_ram_usage("After LazyLoader init")
     tensor_getter = hf_loader.get_tensor
   else:
     max_logging.log(f"Lazy loading DISABLED. Loading full HuggingFace model: {model_id}...")
-    hf_config_obj = AutoConfig.from_pretrained(model_id, token=hf_token, revision=revision)
-    hf_model = get_hf_model(model_id, token=hf_token, revision=revision)
-    hf_state_dict_numpy = hf_model.state_dict()
-    # Convert all to numpy immediately in eager mode
-    for k, v in hf_state_dict_numpy.items():
-      hf_state_dict_numpy[k] = v.numpy()
-    del hf_model
-    max_logging.log("HuggingFace model loaded and converted to NumPy.")
+
+    # Eager load methods:
+    # - Method 1: transformers_class.from_pretrained(..., dtype="auto")
+    # - Method 2: safetensors.safe_open(..., framework="pt")
+    #
+    # Comparison:
+    # - Both methods result in the same dtype (usually bfloat16) and model structure
+    #   for most models (e.g., DeepSeek-V2), with similar loading times.
+    # - Exception: Gemma-3 uses different internal naming (prefixes) between
+    #   Method 1 and Method 2. Current MaxText 'param_mapping' for Gemma-3 assumes
+    #   the Transformers-style structure (Method 1).
+    # - The 'safetensors' method is a necessary fallback for:
+    #   1. "Day-0" models where the official Transformers code hasn't been merged yet
+    #      (e.g., DeepSeek-V3.2 during its initial release).
+    #   2. Weights omitted by official Transformers class
+    #      (e.g., Multi-Token Prediction weights (`layers.61`) in DeepSeek-V3).
+    #
+    # Recommendation:
+    # - Use 'transformers' as the default for backward compatibility of mapping.
+    # - 'safetensors' is an interchangeable and valid alternative for most models,
+    #   and is strictly required if the model or specific weights lack Transformers support.
+    if eager_load_method == "transformers":
+      max_logging.log("Eager load with Transformers backend, from_pretrained with auto dtype")
+      # For auto mode, loaded dtype is the same as `dtype` specified in config.json (or `torch_dtype` for older version)
+      # e.g., https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite/blob/main/config.json#L54
+      hf_state_dict_numpy = load_hf_dict_from_transformers(model_id, token=hf_token, revision=revision, dtype="auto")
+    elif eager_load_method == "safetensors":
+      max_logging.log("Eager load with Safetensors backend, safe_open with pt framework")
+      # For safe_open, loaded dtype is the same as original safetensor
+      # e.g., https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite/blob/main/model.safetensors.index.json
+      hf_state_dict_numpy = load_hf_dict_from_safetensors(model_id, token=hf_token, revision=revision, framework="pt")
+    else:
+      raise NotImplementedError
+
+    unique_dtypes = {tensor.dtype for tensor in hf_state_dict_numpy.values()}
+    max_logging.log(f"HuggingFace model loaded. dtypes: {unique_dtypes}")
     print_ram_usage("After full HF model load")
 
     def _eager_getter(key):
       if key not in hf_state_dict_numpy:
         raise ValueError(f"HuggingFace key {key} not found in state_dict.")
-      return hf_state_dict_numpy[key]
+      v = hf_state_dict_numpy[key]
+      # target dtype is "float32"
+      if save_dtype == DType.FLOAT32:
+        return v.to(torch.float32).numpy()
+      # target dtype is "bfloat16"
+      elif save_dtype == DType.BFLOAT16:
+        # - torch.bfloat16 -> torch.float32 -> np.float32 -> ml_dtypes.bfloat16
+        #   As numpy doesn't accept bfloat16 directly, we convert to float32 first
+        # - torch.float16 -> np.float16 -> ml_dtypes.bfloat16
+        # - torch.float32 -> np.float32 -> ml_dtypes.bfloat16
+        if v.dtype == torch.bfloat16:
+          v = v.to(torch.float32)
+        return v.numpy().astype(ml_dtypes.bfloat16)
+      raise NotImplementedError(f"Save dtype {save_dtype} is not currently implemented.")
 
     tensor_getter = _eager_getter
 
   # Get parameter mappings and hooks
+  model_key = config.model_name
+  # load config
+  hf_config_obj = HF_MODEL_CONFIGS[model_key]
+  hf_config_dict = hf_config_obj.to_dict()
   # example of param mapping (gemma2, maxtext:huggingface):
   # "params-decoder-layers_{maxtext_layer_idx}-pre_self_attention_norm_global-scale":
   #   f"model.layers.{global_layer_idx}.input_layernorm.weight",
-  model_key = config.model_name
-  param_map_mt_to_hf = PARAM_MAPPING[model_key](hf_config_obj.to_dict(), config, config.scan_layers)
-
+  param_map_mt_to_hf = PARAM_MAPPING[model_key](hf_config_dict, config, config.scan_layers)
   # Example of Hook FN mapping, to perform reshape:
   # f"params-decoder-layers_{maxtext_layer_idx}-self_attention_global-key-kernel": reshape_kernel,
-  hook_fn_map_mt = HOOK_FNS[model_key](hf_config_obj.to_dict(), config, config.scan_layers, saving_to_hf=False)
+  hook_fn_map_mt = HOOK_FNS[model_key](hf_config_dict, config, config.scan_layers, saving_to_hf=False)
   max_logging.log("Parameter mappings and hooks obtained.")
 
   maxtext_abstract_dict, abstract_params_treedef = get_maxtext_model_info(config)
@@ -669,6 +719,7 @@ def main(
       unit="param",
       leave=True,
       dynamic_ncols=True,
+      smoothing=0,
   ):
     if not lazy_load_tensors:
       max_logging.log(f"maxtext param: {mt_param_key_or_keys}")
@@ -702,7 +753,7 @@ def main(
         mt_target_shape_or_shapes,
         mt_param_key_or_keys,
         final_mt_weights,
-        config,
+        save_dtype,
         lazy_load_tensors,
     )
 
@@ -744,20 +795,51 @@ if __name__ == "__main__":
 
   # Define local parser
   parser = argparse.ArgumentParser()
+  # Lazy load uses `safetensors.safe_open` with np
   parser.add_argument(
       "--lazy_load_tensors",
       type=str2bool,
       required=False,
       default=False,
-      help="Whether to use lazy loading of HF tensors.",
+      help="Whether to use lazy loading of HF tensors",
+  )
+  # Eager load uses `transformers_class.from_pretrained` with auto dtype or `safetensors.safe_open` with pt.
+  # The two methods are interchangeable in most cases.
+  # Must use "transformers" for gemma3-4b due to mapping compatibility.
+  # Must use "safetensors" for models without official transformers support, like DeepSeek-V3.2.
+  # Must use "safetensors" for weights omitted by transformers class,
+  #   like Multi-Token Prediction weights (`layers.61`) in DeepSeek-V3.
+  parser.add_argument(
+      "--eager_load_method",
+      type=str,
+      required=False,
+      default="transformers",
+      choices=["transformers", "safetensors"],
+      help="Backend to use for eager loading: `transformers_class.from_pretrained` or `safetensors.safe_open` with pt",
   )
   # If not specified, default to maxtext.utils.globals.HF_IDS[model_name]
   parser.add_argument(
       "--hf_model_path",
       type=str,
       required=False,
-      default="",
-      help="local path to hf model, or custom remote hf repo",
+      default=None,
+      help="Customized remote HF repo, or local path to HF model",
+  )
+  # If hf_model_path is set to a local path, this is ignored.
+  parser.add_argument(
+      "--revision",
+      type=str,
+      required=False,
+      default=None,
+      help="Specific Hugging Face revision (branch/tag/commit)",
+  )
+  parser.add_argument(
+      "--save_dtype",
+      type=str,
+      required=False,
+      default="bfloat16",
+      choices=["float32", "bfloat16"],
+      help="Save MaxText weights in specified dtype",
   )
   # Determines the logical sharding of the output checkpoint by partitioning
   # weights across virtual XLA devices.
@@ -772,16 +854,9 @@ if __name__ == "__main__":
   # Case 2: simulated_cpu_devices_count=1 (Monolith)
   #   sharding: None
   #   storage:  chunk_shape=(151936, 1024) <-- Full layer in one chunk
-  parser.add_argument("--simulated_cpu_devices_count", type=int, required=False, default=16)
-
   parser.add_argument(
-      "--revision",
-      type=str,
-      required=False,
-      default=None,
-      help="Specific Hugging Face revision (branch/tag/commit)",
+      "--simulated_cpu_devices_count", type=int, required=False, default=16, help="Sharding of checkpoint"
   )
-
   # Parse local arguments
   # Parse known args returns the namespace AND the list of remaining arguments
   local_args, remaining_args = parser.parse_known_args()
@@ -793,8 +868,10 @@ if __name__ == "__main__":
   os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={local_args.simulated_cpu_devices_count}"
   main(
       args=model_args,
+      lazy_load_tensors=local_args.lazy_load_tensors,
+      eager_load_method=local_args.eager_load_method,
       hf_model_path=local_args.hf_model_path,
       revision=local_args.revision,
-      lazy_load_tensors=local_args.lazy_load_tensors,
+      save_dtype=local_args.save_dtype,
       simulated_cpu_devices_count=local_args.simulated_cpu_devices_count,
   )
