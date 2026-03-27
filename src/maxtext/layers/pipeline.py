@@ -511,9 +511,17 @@ class PipelineSharedMixin:
         return var
       physical = logical_to_mesh_axes(spec, self.mesh, rules=self.config.logical_axis_rules)
       no_fsdp = self._remove_fsdp_from_physical_partition_spec(physical)
-      return self._maybe_shard_with_name(var, NamedSharding(self.mesh, no_fsdp))
+      sharding = NamedSharding(self.mesh, no_fsdp)
+      if isinstance(var, nnx.Variable):
+        var.value = self._maybe_shard_with_name(var.value, sharding)
+        return var
+      return self._maybe_shard_with_name(var, sharding)
 
-    return jax.tree.map(_gather_leaf, variables, logical_partition_spec)
+    # nnx.Variable and PartitionSpec are JAX pytree nodes — treat them as leaves
+    # so the two trees align at the dict level. None must also be a leaf to avoid
+    # being treated as an empty container (0 children) vs the Variable's 1 child.
+    is_leaf = lambda x: isinstance(x, (nnx.Variable, P)) or x is None
+    return jax.tree.map(_gather_leaf, variables, logical_partition_spec, is_leaf=is_leaf)
 
   def get_logical_spec_repeats_removed(self, full_logical):
     """Returns a new logical spec with 'circular_repeats' removed."""
