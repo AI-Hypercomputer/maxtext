@@ -626,9 +626,14 @@ def main(
     hf_config_obj = AutoConfig.from_pretrained(model_id, token=hf_token, revision=revision)
     hf_model = get_hf_model(model_id, token=hf_token, revision=revision)
     hf_state_dict_numpy = hf_model.state_dict()
-    # Convert all to numpy immediately in eager mode
+    # Convert all to numpy immediately in eager mode.
+    # torch.Tensor.numpy() does not support bfloat16, so cast to float32 first.
+    import torch  # pylint: disable=g-import-not-at-top
     for k, v in hf_state_dict_numpy.items():
-      hf_state_dict_numpy[k] = v.numpy()
+      if v.dtype == torch.bfloat16:
+        hf_state_dict_numpy[k] = v.float().numpy()
+      else:
+        hf_state_dict_numpy[k] = v.numpy()
     del hf_model
     max_logging.log("HuggingFace model loaded and converted to NumPy.")
     print_ram_usage("After full HF model load")
