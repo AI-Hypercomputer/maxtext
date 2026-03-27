@@ -1389,8 +1389,6 @@ class CircularPipeline(PipelineBase):
     # base scannable function used twice for real and bubble runs
     base_scannable = functools.partial(
         pipeline_utils.create_rematerialized_pipeline_stage,
-        model=self,
-        run_iteration_scannable=run_iteration_scannable,
         deterministic=deterministic,
         model_mode=model_mode,
         logical_partition_spec=logical_partition_spec,
@@ -1404,9 +1402,15 @@ class CircularPipeline(PipelineBase):
     run_bubbles_scannable = base_scannable(length=bubble_iterations)
 
     run_repeats_scanned = pipeline_utils.create_flax_pipeline_scan(
-        pipeline_stage_fn=run_one_repeat_scannable, length=self.config.num_pipeline_repeats
+        pipeline_stage_fn=run_one_repeat_scannable,
+        length=self.config.num_pipeline_repeats,
+        use_scan=self.config.scan_pipeline_repeats,
     )
-    run_bubbles_scanned = pipeline_utils.create_flax_pipeline_scan(pipeline_stage_fn=run_bubbles_scannable, length=1)
+    run_bubbles_scanned = pipeline_utils.create_flax_pipeline_scan(
+        pipeline_stage_fn=run_bubbles_scannable,
+        length=1,
+        use_scan=self.config.scan_pipeline_repeats,
+    )
     (loop_state, w_curr), _ = run_repeats_scanned(self, (loop_state, bsw[0]))
     (loop_state, _), _ = run_bubbles_scanned(self, (loop_state, w_curr))
 
