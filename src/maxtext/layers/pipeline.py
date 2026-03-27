@@ -1393,7 +1393,16 @@ class NNXPipeline(NNXPipelineBase):
 
     if physical_partition_spec is None:
       return jax.tree.map(gather_weights_for_stages_in, weights)
-    return jax.tree.map(gather_weights_for_stages_in, weights, physical_partition_spec)
+
+    is_leaf = lambda x: isinstance(x, (nnx.Variable, P)) or x is None
+
+    def _var_safe_gather(var, spec):
+      if isinstance(var, nnx.Variable):
+        var.value = gather_weights_for_stages_in(var.value, spec)
+        return var
+      return gather_weights_for_stages_in(var, spec)
+
+    return jax.tree.map(_var_safe_gather, weights, physical_partition_spec, is_leaf=is_leaf)
 
   def run_one_iteration(
       self,
@@ -1648,7 +1657,16 @@ class NNXCircularPipeline(NNXPipelineBase):
 
     if bsw_pps is None:
       return repeat_weights
-    return jax.tree.map(_apply_sharding_hint, repeat_weights, bsw_pps)
+
+    is_leaf = lambda x: isinstance(x, (nnx.Variable, P)) or x is None
+
+    def _var_safe_shard(var, pspec):
+      if isinstance(var, nnx.Variable):
+        var.value = _apply_sharding_hint(var.value, pspec)
+        return var
+      return _apply_sharding_hint(var, pspec)
+
+    return jax.tree.map(_var_safe_shard, repeat_weights, bsw_pps, is_leaf=is_leaf)
 
   def weight_prefetching(self, weights_state, physical_partition_spec, loop_iteration):
     """Triggers asynchronous FSDP-like all-gathers for current and next pipeline steps."""
