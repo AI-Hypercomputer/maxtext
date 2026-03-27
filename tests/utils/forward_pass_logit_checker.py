@@ -332,8 +332,14 @@ def main(config, test_args):  # pylint: disable=W0621
       max_logging.log(msg)
 
       if test_args.clip_logits_epsilon is not None:
-        model_probabilities = jnp.clip(jax.nn.softmax(train_logits_slice, axis=-1), a_min=test_args.clip_logits_epsilon)
-        golden_probabilities = jnp.clip(jax.nn.softmax(golden_logits_slice, axis=-1), a_min=test_args.clip_logits_epsilon)
+        model_probabilities = jnp.clip(
+            jax.nn.softmax(train_logits_slice, axis=-1),
+            min=test_args.clip_logits_epsilon,
+        )
+        golden_probabilities = jnp.clip(
+            jax.nn.softmax(golden_logits_slice, axis=-1),
+            min=test_args.clip_logits_epsilon,
+        )
       else:
         model_probabilities = jax.nn.softmax(train_logits_slice, axis=-1)
         golden_probabilities = jax.nn.softmax(golden_logits_slice, axis=-1)
