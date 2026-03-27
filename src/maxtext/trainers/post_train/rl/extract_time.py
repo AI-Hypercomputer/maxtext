@@ -6,9 +6,10 @@ from google.cloud import logging
 from google.cloud.logging import DESCENDING
 from datetime import datetime, timedelta, timezone
 import os
+import json
 
 def get_reshard_data(args):
-    client = logging.Client(project="cloud-tpu-multipod-dev")
+    client = logging.Client(project=args.project_name)
     
     # 1. Define a narrow time window (last 5 days)
     # This prevents the API from searching the entire history of the project
@@ -19,12 +20,13 @@ def get_reshard_data(args):
     log_filter = (
         f'resource.type="k8s_container" '
         f'resource.labels.location="us-central1" '
-        f'resource.labels.cluster_name="zxhe-super-xpk-bid" '
+        f'resource.labels.project_id="{args.project_name}" '
+        f'resource.labels.cluster_name="{args.cluster_name}" '
         f'resource.labels.namespace_name="default" '
         f'resource.labels.pod_name:"{args.pod_name}" '
         f'severity>=DEFAULT '
         f'timestamp >= "{start_time}" '
-        f'(SEARCH("Reshard finished in") OR SEARCH("Weight Syncing Time taken:") OR (SEARCH("Using") AND SEARCH("GiB on")))'
+        f'("Reshard finished in" OR "Weight Syncing Time taken:" OR ("Using" AND "GiB on"))'
     )
 
     print(f"Querying logs from the last 5 days (Newest first)...")
@@ -44,7 +46,10 @@ def get_reshard_data(args):
             payload = entry.payload
             payload_str = None
             if isinstance(payload, dict):
-                payload_str = payload.get("message") or str(payload)
+                try:
+                    payload_str = json.dumps(payload)
+                except Exception:
+                    payload_str = str(payload)
             else:
                 payload_str = str(payload)
             if payload_str:
@@ -82,15 +87,20 @@ def get_reshard_data(args):
     mean_reshard_time = float('nan')
     if reshard_results:
         df = pd.DataFrame(reshard_results).sort_values("timestamp")
-        # Only keep the third - tenth ones and compute the mean of them
-        # Note: iloc[2:min(df.shape[0], args.max_steps)] gets indices 2 through 9 (8 items), corresponding to 3rd through 10th
-        selected_df = df.iloc[3:min(df.shape[0], args.max_steps)]
+        # Only keep from the 3rd to max_steps and compute the mean of them
+        if df.shape[0] > 2:
+            selected_df = df.iloc[2:min(df.shape[0], args.max_steps)]
+        else:
+            selected_df = df
         mean_reshard_time = selected_df["reshard_sec"].mean()
 
     mean_weight_sync_time = float('nan')
     if weight_sync_results:
         df = pd.DataFrame(weight_sync_results).sort_values("timestamp")
-        selected_df = df.iloc[3:min(df.shape[0], args.max_steps)]
+        if df.shape[0] > 2:
+            selected_df = df.iloc[2:min(df.shape[0], args.max_steps)]
+        else:
+            selected_df = df
         mean_weight_sync_time = selected_df["weight_sync_sec"].mean()
 
     trainer_hbm = float('nan')
@@ -103,14 +113,14 @@ def get_reshard_data(args):
 
     log_query = (
         f'resource.type="k8s_container" '
-        f'resource.labels.project_id="cloud-tpu-multipod-dev" '
+        f'resource.labels.project_id="{args.project_name}" '
         f'resource.labels.location="us-central1" '
-        f'resource.labels.cluster_name="zxhe-super-xpk-bid" '
+        f'resource.labels.cluster_name="{args.cluster_name}" '
         f'resource.labels.namespace_name="default" '
         f'resource.labels.pod_name:"{args.pod_name}" '
         f'severity>=DEFAULT'
     )
-    log_link = f"https://console.cloud.google.com/logs/query;query={urllib.parse.quote(log_query)}?project=cloud-tpu-multipod-dev"
+    log_link = f"https://console.cloud.google.com/logs/query;query={urllib.parse.quote(log_query)}?project={args.project_name}"
 
     result_df = pd.DataFrame([{
         "pod_name": args.pod_name, 
@@ -137,7 +147,7 @@ def get_reshard_data(args):
 
 # Example usage:
 """
-python ./maxtext/src/maxtext/trainers/post_train/rl/extract_time.py --pod_name sanbao-rl-0312-2
+python ./maxtext/src/maxtext/trainers/post_train/rl/extract_time.py --pod_name sanbao-reshard-10217 --store_cvs_file ./reshard/test.csv
 """
 
 if __name__ == "__main__":
@@ -145,6 +155,7 @@ if __name__ == "__main__":
     parser.add_argument("--pod_name", type=str, required=True, help="Pod name")
     parser.add_argument("--max_steps", type=int, default=10, help="Max steps")
     parser.add_argument("--store_cvs_file", type=str, required=True)
+    parser.add_argument("--cluster_name", type=str, default="next-devx-1", help="Cluster name")
+    parser.add_argument("--project_name", type=str, default="tpu-prod-env-automated", help="Project name")
     args = parser.parse_args()
     get_reshard_data(args)
-
