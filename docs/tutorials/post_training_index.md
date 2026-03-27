@@ -10,7 +10,7 @@ We’re investing in performance, scale, algorithms, models, reliability, and ea
 
 MaxText was co-designed with key Google led innovations to provide a unified post training experience:
 
-- [MaxText model library](https://maxtext.readthedocs.io/en/latest/index.html#model-library) for JAX LLMs highly optimized for TPUs
+- [MaxText model library](https://maxtext.readthedocs.io/en/latest/reference/models/supported_models_and_architectures.html#supported-model-families) for JAX LLMs highly optimized for TPUs
 - [Tunix](https://github.com/google/tunix) for the latest algorithms and post-training techniques
 - [vLLM on TPU](https://github.com/vllm-project/tpu-inference) for high performance sampling (inference) for Reinforcement Learning (RL)
 - [Pathways](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/pathways-intro) for multi-host inference (sampling) and highly efficient weight transfer
@@ -38,7 +38,7 @@ Here is an example of the steps you might go through to run a Reinforcement Lear
 
 ## What is Pathways and why is it key for RL?
 
-Pathways is a single controller JAX runtime that was [designed and pressure tested internally at Google DeepMind](https://blog.google/technology/ai/introducing-pathways-next-generation-ai-architecture/) over many years. Now available on Google Cloud, it is designed to coordinate distributed computations across thousands of accelerators from a single Python program. It efficiently performs data transfers between accelerators both within a slice using ICI (Inter-chip Interconnect) and across slices over DCN (Data Center Network).
+Pathways is a single controller JAX runtime that was [designed and pressure tested internally at Google DeepMind](https://blog.google/innovation-and-ai/products/introducing-pathways-next-generation-ai-architecture/) over many years. Now available on Google Cloud, it is designed to coordinate distributed computations across thousands of accelerators from a single Python program. It efficiently performs data transfers between accelerators both within a slice using ICI (Inter-chip Interconnect) and across slices over DCN (Data Center Network).
 
 Pathways allows for fine grained resource allocation (subslice of a physical slice) and scheduling. This allows JAX developers to explore novel model architectures in an easy to develop single controller programming environment.
 

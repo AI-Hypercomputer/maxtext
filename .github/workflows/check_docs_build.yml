@@ -16,24 +16,47 @@ jobs:
         uses: actions/checkout@v5
         with:
           persist-credentials: false
+          fetch-depth: 0
+
+      - name: Check if only documentation changed
+        id: check
+        run: |
+          git fetch origin ${GITHUB_BASE_REF}
+          CHANGED_FILES=$(git diff --name-only origin/${GITHUB_BASE_REF}...HEAD)
+
+          # Check for documentation changes
+          if echo "$CHANGED_FILES" | grep -E '\.(md)$|^docs/' > /dev/null; then
+            echo "Documentation files changed, enabling docs build."
+            echo "build_docs=true" >> $GITHUB_OUTPUT
+          else
+            echo "No documentation changes, skipping docs build."
+            echo "build_docs=false" >> $GITHUB_OUTPUT
+          fi
 
       - name: Install uv and set the Python version
+        if: steps.check.outputs.build_docs == 'true'
         uses: astral-sh/setup-uv@eb1897b8dc4b5d5bfe39a428a8f2304605e0983c  # v7.0.0
         with:
           python-version: '3.12'
           enable-cache: true
 
       - name: Set venv
+        if: steps.check.outputs.build_docs == 'true'
         run: uv venv --python 3.12 $GITHUB_WORKSPACE/venv
 
       - name: Install dependencies
+        if: steps.check.outputs.build_docs == 'true'
         run: . $GITHUB_WORKSPACE/venv/bin/activate && uv pip install -r src/dependencies/requirements/requirements_docs.txt
 
       - name: Build documentation
+        if: steps.check.outputs.build_docs == 'true'
         run: |
           . $GITHUB_WORKSPACE/venv/bin/activate
           uv pip install -e . --no-deps
           uv pip install torch
+          # verify links; the build fails if errors are found
+          sphinx-build -b linkcheck docs docs/_build/linkcheck -q --keep-going
+          # generates the actual website
           sphinx-build -b html docs docs/_build/html
         env:
           JAX_PLATFORMS: cpu

@@ -28,7 +28,7 @@ You can use a single Vertex AI Tensorboard instance to track and compare metrics
 
 ## Prerequisites
 
-- Enable [Vertex AI API](https://cloud.google.com/vertex-ai/docs/start/cloud-environment#enable_vertexai_apis) in your Google Cloud console.
+- Enable [Vertex AI API](https://docs.cloud.google.com/vertex-ai/docs/start/cloud-environment#set_up_a_project) in your Google Cloud console.
 - Assign [Vertex AI User IAM role](https://cloud.google.com/vertex-ai/docs/general/access-control#aiplatform.user) to the service account used by the TPU VMs. This is required to create and access the Vertex AI Tensorboard in Google Cloud console. If you are using XPK for MaxText, the necessary Vertex AI User IAM role will be automatically assigned to your node pools by XPK – no need to assign it manually.
 
 ## Upload logs to Vertex AI Tensorboard
