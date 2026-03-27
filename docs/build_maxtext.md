@@ -136,8 +136,11 @@ upload_maxtext_docker_image CLOUD_IMAGE_NAME=${CLOUD_IMAGE_NAME?}
 
 > **Note:** You will need the [**Artifact Registry Writer**](https://docs.cloud.google.com/artifact-registry/docs/access-control#permissions) role to push Docker images to your project's Artifact Registry and to allow the cluster to pull them during workload execution. If you don't have this permission, contact your project administrator to grant you this role through "Google Cloud Console -> IAM -> Grant access".
 
-> **Note:** If you see the following error, try adding the listed file path to `.dockerignore`:
-> ```
-> ERROR: Found symbolic links with absolute paths in the build context:
-> ./<add_this_value_to_dockerignore>
-> ```
+## Troubleshooting
+
+1. If you see the following error while building or uploading your Docker image, try adding the listed file path to `.dockerignore`. Do not include the `./` prefix in the `.dockerignore` file:
+
+```bash
+ERROR: Found symbolic links with absolute paths in the build context:
+./<add_this_value_to_dockerignore>
+```
