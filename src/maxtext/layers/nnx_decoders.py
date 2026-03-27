@@ -463,9 +463,9 @@ class NNXDecoder(nnx.Module):
           # nnx.get_partition_spec returns specs matching the actual tensor rank.
           # Without this, scanned params are 3D but specs remain 2D.
           if "out_sharding" in metadata and metadata["out_sharding"]:
-            sharding = list(metadata["out_sharding"])
-            sharding.insert(axis, metadata_axis_name)
-            metadata["out_sharding"] = tuple(sharding)
+            sharding_list = list(metadata["out_sharding"])
+            sharding_list.insert(axis, metadata_axis_name)
+            metadata["out_sharding"] = tuple(sharding_list)
           return leaf.replace(**metadata)
         return leaf
 
