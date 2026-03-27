@@ -1193,3 +1193,11 @@ distill_temperature: 1.0
 # 0.0 value disables this feature.
 distill_beta: 0.0
 distill_layer_indices: None
+
+
+##### Elastic training parameters
+# Elastic training is Pathways-specific and does not work on McJAX.
+elastic_enabled: false
+elastic_timeout_seconds: 300
+elastic_max_retries: 30
+elastic_minimum_slice_count: 0
