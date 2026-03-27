@@ -19,6 +19,11 @@ This config defines the architectural configurations of the Hugging Face version
 
 import transformers
 
+if transformers.__version__ >= "5.0.0":
+  from transformers.configuration_utils import PreTrainedConfig as PTConfig
+else:
+  from transformers.configuration_utils import PretrainedConfig as PTConfig
+
 gemma3_4b_config = transformers.Gemma3Config(
     architectures=["Gemma3ForConditionalGeneration"],
     boi_token_index=255999,
@@ -520,7 +525,67 @@ qwen3_coder_480b_a35b_config = transformers.Qwen3MoeConfig(
     vocab_size=151936,
 )
 
-# copy from https://huggingface.co/deepseek-ai/DeepSeek-V3/blob/main/config.json
+# from https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite/blob/main/config.json
+deepseek2_16b_dict = {
+    "architectures": ["DeepseekV2ForCausalLM"],
+    "attention_bias": False,
+    "attention_dropout": 0.0,
+    "auto_map": {
+        "AutoConfig": "configuration_deepseek.DeepseekV2Config",
+        "AutoModel": "modeling_deepseek.DeepseekV2Model",
+        "AutoModelForCausalLM": "modeling_deepseek.DeepseekV2ForCausalLM",
+    },
+    "aux_loss_alpha": 0.001,
+    "bos_token_id": 100000,
+    "eos_token_id": 100001,
+    "first_k_dense_replace": 1,
+    "hidden_act": "silu",
+    "hidden_size": 2048,
+    "initializer_range": 0.02,
+    "intermediate_size": 10944,
+    "kv_lora_rank": 512,
+    "max_position_embeddings": 163840,
+    "model_type": "deepseek_v2",
+    "moe_intermediate_size": 1408,
+    "moe_layer_freq": 1,
+    "n_group": 1,
+    "n_routed_experts": 64,
+    "n_shared_experts": 2,
+    "norm_topk_prob": False,
+    "num_attention_heads": 16,
+    "num_experts_per_tok": 6,
+    "num_hidden_layers": 27,
+    "num_key_value_heads": 16,
+    "pretraining_tp": 1,
+    "q_lora_rank": None,
+    "qk_nope_head_dim": 128,
+    "qk_rope_head_dim": 64,
+    "rms_norm_eps": 1e-06,
+    "rope_scaling": {
+        "beta_fast": 32,
+        "beta_slow": 1,
+        "factor": 40,
+        "mscale": 0.707,
+        "mscale_all_dim": 0.707,
+        "original_max_position_embeddings": 4096,
+        "type": "yarn",
+    },
+    "rope_theta": 10000,
+    "routed_scaling_factor": 1.0,
+    "scoring_func": "softmax",
+    "seq_aux": True,
+    "tie_word_embeddings": False,
+    "topk_group": 1,
+    "topk_method": "greedy",
+    "torch_dtype": "bfloat16",
+    "transformers_version": "4.33.1",
+    "use_cache": True,
+    "v_head_dim": 128,
+    "vocab_size": 102400,
+}
+deepseek2_16b_config = transformers.DeepseekV2Config(**deepseek2_16b_dict)
+
+# from https://huggingface.co/deepseek-ai/DeepSeek-V3/blob/main/config.json
 # remove fp8 quantization_config, since we are using bf16
 deepseek3_671b_dict = {
     "architectures": ["DeepseekV3ForCausalLM"],
@@ -580,7 +645,66 @@ deepseek3_671b_dict = {
 }
 deepseek3_671b_config = transformers.DeepseekV3Config(**deepseek3_671b_dict)
 
-# copy from https://huggingface.co/openai/gpt-oss-20b/blob/main/config.json
+# from https://huggingface.co/deepseek-ai/DeepSeek-V3.2/blob/main/config.json
+# remove fp8 quantization_config, since we are using bf16
+deepseek32_671b_dict = {
+    "architectures": ["DeepseekV32ForCausalLM"],
+    "attention_bias": False,
+    "attention_dropout": 0.0,
+    "bos_token_id": 0,
+    "eos_token_id": 1,
+    "ep_size": 1,
+    "first_k_dense_replace": 3,
+    "hidden_act": "silu",
+    "hidden_size": 7168,
+    "index_head_dim": 128,
+    "index_n_heads": 64,
+    "index_topk": 2048,
+    "initializer_range": 0.02,
+    "intermediate_size": 18432,
+    "kv_lora_rank": 512,
+    "max_position_embeddings": 163840,
+    "model_type": "deepseek_v32",
+    "moe_intermediate_size": 2048,
+    "moe_layer_freq": 1,
+    "n_group": 8,
+    "n_routed_experts": 256,
+    "n_shared_experts": 1,
+    "norm_topk_prob": True,
+    "num_attention_heads": 128,
+    "num_experts_per_tok": 8,
+    "num_hidden_layers": 61,
+    "num_key_value_heads": 128,
+    "num_nextn_predict_layers": 1,
+    "q_lora_rank": 1536,
+    "qk_nope_head_dim": 128,
+    "qk_rope_head_dim": 64,
+    "rms_norm_eps": 1e-06,
+    "rope_scaling": {
+        "beta_fast": 32,
+        "beta_slow": 1,
+        "factor": 40,
+        "mscale": 1.0,
+        "mscale_all_dim": 1.0,
+        "original_max_position_embeddings": 4096,
+        "type": "yarn",
+    },
+    "rope_theta": 10000,
+    "routed_scaling_factor": 2.5,
+    "scoring_func": "sigmoid",
+    "tie_word_embeddings": False,
+    "topk_group": 4,
+    "topk_method": "noaux_tc",
+    "torch_dtype": "bfloat16",
+    "transformers_version": "4.44.2",
+    "use_cache": True,
+    "v_head_dim": 128,
+    "vocab_size": 129280,
+}
+# TODO(shuningjin): replace with DeepseekV32Config when available in transformers library
+deepseek32_671b_config = PTConfig(**deepseek32_671b_dict)
+
+# from https://huggingface.co/openai/gpt-oss-20b/blob/main/config.json
 # remove mxfp4 quantization_config, since we are using bf16
 gpt_oss_20b_dict = {
     "architectures": ["GptOssForCausalLM"],
@@ -649,7 +773,7 @@ gpt_oss_20b_dict = {
 }
 gpt_oss_20b_config = transformers.GptOssConfig(**gpt_oss_20b_dict)
 
-# copy from https://huggingface.co/openai/gpt-oss-120b/blob/main/config.json
+# from https://huggingface.co/openai/gpt-oss-120b/blob/main/config.json
 # remove mxfp4 quantization_config, since we are using bf16
 gpt_oss_120b_dict = {
     "architectures": ["GptOssForCausalLM"],
@@ -887,7 +1011,9 @@ HF_MODEL_CONFIGS = {
     "qwen3-30b-a3b-base": qwen3_30b_a3b_thinking_2507_config,
     "qwen3-235b-a22b": qwen3_235b_a22b_thinking_2507_config,
     "qwen3-480b-a35b": qwen3_coder_480b_a35b_config,
+    "deepseek2-16b": deepseek2_16b_config,
     "deepseek3-671b": deepseek3_671b_config,
+    "deepseek3.2-671b": deepseek32_671b_config,
     "gpt-oss-20b": gpt_oss_20b_config,
     "gpt-oss-120b": gpt_oss_120b_config,
     "qwen3-omni-30b-a3b": qwen3_omni_30b_a3b_config,

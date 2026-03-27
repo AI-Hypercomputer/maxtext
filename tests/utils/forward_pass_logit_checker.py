@@ -166,7 +166,7 @@ def check_kl_divergence(model_logits, golden_logits, atol=0.02):
       log_target=False,
   )
 
-  max_logging.log(f"\nAverage KL divergence per token (D_KL(P_golden || Q_model)): {kl_div_value.item():.6f}")
+  max_logging.log(f"\nAverage KL divergence per token (D_KL(P_golden || Q_model)): {kl_div_value.item():.4e}")
 
   # To find the max KL divergence for any single token in the set
   # use reduction='none'.
@@ -177,13 +177,13 @@ def check_kl_divergence(model_logits, golden_logits, atol=0.02):
   )  # Sum over the vocab dim to get a single KL value per token
 
   # Log per-token KL divergences
-  formatted_list = [f"{x:.6f}" for x in kl_divs_per_token.tolist()]
+  formatted_list = [f"{x:.4e}" for x in kl_divs_per_token.tolist()]
   max_logging.log(f"Per-token KL Divergences: \n{formatted_list}")
 
   max_kl_div = kl_divs_per_token.max()
-  max_logging.log(f"\nMax KL divergence for a single token in the set: {max_kl_div.item():.6f}")
+  max_logging.log(f"\nMax KL divergence for a single token in the set: {max_kl_div.item():.4e}")
 
-  assert max_kl_div < atol, f"KL divergence values {max_kl_div.item():.6f} exceed the threshold {atol}"
+  assert max_kl_div < atol, f"KL divergence values {max_kl_div.item():.4e} exceed the threshold {atol}"
 
 
 def get_data(golden_data_point, config):
@@ -324,10 +324,10 @@ def main(config, test_args):  # pylint: disable=W0621
       max_rel_diff_val = rel_diff[max_rel_diff_idx]
       msg = (
           "\n[numerical difference]\n"
-          f"Max absolute difference: {max_abs_diff_val:.6f} at index {max_abs_diff_idx}\n"
-          f"  (Train: {train_logits_slice[max_abs_diff_idx]:.6f}, Golden: {golden_logits_slice[max_abs_diff_idx]:.6f})\n"
-          f"Max relative difference: {max_rel_diff_val:.6f} at index {max_rel_diff_idx}\n"
-          f"  (Train: {train_logits_slice[max_rel_diff_idx]:.6f}, Golden: {golden_logits_slice[max_rel_diff_idx]:.6f})"
+          f"Max absolute difference: {max_abs_diff_val:.4e} at index {max_abs_diff_idx}\n"
+          f"  (Train: {train_logits_slice[max_abs_diff_idx]:.4e}, Golden: {golden_logits_slice[max_abs_diff_idx]:.4e})\n"
+          f"Max relative difference: {max_rel_diff_val:.4e} at index {max_rel_diff_idx}\n"
+          f"  (Train: {train_logits_slice[max_rel_diff_idx]:.4e}, Golden: {golden_logits_slice[max_rel_diff_idx]:.4e})"
       )
       max_logging.log(msg)
 
@@ -532,25 +532,11 @@ if __name__ == "__main__":
       default=False,
       help="Skip the first token during comparison to ignore BOS/init mismatches.",
   )
-  test_args, _ = parser.parse_known_args()
 
-  # Remove args defined in this test file to avoid error from pyconfig
-  model_args = sys.argv
-  to_remove_args = [
-      "--atol",
-      "--rtol",
-      "--token_size",
-      "--max_kl_div",
-      "--golden_logits_path",
-      "--hf_model_path",
-      "--run_hf_model",
-      "--output_logits_path",
-      "--gcs_output_logits_path",
-      "--clip_logits_epsilon",
-      "--skip_first_token",
-  ]
-  for arg in to_remove_args:
-    model_args = [s for s in model_args if not s.startswith(arg)]
+  # Parse known args returns the namespace AND the list of remaining arguments
+  test_args, remaining_args = parser.parse_known_args()
+  # Reconstruct model_args (script name + the args MaxText needs)
+  model_args = [sys.argv[0]] + remaining_args
 
   cfg = pyconfig.initialize(model_args)
   assert (
