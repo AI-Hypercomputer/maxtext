@@ -1394,15 +1394,14 @@ class NNXPipeline(NNXPipelineBase):
     if physical_partition_spec is None:
       return jax.tree.map(gather_weights_for_stages_in, weights)
 
-    is_leaf = lambda x: isinstance(x, (nnx.Variable, P)) or x is None
-
-    def _var_safe_gather(var, spec):
-      if isinstance(var, nnx.Variable):
-        var.value = gather_weights_for_stages_in(var.value, spec)
-        return var
-      return gather_weights_for_stages_in(var, spec)
-
-    return jax.tree.map(_var_safe_gather, weights, physical_partition_spec, is_leaf=is_leaf)
+    # Flatten specs to a list aligned with weights' leaf traversal order.
+    # Single-tree map on weights lets jax.tree.map naturally recurse into
+    # nnx.Variable nodes and create NEW Variables from results (no mutation),
+    # avoiding TraceContextError inside jax.lax.scan.
+    is_spec_leaf = lambda x: isinstance(x, P) or x is None
+    spec_leaves = jax.tree_util.tree_leaves(physical_partition_spec, is_leaf=is_spec_leaf)
+    spec_iter = iter(spec_leaves)
+    return jax.tree.map(lambda w: gather_weights_for_stages_in(w, next(spec_iter)), weights)
 
   def run_one_iteration(
       self,
@@ -1658,15 +1657,12 @@ class NNXCircularPipeline(NNXPipelineBase):
     if bsw_pps is None:
       return repeat_weights
 
-    is_leaf = lambda x: isinstance(x, (nnx.Variable, P)) or x is None
-
-    def _var_safe_shard(var, pspec):
-      if isinstance(var, nnx.Variable):
-        var.value = _apply_sharding_hint(var.value, pspec)
-        return var
-      return _apply_sharding_hint(var, pspec)
-
-    return jax.tree.map(_var_safe_shard, repeat_weights, bsw_pps, is_leaf=is_leaf)
+    # Flatten specs to a list aligned with repeat_weights' leaf traversal order.
+    # Single-tree map avoids nnx.Variable mutation (TraceContextError inside scan).
+    is_spec_leaf = lambda x: isinstance(x, P) or x is None
+    spec_leaves = jax.tree_util.tree_leaves(bsw_pps, is_leaf=is_spec_leaf)
+    spec_iter = iter(spec_leaves)
+    return jax.tree.map(lambda w: _apply_sharding_hint(w, next(spec_iter)), repeat_weights)
 
   def weight_prefetching(self, weights_state, physical_partition_spec, loop_iteration):
     """Triggers asynchronous FSDP-like all-gathers for current and next pipeline steps."""
