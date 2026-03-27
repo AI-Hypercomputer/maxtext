@@ -32,6 +32,18 @@ rollout_expert_parallelism: 1
 # ====== Reproducibility ======
 data_shuffle_seed: 42
 
+# ====== LoRA ======
+# Low-Rank Adaptation for the actor model. When enabled, only the LoRA parameters
+# are trained and checkpointed, significantly reducing memory and compute.
+lora:
+  enabled: False
+  rank: 32
+  alpha: 64.0
+  # Regex matching module paths to apply LoRA to.
+  # Qwix uses re.fullmatch over slash-separated module paths like:
+  # layers/self_attention/query, layers/self_attention/key, ...
+  module_path: 'layers/(self_attention/(query|key|value|out)|mlp/(wi_0|wi_1|wo))'
+
 # ====== RL ======
 # This config includes RL algorithm variations such as grpo or gspo-token
 rl:

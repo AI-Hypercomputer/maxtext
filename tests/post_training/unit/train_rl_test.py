@@ -364,6 +364,79 @@ class TrainRLTest(unittest.TestCase):
       self.assertEqual(len(test_batch["prompts"]), 1)
       self.assertEqual(test_batch["prompts"][0], "short")
 
+  @pytest.mark.cpu_only
+  def test_create_models_and_meshes_applies_lora_when_enabled(self):
+    """When lora.enabled=True, create_models_and_meshes calls qwix.apply_lora_to_model on the actor."""
+    mock_actor = mock.MagicMock()
+    mock_actor.get_model_input.return_value = {"input_tokens": "dummy"}
+    mock_reference = mock.MagicMock()
+    mock_mesh = mock.MagicMock()
+    lora_actor = mock.MagicMock(name="lora_actor")
+
+    trainer_config = SimpleNamespace(
+        load_checkpoint_only_once=False,
+        vllm_additional_config="",
+        lora=SimpleNamespace(enabled=True, rank=8, alpha=16.0, module_path="layers/.*"),
+    )
+    sampler_config = SimpleNamespace(mesh_axes=("data",))
+
+    with (
+        mock.patch(
+            "maxtext.trainers.post_train.rl.train_rl.get_maxtext_model",
+            side_effect=[(mock_reference, mock_mesh), (mock_actor, mock_mesh)],
+        ),
+        mock.patch("maxtext.trainers.post_train.rl.train_rl.maxtext_utils.create_device_mesh", return_value=[]),
+        mock.patch("maxtext.trainers.post_train.rl.train_rl.Mesh", return_value=mock_mesh),
+        mock.patch("maxtext.trainers.post_train.rl.train_rl.qwix.LoraProvider") as mock_lora_provider_cls,
+        mock.patch(
+            "maxtext.trainers.post_train.rl.train_rl.qwix.apply_lora_to_model", return_value=lora_actor
+        ) as mock_apply,
+    ):
+      ref, ref_mesh, actor, actor_mesh, rollout_mesh = train_rl.create_models_and_meshes(
+          trainer_config, sampler_config, ["dev"], ["dev"]
+      )
+
+      # LoraProvider was constructed with the config values
+      mock_lora_provider_cls.assert_called_once_with(module_path="layers/.*", rank=8, alpha=16.0)
+      # apply_lora_to_model was called with the actor model and provider
+      mock_apply.assert_called_once()
+      call_args = mock_apply.call_args
+      self.assertIs(call_args[0][0], mock_actor)  # first positional arg is the model
+      self.assertIs(call_args[0][1], mock_lora_provider_cls.return_value)  # second is provider
+      # The returned actor should be the LoRA-wrapped model
+      self.assertIs(actor, lora_actor)
+
+  @pytest.mark.cpu_only
+  def test_create_models_and_meshes_skips_lora_when_disabled(self):
+    """When lora.enabled=False, qwix.apply_lora_to_model is not called."""
+    mock_actor = mock.MagicMock()
+    mock_reference = mock.MagicMock()
+    mock_mesh = mock.MagicMock()
+
+    trainer_config = SimpleNamespace(
+        load_checkpoint_only_once=False,
+        vllm_additional_config="",
+        lora=SimpleNamespace(enabled=False, rank=8, alpha=16.0, module_path="layers/.*"),
+    )
+    sampler_config = SimpleNamespace(mesh_axes=("data",))
+
+    with (
+        mock.patch(
+            "maxtext.trainers.post_train.rl.train_rl.get_maxtext_model",
+            side_effect=[(mock_reference, mock_mesh), (mock_actor, mock_mesh)],
+        ),
+        mock.patch("maxtext.trainers.post_train.rl.train_rl.maxtext_utils.create_device_mesh", return_value=[]),
+        mock.patch("maxtext.trainers.post_train.rl.train_rl.Mesh", return_value=mock_mesh),
+        mock.patch("maxtext.trainers.post_train.rl.train_rl.qwix.apply_lora_to_model") as mock_apply,
+    ):
+      ref, ref_mesh, actor, actor_mesh, rollout_mesh = train_rl.create_models_and_meshes(
+          trainer_config, sampler_config, ["dev"], ["dev"]
+      )
+
+      mock_apply.assert_not_called()
+      # Actor should be the original model, not a LoRA-wrapped one
+      self.assertIs(actor, mock_actor)
+
 
 if __name__ == "__main__":
   unittest.main()
