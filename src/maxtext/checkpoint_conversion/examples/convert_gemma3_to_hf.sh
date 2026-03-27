@@ -43,7 +43,7 @@ echo "Starting verification for the converted gemma3-4b model..."
 echo "Creating local directory for HF checkpoints: ${LOCAL_HF_CHECKPOINT_DIR}"
 mkdir -p "${LOCAL_HF_CHECKPOINT_DIR}"
 echo "Downloading HF checkpoints from ${HF_CHECKPOINT_GCS_PATH} to ${LOCAL_HF_CHECKPOINT_DIR}..."
-gsutil -m cp -r "${HF_CHECKPOINT_GCS_PATH}/*" "${LOCAL_HF_CHECKPOINT_DIR}/"
+gcloud storage cp --recursive "${HF_CHECKPOINT_GCS_PATH}/*" "${LOCAL_HF_CHECKPOINT_DIR}/"
 echo "Download complete."
 
 python3 -m tests.utils.forward_pass_logit_checker \
