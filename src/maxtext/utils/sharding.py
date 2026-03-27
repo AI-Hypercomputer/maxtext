@@ -174,9 +174,9 @@ def logical_to_mesh(tree, mesh, rules=None):
   if tree is None:
     return None
   return jax.tree.map(
-      lambda x: logical_to_mesh_axes(x, mesh, rules=rules),
+      lambda x, y: None if x is None else logical_to_mesh_axes(x, mesh, rules=rules),
       tree,
-      is_leaf=lambda x: isinstance(x, P),
+      is_leaf=lambda x: x is None or isinstance(x, P),
   )
 
 
@@ -185,9 +185,10 @@ def logical_to_mesh_sharding(tree, mesh, rules=None):
   if tree is None:
     return None
   return jax.tree.map(
-      lambda x: NamedSharding(mesh, x),
+      lambda x, y: NamedSharding(mesh, x) if x is not None else None,
       logical_to_mesh(tree, mesh, rules=rules),
-      is_leaf=lambda x: isinstance(x, P),
+      tree,
+      is_leaf=lambda x: x is None or isinstance(x, P),
   )
 
 
