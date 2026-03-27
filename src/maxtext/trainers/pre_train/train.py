@@ -204,6 +204,12 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
       total_z_loss = jnp.sum(z_loss)
 
   total_weights = jnp.sum(data["targets_segmentation"] != 0)
+
+  # Calculate MTP Loss
+  mtp_loss_avg = 0.0
+  if config.mtp_num_layers > 0 and is_train:
+    mtp_loss_avg = calculate_mtp_loss(intermediate_outputs, config)
+
   # If gradient accumulation is enabled, we don't need to divide total_loss
   # by total_weights and then multiply the computed gradient by total_weights,
   # since it's equivalent to computing the gradient from total_loss.
@@ -213,22 +219,23 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   # EPS was used to avoid division by zero, but it's not needed when gradient
   # accumulation is enabled since there's no division.
   if config.gradient_accumulation_steps > 1 and not config.use_tunix_gradient_accumulation:
-    loss = total_loss
+    # GA is ON: 'total_loss' is a SUM. We project the MTP average into a SUM 
+    # by multiplying it by the main model's weight count.
+    loss = total_loss + (mtp_loss_avg * total_weights)
   else:
     # When using Tunix gradient accumulation, we revert to standard normalization.
     # Unlike the manual accumulation path above, Tunix (via optax.MultiSteps) expects
     # a normalized loss for each step. It handles the accumulation state
     # updates and scaling internally.
-    loss = total_loss / (total_weights + EPS)
+    loss = (total_loss / (total_weights + EPS)) + mtp_loss_avg
 
   # We keep z-loss normalized by total_weights.
   total_z_loss = total_z_loss / (total_weights + EPS)
 
-  # Calculate and Add MTP Loss
-  mtp_loss = 0.0
-  if config.mtp_num_layers > 0 and is_train:
-    mtp_loss = calculate_mtp_loss(intermediate_outputs, config)
-    loss += mtp_loss
+  # Handle GA accumulation for aux variables so the logger doesn't artificially multiply them
+  if config.gradient_accumulation_steps > 1:
+    total_z_loss = total_z_loss / config.gradient_accumulation_steps
+    mtp_loss_avg = mtp_loss_avg / config.gradient_accumulation_steps
 
   # get indexer loss
   indexer_loss = 0.0
@@ -289,7 +296,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
       "moe_lb_loss": moe_lb_loss,
       "indexer_loss": indexer_loss,
       "moe_bias_updates": moe_bias_updates,
-      "mtp_loss": mtp_loss,
+      "mtp_loss": mtp_loss_avg,
   }
   return loss, aux
 
