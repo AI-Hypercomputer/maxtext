@@ -711,6 +711,7 @@ def main(argv: Sequence[str]) -> None:
   Args:
     argv: Command-line arguments.
   """
+  jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   pathwaysutils.initialize()
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 
