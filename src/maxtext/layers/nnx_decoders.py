@@ -448,11 +448,6 @@ class NNXDecoder(nnx.Module):
     sig = inspect.signature(layer_cls.__call__)
     valid_kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters or "kwargs" in sig.parameters}
 
-    layer_cls = layers.__class__  # Access the underlying class
-    sig = inspect.signature(layer_cls.__call__)
-    # Filter kwargs to only include keys that exist in the layer's signature
-    valid_kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters or "kwargs" in sig.parameters}
-
     def layer_fn(carry, scanned_vars):
       # Unpack the sliced variables for THIS layer
       current_params, current_state = scanned_vars
@@ -469,7 +464,6 @@ class NNXDecoder(nnx.Module):
       new_carry = layer_out[0] if isinstance(layer_out, tuple) else layer_out
 
       # Extract the updated state to return it
-      # _, new_current_state = nnx.split(layer, nnx.Param, ...)
       new_current_state = nnx.state(layer)
       return new_carry, new_current_state
 
