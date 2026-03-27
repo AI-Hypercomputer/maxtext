@@ -131,7 +131,7 @@ build_maxtext_docker_image WORKFLOW=post-training
 > **Note:** You will need the [**Artifact Registry Writer**](https://docs.cloud.google.com/artifact-registry/docs/access-control#permissions) role to push Docker images to your project's Artifact Registry and to allow the cluster to pull them during workload execution. If you don't have this permission, contact your project administrator to grant you this role through "Google Cloud Console -> IAM -> Grant access".
 
 ```bash
-# Make sure to replace <Docker Image Name> with your desired image name.
+# Make sure to set `CLOUD_IMAGE_NAME` with your desired image name.
 export CLOUD_IMAGE_NAME=<Docker Image Name>
 upload_maxtext_docker_image CLOUD_IMAGE_NAME=${CLOUD_IMAGE_NAME?}
 ```
