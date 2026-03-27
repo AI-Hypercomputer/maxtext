@@ -189,9 +189,12 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
         ):
           # structure of linen checkpoint: {'params': {'params': {'decoder': ...}}}
           is_nnx_checkpoint = False
+          # Exclude RngState variables: linen checkpoints don't store PRNG keys, so orbax
+          # would return ShapeDtypeStruct placeholders for them, corrupting the live model state.
+          non_rng_state = nnx.state(model, nnx.Not(nnx.RngState))
           target_for_restore = jax.tree.map(
               lambda v: v.value,
-              sharded_state,
+              non_rng_state,
               is_leaf=lambda n: hasattr(n, "value"),
           )
           target_for_restore_struct = jax.tree.map(
@@ -207,9 +210,13 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
             restore_args = {"params": {"params": ocp.checkpoint_utils.construct_restore_args(target_for_restore_struct)}}
         else:
           # structure of nnx checkpoint: {'decoder': {'value': ...}}
+          # Exclude RngState variables: if the checkpoint doesn't contain PRNG keys (common
+          # for plain weight exports), orbax returns ShapeDtypeStruct for missing entries,
+          # which would corrupt the live model state when nnx.update is called.
+          non_rng_state = nnx.state(model, nnx.Not(nnx.RngState))
           target_for_restore = jax.tree.map(
               lambda v: {"value": v.value},
-              sharded_state,
+              non_rng_state,
               is_leaf=lambda n: isinstance(n, nnx.Variable),
           )
           item_to_restore = target_for_restore

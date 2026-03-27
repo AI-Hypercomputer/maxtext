@@ -37,7 +37,7 @@ _JAX_COMPILATION_CACHE_DIR = "/tmp/jax_cache"
 # Flags
 FLAGS = flags.FLAGS
 _XPROF = flags.DEFINE_bool('xprof', False, 'xprof')
-_RAND_INIT = flags.DEFINE_bool('rand_init', False, 'Whether to use random initialization instead of loading from checkpoint, for faster testing.')  
+_RAND_INIT = flags.DEFINE_bool('rand_init', True, 'Whether to use random initialization instead of loading from checkpoint, for faster testing.')  
 
 def _setup_jax_compilation_cache():
   jax_config.update("jax_compilation_cache_dir", _JAX_COMPILATION_CACHE_DIR)
@@ -164,8 +164,8 @@ def _load_maxtext_model(base_yaml_path):
       key_proj="offload",
       value_proj="offload",
       ici_expert_parallelism=4,
-      # ici_fsdp_parallelism=2,
-      # ici_tensor_parallelism=2,
+      # ici_fsdp_parallelism=,
+      # ici_tensor_parallelism=,
       override_model_config="true",
       # debug_sharding="true",
       checkpoint_storage_concurrent_gb=80,
@@ -206,7 +206,7 @@ class MaxTextToVLLMConverter:
         logging.info("_convert_global: done")
                 
     def _convert_attn(self, params):
-      @jax.jit
+      @jax.jit(donate_argnums=(0,))
       def _transpose_unstack(x):
         return jnp.unstack(jnp.transpose(x, (1, 0)))
 
@@ -272,7 +272,7 @@ class MaxTextToVLLMConverter:
       self.vllm_state["vllm_model.model.embed_tokens.weight"] = params['base']['token_embedder']['embedding']
 
     def _to_lm_head(self, params):
-      @jax.jit
+      @jax.jit(donate_argnums=(0,))
       def _transpose(x):
         return jnp.transpose(x, (1, 0))
       self.vllm_state["vllm_model.lm_head.weight"] = _transpose(
@@ -280,7 +280,7 @@ class MaxTextToVLLMConverter:
       )
       
     @staticmethod
-    @jax.jit
+    @functools.partial(jax.jit, donate_argnums=(0,))
     def _to_attn(attn: PyTree) -> dict[str, jax.Array]:
       # (d_model, l, h, d) -> (l, d_model, h, d)
       q = jnp.transpose(attn['query']['kernel'], (1, 0, 2, 3))
@@ -324,7 +324,7 @@ class MaxTextToVLLMConverter:
       # param: [d_model, l, total_e] -> [l, total_e, d_model]
       # shard_map removed: plain transpose lets GSPMD propagate sharding
       # without requiring param and mesh to be on the same device set.
-      @jax.jit
+      @functools.partial(jax.jit, donate_argnums=(0,))
       def _transpose(param):
         return jnp.transpose(param, (1, 2, 0))
       param = _transpose(param)
@@ -332,7 +332,7 @@ class MaxTextToVLLMConverter:
 
     def _to_mlp_expert_down(self, param):
       # param: [E, L, Hidden, Inter] -> [L, E, Inter, Hidden]
-      @jax.jit
+      @functools.partial(jax.jit, donate_argnums=(0,))
       def _transpose(param):
         return jnp.transpose(param, (1, 0, 3, 2))
       param = _transpose(param)
@@ -344,7 +344,7 @@ class MaxTextToVLLMConverter:
     def _to_mlp_expert_gate_up(self, wi_0, wi_1, num_layers, layer_key_prefix, layer_key_suffix):
       # Process all layers in one JIT call using vmap to avoid per-layer dispatch
       # overhead (which was ~50 separate device syncs on multi-host v5p-64).
-      @jax.jit
+      @functools.partial(jax.jit, donate_argnums=(0, 1))
       def _fuse_all(wi_0, wi_1):
         # wi_0, wi_1: (e, l, d_model, d_inner) -> (l, e, d_model, d_inner)
         wi_0 = jnp.transpose(wi_0, (1, 0, 2, 3))  # -> (l, e, d_model, d_inner)
@@ -357,7 +357,7 @@ class MaxTextToVLLMConverter:
           e, d_inner, d_model = w0.shape
           # Chunk-level interleave to match vLLM TP sharding:
           # layout: [gate_chunk0, up_chunk0, gate_chunk1, up_chunk1, ...]
-          num_chunks = 2  # tensor_parallel_size for vLLM
+          num_chunks = 4  # tensor_parallel_size for vLLM
           chunk_size = d_inner // num_chunks
           gate_chunks = w0.reshape(e, num_chunks, chunk_size, d_model)
           up_chunks = w1.reshape(e, num_chunks, chunk_size, d_model)
@@ -382,7 +382,7 @@ class MaxTextToVLLMConverter:
       gc.collect()
       
     @staticmethod
-    @jax.jit
+    @functools.partial(jax.jit, donate_argnums=(0,))
     def _unstack_layer(param):
         return jnp.unstack(param, axis=0)
 
@@ -446,50 +446,20 @@ def main():
   llm = LLM(
     "Qwen/Qwen3-30B-A3B",
     max_model_len=16,
-    # tensor_parallel_size=4,
-    tensor_parallel_size=2,
-    data_parallel_size=2,
-    gpu_memory_utilization=0.65,
+    tensor_parallel_size=4,
+    gpu_memory_utilization=0.5,
     # load_format="dummy",
-    async_scheduling=False,
   )
   print("\n" + "="*80)
   llm_state = llm.llm_engine.model_executor.driver_worker.model_runner.state
   # save_dict_to_file(llm_state, "llm_state_shapes.txt")
 
-  # Detect once whether MaxText and vLLM meshes share the same physical
-  # devices (single-VM) or are disjoint (multi-host cluster partition).
-  # Same devices → jax.jit with out_shardings lets XLA emit on-device
-  # collectives (fast, ~0.16 s for 30 B).  Disjoint devices → jax.jit
-  # raises "incompatible devices"; fall back to jax.device_put which uses
-  # ICI/DCN for the cross-host transfer without a CPU roundtrip.
-  _any_src = next(iter(vllm_state.values()))
-  _any_src_arr = _any_src.value if hasattr(_any_src, 'value') else _any_src
-  _any_dst = next(iter(llm_state.values()))
-  _same_devices = (
-      frozenset(d.id for d in _any_src_arr.sharding.mesh.devices.flat) ==
-      frozenset(d.id for d in _any_dst.sharding.mesh.devices.flat)
-  )
-  logging.info("Weight sync: same_devices=%s (jit=%s, device_put=%s)",
-               _same_devices, _same_devices, not _same_devices)
-
-  @functools.lru_cache(maxsize=None)
-  def _get_reshard_fn(dst_sharding):
-    if _same_devices:
-      return jax.jit(lambda x: x, out_shardings=dst_sharding)
-    else:
-      return functools.partial(jax.device_put, device=dst_sharding)
-
   with timer(f"Assigning {len(vllm_state)} weights to vLLM model"):
     for key, weight in vllm_state.items():
-      # Unwrap NNX Param → plain jax.Array; plain arrays pass through unchanged.
-      weight_array = weight.value if hasattr(weight, 'value') else weight
-      dst_sharding = llm_state[key].sharding
-      print(f"Assigning {key}: src shape={weight_array.shape}, src sharding={weight_array.sharding}; dst shape={llm_state[key].shape}, dst sharding={dst_sharding}")
-      # llm_state[key] = _get_reshard_fn(dst_sharding)(weight_array)
-      llm_state[key] = jax.device_put(np.asarray(weight_array), dst_sharding)
-    jax.effects_barrier()  # wait for all on-device reshards to finish
-
+      target_sharding = llm_state[key].sharding
+      print(f"{key} MT {weight.shape} to torchax {llm_state[key].shape}")
+      print(f"\tMT sharding: {weight.sharding}, torchax sharding: {llm_state[key].sharding}")
+      llm_state[key] = jax.device_put(np.asarray(weight), target_sharding)
 
   sampling_params = SamplingParams(temperature=0.0, max_tokens=10)
   print("\n" + "="*80)
