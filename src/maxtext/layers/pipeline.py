@@ -35,7 +35,6 @@ from maxtext.utils.sharding import (
     create_sharding,
     logical_to_mesh_axes,
     logical_to_mesh,
-    all_gather_over_fsdp,
 )
 from maxtext.utils import pipeline_utils
 from maxtext.utils import max_logging
@@ -504,9 +503,17 @@ class PipelineSharedMixin:
     return pipeline_weights
 
   def all_gather_over_fsdp(self, variables, logical_partition_spec):
-    return all_gather_over_fsdp(
-        variables, logical_partition_spec, self.mesh, self.config.logical_axis_rules, self.config.shard_mode
-    )
+    if logical_partition_spec is None:
+      return variables
+
+    def _gather_leaf(var, spec):
+      if spec is None:
+        return var
+      physical = logical_to_mesh_axes(spec, self.mesh, rules=self.config.logical_axis_rules)
+      no_fsdp = self._remove_fsdp_from_physical_partition_spec(physical)
+      return self._maybe_shard_with_name(var, NamedSharding(self.mesh, no_fsdp))
+
+    return jax.tree.map(_gather_leaf, variables, logical_partition_spec)
 
   def get_logical_spec_repeats_removed(self, full_logical):
     """Returns a new logical spec with 'circular_repeats' removed."""
