@@ -478,6 +478,11 @@ def create_rl_components(
   argv_list = ["", str(vllm_config_path), "log_config=False"]
   vllm_config = pyconfig.initialize(argv_list)
 
+  rl_rollout_engine = "vllm"
+  model_name = trainer_config.model_name
+  if model_name in ["qwen3-30b-a3b", "qwen3-30b-a3b-base", "qwen3-235b-a22b"]:
+    rl_rollout_engine = functools.partial(MaxTextVllmRollout, maxtext_config=trainer_config)
+
   cluster_config = rl_cluster_lib.ClusterConfig(
       role_to_mesh={
           rl_cluster_lib.Role.ACTOR: actor_mesh,
@@ -489,8 +494,7 @@ def create_rl_components(
           rl_cluster_lib.Role.REFERENCE: trainer_config.logical_axis_rules,
           rl_cluster_lib.Role.ROLLOUT: vllm_config.logical_axis_rules,
       },
-      # rollout_engine="vllm",
-      rollout_engine=functools.partial(MaxTextVllmRollout, maxtext_config=trainer_config),
+      rollout_engine=rl_rollout_engine,
       offload_to_cpu=False,
       training_config=rl_cluster_lib.RLTrainingConfig(
           actor_optimizer=optimizer,
