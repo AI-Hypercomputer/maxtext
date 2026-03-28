@@ -27,7 +27,6 @@ from maxtext.kernels import megablox, sort_activations
 from maxtext.layers import attention_op
 from maxtext.layers import moe as moe_lib
 from maxtext.layers import quantizations
-from maxtext.utils import max_utils
 import qwix.pallas as qpl
 import tokamax
 
@@ -970,10 +969,7 @@ def compute(x, w0, w1, wo, group_sizes, weights, *, config, mesh):
       output = tokamax.ragged_dot(
           lhs=inputs,
           rhs=kernel,
-          group_sizes=tokamax.RaggedDotGroupSizes(
-              group_sizes,
-              max_utils.generate_representative_group_sizes(inputs.shape[0], kernel.shape[0]),
-          ),
+          group_sizes=tokamax.RaggedDotGroupSizes(group_sizes, config.wi_tile_fwd_batch_seq),
           precision=jax.lax.Precision.DEFAULT,
           preferred_element_type=preferred_element_type,
           implementation="mosaic",
