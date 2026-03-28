@@ -12,17 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# This logical rule is designed to optimize pipeline parallelism for large-scale jobs. 
-# Key changes include removing expert weight sharding on the `q_lora` dimension, which 
-# is relatively small (e.g., 512 for DeepSeek), and limiting sharding strategies when 
-# EP x FSDP > 512. 
+# This logical rule is designed to optimize pipeline parallelism for large-scale jobs.
+# Key changes include removing expert weight sharding on the `q_lora` dimension, which
+# is relatively small (e.g., 512 for DeepSeek), and limiting sharding strategies when
+# EP x FSDP > 512.
 #
-# The `data` axis is preserved for two reasons: first, the pipeline stage acts as a 
-# data parallel (DP) domain externally, making the `data` axis a necessary reference; 
-# second, it may be required for DCN communication. 
+# The `data` axis is preserved for two reasons: first, the pipeline stage acts as a
+# data parallel (DP) domain externally, making the `data` axis a necessary reference;
+# second, it may be required for DCN communication.
 #
-# Finally, the `tensor` axis is used to shard weights when `pipeline_fsdp_ag_once` or 
-# `pipeline_fsdp_ag_per_repeat` is enabled, ensuring we have sufficient memory to 
+# Finally, the `tensor` axis is used to shard weights when `pipeline_fsdp_ag_once` or
+# `pipeline_fsdp_ag_per_repeat` is enabled, ensuring we have sufficient memory to
 # store prefetched weights.
 mesh_axes: ['data', 'stage', 'fsdp', 'tensor', 'expert']
 data_sharding: [['data', 'stage', 'fsdp', 'tensor', 'expert']]
@@ -71,4 +71,32 @@ logical_axis_rules: [
                       ['exp_with_fsdp', 'fsdp'],
                       ['paged_kv_heads', ['tensor']],
                       ['engram_dim', ['tensor']],
+                      # Axes unsharded: sequence/context/tensor_transpose/autoregressive do not exist in this mesh
+                      ['activation_attn_length_no_exp', []],
+                      ['activation_length_no_exp', []],
+                      ['activation_norm_length', []],
+                      ['activation_q_length_no_exp', []],
+                      ['prefill_activation_length', []],
+                      ['prefill_activation_norm_length', []],
+                      ['activation_kv_length', []],
+                      ['decode_length', []],
+                      ['embed_tensor_transpose', []],
+                      ['q_lora_up_proj', []],
+                      ['kv_lora_up_proj', []],
+                      ['kv', []],
+                      ['qkv', []],
+                      ['kv_head_dim', []],
+                      ['cache_batch_prefill', []],
+                      ['cache_batch', []],
+                      ['cache_heads_none', []],
+                      ['cache_kv', []],
+                      ['cache_sequence', []],
+                      ['num_pages', []],
+                      ['tokens_per_page', []],
+                      ['paged_kv_head_dim_size', []],
+                      ['dense_layers', []],
+                      ['moe_layers', []],
+                      ['num_activations', []],
+                      ['mhc', []],
+                      ['diloco', []],
                     ]
