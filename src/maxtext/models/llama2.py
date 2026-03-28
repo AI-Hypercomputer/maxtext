@@ -143,9 +143,9 @@ class LlamaDecoderLayer(nnx.Module):
       decoder_positions,
       deterministic,
       model_mode,
+      previous_chunk=None,
       slot: None | int = None,
       page_state: None | page_manager.PageState = None,
-      previous_chunk=None,
       kv_cache=None,
       attention_metadata=None,
   ):
