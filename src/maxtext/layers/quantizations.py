@@ -26,6 +26,7 @@ from aqt.jax.v2.flax import aqt_flax
 from aqt.jax.v2 import tiled_dot_general
 from aqt.jax.v2 import calibration
 
+from maxtext.layers import nnx_wrappers
 import qwix
 from qwix._src.core import dot_general_qt
 
@@ -36,6 +37,7 @@ from jax.tree_util import tree_flatten_with_path, tree_unflatten
 from flax.linen import fp8_ops
 from flax.linen import initializers as flax_initializers
 import flax.linen as nn
+from flax import nnx
 
 from maxtext.common.common_types import DType, Config
 from maxtext.inference.kvcache import KVQuant
@@ -820,7 +822,26 @@ def maybe_quantize_model(model, config):
   if config.use_qwix_quantization and not config.use_batch_split_schedule:
     quantization_provider = get_qt_provider(config)
     if quantization_provider:
-      model = qwix.quantize_model(model, quantization_provider)
+      if isinstance(model, nnx.Module):
+        # NNX models require dummy inputs for Qwix's quantize_model API.
+        # We pass skip_nnx_init=True to avoid eagerly calling the model during
+        # quantization setup, because the NNX decoder's scan+checkpoint pattern
+        # conflicts with Qwix's dynamic Linen module creation (tracer leak).
+        # The interception wrapping is still applied; actual FP8 initialization
+        # happens on the first real forward pass.
+        input_shape = (config.global_batch_size_to_train_on, config.max_target_length)
+        dummy_tokens = jnp.ones(input_shape, dtype=jnp.int32)
+        dummy_positions = jnp.ones(input_shape, dtype=jnp.int32)
+        model = qwix.quantize_model(
+            model,
+            quantization_provider,
+            decoder_input_tokens=dummy_tokens,
+            decoder_positions=dummy_positions,
+            enable_dropout=False,
+            skip_nnx_init=True,
+        )
+      else:
+        model = qwix.quantize_model(model, quantization_provider)
   return model
 
 
