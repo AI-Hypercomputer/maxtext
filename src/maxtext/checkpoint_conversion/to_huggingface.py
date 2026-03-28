@@ -179,6 +179,17 @@ def _validate_or_update_architecture(hf_config, max_config, override: bool):
     if hf_value is None or mt_value is None:
       continue
 
+    # Special handling for Gemma 2 where local and global layers are bundled
+    if max_config.model_name.startswith("gemma2") and hf_attr == "num_hidden_layers":
+      if isinstance(mt_value, int):
+        mt_value = mt_value * 2
+
+    # Handle vocab size padding
+    if hf_attr == "vocab_size" and isinstance(mt_value, int) and isinstance(hf_value, int):
+      # MaxText often pads vocab size to a multiple of 128 or 256 for TPU efficiency
+      if mt_value >= hf_value and (mt_value - hf_value) < 256:
+        mt_value = hf_value
+
     # Compare values (with tolerance for floats)
     is_match = False
     if isinstance(hf_value, float) or isinstance(mt_value, float):
