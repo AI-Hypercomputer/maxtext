@@ -299,7 +299,7 @@ pipeline_fsdp_ag_per_repeat: False
 # It may be useful to do the reverse when the layers_per_stage is very large.
 # The below settings only have effect when using pipeline parallelism.
 scan_pipeline_iterations: True
-scan_pipeline_repeats: True
+scan_pipeline_repeats: False
 scan_layers_per_stage: False
 set_remat_policy_on_pipeline_iterations: True
 set_remat_policy_on_layers_per_stage: False
@@ -957,7 +957,7 @@ xprof_e2e_enable_fw_power_level_event: False
 xprof_e2e_enable_fw_thermal_event: False
 profile_power_events: False # Set to True to enable TPU-specific power/thermal profiling events. Defaults to False to avoid breaking GPU xplane tracing.
 
-log_config: True # Prints the config (after defaults have been set by pyconfig logic)
+log_config: False # Prints the config (after defaults have been set by pyconfig logic)
 debug_sharding: False # Prints model weights sharding info
 
 # Checkpoint Structured logging
