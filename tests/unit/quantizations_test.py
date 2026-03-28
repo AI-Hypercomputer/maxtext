@@ -393,11 +393,14 @@ class QuantTest(unittest.TestCase):
 
   def quantization_config(self, quant, logits_tolerance=2e-1, grad_tolerance=5e-1):
     """Run forward pass and backward pass for quantized model and compare with base model."""
+    rngs = nnx.Rngs(0)
+    
     cfg = self.init_pyconfig(quantization=quant)
-    model = model_creation_utils.create_model(self.cfg, self.mesh)
-    qt_model = model_creation_utils.create_model(cfg, self.mesh)
+    model = model_creation_utils.create_model(self.cfg, self.mesh, rngs=rngs)
+    qt_model = model_creation_utils.create_model(cfg, self.mesh, rngs=rngs)
 
     ids, decoder_segment_ids, decoder_positions = self.get_data()
+    '''
     var = model.init(
         {"params": self.rng, "aqt": self.rng, "dropout": self.rng},
         ids,
@@ -414,7 +417,8 @@ class QuantTest(unittest.TestCase):
         enable_dropout=False,
         mutable=True,
     )
-
+    '''
+    
     def loss_base(all_vars, inputs):
       logits, _ = model.apply(
           all_vars,
@@ -438,9 +442,9 @@ class QuantTest(unittest.TestCase):
     # Compute gradients w.r.t. both models
     grads_base = jax.grad(loss_base)(var, (ids, decoder_positions, decoder_segment_ids))
     grads_quant = jax.grad(loss_quant)(quantized_vars, (ids, decoder_positions, decoder_segment_ids))
-
-    logits, _ = model.apply(
-        var,
+    
+    logits, _ = model( # model.apply(
+        # var,
         ids,
         decoder_positions,
         decoder_segment_ids,
@@ -448,8 +452,8 @@ class QuantTest(unittest.TestCase):
         rngs={"params": self.rng},
         mutable=True,
     )
-    quant_logits, _ = qt_model.apply(
-        quantized_vars,
+    quant_logits, _ = qt_model( # qt_model.apply(
+        # quantized_vars,
         ids,
         decoder_positions,
         decoder_segment_ids,
