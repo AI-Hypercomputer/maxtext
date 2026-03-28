@@ -24,6 +24,8 @@ import socket
 import subprocess
 import time
 from typing import Any
+import subprocess
+import re
 
 from packaging.version import Version
 
@@ -38,6 +40,8 @@ import jax.numpy as jnp
 import numpy as np
 import orbax.checkpoint as ocp
 from orbax.checkpoint.experimental.emergency.multi_tier_checkpointing import initialization
+import pathwaysutils
+from pathwaysutils.elastic import manager
 import psutil
 
 from maxtext.common.gcloud_stub import is_decoupled
@@ -48,6 +52,10 @@ from maxtext.common.common_types import MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRE
 initialize_multi_tier_checkpointing = initialization.initialize_multi_tier_checkpointing
 HYBRID_RING_64X4 = "hybrid_ring_64x4"
 HYBRID_RING_32X8 = "hybrid_ring_32x8"
+
+
+elastic_manager: manager.Manager | None = None
+
 
 # pylint: disable=too-many-positional-arguments
 
@@ -341,9 +349,8 @@ def get_num_slices(raw_keys):
   if int(raw_keys["compile_topology_num_slices"]) > 0:
     return raw_keys["compile_topology_num_slices"]
   else:
-    devices = jax.devices()
     try:
-      return 1 + max(d.slice_index for d in devices)
+      return len(live_slice_indices())
     except (ValueError, AttributeError):
       return 1
 
@@ -701,7 +708,7 @@ def summarize_pytree_data(params, name="Params", raw=False):
 def print_mem_stats(label: str):
   max_logging.log(f"\nMemstats: {label}:")
   try:
-    for d in jax.local_devices():
+    for d in live_devices():
       stats = d.memory_stats()
       used = round(stats["bytes_in_use"] / 2**30, 2)
       limit = round(stats["bytes_limit"] / 2**30, 2)
@@ -1090,3 +1097,55 @@ def generate_representative_group_sizes(target_m: int, g: int) -> tuple[int, ...
   repr_val = np.int32((repr_val / np.sum(repr_val)) * target_m)
   repr_val[0] += target_m - np.sum(repr_val)
   return tuple(map(int, repr_val))
+
+
+def live_devices():
+  device_list = jax.devices()
+
+  if pathwaysutils.is_pathways_backend_used() and elastic_manager is not None:
+      return [
+          d for d in device_list
+          if d.slice_index in elastic_manager.active_slice_indices
+      ]
+  else:
+    return device_list
+
+def live_slice_indices() -> set[int]:
+  return {d.slice_index for d in live_devices()}
+
+
+def clean_up_checkpoints(checkpoint_dir: str):
+
+  max_logging.log(f"Checking for incomplete checkpoint after an elastic event...")
+  checkpoint_dir = f"{checkpoint_dir}"
+
+  # 1. List the directory
+  result = subprocess.run(['gsutil', 'ls', checkpoint_dir], capture_output=True, text=True)
+
+  if result.returncode != 0:
+    max_logging.log("Failed to inspect checkpoint dir. Continuing")
+    return
+
+  # 2. Filter for directories ending in numbers/ (equivalent to your grep and sort)
+  checkpoints = [line for line in result.stdout.splitlines() if re.search(r'/\d+/$', line)]
+
+  if not checkpoints:
+    max_logging.log("Found no existing checkpoints. Continuing")
+    return
+
+  # Sort naturally (Version sort) and get the last one
+  checkpoints.sort(key=lambda x: [int(c) if c.isdigit() else c for c in re.split(r'(\d+)', x)])
+  latest_checkpoint = checkpoints[-1]
+
+  max_logging.log(f"Checking latest checkpoint: {latest_checkpoint}")
+
+  # 3. Check for commit_success file
+  # gsutil -q stat returns 0 if found, non-zero if not
+  stat_check = subprocess.run(['gsutil', '-q', 'stat', f"{latest_checkpoint}commit_success*"])
+
+  if stat_check.returncode != 0:
+    max_logging.log(f"No commit_success file found. Deleting {latest_checkpoint}...")
+    subprocess.run(['gsutil', '-m', 'rm', '-rf', latest_checkpoint])
+  else:
+    max_logging.log(f"Found commit_success file. Keeping {latest_checkpoint}.")
+
