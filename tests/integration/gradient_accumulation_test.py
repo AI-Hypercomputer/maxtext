@@ -16,6 +16,7 @@
 
 import tempfile
 
+import datetime
 import numpy as np
 import json
 import unittest
@@ -24,6 +25,7 @@ import string
 import random
 import os
 import os.path
+import warnings
 
 from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.trainers.pre_train.train import main as train_main
@@ -52,6 +54,7 @@ class GradientAccumulationTest(unittest.TestCase):
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only
+  @pytest.mark.filterwarnings("always::UserWarning")
   def test_grad_accumulate_same_loss(self):
     random_suffix = generate_random_string()
     temp_dir = tempfile.gettempdir()
@@ -71,6 +74,7 @@ class GradientAccumulationTest(unittest.TestCase):
         "steps=20",
     ]
     # Run with gradient accumulation with accumulate_steps=10, per_device_batch=1 --> simulating per_device_batch=10
+    start_time = datetime.datetime.now()
     train_main(
         shared_maxtext_args
         + [
@@ -80,8 +84,12 @@ class GradientAccumulationTest(unittest.TestCase):
             "gradient_accumulation_steps=10",
         ]
     )
+    seconds_elapsed = (datetime.datetime.now() - start_time).total_seconds()
+    print(f"train with GA costs {seconds_elapsed} secs")
+    warnings.warn(f"DEUBG: train with GA costs {seconds_elapsed} secs")
 
     # Run without gradient accumulation with per_device_batch=10
+    start_time = datetime.datetime.now()
     train_main(
         shared_maxtext_args
         + [
@@ -91,8 +99,12 @@ class GradientAccumulationTest(unittest.TestCase):
             "gradient_accumulation_steps=1",
         ]
     )
+    seconds_elapsed = (datetime.datetime.now() - start_time).total_seconds()
+    print(f"train with regular costs {seconds_elapsed} secs")
+    warnings.warn(f"DEUBG: train with regular costs {seconds_elapsed} secs")
 
     # Assert losses roughly equal
+    start_time = datetime.datetime.now()
     with (
         open(run_accumulate_metrics_file, "rt", encoding="utf8") as accum_run,
         open(run_regular_metrics_file, "rt", encoding="utf8") as regular_run,
@@ -109,8 +121,12 @@ class GradientAccumulationTest(unittest.TestCase):
       )
       # Not identical due to an epsilon addition in loss denominator.
       np.testing.assert_allclose(accum_run_loss, regular_run_loss, rtol=0.01)
+    seconds_elapsed = (datetime.datetime.now() - start_time).total_seconds()
+    print(f"comparing losses costs {seconds_elapsed} secs")
+    warnings.warn(f"DEUBG: comparing losses costs {seconds_elapsed} secs")
 
     # Assert grad norms roughly equal
+    start_time = datetime.datetime.now()
     with (
         open(run_accumulate_metrics_file, "rt", encoding="utf8") as accum_run,
         open(run_regular_metrics_file, "rt", encoding="utf8") as regular_run,
@@ -127,8 +143,12 @@ class GradientAccumulationTest(unittest.TestCase):
       )
       # Not identical due to an epsilon addition in loss denominator.
       np.testing.assert_allclose(accum_run_grad_norm, regular_run_grad_norm, rtol=0.01)
+    seconds_elapsed = (datetime.datetime.now() - start_time).total_seconds()
+    print(f"comparing grad norms {seconds_elapsed} secs")
+    warnings.warn(f"DEUBG: comparing grad norms costs {seconds_elapsed} secs")
 
     # Assert per device tflops are the same (10x smaller microbatch size, but 10x more microbatches)
+    start_time = datetime.datetime.now()
     with (
         open(run_accumulate_metrics_file, "rt", encoding="utf8") as accum_run,
         open(run_regular_metrics_file, "rt", encoding="utf8") as regular_run,
@@ -144,6 +164,9 @@ class GradientAccumulationTest(unittest.TestCase):
           flush=True,
       )
       np.testing.assert_equal(accum_device_tflops, regular_device_tflops)
+    seconds_elapsed = (datetime.datetime.now() - start_time).total_seconds()
+    print(f"comparing tflops {seconds_elapsed} secs")
+    warnings.warn(f"DEUBG: comparing tflops costs {seconds_elapsed} secs")
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only
