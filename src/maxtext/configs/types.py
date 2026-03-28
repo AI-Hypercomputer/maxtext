@@ -983,7 +983,17 @@ class Tokenizer(BaseModel):
   )
   num_vocab_tiling: int = Field(
       1,
-      description="Enables memory-saving optimization by tiling cross-entropy loss computation. >1 to enable.",
+      description=(
+          "Enables memory-saving optimization by tiling cross-entropy loss"
+          " computation along the vocabulary axis. >1 to enable."
+      ),
+  )
+  num_batch_seq_tiling: int = Field(
+      1,
+      description=(
+          "Enables memory-saving optimization by tiling cross-entropy loss"
+          " computation along the batch-sequence axis. >1 to enable."
+      ),
   )
 
 
@@ -2503,12 +2513,23 @@ class MaxTextConfig(
         )
       if self.quantization:
         raise ValueError("Quantization is not supported with 'explicit' sharding.")
+    if self.vocab_size % self.num_vocab_tiling != 0:
+      raise ValueError(
+          "vocab_size should be divisible by the number of vocab tiles."
+      )
     if (
         self.per_device_batch_size > 0
-        and (self.per_device_batch_size * self.max_target_length) % self.num_vocab_tiling != 0
+        and (self.per_device_batch_size * self.max_target_length)
+        % self.num_batch_seq_tiling
+        != 0
     ):
-      raise ValueError("Per device batch size times sequence length should be divisible by the number of vocab tiles.")
-    if self.num_vocab_tiling > 1 and self.enable_nnx:
+      raise ValueError(
+          "Per device batch size times sequence length should be divisible by"
+          " the number of batch tiles."
+      )
+    if (
+        self.num_vocab_tiling > 1 or self.num_batch_seq_tiling > 1
+    ) and self.enable_nnx:
       raise ValueError("We currently don't support vocab tiling on NNX module.")
     if self.context_parallel_size > 1 and self.context_parallel_strategy.lower() == "ring":
       if "gpu" not in self.hardware:
