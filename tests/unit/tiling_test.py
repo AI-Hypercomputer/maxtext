@@ -42,7 +42,7 @@ def compute_loss_linen(intermediate_outputs, logits, data, config, model, params
   """
   A loss function wrapper that deals with both vocab tiling or non-vocab tiling cases
   """
-  if config.num_vocab_tiling > 1:
+  if config.num_batch_seq_tiling > 1:
     hidden_state_key = ("intermediates", "decoder", "hidden_states")
     hidden_states = maxtext_utils.get_nested_value(intermediate_outputs, hidden_state_key)[0]
     total_loss, _ = vocab_tiling_linen_loss(hidden_states, data, config, model, params, is_train)
@@ -206,7 +206,7 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
         base_num_decoder_layers=0,
         dtype="float32",
         matmul_precision="high",
-        num_vocab_tiling=1,
+        num_batch_seq_tiling=1,
         z_loss_multiplier=1e-4,  # Enable z-loss
     )
     quant_non_tiling = quantizations.configure_quantization(cfg_non_tiling)
@@ -242,7 +242,7 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
         base_num_decoder_layers=0,
         dtype="float32",
         matmul_precision="high",
-        num_vocab_tiling=4,
+        num_batch_seq_tiling=4,
         z_loss_multiplier=1e-4,  # Enable z-loss
     )
     loss_tiling, grads_tiling = self.get_grads(cfg_tiling, params, data)
@@ -273,7 +273,7 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
         base_num_decoder_layers=0,
         dtype="float32",
         matmul_precision="high",
-        num_vocab_tiling=1,
+        num_batch_seq_tiling=1,
     )
     quant_non_tiling = quantizations.configure_quantization(cfg_non_tiling)
     devices_array_non_tiling = maxtext_utils.create_device_mesh(cfg_non_tiling)
@@ -308,7 +308,7 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
         base_num_decoder_layers=0,
         dtype="float32",
         matmul_precision="high",
-        num_vocab_tiling=4,
+        num_batch_seq_tiling=4,
     )
     loss_tiling, grads_tiling = self.get_grads(cfg_tiling, params, data)
     # Loss correctness test
@@ -337,7 +337,7 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
         base_num_decoder_layers=0,
         dtype="float32",
         matmul_precision="high",
-        num_vocab_tiling=1,
+        num_batch_seq_tiling=1,
     )
 
     quant_non_tiling = quantizations.configure_quantization(cfg_non_tiling)
@@ -372,7 +372,7 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
         base_num_decoder_layers=0,
         dtype="float32",
         matmul_precision="high",
-        num_vocab_tiling=4,
+        num_batch_seq_tiling=4,
     )
     loss_tiling, grads_tiling = self.get_grads(cfg_tiling, params, data)
 
@@ -399,7 +399,7 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
         base_num_decoder_layers=0,
         dtype="float32",
         matmul_precision="high",
-        num_vocab_tiling=1,
+        num_batch_seq_tiling=1,
     )
     quant_non_tiling = quantizations.configure_quantization(cfg_non_tiling)
     devices_array_non_tiling = maxtext_utils.create_device_mesh(cfg_non_tiling)
@@ -435,7 +435,7 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
         dtype="float32",
         matmul_precision="high",
         ici_data_parallelism=4,
-        num_vocab_tiling=4,
+        num_batch_seq_tiling=4,
     )
     loss_tiling, grads_tiling = self.get_grads(cfg_tiling, params, data)
     # Loss correctness test
@@ -463,7 +463,7 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
         base_num_decoder_layers=0,
         dtype="float32",
         matmul_precision="high",
-        num_vocab_tiling=1,
+        num_batch_seq_tiling=1,
     )
     quant_non_tiling = quantizations.configure_quantization(cfg_non_tiling)
     devices_array_non_tiling = maxtext_utils.create_device_mesh(cfg_non_tiling)
@@ -499,7 +499,7 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
         dtype="float32",
         matmul_precision="high",
         ici_tensor_parallelism=4,
-        num_vocab_tiling=4,
+        num_batch_seq_tiling=4,
     )
     loss_tiling, grads_tiling = self.get_grads(cfg_tiling, params, data)
     # Loss correctness test
@@ -529,7 +529,7 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
         packing=False,
         dtype="float32",
         matmul_precision="high",
-        num_vocab_tiling=1,
+        num_batch_seq_tiling=1,
     )
     quant_non_tiling = quantizations.configure_quantization(cfg_non_tiling)
     devices_array_non_tiling = maxtext_utils.create_device_mesh(cfg_non_tiling)
@@ -567,7 +567,7 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
         packing=False,
         dtype="float32",
         matmul_precision="high",
-        num_vocab_tiling=4,
+        num_batch_seq_tiling=4,
     )
     loss_tiling, grads_tiling = self.get_grads(cfg_tiling, params, data)
 

@@ -194,9 +194,34 @@ def validate_expert_shard_attention_option(expert_shard_attention_option: str) -
     )
 
 
-def validate_vocab_tiling(num_vocab_tiling: int, per_device_batch_size: int, max_target_length: int, enable_nnx: bool):
-  if (per_device_batch_size * max_target_length) % num_vocab_tiling != 0:
-    raise ValueError("Per device batch size times sequence length should be divisible by the number of vocab tiles.")
+def validate_batch_seq_tiling(
+    num_batch_seq_tiling: int,
+    per_device_batch_size: int,
+    max_target_length: int,
+    enable_nnx: bool,
+):
+  if (per_device_batch_size * max_target_length) % num_batch_seq_tiling != 0:
+    raise ValueError(
+        "Per device batch size times sequence length should be divisible by the"
+        " number of batch seq tiles."
+    )
+  if (
+      num_batch_seq_tiling > 1 and enable_nnx
+  ):  # TODO (chengnuojin) enable vocab tiling on NNX after NNX migration
+    raise ValueError(
+        "We currently don't support batch seq tiling on NNX module."
+    )
+
+
+def validate_vocab_tiling(
+    num_vocab_tiling: int,
+    vocab_size: int,
+    enable_nnx: bool,
+):
+  if vocab_size % num_vocab_tiling != 0:
+    raise ValueError(
+        "vocab_size should be divisible by the number of vocab tiles."
+    )
   if num_vocab_tiling > 1 and enable_nnx:  # TODO (chengnuojin) enable vocab tiling on NNX after NNX migration
     raise ValueError("We currently don't support vocab tiling on NNX module.")
 
@@ -240,8 +265,16 @@ def validate_keys(keys):
   validate_model_call_mode(keys["model_call_mode"])
   validate_prefill_and_target_lengths(keys["max_prefill_predict_length"], keys["max_target_length"])
   validate_rope_type(keys["rope_type"])
+  validate_batch_seq_tiling(
+      keys["num_batch_seq_tiling"],
+      keys["per_device_batch_size"],
+      keys["max_target_length"],
+      keys["enable_nnx"],
+  )
   validate_vocab_tiling(
-      keys["num_vocab_tiling"], keys["per_device_batch_size"], keys["max_target_length"], keys["enable_nnx"]
+      keys["num_vocab_tiling"],
+      keys["vocab_size"],
+      keys["enable_nnx"],
   )
   if keys["enable_rampup_batch_size"]:
     validate_rampup_batch_size(

@@ -586,10 +586,12 @@ num_slices: -1
 
 # Vocab Tiling Configs
 # Enables a memory-saving optimization by computing the cross-entropy loss in chunks.
-# The logits are tiled into `num_vocab_tiling` parts along the batch-sequence axis,
-# reducing peak memory usage. This is highly recommended for models with large
-# vocabularies (e.g., Gemma). Set to a value greater than 1 to enable.
+# The logits are tiled into `num_vocab_tiling` parts along the vocabulary axis,
+# and `num_batch_seq_tiling` parts along the batch-sequence axis, reducing peak memory usage.
+# This is highly recommended for models with large vocabularies (e.g., Gemma).
+# Set to a value greater than 1 to enable.
 num_vocab_tiling: 1
+num_batch_seq_tiling: 1
 
 # Tokenizer
 vocab_size: 32_000 # powers of 2 for sharding
