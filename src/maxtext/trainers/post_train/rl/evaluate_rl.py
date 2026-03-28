@@ -130,26 +130,29 @@ def score_responses(tmvp_config, question, responses, answer):
 
     # Check exact correctness
     try:
-      # Fix LaTeX escaping issues for both ground truth and extracted answer
-      norm_answer = utils_rl.fix_latex_escaping(answer)
-      norm_extracted = utils_rl.fix_latex_escaping(extracted_response)
-      # Normalize Normalize for certain datasets and parse
-      if "DAPO" in tmvp_config.dataset_name or "OpenMathInstruct" in tmvp_config.dataset_name:
-        norm_extracted = utils_rl.normalize_final_answer(norm_extracted).strip()
-        norm_answer = utils_rl.normalize_final_answer(answer).strip()
-      is_correct = utils_rl.math_verify_func([utils_rl.boxed(norm_answer)], [utils_rl.boxed(norm_extracted)])[0] > 0.1
+      #extracted_response = utils_rl.process_answer(question, extracted_response, question_type)
+      for acceptable_answer in answer:
+        # Fix LaTeX escaping issues for both ground truth and extracted answer
+        norm_answer = utils_rl.fix_latex_escaping(acceptable_answer)
+        norm_extracted = utils_rl.fix_latex_escaping(extracted_response)
+        # Normalize Normalize for certain datasets and parse
+        if any(name in tmvp_config.dataset_name for name in ["DAPO", "OpenMathInstruct", "OpenR1-Math-220k"]):
+          norm_extracted = utils_rl.normalize_final_answer(norm_extracted).strip()
+          norm_answer = utils_rl.normalize_final_answer(norm_answer).strip()
+        is_correct = utils_rl.math_verify_func([utils_rl.boxed(norm_answer)], [utils_rl.boxed(norm_extracted)])[0] > 0.1
+        if is_correct:
+          break
+
       if tmvp_config.debug.rl:
-        # is_correct is a tuple, if first value is 1.0 means it's a match;
-        # 0.0 means a mismatch. e.g. (0.0, (['3', '3'], ['3/5', '\\frac{3}{5}']))
         max_logging.log(f"Result is_correct: {is_correct}")
 
-      val_extracted = parse(utils_rl.boxed(norm_extracted))
-      val_answer = parse(utils_rl.boxed(norm_answer))
+      #val_extracted = parse(utils_rl.boxed(norm_extracted))
+      #val_answer = parse(utils_rl.boxed(norm_answer))
 
       # Check partial correctness if values can be extracted (within 10%)
-      if val_extracted and val_answer:
-        ratio = (val_extracted[0] + utils_rl.EPSILON) / (val_answer[0] + utils_rl.EPSILON)
-        is_partially_correct = 0.9 <= ratio <= 1.1
+      #if val_extracted and val_answer:
+      #  ratio = (val_extracted[0] + utils_rl.EPSILON) / (val_answer[0] + utils_rl.EPSILON)
+      #  is_partially_correct = 0.9 <= ratio <= 1.1
 
     except Exception as e:
       if tmvp_config.debug.rl:
@@ -198,6 +201,7 @@ def evaluate(
   for batch in tqdm(dataset):
     answers = batch["answer"]
     questions = batch["question"]
+    questions_type = batch["question_type"]
     prompts = batch["prompts"]
 
     # Generate responses for all prompts in the batch
@@ -209,7 +213,7 @@ def evaluate(
     )
 
     # Score each question-answer pair
-    for question, responses, answer in zip(questions, multiple_call_responses, answers):
+    for question, question_type, responses, answer in zip(questions, questions_type, multiple_call_responses, answers):
       is_correct, is_partially_correct, has_correct_format = score_responses(
           tmvp_config=tmvp_config,
           question=question,

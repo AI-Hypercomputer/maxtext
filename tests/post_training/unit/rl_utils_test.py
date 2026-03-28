@@ -109,6 +109,101 @@ class TestScoreResponses(unittest.TestCase):
     self.assertTrue(is_partially_correct)
     self.assertFalse(has_correct_format)
 
+  @pytest.mark.cpu_only
+  def test_for_mcq_value_with_exact_match(self):
+    is_correct, is_partially_correct, has_correct_format = evaluate_rl.score_responses(
+        tmvp_config=self.config,
+        question=(
+            r"What is the quantity of the item? "
+            r"(A) $2 \frac{1}{3}$ (B) $3 \frac{1}{3}$ "
+            r"(C) $1 \frac{2}{3}$ (D) $1 \frac{1}{3}$ (E) 2"
+        ),
+        responses=["<reasoning>The answer is 3\frac{1}{3}.<answer>3\frac{1}{3}</answer>"],
+        answer="3\frac{1}{3}",
+    )
+    self.assertTrue(is_correct)
+    self.assertTrue(is_partially_correct)
+    self.assertFalse(has_correct_format)
+
+  @pytest.mark.cpu_only
+  def test_for_mcq_option_with_exact_match(self):
+    is_correct, is_partially_correct, has_correct_format = evaluate_rl.score_responses(
+        tmvp_config=self.config,
+        question=(
+            r"What is the quantity of the item? "
+            r"(A) $2 \frac{1}{3}$ (B) $3 \frac{1}{3}$ "
+            r"(C) $1 \frac{2}{3}$ (D) $1 \frac{1}{3}$ (E) 2"
+        ),
+        responses=["<reasoning>The answer is B.<answer>B</answer>"],
+        answer="B",
+    )
+    self.assertTrue(is_correct)
+    self.assertTrue(is_partially_correct)
+    self.assertFalse(has_correct_format)
+
+  @pytest.mark.cpu_only
+  def test_for_mcq_when_model_responds_with_value(self):
+    is_correct, is_partially_correct, has_correct_format = evaluate_rl.score_responses(
+        tmvp_config=self.config,
+        question=(
+            r"What is the quantity of the item? "
+            r"(A) $2 \frac{1}{3}$ (B) $3 \frac{1}{3}$ "
+            r"(C) $1 \frac{2}{3}$ (D) $1 \frac{1}{3}$ (E) 2"
+        ),
+        responses=["<reasoning>The answer is 3\frac{1}{3}.<answer>3\frac{1}{3}</answer>"],
+        answer="B",
+    )
+    self.assertTrue(is_correct)
+    self.assertTrue(is_partially_correct)
+    self.assertFalse(has_correct_format)
+
+  @pytest.mark.cpu_only
+  def test_for_mcq_when_model_responds_with_option(self):
+    is_correct, is_partially_correct, has_correct_format = evaluate_rl.score_responses(
+        tmvp_config=self.config,
+        question=(
+            r"What is the quantity of the item? "
+            r"(A) $2 \frac{1}{3}$ (B) $3 \frac{1}{3}$ "
+            r"(C) $1 \frac{2}{3}$ (D) $1 \frac{1}{3}$ (E) 2"
+        ),
+        responses=["<reasoning>The answer is B.<answer>B</answer>"],
+        answer="3\frac{1}{3}",
+    )
+    self.assertTrue(is_correct)
+    self.assertTrue(is_partially_correct)
+    self.assertFalse(has_correct_format)
+
+class TestProcessAnswer(unittest.TestCase):
+  @pytest.mark.cpu_only
+  def test_for_mcq(self):
+    self.assertEqual(len(utils_rl.process_mcq("(A) 1\n(B) 2\n(C) 3\n", "B")), 2)
+    self.assertEqual(len(utils_rl.process_mcq("A. 1\nB. 2\n(C) 3\n", "B")), 2)
+    self.assertEqual(len(utils_rl.process_mcq("$\\textbf{(A)}~\\frac{1}{24}\qquad\\textbf{(B)}~\\frac{1}{12}$", "B")), 2)
+    self.assertEqual(len(utils_rl.process_mcq("$(\mathrm {A}) \ 1 \qquad (\mathrm {B}) \ 2$", "B")), 2)
+
+class TestMathVerifyFunc(unittest.TestCase):
+  @pytest.mark.cpu_only
+  def test_support_for_relational(self):
+    self.assertEqual(utils_rl.math_verify_func(["$1 < x < 2$"], ["$(1,2)$"])[0], 1.0)
+
+  @pytest.mark.cpu_only
+  def test_ordered_tuples(self):
+    self.assertEqual(utils_rl.math_verify_func(["${1,2,3}$"], ["${3,2,1}$"])[0], 1.0)
+    self.assertEqual(utils_rl.math_verify_func(["$1,2,3$"], ["${3,2,1}$"])[0], 1.0)
+    self.assertEqual(utils_rl.math_verify_func(["$(1,2,3)$"], ["${3,2,1}$"])[0], 0.0)
+
+  @pytest.mark.cpu_only
+  def test_multiple_boxed(self):
+    self.assertEqual(utils_rl.math_verify_func(["$\\boxed{1},\\boxed{2}$"], ["${1,2}$"])[0], 1.0)
+
+  @pytest.mark.cpu_only
+  def test_list_of_numbers(self):
+    self.assertEqual(utils_rl.math_verify_func(["$1$ and $2$ and $3$"], ["$1,2,3$"])[0], 1.0)
+
+  @pytest.mark.cpu_only
+  def test_string_extraction(self):
+    self.assertEqual(utils_rl.math_verify_func(["$B$", "$B$"])[0], 1.0)
+
 
 class TestNormalizeFinalAnswer(unittest.TestCase):
   """Tests for utils_rl.normalize_final_answer."""
