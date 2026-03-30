@@ -37,7 +37,7 @@ _JAX_COMPILATION_CACHE_DIR = "/tmp/jax_cache"
 # Flags
 FLAGS = flags.FLAGS
 _XPROF = flags.DEFINE_bool('xprof', False, 'xprof')
-_RAND_INIT = flags.DEFINE_bool('rand_init', False, 'Whether to use random initialization instead of loading from checkpoint, for faster testing.')  
+_RAND_INIT = flags.DEFINE_bool('rand_init', True, 'Whether to use random initialization instead of loading from checkpoint, for faster testing.')  
 
 def _setup_jax_compilation_cache():
   jax_config.update("jax_compilation_cache_dir", _JAX_COMPILATION_CACHE_DIR)
@@ -357,7 +357,7 @@ class MaxTextToVLLMConverter:
           e, d_inner, d_model = w0.shape
           # Chunk-level interleave to match vLLM TP sharding:
           # layout: [gate_chunk0, up_chunk0, gate_chunk1, up_chunk1, ...]
-          num_chunks = 2  # tensor_parallel_size for vLLM
+          num_chunks = 4  # tensor_parallel_size for vLLM
           chunk_size = d_inner // num_chunks
           gate_chunks = w0.reshape(e, num_chunks, chunk_size, d_model)
           up_chunks = w1.reshape(e, num_chunks, chunk_size, d_model)
@@ -446,9 +446,9 @@ def main():
   llm = LLM(
     "Qwen/Qwen3-30B-A3B",
     max_model_len=16,
-    # tensor_parallel_size=4,
-    tensor_parallel_size=2,
-    data_parallel_size=2,
+    tensor_parallel_size=4,
+    # tensor_parallel_size=2,
+    # data_parallel_size=2,
     gpu_memory_utilization=0.65,
     # load_format="dummy",
     async_scheduling=False,
@@ -486,8 +486,8 @@ def main():
       weight_array = weight.value if hasattr(weight, 'value') else weight
       dst_sharding = llm_state[key].sharding
       print(f"Assigning {key}: src shape={weight_array.shape}, src sharding={weight_array.sharding}; dst shape={llm_state[key].shape}, dst sharding={dst_sharding}")
-      # llm_state[key] = _get_reshard_fn(dst_sharding)(weight_array)
-      llm_state[key] = jax.device_put(np.asarray(weight_array), dst_sharding)
+      llm_state[key] = _get_reshard_fn(dst_sharding)(weight_array)
+      # llm_state[key] = jax.device_put(np.asarray(weight_array), dst_sharding)
     jax.effects_barrier()  # wait for all on-device reshards to finish
 
 
