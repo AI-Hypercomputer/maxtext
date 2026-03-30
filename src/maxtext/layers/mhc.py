@@ -28,7 +28,7 @@ from maxtext.layers.normalizations import RMSNorm
 def get_functions(expansion_rate: int):
   """Creates functions to broadcast a single feature stream into multiple
 
-  parallel paths (expand) and aggregate them back (reduce).
+  parallel paths (expand) and aggregate them back (reduce)
   """
 
   def expand(x: Array):
