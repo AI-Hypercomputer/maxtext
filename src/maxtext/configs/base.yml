@@ -61,10 +61,10 @@ enable_continuous_checkpointing: False
 enable_single_replica_ckpt_restoring: False
 
 # Subdirectory to move checkpoints to before deletion. For example: ".todelete"
-checkpoint_todelete_subdir: ""
+checkpoint_todelete_subdir: None
 
-# Full path to move checkpoints to before deletion.
-checkpoint_todelete_full_path: ""
+# Full path to move checkpoints to before deletion. For example: "/_trash"
+checkpoint_todelete_full_path: None
 
 force_unroll: False # during generate_param_only_checkpoint should we unroll the loop?
 
