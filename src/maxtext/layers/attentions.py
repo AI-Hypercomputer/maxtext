@@ -974,8 +974,6 @@ class Attention(nnx.Module):
 
     md = rpa_metadata
 
-    num_kv_pages_per_block = self.config.pagedattn_num_kv_pages_per_block
-    num_queries_per_block = self.config.pagedattn_num_queries_per_block
     output, kv_cache = rpa_ops(
         self.mesh,
         query,
@@ -992,8 +990,6 @@ class Attention(nnx.Module):
         q_scale,
         k_scale,
         v_scale,
-        num_kv_pages_per_block=num_kv_pages_per_block if num_kv_pages_per_block > 0 else None,
-        num_queries_per_block=num_queries_per_block if num_queries_per_block > 0 else None,
     )
     return kv_cache, output
 

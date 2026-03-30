@@ -1664,6 +1664,8 @@ class RLDataset(BaseModel):
   test_batch_start_index: int = Field(0, description="Start index for the test dataset")
   train_fraction: float = Field(1.0, description="Fraction of the dataset to be used for training.")
   micro_batch_size: int = Field(-1, description="Micro batch size for rollout and training.")
+  train_micro_batch_size: int = Field(-1, description="Micro batch size for training.")
+  rollout_micro_batch_size: int = Field(-1, description="Micro batch size for rollout.")
 
 
 class RLEvaluation(BaseModel):

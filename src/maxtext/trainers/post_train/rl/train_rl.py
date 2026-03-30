@@ -446,6 +446,8 @@ def create_rl_components(
 
   # Set up micro batching
   micro_batch_size = None if trainer_config.micro_batch_size == -1 else trainer_config.micro_batch_size
+  train_micro_batch_size= micro_batch_size if trainer_config.train_micro_batch_size == -1 else trainer_config.train_micro_batch_size
+  rollout_micro_batch_size = micro_batch_size if trainer_config.rollout_micro_batch_size == -1 else trainer_config.rollout_micro_batch_size
 
   # Setup metrics logging
   metrics_logging_options = metrics_logger.MetricsLoggerOptions(
@@ -495,8 +497,8 @@ def create_rl_components(
           eval_every_n_steps=trainer_config.eval_interval,
           max_steps=max_train_steps,
           mini_batch_size=trainer_config.batch_size,
-          train_micro_batch_size=micro_batch_size,
-          rollout_micro_batch_size=micro_batch_size,
+          train_micro_batch_size=train_micro_batch_size,
+          rollout_micro_batch_size=rollout_micro_batch_size,
           metrics_logging_options=metrics_logging_options,
           profiler_options=profiler_options,
           checkpoint_root_directory=trainer_config.checkpoint_dir,
@@ -619,6 +621,13 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
   model_tokenizer = AutoTokenizer.from_pretrained(trainer_config.tokenizer_path)
 
   train_dataset, test_dataset = prepare_datasets(trainer_config, model_tokenizer)
+
+  # ckpt_manager = ocp.CheckpointManager(trainer_config.checkpoint_dir)
+  # latest_step = ckpt_manager.latest_step()
+  # ckpt_manager.close()
+  # if latest_step is not None and latest_step > 0:
+  #   max_logging.log(f"Fast-forwarding train_dataset by {latest_step} steps to resume from checkpoint.")
+  #   train_dataset = train_dataset.drop(latest_step)
 
   if trainer_config.debug.rl:
     for i, ele in enumerate(train_dataset):
