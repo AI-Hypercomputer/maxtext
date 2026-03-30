@@ -1173,11 +1173,12 @@ class CircularPipeline(PipelineBase):
       self,
       repeat_weights,
       physical_partition_spec,
-      axes_to_gather=("fsdp", "fsdp_transpose", "expert"),  # three major FSDP-like axes
+      axes_to_gather=("fsdp", "fsdp_transpose", "context", "expert"),
+      # TODO (chengnuojin) set use_shardmap=true after JAX >= 10.0.0 and use all_gather(..., to='invarying')
       use_shardmap=False,  # using shardmap produces additional reduce-scatter in backward pass
   ):
     """Executes the FSDP-like all-gathers to fully materialize a block of weights for the BSW."""
-    axes_to_remove = ["fsdp", "fsdp_transpose"]
+    axes_to_remove = ["fsdp", "fsdp_transpose", "context"]
     bsw_pps = pipeline_utils.derive_stage_weight_partition_specs(physical_partition_spec, axes_to_remove)
 
     def _from_repeat_weights_to_bsw_shardmap(
@@ -1244,20 +1245,7 @@ class CircularPipeline(PipelineBase):
       return _from_repeat_weights_to_bsw_shardmap(repeat_weights, physical_partition_spec, axes_to_gather=axes_to_gather)
     return _from_repeat_weights_to_bsw_hint(repeat_weights)
 
-  def both_weight_prefetching(self, weights, physical_partition_spec, loop_iteration):
-    """Triggers asynchronous FSDP-like all-gathers for the current and next pipeline steps.
-
-    By gathering weights for `loop_iteration + 1` right now, the network communication
-    can overlap with the compute happening in `loop_iteration`. The dual-buffers
-    are returned grouped in an explicit `jax.ad_checkpoint` to strictly control memory.
-    """
-    cur_repeat_weights = self.from_all_variables_to_repeat_weights(weights, loop_iteration)
-    nxt_repeat_weights = self.from_all_variables_to_repeat_weights(weights, loop_iteration + 1)
-    bsw_0 = self.from_repeat_weights_to_bsw(cur_repeat_weights, physical_partition_spec)
-    bsw_1 = self.from_repeat_weights_to_bsw(nxt_repeat_weights, physical_partition_spec)
-    return bsw_0, bsw_1
-
-  def one_weight_prefetching(self, weights, physical_partition_spec, loop_iteration):
+  def weight_prefetching(self, weights, physical_partition_spec, loop_iteration):
     """Triggers asynchronous FSDP-like all-gathers for the next pipeline steps.
 
     By gathering weights for `loop_iteration + 1` right now, the network communication
@@ -1351,7 +1339,6 @@ class CircularPipeline(PipelineBase):
       segment_idx = None
 
     loop_state, bsw = self.init_states(inputs)
-    weights = self.layers.variables
     physical_partition_spec = logical_to_mesh(
         logical_partition_spec, mesh=self.mesh, rules=self.config.logical_axis_rules
     )
@@ -1388,41 +1375,34 @@ class CircularPipeline(PipelineBase):
 
     # base scannable function used twice for real and bubble runs
     base_scannable = functools.partial(
-        pipeline_utils.create_rematerialized_pipeline_stage,
+        pipeline_utils.create_pipeline_stage,
         deterministic=deterministic,
         model_mode=model_mode,
         logical_partition_spec=logical_partition_spec,
         physical_partition_spec=physical_partition_spec,
         positions=positions,
         segment_ids=segment_ids,
-        pipeline_weights=weights,
     )
 
     run_one_repeat_scannable = base_scannable(length=self.config.num_pipeline_microbatches)
-    # run_one_repeat_scannable = nn.remat(
-    #   run_one_repeat_scannable,
-    #   prevent_cse=True,
-    #   policy=self.get_pipeline_remat_policy()
-    # )
     run_bubbles_scannable = base_scannable(length=bubble_iterations)
-    # run_bubbles_scannable = nn.remat(
-    #   run_bubbles_scannable,
-    #   prevent_cse=True,
-    #   policy=self.get_pipeline_remat_policy()
-    # )
 
     run_repeats_scanned = pipeline_utils.create_flax_pipeline_scan(
         pipeline_stage_fn=run_one_repeat_scannable,
         length=self.config.num_pipeline_repeats,
+        remat_policy=self.get_pipeline_remat_policy(),
         use_scan=self.config.scan_pipeline_repeats,
     )
     run_bubbles_scanned = pipeline_utils.create_flax_pipeline_scan(
         pipeline_stage_fn=run_bubbles_scannable,
         length=1,
+        remat_policy=self.get_pipeline_remat_policy(),
         use_scan=self.config.scan_pipeline_repeats,
     )
-    (loop_state, w_curr), _ = run_repeats_scanned(self, (loop_state, bsw[0]))
-    (loop_state, _), _ = run_bubbles_scanned(self, (loop_state, w_curr))
+    initial_carry_repeats = (loop_state, bsw[0], self.layers.variables)
+    (loop_state, w_curr, pipeline_weights), _ = run_repeats_scanned(self, initial_carry_repeats)
+    initial_carry_bubbles = (loop_state, w_curr, pipeline_weights)
+    (loop_state, _, pipeline_weights), _ = run_bubbles_scanned(self, initial_carry_bubbles)
 
     final_output = self.realign_output_microbatches(loop_state["state_io"])
     final_output = jnp.reshape(

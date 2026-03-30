@@ -248,7 +248,7 @@ def create_gradient_accumulation_scan(
   return run_pipeline_microbatches_custom
 
 
-def create_rematerialized_pipeline_stage(
+def create_pipeline_stage(
     length,
     deterministic,
     model_mode,
@@ -256,16 +256,13 @@ def create_rematerialized_pipeline_stage(
     physical_partition_spec,
     positions,
     segment_ids,
-    pipeline_weights,
 ):
-  """Builds a memory-checkpointed execution block for a single pipeline stage.
+  """Builds an execution block for a single pipeline stage.
 
   This function prepares the state for a specific chunk of pipeline execution by:
-  1. Prefetching the required weights for the current stage/loop iteration.
-  2. Executing `length` microbatches using either a memory-efficient `jax.lax.scan`
-     (if `scan_pipeline_iterations` is True) or an unrolled Python `for` loop.
-  3. Wrapping the entire stage block in `flax.linen.remat` to discard and recompute
-     activations during the backward pass based on the model's policy.
+  1. Prefetching the required weights (e.g., FSDP-gathered) for the current stage/loop iteration.
+  2. Executing `length` microbatches using a memory-efficient `jax.lax.scan` via a custom VJP
+     that manages collective communication overlap.
 
   Args:
     length: The number of microbatches to process in this stage.
@@ -275,14 +272,27 @@ def create_rematerialized_pipeline_stage(
     physical_partition_spec: Rules for physical device mesh mappings (used in prefetching).
     positions: Position IDs for the sequence.
     segment_ids: Segment/Attention routing IDs for the sequence.
-    pipeline_weights: The fully gathered pipeline weights explicitly passed via closure.
 
   Returns:
-    A function decorated with `nn.remat` that takes `(model, loop_state)` and returns
-    the updated `loop_state`.
+    A function that takes `(model, carry)` and returns the updated `carry` and `None` for the scan outputs.
   """
 
-  def execute_pipeline_stage_outer(model, loop_state_and_bsw):
+  def execute_pipeline_stage_flax(model, carry):
+    """
+    A non-pure Flax closure of the pipeline stage.
+
+    This function bridges the pure JAX custom VJP logic with Flax's object-oriented
+    lifting mechanisms. It unpacks the carry state and routes it through the pure VJP function.
+
+    Args:
+      model: CircularPipeline Flax linen model instance.
+      carry: A tuple containing (loop_state, w_curr, pipeline_weights).
+             - loop_state: The current execution state of the pipeline.
+             - w_curr: The gathered weights used for the current pipeline step.
+             - pipeline_weights: The fully sharded baseline weights.
+    """
+
+    loop_state, w_curr, pipeline_weights = carry
 
     scan_microbatches_fn = create_gradient_accumulation_scan(
         model=model,
@@ -292,71 +302,89 @@ def create_rematerialized_pipeline_stage(
         logical_partition_spec=logical_partition_spec,
     )
 
-    remat_weight_prefetching = model.one_weight_prefetching
-
+    # Establish a pure function boundary to allow for custom VJP definition
     @jax.custom_vjp
-    def execute_pipeline_stage(loop_state_and_bsw, pipeline_weights):
-      return execute_pipeline_stage_custom_fwd(loop_state_and_bsw, pipeline_weights)[0]
+    def execute_pipeline_stage_pure(loop_state, w_curr, pipeline_weights):
+      return execute_pipeline_stage_pure_fwd(loop_state, w_curr, pipeline_weights)[0]
 
-    def execute_pipeline_stage_custom_fwd(loop_state_and_bsw, pipeline_weights):
-      loop_state, w_curr = loop_state_and_bsw
-      # # Retrieve the specific weights needed for this pipeline chunk
-      w_next = remat_weight_prefetching(
+    def execute_pipeline_stage_pure_fwd(loop_state, w_curr, pipeline_weights):
+      # Prefetch FSDP-sharded weights for the upcoming pipeline repeat
+      w_next = model.weight_prefetching(
           pipeline_weights,
           physical_partition_spec,
           loop_state["loop_iteration"],
       )
+      # Construct a buffered sliding window (BSW) of weights.
+      # w_curr: Weights actively used for the current microbatch steps.
+      # w_next: Newly gathered weights that will be carried forward as the new w_curr.
       bsw = (w_curr, w_next)
-      p_remat_weight_prefetching = functools.partial(
-          remat_weight_prefetching,
+      # Bind arguments to the weight prefetching function to prepare it for linear transpose
+      p_weight_prefetching = functools.partial(
+          model.weight_prefetching,
           physical_partition_spec=physical_partition_spec,
           loop_iteration=loop_state["loop_iteration"],
       )
-      remat_weight_prefetching_t = jax.linear_transpose(
-          p_remat_weight_prefetching,
+      # Since weight gathering (all-gather) is a linear operation, we can derive its dual
+      # (reduce-scatter) via jax.linear_transpose. This avoids redundant forward passes
+      weight_prefetching_t = jax.linear_transpose(
+          p_weight_prefetching,
           pipeline_weights,
       )
-      (loop_state, bsw), scan_fn_vjp = jax.vjp(scan_microbatches_fn, loop_state, bsw, positions, segment_ids)
-      w_curr, w_next = bsw
-      return (loop_state, w_next), (scan_fn_vjp, remat_weight_prefetching_t)
+      # Execute the forward pass of the microbatches and generate its VJP.
+      # The VJP captures necessary checkpoints to evaluate gradients later.
+      (loop_state, bsw), scan_microbatches_vjp = jax.vjp(scan_microbatches_fn, loop_state, bsw, positions, segment_ids)
+      # Discard the old weights (w_curr) and advance w_next to act as the current weights in the next iteration
+      _, w_next = bsw
+      return (loop_state, w_next), (scan_microbatches_vjp, weight_prefetching_t)
 
-    def execute_pipeline_stage_custom_bwd(residuals, g_outputs):
+    def execute_pipeline_stage_pure_bwd(residuals, g_outputs):
+      # Unpack forward pass residuals (VJP closures) and the incoming output gradients
       g_loop_state, g_w_next = g_outputs
-      scan_fn_vjp, remat_weight_prefetching_t = residuals
+      scan_microbatches_vjp, weight_prefetching_t = residuals
+      # Initialize zero cotangents for w_curr, as it was consumed in the forward pass
       g_w_curr = jax.tree.map(jnp.zeros_like, g_w_next)
       g_bsw = (g_w_curr, g_w_next)
-      g_loop_state, g_bsw, _, _ = scan_fn_vjp((g_loop_state, g_bsw))
+      # Backpropagate gradients through the dual microbatch execution block
+      g_loop_state, g_bsw, _, _ = scan_microbatches_vjp((g_loop_state, g_bsw))
+      # Apply the linear transpose of the weight prefetch to execute the reduce-scatter
+      # This maps the gradients of the gathered weights back to the FSDP-sharded parameter space
       g_w_curr, g_w_next = g_bsw
-      (g_pipeline_weights,) = remat_weight_prefetching_t(g_w_next)
-      return (g_loop_state, g_w_curr), g_pipeline_weights
+      (g_pipeline_weights,) = weight_prefetching_t(g_w_next)
+      # Return gradients corresponding to the three original inputs of execute_pipeline_stage_pure
+      return g_loop_state, g_w_curr, g_pipeline_weights
 
-    execute_pipeline_stage.defvjp(execute_pipeline_stage_custom_fwd, execute_pipeline_stage_custom_bwd)
+    execute_pipeline_stage_pure.defvjp(execute_pipeline_stage_pure_fwd, execute_pipeline_stage_pure_bwd)
+    # Execute the pure pipeline stage. We unpack the two modified outputs (loop_state, w_next)
+    # and repack them alongside the unmodified pipeline_weights to maintain a consistent carry shape for nn.scan.
+    return (*execute_pipeline_stage_pure(loop_state, w_curr, pipeline_weights), pipeline_weights), None
 
-    return execute_pipeline_stage(loop_state_and_bsw, pipeline_weights), None
-
-  return execute_pipeline_stage_outer
+  return execute_pipeline_stage_flax
 
 
-def create_flax_pipeline_scan(pipeline_stage_fn, length, use_scan=True):
-  """Wraps the pipeline stage execution in a `flax.linen.scan`.
+def create_flax_pipeline_scan(pipeline_stage_fn, length, remat_policy, use_scan=True):
+  """Wraps the pipeline stage execution in `flax.linen.remat` and `flax.linen.scan`.
 
-  This lifts the pipeline stage function so it can be repeated sequentially over
-  the specified length. It safely handles Flax-specific state collections, ensuring
-  that metrics, intermediate values, and PRNG keys do not collide or overwrite
-  each other across the loop iterations.
+  This explicitly wraps the pipeline step in a gradient checkpointing policy
+  and then lifts it so it can be repeated sequentially over the specified length.
+  It safely handles Flax-specific state collections, ensuring that metrics, intermediate
+  values, and PRNG keys do not collide or overwrite each other across loop iterations.
 
   Args:
     pipeline_stage_fn: The function representing a single pipeline stage
-                       (usually created by `create_rematerialized_pipeline_stage`).
+                       (usually created by `create_pipeline_stage`).
+    remat_policy: The checkpointing policy used by `nn.remat` to manage activation memory.
     length: The total number of pipeline stages/repeats to scan over.
-    use_scan: Either scan over repeats or unroll the scan.
+    use_scan: Whether to use `jax.lax.scan` (True) or unroll the loop (False).
 
   Returns:
     A Flax scanned function that executes the full pipeline schedule.
   """
   unroll_length = 1 if use_scan else length
   return nn.scan(
-      pipeline_stage_fn,
+      nn.remat(
+          pipeline_stage_fn,
+          policy=remat_policy,
+      ),
       variable_axes={
           "summaries": 0,
           "aux_loss": 0,
