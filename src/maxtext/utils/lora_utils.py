@@ -418,77 +418,62 @@ def _patch_nnx_decoder_apply_layers_sequentially(model: nnx.Module) -> None:
   """Patches the NNX decoder's _apply_layers_sequentially to include Qwix specific logic."""
 
   def _apply_layers_sequentially_with_qwix(self, layers, x_in, *args, length: int, **kwargs):
-    """Runs the layer stack using nnx.scan with Qwix specific graph init and VJP downcasting."""
+    """Runs the layer stack using nnx.scan with Qwix specific graph init."""
     policy = self.get_remat_policy()
     prevent_cse = maxtext_utils.should_prevent_cse_in_remat(self.config)
-    graphdef, params, state = nnx.split(
-        layers, nnx.Param, ...
-    )  # state: the mutable state we carry (KV cache, RNGs, etc.)
+    graphdef, params, state = nnx.split(layers, nnx.Param, ...)
 
     scan_axis = self.config.param_scan_axis
     if scan_axis != 0:
-      # Move scan_axis to 0 so scan can iterate over it
-      params = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0), params)
+      params = jax.tree_util.tree_map(lambda x: jnp.moveaxis(x, scan_axis, 0), params)
 
-    layer_cls = layers.__class__
-    sig = inspect.signature(layer_cls.__call__)
+    sig = inspect.signature(layers.__class__.__call__)
     valid_kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters or "kwargs" in sig.parameters}
-    # During Qwix init (disable_quant_stats_update=True), params may be lazily
-    # created and the layer graphdef can grow. Allow graphdef refresh in that
-    # phase only. Keep scanned training path static for remat purity.
+    
     dynamic_graph_init = bool(getattr(self, "disable_quant_stats_update", False))
     updated_graphdef = [graphdef]
 
     def layer_fn(carry, scanned_vars):
-      # Unpack the sliced variables for THIS layer
       current_params, current_state = scanned_vars
 
       if self.config.parameter_memory_host_offload:
-        current_params = jax.tree.map(lambda x: jax.device_put(x, max_utils.device_space()), current_params)
+        current_params = jax.tree_util.tree_map(lambda x: jax.device_put(x, max_utils.device_space()), current_params)
 
-      # Merge using the SLICED state
       layer = nnx.merge(graphdef, current_params, current_state)
-
-      # Run the layer (Filter kwargs if using the solution from previous turn)
       layer_out = layer(carry, *args, **valid_kwargs)
-
       new_carry = layer_out[0] if isinstance(layer_out, tuple) else layer_out
 
-      # Qwix init: return updated params so graphdef can grow.
-      # In normal training, keep params unchanged to avoid extra memory use.
       new_graphdef, updated_params, updated_state = nnx.split(layer, nnx.Param, ...)
+      
       if dynamic_graph_init:
         updated_graphdef[0] = new_graphdef
         returned_params = updated_params
       else:
         returned_params = current_params
+        
       return new_carry, (returned_params, updated_state)
 
     layer_fn_wrapped = jax.checkpoint(layer_fn, policy=policy, prevent_cse=prevent_cse)
 
     def _ensure_scan_leading_axis(x):
-      # Promote scalars for scan axis compatibility.
-      if not hasattr(x, "shape"):
-        return x
-      if len(x.shape) == 0:
+      if not hasattr(x, "shape") or len(x.shape) == 0:
         return jnp.broadcast_to(x, (length,))
       return x
 
-    params = jax.tree.map(_ensure_scan_leading_axis, params)
-    state = jax.tree.map(_ensure_scan_leading_axis, state)
+    params = jax.tree_util.tree_map(_ensure_scan_leading_axis, params)
+    state = jax.tree_util.tree_map(_ensure_scan_leading_axis, state)
 
     final_carry, (scanned_params, scanned_other) = jax.lax.scan(layer_fn_wrapped, x_in, (params, state))
 
     if scan_axis != 0:
-      scanned_params = jax.tree.map(lambda x: jnp.moveaxis(x, 0, scan_axis), scanned_params)
+      scanned_params = jax.tree_util.tree_map(lambda x: jnp.moveaxis(x, 0, scan_axis), scanned_params)
 
     if dynamic_graph_init:
       return final_carry, nnx.merge(updated_graphdef[0], scanned_params, scanned_other)
-    else:
-      nnx.update(layers, nnx.State.merge(scanned_params, scanned_other))
-      return final_carry, layers
+      
+    nnx.update(layers, nnx.State.merge(scanned_params, scanned_other))
+    return final_carry, layers
 
-  # IMPORTANT: Patch the class so nnx.merge doesn't lose the patch
   model.decoder.__class__._apply_layers_sequentially = _apply_layers_sequentially_with_qwix  # pylint: disable=protected-access
 
 

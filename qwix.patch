@@ -1,5 +1,5 @@
 diff --git a/qwix/_src/flax_util.py b/qwix/_src/flax_util.py
-index 4ea5d80..7ae95d3 100644
+index 4ea5d80..17bb94b 100644
 --- a/qwix/_src/flax_util.py
 +++ b/qwix/_src/flax_util.py
 @@ -308,13 +308,13 @@ def unbox(maybe_boxed: Any) -> Any:
@@ -18,72 +18,54 @@ index 4ea5d80..7ae95d3 100644
    """Derives the partition spec from an existing spec.
  
    Args:
-@@ -330,21 +330,30 @@ def update_sharding(
+@@ -330,6 +330,8 @@ def update_sharding(
      The updated partition spec.
    """
    assert bool(split) + bool(merge) + bool(transpose) <= 1
 +  is_pspec = isinstance(spec, jax.sharding.PartitionSpec)
-+  spec_list = list(spec)
 +
    if split:
--    spec = [(a, None) if i in split else (a,) for i, a in enumerate(spec)]
--    spec = sum(spec, ())  # flatten the list of tuples.
-+    spec_list = [
-+        (a, None) if i in split else (a,) for i, a in enumerate(spec_list)
-+    ]
-+    spec_list = list(sum(spec_list, ()))  # flatten the list of tuples.
-   elif merge:
-     for i in merge:
--      spec = spec[: i + 1] + spec[i + 2 :]  # pytype: disable=unsupported-operands
-+      spec_list = spec_list[: i + 1] + spec_list[i + 2 :]
-   elif transpose:
--    spec = tuple(spec[i] if i is not None else None for i in transpose)
-+    spec_list = [
-+        spec_list[i] if i is not None else None for i in transpose
-+    ]
- 
-   if shape:
--    assert len(shape) == len(spec), f'{shape=} {spec=}'
-+    assert len(shape) == len(spec_list), f'{shape=} {spec_list=}'
+     spec = [(a, None) if i in split else (a,) for i, a in enumerate(spec)]
+     spec = sum(spec, ())  # flatten the list of tuples.
+@@ -344,6 +346,9 @@ def update_sharding(
      # For scales: remove sharding for dimensions of size 1.
--    spec = tuple(None if d == 1 else a for a, d in zip(spec, shape))
-+    spec_list = [None if d == 1 else a for a, d in zip(spec_list, shape)]
+     spec = tuple(None if d == 1 else a for a, d in zip(spec, shape))
  
--  return spec
 +  if is_pspec:
-+    return jax.sharding.PartitionSpec(*spec_list)
-+  return tuple(spec_list)
++    return jax.sharding.PartitionSpec(*spec)
++  
+   return spec
  
  
- def update_boxed(
-@@ -380,7 +389,7 @@ def update_boxed(
+@@ -380,10 +385,8 @@ def update_boxed(
      shape = boxed.unbox().shape
      for possible_field in ('names', 'mesh_axes', 'axes_types'):
        axes = getattr(boxed, possible_field, None)
 -      if isinstance(axes, (list, tuple)):
+-        axes = update_sharding(
+-            axes, shape=shape, split=split, merge=merge, transpose=transpose
+-        )
 +      if isinstance(axes, (list, tuple, jax.sharding.PartitionSpec)):
-         axes = update_sharding(
-             axes, shape=shape, split=split, merge=merge, transpose=transpose
-         )
-@@ -396,11 +405,13 @@ def update_boxed(
++        axes = update_sharding(axes, shape=shape, split=split, merge=merge, transpose=transpose)
+         boxed = dataclasses.replace(boxed, **{possible_field: axes})
+   elif isinstance(boxed, nnx.Variable):
+     if value is not None:
+@@ -396,10 +399,9 @@ def update_boxed(
      else:
        sharding_key = 'sharding_names'
      axes = metadata.get(sharding_key, None)
 -    if isinstance(axes, (list, tuple)):
 -      axes = update_sharding(
+-          axes, shape=shape, split=split, merge=merge, transpose=transpose
+-      )
++    
 +    if isinstance(axes, (list, tuple, jax.sharding.PartitionSpec)):
-+      updated_axes = update_sharding(
-           axes, shape=shape, split=split, merge=merge, transpose=transpose
-       )
--      boxed.set_metadata(sharding_key, axes)
-+      # Avoid mutating metadata unless sharding actually changed.
-+      if axes != updated_axes:
-+        boxed.set_metadata(sharding_key, updated_axes)
++      axes = update_sharding(axes, shape=shape, split=split, merge=merge, transpose=transpose)
+       boxed.set_metadata(sharding_key, axes)
    elif isinstance(boxed, jax.Array):  # not boxed.
      if value is not None:
-       boxed = value
 diff --git a/qwix/_src/providers/lora.py b/qwix/_src/providers/lora.py
-index e98c833..07be623 100644
+index e98c833..39ce3ef 100644
 --- a/qwix/_src/providers/lora.py
 +++ b/qwix/_src/providers/lora.py
 @@ -13,6 +13,7 @@
@@ -94,7 +76,7 @@ index e98c833..07be623 100644
  import string
  from typing import Any, Callable, Collection, Sequence
  import warnings
-@@ -189,29 +190,87 @@ class LoraProvider(ptq.PtqProvider):
+@@ -189,29 +190,68 @@ class LoraProvider(ptq.PtqProvider):
      if weight_name is None:  # rhs is not a weight.
        return res
  
@@ -107,25 +89,6 @@ index e98c833..07be623 100644
 +    (contract_lhs, contract_rhs) = dimension_numbers[0]
 +    (batch_lhs, batch_rhs) = dimension_numbers[1]
 +
-+    if len(rhs.shape) == 2 and not batch_rhs:
-+      # Standard LoRA path for ...a,ab->...b
-+      lora_a, lora_b = _get_or_create_lora_params(
-+          name=weight_name,
-+          rule=rule,
-+          a_shape=(rhs.shape[0], rule.rank),
-+          b_shape=(rule.rank, rhs.shape[1]),
-+          a_sharding_transpose=(0, None),
-+          b_sharding_transpose=(None, 1),
-+      )
-+
-+      if rule.dropout > 0:
-+        lhs = nnx.Dropout(rule.dropout, deterministic=False)(
-+            lhs, rngs=flax_util.make_rng('dropout')
-+        )
-+
-+      return res + lhs @ lora_a @ lora_b * (rule.alpha / rule.rank)
-+
-+    # General LoRA path for N-D kernels and batch dimensions.
 +    # Identify contracting, batch, and out axes for rhs.
 +    contract_rhs = tuple(contract_rhs)
 +    batch_rhs = tuple(batch_rhs)
