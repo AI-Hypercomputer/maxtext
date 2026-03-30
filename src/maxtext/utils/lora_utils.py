@@ -492,12 +492,57 @@ def _patch_nnx_decoder_apply_layers_sequentially(model: nnx.Module) -> None:
   model.decoder.__class__._apply_layers_sequentially = _apply_layers_sequentially_with_qwix  # pylint: disable=protected-access
 
 
+def _prepare_dummy_inputs() -> tuple[jnp.ndarray, jnp.ndarray]:
+  """Builds dummy decoder inputs used to materialize LoRA parameters."""
+  # Keep LoRA warmup as small as possible to minimize compile/memory overhead.
+  dummy_bs = 1
+  seq_len = 1
+  decoder_input_tokens = jnp.zeros((dummy_bs, seq_len), dtype=jnp.int32)
+  decoder_positions = jnp.zeros((dummy_bs, seq_len), dtype=jnp.int32)
+  return decoder_input_tokens, decoder_positions
+
+
+def _verify_lora_parameters(lora_model: nnx.Module, mt_config: pyconfig.HyperParameters) -> None:
+  """Validates that LoRA is active or that target modules were matched."""
+  from tunix.sft import utils as tunix_sft_utils  # pylint: disable=import-outside-toplevel
+
+  if tunix_sft_utils.is_lora_enabled(lora_model):
+    max_logging.log("LoRA verification: is_lora_enabled=True")
+    return
+
+  lora_module_path = _get_lora_module_path(mt_config)
+  compiled_module_path = re.compile(lora_module_path)
+  matched_module_paths = []
+  sample_module_paths = []
+
+  for path, _ in nnx.iter_modules(lora_model):
+    module_path = "/".join(str(p) for p in path)
+    if len(sample_module_paths) < 50:
+      sample_module_paths.append(module_path)
+    if compiled_module_path.search(module_path):
+      matched_module_paths.append(module_path)
+
+  if not matched_module_paths:
+    max_logging.log(
+        f"LoRA module_path='{lora_module_path}' did not match any weights. "
+        f"Sample module paths: {sample_module_paths}"
+    )
+    raise ValueError("LoRA enabled but no LoRA parameters found in decoder/model state.")
+
+  raise ValueError(
+      "LoRA module path matched target modules, but nnx.LoRAParam is still "
+      "missing. For Tunix PeftTrainer, LoRA params must be materialized before "
+      "trainer initialization, otherwise it falls back to full-model training. "
+      f"Sample matches: {matched_module_paths[:10]}"
+  )
+
+
 def apply_lora_to_model(
     model: nnx.Module, mesh: Optional[jax.sharding.Mesh], mt_config: pyconfig.HyperParameters
 ) -> nnx.Module:
   """Optionally applies LoRA/QLoRA to a MaxText model using Qwix."""
   # Skip Qwix LoRA if MaxText LoRA adapters are loaded
-  if hasattr(mt_config, "lora_input_adapters_path") and mt_config.lora_input_adapters_path:
+  if getattr(mt_config, "lora_input_adapters_path", None):
     max_logging.log("MaxText LoRA adapters loaded, skipping Qwix LoRA application")
     return model
 
@@ -511,11 +556,7 @@ def apply_lora_to_model(
   _patch_nnx_decoder_apply_layers_sequentially(model)
 
   model_rngs = getattr(model.decoder, "rngs", None)
-
-  dummy_bs = 1
-  seq_len = 1
-  decoder_input_tokens = jnp.zeros((dummy_bs, seq_len), dtype=jnp.int32)
-  decoder_positions = jnp.zeros((dummy_bs, seq_len), dtype=jnp.int32)
+  decoder_input_tokens, decoder_positions = _prepare_dummy_inputs()
 
   lora_model = qwix.apply_lora_to_model(
       model,
@@ -524,6 +565,7 @@ def apply_lora_to_model(
       decoder_positions=decoder_positions,
       rngs=model_rngs,
   )
+
   if mesh is not None:
     with mesh, nn_partitioning.axis_rules(mt_config.logical_axis_rules):
       graph_def, state = nnx.split(lora_model)
@@ -533,7 +575,6 @@ def apply_lora_to_model(
           nnx.get_partition_spec(state),
       )
       from tunix.rl import reshard  # pylint: disable=import-outside-toplevel
-
       state = reshard.reshard_pytree(state, dst_shardings)
       lora_model = nnx.merge(graph_def, state)
 
@@ -548,21 +589,7 @@ def apply_lora_to_model(
   finally:
     lora_model.set_attributes(disable_quant_stats_update=False, qwix_rngs=None)
 
-  # Verification
-  lora_module_path = _get_lora_module_path(mt_config)
-  compiled_module_path = re.compile(lora_module_path)
-  matched_module_paths = []
-  for path, _ in nnx.iter_modules(lora_model):
-    module_path = "/".join(str(p) for p in path)
-    if compiled_module_path.search(module_path):
-      matched_module_paths.append(module_path)
-
-  from tunix.sft import utils as tunix_sft_utils  # pylint: disable=import-outside-toplevel
-  if not tunix_sft_utils.is_lora_enabled(lora_model):
-      if not matched_module_paths:
-        max_logging.log(f"LoRA module_path='{lora_module_path}' did not match any weights.")
-        raise ValueError("LoRA enabled but no LoRA parameters found in decoder/model state.")
-      raise ValueError("LoRA module path matched target modules, but nnx.LoRAParam is still missing.")
+  _verify_lora_parameters(lora_model, mt_config)
 
   return lora_model
 
