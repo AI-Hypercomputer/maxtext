@@ -1,10 +1,10 @@
-# Copyright 2023-2026 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -32,6 +32,8 @@ Architecture Overview:
 3. **Tunix Integration**: We wrap the MaxText models in `TunixMaxTextAdapter` to expose
    a standard interface (call signature) that the Tunix `DistillationTrainer` expects.
 """
+
+import inspect
 from typing import Sequence, Callable
 from absl import app
 from flax import nnx
@@ -197,7 +199,7 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
   (positions, segment_ids) are passed to the model.
   """
 
-  def __init__(self, model, strategy, optimizer, training_config, **kwargs):
+  def __init__(self, model, strategy: distillation_utils.DistillationStrategy, optimizer, training_config, **kwargs):
     # We pass a dummy optimizer to the base PeftTrainer temporarily to prevent PeftTrainer from eagerly
     # allocating massive optimizer states for the entire ModelBundle (including the frozen teacher) before
     # redefining the trainer optimizer here.
@@ -211,6 +213,34 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
       optimizer = optax.MultiSteps(optimizer, training_config.gradient_accumulation_steps)
     wrt = nnx.LoRAParam if self._lora_enabled else nnx.Param
     self.optimizer = nnx.Optimizer(model.student_model, optimizer, wrt=wrt)
+
+    # Detect if Tunix expects _train_step to return grad_norm by inspecting the source
+    self._tunix_expects_grad_norm = False
+    try:
+      source = inspect.getsource(peft_trainer.PeftTrainer._train_step)
+      self._tunix_expects_grad_norm = "grad_norm" in source
+    except (TypeError, OSError):
+      # Fallback if source code is unavailable
+      pass
+
+  def _shard_optimizer(self, mesh: jax.sharding.Mesh) -> None:
+    """Overrides base _shard_optimizer to safely shard restored scalars.
+
+    This is necessary because the optimizer state restored from checkpoints may contain unsharded
+    scalars (e.g., Adam moments).
+    """
+    if mesh.empty:
+      return
+    optimizer_state = nnx.state(self.optimizer, nnx.optimizer.OptState)
+    optimizer_pspecs = nnx.get_partition_spec(optimizer_state)
+
+    def _safe_shard(x, pspec):
+      if isinstance(pspec, jax.sharding.PartitionSpec):
+        return jax.device_put(x, jax.sharding.NamedSharding(mesh, pspec))
+      return x
+
+    optimizer_sharded_state = jax.tree.map(_safe_shard, optimizer_state, optimizer_pspecs)
+    nnx.update(self.optimizer, optimizer_sharded_state)
 
   def _train_step(self, model, optimizer, inputs):
     """Overrides the main JIT block to natively handle ModelBundle module."""
@@ -245,7 +275,7 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
           cache=None,
       )
       # we should apply a mask for labels to disable segment-separator tokens
-      labels = self.strategy.labels_fn(batch["targets"], targets_segmentation=batch.get("targets_segmentation", None))
+      labels = self.strategy.create_labels(batch["targets"], targets_segmentation=batch.get("targets_segmentation", None))
       return self.strategy.compute_loss(student_output, teacher_output, labels)
 
     # Because student is the 0th argument, argnums=0 guarantees
@@ -258,9 +288,13 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
 
     out, grads = grad_fn(model.student_model, model.teacher_model, batch)
 
+    tunix_expects_grad_norm = getattr(self, "_tunix_expects_grad_norm", True)
+
     optimizer.update(model.student_model, grads)
 
-    return out[0], out[1]  # loss, aux
+    if tunix_expects_grad_norm:
+      return out[0], out[1], optax.global_norm(grads)
+    return out[0], out[1]
 
   def _eval_step(self, model, inputs):
     """Evaluation only needs the student."""
@@ -274,7 +308,7 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
         decoder_segment_ids=inputs.get("decoder_segment_ids"),
         cache=None,
     )
-    labels = self.strategy.labels_fn(inputs["targets"])
+    labels = self.strategy.create_labels(inputs["targets"], targets_segmentation=inputs.get("targets_segmentation", None))
     return self.strategy.compute_eval_loss(student_output, labels)
 
   def _prepare_inputs(
@@ -321,62 +355,70 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
 
       self._buffered_train_metrics.additional_metrics[name][0].append(value)
 
+  def setup_checkpoint_manager_and_restore(self, raw_train_iter, config):
+    """Configures the trainer's CheckpointManager and restores states.
 
-def _setup_and_restore_input_pipeline(trainer, raw_train_iter, config, train_config):
-  """Configures the trainer to save/restore Grain iterator state.
+    This function unconditionally replaces the default CheckpointManager with
+    MaxTextCheckpointManager. This ensures consistent API availability (like
+    wait_until_finished) and enables Grain checkpointing if the iterator supports it.
 
-  This function unconditionally replaces the default CheckpointManager with
-  MaxTextCheckpointManager. This ensures consistent API availability (like
-  wait_until_finished) and enables Grain checkpointing if the iterator supports it.
+    Args:
+      raw_train_iter: The input pipeline iterator.
+      config: The MaxText HyperParameters.
 
-  Args:
-    trainer: The active DistillationTrainer instance.
-    raw_train_iter: The input pipeline iterator.
-    config: The MaxText HyperParameters.
-    train_config: The Tunix TrainingConfig.
+    Returns:
+      The iterator to use for training (restored or original).
+    """
+    is_grain_dataset = config.dataset_type == "grain"
+    has_save_method = hasattr(raw_train_iter, "save")
+    enable_checkpointing = raw_train_iter is not None and (is_grain_dataset or has_save_method)
 
-  Returns:
-    The iterator to use for training (restored or original).
-  """
-  is_grain_dataset = config.dataset_type == "grain"
-  has_save_method = hasattr(raw_train_iter, "save")
-  enable_checkpointing = raw_train_iter is not None and (is_grain_dataset or has_save_method)
+    iterator_to_manage = raw_train_iter if enable_checkpointing else None
 
-  iterator_to_manage = raw_train_iter if enable_checkpointing else None
-
-  if enable_checkpointing:
-    max_logging.log("Input Pipeline Checkpointing: ENABLED")
-    max_logging.log(f"Details: dataset_type='{config.dataset_type}', has_save={has_save_method}")
-  else:
-    max_logging.log("Input Pipeline Checkpointing: DISABLED")
-    if raw_train_iter is None:
-      max_logging.log("Reason: train_iter is None")
+    if enable_checkpointing:
+      max_logging.log("Input Pipeline Checkpointing: ENABLED")
+      max_logging.log(f"Details: dataset_type='{config.dataset_type}', has_save={has_save_method}")
     else:
-      max_logging.log(
-          f"Reason: Iterator '{type(raw_train_iter).__name__}' is not recognized as Grain "
-          f"(dataset_type='{config.dataset_type}', has_save={has_save_method})"
-      )
+      max_logging.log("Input Pipeline Checkpointing: DISABLED")
+      if raw_train_iter is None:
+        max_logging.log("Reason: train_iter is None")
+      else:
+        max_logging.log(
+            f"Reason: Iterator '{type(raw_train_iter).__name__}' is not recognized as Grain "
+            f"(dataset_type='{config.dataset_type}', has_save={has_save_method})"
+        )
 
-  # 1. Create the specialized manager (always)
-  maxtext_manager = distillation_utils.MaxTextCheckpointManager(
-      raw_iterator=iterator_to_manage,
-      root_directory=train_config.checkpoint_root_directory,
-      options=train_config.checkpointing_options,
-  )
+    # 1. Ensure clean resource release of the base class's manager
+    # pylint: disable=access-member-before-definition
+    if self.checkpoint_manager:
+      self.checkpoint_manager.close()
+    # pylint: enable=access-member-before-definition
 
-  # 2. Swap managers (ensure clean resource release)
-  if trainer.checkpoint_manager:
-    trainer.checkpoint_manager.close()
-  trainer.checkpoint_manager = maxtext_manager
+    # 2. Assign the specialized manager
+    self.checkpoint_manager = distillation_utils.MaxTextCheckpointManager(
+        raw_iterator=iterator_to_manage,
+        root_directory=config.checkpoint_dir,
+        options=self.config.checkpointing_options,
+    )
 
-  # 3. Restore input state (if applicable)
-  if enable_checkpointing:
-    restored_iter = trainer.checkpoint_manager.restore_iterator()
-    if restored_iter is not None:
-      max_logging.log("Restored input pipeline state to match model step.")
-      return restored_iter
+    # 3. Restore Model & Optimizer State correctly via MaxTextCheckpointManager.
+    # Accessing protected variables of the base class IS allowed inside the subclass!
+    self._train_steps, self._restored_custom_metadata = self.checkpoint_manager.maybe_restore(
+        self.model,
+        self.optimizer,
+        restore_only_lora_params=getattr(self, "_lora_enabled", False),
+    )
+    grad_accum_steps = self.config.get_with_default("gradient_accumulation_steps", 1)
+    self._iter_steps = self._train_steps * grad_accum_steps
 
-  return raw_train_iter
+    # 4. Restore input state (if applicable)
+    if enable_checkpointing:
+      restored_iter = self.checkpoint_manager.restore_iterator()
+      if restored_iter is not None:
+        max_logging.log("Restored input pipeline state to match model step.")
+        return restored_iter
+
+    return raw_train_iter
 
 
 # -----------------------------------------------------------------------------
@@ -402,34 +444,22 @@ def get_maxtext_model(config: pyconfig.HyperParameters, mesh: jax.sharding.Mesh)
 # -----------------------------------------------------------------------------
 
 
-def train_distill(
+def build_training_components(
     student_config: pyconfig.HyperParameters,
     teacher_config: pyconfig.HyperParameters,
     is_offline: bool = False,
     offline_data_dir: str | None = None,
-) -> None:
-  """Main distillation training loop.
-
-  Orchestrates the loading of both student and teacher models, configures the
-  distillation strategy, and executes the training loop via the Tunix Trainer.
+):
+  """Builds and returns the strategy, optimizer, and training config objects.
 
   Args:
-    student_config: Configuration object for the Student model (learnable).
-    teacher_config: Configuration object for the Teacher model (frozen).
+    student_config: Configuration object for the Student model.
+    teacher_config: Configuration object for the Teacher model.
+
+  Returns:
+    A tuple of (DistillationStrategy, Optimizer, TrainingConfig).
   """
-  # Validate vocab size match between Student and Teacher
-  if student_config.vocab_size != teacher_config.vocab_size:
-    raise ValueError(
-        f"Vocab size mismatch! Student: {student_config.vocab_size}, Teacher: {teacher_config.vocab_size}. "
-        "Distillation requires matching vocabularies."
-    )
-
-  # 1. Setup Mesh
-  devices = jax.devices()
-  devices_array = maxtext_utils.create_device_mesh(student_config, devices)
-  mesh = jax.sharding.Mesh(devices_array, student_config.mesh_axes)
-
-  # 2. Load Models & Tokenizer Info
+  # 2. Load Tokenizer Info
   tok = tokenizer.build_tokenizer(
       tokenizer_path=student_config.tokenizer_path,
       tokenizer_type=student_config.tokenizer_type,
@@ -439,29 +469,7 @@ def train_distill(
   )
   pad_id = tok.pad_id if tok.pad_id is not None else 0
 
-  max_logging.log(f"Loading Student from {student_config.load_parameters_path}...")
-  _log_config_details(student_config, "Student")
-  student_model = get_maxtext_model(student_config, mesh)
-
-  # Skip teacher model loading if offline
-  if is_offline:
-    max_logging.log("Offline Distillation: Skipping Teacher Model loading.")
-    teacher_model = None
-  else:
-    max_logging.log(f"Loading Teacher from {teacher_config.load_parameters_path}...")
-    _log_config_details(teacher_config, "Teacher")
-    teacher_model = get_maxtext_model(teacher_config, mesh)
-    teacher_model.eval()
-
   # 3. Define Distillation Strategy
-  def labels_fn(targets, targets_segmentation=None, **kwargs):
-    """Converts integer targets to masked one-hot vectors for hard label loss."""
-    del kwargs  # Unused
-    one_hot = jax.nn.one_hot(targets, student_config.vocab_size)
-    mask = jnp.not_equal(targets, pad_id).astype(one_hot.dtype)[..., None]
-    if targets_segmentation is not None:
-      mask = mask * (targets_segmentation != 0)[..., None]
-    return one_hot * mask
 
   # Both Student and Teacher use the same forward logic via the adapter
   student_forward_fn = create_forward_fn(student_config)
@@ -471,12 +479,12 @@ def train_distill(
   strategy = distillation_utils.CombinedDistillationStrategy(
       student_forward_fn=student_forward_fn,
       teacher_forward_fn=teacher_forward_fn,
-      labels_fn=labels_fn,
+      pad_id=pad_id,
       temperature=student_config.distill_temperature,
       alpha=student_config.distill_alpha,
       beta_feature=student_config.distill_beta,
       layer_indices=student_config.distill_layer_indices,
-      sft_mode=student_config.use_sft,
+      vocab_size=student_config.vocab_size,
   )
 
   # 4. Optimizer & Config
@@ -507,85 +515,136 @@ def train_distill(
       eval_every_n_steps=student_config.eval_interval,
       metrics_logging_options=metrics_logging_options,
       profiler_options=profiler_options,
-      checkpoint_root_directory=student_config.checkpoint_dir,
+      checkpoint_root_directory=None,  # Tunix should NOT checkpoint our ModelBundle. MaxTextCheckpointManager handles this.
       checkpointing_options=checkpointing_options,
       gradient_accumulation_steps=student_config.gradient_accumulation_steps,
   )
 
-  # 5. Data Iterators (Init BEFORE Trainer)
-  if is_offline:
-    max_logging.log(f"Loading Offline Dataset from {offline_data_dir}...")
-    raw_train_iter = distillation_utils.OfflineArrayRecordIterator(offline_data_dir)
-    raw_eval_iter = None
-  else:
-    max_logging.log("Initializing Data Iterators via MaxText pipeline...")
-    raw_train_iter, raw_eval_iter = input_pipeline_interface.create_data_iterator(student_config, mesh)
+  return strategy, optimizer, train_config
 
-  student_model.train()
-  model_bundle = ModelBundle(teacher_model, student_model)
 
-  # 6. Initialize Trainer
-  trainer = MaxTextDistillationTrainer(
-      model=model_bundle,
-      strategy=strategy,
-      optimizer=optimizer,
-      training_config=train_config,
-  )
-  trainer.is_managed_externally = True
-  trainer._has_aux = True  # pylint: disable=protected-access
+def train_distill(
+    student_config: pyconfig.HyperParameters,
+    teacher_config: pyconfig.HyperParameters,
+    is_offline: bool = False,
+    offline_data_dir: str | None = None,
+) -> None:
+  """Main distillation training loop.
 
-  # 7. Input Pipeline Checkpointing
-  # Replace the default CheckpointManager with a Grain-aware one, which enables iterator checkpointing for grain datasets.
-  raw_train_iter = _setup_and_restore_input_pipeline(trainer, raw_train_iter, student_config, train_config)
+  Orchestrates the loading of both student and teacher models, configures the
+  distillation strategy, and executes the training loop via the Tunix Trainer.
 
-  # 8. Configure Input Mapping
-  def custom_gen_model_input_fn(batch):
-    inputs_dict = {
-        "input_tokens": batch.input_tokens,
-        "positions": batch.positions,
-        "attention_mask": batch.input_mask,
-        "decoder_segment_ids": batch.decoder_segment_ids,
-        "targets": batch.targets,
-        "targets_position": batch.targets_position,
-        "targets_segmentation": batch.targets_segmentation,
-        "cache": None,
-    }
-
-    # If we are in online mode then we exit
-    if getattr(batch, "top_k_logits", None) is None:
-      return inputs_dict
-
-    # Scatter the offline arrays into a dense tensor of -10000s
-    dense_shape = batch.input_tokens.shape + (student_config.vocab_size,)
-    dense_logits = jnp.full(dense_shape, -10000.0, dtype=jnp.float32)
-    dense_logits = jnp.put_along_axis(dense_logits, batch.top_k_indices, batch.top_k_logits, axis=-1, inplace=False)
-
-    # Inject it as teacher_output so the trainer skips the teacher forward pass
-    inputs_dict["teacher_output"] = distillation_utils.DistillationForwardOutput(
-        logits=dense_logits, out_projection_activations=None
+  Args:
+    student_config: Configuration object for the Student model (learnable).
+    teacher_config: Configuration object for the Teacher model (frozen).
+  """
+  # Validate vocab size match between Student and Teacher
+  if student_config.vocab_size != teacher_config.vocab_size:
+    raise ValueError(
+        f"Vocab size mismatch! Student: {student_config.vocab_size}, Teacher: {teacher_config.vocab_size}. "
+        "Distillation requires matching vocabularies."
     )
 
-    return inputs_dict
+  # Build Training Components (No hardware context required)
+  strategy, optimizer, train_config = build_training_components(
+      student_config, teacher_config, is_offline, offline_data_dir
+  )
 
-  trainer = trainer.with_gen_model_input_fn(custom_gen_model_input_fn)
+  # 1. Setup Mesh
+  devices = jax.devices()
+  devices_array = maxtext_utils.create_device_mesh(student_config, devices)
+  mesh = jax.sharding.Mesh(devices_array, student_config.mesh_axes)
 
-  # 9. Create Iterator Wrappers (Use Utils)
-  train_iter = distillation_utils.MaxTextToTunixIterator(raw_train_iter)
-
-  eval_iter = None
-  if raw_eval_iter is not None:
-    max_logging.log("Evaluation iterator successfully initialized.")
-    eval_iter = distillation_utils.MaxTextToTunixIterator(raw_eval_iter)
-  elif student_config.eval_interval > 0:
-    max_logging.log("Warning: eval_interval > 0 but create_data_iterator returned None for eval_iter.")
-
-  # 10. Train
-  max_logging.log("Starting Distillation Training...")
+  # Hardware Execution (Safe Context)
+  max_logging.log("Applying logical axis rules for model initialization and training...")
   with mesh, nn_partitioning.axis_rules(student_config.logical_axis_rules):
+
+    # 2. Load Models
+    max_logging.log(f"Loading Student from {student_config.load_parameters_path}...")
+    _log_config_details(student_config, "Student")
+    student_model = get_maxtext_model(student_config, mesh)
+
+    if is_offline:
+      max_logging.log("Offline Distillation: Skipping Teacher Model loading.")
+      teacher_model = None
+    else:
+      max_logging.log(f"Loading Teacher from {teacher_config.load_parameters_path}...")
+      _log_config_details(teacher_config, "Teacher")
+      teacher_model = get_maxtext_model(teacher_config, mesh)
+      teacher_model.eval()
+
+    student_model.train()
+    model_bundle = ModelBundle(teacher_model, student_model)
+
+    # 3. Initialize Trainer
+    trainer = MaxTextDistillationTrainer(
+        model=model_bundle,
+        strategy=strategy,
+        optimizer=optimizer,
+        training_config=train_config,
+    )
+    trainer.is_managed_externally = True
+    trainer._has_aux = True  # pylint: disable=protected-access
+
+    # 4. Data Iterators (Init BEFORE Trainer pipeline setup)
+    # We use MaxText's native create_data_iterator which creates both train and eval iterators
+    if is_offline:
+      max_logging.log(f"Loading Offline Dataset from {offline_data_dir}...")
+      raw_train_iter = distillation_utils.OfflineArrayRecordIterator(offline_data_dir)
+      raw_eval_iter = None
+    else:
+      max_logging.log("Initializing Data Iterators via MaxText pipeline...")
+      raw_train_iter, raw_eval_iter = input_pipeline_interface.create_data_iterator(student_config, mesh)
+
+    # 5. Input Pipeline Checkpointing & Restoration
+    # Replace the default CheckpointManager with a Grain-aware one, which enables iterator checkpointing for grain datasets.
+    raw_train_iter = trainer.setup_checkpoint_manager_and_restore(raw_train_iter, student_config)
+
+    # 6. Configure Input Mapping
+    def custom_gen_model_input_fn(batch):
+      inputs_dict = {
+          "input_tokens": batch.input_tokens,
+          "positions": batch.positions,
+          "attention_mask": batch.input_mask,
+          "decoder_segment_ids": batch.decoder_segment_ids,
+          "targets": batch.targets,  # Passed to strategy (labels_fn)
+          "targets_position": batch.targets_position,  # Passed to strategy (labels_fn)
+          "targets_segmentation": batch.targets_segmentation,  # Passed to strategy (labels_fn)
+          "cache": None,
+      }
+      # If we are in online mode then we exit
+      if getattr(batch, "top_k_logits", None) is None:
+        return inputs_dict
+
+      # Scatter the offline arrays into a dense tensor of -10000s
+      dense_shape = batch.input_tokens.shape + (student_config.vocab_size,)
+      dense_logits = jnp.full(dense_shape, -10000.0, dtype=jnp.float32)
+      dense_logits = jnp.put_along_axis(dense_logits, batch.top_k_indices, batch.top_k_logits, axis=-1, inplace=False)
+
+      # Inject it as teacher_output so the trainer skips the teacher forward pass
+      inputs_dict["teacher_output"] = distillation_utils.DistillationForwardOutput(
+          logits=dense_logits, out_projection_activations=None
+      )
+      return inputs_dict
+
+    trainer = trainer.with_gen_model_input_fn(custom_gen_model_input_fn)
+
+    # 7. Create Iterator Wrappers (Use Utils)
+    train_iter = distillation_utils.MaxTextToTunixIterator(raw_train_iter)
+
+    eval_iter = None
+    if raw_eval_iter is not None:
+      max_logging.log("Evaluation iterator successfully initialized.")
+      eval_iter = distillation_utils.MaxTextToTunixIterator(raw_eval_iter)
+    elif student_config.eval_interval > 0:
+      max_logging.log("Warning: eval_interval > 0 but create_data_iterator returned None for eval_iter.")
+
+    # 8. Train
+    max_logging.log("Starting Distillation Training...")
     # Pass both iterators to the trainer
     trainer.train(train_iter, eval_iter)
 
-  # 11. Final Save (Conditional)
+  # 9. Final Save (Conditional)
   if student_config.save_checkpoint_on_completion:
     should_save = student_config.steps % student_config.checkpoint_period
 
@@ -594,7 +653,8 @@ def train_distill(
       try:
         saved = trainer.checkpoint_manager.save(
             trainer.train_steps,
-            trainer.model.student_model,
+            trainer.model,
+            optimizer=trainer.optimizer,
             save_only_lora_params=getattr(trainer, "_lora_enabled", False),
             force=True,
         )
@@ -619,6 +679,9 @@ def main(argv: Sequence[str]) -> None:
 
   Parses configuration, isolates Student and Teacher overrides, and triggers the
   training loop.
+
+  Args:
+    argv: List of command-line arguments. Expects [script_name, config_file, ...].
   """
   # 1. Parse Global Config to extract Overrides
   global_config = pyconfig.initialize(argv)

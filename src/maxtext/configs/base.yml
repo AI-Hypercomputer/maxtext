@@ -317,11 +317,16 @@ mlpwi: 'remat'
 mlpwi_0: 'remat'
 mlpwi_1: 'remat'
 mlpwo: 'remat'
+moe_mlpwi_0: 'remat'
+moe_mlpwi_1: 'remat'
+moe_mlpwo: 'remat'
 query_proj: 'remat'
 key_proj: 'remat'
 value_proj: 'remat'
 qkv_proj: 'remat'
 out_proj: 'remat'
+query_wa_proj: 'remat'
+kv_wa_proj: 'remat'
 mla_q: 'remat'
 mla_kv: 'remat'
 attention_out: 'remat'
@@ -436,7 +441,9 @@ custom_mesh_and_rule: "" # replace default mesh and logical rule by specifying y
 mesh_axes: ['diloco', 'data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context', 'context_autoregressive', 'tensor', 'tensor_transpose', 'tensor_sequence', 'expert', 'autoregressive']
 logical_axis_rules: [
                       ['activation_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['activation_batch_moe', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_batch_no_exp', ['data', 'fsdp', 'fsdp_transpose']],
+                      ['activation_batch_no_exp_moe', ['data', 'fsdp', 'fsdp_transpose']],
                       ['activation_embed_and_logits_batch', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_embed_and_logits_batch_sequence', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context', 'expert']],
                       ['activation_heads', ['tensor', 'tensor_transpose', 'sequence','tensor_sequence','autoregressive']],
@@ -449,7 +456,10 @@ logical_axis_rules: [
                       ['activation_attn_length_no_exp', ['context']],
                       ['activation_length_no_exp', ['sequence', 'context']],
                       ['activation_length_no_exp', ['context']],
+                      ['activation_length_no_exp_moe', ['sequence', 'context']],
+                      ['activation_length_no_exp_moe', ['context']],
                       ['activation_norm_length', ['tensor_sequence', 'context', 'sequence']],
+                      ['activation_norm_length_moe', ['tensor_sequence', 'context', 'sequence']],
                       ['activation_q_length', ['context', 'expert']],
                       ['activation_q_length_no_exp', ['context']],
                       ['prefill_activation_length', ['sequence', 'context']],
@@ -457,6 +467,7 @@ logical_axis_rules: [
                       ['activation_kv_length', []],
                       ['activation_attn_embed', ['tensor', 'tensor_transpose']],
                       ['activation_embed', ['tensor', 'tensor_transpose']],
+                      ['activation_embed_moe', ['tensor', 'tensor_transpose']],
                       ['activation_mlp', ['tensor', 'tensor_transpose', 'tensor_sequence']],
                       ['activation_kv', ['tensor', 'tensor_transpose', 'tensor_sequence']],
                       ['activation_prefill_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
@@ -485,6 +496,14 @@ logical_axis_rules: [
                       ['embed_no_exp', ['fsdp', 'sequence', 'tensor_transpose', 'context']],
                       ['embed_no_exp', ['fsdp', 'fsdp_transpose', 'sequence', 'context']],
                       ['embed_no_exp', ['fsdp', 'sequence', 'context']],
+                      ['embed_moe', ['fsdp', 'fsdp_transpose', 'sequence', 'tensor_transpose', 'context', 'expert']],
+                      ['embed_moe', ['fsdp', 'sequence', 'tensor_transpose', 'context' , 'expert']],
+                      ['embed_moe', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'expert']],
+                      ['embed_moe', ['fsdp', 'sequence', 'context', 'expert']],
+                      ['embed_no_exp_moe', ['fsdp', 'fsdp_transpose', 'sequence', 'tensor_transpose', 'context']],
+                      ['embed_no_exp_moe', ['fsdp', 'sequence', 'tensor_transpose', 'context']],
+                      ['embed_no_exp_moe', ['fsdp', 'fsdp_transpose', 'sequence', 'context']],
+                      ['embed_no_exp_moe', ['fsdp', 'sequence', 'context']],
                       ['embed_tensor_transpose', ['tensor_transpose']],
                       ['q_lora', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'tensor_transpose', 'expert']],
                       ['q_lora', ['fsdp', 'sequence', 'context', 'tensor_transpose', 'expert']],
@@ -859,6 +878,8 @@ decode_sampling_temperature: 1.
 eval_interval: -1  # the specific number of train step between eval_step
 eval_steps: -1  # run this number of steps for eval, recommend setting this to prevent error due to running out of evel data
 target_eval_loss: 0.  # early stop once reaching target eval_loss
+abort_on_nan_loss: True # Check for NaN and abort if found in training loss
+abort_on_inf_loss: True # Check for Inf and abort if found in training loss
 
 # Goodput parameters
 enable_goodput_recording: False
@@ -1121,7 +1142,7 @@ use_tokamax_splash: false
 use_jax_splash: false
 
 # vLLM Adapter Configurations
-# Path to the HuggingFace-style config directory for the adapter (e.g. src/MaxText/integration/vllm/maxtext_vllm_adapter)
+# Path to the HuggingFace-style config directory for the adapter (e.g. src/maxtext/integration/vllm/maxtext_vllm_adapter)
 vllm_hf_config_path: ""
 # A JSON string of overrides to apply to the HuggingFace-style config for the vLLM adapter.
 # This can be used to override specific settings without modifying the original config file. 

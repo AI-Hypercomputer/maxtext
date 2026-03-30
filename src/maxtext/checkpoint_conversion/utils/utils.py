@@ -24,29 +24,28 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from tqdm import tqdm
 import resource
+import numpy as np
+import psutil
+import pathlib
+from etils import epath
 
 import jax
 from jax.experimental import multihost_utils
-
 from jaxtyping import Array
-
-import numpy as np
 
 from google.cloud.storage import Client, transfer_manager
 
+from safetensors import safe_open
 from safetensors.numpy import save_file as numpy_save_file
 from safetensors.numpy import save as numpy_save
 from safetensors.flax import save as save_flax_to_bytes
 
-from huggingface_hub import HfApi, repo_exists
+from huggingface_hub import HfApi, repo_exists, snapshot_download
 
 from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
 from transformers import AutoModelForCausalLM
 
 from maxtext.utils import max_logging
-import psutil
-
-from etils import epath
 import orbax.checkpoint as ocp
 
 
@@ -165,7 +164,7 @@ def convert_jax_weight_to_numpy(weight: "jax.Array", dtype_str: None | str = Non
   return np_array.reshape(expected_shape)  # Reshape for safety, though usually preserved.
 
 
-def _process(hf_path, processed_slice, output_weights, current_hook_fns, hf_shape_map):
+def _process(hf_path, processed_slice, output_weights, current_hook_fns, hf_shape_map, save_dtype):
   """Applies hooks, converts a JAX slice to NumPy, and appends it to the output list, used in to_huggingface"""
   if hf_path not in hf_shape_map:
     raise ValueError(f"HF path '{hf_path}' not found in hf_shape_map.")
@@ -173,7 +172,7 @@ def _process(hf_path, processed_slice, output_weights, current_hook_fns, hf_shap
   # If hook is unsepecified, use identity
   if current_hook_fns:
     processed_slice = apply_hook_fns(processed_slice, target_hf_shape, current_hook_fns)
-  numpy_slice = convert_jax_weight_to_numpy(processed_slice).squeeze()
+  numpy_slice = convert_jax_weight_to_numpy(processed_slice, save_dtype).squeeze()
   if numpy_slice.shape != tuple(target_hf_shape):
     raise ValueError(f"Shape mismatch for {hf_path}: Expect {target_hf_shape}, got {numpy_slice.shape}")
   output_weights.append((hf_path, numpy_slice))
@@ -236,7 +235,14 @@ def process_maxtext_param(
   if not isinstance(hf_target_paths, list):
     max_logging.log("\tunscan")
     hf_path = hf_target_paths
-    _process(hf_path, maxtext_param_weight, output_weights, current_hook_fns, hf_shape_map)
+    _process(
+        hf_path,
+        maxtext_param_weight,
+        output_weights,
+        current_hook_fns,
+        hf_shape_map,
+        save_dtype=maxtext_config.weight_dtype,
+    )
     return output_weights
 
   # Stacked MaxText weight
@@ -270,7 +276,14 @@ def process_maxtext_param(
       else:
         # For `atomic_mt_key` mappings, slice the single MaxText tensor.
         weight_slice = jax.lax.index_in_dim(maxtext_param_weight, i, axis=axis_to_slice, keepdims=False)
-      _process(hf_path, weight_slice, output_weights, current_hook_fns, hf_shape_map)
+      _process(
+          hf_path,
+          weight_slice,
+          output_weights,
+          current_hook_fns,
+          hf_shape_map,
+          save_dtype=maxtext_config.weight_dtype,
+      )
 
     return output_weights
 
@@ -292,7 +305,14 @@ def process_maxtext_param(
       # Slice the expert tensor along the layer axis to get the final individual weight.
       # axis is 0 on the new sliced tensor
       layer_tensor_slice = jax.lax.index_in_dim(expert_tensor_slice, layer_idx, axis=0, keepdims=False)
-      _process(hf_path, layer_tensor_slice, output_weights, current_hook_fns, hf_shape_map)
+      _process(
+          hf_path,
+          layer_tensor_slice,
+          output_weights,
+          current_hook_fns,
+          hf_shape_map,
+          save_dtype=maxtext_config.weight_dtype,
+      )
 
   return output_weights
 
@@ -903,7 +923,7 @@ def detect_and_extract_checkpoint(checkpoint_dict: dict) -> dict[str, np.ndarray
     return extract_linen_weights(actual_weights_dict)
 
 
-def get_hf_model(model_id: str, token: str, revision: str = None):
+def load_hf_dict_from_transformers(model_id: str, token: str, revision: str = None, dtype: str = "auto"):
   """Loads the HuggingFace model based on model_id (Eager mode only), used in to_maxtext"""
   if model_id in ["Qwen/Qwen3-Omni-30B-A3B-Instruct"]:
     from transformers import Qwen3OmniMoeForConditionalGeneration  # pylint: disable=import-outside-toplevel
@@ -912,5 +932,35 @@ def get_hf_model(model_id: str, token: str, revision: str = None):
   else:
     model_class = AutoModelForCausalLM
 
-  hf_model = model_class.from_pretrained(model_id, token=token, revision=revision)
-  return hf_model
+  # Note: transformers deprecates `torch_dtype` in favor of standard `dtype` in model loading
+  hf_model = model_class.from_pretrained(model_id, token=token, revision=revision, dtype=dtype)
+
+  return hf_model.state_dict()
+
+
+def load_hf_dict_from_safetensors(model_id_or_path, token, revision, framework="pt"):
+  """
+  If the safetensor contains more HF keys than MaxText model,
+  these HF keys will be loaded but ignored during conversion.
+  For example, if maxtext has deepseek3 with mtp=false,
+  then safetensor weight with prefix `model.layers.61` will be the extra keys.
+  """
+  # Determine if the path is local or remote
+  if os.path.isdir(model_id_or_path):
+    local_path = model_id_or_path
+  else:
+    # Download only the safetensors files to the local HF cache
+    local_path = snapshot_download(
+        repo_id=model_id_or_path,
+        token=token,
+        revision=revision,
+    )
+  # load safetensors
+  ckpt_paths = sorted(pathlib.Path(local_path).glob("[!.]*.safetensors"))
+  hf_state_dict = {}
+  max_logging.log(f"Loading {len(ckpt_paths)} checkpoints")
+  for ckpt_path in tqdm(ckpt_paths, total=len(ckpt_paths)):
+    with safe_open(ckpt_path, framework=framework, device="cpu") as f:
+      for key in f.keys():
+        hf_state_dict[key] = f.get_tensor(key)
+  return hf_state_dict

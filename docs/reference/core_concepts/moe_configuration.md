@@ -16,7 +16,7 @@
 
 # Mixture of Experts (MoE) Configuration
 
-This document provides a detailed explanation of the configuration parameters related to Mixture of Experts (MoE) models in MaxText. These settings control the model architecture, routing mechanisms, and performance optimizations. Default values and parameter definitions are located in `src/maxtext/configs/base.yml` and are primarily used in `src/MaxText/layers/moe.py`.
+This document provides a detailed explanation of the configuration parameters related to Mixture of Experts (MoE) models in MaxText. These settings control the model architecture, routing mechanisms, and performance optimizations. Default values and parameter definitions are located in `src/maxtext/configs/base.yml` and are primarily used in `src/maxtext/layers/moe.py`.
 
 ## 1. Architecture
 
@@ -30,7 +30,7 @@ MaxText supports both Dropless and Dropping strategies. Please refer to the deci
 Dropless:
 
 - [Tokamax Ragged Dot](https://github.com/openxla/tokamax/tree/main/tokamax/_src/ops/ragged_dot): Enabled by setting `sparse_matmul=True, use_tokamax_gmm=True`.
-- [Megablox](https://github.com/google/maxtext/tree/main/src/MaxText/kernels/megablox): Enabled by setting `sparse_matmul=True, use_tokamax_gmm=False, megablox=True`.
+- [Megablox](https://github.com/google/maxtext/tree/main/src/maxtext/kernels/megablox): Enabled by setting `sparse_matmul=True, use_tokamax_gmm=False, megablox=True`.
 - [JAX Ragged Dot](https://docs.jax.dev/en/latest/_autosummary/jax.lax.ragged_dot.html): Enabled by setting `sparse_matmul=True, use_tokamax_gmm=False, megablox=False`.
 - Dense Matmul: Enabled by setting `sparse_matmul=False, capacity_factor=-1`.
 

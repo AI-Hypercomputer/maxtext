@@ -18,31 +18,31 @@
 
 Deep dive into MaxText architecture, models, and core concepts.
 
-::::{grid} 1 2 2 2
+::::\{grid} 1 2 2 2
 :gutter: 2
 
-:::{grid-item-card} 📊 Performance Metrics
+:::\{grid-item-card} 📊 Performance Metrics
 :link: reference/performance_metrics
 :link-type: doc
 
 Understanding Model Flops Utilization (MFU), calculation methods, and why it matters for performance optimization.
 :::
 
-:::{grid-item-card} 🤖 Models
+:::\{grid-item-card} 🤖 Models
 :link: reference/models
 :link-type: doc
 
 Supported models and architectures, including Llama, Qwen, and Mixtral. Details on tiering and new additions.
 :::
 
-:::{grid-item-card} 🏗️ Architecture
+:::\{grid-item-card} 🏗️ Architecture
 :link: reference/architecture
 :link-type: doc
 
 High-level overview of MaxText design, JAX/XLA choices, and how components interact.
 :::
 
-:::{grid-item-card} 💡 Core Concepts
+:::\{grid-item-card} 💡 Core Concepts
 :link: reference/core_concepts
 :link-type: doc
 
@@ -51,9 +51,10 @@ Key concepts including checkpointing strategies, quantization, tiling, and Mixtu
 ::::
 
 ```{toctree}
-:hidden:
-:maxdepth: 1
-
+---
+hidden:
+maxdepth: 1
+---
 reference/performance_metrics
 reference/models
 reference/architecture

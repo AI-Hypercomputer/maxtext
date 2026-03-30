@@ -355,6 +355,11 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       lambda x: x.astype(config.grad_dtype) if x.dtype == jnp.float32 else x,
       raw_grads,
   )
+  if config.parameter_memory_host_offload:
+    raw_grads = jax.device_put(
+        raw_grads,
+        max_utils.with_memory_kind(params_shardings, "device"),
+    )
   intermediate_outputs = aux["intermediate_outputs"]
   total_weights = aux["total_weights"]
   moe_lb_loss = aux["moe_lb_loss"]

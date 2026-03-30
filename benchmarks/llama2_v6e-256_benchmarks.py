@@ -17,13 +17,12 @@ This script configures benchmark runs for Llama2-7B and Llama2-70B models
 on a specific v6e-256 hardware setup using the XPK runner.
 """
 
-import maxtext_trillium_model_configs as model_configs
+import os
 
-from maxtext_xpk_runner import BenchmarkRunner
-from maxtext_xpk_runner import HWConfig
-from maxtext_xpk_runner import SWconfig
-from maxtext_xpk_runner import xpk_benchmark_runner
-from maxtext_xpk_runner import XpkConfig
+from benchmarks import maxtext_trillium_model_configs as model_configs
+from benchmarks.maxtext_xpk_runner import WorkloadConfig
+from benchmarks.maxtext_xpk_runner import xpk_benchmark_runner
+from benchmarks.maxtext_xpk_runner import XpkClusterConfig
 
 
 DATE = "20241009"
@@ -35,34 +34,37 @@ CLUSTER_NAME = "mlperf-v6e-256"
 DEVICE_TYPE = "v6e-256"
 NUM_SLICES = 1
 BASE_OUTPUT_DIR = "gs://maxtext-experiments-tpem/"
-
-v6e_env_configs = SWconfig(base_docker_image=BASE_DOCKER_IMAGE, libtpu_version=DATE)
-v6e_256_configs = HWConfig(num_slices=NUM_SLICES, device_type=DEVICE_TYPE)
-
-llama2_70b_4096 = BenchmarkRunner(
-    model_name=model_configs.llama2_70b_4096,
-    software_config=v6e_env_configs,
-    hardware_config=v6e_256_configs,
-)
-
-llama2_7b_4096 = BenchmarkRunner(
-    model_name=model_configs.llama2_7b_4096,
-    software_config=v6e_env_configs,
-    hardware_config=v6e_256_configs,
-)
+XPK_PATH = os.path.join("~", "xpk")
+BENCHMARK_STEPS = 20
 
 
 def main() -> None:
-  cluster_config = XpkConfig(
+  cluster_config = XpkClusterConfig(
       cluster_name=CLUSTER_NAME,
       project=PROJECT,
       zone=ZONE,
-      num_slices=NUM_SLICES,
       device_type=DEVICE_TYPE,
-      base_output_directory=BASE_OUTPUT_DIR,
   )
 
-  xpk_benchmark_runner(cluster_config, [llama2_7b_4096, llama2_70b_4096])
+  workload_configs = []
+  for model in [model_configs.llama2_7b_4096, model_configs.llama2_70b_4096]:
+    workload_configs.append(
+        WorkloadConfig(
+            model=model,
+            num_slices=NUM_SLICES,
+            device_type=DEVICE_TYPE,
+            base_output_directory=BASE_OUTPUT_DIR,
+            base_docker_image=BASE_DOCKER_IMAGE,
+            libtpu_type=None,
+            libtpu_nightly_version=DATE,
+            pathways_config=None,
+            xpk_path=XPK_PATH,
+            num_steps=BENCHMARK_STEPS,
+            priority="medium",
+        )
+    )
+
+  xpk_benchmark_runner(cluster_config, workload_configs)
 
 
 if __name__ == "__main__":

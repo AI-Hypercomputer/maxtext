@@ -36,7 +36,7 @@ import functools
 from itertools import islice
 
 from absl import app
-from MaxText import pyconfig
+from maxtext.configs import pyconfig
 from maxtext.utils import model_creation_utils
 from maxtext.input_pipeline import input_pipeline_interface
 from maxtext.utils import maxtext_utils

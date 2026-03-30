@@ -518,9 +518,14 @@ def validate_and_assign_remat_tensors(keys):
       "mlpwi_0",
       "mlpwi_1",
       "mlpwo",
+      "moe_mlpwi_0",
+      "moe_mlpwi_1",
+      "moe_mlpwo",
       "query_proj",
       "key_proj",
       "value_proj",
+      "query_wa_proj",
+      "kv_wa_proj",
       "out_proj",
   ]
   assert keys["decoder_layer_input"] != "remat", "Cannot remeterialize this tensor with scan_layers=True"

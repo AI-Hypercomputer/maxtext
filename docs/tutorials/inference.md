@@ -130,7 +130,7 @@ curl http://localhost:8000/v1/completions \
 > **_NOTE:_**
 > You will need a HuggingFace token to run this command in addition to a MaxText model checkpoint. Please see the following [guide](https://huggingface.co/docs/hub/en/security-tokens) to generate one.
 
-To use a MaxText model architecture for samplers in reinforcement learning algorithms like GRPO, we can override the vLLM model architecture and pass in MaxText specific config arguments similar to the [online inference](online-inference) use-case. An example of an RL command using the MaxText model for samplers can be found below:
+To use a MaxText model architecture for samplers in reinforcement learning algorithms like GRPO, we can override the vLLM model architecture and pass in MaxText specific config arguments similar to the [online inference](https://maxtext.readthedocs.io/en/latest/tutorials/inference.html#online-inference) use-case. An example of an RL command using the MaxText model for samplers can be found below:
 
 ```bash
 python3 -m src.maxtext.trainers.post_train.rl.train_rl \

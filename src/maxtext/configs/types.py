@@ -223,6 +223,7 @@ ModelName = Literal[
     "deepseek2-236b",
     "deepseek3-671b",
     "deepseek3-671b-2dfsdp",
+    "deepseek3-671b-batchsplit",
     "deepseek3-test",
     "deepseek3-tiny",
     "deepseek3.2-671b",
@@ -919,9 +920,29 @@ class RematAndOffload(BaseModel):
       RematLocation.REMAT,
       description="Remat policy for the second MLP layer's output.",
   )
+  moe_mlpwi_0: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for the first part of a gated MoE's output.",
+  )
+  moe_mlpwi_1: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for the second part of a gated MoE's output.",
+  )
+  moe_mlpwo: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for the second MoE layer's output.",
+  )
   query_proj: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the query projection.")
   key_proj: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the key projection.")
   value_proj: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the value projection.")
+  query_wa_proj: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for the MLA query weighted attention projection.",
+  )
+  kv_wa_proj: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for the MLA key and value weighted attention projection.",
+  )
   qkv_proj: RematLocation = Field(RematLocation.REMAT, description="Remat policy for fused QKV projection.")
   out_proj: RematLocation = Field(
       RematLocation.REMAT,
@@ -1130,6 +1151,8 @@ class TrainingLoop(BaseModel):
       0.0,
       description="If set, training will stop early when this evaluation loss is reached.",
   )
+  abort_on_nan_loss: bool = Field(True, description="Check for NaN values and abort training.")
+  abort_on_inf_loss: bool = Field(True, description="Check for Inf values and abort training.")
   enable_dropout: bool = Field(True, description="Enables dropout in the model.")
   dropout_rate: float = Field(0.0, ge=0.0, le=1.0, description="The dropout rate.")
   enable_data_shuffling: bool = Field(True, description="Enables shuffling of the training data.")
@@ -1693,6 +1716,7 @@ class RLEvaluation(BaseModel):
 class Reward(BaseModel):
   """Configuration for the reward/penalty model in RL."""
 
+  reward_exact_answer: float = Field(5.0, description="Reward for an exact answer match.")
   reward_exact_format_match: float = Field(3.0, description="Reward for an exact format match.")
   reward_white_space_format_match: float = Field(1.5, description="Reward for a format match ignoring whitespace.")
   reward_partial_format_match: float = Field(0.5, description="Reward for a partial format match.")
@@ -2266,12 +2290,17 @@ class MaxTextConfig(
           "decoder_layer_input",
           "context",
           "mlpwi",
+          "moe_mlpwi_0",
+          "moe_mlpwi_1",
+          "moe_mlpwo",
           "mlpwi_0",
           "mlpwi_1",
           "mlpwo",
           "query_proj",
           "key_proj",
           "value_proj",
+          "query_wa_proj",
+          "kv_wa_proj",
           "mla_kv",
           "mla_q",
           "qkv_proj",

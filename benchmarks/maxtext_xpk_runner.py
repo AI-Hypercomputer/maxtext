@@ -35,9 +35,9 @@ import time
 import omegaconf
 
 import benchmarks.maxtext_trillium_model_configs as model_configs
+import benchmarks.xla_flags_library as xla_flags
 from benchmarks.globals import MAXTEXT_PKG_DIR
 from benchmarks.command_utils import run_command_with_updates
-import benchmarks.xla_flags_library as xla_flags
 from benchmarks.disruption_management.disruption_handler import DisruptionConfig
 from benchmarks.disruption_management.disruption_manager import DisruptionManager
 from benchmarks.xpk_configs import XpkClusterConfig
@@ -428,7 +428,7 @@ def build_user_command(
   if wl_config.hlo_dump:
     hlo_dump = "XLA_FLAGS='--xla_dump_large_constants --xla_dump_to=/tmp/xla_dump'"
     upload_hlo_dump = (
-        f" && gsutil -m cp -r /tmp/xla_dump  {wl_config.base_output_directory}/{wl_config.run_name}/hlo_dump"
+        f" && gcloud storage cp -r /tmp/xla_dump  {wl_config.base_output_directory}/{wl_config.run_name}/hlo_dump"
     )
   # Construct the command string with proper formatting and line continuations
   command = " ".join(
