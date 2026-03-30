@@ -393,6 +393,83 @@ class QuantTest(unittest.TestCase):
 
   def quantization_config(self, quant, logits_tolerance=2e-1, grad_tolerance=5e-1):
     """Run forward pass and backward pass for quantized model and compare with base model."""
+    cfg = self.init_pyconfig(quantization=quant)
+    model = model_creation_utils.create_model(self.cfg, self.mesh)
+    qt_model = model_creation_utils.create_model(cfg, self.mesh)
+
+    ids, decoder_segment_ids, decoder_positions = self.get_data()
+    var = model.init(
+        {"params": self.rng, "aqt": self.rng, "dropout": self.rng},
+        ids,
+        decoder_positions,
+        decoder_segment_ids,
+        enable_dropout=False,
+        mutable=True,
+    )
+    quantized_vars = qt_model.init(
+        {"params": self.rng, "aqt": self.rng, "dropout": self.rng},
+        ids,
+        decoder_positions,
+        decoder_segment_ids,
+        enable_dropout=False,
+        mutable=True,
+    )
+
+    def loss_base(all_vars, inputs):
+      logits, _ = model.apply(
+          all_vars,
+          *inputs,
+          enable_dropout=False,
+          rngs={"params": self.rng},
+          mutable=True,
+      )
+      return jnp.mean((logits) ** 2)
+
+    def loss_quant(all_vars, inputs):
+      logits, _ = qt_model.apply(
+          all_vars,
+          *inputs,
+          enable_dropout=False,
+          rngs={"params": self.rng},
+          mutable=True,
+      )
+      return jnp.mean((logits) ** 2)
+
+    # Compute gradients w.r.t. both models
+    grads_base = jax.grad(loss_base)(var, (ids, decoder_positions, decoder_segment_ids))
+    grads_quant = jax.grad(loss_quant)(quantized_vars, (ids, decoder_positions, decoder_segment_ids))
+
+    logits, _ = model.apply(
+        var,
+        ids,
+        decoder_positions,
+        decoder_segment_ids,
+        enable_dropout=False,
+        rngs={"params": self.rng},
+        mutable=True,
+    )
+    quant_logits, _ = qt_model.apply(
+        quantized_vars,
+        ids,
+        decoder_positions,
+        decoder_segment_ids,
+        enable_dropout=False,
+        rngs={"params": self.rng},
+        mutable=True,
+    )
+    print("relative error in logits:" f" {jnp.abs(quant_logits - logits).mean() / jnp.abs(logits).mean()}")
+    assert jnp.abs(quant_logits - logits).mean() / jnp.abs(logits).mean() < logits_tolerance
+    self.print_grad_diff(grads_base["params"], grads_quant["params"])
+    self.assertTrue(
+        self.pytree_allclose(
+            grads_base["params"],
+            grads_quant["params"],
+            tolerance=grad_tolerance,
+        )
+    )
+
+  def quantization_config_nnx(self, quant, logits_tolerance=2e-1, grad_tolerance=5e-1):
+    """Run forward and backward pass for NNX quantized model and compare with base."""
     rngs = nnx.Rngs(0)
 
     cfg = self.init_pyconfig(quantization=quant)
@@ -401,48 +478,28 @@ class QuantTest(unittest.TestCase):
 
     ids, decoder_segment_ids, decoder_positions = self.get_data()
 
-    # NNX functional gradient computation: split model into graphdef + params + rest,
-    # then define a pure loss function over params for jax.grad.
+    # NNX functional gradient: split into graphdef + params + rest,
+    # then define pure loss functions over params for jax.grad.
     base_graphdef, base_params, base_rest = nnx.split(model, nnx.Param, ...)
     qt_graphdef, qt_params, qt_rest = nnx.split(qt_model, nnx.Param, ...)
 
     def loss_base(params, inputs):
       m = nnx.merge(base_graphdef, params, base_rest)
-      logits = m(
-          inputs[0],
-          inputs[1],
-          inputs[2],
-          enable_dropout=False,
-      )
-      return jnp.mean((logits) ** 2)
+      logits = m(inputs[0], inputs[1], inputs[2], enable_dropout=False)
+      return jnp.mean(logits ** 2)
 
     def loss_quant(params, inputs):
       m = nnx.merge(qt_graphdef, params, qt_rest)
-      logits = m(
-          inputs[0],
-          inputs[1],
-          inputs[2],
-          enable_dropout=False,
-      )
-      return jnp.mean((logits) ** 2)
+      logits = m(inputs[0], inputs[1], inputs[2], enable_dropout=False)
+      return jnp.mean(logits ** 2)
 
-    # Compute gradients w.r.t. params
     grads_base = jax.grad(loss_base)(base_params, (ids, decoder_positions, decoder_segment_ids))
     grads_quant = jax.grad(loss_quant)(qt_params, (ids, decoder_positions, decoder_segment_ids))
 
-    logits = model(
-        ids,
-        decoder_positions,
-        decoder_segment_ids,
-        enable_dropout=False,
-    )
-    quant_logits = qt_model(
-        ids,
-        decoder_positions,
-        decoder_segment_ids,
-        enable_dropout=False,
-    )
-    print("relative error in logits:" f" {jnp.abs(quant_logits - logits).mean() / jnp.abs(logits).mean()}")
+    logits = model(ids, decoder_positions, decoder_segment_ids, enable_dropout=False)
+    quant_logits = qt_model(ids, decoder_positions, decoder_segment_ids, enable_dropout=False)
+
+    print(f"relative error in logits: {jnp.abs(quant_logits - logits).mean() / jnp.abs(logits).mean()}")
     assert jnp.abs(quant_logits - logits).mean() / jnp.abs(logits).mean() < logits_tolerance
     self.print_grad_diff(grads_base, grads_quant)
     self.assertTrue(
@@ -474,6 +531,16 @@ class QuantTest(unittest.TestCase):
   @pytest.mark.external_serving
   def test_fp8_nanoo_quantization(self):
     self.quantization_config("fp8_nanoo", grad_tolerance=1.0)
+
+  @pytest.mark.gpu_only
+  @pytest.mark.external_serving
+  def test_fp8_gpu_quantization_nnx(self):
+    self.quantization_config_nnx("fp8_gpu", grad_tolerance=1.0)
+
+  @pytest.mark.gpu_only
+  @pytest.mark.external_serving
+  def test_fp8_nanoo_quantization_nnx(self):
+    self.quantization_config_nnx("fp8_nanoo", grad_tolerance=1.0)
 
   @pytest.mark.skip(reason="No runner with GPU arch >= 89 is available")
   @pytest.mark.gpu_only
