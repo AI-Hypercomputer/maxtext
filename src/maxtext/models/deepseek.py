@@ -309,7 +309,7 @@ class DeepSeekGenericLayer(nnx.Module):
 
 
 class DeepSeekDenseLayer(DeepSeekGenericLayer):
-  """DeepSeek-style dense layer with Multi-Head Latent Attention."""
+  """DeepSeek-style dense layer with Multi-Head Latent Attention"""
 
   def __init__(
       self,
