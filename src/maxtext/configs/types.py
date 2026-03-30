@@ -309,7 +309,10 @@ class Checkpointing(BaseModel):
   enable_single_replica_ckpt_restoring: bool = Field(
       False, description="One replica reads and broadcasts the checkpoint."
   )
-  checkpoint_todelete_subdir: str | None = Field(None, description="Subdirectory to move checkpoints to before deletion. (Ignored if directory is prefixed with gs://)")
+  checkpoint_todelete_subdir: str | None = Field(
+      None,
+      description="Subdirectory to move checkpoints to before deletion. (Ignored if directory is prefixed with gs://)",
+  )
   checkpoint_todelete_full_path: str | None = Field(None, description="Full path to move checkpoints to before deletion.")
   force_unroll: bool = Field(
       False,

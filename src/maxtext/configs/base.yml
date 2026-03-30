@@ -60,7 +60,7 @@ enable_continuous_checkpointing: False
 # enables one replica to read the ckpt then broadcast to the rest
 enable_single_replica_ckpt_restoring: False
 
-# Subdirectory to move checkpoints to before deletion. For example: ".todelete"
+# Subdirectory to move checkpoints to before deletion. For example: ".todelete" (Ignored if directory is prefixed with gs://)
 checkpoint_todelete_subdir: None
 
 # Full path to move checkpoints to before deletion. For example: "/_trash"
