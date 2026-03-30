@@ -817,7 +817,7 @@ class RoutedMoE(nnx.Module):
       - lb_loss: Load balance loss (or None).
       - bias_updates: Bias updates (or None).
     """
-    use_te = getattr(self.config, "te_router_and_permutation_impl", False)
+    use_te = self.config.te_router_and_permutation_impl
     perm_state = PermState(use_te)
 
     if use_te:
@@ -1265,7 +1265,7 @@ class RoutedMoE(nnx.Module):
 
     # Extract gate expert bias internally when TE path is active.
     # This avoids exposing gate_expert_bias in the public API.
-    use_te = getattr(self.config, "te_router_and_permutation_impl", False)
+    use_te = self.config.te_router_and_permutation_impl
     if use_te and hasattr(self, 'gate') and self.gate.use_bias:
       gate_expert_bias = jnp.asarray(self.gate.bias[...], self.dtype)
     else:
@@ -2407,7 +2407,7 @@ class RoutedMoE(nnx.Module):
     cfg = self.config
     inputs = inputs.astype(cfg.dtype)
 
-    use_te = getattr(cfg, "te_router_and_permutation_impl", False)
+    use_te = cfg.te_router_and_permutation_impl
     if use_te:
       gate_logits, _ = self.gate(inputs, return_raw_logits=True)
       pre_bias_logits = None
