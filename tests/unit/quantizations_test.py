@@ -393,9 +393,15 @@ class QuantTest(unittest.TestCase):
 
   def quantization_config(self, quant, logits_tolerance=2e-1, grad_tolerance=5e-1):
     """Run forward pass and backward pass for quantized model and compare with base model."""
+    # Force Linen path for the base model config (base.yml defaults enable_nnx=True)
+    self.cfg.enable_nnx = False
+    self.cfg.pure_nnx_decoder = False
     cfg = self.init_pyconfig(quantization=quant)
+    cfg.enable_nnx = False
+    cfg.pure_nnx_decoder = False
     model = model_creation_utils.create_model(self.cfg, self.mesh)
     qt_model = model_creation_utils.create_model(cfg, self.mesh)
+    
 
     ids, decoder_segment_ids, decoder_positions = self.get_data()
     var = model.init(
@@ -472,7 +478,12 @@ class QuantTest(unittest.TestCase):
     """Run forward and backward pass for NNX quantized model and compare with base."""
     rngs = nnx.Rngs(0)
 
+    # Force NNX path for both base and quantized model configs
+    self.cfg.enable_nnx = True
+    self.cfg.pure_nnx_decoder = True
     cfg = self.init_pyconfig(quantization=quant)
+    cfg.enable_nnx = True
+    cfg.pure_nnx_decoder = True
     model = model_creation_utils.create_model(self.cfg, self.mesh, rngs=rngs)
     qt_model = model_creation_utils.create_model(cfg, self.mesh, rngs=rngs)
 
