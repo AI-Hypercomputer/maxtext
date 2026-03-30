@@ -18,14 +18,17 @@ This module provides wrapper functions for TransformerEngine's token dispatch
 and combine operations used in Mixture of Experts (MoE) models.
 
 The integration provides:
-- token_dispatch: Scatter tokens to their designated experts
-- token_combine: Gather tokens back from experts
+- te_permute: Route + dispatch tokens (delegates routing to te_router, then dispatches)
+- te_unpermute: Combine expert outputs back to original token order
+- te_token_dispatch: Low-level scatter tokens to their designated experts
+- te_token_combine: Low-level gather tokens back from experts
 - sort_chunks_by_index: Reorder chunks for expert parallelism
 - Efficient extraction of tokens_per_expert for ragged_all_to_all
 
 Key Design:
-- TE primitives use mask-based routing_map, so we convert MaxText's
-  index-based top_k_indices to a binary routing mask.
+- Routing logic (fused top-k, aux loss, bias updates) lives in te_router.py.
+- This module handles the permutation layer: dispatching tokens to experts
+  and combining them back, using TE's optimized kernels.
 - tokens_per_expert is computed efficiently inside the TE kernels,
   avoiding double iteration over the routing map.
 """
@@ -34,6 +37,8 @@ from typing import Optional, Tuple
 
 import jax
 import jax.numpy as jnp
+
+from maxtext.layers import te_router
 
 # Import TransformerEngine permutation primitives
 try:
@@ -58,93 +63,6 @@ def check_te_permutation_available():
         "Please install TransformerEngine with JAX support: "
         "pip install transformer-engine[jax]"
     )
-
-
-def create_routing_map_from_indices(
-    top_k_indices: jnp.ndarray,
-    num_experts: int,
-) -> jnp.ndarray:
-  """Convert top-k expert indices to a binary routing mask.
-
-  The TE permutation primitives expect a routing_map (binary mask) of shape
-  [num_tokens, num_experts] where routing_map[i, j] = 1 means token i is
-  routed to expert j.
-
-  Args:
-    top_k_indices: Expert indices of shape [batch, seq, num_experts_per_tok]
-                   or [num_tokens, num_experts_per_tok].
-    num_experts: Total number of experts.
-
-  Returns:
-    routing_map: Binary mask of shape [num_tokens, num_experts].
-  """
-  # Flatten to 2D if needed: [num_tokens, num_experts_per_tok]
-  original_shape = top_k_indices.shape
-  if top_k_indices.ndim == 3:
-    num_tokens = original_shape[0] * original_shape[1]
-    top_k_indices = top_k_indices.reshape(num_tokens, -1)
-
-  # Create one-hot encoding for each selected expert
-  # Shape: [num_tokens, num_experts_per_tok, num_experts]
-  one_hot = jax.nn.one_hot(top_k_indices, num_classes=num_experts, dtype=jnp.int32)
-
-  # Sum across the top-k dimension to get binary mask
-  # Shape: [num_tokens, num_experts]
-  routing_map = jnp.sum(one_hot, axis=1)
-
-  return routing_map
-
-
-def create_dense_probs_from_topk(
-    top_k_weights: jnp.ndarray,
-    top_k_indices: jnp.ndarray,
-    num_experts: int,
-) -> jnp.ndarray:
-  """Convert top-k weights to dense probability tensor for TE.
-
-  TE's token_dispatch expects probs of shape [num_tokens, num_experts] where
-  probs[i, j] = routing probability for token i to expert j (0 if not routed).
-
-  Args:
-    top_k_weights: Top-k routing weights of shape [batch, seq, num_experts_per_tok]
-                   or [num_tokens, num_experts_per_tok]. These are the softmax
-                   probabilities for the selected experts.
-    top_k_indices: Expert indices of shape [batch, seq, num_experts_per_tok]
-                   or [num_tokens, num_experts_per_tok].
-    num_experts: Total number of experts.
-
-  Returns:
-    dense_probs: Dense probability tensor of shape [num_tokens, num_experts].
-                 Non-selected experts have probability 0.
-  """
-  # Flatten to 2D if needed
-  original_shape = top_k_indices.shape
-  if top_k_indices.ndim == 3:
-    num_tokens = original_shape[0] * original_shape[1]
-    top_k_indices = top_k_indices.reshape(num_tokens, -1)
-    top_k_weights = top_k_weights.reshape(num_tokens, -1)
-  else:
-    num_tokens = top_k_indices.shape[0]
-
-  num_experts_per_tok = top_k_indices.shape[-1]
-
-  # Create one-hot encoding for each selected expert
-  # Shape: [num_tokens, num_experts_per_tok, num_experts]
-  one_hot = jax.nn.one_hot(top_k_indices, num_classes=num_experts, dtype=top_k_weights.dtype)
-
-  # Scale one-hot by weights: multiply each expert's one-hot by its weight
-  # top_k_weights shape: [num_tokens, num_experts_per_tok]
-  # Expand for broadcasting: [num_tokens, num_experts_per_tok, 1]
-  weights_expanded = top_k_weights[:, :, None]
-
-  # Element-wise multiply: [num_tokens, num_experts_per_tok, num_experts]
-  weighted_one_hot = one_hot * weights_expanded
-
-  # Sum across top-k dimension to get dense probs
-  # Shape: [num_tokens, num_experts]
-  dense_probs = jnp.sum(weighted_one_hot, axis=1)
-
-  return dense_probs
 
 
 def te_token_dispatch(
@@ -418,3 +336,138 @@ def compute_reverse_ragged_all_to_all_params(
   ).squeeze(0)
 
   return input_offsets, send_sizes, output_offsets, recv_sizes
+
+
+def te_permute(
+    inputs: jnp.ndarray,
+    gate_logits: jnp.ndarray,
+    gate_expert_bias: Optional[jnp.ndarray],
+    num_experts: int,
+    num_experts_per_tok: int,
+    dtype: jnp.dtype,
+    logits_dot_in_fp32: bool,
+    routed_score_func: str,
+    n_routing_groups: int,
+    topk_routing_group: int,
+    routed_scaling_factor: float,
+    load_balance_loss_weight: float,
+    should_update_load_balance: bool,
+    routed_bias_update_rate: float,
+    te_permutation_align_size: int,
+    roll_to_expert_id: Optional[int] = None,
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, Optional[jnp.ndarray],
+           Optional[jnp.ndarray], jnp.ndarray, Optional[jnp.ndarray]]:
+  """TE routing + permutation: fused router then TE token dispatch.
+
+  Delegates routing to te_router.te_route(), then dispatches tokens
+  to experts via te_token_dispatch().
+
+  Args:
+    inputs: Input tensor of shape [batch, seq, hidden].
+    gate_logits: Raw GEMM logits [batch, seq, num_experts] (no score_func/bias).
+    gate_expert_bias: Expert bias [num_experts] or empty array [0].
+    num_experts: Total number of experts.
+    num_experts_per_tok: Number of experts each token is routed to.
+    dtype: Compute dtype.
+    logits_dot_in_fp32: Whether to cast logits to float32 for routing.
+    routed_score_func: Score function name ("softmax", "sigmoid", or "").
+    n_routing_groups: Number of groups for grouped top-k routing.
+    topk_routing_group: Top-k at group level.
+    routed_scaling_factor: Scaling factor for output probabilities.
+    load_balance_loss_weight: Weight for load balance loss (0 disables).
+    should_update_load_balance: Whether to compute bias updates.
+    routed_bias_update_rate: Rate for bias updates.
+    te_permutation_align_size: Alignment size for padding (0 disables).
+    roll_to_expert_id: Expert ID offset for ring-of-experts.
+
+  Returns:
+    Tuple of:
+      - permuted_outputs: Tokens grouped by expert [num_out_tokens, hidden].
+      - row_id_map: Mapping for unpermute phase.
+      - tokens_per_expert: Token counts per expert [num_experts].
+      - lb_loss: Scalar load balance loss (or None).
+      - bias_updates: Bias update direction [num_experts] (or None).
+      - sparse_probs: Sparse routing probs [num_tokens, num_experts] for combine.
+      - pad_offsets: Padding offsets per expert (or None).
+  """
+  check_te_permutation_available()
+
+  sparse_probs, routing_map, lb_loss, bias_updates = te_router.te_route(
+      gate_logits,
+      gate_expert_bias,
+      num_experts=num_experts,
+      num_experts_per_tok=num_experts_per_tok,
+      dtype=dtype,
+      logits_dot_in_fp32=logits_dot_in_fp32,
+      routed_score_func=routed_score_func,
+      n_routing_groups=n_routing_groups,
+      topk_routing_group=topk_routing_group,
+      routed_scaling_factor=routed_scaling_factor,
+      load_balance_loss_weight=load_balance_loss_weight,
+      should_update_load_balance=should_update_load_balance,
+      routed_bias_update_rate=routed_bias_update_rate,
+      roll_to_expert_id=roll_to_expert_id,
+  )
+
+  hidden_size = inputs.shape[-1]
+  num_tokens = inputs.shape[0] * inputs.shape[1]
+  num_out_tokens = num_tokens * num_experts_per_tok
+
+  align_size = te_permutation_align_size
+  if align_size == 0:
+    align_size = None
+
+  permuted_outputs, _permuted_probs, row_id_map, pad_offsets, tokens_per_expert = (
+      te_token_dispatch(
+          inputs.reshape(-1, hidden_size),
+          routing_map,
+          num_out_tokens=num_out_tokens,
+          probs=sparse_probs,
+          align_size=align_size,
+      )
+  )
+
+  return (permuted_outputs, row_id_map, tokens_per_expert, lb_loss,
+          bias_updates, sparse_probs, pad_offsets)
+
+
+def te_unpermute(
+    expert_outputs: jnp.ndarray,
+    row_id_map: jnp.ndarray,
+    batch_size: int,
+    sequence_length: int,
+    dtype: jnp.dtype,
+    is_llama4: bool = False,
+    dense_probs: Optional[jnp.ndarray] = None,
+    pad_offsets: Optional[jnp.ndarray] = None,
+) -> jnp.ndarray:
+  """Unpermute expert outputs using TransformerEngine kernels.
+
+  Args:
+    expert_outputs: Output from grouped GEMM [num_out_tokens, hidden].
+    row_id_map: Row ID map from te_permute.
+    batch_size: Original batch size.
+    sequence_length: Original sequence length.
+    dtype: Output dtype.
+    is_llama4: If True, skip weighted combination (implicit weights of 1).
+    dense_probs: Dense routing probs [num_tokens, num_experts] from te_permute.
+                 Used as merging_probs for weighted combination.
+    pad_offsets: Padding offsets per expert from te_permute (for unpadding).
+
+  Returns:
+    Combined output tensor [batch, seq, hidden].
+  """
+  check_te_permutation_available()
+
+  merging_probs = None
+  if not is_llama4:
+    merging_probs = dense_probs
+
+  output = te_token_combine(
+      expert_outputs,
+      row_id_map,
+      merging_probs=merging_probs,
+      pad_offsets=pad_offsets,
+  )
+
+  return output.reshape(batch_size, sequence_length, -1).astype(dtype)

@@ -611,9 +611,9 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to use Ring of Experts for sparse matmul expert parallelism.",
   )
-  te_permutation_impl: bool = Field(
+  te_router_and_permutation_impl: bool = Field(
       False,
-      description="Whether to use TransformerEngine permutation kernels for MoE token dispatch/combine.",
+      description="Whether to use TransformerEngine fused router and permutation kernels for MoE routing and token dispatch/combine.",
   )
   te_permutation_align_size: int = Field(
       128,
@@ -2386,6 +2386,8 @@ class MaxTextConfig(
         raise ValueError("GPT-OSS MoE only supports dropless (capacity_factor=-1) with dense matmul.")
       if self.routed_bias and self.routed_bias_update_rate > 0.0 and self.decoder_block != DecoderBlockType.DEEPSEEK:
         raise ValueError("Loss-free load balancing is only supported for the DeepSeek decoder block.")
+      if self.te_router_and_permutation_impl and not self.sparse_matmul:
+        raise ValueError("te_router_and_permutation_impl=True requires sparse_matmul=True.")
     if self.use_multimodal:
       valid_mm_models = (
           "gemma3-4b",
