@@ -1,0 +1,196 @@
+diff --git a/qwix/_src/flax_util.py b/qwix/_src/flax_util.py
+index 4ea5d80..7ae95d3 100644
+--- a/qwix/_src/flax_util.py
++++ b/qwix/_src/flax_util.py
+@@ -308,13 +308,13 @@ def unbox(maybe_boxed: Any) -> Any:
+ 
+ 
+ def update_sharding(
+-    spec: Sequence[Any],
++    spec: Sequence[Any] | jax.sharding.PartitionSpec,
+     *,
+     shape: Sequence[int] | None = None,
+     split: Collection[int] | None = None,
+     merge: Collection[int] | None = None,
+     transpose: Sequence[int | None] | None = None,
+-) -> tuple[Any, ...]:
++) -> tuple[Any, ...] | jax.sharding.PartitionSpec:
+   """Derives the partition spec from an existing spec.
+ 
+   Args:
+@@ -330,21 +330,30 @@ def update_sharding(
+     The updated partition spec.
+   """
+   assert bool(split) + bool(merge) + bool(transpose) <= 1
++  is_pspec = isinstance(spec, jax.sharding.PartitionSpec)
++  spec_list = list(spec)
++
+   if split:
+-    spec = [(a, None) if i in split else (a,) for i, a in enumerate(spec)]
+-    spec = sum(spec, ())  # flatten the list of tuples.
++    spec_list = [
++        (a, None) if i in split else (a,) for i, a in enumerate(spec_list)
++    ]
++    spec_list = list(sum(spec_list, ()))  # flatten the list of tuples.
+   elif merge:
+     for i in merge:
+-      spec = spec[: i + 1] + spec[i + 2 :]  # pytype: disable=unsupported-operands
++      spec_list = spec_list[: i + 1] + spec_list[i + 2 :]
+   elif transpose:
+-    spec = tuple(spec[i] if i is not None else None for i in transpose)
++    spec_list = [
++        spec_list[i] if i is not None else None for i in transpose
++    ]
+ 
+   if shape:
+-    assert len(shape) == len(spec), f'{shape=} {spec=}'
++    assert len(shape) == len(spec_list), f'{shape=} {spec_list=}'
+     # For scales: remove sharding for dimensions of size 1.
+-    spec = tuple(None if d == 1 else a for a, d in zip(spec, shape))
++    spec_list = [None if d == 1 else a for a, d in zip(spec_list, shape)]
+ 
+-  return spec
++  if is_pspec:
++    return jax.sharding.PartitionSpec(*spec_list)
++  return tuple(spec_list)
+ 
+ 
+ def update_boxed(
+@@ -380,7 +389,7 @@ def update_boxed(
+     shape = boxed.unbox().shape
+     for possible_field in ('names', 'mesh_axes', 'axes_types'):
+       axes = getattr(boxed, possible_field, None)
+-      if isinstance(axes, (list, tuple)):
++      if isinstance(axes, (list, tuple, jax.sharding.PartitionSpec)):
+         axes = update_sharding(
+             axes, shape=shape, split=split, merge=merge, transpose=transpose
+         )
+@@ -396,11 +405,13 @@ def update_boxed(
+     else:
+       sharding_key = 'sharding_names'
+     axes = metadata.get(sharding_key, None)
+-    if isinstance(axes, (list, tuple)):
+-      axes = update_sharding(
++    if isinstance(axes, (list, tuple, jax.sharding.PartitionSpec)):
++      updated_axes = update_sharding(
+           axes, shape=shape, split=split, merge=merge, transpose=transpose
+       )
+-      boxed.set_metadata(sharding_key, axes)
++      # Avoid mutating metadata unless sharding actually changed.
++      if axes != updated_axes:
++        boxed.set_metadata(sharding_key, updated_axes)
+   elif isinstance(boxed, jax.Array):  # not boxed.
+     if value is not None:
+       boxed = value
+diff --git a/qwix/_src/providers/lora.py b/qwix/_src/providers/lora.py
+index e98c833..07be623 100644
+--- a/qwix/_src/providers/lora.py
++++ b/qwix/_src/providers/lora.py
+@@ -13,6 +13,7 @@
+ # limitations under the License.
+ """Low-Rank Adapation (LoRA) support."""
+ import dataclasses
++import math
+ import string
+ from typing import Any, Callable, Collection, Sequence
+ import warnings
+@@ -189,29 +190,87 @@ class LoraProvider(ptq.PtqProvider):
+     if weight_name is None:  # rhs is not a weight.
+       return res
+ 
+-    # We only support ...a,ab->...b for now.
+-    assert (
+-        len(rhs.shape) == 2
+-        and tuple(dimension_numbers[0][1]) == (0,)
+-        and not dimension_numbers[1][1]
+-    ), f'Unsupported: {rhs.shape=} {dimension_numbers=}'
++    (contract_lhs, contract_rhs) = dimension_numbers[0]
++    (batch_lhs, batch_rhs) = dimension_numbers[1]
++
++    if len(rhs.shape) == 2 and not batch_rhs:
++      # Standard LoRA path for ...a,ab->...b
++      lora_a, lora_b = _get_or_create_lora_params(
++          name=weight_name,
++          rule=rule,
++          a_shape=(rhs.shape[0], rule.rank),
++          b_shape=(rule.rank, rhs.shape[1]),
++          a_sharding_transpose=(0, None),
++          b_sharding_transpose=(None, 1),
++      )
++
++      if rule.dropout > 0:
++        lhs = nnx.Dropout(rule.dropout, deterministic=False)(
++            lhs, rngs=flax_util.make_rng('dropout')
++        )
++
++      return res + lhs @ lora_a @ lora_b * (rule.alpha / rule.rank)
++
++    # General LoRA path for N-D kernels and batch dimensions.
++    # Identify contracting, batch, and out axes for rhs.
++    contract_rhs = tuple(contract_rhs)
++    batch_rhs = tuple(batch_rhs)
++    out_rhs = tuple(i for i in range(rhs.ndim) if i not in contract_rhs and i not in batch_rhs)
++    
++    batch_shape = tuple(rhs.shape[i] for i in batch_rhs)
++    contract_shape = tuple(rhs.shape[i] for i in contract_rhs)
++    out_shape = tuple(rhs.shape[i] for i in out_rhs)
++    
++    # LoRA A: (batch, contracting, rank)
++    a_shape = batch_shape + (math.prod(contract_shape), rule.rank)
++    # LoRA B: (batch, rank, out)
++    b_shape = batch_shape + (rule.rank, math.prod(out_shape))
++
++    # Sharding transposes for update_sharding.
++    # lora_a inherits batch and first contracting axis.
++    a_sharding_transpose = batch_rhs + (contract_rhs[0] if contract_rhs else None, None)
++    # lora_b inherits batch and first out axis.
++    b_sharding_transpose = batch_rhs + (None, out_rhs[0] if out_rhs else None)
+ 
+     lora_a, lora_b = _get_or_create_lora_params(
+         name=weight_name,
+         rule=rule,
+-        a_shape=(rhs.shape[0], rule.rank),
+-        b_shape=(rule.rank, rhs.shape[1]),
+-        a_sharding_transpose=(0, None),
+-        b_sharding_transpose=(None, 1),
++        a_shape=a_shape,
++        b_shape=b_shape,
++        a_sharding_transpose=a_sharding_transpose,
++        b_sharding_transpose=b_sharding_transpose,
+     )
+ 
+     if rule.dropout > 0:
+-      # This also works for linen.
+       lhs = nnx.Dropout(rule.dropout, deterministic=False)(
+           lhs, rngs=flax_util.make_rng('dropout')
+       )
+ 
+-    return res + lhs @ lora_a @ lora_b * (rule.alpha / rule.rank)
++    # delta_a = lhs @ lora_a
++    lora_a_reshaped = jax.numpy.reshape(lora_a, batch_shape + contract_shape + (rule.rank,))
++    lora_a_batch_axes = tuple(range(len(batch_shape)))
++    lora_a_contract_axes = tuple(range(len(batch_shape), len(batch_shape) + len(contract_shape)))
++    delta_a = jax.lax.dot_general(
++        lhs,
++        lora_a_reshaped,
++        ((contract_lhs, lora_a_contract_axes), (batch_lhs, lora_a_batch_axes)),
++        precision=precision,
++    )
++
++    # delta = delta_a @ lora_b
++    lora_b_reshaped = jax.numpy.reshape(lora_b, batch_shape + (rule.rank,) + out_shape)
++    delta_a_batch_axes = tuple(range(len(batch_shape)))
++    delta = jax.lax.dot_general(
++        delta_a,
++        lora_b_reshaped,
++        (((delta_a.ndim - 1,), (len(batch_shape),)), (delta_a_batch_axes, lora_a_batch_axes)),
++        precision=precision,
++    )
++
++    if delta.shape != res.shape:
++      delta = jax.numpy.reshape(delta, res.shape)
++    return res + delta * (rule.alpha / rule.rank)
++
+ 
+   def einsum(
+       self,
