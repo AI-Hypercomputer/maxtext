@@ -21,6 +21,8 @@ The TE router fuses score_function + top-k selection + expert bias + scaling
 into a single CUDA kernel with proper automatic differentiation support.
 
 The integration provides:
+- te_route: Full routing pipeline — fused top-k, aux loss, and bias updates.
+  This is the main entry point called by te_permutation.te_permute().
 - te_fused_topk: Fused score_function(logits) → [bias] → top-k → [post-softmax] → scale.
   Returns (sparse_probs, routing_map) in the format expected by TE permutation.
 - te_compute_aux_scores: Clean score_function(logits) → top-k (no bias/groups/scaling).
@@ -200,3 +202,104 @@ def te_aux_loss(
   """
   check_te_router_available()
   return fused_moe_aux_loss(probs, tokens_per_expert, topk, coeff)
+
+
+def te_route(
+    gate_logits: jnp.ndarray,
+    gate_expert_bias: Optional[jnp.ndarray],
+    num_experts: int,
+    num_experts_per_tok: int,
+    dtype: jnp.dtype,
+    logits_dot_in_fp32: bool,
+    routed_score_func: str,
+    n_routing_groups: int,
+    topk_routing_group: int,
+    routed_scaling_factor: float,
+    load_balance_loss_weight: float,
+    should_update_load_balance: bool,
+    routed_bias_update_rate: float,
+    roll_to_expert_id: Optional[int] = None,
+) -> Tuple[jnp.ndarray, jnp.ndarray, Optional[jnp.ndarray], Optional[jnp.ndarray]]:
+  """Full TE routing pipeline: fused top-k, aux loss, and bias updates.
+
+  Runs TE's fused router kernel to produce routing decisions, then computes
+  the auxiliary load-balancing loss and bias updates if configured.
+
+  The main routing kernel and aux scoring kernel are logically independent
+  (both read only from raw_logits_2d with no data dependency between them),
+  so XLA can overlap their GPU execution automatically.
+
+  Args:
+    gate_logits: Raw GEMM logits [batch, seq, num_experts] (before score_func/bias).
+    gate_expert_bias: Expert bias [num_experts] or empty array [0].
+    num_experts: Total number of experts.
+    num_experts_per_tok: Number of experts each token is routed to.
+    dtype: Compute dtype.
+    logits_dot_in_fp32: Whether to cast logits to float32 for routing.
+    routed_score_func: Score function name ("softmax", "sigmoid", or "").
+    n_routing_groups: Number of groups for grouped top-k routing.
+    topk_routing_group: Top-k at group level.
+    routed_scaling_factor: Scaling factor for output probabilities.
+    load_balance_loss_weight: Weight for load balance loss (0 disables).
+    should_update_load_balance: Whether to compute bias updates.
+    routed_bias_update_rate: Rate for bias updates.
+    roll_to_expert_id: Expert ID offset for ring-of-experts.
+
+  Returns:
+    Tuple of:
+      - sparse_probs: Sparse routing probs [num_tokens, num_experts].
+      - routing_map: Boolean routing mask [num_tokens, num_experts].
+      - lb_loss: Scalar load balance loss (or None).
+      - bias_updates: Bias update direction [num_experts] (or None).
+  """
+  check_te_router_available()
+
+  num_tokens = gate_logits.shape[0] * gate_logits.shape[1]
+  raw_logits_2d = gate_logits.reshape(num_tokens, -1)
+
+  router_dtype = jnp.float32 if logits_dot_in_fp32 else dtype
+  raw_logits_2d = raw_logits_2d.astype(router_dtype)
+  expert_bias_for_te = None
+  if gate_expert_bias is not None and gate_expert_bias.size > 0:
+    expert_bias_for_te = gate_expert_bias.astype(router_dtype)
+
+  sparse_probs, routing_map = te_fused_topk(
+      raw_logits_2d,
+      topk=num_experts_per_tok,
+      score_function=routed_score_func,
+      use_pre_softmax=False,
+      num_groups=n_routing_groups,
+      group_topk=topk_routing_group,
+      scaling_factor=routed_scaling_factor,
+      expert_bias=expert_bias_for_te,
+  )
+
+  sparse_probs = sparse_probs.astype(dtype)
+
+  lb_loss = None
+  if load_balance_loss_weight > 0.0:
+    aux_scores, aux_routing_map = te_compute_aux_scores(
+        raw_logits_2d,
+        topk=num_experts_per_tok,
+        score_function=routed_score_func,
+    )
+    aux_tokens_per_expert = jnp.sum(aux_routing_map.astype(jnp.int32), axis=0)
+    lb_loss = te_aux_loss(
+        aux_scores, aux_tokens_per_expert,
+        topk=num_experts_per_tok,
+        coeff=load_balance_loss_weight,
+    )
+
+  bias_updates = None
+  if should_update_load_balance:
+    main_tokens_per_expert = jnp.sum(routing_map.astype(jnp.int32), axis=0)
+    total_assignments = num_tokens * num_experts_per_tok
+    average_load = total_assignments / num_experts
+    direction = jnp.sign(average_load - main_tokens_per_expert)
+    bias_updates = direction * routed_bias_update_rate
+
+  if roll_to_expert_id is not None:
+    routing_map = jnp.roll(routing_map, -roll_to_expert_id, axis=-1)
+    sparse_probs = jnp.roll(sparse_probs, -roll_to_expert_id, axis=-1)
+
+  return sparse_probs, routing_map, lb_loss, bias_updates
