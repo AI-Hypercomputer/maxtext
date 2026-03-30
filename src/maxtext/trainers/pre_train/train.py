@@ -41,6 +41,7 @@ from flax.linen import partitioning as nn_partitioning
 from maxtext.configs import pyconfig
 from maxtext.common.common_types import ShardMode
 from maxtext.utils.globals import EPS
+import maxtext.utils.elastic_utils as elastic_utils
 # Placeholder: internal
 
 # pylint: disable=too-many-positional-arguments
@@ -679,8 +680,17 @@ def run(config, recorder, diagnostic_config):
 def main(argv: Sequence[str]) -> None:
   config, recorder, diagnostic_config = initialize(argv)
   record_goodput(recorder, RECORD_JOB_START_TIME)
-  with maybe_monitor_goodput(config):
+
+  def train_func():
+    config, recorder, diagnostic_config = initialize(argv)
     run(config, recorder, diagnostic_config)
+
+  if config.elastic_pause_resume:
+    max_logging.log("Elastic Pause and Resume Enabled.")
+    train_func = elastic_utils.elastic_pause_resume(config)(train_func)
+
+  with maybe_monitor_goodput(config):
+    train_func()
 
 
 if __name__ == "__main__":
