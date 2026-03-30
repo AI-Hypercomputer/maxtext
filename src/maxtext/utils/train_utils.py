@@ -162,7 +162,7 @@ def jit_train_and_eval_step(
   """Returns a JIT-compiled train and eval step function."""
   if config.enable_diloco:
     train_step_partial = functools.partial(train_step, model, config, state_mesh_shardings, params_shardings)
-    train_step = diloco.build_diloco_train_step(config, train_step_partial)
+    train_step = diloco.build_diloco_train_step(config, train_step_partial, mesh=mesh)
   data_sharding = sharding.get_input_data_sharding(config, mesh)
   p_train_step = jit_train_step(config, model, state, state_mesh_shardings, data_sharding, train_step, params_shardings)
   p_eval_step = None
@@ -229,7 +229,7 @@ def setup_train_loop(config, recorder, devices=None):
 
     if config.enable_diloco:
       with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
-        state, outer_opt_state_sharding = diloco.build_diloco_state(config, lambda: state)
+        state, outer_opt_state_sharding = diloco.build_diloco_state(config, lambda: state, mesh=mesh)
 
         # create state_mesh_shardings for the DilocoState
         inner_state_shardings = diloco.add_diloco_to_sharding(state_mesh_shardings)
