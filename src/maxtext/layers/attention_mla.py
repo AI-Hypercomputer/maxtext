@@ -786,6 +786,10 @@ class MLA(Attention):
           rngs=self.rngs,
       )
 
+  @property
+  def out_head_dim(self) -> int:
+    return self.v_head_dim
+
   def mla_query_projection(
       self, inputs_q: Array, inputs_positions: Array, model_mode
   ) -> tuple[jax.Array, Optional[jax.Array]]:

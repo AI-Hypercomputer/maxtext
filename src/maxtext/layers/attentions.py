@@ -696,9 +696,13 @@ class Attention(nnx.Module):
     query, key, value = qkv_proj[:, :, 0, ...], qkv_proj[:, :, 1, ...], qkv_proj[:, :, 2, ...]
     return query, key, value
 
+  @property
+  def out_head_dim(self) -> int:
+    return self.head_dim
+
   def init_out_w(self, output_dim: int) -> nnx.Module:
     """out projection"""
-    in_features = (self.num_query_heads, self.head_dim)
+    in_features = (self.num_query_heads, self.out_head_dim)
     out_features = output_dim
     out_kernel_axis = (
         (None, None, None) if self.config.ici_context_autoregressive_parallelism > 1 else ("heads", "kv", "embed")
@@ -706,7 +710,7 @@ class Attention(nnx.Module):
     axis = (-2, -1)
 
     if self.is_qwen3_next:
-      in_features = self.num_query_heads * self.head_dim
+      in_features = self.num_query_heads * self.out_head_dim
       out_kernel_axis = ("mlp", "embed")
       axis = (-1,)
 
