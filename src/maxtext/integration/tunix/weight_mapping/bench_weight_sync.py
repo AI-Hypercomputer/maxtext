@@ -24,6 +24,19 @@ from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from maxtext.utils import model_creation_utils
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 
+
+def debug_sharding(array, prefix=""):
+  global_shape = array.shape
+  jax.debug.inspect_array_sharding(
+      array,
+      callback=lambda sharding_obj: print(
+          prefix + f"\tGlobal Shape: {global_shape}\n"
+          f"\tLocal Shape: {sharding_obj.shard_shape(global_shape)}\n"
+          f"\tSharding Object: {sharding_obj}\n"
+      ),
+  )
+
+
 GREEN = "\033[92m"
 YELLOW = "\033[93m"
 RESET = "\033[0m"
@@ -37,7 +50,12 @@ _JAX_COMPILATION_CACHE_DIR = "/tmp/jax_cache"
 # Flags
 FLAGS = flags.FLAGS
 _XPROF = flags.DEFINE_bool('xprof', False, 'xprof')
-_RAND_INIT = flags.DEFINE_bool('rand_init', False, 'Whether to use random initialization instead of loading from checkpoint, for faster testing.')  
+_RAND_INIT = flags.DEFINE_bool(
+    "rand_init", False, "Whether to use random initialization instead of loading from checkpoint, for faster testing."
+)
+# _RAND_INIT = flags.DEFINE_bool(
+#     "rand_init", True, "Whether to use random initialization instead of loading from checkpoint, for faster testing."
+# )
 
 def _setup_jax_compilation_cache():
   jax_config.update("jax_compilation_cache_dir", _JAX_COMPILATION_CACHE_DIR)
@@ -420,7 +438,7 @@ def main():
   print("Loading MaxText model...")
   print("="*80)
   # path1 = "/home/wyzhang_google_com/mnt/rl/maxtext/src/maxtext/configs/base.yml"
-  path1 = "/home/hengtaoguo_google_com/projects/maxtext/src/maxtext/configs/base.yml"
+  path1 = "/home/shuningjin_google_com/maxtext/src/maxtext/configs/base.yml"
   path2 = os.path.join(os.path.expanduser("~"), "mnt/rl/maxtext/src/maxtext/configs/base.yml")
   if os.path.exists(path1):
     base_yaml_path = path1
@@ -445,7 +463,8 @@ def main():
       path_str = jax.tree_util.keystr(path)
       logging.info(f"Name: {path_str}, shape: {leaf.shape}")
       logging.info(f"\tSharding: {leaf.sharding}")
-  
+
+  # conversion time does not differ in cluster, 4s (faster than 10s on v5p-8)
   converter = MaxTextToVLLMConverter(config, mesh)
   with timer("Overall Conversion "):
     vllm_state = converter.convert(model_state)
@@ -458,18 +477,75 @@ def main():
   print("Loading vLLM model for generation test...")
   print("="*80)
   llm = LLM(
-    "Qwen/Qwen3-30B-A3B",
-    max_model_len=16,
-    tensor_parallel_size=4,
-    gpu_memory_utilization=0.5,
+      "Qwen/Qwen3-30B-A3B",
+      max_model_len=16,
+      tensor_parallel_size=4,
+      gpu_memory_utilization=0.5,
+      load_format="dummy",  # not load hf to vllm, assign maxtext to vllm
   )
   llm_state = llm.llm_engine.model_executor.driver_worker.model_runner.state
   # save_dict_to_file(llm_state, "llm_state_shapes.txt")
 
+  # v5p-8, 30s -> expect 10s
+  # cluster v5p-64, 3min -> expect 1min
+
+  # 1. verify tpu -> cpu -> tpu?
   with timer(f"Assigning {len(vllm_state)} weights to vLLM model"):
     for key, weight in vllm_state.items():
+      print(key)
+      debug_sharding(weight, "weight")
+      debug_sharding(llm_state[key], "llm_state[key] (before)")
       target_sharding = llm_state[key].sharding
-      llm_state[key] = jax.device_put(np.asarray(weight), target_sharding)
+      llm_state[key] = jax.device_put(weight, target_sharding)
+      debug_sharding(llm_state[key], "llm_state[key] (after)")
+
+
+  # with timer(f"Assigning {len(vllm_state)} weights to vLLM model"):
+
+  #   # print(key)
+  #   # debug_sharding(weight, "weight")
+  #   # debug_sharding(llm_state[key], "llm_state[key] (before)")
+
+    
+  #   # Extract the target sharding PyTree from the vLLM state
+  #   target_shardings = jax.tree_util.tree_map(lambda x: x.sharding, llm_state)
+
+  #   # Create a JIT-compiled identity function that forces the new sharding
+  #   @jax.jit
+  #   def reshard_state(state):
+  #       # jax.lax.with_sharding forces the tensor into the new mesh/spec on-device
+  #       return jax.tree_util.tree_map(
+  #           lambda w, target_sh: jax.lax.with_sharding(w, target_sh),
+  #           state, target_shardings
+  #       )
+
+  #   # Execute the transfer for the entire model in one compiled TPU operation
+  #   llm_state.update(reshard_state(vllm_state))
+    
+  #   # Block until all TPU operations are finished
+  #   jax.block_until_ready(llm_state)
+
+
+
+  # with timer(f"Assigning {len(vllm_state)} weights to vLLM model"):
+    
+  #   # 1. Extract ONLY the target shardings for the keys we actually converted
+  #   # This ignores the extra RoPE caches and scales in vLLM's state
+  #   target_shardings = {k: llm_state[k].sharding for k in vllm_state.keys()}
+
+  #   # 2. Create a JIT-compiled identity function that forces the new sharding layout.
+  #   # By passing `out_shardings`, XLA handles the AllToAll cross-mesh transfer on the TPUs.
+  #   reshard_fn = jax.jit(lambda x: x, out_shardings=target_shardings)
+
+  #   # 3. Execute the massive resharding operation in one shot
+  #   resharded_weights = reshard_fn(vllm_state)
+
+  #   # 4. Update the vLLM state dictionary with the newly sharded weights
+  #   llm_state.update(resharded_weights)
+    
+  #   # Block until all TPU operations are finished
+  #   jax.block_until_ready(llm_state)
+
 
   sampling_params = SamplingParams(temperature=0.0, max_tokens=10)
   print("\n" + "="*80)
