@@ -60,6 +60,7 @@ _TASK_MAP: dict[str, str] = {
     "gpqa_diamond": "gpqa_diamond",
     "humaneval": "humaneval",
     "livecodebench": "livecodebench",
+    "gsm8k": "gsm8k",
 }
 
 

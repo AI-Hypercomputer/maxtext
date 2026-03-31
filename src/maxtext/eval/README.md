@@ -148,6 +148,47 @@ python -m maxtext.eval.runner.eval_runner ...
 | `--hf_token` | HuggingFace token for gated models |
 | `--hf_mode` | Force HF safetensors mode |
 
+## Async Evaluation for RL Training
+
+After an RL training run saves a checkpoint, you can evaluate it asynchronously
+on a separate machine/job using `evalchemy_runner`.
+
+**Prerequisites:**
+- The checkpoint is written to GCS.
+-  Ensure evalchemy is installed (`pip show evalchemy` or `pip install evalchemy`)
+- `HF_TOKEN` exported (needed for tokenizer download only)
+
+**Supported math tasks:** `math500`, `aime24`, `aime25`, `amc23`, `gsm8k`
+
+```bash
+STEP=1000   # training step to evaluate
+MODEL=qwen3-30b-a3b
+HF_PATH=Qwen/Qwen3-30B-A3B
+CHECKPOINT=gs://<bucket>/run/checkpoints/${STEP}/items
+OUTPUT=gs://<bucket>/eval/
+
+python -m maxtext.eval.runner.evalchemy_runner \
+  --checkpoint_path ${CHECKPOINT} \
+  --model_name ${MODEL} \
+  --hf_path ${HF_PATH} \
+  --tasks math500 aime24 gsm8k \
+  --base_output_directory ${OUTPUT} \
+  --run_name rl_${MODEL}_step${STEP} \
+  --max_model_len 8192 \
+  --tensor_parallel_size 8 \
+  --hf_token $HF_TOKEN
+```
+
+Results are written to `${OUTPUT}/rl_${MODEL}_step${STEP}/eval_results/` as JSON,
+and optionally uploaded to GCS via `--gcs_results_path`.
+
+**Notes:**
+- `--hf_path` is required since vLLM uses it to fetch the model architecture
+  config and tokenizer even when loading weights from the MaxText checkpoint.
+- Do not run this on the same machine as an active training job, both use vLLM
+  and will contend for TPU HBM.
+- To limit dataset size, add `--num_samples 50`.
+
 ## Adding a New Benchmark
 
 For custom datasets not covered by lm-eval or evalchemy:
