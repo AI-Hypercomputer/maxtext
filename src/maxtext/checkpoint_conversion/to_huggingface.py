@@ -235,12 +235,6 @@ def main(argv: Sequence[str]) -> None:
   max_utils.print_system_information()
   overall_start = time.time()
 
-  # Load Maxtext checkpoint using Orbax to get full parameter dict
-  max_logging.log(f"\nLoading Orbax checkpoint from: {config.load_parameters_path}")
-  start = time.time()
-  checkpoint_dict = load_orbax_checkpoint(config)
-  max_logging.log(f"Elapse for checkpoint load: {(time.time() - start) / 60:.2f} min")
-
   # Define output directory
   if not config.base_output_directory:
     output_directory = f"tmp/{config.run_name}"
@@ -255,6 +249,7 @@ def main(argv: Sequence[str]) -> None:
 
   # Validate architecture consistency (raising ValueError on mismatch) or override HF config if specified.
   _validate_or_update_architecture(hf_config_obj, config, override=FLAGS.override_model_architecture)
+  max_logging.log("done")
 
   # 2. Load Tokenizer
   if model_key not in HF_IDS:
@@ -273,6 +268,12 @@ def main(argv: Sequence[str]) -> None:
   hook_fn_map = mappings["hook_fn_mapping"]
 
   # 4. Extract and transform weights for Linen/NNX-SFT/NNX-RL checkpoints
+  # Load Maxtext checkpoint using Orbax to get full parameter dict
+  max_logging.log(f"\nLoading Orbax checkpoint from: {config.load_parameters_path}")
+  start = time.time()
+  checkpoint_dict = load_orbax_checkpoint(config)
+  max_logging.log(f"Elapse for checkpoint load: {(time.time() - start) / 60:.2f} min")
+
   maxtext_state_dict = detect_and_extract_checkpoint(checkpoint_dict)
 
   # Validate that checkpoint keys match the parameter mapping
