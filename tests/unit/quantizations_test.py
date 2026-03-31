@@ -393,13 +393,10 @@ class QuantTest(unittest.TestCase):
 
   def quantization_config(self, quant, logits_tolerance=2e-1, grad_tolerance=5e-1):
     """Run forward pass and backward pass for quantized model and compare with base model."""
-    # Force Linen path for the base model config (base.yml defaults enable_nnx=True)
-    self.cfg.enable_nnx = False
-    self.cfg.pure_nnx_decoder = False
-    cfg = self.init_pyconfig(quantization=quant)
-    cfg.enable_nnx = False
-    cfg.pure_nnx_decoder = False
-    model = model_creation_utils.create_model(self.cfg, self.mesh)
+    # Create fresh configs with Linen path (base.yml defaults enable_nnx=True)
+    base_cfg = self.init_pyconfig(enable_nnx=False, pure_nnx_decoder=False)
+    cfg = self.init_pyconfig(quantization=quant, enable_nnx=False, pure_nnx_decoder=False)
+    model = model_creation_utils.create_model(base_cfg, self.mesh)
     qt_model = model_creation_utils.create_model(cfg, self.mesh)
     
 

@@ -244,6 +244,7 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
         matmul_precision="high",
         num_vocab_tiling=4,
         z_loss_multiplier=1e-4,  # Enable z-loss
+        enable_nnx=False,
     )
     loss_tiling, grads_tiling = self.get_grads(cfg_tiling, params, data)
 
@@ -309,6 +310,7 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
         dtype="float32",
         matmul_precision="high",
         num_vocab_tiling=4,
+        enable_nnx=False,
     )
     loss_tiling, grads_tiling = self.get_grads(cfg_tiling, params, data)
     # Loss correctness test
@@ -373,6 +375,7 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
         dtype="float32",
         matmul_precision="high",
         num_vocab_tiling=4,
+        enable_nnx=False,
     )
     loss_tiling, grads_tiling = self.get_grads(cfg_tiling, params, data)
 
@@ -436,6 +439,7 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
         matmul_precision="high",
         ici_data_parallelism=4,
         num_vocab_tiling=4,
+        enable_nnx=False,
     )
     loss_tiling, grads_tiling = self.get_grads(cfg_tiling, params, data)
     # Loss correctness test
@@ -500,6 +504,7 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
         matmul_precision="high",
         ici_tensor_parallelism=4,
         num_vocab_tiling=4,
+        enable_nnx=False,
     )
     loss_tiling, grads_tiling = self.get_grads(cfg_tiling, params, data)
     # Loss correctness test
@@ -568,6 +573,7 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
         dtype="float32",
         matmul_precision="high",
         num_vocab_tiling=4,
+        enable_nnx=False,
     )
     loss_tiling, grads_tiling = self.get_grads(cfg_tiling, params, data)
 
