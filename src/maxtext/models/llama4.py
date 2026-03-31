@@ -517,7 +517,7 @@ Llama4DecoderLayerToLinen = nnx_wrappers.to_linen_class(
 
 
 class Llama4ScannableBlock(nnx.Module):
-  """A repeatable block given nope_layer_interval and interleave_moe_layer_step."""
+  """A repeatable block given nope_layer_interval and interleave_moe_layer_step"""
 
   def __init__(
       self,
