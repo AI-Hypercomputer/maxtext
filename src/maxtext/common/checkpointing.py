@@ -738,9 +738,6 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
   # Wait for any pending checkpoint save to finish during preemption or final step save
   if force_ckpt_save or checkpoint_manager.reached_preemption(actual_step):
     checkpoint_manager.wait_until_finished()
-    max_logging.log("Checkpoint save finished after waiting due to preemption or final step save.")
-    checkpoint_saved = save_checkpoint(checkpoint_manager, actual_step, state, config, data_iterator, force_ckpt_save)
-    checkpoint_manager.wait_until_finished()
 
   # Raise exception upon preemption
   if checkpoint_manager.reached_preemption(actual_step):
@@ -755,6 +752,7 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
         or (step % config.checkpoint_period == 0 and not config.enable_continuous_checkpointing)
         or (step % config.checkpoint_period == 0)
         or (config.enable_emergency_checkpoint and step % config.local_checkpoint_period == 0)
+        or checkpoint_manager.reached_preemption(step)
     ):
       blocking_until_ready_start = time.time()
       max_logging.log(f"Waiting for step {step} to finish before checkpoint...")
