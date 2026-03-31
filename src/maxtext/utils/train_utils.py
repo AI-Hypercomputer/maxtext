@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # pylint: disable=bare-except, consider-using-generator
-""" Utils that are only interesting for training in MaxText. """
+"""Utils that are only interesting for training in MaxText."""
 
 import os
 import jax
@@ -82,6 +82,7 @@ def create_training_tools(config, model, mesh):
         config.enable_single_controller,
         config.colocated_python_checkpointing,
         config.enable_single_replica_ckpt_restoring,
+        config.enable_autocheckpoint,
     )
 
   return init_rng, checkpoint_manager, learning_rate_schedule, tx

@@ -83,6 +83,9 @@ source_checkpoint_layout: "orbax"
 
 # Only applicable to Single Controller/Pathways on Cloud. Experimental feature, under testing 
 colocated_python_checkpointing: False
+
+# enables autocheckpoint, which saves a checkpoint at the preemption step.
+enable_autocheckpoint: False
 ############################### end checkpointing ##################################
 
 

@@ -333,6 +333,9 @@ class Checkpointing(BaseModel):
       False,
       description="If True, enables checkpointing from remote TPU VMs instead of head node on pathways.",
   )
+  enable_autocheckpoint: bool = Field(
+      False, description="If True, enables autocheckpoint or preemption induced checkpointing."
+  )
 
 
 class OrbaxStorage(BaseModel):
