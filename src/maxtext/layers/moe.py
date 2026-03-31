@@ -893,9 +893,18 @@ class RoutedMoE(nnx.Module):
   ):
     """Perform sparse matrix multiplication of inputs and Experts."""
 
+    use_vma = True
     def gmm(
         inputs, kernel, tiling, group_sizes, expert_assignments, weight_gather_axes, input_buffer_count, combine_scopes
     ):
+      def extract_vma(tensor):
+        try:
+          aval = jax.typeof(tensor)
+          if hasattr(aval, 'vma') and aval.vma:
+            return tuple(sorted(list(aval.vma)))
+        except Exception:
+          pass
+        return tuple()
       # TODO (b/491979205) pipeline fsdp ag per repeat fails tokamax gmm
       if self.config.using_pipeline_parallelism and self.config.pipeline_fsdp_ag_per_repeat:
         tokamax_group_sizes = group_sizes
@@ -931,6 +940,8 @@ class RoutedMoE(nnx.Module):
         )
       if self.config.use_tokamax_gmm:
         if self.config.quantization:
+          lhs_vma_axes = extract_vma(inputs)
+          rhs_vma_axes = extract_vma(kernel)
           output = mblx.gmm(
               lhs=inputs,
               rhs=kernel,
@@ -944,6 +955,8 @@ class RoutedMoE(nnx.Module):
               weight_gather_axes=weight_gather_axes,
               input_buffer_count=input_buffer_count,
               combine_scopes=combine_scopes,
+              lhs_vma_axes=lhs_vma_axes,
+              rhs_vma_axes=rhs_vma_axes,
           )
         else:
           output = tokamax.ragged_dot(
@@ -956,6 +969,8 @@ class RoutedMoE(nnx.Module):
           )
       else:
         if self.config.megablox:
+          lhs_vma_axes = extract_vma(inputs)
+          rhs_vma_axes = extract_vma(kernel)
           output = mblx.gmm(
               lhs=inputs,
               rhs=kernel,
@@ -967,6 +982,8 @@ class RoutedMoE(nnx.Module):
               use_qwix_quantization=self.config.use_qwix_quantization,
               use_tokamax_backend=self.config.use_tokamax_gmm,
               weight_gather_axes=weight_gather_axes,
+              lhs_vma_axes=lhs_vma_axes,
+              rhs_vma_axes=rhs_vma_axes,
           )
         else:
           rhs_inputs = kernel
@@ -1103,7 +1120,7 @@ class RoutedMoE(nnx.Module):
             P(),  # Handle None or replicate the output
             P(),  # Handle None or replicate the output
         ),
-        check_vma=False,
+        check_vma=use_vma,
     )
     def wrapper(x, logits, pre_bias_logits, w0, w1, wo, w0_bias, w1_bias, wo_bias, rngs):
       batch_size, sequence_length, _ = x.shape
@@ -1289,7 +1306,10 @@ class RoutedMoE(nnx.Module):
       if self.config.mlp_bias:
         layer_w1 = layer_w1 + w1_bias
       layer_w1 = adc.checkpoint_name(layer_w1, "moe_mlpwi_1")
+      # multiplied result from W_gate and W_up before downward projection
       intermediate_layer = self.apply_ffn_activation(layer_w0, layer_w1)
+      # output of FFN
+      # print("shuwen intermediate_output")
 
       intermediate_output = gmm_fn(
           intermediate_layer,
