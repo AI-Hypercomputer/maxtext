@@ -122,7 +122,6 @@ comments, or questions by creating a new
 │   │   │   │   ├── inference.yml
 │   │   │   │   └── inference_jetstream.yml
 │   │   │   ├── post_train/
-│   │   │   │   ├── dpo.yml
 │   │   │   │   ├── grpo.yml
 │   │   │   │   └── sft.yml
 │   │   │   ├── tpu/

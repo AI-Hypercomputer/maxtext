@@ -24,8 +24,6 @@ import transformers
 
 import grain.python as grain
 
-import numpy as np
-
 from maxtext.input_pipeline import input_pipeline_utils
 from maxtext.input_pipeline import instruction_data_processing
 from maxtext.input_pipeline import multihost_dataloading
@@ -207,7 +205,6 @@ def preprocessing_pipeline(
     num_threads=1,
     drop_remainder=True,
     generate_padding_batch=False,
-    use_dpo=None,
     use_sft=None,
     use_tunix_gradient_accumulation=False,
     num_microbatches=1,
@@ -316,19 +313,12 @@ def preprocessing_pipeline(
         )
     )
     data_column_names = ("inputs", "targets")
-  elif use_dpo:
-
-    def lists2array(x):
-      """Convert lists/tuples to array"""
-      return jax.tree.map(np.asarray, x, is_leaf=lambda y: isinstance(y, (list, tuple)))
-
-    operations.append(grain.MapOperation(lists2array))
   else:
     assert len(data_column_names) == 1
     operations.append(input_pipeline_utils.HFNormalizeFeatures(data_column_names[0]))
     data_column_names = ("inputs", "targets")
 
-  if packing and not use_dpo:
+  if packing:
     length_struct = {col: max_target_length for col in data_column_names}
     max_segments = max_segments_per_seq
     if max_segments is not None and max_segments <= 0:
@@ -345,7 +335,7 @@ def preprocessing_pipeline(
     operations.append(input_pipeline_utils.PadOrTrimToMaxLength(max_target_length, pad_id))
     operations.append(grain.Batch(batch_size=batch_size, drop_remainder=drop_remainder))
 
-  if shift and not use_dpo:
+  if shift:
     operations.append(input_pipeline_utils.ShiftData(ignored_ids=[pad_id, tokenizer.bos_token_id], axis=1))
 
   # Since HuggingFace IterableDataset does not support access through index
@@ -422,7 +412,6 @@ def make_hf_train_iterator(
         add_eos=config.add_eos,
         packing=config.packing,
         generate_padding_batch=config.generate_padding_batch_train,
-        use_dpo=config.use_dpo,
         use_sft=config.use_sft,
         use_tunix_gradient_accumulation=config.use_tunix_gradient_accumulation,
         num_microbatches=config.gradient_accumulation_steps,
@@ -481,7 +470,6 @@ def make_hf_eval_iterator(
         add_eos=config.add_eos,
         packing=config.packing,
         generate_padding_batch=config.generate_padding_batch_eval,
-        use_dpo=config.use_dpo,
         use_sft=config.use_sft,
         num_microbatches=config.gradient_accumulation_steps,
         sft_train_on_completion_only=config.sft_train_on_completion_only,
