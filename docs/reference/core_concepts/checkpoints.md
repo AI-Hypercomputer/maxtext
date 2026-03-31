@@ -95,6 +95,7 @@ MaxText automatically saves checkpoints periodically during a training run. Thes
 Furthermore, MaxText supports emergency checkpointing, which saves a local copy of the checkpoint that can be restored quickly after an interruption.
 
 - `enable_emergency_checkpoint`: A boolean to enable or disable this feature.
+- `enable_autocheckpoint`: A boolean to enable or disable saving a checkpoint when a preemption signal (SIGTERM) is received.
 - `local_checkpoint_directory`: The local path for storing emergency checkpoints.
 - `local_checkpoint_period`: The interval, in training steps, for saving local checkpoints.
 
