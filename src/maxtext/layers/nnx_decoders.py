@@ -242,7 +242,7 @@ def deepstack_process(hidden_states, bidirectional_mask, visual_embeds):
 
 
 class NNXDecoder(nnx.Module):
-  """A stack of decoder layers as a part of an encoder-decoder architecture, using NNX."""
+  """A stack of decoder layers as a part of an encoder-decoder architecture, using NNX"""
 
   def __init__(
       self,
