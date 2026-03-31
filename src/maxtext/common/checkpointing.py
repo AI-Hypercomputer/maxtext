@@ -253,6 +253,8 @@ def create_orbax_checkpoint_manager(
   else:
     save_decision_policy = save_decision_policy_lib.FixedIntervalPolicy(interval=save_interval_steps)
     preservation_policy = preservation_policy_lib.LatestN(max_num_checkpoints_to_keep)
+
+  save_decision_policy = save_decision_policy_lib.PreemptionCheckpointingPolicy()
   async_options = None
   if enable_continuous_checkpointing:
     async_options = ocp.AsyncOptions(
