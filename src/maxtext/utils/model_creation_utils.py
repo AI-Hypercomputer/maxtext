@@ -199,13 +199,18 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
           restore_args = {"params": {"params": ocp.checkpoint_utils.construct_restore_args(target_for_restore)}}
         else:
           # structure of nnx checkpoint: {'decoder': {'value': ...}}
+          # NNX-RL checkpoints may have an extra 'base' nesting: {'base': {'decoder': {'value': ...}}}
+          # Only restore nnx.Param variables — RNG keys (nnx.RngKey/RngState) are excluded because
+          # their shape may differ from the checkpoint (e.g. (2,) stored vs (4,) initialized).
+          param_only_state = nnx.state(model, nnx.Param)
           target_for_restore = jax.tree.map(
               lambda v: {"value": v.value},
-              sharded_state,
+              param_only_state,
               is_leaf=lambda n: isinstance(n, nnx.Variable),
           )
-          item_to_restore = target_for_restore
-          restore_args = ocp.checkpoint_utils.construct_restore_args(target_for_restore)
+          has_base_key = "base" in metadata.item_metadata.tree
+          item_to_restore = {"base": target_for_restore} if has_base_key else target_for_restore
+          restore_args = ocp.checkpoint_utils.construct_restore_args(item_to_restore)
 
         restored = ckptr.restore(
             epath.Path(config.load_parameters_path),
@@ -215,9 +220,10 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
         )
 
         if is_nnx_checkpoint:
+          restored_root = restored["base"] if has_base_key else restored
           checkpoint = jax.tree.map(
               lambda v: v["value"],
-              restored,
+              restored_root,
               is_leaf=lambda x: isinstance(x, dict) and "value" in x and not isinstance(x.get("value"), dict),
           )
         else:
