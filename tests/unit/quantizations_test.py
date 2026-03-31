@@ -483,23 +483,15 @@ class QuantTest(unittest.TestCase):
 
     ids, decoder_segment_ids, decoder_positions = self.get_data()
 
-    # NNX functional gradient: split into graphdef + params + rest,
-    # then define pure loss functions over params for jax.grad.
-    base_graphdef, base_params, base_rest = nnx.split(model, nnx.Param, ...)
-    qt_graphdef, qt_params, qt_rest = nnx.split(qt_model, nnx.Param, ...)
-
-    def loss_base(params, inputs):
-      m = nnx.merge(base_graphdef, params, base_rest)
-      logits = m(inputs[0], inputs[1], inputs[2], enable_dropout=False)
+    # Use nnx.value_and_grad which handles NNX state management
+    # (split/merge/update) automatically, avoiding TraceContextError
+    # from RngCount mutation crossing trace levels.
+    def loss_fn(m):
+      logits = m(ids, decoder_positions, decoder_segment_ids, enable_dropout=False)
       return jnp.mean(logits ** 2)
 
-    def loss_quant(params, inputs):
-      m = nnx.merge(qt_graphdef, params, qt_rest)
-      logits = m(inputs[0], inputs[1], inputs[2], enable_dropout=False)
-      return jnp.mean(logits ** 2)
-
-    grads_base = jax.grad(loss_base)(base_params, (ids, decoder_positions, decoder_segment_ids))
-    grads_quant = jax.grad(loss_quant)(qt_params, (ids, decoder_positions, decoder_segment_ids))
+    _, grads_base = nnx.value_and_grad(loss_fn)(model)
+    _, grads_quant = nnx.value_and_grad(loss_fn)(qt_model)
 
     logits = model(ids, decoder_positions, decoder_segment_ids, enable_dropout=False)
     quant_logits = qt_model(ids, decoder_positions, decoder_segment_ids, enable_dropout=False)

@@ -496,7 +496,10 @@ class NNXDecoder(nnx.Module):
     """Runs the layer stack using nnx.scan."""
     policy = self.get_remat_policy()
     prevent_cse = maxtext_utils.should_prevent_cse_in_remat(self.config)
-    graphdef, params, state = nnx.split(layers, nnx.Param, ...)
+    # Split RngState separately to avoid TraceContextError when this method
+    # runs inside jax.grad — RngCount mutation through scan/checkpoint crosses
+    # trace levels. RngState is preserved from before the scan instead.
+    graphdef, params, rng_state, other_state = nnx.split(layers, nnx.Param, nnx.RngState, ...)
 
     scan_axis = self.config.param_scan_axis
     if scan_axis != 0:
@@ -514,29 +517,31 @@ class NNXDecoder(nnx.Module):
       return full
 
     def layer_fn(carry, scanned_vars):
-      current_params, current_state = scanned_vars
+      current_params, current_rng, current_other = scanned_vars
 
       if self.config.parameter_memory_host_offload:
         current_params = jax.tree.map(lambda x: jax.device_put(x, max_utils.device_space()), current_params)
 
-      layer = nnx.merge(graphdef, current_params, current_state)
+      layer = nnx.merge(graphdef, current_params, current_rng, current_other)
       layer_out = layer(carry, *args, **valid_kwargs)
       new_carry = layer_out[0] if isinstance(layer_out, tuple) else layer_out
 
       new_full_state = nnx.state(layer)
-      new_current_state = _extract_matching_state(current_state, new_full_state)
+      new_current_other = _extract_matching_state(current_other, new_full_state)
 
-      # ONLY return non-param state to prevent memory duplication of weights
-      return new_carry, new_current_state
+      # ONLY return non-param, non-rng state to prevent memory duplication
+      # and avoid RngCount trace-level mutation issues
+      return new_carry, new_current_other
 
     layer_fn = jax.checkpoint(layer_fn, policy=policy, prevent_cse=prevent_cse)
 
-    final_carry, scanned_other = jax.lax.scan(layer_fn, x_in, (params, state))
+    final_carry, scanned_other = jax.lax.scan(layer_fn, x_in, (params, rng_state, other_state))
 
     if scan_axis != 0:
       params = jax.tree.map(lambda x: jnp.moveaxis(x, 0, scan_axis), params)
 
-    scanned_state = nnx.State.merge(params, scanned_other)
+    # Merge with original rng_state (not from scan output) to avoid trace issues
+    scanned_state = nnx.State.merge(params, rng_state, scanned_other)
     # Update the existing module in-place rather than creating a new one.
     # Creating a new module via nnx.merge and reassigning (self.layers = new_module)
     # would replace a child node in the NNX graph, which is detected as a graph
