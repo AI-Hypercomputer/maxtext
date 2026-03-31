@@ -1126,9 +1126,11 @@ def setup_decode_state_from_nnx(model, config, rng, mesh):
   loaded_params = unwrap_nnx_values(loaded_params)
   # NNX-RL checkpoints may have an extra 'base' nesting level, while NNX-SFT may not
   raw_params = loaded_params["base"] if "base" in loaded_params else loaded_params
+  del loaded_params  # free memory
 
   # Reshard directly to target TPU sharding — no numpy round-trip needed
   params = jax.device_put({"params": raw_params}, state_mesh_shardings.params)
+  del raw_params  # free memory
 
   state = init_decode_state(model.apply, params)
   return state, state_mesh_annotations
