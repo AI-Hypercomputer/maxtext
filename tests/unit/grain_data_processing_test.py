@@ -251,6 +251,45 @@ class GrainArrayRecordAutoTuneTest(GrainArrayRecordProcessingTest):
     super().test_for_loop_repeatable()
 
 
+class GrainArrayRecordTiktokenTest(GrainArrayRecordProcessingTest):
+  """Test grain data processing with best_fit packing strategy."""
+
+  def setUp(self):
+    super().setUp()
+    self.config = self._make_config(
+        tokenizer_type="tiktoken",
+        tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer_llama3.tiktoken"),
+    )
+    self.train_iter = grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
+
+  # Only runs test_train_ds from parent class, skip other tests
+  @pytest.mark.skip(reason="skip for tokenizer testing")
+  def test_batch_determinism(self):
+    pass
+
+  @pytest.mark.skip(reason="skip for tokenizer testing")
+  def test_for_loop_repeatable(self):
+    pass
+
+
+class GrainArrayRecordHFTokenizerTest(GrainArrayRecordProcessingTest):
+  """Test grain data processing with best_fit packing strategy."""
+
+  def setUp(self):
+    super().setUp()
+    self.config = self._make_config(tokenizer_type="huggingface", tokenizer_path="deepseek-ai/DeepSeek-V3")
+    self.train_iter = grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
+
+  # Only runs test_train_ds from parent class, skip other tests
+  @pytest.mark.skip(reason="skip for tokenizer testing")
+  def test_batch_determinism(self):
+    pass
+
+  @pytest.mark.skip(reason="skip for tokenizer testing")
+  def test_for_loop_repeatable(self):
+    pass
+
+
 class GrainArrayRecordBestFitPackingTest(GrainArrayRecordProcessingTest):
   """Test grain data processing with best_fit packing strategy."""
 

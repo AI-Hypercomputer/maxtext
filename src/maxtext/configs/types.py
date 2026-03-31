@@ -2580,13 +2580,6 @@ class MaxTextConfig(
         raise ValueError("When dataset_type=grain, please set grain_train_files or grain_train_mixture_config_path")
       if self.eval_interval > 0 and not self.grain_eval_files:
         raise ValueError("Please specify grain_eval_files or set eval_interval to <=0.")
-      if self.tokenizer_type not in (
-          TokenizerType.SENTENCEPIECE,
-          TokenizerType.HUGGINGFACE,
-      ):
-        raise ValueError(
-            f"grain pipeline only supports tokenizer_type: sentencepiece, huggingface, but got {self.tokenizer_type}"
-        )
     elif self.dataset_type == DatasetType.TFDS:
       if not self.dataset_name:
         raise ValueError("dataset_name can't be empty when dataset_type=tfds")
