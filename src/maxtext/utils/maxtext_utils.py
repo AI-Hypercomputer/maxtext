@@ -1087,6 +1087,53 @@ def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
   return state, state_mesh_annotations
 
 
+def setup_decode_state_from_nnx(model, config, rng, mesh):
+  """Setup decode state by loading params from an NNX checkpoint.
+
+  Loads an Orbax checkpoint saved in NNX format, unwraps the NNX `value` wrappers
+  and strips RNG state, then reshards the params directly onto the target TPU mesh
+  using `jax.device_put` with the expected sharding spec — avoiding any CPU/numpy
+  round-trip. Handles both NNX-RL checkpoints (which have an extra `base` nesting
+  level) and NNX-SFT checkpoints (which do not).
+
+  Args:
+    model: the flax model to initialize
+    config: config object
+    rng: jax.prng key
+    mesh: jax.devices() mesh
+
+  Returns:
+    state: state with decode params loaded from the NNX checkpoint
+    state_mesh_annotations: the mesh annotations for the state
+  """
+  from maxtext.checkpoint_conversion.utils.utils import load_orbax_checkpoint  # pylint: disable=import-outside-toplevel
+
+  def unwrap_nnx_values(tree):
+    if isinstance(tree, dict):
+      filtered_tree = {k: v for k, v in tree.items() if "to_nnx__rngs" not in k}
+      if (
+          len(filtered_tree) == 1
+          and "value" in filtered_tree
+          and isinstance(filtered_tree["value"], (jax.Array, np.ndarray))
+      ):
+        return filtered_tree["value"]
+      return {k: unwrap_nnx_values(v) for k, v in filtered_tree.items()}
+    return tree
+
+  _, state_mesh_annotations, state_mesh_shardings = get_abstract_state(model, None, config, rng, mesh, False)
+
+  loaded_params = load_orbax_checkpoint(config)
+  loaded_params = unwrap_nnx_values(loaded_params)
+  # NNX-RL checkpoints may have an extra 'base' nesting level, while NNX-SFT may not
+  raw_params = loaded_params["base"] if "base" in loaded_params else loaded_params
+
+  # Reshard directly to target TPU sharding — no numpy round-trip needed
+  params = jax.device_put({"params": raw_params}, state_mesh_shardings.params)
+
+  state = init_decode_state(model.apply, params)
+  return state, state_mesh_annotations
+
+
 def setup_training_state(model, data_iterator, tx, config, rng, mesh, checkpoint_manager):
   is_training = True
   return setup_initial_state(
