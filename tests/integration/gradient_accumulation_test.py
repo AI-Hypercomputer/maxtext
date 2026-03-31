@@ -62,6 +62,7 @@ class GradientAccumulationTest(unittest.TestCase):
         get_test_config_path(),
         f"base_output_directory={self.base_output_directory}",
         f"dataset_path={self.dataset_path}",
+        "dataset_type=synthetic",
         "gradient_clipping_threshold=0",  # Ensures we are testing raw scales of gradients (clipping off)
         "enable_checkpointing=False",
         "enable_goodput_recording=False",
