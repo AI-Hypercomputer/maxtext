@@ -104,23 +104,33 @@ MaxText provides a set of configuration flags to control checkpointing options. 
 
 - **Persistent Checkpoints**: These are standard checkpoints saved periodically and much more rarely to durable storage(i.e. GCS bucket). They ensure that you can recover your training state even after a complete cluster failure. This is controlled by `enable_checkpointing`, and `checkpoint_period`.
 
-| Flag                                   | Description                                                                                                                                                                                                                                                                                              | Type      | Default |
+| Flag | Description | Type | Default |
 | :------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :-------- | :------ |
-| `enable_checkpointing`                 | A master switch to enable (`True`) or disable (`False`) saving checkpoints during the training run.                                                                                                                                                                                                      | `boolean` | `False` |
-| `enable_emergency_checkpoint`          | When set to (`True`), this flag enables the two-tiered emergency checkpointing feature.                                                                                                                                                                                                                  | `boolean` | `False` |
-| `async_checkpointing`                  | When set to (`True`), this flag makes checkpoint saving asynchronous. The training step is only blocked for the minimal time needed to capture the model's state, and the actual writing to storage happens in a background thread. This is highly recommended for performance. It's enabled by default. | `boolean` | `True`  |
-| `local_checkpoint_directory`           | The high-speed local filesystem path(i.e. ramdisk) where **emergency checkpoints** are saved. Setting this path, along with a non-zero `local_checkpoint_period`, enables the emergency checkpointing feature.                                                                                           | `string`  | `""`    |
-| `local_checkpoint_period`              | The interval, in training steps, for how often a **local checkpoint** is saved. This should be set to a much smaller value than `checkpoint_period` for frequent, low-overhead saves.                                                                                                                    | `integer` | `0`     |
-| `checkpoint_period`                    | The interval, in training steps, for how often a checkpoint is saved to **persistent storage**.                                                                                                                                                                                                          | `integer` | `10000` |
-| `enable_single_replica_ckpt_restoring` | If `True`, one replica reads the checkpoint from storage and then broadcasts it to all other replicas. This can significantly speed up restoration on multi-host systems by reducing redundant reads from storage.                                                                                       | `boolean` | `False` |
+| `enable_checkpointing` | A master switch to enable (`True`) or disable (`False`) saving checkpoints during the training run. | `boolean` | `False` |
+| `enable_emergency_checkpoint` | When set to (`True`), this flag enables the two-tiered emergency checkpointing feature. | `boolean` | `False` |
+| `async_checkpointing` | When set to (`True`), this flag makes checkpoint saving asynchronous. The training step is only blocked for the minimal time needed to capture the model's state, and the actual writing to storage happens in a background thread. This is highly recommended for performance. It's enabled by default. | `boolean` | `True` |
+| `local_checkpoint_directory` | The high-speed local filesystem path(i.e. ramdisk) where **emergency checkpoints** are saved. Setting this path, along with a non-zero `local_checkpoint_period`, enables the emergency checkpointing feature. | `string` | `""` |
+| `local_checkpoint_period` | The interval, in training steps, for how often a **local checkpoint** is saved. This should be set to a much smaller value than `checkpoint_period` for frequent, low-overhead saves. | `integer` | `0` |
+| `checkpoint_period` | The interval, in training steps, for how often a checkpoint is saved to **persistent storage**. | `integer` | `10000` |
+| `enable_single_replica_ckpt_restoring` | If `True`, one replica reads the checkpoint from storage and then broadcasts it to all other replicas. This can significantly speed up restoration on multi-host systems by reducing redundant reads from storage. | `boolean` | `False` |
+| `enable_autocheckpoint` | If `True`, enables saving a checkpoint when a preemption signal (SIGTERM) is received. This is a reactive mechanism that saves to persistent storage. | `boolean` | `False` |
+
+### Autocheckpoint vs. Emergency Checkpointing
+
+While both features aim to protect against progress loss, they operate differently:
+
+- **Autocheckpoint (`enable_autocheckpoint`)**: A **reactive** mechanism. When the infrastructure sends a `SIGTERM` signal (indicating imminent preemption or maintenance), MaxText immediately attempts to save a checkpoint to persistent storage (GCS). It is best for handling planned maintenance or preemptions where a short grace period is provided.
+- **Emergency Checkpointing (`enable_emergency_checkpoint`)**: A **proactive** mechanism. It saves checkpoints very frequently to local, high-speed storage (ramdisk). If a failure occurs *without* warning, the job can recover from the most recent local checkpoint. It is best for handling sudden hardware failures.
+
+For maximum reliability, both features can be enabled simultaneously.
 
 ## Workload creation using XPK
 
 The flags below would give the user access to the ramdisk in their workload:
 
-| Flag                  | Description                                                                                                                                                                     |
+| Flag | Description |
 | :-------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `--mtc-enabled`       | Enables the Multi-Tier Checkpointing feature, by mounting ramdisk to the workload pods, using csi drivers.                                                                      |
+| `--mtc-enabled` | Enables the Multi-Tier Checkpointing feature, by mounting ramdisk to the workload pods, using csi drivers. |
 | `--ramdisk-directory` | Specifies the mount path inside each pod where the high-speed ramdisk will be accessible. Your training application should write its local, emergency checkpoints to this path. |
 
 ### Example XPK workload creation command

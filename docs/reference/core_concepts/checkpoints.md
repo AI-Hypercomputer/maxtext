@@ -20,10 +20,10 @@
 
 Checkpoint formats in MaxText can be categorized along two axes: whether they include **training states** (e.g., optimizer properties) and whether the model's parameter weights are **stacked** or **unstacked** (aka scanned/unscanned). This results in the four types summarized below:
 
-|                         | **Unstacked Weights**          | **Stacked Weights**          |
+| | **Unstacked Weights** | **Stacked Weights** |
 | :---------------------- | :----------------------------- | :--------------------------- |
 | **Without Train State** | Unstacked Inference Checkpoint | Stacked Inference Checkpoint |
-| **With Train State**    | Unstacked Training Checkpoint  | Stacked Training Checkpoint  |
+| **With Train State** | Unstacked Training Checkpoint | Stacked Training Checkpoint |
 
 We discuss these two axes respectively:
 
@@ -95,6 +95,7 @@ MaxText automatically saves checkpoints periodically during a training run. Thes
 Furthermore, MaxText supports emergency checkpointing, which saves a local copy of the checkpoint that can be restored quickly after an interruption.
 
 - `enable_emergency_checkpoint`: A boolean to enable or disable this feature.
+- `enable_autocheckpoint`: A boolean to enable or disable saving a checkpoint when a preemption signal (SIGTERM) is received.
 - `local_checkpoint_directory`: The local path for storing emergency checkpoints.
 - `local_checkpoint_period`: The interval, in training steps, for saving local checkpoints.
 
