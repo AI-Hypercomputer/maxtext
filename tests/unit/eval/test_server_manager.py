@@ -12,12 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for maxtext.eval.runner.server_manager.VllmServerManager.
-
-Tests cover the in-process LLM instantiation path (vLLM + uvicorn daemon
-thread), NOT a subprocess API.  vLLM, uvicorn, and JAX rank helpers are
-mocked so the suite runs without TPU hardware or installed vLLM.
-"""
+"""Unit tests for maxtext.eval.runner.server_manager.VllmServerManager."""
 
 import os
 import unittest
@@ -53,11 +48,6 @@ def _start_capturing_llm_kwargs(mgr: VllmServerManager, rank: int = 0) -> dict:
     mgr.start()
 
   return mock_llm_cls.call_args.kwargs
-
-
-# ---------------------------------------------------------------------------
-# LLM constructor kwargs
-# ---------------------------------------------------------------------------
 
 
 class TestVllmServerManagerConfig(unittest.TestCase):
@@ -144,11 +134,6 @@ class TestVllmServerManagerConfig(unittest.TestCase):
       VllmServerManager(model_path="/fake/model", checkpoint_path="gs://bucket/0/items")
 
 
-# ---------------------------------------------------------------------------
-# HTTP server threading
-# ---------------------------------------------------------------------------
-
-
 class TestVllmServerManagerHttp(unittest.TestCase):
   """Tests that the HTTP server is started only on rank-0."""
 
@@ -178,11 +163,6 @@ class TestVllmServerManagerHttp(unittest.TestCase):
     mgr = _make_manager()
     mock_thread_cls = self._start_capturing_thread_calls(mgr, rank=1)
     mock_thread_cls.assert_not_called()
-
-
-# ---------------------------------------------------------------------------
-# Lifecycle
-# ---------------------------------------------------------------------------
 
 
 class TestVllmServerManagerLifecycle(unittest.TestCase):

@@ -29,7 +29,7 @@ or local tokenizer dir).
       --hf_path meta-llama/Llama-3.1-8B-Instruct
 
 HuggingFace safetensors mode:
-Pass --hf_mode and point --hf_path at an existing HF model directory.
+Use --hf_mode and point --hf_path to an existing HF model directory.
 
   python -m maxtext.eval.runner.eval_runner \
       --config src/maxtext/eval/configs/mlperf.yml \

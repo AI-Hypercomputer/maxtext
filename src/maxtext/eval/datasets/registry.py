@@ -14,10 +14,7 @@
 
 """Registry mapping benchmark names to BenchmarkDataset classes.
 
-MMLU, GPQA, MATH, and GSM-8K are handled by lm_eval_runner (loglikelihood)
-or evalchemy_runner (generation) and no longer have custom dataset loaders here.
-Custom loaders are retained only for benchmarks not covered by those runners
-(currently: MLPerf OpenOrca, which requires ROUGE scoring).
+This can be used to define custom dataset loaders for benchmarks not covered by lm_eval and evalchemy.
 """
 
 from __future__ import annotations
