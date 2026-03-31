@@ -279,7 +279,9 @@ def main(argv: Sequence[str]) -> None:
     diloco_state, state_mesh_shardings, inner_state_shardings = diloco.build_abstract_diloco_state(
         config, abstract_state, state_mesh_shardings, topology_mesh
     )
-    shaped_train_args = (diloco_state, shaped_train_args[1], shaped_train_args[2])
+    # For NNX, shaped_train_args has 2 elements (state, batch) — no rng; pass None for prng.
+    shaped_rng_arg = shaped_train_args[2] if len(shaped_train_args) > 2 else None
+    shaped_train_args = (diloco_state, shaped_train_args[1], shaped_rng_arg)
 
     # Wrap train_step with diloco
     train_step_partial = functools.partial(train.train_step, model, config, inner_state_shardings, None)
