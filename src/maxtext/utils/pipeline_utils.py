@@ -194,7 +194,7 @@ def create_gradient_accumulation_scan(
     A JAX custom_vjp function that executes the `length` pipeline iterations.
   """
 
-  @functools.partial(jax.custom_vjp)
+  @jax.custom_vjp
   def run_single_microbatch_custom(lightweight_state, bsw, pos_arg, seg_arg):
     return run_single_microbatch_custom_fwd(lightweight_state, bsw, pos_arg, seg_arg)[0]
 
@@ -203,10 +203,10 @@ def create_gradient_accumulation_scan(
       out = model.run_one_iteration(
           l, b, pos_arg, seg_arg, deterministic, model_mode, logical_partition_spec=logical_partition_spec
       )
-      return out, b
+      return out
 
     # Rematerialize the inner step to save activation memory
-    _run_remat = jax.remat(_run, prevent_cse=False, policy=model.get_pipeline_remat_policy())
+    _run_remat = jax.remat(_run, policy=model.get_pipeline_remat_policy())
     out, vjp_fun = jax.vjp(_run_remat, lightweight_state, bsw)
     return out, vjp_fun
 
@@ -217,14 +217,14 @@ def create_gradient_accumulation_scan(
 
   run_single_microbatch_custom.defvjp(run_single_microbatch_custom_fwd, run_single_microbatch_custom_bwd)
 
-  @functools.partial(jax.custom_vjp)
+  @jax.custom_vjp
   def run_pipeline_microbatches_custom(loop_state, bsw, positions, segment_ids):
     return run_pipeline_microbatches_custom_fwd(loop_state, bsw, positions, segment_ids)[0]
 
   def run_pipeline_microbatches_custom_fwd(loop_state, bsw, positions, segment_ids):
     final_lightweight, scan_vjp_fun = jax.vjp(
         lambda l, b: jax.lax.scan(
-            lambda carry, _: (run_single_microbatch_custom(carry, b, positions, segment_ids)[0], None),
+            lambda carry, _: (run_single_microbatch_custom(carry, b, positions, segment_ids), None),
             l,
             None,
             length=length,
@@ -332,9 +332,8 @@ def create_pipeline_stage(
       )
       # Execute the forward pass of the microbatches and generate its VJP.
       # The VJP captures necessary checkpoints to evaluate gradients later.
-      (loop_state, bsw), scan_microbatches_vjp = jax.vjp(scan_microbatches_fn, loop_state, bsw, positions, segment_ids)
+      (loop_state, _), scan_microbatches_vjp = jax.vjp(scan_microbatches_fn, loop_state, bsw, positions, segment_ids)
       # Discard the old weights (w_curr) and advance w_next to act as the current weights in the next iteration
-      _, w_next = bsw
       return (loop_state, w_next), (scan_microbatches_vjp, weight_prefetching_t)
 
     def execute_pipeline_stage_pure_bwd(residuals, g_outputs):
@@ -354,6 +353,7 @@ def create_pipeline_stage(
       return g_loop_state, g_w_curr, g_pipeline_weights
 
     execute_pipeline_stage_pure.defvjp(execute_pipeline_stage_pure_fwd, execute_pipeline_stage_pure_bwd)
+
     # Execute the pure pipeline stage. We unpack the two modified outputs (loop_state, w_next)
     # and repack them alongside the unmodified pipeline_weights to maintain a consistent carry shape for nn.scan.
     return (*execute_pipeline_stage_pure(loop_state, w_curr, pipeline_weights), pipeline_weights), None

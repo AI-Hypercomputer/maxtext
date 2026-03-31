@@ -41,6 +41,8 @@ logical_axis_rules: [
                       ['activation_attn_length', ['context', 'expert']],
                       ['activation_q_length', ['context', 'expert']],
                       ['activation_attn_embed', ['tensor']],
+                      ['activation_norm_length', ['context']],
+                      ['activation_norm_length_moe', ['context']],
                       ['activation_embed', ['tensor']],
                       ['activation_embed_moe', ['tensor']],
                       ['activation_mlp', ['tensor']],
