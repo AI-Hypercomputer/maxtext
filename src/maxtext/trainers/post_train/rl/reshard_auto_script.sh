@@ -35,7 +35,7 @@ mkdir -p ${store_path}
 # Function to handle errors and ensure cleanup
 handle_error() {
     echo "Error occurred during config ${workload_name}. Cleaning up..."
-    python ~/Documents/xpk/run.py workload delete --workload "${workload_name}" --cluster "${cluster}" --project "${project}" --zone "${zone}"
+    xpk workload delete --workload "${workload_name}" --cluster "${cluster}" --project "${project}" --zone "${zone}"
     # Continue to next iteration rather than exiting the whole script
 }
 
@@ -91,7 +91,7 @@ for config in "${configs[@]}"; do
 
     # 4. Cleanup Workload
     echo "Deleting workload..."
-    python ~/Documents/xpk/run.py workload delete --workload "${workload_name}" --cluster "${cluster}" --project "${project}" --zone "${zone}"
+    xpk workload delete --workload "${workload_name}" --cluster "${cluster}" --project "${project}" --zone "${zone}"
     
     # Clear trap for next iteration
     trap - ERR
@@ -152,7 +152,7 @@ for config in "${configs[@]}"; do
 
     # 4. Cleanup Workload
     echo "Deleting workload..."
-    python ~/Documents/xpk/run.py workload delete --workload "${workload_name}" --cluster "${cluster}" --project "${project}" --zone "${zone}"
+    xpk workload delete --workload "${workload_name}" --cluster "${cluster}" --project "${project}" --zone "${zone}"
     
     # Clear trap for next iteration
     trap - ERR
@@ -215,7 +215,7 @@ for config in "${configs[@]}"; do
 
     # 4. Cleanup Workload
     echo "Deleting workload..."
-    python ~/Documents/xpk/run.py workload delete --workload "${workload_name}" --cluster "${cluster}" --project "${project}" --zone "${zone}"
+    xpk workload delete --workload "${workload_name}" --cluster "${cluster}" --project "${project}" --zone "${zone}"
     
     # Clear trap for next iteration
     trap - ERR
