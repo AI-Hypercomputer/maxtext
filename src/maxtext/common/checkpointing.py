@@ -761,7 +761,6 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
     if (
         force
         or (step % config.checkpoint_period == 0 and not config.enable_continuous_checkpointing)
-        or (step % config.checkpoint_period == 0)
         or (config.enable_emergency_checkpoint and step % config.local_checkpoint_period == 0)
         or (config.enable_autocheckpoint and checkpoint_manager.reached_preemption(step))
     ):
