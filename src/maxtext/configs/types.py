@@ -1126,6 +1126,12 @@ class Distillation(BaseModel):
   distill_beta: float = Field(0.0, description="Weight for the feature loss component. Use 0.0 to disable")
   distill_layer_indices: None | list = Field(None, description="Feature indices for feature loss.")
 
+  # --- Distillation freezing filter --
+  student_params_to_update: None | list = Field(
+      None,
+      description="a list of model param name templates to finetune in the student model. The other parameters will be frozen if this attribute is non empty)",
+  )
+
 
 class TrainingLoop(BaseModel):
   """Configuration for the main training loop, evaluation, and reproducibility."""
