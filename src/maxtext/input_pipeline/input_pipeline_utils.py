@@ -313,15 +313,15 @@ class SFTPromptMasking(grain.MapTransform):
 class SFTPromptMaskingVision(grain.MapTransform):
   """SFT prompt masking for multimodal"""
 
-  def __init__(self, query_column, response_column, max_target_length, unk_id):
+  def __init__(self, query_column, response_column, max_target_length, pad_id):
     self.query_column = query_column
     self.response_column = response_column
     self.max_target_length = max_target_length
-    self.unk_id = unk_id
+    self.pad_id = pad_id
 
   def map(self, element):
     inputs = np.concatenate((element[self.query_column], element[self.response_column]))
-    targets = np.concatenate((np.asarray([self.unk_id] * len(element[self.query_column])), element[self.response_column]))
+    targets = np.concatenate((np.asarray([self.pad_id] * len(element[self.query_column])), element[self.response_column]))
     return {
         "inputs": np.asarray(inputs[: self.max_target_length], dtype=np.int32),
         "targets": np.asarray(targets[: self.max_target_length], dtype=np.int32),
@@ -559,13 +559,13 @@ class PadOrTrimToMaxLength(grain.MapTransform):
       self,
       max_length: int,
       pad_id: int = 0,
-      model_name: str | None = None,
+      config=None,
       add_true_length: bool = False,
       max_num_images_per_example: int = -1,
   ):
     self.max_length = max_length
     self.pad_id = pad_id
-    self.model_name = model_name
+    self.config = config
     self.add_true_length = add_true_length
     self.max_num_images_per_example = max_num_images_per_example
 
@@ -614,7 +614,7 @@ class PadOrTrimToMaxLength(grain.MapTransform):
       raise ValueError("Input preprocessed_image must have pixel_values to pad images.")
 
     # Determine the maximum number of images/masks allowed.
-    image_offsets = mm_processor.get_image_offsets(self.model_name, preprocessed_image)
+    image_offsets = mm_processor.get_image_offsets(self.config, preprocessed_image)
     single_image_offset = image_offsets // preprocessed_image.pixel_values.shape[0]
 
     # Reserve space for at least one text token.
@@ -680,7 +680,7 @@ class PadOrTrimToMaxLength(grain.MapTransform):
 
     for key, _ in element.items():
       if key == "images":
-        if self.model_name is None:
+        if self.config.model_name is None:
           raise ValueError("model_name must be provided when padding images")
 
         element["images"] = self._pad_image_and_mask(element["images"])

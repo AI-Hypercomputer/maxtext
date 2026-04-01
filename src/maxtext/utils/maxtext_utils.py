@@ -827,7 +827,7 @@ def calculate_tflops_training_per_device(config, log=True):
   if config.use_multimodal:
     # Add vision layers TFLOPs for multimodal models
     mm_total_tflops, mm_learnable_weight_tflops, mm_attention_tflops = calculate_vision_encoder_tflops(config)
-    if log:
+    if log and mm_total_tflops > 0:
       print(
           f"{config.model_name} vision layers per train step:\n",
           f"Total TFLOPs: {mm_total_tflops:.2f} \n",
