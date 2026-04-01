@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# model config for DeepSeek V3 - 671B that uses fsdp on two logical axes
+# model config for DeepSeek V3 - 671B that uses batch split schedule
 
 # For DeepSeek default device-limited routing, 
 # please set n_routing_groups=8 and topk_routing_group=4 in your command-line arguments.
@@ -55,17 +55,18 @@ rope_interleave: True
 rope_truncate: True
 rope_attention_scaling: False
 
+use_batch_split_schedule: True
+shard_mode: "explicit"
 override_logical_axis_rules: True
-mesh_axes: ['data', 'stage', 'fsdp', 'fsdp_transpose', 'expert', 'context']
+mesh_axes: ['diloco', 'data', 'stage', 'fsdp', 'fsdp_transpose', 'expert', 'context']
 data_sharding: [['data', 'stage', 'fsdp', 'fsdp_transpose', 'expert', 'context']]
 logical_axis_rules: [
     ['activation_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert', 'context']],
     ['activation_batch_moe', ['data', 'fsdp', 'fsdp_transpose', 'expert', 'context']],
     ['activation_embed_and_logits_batch', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'expert', 'context']],
     ['activation_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert', 'context']],
-    ['activation_embed_and_logits_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
-    ['activation_norm_length', ['context']],
-    ['activation_norm_length_moe', ['context']],
+    ['activation_norm_length', []],
+    ['activation_norm_length_moe', []],
     ['activation_heads', []],
     ['activation_stage', 'stage'],
     ['embed', ['fsdp']],
@@ -81,8 +82,8 @@ logical_axis_rules: [
     ['kv_heads', ['fsdp_transpose']],
     ['heads', ['fsdp_transpose']],
     ['mlp', ['fsdp_transpose']],
-    ['mlp_only_fsdp_transpose', ['fsdp_transpose']],
-    ['expert_only', ['expert']],
-    ['fsdp_transpose_only', ['fsdp_transpose']],
     ['fsdp_transpose_and_expert', ['fsdp_transpose', 'expert']],
+    ['fsdp_transpose_only', ['fsdp_transpose']],
+    ['expert_only', ['expert']],
+    ['diloco', 'diloco'],
 ]

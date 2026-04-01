@@ -634,6 +634,10 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to use Ring of Experts for sparse matmul expert parallelism.",
   )
+  use_gather_mosaic_kernel: bool = Field(
+      False,
+      description="Whether to use a custom mosaic kernel for token gather ops.",
+  )
   use_random_routing: bool = Field(False, description="Whether to use random routing for debugging.")
   interleave_moe_layer_step: int = Field(1, description="Frequency of MoE layers, e.g., 2 means every 2nd layer is MoE.")
   expert_shard_attention_option: Literal["fsdp", "context"] = Field(
@@ -2597,8 +2601,6 @@ class MaxTextConfig(
       self.use_grpo = False
 
     if self.use_batch_split_schedule:
-      if not (self.decoder_block == DecoderBlockType.DEEPSEEK and self.sparse_matmul and self.use_tokamax_gmm):
-        raise ValueError("Batch split only supports deepseek, with `sparse_matmul=True` and `use_tokamax_gmm=True`")
       if self.quantization and not (self.use_qwix_quantization and self.quantization == "fp8_full"):
         raise ValueError(
             "Batch split quantization only supports `use_qwix_quantization=True` and `quantization=fp8_full`"

@@ -169,7 +169,7 @@ class Embed(nnx.Module):
             "activation_embed",
         )
     )
-    out_pspec = logical_to_mesh_axes(output_axis_names, self.mesh)
+    out_pspec = logical_to_mesh_axes(output_axis_names, self.mesh, rules=self.config.logical_axis_rules)
 
     out_sharding = NamedSharding(self.mesh, out_pspec) if self.config.shard_mode == ShardMode.EXPLICIT else None
 

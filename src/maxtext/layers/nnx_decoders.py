@@ -976,20 +976,15 @@ class NNXDecoder(nnx.Module):
           num_moe = cfg.num_decoder_layers - cfg.first_num_dense_layers
 
           if cfg.use_batch_split_schedule:
-            policy = self.get_remat_policy()
-
             mock_params = self._build_linen_params(self.moe_layer)
 
             y = deepseek_batchsplit.scan_batch_split_layers(
                 y,
                 mock_params,
                 decoder_positions,
-                decoder_segment_ids,
-                model_mode=model_mode,
                 mesh=self.mesh,
-                quant=self.quant,
                 cfg=cfg,
-                policy=policy,
+                num_layers=num_moe,
             )
           else:
             y, self.moe_layer = self._apply_layers_sequentially(

@@ -90,8 +90,6 @@ def _route_impl(
   assert (
       tokens.shape[0] == selected_experts.shape[0] and selected_experts.ndim == 2
   ), f"{tokens.shape=}, {selected_experts.shape=}"
-  if use_custom_mosaic_kernel:
-    raise NotImplementedError("Custom Mosaic kernel not implemented.")
   inds = jnp.argsort(jnp.ravel(selected_experts)) // selected_experts.shape[1]
   return _sort_impl(tokens, inds, use_custom_mosaic_kernel)
 
@@ -114,7 +112,4 @@ def _unroute_impl(
 
 
 def _sort_impl(tokens: jax.Array, inds: jax.Array, use_custom_mosaic_kernel: bool) -> jax.Array:
-  if use_custom_mosaic_kernel:
-    raise NotImplementedError("Custom Mosaic kernel not implemented.")
-  else:
-    return tokens[inds, ...]
+  return tokens[inds, ...]
