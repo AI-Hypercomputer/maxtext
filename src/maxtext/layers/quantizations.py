@@ -26,7 +26,6 @@ from aqt.jax.v2.flax import aqt_flax
 from aqt.jax.v2 import tiled_dot_general
 from aqt.jax.v2 import calibration
 
-from maxtext.layers import nnx_wrappers
 import qwix
 from qwix._src.core import dot_general_qt
 
@@ -639,6 +638,10 @@ def configure_quantization(config: Config, quant_mode_str: str = "train"):
     )
 
   if config.use_qwix_quantization:
+    if config.quantization == "fp8_gpu":
+      return Fp8Quantization()
+    if config.quantization == "fp8_nanoo":
+      return NANOOFp8Quantization()
     return None
   quant_cfg = _get_quant_config(config)
   if quant_cfg:
@@ -820,6 +823,10 @@ def maybe_quantize_model(model, config):
   """Quantize the model if quantization is enabled."""
   # Batch split is not using Qwix's interception feature but manual plumbing
   if config.use_qwix_quantization and not config.use_batch_split_schedule:
+    # fp8_gpu/fp8_nanoo dot_general is handled by DenseGeneral's ToNNX wrapper,
+    # bypassing QWIX interception to avoid tracer leaks inside jax.checkpoint.
+    if config.quantization in ("fp8_gpu", "fp8_nanoo"):
+      return model
     quantization_provider = get_qt_provider(config)
     if quantization_provider:
       if isinstance(model, nnx.Module):
