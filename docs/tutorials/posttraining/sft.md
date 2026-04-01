@@ -30,10 +30,10 @@ For instructions on installing MaxText with post-training dependencies on your V
 
 ## Setup environment variables
 
-Follow the instructions [here](https://huggingface.co/docs/huggingface_hub/v0.21.2/guides/cli) to login to Hugging Face using your access token using
+Login to Hugging Face. Provide your access token when prompted:
 
 ```bash
-huggingface-cli login
+hf auth login
 ```
 
 Set the following environment variables before running SFT.
