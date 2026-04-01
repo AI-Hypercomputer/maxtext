@@ -1129,7 +1129,8 @@ class Distillation(BaseModel):
   # --- Distillation freezing filter --
   student_params_to_update: None | list = Field(
       None,
-      description="a list of model param name templates to finetune in the student model. The other parameters will be frozen if this attribute is non empty)",
+      description="a list of model param name templates to finetune in the student model. "
+      "The other parameters will be frozen if this attribute is non empty)",
   )
 
 
