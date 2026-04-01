@@ -1087,6 +1087,54 @@ def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
   return state, state_mesh_annotations
 
 
+def setup_decode_state_from_nnx(model, config, rng, mesh):
+  """Setup decode state by loading params via create_nnx_model.
+
+  Uses create_nnx_model to load the checkpoint (handles NNX, NNX-RL with 'base'
+  nesting, and linen checkpoint formats), then extracts Param values from the NNX
+  model and reshards them onto the linen model's expected mesh sharding — avoiding
+  any CPU/numpy round-trip.
+
+  Args:
+    model: the flax linen model to initialize
+    config: config object
+    rng: jax.prng key
+    mesh: jax.devices() mesh
+
+  Returns:
+    state: state with decode params loaded from the NNX checkpoint
+    state_mesh_annotations: the mesh annotations for the state
+  """
+  from flax import nnx  # pylint: disable=import-outside-toplevel
+  from maxtext.utils.model_creation_utils import create_nnx_model  # pylint: disable=import-outside-toplevel
+
+  _, state_mesh_annotations, state_mesh_shardings = get_abstract_state(model, None, config, rng, mesh, False)
+
+  # Load the NNX model with checkpoint (handles NNX, NNX-RL, and linen checkpoint formats)
+  nnx_model, _ = create_nnx_model(config, mesh=mesh, model_mode=MODEL_MODE_AUTOREGRESSIVE)
+
+  # Extract only Param values from the NNX model (filters out dropout/RNG state)
+  # nnx.state() returns a State object (custom pytree), which jax.device_put can't match
+  # against a plain-dict sharding spec. Convert to a plain nested dict first.
+  def _state_to_dict(tree):
+    if isinstance(tree, nnx.Variable):
+      return tree.value
+    if hasattr(tree, "items") and not isinstance(tree, jax.Array):
+      return {k: _state_to_dict(v) for k, v in tree.items()}
+    return tree
+
+  nnx_param_state = nnx.state(nnx_model, nnx.Param)
+  raw_params = _state_to_dict(nnx_param_state)
+  del nnx_model, nnx_param_state  # free memory
+
+  # Reshard to linen's expected sharding — no numpy round-trip needed
+  params = jax.device_put({"params": raw_params}, state_mesh_shardings.params)
+  del raw_params  # free memory
+
+  state = init_decode_state(model.apply, params)
+  return state, state_mesh_annotations
+
+
 def setup_training_state(model, data_iterator, tx, config, rng, mesh, checkpoint_manager):
   is_training = True
   return setup_initial_state(
