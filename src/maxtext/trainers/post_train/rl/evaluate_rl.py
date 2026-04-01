@@ -137,7 +137,7 @@ def score_responses(tmvp_config, question, responses, answer):
       if "DAPO" in tmvp_config.dataset_name or "OpenMathInstruct" in tmvp_config.dataset_name:
         norm_extracted = utils_rl.normalize_final_answer(norm_extracted).strip()
         norm_answer = utils_rl.normalize_final_answer(answer).strip()
-      is_correct = utils_rl.math_verify_func([utils_rl.boxed(norm_answer)], [utils_rl.boxed(norm_extracted)])[0] > 0.1
+      is_correct = utils_rl.math_verify_func([utils_rl.boxed(norm_answer)], [utils_rl.boxed(norm_extracted)]) > 0.1
       if tmvp_config.debug.rl:
         # is_correct is a tuple, if first value is 1.0 means it's a match;
         # 0.0 means a mismatch. e.g. (0.0, (['3', '3'], ['3/5', '\\frac{3}{5}']))
