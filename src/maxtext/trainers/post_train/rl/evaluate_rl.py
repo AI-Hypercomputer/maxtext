@@ -20,6 +20,7 @@ from math_verify import parse
 from tqdm.auto import tqdm
 from tunix.rl.rollout.base_rollout import RolloutConfig
 
+from maxtext.trainers.post_train.rl import math_verify_utils
 from maxtext.trainers.post_train.rl import utils_rl
 from maxtext.utils import max_logging
 
@@ -137,7 +138,9 @@ def score_responses(tmvp_config, question, responses, answer):
       if "DAPO" in tmvp_config.dataset_name or "OpenMathInstruct" in tmvp_config.dataset_name:
         norm_extracted = utils_rl.normalize_final_answer(norm_extracted).strip()
         norm_answer = utils_rl.normalize_final_answer(answer).strip()
-      is_correct = utils_rl.math_verify_func([utils_rl.boxed(norm_answer)], [utils_rl.boxed(norm_extracted)])[0] > 0.1
+
+      math_verify_queue = [(0, [utils_rl.boxed(norm_answer)], [utils_rl.boxed(norm_extracted)])]
+      is_correct = math_verify_utils.math_verify_func(math_verify_queue, tmvp_config=tmvp_config, log_fn=max_logging.log)[0] > 0.1
       if tmvp_config.debug.rl:
         # is_correct is a tuple, if first value is 1.0 means it's a match;
         # 0.0 means a mismatch. e.g. (0.0, (['3', '3'], ['3/5', '\\frac{3}{5}']))

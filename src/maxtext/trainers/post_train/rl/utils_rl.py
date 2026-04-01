@@ -20,28 +20,11 @@ from etils import epath
 import optax
 import numpy as np
 
+from maxtext.trainers.post_train.rl import math_verify_utils
 
-from math_verify.errors import TimeoutException
-from math_verify.metric import math_metric
-from math_verify.parser import ExprExtractionConfig, LatexExtractionConfig
 from math_verify import parse
 
 from tunix.rl.agentic.parser.chat_template_parser import parser as agentic_chat_template_parser
-
-
-# initialize math_verify_func once
-math_verify_func = math_metric(
-    gold_extraction_target=(LatexExtractionConfig(),),
-    pred_extraction_target=(
-        ExprExtractionConfig(),
-        LatexExtractionConfig(),
-    ),
-)
-
-
-def boxed(x):
-  """Wraps the input string in a LaTeX boxed command if it's not already wrapped."""
-  return "\\boxed{" + x + "}" if not x.startswith("\\boxed{") else x
 
 
 EPSILON = 1e-6
@@ -102,6 +85,11 @@ REMOVED_EXPRESSIONS = [
     '"',
     "\\dots",
 ]
+
+
+def boxed(x):
+  """Wraps the input string in a LaTeX boxed command if it's not already wrapped."""
+  return "\\boxed{" + x + "}" if not x.startswith("\\boxed{") else x
 
 
 # Let's define a RegEx for checking whether the format matches.
@@ -204,10 +192,20 @@ def normalize_final_answer(final_answer: str) -> str:
     final_answer = final_answer.replace(expr, "")
 
   # Extract and normalize LaTeX math
-  final_answer = re.sub(r"(.*?)(\$)(.*?)(\$)(.*)", "$\\3$", final_answer)
+  # converts "The answer is $\frac{1}{2}$" -> "$\frac{1}{2}$"
+  # converts "The answer is 3 $\frac{1}{2}$" -> "$3\frac{1}{2}$"
+  final_answer = re.sub(
+      r".*?(\d+)?\s*\$\s*(\d+)?\s*(\\frac\{.*?\}\{.*?\}|\d+/\d+)\s*\$.*",
+      lambda m: f"${w}{m.group(3)}$" if (w := (m.group(1) or m.group(2))) else f"${m.group(3)}$",
+      final_answer,
+  )
+  # converts "\text{hello}" -> "hello"
   final_answer = re.sub(r"(\\text\{)(.*?)(\})", "\\2", final_answer)
+  # converts "\textbf{hello}" -> "hello"
   final_answer = re.sub(r"(\\textbf\{)(.*?)(\})", "\\2", final_answer)
+  # converts "\overline{hello}" -> "hello"
   final_answer = re.sub(r"(\\overline\{)(.*?)(\})", "\\2", final_answer)
+  # converts "\boxed{100}" -> "100"
   final_answer = re.sub(r"(\\boxed\{)(.*)(\})", "\\2", final_answer)
 
   # Normalize shorthand TeX:
@@ -245,61 +243,50 @@ def check_answer(prompts, completions, answer, tmvp_config, **kargs):
       fallback_matches = answer_fallback.findall(c)
       extracted_responses.append(fallback_matches[-1].strip() if fallback_matches else None)
 
-  scores = []
-  for guess, true_answer in zip(extracted_responses, answer):
-    score = 0
+  scores = [tmvp_config.penalty_incorrect_format] * len(completions)  # Default to penalty for incorrect format
+  for idx, (guess, true_answer) in enumerate(zip(extracted_responses, answer)):
     if guess is None:
-      scores.append(0)
+      scores[idx] = 0
       continue
+
+    # 1. Check for exact or whitespace-normalized match first for a quick reward
+    if guess == true_answer:
+      scores[idx] = max(scores[idx], tmvp_config.reward_exact_answer)
+      continue
+    elif guess.strip() == true_answer.strip():
+      scores[idx] = max(scores[idx], tmvp_config.reward_white_space_format_match)
+      continue
+
+    # Fix LaTeX escaping issues for both ground truth and extracted answer
+    true_answer_fixed = fix_latex_escaping(true_answer)
+    guess_fixed = fix_latex_escaping(guess)
+
     # Normalize for certain datasets
     if "DAPO" in tmvp_config.dataset_name or "OpenMathInstruct" in tmvp_config.dataset_name:
-      guess = normalize_final_answer(guess)
-      true_answer = normalize_final_answer(true_answer)
-    # Try math_verify first for robust comparison
-    verified_correct = False
-    mv_output = None
-    true_answer_fixed = true_answer
-    guess_fixed = guess
-    try:
-      # Fix LaTeX escaping issues for both ground truth and extracted answer
-      true_answer_fixed = fix_latex_escaping(true_answer)
-      guess_fixed = fix_latex_escaping(guess)
+      guess = normalize_final_answer(guess_fixed)
+      true_answer = normalize_final_answer(true_answer_fixed)
 
-      mv_output = math_verify_func([boxed(true_answer_fixed)], [boxed(guess_fixed)])
-      if mv_output and mv_output[0] > 0.1:
-        verified_correct = True
-    except (TimeoutException, Exception):
-      pass
-
-    # Correct answer gets tmvp_config.reward_exact_answer points!
-    if guess == true_answer:
-      score += tmvp_config.reward_exact_answer
-    # Give credit if spaces are seen but otherwise the answers match (useful for simple datasets like gsm8k)
-    elif guess.strip() == true_answer.strip():
-      score += tmvp_config.reward_white_space_format_match
-    # Answers match upon robust comparison with math_verify
-    elif verified_correct:
-      score += tmvp_config.reward_exact_answer
+    # 2. Try math_verify for robust mathematical correctness checking
+    math_verify_queue = [(idx, boxed(true_answer_fixed), [boxed(guess_fixed)])]
+    math_verify_results = math_verify_utils.math_verify_func(math_verify_queue, tmvp_config=tmvp_config, log_fn=max_logging.log)
+    if math_verify_results[0] > 0.1:
+      scores[idx] = max(scores[idx], tmvp_config.reward_exact_answer)
     else:
       # We also reward it if the answer is close via ratios!
       # Ie if the answer is within some range, reward it!
       try:
-        # Fix LaTeX escaping issues for both ground truth and extracted answer
-        true_answer_fixed = fix_latex_escaping(true_answer)
-        guess_fixed = fix_latex_escaping(guess)
         val_true = parse(boxed(true_answer_fixed.strip()))
         val_guess = parse(boxed(guess_fixed.strip()))
 
         ratio = (val_guess[0] + EPSILON) / (val_true[0] + EPSILON)
         if ratio >= 0.9 and ratio <= 1.1:
-          score += tmvp_config.reward_ratio_guess_to_answer_high
+          scores[idx] = max(scores[idx], tmvp_config.reward_ratio_guess_to_answer_high)
         elif ratio >= 0.8 and ratio <= 1.2:
-          score += tmvp_config.reward_ratio_guess_to_answer_low
+          scores[idx] = max(scores[idx], tmvp_config.reward_ratio_guess_to_answer_low)
         else:
-          score += tmvp_config.penalty_incorrect_answer  # Penalize wrong answers
+          scores[idx] = max(scores[idx], tmvp_config.penalty_incorrect_answer)  # Penalize wrong answers
       except:
-        score += tmvp_config.penalty_incorrect_format  # Penalize
-    scores.append(score)
+        scores[idx] = max(scores[idx], tmvp_config.penalty_incorrect_format)  # Penalize
   return scores
 
 
@@ -433,15 +420,23 @@ def check_numbers(prompts, completions, answer, tmvp_config, **kargs):
       fallback_matches = answer_fallback.findall(c)
       extracted_responses.append(fallback_matches[-1].strip() if fallback_matches else None)
 
-  scores = []
-
-  for guess, true_answer in zip(extracted_responses, answer):
+  scores = [tmvp_config.penalty_incorrect_format] * len(completions)  # Default to penalty for incorrect format
+  math_verify_queue = []
+  for idx, (guess, true_answer) in enumerate(zip(extracted_responses, answer)):
     if guess is None:
-      scores.append(0)
+      scores[idx] = 0
       continue
 
-    # Try math_verify first for robust comparison of both numbers and expressions
-    try:
+    has_exact_match = False
+    # 1. Check for exact or whitespace-normalized match first for a quick reward
+    if guess == true_answer:
+      scores[idx] = max(scores[idx], tmvp_config.reward_exact_answer)
+      has_exact_match = True
+    elif guess.strip() == true_answer.strip():
+      scores[idx] = max(scores[idx], tmvp_config.reward_white_space_format_match)
+      has_exact_match = True
+
+    if not has_exact_match:
       # Fix LaTeX escaping issues for both ground truth and extracted answer
       true_answer_fixed = fix_latex_escaping(true_answer)
       guess_fixed = fix_latex_escaping(guess)
@@ -451,18 +446,15 @@ def check_numbers(prompts, completions, answer, tmvp_config, **kargs):
         true_answer_fixed = normalize_final_answer(true_answer_fixed)
         guess_fixed = normalize_final_answer(guess_fixed)
 
-      # Use math_verify to compare answers (handles both numeric and expression comparison)
-      score, _ = math_verify_func([boxed(true_answer_fixed)], [boxed(guess_fixed)])
-      # Return scaled score: 1.5 for exact/correct, 0 otherwise
-      scores.append(tmvp_config.reward_exact_answer if score > 0.1 else 0.0)
-    except (TimeoutException, Exception):
-      # Fallback to simple numeric comparison if math_verify fails
-      try:
-        guess_val = float(normalize_final_answer(guess).strip())
-        true_val = float(normalize_final_answer(true_answer).strip())
-        scores.append(tmvp_config.reward_exact_answer if guess_val == true_val else 0.0)
-      except:
-        scores.append(0)
+      math_verify_queue.append((idx, boxed(true_answer_fixed), [boxed(guess_fixed)]))
+
+  if math_verify_queue:
+    # 2. Try math_verify for robust mathematical correctness checking
+    math_verify_results = math_verify_utils.math_verify_func(math_verify_queue, tmvp_config=tmvp_config, log_fn=max_logging.log)
+    for (idx, _, _), score in zip(math_verify_queue, math_verify_results):
+      if score > 0.1:
+        scores[idx] = max(scores[idx], tmvp_config.reward_exact_answer)
+
   if tmvp_config.debug.rl:
     debug_log_path = epath.Path(tmvp_config.base_output_directory) / tmvp_config.run_name / "debug_rl_logs"
     debug_log_path.mkdir(parents=True, exist_ok=True)

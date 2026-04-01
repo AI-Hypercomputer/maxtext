@@ -189,6 +189,12 @@ reward_ratio_guess_to_answer_low: 0.0
 penalty_incorrect_format: 0.0
 penalty_incorrect_answer: 0.0
 
+# ====== math_verify grading pool ======
+# Per-item wall-clock timeout (seconds) for math_verify grading.
+math_verify_timeout: 15
+# Max worker processes for the math_verify pool. null ⇒ min(batch_size, cpu_count()).
+math_verify_num_procs: null
+
 # ====== Special tokens/templates for GSM8K reasoning ======
 reasoning_start_token: '<reasoning>'
 reasoning_end_token: '</reasoning>'

@@ -50,7 +50,6 @@ def _make_config():
       debug=SimpleNamespace(rl=False),
   )
 
-
 class TestScoreResponses(unittest.TestCase):
   """Tests for evaluate_rl.score_responses parsing and correctness logic."""
 
@@ -314,6 +313,19 @@ class TestCheckNumbers(unittest.TestCase):
         answer=["red"],
     )
     self.assertEqual(scores[0], 0.0)
+
+  @pytest.mark.cpu_only
+  def test_extracted_non_numeric_but_math_verifies(self):
+    """Non-numeric extraction that math-verifies with the reference answer earns reward_exact_answer."""
+    scores = self._check(
+        completions=[
+            "<reasoning>geometry</reasoning><answer>3\\frac{1}{2}</answer>",
+            "<reasoning>geometry</reasoning><answer>\\dfrac{AC}{\\sqrt{AC^2 + BC^2}}</answer>",
+        ],
+        answer=["3.5", "\\frac{AC}{\\sqrt{AC^2 + BC^2}}"],
+    )
+    self.assertEqual(scores[0], self.config.reward_exact_answer)
+    self.assertEqual(scores[1], self.config.reward_exact_answer)
 
 
 class TestExtractHashAnswer(unittest.TestCase):
