@@ -34,6 +34,7 @@ Architecture Overview:
 """
 
 import inspect
+import logging
 from typing import Sequence, Callable, Any
 from absl import app
 from flax import nnx
@@ -226,7 +227,9 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
       def wrt_filter(path, x):
         if not isinstance(x, base_wrt):
           return False
-        return not student_freeze_param_filter(path)
+        freeze = student_freeze_param_filter(path)
+        logging.info("Student model freezing info: Parameter {path}; freeze={freeze}")
+        return not freeze
 
       self.wrt_filter = wrt_filter
     else:
@@ -589,7 +592,7 @@ def train_distill(
     def student_freeze_param_fn(path) -> bool:
       path_str = "/".join(str(p) for p in path)
       return not any(template in path_str for template in student_params_to_update)
-    
+
     if is_offline:
       max_logging.log("Offline Distillation: Skipping Teacher Model loading.")
       teacher_model = None
