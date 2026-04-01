@@ -440,9 +440,14 @@ def create_rl_components(
   optimizer = utils_rl.get_optimizer(trainer_config, max_train_steps)
 
   # Setup checkpointing
-  checkpointing_options = ocp.CheckpointManagerOptions(
-      save_interval_steps=trainer_config.checkpoint_period, max_to_keep=trainer_config.max_num_checkpoints_to_keep
-  )
+  if trainer_config.enable_checkpointing:
+    checkpointing_options = ocp.CheckpointManagerOptions(
+        save_interval_steps=trainer_config.checkpoint_period, max_to_keep=trainer_config.max_num_checkpoints_to_keep
+    )
+    checkpoint_dir = trainer_config.checkpoint_dir
+  else:
+    checkpointing_options = None
+    checkpoint_dir = None
 
   # Set up micro batching
   micro_batch_size = None if trainer_config.micro_batch_size == -1 else trainer_config.micro_batch_size
@@ -501,7 +506,7 @@ def create_rl_components(
           rollout_micro_batch_size=rollout_micro_batch_size,
           metrics_logging_options=metrics_logging_options,
           profiler_options=profiler_options,
-          checkpoint_root_directory=trainer_config.checkpoint_dir,
+          checkpoint_root_directory=checkpoint_dir,
           checkpointing_options=checkpointing_options,
       ),
       rollout_config=base_rollout.RolloutConfig(
