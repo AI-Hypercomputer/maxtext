@@ -228,7 +228,7 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
         if not isinstance(x, base_wrt):
           return False
         freeze = student_freeze_param_filter(path)
-        logging.info("Student model freezing info: Parameter {path}; freeze={freeze}")
+        logging.info(f"Student model freezing info: Parameter {path}; freeze={freeze}")
         return not freeze
 
       self.wrt_filter = wrt_filter
