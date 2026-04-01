@@ -1094,6 +1094,12 @@ class RoutedMoE(nnx.Module):
     if isinstance(wo_kernel, aqt.QTensor):
       wo_pspec = aqt.partition_spec(wo_pspec, (1,), wo_kernel.dtype, use_bias=False)
 
+    print(f"[moe] mesh.shape={dict(self.mesh.shape)}")
+    print(f"[moe] ep_name={self._expert_parallelism_name} num_expert_parallelism={self.get_expert_parallelism_size()}")
+    print(f"[moe] is_batch_sharded_by_expert={is_batch_sharded_by_expert} batch_logical_axis={batch_logical_axis}")
+    print(f"[moe] weight_gather={weight_gather} w0_pspec={w0_pspec}")
+    print(f"[moe] input_partition_pspec={input_partition_pspec}")
+
     @functools.partial(
         jax.shard_map,
         mesh=self.mesh,
@@ -1239,6 +1245,8 @@ class RoutedMoE(nnx.Module):
         # wo [Experts, Hidden, Out] -> Gather Exp(0) and Hidden(1)
         wo_gather_axes.extend(get_active_sharding_axes(wo_pspec[0], 0))
         wo_gather_axes.extend(get_active_sharding_axes(wo_pspec[1], 1))
+      print(f"[wrapper] num_expert_parallelism={num_expert_parallelism}")
+      print(f"[wrapper] wi_gather_axes={wi_gather_axes} wo_gather_axes={wo_gather_axes}")
       gmm_fn = functools.partial(
           gmm,
           group_sizes=group_sizes,
