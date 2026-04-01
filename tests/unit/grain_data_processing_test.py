@@ -19,6 +19,7 @@ import os.path
 import tempfile
 import unittest
 import json
+import numpy as np
 
 import jax
 import pytest
@@ -250,6 +251,45 @@ class GrainArrayRecordAutoTuneTest(GrainArrayRecordProcessingTest):
     super().test_for_loop_repeatable()
 
 
+class GrainArrayRecordTiktokenTest(GrainArrayRecordProcessingTest):
+  """Test grain data processing with best_fit packing strategy."""
+
+  def setUp(self):
+    super().setUp()
+    self.config = self._make_config(
+        tokenizer_type="tiktoken",
+        tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer_llama3.tiktoken"),
+    )
+    self.train_iter = grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
+
+  # Only runs test_train_ds from parent class, skip other tests
+  @pytest.mark.skip(reason="skip for tokenizer testing")
+  def test_batch_determinism(self):
+    pass
+
+  @pytest.mark.skip(reason="skip for tokenizer testing")
+  def test_for_loop_repeatable(self):
+    pass
+
+
+class GrainArrayRecordHFTokenizerTest(GrainArrayRecordProcessingTest):
+  """Test grain data processing with best_fit packing strategy."""
+
+  def setUp(self):
+    super().setUp()
+    self.config = self._make_config(tokenizer_type="huggingface", tokenizer_path="deepseek-ai/DeepSeek-V3")
+    self.train_iter = grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
+
+  # Only runs test_train_ds from parent class, skip other tests
+  @pytest.mark.skip(reason="skip for tokenizer testing")
+  def test_batch_determinism(self):
+    pass
+
+  @pytest.mark.skip(reason="skip for tokenizer testing")
+  def test_for_loop_repeatable(self):
+    pass
+
+
 class GrainArrayRecordBestFitPackingTest(GrainArrayRecordProcessingTest):
   """Test grain data processing with best_fit packing strategy."""
 
@@ -385,6 +425,71 @@ class GrainTFRecordProcessingTest(GrainBaseProcessingTest, unittest.TestCase):
         self.mesh,
     )
     self.train_iter = grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
+
+
+class GrainSFTParquetProcessingTest(unittest.TestCase):
+  """Tests the SFT pipeline end-to-end using the real ultrachat_200k parquet dataset."""
+
+  def setUp(self):
+    super().setUp()
+
+    grain_train_file = "gs://maxtext-dataset/hf/ultrachat_200k/train_sft-*.parquet"
+    base_output_directory = "gs://max-experiments/"
+    config_file = get_test_config_path()
+
+    self.config = pyconfig.initialize(
+        [sys.argv[0], config_file],
+        per_device_batch_size=1,
+        run_name="test",
+        mesh_axes=["data"],
+        logical_axis_rules=[["batch", "data"]],
+        data_sharding=["data"],
+        base_output_directory=base_output_directory,
+        dataset_type="grain",
+        grain_file_type="parquet",
+        grain_train_files=grain_train_file,
+        use_sft=True,  # Triggers your new SFT pipeline
+        sft_train_on_completion_only=True,
+        train_data_columns=["messages"],
+        tokenizer_type="huggingface",
+        tokenizer_path="HuggingFaceH4/zephyr-7b-beta",  # The ungated tokenizer
+        max_target_length=128,
+        packing=True,
+        grain_worker_count=1,
+        grain_per_worker_buffer_size=1,
+        enable_checkpointing=False,
+    )
+    self.mesh_shape_1d = (len(jax.devices()),)
+    self.mesh = Mesh(mesh_utils.create_device_mesh(self.mesh_shape_1d), self.config.mesh_axes)
+    self.process_indices = input_pipeline_interface.get_process_loading_real_data(
+        self.config.data_sharding,
+        self.config.global_batch_size_to_load,
+        self.config.global_batch_size_to_train_on,
+        self.config.max_target_length,
+        self.mesh,
+    )
+    self.train_iter = grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
+
+  def test_train_ds(self):
+    expected_shape = [jax.device_count(), self.config.max_target_length]
+    batch = next(self.train_iter)
+
+    # Assert all the required packing and target tensors were generated
+    self.assertEqual(
+        {k: list(v.shape) for k, v in batch.items()},
+        {
+            "inputs": expected_shape,
+            "inputs_position": expected_shape,
+            "inputs_segmentation": expected_shape,
+            "targets": expected_shape,
+            "targets_position": expected_shape,
+            "targets_segmentation": expected_shape,
+        },
+    )
+
+    # check to see that if prompts are masked, targets will differ from inputs
+    has_masked_tokens = np.any(batch["inputs"] != batch["targets"])
+    self.assertTrue(bool(has_masked_tokens), "Targets array should differ from inputs array due to prompt masking.")
 
 
 if __name__ == "__main__":

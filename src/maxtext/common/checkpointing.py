@@ -221,6 +221,7 @@ def create_orbax_checkpoint_manager(
     enable_single_controller: bool = False,
     colocated_python_checkpointing: bool = False,
     enable_single_replica_ckpt_restoring: bool = False,
+    enable_autocheckpoint: bool = False,
 ):
   """Returns specified Orbax (async or not) CheckpointManager or None if checkpointing is disabled."""
   if not enable_checkpointing:
@@ -248,11 +249,21 @@ def create_orbax_checkpoint_manager(
   # local storage checkpoint needs parent directory created
   p = gcs_utils.mkdir_and_check_permissions(checkpoint_dir)
   if enable_continuous_checkpointing:
+    max_logging.log("Enabling policy for continuous checkpointing.")
     save_decision_policy = save_decision_policy_lib.ContinuousCheckpointingPolicy()
-    preservation_policy = preservation_policy_lib.LatestN(max_num_checkpoints_to_keep)
+  elif enable_autocheckpoint:
+    max_logging.log("Enabling policy for autocheckpoint.")
+    save_decision_policy = save_decision_policy_lib.AnySavePolicy(
+        [
+            save_decision_policy_lib.PreemptionCheckpointingPolicy(),
+            save_decision_policy_lib.FixedIntervalPolicy(save_interval_steps),
+        ]
+    )
   else:
+    max_logging.log("Enabling policy for fixed interval checkpointing.")
     save_decision_policy = save_decision_policy_lib.FixedIntervalPolicy(interval=save_interval_steps)
-    preservation_policy = preservation_policy_lib.LatestN(max_num_checkpoints_to_keep)
+  preservation_policy = preservation_policy_lib.LatestN(max_num_checkpoints_to_keep)
+
   async_options = None
   if enable_continuous_checkpointing:
     async_options = ocp.AsyncOptions(
@@ -750,8 +761,8 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
     if (
         force
         or (step % config.checkpoint_period == 0 and not config.enable_continuous_checkpointing)
-        or (step % config.checkpoint_period == 0)
         or (config.enable_emergency_checkpoint and step % config.local_checkpoint_period == 0)
+        or (config.enable_autocheckpoint and checkpoint_manager.reached_preemption(step))
     ):
       blocking_until_ready_start = time.time()
       max_logging.log(f"Waiting for step {step} to finish before checkpoint...")
