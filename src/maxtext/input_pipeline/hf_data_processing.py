@@ -26,6 +26,7 @@ import grain.python as grain
 
 import numpy as np
 
+from maxtext.input_pipeline import data_processing_utils
 from maxtext.input_pipeline import input_pipeline_utils
 from maxtext.input_pipeline import instruction_data_processing
 from maxtext.input_pipeline import multihost_dataloading
@@ -248,13 +249,7 @@ def preprocessing_pipeline(
   dataset = dataset.select_columns(data_column_names)
 
   if use_sft:
-    if chat_template:
-      tokenizer.chat_template = chat_template
-
-    supported_columns = [["prompt", "completion"], ["messages"], ["question", "answer"]]
-    assert any(
-        set(data_column_names) == set(supported) for supported in supported_columns
-    ), f"Dataset column names mismatch. Expected columns to match one of {supported_columns}, but got {data_column_names}"
+    data_processing_utils.validate_and_configure_sft_columns(data_column_names, tokenizer, chat_template)
 
     # convert instruction dataset to conversational format
     # currently only works for Q&A datasets
