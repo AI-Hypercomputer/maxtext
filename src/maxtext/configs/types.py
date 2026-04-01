@@ -1709,6 +1709,20 @@ class RL(BaseModel):
   grpo_beta: float = Field(0.08, description="Coefficient for the KL divergence penalty (β).")
   grpo_epsilon: float = Field(0.2, description="Epsilon value for clipping in the GRPO loss.")
   loss_algo: Literal["grpo", "gspo-token"] = Field("grpo", description="Loss algorithm, i.e., 'grpo' or 'gspo-token'.")
+  use_agentic_rollout: bool = Field(
+      False, description="If True, uses the asynchronous AgenticGRPOLearner for online vLLM rollouts."
+  )
+  max_concurrency: int = Field(256, description="Maximum number of concurrent rollout requests (agentic rollout only).")
+  off_policy_steps: int = Field(
+      0, description="Number of off-policy steps tolerated before requiring a policy update (agentic only)."
+  )
+  system_prompt: str = Field("", description="System prompt injected into the agent at rollout time (agentic only).")
+  degenerate_group_masking: bool = Field(
+      True, description="Mask degenerate groups (all-zero advantages) from contributing to loss (agentic only)."
+  )
+  epsilon_high: Optional[float] = Field(
+      None, description="Upper-bound clipping epsilon for GRPO loss. Defaults to epsilon when None (agentic only)."
+  )
 
 
 class RLDataset(BaseModel):
