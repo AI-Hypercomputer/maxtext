@@ -126,6 +126,7 @@ class TrainDistillTest(unittest.TestCase):
     trainer.teacher_model = mock.Mock()
     trainer.model = mock.Mock()
     trainer.gen_model_input_fn = lambda x: {"inputs": {"some_key": "some_val"}}
+    trainer.wrt_filter = lambda path, x: True  # type: ignore
 
     # 2. Setup Input
     # pylint: disable=unexpected-keyword-arg
@@ -153,6 +154,7 @@ class TrainDistillTest(unittest.TestCase):
     # pylint: disable=no-value-for-parameter
     trainer = train_distill.MaxTextDistillationTrainer.__new__(train_distill.MaxTextDistillationTrainer)
     trainer.strategy = mock.Mock()
+    trainer.wrt_filter = lambda path, x: True  # type: ignore
 
     # 2. Setup Batch WITH teacher_output
     mock_batch = {
@@ -205,6 +207,7 @@ class TrainDistillTest(unittest.TestCase):
     # pylint: disable=no-value-for-parameter
     trainer = train_distill.MaxTextDistillationTrainer.__new__(train_distill.MaxTextDistillationTrainer)
     trainer.strategy = mock.Mock()
+    trainer.wrt_filter = lambda path, x: True  # type: ignore
 
     # 2. Setup Batch WITHOUT teacher_output
     mock_batch = {
@@ -278,6 +281,7 @@ class TrainDistillTest(unittest.TestCase):
     # pylint: disable=no-value-for-parameter
     trainer = train_distill.MaxTextDistillationTrainer.__new__(train_distill.MaxTextDistillationTrainer)
     trainer.strategy = mock.Mock()
+    trainer.wrt_filter = lambda path, x: True  # type: ignore
 
     # 2. Setup Batch WITH targets_segmentation
     mock_targets_segmentation = jnp.array([[1, 1, 0]])
@@ -579,6 +583,7 @@ class TrainDistillTest(unittest.TestCase):
     # pylint: disable=no-value-for-parameter
     trainer = train_distill.MaxTextDistillationTrainer.__new__(train_distill.MaxTextDistillationTrainer)
     trainer.strategy = mock.Mock()
+    trainer.wrt_filter = lambda path, x: True  # type: ignore
 
     # 2. Setup Input Mocks
     raw_inputs = mock.Mock()
@@ -675,6 +680,7 @@ class TrainDistillTest(unittest.TestCase):
     """Verifies metrics are moved from aux dict to the trainer buffer."""
     # pylint: disable=no-value-for-parameter
     trainer = train_distill.MaxTextDistillationTrainer.__new__(train_distill.MaxTextDistillationTrainer)
+    trainer.wrt_filter = lambda path, x: True  # type: ignore
 
     # Setup MetricsBuffer mock
     mock_buffer = mock.Mock()
@@ -723,6 +729,7 @@ class TrainDistillTest(unittest.TestCase):
     # pylint: disable=no-value-for-parameter
     trainer = train_distill.MaxTextDistillationTrainer.__new__(train_distill.MaxTextDistillationTrainer)
     trainer.strategy = mock.Mock()
+    trainer.wrt_filter = lambda path, x: True  # type: ignore
 
     dummy_batch = {
         "input_tokens": jnp.ones((1, 2)),
@@ -1120,6 +1127,92 @@ class TrainDistillTest(unittest.TestCase):
     # check that both student and teacher models are set since online mode should load both
     self.assertIs(model_bundle.student_model, mock_student_model)
     self.assertIs(model_bundle.teacher_model, mock_teacher_model)
+
+  def test_student_freeze_param_filter(self):
+    """Verifies that student_freeze_param_filter correctly freezes specified parameters."""
+
+    # 1. Setup a dummy model with multiple layers
+    class DummyModel(nnx.Module):
+
+      def __init__(self):
+        self.layer1 = nnx.Linear(in_features=2, out_features=2, rngs=nnx.Rngs(0))
+        self.layer2 = nnx.Linear(in_features=2, out_features=2, rngs=nnx.Rngs(1))
+
+      def __call__(self, input_tokens, **kwargs):
+        # Apply layers
+        return self.layer2(self.layer1(input_tokens))
+
+    student = DummyModel()
+    teacher = DummyModel()
+    model_bundle = train_distill.ModelBundle(teacher_model=teacher, student_model=student)
+
+    # Snapshot initial weights
+    initial_layer1_weights = student.layer1.kernel.get_value().copy()
+    initial_layer2_weights = student.layer2.kernel.get_value().copy()
+
+    # 2. Setup freeze filter (freeze layer1, train layer2)
+    def freeze_filter(path):
+      path_str = "/".join(str(p) for p in path)
+      return "layer1" in path_str
+
+    # 3. Setup Strategy and TrainingConfig
+    strategy = mock.Mock()
+    strategy.compute_loss.side_effect = lambda s_out, t_out, labels: (jnp.sum(s_out.logits), {"aux": 1.0})
+    strategy.create_labels.return_value = None
+    strategy.student_forward_fn = lambda model, **kw: distillation_utils.DistillationForwardOutput(
+        logits=model(kw["input_tokens"])
+    )
+    strategy.teacher_forward_fn = lambda model, **kw: distillation_utils.DistillationForwardOutput(
+        logits=model(kw["input_tokens"])
+    )
+
+    # pylint: disable=import-outside-toplevel
+    from tunix.sft import peft_trainer
+
+    train_config = peft_trainer.TrainingConfig(
+        max_steps=1,
+        eval_every_n_steps=0,
+        # checkpointing_options=ocp.CheckpointManagerOptions(create=False),
+        gradient_accumulation_steps=1,
+    )
+
+    # 4. Initialize Trainer
+    trainer = train_distill.MaxTextDistillationTrainer(
+        model=model_bundle,
+        strategy=strategy,
+        optimizer=optax.sgd(0.1),
+        training_config=train_config,
+        student_freeze_param_filter=freeze_filter,
+    )
+    trainer._lora_enabled = False
+    trainer.is_managed_externally = True
+
+    trainer = trainer.with_gen_model_input_fn(
+        lambda batch: {
+            "input_tokens": batch["input_tokens"],
+            "positions": None,
+            "attention_mask": None,
+            "decoder_segment_ids": None,
+            "targets": None,
+            "teacher_output": distillation_utils.DistillationForwardOutput(logits=jnp.ones((1, 2))),
+        }
+    )
+
+    dummy_batch = {"input_tokens": jnp.ones((1, 2))}
+
+    # 5. Execute Pass
+    trainer._train_step(model_bundle, trainer.optimizer, dummy_batch)
+
+    # 6. Verify layer1 is unchanged (frozen)
+    np.testing.assert_allclose(
+        student.layer1.kernel.get_value(),
+        initial_layer1_weights,
+        err_msg="layer1 weights should be frozen and remain unchanged.",
+    )
+
+    # Verify layer2 has changed (trained)
+    is_layer2_unchanged = np.allclose(student.layer2.kernel.get_value(), initial_layer2_weights)
+    self.assertFalse(is_layer2_unchanged, msg="layer2 weights should have updated.")
 
 
 if __name__ == "__main__":
