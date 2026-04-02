@@ -275,7 +275,7 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
                 "swap_space": rollout_config.rollout_vllm_swap_space_size_gb,
                 # Async scheduling causes KeyError in dp_scheduler on slow models
                 # (30B+) where inference latency exceeds the scheduler's window.
-                "async_scheduling": False,
+                "async_scheduling": rollout_config.rollout_vllm_async_scheduling,
             },
         ),
         converter=converter,
