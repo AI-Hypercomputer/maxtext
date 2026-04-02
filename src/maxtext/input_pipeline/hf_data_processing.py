@@ -280,7 +280,8 @@ def preprocessing_pipeline(
 
   pad_id = _get_pad_id(tokenizer)
 
-  if tokenize:
+  # Tunix-DPO handles tokenization internally to ensure proper padding/masking.
+  if tokenize and not use_dpo:
     dataset = dataset.map(
         input_pipeline_utils.tokenization,
         batched=True,

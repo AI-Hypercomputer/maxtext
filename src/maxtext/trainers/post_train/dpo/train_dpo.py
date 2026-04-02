@@ -36,6 +36,7 @@ from flax.linen import partitioning as nn_partitioning
 from tunix.sft import metrics_logger, profiler
 from tunix.sft.dpo.dpo_trainer import DPOTrainer, DPOTrainingConfig
 
+import tunix
 from maxtext.configs import pyconfig
 from maxtext.utils import max_utils
 from maxtext.common.goodput import (
@@ -98,6 +99,8 @@ def get_tunix_config(mt_config: pyconfig.HyperParameters) -> DPOTrainingConfig:
       algorithm="dpo",  # TODO: add support of "orpo"
       beta=mt_config.dpo_beta,
       label_smoothing=mt_config.dpo_label_smoothing,
+      max_prompt_length=mt_config.max_target_length // 2,
+      max_response_length=mt_config.max_target_length // 2,
   )
 
 
@@ -121,7 +124,17 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
     training_hooks = hooks.SFTTrainingHooks(mt_config, mesh, learning_rate_schedule, goodput_recorder)
     data_hooks = hooks.SFTDataHooks(mt_config, mesh, goodput_recorder)
 
-    trainer = DPOTrainer(model=model, ref_model=None, optimizer=optimizer, training_config=tunix_config, tokenizer=None)
+    tokenizer = tunix.Tokenizer(
+        tokenizer_type=mt_config.tokenizer_type,
+        tokenizer_path=mt_config.tokenizer_path,
+        add_bos=mt_config.add_bos,
+        add_eos=mt_config.add_eos,
+        hf_access_token=mt_config.hf_access_token,
+    )
+
+    trainer = DPOTrainer(
+        model=model, ref_model=None, optimizer=optimizer, training_config=tunix_config, tokenizer=tokenizer
+    )
     trainer.with_training_hooks(training_hooks)
     trainer.with_data_hooks(data_hooks)
 
