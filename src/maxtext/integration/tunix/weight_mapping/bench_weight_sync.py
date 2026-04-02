@@ -282,7 +282,7 @@ class MaxTextToVLLMConverter:
       )
       
     def _to_attn(self, attn: PyTree) -> dict[str, jax.Array]:
-      tp = self.vllm_tp
+      tp = min(self.vllm_tp, self.config.base_num_kv_heads)  # Don't TP-shard more heads than exist in the model.
 
       @jax.jit
       def _compute(attn):

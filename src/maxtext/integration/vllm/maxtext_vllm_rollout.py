@@ -268,6 +268,7 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
             server_mode=rollout_config.rollout_vllm_server_mode,
             tensor_parallel_size=rollout_config.tensor_parallel_size,
             data_parallel_size=rollout_config.data_parallel_size,
+            enable_dp_attention=rollout_config.rollout_vllm_enable_dp_attention,
             engine_kwargs={
                 "max_model_len": cache_config_or_size,
                 "model": rollout_config.rollout_vllm_model_version,
