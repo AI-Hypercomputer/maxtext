@@ -160,9 +160,12 @@ class MaxTextForCausalLM(nnx.Module):
     if not isinstance(self.model, nnx.Module):
       raise ValueError("Model must be an instance of type nnx.Module.")
 
-    # Ensure inputs are at least 2D with a batch dimension
-    input_ids = jnp.atleast_2d(input_ids)
-    input_positions = jnp.atleast_2d(attention_metadata.input_positions)
+    # Reshape inputs to (num_tokens, 1) — standard MaxText decode convention: batch=N, seq=1.
+    # vLLM passes flat (N,) token IDs; atleast_2d would give (1, N) which is semantically wrong
+    # (1 batch entry with N positions). (N, 1) means N independent sequences each with 1 token,
+    # which is correct for packed decode and consistent with the RPA attention interface.
+    input_ids = input_ids.reshape((-1, 1))
+    input_positions = attention_metadata.input_positions.reshape((-1, 1))
 
     with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
       aux_hidden_states = []
