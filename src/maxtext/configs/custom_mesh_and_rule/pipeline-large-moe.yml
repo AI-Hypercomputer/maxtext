@@ -20,48 +20,49 @@
 # The `data` axis is preserved for two reasons: first, the pipeline stage acts as a 
 # data parallel (DP) domain externally, making the `data` axis a necessary reference; 
 # second, it may be required for DCN communication. 
+# 
+# The `context` axis is used for supporting fractional per device batch size
 #
 # Finally, the `tensor` axis is used to shard weights when `pipeline_fsdp_ag_once` or 
 # `pipeline_fsdp_ag_per_repeat` is enabled, ensuring we have sufficient memory to 
 # store prefetched weights.
-mesh_axes: ['data', 'stage', 'fsdp', 'tensor', 'expert']
-data_sharding: [['data', 'stage', 'fsdp', 'tensor', 'expert']]
+mesh_axes: ['data', 'stage', 'fsdp', 'context', 'tensor', 'expert']
+data_sharding: [['data', 'stage', 'fsdp', 'context', 'tensor', 'expert']]
 logical_axis_rules: [
                       ['activation_batch', ['data', 'fsdp', 'expert']],
                       ['activation_batch_moe', ['data', 'fsdp', 'expert']],
                       ['activation_batch_no_exp', ['data', 'fsdp']],
                       ['activation_batch_no_exp_moe', ['data', 'fsdp']],
                       ['activation_embed_and_logits_batch', ['data', 'stage', 'fsdp', 'expert']],
-                      ['activation_embed_and_logits_batch_sequence', ['data', 'stage', 'fsdp', 'expert']],
+                      ['activation_embed_and_logits_batch_sequence', ['data', 'stage', 'fsdp', 'context', 'expert']],
                       ['activation_heads', ['tensor']],
                       ['activation_kv_heads', ['tensor']],
-                      ['activation_length', ['expert']],
-                      ['activation_attn_length', ['expert']],
-                      ['activation_q_length', ['expert']],
+                      ['activation_length', ['context', 'expert']],
+                      ['activation_attn_length', ['context', 'expert']],
+                      ['activation_q_length', ['context', 'expert']],
                       ['activation_attn_embed', ['tensor']],
+                      ['activation_norm_length', ['context']],
+                      ['activation_norm_length_moe', ['context']],
                       ['activation_embed', ['tensor']],
                       ['activation_embed_moe', ['tensor']],
                       ['activation_mlp', ['tensor']],
                       ['activation_kv', ['tensor']],
-                      ['activation_prefill_kv_batch', ['data', 'fsdp', 'expert']],
                       ['activation_kv_batch', ['data', 'fsdp', 'expert']],
                       ['activation_kv_batch_no_exp', ['data', 'fsdp']],
                       ['activation_kv_head_dim', ['tensor']],
                       ['activation_vocab', ['tensor']],
                       ['activation_stage', 'stage'],
                       ['activation_exp', ['expert']],
-                      ['decode_batch', ['data', 'fsdp', 'expert']],
                       ['mlp', ['tensor']],
                       ['mlp_no_fsdp', ['tensor']],
                       ['vocab', ['tensor']],
                       ['heads', ['tensor']],
                       ['q_heads', ['tensor']],
                       ['kv_heads', ['tensor']],
-                      ['embed', ['fsdp', 'expert']],
+                      ['embed', ['fsdp', 'expert']], # remove context from embed sharding
                       ['embed_moe', ['fsdp', 'expert']],
                       ['embed_no_exp', ['fsdp']],
                       ['embed_no_exp_moe', ['fsdp']],
-                      ['embed_moe', ['fsdp']],
                       ['q_lora', ['fsdp']],
                       ['kv_lora', ['fsdp']],
                       ['norm', ['tensor']],
