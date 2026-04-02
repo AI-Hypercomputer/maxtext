@@ -220,32 +220,48 @@ class DenseGeneral(nnx.Module):
       kernel_shape = self.in_features_shape + self.out_features_shape
       kernel = jnp.zeros(kernel_shape, dtype=self.dtype)
     else:
-      kernel = self.kernel[...]
-      # Move logit_dense kernel to device if parameter offloading is enabled
-      if self.parameter_memory_host_offload:
-        max_logging.log("linear.py: Moving parameter logits_dense kernel to device")
-        kernel = jax.device_put(kernel, max_utils.device_space())
-      kernel = jnp.asarray(kernel, self.dtype)
+      kernel_val = self.kernel.value
+      if kernel_val is not None:
+        if isinstance(kernel_val, jax.ShapeDtypeStruct):
+          # Bypass concrete indexing for abstract tracers
+          kernel = kernel_val
+        else:
+          kernel = self.kernel[...]
+          # Move logit_dense kernel to device if parameter offloading is enabled
+          if self.parameter_memory_host_offload:
+            max_logging.log("linear.py: Moving parameter logits_dense kernel to device")
+            kernel = jax.device_put(kernel, max_utils.device_space())
+          kernel = jnp.asarray(kernel, self.dtype)
+      else:
+        kernel = None
 
     # out_sharding should be None for auto mesh axis
     if self.shard_mode != ShardMode.EXPLICIT:
       out_sharding = None
 
-    contract_ind = tuple(range(0, len(self.axis)))
-    output = _compute_dot_general_nnx(
-        inputs,
-        kernel,
-        norm_axis,
-        contract_ind,
-        self.matmul_precision,
-        self.quant_dot_general,
-        _initializing,
-        out_sharding,
-    )
+    if kernel is not None:
+      contract_ind = tuple(range(0, len(self.axis)))
+      output = _compute_dot_general_nnx(
+          inputs,
+          kernel,
+          norm_axis,
+          contract_ind,
+          self.matmul_precision,
+          self.quant_dot_general,
+          _initializing,
+          out_sharding,
+      )
 
-    if self.bias is not None:
-      bias = jnp.asarray(self.bias[...], self.dtype)
-      output += bias
+      if self.bias is not None:
+        bias_val = self.bias.value
+        if bias_val is not None:
+          bias = jnp.asarray(self.bias[...], self.dtype)
+          output += bias
+    else:
+      # If kernel is missing (e.g. masked in pipeline), return zeros.
+      out_shape = inputs.shape[: -len(self.axis)] + self.out_features_shape
+      output = jnp.zeros(out_shape, dtype=self.dtype)
+
     return output
 
 

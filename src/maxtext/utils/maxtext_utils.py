@@ -20,6 +20,7 @@ import pickle
 import os
 
 from flax import linen as nn
+from flax import nnx
 from flax.linen import partitioning as nn_partitioning
 from flax.training import train_state
 
@@ -27,6 +28,7 @@ import numpy as np
 
 from jax.experimental import mesh_utils
 from jax.experimental.serialize_executable import deserialize_and_load
+from jax.sharding import PartitionSpec as P
 
 import jax
 import jax.numpy as jnp
@@ -86,16 +88,54 @@ def all_gather_over_fsdp(variables, sharding_info, mesh, logical_axis_rules, sha
   return sharding.all_gather_over_fsdp(variables, sharding_info, mesh, logical_axis_rules, shard_mode)
 
 
+def to_hashable(x):
+  """Recursively converts unhashable containers (dict, list) into hashable tuples."""
+  if isinstance(x, dict):
+    return tuple(sorted((k, to_hashable(v)) for k, v in x.items()))
+  elif isinstance(x, (list, tuple)):
+    return tuple(to_hashable(v) for v in x)
+  return x
+
+
 def get_functional_train_with_signature(
     train_step, data_sharding, state_mesh_shardings, model, config, params_shardings=None
 ):
   """Get the shardings (both state and data) for `train_step`."""
-  functional_train = functools.partial(train_step, model, config, state_mesh_shardings, params_shardings)
+  if isinstance(model, nnx.Module):
+    # For native NNX models, we must avoid unhashable State objects in the JIT closure.
+    # We perform the merge entirely INSIDE the traced function.
+    # We use a full split to ensure the graphdef matches the full state (133 leaves).
+    graphdef, _ = nnx.split(model)
+
+    def nnx_train_step_wrapper(graphdef, config, state_mesh_shardings, params_shardings, state, data, dropout_rng):
+      # Re-materialize the model from graphdef and the dynamic state.
+      # We extract the raw values but keep the nnx.State structure and leaf types (Param, RngKey, etc.)
+      # to satisfy nnx.merge's strict type checking.
+      def safe_unbox(x):
+        # If it's a VariableState, extract value. If it's already unboxed (e.g. a tracer), keep it.
+        return x.value if hasattr(x, "value") else x
+
+      # state.params is already an nnx.State with the correct leaf types.
+      # We just need to ensure the leaves themselves contain the raw array values (unboxed from .value if needed).
+      # unboxed from .value if needed).
+      # nnx.State is a valid PyTree, so we can use jax.tree.map directly.
+      # But jax.tree.map returns a dict, so we must re-wrap in nnx.State.
+      unboxed_state = nnx.State(jax.tree.map(safe_unbox, state.params))
+      model = nnx.merge(graphdef, unboxed_state)
+      return train_step(model, config, state_mesh_shardings, params_shardings, state, data, dropout_rng)
+
+    # We make graphdef, config, etc. static
+    functional_train = functools.partial(nnx_train_step_wrapper, graphdef, config, state_mesh_shardings, params_shardings)
+    static_argnums = ()  # We partial out the static argnums
+    donate_argnums = 0  # State is the first argument to the partialed function
+  else:
+    functional_train = functools.partial(train_step, model, config, state_mesh_shardings, params_shardings)
+    static_argnums = ()  # We partial out the static argnums of model and config
+    donate_argnums = 0  # State is the first dynamic argument
+
   functional_train.__name__ = "train_step"
   in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
   out_shardings = (state_mesh_shardings, None)  # State, metrics
-  static_argnums = ()  # We partial out the static argnums of model and config
-  donate_argnums = 0  # This is the index of the state - we allow the compiler to make use of this memory.
   return functional_train, in_shardings, out_shardings, static_argnums, donate_argnums
 
 
@@ -1017,17 +1057,26 @@ def init_initial_state(model, tx, config, is_training, key):
   # Reference: https://flax-linen.readthedocs.io/en/latest/guides/flax_fundamentals/rng_guide.html
   params_key, dropout_key, aqt_key = jax.random.split(key, 3)
 
-  model_vars = model.init(
-      {"params": params_key, "dropout": dropout_key, "aqt": aqt_key},
-      np.ones(input_shape, dtype=jnp.int32),
-      np.ones(input_shape, dtype=jnp.int32),
-      encoder_images=np.ones(image_shape, dtype=jnp.int32) if config.use_multimodal else None,
-      encoder_audios=np.ones(audio_shape, dtype=jnp.float32) if config.use_audio else None,
-      # nnx_method="no_op",
-  )
+  if isinstance(model, nnx.Module):
+    # For NNX models, they are already initialized (or abstractly initialized).
+    # We extract the FULL state to ensure it matches the graphdef leaf count for nnx.merge.
+    # Non-differentiable parts will be filtered during the actual grad call.
+    model_vars = nnx.state(model)
+    apply_fn = model
+  else:
+    model_vars = model.init(
+        {"params": params_key, "dropout": dropout_key, "aqt": aqt_key},
+        np.ones(input_shape, dtype=jnp.int32),
+        np.ones(input_shape, dtype=jnp.int32),
+        encoder_images=np.ones(image_shape, dtype=jnp.int32) if config.use_multimodal else None,
+        encoder_audios=np.ones(audio_shape, dtype=jnp.float32) if config.use_audio else None,
+        # nnx_method="no_op",
+    )
+    apply_fn = model.apply
+
   if is_training:
-    return init_training_state(model.apply, model_vars, tx)
-  return init_decode_state(model.apply, model_vars)
+    return init_training_state(apply_fn, model_vars, tx)
+  return init_decode_state(apply_fn, model_vars)
 
 
 def get_abstract_param(model, config):
@@ -1180,12 +1229,31 @@ def setup_initial_state(
   return state, state_mesh_annotations, state_mesh_shardings, data_iterator
 
 
+def _extract_partition_specs(abstract_state, config):
+  """Safely extracts PartitionSpecs, routing to the correct Flax API."""
+  if not config.enable_nnx:
+    return nn.get_partition_spec(abstract_state)
+
+  # Flax NNX get_partition_spec expects an nnx.State or nnx.Variable.
+  # abstract_state is a TrainState, so we must map over it and extract specs manually.
+  def get_nnx_spec(leaf):
+    if isinstance(leaf, nnx.VariableState):
+      # Extract using NNX's native metadata
+      return P(*leaf.sharding_names) if getattr(leaf, "sharding_names", None) else P()
+    elif hasattr(leaf, "sharding_names"):
+      return P(*leaf.sharding_names)
+    # Default to replicated for scalars, ints, or missing specs
+    return P()
+
+  return jax.tree_util.tree_map(get_nnx_spec, abstract_state, is_leaf=lambda x: isinstance(x, nnx.VariableState))
+
+
 def get_logical_annotations(model, tx, config, rng, mesh, is_training=True):
   init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training, rng)
 
   with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
     abstract_state = jax.eval_shape(init_state_partial)
-    logical_annotations = nn.get_partition_spec(abstract_state)
+    logical_annotations = _extract_partition_specs(abstract_state, config)
   return logical_annotations
 
 
@@ -1196,7 +1264,8 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
   with nn_partitioning.axis_rules(config.logical_axis_rules):
     abstract_state = jax.eval_shape(init_state_partial)
 
-  state_logical_annotations = nn.get_partition_spec(abstract_state)
+  # Use the new dual-compatible extractor
+  state_logical_annotations = _extract_partition_specs(abstract_state, config)
 
   state_mesh_shardings = nn.logical_to_mesh_sharding(state_logical_annotations, mesh, config.logical_axis_rules)
   if is_training and config.shard_optimizer_over_data:

@@ -144,7 +144,8 @@ def maybe_shard_with_logical(
 
 def remove_size_one_mesh_axis(spec, mesh):
   """
-  Removes mesh axes from a PartitionSpec (P) where the axis size is 1.
+  Removes mesh axes from a PartitionSpec (P) where the axis size is 1
+  OR if the axis is not present in the mesh at all.
 
   This is a common optimization to simplify sharding by excluding redundant axes.
   Function originally from jax._src.core:
@@ -157,15 +158,52 @@ def remove_size_one_mesh_axis(spec, mesh):
     if s is None or s == P.UNCONSTRAINED:
       new_spec.append(s)  # type: ignore
     elif isinstance(s, tuple):
-      new_spec.append(tuple(i for i in s if mesh.shape.get(i, 1) != 1))
+      # Filter for both existence and size > 1
+      new_spec.append(tuple(i for i in s if i in mesh.axis_names and mesh.shape.get(i, 1) != 1))
     else:
-      new_spec.append(None if mesh.shape.get(s, 1) == 1 else s)  # type: ignore
+      # Replace with None if doesn't exist or size == 1
+      new_spec.append(s if (s in mesh.axis_names and mesh.shape.get(s, 1) != 1) else None)  # type: ignore
   return P(*new_spec, unreduced=spec.unreduced, reduced=spec.reduced)
+
+
+def filter_rules_for_mesh(rules, mesh):
+  """Filters logical axis rules to remove physical axes that don't exist in the mesh."""
+  if rules is None:
+    return None
+  new_rules = []
+  for logical_name, physical_axes in rules:
+    if isinstance(physical_axes, str):
+      new_physical = physical_axes if physical_axes in mesh.axis_names else None
+    elif isinstance(physical_axes, (list, tuple)):
+      new_physical = tuple(ax for ax in physical_axes if ax in mesh.axis_names)
+    else:
+      new_physical = physical_axes
+    new_rules.append((logical_name, new_physical))
+  return tuple(new_rules)
 
 
 def logical_to_mesh_axes(logical_names, mesh, rules=None):
   """Remove size one mesh axes given logical names."""
+  # Filter rules before passing to nn.logical_to_mesh_axes
+  rules = filter_rules_for_mesh(rules, mesh)
   tensor_spec = nn.logical_to_mesh_axes(logical_names, rules=rules)
+
+  # Strict axis existence check: ensure all axes in tensor_spec exist in the mesh.
+  # Rules might map to axes (like fsdp_transpose) that are missing from the current mesh.
+  if tensor_spec is not None:
+    new_spec = []
+    for s in tensor_spec:
+      if s is None or s == P.UNCONSTRAINED:
+        new_spec.append(s)
+      elif isinstance(s, tuple):
+        # Filter tuple of axes for existence in mesh
+        valid_tuple = tuple(i for i in s if i in mesh.axis_names)
+        new_spec.append(valid_tuple if valid_tuple else None)
+      else:
+        # Check single axis for existence in mesh
+        new_spec.append(s if s in mesh.axis_names else None)
+    tensor_spec = P(*new_spec, unreduced=tensor_spec.unreduced, reduced=tensor_spec.reduced)
+
   return remove_size_one_mesh_axis(tensor_spec, mesh)
 
 

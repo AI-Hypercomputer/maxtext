@@ -36,6 +36,7 @@ import jax
 import jax.numpy as jnp
 
 from flax import linen as nn
+from flax import nnx
 from flax.linen import partitioning as nn_partitioning
 
 from maxtext.configs import pyconfig
@@ -85,20 +86,7 @@ def get_first_step(state):
 
 
 def loss_fn(model, config, data, dropout_rng, params, is_train=True):
-  """loss_fn for both train and eval.
-
-  Args:
-    model: A nn.Module
-    config: Config of parameters
-    data: Batch of data to apply to the model
-    dropout_rng: A key to use to generate rng for dropout
-    params: Model params
-    is_train: True for train_step and False for eval_step
-
-  Returns:
-    loss: average loss
-    aux: a dictionary including intermediate_outputs, total_loss, and total_weights
-  """
+  """loss_fn for both train and eval."""
   # decimate proportion of data when per_device_batch_size<1
   if is_train:
     for k, v in data.items():
@@ -172,6 +160,12 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
       total_z_loss = jnp.sum(z_loss)
   else:
     # Flax NNX model
+    if is_train and params is not None:
+      # Natively connect the AD Graph! (This fully prevents the XLA compiler OOM)
+      # We extract the non-differentiable state using the Ellipsis (...) to capture leftovers cleanly
+      graphdef, _, non_diff_state = nnx.split(model, nnx.Param, ...)
+      model = nnx.merge(graphdef, params, non_diff_state)
+
     logits = model(
         decoder_input_tokens=data["inputs"],
         decoder_positions=data["inputs_position"],
@@ -185,8 +179,6 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
     intermediate_outputs = {}
 
     if (config.use_indexer and not config.indexer_sparse_training) and is_train:
-      # In Dense Warm-up stage, we skip main model loss calculation for efficiency.
-      # The main model parameters are frozen and only the indexer is trained via KL divergence.
       total_loss = 0.0
       total_z_loss = 0.0
     else:
@@ -204,39 +196,21 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
       total_z_loss = jnp.sum(z_loss)
 
   total_weights = jnp.sum(data["targets_segmentation"] != 0)
-  # If gradient accumulation is enabled, we don't need to divide total_loss
-  # by total_weights and then multiply the computed gradient by total_weights,
-  # since it's equivalent to computing the gradient from total_loss.
-  # This simplification reduces the number of operations and makes it easier
-  # for XLA to move all-reduce out of the gradient accumulation loop when use
-  # Zero1+GA to reduce communication overhead.
-  # EPS was used to avoid division by zero, but it's not needed when gradient
-  # accumulation is enabled since there's no division.
   if config.gradient_accumulation_steps > 1 and not config.use_tunix_gradient_accumulation:
     loss = total_loss
   else:
-    # When using Tunix gradient accumulation, we revert to standard normalization.
-    # Unlike the manual accumulation path above, Tunix (via optax.MultiSteps) expects
-    # a normalized loss for each step. It handles the accumulation state
-    # updates and scaling internally.
     loss = total_loss / (total_weights + EPS)
 
-  # We keep z-loss normalized by total_weights.
   total_z_loss = total_z_loss / (total_weights + EPS)
 
-  # Calculate and Add MTP Loss
   mtp_loss = 0.0
   if config.mtp_num_layers > 0 and is_train:
     mtp_loss = calculate_mtp_loss(intermediate_outputs, config)
     loss += mtp_loss
 
-  # get indexer loss
   indexer_loss = 0.0
   if config.use_indexer and config.indexer_loss_scaling_factor > 0.0:
     indexer_losses = []
-    # Extract 'indexer_loss' from model intermediates.
-    # We check for paths ending in ('self_attention', 'indexer_loss').
-    # This handles varying paths caused by different layer names.
     for path, val in jax.tree_util.tree_leaves_with_path(intermediate_outputs):
       path_keys = tuple(k.key for k in path if hasattr(k, "key"))
       if path_keys[-2:] == ("self_attention", "indexer_loss"):
@@ -248,10 +222,8 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
     else:
       max_logging.debug("No indexer loss found.")
 
-  # get MoE load balance loss
   moe_lb_loss = 0.0
   if config.num_experts > 1:
-    # Note: the key is affected by the model implementation
     possible_keys = [
         ("intermediates", "decoder", "layers", "moe_lb_loss"),
         ("intermediates", "decoder", "moe_layers", "moe_lb_loss"),
@@ -271,14 +243,11 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
     moe_lb_loss = jnp.mean(jnp.array(total_moe_lb_loss))
     loss += moe_lb_loss
 
-  # get MoE routed bias term updates
   moe_bias_updates = None
   if config.routed_bias and config.routed_bias_update_rate > 0.0:
     nested_key = ("intermediates", "decoder", "moe_layers", "moe_bias_updates")
     moe_bias_updates = maxtext_utils.get_nested_value(intermediate_outputs, nested_key, None)
 
-  # Add the model's primary output to the intermediates dict so it can be used
-  # by the acceptance rate calculation in eval_step.
   intermediate_outputs["logits"] = logits
 
   aux = {
@@ -295,20 +264,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
 
 
 def train_step(model, config, state_mesh_shardings, params_shardings, state, data, dropout_rng):
-  """
-
-  Args:
-    model: A nn.Module
-    state: A pytree of the current state of the model
-    data: Batch of data to apply to the model
-    dropout_rng: A key to use to generate rng for dropout
-
-  Returns:
-    new_state: Same format as state.
-    metrics: Dictionary of model metrics such as loss, training rate, etc.
-    rng2: A new rng key that can be used in future calls.
-
-  """
+  """Performs a single training step."""
   reference_params, reference_params_sharding, extra_dpo_args, _loss_fn = (
       [],
       [],
@@ -321,14 +277,19 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     extra_dpo_args = [reference_params]
     _loss_fn = dpo_loss_fn
 
-  params = state.params
+  if config.enable_nnx:
+    # Safely extract ONLY the mathematical parameters to compute gradients for (use ... to collect leftovers safely)
+    _, diff_state, _ = nnx.split(model, nnx.Param, ...)
+    differentiable_params = diff_state
+  else:
+    differentiable_params = state.params
 
   if config.gradient_accumulation_steps > 1:
     loss, aux, raw_grads = gradient_accumulation_loss_and_grad(
         _loss_fn,
         config,
         model,
-        params,
+        differentiable_params,
         params_shardings,
         data,
         dropout_rng,
@@ -343,13 +304,15 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
         )
         extra_dpo_args = [reference_params]
     if config.shard_optimizer_over_data:
-      params = jax.tree.map(
+      differentiable_params = jax.tree.map(
           functools.partial(sharding.maybe_shard_with_name, shard_mode=config.shard_mode),
-          params,
+          differentiable_params,
           params_shardings,
       )
     grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
-    (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, params, *extra_dpo_args, is_train=True)
+    (loss, aux), raw_grads = grad_func(
+        model, config, data, dropout_rng, differentiable_params, *extra_dpo_args, is_train=True
+    )
 
   raw_grads = jax.tree_util.tree_map(
       lambda x: x.astype(config.grad_dtype) if x.dtype == jnp.float32 else x,
@@ -372,6 +335,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     grads = maxtext_utils.apply_gradient_clipping(raw_grads, state, config.gradient_clipping_threshold)
   else:
     grads = raw_grads
+
   if config.optimizer_memory_host_offload:
     state = state.replace(
         opt_state=jax.device_put(
@@ -382,7 +346,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
             ),
         )
     )
-  # Move all parameters to device before optimizer update
+
   if config.parameter_memory_host_offload:
     max_logging.log("\nMoving all parameters to device before optimizer update")
 
@@ -396,13 +360,47 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
             jax.tree_util.tree_map_with_path(move, state_mesh_shardings.params),
         )
     )
-  new_state = state.apply_gradients(grads=grads)
+
+  if config.enable_nnx:
+    # 1. Build a fast, flat lookup dictionary of gradients using 100% native JAX KeyEntry hashes.
+    #    This completely avoids the legacy `traverse_util.flatten_dict` AssertionError.
+    flat_grads = dict(jax.tree_util.tree_leaves_with_path(grads))
+
+    # 2. Hide RngKeys/integers from Optax math by turning them into safe 0.0 floats
+    def sanitize(leaf):
+      if hasattr(leaf, "dtype") and jnp.issubdtype(leaf.dtype, jnp.inexact):
+        return leaf
+      return jnp.zeros((1,), dtype=jnp.float32)
+
+    # 3. Securely pull the gradients from the flat lookup table, guaranteeing a 100% structural match
+    def build_safe_grad(path, leaf):
+      g = flat_grads.get(path)
+      return g if g is not None else jnp.zeros((1,), dtype=jnp.float32)
+
+    safe_params = jax.tree_util.tree_map(sanitize, state.params)
+    safe_opt_state = jax.tree_util.tree_map(sanitize, state.opt_state)
+    safe_grads = jax.tree_util.tree_map_with_path(build_safe_grad, state.params)
+
+    # 4. Execute Optax safely! (params, opt_state, and grads are now identically structured float PyTrees)
+    temp_state = state.replace(params=safe_params, opt_state=safe_opt_state)
+    new_temp_state = temp_state.apply_gradients(grads=safe_grads)
+
+    # 5. Restore the pristine RngKeys (random seeds) back into the state
+    def restore(orig, new):
+      if hasattr(orig, "dtype") and jnp.issubdtype(orig.dtype, jnp.inexact):
+        return new
+      return orig
+
+    final_params = jax.tree_util.tree_map(restore, state.params, new_temp_state.params)
+    final_opt_state = jax.tree_util.tree_map(restore, state.opt_state, new_temp_state.opt_state)
+
+    new_state = new_temp_state.replace(params=final_params, opt_state=final_opt_state)
+  else:
+    new_state = state.apply_gradients(grads=grads)
 
   # Apply updates for Auxiliary-Loss-Free load balancing for DeepSeek family
   if config.routed_bias and config.routed_bias_update_rate > 0.0 and moe_bias_updates is not None:
     target_path = ("params", "decoder", "moe_layers", "DeepSeekMoeBlock_0", "MoeBlock_0", "gate", "bias")
-    # Flax 'sow' returns a tuple, so we take the first element [0].
-    # Updates the shape to be aligned with state.
     moe_bias_updates = jnp.array(moe_bias_updates[0]).transpose()
     new_state = maxtext_utils.update_state_param(new_state, target_path, moe_bias_updates)
 
@@ -415,10 +413,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       "learning/total_weights": total_weights,
   }
   if config.use_qk_clip:
-    # Apply QK-Clip
     new_state = qk_clip_utils.apply_qk_clip(new_state, intermediate_outputs, config)
-
-    # Report max_logits metric
     global_max_logit = qk_clip_utils.calculate_max_logit_metric(intermediate_outputs)
     if global_max_logit is not None:
       scalar_metrics["learning/max_logits"] = global_max_logit
@@ -426,7 +421,19 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   if not config.optimizer_memory_host_offload:
     scalar_metrics["learning/grad_norm"] = max_utils.l2norm_pytree(grads)
     scalar_metrics["learning/raw_grad_norm"] = max_utils.l2norm_pytree(raw_grads)
-    scalar_metrics["learning/param_norm"] = max_utils.l2norm_pytree(new_state.params)
+
+    if config.enable_nnx:
+      # Hide PRNG keys from the metric logger so jnp.square() doesn't crash
+      def sanitize_metric(leaf):
+        if hasattr(leaf, "dtype") and jnp.issubdtype(leaf.dtype, jnp.inexact):
+          return leaf
+        return jnp.zeros((1,), dtype=jnp.float32)
+
+      safe_norm_params = jax.tree_util.tree_map(sanitize_metric, new_state.params)
+      scalar_metrics["learning/param_norm"] = max_utils.l2norm_pytree(safe_norm_params)
+    else:
+      scalar_metrics["learning/param_norm"] = max_utils.l2norm_pytree(new_state.params)
+
   if config.use_dpo:
     scalar_metrics["learning/dpo_reward_accuracy"] = aux["reward_accuracy"]
   metrics = {

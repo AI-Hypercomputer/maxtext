@@ -68,16 +68,24 @@ class RMSNorm(nnx.Module):
     y = jnp.asarray(x * lax.rsqrt(mean2 + self.epsilon), self.dtype)
     scale = self.scale.value
     # Move scale to device if parameter offloading is enabled
-    if self.parameter_memory_host_offload:
+    if scale is not None and self.parameter_memory_host_offload:
       max_logging.log("normalizations.py: Moving scale parameter to device")
       scale = jax.device_put(scale, max_utils.device_space())
     # out_sharding must be None in auto shard mode
     if self.shard_mode != ShardMode.EXPLICIT:
       out_sharding = None
 
-    scale = jnp.asarray(scale, self.dtype)
-    effective_scale = scale + self.scale_offset  # Apply offset
-    return jnp.einsum("i...k,...k->i...k", y, effective_scale, out_sharding=out_sharding)
+    if scale is not None:
+      if isinstance(scale, jax.ShapeDtypeStruct):
+        # Bypass arithmetic and einsum for abstract tracers
+        return y
+
+      scale = jnp.asarray(scale, self.dtype)
+      effective_scale = scale + self.scale_offset  # Apply offset
+      return jnp.einsum("i...k,...k->i...k", y, effective_scale, out_sharding=out_sharding)
+    else:
+      # If scale is missing (e.g. masked in pipeline), return unscaled output.
+      return y
 
 
 class GlobalRMSNorm(RMSNorm):

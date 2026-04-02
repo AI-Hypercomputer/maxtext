@@ -273,25 +273,35 @@ class GateLogit(nnx.Module):
       kernel_shape = self.in_features_shape + self.out_features_shape
       kernel = jnp.zeros(kernel_shape, dtype=self.dtype)
     else:
-      kernel = self.kernel[...]
-    kernel = jnp.asarray(kernel, self.dtype)
+      kernel_val = self.kernel.value
+      if kernel_val is not None:
+        kernel = self.kernel[...]
+        kernel = jnp.asarray(kernel, self.dtype)
+      else:
+        kernel = None
 
-    contract_ind = tuple(range(0, len(norm_axis)))
-    output_sharding = (
-        create_sharding(self.mesh, ("activation_batch_no_exp_moe", "activation_length_no_exp_moe", None))
-        if self.shard_mode == ShardMode.EXPLICIT
-        else None
-    )
-    output = linears._compute_dot_general_nnx(
-        inputs,
-        kernel,
-        norm_axis,
-        contract_ind,
-        self.matmul_precision,
-        self.quant_dot_general,
-        _initializing,
-        out_sharding=output_sharding,
-    )
+    if kernel is not None:
+      contract_ind = tuple(range(0, len(norm_axis)))
+      output_sharding = (
+          create_sharding(self.mesh, ("activation_batch_no_exp_moe", "activation_length_no_exp_moe", None))
+          if self.shard_mode == ShardMode.EXPLICIT
+          else None
+      )
+      output = linears._compute_dot_general_nnx(
+          inputs,
+          kernel,
+          norm_axis,
+          contract_ind,
+          self.matmul_precision,
+          self.quant_dot_general,
+          _initializing,
+          out_sharding=output_sharding,
+      )
+    else:
+      # If kernel is missing (e.g. masked in pipeline), return zeros.
+      out_shape = inputs.shape[:-1] + self.out_features_shape
+      output = jnp.zeros(out_shape, dtype=self.dtype)
+
     pre_bias_logits = None
 
     if self.score_func:
@@ -300,8 +310,10 @@ class GateLogit(nnx.Module):
         pre_bias_logits = output
 
     if self.use_bias:
-      bias = jnp.asarray(self.bias[...], self.dtype)
-      output += bias
+      bias_val = self.bias.value
+      if bias_val is not None:
+        bias = jnp.asarray(self.bias[...], self.dtype)
+        output += bias
     return output, pre_bias_logits
 
 
@@ -2010,37 +2022,44 @@ class RoutedMoE(nnx.Module):
     inputs = inputs.astype(cfg.dtype)
     gate_logits, pre_bias_logits = self.gate(inputs)
 
-    w0_kernel = jnp.asarray(self.wi_0[...], self.dtype)
-    w1_kernel = jnp.asarray(self.wi_1[...], self.dtype)
-    wo_kernel = jnp.asarray(self.wo[...], self.dtype)
+    if self.wi_0.value is not None:
+      w0_kernel = jnp.asarray(self.wi_0[...], self.dtype)
+      w1_kernel = jnp.asarray(self.wi_1[...], self.dtype)
+      wo_kernel = jnp.asarray(self.wo[...], self.dtype)
 
-    if cfg.mlp_bias:
-      w0_bias = jnp.asarray(self.wi_0_bias[...], self.dtype)
-      w1_bias = jnp.asarray(self.wi_1_bias[...], self.dtype)
-      wo_bias = jnp.asarray(self.wo_bias[...], self.dtype)
-    else:
-      w0_bias, w1_bias, wo_bias = None, None, None
+      if cfg.mlp_bias:
+        w0_bias = jnp.asarray(self.wi_0_bias[...], self.dtype)
+        w1_bias = jnp.asarray(self.wi_1_bias[...], self.dtype)
+        wo_bias = jnp.asarray(self.wo_bias[...], self.dtype)
+      else:
+        w0_bias, w1_bias, wo_bias = None, None, None
 
-    if cfg.sparse_matmul:
-      if quantizations.in_serve_mode(self.quant):
-        w0_kernel, w1_kernel, wo_kernel = self.retrieve_quantized_weight(
-            inputs,
-            gate_logits,
-            pre_bias_logits,
-            w0_kernel,
-            w1_kernel,
-            wo_kernel,
-            w0_bias,
-            w1_bias,
-            wo_bias,
+      if cfg.sparse_matmul:
+        if quantizations.in_serve_mode(self.quant):
+          w0_kernel, w1_kernel, wo_kernel = self.retrieve_quantized_weight(
+              inputs,
+              gate_logits,
+              pre_bias_logits,
+              w0_kernel,
+              w1_kernel,
+              wo_kernel,
+              w0_bias,
+              w1_bias,
+              wo_bias,
+          )
+        output, lb_loss, bias_updates = self.sparse_matmul(
+            inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias
         )
-      output, lb_loss, bias_updates = self.sparse_matmul(
-          inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias
-      )
+      else:
+        output, lb_loss, bias_updates = self.dense_matmul(
+            inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias
+        )
     else:
-      output, lb_loss, bias_updates = self.dense_matmul(
-          inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias
-      )
+      # If kernels are missing (e.g. masked in pipeline), return zeros.
+      output = jnp.zeros_like(inputs)
+      lb_loss = None
+      bias_updates = None
+
     return output, lb_loss, bias_updates
 
 

@@ -27,6 +27,7 @@ import pickle
 from typing import Sequence
 
 from absl import app
+from flax import nnx
 from flax.linen import partitioning as nn_partitioning
 import jax
 from jax.experimental.serialize_executable import serialize
@@ -43,6 +44,7 @@ from maxtext.trainers.pre_train import train
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
+from maxtext.utils import model_creation_utils
 from maxtext.utils import sharding
 
 # pylint: disable=too-many-positional-arguments
@@ -93,15 +95,26 @@ def get_shaped_inputs(topology_mesh, config):
   """Get shaped abstractions of inputs to train_step: state, batch and rng"""
   # Construct the model and optimizer to get shaped versions of the state
   quant = quantizations.configure_quantization(config)
-  model = Transformer(config, topology_mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
-  # The learning_rate_schedule is baked into the compiled object.
-  learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
-  # pass in model for muon
-  tx = optimizers.get_optimizer(config, learning_rate_schedule, model)
 
   # Shaped RNG keys
   _, example_rng = jax.random.split(jax.random.PRNGKey(0), 2)
   shaped_rng = jax.ShapeDtypeStruct(example_rng.shape, example_rng.dtype)
+
+  if config.enable_nnx:
+    # Use eval_shape to avoid concrete initialization of parameters on device.
+    # Moving Rngs inside the lambda ensures they are created at the same trace level.
+    model = jax.eval_shape(
+        lambda: model_creation_utils.create_model(
+            config, topology_mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=jax.random.PRNGKey(0), dropout=1)
+        )
+    )
+  else:
+    model = Transformer(config, topology_mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+
+  # The learning_rate_schedule is baked into the compiled object.
+  learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
+  # pass in model for muon
+  tx = optimizers.get_optimizer(config, learning_rate_schedule, model)
 
   # Shaped state
   abstract_state, _, state_mesh_shardings = maxtext_utils.get_abstract_state(
@@ -234,7 +247,13 @@ def main(argv: Sequence[str]) -> None:
   # prematurely initializing the backend.
   max_utils.print_system_information()
 
-  # Get shaped inputs
+  # Filter logical_axis_rules to remove axes not present in the topology mesh.
+  # This prevents ValueError in flax.linen.spmd.with_logical_constraint during compilation.
+  # Configuration is read-only, so we bypass __setattr__ by modifying the underlying dictionary.
+  filtered_rules = sharding.filter_rules_for_mesh(config.logical_axis_rules, topology_mesh)
+  object.__getattribute__(config, "_flat_config")["logical_axis_rules"] = filtered_rules
+
+  # Shaped inputs
   (
       shaped_train_args,
       shaped_train_kwargs,
