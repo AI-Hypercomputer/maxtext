@@ -231,7 +231,9 @@ norm_topk_prob: false # boolean to enable the top-k probability normalization. q
 # how the expert axis is used to shard attention weights and activations
 # "fsdp" (ep acts as fsdp parallelism)
 # "context" (ep acts as context parallelism, training only)
+# "tp" (ep acts as tp for attn/shared exp, useful for autoregressive inference or training/prefill with very low token count)
 expert_shard_attention_option: "fsdp"
+
 
 # when moe weight matrices are sharded on both fsdp and fsdp-transpose axes, use two separate all-gather calls
 moe_fsdp_use_two_stage_all_gather: false

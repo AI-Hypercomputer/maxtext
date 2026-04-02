@@ -1117,9 +1117,19 @@ class RoutedMoE(nnx.Module):
         # The ring-of-experts strategy first duplicates the inputs to all
         # expert shards, and then routes within each shard.
 
-        # Duplicate inputs to all expert shards.
+        def get_ep_ag_axis():
+          if self.config.expert_shard_attention_option == EP_AS_FSDP:
+            return 0
+          elif self.config.expert_shard_attention_option == EP_AS_CONTEXT:
+            return 1
+          elif self.config.expert_shard_attention_option == EP_AS_TP:
+            return 2
+          else:
+            return ValueError("I dunno man")
+
+  
         x, logits, pre_bias_logits = tuple(
-            jax.lax.all_gather(z, axis_name=self._expert_parallelism_name, tiled=True)
+            jax.lax.all_gather(z, axis_name=self._expert_parallelism_name, axis=get_ep_ag_axis(), tiled=True)
             for z in (x, logits, pre_bias_logits)
         )
 

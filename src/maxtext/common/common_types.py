@@ -73,6 +73,7 @@ MODEL_MODE_TRAIN = "train"
 # expert_shard_attention_option
 EP_AS_CONTEXT = "context"
 EP_AS_FSDP = "fsdp"
+EP_AS_TP = "tp"
 
 DECODING_ACTIVE_SEQUENCE_INDICATOR = 1
 

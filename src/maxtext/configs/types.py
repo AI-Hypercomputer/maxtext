@@ -636,7 +636,7 @@ class MoEGeneral(BaseModel):
   )
   use_random_routing: bool = Field(False, description="Whether to use random routing for debugging.")
   interleave_moe_layer_step: int = Field(1, description="Frequency of MoE layers, e.g., 2 means every 2nd layer is MoE.")
-  expert_shard_attention_option: Literal["fsdp", "context"] = Field(
+  expert_shard_attention_option: Literal["fsdp", "context", "tp"] = Field(
       "fsdp",
       description="How the expert axis is used to shard attention weights and activations.",
   )
