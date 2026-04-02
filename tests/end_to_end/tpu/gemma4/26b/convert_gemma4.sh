@@ -7,18 +7,19 @@ MODEL_NAME='gemma4-26b'
 export MODEL_VARIATION='26b'
 TOKENIZER_PATH='google/gemma-4-26b-a4b-it'
 # To convert the multimodal model, make sure the use_multimodal is set to be true
-USE_MULTIMODAL=true
+USE_MULTIMODAL=false
 USE_SCAN_LAYERS=false
 
 
 # Installing torch for deps in forward_pass_logit_checker.py
 python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
-# After downloading checkpoints, copy them to GCS bucket at $CHKPT_BUCKET
+# After downloading checkpoints, copy them to GCS bucket at $MODEL_BUCKET
 export MODEL_BUCKET='gs://maxtext-gemma/gemma4'
+export HF_MODEL='path/to/your/hf/gemma-4-26b-a4b-it'
 
 # To get converted ckpt:
-python3 -m maxtext.checkpoint_conversion.to_maxtext "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
+python3 -m maxtext.checkpoint_conversion.to_maxtext "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"/base.yml \
     model_name=${MODEL_NAME} \
     hf_access_token=${HF_TOKEN} \
     --hf_model_path=${HF_MODEL} \
@@ -28,7 +29,6 @@ python3 -m maxtext.checkpoint_conversion.to_maxtext "${MAXTEXT_CONFIGS_DIR:-${MA
 
 
 export MAXTEXT_CKPT_PATH=${MODEL_BUCKET}/${MODEL_VARIATION}/converted/${idx}/0/items
-export HF_MODEL='path/to/your/hf/gemma-4-26b-a4b-it'
 
 
 if [ ${USE_MULTIMODAL} == true ]; then
@@ -62,7 +62,7 @@ if [ ${USE_MULTIMODAL} == true ]; then
         --max_kl_div=0.03 \
         --golden_logits_path=${GOLDEN_LOGITS_PATH}
 else
-    python3 -m tests.utils.forward_pass_logit_checker "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
+    python3 -m tests.utils.forward_pass_logit_checker "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"/base.yml \
         tokenizer_path=${TOKENIZER_PATH}  \
         load_parameters_path=${MAXTEXT_CKPT_PATH} \
         model_name=${MODEL_NAME} \

@@ -2362,16 +2362,16 @@ def GEMMA4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False
                   f"{text_base}.layers.{i}.router.proj.weight" if num_experts > 1 else None for i in hf_indices
               ],
               f"{prefix}-mlp-moe_block-MoeBlock_0-wi_0": [
-                  f"{text_base}.layers.{i}.moe.gate_up_proj" if num_experts > 1 else None for i in hf_indices
+                  f"{text_base}.layers.{i}.experts.gate_up_proj" if num_experts > 1 else None for i in hf_indices
               ],
               f"{prefix}-mlp-moe_block-MoeBlock_0-wi_1": [
-                  f"{text_base}.layers.{i}.moe.gate_up_proj" if num_experts > 1 else None for i in hf_indices
+                  f"{text_base}.layers.{i}.experts.gate_up_proj" if num_experts > 1 else None for i in hf_indices
               ],
               f"{prefix}-mlp-moe_block-MoeBlock_0-wo": [
-                  f"{text_base}.layers.{i}.moe.down_proj" if num_experts > 1 else None for i in hf_indices
+                  f"{text_base}.layers.{i}.experts.down_proj" if num_experts > 1 else None for i in hf_indices
               ],
               f"{prefix}-mlp-moe_block-MoeBlock_0-per_expert_scale": [
-                  f"{text_base}.layers.{i}.moe.per_expert_scale" if num_experts > 1 else None for i in hf_indices
+                  f"{text_base}.layers.{i}.router.per_expert_scale" if num_experts > 1 else None for i in hf_indices
               ],
               f"{prefix}-mlp-moe_block-shared_experts-wi_0-kernel": [
                   f"{text_base}.layers.{i}.mlp.gate_proj.weight" if num_experts > 1 else None for i in hf_indices
@@ -2440,10 +2440,14 @@ def GEMMA4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False
                 f"{prefix}-mlp-moe_block-MoeBlock_0-gate-kernel": f"{hf_prefix}.router.proj.weight"
                 if num_experts > 1
                 else None,
-                f"{prefix}-mlp-moe_block-MoeBlock_0-wi_0": f"{hf_prefix}.moe.gate_up_proj" if num_experts > 1 else None,
-                f"{prefix}-mlp-moe_block-MoeBlock_0-wi_1": f"{hf_prefix}.moe.gate_up_proj" if num_experts > 1 else None,
-                f"{prefix}-mlp-moe_block-MoeBlock_0-wo": f"{hf_prefix}.moe.down_proj" if num_experts > 1 else None,
-                f"{prefix}-mlp-moe_block-MoeBlock_0-per_expert_scale": f"{hf_prefix}.moe.per_expert_scale"
+                f"{prefix}-mlp-moe_block-MoeBlock_0-wi_0": f"{hf_prefix}.experts.gate_up_proj"
+                if num_experts > 1
+                else None,
+                f"{prefix}-mlp-moe_block-MoeBlock_0-wi_1": f"{hf_prefix}.experts.gate_up_proj"
+                if num_experts > 1
+                else None,
+                f"{prefix}-mlp-moe_block-MoeBlock_0-wo": f"{hf_prefix}.experts.down_proj" if num_experts > 1 else None,
+                f"{prefix}-mlp-moe_block-MoeBlock_0-per_expert_scale": f"{hf_prefix}.router.per_expert_scale"
                 if num_experts > 1
                 else None,
                 f"{prefix}-mlp-moe_block-shared_experts-wi_0-kernel": f"{hf_prefix}.mlp.gate_proj.weight"
@@ -2502,10 +2506,10 @@ def GEMMA4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False
               f"{prefix}-mlp-moe_block-MoeBlock_0-gate-kernel": f"{hf_prefix}.router.proj.weight"
               if num_experts > 1
               else None,
-              f"{prefix}-mlp-moe_block-MoeBlock_0-wi_0": f"{hf_prefix}.moe.gate_up_proj" if num_experts > 1 else None,
-              f"{prefix}-mlp-moe_block-MoeBlock_0-wi_1": f"{hf_prefix}.moe.gate_up_proj" if num_experts > 1 else None,
-              f"{prefix}-mlp-moe_block-MoeBlock_0-wo": f"{hf_prefix}.moe.down_proj" if num_experts > 1 else None,
-              f"{prefix}-mlp-moe_block-MoeBlock_0-per_expert_scale": f"{hf_prefix}.moe.per_expert_scale"
+              f"{prefix}-mlp-moe_block-MoeBlock_0-wi_0": f"{hf_prefix}.experts.gate_up_proj" if num_experts > 1 else None,
+              f"{prefix}-mlp-moe_block-MoeBlock_0-wi_1": f"{hf_prefix}.experts.gate_up_proj" if num_experts > 1 else None,
+              f"{prefix}-mlp-moe_block-MoeBlock_0-wo": f"{hf_prefix}.experts.down_proj" if num_experts > 1 else None,
+              f"{prefix}-mlp-moe_block-MoeBlock_0-per_expert_scale": f"{hf_prefix}.router.per_expert_scale"
               if num_experts > 1
               else None,
               f"{prefix}-mlp-moe_block-shared_experts-wi_0-kernel": f"{hf_prefix}.mlp.gate_proj.weight"
