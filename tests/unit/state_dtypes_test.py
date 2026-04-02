@@ -13,9 +13,11 @@
 # limitations under the License.
 
 """ Test that all weights are expected dtype (default float32) """
+from functools import partial
 import unittest
 
 import jax
+import pytest
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.configs import pyconfig
@@ -29,6 +31,7 @@ from tests.utils.test_helpers import get_test_config_path, get_decoupled_paralle
 Transformer = models.transformer_as_linen
 
 
+@pytest.mark.linen_only
 class StateDtypes(unittest.TestCase):
   """Tests that state has expected dtypes, e.g. weights default to float32"""
 
@@ -38,7 +41,7 @@ class StateDtypes(unittest.TestCase):
     argv = list(argv) + get_decoupled_parallelism_overrides(as_argv=True)
 
     # Setup necessary inputs to build a model state
-    config = pyconfig.initialize(argv)
+    config = pyconfig.initialize(list(argv) + ["pure_nnx=False"])
     quant = quantizations.configure_quantization(config)
     devices_array = maxtext_utils.create_device_mesh(config)
     mesh = Mesh(devices_array, config.mesh_axes)
@@ -47,7 +50,12 @@ class StateDtypes(unittest.TestCase):
     tx = optimizers.get_optimizer(config, learning_rate_schedule)
     _, example_rng = jax.random.split(jax.random.PRNGKey(0), 2)
 
-    abstract_state, _, _ = maxtext_utils.get_abstract_state(model, tx, config, example_rng, mesh)
+    if config.pure_nnx:
+      # NNX has a different function to init the training state.
+      raise NotImplementedError("Pure NNX support has not been implemented yet.")
+    else:
+      init_state_fn = partial(maxtext_utils.init_initial_state, model, tx, config, True, example_rng)
+    abstract_state, _, _ = maxtext_utils.get_abstract_state(config, mesh, init_state_fn, True)
     return abstract_state
 
   def get_weights(self, argv):

@@ -31,7 +31,7 @@ from tests.utils.test_helpers import get_test_config_path
 import numpy as np
 import pytest
 
-pytestmark = [pytest.mark.external_serving]
+pytestmark = [pytest.mark.external_serving, pytest.mark.linen_only]
 
 
 class MaxEngineTest(unittest.TestCase):
@@ -50,6 +50,7 @@ class MaxEngineTest(unittest.TestCase):
         "per_device_batch_size": 1.0,
         "run_name": "test",
         "enable_checkpointing": False,
+        "pure_nnx": False,
         "base_num_decoder_layers": 2,
         "attention": "dot_product",
         "max_target_length": 16,
@@ -80,6 +81,7 @@ class MaxEngineTest(unittest.TestCase):
     config = pyconfig.initialize(
         [None, get_test_config_path()],
         enable_checkpointing=False,
+        pure_nnx=False,
         stack_prefill_result_cache=True,
     )
     engine = maxengine.MaxEngine(config, jax.devices())
