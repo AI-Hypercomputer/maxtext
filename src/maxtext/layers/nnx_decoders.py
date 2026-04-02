@@ -507,7 +507,7 @@ class NNXDecoder(nnx.Module):
 
     if cfg.num_layers_per_pipeline_stage == 1:
       return self._create_single_layer(base_stage_cls, rngs)
-    elif cfg.scan_layers_per_stage:
+    elif cfg.scan_layers_per_stage or cfg.scan_layers:
       return NNXScannedPipelineStage(
           base_stage_cls, cfg.num_layers_per_pipeline_stage, cfg, self.mesh, self.quant, self.model_mode, rngs=rngs
       )
@@ -584,7 +584,17 @@ class NNXDecoder(nnx.Module):
     scan_axis = self.config.param_scan_axis
     if scan_axis != 0:
       # Move scan_axis to 0 so scan can iterate over it
-      params = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0), params)
+      def move_axis_abstract_safe(x):
+        if isinstance(x, jax.ShapeDtypeStruct):
+          # Manually calculate new shape for abstract tracers
+          new_shape = list(x.shape)
+          ax = scan_axis if scan_axis >= 0 else len(new_shape) + scan_axis
+          val = new_shape.pop(ax)
+          new_shape.insert(0, val)
+          return jax.ShapeDtypeStruct(tuple(new_shape), x.dtype)
+        return jnp.moveaxis(x, scan_axis, 0)
+
+      params = jax.tree.map(move_axis_abstract_safe, params)
 
     layer_cls = layers.__class__
     sig = inspect.signature(layer_cls.__call__)
@@ -607,11 +617,21 @@ class NNXDecoder(nnx.Module):
 
     if scan_axis != 0:
       # Only move the axis back on the params, NOT the mutables!
-      params = jax.tree.map(lambda x: jnp.moveaxis(x, 0, scan_axis), params)
+      def move_axis_back_abstract_safe(x):
+        if isinstance(x, jax.ShapeDtypeStruct):
+          new_shape = list(x.shape)
+          val = new_shape.pop(0)
+          ax = scan_axis if scan_axis >= 0 else len(new_shape) + 1 + scan_axis
+          new_shape.insert(ax, val)
+          return jax.ShapeDtypeStruct(tuple(new_shape), x.dtype)
+        return jnp.moveaxis(x, 0, scan_axis)
+
+      params = jax.tree.map(move_axis_back_abstract_safe, params)
 
     final_state = nnx.State.merge(params, scanned_state)
-    nnx.update(layers, final_state)
-    return final_carry, layers
+    # Skip direct mutation of 'layers' during compilation to avoid TraceContextError.
+    # The caller will handle the final state update.
+    return final_carry, final_state
 
   def _apply_interleaved_scanned_layers(
       self, layers, y, layer_args, layer_kwargs, start_idx, end_idx, engram_indices, decoder_input_tokens
@@ -1122,14 +1142,16 @@ class NNXDecoder(nnx.Module):
                     decoder_input_tokens=decoder_input_tokens,
                 )
             else:
-              y, self.dense_layers = self._apply_layers_sequentially(
+              y, new_state = self._apply_layers_sequentially(
                   self.dense_layers, y, *layer_args, length=cfg.first_num_dense_layers, **layer_kwargs
               )
+              self._trace_safe_update(self.dense_layers, new_state)
               if hasattr(self, "moe_layers_outside_pipeline"):
                 num_moe_outside = (cfg.num_decoder_layers - cfg.first_num_dense_layers) - cfg.pipeline_parallel_layers
-                y, self.moe_layers_outside_pipeline = self._apply_layers_sequentially(
+                y, new_state = self._apply_layers_sequentially(
                     self.moe_layers_outside_pipeline, y, *layer_args, length=num_moe_outside, **layer_kwargs
                 )
+                self._trace_safe_update(self.moe_layers_outside_pipeline, new_state)
           else:
             y = self._run_unscanned_layers_loop(
                 base_name="dense_layers",
@@ -1182,13 +1204,14 @@ class NNXDecoder(nnx.Module):
           logical_axis_rules_pp_as_dp = sharding.logical_axis_rules_pp_act_as_dp(cfg.logical_axis_rules)
           with self.mesh, nn.partitioning.axis_rules(logical_axis_rules_pp_as_dp):
             if cfg.scan_layers:
-              y, self.layers_outside_pipeline = self._apply_layers_sequentially(
+              y, new_state = self._apply_layers_sequentially(
                   self.layers_outside_pipeline,
                   y,
                   *layer_args,
                   length=len(self.layers_outside_pipeline.scanned_layers),
                   **layer_kwargs,
               )
+              self._trace_safe_update(self.layers_outside_pipeline, new_state)
             else:
               y = self._run_unscanned_layers_loop(
                   base_name="layers_outside_pipeline",
@@ -1230,9 +1253,10 @@ class NNXDecoder(nnx.Module):
                 decoder_input_tokens=decoder_input_tokens,
             )
           else:
-            y, self.dense_layers = self._apply_layers_sequentially(
+            y, new_state = self._apply_layers_sequentially(
                 self.dense_layers, y, *layer_args, length=cfg.first_num_dense_layers, **layer_kwargs
             )
+            self._trace_safe_update(self.dense_layers, new_state)
             num_moe = cfg.num_decoder_layers - cfg.first_num_dense_layers
 
             # Use raw deepseek_batchsplit logic for MoE scanned layers to minimize VRAM overhead
@@ -1251,9 +1275,10 @@ class NNXDecoder(nnx.Module):
                   policy=self.get_remat_policy(),
               )
             else:
-              y, self.moe_layers = self._apply_layers_sequentially(
+              y, new_state = self._apply_layers_sequentially(
                   self.moe_layers, y, *layer_args, length=num_moe, **layer_kwargs
               )
+              self._trace_safe_update(self.moe_layers, new_state)
 
         elif self.is_gemma3:
           y = self._apply_gemma3_scanned_blocks(
@@ -1268,9 +1293,10 @@ class NNXDecoder(nnx.Module):
               slot,
           )
         else:
-          y, self.layers = self._apply_layers_sequentially(
+          y, new_state = self._apply_layers_sequentially(
               self.layers, y, *layer_args, length=cfg.num_decoder_layers, **layer_kwargs
           )
+          self._trace_safe_update(self.layers, new_state)
       else:
         if self.is_deepseek:
           y = self._run_unscanned_layers_loop(
@@ -1336,6 +1362,14 @@ class NNXDecoder(nnx.Module):
 
     return logits, hidden_state, kv_caches
 
+  def _trace_safe_update(self, layer, new_state):
+    """Updates the layer state only if not currently in a tracing context where mutation is forbidden."""
+    # Check if we are in an abstract tracing context (like jax.eval_shape)
+    # where mutation of variables from outer scopes is disallowed.
+    is_tracing = any(isinstance(x, jax.core.Tracer) for x in jax.tree_util.tree_leaves(new_state))
+    if not is_tracing:
+      nnx.update(layer, new_state)
+
   def _apply_gemma3_scanned_blocks(
       self,
       y,
@@ -1361,7 +1395,8 @@ class NNXDecoder(nnx.Module):
 
     # Apply the main scan over the full blocks
     if scan_length > 0:
-      y, self.layers = self._apply_layers_sequentially(self.layers, y, *layer_args, length=scan_length, **layer_kwargs)
+      y, new_state = self._apply_layers_sequentially(self.layers, y, *layer_args, length=scan_length, **layer_kwargs)
+      self._trace_safe_update(self.layers, new_state)
 
     # Apply any remaining layers that did not fit into a full scanned block
     num_remaining_layers = cfg.num_decoder_layers % attention_pattern_length

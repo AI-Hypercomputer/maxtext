@@ -151,10 +151,11 @@ class Embed(nnx.Module):
     if not jnp.issubdtype(inputs.dtype, jnp.integer):
       raise ValueError("Input type must be an integer or unsigned integer.")
 
-    embedding = jnp.asarray(
-        _maybe_move_embedding_to_device(self.embedding.value, self.config),
-        self.dtype,
-    )
+    embedding_val = _maybe_move_embedding_to_device(self.embedding.value, self.config)
+    if isinstance(embedding_val, jax.ShapeDtypeStruct):
+      embedding = embedding_val
+    else:
+      embedding = jnp.asarray(embedding_val, self.dtype)
 
     output_axis_names = (
         (
