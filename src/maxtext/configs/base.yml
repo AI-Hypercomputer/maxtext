@@ -149,6 +149,14 @@ act_quantization_calibration_method: "absmax"
 bwd_quantization_calibration_method: "absmax"
 # shard the range finding operation for quantization. by default this is set to number of slices.
 quantization_local_shard_count: -1
+# The 'N' in N:M sparsity, representing the maximum number of non-zero values in each block.
+weight_sparsity_n: null
+# The 'M' in N:M sparsity, representing the number of values in each block.
+weight_sparsity_m: null
+# The step size to update the sparsity masks.
+weight_sparsity_update_step: 10
+# The first number of steps before updating the sparsity masks.
+weight_sparsity_start_step: 50
 
 decoder_block: "llama2" # which style of decoderblock to use.
 # global parameter scale needs to be a power of 2. if you want finer grained control of the model sizes

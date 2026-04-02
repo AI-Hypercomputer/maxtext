@@ -566,6 +566,7 @@ class Decoder(nn.Module):
             "cache": cache_spec,
             "intermediates": 0,
             "aqt": 0,
+            "batch_stats": 0,
             "_overwrite_with_gradient": 0,
         },
         split_rngs={

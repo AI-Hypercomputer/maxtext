@@ -1385,11 +1385,20 @@ def setup_initial_state(
           in_shardings=None,
           out_shardings=state_mesh_shardings,
       )()
-      if raw_params:  # If we loaded a partial state, we need to merge it.
+      sparsity_enabled = config.weight_sparsity_n and config.weight_sparsity_m
+      if sparsity_enabled and raw_params:  # If we loaded a partial state, we need to merge it.
+
+        def _merge_params(p_raw, p_init):
+          if isinstance(p_raw, jax.ShapeDtypeStruct):
+            return p_init
+          return p_raw
+
+        merged_params = jax.tree_util.tree_map(_merge_params, raw_params, state.params)
+        state = state.replace(params=merged_params)
+      elif raw_params:
         state = state.replace(params=raw_params)
 
   state = max_utils.unbox_logicallypartioned(state)
-
   return state, state_mesh_annotations, state_mesh_shardings, data_iterator
 
 
