@@ -26,6 +26,7 @@ from aqt.jax.v2.flax import aqt_flax
 from aqt.jax.v2 import tiled_dot_general
 from aqt.jax.v2 import calibration
 
+from maxtext.layers import nnx_wrappers
 import qwix
 from qwix._src.core import dot_general_qt
 
