@@ -15,6 +15,7 @@
 """Operations used by Grain"""
 
 import dataclasses
+import json
 import warnings
 from threading import current_thread
 from typing import Any, Iterable, TYPE_CHECKING
@@ -277,7 +278,7 @@ def verify_chat_template_generation_prompt_logic(tokenizer_model):
     )
 
 
-def _get_completion_in_chat_template(tokenizer_model, round_msgs):
+def _get_completion_in_chat_template(tokenizer_model, round_msgs, tools=None):
   """
   Calculates the completion part of a conversation turn when formatted with a chat template.
 
@@ -291,9 +292,10 @@ def _get_completion_in_chat_template(tokenizer_model, round_msgs):
   Returns:
     A string representing the completion formatted by the chat template.
   """
-  prompt_completion_tokens = tokenizer_model.apply_chat_template(round_msgs, add_generation_prompt=False, tokenize=True)
+  tools_kwargs = {"tools": tools} if tools is not None else {}
+  prompt_completion_tokens = tokenizer_model.apply_chat_template(round_msgs, add_generation_prompt=False, tokenize=True, **tools_kwargs)
   # include generation_prompt as part of the prompt tokens
-  prompt_tokens = tokenizer_model.apply_chat_template(round_msgs[:-1], add_generation_prompt=True, tokenize=True)
+  prompt_tokens = tokenizer_model.apply_chat_template(round_msgs[:-1], add_generation_prompt=True, tokenize=True, **tools_kwargs)
 
   prompt_completion_ids = _extract_token_ids(prompt_completion_tokens)
   prompt_ids = _extract_token_ids(prompt_tokens)
@@ -303,7 +305,7 @@ def _get_completion_in_chat_template(tokenizer_model, round_msgs):
   return completion_in_chat_template
 
 
-def apply_chat_template(example, tokenizer_model, data_column_name):
+def apply_chat_template(example, tokenizer_model, data_column_name, tools_column_name=None):
   """Formats conversational data by applying the tokenizer's chat template
   and identifying prompt/completion segments for SFT masking.
 
@@ -327,6 +329,10 @@ def apply_chat_template(example, tokenizer_model, data_column_name):
   messages = []
   is_prompt = []
   round_msgs = []
+  tools = example.get(tools_column_name) if tools_column_name else None
+  if isinstance(tools, str):
+    tools = json.loads(tools)
+  tools_kwargs = {"tools": tools} if tools is not None else {}
   try:
     for idx, message in enumerate(example[data_column_name]):
       if message["role"] == "system":
@@ -336,13 +342,13 @@ def apply_chat_template(example, tokenizer_model, data_column_name):
       elif message["role"] == "user":
         round_msgs.append(message)
         prompt_in_chat_template = tokenizer_model.apply_chat_template(
-            round_msgs, add_generation_prompt=True, tokenize=False
+            round_msgs, add_generation_prompt=True, tokenize=False, **tools_kwargs
         )
         messages.append(prompt_in_chat_template)
         is_prompt.append(True)
       elif message["role"] == "assistant":
         round_msgs.append(message)
-        messages.append(_get_completion_in_chat_template(tokenizer_model, round_msgs))
+        messages.append(_get_completion_in_chat_template(tokenizer_model, round_msgs, tools=tools))
         is_prompt.append(False)
         # Round ended, clearing the buffer.
         round_msgs.clear()
