@@ -112,6 +112,38 @@ def create_model(config, mesh, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rng
   return model
 
 
+def create_nnx_abstract_model(config, mesh, model_mode=MODEL_MODE_TRAIN, rng_key=None):
+  """Returns (_create_model_partial, abstract_model) for AOT compilation.
+
+  Unlike create_nnx_model, this does not shard parameters or load checkpoints.
+  It only builds the abstract shape/dtype structure needed by get_abstract_state
+  and optimizer construction (e.g. Muon).
+
+  Args:
+    config: the configuration
+    mesh: the device mesh
+    model_mode: train or inference
+    rng_key: optional RNG key
+
+  Returns:
+    (_create_model_partial, abstract_model) where _create_model_partial() creates
+    a concrete model instance and abstract_model is the eval_shape result.
+  """
+
+  def _create_model(rng_key=None):
+    if rng_key is None:
+      rng_key = jax.random.PRNGKey(config.init_weights_seed)
+    rngs = nnx.Rngs(params=rng_key, dropout=1)
+    return from_config(config, mesh=mesh, rngs=rngs, model_mode=model_mode)
+
+  _create_model_partial = partial(_create_model, rng_key=rng_key)
+
+  with nn.logical_axis_rules(config.logical_axis_rules):
+    abstract_model = nnx.eval_shape(_create_model_partial)
+
+  return _create_model_partial, abstract_model
+
+
 def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAIN, rng_key=None):
   """Creates a NNX model with sharded parameters, possibly loading from a checkpoint."""
 

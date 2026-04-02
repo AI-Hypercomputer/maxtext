@@ -196,8 +196,11 @@ def load_compiled(config, partial_train, state, execution_devices):
 
   serialized_compiled = load_serialized_compiled(config.compiled_trainstep_file)
   shaped_batch = get_shaped_batch(config)
-  example_rng = jax.random.PRNGKey(0)
-  shaped_input_args = (state, shaped_batch, example_rng)
+  if config.pure_nnx:
+    shaped_input_args = (state, shaped_batch)
+  else:
+    example_rng = jax.random.PRNGKey(0)
+    shaped_input_args = (state, shaped_batch, example_rng)
   shaped_input_kwargs = {}
   in_tree, out_tree = get_train_input_output_trees(partial_train, shaped_input_args, shaped_input_kwargs)
   p_train_step = deserialize_and_load(serialized_compiled, in_tree, out_tree, execution_devices=execution_devices)
@@ -1060,14 +1063,13 @@ def get_abstract_param(model, config):
   return abstract_vars
 
 
-def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
+def setup_decode_state(config, mesh, checkpoint_manager, init_state_fn):
   """Setup decode state by loading params from a checkpoint.
   Args:
-    model: the flax model to initialize
     config: config object
-    rng: jax.prng key
     mesh: jax.devices() mesh
     checkpoint_manager: Checkpoint manager
+    init_state_fn: function to initialize the model state
 
   Returns:
     state: state with decode params loaded from the checkpoint
@@ -1077,12 +1079,12 @@ def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
     # generate random params
     max_logging.log("No decode checkpoint specified - generating random weights.")
     state, state_mesh_annotations, _, _ = setup_initial_state(
-        model, None, None, config, rng, mesh, checkpoint_manager, False
+        None, config, mesh, checkpoint_manager, init_state_fn, False
     )
   else:
     # Load params from checkpoint
     max_logging.log(f"Loading decode params from {config.load_parameters_path}")
-    unboxed_abstract_state, state_mesh_annotations, _ = get_abstract_state(model, None, config, rng, mesh, False)
+    unboxed_abstract_state, state_mesh_annotations, _ = get_abstract_state(config, mesh, init_state_fn, False)
     with nn_partitioning.axis_rules(config.logical_axis_rules):
       params = checkpointing.load_params_from_path(
           config.load_parameters_path,
@@ -1097,40 +1099,35 @@ def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
   return state, state_mesh_annotations
 
 
-def setup_training_state(model, data_iterator, tx, config, rng, mesh, checkpoint_manager):
+def setup_training_state(data_iterator, config, mesh, checkpoint_manager, init_state_fn):
   is_training = True
   return setup_initial_state(
-      model,
       data_iterator,
-      tx,
       config,
-      rng,
       mesh,
       checkpoint_manager,
+      init_state_fn,
       is_training,
   )
 
 
 def setup_initial_state(
-    model,
     data_iterator,
-    tx,
     config,
-    rng,
     mesh,
     checkpoint_manager,
+    init_state_fn,
     is_training=True,
 ):
   """We initialize the model and optimizer state, and optionally load from a
   checkpoint as necessary.
 
   Args:
-    model: the flax model to initialize
-    tx: the optax.GradientTransformation
+    data_iterator: data iterator
     config: config object
-    rng: jax.prng key
     mesh: jax.devices() mesh
     checkpoint_manager: an Orbax checkpointing.CheckpointManager object
+    init_state_fn: function to initialize the training state
     is_training: True to initialize training state, False for decode state
 
   Returns:
@@ -1139,7 +1136,7 @@ def setup_initial_state(
   """
 
   unboxed_abstract_state, state_mesh_annotations, state_mesh_shardings = get_abstract_state(
-      model, tx, config, rng, mesh, is_training
+      config, mesh, init_state_fn, is_training
   )
 
   # Initialization
@@ -1174,14 +1171,14 @@ def setup_initial_state(
         # The update of data_iterator state happens in place, no need to assign explicitly
         state = restored["items"]
     else:
-      init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training)
+      init_state_partial = init_state_fn
       init_state_partial.__name__ = "initialize_state"
       # pylint: disable=not-callable
       state = jax.jit(
           init_state_partial,
           in_shardings=None,
           out_shardings=state_mesh_shardings,
-      )(rng)
+      )()
       if raw_params:  # If we loaded a partial state, we need to merge it.
         state = state.replace(params=raw_params)
 
@@ -1190,8 +1187,8 @@ def setup_initial_state(
   return state, state_mesh_annotations, state_mesh_shardings, data_iterator
 
 
-def get_logical_annotations(model, tx, config, rng, mesh, is_training=True):
-  init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training, rng)
+def get_logical_annotations(config, mesh, init_state_fn):
+  init_state_partial = init_state_fn
 
   with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
     abstract_state = jax.eval_shape(init_state_partial)
@@ -1199,9 +1196,9 @@ def get_logical_annotations(model, tx, config, rng, mesh, is_training=True):
   return logical_annotations
 
 
-def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
+def get_abstract_state(config, mesh, init_state_fn, is_training=True):
   """Get a shaped abstraction of the state (including optimizer)"""
-  init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training, rng)
+  init_state_partial = init_state_fn
 
   with nn_partitioning.axis_rules(config.logical_axis_rules):
     abstract_state = jax.eval_shape(init_state_partial)
