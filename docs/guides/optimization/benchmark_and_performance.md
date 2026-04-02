@@ -69,7 +69,7 @@ Different quantization recipes are available, including` "int8", "fp8", "fp8_ful
 
 For v6e and earlier generation TPUs, use the "int8" recipe. For v7x and later generation TPUs, use "fp8_full". GPUs should use “fp8_gpu” for NVIDIA and "nanoo_fp8" for AMD.
 
-See [](quantization).
+See [](quantization-doc).
 
 ### Choose sharding strategy
 
@@ -98,16 +98,16 @@ There are two methods for asynchronous collective offloading:
 
 1. Offload Collectives to Sparse Core:
 
-   This method is recommended for v7x. To enable it, set the following flags from \[[link](https://github.com/AI-Hypercomputer/maxtext/blob/main/benchmarks/xla_flags_library.py#L70)\]:
+   This method is recommended for v7x. To enable it, set the following flags from [link](https://github.com/AI-Hypercomputer/maxtext/blob/main/benchmarks/xla_flags_library.py#L70):
 
 - `ENABLE_SPARSECORE_OFFLOADING_FOR_RS_AG_AR`
 - `ENABLE_SPARSECORE_OFFLOADING_FOR_REDUCE_SCATTER`
 - `ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_GATHER`
 - `ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE`
 
-2. Overlap Collective Using Continuation Fusion:\*\*
+2. Overlap Collective Using Continuation Fusion:
 
-   This method is recommended for v5p and v6e. To enable it, set the following flags \[[link](https://github.com/AI-Hypercomputer/maxtext/blob/main/benchmarks/xla_flags_library.py#L39)\]:
+   This method is recommended for v5p and v6e. To enable it, set the following flags ([link](https://github.com/AI-Hypercomputer/maxtext/blob/main/benchmarks/xla_flags_library.py#L39)):
 
 - `CF_FOR_ALL_GATHER`
 - `CF_FOR_ALL_REDUCE`
