@@ -200,6 +200,10 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
   """
 
   def __init__(self, model, strategy: distillation_utils.DistillationStrategy, optimizer, training_config, **kwargs):
+    # Implement Selective Freezing (Task 3)
+    import re
+    mask = kwargs.pop("trainable_parameters_mask", [])
+
     # We pass a dummy optimizer to the base PeftTrainer temporarily to prevent PeftTrainer from eagerly
     # allocating massive optimizer states for the entire ModelBundle (including the frozen teacher) before
     # redefining the trainer optimizer here.
@@ -211,7 +215,24 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
     # override optimizer to only use student_model.
     if training_config.gradient_accumulation_steps is not None and training_config.gradient_accumulation_steps > 1:
       optimizer = optax.MultiSteps(optimizer, training_config.gradient_accumulation_steps)
-    wrt = nnx.LoRAParam if self._lora_enabled else nnx.Param
+
+    if mask:
+      max_logging.log(f"Applying selective freezing with mask: {mask}")
+      def is_trainable(path, leaf):
+        if not isinstance(leaf, nnx.Param):
+          return False
+        # path is a tuple of keys. We convert to string for regex matching.
+        def get_key(k):
+          if hasattr(k, "key"): return str(k.key)
+          if hasattr(k, "index") and not isinstance(k, str): return str(k.index)
+          if hasattr(k, "name") and not isinstance(k, str): return str(k.name)
+          return str(k)
+        str_path = ".".join(map(get_key, path))
+        return any(re.match(p, str_path) for p in mask)
+      wrt = is_trainable
+    else:
+      wrt = nnx.LoRAParam if self._lora_enabled else nnx.Param
+
     self.optimizer = nnx.Optimizer(model.student_model, optimizer, wrt=wrt)
 
     # Detect if Tunix expects _train_step to return grad_norm by inspecting the source
@@ -330,7 +351,7 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
     # pylint: disable=unexpected-keyword-arg
     return distillation_utils.MaxTextTrainingInput(
         input_tokens=input_data.input_tokens,
-        input_mask=input_data.input_mask,
+        input_mask=input_mask if (input_mask := getattr(input_data, 'input_mask', None)) is not None else getattr(input_data, 'attention_mask', None),
         positions=input_data.positions,
         decoder_segment_ids=input_data.decoder_segment_ids,
         targets=input_data.targets,
@@ -419,6 +440,132 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
         return restored_iter
 
     return raw_train_iter
+
+
+# -----------------------------------------------------------------------------
+# Parameter Surgery
+# -----------------------------------------------------------------------------
+
+
+def initialize_student_from_teacher(student_model, teacher_model, config):
+  """Performs parameter surgery to initialize student from teacher.
+
+  This handles the case where the student halves the number of routed experts
+  and doubles the number of shared experts. We map the teacher's first half
+  of routed experts to the student's routed experts, and use the teacher's
+  routed expert index 16 as the second shared expert for the student.
+
+  This implementation handles both scanned (default) and non-scanned models.
+  """
+  from jax.tree_util import tree_flatten_with_path
+
+  max_logging.log("Starting Parameter Surgery: Teacher -> Student...")
+
+  # 1. Get configurations for surgery logic
+  num_experts = getattr(config, "num_experts", 16) # Student's num_experts
+
+  # 2. Get states
+  s_state = nnx.state(student_model)
+  t_state = nnx.state(teacher_model)
+  
+  # Flatten states for robust path lookup
+  s_leaves, s_treedef = tree_flatten_with_path(s_state)
+  t_leaves, _ = tree_flatten_with_path(t_state)
+  t_flat = {path: leaf for path, leaf in t_leaves}
+
+  # Helper to get string key from path element
+  def get_key(k):
+    if hasattr(k, "key"): return str(k.key)
+    if hasattr(k, "index"): return str(k.index)
+    if hasattr(k, "name"): return str(k.name)
+    return str(k)
+
+  new_s_leaves = []
+  
+  for path, s_val in s_leaves:
+    str_path = ".".join(map(get_key, path))
+    updated_val = s_val
+    s_shape = s_val.shape
+
+    # Handle MoE layers
+    if "moe_layers" in str_path:
+      # Detect adaptive expert axis based on teacher's matching parameter shape
+      # Default: axis 0. If 4D (scanned), axis 1.
+      expert_axis = 0
+      if path in t_flat:
+        t_val = t_flat[path]
+        if t_val.ndim == 4: expert_axis = 1
+
+      # Handle Routed Experts (MoeBlock_0)
+      if "MoeBlock_0" in str_path and any(k in str_path for k in ["wi_0", "wi_1", "wo"]):
+        if path in t_flat:
+          t_val = t_flat[path]
+          try:
+            sliced_value = jax.lax.slice_in_dim(t_val, 0, num_experts, axis=expert_axis)
+            if s_shape == sliced_value.shape:
+              updated_val = sliced_value
+          except Exception:
+            pass
+
+      # Handle Shared Experts
+      elif "shared_experts" in str_path and any(k in str_path for k in ["wi_0", "wi_1", "wo"]):
+        try:
+          t_shared_val = t_flat.get(path)
+
+          # Construct path for teacher's routed expert N (to be moved to shared)
+          # student: ...shared_experts.wi_0.kernel -> teacher: ...MoeBlock_0.wi_0.kernel
+          from jax.tree_util import DictKey
+          routed_path = []
+          for p in path:
+            p_key = get_key(p)
+            if p_key == "shared_experts":
+              routed_path.append(DictKey("MoeBlock_0") if hasattr(p, "key") else "MoeBlock_0")
+            elif p_key in ["kernel", "bias", "value"]:
+              continue
+            else:
+              routed_path.append(p)
+
+          t_routed_val = t_flat.get(tuple(routed_path))
+          if t_routed_val is None:
+            # Try adding 'value' if it was removed
+            t_routed_val = t_flat.get(tuple(routed_path + [path[-1]]))
+
+          if t_shared_val is not None and t_routed_val is not None:
+            # Detect scanned for teacher's routed expert
+            routed_expert_axis = 1 if t_routed_val.ndim == 4 else 0
+            
+            # Extract the moved expert from the teacher's routed expert collection
+            moved_expert_val = jax.lax.index_in_dim(t_routed_val, num_experts,
+                                                 axis=routed_expert_axis, keepdims=False)
+
+            # Determine concatenation axis based on parameter type
+            if "kernel" in str_path:
+              if "wi" in str_path: concat_axis = t_shared_val.ndim - 1
+              else: concat_axis = t_shared_val.ndim - 2
+            else: # bias
+              concat_axis = t_shared_val.ndim - 1
+
+            combined_val = jnp.concatenate([t_shared_val, moved_expert_val], axis=concat_axis)
+
+            if s_shape == combined_val.shape:
+              updated_val = combined_val
+            elif "bias" in str_path and "wo" in str_path and s_shape == t_shared_val.shape:
+              # Fallback for wo bias where output dimension doesn't change; we sum them.
+              updated_val = t_shared_val + moved_expert_val
+        except Exception:
+          pass
+
+    # General Copy: Try to copy from teacher if path exists and shape matches exactly
+    if updated_val is s_val and path in t_flat:
+      t_val = t_flat[path]
+      if s_shape == t_val.shape:
+        updated_val = t_val
+
+    new_s_leaves.append(updated_val)
+
+  new_s_state = s_treedef.unflatten(new_s_leaves)
+  nnx.update(student_model, new_s_state)
+  max_logging.log("Parameter Surgery Complete.")
 
 
 # -----------------------------------------------------------------------------
@@ -573,6 +720,10 @@ def train_distill(
       teacher_model = get_maxtext_model(teacher_config, mesh)
       teacher_model.eval()
 
+    # Perform parameter surgery to initialize Student from Teacher
+    if teacher_model is not None:
+      initialize_student_from_teacher(student_model, teacher_model, student_config)
+
     student_model.train()
     model_bundle = ModelBundle(teacher_model, student_model)
 
@@ -582,6 +733,7 @@ def train_distill(
         strategy=strategy,
         optimizer=optimizer,
         training_config=train_config,
+        trainable_parameters_mask=student_config.trainable_parameters_mask,
     )
     trainer.is_managed_externally = True
     trainer._has_aux = True  # pylint: disable=protected-access
@@ -605,7 +757,7 @@ def train_distill(
       inputs_dict = {
           "input_tokens": batch.input_tokens,
           "positions": batch.positions,
-          "attention_mask": batch.input_mask,
+          "attention_mask": batch.input_mask if hasattr(batch, 'input_mask') else getattr(batch, 'attention_mask', None),
           "decoder_segment_ids": batch.decoder_segment_ids,
           "targets": batch.targets,  # Passed to strategy (labels_fn)
           "targets_position": batch.targets_position,  # Passed to strategy (labels_fn)
