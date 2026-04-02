@@ -68,6 +68,7 @@ from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.rollout import base_rollout
 from tunix.rl.grpo.grpo_learner import GrpoConfig, GrpoLearner
 from tunix.sft import metrics_logger, profiler
+from tunix.utils import math_rewards
 
 # for vLLM we can skip JAX precompilation with this flag, it makes startup faster
 os.environ["SKIP_JAX_PRECOMPILE"] = "1"
@@ -578,11 +579,7 @@ def create_rl_components(
   rl_trainer = GrpoLearner(
       rl_cluster=rl_cluster,
       reward_fns=[  # type: ignore
-          make_reward_fn(utils_rl.match_format_exactly),
-          make_reward_fn(utils_rl.match_format_approximately),
-          # TODO(atwigg): comment out to simplify reward and overlap with check_numbers
-          make_reward_fn(utils_rl.check_answer),
-          make_reward_fn(utils_rl.check_numbers),
+          math_rewards.math_reward,
       ],
       algo_config=grpo_config,
   )
