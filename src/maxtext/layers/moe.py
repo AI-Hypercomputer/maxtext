@@ -911,6 +911,8 @@ class RoutedMoE(nnx.Module):
       # TODO (b/491979205) pipeline fsdp ag per repeat fails tokamax gmm
       if self.config.using_pipeline_parallelism and self.config.pipeline_fsdp_ag_per_repeat:
         tokamax_group_sizes = group_sizes
+      elif self.config.attention == "vllm_rpa":
+        tokamax_group_sizes = group_sizes
       else:
         tokamax_group_sizes = tokamax.RaggedDotGroupSizes(
             group_sizes,
