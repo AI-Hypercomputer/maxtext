@@ -13,7 +13,6 @@
 # limitations under the License.
 
 """ Common LoRA utils needed to support LoRA adapters."""
-import inspect
 import json
 import os
 from typing import Any, Optional
@@ -32,16 +31,12 @@ from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import max_logging
 
-import math
 import re
 
 from flax import nnx
 from orbax import checkpoint as ocp
 
 import qwix
-import qwix._src.flax_util as qwix_flax_util
-import qwix._src.providers.lora as qwix_lora
-import qwix._src.providers.ptq as qwix_ptq
 
 
 def apply_lora_on_base_params(base_params, lora_params, lora_scale_factor=1.0):
@@ -414,69 +409,6 @@ def _build_lora_provider(mt_config: pyconfig.HyperParameters) -> qwix.LoraProvid
   return qwix.LoraProvider(**lora_kwargs)
 
 
-def _patch_nnx_decoder_apply_layers_sequentially(model: nnx.Module) -> None:
-  """Patches the NNX decoder's _apply_layers_sequentially to include Qwix specific logic."""
-
-  def _apply_layers_sequentially_with_qwix(self, layers, x_in, *args, length: int, **kwargs):
-    """Runs the layer stack using nnx.scan with Qwix specific graph init."""
-    policy = self.get_remat_policy()
-    prevent_cse = maxtext_utils.should_prevent_cse_in_remat(self.config)
-    graphdef, params, state = nnx.split(layers, nnx.Param, ...)
-
-    scan_axis = self.config.param_scan_axis
-    if scan_axis != 0:
-      params = jax.tree_util.tree_map(lambda x: jnp.moveaxis(x, scan_axis, 0), params)
-
-    sig = inspect.signature(layers.__class__.__call__)
-    valid_kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters or "kwargs" in sig.parameters}
-    
-    dynamic_graph_init = bool(getattr(self, "disable_quant_stats_update", False))
-    updated_graphdef = [graphdef]
-
-    def layer_fn(carry, scanned_vars):
-      current_params, current_state = scanned_vars
-
-      if self.config.parameter_memory_host_offload:
-        current_params = jax.tree_util.tree_map(lambda x: jax.device_put(x, max_utils.device_space()), current_params)
-
-      layer = nnx.merge(graphdef, current_params, current_state)
-      layer_out = layer(carry, *args, **valid_kwargs)
-      new_carry = layer_out[0] if isinstance(layer_out, tuple) else layer_out
-
-      new_graphdef, updated_params, updated_state = nnx.split(layer, nnx.Param, ...)
-      
-      if dynamic_graph_init:
-        updated_graphdef[0] = new_graphdef
-        returned_params = updated_params
-      else:
-        returned_params = current_params
-        
-      return new_carry, (returned_params, updated_state)
-
-    layer_fn_wrapped = jax.checkpoint(layer_fn, policy=policy, prevent_cse=prevent_cse)
-
-    def _ensure_scan_leading_axis(x):
-      if not hasattr(x, "shape") or len(x.shape) == 0:
-        return jnp.broadcast_to(x, (length,))
-      return x
-
-    params = jax.tree_util.tree_map(_ensure_scan_leading_axis, params)
-    state = jax.tree_util.tree_map(_ensure_scan_leading_axis, state)
-
-    final_carry, (scanned_params, scanned_other) = jax.lax.scan(layer_fn_wrapped, x_in, (params, state))
-
-    if scan_axis != 0:
-      scanned_params = jax.tree_util.tree_map(lambda x: jnp.moveaxis(x, 0, scan_axis), scanned_params)
-
-    if dynamic_graph_init:
-      return final_carry, nnx.merge(updated_graphdef[0], scanned_params, scanned_other)
-      
-    nnx.update(layers, nnx.State.merge(scanned_params, scanned_other))
-    return final_carry, layers
-
-  model.decoder.__class__._apply_layers_sequentially = _apply_layers_sequentially_with_qwix  # pylint: disable=protected-access
-
-
 def _prepare_dummy_inputs() -> tuple[jnp.ndarray, jnp.ndarray]:
   """Builds dummy decoder inputs used to materialize LoRA parameters."""
   # Keep LoRA warmup as small as possible to minimize compile/memory overhead.
@@ -509,8 +441,7 @@ def _verify_lora_parameters(lora_model: nnx.Module, mt_config: pyconfig.HyperPar
 
   if not matched_module_paths:
     max_logging.log(
-        f"LoRA module_path='{lora_module_path}' did not match any weights. "
-        f"Sample module paths: {sample_module_paths}"
+        f"LoRA module_path='{lora_module_path}' did not match any weights. " f"Sample module paths: {sample_module_paths}"
     )
     raise ValueError("LoRA enabled but no LoRA parameters found in decoder/model state.")
 
@@ -536,10 +467,6 @@ def apply_lora_to_model(
 
   lora_provider = _build_lora_provider(mt_config)
 
-  # Core Qwix patches are now integrated into Qwix HEAD.
-  # We still patch the NNX decoder to handle Qwix dynamic graph init.
-  _patch_nnx_decoder_apply_layers_sequentially(model)
-
   model_rngs = getattr(model.decoder, "rngs", None)
   decoder_input_tokens, decoder_positions = _prepare_dummy_inputs()
 
@@ -555,24 +482,14 @@ def apply_lora_to_model(
     with mesh, nn_partitioning.axis_rules(mt_config.logical_axis_rules):
       graph_def, state = nnx.split(lora_model)
       default_memory_kind = jax.devices()[0].default_memory().kind
-      dst_shardings = jax.tree_util.tree_map(
+      dst_shardings = jax.tree.map(
           lambda x: jax.sharding.NamedSharding(mesh, x, memory_kind=default_memory_kind) if x is not None else None,
           nnx.get_partition_spec(state),
       )
       from tunix.rl import reshard  # pylint: disable=import-outside-toplevel
+
       state = reshard.reshard_pytree(state, dst_shardings)
       lora_model = nnx.merge(graph_def, state)
-
-  # Warm up once outside jax.jit so any remaining lazy LoRA params are
-  # materialized before train_step tracing.
-  lora_model.set_attributes(disable_quant_stats_update=True, qwix_rngs=model_rngs)
-  try:
-    lora_model(
-        decoder_input_tokens=decoder_input_tokens,
-        decoder_positions=decoder_positions,
-    )
-  finally:
-    lora_model.set_attributes(disable_quant_stats_update=False, qwix_rngs=None)
 
   _verify_lora_parameters(lora_model, mt_config)
 

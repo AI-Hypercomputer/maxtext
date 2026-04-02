@@ -435,48 +435,61 @@ class NNXDecoder(nnx.Module):
     """Runs the layer stack using nnx.scan."""
     policy = self.get_remat_policy()
     prevent_cse = maxtext_utils.should_prevent_cse_in_remat(self.config)
-    graphdef, params, state = nnx.split(
-        layers, nnx.Param, ...
-    )  # state: the mutable state we carry (KV cache, RNGs, etc.)
-
     scan_axis = self.config.param_scan_axis
+
+    graphdef, params, state = nnx.split(layers, nnx.Param, ...)
+
     if scan_axis != 0:
-      # Move scan_axis to 0 so scan can iterate over it
       params = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0), params)
 
-    layer_cls = layers.__class__
-    sig = inspect.signature(layer_cls.__call__)
+    sig = inspect.signature(layers.__class__.__call__)
     valid_kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters or "kwargs" in sig.parameters}
 
+    dynamic_graph_init = bool(getattr(self, "disable_quant_stats_update", False))
+    updated_graphdef = [graphdef]
+
     def layer_fn(carry, scanned_vars):
-      # Unpack the sliced variables for THIS layer
       current_params, current_state = scanned_vars
 
       if self.config.parameter_memory_host_offload:
         current_params = jax.tree.map(lambda x: jax.device_put(x, max_utils.device_space()), current_params)
 
-      # Merge using the SLICED state
       layer = nnx.merge(graphdef, current_params, current_state)
-
-      # Run the layer (Filter kwargs if using the solution from previous turn)
       layer_out = layer(carry, *args, **valid_kwargs)
-
       new_carry = layer_out[0] if isinstance(layer_out, tuple) else layer_out
 
-      # Extract the updated state to return it
-      new_current_state = nnx.state(layer)
-      return new_carry, new_current_state
+      new_graphdef, updated_params, updated_state = nnx.split(layer, nnx.Param, ...)
 
-    layer_fn = jax.checkpoint(layer_fn, policy=policy, prevent_cse=prevent_cse)
+      if dynamic_graph_init:
+        updated_graphdef[0] = new_graphdef
+        returned_params = updated_params
+      else:
+        returned_params = current_params
 
-    final_carry, scanned_state = jax.lax.scan(layer_fn, x_in, (params, state))
+      return new_carry, (returned_params, updated_state)
+
+    layer_fn_wrapped = jax.checkpoint(layer_fn, policy=policy, prevent_cse=prevent_cse)
+
+    def _ensure_scan_leading_axis(x):
+      if not hasattr(x, "shape") or len(x.shape) == 0:
+        return jnp.broadcast_to(x, (length,))
+      return x
+
+    params = jax.tree.map(_ensure_scan_leading_axis, params)
+    state = jax.tree.map(_ensure_scan_leading_axis, state)
+
+    final_carry, (scanned_params, scanned_other) = jax.lax.scan(layer_fn_wrapped, x_in, (params, state))
 
     if scan_axis != 0:
-      scanned_params, scanned_other = scanned_state.split(nnx.Param, ...)
       scanned_params = jax.tree.map(lambda x: jnp.moveaxis(x, 0, scan_axis), scanned_params)
-      scanned_state = nnx.State.merge(scanned_params, scanned_other)
 
-    return final_carry, nnx.merge(graphdef, scanned_state)
+    if dynamic_graph_init:
+      out_layers = nnx.merge(updated_graphdef[0], scanned_params, scanned_other)
+    else:
+      nnx.update(layers, nnx.State.merge(scanned_params, scanned_other))
+      out_layers = layers
+
+    return final_carry, out_layers
 
   def get_decoder_layers(self):
     """Retrieves decoder layer classes based on config using a dictionary lookup."""
