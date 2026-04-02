@@ -64,6 +64,7 @@ from jax.sharding import Mesh
 from orbax import checkpoint as ocp
 from pprint import pprint
 from transformers import AutoTokenizer
+import functools
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.rollout import base_rollout
 from tunix.rl.grpo.grpo_learner import GrpoConfig, GrpoLearner
@@ -75,6 +76,7 @@ os.environ["SKIP_JAX_PRECOMPILE"] = "1"
 from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
 from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
+from maxtext.integration.vllm.maxtext_vllm_rollout import MaxTextVllmRollout
 from maxtext.trainers.post_train.rl.evaluate_rl import evaluate
 from maxtext.trainers.post_train.rl import utils_rl
 from maxtext.input_pipeline.instruction_data_processing import load_template_from_file
@@ -477,6 +479,11 @@ def create_rl_components(
   argv_list = ["", str(vllm_config_path), "log_config=False"]
   vllm_config = pyconfig.initialize(argv_list)
 
+  rl_rollout_engine = "vllm"
+  model_name = trainer_config.model_name
+  if model_name in ["qwen3-30b-a3b", "qwen3-30b-a3b-base", "qwen3-235b-a22b"]:
+    rl_rollout_engine = functools.partial(MaxTextVllmRollout, maxtext_config=trainer_config)
+
   cluster_config = rl_cluster_lib.ClusterConfig(
       role_to_mesh={
           rl_cluster_lib.Role.ACTOR: actor_mesh,
@@ -488,7 +495,7 @@ def create_rl_components(
           rl_cluster_lib.Role.REFERENCE: trainer_config.logical_axis_rules,
           rl_cluster_lib.Role.ROLLOUT: vllm_config.logical_axis_rules,
       },
-      rollout_engine="vllm",
+      rollout_engine=rl_rollout_engine,
       offload_to_cpu=False,
       training_config=rl_cluster_lib.RLTrainingConfig(
           actor_optimizer=optimizer,
@@ -703,6 +710,7 @@ def main(argv: Sequence[str]) -> None:
   Args:
     argv: Command-line arguments.
   """
+  jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   pathwaysutils.initialize()
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 
