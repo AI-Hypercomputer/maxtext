@@ -492,7 +492,7 @@ class Transformer(nnx.Module):
 
     # Materialize hidden state when vocab tiling is enabled
     if self.config.num_vocab_tiling > 1:
-      self.hidden_states = hidden_state
+      self.hidden_states = nnx.data(hidden_state)
 
     # If we are initializing the model AND MTP is enabled, we must create
     # dummy target tensors. This allows Flax to trace the MTPBlock and create
