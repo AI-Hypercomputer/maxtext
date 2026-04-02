@@ -302,6 +302,7 @@ def preprocessing_pipeline(
   )
   operations = []
   if use_sft:
+    input_pipeline_utils.verify_chat_template_generation_prompt_logic(tokenizer)
     operations.append(
         input_pipeline_utils.SFTPromptMasking(
             text_column_name=data_column_names[0],
