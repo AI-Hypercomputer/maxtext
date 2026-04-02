@@ -406,13 +406,15 @@ def main(config, test_args):  # pylint: disable=W0621
 
     hf_model = AutoModelForCausalLM.from_pretrained(test_args.hf_model_path, dtype=torch_dtype, token=hf_token)
 
-    if os.path.isdir(test_args.hf_model_path):
-      # local hf directory may not contain tokenizer, read from remote tokenizer
-      tokenizer_path = config.tokenizer_path
-    else:
-      tokenizer_path = test_args.hf_model_path
-
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, token=hf_token)
+    # Load tokenizer: `test_args.hf_model_path` or fallback to `config.tokenizer_path`
+    try:
+      # Try loading from `test_args.hf_model_path`
+      max_logging.log(f"Loading tokenizer from {test_args.hf_model_path}.")
+      tokenizer = AutoTokenizer.from_pretrained(test_args.hf_model_path, token=hf_token)
+    except Exception as e:  # pylint: disable=broad-except
+      # Fallback to `config.tokenizer_path`. local hf directory may not contain tokenizer, read from remote tokenizer
+      max_logging.log(f"Tokenizer loading error: {e}.\nLoading tokenizer from {config.tokenizer_path}.")
+      tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_path, token=hf_token)
 
     # maxtext model prefix, use eos token as pad token
     pad_token_prefixes = ["llama3.1", "mixtral"]
