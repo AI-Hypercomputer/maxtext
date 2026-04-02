@@ -14,13 +14,12 @@ USE_SCAN_LAYERS=false
 # Installing torch for deps in forward_pass_logit_checker.py
 python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
-# After downloading checkpoints, copy them to GCS bucket at $CHKPT_BUCKET \
+# After downloading checkpoints, copy them to GCS bucket at $MODEL_BUCKET
 export MODEL_BUCKET='gs://maxtext-gemma/gemma4'
-
 export HF_MODEL='path/to/your/hf/gemma-4-31b'
 
 # To get converted ckpt:
-python3 -m maxtext.checkpoint_conversion.to_maxtext "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
+python3 -m maxtext.checkpoint_conversion.to_maxtext "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"/base.yml \
     model_name=${MODEL_NAME} \
     hf_access_token=${HF_TOKEN} \
     --hf_model_path=${HF_MODEL} \
@@ -63,7 +62,7 @@ if [ ${USE_MULTIMODAL} == true ]; then
         --max_kl_div=0.03 \
         --golden_logits_path=${GOLDEN_LOGITS_PATH}
 else
-    python3 -m tests.utils.forward_pass_logit_checker "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
+    python3 -m tests.utils.forward_pass_logit_checker "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"/base.yml \
         tokenizer_path=${TOKENIZER_PATH}  \
         load_parameters_path=${MAXTEXT_CKPT_PATH} \
         model_name=${MODEL_NAME} \
