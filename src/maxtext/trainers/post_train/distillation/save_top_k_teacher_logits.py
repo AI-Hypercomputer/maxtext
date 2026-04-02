@@ -18,9 +18,9 @@ for distillation purposes in MaxText.
 
 Example command: 
 python3 src/maxtext/trainers/post_train/distillation/save_top_k_teacher_logits.py \
-src/maxtext/configs/post_train/distillation.yml \
---top_k=128 \
---gcs_upload_path=gs://my-bucket/teacher_logits/
+  src/maxtext/configs/post_train/distillation.yml \
+  --local_tmp_dir=/mnt/ajkv/disks/codebase/tmp_save_dir \
+  --steps_per_file=10
 """
 
 import os
@@ -58,18 +58,12 @@ def get_start_step(config, local_args):
   if jax.process_index() != 0:
     return 0
 
-  output_dir = (
-      local_args.gcs_upload_path
-      if local_args.gcs_upload_path
-      else local_args.local_tmp_dir
-  )
+  output_dir = local_args.gcs_upload_path if local_args.gcs_upload_path else local_args.local_tmp_dir
   if not tf.io.gfile.exists(output_dir):
     tf.io.gfile.makedirs(output_dir)
     return 0
 
-  existing_files = tf.io.gfile.glob(
-      os.path.join(output_dir, "teacher_top_k_part_*.array_record")
-  )
+  existing_files = tf.io.gfile.glob(os.path.join(output_dir, "teacher_top_k_part_*.array_record"))
   if not existing_files:
     return 0
 
@@ -89,7 +83,7 @@ def get_start_step(config, local_args):
 
 
 def generate_and_save_data(config, local_args):
-  """Generates top-k logits from the teacher model and saves them locally, optionally uploading to GCS."""
+  """Generates top-k logits from the teacher model and saves them locally, optionally uploading to GCS"""
   k_val = local_args.top_k
   optional_keys = local_args.optional_keys
   gcs_upload_path = local_args.gcs_upload_path
