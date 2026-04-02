@@ -30,6 +30,7 @@ import argparse
 import time
 import sys
 import tensorflow as tf
+import re
 
 import jax
 import functools
@@ -52,12 +53,48 @@ def get_top_k_logits(logits: jax.Array, k: int):
   return top_k_values, top_k_indices
 
 
+def get_start_step(config, local_args):
+  """Determines the starting step for the generation process."""
+  if jax.process_index() != 0:
+    return 0
+
+  output_dir = (
+      local_args.gcs_upload_path
+      if local_args.gcs_upload_path
+      else local_args.local_tmp_dir
+  )
+  if not tf.io.gfile.exists(output_dir):
+    tf.io.gfile.makedirs(output_dir)
+    return 0
+
+  existing_files = tf.io.gfile.glob(
+      os.path.join(output_dir, "teacher_top_k_part_*.array_record")
+  )
+  if not existing_files:
+    return 0
+
+  # Find the highest part number from the filenames
+  max_part_num = -1
+  for f in existing_files:
+    match = re.search(r"part_(\d+)\.array_record", os.path.basename(f))
+    if match:
+      max_part_num = max(max_part_num, int(match.group(1)))
+
+  if max_part_num == -1:
+    return 0
+
+  start_step = (max_part_num + 1) * local_args.steps_per_file
+  max_logging.log(f"Found existing data, resuming from step {start_step}")
+  return start_step
+
+
 def generate_and_save_data(config, local_args):
   """Generates top-k logits from the teacher model and saves them locally, optionally uploading to GCS."""
   k_val = local_args.top_k
   optional_keys = local_args.optional_keys
   gcs_upload_path = local_args.gcs_upload_path
   local_tmp_dir = local_args.local_tmp_dir
+  steps_per_file = local_args.steps_per_file
 
   devices = jax.devices()
   devices_array = maxtext_utils.create_device_mesh(config, devices)
@@ -68,25 +105,48 @@ def generate_and_save_data(config, local_args):
   teacher_model, _ = model_creation_utils.create_nnx_model(config, mesh=mesh)
   train_iter, _ = input_pipeline_interface.create_data_iterator(config, mesh)
 
-  # Setup local tmp directory for Host 0
-  filename = "teacher_top_k_global.array_record"
-  local_output_path = os.path.join(local_tmp_dir, filename)
+  # Determine start_step for resuming
+  start_step = get_start_step(config, local_args)
+  start_step = int(multihost_utils.broadcast_one_to_all(jax.numpy.array(start_step)))
+
+  # Fast-forward the dataset iterator
+  if start_step > 0:
+    max_logging.log(f"Fast-forwarding dataset by {start_step} steps...")
+    for _ in range(start_step):
+      next(train_iter)
 
   writer = None
+  local_output_path = None
   if jax.process_index() == 0:
     if not os.path.exists(local_tmp_dir):
       os.makedirs(local_tmp_dir)
-    max_logging.log(f"Process 0 writing globally gathered data to local path: {local_output_path}")
-    writer = array_record_module.ArrayRecordWriter(local_output_path, "group_size:1000")
 
   # Sync all hosts before starting the loop
   multihost_utils.sync_global_devices("start_generation_loop")
 
-  max_logging.log(f"Starting Top-K generation loop for {config.steps} steps...")
+  max_logging.log(f"Starting Top-K generation loop for {config.steps - start_step} steps...")
   loop_start = time.time()
 
-  for step, batch in enumerate(islice(train_iter, config.steps)):
+  for step, batch in enumerate(islice(train_iter, config.steps - start_step), start=start_step):
     step_start = time.time()
+
+    # Open a new writer for each file chunk on process 0
+    if jax.process_index() == 0 and step % steps_per_file == 0:
+      if writer:
+        writer.close()
+        if gcs_upload_path:
+          # Upload the previous file
+          gcs_file_path = os.path.join(gcs_upload_path, os.path.basename(local_output_path))
+          max_logging.log(f"Uploading {local_output_path} to {gcs_file_path}")
+          tf.io.gfile.copy(local_output_path, gcs_file_path, overwrite=True)
+          max_logging.log("Upload complete.")
+
+      file_index = step // steps_per_file
+      filename = f"teacher_top_k_part_{file_index:05d}.array_record"
+      local_output_path = os.path.join(local_tmp_dir, filename)
+      max_logging.log(f"Process 0 writing to new chunk: {local_output_path}")
+      writer = array_record_module.ArrayRecordWriter(local_output_path, "group_size:1000")
+
     tokens = batch["inputs"]
     logits = teacher_model(
         decoder_input_tokens=tokens,
@@ -122,18 +182,13 @@ def generate_and_save_data(config, local_args):
   multihost_utils.sync_global_devices("loop_finished")
 
   # Finalize writing and handle GCS upload on Host 0
-  if jax.process_index() == 0:
+  if jax.process_index() == 0 and writer:
     writer.close()
     max_logging.log(f"Finished writing to local disk: {local_output_path}")
 
     if gcs_upload_path:
-      gcs_file_path = os.path.join(gcs_upload_path, filename)
-      max_logging.log(f"Flag --gcs_upload_path detected. Uploading to: {gcs_file_path}")
-
-      if not tf.io.gfile.exists(gcs_upload_path):
-        tf.io.gfile.makedirs(gcs_upload_path)
-
-      # Perform the bulk copy to GCS
+      gcs_file_path = os.path.join(gcs_upload_path, os.path.basename(local_output_path))
+      max_logging.log(f"Uploading final chunk to: {gcs_file_path}")
       tf.io.gfile.copy(local_output_path, gcs_file_path, overwrite=True)
       max_logging.log("GCS Upload complete.")
 
@@ -181,6 +236,12 @@ if __name__ == "__main__":
       required=False,
       default="/tmp",
       help="Local temporary directory to write the ArrayRecord file before optional GCS upload.",
+  )
+  parser.add_argument(
+      "--steps_per_file",
+      type=int,
+      default=1000,
+      help="Number of steps to save in each chunk.",
   )
   local_arg, remaining_args = parser.parse_known_args()
 
