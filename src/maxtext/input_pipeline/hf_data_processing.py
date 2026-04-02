@@ -256,6 +256,11 @@ def preprocessing_pipeline(
 
     data_processing_utils.validate_and_configure_sft_columns(data_column_names, tokenizer, chat_template)
 
+    # Separate auxiliary "tools" column from primary data columns
+    tools_column_name = data_processing_utils.TOOLS_COLUMN if data_processing_utils.TOOLS_COLUMN in data_column_names else None
+    if tools_column_name:
+      data_column_names = [c for c in data_column_names if c != tools_column_name]
+
     # convert instruction dataset to conversational format
     dataset, data_column_names = instruction_data_processing.convert_to_conversational_format(
         dataset=dataset,
@@ -280,11 +285,17 @@ def preprocessing_pipeline(
           features=dataset_features,
       )
 
-    data_column_names = list(dataset.features.keys())
+    data_column_names = [k for k in dataset.features.keys() if k != data_processing_utils.TOOLS_COLUMN]
     dataset = dataset.map(
         input_pipeline_utils.apply_chat_template,
-        fn_kwargs={"tokenizer_model": tokenizer, "data_column_name": data_column_names[0]},
+        fn_kwargs={
+            "tokenizer_model": tokenizer,
+            "data_column_name": data_column_names[0],
+            "tools_column_name": tools_column_name,
+        },
     )
+    if tools_column_name and tools_column_name in dataset.column_names:
+      dataset = dataset.remove_columns([tools_column_name])
 
   pad_id = _get_pad_id(tokenizer)
 
