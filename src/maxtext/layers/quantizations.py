@@ -707,7 +707,6 @@ def remove_quantized_params(params, aqt_vars):
 def configure_kv_quant(config):
   return None if not config.quantize_kvcache else KVQuant(config)
 
-
 class NvidaFp8Provider(qwix.QtProvider):
   """Wraps nn.Fp8DirectDotGeneralOp with Qwix's provider interface."""
 
@@ -716,12 +715,24 @@ class NvidaFp8Provider(qwix.QtProvider):
     rule, op_id = self._get_current_rule_and_op_id("dot_general")
     if rule is None:
       return jax.lax.dot_general(*args, **kwargs)
+    
+    if linen.module._context.module_stack:
+      nn_module = linen.module._context.module_stack[-1]
+      op_id = "_".join(nn_module.scope.path) + "_" + op_id
+      op_id = op_id.replace("/", "_").replace("-", "_")
+      
     return nn.Fp8DirectDotGeneralOp(name=op_id)(*args, **kwargs)
 
   def einsum(self, *args, **kwargs):
     rule, op_id = self._get_current_rule_and_op_id("einsum")
     if rule is None:
       return jnp.einsum(*args, **kwargs)
+      
+    if linen.module._context.module_stack:
+      nn_module = linen.module._context.module_stack[-1]
+      op_id = "_".join(nn_module.scope.path) + "_" + op_id
+      op_id = op_id.replace("/", "_").replace("-", "_")
+      
     return nn.Fp8Einsum(name=op_id)(*args, **kwargs)
 
 
@@ -732,8 +743,13 @@ class NANOOFp8Provider(qwix.QtProvider):
     rule, op_id = self._get_current_rule_and_op_id("dot_general")
     if rule is None:
       return jax.lax.dot_general(*args, **kwargs)
+      
+    if linen.module._context.module_stack:
+      nn_module = linen.module._context.module_stack[-1]
+      op_id = "_".join(nn_module.scope.path) + "_" + op_id
+      op_id = op_id.replace("/", "_").replace("-", "_")
+      
     return nn.NANOOFp8DotGeneralOp(name=op_id)(*args, **kwargs)
-
 
 def get_fp8_full_qwix_rule(config: Config):
   return qwix.QtRule(

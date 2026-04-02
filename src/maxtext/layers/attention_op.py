@@ -1631,7 +1631,12 @@ class AttentionOp(nnx.Module):
         dummy_value_prefill,
         sequence_descriptor=dummy_attn_mask,
     )
-    return dpa_layer(query, key, value, sequence_descriptor=attn_mask)
+    return dpa_layer(
+        query, key, value, 
+        sequence_descriptor=attn_mask, 
+        mutable=["aqt", "_overwrite_with_gradient"]
+    )
+
 
   def cudnn_jax_flash_attention(
       self,
@@ -1896,6 +1901,9 @@ class AttentionOp(nnx.Module):
     n_kv = key.shape[-2]
     assert n_kv == self.num_kv_heads
     precision_kwargs = {"precision": self.config.matmul_precision} if einsum is jnp.einsum else {}
+    if isinstance(einsum, nnx_wrappers.ToNNX):
+      precision_kwargs["mutable"] = ["aqt", "_overwrite_with_gradient"]
+      
     if model_mode == MODEL_MODE_TRAIN or self.compute_axis_order == (
         0,
         1,
@@ -1945,6 +1953,9 @@ class AttentionOp(nnx.Module):
     """
 
     precision_kwargs = {"precision": self.config.matmul_precision} if einsum is jnp.einsum else {}
+    if isinstance(einsum, nnx_wrappers.ToNNX):
+      precision_kwargs["mutable"] = ["aqt", "_overwrite_with_gradient"]
+      
     if self.kv_quant:
       # manually cast to bf16 to avoid the fp32 XLA ops for speedup
       if isinstance(value, KVTensor) and self.kv_quant.dtype == jnp.float8_e4m3fn:
