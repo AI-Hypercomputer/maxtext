@@ -23,7 +23,7 @@ The following models are supported:
 
 ## Prerequisites
 
-- MaxText must be installed in a Python virtual environment. For instructions on installing MaxText on your VM, please refer to the [official documentation](https://maxtext.readthedocs.io/en/maxtext-v0.2.1/install_maxtext.html).
+- MaxText must be installed in a Python virtual environment using the `maxtext[tpu]` option. For instructions on installing MaxText on your VM, please refer to the official [installation documentation](https://maxtext.readthedocs.io/en/maxtext-v0.2.1/install_maxtext.html).
 - Hugging Face model checkpoints are cached locally at `$HOME/.cache/huggingface/hub` before conversion. Ensure you have sufficient disk space.
 - Authenticate via the [Hugging Face CLI](https://huggingface.co/docs/huggingface_hub/v0.21.2/guides/cli) if using private or gated models.
 
