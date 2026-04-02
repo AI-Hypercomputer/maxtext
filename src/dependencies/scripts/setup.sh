@@ -216,6 +216,8 @@ install_maxtext_with_deps() {
     fi
     echo "Installing requirements from $dep_name"
     python3 -m uv pip install --resolution=lowest -r "$dep_name"
+    echo "Installing local qwix from extra_deps"
+    python3 -m uv pip install -e src/dependencies/extra_deps/qwix
     python3 -m src.dependencies.scripts.install_pre_train_extra_deps
 
     install_maxtext_package_without_deps
@@ -230,6 +232,8 @@ install_post_training_deps() {
     dep_name='src/dependencies/requirements/generated_requirements/tpu-post-train-requirements.txt'
     echo "Installing requirements from $dep_name"
     python3 -m uv pip install --resolution=lowest -r "$dep_name"
+    echo "Installing local qwix from extra_deps"
+    python3 -m uv pip install -e src/dependencies/extra_deps/qwix
     python3 -m src.dependencies.scripts.install_post_train_extra_deps
 }
 

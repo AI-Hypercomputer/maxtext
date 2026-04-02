@@ -601,7 +601,9 @@ def load_state_if_possible(
         ocp.type_handlers.register_type_handler(jax.Array, array_handler, override=True)
 
       restore_args = jax.tree_util.tree_map(map_to_pspec, abstract_unboxed_pre_state)
-      checkpoint_args = ocp.args.PyTreeRestore(item=abstract_unboxed_pre_state, restore_args=restore_args)
+      checkpoint_args = ocp.args.PyTreeRestore(
+          item=abstract_unboxed_pre_state, restore_args=restore_args, partial_restore=True
+      )
 
       match (checkpoint_manager, dataset_type, data_iterator):
         # Case 1: Matches if 'checkpoint_manager' is an instance of either EmergencyCheckpointManager
