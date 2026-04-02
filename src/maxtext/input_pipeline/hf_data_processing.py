@@ -146,7 +146,7 @@ def vision_sft_preprocessing_pipeline(
           query_column=text_columns[0],
           response_column=text_columns[1],
           max_target_length=config.max_target_length,
-          unk_id=pad_id,
+          pad_id=pad_id,
       )
   )
   # TODO(aireenmei, hengtaoguo): support packing
@@ -154,7 +154,7 @@ def vision_sft_preprocessing_pipeline(
       input_pipeline_utils.PadOrTrimToMaxLength(
           config.max_target_length,
           pad_id,
-          model_name=config.model_name,
+          config=config,
           max_num_images_per_example=config.max_num_images_per_example,
       )
   )
