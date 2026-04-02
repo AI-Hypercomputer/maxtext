@@ -19,7 +19,7 @@ for distillation purposes in MaxText.
 Example command: 
 python3 src/maxtext/trainers/post_train/distillation/save_top_k_teacher_logits.py \
   src/maxtext/configs/post_train/distillation.yml \
-  --local_tmp_dir=/mnt/ajkv/disks/codebase/tmp_save_dir \
+  --local_tmp_dir=/tmp/save_logits_dir \
   --steps_per_file=10
 """
 
