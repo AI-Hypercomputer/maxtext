@@ -185,6 +185,7 @@ class GateLogit(nnx.Module):
       quant: Optional[quantizations.AqtQuantization] = None,
       shard_mode: ShardMode = ShardMode.AUTO,
       matmul_precision: str = "default",
+      enable_moe_shape_debugging: bool = False,
   ):
     """Initializes the GateLogit module.
 
@@ -204,6 +205,7 @@ class GateLogit(nnx.Module):
       score_func: Scoring function for output normalization before applying bias.
       quant: The quantization configuration. If None, no quantization is applied.
       matmul_precision: The precision level for the matrix multiplication.
+      enable_moe_shape_debugging: If True, log shape info for debugging.
     """
     self.in_features_shape = linears.canonicalize_tuple(in_features_shape)
     self.out_features_shape = linears.canonicalize_tuple(out_features_shape)
@@ -219,6 +221,7 @@ class GateLogit(nnx.Module):
     self.quant = quant
     self.shard_mode = shard_mode
     self.matmul_precision = matmul_precision
+    self.enable_moe_shape_debugging = enable_moe_shape_debugging
 
     # Parameter initialization
     kernel_shape = self.in_features_shape + self.out_features_shape
@@ -303,9 +306,10 @@ class GateLogit(nnx.Module):
       bias = jnp.asarray(self.bias[...], self.dtype)
       output += bias
 
-    max_logging.log(f"[GateLogit] inputs shape={inputs.shape} dtype={inputs.dtype}")
-    max_logging.log(f"[GateLogit] kernel shape={kernel.shape} dtype={kernel.dtype}")
-    max_logging.log(f"[GateLogit] gate output shape={output.shape} dtype={output.dtype}")
+    if self.enable_moe_shape_debugging:
+      max_logging.log(f"[GateLogit] inputs shape={inputs.shape} dtype={inputs.dtype}")
+      max_logging.log(f"[GateLogit] kernel shape={kernel.shape} dtype={kernel.dtype}")
+      max_logging.log(f"[GateLogit] gate output shape={output.shape} dtype={output.dtype}")
 
     return output, pre_bias_logits
 
@@ -392,6 +396,7 @@ class RoutedMoE(nnx.Module):
         score_func=self.config.routed_score_func,
         matmul_precision=self.config.matmul_precision,
         shard_mode=config.shard_mode,
+        enable_moe_shape_debugging=config.enable_moe_shape_debugging,
         rngs=self.rngs,
     )
 
@@ -2049,16 +2054,19 @@ class RoutedMoE(nnx.Module):
   ) -> tuple[jax.Array, Optional[jax.Array], Optional[jax.Array]]:
     cfg = self.config
     inputs = inputs.astype(cfg.dtype)
-    max_logging.log(f"[MoE.__call__] inputs shape={inputs.shape} dtype={inputs.dtype}")
+    if cfg.enable_moe_shape_debugging:
+      max_logging.log(f"[MoE.__call__] inputs shape={inputs.shape} dtype={inputs.dtype}")
     gate_logits, pre_bias_logits = self.gate(inputs)
-    max_logging.log(f"[MoE.__call__] gate_logits shape={gate_logits.shape} dtype={gate_logits.dtype}")
+    if cfg.enable_moe_shape_debugging:
+      max_logging.log(f"[MoE.__call__] gate_logits shape={gate_logits.shape} dtype={gate_logits.dtype}")
 
     w0_kernel = jnp.asarray(self.wi_0[...], self.dtype)
     w1_kernel = jnp.asarray(self.wi_1[...], self.dtype)
     wo_kernel = jnp.asarray(self.wo[...], self.dtype)
-    max_logging.log(f"[MoE.__call__] w0_kernel shape={w0_kernel.shape} dtype={w0_kernel.dtype}")
-    max_logging.log(f"[MoE.__call__] w1_kernel shape={w1_kernel.shape} dtype={w1_kernel.dtype}")
-    max_logging.log(f"[MoE.__call__] wo_kernel shape={wo_kernel.shape} dtype={wo_kernel.dtype}")
+    if cfg.enable_moe_shape_debugging:
+      max_logging.log(f"[MoE.__call__] w0_kernel shape={w0_kernel.shape} dtype={w0_kernel.dtype}")
+      max_logging.log(f"[MoE.__call__] w1_kernel shape={w1_kernel.shape} dtype={w1_kernel.dtype}")
+      max_logging.log(f"[MoE.__call__] wo_kernel shape={wo_kernel.shape} dtype={wo_kernel.dtype}")
 
     if cfg.mlp_bias:
       w0_bias = jnp.asarray(self.wi_0_bias[...], self.dtype)
@@ -2087,7 +2095,8 @@ class RoutedMoE(nnx.Module):
       output, lb_loss, bias_updates = self.dense_matmul(
           inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias
       )
-    max_logging.log(f"[MoE.__call__] output shape={output.shape} dtype={output.dtype}")
+    if cfg.enable_moe_shape_debugging:
+      max_logging.log(f"[MoE.__call__] output shape={output.shape} dtype={output.dtype}")
     return output, lb_loss, bias_updates
 
 
