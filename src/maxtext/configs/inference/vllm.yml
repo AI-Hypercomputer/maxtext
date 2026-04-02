@@ -32,7 +32,7 @@ logical_axis_rules: [
                       ['activation_batch', ['data']],
                       ['activation_batch_moe', []],
                       ['activation_batch_no_exp', []],
-                      ['activation_batch_no_exp_moe', []],
+                      ['activation_batch_no_exp_moe', ['data']],
                       ['activation_embed_and_logits_batch', ['data', 'expert']],
                       ['activation_embed_and_logits_batch_sequence', ['data', 'expert']],
                       ['activation_heads', ['model', 'expert']],
