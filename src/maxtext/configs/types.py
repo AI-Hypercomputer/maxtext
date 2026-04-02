@@ -288,6 +288,7 @@ class RunInfo(BaseModel):
       description="If True, prints the final configuration after initialization.",
   )
   debug_sharding: bool = Field(False, description="If True, print model weight sharding details.")
+  enable_moe_shape_debugging: bool = Field(False, description="If True, print MoE shapes ([moe], [wrapper], [permute], [adapter]) for shape analysis.")
   base_output_directory: PathStr = Field("", description="Base directory for all outputs, typically a GCS path.")
   sharding_strategy: None | Literal["experimental"] = Field(
       None,

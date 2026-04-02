@@ -169,7 +169,8 @@ class MaxTextForCausalLM(nnx.Module):
 
     with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
       aux_hidden_states = []
-      print(f"[adapter] model_mode={self.model_mode} input_ids.shape={input_ids.shape} input_positions.shape={input_positions.shape}")
+      if self.maxtext_config.enable_moe_shape_debugging:
+        print(f"[adapter] model_mode={self.model_mode} input_ids.shape={input_ids.shape} input_positions.shape={input_positions.shape}")
       hidden, kv_caches = self.model(
           decoder_input_tokens=input_ids,
           decoder_positions=input_positions,

@@ -952,6 +952,7 @@ profile_power_events: False # Set to True to enable TPU-specific power/thermal p
 
 log_config: True # Prints the config (after defaults have been set by pyconfig logic)
 debug_sharding: False # Prints model weights sharding info
+enable_moe_shape_debugging: False # Prints MoE shapes ([moe], [wrapper], [permute], [adapter]) for shape analysis
 
 # Checkpoint Structured logging
 enable_checkpoint_cloud_logger: False

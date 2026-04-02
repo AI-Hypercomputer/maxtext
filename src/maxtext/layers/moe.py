@@ -639,9 +639,10 @@ class RoutedMoE(nnx.Module):
       # Squeeze router_scores to (batch_size * seq_len, num_experts_per_tok)
       inputs_2d = inputs_2d * router_scores.reshape(bsz_times_seq_len, -1)
 
-    print(f"[permute] inputs_2d shape={inputs_2d.shape} dtype={inputs_2d.dtype}")
-    print(f"[permute] weights (top_k_weights) shape={weights.shape} dtype={weights.dtype}")
-    print(f"[permute] selected_experts shape={selected_experts.shape}")
+    if self.config.enable_moe_shape_debugging:
+      print(f"[permute] inputs_2d shape={inputs_2d.shape} dtype={inputs_2d.dtype}")
+      print(f"[permute] weights (top_k_weights) shape={weights.shape} dtype={weights.dtype}")
+      print(f"[permute] selected_experts shape={selected_experts.shape}")
     flatten_selected_experts = jnp.ravel(selected_experts)
     if roll_to_expert_id is not None:
       flatten_selected_experts = (flatten_selected_experts - roll_to_expert_id) % self.num_experts
@@ -652,8 +653,9 @@ class RoutedMoE(nnx.Module):
         self.dtype
     )
     group_size = jnp.bincount(flatten_selected_experts, length=self.num_experts)
-    print(f"[permute] sorted_inputs shape={sorted_inputs.shape}")
-    print(f"[permute] group_size shape={group_size.shape}")
+    if self.config.enable_moe_shape_debugging:
+      print(f"[permute] sorted_inputs shape={sorted_inputs.shape}")
+      print(f"[permute] group_size shape={group_size.shape}")
 
     # Return the experts for each sorted input.
     expert_indices = jnp.arange(self.num_experts)
@@ -1094,11 +1096,12 @@ class RoutedMoE(nnx.Module):
     if isinstance(wo_kernel, aqt.QTensor):
       wo_pspec = aqt.partition_spec(wo_pspec, (1,), wo_kernel.dtype, use_bias=False)
 
-    print(f"[moe] mesh.shape={dict(self.mesh.shape)}")
-    print(f"[moe] ep_name={self._expert_parallelism_name} num_expert_parallelism={self.get_expert_parallelism_size()}")
-    print(f"[moe] is_batch_sharded_by_expert={is_batch_sharded_by_expert} batch_logical_axis={batch_logical_axis}")
-    print(f"[moe] weight_gather={weight_gather} w0_pspec={w0_pspec}")
-    print(f"[moe] input_partition_pspec={input_partition_pspec}")
+    if self.config.enable_moe_shape_debugging:
+      print(f"[moe] mesh.shape={dict(self.mesh.shape)}")
+      print(f"[moe] ep_name={self._expert_parallelism_name} num_expert_parallelism={self.get_expert_parallelism_size()}")
+      print(f"[moe] is_batch_sharded_by_expert={is_batch_sharded_by_expert} batch_logical_axis={batch_logical_axis}")
+      print(f"[moe] weight_gather={weight_gather} w0_pspec={w0_pspec}")
+      print(f"[moe] input_partition_pspec={input_partition_pspec}")
 
     @functools.partial(
         jax.shard_map,
@@ -1124,10 +1127,11 @@ class RoutedMoE(nnx.Module):
     )
     def wrapper(x, logits, pre_bias_logits, w0, w1, wo, w0_bias, w1_bias, wo_bias, rngs):
       batch_size, sequence_length, _ = x.shape
-      print(f"[wrapper] shard x shape={x.shape} dtype={x.dtype}")
-      print(f"[wrapper] shard logits shape={logits.shape} dtype={logits.dtype}")
-      print(f"[wrapper] shard w0 shape={w0.shape if not hasattr(w0, 'qvalue') else w0.qvalue.shape} dtype={w0.dtype}")
-      print(f"[wrapper] shard wo shape={wo.shape if not hasattr(wo, 'qvalue') else wo.qvalue.shape} dtype={wo.dtype}")
+      if self.config.enable_moe_shape_debugging:
+        print(f"[wrapper] shard x shape={x.shape} dtype={x.dtype}")
+        print(f"[wrapper] shard logits shape={logits.shape} dtype={logits.dtype}")
+        print(f"[wrapper] shard w0 shape={w0.shape if not hasattr(w0, 'qvalue') else w0.qvalue.shape} dtype={w0.dtype}")
+        print(f"[wrapper] shard wo shape={wo.shape if not hasattr(wo, 'qvalue') else wo.qvalue.shape} dtype={wo.dtype}")
       num_expert_parallelism = self.get_expert_parallelism_size()
       if num_expert_parallelism > 1:
         expert_shard_id = jax.lax.axis_index(self._expert_parallelism_name)
@@ -1219,8 +1223,9 @@ class RoutedMoE(nnx.Module):
                 use_custom_sort_vjp=self.config.use_custom_sort_vjp,
             )
 
-      print(f"[wrapper] post-permute x shape={x.shape} dtype={x.dtype}")
-      print(f"[wrapper] group_sizes shape={group_sizes.shape}")
+      if self.config.enable_moe_shape_debugging:
+        print(f"[wrapper] post-permute x shape={x.shape} dtype={x.dtype}")
+        print(f"[wrapper] group_sizes shape={group_sizes.shape}")
       if self.config.mlp_bias:
         w0_bias, w1_bias, wo_bias = self.transform_bias(selected_experts, w0_bias, w1_bias, wo_bias)
 
@@ -1245,8 +1250,9 @@ class RoutedMoE(nnx.Module):
         # wo [Experts, Hidden, Out] -> Gather Exp(0) and Hidden(1)
         wo_gather_axes.extend(get_active_sharding_axes(wo_pspec[0], 0))
         wo_gather_axes.extend(get_active_sharding_axes(wo_pspec[1], 1))
-      print(f"[wrapper] num_expert_parallelism={num_expert_parallelism}")
-      print(f"[wrapper] wi_gather_axes={wi_gather_axes} wo_gather_axes={wo_gather_axes}")
+      if self.config.enable_moe_shape_debugging:
+        print(f"[wrapper] num_expert_parallelism={num_expert_parallelism}")
+        print(f"[wrapper] wi_gather_axes={wi_gather_axes} wo_gather_axes={wo_gather_axes}")
       gmm_fn = functools.partial(
           gmm,
           group_sizes=group_sizes,
@@ -1300,7 +1306,8 @@ class RoutedMoE(nnx.Module):
       if self.config.mlp_bias:
         layer_w0 = layer_w0 + w0_bias
       layer_w0 = adc.checkpoint_name(layer_w0, "mlpwi_0")
-      print(f"[wrapper] layer_w0 shape={layer_w0.shape} dtype={layer_w0.dtype}")
+      if self.config.enable_moe_shape_debugging:
+        print(f"[wrapper] layer_w0 shape={layer_w0.shape} dtype={layer_w0.dtype}")
 
       layer_w1 = gmm_fn(
           x,
@@ -1315,9 +1322,11 @@ class RoutedMoE(nnx.Module):
       if self.config.mlp_bias:
         layer_w1 = layer_w1 + w1_bias
       layer_w1 = adc.checkpoint_name(layer_w1, "mlpwi_1")
-      print(f"[wrapper] layer_w1 shape={layer_w1.shape} dtype={layer_w1.dtype}")
+      if self.config.enable_moe_shape_debugging:
+        print(f"[wrapper] layer_w1 shape={layer_w1.shape} dtype={layer_w1.dtype}")
       intermediate_layer = self.apply_ffn_activation(layer_w0, layer_w1)
-      print(f"[wrapper] intermediate_layer shape={intermediate_layer.shape} dtype={intermediate_layer.dtype}")
+      if self.config.enable_moe_shape_debugging:
+        print(f"[wrapper] intermediate_layer shape={intermediate_layer.shape} dtype={intermediate_layer.dtype}")
 
       intermediate_output = gmm_fn(
           intermediate_layer,
@@ -1334,7 +1343,8 @@ class RoutedMoE(nnx.Module):
       if self.config.mlp_bias:
         intermediate_output = intermediate_output + wo_bias
       intermediate_output = adc.checkpoint_name(intermediate_output, "mlpwo")
-      print(f"[wrapper] intermediate_output shape={intermediate_output.shape} dtype={intermediate_output.dtype}")
+      if self.config.enable_moe_shape_debugging:
+        print(f"[wrapper] intermediate_output shape={intermediate_output.shape} dtype={intermediate_output.dtype}")
 
       if self.config.use_ring_of_experts:
         # Set the outputs of tokens which were not processed to 0.
@@ -1418,7 +1428,8 @@ class RoutedMoE(nnx.Module):
             use_custom_sort_vjp=self.config.use_custom_sort_vjp,
         )
 
-      print(f"[wrapper] output (post-unpermute) shape={output.shape} dtype={output.dtype}")
+      if self.config.enable_moe_shape_debugging:
+        print(f"[wrapper] output (post-unpermute) shape={output.shape} dtype={output.dtype}")
       return output, lb_loss, bias_updates
 
     if self.config.moe_fsdp_use_two_stage_all_gather:
