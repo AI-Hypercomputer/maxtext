@@ -788,6 +788,10 @@ def calculate_tflops_training_per_device(config, log=True):
     learnable_weight_tflops = (
         (total_ffn_flops + (qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops) * 3 / 10**12
     )
+  elif config.decoder_block == DecoderBlockType.GEMMA4:
+    attention_tflops, learnable_weight_tflops = calculate_mixed_attention_model_tflops_training_per_device(
+        config, total_ffn_flops, qkv_flops, projection_flops, embedding_flops, attention_pattern_length=6
+    )
   elif config.decoder_block == DecoderBlockType.DEEPSEEK:
     learnable_weight_tflops = (
         (total_ffn_flops + (qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops) * 3 / 10**12
@@ -1035,15 +1039,21 @@ def get_abstract_param(model, config):
   with model.mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     key = jax.random.PRNGKey(0)
     input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
+
+  # Cleanly fetch the shapes from the processor using the correct micro_batch_size
+  if config.use_multimodal:
     image_shape = mm_processor.get_dummy_image_shape_for_init(
         config.model_name, batch_size=config.micro_batch_size_to_train_on
     )
-    audio_shape = mm_processor.get_dummy_audio_shape_for_init(config)
+  else:
+    image_shape = None
+
+  audio_shape = mm_processor.get_dummy_audio_shape_for_init(config)
   abstract_vars = jax.eval_shape(
       model.init,
       {"params": key, "dropout": key, "aqt": key},
-      jnp.ones(input_shape, dtype=jnp.int32),
-      jnp.ones(input_shape, dtype=jnp.int32),
+      np.ones(input_shape, dtype=jnp.int32),
+      np.ones(input_shape, dtype=jnp.int32),
       encoder_images=np.ones(image_shape, dtype=jnp.int32) if config.use_multimodal else None,
       encoder_audios=np.ones(audio_shape, dtype=jnp.float32) if config.use_audio else None,
   )

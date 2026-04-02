@@ -158,6 +158,9 @@ base_num_kv_heads: 16
 base_mlp_dim: 7168
 base_num_decoder_layers: 16
 head_dim: 128
+# Those parameters are only used with global attention for Gemma4.
+global_head_dim: 0
+global_num_kv_heads: 0
 mlp_activations: ["silu", "linear"]
 mlp_activations_limit: -1.0
 dropout_rate: 0.0
@@ -168,6 +171,7 @@ cast_logits_to_fp32: true # whether to cast the logits to fp32. the higher preci
 float32_qk_product: false # in dot_product attention, whether to cast to fp32 the inputs to qk product
 float32_logits: false # in dot_product attention, whether to cast to fp32 the inputs to softmax
 float32_weight_sum: true # whether to use full fp32 precision to sum expert weights for numerical stability
+float32_gate_logits: false # whether to cast inputs to fp32 to compute MoE gate logits for numerical stability
 
 # multi-token prediction configs
 # the number of auxiliary prediction layers to use for mtp.
@@ -354,6 +358,8 @@ final_logits_soft_cap: 0.0
 z_loss_multiplier: 0.0
 use_post_attn_norm: False
 use_post_ffw_norm: False
+v_norm_with_scale: True
+qk_norm_with_scale: True
 mla_naive_kvcache: True
 
 
@@ -853,6 +859,9 @@ rope_use_scale: True # apply rope scaling for llama3.1 (see class `LLaMARotaryEm
 rope_min_timescale: 1
 rope_max_timescale: 10_000 # Timescale For global Attention
 local_rope_max_timescale: -1 # If positive used for local window Attention, otherwise `rope_max_timescale` is used for both local and global
+global_rope_max_timescale: -1 # Timescale For global Attention (Gemma 4 specific)
+global_rope_proportion: 0.25
+local_rope_proportion: 1.0
 
 # yarn RoPE parameters
 max_position_embeddings: 163840
@@ -1062,6 +1071,7 @@ posemb_type_for_vit: "learn"
 # -1 means no limit, and will pad to the max possible number of images determined by sequence length.
 # Set it to avoid unnecessary padding if you know the maximum number of images per example.
 max_num_images_per_example: -1
+vision_output_length: -1 # The output length (number of soft tokens) from vision encoder, used in Gemma4.
 
 ### llama4 multi modal configs
 hidden_size_for_vit: 1408

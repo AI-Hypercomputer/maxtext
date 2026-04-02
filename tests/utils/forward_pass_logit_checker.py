@@ -149,8 +149,8 @@ def check_kl_divergence(model_logits, golden_logits, atol=0.02):
 
   # 2. Reshape
   b, s, v = model_logits_sliced.shape
-  model_logits_reshaped = model_logits_sliced.view(b * s, v)
-  golden_logits_reshaped = golden_logits_sliced.view(b * s, v)
+  model_logits_reshaped = model_logits_sliced.reshape(b * s, v)
+  golden_logits_reshaped = golden_logits_sliced.reshape(b * s, v)
 
   # 3. Get the probability distributions.
   golden_probabilities = F.softmax(golden_logits_reshaped, dim=-1)
@@ -195,8 +195,17 @@ def get_data(golden_data_point, config):
     pixel_values = np.asarray(golden_data_point["pixel_values"], dtype=np.float32)
     max_logging.log(f"pixel_values.shape = {pixel_values.shape}")
     model_prefix = config.model_name.split("-")[0]
-    if model_prefix in ["gemma3"]:
-      pixel_values = np.transpose(pixel_values, (1, 2, 0))
+    # Gemma3 and Gemma4 models expect (num_images, height, width, channels)
+    if model_prefix in ["gemma3", "gemma4"]:
+      if pixel_values.ndim == 2:
+        h, w = config.image_size_for_vit
+        p = config.patch_size_for_vit
+        c = pixel_values.shape[-1] // (p * p)
+        pixel_values = np.reshape(pixel_values, (h // p, w // p, p, p, c))
+        pixel_values = np.transpose(pixel_values, (0, 2, 1, 3, 4))
+        pixel_values = np.reshape(pixel_values, (h, w, c))
+      else:
+        pixel_values = np.transpose(pixel_values, (1, 2, 0))
     elif model_prefix in ["llama4"]:
       pixel_values = pixel_values[None, :]
     pixel_values = np.stack([pixel_values for _ in range(config.global_batch_size_to_train_on)])

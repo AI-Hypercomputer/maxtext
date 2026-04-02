@@ -2228,6 +2228,497 @@ def MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
   return hooks
 
 
+def GEMMA4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
+  """Returns mapping between MaxText and HuggingFace Gemma4 weight paths."""
+  tcfg = config.get("text_config", config)
+  nlayers = tcfg["num_hidden_layers"]
+  share_kv_projections = maxtext_config.share_kv_projections
+  # Gemma 4 uses a block pattern of length 6: 5 local, 1 global
+  vcfg = config.get("vision_config", {})
+  text_base = "model.language_model" if vcfg else "model"
+  mapping = {
+      "params-token_embedder-embedding": f"{text_base}.embed_tokens.weight",
+      "params-decoder-decoder_norm-scale": f"{text_base}.norm.weight",
+  }
+  if maxtext_config.use_multimodal and vcfg:
+    nvis = vcfg.get("num_hidden_layers", 0)
+    mapping.update(
+        {
+            "params-vision_encoder-Gemma4VisionEncoderLayer_0-vision_entry-input_projection-kernel": (
+                "model.vision_tower.patch_embedder.input_proj.weight"
+            ),
+            "params-vision_encoder-Gemma4VisionEncoderLayer_0-vision_entry-pos_emb_param": (
+                "model.vision_tower.patch_embedder.position_embedding_table"
+            ),
+            "params-vision_encoder-Gemma4VisionProjector_0-projection-kernel": (
+                "model.embed_vision.embedding_projection.weight"
+            ),
+            "params-vision_encoder-Gemma4VisionEncoderLayer_0-std_scale": ("model.vision_tower.std_scale"),
+            "params-vision_encoder-Gemma4VisionEncoderLayer_0-std_bias": ("model.vision_tower.std_bias"),
+        }
+    )
+    for i in range(nvis):
+      prefix = f"params-vision_encoder-Gemma4VisionEncoderLayer_0-layer_{i}"
+      hf_prefix = f"model.vision_tower.encoder.layers.{i}"
+      mapping.update(
+          {
+              f"{prefix}-attention-query-kernel": f"{hf_prefix}.self_attn.q_proj.linear.weight",
+              f"{prefix}-attention-key-kernel": f"{hf_prefix}.self_attn.k_proj.linear.weight",
+              f"{prefix}-attention-value-kernel": f"{hf_prefix}.self_attn.v_proj.linear.weight",
+              f"{prefix}-attention-out-kernel": f"{hf_prefix}.self_attn.o_proj.linear.weight",
+              f"{prefix}-attention-query_norm-scale": f"{hf_prefix}.self_attn.q_norm.weight",
+              f"{prefix}-attention-key_norm-scale": f"{hf_prefix}.self_attn.k_norm.weight",
+              f"{prefix}-pre_attention_norm-scale": f"{hf_prefix}.input_layernorm.weight",
+              f"{prefix}-post_attention_norm-scale": f"{hf_prefix}.post_attention_layernorm.weight",
+              f"{prefix}-pre_ffw_norm-scale": f"{hf_prefix}.pre_feedforward_layernorm.weight",
+              f"{prefix}-post_ffw_norm-scale": f"{hf_prefix}.post_feedforward_layernorm.weight",
+              f"{prefix}-mlp-wi_0-kernel": f"{hf_prefix}.mlp.gate_proj.linear.weight",
+              f"{prefix}-mlp-wi_1-kernel": f"{hf_prefix}.mlp.up_proj.linear.weight",
+              f"{prefix}-mlp-wo-kernel": f"{hf_prefix}.mlp.down_proj.linear.weight",
+          }
+      )
+  if scan_layers:
+    attention_pattern_length = 6
+    num_remaining = nlayers % attention_pattern_length
+    num_scanned = nlayers - num_remaining
+    num_experts = tcfg.get("num_experts")
+    num_experts = num_experts if num_experts is not None else 1
+
+    # Main scanned blocks
+    for layer_in_block in range(attention_pattern_length):
+      hf_indices = list(range(layer_in_block, num_scanned, attention_pattern_length))
+      prefix = f"params-decoder-scanned_blocks-layers_{layer_in_block}"
+      mapping.update(
+          {
+              f"{prefix}-self_attention-query-kernel": [
+                  f"{text_base}.layers.{i}.self_attn.q_proj.weight" for i in hf_indices
+              ],
+              f"{prefix}-self_attention-key-kernel": [
+                  f"{text_base}.layers.{i}.self_attn.k_proj.weight" for i in hf_indices
+              ],
+              f"{prefix}-self_attention-value-kernel": (
+                  None
+                  if share_kv_projections and layer_in_block == 5
+                  else [f"{text_base}.layers.{i}.self_attn.v_proj.weight" for i in hf_indices]
+              ),
+              f"{prefix}-self_attention-out-kernel": [
+                  f"{text_base}.layers.{i}.self_attn.o_proj.weight" for i in hf_indices
+              ],
+              f"{prefix}-self_attention-query_norm-scale": [
+                  f"{text_base}.layers.{i}.self_attn.q_norm.weight" for i in hf_indices
+              ],
+              f"{prefix}-self_attention-key_norm-scale": [
+                  f"{text_base}.layers.{i}.self_attn.k_norm.weight" for i in hf_indices
+              ],
+          }
+      )
+      if maxtext_config.v_norm_with_scale:
+        mapping.update(
+            {
+                f"{prefix}-self_attention-value_norm-scale": [
+                    f"{text_base}.layers.{i}.self_attn.v_norm.weight" for i in hf_indices
+                ]
+            }
+        )
+      mapping.update(
+          {
+              f"{prefix}-pre_self_attention_norm-scale": [
+                  f"{text_base}.layers.{i}.input_layernorm.weight" for i in hf_indices
+              ],
+              f"{prefix}-post_self_attention_norm-scale": [
+                  f"{text_base}.layers.{i}.post_attention_layernorm.weight" for i in hf_indices
+              ],
+              f"{prefix}-pre_ffw_norm-scale": [
+                  f"{text_base}.layers.{i}.pre_feedforward_layernorm.weight" for i in hf_indices
+              ],
+              f"{prefix}-post_ffw_norm-scale": [
+                  f"{text_base}.layers.{i}.post_feedforward_layernorm.weight" for i in hf_indices
+              ],
+              f"{prefix}-mlp-pre_feedforward_layernorm_2-scale": [
+                  f"{text_base}.layers.{i}.pre_feedforward_layernorm_2.weight" if num_experts > 1 else None
+                  for i in hf_indices
+              ],
+              f"{prefix}-mlp-post_feedforward_layernorm_1-scale": [
+                  f"{text_base}.layers.{i}.post_feedforward_layernorm_1.weight" if num_experts > 1 else None
+                  for i in hf_indices
+              ],
+              f"{prefix}-mlp-post_feedforward_layernorm_2-scale": [
+                  f"{text_base}.layers.{i}.post_feedforward_layernorm_2.weight" if num_experts > 1 else None
+                  for i in hf_indices
+              ],
+              f"{prefix}-mlp-pre_forward_scale_2": [
+                  f"{text_base}.layers.{i}.router.scale" if num_experts > 1 else None for i in hf_indices
+              ],
+              f"{prefix}-mlp-wi_0-kernel": [
+                  f"{text_base}.layers.{i}.mlp.gate_proj.weight" if num_experts == 1 else None for i in hf_indices
+              ],
+              f"{prefix}-mlp-wi_1-kernel": [
+                  f"{text_base}.layers.{i}.mlp.up_proj.weight" if num_experts == 1 else None for i in hf_indices
+              ],
+              f"{prefix}-mlp-wo-kernel": [
+                  f"{text_base}.layers.{i}.mlp.down_proj.weight" if num_experts == 1 else None for i in hf_indices
+              ],
+              f"{prefix}-mlp-moe_block-MoeBlock_0-gate-kernel": [
+                  f"{text_base}.layers.{i}.router.proj.weight" if num_experts > 1 else None for i in hf_indices
+              ],
+              f"{prefix}-mlp-moe_block-MoeBlock_0-wi_0": [
+                  f"{text_base}.layers.{i}.moe.gate_up_proj" if num_experts > 1 else None for i in hf_indices
+              ],
+              f"{prefix}-mlp-moe_block-MoeBlock_0-wi_1": [
+                  f"{text_base}.layers.{i}.moe.gate_up_proj" if num_experts > 1 else None for i in hf_indices
+              ],
+              f"{prefix}-mlp-moe_block-MoeBlock_0-wo": [
+                  f"{text_base}.layers.{i}.moe.down_proj" if num_experts > 1 else None for i in hf_indices
+              ],
+              f"{prefix}-mlp-moe_block-MoeBlock_0-per_expert_scale": [
+                  f"{text_base}.layers.{i}.moe.per_expert_scale" if num_experts > 1 else None for i in hf_indices
+              ],
+              f"{prefix}-mlp-moe_block-shared_experts-wi_0-kernel": [
+                  f"{text_base}.layers.{i}.mlp.gate_proj.weight" if num_experts > 1 else None for i in hf_indices
+              ],
+              f"{prefix}-mlp-moe_block-shared_experts-wi_1-kernel": [
+                  f"{text_base}.layers.{i}.mlp.up_proj.weight" if num_experts > 1 else None for i in hf_indices
+              ],
+              f"{prefix}-mlp-moe_block-shared_experts-wo-kernel": [
+                  f"{text_base}.layers.{i}.mlp.down_proj.weight" if num_experts > 1 else None for i in hf_indices
+              ],
+              f"{prefix}-layer_scalar": [f"{text_base}.layers.{i}.layer_scalar" for i in hf_indices],
+          }
+      )
+      mapping = {
+          k: v
+          for k, v in mapping.items()
+          if (isinstance(v, list) and len(v) > 0 and v[0] is not None) or (not isinstance(v, list) and v is not None)
+      }
+
+    # Remainder layers
+    if num_remaining > 0:
+      for rem_idx in range(num_remaining):
+        hf_layer_idx = num_scanned + rem_idx
+        # Remaining layers use local attention type logic
+        is_global = False  # For gemma 4 it is unlikely the remainder is global but safe to determine
+        layer_in_block = hf_layer_idx % 6
+        is_global = layer_in_block == 5
+
+        prefix = f"params-decoder-layers_remainder-layers_{rem_idx}"
+        hf_prefix = f"{text_base}.layers.{hf_layer_idx}"
+        mapping.update(
+            {
+                f"{prefix}-self_attention-query-kernel": (f"{hf_prefix}.self_attn.q_proj.weight"),
+                f"{prefix}-self_attention-key-kernel": (f"{hf_prefix}.self_attn.k_proj.weight"),
+                f"{prefix}-self_attention-value-kernel": (
+                    f"{hf_prefix}.self_attn.k_proj.weight"
+                    if share_kv_projections and is_global
+                    else f"{hf_prefix}.self_attn.v_proj.weight"
+                ),
+                f"{prefix}-self_attention-out-kernel": (f"{hf_prefix}.self_attn.o_proj.weight"),
+                f"{prefix}-self_attention-query_norm-scale": (f"{hf_prefix}.self_attn.q_norm.weight"),
+                f"{prefix}-self_attention-key_norm-scale": (f"{hf_prefix}.self_attn.k_norm.weight"),
+            }
+        )
+        if maxtext_config.v_norm_with_scale:
+          mapping.update({f"{prefix}-self_attention-value_norm-scale": (f"{hf_prefix}.self_attn.v_norm.weight")})
+        mapping.update(
+            {
+                f"{prefix}-pre_self_attention_norm-scale": (f"{hf_prefix}.input_layernorm.weight"),
+                f"{prefix}-post_self_attention_norm-scale": (f"{hf_prefix}.post_attention_layernorm.weight"),
+                f"{prefix}-pre_ffw_norm-scale": (f"{hf_prefix}.pre_feedforward_layernorm.weight"),
+                f"{prefix}-post_ffw_norm-scale": (f"{hf_prefix}.post_feedforward_layernorm.weight"),
+                f"{prefix}-mlp-pre_feedforward_layernorm_2-scale": (
+                    f"{hf_prefix}.pre_feedforward_layernorm_2.weight" if num_experts > 1 else None
+                ),
+                f"{prefix}-mlp-post_feedforward_layernorm_1-scale": (
+                    f"{hf_prefix}.post_feedforward_layernorm_1.weight" if num_experts > 1 else None
+                ),
+                f"{prefix}-mlp-post_feedforward_layernorm_2-scale": (
+                    f"{hf_prefix}.post_feedforward_layernorm_2.weight" if num_experts > 1 else None
+                ),
+                f"{prefix}-mlp-pre_forward_scale_2": (f"{hf_prefix}.router.scale" if num_experts > 1 else None),
+                f"{prefix}-mlp-wi_0-kernel": f"{hf_prefix}.mlp.gate_proj.weight" if num_experts == 1 else None,
+                f"{prefix}-mlp-wi_1-kernel": f"{hf_prefix}.mlp.up_proj.weight" if num_experts == 1 else None,
+                f"{prefix}-mlp-wo-kernel": f"{hf_prefix}.mlp.down_proj.weight" if num_experts == 1 else None,
+                f"{prefix}-mlp-moe_block-MoeBlock_0-gate-kernel": f"{hf_prefix}.router.proj.weight"
+                if num_experts > 1
+                else None,
+                f"{prefix}-mlp-moe_block-MoeBlock_0-wi_0": f"{hf_prefix}.moe.gate_up_proj" if num_experts > 1 else None,
+                f"{prefix}-mlp-moe_block-MoeBlock_0-wi_1": f"{hf_prefix}.moe.gate_up_proj" if num_experts > 1 else None,
+                f"{prefix}-mlp-moe_block-MoeBlock_0-wo": f"{hf_prefix}.moe.down_proj" if num_experts > 1 else None,
+                f"{prefix}-mlp-moe_block-MoeBlock_0-per_expert_scale": f"{hf_prefix}.moe.per_expert_scale"
+                if num_experts > 1
+                else None,
+                f"{prefix}-mlp-moe_block-shared_experts-wi_0-kernel": f"{hf_prefix}.mlp.gate_proj.weight"
+                if num_experts > 1
+                else None,
+                f"{prefix}-mlp-moe_block-shared_experts-wi_1-kernel": f"{hf_prefix}.mlp.up_proj.weight"
+                if num_experts > 1
+                else None,
+                f"{prefix}-mlp-moe_block-shared_experts-wo-kernel": f"{hf_prefix}.mlp.down_proj.weight"
+                if num_experts > 1
+                else None,
+                f"{prefix}-layer_scalar": f"{hf_prefix}.layer_scalar",
+            }
+        )
+      mapping = {k: v for k, v in mapping.items() if v is not None}
+  else:
+    for i in range(nlayers):
+      prefix = f"params-decoder-layers_{i}"
+      hf_prefix = f"{text_base}.layers.{i}"
+      is_global = i % 6 == 5
+      num_experts = tcfg.get("num_experts")
+      num_experts = num_experts if num_experts is not None else 1
+      mapping.update(
+          {
+              f"{prefix}-self_attention-query-kernel": (f"{hf_prefix}.self_attn.q_proj.weight"),
+              f"{prefix}-self_attention-key-kernel": (f"{hf_prefix}.self_attn.k_proj.weight"),
+              f"{prefix}-self_attention-value-kernel": (
+                  None if share_kv_projections and is_global else f"{hf_prefix}.self_attn.v_proj.weight"
+              ),
+              f"{prefix}-self_attention-out-kernel": (f"{hf_prefix}.self_attn.o_proj.weight"),
+              f"{prefix}-self_attention-query_norm-scale": (f"{hf_prefix}.self_attn.q_norm.weight"),
+              f"{prefix}-self_attention-key_norm-scale": (f"{hf_prefix}.self_attn.k_norm.weight"),
+          }
+      )
+      if maxtext_config.v_norm_with_scale:
+        mapping.update({f"{prefix}-self_attention-value_norm-scale": (f"{hf_prefix}.self_attn.v_norm.weight")})
+      mapping.update(
+          {
+              f"{prefix}-pre_self_attention_norm-scale": (f"{hf_prefix}.input_layernorm.weight"),
+              f"{prefix}-post_self_attention_norm-scale": (f"{hf_prefix}.post_attention_layernorm.weight"),
+              f"{prefix}-pre_ffw_norm-scale": (f"{hf_prefix}.pre_feedforward_layernorm.weight"),
+              f"{prefix}-post_ffw_norm-scale": (f"{hf_prefix}.post_feedforward_layernorm.weight"),
+              f"{prefix}-mlp-pre_feedforward_layernorm_2-scale": (
+                  f"{hf_prefix}.pre_feedforward_layernorm_2.weight" if num_experts > 1 else None
+              ),
+              f"{prefix}-mlp-post_feedforward_layernorm_1-scale": (
+                  f"{hf_prefix}.post_feedforward_layernorm_1.weight" if num_experts > 1 else None
+              ),
+              f"{prefix}-mlp-post_feedforward_layernorm_2-scale": (
+                  f"{hf_prefix}.post_feedforward_layernorm_2.weight" if num_experts > 1 else None
+              ),
+              f"{prefix}-mlp-pre_forward_scale_2": (f"{hf_prefix}.router.scale" if num_experts > 1 else None),
+              f"{prefix}-mlp-wi_0-kernel": f"{hf_prefix}.mlp.gate_proj.weight" if num_experts == 1 else None,
+              f"{prefix}-mlp-wi_1-kernel": f"{hf_prefix}.mlp.up_proj.weight" if num_experts == 1 else None,
+              f"{prefix}-mlp-wo-kernel": f"{hf_prefix}.mlp.down_proj.weight" if num_experts == 1 else None,
+              f"{prefix}-mlp-moe_block-MoeBlock_0-gate-kernel": f"{hf_prefix}.router.proj.weight"
+              if num_experts > 1
+              else None,
+              f"{prefix}-mlp-moe_block-MoeBlock_0-wi_0": f"{hf_prefix}.moe.gate_up_proj" if num_experts > 1 else None,
+              f"{prefix}-mlp-moe_block-MoeBlock_0-wi_1": f"{hf_prefix}.moe.gate_up_proj" if num_experts > 1 else None,
+              f"{prefix}-mlp-moe_block-MoeBlock_0-wo": f"{hf_prefix}.moe.down_proj" if num_experts > 1 else None,
+              f"{prefix}-mlp-moe_block-MoeBlock_0-per_expert_scale": f"{hf_prefix}.moe.per_expert_scale"
+              if num_experts > 1
+              else None,
+              f"{prefix}-mlp-moe_block-shared_experts-wi_0-kernel": f"{hf_prefix}.mlp.gate_proj.weight"
+              if num_experts > 1
+              else None,
+              f"{prefix}-mlp-moe_block-shared_experts-wi_1-kernel": f"{hf_prefix}.mlp.up_proj.weight"
+              if num_experts > 1
+              else None,
+              f"{prefix}-mlp-moe_block-shared_experts-wo-kernel": f"{hf_prefix}.mlp.down_proj.weight"
+              if num_experts > 1
+              else None,
+              f"{prefix}-layer_scalar": f"{hf_prefix}.layer_scalar",
+          }
+      )
+  mapping = {k: v for k, v in mapping.items() if v is not None}
+  return mapping
+
+
+def GEMMA4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Creates parameter transformation functions for Gemma4."""
+  tcfg = config.get("text_config", config)
+  nlayers = tcfg["num_hidden_layers"]
+  share_kv_projections = maxtext_config.share_kv_projections
+  hooks = {}
+
+  def pad_hf_embedding_layer(input_tensor, target_shape):
+    normalizer = np.dtype("float32").type(tcfg["hidden_size"] ** 0.5)
+    if saving_to_hf:
+      target_tensor = input_tensor[: target_shape[0], : target_shape[1]]
+      target_tensor = target_tensor / normalizer
+      return target_tensor.astype(input_tensor.dtype)
+    else:
+      target_tensor = np.zeros(target_shape, dtype=input_tensor.dtype)
+      target_tensor[: input_tensor.shape[0], : input_tensor.shape[1]] = input_tensor
+      target_tensor = target_tensor * normalizer
+      return target_tensor.astype(input_tensor.dtype)
+
+  def reshape_kernel(input_tensor, target_shape):
+    if saving_to_hf:
+      flipped_target_shape = np.flip(np.array(target_shape))
+      return input_tensor.reshape(flipped_target_shape).T
+    else:
+      return input_tensor.T.reshape(target_shape)
+
+  def scale_rmsnorm_layer(input_tensor, target_shape):
+    # Shift of 1.0 is now folded into Gemma 4 text and vision checkpoint weights
+    return input_tensor.reshape(target_shape)
+
+  def split_moe_wi0(input_tensor, target_shape):
+    if saving_to_hf:
+      raise NotImplementedError("Saving to HF for fused gate_up_proj requires custom concat hook.")
+    # input_tensor: [E, 2*FF, H], target: [E, H, FF]
+    _, two_FF, _ = input_tensor.shape
+    FF = two_FF // 2
+    return input_tensor[:, :FF, :].transpose(0, 2, 1)
+
+  def split_moe_wi1(input_tensor, target_shape):
+    if saving_to_hf:
+      raise NotImplementedError("Saving to HF for fused gate_up_proj requires custom concat hook.")
+    _, two_FF, _ = input_tensor.shape
+    FF = two_FF // 2
+    return input_tensor[:, FF:, :].transpose(0, 2, 1)
+
+  def reshape_moe_wo(input_tensor, target_shape):
+    # input_tensor: [E, H, FF], target: [E, FF, H]
+    return input_tensor.transpose(0, 2, 1)
+
+  hooks["params-token_embedder-embedding"] = pad_hf_embedding_layer
+  hooks["params-decoder-decoder_norm-scale"] = scale_rmsnorm_layer
+  # REMOVED: logits_dense-kernel hook (handled by logits_via_embedding: True)
+
+  kernel_keys = [
+      "self_attention-query-kernel",
+      "self_attention-key-kernel",
+      "self_attention-value-kernel",
+      "self_attention-out-kernel",
+      "mlp-wi_0-kernel",
+      "mlp-wi_1-kernel",
+      "mlp-wo-kernel",
+      "mlp-moe_block-shared_experts-wi_0-kernel",
+      "mlp-moe_block-shared_experts-wi_1-kernel",
+      "mlp-moe_block-shared_experts-wo-kernel",
+  ]
+  moe_kernel_keys = [
+      # `gate-kernel` (router) has shape [feature, num_experts] in MaxText, but [num_experts, feature] in HF
+      "mlp-moe_block-MoeBlock_0-gate-kernel",
+  ]
+
+  norm_keys = [
+      "self_attention-query_norm-scale",
+      "self_attention-key_norm-scale",
+  ]
+  if maxtext_config.v_norm_with_scale:
+    norm_keys.append("self_attention-value_norm-scale")
+
+  norm_keys.extend(
+      [
+          "pre_self_attention_norm-scale",
+          "post_self_attention_norm-scale",
+          "pre_ffw_norm-scale",
+          "post_ffw_norm-scale",
+      ]
+  )
+
+  num_experts = tcfg.get("num_experts")
+  num_experts = num_experts if num_experts is not None else 1
+  if num_experts > 1:
+    norm_keys.extend(
+        [
+            "mlp-pre_feedforward_layernorm_2-scale",
+            "mlp-post_feedforward_layernorm_1-scale",
+            "mlp-post_feedforward_layernorm_2-scale",
+        ]
+    )
+
+  # Note: `pre_forward_scale_2`, `per_expert_scale`, and `layer_scalar`
+  # are standard tensors being multiplied, not typical RMSNorms. They
+  # do not need the `scale_rmsnorm_layer` hook, so leaving them out
+  # of norm_keys means they perfectly default to the identity mapping.
+
+  vcfg = config.get("vision_config", {})
+  if maxtext_config.use_multimodal and vcfg:
+    nvis = vcfg.get("num_hidden_layers", 0)
+
+    def reshape_vision_patch(x, target_shape):
+      # HF and MaxText both use (H, W, C) patch flattening now.
+      # Just transpose between out_features/in_features.
+      return x.T
+
+    def reshape_pos_emb(x, target_shape):
+      return x.transpose(1, 0, 2)
+
+    hooks["params-vision_encoder-Gemma4VisionEncoderLayer_0-vision_entry-input_projection-kernel"] = reshape_vision_patch
+    hooks["params-vision_encoder-Gemma4VisionEncoderLayer_0-vision_entry-pos_emb_param"] = reshape_pos_emb
+    hooks["params-vision_encoder-Gemma4VisionProjector_0-projection-kernel"] = reshape_kernel
+
+    for i in range(nvis):
+      prefix = f"params-vision_encoder-Gemma4VisionEncoderLayer_0-layer_{i}"
+      hooks[f"{prefix}-attention-query-kernel"] = reshape_kernel
+      hooks[f"{prefix}-attention-key-kernel"] = reshape_kernel
+      hooks[f"{prefix}-attention-value-kernel"] = reshape_kernel
+      hooks[f"{prefix}-attention-out-kernel"] = reshape_kernel
+      hooks[f"{prefix}-attention-query_norm-scale"] = scale_rmsnorm_layer
+      hooks[f"{prefix}-attention-key_norm-scale"] = scale_rmsnorm_layer
+      hooks[f"{prefix}-pre_attention_norm-scale"] = scale_rmsnorm_layer
+      hooks[f"{prefix}-post_attention_norm-scale"] = scale_rmsnorm_layer
+      hooks[f"{prefix}-pre_ffw_norm-scale"] = scale_rmsnorm_layer
+      hooks[f"{prefix}-post_ffw_norm-scale"] = scale_rmsnorm_layer
+      hooks[f"{prefix}-mlp-wi_0-kernel"] = reshape_kernel
+      hooks[f"{prefix}-mlp-wi_1-kernel"] = reshape_kernel
+      hooks[f"{prefix}-mlp-wo-kernel"] = reshape_kernel
+
+  if scan_layers:
+    attention_pattern_length = 6
+    num_remaining = nlayers % attention_pattern_length
+
+    # Scanned sub-layer prefixes
+    for layer_in_block in range(attention_pattern_length):
+      is_global = layer_in_block % 6 == 5
+      prefix = f"params-decoder-scanned_blocks-layers_{layer_in_block}"
+      for key in kernel_keys:
+        if share_kv_projections and is_global and key == "self_attention-value-kernel":
+          continue
+        hooks[f"{prefix}-{key}"] = reshape_kernel
+      for key in moe_kernel_keys:
+        hooks[f"{prefix}-{key}"] = reshape_kernel
+      for key in norm_keys:
+        hooks[f"{prefix}-{key}"] = scale_rmsnorm_layer
+
+      # Add these specialized 3D tensor hooks inside the loop
+      hooks[f"{prefix}-mlp-moe_block-MoeBlock_0-wi_0"] = split_moe_wi0
+      hooks[f"{prefix}-mlp-moe_block-MoeBlock_0-wi_1"] = split_moe_wi1
+      hooks[f"{prefix}-mlp-moe_block-MoeBlock_0-wo"] = reshape_moe_wo
+
+    # Remainder sub-layer prefixes
+    if num_remaining > 0:
+      for rem_idx in range(num_remaining):
+        prefix = f"params-decoder-layers_remainder-layers_{rem_idx}"
+        real_layer_idx = attention_pattern_length * (nlayers // attention_pattern_length) + rem_idx
+        is_global = real_layer_idx % 6 == 5
+        for key in kernel_keys:
+          if share_kv_projections and is_global and key == "self_attention-value-kernel":
+            continue
+          hooks[f"{prefix}-{key}"] = reshape_kernel
+        for key in moe_kernel_keys:
+          hooks[f"{prefix}-{key}"] = reshape_kernel
+        for key in norm_keys:
+          hooks[f"{prefix}-{key}"] = scale_rmsnorm_layer
+
+        # Add these specialized 3D tensor hooks inside the loop
+        hooks[f"{prefix}-mlp-moe_block-MoeBlock_0-wi_0"] = split_moe_wi0
+        hooks[f"{prefix}-mlp-moe_block-MoeBlock_0-wi_1"] = split_moe_wi1
+        hooks[f"{prefix}-mlp-moe_block-MoeBlock_0-wo"] = reshape_moe_wo
+  else:
+    for i in range(nlayers):
+      is_global = i % 6 == 5
+      prefix = f"params-decoder-layers_{i}"
+      for key in kernel_keys:
+        if share_kv_projections and is_global and key == "self_attention-value-kernel":
+          continue
+        hooks[f"{prefix}-{key}"] = reshape_kernel
+      for key in moe_kernel_keys:
+        hooks[f"{prefix}-{key}"] = reshape_kernel
+      for key in norm_keys:
+        hooks[f"{prefix}-{key}"] = scale_rmsnorm_layer
+
+      # Add these specialized 3D tensor hooks inside the loop
+      hooks[f"{prefix}-mlp-moe_block-MoeBlock_0-wi_0"] = split_moe_wi0
+      hooks[f"{prefix}-mlp-moe_block-MoeBlock_0-wi_1"] = split_moe_wi1
+      hooks[f"{prefix}-mlp-moe_block-MoeBlock_0-wo"] = reshape_moe_wo
+  return hooks
+
+
 def OLMO3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
   """Returns mapping from MaxText to HuggingFace Olmo3 weight paths."""
 
@@ -2395,6 +2886,8 @@ PARAM_MAPPING = {
     "gemma3-4b": GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma3-12b": GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma3-27b": GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "gemma4-26b": GEMMA4_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "gemma4-31b": GEMMA4_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen2.5-1.5b": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen2.5-7b": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen2.5-14b": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -2438,6 +2931,8 @@ HOOK_FNS = {
     "gemma3-4b": GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma3-12b": GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma3-27b": GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "gemma4-26b": GEMMA4_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "gemma4-31b": GEMMA4_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen2.5-1.5b": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen2.5-7b": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen2.5-14b": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,

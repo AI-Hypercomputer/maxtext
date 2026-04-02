@@ -1173,9 +1173,10 @@ def validate_mlp_dim(raw_keys):
   base_mlp_dim = raw_keys["base_mlp_dim"]
   base_moe_mlp_dim = raw_keys["base_moe_mlp_dim"]
   if is_fully_moe_model and (base_mlp_dim != base_moe_mlp_dim):
-    raise ValueError(
-        f"For a fully MoE model, base_mlp_dim must be equal to base_moe_mlp_dim. Received base_mlp_dim={base_mlp_dim} and base_moe_mlp_dim={base_moe_mlp_dim}."
-    )
+    if raw_keys.get("decoder_block") != "gemma4":
+      raise ValueError(
+          f"For a fully MoE model, base_mlp_dim must be equal to base_moe_mlp_dim. Received base_mlp_dim={base_mlp_dim} and base_moe_mlp_dim={base_moe_mlp_dim}."
+      )
 
 
 def validate_gpt_oss_moe(raw_keys):

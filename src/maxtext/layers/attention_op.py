@@ -1582,6 +1582,11 @@ class AttentionOp(nnx.Module):
       attn_mask = None
       dummy_attn_mask = None
       mask_type = "causal"
+    elif model_mode == MODEL_MODE_PREFILL and self.config.attention_kernel == "cudnn":
+      # Prefill with CUDNN attention does not support packing or context parallelism.
+      attn_mask = None
+      dummy_attn_mask = None
+      mask_type = "causal"
     else:
       # Default case: no packing, no context parallelism
       dummy_attn_mask = jnp.zeros(

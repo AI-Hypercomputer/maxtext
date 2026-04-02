@@ -234,6 +234,8 @@ ModelName = Literal[
     "gemma3-4b",
     "gemma3-12b",
     "gemma3-27b",
+    "gemma4-26b",
+    "gemma4-31b",
     "qwen2.5-1.5b",
     "qwen2.5-7b",
     "qwen2.5-14b",
@@ -441,7 +443,14 @@ class ModelArchitecture(BaseModel):
   base_num_kv_heads: int = Field(16, description="Base number of key/value heads.")
   base_mlp_dim: int = Field(7168, description="Base dimension of the MLP layer.")
   base_num_decoder_layers: int = Field(16, description="Base number of decoder layers.")
-  head_dim: int = Field(128, description="Dimension of each attention head.")
+  head_dim: int = Field(
+      128,
+      description="Model query and key head dimension.",
+  )
+  global_head_dim: int = Field(
+      0,
+      description="Model query and key head dimension for global attention layers.",
+  )
   mlp_activations: list[str] = Field(["silu", "linear"], description="Activation functions in the MLP layer.")
   mlp_activations_limit: float = Field(
       -1.0,
@@ -454,6 +463,10 @@ class ModelArchitecture(BaseModel):
       description="If True, adds a learnable bias to the query, key, and value projections.",
   )
   fused_mlp: bool = Field(False, description="If supported, fuse the MLP layers.")
+  qk_norm_with_scale: bool = Field(
+      True, description="Whether to apply scale on query and key normalizations (default True)."
+  )
+  v_norm_with_scale: bool = Field(True, description="Whether to apply scale on value normalization (default True).")
 
 
 class MTP(BaseModel):
@@ -494,10 +507,13 @@ class Attention(BaseModel):
       "autoselected",
       description="The attention algorithm to use (dot_product, flash, etc).",
   )
-  share_kv_projections: bool = Field(False, description="If True, Key and Value use the same projection.")
   attention_type: Literal["global", "local_sliding", "chunk", "mla", "full"] = Field(
       "global", description="The variant of attention to use."
   )
+  share_kv_projections: bool = Field(
+      False, description="If True, for global attention, Key and Value projections share the same weights."
+  )
+  global_num_kv_heads: int = Field(0, description="If greater than 0, sets the number of KV heads for global attention.")
   attention_sink: bool = Field(False, description="If True, enables attention sinks.")
   float32_qk_product: bool = Field(False, description="In dot-product attention, cast query-key product to fp32.")
   float32_logits: bool = Field(
@@ -660,6 +676,10 @@ class MoEGeneral(BaseModel):
   float32_weight_sum: bool = Field(
       True,
       description="Whether to use full fp32 precision to sum expert weights for numerical stability.",
+  )
+  float32_gate_logits: bool = Field(
+      False,
+      description="Whether to cast inputs to fp32 to compute MoE gate logits for numerical stability.",
   )
 
 
@@ -1290,9 +1310,12 @@ class Rope(BaseModel):
   rope_type: RopeType = Field(RopeType.DEFAULT, description="The type of RoPE to use.")
   rope_use_scale: bool = Field(True, description="Apply RoPE scaling for Llama3.1 style.")
   rope_min_timescale: int = Field(1, description="The minimum timescale for RoPE.")
-  rope_max_timescale: int = Field(10_000, description="The maximum timescale for global attention RoPE.")
+  rope_max_timescale: int = Field(10_000, description="The maximum timescale for RoPE.")
   rope_linear_scaling_factor: float = Field(1.0, description="Linear scaling factor for 'default' RoPE implementation.")
   local_rope_max_timescale: int = Field(-1, description="If positive, used for local window attention RoPE.")
+  global_rope_max_timescale: int = Field(-1, description="If positive, used for global attention RoPE.")
+  global_rope_proportion: float = Field(0.25, description="Proportion of dimension to apply RoPE on in global layers.")
+  local_rope_proportion: float = Field(1.0, description="Proportion of dimension to apply RoPE on in local layers.")
 
 
 class YarnRope(BaseModel):
@@ -1548,7 +1571,7 @@ class MultimodalGeneral(BaseModel):
   freeze_vision_encoder_params: bool = Field(True, description="Freeze the parameters of the vision encoder.")
   freeze_audio_encoder_params: bool = Field(True, description="Freeze the parameters of the audio encoder.")
   use_audio: bool = Field(False, description="Enable audio encoder for multimodal models.")
-  image_size_for_vit: int = Field(896, description="Input image size for the Vision Transformer.")
+  image_size_for_vit: int | list[int] = Field(896, description="Input image size for the Vision Transformer.")
   image_path: PathStr = Field("", description="Path to an image for decoding.")
   image_placeholder: str = Field("<|image|>", description="Placeholder string for images in text prompts.")
   posemb_type_for_vit: str = Field("learn", description="Positional embedding type for the vision encoder.")
@@ -1590,6 +1613,7 @@ class VisionTower(BaseModel):
   temporal_patch_size_for_vit: int = Field(2, description="Temporal patch size for video inputs.")
   num_position_embeddings_for_vit: int = Field(1024, description="Number of position embeddings for ViT.")
   deepstack_visual_indexes_for_vit: list[int] = Field([], description="Layer indices to extract deep visual features.")
+  vision_output_length: int = Field(-1, description="The output length (number of soft tokens) from the vision encoder.")
 
 
 class VisionProjector(BaseModel):
@@ -2473,7 +2497,8 @@ class MaxTextConfig(
           self.base_mlp_dim = self.base_moe_mlp_dim
           _, _, mlp_dim_scale, _ = get_individual_scales(self.global_parameter_scale)
           self.mlp_dim = (2**mlp_dim_scale) * self.base_mlp_dim
-        else:
+        elif self.decoder_block != DecoderBlockType.GEMMA4:
+          # Allow Gemma 4 to keep distinct shared and routed MLP dimensions
           raise ValueError(
               "For a fully MoE model, base_mlp_dim must equal base_moe_mlp_dim. "
               f"Got base_mlp_dim={self.base_mlp_dim}, base_moe_mlp_dim={self.base_moe_mlp_dim}."
@@ -2487,6 +2512,8 @@ class MaxTextConfig(
           "gemma3-4b",
           "gemma3-12b",
           "gemma3-27b",
+          "gemma4-26b",
+          "gemma4-31b",
           "llama4-17b-16e",
           "llama4-17b-128e",
           "qwen3-omni-30b-a3b",

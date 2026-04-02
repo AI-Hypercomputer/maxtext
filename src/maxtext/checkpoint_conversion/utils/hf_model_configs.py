@@ -24,6 +24,137 @@ if transformers.__version__ >= "5.0.0":
 else:
   from transformers.configuration_utils import PretrainedConfig as PTConfig
 
+
+gemma4_26b_dict = {
+    "architectures": ["Gemma4ForConditionalGeneration"],
+    "audio_config": None,
+    "audio_token_id": 258881,
+    "boa_token_id": 256000,
+    "boi_token_id": 255999,
+    "dtype": "bfloat16",
+    "eoa_token_id": 258883,
+    "eoa_token_index": 258883,
+    "eoi_token_id": 258882,
+    "eos_token_id": [1, 106],
+    "image_token_id": 258880,
+    "initializer_range": 0.02,
+    "model_type": "gemma4",
+    "text_config": {
+        "attention_bias": False,
+        "attention_dropout": 0.0,
+        "attention_k_eq_v": True,
+        "bos_token_id": 2,
+        "dtype": "bfloat16",
+        "enable_moe_block": True,
+        "eos_token_id": 1,
+        "expert_intermediate_size": 704,
+        "final_logit_softcapping": 30.0,
+        "global_head_dim": 512,
+        "head_dim": 256,
+        "hidden_activation": "gelu_pytorch_tanh",
+        "hidden_size": 2816,
+        "hidden_size_per_layer_input": 0,
+        "initializer_range": 0.02,
+        "intermediate_size": 2112,
+        "layer_types": [
+            "sliding_attention",
+            "sliding_attention",
+            "sliding_attention",
+            "sliding_attention",
+            "sliding_attention",
+            "full_attention",
+        ]
+        * 5,
+        "max_position_embeddings": 262144,
+        "model_type": "gemma4_text",
+        "num_attention_heads": 16,
+        "num_experts": 128,
+        "num_global_key_value_heads": 2,
+        "num_hidden_layers": 30,
+        "num_key_value_heads": 8,
+        "num_kv_shared_layers": 0,
+        "pad_token_id": 0,
+        "rms_norm_eps": 1e-06,
+        "rope_parameters": {
+            "full_attention": {"partial_rotary_factor": 0.25, "rope_theta": 1_000_000.0, "rope_type": "proportional"},
+            "sliding_attention": {"rope_theta": 10_000.0, "rope_type": "default"},
+        },
+        "sliding_window": 1024,
+        "tie_word_embeddings": True,
+        "top_k_experts": 8,
+        "use_bidirectional_attention": "vision",
+        "use_cache": True,
+        "use_double_wide_mlp": False,
+        "vocab_size": 262144,
+        "vocab_size_per_layer_input": 262144,
+    },
+    "tie_word_embeddings": True,
+    "transformers_version": "5.5.0.dev0",
+    "video_token_id": 258884,
+    "vision_config": {
+        "attention_bias": False,
+        "attention_dropout": 0.0,
+        "default_output_length": 280,
+        "dtype": "bfloat16",
+        "global_head_dim": 72,
+        "head_dim": 72,
+        "hidden_activation": "gelu_pytorch_tanh",
+        "hidden_size": 1152,
+        "intermediate_size": 4304,
+        "max_position_embeddings": 131072,
+        "model_type": "gemma4_vision",
+        "num_attention_heads": 16,
+        "num_hidden_layers": 27,
+        "num_key_value_heads": 16,
+        "patch_size": 16,
+        "pooling_kernel_size": 3,
+        "position_embedding_size": 10240,
+        "rms_norm_eps": 1e-06,
+        "rope_parameters": {"rope_theta": 100.0, "rope_type": "default"},
+        "standardize": True,
+        "use_clipped_linears": False,
+    },
+    "vision_soft_tokens_per_image": 280,
+}
+
+
+gemma4_31b_dict = gemma4_26b_dict.copy()
+gemma4_31b_dict["text_config"] = gemma4_26b_dict["text_config"].copy()
+gemma4_31b_dict["text_config"].update(
+    {
+        "enable_moe_block": False,
+        "expert_intermediate_size": None,
+        "hidden_size": 5376,
+        "intermediate_size": 21504,
+        "layer_types": [
+            "sliding_attention",
+            "sliding_attention",
+            "sliding_attention",
+            "sliding_attention",
+            "sliding_attention",
+            "full_attention",
+        ]
+        * 10,
+        "num_attention_heads": 32,
+        "num_experts": None,
+        "num_global_key_value_heads": 4,
+        "num_hidden_layers": 60,
+        "num_key_value_heads": 16,
+        "top_k_experts": None,
+    }
+)
+
+
+try:
+  # Will execute successfully if Transformers is updated with Gemma 4 support
+  gemma4_26b_config = transformers.Gemma4Config(**gemma4_26b_dict)
+  gemma4_31b_config = transformers.Gemma4Config(**gemma4_31b_dict)
+except AttributeError:
+  # Graceful fallback to raw dict-based PTConfig if Gemma 4 natively is missing
+  gemma4_26b_config = PTConfig(**gemma4_26b_dict)
+  gemma4_31b_config = PTConfig(**gemma4_31b_dict)
+
+
 gemma3_4b_config = transformers.Gemma3Config(
     architectures=["Gemma3ForConditionalGeneration"],
     boi_token_index=255999,
@@ -584,9 +715,10 @@ deepseek2_16b_dict = {
         "mscale": 0.707,
         "mscale_all_dim": 0.707,
         "original_max_position_embeddings": 4096,
+        "rope_theta": 10_000,
         "type": "yarn",
     },
-    "rope_theta": 10000,
+    "rope_theta": 10_000,
     "routed_scaling_factor": 1.0,
     "scoring_func": "softmax",
     "seq_aux": True,
@@ -645,9 +777,10 @@ deepseek3_671b_dict = {
         "mscale": 1.0,
         "mscale_all_dim": 1.0,
         "original_max_position_embeddings": 4096,
+        "rope_theta": 10_000,
         "type": "yarn",
     },
-    "rope_theta": 10000,
+    "rope_theta": 10_000,
     "routed_scaling_factor": 2.5,
     "scoring_func": "sigmoid",
     "tie_word_embeddings": False,
@@ -697,15 +830,16 @@ deepseek32_671b_dict = {
     "qk_rope_head_dim": 64,
     "rms_norm_eps": 1e-06,
     "rope_scaling": {
-        "beta_fast": 32,
-        "beta_slow": 1,
-        "factor": 40,
+        "beta_fast": 32.0,
+        "beta_slow": 1.0,
+        "factor": 40.0,
         "mscale": 1.0,
         "mscale_all_dim": 1.0,
         "original_max_position_embeddings": 4096,
+        "rope_theta": 10_000,
         "type": "yarn",
     },
-    "rope_theta": 10000,
+    "rope_theta": 10_000,
     "routed_scaling_factor": 2.5,
     "scoring_func": "sigmoid",
     "tie_word_embeddings": False,
@@ -717,8 +851,17 @@ deepseek32_671b_dict = {
     "v_head_dim": 128,
     "vocab_size": 129280,
 }
+
+
 # TODO(shuningjin): replace with DeepseekV32Config when available in transformers library
-deepseek32_671b_config = PTConfig(**deepseek32_671b_dict)
+class DeepseekV32Config(PTConfig):
+
+  def __init__(self, **kwargs):
+    self.max_position_embeddings = kwargs.get("max_position_embeddings", 163840)
+    super().__init__(**kwargs)
+
+
+deepseek32_671b_config = DeepseekV32Config(**deepseek32_671b_dict)
 
 # from https://huggingface.co/openai/gpt-oss-20b/blob/main/config.json
 # remove mxfp4 quantization_config, since we are using bf16
@@ -775,10 +918,11 @@ gpt_oss_20b_dict = {
         "beta_slow": 1.0,
         "factor": 32.0,
         "original_max_position_embeddings": 4096,
+        "rope_theta": 150_000,
         "rope_type": "yarn",
         "truncate": False,
     },
-    "rope_theta": 150000,
+    "rope_theta": 150_000,
     "router_aux_loss_coef": 0.9,
     "sliding_window": 128,
     "swiglu_limit": 7.0,
@@ -856,10 +1000,11 @@ gpt_oss_120b_dict = {
         "beta_slow": 1.0,
         "factor": 32.0,
         "original_max_position_embeddings": 4096,
+        "rope_theta": 150_000,
         "rope_type": "yarn",
         "truncate": False,
     },
-    "rope_theta": 150000,
+    "rope_theta": 150_000,
     "router_aux_loss_coef": 0.9,
     "sliding_window": 128,
     "swiglu_limit": 7.0,
@@ -1006,6 +1151,8 @@ HF_MODEL_CONFIGS = {
     "gemma3-4b": gemma3_4b_config,
     "gemma3-12b": gemma3_12b_config,
     "gemma3-27b": gemma3_27b_config,
+    "gemma4-26b": gemma4_26b_config,
+    "gemma4-31b": gemma4_31b_config,
     "qwen2.5-1.5b": qwen25_1_5b_config,
     "qwen2.5-7b": qwen25_7b_config,
     "qwen2.5-14b": qwen25_14b_config,

@@ -106,10 +106,22 @@ def save_golden_logits(
     # 1. Prepare inputs for the model and base data for saving
     data_to_save = {"prompt": prompt_text}
     if image_paths:
-      image = Image.open(image_paths[i]).convert("RGB")
+      with Image.open(image_paths[i]) as image_file:
+        image = image_file.convert("RGB")
       if model_id.startswith("meta-llama/Llama-4"):
         image = image.resize((336, 336))
+      elif "gemma-4" in model_id.lower():
+        # Force exact dimensions to prevent HF from dynamically padding
+        # PIL resize expects (Width, Height). Matches MaxText's [672, 960]
+        image = image.resize((960, 672), resample=Image.Resampling.BICUBIC)
       processor = AutoProcessor.from_pretrained(model_id, token=True) if image_paths else None
+
+      if processor is not None and hasattr(processor, "image_token"):
+        for placeholder in ["<img>", "<image>", "<|image|>"]:
+          prompt_text = prompt_text.replace(placeholder, processor.image_token)
+        # Update the saved data dictionary so MaxText gets the correct token too
+        data_to_save["prompt"] = prompt_text
+
       if apply_chat_template:
         messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": prompt_text}]}]
         formatted_prompt = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -133,7 +145,8 @@ def save_golden_logits(
     # 3. Populate final data dictionary with tensors from inputs and logits
     for key, value in inputs.items():
       new_key = "tokens" if key == "input_ids" else key
-      data_to_save[new_key] = value.cpu().numpy()[0]
+      val_np = value.cpu().numpy()
+      data_to_save[new_key] = val_np[0] if val_np.ndim > 0 else val_np
     data_to_save["logits"] = logits[0]
 
     print(f"Token length is {len(data_to_save['tokens'])} for prompt: {prompt_text}")

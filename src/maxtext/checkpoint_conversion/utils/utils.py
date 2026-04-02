@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Checkpoint conversion utility functions. """
+"""Checkpoint conversion utility functions."""
 
 import contextlib
 import io
@@ -923,17 +923,37 @@ def detect_and_extract_checkpoint(checkpoint_dict: dict) -> dict[str, np.ndarray
     return extract_linen_weights(actual_weights_dict)
 
 
-def load_hf_dict_from_transformers(model_id: str, token: str, revision: str = None, dtype: str = "auto"):
+def load_hf_dict_from_transformers(model_id: str, token: str, revision: str | None = None, dtype: str = "auto"):
   """Loads the HuggingFace model based on model_id (Eager mode only), used in to_maxtext"""
+
+  # 1. Handle special cases requiring specific model classes
   if model_id in ["Qwen/Qwen3-Omni-30B-A3B-Instruct"]:
     from transformers import Qwen3OmniMoeForConditionalGeneration  # pylint: disable=import-outside-toplevel
 
-    model_class = Qwen3OmniMoeForConditionalGeneration
+    model_classes = [Qwen3OmniMoeForConditionalGeneration]
+  # 2. For all other models, use AutoModel cascade logic
   else:
-    model_class = AutoModelForCausalLM
+    from transformers import AutoModel  # pylint: disable=import-outside-toplevel
+    # Fallback cascade:
+    # 1. AutoModelForCausalLM (Standard text-only LLMs)
+    # 2. Base AutoModel (Final fallback)
+    model_classes = [AutoModelForCausalLM, AutoModel]
 
   # Note: transformers deprecates `torch_dtype` in favor of standard `dtype` in model loading
-  hf_model = model_class.from_pretrained(model_id, token=token, revision=revision, dtype=dtype)
+  last_exception = None
+  for model_class in model_classes:
+    try:
+      hf_model = model_class.from_pretrained(model_id, token=token, revision=revision, dtype=dtype)
+      break
+    except (ValueError, OSError, RuntimeError, ImportError) as e:
+      max_logging.log(f"Failed to load using {model_class.__name__}: {e!r}")
+      last_exception = e
+  else:
+    # This else block is executed if the loop completes without a break.
+    error_message = (
+        f"Could not load HuggingFace model {model_id} with any of the attempted classes. " f"Last error: {last_exception}"
+    )
+    raise ValueError(error_message) from last_exception
 
   return hf_model.state_dict()
 

@@ -25,7 +25,7 @@ from jax.sharding import Mesh
 from flax import linen as nn
 from flax import nnx
 
-from maxtext.common.common_types import Config, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN
+from maxtext.common.common_types import Config, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN, MultimodalInput
 from maxtext.inference import page_manager
 from maxtext.layers.nnx_decoders import NNXDecoder
 from maxtext.layers import initializers
@@ -161,6 +161,7 @@ class TransformerLinenPure(nn.Module):
       image_embeddings, deepstack_visual_embeds = self.vision_encoder(
           input_images=encoder_images, deterministic=not enable_dropout
       )
+
       bidirectional_mask = mm_processor.get_bidirectional_mask_vision(self.config, decoder_input_tokens)
 
     if self.config.use_multimodal and encoder_audios is not None and self.audio_encoder is not None:
@@ -170,6 +171,16 @@ class TransformerLinenPure(nn.Module):
     audio_masks = None
     if audio_embeddings is not None:
       audio_masks = mm_processor.get_bidirectional_mask_audio(self.config, decoder_input_tokens)
+
+    multimodal_input = None
+    if image_embeddings is not None or audio_embeddings is not None:
+      multimodal_input = MultimodalInput(
+          image_embeddings=image_embeddings,
+          image_masks=encoder_image_masks,
+          audio_embeddings=audio_embeddings,
+          audio_masks=audio_masks,
+          bidirectional_mask=bidirectional_mask,
+      )
 
     logits, hidden_state, kv_caches = self.decoder(
         shared_embedding=self.shared_embedding,
@@ -181,15 +192,11 @@ class TransformerLinenPure(nn.Module):
         previous_chunk=previous_chunk,
         slot=slot,
         page_state=page_state,
-        bidirectional_mask=bidirectional_mask,
-        image_embeddings=image_embeddings,
-        image_masks=encoder_image_masks,
-        audio_embeddings=audio_embeddings,
-        audio_masks=audio_masks,
+        multimodal_input=multimodal_input,
         kv_caches=kv_caches,
         attention_metadata=attention_metadata,
         deepstack_visual_embeds=deepstack_visual_embeds,
-    )
+    )  # pytype: disable=wrong-keyword-args
 
     # If we are initializing the model AND MTP is enabled, we must create
     # dummy target tensors. This allows Flax to trace the MTPBlock and create
@@ -483,6 +490,16 @@ class Transformer(nnx.Module):
     if audio_embeddings is not None:
       audio_masks = mm_processor.get_bidirectional_mask_audio(self.config, decoder_input_tokens)
 
+    multimodal_input = None
+    if image_embeddings is not None or audio_embeddings is not None:
+      multimodal_input = MultimodalInput(
+          image_embeddings=image_embeddings,
+          image_masks=encoder_image_masks,
+          audio_embeddings=audio_embeddings,
+          audio_masks=audio_masks,
+          bidirectional_mask=bidirectional_mask,
+      )
+
     mutable_collections = []
     if self.config.record_internal_nn_metrics:
       mutable_collections.append("intermediates")
@@ -500,15 +517,11 @@ class Transformer(nnx.Module):
           previous_chunk=previous_chunk,
           slot=slot,
           page_state=page_state,
-          bidirectional_mask=bidirectional_mask,
-          image_embeddings=image_embeddings,
-          image_masks=encoder_image_masks,
-          audio_embeddings=audio_embeddings,
-          audio_masks=audio_masks,
+          multimodal_input=multimodal_input,
           kv_caches=kv_caches,
           attention_metadata=attention_metadata,
           deepstack_visual_embeds=deepstack_visual_embeds,
-      )
+      )  # pytype: disable=wrong-keyword-args
     else:
       logits, hidden_state, kv_caches = self.decoder(
           shared_embedding=self.token_embedder,
@@ -520,11 +533,7 @@ class Transformer(nnx.Module):
           previous_chunk=previous_chunk,
           slot=slot,
           page_state=page_state,
-          bidirectional_mask=bidirectional_mask,
-          image_embeddings=image_embeddings,
-          image_masks=encoder_image_masks,
-          audio_embeddings=audio_embeddings,
-          audio_masks=audio_masks,
+          multimodal_input=multimodal_input,
           kv_caches=kv_caches,
           attention_metadata=attention_metadata,
           deepstack_visual_embeds=deepstack_visual_embeds,

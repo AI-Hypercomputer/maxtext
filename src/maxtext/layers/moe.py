@@ -378,7 +378,7 @@ class RoutedMoE(nnx.Module):
         out_features_shape=self.num_experts,
         mesh=self.mesh,
         model_name=self.config.model_name,
-        dtype=self.dtype,
+        dtype=jnp.float32 if self.config.float32_gate_logits else self.dtype,
         weight_dtype=self.weight_dtype,
         quant=self.quant,
         kernel_init=self.kernel_init,
@@ -457,6 +457,14 @@ class RoutedMoE(nnx.Module):
       self.wi_1_bias = None
       self.wo_bias = None
 
+    if self.config.decoder_block == ctypes.DecoderBlockType.GEMMA4:
+      self.per_expert_scale = nnx.Param(
+          jnp.ones((self.num_experts,), dtype=self.weight_dtype),
+          sharding=("exp",),
+      )
+    else:
+      self.per_expert_scale = None
+
   def _maybe_shard_with_logical(self, inputs, logical_name):
     return maybe_shard_with_logical(
         inputs,
@@ -506,15 +514,19 @@ class RoutedMoE(nnx.Module):
 
     if self.config.model_name.startswith("deepseek3"):
       top_k_weights, top_k_indices = self.deepseek_routing(gate_logits, pre_bias_logits)
+    elif self.config.decoder_block == ctypes.DecoderBlockType.GEMMA4:
+      router_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
+      _, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
+      top_k_weights = jnp.take_along_axis(router_probs, top_k_indices, axis=-1).astype(self.dtype)
     else:
       top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
 
     if self.config.decoder_block == ctypes.DecoderBlockType.DEEPSEEK:
       top_k_weights = self.deepseek_scale_weights(top_k_weights)
-    elif self.config.decoder_block != ctypes.DecoderBlockType.LLAMA4:
+    elif self.config.decoder_block not in (ctypes.DecoderBlockType.LLAMA4, ctypes.DecoderBlockType.GEMMA4):
       top_k_weights = jax.nn.softmax(top_k_weights.astype(jnp.float32), axis=-1).astype(self.dtype)
 
-    # This is the Qwen3-specific normalization of router weights.
+    # Normalization of router weights (e.g. used by Qwen3, Gemma4).
     if self.config.norm_topk_prob:
       top_k_weights /= top_k_weights.sum(axis=-1, keepdims=True)
 
@@ -2004,15 +2016,20 @@ class RoutedMoE(nnx.Module):
     return w0_kernel, w1_kernel, wo_kernel
 
   def __call__(
-      self, inputs: jax.Array, out_sharding: NamedSharding | None = None
+      self, inputs: jax.Array, gate_inputs: jax.Array | None = None, out_sharding: NamedSharding | None = None
   ) -> tuple[jax.Array, Optional[jax.Array], Optional[jax.Array]]:
     cfg = self.config
     inputs = inputs.astype(cfg.dtype)
-    gate_logits, pre_bias_logits = self.gate(inputs)
+    gate_dtype = jnp.float32 if cfg.float32_gate_logits else cfg.dtype
+    routing_inputs = inputs if gate_inputs is None else gate_inputs.astype(gate_dtype)
+    gate_logits, pre_bias_logits = self.gate(routing_inputs)
 
     w0_kernel = jnp.asarray(self.wi_0[...], self.dtype)
     w1_kernel = jnp.asarray(self.wi_1[...], self.dtype)
     wo_kernel = jnp.asarray(self.wo[...], self.dtype)
+
+    if self.per_expert_scale is not None:
+      wo_kernel = wo_kernel * jnp.asarray(self.per_expert_scale[...], self.dtype)[:, None, None]
 
     if cfg.mlp_bias:
       w0_bias = jnp.asarray(self.wi_0_bias[...], self.dtype)
@@ -2093,10 +2110,14 @@ class RoutedAndSharedMoE(nnx.Module):
         quant=self.quant,
         rngs=self.rngs,
     )
+
+    shared_expert_mlp_dim = (
+        self.config.mlp_dim if self.config.decoder_block == ctypes.DecoderBlockType.GEMMA4 else self.config.moe_mlp_dim
+    )
     self.shared_experts = linears.MlpBlock(
         mesh=self.mesh,
         in_features=self.config.emb_dim,
-        intermediate_dim=self.config.shared_experts * self.config.moe_mlp_dim,
+        intermediate_dim=self.config.shared_experts * shared_expert_mlp_dim,
         activations=self.config.mlp_activations,
         intermediate_dropout_rate=self.config.dropout_rate,
         dtype=self.config.dtype,
@@ -2113,10 +2134,14 @@ class RoutedAndSharedMoE(nnx.Module):
   def __call__(
       self,
       inputs: jax.Array,
+      original_inputs: jax.Array | None = None,
+      gate_inputs: jax.Array | None = None,
       intermediate_sharding: NamedSharding | None = None,
       out_sharding: NamedSharding | None = None,
   ) -> tuple[jax.Array, Optional[jax.Array], Optional[jax.Array]]:
-    routed_experts, load_balance_loss, moe_bias_updates = self.routed_moe(inputs, out_sharding=out_sharding)
+    routed_experts, load_balance_loss, moe_bias_updates = self.routed_moe(
+        inputs, gate_inputs=gate_inputs, out_sharding=out_sharding
+    )
     shared_experts = self.shared_experts(inputs, intermediate_sharding=intermediate_sharding, out_sharding=out_sharding)
     return routed_experts + shared_experts, load_balance_loss, moe_bias_updates
 

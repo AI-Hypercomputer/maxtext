@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""""Module for encoder layers."""
+"""Module for encoder layers."""
 
 import jax
 from flax import nnx
@@ -57,6 +57,18 @@ class VisionEncoder(nnx.Module):
       projector_name = "Qwen3OmniMoeVisionProjector_0"
       setattr(self, encoder_name, qwen3.Qwen3OmniMoeVisionEncoder(config=self.config, mesh=self.mesh, rngs=self.rngs))
       setattr(self, projector_name, qwen3.Qwen3OmniMoeVisionProjector(config=self.config, rngs=self.rngs))
+      return encoder_name, projector_name
+    elif self.config.model_name in ["gemma4-26b", "gemma4-31b"]:
+      from maxtext.models import gemma4_vision  # pylint: disable=import-outside-toplevel
+
+      encoder_name = "Gemma4VisionEncoderLayer_0"
+      projector_name = "Gemma4VisionProjector_0"
+      setattr(
+          self, encoder_name, gemma4_vision.Gemma4VisionEncoderLayer(config=self.config, mesh=self.mesh, rngs=self.rngs)
+      )
+      setattr(
+          self, projector_name, gemma4_vision.Gemma4VisionProjector(config=self.config, mesh=self.mesh, rngs=self.rngs)
+      )
       return encoder_name, projector_name
     else:
       raise ValueError(f"No VisionEncoder implemented for {self.config.model_name} yet")

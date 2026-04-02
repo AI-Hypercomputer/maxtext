@@ -19,6 +19,7 @@ from typing import Any, Sequence
 import numpy as np
 
 import jax.numpy as jnp
+from flax import struct
 
 Config = Any
 
@@ -81,6 +82,17 @@ DECODING_ACTIVE_SEQUENCE_INDICATOR = 1
 DEFAULT_MASK_VALUE = -0.7 * float(np.finfo(np.dtype("float32")).max)
 
 
+@struct.dataclass
+class MultimodalInput:
+  """Multimodal inputs for encoder processing."""
+
+  image_embeddings: Array | None = None
+  image_masks: Array | None = None
+  audio_embeddings: Array | None = None
+  audio_masks: Array | None = None
+  bidirectional_mask: Array | None = None
+
+
 class DecoderBlockType(enum.Enum):
   """Decoder block types."""
 
@@ -92,6 +104,7 @@ class DecoderBlockType(enum.Enum):
   GEMMA = "gemma"
   GEMMA2 = "gemma2"
   GEMMA3 = "gemma3"
+  GEMMA4 = "gemma4"
   QWEN2 = "qwen2"
   QWEN3 = "qwen3"
   QWEN3_MOE = "qwen3_moe"

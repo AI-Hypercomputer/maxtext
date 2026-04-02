@@ -612,12 +612,19 @@ def to_linen_class(
         **linen_kwargs,
     )
 
+  # Set the class name correctly to avoid issues like ScanToLinenPartial_0
+  # Instead of ToLinenPartial_0, we can use the base class name + 'ToLinen'
+  class_name = f"{base_nnx_class.__name__}ToLinen"
+
   class ToLinenPartial(ToLinen):
     """A dynamically created Linen Module that wraps a specific NNX Module."""
 
     def __init_subclass__(cls, **kwargs):
       super().__init_subclass__(**kwargs)
       cls.__init__ = __init__
+
+  ToLinenPartial.__name__ = class_name
+  ToLinenPartial.__qualname__ = class_name
 
   ToLinenPartial.__init__ = __init__
 

@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Tests for the common MaxText utilities """
+"""Tests for the common MaxText utilities"""
 import os
 import unittest
 import numpy as np
@@ -22,6 +22,7 @@ from maxtext.utils.globals import MAXTEXT_REPO_ROOT
 from maxtext.multimodal import processor as mm_processor
 from maxtext.multimodal import utils as mm_utils
 from maxtext.multimodal import processor_gemma3
+from maxtext.multimodal import processor_gemma4
 from maxtext.multimodal import processor_llama4
 
 
@@ -74,6 +75,80 @@ class TestTextImageFusionGemma3(unittest.TestCase):
         ]
     )
     np.testing.assert_array_equal(new_tokens, expected)
+
+
+class TestTextImageFusionGemma4(unittest.TestCase):
+  """Test inserting place_holder tokens for image for Gemma 4"""
+
+  def setUp(self):
+    super().setUp()
+    # Gemma 4 specific token IDs
+    self.BOI_TOKEN = 255999
+    self.EOI_TOKEN = 258882
+    self.PLACEHOLDER_TOKEN = 258880
+
+    # Mock sequence for testing the raw insert_sequence utility
+    self.mock_sequence = [self.BOI_TOKEN, self.PLACEHOLDER_TOKEN, self.EOI_TOKEN]
+
+  def test_insert_sequence_zero_image(self):
+    tokens = np.asarray([1, 2, 3, 4, 5, 6])
+    num_images = 0
+    new_tokens = processor_gemma4.insert_sequence(
+        at=self.PLACEHOLDER_TOKEN, sequence=self.mock_sequence, tokens=tokens, max_num_images=num_images
+    )
+    np.testing.assert_array_equal(new_tokens, tokens)
+
+  def test_insert_sequence_single_image(self):
+    tokens = np.asarray([1, 2, 3, self.PLACEHOLDER_TOKEN, 5, 6])
+    num_images = 1
+    new_tokens = processor_gemma4.insert_sequence(
+        at=self.PLACEHOLDER_TOKEN, sequence=self.mock_sequence, tokens=tokens, max_num_images=num_images
+    )
+    expected = np.asarray([1, 2, 3] + self.mock_sequence + [5, 6])
+    np.testing.assert_array_equal(new_tokens, expected)
+
+  def test_insert_sequence_two_images(self):
+    tokens = np.asarray([1, self.PLACEHOLDER_TOKEN, 3, 4, self.PLACEHOLDER_TOKEN, 6])
+    num_images = 2
+    new_tokens = processor_gemma4.insert_sequence(
+        at=self.PLACEHOLDER_TOKEN, sequence=self.mock_sequence, tokens=tokens, max_num_images=num_images
+    )
+    expected = np.asarray([1] + self.mock_sequence + [3, 4] + self.mock_sequence + [6])
+    np.testing.assert_array_equal(new_tokens, expected)
+
+  def test_insert_sequence_in_batch(self):
+    tokens = np.asarray(
+        [[1, 2, 3, self.PLACEHOLDER_TOKEN, 5, 6], [1, self.PLACEHOLDER_TOKEN, 3, 4, self.PLACEHOLDER_TOKEN, 6]]
+    )
+    num_images = 2
+    new_tokens = processor_gemma4.insert_sequence(
+        at=self.PLACEHOLDER_TOKEN, sequence=self.mock_sequence, tokens=tokens, max_num_images=num_images
+    )
+    expected = np.asarray(
+        [
+            [1, 2, 3] + self.mock_sequence + [5, 6] + [0] * (len(self.mock_sequence) - 1),
+            [1] + self.mock_sequence + [3, 4] + self.mock_sequence + [6],
+        ]
+    )
+    np.testing.assert_array_equal(new_tokens, expected)
+
+  def test_add_extra_tokens_for_images_gemma4_full_sequence(self):
+    """Verifies that the correct number of pooled soft tokens are inserted."""
+    tokens = np.asarray([1, 2, self.PLACEHOLDER_TOKEN, 4])
+
+    # Use the actual Gemma4 function
+    new_tokens = processor_gemma4.add_extra_tokens_for_images_gemma4(tokens=tokens, max_num_images=1)
+
+    # Calculate expected soft tokens based on 672x960 image size, 16 patch size, and 3x3 pooling
+    num_patches = (672 // 16) * (960 // 16)  # 2520
+    num_soft_tokens = num_patches // (3**2)  # 280
+
+    expected_sequence = [self.BOI_TOKEN] + [self.PLACEHOLDER_TOKEN] * num_soft_tokens + [self.EOI_TOKEN]
+    expected_tokens = np.asarray([1, 2] + expected_sequence + [4])
+
+    # The length should be 3 (original non-image tokens) + 282 (inserted sequence) = 285
+    self.assertEqual(len(new_tokens), 285)
+    np.testing.assert_array_equal(new_tokens, expected_tokens)
 
 
 class TestLlama4ImageProcessing(unittest.TestCase):
@@ -202,6 +277,7 @@ class TestLlama4PostProcessing(unittest.TestCase):
     config = pyconfig.initialize(
         ["", base_config_path],
         model_name="llama4-17b-16e",
+        skip_jax_distributed_system=True,
     )
     image_offsets = mm_processor.get_image_offsets(config=config, processor_output=processor_output)
     post_processed_tokens = processor_llama4.add_extra_tokens_for_images_llama4(dummy_tokens, processor_output)
