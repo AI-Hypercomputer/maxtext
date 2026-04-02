@@ -81,9 +81,9 @@ def verify_array_records(output_dir, expected_steps, expected_k, expected_keys):
     max_logging.log(f"Verified {num_records_in_file} records in {file_path}")
 
   # Verify the total number of steps processed across all files
-  assert total_records_processed == expected_steps, (
-      f"Expected a total of {expected_steps} steps across all files, but found {total_records_processed}."
-  )
+  assert (
+      total_records_processed == expected_steps
+  ), f"Expected a total of {expected_steps} steps across all files, but found {total_records_processed}."
 
   max_logging.log("-----------------------------------------")
   max_logging.log("Verification Successful!")
