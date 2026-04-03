@@ -329,9 +329,6 @@ def apply_chat_template(example, tokenizer_model, data_column_name, tools_column
   messages = []
   is_prompt = []
   round_msgs = []
-  raw_messages = example[data_column_name]
-  if isinstance(raw_messages, (str, bytes)):
-    example[data_column_name] = json.loads(raw_messages)
   tools = example.get(tools_column_name) if tools_column_name else None
   if isinstance(tools, str):
     tools = json.loads(tools)

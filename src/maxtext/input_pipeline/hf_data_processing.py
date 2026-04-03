@@ -262,9 +262,6 @@ def preprocessing_pipeline(
     dataset, data_column_names = instruction_data_processing.convert_to_conversational_format(
         dataset=dataset, data_columns=data_column_names, chat_template_path=chat_template_path
     )
-
-    # Deserialize JSON string columns if needed (e.g., messages stored as JSON strings
-    # in Parquet to avoid PyArrow schema issues with nested/varying structures)
     for col in data_column_names:
       if isinstance(dataset.features.get(col), datasets.Value) and dataset.features[col].dtype == "string":
         dataset = dataset.map(lambda x, c=col: {c: json.loads(x[c]) if isinstance(x[c], str) else x[c]})
