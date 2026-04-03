@@ -47,6 +47,8 @@ class MLATestBase(parameterized.TestCase):
       "qk_nope_head_dim": 128,
       "qk_rope_head_dim": 64,
       "v_head_dim": 192,
+      "dtype": "float32",
+      "mla_naive_kvcache": False,  # TODO: Test both naive/non-naive modes once b/485997160 is resolved.
   }
 
   def setUp(self):

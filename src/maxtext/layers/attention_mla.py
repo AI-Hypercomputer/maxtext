@@ -38,6 +38,11 @@ from maxtext.common.common_types import (
     AxisNames,
     BATCH,
     BATCH_NO_EXP,
+    CACHE_BATCH,
+    CACHE_BATCH_PREFILL,
+    CACHE_SEQUENCE,
+    CACHE_HEADS_NONE,
+    CACHE_KV,
     Config,
     DECODE_BATCH,
     DECODE_LENGTH,
@@ -76,6 +81,9 @@ from maxtext.utils.sharding import create_sharding
 from maxtext.utils.globals import EPS
 
 
+PLACEHOLDER_SEQ_LEN = 1
+
+
 class Indexer(nnx.Module):
   """Indexer for DeepSeek Sparse Attention (DSA).
 
@@ -109,6 +117,7 @@ class Indexer(nnx.Module):
     self.rngs = rngs
     self.dtype = config.dtype
     self.weight_dtype = config.weight_dtype
+    self.max_target_length = config.max_target_length
 
     self.n_heads = config.indexer_n_heads
     self.head_dim = config.indexer_head_dim
@@ -168,6 +177,31 @@ class Indexer(nnx.Module):
         rngs=self.rngs,
     )
 
+  def update_indexer_cache(self, kv_cache, k, decoder_segment_ids, model_mode, previous_chunk):
+    """Updates Indexer buffers by processing KV cache results."""
+    k_expanded = k[:, :, jnp.newaxis, :]
+    p_res, a_res = kv_cache(
+        key=k_expanded,
+        value=k_expanded,
+        decoder_segment_ids=decoder_segment_ids,
+        model_mode=model_mode,
+        use_ragged_attention=self.config.use_ragged_attention,
+        previous_chunk=previous_chunk,
+    )
+
+    # Filter out None values to handle PREFILL vs AR modes uniformly
+    active_results = [res for res in [p_res, a_res] if res is not None]
+
+    if not active_results:
+      return None, None
+
+    # Extract keys (index 0) and segment IDs (index 2)
+    keys = jnp.concatenate([res[0] for res in active_results], axis=1)
+    segs = jnp.concatenate([res[2] for res in active_results], axis=1)
+
+    # squeeze(2) removes the jnp.newaxis added above
+    return keys.squeeze(2), segs
+
   def apply_partial_rope(
       self,
       inputs: Array,
@@ -221,6 +255,10 @@ class Indexer(nnx.Module):
       inputs_kv: Array,
       inputs_positions: Optional[Array | None] = None,
       attention_mask: Optional[Array | None] = None,
+      decoder_segment_ids: Optional[Array | None] = None,
+      previous_chunk: Any = None,
+      kv_cache: Any = None,
+      model_mode: str = MODEL_MODE_TRAIN,
   ):
     """Computes the index score to determine the top-k relevant tokens.
 
@@ -245,6 +283,10 @@ class Indexer(nnx.Module):
         `DEFAULT_MASK_VALUE` (a large negative number) prevent it.
         Returns `None` if no masking is determined to be necessary based on
         the inputs and configuration.
+      decoder_segment_ids: Segment IDs for decoder masking.
+      previous_chunk: Previous chunk info for prefill.
+      kv_cache: Key-value cache used when serving models.
+      model_mode: "train", "prefill", or "autoregressive".
 
     Returns:
       indexer_mask: A sparse mask [b, t, s] with 0.0 for top-k selected tokens
@@ -259,10 +301,6 @@ class Indexer(nnx.Module):
       h: Number of Indexer Heads (indexer_n_heads)
       d: Indexer Head Dimension (indexer_head_dim)
     """
-    # NOTE: If sequence length <= topk, indexer always selects all tokens.
-    if self.config.max_target_length <= self.indexer_topk:
-      return None, None, None
-
     bsz, seqlen, _ = inputs_q.shape  # s = t = seqlen
     # ==============================================================================
     # Gradient Isolation Strategy: Main Model vs. Indexer
@@ -300,6 +338,16 @@ class Indexer(nnx.Module):
     k = self.apply_partial_rope(k, inputs_positions=inputs_positions)
     k = k.squeeze(2)  # [b, s, 1, d] -> [b, s, d]
 
+    # Update and retrieve from cache if not training
+    cached_s = None
+    if model_mode != MODEL_MODE_TRAIN:
+      k_cached, cached_s = self.update_indexer_cache(kv_cache, k, decoder_segment_ids, model_mode, previous_chunk)
+      k = k_cached if k_cached is not None else k
+
+    # NOTE: If the total available sequence length <= topk, indexer always selects all tokens.
+    if k.shape[1] <= self.indexer_topk:
+      return None, None, None
+
     # Compute Index Scores
     # QK product: relu(q @ k.T), [b, t, s, h]
     # Similar to MQA, each key is shared by h query head
@@ -313,6 +361,12 @@ class Indexer(nnx.Module):
     # Aggregate head-wise logits: logits @ weights
     indexer_score = jnp.einsum("btsh, bth -> bts", logits, weights, precision=self.config.matmul_precision)  # [b, t, s]
 
+    internal_padding_mask = None
+    if cached_s is not None:
+      # cached_s marks valid tokens from the original prefill step and all subsequent AR steps
+      internal_padding_mask = jnp.where(cached_s > 0, 0.0, DEFAULT_MASK_VALUE)
+      indexer_score += internal_padding_mask[:, None, :]
+
     # Apply attention mask before TopK
     if attention_mask is not None:
       indexer_score += attention_mask
@@ -321,11 +375,14 @@ class Indexer(nnx.Module):
     _, topk_indices = jax.lax.top_k(indexer_score, k=self.indexer_topk)  # topk_indices [b, t, k]
 
     # Create Sparse Index Mask: 0 and large negatives
-    indexer_mask = self.generate_mask(topk_indices, seqlen)  # [b, t, s]
+    indexer_mask = self.generate_mask(topk_indices, k.shape[1])  # [b, t, s]
 
     # Re-apply attention mask after TopK: in case number of unmasked tokens < TopK
     if attention_mask is not None:
       indexer_mask += attention_mask
+
+    if internal_padding_mask is not None:
+      indexer_mask += internal_padding_mask[:, None, :]
 
     return indexer_mask, topk_indices, indexer_score
 
@@ -645,9 +702,40 @@ class MLA(Attention):
           quant=quant,
           model_mode=model_mode,
       )
+      self.IndexerKVCache_0 = self.init_indexer_cache(inputs_kv_shape) if model_mode != MODEL_MODE_TRAIN else None
+    else:
+      self.indexer = None
+      self.IndexerKVCache_0 = None
 
     # Module attribute names must match names previously passed to Linen for checkpointing
     self.MlaKVCache_0 = self.init_mla_kv_caches(inputs_kv_shape) if model_mode != MODEL_MODE_TRAIN else None
+
+  def init_indexer_cache(self, inputs_kv_shape: Tuple):
+    """Initializes Indexer Cache."""
+    batch_size, _, _ = inputs_kv_shape
+    # Use standard KVCache to store keys. Values are unused but required by KVCache API.
+    # KVCache expects key_heads and value_heads. Since k is shared (MQA-like for Indexer),
+    # we use key_heads=1, value_heads=1.
+    return kvcache.KVCache(
+        max_prefill_length=self.max_prefill_predict_length,
+        max_target_length=self.max_target_length,
+        batch=batch_size,
+        key_seq_len=PLACEHOLDER_SEQ_LEN,
+        value_seq_len=PLACEHOLDER_SEQ_LEN,
+        key_heads=1,
+        value_heads=1,
+        key_head_size=self.config.indexer_head_dim,
+        value_head_size=self.config.indexer_head_dim,
+        dtype=self.dtype,
+        kv_quant=None,  # Quantization is not yet supported by the indexer.
+        prefill_cache_logical_axis_names=(CACHE_BATCH_PREFILL, CACHE_SEQUENCE, CACHE_HEADS_NONE, CACHE_KV),
+        cache_logical_axis_names=(CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS_NONE, CACHE_KV),
+        prefill_cache_axis_order=(1, 2, 0, 3),
+        ar_cache_axis_order=(1, 2, 0, 3),
+        use_chunked_prefill=self.config.use_chunked_prefill,
+        model_mode=self.model_mode,
+        rngs=self.rngs,
+    )
 
   def _init_projections(self, inputs_q_shape: Tuple, inputs_kv_shape: Tuple) -> None:
     """Initializes the MLA-specific projections."""
@@ -881,14 +969,13 @@ class MLA(Attention):
     # and max_target_length, not the passed seq_len.
     # We can use a placeholder value. The correct fix might involve refactoring
     # MlaKVCache.
-    placeholder_seq_len = 1
 
     return kvcache.MlaKVCache(
         max_prefill_length=self.max_prefill_predict_length,
         max_target_length=self.max_target_length,
         batch=batch_size,
-        key_seq_len=placeholder_seq_len,
-        value_seq_len=placeholder_seq_len,
+        key_seq_len=PLACEHOLDER_SEQ_LEN,
+        value_seq_len=PLACEHOLDER_SEQ_LEN,
         key_head_size=self.kv_lora_rank,
         value_head_size=self.qk_rope_head_dim,
         dtype=self.dtype,
@@ -1100,6 +1187,9 @@ class MLA(Attention):
       inputs_kv = self._maybe_shard_with_logical(inputs_kv, self.input_axis_names)
       out_logical_name = (BATCH, LENGTH_NO_EXP, HEAD, D_KV)
 
+    if model_mode != MODEL_MODE_TRAIN and decoder_segment_ids is None:
+      decoder_segment_ids = jnp.ones(inputs_q.shape[:2], dtype=jnp.int32)
+
     query, low_rank_q = self.mla_query_projection(inputs_q, inputs_positions, model_mode)
     if self.config.force_q_layout:
       query = layout.with_layout_constraint(query, DLL(major_to_minor=(0, 2, 3, 1)))
@@ -1113,8 +1203,6 @@ class MLA(Attention):
     # Indexer Logic
     indexer_mask = None
     if self.use_indexer:
-      if model_mode != MODEL_MODE_TRAIN:
-        raise NotImplementedError("Sparse indexer has not implemented for inference yet.")
       # generate mask: with 0 and large negative, [b, 1, 1, q_len, kv_len] -> [b, q_len, kv_len]
       attention_mask = self.attention_op.generate_attention_mask(
           query, key, decoder_segment_ids, model_mode, previous_chunk, bidirectional_mask
@@ -1128,6 +1216,10 @@ class MLA(Attention):
           inputs_kv=inputs_kv,
           inputs_positions=inputs_positions,
           attention_mask=attention_mask,
+          decoder_segment_ids=decoder_segment_ids,
+          previous_chunk=previous_chunk,
+          kv_cache=self.IndexerKVCache_0,
+          model_mode=model_mode,
       )
 
       if indexer_mask is not None and self.config.indexer_loss_scaling_factor > 0.0:

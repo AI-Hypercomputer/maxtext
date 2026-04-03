@@ -677,7 +677,7 @@ class AttentionOp(nnx.Module):
           Chunked Prefills - ArXiv:2308.16369 (https://arxiv.org/abs/2308.16369)
     """
     mask = None
-    if model_mode == MODEL_MODE_AUTOREGRESSIVE:
+    if model_mode == MODEL_MODE_AUTOREGRESSIVE and decoder_segment_ids is not None:
       mask = decoder_segment_ids[:, None, None, None, :] == DECODING_ACTIVE_SEQUENCE_INDICATOR
     elif decoder_segment_ids is not None:
       mask = decoder_segment_ids[:, :, None] == decoder_segment_ids[:, None, :]
@@ -2047,6 +2047,14 @@ class AttentionOp(nnx.Module):
       assert prefill_kv_cache
       key, value, decoder_segment_ids = prefill_kv_cache
 
+    indexer_mask_prefill = None
+    indexer_mask_ar = None
+    if indexer_mask is not None:
+      prefill_len = key.shape[1]
+      indexer_mask_prefill = indexer_mask[:, :, :prefill_len]
+      if ar_kv_cache is not None:
+        indexer_mask_ar = indexer_mask[:, :, prefill_len:]
+
     prefill_unnormalized_output, prefill_exponentials_max, prefill_exponentials_sum = self.apply_attention(
         query=query,
         key=key,
@@ -2058,7 +2066,7 @@ class AttentionOp(nnx.Module):
         previous_chunk=previous_chunk,
         bidirectional_mask=bidirectional_mask,
         sinks=sinks,
-        indexer_mask=indexer_mask,
+        indexer_mask=indexer_mask_prefill,
         record_max_logits=record_max_logits,
         qk_product_einsum=self.AqtEinsum_0,
         wv_product_einsum=self.AqtEinsum_1,
@@ -2081,6 +2089,7 @@ class AttentionOp(nnx.Module):
         model_mode=model_mode,
         use_ragged_attention=self.use_ragged_attention,
         bidirectional_mask=bidirectional_mask,
+        indexer_mask=indexer_mask_ar,
         qk_product_einsum=self.AqtEinsum_2,
         wv_product_einsum=self.AqtEinsum_3,
     )
