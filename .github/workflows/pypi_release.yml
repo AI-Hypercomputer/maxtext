@@ -123,3 +123,5 @@ jobs:
       dockerfile: ${{ matrix.dockerfile }}
       maxtext_sha: ${{ github.sha }}
       version_name: ${{ needs.get_latest_maxtext_pypi_version.outputs.latest_pypi_version }}
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}

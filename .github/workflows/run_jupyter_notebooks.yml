@@ -78,7 +78,6 @@ jobs:
       - name: Run Post-Training Notebooks
         shell: bash
         env:
-          PYTHONPATH: "${{ github.workspace }}/src"
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           MAXTEXT_INSTALLED: ${{ inputs.maxtext_installed }}
         run: |
@@ -93,6 +92,7 @@ jobs:
             PAPERMILL_EXE=".venv/bin/papermill"
             source .venv/bin/activate
           fi
+          export PYTHONPATH="${pwd}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
           export MAXTEXT_REPO_ROOT=$(pwd)
           export MAXTEXT_PKG_DIR=$(pwd)/src/maxtext
