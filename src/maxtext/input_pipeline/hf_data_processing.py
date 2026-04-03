@@ -285,8 +285,8 @@ def preprocessing_pipeline(
           remove_columns=data_column_names,
           features=dataset_features,
       )
+      data_column_names = [combined_column_name]
 
-    data_column_names = [k for k in dataset.features.keys() if k != data_processing_utils.TOOLS_COLUMN]
     dataset = dataset.map(
         input_pipeline_utils.apply_chat_template,
         fn_kwargs={
@@ -295,7 +295,7 @@ def preprocessing_pipeline(
             "tools_column_name": tools_column_name,
         },
     )
-    if tools_column_name and tools_column_name in dataset.column_names:
+    if tools_column_name:
       dataset = dataset.remove_columns([tools_column_name])
 
   pad_id = _get_pad_id(tokenizer)
