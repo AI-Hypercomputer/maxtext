@@ -107,6 +107,9 @@ def _get_maxtext_model(config):
     elif config.model_name == "gemma4-26b":
       # Tunix has no Gemma4 model class yet; config is unused for weight sync.
       model_config = None
+    elif config.model_name.startswith("deepseek3"):
+      # Tunix has no DeepSeekV3 model class yet; config is unused for weight sync.
+      model_config = None
     elif config.model_name == "gemma4-31b":
       # Tunix has no Gemma4 model class yet; config is unused for weight sync.
       model_config = None
@@ -162,8 +165,10 @@ def _load_maxtext_model(base_yaml_path):
 
   logging.info("Loading model_name=%s checkpoint=%s fsdp=%d ici_tp=%d rollout_tp=%d tokenizer=%s",
                model_name, _CHECKPOINT.value, _FSDP_TP.value, _ICI_TP.value, _ROLLOUT_TP.value, tokenizer_path)
+               
+  argv = ["", base_yaml_path] + [arg for arg in sys.argv[1:] if "=" in arg and not arg.startswith("--")]
   config_ref = pyconfig.initialize(
-      ["", base_yaml_path],
+      argv,
       base_output_directory="gs://tmp",  # Not used in Tunix.
       run_name=f"bench-weight-sync-{model_name}",
       tokenizer_type="huggingface",
@@ -727,6 +732,203 @@ def save_dict_to_file(dict, filename):
             f.write(f"{key}: {dict[key].shape}\n")
 
 
+class DeepSeekV3ToVLLMConverter:
+    """Converts MaxText DeepSeekV3 weights to the layout expected by vLLM."""
+
+    def __init__(self, config, mesh):
+        self.config = config
+        self.mesh = mesh
+        self.num_layers = config.base_num_decoder_layers
+        self.vllm_state = {}
+        self.vllm_tp = self.config.rollout_tensor_parallelism
+
+    def convert(self, model_state: dict):
+        logging.info(f"\n{GREEN}Starting DeepSeekV3 Conversion...{RESET}")
+        
+        with timer("Convert Global Weights"):
+            self._convert_global(model_state)
+        
+        with timer("Convert Layer Weights"):
+            self._convert_layers(model_state)
+            
+        return self.vllm_state
+
+    def _convert_global(self, params):
+        logging.info("_convert_global: embed_tokens...")
+        self.vllm_state["vllm_model.model.embed_tokens.weight"] = params['base']['token_embedder']['embedding']
+        
+        logging.info("_convert_global: final_norm...")
+        self.vllm_state["vllm_model.model.norm.weight"] = params['base']['decoder']['decoder_norm']['scale']
+        
+        logging.info("_convert_global: lm_head...")
+        @jax.jit
+        def _transpose(x):
+            return jnp.transpose(x, (1, 0))
+        self.vllm_state["vllm_model.lm_head.weight"] = _transpose(params['base']['decoder']['logits_dense']['kernel'])
+
+    def _convert_layers(self, params):
+        layers = params['base']['decoder']['layers']
+        prefix = "vllm_model.model.layers"
+
+        # 1. Layer Norms
+        logging.info("_convert_layers: layer norms...")
+        @jax.jit
+        def _unstack_norm(x):
+            return jnp.unstack(jnp.transpose(x, (1, 0)))
+        
+        input_norms = _unstack_norm(layers['pre_self_attention_layer_norm']['scale'])
+        post_attn_norms = _unstack_norm(layers['post_self_attention_layer_norm']['scale'])
+        
+        for i in range(self.num_layers):
+            self.vllm_state[f"{prefix}.{i}.input_layernorm.weight"] = input_norms[i]
+            self.vllm_state[f"{prefix}.{i}.post_attention_layernorm.weight"] = post_attn_norms[i]
+        
+        # 2. MLA Attention
+        logging.info("_convert_layers: MLA attention...")
+        self._convert_mla(layers['self_attention'], prefix)
+
+        # 3. MoE / MLP
+        logging.info("_convert_layers: MoE / MLP...")
+        if 'moe_block' in layers:
+            self._convert_moe(layers['moe_block'], prefix)
+        elif 'mlp' in layers:
+            # Handle dense MLP if any (though DSV3 is mostly MoE)
+            self._convert_dense_mlp(layers['mlp'], prefix)
+        
+    def _convert_mla(self, attn, prefix):
+        tp = self.vllm_tp
+
+        @jax.jit
+        def _process_mla(attn):
+            # wq_a: (d_model, L, Rank) -> (L, Rank, d_model)
+            wq_a = jnp.transpose(attn['wq_a']['kernel'], (1, 2, 0))
+            
+            # q_norm: (Rank, L) -> (L, Rank)
+            q_norm = jnp.transpose(attn['q_norm']['scale'], (1, 0))
+
+            # wq_b: (Rank, L, Heads, HeadDim) -> (L, Heads * HeadDim, Rank)
+            wq_b = jnp.transpose(attn['wq_b']['kernel'], (1, 2, 3, 0))
+            l, nh, dh, r = wq_b.shape
+            wq_b = wq_b.reshape(l, nh * dh, r)
+            
+            # wkv_a: (d_model, L, Rank + 2 * qk_head_dim) -> (L, Rank + 2 * qk_head_dim, d_model)
+            wkv_a = jnp.transpose(attn['wkv_a']['kernel'], (1, 2, 0))
+            
+            # kv_norm: (Rank, L) -> (L, Rank)
+            kv_norm = jnp.transpose(attn['kv_norm']['scale'], (1, 0))
+
+            # wkv_b: (Rank, L, Heads, HeadDim + qk_head_dim) -> (L, Heads * (HeadDim + qk_head_dim), Rank)
+            wkv_b = jnp.transpose(attn['wkv_b']['kernel'], (1, 2, 3, 0))
+            l, nh, dh_total, r = wkv_b.shape
+            wkv_b = wkv_b.reshape(l, nh * dh_total, r)
+            
+            # out: (Heads, HeadDim, L, d_model) -> (L, d_model, Heads * HeadDim)
+            wo = jnp.transpose(attn['out']['kernel'], (2, 3, 0, 1))
+            l, dm, nh, dh = wo.shape
+            wo = wo.reshape(l, dm, nh * dh)
+            # Standard is (out_features, in_features), so (d_model, Heads * HeadDim).
+            # vLLM expects o_proj.weight as (d_model, Heads * HeadDim)
+            
+            return {
+                "q_a_proj.weight": jnp.unstack(wq_a),
+                "q_b_proj.weight": jnp.unstack(wq_b),
+                "kv_a_proj_with_mqa.weight": jnp.unstack(wkv_a),
+                "kv_b_proj.weight": jnp.unstack(wkv_b),
+                "o_proj.weight": jnp.unstack(wo),
+                "q_a_layernorm.weight": jnp.unstack(q_norm),
+                "kv_a_layernorm.weight": jnp.unstack(kv_norm),
+            }
+
+        mla_weights = _process_mla(attn)
+        for key, layers in mla_weights.items():
+            for i, weight in enumerate(layers):
+                self.vllm_state[f"{prefix}.{i}.self_attn.{key}"] = weight
+
+    def _convert_moe(self, moe, prefix):
+        tp = self.vllm_tp
+
+        logging.info("_convert_moe: gate...")
+        @jax.jit
+        def _process_gate(gate_kernel):
+            # (emb, L, E) -> (L, E, emb)
+            return jnp.unstack(jnp.transpose(gate_kernel, (1, 2, 0)))
+        
+        gate_layers = _process_gate(moe['MoeBlock_0']['gate']['kernel'])
+        for i, w in enumerate(gate_layers):
+            self.vllm_state[f"{prefix}.{i}.mlp.gate.weight"] = w
+
+        logging.info("_convert_moe: routed experts...")
+        @jax.jit
+        def _process_routed(wi_0, wi_1, wo):
+            # wi_0: (E, L, d_model, d_inner) -> (L, E, d_inner, d_model)
+            l = wi_0.shape[1]
+            e = wi_0.shape[0]
+            dm = wi_0.shape[2]
+            di = wi_0.shape[3]
+            
+            w0 = jnp.transpose(wi_0, (1, 0, 3, 2)) # (L, E, d_inner, d_model)
+            w1 = jnp.transpose(wi_1, (1, 0, 3, 2)) # (L, E, d_inner, d_model)
+            
+            # Interleave for TP
+            chunk_size = di // tp
+            w0_chunks = w0.reshape(l, e, tp, chunk_size, dm)
+            w1_chunks = w1.reshape(l, e, tp, chunk_size, dm)
+            gate_up = jnp.stack([w0_chunks, w1_chunks], axis=3).reshape(l, e, 2 * di, dm)
+            # vLLM expects (E, d_model, 2*d_inner)
+            gate_up = jnp.transpose(gate_up, (0, 1, 3, 2))
+            
+            # wo: (E, L, d_inner, d_model) -> (L, E, d_model, d_inner)
+            down = jnp.transpose(wo, (1, 0, 3, 2))
+            
+            return jnp.unstack(gate_up), jnp.unstack(down)
+
+        gate_up_layers, down_layers = _process_routed(moe['MoeBlock_0']['wi_0'], moe['MoeBlock_0']['wi_1'], moe['MoeBlock_0']['wo'])
+        
+        for i in range(self.num_layers):
+            self.vllm_state[f"{prefix}.{i}.mlp.experts.gate_up_proj"] = gate_up_layers[i]
+            self.vllm_state[f"{prefix}.{i}.mlp.experts.down_proj"] = down_layers[i]
+
+        logging.info("_convert_moe: shared experts...")
+        @jax.jit
+        def _process_shared(wi_0, wi_1, wo):
+            # (emb, L, d_shared) -> (L, d_shared, emb)
+            l = wi_0.shape[1]
+            dm = wi_0.shape[0]
+            ds = wi_0.shape[2]
+
+            w0 = jnp.transpose(wi_0, (1, 2, 0))
+            w1 = jnp.transpose(wi_1, (1, 2, 0))
+            
+            # Interleave for TP? Shared experts might also be TPed in vLLM.
+            # If so, they are usually treated as a single dense MLP.
+            chunk_size = ds // tp
+            w0_chunks = w0.reshape(l, tp, chunk_size, dm)
+            w1_chunks = w1.reshape(l, tp, chunk_size, dm)
+            gate_up = jnp.stack([w0_chunks, w1_chunks], axis=2).reshape(l, 2 * ds, dm)
+            # vLLM expects (2*d_shared, d_model) -> (d_model, 2*d_shared)
+            gate_up = jnp.transpose(gate_up, (0, 2, 1))
+
+            # wo: (d_shared, L, d_model) -> (L, d_model, d_shared)
+            down = jnp.transpose(wo, (1, 2, 0))
+            
+            return jnp.unstack(gate_up), jnp.unstack(down)
+
+        sh_gate_up, sh_down = _process_shared(
+            moe['shared_experts']['wi_0']['kernel'],
+            moe['shared_experts']['wi_1']['kernel'],
+            moe['shared_experts']['wo']['kernel']
+        )
+        
+        for i in range(self.num_layers):
+            self.vllm_state[f"{prefix}.{i}.mlp.shared_experts.gate_up_proj.weight"] = sh_gate_up[i]
+            self.vllm_state[f"{prefix}.{i}.mlp.shared_experts.down_proj.weight"] = sh_down[i]
+
+    def _convert_dense_mlp(self, mlp, prefix):
+        # Implementation for dense MLP layers if needed
+        pass
+
+
+
 def main():
   print(f"JAX devices: {jax.devices()}")  
   _setup_jax_compilation_cache()
@@ -762,8 +964,12 @@ def main():
   
   if config.model_name.startswith("gemma4"):
     converter = Gemma4ToVLLMConverter(config, mesh)
+  elif config.model_name.startswith("deepseek3"):
+    converter = DeepSeekV3ToVLLMConverter(config, mesh)
   else:
     converter = MaxTextToVLLMConverter(config, mesh)
+
+
   with timer("Overall Conversion "):
     vllm_state = converter.convert(model_state)
   del model_state
