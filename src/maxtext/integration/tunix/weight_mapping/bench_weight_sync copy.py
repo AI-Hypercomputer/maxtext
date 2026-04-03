@@ -37,7 +37,7 @@ _JAX_COMPILATION_CACHE_DIR = "/tmp/jax_cache"
 # Flags
 FLAGS = flags.FLAGS
 _XPROF = flags.DEFINE_bool('xprof', False, 'xprof')
-_RAND_INIT = flags.DEFINE_bool('rand_init', True, 'Whether to use random initialization instead of loading from checkpoint, for faster testing.')  
+_RAND_INIT = flags.DEFINE_bool('rand_init', False, 'Whether to use random initialization instead of loading from checkpoint, for faster testing.')  
 
 def _setup_jax_compilation_cache():
   jax_config.update("jax_compilation_cache_dir", _JAX_COMPILATION_CACHE_DIR)
@@ -163,9 +163,10 @@ def _load_maxtext_model(base_yaml_path):
       query_proj="offload",
       key_proj="offload",
       value_proj="offload",
-      ici_expert_parallelism=4,
-      # ici_fsdp_parallelism=,
-      # ici_tensor_parallelism=,
+      # ici_expert_parallelism=4,
+      ici_fsdp_parallelism=2,
+      ici_tensor_parallelism=2,
+      rollout_tensor_parallelism=2,
       override_model_config="true",
       # debug_sharding="true",
       checkpoint_storage_concurrent_gb=80,
@@ -180,6 +181,7 @@ class MaxTextToVLLMConverter:
         self.mesh = mesh
         self.num_layers = config.base_num_decoder_layers
         self.vllm_state = {}
+        self.vllm_tp = self.config.rollout_tensor_parallelism
 
     # --- 1. Top-Level Entry Point ---
     def convert(self, model_state: dict):
@@ -206,7 +208,7 @@ class MaxTextToVLLMConverter:
         logging.info("_convert_global: done")
                 
     def _convert_attn(self, params):
-      @jax.jit(donate_argnums=(0,))
+      @jax.jit
       def _transpose_unstack(x):
         return jnp.unstack(jnp.transpose(x, (1, 0)))
 
@@ -272,59 +274,70 @@ class MaxTextToVLLMConverter:
       self.vllm_state["vllm_model.model.embed_tokens.weight"] = params['base']['token_embedder']['embedding']
 
     def _to_lm_head(self, params):
-      @jax.jit(donate_argnums=(0,))
+      @jax.jit
       def _transpose(x):
         return jnp.transpose(x, (1, 0))
       self.vllm_state["vllm_model.lm_head.weight"] = _transpose(
           params['base']['decoder']['logits_dense']['kernel']
       )
       
-    @staticmethod
-    @functools.partial(jax.jit, donate_argnums=(0,))
-    def _to_attn(attn: PyTree) -> dict[str, jax.Array]:
-      # (d_model, l, h, d) -> (l, d_model, h, d)
-      q = jnp.transpose(attn['query']['kernel'], (1, 0, 2, 3))
-      k = jnp.transpose(attn['key']['kernel'], (1, 0, 2, 3))
-      v = jnp.transpose(attn['value']['kernel'], (1, 0, 2, 3))
-      # GQA interleaving: [Q_group0, K0, V0, Q_group1, K1, V1, ...]
-      # q: (l, d_model, num_q_heads, head_dim)
-      # k: (l, d_model, num_kv_heads, head_dim)
-      num_q_heads = q.shape[2]
-      num_kv_heads = k.shape[2]
-      heads_per_group = num_q_heads // num_kv_heads
-      l, d_model, _, head_dim = q.shape
-      # Group q: (l, d_model, num_kv_heads, heads_per_group, head_dim)
-      q_grouped = q.reshape(l, d_model, num_kv_heads, heads_per_group, head_dim)
-      # Group k, v: (l, d_model, num_kv_heads, 1, head_dim)
-      k_grouped = k.reshape(l, d_model, num_kv_heads, 1, head_dim)
-      v_grouped = v.reshape(l, d_model, num_kv_heads, 1, head_dim)
-      # Concat within each group: (l, d_model, num_kv_heads, heads_per_group+2, head_dim)
-      group = jnp.concatenate([q_grouped, k_grouped, v_grouped], axis=3)
-      # Flatten and transpose: (l, num_kv_heads*(heads_per_group+2)*head_dim, d_model)
-      qkv_proj = jnp.transpose(group.reshape(l, d_model, -1), (0, 2, 1))
-      
-      # (h, l, d, d_model) -> (l, d_model, Heads, d)
-      o = jnp.transpose(attn['out']['kernel'], (1, 3, 0, 2))
-      # (h, l, d, d_model) -> (l, d_model, Total_Dim)
-      o_proj = o.reshape(o.shape[0], o.shape[1], -1)
-    
-      # (d_model, l) -> (l, d_model)
-      q_norm = jnp.transpose(attn['query_norm']['scale'], (1, 0))
-      # (d_model, l) -> (l, d_model)
-      k_norm = jnp.transpose(attn['key_norm']['scale'], (1, 0))
+    def _to_attn(self, attn: PyTree) -> dict[str, jax.Array]:
+      tp = self.vllm_tp
 
-      return {
-          "self_attn.qkv_proj.weight": jnp.unstack(qkv_proj),
-          "self_attn.o_proj.weight": jnp.unstack(o_proj),
-          "self_attn.q_norm.weight": jnp.unstack(q_norm),
-          "self_attn.k_norm.weight": jnp.unstack(k_norm)
-      }
+      @jax.jit
+      def _compute(attn):
+        # (d_model, l, h, d) -> (l, d_model, h, d)
+        q = jnp.transpose(attn['query']['kernel'], (1, 0, 2, 3))
+        k = jnp.transpose(attn['key']['kernel'], (1, 0, 2, 3))
+        v = jnp.transpose(attn['value']['kernel'], (1, 0, 2, 3))
+
+        num_q_heads = q.shape[2]
+        num_kv_heads = k.shape[2]
+        head_dim = q.shape[3]
+        l, d_model = q.shape[0], q.shape[1]
+
+        # When TP > num_heads, vLLM replicates heads to every TP rank
+        # (this is how vLLM handles GQA with enable_dp_attention when tp > num_kv_heads)
+        if tp > num_kv_heads:
+          kv_per_tp = num_kv_heads
+          k_by_tp = jnp.broadcast_to(k[:, :, jnp.newaxis, :, :], (l, d_model, tp, kv_per_tp, head_dim))
+          v_by_tp = jnp.broadcast_to(v[:, :, jnp.newaxis, :, :], (l, d_model, tp, kv_per_tp, head_dim))
+        else:
+          kv_per_tp = num_kv_heads // tp
+          k_by_tp = k.reshape(l, d_model, tp, kv_per_tp, head_dim)
+          v_by_tp = v.reshape(l, d_model, tp, kv_per_tp, head_dim)
+
+        if tp > num_q_heads:
+          q_per_tp = num_q_heads
+          q_by_tp = jnp.broadcast_to(q[:, :, jnp.newaxis, :, :], (l, d_model, tp, q_per_tp, head_dim))
+        else:
+          q_per_tp = num_q_heads // tp
+          q_by_tp = q.reshape(l, d_model, tp, q_per_tp, head_dim)
+
+        qkv_by_tp = jnp.concatenate([q_by_tp, k_by_tp, v_by_tp], axis=3)
+        qkv_flat = qkv_by_tp.reshape(l, d_model, -1)
+        qkv_proj = jnp.transpose(qkv_flat, (0, 2, 1))
+
+        o = jnp.transpose(attn['out']['kernel'], (1, 3, 0, 2))
+        o_proj = o.reshape(o.shape[0], o.shape[1], -1)
+
+        q_norm = jnp.transpose(attn['query_norm']['scale'], (1, 0))
+        k_norm = jnp.transpose(attn['key_norm']['scale'], (1, 0))
+
+        return {
+            "self_attn.qkv_proj.weight": jnp.unstack(qkv_proj),
+            "self_attn.o_proj.weight": jnp.unstack(o_proj),
+            "self_attn.q_norm.weight": jnp.unstack(q_norm),
+            "self_attn.k_norm.weight": jnp.unstack(k_norm)
+        }
+
+      return _compute(attn)
     
     def _to_mlp_gate(self, param):
       # param: [d_model, l, total_e] -> [l, total_e, d_model]
       # shard_map removed: plain transpose lets GSPMD propagate sharding
       # without requiring param and mesh to be on the same device set.
-      @functools.partial(jax.jit, donate_argnums=(0,))
+      @jax.jit
       def _transpose(param):
         return jnp.transpose(param, (1, 2, 0))
       param = _transpose(param)
@@ -332,7 +345,7 @@ class MaxTextToVLLMConverter:
 
     def _to_mlp_expert_down(self, param):
       # param: [E, L, Hidden, Inter] -> [L, E, Inter, Hidden]
-      @functools.partial(jax.jit, donate_argnums=(0,))
+      @jax.jit
       def _transpose(param):
         return jnp.transpose(param, (1, 0, 3, 2))
       param = _transpose(param)
@@ -340,11 +353,13 @@ class MaxTextToVLLMConverter:
       # So for each layer, do param[i]: (E, Inter, Hidden) -> (E, Hidden, Inter)
       param = jnp.transpose(param, (0, 1, 3, 2))
       return self._unstack_layer(param)
-    
+
     def _to_mlp_expert_gate_up(self, wi_0, wi_1, num_layers, layer_key_prefix, layer_key_suffix):
       # Process all layers in one JIT call using vmap to avoid per-layer dispatch
       # overhead (which was ~50 separate device syncs on multi-host v5p-64).
-      @functools.partial(jax.jit, donate_argnums=(0, 1))
+      tp = self.vllm_tp
+      
+      @jax.jit
       def _fuse_all(wi_0, wi_1):
         # wi_0, wi_1: (e, l, d_model, d_inner) -> (l, e, d_model, d_inner)
         wi_0 = jnp.transpose(wi_0, (1, 0, 2, 3))  # -> (l, e, d_model, d_inner)
@@ -357,10 +372,9 @@ class MaxTextToVLLMConverter:
           e, d_inner, d_model = w0.shape
           # Chunk-level interleave to match vLLM TP sharding:
           # layout: [gate_chunk0, up_chunk0, gate_chunk1, up_chunk1, ...]
-          num_chunks = 4  # tensor_parallel_size for vLLM
-          chunk_size = d_inner // num_chunks
-          gate_chunks = w0.reshape(e, num_chunks, chunk_size, d_model)
-          up_chunks = w1.reshape(e, num_chunks, chunk_size, d_model)
+          chunk_size = d_inner // tp
+          gate_chunks = w0.reshape(e, tp, chunk_size, d_model)
+          up_chunks = w1.reshape(e, tp, chunk_size, d_model)
           combined = jnp.stack([gate_chunks, up_chunks], axis=2)
           return combined.reshape(e, 2 * d_inner, d_model)
 
@@ -382,7 +396,7 @@ class MaxTextToVLLMConverter:
       gc.collect()
       
     @staticmethod
-    @functools.partial(jax.jit, donate_argnums=(0,))
+    @jax.jit
     def _unstack_layer(param):
         return jnp.unstack(param, axis=0)
 
@@ -446,20 +460,56 @@ def main():
   llm = LLM(
     "Qwen/Qwen3-30B-A3B",
     max_model_len=16,
-    tensor_parallel_size=4,
-    gpu_memory_utilization=0.5,
+    # tensor_parallel_size=4,
+    # tensor_parallel_size=4,
+    tensor_parallel_size=2,
+    data_parallel_size=2,
+    # enable_expert_parallel=True,
+    gpu_memory_utilization=0.65,
     # load_format="dummy",
+    async_scheduling=False,
   )
   print("\n" + "="*80)
   llm_state = llm.llm_engine.model_executor.driver_worker.model_runner.state
   # save_dict_to_file(llm_state, "llm_state_shapes.txt")
 
+  # Detect once whether MaxText and vLLM meshes share the same physical
+  # devices (single-VM) or are disjoint (multi-host cluster partition).
+  # Same devices → jax.jit with out_shardings lets XLA emit on-device
+  # collectives (fast, ~0.16 s for 30 B).  Disjoint devices → jax.jit
+  # raises "incompatible devices"; fall back to jax.device_put which uses
+  # ICI/DCN for the cross-host transfer without a CPU roundtrip.
+  _any_src = next(iter(vllm_state.values()))
+  _any_src_arr = _any_src.value if hasattr(_any_src, 'value') else _any_src
+  _any_dst = next(iter(llm_state.values()))
+  _same_devices = (
+      frozenset(d.id for d in _any_src_arr.sharding.mesh.devices.flat) ==
+      frozenset(d.id for d in _any_dst.sharding.mesh.devices.flat)
+  )
+  logging.info("Weight sync: same_devices=%s (jit=%s, device_put=%s)",
+               _same_devices, _same_devices, not _same_devices)
+
+  @functools.lru_cache(maxsize=None)
+  def _get_reshard_fn(dst_sharding):
+    if _same_devices:
+      return jax.jit(lambda x: x, out_shardings=dst_sharding)
+    else:
+      return functools.partial(jax.device_put, device=dst_sharding)
+
   with timer(f"Assigning {len(vllm_state)} weights to vLLM model"):
     for key, weight in vllm_state.items():
-      target_sharding = llm_state[key].sharding
-      print(f"{key} MT {weight.shape} to torchax {llm_state[key].shape}")
-      print(f"\tMT sharding: {weight.sharding}, torchax sharding: {llm_state[key].sharding}")
-      llm_state[key] = jax.device_put(np.asarray(weight), target_sharding)
+      # Unwrap NNX Param → plain jax.Array; plain arrays pass through unchanged.
+      weight_array = weight.value if hasattr(weight, 'value') else weight
+      dst_sharding = llm_state[key].sharding
+      # print(f"Assigning {key}: src shape={weight_array.shape}, src sharding={weight_array.sharding}; dst shape={llm_state[key].shape}, dst sharding={dst_sharding}")
+      llm_state[key] = _get_reshard_fn(dst_sharding)(weight_array)
+      # array_allclose = np.allclose(
+      #     np.asarray(llm_state[key]), np.asarray(weight_array), rtol=1e-2, atol=1e-2
+      # )
+      # print(f"{key}: {array_allclose}")
+      # llm_state[key] = jax.device_put(np.asarray(weight_array), dst_sharding)
+    jax.effects_barrier()  # wait for all on-device reshards to finish
+
 
   sampling_params = SamplingParams(temperature=0.0, max_tokens=10)
   print("\n" + "="*80)

@@ -37,7 +37,7 @@ _JAX_COMPILATION_CACHE_DIR = "/tmp/jax_cache"
 # Flags
 FLAGS = flags.FLAGS
 _XPROF = flags.DEFINE_bool('xprof', False, 'xprof')
-_RAND_INIT = flags.DEFINE_bool('rand_init', False, 'Whether to use random initialization instead of loading from checkpoint, for faster testing.')  
+_RAND_INIT = flags.DEFINE_bool('rand_init', True, 'Whether to use random initialization instead of loading from checkpoint, for faster testing.')  
 
 def _setup_jax_compilation_cache():
   jax_config.update("jax_compilation_cache_dir", _JAX_COMPILATION_CACHE_DIR)
