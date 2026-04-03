@@ -341,7 +341,8 @@ def preprocessing_pipeline(
     )
     operations.append(input_pipeline_utils.ReformatPacking(data_column_names))
   else:
-    operations.append(input_pipeline_utils.PadOrTrimToMaxLength(max_target_length, pad_id))
+    if not use_dpo:
+      operations.append(input_pipeline_utils.PadOrTrimToMaxLength(max_target_length, pad_id))
     operations.append(grain.Batch(batch_size=batch_size, drop_remainder=drop_remainder))
 
   if shift and not use_dpo:

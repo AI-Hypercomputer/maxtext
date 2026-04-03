@@ -31,6 +31,8 @@ import optax
 from orbax import checkpoint as ocp
 import pathwaysutils
 
+import flax.linen as nn
+from flax import nnx
 from flax.linen import partitioning as nn_partitioning
 
 from tunix.sft import metrics_logger, profiler
@@ -120,6 +122,14 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
           optimizer,
       )
 
+    # Pre-shard the optimizer to avoid TypeError in Tunix _shard_optimizer
+    with mesh, nn.logical_axis_rules(mt_config.logical_axis_rules):
+      nnx_optimizer = nnx.Optimizer(model, optimizer, wrt=nnx.Param)
+      opt_state = nnx.state(nnx_optimizer, nnx.optimizer.OptState)
+      opt_pspecs = nnx.get_partition_spec(opt_state)
+      opt_sharded_state = jax.lax.with_sharding_constraint(opt_state, opt_pspecs)
+      nnx.update(nnx_optimizer, opt_sharded_state)
+
   with maybe_record_goodput(goodput_recorder, GoodputEvent.TRAINING_PREPARATION):
     training_hooks = hooks.SFTTrainingHooks(mt_config, mesh, learning_rate_schedule, goodput_recorder)
     data_hooks = hooks.SFTDataHooks(mt_config, mesh, goodput_recorder)
@@ -132,9 +142,15 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
         hf_access_token=mt_config.hf_access_token,
     )
 
-    trainer = DPOTrainer(
-        model=model, ref_model=None, optimizer=optimizer, training_config=tunix_config, tokenizer=tokenizer
-    )
+    # Pass raw optax optimizer to DPOTrainer, then inject pre-sharded nnx.Optimizer
+    with mesh, nn.logical_axis_rules(mt_config.logical_axis_rules):
+      trainer = DPOTrainer(
+          model=model, ref_model=None, optimizer=optimizer, training_config=tunix_config, tokenizer=tokenizer
+      )
+      # Ensure the trainer uses our pre-sharded optimizer instance
+      trainer.optimizer = nnx_optimizer
+      # Override _shard_optimizer to avoid TypeError on scalar states
+      trainer._shard_optimizer = lambda mesh: None
     trainer.with_training_hooks(training_hooks)
     trainer.with_data_hooks(data_hooks)
 
@@ -146,7 +162,7 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
 
 def train_model(mt_config: pyconfig.HyperParameters, trainer, mesh):
   """Runs the DPO training loop in Tunix."""
-  with mesh, nn_partitioning.axis_rules(mt_config.logical_axis_rules):
+  with jax.set_mesh(mesh), mesh, nn.logical_axis_rules(mt_config.logical_axis_rules):
     trainer.train(trainer.data_hooks.train_data_iterator, trainer.data_hooks.eval_data_iterator)
   return trainer
 
