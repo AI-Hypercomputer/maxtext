@@ -119,6 +119,8 @@ exclude_patterns = [
     os.path.join("run_maxtext", "run_maxtext_via_multihost_job.md"),
     os.path.join("run_maxtext", "run_maxtext_via_multihost_runner.md"),
     os.path.join("reference", "core_concepts", "llm_calculator.ipynb"),
+    os.path.join("reference", "api.rst"),
+    os.path.join("reference", "api_generated", "MaxText*.rst"),
     os.path.join("reference", "api_generated", "modules.rst"),
     os.path.join("reference", "api_generated", "dependencies.github_deps.rst"),
     os.path.join("reference", "api_generated", "dependencies.github_deps.install_pre_train_deps.rst"),

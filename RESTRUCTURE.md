@@ -299,9 +299,6 @@ comments, or questions by creating a new
     ├── dev/
     │   ├── code_style.sh
     │   └── unit_test_and_lint.sh
-    ├── gcs_benchmarks/
-    │   ├── standalone_checkpointer.py
-    │   └── standalone_dataloader.py
     ├── orchestration/
     │   ├── gpu_multi_process_run.sh
     │   ├── multihost_job.py

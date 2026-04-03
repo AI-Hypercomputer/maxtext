@@ -15,8 +15,8 @@
 """ Tests for the standalone_checkpointer.py """
 import unittest
 import pytest
-from tools.gcs_benchmarks.standalone_checkpointer import main as sckpt_main
-from tools.gcs_benchmarks.standalone_dataloader import main as sdl_main
+from maxtext.utils.standalone_checkpointer import main as sckpt_main
+from maxtext.utils.standalone_dataloader import main as sdl_main
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from maxtext.common.gcloud_stub import is_decoupled
 
@@ -50,6 +50,7 @@ class Standalone_DL_CKPT(unittest.TestCase):
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only
+  @pytest.mark.scheduled_only
   def test_standalone_dataloader(self):
     random_run_name = self._get_random_test_name("standalone_dataloader")
     sdl_main(
@@ -68,6 +69,7 @@ class Standalone_DL_CKPT(unittest.TestCase):
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only
+  @pytest.mark.scheduled_only
   def test_standalone_checkpointer(self):
     random_run_name = self._get_random_test_name("standalone_checkpointer")
     # checkpoint at 50
