@@ -274,6 +274,8 @@ def _format_chat_template_grain(element, data_columns, tokenizer_model):
   # Convert raw columns to conversational messages
   if "messages" in primary_columns:
     messages = element["messages"]
+    if isinstance(messages, (str, bytes)):
+      messages = json.loads(messages)
   elif set(primary_columns) == {"prompt", "completion"}:
     messages = [{"role": "user", "content": element["prompt"]}, {"role": "assistant", "content": element["completion"]}]
   elif set(primary_columns) == {"question", "answer"}:
