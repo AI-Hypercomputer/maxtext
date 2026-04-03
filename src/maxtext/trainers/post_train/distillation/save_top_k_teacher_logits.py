@@ -70,9 +70,10 @@ def get_start_step(config, local_args):
   # Find the highest part number from the filenames
   max_part_num = -1
   for f in existing_files:
-    match = re.search(r"part_(\d+)\.array_record", os.path.basename(f))
-    if match:
-      max_part_num = max(max_part_num, int(match.group(1)))
+    max_part_num = max(
+        (int(m.group(1)) for f in existing_files if (m := re.search(r"part_(\d+).array_record", os.path.basename(f)))),
+        default=-1,
+    )
 
   if max_part_num == -1:
     return 0
@@ -103,12 +104,7 @@ def generate_and_save_data(config, local_args):
   start_step = get_start_step(config, local_args)
   start_step = int(multihost_utils.broadcast_one_to_all(jax.numpy.array(start_step)))
 
-  # Fast-forward the dataset iterator
-  if start_step > 0:
-    max_logging.log(f"Fast-forwarding dataset by {start_step} steps...")
-    for _ in range(start_step):
-      next(train_iter)
-
+  # The dataset iterator will be fast-forwarded by `islice` in the loop below.
   writer = None
   local_output_path = None
   if jax.process_index() == 0:
@@ -121,7 +117,7 @@ def generate_and_save_data(config, local_args):
   max_logging.log(f"Starting Top-K generation loop for {config.steps - start_step} steps...")
   loop_start = time.time()
 
-  for step, batch in enumerate(islice(train_iter, config.steps - start_step), start=start_step):
+  for step, batch in enumerate(islice(train_iter, start_step, config.steps), start=start_step):
     step_start = time.time()
 
     # Open a new writer for each file chunk on process 0
