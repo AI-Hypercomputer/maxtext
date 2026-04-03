@@ -51,6 +51,10 @@ See our guide on running MaxText in decoupled mode, without any GCP dependencies
 * \[December 9, 2025\] [New RL and SFT Notebook tutorials](https://github.com/AI-Hypercomputer/maxtext/tree/7656eb8d1c9eb0dd91e617a6fdf6ad805221221a/src/maxtext/examples) are available.
 * \[December 4, 2025\] The [ReadTheDocs documentation site](https://maxtext.readthedocs.io/en/latest/index.html) has been reorganized.
 * \[December 3, 2025\] Multi-host support for GSPO and GRPO is now available via [new RL tutorials](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/rl_on_multi_host.html).
+
+<details>
+<summary><b>View full news archive</b></summary>
+
 * \[November 20, 2025\] A new guide, [What is Post Training in MaxText?](https://maxtext.readthedocs.io/en/latest/tutorials/post_training_index.html), is now available.
 * \[November 6, 2025\] Ironwood TPU co-designed AI stack announced. Read the [blog post on its co-design with MaxText](https://cloud.google.com/blog/products/compute/inside-the-ironwood-tpu-codesigned-ai-stack?e=48754805).
 * \[October 29, 2025\] [Optimized models tiering documentation](https://maxtext.readthedocs.io/en/latest/reference/models/tiering.html) has been refreshed.
@@ -66,6 +70,7 @@ See our guide on running MaxText in decoupled mode, without any GCP dependencies
 * \[July 11, 2025\] Multi-Token Prediction (MTP) training support\! Adds an auxiliary loss based on predicting multiple future tokens, inspired by [DeepSeek-V3 paper](https://arxiv.org/html/2412.19437v1), to enhance training efficiency.
 * \[June 25, 2025\] DeepSeek R1-0528 variant is now supported.
 * \[April 24, 2025\] Llama 4 Maverick models are now supported.
+</details>
 <!-- NEWS END -->
 
 ## Use cases
