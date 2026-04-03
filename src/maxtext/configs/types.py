@@ -650,6 +650,14 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to use Ring of Experts for sparse matmul expert parallelism.",
   )
+  use_iterative_moe: bool = Field(
+      False,
+      description="Whether to use iterative MoE routing to save memory.",
+  )
+  ra2a_num_chunks: int = Field(
+      1,
+      description="Number of chunks for iterative MoE routing.",
+  )
   use_random_routing: bool = Field(False, description="Whether to use random routing for debugging.")
   interleave_moe_layer_step: int = Field(1, description="Frequency of MoE layers, e.g., 2 means every 2nd layer is MoE.")
   expert_shard_attention_option: Literal["fsdp", "context"] = Field(
