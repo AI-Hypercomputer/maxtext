@@ -280,8 +280,10 @@ def preprocessing_pipeline(
 
   pad_id = _get_pad_id(tokenizer)
 
-  # Tunix-DPO handles tokenization internally to ensure proper padding/masking.
-  if tokenize and not use_dpo:
+  # Tunix-DPO handles tokenization internally if strings are passed.
+  # However, MaxText's multihost loader requires numeric JAX arrays.
+  # We tokenize here and rename columns to match Tunix's TrainingInput requirements.
+  if tokenize:
     dataset = dataset.map(
         input_pipeline_utils.tokenization,
         batched=True,
@@ -320,8 +322,40 @@ def preprocessing_pipeline(
 
     operations.append(grain.MapOperation(lists2array))
 
-    rekey_dict = {"prompts": "input", "chosen_responses": "chosen", "rejected_responses": "rejected"}
-    operations.append(input_pipeline_utils.Rekey(rekey_dict))
+    # Generate masks and rename keys to match tunix.sft.dpo.dpo_trainer.TrainingInput
+    class DPOTunixPrep(grain.MapTransform):
+
+      def __init__(self, pad_id, max_prompt_length, max_response_length):
+        self.pad_id = pad_id
+        self.max_prompt_length = max_prompt_length
+        self.max_response_length = max_response_length
+
+      def _pad(self, x, length, left=False):
+        x = np.asarray(x)
+        pad_amount = max(length - x.shape[0], 0)
+        if left:
+          pad_width = ((pad_amount, 0),)
+        else:
+          pad_width = ((0, pad_amount),)
+        return np.pad(x[:length], pad_width, constant_values=self.pad_id)
+
+      def map(self, x):
+        prompt_ids = self._pad(x.pop("input"), self.max_prompt_length, left=True)
+        chosen_ids = self._pad(x.pop("chosen"), self.max_response_length, left=False)
+        rejected_ids = self._pad(x.pop("rejected"), self.max_response_length, left=False)
+
+        x["prompt_ids"] = prompt_ids
+        x["chosen_ids"] = chosen_ids
+        x["rejected_ids"] = rejected_ids
+        x["prompt_mask"] = (prompt_ids != self.pad_id).astype(np.int32)
+        x["chosen_mask"] = (chosen_ids != self.pad_id).astype(np.int32)
+        x["rejected_mask"] = (rejected_ids != self.pad_id).astype(np.int32)
+        return x
+
+    # Tunix DPO expects prompt and response to share the total budget.
+    dpo_max_prompt_len = max_target_length // 2
+    dpo_max_response_len = max_target_length // 2
+    operations.append(DPOTunixPrep(pad_id, dpo_max_prompt_len, dpo_max_response_len))
   else:
     assert len(data_column_names) == 1
     operations.append(input_pipeline_utils.HFNormalizeFeatures(data_column_names[0]))

@@ -43,15 +43,17 @@ Existing documentation is fragmented (`docs/tutorials/posttraining/sft.md`, `rl.
 *   **Action:** Create a unified `post_training_overview.md` that explains the MaxText-Tunix relationship (MaxText=Engine, Tunix=Brain).
 *   **Action:** Ensure all tutorials consistently mention the `maxtext[tpu-post-train]` installation requirement.
 
-## 4. Specific Collaboration Opportunities
+## 4. Collaborative Enhancements (Modifications to Tunix)
 
-### Contribution to Tunix
-1.  **Refactor `_shard_optimizer`:** Modify Tunix to check if an optimizer is already sharded before attempting to apply `with_sharding_constraint`.
-2.  **Generalized Keyword Arguments:** Update Tunix's `get_per_token_logps` to accept a mapping for keyword arguments, avoiding the need for a manual `ModelWrapper` for every new model.
+To further reduce the "glue code" in MaxText, we should upstream the following improvements to the Tunix library:
 
-### Enhancement in MaxText
-1.  **Alignment-Aware Hooks:** Formalize the `SFTTrainingHooks` into a more general `PostTrainingHooks` system that detects the algorithm (SFT vs DPO vs RL) and adjusts metric calculation accordingly.
-2.  **Parameter-Efficient Fine-Tuning (PEFT):** Leverage Tunix's LoRA/PEFT logic while applying MaxText's optimized kernel implementations.
+### A. Flexible Sharding in `PeftTrainer`
+Tunix's `_shard_optimizer` currently forces sharding constraints that can crash on pre-sharded MaxText states (especially with scalar values).
+*   **Action:** Modify `tunix/sft/peft_trainer.py` to only apply `with_sharding_constraint` if the optimizer is not already sharded or if a specific flag is set.
+
+### B. Generalized Model Call Interface
+Tunix's `get_per_token_logps` hardcodes argument names like `positions` and `attention_mask`.
+*   **Action:** Update `tunix/rl/common.py` to allow passing a `name_mapping` dictionary. This would allow MaxText to tell Tunix: "Use `decoder_positions` instead of `positions`."
 
 ## 5. Cleanup: Deleting Legacy Post-Training Support
 

@@ -39,6 +39,7 @@ from tunix.sft import metrics_logger, profiler
 from tunix.sft.dpo.dpo_trainer import DPOTrainer, DPOTrainingConfig
 
 import tunix
+from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from maxtext.configs import pyconfig
 from maxtext.utils import max_utils
 from maxtext.common.goodput import (
@@ -112,6 +113,10 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
 
   with maybe_record_goodput(goodput_recorder, GoodputEvent.TPU_INIT):
     model, mesh = model_creation_utils.create_nnx_model(mt_config)
+
+    # Wrap model with Tunix adapter for consistent interface
+    model = TunixMaxTextAdapter(model)
+
     learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(mt_config)
     # pass in model for muon
     optimizer = optimizers.get_optimizer(mt_config, learning_rate_schedule, model)
@@ -123,6 +128,7 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
       )
 
     # Pre-shard the optimizer to avoid TypeError in Tunix _shard_optimizer
+    # Tunix will now detect it's already sharded and skip its internal sharding logic.
     with mesh, nn.logical_axis_rules(mt_config.logical_axis_rules):
       nnx_optimizer = nnx.Optimizer(model, optimizer, wrt=nnx.Param)
       opt_state = nnx.state(nnx_optimizer, nnx.optimizer.OptState)
@@ -142,20 +148,13 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
         hf_access_token=mt_config.hf_access_token,
     )
 
-    # Pass raw optax optimizer to DPOTrainer, then inject pre-sharded nnx.Optimizer
+    # Pass the pre-sharded nnx.Optimizer directly to DPOTrainer.
     with mesh, nn.logical_axis_rules(mt_config.logical_axis_rules):
       trainer = DPOTrainer(
-          model=model, ref_model=None, optimizer=optimizer, training_config=tunix_config, tokenizer=tokenizer
+          model=model, ref_model=None, optimizer=nnx_optimizer, training_config=tunix_config, tokenizer=None
       )
-      # Ensure the trainer uses our pre-sharded optimizer instance
-      trainer.optimizer = nnx_optimizer
-      # Override _shard_optimizer to avoid TypeError on scalar states
-      trainer._shard_optimizer = lambda mesh: None
     trainer.with_training_hooks(training_hooks)
     trainer.with_data_hooks(data_hooks)
-
-    # TODO(igorts-git): do we need this? It exists in SFT.
-    # trainer = use_maxtext_loss_function(trainer, mt_config)
 
   return trainer, mesh
 

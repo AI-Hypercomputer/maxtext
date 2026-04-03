@@ -15,6 +15,7 @@
 
 """Training and data loading hooks for SFT"""
 
+import time
 from collections import defaultdict
 from sys import version_info
 
@@ -93,11 +94,17 @@ class SFTTrainingHooks(TrainingHooks):
   @override
   def on_train_step_start(self, train_ctx: peft_trainer.PeftTrainer):
     """Called at the beginning of a training step."""
+    self.step_start_time = time.time()
     if self.config.enable_goodput_recording:
       record_goodput(self.goodput_recorder, f"record_{GoodputEvent.STEP.value}_start_time", train_ctx.train_steps)
 
     # Calculate the number of non-padded tokens in the batch
-    total_weights = jnp.sum(train_ctx.data_hooks.train_batch["targets_segmentation"] != 0)
+    if self.config.use_dpo:
+      # For DPO, we sum both chosen and rejected masks
+      total_weights = jnp.sum(train_ctx.data_hooks.train_batch["chosen_mask"] != 0)
+      total_weights += jnp.sum(train_ctx.data_hooks.train_batch["rejected_mask"] != 0)
+    else:
+      total_weights = jnp.sum(train_ctx.data_hooks.train_batch["targets_segmentation"] != 0)
 
     self.train_metadata[train_ctx.train_steps] = {
         "total_weights": total_weights,
@@ -117,6 +124,8 @@ class SFTTrainingHooks(TrainingHooks):
     However, we will use the current `train_step` value to record metrics in this hook to be
     consistent with Tunix's metric logging convention.
     """
+    # Use our own timing since Tunix might pass 0.0
+    actual_step_time = time.time() - self.step_start_time
 
     assert train_step - 1 in self.train_metadata, (
         "SFTTrainingHooks.on_train_step_start() must be called before" " SFTTrainingHooks.on_train_step_end()"
@@ -131,7 +140,7 @@ class SFTTrainingHooks(TrainingHooks):
             "learning/total_weights": self.train_metadata[train_step - 1]["total_weights"],
         }
     }
-    self.metric_logger.record_train_metrics(metrics, train_step, step_time)
+    self.metric_logger.record_train_metrics(metrics, train_step, actual_step_time)
     self.metric_logger.write_metrics(metrics, train_step)
     del self.train_metadata[train_step - 1]
 
@@ -140,7 +149,12 @@ class SFTTrainingHooks(TrainingHooks):
     """Called at the beginning of an evaluation step."""
     self.eval_metadata["eval_step_count"] += 1.0
     # Calculate the number of non-padded tokens in the batch
-    self.eval_metadata["total_weights"] += jnp.sum(train_ctx.data_hooks.eval_batch["targets_segmentation"] != 0)
+    if self.config.use_dpo:
+      total_weights = jnp.sum(train_ctx.data_hooks.eval_batch["chosen_mask"] != 0)
+      total_weights += jnp.sum(train_ctx.data_hooks.eval_batch["rejected_mask"] != 0)
+      self.eval_metadata["total_weights"] += total_weights
+    else:
+      self.eval_metadata["total_weights"] += jnp.sum(train_ctx.data_hooks.eval_batch["targets_segmentation"] != 0)
 
   @override
   def on_eval_step_end(self, train_ctx: peft_trainer.PeftTrainer, eval_loss: float):
