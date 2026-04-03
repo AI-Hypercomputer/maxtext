@@ -840,6 +840,7 @@ class LayoutAndSharding(BaseModel):
       description="Allowed percentage of non-sharded parameters.",
   )
   shard_optimizer_over_data: bool = Field(False, description="Enable ZeRO-1 optimizer sharding over the data axis.")
+  compile_libtpu_flags: str = Field("", description="LIBTPU_INIT_ARGS for compilation only.")
   internal_compile: bool = Field(False, description="Use internal_compile to bypass open-source topology mappings.")
   internal_compile_num_devices: int = Field(-1, description="Number of devices when using internal_compile.")
 
@@ -2173,6 +2174,9 @@ class MaxTextConfig(
         os.environ["XLA_FLAGS"] = self.dump_hlo_xla_flags
 
     # pylint: enable=access-member-before-definition
+
+    # Add LIBTPU FLAGS
+    os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + self.compile_libtpu_flags
 
     # Validate and initiate hlo dump related configs
     validate_and_set_hlo_dump_defaults()
