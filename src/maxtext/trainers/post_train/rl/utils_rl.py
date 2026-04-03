@@ -14,30 +14,25 @@
 
 # pylint: disable=bare-except, consider-using-generator, chained-comparison, broad-exception-caught
 """RL Utils Module."""
+import concurrent
 import re
 import optax
 from maxtext.utils import max_logging
 
 
 from math_verify.errors import TimeoutException
-from math_verify.metric import math_metric
 from math_verify.parser import ExprExtractionConfig, LatexExtractionConfig
-from math_verify import parse
+from math_verify import parse, verify
 
-# initialize math_verify_func once
-math_verify_func = math_metric(
-    gold_extraction_target=(LatexExtractionConfig(),),
-    pred_extraction_target=(
-        ExprExtractionConfig(),
-        LatexExtractionConfig(),
-    ),
+GOLD_EXTRACTION_TARGET = (
+    ExprExtractionConfig(),
+    LatexExtractionConfig(),
 )
 
-
-def boxed(x):
-  """Wraps the input string in a LaTeX boxed command if it's not already wrapped."""
-  return "\\boxed{" + x + "}" if not x.startswith("\\boxed{") else x
-
+PRED_EXTRACTION_TARGET = (
+    ExprExtractionConfig(),
+    LatexExtractionConfig(),
+)
 
 EPSILON = 1e-6
 # Constants for normalization
@@ -97,6 +92,37 @@ REMOVED_EXPRESSIONS = [
     '"',
     "\\dots",
 ]
+
+
+def math_verify_func(golds, predictions, timeout=5):
+  """Wrapper around math_verify's verify function to handle timeouts and exceptions gracefully."""
+  with concurrent.futures.ProcessPoolExecutor(max_workers=1) as executor:
+    future = executor.submit(verify_math, golds, predictions)
+    try:
+      return future.result(timeout=timeout)
+    except concurrent.futures.TimeoutError:
+      return 0.0
+    except Exception:
+      return 0.0
+
+
+def verify_math(golds, predictions):
+  """Runs mathematical expression evaluation on ground-truth and predictions."""
+
+  extracted_predictions = [parse(pred, PRED_EXTRACTION_TARGET, parsing_timeout=None) for pred in predictions]
+  extracted_golds = [parse(gold, GOLD_EXTRACTION_TARGET, parsing_timeout=None) for gold in golds]
+
+  return max(
+      [
+          (1.0 if any(verify(gold, pred, timeout_seconds=None) for gold in extracted_golds) else 0.0)
+          for pred in extracted_predictions
+      ]
+  )
+
+
+def boxed(x):
+  """Wraps the input string in a LaTeX boxed command if it's not already wrapped."""
+  return "\\boxed{" + x + "}" if not x.startswith("\\boxed{") else x
 
 
 # Let's define a RegEx for checking whether the format matches.
@@ -199,10 +225,20 @@ def normalize_final_answer(final_answer: str) -> str:
     final_answer = final_answer.replace(expr, "")
 
   # Extract and normalize LaTeX math
-  final_answer = re.sub(r"(.*?)(\$)(.*?)(\$)(.*)", "$\\3$", final_answer)
+  # converts "The answer is $\frac{1}{2}$" -> "$\frac{1}{2}$"
+  # converts "The answer is 3 $\frac{1}{2}$" -> "$3\frac{1}{2}$"
+  final_answer = re.sub(
+      r".*?(\d+)?\s*\$\s*(\d+)?\s*(\\frac\{.*?\}\{.*?\}|\d+/\d+)\s*\$.*",
+      lambda m: f"${w}{m.group(3)}$" if (w := (m.group(1) or m.group(2))) else f"${m.group(3)}$",
+      final_answer,
+  )
+  # converts "\text{hello}" -> "hello"
   final_answer = re.sub(r"(\\text\{)(.*?)(\})", "\\2", final_answer)
+  # converts "\textbf{hello}" -> "hello"
   final_answer = re.sub(r"(\\textbf\{)(.*?)(\})", "\\2", final_answer)
+  # converts "\overline{hello}" -> "hello"
   final_answer = re.sub(r"(\\overline\{)(.*?)(\})", "\\2", final_answer)
+  # converts "\boxed{100}" -> "100"
   final_answer = re.sub(r"(\\boxed\{)(.*)(\})", "\\2", final_answer)
 
   # Normalize shorthand TeX:
@@ -252,7 +288,6 @@ def check_answer(prompts, completions, answer, tmvp_config, **kargs):
       true_answer = normalize_final_answer(true_answer)
     # Try math_verify first for robust comparison
     verified_correct = False
-    mv_output = None
     true_answer_fixed = true_answer
     guess_fixed = guess
     try:
@@ -260,11 +295,14 @@ def check_answer(prompts, completions, answer, tmvp_config, **kargs):
       true_answer_fixed = fix_latex_escaping(true_answer)
       guess_fixed = fix_latex_escaping(guess)
 
-      mv_output = math_verify_func([boxed(true_answer_fixed)], [boxed(guess_fixed)])
-      if mv_output and mv_output[0] > 0.1:
+      if math_verify_func([boxed(true_answer_fixed)], [boxed(guess_fixed)]) > 0.1:
         verified_correct = True
     except (TimeoutException, Exception):
-      pass
+      if tmvp_config.debug.rl:
+        max_logging.log(
+            f"math_verify_func failed for gold: {true_answer_fixed} and prediction: "
+            f"{guess_fixed}, falling back to numeric comparison."
+        )
 
     # Correct answer gets tmvp_config.reward_exact_answer points!
     if guess == true_answer:
@@ -454,11 +492,16 @@ def check_numbers(prompts, completions, answer, tmvp_config, **kargs):
         guess_fixed = normalize_final_answer(guess_fixed)
 
       # Use math_verify to compare answers (handles both numeric and expression comparison)
-      score, _ = math_verify_func([boxed(true_answer_fixed)], [boxed(guess_fixed)])
+      score = math_verify_func([boxed(true_answer_fixed)], [boxed(guess_fixed)])
       # Return scaled score: 1.5 for exact/correct, 0 otherwise
       scores.append(tmvp_config.reward_exact_answer if score > 0.1 else 0.0)
     except (TimeoutException, Exception):
       # Fallback to simple numeric comparison if math_verify fails
+      if tmvp_config.debug.rl:
+        max_logging.log(
+            f"math_verify_func failed for gold: {true_answer_fixed} and prediction: "
+            f"{guess_fixed}, falling back to numeric comparison."
+        )
       try:
         guess_val = float(normalize_final_answer(guess).strip())
         true_val = float(normalize_final_answer(true_answer).strip())
