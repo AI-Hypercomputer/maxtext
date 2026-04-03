@@ -241,17 +241,17 @@ def verify_chat_template_generation_prompt_logic(tokenizer_model):
   dummy_msgs = [{"role": "system", "content": "System message"}, {"role": "user", "content": "Test message"}]
 
   try:
-    prompt_wo_gen_tokens = tokenizer_model.apply_chat_template(dummy_msgs, add_generation_prompt=False, tokenize=True)
+    prompt_wo_gen_tokens = tokenizer_model.apply_chat_template(dummy_msgs, add_generation_prompt=False, tokenize=True, enable_thinking=True)
   except TemplateError:
     max_logging.info(
         "Tokenizer failed to apply chat template with 'system' role. "
         "Falling back to 'user' role only for chat template verification."
     )
     dummy_msgs.pop(0)
-    prompt_wo_gen_tokens = tokenizer_model.apply_chat_template(dummy_msgs, add_generation_prompt=False, tokenize=True)
+    prompt_wo_gen_tokens = tokenizer_model.apply_chat_template(dummy_msgs, add_generation_prompt=False, tokenize=True, enable_thinking=True)
   prompt_wo_gen_ids = _extract_token_ids(prompt_wo_gen_tokens)
 
-  prompt_w_gen_tokens = tokenizer_model.apply_chat_template(dummy_msgs, add_generation_prompt=True, tokenize=True)
+  prompt_w_gen_tokens = tokenizer_model.apply_chat_template(dummy_msgs, add_generation_prompt=True, tokenize=True, enable_thinking=True)
   prompt_w_gen_ids = _extract_token_ids(prompt_w_gen_tokens)
 
   if prompt_w_gen_ids[: len(prompt_wo_gen_ids)] != prompt_wo_gen_ids:
@@ -260,7 +260,7 @@ def verify_chat_template_generation_prompt_logic(tokenizer_model):
   assistant_prefix = prompt_w_gen_ids[len(prompt_wo_gen_ids) :]
   full_turn_tokens = _extract_token_ids(
       tokenizer_model.apply_chat_template(
-          dummy_msgs + [{"role": "assistant", "content": "Dummy response"}], add_generation_prompt=False, tokenize=True
+          dummy_msgs + [{"role": "assistant", "content": "Dummy response"}], add_generation_prompt=False, tokenize=True, enable_thinking=True
       )
   )
   full_turn_ids = _extract_token_ids(full_turn_tokens)
@@ -293,9 +293,9 @@ def _get_completion_in_chat_template(tokenizer_model, round_msgs, tools=None):
     A string representing the completion formatted by the chat template.
   """
   tools_kwargs = {"tools": tools} if tools is not None else {}
-  prompt_completion_tokens = tokenizer_model.apply_chat_template(round_msgs, add_generation_prompt=False, tokenize=True, **tools_kwargs)
+  prompt_completion_tokens = tokenizer_model.apply_chat_template(round_msgs, add_generation_prompt=False, tokenize=True, enable_thinking=True, **tools_kwargs)
   # include generation_prompt as part of the prompt tokens
-  prompt_tokens = tokenizer_model.apply_chat_template(round_msgs[:-1], add_generation_prompt=True, tokenize=True, **tools_kwargs)
+  prompt_tokens = tokenizer_model.apply_chat_template(round_msgs[:-1], add_generation_prompt=True, tokenize=True, enable_thinking=True, **tools_kwargs)
 
   prompt_completion_ids = _extract_token_ids(prompt_completion_tokens)
   prompt_ids = _extract_token_ids(prompt_tokens)
@@ -342,7 +342,7 @@ def apply_chat_template(example, tokenizer_model, data_column_name, tools_column
       elif message["role"] == "user":
         round_msgs.append(message)
         prompt_in_chat_template = tokenizer_model.apply_chat_template(
-            round_msgs, add_generation_prompt=True, tokenize=False, **tools_kwargs
+            round_msgs, add_generation_prompt=True, tokenize=False, enable_thinking=True, **tools_kwargs
         )
         messages.append(prompt_in_chat_template)
         is_prompt.append(True)
