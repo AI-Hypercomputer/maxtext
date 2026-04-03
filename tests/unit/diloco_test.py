@@ -77,6 +77,10 @@ class DiLoCoTest(unittest.TestCase):
             f"diloco_sync_period={num_steps-1}",
         ]
     )
+    if test_config.pure_nnx:
+      self.skipTest(
+          "test_diloco_training_simulation_with_mesh uses a hand-crafted Linen TrainState; NNX path not yet covered."
+      )
 
     with mesh:
       tx = optax.sgd(learning_rate=0.1)

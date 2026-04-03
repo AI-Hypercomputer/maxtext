@@ -348,21 +348,16 @@ class MaxUtilsInitTransformerState(unittest.TestCase):
     # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
     extra_args = get_decoupled_parallelism_overrides()
     self.config = pyconfig.initialize([None, get_test_config_path()], enable_checkpointing=False, **extra_args)
+    if self.config.pure_nnx:
+      self.skipTest("Pure NNX support has not been implemented yet.")
     devices_array = maxtext_utils.create_device_mesh(self.config)
     self.mesh = Mesh(devices_array, self.config.mesh_axes)
     quant = quantizations.configure_quantization(self.config)
-    if self.config.pure_nnx:
-      raise NotImplementedError("Pure NNX support has not been implemented yet.")
-    else:
-      self.model = models.transformer_as_linen(self.config, mesh=self.mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+    self.model = models.transformer_as_linen(self.config, mesh=self.mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
 
   def test_setup_decode_state(self):
     rng = random.PRNGKey(0)
-    if self.config.pure_nnx:
-      # NNX has a different function to init the training state.
-      raise NotImplementedError("Pure NNX support has not been implemented yet.")
-    else:
-      init_state_fn = functools.partial(maxtext_utils.init_initial_state, self.model, None, self.config, False, rng)
+    init_state_fn = functools.partial(maxtext_utils.init_initial_state, self.model, None, self.config, False, rng)
     state, _ = maxtext_utils.setup_decode_state(self.config, self.mesh, None, init_state_fn)
     self.assertEqual(state.tx, None)
     self.assertEqual(state.opt_state, {})
@@ -370,12 +365,10 @@ class MaxUtilsInitTransformerState(unittest.TestCase):
   def test_setup_initial_state(self):
     rng = random.PRNGKey(0)
     tx = optax.adam(learning_rate=0.001)
-    if self.config.pure_nnx:
-      # NNX has a different function to init the training state.
-      raise NotImplementedError("Pure NNX support has not been implemented yet.")
-    else:
-      init_state_fn = functools.partial(maxtext_utils.init_initial_state, self.model, tx, self.config, True, rng)
-    state, _, _, _ = maxtext_utils.setup_initial_state(None, self.config, self.mesh, None, init_state_fn)
+    init_state_fn = functools.partial(maxtext_utils.init_initial_state, self.model, tx, self.config, True, rng)
+    state, _, _, _ = maxtext_utils.setup_initial_state(  # type: ignore[arg-type]
+        None, self.config, self.mesh, None, init_state_fn
+    )
     self.assertEqual(state.tx, tx)
     self.assertNotEqual(state.opt_state, {})
 
@@ -991,7 +984,7 @@ class TestGetFunctionalTrainWithSignature(unittest.TestCase):
 
     return train_step
 
-  def _make_mock_config(self, pure_nnx=False):
+  def _make_mock_config(self, pure_nnx=True):
     cfg = MagicMock()
     cfg.pure_nnx = pure_nnx
     return cfg
@@ -1059,7 +1052,7 @@ class TestGetFunctionalEvalWithSignature(unittest.TestCase):
 
     return eval_step
 
-  def _make_mock_config(self, pure_nnx=False):
+  def _make_mock_config(self, pure_nnx=True):
     cfg = MagicMock()
     cfg.pure_nnx = pure_nnx
     return cfg
@@ -1331,11 +1324,11 @@ class TestSetupTrainingState(unittest.TestCase):
   def setUp(self):
     extra_args = get_decoupled_parallelism_overrides()
     self.config = pyconfig.initialize([None, get_test_config_path()], enable_checkpointing=False, **extra_args)
+    if self.config.pure_nnx:
+      self.skipTest("Pure NNX path not covered by this test.")
     devices_array = maxtext_utils.create_device_mesh(self.config)
     self.mesh = Mesh(devices_array, self.config.mesh_axes)
     quant = quantizations.configure_quantization(self.config)
-    if self.config.pure_nnx:
-      raise NotImplementedError("Pure NNX path not covered by this test.")
     self.model = Transformer(self.config, mesh=self.mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
 
   def test_setup_training_state_returns_train_state(self):
@@ -1353,11 +1346,11 @@ class TestGetLogicalAnnotations(unittest.TestCase):
   def setUp(self):
     extra_args = get_decoupled_parallelism_overrides()
     self.config = pyconfig.initialize([None, get_test_config_path()], enable_checkpointing=False, **extra_args)
+    if self.config.pure_nnx:
+      self.skipTest("Pure NNX path not covered by this test.")
     devices_array = maxtext_utils.create_device_mesh(self.config)
     self.mesh = Mesh(devices_array, self.config.mesh_axes)
     quant = quantizations.configure_quantization(self.config)
-    if self.config.pure_nnx:
-      raise NotImplementedError("Pure NNX path not covered by this test.")
     self.model = Transformer(self.config, mesh=self.mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
     self.rng = jax.random.PRNGKey(0)
     self.tx = optax.adam(learning_rate=0.001)

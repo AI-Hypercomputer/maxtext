@@ -58,10 +58,10 @@ FLAGS = flags.FLAGS
 flags.DEFINE_string("model_name", None, "Specific model name to dump.")
 flags.DEFINE_string("topology", None, "Specific topology to dump.")
 flags.DEFINE_string("num_slice", None, "Specific number of slices to dump.")
-flags.DEFINE_bool("pure_nnx", False, "Use pure NNX model.")
+flags.DEFINE_bool("pure_nnx", True, "Use pure NNX model.")
 
 
-def run_single_dump(model_name: str, topology: str, num_slice: str, pure_nnx: bool = False) -> None:
+def run_single_dump(model_name: str, topology: str, num_slice: str, pure_nnx: bool = True) -> None:
   """Generate sharding json file for one specific model, topology and slice."""
   cmd = [
       "python3",

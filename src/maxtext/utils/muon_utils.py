@@ -116,7 +116,19 @@ def get_muon_weight_dimension_numbers(model, config, verbose=False):
 
     # Use jax.tree_util.tree_map_with_path for NNX's potentially complex PyTree structure.
     # This is different with linen where abstract_param is a dict-based tree with nn.LogicallyPartitioned leaves.
-    muon_weight_dimension_numbers = jax.tree_util.tree_map_with_path(apply_transform_nnx, abstract_param)
+    mapped_state = jax.tree_util.tree_map_with_path(apply_transform_nnx, abstract_param)
+
+    # Normalize to a plain nested dict wrapped in 'params' to match the Linen output structure.
+    flat = nnx.to_flat_state(mapped_state)
+    nested: dict = {}
+    for key_tuple, var in flat:
+      d = nested
+      for k in key_tuple[:-1]:
+        if k not in d:
+          d[k] = {}
+        d = d[k]
+      d[key_tuple[-1]] = var.get_value()
+    muon_weight_dimension_numbers = {"params": nested}
 
   else:  # Linen
     # quickly get param structure without materialization
@@ -154,7 +166,7 @@ def _print_structure_debug(abstract_param, muon_weight_dimension_numbers):
   print("\nIs this reasonable?")
 
 
-def get_model_mdn(model_name, scan_layers=True, verbose=False, pure_nnx=False):
+def get_model_mdn(model_name, scan_layers=True, verbose=False, pure_nnx=True):
   """Initializes a model and retrieves its Muon dimension numbers.
 
   This function sets up the configuration for a given model, initializes the

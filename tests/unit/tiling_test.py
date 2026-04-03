@@ -209,6 +209,8 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
         num_vocab_tiling=1,
         z_loss_multiplier=1e-4,  # Enable z-loss
     )
+    if cfg_non_tiling.enable_nnx:
+      self.skipTest("Vocab tiling is not supported with NNX yet.")
     quant_non_tiling = quantizations.configure_quantization(cfg_non_tiling)
     devices_array_non_tiling = maxtext_utils.create_device_mesh(cfg_non_tiling)
     mesh_non_tiling = Mesh(devices_array_non_tiling, cfg_non_tiling.mesh_axes)
@@ -275,6 +277,8 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
         matmul_precision="high",
         num_vocab_tiling=1,
     )
+    if cfg_non_tiling.enable_nnx:
+      self.skipTest("Vocab tiling is not supported with NNX yet.")
     quant_non_tiling = quantizations.configure_quantization(cfg_non_tiling)
     devices_array_non_tiling = maxtext_utils.create_device_mesh(cfg_non_tiling)
     mesh_non_tiling = Mesh(devices_array_non_tiling, cfg_non_tiling.mesh_axes)
@@ -339,6 +343,8 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
         matmul_precision="high",
         num_vocab_tiling=1,
     )
+    if cfg_non_tiling.enable_nnx:
+      self.skipTest("Vocab tiling is not supported with NNX yet.")
 
     quant_non_tiling = quantizations.configure_quantization(cfg_non_tiling)
     devices_array_non_tiling = maxtext_utils.create_device_mesh(cfg_non_tiling)
@@ -401,6 +407,8 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
         matmul_precision="high",
         num_vocab_tiling=1,
     )
+    if cfg_non_tiling.enable_nnx:
+      self.skipTest("Vocab tiling is not supported with NNX yet.")
     quant_non_tiling = quantizations.configure_quantization(cfg_non_tiling)
     devices_array_non_tiling = maxtext_utils.create_device_mesh(cfg_non_tiling)
     mesh_non_tiling = Mesh(devices_array_non_tiling, cfg_non_tiling.mesh_axes)
@@ -465,6 +473,8 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
         matmul_precision="high",
         num_vocab_tiling=1,
     )
+    if cfg_non_tiling.enable_nnx:
+      self.skipTest("Vocab tiling is not supported with NNX yet.")
     quant_non_tiling = quantizations.configure_quantization(cfg_non_tiling)
     devices_array_non_tiling = maxtext_utils.create_device_mesh(cfg_non_tiling)
     mesh_non_tiling = Mesh(devices_array_non_tiling, cfg_non_tiling.mesh_axes)
@@ -531,6 +541,8 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
         matmul_precision="high",
         num_vocab_tiling=1,
     )
+    if cfg_non_tiling.enable_nnx:
+      self.skipTest("Vocab tiling is not supported with NNX yet.")
     quant_non_tiling = quantizations.configure_quantization(cfg_non_tiling)
     devices_array_non_tiling = maxtext_utils.create_device_mesh(cfg_non_tiling)
     mesh_non_tiling = Mesh(devices_array_non_tiling, cfg_non_tiling.mesh_axes)

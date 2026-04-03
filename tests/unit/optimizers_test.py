@@ -242,7 +242,7 @@ class MuonDimensionTest(parameterized.TestCase):
     Initializes the specified MaxText model and asserts that the generated
     Muon dimension numbers match the hardcoded reference.
     """
-    actual_output = muon_utils.get_model_mdn(model_name, scan_layers=True, pure_nnx=False)
+    actual_output = muon_utils.get_model_mdn(model_name, scan_layers=True)
     self.assertEqual(actual_output, expected_output)
 
 

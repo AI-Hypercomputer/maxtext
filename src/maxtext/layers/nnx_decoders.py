@@ -311,7 +311,7 @@ class NNXDecoder(nnx.Module):
 
         num_moe = config.num_decoder_layers - config.first_num_dense_layers
 
-        self.moe_layer = self._create_scanned_layers(moe_cls, length=num_moe, rngs=rngs)
+        self.moe_layers = self._create_scanned_layers(moe_cls, length=num_moe, rngs=rngs)
       elif self.is_gemma3:
         attention_pattern_length = len(gemma3.GEMMA3_ATTENTION_PATTERN)
         scan_length = config.num_decoder_layers // attention_pattern_length
@@ -346,7 +346,7 @@ class NNXDecoder(nnx.Module):
         for i in range(config.first_num_dense_layers):
           self._create_and_register_layer(dense_cls, rngs, "dense_layer", i)
         for i in range(config.num_decoder_layers - config.first_num_dense_layers):
-          self._create_and_register_layer(moe_cls, rngs, "moe_layer", i)
+          self._create_and_register_layer(moe_cls, rngs, "moe_layers", i)
       else:
         layer_cls = decoder_block_classes[0]
 
@@ -388,6 +388,8 @@ class NNXDecoder(nnx.Module):
 
   def _create_scanned_layers(self, decoder_layer_class, length: int, rngs: nnx.Rngs, **layer_kwargs):
     """Creates a VMapped stack of layers, forcing parameter init for Compact modules."""
+    if length == 0:
+      return nnx.List([])
 
     def create_layer_fn(rng):
       layer = decoder_layer_class(
@@ -433,6 +435,8 @@ class NNXDecoder(nnx.Module):
 
   def _apply_layers_sequentially(self, layers, x_in, *args, length: int, **kwargs):
     """Runs the layer stack using nnx.scan."""
+    if length == 0:
+      return x_in, layers
     policy = self.get_remat_policy()
     prevent_cse = maxtext_utils.should_prevent_cse_in_remat(self.config)
     graphdef, params, state = nnx.split(
@@ -961,7 +965,7 @@ class NNXDecoder(nnx.Module):
 
           y = self._apply_interleaved_scanned_layers(
               y,
-              self.moe_layer,
+              self.moe_layers,
               0,
               (cfg.num_decoder_layers - cfg.first_num_dense_layers),
               [e - cfg.first_num_dense_layers for e in cfg.engram_layers],
@@ -978,7 +982,7 @@ class NNXDecoder(nnx.Module):
           if cfg.use_batch_split_schedule:
             policy = self.get_remat_policy()
 
-            mock_params = self._build_linen_params(self.moe_layer)
+            mock_params = self._build_linen_params(self.moe_layers)
 
             y = deepseek_batchsplit.scan_batch_split_layers(
                 y,
@@ -992,8 +996,8 @@ class NNXDecoder(nnx.Module):
                 policy=policy,
             )
           else:
-            y, self.moe_layer = self._apply_layers_sequentially(
-                self.moe_layer, y, *layer_args, length=num_moe, **layer_kwargs
+            y, self.moe_layers = self._apply_layers_sequentially(
+                self.moe_layers, y, *layer_args, length=num_moe, **layer_kwargs
             )
       elif self.is_gemma3:
         y = self._apply_gemma3_scanned_blocks(

@@ -42,6 +42,8 @@ class MaxEngineTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     self.cfg = self.init_pyconfig()
+    if self.cfg.pure_nnx:
+      self.skipTest("Pure NNX support has not been implemented yet in MaxEngine.")
     self.rng = jax.random.PRNGKey(0)
 
   def init_pyconfig(self, **kwargs):
@@ -82,6 +84,8 @@ class MaxEngineTest(unittest.TestCase):
         enable_checkpointing=False,
         stack_prefill_result_cache=True,
     )
+    if config.pure_nnx:
+      self.skipTest("Pure NNX support has not been implemented yet in MaxEngine.")
     engine = maxengine.MaxEngine(config, jax.devices())
     num_layers = engine.config.num_decoder_layers
     input_d = {

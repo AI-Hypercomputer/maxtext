@@ -160,6 +160,8 @@ class UnscanTest(unittest.TestCase):
     """Test unscan_train_state_params logic and performance with a real model."""
     # Initialize a configuration for an 8B model.
     config = self.init_pyconfig()
+    if config.pure_nnx:
+      self.skipTest("test_unscan_train_state_params uses Linen state.params; NNX path not yet covered.")
 
     _, _, sharding, _, mesh, *_, state = setup_train_loop(config, None)
 

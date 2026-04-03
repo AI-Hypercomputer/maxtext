@@ -1,476 +1,370 @@
 {
-  ".step": {
+  "['model']/['decoder']/['decoder_norm']/['scale']/.value": {
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose"
+      ]
+    ],
+    "shape": [
+      2048
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['dropout']/['rngs']/['aqt']/['count']/.value": {
+    "partition_spec": [],
+    "shape": [
+      1
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['dropout']/['rngs']/['aqt']/['key']/.value": {
+    "partition_spec": [],
+    "shape": [
+      1
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['dropout']/['rngs']/['dropout']/['count']/.value": {
+    "partition_spec": [],
+    "shape": [
+      1
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['dropout']/['rngs']/['dropout']/['key']/.value": {
+    "partition_spec": [],
+    "shape": [
+      1
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['dropout']/['rngs']/['params']/['count']/.value": {
+    "partition_spec": [],
+    "shape": [
+      1
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['dropout']/['rngs']/['params']/['key']/.value": {
+    "partition_spec": [],
+    "shape": [
+      1
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['mlp']/['dropout']/['rngs']/['aqt']/['count']/.value": {
+    "partition_spec": [],
+    "shape": [
+      1
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['mlp']/['dropout']/['rngs']/['aqt']/['key']/.value": {
+    "partition_spec": [],
+    "shape": [
+      1
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['mlp']/['dropout']/['rngs']/['dropout']/['count']/.value": {
+    "partition_spec": [],
+    "shape": [
+      1
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['mlp']/['dropout']/['rngs']/['dropout']/['key']/.value": {
+    "partition_spec": [],
+    "shape": [
+      1
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['mlp']/['dropout']/['rngs']/['params']/['count']/.value": {
+    "partition_spec": [],
+    "shape": [
+      1
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['mlp']/['dropout']/['rngs']/['params']/['key']/.value": {
+    "partition_spec": [],
+    "shape": [
+      1
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['mlp']/['wi_0']/['kernel']/.value": {
+    "partition_spec": [
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ]
+    ],
+    "shape": [
+      2048,
+      1,
+      10944
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['mlp']/['wi_1']/['kernel']/.value": {
+    "partition_spec": [
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ]
+    ],
+    "shape": [
+      2048,
+      1,
+      10944
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['mlp']/['wo']/['kernel']/.value": {
+    "partition_spec": [
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      "stage",
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ]
+    ],
+    "shape": [
+      10944,
+      1,
+      2048
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['post_self_attention_layer_norm']/['scale']/.value": {
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose"
+      ],
+      "stage"
+    ],
+    "shape": [
+      2048,
+      1
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['pre_self_attention_layer_norm']/['scale']/.value": {
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose"
+      ],
+      "stage"
+    ],
+    "shape": [
+      2048,
+      1
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['rngs']/['aqt']/['count']/.value": {
+    "partition_spec": [],
+    "shape": [
+      1
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['rngs']/['aqt']/['key']/.value": {
+    "partition_spec": [],
+    "shape": [
+      1
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['rngs']/['dropout']/['count']/.value": {
+    "partition_spec": [],
+    "shape": [
+      1
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['rngs']/['dropout']/['key']/.value": {
+    "partition_spec": [],
+    "shape": [
+      1
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['rngs']/['params']/['count']/.value": {
+    "partition_spec": [],
+    "shape": [
+      1
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['rngs']/['params']/['key']/.value": {
+    "partition_spec": [],
+    "shape": [
+      1
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['self_attention']/['kv_norm']/['scale']/.value": {
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose"
+      ],
+      "stage"
+    ],
+    "shape": [
+      512,
+      1
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['self_attention']/['out']/['kernel']/.value": {
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      "stage",
+      null,
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ]
+    ],
+    "shape": [
+      16,
+      1,
+      128,
+      2048
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['self_attention']/['query']/['kernel']/.value": {
+    "partition_spec": [
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      null
+    ],
+    "shape": [
+      2048,
+      1,
+      16,
+      192
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['self_attention']/['wkv_a']/['kernel']/.value": {
+    "partition_spec": [
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      null
+    ],
+    "shape": [
+      2048,
+      1,
+      576
+    ]
+  },
+  "['model']/['decoder']/['dense_layers']/['self_attention']/['wkv_b']/['kernel']/.value": {
+    "partition_spec": [
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      null
+    ],
+    "shape": [
+      512,
+      1,
+      16,
+      256
+    ]
+  },
+  "['model']/['decoder']/['dropout']/['rngs']/['aqt']/['count']/.value": {
     "partition_spec": [],
     "shape": []
   },
-  ".params/['params']/['decoder']/['decoder_norm']/['scale']": {
-    "partition_spec": [
-      "norm"
-    ],
-    "shape": [
-      2048
-    ]
-  },
-  ".params/['params']/['decoder']/['dense_layers']/['mlp']/['wi_0']/['kernel']": {
-    "partition_spec": [
-      "embed",
-      "dense_layers",
-      "mlp"
-    ],
-    "shape": [
-      2048,
-      1,
-      10944
-    ]
-  },
-  ".params/['params']/['decoder']/['dense_layers']/['mlp']/['wi_1']/['kernel']": {
-    "partition_spec": [
-      "embed",
-      "dense_layers",
-      "mlp"
-    ],
-    "shape": [
-      2048,
-      1,
-      10944
-    ]
-  },
-  ".params/['params']/['decoder']/['dense_layers']/['mlp']/['wo']/['kernel']": {
-    "partition_spec": [
-      "mlp",
-      "dense_layers",
-      "embed"
-    ],
-    "shape": [
-      10944,
-      1,
-      2048
-    ]
-  },
-  ".params/['params']/['decoder']/['dense_layers']/['post_self_attention_layer_norm']/['scale']": {
-    "partition_spec": [
-      "norm",
-      "dense_layers"
-    ],
-    "shape": [
-      2048,
-      1
-    ]
-  },
-  ".params/['params']/['decoder']/['dense_layers']/['pre_self_attention_layer_norm']/['scale']": {
-    "partition_spec": [
-      "norm",
-      "dense_layers"
-    ],
-    "shape": [
-      2048,
-      1
-    ]
-  },
-  ".params/['params']/['decoder']/['dense_layers']/['self_attention']/['kv_norm']/['scale']": {
-    "partition_spec": [
-      "norm",
-      "dense_layers"
-    ],
-    "shape": [
-      512,
-      1
-    ]
-  },
-  ".params/['params']/['decoder']/['dense_layers']/['self_attention']/['out']/['kernel']": {
-    "partition_spec": [
-      "heads",
-      "dense_layers",
-      "kv",
-      "embed"
-    ],
-    "shape": [
-      16,
-      1,
-      128,
-      2048
-    ]
-  },
-  ".params/['params']/['decoder']/['dense_layers']/['self_attention']/['query']/['kernel']": {
-    "partition_spec": [
-      "embed",
-      "dense_layers",
-      "q_heads",
-      "kv"
-    ],
-    "shape": [
-      2048,
-      1,
-      16,
-      192
-    ]
-  },
-  ".params/['params']/['decoder']/['dense_layers']/['self_attention']/['wkv_a']/['kernel']": {
-    "partition_spec": [
-      "embed",
-      "dense_layers",
-      "kv_lora_up_proj"
-    ],
-    "shape": [
-      2048,
-      1,
-      576
-    ]
-  },
-  ".params/['params']/['decoder']/['dense_layers']/['self_attention']/['wkv_b']/['kernel']": {
-    "partition_spec": [
-      "kv_lora",
-      "dense_layers",
-      "kv_heads",
-      "kv_head_dim"
-    ],
-    "shape": [
-      512,
-      1,
-      16,
-      256
-    ]
-  },
-  ".params/['params']/['decoder']/['logits_dense']/['kernel']": {
-    "partition_spec": [
-      "embed",
-      "vocab"
-    ],
-    "shape": [
-      2048,
-      102400
-    ]
-  },
-  ".params/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['gate']/['kernel']": {
-    "partition_spec": [
-      "embed_moe",
-      "moe_layers",
-      null
-    ],
-    "shape": [
-      2048,
-      26,
-      64
-    ]
-  },
-  ".params/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wi_0']": {
-    "partition_spec": [
-      "exp",
-      "moe_layers",
-      "embed_no_exp_moe",
-      "mlp"
-    ],
-    "shape": [
-      64,
-      26,
-      2048,
-      1408
-    ]
-  },
-  ".params/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wi_1']": {
-    "partition_spec": [
-      "exp",
-      "moe_layers",
-      "embed_no_exp_moe",
-      "mlp"
-    ],
-    "shape": [
-      64,
-      26,
-      2048,
-      1408
-    ]
-  },
-  ".params/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wo']": {
-    "partition_spec": [
-      "exp",
-      "moe_layers",
-      "mlp",
-      "embed_no_exp_moe"
-    ],
-    "shape": [
-      64,
-      26,
-      1408,
-      2048
-    ]
-  },
-  ".params/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wi_0']/['kernel']": {
-    "partition_spec": [
-      "embed",
-      "moe_layers",
-      "mlp"
-    ],
-    "shape": [
-      2048,
-      26,
-      2816
-    ]
-  },
-  ".params/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wi_1']/['kernel']": {
-    "partition_spec": [
-      "embed",
-      "moe_layers",
-      "mlp"
-    ],
-    "shape": [
-      2048,
-      26,
-      2816
-    ]
-  },
-  ".params/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wo']/['kernel']": {
-    "partition_spec": [
-      "mlp",
-      "moe_layers",
-      "embed"
-    ],
-    "shape": [
-      2816,
-      26,
-      2048
-    ]
-  },
-  ".params/['params']/['decoder']/['moe_layers']/['post_self_attention_layer_norm']/['scale']": {
-    "partition_spec": [
-      "norm",
-      "moe_layers"
-    ],
-    "shape": [
-      2048,
-      26
-    ]
-  },
-  ".params/['params']/['decoder']/['moe_layers']/['pre_self_attention_layer_norm']/['scale']": {
-    "partition_spec": [
-      "norm",
-      "moe_layers"
-    ],
-    "shape": [
-      2048,
-      26
-    ]
-  },
-  ".params/['params']/['decoder']/['moe_layers']/['self_attention']/['kv_norm']/['scale']": {
-    "partition_spec": [
-      "norm",
-      "moe_layers"
-    ],
-    "shape": [
-      512,
-      26
-    ]
-  },
-  ".params/['params']/['decoder']/['moe_layers']/['self_attention']/['out']/['kernel']": {
-    "partition_spec": [
-      "heads",
-      "moe_layers",
-      "kv",
-      "embed"
-    ],
-    "shape": [
-      16,
-      26,
-      128,
-      2048
-    ]
-  },
-  ".params/['params']/['decoder']/['moe_layers']/['self_attention']/['query']/['kernel']": {
-    "partition_spec": [
-      "embed",
-      "moe_layers",
-      "q_heads",
-      "kv"
-    ],
-    "shape": [
-      2048,
-      26,
-      16,
-      192
-    ]
-  },
-  ".params/['params']/['decoder']/['moe_layers']/['self_attention']/['wkv_a']/['kernel']": {
-    "partition_spec": [
-      "embed",
-      "moe_layers",
-      "kv_lora_up_proj"
-    ],
-    "shape": [
-      2048,
-      26,
-      576
-    ]
-  },
-  ".params/['params']/['decoder']/['moe_layers']/['self_attention']/['wkv_b']/['kernel']": {
-    "partition_spec": [
-      "kv_lora",
-      "moe_layers",
-      "kv_heads",
-      "kv_head_dim"
-    ],
-    "shape": [
-      512,
-      26,
-      16,
-      256
-    ]
-  },
-  ".params/['params']/['token_embedder']/['embedding']": {
-    "partition_spec": [
-      "vocab",
-      "embed"
-    ],
-    "shape": [
-      102400,
-      2048
-    ]
-  },
-  ".opt_state/[0]/.count": {
+  "['model']/['decoder']/['dropout']/['rngs']/['aqt']/['key']/.value": {
     "partition_spec": [],
     "shape": []
   },
-  ".opt_state/[0]/.mu/['params']/['decoder']/['decoder_norm']/['scale']": {
-    "partition_spec": [
-      "norm"
-    ],
-    "shape": [
-      2048
-    ]
+  "['model']/['decoder']/['dropout']/['rngs']/['dropout']/['count']/.value": {
+    "partition_spec": [],
+    "shape": []
   },
-  ".opt_state/[0]/.mu/['params']/['decoder']/['dense_layers']/['mlp']/['wi_0']/['kernel']": {
-    "partition_spec": [
-      "embed",
-      "dense_layers",
-      "mlp"
-    ],
-    "shape": [
-      2048,
-      1,
-      10944
-    ]
+  "['model']/['decoder']/['dropout']/['rngs']/['dropout']/['key']/.value": {
+    "partition_spec": [],
+    "shape": []
   },
-  ".opt_state/[0]/.mu/['params']/['decoder']/['dense_layers']/['mlp']/['wi_1']/['kernel']": {
-    "partition_spec": [
-      "embed",
-      "dense_layers",
-      "mlp"
-    ],
-    "shape": [
-      2048,
-      1,
-      10944
-    ]
+  "['model']/['decoder']/['dropout']/['rngs']/['params']/['count']/.value": {
+    "partition_spec": [],
+    "shape": []
   },
-  ".opt_state/[0]/.mu/['params']/['decoder']/['dense_layers']/['mlp']/['wo']/['kernel']": {
-    "partition_spec": [
-      "mlp",
-      "dense_layers",
-      "embed"
-    ],
-    "shape": [
-      10944,
-      1,
-      2048
-    ]
+  "['model']/['decoder']/['dropout']/['rngs']/['params']/['key']/.value": {
+    "partition_spec": [],
+    "shape": []
   },
-  ".opt_state/[0]/.mu/['params']/['decoder']/['dense_layers']/['post_self_attention_layer_norm']/['scale']": {
+  "['model']/['decoder']/['logits_dense']/['kernel']/.value": {
     "partition_spec": [
-      "norm",
-      "dense_layers"
-    ],
-    "shape": [
-      2048,
-      1
-    ]
-  },
-  ".opt_state/[0]/.mu/['params']/['decoder']/['dense_layers']/['pre_self_attention_layer_norm']/['scale']": {
-    "partition_spec": [
-      "norm",
-      "dense_layers"
-    ],
-    "shape": [
-      2048,
-      1
-    ]
-  },
-  ".opt_state/[0]/.mu/['params']/['decoder']/['dense_layers']/['self_attention']/['kv_norm']/['scale']": {
-    "partition_spec": [
-      "norm",
-      "dense_layers"
-    ],
-    "shape": [
-      512,
-      1
-    ]
-  },
-  ".opt_state/[0]/.mu/['params']/['decoder']/['dense_layers']/['self_attention']/['out']/['kernel']": {
-    "partition_spec": [
-      "heads",
-      "dense_layers",
-      "kv",
-      "embed"
-    ],
-    "shape": [
-      16,
-      1,
-      128,
-      2048
-    ]
-  },
-  ".opt_state/[0]/.mu/['params']/['decoder']/['dense_layers']/['self_attention']/['query']/['kernel']": {
-    "partition_spec": [
-      "embed",
-      "dense_layers",
-      "q_heads",
-      "kv"
-    ],
-    "shape": [
-      2048,
-      1,
-      16,
-      192
-    ]
-  },
-  ".opt_state/[0]/.mu/['params']/['decoder']/['dense_layers']/['self_attention']/['wkv_a']/['kernel']": {
-    "partition_spec": [
-      "embed",
-      "dense_layers",
-      "kv_lora_up_proj"
-    ],
-    "shape": [
-      2048,
-      1,
-      576
-    ]
-  },
-  ".opt_state/[0]/.mu/['params']/['decoder']/['dense_layers']/['self_attention']/['wkv_b']/['kernel']": {
-    "partition_spec": [
-      "kv_lora",
-      "dense_layers",
-      "kv_heads",
-      "kv_head_dim"
-    ],
-    "shape": [
-      512,
-      1,
-      16,
-      256
-    ]
-  },
-  ".opt_state/[0]/.mu/['params']/['decoder']/['logits_dense']/['kernel']": {
-    "partition_spec": [
-      "embed",
-      "vocab"
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ]
     ],
     "shape": [
       2048,
       102400
     ]
   },
-  ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['gate']/['kernel']": {
+  "['model']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['gate']/['kernel']/.value": {
     "partition_spec": [
-      "embed_moe",
-      "moe_layers",
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
       null
     ],
     "shape": [
@@ -479,12 +373,57 @@
       64
     ]
   },
-  ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wi_0']": {
+  "['model']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['rngs']/['aqt']/['count']/.value": {
+    "partition_spec": [],
+    "shape": [
+      26
+    ]
+  },
+  "['model']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['rngs']/['aqt']/['key']/.value": {
+    "partition_spec": [],
+    "shape": [
+      26
+    ]
+  },
+  "['model']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['rngs']/['dropout']/['count']/.value": {
+    "partition_spec": [],
+    "shape": [
+      26
+    ]
+  },
+  "['model']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['rngs']/['dropout']/['key']/.value": {
+    "partition_spec": [],
+    "shape": [
+      26
+    ]
+  },
+  "['model']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['rngs']/['params']/['count']/.value": {
+    "partition_spec": [],
+    "shape": [
+      26
+    ]
+  },
+  "['model']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['rngs']/['params']/['key']/.value": {
+    "partition_spec": [],
+    "shape": [
+      26
+    ]
+  },
+  "['model']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wi_0']/.value": {
     "partition_spec": [
-      "exp",
-      "moe_layers",
-      "embed_no_exp_moe",
-      "mlp"
+      "expert",
+      "stage",
+      [
+        "fsdp",
+        "sequence",
+        "context"
+      ],
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ]
     ],
     "shape": [
       64,
@@ -493,12 +432,21 @@
       1408
     ]
   },
-  ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wi_1']": {
+  "['model']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wi_1']/.value": {
     "partition_spec": [
-      "exp",
-      "moe_layers",
-      "embed_no_exp_moe",
-      "mlp"
+      "expert",
+      "stage",
+      [
+        "fsdp",
+        "sequence",
+        "context"
+      ],
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ]
     ],
     "shape": [
       64,
@@ -507,12 +455,21 @@
       1408
     ]
   },
-  ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wo']": {
+  "['model']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wo']/.value": {
     "partition_spec": [
-      "exp",
-      "moe_layers",
-      "mlp",
-      "embed_no_exp_moe"
+      "expert",
+      "stage",
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      [
+        "fsdp",
+        "sequence",
+        "context"
+      ]
     ],
     "shape": [
       64,
@@ -521,11 +478,57 @@
       2048
     ]
   },
-  ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wi_0']/['kernel']": {
+  "['model']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['dropout']/['rngs']/['aqt']/['count']/.value": {
+    "partition_spec": [],
+    "shape": [
+      26
+    ]
+  },
+  "['model']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['dropout']/['rngs']/['aqt']/['key']/.value": {
+    "partition_spec": [],
+    "shape": [
+      26
+    ]
+  },
+  "['model']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['dropout']/['rngs']/['dropout']/['count']/.value": {
+    "partition_spec": [],
+    "shape": [
+      26
+    ]
+  },
+  "['model']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['dropout']/['rngs']/['dropout']/['key']/.value": {
+    "partition_spec": [],
+    "shape": [
+      26
+    ]
+  },
+  "['model']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['dropout']/['rngs']/['params']/['count']/.value": {
+    "partition_spec": [],
+    "shape": [
+      26
+    ]
+  },
+  "['model']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['dropout']/['rngs']/['params']/['key']/.value": {
+    "partition_spec": [],
+    "shape": [
+      26
+    ]
+  },
+  "['model']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wi_0']/['kernel']/.value": {
     "partition_spec": [
-      "embed",
-      "moe_layers",
-      "mlp"
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ]
     ],
     "shape": [
       2048,
@@ -533,11 +536,21 @@
       2816
     ]
   },
-  ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wi_1']/['kernel']": {
+  "['model']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wi_1']/['kernel']/.value": {
     "partition_spec": [
-      "embed",
-      "moe_layers",
-      "mlp"
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ]
     ],
     "shape": [
       2048,
@@ -545,11 +558,21 @@
       2816
     ]
   },
-  ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wo']/['kernel']": {
+  "['model']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wo']/['kernel']/.value": {
     "partition_spec": [
-      "mlp",
-      "moe_layers",
-      "embed"
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      "stage",
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ]
     ],
     "shape": [
       2816,
@@ -557,42 +580,97 @@
       2048
     ]
   },
-  ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['post_self_attention_layer_norm']/['scale']": {
+  "['model']/['decoder']/['moe_layers']/['dropout']/['rngs']/['aqt']/['count']/.value": {
+    "partition_spec": [],
+    "shape": [
+      26
+    ]
+  },
+  "['model']/['decoder']/['moe_layers']/['dropout']/['rngs']/['aqt']/['key']/.value": {
+    "partition_spec": [],
+    "shape": [
+      26
+    ]
+  },
+  "['model']/['decoder']/['moe_layers']/['dropout']/['rngs']/['dropout']/['count']/.value": {
+    "partition_spec": [],
+    "shape": [
+      26
+    ]
+  },
+  "['model']/['decoder']/['moe_layers']/['dropout']/['rngs']/['dropout']/['key']/.value": {
+    "partition_spec": [],
+    "shape": [
+      26
+    ]
+  },
+  "['model']/['decoder']/['moe_layers']/['dropout']/['rngs']/['params']/['count']/.value": {
+    "partition_spec": [],
+    "shape": [
+      26
+    ]
+  },
+  "['model']/['decoder']/['moe_layers']/['dropout']/['rngs']/['params']/['key']/.value": {
+    "partition_spec": [],
+    "shape": [
+      26
+    ]
+  },
+  "['model']/['decoder']/['moe_layers']/['post_self_attention_layer_norm']/['scale']/.value": {
     "partition_spec": [
-      "norm",
-      "moe_layers"
+      [
+        "tensor",
+        "tensor_transpose"
+      ],
+      "stage"
     ],
     "shape": [
       2048,
       26
     ]
   },
-  ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['pre_self_attention_layer_norm']/['scale']": {
+  "['model']/['decoder']/['moe_layers']/['pre_self_attention_layer_norm']/['scale']/.value": {
     "partition_spec": [
-      "norm",
-      "moe_layers"
+      [
+        "tensor",
+        "tensor_transpose"
+      ],
+      "stage"
     ],
     "shape": [
       2048,
       26
     ]
   },
-  ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['self_attention']/['kv_norm']/['scale']": {
+  "['model']/['decoder']/['moe_layers']/['self_attention']/['kv_norm']/['scale']/.value": {
     "partition_spec": [
-      "norm",
-      "moe_layers"
+      [
+        "tensor",
+        "tensor_transpose"
+      ],
+      "stage"
     ],
     "shape": [
       512,
       26
     ]
   },
-  ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['self_attention']/['out']/['kernel']": {
+  "['model']/['decoder']/['moe_layers']/['self_attention']/['out']/['kernel']/.value": {
     "partition_spec": [
-      "heads",
-      "moe_layers",
-      "kv",
-      "embed"
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      "stage",
+      null,
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ]
     ],
     "shape": [
       16,
@@ -601,12 +679,22 @@
       2048
     ]
   },
-  ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['self_attention']/['query']/['kernel']": {
+  "['model']/['decoder']/['moe_layers']/['self_attention']/['query']/['kernel']/.value": {
     "partition_spec": [
-      "embed",
-      "moe_layers",
-      "q_heads",
-      "kv"
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      null
     ],
     "shape": [
       2048,
@@ -615,11 +703,16 @@
       192
     ]
   },
-  ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['self_attention']/['wkv_a']/['kernel']": {
+  "['model']/['decoder']/['moe_layers']/['self_attention']/['wkv_a']/['kernel']/.value": {
     "partition_spec": [
-      "embed",
-      "moe_layers",
-      "kv_lora_up_proj"
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      null
     ],
     "shape": [
       2048,
@@ -627,12 +720,22 @@
       576
     ]
   },
-  ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['self_attention']/['wkv_b']/['kernel']": {
+  "['model']/['decoder']/['moe_layers']/['self_attention']/['wkv_b']/['kernel']/.value": {
     "partition_spec": [
-      "kv_lora",
-      "moe_layers",
-      "kv_heads",
-      "kv_head_dim"
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      null
     ],
     "shape": [
       512,
@@ -641,29 +744,80 @@
       256
     ]
   },
-  ".opt_state/[0]/.mu/['params']/['token_embedder']/['embedding']": {
+  "['model']/['decoder']/['rngs']/['aqt']/['count']/.value": {
+    "partition_spec": [],
+    "shape": []
+  },
+  "['model']/['decoder']/['rngs']/['aqt']/['key']/.value": {
+    "partition_spec": [],
+    "shape": []
+  },
+  "['model']/['decoder']/['rngs']/['dropout']/['count']/.value": {
+    "partition_spec": [],
+    "shape": []
+  },
+  "['model']/['decoder']/['rngs']/['dropout']/['key']/.value": {
+    "partition_spec": [],
+    "shape": []
+  },
+  "['model']/['decoder']/['rngs']/['params']/['count']/.value": {
+    "partition_spec": [],
+    "shape": []
+  },
+  "['model']/['decoder']/['rngs']/['params']/['key']/.value": {
+    "partition_spec": [],
+    "shape": []
+  },
+  "['model']/['token_embedder']/['embedding']/.value": {
     "partition_spec": [
-      "vocab",
-      "embed"
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ]
     ],
     "shape": [
       102400,
       2048
     ]
   },
-  ".opt_state/[0]/.nu/['params']/['decoder']/['decoder_norm']/['scale']": {
+  "['optimizer']/['opt_state']/[0]/['count']/.value": {
+    "partition_spec": [],
+    "shape": []
+  },
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['decoder_norm']/['scale']/.value": {
     "partition_spec": [
-      "norm"
+      [
+        "tensor",
+        "tensor_transpose"
+      ]
     ],
     "shape": [
       2048
     ]
   },
-  ".opt_state/[0]/.nu/['params']/['decoder']/['dense_layers']/['mlp']/['wi_0']/['kernel']": {
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['dense_layers']/['mlp']/['wi_0']/['kernel']/.value": {
     "partition_spec": [
-      "embed",
-      "dense_layers",
-      "mlp"
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ]
     ],
     "shape": [
       2048,
@@ -671,11 +825,21 @@
       10944
     ]
   },
-  ".opt_state/[0]/.nu/['params']/['decoder']/['dense_layers']/['mlp']/['wi_1']/['kernel']": {
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['dense_layers']/['mlp']/['wi_1']/['kernel']/.value": {
     "partition_spec": [
-      "embed",
-      "dense_layers",
-      "mlp"
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ]
     ],
     "shape": [
       2048,
@@ -683,11 +847,21 @@
       10944
     ]
   },
-  ".opt_state/[0]/.nu/['params']/['decoder']/['dense_layers']/['mlp']/['wo']/['kernel']": {
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['dense_layers']/['mlp']/['wo']/['kernel']/.value": {
     "partition_spec": [
-      "mlp",
-      "dense_layers",
-      "embed"
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      "stage",
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ]
     ],
     "shape": [
       10944,
@@ -695,42 +869,61 @@
       2048
     ]
   },
-  ".opt_state/[0]/.nu/['params']/['decoder']/['dense_layers']/['post_self_attention_layer_norm']/['scale']": {
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['dense_layers']/['post_self_attention_layer_norm']/['scale']/.value": {
     "partition_spec": [
-      "norm",
-      "dense_layers"
+      [
+        "tensor",
+        "tensor_transpose"
+      ],
+      "stage"
     ],
     "shape": [
       2048,
       1
     ]
   },
-  ".opt_state/[0]/.nu/['params']/['decoder']/['dense_layers']/['pre_self_attention_layer_norm']/['scale']": {
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['dense_layers']/['pre_self_attention_layer_norm']/['scale']/.value": {
     "partition_spec": [
-      "norm",
-      "dense_layers"
+      [
+        "tensor",
+        "tensor_transpose"
+      ],
+      "stage"
     ],
     "shape": [
       2048,
       1
     ]
   },
-  ".opt_state/[0]/.nu/['params']/['decoder']/['dense_layers']/['self_attention']/['kv_norm']/['scale']": {
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['dense_layers']/['self_attention']/['kv_norm']/['scale']/.value": {
     "partition_spec": [
-      "norm",
-      "dense_layers"
+      [
+        "tensor",
+        "tensor_transpose"
+      ],
+      "stage"
     ],
     "shape": [
       512,
       1
     ]
   },
-  ".opt_state/[0]/.nu/['params']/['decoder']/['dense_layers']/['self_attention']/['out']/['kernel']": {
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['dense_layers']/['self_attention']/['out']/['kernel']/.value": {
     "partition_spec": [
-      "heads",
-      "dense_layers",
-      "kv",
-      "embed"
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      "stage",
+      null,
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ]
     ],
     "shape": [
       16,
@@ -739,12 +932,22 @@
       2048
     ]
   },
-  ".opt_state/[0]/.nu/['params']/['decoder']/['dense_layers']/['self_attention']/['query']/['kernel']": {
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['dense_layers']/['self_attention']/['query']/['kernel']/.value": {
     "partition_spec": [
-      "embed",
-      "dense_layers",
-      "q_heads",
-      "kv"
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      null
     ],
     "shape": [
       2048,
@@ -753,11 +956,16 @@
       192
     ]
   },
-  ".opt_state/[0]/.nu/['params']/['decoder']/['dense_layers']/['self_attention']/['wkv_a']/['kernel']": {
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['dense_layers']/['self_attention']/['wkv_a']/['kernel']/.value": {
     "partition_spec": [
-      "embed",
-      "dense_layers",
-      "kv_lora_up_proj"
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      null
     ],
     "shape": [
       2048,
@@ -765,12 +973,22 @@
       576
     ]
   },
-  ".opt_state/[0]/.nu/['params']/['decoder']/['dense_layers']/['self_attention']/['wkv_b']/['kernel']": {
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['dense_layers']/['self_attention']/['wkv_b']/['kernel']/.value": {
     "partition_spec": [
-      "kv_lora",
-      "dense_layers",
-      "kv_heads",
-      "kv_head_dim"
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      null
     ],
     "shape": [
       512,
@@ -779,20 +997,35 @@
       256
     ]
   },
-  ".opt_state/[0]/.nu/['params']/['decoder']/['logits_dense']/['kernel']": {
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['logits_dense']/['kernel']/.value": {
     "partition_spec": [
-      "embed",
-      "vocab"
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ]
     ],
     "shape": [
       2048,
       102400
     ]
   },
-  ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['gate']/['kernel']": {
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['gate']/['kernel']/.value": {
     "partition_spec": [
-      "embed_moe",
-      "moe_layers",
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
       null
     ],
     "shape": [
@@ -801,12 +1034,21 @@
       64
     ]
   },
-  ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wi_0']": {
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wi_0']/.value": {
     "partition_spec": [
-      "exp",
-      "moe_layers",
-      "embed_no_exp_moe",
-      "mlp"
+      "expert",
+      "stage",
+      [
+        "fsdp",
+        "sequence",
+        "context"
+      ],
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ]
     ],
     "shape": [
       64,
@@ -815,12 +1057,21 @@
       1408
     ]
   },
-  ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wi_1']": {
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wi_1']/.value": {
     "partition_spec": [
-      "exp",
-      "moe_layers",
-      "embed_no_exp_moe",
-      "mlp"
+      "expert",
+      "stage",
+      [
+        "fsdp",
+        "sequence",
+        "context"
+      ],
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ]
     ],
     "shape": [
       64,
@@ -829,12 +1080,21 @@
       1408
     ]
   },
-  ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wo']": {
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wo']/.value": {
     "partition_spec": [
-      "exp",
-      "moe_layers",
-      "mlp",
-      "embed_no_exp_moe"
+      "expert",
+      "stage",
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      [
+        "fsdp",
+        "sequence",
+        "context"
+      ]
     ],
     "shape": [
       64,
@@ -843,11 +1103,21 @@
       2048
     ]
   },
-  ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wi_0']/['kernel']": {
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wi_0']/['kernel']/.value": {
     "partition_spec": [
-      "embed",
-      "moe_layers",
-      "mlp"
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ]
     ],
     "shape": [
       2048,
@@ -855,11 +1125,21 @@
       2816
     ]
   },
-  ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wi_1']/['kernel']": {
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wi_1']/['kernel']/.value": {
     "partition_spec": [
-      "embed",
-      "moe_layers",
-      "mlp"
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ]
     ],
     "shape": [
       2048,
@@ -867,11 +1147,21 @@
       2816
     ]
   },
-  ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wo']/['kernel']": {
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wo']/['kernel']/.value": {
     "partition_spec": [
-      "mlp",
-      "moe_layers",
-      "embed"
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      "stage",
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ]
     ],
     "shape": [
       2816,
@@ -879,42 +1169,61 @@
       2048
     ]
   },
-  ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['post_self_attention_layer_norm']/['scale']": {
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['moe_layers']/['post_self_attention_layer_norm']/['scale']/.value": {
     "partition_spec": [
-      "norm",
-      "moe_layers"
+      [
+        "tensor",
+        "tensor_transpose"
+      ],
+      "stage"
     ],
     "shape": [
       2048,
       26
     ]
   },
-  ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['pre_self_attention_layer_norm']/['scale']": {
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['moe_layers']/['pre_self_attention_layer_norm']/['scale']/.value": {
     "partition_spec": [
-      "norm",
-      "moe_layers"
+      [
+        "tensor",
+        "tensor_transpose"
+      ],
+      "stage"
     ],
     "shape": [
       2048,
       26
     ]
   },
-  ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['self_attention']/['kv_norm']/['scale']": {
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['moe_layers']/['self_attention']/['kv_norm']/['scale']/.value": {
     "partition_spec": [
-      "norm",
-      "moe_layers"
+      [
+        "tensor",
+        "tensor_transpose"
+      ],
+      "stage"
     ],
     "shape": [
       512,
       26
     ]
   },
-  ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['self_attention']/['out']/['kernel']": {
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['moe_layers']/['self_attention']/['out']/['kernel']/.value": {
     "partition_spec": [
-      "heads",
-      "moe_layers",
-      "kv",
-      "embed"
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      "stage",
+      null,
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ]
     ],
     "shape": [
       16,
@@ -923,12 +1232,22 @@
       2048
     ]
   },
-  ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['self_attention']/['query']/['kernel']": {
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['moe_layers']/['self_attention']/['query']/['kernel']/.value": {
     "partition_spec": [
-      "embed",
-      "moe_layers",
-      "q_heads",
-      "kv"
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      null
     ],
     "shape": [
       2048,
@@ -937,11 +1256,16 @@
       192
     ]
   },
-  ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['self_attention']/['wkv_a']/['kernel']": {
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['moe_layers']/['self_attention']/['wkv_a']/['kernel']/.value": {
     "partition_spec": [
-      "embed",
-      "moe_layers",
-      "kv_lora_up_proj"
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      null
     ],
     "shape": [
       2048,
@@ -949,12 +1273,22 @@
       576
     ]
   },
-  ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['self_attention']/['wkv_b']/['kernel']": {
+  "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['moe_layers']/['self_attention']/['wkv_b']/['kernel']/.value": {
     "partition_spec": [
-      "kv_lora",
-      "moe_layers",
-      "kv_heads",
-      "kv_head_dim"
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      null
     ],
     "shape": [
       512,
@@ -963,17 +1297,556 @@
       256
     ]
   },
-  ".opt_state/[0]/.nu/['params']/['token_embedder']/['embedding']": {
+  "['optimizer']/['opt_state']/[0]/['mu']/['token_embedder']/['embedding']/.value": {
     "partition_spec": [
-      "vocab",
-      "embed"
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ]
     ],
     "shape": [
       102400,
       2048
     ]
   },
-  ".opt_state/[2]/.count": {
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['decoder_norm']/['scale']/.value": {
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose"
+      ]
+    ],
+    "shape": [
+      2048
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['dense_layers']/['mlp']/['wi_0']/['kernel']/.value": {
+    "partition_spec": [
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ]
+    ],
+    "shape": [
+      2048,
+      1,
+      10944
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['dense_layers']/['mlp']/['wi_1']/['kernel']/.value": {
+    "partition_spec": [
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ]
+    ],
+    "shape": [
+      2048,
+      1,
+      10944
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['dense_layers']/['mlp']/['wo']/['kernel']/.value": {
+    "partition_spec": [
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      "stage",
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ]
+    ],
+    "shape": [
+      10944,
+      1,
+      2048
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['dense_layers']/['post_self_attention_layer_norm']/['scale']/.value": {
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose"
+      ],
+      "stage"
+    ],
+    "shape": [
+      2048,
+      1
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['dense_layers']/['pre_self_attention_layer_norm']/['scale']/.value": {
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose"
+      ],
+      "stage"
+    ],
+    "shape": [
+      2048,
+      1
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['dense_layers']/['self_attention']/['kv_norm']/['scale']/.value": {
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose"
+      ],
+      "stage"
+    ],
+    "shape": [
+      512,
+      1
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['dense_layers']/['self_attention']/['out']/['kernel']/.value": {
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      "stage",
+      null,
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ]
+    ],
+    "shape": [
+      16,
+      1,
+      128,
+      2048
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['dense_layers']/['self_attention']/['query']/['kernel']/.value": {
+    "partition_spec": [
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      null
+    ],
+    "shape": [
+      2048,
+      1,
+      16,
+      192
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['dense_layers']/['self_attention']/['wkv_a']/['kernel']/.value": {
+    "partition_spec": [
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      null
+    ],
+    "shape": [
+      2048,
+      1,
+      576
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['dense_layers']/['self_attention']/['wkv_b']/['kernel']/.value": {
+    "partition_spec": [
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      null
+    ],
+    "shape": [
+      512,
+      1,
+      16,
+      256
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['logits_dense']/['kernel']/.value": {
+    "partition_spec": [
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ]
+    ],
+    "shape": [
+      2048,
+      102400
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['gate']/['kernel']/.value": {
+    "partition_spec": [
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      null
+    ],
+    "shape": [
+      2048,
+      26,
+      64
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wi_0']/.value": {
+    "partition_spec": [
+      "expert",
+      "stage",
+      [
+        "fsdp",
+        "sequence",
+        "context"
+      ],
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ]
+    ],
+    "shape": [
+      64,
+      26,
+      2048,
+      1408
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wi_1']/.value": {
+    "partition_spec": [
+      "expert",
+      "stage",
+      [
+        "fsdp",
+        "sequence",
+        "context"
+      ],
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ]
+    ],
+    "shape": [
+      64,
+      26,
+      2048,
+      1408
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wo']/.value": {
+    "partition_spec": [
+      "expert",
+      "stage",
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      [
+        "fsdp",
+        "sequence",
+        "context"
+      ]
+    ],
+    "shape": [
+      64,
+      26,
+      1408,
+      2048
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wi_0']/['kernel']/.value": {
+    "partition_spec": [
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ]
+    ],
+    "shape": [
+      2048,
+      26,
+      2816
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wi_1']/['kernel']/.value": {
+    "partition_spec": [
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ]
+    ],
+    "shape": [
+      2048,
+      26,
+      2816
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wo']/['kernel']/.value": {
+    "partition_spec": [
+      [
+        "fsdp_transpose",
+        "tensor",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      "stage",
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ]
+    ],
+    "shape": [
+      2816,
+      26,
+      2048
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['moe_layers']/['post_self_attention_layer_norm']/['scale']/.value": {
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose"
+      ],
+      "stage"
+    ],
+    "shape": [
+      2048,
+      26
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['moe_layers']/['pre_self_attention_layer_norm']/['scale']/.value": {
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose"
+      ],
+      "stage"
+    ],
+    "shape": [
+      2048,
+      26
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['moe_layers']/['self_attention']/['kv_norm']/['scale']/.value": {
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose"
+      ],
+      "stage"
+    ],
+    "shape": [
+      512,
+      26
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['moe_layers']/['self_attention']/['out']/['kernel']/.value": {
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      "stage",
+      null,
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ]
+    ],
+    "shape": [
+      16,
+      26,
+      128,
+      2048
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['moe_layers']/['self_attention']/['query']/['kernel']/.value": {
+    "partition_spec": [
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      null
+    ],
+    "shape": [
+      2048,
+      26,
+      16,
+      192
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['moe_layers']/['self_attention']/['wkv_a']/['kernel']/.value": {
+    "partition_spec": [
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      null
+    ],
+    "shape": [
+      2048,
+      26,
+      576
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['moe_layers']/['self_attention']/['wkv_b']/['kernel']/.value": {
+    "partition_spec": [
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ],
+      "stage",
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      null
+    ],
+    "shape": [
+      512,
+      26,
+      16,
+      256
+    ]
+  },
+  "['optimizer']/['opt_state']/[0]/['nu']/['token_embedder']/['embedding']/.value": {
+    "partition_spec": [
+      [
+        "tensor",
+        "tensor_transpose",
+        "tensor_sequence",
+        "autoregressive"
+      ],
+      [
+        "fsdp",
+        "sequence",
+        "context",
+        "expert"
+      ]
+    ],
+    "shape": [
+      102400,
+      2048
+    ]
+  },
+  "['optimizer']/['opt_state']/[2]/['count']/.value": {
+    "partition_spec": [],
+    "shape": []
+  },
+  "['optimizer']/['step']/.value": {
     "partition_spec": [],
     "shape": []
   }

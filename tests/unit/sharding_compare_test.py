@@ -20,8 +20,10 @@ import json
 import os
 import jax
 import jax.numpy as jnp
+from flax import nnx
 from maxtext.configs import pyconfig
-from maxtext.utils import maxtext_utils
+from maxtext.layers.train_state_nnx import TrainStateNNX
+from maxtext.utils import maxtext_utils, maxtext_utils_nnx, model_creation_utils
 from maxtext.utils.sharding import clear_input_shardings_dump
 # import optax
 
@@ -128,9 +130,6 @@ def test_sharding_dump_for_model(model_name: str, topology: str, num_slice: str)
       f"model_name={model_name}",
       "log_config=false",
       "debug_sharding=true",  # for input sharding dump
-      "pure_nnx=False",
-      "enable_nnx=False",
-      "pure_nnx_decoder=False",
   ]
 
   root_dir = "tests/utils/sharding_info"
@@ -219,31 +218,39 @@ def abstract_state_and_shardings(request):
       f"compile_topology_num_slices={num_slice}",
       f"model_name={model_name}",
       "weight_dtype=float32",
-      "pure_nnx=False",
-      "enable_nnx=False",
-      "pure_nnx_decoder=False",
   ]
   config = pyconfig.initialize(params)
   validate_config(config)
 
   topology_mesh = get_topology_mesh(config)
   quant = quantizations.configure_quantization(config)
-  model = Transformer(config, mesh=topology_mesh, quant=quant)
-
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
-  # tx = optax.adam(learning_rate=learning_rate_schedule)
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
-  rng = jax.random.PRNGKey(0)
 
-  init_state_fn = functools.partial(maxtext_utils.init_initial_state, model, tx, config, True, rng)
+  if config.pure_nnx:
+    _create_model_partial, _ = model_creation_utils.create_nnx_abstract_model(config, topology_mesh)
+
+    def create_train_state_fn():
+      nnx_model = _create_model_partial()
+      optimizer = nnx.Optimizer(nnx_model, tx, wrt=nnx.Param)
+      return TrainStateNNX(nnx_model, optimizer)
+
+    init_state_fn = create_train_state_fn
+  else:
+    model = Transformer(config, mesh=topology_mesh, quant=quant)
+    rng = jax.random.PRNGKey(0)
+    init_state_fn = functools.partial(maxtext_utils.init_initial_state, model, tx, config, True, rng)
 
   # Get abstract state and physical shardings from maxtext_utils
   abstract_state, _, state_mesh_shardings = maxtext_utils.get_abstract_state(
       config, topology_mesh, init_state_fn, is_training=True
   )
 
-  # Get logical shardings from maxtext_utils
-  logical_shardings = maxtext_utils.get_logical_annotations(config, topology_mesh, init_state_fn)
+  # Get logical shardings
+  if config.pure_nnx:
+    logical_shardings = maxtext_utils_nnx.get_partition_spec_nnx(state_mesh_shardings)
+  else:
+    logical_shardings = maxtext_utils.get_logical_annotations(config, topology_mesh, init_state_fn)
 
   return model_name, topology, num_slice, abstract_state, state_mesh_shardings, logical_shardings
 
@@ -261,11 +268,17 @@ class TestGetAbstractState:
         abstract_state_and_shardings
     )
 
-    assert hasattr(abstract_state, "params")
-    assert hasattr(abstract_state, "opt_state")
-    param_leaf = jax.tree_util.tree_leaves(abstract_state.params)[0]
-    assert isinstance(param_leaf, jax.ShapeDtypeStruct)
-    assert param_leaf.dtype == jnp.float32
+    if hasattr(abstract_state, "params"):  # Linen TrainState
+      assert hasattr(abstract_state, "opt_state")
+      param_leaf = jax.tree_util.tree_leaves(abstract_state.params)[0]
+      assert isinstance(param_leaf, jax.ShapeDtypeStruct)
+      assert param_leaf.dtype == jnp.float32
+    else:  # NNX nnx.State
+      assert hasattr(abstract_state, "model")
+      assert hasattr(abstract_state, "optimizer")
+      param_leaves = [l for l in jax.tree_util.tree_leaves(abstract_state.model) if isinstance(l, jax.ShapeDtypeStruct)]
+      assert len(param_leaves) > 0
+      assert all(l.dtype == jnp.float32 for l in param_leaves)
 
     root_dir = "tests/utils/sharding_info"  # Or your target directory
     base_path = os.path.join(root_dir, model_name, topology, f"slice_{num_slice}")

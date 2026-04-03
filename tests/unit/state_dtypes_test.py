@@ -18,13 +18,15 @@ import unittest
 
 import jax
 import jax.numpy as jnp
+from flax import nnx
 from jax.sharding import Mesh
 from maxtext.configs import pyconfig
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.layers import quantizations
+from maxtext.layers.train_state_nnx import TrainStateNNX
 from maxtext.models import models
 from maxtext.optimizers import optimizers
-from maxtext.utils import maxtext_utils
+from maxtext.utils import maxtext_utils, model_creation_utils
 from tests.utils.test_helpers import get_test_config_path, get_decoupled_parallelism_overrides
 
 Transformer = models.transformer_as_linen
@@ -35,32 +37,42 @@ class StateDtypes(unittest.TestCase):
 
   def get_state(self, argv):
     """Gets model state including weights and optimizer state"""
-    # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
     argv = list(argv) + get_decoupled_parallelism_overrides(as_argv=True)
-
-    # Setup necessary inputs to build a model state
     config = pyconfig.initialize(argv)
     quant = quantizations.configure_quantization(config)
     devices_array = maxtext_utils.create_device_mesh(config)
     mesh = Mesh(devices_array, config.mesh_axes)
-    model = Transformer(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
     learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
     tx = optimizers.get_optimizer(config, learning_rate_schedule)
-    _, example_rng = jax.random.split(jax.random.PRNGKey(0), 2)
 
     if config.pure_nnx:
-      # NNX has a different function to init the training state.
-      raise NotImplementedError("Pure NNX support has not been implemented yet.")
-    else:
-      init_state_fn = partial(maxtext_utils.init_initial_state, model, tx, config, True, example_rng)
+      _create_model_partial, _ = model_creation_utils.create_nnx_abstract_model(config, mesh)
+
+      def create_train_state_fn():
+        nnx_model = _create_model_partial()
+        optimizer = nnx.Optimizer(nnx_model, tx, wrt=nnx.Param)
+        return TrainStateNNX(nnx_model, optimizer)
+
+      return nnx.eval_shape(create_train_state_fn)
+
+    model = Transformer(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+    _, example_rng = jax.random.split(jax.random.PRNGKey(0), 2)
+    init_state_fn = partial(maxtext_utils.init_initial_state, model, tx, config, True, example_rng)
     abstract_state, _, _ = maxtext_utils.get_abstract_state(config, mesh, init_state_fn, True)
     return abstract_state
 
   def get_weights(self, argv):
-    return self.get_state(argv).params
+    state = self.get_state(argv)
+    if isinstance(state, TrainStateNNX):
+      _, param_state, _ = nnx.split(state, nnx.Param, ...)
+      return param_state
+    return state.params
 
   def get_mu(self, argv):
-    return self.get_state(argv).opt_state[0].mu
+    state = self.get_state(argv)
+    if isinstance(state, TrainStateNNX):
+      return state.optimizer.opt_state[0].mu
+    return state.opt_state[0].mu
 
   def assert_pytree_is_dtype(self, weights, expected_dtype):
     jax.tree_util.tree_map_with_path(lambda x, y: self.assertEqual(y.dtype, expected_dtype), weights)
