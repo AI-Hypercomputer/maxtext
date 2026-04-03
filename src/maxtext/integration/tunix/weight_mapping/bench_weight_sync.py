@@ -162,10 +162,10 @@ def _load_maxtext_model(base_yaml_path):
     tokenizer_path = local_tokenizer_dir
   else:
     tokenizer_path = HF_IDS.get(model_name, os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers/tokenizer.llama2"))
-
+  
   logging.info("Loading model_name=%s checkpoint=%s fsdp=%d ici_tp=%d rollout_tp=%d tokenizer=%s",
                model_name, _CHECKPOINT.value, _FSDP_TP.value, _ICI_TP.value, _ROLLOUT_TP.value, tokenizer_path)
-               
+           
   argv = ["", base_yaml_path] + [arg for arg in sys.argv[1:] if "=" in arg and not arg.startswith("--")]
   config_ref = pyconfig.initialize(
       argv,
@@ -190,7 +190,7 @@ def _load_maxtext_model(base_yaml_path):
       query_proj="offload",
       key_proj="offload",
       value_proj="offload",
-      ici_fsdp_parallelism=_FSDP_TP.value,
+      ici_data_parallelism=_FSDP_TP.value,
       ici_tensor_parallelism=_ICI_TP.value,
       rollout_tensor_parallelism=_ROLLOUT_TP.value,
       override_model_config="true",
@@ -767,35 +767,49 @@ class DeepSeekV3ToVLLMConverter:
         self.vllm_state["vllm_model.lm_head.weight"] = _transpose(params['base']['decoder']['logits_dense']['kernel'])
 
     def _convert_layers(self, params):
-        layers = params['base']['decoder']['layers']
+        decoder_params = params['base']['decoder']
         prefix = "vllm_model.model.layers"
+        num_dense = getattr(self.config, "first_num_dense_layers", 0)
 
         # 1. Layer Norms
         logging.info("_convert_layers: layer norms...")
         @jax.jit
         def _unstack_norm(x):
             return jnp.unstack(jnp.transpose(x, (1, 0)))
-        
-        input_norms = _unstack_norm(layers['pre_self_attention_layer_norm']['scale'])
-        post_attn_norms = _unstack_norm(layers['post_self_attention_layer_norm']['scale'])
-        
-        for i in range(self.num_layers):
-            self.vllm_state[f"{prefix}.{i}.input_layernorm.weight"] = input_norms[i]
-            self.vllm_state[f"{prefix}.{i}.post_attention_layernorm.weight"] = post_attn_norms[i]
-        
-        # 2. MLA Attention
-        logging.info("_convert_layers: MLA attention...")
-        self._convert_mla(layers['self_attention'], prefix)
 
-        # 3. MoE / MLP
-        logging.info("_convert_layers: MoE / MLP...")
-        if 'moe_block' in layers:
-            self._convert_moe(layers['moe_block'], prefix)
-        elif 'mlp' in layers:
-            # Handle dense MLP if any (though DSV3 is mostly MoE)
-            self._convert_dense_mlp(layers['mlp'], prefix)
-        
-    def _convert_mla(self, attn, prefix):
+        # Process Dense Layers
+        if num_dense > 0 and 'dense_layers' in decoder_params:
+            dense_layers = decoder_params['dense_layers']
+            logging.info(f"_convert_layers: processing {num_dense} dense layers...")
+            
+            input_norms = _unstack_norm(dense_layers['pre_self_attention_layer_norm']['scale'])
+            post_attn_norms = _unstack_norm(dense_layers['post_self_attention_layer_norm']['scale'])
+            
+            for i in range(num_dense):
+                self.vllm_state[f"{prefix}.{i}.input_layernorm.weight"] = input_norms[i]
+                self.vllm_state[f"{prefix}.{i}.post_attention_layernorm.weight"] = post_attn_norms[i]
+            
+            self._convert_mla(dense_layers['self_attention'], prefix, range(num_dense))
+            self._convert_dense_mlp(dense_layers['mlp'], prefix, range(num_dense))
+
+        # Process MoE Layers
+        num_moe = self.num_layers - num_dense
+        if num_moe > 0 and 'moe_layers' in decoder_params:
+            moe_layers = decoder_params['moe_layers']
+            logging.info(f"_convert_layers: processing {num_moe} moe layers...")
+            
+            input_norms = _unstack_norm(moe_layers['pre_self_attention_layer_norm']['scale'])
+            post_attn_norms = _unstack_norm(moe_layers['post_self_attention_layer_norm']['scale'])
+            
+            for i in range(num_moe):
+                idx = i + num_dense
+                self.vllm_state[f"{prefix}.{idx}.input_layernorm.weight"] = input_norms[i]
+                self.vllm_state[f"{prefix}.{idx}.post_attention_layernorm.weight"] = post_attn_norms[i]
+            
+            self._convert_mla(moe_layers['self_attention'], prefix, range(num_dense, self.num_layers))
+            self._convert_moe(moe_layers['DeepSeekMoeBlock_0'], prefix, range(num_dense, self.num_layers))
+
+    def _convert_mla(self, attn, prefix, layer_indices):
         tp = self.vllm_tp
 
         @jax.jit
@@ -826,8 +840,6 @@ class DeepSeekV3ToVLLMConverter:
             wo = jnp.transpose(attn['out']['kernel'], (2, 3, 0, 1))
             l, dm, nh, dh = wo.shape
             wo = wo.reshape(l, dm, nh * dh)
-            # Standard is (out_features, in_features), so (d_model, Heads * HeadDim).
-            # vLLM expects o_proj.weight as (d_model, Heads * HeadDim)
             
             return {
                 "q_a_proj.weight": jnp.unstack(wq_a),
@@ -840,12 +852,13 @@ class DeepSeekV3ToVLLMConverter:
             }
 
         mla_weights = _process_mla(attn)
-        for key, layers in mla_weights.items():
-            for i, weight in enumerate(layers):
-                self.vllm_state[f"{prefix}.{i}.self_attn.{key}"] = weight
+        for key, unstacked_weights in mla_weights.items():
+            for i, layer_idx in enumerate(layer_indices):
+                self.vllm_state[f"{prefix}.{layer_idx}.self_attn.{key}"] = unstacked_weights[i]
 
-    def _convert_moe(self, moe, prefix):
+    def _convert_moe(self, moe, prefix, layer_indices):
         tp = self.vllm_tp
+        routed_moe = moe['MoeBlock_0']
 
         logging.info("_convert_moe: gate...")
         @jax.jit
@@ -853,9 +866,9 @@ class DeepSeekV3ToVLLMConverter:
             # (emb, L, E) -> (L, E, emb)
             return jnp.unstack(jnp.transpose(gate_kernel, (1, 2, 0)))
         
-        gate_layers = _process_gate(moe['MoeBlock_0']['gate']['kernel'])
-        for i, w in enumerate(gate_layers):
-            self.vllm_state[f"{prefix}.{i}.mlp.gate.weight"] = w
+        gate_layers = _process_gate(routed_moe['gate']['kernel'])
+        for i, layer_idx in enumerate(layer_indices):
+            self.vllm_state[f"{prefix}.{layer_idx}.mlp.gate.weight"] = gate_layers[i]
 
         logging.info("_convert_moe: routed experts...")
         @jax.jit
@@ -882,11 +895,11 @@ class DeepSeekV3ToVLLMConverter:
             
             return jnp.unstack(gate_up), jnp.unstack(down)
 
-        gate_up_layers, down_layers = _process_routed(moe['MoeBlock_0']['wi_0'], moe['MoeBlock_0']['wi_1'], moe['MoeBlock_0']['wo'])
+        gate_up_layers, down_layers = _process_routed(routed_moe['wi_0'], routed_moe['wi_1'], routed_moe['wo'])
         
-        for i in range(self.num_layers):
-            self.vllm_state[f"{prefix}.{i}.mlp.experts.gate_up_proj"] = gate_up_layers[i]
-            self.vllm_state[f"{prefix}.{i}.mlp.experts.down_proj"] = down_layers[i]
+        for i, layer_idx in enumerate(layer_indices):
+            self.vllm_state[f"{prefix}.{layer_idx}.mlp.experts.gate_up_proj"] = gate_up_layers[i]
+            self.vllm_state[f"{prefix}.{layer_idx}.mlp.experts.down_proj"] = down_layers[i]
 
         logging.info("_convert_moe: shared experts...")
         @jax.jit
@@ -899,8 +912,7 @@ class DeepSeekV3ToVLLMConverter:
             w0 = jnp.transpose(wi_0, (1, 2, 0))
             w1 = jnp.transpose(wi_1, (1, 2, 0))
             
-            # Interleave for TP? Shared experts might also be TPed in vLLM.
-            # If so, they are usually treated as a single dense MLP.
+            # Interleave for TP
             chunk_size = ds // tp
             w0_chunks = w0.reshape(l, tp, chunk_size, dm)
             w1_chunks = w1.reshape(l, tp, chunk_size, dm)
@@ -913,19 +925,52 @@ class DeepSeekV3ToVLLMConverter:
             
             return jnp.unstack(gate_up), jnp.unstack(down)
 
+        shared_experts = moe['shared_experts']
         sh_gate_up, sh_down = _process_shared(
-            moe['shared_experts']['wi_0']['kernel'],
-            moe['shared_experts']['wi_1']['kernel'],
-            moe['shared_experts']['wo']['kernel']
+            shared_experts['wi_0']['kernel'],
+            shared_experts['wi_1']['kernel'],
+            shared_experts['wo']['kernel']
         )
         
-        for i in range(self.num_layers):
-            self.vllm_state[f"{prefix}.{i}.mlp.shared_experts.gate_up_proj.weight"] = sh_gate_up[i]
-            self.vllm_state[f"{prefix}.{i}.mlp.shared_experts.down_proj.weight"] = sh_down[i]
+        for i, layer_idx in enumerate(layer_indices):
+            self.vllm_state[f"{prefix}.{layer_idx}.mlp.shared_experts.gate_up_proj.weight"] = sh_gate_up[i]
+            self.vllm_state[f"{prefix}.{layer_idx}.mlp.shared_experts.down_proj.weight"] = sh_down[i]
 
-    def _convert_dense_mlp(self, mlp, prefix):
-        # Implementation for dense MLP layers if needed
-        pass
+    def _convert_dense_mlp(self, mlp, prefix, layer_indices):
+        tp = self.vllm_tp
+
+        @jax.jit
+        def _process_dense(wi_0, wi_1, wo):
+            # wi_0: (d_model, L, d_inner) -> (L, d_inner, d_model)
+            l = wi_0.shape[1]
+            dm = wi_0.shape[0]
+            di = wi_0.shape[2]
+
+            w0 = jnp.transpose(wi_0, (1, 2, 0))
+            w1 = jnp.transpose(wi_1, (1, 2, 0))
+
+            # Interleave for TP
+            chunk_size = di // tp
+            w0_chunks = w0.reshape(l, tp, chunk_size, dm)
+            w1_chunks = w1.reshape(l, tp, chunk_size, dm)
+            gate_up = jnp.stack([w0_chunks, w1_chunks], axis=2).reshape(l, 2 * di, dm)
+            # vLLM expects (2*d_inner, d_model) -> (d_model, 2*d_inner)
+            gate_up = jnp.transpose(gate_up, (0, 2, 1))
+
+            # wo: (d_inner, L, d_model) -> (L, d_model, d_inner)
+            down = jnp.transpose(wo, (1, 2, 0))
+
+            return jnp.unstack(gate_up), jnp.unstack(down)
+
+        gate_up_layers, down_layers = _process_dense(
+            mlp['wi_0']['kernel'],
+            mlp['wi_1']['kernel'],
+            mlp['wo']['kernel']
+        )
+
+        for i, layer_idx in enumerate(layer_indices):
+            self.vllm_state[f"{prefix}.{layer_idx}.mlp.gate_up_proj.weight"] = gate_up_layers[i]
+            self.vllm_state[f"{prefix}.{layer_idx}.mlp.down_proj.weight"] = down_layers[i]
 
 
 
@@ -941,7 +986,7 @@ def main():
   print("="*80)
   print("Loading MaxText model...")
   print("="*80)
-  base_yaml_path = os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")
+  base_yaml_path = os.path.join(MAXTEXT_CONFIGS_DIR, "inference", "vllm.yml")
   config, model, mesh = _load_maxtext_model(base_yaml_path)
   print(f"{GREEN}MaxText model loaded successfully{RESET}")
   print(f"Model: {config.model_name}")
@@ -987,9 +1032,10 @@ def main():
     max_model_len=16,
     tensor_parallel_size=_ROLLOUT_TP.value,
     data_parallel_size=_FSDP_TP.value,
-    gpu_memory_utilization=0.35,
+    gpu_memory_utilization=0.75,
     async_scheduling=False,
     enforce_eager=True,
+    load_format="dummy",
   )
   print("\n" + "="*80)
   llm_state = llm.llm_engine.model_executor.driver_worker.model_runner.state
