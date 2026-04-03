@@ -103,10 +103,9 @@ class GrainArrayRecordProcessingTest(GrainBaseProcessingTest, unittest.TestCase)
       grain_train_files = os.path.join(
           dataset_root,
           "c4",
-          "array-record",
           "en",
           "3.0.1",
-          "c4-train.array_record-00000-of-01024",
+          "c4-train.array_record-00000-of-00008",
       )
       base_output_directory = get_test_base_output_directory()
     else:
@@ -384,7 +383,7 @@ class GrainTFRecordProcessingTest(GrainBaseProcessingTest, unittest.TestCase):
           "c4",
           "en",
           "3.0.1",
-          "c4-train.tfrecord-00000-of-01024",
+          "__local_c4_builder-train.tfrecord-00000-of-00008",
       )
       base_output_directory = get_test_base_output_directory()
     else:
@@ -427,6 +426,7 @@ class GrainTFRecordProcessingTest(GrainBaseProcessingTest, unittest.TestCase):
     self.train_iter = grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
 
 
+@pytest.mark.external_training
 class GrainSFTParquetProcessingTest(unittest.TestCase):
   """Tests the SFT pipeline end-to-end using the real ultrachat_200k parquet dataset."""
 

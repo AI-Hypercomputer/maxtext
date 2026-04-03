@@ -269,6 +269,7 @@ class DiLoCoTest(unittest.TestCase):
       chex.assert_trees_all_equal(diloco_test_state.params, step_three_outer_params)
 
   @pytest.mark.cpu_only
+  @pytest.mark.tpu_backend
   def test_diloco_qwen3_moe_two_slices(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_compiled_diloco_qwen3_moe.pickle")
