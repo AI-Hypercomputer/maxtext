@@ -22,7 +22,7 @@ from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE
 from maxtext.configs import pyconfig
 from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from maxtext.utils import model_creation_utils
-from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
+from maxtext.utils.globals import HF_IDS, MAXTEXT_ASSETS_ROOT, MAXTEXT_CONFIGS_DIR
 
 GREEN = "\033[92m"
 YELLOW = "\033[93m"
@@ -37,7 +37,13 @@ _JAX_COMPILATION_CACHE_DIR = "/tmp/jax_cache"
 # Flags
 FLAGS = flags.FLAGS
 _XPROF = flags.DEFINE_bool('xprof', False, 'xprof')
-_RAND_INIT = flags.DEFINE_bool('rand_init', False, 'Whether to use random initialization instead of loading from checkpoint, for faster testing.')  
+_RAND_INIT = flags.DEFINE_bool('rand_init', False, 'Whether to use random initialization instead of loading from checkpoint, for faster testing.')
+_MODEL_NAME = flags.DEFINE_string('model_name', 'qwen3-30b-a3b', 'MaxText model name (e.g. qwen3-30b-a3b, gemma4-26b, gemma4-31b)')
+_CHECKPOINT = flags.DEFINE_string('checkpoint_path', 'gs://hengtaoguo-maxtext-logs/checkpoints/qwen3-30b-a3b/scanned/2026-01-23-14-00/0/items/0/items', 'GCS or local path to the scanned checkpoint')
+_VLLM_MODEL_ID = flags.DEFINE_string('vllm_model_id', 'Qwen/Qwen3-30B-A3B', 'HuggingFace model ID passed to vLLM (e.g. google/gemma-4-26b-it)')
+_FSDP_TP = flags.DEFINE_integer('ici_fsdp_parallelism', -1, 'ICI FSDP parallelism (-1 = auto-shard to fill remaining devices)')
+_ICI_TP = flags.DEFINE_integer('ici_tensor_parallelism', 2, 'ICI tensor parallelism')
+_ROLLOUT_TP = flags.DEFINE_integer('rollout_tensor_parallelism', 2, 'Rollout tensor parallelism')
 
 def _setup_jax_compilation_cache():
   jax_config.update("jax_compilation_cache_dir", _JAX_COMPILATION_CACHE_DIR)
@@ -98,6 +104,12 @@ def _get_maxtext_model(config):
         num_experts=128,
         num_experts_per_tok=8,
     )
+    elif config.model_name == "gemma4-26b":
+      # Tunix has no Gemma4 model class yet; config is unused for weight sync.
+      model_config = None
+    elif config.model_name == "gemma4-31b":
+      # Tunix has no Gemma4 model class yet; config is unused for weight sync.
+      model_config = None
     else:
       raise ValueError(f"Unsupported model: {config.model_name}")
     tunix_model.config = model_config
@@ -138,16 +150,26 @@ def _load_maxtext_model(base_yaml_path):
   #     override_model_config="true",
   #     # base_num_decoder_layers=2,
   # )  
+  model_name = _MODEL_NAME.value
+  tokenizer_dir = "gemma4-tokenizer" if model_name.startswith("gemma4") else "qwen3-tokenizer"
+  
+  # Determine tokenizer path: prefer local assets if they exist, otherwise use HF ID.
+  local_tokenizer_dir = os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", tokenizer_dir)
+  if os.path.isdir(local_tokenizer_dir):
+    tokenizer_path = local_tokenizer_dir
+  else:
+    tokenizer_path = HF_IDS.get(model_name, os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers/tokenizer.llama2"))
+
+  logging.info("Loading model_name=%s checkpoint=%s fsdp=%d ici_tp=%d rollout_tp=%d tokenizer=%s",
+               model_name, _CHECKPOINT.value, _FSDP_TP.value, _ICI_TP.value, _ROLLOUT_TP.value, tokenizer_path)
   config_ref = pyconfig.initialize(
-      [ "", base_yaml_path, ],
-      base_output_directory="gs://wyzhang-dev/tmp",  # Not used in Tunix.
-      run_name="test-tunix-maxtext-qwen3",
+      ["", base_yaml_path],
+      base_output_directory="gs://tmp",  # Not used in Tunix.
+      run_name=f"bench-weight-sync-{model_name}",
       tokenizer_type="huggingface",
-      tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "qwen3-tokenizer"),
-      # model_name="qwen3-235b-a22b",
-      # load_parameters_path="gs://hengtaoguo-maxtext-logs/checkpoints/qwen3-235b-a22b/scanned/Qwen3-235B-A22B/0/items",
-      model_name="qwen3-30b-a3b",
-      load_parameters_path="gs://hengtaoguo-maxtext-logs/checkpoints/qwen3-30b-a3b/scanned/2026-01-23-14-00/0/items/0/items",
+      tokenizer_path=tokenizer_path,
+      model_name=model_name,
+      load_parameters_path=_CHECKPOINT.value,
       scan_layers="true",
       per_device_batch_size=1,
       max_prefill_predict_length=8,
@@ -163,12 +185,10 @@ def _load_maxtext_model(base_yaml_path):
       query_proj="offload",
       key_proj="offload",
       value_proj="offload",
-      # ici_expert_parallelism=4,
-      ici_fsdp_parallelism=2,
-      ici_tensor_parallelism=2,
-      rollout_tensor_parallelism=2,
+      ici_fsdp_parallelism=_FSDP_TP.value,
+      ici_tensor_parallelism=_ICI_TP.value,
+      rollout_tensor_parallelism=_ROLLOUT_TP.value,
       override_model_config="true",
-      # debug_sharding="true",
       checkpoint_storage_concurrent_gb=80,
       async_scheduling="false",
   )
@@ -390,6 +410,317 @@ class MaxTextToVLLMConverter:
         return jnp.unstack(param, axis=0)
 
 
+class Gemma4ToVLLMConverter:
+    """Converts MaxText Gemma4 weights to the layout expected by a vLLM Gemma4 model.
+
+    Supports both gemma4-26b (MoE: 128 routed + 1 shared expert) and
+    gemma4-31b (Dense).
+
+    MaxText Gemma4 stores layers in a scanned-block structure:
+      state['base']['decoder']['scanned_blocks']['layers_{slot}']
+    where slot ∈ [0..5].  Slots 0–4 are local-sliding-window attention layers
+    and slot 5 is a global attention layer.  The 'L' dimension (axis 1 of each
+    weight tensor) holds 'num_reps = num_layers // 6' repetitions of each slot.
+    Final vLLM layer index = rep * 6 + slot.
+
+    Global attention (slot 5) uses a shared KV projection — 'key' serves as
+    both K and V; there is no separate 'value' tensor.
+
+    Key names and tensor transformations are derived from the MaxText HF param mapping
+    at src/maxtext/checkpoint_conversion/utils/param_mapping.py.
+
+    Attention: Gemma4 uses SEPARATE q/k/v proj weights (not fused QKV).
+    MoE (26B): gate+up proj are fused into experts.gate_up_proj (E, 2*d_inner, d_model).
+    Embedding: MaxText stores embedding * sqrt(d_model); divide out before writing to vLLM.
+    """
+
+    NUM_SLOTS = 6  # 5 local + 1 global
+
+    def __init__(self, config, mesh):
+        self.config = config
+        self.mesh = mesh
+        self.num_layers = config.base_num_decoder_layers
+        assert self.num_layers % self.NUM_SLOTS == 0, (
+            f"num_layers {self.num_layers} must be divisible by {self.NUM_SLOTS}"
+        )
+        self.num_reps = self.num_layers // self.NUM_SLOTS
+        self.vllm_state = {}
+        self.is_moe = (config.model_name == "gemma4-26b")
+        self.d_model = config.base_emb_dim
+        self.vllm_tp = self.config.rollout_tensor_parallelism
+
+    # --- 1. Top-Level Entry Point ---
+
+    def convert(self, model_state: dict):
+        logging.info(f"\n{GREEN}Starting Gemma4 Conversion (is_moe={self.is_moe}, "
+                     f"num_layers={self.num_layers}, num_reps={self.num_reps})...{RESET}")
+        blocks = model_state['base']['decoder']['scanned_blocks']
+        prefix = "vllm_model.model.layers"
+
+        with timer("Convert Global Weights"):
+            self._convert_global(model_state)
+        with timer("Convert Layer Norms"):
+            self._convert_norms(blocks, prefix)
+        with timer("Convert Attention Weights"):
+            self._convert_attn_weights(blocks, prefix)
+        if self.is_moe:
+            with timer("Convert MoE Weights"):
+                self._convert_moe_weights(blocks, prefix)
+        else:
+            with timer("Convert Dense MLP Weights"):
+                self._convert_dense_mlp_weights(blocks, prefix)
+
+        return self.vllm_state
+
+    @staticmethod
+    @jax.jit
+    def _pack_attn(q, k, v, o, qnorm, knorm):
+        """Prepares separate q/k/v, o, and norms for all layers in a slot.
+        Input shapes (MaxText scanned):
+          q/k/v: (d_model, L, nH, D)
+          o:     (nH, D, L, d_model)
+          norms: (D, L)
+        Returns: L × (nH*D, d_model) for q/k/v, etc.
+        """
+        # q/k/v: (d_model, L, nH, D) -> (L, nH, D, d_model) -> (L, nH*D, d_model)
+        q = jnp.transpose(q, (1, 2, 3, 0)).reshape(q.shape[1], -1, q.shape[0])
+        k = jnp.transpose(k, (1, 2, 3, 0)).reshape(k.shape[1], -1, k.shape[0])
+        v = jnp.transpose(v, (1, 2, 3, 0)).reshape(v.shape[1], -1, v.shape[0])
+        
+        # o: (nH, D, L, d_model) -> (L, d_model, nH, D) -> (L, d_model, nH*D)
+        o = jnp.transpose(o, (2, 3, 0, 1)).reshape(o.shape[2], o.shape[3], -1)
+        
+        # norms: (D, L) -> (L, D)
+        qnorm = jnp.transpose(qnorm, (1, 0))
+        knorm = jnp.transpose(knorm, (1, 0))
+        
+        return (jnp.unstack(q), jnp.unstack(k), jnp.unstack(v), 
+                jnp.unstack(o), jnp.unstack(qnorm), jnp.unstack(knorm))
+
+    # --- 2. Global (non-per-layer) weights ---
+
+    def _convert_global(self, params):
+        # Gemma4 uses tied embeddings: no logits_dense; lm_head.weight = embed_tokens.weight.
+        # MaxText stores embedding pre-multiplied by sqrt(d_model) (applied at runtime in HF/vLLM).
+        # Divide it out so vLLM gets the raw embedding and can apply its own normalizer.
+        logging.info("_convert_global: embed_tokens (de-normalize) + lm_head (tied) + final_norm...")
+        normalizer = self.d_model ** 0.5
+
+        @jax.jit
+        def _denorm_embed(x):
+            return (x / normalizer).astype(x.dtype)
+
+        raw_embedding = _denorm_embed(params['base']['token_embedder']['embedding'])
+        self.vllm_state["vllm_model.model.embed_tokens.weight"] = raw_embedding
+        self.vllm_state["vllm_model.lm_head.weight"] = raw_embedding  # tied
+        self.vllm_state["vllm_model.model.norm.weight"] = (
+            params['base']['decoder']['decoder_norm']['scale']
+        )
+        logging.info("_convert_global: done")
+
+    # --- 3. Per-layer norms ---
+
+    def _convert_norms(self, blocks, prefix):
+        """Converts all 4 per-layer norm vectors across all layers."""
+        @jax.jit
+        def _unstack_norm(x):
+            # x: (d_model, L) -> L tensors of (d_model,)
+            return jnp.unstack(x, axis=1)
+
+        for slot in range(self.NUM_SLOTS):
+            slot_data = blocks[f'layers_{slot}']
+            pre_attn  = _unstack_norm(slot_data['pre_self_attention_norm']['scale'])
+            post_attn = _unstack_norm(slot_data['post_self_attention_norm']['scale'])
+            pre_ffw   = _unstack_norm(slot_data['pre_ffw_norm']['scale'])
+            post_ffw  = _unstack_norm(slot_data['post_ffw_norm']['scale'])
+            for rep in range(self.num_reps):
+                i = rep * self.NUM_SLOTS + slot
+                self.vllm_state[f"{prefix}.{i}.input_layernorm.weight"]            = pre_attn[rep]
+                self.vllm_state[f"{prefix}.{i}.post_attention_layernorm.weight"]   = post_attn[rep]
+                self.vllm_state[f"{prefix}.{i}.pre_feedforward_layernorm.weight"]  = pre_ffw[rep]
+                self.vllm_state[f"{prefix}.{i}.post_feedforward_layernorm.weight"] = post_ffw[rep]
+            del pre_attn, post_attn, pre_ffw, post_ffw
+        gc.collect()
+
+    # --- 4. Per-layer attention weights ---
+
+    def _convert_attn_weights(self, blocks, prefix):
+        """Converts separate q/k/v proj, o proj, q-norm, k-norm for all layers.
+
+        HF/vLLM Gemma4 uses separate projections (not fused QKV).  Global attention
+        layers (slot 5) have no 'value' tensor; vLLM sets v_proj = k_proj.
+
+        Tensor transformations (MaxText → HF, i.e. saving_to_hf=True in reshape_kernel):
+          q/k/v kernel: (d_model, nH, D) → (nH*D, d_model)  [reshape then transpose]
+          out kernel:   (nH, D, d_model) → (d_model, nH*D)   [reshape then transpose]
+          norms:        (D,)             → (D,)               [identity]
+        """
+        @jax.jit
+        def _pack_local(attn):
+            # q/k/v: (d_model, L, nH, D)
+            q = attn['query']['kernel']
+            k = attn['key']['kernel']
+            v = attn['value']['kernel']
+            return Gemma4ToVLLMConverter._pack_attn(
+                q, k, v, attn['out']['kernel'],
+                attn['query_norm']['scale'], attn['key_norm']['scale']
+            )
+
+        @jax.jit
+        def _pack_global(attn):
+            # Global: no 'value'; key used as both K and V (shared KV projection).
+            q = attn['query']['kernel']
+            k = attn['key']['kernel']
+            return Gemma4ToVLLMConverter._pack_attn(
+                q, k, k, attn['out']['kernel'],
+                attn['query_norm']['scale'], attn['key_norm']['scale']
+            )
+
+        for slot in range(self.NUM_SLOTS):
+            is_global = (slot == self.NUM_SLOTS - 1)
+            attn = blocks[f'layers_{slot}']['self_attention']
+            pack_fn = _pack_global if is_global else _pack_local
+            q_layers, k_layers, v_layers, o_layers, qnorm_layers, knorm_layers = pack_fn(attn)
+            for rep in range(self.num_reps):
+                i = rep * self.NUM_SLOTS + slot
+                self.vllm_state[f"{prefix}.{i}.self_attn.q_proj.weight"] = q_layers[rep]
+                self.vllm_state[f"{prefix}.{i}.self_attn.k_proj.weight"] = k_layers[rep]
+                self.vllm_state[f"{prefix}.{i}.self_attn.v_proj.weight"] = v_layers[rep]
+                self.vllm_state[f"{prefix}.{i}.self_attn.o_proj.weight"] = o_layers[rep]
+                self.vllm_state[f"{prefix}.{i}.self_attn.q_norm.weight"] = qnorm_layers[rep]
+                self.vllm_state[f"{prefix}.{i}.self_attn.k_norm.weight"] = knorm_layers[rep]
+            del q_layers, k_layers, v_layers, o_layers, qnorm_layers, knorm_layers
+        gc.collect()
+
+    # --- 5a. MoE weights (gemma4-26b only) ---
+
+    def _convert_moe_weights(self, blocks, prefix):
+        """Converts router, routed experts (fused gate_up_proj), shared expert, MoE norms (26B).
+
+        Tensor transformations:
+          router.proj.weight:       gate.kernel (d_model, L, E) → (E, d_model)
+          router.scale:             pre_forward_scale_2 (d_model, L) → (d_model,)  [identity]
+          router.per_expert_scale:  per_expert_scale (E, L) → (E,)  [identity]
+          experts.gate_up_proj:     fuse wi_0+wi_1 (E, L, d_model, d_inner) → (E, 2*d_inner, d_model)
+          experts.down_proj:        wo (E, L, d_inner, d_model) → (E, d_model, d_inner)
+          shared mlp.*:             (d_model, L, d_sh) or (d_sh, L, d_model) → HF convention
+          extra norms:              (d_model, L) → (d_model,)  [identity per layer]
+        """
+        @functools.partial(jax.jit, static_argnames=['vllm_tp'])
+        def _pack_moe(routed, shared, extra, vllm_tp):
+            L = routed['wi_0'].shape[1]
+            E = routed['wi_0'].shape[0]
+            d_inner = routed['wi_0'].shape[3]
+            d_model = routed['wi_0'].shape[2]
+
+            # Router proj: (d_model, L, E) -> L × (E, d_model)
+            router_proj = jnp.unstack(
+                jnp.transpose(routed['gate']['kernel'], (1, 2, 0)), axis=0
+            )
+            # Router scale: (d_model, L) -> L × (d_model,)  [identity — no reshape_kernel]
+            router_scale = jnp.unstack(extra['pre_forward_scale_2'], axis=1)
+            # Per-expert scale: (E, L) -> L × (E,)
+            per_expert_scale = jnp.unstack(routed['per_expert_scale'], axis=1)
+
+            # Fused gate+up proj for routed experts (TP-interleaved):
+            #   wi_0 (gate): (E, L, d_model, d_inner) -> (L, E, TP, d_inner//TP, d_model)
+            #   wi_1 (up):   (E, L, d_model, d_inner) -> (L, E, TP, d_inner//TP, d_model)
+            #   stack along new axis 3: (L, E, TP, 2, d_inner//TP, d_model)
+            #   reshape: (L, E, 2*d_inner, d_model) = gate_up_proj
+            w0 = jnp.transpose(routed['wi_0'], (1, 0, 3, 2)).reshape(L, E, vllm_tp, -1, d_model)
+            w1 = jnp.transpose(routed['wi_1'], (1, 0, 3, 2)).reshape(L, E, vllm_tp, -1, d_model)
+            combined = jnp.stack([w0, w1], axis=3)
+            gate_up = combined.reshape(L, E, 2 * d_inner, d_model)
+            gate_up_proj = jnp.unstack(gate_up, axis=0)
+
+            # Down proj: (E, L, d_inner, d_model) -> L × (E, d_model, d_inner)
+            down_proj = jnp.unstack(jnp.transpose(routed['wo'], (1, 0, 3, 2)), axis=0)
+
+            # Shared expert:
+            #   wi_0/wi_1: (d_model, L, d_sh) -> L × (d_sh, d_model)
+            #   wo:        (d_sh, L, d_model)  -> L × (d_model, d_sh)
+            sh_gate = jnp.unstack(jnp.transpose(shared['wi_0']['kernel'], (1, 2, 0)), axis=0)
+            sh_up   = jnp.unstack(jnp.transpose(shared['wi_1']['kernel'], (1, 2, 0)), axis=0)
+            sh_down = jnp.unstack(jnp.transpose(shared['wo']['kernel'],   (1, 2, 0)), axis=0)
+
+            # Extra MoE norms: (d_model, L) -> L × (d_model,)
+            pre_ln_2  = jnp.unstack(extra['pre_feedforward_layernorm_2']['scale'], axis=1)
+            post_ln_1 = jnp.unstack(extra['post_feedforward_layernorm_1']['scale'], axis=1)
+            post_ln_2 = jnp.unstack(extra['post_feedforward_layernorm_2']['scale'], axis=1)
+
+            return (router_proj, router_scale, per_expert_scale,
+                    gate_up_proj, down_proj,
+                    sh_gate, sh_up, sh_down,
+                    pre_ln_2, post_ln_1, post_ln_2)
+
+        for slot in range(self.NUM_SLOTS):
+            moe_block = blocks[f'layers_{slot}']['mlp']['moe_block']
+            routed = moe_block['MoeBlock_0']
+            shared = moe_block['shared_experts']
+            extra  = blocks[f'layers_{slot}']['mlp']
+            (router_proj, router_scale, per_expert_scale,
+             gate_up_proj, down_proj,
+             sh_gate, sh_up, sh_down,
+             pre_ln_2, post_ln_1, post_ln_2) = _pack_moe(routed, shared, extra, self.vllm_tp)
+
+            for rep in range(self.num_reps):
+                i = rep * self.NUM_SLOTS + slot
+                p = f"{prefix}.{i}"
+                # Router
+                self.vllm_state[f"{p}.router.proj.weight"]        = router_proj[rep]
+                self.vllm_state[f"{p}.router.scale"]              = router_scale[rep]
+                self.vllm_state[f"{p}.router.per_expert_scale"]   = per_expert_scale[rep]
+                # Routed experts (fused gate+up, separate down)
+                self.vllm_state[f"{p}.experts.gate_up_proj"] = gate_up_proj[rep]
+                self.vllm_state[f"{p}.experts.down_proj"]    = down_proj[rep]
+                # Shared expert (uses mlp.* keys — same as Dense MLP naming)
+                self.vllm_state[f"{p}.mlp.gate_proj.weight"] = sh_gate[rep]
+                self.vllm_state[f"{p}.mlp.up_proj.weight"]   = sh_up[rep]
+                self.vllm_state[f"{p}.mlp.down_proj.weight"] = sh_down[rep]
+                # Extra MoE norms
+                self.vllm_state[f"{p}.pre_feedforward_layernorm_2.weight"]  = pre_ln_2[rep]
+                self.vllm_state[f"{p}.post_feedforward_layernorm_1.weight"] = post_ln_1[rep]
+                self.vllm_state[f"{p}.post_feedforward_layernorm_2.weight"] = post_ln_2[rep]
+
+            del router_proj, router_scale, per_expert_scale, gate_up_proj, down_proj
+            del sh_gate, sh_up, sh_down, pre_ln_2, post_ln_1, post_ln_2
+            gc.collect()
+
+    # --- 5b. Dense MLP weights (gemma4-31b only) ---
+
+    def _convert_dense_mlp_weights(self, blocks, prefix):
+        """Converts gate/up/down projections for all layers (31B only).
+
+        Tensor transformations:
+          wi_0 (gate): (d_model, L, d_mlp) → L × (d_mlp, d_model)
+          wi_1 (up):   (d_model, L, d_mlp) → L × (d_mlp, d_model)
+          wo  (down):  (d_mlp,  L, d_model) → L × (d_model, d_mlp)
+        """
+        @jax.jit
+        def _pack_mlp(mlp):
+            # wi_0 (gate): (d_model, L, d_mlp) -> L × (d_mlp, d_model)
+            gate = jnp.unstack(jnp.transpose(mlp['wi_0']['kernel'], (1, 2, 0)), axis=0)
+            # wi_1 (up):   (d_model, L, d_mlp) -> L × (d_mlp, d_model)
+            up   = jnp.unstack(jnp.transpose(mlp['wi_1']['kernel'], (1, 2, 0)), axis=0)
+            # wo  (down):  (d_mlp,  L, d_model) -> L × (d_model, d_mlp)
+            down = jnp.unstack(jnp.transpose(mlp['wo']['kernel'], (1, 2, 0)), axis=0)
+            return gate, up, down
+
+        for slot in range(self.NUM_SLOTS):
+            mlp = blocks[f'layers_{slot}']['mlp']
+            gate_layers, up_layers, down_layers = _pack_mlp(mlp)
+            for rep in range(self.num_reps):
+                i = rep * self.NUM_SLOTS + slot
+                p = f"{prefix}.{i}"
+                # TODO: vLLM Gemma4 Dense may fuse gate+up into gate_up_proj (like Gemma3).
+                # Verify naming once vLLM Gemma4 is available.
+                self.vllm_state[f"{p}.mlp.gate_proj.weight"] = gate_layers[rep]
+                self.vllm_state[f"{p}.mlp.up_proj.weight"]   = up_layers[rep]
+                self.vllm_state[f"{p}.mlp.down_proj.weight"] = down_layers[rep]
+            del gate_layers, up_layers, down_layers
+            gc.collect()
+
+
 def save_dict_to_file(dict, filename):
     with open(filename, 'w') as f:
         for key in sorted(dict.keys()):
@@ -408,17 +739,7 @@ def main():
   print("="*80)
   print("Loading MaxText model...")
   print("="*80)
-  # path1 = "/home/wyzhang_google_com/mnt/rl/maxtext/src/maxtext/configs/base.yml"
-  path1 = "/home/hengtaoguo_google_com/projects/maxtext/src/maxtext/configs/base.yml"
-  path2 = os.path.join(os.path.expanduser("~"), "mnt/rl/maxtext/src/maxtext/configs/base.yml")
-  if os.path.exists(path1):
-    base_yaml_path = path1
-  elif os.path.exists(path2):
-    base_yaml_path = path2
-  else:
-    raise FileNotFoundError(
-        f"Could not find base.yml in the expected locations: {path1} or {path2}"
-    )
+  base_yaml_path = os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")
   config, model, mesh = _load_maxtext_model(base_yaml_path)
   print(f"{GREEN}MaxText model loaded successfully{RESET}")
   print(f"Model: {config.model_name}")
@@ -428,17 +749,26 @@ def main():
   print("="*80)
   print("Converting weights to VLLM format")
   print("="*80)
-  model_state = nnx.state(model)
+  model_state = nnx.state(model, nnx.Not(nnx.RngState))
+  
+  if 'to_nnx__rngs' in model_state:
+    del model_state['to_nnx__rngs']
+
   for path, leaf in jax.tree_util.tree_flatten_with_path(model_state)[0]:
     if hasattr(leaf, 'shape') and hasattr(leaf, 'sharding'):
       path_str = jax.tree_util.keystr(path)
       logging.info(f"Name: {path_str}, shape: {leaf.shape}")
       logging.info(f"\tSharding: {leaf.sharding}")
   
-  converter = MaxTextToVLLMConverter(config, mesh)
+  if config.model_name.startswith("gemma4"):
+    converter = Gemma4ToVLLMConverter(config, mesh)
+  else:
+    converter = MaxTextToVLLMConverter(config, mesh)
   with timer("Overall Conversion "):
     vllm_state = converter.convert(model_state)
   del model_state
+  del model
+  del mesh
   gc.collect()
   # save_dict_to_file(vllm_state, "vllm_state_shapes.txt")
 
@@ -447,16 +777,13 @@ def main():
   print("Loading vLLM model for generation test...")
   print("="*80)
   llm = LLM(
-    "Qwen/Qwen3-30B-A3B",
+    _VLLM_MODEL_ID.value,
     max_model_len=16,
-    # tensor_parallel_size=4,
-    # tensor_parallel_size=4,
-    tensor_parallel_size=2,
-    data_parallel_size=2,
-    # enable_expert_parallel=True,
-    gpu_memory_utilization=0.65,
-    # load_format="dummy",
+    tensor_parallel_size=_ROLLOUT_TP.value,
+    data_parallel_size=_FSDP_TP.value,
+    gpu_memory_utilization=0.35,
     async_scheduling=False,
+    enforce_eager=True,
   )
   print("\n" + "="*80)
   llm_state = llm.llm_engine.model_executor.driver_worker.model_runner.state

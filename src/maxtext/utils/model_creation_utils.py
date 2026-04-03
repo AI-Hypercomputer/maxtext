@@ -373,9 +373,11 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
           )
 
         if checkpoint:
+          # Extract non-RngState variables from the model to match the checkpoint structure
+          non_rng_sharded_state = nnx.state(model, nnx.Not(nnx.RngState))
           model_arrays = jax.tree.map(
               lambda v: v.value,
-              sharded_state,
+              non_rng_sharded_state,
               is_leaf=lambda n: isinstance(n, nnx.Variable),
           )
           checkpoint = jax.tree.map(_expand_checkpoint_to_model_shapes, checkpoint, model_arrays)
