@@ -304,28 +304,28 @@ def prepare_datasets(trainer_config, model_tokenizer):
   if not os.path.exists(test_data_dir):
     os.makedirs(test_data_dir)
 
-  # Load datasets
-  if trainer_config.dataset_name == "huggingface:nvidia/OpenMathInstruct-2":
+  # Prepare train and test data from training data for certain datasets
+  if trainer_config.dataset_name in ["nvidia/OpenMathInstruct-2", "nvidia/OpenMathReasoning", "open-r1/OpenR1-Math-220k", "bethgelab/CuratedThoughts"]:
     import datasets  # pylint: disable=import-outside-toplevel
 
-    def prepare_openinstructmath2_dataset(
-        split: str = "train_1M",
+    def prepare_train_and_eval_dataset(
         seed: int = 42,
         test_size: float = 0.05,
     ):
-      """Load and split the OpenMathInstruct-2 dataset into train and validation sets using HF's train_test_split."""
+      """Load and split the dataset into train and validation sets using HF's train_test_split."""
       max_logging.log(
           "WARNING: For reproducible experiments, preprocess the dataset once and "
           "define your own HfDataset subclass that directly uses the preprocessed datasets."
       )
 
-      # Load the original dataset
       original_ds = datasets.load_dataset(
-          "parquet",
+          trainer_config.dataset_name,
           data_files={trainer_config.train_split: trainer_config.hf_train_files},
-          split=split,
-          cache_dir=train_data_dir,
+          split=trainer_config.train_split,
       )
+
+      if "OpenMathReasoning" in trainer_config.dataset_name:
+            original_ds = original_ds.filter(lambda x: x.get("problem_type") == "has_answer_extracted")
 
       # Split into train and validation sets using HF's train_test_split
       split_ds = original_ds.train_test_split(test_size=test_size, seed=seed)
@@ -335,8 +335,7 @@ def prepare_datasets(trainer_config, model_tokenizer):
           "validation": split_ds["test"],
       }
 
-    split_name = trainer_config.train_split if trainer_config.train_split != "train" else "train_1M"
-    splits = prepare_openinstructmath2_dataset(split=split_name)
+    splits = prepare_train_and_eval_dataset()
     template_config = load_template_from_file(trainer_config.chat_template_path)
 
     train_dataset = (
@@ -389,7 +388,6 @@ def prepare_datasets(trainer_config, model_tokenizer):
   dataset_size = int(trainer_config.num_batches * trainer_config.batch_size * trainer_config.train_fraction)
   train_dataset = train_dataset[:dataset_size]
   train_dataset = train_dataset.repeat(trainer_config.num_epoch)
-
   train_dataset = train_dataset.to_iter_dataset().batch(trainer_config.batch_size)
 
   test_dataset = test_dataset.filter(_filter_long_prompts)
@@ -585,8 +583,6 @@ def create_rl_components(
       reward_fns=[  # type: ignore
           make_reward_fn(utils_rl.match_format_exactly),
           make_reward_fn(utils_rl.match_format_approximately),
-          # TODO(atwigg): comment out to simplify reward and overlap with check_numbers
-          make_reward_fn(utils_rl.check_answer),
           make_reward_fn(utils_rl.check_numbers),
       ],
       algo_config=grpo_config,

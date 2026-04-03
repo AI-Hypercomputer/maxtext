@@ -16,7 +16,8 @@
 """
 RL Evaluation Module.
 """
-from math_verify import parse
+import json
+
 from tqdm.auto import tqdm
 from tunix.rl.rollout.base_rollout import RolloutConfig
 
@@ -86,7 +87,7 @@ def generate_responses(
   return multiple_call_responses
 
 
-def score_responses(tmvp_config, question, responses, answer):
+def score_responses(tmvp_config, question, responses, answers):
   """
   Score a set of responses for a single question.
 
@@ -94,18 +95,17 @@ def score_responses(tmvp_config, question, responses, answer):
       tmvp_config: Configuration object
       question: The evaluation question
       responses: List of generated responses for this question
-      answer: The correct answer
+      answers: List of acceptable answers for this question
 
   Returns:
       Tuple of (is_correct, is_partially_correct, has_correct_format)
   """
-  match_format = utils_rl.get_match_format_regex(tmvp_config)
-  answer_fallback = utils_rl.get_answer_fallback_regex(tmvp_config)
 
+  answers = list(dict.fromkeys(answers))
   if tmvp_config.debug.rl:
     max_logging.log("========================================")
     max_logging.log(f"Evaluation Question: {question}")
-    max_logging.log(f"Evaluation Answer: {answer}")
+    max_logging.log(f"Evaluation Answer: {answers}")
     max_logging.log(f"Evaluation Responses: {responses}")
     max_logging.log("========================================")
 
@@ -117,47 +117,21 @@ def score_responses(tmvp_config, question, responses, answer):
     # Extract answer: prefer the full format match; fall back to the last
     # <answer>...</answer> tag if full format match is not found, so result
     # scoring is decoupled from format.
-    full_match = match_format.search(response)
-    if full_match is not None:
-      extracted_response = full_match.group(1)
-    else:
-      # Find the *last* occurrence of the answer tag (most likely the final answer).
-      fallback_matches = answer_fallback.findall(response)
-      extracted_response = fallback_matches[-1].strip() if fallback_matches else "-1000000"
-    if tmvp_config.debug.rl:
-      used = "full format" if full_match is not None else "answer-tag fallback"
-      max_logging.log(f"Evaluation extracted_response ({used}): {extracted_response}")
+    extracted_response, match_method = utils_rl.extract_answer(response, tmvp_config)
 
-    # Check exact correctness
+    # Check exact and partial correctness (within 10%)
     try:
-      # Fix LaTeX escaping issues for both ground truth and extracted answer
-      norm_answer = utils_rl.fix_latex_escaping(answer)
-      norm_extracted = utils_rl.fix_latex_escaping(extracted_response)
-      # Normalize Normalize for certain datasets and parse
-      if "DAPO" in tmvp_config.dataset_name or "OpenMathInstruct" in tmvp_config.dataset_name:
-        norm_extracted = utils_rl.normalize_final_answer(norm_extracted).strip()
-        norm_answer = utils_rl.normalize_final_answer(answer).strip()
-      is_correct = utils_rl.math_verify_func([utils_rl.boxed(norm_answer)], [utils_rl.boxed(norm_extracted)])[0] > 0.1
+      is_correct, is_partially_correct = utils_rl.check_correctness(extracted_response, answers, tmvp_config)
       if tmvp_config.debug.rl:
-        # is_correct is a tuple, if first value is 1.0 means it's a match;
-        # 0.0 means a mismatch. e.g. (0.0, (['3', '3'], ['3/5', '\\frac{3}{5}']))
         max_logging.log(f"Result is_correct: {is_correct}")
-
-      val_extracted = parse(utils_rl.boxed(norm_extracted))
-      val_answer = parse(utils_rl.boxed(norm_answer))
-
-      # Check partial correctness if values can be extracted (within 10%)
-      if val_extracted and val_answer:
-        ratio = (val_extracted[0] + utils_rl.EPSILON) / (val_answer[0] + utils_rl.EPSILON)
-        is_partially_correct = 0.9 <= ratio <= 1.1
-
+        max_logging.log(f"Result is_partially_correct: {is_partially_correct}")
     except Exception as e:
       if tmvp_config.debug.rl:
         max_logging.log(f"Evaluation Exception: {e}")
         max_logging.log("SKIPPED")
 
     # Check format correctness (requires the full <reasoning>...</reasoning><answer>...</answer> structure)
-    if full_match is not None:
+    if match_method == "full format":
       has_correct_format = True
 
     # Early exit if all criteria are met
@@ -210,11 +184,14 @@ def evaluate(
 
     # Score each question-answer pair
     for question, responses, answer in zip(questions, multiple_call_responses, answers):
+      answer = (
+          json.loads(answer) if isinstance(answer, str) else answer
+      )  # decode the json-encoded list of acceptable answers
       is_correct, is_partially_correct, has_correct_format = score_responses(
           tmvp_config=tmvp_config,
           question=question,
           responses=responses,
-          answer=answer,
+          answers=answer,
       )
 
       # Update counters
