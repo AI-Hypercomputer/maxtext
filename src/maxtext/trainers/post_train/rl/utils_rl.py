@@ -461,6 +461,7 @@ def check_numbers(prompts, completions, answer, tmvp_config, **kargs):
         true_answer_fixed = normalize_final_answer(true_answer_fixed)
         guess_fixed = normalize_final_answer(guess_fixed)
 
+      breakpoint()
       # Use math_verify to compare answers (handles both numeric and expression comparison)
       score, _ = math_verify_func([boxed(true_answer_fixed)], [boxed(guess_fixed)])
       # Return scaled score: 1.5 for exact/correct, 0 otherwise

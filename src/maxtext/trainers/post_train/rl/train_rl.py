@@ -622,13 +622,6 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
 
   train_dataset, test_dataset = prepare_datasets(trainer_config, model_tokenizer)
 
-  # ckpt_manager = ocp.CheckpointManager(trainer_config.checkpoint_dir)
-  # latest_step = ckpt_manager.latest_step()
-  # ckpt_manager.close()
-  # if latest_step is not None and latest_step > 0:
-  #   max_logging.log(f"Fast-forwarding train_dataset by {latest_step} steps to resume from checkpoint.")
-  #   train_dataset = train_dataset.drop(latest_step)
-
   if trainer_config.debug.rl:
     for i, ele in enumerate(train_dataset):
       if i >= 5:
@@ -663,6 +656,28 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
       model_tokenizer,
       max_train_steps,
   )
+
+  start_step = 0
+  try:
+    # The restored step is set on rl_cluster.global_steps during GrpoLearner initialization
+    start_step = rl_cluster.global_steps
+    breakpoint()
+    if start_step > 0:
+      max_logging.warning(f"Restored trainer state from step {start_step}")
+      max_logging.warning(f"Fast-forwarding train_dataset iterator by {start_step} batches...")
+      # train_dataset is batched, so we skip 'start_step' batches
+      for i in range(start_step):
+        try:
+          next(train_dataset)
+        except StopIteration:
+          max_logging.warning(f"Dataset exhausted while skipping to step {start_step}")
+          break
+      max_logging.warning(f"Dataset iterator advanced by {i +  1} batches.")
+    else:
+      max_logging.warning("Starting from step 0.")
+  except Exception as e:
+    max_logging.warning(f"Error accessing restored step: {e}, assuming step 0.")
+
 
   # Before we train the model, let's evaluate the model on the test set so we can
   # see the improvement post training.
