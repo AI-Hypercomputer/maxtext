@@ -557,16 +557,17 @@ def process_data(dataset_name, model_tokenizer, template_config, tmvp_config, x)
       "prompts": model_tokenizer.apply_chat_template(
           [
               {
-                  "role": "user",
-                  "content": template_config["TEMPLATE"].format(
-                      system_prompt=template_config["SYSTEM_PROMPT"].format(
-                          reasoning_start_token=tmvp_config.reasoning_start_token,
-                          reasoning_end_token=tmvp_config.reasoning_end_token,
-                          solution_start_token=tmvp_config.solution_start_token,
-                          solution_end_token=tmvp_config.solution_end_token,
-                      ),
-                      question=question,
+                  "role": "system",
+                  "content": template_config["SYSTEM_PROMPT"].format(
+                      reasoning_start_token=tmvp_config.reasoning_start_token,
+                      reasoning_end_token=tmvp_config.reasoning_end_token,
+                      solution_start_token=tmvp_config.solution_start_token,
+                      solution_end_token=tmvp_config.solution_end_token,
                   ),
+              },
+              {
+                  "role": "user",
+                  "content": question,
               },
           ],
           tokenize=False,
