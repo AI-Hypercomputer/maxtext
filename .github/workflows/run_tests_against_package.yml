@@ -110,9 +110,9 @@ jobs:
           echo "Installing ${maxtext_wheel} for ${MAXTEXT_PACKAGE_EXTRA}..."
           uv pip install ${maxtext_wheel}[${MAXTEXT_PACKAGE_EXTRA}] --resolution=lowest
           if [ "${MAXTEXT_PACKAGE_EXTRA}" == "tpu-post-train" ]; then
-            uv pip install -r src/dependencies/github_deps/post_train_base_deps.txt
+            install_tpu_post_train_extra_deps
           else
-            uv pip install -r src/dependencies/github_deps/pre_train_deps.txt
+            install_tpu_pre_train_extra_deps
           fi
           python3 --version
           python3 -m pip freeze
