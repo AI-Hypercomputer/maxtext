@@ -104,7 +104,6 @@ def generate_and_save_data(config, local_args):
   start_step = get_start_step(config, local_args)
   start_step = int(multihost_utils.broadcast_one_to_all(jax.numpy.array(start_step)))
 
-  # The dataset iterator will be fast-forwarded by `islice` in the loop below.
   writer = None
   local_output_path = None
   if jax.process_index() == 0:
