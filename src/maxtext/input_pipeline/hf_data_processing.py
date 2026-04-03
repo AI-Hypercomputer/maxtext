@@ -14,6 +14,7 @@
 
 """Input pipeline using Huggingface datasets."""
 
+import json
 from typing import Optional
 
 import ml_collections
@@ -268,6 +269,12 @@ def preprocessing_pipeline(
         formatting_func_path=formatting_func_path,
         formatting_func_kwargs=formatting_func_kwargs,
     )
+
+    # Deserialize JSON string columns if needed (e.g., messages stored as JSON strings
+    # in Parquet to avoid PyArrow schema issues with nested/varying structures)
+    for col in data_column_names:
+      if isinstance(dataset.features.get(col), datasets.Value) and dataset.features[col].dtype == "string":
+        dataset = dataset.map(lambda x, c=col: {c: json.loads(x[c]) if isinstance(x[c], str) else x[c]})
 
     assert input_pipeline_utils.is_conversational(
         dataset.features, data_column_names
