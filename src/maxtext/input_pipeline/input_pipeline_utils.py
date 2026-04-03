@@ -180,7 +180,7 @@ def is_conversational(features, data_columns):
   return False
 
 
-def _extract_token_ids(tokens):
+def extract_token_ids(tokens):
   """Extracts token IDs from various tokenizer output formats.
 
   This helper function standardizes the extraction of tokenized integer IDs
@@ -248,21 +248,21 @@ def verify_chat_template_generation_prompt_logic(tokenizer_model):
     )
     dummy_msgs.pop(0)
     prompt_wo_gen_tokens = tokenizer_model.apply_chat_template(dummy_msgs, add_generation_prompt=False, tokenize=True)
-  prompt_wo_gen_ids = _extract_token_ids(prompt_wo_gen_tokens)
+  prompt_wo_gen_ids = extract_token_ids(prompt_wo_gen_tokens)
 
   prompt_w_gen_tokens = tokenizer_model.apply_chat_template(dummy_msgs, add_generation_prompt=True, tokenize=True)
-  prompt_w_gen_ids = _extract_token_ids(prompt_w_gen_tokens)
+  prompt_w_gen_ids = extract_token_ids(prompt_w_gen_tokens)
 
   if prompt_w_gen_ids[: len(prompt_wo_gen_ids)] != prompt_wo_gen_ids:
     raise ValueError("Unable to extract generation prompt tokens.")
   # Extract the tokenized generation prompt (the expected assistant prefix)
   assistant_prefix = prompt_w_gen_ids[len(prompt_wo_gen_ids) :]
-  full_turn_tokens = _extract_token_ids(
+  full_turn_tokens = extract_token_ids(
       tokenizer_model.apply_chat_template(
           dummy_msgs + [{"role": "assistant", "content": "Dummy response"}], add_generation_prompt=False, tokenize=True
       )
   )
-  full_turn_ids = _extract_token_ids(full_turn_tokens)
+  full_turn_ids = extract_token_ids(full_turn_tokens)
   # Extract the actual tokens that appear right after the user message in the full turn
   actual_prefix_in_full_turn = full_turn_ids[len(prompt_wo_gen_ids) : len(prompt_wo_gen_ids) + len(assistant_prefix)]
 
@@ -295,8 +295,8 @@ def _get_completion_in_chat_template(tokenizer_model, round_msgs):
   # include generation_prompt as part of the prompt tokens
   prompt_tokens = tokenizer_model.apply_chat_template(round_msgs[:-1], add_generation_prompt=True, tokenize=True)
 
-  prompt_completion_ids = _extract_token_ids(prompt_completion_tokens)
-  prompt_ids = _extract_token_ids(prompt_tokens)
+  prompt_completion_ids = extract_token_ids(prompt_completion_tokens)
+  prompt_ids = extract_token_ids(prompt_tokens)
 
   completion_tokens = prompt_completion_ids[len(prompt_ids) :]
   completion_in_chat_template = tokenizer_model.decode(completion_tokens, skip_special_tokens=False)

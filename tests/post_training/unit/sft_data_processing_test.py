@@ -106,9 +106,9 @@ LLAMA2_DATA = {
     "tokenizer_path": None,
     "messages": {
         "truncated_exp1_inputs": (
-            "<s> [INST] <<SYS>>\nthe system prompt\n<</SYS>>\n\nexample one question one [/INST] "
+            "<s>[INST] <<SYS>>\nthe system prompt\n<</SYS>>\n\nexample one question one [/INST] "
             "example one answer one </s>"
-            "<s> [INST] example one question two [/INST] "
+            "<s>[INST] example one question two [/INST] "
             "example one answer two"
         ),
         "truncated_exp1_targets": (
@@ -122,11 +122,11 @@ LLAMA2_DATA = {
             "example one answer two<unk>"
         ),
         "packed_exp2_inputs": (
-            "<s> [INST] question two [/INST] "
+            "<s>[INST] question two [/INST] "
             "answer two </s>"
-            "<s> [INST] question three [/INST] "
+            "<s>[INST] question three [/INST] "
             "answer three </s>"
-            "<s> [INST] question four [/INST] "
+            "<s>[INST] question four [/INST] "
             "answer four </s>"
             "<unk><unk><unk><unk><unk><unk><unk><unk>"
         ),
@@ -149,11 +149,11 @@ LLAMA2_DATA = {
     },
     "prompt_completion": {
         "truncated_exp1_inputs": (
-            "<s> [INST] example one question one [/INST] "
+            "<s>[INST] example one question one [/INST] "
             "example one answer one </s>"
-            "<s> [INST] example one question two [/INST] "
+            "<s>[INST] example one question two [/INST] "
             "example one answer two </s>"
-            "<s> [INST] example one question three [/INST] "
+            "<s>[INST] example one question three [/INST] "
             "example one"
         ),
         "truncated_exp1_targets": (
@@ -173,11 +173,11 @@ LLAMA2_DATA = {
             "example one<unk>"
         ),
         "packed_exp2_inputs": (
-            "<s> [INST] question two [/INST] "
+            "<s>[INST] question two [/INST] "
             "answer two </s>"
-            "<s> [INST] question three [/INST]"
+            "<s>[INST] question three [/INST]"
             " answer three </s>"
-            "<s> [INST] question four [/INST]"
+            "<s>[INST] question four [/INST]"
             " answer four </s>"
             "<unk><unk><unk><unk><unk><unk><unk><unk>"
         ),
@@ -442,6 +442,7 @@ class SFTDataProcessingTest(unittest.TestCase):
     data_iter = self.get_data_iterator(dataset, data_columns)
 
     batch = next(data_iter)
+    print("Iter output: ", self.tokenizer.decode(batch["inputs"][0]))
 
     # Check Truncation
     self.assertEqual(self.tokenizer.decode(batch["inputs"][0]), expected["truncated_exp1_inputs"])

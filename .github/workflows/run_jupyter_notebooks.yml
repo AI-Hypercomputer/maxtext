@@ -72,7 +72,7 @@ jobs:
 
           # 2. Install MaxText package and all the post training dependencies
           uv pip install ${maxtext_wheel}[tpu-post-train] --resolution=lowest
-          install_maxtext_tpu_post_train_extra_deps
+          install_tpu_post_train_extra_deps
           
           python3 -m pip freeze
       - name: Run Post-Training Notebooks

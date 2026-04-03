@@ -47,7 +47,7 @@ Required-by:
 If the plugin is not installed, please run the install post training extra dependencies script again with the following command:
 
 ```bash
-install_maxtext_tpu_post_train_extra_deps
+install_tpu_post_train_extra_deps
 ```
 
 # Offline Inference
