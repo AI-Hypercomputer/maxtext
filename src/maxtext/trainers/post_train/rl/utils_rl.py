@@ -17,12 +17,16 @@
 import re
 import optax
 from maxtext.utils import max_logging
+import numpy as np
 
 
 from math_verify.errors import TimeoutException
 from math_verify.metric import math_metric
 from math_verify.parser import ExprExtractionConfig, LatexExtractionConfig
 from math_verify import parse
+
+from tunix.rl.agentic.parser.chat_template_parser import parser as agentic_chat_template_parser
+
 
 # initialize math_verify_func once
 math_verify_func = math_metric(
@@ -514,6 +518,23 @@ def get_optimizer(tmvp_config, max_train_steps):
   return optax.inject_hyperparams(make_optimizer)(learning_rate=schedule)
 
 
+def format_maxtext_messages(messages: list[dict[str, str]], template_config: dict, tmvp_config) -> list[dict[str, str]]:
+  """Helper to inject MaxText's system prompt into the input user messages."""
+  formatted_messages = []
+  for msg in messages:
+    formatted_content = template_config["TEMPLATE"].format(
+        system_prompt=template_config["SYSTEM_PROMPT"].format(
+            reasoning_start_token=tmvp_config.reasoning_start_token,
+            reasoning_end_token=tmvp_config.reasoning_end_token,
+            solution_start_token=tmvp_config.solution_start_token,
+            solution_end_token=tmvp_config.solution_end_token,
+        ),
+        question=msg,
+    )
+    formatted_messages.append({"role": "user", "content": formatted_content})
+  return formatted_messages
+
+
 def process_data(dataset_name, model_tokenizer, template_config, tmvp_config, x):
   """Function to process input dataset"""
 
@@ -552,28 +573,75 @@ def process_data(dataset_name, model_tokenizer, template_config, tmvp_config, x)
   if dataset_name == "gsm8k":
     answer = extract_hash_answer(answer)
 
+  messages = [question]
+  formatted_messages = format_maxtext_messages(messages, template_config, tmvp_config)
+
+  prompts = model_tokenizer.apply_chat_template(
+      formatted_messages,
+      tokenize=False,
+      add_generation_prompt=True,
+  )
+
   return {
-      # passed to model forward pass
-      "prompts": model_tokenizer.apply_chat_template(
-          [
-              {
-                  "role": "user",
-                  "content": template_config["TEMPLATE"].format(
-                      system_prompt=template_config["SYSTEM_PROMPT"].format(
-                          reasoning_start_token=tmvp_config.reasoning_start_token,
-                          reasoning_end_token=tmvp_config.reasoning_end_token,
-                          solution_start_token=tmvp_config.solution_start_token,
-                          solution_end_token=tmvp_config.solution_end_token,
-                      ),
-                      question=question,
-                  ),
-              },
-          ],
-          tokenize=False,
-          add_generation_prompt=True,
-      ),
-      # passed to reward functions
+      # pre-formatted prompts for evaluation
+      "prompts": prompts,
+      # raw question for AgenticGRPOLearner to bypass formatting
       "question": question,
       # passed to reward functions
       "answer": answer,
   }
+
+
+def get_correctness_metrics(prompts, completions, rewards, advantages, **kwargs):
+  """Compute correctness statistics metrics based on rewards."""
+  del prompts, completions, advantages, kwargs
+  solve_all = (rewards > 0.1).all()
+  solve_none = (rewards == 0).all()
+  solve_partial = (~solve_all) and (~solve_none)
+  solve_ratio = (rewards > 0.1).mean()
+  return {
+      "rewards/solve_all": (
+          1 if solve_all else 0,
+          np.mean,
+      ),
+      "rewards/solve_none": (
+          1 if solve_none else 0,
+          np.mean,
+      ),
+      "rewards/solve_partial": (
+          1 if solve_partial else 0,
+          np.mean,
+      ),
+      "rewards/solve_ratio": (
+          solve_ratio,
+          np.mean,
+      ),
+  }
+
+
+class MaxTextChatParser(agentic_chat_template_parser.DefaultChatTemplateParser):
+  """
+  Custom Chat Parser for MaxText that intercepts message lists dynamically
+  during agentic rollouts and injects the necessary system templates and
+  special tokens using the shared helper.
+  """
+
+  def __init__(self, model_tokenizer, template_config, tmvp_config):
+    super().__init__(model_tokenizer)
+    self.template_config = template_config
+    self.tmvp_config = tmvp_config
+
+  def parse(
+      self,
+      messages: list[dict[str, str]],
+      add_generation_prompt: bool = False,
+      is_first_msg: bool = False,
+  ) -> str:
+    """Overrides the default parse method to apply MaxText-specific formatting to the messages."""
+    # Apply MaxText specific formatting to the messages
+    formatted_messages = format_maxtext_messages(messages, self.template_config, self.tmvp_config)
+
+    # Delegate to Tunix default parser to apply the tokenizer's chat template
+    return super().parse(
+        messages=formatted_messages, add_generation_prompt=add_generation_prompt, is_first_msg=is_first_msg
+    )

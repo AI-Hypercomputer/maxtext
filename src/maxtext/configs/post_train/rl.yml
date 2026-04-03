@@ -54,6 +54,21 @@ rl:
   grpo_epsilon: 0.2
   loss_algo: 'grpo' # grpo or gspo-token
 
+  # ====== Agentic Rollout ======
+  # If True, uses the async AgenticGRPOLearner, which overlaps rollout generation
+  # with training for faster throughput via online vLLM inference.
+  use_agentic_rollout: False
+  # Max concurrent rollout requests when using agentic rollout.
+  max_concurrency: 256
+  # Number of off-policy steps tolerated before requiring a policy update.
+  off_policy_steps: 0
+  # System prompt injected into the agent at rollout time.
+  system_prompt: ''
+  # If True, mask degenerate groups (all-zero advantages) from contributing to the loss.
+  degenerate_group_masking: True
+  # Upper-bound clipping epsilon for GRPO loss; defaults to grpo_epsilon when null.
+  epsilon_high: null
+
 
 # ====== Models ======
 # for MaxText
