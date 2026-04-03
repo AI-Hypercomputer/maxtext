@@ -24,6 +24,9 @@ from maxtext.input_pipeline import input_pipeline_utils
 from maxtext.input_pipeline import tokenizer
 
 
+TOOLS_COLUMN = "tools"
+
+
 def parse_and_keep_features(dataset, config, data_columns, tokenize):
   """Parse arrayrecord features or keep specified columns for other formats."""
   if config.grain_file_type in ("arrayrecord", "tfrecord"):
@@ -57,7 +60,7 @@ def validate_and_configure_sft_columns(data_columns, tokenizer_model, chat_templ
   if chat_template and hasattr(tokenizer_model, "chat_template"):
     tokenizer_model.chat_template = chat_template
 
-  supported_columns = [["prompt", "completion"], ["messages"], ["question", "answer"]]
+  supported_columns = [["prompt", "completion"], ["messages"], ["messages", TOOLS_COLUMN], ["question", "answer"]]
   assert any(
       set(data_columns) == set(supported) for supported in supported_columns
   ), f"Dataset column names mismatch. Expected columns to match one of {supported_columns}, but got {data_columns}"
