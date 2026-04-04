@@ -16,10 +16,9 @@
 Verification script to check the correctness of saved top-k teacher logits.
 
 Example usage:
-python3 src/maxtext/trainers/post_train/distillation/verify_saved_logits.py \
-  --output_dir=/path/to/your/output \
-  --expected_steps=1000 \
-  --top_k=128
+python3 python3 src/maxtext/trainers/post_train/distillation/verify_saved_logits.py \
+  --output_dir=/tmp/save_logits_dir \
+  --expected_steps=140
 """
 
 import functools
@@ -40,28 +39,34 @@ def verify_array_records(output_dir, expected_steps, expected_k, expected_keys):
   files = tf.io.gfile.glob(file_pattern)
 
   if not files:
-    max_logging.log(f"Error: No ArrayRecord files found matching {file_pattern}")
-    return
+    assert False, f"Error: No ArrayRecord files found matching {file_pattern}"
 
   max_logging.log(f"Found {len(files)} ArrayRecord files. Starting verification...")
+
+  total_records_processed = 0
+  all_keys_verified = set()
 
   for file_path in files:
     max_logging.log(f"Verifying: {file_path}")
     reader = array_record_module.ArrayRecordReader(file_path)
-    num_records = reader.num_records()
+    num_records_in_file = reader.num_records()
 
-    step_count = 0
-    for _ in range(num_records):
+    if num_records_in_file == 0:
+      max_logging.log(f"Warning: {file_path} is empty.")
+      continue
+
+    for record_idx in range(num_records_in_file):
       record = reader.read()
       data = pickle.loads(record)
 
       # Verify all required keys are present
-      for key in ["tokens", "top_k_logits", "top_k_indices"]:
-        assert key in data, f"Missing required key '{key}' at step {step_count} in {file_path}"
+      required_keys = ["tokens", "top_k_logits", "top_k_indices"]
+      for key in required_keys:
+        assert key in data, f"Missing required key '{key}' in record {record_idx} in {file_path}"
 
       # Verify all optional keys are present
       for key in expected_keys:
-        assert key in data, f"Missing optional key '{key}' at step {step_count} in {file_path}"
+        assert key in data, f"Missing optional key '{key}' in record {record_idx} in {file_path}"
 
       # Verify shapes for Top-K outputs
       actual_k_logits = data["top_k_logits"].shape[-1]
@@ -69,15 +74,23 @@ def verify_array_records(output_dir, expected_steps, expected_k, expected_keys):
       assert actual_k_logits == expected_k, f"Expected top_k={expected_k}, got {actual_k_logits} for logits"
       assert actual_k_indices == expected_k, f"Expected top_k={expected_k}, got {actual_k_indices} for indices"
 
-      step_count += 1
+      if not all_keys_verified:
+        all_keys_verified.update(data.keys())
 
-    # Verify the total number of steps processed
-    assert step_count == expected_steps, f"Expected {expected_steps} steps, but found {step_count} in {file_path}."
+    total_records_processed += num_records_in_file
+    max_logging.log(f"Verified {num_records_in_file} records in {file_path}")
 
-    max_logging.log(f"Successfully verified {file_path}")
-    max_logging.log(f"- Total steps: {step_count} (Matches expected)")
-    max_logging.log(f"- Top-K dimension: {expected_k}")
-    max_logging.log(f"- Keys verified: {list(data.keys())}")
+  # Verify the total number of steps processed across all files
+  assert (
+      total_records_processed == expected_steps
+  ), f"Expected a total of {expected_steps} steps across all files, but found {total_records_processed}."
+
+  max_logging.log("-----------------------------------------")
+  max_logging.log("Verification Successful!")
+  max_logging.log(f"- Total files verified: {len(files)}")
+  max_logging.log(f"- Total steps verified: {total_records_processed} (Matches expected)")
+  max_logging.log(f"- Top-K dimension: {expected_k}")
+  max_logging.log(f"- Keys verified in records: {sorted(list(all_keys_verified))}")
 
 
 def main(argv, local_args):
