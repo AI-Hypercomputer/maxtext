@@ -30,6 +30,7 @@ integrations while still allowing local unit tests to import modules. This modul
 All stubs raise RuntimeError only when actually invoked, not at import time, so test collection proceeds.
 """
 from __future__ import annotations
+import jax
 
 from collections.abc import Callable
 from types import SimpleNamespace
@@ -179,6 +180,24 @@ def _jetstream_stubs():
       self.length_idx = length_idx
       self.log_prob = log_prob
       self.samples_per_slot = samples_per_slot
+
+  # Register ResultTokens stub as a pytree node so it can be used in
+  # GCLOUD_DECOUPLED mode.
+  jax.tree_util.register_pytree_node(
+      ResultTokens,
+      lambda x: (
+          (x.data, x.tokens_idx, x.valid_idx, x.length_idx, x.log_prob),
+          (x.samples_per_slot,),
+      ),
+      lambda aux, children: ResultTokens(
+          data=children[0],
+          tokens_idx=children[1],
+          valid_idx=children[2],
+          length_idx=children[3],
+          log_prob=children[4],
+          samples_per_slot=aux[0],
+      ),
+  )
 
   # Tokenizer placeholders (unused in decoupled tests due to runtime guard).
   class TokenizerParameters:  # pragma: no cover - placeholder

@@ -344,5 +344,43 @@ class TestMaybePad(unittest.TestCase):
     self.assertEqual(padding_amount, target_padding_amount)
 
 
+class MaxUtilsBatchSeqLenTest(unittest.TestCase):
+  """Tests for get_batch_seq_len_for_mode in max_utils.py"""
+
+  def test_batch_scaling_for_dbs(self):
+    # Set up a config with DBS and 4 beams
+    config = mock.MagicMock()
+    config.decode_sampling_strategy = "diverse_beam_search"
+    config.decode_num_beams = 4
+    config.per_device_batch_size = 1
+    config.max_prefill_predict_length = 10
+    config.max_target_length = 20
+
+    # In autoregressive mode, batch should be scaled by num_beams
+    batch, seq = max_utils.get_batch_seq_len_for_mode(config, "autoregressive", mesh_size=1)
+    self.assertEqual(batch, 4)
+    self.assertEqual(seq, 1)
+
+    # In prefill mode, batch should also be scaled by num_beams
+    batch, seq = max_utils.get_batch_seq_len_for_mode(config, "prefill", mesh_size=1)
+    self.assertEqual(batch, 4)
+    self.assertEqual(seq, 10)
+
+  def test_no_batch_scaling_for_greedy(self):
+    # Set up a config with greedy and 4 beams (should be ignored)
+    config = mock.MagicMock()
+    config.decode_sampling_strategy = "greedy"
+    config.decode_num_beams = 4
+    config.per_device_batch_size = 1
+    config.max_prefill_predict_length = 10
+
+    # Batch should be 1 regardless of num_beams config
+    batch, seq = max_utils.get_batch_seq_len_for_mode(config, "autoregressive", mesh_size=1)
+    self.assertEqual(batch, 1)
+
+    batch, seq = max_utils.get_batch_seq_len_for_mode(config, "prefill", mesh_size=2)
+    self.assertEqual(batch, 2)
+
+
 if __name__ == "__main__":
   unittest.main()

@@ -1606,8 +1606,12 @@ class MaxEngine(_BaseEngine):
 
     # pylint: disable=unused-argument
     def init(abstract_params, page_state):
+      num_beams = (
+          self.config.decode_num_beams if self.config.decode_sampling_strategy == "diverse_beam_search" else 1
+      )
+      total_batch_size = int(self.config.per_device_batch_size * self.mesh.size) * num_beams
       x = jnp.ones(
-          (int(self.config.per_device_batch_size * self.mesh.size), 1),
+          (total_batch_size, 1),
           dtype=jnp.int32,
       )
       dummy_image = jnp.ones(
