@@ -117,13 +117,23 @@ def vocab_tiling_linen_loss(
 
   def _chunked_cross_entropy_loss_fwd(gathered_params, hidden_states, labels, segmentation):
     batch_size, seq_len, emb_dim = hidden_states.shape
-    vocab_tile_size = (batch_size * seq_len) // config.num_vocab_tiling
+    batch_seq_tile_size = (batch_size * seq_len) // config.num_batch_seq_tiling
 
     reshaped_hidden_states = _reshape(
-        hidden_states, (config.num_vocab_tiling, vocab_tile_size, emb_dim), reshaped_hidden_spec
+        hidden_states,
+        (config.num_batch_seq_tiling, batch_seq_tile_size, emb_dim),
+        reshaped_hidden_spec,
     )
-    reshaped_labels = _reshape(labels, (config.num_vocab_tiling, vocab_tile_size), reshaped_data_spec)
-    reshaped_segmentation = _reshape(segmentation, (config.num_vocab_tiling, vocab_tile_size), reshaped_data_spec)
+    reshaped_labels = _reshape(
+        labels,
+        (config.num_batch_seq_tiling, batch_seq_tile_size),
+        reshaped_data_spec,
+    )
+    reshaped_segmentation = _reshape(
+        segmentation,
+        (config.num_batch_seq_tiling, batch_seq_tile_size),
+        reshaped_data_spec,
+    )
 
     # Scan body accumulates loss from each tile given chunked hidden states and labels
     def _fwd_scan_body(accumulators, chunk_data):

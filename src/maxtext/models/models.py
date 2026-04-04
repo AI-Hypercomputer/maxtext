@@ -540,8 +540,8 @@ class Transformer(nnx.Module):
           mutable=mutable_collections,
       )  # pytype: disable=wrong-keyword-args
 
-    # Materialize hidden state when vocab tiling is enabled
-    if self.config.num_vocab_tiling > 1:
+    # Materialize hidden state when batch-sequence tiling is enabled.
+    if self.config.num_batch_seq_tiling > 1:
       self.hidden_states = hidden_state
 
     # If we are initializing the model AND MTP is enabled, we must create

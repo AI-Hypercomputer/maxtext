@@ -1106,9 +1106,9 @@ class Decoder(nn.Module):
     # for efficiency, as the main model is frozen and the LM loss is not needed.
     elif (cfg.use_indexer and not cfg.indexer_sparse_training) and self.model_mode == MODEL_MODE_TRAIN:
       logits = None
-    # When vocab tiling is enabled in training mode, full logits won't generate to reduce memory
+    # When batch-sequence tiling is enabled in training mode, full logits won't generate to reduce memory
     # Instead, we keep track on the hidden states, which has smaller size compared to full logits
-    elif cfg.num_vocab_tiling > 1 and self.model_mode == MODEL_MODE_TRAIN:
+    elif cfg.num_batch_seq_tiling > 1 and self.model_mode == MODEL_MODE_TRAIN:
       logits = None
       self.sow("intermediates", "hidden_states", hidden_state)
 

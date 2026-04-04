@@ -1057,9 +1057,9 @@ class NNXDecoder(nnx.Module):
     if cfg.attention == "vllm_rpa":
       logits = None
 
-    # When vocab tiling is enabled in training mode, full logits won't generate to reduce memory
+    # When batch-sequence tiling is enabled in training mode, full logits won't generate to reduce memory
     # Instead, we keep track on the hidden states, which has smaller size compared to full logits
-    if cfg.num_vocab_tiling > 1 and self.model_mode == MODEL_MODE_TRAIN:
+    if cfg.num_batch_seq_tiling > 1 and self.model_mode == MODEL_MODE_TRAIN:
       logits = None
       self.sow(nnx.Intermediate, "hidden_states", hidden_state)
 

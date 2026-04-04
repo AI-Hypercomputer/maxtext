@@ -1721,7 +1721,7 @@ gemma3_12b_32768_v6e256 = _add_to_model_dictionary(
         model_type="gemma3-12b",
         tuning_params={
             "per_device_batch_size": 1,
-            "num_vocab_tiling": 16,
+            "num_batch_seq_tiling": 16,
             "ici_fsdp_parallelism": -1,
             "remat_policy": "custom",
             "decoder_layer_input": "device",
@@ -1739,7 +1739,9 @@ gemma3_12b_32768_v6e256 = _add_to_model_dictionary(
             "profiler": "xplane",
             "skip_first_n_steps_for_profiler": 10,
             "profiler_steps": 2,
-            "tokenizer_path": os.path.join("assets", "tokenizers", "tokenizer.gemma3"),
+            "tokenizer_path": os.path.join(
+                "assets", "tokenizers", "tokenizer.gemma3"
+            ),
             "sa_block_q": 1024,
             "sa_block_kv": 1024,
             "sa_block_kv_compute": 1024,
@@ -1760,7 +1762,7 @@ gemma3_12b_32768_2x_v6e256 = _add_to_model_dictionary(
         model_type="gemma3-12b",
         tuning_params={
             "per_device_batch_size": 1,
-            "num_vocab_tiling": 16,
+            "num_batch_seq_tiling": 16,
             "ici_fsdp_parallelism": 1,
             "ici_fsdp_transpose_parallelism": -1,
             "remat_policy": "custom",
@@ -1779,7 +1781,9 @@ gemma3_12b_32768_2x_v6e256 = _add_to_model_dictionary(
             "profiler": "xplane",
             "skip_first_n_steps_for_profiler": 10,
             "profiler_steps": 2,
-            "tokenizer_path": os.path.join("assets", "tokenizers", "tokenizer.gemma3"),
+            "tokenizer_path": os.path.join(
+                "assets", "tokenizers", "tokenizer.gemma3"
+            ),
             "sa_block_q": 1024,
             "sa_block_kv": 1024,
             "sa_block_kv_compute": 1024,
@@ -1800,7 +1804,7 @@ gemma3_12b_32768_4x_v6e256 = _add_to_model_dictionary(
         model_type="gemma3-12b",
         tuning_params={
             "per_device_batch_size": 1,
-            "num_vocab_tiling": 16,
+            "num_batch_seq_tiling": 16,
             "ici_fsdp_parallelism": 1,
             "ici_fsdp_transpose_parallelism": -1,
             "remat_policy": "custom",
@@ -1819,7 +1823,9 @@ gemma3_12b_32768_4x_v6e256 = _add_to_model_dictionary(
             "profiler": "xplane",
             "skip_first_n_steps_for_profiler": 10,
             "profiler_steps": 2,
-            "tokenizer_path": os.path.join("assets", "tokenizers", "tokenizer.gemma3"),
+            "tokenizer_path": os.path.join(
+                "assets", "tokenizers", "tokenizer.gemma3"
+            ),
             "sa_block_q": 1024,
             "sa_block_kv": 1024,
             "sa_block_kv_compute": 1024,
