@@ -229,7 +229,6 @@ class PipelineBase(nn.Module):
     vmap_func = nn.vmap(
         func_to_vmap,
         in_axes=(0, 0, 0, None, None),
-        spmd_axis_name=self.spmd_axis_name,
         variable_axes={"params": 0, "_overwrite_with_gradient": 0},
         split_rngs={"params": self.is_initializing(), "dropout": self.config.enable_dropout},
         metadata_params={
@@ -266,7 +265,6 @@ class PipelineBase(nn.Module):
     vmap_func = nn.vmap(
         func_to_vmap,
         in_axes=(0, 0, 0, 0, None, None),
-        spmd_axis_name=self.spmd_axis_name,
         variable_axes={"params": 0},
         split_rngs={"params": self.is_initializing(), "dropout": self.config.enable_dropout},
         metadata_params={

@@ -44,6 +44,8 @@ def gmm(
     weight_gather_axes: List[Tuple[str, int]] | None = None,
     input_buffer_count: tuple[int, int, int] = (2, 2, 2),
     combine_scopes: bool = False,
+    lhs_vma_axes: tuple = tuple(),
+    rhs_vma_axes: tuple = tuple(),
     # TODO(amandaliang): get rid of the qwix_rule in favor of Qwix's interception feature
     qwix_rule: qwix.QtRule | None = None,
 ):
@@ -65,7 +67,7 @@ def gmm(
       )
 
   gmm_fwd_bwd = lambda *args: _gmm_fwd(*args)[0]  # pylint: disable=C3001
-  gmm_fwd_bwd = jax.custom_vjp(gmm_fwd_bwd, nondiff_argnums=(3, 4, 5, 6, 9, 10, 11, 12, 13))
+  gmm_fwd_bwd = jax.custom_vjp(gmm_fwd_bwd, nondiff_argnums=(3, 4, 5, 6, 9, 10, 11, 12, 13, 14, 15))
   gmm_fwd_bwd.defvjp(_gmm_fwd, functools.partial(_gmm_bwd, lhs.dtype, rhs.dtype))
   return gmm_fwd_bwd(
       lhs,
@@ -82,6 +84,8 @@ def gmm(
       quantization_rule,
       use_tokamax_backend,
       weight_gather_axes,
+      lhs_vma_axes,
+      rhs_vma_axes,
   )
 
 
@@ -100,6 +104,8 @@ def _gmm_fwd(
     quantization_rule: qwix.QtRule | None = None,
     use_tokamax_backend: bool = False,
     weight_gather_axes: List[Tuple[str, int]] | None = None,
+    lhs_vma_axes: tuple = tuple(),
+    rhs_vma_axes: tuple = tuple(),
 ) -> tuple[
     jnp.ndarray,
     tuple[
@@ -175,6 +181,8 @@ def _gmm_bwd(
     quantization_rule: qwix.QtRule | None,
     use_tokamax_backend: bool,
     weight_gather_axes: List[Tuple[str, int]] | None,
+    lhs_vma_axes: tuple,
+    rhs_vma_axes: tuple,
     residual: tuple[
         jnp.ndarray | qpl.QArray,
         jnp.ndarray | qpl.QArray,
@@ -264,6 +272,9 @@ def _gmm_bwd(
         transpose_rhs=not transpose_rhs,
         interpret=interpret,
     )
+    for axis in lhs_vma_axes:
+      dlhs = jax.lax.pcast(dlhs, axis_name=axis, to="varying")
+
     drhs = backend.tgmm(
         lhs.swapaxes(0, 1),
         drhs_dout,
@@ -274,6 +285,8 @@ def _gmm_bwd(
         num_actual_groups,
         interpret=interpret,
     )
+    for axis in rhs_vma_axes:
+      drhs = jax.lax.pcast(drhs, axis_name=axis, to="varying")
 
   # NOTE: If the rhs transposition is fused into the forward pass we need to
   # return the transpose of the rhs gradient that we calculated above.
