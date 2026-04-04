@@ -38,7 +38,7 @@ llama3_1_405b_8192_v5p_1024 = _add_to_model_dictionary(
             "remat_policy": "custom",
             "context": "offload",
             "mlpwo": "offload",
-            "num_vocab_tiling": 4,
+            "num_batch_seq_tiling": 4,
             "sa_block_q": 2048,
             "sa_block_kv": 2048,
             "sa_block_kv_compute": 2048,

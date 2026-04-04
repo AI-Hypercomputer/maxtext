@@ -67,9 +67,9 @@ The final output unembedding layer of a language model maps hidden states to log
 
 Vocabulary tiling avoids materializing the full logits tensor. Instead, it tiles the input hidden states and computes the logits, loss, and gradients one tile at a time. Unlike GA, which is applied at the start of the model, vocabulary tiling is applied only to the input of the final layer.
 
-In MaxText, the `num_vocab_tiling` configuration controls the number of tiles. This technique is especially advantageous for models with large vocabularies (e.g., Gemma and Llama), particularly when training with long sequence lengths. By preventing out-of-memory errors, vocabulary tiling can enable simpler sharding strategies (like FSDP) and unlock better computational performance.
+In MaxText, the `num_batch_seq_tiling` configuration controls the number of tiles in batch and sequence axis. This technique is especially advantageous for models with large vocabularies (e.g., Gemma and Llama), particularly when training with long sequence lengths. One may also tile vocabulary dimension using `num_vocab_tiling` configuration. By preventing out-of-memory errors, vocabulary tiling can enable simpler sharding strategies (like FSDP) and unlock better computational performance.
 
-![Illustration of vocabulary tiling.](../../_static/vocab_tiling.png)
+![Illustration of batch_sequence tiling.](../../_static/vocab_tiling.png)
 *Figure 2: Vocabulary tiling processes hidden states in tiles to avoid generating the full logits tensor.*
 
 ### Other Tiling Methods

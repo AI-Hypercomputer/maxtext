@@ -108,22 +108,41 @@ def vocab_tiling_linen_loss(
 
   # Customized forward and backward maps for the embedding tiling
   @jax.custom_vjp
-  def chunked_cross_entropy_loss(gathered_params, hidden_states, labels, segmentation):
-    """
-    Calculates the total cross-entropy loss using vocab tiling.
-    """
-    (total_loss, total_z_loss), _ = _chunked_cross_entropy_loss_fwd(gathered_params, hidden_states, labels, segmentation)
+  def chunked_cross_entropy_loss(
+      gathered_params, hidden_states, labels, segmentation
+  ):
+    """Calculates the total cross-entropy loss using vocab tiling."""
+    # if both batch-sequence tiling and vocab tiling are enabled, call
+    # _b_v_chunked_cross_entropy_loss_fwd
+    if config.num_vocab_tiling > 1:
+      (total_loss, total_z_loss), _ = _b_v_chunked_cross_entropy_loss_fwd(
+          gathered_params, hidden_states, labels, segmentation
+      )
+    else:
+      (total_loss, total_z_loss), _ = _chunked_cross_entropy_loss_fwd(
+          gathered_params, hidden_states, labels, segmentation
+      )
     return total_loss, total_z_loss
 
   def _chunked_cross_entropy_loss_fwd(gathered_params, hidden_states, labels, segmentation):
     batch_size, seq_len, emb_dim = hidden_states.shape
-    vocab_tile_size = (batch_size * seq_len) // config.num_vocab_tiling
+    batch_seq_tile_size = (batch_size * seq_len) // config.num_batch_seq_tiling
 
     reshaped_hidden_states = _reshape(
-        hidden_states, (config.num_vocab_tiling, vocab_tile_size, emb_dim), reshaped_hidden_spec
+        hidden_states,
+        (config.num_batch_seq_tiling, batch_seq_tile_size, emb_dim),
+        reshaped_hidden_spec,
     )
-    reshaped_labels = _reshape(labels, (config.num_vocab_tiling, vocab_tile_size), reshaped_data_spec)
-    reshaped_segmentation = _reshape(segmentation, (config.num_vocab_tiling, vocab_tile_size), reshaped_data_spec)
+    reshaped_labels = _reshape(
+        labels,
+        (config.num_batch_seq_tiling, batch_seq_tile_size),
+        reshaped_data_spec,
+    )
+    reshaped_segmentation = _reshape(
+        segmentation,
+        (config.num_batch_seq_tiling, batch_seq_tile_size),
+        reshaped_data_spec,
+    )
 
     # Scan body accumulates loss from each tile given chunked hidden states and labels
     def _fwd_scan_body(accumulators, chunk_data):
@@ -167,6 +186,171 @@ def vocab_tiling_linen_loss(
         emb_dim,
     )
 
+    return (total_loss, total_z_loss), residuals
+
+  # Chunked cross entropy loss forward pass, chunk along batch-sequence and
+  # vocab dimensions.
+  def _b_v_chunked_cross_entropy_loss_fwd(
+      gathered_params, hidden_states, labels, segmentation
+  ):
+    batch_size, seq_len, emb_dim = hidden_states.shape
+    v_dim = config.vocab_size
+
+    b_dim = batch_size * seq_len
+    b_block_sz = b_dim // config.num_batch_seq_tiling
+    v_block_sz = v_dim // config.num_vocab_tiling
+
+    if b_dim % b_block_sz != 0 or v_dim % v_block_sz != 0:
+      raise ValueError(
+          "Batch/sequence dimension and vocab dimension must be divisible by"
+          " their block sizes."
+      )
+
+    num_b_blocks = b_dim // b_block_sz
+    num_v_blocks = v_dim // v_block_sz
+
+    flat_hidden = _reshape(
+        hidden_states,
+        (b_dim, emb_dim),
+        create_sharding(
+            model.mesh,
+            ("activation_embed_and_logits_batch_sequence", "activation_embed"),
+        ),
+    )
+    flat_labels = _reshape(
+        labels,
+        (b_dim,),
+        create_sharding(
+            model.mesh, ("activation_embed_and_logits_batch_sequence",)
+        ),
+    )
+    flat_segmentation = _reshape(
+        segmentation,
+        (b_dim,),
+        create_sharding(
+            model.mesh, ("activation_embed_and_logits_batch_sequence",)
+        ),
+    )
+
+    if config.logits_via_embedding:
+      w = gathered_params["params"]["shared_embedding"]["embedding"]
+    else:
+      w = gathered_params["params"]["decoder"]["logits_dense"]["kernel"]
+
+    if hasattr(w, "unbox"):
+      w = w.unbox()
+    elif hasattr(w, "value"):
+      w = w.value
+
+    def b_loop_body(i, carry):
+      total_loss, total_z_loss = carry
+      b_start = i * b_block_sz
+
+      def v_loop_body(j, v_carry):
+        lse_b_, b_loss_sum_neg_logits_ = v_carry
+        v_start = j * v_block_sz
+        labels_b = jax.lax.dynamic_slice(flat_labels, (b_start,), (b_block_sz,))
+        x_b = jax.lax.dynamic_slice(
+            flat_hidden, (b_start, 0), (b_block_sz, emb_dim)
+        )
+
+        # Apply normalization to the batch block
+        x_b_norm = model.apply(
+            {"params": gathered_params["params"]},
+            x_b,
+            deterministic=deterministic,
+            method="normalize_hidden_states",
+        )
+        x_b_norm = _maybe_shard_with_name(x_b_norm, chunked_hidden_spec)
+
+        # Extract w_j
+        if config.logits_via_embedding:
+          # Attend on embedding table. Table is (vocab_size, emb_dim)
+          # Transpose to (emb_dim, vocab_size)
+          w_j = jax.lax.dynamic_slice(w.T, (0, v_start), (emb_dim, v_block_sz))
+        else:
+          w_j = jax.lax.dynamic_slice(w, (0, v_start), (emb_dim, v_block_sz))
+
+        # Compute logits for the block
+        logits_bv = jnp.dot(x_b_norm, w_j)
+
+        if config.logits_via_embedding and config.normalize_embedding_logits:
+          logits_bv = logits_bv / jnp.sqrt(emb_dim)
+        if config.final_logits_soft_cap:
+          logits_bv = logits_bv / config.final_logits_soft_cap
+          logits_bv = jnp.tanh(logits_bv) * config.final_logits_soft_cap
+
+        if config.cast_logits_to_fp32:
+          logits_bv = logits_bv.astype(jnp.float32)
+
+        lse_b__ = jnp.logaddexp(lse_b_, jax.nn.logsumexp(logits_bv, axis=-1))
+
+        labels_one_hot = jax.nn.one_hot(
+            labels_b - v_start, v_block_sz, dtype=logits_bv.dtype
+        )
+        b_loss_sum_neg_logits__ = b_loss_sum_neg_logits_ - jnp.sum(
+            logits_bv * labels_one_hot, axis=-1
+        )
+        return lse_b__, b_loss_sum_neg_logits__
+
+      lse_b, b_loss_sum_neg_logits = jax.lax.fori_loop(
+          0,
+          num_v_blocks,
+          v_loop_body,
+          (
+              jnp.full((b_block_sz,), -jnp.inf, dtype=jnp.float32),
+              jnp.zeros((b_block_sz,), dtype=jnp.float32),
+          ),
+      )
+
+      segmentation_b = jax.lax.dynamic_slice(
+          flat_segmentation, (b_start,), (b_block_sz,)
+      )
+      mask = (segmentation_b != 0).astype(jnp.float32)
+
+      # Z-loss
+      z_loss_b = config.z_loss_multiplier * jnp.square(lse_b) * mask
+      total_z_loss += jnp.sum(z_loss_b)
+
+      b_loss_sum_neg_logits = b_loss_sum_neg_logits * mask
+      lse_b_masked = lse_b * mask
+
+      total_loss += jnp.sum(b_loss_sum_neg_logits) + jnp.sum(lse_b_masked)
+
+      return total_loss, total_z_loss
+
+    initial_acc = (0.0, 0.0)
+    total_loss, total_z_loss = jax.lax.fori_loop(
+        0,
+        num_b_blocks,
+        b_loop_body,
+        initial_acc,
+    )
+
+    # Reshape the flattened 2D tensors `(b_dim, ...)` into 3D chunked tensors
+    # `(num_b_blocks, b_block_sz, ...)` so we can process them sequentially
+    # over the batch dimension using `jax.lax.scan` in the backward pass.
+    # TODO(b/486111493): When we replace the bwd pass, perhaps we can think
+    # about what to do with these reshape operations.
+    reshaped_hidden_states = _reshape(
+        flat_hidden, (num_b_blocks, b_block_sz, emb_dim), reshaped_hidden_spec
+    )
+    reshaped_labels = _reshape(
+        flat_labels, (num_b_blocks, b_block_sz), reshaped_data_spec
+    )
+    reshaped_segmentation = _reshape(
+        flat_segmentation, (num_b_blocks, b_block_sz), reshaped_data_spec
+    )
+
+    residuals = (
+        gathered_params,
+        reshaped_hidden_states,
+        reshaped_labels,
+        reshaped_segmentation,
+        batch_size,
+        seq_len,
+        emb_dim,
+    )
     return (total_loss, total_z_loss), residuals
 
   def _chunked_cross_entropy_loss_bwd(residuals, cotangents):
@@ -237,7 +421,14 @@ def vocab_tiling_linen_loss(
         None,  # grad for reshaped_segmentation
     )
 
-  chunked_cross_entropy_loss.defvjp(_chunked_cross_entropy_loss_fwd, _chunked_cross_entropy_loss_bwd)
+  if config.num_vocab_tiling > 1:
+    chunked_cross_entropy_loss.defvjp(
+        _b_v_chunked_cross_entropy_loss_fwd, _chunked_cross_entropy_loss_bwd
+    )
+  else:
+    chunked_cross_entropy_loss.defvjp(
+        _chunked_cross_entropy_loss_fwd, _chunked_cross_entropy_loss_bwd
+    )
 
   total_loss, total_z_loss = chunked_cross_entropy_loss(
       gathered_params,

@@ -141,7 +141,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
       # The main model parameters are frozen and only the indexer is trained via KL divergence.
       total_loss = 0.0
       total_z_loss = 0.0
-    elif config.num_vocab_tiling > 1:
+    elif config.num_batch_seq_tiling > 1:
       hidden_state_key = ("intermediates", "decoder", "hidden_states")
       hidden_states = maxtext_utils.get_nested_value(intermediate_outputs, hidden_state_key)[0]
       total_loss, total_z_loss = vocab_tiling_linen_loss(hidden_states, data, config, model, params, is_train)
