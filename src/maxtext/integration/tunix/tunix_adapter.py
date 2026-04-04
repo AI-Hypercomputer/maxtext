@@ -93,3 +93,16 @@ class TunixMaxTextAdapter(nnx.Module):
       return {}
 
     return self._vllm_weight_mapping.lora_to_hf_mappings()
+
+  def get_model_input(self):
+    """Returns dummy inputs matching __call__ for qwix.apply_lora_to_model tracing."""
+    import jax.numpy as jnp  # pylint: disable=import-outside-toplevel
+
+    dummy_batch_size = 1
+    dummy_seq_len = 128
+    return {
+        "input_tokens": jnp.ones((dummy_batch_size, dummy_seq_len), dtype=jnp.int32),
+        "positions": jnp.ones((dummy_batch_size, dummy_seq_len), dtype=jnp.int32),
+        "cache": None,
+        "attention_mask": None,
+    }

@@ -1700,6 +1700,15 @@ class VLLM(BaseModel):
   )
   vllm_hf_config_path: str = Field("", description="Path to HuggingFace model config for MaxText model.")
 
+ 
+class LoraConfig(BaseModel):
+  """Configuration for LoRA (Low-Rank Adaptation) applied to the actor model during RL training."""
+
+  enabled: bool = Field(False, description="If True, apply LoRA to the actor model instead of full-weight training.")
+  rank: int = Field(4, description="Rank of the LoRA decomposition.")
+  alpha: float = Field(8.0, description="Alpha scaling parameter for LoRA (effective LR scale = alpha / rank).")
+  module_path: str = Field(".*", description="Regex matching which module paths to apply LoRA to.")
+
 
 class RL(BaseModel):
   """Configuration for RL algorithms like Group Relative Policy Optimization (GRPO) among others."""
@@ -2040,6 +2049,10 @@ class MaxTextConfig(
   rl: RL = Field(
       default_factory=RL,
       description="Configuration for RL algorithms like Group Relative Policy Optimization (GRPO).",
+  )
+  lora: LoraConfig = Field(
+      default_factory=LoraConfig,
+      description="Configuration for LoRA applied to the actor model during RL training.",
   )
   model_config = ConfigDict(extra="forbid", protected_namespaces=())
 
