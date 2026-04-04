@@ -15,6 +15,21 @@
 """Tests for Qwen3 Omni layers comparing MaxText implementation against PyTorch reference.
 
 This module tests both vision and audio encoder components.
+
+Environment Variables:
+  - USE_TORCH_FORWARD: Set to 'false' to skip PyTorch forward passes and compare against
+                       precomputed statistics instead. This allows running tests in CI
+                       without PyTorch dependencies. Default: 'true'
+                       Example: USE_TORCH_FORWARD=false pytest tests/unit/qwen3_omni_layers_test.py
+  
+  - PRINT_STATS: Set to 'true' to print statistics that can be hardcoded into tests.
+                 Use this when regenerating expected statistics after model changes.
+                 Example: PRINT_STATS=true USE_TORCH_FORWARD=true pytest tests/unit/qwen3_omni_layers_test.py::TestQwen3OmniMoeVisionAttention::test_attention_output_matches_torch
+                 
+Workflow for updating expected statistics:
+  1. Run test with USE_TORCH_FORWARD=true and PRINT_STATS=true
+  2. Copy the printed statistics into the EXPECTED_STATS dictionary in the test
+  3. Run test with USE_TORCH_FORWARD=false to verify statistics-based testing works
 """
 
 import math
@@ -61,6 +76,8 @@ from tests.utils.multimodal_test_utils import (
     create_block_diagonal_attention_mask,
     create_random_jax_torch,
     split_into_patches,
+    copy_vision_encoder_weights_jax_to_torch,
+    copy_patch_merger_weights_jax_to_torch,
 )
 import numpy as np
 import torch
@@ -141,6 +158,119 @@ torch_audio_encoder_config._attn_implementation = "eager"  # pylint: disable=pro
 
 torch.set_grad_enabled(False)
 
+# =============================================================================
+# Statistics-based Testing (to avoid PyTorch dependency in CI)
+# =============================================================================
+
+# Flag to control whether to run actual PyTorch forward passes
+# Set to False to use precomputed statistics instead
+USE_TORCH_FORWARD = os.environ.get("USE_TORCH_FORWARD", "true").lower() in ("true", "1", "yes")
+USE_TORCH_FORWARD = os.environ.get("USE_TORCH_FORWARD", "true").lower() in ("true", "1", "yes")
+
+
+def generate_statistics_dict(array, name="output"):
+  """Generate statistics dictionary from an array for comparison.
+  
+  This function extracts key statistics that can be hardcoded for CI testing
+  without requiring PyTorch forward passes.
+  
+  Args:
+    array: JAX or PyTorch tensor to generate statistics from
+    name: Name identifier for the statistics
+    
+  Returns:
+    Dictionary with statistics that can be printed and hardcoded
+  """
+  # Convert to numpy for consistent handling
+  if hasattr(array, 'detach'):  # PyTorch tensor
+    arr_np = array.detach().cpu().numpy()
+  else:  # JAX array
+    arr_np = np.array(array)
+  
+  # Flatten to 1D for easier statistics
+  flat = arr_np.flatten()
+  
+  stats = {
+      "name": name,
+      "shape": arr_np.shape,
+      "mean": float(np.mean(flat)),
+      "std": float(np.std(flat)),
+      "max": float(np.max(flat)),
+      "min": float(np.min(flat)),
+      "median": float(np.median(flat)),
+      "first_5": flat[:5].tolist() if len(flat) >= 5 else flat.tolist(),
+      "last_5": flat[-5:].tolist() if len(flat) >= 5 else flat.tolist(),
+  }
+  
+  return stats
+
+
+def print_statistics_for_hardcoding(array, name="output", indent=2):
+  """Print statistics in a format that can be copy-pasted into code.
+  
+  Args:
+    array: JAX or PyTorch tensor
+    name: Name identifier for the statistics
+    indent: Indentation level for formatting
+  """
+  stats = generate_statistics_dict(array, name)
+  ind = " " * indent
+  
+  print(f"\n{ind}# Statistics for {name}:")
+  print(f"{ind}EXPECTED_STATS = ")
+  print(f'{ind}  "shape": {stats["shape"]},')
+  print(f'{ind}  "mean": {stats["mean"]},')
+  print(f'{ind}  "std": {stats["std"]},')
+  print(f'{ind}  "max": {stats["max"]},')
+  print(f'{ind}  "min": {stats["min"]},')
+  print(f'{ind}  "median": {stats["median"]},')
+  print(f'{ind}  "first_5": {stats["first_5"]},')
+  print(f'{ind}  "last_5": {stats["last_5"]},')
+  print(f"{ind}")
+
+
+def compare_with_statistics(jax_array, expected_stats, rtol=1e-2, atol=1e-2, name="output"):
+  """Compare JAX array against precomputed statistics.
+  
+  Args:
+    jax_array: JAX array to compare
+    expected_stats: Dictionary with expected statistics
+    rtol: Relative tolerance for comparisons
+    atol: Absolute tolerance for comparisons
+    name: Name for error messages
+    
+  Raises:
+    AssertionError: If statistics don't match within tolerance
+  """
+  actual_stats = generate_statistics_dict(jax_array, name)
+  
+  # Compare shape
+  if actual_stats["shape"] != expected_stats["shape"]:
+    raise AssertionError(
+        f"{name} shape mismatch: expected {expected_stats['shape']}, got {actual_stats['shape']}"
+    )
+  
+  # Compare scalar statistics
+  for key in ["mean", "std", "max", "min", "median"]:
+    expected = expected_stats[key]
+    actual = actual_stats[key]
+    if not np.allclose([actual], [expected], rtol=rtol, atol=atol):
+      raise AssertionError(
+          f"{name} {key} mismatch: expected {expected:.6f}, got {actual:.6f} "
+          f"(diff: {abs(actual - expected):.6f}, rtol: {rtol}, atol: {atol})"
+      )
+  
+  # Compare first and last values
+  for key in ["first_5", "last_5"]:
+    expected = np.array(expected_stats[key])
+    actual = np.array(actual_stats[key])
+    if not np.allclose(actual, expected, rtol=rtol, atol=atol):
+      raise AssertionError(
+          f"{name} {key} mismatch:\nExpected: {expected}\nActual: {actual}"
+      )
+  
+  print(f"✓ {name} statistics match within tolerance (rtol={rtol}, atol={atol})")
+
 
 def create_torch_vision_encoder():
   """Create and configure PyTorch vision encoder."""
@@ -188,47 +318,87 @@ class TestQwen3OmniMoeVisionAttention(BaseVisionTestCaseWithMesh):
 
   def test_attention_output_matches_torch(self):
     """Test that JAX vision attention output matches PyTorch implementation."""
-    torch_encoder = create_torch_vision_encoder()
-    torch_model = torch_encoder.blocks[0].attn
-
+    # Expected statistics for JAX output (generated with USE_TORCH_FORWARD=true)
+    # To regenerate, set PRINT_STATS=true environment variable
+    EXPECTED_STATS = {
+      "shape": (16, 1024),
+      "mean": -0.00019758939743041992,
+      "std": 0.023577280715107918,
+      "max": 0.11169242858886719,
+      "min": -0.10485196113586426,
+      "median": -0.000415802001953125,
+      "first_5": [-0.017169952392578125, -0.020233154296875, 0.01904296875, 0.020172119140625, 0.0008268356323242188],
+      "last_5": [0.008697509765625, -0.002193450927734375, 0.030975341796875, 0.0057220458984375, -0.013702392578125],
+    }
+    
     jax_model = JaxQwen3OmniMoeVisionAttention(config=self.config, mesh=self.mesh, rngs=nnx.Rngs(42))
+    
+    if USE_TORCH_FORWARD:
+      # Full test with PyTorch forward pass
+      torch_encoder = create_torch_vision_encoder()
+      torch_model = torch_encoder.blocks[0].attn
+      copy_attention_weights_to_maxtext(torch_model, jax_model.attn, fused_qkv=True)
 
-    copy_attention_weights_to_maxtext(torch_model, jax_model.attn, fused_qkv=True)
+      jax_hidden_states_2d, torch_hidden_states = create_random_jax_torch(self.seq_length, self.hidden_size)
+      grid_thw = torch.tensor([[1, 4, 4]], dtype=torch.int32)
+      cu_seqlens = torch.tensor([0, self.seq_length], dtype=torch.int32)
 
-    jax_hidden_states_2d, torch_hidden_states = create_random_jax_torch(self.seq_length, self.hidden_size)
-    grid_thw = torch.tensor([[1, 4, 4]], dtype=torch.int32)
+      # Compute rotary position embeddings for PyTorch
+      rotary_pos_emb = torch_encoder.rot_pos_emb(grid_thw)
+      rotary_pos_emb = rotary_pos_emb.reshape(self.seq_length, -1)
+      emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
+      position_embeddings = (emb.cos(), emb.sin())
 
-    cu_seqlens = torch.tensor([0, self.seq_length], dtype=torch.int32)
+      torch_output = torch_model(
+          torch_hidden_states,
+          cu_seqlens=cu_seqlens,
+          position_embeddings=position_embeddings,
+      )
 
-    # Compute rotary position embeddings for PyTorch
-    rotary_pos_emb = torch_encoder.rot_pos_emb(grid_thw)
-    rotary_pos_emb = rotary_pos_emb.reshape(self.seq_length, -1)
-    emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
-    position_embeddings = (emb.cos(), emb.sin())
+      jax_hidden_states_3d = jax_hidden_states_2d[jnp.newaxis, :, :]
+      jax_output = jax_model(
+          jax_hidden_states_3d,  # Shape: (1, seq_len, hidden_size)
+          num_frames=1,
+          height=4,
+          width=4,
+          deterministic=True,
+      )
+      jax_output = jax_output[0]
 
-    torch_output = torch_model(
-        torch_hidden_states,
-        cu_seqlens=cu_seqlens,
-        position_embeddings=position_embeddings,
-    )
+      # Option to print statistics for hardcoding
+      if os.environ.get("PRINT_STATS", "false").lower() in ("true", "1", "yes"):
+        print_statistics_for_hardcoding(jax_output, "vision_attention_output")
 
-    jax_hidden_states_3d = jax_hidden_states_2d[jnp.newaxis, :, :]
-    jax_output = jax_model(
-        jax_hidden_states_3d,  # Shape: (1, seq_len, hidden_size)
-        num_frames=1,
-        height=4,
-        width=4,
-        deterministic=True,
-    )
-    jax_output = jax_output[0]
-
-    assert_all_close_jax_torch(
-        jax_output,
-        torch_output,
-        rtol=1e-2,
-        atol=1e-2,
-        error_msg="Vision attention outputs differ",
-    )
+      assert_all_close_jax_torch(
+          jax_output,
+          torch_output,
+          rtol=1e-2,
+          atol=1e-2,
+          error_msg="Vision attention outputs differ",
+      )
+    else:
+      # Lightweight test without PyTorch - compare against statistics
+      # Initialize with dummy weights (in real CI, would load from checkpoint)
+      jax_hidden_states_2d, _ = create_random_jax_torch(self.seq_length, self.hidden_size)
+      jax_hidden_states_3d = jax_hidden_states_2d[jnp.newaxis, :, :]
+      
+      jax_output = jax_model(
+          jax_hidden_states_3d,
+          num_frames=1,
+          height=4,
+          width=4,
+          deterministic=True,
+      )
+      jax_output = jax_output[0]
+      
+      # Compare against expected statistics
+      compare_with_statistics(
+          jax_output,
+          EXPECTED_STATS,
+          rtol=1e-2,
+          atol=1e-2,
+          name="vision_attention_output"
+      )
 
   def test_attention_is_jittable(self):
     """Test that attention is JIT-compilable."""
@@ -522,13 +692,31 @@ class TestQwen3OmniMoeVisionEncoderEndToEnd(BaseVisionTestCaseWithMesh):
 
   def test_vision_encoder_single_image(self):
     """Test full vision encoder with single image matches PyTorch."""
-    torch_encoder = create_torch_vision_encoder()
-
+    # Expected statistics for main output and deep features
+    EXPECTED_MAIN_OUTPUT_STATS = {
+      "shape": (16, 2048),
+      "mean": -0.0035424784291535616,
+      "std": 0.19684186577796936,
+      "max": 0.7648332118988037,
+      "min": -0.7719197869300842,
+      "median": -0.003264244645833969,
+      "first_5": [-0.07272490859031677, -0.3177303969860077, 0.0980076864361763, 0.22687660157680511, -0.198265939950943],
+      "last_5": [-0.08198238909244537, -0.00675368495285511, 0.24948346614837646, 0.32567575573921204, 0.05311001092195511],
+    }
+    
+    EXPECTED_DEEP_FEAT_0_STATS = {
+      "shape": (16, 2048),
+      "mean": -0.0006954995915293694,
+      "std": 0.19501300156116486,
+      "max": 0.8125842809677124,
+      "min": -0.8966280817985535,
+      "median": -0.001320576760917902,
+      "first_5": [0.25553667545318604, -0.19426020979881287, -0.245510995388031, -0.0046244049444794655, 0.18533197045326233],
+      "last_5": [0.11705559492111206, -0.1613277941942215, 0.11175861209630966, -0.23155327141284943, -0.12354159355163574],
+    }
+    
     jax_encoder = JaxQwen3OmniMoeVisionEncoder(config=self.config, mesh=self.mesh, rngs=nnx.Rngs(42))
     jax_projector = JaxQwen3OmniMoeVisionProjector(config=self.config, rngs=nnx.Rngs(43))
-
-    copy_vision_encoder_weights(torch_encoder, jax_encoder)
-    copy_patch_merger_weights(torch_encoder.merger, jax_projector.merger)
 
     patch_size = self.config.patch_size_for_vit
     temporal_patch_size = self.config.temporal_patch_size_for_vit
@@ -540,44 +728,96 @@ class TestQwen3OmniMoeVisionEncoderEndToEnd(BaseVisionTestCaseWithMesh):
 
     jax_hidden_states = jax_hidden_states.reshape(1, in_channels, temporal_patch_size, h * patch_size, w * patch_size)
 
-    torch_hidden_states = split_into_patches(
-        torch.from_numpy(np.array(jax_hidden_states)),
-        temporal_patch_size,
-        patch_size,
-    )
+    if USE_TORCH_FORWARD:
+      # Full test with PyTorch forward pass
+      torch_encoder = create_torch_vision_encoder()
+      
+      # copy_vision_encoder_weights(torch_encoder, jax_encoder)
+      # copy_patch_merger_weights(torch_encoder.merger, jax_projector.merger)
+      copy_vision_encoder_weights_jax_to_torch(jax_encoder, torch_encoder)
+      copy_patch_merger_weights_jax_to_torch(jax_projector.merger, torch_encoder.merger)
 
-    grid_thw = np.array([[1, h, w]], dtype=np.int64)
-    grid_thw_torch = torch.from_numpy(grid_thw)
+      torch_hidden_states = split_into_patches(
+          torch.from_numpy(np.array(jax_hidden_states)),
+          temporal_patch_size,
+          patch_size,
+      )
 
-    torch_output, torch_deep_feats = torch_encoder(torch_hidden_states, grid_thw_torch)
-    jax_encoder_output, jax_deep_feats = jax_encoder(jax_hidden_states)
-    jax_output = jax_projector(jax_encoder_output)
+      grid_thw = np.array([[1, h, w]], dtype=np.int64)
+      grid_thw_torch = torch.from_numpy(grid_thw)
 
-    jax_output = jax_output[0]
-    jax_deep_feats = [feat[0] for feat in jax_deep_feats]
+      torch_output, torch_deep_feats = torch_encoder(torch_hidden_states, grid_thw_torch)
+      jax_encoder_output, jax_deep_feats = jax_encoder(jax_hidden_states)
+      jax_output = jax_projector(jax_encoder_output)
 
-    assert_all_close_jax_torch(
-        jax_output,
-        torch_output,
-        rtol=1e-2,
-        atol=1e-2,
-        error_msg="Vision encoder final output differs",
-    )
+      jax_output = jax_output[0]
+      jax_deep_feats = [feat[0] for feat in jax_deep_feats]
 
-    # Compare deep features
-    self.assertEqual(
-        len(jax_deep_feats),
-        len(torch_deep_feats),
-        "Number of deep features should match",
-    )
-    for i, (jax_feat, torch_feat) in enumerate(zip(jax_deep_feats, torch_deep_feats)):
+      print(f"jax_output: shape={jax_output.shape}, mean={jax_output.mean():.4f}, std={jax_output.std():.4f}")
+      print(f"torch_output: shape={torch_output.shape}, mean={torch_output.mean():.4f}, std={torch_output.std():.4f}")
+
+      # Option to print statistics for hardcoding
+      # if os.environ.get("PRINT_STATS", "false").lower() in ("true", "1", "yes"):
+      print("\n=== HuggingFace ===")
+      print_statistics_for_hardcoding(torch_output, "vision_encoder_main_output")
+      # for i, feat in enumerate(torch_deep_feats):
+      #   print_statistics_for_hardcoding(feat, f"vision_encoder_deep_feat_{i}")
+      print("\n=== MaxText ===")
+      print_statistics_for_hardcoding(jax_output, "vision_encoder_main_output")
+      # for i, feat in enumerate(jax_deep_feats):
+      #   print_statistics_for_hardcoding(feat, f"vision_encoder_deep_feat_{i}")
+
       assert_all_close_jax_torch(
-          jax_feat,
-          torch_feat,
+          jax_output,
+          torch_output,
           rtol=1e-2,
           atol=1e-2,
-          error_msg=f"Deep feature {i} differs",
+          error_msg="Vision encoder final output differs",
       )
+
+      # Compare deep features
+      self.assertEqual(
+          len(jax_deep_feats),
+          len(torch_deep_feats),
+          "Number of deep features should match",
+      )
+      for i, (jax_feat, torch_feat) in enumerate(zip(jax_deep_feats, torch_deep_feats)):
+        assert_all_close_jax_torch(
+            jax_feat,
+            torch_feat,
+            rtol=1e-2,
+            atol=1e-2,
+            error_msg=f"Deep feature {i} differs",
+        )
+    else:
+      # Lightweight test without PyTorch - compare against statistics
+      jax_encoder_output, jax_deep_feats = jax_encoder(jax_hidden_states)
+      jax_output = jax_projector(jax_encoder_output)
+      
+      jax_output = jax_output[0]
+      jax_deep_feats = [feat[0] for feat in jax_deep_feats]
+      
+      print_statistics_for_hardcoding(jax_output, "vision_encoder_main_output")
+      print(EXPECTED_MAIN_OUTPUT_STATS)
+
+      # Compare main output against expected statistics
+      compare_with_statistics(
+          jax_output,
+          EXPECTED_MAIN_OUTPUT_STATS,
+          rtol=1e-2,
+          atol=1e-2,
+          name="vision_encoder_main_output"
+      )
+      
+      # Compare first deep feature (add more as needed)
+      if len(jax_deep_feats) > 0:
+        compare_with_statistics(
+            jax_deep_feats[0],
+            EXPECTED_DEEP_FEAT_0_STATS,
+            rtol=1e-2,
+            atol=1e-2,
+            name="vision_encoder_deep_feat_0"
+        )
 
 
 class TestDeepstackProcess(unittest.TestCase):

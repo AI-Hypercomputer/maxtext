@@ -412,3 +412,268 @@ def create_block_diagonal_attention_mask(cu_seqlens, dtype):
     attention_mask[..., start:end, start:end] = 0
 
   return attention_mask
+
+
+# =============================================================================
+# Reverse Weight Copying: JAX → PyTorch
+# =============================================================================
+
+
+def copy_linear_weights_jax_to_torch(jax_linear, torch_linear):
+  """Copy weights from JAX nnx.Linear to PyTorch Linear.
+  
+  Args:
+      jax_linear: JAX nnx.Linear layer
+      torch_linear: PyTorch Linear layer
+  """
+  # JAX kernel: (in_features, out_features)
+  # PyTorch weight: (out_features, in_features) - need to transpose
+  torch_linear.weight.data = torch.from_numpy(np.array(jax_linear.kernel.value).T)
+  
+  if jax_linear.bias is not None and torch_linear.bias is not None:
+    torch_linear.bias.data = torch.from_numpy(np.array(jax_linear.bias.value))
+
+
+def copy_layernorm_weights_jax_to_torch(jax_ln, torch_ln):
+  """Copy weights from JAX nnx.LayerNorm to PyTorch LayerNorm.
+  
+  Args:
+      jax_ln: JAX nnx.LayerNorm layer
+      torch_ln: PyTorch LayerNorm layer
+  """
+  torch_ln.weight.data = torch.from_numpy(np.array(jax_ln.scale.value))
+  torch_ln.bias.data = torch.from_numpy(np.array(jax_ln.bias.value))
+
+
+def copy_conv2d_weights_jax_to_torch(jax_conv, torch_conv):
+  """Copy weights from JAX nnx.Conv to PyTorch Conv2d.
+  
+  Args:
+      jax_conv: JAX nnx.Conv layer (2D)
+      torch_conv: PyTorch Conv2d layer
+  """
+  # JAX: (kH, kW, in_channels, out_channels)
+  # PyTorch: (out_channels, in_channels, kH, kW)
+  jax_weight = np.array(jax_conv.kernel.value)
+  torch_weight = np.transpose(jax_weight, (3, 2, 0, 1))
+  torch_conv.weight.data = torch.from_numpy(torch_weight)
+  torch_conv.bias.data = torch.from_numpy(np.array(jax_conv.bias.value))
+
+
+def copy_conv3d_weights_jax_to_torch(jax_conv, torch_conv):
+  """Copy weights from JAX nnx.Conv (3D) to PyTorch Conv3d.
+  
+  Args:
+      jax_conv: JAX nnx.Conv layer (3D)
+      torch_conv: PyTorch Conv3d layer
+  """
+  # JAX Conv (3D): (kD, kH, kW, in_channels, out_channels)
+  # PyTorch Conv3d: (out_channels, in_channels, kD, kH, kW)
+  jax_weight = np.array(jax_conv.kernel.value)
+  torch_weight = np.transpose(jax_weight, (4, 3, 0, 1, 2))
+  torch_conv.weight.data = torch.from_numpy(torch_weight)
+  torch_conv.bias.data = torch.from_numpy(np.array(jax_conv.bias.value))
+
+
+def copy_mlp_weights_jax_to_torch(jax_mlp, torch_mlp):
+  """Copy MLP weights from JAX to PyTorch.
+  
+  Args:
+      jax_mlp: JAX MLP module
+      torch_mlp: PyTorch MLP module
+  """
+  copy_linear_weights_jax_to_torch(jax_mlp.linear_fc1, torch_mlp.linear_fc1)
+  copy_linear_weights_jax_to_torch(jax_mlp.linear_fc2, torch_mlp.linear_fc2)
+
+
+def copy_patch_embed_weights_jax_to_torch(jax_embed, torch_embed):
+  """Copy patch embed weights from JAX to PyTorch.
+  
+  Args:
+      jax_embed: JAX patch embed module
+      torch_embed: PyTorch patch embed module
+  """
+  copy_conv3d_weights_jax_to_torch(jax_embed.proj, torch_embed.proj)
+
+
+def copy_patch_merger_weights_jax_to_torch(jax_merger, torch_merger):
+  """Copy patch merger weights from JAX to PyTorch.
+  
+  Args:
+      jax_merger: JAX patch merger module
+      torch_merger: PyTorch patch merger module
+  """
+  copy_layernorm_weights_jax_to_torch(jax_merger.ln_q, torch_merger.ln_q)
+  copy_linear_weights_jax_to_torch(jax_merger.mlp_0, torch_merger.mlp[0])
+  copy_linear_weights_jax_to_torch(jax_merger.mlp_2, torch_merger.mlp[2])
+
+
+def copy_attention_weights_from_maxtext(maxtext_attn, torch_attn, fused_qkv=False):
+  """Copy attention weights from MaxText's Attention module to PyTorch.
+  
+  This is the reverse of copy_attention_weights_to_maxtext.
+  
+  Args:
+      maxtext_attn: MaxText Attention module with separate q/k/v projections
+      torch_attn: PyTorch attention with either:
+          - Separate q_proj, k_proj, v_proj, out_proj (fused_qkv=False, for audio)
+          - Fused qkv and proj (fused_qkv=True, for vision)
+      fused_qkv: If True, torch_attn has fused qkv projection that needs merging
+  """
+  if not hasattr(maxtext_attn, "query"):
+    raise NotImplementedError("Unsupported MaxText Attention structure")
+
+  num_heads = maxtext_attn.num_query_heads
+  head_dim = maxtext_attn.head_dim
+  hidden_size = num_heads * head_dim
+
+  # Extract Q/K/V weights from MaxText
+  # MaxText: (hidden_size, num_heads, head_dim)
+  q_weight_jax = np.array(maxtext_attn.query.kernel.value)  # (hidden_size, num_heads, head_dim)
+  k_weight_jax = np.array(maxtext_attn.key.kernel.value)
+  v_weight_jax = np.array(maxtext_attn.value.kernel.value)
+  
+  q_bias_jax = np.array(maxtext_attn.query.bias.value)  # (num_heads, head_dim)
+  k_bias_jax = np.array(maxtext_attn.key.bias.value)
+  v_bias_jax = np.array(maxtext_attn.value.bias.value)
+
+  # Reshape to PyTorch format: (out_features, in_features)
+  q_weight = q_weight_jax.reshape(hidden_size, -1).T  # (num_heads*head_dim, hidden_size)
+  k_weight = k_weight_jax.reshape(hidden_size, -1).T
+  v_weight = v_weight_jax.reshape(hidden_size, -1).T
+  
+  q_bias = q_bias_jax.reshape(-1)  # (num_heads*head_dim,)
+  k_bias = k_bias_jax.reshape(-1)
+  v_bias = v_bias_jax.reshape(-1)
+
+  if fused_qkv:
+    # Vision: Merge Q/K/V into fused projection
+    qkv_weight = np.concatenate([q_weight, k_weight, v_weight], axis=0)
+    qkv_bias = np.concatenate([q_bias, k_bias, v_bias], axis=0)
+    
+    torch_attn.qkv.weight.data = torch.from_numpy(qkv_weight)
+    torch_attn.qkv.bias.data = torch.from_numpy(qkv_bias)
+    
+    out_proj = torch_attn.proj
+  else:
+    # Audio: Set separate projections
+    torch_attn.q_proj.weight.data = torch.from_numpy(q_weight)
+    torch_attn.q_proj.bias.data = torch.from_numpy(q_bias)
+    
+    torch_attn.k_proj.weight.data = torch.from_numpy(k_weight)
+    torch_attn.k_proj.bias.data = torch.from_numpy(k_bias)
+    
+    torch_attn.v_proj.weight.data = torch.from_numpy(v_weight)
+    torch_attn.v_proj.bias.data = torch.from_numpy(v_bias)
+    
+    out_proj = torch_attn.out_proj
+
+  # Copy output projection
+  # MaxText: (num_heads, head_dim, output_dim)
+  out_weight_jax = np.array(maxtext_attn.out.kernel.value)  # (num_heads, head_dim, output_dim)
+  out_bias_jax = np.array(maxtext_attn.out.bias.value)
+  
+  # Reshape to PyTorch format: (output_dim, num_heads*head_dim)
+  out_weight = out_weight_jax.reshape(-1, out_weight_jax.shape[-1]).T
+  
+  out_proj.weight.data = torch.from_numpy(out_weight)
+  out_proj.bias.data = torch.from_numpy(out_bias_jax)
+
+
+def copy_maxtext_encoder_layer_weights_jax_to_torch(maxtext_layer, torch_layer):
+  """Copy encoder layer weights from MaxText AudioEncoderLayer to PyTorch.
+  
+  Args:
+      maxtext_layer: MaxText AudioEncoderLayer
+      torch_layer: PyTorch TorchQwen3OmniMoeAudioEncoderLayer
+  """
+  # Copy layer norms
+  copy_layernorm_weights_jax_to_torch(maxtext_layer.input_layer_norm, torch_layer.self_attn_layer_norm)
+  copy_layernorm_weights_jax_to_torch(maxtext_layer.post_attention_layer_norm, torch_layer.final_layer_norm)
+
+  # Copy attention weights from MaxText Attention module
+  copy_attention_weights_from_maxtext(maxtext_layer.self_attention_audio, torch_layer.self_attn, fused_qkv=False)
+
+  copy_linear_weights_jax_to_torch(maxtext_layer.AudioMLP.wi, torch_layer.fc1)
+  copy_linear_weights_jax_to_torch(maxtext_layer.AudioMLP.wo, torch_layer.fc2)
+
+
+def copy_audio_projector_weights_jax_to_torch(maxtext_projector, torch_model):
+  """Copy AudioProjector weights from MaxText to PyTorch.
+  
+  Args:
+      maxtext_projector: MaxText Qwen3OmniAudioProjector
+      torch_model: PyTorch TorchQwen3OmniMoeAudioEncoder (contains proj1, proj2)
+  """
+  copy_linear_weights_jax_to_torch(maxtext_projector.proj1, torch_model.proj1)
+  copy_linear_weights_jax_to_torch(maxtext_projector.proj2, torch_model.proj2)
+
+
+def copy_maxtext_audio_encoder_weights_jax_to_torch(maxtext_encoder, torch_model, config):
+  """Copy AudioEncoder weights from MaxText to PyTorch (encoder only, no projector).
+  
+  Args:
+      maxtext_encoder: MaxText Qwen3OmniAudioEncoder
+      torch_model: PyTorch TorchQwen3OmniMoeAudioEncoder
+      config: MaxText config with encoder_layers_for_audio
+      
+  Note:
+      Positional embeddings are not copied because MaxText's PositionalEmbedding
+      computes them deterministically on-the-fly, unlike PyTorch which stores them.
+  """
+  # Copy convolutional layers
+  copy_conv2d_weights_jax_to_torch(maxtext_encoder.conv2d1, torch_model.conv2d1)
+  copy_conv2d_weights_jax_to_torch(maxtext_encoder.conv2d2, torch_model.conv2d2)
+  copy_conv2d_weights_jax_to_torch(maxtext_encoder.conv2d3, torch_model.conv2d3)
+
+  # Copy conv output projection
+  copy_linear_weights_jax_to_torch(maxtext_encoder.conv_out, torch_model.conv_out)
+
+  # Note: Positional embeddings are not copied - MaxText computes them on-the-fly
+
+  # Copy layer norm
+  copy_layernorm_weights_jax_to_torch(maxtext_encoder.layernorm_post, torch_model.ln_post)
+
+  # Copy encoder layers
+  for maxtext_layer, torch_layer in zip(
+      [getattr(maxtext_encoder, f"layers_{i}") for i in range(config.encoder_layers_for_audio)],
+      torch_model.layers,
+  ):
+    copy_maxtext_encoder_layer_weights_jax_to_torch(maxtext_layer, torch_layer)
+
+
+def copy_vision_encoder_weights_jax_to_torch(jax_encoder, torch_encoder):
+  """Copy all weights from JAX vision encoder to PyTorch vision encoder.
+  
+  Args:
+      jax_encoder: JAX Qwen3OmniMoeVisionEncoder
+      torch_encoder: PyTorch Qwen3OmniMoeVisionEncoder
+  """
+  # Copy patch embedding
+  copy_patch_embed_weights_jax_to_torch(jax_encoder.patch_embed, torch_encoder.patch_embed)
+
+  # Copy positional embedding weights
+  jax_pos_embed = np.array(jax_encoder.pos_embed_interpolate.pos_embed.value)
+  torch_encoder.pos_embed.weight.data = torch.from_numpy(jax_pos_embed)
+
+  # Copy encoder blocks
+  # JAX encoder stores blocks as blocks_0, blocks_1, etc. via setattr
+  for i, torch_block in enumerate(torch_encoder.blocks):
+    jax_block = getattr(jax_encoder, f"blocks_{i}")
+    
+    # Copy layer norms
+    copy_layernorm_weights_jax_to_torch(jax_block.ln1, torch_block.norm1)
+    copy_layernorm_weights_jax_to_torch(jax_block.ln2, torch_block.norm2)
+
+    # Copy attention weights (vision uses fused QKV)
+    copy_attention_weights_from_maxtext(jax_block.attn.attn, torch_block.attn, fused_qkv=True)
+
+    # Copy MLP weights
+    copy_linear_weights_jax_to_torch(jax_block.mlp, torch_block.mlp.linear_fc1)
+    copy_linear_weights_jax_to_torch(jax_block.mlp_out, torch_block.mlp.linear_fc2)
+
+  # Copy merger weights (deep mergers only, final_merger is now in projector)
+  # JAX encoder stores mergers as merger_0, merger_1, etc. via setattr
+  for i, torch_merger in enumerate(torch_encoder.merger_list):
+    jax_merger = getattr(jax_encoder, f"merger_{i}")
+    copy_patch_merger_weights_jax_to_torch(jax_merger, torch_merger)
