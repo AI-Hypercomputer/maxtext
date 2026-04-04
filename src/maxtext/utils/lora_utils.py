@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,9 +13,11 @@
 # limitations under the License.
 
 """ Common LoRA utils needed to support LoRA adapters."""
-
 import json
+import os
+from typing import Any, Optional
 
+import omegaconf
 import jax
 import jax.numpy as jnp
 
@@ -23,10 +25,18 @@ from flax.training import train_state
 from flax.linen import partitioning as nn_partitioning
 
 from maxtext.common import checkpointing
+from maxtext.configs import pyconfig
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import max_logging
+
+import re
+
+from flax import nnx
+from orbax import checkpoint as ocp
+
+import qwix
 
 
 def apply_lora_on_base_params(base_params, lora_params, lora_scale_factor=1.0):
@@ -343,3 +353,176 @@ def get_lora_abstract_state(base_abstract_params, lora_config):
   )
 
   return unboxed_abstract_lora_state, lora_state_mesh_annotations
+
+
+# --- Qwix LoRA Utils ---
+
+
+def _get_lora_module_path(mt_config: pyconfig.HyperParameters) -> str:
+  """Gets the regex for modules to apply LoRA on based on the model name."""
+  if mt_config.lora_module_path:
+    return mt_config.lora_module_path
+
+  config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "post_train", "lora_module_path.yml")
+  lora_configs = omegaconf.OmegaConf.load(config_path)
+  model_name = mt_config.model_name.lower()
+
+  for key, module_path in lora_configs.items():
+    if key != "default" and model_name.startswith(key):
+      max_logging.log(f"Auto-detected lora_module_path for model '{model_name}': {module_path}")
+      return str(module_path)
+
+  default_path = lora_configs.get("default", "decoder/layers/.*(self_attention/(query|key|value|out)|mlp/(wi_0|wi_1|wo))")
+  max_logging.log(
+      f"Warning: Model '{model_name}' is not in the list of verified LoRA models. "
+      "Auto-detection might not work. Please provide an explicit `lora_module_path` in your config if training fails."
+  )
+  max_logging.log(f"Falling back to default lora_module_path: {default_path}")
+  return str(default_path)
+
+
+def _build_lora_provider(mt_config: pyconfig.HyperParameters) -> qwix.LoraProvider:
+  """Builds a Qwix LoRA provider from MaxText LoRA settings."""
+  lora_module_path = _get_lora_module_path(mt_config)
+  lora_kwargs = {
+      "module_path": lora_module_path,
+      "rank": mt_config.lora_rank,
+      "alpha": mt_config.lora_alpha,
+      "dropout": 0.0,
+  }
+  if mt_config.lora_tile_size is not None:
+    lora_kwargs["tile_size"] = mt_config.lora_tile_size
+  if mt_config.lora_weight_qtype is not None:
+    lora_kwargs["weight_qtype"] = mt_config.lora_weight_qtype
+    max_logging.log(
+        f"QLoRA configured: module_path={lora_module_path} "
+        f"rank={mt_config.lora_rank} alpha={mt_config.lora_alpha} "
+        f"weight_qtype={mt_config.lora_weight_qtype} "
+        f"tile_size={mt_config.lora_tile_size}"
+    )
+  else:
+    max_logging.log(
+        f"LoRA configured: module_path={lora_module_path} "
+        f"rank={mt_config.lora_rank} alpha={mt_config.lora_alpha} "
+        f"tile_size={mt_config.lora_tile_size}"
+    )
+  return qwix.LoraProvider(**lora_kwargs)
+
+
+def _prepare_dummy_inputs() -> tuple[jnp.ndarray, jnp.ndarray]:
+  """Builds dummy decoder inputs used to materialize LoRA parameters."""
+  # Keep LoRA warmup as small as possible to minimize compile/memory overhead.
+  dummy_bs = 1
+  seq_len = 1
+  decoder_input_tokens = jnp.zeros((dummy_bs, seq_len), dtype=jnp.int32)
+  decoder_positions = jnp.zeros((dummy_bs, seq_len), dtype=jnp.int32)
+  return decoder_input_tokens, decoder_positions
+
+
+def _verify_lora_parameters(lora_model: nnx.Module, mt_config: pyconfig.HyperParameters) -> None:
+  """Validates that LoRA is active or that target modules were matched."""
+  from tunix.sft import utils as tunix_sft_utils  # pylint: disable=import-outside-toplevel
+
+  if tunix_sft_utils.is_lora_enabled(lora_model):
+    max_logging.log("LoRA verification: is_lora_enabled=True")
+    return
+
+  lora_module_path = _get_lora_module_path(mt_config)
+  compiled_module_path = re.compile(lora_module_path)
+  matched_module_paths = []
+  sample_module_paths = []
+
+  for path, _ in nnx.iter_modules(lora_model):
+    module_path = "/".join(str(p) for p in path)
+    if len(sample_module_paths) < 50:
+      sample_module_paths.append(module_path)
+    if compiled_module_path.search(module_path):
+      matched_module_paths.append(module_path)
+
+  if not matched_module_paths:
+    max_logging.log(
+        f"LoRA module_path='{lora_module_path}' did not match any weights. " f"Sample module paths: {sample_module_paths}"
+    )
+    raise ValueError("LoRA enabled but no LoRA parameters found in decoder/model state.")
+
+  raise ValueError(
+      "LoRA module path matched target modules, but nnx.LoRAParam is still "
+      "missing. For Tunix PeftTrainer, LoRA params must be materialized before "
+      "trainer initialization, otherwise it falls back to full-model training. "
+      f"Sample matches: {matched_module_paths[:10]}"
+  )
+
+
+def apply_lora_to_model(
+    model: nnx.Module, mesh: Optional[jax.sharding.Mesh], mt_config: pyconfig.HyperParameters
+) -> nnx.Module:
+  """Optionally applies LoRA/QLoRA to a MaxText model using Qwix."""
+  # Skip Qwix LoRA if MaxText LoRA adapters are loaded
+  if getattr(mt_config, "lora_input_adapters_path", None):
+    max_logging.log("MaxText LoRA adapters loaded, skipping Qwix LoRA application")
+    return model
+
+  if not getattr(mt_config, "enable_lora", False):
+    return model
+
+  lora_provider = _build_lora_provider(mt_config)
+
+  model_rngs = getattr(model.decoder, "rngs", None)
+  decoder_input_tokens, decoder_positions = _prepare_dummy_inputs()
+
+  lora_model = qwix.apply_lora_to_model(
+      model,
+      lora_provider,
+      decoder_input_tokens=decoder_input_tokens,
+      decoder_positions=decoder_positions,
+      rngs=model_rngs,
+  )
+
+  if mesh is not None:
+    with mesh, nn_partitioning.axis_rules(mt_config.logical_axis_rules):
+      graph_def, state = nnx.split(lora_model)
+      default_memory_kind = jax.devices()[0].default_memory().kind
+      dst_shardings = jax.tree.map(
+          lambda x: jax.sharding.NamedSharding(mesh, x, memory_kind=default_memory_kind) if x is not None else None,
+          nnx.get_partition_spec(state),
+      )
+      from tunix.rl import reshard  # pylint: disable=import-outside-toplevel
+
+      state = reshard.reshard_pytree(state, dst_shardings)
+      lora_model = nnx.merge(graph_def, state)
+
+  _verify_lora_parameters(lora_model, mt_config)
+
+  return lora_model
+
+
+def restore_lora_from_path(trainer: Any, mt_config: pyconfig.HyperParameters) -> Any:
+  """Optionally restores LoRA params from an external checkpoint item path."""
+  lora_restore_path = getattr(mt_config, "lora_restore_path", "")
+  if not lora_restore_path:
+    return trainer
+
+  train_steps = getattr(trainer, "train_steps", 0)
+  if train_steps > 0:
+    max_logging.log(
+        f"PeftTrainer restored current run at step {train_steps}; " f"ignoring lora_restore_path '{lora_restore_path}'."
+    )
+    return trainer
+
+  from tunix.sft import utils as tunix_sft_utils  # pylint: disable=import-outside-toplevel
+
+  if not tunix_sft_utils.is_lora_enabled(trainer.model):
+    lora_module_path = _get_lora_module_path(mt_config)
+    raise ValueError(
+        "lora_restore_path is set but LoRA is not enabled on the model. "
+        f"Set enable_lora=True and verify lora_module_path ('{lora_module_path}') matches model modules."
+    )
+
+  abstract_lora_params = nnx.state(trainer.model, nnx.LoRAParam)
+  restored_lora_params = ocp.StandardCheckpointer().restore(
+      lora_restore_path,
+      target=abstract_lora_params,
+  )
+  nnx.update(trainer.model, restored_lora_params)
+  max_logging.log(f"LoRA restore complete from '{lora_restore_path}'. " "Trainer step remains at 0 for this run.")
+  return trainer
