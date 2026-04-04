@@ -2242,7 +2242,7 @@ class MaxTextConfig(
     # Default quantization sharding count to number of local devices if not set.
     if self.quantization_local_shard_count == -1:
       try:
-        self.quantization_local_shard_count = jax.local_device_count()
+        self.quantization_local_shard_count = 1 + max(d.slice_index for d in jax.devices())
       except RuntimeError:
         self.quantization_local_shard_count = 1
 
