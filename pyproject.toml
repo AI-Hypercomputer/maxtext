@@ -46,8 +46,8 @@ packages = ["src/maxtext", "src/dependencies"]
 path = "build_hooks.py"
 
 [project.scripts]
-install_maxtext_tpu_github_deps = "dependencies.github_deps.install_pre_train_deps:main"
-install_maxtext_cuda12_github_deps = "dependencies.github_deps.install_pre_train_deps:main"
-install_maxtext_tpu_post_train_extra_deps = "dependencies.github_deps.install_post_train_deps:main"
+install_tpu_pre_train_extra_deps = "dependencies.scripts.install_pre_train_extra_deps:main"
+install_cuda12_pre_train_extra_deps = "dependencies.scripts.install_pre_train_extra_deps:main"
+install_tpu_post_train_extra_deps = "dependencies.scripts.install_post_train_extra_deps:main"
 build_maxtext_docker_image = "dependencies.scripts.build_maxtext_docker_image:main"
 upload_maxtext_docker_image = "dependencies.scripts.upload_maxtext_docker_image:main"

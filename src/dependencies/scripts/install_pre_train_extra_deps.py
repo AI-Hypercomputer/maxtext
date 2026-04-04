@@ -14,10 +14,8 @@
 
 """Installs extra dependencies from a requirements file using uv.
 
-This script is designed to be run to install dependencies specified in
-'pre_train_deps.txt', which is expected to be in the same directory.
-It first ensures 'uv' is installed and then uses it to install the packages
-listed in the requirements file.
+This script is designed to install dependencies specified in 'dependencies/extra_deps/pre_train_*.txt'.
+It first ensures 'uv' is installed and then uses it to install the packages listed in the requirements file.
 """
 
 import os
@@ -27,15 +25,14 @@ import sys
 
 def main():
   """
-  Installs extra dependencies specified in pre_train_deps.txt using uv.
-
-  This script looks for 'pre_train_deps.txt' relative to its own location.
+  Installs extra dependencies specified in 'dependencies/extra_deps/pre_train_*.txt' using uv.
   It executes 'uv pip install -r <path_to_extra_deps.txt> --resolution=lowest'.
   """
   current_dir = os.path.dirname(os.path.abspath(__file__))
-  extra_deps_path = os.path.join(current_dir, "pre_train_deps.txt")
-  if not os.path.exists(extra_deps_path):
-    raise FileNotFoundError(f"Dependencies file not found at {extra_deps_path}")
+  repo_root = os.path.abspath(os.path.join(current_dir, "..", ".."))
+  github_deps_path = os.path.join(repo_root, "dependencies", "extra_deps", "pre_train_github_deps.txt")
+  if not os.path.exists(github_deps_path):
+    raise FileNotFoundError(f"Github dependencies file not found at {github_deps_path}")
 
   # Check if 'uv' is available in the environment
   try:
@@ -46,22 +43,21 @@ def main():
     print(f"Stderr: {e.stderr.decode()}")
     sys.exit(1)
 
-  command = [
+  github_deps_command = [
       sys.executable,  # Use the current Python executable's pip to ensure the correct environment
       "-m",
       "uv",
       "pip",
       "install",
       "-r",
-      str(extra_deps_path),
+      str(github_deps_path),
       "--no-deps",
   ]
 
   try:
-    # Run the command
-    print(f"Installing extra dependencies: {' '.join(command)}")
-    _ = subprocess.run(command, check=True, capture_output=True, text=True)
-    print("Extra dependencies installed successfully!")
+    print(f"Installing Github dependencies: {' '.join(github_deps_command)}")
+    _ = subprocess.run(github_deps_command, check=True, capture_output=True, text=True)
+    print("Github dependencies installed successfully!")
   except subprocess.CalledProcessError as e:
     print("Failed to install extra dependencies.")
     print(f"Command '{' '.join(e.cmd)}' returned non-zero exit status {e.returncode}.")
