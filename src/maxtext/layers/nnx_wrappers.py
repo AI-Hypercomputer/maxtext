@@ -45,7 +45,7 @@ if hasattr(flax_config, "flax_always_shard_variable"):
 def is_vanilla_variable(vs: variablelib.VariableState) -> bool:
   """A variables state is vanilla if its metadata is essentially blank.
 
-  Returns False only if it has non-empty hooks or any non-built-in attribute.
+  Returns False only if it has non-empty hooks or any non-built-in attribute
   """
   for key, value in vs.get_metadata().items():
     if key.endswith("_hooks"):

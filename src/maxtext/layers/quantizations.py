@@ -36,6 +36,7 @@ from jax.tree_util import tree_flatten_with_path, tree_unflatten
 from flax.linen import fp8_ops
 from flax.linen import initializers as flax_initializers
 import flax.linen as nn
+from flax import nnx
 
 from maxtext.common.common_types import DType, Config
 from maxtext.inference.kvcache import KVQuant
@@ -637,6 +638,10 @@ def configure_quantization(config: Config, quant_mode_str: str = "train"):
     )
 
   if config.use_qwix_quantization:
+    if config.quantization == "fp8_gpu":
+      return Fp8Quantization()
+    if config.quantization == "fp8_nanoo":
+      return NANOOFp8Quantization()
     return None
   quant_cfg = _get_quant_config(config)
   if quant_cfg:
@@ -702,7 +707,6 @@ def remove_quantized_params(params, aqt_vars):
 def configure_kv_quant(config):
   return None if not config.quantize_kvcache else KVQuant(config)
 
-
 class NvidaFp8Provider(qwix.QtProvider):
   """Wraps nn.Fp8DirectDotGeneralOp with Qwix's provider interface."""
 
@@ -711,12 +715,24 @@ class NvidaFp8Provider(qwix.QtProvider):
     rule, op_id = self._get_current_rule_and_op_id("dot_general")
     if rule is None:
       return jax.lax.dot_general(*args, **kwargs)
+    
+    if linen.module._context.module_stack:
+      nn_module = linen.module._context.module_stack[-1]
+      op_id = "_".join(nn_module.scope.path) + "_" + op_id
+      op_id = op_id.replace("/", "_").replace("-", "_")
+      
     return nn.Fp8DirectDotGeneralOp(name=op_id)(*args, **kwargs)
 
   def einsum(self, *args, **kwargs):
     rule, op_id = self._get_current_rule_and_op_id("einsum")
     if rule is None:
       return jnp.einsum(*args, **kwargs)
+      
+    if linen.module._context.module_stack:
+      nn_module = linen.module._context.module_stack[-1]
+      op_id = "_".join(nn_module.scope.path) + "_" + op_id
+      op_id = op_id.replace("/", "_").replace("-", "_")
+      
     return nn.Fp8Einsum(name=op_id)(*args, **kwargs)
 
 
@@ -727,8 +743,13 @@ class NANOOFp8Provider(qwix.QtProvider):
     rule, op_id = self._get_current_rule_and_op_id("dot_general")
     if rule is None:
       return jax.lax.dot_general(*args, **kwargs)
+      
+    if linen.module._context.module_stack:
+      nn_module = linen.module._context.module_stack[-1]
+      op_id = "_".join(nn_module.scope.path) + "_" + op_id
+      op_id = op_id.replace("/", "_").replace("-", "_")
+      
     return nn.NANOOFp8DotGeneralOp(name=op_id)(*args, **kwargs)
-
 
 def get_fp8_full_qwix_rule(config: Config):
   return qwix.QtRule(
@@ -818,9 +839,32 @@ def maybe_quantize_model(model, config):
   """Quantize the model if quantization is enabled."""
   # Batch split is not using Qwix's interception feature but manual plumbing
   if config.use_qwix_quantization and not config.use_batch_split_schedule:
+    # fp8_gpu/fp8_nanoo dot_general is handled by DenseGeneral's ToNNX wrapper,
+    # bypassing QWIX interception to avoid tracer leaks inside jax.checkpoint.
+    if config.quantization in ("fp8_gpu", "fp8_nanoo"):
+      return model
     quantization_provider = get_qt_provider(config)
     if quantization_provider:
-      model = qwix.quantize_model(model, quantization_provider)
+      if isinstance(model, nnx.Module):
+        # NNX models require dummy inputs for Qwix's quantize_model API.
+        # We pass skip_nnx_init=True to avoid eagerly calling the model during
+        # quantization setup, because the NNX decoder's scan+checkpoint pattern
+        # conflicts with Qwix's dynamic Linen module creation (tracer leak).
+        # The interception wrapping is still applied; actual FP8 initialization
+        # happens on the first real forward pass.
+        input_shape = (config.global_batch_size_to_train_on, config.max_target_length)
+        dummy_tokens = jnp.ones(input_shape, dtype=jnp.int32)
+        dummy_positions = jnp.ones(input_shape, dtype=jnp.int32)
+        model = qwix.quantize_model(
+            model,
+            quantization_provider,
+            decoder_input_tokens=dummy_tokens,
+            decoder_positions=dummy_positions,
+            enable_dropout=False,
+            skip_nnx_init=True,
+        )
+      else:
+        model = qwix.quantize_model(model, quantization_provider)
   return model
 
 

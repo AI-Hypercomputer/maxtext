@@ -35,7 +35,7 @@ routed_scaling_factor: 2.5
 routed_score_func: "sigmoid"
 routed_bias: True
 decoder_block: "deepseek"
-# MLA
+# MLA.
 attention_type: "mla"
 q_lora_rank: 1536
 kv_lora_rank: 512

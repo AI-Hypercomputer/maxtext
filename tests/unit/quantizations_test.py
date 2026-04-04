@@ -393,9 +393,12 @@ class QuantTest(unittest.TestCase):
 
   def quantization_config(self, quant, logits_tolerance=2e-1, grad_tolerance=5e-1):
     """Run forward pass and backward pass for quantized model and compare with base model."""
-    cfg = self.init_pyconfig(quantization=quant)
-    model = model_creation_utils.create_model(self.cfg, self.mesh)
+    # Create fresh configs with Linen path (base.yml defaults enable_nnx=True)
+    base_cfg = self.init_pyconfig(enable_nnx=False, pure_nnx_decoder=False)
+    cfg = self.init_pyconfig(quantization=quant, enable_nnx=False, pure_nnx_decoder=False)
+    model = model_creation_utils.create_model(base_cfg, self.mesh)
     qt_model = model_creation_utils.create_model(cfg, self.mesh)
+    
 
     ids, decoder_segment_ids, decoder_positions = self.get_data()
     var = model.init(
@@ -468,6 +471,42 @@ class QuantTest(unittest.TestCase):
         )
     )
 
+  def quantization_config_nnx(self, quant, logits_tolerance=2e-1, grad_tolerance=5e-1):
+    """Run forward and backward pass for NNX quantized model and compare with base."""
+    rngs = nnx.Rngs(0)
+
+    # Create fresh configs with NNX path
+    base_cfg = self.init_pyconfig(enable_nnx=True, pure_nnx_decoder=True)
+    cfg = self.init_pyconfig(quantization=quant, enable_nnx=True, pure_nnx_decoder=True)
+    model = model_creation_utils.create_model(base_cfg, self.mesh, rngs=rngs)
+    qt_model = model_creation_utils.create_model(cfg, self.mesh, rngs=rngs)
+
+    ids, decoder_segment_ids, decoder_positions = self.get_data()
+
+    # Use nnx.value_and_grad which handles NNX state management
+    # (split/merge/update) automatically, avoiding TraceContextError
+    # from RngCount mutation crossing trace levels.
+    def loss_fn(m):
+      logits = m(ids, decoder_positions, decoder_segment_ids, enable_dropout=False)
+      return jnp.mean(logits ** 2)
+
+    _, grads_base = nnx.value_and_grad(loss_fn)(model)
+    _, grads_quant = nnx.value_and_grad(loss_fn)(qt_model)
+
+    logits = model(ids, decoder_positions, decoder_segment_ids, enable_dropout=False)
+    quant_logits = qt_model(ids, decoder_positions, decoder_segment_ids, enable_dropout=False)
+
+    print(f"relative error in logits: {jnp.abs(quant_logits - logits).mean() / jnp.abs(logits).mean()}")
+    assert jnp.abs(quant_logits - logits).mean() / jnp.abs(logits).mean() < logits_tolerance
+    self.print_grad_diff(grads_base, grads_quant)
+    self.assertTrue(
+        self.pytree_allclose(
+            grads_base,
+            grads_quant,
+            tolerance=grad_tolerance,
+        )
+    )
+
   @pytest.mark.tpu_only
   def test_int8_quantization(self):
     self.quantization_config("int8")
@@ -489,6 +528,16 @@ class QuantTest(unittest.TestCase):
   @pytest.mark.external_serving
   def test_fp8_nanoo_quantization(self):
     self.quantization_config("fp8_nanoo", grad_tolerance=1.0)
+
+  @pytest.mark.gpu_only
+  @pytest.mark.external_serving
+  def test_fp8_gpu_quantization_nnx(self):
+    self.quantization_config_nnx("fp8_gpu", grad_tolerance=1.0)
+
+  @pytest.mark.gpu_only
+  @pytest.mark.external_serving
+  def test_fp8_nanoo_quantization_nnx(self):
+    self.quantization_config_nnx("fp8_nanoo", grad_tolerance=1.0)
 
   @pytest.mark.skip(reason="No runner with GPU arch >= 89 is available")
   @pytest.mark.gpu_only
