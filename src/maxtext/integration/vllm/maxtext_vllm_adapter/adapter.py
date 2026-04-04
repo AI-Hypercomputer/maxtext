@@ -104,6 +104,11 @@ class MaxTextForCausalLM(nnx.Module):
   of the decoding step.
   """
 
+  # Signal to tpu-inference model_loader that this class manages its own
+  # JIT-sharded initialization (via create_nnx_model with out_shardings).
+  # When True, model_loader skips wrapping __init__ in an outer bare @jax.jit,
+  _self_manages_sharding: bool = True
+
   def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array, mesh: Mesh):
     """Initializes the MaxTextForCausalLM model.
 
@@ -250,7 +255,7 @@ class MaxTextForCausalLM(nnx.Module):
     if self.model is not None:
       return
 
-    with self.mesh, nn.logical_axis_rules(""):
+    with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
       model, _ = model_creation_utils.create_nnx_model(
           self.maxtext_config, mesh=self.mesh, model_mode=self.model_mode, rng_key=rng_key
       )

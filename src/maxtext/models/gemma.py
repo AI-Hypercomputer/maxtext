@@ -30,6 +30,7 @@ from maxtext.layers.attentions import Attention
 from maxtext.layers.linears import Dropout, MlpBlock
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.inference import page_manager
 from maxtext.utils import max_utils
 
 
@@ -126,8 +127,7 @@ class GemmaDecoderLayer(nnx.Module):
       deterministic,
       model_mode,
       previous_chunk=None,
-      page_manager=None,
-      page_state=None,
+      page_state: None | page_manager.PageState = None,
       slot=None,
       kv_cache=None,
       attention_metadata=None,
