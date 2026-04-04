@@ -919,12 +919,9 @@ class Decoder(nn.Module):
                   y,
                   self.variables["params"]["moe_layers"],
                   decoder_positions,
-                  decoder_segment_ids,
-                  model_mode=model_mode,
                   mesh=mesh,
-                  quant=self.quant,
                   cfg=cfg,
-                  policy=policy,
+                  num_layers=num_moe_layers,
               )
             else:
               y, _ = self.scan_decoder_layers(

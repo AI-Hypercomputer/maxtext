@@ -42,6 +42,7 @@ from maxtext.models import deepseek_batchsplit
 from maxtext.utils import max_utils
 from maxtext.utils.sharding import create_sharding
 from maxtext.utils.sharding import maybe_shard_with_logical
+from maxtext.utils.sharding import remove_size_one_mesh_axis
 
 import transformers
 
@@ -78,8 +79,10 @@ class DeepSeekGenericLayer(nnx.Module):
     batch_size, sequence_length = max_utils.get_batch_seq_len_for_mode(self.config, self.model_mode)
     self.dummy_inputs_shape = (batch_size, sequence_length, self.config.emb_dim)
 
-    self.out_sharding = create_sharding(self.mesh, self.logical_axis_names)
-    self.mlp_intermediate_sharding = create_sharding(self.mesh, self.mlp_logical_axis_names)
+    self.out_sharding = create_sharding(self.mesh, self.logical_axis_names, rules=self.config.logical_axis_rules)
+    self.mlp_intermediate_sharding = create_sharding(
+        self.mesh, self.mlp_logical_axis_names, rules=self.config.logical_axis_rules
+    )
 
     self.pre_self_attention_layer_norm = RMSNorm(
         num_features=self.dummy_inputs_shape[-1],
@@ -185,6 +188,7 @@ class DeepSeekGenericLayer(nnx.Module):
         shard_mode=self.config.shard_mode,
         debug_sharding=self.config.debug_sharding,
         extra_stack_level=1,
+        rules=self.config.logical_axis_rules,
     )
 
   def dropout_op(self, x, deterministic):
@@ -447,11 +451,28 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
     # That is also why we can split/merge activations here as well as
     # in `Decoder`, since they will never be executed together.
     if self.config.use_batch_split_schedule:
-      activation_pspec = jax.sharding.PartitionSpec(
-          ("data", "fsdp", "fsdp_transpose", "expert", "context"),
-          None,
-          None,
+      activation_pspec = remove_size_one_mesh_axis(
+          jax.sharding.PartitionSpec(
+              ("data", "fsdp", "fsdp_transpose", "expert", "context"),
+              None,
+              None,
+          ),
+          self.mesh,
       )
+      yarn_freqs = deepseek_batchsplit.initialize_yarn_freqs(
+          decoder_positions,
+          embedding_dims=self.config.qk_rope_head_dim,
+          rope_theta=self.config.rope_max_timescale,
+          max_position_embeddings=self.config.max_position_embeddings,
+          original_max_position_embeddings=self.config.original_max_position_embeddings,
+          beta_fast=self.config.beta_fast,
+          beta_slow=self.config.beta_slow,
+          rope_factor=self.config.rope_factor,
+          mesh=self.mesh,
+          activation_pspec=activation_pspec,
+      )
+      yarn_mask = deepseek_batchsplit.initialize_yarn_mask(self.config.qk_rope_head_dim)
+      splash_kernel = deepseek_batchsplit.init_splash_kernel(self.config)
       inputs = jax.shard_map(
           functools.partial(
               deepseek_batchsplit.split,
@@ -461,18 +482,40 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
           in_specs=activation_pspec,
           out_specs=[activation_pspec] * self.config.batch_split_factor,
       )(inputs)
-      dpos = deepseek_batchsplit.split(decoder_positions, self.config.batch_split_factor)
-      dseg = deepseek_batchsplit.split(decoder_segment_ids, self.config.batch_split_factor)
-      weights = deepseek_batchsplit.fetch_weights(nnx.to_pure_dict(nnx.state(self, nnx.Param)), self.config.dtype)
-      outputs = deepseek_batchsplit.batch_split_schedule(
+      yarn_freqs = deepseek_batchsplit.split(yarn_freqs, self.config.batch_split_factor)
+      def extract_fn(x):
+        if isinstance(x, nnx.variablelib.Variable):
+          return maybe_shard_with_logical(
+              x.value,
+              x.sharding_names,
+              self.mesh,
+              shard_mode=self.config.shard_mode,
+              rules=self.config.logical_axis_rules,
+          )
+        return x
+      weights = deepseek_batchsplit.fetch_weights(nnx.to_pure_dict(nnx.state(self, nnx.Param), extract_fn), self.config.dtype)
+      weights = deepseek_batchsplit.gather_weights(weights, self.mesh)
+      outputs, _ = deepseek_batchsplit.batch_split_schedule(
           inputs,
           weights,
-          dpos,
-          dseg,
-          model_mode=model_mode,
+          yarn_freqs,
           mesh=self.mesh,
-          quant=self.quant,
           cfg=self.config,
+          splash_kernel=splash_kernel,
+          activation_pspec=activation_pspec,
+          pairwise_swap_and_negate_mask=yarn_mask,
+      )
+      moe_inputs, routed_expert_out, shared_expert_out, selected_experts = outputs[1]
+      outputs[1], _ = deepseek_batchsplit.unroute_ubatch_shard_mapped(
+          moe_inputs,
+          routed_expert_out,
+          shared_expert_out,
+          selected_experts,
+          expert_axis_name="expert",
+          use_gather_mosaic_kernel=False,
+          target_length=self.config.max_target_length,
+          mesh=self.mesh,
+          activation_pspec=activation_pspec,
       )
       outputs = jax.shard_map(
           functools.partial(
