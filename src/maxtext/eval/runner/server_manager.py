@@ -183,7 +183,7 @@ class VllmServerManager:
   """Manages an in-process vLLM-TPU LLM with an OpenAI-compatible HTTP layer.
 
   Args:
-    model_path: HF model ID or local path. 
+    model_path: HF model ID or local path.
     checkpoint_path: MaxText orbax checkpoint path.
     maxtext_model_name: MaxText model name (e.g. "llama3.1-8b").
     host: Hostname the HTTP server binds to (rank-0 only).
@@ -195,6 +195,7 @@ class VllmServerManager:
     max_num_seqs: Max concurrent sequences (None = vLLM default).
     startup_timeout: Seconds to wait for /health to return healthy.
     env: Optional environment-variable overrides.
+    additional_vllm_kwargs: Extra kwargs merged into the vLLM LLM() constructor.
   """
 
   def __init__(
@@ -211,6 +212,7 @@ class VllmServerManager:
       max_num_seqs: int | None = None,
       startup_timeout: int = 600,
       env: dict[str, str] | None = None,
+      additional_vllm_kwargs: dict | None = None,
   ):
     if checkpoint_path and not maxtext_model_name:
       raise ValueError("maxtext_model_name is required when checkpoint_path is set.")
@@ -226,6 +228,7 @@ class VllmServerManager:
     self.max_num_seqs = max_num_seqs
     self.startup_timeout = startup_timeout
     self.env = env
+    self.additional_vllm_kwargs = additional_vllm_kwargs or {}
 
     self._llm: Any | None = None
     self._uvicorn_server: Any | None = None
@@ -270,6 +273,9 @@ class VllmServerManager:
       }
     else:
       vllm_kwargs["load_format"] = "auto"
+
+    if self.additional_vllm_kwargs:
+      vllm_kwargs.update(self.additional_vllm_kwargs)
 
     logger.info(
         "Initializing in-process vLLM (tp=%d, max_len=%d)...",

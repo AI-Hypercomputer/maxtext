@@ -142,6 +142,9 @@ def run_lm_eval(cfg: dict, hf_token: str | None = None) -> dict:
     lm_tasks.append(lm_task)
 
   server_env = {"HF_TOKEN": token} if token else None
+  additional_vllm_kwargs = {}
+  if cfg.get("enable_expert_parallel"):
+    additional_vllm_kwargs["enable_expert_parallel"] = True
 
   with VllmServerManager(
       model_path=hf_path,
@@ -154,6 +157,7 @@ def run_lm_eval(cfg: dict, hf_token: str | None = None) -> dict:
       max_num_batched_tokens=max_num_batched_tokens,
       max_num_seqs=max_num_seqs,
       env=server_env,
+      additional_vllm_kwargs=additional_vllm_kwargs or None,
   ) as server:
     warmup_server(base_url=server.base_url, model=model_name)
 
@@ -213,6 +217,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
   parser.add_argument("--num_samples", type=int, help="Limit samples per task (None = full dataset).")
   parser.add_argument("--hf_token", help="HuggingFace token for gated tokenizers.")
   parser.add_argument("--hf_mode", action="store_true", help="HF safetensors mode.")
+  parser.add_argument(
+      "--enable_expert_parallel",
+      action="store_true",
+      help=(
+          "Enable expert parallelism in vLLM. Required for MoE models such as "
+          "qwen3-30b-a3b, qwen3-235b-a22b, deepseek-v3, etc. Without this flag "
+          "tpu-inference omits the 'expert' mesh axis and MaxText's MoE sharding "
+          "raises KeyError."
+      ),
+  )
   parser.add_argument("--gcs_results_path", help="Optional GCS path to upload results.")
   parser.add_argument("--log_level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
   return parser

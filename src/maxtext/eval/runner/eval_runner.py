@@ -165,6 +165,10 @@ def run_eval(cfg: dict, hf_token: str | None = None) -> dict:
 
   # Start vLLM server.
   server_env = {"HF_TOKEN": token} if token else None
+  additional_vllm_kwargs = {}
+  if cfg.get("enable_expert_parallel"):
+    additional_vllm_kwargs["enable_expert_parallel"] = True
+
   with VllmServerManager(
       model_path=hf_path,
       checkpoint_path=checkpoint_path if use_maxtext_adapter else None,
@@ -176,6 +180,7 @@ def run_eval(cfg: dict, hf_token: str | None = None) -> dict:
       max_num_batched_tokens=max_num_batched_tokens,
       max_num_seqs=max_num_seqs,
       env=server_env,
+      additional_vllm_kwargs=additional_vllm_kwargs or None,
   ) as server:
     base_url = server.base_url
 
@@ -255,6 +260,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
   parser.add_argument("--server_host", help="vLLM server host.")
   parser.add_argument("--server_port", type=int, help="vLLM server port.")
   parser.add_argument("--hf_mode", action="store_true", help="Use HF safetensors mode.")
+  parser.add_argument(
+      "--enable_expert_parallel",
+      action="store_true",
+      help=(
+          "Enable expert parallelism in vLLM. Required for MoE models such as "
+          "qwen3-30b-a3b, qwen3-235b-a22b, deepseek-v3, etc. Without this flag "
+          "tpu-inference omits the 'expert' mesh axis and MaxText's MoE sharding "
+          "raises KeyError."
+      ),
+  )
   parser.add_argument("--hf_token", help="HuggingFace token for gated models.")
   parser.add_argument(
       "--log_level",

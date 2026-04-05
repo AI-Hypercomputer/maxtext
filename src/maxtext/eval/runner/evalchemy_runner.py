@@ -33,7 +33,7 @@ Usage:
       --tensor_parallel_size 4 \\
       --hf_token $HF_TOKEN
 
-Requires: pip install evalchemy
+Requires: pip install git+https://github.com/mlfoundations/evalchemy.git
 """
 
 from __future__ import annotations
@@ -200,6 +200,9 @@ def run_evalchemy(cfg: dict, hf_token: str | None = None) -> dict:
     lm_eval_tasks.append(lm_eval_task)
 
   server_env = {"HF_TOKEN": token} if token else None
+  additional_vllm_kwargs = {}
+  if cfg.get("enable_expert_parallel"):
+    additional_vllm_kwargs["enable_expert_parallel"] = True
 
   with VllmServerManager(
       model_path=hf_path,
@@ -212,6 +215,7 @@ def run_evalchemy(cfg: dict, hf_token: str | None = None) -> dict:
       max_num_batched_tokens=max_num_batched_tokens,
       max_num_seqs=max_num_seqs,
       env=server_env,
+      additional_vllm_kwargs=additional_vllm_kwargs or None,
   ) as server:
     warmup_server(base_url=server.base_url, model=model_name)
 
@@ -328,6 +332,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
       "--hf_mode",
       action="store_true",
       help="HF safetensors mode.",
+  )
+  parser.add_argument(
+      "--enable_expert_parallel",
+      action="store_true",
+      help=(
+          "Enable expert parallelism in vLLM. Required for MoE models such as "
+          "qwen3-30b-a3b, qwen3-235b-a22b, deepseek-v3, etc. Without this flag "
+          "tpu-inference omits the 'expert' mesh axis and MaxText's MoE sharding "
+          "raises KeyError."
+      ),
   )
   parser.add_argument(
       "--hf_token",
