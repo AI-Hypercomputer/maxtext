@@ -1,0 +1,8 @@
+# Base evaluation configuration.
+
+temperature: 0.0
+concurrency: 64
+server_host: "localhost"
+server_port: 8000
+tensor_parallel_size: 4
+num_samples: null
