@@ -198,6 +198,83 @@ class MaxEngineTest(unittest.TestCase):
 
     jax.tree.map(check_cache_shape, decode_state["cache"])
 
+  def test_reorder_cache(self):
+    """Test that reorder_cache correctly gathers parent memories."""
+    cfg = self.init_pyconfig()
+    engine = maxengine.MaxEngine(cfg, jax.devices())
+
+    # Create a dummy cache with 4 slots (e.g., 1 user * 4 beams)
+    # Each slot has a unique value (index 0..3)
+    dummy_cache = {
+        "layer0": jnp.array([[[0.0]], [[1.0]], [[2.0]], [[3.0]]]),
+        "layer1": jnp.array([[[10.0]], [[11.0]], [[12.0]], [[13.0]]]),
+    }
+
+    # Winning parents: [3, 2, 2, 0]
+    # Slot 0 wants parent 3
+    # Slot 1 wants parent 2
+    # Slot 2 wants parent 2 (branching!)
+    # Slot 3 wants parent 0
+    parent_indices = jnp.array([[3], [2], [2], [0]])
+
+    reordered = engine.reorder_cache(dummy_cache, parent_indices)
+
+    # Verify layer0: should be [3.0, 2.0, 2.0, 0.0]
+    expected0 = jnp.array([[[3.0]], [[2.0]], [[2.0]], [[0.0]]])
+    self.assertTrue(jnp.array_equal(reordered["layer0"], expected0))
+
+    # Verify layer1: should be [13.0, 12.0, 12.0, 10.0]
+    expected1 = jnp.array([[[13.0]], [[12.0]], [[12.0]], [[10.0]]])
+    self.assertTrue(jnp.array_equal(reordered["layer1"], expected1))
+
+  def test_diverse_beam_search_decode_step(self):
+    """Test that decode_step handles DBS branching correctly."""
+    num_beams = 2
+    cfg = self.init_pyconfig(
+        decode_sampling_strategy="diverse_beam_search",
+        decode_num_beams=num_beams,
+        decode_num_beam_groups=1,
+    )
+    devices_array = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices_array, cfg.mesh_axes)
+    quant = quantizations.configure_quantization(cfg)
+    model = models.transformer_as_linen(config=cfg, mesh=mesh, quant=quant, model_mode=MODEL_MODE_PREFILL)
+    
+    # Initialize dummy variables to get params
+    ids, decoder_segment_ids, decoder_positions = self.get_data()
+    transformer_vars = model.init(
+        {"params": self.rng, "aqt": self.rng, "dropout": self.rng},
+        ids,
+        decoder_positions,
+        decoder_segment_ids,
+        enable_dropout=False,
+    )
+    
+    engine = maxengine.MaxEngine(cfg, jax.devices())
+    params = engine.load_params(params=transformer_vars)
+    decode_state = engine.init_decode_state()
+
+    # Manually ensure is_dbs is in the state (as prefill would do)
+    decode_state["is_dbs"] = jnp.array([True])
+    # Add dummy cumulative logprobs for DBS
+    total_batch = int(cfg.per_device_batch_size * jax.local_device_count() * num_beams)
+    decode_state["cumulative_logprobs"] = jnp.zeros((total_batch, 1))
+
+    rng = jax.random.PRNGKey(0)
+    # Run one decode step
+    # This will trigger jax.lax.cond and use inference_utils.sampling_dbs
+    new_state, result = engine.generate(
+        params,
+        decode_state,
+        rng=rng,
+    )
+
+    # Verify that the state was updated
+    self.assertIn("tokens", new_state)
+    self.assertIn("cache", new_state)
+    # Total batch size should be maintained
+    self.assertEqual(new_state["tokens"].shape[0], total_batch)
+
   def test_basic_decode(self):
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
     mesh = Mesh(devices_array, self.cfg.mesh_axes)

@@ -290,7 +290,8 @@ def sample_diverse_beam_search_step(
     pool_size = num_beams
 
   total_batch_size = logits.shape[0]
-  user_batch_size = total_batch_size // num_beams
+  # Safety for JAX tracing: ensure user_batch_size is at least 1 during trace.
+  user_batch_size = max(1, total_batch_size // num_beams)
   vocab_size = logits.shape[-1]
   beams_per_group = num_beams // num_groups
 

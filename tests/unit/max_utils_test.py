@@ -353,16 +353,17 @@ class MaxUtilsBatchSeqLenTest(unittest.TestCase):
     config.decode_sampling_strategy = "diverse_beam_search"
     config.decode_num_beams = 4
     config.per_device_batch_size = 1
+    config.micro_batch_size_to_train_on = 1
     config.max_prefill_predict_length = 10
     config.max_target_length = 20
 
     # In autoregressive mode, batch should be scaled by num_beams
-    batch, seq = max_utils.get_batch_seq_len_for_mode(config, "autoregressive", mesh_size=1)
+    batch, seq = max_utils.get_batch_seq_len_for_mode(config, "autoregressive")
     self.assertEqual(batch, 4)
     self.assertEqual(seq, 1)
 
     # In prefill mode, batch should also be scaled by num_beams
-    batch, seq = max_utils.get_batch_seq_len_for_mode(config, "prefill", mesh_size=1)
+    batch, seq = max_utils.get_batch_seq_len_for_mode(config, "prefill")
     self.assertEqual(batch, 4)
     self.assertEqual(seq, 10)
 
@@ -371,15 +372,16 @@ class MaxUtilsBatchSeqLenTest(unittest.TestCase):
     config = mock.MagicMock()
     config.decode_sampling_strategy = "greedy"
     config.decode_num_beams = 4
-    config.per_device_batch_size = 1
+    config.micro_batch_size_to_train_on = 1
     config.max_prefill_predict_length = 10
 
     # Batch should be 1 regardless of num_beams config
-    batch, seq = max_utils.get_batch_seq_len_for_mode(config, "autoregressive", mesh_size=1)
+    batch, seq = max_utils.get_batch_seq_len_for_mode(config, "autoregressive")
     self.assertEqual(batch, 1)
 
-    batch, seq = max_utils.get_batch_seq_len_for_mode(config, "prefill", mesh_size=2)
-    self.assertEqual(batch, 2)
+    # In prefill, stays 1 (it returns the per-mesh-instance microbatch size)
+    batch, seq = max_utils.get_batch_seq_len_for_mode(config, "prefill")
+    self.assertEqual(batch, 1)
 
 
 if __name__ == "__main__":
