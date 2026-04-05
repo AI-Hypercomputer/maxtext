@@ -141,8 +141,24 @@ def sampling(logits, rng, algorithm, topk=0, nucleus_topp=0, temperature=1.0):
     return sample_topk_logits(logits, topk, temperature, rng)
   elif algorithm == "composite":
     return sample_topk_topp_weighted(logits, topk, nucleus_topp, temperature, rng)
+  elif algorithm == "diverse_beam_search":
+    # This expects a special call signature with cumulative_logprobs
+    raise ValueError("diverse_beam_search must be called via sampling_dbs")
   else:
     raise ValueError(f"Sampling {algorithm=} not supported!")
+
+
+def sampling_dbs(
+    logits, cumulative_logprobs, num_beams, num_groups, diversity_penalty, topk=None
+):
+  """Router for Diverse Beam Search."""
+  # logits shape: (total_batch_size, 1, vocab_size)
+  # cumulative_logprobs shape: (total_batch_size, 1)
+  # total_batch_size = (user_batch * num_beams)
+  # Returns: (chosen_tokens, chosen_scores, chosen_parents)
+  return sample_diverse_beam_search_step(
+      logits, cumulative_logprobs, num_beams, num_groups, diversity_penalty, topk
+  )
 
 
 def sample_nucleus_topp_logits(logits, nucleus_topp, temperature, rng):
@@ -241,3 +257,134 @@ def sample_topk_topp_weighted(logits, topk, nucleus_topp, temperature, rng):
   ).astype(jnp.int32)
 
   return sampled_token
+
+def sample_diverse_beam_search_step(
+    logits, cumulative_logprobs, num_beams, num_groups, diversity_penalty, pool_size=None
+):
+  """Implementation of Diverse Beam Search using an optional candidate pool.
+
+  Args:
+    logits: The log probabilities of the vocabulary tokens with shape
+      `[total_batch_size, 1, vocab_size]`.
+    cumulative_logprobs: The cumulative log probabilities of the beams with
+      shape `[total_batch_size, 1]`.
+    num_beams: The number of beams to use.
+    num_groups: The number of groups to use per beam.
+    diversity_penalty: The diversity penalty to use.
+    pool_size: The size of the candidate pool. Default to num_beams.
+
+  Returns:
+    chosen_tokens: The sampled token indices, one per batch, with shape
+      `[batch, 1]`. Here batch is the total batch size, i.e.
+      user_batch_size * num_beams.
+    chosen_scores: The log probabilities of the chosen tokens, with shape
+      `[batch, 1]`.
+    chosen_parents: The parent indices of the chosen tokens, with shape
+      `[batch, 1]`.
+  """
+  if num_beams % num_groups != 0:
+    raise ValueError(
+        f"num_beams ({num_beams}) must be divisible by num_groups ({num_groups})"
+    )
+  if pool_size is None:
+    pool_size = num_beams
+
+  total_batch_size = logits.shape[0]
+  user_batch_size = total_batch_size // num_beams
+  vocab_size = logits.shape[-1]
+  beams_per_group = num_beams // num_groups
+
+  # 1. Convert to log probabilities and add parent scores
+  # logits shape: (total_batch_size, 1, vocab_size)
+  # logprobs shape: (total_batch_size, vocab_size)
+  logprobs = jax.nn.log_softmax(jnp.squeeze(logits, axis=1), axis=-1)
+  # logprobs shape: (user_batch_size, num_beams, vocab_size)
+  logprobs = logprobs.reshape((user_batch_size, num_beams, vocab_size))
+  # path_scores shape: (user_batch_size, num_beams, vocab_size)
+  path_scores = logprobs + cumulative_logprobs.reshape((user_batch_size, num_beams, 1))
+
+  # 2. Extract top candidates for EACH beam to create a small search pool
+  # pool_scores shape: (user_batch, num_beams, pool_size)
+  pool_scores, pool_token_ids = jax.lax.top_k(path_scores, pool_size)
+
+  all_chosen_tokens = []
+  all_chosen_scores = []
+  all_chosen_parents = []
+  diversity_mask = jnp.zeros((user_batch_size, vocab_size))
+
+  # 3. Process groups to apply diversity penalties
+  group_pool_scores = pool_scores.reshape((user_batch_size, num_groups, beams_per_group, pool_size))
+  group_pool_token_ids = pool_token_ids.reshape((user_batch_size, num_groups, beams_per_group, pool_size))
+
+  for g in range(num_groups):
+    # penalized_scores shape: (user_batch, beams_per_group, pool_size)
+    current_token_ids = group_pool_token_ids[:, g, :, :]
+    
+    # Apply penalty based on global token IDs
+    # penalties: (user_batch, beams_per_group, pool_size)
+    penalties = jnp.take_along_axis(
+        # diversity_mask shape: (user_batch, vocab_size) converted to
+        # (user_batch, 1, vocab_size)
+        diversity_mask[:, None, :], 
+        # current_token_ids shape: (user_batch, beams_per_group, pool_size)
+        current_token_ids, 
+        axis=2
+    ).reshape((user_batch_size, beams_per_group, pool_size))
+    
+    # penalized_scores shape: (user_batch, 1, beams_per_group, pool_size)
+    penalized_scores = group_pool_scores[:, g, :, :] - (penalties * diversity_penalty)
+    
+    # Pick top winners for this group from the pool
+    # flat_scores shape: (user_batch, beams_per_group * pool_size)
+    flat_scores = penalized_scores.reshape((user_batch_size, -1))
+    # top_scores shape: (user_batch, beams_per_group) for this group.
+    # top_pool_indices shape: (user_batch, beams_per_group) for this group
+    top_scores, top_pool_indices = jax.lax.top_k(flat_scores, beams_per_group)
+
+    # Get the parent index in the current group. Since each group has pool_size
+    # candidates, the top_pool_indices range from 0 to
+    # beams_per_group * pool_size - 1.
+    # So top_pool_indices // pool_size will get the parent index in the current
+    # group.
+    # e.g. If beams_per_group=2, pool_size=4, then top_pool_indices can be
+    # 0, 1, 2, 3. Then parent_in_group_idx will be 0, 0, 1, 1.
+    # parent_in_group_idx shape: (user_batch, beams_per_group)
+    parent_in_group_idx = top_pool_indices // pool_size
+    
+    # Map back to global token IDs
+    # actual_token_ids shape: (user_batch, beams_per_group)
+    actual_token_ids = jnp.take_along_axis(
+        current_token_ids.reshape((user_batch_size, -1)), 
+        top_pool_indices, 
+        axis=1
+    )
+    
+    # Calculate global parent index in the KV cache
+    # global_parent_idx shape: (user_batch, beams_per_group)
+    # Note that the broadcast rule applies at the last operation. i.e. 
+    # (user_batch, 1) + (user_batch, beams_per_group)
+    global_parent_idx = (
+        # jnp.arange(user_batch_size) shape: (user_batch, 1)
+        jnp.arange(user_batch_size)[:, None] * num_beams
+        # g * beams_per_group is scalar, so the shape is still (user_batch, 1)
+        + g * beams_per_group
+        # parent_in_group_idx shape: (user_batch, beams_per_group), broadcast
+        # rule applies here to make the final shape:
+        # (user_batch, beams_per_group)
+        + parent_in_group_idx
+    )
+
+    all_chosen_tokens.append(actual_token_ids)
+    all_chosen_scores.append(top_scores)
+    all_chosen_parents.append(global_parent_idx)
+
+    # Update diversity mask (counting occurrences of tokens chosen so far)
+    one_hot = jax.nn.one_hot(actual_token_ids, vocab_size).sum(axis=1)
+    diversity_mask = diversity_mask + one_hot
+
+  # 4. Final assembly into (total_batch_size, 1)
+  return (
+      jnp.concatenate(all_chosen_tokens, axis=1).reshape((total_batch_size, 1)),
+      jnp.concatenate(all_chosen_scores, axis=1).reshape((total_batch_size, 1)),
+      jnp.concatenate(all_chosen_parents, axis=1).reshape((total_batch_size, 1))
+  )
