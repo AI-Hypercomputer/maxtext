@@ -47,6 +47,7 @@ _TASK_MAP: dict[str, str] = {
     "mmlu": "mmlu",           # loglikelihood, 14042 questions
     "gpqa": "gpqa_diamond",   # loglikelihood, 198 questions
     "math": "hendrycks_math", # generation, 12500 problems (5 subjects)
+    "gsm8k": "gsm8k",         # generation, 8500 grade-school math problems
 }
 
 

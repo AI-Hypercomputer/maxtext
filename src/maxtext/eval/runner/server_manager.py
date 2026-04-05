@@ -23,7 +23,6 @@ import time
 import uuid
 from typing import Any
 
-import jax
 import requests
 
 logger = logging.getLogger(__name__)
@@ -241,6 +240,11 @@ class VllmServerManager:
     # pylint: disable=import-outside-toplevel
     from vllm import LLM
 
+    # Disable V1 multiprocessing so EngineCore runs in-process instead.
+    # V1 engine architecture is otherwise preserved (tpu-inference plugin works),
+    # and JAX/TPU is initialised exactly once inside LLM() in this process.
+    os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
     if self.env:
       os.environ.update(self.env)
 
@@ -249,7 +253,6 @@ class VllmServerManager:
         "tensor_parallel_size": self.tensor_parallel_size,
         "max_model_len": self.max_model_len,
         "dtype": self.dtype,
-        "device": "tpu",
     }
     if self.max_num_batched_tokens is not None:
       vllm_kwargs["max_num_batched_tokens"] = self.max_num_batched_tokens
@@ -269,15 +272,16 @@ class VllmServerManager:
       vllm_kwargs["load_format"] = "auto"
 
     logger.info(
-        "Rank %d: initialising in-process vLLM (tp=%d, max_len=%d)...",
-        jax.process_index(),
+        "Initializing in-process vLLM (tp=%d, max_len=%d)...",
         self.tensor_parallel_size,
         self.max_model_len,
     )
     self._llm = LLM(**vllm_kwargs)
-    logger.info("Rank %d: vLLM LLM ready.", jax.process_index())
 
-    if jax.process_index() == 0:
+    import jax as _jax  # pylint: disable=import-outside-toplevel
+    logger.info("Rank %d: vLLM LLM ready.", _jax.process_index())
+
+    if _jax.process_index() == 0:
       import uvicorn  # pylint: disable=import-outside-toplevel
 
       app = _build_app(self._llm)
@@ -317,7 +321,7 @@ class VllmServerManager:
 
   def stop(self) -> None:
     """Stop the HTTP server and release the LLM."""
-    if jax.process_index() == 0 and self._uvicorn_server is not None:
+    if self._uvicorn_server is not None:
       logger.info("Stopping vLLM HTTP server...")
       self._uvicorn_server.should_exit = True
       if self._server_thread is not None:
@@ -327,7 +331,7 @@ class VllmServerManager:
     self._llm = None
     self._uvicorn_server = None
     self._server_thread = None
-    logger.info("Rank %d: VllmServerManager stopped.", jax.process_index())
+    logger.info("VllmServerManager stopped.")
 
   def __enter__(self) -> "VllmServerManager":
     self.start()
