@@ -428,6 +428,14 @@ class Quantization(BaseModel):
       "absmax",
       description="Quantization calibration method used for gradients.",
   )
+  weight_sparsity_n: int | None = Field(
+      None, description="The 'N' in N:M sparsity, representing the maximum number of non-zero values in each block."
+  )
+  weight_sparsity_m: int | None = Field(
+      None, description="The 'M' in N:M sparsity, representing the number of values in each block."
+  )
+  weight_sparsity_update_step: int = Field(10, description="The step size for updating weight sparsity masks.")
+  weight_sparsity_start_step: int = Field(50, description="The first number of steps before updating the sparsity masks.")
 
 
 class ModelArchitecture(BaseModel):

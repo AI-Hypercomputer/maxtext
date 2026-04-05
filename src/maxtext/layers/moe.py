@@ -39,6 +39,8 @@ from maxtext.utils import max_utils
 from maxtext.utils.sharding import maybe_shard_with_logical, create_sharding
 from maxtext.utils.sharding import logical_to_mesh_axes
 import numpy as np
+import qwix
+from qwix.contrib.sparsity import sparsity_module
 import qwix.pallas as qpl
 import tokamax
 
@@ -389,6 +391,36 @@ class RoutedMoE(nnx.Module):
         shard_mode=config.shard_mode,
         rngs=self.rngs,
     )
+    rule = qpl.get_current_rule("gmm")
+    sparsity_rule = None
+    if rule is not None:
+      if not isinstance(rule, qwix.QtRule):
+        raise ValueError("Expect a QtRule for quantized training.")
+      if rule.additional_qt_config and "sparsity_rule" in rule.additional_qt_config:
+        q_s_rule = rule.additional_qt_config["sparsity_rule"]
+        if q_s_rule and q_s_rule.weight_sparsity_n and q_s_rule.weight_sparsity_m:
+          sparsity_rule = q_s_rule
+
+    if sparsity_rule is not None:
+      self.wi_0_sparsity_module = sparsity_module.SparsityModule(
+          shape=(self.num_experts, self.config.emb_dim, self.intermediate_dim),
+          sharding_axes=self.wi_kernel_axes,
+          sparsity_rule=sparsity_rule,
+      )
+      self.wi_1_sparsity_module = sparsity_module.SparsityModule(
+          shape=(self.num_experts, self.config.emb_dim, self.intermediate_dim),
+          sharding_axes=self.wi_kernel_axes,
+          sparsity_rule=sparsity_rule,
+      )
+      self.wo_sparsity_module = sparsity_module.SparsityModule(
+          shape=(self.num_experts, self.intermediate_dim, self.config.emb_dim),
+          sharding_axes=self.wo_kernel_axes,
+          sparsity_rule=sparsity_rule,
+      )
+    else:
+      self.wi_0_sparsity_module = None
+      self.wi_1_sparsity_module = None
+      self.wo_sparsity_module = None
 
     # pylint: disable=protected-access
     self.activation_fn = linears._convert_to_activation_function(self.config.mlp_activations[0])
@@ -909,7 +941,9 @@ class RoutedMoE(nnx.Module):
         inputs, kernel, tiling, group_sizes, expert_assignments, weight_gather_axes, input_buffer_count, combine_scopes
     ):
       # TODO (b/491979205) pipeline fsdp ag per repeat fails tokamax gmm
-      if self.config.using_pipeline_parallelism and self.config.pipeline_fsdp_ag_per_repeat:
+      if self.config.use_qwix_quantization or (
+          self.config.using_pipeline_parallelism and self.config.pipeline_fsdp_ag_per_repeat
+      ):
         tokamax_group_sizes = group_sizes
       elif self.config.attention == "vllm_rpa":
         tokamax_group_sizes = group_sizes
@@ -2033,6 +2067,10 @@ class RoutedMoE(nnx.Module):
     if self.per_expert_scale is not None:
       wo_kernel = wo_kernel * jnp.asarray(self.per_expert_scale[...], self.dtype)[:, None, None]
 
+    if self.wi_0_sparsity_module is not None:
+      _, w0_kernel = self.wi_0_sparsity_module(jnp.zeros_like(w0_kernel), w0_kernel)
+      _, w1_kernel = self.wi_1_sparsity_module(jnp.zeros_like(w1_kernel), w1_kernel)
+      _, wo_kernel = self.wo_sparsity_module(jnp.zeros_like(wo_kernel), wo_kernel)
     if cfg.mlp_bias:
       w0_bias = jnp.asarray(self.wi_0_bias[...], self.dtype)
       w1_bias = jnp.asarray(self.wi_1_bias[...], self.dtype)

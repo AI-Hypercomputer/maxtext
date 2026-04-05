@@ -84,7 +84,7 @@ def get_first_step(state):
 # -----------------------------------------------------------------------------
 
 
-def loss_fn(model, config, data, dropout_rng, params, is_train=True):
+def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_train=True):
   """loss_fn for both train and eval.
 
   Args:
@@ -117,13 +117,18 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   if config.mtp_eval_target_module > 0 and not is_train:
     mutable_collections.append("mtp_acceptance")
 
+  if is_train and config.weight_sparsity_n and config.weight_sparsity_m:
+    mutable_collections.append("batch_stats")
   if isinstance(model, nn.Module):
     # inputs, targets, segments, positions = apply_args
     rng1, aqt_rng = jax.random.split(dropout_rng)
 
     # Flax Linen model
+    model_vars = {"params": params}
+    if sparsity_state:
+      model_vars["batch_stats"] = sparsity_state
     logits, intermediate_outputs = model.apply(
-        params,
+        model_vars,
         data["inputs"],
         data["inputs_position"],
         decoder_segment_ids=data["inputs_segmentation"],
@@ -144,7 +149,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
     elif config.num_vocab_tiling > 1:
       hidden_state_key = ("intermediates", "decoder", "hidden_states")
       hidden_states = maxtext_utils.get_nested_value(intermediate_outputs, hidden_state_key)[0]
-      total_loss, total_z_loss = vocab_tiling_linen_loss(hidden_states, data, config, model, params, is_train)
+      total_loss, total_z_loss = vocab_tiling_linen_loss(hidden_states, data, config, model, {"params": params}, is_train)
     else:
       one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
       xent, z_loss = max_utils.cross_entropy_with_logits(logits, one_hot_targets, z_loss=config.z_loss_multiplier)
@@ -290,6 +295,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
       "indexer_loss": indexer_loss,
       "moe_bias_updates": moe_bias_updates,
       "mtp_loss": mtp_loss,
+      "batch_stats": (intermediate_outputs.get("batch_stats", None) if hasattr(intermediate_outputs, "get") else None),
   }
   return loss, aux
 
@@ -322,7 +328,6 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     _loss_fn = dpo_loss_fn
 
   params = state.params
-
   if config.gradient_accumulation_steps > 1:
     loss, aux, raw_grads = gradient_accumulation_loss_and_grad(
         _loss_fn,
@@ -348,8 +353,20 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
           params,
           params_shardings,
       )
+    pure_params = params["params"] if "params" in params else params
+    batch_stats = params.get("batch_stats", {})
+
     grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
-    (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, params, *extra_dpo_args, is_train=True)
+    (loss, aux), raw_grads = grad_func(
+        model,
+        config,
+        data,
+        dropout_rng,
+        pure_params,
+        *extra_dpo_args,
+        sparsity_state=batch_stats,
+        is_train=True,
+    )
 
   raw_grads = jax.tree_util.tree_map(
       lambda x: x.astype(config.grad_dtype) if x.dtype == jnp.float32 else x,
@@ -396,8 +413,22 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
             jax.tree_util.tree_map_with_path(move, state_mesh_shardings.params),
         )
     )
-  new_state = state.apply_gradients(grads=grads)
+  # Re-wrap grads to match state.params structure if it's a dict of collections
+  if isinstance(state.params, dict) and "params" in state.params:
+    full_grads = {"params": grads}
+    if "batch_stats" in state.params:
+      batch_stats_grads = jax.tree_util.tree_map(jnp.zeros_like, state.params.get("batch_stats", {}))
+      full_grads["batch_stats"] = batch_stats_grads
+    full_grads = max_utils.unbox_logicallypartioned(full_grads)
+  else:
+    full_grads = grads
 
+  new_state = state.apply_gradients(grads=full_grads)
+
+  if "batch_stats" in aux and isinstance(state.params, dict) and "batch_stats" in state.params:
+    new_params = dict(new_state.params)
+    new_params["batch_stats"] = max_utils.unbox_logicallypartioned(aux["batch_stats"])
+    new_state = new_state.replace(params=new_params)
   # Apply updates for Auxiliary-Loss-Free load balancing for DeepSeek family
   if config.routed_bias and config.routed_bias_update_rate > 0.0 and moe_bias_updates is not None:
     target_path = ("params", "decoder", "moe_layers", "DeepSeekMoeBlock_0", "MoeBlock_0", "gate", "bias")
@@ -452,8 +483,11 @@ def eval_step(model, config, state, data, dropout_rng):
     extra_dpo_args = [reference_params]
     _loss_fn = dpo_loss_fn
 
+  pure_params = state.params["params"] if "params" in state.params else state.params
+  batch_stats = state.params.get("batch_stats", {})
+
   eval_loss_fn = functools.partial(_loss_fn, model, config, data, dropout_rng, is_train=False)
-  loss, aux = eval_loss_fn(state.params, *extra_dpo_args)
+  loss, aux = eval_loss_fn(pure_params, *extra_dpo_args, sparsity_state=batch_stats)
 
   mtp_acceptance_rate = 0.0
   if config.mtp_eval_target_module > 0:

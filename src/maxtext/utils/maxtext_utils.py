@@ -1183,7 +1183,14 @@ def setup_initial_state(
           out_shardings=state_mesh_shardings,
       )(rng)
       if raw_params:  # If we loaded a partial state, we need to merge it.
-        state = state.replace(params=raw_params)
+
+        def _merge_params(p_raw, p_init):
+          if isinstance(p_raw, jax.ShapeDtypeStruct):
+            return p_init
+          return p_raw
+
+        merged_params = jax.tree_util.tree_map(_merge_params, raw_params, state.params)
+        state = state.replace(params=merged_params)
 
   state = max_utils.unbox_logicallypartioned(state)
 
