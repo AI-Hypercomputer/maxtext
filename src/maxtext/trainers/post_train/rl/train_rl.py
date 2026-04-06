@@ -115,29 +115,18 @@ def get_dataset(
   if dataset_name is None:
     raise ValueError("dataset_name must be provided")
 
-  if dataset_name.startswith("huggingface:"):
-    import datasets  # pylint: disable=import-outside-toplevel
+  import datasets  # pylint: disable=import-outside-toplevel
 
-    if data_files is None:
-      hf_dataset_name = dataset_name.replace("huggingface:", "")
-      data = datasets.load_dataset(hf_dataset_name, split=split, cache_dir=data_dir)
-      if tmvp_config.debug.rl:
-        max_logging.log(f"Loaded Hugging Face dataset {hf_dataset_name} with split {split}. Size: {len(data)}")
-    else:  # data_files have been provided, useful for using slices of large datasets like nvidia/OpenMathInstruct-2
-      data = datasets.load_dataset(
-          "parquet",
-          data_files={tmvp_config.train_split: data_files},
-          split=split,
-          cache_dir=data_dir,
-      )
-  else:
-    builder_kwargs = {"file_format": tfds.core.FileFormat.ARRAY_RECORD}
-    data = tfds.data_source(
-        dataset_name,
+  if data_files is None:
+    data = datasets.load_dataset(dataset_name, split=split, cache_dir=data_dir)
+    if tmvp_config.debug.rl:
+      max_logging.log(f"Loaded Hugging Face dataset {dataset_name} with split {split}. Size: {len(data)}")
+  else:  # data_files have been provided, useful for using slices of large datasets like nvidia/OpenMathInstruct-2
+    data = datasets.load_dataset(
+        "parquet",
+        data_files={tmvp_config.train_split: data_files},
         split=split,
-        data_dir=data_dir,
-        builder_kwargs=builder_kwargs,
-        download=True,
+        cache_dir=data_dir,
     )
 
   template_config = load_template_from_file(tmvp_config.chat_template_path)
@@ -294,6 +283,37 @@ def get_max_train_steps(trainer_config):
   )
 
 
+def prepare_train_and_eval_dataset(
+    trainer_config,
+    seed: int = 42,
+    test_size: float = 0.05,
+):
+  """Load and split the dataset into train and validation sets using HF's train_test_split."""
+  import datasets  # pylint: disable=import-outside-toplevel
+
+  max_logging.log(
+      "WARNING: For reproducible experiments, preprocess the dataset once and "
+      "define your own HfDataset subclass that directly uses the preprocessed datasets."
+  )
+
+  original_ds = datasets.load_dataset(
+      "parquet",
+      data_files={trainer_config.train_split: trainer_config.hf_train_files},
+      split=trainer_config.train_split,
+  )
+
+  if "OpenMathReasoning" in trainer_config.dataset_name:
+    original_ds = original_ds.filter(lambda x: x.get("problem_type") == "has_answer_extracted")
+
+  # Split into train and validation sets using HF's train_test_split
+  split_ds = original_ds.train_test_split(test_size=test_size, seed=seed)
+
+  return {
+      "train": split_ds["train"],
+      "validation": split_ds["test"],
+  }
+
+
 def prepare_datasets(trainer_config, model_tokenizer):
   """Setup and return train and test datasets."""
   home = os.path.expanduser("~") + "/"
@@ -305,42 +325,16 @@ def prepare_datasets(trainer_config, model_tokenizer):
     os.makedirs(test_data_dir)
 
   # Prepare train and test data from training data for certain datasets
+  eval_dataset_name = getattr(trainer_config, "eval_dataset_name", None)
   if trainer_config.dataset_name in [
       "nvidia/OpenMathInstruct-2",
       "nvidia/OpenMathReasoning",
       "open-r1/OpenR1-Math-220k",
       "bethgelab/CuratedThoughts",
-  ]:
+  ] and (not eval_dataset_name or eval_dataset_name == trainer_config.dataset_name):
     import datasets  # pylint: disable=import-outside-toplevel
-
-    def prepare_train_and_eval_dataset(
-        seed: int = 42,
-        test_size: float = 0.05,
-    ):
-      """Load and split the dataset into train and validation sets using HF's train_test_split."""
-      max_logging.log(
-          "WARNING: For reproducible experiments, preprocess the dataset once and "
-          "define your own HfDataset subclass that directly uses the preprocessed datasets."
-      )
-
-      original_ds = datasets.load_dataset(
-          trainer_config.dataset_name,
-          data_files={trainer_config.train_split: trainer_config.hf_train_files},
-          split=trainer_config.train_split,
-      )
-
-      if "OpenMathReasoning" in trainer_config.dataset_name:
-        original_ds = original_ds.filter(lambda x: x.get("problem_type") == "has_answer_extracted")
-
-      # Split into train and validation sets using HF's train_test_split
-      split_ds = original_ds.train_test_split(test_size=test_size, seed=seed)
-
-      return {
-          "train": split_ds["train"],
-          "validation": split_ds["test"],
-      }
-
-    splits = prepare_train_and_eval_dataset()
+    
+    splits = prepare_train_and_eval_dataset(trainer_config)
     template_config = load_template_from_file(trainer_config.chat_template_path)
 
     train_dataset = (

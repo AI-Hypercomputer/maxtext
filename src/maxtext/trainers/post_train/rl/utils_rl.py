@@ -265,7 +265,7 @@ def normalize_final_answer(final_answer: str) -> str:
 def preprocess_math_string(dataset_name, text) -> str:
   """Fix common formatting issues in text."""
   # Normalize for certain datasets and parse
-  if any(name in dataset_name for name in ["DAPO", "OpenMathInstruct", "OpenMathReasoning", "OpenR1-Math-220k", "CuratedThoughts"]):
+  if any(name in dataset_name for name in ["DAPO", "OpenMathInstruct", "OpenMathReasoning", "OpenR1-Math-220k", "CuratedThoughts", "MATH-500"]):
     text = normalize_final_answer(text).strip()
   # Fix LaTeX escaping issues
   text = fix_latex_escaping(text)
@@ -458,10 +458,11 @@ def extract_hash_answer(text: str) -> str | None:
 def check_correctness(extracted_response, acceptable_answers, tmvp_config):
   """Handles math verification and partial correctness logic."""
   norm_answers = []
-  norm_response = preprocess_math_string(tmvp_config.dataset_name, extracted_response)
+  dataset_name = tmvp_config.eval_dataset_name if tmvp_config.eval_dataset_name else tmvp_config.dataset_name
+  norm_response = preprocess_math_string(dataset_name, extracted_response)
   # Check exact correctness first
   for answer in acceptable_answers: 
-    norm_answers.append(preprocess_math_string(tmvp_config.dataset_name, answer))
+    norm_answers.append(preprocess_math_string(dataset_name, answer))
   is_correct = math_verify_func([(0, [boxed(norm_answer) for norm_answer in norm_answers], [boxed(norm_response)])])[0] > 0.1
   if is_correct:
     return True, True  # Exact correctness implies partial correctness
