@@ -12,40 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CLI entry point for model evaluation.
+"""Custom dataset eval runner (MLPerf OpenOrca, ROUGE scoring).
 
-MaxTextForCausalLM mode (preferred):
-Load weights directly from the MaxText checkpoint, no HuggingFace weight
-conversion required. Flag --hf_path supplies the tokenizer (HF model ID
-or local tokenizer dir).
+Unified entry point:
 
-  python -m maxtext.eval.runner.eval_runner \
-      --config src/maxtext/eval/configs/mlperf.yml \
-      --base_config src/maxtext/configs/base.yml  \
-      --base_output_directory gs://<gcs_bucket>/ \
-      --run_name my_run \
-      --checkpoint_path gs://<gcs_bucket>/checkpoint/0/items \
-      --model_name llama3.1-8b \
-      --hf_path meta-llama/Llama-3.1-8B-Instruct
-
-HuggingFace safetensors mode:
-Use --hf_mode and point --hf_path to an existing HF model directory.
-
-  python -m maxtext.eval.runner.eval_runner \
-      --config src/maxtext/eval/configs/mlperf.yml \
-      --hf_path TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
-      --model_name tinyllama \
-      --hf_mode \
-      --base_output_directory /tmp/eval/ \
-      --run_name smoke_test \
-      --tensor_parallel_size 1
+  python -m maxtext.eval.runner.run --runner eval ...
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
-import os
 import time
 
 import yaml
@@ -116,7 +93,7 @@ def run_eval(cfg: dict, hf_token: str | None = None) -> dict:
   from maxtext.eval.datasets.registry import get_dataset
   from maxtext.eval.reporting.json_reporter import write_results
   from maxtext.eval.runner.async_client import generate_batch
-  from maxtext.eval.runner.server_manager import VllmServerManager
+  from maxtext.eval.runner.common import build_server_manager, maybe_upload_to_gcs, resolve_token
   from maxtext.eval.runner.warmup import warmup_server
   from maxtext.eval.scoring.registry import get_scorer
 
@@ -128,27 +105,10 @@ def run_eval(cfg: dict, hf_token: str | None = None) -> dict:
   max_tokens = int(cfg.get("max_tokens", 1024))
   temperature = float(cfg.get("temperature", 0.0))
   concurrency = int(cfg.get("concurrency", 64))
-  tensor_parallel_size = int(cfg.get("tensor_parallel_size", 4))
   if "max_model_len" not in cfg:
-    raise ValueError(
-        "Error: max_model_len is required."
-    )
-  max_model_len = int(cfg["max_model_len"])
-  server_host = cfg.get("server_host", "localhost")
-  server_port = int(cfg.get("server_port", 8000))
-  max_num_batched_tokens = cfg.get("max_num_batched_tokens")
-  if max_num_batched_tokens is not None:
-    max_num_batched_tokens = int(max_num_batched_tokens)
-  max_num_seqs = cfg.get("max_num_seqs")
-  if max_num_seqs is not None:
-    max_num_seqs = int(max_num_seqs)
+    raise ValueError("Error: max_model_len is required.")
   gcs_results_path = cfg.get("gcs_results_path")
-  token = hf_token or os.environ.get("HF_TOKEN") or None
-  checkpoint_path = cfg.get("checkpoint_path")
-  hf_mode = cfg.get("hf_mode", False)
-
-  # Determine loading mode.
-  use_maxtext_adapter = bool(checkpoint_path) and not hf_mode
+  token = resolve_token(cfg, hf_token)
 
   # Load tokenizer for prompt formatting.
   logger.info("Loading tokenizer from %s.", hf_path)
@@ -164,42 +124,40 @@ def run_eval(cfg: dict, hf_token: str | None = None) -> dict:
   references = [r.reference for r in requests]
 
   # Start vLLM server.
-  server_env = {"HF_TOKEN": token} if token else None
-  additional_vllm_kwargs = {}
-  if cfg.get("enable_expert_parallel"):
-    additional_vllm_kwargs["enable_expert_parallel"] = True
+  with build_server_manager(cfg, token) as server:
+    import jax as _jax  # pylint: disable=import-outside-toplevel
+    from jax.experimental import multihost_utils as _multihost_utils  # pylint: disable=import-outside-toplevel
+    is_rank0 = _jax.process_index() == 0
 
-  with VllmServerManager(
-      model_path=hf_path,
-      checkpoint_path=checkpoint_path if use_maxtext_adapter else None,
-      maxtext_model_name=model_name if use_maxtext_adapter else None,
-      host=server_host,
-      port=server_port,
-      tensor_parallel_size=tensor_parallel_size,
-      max_model_len=max_model_len,
-      max_num_batched_tokens=max_num_batched_tokens,
-      max_num_seqs=max_num_seqs,
-      env=server_env,
-      additional_vllm_kwargs=additional_vllm_kwargs or None,
-  ) as server:
-    base_url = server.base_url
+    if is_rank0:
+      base_url = server.base_url
 
-    # Warmup server.
-    warmup_server(base_url=base_url, model=model_name, sample_requests=requests)
+      # Warmup server.
+      warmup_server(base_url=base_url, model=model_name, sample_requests=requests)
 
-    # Generate responses.
-    logger.info("Generating responses for %d prompts.", len(prompts))
-    t0 = time.time()
-    results = generate_batch(
-        prompts=prompts,
-        base_url=base_url,
-        model=model_name,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        concurrency=concurrency,
-    )
-    elapsed = time.time() - t0
-    logger.info("Generation completed in %.1fs (%.1f samples/s).", elapsed, len(prompts) / elapsed)
+      # Generate responses.
+      logger.info("Generating responses for %d prompts.", len(prompts))
+      t0 = time.time()
+      results = generate_batch(
+          prompts=prompts,
+          base_url=base_url,
+          model=model_name,
+          max_tokens=max_tokens,
+          temperature=temperature,
+          concurrency=concurrency,
+      )
+      elapsed = time.time() - t0
+      logger.info("Generation completed in %.1fs (%.1f samples/s).", elapsed, len(prompts) / elapsed)
+
+    # All ranks block here until rank-0 finishes generation. Non-rank-0 hosts
+    # keep their in-process LLM alive so rank-0's llm.generate() calls can
+    # complete their tensor-parallel collectives across all hosts.
+    _multihost_utils.sync_global_devices("eval_runner_complete")
+
+  # All ranks exit the context manager together above (LLM stopped on all).
+  # Only rank-0 has results/elapsed defined, non-rank-0 return early.
+  if not is_rank0:
+    return {}
 
   # Score.
   responses = [r.text for r in results]
@@ -229,11 +187,7 @@ def run_eval(cfg: dict, hf_token: str | None = None) -> dict:
       results_path=results_path,
   )
 
-  # Optional GCS Upload.
-  if gcs_results_path:
-    from maxtext.eval.reporting.gcs_reporter import upload_results  # pylint: disable=import-outside-toplevel
-    upload_results(output["local_path"], gcs_results_path)
-
+  maybe_upload_to_gcs(output, gcs_results_path)
   return output
 
 

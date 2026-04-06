@@ -20,6 +20,7 @@ import datetime
 import json
 import logging
 import os
+import tempfile
 
 logger = logging.getLogger(__name__)
 
@@ -50,13 +51,9 @@ def write_results(
       - results: The full results dict written to disk.
       - local_path: Absolute path of the written file.
   """
-  os.makedirs(results_path, exist_ok=True)
-
   timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-  # Create filename.
   safe_model = model_name.replace("/", "_").replace(":", "_")
   filename = f"{benchmark}_{safe_model}_{timestamp}.json"
-  local_path = os.path.join(results_path, filename)
 
   results = {
       "benchmark": benchmark,
@@ -67,7 +64,20 @@ def write_results(
       "config": config,
   }
 
-  with open(local_path, "w") as f:
-    json.dump(results, f, indent=2)
-  logger.info("Results written to %s", local_path)
+  if results_path.startswith("gs://"):
+    from maxtext.utils.gcs_utils import upload_blob  # pylint: disable=import-outside-toplevel
+    tmp_dir = tempfile.mkdtemp(prefix="eval_results_")
+    local_path = os.path.join(tmp_dir, filename)
+    with open(local_path, "w") as f:
+      json.dump(results, f, indent=2)
+    gcs_dest = f"{results_path.rstrip('/')}/{filename}"
+    upload_blob(gcs_dest, local_path)
+    logger.info("Results written to %s", gcs_dest)
+  else:
+    os.makedirs(results_path, exist_ok=True)
+    local_path = os.path.join(results_path, filename)
+    with open(local_path, "w") as f:
+      json.dump(results, f, indent=2)
+    logger.info("Results written to %s", local_path)
+
   return {"results": results, "local_path": os.path.abspath(local_path)}

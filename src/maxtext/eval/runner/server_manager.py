@@ -271,11 +271,31 @@ class VllmServerManager:
               "log_config": False,
           }
       }
+      if self.additional_vllm_kwargs.get("enable_expert_parallel"):
+        vllm_kwargs["additional_config"]["sharding"] = {
+            "sharding_strategy": {
+                "expert_parallelism": self.tensor_parallel_size,
+            }
+        }
     else:
       vllm_kwargs["load_format"] = "auto"
 
     if self.additional_vllm_kwargs:
-      vllm_kwargs.update(self.additional_vllm_kwargs)
+      for _k, _v in self.additional_vllm_kwargs.items():
+        if (
+            _k == "additional_config"
+            and isinstance(_v, dict)
+            and isinstance(vllm_kwargs.get("additional_config"), dict)
+        ):
+          for _sub_k, _sub_v in _v.items():
+            if isinstance(_sub_v, dict) and isinstance(
+                vllm_kwargs["additional_config"].get(_sub_k), dict
+            ):
+              vllm_kwargs["additional_config"][_sub_k].update(_sub_v)
+            else:
+              vllm_kwargs["additional_config"][_sub_k] = _sub_v
+        else:
+          vllm_kwargs[_k] = _v
 
     logger.info(
         "Initializing in-process vLLM (tp=%d, max_len=%d)...",

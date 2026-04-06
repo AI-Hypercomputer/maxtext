@@ -89,17 +89,17 @@ async def generate_batch_async(
         "max_tokens": max_tokens,
         "temperature": temperature,
     }
-    t0 = time.monotonic()
     async with semaphore:
+      t0 = time.monotonic()
       try:
         async with session.post(api_url, json=payload) as resp:
           if resp.status != 200:
             body = await resp.text()
             return GenerationResult(error=f"HTTP {resp.status}: {body[:200]}")
           data = await resp.json()
-      except aiohttp.ClientError as exc:
+      except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
         return GenerationResult(error=str(exc))
-    latency = time.monotonic() - t0
+      latency = time.monotonic() - t0
 
     choice = data["choices"][0]
     usage = data.get("usage", {})
