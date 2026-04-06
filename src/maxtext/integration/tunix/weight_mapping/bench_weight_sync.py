@@ -52,8 +52,9 @@ _CHECKPOINT = flags.DEFINE_string('checkpoint_path', 'gs://hengtaoguo-maxtext-lo
 _VLLM_MODEL_ID = flags.DEFINE_string('vllm_model_id', 'Qwen/Qwen3-30B-A3B', 'HuggingFace model ID passed to vLLM (e.g. google/gemma-4-26b-it)')
 _FSDP_TP = flags.DEFINE_integer('ici_fsdp_parallelism', -1, 'ICI FSDP parallelism (-1 = auto-shard to fill remaining devices)')
 _ICI_TP = flags.DEFINE_integer('ici_tensor_parallelism', 2, 'ICI tensor parallelism')
-_ROLLOUT_DP = flags.DEFINE_integer('rollout_data_parallelism', 1, 'Rollout data parallelism')
 _ROLLOUT_TP = flags.DEFINE_integer('rollout_tensor_parallelism', 2, 'Rollout tensor parallelism')
+_ROLLOUT_DP = flags.DEFINE_integer('rollout_data_parallelism', 1, 'Rollout data parallelism')
+_RUN_VLLM_ONLY = flags.DEFINE_boolean('run_vllm_only', False, 'Skip MaxText model loading and weight sync; just run vLLM.')
 
 def _setup_jax_compilation_cache():
   jax_config.update("jax_compilation_cache_dir", _JAX_COMPILATION_CACHE_DIR)
@@ -990,46 +991,46 @@ def main():
 
   FLAGS(sys.argv)
 
-  # Load maxtext model
-  print("="*80)
-  print("Loading MaxText model...")
-  print("="*80)
-  base_yaml_path = os.path.join(MAXTEXT_CONFIGS_DIR, "inference", "vllm.yml")
-  config, model, mesh = _load_maxtext_model(base_yaml_path)
-  print(f"{GREEN}MaxText model loaded successfully{RESET}")
-  print(f"Model: {config.model_name}")
-  print(f"Mesh: {mesh}")
+  if not _RUN_VLLM_ONLY.value:
+    # Load maxtext model
+    print("="*80)
+    print("Loading MaxText model...")
+    print("="*80)
+    base_yaml_path = os.path.join(MAXTEXT_CONFIGS_DIR, "inference", "vllm.yml")
+    config, model, mesh = _load_maxtext_model(base_yaml_path)
+    print(f"{GREEN}MaxText model loaded successfully{RESET}")
+    print(f"Model: {config.model_name}")
+    print(f"Mesh: {mesh}")
 
-  # Convert weights to VLLM format
-  print("="*80)
-  print("Converting weights to VLLM format")
-  print("="*80)
-  model_state = nnx.state(model, nnx.Not(nnx.RngState))
-  
-  if 'to_nnx__rngs' in model_state:
-    del model_state['to_nnx__rngs']
+    # Convert weights to VLLM format
+    print("="*80)
+    print("Converting weights to VLLM format")
+    print("="*80)
+    model_state = nnx.state(model, nnx.Not(nnx.RngState))
+    
+    if 'to_nnx__rngs' in model_state:
+      del model_state['to_nnx__rngs']
 
-  for path, leaf in jax.tree_util.tree_flatten_with_path(model_state)[0]:
-    if hasattr(leaf, 'shape') and hasattr(leaf, 'sharding'):
-      path_str = jax.tree_util.keystr(path)
-      logging.info(f"Name: {path_str}, shape: {leaf.shape}")
-      logging.info(f"\tSharding: {leaf.sharding}")
-  
-  if config.model_name.startswith("gemma4"):
-    converter = Gemma4ToVLLMConverter(config, mesh)
-  elif config.model_name.startswith("deepseek3"):
-    converter = DeepSeekV3ToVLLMConverter(config, mesh)
-  else:
-    converter = MaxTextToVLLMConverter(config, mesh)
+    for path, leaf in jax.tree_util.tree_flatten_with_path(model_state)[0]:
+      if hasattr(leaf, 'shape') and hasattr(leaf, 'sharding'):
+        path_str = jax.tree_util.keystr(path)
+        logging.info(f"Name: {path_str}, shape: {leaf.shape}")
+        logging.info(f"\tSharding: {leaf.sharding}")
+    
+    if config.model_name.startswith("gemma4"):
+      converter = Gemma4ToVLLMConverter(config, mesh)
+    elif config.model_name.startswith("deepseek3"):
+      converter = DeepSeekV3ToVLLMConverter(config, mesh)
+    else:
+      converter = MaxTextToVLLMConverter(config, mesh)
 
-
-  with timer("Overall Conversion "):
-    vllm_state = converter.convert(model_state)
-  del model_state
-  del model
-  del mesh
-  gc.collect()
-  # save_dict_to_file(vllm_state, "vllm_state_shapes.txt")
+    with timer("Overall Conversion "):
+      vllm_state = converter.convert(model_state)
+    del model_state
+    del model
+    del mesh
+    gc.collect()
+    # save_dict_to_file(vllm_state, "vllm_state_shapes.txt")
 
   # Load vLLM model and run generation test
   print("="*80)
@@ -1049,42 +1050,43 @@ def main():
   llm_state = llm.llm_engine.model_executor.driver_worker.model_runner.state
   # save_dict_to_file(llm_state, "llm_state_shapes.txt")
 
-  # Detect once whether MaxText and vLLM meshes share the same physical
-  # devices (single-VM) or are disjoint (multi-host cluster partition).
-  # Same devices → jax.jit with out_shardings lets XLA emit on-device
-  # collectives (fast, ~0.16 s for 30 B).  Disjoint devices → jax.jit
-  # raises "incompatible devices"; fall back to jax.device_put which uses
-  # ICI/DCN for the cross-host transfer without a CPU roundtrip.
-  _any_src = next(iter(vllm_state.values()))
-  _any_src_arr = _any_src.value if hasattr(_any_src, 'value') else _any_src
-  _any_dst = next(iter(llm_state.values()))
-  _same_devices = (
-      frozenset(d.id for d in _any_src_arr.sharding.mesh.devices.flat) ==
-      frozenset(d.id for d in _any_dst.sharding.mesh.devices.flat)
-  )
-  logging.info("Weight sync: same_devices=%s (jit=%s, device_put=%s)",
-               _same_devices, _same_devices, not _same_devices)
+  if not _RUN_VLLM_ONLY.value:
+    # Detect once whether MaxText and vLLM meshes share the same physical
+    # devices (single-VM) or are disjoint (multi-host cluster partition).
+    # Same devices → jax.jit with out_shardings lets XLA emit on-device
+    # collectives (fast, ~0.16 s for 30 B).  Disjoint devices → jax.jit
+    # raises "incompatible devices"; fall back to jax.device_put which uses
+    # ICI/DCN for the cross-host transfer without a CPU roundtrip.
+    _any_src = next(iter(vllm_state.values()))
+    _any_src_arr = _any_src.value if hasattr(_any_src, 'value') else _any_src
+    _any_dst = next(iter(llm_state.values()))
+    _same_devices = (
+        frozenset(d.id for d in _any_src_arr.sharding.mesh.devices.flat) ==
+        frozenset(d.id for d in _any_dst.sharding.mesh.devices.flat)
+    )
+    logging.info("Weight sync: same_devices=%s (jit=%s, device_put=%s)",
+                 _same_devices, _same_devices, not _same_devices)
 
-  @functools.lru_cache(maxsize=None)
-  def _get_reshard_fn(dst_sharding):
-    if _same_devices:
-      return jax.jit(lambda x: x, out_shardings=dst_sharding)
-    else:
-      return functools.partial(jax.device_put, device=dst_sharding)
+    @functools.lru_cache(maxsize=None)
+    def _get_reshard_fn(dst_sharding):
+      if _same_devices:
+        return jax.jit(lambda x: x, out_shardings=dst_sharding)
+      else:
+        return functools.partial(jax.device_put, device=dst_sharding)
 
-  with timer(f"Assigning {len(vllm_state)} weights to vLLM model"):
-    for key, weight in vllm_state.items():
-      # Unwrap NNX Param → plain jax.Array; plain arrays pass through unchanged.
-      weight_array = weight.value if hasattr(weight, 'value') else weight
-      dst_sharding = llm_state[key].sharding
-      # print(f"Assigning {key}: src shape={weight_array.shape}, src sharding={weight_array.sharding}; dst shape={llm_state[key].shape}, dst sharding={dst_sharding}")
-      llm_state[key] = _get_reshard_fn(dst_sharding)(weight_array)
-      # array_allclose = np.allclose(
-      #     np.asarray(llm_state[key]), np.asarray(weight_array), rtol=1e-2, atol=1e-2
-      # )
-      # print(f"{key}: {array_allclose}")
-      # llm_state[key] = jax.device_put(np.asarray(weight_array), dst_sharding)
-    jax.effects_barrier()  # wait for all on-device reshards to finish
+    with timer(f"Assigning {len(vllm_state)} weights to vLLM model"):
+      for key, weight in vllm_state.items():
+        # Unwrap NNX Param → plain jax.Array; plain arrays pass through unchanged.
+        weight_array = weight.value if hasattr(weight, 'value') else weight
+        dst_sharding = llm_state[key].sharding
+        # print(f"Assigning {key}: src shape={weight_array.shape}, src sharding={weight_array.sharding}; dst shape={llm_state[key].shape}, dst sharding={dst_sharding}")
+        llm_state[key] = _get_reshard_fn(dst_sharding)(weight_array)
+        # array_allclose = np.allclose(
+        #     np.asarray(llm_state[key]), np.asarray(weight_array), rtol=1e-2, atol=1e-2
+        # )
+        # print(f"{key}: {array_allclose}")
+        # llm_state[key] = jax.device_put(np.asarray(weight_array), dst_sharding)
+      jax.effects_barrier()  # wait for all on-device reshards to finish
 
 
   sampling_params = SamplingParams(temperature=0.0, max_tokens=10)
