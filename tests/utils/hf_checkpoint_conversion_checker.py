@@ -26,6 +26,7 @@ from safetensors import safe_open
 import numpy as np
 
 import jax
+from tqdm import tqdm
 
 
 def load_hf(hf_checkpoint_folder):
@@ -83,7 +84,8 @@ def compare_pytrees(tree1, tree2, atol=0.001):
   named_leaves2 = get_named_leaves(tree2)
 
   print(f"There are {len(named_leaves1.keys())} leaves to check.")
-  for key in named_leaves1:  # pylint: disable=C0206
+  for key in (pb := tqdm(named_leaves1)):  # pylint: disable=C0206
+    pb.set_postfix_str(key)
     if key not in named_leaves2:
       print(f"Missing key in second tree: {key}")
       return

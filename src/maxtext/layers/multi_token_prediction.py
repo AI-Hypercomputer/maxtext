@@ -22,8 +22,8 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.common.common_types import Config, MODEL_MODE_TRAIN
+from maxtext.layers.nnx_decoders import NNXDecoderLayer
 from maxtext.utils.globals import EPS
-from maxtext.layers import nnx_wrappers
 from maxtext.layers.decoders import DecoderLayer
 from maxtext.layers.initializers import variable_to_logically_partitioned
 from maxtext.layers.linears import DenseGeneral
@@ -70,7 +70,7 @@ class MultiTokenPredictionLayer(nnx.Module):
       config: Config,
       mesh: Mesh,
       layer_number: int,
-      transformer_layer_module: Type[DecoderLayer],
+      transformer_layer_module: Type[NNXDecoderLayer],
       *,
       rngs: nnx.Rngs,
   ):
@@ -108,22 +108,12 @@ class MultiTokenPredictionLayer(nnx.Module):
         rngs=rngs,
     )
     # Use MODEL_MODE_TRAIN for initialization; runtime model_mode is passed dynamically.
-    mtp_transformer_layer = transformer_layer_module(
+    self.transformer_layer = transformer_layer_module(
         config=cfg,
         mesh=mesh,
         model_mode=MODEL_MODE_TRAIN,
         name=f"mtp_{k}_transformer_layer",
-    )
-    self.transformer_layer = nnx_wrappers.ToNNX(mtp_transformer_layer, rngs=rngs)
-
-    # ToNNX requires explicit initialization with sample inputs for proper parameter setup.
-    batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config=cfg, model_mode=MODEL_MODE_TRAIN)
-    self.transformer_layer.lazy_init(
-        inputs=jnp.zeros((batch_size, seq_len, self.config.emb_dim), dtype=self.config.dtype),
-        decoder_segment_ids=None,
-        decoder_positions=jnp.zeros((batch_size, seq_len), dtype=jnp.int32),
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
+        rngs=rngs,
     )
 
   @property
@@ -212,7 +202,7 @@ class MultiTokenPredictionBlock(nnx.Module):
       self,
       config: Config,
       mesh: Mesh,
-      transformer_layer_module: Type[DecoderLayer],
+      transformer_layer_module: Type[NNXDecoderLayer],
       decoder: nnx.Module,
       rngs: nnx.Rngs,
   ):

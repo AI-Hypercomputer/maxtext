@@ -44,7 +44,7 @@ You can train from scratch to generate a new checkpoint. One example command to 
 
 ```sh
 python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
-    base_output_directory=${BASE_OUTPUT_DIRECTORY} \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
     run_name=matmul_pre_training \
     per_device_batch_size=1 \
     enable_checkpointing=false \
@@ -66,12 +66,12 @@ In order to run an example decoding with Llama4 Scout, you can use a command suc
 
 ```sh
 python3 -m maxtext.inference.decode src/maxtext/configs/base.yml \
-    base_output_directory=${BASE_OUTPUT_DIRECTORY} \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
     run_name=decode \
     model_name=llama4-17b-16e \
     tokenizer_path="meta-llama/Llama-4-Scout-17B-16E" \
-    hf_access_token=${HF_TOKEN} \
-    load_parameters_path=${UNSCANNED_CKPT_PATH} \
+    hf_access_token=${HF_TOKEN?} \
+    load_parameters_path=${UNSCANNED_CKPT_PATH?} \
     scan_layers=false \
     attention=dot_product \
     sparse_matmul=false \

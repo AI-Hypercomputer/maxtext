@@ -25,6 +25,8 @@ import subprocess
 import time
 from typing import Any
 
+from packaging.version import Version
+
 from etils import epath
 import flax
 import jax
@@ -82,7 +84,7 @@ def calculate_num_params_from_pytree(params):
 def device_space():
   """Version guard for jax.memory.Space.Device."""
   # See b/436565838 for more.
-  if jax.__version__ >= "0.7.1":
+  if Version(jax.__version__) >= Version("0.7.1"):
     return jax.memory.Space.Device  # pytype: disable=module-attr
   else:
     return jax._src.sharding_impls.TransferToMemoryKind("device")  # pylint: disable=protected-access # pytype: disable=module-attr
@@ -1078,3 +1080,13 @@ def transformer_engine_context():
       yield
   except (ImportError, AttributeError):
     yield
+
+
+def generate_representative_group_sizes(target_m: int, g: int) -> tuple[int, ...]:
+  """Generate group sizes for a given target m."""
+  np.random.seed(0)
+  repr_val = np.random.uniform(size=(g,))
+  repr_val = np.random.binomial(1, 0.9, (g,)) * repr_val
+  repr_val = np.int32((repr_val / np.sum(repr_val)) * target_m)
+  repr_val[0] += target_m - np.sum(repr_val)
+  return tuple(map(int, repr_val))

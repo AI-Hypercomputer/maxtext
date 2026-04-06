@@ -64,8 +64,8 @@ After converting the checkpoint, you can use it for fine-tuning. The command bel
 
 ```
 python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
-    base_output_directory=${BASE_OUTPUT_DIRECTORY} \
-    dataset_path=${DATASET_PATH} \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+    dataset_path=${DATASET_PATH?} \
     load_parameters_path=gs://your-gcs-bucket/qwen3_next_maxtext_ckpt/0/items \
     run_name=qwen3_next_finetuning \
     per_device_batch_size=1 \

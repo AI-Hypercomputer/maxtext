@@ -83,6 +83,9 @@ source_checkpoint_layout: "orbax"
 
 # Only applicable to Single Controller/Pathways on Cloud. Experimental feature, under testing 
 colocated_python_checkpointing: False
+
+# enables autocheckpoint, which saves a checkpoint at the preemption step.
+enable_autocheckpoint: False
 ############################### end checkpointing ##################################
 
 
@@ -155,6 +158,9 @@ base_num_kv_heads: 16
 base_mlp_dim: 7168
 base_num_decoder_layers: 16
 head_dim: 128
+# Those parameters are only used with global attention for Gemma4.
+global_head_dim: 0
+global_num_kv_heads: 0
 mlp_activations: ["silu", "linear"]
 mlp_activations_limit: -1.0
 dropout_rate: 0.0
@@ -165,6 +171,7 @@ cast_logits_to_fp32: true # whether to cast the logits to fp32. the higher preci
 float32_qk_product: false # in dot_product attention, whether to cast to fp32 the inputs to qk product
 float32_logits: false # in dot_product attention, whether to cast to fp32 the inputs to softmax
 float32_weight_sum: true # whether to use full fp32 precision to sum expert weights for numerical stability
+float32_gate_logits: false # whether to cast inputs to fp32 to compute MoE gate logits for numerical stability
 
 # multi-token prediction configs
 # the number of auxiliary prediction layers to use for mtp.
@@ -279,7 +286,6 @@ pipeline_parallel_layers: -1 # Pipeline only this number of layers - for the rem
 # PP degree divides the number of layers.
 # By default (when set to -1) we pipeline all of the decoder layers.
 
-
 # num_pipeline_microbatches must be a multiple of the number of pipeline stages. By default it is set to the number of stages.
 # Note the microbatch_size is given by global_batch_size / num_pipeline_microbatches, where global_batch_size = per_device_batch_size * num_devices
 num_pipeline_microbatches: -1
@@ -292,8 +298,9 @@ pipeline_fsdp_ag_once: False # If set to true then all gather all of the weights
 # to only one stage's worth, however we only execute one all-gather and reduce across per repeat, as opposed
 # to every microbatch. This is similar to zero-1 sharding, since we also don't need to all gather the FSDP weights in the backward pass.
 # An alternative to setting this to true may be to replace any FSDP with DP and use optimizer offloading if necessary.
-# A more optimal behavior is to all-gather at the start of each repeat, which would ideally get the best of both worlds -
-# a small amount of memory and time, however this has proven hard to implement in SPMD, see b/364386697 for more.
+pipeline_fsdp_ag_per_repeat: False
+# Pipeline weight prefetching per repeat is an advanced SPMD pipeline parallelism improvement technique
+# When enabled, it prefetches necessary weight gathering ahead of microbatched computation, therefore reducing collectives
 
 # There are two loops for PP:
 #  1)  Outer loop over microbatches (pipeline iterations)
@@ -303,6 +310,7 @@ pipeline_fsdp_ag_once: False # If set to true then all gather all of the weights
 # It may be useful to do the reverse when the layers_per_stage is very large.
 # The below settings only have effect when using pipeline parallelism.
 scan_pipeline_iterations: True
+scan_pipeline_repeats: False
 scan_layers_per_stage: False
 set_remat_policy_on_pipeline_iterations: True
 set_remat_policy_on_layers_per_stage: False
@@ -320,11 +328,16 @@ mlpwi: 'remat'
 mlpwi_0: 'remat'
 mlpwi_1: 'remat'
 mlpwo: 'remat'
+moe_mlpwi_0: 'remat'
+moe_mlpwi_1: 'remat'
+moe_mlpwo: 'remat'
 query_proj: 'remat'
 key_proj: 'remat'
 value_proj: 'remat'
 qkv_proj: 'remat'
 out_proj: 'remat'
+query_wa_proj: 'remat'
+kv_wa_proj: 'remat'
 mla_q: 'remat'
 mla_kv: 'remat'
 attention_out: 'remat'
@@ -349,6 +362,8 @@ final_logits_soft_cap: 0.0
 z_loss_multiplier: 0.0
 use_post_attn_norm: False
 use_post_ffw_norm: False
+v_norm_with_scale: True
+qk_norm_with_scale: True
 mla_naive_kvcache: True
 
 
@@ -359,10 +374,17 @@ moba_topk: 8
 
 # DeepSeek Sparse Attention (DSA)
 # deepseek3.2 introduces indexer in MLA
-use_sparse_indexer: False
-index_head_dim: 128
-index_n_heads: 64
-index_topk: 2048
+use_indexer: False
+indexer_head_dim: 128
+indexer_n_heads: 64
+indexer_topk: 2048
+# Determines the training strategy for the indexer:
+# - False (Dense Warm-up): Computes indexer loss over all tokens. Used with `trainable_parameters_mask` to freeze other model parameters.
+# - True (Sparse Training): Computes indexer loss over top-k tokens only and detaches the indexer input for independent optimization.
+# Note: This is only active when `indexer_loss_scaling_factor` > 0.
+indexer_sparse_training: False
+# Multiplier for the indexer KL divergence loss
+indexer_loss_scaling_factor: 0.0
 
 # MLA parameters
 q_lora_rank: 0
@@ -427,10 +449,13 @@ internal_compile_num_devices: -1 # You must specify the number of devices when u
 
 # Parallelism
 shard_mode: "auto" # can be either auto or explicit
+custom_mesh_and_rule: "" # replace default mesh and logical rule by specifying yml name under config/mesh_and_rule/.
 mesh_axes: ['diloco', 'data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context', 'context_autoregressive', 'tensor', 'tensor_transpose', 'tensor_sequence', 'expert', 'autoregressive']
 logical_axis_rules: [
                       ['activation_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['activation_batch_moe', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_batch_no_exp', ['data', 'fsdp', 'fsdp_transpose']],
+                      ['activation_batch_no_exp_moe', ['data', 'fsdp', 'fsdp_transpose']],
                       ['activation_embed_and_logits_batch', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_embed_and_logits_batch_sequence', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context', 'expert']],
                       ['activation_heads', ['tensor', 'tensor_transpose', 'sequence','tensor_sequence','autoregressive']],
@@ -443,7 +468,10 @@ logical_axis_rules: [
                       ['activation_attn_length_no_exp', ['context']],
                       ['activation_length_no_exp', ['sequence', 'context']],
                       ['activation_length_no_exp', ['context']],
+                      ['activation_length_no_exp_moe', ['sequence', 'context']],
+                      ['activation_length_no_exp_moe', ['context']],
                       ['activation_norm_length', ['tensor_sequence', 'context', 'sequence']],
+                      ['activation_norm_length_moe', ['tensor_sequence', 'context', 'sequence']],
                       ['activation_q_length', ['context', 'expert']],
                       ['activation_q_length_no_exp', ['context']],
                       ['prefill_activation_length', ['sequence', 'context']],
@@ -451,6 +479,7 @@ logical_axis_rules: [
                       ['activation_kv_length', []],
                       ['activation_attn_embed', ['tensor', 'tensor_transpose']],
                       ['activation_embed', ['tensor', 'tensor_transpose']],
+                      ['activation_embed_moe', ['tensor', 'tensor_transpose']],
                       ['activation_mlp', ['tensor', 'tensor_transpose', 'tensor_sequence']],
                       ['activation_kv', ['tensor', 'tensor_transpose', 'tensor_sequence']],
                       ['activation_prefill_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
@@ -479,6 +508,14 @@ logical_axis_rules: [
                       ['embed_no_exp', ['fsdp', 'sequence', 'tensor_transpose', 'context']],
                       ['embed_no_exp', ['fsdp', 'fsdp_transpose', 'sequence', 'context']],
                       ['embed_no_exp', ['fsdp', 'sequence', 'context']],
+                      ['embed_moe', ['fsdp', 'fsdp_transpose', 'sequence', 'tensor_transpose', 'context', 'expert']],
+                      ['embed_moe', ['fsdp', 'sequence', 'tensor_transpose', 'context' , 'expert']],
+                      ['embed_moe', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'expert']],
+                      ['embed_moe', ['fsdp', 'sequence', 'context', 'expert']],
+                      ['embed_no_exp_moe', ['fsdp', 'fsdp_transpose', 'sequence', 'tensor_transpose', 'context']],
+                      ['embed_no_exp_moe', ['fsdp', 'sequence', 'tensor_transpose', 'context']],
+                      ['embed_no_exp_moe', ['fsdp', 'fsdp_transpose', 'sequence', 'context']],
+                      ['embed_no_exp_moe', ['fsdp', 'sequence', 'context']],
                       ['embed_tensor_transpose', ['tensor_transpose']],
                       ['q_lora', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'tensor_transpose', 'expert']],
                       ['q_lora', ['fsdp', 'sequence', 'context', 'tensor_transpose', 'expert']],
@@ -569,9 +606,8 @@ num_vocab_tiling: 1
 
 # Tokenizer
 vocab_size: 32_000 # powers of 2 for sharding
-tokenizer_path: "src/maxtext/assets/tokenizers/tokenizer.llama2"
-# tfds pipeline supports tokenizer_type: sentencepiece, huggingface, tiktoken
-# grain pipeline supports tokenizer_type: sentencepiece, huggingface
+tokenizer_path: ""
+# grain and tfds pipeline supports tokenizer_type: sentencepiece, huggingface, tiktoken
 # hf pipeline only supports huggingface type, and will ignore tokenizer_type flag
 tokenizer_type: "sentencepiece" # Currently supporting: "tiktoken", "sentencepiece", "huggingface"
 use_chat_template: False
@@ -675,6 +711,7 @@ grain_ram_budget_mb: 1024 # RAM budget (MB) for auto-tuning worker count. Only u
 grain_num_threads_eval: 16
 grain_prefetch_buffer_size_eval: 500
 grain_data_source_max_workers: 16  # Max workers for ThreadPoolExecutor when mixing multiple Grain data sources.
+grain_shuffle_buffer_size: 100 # shuffle buffer when using sequential access formats such as Parquet, TFRecord.
 # for using pathways
 colocated_python_data_input: False  # experimental feature, under testing
 
@@ -784,6 +821,10 @@ gradient_clipping_threshold: 1.0
 gradient_accumulation_steps: 1
 
 opt_type: "adamw"  # one of "adamw", "adam_pax", "sgd", or "muon"
+# List of parameter names/patterns to train.
+# If non-empty, all other parameters will be frozen. Example: ['.*indexer.*'].
+# If empty (default), all parameters are trained.
+trainable_parameters_mask: []
 
 # AdamW optimizer parameters
 # We use AdamW following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
@@ -822,6 +863,9 @@ rope_use_scale: True # apply rope scaling for llama3.1 (see class `LLaMARotaryEm
 rope_min_timescale: 1
 rope_max_timescale: 10_000 # Timescale For global Attention
 local_rope_max_timescale: -1 # If positive used for local window Attention, otherwise `rope_max_timescale` is used for both local and global
+global_rope_max_timescale: -1 # Timescale For global Attention (Gemma 4 specific)
+global_rope_proportion: 0.25
+local_rope_proportion: 1.0
 
 # yarn RoPE parameters
 max_position_embeddings: 163840
@@ -848,6 +892,8 @@ decode_sampling_temperature: 1.
 eval_interval: -1  # the specific number of train step between eval_step
 eval_steps: -1  # run this number of steps for eval, recommend setting this to prevent error due to running out of evel data
 target_eval_loss: 0.  # early stop once reaching target eval_loss
+abort_on_nan_loss: True # Check for NaN and abort if found in training loss
+abort_on_inf_loss: True # Check for Inf and abort if found in training loss
 
 # Goodput parameters
 enable_goodput_recording: False
@@ -1029,6 +1075,7 @@ posemb_type_for_vit: "learn"
 # -1 means no limit, and will pad to the max possible number of images determined by sequence length.
 # Set it to avoid unnecessary padding if you know the maximum number of images per example.
 max_num_images_per_example: -1
+vision_output_length: -1 # The output length (number of soft tokens) from vision encoder, used in Gemma4.
 
 ### llama4 multi modal configs
 hidden_size_for_vit: 1408
@@ -1083,6 +1130,7 @@ subslice_shape: ""
 
 # NNX
 enable_nnx: false
+pure_nnx_decoder: false
 
 ################################## Qwen3-Next Specific Configs ##################################
 # Kernel size for the 1D convolution in the Gated Delta Net
@@ -1109,7 +1157,7 @@ use_tokamax_splash: false
 use_jax_splash: false
 
 # vLLM Adapter Configurations
-# Path to the HuggingFace-style config directory for the adapter (e.g. src/MaxText/integration/vllm/maxtext_vllm_adapter)
+# Path to the HuggingFace-style config directory for the adapter (e.g. src/maxtext/integration/vllm/maxtext_vllm_adapter)
 vllm_hf_config_path: ""
 # A JSON string of overrides to apply to the HuggingFace-style config for the vLLM adapter.
 # This can be used to override specific settings without modifying the original config file. 

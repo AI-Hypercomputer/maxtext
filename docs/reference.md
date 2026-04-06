@@ -51,9 +51,10 @@ Key concepts including checkpointing strategies, quantization, tiling, and Mixtu
 ::::
 
 ```{toctree}
-:hidden:
-:maxdepth: 1
-
+---
+hidden:
+maxdepth: 1
+---
 reference/performance_metrics
 reference/models
 reference/architecture

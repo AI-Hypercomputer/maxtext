@@ -65,9 +65,10 @@ A step-by-step guide for the community to help expand MaxText's model library.
 ::::
 
 ```{toctree}
-:hidden:
-:maxdepth: 1
-
+---
+hidden:
+maxdepth: 1
+---
 guides/optimization.md
 guides/data_input_pipeline.md
 guides/checkpointing_solutions.md

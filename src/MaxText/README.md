@@ -14,9 +14,9 @@
 # limitations under the License.
  -->
 
-# src/MaxText
+# src/maxtext
 
-The contents of `src/MaxText` have moved to `src/MaxText` as part of a larger 
+The contents of `src/MaxText` have moved to `src/maxtext` as part of a larger 
 [restructuring effort in MaxText](https://github.com/AI-Hypercomputer/maxtext/blob/2790ed289c0c4cb704645d5d2ab91da26711b891/RESTRUCTURE.md).
 This directory only contains shim files to temporarily support legacy commands like `python3 -m MaxText.train ...`.
 These legacy commands are now deprecated and will be removed soon. Please migrate your existing commands and avoid using

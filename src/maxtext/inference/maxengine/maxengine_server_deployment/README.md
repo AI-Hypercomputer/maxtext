@@ -4,8 +4,8 @@ These instructions are to build the Maxengine Server image, which calls an entry
 
 ```
 docker build -t maxengine-server .
-docker tag maxengine-server us-docker.pkg.dev/${PROJECT_ID}/jetstream/maxengine-server:latest
-docker push us-docker.pkg.dev/${PROJECT_ID}/jetstream/maxengine-server:latest
+docker tag maxengine-server us-docker.pkg.dev/${PROJECT_ID?}/jetstream/maxengine-server:latest
+docker push us-docker.pkg.dev/${PROJECT_ID?}/jetstream/maxengine-server:latest
 ```
 
 If you would like to change the version of MaxText or JetStream the image is built off of, change the `MAXTEXT_VERSION` / `JETSTREAM_VERSION` environment variable:

@@ -12,12 +12,13 @@ If you are writing documentation for MaxText, you may want to preview the docume
 First, make sure you install the necessary dependencies. You can do this by navigating to your local clone of the MaxText repo and running:
 
 ```bash
-pip install -r dependencies/requirements/requirements_docs.txt
+pip install -r src/dependencies/requirements/requirements_docs.txt
 ```
 
-Once the dependencies are installed, you can navigate to the `docs/` folder and run:
+Once the dependencies are installed, navigate to the `docs/` directory and run the `sphinx-build`:
 
 ```bash
+cd docs
 sphinx-build -b html . _build/html
 ```
 

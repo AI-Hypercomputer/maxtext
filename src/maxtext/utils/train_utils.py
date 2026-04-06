@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # pylint: disable=bare-except, consider-using-generator
-""" Utils that are only interesting for training in MaxText. """
+"""Utils that are only interesting for training in MaxText."""
 
 import os
 import jax
@@ -82,6 +82,7 @@ def create_training_tools(config, model, mesh):
         config.enable_single_controller,
         config.colocated_python_checkpointing,
         config.enable_single_replica_ckpt_restoring,
+        config.enable_autocheckpoint,
     )
 
   return init_rng, checkpoint_manager, learning_rate_schedule, tx
@@ -162,7 +163,7 @@ def jit_train_and_eval_step(
   """Returns a JIT-compiled train and eval step function."""
   if config.enable_diloco:
     train_step_partial = functools.partial(train_step, model, config, state_mesh_shardings, params_shardings)
-    train_step = diloco.build_diloco_train_step(config, train_step_partial)
+    train_step = diloco.build_diloco_train_step(config, train_step_partial, mesh=mesh)
   data_sharding = sharding.get_input_data_sharding(config, mesh)
   p_train_step = jit_train_step(config, model, state, state_mesh_shardings, data_sharding, train_step, params_shardings)
   p_eval_step = None
@@ -204,7 +205,7 @@ def setup_train_loop(config, recorder, devices=None):
     data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
     rampup_manager = create_rampup_manager(config, checkpoint_manager)
     data_loader = create_dataloader(config, mesh, data_iterator, recorder, rampup_manager)
-    context_parallel_size = mesh.shape["context"]
+    context_parallel_size = mesh.shape.get("context", 1)
     # Check if context parallelism is being used with sequence packing
     if context_parallel_size > 1 and config.packing and config.dataset_type != "synthetic":
       raise ValueError(
@@ -229,7 +230,7 @@ def setup_train_loop(config, recorder, devices=None):
 
     if config.enable_diloco:
       with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
-        state, outer_opt_state_sharding = diloco.build_diloco_state(config, lambda: state)
+        state, outer_opt_state_sharding = diloco.build_diloco_state(config, lambda: state, mesh=mesh)
 
         # create state_mesh_shardings for the DilocoState
         inner_state_shardings = diloco.add_diloco_to_sharding(state_mesh_shardings)

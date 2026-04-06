@@ -25,7 +25,7 @@ Multimodal Large Language Models (LLMs) extend traditional text-only models by i
 
 ## Checkpoint Conversion
 
-Recently we have onboarded a new centralized tool for bidirectional checkpoint conversion between MaxText and HuggingFace ([README](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/checkpoint_conversion/README.md)).
+Recently we have onboarded a new centralized tool for bidirectional checkpoint conversion between MaxText and HuggingFace ([README](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/README.md)).
 
 Install pytorch:
 
@@ -38,10 +38,10 @@ Then use this command to convert an unscanned checkpoint from HuggingFace to Max
 ```shell
 export HF_ACCESS_TOKEN=hf_...
 export MAXTEXT_CKPT_GCS_PATH=gs://...
-python -m maxtext.checkpoint_conversion.to_maxtext maxtext/configs/base.yml \
+python -m maxtext.checkpoint_conversion.to_maxtext \
     model_name=gemma3-4b \
-    hf_access_token=$HF_ACCESS_TOKEN \
-    base_output_directory=$MAXTEXT_CKPT_GCS_PATH \
+    hf_access_token=${HF_ACCESS_TOKEN?} \
+    base_output_directory=${MAXTEXT_CKPT_GCS_PATH?} \
     use_multimodal=true \
     scan_layers=false
 ```
@@ -54,8 +54,8 @@ export MAXTEXT_CKPT_GCS_PATH=gs://...
 python -m maxtext.checkpoint_conversion.standalone_scripts.llama4_ckpt_unscanned \
     --model-size=llama4-17b-16e \
     --huggingface-checkpoint=True \
-    --base-model-path=$LOCAL_HF_MODEL_PATH \
-    --maxtext-model-path=$MAXTEXT_CKPT_GCS_PATH
+    --base-model-path=${LOCAL_HF_MODEL_PATH?} \
+    --maxtext-model-path=${MAXTEXT_CKPT_GCS_PATH?}
 ```
 
 ## Multimodal Decode
@@ -73,11 +73,10 @@ To run a forward pass and verify the model's output, use the following command:
 ```shell
 # Gemma3 decode
 python -m maxtext.inference.decode \
-    maxtext/configs/base.yml \
     model_name=gemma3-4b \
-    hf_access_token=$HF_ACCESS_TOKEN \
+    hf_access_token=${HF_ACCESS_TOKEN?} \
     tokenizer_path=src/maxtext/assets/tokenizers/tokenizer.gemma3 \
-    load_parameters_path=$MAXTEXT_CKPT_GCS_PATH/0/items \
+    load_parameters_path=${MAXTEXT_CKPT_GCS_PATH?}/0/items \
     per_device_batch_size=1 \
     run_name=ht_test \
     max_prefill_predict_length=272 \
@@ -109,11 +108,10 @@ export TARGET_LENGTH=...  # Adjust to fit expected output length
 export PREDICT_LENGTH=...  # Adjust to fit image tokens + text prompt
 
 python -m maxtext.inference.decode \
-    maxtext/configs/base.yml \
     model_name=gemma3-4b \
     ... \
-    max_prefill_predict_length=$PREDICT_LENGTH  # Adjust to fit image tokens + text prompt \
-    max_target_length=$TARGET_LENGTH \
+    max_prefill_predict_length=${PREDICT_LENGTH?}  # Adjust to fit image tokens + text prompt \
+    max_target_length=${TARGET_LENGTH?} \
     image_path=/path/to/image1.jpg,/path/to/image2.jpg \
     prompt="Describe each image in a short sentence." # <start_of_image> will be added to prompt if not provided
     # or prompt="Describe each image in a short sentence: <start_of_image> and <start_of_image>"
@@ -134,11 +132,11 @@ python -m maxtext.trainers.post_train.sft.train_sft_deprecated \
     run_name="chartqa-sft" \
     model_name=gemma3-4b \
     tokenizer_path="google/gemma-3-4b-it" \
-    hf_access_token=$HF_ACCESS_TOKEN \
-    load_parameters_path=$UNSCANNED_CKPT_PATH \
-    base_output_directory=$BASE_OUTPUT_DIRECTORY \
+    hf_access_token=${HF_ACCESS_TOKEN?} \
+    load_parameters_path=${UNSCANNED_CKPT_PATH?} \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
     per_device_batch_size=1 \
-    steps=$STEPS \
+    steps=${STEPS?} \
     max_prefill_predict_length=1024 \
     max_target_length=2048 \
     checkpoint_period=1000 \
@@ -155,12 +153,12 @@ python -m maxtext.trainers.post_train.sft.train_sft_deprecated \
 - **Setting appropriate prefill length**: To prevent truncation and ensure your full input (text + image) is processed, the prefill length should be set longer than the total combined length of your text tokens and image tokens. This combined length makes up the final sequence fed to the decoder. We recommend to estimate the combined sequence length from your full input and then add a buffer when setting your `max_prefill_predict_length` for decoding. Token estimation rules:
   - For text tokens, a good estimate is:
 
-    $\text{Text Tokens} \approx 1.3 \times \text{Number of Words in Prompt}$.
+    $\\text{Text Tokens} \\approx 1.3 \\times \\text{Number of Words in Prompt}$.
 
   - For Gemma3, each image is resized to 896\*896 and contributes 256 tokens:
 
-    $\text{Total Tokens} \approx \text{Text Tokens} + \text{Number of Images} * 256$.
+    $\\text{Total Tokens} \\approx \\text{Text Tokens} + \\text{Number of Images} * 256$.
 
   - For Llama4 models, each image is dynamically tiled based on its size, with each resulting tile contributing 144 tokens:
 
-    $\text{Total Tokens} \approx \text{Text Tokens} + 144 \times \sum_{i=1}^{N} \text{Number of Tiles of Image}_i$.
+    $\\text{Total Tokens} \\approx \\text{Text Tokens} + 144 \\times \\sum\_{i=1}^{N} \\text{Number of Tiles of Image}\_i$.

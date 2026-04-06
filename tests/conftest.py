@@ -54,15 +54,11 @@ def _has_tpu_backend_support() -> bool:
   except Exception:  # pragma: no cover  pylint: disable=broad-exception-caught
     return False
 
-  # Heuristic: TPU-enabled jaxlib exposes a TPU client/extension module.
-  # This check avoids initializing any backend at collection time.
-  for mod in ("jaxlib.tpu_client", "jaxlib._src.tpu_client", "jaxlib.tpu_extension"):
-    try:
-      if importlib.util.find_spec(mod) is not None:
-        return True
-    except Exception:  # pragma: no cover  pylint: disable=broad-exception-caught
-      continue
-  return False
+  # Heuristic: TPU backend support is provided via the `libtpu` package.
+  try:
+    return importlib.util.find_spec("libtpu") is not None
+  except Exception:  # pragma: no cover  pylint: disable=broad-exception-caught
+    return False
 
 
 def pytest_collection_modifyitems(config, items):

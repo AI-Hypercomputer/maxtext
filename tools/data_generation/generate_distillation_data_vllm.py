@@ -24,11 +24,11 @@ Example command:
       --dataset-path HuggingFaceH4/ultrachat_200k \
       --data-split train_sft \
       --data-columns messages \
-      --hf-access-token $HF_TOKEN \
-      --teacher-model ${BASE_DIRECTORY}/qwen3-32b \
+      --hf-access-token ${HF_TOKEN?} \
+      --teacher-model ${BASE_DIRECTORY?}/qwen3-32b \
       --use-chat-template \
       --num-prompts 5120 \
-      --output-file ${BASE_DIRECTORY}/datasets/distillation_data.parquet
+      --output-file ${BASE_DIRECTORY?}/datasets/distillation_data.parquet
 
 This processes 5120 prompts, generating the specified number of samples per prompt.
 Some prompts may be filtered out if prompt tokens are longer than `max-prefill-length`.

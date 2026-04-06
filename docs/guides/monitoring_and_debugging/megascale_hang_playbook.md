@@ -14,7 +14,7 @@ Much of this guide is geared towards providing Google with the right data to hel
 
 1. Use `JAX` 0.6 or up, and enable JAX distributed service. This version of JAX contains additional logging that can help identify which workers are experiencing issues.
 2. Generate an HLO dump using the `--xla_dump_to` flag when initializing your workload. This is discussed in the [XLA Documentation](https://openxla.org/xla/hlo_dumps).
-3. Run your workload with stack traces enabled. XPK users should follow the [XPK-specific instructions](https://github.com/AI-Hypercomputer/xpk?tab=readme-ov-file#collect-stack-traces). Note the `--deploy-stacktrace-sidecar` flag when running the XPK workload command.
+3. Run your workload with stack traces enabled. XPK users should follow the [XPK-specific instructions](https://github.com/AI-Hypercomputer/xpk/blob/main/docs/troubleshooting.md#collect-stack-traces). Note the `--deploy-stacktrace-sidecar` flag when running the XPK workload command.
 4. Set `--vmodule=real_program_continuator=1` to enable verbose logging for the TPU program execution status.
 
 ## Locate the Megascale Hang Detected Error
@@ -70,7 +70,7 @@ If the TPU listed in the log shows a non-zero program counter, it is very likely
 
 If the logged TPU shows a program counter of 0, it is likely that the TPU is waiting on input. We can attempt to confirm the worker is hung during the input pipeline using the stack trace library found in the [cloud-tpu-diagnostics package](https://pypi.org/project/cloud-tpu-diagnostics/).
 
-XPK users should follow the [XPK-specific instructions](https://github.com/AI-Hypercomputer/xpk?tab=readme-ov-file#collect-stack-traces) to emit stack traces. Note the `--deploy-stacktrace-sidecar` flag when running the XPK workload command.
+XPK users should follow the [XPK-specific instructions](https://github.com/AI-Hypercomputer/xpk/blob/main/docs/troubleshooting.md#collect-stack-traces) to emit stack traces. Note the `--deploy-stacktrace-sidecar` flag when running the XPK workload command.
 
 Customers can then query Cloud Logging for the stack trace logs from the outlier TPU. The stack trace log will help users determine where in the Python code the program was during the hang.
 

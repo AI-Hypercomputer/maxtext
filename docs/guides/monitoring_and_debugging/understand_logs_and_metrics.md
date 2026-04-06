@@ -23,7 +23,7 @@ When you run a training job, MaxText produces detailed output logs. This guide s
 To start, run a simple pretraining job on a single-host TPU. For instance, we can run the following command on TPU v5p-8. The resulting log is used as an example throughout this guide.
 
 ```bash
-python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
+python3 -m maxtext.trainers.pre_train.train \
 base_output_directory=gs://runner-maxtext-logs run_name=demo \
 model_name=deepseek2-16b \
 per_device_batch_size=24 max_target_length=2048 steps=10 dataset_type=synthetic enable_checkpointing=false
@@ -35,7 +35,7 @@ The first section of the log details the configuration of your run. This is cruc
 
 MaxText builds its configuration in layers.
 
-- It starts with the **default configuration** from a YAML file. In our example, the file is [`src/maxtext/configs/base.yml`](https://github.com/AI-Hypercomputer/maxtext/blob/28e5097ac467ed8b1d17676d68aa5acc50f9d60d/src/maxtext/configs/base.yml).
+- It starts with the **default configuration** from a YAML file. In our example, the file is [`src/maxtext/configs/base.yml`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/configs/base.yml).
 
 - Then, it overwrites any of these values with the arguments you provide in the **command line**.
 
@@ -43,7 +43,7 @@ MaxText builds its configuration in layers.
   Updating keys from env and command line: ['run_name', 'model_name', 'enable_checkpointing', 'base_output_directory', 'per_device_batch_size', 'dataset_type', 'steps', 'max_target_length']
   ```
 
-- It updates keys based on the **model-specific configuration** file. When you specify a model, like `deepseek2-16b`, MaxText reads the corresponding parameters from the [deepseek2-16b.yml](https://github.com/AI-Hypercomputer/maxtext/blob/fafdeaa14183a8f5ca7b9f7b7542ce1655237574/src/maxtext/configs/models/deepseek2-16b.yml) file.
+- It updates keys based on the **model-specific configuration** file. When you specify a model, like `deepseek2-16b`, MaxText reads the corresponding parameters from the [deepseek2-16b.yml](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/configs/models/deepseek2-16b.yml) file.
 
   ```none
   Running Model: deepseek2-16b
@@ -123,7 +123,7 @@ To generate all optional artifacts in one run, you can set the corresponding fla
 This command enables tensorboard, profiler, text metrics, config saving, and checkpointing:
 
 ```bash
-python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
+python3 -m maxtext.trainers.pre_train.train \
 base_output_directory=gs://runner-maxtext-logs run_name=demo2 \
 model_name=deepseek2-16b \
 per_device_batch_size=24 max_target_length=2048 steps=10 dataset_type=synthetic \
@@ -197,7 +197,7 @@ The **model FLOPs** are the floating point operations to perform model computati
 - The number of model FLOPs is dependent on model architecture, input size (batch size, sequence length), and gradient accumulation steps. It does not include optimization operations.
 - We break down the FLOPs into two parts:
   - "Learnable weight FLOPs" are matmuls between activations and learnable weights. Specifically, this occurs in embedding, feed forward networks, attention-related projections, and unembedding.
-  - "Attention FLOPs" are matmuls in attention score computation like $\mathrm{softmax}{\left(\frac{QK^\top}{\sqrt{d}}\right)} V$.
+  - "Attention FLOPs" are matmuls in attention score computation like $\\mathrm{softmax}{\\left(\\frac{QK^\\top}{\\sqrt{d}}\\right)} V$.
 
 One **TFLOP** (TeraFLOP) is equal to $10^{12}$ FLOPs. The log shows the theoretical estimate of **model TFLOP per device**:
 
@@ -207,12 +207,12 @@ Per train step:
  split as 94.54% learnable weight flops and 5.46% attention flops
 ```
 
-In this example, given `model=deepseek2-16b`, `per_device_batch_size=24`, `max_target_length=2048`, and no gradient accumulation, we have $\text{model tflop per device} \approx 764.67$.
+In this example, given `model=deepseek2-16b`, `per_device_batch_size=24`, `max_target_length=2048`, and no gradient accumulation, we have $\\text{model tflop per device} \\approx 764.67$.
 
 - 94.54% of the TFLOPs are attributed to learnable weight and 5.46% are attributed to attention.
 - As you will see next, this number is important for calculating performance metrics, such as TFLOP/s/device and Model FLOPs Utilization (MFU).
 
-You can find more information about model FLOPs and MFU in the [Performance Metrics](performance-metrics) topic.
+You can find more information about model FLOPs and MFU in the [Performance Metrics](../../reference/performance_metrics.md#performance-metrics) topic.
 
 ## 4. Training metrics
 
@@ -233,8 +233,8 @@ completed step: 9, seconds: 5.667, TFLOP/s/device: 134.924, Tokens/s/device: 867
 
 Before we dive deep here, recall a few numbers from previous sections:
 
-- $\text{max target length} = 2048$, $\text{per device batch size} = 24$
-- $\text{model tflop per device} \approx 764.67$ (rounded), $\text{number of devices} = 4$
+- $\\text{max target length} = 2048$, $\\text{per device batch size} = 24$
+- $\\text{model tflop per device} \\approx 764.67$ (rounded), $\\text{number of devices} = 4$
 
 ### 4.1. Performance metrics
 
@@ -244,38 +244,38 @@ The performance metrics fluctuate at the beginning, and become stable towards th
 completed step: 9, seconds: 5.667, TFLOP/s/device: 134.924, Tokens/s/device: 8672.758, total_weights: 196608, loss: 10.374
 ```
 
-As shown in `seconds: 5.667`, $\text{measured step time in seconds} \approx 5.667$ (rounded).
+As shown in `seconds: 5.667`, $\\text{measured step time in seconds} \\approx 5.667$ (rounded).
 
 **TFLOP per second per device**
 
 - It is [computed](https://github.com/AI-Hypercomputer/maxtext/blob/28e5097ac467ed8b1d17676d68aa5acc50f9d60d/src/MaxText/metric_logger.py#L211-L213) as
 
-$$\text{tflop/s/device} = \frac{\text{model tflop per device}}{\text{measured step time in seconds}}$$
+$$\\text{tflop/s/device} = \\frac{\\text{model tflop per device}}{\\text{measured step time in seconds}}$$
 
 - Here we have `TFLOP/s/device: 134.924`. Let's try to verify manually: $764.67 / 5.667 = 134.934$. Not exactly the same but close, since the both tflop and time are rounded in the log.
 - Further, we can calculate **Model FLOPs Utilization (MFU)** from this:
 
-$$\text{MFU} = \frac{\text{tflop/s/device}}{\text{peak hardware tflop/s}}$$
+$$\\text{MFU} = \\frac{\\text{tflop/s/device}}{\\text{peak hardware tflop/s}}$$
 
-For TPU v5p, $\text{peak hardware tflop/s}=459$. Thus, $134.924 / 459 = 29.40$%. Note this is an example for explanation with small batch size and sequence length, so the MFU is not optimal.
+For TPU v5p, $\\text{peak hardware tflop/s}=459$. Thus, $134.924 / 459 = 29.40$%. Note this is an example for explanation with small batch size and sequence length, so the MFU is not optimal.
 
 **Tokens per second per device (throughput)**
 
 - It is [computed](https://github.com/AI-Hypercomputer/maxtext/blob/28e5097ac467ed8b1d17676d68aa5acc50f9d60d/src/MaxText/metric_logger.py#L215-L217) as
 
-$$\text{token/s/device} = \frac{\text{number of tokens per device}}{\text{measured step time in seconds}}$$
+$$\\text{token/s/device} = \\frac{\\text{number of tokens per device}}{\\text{measured step time in seconds}}$$
 
 - The numerator is from [calculate_tokens_training_per_device](https://github.com/AI-Hypercomputer/maxtext/blob/28e5097ac467ed8b1d17676d68aa5acc50f9d60d/src/MaxText/maxtext_utils.py#L148)
 
-$$\text{number of tokens per device} = \text{per device batch size} \times \text{max target length}$$
+$$\\text{number of tokens per device} = \\text{per device batch size} \\times \\text{max target length}$$
 
-- Here we have `Tokens/s/device: 8672.758`. Let's try to verify manually: $24 \times 2048 / 5.667 = 8673.372$. Not exactly the same but close, since the time is rounded in the log.
+- Here we have `Tokens/s/device: 8672.758`. Let's try to verify manually: $24 \\times 2048 / 5.667 = 8673.372$. Not exactly the same but close, since the time is rounded in the log.
 
 ### 4.2. Learning metrics
 
 **Loss**. The loss is the key indicator of learning progress, which should decrease over training steps. In this example, the loss is `12.038` at Step 0 and decreases to `10.374` at Step 9. Ideally, we want the loss to converge to a small value with sufficiently large training steps.
 
-**Total weights**. When discussing the throughput, we have $\text{number of tokens} = \text{per device batch size} \times \text{max target length} \times \text{number of device}$. In this example, $\text{number of tokens} = 24 \times 2048 \times 4 = 196608$. There are two types of tokens: real tokens and pad tokens. The pad tokens are placeholders introduced by data preprocessing: We truncate or pad each sentence to max target length. Only real tokens contribute to the learning signal (i.e., loss). Therefore, we monitor $\text{number of real tokens}$, which is shown as [total weights](https://github.com/AI-Hypercomputer/maxtext/blob/28e5097ac467ed8b1d17676d68aa5acc50f9d60d/src/MaxText/train.py#L151).
+**Total weights**. When discussing the throughput, we have $\\text{number of tokens} = \\text{per device batch size} \\times \\text{max target length} \\times \\text{number of device}$. In this example, $\\text{number of tokens} = 24 \\times 2048 \\times 4 = 196608$. There are two types of tokens: real tokens and pad tokens. The pad tokens are placeholders introduced by data preprocessing: We truncate or pad each sentence to max target length. Only real tokens contribute to the learning signal (i.e., loss). Therefore, we monitor $\\text{number of real tokens}$, which is shown as [total weights](https://github.com/AI-Hypercomputer/maxtext/blob/28e5097ac467ed8b1d17676d68aa5acc50f9d60d/src/MaxText/train.py#L151).
 
 - Here we see `total_weights: 196608` for all steps. This is because we are using `dataset_type=synthetic`, where all sentences are generated with a length of `max_target_length=2048`. As a result, there are no pad tokens and total weights = number of tokens.
 - However, in real datasets, sentences can have variable lengths and total weights < number of tokens. For example, we can set `dataset_type=tfds dataset_path=gs://maxtext-dataset dataset_name='c4/en:3.0.1'`, and will see total weights smaller than `196608`:
@@ -283,4 +283,4 @@ $$\text{number of tokens per device} = \text{per device batch size} \times \text
   completed step: 8, seconds: 5.670, TFLOP/s/device: 134.856, Tokens/s/device: 8668.393, total_weights: 163259, loss: 9.596
   completed step: 9, seconds: 5.669, TFLOP/s/device: 134.884, Tokens/s/device: 8670.184, total_weights: 155934, loss: 9.580
   ```
-- For better convergence, we want to have large total weights. Towards this end, MaxText supports [packing](https://github.com/AI-Hypercomputer/maxtext/blob/28e5097ac467ed8b1d17676d68aa5acc50f9d60d/src/MaxText/sequence_packing.py#L37) multiple short sequences into one. This is enabled by default with `packing=True` in [base.yml](https://github.com/AI-Hypercomputer/maxtext/blob/28e5097ac467ed8b1d17676d68aa5acc50f9d60d/src/maxtext/configs/base.yml#L465).
+- For better convergence, we want to have large total weights. Towards this end, MaxText supports [packing](https://github.com/AI-Hypercomputer/maxtext/blob/28e5097ac467ed8b1d17676d68aa5acc50f9d60d/src/MaxText/sequence_packing.py#L37) multiple short sequences into one. This is enabled by default with `packing=True` in [base.yml](https://github.com/AI-Hypercomputer/maxtext/blob/ccd91f48454ed887c1ba2fe27d5c6214cff2817c/src/maxtext/configs/base.yml#L598).

@@ -13,12 +13,12 @@ MaxText builds on the following core technologies:
 
 The following table provides a high-level overview to scaffold understanding before a more detailed exploration.
 
-| Technology | Role in MaxText | Key Benefit for LLM Training |
-| :---- | :---- | :---- |
-| JAX | Programming Model & Transformations | Enables scalable, composable, and differentiable model definitions in pure Python. |
-| JAX Pallas | Custom Kernel Language | Allows for hand-tuned, hardware-specific kernels for peak performance on novel operations (e.g., MoE, custom attention). |
-| XLA | JAX Compiler | Automatically fuses operations and compiles HLO code, emitted by JAX into optimized LLO machine code for TPUs/GPUs. |
-| Mosaic | Pallas Compiler | Compiles the Mosaic IR code emitted by JAX Pallas into LLO |
+| Technology | Role in MaxText                     | Key Benefit for LLM Training                                                                                             |
+| :--------- | :---------------------------------- | :----------------------------------------------------------------------------------------------------------------------- |
+| JAX        | Programming Model & Transformations | Enables scalable, composable, and differentiable model definitions in pure Python.                                       |
+| JAX Pallas | Custom Kernel Language              | Allows for hand-tuned, hardware-specific kernels for peak performance on novel operations (e.g., MoE, custom attention). |
+| XLA        | JAX Compiler                        | Automatically fuses operations and compiles HLO code, emitted by JAX into optimized LLO machine code for TPUs/GPUs.      |
+| Mosaic     | Pallas Compiler                     | Compiles the Mosaic IR code emitted by JAX Pallas into LLO                                                               |
 
 ## 1. JAX: the high-performance engine of MaxText
 
@@ -58,7 +58,7 @@ JAX provides powerful, high-level abstractions for SPMD programming. [`jax.vmap`
 
 This unified scalability model is a key advantage of the JAX ecosystem. Training large LLMs requires different types of parallelism—data parallelism (splitting the batch), tensor parallelism (splitting a single matrix multiplication), and pipeline parallelism (splitting layers across devices). In many frameworks, implementing these requires different APIs, libraries, or coding patterns, which adds significant complexity. In JAX, all these forms of parallelism can be expressed through the single, unified concept of sharding tensors over a logical device mesh. For data parallelism, one shards the batch dimension of the input data. For tensor parallelism, one shards the weight matrices along their feature or output dimensions.
 
-MaxText leverages this unification to great effect. The core model code remains largely agnostic to the parallelism strategy. Scalability is controlled primarily by changing the level of each kind of parallelism  in configuration files. This abstraction is a primary reason MaxText can be described as both "simple" and "massively scalable," as the immense complexity of distributed execution is handled by JAX and the XLA compiler, rather than the user.
+MaxText leverages this unification to great effect. The core model code remains largely agnostic to the parallelism strategy. Scalability is controlled primarily by changing the level of each kind of parallelism in configuration files. This abstraction is a primary reason MaxText can be described as both "simple" and "massively scalable," as the immense complexity of distributed execution is handled by JAX and the XLA compiler, rather than the user.
 
 ### 1.4. Composability: the JAX superpower
 
