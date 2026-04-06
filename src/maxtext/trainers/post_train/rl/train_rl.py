@@ -336,7 +336,7 @@ def prepare_datasets(trainer_config, model_tokenizer):
       "nvidia/OpenMathReasoning",
       "open-r1/OpenR1-Math-220k",
       "bethgelab/CuratedThoughts",
-  ] and (not eval_dataset_name or eval_dataset_name == trainer_config.dataset_name):
+  ] and eval_dataset_name == trainer_config.dataset_name:
     import datasets  # pylint: disable=import-outside-toplevel
 
     splits = prepare_train_and_eval_dataset(trainer_config)
