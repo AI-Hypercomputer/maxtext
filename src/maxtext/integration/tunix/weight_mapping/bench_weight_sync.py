@@ -37,7 +37,7 @@ _JAX_COMPILATION_CACHE_DIR = "/tmp/jax_cache"
 # Flags
 FLAGS = flags.FLAGS
 _XPROF = flags.DEFINE_bool('xprof', False, 'xprof')
-_RAND_INIT = flags.DEFINE_bool('rand_init', True, 'Whether to use random initialization instead of loading from checkpoint, for faster testing.')  
+_RAND_INIT = flags.DEFINE_bool('rand_init', False, 'Whether to use random initialization instead of loading from checkpoint, for faster testing.')  
 
 def _setup_jax_compilation_cache():
   jax_config.update("jax_compilation_cache_dir", _JAX_COMPILATION_CACHE_DIR)
@@ -163,10 +163,10 @@ def _load_maxtext_model(base_yaml_path):
       query_proj="offload",
       key_proj="offload",
       value_proj="offload",
-      # ici_expert_parallelism=4,
-      ici_fsdp_parallelism=2,
-      ici_tensor_parallelism=2,
-      rollout_tensor_parallelism=2,
+      ici_expert_parallelism=4,
+      # ici_fsdp_parallelism=2,
+      # ici_tensor_parallelism=2,
+      rollout_tensor_parallelism=4,
       override_model_config="true",
       # debug_sharding="true",
       checkpoint_storage_concurrent_gb=80,
@@ -355,17 +355,25 @@ class MaxTextToVLLMConverter:
         wi_1 = jnp.transpose(wi_1, (1, 0, 2, 3))
 
         def _fuse_single(w0, w1):
-          # [e, d_model, d_inner] -> [e, 2*d_inner, d_model]
+          # [e, d_model, d_inner] -> [e, 2*padded_chunk_size*tp, d_model]
           w0 = jnp.transpose(w0, (0, 2, 1))  # gate: [e, d_inner, d_model]
           w1 = jnp.transpose(w1, (0, 2, 1))  # up:   [e, d_inner, d_model]
           e, d_inner, d_model = w0.shape
           # Chunk-level interleave to match vLLM TP sharding:
           # layout: [gate_chunk0, up_chunk0, gate_chunk1, up_chunk1, ...]
           chunk_size = d_inner // tp
+          # Pad each TP chunk up to the next multiple of 128 for TPU GMM kernel
+          # alignment (same logic as process_w13_for_gmm in tpu_inference).
+          # e.g. d_inner=768, tp=4 → chunk=192 → padded=256; tp=8 → 96 → 128.
+          padded_chunk_size = ((chunk_size + 127) // 128) * 128
+          pad_amount = padded_chunk_size - chunk_size
           gate_chunks = w0.reshape(e, tp, chunk_size, d_model)
           up_chunks = w1.reshape(e, tp, chunk_size, d_model)
+          if pad_amount > 0:
+            gate_chunks = jnp.pad(gate_chunks, ((0, 0), (0, 0), (0, pad_amount), (0, 0)))
+            up_chunks   = jnp.pad(up_chunks,   ((0, 0), (0, 0), (0, pad_amount), (0, 0)))
           combined = jnp.stack([gate_chunks, up_chunks], axis=2)
-          return combined.reshape(e, 2 * d_inner, d_model)
+          return combined.reshape(e, 2 * padded_chunk_size * tp, d_model)
 
         return jax.vmap(_fuse_single)(wi_0, wi_1)  # -> (l, e, 2*d_inner, d_model)
 
@@ -449,13 +457,13 @@ def main():
   llm = LLM(
     "Qwen/Qwen3-30B-A3B",
     max_model_len=16,
+    tensor_parallel_size=4,
     # tensor_parallel_size=4,
-    # tensor_parallel_size=4,
-    tensor_parallel_size=2,
-    data_parallel_size=2,
+    # tensor_parallel_size=2,
+    # data_parallel_size=2,
     # enable_expert_parallel=True,
     gpu_memory_utilization=0.65,
-    # load_format="dummy",
+    load_format="dummy",
     async_scheduling=False,
   )
   print("\n" + "="*80)
