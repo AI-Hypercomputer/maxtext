@@ -490,7 +490,7 @@ def main():
       # Unwrap NNX Param → plain jax.Array; plain arrays pass through unchanged.
       weight_array = weight.value if hasattr(weight, 'value') else weight
       dst_sharding = llm_state[key].sharding
-      # print(f"Assigning {key}: src shape={weight_array.shape}, src sharding={weight_array.sharding}; dst shape={llm_state[key].shape}, dst sharding={dst_sharding}")
+      print(f"{key}: mt {weight_array.shape}, vllm {llm_state[key].shape}")
       llm_state[key] = _get_reshard_fn(dst_sharding)(weight_array)
       # array_allclose = np.allclose(
       #     np.asarray(llm_state[key]), np.asarray(weight_array), rtol=1e-2, atol=1e-2
