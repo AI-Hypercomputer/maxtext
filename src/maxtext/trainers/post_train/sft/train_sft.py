@@ -43,12 +43,14 @@ import jax
 import optax
 import pathwaysutils
 
-from flax.linen import partitioning as nn_partitioning
+import flax.linen as nn
+from flax import nnx
 
 from orbax import checkpoint as ocp
 
 from tunix.sft import metrics_logger, peft_trainer, profiler
 
+from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from maxtext.configs import pyconfig
 from maxtext.trainers.pre_train.train import loss_fn
 from maxtext.common.goodput import (
@@ -109,6 +111,7 @@ def get_tunix_config(mt_config):
       checkpointing_options=checkpointing_options,
       metrics_logging_options=metrics_logging_options,
       profiler_options=profiler_options,
+      skip_sharding_optimizer=True,
   )
 
 
@@ -135,6 +138,10 @@ def use_maxtext_loss_function(trainer, mt_config):
         "targets_position": targets_position,
         "targets_segmentation": targets_segmentation,
     }
+    # If the model is wrapped in TunixMaxTextAdapter, we should unwrap it
+    # because MaxText's loss_fn expects the raw Transformer interface.
+    if isinstance(model, TunixMaxTextAdapter):
+      model = model.base
     return loss_fn(model, mt_config, data, dropout_rng=None, params=None, is_train=True)
 
   trainer = trainer.with_loss_fn(loss_func, has_aux=True)
@@ -147,6 +154,10 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
 
   with maybe_record_goodput(goodput_recorder, GoodputEvent.TPU_INIT):
     model, mesh = model_creation_utils.create_nnx_model(mt_config)
+
+    # Wrap model with Tunix adapter for consistent interface
+    model = TunixMaxTextAdapter(model)
+
     learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(mt_config)
     # pass in model for muon
     optimizer = optimizers.get_optimizer(mt_config, learning_rate_schedule, model)
@@ -157,11 +168,24 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
           optimizer,
       )
 
+    # Pre-shard the optimizer to avoid TypeError in Tunix _shard_optimizer
+    # Tunix will now detect it's already sharded and skip its internal sharding logic.
+    with mesh, nn.logical_axis_rules(mt_config.logical_axis_rules):
+      nnx_optimizer = nnx.Optimizer(model, optimizer, wrt=nnx.Param)
+      opt_state = nnx.state(nnx_optimizer, nnx.optimizer.OptState)
+      opt_pspecs = nnx.get_partition_spec(opt_state)
+      opt_sharded_state = jax.lax.with_sharding_constraint(opt_state, opt_pspecs)
+      nnx.update(nnx_optimizer, opt_sharded_state)
+
   with maybe_record_goodput(goodput_recorder, GoodputEvent.TRAINING_PREPARATION):
     training_hooks = hooks.SFTTrainingHooks(mt_config, mesh, learning_rate_schedule, goodput_recorder)
     data_hooks = hooks.SFTDataHooks(mt_config, mesh, goodput_recorder)
 
-    trainer = peft_trainer.PeftTrainer(model, optimizer, tunix_config)
+    # Create the trainer within the correct JAX context to ensure checkpoint restoration
+    # and internal sharding checks have access to the hardware mesh and axis rules.
+    with mesh, nn.logical_axis_rules(mt_config.logical_axis_rules):
+      trainer = peft_trainer.PeftTrainer(model, nnx_optimizer, tunix_config)
+
     trainer.with_training_hooks(training_hooks)
     trainer.with_data_hooks(data_hooks)
     trainer = use_maxtext_loss_function(trainer, mt_config)
@@ -171,7 +195,7 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
 
 def train_model(mt_config, trainer, mesh):
   """Runs the SFT training loop in Tunix."""
-  with mesh, nn_partitioning.axis_rules(mt_config.logical_axis_rules):
+  with jax.set_mesh(mesh), mesh, nn.logical_axis_rules(mt_config.logical_axis_rules):
     trainer.train(trainer.data_hooks.train_data_iterator, trainer.data_hooks.eval_data_iterator)
   return trainer
 

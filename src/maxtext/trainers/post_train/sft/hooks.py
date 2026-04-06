@@ -25,6 +25,7 @@ else:
   from typing_extensions import override
 
 import jax
+import time
 import jax.numpy as jnp
 
 from flax import nnx
@@ -54,6 +55,7 @@ class SFTTrainingHooks(TrainingHooks):
     self.metadata = {}
     self.train_metadata = defaultdict(float)
     self.eval_metadata = defaultdict(float)
+    self.step_start_time = 0.0
 
   @override
   def on_train_start(self, train_ctx: peft_trainer.PeftTrainer):
@@ -93,6 +95,7 @@ class SFTTrainingHooks(TrainingHooks):
   @override
   def on_train_step_start(self, train_ctx: peft_trainer.PeftTrainer):
     """Called at the beginning of a training step."""
+    self.step_start_time = time.time()
     if self.config.enable_goodput_recording:
       record_goodput(self.goodput_recorder, f"record_{GoodputEvent.STEP.value}_start_time", train_ctx.train_steps)
 
@@ -125,13 +128,16 @@ class SFTTrainingHooks(TrainingHooks):
     if self.metadata["first_train_step"] == train_step - 1:
       max_utils.print_mem_stats("After params initialized")
 
+    # Use our own timing since Tunix might pass 0.0
+    actual_step_time = time.time() - self.step_start_time
+
     metrics = {
         "scalar": {
             "learning/loss": train_loss,
             "learning/total_weights": self.train_metadata[train_step - 1]["total_weights"],
         }
     }
-    self.metric_logger.record_train_metrics(metrics, train_step, step_time)
+    self.metric_logger.record_train_metrics(metrics, train_step, actual_step_time)
     self.metric_logger.write_metrics(metrics, train_step)
     del self.train_metadata[train_step - 1]
 
