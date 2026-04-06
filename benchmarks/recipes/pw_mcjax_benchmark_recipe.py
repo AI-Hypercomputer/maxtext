@@ -18,14 +18,14 @@ import sys
 
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.append(parent_dir)
-from . import args_helper as helper
-from .user_configs import UserConfig
-from .user_configs import USER_CONFIG
-from .runner_utils import generate_and_run_workloads
-from . import parser_utils
+from benchmarks.recipes import args_helper as helper
+from benchmarks.recipes import parser_utils
+from benchmarks.recipes.pw_utils import check_and_create_bucket
+from benchmarks.recipes.runner_utils import generate_and_run_workloads
+from benchmarks.recipes.user_configs import UserConfig
+from benchmarks.recipes.user_configs import USER_CONFIG
 import argparse
 from google.cloud import storage
-from .pw_utils import check_and_create_bucket
 
 
 def main(user_config) -> int:

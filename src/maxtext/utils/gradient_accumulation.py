@@ -94,6 +94,7 @@ def gradient_accumulation_loss_and_grad(
     (_, aux), cur_batch_gradient = grad_func(model, config, data, dropout_rng, ga_params, *extra_dpo_args, is_train=True)
     acc_grad_and_loss["loss"] += aux["total_loss"]
     acc_grad_and_loss["moe_lb_loss"] += aux["moe_lb_loss"]
+    acc_grad_and_loss["indexer_loss"] += aux["indexer_loss"]
     acc_grad_and_loss["mtp_loss"] += aux["mtp_loss"]
     acc_grad_and_loss["grad"] = jax.tree_util.tree_map(lambda x, y: x + y, cur_batch_gradient, acc_grad_and_loss["grad"])
     acc_grad_and_loss["total_weights"] += aux["total_weights"]
@@ -114,6 +115,7 @@ def gradient_accumulation_loss_and_grad(
       "grad": init_grad,
       "total_weights": 0,
       "moe_lb_loss": 0.0,
+      "indexer_loss": 0.0,
       "mtp_loss": 0.0,
       "ga_params": ga_params,
   }
@@ -124,6 +126,7 @@ def gradient_accumulation_loss_and_grad(
   loss = (
       grad_and_loss["loss"] / grad_and_loss["total_weights"]
       + grad_and_loss["moe_lb_loss"] / config.gradient_accumulation_steps
+      + grad_and_loss["indexer_loss"] / config.gradient_accumulation_steps
       + grad_and_loss["mtp_loss"] / config.gradient_accumulation_steps
   )
   raw_grads = grad_and_loss["grad"]

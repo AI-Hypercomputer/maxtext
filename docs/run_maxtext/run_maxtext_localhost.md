@@ -36,30 +36,15 @@ Local development on a single host TPU/GPU VM is a convenient way to run MaxText
 
 1. Create and SSH to the single host VM of your choice. You can use any available single host TPU, such as `v5litepod-8`, `v5p-8`, or `v4-8`. For GPUs, you can use `nvidia-h100-mega-80gb`, `nvidia-h200-141gb`, or `nvidia-b200`. For setting up a TPU VM, use the Cloud TPU documentation available at https://cloud.google.com/tpu/docs/managing-tpus-tpu-vm. For a GPU setup, refer to the guide at https://cloud.google.com/compute/docs/gpus/create-vm-with-gpus.
 
-2. Clone MaxText onto that VM.
-
-   ```bash
-   git clone https://github.com/google/maxtext.git
-   cd maxtext
-   ```
-
-3. Once you have cloned the repository, you have two primary options for setting up the necessary dependencies on your VM: Installing in a Python Environment, or building a Docker container. For single host workloads, we recommend to install dependencies in a python environment, and for multihost workloads we recommend the containerized approach.
-
-Within the root directory of the cloned repo, create a virtual environment and install dependencies and the pre-commit hook by running:
-
-```bash
-python3.12 -m venv ~/venv-maxtext
-source ~/venv-maxtext/bin/activate
-bash tools/setup/setup.sh DEVICE={tpu|gpu}
-```
+2. For instructions on installing MaxText on your VM, please refer to the [official documentation](https://maxtext.readthedocs.io/en/latest/install_maxtext.html).
 
 #### Run a Test Training Job
 
 After the installation is complete, run a short training job using synthetic data to confirm everything is working correctly. This command trains a model for just 10 steps. Remember to replace `$YOUR_JOB_NAME` with a unique name for your run and `gs://<my-bucket>` with the path to the GCS bucket you configured in the prerequisites.
 
 ```bash
-python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
-  run_name=$YOUR_JOB_NAME \
+python3 -m maxtext.trainers.pre_train.train \
+  run_name=${YOUR_JOB_NAME?} \
   base_output_directory=gs://<my-bucket> \
   dataset_type=synthetic \
   steps=10
@@ -72,8 +57,8 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
 To demonstrate model output, run the following command:
 
 ```bash
-python3 -m maxtext.inference.decode src/maxtext/configs/base.yml \
-  run_name=$YOUR_JOB_NAME \
+python3 -m maxtext.inference.decode \
+  run_name=${YOUR_JOB_NAME?} \
   base_output_directory=gs://<my-bucket> \
   per_device_batch_size=1
 ```
@@ -92,9 +77,9 @@ To use a pre-configured model for TPUs, you override the `model_name` parameter,
 <summary><strong>llama3-8b (TPU)</strong></summary>
 
 ```bash
-python3 -m maxtext.trainers.pre_train.train maxtext/configs/base.yml \
+python3 -m maxtext.trainers.pre_train.train \
   model_name=llama3-8b \
-  run_name=$YOUR_JOB_NAME \
+  run_name=${YOUR_JOB_NAME?} \
   base_output_directory=gs://<my-bucket> \
   dataset_type=synthetic \
   steps=10
@@ -106,9 +91,9 @@ python3 -m maxtext.trainers.pre_train.train maxtext/configs/base.yml \
 <summary><strong>qwen3-4b (TPU)</strong></summary>
 
 ```bash
-python3 -m maxtext.trainers.pre_train.train maxtext/configs/base.yml \
+python3 -m maxtext.trainers.pre_train.train \
   model_name=qwen3-4b \
-  run_name=$YOUR_JOB_NAME \
+  run_name=${YOUR_JOB_NAME?} \
   base_output_directory=gs://<my-bucket> \
   dataset_type=synthetic \
   steps=10
@@ -125,7 +110,7 @@ To use a GPU-optimized configuration, you should specify the path to the model's
 
 ```bash
 python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/gpu/models/mixtral_8x7b.yml \
-  run_name=$YOUR_JOB_NAME \
+  run_name=${YOUR_JOB_NAME?} \
   base_output_directory=gs://<my-bucket> \
   dataset_type=synthetic \
   steps=10
@@ -140,7 +125,7 @@ This will load `gpu/mixtral_8x7b.yml`, which inherits from `base.yml`.
 
 ```bash
 python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/gpu/models/llama3-8b.yml \
-  run_name=$YOUR_JOB_NAME \
+  run_name=${YOUR_JOB_NAME?} \
   base_output_directory=gs://<my-bucket> \
   dataset_type=synthetic \
   steps=10

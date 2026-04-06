@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@ model name. This allows for easy extension to support new models.
 from maxtext.integration.tunix.weight_mapping.deepseek3 import DEEPSEEK_VLLM_MAPPING
 from maxtext.integration.tunix.weight_mapping.gpt_oss import GPT_OSS_VLLM_MAPPING
 from maxtext.integration.tunix.weight_mapping.llama3 import LLAMA3_VLLM_MAPPING
+from maxtext.integration.tunix.weight_mapping.qwen2 import QWEN2_VLLM_MAPPING
 from maxtext.integration.tunix.weight_mapping.qwen3 import QWEN3_VLLM_MAPPING
 
 
@@ -30,6 +31,8 @@ class StandaloneVllmWeightMapping:
   def __getattr__(self, name):
     if name.startswith("llama3.1"):
       return LLAMA3_VLLM_MAPPING
+    elif name.startswith("qwen2"):
+      return QWEN2_VLLM_MAPPING
     elif name.startswith("qwen3"):
       return QWEN3_VLLM_MAPPING
     elif name.startswith("deepseek3"):

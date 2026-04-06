@@ -75,8 +75,8 @@ In this scenario, you should configure each pod in that slice with a ramdisk of 
    ```
 2. **Configure gcloud:**
    ```bash
-   gcloud config set project ${PROJECT_ID}
-   gcloud config set compute/zone ${ZONE}
+   gcloud config set project ${PROJECT_ID?}
+   gcloud config set compute/zone ${ZONE?}
    ```
 3. **Clone the XPK repository:**
    ```bash
@@ -85,15 +85,15 @@ In this scenario, you should configure each pod in that slice with a ramdisk of 
 4. **Run the cluster creation command:**
    ```bash
    python3 xpk/xpk.py cluster create \
-   --cluster ${CLUSTER_NAME} \
-   --cluster-cpu-machine-type=${MACHINE_TYPE} \
-   --num-slices=${NUM_SLICES} \
-   --tpu-type=${TPU_TYPE} \
+   --cluster ${CLUSTER_NAME?} \
+   --cluster-cpu-machine-type=${MACHINE_TYPE?} \
+   --num-slices=${NUM_SLICES?} \
+   --tpu-type=${TPU_TYPE?} \
    --enable-mtc \
    --enable-gcsfuse-csi-driver \
-   --mtc-ramdisk-size=${RAMDISK_SIZE} \
-   --mtc-gcs-bucket=${OUTPUT_PATH} \
-   --gke-version=${GKE_VERSION}
+   --mtc-ramdisk-size=${RAMDISK_SIZE?} \
+   --mtc-gcs-bucket=${OUTPUT_PATH?} \
+   --gke-version=${GKE_VERSION?}
    ```
 
 ## MaxText configuration
@@ -113,6 +113,16 @@ MaxText provides a set of configuration flags to control checkpointing options. 
 | `local_checkpoint_period`              | The interval, in training steps, for how often a **local checkpoint** is saved. This should be set to a much smaller value than `checkpoint_period` for frequent, low-overhead saves.                                                                                                                    | `integer` | `0`     |
 | `checkpoint_period`                    | The interval, in training steps, for how often a checkpoint is saved to **persistent storage**.                                                                                                                                                                                                          | `integer` | `10000` |
 | `enable_single_replica_ckpt_restoring` | If `True`, one replica reads the checkpoint from storage and then broadcasts it to all other replicas. This can significantly speed up restoration on multi-host systems by reducing redundant reads from storage.                                                                                       | `boolean` | `False` |
+| `enable_autocheckpoint`                | If `True`, enables saving a checkpoint when a preemption signal (SIGTERM) is received. This is a reactive mechanism that saves to persistent storage.                                                                                                                                                    | `boolean` | `False` |
+
+### Autocheckpoint vs. Emergency Checkpointing
+
+While both features aim to protect against progress loss, they operate differently:
+
+- **Autocheckpoint (`enable_autocheckpoint`)**: A **reactive** mechanism. When the infrastructure sends a `SIGTERM` signal (indicating imminent preemption or maintenance), MaxText immediately attempts to save a checkpoint to persistent storage (GCS). It is best for handling planned maintenance or preemptions where a short grace period is provided.
+- **Emergency Checkpointing (`enable_emergency_checkpoint`)**: A **proactive** mechanism. It saves checkpoints very frequently to local, high-speed storage (ramdisk). If a failure occurs *without* warning, the job can recover from the most recent local checkpoint. It is best for handling sudden hardware failures.
+
+For maximum reliability, both features can be enabled simultaneously.
 
 ## Workload creation using XPK
 
@@ -150,12 +160,12 @@ The flags below would give the user access to the ramdisk in their workload:
 
    ```bash
    python3 xpk/xpk.py workload create \
-   --cluster ${CLUSTER_NAME} \
-   --docker-image ${DOCKER_IMAGE} \
-   --workload ${WORKLOAD_NAME} \
-   --tpu-type=${TPU_TYPE} \
-   --num-slices=${NUM_SLICES} \
-   --ramdisk-directory=${RAMDISK_DIRECTORY} \
+   --cluster ${CLUSTER_NAME?} \
+   --docker-image ${DOCKER_IMAGE?} \
+   --workload ${WORKLOAD_NAME?} \
+   --tpu-type=${TPU_TYPE?} \
+   --num-slices=${NUM_SLICES?} \
+   --ramdisk-directory=${RAMDISK_DIRECTORY?} \
    --mtc-enabled \
-   --command "python3 src/maxtext/trainers/pre_train/train.py src/maxtext/configs/base.yml base_output_directory=$OUTPUT_PATH dataset_path=$DATA_PATH steps=120 per_device_batch_size=6 enable_checkpoint_cloud_logger=True checkpoint_period=${CHECKPOINT_PEROID} enable_emergency_checkpoint=True local_checkpoint_period=${LOCAL_CHECKPOINT_PERIOD} local_checkpoint_directory=/${RAMDISK_DIRECTORY}"
+   --command "python3 src/maxtext/trainers/pre_train/train.py src/maxtext/configs/base.yml base_output_directory=${OUTPUT_PATH?} dataset_path=${DATA_PATH?} steps=120 per_device_batch_size=6 enable_checkpoint_cloud_logger=True checkpoint_period=${CHECKPOINT_PEROID?} enable_emergency_checkpoint=True local_checkpoint_period=${LOCAL_CHECKPOINT_PERIOD?} local_checkpoint_directory=/${RAMDISK_DIRECTORY?}"
    ```

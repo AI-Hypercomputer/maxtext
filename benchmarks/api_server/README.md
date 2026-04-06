@@ -131,17 +131,17 @@ export ICI_EXPERT_PARALLELISM=2
 # 2. Define the Command to Run on the Cluster
 # ==============================================================================
 # This command installs dependencies and then starts the server.
-CMD="export HF_TOKEN=${HF_TOKEN} && \
+CMD="export HF_TOKEN=${HF_TOKEN?} && \
      pip install --upgrade pip && \
      pip install -r benchmarks/api_server/requirements.txt && \
      bash benchmarks/api_server/start_server.sh \
         maxtext/configs/base.yml \
-        model_name="${MODEL_NAME}" \
-        tokenizer_path="${TOKENIZER_PATH}" \
-        load_parameters_path="${LOAD_PARAMETERS_PATH}" \
-        per_device_batch_size=${PER_DEVICE_BATCH_SIZE} \
-        ici_tensor_parallelism=${ICI_TENSOR_PARALLELISM} \
-        ici_expert_parallelism=${ICI_EXPERT_PARALLELISM} \
+        model_name="${MODEL_NAME?}" \
+        tokenizer_path="${TOKENIZER_PATH?}" \
+        load_parameters_path="${LOAD_PARAMETERS_PATH?}" \
+        per_device_batch_size=${PER_DEVICE_BATCH_SIZE?} \
+        ici_tensor_parallelism=${ICI_TENSOR_PARALLELISM?} \
+        ici_expert_parallelism=${ICI_EXPERT_PARALLELISM?} \
         tokenizer_type=\"huggingface\" \
         return_log_prob=True"
 
@@ -149,16 +149,16 @@ CMD="export HF_TOKEN=${HF_TOKEN} && \
 # ==============================================================================
 # 3. Launch the Workload
 # ==============================================================================
-echo "Launching workload ${RUNNAME}..."
-xpk workload create --workload "${RUNNAME}" \
-  --base-docker-image "${DOCKER_IMAGE}" \
-  --command "${CMD}" \
+echo "Launching workload ${RUNNAME?}..."
+xpk workload create --workload "${RUNNAME?}" \
+  --base-docker-image "${DOCKER_IMAGE?}" \
+  --command "${CMD?}" \
   --num-slices=1  \
-  --cluster "${CLUSTER}" --device-type "${DEVICE_TYPE}" --project "${PROJECT}" --zone "${ZONE}"
+  --cluster "${CLUSTER?}" --device-type "${DEVICE_TYPE?}" --project "${PROJECT?}" --zone "${ZONE?}"
 
-echo "Workload ${RUNNAME} created."
+echo "Workload ${RUNNAME?} created."
 echo "Use the following command to connect:"
-echo "bash benchmarks/api_server/port_forward_xpk.sh job_name=${RUNNAME} project=${PROJECT} zone=${ZONE} cluster=${CLUSTER}"
+echo "bash benchmarks/api_server/port_forward_xpk.sh job_name=${RUNNAME?} project=${PROJECT?} zone=${ZONE?} cluster=${CLUSTER?}"
 ```
 
 ### 2. Launch the Workload

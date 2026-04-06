@@ -19,9 +19,10 @@ List of all supported models and architectures.
 ::::
 
 ```{toctree}
-:hidden:
-:maxdepth: 1
-
+---
+hidden:
+maxdepth: 1
+---
 models/tiering.md
 models/supported_models_and_architectures.md
 ```

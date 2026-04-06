@@ -51,7 +51,7 @@ Before you begin, you must have the necessary tools installed and permissions co
 
 - **kubectl:** The Kubernetes command-line tool.
 
-- **Docker:** Follow the [installation instructions](https://docs.docker.com/engine/install/) and complete the [post-install steps](https://docs.docker.com/engine/install/linux-postinstall/) to run Docker without `sudo`.
+- **Docker:** Follow the [installation instructions](https://docs.docker.com/engine/install/) and [follow the steps to configure sudoless Docker](https://docs.docker.com/engine/install/linux-postinstall/).
 
 ### GCP permissions
 
@@ -99,49 +99,13 @@ These commands configure your local environment to connect to Google Cloud servi
 
 ______________________________________________________________________
 
-## 3. Install XPK
+## 3. Build the MaxText Docker image
 
-It is best practice to install XPK in a dedicated Python virtual environment.
-
-```
-# Create a virtual environment (only needs to be done once)
-python3 -m venv ~/xpk_venv
-
-# Activate the virtual environment (do this every time you open a new terminal)
-source ~/xpk_venv/bin/activate
-
-# Install XPK
-pip install xpk
-```
+For instructions on building the MaxText Docker image, please refer to the [official documentation](https://maxtext.readthedocs.io/en/latest/build_maxtext.html).
 
 ______________________________________________________________________
 
-## 4. Build the MaxText Docker image
-
-1. **Clone the MaxText repository**
-
-   ```
-   git clone https://github.com/google/maxtext.git
-   cd maxtext
-   ```
-
-2. **Build the image for your target hardware (TPU or GPU)** This script creates a local Docker image named `maxtext_base_image`.
-
-   - **For TPUs:**
-
-     ```
-     bash dependencies/scripts/docker_build_dependency_image.sh DEVICE=tpu MODE=stable
-     ```
-
-   - **For GPUs:**
-
-     ```
-     bash dependencies/scripts/docker_build_dependency_image.sh DEVICE=gpu MODE=stable
-     ```
-
-______________________________________________________________________
-
-## 5. Run your first MaxText job
+## 4. Run your first MaxText job
 
 This section assumes you have an existing GKE cluster with either TPU or GPU nodes.
 
@@ -162,8 +126,8 @@ This guide focuses on submitting workloads to an existing cluster. Cluster creat
 2. **Configure gcloud CLI**
 
    ```
-   gcloud config set project $PROJECT_ID
-   gcloud config set compute/zone $ZONE
+   gcloud config set project ${PROJECT_ID?}
+   gcloud config set compute/zone ${ZONE?}
    ```
 
 ### A Note on multi-slice and multi-node runs
@@ -178,29 +142,29 @@ For instance, to run a job across **four TPU slices**, you would change `--num-s
 
      ```
      xpk workload create\
-       --cluster ${CLUSTER_NAME}\
+       --cluster ${CLUSTER_NAME?}\
        --workload ${USER}-tpu-job\
        --base-docker-image maxtext_base_image\
        --tpu-type v5litepod-256\
        --num-slices 1\
-       --command "python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml run_name=${USER}-tpu-job base_output_directory=${BASE_OUTPUT_DIR} dataset_path=${DATASET_PATH} steps=100"
+       --command "python3 -m maxtext.trainers.pre_train.train run_name=${USER}-tpu-job base_output_directory=${BASE_OUTPUT_DIR?} dataset_path=${DATASET_PATH?} steps=100"
      ```
 
    - **On your GPU cluster:**
 
      ```
      xpk workload create\
-       --cluster ${CLUSTER_NAME}\
+       --cluster ${CLUSTER_NAME?}\
        --workload ${USER}-gpu-job\
        --base-docker-image maxtext_base_image\
        --device-type h100-80gb-8\
        --num-nodes 2\
-       --command "python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml run_name=${USER}-gpu-job base_output_directory=${BASE_OUTPUT_DIR} dataset_path=${DATASET_PATH} steps=100"
+       --command "python3 -m maxtext.trainers.pre_train.train run_name=${USER}-gpu-job base_output_directory=${BASE_OUTPUT_DIR?} dataset_path=${DATASET_PATH?} steps=100"
      ```
 
 ______________________________________________________________________
 
-## 6. Managing and monitoring your job
+## 5. Managing and monitoring your job
 
 - **View logs in real-time:** The easiest way to see the output of your training job is through the Google Cloud Console.
 
@@ -215,7 +179,7 @@ ______________________________________________________________________
 - **List your jobs:**
 
   ```
-  xpk workload list --cluster ${CLUSTER_NAME}
+  xpk workload list --cluster ${CLUSTER_NAME?}
   ```
 
 - **Analyze output:** Checkpoints and other artifacts will be saved to the Google Cloud Storage bucket you specified in `BASE_OUTPUT_DIR`.
@@ -223,5 +187,5 @@ ______________________________________________________________________
 - **Delete a job:**
 
   ```
-  xpk workload delete --cluster ${CLUSTER_NAME} --workload <your-workload-name>
+  xpk workload delete --cluster ${CLUSTER_NAME?} --workload <your-workload-name>
   ```

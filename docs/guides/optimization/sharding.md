@@ -26,14 +26,14 @@ When considering different sharding strategies, the main concern is the amount o
 
 We illustrate our sharding notation with an example matmul:
 
-$$B_xE  \times  EM = B_xM$$
+$$B_xE \\times EM = B_xM$$
 
 Where B, E and M are names of dimensions and a subscript denotes sharding. For example, $B_xE$ is a 2-dimensional matrix sharded along the $B$ dimension, using the $x$ mesh axis. Dimensions without a subscript are not sharded.
-This example is of standard data parallelism, only the batch dimension is sharded. Note that $B$ refers to the batch dimension, $B_x$ to the local shard of this dimension, whereas we use $\left|B\right|$ and $\left|B_x\right|$ to refer to the lengths of single axes, and $\left|x\right|$ as the degree of sharding on the x axis, e.g. $\left|B_x\right| = \left|B\right|/\left|x\right|$. We drop this $\left|\cdot\right|$ notation when there is a product to reduce clutter, e.g. we use $BEM_x$ instead of $\left|B\right|\left|E\right|\left|M_x\right|$.
+This example is of standard data parallelism, only the batch dimension is sharded. Note that $B$ refers to the batch dimension, $B_x$ to the local shard of this dimension, whereas we use $\\left|B\\right|$ and $\\left|B_x\\right|$ to refer to the lengths of single axes, and $\\left|x\\right|$ as the degree of sharding on the x axis, e.g. $\\left|B_x\\right| = \\left|B\\right|/\\left|x\\right|$. We drop this $\\left|\\cdot\\right|$ notation when there is a product to reduce clutter, e.g. we use $BEM_x$ instead of $\\left|B\\right|\\left|E\\right|\\left|M_x\\right|$.
 
 We illustrate this notation on model parallelism as well:
 
-$BM_x \times M_xE = BE \rightarrow \text{Reduce-Scatter (RS) over x} \rightarrow BE_x$
+$BM_x \\times M_xE = BE \\rightarrow \\text{Reduce-Scatter (RS) over x} \\rightarrow BE_x$
 
 Explanation: Both the activations ($BM$) and weights ($ME$) are sharded on the M dimension. Thus each device is able to perform the matmul locally with its shard of the $M_x$ dimension, the local result is of the right global shape ($BE$) but is only a partial result - it needs to be summed with the other shards to get the full result. This is achieved with a reduce scatter (which does the summation and additionally shards the activations). Note that some flavors of tensor parallelism call for an all reduce instead a reduce scatter, but generally in maxtext we use a reduce scatter here.
 
@@ -49,11 +49,11 @@ Explanation: Both the activations ($BM$) and weights ($ME$) are sharded on the M
 
 Note for the feed forward computation the batch and sequence dimensions act the same and thus we use only one $B$ axis (which you can think of as a token batch dimension, a reshaping of batch and sequence into one axis), but for context and sequence parallelism they act differently and thus we use both a $B$ and $S$ dimension and the $B$ dimension is really batch in sequences. For example a matmul with an explicit sequence dimension might look like
 
-$$BSE \times EM = BSM$$
+$$BSE \\times EM = BSM$$
 
 But for arithmetic intensity roofline analysis purposes the $B$ and $S$ axis act as one, and generally we omit the $S$ axis except for when its needed (context/sequence parallelism), thus we only write
 
-$$BE \times EM = BM$$
+$$BE \\times EM = BM$$
 
 We recognize this overloads the definition of $B$ but for arithmetic intensity purposes the only batch size that matters is batch in tokens - which imagines combining the $B$ and $S$ axis into one.
 
@@ -69,9 +69,9 @@ We will see why this is a useful definition by walking through an example.
 
 We want to be compute bound (because there is a fixed amount of compute to perform), which means we want the compute to take longer than the communication. Consider the above example (model parallelism aka tensor parallelism)
 
-$$ BM_x \times M_xE = BE \text{ (partial result)} \rightarrow \text{RS over x} \rightarrow BE_x $$
+$$ BM_x \\times M_xE = BE \\text{ (partial result)} \\rightarrow \\text{RS over x} \\rightarrow BE_x $$
 
-The compute is $BM_x \times M_xE = BE$ matmul, which takes $2BM_xE$ flops (you can think of this as $\left|B\right| * \left|E\right|$ dot products each of length $\left|M_x\right|$, thus there are $BEM_x$ multiplications and additions to perform.
+The compute is $BM_x \\times M_xE = BE$ matmul, which takes $2BM_xE$ flops (you can think of this as $\\left|B\\right| * \\left|E\\right|$ dot products each of length $\\left|M_x\\right|$, thus there are $BEM_x$ multiplications and additions to perform.
 
 **Compute time** = Flops / compute speed = $2BEM_x$ / compute speed
 
@@ -95,23 +95,23 @@ Operation Arithmetic Intensity > Hardware Arithmetic Intensity
 
 The LHS (Compute Flops / Comm bytes) is the “Operation” or “Model” arithmetic intensity, whereas the RHS (Compute Speed / comm speed) is the hardware arithmetic intensity. This re-arrangement has a huge benefit in that it separates model from hardware - the operational intensity is independent of the hardware. Note however that arithmetic has this funky unity of flops/byte - intuitively you can think of this as the amount of flops unlocked by communicating a certain amount of bytes.
 
-Operation Arithmetic Intensity for this example: $2BM_xE$ flops / $2BE$ bytes = $\left|M_x\right|$ flops/byte
+Operation Arithmetic Intensity for this example: $2BM_xE$ flops / $2BE$ bytes = $\\left|M_x\\right|$ flops/byte
 
 Hardware Arithmetic Intensity: Compute speed / comm speed
 
-Example hardware for trillium (See https://cloud.google.com/tpu/docs/v6e), compute speed = $917$ TFLOPs, and comm speed of 1 ICI axis is $180$ GB/s so the ratio $917 * 10^12 / 180 * 10^ 9 = 5100$. Thus we would need $\left|M_x\right| > 5100$ (Operational AI > Hardware AI) to be compute bound for this operation. This is an example of key insights that arithmetic intensity gives us - it tells us we need a large $\left|M\right|$ to achieve high utilization for model parallelism because the operational intensity is proportional to $\left|M\right|$.
+Example hardware for trillium (See https://cloud.google.com/tpu/docs/v6e), compute speed = $917$ TFLOPs, and comm speed of 1 ICI axis is $180$ GB/s so the ratio $917 * 10^12 / 180 * 10^ 9 = 5100$. Thus we would need $\\left|M_x\\right| > 5100$ (Operational AI > Hardware AI) to be compute bound for this operation. This is an example of key insights that arithmetic intensity gives us - it tells us we need a large $\\left|M\\right|$ to achieve high utilization for model parallelism because the operational intensity is proportional to $\\left|M\\right|$.
 
 ## Arithmetic Intensity: Mixed sharding strategies
 
-When we use multiple sharding strategies together it seems intractable to keep track of all of the compute vs communication ratios. However it turns out (not obvious at first), that the arithmetic intensity analysis of a “pure” sharding strategy generalizes to when it's used in a mix. For instance, if we added data parallelism to the above tensor parallelism example then the batch dimension $B$ would also be sharded by a new mesh axes $y$. Both the compute and communication would decrease by this sharding factor $\left|y\right|$, and thus the ratio of compute to comms for tensor parallelism would remain the same ($\left|M\right|\left|x\right|$, independent of $\left|y\right|$). Concretely this would look like
+When we use multiple sharding strategies together it seems intractable to keep track of all of the compute vs communication ratios. However it turns out (not obvious at first), that the arithmetic intensity analysis of a “pure” sharding strategy generalizes to when it's used in a mix. For instance, if we added data parallelism to the above tensor parallelism example then the batch dimension $B$ would also be sharded by a new mesh axes $y$. Both the compute and communication would decrease by this sharding factor $\\left|y\\right|$, and thus the ratio of compute to comms for tensor parallelism would remain the same ($\\left|M\\right|\\left|x\\right|$, independent of $\\left|y\\right|$). Concretely this would look like
 
-$$B_yM_x \times M_xE = B_yE \rightarrow \text{RS over x } \rightarrow B_yE_x  $$
+$$B_yM_x \\times M_xE = B_yE \\rightarrow \\text{RS over x } \\rightarrow B_yE_x $$
 
 **Compute:** = $2B_yM_xE$ Flops
 
 **TP comms (RS)** = $2B_yE$ bytes
 
-**Ratio (Arithmetic Intensity)** = $\left|M_x\right|$ Flops/byte
+**Ratio (Arithmetic Intensity)** = $\\left|M_x\\right|$ Flops/byte
 
 This "independence" of sharding strategies is true for the main four parallelisms (data, model (tensor), pipeline, and expert). Note that data, fsdp, context and sequence parallelism are all roughly the same for the purpose of
 arithmetic intensity analysis since they shard the batch, as we will illustrate in the individual sections below. In addition both data and pipeline parallelism (microbatches) shard the batch which decreases the HBM arithmetic intensity.
@@ -120,15 +120,15 @@ arithmetic intensity analysis since they shard the batch, as we will illustrate 
 
 Sharding in maxtext is split into 3 layers
 
-- **Physical** mesh axes (e.g. `data`, `fsdp`, `tensor`) defined [here](https://github.com/AI-Hypercomputer/maxtext/blob/f269268bd622f6d2f40d38632ede7a7834a6024e/maxtext/configs/base.yml#L269)
+- **Physical** mesh axes (e.g. `data`, `fsdp`, `tensor`) defined [here](https://github.com/AI-Hypercomputer/maxtext/blob/f269268bd622f6d2f40d38632ede7a7834a6024e/MaxText/configs/base.yml#L269)
 
 - Mesh is created via [create_device_mesh](https://github.com/AI-Hypercomputer/maxtext/blob/f269268bd622f6d2f40d38632ede7a7834a6024e/MaxText/max_utils.py#L576-L580)
 
 - Mesh given names in train.py via [Mesh](https://github.com/AI-Hypercomputer/maxtext/blob/f269268bd622f6d2f40d38632ede7a7834a6024e/MaxText/train.py#L594)
 
-- **Logical** axes which map a meaningful axes name to physical axes defined [here](https://github.com/AI-Hypercomputer/maxtext/blob/f269268bd622f6d2f40d38632ede7a7834a6024e/maxtext/configs/base.yml#L270)
+- **Logical** axes which map a meaningful axes name to physical axes defined [here](https://github.com/AI-Hypercomputer/maxtext/blob/f269268bd622f6d2f40d38632ede7a7834a6024e/MaxText/configs/base.yml#L270)
 
-- E.g. logical axes `activation_batch` is sharded by the physical axes of `data` and `fsdp` (among others) since those sharding strategies shard the batch. `Activation_batch` is a common axis among most activation tensors. Note that if we use `data_parallelism=4` and `fsdp_parallelism=2`, then the `activation_batch` dimension will get sharded over both, e.g. $4*2=8$ ways.
+- E.g. logical axes `activation_batch` is sharded by the physical axes of `data` and `fsdp` (among others) since those sharding strategies shard the batch. `Activation_batch` is a common axis among most activation tensors. Note that if we use `data_parallelism=4` and `fsdp_parallelism=2`, then the `activation_batch` dimension will get sharded over both, e.g. $4\*2=8$ ways.
 
 - **Individual tensors** have sharding constraints - generally specified by logical rules
 
@@ -163,11 +163,11 @@ The simplest parallelization is data parallelization. Each chip works on a diffe
 
 Roughly approximate the entire backward pass:
 
-**Compute**: $4 * \text{local batch} * \text{params}$
+**Compute**: $4 * \\text{local batch} * \\text{params}$
 
-We saw above that each matmul performs $2 * \text{local batch} * \text{params}$ flops, it turns out that the backward pass requires twice as many flops as the forward pass. We don't derive this here but highly recommend reading these [slides](https://www.cs.toronto.edu/~rgrosse/courses/csc321_2017/slides/lec6.pdf) from University of Toronto to explain the mathematics and implementation of backprop.
+We saw above that each matmul performs $2 * \\text{local batch} * \\text{params}$ flops, it turns out that the backward pass requires twice as many flops as the forward pass. We don't derive this here but highly recommend reading these [slides](https://www.cs.toronto.edu/~rgrosse/courses/csc321_2017/slides/lec6.pdf) from University of Toronto to explain the mathematics and implementation of backprop.
 
-**Communicate**: All reduce size of params (`bf16`) : $4 * \text{params}$ (`2*` since `bf16`, another `2*` since an optimal all reduce algorithm turns out to require two passes of communicating data (generally a reduce scatter followed by an all-gather))
+**Communicate**: All reduce size of params (`bf16`) : $4 * \\text{params}$ (`2*` since `bf16`, another `2*` since an optimal all reduce algorithm turns out to require two passes of communicating data (generally a reduce scatter followed by an all-gather))
 
 **Ratio (arithmetic intensity)**: `local_batch`
 
@@ -181,22 +181,22 @@ e.g. the original activations have grown by a factor of `expert_per_token` and a
 
 `batch_per_expert` = `batch` * (`expert_per_token`/`expert`) = `batch` / `sparsity`
 
-We denote the local `batch_per_expert` with $\beta$ and analyze an MoE feedfoward matmul to calculate arithmetic intensity:
+We denote the local `batch_per_expert` with $\\beta$ and analyze an MoE feedfoward matmul to calculate arithmetic intensity:
 
-$$\beta EX \times EMX = \beta MX$$
+$$\\beta EX \\times EMX = \\beta MX$$
 
-**Compute:** $4\beta EMX$ Flops (2x in backward pass)
+**Compute:** $4\\beta EMX$ Flops (2x in backward pass)
 
 **Comms:** All Reduce Gradient of size $EMX$: $4EMX$ bytes
 
-**Ratio (arithmetic intensity):** $\left|\beta\right| = \text{local batch} / \text{sparsity}$
+**Ratio (arithmetic intensity):** $\\left|\\beta\\right| = \\text{local batch} / \\text{sparsity}$
 
 ### DP Arithmetic Intensity (Hierarchical)
 
 For a hierarchal mesh (TPU: within slice ICI, across slice DCN, GPU: within NVL domain, across NVL Domains), only one set of gradients need to be communicated
 across the slower network per slice/NVL Domain (as opposed to one set per chip). This is generally achieved for us automatically by the XLA compiler:
 
-Reduce Scatter grads on fast network $\rightarrow$ All Reduce across slow $\rightarrow$ All Gather on faster network
+Reduce Scatter grads on fast network $\\rightarrow$ All Reduce across slow $\\rightarrow$ All Gather on faster network
 
 We can compute the arithmetic intensity of these cross slice/NVL Domain comms by imagining the chips forming a slice or NVL Domain as one "super chip". This "super chip" processes all of the tokens within its domain, but it only
 has to share one copy of the gradients to its super chip neighbors.
@@ -207,11 +207,11 @@ If the local per device batch size is `local batch`, then we can imagine each "s
 
 We can then perform the same arithmetic intensity analysis as before, and indeed get the same result:
 
-**Compute (per super chip):** $4 * \text{super batch} * \text{params}$ flops
+**Compute (per super chip):** $4 * \\text{super batch} * \\text{params}$ flops
 
-**Comms (per super chip):** All reduce params $\rightarrow 4 * \text{params}$ bytes
+**Comms (per super chip):** All reduce params $\\rightarrow 4 * \\text{params}$ bytes
 
-**Ratio (arithmetic intensity):** $\text{super batch } (\text{super batch} / \text{sparsity} \text{ for sparse models})$
+**Ratio (arithmetic intensity):** $\\text{super batch } (\\text{super batch} / \\text{sparsity} \\text{ for sparse models})$
 
 This illustrates there are more than one way to calculate arithmetic intensity - we could also derive the same expression
 from the chip level as long as we are consistent for the compute and comms - either both the compute and comms should be at the super chip level, or both should be at the regular chip level.
@@ -230,9 +230,9 @@ Approximate a typical weight @ activation = activation matmul:
 
 Start with activations sharded like $B_xE$ and weights sharded like $E_xM$ (it doesn't matter which axis of weights is sharded). We must first All Gather (AG) the weights
 
-$$E_xM \rightarrow \text{AG } x \rightarrow  EM$$
+$$E_xM \\rightarrow \\text{AG } x \\rightarrow EM$$
 
-**Compute**: $B_xE \times EM = B_xM$
+**Compute**: $B_xE \\times EM = B_xM$
 
 This takes $2B_xEM$ flops
 
@@ -300,7 +300,7 @@ Shard the activations along the feature dimensions (e.g. model or `embed` dimens
 
 Analyze one pattern of TP as given above
 
-$$ BM_x \times M_xE = BE \text{ (local partial result) } \rightarrow \text{ Reduce-Scatter (RS) } x \rightarrow BE_x $$
+$$ BM_x \\times M_xE = BE \\text{ (local partial result) } \\rightarrow \\text{ Reduce-Scatter (RS) } x \\rightarrow BE_x $$
 
 **Compute:** $2BM_xE$ Flops
 
@@ -308,11 +308,11 @@ $$ BM_x \times M_xE = BE \text{ (local partial result) } \rightarrow \text{ Redu
 
 **Ratio (arithmetic intensity)**
 
-$\left|M_x\right| = \left|M\right|/\left|TP\right|$
+$\\left|M_x\\right| = \\left|M\\right|/\\left|TP\\right|$
 
 Note this is one pattern of TP where the contracting dimension is sharded. By contrast for the initial feed forward matmul the non-contracting weight dimension is sharded:
 
-$$BE_x \times EM_x \rightarrow \text{AG activations over } x\rightarrow BE \times EM_x = BM_x$$
+$$BE_x \\times EM_x \\rightarrow \\text{AG activations over } x\\rightarrow BE \\times EM_x = BM_x$$
 
 This is the same amount of compute, and also the same amount of communication - again activations of $BE$ are communicated, but in this case it is an initial all-gathering instead of secondary all-reduce. Ideally these activations (all-gather or reduce scatter) can be overlapped with the compute by the XLA compiler - an idea called a **collective matmul**. This is fairly challenging for the compiler since the comms and compute do depend on each other - to achieve overlap the computation and communication have to be chunked into smaller pieces and pipelined.
 
@@ -334,13 +334,13 @@ Similar to tensor parallelism, but instead of sharding the feed forward weights 
 
 This is really just swapping $E$ and $M$ of the TP analysis above, but we will include it here:
 
-$$BE_x \times E_xM = BM_x$$
+$$BE_x \\times E_xM = BM_x$$
 
 **Compute:** $2BE_xM$ FLOPS
 
 **Communicate:** Reduce scatter $BM$ (`bf16`): $2BM$ bytes
 
-**Ratio (arithmetic intensity):** $\left|E_x\right|=\left|E\right|/\left|TP\right|$
+**Ratio (arithmetic intensity):** $\\left|E_x\\right|=\\left|E\\right|/\\left|TP\\right|$
 
 ## Expert Parallelism (EP)
 
@@ -358,19 +358,19 @@ An all-to-all (A2A) is needed to move between data sharding (fsdp) prior to the 
 
 Analyze only 1 feed forward matmul
 
-$$ BEX_x \times EMX_x = BMX_x $$
+$$ BEX_x \\times EMX_x = BMX_x $$
 
-$$ 2BEX_x \text{ Flops} $$
+$$ 2BEX_x \\text{ Flops} $$
 
 **Communicate**
 
-$$ B_xEX \rightarrow A2A \rightarrow BEX_x $$
+$$ B_xEX \\rightarrow A2A \\rightarrow BEX_x $$
 
 Ideally this `A2A` only requires moving around $BEX_x$ elements per shard, but it depends on if the hardware is connected with an all to all network (true for `GPUs` and `TPU DCN` but not for `TPU ICI`)
 
 With a true all-to-all network this takes $2BEX_x$ bytes. Over TPU ICI, an all-to-all is instead as costly as `1/4` of all gathering the entire activation as nicely drawn [here](https://jax-ml.github.io/scaling-book/sharding/#our-final-communication-primitive-the-alltoall) in jax's sharding doc.
 
-**Ratio (arithmetic intensity)**: $2BEMX_x / 2BEX_x = \left|M\right|$
+**Ratio (arithmetic intensity)**: $2BEMX_x / 2BEX_x = \\left|M\\right|$
 
 Note: The batch $B$ cancels in above arithmetic intensity - the batch dimension is present in both the compute and communication since we are communicating activations so cancels from the arithmetic intensity ratio regardless of how it is shaped (e.g.`batch` or `batch_per_exp`)
 
@@ -424,8 +424,8 @@ Note that for MoE models, this arithmetic intensity grows by a factor of `expert
 
 ## Context Autoregressive
 
-Context Autoregressive shards the KV cache on the sequence dimension. It shards feed forward layer by experts for both activations and weights. This is used for inference only, see [inference.yml](https://github.com/AI-Hypercomputer/maxtext/blob/353a45d57eb1f1cc02e5c8d9e7b18eaf634d7edc/maxtext/configs/inference/inference.yml#L4) for the modified logical axis rules for inference.
+Context Autoregressive shards the KV cache on the sequence dimension. It shards feed forward layer by experts for both activations and weights. This is used for inference only, see [inference.yml](https://github.com/AI-Hypercomputer/maxtext/blob/2052c22e3219b9f3a3fd66813bc6be793d79c963/src/maxtext/configs/inference/inference.yml#L4) for the modified logical axis rules for inference.
 
 ## Autoregressive
 
-Autoregressive shards weights, but not activations. This is used for inference only. See [inference.yml](https://github.com/AI-Hypercomputer/maxtext/blob/353a45d57eb1f1cc02e5c8d9e7b18eaf634d7edc/maxtext/configs/inference/inference.yml#L4) for the modified logical axis rules for inference.
+Autoregressive shards weights, but not activations. This is used for inference only. See [inference.yml](https://github.com/AI-Hypercomputer/maxtext/blob/2052c22e3219b9f3a3fd66813bc6be793d79c963/src/maxtext/configs/inference/inference.yml#L4) for the modified logical axis rules for inference.

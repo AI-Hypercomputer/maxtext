@@ -19,7 +19,7 @@ while staying simple and "optimization-free" thanks to the power of Jax and the 
 """
 
 __author__ = "Google LLC"
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 __description__ = (
     "MaxText is a high performance, highly scalable, open-source LLM written in pure Python/Jax and "
     "targeting Google Cloud TPUs and GPUs for training and **inference."

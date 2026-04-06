@@ -132,7 +132,9 @@ def jit_and_compile(
     logical_axis_rules,
 ):
   """Jit, lower, and compile func."""
-  with jax.set_mesh(mesh), logical_axis_rules:
+  # Use both jax.set_mesh (new API) and `with mesh:` (old API) so that drjax,
+  # which reads from pxla.thread_resources.env.physical_mesh, can find the mesh.
+  with jax.set_mesh(mesh), mesh, logical_axis_rules:
     jitted = jax.jit(
         func,
         in_shardings=in_shardings,

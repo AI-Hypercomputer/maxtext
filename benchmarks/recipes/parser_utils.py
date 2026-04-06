@@ -156,3 +156,4 @@ def add_arguments(parser: argparse.ArgumentParser):
   parser.add_argument("--delete", action="store_true", help="Delete the cluster workload")
   parser.add_argument("--max_restarts", type=int, default=0, help="Maximum number of restarts")
   parser.add_argument("--temp_key", type=str, default=None, help="Temporary placeholder code")
+  parser.add_argument("--workload_id", type=str, default=None, help="Optional custom name for the XPK workload.")

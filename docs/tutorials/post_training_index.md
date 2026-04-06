@@ -9,7 +9,8 @@ We’re investing in performance, scale, algorithms, models, reliability, and ea
 ## The MaxText stack
 
 MaxText was co-designed with key Google led innovations to provide a unified post training experience:
-- [MaxText model library](https://maxtext.readthedocs.io/en/latest/index.html#model-library) for JAX LLMs highly optimized for TPUs
+
+- [MaxText model library](https://maxtext.readthedocs.io/en/latest/reference/models/supported_models_and_architectures.html#supported-model-families) for JAX LLMs highly optimized for TPUs
 - [Tunix](https://github.com/google/tunix) for the latest algorithms and post-training techniques
 - [vLLM on TPU](https://github.com/vllm-project/tpu-inference) for high performance sampling (inference) for Reinforcement Learning (RL)
 - [Pathways](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/pathways-intro) for multi-host inference (sampling) and highly efficient weight transfer
@@ -19,13 +20,13 @@ MaxText was co-designed with key Google led innovations to provide a unified pos
 ## Supported techniques & models
 
 - **SFT (Supervised Fine-Tuning)**
-  * [SFT on Single-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/sft.html)
-  * [SFT on Multi-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/sft_on_multi_host.html)
+  - [SFT on Single-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/sft.html)
+  - [SFT on Multi-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/sft_on_multi_host.html)
 - **Multimodal SFT**
-  * [Multimodal Support](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/multimodal.html)
+  - [Multimodal Support](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/multimodal.html)
 - **Reinforcement Learning (RL)**
-  * [RL on Single-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/rl.html)
-  * [RL on Multi-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/rl_on_multi_host.html)
+  - [RL on Single-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/rl.html)
+  - [RL on Multi-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/rl_on_multi_host.html)
 
 ## Step by step RL
 
@@ -37,15 +38,16 @@ Here is an example of the steps you might go through to run a Reinforcement Lear
 
 ## What is Pathways and why is it key for RL?
 
-Pathways is a single controller JAX runtime that was [designed and pressure tested internally at Google DeepMind](https://blog.google/technology/ai/introducing-pathways-next-generation-ai-architecture/) over many years. Now available on Google Cloud, it is designed to coordinate distributed computations across thousands of accelerators from a single Python program. It efficiently performs data transfers between accelerators both within a slice using ICI (Inter-chip Interconnect) and across slices over DCN (Data Center Network).
+Pathways is a single controller JAX runtime that was [designed and pressure tested internally at Google DeepMind](https://blog.google/innovation-and-ai/products/introducing-pathways-next-generation-ai-architecture/) over many years. Now available on Google Cloud, it is designed to coordinate distributed computations across thousands of accelerators from a single Python program. It efficiently performs data transfers between accelerators both within a slice using ICI (Inter-chip Interconnect) and across slices over DCN (Data Center Network).
 
 Pathways allows for fine grained resource allocation (subslice of a physical slice) and scheduling. This allows JAX developers to explore novel model architectures in an easy to develop single controller programming environment.
 
 Pathways supercharges RL with:
+
 1. **Multi-host Model Support:** Easily manages models that span multiple hosts.
-1. **Unified Orchestration:** Controls both trainers and samplers from a single Python process.
-1. **Efficient Data Transfer:** Optimally moves data between training and inference devices, utilizing ICI or DCN as needed. JAX Reshard primitives simplify integration.
-1. **Flexible Resource Allocation:** Enables dedicating different numbers of accelerators to inference and training within the same job, adapting to workload bottlenecks (disaggregated setup).
+2. **Unified Orchestration:** Controls both trainers and samplers from a single Python process.
+3. **Efficient Data Transfer:** Optimally moves data between training and inference devices, utilizing ICI or DCN as needed. JAX Reshard primitives simplify integration.
+4. **Flexible Resource Allocation:** Enables dedicating different numbers of accelerators to inference and training within the same job, adapting to workload bottlenecks (disaggregated setup).
 
 ## Getting started
 
@@ -54,8 +56,9 @@ Start your Post-Training journey through quick experimentation with [Python Note
 ## More tutorials
 
 ```{toctree}
-:maxdepth: 1
-
+---
+maxdepth: 1
+---
 posttraining/sft.md
 posttraining/sft_on_multi_host.md
 posttraining/rl.md

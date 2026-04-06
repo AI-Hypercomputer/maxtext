@@ -41,12 +41,11 @@ jobs:
     name: Build and Test MaxText Package
     needs: [release_approval]
     uses: ./.github/workflows/build_and_test_maxtext.yml
+    secrets: inherit
       
   publish_maxtext_package_to_pypi:
     name: Publish MaxText package to PyPI
-    # Temporarily only require release_approval for a one-time upload.
-    # Immediately revert this to `needs: [build_and_test_maxtext_package]`.
-    needs: [release_approval]
+    needs: [build_and_test_maxtext_package]
     runs-on: ubuntu-latest
     environment: release
     steps:
@@ -61,3 +60,66 @@ jobs:
       uses: pypa/gh-action-pypi-publish@release/v1
       with:
         packages-dir: dist/
+
+  get_latest_maxtext_pypi_version:
+    name: Get latest MaxText PyPI version
+    needs: [publish_maxtext_package_to_pypi]
+    runs-on: ubuntu-latest
+    outputs:
+      latest_pypi_version: ${{ steps.get_version.outputs.version }}
+    steps:
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+      - name: Fetch latest version of maxtext from PyPI
+        id: get_version
+        run: |
+          # Fetch JSON from PyPI for 'maxtext'
+          echo "Fetching latest version from https://pypi.org/pypi/maxtext/json"
+          pypi_json=$(curl -s https://pypi.org/pypi/maxtext/json)
+
+          # Extract the version from the "info" section using jq
+          latest_version=$(echo "$pypi_json" | jq -r ".info.version")
+
+          if [ -z "$latest_version" ] || [ "$latest_version" == "null" ]; then
+            echo "Error: Could not parse latest version from PyPI JSON."
+            exit 1
+          fi
+
+          echo "Successfully fetched latest MaxText version on PyPI: $latest_version"
+          # Set the output variable for other jobs to consume
+          echo "version=$latest_version" >> "$GITHUB_OUTPUT"
+
+  # This job builds and pushes MaxText stable Docker images for both TPU and GPU devices.
+  # It runs only after a new release is published to PyPI.
+  # Creates docker image for MaxText commit corresponding to the release.
+  upload_maxtext_docker_images:
+    name: ${{ matrix.image_name }}
+    needs: [get_latest_maxtext_pypi_version]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - device: tpu
+            build_mode: stable
+            image_name: maxtext_jax_stable
+            workflow: pre-training
+            dockerfile: ./src/dependencies/dockerfiles/maxtext_tpu_dependencies.Dockerfile
+          - device: gpu
+            build_mode: stable
+            image_name: maxtext_gpu_jax_stable
+            workflow: pre-training
+            dockerfile: ./src/dependencies/dockerfiles/maxtext_gpu_dependencies.Dockerfile
+          - device: tpu
+            build_mode: stable
+            image_name: maxtext_post_training_stable
+            workflow: post-training
+            dockerfile: ./src/dependencies/dockerfiles/maxtext_tpu_dependencies.Dockerfile
+    uses: ./.github/workflows/build_and_push_docker_image.yml
+    with:
+      image_name: ${{ matrix.image_name }}
+      device: ${{ matrix.device }}
+      build_mode: ${{ matrix.build_mode }}
+      workflow: ${{ matrix.workflow }}
+      dockerfile: ${{ matrix.dockerfile }}
+      maxtext_sha: ${{ github.sha }}
+      version_name: ${{ needs.get_latest_maxtext_pypi_version.outputs.latest_pypi_version }}

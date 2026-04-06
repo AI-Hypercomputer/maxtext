@@ -145,7 +145,6 @@ def decode_with_vllm(config: Config) -> None:
       max_tokens=max_tokens_to_generate,
       top_k=config.decode_sampling_top_k,
       top_p=config.decode_sampling_nucleus_p,
-      seed=FLAGS.seed,
   )
 
   outputs = llm.generate(prompts, sampling_params)

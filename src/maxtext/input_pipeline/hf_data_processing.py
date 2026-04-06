@@ -14,6 +14,8 @@
 
 """Input pipeline using Huggingface datasets."""
 
+from typing import Optional
+
 import ml_collections
 
 import jax
@@ -24,6 +26,7 @@ import grain.python as grain
 
 import numpy as np
 
+from maxtext.input_pipeline import data_processing_utils
 from maxtext.input_pipeline import input_pipeline_utils
 from maxtext.input_pipeline import instruction_data_processing
 from maxtext.input_pipeline import multihost_dataloading
@@ -143,7 +146,7 @@ def vision_sft_preprocessing_pipeline(
           query_column=text_columns[0],
           response_column=text_columns[1],
           max_target_length=config.max_target_length,
-          unk_id=pad_id,
+          pad_id=pad_id,
       )
   )
   # TODO(aireenmei, hengtaoguo): support packing
@@ -151,7 +154,7 @@ def vision_sft_preprocessing_pipeline(
       input_pipeline_utils.PadOrTrimToMaxLength(
           config.max_target_length,
           pad_id,
-          model_name=config.model_name,
+          config=config,
           max_num_images_per_example=config.max_num_images_per_example,
       )
   )
@@ -213,6 +216,7 @@ def preprocessing_pipeline(
     grain_worker_count=1,  # only support 0 or 1
     max_segments_per_seq=None,
     num_epoch=1,
+    chat_template: Optional[str] = None,
 ):
   """pipeline for preprocessing HF dataset"""
   import datasets  # pylint: disable=import-outside-toplevel
@@ -242,19 +246,16 @@ def preprocessing_pipeline(
       token=hf_access_token,
   )
 
-  if use_sft:
-    dataset = dataset.select_columns(data_column_names)
+  dataset = dataset.select_columns(data_column_names)
 
-    supported_columns = [["prompt", "completion"], ["messages"], ["question", "answer"]]
-    assert any(
-        set(data_column_names) == set(supported) for supported in supported_columns
-    ), f"Dataset column names mismatch. Expected columns to match one of {supported_columns}, but got {data_column_names}"
+  if use_sft:
+    data_processing_utils.validate_and_configure_sft_columns(data_column_names, tokenizer, chat_template)
 
     # convert instruction dataset to conversational format
+    # currently only works for Q&A datasets
     dataset, data_column_names = instruction_data_processing.convert_to_conversational_format(
         dataset=dataset, data_columns=data_column_names, chat_template_path=chat_template_path
     )
-
     assert input_pipeline_utils.is_conversational(
         dataset.features, data_column_names
     ), "Dataset is not in conversational format."
@@ -276,8 +277,6 @@ def preprocessing_pipeline(
         input_pipeline_utils.apply_chat_template,
         fn_kwargs={"tokenizer_model": tokenizer, "data_column_name": data_column_names[0]},
     )
-  else:
-    dataset = dataset.select_columns(data_column_names)
 
   pad_id = _get_pad_id(tokenizer)
 
@@ -303,6 +302,7 @@ def preprocessing_pipeline(
   )
   operations = []
   if use_sft:
+    input_pipeline_utils.verify_chat_template_generation_prompt_logic(tokenizer)
     operations.append(
         input_pipeline_utils.SFTPromptMasking(
             text_column_name=data_column_names[0],
@@ -426,6 +426,7 @@ def make_hf_train_iterator(
         chat_template_path=config.chat_template_path,
         max_segments_per_seq=config.max_segments_per_seq,
         num_epoch=config.num_epoch,
+        chat_template=config.chat_template,
     )
   return train_iter
 
@@ -482,5 +483,6 @@ def make_hf_eval_iterator(
         sft_train_on_completion_only=config.sft_train_on_completion_only,
         chat_template_path=config.chat_template_path,
         max_segments_per_seq=config.max_segments_per_seq,
+        chat_template=config.chat_template,
     )
   return eval_iter
