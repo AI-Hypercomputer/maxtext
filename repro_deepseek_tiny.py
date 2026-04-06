@@ -71,7 +71,7 @@ def create_vllm_config():
     # We need a tokenizer. We can use a small one or copy from another model.
     # Since we are in a TPU environment, there should be some tokenizers around.
     # I'll try to find one.
-    src_tokenizer_dir = "/mnt/workspace/maxtext/src/maxtext/assets/tokenizers/qwen3-tokenizer"
+    src_tokenizer_dir = "/mnt/data/workspace/maxtext/src/maxtext/assets/tokenizers/qwen3-tokenizer"
     if os.path.exists(src_tokenizer_dir):
         for item in os.listdir(src_tokenizer_dir):
             s = os.path.join(src_tokenizer_dir, item)
@@ -83,16 +83,16 @@ def create_vllm_config():
     return vllm_dir
 
 def run_benchmark(vllm_dir):
-    python_path = "/mnt/workspace/max_venv/bin/python3"
+    python_path = "/home/mohitkhatwani_google_com/workspace/max_venv/bin/python"
     cmd = [
         python_path, "src/maxtext/integration/tunix/weight_mapping/bench_weight_sync.py",
         "--model_name=deepseek3-tiny",
         f"--vllm_model_id={vllm_dir}",
         "--rand_init=True",
-        "--ici_fsdp_parallelism=8",
-        "--ici_tensor_parallelism=1",
-        "--rollout_tensor_parallelism=1"
-    ]
+        "--ici_fsdp_parallelism=1",
+        "--ici_tensor_parallelism=4",
+        "--rollout_tensor_parallelism=4"
+        ]
     print(f"Running: {' '.join(cmd)}")
     subprocess.run(cmd, check=True)
 

@@ -5,6 +5,16 @@ import os
 import sys
 import time
 from contextlib import contextmanager
+import pathwaysutils
+
+# These env vars must be set before vLLM and JAX are imported.
+os.environ.setdefault("SKIP_JAX_PRECOMPILE", "1")
+os.environ.setdefault("JAX_RANDOM_WEIGHTS", "False")
+os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
+# vLLM must be imported before JAX/libtpu to avoid protobuf descriptor conflicts.
+# Both register google/protobuf/timestamp.proto; whichever loads second will crash.
+from vllm import LLM, SamplingParams
 
 import jax
 import jax.numpy as jnp
@@ -16,7 +26,6 @@ from jax.sharding import PartitionSpec as P
 from jaxtyping import PyTree
 import torch
 from tunix.models.qwen3 import model as qwen3_lib
-from vllm import LLM, SamplingParams
 
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE
 from maxtext.configs import pyconfig
@@ -43,6 +52,7 @@ _CHECKPOINT = flags.DEFINE_string('checkpoint_path', 'gs://hengtaoguo-maxtext-lo
 _VLLM_MODEL_ID = flags.DEFINE_string('vllm_model_id', 'Qwen/Qwen3-30B-A3B', 'HuggingFace model ID passed to vLLM (e.g. google/gemma-4-26b-it)')
 _FSDP_TP = flags.DEFINE_integer('ici_fsdp_parallelism', -1, 'ICI FSDP parallelism (-1 = auto-shard to fill remaining devices)')
 _ICI_TP = flags.DEFINE_integer('ici_tensor_parallelism', 2, 'ICI tensor parallelism')
+_ROLLOUT_DP = flags.DEFINE_integer('rollout_data_parallelism', 1, 'Rollout data parallelism')
 _ROLLOUT_TP = flags.DEFINE_integer('rollout_tensor_parallelism', 2, 'Rollout tensor parallelism')
 
 def _setup_jax_compilation_cache():
@@ -53,10 +63,8 @@ def _setup_jax_compilation_cache():
 
 
 def _setup_vllm():
-  # for vLLM we can skip JAX precompilation with this flag, it makes startup faster
-  os.environ["SKIP_JAX_PRECOMPILE"] = "1"
-  os.environ["JAX_RANDOM_WEIGHTS"] = "False"
-  os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+  # Env vars already set at module level before imports; nothing else to do here.
+  pass
 
 def _clean_device_memory():
   """Forces Python garbage collection and waits for JAX devices to idle."""
@@ -184,7 +192,6 @@ def _load_maxtext_model(base_yaml_path):
       checkpoint_period=5,
       skip_jax_distributed_system="true",
       weight_dtype="bfloat16",
-      attention="dot_product",
       remat_policy="custom",
       decoder_layer_input="offload",
       query_proj="offload",
@@ -975,6 +982,7 @@ class DeepSeekV3ToVLLMConverter:
 
 
 def main():
+  pathwaysutils.initialize()
   print(f"JAX devices: {jax.devices()}")  
   _setup_jax_compilation_cache()
   _setup_vllm()
@@ -1031,11 +1039,11 @@ def main():
     _VLLM_MODEL_ID.value,
     max_model_len=16,
     tensor_parallel_size=_ROLLOUT_TP.value,
-    data_parallel_size=_FSDP_TP.value,
+    data_parallel_size=_ROLLOUT_DP.value,
     gpu_memory_utilization=0.75,
     async_scheduling=False,
-    enforce_eager=True,
     load_format="dummy",
+    additional_config={"sharding": {"sharding_strategy": {"enable_dp_attention": True}}, "sparse_matmul": True, "replicate_attn_weights": True},
   )
   print("\n" + "="*80)
   llm_state = llm.llm_engine.model_executor.driver_worker.model_runner.state
