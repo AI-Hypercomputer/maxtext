@@ -27,13 +27,10 @@ import sys
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.append(parent_dir)
 
-import recipes.args_helper as helper
-
-import maxtext_trillium_model_configs as model_configs
-
-import maxtext_xpk_runner as mxr
-
-from xpk_configs import XpkClusterConfig
+import benchmarks.maxtext_trillium_model_configs as model_configs
+import benchmarks.maxtext_xpk_runner as mxr
+import benchmarks.recipes.args_helper as helper
+from benchmarks.xpk_configs import XpkClusterConfig
 
 PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server"
 SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server"
@@ -66,7 +63,7 @@ def main():
   )
 
   # Handle command line arguments using args_helper
-  should_continue = helper.handle_cmd_args(cluster_config, helper.DELETE, xpk_path=XPK_PATH)
+  should_continue = helper.handle_cmd_args(cluster_config, helper.DELETE, USER, xpk_path=XPK_PATH)
 
   if not should_continue:
     return

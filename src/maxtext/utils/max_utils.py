@@ -25,6 +25,8 @@ import subprocess
 import time
 from typing import Any
 
+from packaging.version import Version
+
 from etils import epath
 import flax
 import jax
@@ -82,7 +84,7 @@ def calculate_num_params_from_pytree(params):
 def device_space():
   """Version guard for jax.memory.Space.Device."""
   # See b/436565838 for more.
-  if jax.__version__ >= "0.7.1":
+  if Version(jax.__version__) >= Version("0.7.1"):
     return jax.memory.Space.Device  # pytype: disable=module-attr
   else:
     return jax._src.sharding_impls.TransferToMemoryKind("device")  # pylint: disable=protected-access # pytype: disable=module-attr

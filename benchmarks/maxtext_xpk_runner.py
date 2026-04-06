@@ -35,9 +35,9 @@ import time
 import omegaconf
 
 import benchmarks.maxtext_trillium_model_configs as model_configs
+import benchmarks.xla_flags_library as xla_flags
 from benchmarks.globals import MAXTEXT_PKG_DIR
 from benchmarks.command_utils import run_command_with_updates
-import benchmarks.xla_flags_library as xla_flags
 from benchmarks.disruption_management.disruption_handler import DisruptionConfig
 from benchmarks.disruption_management.disruption_manager import DisruptionManager
 from benchmarks.xpk_configs import XpkClusterConfig

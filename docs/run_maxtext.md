@@ -42,9 +42,10 @@ Run tests and local development without Google Cloud dependencies (no `gcloud`, 
 ::::
 
 ```{toctree}
-:hidden:
-:maxdepth: 1
-
+---
+hidden:
+maxdepth: 1
+---
 run_maxtext/run_maxtext_localhost.md
 run_maxtext/run_maxtext_single_host_gpu.md
 run_maxtext/run_maxtext_via_xpk.md

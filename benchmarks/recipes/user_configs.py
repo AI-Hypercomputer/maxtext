@@ -27,10 +27,10 @@ import sys
 
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.append(parent_dir)
-from .. import maxtext_trillium_model_configs as v6e_model_configs
-from .. import maxtext_v5e_model_configs as v5e_model_configs
-from .. import maxtext_v5p_model_configs as v5p_model_configs
-from .pw_utils import build_user_models, get_cluster_config, get_pathways_config
+from benchmarks import maxtext_trillium_model_configs as v6e_model_configs
+from benchmarks import maxtext_v5e_model_configs as v5e_model_configs
+from benchmarks import maxtext_v5p_model_configs as v5p_model_configs
+from benchmarks.recipes.pw_utils import build_user_models, get_cluster_config, get_pathways_config
 
 
 AVAILABLE_MODELS_FRAMEWORKS = ["mcjax", "pathways"]

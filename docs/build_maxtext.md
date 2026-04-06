@@ -61,7 +61,7 @@ source ${VENV_NAME?}/bin/activate
 
 # Install MaxText with the [runner] extra
 # This enables Docker image building and workload scheduling via XPK
-uv pip install maxtext[runner] --resolution=lowest
+uv pip install maxtext[runner]==0.2.1 --resolution=lowest
 ```
 
 > **Note:** The `maxtext[runner]` extra includes all necessary dependencies for building MaxText Docker images and running workloads through XPK. It automatically installs XPK, so you do not need to install it separately to manage your clusters and workloads.
@@ -128,10 +128,19 @@ build_maxtext_docker_image WORKFLOW=post-training
 
 ## Upload MaxText Docker Image to Artifact Registry
 
-> **Note:** You will need the [**Artifact Registry Writer**](https://docs.cloud.google.com/artifact-registry/docs/access-control#permissions) role to push Docker images to your project's Artifact Registry and to allow the cluster to pull them during workload execution. If you don't have this permission, contact your project administrator to grant you this role through "Google Cloud Console -> IAM -> Grant access".
-
 ```bash
-# Make sure to replace <Docker Image Name> with your desired image name.
+# Make sure to set `CLOUD_IMAGE_NAME` with your desired image name.
 export CLOUD_IMAGE_NAME=<Docker Image Name>
 upload_maxtext_docker_image CLOUD_IMAGE_NAME=${CLOUD_IMAGE_NAME?}
+```
+
+> **Note:** You will need the [**Artifact Registry Writer**](https://docs.cloud.google.com/artifact-registry/docs/access-control#permissions) role to push Docker images to your project's Artifact Registry and to allow the cluster to pull them during workload execution. If you don't have this permission, contact your project administrator to grant you this role through "Google Cloud Console -> IAM -> Grant access".
+
+## Troubleshooting
+
+1. If you see the following error while building or uploading your Docker image, try adding the listed file path to `.dockerignore`. Do not include the `./` prefix in the `.dockerignore` file:
+
+```bash
+ERROR: Found symbolic links with absolute paths in the build context:
+./<add_this_value_to_dockerignore>
 ```

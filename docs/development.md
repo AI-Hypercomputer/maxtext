@@ -15,9 +15,10 @@ First, make sure you install the necessary dependencies. You can do this by navi
 pip install -r src/dependencies/requirements/requirements_docs.txt
 ```
 
-Once the dependencies are installed, you can navigate to the `docs/` folder and run:
+Once the dependencies are installed, navigate to the `docs/` directory and run the `sphinx-build`:
 
 ```bash
+cd docs
 sphinx-build -b html . _build/html
 ```
 

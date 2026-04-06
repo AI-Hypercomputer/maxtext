@@ -122,13 +122,13 @@
     },
     {
       "moe/inputs: bfloat16[384,2048,2048]": {
-        "logic_axes": "('activation_batch', 'activation_norm_length', None)",
+        "logic_axes": "('activation_batch_moe', 'activation_norm_length_moe', None)",
         "PartitionSpec": "P(('data', 'fsdp'), None, None)"
       }
     },
     {
       "moe/gate_logits: bfloat16[384,2048,64]": {
-        "logic_axes": "('activation_batch', 'activation_norm_length', None)",
+        "logic_axes": "('activation_batch_moe', 'activation_norm_length_moe', None)",
         "PartitionSpec": "P(('data', 'fsdp'), None, None)"
       }
     },

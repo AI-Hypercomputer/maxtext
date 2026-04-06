@@ -19,6 +19,8 @@ import warnings
 from threading import current_thread
 from typing import Any, Iterable, TYPE_CHECKING
 
+from jinja2 import TemplateError
+
 if TYPE_CHECKING:
   import datasets
   import tensorflow as tf
@@ -178,6 +180,103 @@ def is_conversational(features, data_columns):
   return False
 
 
+def _extract_token_ids(tokens):
+  """Extracts token IDs from various tokenizer output formats.
+
+  This helper function standardizes the extraction of tokenized integer IDs
+  from common return types of Hugging Face tokenizers, including
+  `BatchEncoding` objects, dictionaries, or simple lists.
+
+  Args:
+    tokens: The object containing token IDs. Supported types include:
+      - A list of integers.
+      - A dictionary containing the `INPUT_TOKENS_KEY`.
+      - An object (e.g., `BatchEncoding`) with an attribute named `INPUT_TOKENS_KEY`.
+
+  Returns:
+    A list of integer token IDs.
+
+  Raises:
+    ValueError: If the input type is not supported or does not contain the expected key.
+  """
+  # attention masks in BatchEncoding are effectively ignored
+  if hasattr(tokens, INPUT_TOKENS_KEY):
+    return getattr(tokens, INPUT_TOKENS_KEY)
+  elif isinstance(tokens, dict) and INPUT_TOKENS_KEY in tokens:
+    return tokens[INPUT_TOKENS_KEY]
+  elif isinstance(tokens, list):
+    return tokens
+  else:
+    raise ValueError(f"Can't extract token_ids from type {type(tokens)}")
+
+
+def verify_chat_template_generation_prompt_logic(tokenizer_model):
+  """Verifies the tokenizer's chat template for correct SFT loss masking.
+
+  This function ensures that the tokens added by `add_generation_prompt=True`
+  are identical to the tokens that begin an assistant's turn in a complete
+  conversation, which is critical for masking prompt tokens during SFT loss
+  calculation.
+
+  Example of a mismatch:
+    A `ValueError` is raised if the generation prompt and the actual
+    assistant prefix do not match. For example:
+
+    - `add_generation_prompt=True` on a user message produces a prompt ending in:
+      `...<|im_start|>generation\n`
+    - A full turn with an assistant message starts the reply with:
+      `...<|im_start|>assistant\n...`
+
+    This function would fail because the tokens for "generation" do not
+    match the tokens for "assistant".
+
+  Args:
+    tokenizer_model: The Hugging Face tokenizer instance to verify.
+
+  Raises:
+    ValueError: If the `add_generation_prompt` tokens do not exactly
+      match the beginning of an assistant message in the template.
+  """
+  dummy_msgs = [{"role": "system", "content": "System message"}, {"role": "user", "content": "Test message"}]
+
+  try:
+    prompt_wo_gen_tokens = tokenizer_model.apply_chat_template(dummy_msgs, add_generation_prompt=False, tokenize=True)
+  except TemplateError:
+    max_logging.info(
+        "Tokenizer failed to apply chat template with 'system' role. "
+        "Falling back to 'user' role only for chat template verification."
+    )
+    dummy_msgs.pop(0)
+    prompt_wo_gen_tokens = tokenizer_model.apply_chat_template(dummy_msgs, add_generation_prompt=False, tokenize=True)
+  prompt_wo_gen_ids = _extract_token_ids(prompt_wo_gen_tokens)
+
+  prompt_w_gen_tokens = tokenizer_model.apply_chat_template(dummy_msgs, add_generation_prompt=True, tokenize=True)
+  prompt_w_gen_ids = _extract_token_ids(prompt_w_gen_tokens)
+
+  if prompt_w_gen_ids[: len(prompt_wo_gen_ids)] != prompt_wo_gen_ids:
+    raise ValueError("Unable to extract generation prompt tokens.")
+  # Extract the tokenized generation prompt (the expected assistant prefix)
+  assistant_prefix = prompt_w_gen_ids[len(prompt_wo_gen_ids) :]
+  full_turn_tokens = _extract_token_ids(
+      tokenizer_model.apply_chat_template(
+          dummy_msgs + [{"role": "assistant", "content": "Dummy response"}], add_generation_prompt=False, tokenize=True
+      )
+  )
+  full_turn_ids = _extract_token_ids(full_turn_tokens)
+  # Extract the actual tokens that appear right after the user message in the full turn
+  actual_prefix_in_full_turn = full_turn_ids[len(prompt_wo_gen_ids) : len(prompt_wo_gen_ids) + len(assistant_prefix)]
+
+  if actual_prefix_in_full_turn != assistant_prefix:
+    expected_str = tokenizer_model.decode(assistant_prefix)
+    actual_str = tokenizer_model.decode(actual_prefix_in_full_turn)
+    raise ValueError(
+        "Chat template generation prompt mismatch!\n"
+        f"Expected assistant prefix tokens: {assistant_prefix} ('{expected_str}')\n"
+        f"Actual prefix tokens found: {actual_prefix_in_full_turn} ('{actual_str}')\n"
+        "This means the tokenizer's chat template will break the sft masking logic."
+    )
+
+
 def _get_completion_in_chat_template(tokenizer_model, round_msgs):
   """
   Calculates the completion part of a conversation turn when formatted with a chat template.
@@ -196,18 +295,8 @@ def _get_completion_in_chat_template(tokenizer_model, round_msgs):
   # include generation_prompt as part of the prompt tokens
   prompt_tokens = tokenizer_model.apply_chat_template(round_msgs[:-1], add_generation_prompt=True, tokenize=True)
 
-  # attention masks in BatchEncoding are effectively ignored
-  if hasattr(prompt_completion_tokens, INPUT_TOKENS_KEY):
-    prompt_completion_ids = getattr(prompt_completion_tokens, INPUT_TOKENS_KEY)
-    prompt_ids = getattr(prompt_tokens, INPUT_TOKENS_KEY)
-  elif isinstance(prompt_completion_tokens, dict) and INPUT_TOKENS_KEY in prompt_completion_tokens:
-    prompt_completion_ids = prompt_completion_tokens[INPUT_TOKENS_KEY]
-    prompt_ids = prompt_tokens[INPUT_TOKENS_KEY]
-  elif isinstance(prompt_completion_tokens, list):
-    prompt_completion_ids = prompt_completion_tokens
-    prompt_ids = prompt_tokens
-  else:
-    raise ValueError(f"Can't handle the chat template output of type {type(prompt_completion_tokens)}")
+  prompt_completion_ids = _extract_token_ids(prompt_completion_tokens)
+  prompt_ids = _extract_token_ids(prompt_tokens)
 
   completion_tokens = prompt_completion_ids[len(prompt_ids) :]
   completion_in_chat_template = tokenizer_model.decode(completion_tokens, skip_special_tokens=False)
@@ -313,15 +402,15 @@ class SFTPromptMasking(grain.MapTransform):
 class SFTPromptMaskingVision(grain.MapTransform):
   """SFT prompt masking for multimodal"""
 
-  def __init__(self, query_column, response_column, max_target_length, unk_id):
+  def __init__(self, query_column, response_column, max_target_length, pad_id):
     self.query_column = query_column
     self.response_column = response_column
     self.max_target_length = max_target_length
-    self.unk_id = unk_id
+    self.pad_id = pad_id
 
   def map(self, element):
     inputs = np.concatenate((element[self.query_column], element[self.response_column]))
-    targets = np.concatenate((np.asarray([self.unk_id] * len(element[self.query_column])), element[self.response_column]))
+    targets = np.concatenate((np.asarray([self.pad_id] * len(element[self.query_column])), element[self.response_column]))
     return {
         "inputs": np.asarray(inputs[: self.max_target_length], dtype=np.int32),
         "targets": np.asarray(targets[: self.max_target_length], dtype=np.int32),
@@ -559,13 +648,13 @@ class PadOrTrimToMaxLength(grain.MapTransform):
       self,
       max_length: int,
       pad_id: int = 0,
-      model_name: str | None = None,
+      config=None,
       add_true_length: bool = False,
       max_num_images_per_example: int = -1,
   ):
     self.max_length = max_length
     self.pad_id = pad_id
-    self.model_name = model_name
+    self.config = config
     self.add_true_length = add_true_length
     self.max_num_images_per_example = max_num_images_per_example
 
@@ -614,7 +703,7 @@ class PadOrTrimToMaxLength(grain.MapTransform):
       raise ValueError("Input preprocessed_image must have pixel_values to pad images.")
 
     # Determine the maximum number of images/masks allowed.
-    image_offsets = mm_processor.get_image_offsets(self.model_name, preprocessed_image)
+    image_offsets = mm_processor.get_image_offsets(self.config, preprocessed_image)
     single_image_offset = image_offsets // preprocessed_image.pixel_values.shape[0]
 
     # Reserve space for at least one text token.
@@ -680,7 +769,7 @@ class PadOrTrimToMaxLength(grain.MapTransform):
 
     for key, _ in element.items():
       if key == "images":
-        if self.model_name is None:
+        if self.config.model_name is None:
           raise ValueError("model_name must be provided when padding images")
 
         element["images"] = self._pad_image_and_mask(element["images"])

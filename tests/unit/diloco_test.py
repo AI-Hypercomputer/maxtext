@@ -268,6 +268,24 @@ class DiLoCoTest(unittest.TestCase):
       # synchronization).
       chex.assert_trees_all_equal(diloco_test_state.params, step_three_outer_params)
 
+  @pytest.mark.cpu_only
+  def test_diloco_qwen3_moe_two_slices(self):
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_compiled_diloco_qwen3_moe.pickle")
+    train_compile_main(
+        (
+            None,
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=tpu7x-16",
+            "compile_topology_num_slices=2",
+            "ici_fsdp_parallelism=-1",
+            "dcn_diloco_parallelism=2",
+            "enable_diloco=true",
+            "model_name=qwen3-30b-a3b",
+        )
+    )
+
   @pytest.mark.tpu_only
   def test_diloco_two_slices(self):
     temp_dir = gettempdir()

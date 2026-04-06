@@ -20,7 +20,7 @@ selections and for generating `XpkClusterConfig` and `PathwaysConfig` objects.
 
 import typing
 
-import maxtext_xpk_runner as mxr
+import benchmarks.maxtext_xpk_runner as mxr
 from google.api_core.exceptions import (
     NotFound,
     Conflict,

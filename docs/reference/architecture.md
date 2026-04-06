@@ -19,9 +19,10 @@ Deep dive into the JAX and AI libraries used in MaxText.
 ::::
 
 ```{toctree}
-:hidden:
-:maxdepth: 1
-
+---
+hidden:
+maxdepth: 1
+---
 architecture/architecture_overview.md
 architecture/jax_ai_libraries_chosen.md
 ```

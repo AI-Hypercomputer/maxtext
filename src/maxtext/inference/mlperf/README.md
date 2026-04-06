@@ -131,9 +131,11 @@ python3 -m maxtext.checkpoint_conversion.load_and_quantize_checkpoint src/maxtex
 The quantized checkpoint is saved at `${SAVE_QUANT_PARAMS_PATH}`
 
 ### HuggingFace login
-```
-export HUGGING_FACE_TOKEN=<your_hugging_face_token>
-huggingface-cli login --token ${HUGGING_FACE_TOKEN?}
+
+Login to Hugging Face. Provide your access token when prompted:
+
+```bash
+hf auth login
 ```
 
 ### Run Offline Benchmarks

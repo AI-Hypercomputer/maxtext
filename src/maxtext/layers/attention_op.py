@@ -677,7 +677,7 @@ class AttentionOp(nnx.Module):
           Chunked Prefills - ArXiv:2308.16369 (https://arxiv.org/abs/2308.16369)
     """
     mask = None
-    if model_mode == MODEL_MODE_AUTOREGRESSIVE:
+    if model_mode == MODEL_MODE_AUTOREGRESSIVE and decoder_segment_ids is not None:
       mask = decoder_segment_ids[:, None, None, None, :] == DECODING_ACTIVE_SEQUENCE_INDICATOR
     elif decoder_segment_ids is not None:
       mask = decoder_segment_ids[:, :, None] == decoder_segment_ids[:, None, :]
@@ -1582,6 +1582,11 @@ class AttentionOp(nnx.Module):
       attn_mask = None
       dummy_attn_mask = None
       mask_type = "causal"
+    elif model_mode == MODEL_MODE_PREFILL and self.config.attention_kernel == "cudnn":
+      # Prefill with CUDNN attention does not support packing or context parallelism.
+      attn_mask = None
+      dummy_attn_mask = None
+      mask_type = "causal"
     else:
       # Default case: no packing, no context parallelism
       dummy_attn_mask = jnp.zeros(
@@ -1672,7 +1677,7 @@ class AttentionOp(nnx.Module):
           key,
           value,
           mask_type=MaskType.CAUSAL,
-          scale=1.0 / math.sqrt(head_dim),
+          scale=1.0,
           dropout_rate=self.dropout_rate,
           qkv_layout="BTNH",
           return_residual=True,
@@ -2042,6 +2047,14 @@ class AttentionOp(nnx.Module):
       assert prefill_kv_cache
       key, value, decoder_segment_ids = prefill_kv_cache
 
+    indexer_mask_prefill = None
+    indexer_mask_ar = None
+    if indexer_mask is not None:
+      prefill_len = key.shape[1]
+      indexer_mask_prefill = indexer_mask[:, :, :prefill_len]
+      if ar_kv_cache is not None:
+        indexer_mask_ar = indexer_mask[:, :, prefill_len:]
+
     prefill_unnormalized_output, prefill_exponentials_max, prefill_exponentials_sum = self.apply_attention(
         query=query,
         key=key,
@@ -2053,7 +2066,7 @@ class AttentionOp(nnx.Module):
         previous_chunk=previous_chunk,
         bidirectional_mask=bidirectional_mask,
         sinks=sinks,
-        indexer_mask=indexer_mask,
+        indexer_mask=indexer_mask_prefill,
         record_max_logits=record_max_logits,
         qk_product_einsum=self.AqtEinsum_0,
         wv_product_einsum=self.AqtEinsum_1,
@@ -2076,6 +2089,7 @@ class AttentionOp(nnx.Module):
         model_mode=model_mode,
         use_ragged_attention=self.use_ragged_attention,
         bidirectional_mask=bidirectional_mask,
+        indexer_mask=indexer_mask_ar,
         qk_product_einsum=self.AqtEinsum_2,
         wv_product_einsum=self.AqtEinsum_3,
     )

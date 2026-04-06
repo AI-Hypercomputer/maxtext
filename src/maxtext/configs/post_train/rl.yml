@@ -54,6 +54,21 @@ rl:
   grpo_epsilon: 0.2
   loss_algo: 'grpo' # grpo or gspo-token
 
+  # ====== Agentic Rollout ======
+  # If True, uses the async AgenticGRPOLearner, which overlaps rollout generation
+  # with training for faster throughput via online vLLM inference.
+  use_agentic_rollout: False
+  # Max concurrent rollout requests when using agentic rollout.
+  max_concurrency: 256
+  # Number of off-policy steps tolerated before requiring a policy update.
+  off_policy_steps: 0
+  # System prompt injected into the agent at rollout time.
+  system_prompt: ''
+  # If True, mask degenerate groups (all-zero advantages) from contributing to the loss.
+  degenerate_group_masking: True
+  # Upper-bound clipping epsilon for GRPO loss; defaults to grpo_epsilon when null.
+  epsilon_high: null
+
 
 # ====== Models ======
 # for MaxText
@@ -96,7 +111,8 @@ batch_size: 1
 num_batches: 4
 # A batch can be split into multiple micro batches for memory management
 # and/or async sampling and training.
-micro_batch_size: -1
+train_micro_batch_size: -1
+rollout_micro_batch_size: -1
 # Keep `num_test_batches` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
 num_test_batches: 5  # 200
@@ -164,13 +180,14 @@ max_num_checkpoints_to_keep: 10
 
 # ====== Reward ======
 
-reward_exact_format_match: 3.0
-reward_white_space_format_match: 1.5
-reward_partial_format_match: 0.5
-reward_ratio_guess_to_answer_high:  0.5
-reward_ratio_guess_to_answer_low: 0.25
-penalty_incorrect_format: -0.5
-penalty_incorrect_answer: -1.0
+reward_exact_answer: 1.0
+reward_white_space_format_match: 1.0
+reward_exact_format_match: 0.1
+reward_partial_format_match: 0.0
+reward_ratio_guess_to_answer_high:  0.0
+reward_ratio_guess_to_answer_low: 0.0
+penalty_incorrect_format: 0.0
+penalty_incorrect_answer: 0.0
 
 # ====== Special tokens/templates for GSM8K reasoning ======
 reasoning_start_token: '<reasoning>'

@@ -39,7 +39,7 @@ Choose efficient sharding strategies (FSDP, TP, EP, PP) using Roofline Analysis 
 :link: optimization/pallas_kernels_performance
 :link-type: doc
 
-Optimize with Pallas kernels for fine-grained control. 
+Optimize with Pallas kernels for fine-grained control.
 :::
 
 :::{grid-item-card} 📈 Benchmarking & Tuning
@@ -51,9 +51,10 @@ Guide to setting up benchmarks, performing performance tuning, and analyzing met
 ::::
 
 ```{toctree}
-:hidden:
-:maxdepth: 1
-
+---
+hidden:
+maxdepth: 1
+---
 optimization/custom_model.md
 optimization/sharding.md
 optimization/pallas_kernels_performance.md

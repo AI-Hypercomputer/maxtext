@@ -25,11 +25,14 @@ on:
       device_name:
         required: true
         type: string
-      image_type:
-        required: false
+      base_image:
+        required: true
         type: string
       pytest_marker:
         required: true
+        type: string
+      pytest_extra_args:
+        required: false
         type: string
       pytest_addopts:
         required: false
@@ -59,12 +62,14 @@ on:
         type: number
         default: 1
       maxtext_sha:
-        required: true
-        type: string
-      extra_pip_deps_file:
+        description: 'Git SHA to checkout if MaxText is not pre-installed'
         required: false
         type: string
-        default: ''
+      # Flag to skip source checkout and wheel installation
+      maxtext_installed:
+        description: 'If false, maxtext_sha must be provided for checkout'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -72,45 +77,67 @@ jobs:
   run:
     runs-on: ${{ inputs.cloud_runner != '' && inputs.cloud_runner || fromJson(format('["self-hosted", "{0}", "{1}"]', inputs.device_type, inputs.device_name)) }}
     container:
-      image: gcr.io/tpu-prod-env-multipod/maxtext-unit-test-${{ inputs.device_type == 'cpu' && 'tpu' || inputs.device_type }}:${{ inputs.image_type != '' && inputs.image_type }}
+      image: gcr.io/tpu-prod-env-multipod/${{ inputs.base_image }}
       env:
         XLA_PYTHON_CLIENT_MEM_FRACTION: ${{ inputs.xla_python_client_mem_fraction }}
         TF_FORCE_GPU_ALLOW_GROWTH: ${{ inputs.tf_force_gpu_allow_growth }}
         TPU_SKIP_MDS_QUERY: ${{ inputs.device_type == 'cpu' && '1' || '' }}
-        MAXTEXT_PACKAGE_EXTRA: ${{ inputs.device_type == 'cpu' && 'tpu' || inputs.device_type }}
+        MAXTEXT_PACKAGE_EXTRA: >-
+          ${{ 
+            !contains(inputs.pytest_marker, 'not post_training') && 'tpu-post-train' 
+            || (inputs.device_type == 'cpu' && 'tpu' || inputs.device_type) 
+          }}
         ALLOW_MULTIPLE_LIBTPU_LOAD: ${{ inputs.device_type == 'cpu' && 'true' || '' }} # bypass /tmp/libtpu_lockfile check for cpu tests, which don't actually use accelerators (to allow concurrency)
       options: ${{ inputs.container_resource_option }}
     steps:
       - name: Checkout MaxText
+        if: ${{ !inputs.maxtext_installed }}
         uses: actions/checkout@v5
         with:
           ref: ${{ inputs.maxtext_sha }}
       - name: Download the maxtext wheel
+        if: ${{ !inputs.maxtext_installed }}
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           name: maxtext-wheel
       - name: Install the maxtext wheel
+        if: ${{ !inputs.maxtext_installed }}
         shell: bash
         run: |
           python3 -m uv venv --seed
           source .venv/bin/activate
           maxtext_wheel=$(ls maxtext-*-py3-none-any.whl 2>/dev/null)
+          echo "Installing ${maxtext_wheel} for ${MAXTEXT_PACKAGE_EXTRA}..."
           uv pip install ${maxtext_wheel}[${MAXTEXT_PACKAGE_EXTRA}] --resolution=lowest
-          uv pip install -r src/dependencies/github_deps/pre_train_deps.txt
+          if [ "${MAXTEXT_PACKAGE_EXTRA}" == "tpu-post-train" ]; then
+            install_tpu_post_train_extra_deps
+          else
+            install_tpu_pre_train_extra_deps
+          fi
           python3 --version
           python3 -m pip freeze
-          uv pip install pytest-cov
-      - name: Install extra pip deps
-        if: inputs.extra_pip_deps_file != ''
-        shell: bash
-        run: |
-          source .venv/bin/activate
-          uv pip install -r ${{ inputs.extra_pip_deps_file }}
       - name: Copy test assets files
+        if: ${{ !inputs.maxtext_installed }}
         run : gcloud storage cp gs://maxtext-test-assets/* tests/assets
       - name: Run Tests
         shell: bash
         run: |
+          # Determine environment and entry directory
+          if [ "${INPUTS_MAXTEXT_INSTALLED}" == "true" ]; then
+            # Move to the directory where code is baked into the image. See the Dockerfile.
+            cd /deps
+            PYTHON_EXE="python3"
+            # Disable coverage flags when testing against a pre-installed package
+            PYTEST_COV_ARGS=""
+          else
+            source .venv/bin/activate
+            # Use the local virtual environment created in Step 3
+            PYTHON_EXE=".venv/bin/python3"
+            # Ensure pytest-cov is available and enable coverage flags
+            uv pip install pytest-cov
+            PYTEST_COV_ARGS="--cov=MaxText --cov=maxtext --cov-report=xml --cov-report=term"
+          fi
+
           if [ "${INPUTS_IS_SCHEDULED_RUN}" == "true" ]; then
             FINAL_PYTEST_MARKER="${INPUTS_PYTEST_MARKER}"
           else
@@ -118,6 +145,7 @@ jobs:
           fi
           # TODO: Use package data for testing and remove the env vars
           export MAXTEXT_REPO_ROOT=$(pwd)
+          echo "MAXTEXT_REPO_ROOT (the current working directory) is ${MAXTEXT_REPO_ROOT}."
           export MAXTEXT_ASSETS_ROOT=$(pwd)/src/maxtext/assets
           export MAXTEXT_TEST_ASSETS_ROOT=$(pwd)/tests/assets
           export MAXTEXT_PKG_DIR=$(pwd)/src/maxtext
@@ -125,28 +153,32 @@ jobs:
           if [ "${INPUTS_DEVICE_TYPE}" != "cuda12" ]; then
             export LIBTPU_INIT_ARGS='--xla_tpu_scoped_vmem_limit_kib=65536'
           fi
-          if [ "${{ inputs.total_workers }}" -gt 1 ]; then
-            .venv/bin/python3 -m pip install --quiet pytest-split pytest-xdist
-            SPLIT_ARGS="--splits ${{ inputs.total_workers }} --group ${{ inputs.worker_group }} -n auto"
+          if [ "${INPUTS_TOTAL_WORKERS}" -gt 1 ]; then
+            $PYTHON_EXE -m pip install --quiet pytest-split pytest-xdist
+            SPLIT_ARGS="--splits ${INPUTS_TOTAL_WORKERS} --group ${INPUTS_WORKER_GROUP} -n auto"
           else
             SPLIT_ARGS=""
           fi
-          .venv/bin/python3 -m pytest ${INPUTS_PYTEST_ADDOPTS} \
+          $PYTHON_EXE -m pytest ${INPUTS_PYTEST_ADDOPTS} \
             -v \
             -m "${FINAL_PYTEST_MARKER}" \
             --durations=0 \
-            --cov=MaxText \
-            --cov=maxtext \
-            --cov-report=xml \
-            --cov-report=term \
-            $SPLIT_ARGS
+            $PYTEST_COV_ARGS \
+            $SPLIT_ARGS \
+            ${INPUTS_PYTEST_EXTRA_ARGS}
+
         env:
           PYTHONPATH: "${{ github.workspace }}/src"
           INPUTS_IS_SCHEDULED_RUN: ${{ inputs.is_scheduled_run }}
           INPUTS_PYTEST_MARKER: ${{ inputs.pytest_marker }}
           INPUTS_DEVICE_TYPE: ${{ inputs.device_type }}
           INPUTS_PYTEST_ADDOPTS: ${{ inputs.pytest_addopts }}
+          INPUTS_TOTAL_WORKERS: ${{ inputs.total_workers }}
+          INPUTS_WORKER_GROUP: ${{ inputs.worker_group }}
+          INPUTS_PYTEST_EXTRA_ARGS: ${{ inputs.pytest_extra_args }}
+          INPUTS_MAXTEXT_INSTALLED: ${{ inputs.maxtext_installed }}
       - name: Upload results to Codecov
+        if: ${{ !inputs.maxtext_installed }} # Skip code coverage upload for maxtext image testing
         uses: codecov/codecov-action@v5
         continue-on-error: true
         with:

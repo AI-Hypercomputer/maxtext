@@ -45,6 +45,7 @@ from maxtext.models import (
     gemma,
     gemma2,
     gemma3,
+    gemma4,
     gpt3,
     gpt_oss,
     llama2,
@@ -464,6 +465,8 @@ class Decoder(nn.Module):
         return [gemma2.Gemma2DecoderLayerToLinen]
       case DecoderBlockType.GEMMA3:
         return [gemma3.Gemma3DecoderLayerToLinen]
+      case DecoderBlockType.GEMMA4:
+        return [gemma4.Gemma4ScannableBlockToLinen] if self.config.scan_layers else [gemma4.Gemma4DecoderLayerToLinen]
       case DecoderBlockType.GPT3:
         return [gpt3.Gpt3DecoderLayerToLinen]
       case DecoderBlockType.GPT_OSS:
@@ -528,6 +531,7 @@ class Decoder(nn.Module):
         DecoderBlockType.GEMMA,
         DecoderBlockType.GEMMA2,
         DecoderBlockType.GEMMA3,
+        DecoderBlockType.GEMMA4,
         DecoderBlockType.QWEN2,
         DecoderBlockType.QWEN3,
         DecoderBlockType.QWEN3_MOE,
@@ -617,11 +621,7 @@ class Decoder(nn.Module):
       decoder_positions,
       deterministic,
       model_mode,
-      image_embeddings=None,
-      bidirectional_mask=None,
-      image_masks=None,
-      audio_embeddings=None,
-      audio_masks=None,
+      multimodal_input=None,
   ):
     """Applies token and positional embeddings to the input tokens."""
     cfg = self.config
@@ -629,35 +629,44 @@ class Decoder(nn.Module):
     y = shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode)
 
     # Merge the image embeddings with the text embeddings for multimodal models
-    if image_embeddings is not None and cfg.use_multimodal:
-      if cfg.model_name in [
-          "gemma3-4b",
-          "gemma3-12b",
-          "gemma3-27b",
-          "llama4-17b-16e",
-          "llama4-17b-128e",
-          "qwen3-omni-30b-a3b",
-      ]:
-        y = mm_utils.merge_mm_embeddings(
-            text_embeddings=y,
-            multimodal_embeddings=image_embeddings,
-            mask=bidirectional_mask,
-            token_masks=image_masks,
-        )
-      # TODO(hengtaoguo): Add support for other multimodal models such as Llama4, refactor if needed
-      else:
-        raise ValueError(f"Unsupported model_name for multimodal: {cfg.model_name}")
+    if multimodal_input is not None:
+      image_embeddings = multimodal_input.image_embeddings
+      bidirectional_mask = multimodal_input.bidirectional_mask
+      image_masks = multimodal_input.image_masks
+      audio_embeddings = multimodal_input.audio_embeddings
+      audio_masks = multimodal_input.audio_masks
 
-    if audio_embeddings is not None and cfg.use_audio:
-      if cfg.model_name in ["qwen3-omni-30b-a3b"]:
-        y = mm_utils.merge_mm_embeddings(
-            text_embeddings=y,
-            multimodal_embeddings=audio_embeddings,
-            mask=audio_masks,
-            token_masks=None,
-        )
-      else:
-        raise ValueError(f"Unsupported model_name for audio: {cfg.model_name}")
+      if image_embeddings is not None and cfg.use_multimodal:
+        if cfg.model_name in [
+            "gemma3-4b",
+            "gemma3-12b",
+            "gemma3-27b",
+            "gemma4-26b",
+            "gemma4-31b",
+            "llama4-17b-16e",
+            "llama4-17b-128e",
+            "qwen3-omni-30b-a3b",
+        ]:
+          y = mm_utils.merge_mm_embeddings(
+              text_embeddings=y,
+              multimodal_embeddings=image_embeddings,
+              mask=bidirectional_mask,
+              token_masks=image_masks,
+          )
+        # TODO(hengtaoguo): Add support for other multimodal models such as Llama4, refactor if needed
+        else:
+          raise ValueError(f"Unsupported model_name for multimodal: {cfg.model_name}")
+
+      if audio_embeddings is not None and cfg.use_audio:
+        if cfg.model_name in ["qwen3-omni-30b-a3b"]:
+          y = mm_utils.merge_mm_embeddings(
+              text_embeddings=y,
+              multimodal_embeddings=audio_embeddings,
+              mask=audio_masks,
+              token_masks=None,
+          )
+        else:
+          raise ValueError(f"Unsupported model_name for audio: {cfg.model_name}")
 
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
     y = y.astype(cfg.dtype)
@@ -743,7 +752,6 @@ class Decoder(nn.Module):
 
     return logits
 
-  # TODO(aireenmei, Hengtaoguo): consolidate all multimodal inputs into a class as input to the encoder
   @nn.compact
   def __call__(
       self,
@@ -756,13 +764,9 @@ class Decoder(nn.Module):
       previous_chunk=None,
       slot: None | int = None,
       page_state: None | page_manager.PageState = None,
-      bidirectional_mask: None | Any = None,
-      image_embeddings: None | jnp.ndarray = None,
-      image_masks: None | jnp.ndarray = None,
+      multimodal_input=None,
       kv_caches: list[jax.Array] | None = None,
       attention_metadata=None,
-      audio_embeddings: None | jnp.ndarray = None,
-      audio_masks: None | jnp.ndarray = None,
       deepstack_visual_embeds: None | list[jnp.ndarray] = None,
   ):
     cfg = self.config
@@ -776,11 +780,7 @@ class Decoder(nn.Module):
         decoder_positions,
         deterministic,
         model_mode,
-        image_embeddings,
-        bidirectional_mask,
-        image_masks,
-        audio_embeddings,
-        audio_masks,
+        multimodal_input=multimodal_input,
     )
 
     mhc_expand, mhc_reduce = mhc.get_functions(cfg.mhc_expansion_rate)
@@ -937,13 +937,27 @@ class Decoder(nn.Module):
                   model_mode=model_mode,
               )(y, *broadcast_args)
         elif cfg.decoder_block == DecoderBlockType.GEMMA3:
+          bidirectional_mask_value = multimodal_input.bidirectional_mask if multimodal_input is not None else None
           y = self._apply_gemma3_scanned_blocks(
               y,
               decoder_segment_ids,
               decoder_positions,
               deterministic,
               model_mode,
-              bidirectional_mask,
+              bidirectional_mask_value,
+              previous_chunk,
+              page_state,
+              slot,
+          )
+        elif cfg.decoder_block == DecoderBlockType.GEMMA4:
+          bidirectional_mask_value = multimodal_input.bidirectional_mask if multimodal_input is not None else None
+          y = self._apply_gemma4_scanned_blocks(
+              y,
+              decoder_segment_ids,
+              decoder_positions,
+              deterministic,
+              model_mode,
+              bidirectional_mask_value,
               previous_chunk,
               page_state,
               slot,
@@ -1014,8 +1028,14 @@ class Decoder(nn.Module):
             layer_call_kwargs = {}
             if cfg.decoder_block == DecoderBlockType.GEMMA3:
               # Gemma3 uses both global and sliding window attention depending on the layer index.
+              bidirectional_mask_value = multimodal_input.bidirectional_mask if multimodal_input is not None else None
               layer_kwargs = {"attention_type": gemma3.get_attention_type(layer_id=lyr)}
-              layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
+              layer_call_kwargs = {"bidirectional_mask": bidirectional_mask_value}
+            if cfg.decoder_block == DecoderBlockType.GEMMA4:
+              # Gemma4 uses both global and sliding window attention depending on the layer index.
+              bidirectional_mask_value = multimodal_input.bidirectional_mask if multimodal_input is not None else None
+              layer_kwargs = {"attention_type": gemma4.get_attention_type(layer_id=lyr)}
+              layer_call_kwargs = {"bidirectional_mask": bidirectional_mask_value}
             if cfg.decoder_block == DecoderBlockType.LLAMA4:
               layer_kwargs = {
                   "is_nope_layer": llama4.determine_is_nope_layer(lyr, self.config.nope_layer_interval),
@@ -1061,8 +1081,9 @@ class Decoder(nn.Module):
             if deepstack_visual_embeds is not None and lyr < len(deepstack_visual_embeds):
               visual_embeds = deepstack_visual_embeds[lyr]
               # Use bidirectional_mask to identify visual token positions
-              if bidirectional_mask is not None and visual_embeds is not None:
-                y = deepstack_process(y, bidirectional_mask, visual_embeds)
+              bidirectional_mask_value = multimodal_input.bidirectional_mask if multimodal_input is not None else None
+              if bidirectional_mask_value is not None and visual_embeds is not None:
+                y = deepstack_process(y, bidirectional_mask_value, visual_embeds)
 
     assert isinstance(y, jax.Array)
 
@@ -1163,6 +1184,88 @@ class Decoder(nn.Module):
           slot=slot,
           **layer_call_kwargs,
       )
+    return y
+
+  def _apply_gemma4_scanned_blocks(
+      self,
+      y,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      bidirectional_mask,
+      previous_chunk,
+      page_state,
+      slot,
+  ):
+    """Applies Gemma4 scanned decoder blocks, handling main scan and remainders."""
+
+    cfg = self.config
+    mesh = self.mesh
+
+    # Define the repeating pattern length and calculate how many full blocks to scan
+    block_pattern_len = len(gemma4.GEMMA4_ATTENTION_PATTERN)
+    num_full_blocks = cfg.num_decoder_layers // block_pattern_len
+    remainder_layers = cfg.num_decoder_layers % block_pattern_len
+
+    broadcast_args = (
+        decoder_segment_ids,
+        decoder_positions,
+        deterministic,
+        model_mode,
+        slot,
+        page_state,
+        previous_chunk,
+        bidirectional_mask,
+    )
+
+    if num_full_blocks > 0:
+      ScannableBlockToLinen = gemma4.Gemma4ScannableBlockToLinen
+      policy = self.get_remat_policy()
+      RemattedGemma4Block = self.set_remat_policy([ScannableBlockToLinen], policy)[0]
+      # For a fully scanned block, apply it inside a nn.scan over the calculated number of full blocks
+      y, _ = nn.scan(
+          RemattedGemma4Block,
+          variable_axes={
+              "params": cfg.param_scan_axis,
+              "cache": 0,
+              "intermediates": 0,
+              "aqt": 0,
+              "_overwrite_with_gradient": 0,
+          },
+          split_rngs={"params": True, "dropout": cfg.enable_dropout},
+          in_axes=(nn.broadcast,) * len(broadcast_args),
+          length=num_full_blocks,
+          metadata_params={
+              nn.PARTITION_NAME: "layers",
+              "abstract_init": False,
+          },
+      )(
+          config=cfg,
+          mesh=mesh,
+          quant=self.quant,
+          model_mode=model_mode,
+          num_of_layers=block_pattern_len,
+          name="scanned_blocks",
+      )(
+          y, *broadcast_args
+      )
+
+    # Process any remaining layers that don't fit into a full scanned block
+    for layer_id in range(cfg.num_decoder_layers - remainder_layers, cfg.num_decoder_layers):
+      attention_type = gemma4.get_attention_type(layer_id)
+      layer = gemma4.Gemma4DecoderLayerToLinen(
+          config=cfg,
+          mesh=mesh,
+          model_mode=model_mode,
+          quant=self.quant,
+          attention_type=attention_type,
+          layer_idx=layer_id,
+      )
+      y = layer(y, *broadcast_args)
+      if cfg.scan_layers:
+        y = y[0]
+
     return y
 
   # TODO(b/490118813): Relocate the following functions to their designated directories

@@ -126,6 +126,7 @@ class TrainDistillTest(unittest.TestCase):
     trainer.teacher_model = mock.Mock()
     trainer.model = mock.Mock()
     trainer.gen_model_input_fn = lambda x: {"inputs": {"some_key": "some_val"}}
+    trainer.wrt_filter = lambda path, x: True  # type: ignore
 
     # 2. Setup Input
     # pylint: disable=unexpected-keyword-arg
@@ -153,6 +154,7 @@ class TrainDistillTest(unittest.TestCase):
     # pylint: disable=no-value-for-parameter
     trainer = train_distill.MaxTextDistillationTrainer.__new__(train_distill.MaxTextDistillationTrainer)
     trainer.strategy = mock.Mock()
+    trainer.wrt_filter = lambda path, x: True  # type: ignore
 
     # 2. Setup Batch WITH teacher_output
     mock_batch = {
@@ -205,6 +207,7 @@ class TrainDistillTest(unittest.TestCase):
     # pylint: disable=no-value-for-parameter
     trainer = train_distill.MaxTextDistillationTrainer.__new__(train_distill.MaxTextDistillationTrainer)
     trainer.strategy = mock.Mock()
+    trainer.wrt_filter = lambda path, x: True  # type: ignore
 
     # 2. Setup Batch WITHOUT teacher_output
     mock_batch = {
@@ -258,7 +261,7 @@ class TrainDistillTest(unittest.TestCase):
     )
 
     # Verify loss computation and optimizer update
-    trainer.strategy.labels_fn.assert_called_once_with(mock_batch["targets"], targets_segmentation=None)
+    trainer.strategy.create_labels.assert_called_once_with(mock_batch["targets"], targets_segmentation=None)
     trainer.strategy.compute_loss.assert_called_once()
     optimizer.update.assert_called_once_with(student_model, mock_grads)
 
@@ -278,6 +281,7 @@ class TrainDistillTest(unittest.TestCase):
     # pylint: disable=no-value-for-parameter
     trainer = train_distill.MaxTextDistillationTrainer.__new__(train_distill.MaxTextDistillationTrainer)
     trainer.strategy = mock.Mock()
+    trainer.wrt_filter = lambda path, x: True  # type: ignore
 
     # 2. Setup Batch WITH targets_segmentation
     mock_targets_segmentation = jnp.array([[1, 1, 0]])
@@ -307,7 +311,7 @@ class TrainDistillTest(unittest.TestCase):
     loss_wrapper(student_model, teacher_model, mock_batch)
 
     # 6. Assertions
-    trainer.strategy.labels_fn.assert_called_once_with(
+    trainer.strategy.create_labels.assert_called_once_with(
         mock_batch["targets"], targets_segmentation=mock_targets_segmentation
     )
     trainer.strategy.student_forward_fn.assert_called_once_with(
@@ -378,12 +382,11 @@ class TrainDistillTest(unittest.TestCase):
     strategy = distillation_utils.CombinedDistillationStrategy(
         student_forward_fn=lambda m, **k: None,
         teacher_forward_fn=lambda m, **k: None,
-        labels_fn=lambda t: t,
+        vocab_size=4,
         temperature=1.0,
         alpha=0.5,
         beta_feature=1.0,
         layer_indices=None,
-        sft_mode=sft_mode,
     )
 
     # Dummy inputs (batch=1, seq=2, vocab=4)
@@ -426,18 +429,15 @@ class TrainDistillTest(unittest.TestCase):
     self.assertLess(metrics["distill/kl_div"], 1e-5)
     self.assertLess(metrics["distill/out_proj_feature_loss"], 1e-5)
 
-  def test_strategy_compute_eval_loss(self):
-    self._verify_strategy_compute_eval_loss(sft_mode=False)
-
-  def _verify_strategy_compute_eval_loss(self, sft_mode):
+  def verify_strategy_compute_eval_loss(self):
     """Covers MonitoredLogitStrategy.compute_eval_loss."""
     strategy = distillation_utils.CombinedDistillationStrategy(
         student_forward_fn=mock.Mock(),
         teacher_forward_fn=mock.Mock(),
-        labels_fn=mock.Mock(),
+        vocab_size=4,
+        # student_config=mock_config,
         temperature=1.0,
         alpha=0.5,
-        sft_mode=sft_mode,
     )
     # Case where feature loss is enabled
     logits = distillation_utils.DistillationForwardOutput(
@@ -459,8 +459,51 @@ class TrainDistillTest(unittest.TestCase):
     self.assertTrue(isinstance(loss, jax.Array))
     self.assertEqual(aux, {})
 
-  def test_strategy_compute_eval_loss_sft(self):
-    self._verify_strategy_compute_eval_loss(sft_mode=True)
+  def test_strategy_ignores_segmentation_zero_tokens(self):
+    """Verifies that 0 tokens in targets_segmentation are ignored in loss computation."""
+    strategy = distillation_utils.CombinedDistillationStrategy(
+        student_forward_fn=mock.Mock(),
+        teacher_forward_fn=mock.Mock(),
+        vocab_size=4,
+        temperature=1.0,
+        alpha=0.5,
+        pad_id=0,
+    )
+
+    # 1. Leverage the targets_segmentation tensor and put a 0 token in between.
+    # Token 1 is a delimiter (targets_segmentation = 0).
+    targets = jnp.array([[2, 1, 3]])
+    targets_segmentation = jnp.array([[1, 0, 1]])
+
+    # 2. Create labels with the zeroed out segment delimiter mask.
+    labels = strategy.create_labels(targets, targets_segmentation=targets_segmentation)
+
+    # Student has all predictions incorrect
+    s_logits = jnp.array(
+        [
+            [
+                [10.0, -10.0, -10.0, -10.0],
+                [-10.0, 10.0, -10.0, -10.0],
+                [-10.0, 10.0, -10.0, -10.0],
+            ]
+        ]  # correct
+    )
+    student_output = distillation_utils.DistillationForwardOutput(logits=s_logits, out_projection_activations=None)
+
+    # Teacher perfectly predicts the target for Token 0 and Token 2, and class 1 for Token 1
+    t_logits = jnp.array([[[-10.0, -10.0, 10.0, -10.0], [10.0, -10.0, -10.0, -10.0], [-10.0, -10.0, -10.0, 10.0]]])
+    teacher_output = distillation_utils.DistillationForwardOutput(logits=t_logits, out_projection_activations=None)
+
+    # 3. Call compute_loss()
+    _, metrics = strategy.compute_loss(student_output, teacher_output, labels)
+
+    # all tokens are predicted incorrect so the loss should be 10*2 since
+    # token at position 1 should be excluded from the loss
+    # mean kl_div should also be equal to 20
+    self.assertTrue(19.0 < metrics["distill/hard_loss"] < 21.0)
+    self.assertTrue(19.0 < metrics["distill/soft_loss"] < 21.0)
+    self.assertTrue(19.0 < metrics["distill/kl_div"] < 21.0)
+    self.assertTrue(metrics["distill/teacher_loss"] == 0.0)
 
   def test_setup_pipeline_grain_enabled(self):
     """Covers setup_checkpoint_manager_and_restore when Grain IS detected."""
@@ -540,6 +583,7 @@ class TrainDistillTest(unittest.TestCase):
     # pylint: disable=no-value-for-parameter
     trainer = train_distill.MaxTextDistillationTrainer.__new__(train_distill.MaxTextDistillationTrainer)
     trainer.strategy = mock.Mock()
+    trainer.wrt_filter = lambda path, x: True  # type: ignore
 
     # 2. Setup Input Mocks
     raw_inputs = mock.Mock()
@@ -549,6 +593,7 @@ class TrainDistillTest(unittest.TestCase):
         "attention_mask": mock.Mock(),
         "decoder_segment_ids": mock.Mock(),
         "targets": mock.Mock(),
+        "targets_segmentation": None,
     }
     trainer.gen_model_input_fn = mock.Mock(return_value=mock_batch)
 
@@ -562,7 +607,7 @@ class TrainDistillTest(unittest.TestCase):
     trainer.strategy.student_forward_fn.return_value = mock_student_output
 
     mock_labels = mock.Mock()
-    trainer.strategy.labels_fn.return_value = mock_labels
+    trainer.strategy.create_labels.return_value = mock_labels
 
     mock_loss = mock.Mock()
     trainer.strategy.compute_eval_loss.return_value = mock_loss
@@ -591,7 +636,7 @@ class TrainDistillTest(unittest.TestCase):
       trainer.strategy.teacher_forward_fn.assert_not_called()
 
     # Verify loss computation pipeline
-    trainer.strategy.labels_fn.assert_called_once_with(mock_batch["targets"])
+    trainer.strategy.create_labels.assert_called_once_with(mock_batch["targets"], targets_segmentation=None)
     trainer.strategy.compute_eval_loss.assert_called_once_with(mock_student_output, mock_labels)
 
     # Verify it returns the correct loss
@@ -635,6 +680,7 @@ class TrainDistillTest(unittest.TestCase):
     """Verifies metrics are moved from aux dict to the trainer buffer."""
     # pylint: disable=no-value-for-parameter
     trainer = train_distill.MaxTextDistillationTrainer.__new__(train_distill.MaxTextDistillationTrainer)
+    trainer.wrt_filter = lambda path, x: True  # type: ignore
 
     # Setup MetricsBuffer mock
     mock_buffer = mock.Mock()
@@ -683,6 +729,7 @@ class TrainDistillTest(unittest.TestCase):
     # pylint: disable=no-value-for-parameter
     trainer = train_distill.MaxTextDistillationTrainer.__new__(train_distill.MaxTextDistillationTrainer)
     trainer.strategy = mock.Mock()
+    trainer.wrt_filter = lambda path, x: True  # type: ignore
 
     dummy_batch = {
         "input_tokens": jnp.ones((1, 2)),
@@ -691,7 +738,7 @@ class TrainDistillTest(unittest.TestCase):
         "teacher_output": jnp.array([1.0, 1.0]),
     }
     trainer.gen_model_input_fn = mock.Mock(return_value=dummy_batch)
-    trainer.strategy.labels_fn.return_value = None
+    trainer.strategy.create_labels.return_value = None
 
     # 4. Mock the forward pass to COUNT how many times it executes
     # We wrap the actual dummy model execution in a mock to track it.
@@ -1080,6 +1127,92 @@ class TrainDistillTest(unittest.TestCase):
     # check that both student and teacher models are set since online mode should load both
     self.assertIs(model_bundle.student_model, mock_student_model)
     self.assertIs(model_bundle.teacher_model, mock_teacher_model)
+
+  def test_student_freeze_param_filter(self):
+    """Verifies that student_freeze_param_filter correctly freezes specified parameters."""
+
+    # 1. Setup a dummy model with multiple layers
+    class DummyModel(nnx.Module):
+
+      def __init__(self):
+        self.layer1 = nnx.Linear(in_features=2, out_features=2, rngs=nnx.Rngs(0))
+        self.layer2 = nnx.Linear(in_features=2, out_features=2, rngs=nnx.Rngs(1))
+
+      def __call__(self, input_tokens, **kwargs):
+        # Apply layers
+        return self.layer2(self.layer1(input_tokens))
+
+    student = DummyModel()
+    teacher = DummyModel()
+    model_bundle = train_distill.ModelBundle(teacher_model=teacher, student_model=student)
+
+    # Snapshot initial weights
+    initial_layer1_weights = student.layer1.kernel.get_value().copy()
+    initial_layer2_weights = student.layer2.kernel.get_value().copy()
+
+    # 2. Setup freeze filter (freeze layer1, train layer2)
+    def freeze_filter(path):
+      path_str = "/".join(str(p) for p in path)
+      return "layer1" in path_str
+
+    # 3. Setup Strategy and TrainingConfig
+    strategy = mock.Mock()
+    strategy.compute_loss.side_effect = lambda s_out, t_out, labels: (jnp.sum(s_out.logits), {"aux": 1.0})
+    strategy.create_labels.return_value = None
+    strategy.student_forward_fn = lambda model, **kw: distillation_utils.DistillationForwardOutput(
+        logits=model(kw["input_tokens"])
+    )
+    strategy.teacher_forward_fn = lambda model, **kw: distillation_utils.DistillationForwardOutput(
+        logits=model(kw["input_tokens"])
+    )
+
+    # pylint: disable=import-outside-toplevel
+    from tunix.sft import peft_trainer
+
+    train_config = peft_trainer.TrainingConfig(
+        max_steps=1,
+        eval_every_n_steps=0,
+        # checkpointing_options=ocp.CheckpointManagerOptions(create=False),
+        gradient_accumulation_steps=1,
+    )
+
+    # 4. Initialize Trainer
+    trainer = train_distill.MaxTextDistillationTrainer(
+        model=model_bundle,
+        strategy=strategy,
+        optimizer=optax.sgd(0.1),
+        training_config=train_config,
+        student_freeze_param_filter=freeze_filter,
+    )
+    trainer._lora_enabled = False
+    trainer.is_managed_externally = True
+
+    trainer = trainer.with_gen_model_input_fn(
+        lambda batch: {
+            "input_tokens": batch["input_tokens"],
+            "positions": None,
+            "attention_mask": None,
+            "decoder_segment_ids": None,
+            "targets": None,
+            "teacher_output": distillation_utils.DistillationForwardOutput(logits=jnp.ones((1, 2))),
+        }
+    )
+
+    dummy_batch = {"input_tokens": jnp.ones((1, 2))}
+
+    # 5. Execute Pass
+    trainer._train_step(model_bundle, trainer.optimizer, dummy_batch)
+
+    # 6. Verify layer1 is unchanged (frozen)
+    np.testing.assert_allclose(
+        student.layer1.kernel.get_value(),
+        initial_layer1_weights,
+        err_msg="layer1 weights should be frozen and remain unchanged.",
+    )
+
+    # Verify layer2 has changed (trained)
+    is_layer2_unchanged = np.allclose(student.layer2.kernel.get_value(), initial_layer2_weights)
+    self.assertFalse(is_layer2_unchanged, msg="layer2 weights should have updated.")
 
 
 if __name__ == "__main__":

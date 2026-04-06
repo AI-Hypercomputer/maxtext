@@ -1,10 +1,10 @@
-# Copyright 2023-2026 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -34,7 +34,8 @@ Architecture Overview:
 """
 
 import inspect
-from typing import Sequence, Callable
+import logging
+from typing import Sequence, Callable, Any
 from absl import app
 from flax import nnx
 from flax.linen import partitioning as nn_partitioning
@@ -199,7 +200,15 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
   (positions, segment_ids) are passed to the model.
   """
 
-  def __init__(self, model, strategy, optimizer, training_config, **kwargs):
+  def __init__(
+      self,
+      model,
+      strategy: distillation_utils.DistillationStrategy,
+      optimizer,
+      training_config,
+      student_freeze_param_filter: Callable[[Any], bool] | None = None,
+      **kwargs,
+  ):
     # We pass a dummy optimizer to the base PeftTrainer temporarily to prevent PeftTrainer from eagerly
     # allocating massive optimizer states for the entire ModelBundle (including the frozen teacher) before
     # redefining the trainer optimizer here.
@@ -211,8 +220,22 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
     # override optimizer to only use student_model.
     if training_config.gradient_accumulation_steps is not None and training_config.gradient_accumulation_steps > 1:
       optimizer = optax.MultiSteps(optimizer, training_config.gradient_accumulation_steps)
-    wrt = nnx.LoRAParam if self._lora_enabled else nnx.Param
-    self.optimizer = nnx.Optimizer(model.student_model, optimizer, wrt=wrt)
+
+    base_wrt = nnx.LoRAParam if getattr(self, "_lora_enabled", False) else nnx.Param
+    if student_freeze_param_filter:
+
+      def wrt_filter(path, x):
+        if not isinstance(x, base_wrt):
+          return False
+        freeze = student_freeze_param_filter(path)
+        logging.info("Student model freezing info: Parameter %s; freeze=%s", path, freeze)
+        return not freeze
+
+      self.wrt_filter = wrt_filter
+    else:
+      self.wrt_filter = base_wrt
+
+    self.optimizer = nnx.Optimizer(model.student_model, optimizer, wrt=self.wrt_filter)
 
     # Detect if Tunix expects _train_step to return grad_norm by inspecting the source
     self._tunix_expects_grad_norm = False
@@ -275,14 +298,14 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
           cache=None,
       )
       # we should apply a mask for labels to disable segment-separator tokens
-      labels = self.strategy.labels_fn(batch["targets"], targets_segmentation=batch.get("targets_segmentation", None))
+      labels = self.strategy.create_labels(batch["targets"], targets_segmentation=batch.get("targets_segmentation", None))
       return self.strategy.compute_loss(student_output, teacher_output, labels)
 
     # Because student is the 0th argument, argnums=0 guarantees
     # we only compute gradients for the student.
     grad_fn = nnx.value_and_grad(
         loss_wrapper,
-        argnums=0,
+        argnums=nnx.DiffState(0, self.wrt_filter),
         has_aux=True,
     )
 
@@ -308,7 +331,7 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
         decoder_segment_ids=inputs.get("decoder_segment_ids"),
         cache=None,
     )
-    labels = self.strategy.labels_fn(inputs["targets"])
+    labels = self.strategy.create_labels(inputs["targets"], targets_segmentation=inputs.get("targets_segmentation", None))
     return self.strategy.compute_eval_loss(student_output, labels)
 
   def _prepare_inputs(
@@ -470,14 +493,6 @@ def build_training_components(
   pad_id = tok.pad_id if tok.pad_id is not None else 0
 
   # 3. Define Distillation Strategy
-  def labels_fn(targets, targets_segmentation=None, **kwargs):
-    """Converts integer targets to masked one-hot vectors for hard label loss."""
-    del kwargs  # Unused
-    one_hot = jax.nn.one_hot(targets, student_config.vocab_size)
-    mask = jnp.not_equal(targets, pad_id).astype(one_hot.dtype)[..., None]
-    if targets_segmentation is not None:
-      mask = mask * (targets_segmentation != 0)[..., None]
-    return one_hot * mask
 
   # Both Student and Teacher use the same forward logic via the adapter
   student_forward_fn = create_forward_fn(student_config)
@@ -487,12 +502,12 @@ def build_training_components(
   strategy = distillation_utils.CombinedDistillationStrategy(
       student_forward_fn=student_forward_fn,
       teacher_forward_fn=teacher_forward_fn,
-      labels_fn=labels_fn,
+      pad_id=pad_id,
       temperature=student_config.distill_temperature,
       alpha=student_config.distill_alpha,
       beta_feature=student_config.distill_beta,
       layer_indices=student_config.distill_layer_indices,
-      sft_mode=student_config.use_sft,
+      vocab_size=student_config.vocab_size,
   )
 
   # 4. Optimizer & Config
@@ -572,6 +587,12 @@ def train_distill(
     _log_config_details(student_config, "Student")
     student_model = get_maxtext_model(student_config, mesh)
 
+    student_params_to_update = getattr(student_config, "student_params_to_update", [])
+
+    def student_freeze_param_fn(path) -> bool:
+      path_str = "/".join(str(p) for p in path)
+      return not any(template in path_str for template in student_params_to_update)
+
     if is_offline:
       max_logging.log("Offline Distillation: Skipping Teacher Model loading.")
       teacher_model = None
@@ -590,6 +611,7 @@ def train_distill(
         strategy=strategy,
         optimizer=optimizer,
         training_config=train_config,
+        student_freeze_param_filter=student_freeze_param_fn if student_params_to_update else None,
     )
     trainer.is_managed_externally = True
     trainer._has_aux = True  # pylint: disable=protected-access

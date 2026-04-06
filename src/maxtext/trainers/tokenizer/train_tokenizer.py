@@ -42,6 +42,7 @@ from sentencepiece import SentencePieceTrainer
 import jax
 import grain.python as grain
 
+from maxtext.input_pipeline import input_pipeline_utils
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from maxtext.utils import gcs_utils
 
@@ -50,7 +51,7 @@ _GRAIN_TRAIN_FILES = flags.DEFINE_string(
     "grain_train_files", None, "File pattern for training data (local or gs://)", required=True
 )
 _GRAIN_FILE_TYPE = flags.DEFINE_string(
-    "grain_file_type", "parquet", "Type of data files. Supported: 'parquet', 'arrayrecord'."
+    "grain_file_type", "parquet", "Type of data files. Supported: 'parquet', 'arrayrecord', 'tfrecord'."
 )
 _DATA_COLUMN = flags.DEFINE_string("data_column", "text", "Column name to extract text from (used for arrayrecord).")
 _VOCAB_SIZE = flags.DEFINE_integer("vocab_size", 32_768, "Vocab size")
@@ -82,27 +83,23 @@ def build_grain_iterator(data_file_pattern: str, data_file_type: str, data_keys:
     dataset = grain.MapDataset.source(data_files)
     dataset = dataset.map(grain.experimental.ParquetIterDataset)
     dataset = grain.experimental.InterleaveIterDataset(dataset, cycle_length=len(data_files))
+    dataset = dataset.map(input_pipeline_utils.KeepFeatures(feature_names=list(data_keys)))
     return iter(dataset)
   elif data_file_type == "arrayrecord":
-    from maxtext.input_pipeline.protos import example_pb2  # pylint: disable=import-outside-toplevel
-
     source = grain.ArrayRecordDataSource(data_files)
     dataset = grain.MapDataset.source(source)
-
-    def _parse_example(raw_bytes):
-      example = example_pb2.Example()
-      example.ParseFromString(raw_bytes)
-      features = example.features.feature
-      parsed = {}
-      for col in data_keys:
-        if col in features:
-          parsed[col] = features[col].bytes_list.value[0]
-      return parsed
-
-    dataset = dataset.map(_parse_example)
+    dataset = dataset.map(input_pipeline_utils.ParseFeatures(list(data_keys), tokenize=True))
+    dataset = dataset.map(input_pipeline_utils.NormalizeFeatures(list(data_keys), tokenize=True))
+    return iter(dataset)
+  elif data_file_type == "tfrecord":
+    dataset = grain.MapDataset.source(data_files)
+    dataset = dataset.map(input_pipeline_utils.make_tfrecord_iter_dataset)
+    dataset = grain.experimental.InterleaveIterDataset(dataset, cycle_length=len(data_files))
+    dataset = dataset.map(input_pipeline_utils.ParseFeatures(list(data_keys), tokenize=True))
+    dataset = dataset.map(input_pipeline_utils.NormalizeFeatures(list(data_keys), tokenize=True))
     return iter(dataset)
   else:
-    raise ValueError(f"Unsupported grain_file_type: {data_file_type!r}. Use 'parquet' or 'arrayrecord'.")
+    raise ValueError(f"Unsupported grain_file_type: {data_file_type!r}. Use 'parquet', 'arrayrecord', or 'tfrecord'.")
 
 
 def _dump_chars_to_textfile(dataset_iter: Iterator, maxchars: int = int(1e7), data_keys=("text",)) -> tuple[str, int]:

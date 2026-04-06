@@ -77,10 +77,9 @@ def preprocess_mm_data_gemma3(images):
     images_out.append(img)
 
   processor_output = Gemma3PreprocessorOutput(
-      num_images=len(images),
+      num_images=len(images_in),
       pixel_values=np.stack(images_out, axis=0).astype(np.float32),  # (N, H, W, C)
   )
-  processor_output.num_images = len(images)
   return processor_output
 
 

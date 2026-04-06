@@ -22,17 +22,19 @@ import unittest
 import os.path
 import numpy as np
 import jax
+import re
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 from datasets import Dataset
 import transformers
 from parameterized import parameterized_class
-
+from unittest.mock import patch
 from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_PKG_DIR, MAXTEXT_CONFIGS_DIR, MAXTEXT_ASSETS_ROOT
 from maxtext.input_pipeline import hf_data_processing
 from maxtext.input_pipeline import input_pipeline_interface
 from maxtext.input_pipeline.hf_data_processing import _get_pad_id
+from maxtext.input_pipeline.input_pipeline_utils import verify_chat_template_generation_prompt_logic
 
 PROMPT_DATA = [
     [
@@ -482,6 +484,52 @@ class SFTDataProcessingTest(unittest.TestCase):
     )
     with self.assertRaisesRegex(ValueError, "System messages must be at index 0"):
       self.get_data_iterator(dataset, ["messages"])
+
+
+@pytest.mark.external_training
+class SFTChatTemplateLogicTest(unittest.TestCase):
+  LLAMA_TOKENIZER_PATH = os.path.join(MAXTEXT_ASSETS_ROOT, "llama2-chat-tokenizer")
+
+  @classmethod
+  def setUpClass(cls):
+    super().setUpClass()
+    if not os.path.exists(cls.LLAMA_TOKENIZER_PATH):
+      exit_code = subprocess.call(
+          [
+              "gsutil",
+              "cp",
+              "-r",
+              "gs://maxtext-dataset/hf/llama2-chat-tokenizer",
+              os.path.join(MAXTEXT_ASSETS_ROOT, ""),
+          ]
+      )
+      if exit_code != 0:
+        raise ValueError("Failed to download llama tokenizer")
+
+  def setUp(self):
+    super().setUp()
+    self.qwen3_tokenizer = transformers.AutoTokenizer.from_pretrained("Qwen/Qwen3-4B")
+    self.llama2_tokenizer = transformers.AutoTokenizer.from_pretrained(self.LLAMA_TOKENIZER_PATH)
+
+  def test_tokenizer_w_generation_prompt(self):
+    verify_chat_template_generation_prompt_logic(self.qwen3_tokenizer)
+
+  def test_tokenizer_wo_generation_prompt(self):
+    verify_chat_template_generation_prompt_logic(self.llama2_tokenizer)
+
+  def test_failure_path_with_modified_template(self):
+    """Verifies the function correctly raises a ValueError on a bad template."""
+    # Replace the role within the existing add_generation_prompt block with a deliberately faulty one.
+    fault_chat_template = re.sub(
+        r"(\{%-?\s*if add_generation_prompt\s*%\}.*?<\|im_start\|>)assistant(.*?\{%-?\s*endif\s*%\})",
+        r"\1wrong_role\2",
+        self.qwen3_tokenizer.chat_template,
+        flags=re.DOTALL,
+    )
+    with patch.object(self.qwen3_tokenizer, "chat_template", fault_chat_template):
+      # Verify that our function catches the mismatch and raises the expected error
+      with self.assertRaisesRegex(ValueError, "Chat template generation prompt mismatch!"):
+        verify_chat_template_generation_prompt_logic(self.qwen3_tokenizer)
 
 
 if __name__ == "__main__":

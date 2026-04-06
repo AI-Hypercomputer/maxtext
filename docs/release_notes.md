@@ -32,7 +32,7 @@ MaxText is [available in PyPI](https://pypi.org/project/maxtext/) and can be ins
 
 ### v0.2.0
 
-# Changes
+#### Changes
 
 - New `tpu-post-train` target in PyPI. Please also use this installation option for running vllm_decode. See the [MaxText installation instructions](https://maxtext.readthedocs.io/en/latest/install_maxtext.html) for more info.
 - [Qwen3-Next](https://github.com/AI-Hypercomputer/maxtext/blob/7656eb8d1c9eb0dd91e617a6fdf6ad805221221a/tests/end_to_end/tpu/qwen/next/run_qwen3_next.md) is now supported.
@@ -50,7 +50,7 @@ MaxText is [available in PyPI](https://pypi.org/project/maxtext/) and can be ins
 - Vocabulary tiling ([PR](https://github.com/AI-Hypercomputer/maxtext/pull/2242)) is now supported in MaxText! Adjust config `num_vocab_tiling` to unlock more efficient memory usage.
 - The GPT-OSS family of models (20B, 120B) is now supported.
 
-# Deprecations
+#### Deprecations
 
 - Many MaxText modules have changed locations. Core commands like train, decode, sft, etc. will still work as expected temporarily. Please update your commands to the latest file locations
 - install_maxtext_github_deps installation script replaced with install_maxtext_tpu_github_deps

@@ -44,6 +44,7 @@ python3 -m maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_trai
 """
 
 from __future__ import annotations
+from functools import wraps
 from typing import Sequence
 
 import collections
@@ -66,6 +67,7 @@ from transformers import AutoTokenizer
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.rollout import base_rollout
 from tunix.rl.grpo.grpo_learner import GrpoConfig, GrpoLearner
+from tunix.rl.agentic.agentic_grpo_learner import GrpoConfig as AgenticGrpoConfig, GrpoLearner as AgenticGrpoLearner
 from tunix.sft import metrics_logger, profiler
 
 # for vLLM we can skip JAX precompilation with this flag, it makes startup faster
@@ -84,10 +86,10 @@ def get_maxtext_model(config, devices=None):
   """
   Load MaxText model with Tunix adapter.
   # Note: pass the path to your scanned checkpoint for 'load_parameters_path'.
-  # To create a scanned checkpoint, you can use /maxtext/src/MaxText/checkpoint_conversion/to_maxtext.py and if
+  # To create a scanned checkpoint, you can use /maxtext/src/maxtext/checkpoint_conversion/to_maxtext.py and if
   # using Pathways, please set `USE_PATHWAYS=1` and use `$((1 - USE_PATHWAYS))` for storage flags:
   # export USE_PATHWAYS=1
-  # python src/MaxText/checkpoint_conversion/to_maxtext.py \
+  # python src/maxtext/checkpoint_conversion/to_maxtext.py \
   #  --model_name="gemma2-2b" \
   #  --base_output_directory="/path/to/your/output/directory" \
   #  --scan_layers=True \
@@ -385,6 +387,16 @@ def prepare_datasets(trainer_config, model_tokenizer):
     return len(tokens) <= trainer_config.max_prefill_predict_length
 
   train_dataset = train_dataset.filter(_filter_long_prompts)
+
+  # AgenticGRPOLearner uses a built in chat parser that expects raw prompts
+  if getattr(trainer_config.rl, "use_agentic_rollout", False):
+
+    def _use_raw_prompt(x):
+      x["prompts"] = x["question"]
+      return x
+
+    train_dataset = train_dataset.map(_use_raw_prompt)
+
   dataset_size = int(trainer_config.num_batches * trainer_config.batch_size * trainer_config.train_fraction)
   train_dataset = train_dataset[:dataset_size]
   train_dataset = train_dataset.repeat(trainer_config.num_epoch)
@@ -439,12 +451,20 @@ def create_rl_components(
   optimizer = utils_rl.get_optimizer(trainer_config, max_train_steps)
 
   # Setup checkpointing
-  checkpointing_options = ocp.CheckpointManagerOptions(
-      save_interval_steps=trainer_config.checkpoint_period, max_to_keep=trainer_config.max_num_checkpoints_to_keep
-  )
+  if trainer_config.enable_checkpointing:
+    checkpointing_options = ocp.CheckpointManagerOptions(
+        save_interval_steps=trainer_config.checkpoint_period, max_to_keep=trainer_config.max_num_checkpoints_to_keep
+    )
+    checkpoint_dir = trainer_config.checkpoint_dir
+  else:
+    checkpointing_options = None
+    checkpoint_dir = None
 
   # Set up micro batching
-  micro_batch_size = None if trainer_config.micro_batch_size == -1 else trainer_config.micro_batch_size
+  train_micro_batch_size = None if trainer_config.train_micro_batch_size == -1 else trainer_config.train_micro_batch_size
+  rollout_micro_batch_size = (
+      None if trainer_config.rollout_micro_batch_size == -1 else trainer_config.rollout_micro_batch_size
+  )
 
   # Setup metrics logging
   metrics_logging_options = metrics_logger.MetricsLoggerOptions(
@@ -494,11 +514,11 @@ def create_rl_components(
           eval_every_n_steps=trainer_config.eval_interval,
           max_steps=max_train_steps,
           mini_batch_size=trainer_config.batch_size,
-          train_micro_batch_size=micro_batch_size,
-          rollout_micro_batch_size=micro_batch_size,
+          train_micro_batch_size=train_micro_batch_size,
+          rollout_micro_batch_size=rollout_micro_batch_size,
           metrics_logging_options=metrics_logging_options,
           profiler_options=profiler_options,
-          checkpoint_root_directory=trainer_config.checkpoint_dir,
+          checkpoint_root_directory=checkpoint_dir,
           checkpointing_options=checkpointing_options,
       ),
       rollout_config=base_rollout.RolloutConfig(
@@ -519,25 +539,22 @@ def create_rl_components(
           rollout_vllm_max_num_batched_tokens=trainer_config.max_num_batched_tokens,
           rollout_vllm_max_num_seqs=trainer_config.max_num_seqs,
           rollout_vllm_async_scheduling=trainer_config.async_scheduling,
+          rollout_vllm_server_mode=trainer_config.rl.use_agentic_rollout,
           rollout_vllm_kwargs={
               "hf_overrides": trainer_config.vllm_hf_overrides,
               "enable_expert_parallel": sampler_config.rollout_expert_parallelism > 1,
+              "enable_prefix_caching": True,  # Enable prefix caching to speed up generation for long prompts
           },
           rollout_vllm_sampling_kwargs={
               "stop": trainer_config.stop_strings,
               "detokenize": trainer_config.stop_strings is not None,
               "include_stop_str_in_output": trainer_config.stop_strings is not None,
           },
+          # AgenticGRPOLearner requires log-probabilities from the rollout engine
+          # to support off-policy filtering and multi-iteration training.
+          **({"return_logprobs": True} if trainer_config.rl.use_agentic_rollout else {}),
           **get_rollout_kwargs_for_parallelism(sampler_config, len(sampler_devices)),
       ),
-  )
-
-  grpo_config = GrpoConfig(
-      num_generations=trainer_config.rl.num_generations,
-      num_iterations=trainer_config.rl.num_iterations,
-      beta=trainer_config.rl.grpo_beta,
-      epsilon=trainer_config.rl.grpo_epsilon,
-      loss_algo=trainer_config.rl.loss_algo,
   )
 
   # Create RL cluster
@@ -564,18 +581,65 @@ def create_rl_components(
       **rl_cluster_kwargs,
   )
 
+  def make_reward_fn(fn):
+    # pragma: no cover
+    @wraps(fn)
+    def _reward_fn(**kwargs):
+      return fn(tmvp_config=trainer_config, **kwargs)
+
+    return _reward_fn
+
+  reward_fns = [  # type: ignore
+      make_reward_fn(utils_rl.match_format_exactly),
+      make_reward_fn(utils_rl.match_format_approximately),
+      # TODO(atwigg): comment out to simplify reward and overlap with check_numbers
+      make_reward_fn(utils_rl.check_answer),
+      make_reward_fn(utils_rl.check_numbers),
+  ]
+
   # Create RL trainer
   max_logging.log("Setting up RL trainer...")
-  rl_trainer = GrpoLearner(
-      rl_cluster=rl_cluster,
-      reward_fns=[  # type: ignore
-          lambda **kwargs: utils_rl.match_format_exactly(tmvp_config=trainer_config, **kwargs),
-          lambda **kwargs: utils_rl.match_format_approximately(tmvp_config=trainer_config, **kwargs),
-          lambda **kwargs: utils_rl.check_answer(tmvp_config=trainer_config, **kwargs),
-          lambda **kwargs: utils_rl.check_numbers(tmvp_config=trainer_config, **kwargs),
-      ],
-      algo_config=grpo_config,
-  )
+  if trainer_config.rl.use_agentic_rollout:
+    max_logging.log("Using AgenticGRPOLearner with async online rollouts.")
+    grpo_config = AgenticGrpoConfig(
+        num_generations=trainer_config.rl.num_generations,
+        num_iterations=trainer_config.rl.num_iterations,
+        beta=trainer_config.rl.grpo_beta,
+        epsilon=trainer_config.rl.grpo_epsilon,
+        loss_algo=trainer_config.rl.loss_algo,
+        max_response_length=trainer_config.max_target_length - trainer_config.max_prefill_predict_length,
+        max_concurrency=trainer_config.rl.max_concurrency,
+        off_policy_steps=trainer_config.rl.off_policy_steps,
+        system_prompt=trainer_config.rl.system_prompt,
+        degenerate_group_masking=trainer_config.rl.degenerate_group_masking,
+        epsilon_high=trainer_config.rl.epsilon_high,
+    )
+    # Instantiate the custom MaxText chat parser
+    template_config = load_template_from_file(trainer_config.chat_template_path)
+    chat_parser = utils_rl.MaxTextChatParser(
+        model_tokenizer=model_tokenizer, template_config=template_config, tmvp_config=trainer_config
+    )
+    rl_trainer = AgenticGrpoLearner(
+        rl_cluster=rl_cluster,
+        reward_fns=reward_fns,
+        algo_config=grpo_config,
+        chat_parser=chat_parser,
+        metric_fns=[utils_rl.get_correctness_metrics],
+    )
+  else:
+    max_logging.log("Using standard GRPOLearner with offline rollouts.")
+    grpo_config = GrpoConfig(
+        num_generations=trainer_config.rl.num_generations,
+        num_iterations=trainer_config.rl.num_iterations,
+        beta=trainer_config.rl.grpo_beta,
+        epsilon=trainer_config.rl.grpo_epsilon,
+        loss_algo=trainer_config.rl.loss_algo,
+    )
+    rl_trainer = GrpoLearner(
+        rl_cluster=rl_cluster,
+        reward_fns=reward_fns,
+        algo_config=grpo_config,
+    )
 
   return rl_cluster, rl_trainer, optimizer
 
