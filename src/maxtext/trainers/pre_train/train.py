@@ -696,7 +696,7 @@ def main(argv: Sequence[str]) -> None:
                       slice_count=max_utils.elastic_manager.total_slice_count,
                       slice_to_devices=max_utils.elastic_manager.slice_to_devices,
                       poll_interval=10,
-                      timeout=60,
+                      timeout=90,
                   )
               )
             except TimeoutError:
