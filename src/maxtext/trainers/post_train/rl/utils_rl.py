@@ -18,8 +18,11 @@ import concurrent
 import itertools
 import json
 import re
+import uuid
+from etils import epath
 import optax
 from maxtext.utils import max_logging
+
 
 from math_verify.errors import TimeoutException
 from math_verify.parser import ExprExtractionConfig, LatexExtractionConfig
@@ -34,6 +37,41 @@ PRED_EXTRACTION_TARGET = (
     ExprExtractionConfig(),
     LatexExtractionConfig(),
 )
+
+def math_verify_func(items, timeout=5):
+  """Verifies a batch of math problems, handling timeouts and exceptions."""
+  with concurrent.futures.ThreadPoolExecutor() as executor:
+    future_to_index = {executor.submit(verify_math, golds, predictions): idx for idx, (_, golds, predictions) in enumerate(items)}
+    results = [0.0] * len(items)
+    for future in concurrent.futures.as_completed(future_to_index):
+      index = future_to_index[future]
+      try:
+        results[index] = future.result(timeout=timeout)
+      except (concurrent.futures.TimeoutError, Exception):
+        max_logging.log(f"math_verify_func failed for golds: {items[index][1]} and predictions: {items[index][2]}")
+  return results
+
+
+def verify_math(golds, predictions):
+  """Runs mathematical expression evaluation on ground-truth and predictions."""
+
+  extracted_predictions = list(itertools.chain.from_iterable(parse(pred, PRED_EXTRACTION_TARGET, parsing_timeout=None) for pred in predictions))
+  extracted_golds = list(itertools.chain.from_iterable(parse(gold, GOLD_EXTRACTION_TARGET, parsing_timeout=None) for gold in golds))
+  # If no predictions or golds were extracted, return 0.0
+  if not extracted_predictions or not extracted_golds:
+    return 0.0
+
+  return max(
+      [
+          (1.0 if any(verify(gold, pred, timeout_seconds=None) for gold in extracted_golds) else 0.0)
+          for pred in extracted_predictions
+      ]
+  )
+
+def boxed(x):
+  """Wraps the input string in a LaTeX boxed command if it's not already wrapped."""
+  return "\\boxed{" + x + "}" if not x.startswith("\\boxed{") else x
+
 
 EPSILON = 1e-6
 # Constants for normalization
@@ -95,42 +133,8 @@ REMOVED_EXPRESSIONS = [
 ]
 
 
-def math_verify_func(items, timeout=5):
-  """Verifies a batch of math problems, handling timeouts and exceptions."""
-  with concurrent.futures.ThreadPoolExecutor() as executor:
-    future_to_index = {executor.submit(verify_math, golds, predictions): idx for idx, (_, golds, predictions) in enumerate(items)}
-    results = [0.0] * len(items)
-    for future in concurrent.futures.as_completed(future_to_index):
-      index = future_to_index[future]
-      try:
-        results[index] = future.result(timeout=timeout)
-      except (concurrent.futures.TimeoutError, Exception):
-        max_logging.log(f"math_verify_func failed for golds: {items[index][1]} and predictions: {items[index][2]}")
-  return results
-
-
-def verify_math(golds, predictions):
-  """Runs mathematical expression evaluation on ground-truth and predictions."""
-
-  extracted_predictions = list(itertools.chain.from_iterable(parse(pred, PRED_EXTRACTION_TARGET, parsing_timeout=None) for pred in predictions))
-  extracted_golds = list(itertools.chain.from_iterable(parse(gold, GOLD_EXTRACTION_TARGET, parsing_timeout=None) for gold in golds))
-  # If no predictions or golds were extracted, return 0.0
-  if not extracted_predictions or not extracted_golds:
-    return 0.0
-
-  return max(
-      [
-          (1.0 if any(verify(gold, pred, timeout_seconds=None) for gold in extracted_golds) else 0.0)
-          for pred in extracted_predictions
-      ]
-  )
-
-
-def boxed(x):
-  """Wraps the input string in a LaTeX boxed command if it's not already wrapped."""
-  return "\\boxed{" + x + "}" if not x.startswith("\\boxed{") else x
-
-
+# Let's define a RegEx for checking whether the format matches.
+#
 def get_match_format_regex(tmvp_config):
   """Returns a compiled regex to extract the answer from a completion."""
   match_format = re.compile(
@@ -229,20 +233,14 @@ def normalize_final_answer(final_answer: str) -> str:
     final_answer = final_answer.replace(expr, "")
 
   # Extract and normalize LaTeX math
-  # converts "The answer is $\\frac{1}{2}$" -> "$\frac{1}{2}$"
-  # converts "The answer is 3 $\\frac{1}{2}$" -> "$3+\frac{1}{2}$"
   final_answer = re.sub(
       r".*?(\d+)?\s*\$\s*(\d+)?\s*(\\frac\{.*?\}\{.*?\}|\d+/\d+)\s*\$.*",
-      lambda m: f"${w}+{m.group(3)}$" if (w := (m.group(1) or m.group(2))) else f"${m.group(3)}$",
+      lambda m: f"${w}{m.group(3)}$" if (w := (m.group(1) or m.group(2))) else f"${m.group(3)}$",
       final_answer,
   )
-  # converts "\text{hello}" -> "hello"
   final_answer = re.sub(r"(\\text\{)(.*?)(\})", "\\2", final_answer)
-  # converts "\textbf{hello}" -> "hello"
   final_answer = re.sub(r"(\\textbf\{)(.*?)(\})", "\\2", final_answer)
-  # converts "\overline{hello}" -> "hello"
   final_answer = re.sub(r"(\\overline\{)(.*?)(\})", "\\2", final_answer)
-  # converts "\boxed{100}" -> "100"
   final_answer = re.sub(r"(\\boxed\{)(.*)(\})", "\\2", final_answer)
 
   # Normalize shorthand TeX:
@@ -265,7 +263,7 @@ def normalize_final_answer(final_answer: str) -> str:
 def preprocess_math_string(dataset_name, text) -> str:
   """Fix common formatting issues in text."""
   # Normalize for certain datasets and parse
-  if any(name in dataset_name for name in ["DAPO", "OpenMathInstruct", "OpenMathReasoning", "OpenR1-Math-220k", "CuratedThoughts", "MATH-500"]):
+  if any(name in dataset_name for name in ["DAPO", "OpenMathInstruct", "OpenMathReasoning",  "OpenR1-Math-220k", "CuratedThoughts"]):
     text = normalize_final_answer(text).strip()
   # Fix LaTeX escaping issues
   text = fix_latex_escaping(text)
@@ -379,15 +377,7 @@ def check_numbers(prompts, completions, answer, tmvp_config, **kargs):
 
   # Extract full answer content from solution tags (not just first number)
   extracted_responses = [extract_answer(c, tmvp_config) for c in completions]
-  true_answers = [list(dict.fromkeys(json.loads(acceptable_answers))) if isinstance(acceptable_answers, str) else acceptable_answers for acceptable_answers in answer]
-
-  if tmvp_config.debug.rl:
-    max_logging.log("START ============================")
-    max_logging.log(f"Question: {question[0]}")
-    max_logging.log(f"Answer: {answer[0]}")
-    max_logging.log(f"Response: {completions[0]}")
-    max_logging.log(f"Extracted: {extracted_responses[0]}")
-    max_logging.log("END ==============================")
+  true_answers = [list(dict.fromkeys(acceptable_answers)) for acceptable_answers in answer]
 
   scores = [tmvp_config.penalty_incorrect_format] * len(completions)  # Default to penalty for incorrect format
   math_verify_queue = []
@@ -417,32 +407,49 @@ def check_numbers(prompts, completions, answer, tmvp_config, **kargs):
   if math_verify_queue:
     # 2. Try math_verify for robust mathematical correctness checking
     math_verify_results = math_verify_func(math_verify_queue)
-    for (gen_idx, norm_answers, norm_guess), score in zip(math_verify_queue, math_verify_results):
+    for (gen_idx, norm_answers, norm_guesses), score in zip(math_verify_queue, math_verify_results):
       if score > 0.1:
         scores[gen_idx] = max(scores[gen_idx], tmvp_config.reward_exact_answer)
-        print("-------- Found a math_verify match -----------")
       else:
         # 3. As a fallback, try numeric comparison if both can be parsed as numbers
         try:
-          predictions = parse(boxed(norm_guess), PRED_EXTRACTION_TARGET, parsing_timeout=None)
-          golds = list(itertools.chain.from_iterable(parse(boxed(norm_answer), GOLD_EXTRACTION_TARGET, parsing_timeout=None) for norm_answer in norm_answers))
+          predictions = parse(norm_guesses[0], PRED_EXTRACTION_TARGET, parsing_timeout=None)
+          golds = list(itertools.chain.from_iterable(parse(norm_answer, GOLD_EXTRACTION_TARGET, parsing_timeout=None) for norm_answer in norm_answers))
           for gold in golds:
             for pred in predictions:
-              ratio = (float(pred) + EPSILON) / (float(gold) + EPSILON)
-              if 0.9 <= ratio <= 1.1:
-                scores[gen_idx] = max(scores[gen_idx], tmvp_config.reward_ratio_guess_to_answer_high)
-              elif 0.8 <= ratio <= 1.2:
-                scores[gen_idx] = max(scores[gen_idx], tmvp_config.reward_ratio_guess_to_answer_low)
-              else:
-                scores[gen_idx] = max(scores[gen_idx], tmvp_config.penalty_incorrect_answer)  # Penalize wrong answers
+              try:
+                ratio = (float(pred) + EPSILON) / (float(gold) + EPSILON)
+                if 0.9 <= ratio <= 1.1:
+                  scores[gen_idx] = max(scores[gen_idx], tmvp_config.reward_ratio_guess_to_answer_high)
+                elif 0.8 <= ratio <= 1.2:
+                  scores[gen_idx] = max(scores[gen_idx], tmvp_config.reward_ratio_guess_to_answer_low)
+                else:
+                  scores[gen_idx] = max(scores[gen_idx], tmvp_config.penalty_incorrect_answer)
+              except:
+                  scores[gen_idx] = max(scores[gen_idx], tmvp_config.penalty_incorrect_answer)
         except:
           scores[gen_idx] = max(scores[gen_idx], tmvp_config.penalty_incorrect_format)  # Penalize if we can't parse numbers at all
+  if tmvp_config.debug.rl:
+    debug_log_path = epath.Path(tmvp_config.base_output_directory) / tmvp_config.run_name / "debug_rl_logs"
+    debug_log_path.mkdir(parents=True, exist_ok=True)
+    log_file = debug_log_path / f"check_numbers_{uuid.uuid4().hex}.txt"
+    log_content = (
+        "START ============================\n"
+        f"Question: {question[0]}\n"
+        f"Answer: {answer[0]}\n"
+        f"Response: {completions[0]}\n"
+        f"Extracted: {extracted_responses[0]}\n"
+        f"Reward: {scores[0]}\n"
+        "END ==============================\n"
+    )
+    log_file.write_text(log_content)
   return scores
 
 
 def extract_answer(response, tmvp_config) -> str | None:
   """Function to extract the answer from the text based on the tmvp_config format."""
   answer_fallback = get_answer_fallback_regex(tmvp_config)
+  # Find the *last* occurrence of the answer tag (most likely the final answer).
   fallback_matches = answer_fallback.findall(response)
   extracted_response = fallback_matches[-1].strip() if fallback_matches else "-1000000"
   return extracted_response
@@ -458,25 +465,26 @@ def extract_hash_answer(text: str) -> str | None:
 def check_correctness(extracted_response, acceptable_answers, tmvp_config):
   """Handles math verification and partial correctness logic."""
   norm_answers = []
-  dataset_name = tmvp_config.eval_dataset_name if tmvp_config.eval_dataset_name else tmvp_config.dataset_name
-  norm_response = preprocess_math_string(dataset_name, extracted_response)
+  norm_response = preprocess_math_string(tmvp_config.dataset_name, extracted_response)
   # Check exact correctness first
   for answer in acceptable_answers: 
-    norm_answers.append(preprocess_math_string(dataset_name, answer))
-  is_correct = math_verify_func([(0, [boxed(norm_answer) for norm_answer in norm_answers], [boxed(norm_response)])])[0] > 0.1
+    norm_answers.append(preprocess_math_string(tmvp_config.dataset_name, answer))
+  is_correct = verify_math([boxed(norm_answer) for norm_answer in norm_answers], [boxed(norm_response)]) > 0.1
   if is_correct:
     return True, True  # Exact correctness implies partial correctness
 
   # Check partial correctness if values can be extracted (within 10%)
-  predictions = parse(boxed(norm_response), PRED_EXTRACTION_TARGET, parsing_timeout=None)
-  golds = list(itertools.chain.from_iterable(parse(boxed(norm_answer), GOLD_EXTRACTION_TARGET, parsing_timeout=None) for norm_answer in norm_answers))
-  is_partially_correct = any(
-      0.9 <= (float(pred) + EPSILON) / (float(gold) + EPSILON) <= 1.1 for pred in predictions for gold in golds
-  )
-  if is_partially_correct:
-    return False, True  # Not exactly correct, but partially correct
+  is_partially_correct = False
+  try:
+    predictions = parse(boxed(norm_response), PRED_EXTRACTION_TARGET, parsing_timeout=None)
+    golds = list(itertools.chain.from_iterable(parse(boxed(norm_answer), GOLD_EXTRACTION_TARGET, parsing_timeout=None) for norm_answer in norm_answers))
+    is_partially_correct = any(
+        0.9 <= (float(pred) + EPSILON) / (float(gold) + EPSILON) <= 1.1 for pred in predictions for gold in golds
+    )
+  except:
+    pass
 
-  return False, False  # Not correct at all
+  return False, is_partially_correct
 
 
 def get_optimizer(tmvp_config, max_train_steps):
@@ -629,4 +637,4 @@ def process_data(dataset_name, model_tokenizer, template_config, tmvp_config, x)
       "answer": json.dumps(
           processed_answer
       ),  # json.dumps to string-encode the list to prevent grain from flattening it while batching
-  }
+}
