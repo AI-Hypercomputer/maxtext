@@ -23,13 +23,6 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
   from maxtext.eval.runner.server_manager import VllmServerManager
 
-ENABLE_EXPERT_PARALLEL_HELP = (
-    "Enable expert parallelism in vLLM. Required for MoE models such as "
-    "qwen3-30b-a3b, qwen3-235b-a22b, deepseek-v3, etc. Without this flag "
-    "tpu-inference omits the 'expert' mesh axis and MaxText's MoE sharding "
-    "raises KeyError."
-)
-
 
 def resolve_token(cfg: dict, hf_token: str | None) -> str | None:
   """Return HF token from explicit arg or HF_TOKEN env var."""
@@ -71,10 +64,9 @@ def build_server_manager(cfg: dict, token: str | None) -> "VllmServerManager":
   if max_num_seqs is not None:
     max_num_seqs = int(max_num_seqs)
 
+  expert_parallel_size = int(cfg.get("expert_parallel_size") or 1)
+
   server_env = {"HF_TOKEN": token} if token else None
-  additional_vllm_kwargs: dict = {}
-  if cfg.get("enable_expert_parallel"):
-    additional_vllm_kwargs["enable_expert_parallel"] = True
 
   return VllmServerManager(
       model_path=hf_path,
@@ -83,11 +75,11 @@ def build_server_manager(cfg: dict, token: str | None) -> "VllmServerManager":
       host=server_host,
       port=server_port,
       tensor_parallel_size=tensor_parallel_size,
+      expert_parallel_size=expert_parallel_size,
       max_model_len=max_model_len,
       max_num_batched_tokens=max_num_batched_tokens,
       max_num_seqs=max_num_seqs,
       env=server_env,
-      additional_vllm_kwargs=additional_vllm_kwargs or None,
   )
 
 
@@ -121,7 +113,12 @@ def add_server_args(parser: argparse.ArgumentParser) -> None:
   parser.add_argument("--max_num_seqs", type=int, help="vLLM max concurrent sequences.")
   parser.add_argument("--hf_mode", action="store_true", help="HF safetensors mode.")
   parser.add_argument(
-      "--enable_expert_parallel", action="store_true", help=ENABLE_EXPERT_PARALLEL_HELP
+      "--expert_parallel_size",
+      type=int,
+      default=0,
+      help=(
+          "Chips allocated to the expert mesh axis (EP). "
+      ),
   )
   parser.add_argument("--hf_token", help="HuggingFace token for gated models.")
   parser.add_argument(

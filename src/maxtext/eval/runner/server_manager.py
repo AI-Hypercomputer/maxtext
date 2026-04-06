@@ -188,7 +188,8 @@ class VllmServerManager:
     maxtext_model_name: MaxText model name (e.g. "llama3.1-8b").
     host: Hostname the HTTP server binds to (rank-0 only).
     port: Port the HTTP server listens on.
-    tensor_parallel_size: Tensor parallelism.
+    tensor_parallel_size: Total number of chips.
+    expert_parallel_size: Chips allocated to the expert mesh axis (EP).
     max_model_len: Maximum sequence length.
     dtype: Activation dtype string passed to vLLM (e.g. "bfloat16").
     max_num_batched_tokens: Tokens per scheduler step (None = vLLM default).
@@ -206,6 +207,7 @@ class VllmServerManager:
       host: str = "localhost",
       port: int = 8000,
       tensor_parallel_size: int = 4,
+      expert_parallel_size: int = 1,
       max_model_len: int = 4096,
       dtype: str = "bfloat16",
       max_num_batched_tokens: int | None = None,
@@ -216,12 +218,18 @@ class VllmServerManager:
   ):
     if checkpoint_path and not maxtext_model_name:
       raise ValueError("maxtext_model_name is required when checkpoint_path is set.")
+    if tensor_parallel_size % expert_parallel_size != 0:
+      raise ValueError(
+          f"tensor_parallel_size ({tensor_parallel_size}) is not divisible by "
+          f"expert_parallel_size ({expert_parallel_size})."
+      )
     self.model_path = model_path
     self.checkpoint_path = checkpoint_path
     self.maxtext_model_name = maxtext_model_name
     self.host = host
     self.port = port
     self.tensor_parallel_size = tensor_parallel_size
+    self.expert_parallel_size = expert_parallel_size
     self.max_model_len = max_model_len
     self.dtype = dtype
     self.max_num_batched_tokens = max_num_batched_tokens
@@ -251,9 +259,13 @@ class VllmServerManager:
     if self.env:
       os.environ.update(self.env)
 
+    # total chips = ici_tensor_parallelism x ici_expert_parallelism.
+    ici_tp = self.tensor_parallel_size // self.expert_parallel_size
+    ici_ep = self.expert_parallel_size
+
     vllm_kwargs: dict = {
         "model": self.model_path,
-        "tensor_parallel_size": self.tensor_parallel_size,
+        "tensor_parallel_size": ici_tp,
         "max_model_len": self.max_model_len,
         "dtype": self.dtype,
     }
@@ -269,14 +281,15 @@ class VllmServerManager:
               "model_name": self.maxtext_model_name,
               "load_parameters_path": self.checkpoint_path,
               "log_config": False,
-          }
+              "ici_tensor_parallelism": ici_tp,
+              "ici_expert_parallelism": ici_ep,
+          },
+          "sharding": {
+              "sharding_strategy": {},
+          },
       }
-      if self.additional_vllm_kwargs.get("enable_expert_parallel"):
-        vllm_kwargs["additional_config"]["sharding"] = {
-            "sharding_strategy": {
-                "expert_parallelism": self.tensor_parallel_size,
-            }
-        }
+      if ici_ep > 1:
+        vllm_kwargs["additional_config"]["sharding"]["sharding_strategy"]["expert_parallelism"] = ici_ep
     else:
       vllm_kwargs["load_format"] = "auto"
 
@@ -298,8 +311,9 @@ class VllmServerManager:
           vllm_kwargs[_k] = _v
 
     logger.info(
-        "Initializing in-process vLLM (tp=%d, max_len=%d)...",
-        self.tensor_parallel_size,
+        "Initializing in-process vLLM (tp=%d, ep=%d, max_len=%d)...",
+        ici_tp,
+        ici_ep,
         self.max_model_len,
     )
     self._llm = LLM(**vllm_kwargs)
