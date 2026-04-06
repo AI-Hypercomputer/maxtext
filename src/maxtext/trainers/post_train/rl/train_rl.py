@@ -64,17 +64,22 @@ from jax.sharding import Mesh
 from orbax import checkpoint as ocp
 from pprint import pprint
 from transformers import AutoTokenizer
+import functools
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.rollout import base_rollout
 from tunix.rl.grpo.grpo_learner import GrpoConfig, GrpoLearner
 from tunix.sft import metrics_logger, profiler
 
 # for vLLM we can skip JAX precompilation with this flag, it makes startup faster
-os.environ["SKIP_JAX_PRECOMPILE"] = "1"
+os.environ["SKIP_JAX_PRECOMPILE"] = "0"
+os.environ["PHASED_PROFILING_DIR"] = "gs://mazumdera-bucket-tpu-prod-env-automated/qwen3-30b/0403"
+os.environ["TOKENIZERS_PARALLELISM"] = "0"
+# os.environ["TUNIX_DEBUG_REWARDS"] = "1"
 
 from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
 from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
+from maxtext.integration.vllm.maxtext_vllm_rollout import MaxTextVllmRollout
 from maxtext.trainers.post_train.rl.evaluate_rl import evaluate
 from maxtext.trainers.post_train.rl import utils_rl
 from maxtext.input_pipeline.instruction_data_processing import load_template_from_file
@@ -85,10 +90,10 @@ def get_maxtext_model(config, devices=None):
   """
   Load MaxText model with Tunix adapter.
   # Note: pass the path to your scanned checkpoint for 'load_parameters_path'.
-  # To create a scanned checkpoint, you can use /maxtext/src/maxtext/checkpoint_conversion/to_maxtext.py and if
+  # To create a scanned checkpoint, you can use /maxtext/src/MaxText/checkpoint_conversion/to_maxtext.py and if
   # using Pathways, please set `USE_PATHWAYS=1` and use `$((1 - USE_PATHWAYS))` for storage flags:
   # export USE_PATHWAYS=1
-  # python src/maxtext/checkpoint_conversion/to_maxtext.py \
+  # python src/MaxText/checkpoint_conversion/to_maxtext.py \
   #  --model_name="gemma2-2b" \
   #  --base_output_directory="/path/to/your/output/directory" \
   #  --scan_layers=True \
@@ -115,18 +120,29 @@ def get_dataset(
   if dataset_name is None:
     raise ValueError("dataset_name must be provided")
 
-  import datasets  # pylint: disable=import-outside-toplevel
+  if dataset_name.startswith("huggingface:"):
+    import datasets  # pylint: disable=import-outside-toplevel
 
-  if data_files is None:
-    data = datasets.load_dataset(dataset_name, split=split, cache_dir=data_dir)
-    if tmvp_config.debug.rl:
-      max_logging.log(f"Loaded Hugging Face dataset {dataset_name} with split {split}. Size: {len(data)}")
-  else:  # data_files have been provided, useful for using slices of large datasets like nvidia/OpenMathInstruct-2
-    data = datasets.load_dataset(
-        "parquet",
-        data_files={tmvp_config.train_split: data_files},
+    if data_files is None:
+      hf_dataset_name = dataset_name.replace("huggingface:", "")
+      data = datasets.load_dataset(hf_dataset_name, split=split, cache_dir=data_dir)
+      if tmvp_config.debug.rl:
+        max_logging.log(f"Loaded Hugging Face dataset {hf_dataset_name} with split {split}. Size: {len(data)}")
+    else:  # data_files have been provided, useful for using slices of large datasets like nvidia/OpenMathInstruct-2
+      data = datasets.load_dataset(
+          "parquet",
+          data_files={tmvp_config.train_split: data_files},
+          split=split,
+          cache_dir=data_dir,
+      )
+  else:
+    builder_kwargs = {"file_format": tfds.core.FileFormat.ARRAY_RECORD}
+    data = tfds.data_source(
+        dataset_name,
         split=split,
-        cache_dir=data_dir,
+        data_dir=data_dir,
+        builder_kwargs=builder_kwargs,
+        download=True,
     )
 
   template_config = load_template_from_file(tmvp_config.chat_template_path)
@@ -283,37 +299,6 @@ def get_max_train_steps(trainer_config):
   )
 
 
-def prepare_train_and_eval_dataset(
-    trainer_config,
-    seed: int = 42,
-    test_size: float = 0.05,
-):
-  """Load and split the dataset into train and validation sets using HF's train_test_split."""
-  import datasets  # pylint: disable=import-outside-toplevel
-
-  max_logging.log(
-      "WARNING: For reproducible experiments, preprocess the dataset once and "
-      "define your own HfDataset subclass that directly uses the preprocessed datasets."
-  )
-
-  original_ds = datasets.load_dataset(
-      "parquet",
-      data_files={trainer_config.train_split: trainer_config.hf_train_files},
-      split=trainer_config.train_split,
-  )
-
-  if "OpenMathReasoning" in trainer_config.dataset_name:
-    original_ds = original_ds.filter(lambda x: x.get("problem_type") == "has_answer_extracted")
-
-  # Split into train and validation sets using HF's train_test_split
-  split_ds = original_ds.train_test_split(test_size=test_size, seed=seed)
-
-  return {
-      "train": split_ds["train"],
-      "validation": split_ds["test"],
-  }
-
-
 def prepare_datasets(trainer_config, model_tokenizer):
   """Setup and return train and test datasets."""
   home = os.path.expanduser("~") + "/"
@@ -325,16 +310,39 @@ def prepare_datasets(trainer_config, model_tokenizer):
     os.makedirs(test_data_dir)
 
   # Prepare train and test data from training data for certain datasets
-  eval_dataset_name = getattr(trainer_config, "eval_dataset_name", None)
-  if trainer_config.dataset_name in [
-      "nvidia/OpenMathInstruct-2",
-      "nvidia/OpenMathReasoning",
-      "open-r1/OpenR1-Math-220k",
-      "bethgelab/CuratedThoughts",
-  ] and (not eval_dataset_name or eval_dataset_name == trainer_config.dataset_name):
+  if trainer_config.dataset_name in ["nvidia/OpenMathInstruct-2", "nvidia/OpenMathReasoning", "open-r1/OpenR1-Math-220k", "bethgelab/CuratedThoughts"]:
     import datasets  # pylint: disable=import-outside-toplevel
-    
-    splits = prepare_train_and_eval_dataset(trainer_config)
+
+    def prepare_train_and_eval_dataset(
+        seed: int = 42,
+        test_size: float = 0.05,
+    ):
+      """Load and split the dataset into train and validation sets using HF's train_test_split."""
+      max_logging.log(
+          "WARNING: For reproducible experiments, preprocess the dataset once and "
+          "define your own HfDataset subclass that directly uses the preprocessed datasets."
+      )
+
+      # Load the original dataset
+      original_ds = datasets.load_dataset(
+          "parquet",
+          data_files={trainer_config.train_split: trainer_config.hf_train_files},
+          split=trainer_config.train_split,
+      )
+
+      if "OpenMathReasoning" in trainer_config.dataset_name:
+            original_ds = original_ds.filter(lambda x: x.get("problem_type") == "has_answer_extracted")
+
+
+      # Split into train and validation sets using HF's train_test_split
+      split_ds = original_ds.train_test_split(test_size=test_size, seed=seed)
+
+      return {
+          "train": split_ds["train"],
+          "validation": split_ds["test"],
+      }
+
+    splits = prepare_train_and_eval_dataset()
     template_config = load_template_from_file(trainer_config.chat_template_path)
 
     train_dataset = (
@@ -387,6 +395,7 @@ def prepare_datasets(trainer_config, model_tokenizer):
   dataset_size = int(trainer_config.num_batches * trainer_config.batch_size * trainer_config.train_fraction)
   train_dataset = train_dataset[:dataset_size]
   train_dataset = train_dataset.repeat(trainer_config.num_epoch)
+
   train_dataset = train_dataset.to_iter_dataset().batch(trainer_config.batch_size)
 
   test_dataset = test_dataset.filter(_filter_long_prompts)
@@ -443,6 +452,9 @@ def create_rl_components(
 
   # Set up micro batching
   micro_batch_size = None if trainer_config.micro_batch_size == -1 else trainer_config.micro_batch_size
+  train_micro_batch_size= micro_batch_size if trainer_config.train_micro_batch_size == -1 else trainer_config.train_micro_batch_size
+  rollout_micro_batch_size = micro_batch_size if trainer_config.rollout_micro_batch_size == -1 else trainer_config.rollout_micro_batch_size
+
 
   # Setup metrics logging
   metrics_logging_options = metrics_logger.MetricsLoggerOptions(
@@ -474,6 +486,11 @@ def create_rl_components(
   argv_list = ["", str(vllm_config_path), "log_config=False"]
   vllm_config = pyconfig.initialize(argv_list)
 
+  rl_rollout_engine = "vllm"
+  model_name = trainer_config.model_name
+  if model_name in ["qwen3-30b-a3b", "qwen3-30b-a3b-base", "qwen3-235b-a22b"]:
+    rl_rollout_engine = functools.partial(MaxTextVllmRollout, maxtext_config=trainer_config)
+
   cluster_config = rl_cluster_lib.ClusterConfig(
       role_to_mesh={
           rl_cluster_lib.Role.ACTOR: actor_mesh,
@@ -485,15 +502,15 @@ def create_rl_components(
           rl_cluster_lib.Role.REFERENCE: trainer_config.logical_axis_rules,
           rl_cluster_lib.Role.ROLLOUT: vllm_config.logical_axis_rules,
       },
-      rollout_engine="vllm",
+      rollout_engine=rl_rollout_engine,
       offload_to_cpu=False,
       training_config=rl_cluster_lib.RLTrainingConfig(
           actor_optimizer=optimizer,
           eval_every_n_steps=trainer_config.eval_interval,
           max_steps=max_train_steps,
           mini_batch_size=trainer_config.batch_size,
-          train_micro_batch_size=micro_batch_size,
-          rollout_micro_batch_size=micro_batch_size,
+          train_micro_batch_size=train_micro_batch_size,
+          rollout_micro_batch_size=rollout_micro_batch_size,
           metrics_logging_options=metrics_logging_options,
           profiler_options=profiler_options,
           checkpoint_root_directory=trainer_config.checkpoint_dir,
@@ -520,6 +537,10 @@ def create_rl_components(
           rollout_vllm_kwargs={
               "hf_overrides": trainer_config.vllm_hf_overrides,
               "enable_expert_parallel": sampler_config.rollout_expert_parallelism > 1,
+              #"max-num-seqs": 128,
+              #"max-num-batched-tokens": 4096,
+              #"max-num-seqs": 256,
+              #"max-num-batched-tokens": 4096,
           },
           rollout_vllm_sampling_kwargs={
               "stop": trainer_config.stop_strings,
@@ -577,6 +598,8 @@ def create_rl_components(
       reward_fns=[  # type: ignore
           make_reward_fn(utils_rl.match_format_exactly),
           make_reward_fn(utils_rl.match_format_approximately),
+          # TODO(atwigg): comment out to simplify reward and overlap with check_numbers
+          #make_reward_fn(utils_rl.check_answer),
           make_reward_fn(utils_rl.check_numbers),
       ],
       algo_config=grpo_config,
@@ -652,17 +675,15 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
 
   # Before we train the model, let's evaluate the model on the test set so we can
   # see the improvement post training.
-  if trainer_config.num_test_batches > 0:
-    max_logging.warning("Starting evaluation before RL training...")
-    (corr, total, accuracy, partial_accuracy, format_accuracy), _ = evaluate(
-        trainer_config,
-        test_dataset,
-        rl_cluster=rl_cluster,
-        num_passes=trainer_config.num_eval_passes,
-        corr_lst=trainer_config.eval_corr_lst,
-        make_lst=trainer_config.eval_make_lst,
-    )
-    max_logging.warning(f"Pre RL Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%," f" {format_accuracy=}%")
+  (corr, total, accuracy, partial_accuracy, format_accuracy), _ = evaluate(
+      trainer_config,
+      test_dataset,
+      rl_cluster=rl_cluster,
+      num_passes=trainer_config.num_eval_passes,
+      corr_lst=trainer_config.eval_corr_lst,
+      make_lst=trainer_config.eval_make_lst,
+  )
+  max_logging.warning(f"Pre RL Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%," f" {format_accuracy=}%")
 
   # Start training
   if trainer_config.load_checkpoint_only_once:
@@ -683,17 +704,15 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
   max_logging.warning("RL Training Completed Successfully!")
 
   # Let's evaluate our model!
-  if trainer_config.num_test_batches > 0:
-    max_logging.warning("Starting evaluation after RL training...")
-    (corr, total, accuracy, partial_accuracy, format_accuracy), _ = evaluate(
-        trainer_config,
-        test_dataset,
-        rl_cluster=rl_cluster,
-        num_passes=trainer_config.num_eval_passes,
-        corr_lst=trainer_config.eval_corr_lst,
-        make_lst=trainer_config.eval_make_lst,
-    )
-    max_logging.warning(f"Post RL Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%," f" {format_accuracy=}%")
+  (corr, total, accuracy, partial_accuracy, format_accuracy), _ = evaluate(
+      trainer_config,
+      test_dataset,
+      rl_cluster=rl_cluster,
+      num_passes=trainer_config.num_eval_passes,
+      corr_lst=trainer_config.eval_corr_lst,
+      make_lst=trainer_config.eval_make_lst,
+  )
+  max_logging.warning(f"Post RL Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%," f" {format_accuracy=}%")
 
 
 def main(argv: Sequence[str]) -> None:
@@ -702,6 +721,7 @@ def main(argv: Sequence[str]) -> None:
   Args:
     argv: Command-line arguments.
   """
+  jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   pathwaysutils.initialize()
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 

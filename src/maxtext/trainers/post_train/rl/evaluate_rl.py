@@ -101,7 +101,6 @@ def score_responses(tmvp_config, question, responses, answers):
       Tuple of (is_correct, is_partially_correct, has_correct_format)
   """
 
-  answers = list(dict.fromkeys(answers))
   if tmvp_config.debug.rl:
     max_logging.log("========================================")
     max_logging.log(f"Evaluation Question: {question}")
@@ -114,7 +113,6 @@ def score_responses(tmvp_config, question, responses, answers):
   has_correct_format = False
 
   for response in responses:
-    # Check format correctness (requires the full <reasoning>...</reasoning><answer>...</answer> structure)
     match_format = utils_rl.get_match_format_regex(tmvp_config)
     if match_format.search(response) is not None:
       has_correct_format = True
@@ -182,9 +180,8 @@ def evaluate(
 
     # Score each question-answer pair
     for question, responses, answer in zip(questions, multiple_call_responses, answers):
-      answer = (
-          json.loads(answer) if isinstance(answer, str) else answer
-      )  # decode the json-encoded list of acceptable answers
+      # decode the json-encoded list of acceptable answers
+      answer = list(dict.fromkeys(json.loads(answer)))
       is_correct, is_partially_correct, has_correct_format = score_responses(
           tmvp_config=tmvp_config,
           question=question,
