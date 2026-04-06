@@ -38,10 +38,13 @@ PRED_EXTRACTION_TARGET = (
     LatexExtractionConfig(),
 )
 
+
 def math_verify_func(items, timeout=5):
   """Verifies a batch of math problems, handling timeouts and exceptions."""
   with concurrent.futures.ThreadPoolExecutor() as executor:
-    future_to_index = {executor.submit(verify_math, golds, predictions): idx for idx, (_, golds, predictions) in enumerate(items)}
+    future_to_index = {
+        executor.submit(verify_math, golds, predictions): idx for idx, (_, golds, predictions) in enumerate(items)
+    }
     results = [0.0] * len(items)
     for future in concurrent.futures.as_completed(future_to_index):
       index = future_to_index[future]
@@ -55,8 +58,12 @@ def math_verify_func(items, timeout=5):
 def verify_math(golds, predictions):
   """Runs mathematical expression evaluation on ground-truth and predictions."""
 
-  extracted_predictions = list(itertools.chain.from_iterable(parse(pred, PRED_EXTRACTION_TARGET, parsing_timeout=None) for pred in predictions))
-  extracted_golds = list(itertools.chain.from_iterable(parse(gold, GOLD_EXTRACTION_TARGET, parsing_timeout=None) for gold in golds))
+  extracted_predictions = list(
+      itertools.chain.from_iterable(parse(pred, PRED_EXTRACTION_TARGET, parsing_timeout=None) for pred in predictions)
+  )
+  extracted_golds = list(
+      itertools.chain.from_iterable(parse(gold, GOLD_EXTRACTION_TARGET, parsing_timeout=None) for gold in golds)
+  )
   # If no predictions or golds were extracted, return 0.0
   if not extracted_predictions or not extracted_golds:
     return 0.0
@@ -67,6 +74,7 @@ def verify_math(golds, predictions):
           for pred in extracted_predictions
       ]
   )
+
 
 def boxed(x):
   """Wraps the input string in a LaTeX boxed command if it's not already wrapped."""
@@ -263,7 +271,10 @@ def normalize_final_answer(final_answer: str) -> str:
 def preprocess_math_string(dataset_name, text) -> str:
   """Fix common formatting issues in text."""
   # Normalize for certain datasets and parse
-  if any(name in dataset_name for name in ["DAPO", "OpenMathInstruct", "OpenMathReasoning",  "OpenR1-Math-220k", "CuratedThoughts"]):
+  if any(
+      name in dataset_name
+      for name in ["DAPO", "OpenMathInstruct", "OpenMathReasoning", "OpenR1-Math-220k", "CuratedThoughts", "MATH-500"]
+  ):
     text = normalize_final_answer(text).strip()
   # Fix LaTeX escaping issues
   text = fix_latex_escaping(text)
@@ -414,7 +425,11 @@ def check_numbers(prompts, completions, answer, tmvp_config, **kargs):
         # 3. As a fallback, try numeric comparison if both can be parsed as numbers
         try:
           predictions = parse(norm_guesses[0], PRED_EXTRACTION_TARGET, parsing_timeout=None)
-          golds = list(itertools.chain.from_iterable(parse(norm_answer, GOLD_EXTRACTION_TARGET, parsing_timeout=None) for norm_answer in norm_answers))
+          golds = list(
+              itertools.chain.from_iterable(
+                  parse(norm_answer, GOLD_EXTRACTION_TARGET, parsing_timeout=None) for norm_answer in norm_answers
+              )
+          )
           for gold in golds:
             for pred in predictions:
               try:
@@ -426,9 +441,11 @@ def check_numbers(prompts, completions, answer, tmvp_config, **kargs):
                 else:
                   scores[gen_idx] = max(scores[gen_idx], tmvp_config.penalty_incorrect_answer)
               except:
-                  scores[gen_idx] = max(scores[gen_idx], tmvp_config.penalty_incorrect_answer)
+                scores[gen_idx] = max(scores[gen_idx], tmvp_config.penalty_incorrect_answer)
         except:
-          scores[gen_idx] = max(scores[gen_idx], tmvp_config.penalty_incorrect_format)  # Penalize if we can't parse numbers at all
+          scores[gen_idx] = max(
+              scores[gen_idx], tmvp_config.penalty_incorrect_format
+          )  # Penalize if we can't parse numbers at all
   if tmvp_config.debug.rl:
     debug_log_path = epath.Path(tmvp_config.base_output_directory) / tmvp_config.run_name / "debug_rl_logs"
     debug_log_path.mkdir(parents=True, exist_ok=True)
@@ -465,10 +482,11 @@ def extract_hash_answer(text: str) -> str | None:
 def check_correctness(extracted_response, acceptable_answers, tmvp_config):
   """Handles math verification and partial correctness logic."""
   norm_answers = []
-  norm_response = preprocess_math_string(tmvp_config.dataset_name, extracted_response)
+  dataset_name = tmvp_config.eval_dataset_name if tmvp_config.eval_dataset_name else tmvp_config.dataset_name
+  norm_response = preprocess_math_string(dataset_name, extracted_response)
   # Check exact correctness first
-  for answer in acceptable_answers: 
-    norm_answers.append(preprocess_math_string(tmvp_config.dataset_name, answer))
+  for answer in acceptable_answers:
+    norm_answers.append(preprocess_math_string(dataset_name, answer))
   is_correct = verify_math([boxed(norm_answer) for norm_answer in norm_answers], [boxed(norm_response)]) > 0.1
   if is_correct:
     return True, True  # Exact correctness implies partial correctness
@@ -477,7 +495,11 @@ def check_correctness(extracted_response, acceptable_answers, tmvp_config):
   is_partially_correct = False
   try:
     predictions = parse(boxed(norm_response), PRED_EXTRACTION_TARGET, parsing_timeout=None)
-    golds = list(itertools.chain.from_iterable(parse(boxed(norm_answer), GOLD_EXTRACTION_TARGET, parsing_timeout=None) for norm_answer in norm_answers))
+    golds = list(
+        itertools.chain.from_iterable(
+            parse(boxed(norm_answer), GOLD_EXTRACTION_TARGET, parsing_timeout=None) for norm_answer in norm_answers
+        )
+    )
     is_partially_correct = any(
         0.9 <= (float(pred) + EPSILON) / (float(gold) + EPSILON) <= 1.1 for pred in predictions for gold in golds
     )
@@ -637,4 +659,4 @@ def process_data(dataset_name, model_tokenizer, template_config, tmvp_config, x)
       "answer": json.dumps(
           processed_answer
       ),  # json.dumps to string-encode the list to prevent grain from flattening it while batching
-}
+  }
