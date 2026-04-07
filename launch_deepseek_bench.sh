@@ -8,7 +8,7 @@ export PROJECT=tpu-prod-env-automated
 export ZONE=us-central1-c
 export TPU_TYPE=tpu7x-128
 NUM_SLICES=1
-DOCKER_IMAGE="gcr.io/tpu-prod-env-multipod/mohit-dsv3:20260406" # Ensure this image has pathwaysutils installed
+DOCKER_IMAGE="gcr.io/tpu-prod-env-multipod/mohit-dsv3-build:20260406" # Ensure this image has pathwaysutils installed
 
 WORKLOAD_NAME="dsv3-$RANDOM"
 
@@ -36,4 +36,4 @@ xpk workload create-pathways \
   --tpu-type="${TPU_TYPE}" \
   --num-slices=${NUM_SLICES} \
   --docker-image="${DOCKER_IMAGE}" \
-  --command="pip show jax; pip show libtpu; ${COMMAND}"
+  --command="pip show jax; pip show libtpu; MODEL_IMPL_TYPE=auto NEW_MODEL_DESIGN=True ${COMMAND}"

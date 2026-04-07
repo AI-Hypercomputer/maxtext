@@ -1043,8 +1043,10 @@ def main():
     data_parallel_size=_ROLLOUT_DP.value,
     gpu_memory_utilization=0.75,
     async_scheduling=False,
-    load_format="dummy",
-    additional_config={"sharding": {"sharding_strategy": {"enable_dp_attention": True}}, "sparse_matmul": True, "replicate_attn_weights": True},
+    load_format="runai_streamer",
+    additional_config={"sharding": {"sharding_strategy": {"enable_dp_attention": True}}, 
+                       "sparse_matmul": True,
+                       "replicate_attn_weights": True},
   )
   print("\n" + "="*80)
   llm_state = llm.llm_engine.model_executor.driver_worker.model_runner.state
