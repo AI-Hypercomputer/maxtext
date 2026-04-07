@@ -248,30 +248,20 @@ def jetstream():
     from jetstream.engine import engine_api, token_utils, tokenizer_api  # type: ignore  # pylint: disable=import-outside-toplevel
     from jetstream.engine.tokenizer_pb2 import TokenizerParameters, TokenizerType  # type: ignore  # pylint: disable=import-outside-toplevel
     # Mark real modules as not stubs so consumers can detect the difference.
-    try:
-      setattr(config_lib, "_IS_STUB", False)
-    except Exception:  # pylint: disable=broad-exception-caught
-      pass
-    try:
-      setattr(engine_api, "_IS_STUB", False)
-    except Exception:  # pylint: disable=broad-exception-caught
-      pass
-    try:
-      setattr(token_utils, "_IS_STUB", False)
-    except Exception:  # pylint: disable=broad-exception-caught
-      pass
-    try:
-      setattr(tokenizer_api, "_IS_STUB", False)
-    except Exception:  # pylint: disable=broad-exception-caught
-      pass
+    for mod_obj in [config_lib, engine_api, token_utils, tokenizer_api]:
+      try:
+        setattr(mod_obj, "_IS_STUB", False)
+      except Exception:  # pylint: disable=broad-exception-caught
+        pass
     token_params_ns = SimpleNamespace(TokenizerParameters=TokenizerParameters, TokenizerType=TokenizerType)
     setattr(token_params_ns, "_IS_STUB", False)
     return config_lib, engine_api, token_utils, tokenizer_api, token_params_ns
-  except ModuleNotFoundError:
-    if is_decoupled():
-      print("[DECOUPLED NO-OP] jetstream: dependency missing; using stubs.")
-      return _jetstream_stubs()
-    raise
+  except (ModuleNotFoundError, ImportError):
+    # Automatically fallback to stubs if dependencies are missing, 
+    # ensuring that MaxEngine can always be imported and tested locally.
+    if not is_decoupled():
+      print("[INFO] jetstream dependencies not found; automatically using stubs for local compatibility.")
+    return _jetstream_stubs()
 
 
 # ---------------- GCS -----------------

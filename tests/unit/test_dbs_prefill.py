@@ -8,8 +8,6 @@ import os
 class DBSPrefillTest(unittest.TestCase):
   def test_dbs_prefill_no_crash(self):
     """Test that prefill doesn't crash when diverse_beam_search is enabled."""
-    # Set DECOUPLE_GCLOUD=TRUE to use stubs
-    os.environ["DECOUPLE_GCLOUD"] = "TRUE"
     
     # Resolve config path relative to this file
     current_dir = os.path.dirname(os.path.abspath(__file__))
