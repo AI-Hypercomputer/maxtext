@@ -55,6 +55,7 @@ import pathwaysutils
 
 from absl import app
 from absl import logging as absl_logging
+from etils import epath
 from flax import nnx
 from jax.sharding import Mesh
 from orbax import checkpoint as ocp
@@ -399,8 +400,15 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
       "Calling rl_cluster.sync_weights() to reshard actor weights to rollout mesh..."
   )
 
+  if not epath.Path(trainer_config.tensorboard_dir).exists():
+    epath.Path(trainer_config.tensorboard_dir).mkdir(parents=True, exist_ok=True)
+
   key = jax.random.PRNGKey(42)
   for step in range(trainer_config.num_batches):
+    if step == trainer_config.skip_first_n_steps_for_profiler:
+      max_logging.log(f"Starting XProf trace in {trainer_config.tensorboard_dir}")
+      jax.profiler.start_trace(trainer_config.tensorboard_dir)
+
     key, subkey = jax.random.split(key)
     noise = jax.random.normal(subkey, ()) * 1e-3
     # Update all actor weights to trigger full resharding
@@ -416,6 +424,10 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
     show_hbm_usage(f"HBM after step {step}:")
     max_logging.log(f"Weight Syncing Time taken: {end_time - start_time:.4f}s")
     max_logging.log(f"Resharding via sync_weights() completed: step {step}")
+
+    if step == trainer_config.skip_first_n_steps_for_profiler + trainer_config.profiler_steps - 1:
+      jax.profiler.stop_trace()
+      max_logging.log("Stopped XProf trace.")
 
 
 def main(argv: Sequence[str]) -> None:
