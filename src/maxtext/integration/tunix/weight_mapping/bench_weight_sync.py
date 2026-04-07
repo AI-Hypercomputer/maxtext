@@ -1043,7 +1043,7 @@ def main():
     data_parallel_size=_ROLLOUT_DP.value,
     gpu_memory_utilization=0.75,
     async_scheduling=False,
-    load_format="pathways_dummy",
+    load_format="runai_streamer",
     quantization=None,
     additional_config={"sharding": {"sharding_strategy": {"enable_dp_attention": True}}, 
                        "sparse_matmul": True,

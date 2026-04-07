@@ -76,7 +76,7 @@ spec:
                   fieldRef:
                     fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
               - name: JAX_PLATFORMS
-                value: proxy
+                value: proxy,cpu
               - name: XCLOUD_ENVIRONMENT
                 value: GCP
               - name: JAX_BACKEND_TARGET
