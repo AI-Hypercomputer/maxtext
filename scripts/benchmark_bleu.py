@@ -141,6 +141,11 @@ def main():
             slots = list(range(config.batch_size))
             # bulk_insert replicates the prefill results into all beam slots
             decode_state = engine.bulk_insert(prefill_res, decode_state, slots=slots)
+            # Safety: Ensure is_dbs is preserved (in case MaxEngine isn't updated)
+            if "is_dbs" not in decode_state:
+                decode_state["is_dbs"] = jnp.array([config.decode_sampling_strategy == "diverse_beam_search"])
+            if "cumulative_logprobs" not in decode_state:
+                decode_state["cumulative_logprobs"] = jnp.zeros_like(decode_state["tokens"], dtype=jnp.float32)
             
             # Start all beams with the same first token from prefill
             token0 = first_token.get_result_at_slot(0).tokens.item()
