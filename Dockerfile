@@ -10,7 +10,7 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 # 1. Clone and install tpu-inference to get the compatible vLLM version
 RUN git clone https://github.com/vllm-project/tpu-inference.git /tpu-inference && \
     cd /tpu-inference && \
-    git checkout f2f6e42b858d1e6e8b25bee2616d563aa047f2e2 && \
+    git checkout 08389467505e98b7077c52fdbd5aee2fa34cae05 && \
     # Extract the LKG vLLM commit hash
     VLLM_COMMIT_HASH=$(cat .buildkite/vllm_lkg.version) && \
     echo "Using vLLM commit: ${VLLM_COMMIT_HASH}" && \
