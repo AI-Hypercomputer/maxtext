@@ -357,6 +357,11 @@ def apply_chat_template(example, tokenizer_model, data_column_name, tools_column
         round_msgs.append(message)
         messages.append(_get_completion_in_chat_template(tokenizer_model, round_msgs, tools=tools))
         is_prompt.append(False)
+        # Clear round only when the next message starts a new user turn or conversation ends
+        # This preserves context for consecutive assistant/tool messages
+        next_idx = idx + 1
+        if next_idx >= len(conversation) or conversation[next_idx]["role"] == "user":
+          round_msgs.clear()
   except ValueError as e:
     max_logging.log(f"Unable to apply chat template: {e}")
     raise e
