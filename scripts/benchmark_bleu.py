@@ -54,16 +54,23 @@ def main():
     # Rebuild sys.argv to strip out DBS flags
     new_argv = []
     for arg in sys.argv:
-        if arg.startswith("max_dataset_examples="):
-            max_examples = int(arg.split("=")[1])
-        elif arg.startswith("decode_num_beams="):
-            decode_num_beams = int(arg.split("=")[1])
-        elif arg.startswith("decode_diversity_penalty="):
-            decode_diversity_penalty = float(arg.split("=")[1])
-        else:
-            new_argv.append(arg)
+        # Check for flags even if there's leading/trailing whitespace
+        clean_arg = arg.strip()
+        if "=" in clean_arg:
+            key, val = clean_arg.split("=", 1)
+            if key == "max_dataset_examples":
+                max_examples = int(val)
+                continue
+            if key == "decode_num_beams":
+                decode_num_beams = int(val)
+                continue
+            if key == "decode_diversity_penalty":
+                decode_diversity_penalty = float(val)
+                continue
+        new_argv.append(arg)
     
     # Set sys.argv to the cleaned version
+    print(f"DEBUG: Cleaned argv before pyconfig: {new_argv}")
     sys.argv = new_argv
     
     config = pyconfig.initialize(sys.argv)
