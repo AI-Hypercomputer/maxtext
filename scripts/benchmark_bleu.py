@@ -97,7 +97,17 @@ def main():
         # Note: MaxEngine initialization sets up the JAX mesh and loaded model
         engine = maxengine.MaxEngine(config)
     
-    # 2. Load Dataset (CNN/DailyMail)
+    # 4. AOT Compile (Optional but recommended for TPU performance/memory)
+    print("Compiling engine...")
+    if engine is not None:
+        try:
+            # We don't need to use the returned values, just triggering the compilation
+            engine.aot_compile(params)
+            print("AOT Compilation successful.")
+        except Exception as e:
+            print(f"AOT Compilation failed (falling back to JIT): {e}")
+    
+    # 5. Load Dataset (CNN/DailyMail)
     print(f"Loading CNN/DailyMail Goal: {max_examples} samples...")
     dataset = load_dataset("cnn_dailymail", "3.0.0", split="test", streaming=True)
     
