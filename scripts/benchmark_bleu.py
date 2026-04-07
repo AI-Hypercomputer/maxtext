@@ -53,23 +53,32 @@ def main():
     
     # Rebuild sys.argv to strip out DBS flags
     new_argv = []
-    for arg in sys.argv:
-        # Check for flags even if there's leading/trailing whitespace
-        clean_arg = arg.strip()
-        if "=" in clean_arg:
-            key, val = clean_arg.split("=", 1)
-            if key == "max_dataset_examples":
-                max_examples = int(val)
-                continue
-            if key == "decode_num_beams":
-                decode_num_beams = int(val)
-                continue
-            if key == "decode_diversity_penalty":
-                decode_diversity_penalty = float(val)
-                continue
-        new_argv.append(arg)
+    # Keys we want to strip from the command line because they aren't standard MaxTextConfig fields
+    dbs_keys_to_strip = {"max_dataset_examples", "decode_num_beams", "decode_diversity_penalty", "decode_num_beam_groups"}
     
-    # Set sys.argv to the cleaned version
+    for arg in sys.argv:
+        # Check if this arg is a key=val pair we should strip
+        is_dbs_flag = False
+        if "=" in arg:
+            # Handle both key=val and --key=val
+            key_part = arg.split("=", 1)[0].lstrip("-")
+            if key_part in dbs_keys_to_strip:
+                val = arg.split("=", 1)[1]
+                if key_part == "max_dataset_examples":
+                    max_examples = int(val)
+                elif key_part == "decode_num_beams":
+                    decode_num_beams = int(val)
+                elif key_part == "decode_diversity_penalty":
+                    decode_diversity_penalty = float(val)
+                elif key_part == "decode_num_beam_groups":
+                    decode_num_beam_groups = int(val)
+                is_dbs_flag = True
+        
+        if not is_dbs_flag:
+            new_argv.append(arg)
+    
+    print(f"DEBUG: Cleaned argv before pyconfig: {new_argv}")
+    # Force sys.argv to be the cleaned version
     sys.argv = new_argv
     
     config = pyconfig.initialize(sys.argv)
