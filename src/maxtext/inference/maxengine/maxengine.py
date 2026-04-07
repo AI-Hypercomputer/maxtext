@@ -1093,7 +1093,7 @@ class MaxEngine(_BaseEngine):
     
     current_algorithm = algorithm if algorithm is not None else self.config.decode_sampling_strategy
     
-    is_dbs = decode_state["is_dbs"]
+    is_dbs = decode_state.get("is_dbs", jnp.array([current_algorithm == "diverse_beam_search"]))
 
     # For JAX tracing: we only use the full beam count if DBS is actually selected.
     # This prevents standard (batch size B) runs from failing when traced through
