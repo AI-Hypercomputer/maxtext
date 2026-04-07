@@ -551,10 +551,15 @@ class MaxEngine(_BaseEngine):
 
     # sampling first token
     rng, new_rng = jax.random.split(rng)
+    current_algorithm = algorithm if algorithm is not None else self.config.decode_sampling_strategy
+    # For prefill we generate the first token. Since we don't have multiple beams 
+    # yet we used greedy for the first token then start the multi-beam search.
+    prefill_algorithm = current_algorithm if current_algorithm != "diverse_beam_search" else "greedy"
+
     first_generated_token = inference_utils.sampling(
         selected_logits,
         new_rng,
-        algorithm if algorithm is not None else self.config.decode_sampling_strategy,
+        prefill_algorithm,
         topk=topk if topk is not None else self.config.decode_sampling_top_k,
         nucleus_topp=nucleus_topp if nucleus_topp is not None else self.config.decode_sampling_nucleus_p,
         temperature=temperature if temperature is not None else self.config.decode_sampling_temperature,
