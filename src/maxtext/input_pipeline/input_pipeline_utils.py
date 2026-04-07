@@ -329,12 +329,15 @@ def apply_chat_template(example, tokenizer_model, data_column_name, tools_column
   messages = []
   is_prompt = []
   round_msgs = []
+  conversation = example[data_column_name]
+  if isinstance(conversation, str):
+    conversation = json.loads(conversation)
   tools = example.get(tools_column_name) if tools_column_name else None
   if isinstance(tools, str):
     tools = json.loads(tools)
   tools_kwargs = {"tools": tools} if tools is not None else {}
   try:
-    for idx, message in enumerate(example[data_column_name]):
+    for idx, message in enumerate(conversation):
       if message["role"] == "system":
         if idx != 0:
           raise ValueError(f"System message found at index {idx}. System messages must be at index 0.")
@@ -349,17 +352,11 @@ def apply_chat_template(example, tokenizer_model, data_column_name, tools_column
       elif message["role"] == "tool":
         round_msgs.append(message)
       elif message["role"] == "assistant":
-        # Emit accumulated tool messages as prompt if no user message generated one
-        if round_msgs and not any(m["role"] == "user" for m in round_msgs):
-          prompt_in_chat_template = tokenizer_model.apply_chat_template(
-              round_msgs, add_generation_prompt=True, tokenize=False, enable_thinking=True, **tools_kwargs
-          )
-          messages.append(prompt_in_chat_template)
-          is_prompt.append(True)
+        if not round_msgs:
+          raise ValueError(f"Assistant message at index {idx} with no preceding context.")
         round_msgs.append(message)
         messages.append(_get_completion_in_chat_template(tokenizer_model, round_msgs, tools=tools))
         is_prompt.append(False)
-        round_msgs.clear()
   except ValueError as e:
     max_logging.log(f"Unable to apply chat template: {e}")
     raise e
