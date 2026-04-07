@@ -1299,8 +1299,10 @@ class MaxEngine(_BaseEngine):
         "generated_tokens": inserted_generated_tokens,
         "tokens": inserted_tokens,
         "token_logp": inserted_token_logp,
-        "is_dbs": unboxed_prefix.get("is_dbs", jnp.array([False])),
-        "cumulative_logprobs": unboxed_prefix.get("cumulative_logprobs", jnp.zeros_like(inserted_tokens, dtype=jnp.float32)),
+        "is_dbs": decode_state.get("is_dbs", unboxed_prefix.get("is_dbs", jnp.array([False]))),
+        "cumulative_logprobs": decode_state.get(
+            "cumulative_logprobs", unboxed_prefix.get("cumulative_logprobs", jnp.zeros_like(inserted_tokens, dtype=jnp.float32))
+        ),
     }
 
   @functools.partial(jax.jit, static_argnums=(0,), donate_argnames=("prefix", "decode_state"))
@@ -1432,8 +1434,10 @@ class MaxEngine(_BaseEngine):
         "generated_tokens": inserted_generated_tokens,
         "tokens": inserted_tokens,
         "token_logp": inserted_token_logp,
-        "is_dbs": unboxed_prefix.get("is_dbs", jnp.array([False])),
-        "cumulative_logprobs": unboxed_prefix.get("cumulative_logprobs", jnp.zeros_like(inserted_tokens, dtype=jnp.float32)),
+        "is_dbs": decode_state.get("is_dbs", unboxed_prefix.get("is_dbs", jnp.array([False]))),
+        "cumulative_logprobs": decode_state.get(
+            "cumulative_logprobs", unboxed_prefix.get("cumulative_logprobs", jnp.zeros_like(inserted_tokens, dtype=jnp.float32))
+        ),
     }
 
   def insert(
