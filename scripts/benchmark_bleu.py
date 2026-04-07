@@ -64,7 +64,6 @@ def main():
             new_argv.append(arg)
     
     # Set sys.argv to the cleaned version
-    import sys
     sys.argv = new_argv
     
     config = pyconfig.initialize(sys.argv)
