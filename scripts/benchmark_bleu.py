@@ -51,16 +51,21 @@ def main():
     decode_num_beams = 1
     decode_diversity_penalty = 0.0
     
-    for arg in sys.argv[:]:
+    # Rebuild sys.argv to strip out DBS flags
+    new_argv = []
+    for arg in sys.argv:
         if arg.startswith("max_dataset_examples="):
             max_examples = int(arg.split("=")[1])
-            sys.argv.remove(arg)
         elif arg.startswith("decode_num_beams="):
             decode_num_beams = int(arg.split("=")[1])
-            sys.argv.remove(arg)
         elif arg.startswith("decode_diversity_penalty="):
             decode_diversity_penalty = float(arg.split("=")[1])
-            sys.argv.remove(arg)
+        else:
+            new_argv.append(arg)
+    
+    # Set sys.argv to the cleaned version
+    import sys
+    sys.argv = new_argv
     
     config = pyconfig.initialize(sys.argv)
     
