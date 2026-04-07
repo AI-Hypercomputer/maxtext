@@ -70,7 +70,6 @@ def main():
         new_argv.append(arg)
     
     # Set sys.argv to the cleaned version
-    print(f"DEBUG: Cleaned argv before pyconfig: {new_argv}")
     sys.argv = new_argv
     
     config = pyconfig.initialize(sys.argv)
