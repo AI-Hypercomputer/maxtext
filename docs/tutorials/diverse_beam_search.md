@@ -14,8 +14,8 @@ To use DBS in MaxText, you need to configure a few key parameters in your YAML c
 
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `num_beams` | [int](cci:1://file:///Users/kevinwang/Projects/maxtext/src/maxtext/inference/maxengine/maxengine.py:137:2-139:40) | `4` | Total number of beams across ALL groups. |
-| `num_groups` | [int](cci:1://file:///Users/kevinwang/Projects/maxtext/src/maxtext/inference/maxengine/maxengine.py:137:2-139:40) | `1` | Number of diversity groups. Must be a divisor of `num_beams`. |
+| `num_beams` | `int` | `4` | Total number of beams across ALL groups. |
+| `num_groups` | `int` | `1` | Number of diversity groups. Must be a divisor of `num_beams`. |
 | `diversity_penalty` | `float` | `0.0` | The $\lambda$ parameter. Higher values force more diversity across groups. |
 
 > **Note:** If `num_groups=1`, DBS behaves exactly like standard Beam Search.
@@ -23,7 +23,7 @@ To use DBS in MaxText, you need to configure a few key parameters in your YAML c
 ## 3. How to Run DBS
 
 ### Via Command Line
-You can enable DBS by overriding the configuration during the [decode.py](cci:7://file:///Users/kevinwang/Projects/maxtext/src/maxtext/inference/decode.py:0:0-0:0) run:
+You can enable DBS by overriding the configuration during the `decode.py` run:
 
 ```bash
 python3 -m maxtext.inference.decode \

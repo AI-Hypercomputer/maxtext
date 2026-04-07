@@ -11,8 +11,9 @@ class DBSPrefillTest(unittest.TestCase):
     # Set DECOUPLE_GCLOUD=TRUE to use stubs
     os.environ["DECOUPLE_GCLOUD"] = "TRUE"
     
-    base_dir = "/mnt/mac/Users/kevinwang/Projects/maxtext"
-    config_path = f"{base_dir}/src/maxtext/configs/base.yml"
+    # Resolve config path relative to this file
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(current_dir, "../../src/maxtext/configs/base.yml")
     
     argv = [
         "tests/unit/test_dbs_prefill_no_crash",
