@@ -99,13 +99,15 @@ def main():
     
     # 4. AOT Compile (Optional but recommended for TPU performance/memory)
     print("Compiling engine...")
-    if engine is not None:
+    if engine is not None and not is_mock:
         try:
             # We don't need to use the returned values, just triggering the compilation
-            engine.aot_compile(params)
-            print("AOT Compilation successful.")
+            # Use dummy rng and config for compilation if needed, or just let JIT handle it.
+            # MaxEngine.aot_compile usually needs the actual params to finalize layouts.
+            # Since we haven't loaded params yet, we can either move loading up or skip AOT here.
+            print("AOT Compilation skipped at this step (will be handled by first JIT).")
         except Exception as e:
-            print(f"AOT Compilation failed (falling back to JIT): {e}")
+            print(f"AOT Compilation failed: {e}")
     
     # 5. Load Dataset (CNN/DailyMail)
     print(f"Loading CNN/DailyMail Goal: {max_examples} samples...")
