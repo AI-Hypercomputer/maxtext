@@ -584,6 +584,46 @@ class TrainTests(unittest.TestCase):
 
   @pytest.mark.integration_test
   @pytest.mark.gpu_only
+  @pytest.mark.external_serving
+  def test_gpu_packed_attention_hf(self):
+    """Packed (THD) cuDNN TE attention with real HF data.
+
+    Unlike test_gpu_packed_attention (which uses synthetic data and bypasses
+    SequenceDescriptor), this test exercises the SequenceDescriptor.from_segment_ids_and_pos()
+    codepath that is only reached when packing=True AND dataset_type != 'synthetic'.
+    Regression test for NVIDIA/TransformerEngine#2523.
+    """
+    gpu_device = jax.devices("gpu")[0]
+    compute_capability = getattr(gpu_device, "compute_capability", None)
+    try:
+      if float(compute_capability) < 9.0:
+        pytest.skip("Packed (THD) attention is only supported on sm90+!")
+    except Exception:  # pylint: disable=broad-exception-caught
+      print("checking if Packed THD attention is supported on this host...")
+      pytest.skip("Packed (THD) attention is only supported on sm90+!")
+    os.environ["NVTE_FUSED_ATTN"] = "1"
+    packed_attention_hf = [
+        None,
+        get_test_config_path(),
+        f"base_output_directory={self._base_output_directory}",
+        "run_name=runner_test",
+        f"dataset_path={self.dataset_path}",
+        "dataset_type=hf",
+        "hf_path=parquet",
+        f"hf_train_files={self.dataset_path}/hf/c4/c4-train-00000-of-01637.parquet",
+        "tokenizer_path=google-t5/t5-large",
+        "steps=2",
+        "enable_checkpointing=False",
+        "enable_goodput_recording=False",
+        "attention=cudnn_flash_te",
+        "ici_fsdp_parallelism=-1",
+        "packing=True",
+        "max_segments_per_seq=32",
+    ]
+    train_main(packed_attention_hf)
+
+  @pytest.mark.integration_test
+  @pytest.mark.gpu_only
   @pytest.mark.skip(reason="b/489133823. Previously transient in b/462548581.")
   def test_gpu_ring_attention(self):
     if is_rocm_backend():
