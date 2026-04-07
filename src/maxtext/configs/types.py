@@ -1704,6 +1704,10 @@ class RLEvaluation(BaseModel):
       False,
       description="If True, return a list of (question, answer, responses) during evaluation.",
   )
+  eval_mode: Literal["pass", "maj"] = Field(
+      "pass",
+      description="Evaluation mode to use ('pass' for pass@K, 'maj' for maj@K).",
+  )
 
 
 class Reward(BaseModel):

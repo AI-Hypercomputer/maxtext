@@ -16,6 +16,7 @@
 """
 RL Evaluation Module.
 """
+import collections
 import json
 
 from tqdm.auto import tqdm
@@ -87,7 +88,7 @@ def generate_responses(
   return multiple_call_responses
 
 
-def score_responses(tmvp_config, question, responses, answers):
+def score_responses(tmvp_config, question, responses, answers, eval_mode="pass"):
   """
   Score a set of responses for a single question.
 
@@ -96,6 +97,7 @@ def score_responses(tmvp_config, question, responses, answers):
       question: The evaluation question
       responses: List of generated responses for this question
       answers: List of acceptable answers for this question
+      eval_mode: The evaluation mode to use ("pass" for pass@K, "maj" for maj@K)
 
   Returns:
       Tuple of (is_correct, is_partially_correct, has_correct_format)
@@ -111,6 +113,35 @@ def score_responses(tmvp_config, question, responses, answers):
   is_correct = False
   is_partially_correct = False
   has_correct_format = False
+
+  if eval_mode == "maj":
+    extracted_answers = []
+    for response in responses:
+      match_format = utils_rl.get_match_format_regex(tmvp_config)
+      if match_format.search(response) is not None:
+        has_correct_format = True
+
+      extracted_response = utils_rl.extract_answer(response, tmvp_config)
+      extracted_answers.append(extracted_response)
+
+    if not extracted_answers:
+      return False, False, False
+
+    counter = collections.Counter(extracted_answers)
+    majority_answer = counter.most_common(1)[0][0]
+
+    try:
+      is_correct, is_partially_correct = utils_rl.check_correctness(majority_answer, answers, tmvp_config)
+      if tmvp_config.debug.rl:
+        max_logging.log(f"Majority Answer: {majority_answer} (Count: {counter[majority_answer]})")
+        max_logging.log(f"Result is_correct: {is_correct}")
+        max_logging.log(f"Result is_partially_correct: {is_partially_correct}")
+    except Exception as e:
+      if tmvp_config.debug.rl:
+        max_logging.log(f"Evaluation Exception on majority answer: {e}")
+        max_logging.log("SKIPPED")
+
+    return is_correct, is_partially_correct, has_correct_format
 
   for response in responses:
     match_format = utils_rl.get_match_format_regex(tmvp_config)
@@ -144,6 +175,7 @@ def evaluate(
     num_passes=1,
     corr_lst=False,
     make_lst=False,
+    eval_mode=None,
 ):
   """
   Computes accuracy and percentage of outputs matching the format.
@@ -155,10 +187,14 @@ def evaluate(
       num_passes: Number of generation passes
       corr_lst: If True, only include correct responses in the list
       make_lst: If True, return a list of (question, answer, responses)
+      eval_mode: Override for the evaluation mode ("pass" or "maj").
 
   Returns:
       Tuple of statistics and optionally the response list
   """
+  if eval_mode is None:
+    eval_mode = getattr(tmvp_config, "eval_mode", "pass")
+
   response_lst = []
   corr = 0
   partially_corr = 0
@@ -187,6 +223,7 @@ def evaluate(
           question=question,
           responses=responses,
           answers=answer,
+          eval_mode=eval_mode,
       )
 
       # Update counters

@@ -271,11 +271,7 @@ def normalize_final_answer(final_answer: str) -> str:
 def preprocess_math_string(dataset_name, text) -> str:
   """Fix common formatting issues in text."""
   # Normalize for certain datasets and parse
-  if any(
-      name in dataset_name
-      for name in ["DAPO", "OpenMathInstruct", "OpenMathReasoning", "OpenR1-Math-220k", "CuratedThoughts", "MATH-500"]
-  ):
-    text = normalize_final_answer(text).strip()
+  text = normalize_final_answer(text).strip()
   # Fix LaTeX escaping issues
   text = fix_latex_escaping(text)
   return text

@@ -682,6 +682,7 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
       num_passes=trainer_config.num_eval_passes,
       corr_lst=trainer_config.eval_corr_lst,
       make_lst=trainer_config.eval_make_lst,
+      eval_mode=getattr(trainer_config, "eval_mode", "pass"),
   )
   max_logging.warning(f"Pre RL Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%," f" {format_accuracy=}%")
 
@@ -711,6 +712,7 @@ def rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices):
       num_passes=trainer_config.num_eval_passes,
       corr_lst=trainer_config.eval_corr_lst,
       make_lst=trainer_config.eval_make_lst,
+      eval_mode=getattr(trainer_config, "eval_mode", "pass"),
   )
   max_logging.warning(f"Post RL Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%," f" {format_accuracy=}%")
 

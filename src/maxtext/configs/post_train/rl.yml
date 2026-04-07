@@ -131,6 +131,7 @@ generation_configs:
 num_eval_passes: 1 # Number of generation passes during evaluation
 eval_corr_lst: False # If True, only include correct responses in the list during evaluation
 eval_make_lst: False # If True, return a list of (question, answer, responses) during evaluation
+eval_mode: "pass" # Evaluation mode ("pass" for pass@K, "maj" for majority voting maj@K)
 
 # ====== Inference ======
 # === Generation during GRPO training ===
