@@ -379,9 +379,8 @@ def sample_diverse_beam_search_step(
     all_chosen_scores.append(top_scores)
     all_chosen_parents.append(global_parent_idx)
 
-    # Update diversity mask (counting occurrences of tokens chosen so far)
-    one_hot = jax.nn.one_hot(actual_token_ids, vocab_size).sum(axis=1)
-    diversity_mask = diversity_mask + one_hot
+    # Update diversity mask efficiently without materializing a full one-hot matrix
+    diversity_mask = diversity_mask.at[jnp.arange(user_batch_size)[:, None], actual_token_ids].add(1.0)
 
   # 4. Final assembly into (total_batch_size, 1)
   return (
