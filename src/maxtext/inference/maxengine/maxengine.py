@@ -1139,13 +1139,13 @@ class MaxEngine(_BaseEngine):
 
     # Select branch based on 'is_dbs' in decode_state. 
     # This enforces that the algorithm cannot change once set.
-    new_token, cumulative_logprobs, beam_parents, final_cache = jax.lax.cond(
-        is_dbs[0],
-        dbs_sampling_branch,
-        standard_sampling_branch,
-        out_logits,
-        decode_state,
-    )
+    # Directly call the branch instead of using jax.lax.cond
+    # This simplifies the JIT graph and reduces memory fragmentation
+    if self.config.decode_sampling_strategy == "diverse_beam_search":
+        new_token, cumulative_logprobs, beam_parents, final_cache = dbs_sampling_branch(out_logits, decode_state)
+    else:
+        new_token, cumulative_logprobs, beam_parents, final_cache = standard_sampling_branch(out_logits, decode_state)
+
     all_valid = jnp.ones(new_token.shape, dtype=jnp.int8)
     if self.config.return_log_prob:
       token_logp = inference_utils.log_prob_of_chosen_token(out_logits, new_token)
