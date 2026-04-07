@@ -346,11 +346,19 @@ def apply_chat_template(example, tokenizer_model, data_column_name, tools_column
         )
         messages.append(prompt_in_chat_template)
         is_prompt.append(True)
+      elif message["role"] == "tool":
+        round_msgs.append(message)
       elif message["role"] == "assistant":
+        # Emit accumulated tool messages as prompt if no user message generated one
+        if round_msgs and not any(m["role"] == "user" for m in round_msgs):
+          prompt_in_chat_template = tokenizer_model.apply_chat_template(
+              round_msgs, add_generation_prompt=True, tokenize=False, enable_thinking=True, **tools_kwargs
+          )
+          messages.append(prompt_in_chat_template)
+          is_prompt.append(True)
         round_msgs.append(message)
         messages.append(_get_completion_in_chat_template(tokenizer_model, round_msgs, tools=tools))
         is_prompt.append(False)
-        # Round ended, clearing the buffer.
         round_msgs.clear()
   except ValueError as e:
     max_logging.log(f"Unable to apply chat template: {e}")
