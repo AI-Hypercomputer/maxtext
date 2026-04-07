@@ -134,6 +134,11 @@ def score_responses(tmvp_config, question, responses, answers, eval_mode="pass")
       is_correct, is_partially_correct = utils_rl.check_correctness(majority_answer, answers, tmvp_config)
       if tmvp_config.debug.rl:
         max_logging.log(f"Majority Answer: {majority_answer} (Count: {counter[majority_answer]})")
+        # temporarily, log other answers as well
+        # sort the counter values and print all
+        for ans, count in counter.most_common():
+          max_logging.log(f"Answer: {ans} (Count: {count})")
+
         max_logging.log(f"Result is_correct: {is_correct}")
         max_logging.log(f"Result is_partially_correct: {is_partially_correct}")
     except Exception as e:
