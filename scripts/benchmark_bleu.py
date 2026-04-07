@@ -78,8 +78,6 @@ def main():
     # (Using setattr because MaxConfig is a Pydantic model)
     object.__setattr__(config, 'decode_num_beams', decode_num_beams)
     object.__setattr__(config, 'decode_diversity_penalty', decode_diversity_penalty)
-    if decode_num_beams > 1:
-        object.__setattr__(config, 'batch_size', decode_num_beams)
     
     if is_mock:
         print(f"RUNNING IN MOCK MODE (No model loading) - Beams: {decode_num_beams}")
