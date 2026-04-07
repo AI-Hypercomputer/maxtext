@@ -1103,7 +1103,7 @@ class MaxEngine(_BaseEngine):
     def dbs_sampling_branch(logits, cur_state):
       new_tok, new_sco, par_idx = inference_utils.sampling_dbs(
           logits,
-          cur_state["cumulative_logprobs"],
+          cur_state.get("cumulative_logprobs", jnp.zeros_like(cur_state["tokens"], dtype=jnp.float32)),
           dbs_num_beams,
           self.config.decode_num_beam_groups if dbs_num_beams > 1 else 1,
           self.config.decode_diversity_penalty,
@@ -1170,13 +1170,18 @@ class MaxEngine(_BaseEngine):
         samples_per_slot=1,
     )
 
+    is_dbs = jax.lax.with_sharding_constraint(is_dbs, self.replicated_sharding)
+    cumulative_logprobs = jax.lax.with_sharding_constraint(cumulative_logprobs, self.replicated_sharding)
+
     return {
         "logits": out_logits,
-        "cache": new_cache,
+        "cache": final_cache,
         "next_pos": next_pos,
         "generated_tokens": generated_tokens,
         "tokens": new_token,
         "token_logp": token_logp,
+        "is_dbs": is_dbs,
+        "cumulative_logprobs": cumulative_logprobs,
     }, result
 
   @functools.partial(
