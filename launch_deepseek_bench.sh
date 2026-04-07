@@ -17,7 +17,7 @@ WORKLOAD_NAME="dsv3-$RANDOM"
 # and --additional_config to force the 'megablox' backend for faster compilation at scale.
 COMMAND="python3 src/maxtext/integration/tunix/weight_mapping/bench_weight_sync.py \
   --model_name=deepseek3-671b \
-  --vllm_model_id=jrplatin/DeepSeek-R1-1D-Subchannel-256 \
+  --vllm_model_id=deepseek-ai/DeepSeek-V3 \
   --rand_init=True \
   --ici_fsdp_parallelism=1 \
   --ici_tensor_parallelism=128 \
