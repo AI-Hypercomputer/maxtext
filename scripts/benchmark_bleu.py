@@ -49,15 +49,27 @@ def main():
   if is_mock:
     sys.argv.remove("--mock")
   
-  # Manually extract max_dataset_examples because it's not in the core MaxText types.py
-  max_examples = 100
+  # Manually extract DBS-specific flags that aren't in the base MaxText config schema
+  decode_num_beams = 1
+  decode_diversity_penalty = 0.0
+  
   for arg in sys.argv[:]:
     if arg.startswith("max_dataset_examples="):
       max_examples = int(arg.split("=")[1])
       sys.argv.remove(arg)
-      break
+    elif arg.startswith("decode_num_beams="):
+      decode_num_beams = int(arg.split("=")[1])
+      sys.argv.remove(arg)
+    elif arg.startswith("decode_diversity_penalty="):
+      decode_diversity_penalty = float(arg.split("=")[1])
+      sys.argv.remove(arg)
   
   config = pyconfig.initialize(sys.argv)
+  
+  # Manually inject the extracted flags back into the config object
+  # (Using setattr because MaxConfig is a Pydantic model)
+  object.__setattr__(config, 'decode_num_beams', decode_num_beams)
+  object.__setattr__(config, 'decode_diversity_penalty', decode_diversity_penalty)
   
   if is_mock:
     print(f"RUNNING IN MOCK MODE (No model loading) - Limit: {max_examples}")
@@ -65,7 +77,11 @@ def main():
     params = None
   else:
     from maxtext.inference.maxengine import maxengine
-    # Note: MaxEngine initialization sets up the JAX mesh and loaded model
+    # For DBS, we treat the beams as a batch of related sequences.
+    # We must ensure the engine's batch_size matches our requested beam count.
+    if decode_num_beams > 1:
+        object.__setattr__(config, 'batch_size', decode_num_beams)
+    
     engine = maxengine.MaxEngine(config)
   
   # 2. Load Dataset (CNN/DailyMail)
@@ -138,22 +154,37 @@ def main():
          
          # Prefill
          prefill_res, first_token = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length)
-         
-         # Insert
+                  # Insert the prefill result into ALL beam slots
          decode_state = engine.init_decode_state(rng_gen)
-         decode_state = engine.insert(prefill_res, decode_state, slot=0)
-         
+         slots = list(range(config.batch_size))
+         # bulk_insert replicates the prompt cache for all beams
+         decode_state = engine.bulk_insert(prefill_res, decode_state, slots=slots)
+          
          # Generate
          steps = range(config.max_prefill_predict_length, config.max_target_length)
-         all_tokens = [first_token.get_result_at_slot(0).tokens.item()]
-         
+          
+         # Initialize storage for all beams
+         # beam_tokens[beam_idx] = list of token IDs
+         # We start all beams with the same first token from the single prefill
+         token0 = first_token.get_result_at_slot(0).tokens.item()
+         beam_tokens = [[token0] for _ in slots]
+         beam_finished = [False] * config.batch_size
+          
          for _ in steps:
            decode_state, sampled_tokens = engine.generate(params, decode_state)
-           all_tokens.append(sampled_tokens.get_result_at_slot(0).tokens.item())
-           if all_tokens[-1] == tokenizer_model.eos_id:
+            
+           for s in slots:
+             if not beam_finished[s]:
+               tok = sampled_tokens.get_result_at_slot(s).tokens.item()
+               beam_tokens[s].append(tok)
+               if tok == tokenizer_model.eos_id:
+                 beam_finished[s] = True
+            
+           if all(beam_finished):
              break
-             
-         return tokenizer_model.decode(all_tokens)
+              
+         # Decode all beams
+         return [tokenizer_model.decode(b) for b in beam_tokens]
 
       output_text_or_beams = get_inference_result(prompt)
     
