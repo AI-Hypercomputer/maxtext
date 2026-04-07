@@ -49,10 +49,18 @@ def main():
   if is_mock:
     sys.argv.remove("--mock")
   
+  # Manually extract max_dataset_examples because it's not in the core MaxText types.py
+  max_examples = 100
+  for arg in sys.argv[:]:
+    if arg.startswith("max_dataset_examples="):
+      max_examples = int(arg.split("=")[1])
+      sys.argv.remove(arg)
+      break
+  
   config = pyconfig.initialize(sys.argv)
   
   if is_mock:
-    print("RUNNING IN MOCK MODE (No model loading)")
+    print(f"RUNNING IN MOCK MODE (No model loading) - Limit: {max_examples}")
     engine = None
     params = None
   else:
@@ -61,14 +69,12 @@ def main():
     engine = maxengine.MaxEngine(config)
   
   # 2. Load Dataset (CNN/DailyMail)
-  print("Loading CNN/DailyMail dataset (test split)...")
+  print(f"Loading CNN/DailyMail dataset (test split) - Goal: {max_examples} samples...")
   # Use streaming=True to avoid downloading the whole dataset at once
   dataset = load_dataset("cnn_dailymail", "3.0.0", split="test", streaming=True)
   
-  # Max examples from CLI (using steps as a proxy or custom flag)
-  limit = getattr(config, "max_dataset_examples", 100)
-  if limit <= 0:
-    limit = 100
+  # Max examples was extracted manually above
+  limit = max_examples
     
   # 3. Load BLEU metric
   print("Loading BLEU metric...")
