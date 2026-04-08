@@ -1065,7 +1065,6 @@ def main():
   llm = LLM(
     vllm_model_arg,
     tokenizer=vllm_tokenizer_arg,
-    dtype="bfloat16",
     max_model_len=16,
     tensor_parallel_size=_ROLLOUT_TP.value,
     data_parallel_size=_ROLLOUT_DP.value,
