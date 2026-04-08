@@ -106,6 +106,29 @@ uv pip install -e .[runner] --resolution=lowest
 
 After installation, you can verify the package is available with `python3 -c "import maxtext"` and run training jobs with `python3 -m maxtext.trainers.pre_train.train ...`.
 
+## UV Project management
+
+For simplicity this guide uses the traditional `uv pip install` syntax.
+If you are using the `uv` project management features (with a `pyproject.toml` and `uv.lock` in your own project), you would need to run your commands differently.
+You would need to use `uv add` instead of `uv pip install` and `uv run` as a prefix to all other commands.
+For example, to install and run MaxText in a `uv`-managed project:
+
+```bash
+# 1. Initialize your uv project
+mkdir my-maxtext-project && cd my-maxtext-project
+uv init
+
+# 2. Add MaxText as a dependency
+uv add maxtext[tpu]==0.2.1 --resolution=lowest
+
+# 3. Install MaxText's extra GitHub dependencies. These will be automatically added to your pyproject.toml
+uv run install_tpu_pre_train_extra_deps # This will be added to your pyproject.toml
+
+# 4. Run MaxText training for a few steps
+uv run python3 -m maxtext.trainers.pre_train.train run_name=${RUN_NAME?} base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+    dataset_type=synthetic steps=5 per_device_batch_size=1 model_name=llama2-7b
+```
+
 # Update MaxText dependencies
 
 ## Introduction
@@ -120,7 +143,7 @@ To update dependencies, you will follow these general steps:
 
 1. **Modify Base Requirements**: Update the desired dependencies in `base_requirements/requirements.txt` or the hardware-specific files (`base_requirements/tpu-base-requirements.txt`, `base_requirements/gpu-base-requirements.txt`).
 2. **Generate New Files**: Run the `seed-env` CLI tool to generate new, fully-pinned requirements files based on your changes.
-3. **Update Project Files**: Copy the newly generated files into the `generated_requirements/` directory.
+3. **Update Project Files**: Copy the newly generated files into the `src/dependencies/requirements/generated_requirements/` directory.
 4. **Handle GitHub Dependencies**: Move any dependencies that are installed directly from GitHub from the generated files to `src/dependencies/github_deps/pre_train_deps.txt`.
 5. **Verify**: Test the new dependencies to ensure the project installs and runs correctly.
 
@@ -176,8 +199,8 @@ After generating the new requirements, you need to update the files in the MaxTe
 
 1. **Copy the generated files:**
 
-   - Move `generated_tpu_artifacts/tpu-requirements.txt` to `generated_requirements/tpu-requirements.txt`.
-   - Move `generated_gpu_artifacts/cuda12-requirements.txt` to `generated_requirements/cuda12-requirements.txt`.
+   - Move `generated_tpu_artifacts/tpu-requirements.txt` to `src/dependencies/requirements/generated_requirements/tpu-requirements.txt`.
+   - Move `generated_gpu_artifacts/cuda12-requirements.txt` to `src/dependencies/requirements/generated_requirements/cuda12-requirements.txt`.
 
 2. **Update `pre_train_deps.txt` (if necessary):**
    Currently, MaxText uses a few dependencies, such as `mlperf-logging` and `google-jetstream`, that are installed directly from GitHub source. These are defined in `base_requirements/requirements.txt`, and the `seed-env` tool will carry them over to the generated requirements files.
