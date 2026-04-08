@@ -174,6 +174,17 @@ reward_ratio_guess_to_answer_low: 0.0
 penalty_incorrect_format: 0.0
 penalty_incorrect_answer: 0.0
 
+# ====== math_verify grading pool ======
+# Run math_verify in a spawn-based multiprocessing pool so hung sympy calls
+# can be killed via pool.terminate() and workers can't contend for the
+# trainer accelerator. Set to False to fall back to the in-process
+# ThreadPoolExecutor path for debugging.
+math_verify_use_pool: True
+# Per-item wall-clock timeout (seconds) for math_verify grading.
+math_verify_timeout: 15
+# Max worker processes for the math_verify pool. null ⇒ min(batch_size, cpu_count()).
+math_verify_num_procs: null
+
 # ====== Special tokens/templates for GSM8K reasoning ======
 reasoning_start_token: '<reasoning>'
 reasoning_end_token: '</reasoning>'
