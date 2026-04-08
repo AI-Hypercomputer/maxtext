@@ -33,7 +33,7 @@ spec:
               cloud.google.com/gke-nodepool: m3-megamem-pool
             initContainers:
               - name: pathways-proxy
-                image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest
+                image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/wenxindong/unsanitized_proxy_server:latest
                 imagePullPolicy: Always
                 args:
                 - --server_port=29000
@@ -53,7 +53,7 @@ spec:
                     memory: 950G
                 restartPolicy: Always
               - name: pathways-rm
-                image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest
+                image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/wenxindong/unsanitized_server:latest
                 imagePullPolicy: Always
                 args:
                 - --server_port=29001
@@ -95,6 +95,8 @@ spec:
                   valueFrom:
                     fieldRef:
                       fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+                - name: MOE_REQUANTIZE_WEIGHT_DTYPE
+                  value: "bfloat16"
                 - name: JAX_PLATFORMS
                   value: proxy,cpu
                 - name: XCLOUD_ENVIRONMENT
@@ -111,7 +113,7 @@ spec:
                   _sigterm() (kill -SIGTERM $! 2>/dev/null;);
                   trap _sigterm SIGTERM;
                   
-                  (pip show jax; pip show jaxlib; pip show libtpu; pip show tpu-inference; pip show vllm; MODEL_IMPL_TYPE=vllm NEW_MODEL_DESIGN=True         python3 src/maxtext/integration/tunix/weight_mapping/bench_weight_sync.py         --model_name=deepseek3-671b         --vllm_model_id=deepseek-ai/DeepSeek-V3         --vllm_checkpoint_path=gs://ranlihao-deepseek/model/r1         --rand_init=True         --ici_fsdp_parallelism=1         --ici_tensor_parallelism=128         --rollout_tensor_parallelism=1         --rollout_expert_parallelism=128         --run_vllm_only=True         --model_loader_extra_config='{"memory_limit":5368709120}') & PID=$!;
+                  (pip show jax; pip show jaxlib; pip show libtpu; pip show tpu-inference; pip show vllm; MODEL_IMPL_TYPE=vllm NEW_MODEL_DESIGN=True         python3 src/maxtext/integration/tunix/weight_mapping/bench_weight_sync.py         --model_name=deepseek3-671b         --vllm_model_id=deepseek-ai/DeepSeek-V3         --vllm_checkpoint_path=gs://ranlihao-deepseek/model/r1         --rand_init=True         --ici_fsdp_parallelism=1         --ici_tensor_parallelism=128         --rollout_tensor_parallelism=1         --rollout_expert_parallelism=128         --run_vllm_only=True         --model_loader_extra_config='{"memory_limit":10737418240}') & PID=$!;
                   while kill -0 $PID 2>/dev/null;
                       do sleep 5;
                   done;
@@ -164,7 +166,7 @@ spec:
               cloud.google.com/placement-policy-name: tpu7x-128-4x4x4-placement-policy
             containers:
               - name: pathways-worker
-                image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest
+                image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/wenxindong/unsanitized_server:latest
                 imagePullPolicy: Always
                 args:
                 - --server_port=29005
