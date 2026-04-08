@@ -1040,7 +1040,7 @@ class RoutedMoE(nnx.Module):
       w1_bias_pspec = self._logical_to_mesh_axes(("exp", None))
       wo_bias_pspec = self._logical_to_mesh_axes(("exp", "activation_embed_moe"))
     else:
-      # This is terrible =(
+      # This can be improved!
       input_partition_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length_moe", "activation_embed"))
       w0_bias_pspec = self._logical_to_mesh_axes(("exp", "activation_mlp"))
       w1_bias_pspec = self._logical_to_mesh_axes(("exp", "activation_mlp"))
