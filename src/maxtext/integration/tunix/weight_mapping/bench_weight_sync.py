@@ -60,6 +60,7 @@ _RUN_VLLM_ONLY = flags.DEFINE_boolean('run_vllm_only', False, 'Skip MaxText mode
 _VLLM_CHECKPOINT_PATH = flags.DEFINE_string('vllm_checkpoint_path', '', 'GCS path (gs://…) to load vLLM weights via runai_streamer. When set, used as the vLLM model arg; --vllm_model_id is used as the tokenizer.')
 _RUNAI_GCS_CREDENTIAL_FILE = flags.DEFINE_string('runai_gcs_credential_file', '', 'Path to GCS service-account JSON for Run:ai Model Streamer. If unset, falls back to GOOGLE_APPLICATION_CREDENTIALS or the GCE metadata server.')
 _MODEL_LOADER_EXTRA_CONFIG = flags.DEFINE_string('model_loader_extra_config', '', 'JSON string passed as --model-loader-extra-config to vLLM (e.g. \'{"memory_limit":5368709120}\').')
+_LOAD_FORMAT = flags.DEFINE_string('load_format', 'runai_streamer', 'vLLM load format (e.g. runai_streamer, auto, dummy).')
 
 def _setup_jax_compilation_cache():
   jax_config.update("jax_compilation_cache_dir", _JAX_COMPILATION_CACHE_DIR)
@@ -1071,7 +1072,7 @@ def main():
     data_parallel_size=_ROLLOUT_DP.value,
     gpu_memory_utilization=0.75,
     async_scheduling=False,
-    load_format="runai_streamer",
+    load_format=_LOAD_FORMAT.value,
     model_loader_extra_config=model_loader_extra_config,
     enable_expert_parallel=_ROLLOUT_EP.value > 1,
     quantization=None,
