@@ -448,13 +448,11 @@ def create_rl_components(
   )
 
   # Set up micro batching
-  micro_batch_size = None if trainer_config.micro_batch_size == -1 else trainer_config.micro_batch_size
-  train_micro_batch_size = (
-      micro_batch_size if trainer_config.train_micro_batch_size == -1 else trainer_config.train_micro_batch_size
-  )
+  train_micro_batch_size = None if trainer_config.train_micro_batch_size == -1 else trainer_config.train_micro_batch_size
   rollout_micro_batch_size = (
-      micro_batch_size if trainer_config.rollout_micro_batch_size == -1 else trainer_config.rollout_micro_batch_size
+      None if trainer_config.rollout_micro_batch_size == -1 else trainer_config.rollout_micro_batch_size
   )
+
 
   # Setup metrics logging
   metrics_logging_options = metrics_logger.MetricsLoggerOptions(
