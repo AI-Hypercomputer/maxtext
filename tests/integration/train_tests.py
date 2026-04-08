@@ -584,7 +584,6 @@ class TrainTests(unittest.TestCase):
 
   @pytest.mark.integration_test
   @pytest.mark.gpu_only
-  @pytest.mark.external_serving
   def test_gpu_packed_attention_hf(self):
     """Packed (THD) cuDNN TE attention with real HF data.
 
