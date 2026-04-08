@@ -15,14 +15,18 @@ WORKLOAD_NAME="dsv3-$RANDOM"
 # The command to execute inside the cluster
 # We use --run_vllm_only=True to verify vLLM initialization directly
 # and --additional_config to force the 'megablox' backend for faster compilation at scale.
-COMMAND="python3 src/maxtext/integration/tunix/weight_mapping/bench_weight_sync.py \
-  --model_name=deepseek3-671b \
-  --vllm_model_id=deepseek-ai/DeepSeek-V3 \
-  --rand_init=True \
-  --ici_fsdp_parallelism=1 \
-  --ici_tensor_parallelism=128 \
-  --rollout_tensor_parallelism=128 \
-  --run_vllm_only=True"
+COMMAND="MODEL_IMPL_TYPE=vllm NEW_MODEL_DESIGN=True \
+        python3 src/maxtext/integration/tunix/weight_mapping/bench_weight_sync.py \
+        --model_name=deepseek3-671b \
+        --vllm_model_id=deepseek-ai/DeepSeek-V3 \
+        --vllm_checkpoint_path=gs://ranlihao-deepseek/model/r1 \
+        --rand_init=True \
+        --ici_fsdp_parallelism=1 \
+        --ici_tensor_parallelism=128 \
+        --rollout_tensor_parallelism=1 \
+        --rollout_expert_parallelism=128 \
+        --run_vllm_only=True \
+        --model_loader_extra_config='{\"memory_limit\":5368709120}'"
 
 echo "Submitting xpk workload: ${WORKLOAD_NAME}"
 echo "Command: ${COMMAND}"
@@ -36,4 +40,4 @@ xpk workload create-pathways \
   --tpu-type="${TPU_TYPE}" \
   --num-slices=${NUM_SLICES} \
   --docker-image="${DOCKER_IMAGE}" \
-  --command="pip show jax; pip show libtpu; MODEL_IMPL_TYPE=auto NEW_MODEL_DESIGN=True ${COMMAND}"
+  --command="pip show jax; pip show libtpu; ${COMMAND}"

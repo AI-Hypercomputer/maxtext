@@ -103,14 +103,6 @@ spec:
                 value: GCP
               - name: JAX_BACKEND_TARGET
                 value: grpc://$(PATHWAYS_HEAD):29000
-              # MoE requantization controls (tpu_inference envs):
-              # The checkpoint uses block-fp8 (weight_block_size=[128,128]) which triggers
-              # an online dequant->float32->requant->fp8 conversion that OOMs TPU HBM.
-              # Option B: requantize MoE weights to bfloat16 — avoids block-scale sharding
-              # incompatibility with TP=128 (moe_intermediate_size=2048, block_size=128 → 16
-              # scale blocks, not divisible by 128 TPUs).
-              - name: MOE_REQUANTIZE_WEIGHT_DTYPE
-                value: "bfloat16"
               resources:
                 limits:
                   cpu: "24"
