@@ -1725,6 +1725,25 @@ class Reward(BaseModel):
   )
   penalty_incorrect_format: float = Field(-0.5, description="Penalty for an incorrect format.")
   penalty_incorrect_answer: float = Field(-1.0, description="Penalty for an incorrect answer.")
+  math_verify_use_pool: bool = Field(
+      True,
+      description=(
+          "If True, run math_verify in a spawn-based multiprocessing pool so "
+          "hung sympy calls can be killed and workers don't contend for the "
+          "trainer accelerator. Set False to fall back to the in-process "
+          "ThreadPoolExecutor path."
+      ),
+  )
+  math_verify_timeout: int = Field(
+      15, description="Per-item wall-clock timeout (seconds) for math_verify grading."
+  )
+  math_verify_num_procs: int | None = Field(
+      None,
+      description=(
+          "Max worker processes for the math_verify pool. None ⇒ "
+          "min(batch_size, cpu_count())."
+      ),
+  )
 
 
 class SpecialTokens(BaseModel):

@@ -28,6 +28,11 @@ from math_verify.errors import TimeoutException
 from math_verify.parser import ExprExtractionConfig, LatexExtractionConfig
 from math_verify import parse, verify
 
+from tunix.rl.agentic.parser.chat_template_parser import parser as agentic_chat_template_parser
+
+from maxtext.trainers.post_train.rl.math_verify_pool import math_verify_pool
+
+
 GOLD_EXTRACTION_TARGET = (
     ExprExtractionConfig(),
     LatexExtractionConfig(),
@@ -39,8 +44,33 @@ PRED_EXTRACTION_TARGET = (
 )
 
 
-def math_verify_func(items, timeout=5):
-  """Verifies a batch of math problems, handling timeouts and exceptions."""
+def math_verify_func(items, timeout=5, tmvp_config=None):
+  """Verifies a batch of math problems, handling timeouts and exceptions.
+
+  By default, dispatches to a spawn-based multiprocessing pool
+  (`math_verify_pool`) so that hung sympy calls inside `math_verify` can be
+  killed via `pool.terminate()` and so the workers cannot contend for the
+  trainer's TPU/GPU. Set `tmvp_config.math_verify_use_pool = False` to fall
+  back to the legacy in-process `ThreadPoolExecutor` path for debugging.
+  """
+  if not items:
+    return []
+
+  use_pool = True
+  num_procs = None
+  if tmvp_config is not None:
+    use_pool = getattr(tmvp_config, "math_verify_use_pool", True)
+    timeout = getattr(tmvp_config, "math_verify_timeout", timeout)
+    num_procs = getattr(tmvp_config, "math_verify_num_procs", None)
+
+  if use_pool:
+    return math_verify_pool(
+        items,
+        timeout=timeout,
+        num_procs=num_procs,
+        log_fn=max_logging.log,
+    )
+
   with concurrent.futures.ThreadPoolExecutor() as executor:
     future_to_index = {
         executor.submit(verify_math, golds, predictions): idx for idx, (_, golds, predictions) in enumerate(items)
@@ -413,7 +443,7 @@ def check_numbers(prompts, completions, answer, tmvp_config, **kargs):
 
   if math_verify_queue:
     # 2. Try math_verify for robust mathematical correctness checking
-    math_verify_results = math_verify_func(math_verify_queue)
+    math_verify_results = math_verify_func(math_verify_queue, tmvp_config=tmvp_config)
     for (gen_idx, norm_answers, norm_guesses), score in zip(math_verify_queue, math_verify_results):
       if score > 0.1:
         scores[gen_idx] = max(scores[gen_idx], tmvp_config.reward_exact_answer)
