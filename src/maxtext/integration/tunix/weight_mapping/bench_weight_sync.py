@@ -1,5 +1,6 @@
 import functools
 import gc
+import json
 import logging
 import os
 import sys
@@ -1056,7 +1057,7 @@ def main():
     vllm_model_arg = _VLLM_MODEL_ID.value
     vllm_tokenizer_arg = None
 
-  model_loader_extra_config = _MODEL_LOADER_EXTRA_CONFIG.value or None
+  model_loader_extra_config = json.loads(_MODEL_LOADER_EXTRA_CONFIG.value) if _MODEL_LOADER_EXTRA_CONFIG.value else None
   llm = LLM(
     vllm_model_arg,
     tokenizer=vllm_tokenizer_arg,
