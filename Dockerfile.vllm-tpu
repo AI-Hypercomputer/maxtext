@@ -1,0 +1,25 @@
+# Run using docker build -f Dockerfile.vllm-tpu -t gcr.io/tpu-prod-env-multipod/mohit-dsv3-vllm:20260408 .
+FROM us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-inference/vllm-tpu:latest
+
+WORKDIR /deps
+
+# Copy MaxText source into /deps
+COPY . /deps
+
+# Install MaxText (no extra deps — base image already has JAX, vLLM, tpu-inference)
+RUN pip install --no-deps -e .
+
+# Install MaxText requirements and make sure not to mess with jax,jaxlib and libtpu
+RUN pip install google-tunix && \
+    pip install aqtp && \
+    pip install tokamax && \
+    pip install tensorflow-datasets && \
+    pip install tensorflow-text && \
+    pip install tensorflow
+
+# Only MaxText src needs to be on PYTHONPATH; vLLM and tpu-inference are
+# already importable via their editable-install .pth files in site-packages
+ENV PYTHONPATH=/deps/src:${PYTHONPATH}
+
+ENV JAX_PLATFORMS=proxy,cpu
+ENV JAX_BACKEND_TARGET=grpc://127.0.0.1:29000

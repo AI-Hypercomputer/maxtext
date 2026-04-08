@@ -10,7 +10,7 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 # 1. Clone and install tpu-inference to get the compatible vLLM version
 RUN git clone https://github.com/vllm-project/tpu-inference.git /tpu-inference && \
     cd /tpu-inference && \
-    git checkout da172b7960fb660c7c49c9c47a3911bf846a76ed && \
+    git checkout 014ea74841449f8ee4942213c7d7269afb7e65e3 && \
     # Extract the LKG vLLM commit hash
     VLLM_COMMIT_HASH=$(cat .buildkite/vllm_lkg.version) && \
     echo "Using vLLM commit: ${VLLM_COMMIT_HASH}" && \
@@ -26,9 +26,18 @@ RUN git clone https://github.com/vllm-project/tpu-inference.git /tpu-inference &
     find . -name "*.o" -type f -delete && \
     find . -name "*.a" -type f -delete && \
     # Go back and install tpu-inference
-    pip install --find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html libtpu==0.0.39.dev20260403 && \ 
+    pip install -U \
+    libtpu==0.0.39.dev20260403 \
+    -f https://storage.googleapis.com/jax-releases/libtpu_releases.html \
     cd /tpu-inference && \
     uv pip install --system -e . && \
+    pip install -U \
+    jax==0.10.0.dev20260403 \
+    jaxlib==0.10.0.dev20260403 \
+    libtpu==0.0.39.dev20260403 \
+    requests \
+    -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ \
+    -f https://storage.googleapis.com/jax-releases/libtpu_releases.html \
     # Cleanup tpu-inference build artifacts
     rm -rf build/ dist/ *.egg-info/ && \
     find . -name "*.o" -type f -delete && \
@@ -49,7 +58,7 @@ RUN uv pip install --system -e . && \
     rm -rf /root/.cache/pip /root/.cache/uv /root/.cache/huggingface
 
 # Environment setup for Pathways and custom paths
-ENV JAX_PLATFORMS=proxy
+ENV JAX_PLATFORMS=proxy,cpu
 ENV JAX_BACKEND_TARGET=grpc://127.0.0.1:29000
 ENV PYTHONPATH=$PYTHONPATH:/vllm:/tpu-inference:/deps/src
 
