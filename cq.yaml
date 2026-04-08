@@ -1,0 +1,82 @@
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ClusterQueue
+metadata:
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"kueue.x-k8s.io/v1beta1","kind":"ClusterQueue","metadata":{"annotations":{},"name":"cluster-queue"},"spec":{"namespaceSelector":{},"preemption":{"reclaimWithinCohort":"Never","withinClusterQueue":"LowerPriority"},"resourceGroups":[{"coveredResources":["google.com/tpu"],"flavors":[{"name":"8xtpu7x-128","resources":[{"name":"google.com/tpu","nominalQuota":512}]}]},{"coveredResources":["cpu","memory"],"flavors":[{"name":"cpu-user","resources":[{"name":"cpu","nominalQuota":480},{"name":"memory","nominalQuota":"2000G"}]}]}]}}
+  creationTimestamp: "2026-03-21T17:59:31Z"
+  finalizers:
+  - kueue.x-k8s.io/resource-in-use
+  generation: 2
+  name: cluster-queue
+  resourceVersion: "1775620535171375021"
+  uid: 7dbeb91c-5d97-405d-a398-a4f80ae9714b
+spec:
+  flavorFungibility:
+    whenCanBorrow: MayStopSearch
+    whenCanPreempt: TryNextFlavor
+  namespaceSelector: {}
+  preemption:
+    borrowWithinCohort:
+      policy: Never
+    reclaimWithinCohort: Never
+    withinClusterQueue: LowerPriority
+  queueingStrategy: BestEffortFIFO
+  resourceGroups:
+  - coveredResources:
+    - google.com/tpu
+    flavors:
+    - name: 8xtpu7x-128
+      resources:
+      - name: google.com/tpu
+        nominalQuota: "512"
+  - coveredResources:
+    - cpu
+    - memory
+    flavors:
+    - name: cpu-user
+      resources:
+      - name: cpu
+        nominalQuota: "480"
+      - name: memory
+        nominalQuota: 2T
+  stopPolicy: None
+status:
+  admittedWorkloads: 2
+  conditions:
+  - lastTransitionTime: "2026-03-21T17:59:31Z"
+    message: Can admit new workloads
+    observedGeneration: 2
+    reason: Ready
+    status: "True"
+    type: Active
+  flavorsReservation:
+  - name: 8xtpu7x-128
+    resources:
+    - borrowed: "0"
+      name: google.com/tpu
+      total: "128"
+  - name: cpu-user
+    resources:
+    - borrowed: "0"
+      name: cpu
+      total: "144"
+    - borrowed: "0"
+      name: memory
+      total: 1105468750Ki
+  flavorsUsage:
+  - name: 8xtpu7x-128
+    resources:
+    - borrowed: "0"
+      name: google.com/tpu
+      total: "128"
+  - name: cpu-user
+    resources:
+    - borrowed: "0"
+      name: cpu
+      total: "144"
+    - borrowed: "0"
+      name: memory
+      total: 1105468750Ki
+  pendingWorkloads: 1
+  reservingWorkloads: 2
