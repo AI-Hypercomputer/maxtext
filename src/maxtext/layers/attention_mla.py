@@ -117,7 +117,6 @@ class Indexer(nnx.Module):
     self.rngs = rngs
     self.dtype = config.dtype
     self.weight_dtype = config.weight_dtype
-    self.max_target_length = config.max_target_length
 
     self.n_heads = config.indexer_n_heads
     self.head_dim = config.indexer_head_dim
@@ -364,11 +363,16 @@ class Indexer(nnx.Module):
     internal_padding_mask = None
     if cached_s is not None:
       # cached_s marks valid tokens from the original prefill step and all subsequent AR steps
-      internal_padding_mask = jnp.where(cached_s > 0, 0.0, DEFAULT_MASK_VALUE)
-      indexer_score += internal_padding_mask[:, None, :]
+      if decoder_segment_ids is not None:
+        # Compare cached segment IDs against the current sequence's segment ID to isolate sequences
+        is_valid = (cached_s[:, None, :] == decoder_segment_ids[:, :, None]) & (cached_s[:, None, :] > 0)
+        internal_padding_mask = jnp.where(is_valid, 0.0, DEFAULT_MASK_VALUE)
+      else:
+        internal_padding_mask = jnp.where(cached_s > 0, 0.0, DEFAULT_MASK_VALUE)[:, None, :]
+      indexer_score += internal_padding_mask
 
     # Apply attention mask before TopK
-    if attention_mask is not None:
+    if attention_mask is not None and attention_mask.shape[-1] == k.shape[1]:
       indexer_score += attention_mask
 
     # TopK selection based on index score
@@ -378,11 +382,11 @@ class Indexer(nnx.Module):
     indexer_mask = self.generate_mask(topk_indices, k.shape[1])  # [b, t, s]
 
     # Re-apply attention mask after TopK: in case number of unmasked tokens < TopK
-    if attention_mask is not None:
+    if attention_mask is not None and attention_mask.shape[-1] == k.shape[1]:
       indexer_mask += attention_mask
 
     if internal_padding_mask is not None:
-      indexer_mask += internal_padding_mask[:, None, :]
+      indexer_mask += internal_padding_mask
 
     return indexer_mask, topk_indices, indexer_score
 
