@@ -204,6 +204,47 @@ no change needed.
   the bottleneck, the next optimization is a long-lived pool created once at
   trainer init instead of per `check_numbers` call.
 
+### 6. [`utils_rl.py`](../src/maxtext/trainers/post_train/rl/utils_rl.py): preprocessing additions
+
+Tunix's `_strip_string` and `_normalize` ([math_utils.py](https://github.com/google/tunix/blob/linchai_deepscaler/tunix/utils/math_utils.py))
+do several normalizations that MaxText's `normalize_final_answer` was
+missing. Most matter because they unblock `math_verify`'s LaTeX parser when
+it would otherwise fail and force the run into the numeric-ratio fallback.
+
+Added to `SUBSTITUTIONS` (order matters — collapse must come first):
+
+| Rule | Why |
+|---|---|
+| `\\` → `\` | Collapse double-escaped LaTeX so subsequent rules see canonical form. |
+| `\tfrac` / `\dfrac` → `\frac` | Common in MATH/OMI-2; some parsers don't accept the variants. |
+| ` or ` / ` and ` → `,` | Set-style answers like "1 or 2" become tuples. |
+| `million` → `*10^6`, `billion` → `*10^9`, `trillion` → `*10^12` | Word-form scale factors. |
+
+Added to `REMOVED_EXPRESSIONS`:
+
+| Rule | Why |
+|---|---|
+| `\left`, `\right` | Pure formatting; major parse blocker for sympy. |
+| `\!` (inverse space) | Pure formatting. |
+| Singular unit forms: `yard`, `foot`, `mile`, `day`, `week`, `month`, `year`, `hour`, `minute`, `second`, `centimeter`, `meter` (and selected plurals) | MaxText already had plural forms for some units; Tunix removes both. |
+
+New steps inside `normalize_final_answer`:
+
+1. **Mixed-number injection** (`7 3/4` → `7+3/4`) — runs **before** the
+   substitutions loop, because that loop strips spaces and would otherwise
+   destroy the mixed-number structure.
+2. **Leading-zero fix**: `.5` → `0.5` and `{.5` → `{0.5`. Sympy parses
+   `0.5` but not bare `.5` in some contexts.
+3. **Outer-brace strip**: `{42}` → `42`.
+4. **Integer-float collapse**: `2.0` → `2`. Important because Tunix's
+   sympy grader requires strict integer match when GT is integer; the same
+   discipline helps `math_verify`'s exact-string fast path.
+
+These changes are intentionally conservative — none of them touch the
+existing reward shaping or extraction logic, and they only fire on inputs
+that previously would have been graded incorrectly or kicked into the
+numeric-ratio fallback.
+
 ## Files touched
 
 - **New:** `src/maxtext/trainers/post_train/rl/math_verify_pool.py`

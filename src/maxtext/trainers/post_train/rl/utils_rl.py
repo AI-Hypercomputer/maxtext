@@ -114,11 +114,24 @@ def boxed(x):
 EPSILON = 1e-6
 # Constants for normalization
 SUBSTITUTIONS = [
+    # Collapse double backslashes first so subsequent rules see canonical form
+    # (mirrors Tunix `_strip_string` line 116).
+    ("\\\\", "\\"),
+    # Tunix `_strip_string` lines 120-121: tfrac/dfrac → frac.
+    ("\\tfrac", "\\frac"),
+    ("\\dfrac", "\\frac"),
     ("an ", ""),
     ("a ", ""),
     (".$", "$"),
     ("\\$", ""),
     (r"\ ", ""),
+    # Tunix `_normalize` lines 281-282: set-style answers.
+    (" or ", ","),
+    (" and ", ","),
+    # Tunix `_normalize` lines 284-286: scale words.
+    ("million", "*10^6"),
+    ("billion", "*10^9"),
+    ("trillion", "*10^12"),
     (" ", ""),
     ("mbox", "text"),
     (",\\text{and}", ","),
@@ -127,6 +140,32 @@ SUBSTITUTIONS = [
 ]
 
 REMOVED_EXPRESSIONS = [
+    # Tunix `_strip_string` lines 112, 125-126: parse blockers.
+    "\\left",
+    "\\right",
+    "\\!",
+    # Singular unit forms from Tunix `_normalize` lines 288-306 that MaxText
+    # was missing (existing list already has many plural forms).
+    "yard",
+    "yards",
+    "foot",
+    "mile",
+    "miles",
+    "day",
+    "days",
+    "week",
+    "weeks",
+    "month",
+    "months",
+    "year",
+    "years",
+    "hour",
+    "minute",
+    "second",
+    "seconds",
+    "centimeter",
+    "centimeters",
+    "meter",
     "square",
     "ways",
     "integers",
@@ -264,6 +303,10 @@ def normalize_final_answer(final_answer: str) -> str:
   """
   final_answer = final_answer.split("=")[-1]
 
+  # Inject implicit mixed numbers BEFORE the substitutions strip spaces
+  # (mirrors Tunix `_inject_implicit_mixed_number`): "7 3/4" -> "7+3/4".
+  final_answer = re.sub(r"([0-9]) +([0-9])", r"\1+\2", final_answer)
+
   # Apply substitutions and removals
   for before, after in SUBSTITUTIONS:
     final_answer = final_answer.replace(before, after)
@@ -290,6 +333,26 @@ def normalize_final_answer(final_answer: str) -> str:
   final_answer = re.sub(r"(frac)([^{])(.)", "frac{\\2}{\\3}", final_answer)
   final_answer = re.sub(r"(sqrt)([^{])", "sqrt{\\2}", final_answer)
   final_answer = final_answer.replace("$", "")
+
+  # Leading-zero fixups (Tunix `_strip_string` lines 143-149). Spaces have
+  # already been stripped above, so we only need the start-of-string and
+  # post-`{` cases.
+  if final_answer.startswith("."):
+    final_answer = "0" + final_answer
+  final_answer = final_answer.replace("{.", "{0.")
+
+  # Strip a single layer of outer braces (Tunix `_normalize` lines 309-310):
+  # "{42}" -> "42".
+  if len(final_answer) >= 2 and final_answer[0] == "{" and final_answer[-1] == "}":
+    final_answer = final_answer[1:-1]
+
+  # Integer-float collapse (Tunix `_normalize` lines 313-314): "2.0" -> "2".
+  try:
+    f = float(final_answer)
+    if abs(f - round(f)) < 1e-7:
+      final_answer = str(int(round(f)))
+  except (ValueError, OverflowError):
+    pass
 
   # Normalize numbers
   if final_answer.replace(",", "").isdigit():
@@ -414,7 +477,7 @@ def check_numbers(prompts, completions, answer, tmvp_config, **kargs):
 
   # Extract full answer content from solution tags (not just first number)
   extracted_responses = [extract_answer(c, tmvp_config) for c in completions]
-  true_answers = [list(dict.fromkeys(acceptable_answers)) for acceptable_answers in answer]
+  true_answers = [list(dict.fromkeys(json.loads(acceptable_answers))) for acceptable_answers in answer]
 
   scores = [tmvp_config.penalty_incorrect_format] * len(completions)  # Default to penalty for incorrect format
   math_verify_queue = []
@@ -447,31 +510,6 @@ def check_numbers(prompts, completions, answer, tmvp_config, **kargs):
     for (gen_idx, norm_answers, norm_guesses), score in zip(math_verify_queue, math_verify_results):
       if score > 0.1:
         scores[gen_idx] = max(scores[gen_idx], tmvp_config.reward_exact_answer)
-      else:
-        # 3. As a fallback, try numeric comparison if both can be parsed as numbers
-        try:
-          predictions = parse(norm_guesses[0], PRED_EXTRACTION_TARGET, parsing_timeout=None)
-          golds = list(
-              itertools.chain.from_iterable(
-                  parse(norm_answer, GOLD_EXTRACTION_TARGET, parsing_timeout=None) for norm_answer in norm_answers
-              )
-          )
-          for gold in golds:
-            for pred in predictions:
-              try:
-                ratio = (float(pred) + EPSILON) / (float(gold) + EPSILON)
-                if 0.9 <= ratio <= 1.1:
-                  scores[gen_idx] = max(scores[gen_idx], tmvp_config.reward_ratio_guess_to_answer_high)
-                elif 0.8 <= ratio <= 1.2:
-                  scores[gen_idx] = max(scores[gen_idx], tmvp_config.reward_ratio_guess_to_answer_low)
-                else:
-                  scores[gen_idx] = max(scores[gen_idx], tmvp_config.penalty_incorrect_answer)
-              except:
-                scores[gen_idx] = max(scores[gen_idx], tmvp_config.penalty_incorrect_answer)
-        except:
-          scores[gen_idx] = max(
-              scores[gen_idx], tmvp_config.penalty_incorrect_format
-          )  # Penalize if we can't parse numbers at all
   if tmvp_config.debug.rl:
     debug_log_path = epath.Path(tmvp_config.base_output_directory) / tmvp_config.run_name / "debug_rl_logs"
     debug_log_path.mkdir(parents=True, exist_ok=True)
