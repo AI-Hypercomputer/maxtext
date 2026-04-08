@@ -55,6 +55,9 @@ _ICI_TP = flags.DEFINE_integer('ici_tensor_parallelism', 2, 'ICI tensor parallel
 _ROLLOUT_TP = flags.DEFINE_integer('rollout_tensor_parallelism', 2, 'Rollout tensor parallelism')
 _ROLLOUT_DP = flags.DEFINE_integer('rollout_data_parallelism', 1, 'Rollout data parallelism')
 _RUN_VLLM_ONLY = flags.DEFINE_boolean('run_vllm_only', False, 'Skip MaxText model loading and weight sync; just run vLLM.')
+_VLLM_CHECKPOINT_PATH = flags.DEFINE_string('vllm_checkpoint_path', '', 'GCS path (gs://…) to load vLLM weights via runai_streamer. When set, used as the vLLM model arg; --vllm_model_id is used as the tokenizer.')
+_RUNAI_GCS_CREDENTIAL_FILE = flags.DEFINE_string('runai_gcs_credential_file', '', 'Path to GCS service-account JSON for Run:ai Model Streamer. If unset, falls back to GOOGLE_APPLICATION_CREDENTIALS or the GCE metadata server.')
+_MODEL_LOADER_EXTRA_CONFIG = flags.DEFINE_string('model_loader_extra_config', '', 'JSON string passed as --model-loader-extra-config to vLLM (e.g. \'{"memory_limit":5368709120}\').')
 
 def _setup_jax_compilation_cache():
   jax_config.update("jax_compilation_cache_dir", _JAX_COMPILATION_CACHE_DIR)
@@ -1036,16 +1039,36 @@ def main():
   print("="*80)
   print("Loading vLLM model for generation test...")
   print("="*80)
+
+  # Configure GCS credentials for Run:ai Model Streamer if provided.
+  if _RUNAI_GCS_CREDENTIAL_FILE.value:
+    os.environ["RUNAI_STREAMER_GCS_CREDENTIAL_FILE"] = _RUNAI_GCS_CREDENTIAL_FILE.value
+    logging.info("runai_streamer: using GCS credential file: %s", _RUNAI_GCS_CREDENTIAL_FILE.value)
+
+  # When a GCS checkpoint path is given, vLLM loads weights from GCS via
+  # runai_streamer; the HF model ID is still used for the tokenizer/config.
+  vllm_gcs_path = _VLLM_CHECKPOINT_PATH.value
+  if vllm_gcs_path:
+    vllm_model_arg = vllm_gcs_path
+    vllm_tokenizer_arg = _VLLM_MODEL_ID.value
+    logging.info("runai_streamer: loading weights from GCS path=%s, tokenizer=%s", vllm_model_arg, vllm_tokenizer_arg)
+  else:
+    vllm_model_arg = _VLLM_MODEL_ID.value
+    vllm_tokenizer_arg = None
+
+  model_loader_extra_config = _MODEL_LOADER_EXTRA_CONFIG.value or None
   llm = LLM(
-    _VLLM_MODEL_ID.value,
+    vllm_model_arg,
+    tokenizer=vllm_tokenizer_arg,
     max_model_len=16,
     tensor_parallel_size=_ROLLOUT_TP.value,
     data_parallel_size=_ROLLOUT_DP.value,
     gpu_memory_utilization=0.75,
     async_scheduling=False,
     load_format="runai_streamer",
+    model_loader_extra_config=model_loader_extra_config,
     quantization=None,
-    additional_config={"sharding": {"sharding_strategy": {"enable_dp_attention": True}}, 
+    additional_config={"sharding": {"sharding_strategy": {"enable_dp_attention": True}},
                        "sparse_matmul": True,
                        "replicate_attn_weights": True},
   )

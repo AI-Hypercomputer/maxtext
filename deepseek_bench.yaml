@@ -4,7 +4,7 @@ metadata:
   annotations:
     jobset.sigs.k8s.io/hack: "true"
   labels: {}
-  name: mohitkhatwani-dsv3 # Change to your favorite run name (please use your ldap)
+  name: mohitkhatwani-dsv3-ax # Change to your favorite run name (please use your ldap)
   namespace: default
 spec:
   coordinator:
@@ -50,15 +50,17 @@ spec:
                   (
                     pip show jax; 
                     pip show libtpu; 
-                    MODEL_IMPL_TYPE=auto NEW_MODEL_DESIGN=True \
+                    MODEL_IMPL_TYPE=vllm NEW_MODEL_DESIGN=True \
                     python3 src/maxtext/integration/tunix/weight_mapping/bench_weight_sync.py \
                     --model_name=deepseek3-671b \
                     --vllm_model_id=deepseek-ai/DeepSeek-V3 \
+                    --vllm_checkpoint_path=gs://ranlihao-deepseek/model/r1 \
                     --rand_init=True \
                     --ici_fsdp_parallelism=1 \
                     --ici_tensor_parallelism=128 \
                     --rollout_tensor_parallelism=128 \
-                    --run_vllm_only=True
+                    --run_vllm_only=True \
+                    --model_loader_extra_config='{"memory_limit":5368709120}'
                   ) & PID=$!
 
                   while kill -0 $PID 2>/dev/null; do
@@ -84,7 +86,7 @@ spec:
               resources:
                 limits:
                   cpu: "24"
-                  memory: 100G
+                  memory: 300G
               volumeMounts:
               - mountPath: /tmp
                 name: shared-tmp
