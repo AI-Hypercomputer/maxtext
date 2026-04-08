@@ -1072,6 +1072,7 @@ def main():
     async_scheduling=False,
     load_format="runai_streamer",
     model_loader_extra_config=model_loader_extra_config,
+    enable_expert_parallel=_ROLLOUT_EP.value > 1,
     quantization=None,
     additional_config={"sharding": {"sharding_strategy": sharding_strategy},
                        "sparse_matmul": True,
