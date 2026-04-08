@@ -24,7 +24,6 @@ Usage:
   pytest tests/post_training/integration/sft_trainer_correctness_test.py
 """
 
-import functools
 import os.path
 import subprocess
 import sys
@@ -118,13 +117,8 @@ def setup_maxtext_model(config):
   quant = quantizations.configure_quantization(config)
   devices_array = maxtext_utils.create_device_mesh(config)
   mesh = Mesh(devices_array, config.mesh_axes)
-  if config.pure_nnx:
-    # NNX has a different function to init the training state.
-    raise NotImplementedError("Pure NNX support has not been implemented yet.")
-  else:
-    maxtext_model = models.transformer_as_linen(config=config, mesh=mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
-    init_state_fn = functools.partial(maxtext_utils.init_initial_state, maxtext_model, None, config, False, init_rng)
-  state, _ = maxtext_utils.setup_decode_state(config, mesh, None, init_state_fn)
+  maxtext_model = models.transformer_as_linen(config=config, mesh=mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+  state, _ = maxtext_utils.setup_decode_state(maxtext_model, config, init_rng, mesh, None)
   return maxtext_model, state, init_rng
 
 
