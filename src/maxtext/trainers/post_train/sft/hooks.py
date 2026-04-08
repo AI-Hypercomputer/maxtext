@@ -125,13 +125,19 @@ class SFTTrainingHooks(TrainingHooks):
     if self.metadata["first_train_step"] == train_step - 1:
       max_utils.print_mem_stats("After params initialized")
 
+    # Try to get high-fidelity metrics from Tunix PerfTracer
+    # Fallback to a small epsilon to avoid ZeroDivisionError in MetricLogger
+    # Note: the `step_time` argument is currently hardcoded to 0.0 in Tunix library.
+    tracer_metrics = train_ctx._perf_tracer.export()  # pylint: disable=protected-access
+    actual_step_time, _ = tracer_metrics.get("perf/step_time_seconds", (1e-6, None))
+
     metrics = {
         "scalar": {
             "learning/loss": train_loss,
             "learning/total_weights": self.train_metadata[train_step - 1]["total_weights"],
         }
     }
-    self.metric_logger.record_train_metrics(metrics, train_step, step_time)
+    self.metric_logger.record_train_metrics(metrics, train_step, actual_step_time)
     self.metric_logger.write_metrics(metrics, train_step)
     del self.train_metadata[train_step - 1]
 

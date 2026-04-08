@@ -48,6 +48,7 @@ from flax.linen import partitioning as nn_partitioning
 from orbax import checkpoint as ocp
 
 from tunix.sft import metrics_logger, peft_trainer, profiler
+from tunix.perf import trace, span
 
 from maxtext.configs import pyconfig
 from maxtext.trainers.pre_train.train import loss_fn
@@ -141,6 +142,23 @@ def use_maxtext_loss_function(trainer, mt_config):
   return trainer
 
 
+def sft_perf_export_fn(query):
+  """Custom exporter to extract SFT step time from Tunix spans."""
+  # PeftTrainer uses a Span named "peft_train_step" (not a SpanGroup).
+  # We have to find it manually in the root inner items.
+  timelines = query._timelines  # pylint: disable=protected-access
+  main_tl = timelines.get(query.get_main_thread_id())
+  if not main_tl:
+    return {}
+
+  # Search for the last peft_train_step span
+  for item in reversed(main_tl.root.inner):
+    if isinstance(item, span.Span) and item.name == "peft_train_step":
+      return {"perf/step_time_seconds": (item.duration, None)}
+
+  return {}
+
+
 def setup_trainer_state(mt_config, goodput_recorder=None):
   """Set up prerequisites for training loop."""
   tunix_config = get_tunix_config(mt_config)
@@ -161,7 +179,11 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
     training_hooks = hooks.SFTTrainingHooks(mt_config, mesh, learning_rate_schedule, goodput_recorder)
     data_hooks = hooks.SFTDataHooks(mt_config, mesh, goodput_recorder)
 
-    trainer = peft_trainer.PeftTrainer(model, optimizer, tunix_config)
+    # Initialize the official Tunix performance tracer
+    # Convert mesh devices to list to avoid ambiguous truth value error in Tunix tracer
+    perf_tracer = trace.PerfTracer(mesh.devices.flatten().tolist(), sft_perf_export_fn)
+
+    trainer = peft_trainer.PeftTrainer(model, optimizer, tunix_config, perf_tracer=perf_tracer)
     trainer.with_training_hooks(training_hooks)
     trainer.with_data_hooks(data_hooks)
     trainer = use_maxtext_loss_function(trainer, mt_config)
