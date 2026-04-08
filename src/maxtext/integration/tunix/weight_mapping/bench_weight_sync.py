@@ -55,6 +55,7 @@ _FSDP_TP = flags.DEFINE_integer('ici_fsdp_parallelism', -1, 'ICI FSDP parallelis
 _ICI_TP = flags.DEFINE_integer('ici_tensor_parallelism', 2, 'ICI tensor parallelism')
 _ROLLOUT_TP = flags.DEFINE_integer('rollout_tensor_parallelism', 2, 'Rollout tensor parallelism')
 _ROLLOUT_DP = flags.DEFINE_integer('rollout_data_parallelism', 1, 'Rollout data parallelism')
+_ROLLOUT_EP = flags.DEFINE_integer('rollout_expert_parallelism', 1, 'Expert parallelism for MoE layers in vLLM rollout.')
 _RUN_VLLM_ONLY = flags.DEFINE_boolean('run_vllm_only', False, 'Skip MaxText model loading and weight sync; just run vLLM.')
 _VLLM_CHECKPOINT_PATH = flags.DEFINE_string('vllm_checkpoint_path', '', 'GCS path (gs://…) to load vLLM weights via runai_streamer. When set, used as the vLLM model arg; --vllm_model_id is used as the tokenizer.')
 _RUNAI_GCS_CREDENTIAL_FILE = flags.DEFINE_string('runai_gcs_credential_file', '', 'Path to GCS service-account JSON for Run:ai Model Streamer. If unset, falls back to GOOGLE_APPLICATION_CREDENTIALS or the GCE metadata server.')
@@ -1058,6 +1059,9 @@ def main():
     vllm_tokenizer_arg = None
 
   model_loader_extra_config = json.loads(_MODEL_LOADER_EXTRA_CONFIG.value) if _MODEL_LOADER_EXTRA_CONFIG.value else None
+  sharding_strategy = {"enable_dp_attention": True}
+  if _ROLLOUT_EP.value > 1:
+    sharding_strategy["expert_parallelism"] = _ROLLOUT_EP.value
   llm = LLM(
     vllm_model_arg,
     tokenizer=vllm_tokenizer_arg,
@@ -1069,7 +1073,7 @@ def main():
     load_format="runai_streamer",
     model_loader_extra_config=model_loader_extra_config,
     quantization=None,
-    additional_config={"sharding": {"sharding_strategy": {"enable_dp_attention": True}},
+    additional_config={"sharding": {"sharding_strategy": sharding_strategy},
                        "sparse_matmul": True,
                        "replicate_attn_weights": True},
   )

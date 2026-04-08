@@ -47,9 +47,28 @@ spec:
                   _sigterm() (kill -SIGTERM $! 2>/dev/null)
                   trap _sigterm SIGTERM
 
+                  # Wait for all 128 TPU devices to be visible via Pathways before starting.
+                  echo "Waiting for 128 TPU devices..."
+                  JAX_PLATFORMS=proxy,cpu JAX_BACKEND_TARGET=grpc://$(PATHWAYS_HEAD):29000 \
+                  python3 -c "
+                  import time, os
+                  os.environ.setdefault('SKIP_JAX_PRECOMPILE', '1')
+                  import pathwaysutils; pathwaysutils.initialize()
+                  import jax
+                  expected = 128
+                  while True:
+                      n = len(jax.devices())
+                      print(f'Devices visible: {n}/{expected}', flush=True)
+                      if n >= expected:
+                          break
+                      time.sleep(5)
+                  print('All devices ready.')
+                  "
+                  echo "All TPU devices ready at $(date)"
+
                   (
-                    pip show jax; 
-                    pip show libtpu; 
+                    pip show jax;
+                    pip show libtpu;
                     MODEL_IMPL_TYPE=vllm NEW_MODEL_DESIGN=True \
                     python3 src/maxtext/integration/tunix/weight_mapping/bench_weight_sync.py \
                     --model_name=deepseek3-671b \
@@ -58,7 +77,8 @@ spec:
                     --rand_init=True \
                     --ici_fsdp_parallelism=1 \
                     --ici_tensor_parallelism=128 \
-                    --rollout_tensor_parallelism=128 \
+                    --rollout_tensor_parallelism=1 \
+                    --rollout_expert_parallelism=128 \
                     --run_vllm_only=True \
                     --model_loader_extra_config='{"memory_limit":5368709120}'
                   ) & PID=$!
@@ -83,10 +103,18 @@ spec:
                 value: GCP
               - name: JAX_BACKEND_TARGET
                 value: grpc://$(PATHWAYS_HEAD):29000
+              # MoE requantization controls (tpu_inference envs):
+              # The checkpoint uses block-fp8 (weight_block_size=[128,128]) which triggers
+              # an online dequant->float32->requant->fp8 conversion that OOMs TPU HBM.
+              # Option B: requantize MoE weights to bfloat16 — avoids block-scale sharding
+              # incompatibility with TP=128 (moe_intermediate_size=2048, block_size=128 → 16
+              # scale blocks, not divisible by 128 TPUs).
+              - name: MOE_REQUANTIZE_WEIGHT_DTYPE
+                value: "bfloat16"
               resources:
                 limits:
                   cpu: "24"
-                  memory: 300G
+                  memory: 750G
               volumeMounts:
               - mountPath: /tmp
                 name: shared-tmp
