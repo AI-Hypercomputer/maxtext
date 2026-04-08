@@ -1040,7 +1040,8 @@ class RoutedMoE(nnx.Module):
       w1_bias_pspec = self._logical_to_mesh_axes(("exp", None))
       wo_bias_pspec = self._logical_to_mesh_axes(("exp", "activation_embed_moe"))
     else:
-      input_partition_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length_moe", None))
+      # This is terrible =(
+      input_partition_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length_moe", "activation_embed"))
       w0_bias_pspec = self._logical_to_mesh_axes(("exp", "activation_mlp"))
       w1_bias_pspec = self._logical_to_mesh_axes(("exp", "activation_mlp"))
       wo_bias_pspec = self._logical_to_mesh_axes(("exp", "activation_embed_moe"))
@@ -1117,21 +1118,19 @@ class RoutedMoE(nnx.Module):
         # The ring-of-experts strategy first duplicates the inputs to all
         # expert shards, and then routes within each shard.
 
-        def get_ep_ag_axis():
-          if self.config.expert_shard_attention_option == EP_AS_FSDP:
-            return 0
-          elif self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-            return 1
-          elif self.config.expert_shard_attention_option == EP_AS_TP:
-            return 2
+        def ag_activations(x, logits, pre_bias_logits):          
+          if self.config.expert_shard_attention_option == ctypes.EP_AS_FSDP:
+            x, logits, pre_bias_logits = tuple(
+              jax.lax.all_gather(z, axis_name=self._expert_parallelism_name, axis=0, tiled=True)
+              for z in (x, logits, pre_bias_logits)
+            )
           else:
-            return ValueError("I dunno man")
+            # logits and pre_bias_logits are already replicated over EP, only AG x
+            x = jax.lax.all_gather(x, axis_name=self._expert_parallelism_name, axis=2, tiled=True)
+          return x, logits, pre_bias_logits
 
-  
-        x, logits, pre_bias_logits = tuple(
-            jax.lax.all_gather(z, axis_name=self._expert_parallelism_name, axis=get_ep_ag_axis(), tiled=True)
-            for z in (x, logits, pre_bias_logits)
-        )
+        x, logits, pre_bias_logits = ag_activations(x, logits, pre_bias_logits)
+
 
         # "Route" tokens within each shard.
         num_experts_per_shard = self.config.num_experts // num_expert_parallelism
@@ -1334,7 +1333,13 @@ class RoutedMoE(nnx.Module):
 
         # Sum up the partial outputs across the expert shards.
         output = jnp.reshape(output, (-1, sequence_length, self.config.emb_dim // self.get_tensor_parallelism_size()))
-        output = jax.lax.psum_scatter(output, self._expert_parallelism_name, scatter_dimension=0, tiled=True)
+        if self.config.expert_shard_attention_option == ctypes.EP_AS_FSDP:
+          scatter_dimension=0
+        elif self.config.expert_shard_attention_option == ctypes.EP_AS_CONTEXT:
+          scatter_dimension=1
+        elif self.config.expert_shard_attention_option == ctypes.EP_AS_TP:
+          scatter_dimension=2
+        output = jax.lax.psum_scatter(output, self._expert_parallelism_name, scatter_dimension=scatter_dimension, tiled=True)
 
       else:
         if num_expert_parallelism > 1:
