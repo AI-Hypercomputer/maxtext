@@ -28,6 +28,8 @@ from jaxtyping import PyTree
 import torch
 from tunix.models.qwen3 import model as qwen3_lib
 
+from tpu_inference.layers.common.quantization import quantize_tensor as tpu_quantize_tensor
+
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE
 from maxtext.configs import pyconfig
 from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
@@ -895,6 +897,9 @@ class DeepSeekV3ToVLLMConverter:
         gate_layers = _process_gate(routed_moe['gate']['kernel'])
         _expert_2d = jax.sharding.NamedSharding(
             self.mesh, jax.sharding.PartitionSpec('model', None))
+        # gate bias shape is (E,) — rank 1, so use a 1D partition spec.
+        _expert_1d = jax.sharding.NamedSharding(
+            self.mesh, jax.sharding.PartitionSpec('model',))
         # Gate bias: (L, E) after unstack -> (E,) per layer.
         # MaxText stores gate bias as (E, L), so transpose first.
         gate_has_bias = 'bias' in routed_moe['gate']
@@ -907,7 +912,7 @@ class DeepSeekV3ToVLLMConverter:
         for i, layer_idx in enumerate(layer_indices):
             self.vllm_state[f"{prefix}.{layer_idx}.mlp.gate.weight"] = jax.device_put(gate_layers[i], _expert_2d)
             if gate_has_bias:
-                self.vllm_state[f"{prefix}.{layer_idx}.mlp.gate.e_score_correction_bias"] = jax.device_put(gate_bias_layers[i], _expert_2d)
+                self.vllm_state[f"{prefix}.{layer_idx}.mlp.gate.e_score_correction_bias"] = jax.device_put(gate_bias_layers[i], _expert_1d)
 
         logging.info("_convert_moe: routed experts...")
 
@@ -1137,7 +1142,6 @@ def main():
     load_format=_LOAD_FORMAT.value,
     model_loader_extra_config=model_loader_extra_config,
     enable_expert_parallel=_ROLLOUT_EP.value > 1,
-    quantization=None,
     compilation_config={"compile_sizes": [16, 32, 64, 128, 256]},
     additional_config={"compilation_sizes": [16, 32, 64, 128, 256],
                        "sharding": {"sharding_strategy": sharding_strategy},
@@ -1189,20 +1193,44 @@ def main():
         return functools.partial(jax.device_put, device=dst_sharding)
 
     with timer(f"Assigning {len(vllm_state)} weights to vLLM model"):
+      _fp8_dtype = jnp.float8_e4m3fn
       for key, weight in vllm_state.items():
         # Unwrap NNX Param → plain jax.Array; plain arrays pass through unchanged.
         weight_array = weight.value if hasattr(weight, 'value') else weight
         if key not in llm_state:
           logging.warning("Key missing from llm_state: %s (skipping)", key)
           continue
-        dst_sharding = llm_state[key].sharding
-        # print(f"Assigning {key}: src shape={weight_array.shape}, src sharding={weight_array.sharding}; dst shape={llm_state[key].shape}, dst sharding={dst_sharding}")
-        llm_state[key] = _get_reshard_fn(dst_sharding)(weight_array)
-        # array_allclose = np.allclose(
-        #     np.asarray(llm_state[key]), np.asarray(weight_array), rtol=1e-2, atol=1e-2
-        # )
-        # print(f"{key}: {array_allclose}")
-        # llm_state[key] = jax.device_put(np.asarray(weight_array), dst_sharding)
+
+        dst = llm_state[key]
+        dst_dtype = dst.dtype
+        dst_sharding = dst.sharding
+
+        if dst_dtype == _fp8_dtype:
+          scale_key = key + "_scale"
+          scale_inv_key = key + "_scale_inv"
+          if scale_inv_key in llm_state:
+            # MoE expert weight (w13_weight, w2_weight): uses block quantization
+            # with complex post-processing scale shape (256, 1, 1, d_inner).
+            # Defer — keep the checkpoint's fp8 expert weights as-is.
+            logging.info("Skipping MoE block-quantized weight (keeping checkpoint fp8): %s", key)
+            continue
+          elif scale_key in llm_state:
+            # Linear fp8 weight (attention, dense MLP, shared experts):
+            # checkpoint uses per-row (per-output-channel) fp8 quantization.
+            # scale shape = (out_channels,) matching weight.shape[0].
+            weight_fp8, scale = tpu_quantize_tensor(
+                _fp8_dtype, weight_array.astype(jnp.float32), axis=-1)
+            llm_state[key] = _get_reshard_fn(dst_sharding)(weight_fp8)
+            llm_state[scale_key] = _get_reshard_fn(llm_state[scale_key].sharding)(
+                scale.astype(jnp.float32))
+          else:
+            # fp8 with no companion scale — cast directly.
+            llm_state[key] = _get_reshard_fn(dst_sharding)(
+                weight_array.astype(_fp8_dtype))
+        else:
+          # bf16 / float32 weights (layernorms, gate, embeddings, lm_head).
+          llm_state[key] = _get_reshard_fn(dst_sharding)(weight_array)
+
       jax.effects_barrier()  # wait for all on-device reshards to finish
 
 

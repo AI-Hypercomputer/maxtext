@@ -34,12 +34,18 @@ spec:
     - cpu
     - memory
     flavors:
+    - name: megamem-user
+      resources:
+      - name: cpu
+        nominalQuota: "256"
+      - name: memory
+        nominalQuota: 3T
     - name: cpu-user
       resources:
       - name: cpu
         nominalQuota: "480"
       - name: memory
-        nominalQuota: 2T
+        nominalQuota: 4T
   stopPolicy: None
 status:
   admittedWorkloads: 2

@@ -125,14 +125,14 @@ spec:
                   python3 src/maxtext/integration/tunix/weight_mapping/bench_weight_sync.py \
                   --model_name=deepseek3-671b \
                   --vllm_model_id=deepseek-ai/DeepSeek-V3 \
-                  --vllm_checkpoint_path=gs://ranlihao-deepseek/model/r1 \
+                  --vllm_checkpoint_path=gs://maxtext-model-checkpoints/deepseek-v3/hf-weights \
                   --rand_init=True \
                   --ici_fsdp_parallelism=1 \
                   --ici_tensor_parallelism=128 \
                   --rollout_tensor_parallelism=1 \
                   --rollout_expert_parallelism=128 \
-                  --run_vllm_only=True \
-                  --load_format=riunai_streamer \
+                  --run_vllm_only=False \
+                  --load_format=runai_streamer \
                   --model_loader_extra_config='{"memory_limit":10737418240}') & PID=$!;
                   while kill -0 $PID 2>/dev/null;
                       do sleep 5;
