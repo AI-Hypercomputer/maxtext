@@ -826,11 +826,17 @@ class DeepSeekV3ToVLLMConverter:
     def _convert_mla(self, attn, prefix, layer_indices):
         tp = self.vllm_tp
 
+        logging.info("_convert_mla: attn top-level keys: %s", list(attn.keys()))
+        logging.info("_convert_mla: out kernel shape: %s", attn['out']['kernel'].shape)
+        for k in ['wq_a', 'wq_b', 'wkv_a', 'wkv_b', 'q_norm', 'kv_norm']:
+            if k in attn:
+                logging.info("_convert_mla: attn['%s']['kernel' or 'scale'] shape: %s", k,
+                             attn[k].get('kernel', attn[k].get('scale')).shape)
+            else:
+                logging.info("_convert_mla: key '%s' NOT found in attn", k)
+
         @jax.jit
         def _process_mla(attn):
-            # wq_a: (d_model, L, Rank) -> (L, Rank, d_model)
-            wq_a = jnp.transpose(attn['wq_a']['kernel'], (1, 2, 0))
-            
             # q_norm: (Rank, L) -> (L, Rank)
             q_norm = jnp.transpose(attn['q_norm']['scale'], (1, 0))
 
@@ -838,28 +844,34 @@ class DeepSeekV3ToVLLMConverter:
             wq_b = jnp.transpose(attn['wq_b']['kernel'], (1, 2, 3, 0))
             l, nh, dh, r = wq_b.shape
             wq_b = wq_b.reshape(l, nh * dh, r)
-            
-            # wkv_a: (d_model, L, Rank + 2 * qk_head_dim) -> (L, Rank + 2 * qk_head_dim, d_model)
-            wkv_a = jnp.transpose(attn['wkv_a']['kernel'], (1, 2, 0))
-            
+
             # kv_norm: (Rank, L) -> (L, Rank)
             kv_norm = jnp.transpose(attn['kv_norm']['scale'], (1, 0))
 
-            # wkv_b: (Rank, L, Heads, HeadDim + qk_head_dim) -> (L, Heads * (HeadDim + qk_head_dim), Rank)
-            wkv_b = jnp.transpose(attn['wkv_b']['kernel'], (1, 2, 3, 0))
-            l, nh, dh_total, r = wkv_b.shape
-            wkv_b = wkv_b.reshape(l, nh * dh_total, r)
-            
-            # out: (Heads, HeadDim, L, d_model) -> (L, d_model, Heads * HeadDim)
-            wo = jnp.transpose(attn['out']['kernel'], (2, 3, 0, 1))
+            # fused_qkv_a_proj: concat(wq_a, wkv_a) along output dim
+            # wq_a:  (d_model, L, q_lora_rank)             -> (L, q_lora_rank, d_model)
+            # wkv_a: (d_model, L, kv_lora_rank+rope_dim)   -> (L, kv_lora_rank+rope_dim, d_model)
+            # fused: (L, q_lora_rank + kv_lora_rank + rope_dim, d_model)
+            # DeepSeekV3: 1536 + 512 + 64 = 2112 output dims, d_model=7168
+            wq_a = jnp.transpose(attn['wq_a']['kernel'], (1, 2, 0))
+            wkv_a = jnp.transpose(attn['wkv_a']['kernel'], (1, 2, 0))
+            fused_qkv_a = jnp.concatenate([wq_a, wkv_a], axis=1)
+
+            # out: (Heads, L, HeadDim, d_model) -> (L, d_model, Heads * HeadDim)
+            # MaxText stores out.kernel as (Heads, L, HeadDim, d_model) after
+            # reshape+reorder in convert_deepseek_family_ckpt.py (axes=(1,0,2,3)).
+            wo = jnp.transpose(attn['out']['kernel'], (1, 3, 0, 2))
             l, dm, nh, dh = wo.shape
             wo = wo.reshape(l, dm, nh * dh)
-            
+
+            # NOTE: kv_b_proj (wkv_b) is absorbed by process_weights_after_loading
+            # into W_UK_T (fp8) and W_UV (fp8) at self_attn.mla_attn.mla_attn.W_UK_T/.W_UV.
+            # Syncing those requires fp8 quantization of the split k/v submatrices, which
+            # is deferred (they keep their pathways_dummy values for now).
+
             return {
-                "q_a_proj.weight": jnp.unstack(wq_a),
+                "fused_qkv_a_proj.weight": jnp.unstack(fused_qkv_a),
                 "q_b_proj.weight": jnp.unstack(wq_b),
-                "kv_a_proj_with_mqa.weight": jnp.unstack(wkv_a),
-                "kv_b_proj.weight": jnp.unstack(wkv_b),
                 "o_proj.weight": jnp.unstack(wo),
                 "q_a_layernorm.weight": jnp.unstack(q_norm),
                 "kv_a_layernorm.weight": jnp.unstack(kv_norm),
@@ -883,8 +895,19 @@ class DeepSeekV3ToVLLMConverter:
         gate_layers = _process_gate(routed_moe['gate']['kernel'])
         _expert_2d = jax.sharding.NamedSharding(
             self.mesh, jax.sharding.PartitionSpec('model', None))
+        # Gate bias: (L, E) after unstack -> (E,) per layer.
+        # MaxText stores gate bias as (E, L), so transpose first.
+        gate_has_bias = 'bias' in routed_moe['gate']
+        if gate_has_bias:
+            @jax.jit
+            def _process_gate_bias(gate_bias):
+                # gate_bias: (E, L) -> (L, E)
+                return jnp.unstack(jnp.transpose(gate_bias, (1, 0)))
+            gate_bias_layers = _process_gate_bias(routed_moe['gate']['bias'])
         for i, layer_idx in enumerate(layer_indices):
             self.vllm_state[f"{prefix}.{layer_idx}.mlp.gate.weight"] = jax.device_put(gate_layers[i], _expert_2d)
+            if gate_has_bias:
+                self.vllm_state[f"{prefix}.{layer_idx}.mlp.gate.e_score_correction_bias"] = jax.device_put(gate_bias_layers[i], _expert_2d)
 
         logging.info("_convert_moe: routed experts...")
 
@@ -903,7 +926,7 @@ class DeepSeekV3ToVLLMConverter:
         _expert_3d = jax.sharding.NamedSharding(
             self.mesh, jax.sharding.PartitionSpec('model', None, None))
 
-        @functools.partial(jax.jit, out_shardings=([_expert_3d], [_expert_3d]))
+        @functools.partial(jax.jit, out_shardings=((_expert_3d,), (_expert_3d,)))
         def _process_routed(wi_0, wi_1, wo):
             # wi_0: (E, L, d_model, d_inner) -> (L, E, d_inner, d_model)
             l = wi_0.shape[1]
@@ -919,8 +942,7 @@ class DeepSeekV3ToVLLMConverter:
             w0_chunks = w0.reshape(l, e, tp, chunk_size, dm)
             w1_chunks = w1.reshape(l, e, tp, chunk_size, dm)
             gate_up = jnp.stack([w0_chunks, w1_chunks], axis=3).reshape(l, e, 2 * di, dm)
-            # vLLM expects (L, E, d_model, 2*d_inner)
-            gate_up = jnp.transpose(gate_up, (0, 1, 3, 2))
+            # vLLM quantized matmul contracts on last dim of W, so keep (E, 2*d_inner, d_model)
 
             # wo: (E, L, d_inner, d_model) -> (L, E, d_model, d_inner)
             down = jnp.transpose(wo, (1, 0, 3, 2))
@@ -936,8 +958,9 @@ class DeepSeekV3ToVLLMConverter:
                 routed_moe['wo'][:, _chunk_start:_chunk_end],
             )
             for _j, _layer_idx in enumerate(list(layer_indices)[_chunk_start:_chunk_end]):
-                self.vllm_state[f"{prefix}.{_layer_idx}.mlp.experts.gate_up_proj"] = _gu[_j]
-                self.vllm_state[f"{prefix}.{_layer_idx}.mlp.experts.down_proj"] = _dn[_j]
+                # tpu-inference uses w13_weight (gate+up fused) and w2_weight (down)
+                self.vllm_state[f"{prefix}.{_layer_idx}.mlp.experts.w13_weight"] = _gu[_j]
+                self.vllm_state[f"{prefix}.{_layer_idx}.mlp.experts.w2_weight"] = _dn[_j]
 
         logging.info("_convert_moe: shared experts...")
         @jax.jit
@@ -955,8 +978,7 @@ class DeepSeekV3ToVLLMConverter:
             w0_chunks = w0.reshape(l, tp, chunk_size, dm)
             w1_chunks = w1.reshape(l, tp, chunk_size, dm)
             gate_up = jnp.stack([w0_chunks, w1_chunks], axis=2).reshape(l, 2 * ds, dm)
-            # vLLM expects (2*d_shared, d_model) -> (d_model, 2*d_shared)
-            gate_up = jnp.transpose(gate_up, (0, 2, 1))
+            # vLLM quantized matmul contracts on last dim of W, so keep (2*d_shared, d_model)
 
             # wo: (d_shared, L, d_model) -> (L, d_model, d_shared)
             down = jnp.transpose(wo, (1, 2, 0))
@@ -992,8 +1014,7 @@ class DeepSeekV3ToVLLMConverter:
             w0_chunks = w0.reshape(l, tp, chunk_size, dm)
             w1_chunks = w1.reshape(l, tp, chunk_size, dm)
             gate_up = jnp.stack([w0_chunks, w1_chunks], axis=2).reshape(l, 2 * di, dm)
-            # vLLM expects (2*d_inner, d_model) -> (d_model, 2*d_inner)
-            gate_up = jnp.transpose(gate_up, (0, 2, 1))
+            # vLLM quantized matmul contracts on last dim of W, so keep (2*d_inner, d_model)
 
             # wo: (d_inner, L, d_model) -> (L, d_model, d_inner)
             down = jnp.transpose(wo, (1, 2, 0))
@@ -1090,6 +1111,18 @@ def main():
   sharding_strategy = {"enable_dp_attention": True}
   if _ROLLOUT_EP.value > 1:
     sharding_strategy["expert_parallelism"] = _ROLLOUT_EP.value
+
+  # Force the vLLM PyTorch model backend (not the JAX/flax_nnx model).
+  # The JAX model returns a nested nnx.State which is incompatible with the flat
+  # dict key access used in the weight sync loop below.  The vLLM backend returns
+  # jax_view(named_parameters()) — a flat dict with string keys — which is what
+  # we expect.  This is also the production path (runai_streamer always resolves
+  # to "vllm" because DeepseekV3ForCausalLM has no WeightLoader).
+  # Setting the env var before first access of envs.MODEL_IMPL_TYPE is safe
+  # because tpu_inference.envs uses lazy __getattr__ + functools.cache.
+  os.environ.setdefault('MODEL_IMPL_TYPE', 'vllm')
+  print(f"[KEY_DUMP] MODEL_IMPL_TYPE forced to: {os.environ.get('MODEL_IMPL_TYPE')}", flush=True)
+
   llm = LLM(
     vllm_model_arg,
     tokenizer=vllm_tokenizer_arg,
@@ -1114,6 +1147,22 @@ def main():
   print("\n" + "="*80)
   llm_state = llm.llm_engine.model_executor.driver_worker.model_runner.state
   # save_dict_to_file(llm_state, "llm_state_shapes.txt")
+
+  # Print llm_state keys immediately — before weight sync or generation — so
+  # they appear even if the process OOMs later. Use print() not logging.info()
+  # because vLLM resets the root logger level to WARNING after initialization.
+  print(f"[KEY_DUMP] llm_state type: {type(llm_state)}", flush=True)
+  _llm_state_keys = list(llm_state.keys())
+  print(f"[KEY_DUMP] llm_state has {len(_llm_state_keys)} keys; first 10: {_llm_state_keys[:10]}", flush=True)
+  print(f"[KEY_DUMP] ALL llm_state keys for layers.0: {sorted([k for k in _llm_state_keys if 'layers.0.' in k])}", flush=True)
+  print(f"[KEY_DUMP] ALL llm_state keys for layers.3: {sorted([k for k in _llm_state_keys if 'layers.3.' in k])}", flush=True)
+  # Also try flat_state() in case llm_state is a nested nnx.State
+  if hasattr(llm_state, 'flat_state'):
+    _flat = list(llm_state.flat_state())
+    _flat_keys = ['.'.join(str(k) for k in path) for path, _ in _flat]
+    print(f"[KEY_DUMP] flat_state has {len(_flat_keys)} entries; first 10: {_flat_keys[:10]}", flush=True)
+    print(f"[KEY_DUMP] flat_state keys for layers.0: {sorted([k for k in _flat_keys if 'layers.0.' in k])}", flush=True)
+    print(f"[KEY_DUMP] flat_state keys for layers.3: {sorted([k for k in _flat_keys if 'layers.3.' in k])}", flush=True)
 
   if not _RUN_VLLM_ONLY.value:
     # Detect once whether MaxText and vLLM meshes share the same physical
@@ -1143,6 +1192,9 @@ def main():
       for key, weight in vllm_state.items():
         # Unwrap NNX Param → plain jax.Array; plain arrays pass through unchanged.
         weight_array = weight.value if hasattr(weight, 'value') else weight
+        if key not in llm_state:
+          logging.warning("Key missing from llm_state: %s (skipping)", key)
+          continue
         dst_sharding = llm_state[key].sharding
         # print(f"Assigning {key}: src shape={weight_array.shape}, src sharding={weight_array.sharding}; dst shape={llm_state[key].shape}, dst sharding={dst_sharding}")
         llm_state[key] = _get_reshard_fn(dst_sharding)(weight_array)
