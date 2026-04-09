@@ -61,9 +61,15 @@ def silent_worker_init():
   os.environ["TPU_VISIBLE_DEVICES"] = ""
   os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
   os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
-  # Quiet TF init noise in workers.
-  os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
-  os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
+  # Quiet TF / TPU log noise in workers. Override unconditionally — the
+  # parent trainer process often sets these to 0 for its own debugging,
+  # and `setdefault` would inherit that loud value into every spawned
+  # grader worker. We want the workers silent regardless.
+  os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+  os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
+  os.environ["TPU_MIN_LOG_LEVEL"] = "3"
+  os.environ["TPU_STDERR_LOG_LEVEL"] = "3"
+  os.environ["GRPC_VERBOSITY"] = "ERROR"
   try:
     # Eagerly import the heavy grader stack so all subsequent
     # `_verify_math_worker` calls in this worker are fast.
