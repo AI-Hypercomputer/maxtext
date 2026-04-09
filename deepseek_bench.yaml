@@ -4,7 +4,7 @@ metadata:
   annotations:
     jobset.sigs.k8s.io/hack: "true"
   labels: {}
-  name: mohitkhatwani-dsv3-ax # Change to your favorite run name (please use your ldap)
+  name: mohit-dsv3-dummmy # Change to your favorite run name (please use your ldap)
   namespace: default
 spec:
   coordinator:
@@ -35,7 +35,7 @@ spec:
           spec:
             containers:
             - name: jax-tpu
-              image: gcr.io/tpu-prod-env-multipod/mohit-dsv3-build:20260406
+              image: gcr.io/tpu-prod-env-multipod/mohit-dsv3-build:20260408
               imagePullPolicy: Always
               securityContext:
                 privileged: true
@@ -68,7 +68,9 @@ spec:
 
                   (
                     pip show jax;
-                    pip show libtpu;
+                    pip show jaxlib;
+                    pip show tpu-inference; 
+                    pip show vllm;
                     MODEL_IMPL_TYPE=vllm NEW_MODEL_DESIGN=True \
                     python3 src/maxtext/integration/tunix/weight_mapping/bench_weight_sync.py \
                     --model_name=deepseek3-671b \
@@ -80,7 +82,8 @@ spec:
                     --rollout_tensor_parallelism=1 \
                     --rollout_expert_parallelism=128 \
                     --run_vllm_only=True \
-                    --model_loader_extra_config='{"memory_limit":5368709120}'
+                    --load_format=pathways_dummy \
+                    --model_loader_extra_config='{"memory_limit":10737418240}'
                   ) & PID=$!
 
                   while kill -0 $PID 2>/dev/null; do
@@ -99,6 +102,8 @@ spec:
                     fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
               - name: JAX_PLATFORMS
                 value: proxy,cpu
+              - name: MOE_REQUANTIZE_WEIGHT_DTYPE
+                value: "bfloat16"
               - name: XCLOUD_ENVIRONMENT
                 value: GCP
               - name: JAX_BACKEND_TARGET
@@ -171,7 +176,7 @@ spec:
                   memory: 100G
               restartPolicy: Always
             nodeSelector:
-              cloud.google.com/gke-nodepool: cpu-np
+              cloud.google.com/gke-nodepool: m3-megamem-pool
             restartPolicy: Never
             terminationGracePeriodSeconds: 300
             volumes:
@@ -229,11 +234,6 @@ spec:
               image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/wenxindong/unsanitized_server:latest
               imagePullPolicy: Always
               restartPolicy: OnFailure
-              restartPolicyRules:
-              - action: RestartAllContainers
-                exitCodes:
-                  operator: NotIn
-                  values: [0]
               args:
               - --server_port=29005
               - --resource_manager_address=$(PATHWAYS_HEAD):29001

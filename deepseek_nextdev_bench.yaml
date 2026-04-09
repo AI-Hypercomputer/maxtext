@@ -1,7 +1,7 @@
 apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
 metadata:
-  name: mohit-dsv3
+  name: mohit-dsv3-dummy
   labels:
     kueue.x-k8s.io/queue-name: multislice-queue  # Name of the LocalQueue
     xpk.google.com/workload: mohit-dsv3
@@ -40,6 +40,8 @@ spec:
                 - --resource_manager_address=$(PATHWAYS_HEAD):29001
                 - --gcs_scratch_location=gs://cloud-pathways-staging/tmp
                 env:
+                - name: LIBTPU_INIT_ARGS
+                  value: "--xla_tpu_dvfs_p_state=7 --xla_tpu_scoped_vmem_limit_kib=65536 --xla_tpu_num_sparse_cores_for_gather_offloading=1 --xla_tpu_bf16_emission_mode=NATIVE_EMISSION --xla_tpu_enable_sparse_core_reduce_scatter_v2=true --xla_tpu_enable_sparse_core_collective_offload_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true --xla_tpu_use_tc_device_shape_on_sc=True --xla_sc_disable_megacore_partitioning=True --xla_tpu_enable_async_collective_fusion_fuse_all_gather=false --xla_enable_async_all_gather=true --xla_tpu_prefer_async_allgather_to_allreduce=true --xla_tpu_enable_sparse_core_collective_offload_all_reduce=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true --xla_tpu_enable_sparse_core_collective_offload_3d_all_gather=true --xla_tpu_use_single_sparse_core_for_all_gather_offload=true --xla_tpu_enable_concurrent_sparse_core_offloading=true --xla_tpu_enable_offloading_gather_to_sparsecore=true --xla_tpu_sparse_core_all_gather_latency_multiplier=1 --xla_tpu_sparse_core_reduce_scatter_latency_multiplier=3 --xla_tpu_enable_sparse_core_collective_aggregator=true --xla_tpu_enable_latency_hiding_layer_scheduler=true --xla_tpu_scheduler_percent_shared_memory_limit=150 --xla_tpu_enable_layer_scheduler_for_dependent_collectives=true --xla_tpu_enable_sparse_core_collective_offload_nd_reduce_scatter=true --xla_tpu_pcie_bandwidth_multiplier=0.03 --xla_tpu_enable_sparse_core_offload_queuing_in_lhs=true --xla_tpu_enable_multi_compute_overlap_in_layer_scheduler=false --xla_tpu_enable_3d_reduce_scatter_decomposer=false"
                 - name: PATHWAYS_HEAD
                   valueFrom:
                     fieldRef:
@@ -62,6 +64,8 @@ spec:
                 - --instance_count=1
                 - --instance_type=tpu7x:4x4x4
                 env:
+                - name: LIBTPU_INIT_ARGS
+                  value: "--xla_tpu_dvfs_p_state=7 --xla_tpu_scoped_vmem_limit_kib=65536 --xla_tpu_num_sparse_cores_for_gather_offloading=1 --xla_tpu_bf16_emission_mode=NATIVE_EMISSION --xla_tpu_enable_sparse_core_reduce_scatter_v2=true --xla_tpu_enable_sparse_core_collective_offload_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true --xla_tpu_use_tc_device_shape_on_sc=True --xla_sc_disable_megacore_partitioning=True --xla_tpu_enable_async_collective_fusion_fuse_all_gather=false --xla_enable_async_all_gather=true --xla_tpu_prefer_async_allgather_to_allreduce=true --xla_tpu_enable_sparse_core_collective_offload_all_reduce=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true --xla_tpu_enable_sparse_core_collective_offload_3d_all_gather=true --xla_tpu_use_single_sparse_core_for_all_gather_offload=true --xla_tpu_enable_concurrent_sparse_core_offloading=true --xla_tpu_enable_offloading_gather_to_sparsecore=true --xla_tpu_sparse_core_all_gather_latency_multiplier=1 --xla_tpu_sparse_core_reduce_scatter_latency_multiplier=3 --xla_tpu_enable_sparse_core_collective_aggregator=true --xla_tpu_enable_latency_hiding_layer_scheduler=true --xla_tpu_scheduler_percent_shared_memory_limit=150 --xla_tpu_enable_layer_scheduler_for_dependent_collectives=true --xla_tpu_enable_sparse_core_collective_offload_nd_reduce_scatter=true --xla_tpu_pcie_bandwidth_multiplier=0.03 --xla_tpu_enable_sparse_core_offload_queuing_in_lhs=true --xla_tpu_enable_multi_compute_overlap_in_layer_scheduler=false --xla_tpu_enable_3d_reduce_scatter_decomposer=false"
                 - name: REPLICATED_JOB_NAME
                   valueFrom:
                     fieldRef:
@@ -88,17 +92,17 @@ spec:
                 restartPolicy: Always
             containers:
               - name: jax-tpu
-                image: gcr.io/tpu-prod-env-multipod/mohit-dsv3-vllm:20260408
+                image: gcr.io/tpu-prod-env-multipod/mohit-dsv3-build:20260408
                 imagePullPolicy: Always
                 env:
+                - name: LIBTPU_INIT_ARGS
+                  value: "--xla_tpu_dvfs_p_state=7 --xla_tpu_scoped_vmem_limit_kib=65536 --xla_tpu_num_sparse_cores_for_gather_offloading=1 --xla_tpu_bf16_emission_mode=NATIVE_EMISSION --xla_tpu_enable_sparse_core_reduce_scatter_v2=true --xla_tpu_enable_sparse_core_collective_offload_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true --xla_tpu_use_tc_device_shape_on_sc=True --xla_sc_disable_megacore_partitioning=True --xla_tpu_enable_async_collective_fusion_fuse_all_gather=false --xla_enable_async_all_gather=true --xla_tpu_prefer_async_allgather_to_allreduce=true --xla_tpu_enable_sparse_core_collective_offload_all_reduce=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true --xla_tpu_enable_sparse_core_collective_offload_3d_all_gather=true --xla_tpu_use_single_sparse_core_for_all_gather_offload=true --xla_tpu_enable_concurrent_sparse_core_offloading=true --xla_tpu_enable_offloading_gather_to_sparsecore=true --xla_tpu_sparse_core_all_gather_latency_multiplier=1 --xla_tpu_sparse_core_reduce_scatter_latency_multiplier=3 --xla_tpu_enable_sparse_core_collective_aggregator=true --xla_tpu_enable_latency_hiding_layer_scheduler=true --xla_tpu_scheduler_percent_shared_memory_limit=150 --xla_tpu_enable_layer_scheduler_for_dependent_collectives=true --xla_tpu_enable_sparse_core_collective_offload_nd_reduce_scatter=true --xla_tpu_pcie_bandwidth_multiplier=0.03 --xla_tpu_enable_sparse_core_offload_queuing_in_lhs=true --xla_tpu_enable_multi_compute_overlap_in_layer_scheduler=false --xla_tpu_enable_3d_reduce_scatter_decomposer=false"
                 - name: PATHWAYS_HEAD
                   valueFrom:
                     fieldRef:
                       fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
                 - name: MOE_REQUANTIZE_WEIGHT_DTYPE
                   value: "bfloat16"
-                - name: VLLM_MLA_DISABLE
-                  value: "1"
                 - name: JAX_PLATFORMS
                   value: proxy,cpu
                 - name: XCLOUD_ENVIRONMENT
@@ -115,7 +119,7 @@ spec:
                   _sigterm() (kill -SIGTERM $! 2>/dev/null;);
                   trap _sigterm SIGTERM;
                   
-                  (pip show jax; pip show jaxlib; pip show libtpu; pip show tpu-inference; pip show vllm; MODEL_IMPL_TYPE=vllm NEW_MODEL_DESIGN=True         python3 src/maxtext/integration/tunix/weight_mapping/bench_weight_sync.py         --model_name=deepseek3-671b         --vllm_model_id=deepseek-ai/DeepSeek-V3         --vllm_checkpoint_path=gs://ranlihao-deepseek/model/r1         --rand_init=True         --ici_fsdp_parallelism=1         --ici_tensor_parallelism=128         --rollout_tensor_parallelism=1         --rollout_expert_parallelism=128         --run_vllm_only=True         --load_format=runai_streamer         --model_loader_extra_config='{"memory_limit":10737418240}') & PID=$!;
+                  (pip show jax; pip show jaxlib; pip show libtpu; pip show tpu-inference; pip show vllm; rm -rf /root/.cache/vllm/assets/model_streamer; MODEL_IMPL_TYPE=vllm NEW_MODEL_DESIGN=True         python3 src/maxtext/integration/tunix/weight_mapping/bench_weight_sync.py         --model_name=deepseek3-671b         --vllm_model_id=deepseek-ai/DeepSeek-V3         --vllm_checkpoint_path=gs://ranlihao-deepseek/model/r1         --rand_init=True         --ici_fsdp_parallelism=1         --ici_tensor_parallelism=128         --rollout_tensor_parallelism=1         --rollout_expert_parallelism=128         --run_vllm_only=True         --load_format=pathways_dummy         --model_loader_extra_config='{"memory_limit":10737418240}') & PID=$!;
                   while kill -0 $PID 2>/dev/null;
                       do sleep 5;
                   done;
@@ -175,6 +179,8 @@ spec:
                 - --resource_manager_address=$(PATHWAYS_HEAD):29001
                 - --gcs_scratch_location=gs://cloud-pathways-staging/tmp
                 env:
+                - name: LIBTPU_INIT_ARGS
+                  value: "--xla_tpu_dvfs_p_state=7 --xla_tpu_scoped_vmem_limit_kib=65536 --xla_tpu_num_sparse_cores_for_gather_offloading=1 --xla_tpu_bf16_emission_mode=NATIVE_EMISSION --xla_tpu_enable_sparse_core_reduce_scatter_v2=true --xla_tpu_enable_sparse_core_collective_offload_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true --xla_tpu_use_tc_device_shape_on_sc=True --xla_sc_disable_megacore_partitioning=True --xla_tpu_enable_async_collective_fusion_fuse_all_gather=false --xla_enable_async_all_gather=true --xla_tpu_prefer_async_allgather_to_allreduce=true --xla_tpu_enable_sparse_core_collective_offload_all_reduce=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true --xla_tpu_enable_sparse_core_collective_offload_3d_all_gather=true --xla_tpu_use_single_sparse_core_for_all_gather_offload=true --xla_tpu_enable_concurrent_sparse_core_offloading=true --xla_tpu_enable_offloading_gather_to_sparsecore=true --xla_tpu_sparse_core_all_gather_latency_multiplier=1 --xla_tpu_sparse_core_reduce_scatter_latency_multiplier=3 --xla_tpu_enable_sparse_core_collective_aggregator=true --xla_tpu_enable_latency_hiding_layer_scheduler=true --xla_tpu_scheduler_percent_shared_memory_limit=150 --xla_tpu_enable_layer_scheduler_for_dependent_collectives=true --xla_tpu_enable_sparse_core_collective_offload_nd_reduce_scatter=true --xla_tpu_pcie_bandwidth_multiplier=0.03 --xla_tpu_enable_sparse_core_offload_queuing_in_lhs=true --xla_tpu_enable_multi_compute_overlap_in_layer_scheduler=false --xla_tpu_enable_3d_reduce_scatter_decomposer=false"
                 - name: TPU_MIN_LOG_LEVEL
                   value: "0"
                 - name: TF_CPP_MIN_LOG_LEVEL

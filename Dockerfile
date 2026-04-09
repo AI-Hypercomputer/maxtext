@@ -10,7 +10,7 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 # 1. Clone and install tpu-inference to get the compatible vLLM version
 RUN git clone https://github.com/vllm-project/tpu-inference.git /tpu-inference && \
     cd /tpu-inference && \
-    git checkout 014ea74841449f8ee4942213c7d7269afb7e65e3 && \
+    git checkout b4c5d3d24e1bba73f58d329c32c1441ac0c03819 && \
     # Extract the LKG vLLM commit hash
     VLLM_COMMIT_HASH=$(cat .buildkite/vllm_lkg.version) && \
     echo "Using vLLM commit: ${VLLM_COMMIT_HASH}" && \
@@ -26,18 +26,20 @@ RUN git clone https://github.com/vllm-project/tpu-inference.git /tpu-inference &
     find . -name "*.o" -type f -delete && \
     find . -name "*.a" -type f -delete && \
     # Go back and install tpu-inference
-    pip install -U \
-    libtpu==0.0.39.dev20260403 \
-    -f https://storage.googleapis.com/jax-releases/libtpu_releases.html \
+    # pip install -U \
+    # libtpu==0.0.39.dev20260403 \
+    # -f https://storage.googleapis.com/jax-releases/libtpu_releases.html \
     cd /tpu-inference && \
     uv pip install --system -e . && \
-    pip install -U \
-    jax==0.10.0.dev20260403 \
-    jaxlib==0.10.0.dev20260403 \
-    libtpu==0.0.39.dev20260403 \
-    requests \
-    -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ \
-    -f https://storage.googleapis.com/jax-releases/libtpu_releases.html \
+    pip install -U jax==0.9.1 && \
+    pip install -U jaxlib==0.9.1 && \
+    # pip install -U \
+    # jax==0.10.0.dev20260403 \
+    # jaxlib==0.10.0.dev20260403 \
+    # libtpu==0.0.39.dev20260403 \
+    # requests \
+    # -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ \
+    # -f https://storage.googleapis.com/jax-releases/libtpu_releases.html \
     # Cleanup tpu-inference build artifacts
     rm -rf build/ dist/ *.egg-info/ && \
     find . -name "*.o" -type f -delete && \
@@ -51,7 +53,7 @@ COPY . /deps
 WORKDIR /deps
 
 # Install MaxText dependencies and final cleanup
-RUN uv pip install --system -e . && \
+RUN uv pip install --system -e . --no-deps && \
     rm -rf build/ dist/ *.egg-info/ && \
     uv cache clean && \
     pip cache purge && \

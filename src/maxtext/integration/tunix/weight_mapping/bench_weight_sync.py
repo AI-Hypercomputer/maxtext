@@ -1050,8 +1050,11 @@ def main():
 
   # When a GCS checkpoint path is given, vLLM loads weights from GCS via
   # runai_streamer; the HF model ID is still used for the tokenizer/config.
+  # For non-streamer formats (e.g. dummy), GCS paths are invalid so fall back
+  # to the HF model ID.
   vllm_gcs_path = _VLLM_CHECKPOINT_PATH.value
-  if vllm_gcs_path:
+  streamer_formats = ('runai_streamer', 'runai_streamer_sharded')
+  if vllm_gcs_path and _LOAD_FORMAT.value in streamer_formats:
     vllm_model_arg = vllm_gcs_path
     vllm_tokenizer_arg = _VLLM_MODEL_ID.value
     logging.info("runai_streamer: loading weights from GCS path=%s, tokenizer=%s", vllm_model_arg, vllm_tokenizer_arg)
@@ -1068,15 +1071,19 @@ def main():
     tokenizer=vllm_tokenizer_arg,
     kv_cache_dtype="fp8",
     max_model_len=16,
+    max_num_seqs=32,
+    max_num_batched_tokens=256,
     tensor_parallel_size=_ROLLOUT_TP.value,
     data_parallel_size=_ROLLOUT_DP.value,
-    gpu_memory_utilization=0.75,
+    gpu_memory_utilization=0.35,
     async_scheduling=False,
     load_format=_LOAD_FORMAT.value,
     model_loader_extra_config=model_loader_extra_config,
     enable_expert_parallel=_ROLLOUT_EP.value > 1,
     quantization=None,
-    additional_config={"sharding": {"sharding_strategy": sharding_strategy},
+    compilation_config={"compile_sizes": [16, 32, 64, 128, 256]},
+    additional_config={"compilation_sizes": [16, 32, 64, 128, 256],
+                       "sharding": {"sharding_strategy": sharding_strategy},
                        "sparse_matmul": True,
                        "replicate_attn_weights": True},
   )
