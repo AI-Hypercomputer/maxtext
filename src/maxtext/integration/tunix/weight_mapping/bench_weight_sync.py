@@ -881,39 +881,63 @@ class DeepSeekV3ToVLLMConverter:
             return jnp.unstack(jnp.transpose(gate_kernel, (1, 2, 0)))
         
         gate_layers = _process_gate(routed_moe['gate']['kernel'])
+        _expert_2d = jax.sharding.NamedSharding(
+            self.mesh, jax.sharding.PartitionSpec('model', None))
         for i, layer_idx in enumerate(layer_indices):
-            self.vllm_state[f"{prefix}.{layer_idx}.mlp.gate.weight"] = gate_layers[i]
+            self.vllm_state[f"{prefix}.{layer_idx}.mlp.gate.weight"] = jax.device_put(gate_layers[i], _expert_2d)
 
         logging.info("_convert_moe: routed experts...")
-        @jax.jit
+
+        # Process one layer at a time to avoid:
+        # 1. SparseCore int32 overflow (L=58 → 13.6B elements > int32_max)
+        # 2. Compile-time HBM OOM (L=4 → 2×56GB = 112GB > 94.75GB budget)
+        # At L=1 each all-gather buffer is 14GB (28GB total), safely within budget.
+        _ROUTED_LAYER_CHUNK = 1
+
+        # Declare the target output sharding before the jit-decorated function so
+        # XLA can fuse the all-gather (needed to transpose d_inner across chips) and
+        # the subsequent re-shard into a single collective, rather than issuing a
+        # separate jax.device_put per layer.  This keeps the device busier across
+        # the 58 sequential single-layer dispatches.
+        # 256 experts / 128 chips = 2 experts per chip on the 'model' axis.
+        _expert_3d = jax.sharding.NamedSharding(
+            self.mesh, jax.sharding.PartitionSpec('model', None, None))
+
+        @functools.partial(jax.jit, out_shardings=([_expert_3d], [_expert_3d]))
         def _process_routed(wi_0, wi_1, wo):
             # wi_0: (E, L, d_model, d_inner) -> (L, E, d_inner, d_model)
             l = wi_0.shape[1]
             e = wi_0.shape[0]
             dm = wi_0.shape[2]
             di = wi_0.shape[3]
-            
-            w0 = jnp.transpose(wi_0, (1, 0, 3, 2)) # (L, E, d_inner, d_model)
-            w1 = jnp.transpose(wi_1, (1, 0, 3, 2)) # (L, E, d_inner, d_model)
-            
-            # Interleave for TP
+
+            w0 = jnp.transpose(wi_0, (1, 0, 3, 2))  # (L, E, d_inner, d_model)
+            w1 = jnp.transpose(wi_1, (1, 0, 3, 2))  # (L, E, d_inner, d_model)
+
+            # Interleave gate/up projections for TP
             chunk_size = di // tp
             w0_chunks = w0.reshape(l, e, tp, chunk_size, dm)
             w1_chunks = w1.reshape(l, e, tp, chunk_size, dm)
             gate_up = jnp.stack([w0_chunks, w1_chunks], axis=3).reshape(l, e, 2 * di, dm)
-            # vLLM expects (E, d_model, 2*d_inner)
+            # vLLM expects (L, E, d_model, 2*d_inner)
             gate_up = jnp.transpose(gate_up, (0, 1, 3, 2))
-            
+
             # wo: (E, L, d_inner, d_model) -> (L, E, d_model, d_inner)
             down = jnp.transpose(wo, (1, 0, 3, 2))
-            
+
             return jnp.unstack(gate_up), jnp.unstack(down)
 
-        gate_up_layers, down_layers = _process_routed(routed_moe['wi_0'], routed_moe['wi_1'], routed_moe['wo'])
-        
-        for i, layer_idx in enumerate(layer_indices):
-            self.vllm_state[f"{prefix}.{layer_idx}.mlp.experts.gate_up_proj"] = gate_up_layers[i]
-            self.vllm_state[f"{prefix}.{layer_idx}.mlp.experts.down_proj"] = down_layers[i]
+        num_moe_layers = len(layer_indices)
+        for _chunk_start in range(0, num_moe_layers, _ROUTED_LAYER_CHUNK):
+            _chunk_end = min(_chunk_start + _ROUTED_LAYER_CHUNK, num_moe_layers)
+            _gu, _dn = _process_routed(
+                routed_moe['wi_0'][:, _chunk_start:_chunk_end],
+                routed_moe['wi_1'][:, _chunk_start:_chunk_end],
+                routed_moe['wo'][:, _chunk_start:_chunk_end],
+            )
+            for _j, _layer_idx in enumerate(list(layer_indices)[_chunk_start:_chunk_end]):
+                self.vllm_state[f"{prefix}.{_layer_idx}.mlp.experts.gate_up_proj"] = _gu[_j]
+                self.vllm_state[f"{prefix}.{_layer_idx}.mlp.experts.down_proj"] = _dn[_j]
 
         logging.info("_convert_moe: shared experts...")
         @jax.jit
@@ -1070,12 +1094,12 @@ def main():
     vllm_model_arg,
     tokenizer=vllm_tokenizer_arg,
     kv_cache_dtype="fp8",
-    max_model_len=16,
+    max_model_len=32,
     max_num_seqs=32,
     max_num_batched_tokens=256,
     tensor_parallel_size=_ROLLOUT_TP.value,
     data_parallel_size=_ROLLOUT_DP.value,
-    gpu_memory_utilization=0.35,
+    gpu_memory_utilization=0.85,
     async_scheduling=False,
     load_format=_LOAD_FORMAT.value,
     model_loader_extra_config=model_loader_extra_config,
@@ -1130,7 +1154,7 @@ def main():
       jax.effects_barrier()  # wait for all on-device reshards to finish
 
 
-  sampling_params = SamplingParams(temperature=0.0, max_tokens=10)
+  sampling_params = SamplingParams(temperature=0.0, max_tokens=16)
   print("\n" + "="*80)
   print("Generation test after weight transfer:")
   with timer("Generation"):
