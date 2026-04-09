@@ -35,7 +35,8 @@ Training:
     eval_interval=-1 steps=10 profiler=xplane weight_dtype=bfloat16
 """
 
-from typing import Sequence
+from collections import defaultdict
+from typing import Sequence, Dict
 
 from absl import app
 import os
@@ -47,6 +48,8 @@ from flax.linen import partitioning as nn_partitioning
 
 from orbax import checkpoint as ocp
 
+from tunix.perf.experimental import constants as perf_constants
+from tunix.perf.experimental import tracer as perf_tracer_lib
 from tunix.sft import metrics_logger, peft_trainer, profiler
 
 from maxtext.configs import pyconfig
@@ -66,6 +69,34 @@ from maxtext.utils import max_utils
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
+
+
+class SFTPerfTracer(perf_tracer_lib.PerfTracer):
+  """Custom PerfTracer for SFT that aggregates step durations and supports clearing."""
+
+  def export(self) -> Dict[str, float]:
+    """Aggregates durations of all PEFT_TRAIN spans in the tracer."""
+    # pylint: disable=protected-access
+    timelines = self._get_timeline_snapshots()
+    micro_batch_durations = defaultdict(float)
+
+    for timeline in timelines.values():
+      for span in timeline.spans.values():
+        if span.name == perf_constants.PEFT_TRAIN:
+          micro = span.tags.get(perf_constants.MICRO_BATCH, 0)
+          micro_batch_durations[micro] = max(micro_batch_durations[micro], span.duration)
+
+    total_duration = sum(micro_batch_durations.values())
+    return {"step_time": total_duration}
+
+  def clear(self):
+    """Safely clears spans from all timelines in the tracer."""
+    # pylint: disable=protected-access
+    with self._timelines_lock:
+      for tl in self._host_timelines.values():
+        tl.spans.clear()
+      for tl in self._device_timelines.values():
+        tl.spans.clear()
 
 
 def get_tunix_config(mt_config):
@@ -158,10 +189,14 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
       )
 
   with maybe_record_goodput(goodput_recorder, GoodputEvent.TRAINING_PREPARATION):
-    training_hooks = hooks.SFTTrainingHooks(mt_config, mesh, learning_rate_schedule, goodput_recorder)
+    # Initialize the Tunix performance tracer to be able to get step_time metrics in `training_hooks.on_train_step_end()`.
+    perf_tracer_v2 = SFTPerfTracer(devices=mesh.devices)
+    training_hooks = hooks.SFTTrainingHooks(
+        mt_config, mesh, learning_rate_schedule, goodput_recorder, perf_tracer_v2=perf_tracer_v2
+    )
     data_hooks = hooks.SFTDataHooks(mt_config, mesh, goodput_recorder)
 
-    trainer = peft_trainer.PeftTrainer(model, optimizer, tunix_config)
+    trainer = peft_trainer.PeftTrainer(model, optimizer, tunix_config, perf_tracer_v2=perf_tracer_v2)
     trainer.with_training_hooks(training_hooks)
     trainer.with_data_hooks(data_hooks)
     trainer = use_maxtext_loss_function(trainer, mt_config)

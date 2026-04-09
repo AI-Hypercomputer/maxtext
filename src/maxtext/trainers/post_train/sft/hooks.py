@@ -26,6 +26,7 @@ else:
 
 import jax
 import jax.numpy as jnp
+from jax.typing import ArrayLike
 
 from flax import nnx
 
@@ -46,7 +47,7 @@ from maxtext.utils import sharding
 class SFTTrainingHooks(TrainingHooks):
   """Training hooks for SFT."""
 
-  def __init__(self, config, mesh, learning_rate_schedule, goodput_recorder):
+  def __init__(self, config, mesh, learning_rate_schedule, goodput_recorder, perf_tracer_v2=None):
     self.config = config
     self.mesh = mesh
     self.metric_logger = MetricLogger(self.config, learning_rate_schedule)
@@ -54,6 +55,7 @@ class SFTTrainingHooks(TrainingHooks):
     self.metadata = {}
     self.train_metadata = defaultdict(float)
     self.eval_metadata = defaultdict(float)
+    self.perf_tracer_v2 = perf_tracer_v2
 
   @override
   def on_train_start(self, train_ctx: peft_trainer.PeftTrainer):
@@ -107,9 +109,9 @@ class SFTTrainingHooks(TrainingHooks):
   def on_train_step_end(
       self,
       train_ctx: peft_trainer.PeftTrainer,
-      train_step: int,
-      train_loss: float,
-      step_time: float,
+      train_step: int | None,
+      train_loss: ArrayLike | None,
+      step_time: float | None,
   ):
     """Called at the end of training step.
     This hook is called by Tunix after the step counter has been incremented for logging purposes.
@@ -117,6 +119,8 @@ class SFTTrainingHooks(TrainingHooks):
     However, we will use the current `train_step` value to record metrics in this hook to be
     consistent with Tunix's metric logging convention.
     """
+
+    assert train_step is not None
 
     assert train_step - 1 in self.train_metadata, (
         "SFTTrainingHooks.on_train_step_start() must be called before" " SFTTrainingHooks.on_train_step_end()"
@@ -131,8 +135,17 @@ class SFTTrainingHooks(TrainingHooks):
             "learning/total_weights": self.train_metadata[train_step - 1]["total_weights"],
         }
     }
-    self.metric_logger.record_train_metrics(metrics, train_step, step_time)
-    self.metric_logger.write_metrics(metrics, train_step)
+
+    if self.perf_tracer_v2:
+      self.perf_tracer_v2.synchronize()
+      step_time = self.perf_tracer_v2.export()["step_time"]
+      # Safety fallback because MetricLogger divides by step_time
+      self.perf_tracer_v2.clear()
+
+    if step_time > 1e-6:
+      # Avoid division by zero when step_time is the default value of 0.0.
+      self.metric_logger.record_train_metrics(metrics, train_step, step_time)
+      self.metric_logger.write_metrics(metrics, train_step)
     del self.train_metadata[train_step - 1]
 
   @override
