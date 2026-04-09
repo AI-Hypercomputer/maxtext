@@ -66,7 +66,7 @@ xpk workload create-pathways  --workload {{ metadata_name }} \\
 --project=$PROJECT \\
 --zone=$ZONE \\
 --num-slices={{ num_slices }}  \\
---priority=high \\
+--priority=very-high \\
 --custom-pathways-worker-args="--xprof_max_trace_buffers=16384" \\
 --command "${command}"
 """
@@ -127,11 +127,12 @@ if __name__ == "__main__":
     extra_config = ""
     number_of_chips = 64
     batch_size = args.trainer_chips * 2
-    ici_fsdp_parallelism = batch_size
-    if ici_fsdp_parallelism >= 64:
-        ici_tensor_parallelism = ici_fsdp_parallelism // 64
+    if args.trainer_chips >= 64:
+        ici_tensor_parallelism = 2
         ici_fsdp_parallelism = 64
+        assert args.trainer_chips % 64 == 0, "trainer_chips must be a multiple of 64 when using multiple slices"
     else:
+        ici_fsdp_parallelism = -1
         ici_tensor_parallelism = 1
     rollout_data_parallelism = args.sampler_replicas
     sampler_chips = args.number_of_sampler_chips_per_replica * args.sampler_replicas

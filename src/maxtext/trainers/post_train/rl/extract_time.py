@@ -118,7 +118,9 @@ def get_reshard_data(args):
         f'resource.labels.cluster_name="{args.cluster_name}" '
         f'resource.labels.namespace_name="default" '
         f'resource.labels.pod_name:"{args.pod_name}" '
-        f'severity>=DEFAULT'
+        f'severity>=DEFAULT '
+        f'timestamp >= "{start_time}" '
+        f'resource.labels.container_name="jax-tpu"'
     )
     log_link = f"https://console.cloud.google.com/logs/query;query={urllib.parse.quote(log_query)}?project={args.project_name}"
 

@@ -56,7 +56,7 @@ python3 ~/Documents/xpk/run.py workload create-pathways  --workload {{ metadata_
 --project=$PROJECT \\
 --zone=$ZONE \\
 --num-slices=1  \\
---priority=high \\
+--priority=very-high \\
 --custom-pathways-worker-args="--xprof_max_trace_buffers=16384" \\
 --command "${command}"
 """
