@@ -14,21 +14,20 @@
 
 """ Unit tests for all optimizers. """
 import re
-import unittest
 from unittest.mock import patch
+from absl.testing import absltest
 import jax
 import optax
 import jax.numpy as jnp
 
 import pytest
+import types
+
 from absl.testing import parameterized
 from optax.contrib import MuonDimensionNumbers as mdn
 
-from maxtext.configs import pyconfig
 from maxtext.optimizers import optimizers
-from maxtext.utils import maxtext_utils
 from maxtext.utils.muon_utils import get_model_mdn
-from tests.utils.test_helpers import get_test_config_path
 from typing import NamedTuple
 
 
@@ -253,16 +252,14 @@ class AdamWMaskTest(parameterized.TestCase):
   def test_get_adamw_mask_with_empty_mask(self):
     """Directly test the get_adamw_mask function with empty list"""
     # Case 1: No mask in config (empty list)
-    argv = ["", get_test_config_path(), "run_name=test", "adamw_mask=[]"]
-    config = pyconfig.initialize(argv)
+    config = types.SimpleNamespace(adamw_mask=[])
     mask_fn = optimizers.get_adamw_mask(config)
     self.assertIsNone(mask_fn)
 
   def test_get_adamw_mask_with_valid_mask(self):
     """Directly test the get_adamw_mask function with valid mask"""
     # Case 2: Mask in config
-    argv = ["", get_test_config_path(), "run_name=test", "adamw_mask=['bias', '.*norm', '.*ln.*']"]
-    config = pyconfig.initialize(argv)
+    config = types.SimpleNamespace(adamw_mask=["bias", ".*norm", ".*ln.*"])
     mask_fn = optimizers.get_adamw_mask(config)
     self.assertTrue(callable(mask_fn))
 
@@ -276,8 +273,7 @@ class AdamWMaskTest(parameterized.TestCase):
   def test_get_adamw_mask_with_invalid_mask(self):
     """Test that an invalid regex in the mask config raises an error when used"""
     # Create a config with an invalid regex (unbalanced bracket)
-    argv = ["", get_test_config_path(), "run_name=test", "adamw_mask=['[']"]
-    config = pyconfig.initialize(argv)
+    config = types.SimpleNamespace(adamw_mask=["["])
 
     # Applying the mask should raise re.error due to the invalid regex
     with self.assertRaises(re.error):
@@ -290,8 +286,7 @@ class AdamWMaskTest(parameterized.TestCase):
       kernel: jax.Array
       bias: jax.Array
 
-    argv = ["", get_test_config_path(), "run_name=test", "adamw_mask=['bias']"]
-    config = pyconfig.initialize(argv)
+    config = types.SimpleNamespace(adamw_mask=["bias"])
     mask_fn = optimizers.get_adamw_mask(config)
 
     params = MyParams(kernel=jax.numpy.ones((2, 2)), bias=jax.numpy.zeros((2,)))
@@ -301,23 +296,25 @@ class AdamWMaskTest(parameterized.TestCase):
     self.assertFalse(mask.bias)
 
   @parameterized.named_parameters(
-      ("adamw", "adamw", "maxtext.optimizers.optimizers.optax.adamw"),
-      ("adam_pax", "adam_pax", "maxtext.optimizers.optimizers.adam_pax"),
+      ("adamw", "adamw", optimizers.optax, "adamw"),
+      ("adam_pax", "adam_pax", optimizers, "adam_pax"),
   )
-  def test_optimizer_with_mask(self, opt_type, mock_path):
+  def test_optimizer_with_mask(self, opt_type, patch_target, patch_attr):
     """Test that optimizer receives the mask function from config and it works as expected"""
     # Create a config with a mask list including regex
-    argv = [
-        "",
-        get_test_config_path(),
-        "run_name=test",
-        "adamw_mask=['bias', 'layer_norm', 'layer1/.*kernel']",
-        f"opt_type={opt_type}",
-    ]
-    config = pyconfig.initialize(argv)
-    learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
+    config = types.SimpleNamespace(
+        opt_type=opt_type,
+        adam_b1=0.9,
+        adam_b2=0.99,
+        adam_eps=1e-8,
+        adam_eps_root=0.0,
+        adam_weight_decay=0.1,
+        mu_dtype="float32",
+        adamw_mask=["bias", "layer_norm", "layer1/.*kernel"],
+    )
+    learning_rate_schedule = optax.constant_schedule(0.1)
 
-    with patch(mock_path) as mock_opt:
+    with patch.object(patch_target, patch_attr) as mock_opt:
       # Call get_optimizer
       optimizers.get_optimizer(config, learning_rate_schedule)
 
@@ -345,23 +342,41 @@ class AdamWMaskTest(parameterized.TestCase):
       self.assertTrue(mask["layer3"][1])
 
   @parameterized.named_parameters(
-      ("adamw", "adamw", "maxtext.optimizers.optimizers.optax.adamw"),
-      ("adam_pax", "adam_pax", "maxtext.optimizers.optimizers.adam_pax"),
+      ("adamw", "adamw"),
+      ("adam_pax", "adam_pax"),
   )
-  def test_optimizer_without_mask(self, opt_type, mock_path):
+  def test_optimizer_without_mask(self, opt_type):
     """Test that optimizer receives None for mask when config is empty"""
-    argv = ["", get_test_config_path(), "run_name=test", f"opt_type={opt_type}"]
-    config = pyconfig.initialize(argv)
-    learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
+    config = types.SimpleNamespace(
+        opt_type=opt_type,
+        adam_b1=0.9,
+        adam_b2=0.99,
+        adam_eps=1e-8,
+        adam_eps_root=0.0,
+        adam_weight_decay=0.1,
+        mu_dtype="float32",
+        adamw_mask=[],
+    )
+    learning_rate_schedule = optax.constant_schedule(0.1)
 
-    with patch(mock_path) as mock_opt:
-      # Call get_optimizer
-      optimizers.get_optimizer(config, learning_rate_schedule)
+    if opt_type == "adamw":
+      with patch.object(optimizers.optax, "adamw") as mock_opt:
+        # Call get_optimizer
+        optimizers.get_optimizer(config, learning_rate_schedule)
 
-      # Check that optimizer was called with mask=None
-      mock_opt.assert_called_once()
-      _, kwargs = mock_opt.call_args
-      self.assertIsNone(kwargs["mask"])
+        # Check that optimizer was called with mask=None
+        mock_opt.assert_called_once()
+        _, kwargs = mock_opt.call_args
+        self.assertIsNone(kwargs["mask"])
+    elif opt_type == "adam_pax":
+      with patch.object(optimizers, "adam_pax") as mock_opt:
+        # Call get_optimizer
+        optimizers.get_optimizer(config, learning_rate_schedule)
+
+        # Check that optimizer was called with mask=None
+        mock_opt.assert_called_once()
+        _, kwargs = mock_opt.call_args
+        self.assertIsNone(kwargs["mask"])
 
 
 class TrainableParametersMaskTest(parameterized.TestCase):
@@ -369,13 +384,16 @@ class TrainableParametersMaskTest(parameterized.TestCase):
 
   def test_get_optimizer_with_trainable_mask(self):
     """Test get_optimizer with a valid trainable_parameters_mask."""
-    argv = [
-        "",
-        get_test_config_path(),
-        "run_name=test_with_trainable_mask",
-        "trainable_parameters_mask=['.*indexer.*', 'layer_norm']",
-    ]
-    config = pyconfig.initialize(argv)
+    config = types.SimpleNamespace(
+        trainable_parameters_mask=[".*indexer.*", "layer_norm"],
+        opt_type="adamw",
+        adam_b1=0.9,
+        adam_b2=0.99,
+        adam_eps=1e-8,
+        adam_eps_root=0.0,
+        adam_weight_decay=0.1,
+        mu_dtype="float32",
+    )
 
     # Use a constant learning rate > 0 to ensure non-zero updates
     def learning_rate_schedule(step):
@@ -411,8 +429,16 @@ class TrainableParametersMaskTest(parameterized.TestCase):
 
   def test_get_optimizer_without_trainable_mask(self):
     """Test get_optimizer when trainable_parameters_mask is empty."""
-    argv = ["", get_test_config_path(), "run_name=test", "trainable_parameters_mask=[]"]
-    config = pyconfig.initialize(argv)
+    config = types.SimpleNamespace(
+        trainable_parameters_mask=[],
+        opt_type="adamw",
+        adam_b1=0.9,
+        adam_b2=0.99,
+        adam_eps=1e-8,
+        adam_eps_root=0.0,
+        adam_weight_decay=0.1,
+        mu_dtype="float32",
+    )
 
     # Use a constant learning rate > 0 to ensure non-zero updates
     def learning_rate_schedule(step):
@@ -455,9 +481,21 @@ class SkipStepOnSpikesTest(parameterized.TestCase):
 
     # Step 2: count = 2. Spike!
     spike_kwargs_jnp = {k: jnp.array(v) for k, v in spike_kwargs.items()}
-    updates, opt_state = opt.update({"x": jnp.array([1.0])}, opt_state, params, **spike_kwargs_jnp)
+
+    def mock_cond(pred, true_fun, false_fun):
+      return true_fun() if pred else false_fun()
+
+    called = []
+
+    def dummy_callback(fun, *args):
+      called.append(True)
+
+    with patch.object(optimizers.jax.lax, "cond", new=mock_cond):
+      with patch.object(optimizers.jax.debug, "callback", new=dummy_callback):
+        updates, opt_state = opt.update({"x": jnp.array([1.0])}, opt_state, params, **spike_kwargs_jnp)
     self.assertTrue(jnp.all(updates["x"] == 0.0))
     self.assertTrue(opt_state["is_skipped"])
+    self.assertEqual(len(called), 1)
 
   def test_skip_step_on_loss_spike(self):
     self._run_spike_test({"loss": 100.0})
@@ -484,4 +522,4 @@ class SkipStepOnSpikesTest(parameterized.TestCase):
 
 
 if __name__ == "__main__":
-  unittest.main()
+  absltest.main()
