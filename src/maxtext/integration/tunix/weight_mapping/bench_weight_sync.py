@@ -180,7 +180,6 @@ class MaxTextToVLLMConverter:
         self.config = config
         self.mesh = mesh
         self.num_layers = config.base_num_decoder_layers
-        self.vllm_state = {}
         self.vllm_tp = self.config.rollout_tensor_parallelism
 
     # --- 1. Top-Level Entry Point ---
@@ -188,6 +187,10 @@ class MaxTextToVLLMConverter:
         """Main entry point to convert all weights."""
         logging.info(f"\n{GREEN}Starting Conversion...{RESET}")
         start_time = time.time()
+
+        # Reset per-invocation so stale arrays from a previous call are released
+        # rather than kept alive until their keys happen to be overwritten.
+        self.vllm_state = {}
 
         with timer("Convert Global Weights"):
           self._convert_global(model_state)

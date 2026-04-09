@@ -21,6 +21,7 @@ from flax import nnx
 from tunix.generate import mappings, vllm_sampler
 from tunix.generate.vllm_sampler import VllmConfig, VllmSampler
 from tunix.rl.rollout import base_rollout, vllm_rollout
+from pathwaysutils.experimental import reshard as _experimental_reshard  # pytype: disable=import-error
 
 
 def _patch_tpu_inference_group_offset():
@@ -46,7 +47,7 @@ def _patch_tpu_inference_group_offset():
   def _fixed_tensor_parallel_gmm(
       x, w1, w1_scale, w1_bias, w2, w2_scale, w2_bias,
       group_sizes, topk_argsort_revert_indices, topk_weights, *,
-      activation, topk, mesh,
+      activation, topk, mesh, **kwargs,
   ):
     data_p_spec = P(ShardingAxisName.MLP_DATA)
     # Fix: size must equal the data axis product so each shard gets 1 element.
@@ -70,6 +71,7 @@ def _patch_tpu_inference_group_offset():
             activation=activation,
             topk=topk,
             parallelism="tp",
+            **kwargs,
         ),
         mesh=mesh,
         in_specs=(
@@ -130,82 +132,49 @@ class MaxTextVllmSampler(VllmSampler):
       self._driver.llm_engine.reset_prefix_cache()
       self._driver.llm_engine.collective_rpc("delete_kv_cache")
 
+    # Perform explicit garbage collection and synchronization to free up HBM memory before loading new weights
+    gc.collect()
+    jax.clear_caches()
+    jax.effects_barrier()
+
     logging.info("MaxTextVllmSampler.update_params: starting converter.convert()...")
     vllm_state = self._converter.convert(updated_weights)
-
-    # reinitialize kv_cache
-    if self.llm is not None:
-      self.llm.collective_rpc("reinitialize_kv_cache")
-    elif self._driver is not None:
-      self._driver.llm_engine.collective_rpc("reinitialize_kv_cache")
+    jax.block_until_ready(vllm_state)
 
     logging.info("MaxTextVllmSampler.update_params: converter.convert() done, %d weights to assign", len(vllm_state))
     model_runner_state = self.transformer_state
 
-    # Priority order for weight transfer:
-    #   1. Pathways experimental_reshard (cross-mesh, cache_resharding_plans)
-    #      — only available when JAX_PLATFORMS contains "proxy".
-    #   2. jax.jit(out_shardings) — same physical devices (single-VM), fast.
-    #   3. jax.device_put          — disjoint devices (multi-host), ICI/DCN.
-    import os as _os
-    _pathways_reshard = None
-    try:
-      from pathwaysutils.experimental import reshard as _experimental_reshard  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
-      if "proxy" not in _os.getenv("JAX_PLATFORMS", ""):
-        raise EnvironmentError("Pathways proxy not active")
-      _pathways_reshard = _experimental_reshard.reshard
-      logging.info("Weight sync: using pathwaysutils experimental_reshard")
-    except (ImportError, EnvironmentError) as _e:
-      logging.info("Weight sync: pathwaysutils not available (%s), falling back", _e)
-
-    if _pathways_reshard is None:
-      # Detect whether meshes share the same physical devices (single-VM) or
-      # are disjoint (multi-host cluster partition) to choose between JIT and
-      # device_put.
-      _any_src = next(iter(vllm_state.values()))
-      _any_src_arr = _any_src.value if hasattr(_any_src, "value") else _any_src
-      _any_dst = next(iter(model_runner_state.values()))
-      _same_devices = (
-          frozenset(d.id for d in _any_src_arr.sharding.mesh.devices.flat) ==
-          frozenset(d.id for d in _any_dst.sharding.mesh.devices.flat)
-      )
-      logging.info("Weight sync: same_devices=%s (jit=%s, device_put=%s)",
-                   _same_devices, _same_devices, not _same_devices)
-    else:
-      _same_devices = None  # unused in Pathways path
-
-    @functools.lru_cache(maxsize=None)
-    def _get_reshard_fn(dst_sharding):
-      if _pathways_reshard is not None:
-        return lambda x: _pathways_reshard(
-            x, dst_sharding, donate=False, may_alias=None,
-            cache_resharding_plans=True,
-        )
-      elif _same_devices:
-        return jax.jit(lambda x: x, out_shardings=dst_sharding)
-      else:
-        return functools.partial(jax.device_put, device=dst_sharding)
+    logging.info("Weight sync: using pathwaysutils experimental_reshard")
 
     keys = list(vllm_state.keys())
     start_time = time.time()
     for i, key in enumerate(keys):
       weight = vllm_state.pop(key)  # free immediately to avoid accumulating all weights in RAM
       weight_array = weight.value if hasattr(weight, "value") else weight  # handle both jnp arrays and ShardedDeviceArrays
-      # logging.info("MaxTextVllmSampler.update_params: device_put [%d/%d] %s shape=%s",
-      #              i + 1, len(keys), key, weight_array.shape)
+      weight_shape_matches = weight_array.shape == model_runner_state[key].shape
+      assert weight_shape_matches, f"Shape mismatch for {key}: converter produced {weight_array.shape}, expected {model_runner_state[key].shape}"
+      logging.info(f"{key}: mt {weight_array.shape} -> vllm {model_runner_state[key].shape}: {weight_shape_matches}")
       target_sharding = model_runner_state[key].sharding
-      model_runner_state[key] = _get_reshard_fn(target_sharding)(weight_array)
-      # host_array = np.asarray(weight_array)
+      model_runner_state[key] = _experimental_reshard.reshard(
+          weight_array, target_sharding, donate=True, may_alias=None,
+          cache_resharding_plans=True,
+      )
       del weight, weight_array  # release TPU buffer before pushing back to device
-      # del host_array
       # Periodically flush async ops and GC to prevent host RAM accumulation.
       if i % 16 == 15:
         jax.effects_barrier()
         gc.collect()
     jax.effects_barrier()
+    gc.collect()
     end_time = time.time()
     logging.info("MaxTextVllmSampler.update_params: all weights assigned in %.4f seconds", end_time - start_time)
     
+    # reinitialize kv_cache
+    if self.llm is not None:
+      self.llm.collective_rpc("reinitialize_kv_cache")
+    elif self._driver is not None:
+      self._driver.llm_engine.collective_rpc("reinitialize_kv_cache")
+
 
 
 class MaxTextVllmRollout(vllm_rollout.VllmRollout):
