@@ -257,3 +257,112 @@ numeric-ratio fallback.
 Set `math_verify_use_pool: False` in
 `src/maxtext/configs/post_train/rl.yml` (or any RL config). No code change
 required.
+
+## Followup: cold-start timeout storm and the persistent-pool fix
+
+### Symptom
+
+After the initial port, the first real run produced log spam like:
+
+```
+math_verify_pool timed out for golds: ['\\boxed{\\frac{\\sqrt{41}}{2}}']
+                                  preds: ['\\boxed{\\pm\\frac{\\sqrt{41}}{2}}']
+math_verify_pool timed out for golds: ['\\boxed{\\frac{\\sqrt{41}}{2}}']
+                                  preds: ['\\boxed{-1000000}']
+math_verify_pool timed out for golds: ['\\boxed{12\\sqrt{2}}']
+                                  preds: ['\\boxed{24}']
+...
+```
+
+— **every** item timing out at exactly 15 s, even trivially fast inputs like
+`\boxed{24}` that sympy grades in microseconds. Alongside that, the trainer
+log was repeating
+
+```
+tensorflow/core/util/port.cc:153] oneDNN custom operations are on...
+```
+
+dozens of times per batch.
+
+### Root cause
+
+Both symptoms had the same cause: **the pool was being created and torn down
+on every `check_numbers` call**, and `math_verify`'s import chain
+(`math_verify` → `sympy` → `latex2sympy2` → `antlr4` → transitively `tensorflow`)
+takes 5–10 seconds per worker process to load on a busy TPU host. With
+`spawn`, each worker starts with an empty interpreter and re-imports
+everything from scratch.
+
+So on every batch:
+
+1. The pool spawned `cpu_count()` (often 96+) Python interpreters.
+2. Each interpreter raced to import the entire math_verify stack at once,
+   thrashing memory.
+3. None of them finished initializing before the per-item 15 s timeout
+   started ticking on `job.get(...)`.
+4. Every job timed out → every score was 0.0 → the pool was destroyed →
+   the next batch repeated the whole thing.
+5. Each fresh worker also re-printed TensorFlow's `oneDNN` init message,
+   producing the log spam.
+
+The original 15 s timeout was sized for *steady-state grading* (where
+each call should be sub-millisecond), not for absorbing repeated cold
+starts of the entire grader stack.
+
+### Fix
+
+Three changes to
+[math_verify_pool.py](../src/maxtext/trainers/post_train/rl/math_verify_pool.py),
+all in the same file — no caller changes:
+
+1. **Persistent module-level pool.** Added `_POOL` / `_POOL_NUM_PROCS` /
+   `_get_pool()` / `_shutdown_pool()`. The pool is created lazily on the
+   first `math_verify_pool` call and reused across all subsequent calls.
+   Registered `atexit.register(_shutdown_pool)` so it cleans up at process
+   exit. The cold-start cost is paid exactly **once per training run**,
+   not per batch.
+
+2. **Eager `math_verify` import inside `silent_worker_init`.** The
+   initializer now imports `math_verify`, `parse`, `verify`,
+   `ExprExtractionConfig`, `LatexExtractionConfig` immediately after
+   setting the env vars (which still must come first so JAX/XLA never
+   touch the accelerator). This moves the heavy import out of the timed
+   `job.get` window — by the time the first real grading task is
+   submitted, every worker is already warm. Also added
+   `TF_CPP_MIN_LOG_LEVEL=3` and `TF_ENABLE_ONEDNN_OPTS=0` in the
+   initializer to silence the `oneDNN` log noise.
+
+3. **Default worker cap of 8** (`_DEFAULT_MAX_PROCS = 8`). TPU hosts
+   typically expose 96+ logical CPUs, but spawning that many Python
+   interpreters all importing the math stack simultaneously is *slower*
+   than a small pool because of memory contention. 8 is a safe default;
+   override via `tmvp_config.math_verify_num_procs` if a workload needs
+   more.
+
+4. **Rebuild-on-timeout policy.** If any item times out during a batch,
+   the pool is torn down in the `finally` block. The next call recreates
+   it. This guarantees a hung sympy worker can't poison subsequent
+   batches, while keeping the common (no-timeout) case on a warm
+   persistent pool. The cold-start cost reappears only after a real
+   sympy hang — exactly when we want fresh workers anyway.
+
+### Expected behavior after the fix
+
+| | Before fix | After fix |
+|---|---|---|
+| First batch latency | ~15 s × len(items) (everything times out) | ~5–10 s once (parallel cold start of 8 workers), then real grading |
+| Steady-state batch latency | n/a — every batch was a cold start | sub-second |
+| `oneDNN` log lines | ~96 per batch | ≤ 8 total per process |
+| Real sympy hangs | masked by cold-start timeouts | caught by the 15 s timeout, score 0.0, pool rebuilt for next batch |
+
+### Tuning knobs (already in `rl.yml` / `types.py`)
+
+- `math_verify_use_pool: True` — keep this on; the legacy
+  `ThreadPoolExecutor` path doesn't benefit from the persistent-pool fix.
+- `math_verify_timeout: 15` — only matters for (a) the very first batch's
+  cold start and (b) real sympy hangs. Bump to 30 or 60 if the first
+  batch on a particularly slow host occasionally trips it.
+- `math_verify_num_procs: null` — `null` ⇒ the new
+  `min(8, len(items), cpu_count())` default. Set explicitly only if
+  profiling shows the grader is the bottleneck and there's spare CPU
+  headroom.
