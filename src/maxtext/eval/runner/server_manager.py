@@ -33,6 +33,7 @@ def _build_app(llm: Any) -> Any:
   """Return a FastAPI app that wraps an in-process vLLM LLM instance."""
   import fastapi  # pylint: disable=import-outside-toplevel
   from vllm.sampling_params import SamplingParams  # pylint: disable=import-outside-toplevel
+  globals()["fastapi"] = fastapi
 
   app = fastapi.FastAPI()
 
@@ -195,6 +196,7 @@ class VllmServerManager:
     max_num_batched_tokens: Tokens per scheduler step (None = vLLM default).
     max_num_seqs: Max concurrent sequences (None = vLLM default).
     startup_timeout: Seconds to wait for /health to return healthy.
+    hbm_memory_utilization: Fraction of HBM reserved for KV cache.
     env: Optional environment-variable overrides.
     additional_vllm_kwargs: Extra kwargs merged into the vLLM LLM() constructor.
   """
@@ -213,6 +215,7 @@ class VllmServerManager:
       max_num_batched_tokens: int | None = None,
       max_num_seqs: int | None = None,
       startup_timeout: int = 600,
+      hbm_memory_utilization: float = 0.3,
       env: dict[str, str] | None = None,
       additional_vllm_kwargs: dict | None = None,
   ):
@@ -235,6 +238,7 @@ class VllmServerManager:
     self.max_num_batched_tokens = max_num_batched_tokens
     self.max_num_seqs = max_num_seqs
     self.startup_timeout = startup_timeout
+    self.hbm_memory_utilization = hbm_memory_utilization
     self.env = env
     self.additional_vllm_kwargs = additional_vllm_kwargs or {}
 
@@ -255,6 +259,8 @@ class VllmServerManager:
     # V1 engine architecture is otherwise preserved (tpu-inference plugin works),
     # and JAX/TPU is initialised exactly once inside LLM() in this process.
     os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    os.environ.setdefault("NEW_MODEL_DESIGN", "1")
+    os.environ.setdefault("SKIP_JAX_PRECOMPILE", "1")
 
     if self.env:
       os.environ.update(self.env)
@@ -268,6 +274,7 @@ class VllmServerManager:
         "tensor_parallel_size": ici_tp,
         "max_model_len": self.max_model_len,
         "dtype": self.dtype,
+        "gpu_memory_utilization": self.hbm_memory_utilization,
     }
     if self.max_num_batched_tokens is not None:
       vllm_kwargs["max_num_batched_tokens"] = self.max_num_batched_tokens

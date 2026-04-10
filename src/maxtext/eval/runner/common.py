@@ -65,6 +65,7 @@ def build_server_manager(cfg: dict, token: str | None) -> "VllmServerManager":
     max_num_seqs = int(max_num_seqs)
 
   expert_parallel_size = int(cfg.get("expert_parallel_size") or 1)
+  hbm_memory_utilization = float(cfg.get("hbm_memory_utilization") or 0.3)
 
   server_env = {"HF_TOKEN": token} if token else None
 
@@ -79,6 +80,7 @@ def build_server_manager(cfg: dict, token: str | None) -> "VllmServerManager":
       max_model_len=max_model_len,
       max_num_batched_tokens=max_num_batched_tokens,
       max_num_seqs=max_num_seqs,
+      hbm_memory_utilization=hbm_memory_utilization,
       env=server_env,
   )
 
@@ -118,6 +120,14 @@ def add_server_args(parser: argparse.ArgumentParser) -> None:
       default=0,
       help=(
           "Chips allocated to the expert mesh axis (EP). "
+      ),
+  )
+  parser.add_argument(
+      "--hbm_memory_utilization",
+      type=float,
+      default=0.3,
+      help=(
+          "Fraction of HBM reserved for KV cache."
       ),
   )
   parser.add_argument("--hf_token", help="HuggingFace token for gated models.")

@@ -76,22 +76,37 @@ def _map_results(raw_results: dict, tasks: list[str], task_map: dict[str, str]) 
     lm_task = task_map.get(task, task)
     task_r = results_section.get(lm_task, {})
 
-    acc = task_r.get("acc,none")
-    if acc is None:
-      acc = task_r.get("exact_match,none")
-    if acc is None:
-      acc = task_r.get("acc")
-    if acc is None:
-      acc = task_r.get("score")
+    acc = None
+    for key in (
+        "acc,none",
+        "exact_match,strict-match",
+        "exact_match,flexible-extract",
+        "exact_match,none",
+        "acc",
+        "score",
+    ):
+      if task_r.get(key) is not None:
+        acc = task_r[key]
+        break
 
-    acc_norm = task_r.get("acc_norm,none")
-    if acc_norm is None:
-      acc_norm = task_r.get("acc_norm")
+    acc_norm = None
+    for key in ("acc_norm,none", "acc_norm"):
+      if task_r.get(key) is not None:
+        acc_norm = task_r[key]
+        break
 
     if acc is not None:
       scores[f"{task}_accuracy"] = round(float(acc) * 100, 2)
     if acc_norm is not None:
       scores[f"{task}_accuracy_norm"] = round(float(acc_norm) * 100, 2)
+
+    if acc is None and task_r:
+      logger.warning(
+          "No known accuracy keys found for task '%s'. Available: %s",
+          task,
+          list(task_r.keys()),
+      )
+
   return scores
 
 
@@ -206,7 +221,10 @@ def run_harness(cfg: dict, hf_token: str | None = None) -> dict:
       benchmark="+".join(tasks),
       model_name=model_name,
       scores=scores,
-      generation_stats={f"{backend}_config": raw_results.get("config", {})},
+      generation_stats={
+          f"{backend}_config": raw_results.get("config", {}),
+          f"{backend}_results": raw_results.get("results", {}),
+      },
       config=cfg,
       results_path=results_path,
   )

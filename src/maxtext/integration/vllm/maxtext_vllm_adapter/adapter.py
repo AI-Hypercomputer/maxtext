@@ -20,12 +20,11 @@ import jax
 from flax import nnx
 import flax.linen as nn
 from jax import numpy as jnp
-from jax.sharding import AxisType, Mesh
+from jax.sharding import Mesh
 from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE
 from maxtext.utils import max_logging
-from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
 
 
@@ -99,9 +98,8 @@ class MaxTextForCausalLM(nnx.Module):
     self.cfg = vllm_config.model_config
     self.maxtext_config = generate_maxtext_config(vllm_config)
 
-    devices_array = maxtext_utils.create_device_mesh(self.maxtext_config)
-    axis_types = tuple([AxisType.Auto] * len(self.maxtext_config.mesh_axes))
-    self.mesh = Mesh(devices_array, self.maxtext_config.mesh_axes, axis_types=axis_types)
+    # Model configuration
+    self.mesh = mesh
     self.model_mode = MODEL_MODE_AUTOREGRESSIVE
     self.is_text_generation_model = True
 
