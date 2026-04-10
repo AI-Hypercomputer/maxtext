@@ -37,7 +37,7 @@ _JAX_COMPILATION_CACHE_DIR = "/tmp/jax_cache"
 # Flags
 FLAGS = flags.FLAGS
 _XPROF = flags.DEFINE_bool('xprof', False, 'xprof')
-_RAND_INIT = flags.DEFINE_bool('rand_init', False, 'Whether to use random initialization instead of loading from checkpoint, for faster testing.')  
+_RAND_INIT = flags.DEFINE_bool('rand_init', True, 'Whether to use random initialization instead of loading from checkpoint, for faster testing.')  
 
 def _setup_jax_compilation_cache():
   jax_config.update("jax_compilation_cache_dir", _JAX_COMPILATION_CACHE_DIR)
@@ -164,9 +164,8 @@ def _load_maxtext_model(base_yaml_path):
       key_proj="offload",
       value_proj="offload",
       ici_expert_parallelism=4,
-      # ici_fsdp_parallelism=2,
-      # ici_tensor_parallelism=2,
-      rollout_tensor_parallelism=4,
+      # ici_fsdp_parallelism=,
+      # ici_tensor_parallelism=,
       override_model_config="true",
       # debug_sharding="true",
       checkpoint_storage_concurrent_gb=80,
@@ -180,6 +179,7 @@ class MaxTextToVLLMConverter:
         self.config = config
         self.mesh = mesh
         self.num_layers = config.base_num_decoder_layers
+        self.vllm_state = {}
         self.vllm_tp = self.config.rollout_tensor_parallelism
 
     # --- 1. Top-Level Entry Point ---
@@ -187,10 +187,6 @@ class MaxTextToVLLMConverter:
         """Main entry point to convert all weights."""
         logging.info(f"\n{GREEN}Starting Conversion...{RESET}")
         start_time = time.time()
-
-        # Reset per-invocation so stale arrays from a previous call are released
-        # rather than kept alive until their keys happen to be overwritten.
-        self.vllm_state = {}
 
         with timer("Convert Global Weights"):
           self._convert_global(model_state)
@@ -358,25 +354,17 @@ class MaxTextToVLLMConverter:
         wi_1 = jnp.transpose(wi_1, (1, 0, 2, 3))
 
         def _fuse_single(w0, w1):
-          # [e, d_model, d_inner] -> [e, 2*padded_chunk_size*tp, d_model]
+          # [e, d_model, d_inner] -> [e, 2*d_inner, d_model]
           w0 = jnp.transpose(w0, (0, 2, 1))  # gate: [e, d_inner, d_model]
           w1 = jnp.transpose(w1, (0, 2, 1))  # up:   [e, d_inner, d_model]
           e, d_inner, d_model = w0.shape
           # Chunk-level interleave to match vLLM TP sharding:
           # layout: [gate_chunk0, up_chunk0, gate_chunk1, up_chunk1, ...]
           chunk_size = d_inner // tp
-          # Pad each TP chunk up to the next multiple of 128 for TPU GMM kernel
-          # alignment (same logic as process_w13_for_gmm in tpu_inference).
-          # e.g. d_inner=768, tp=4 → chunk=192 → padded=256; tp=8 → 96 → 128.
-          padded_chunk_size = ((chunk_size + 127) // 128) * 128
-          pad_amount = padded_chunk_size - chunk_size
           gate_chunks = w0.reshape(e, tp, chunk_size, d_model)
           up_chunks = w1.reshape(e, tp, chunk_size, d_model)
-          if pad_amount > 0:
-            gate_chunks = jnp.pad(gate_chunks, ((0, 0), (0, 0), (0, pad_amount), (0, 0)))
-            up_chunks   = jnp.pad(up_chunks,   ((0, 0), (0, 0), (0, pad_amount), (0, 0)))
           combined = jnp.stack([gate_chunks, up_chunks], axis=2)
-          return combined.reshape(e, 2 * padded_chunk_size * tp, d_model)
+          return combined.reshape(e, 2 * d_inner, d_model)
 
         return jax.vmap(_fuse_single)(wi_0, wi_1)  # -> (l, e, 2*d_inner, d_model)
 
@@ -461,55 +449,18 @@ def main():
     "Qwen/Qwen3-30B-A3B",
     max_model_len=16,
     tensor_parallel_size=4,
-    # tensor_parallel_size=4,
-    # tensor_parallel_size=2,
-    # data_parallel_size=2,
-    # enable_expert_parallel=True,
-    gpu_memory_utilization=0.65,
-    load_format="dummy",
-    async_scheduling=False,
+    gpu_memory_utilization=0.5,
+    # load_format="dummy",
   )
   print("\n" + "="*80)
   llm_state = llm.llm_engine.model_executor.driver_worker.model_runner.state
   # save_dict_to_file(llm_state, "llm_state_shapes.txt")
 
-  # Detect once whether MaxText and vLLM meshes share the same physical
-  # devices (single-VM) or are disjoint (multi-host cluster partition).
-  # Same devices → jax.jit with out_shardings lets XLA emit on-device
-  # collectives (fast, ~0.16 s for 30 B).  Disjoint devices → jax.jit
-  # raises "incompatible devices"; fall back to jax.device_put which uses
-  # ICI/DCN for the cross-host transfer without a CPU roundtrip.
-  _any_src = next(iter(vllm_state.values()))
-  _any_src_arr = _any_src.value if hasattr(_any_src, 'value') else _any_src
-  _any_dst = next(iter(llm_state.values()))
-  _same_devices = (
-      frozenset(d.id for d in _any_src_arr.sharding.mesh.devices.flat) ==
-      frozenset(d.id for d in _any_dst.sharding.mesh.devices.flat)
-  )
-  logging.info("Weight sync: same_devices=%s (jit=%s, device_put=%s)",
-               _same_devices, _same_devices, not _same_devices)
-
-  @functools.lru_cache(maxsize=None)
-  def _get_reshard_fn(dst_sharding):
-    if _same_devices:
-      return jax.jit(lambda x: x, out_shardings=dst_sharding)
-    else:
-      return functools.partial(jax.device_put, device=dst_sharding)
-
   with timer(f"Assigning {len(vllm_state)} weights to vLLM model"):
     for key, weight in vllm_state.items():
-      # Unwrap NNX Param → plain jax.Array; plain arrays pass through unchanged.
-      weight_array = weight.value if hasattr(weight, 'value') else weight
-      dst_sharding = llm_state[key].sharding
-      print(f"{key}: mt {weight_array.shape}, vllm {llm_state[key].shape}")
-      llm_state[key] = _get_reshard_fn(dst_sharding)(weight_array)
-      # array_allclose = np.allclose(
-      #     np.asarray(llm_state[key]), np.asarray(weight_array), rtol=1e-2, atol=1e-2
-      # )
-      # print(f"{key}: {array_allclose}")
-      # llm_state[key] = jax.device_put(np.asarray(weight_array), dst_sharding)
-    jax.effects_barrier()  # wait for all on-device reshards to finish
-
+      target_sharding = llm_state[key].sharding
+      print(f"{key} MT {weight.shape} to torchax {llm_state[key].shape}")
+      llm_state[key] = jax.device_put(np.asarray(weight), target_sharding)
 
   sampling_params = SamplingParams(temperature=0.0, max_tokens=10)
   print("\n" + "="*80)
