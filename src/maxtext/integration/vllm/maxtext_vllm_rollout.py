@@ -179,10 +179,10 @@ class MaxTextVllmSampler(VllmSampler):
       weight_array = weight.value if hasattr(weight, "value") else weight  # handle both jnp arrays and ShardedDeviceArrays
       weight_shape_matches = weight_array.shape == model_runner_state[key].shape
       assert weight_shape_matches, f"Shape mismatch for {key}: converter produced {weight_array.shape}, expected {model_runner_state[key].shape}"
-      logging.info(f"{key}: mt {weight_array.shape} -> vllm {model_runner_state[key].shape}: {weight_shape_matches}")
+      # logging.info(f"{key}: mt {weight_array.shape} -> vllm {model_runner_state[key].shape}: {weight_shape_matches}")
       target_sharding = model_runner_state[key].sharding
       model_runner_state[key] = _experimental_reshard.reshard(
-          weight_array, target_sharding, donate=False, may_alias=None,
+          weight_array, target_sharding, donate=True, may_alias=None,
           cache_resharding_plans=True,
       )
       del weight, weight_array  # release TPU buffer before pushing back to device

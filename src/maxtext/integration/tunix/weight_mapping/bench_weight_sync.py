@@ -203,7 +203,6 @@ class MaxTextToVLLMConverter:
         self.config = config
         self.mesh = mesh
         self.num_layers = config.base_num_decoder_layers
-        self.vllm_state = {}
         self.vllm_tp = self.config.rollout_tensor_parallelism
 
     # --- 1. Top-Level Entry Point ---
@@ -211,6 +210,7 @@ class MaxTextToVLLMConverter:
         """Main entry point to convert all weights."""
         logging.info(f"\n{GREEN}Starting Conversion...{RESET}")
         start_time = time.time()
+        self.vllm_state = {}
         _log_mem_stats("converter:start")
 
         with timer("Convert Global Weights"):
@@ -235,13 +235,9 @@ class MaxTextToVLLMConverter:
         logging.info("_convert_global: done")
                 
     def _convert_attn(self, params):
-      @jax.jit
-      def _transpose_unstack(x):
-        return jnp.unstack(jnp.transpose(x, (1, 0)))
-
       logging.info("_convert_attn: pre_self_attention_layer_norm...")
       pre_ln = params['base']['decoder']['layers']['pre_self_attention_layer_norm']['scale']
-      convert_pre_ln = _transpose_unstack(pre_ln)
+      convert_pre_ln = self._transpose_unstack(pre_ln)
       assert len(convert_pre_ln) == self.num_layers, f"Expected {self.num_layers} layers, got {len(convert_pre_ln)}"
       for i, layer in enumerate(convert_pre_ln):
         self.vllm_state.update({f'vllm_model.model.layers.{i}.input_layernorm.weight': layer})
@@ -249,18 +245,18 @@ class MaxTextToVLLMConverter:
 
       logging.info("_convert_attn: post_self_attention_layer_norm...")
       post_ln = params['base']['decoder']['layers']['post_self_attention_layer_norm']['scale']
-      converted_post_ln = _transpose_unstack(post_ln)
+      converted_post_ln = self._transpose_unstack(post_ln)
       assert len(converted_post_ln) == self.num_layers, f"Expected {self.num_layers} layers, got {len(converted_post_ln)}"
       for i, layer in enumerate(converted_post_ln):
         self.vllm_state.update({f'vllm_model.model.layers.{i}.post_attention_layernorm.weight': layer})      
-      del post_ln
+      del post_ln, converted_post_ln
 
       logging.info("_convert_attn: self_attention (qkv/o/norms)...")
       attn = params['base']['decoder']['layers']['self_attention']
       self_attn = self._to_attn(attn)
       for key, layers in self_attn.items():
         self.vllm_state.update({f'vllm_model.model.layers.{i}.{key}': layer for i, layer in enumerate(layers)})
-      del attn
+      del attn, self_attn
       logging.info("_convert_attn: done")
       gc.collect()
 
@@ -275,7 +271,7 @@ class MaxTextToVLLMConverter:
           f"{prefix}.{i}.mlp.gate.weight": w 
           for i, w in enumerate(self._to_mlp_gate(moe['gate']['kernel']))
       })
-      del moe['gate']['kernel']
+      del moe['gate']
       gc.collect()
       _log_mem_stats("converter:moe_post_gate")
 
@@ -294,27 +290,41 @@ class MaxTextToVLLMConverter:
           self.num_layers, prefix, 'mlp.experts.w13_weight'
       )
       del moe['wi_0'], moe['wi_1']
+      del moe
       logging.info("_convert_moe: done")
       gc.collect()
       _log_mem_stats("converter:moe_post_w13")
       
     def _to_final_norm(self, params):
-      self.vllm_state["vllm_model.model.norm.weight"] = params['base']['decoder']['decoder_norm']['scale']
+      # Explicit copy: avoids aliasing the actor model's buffer into vllm_state,
+      # which would cause 'Array has been deleted' if the source is ever donated.
+      self.vllm_state["vllm_model.model.norm.weight"] = jnp.array(
+          params['base']['decoder']['decoder_norm']['scale']
+      )
 
     def _to_embed_tokens(self, params):
-      self.vllm_state["vllm_model.model.embed_tokens.weight"] = params['base']['token_embedder']['embedding']
+      # Explicit copy: avoids aliasing the actor model's buffer into vllm_state.
+      self.vllm_state["vllm_model.model.embed_tokens.weight"] = jnp.array(
+          params['base']['token_embedder']['embedding']
+      )
 
     def _to_lm_head(self, params):
-      @jax.jit
-      def _transpose(x):
-        return jnp.transpose(x, (1, 0))
-      self.vllm_state["vllm_model.lm_head.weight"] = _transpose(
+      self.vllm_state["vllm_model.lm_head.weight"] = self._transpose_2d(
           params['base']['decoder']['logits_dense']['kernel']
       )
       
     def _to_attn(self, attn: PyTree) -> dict[str, jax.Array]:
       tp = min(self.vllm_tp, self.config.base_num_kv_heads)  # Don't TP-shard more heads than exist in the model.
+      _compute = self._make_attn_compute(tp)
+      return _compute(attn)
 
+    @staticmethod
+    @functools.lru_cache(maxsize=8)
+    def _make_attn_compute(tp: int):
+      """Return a JIT-compiled attn converter for a given TP degree.
+
+      Cached by tp so the same XLA executable is reused across all steps.
+      """
       @jax.jit
       def _compute(attn):
         # (d_model, l, h, d) -> (l, d_model, h, d)
@@ -351,24 +361,18 @@ class MaxTextToVLLMConverter:
             "self_attn.k_norm.weight": jnp.unstack(k_norm)
         }
 
-      return _compute(attn)
+      return _compute
     
     def _to_mlp_gate(self, param):
       # param: [d_model, l, total_e] -> [l, total_e, d_model]
       # shard_map removed: plain transpose lets GSPMD propagate sharding
       # without requiring param and mesh to be on the same device set.
-      @jax.jit
-      def _transpose(param):
-        return jnp.transpose(param, (1, 2, 0))
-      param = _transpose(param)
+      param = self._transpose_gate(param)
       return self._unstack_layer(param)
 
     def _to_mlp_expert_down(self, param):
       # param: [E, L, Hidden, Inter] -> [L, E, Inter, Hidden]
-      @jax.jit
-      def _transpose(param):
-        return jnp.transpose(param, (1, 0, 3, 2))
-      param = _transpose(param)
+      param = self._transpose_expert_down(param)
       # vLLM 0.17+ expects (E, Hidden, Inter) -> (E, Inter, Hidden)
       # So for each layer, do param[i]: (E, Inter, Hidden) -> (E, Hidden, Inter)
       param = jnp.transpose(param, (0, 1, 3, 2))
@@ -377,8 +381,32 @@ class MaxTextToVLLMConverter:
     def _to_mlp_expert_gate_up(self, wi_0, wi_1, num_layers, layer_key_prefix, layer_key_suffix):
       # Process all layers in one JIT call using vmap to avoid per-layer dispatch
       # overhead (which was ~50 separate device syncs on multi-host v5p-64).
-      tp = self.vllm_tp
-      
+      _fuse_all = self._make_fuse_all(self.vllm_tp)
+
+      logging.info("_to_mlp_expert_gate_up: dispatching _fuse_all (single JIT+vmap)...")
+      fused = _fuse_all(wi_0, wi_1)
+      logging.info("_to_mlp_expert_gate_up: _fuse_all complete, shape=%s, unstacking layers...", fused.shape)
+      del wi_0, wi_1
+      gc.collect()
+      _log_mem_stats("converter:moe_w13_post_fuse")
+
+      # vLLM 0.17+ expects (e, 2*d_inner, d_model) -> (e, d_model, 2*d_inner)
+      for i, layer_i in enumerate(jnp.unstack(fused, axis=0)):
+        layer_i = jnp.transpose(layer_i, (0, 2, 1))  # (e, 2*d_inner, d_model) -> (e, d_model, 2*d_inner)
+        self.vllm_state[f"{layer_key_prefix}.{i}.{layer_key_suffix}"] = layer_i
+        if i % 8 == 7:
+          gc.collect()
+      del fused, layer_i
+      gc.collect()
+      _log_mem_stats("converter:moe_w13_post_unstack")
+
+    @staticmethod
+    @functools.lru_cache(maxsize=8)
+    def _make_fuse_all(tp: int):
+      """Return a JIT-compiled w13 fuser for a given TP degree.
+
+      Cached by tp so the same XLA executable is reused across all steps.
+      """
       @jax.jit
       def _fuse_all(wi_0, wi_1):
         # wi_0, wi_1: (e, l, d_model, d_inner) -> (l, e, d_model, d_inner)
@@ -400,27 +428,32 @@ class MaxTextToVLLMConverter:
 
         return jax.vmap(_fuse_single)(wi_0, wi_1)  # -> (l, e, 2*d_inner, d_model)
 
-      logging.info("_to_mlp_expert_gate_up: dispatching _fuse_all (single JIT+vmap)...")
-      fused = _fuse_all(wi_0, wi_1)
-      logging.info("_to_mlp_expert_gate_up: _fuse_all complete, shape=%s, unstacking layers...", fused.shape)
-      del wi_0, wi_1
-      gc.collect()
-      _log_mem_stats("converter:moe_w13_post_fuse")
-
-      # vLLM 0.17+ expects (e, 2*d_inner, d_model) -> (e, d_model, 2*d_inner)
-      for i, layer_i in enumerate(jnp.unstack(fused, axis=0)):
-        layer_i = jnp.transpose(layer_i, (0, 2, 1))  # (e, 2*d_inner, d_model) -> (e, d_model, 2*d_inner)
-        self.vllm_state[f"{layer_key_prefix}.{i}.{layer_key_suffix}"] = layer_i
-        if i % 8 == 7:
-          gc.collect()
-      del fused
-      gc.collect()
-      _log_mem_stats("converter:moe_w13_post_unstack")
+      return _fuse_all
       
     @staticmethod
     @jax.jit
     def _unstack_layer(param):
         return jnp.unstack(param, axis=0)
+
+    @staticmethod
+    @jax.jit
+    def _transpose_unstack(x):
+        return jnp.unstack(jnp.transpose(x, (1, 0)))
+
+    @staticmethod
+    @jax.jit
+    def _transpose_2d(x):
+        return jnp.transpose(x, (1, 0))
+
+    @staticmethod
+    @jax.jit
+    def _transpose_gate(param):
+        return jnp.transpose(param, (1, 2, 0))
+
+    @staticmethod
+    @jax.jit
+    def _transpose_expert_down(param):
+        return jnp.transpose(param, (1, 0, 3, 2))
 
 
 def save_dict_to_file(dict, filename):
