@@ -28,6 +28,8 @@ MaxText achieves high Model FLOPs Utilization (MFU) and tokens/second from singl
 
 MaxText is the launching point for ambitious LLM projects both in research and production. We encourage you to start by experimenting with MaxText out of the box and then fork and modify MaxText to meet your needs.
 
+test
+
 Check out our [Read The Docs site](https://maxtext.readthedocs.io/en/latest/) or directly [Get Started](https://maxtext.readthedocs.io/en/latest/tutorials/first_run.html) with your first MaxText run. If you’re interested in Diffusion models (Wan 2.1, Flux, etc), see the [MaxDiffusion](https://github.com/AI-Hypercomputer/maxdiffusion) repository in our AI Hypercomputer GitHub organization.
 
 ## Installation
