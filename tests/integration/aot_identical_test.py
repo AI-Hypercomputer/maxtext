@@ -200,7 +200,7 @@ class AotJaxprIdenticalTest(AotBaseTest):
     train.main(train_argv)
     seconds_elapsed = (datetime.datetime.now() - start_time).total_seconds()
     print(f"train cost {seconds_elapsed} secs")
-    warnings.warn(f"DEUBG: train cost {seconds_elapsed} secs")
+    warnings.warn(f"DEBUG: train cost {seconds_elapsed} secs")
     jax.clear_caches()
 
     # Run train_compile.py and dump jaxpr
@@ -216,7 +216,7 @@ class AotJaxprIdenticalTest(AotBaseTest):
     train_compile.main(compile_argv)
     seconds_elapsed = (datetime.datetime.now() - start_time).total_seconds()
     print(f"train_compile cost {seconds_elapsed} secs")
-    warnings.warn(f"DEUBG: train_compile cost {seconds_elapsed} secs")
+    warnings.warn(f"DEBUG: train_compile cost {seconds_elapsed} secs")
     jax.clear_caches()
 
     # Compare results

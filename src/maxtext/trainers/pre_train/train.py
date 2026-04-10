@@ -23,6 +23,7 @@ import contextlib
 import datetime
 import functools
 import os
+import warnings
 
 from absl import app
 
@@ -524,6 +525,7 @@ def train_loop(config, recorder, state=None):
   params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
 
   with jax.set_mesh(mesh), mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+    start_time = datetime.datetime.now()
     p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
         config,
         model,
@@ -535,6 +537,9 @@ def train_loop(config, recorder, state=None):
         eval_data_iterator,
         params_shardings,
     )
+    seconds_elapsed = (datetime.datetime.now() - start_time).total_seconds()
+    print(f"train jit {seconds_elapsed} secs")
+    warnings.warn(f"DEBUG: train jit cost {seconds_elapsed} secs")
     shaped_batch = maxtext_utils.get_shaped_batch(config)
     if config.shard_optimizer_over_data:
       state = sharding.maybe_shard_with_name(state, state_mesh_shardings, config.shard_mode)

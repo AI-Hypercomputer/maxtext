@@ -15,7 +15,9 @@
 # pylint: disable=bare-except, consider-using-generator
 """Utils that are only interesting for training in MaxText."""
 
+import datetime
 import os
+import warnings
 from functools import partial
 
 import jax
@@ -176,9 +178,13 @@ def jit_train_and_eval_step(
     train_step_partial = functools.partial(train_step, model, config, state_mesh_shardings, params_shardings)
     train_step = diloco.build_diloco_train_step(config, train_step_partial, mesh=mesh)
   data_sharding = sharding.get_input_data_sharding(config, mesh)
+  start_time = datetime.datetime.now()
   p_train_step = jit_train_step(
       config, model, state, state_mesh_shardings, data_sharding, train_step, params_shardings, mesh=mesh
   )
+  seconds_elapsed = (datetime.datetime.now() - start_time).total_seconds()
+  print(f"train_util train_step jit {seconds_elapsed} secs")
+  warnings.warn(f"DEBUG: train_util train_step jit cost {seconds_elapsed} secs")
   p_eval_step = None
   if eval_data_iterator:
     p_eval_step = jit_eval_step(config, model, state_mesh_shardings, data_sharding, eval_step)
