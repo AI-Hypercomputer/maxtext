@@ -71,6 +71,30 @@ def timer(name):
     end = time.perf_counter()
     print(f"{name} took {end - start:.4f} seconds")  
 
+
+def _log_mem_stats(tag: str) -> None:
+  """Log JAX live-array count/bytes and process RSS.
+
+  Filter in cloud logging with:  textPayload =~ "\\[ROLLOUT_MEM\\]"
+  """
+  live = jax.live_arrays()
+  num_arrays = len(live)
+  total_bytes = sum(a.nbytes for a in live if hasattr(a, "nbytes"))
+  rss_gb = 0.0
+  try:
+    with open("/proc/self/status") as _f:
+      for _line in _f:
+        if _line.startswith("VmRSS:"):
+          rss_gb = int(_line.split()[1]) / 1e6
+          break
+  except OSError:
+    pass
+  logging.info(
+      "[ROLLOUT_MEM] %s | live_arrays=%d jax_bytes=%.3f GB rss=%.3f GB",
+      tag, num_arrays, total_bytes / 1e9, rss_gb,
+  )
+
+
 def _get_maxtext_model(config):
   """Creates and returns a Tunix-adapted MaxText model and mesh."""
   logging.info(f'Creating model with config: {config}')
@@ -187,13 +211,17 @@ class MaxTextToVLLMConverter:
         """Main entry point to convert all weights."""
         logging.info(f"\n{GREEN}Starting Conversion...{RESET}")
         start_time = time.time()
+        _log_mem_stats("converter:start")
 
         with timer("Convert Global Weights"):
           self._convert_global(model_state)
+        _log_mem_stats("converter:post_global")
         with timer("Convert Attention Weights"):
           self._convert_attn(model_state)
+        _log_mem_stats("converter:post_attn")
         with timer("Convert MoE Weights"):
           self._convert_moe(model_state)
+        _log_mem_stats("converter:post_moe")
         
         return self.vllm_state
 
@@ -238,6 +266,7 @@ class MaxTextToVLLMConverter:
 
     def _convert_moe(self, params):
       logging.info("_convert_moe: extracting moe_block...")
+      _log_mem_stats("converter:moe_start")
       moe = params['base']['decoder']['layers']['moe_block'].to_pure_dict()
       prefix = "vllm_model.model.layers"
 
@@ -248,6 +277,7 @@ class MaxTextToVLLMConverter:
       })
       del moe['gate']['kernel']
       gc.collect()
+      _log_mem_stats("converter:moe_post_gate")
 
       logging.info("_convert_moe: expert down (w2) weights...")
       self.vllm_state.update({
@@ -256,6 +286,7 @@ class MaxTextToVLLMConverter:
       })
       del moe['wo']
       gc.collect()
+      _log_mem_stats("converter:moe_post_w2")
 
       logging.info("_convert_moe: expert gate+up (w13) weights (fuse_all jit+vmap)...")
       self._to_mlp_expert_gate_up(
@@ -265,6 +296,7 @@ class MaxTextToVLLMConverter:
       del moe['wi_0'], moe['wi_1']
       logging.info("_convert_moe: done")
       gc.collect()
+      _log_mem_stats("converter:moe_post_w13")
       
     def _to_final_norm(self, params):
       self.vllm_state["vllm_model.model.norm.weight"] = params['base']['decoder']['decoder_norm']['scale']
@@ -373,6 +405,7 @@ class MaxTextToVLLMConverter:
       logging.info("_to_mlp_expert_gate_up: _fuse_all complete, shape=%s, unstacking layers...", fused.shape)
       del wi_0, wi_1
       gc.collect()
+      _log_mem_stats("converter:moe_w13_post_fuse")
 
       # vLLM 0.17+ expects (e, 2*d_inner, d_model) -> (e, d_model, 2*d_inner)
       for i, layer_i in enumerate(jnp.unstack(fused, axis=0)):
@@ -382,6 +415,7 @@ class MaxTextToVLLMConverter:
           gc.collect()
       del fused
       gc.collect()
+      _log_mem_stats("converter:moe_w13_post_unstack")
       
     @staticmethod
     @jax.jit

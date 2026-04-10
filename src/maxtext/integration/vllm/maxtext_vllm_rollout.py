@@ -95,6 +95,29 @@ def _patch_tpu_inference_group_offset():
 _patch_tpu_inference_group_offset()
 
 
+def _log_mem_stats(tag: str) -> None:
+  """Log JAX live-array count/bytes and process RSS.
+
+  Filter in cloud logging with:  textPayload =~ "\\[ROLLOUT_MEM\\]"
+  """
+  live = jax.live_arrays()
+  num_arrays = len(live)
+  total_bytes = sum(a.nbytes for a in live if hasattr(a, "nbytes"))
+  rss_gb = 0.0
+  try:
+    with open("/proc/self/status") as _f:
+      for _line in _f:
+        if _line.startswith("VmRSS:"):
+          rss_gb = int(_line.split()[1]) / 1e6
+          break
+  except OSError:
+    pass
+  logging.info(
+      "[ROLLOUT_MEM] %s | live_arrays=%d jax_bytes=%.3f GB rss=%.3f GB",
+      tag, num_arrays, total_bytes / 1e9, rss_gb,
+  )
+
+
 class MaxTextVllmSampler(VllmSampler):
   """VllmSampler that delegates weight updates to a MaxTextToVLLMConverter.
 
@@ -122,6 +145,7 @@ class MaxTextVllmSampler(VllmSampler):
       return super().update_params(updated_weights, filter_types)
 
     del filter_types
+    _log_mem_stats("sampler:update_params_start")
 
     # delete kv_cache
     if self.llm is not None:
@@ -130,15 +154,18 @@ class MaxTextVllmSampler(VllmSampler):
     elif self._driver is not None:
       self._driver.llm_engine.reset_prefix_cache()
       self._driver.llm_engine.collective_rpc("delete_kv_cache")
+    _log_mem_stats("sampler:post_kv_delete")
 
     # Perform explicit garbage collection and synchronization to free up HBM memory before loading new weights
     gc.collect()
     jax.clear_caches()
     jax.effects_barrier()
+    _log_mem_stats("sampler:post_gc_clear")
 
     logging.info("MaxTextVllmSampler.update_params: starting converter.convert()...")
     vllm_state = self._converter.convert(updated_weights)
     jax.block_until_ready(vllm_state)
+    _log_mem_stats("sampler:post_convert")
 
     logging.info("MaxTextVllmSampler.update_params: converter.convert() done, %d weights to assign", len(vllm_state))
     model_runner_state = self.transformer_state
@@ -163,16 +190,19 @@ class MaxTextVllmSampler(VllmSampler):
       if i % 16 == 15:
         jax.effects_barrier()
         gc.collect()
+        _log_mem_stats(f"sampler:assign_weights_after_{i+1}")
     jax.effects_barrier()
     gc.collect()
     end_time = time.time()
     logging.info("MaxTextVllmSampler.update_params: all weights assigned in %.4f seconds", end_time - start_time)
+    _log_mem_stats("sampler:post_assign_all")
     
     # reinitialize kv_cache
     if self.llm is not None:
       self.llm.collective_rpc("reinitialize_kv_cache")
     elif self._driver is not None:
       self._driver.llm_engine.collective_rpc("reinitialize_kv_cache")
+    _log_mem_stats("sampler:post_kv_reinit")
 
 
 
