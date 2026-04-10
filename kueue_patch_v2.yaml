@@ -1,0 +1,7 @@
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata:
+  name: cpu-user
+spec:
+  nodeLabels:
+    cloud.google.com/gke-nodepool: m3-megamem-pool

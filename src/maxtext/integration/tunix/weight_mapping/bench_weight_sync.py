@@ -54,7 +54,8 @@ _MODEL_NAME = flags.DEFINE_string('model_name', 'qwen3-30b-a3b', 'MaxText model 
 _CHECKPOINT = flags.DEFINE_string('checkpoint_path', 'gs://hengtaoguo-maxtext-logs/checkpoints/qwen3-30b-a3b/scanned/2026-01-23-14-00/0/items/0/items', 'GCS or local path to the scanned checkpoint')
 _VLLM_MODEL_ID = flags.DEFINE_string('vllm_model_id', 'Qwen/Qwen3-30B-A3B', 'HuggingFace model ID passed to vLLM (e.g. google/gemma-4-26b-it)')
 _FSDP_TP = flags.DEFINE_integer('ici_fsdp_parallelism', -1, 'ICI FSDP parallelism (-1 = auto-shard to fill remaining devices)')
-_ICI_TP = flags.DEFINE_integer('ici_tensor_parallelism', 2, 'ICI tensor parallelism')
+_ICI_EP = flags.DEFINE_integer('ici_expert_parallelism', 1, 'ICI Expert parallelism')
+_ICI_TP = flags.DEFINE_integer('ici_tensor_parallelism', 1, 'ICI Tensor parallelism')
 _ROLLOUT_TP = flags.DEFINE_integer('rollout_tensor_parallelism', 2, 'Rollout tensor parallelism')
 _ROLLOUT_DP = flags.DEFINE_integer('rollout_data_parallelism', 1, 'Rollout data parallelism')
 _ROLLOUT_EP = flags.DEFINE_integer('rollout_expert_parallelism', 1, 'Expert parallelism for MoE layers in vLLM rollout.')
@@ -206,10 +207,10 @@ def _load_maxtext_model(base_yaml_path):
       query_proj="offload",
       key_proj="offload",
       value_proj="offload",
-      ici_data_parallelism=_FSDP_TP.value,
+      ici_fsdp_parallelism=_FSDP_TP.value,
       ici_tensor_parallelism=_ICI_TP.value,
-      rollout_tensor_parallelism=_ROLLOUT_TP.value,
-      override_model_config="true",
+      ici_expert_parallelism=_ICI_EP.value,
+      rollout_tensor_parallelism=_ROLLOUT_TP.value,      override_model_config="true",
       checkpoint_storage_concurrent_gb=80,
       async_scheduling="false",
   )
@@ -963,9 +964,15 @@ class DeepSeekV3ToVLLMConverter:
                 routed_moe['wo'][:, _chunk_start:_chunk_end],
             )
             for _j, _layer_idx in enumerate(list(layer_indices)[_chunk_start:_chunk_end]):
-                # tpu-inference uses w13_weight (gate+up fused) and w2_weight (down)
-                self.vllm_state[f"{prefix}.{_layer_idx}.mlp.experts.w13_weight"] = _gu[_j]
-                self.vllm_state[f"{prefix}.{_layer_idx}.mlp.experts.w2_weight"] = _dn[_j]
+                # NOTE: w13_weight and w2_weight are NOT added to vllm_state.
+                # They require block fp8 quantization (128x128 blocks) + the full
+                # process_fp8_moe_weights pipeline (swapaxes, GMM reordering, padding)
+                # to produce the shape/dtype that tpu-inference expects.
+                # Until that is implemented, the checkpoint's fp8 expert weights are
+                # kept as-is. Storing them in vllm_state (even with the scale_inv
+                # skip guard) risks overwriting the correctly-processed tensors if
+                # the root logger is at WARNING level and the guard silently fails.
+                pass  # _gu[_j] and _dn[_j] computed but not yet synced to vllm_state
 
         logging.info("_convert_moe: shared experts...")
         @jax.jit
@@ -1085,6 +1092,16 @@ def main():
     del model_state
     del model
     del mesh
+
+    # Move all converted weights to host (numpy) to free device HBM before
+    # vLLM loads the full checkpoint. Without this, both MaxText-converted
+    # tensors and the vLLM checkpoint coexist on device simultaneously,
+    # causing OOM on memory-constrained clusters (e.g. 16-chip v5litepod).
+    # The sync loop's _get_reshard_fn will device_put them back lazily.
+    # SKIPPING HOST TRANSFER: We are on a 256-chip cluster with plenty of HBM.
+    # with timer("Moving vllm_state to host memory to free HBM"):
+    #   vllm_state = {k: np.array(v) for k, v in vllm_state.items()}
+    jax.effects_barrier()
     gc.collect()
     # save_dict_to_file(vllm_state, "vllm_state_shapes.txt")
 
@@ -1178,7 +1195,8 @@ def main():
     _any_src = next(iter(vllm_state.values()))
     _any_src_arr = _any_src.value if hasattr(_any_src, 'value') else _any_src
     _any_dst = next(iter(llm_state.values()))
-    _same_devices = (
+    # numpy arrays (moved to host to save HBM) have no .sharding — always use device_put.
+    _same_devices = isinstance(_any_src_arr, jax.Array) and (
         frozenset(d.id for d in _any_src_arr.sharding.mesh.devices.flat) ==
         frozenset(d.id for d in _any_dst.sharding.mesh.devices.flat)
     )

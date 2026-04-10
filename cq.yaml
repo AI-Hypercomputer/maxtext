@@ -43,9 +43,9 @@ spec:
     - name: cpu-user
       resources:
       - name: cpu
-        nominalQuota: "480"
+        nominalQuota: "608"
       - name: memory
-        nominalQuota: 4T
+        nominalQuota: 5T
   stopPolicy: None
 status:
   admittedWorkloads: 2

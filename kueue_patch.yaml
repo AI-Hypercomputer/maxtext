@@ -1,0 +1,51 @@
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata:
+  name: megamem-rf
+spec:
+  nodeLabels:
+    cloud.google.com/gke-nodepool: m3-megamem-pool
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ClusterQueue
+metadata:
+  name: cq
+spec:
+  admissionChecksStrategy:
+    admissionChecks:
+    - name: superslice-ac
+  flavorFungibility:
+    whenCanBorrow: MayStopSearch
+    whenCanPreempt: TryNextFlavor
+  namespaceSelector: {}
+  preemption:
+    borrowWithinCohort:
+      policy: Never
+    reclaimWithinCohort: Never
+    withinClusterQueue: LowerPriority
+  queueingStrategy: BestEffortFIFO
+  resourceGroups:
+  - coveredResources:
+    - google.com/tpu
+    flavors:
+    - name: super-slice-rf
+      resources:
+      - name: google.com/tpu
+        nominalQuota: "20480"
+  - coveredResources:
+    - cpu
+    - memory
+    flavors:
+    - name: megamem-rf
+      resources:
+      - name: cpu
+        nominalQuota: "128"
+      - name: memory
+        nominalQuota: 2T
+    - name: cpu-user
+      resources:
+      - name: cpu
+        nominalQuota: "600"
+      - name: memory
+        nominalQuota: 4T
+  stopPolicy: None
