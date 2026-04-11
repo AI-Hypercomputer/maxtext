@@ -952,6 +952,8 @@ class TransformerEngineQuantization(Quantization):
     """ Grouped GEMM """
     import transformer_engine.jax.flax as te_flax  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
 
+    # Currently only BF16 is supported for TE GMM v2, so we don't use the quantization recipe here yet.
+    # the_recipe = self._recipe
     the_recipe = None
     return te_flax.make_grouped_dense_cls(quantization_recipe=the_recipe)(
         inputs,

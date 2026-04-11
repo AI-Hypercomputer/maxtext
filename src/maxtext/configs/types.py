@@ -654,9 +654,9 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to use TransformerEngine fused router and permutation kernels for MoE routing and token dispatch/combine.",
   )
-  te_permutation_align_size: int = Field(
+  moe_permutation_group_align_size: int = Field(
       128,
-      description="Alignment size for TE permutation padding. Set to 0 to disable padding.",
+      description="Alignment size for MoE permutation group padding (MT and TE paths). Set to 0 to disable.",
   )
   te_use_gmm: bool = Field(
       False,
