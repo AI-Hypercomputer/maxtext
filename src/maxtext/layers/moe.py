@@ -700,16 +700,21 @@ class RoutedMoE(nnx.Module):
     weights, selected_experts = self.get_topk(gate_logits, pre_bias_logits, rngs)
 
     token_count_per_expert = jnp.bincount(selected_experts.ravel(), length=self.num_experts)
-    padding_tokens_required_per_expert = self.config.te_permutation_align_size - (token_count_per_expert % self.config.te_permutation_align_size)
+    align_size = self.config.te_permutation_align_size
+    # Use (align - count % align) % align so that experts already aligned to
+    # align_size need 0 padding tokens (not align_size, which would exceed the
+    # per-expert slot capacity of align_size - 1).
+    padding_tokens_required_per_expert = (align_size - (token_count_per_expert % align_size)) % align_size
     # Build a static-size padding index buffer.
-    # Each expert i gets a slot of (align_size - 1) positions (worst-case padding).
+    # Each expert i gets a slot of (align_size - 1) positions (worst-case padding,
+    # which occurs when token_count[i] % align_size == 1).
     # Within slot i: positions where offset < padding_tokens_required_per_expert[i]
-    # are assigned to expert i; the rest point to the last expert and will be ignored
-    # by the GEMM (they sort to the tail of the buffer).
+    # are assigned to expert i (real padding); the rest point to the last expert
+    # as overflow placeholders to keep the buffer statically sized.
     # E.g. padding_tokens_required_per_expert=(1,3), align_size=8 → total=14:
     #   [0, last, last, last, last, last, last,   # slot 0: 1 real, 6 overflow
     #    1, 1, 1, last, last, last, last]          # slot 1: 3 real, 4 overflow
-    max_padding_per_expert = self.config.te_permutation_align_size - 1
+    max_padding_per_expert = align_size - 1
     total_padding_size = self.num_experts * max_padding_per_expert
     positions = jnp.arange(total_padding_size)
     expert_for_pos = positions // max_padding_per_expert
@@ -757,14 +762,21 @@ class RoutedMoE(nnx.Module):
     sorted_inputs = _sort_activations(replicated_inputs_2d, sorted_selected_experts, use_custom_sort_vjp).astype(
         self.dtype
     )
-    group_size = jnp.bincount(flatten_selected_experts, length=self.num_experts)
-    # Return the experts for each sorted input.
-    expert_indices = jnp.arange(self.num_experts)
-    sorted_experts = jnp.repeat(
-        expert_indices,
-        repeats=group_size,
-        total_repeat_length=flatten_selected_experts.shape[0],
-    )
+    # Compute group_size directly from token_count + required padding rather than
+    # via bincount(flatten_selected_experts).  bincount would include overflow
+    # tokens (the static-buffer fill tokens pointing to num_experts-1) in
+    # group_size[num_experts-1], making it NOT a multiple of align_size.
+    # Direct computation gives each expert exactly ceil(count/align)*align tokens,
+    # all guaranteed to be multiples of align_size.
+    group_size = token_count_per_expert + padding_tokens_required_per_expert
+    if roll_to_expert_id is not None:
+      # Rolling shifts expert IDs; roll the group_sizes to match.
+      group_size = jnp.roll(group_size, -roll_to_expert_id)
+    # sorted_experts[i] = expert ID of the token at sorted position i.
+    # Directly index flatten_selected_experts (post-roll) by the sort permutation
+    # rather than reconstructing via jnp.repeat, which would need the overflow
+    # count to match total_repeat_length.
+    sorted_experts = flatten_selected_experts[sorted_selected_experts]
     return (
         sorted_inputs,
         sorted_selected_experts,
