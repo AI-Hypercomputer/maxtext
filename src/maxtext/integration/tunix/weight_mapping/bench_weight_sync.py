@@ -911,9 +911,9 @@ class DeepSeekV3ToVLLMConverter:
                 return jnp.unstack(jnp.transpose(gate_bias, (1, 0)))
             gate_bias_layers = _process_gate_bias(routed_moe['gate']['bias'])
         for i, layer_idx in enumerate(layer_indices):
-            self.vllm_state[f"{prefix}.{layer_idx}.mlp.gate.weight"] = jax.device_put(gate_layers[i], _expert_2d)
+            self.vllm_state[f"{prefix}.{layer_idx}.mlp.gate.weight"] = jax.device_put(gate_layers[i], _expert_2d).block_until_ready()
             if gate_has_bias:
-                self.vllm_state[f"{prefix}.{layer_idx}.mlp.gate.e_score_correction_bias"] = jax.device_put(gate_bias_layers[i], _expert_1d)
+                self.vllm_state[f"{prefix}.{layer_idx}.mlp.gate.e_score_correction_bias"] = jax.device_put(gate_bias_layers[i], _expert_1d).block_until_ready()
 
         logging.info("_convert_moe: routed experts...")
 

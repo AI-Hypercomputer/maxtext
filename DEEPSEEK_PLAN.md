@@ -2,19 +2,16 @@
 
 This document outlines the plan for executing, validating, and optimizing the DeepSeek-V3 (671B) weight synchronization and vLLM inference benchmarking on the Pathways/XPK cluster.
 
-## 1. Infrastructure & Quota (Completed)
-* **Goal:** Ensure the cluster can schedule the highly demanding `pathways-head` pod alongside 128 TPU v7e chips.
-* **Status:** Resolved.
-* **Actions Taken:** 
-  * The `pathways-head` pod requires massive memory (~850GB - 950GB) to load and synchronize the 671B model weights.
-  * Increased the Kueue `ClusterQueue` (`cq.yaml`) memory quota for the `cpu-user` flavor from `2T` to `4T`.
-  * This successfully allowed `jobset` workloads (like `mohit-dsv3-torchax` and `xfgu-235b-tp-2`) to admit and schedule the head pod onto the required `m3-megamem-pool` nodes without triggering "insufficient unused quota" errors.
+## 1. Infrastructure
+You are working on cluster `bodaborg-super-alpha-cluster` and you can connect to it using `gcloud container clusters get-credentials bodaborg-super-alpha-cluster --region us-central1 --project cloud-tpu-multipod-dev --dns-endpoint`
 
-## 2. Workload Configuration (`deepseek_nextdev_bench.yaml`)
+Don't exec into the pods to check into ongoing workloads
+
+## 2. Workload Configuration (`deepseek_bench.yaml`)
 * **Goal:** Verify and maintain the Kubernetes JobSet configurations for distributed execution.
 * **Action Items:**
   * **Head Node (`pathways-head`):**
-    * Ensure `nodeSelector` strictly targets `cloud.google.com/gke-nodepool: m3-megamem-pool`.
+    * Ensure `nodeSelector` strictly targets `cloud.google.com/gke-nodepool: mega-cpu-np`.
     * Verify `MODEL_IMPL_TYPE=vllm` and `NEW_MODEL_DESIGN=True` are passed to force the vLLM PyTorch backend.
     * Ensure `load_format=runai_streamer` is used to load weights efficiently from GCS (`gs://maxtext-model-checkpoints/deepseek-v3/hf-weights`).
   * **TPU Workers (`worker`):**
@@ -36,7 +33,7 @@ This document outlines the plan for executing, validating, and optimizing the De
 ## 4. Execution, Profiling & Validation
 * **Goal:** Run the benchmark and measure throughput, latency, and correctness.
 * **Action Items:**
-  1. **Deployment:** Apply the workload via `kubectl apply -f deepseek_nextdev_bench.yaml`.
+  1. **Deployment:** Apply the workload via `kubectl delete -f deepseek_bench.yaml; kubectl apply -f deepseek_bench.yaml`.
   2. **Monitoring:** 
      * Watch `pathways-head` logs: `kubectl logs -f <head-pod-name> -c jax-tpu`.
      * Verify all TPU devices (128) are visible to Pathways.
@@ -48,3 +45,9 @@ This document outlines the plan for executing, validating, and optimizing the De
        * *Generation* (End-to-end token generation time).
   4. **Correctness:** 
      * Verify the generation test (`llm.generate("Paris is", ...)`) outputs coherent text, confirming that the `runai_streamer` weight loading, MaxText-to-vLLM conversion, and FP8 quantization were all successful.
+
+## 5. Repositories you have to go through
+
+You are working with MaxText and tpu-inference repositories which can be found in ~/workspace folders. I will try to keep same copies of these repo in the docker image as well. 
+Whenever I ask you to go through the repos understand them and go through the files in the local copies. I will rebuild their commits in the docker file `Dockerfile` in MaxText repo.
+
