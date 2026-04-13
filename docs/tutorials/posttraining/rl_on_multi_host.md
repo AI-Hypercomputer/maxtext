@@ -75,23 +75,23 @@ placeholders with your actual values.
 # -- Model configuration --
 # The MaxText model name. See `src/maxtext/configs/types.py` for `ModelName` for a
 # full list of supported models.
-export MODEL=<MaxText Model> # e.g. 'llama3.1-70b-Instruct'
+export MODEL="<MAXTEXT_MODEL>" # e.g. 'llama3.1-70b-Instruct'
 
 # Your Hugging Face access token. Required to download gated models like Llama.
 # You can generate one at https://huggingface.co/settings/tokens.
-export HF_TOKEN=<Hugging Face access token>
+export HF_TOKEN="<HF_TOKEN>"
 
 # -- MaxText configuration --
 # Use a GCS bucket you own to store logs and checkpoints. Ideally in the same
 # region as your TPUs to minimize latency and costs.
 # You can list your buckets and their locations in the
 # [Cloud Console](https://console.cloud.google.com/storage/browser).
-export BASE_OUTPUT_DIRECTORY=<gcs bucket path> # e.g., gs://my-bucket/maxtext-runs
+export BASE_OUTPUT_DIRECTORY="<GCS_OUTPUT_PATH>" # e.g., gs://my-bucket/maxtext-runs
 
 # An arbitrary string to identify this specific run.
 # We recommend to include the model, user, and timestamp.
 # Note: Kubernetes requires workload names to be valid DNS labels (lowercase, no underscores or periods).
-export RUN_NAME=<Name for this run>
+export RUN_NAME="<RUN_NAME>"
 
 # The directory containing the MaxText-compatible model checkpoint.
 # If you are converting from a Hugging Face checkpoint, see:
@@ -102,13 +102,13 @@ export MAXTEXT_CKPT_PATH=${BASE_OUTPUT_DIRECTORY?}/${RUN_NAME?}/0/items
 # Your GCP project ID. Find it on the [Cloud Console Dashboard](https://console.cloud.google.com/home/dashboard).
 # If you've already set it in your local config, you can retrieve it via:
 # gcloud config get-value project
-export PROJECT_ID=<GCP project ID>
+export PROJECT_ID="<PROJECT_ID>"
 
 # The GCP location (listed as "Location" in the UI) and name of your
 # TPU-enabled GKE cluster. Both can be found on the
 # [Cloud Console](https://console.cloud.google.com/kubernetes/list).
-export ZONE=<GCP location> # e.g., 'us-central1' or 'us-central1-a'
-export GKE_CLUSTER=<cluster name>
+export ZONE="<ZONE>" # e.g., 'us-central1' or 'us-central1-a'
+export GKE_CLUSTER="<GKE_CLUSTER>"
 
 # For a full list of MaxText-supported TPU types, see: `src/maxtext/utils/accelerator_to_spec_map.py`. To see the TPU type
 # of your cluster:
@@ -118,10 +118,10 @@ export GKE_CLUSTER=<cluster name>
 
 # 2. Find your TPU type (e.g., 'v5p-128') by checking the accelerator labels on your nodes:
 # kubectl get nodes -l cloud.google.com/gke-tpu-accelerator -o jsonpath='{.items[*].metadata.labels.cloud\.google\.com/gke-tpu-accelerator}' | tr ' ' '\n' | sort -u
-export TPU_TYPE=<TPU Type>
+export TPU_TYPE="<TPU_TYPE>"
 
 # The Docker image you pushed in the prerequisite step
-export CLOUD_IMAGE_NAME=<Docker Image Name>
+export CLOUD_IMAGE_NAME="<DOCKER_IMAGE_NAME>"
 export DOCKER_IMAGE="gcr.io/${PROJECT_ID?}/${CLOUD_IMAGE_NAME?}"
 ```
 
@@ -133,7 +133,7 @@ If you already have a MaxText-compatible model checkpoint, simply set the
 following environment variable and move on to the next section.
 
 ```bash
-export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint> # e.g., gs://my-bucket/my-model-checkpoint/0/items
+export MAXTEXT_CKPT_PATH="<MAXTEXT_CKPT_PATH>" # e.g., gs://my-bucket/my-model-checkpoint/0/items
 ```
 
 ### Option 2: Converting from a Hugging Face checkpoint
@@ -141,7 +141,7 @@ export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint> # e.g., gs://my-bucke
 Refer to the steps in [Hugging Face to MaxText](../../guides/checkpointing_solutions/convert_checkpoint.md) to convert a hugging face checkpoint to MaxText. Make sure you have correct checkpoint files converted and saved. Similar as Option 1, you can set the following environment and move on.
 
 ```bash
-export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint> # e.g., gs://my-bucket/my-model-checkpoint/0/items
+export MAXTEXT_CKPT_PATH="<MAXTEXT_CKPT_PATH>" # e.g., gs://my-bucket/my-model-checkpoint/0/items
 ```
 
 ## Submit your RL workload via Pathways
@@ -154,7 +154,7 @@ submit the `train_rl.py` script via XPK.
 
 > **Note:** XPK v0.14.0+ automatically discovers your cluster's location from
 > GCP. You don't need to specify `--zone` in the commands below. If using an
-> older XPK version, add `--zone=<zone>` to the workload commands.
+> older XPK version, add `--zone="<ZONE>"` to the workload commands.
 
 ### Submit GRPO workload
 
@@ -202,7 +202,7 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
       --project ${PROJECT_ID?}
   ```
   In case the job still lingers on, you can use
-  `kubectl get pods` to obtain the name of the pod and then run: `kubectl delete pod <pod-name>`.
+  `kubectl get pods` to obtain the name of the pod and then run: `kubectl delete pod "<POD_NAME>"`.
 
 ## Troubleshooting
 

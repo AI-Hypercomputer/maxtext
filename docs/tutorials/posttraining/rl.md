@@ -65,7 +65,7 @@ placeholders with your actual values.
 # The MaxText model name. See `src/maxtext/configs/types.py` for `ModelName` for a
 # full list of supported models.
 # e.g. 'llama3.1-8b-Instruct'
-export MODEL=<MaxText Model>
+export MODEL="<MAXTEXT_MODEL>"
 
 # -- MaxText configuration --
 # Use a GCS bucket you own to store logs and checkpoints.
@@ -73,18 +73,18 @@ export MODEL=<MaxText Model>
 # [Cloud Console](https://console.cloud.google.com/storage/browser) or via
 # `gcloud storage buckets list --format="table(name, location)"`.
 # e.g., gs://my-bucket/maxtext-runs
-export BASE_OUTPUT_DIRECTORY=<gcs bucket path>
+export BASE_OUTPUT_DIRECTORY="<GCS_BUCKET_PATH>"
 
 # An arbitrary string to identify this specific run.
 # We recommend to include the model, user, and timestamp.
 # Note: Kubernetes requires workload names to be valid DNS labels (lowercase, no underscores or periods).
-export RUN_NAME=<Name for this run>
+export RUN_NAME="<RUN_NAME>"
 
 # Number of accelerator chips per VM.
 # - TPU v5e (single host): 8
 # - TPU v5p (single host): 4
 # - TPU v6e (single host): 8
-export CHIPS_PER_VM=<the number of chips per VM>
+export CHIPS_PER_VM="<CHIPS_PER_VM>"
 ```
 
 ## Get your model checkpoint
@@ -96,7 +96,7 @@ following environment variable and move on to the next section.
 
 ```bash
 # e.g., gs://my-bucket/my-model-checkpoint/0/items
-export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint>
+export MAXTEXT_CKPT_PATH="<MAXTEXT_CKPT_PATH>"
 ```
 
 ### Option 2: Converting from a Hugging Face checkpoint
@@ -105,7 +105,7 @@ Refer the steps in [Hugging Face to MaxText](https://maxtext.readthedocs.io/en/m
 
 ```bash
 # e.g., gs://my-bucket/my-model-checkpoint/0/items
-export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint>
+export MAXTEXT_CKPT_PATH="<MAXTEXT_CKPT_PATH>"
 ```
 
 ## Run GRPO

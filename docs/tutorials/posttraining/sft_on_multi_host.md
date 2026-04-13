@@ -53,11 +53,11 @@ placeholders with your actual values.
 # The MaxText model name. See `src/maxtext/configs/types.py` for `ModelName` for a
 # full list of supported models.
 # e.g., deepseek3-671b
-export MODEL=<MaxText Model>
+export MODEL="<MAXTEXT_MODEL>"
 
 # Your Hugging Face access token. Required to download gated models like Llama.
 # You can generate one at https://huggingface.co/settings/tokens.
-export HF_TOKEN=<Hugging Face Access Token>
+export HF_TOKEN="<HF_TOKEN>"
 
 # -- MaxText configuration --
 # Use a GCS bucket you own to store logs and checkpoints. Ideally in the same
@@ -66,25 +66,25 @@ export HF_TOKEN=<Hugging Face Access Token>
 # [Cloud Console](https://console.cloud.google.com/storage/browser) or via
 # `gcloud storage buckets list --format="table(name, location)"`.
 # e.g., gs://my-bucket/maxtext-runs
-export BASE_OUTPUT_DIRECTORY=<GCS Path for Output/Logs>
+export BASE_OUTPUT_DIRECTORY="<GCS_OUTPUT_PATH>"
 
 # An arbitrary string to identify this specific run.
 # We recommend to include the model, user, and timestamp.
 # Note: Kubernetes requires workload names to be valid DNS labels (lowercase, no underscores or periods).
-export RUN_NAME=<Name for this run>
+export RUN_NAME="<RUN_NAME>"
 
 # -- Workload configuration --
 # Your GCP project ID. Find it on the [Cloud Console Dashboard](https://console.cloud.google.com/home/dashboard).
 # If you've already set it in your local config, you can retrieve it via:
 # gcloud config get-value project
-export PROJECT_ID=<Google Cloud Project ID>
+export PROJECT_ID="<PROJECT_ID>"
 
 # The GCP location (listed as "Location" in the UI) and name of your
 # TPU-enabled GKE cluster. Both can be found on the
 # [Cloud Console](https://console.cloud.google.com/kubernetes/list).
 # e.g., 'us-central1'
-export ZONE=<GKE Cluster Zone>
-export GKE_CLUSTER=<Name of GKE Cluster>
+export ZONE="<ZONE>"
+export GKE_CLUSTER="<GKE_CLUSTER>"
 
 # For a full list of MaxText-supported TPU types, see: `src/maxtext/utils/accelerator_to_spec_map.py`. To see the TPU type
 # of your cluster:
@@ -94,24 +94,24 @@ export GKE_CLUSTER=<Name of GKE Cluster>
 
 # 2. Find your TPU type (e.g., 'v5p-128') by checking the accelerator labels on your nodes:
 # kubectl get nodes -l cloud.google.com/gke-tpu-accelerator -o jsonpath='{.items[*].metadata.labels.cloud\.google\.com/gke-tpu-accelerator}' | tr ' ' '\n' | sort -u
-export TPU_TYPE=<TPU Type>
-export NUM_SLICES=<number of slices>
+export TPU_TYPE="<TPU_TYPE>"
+export NUM_SLICES="<NUM_SLICES>"
 
 # The Docker image you pushed in the prerequisite step
-export CLOUD_IMAGE_NAME=<Docker Image Name>
+export CLOUD_IMAGE_NAME="<DOCKER_IMAGE_NAME>"
 export DOCKER_IMAGE="gcr.io/${PROJECT_ID?}/${CLOUD_IMAGE_NAME?}"
 
 # -- Fine-Tuning configuration --
 # e.g., 1000
-export STEPS=<Fine-Tuning Steps>
+export STEPS="<STEPS>"
 
 # -- Dataset configuration --
 # e.g., HuggingFaceH4/ultrachat_200k
-export DATASET_NAME=<Hugging Face Dataset Name>
+export DATASET_NAME="<DATASET_NAME>"
 # e.g., train_sft
-export TRAIN_SPLIT=<Data Split for Train>
+export TRAIN_SPLIT="<TRAIN_SPLIT>"
 # e.g., ['messages']
-export TRAIN_DATA_COLUMNS=<Data Columns to Train on>
+export TRAIN_DATA_COLUMNS="<TRAIN_DATA_COLUMNS>"
 ```
 
 ## Get MaxText model checkpoint
@@ -124,7 +124,7 @@ If you already have a MaxText-compatible model checkpoint, simply set the follow
 
 ```bash
 # e.g., gs://my-bucket/my-model-checkpoint/0/items
-export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint>
+export MAXTEXT_CKPT_PATH="<MAXTEXT_CKPT_PATH>"
 ```
 
 **Note:** Make sure that `MAXTEXT_CKPT_PATH` has the checkpoints created using the correct storage flags:
@@ -141,7 +141,7 @@ Refer the steps in [Hugging Face to MaxText](https://maxtext.readthedocs.io/en/m
 
 ```bash
 # gs://my-bucket/my-checkpoint-directory/0/items
-export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint>
+export MAXTEXT_CKPT_PATH="<MAXTEXT_CKPT_PATH>"
 ```
 
 ## Submit workload on GKE cluster

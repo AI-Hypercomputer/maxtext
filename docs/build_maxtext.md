@@ -57,7 +57,7 @@ pip install uv
 # curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Create virtual environment (e.g., docker_venv)
-export VENV_NAME=<your virtual env name>
+export VENV_NAME="<VENV_NAME>"
 uv venv --python 3.12 --seed ${VENV_NAME?}
 source ${VENV_NAME?}/bin/activate
 
@@ -80,7 +80,7 @@ git clone https://github.com/AI-Hypercomputer/maxtext.git
 cd maxtext
 
 # Create virtual environment (e.g., docker_venv)
-export VENV_NAME=<your virtual env name>
+export VENV_NAME="<VENV_NAME>"
 uv venv --python 3.12 --seed ${VENV_NAME?}
 source ${VENV_NAME?}/bin/activate
 
@@ -137,7 +137,7 @@ build_maxtext_docker_image WORKFLOW=post-training
 
 ```bash
 # Make sure to set `CLOUD_IMAGE_NAME` with your desired image name.
-export CLOUD_IMAGE_NAME=<Docker Image Name>
+export CLOUD_IMAGE_NAME="<DOCKER_IMAGE_NAME>"
 upload_maxtext_docker_image CLOUD_IMAGE_NAME=${CLOUD_IMAGE_NAME?}
 ```
 
@@ -149,5 +149,5 @@ upload_maxtext_docker_image CLOUD_IMAGE_NAME=${CLOUD_IMAGE_NAME?}
 
 ```bash
 ERROR: Found symbolic links with absolute paths in the build context:
-./<add_this_value_to_dockerignore>
+./"<FILE_PATH_TO_IGNORE>"
 ```

@@ -81,7 +81,7 @@ eval metrics after step: 9, loss=9.420, total_weights=75264.0
 
 **HuggingFace access token (optional)**:
 
-- For a [gated dataset](https://huggingface.co/docs/hub/en/datasets-gated) or a tokenizer from a [gated model](https://huggingface.co/docs/hub/en/models-gated), you need to request access on HuggingFace and provide `hf_access_token=<YOUR_TOKEN>` in the command. For instance, [meta-llama/Llama-2-7b](https://huggingface.co/meta-llama/Llama-2-7b) is a gated model.
+- For a [gated dataset](https://huggingface.co/docs/hub/en/datasets-gated) or a tokenizer from a [gated model](https://huggingface.co/docs/hub/en/models-gated), you need to request access on HuggingFace and provide `hf_access_token="<HF_ACCESS_TOKEN>"` in the command. For instance, [meta-llama/Llama-2-7b](https://huggingface.co/meta-llama/Llama-2-7b) is a gated model.
 
 ## 2. Grain pipeline
 
@@ -133,7 +133,7 @@ The TensorFlow Datasets (TFDS) pipeline uses dataset in the TFRecord format. You
 
 **Data preparation**: You need to download data to a [Cloud Storage bucket](https://cloud.google.com/storage/docs/creating-buckets), and the pipeline streams data from the bucket.
 
-- To download the AllenAI C4 dataset to your bucket, you can use [download_dataset.sh](https://github.com/AI-Hypercomputer/maxtext/blob/main/tools/data_generation/download_dataset.sh): `bash download_dataset.sh <GCS_PROJECT> <GCS_BUCKET_FOR_DATASET>`
+- To download the AllenAI C4 dataset to your bucket, you can use [download_dataset.sh](https://github.com/AI-Hypercomputer/maxtext/blob/main/tools/data_generation/download_dataset.sh): `bash download_dataset.sh "<GCS_PROJECT>" "<GCS_BUCKET_FOR_DATASET>"`
 
 This **command** shows pretraining with TFDS pipeline, along with evaluation:
 

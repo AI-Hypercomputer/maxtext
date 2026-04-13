@@ -38,8 +38,8 @@ Then use this command to convert an unscanned checkpoint from HuggingFace to Max
 ```shell
 # Your Hugging Face access token. Required to download gated models like Llama.
 # You can generate one at https://huggingface.co/settings/tokens.
-export HF_TOKEN=<Hugging Face access token>
-export MAXTEXT_CKPT_PATH=<Checkpoint GCS path> # gs://my-bucket/path
+export HF_TOKEN="<HF_TOKEN>"
+export MAXTEXT_CKPT_PATH="<MAXTEXT_CKPT_PATH>" # gs://my-bucket/path
 python -m maxtext.checkpoint_conversion.to_maxtext \
     model_name=gemma3-4b \
     hf_access_token=${HF_TOKEN?} \
@@ -52,7 +52,7 @@ For the Llama4 model family, we are using a separate checkpoint conversion scrip
 
 ```shell
 export LOCAL_HF_MODEL_PATH=...  # Need to pre-download the safetensors from HuggingFace
-export MAXTEXT_CKPT_PATH=<Checkpoint GCS path> # gs://my-bucket/path
+export MAXTEXT_CKPT_PATH="<MAXTEXT_CKPT_PATH>" # gs://my-bucket/path
 python -m maxtext.checkpoint_conversion.standalone_scripts.llama4_ckpt_unscanned \
     --model-size=llama4-17b-16e \
     --huggingface-checkpoint=True \

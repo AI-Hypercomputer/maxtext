@@ -10,6 +10,27 @@ document.addEventListener('DOMContentLoaded', () => {
     const originalHTML = block.innerHTML;
 
     const placeholders = [
+      '"<DATASET_NAME>"',
+      '"<DOCKER_IMAGE_NAME>"',
+      '"<FILE_PATH_TO_IGNORE>"',
+      '"<GCS_BUCKET_FOR_DATASET>"',
+      '"<GCS_BUCKET_PATH>"',
+      '"<GCS_OUTPUT_PATH>"',
+      '"<GCS_PROJECT>"',
+      '"<GKE_CLUSTER>"',
+      '"<HF_ACCESS_TOKEN>"',
+      '"<HF_TOKEN>"',
+      '"<MAXTEXT_CKPT_PATH>"',
+      '"<MAXTEXT_MODEL>"',
+      '"<NUM_SLICES>"',
+      '"<PER_DEVICE_BATCH_SIZE>"',
+      '"<POD_NAME>"',
+      '"<PROJECT_ID>"',
+      '"<RUN_NAME>"',
+      '"<STEPS>"',
+      '"<TPU_TYPE>"',
+      '"<VENV_NAME>"',
+      '"<ZONE>"',
       "<batch size per device>",
       "<bucket>",
       "<cluster name>",
@@ -81,7 +102,8 @@ document.addEventListener('DOMContentLoaded', () => {
       const htmlEscapedKey = placeholder
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;');
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
 
       let pattern = '';
       for (let i = 0; i < htmlEscapedKey.length; i++) {
