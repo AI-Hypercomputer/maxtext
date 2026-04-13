@@ -4,7 +4,7 @@ metadata:
   annotations:
     jobset.sigs.k8s.io/hack: "true"
   labels: {}
-  name: mohit-ds # Change to your favorite run name (please use your ldap)
+  name: mohit-dsv3-t
   namespace: default
 spec:
   coordinator:
@@ -34,7 +34,7 @@ spec:
           spec:
             containers:
             - name: jax-tpu
-              image: gcr.io/tpu-prod-env-multipod/mohit-dsv3-build:20260411
+              image: gcr.io/tpu-prod-env-multipod/mohit-dsv3-build:20260413b
               imagePullPolicy: Always
               securityContext:
                 privileged: true
@@ -68,7 +68,7 @@ spec:
                   (
                     pip show jax;
                     pip show jaxlib;
-                    pip show tpu-inference; 
+                    pip show tpu-inference;
                     pip show vllm;
                     MODEL_IMPL_TYPE=vllm NEW_MODEL_DESIGN=True \
                     python3 src/maxtext/integration/tunix/weight_mapping/bench_weight_sync.py \
@@ -121,7 +121,7 @@ spec:
             # ── Pathways Resource Manager (sidecar initContainer) ──
             initContainers:
             - name: pathways-rm
-              image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/wenxindong/unsanitized_server@sha256:86c38c662b9d336518e47428240d3e26454bca6a696503642e205bd05cc58536
+              image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/wenxindong/unsanitized_server:latest
               imagePullPolicy: Always
               args:
               - --server_port=29001
@@ -158,7 +158,7 @@ spec:
               restartPolicy: Always
             # ── Pathways Proxy Server (sidecar initContainer, port 29000) ──
             - name: pathways-proxy
-              image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/wenxindong/unsanitized_proxy_server@sha256:dc2619c4a1a1df238e3b1d811c106c143ae8777fa0c779c9aafe071b615cf381
+              image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/wenxindong/unsanitized_proxy_server:latest
               imagePullPolicy: Always
               args:
               - --server_port=29000
@@ -195,17 +195,18 @@ spec:
         labels:
           kueue.x-k8s.io/queue-name: lq
         annotations:
-          cloud.google.com/gke-tpu-slice-topology: 4x4x4 # Use your favorite 4m x 4n x 4k topology
+          cloud.google.com/gke-tpu-slice-topology: 4x4x4
       spec:
         backoffLimit: 2048000
         completionMode: Indexed
-        completions: 16 # use num_chips / 4 (see your topology setting above)
-        parallelism: 16 # same as above
+        completions: 16
+        parallelism: 16
         template:
           metadata:
             annotations:
-              cloud.google.com/gke-tpu-slice-topology: 4x4x4 # same as above
+              cloud.google.com/gke-tpu-slice-topology: 4x4x4
               kueue.k8s.io/podset-required-topology: cloud.google.com/gce-topology-block
+              kueue.x-k8s.io/podset-required-topology: cloud.google.com/gce-topology-block
               kueue.x-k8s.io/podset-slice-required-topology: cloud.google.com/gke-tpu-partition-4x4x4-id
               kueue.x-k8s.io/podset-slice-size: "16"
               cloud.google.com/skip-tpu-webhook-check: "true"
@@ -234,7 +235,7 @@ spec:
             dnsPolicy: ClusterFirstWithHostNet
             containers:
             - name: pathways-worker
-              image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/wenxindong/unsanitized_server@sha256:86c38c662b9d336518e47428240d3e26454bca6a696503642e205bd05cc58536
+              image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/wenxindong/unsanitized_server:latest
               imagePullPolicy: Always
               restartPolicy: Always
               args:
@@ -292,33 +293,6 @@ spec:
                   google.com/tpu: "4"
                 requests:
                   google.com/tpu: "4"
-              volumeMounts:
-              - mountPath: /tmp
-                name: shared-tmp
-            initContainers:
-            - name: colocated-python-sidecar
-              image: us-east5-docker.pkg.dev/cloud-tpu-inference-test/wenxindong/colocated_python:latest
-              imagePullPolicy: Always
-              env:
-              - name: GRPC_SERVER_ADDRESS
-                value: '''0.0.0.0:50051'''
-              - name: MEGASCALE_COORDINATOR_ADDRESS
-                valueFrom:
-                  fieldRef:
-                    fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
-              - name: TPU_CHIP_ID
-                valueFrom:
-                  fieldRef:
-                    fieldPath: metadata.annotations['batch.kubernetes.io/job-completion-index']
-              - name: TPU_REPLICATED_CHIP_ID
-                valueFrom:
-                  fieldRef:
-                    fieldPath: metadata.annotations['batch.kubernetes.io/job-completion-index']
-              ports:
-              - containerPort: 50051
-                protocol: TCP
-              resources: {}
-              restartPolicy: Always
               volumeMounts:
               - mountPath: /tmp
                 name: shared-tmp

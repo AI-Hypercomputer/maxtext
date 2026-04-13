@@ -92,7 +92,7 @@ spec:
                 restartPolicy: Always
             containers:
               - name: jax-tpu
-                image: gcr.io/tpu-prod-env-multipod/mohit-dsv3-build:20260409
+                image: gcr.io/tpu-prod-env-multipod/mohit-dsv3-build:20260413f
                 imagePullPolicy: Always
                 env:
                 - name: LIBTPU_INIT_ARGS
@@ -102,9 +102,11 @@ spec:
                     fieldRef:
                       fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
                 - name: MOE_REQUANTIZE_WEIGHT_DTYPE
-                  value: "bfloat16"
+                  value: ""
                 - name: JAX_PLATFORMS
                   value: proxy,cpu
+                - name: VLLM_TPU_USING_PATHWAYS
+                  value: "1"
                 - name: XCLOUD_ENVIRONMENT
                   value: GCP
                 - name: JAX_BACKEND_TARGET
@@ -132,7 +134,7 @@ spec:
                   --rollout_tensor_parallelism=1 \
                   --rollout_expert_parallelism=128 \
                   --run_vllm_only=False \
-                  --load_format=runai_streamer \
+                  --load_format=pathways_dummy \
                   --model_loader_extra_config='{"memory_limit":10737418240}') & PID=$!;
                   while kill -0 $PID 2>/dev/null;
                       do sleep 5;

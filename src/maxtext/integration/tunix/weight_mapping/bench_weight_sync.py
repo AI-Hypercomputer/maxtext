@@ -890,17 +890,22 @@ class DeepSeekV3ToVLLMConverter:
         routed_moe = moe['MoeBlock_0']
 
         logging.info("_convert_moe: gate...")
-        @jax.jit
-        def _process_gate(gate_kernel):
-            # (emb, L, E) -> (L, E, emb)
-            return jnp.unstack(jnp.transpose(gate_kernel, (1, 2, 0)))
-        
-        gate_layers = _process_gate(routed_moe['gate']['kernel'])
+        _num_moe_layers = len(list(layer_indices))
         _expert_2d = jax.sharding.NamedSharding(
             self.mesh, jax.sharding.PartitionSpec('model', None))
         # gate bias shape is (E,) — rank 1, so use a 1D partition spec.
         _expert_1d = jax.sharding.NamedSharding(
             self.mesh, jax.sharding.PartitionSpec('model',))
+
+        # No explicit out_shardings — let XLA keep the natural sharding derived
+        # from the input.  Forcing expert-parallel out_shardings when MaxText
+        # uses TP sharding triggers a giant all-to-all that crashes the proxy.
+        @jax.jit
+        def _process_gate(gate_kernel):
+            # (emb, L, E) -> (L, E, emb)
+            return jnp.unstack(jnp.transpose(gate_kernel, (1, 2, 0)))
+
+        gate_layers = _process_gate(routed_moe['gate']['kernel'])
         # Gate bias: (L, E) after unstack -> (E,) per layer.
         # MaxText stores gate bias as (E, L), so transpose first.
         gate_has_bias = 'bias' in routed_moe['gate']
@@ -910,17 +915,10 @@ class DeepSeekV3ToVLLMConverter:
                 # gate_bias: (E, L) -> (L, E)
                 return jnp.unstack(jnp.transpose(gate_bias, (1, 0)))
             gate_bias_layers = _process_gate_bias(routed_moe['gate']['bias'])
-        # Windowed pipelining: Keep up to 4 layers in-flight to overlap transfers 
-        # while keeping proxy memory usage low and stable.
-        _GATE_WINDOW = 4
         for i, layer_idx in enumerate(layer_indices):
-            self.vllm_state[f"{prefix}.{layer_idx}.mlp.gate.weight"] = jax.device_put(gate_layers[i], _expert_2d)
+            self.vllm_state[f"{prefix}.{layer_idx}.mlp.gate.weight"] = gate_layers[i]
             if gate_has_bias:
-                self.vllm_state[f"{prefix}.{layer_idx}.mlp.gate.e_score_correction_bias"] = jax.device_put(gate_bias_layers[i], _expert_1d)
-            
-            # Block after every window to drain the proxy buffer.
-            if (i + 1) % _GATE_WINDOW == 0:
-                self.vllm_state[f"{prefix}.{layer_idx}.mlp.gate.weight"].block_until_ready()
+                self.vllm_state[f"{prefix}.{layer_idx}.mlp.gate.e_score_correction_bias"] = gate_bias_layers[i]
 
         logging.info("_convert_moe: routed experts...")
 
@@ -930,19 +928,14 @@ class DeepSeekV3ToVLLMConverter:
         # At L=1 each all-gather buffer is 14GB (28GB total), safely within budget.
         _ROUTED_LAYER_CHUNK = 1
 
-        # Declare the target output sharding before the jit-decorated function so
-        # XLA can fuse the all-gather (needed to transpose d_inner across chips) and
-        # the subsequent re-shard into a single collective, rather than issuing a
-        # separate jax.device_put per layer.  This keeps the device busier across
-        # the 58 sequential single-layer dispatches.
-        # 256 experts / 128 chips = 2 experts per chip on the 'model' axis.
-        _expert_3d = jax.sharding.NamedSharding(
-            self.mesh, jax.sharding.PartitionSpec('model', None, None))
+        # Log input sharding so we know what XLA will need to reshard from/to.
+        _wi0_sharding = routed_moe['wi_0'].sharding if hasattr(routed_moe['wi_0'], 'sharding') else 'unknown'
+        logging.info("_convert_moe: wi_0 sharding=%s shape=%s", _wi0_sharding, routed_moe['wi_0'].shape)
 
-        _scale_3d = jax.sharding.NamedSharding(
-            self.mesh, jax.sharding.PartitionSpec('model', None, None))
-
-        @functools.partial(jax.jit, out_shardings=(tuple([_expert_3d]*_ROUTED_LAYER_CHUNK), tuple([_scale_3d]*_ROUTED_LAYER_CHUNK), tuple([_expert_3d]*_ROUTED_LAYER_CHUNK), tuple([_scale_3d]*_ROUTED_LAYER_CHUNK)))
+        # No explicit out_shardings — let XLA keep the natural sharding derived
+        # from the input.  Forcing expert-parallel out_shardings when MaxText
+        # uses TP sharding triggers a giant all-to-all that crashes workers.
+        @jax.jit
         def _process_routed(wi_0, wi_1, wo):
             # wi_0: (E, L, d_model, d_inner) -> (L, E, d_inner, d_model)
             l = wi_0.shape[1]
@@ -953,12 +946,14 @@ class DeepSeekV3ToVLLMConverter:
             w0 = jnp.transpose(wi_0, (1, 0, 3, 2))  # (L, E, d_inner, d_model)
             w1 = jnp.transpose(wi_1, (1, 0, 3, 2))  # (L, E, d_inner, d_model)
 
-            # Interleave gate/up projections for TP
-            chunk_size = di // tp
-            w0_chunks = w0.reshape(l, e, tp, chunk_size, dm)
-            w1_chunks = w1.reshape(l, e, tp, chunk_size, dm)
-            gate_up = jnp.stack([w0_chunks, w1_chunks], axis=3).reshape(l, e, 2 * di, dm)
-            # vLLM quantized matmul contracts on last dim of W, so keep (E, 2*d_inner, d_model)
+            # EP inference: each chip owns its local experts in full.
+            # No TP interleaving — just concatenate gate (w0) and up (w1)
+            # along the output-channel axis to form (L, E, 2*d_inner, d_model).
+            # TP-style chunk-interleaving would require a reshape that splits E
+            # across the tp=128 dim, which conflicts with MaxText's expert
+            # sharding ('model': E/128) and triggers huge all-to-all collectives.
+            gate_up = jnp.concatenate([w0, w1], axis=2)
+            # vLLM GMM contraction is on the last dim (d_model), layout (E, 2*d_inner, d_model).
 
             # wo: (E, L, d_inner, d_model) -> (L, E, d_model, d_inner)
             down = jnp.transpose(wo, (1, 0, 3, 2))
@@ -999,10 +994,9 @@ class DeepSeekV3ToVLLMConverter:
                 self.vllm_state[f"{prefix}.{_layer_idx}.mlp.experts.w13_weight_scale_inv"] = _gu_s[_j]
                 self.vllm_state[f"{prefix}.{_layer_idx}.mlp.experts.w2_weight"] = _dn[_j]
                 self.vllm_state[f"{prefix}.{_layer_idx}.mlp.experts.w2_weight_scale_inv"] = _dn_s[_j]
-                
-            # Block after every window based on the outer loop index
-            if (_chunk_start + 1) % 4 == 0:
-                _gu[-1].block_until_ready()
+
+            # Block after every chunk to prevent unbounded dispatch buffering.
+            _gu[-1].block_until_ready()
 
         logging.info("_convert_moe: shared experts...")
         @jax.jit
@@ -1014,13 +1008,10 @@ class DeepSeekV3ToVLLMConverter:
 
             w0 = jnp.transpose(wi_0, (1, 2, 0))
             w1 = jnp.transpose(wi_1, (1, 2, 0))
-            
-            # Interleave for TP
-            chunk_size = ds // tp
-            w0_chunks = w0.reshape(l, tp, chunk_size, dm)
-            w1_chunks = w1.reshape(l, tp, chunk_size, dm)
-            gate_up = jnp.stack([w0_chunks, w1_chunks], axis=2).reshape(l, 2 * ds, dm)
-            # vLLM quantized matmul contracts on last dim of W, so keep (2*d_shared, d_model)
+
+            # No TP interleaving — just concatenate gate and up.
+            gate_up = jnp.concatenate([w0, w1], axis=1)
+            # Shape: (L, 2*d_shared, d_model)
 
             # wo: (d_shared, L, d_model) -> (L, d_model, d_shared)
             down = jnp.transpose(wo, (1, 2, 0))
@@ -1051,12 +1042,9 @@ class DeepSeekV3ToVLLMConverter:
             w0 = jnp.transpose(wi_0, (1, 2, 0))
             w1 = jnp.transpose(wi_1, (1, 2, 0))
 
-            # Interleave for TP
-            chunk_size = di // tp
-            w0_chunks = w0.reshape(l, tp, chunk_size, dm)
-            w1_chunks = w1.reshape(l, tp, chunk_size, dm)
-            gate_up = jnp.stack([w0_chunks, w1_chunks], axis=2).reshape(l, 2 * di, dm)
-            # vLLM quantized matmul contracts on last dim of W, so keep (2*d_inner, d_model)
+            # No TP interleaving — just concatenate gate and up.
+            gate_up = jnp.concatenate([w0, w1], axis=1)
+            # Shape: (L, 2*d_inner, d_model)
 
             # wo: (d_inner, L, d_model) -> (L, d_model, d_inner)
             down = jnp.transpose(wo, (1, 2, 0))
@@ -1118,6 +1106,11 @@ def main():
     print(f"{GREEN}MaxText model loaded successfully{RESET}")
     print(f"Model: {config.model_name}")
     print(f"Mesh: {mesh}")
+    # Drain all pending proxy ops from model init before starting conversion.
+    # The 671B-param random init dispatches a large burst of async ops; without
+    # this barrier the proxy queue overflows and the connection drops mid-conversion.
+    jax.effects_barrier()
+    print("Model init barrier complete")
 
     # Convert weights to VLLM format
     print("="*80)
