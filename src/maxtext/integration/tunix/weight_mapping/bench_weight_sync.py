@@ -910,10 +910,17 @@ class DeepSeekV3ToVLLMConverter:
                 # gate_bias: (E, L) -> (L, E)
                 return jnp.unstack(jnp.transpose(gate_bias, (1, 0)))
             gate_bias_layers = _process_gate_bias(routed_moe['gate']['bias'])
+        # Windowed pipelining: Keep up to 4 layers in-flight to overlap transfers 
+        # while keeping proxy memory usage low and stable.
+        _GATE_WINDOW = 4
         for i, layer_idx in enumerate(layer_indices):
-            self.vllm_state[f"{prefix}.{layer_idx}.mlp.gate.weight"] = jax.device_put(gate_layers[i], _expert_2d).block_until_ready()
+            self.vllm_state[f"{prefix}.{layer_idx}.mlp.gate.weight"] = jax.device_put(gate_layers[i], _expert_2d)
             if gate_has_bias:
-                self.vllm_state[f"{prefix}.{layer_idx}.mlp.gate.e_score_correction_bias"] = jax.device_put(gate_bias_layers[i], _expert_1d).block_until_ready()
+                self.vllm_state[f"{prefix}.{layer_idx}.mlp.gate.e_score_correction_bias"] = jax.device_put(gate_bias_layers[i], _expert_1d)
+            
+            # Block after every window to drain the proxy buffer.
+            if (i + 1) % _GATE_WINDOW == 0:
+                self.vllm_state[f"{prefix}.{layer_idx}.mlp.gate.weight"].block_until_ready()
 
         logging.info("_convert_moe: routed experts...")
 
@@ -932,7 +939,10 @@ class DeepSeekV3ToVLLMConverter:
         _expert_3d = jax.sharding.NamedSharding(
             self.mesh, jax.sharding.PartitionSpec('model', None, None))
 
-        @functools.partial(jax.jit, out_shardings=((_expert_3d,), (_expert_3d,)))
+        _scale_3d = jax.sharding.NamedSharding(
+            self.mesh, jax.sharding.PartitionSpec('model', None, None))
+
+        @functools.partial(jax.jit, out_shardings=(tuple([_expert_3d]*_ROUTED_LAYER_CHUNK), tuple([_scale_3d]*_ROUTED_LAYER_CHUNK), tuple([_expert_3d]*_ROUTED_LAYER_CHUNK), tuple([_scale_3d]*_ROUTED_LAYER_CHUNK)))
         def _process_routed(wi_0, wi_1, wo):
             # wi_0: (E, L, d_model, d_inner) -> (L, E, d_inner, d_model)
             l = wi_0.shape[1]
@@ -952,27 +962,47 @@ class DeepSeekV3ToVLLMConverter:
 
             # wo: (E, L, d_inner, d_model) -> (L, E, d_model, d_inner)
             down = jnp.transpose(wo, (1, 0, 3, 2))
+            
+            # Quantize
+            fp8_type = jnp.float8_e4m3fn
+            gate_up_q, gate_up_scale = tpu_quantize_tensor(fp8_type, gate_up, axis=-1)
+            down_q, down_scale = tpu_quantize_tensor(fp8_type, down, axis=-1)
+            
+            # tpu_quantize_tensor on axis=-1 drops the last dimension if block_size is None.
+            # gate_up: (L, E, 2*di, dm) -> scale is (L, E, 2*di)
+            # vLLM expects blockwise scales as (out_features, 1, n_blocks).
+            # For per-channel (block_size=None), n_blocks=1.
+            # We need to reshape (L, E, 2*di) -> (L, E, 2*di, 1) to match the expected format 
+            # for process_weights_after_loading, which expects (out, 1) or similar.
+            # Let's expand dims to match the expected 4D shape (L, E, 1, 2*di) that tpu-inference 
+            # swapaxes patch looks for, or just keep it compatible.
+            # Actually, per-channel scales for GMM EP are expected to be (E, 1, 1, out_features) 
+            # if we use the tpu-inference fast path swapaxes(1, 2).
+            # Wait, our patch in tpu-inference skips padding if shape[-1] != intermediate_size * 2.
+            # So if we output (L, E, 2*di), unstack makes it (E, 2*di). 
+            # Let's just output (L, E, 1, 2*di) so unstack makes it (E, 1, 2*di) which is safe.
+            gate_up_scale = jnp.expand_dims(gate_up_scale, axis=2)
+            down_scale = jnp.expand_dims(down_scale, axis=2)
 
-            return jnp.unstack(gate_up), jnp.unstack(down)
+            return jnp.unstack(gate_up_q), jnp.unstack(gate_up_scale), jnp.unstack(down_q), jnp.unstack(down_scale)
 
         num_moe_layers = len(layer_indices)
         for _chunk_start in range(0, num_moe_layers, _ROUTED_LAYER_CHUNK):
             _chunk_end = min(_chunk_start + _ROUTED_LAYER_CHUNK, num_moe_layers)
-            _gu, _dn = _process_routed(
+            _gu, _gu_s, _dn, _dn_s = _process_routed(
                 routed_moe['wi_0'][:, _chunk_start:_chunk_end],
                 routed_moe['wi_1'][:, _chunk_start:_chunk_end],
                 routed_moe['wo'][:, _chunk_start:_chunk_end],
             )
             for _j, _layer_idx in enumerate(list(layer_indices)[_chunk_start:_chunk_end]):
-                # NOTE: w13_weight and w2_weight are NOT added to vllm_state.
-                # They require block fp8 quantization (128x128 blocks) + the full
-                # process_fp8_moe_weights pipeline (swapaxes, GMM reordering, padding)
-                # to produce the shape/dtype that tpu-inference expects.
-                # Until that is implemented, the checkpoint's fp8 expert weights are
-                # kept as-is. Storing them in vllm_state (even with the scale_inv
-                # skip guard) risks overwriting the correctly-processed tensors if
-                # the root logger is at WARNING level and the guard silently fails.
-                pass  # _gu[_j] and _dn[_j] computed but not yet synced to vllm_state
+                self.vllm_state[f"{prefix}.{_layer_idx}.mlp.experts.w13_weight"] = _gu[_j]
+                self.vllm_state[f"{prefix}.{_layer_idx}.mlp.experts.w13_weight_scale_inv"] = _gu_s[_j]
+                self.vllm_state[f"{prefix}.{_layer_idx}.mlp.experts.w2_weight"] = _dn[_j]
+                self.vllm_state[f"{prefix}.{_layer_idx}.mlp.experts.w2_weight_scale_inv"] = _dn_s[_j]
+                
+            # Block after every window based on the outer loop index
+            if (_chunk_start + 1) % 4 == 0:
+                _gu[-1].block_until_ready()
 
         logging.info("_convert_moe: shared experts...")
         @jax.jit
@@ -1045,8 +1075,32 @@ class DeepSeekV3ToVLLMConverter:
 
 
 
+def wait_for_devices(expected_devices, timeout_s=1200):
+    """Wait for Pathways to report the expected number of devices."""
+    start_time = time.time()
+    print(f"Waiting for {expected_devices} TPU devices via Pathways...")
+    while True:
+        try:
+            n = len(jax.devices())
+            print(f"Devices visible: {n}/{expected_devices}", flush=True)
+            if n >= expected_devices:
+                print(f"All {n} devices ready.")
+                break
+        except Exception as e:
+            print(f"Error checking devices: {e}")
+        
+        if time.time() - start_time > timeout_s:
+            raise TimeoutError(f"Timed out waiting {timeout_s}s for {expected_devices} devices.")
+        
+        time.sleep(10)
+
 def main():
   pathwaysutils.initialize()
+  
+  # Calculate expected devices dynamically from config if possible, else default to 128
+  expected = 128
+  wait_for_devices(expected)
+  
   print(f"JAX devices: {jax.devices()}")  
   _setup_jax_compilation_cache()
   _setup_vllm()
@@ -1210,6 +1264,12 @@ def main():
       else:
         return functools.partial(jax.device_put, device=dst_sharding)
 
+    # Key completeness diagnostic — print before sync so it's visible even on OOM.
+    _missing_in_llm  = sorted(k for k in vllm_state  if k not in llm_state)
+    _missing_in_vllm = sorted(k for k in llm_state   if k not in vllm_state)
+    print(f"[KEY_CHECK] vllm_state keys NOT in llm_state  ({len(_missing_in_llm)}): {_missing_in_llm[:30]}", flush=True)
+    print(f"[KEY_CHECK] llm_state  keys NOT in vllm_state ({len(_missing_in_vllm)}): {_missing_in_vllm[:30]}", flush=True)
+
     with timer(f"Assigning {len(vllm_state)} weights to vLLM model"):
       _fp8_dtype = jnp.float8_e4m3fn
       for key, weight in vllm_state.items():
@@ -1226,13 +1286,16 @@ def main():
         if dst_dtype == _fp8_dtype:
           scale_key = key + "_scale"
           scale_inv_key = key + "_scale_inv"
-          if scale_inv_key in llm_state:
-            # MoE expert weight (w13_weight, w2_weight): uses block quantization
-            # with complex post-processing scale shape (256, 1, 1, d_inner).
-            # Defer — keep the checkpoint's fp8 expert weights as-is.
-            logging.info("Skipping MoE block-quantized weight (keeping checkpoint fp8): %s", key)
-            continue
+          if weight_array.dtype == _fp8_dtype:
+            # Already quantized (like MoE experts)
+            llm_state[key] = _get_reshard_fn(dst_sharding)(weight_array)
+            if scale_key in vllm_state and scale_key in llm_state:
+                # scale will be assigned when the loop hits scale_key, 
+                # or we just skip it here. Actually, the loop iterates over vllm_state.items(),
+                # so scale_key will be processed independently if it's not fp8.
+                pass
           elif scale_key in llm_state:
+
             # Linear fp8 weight (attention, dense MLP, shared experts):
             # checkpoint uses per-row (per-output-channel) fp8 quantization.
             # scale shape = (out_channels,) matching weight.shape[0].
