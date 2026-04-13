@@ -56,8 +56,8 @@ pip install uv
 # Alternatively, if pip install fails:
 # curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# Create virtual environment
-export VENV_NAME=<your virtual env name> # e.g., docker_venv
+# Create virtual environment (e.g., docker_venv)
+export VENV_NAME=<your virtual env name>
 uv venv --python 3.12 --seed ${VENV_NAME?}
 source ${VENV_NAME?}/bin/activate
 
@@ -79,8 +79,8 @@ If you plan to contribute to MaxText or need the latest unreleased features, ins
 git clone https://github.com/AI-Hypercomputer/maxtext.git
 cd maxtext
 
-# Create virtual environment
-export VENV_NAME=<your virtual env name> # e.g., docker_venv
+# Create virtual environment (e.g., docker_venv)
+export VENV_NAME=<your virtual env name>
 uv venv --python 3.12 --seed ${VENV_NAME?}
 source ${VENV_NAME?}/bin/activate
 

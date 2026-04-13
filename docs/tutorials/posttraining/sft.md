@@ -45,27 +45,34 @@ placeholders with your actual values.
 # -- Model configuration --
 # The MaxText model name. See `src/maxtext/configs/types.py` for `ModelName` for a
 # full list of supported models.
-export MODEL=<MaxText Model> # e.g., 'llama3.1-8b-Instruct'
+# e.g., 'llama3.1-8b-Instruct'
+export MODEL=<MaxText Model>
 
 # -- MaxText configuration --
 # Use a GCS bucket you own to store logs and checkpoints. Ideally in the same
 # region as your TPUs to minimize latency and costs.
 # You can list your buckets and their locations in the
 # [Cloud Console](https://console.cloud.google.com/storage/browser).
-export BASE_OUTPUT_DIRECTORY=<gcs bucket path> # e.g., gs://my-bucket/maxtext-runs
+# e.g., gs://my-bucket/maxtext-runs
+export BASE_OUTPUT_DIRECTORY=<gcs bucket path>
 
 # An arbitrary string to identify this specific run.
 # We recommend to include the model, user, and timestamp.
 # Note: Kubernetes requires workload names to be valid DNS labels (lowercase, no underscores or periods).
 export RUN_NAME=<Name for this run>
 
-export STEPS=<number of fine-tuning steps to run> # e.g., 1000
-export PER_DEVICE_BATCH_SIZE=<batch size per device> # e.g., 1
+# e.g., 1000
+export STEPS=<number of fine-tuning steps to run>
+# e.g., 1
+export PER_DEVICE_BATCH_SIZE=<batch size per device>
 
 # -- Dataset configuration --
-export DATASET_NAME=<Hugging Face dataset name> # e.g., HuggingFaceH4/ultrachat_200k
-export TRAIN_SPLIT=<data split for train> # e.g., train_sft
-export TRAIN_DATA_COLUMNS=<data columns to train on> # e.g., ['messages']
+# e.g., HuggingFaceH4/ultrachat_200k
+export DATASET_NAME=<Hugging Face dataset name>
+# e.g., train_sft
+export TRAIN_SPLIT=<data split for train>
+# e.g., ['messages']
+export TRAIN_DATA_COLUMNS=<data columns to train on>
 ```
 
 ## Get your model checkpoint
@@ -77,7 +84,8 @@ This section explains how to prepare your model checkpoint for use with MaxText.
 If you already have a MaxText-compatible model checkpoint, simply set the following environment variable and move on to the next section.
 
 ```sh
-export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint> # e.g., gs://my-bucket/my-model-checkpoint/0/items
+# e.g., gs://my-bucket/my-model-checkpoint/0/items
+export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint>
 ```
 
 ### Option 2: Converting a Hugging Face checkpoint
@@ -85,7 +93,8 @@ export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint> # e.g., gs://my-bucke
 Refer the steps in [Hugging Face to MaxText](https://maxtext.readthedocs.io/en/maxtext-v0.2.1/guides/checkpointing_solutions/convert_checkpoint.html#hugging-face-to-maxtext) to convert a hugging face checkpoint to MaxText. Make sure you have correct checkpoint files converted and saved. Similar as Option 1, you can set the following environment and move on.
 
 ```sh
-export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint> # e.g., gs://my-bucket/my-model-checkpoint/0/items
+# e.g., gs://my-bucket/my-model-checkpoint/0/items
+export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint>
 ```
 
 ## Run SFT on Hugging Face Dataset

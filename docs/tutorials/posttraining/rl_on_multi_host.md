@@ -121,7 +121,7 @@ export GKE_CLUSTER=<cluster name>
 export TPU_TYPE=<TPU Type>
 
 # The Docker image you pushed in the prerequisite step
-export CLOUD_IMAGE_NAME=<image name>
+export CLOUD_IMAGE_NAME=<Docker Image Name>
 export DOCKER_IMAGE="gcr.io/${PROJECT_ID?}/${CLOUD_IMAGE_NAME?}"
 ```
 

@@ -64,14 +64,16 @@ placeholders with your actual values.
 # -- Model configuration --
 # The MaxText model name. See `src/maxtext/configs/types.py` for `ModelName` for a
 # full list of supported models.
-export MODEL=<MaxText Model> # e.g. 'llama3.1-8b-Instruct'
+# e.g. 'llama3.1-8b-Instruct'
+export MODEL=<MaxText Model>
 
 # -- MaxText configuration --
 # Use a GCS bucket you own to store logs and checkpoints.
 # You can list your buckets and their locations in the
 # [Cloud Console](https://console.cloud.google.com/storage/browser) or via
 # `gcloud storage buckets list --format="table(name, location)"`.
-export BASE_OUTPUT_DIRECTORY=<gcs bucket path> # e.g., gs://my-bucket/maxtext-runs
+# e.g., gs://my-bucket/maxtext-runs
+export BASE_OUTPUT_DIRECTORY=<gcs bucket path>
 
 # An arbitrary string to identify this specific run.
 # We recommend to include the model, user, and timestamp.
@@ -93,7 +95,8 @@ If you already have a MaxText-compatible model checkpoint, simply set the
 following environment variable and move on to the next section.
 
 ```bash
-export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint> # e.g., gs://my-bucket/my-model-checkpoint/0/items
+# e.g., gs://my-bucket/my-model-checkpoint/0/items
+export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint>
 ```
 
 ### Option 2: Converting from a Hugging Face checkpoint
@@ -101,7 +104,8 @@ export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint> # e.g., gs://my-bucke
 Refer the steps in [Hugging Face to MaxText](https://maxtext.readthedocs.io/en/maxtext-v0.2.1/guides/checkpointing_solutions/convert_checkpoint.html#hugging-face-to-maxtext) to convert a hugging face checkpoint to MaxText. Make sure you have correct checkpoint files converted and saved. Similar as Option 1, you can set the following environment and move on.
 
 ```bash
-export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint> # e.g., gs://my-bucket/my-model-checkpoint/0/items
+# e.g., gs://my-bucket/my-model-checkpoint/0/items
+export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint>
 ```
 
 ## Run GRPO

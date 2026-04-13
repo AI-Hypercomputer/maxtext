@@ -52,7 +52,8 @@ placeholders with your actual values.
 # -- Model configuration --
 # The MaxText model name. See `src/maxtext/configs/types.py` for `ModelName` for a
 # full list of supported models.
-export MODEL=<MaxText Model> # e.g., deepseek3-671b
+# e.g., deepseek3-671b
+export MODEL=<MaxText Model>
 
 # Your Hugging Face access token. Required to download gated models like Llama.
 # You can generate one at https://huggingface.co/settings/tokens.
@@ -64,7 +65,8 @@ export HF_TOKEN=<Hugging Face Access Token>
 # You can list your buckets and their locations in the
 # [Cloud Console](https://console.cloud.google.com/storage/browser) or via
 # `gcloud storage buckets list --format="table(name, location)"`.
-export BASE_OUTPUT_DIRECTORY=<GCS Path for Output/Logs> # e.g., gs://my-bucket/maxtext-runs
+# e.g., gs://my-bucket/maxtext-runs
+export BASE_OUTPUT_DIRECTORY=<GCS Path for Output/Logs>
 
 # An arbitrary string to identify this specific run.
 # We recommend to include the model, user, and timestamp.
@@ -80,7 +82,8 @@ export PROJECT_ID=<Google Cloud Project ID>
 # The GCP location (listed as "Location" in the UI) and name of your
 # TPU-enabled GKE cluster. Both can be found on the
 # [Cloud Console](https://console.cloud.google.com/kubernetes/list).
-export ZONE=<GKE Cluster Zone> # e.g., 'us-central1'
+# e.g., 'us-central1'
+export ZONE=<GKE Cluster Zone>
 export GKE_CLUSTER=<Name of GKE Cluster>
 
 # For a full list of MaxText-supported TPU types, see: `src/maxtext/utils/accelerator_to_spec_map.py`. To see the TPU type
@@ -95,16 +98,20 @@ export TPU_TYPE=<TPU Type>
 export NUM_SLICES=<number of slices>
 
 # The Docker image you pushed in the prerequisite step
-export CLOUD_IMAGE_NAME=<image name>
+export CLOUD_IMAGE_NAME=<Docker Image Name>
 export DOCKER_IMAGE="gcr.io/${PROJECT_ID?}/${CLOUD_IMAGE_NAME?}"
 
 # -- Fine-Tuning configuration --
-export STEPS=<Fine-Tuning Steps> # e.g., 1000
+# e.g., 1000
+export STEPS=<Fine-Tuning Steps>
 
 # -- Dataset configuration --
-export DATASET_NAME=<Hugging Face Dataset Name> # e.g., HuggingFaceH4/ultrachat_200k
-export TRAIN_SPLIT=<Data Split for Train> # e.g., train_sft
-export TRAIN_DATA_COLUMNS=<Data Columns to Train on> # e.g., ['messages']
+# e.g., HuggingFaceH4/ultrachat_200k
+export DATASET_NAME=<Hugging Face Dataset Name>
+# e.g., train_sft
+export TRAIN_SPLIT=<Data Split for Train>
+# e.g., ['messages']
+export TRAIN_DATA_COLUMNS=<Data Columns to Train on>
 ```
 
 ## Get MaxText model checkpoint
@@ -116,7 +123,8 @@ This section explains how to prepare your model checkpoint for use with MaxText.
 If you already have a MaxText-compatible model checkpoint, simply set the following environment variable and move on to the next section.
 
 ```bash
-export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint> # e.g., gs://my-bucket/my-model-checkpoint/0/items
+# e.g., gs://my-bucket/my-model-checkpoint/0/items
+export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint>
 ```
 
 **Note:** Make sure that `MAXTEXT_CKPT_PATH` has the checkpoints created using the correct storage flags:
@@ -132,7 +140,8 @@ checkpoint_storage_use_ocdbt=$((1 - USE_PATHWAYS))
 Refer the steps in [Hugging Face to MaxText](https://maxtext.readthedocs.io/en/maxtext-v0.2.1/guides/checkpointing_solutions/convert_checkpoint.html#hugging-face-to-maxtext) to convert a hugging face checkpoint to MaxText. Make sure you have correct checkpoint files converted and saved. Similar as Option 1, you can set the following environment and move on.
 
 ```bash
-export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint> # gs://my-bucket/my-checkpoint-directory/0/items
+# gs://my-bucket/my-checkpoint-directory/0/items
+export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint>
 ```
 
 ## Submit workload on GKE cluster
