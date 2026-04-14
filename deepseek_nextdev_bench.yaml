@@ -33,7 +33,7 @@ spec:
               cloud.google.com/gke-nodepool: m3-megamem-pool
             initContainers:
               - name: pathways-proxy
-                image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/wenxindong/unsanitized_proxy_server:latest
+                image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/wenxindong/unsanitized_proxy_server@sha256:86fedb263c8221bb878c2d301cb45e7c93f54f62872c5c79b055a267da780f42
                 imagePullPolicy: Always
                 args:
                 - --server_port=29000
@@ -55,7 +55,7 @@ spec:
                     memory: 950G
                 restartPolicy: Always
               - name: pathways-rm
-                image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/wenxindong/unsanitized_server:latest
+                image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/wenxindong/unsanitized_server@sha256:3ffb32b12f6b8cbf4f12cf08ecc9fcfda720b171f4ec9d4131c95f5eeb84d2ae
                 imagePullPolicy: Always
                 args:
                 - --server_port=29001
@@ -92,7 +92,7 @@ spec:
                 restartPolicy: Always
             containers:
               - name: jax-tpu
-                image: gcr.io/tpu-prod-env-multipod/mohit-dsv3-build:20260413f
+                image: gcr.io/tpu-prod-env-multipod/mohit-dsv3-build:20260414c
                 imagePullPolicy: Always
                 env:
                 - name: LIBTPU_INIT_ARGS
@@ -133,8 +133,8 @@ spec:
                   --ici_tensor_parallelism=128 \
                   --rollout_tensor_parallelism=1 \
                   --rollout_expert_parallelism=128 \
-                  --run_vllm_only=False \
-                  --load_format=pathways_dummy \
+                  --run_vllm_only=True \
+                  --load_format=runai_streamer \
                   --model_loader_extra_config='{"memory_limit":10737418240}') & PID=$!;
                   while kill -0 $PID 2>/dev/null;
                       do sleep 5;
@@ -188,7 +188,7 @@ spec:
               cloud.google.com/placement-policy-name: tpu7x-128-4x4x4-placement-policy
             containers:
               - name: pathways-worker
-                image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/wenxindong/unsanitized_server:latest
+                image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/wenxindong/unsanitized_server@sha256:3ffb32b12f6b8cbf4f12cf08ecc9fcfda720b171f4ec9d4131c95f5eeb84d2ae
                 imagePullPolicy: Always
                 args:
                 - --server_port=29005
@@ -251,7 +251,7 @@ spec:
                 type: DirectoryOrCreate
               name: shared-tmp
   startupPolicy:
-    startupPolicyOrder: InOrder
+    startupPolicyOrder: AnyOrder
   successPolicy:
     operator: All
     targetReplicatedJobs:

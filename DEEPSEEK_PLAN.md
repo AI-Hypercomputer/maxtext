@@ -87,3 +87,13 @@ Whenever I ask you to go through the repos understand them and go through the fi
   5. Current Workspace State
    * Repository Branch: All tpu-inference fixes are committed and pushed to the mohit/patch_tiles branch.
    * Docker Image: The image gcr.io/tpu-prod-env-multipod/mohit-dsv3-build:20260410 is now a "golden" build containing all code fixes described above.
+
+## Here's how I want your developement flow to be
+
+* If you are making changes in tpu-inference repo from ~/workspace/ folder. Commit the changes and use the latest commit in Dockerfile to build the image
+* After making a change build a new image with tag 20110413{letter} letter should be incremented after every push
+* deploy the workload on nextdev-1 cluster using deepseek_nextdev_bench.yaml
+* monitor the worload and all the containers from the head pod
+* if you see an error, fix it and redo the building. 
+* After every deployment, give me a summary of what was the error in that deployment. 
+* Do this until you reach the tag 20110413z, we are currently at 20260413j

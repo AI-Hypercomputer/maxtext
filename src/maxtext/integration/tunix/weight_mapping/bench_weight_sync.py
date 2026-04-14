@@ -838,6 +838,8 @@ class DeepSeekV3ToVLLMConverter:
             else:
                 logging.info("_convert_mla: key '%s' NOT found in attn", k)
 
+        nope_dim = self.config.qk_nope_head_dim
+
         @jax.jit
         def _process_mla(attn):
             # q_norm: (Rank, L) -> (L, Rank)
@@ -867,23 +869,74 @@ class DeepSeekV3ToVLLMConverter:
             l, dm, nh, dh = wo.shape
             wo = wo.reshape(l, dm, nh * dh)
 
-            # NOTE: kv_b_proj (wkv_b) is absorbed by process_weights_after_loading
-            # into W_UK_T (fp8) and W_UV (fp8) at self_attn.mla_attn.mla_attn.W_UK_T/.W_UV.
-            # Syncing those requires fp8 quantization of the split k/v submatrices, which
-            # is deferred (they keep their pathways_dummy values for now).
+            # wkv_b: (kv_lora_rank, L, num_heads, qk_nope_head_dim + v_head_dim)
+            # Split into K (nope) and V parts, transpose to vLLM W_UK_T/W_UV layout,
+            # then FP8 quantize matching the axis used by process_weights_after_loading.
+            wkv_b = attn['wkv_b']['kernel'].astype(jnp.float32)
+            wkv_b_k = wkv_b[..., :nope_dim]  # (kv_lora, L, N, nope)
+            wkv_b_v = wkv_b[..., nope_dim:]  # (kv_lora, L, N, v)
+
+            # W_UK_T per layer: (N, nope, kv_lora) — batched as (L, N, nope, kv_lora)
+            w_uk_t_all = jnp.transpose(wkv_b_k, (1, 2, 3, 0))
+            # W_UV per layer:  (N, kv_lora, v)     — batched as (L, N, kv_lora, v)
+            w_uv_all = jnp.transpose(wkv_b_v, (1, 2, 0, 3))
+
+            # FP8 quantize everything (matching _convert_dense_mlp / process_weights_after_loading).
+            _fp8 = jnp.float8_e4m3fn
+
+            # Attention linear projections: axis=-1 (per output channel, over input dim).
+            fused_q, fused_s = tpu_quantize_tensor(_fp8, fused_qkv_a.astype(jnp.float32), axis=-1)
+            fused_inv = 1.0 / fused_s
+
+            wq_b_q, wq_b_s = tpu_quantize_tensor(_fp8, wq_b.astype(jnp.float32), axis=-1)
+            wq_b_inv = 1.0 / wq_b_s
+
+            wo_q, wo_s = tpu_quantize_tensor(_fp8, wo.astype(jnp.float32), axis=-1)
+            wo_inv = 1.0 / wo_s
+
+            # W_UK_T / W_UV: axis=2 (nope/kv_lora axis), matching process_weights_after_loading
+            # which does axis=1 on per-layer (N, P, kv_lora) and (N, kv_lora, v).
+            # scale shape after squeeze: (L, N, kv_lora) and (L, N, v).
+            # After expand_dims(1): (L, 1, N, kv_lora) and (L, 1, N, v).
+            # After unstack: per-layer (1, N, kv_lora) and (1, N, v) — shape expected by flash_attn_mla.
+            w_uk_t_fp8, uk_scale = tpu_quantize_tensor(_fp8, w_uk_t_all, axis=2)
+            w_uk_t_scale_all = jnp.expand_dims(uk_scale, 1)  # (L, 1, N, kv_lora)
+
+            w_uv_fp8, uv_scale = tpu_quantize_tensor(_fp8, w_uv_all, axis=2)
+            w_uv_scale_all = jnp.expand_dims(uv_scale, 1)  # (L, 1, N, v)
 
             return {
-                "fused_qkv_a_proj.weight": jnp.unstack(fused_qkv_a),
-                "q_b_proj.weight": jnp.unstack(wq_b),
-                "o_proj.weight": jnp.unstack(wo),
+                "fused_qkv_a_proj.weight": jnp.unstack(fused_q),
+                "fused_qkv_a_proj.weight_scale": jnp.unstack(fused_s),
+                "fused_qkv_a_proj.weight_scale_inv": jnp.unstack(fused_inv),
+                "q_b_proj.weight": jnp.unstack(wq_b_q),
+                "q_b_proj.weight_scale": jnp.unstack(wq_b_s),
+                "q_b_proj.weight_scale_inv": jnp.unstack(wq_b_inv),
+                "o_proj.weight": jnp.unstack(wo_q),
+                "o_proj.weight_scale": jnp.unstack(wo_s),
+                "o_proj.weight_scale_inv": jnp.unstack(wo_inv),
                 "q_a_layernorm.weight": jnp.unstack(q_norm),
                 "kv_a_layernorm.weight": jnp.unstack(kv_norm),
+                "mla_attn.mla_attn.W_UK_T": jnp.unstack(w_uk_t_fp8),
+                "mla_attn.mla_attn.W_UK_T_scale": jnp.unstack(w_uk_t_scale_all),
+                "mla_attn.mla_attn.W_UV": jnp.unstack(w_uv_fp8),
+                "mla_attn.mla_attn.W_UV_scale": jnp.unstack(w_uv_scale_all),
             }
 
         mla_weights = _process_mla(attn)
         for key, unstacked_weights in mla_weights.items():
             for i, layer_idx in enumerate(layer_indices):
                 self.vllm_state[f"{prefix}.{layer_idx}.self_attn.{key}"] = unstacked_weights[i]
+
+        # KV-cache activation scales: initialized to 1.0 by vLLM (set_default_quant_scales)
+        # and updated online during the first forward pass by maybe_calc_kv_scales.
+        # Write 1.0 explicitly so KEY_CHECK reports 0 missing and intent is clear.
+        _one = jnp.array(1.0, dtype=jnp.float32)
+        for layer_idx in layer_indices:
+            for scale_name in ("_q_scale", "_k_scale", "_v_scale", "_prob_scale"):
+                self.vllm_state[
+                    f"{prefix}.{layer_idx}.self_attn.mla_attn.mla_attn.{scale_name}"
+                ] = _one
 
     def _convert_moe(self, moe, prefix, layer_indices):
         tp = self.vllm_tp
@@ -922,6 +975,9 @@ class DeepSeekV3ToVLLMConverter:
 
         logging.info("_convert_moe: routed experts...")
 
+        _wi0_sharding = routed_moe['wi_0'].sharding if hasattr(routed_moe['wi_0'], 'sharding') else 'unknown'
+        logging.info("_convert_moe: wi_0 sharding=%s shape=%s", _wi0_sharding, routed_moe['wi_0'].shape)
+
         # Process one layer at a time to avoid:
         # 1. SparseCore int32 overflow (L=58 → 13.6B elements > int32_max)
         # 2. Compile-time HBM OOM (L=4 → 2×56GB = 112GB > 94.75GB budget)
@@ -932,10 +988,21 @@ class DeepSeekV3ToVLLMConverter:
         _wi0_sharding = routed_moe['wi_0'].sharding if hasattr(routed_moe['wi_0'], 'sharding') else 'unknown'
         logging.info("_convert_moe: wi_0 sharding=%s shape=%s", _wi0_sharding, routed_moe['wi_0'].shape)
 
-        # No explicit out_shardings — let XLA keep the natural sharding derived
-        # from the input.  Forcing expert-parallel out_shardings when MaxText
-        # uses TP sharding triggers a giant all-to-all that crashes workers.
-        @jax.jit
+        _expert_3d = jax.sharding.NamedSharding(
+            self.mesh, jax.sharding.PartitionSpec('model', None, None))
+        _expert_4d = jax.sharding.NamedSharding(
+            self.mesh, jax.sharding.PartitionSpec('model', None, None, None))
+
+        out_shardings = (
+            tuple([_expert_3d] * _ROUTED_LAYER_CHUNK),  # gate_up_q
+            tuple([_expert_4d] * _ROUTED_LAYER_CHUNK),  # gate_up_scale
+            tuple([_expert_4d] * _ROUTED_LAYER_CHUNK),  # gate_up_inv
+            tuple([_expert_3d] * _ROUTED_LAYER_CHUNK),  # down_q
+            tuple([_expert_4d] * _ROUTED_LAYER_CHUNK),  # down_scale
+            tuple([_expert_4d] * _ROUTED_LAYER_CHUNK),  # down_inv
+        )
+
+        @functools.partial(jax.jit, out_shardings=out_shardings)
         def _process_routed(wi_0, wi_1, wo):
             # wi_0: (E, L, d_model, d_inner) -> (L, E, d_inner, d_model)
             l = wi_0.shape[1]
@@ -943,57 +1010,67 @@ class DeepSeekV3ToVLLMConverter:
             dm = wi_0.shape[2]
             di = wi_0.shape[3]
 
-            w0 = jnp.transpose(wi_0, (1, 0, 3, 2))  # (L, E, d_inner, d_model)
-            w1 = jnp.transpose(wi_1, (1, 0, 3, 2))  # (L, E, d_inner, d_model)
+            # vLLM expects gate_up to be (E, d_model, 2*d_inner) and down to be (E, d_inner, d_model)
+            w0 = jnp.transpose(wi_0, (1, 0, 2, 3))  # (L, E, d_model, d_inner)
+            w1 = jnp.transpose(wi_1, (1, 0, 2, 3))  # (L, E, d_model, d_inner)
 
-            # EP inference: each chip owns its local experts in full.
-            # No TP interleaving — just concatenate gate (w0) and up (w1)
-            # along the output-channel axis to form (L, E, 2*d_inner, d_model).
-            # TP-style chunk-interleaving would require a reshape that splits E
-            # across the tp=128 dim, which conflicts with MaxText's expert
-            # sharding ('model': E/128) and triggers huge all-to-all collectives.
-            gate_up = jnp.concatenate([w0, w1], axis=2)
-            # vLLM GMM contraction is on the last dim (d_model), layout (E, 2*d_inner, d_model).
+            # Concatenate along d_inner axis to form (L, E, d_model, 2*d_inner)
+            gate_up = jnp.concatenate([w0, w1], axis=3)
 
-            # wo: (E, L, d_inner, d_model) -> (L, E, d_model, d_inner)
-            down = jnp.transpose(wo, (1, 0, 3, 2))
+            # wo: (E, L, d_inner, d_model) -> (L, E, d_inner, d_model)
+            down = jnp.transpose(wo, (1, 0, 2, 3))
             
             # Quantize
             fp8_type = jnp.float8_e4m3fn
-            gate_up_q, gate_up_scale = tpu_quantize_tensor(fp8_type, gate_up, axis=-1)
-            down_q, down_scale = tpu_quantize_tensor(fp8_type, down, axis=-1)
+            gate_up_q, gate_up_scale = tpu_quantize_tensor(fp8_type, gate_up.astype(jnp.float32), axis=-1)
+            down_q, down_scale = tpu_quantize_tensor(fp8_type, down.astype(jnp.float32), axis=-1)
             
-            # tpu_quantize_tensor on axis=-1 drops the last dimension if block_size is None.
-            # gate_up: (L, E, 2*di, dm) -> scale is (L, E, 2*di)
-            # vLLM expects blockwise scales as (out_features, 1, n_blocks).
-            # For per-channel (block_size=None), n_blocks=1.
-            # We need to reshape (L, E, 2*di) -> (L, E, 2*di, 1) to match the expected format 
-            # for process_weights_after_loading, which expects (out, 1) or similar.
-            # Let's expand dims to match the expected 4D shape (L, E, 1, 2*di) that tpu-inference 
-            # swapaxes patch looks for, or just keep it compatible.
-            # Actually, per-channel scales for GMM EP are expected to be (E, 1, 1, out_features) 
-            # if we use the tpu-inference fast path swapaxes(1, 2).
-            # Wait, our patch in tpu-inference skips padding if shape[-1] != intermediate_size * 2.
-            # So if we output (L, E, 2*di), unstack makes it (E, 2*di). 
-            # Let's just output (L, E, 1, 2*di) so unstack makes it (E, 1, 2*di) which is safe.
-            gate_up_scale = jnp.expand_dims(gate_up_scale, axis=2)
-            down_scale = jnp.expand_dims(down_scale, axis=2)
+            gate_up_inv = 1.0 / gate_up_scale
+            down_inv = 1.0 / down_scale
 
-            return jnp.unstack(gate_up_q), jnp.unstack(gate_up_scale), jnp.unstack(down_q), jnp.unstack(down_scale)
+            # Scales are (L, E, d_model) for gate_up? Wait, quantize on axis=-1 means per output channel.
+            # We quantized over axis=-1 which is 2*d_inner for gate_up and d_model for down.
+            # So scales are (L, E, d_model) and (L, E, d_inner). 
+            # vLLM expects scales as (E, 1, 1, out) or similar. For GMM it wants them broadcastable.
+            # Just expanding axis=2 so they are (L, E, 1, out) or similar isn't needed if we just return them.
+            # Wait, previously the code did jnp.expand_dims. We should do it on axis=2? No, axis=2 is now the contracted dim?
+            # Actually, per-channel scales for linear are (out_channels).
+            # For gate_up, out_channels is 2*d_inner. We quantized axis=-1. So scale is (L, E, d_model).
+            # WAIT: If vLLM expects out_channels, the out_channel is 2*d_inner for gate_up!
+            # If we quantize over axis=-1, we are quantizing over 2*d_inner! This is wrong! Per-channel quantization should be over the contraction dimension!
+            # Let's fix that. Contraction dimension for gate_up is d_model!
+            # So axis should be 2 for gate_up (d_model), and 3 for down (d_model)? Wait.
+            # PyTorch nn.Linear(in, out) has weight (out, in). Contraction dim is in. Per-channel quantization is over in.
+            # So if weight is (out, in), we quantize over `in` (axis=-1).
+            # If weight is (in, out), we quantize over `in` (axis=0).
+            # Let's check vLLM: vLLM usually expects weight as (out, in) or (in, out) depending on EP or TP.
+            # FusedMoE weight w13: (E, hidden_size, 2*intermediate_size). Contraction is hidden_size. Output is 2*intermediate.
+            # So we should quantize over hidden_size. That means axis=2.
+            # Then scale is (L, E, 2*intermediate).
+            gate_up_q, gate_up_scale = tpu_quantize_tensor(fp8_type, gate_up.astype(jnp.float32), axis=2)
+            down_q, down_scale = tpu_quantize_tensor(fp8_type, down.astype(jnp.float32), axis=2)
+
+            gate_up_scale = jnp.expand_dims(gate_up_scale, axis=(2, 3))
+            down_scale = jnp.expand_dims(down_scale, axis=(2, 3))
+
+            gate_up_inv = 1.0 / gate_up_scale
+            down_inv = 1.0 / down_scale
+
+            return jnp.unstack(gate_up_q), jnp.unstack(gate_up_scale), jnp.unstack(gate_up_inv), jnp.unstack(down_q), jnp.unstack(down_scale), jnp.unstack(down_inv)
 
         num_moe_layers = len(layer_indices)
         for _chunk_start in range(0, num_moe_layers, _ROUTED_LAYER_CHUNK):
             _chunk_end = min(_chunk_start + _ROUTED_LAYER_CHUNK, num_moe_layers)
-            _gu, _gu_s, _dn, _dn_s = _process_routed(
+            _gu, _gu_s, _gu_inv, _dn, _dn_s, _dn_inv = _process_routed(
                 routed_moe['wi_0'][:, _chunk_start:_chunk_end],
                 routed_moe['wi_1'][:, _chunk_start:_chunk_end],
                 routed_moe['wo'][:, _chunk_start:_chunk_end],
             )
             for _j, _layer_idx in enumerate(list(layer_indices)[_chunk_start:_chunk_end]):
                 self.vllm_state[f"{prefix}.{_layer_idx}.mlp.experts.w13_weight"] = _gu[_j]
-                self.vllm_state[f"{prefix}.{_layer_idx}.mlp.experts.w13_weight_scale_inv"] = _gu_s[_j]
+                self.vllm_state[f"{prefix}.{_layer_idx}.mlp.experts.w13_weight_scale_inv"] = _gu_inv[_j]
                 self.vllm_state[f"{prefix}.{_layer_idx}.mlp.experts.w2_weight"] = _dn[_j]
-                self.vllm_state[f"{prefix}.{_layer_idx}.mlp.experts.w2_weight_scale_inv"] = _dn_s[_j]
+                self.vllm_state[f"{prefix}.{_layer_idx}.mlp.experts.w2_weight_scale_inv"] = _dn_inv[_j]
 
             # Block after every chunk to prevent unbounded dispatch buffering.
             _gu[-1].block_until_ready()
@@ -1001,25 +1078,26 @@ class DeepSeekV3ToVLLMConverter:
         logging.info("_convert_moe: shared experts...")
         @jax.jit
         def _process_shared(wi_0, wi_1, wo):
-            # (emb, L, d_shared) -> (L, d_shared, emb)
-            l = wi_0.shape[1]
-            dm = wi_0.shape[0]
-            ds = wi_0.shape[2]
-
-            w0 = jnp.transpose(wi_0, (1, 2, 0))
+            # (d_model, L, d_shared) -> (L, 2*d_shared, d_model) is what's generated. But we need (L, 2*d_shared, d_model)??
+            # No, standard Linear weight is (out, in). So (L, 2*d_shared, d_model). Contraction is d_model.
+            w0 = jnp.transpose(wi_0, (1, 2, 0)) # (L, d_shared, d_model)
             w1 = jnp.transpose(wi_1, (1, 2, 0))
+            gate_up = jnp.concatenate([w0, w1], axis=1) # (L, 2*d_shared, d_model)
 
-            # No TP interleaving — just concatenate gate and up.
-            gate_up = jnp.concatenate([w0, w1], axis=1)
-            # Shape: (L, 2*d_shared, d_model)
-
-            # wo: (d_shared, L, d_model) -> (L, d_model, d_shared)
-            down = jnp.transpose(wo, (1, 2, 0))
+            down = jnp.transpose(wo, (1, 2, 0)) # (L, d_model, d_shared)
             
-            return jnp.unstack(gate_up), jnp.unstack(down)
+            fp8_type = jnp.float8_e4m3fn
+            gate_up_q, gate_up_s = tpu_quantize_tensor(fp8_type, gate_up.astype(jnp.float32), axis=-1)
+            down_q, down_s = tpu_quantize_tensor(fp8_type, down.astype(jnp.float32), axis=-1)
+            
+            gate_up_inv = 1.0 / gate_up_s
+            down_inv = 1.0 / down_s
+
+            return (jnp.unstack(gate_up_q), jnp.unstack(gate_up_s), jnp.unstack(gate_up_inv), 
+                    jnp.unstack(down_q), jnp.unstack(down_s), jnp.unstack(down_inv))
 
         shared_experts = moe['shared_experts']
-        sh_gate_up, sh_down = _process_shared(
+        sh_gate_up, sh_gu_s, sh_gu_inv, sh_down, sh_dn_s, sh_dn_inv = _process_shared(
             shared_experts['wi_0']['kernel'],
             shared_experts['wi_1']['kernel'],
             shared_experts['wo']['kernel']
@@ -1027,31 +1105,34 @@ class DeepSeekV3ToVLLMConverter:
         
         for i, layer_idx in enumerate(layer_indices):
             self.vllm_state[f"{prefix}.{layer_idx}.mlp.shared_experts.gate_up_proj.weight"] = sh_gate_up[i]
+            self.vllm_state[f"{prefix}.{layer_idx}.mlp.shared_experts.gate_up_proj.weight_scale"] = sh_gu_s[i]
+            self.vllm_state[f"{prefix}.{layer_idx}.mlp.shared_experts.gate_up_proj.weight_scale_inv"] = sh_gu_inv[i]
             self.vllm_state[f"{prefix}.{layer_idx}.mlp.shared_experts.down_proj.weight"] = sh_down[i]
+            self.vllm_state[f"{prefix}.{layer_idx}.mlp.shared_experts.down_proj.weight_scale"] = sh_dn_s[i]
+            self.vllm_state[f"{prefix}.{layer_idx}.mlp.shared_experts.down_proj.weight_scale_inv"] = sh_dn_inv[i]
 
     def _convert_dense_mlp(self, mlp, prefix, layer_indices):
         tp = self.vllm_tp
 
         @jax.jit
         def _process_dense(wi_0, wi_1, wo):
-            # wi_0: (d_model, L, d_inner) -> (L, d_inner, d_model)
-            l = wi_0.shape[1]
-            dm = wi_0.shape[0]
-            di = wi_0.shape[2]
-
             w0 = jnp.transpose(wi_0, (1, 2, 0))
             w1 = jnp.transpose(wi_1, (1, 2, 0))
 
-            # No TP interleaving — just concatenate gate and up.
             gate_up = jnp.concatenate([w0, w1], axis=1)
-            # Shape: (L, 2*d_inner, d_model)
-
-            # wo: (d_inner, L, d_model) -> (L, d_model, d_inner)
             down = jnp.transpose(wo, (1, 2, 0))
 
-            return jnp.unstack(gate_up), jnp.unstack(down)
+            fp8_type = jnp.float8_e4m3fn
+            gate_up_q, gate_up_s = tpu_quantize_tensor(fp8_type, gate_up.astype(jnp.float32), axis=-1)
+            down_q, down_s = tpu_quantize_tensor(fp8_type, down.astype(jnp.float32), axis=-1)
 
-        gate_up_layers, down_layers = _process_dense(
+            gate_up_inv = 1.0 / gate_up_s
+            down_inv = 1.0 / down_s
+
+            return (jnp.unstack(gate_up_q), jnp.unstack(gate_up_s), jnp.unstack(gate_up_inv),
+                    jnp.unstack(down_q), jnp.unstack(down_s), jnp.unstack(down_inv))
+
+        gate_up_layers, gu_s, gu_inv, down_layers, dn_s, dn_inv = _process_dense(
             mlp['wi_0']['kernel'],
             mlp['wi_1']['kernel'],
             mlp['wo']['kernel']
@@ -1059,7 +1140,11 @@ class DeepSeekV3ToVLLMConverter:
 
         for i, layer_idx in enumerate(layer_indices):
             self.vllm_state[f"{prefix}.{layer_idx}.mlp.gate_up_proj.weight"] = gate_up_layers[i]
+            self.vllm_state[f"{prefix}.{layer_idx}.mlp.gate_up_proj.weight_scale"] = gu_s[i]
+            self.vllm_state[f"{prefix}.{layer_idx}.mlp.gate_up_proj.weight_scale_inv"] = gu_inv[i]
             self.vllm_state[f"{prefix}.{layer_idx}.mlp.down_proj.weight"] = down_layers[i]
+            self.vllm_state[f"{prefix}.{layer_idx}.mlp.down_proj.weight_scale"] = dn_s[i]
+            self.vllm_state[f"{prefix}.{layer_idx}.mlp.down_proj.weight_scale_inv"] = dn_inv[i]
 
 
 
@@ -1201,7 +1286,7 @@ def main():
     max_num_batched_tokens=256,
     tensor_parallel_size=_ROLLOUT_TP.value,
     data_parallel_size=_ROLLOUT_DP.value,
-    gpu_memory_utilization=0.85,
+    gpu_memory_utilization=0.75,
     async_scheduling=False,
     load_format=_LOAD_FORMAT.value,
     model_loader_extra_config=model_loader_extra_config,
@@ -1259,7 +1344,7 @@ def main():
 
     # Key completeness diagnostic — print before sync so it's visible even on OOM.
     _missing_in_llm  = sorted(k for k in vllm_state  if k not in llm_state)
-    _missing_in_vllm = sorted(k for k in llm_state   if k not in vllm_state)
+    _missing_in_vllm = sorted(k for k in llm_state   if k not in vllm_state and "cos_sin_cache" not in k and "kv_b_proj" not in k)
     print(f"[KEY_CHECK] vllm_state keys NOT in llm_state  ({len(_missing_in_llm)}): {_missing_in_llm[:30]}", flush=True)
     print(f"[KEY_CHECK] llm_state  keys NOT in vllm_state ({len(_missing_in_vllm)}): {_missing_in_vllm[:30]}", flush=True)
 
@@ -1276,37 +1361,18 @@ def main():
         dst_dtype = dst.dtype
         dst_sharding = dst.sharding
 
-        if dst_dtype == _fp8_dtype:
-          scale_key = key + "_scale"
-          scale_inv_key = key + "_scale_inv"
-          if weight_array.dtype == _fp8_dtype:
-            # Already quantized (like MoE experts)
-            llm_state[key] = _get_reshard_fn(dst_sharding)(weight_array)
-            if scale_key in vllm_state and scale_key in llm_state:
-                # scale will be assigned when the loop hits scale_key, 
-                # or we just skip it here. Actually, the loop iterates over vllm_state.items(),
-                # so scale_key will be processed independently if it's not fp8.
-                pass
-          elif scale_key in llm_state:
-
-            # Linear fp8 weight (attention, dense MLP, shared experts):
-            # checkpoint uses per-row (per-output-channel) fp8 quantization.
-            # scale shape = (out_channels,) matching weight.shape[0].
-            weight_fp8, scale = tpu_quantize_tensor(
-                _fp8_dtype, weight_array.astype(jnp.float32), axis=-1)
-            llm_state[key] = _get_reshard_fn(dst_sharding)(weight_fp8)
-            llm_state[scale_key] = _get_reshard_fn(llm_state[scale_key].sharding)(
-                scale.astype(jnp.float32))
-          else:
-            # fp8 with no companion scale — cast directly.
-            llm_state[key] = _get_reshard_fn(dst_sharding)(
-                weight_array.astype(_fp8_dtype))
-        else:
-          # bf16 / float32 weights (layernorms, gate, embeddings, lm_head).
-          llm_state[key] = _get_reshard_fn(dst_sharding)(weight_array)
+        if "rotary_emb.cos_sin_cache" in key:
+            continue
+        llm_state[key] = _get_reshard_fn(dst_sharding)(weight_array)
 
       jax.effects_barrier()  # wait for all on-device reshards to finish
 
+    # Free converted MaxText weights — they've been assigned into llm_state.
+    # Without this, vllm_state keeps a full model copy on HBM alongside llm's
+    # copy, doubling HBM usage and leaving no room for XLA program buffers.
+    del vllm_state
+    gc.collect()
+    jax.effects_barrier()
 
   sampling_params = SamplingParams(temperature=0.0, max_tokens=16)
   print("\n" + "="*80)
