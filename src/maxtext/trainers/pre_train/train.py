@@ -430,6 +430,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       "learning/indexer_loss": indexer_loss,
       "learning/mtp_loss": mtp_loss,
       "learning/total_weights": total_weights,
+      "learning/loss_without_mtp": loss - mtp_loss,
   }
   if config.use_qk_clip:
     # Apply QK-Clip
