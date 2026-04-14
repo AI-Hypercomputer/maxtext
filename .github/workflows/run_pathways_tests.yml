@@ -92,17 +92,21 @@ jobs:
         run : gcloud storage cp gs://maxtext-test-assets/* tests/assets
       - name: Run Tests
         run: |
+          # TODO(b/454659463): Enable test_default_hlo_match after volume mount is supported.
+          PYTEST_MATCHER="not AotHloIdenticalTest and not CompileThenLoad"
           if [ "${{ inputs.is_scheduled_run }}" = "true" ]; then
             FINAL_PYTEST_MARKER="${{ inputs.pytest_marker }}"
           else
             FINAL_PYTEST_MARKER="${{ inputs.pytest_marker }} and not scheduled_only"
+            # TODO(b/496201097): AotJaxprIdenticalTest costs long time due to JAX API get_topology_desc
+            PYTEST_MATCHER="${PYTEST_MATCHER} and not AotJaxprIdenticalTest"
           fi
           export MAXTEXT_REPO_ROOT=$(pwd)
           export MAXTEXT_ASSETS_ROOT=$(pwd)/src/maxtext/assets
           export MAXTEXT_TEST_ASSETS_ROOT=$(pwd)/tests/assets
           export MAXTEXT_PKG_DIR=$(pwd)/src/maxtext
-          # TODO(b/454659463): Enable test_default_hlo_match after volume mount is supported.
-          .venv/bin/python3 -m pytest ${{ inputs.pytest_addopts }} -v -m "${FINAL_PYTEST_MARKER}" -k "not AotHloIdenticalTest and not CompileThenLoad" --durations=0
+
+          .venv/bin/python3 -m pytest ${{ inputs.pytest_addopts }} -v -m "${FINAL_PYTEST_MARKER}" -k "${PYTEST_MATCHER}" --durations=0
         env:
           PYTHONPATH: "${{ github.workspace }}/src"
     services:
