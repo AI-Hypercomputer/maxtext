@@ -96,6 +96,34 @@ class DecodeTests(unittest.TestCase):
           "prompt=I love to",
           "skip_jax_distributed_system=True",
       ],
+      "deepseek32": [  # tests decode for deepseek3.2-671b full EP
+          None,
+          get_test_config_path(),
+          "base_output_directory=gs://runner-maxtext-logs",
+          "run_name=decode",
+          "model_name=deepseek3.2-671b",
+          "override_model_config=True",
+          "base_num_decoder_layers=2",
+          "first_num_dense_layers=1",
+          "num_experts=16",
+          "base_mlp_dim=128",
+          "base_emb_dim=128",
+          "base_moe_mlp_dim=128",
+          "tokenizer_type=huggingface",
+          f"hf_access_token={os.environ.get('HF_TOKEN', '')}",
+          "tokenizer_path=deepseek-ai/DeepSeek-V3.2-Exp",
+          "scan_layers=False",
+          "attention=dot_product",
+          "weight_dtype=bfloat16",
+          "per_device_batch_size=1",
+          "max_prefill_predict_length=8",
+          "max_target_length=16",
+          "ici_fsdp_parallelism=1",
+          "ici_tensor_parallelism=1",
+          "ici_expert_parallelism=-1",
+          "mla_naive_kvcache=false",
+          "prompt=I love to",
+      ],
   }
   SAMPLING_STRATEGY_CONFIG = {
       "greedy": [
@@ -172,6 +200,11 @@ class DecodeTests(unittest.TestCase):
     captured_out = run_decoding(config)
     expected_output = "Input `I love to` -> ` travel and I love to write"
     assert expected_output in captured_out
+
+  @pytest.mark.tpu_only
+  @pytest.mark.scheduled_only
+  def test_tpu_deepseek32(self):
+    decode_main(DecodeTests.CONFIGS["deepseek32"])
 
 
 def run_decoding(config):

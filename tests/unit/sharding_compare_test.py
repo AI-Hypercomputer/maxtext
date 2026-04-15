@@ -14,6 +14,7 @@
 
 """Compare expected sharding of models with actual sharding of models."""
 
+import functools
 import hashlib
 import json
 import os
@@ -21,13 +22,14 @@ import jax
 import jax.numpy as jnp
 from maxtext.configs import pyconfig
 from maxtext.utils import maxtext_utils
+from maxtext.utils.sharding import clear_input_shardings_dump
 # import optax
 
 from maxtext.layers import quantizations
 from maxtext.models import models
 from maxtext.optimizers import optimizers
 from maxtext.trainers.pre_train.train_compile import get_shaped_inputs, get_topology_mesh, validate_config
-from tests.utils.sharding_dump import TEST_CASES, load_json, named_shardings_to_json, partition_specs_to_json
+from tests.utils.sharding_dump import TEST_CASES, load_json, input_sharding_to_json, named_shardings_to_json, partition_specs_to_json
 from tests.utils.test_helpers import get_test_config_path
 import pytest
 
@@ -112,8 +114,10 @@ def compare_sharding_jsons(json1: dict, model1_name: str, json2: dict, model2_na
 # Requires JAX TPU support to generate the simulated TPU topology.
 @pytest.mark.cpu_only
 @pytest.mark.tpu_backend
-@pytest.mark.parametrize("model_name, topology, num_slice", TEST_CASES)
-def test_sharding_dump_for_model(model_name: str, topology: str, num_slice: str) -> None:
+@pytest.mark.parametrize("model_name, topology, num_slice, custom_mesh_and_rule, overrides", TEST_CASES)
+def test_sharding_dump_for_model(
+    model_name: str, topology: str, num_slice: str, custom_mesh_and_rule: str, overrides: tuple
+) -> None:
   """
   Test sharding configurations from train_compile.get_shaped_inputs.
   This test verifies that the sharding configurations for various models and topologies remain consistent with golden files.
@@ -124,13 +128,26 @@ def test_sharding_dump_for_model(model_name: str, topology: str, num_slice: str)
       f"compile_topology={topology}",
       f"compile_topology_num_slices={num_slice}",
       f"model_name={model_name}",
+      "log_config=false",
+      "debug_sharding=true",  # for input sharding dump
+      "pure_nnx=False",
+      "enable_nnx=False",
+      "pure_nnx_decoder=False",
   ]
+  if custom_mesh_and_rule:
+    params.append(f"custom_mesh_and_rule={custom_mesh_and_rule}")
+  if overrides:
+    params.extend(overrides)
 
   root_dir = "tests/utils/sharding_info"
-  base_path = os.path.join(root_dir, model_name, topology, f"slice_{num_slice}")
+  rule_name = f"rule_{custom_mesh_and_rule}" if custom_mesh_and_rule else "rule_default"
+  if overrides:
+    rule_name += "_" + "_".join(overrides)
+  base_path = os.path.join(root_dir, model_name, topology, f"slice_{num_slice}", rule_name)
 
   named_json_path = os.path.join(base_path, "named_shardings.json")
   logical_json_path = os.path.join(base_path, "logical_shardings.json")
+  input_json_path = os.path.join(base_path, "input_shardings.json")
 
   if not os.path.exists(named_json_path):
     pytest.skip(f"Missing named_shardings.json for {model_name} {topology} slice {num_slice}")
@@ -138,11 +155,17 @@ def test_sharding_dump_for_model(model_name: str, topology: str, num_slice: str)
   if not os.path.exists(logical_json_path):
     pytest.skip(f"Missing logical_shardings.json for {model_name} {topology} slice {num_slice}")
     return
+  if not os.path.exists(input_json_path):
+    pytest.skip(f"Missing input_shardings.json for {model_name} {topology} slice {num_slice}")
+    return
 
   config = pyconfig.initialize(params)
   validate_config(config)
 
+  clear_input_shardings_dump()
   topology_mesh = get_topology_mesh(config)
+  learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
+  optimizers.get_optimizer(config, learning_rate_schedule)
   shaped_train_args, _, state_mesh_shardings, logical_shardings, _ = get_shaped_inputs(topology_mesh, config)
 
   error_messages = []
@@ -173,17 +196,35 @@ def test_sharding_dump_for_model(model_name: str, topology: str, num_slice: str)
     compare_sharding_jsons(expected_logical, "Expected (Logical)", actual_logical, "Actual (Logical)")
     error_messages.append(f"Logical sharding mismatch for {model_name} on {topology} slice {num_slice}")
 
+  # 3. Compare Input Shardings
+  actual_input = input_sharding_to_json()
+  expected_input = load_json(input_json_path)
+  # calculate checksum
+  actual_input_sum = compute_checksum(actual_input)
+  expected_input_sum = compute_checksum(expected_input)
+
+  input_match = actual_input_sum == expected_input_sum
+
+  if not input_match:
+    print(f"\n[FAIL] Input Sharding Mismatch: {model_name} {topology} slice {num_slice}", flush=True)
+    # compare_sharding_jsons(expected_input, "Expected (Input)", actual_input, "Actual (Input)")
+    error_messages.append(f"Input sharding mismatch for {model_name} on {topology} slice {num_slice}")
+
   assert not error_messages, "\n".join(error_messages)
 
 
 @pytest.fixture(
     scope="module",
-    params=[pytest.param(case, id=f"{case[0]}-{case[1]}-{case[2]}") for case in TEST_CASES],
+    params=[pytest.param(case, id=f"{case[0]}-{case[1]}-{case[2]}-{case[3]}-{''.join(case[4])}") for case in TEST_CASES],
 )
 def abstract_state_and_shardings(request):
   """Pytest fixture to set up model, config, and generate abstract state once per test case."""
-  model_name, topology, num_slice = request.param
-  print(f"Testing model: {model_name}, topology: {topology}, num_slices: {num_slice}", flush=True)
+  model_name, topology, num_slice, custom_mesh_and_rule, overrides = request.param
+  print(
+      f"Testing model: {model_name}, topology: {topology}, num_slices: {num_slice}, "
+      "rule: {custom_mesh_and_rule}, overrides: {overrides}",
+      flush=True,
+  )
   params = [
       "/deps/MaxText/tests/unit/sharding_compare_test",
       get_test_config_path(),
@@ -191,7 +232,14 @@ def abstract_state_and_shardings(request):
       f"compile_topology_num_slices={num_slice}",
       f"model_name={model_name}",
       "weight_dtype=float32",
+      "pure_nnx=False",
+      "enable_nnx=False",
+      "pure_nnx_decoder=False",
   ]
+  if custom_mesh_and_rule:
+    params.append(f"custom_mesh_and_rule={custom_mesh_and_rule}")
+  if overrides:
+    params.extend(overrides)
   config = pyconfig.initialize(params)
   validate_config(config)
 
@@ -204,15 +252,26 @@ def abstract_state_and_shardings(request):
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
   rng = jax.random.PRNGKey(0)
 
+  init_state_fn = functools.partial(maxtext_utils.init_initial_state, model, tx, config, True, rng)
+
   # Get abstract state and physical shardings from maxtext_utils
   abstract_state, _, state_mesh_shardings = maxtext_utils.get_abstract_state(
-      model, tx, config, rng, topology_mesh, is_training=True
+      config, topology_mesh, init_state_fn, is_training=True
   )
 
   # Get logical shardings from maxtext_utils
-  logical_shardings = maxtext_utils.get_logical_annotations(model, tx, config, rng, topology_mesh, is_training=True)
+  logical_shardings = maxtext_utils.get_logical_annotations(config, topology_mesh, init_state_fn)
 
-  return model_name, topology, num_slice, abstract_state, state_mesh_shardings, logical_shardings
+  return (
+      model_name,
+      topology,
+      num_slice,
+      custom_mesh_and_rule,
+      overrides,
+      abstract_state,
+      state_mesh_shardings,
+      logical_shardings,
+  )
 
 
 @pytest.mark.cpu_only
@@ -224,9 +283,16 @@ class TestGetAbstractState:
   def test_get_abstract_state_sharding(self, abstract_state_and_shardings):  # pylint: disable=redefined-outer-name
     """Tests that get_abstract_state returns a state with the correct abstract structure and compares sharding."""
 
-    model_name, topology, num_slice, abstract_state, state_mesh_shardings, logical_shardings = (
-        abstract_state_and_shardings
-    )
+    (
+        model_name,
+        topology,
+        num_slice,
+        custom_mesh_and_rule,
+        overrides,
+        abstract_state,
+        state_mesh_shardings,
+        logical_shardings,
+    ) = abstract_state_and_shardings
 
     assert hasattr(abstract_state, "params")
     assert hasattr(abstract_state, "opt_state")
@@ -235,7 +301,10 @@ class TestGetAbstractState:
     assert param_leaf.dtype == jnp.float32
 
     root_dir = "tests/utils/sharding_info"  # Or your target directory
-    base_path = os.path.join(root_dir, model_name, topology, f"slice_{num_slice}")
+    rule_name = f"rule_{custom_mesh_and_rule}" if custom_mesh_and_rule else "rule_default"
+    if overrides:
+      rule_name += "_" + "_".join(overrides)
+    base_path = os.path.join(root_dir, model_name, topology, f"slice_{num_slice}", rule_name)
     os.makedirs(base_path, exist_ok=True)  # Ensure directory exists for saving actual
 
     error_messages = []

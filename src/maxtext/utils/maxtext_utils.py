@@ -196,8 +196,11 @@ def load_compiled(config, partial_train, state, execution_devices):
 
   serialized_compiled = load_serialized_compiled(config.compiled_trainstep_file)
   shaped_batch = get_shaped_batch(config)
-  example_rng = jax.random.PRNGKey(0)
-  shaped_input_args = (state, shaped_batch, example_rng)
+  if config.pure_nnx:
+    shaped_input_args = (state, shaped_batch)
+  else:
+    example_rng = jax.random.PRNGKey(0)
+    shaped_input_args = (state, shaped_batch, example_rng)
   shaped_input_kwargs = {}
   in_tree, out_tree = get_train_input_output_trees(partial_train, shaped_input_args, shaped_input_kwargs)
   p_train_step = deserialize_and_load(serialized_compiled, in_tree, out_tree, execution_devices=execution_devices)
@@ -214,19 +217,18 @@ def calculate_gemma2_tflops_training_per_device(config, total_ffn_flops, qkv_flo
   Calculate training TFLOP for Gemma2 as in Gemma2 we combine [local_attention, global_attention] into one decoder
   layer and we use sliding window attention in local_attention
   """
-  noncausal_attention_flops = (
-      # global attention
-      4 * config.per_device_batch_size * config.max_target_length**2 * config.num_query_heads * config.head_dim
-      +
-      # local attention
+  window = min(config.sliding_window_size, config.max_target_length)
+  global_causal_flops = (
+      2 * config.per_device_batch_size * config.max_target_length**2 * config.num_query_heads * config.head_dim
+  )
+  local_causal_flops = (
       4
       * config.per_device_batch_size
-      * config.max_target_length
-      * min(config.sliding_window_size, config.max_target_length)
+      * (config.max_target_length * window - 0.5 * window**2)
       * config.num_query_heads
       * config.head_dim
   )
-  causal_attention_flops = noncausal_attention_flops / 2
+  causal_attention_flops = global_causal_flops + local_causal_flops
   attention_tflops = causal_attention_flops * config.num_decoder_layers * 3 / 10**12
 
   # multiply num_decoder_layers by 2 because we combine [local_attention, global_attention] into one decoder layer
@@ -238,7 +240,7 @@ def calculate_gemma2_tflops_training_per_device(config, total_ffn_flops, qkv_flo
 
 
 def calculate_mixed_attention_model_tflops_training_per_device(
-    config, total_ffn_flops, qkv_flops, projection_flops, embedding_flops, attention_pattern_length
+    config, total_ffn_flops_all_layers, qkv_flops, projection_flops, embedding_flops, attention_pattern_length
 ):
   """
   Calculate training TFLOPs for models with a mixed attention pattern of local
@@ -249,34 +251,125 @@ def calculate_mixed_attention_model_tflops_training_per_device(
   num_global_layers = num_layers // attention_pattern_length
   num_local_layers = num_layers - num_global_layers
 
-  # FLOPs for a single global attention layer (full attention)
-  # Formula: 4 * batch_size * seq_len^2 * num_heads * head_dim
-  global_attention_flops_per_layer = (
-      4 * config.per_device_batch_size * config.max_target_length**2 * config.num_query_heads * config.head_dim
+  # Global causal attention uses a multiplier of 2 (instead of 4 for non-causal)
+  # since we only compute the lower triangular half of the attention matrix.
+  global_causal_flops_per_layer = (
+      2 * config.per_device_batch_size * config.max_target_length**2 * config.num_query_heads * config.head_dim
   )
 
-  # FLOPs for a single local attention layer (sliding window)
-  # Formula: 4 * batch_size * seq_len * window_size * num_heads * head_dim
-  local_attention_flops_per_layer = (
+  # Local sliding window attention directly computes the exact causal interactions
+  # via the formula `(T * W - 0.5 * W^2)`. Therefore, we use the base multiplier of 4.
+  window = min(config.sliding_window_size, config.max_target_length)
+  local_causal_flops_per_layer = (
       4
       * config.per_device_batch_size
-      * config.max_target_length
-      * min(config.sliding_window_size, config.max_target_length)
+      * (config.max_target_length * window - 0.5 * window**2)
       * config.num_query_heads
       * config.head_dim
   )
 
-  # Total attention FLOPs = (num_global_layers * FLOPs_per_global) + (num_local_layers * FLOPs_per_local)
-  noncausal_attention_flops = (
-      num_global_layers * global_attention_flops_per_layer + num_local_layers * local_attention_flops_per_layer
+  causal_attention_flops = (
+      num_global_layers * global_causal_flops_per_layer + num_local_layers * local_causal_flops_per_layer
   )
-  causal_attention_flops = noncausal_attention_flops / 2
 
   # Convert to TFLOPs and multiply by 3 for fwd/bwd pass
   attention_tflops = causal_attention_flops * 3 / 10**12
 
-  # Learnable weights (FFN, QKV, Projections) are present in every layer.
-  learnable_weight_tflops = ((total_ffn_flops + qkv_flops + projection_flops) * num_layers + embedding_flops) * 3 / 10**12
+  total_learnable_flops = total_ffn_flops_all_layers
+
+  total_learnable_flops += (qkv_flops + projection_flops) * num_layers + embedding_flops
+
+  learnable_weight_tflops = total_learnable_flops * 3 / 10**12
+
+  return attention_tflops, learnable_weight_tflops
+
+
+def calculate_gemma4_tflops_training_per_device(
+    config, total_ffn_flops_all_layers, embedding_flops, attention_pattern_length
+):
+  """
+  Calculate training TFLOPs for Gemma 4.
+  Gemma 4 has specific quirks:
+  - Different QKV projection sizes for local vs. global layers.
+  - Global-only KV sharing and varying global head dimensions.
+  """
+  num_layers = config.num_decoder_layers
+
+  num_global_layers = num_layers // attention_pattern_length
+  num_local_layers = num_layers - num_global_layers
+
+  kv_multiplier = 1 if config.share_kv_projections else 2
+  global_head_dim = config.global_head_dim or config.head_dim
+  global_num_kv_heads = config.global_num_kv_heads or config.num_kv_heads
+
+  # Global causal attention uses a multiplier of 2 (instead of 4 for non-causal)
+  # since we only compute the lower triangular half of the attention matrix.
+  global_causal_flops_per_layer = (
+      2 * config.per_device_batch_size * config.max_target_length**2 * config.num_query_heads * global_head_dim
+  )
+
+  # Local sliding window attention directly computes the exact causal interactions
+  # via the formula `(T * W - 0.5 * W^2)`. Therefore, we use the base multiplier of 4.
+  window = min(config.sliding_window_size, config.max_target_length)
+  local_causal_flops_per_layer = (
+      4
+      * config.per_device_batch_size
+      * (config.max_target_length * window - 0.5 * window**2)
+      * config.num_query_heads
+      * config.head_dim
+  )
+
+  causal_attention_flops = (
+      num_global_layers * global_causal_flops_per_layer + num_local_layers * local_causal_flops_per_layer
+  )
+
+  # Convert to TFLOPs and multiply by 3 for fwd/bwd pass
+  attention_tflops = causal_attention_flops * 3 / 10**12
+
+  global_qkv_flops_per_layer = (
+      2
+      * config.per_device_batch_size
+      * config.max_target_length
+      * config.emb_dim
+      * (config.num_query_heads + kv_multiplier * global_num_kv_heads)
+      * global_head_dim
+  )
+  global_projection_flops_per_layer = (
+      2
+      * config.per_device_batch_size
+      * config.max_target_length
+      * config.emb_dim
+      * config.num_query_heads
+      * global_head_dim
+  )
+
+  # Local layers never share KV projections (kv_multiplier is always 2).
+  local_qkv_flops_per_layer = (
+      2
+      * config.per_device_batch_size
+      * config.max_target_length
+      * config.emb_dim
+      * (config.num_query_heads + 2 * config.num_kv_heads)
+      * config.head_dim
+  )
+  local_projection_flops_per_layer = (
+      2
+      * config.per_device_batch_size
+      * config.max_target_length
+      * config.emb_dim
+      * config.num_query_heads
+      * config.head_dim
+  )
+
+  total_learnable_flops = total_ffn_flops_all_layers
+
+  total_learnable_flops += (
+      (local_qkv_flops_per_layer + local_projection_flops_per_layer) * num_local_layers
+      + (global_qkv_flops_per_layer + global_projection_flops_per_layer) * num_global_layers
+      + embedding_flops
+  )
+
+  learnable_weight_tflops = total_learnable_flops * 3 / 10**12
 
   return attention_tflops, learnable_weight_tflops
 
@@ -326,7 +419,7 @@ def calculate_llama4_attention_tflops(config):
   return attention_tflops
 
 
-def calculate_indexer_mask_ratio(index_topk, max_target_length):
+def calculate_indexer_mask_ratio(indexer_topk, max_target_length):
   """
   Calculates the sparse-to-dense ratio for Indexer TFLOPs.
 
@@ -367,7 +460,7 @@ def calculate_indexer_mask_ratio(index_topk, max_target_length):
   """
 
   T = float(max_target_length)
-  K = float(index_topk)
+  K = float(indexer_topk)
 
   ratio = K / T
   mask_multiplier = ratio - (0.5 * ratio**2)
@@ -379,20 +472,20 @@ def calculate_indexer_tflops_per_device(config):
   batch_len = config.per_device_batch_size * config.max_target_length
 
   # 1. Calculate projections flops
-  # Query: [batch, seq, q_lora_rank] @ [q_lora_rank, index_n_heads, index_head_dim]
-  q_flops = 2 * batch_len * config.q_lora_rank * config.index_n_heads * config.index_head_dim
-  # Key: [batch, seq, emb_dim] @ [emb_dim, index_head_dim]
-  k_flops = 2 * batch_len * config.emb_dim * config.index_head_dim
-  # Head weight: [batch, seq, emb_dim] @ [emb_dim, index_n_heads]
-  head_weight_flops = 2 * batch_len * config.emb_dim * config.index_n_heads
+  # Query: [batch, seq, q_lora_rank] @ [q_lora_rank, indexer_n_heads, indexer_head_dim]
+  q_flops = 2 * batch_len * config.q_lora_rank * config.indexer_n_heads * config.indexer_head_dim
+  # Key: [batch, seq, emb_dim] @ [emb_dim, indexer_head_dim]
+  k_flops = 2 * batch_len * config.emb_dim * config.indexer_head_dim
+  # Head weight: [batch, seq, emb_dim] @ [emb_dim, indexer_n_heads]
+  head_weight_flops = 2 * batch_len * config.emb_dim * config.indexer_n_heads
   proj_flops = q_flops + k_flops + head_weight_flops
 
   # 2. Calculate index score flops
-  # QK product [batch, seq, index_n_heads, index_head_dim] @ [batch, seq, index_head_dim]
-  # --> [batch, seq, seq, index_n_heads]
-  qk_product_flops = 2 * batch_len * config.max_target_length * config.index_n_heads * config.index_head_dim
-  # Aggregate heads [batch, seq, seq, index_n_heads] @ [batch, seq, index_n_heads]
-  head_reduction_flops = 2 * batch_len * config.max_target_length * config.index_n_heads
+  # QK product [batch, seq, indexer_n_heads, indexer_head_dim] @ [batch, seq, indexer_head_dim]
+  # --> [batch, seq, seq, indexer_n_heads]
+  qk_product_flops = 2 * batch_len * config.max_target_length * config.indexer_n_heads * config.indexer_head_dim
+  # Aggregate heads [batch, seq, seq, indexer_n_heads] @ [batch, seq, indexer_n_heads]
+  head_reduction_flops = 2 * batch_len * config.max_target_length * config.indexer_n_heads
   # Apply causal mask: Divide by 2 to account for triangular interactions
   # The mask restricts the indexer's search space prior to Top-K filtering
   scoring_flops = (qk_product_flops + head_reduction_flops) / 2
@@ -428,14 +521,14 @@ def calculate_mla_tflops_per_device(config):
   qkv_flops = q_flops + kv_flops
 
   # 3. calculate attention
-  if config.use_sparse_indexer and config.max_target_length > config.index_topk:
+  if config.use_indexer and config.max_target_length > config.indexer_topk:
     # get indexer flops
     indexer_proj_flops, indexer_scoring_flops = calculate_indexer_tflops_per_device(config)
     qkv_flops += indexer_proj_flops
 
     # calculate the proportion of the T x T causal matrix that the Indexer actually explores
-    # this follows the area: (TK - 0.5*K^2) / T^2 (T: max_target_length, K: index_topk)
-    multiplier = calculate_indexer_mask_ratio(config.index_topk, config.max_target_length)
+    # this follows the area: (TK - 0.5*K^2) / T^2 (T: max_target_length, K: indexer_topk)
+    multiplier = calculate_indexer_mask_ratio(config.indexer_topk, config.max_target_length)
     attention_flops = (
         2
         * batch_len
@@ -446,7 +539,7 @@ def calculate_mla_tflops_per_device(config):
     )
     attention_flops += indexer_scoring_flops
   else:
-    # standard MLA & max_target_length <= index_topk in sparse indexer
+    # standard MLA & max_target_length <= indexer_topk in sparse indexer
     # in both cases, the indexer is bypassed as the causal mask remains the efficient representation
     attention_flops = (
         2 * batch_len * config.max_target_length * config.num_query_heads * (qk_head_dim_sum + config.v_head_dim)
@@ -493,11 +586,19 @@ def get_dense_moe_layers(config):
   elif config.decoder_block == DecoderBlockType.LLAMA4:
     num_moe_layers = config.num_decoder_layers // config.interleave_moe_layer_step
     num_dense_layers = config.num_decoder_layers - num_moe_layers
+    return num_dense_layers, num_moe_layers
   elif config.decoder_block == DecoderBlockType.QWEN3_NEXT:
+    return 0, config.num_decoder_layers
+  elif config.decoder_block == DecoderBlockType.DEFAULT:
+    raise ValueError("Unsupported decoder block for dense/MoE layer calculation")
+
+  num_experts = getattr(config, "num_experts", 0)
+  if num_experts > 1:
     num_moe_layers = config.num_decoder_layers
     num_dense_layers = 0
   else:
-    raise ValueError("Currently we only support DeepSeek, Llama4, and Qwen3-Next calculation.")
+    num_moe_layers = 0
+    num_dense_layers = config.num_decoder_layers
 
   return num_dense_layers, num_moe_layers
 
@@ -598,6 +699,7 @@ def calculate_gemma3_vision_layers_tflops_per_device(config):
     learnable_weight_flops += 2 * vision_embedder_flops  # only projector is learnable, add fwd+optimizer
   else:
     learnable_weight_flops *= 3  # multiply by 3 for fwd + bwd + optimizer
+    total_attn_flops *= 3  # multiply by 3 for fwd + bwd pass
 
   # Convert to TFLOPs
   learnable_weight_tflops = learnable_weight_flops / 1e12
@@ -660,6 +762,7 @@ def calculate_llama4_vision_layers_tflops_per_device(config):
     learnable_weight_flops += 2 * projector_flops  # only projector is learnable, add fwd+optimizer
   else:
     learnable_weight_flops *= 3  # multiply by 3 for fwd + bwd + optimizer
+    total_attn_flops *= 3  # multiply by 3 for fwd + bwd pass
 
   # Convert to TFLOPs
   learnable_weight_tflops = learnable_weight_flops / 1e12
@@ -723,28 +826,40 @@ def calculate_vision_encoder_tflops(config):
 def calculate_tflops_training_per_device(config, log=True):
   """Calculate training TFLOP"""
   # MLP flops
+  is_ffn_flops_already_total = False
   if config.num_experts > 1:
     # calculation based on dropless implementation
-    if config.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.LLAMA4, DecoderBlockType.QWEN3_NEXT):
+    if config.decoder_block in (
+        DecoderBlockType.DEEPSEEK,
+        DecoderBlockType.LLAMA4,
+        DecoderBlockType.QWEN3_NEXT,
+        DecoderBlockType.GEMMA4,
+    ):
       total_ffn_flops = calculate_routed_and_shared_ffn_tflops_per_device(config)
+      is_ffn_flops_already_total = True
     else:
       gate_flops = 2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.num_experts
       total_ffn_flops = (
-          gate_flops + calculate_ffn_mamtul_tflops_per_device(config, config.mlp_dim) * config.num_experts_per_tok
+          gate_flops + calculate_ffn_mamtul_tflops_per_device(config, config.moe_mlp_dim) * config.num_experts_per_tok
       )
   else:
     total_ffn_flops = calculate_ffn_mamtul_tflops_per_device(config, config.mlp_dim)
+
+  total_ffn_flops_all_layers = (
+      total_ffn_flops if is_ffn_flops_already_total else total_ffn_flops * config.num_decoder_layers
+  )
 
   # Attention flops
   if config.attention_type == "mla":
     qkv_flops, causal_attention_flops, projection_flops = calculate_mla_tflops_per_device(config)
   else:
+    kv_multiplier = 1 if config.share_kv_projections else 2
     qkv_flops = (
         2
         * config.per_device_batch_size
         * config.max_target_length
         * config.emb_dim
-        * (config.num_query_heads + 2 * config.num_kv_heads)
+        * (config.num_query_heads + kv_multiplier * config.num_kv_heads)
         * config.head_dim
     )
     noncausal_attention_flops = (
@@ -765,7 +880,8 @@ def calculate_tflops_training_per_device(config, log=True):
     # NVIDIA/NeMo (2025 April): https://github.com/NVIDIA/NeMo/blob/ba4d6d116463de512ff0cfc14641aa6cf4577a42/nemo/utils/flops_formulas.py#L259-L272
     causal_attention_flops = noncausal_attention_flops / 2
 
-  # Embedding flops
+  # Embedding flops (counts only the unembedding projection; the embedding lookup is a gather operation
+  # that performs no dense math, matching standard MFU hardware calculations)
   embedding_flops = 2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.vocab_size
 
   # Combine flops with number of decoder layers
@@ -775,22 +891,30 @@ def calculate_tflops_training_per_device(config, log=True):
     )
   elif config.decoder_block == DecoderBlockType.GEMMA3:
     attention_tflops, learnable_weight_tflops = calculate_mixed_attention_model_tflops_training_per_device(
-        config, total_ffn_flops, qkv_flops, projection_flops, embedding_flops, attention_pattern_length=6
+        config, total_ffn_flops_all_layers, qkv_flops, projection_flops, embedding_flops, attention_pattern_length=6
     )
   elif config.decoder_block == DecoderBlockType.GPT_OSS:
     attention_tflops, learnable_weight_tflops = calculate_mixed_attention_model_tflops_training_per_device(
-        config, total_ffn_flops, qkv_flops, projection_flops, embedding_flops, attention_pattern_length=2
+        config, total_ffn_flops_all_layers, qkv_flops, projection_flops, embedding_flops, attention_pattern_length=2
     )
   elif config.decoder_block == DecoderBlockType.LLAMA4:
     # Use the new helper to calculate attention TFLOPs correctly.
     attention_tflops = calculate_llama4_attention_tflops(config)
     # The learnable weight calculation remains the same as it correctly handles Llama4's MoE structure.
     learnable_weight_tflops = (
-        (total_ffn_flops + (qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops) * 3 / 10**12
+        (total_ffn_flops_all_layers + (qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops)
+        * 3
+        / 10**12
+    )
+  elif config.decoder_block == DecoderBlockType.GEMMA4:
+    attention_tflops, learnable_weight_tflops = calculate_gemma4_tflops_training_per_device(
+        config, total_ffn_flops_all_layers, embedding_flops, attention_pattern_length=6
     )
   elif config.decoder_block == DecoderBlockType.DEEPSEEK:
     learnable_weight_tflops = (
-        (total_ffn_flops + (qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops) * 3 / 10**12
+        (total_ffn_flops_all_layers + (qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops)
+        * 3
+        / 10**12
     )
     attention_tflops = causal_attention_flops * config.num_decoder_layers * 3 / 10**12
   elif config.decoder_block == DecoderBlockType.QWEN3_NEXT:
@@ -801,7 +925,7 @@ def calculate_tflops_training_per_device(config, log=True):
 
     # Weights TFLOPs:
     total_weights = (
-        total_ffn_flops
+        total_ffn_flops_all_layers
         + embedding_flops
         + (qkv_flops + projection_flops) * num_full_attn_layers
         + gdn_weight_flops_per_layer * num_linear_attn_layers
@@ -814,7 +938,9 @@ def calculate_tflops_training_per_device(config, log=True):
   else:
     # multiply by 3 for both feed forward and back propagation flops
     learnable_weight_tflops = (
-        ((total_ffn_flops + qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops) * 3 / 10**12
+        (total_ffn_flops_all_layers + (qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops)
+        * 3
+        / 10**12
     )
     attention_tflops = causal_attention_flops * config.num_decoder_layers * 3 / 10**12
 
@@ -827,7 +953,7 @@ def calculate_tflops_training_per_device(config, log=True):
   if config.use_multimodal:
     # Add vision layers TFLOPs for multimodal models
     mm_total_tflops, mm_learnable_weight_tflops, mm_attention_tflops = calculate_vision_encoder_tflops(config)
-    if log:
+    if log and mm_total_tflops > 0:
       print(
           f"{config.model_name} vision layers per train step:\n",
           f"Total TFLOPs: {mm_total_tflops:.2f} \n",
@@ -1035,29 +1161,34 @@ def get_abstract_param(model, config):
   with model.mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     key = jax.random.PRNGKey(0)
     input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
+
+  # Cleanly fetch the shapes from the processor using the correct micro_batch_size
+  if config.use_multimodal:
     image_shape = mm_processor.get_dummy_image_shape_for_init(
         config.model_name, batch_size=config.micro_batch_size_to_train_on
     )
-    audio_shape = mm_processor.get_dummy_audio_shape_for_init(config)
+  else:
+    image_shape = None
+
+  audio_shape = mm_processor.get_dummy_audio_shape_for_init(config)
   abstract_vars = jax.eval_shape(
       model.init,
       {"params": key, "dropout": key, "aqt": key},
-      jnp.ones(input_shape, dtype=jnp.int32),
-      jnp.ones(input_shape, dtype=jnp.int32),
+      np.ones(input_shape, dtype=jnp.int32),
+      np.ones(input_shape, dtype=jnp.int32),
       encoder_images=np.ones(image_shape, dtype=jnp.int32) if config.use_multimodal else None,
       encoder_audios=np.ones(audio_shape, dtype=jnp.float32) if config.use_audio else None,
   )
   return abstract_vars
 
 
-def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
+def setup_decode_state(config, mesh, checkpoint_manager, init_state_fn):
   """Setup decode state by loading params from a checkpoint.
   Args:
-    model: the flax model to initialize
     config: config object
-    rng: jax.prng key
     mesh: jax.devices() mesh
     checkpoint_manager: Checkpoint manager
+    init_state_fn: function to initialize the model state
 
   Returns:
     state: state with decode params loaded from the checkpoint
@@ -1067,12 +1198,12 @@ def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
     # generate random params
     max_logging.log("No decode checkpoint specified - generating random weights.")
     state, state_mesh_annotations, _, _ = setup_initial_state(
-        model, None, None, config, rng, mesh, checkpoint_manager, False
+        None, config, mesh, checkpoint_manager, init_state_fn, False
     )
   else:
     # Load params from checkpoint
     max_logging.log(f"Loading decode params from {config.load_parameters_path}")
-    unboxed_abstract_state, state_mesh_annotations, _ = get_abstract_state(model, None, config, rng, mesh, False)
+    unboxed_abstract_state, state_mesh_annotations, _ = get_abstract_state(config, mesh, init_state_fn, False)
     with nn_partitioning.axis_rules(config.logical_axis_rules):
       params = checkpointing.load_params_from_path(
           config.load_parameters_path,
@@ -1087,40 +1218,35 @@ def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
   return state, state_mesh_annotations
 
 
-def setup_training_state(model, data_iterator, tx, config, rng, mesh, checkpoint_manager):
+def setup_training_state(data_iterator, config, mesh, checkpoint_manager, init_state_fn):
   is_training = True
   return setup_initial_state(
-      model,
       data_iterator,
-      tx,
       config,
-      rng,
       mesh,
       checkpoint_manager,
+      init_state_fn,
       is_training,
   )
 
 
 def setup_initial_state(
-    model,
     data_iterator,
-    tx,
     config,
-    rng,
     mesh,
     checkpoint_manager,
+    init_state_fn,
     is_training=True,
 ):
   """We initialize the model and optimizer state, and optionally load from a
   checkpoint as necessary.
 
   Args:
-    model: the flax model to initialize
-    tx: the optax.GradientTransformation
+    data_iterator: data iterator
     config: config object
-    rng: jax.prng key
     mesh: jax.devices() mesh
     checkpoint_manager: an Orbax checkpointing.CheckpointManager object
+    init_state_fn: function to initialize the training state
     is_training: True to initialize training state, False for decode state
 
   Returns:
@@ -1129,7 +1255,7 @@ def setup_initial_state(
   """
 
   unboxed_abstract_state, state_mesh_annotations, state_mesh_shardings = get_abstract_state(
-      model, tx, config, rng, mesh, is_training
+      config, mesh, init_state_fn, is_training
   )
 
   # Initialization
@@ -1164,14 +1290,14 @@ def setup_initial_state(
         # The update of data_iterator state happens in place, no need to assign explicitly
         state = restored["items"]
     else:
-      init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training)
+      init_state_partial = init_state_fn
       init_state_partial.__name__ = "initialize_state"
       # pylint: disable=not-callable
       state = jax.jit(
           init_state_partial,
           in_shardings=None,
           out_shardings=state_mesh_shardings,
-      )(rng)
+      )()
       if raw_params:  # If we loaded a partial state, we need to merge it.
         state = state.replace(params=raw_params)
 
@@ -1180,8 +1306,8 @@ def setup_initial_state(
   return state, state_mesh_annotations, state_mesh_shardings, data_iterator
 
 
-def get_logical_annotations(model, tx, config, rng, mesh, is_training=True):
-  init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training, rng)
+def get_logical_annotations(config, mesh, init_state_fn):
+  init_state_partial = init_state_fn
 
   with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
     abstract_state = jax.eval_shape(init_state_partial)
@@ -1189,9 +1315,9 @@ def get_logical_annotations(model, tx, config, rng, mesh, is_training=True):
   return logical_annotations
 
 
-def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
+def get_abstract_state(config, mesh, init_state_fn, is_training=True):
   """Get a shaped abstraction of the state (including optimizer)"""
-  init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training, rng)
+  init_state_partial = init_state_fn
 
   with nn_partitioning.axis_rules(config.logical_axis_rules):
     abstract_state = jax.eval_shape(init_state_partial)

@@ -15,14 +15,19 @@
 # pylint: disable=bare-except, consider-using-generator, chained-comparison, broad-exception-caught
 """RL Utils Module."""
 import re
+import uuid
+from etils import epath
 import optax
-from maxtext.utils import max_logging
+import numpy as np
 
 
 from math_verify.errors import TimeoutException
 from math_verify.metric import math_metric
 from math_verify.parser import ExprExtractionConfig, LatexExtractionConfig
 from math_verify import parse
+
+from tunix.rl.agentic.parser.chat_template_parser import parser as agentic_chat_template_parser
+
 
 # initialize math_verify_func once
 math_verify_func = math_metric(
@@ -229,7 +234,16 @@ def check_answer(prompts, completions, answer, tmvp_config, **kargs):
   value.
   """
   match_format = get_match_format_regex(tmvp_config)
-  extracted_responses = [guess.group(1) if (guess := match_format.search(c)) is not None else None for c in completions]
+  answer_fallback = get_answer_fallback_regex(tmvp_config)
+
+  extracted_responses = []
+  for c in completions:
+    full_match = match_format.search(c)
+    if full_match is not None:
+      extracted_responses.append(full_match.group(1))
+    else:
+      fallback_matches = answer_fallback.findall(c)
+      extracted_responses.append(fallback_matches[-1].strip() if fallback_matches else None)
 
   scores = []
   for guess, true_answer in zip(extracted_responses, answer):
@@ -257,15 +271,15 @@ def check_answer(prompts, completions, answer, tmvp_config, **kargs):
     except (TimeoutException, Exception):
       pass
 
-    # Correct answer gets tmvp_config.reward_exact_format_match points!
+    # Correct answer gets tmvp_config.reward_exact_answer points!
     if guess == true_answer:
-      score += tmvp_config.reward_exact_format_match
+      score += tmvp_config.reward_exact_answer
     # Give credit if spaces are seen but otherwise the answers match (useful for simple datasets like gsm8k)
     elif guess.strip() == true_answer.strip():
       score += tmvp_config.reward_white_space_format_match
     # Answers match upon robust comparison with math_verify
     elif verified_correct:
-      score += tmvp_config.reward_exact_format_match
+      score += tmvp_config.reward_exact_answer
     else:
       # We also reward it if the answer is close via ratios!
       # Ie if the answer is within some range, reward it!
@@ -408,16 +422,18 @@ def check_numbers(prompts, completions, answer, tmvp_config, **kargs):
 
   # Extract full answer content from solution tags (not just first number)
   match_format = get_match_format_regex(tmvp_config)
-  extracted_responses = [guess.group(1) if (guess := match_format.search(c)) is not None else None for c in completions]
+  answer_fallback = get_answer_fallback_regex(tmvp_config)
+
+  extracted_responses = []
+  for c in completions:
+    full_match = match_format.search(c)
+    if full_match is not None:
+      extracted_responses.append(full_match.group(1))
+    else:
+      fallback_matches = answer_fallback.findall(c)
+      extracted_responses.append(fallback_matches[-1].strip() if fallback_matches else None)
 
   scores = []
-  if tmvp_config.debug.rl:
-    max_logging.log("START ============================")
-    max_logging.log(f"Question: {question[0]}")
-    max_logging.log(f"Answer: {answer[0]}")
-    max_logging.log(f"Response: {completions[0]}")
-    max_logging.log(f"Extracted: {extracted_responses[0]}")
-    max_logging.log("END ==============================")
 
   for guess, true_answer in zip(extracted_responses, answer):
     if guess is None:
@@ -438,15 +454,29 @@ def check_numbers(prompts, completions, answer, tmvp_config, **kargs):
       # Use math_verify to compare answers (handles both numeric and expression comparison)
       score, _ = math_verify_func([boxed(true_answer_fixed)], [boxed(guess_fixed)])
       # Return scaled score: 1.5 for exact/correct, 0 otherwise
-      scores.append(1.5 if score > 0.1 else 0.0)
+      scores.append(tmvp_config.reward_exact_answer if score > 0.1 else 0.0)
     except (TimeoutException, Exception):
       # Fallback to simple numeric comparison if math_verify fails
       try:
         guess_val = float(normalize_final_answer(guess).strip())
         true_val = float(normalize_final_answer(true_answer).strip())
-        scores.append(1.5 if guess_val == true_val else 0.0)
+        scores.append(tmvp_config.reward_exact_answer if guess_val == true_val else 0.0)
       except:
         scores.append(0)
+  if tmvp_config.debug.rl:
+    debug_log_path = epath.Path(tmvp_config.base_output_directory) / tmvp_config.run_name / "debug_rl_logs"
+    debug_log_path.mkdir(parents=True, exist_ok=True)
+    log_file = debug_log_path / f"check_numbers_{uuid.uuid4().hex}.txt"
+    log_content = (
+        "START ============================\n"
+        f"Question: {question[0]}\n"
+        f"Answer: {answer[0]}\n"
+        f"Response: {completions[0]}\n"
+        f"Extracted: {extracted_responses[0]}\n"
+        f"Reward Score: {scores[0]}\n"
+        "END ==============================\n"
+    )
+    log_file.write_text(log_content)
 
   return scores
 
@@ -460,32 +490,57 @@ def extract_hash_answer(text: str) -> str | None:
 
 def get_optimizer(tmvp_config, max_train_steps):
   """Function to obtain an optax optimizer, currently we use adamw."""
-  optimizer = optax.adamw(
-      learning_rate=optax.schedules.warmup_cosine_decay_schedule(
-          init_value=0.0,
-          peak_value=tmvp_config.learning_rate,
-          # Linearly increase learning rate from 0. to learning_rate in the first
-          # warmup_steps_fraction training steps, and then gradually decrease the
-          # learning rate to 0 using cosine scheduler.
-          warmup_steps=int(tmvp_config.warmup_steps_fraction * max_train_steps),
-          decay_steps=max_train_steps,
-          end_value=0.0,
-      ),
-      b1=tmvp_config.adam_b1,
-      b2=tmvp_config.adam_b2,
-      weight_decay=tmvp_config.adam_weight_decay,
+  schedule = optax.schedules.warmup_cosine_decay_schedule(
+      init_value=0.0,
+      peak_value=tmvp_config.learning_rate,
+      # Linearly increase learning rate from 0. to learning_rate in the first
+      # warmup_steps_fraction training steps, and then gradually decrease the
+      # learning rate to 0 using cosine scheduler.
+      warmup_steps=int(tmvp_config.warmup_steps_fraction * max_train_steps),
+      decay_steps=max_train_steps,
+      end_value=0.0,
   )
 
   # TODO: @mazumdera: try optimizer offloading with adamw
   # Add gradient clipping if specified
   # Grad clipping to prevent large gradients. We find this
   # important to keep KL divergence in check.
-  if tmvp_config.gradient_clipping_threshold > 0:
-    optimizer = optax.chain(
-        optax.clip_by_global_norm(max_norm=tmvp_config.gradient_clipping_threshold),
-        optimizer,
+  def make_optimizer(learning_rate):
+    transforms = []
+    if tmvp_config.gradient_clipping_threshold > 0:
+      transforms.append(optax.clip_by_global_norm(max_norm=tmvp_config.gradient_clipping_threshold))
+    transforms.append(
+        optax.adamw(
+            learning_rate=learning_rate,
+            b1=tmvp_config.adam_b1,
+            b2=tmvp_config.adam_b2,
+            weight_decay=tmvp_config.adam_weight_decay,
+        )
     )
-  return optimizer
+    return optax.chain(*transforms)
+
+  # Wrap the entire optimizer (including gradient clipping) with
+  # inject_hyperparams so opt_state.hyperparams['learning_rate'] is at the
+  # top level of the state tree. This is required for tunix's peft_trainer to
+  # automatically read and log the per-step learning rate.
+  return optax.inject_hyperparams(make_optimizer)(learning_rate=schedule)
+
+
+def format_maxtext_messages(messages: list[dict[str, str]], template_config: dict, tmvp_config) -> list[dict[str, str]]:
+  """Helper to inject MaxText's system prompt into the input user messages."""
+  formatted_messages = []
+  for msg in messages:
+    formatted_content = template_config["TEMPLATE"].format(
+        system_prompt=template_config["SYSTEM_PROMPT"].format(
+            reasoning_start_token=tmvp_config.reasoning_start_token,
+            reasoning_end_token=tmvp_config.reasoning_end_token,
+            solution_start_token=tmvp_config.solution_start_token,
+            solution_end_token=tmvp_config.solution_end_token,
+        ),
+        question=msg,
+    )
+    formatted_messages.append({"role": "user", "content": formatted_content})
+  return formatted_messages
 
 
 def process_data(dataset_name, model_tokenizer, template_config, tmvp_config, x):
@@ -526,28 +581,75 @@ def process_data(dataset_name, model_tokenizer, template_config, tmvp_config, x)
   if dataset_name == "gsm8k":
     answer = extract_hash_answer(answer)
 
+  messages = [question]
+  formatted_messages = format_maxtext_messages(messages, template_config, tmvp_config)
+
+  prompts = model_tokenizer.apply_chat_template(
+      formatted_messages,
+      tokenize=False,
+      add_generation_prompt=True,
+  )
+
   return {
-      # passed to model forward pass
-      "prompts": model_tokenizer.apply_chat_template(
-          [
-              {
-                  "role": "user",
-                  "content": template_config["TEMPLATE"].format(
-                      system_prompt=template_config["SYSTEM_PROMPT"].format(
-                          reasoning_start_token=tmvp_config.reasoning_start_token,
-                          reasoning_end_token=tmvp_config.reasoning_end_token,
-                          solution_start_token=tmvp_config.solution_start_token,
-                          solution_end_token=tmvp_config.solution_end_token,
-                      ),
-                      question=question,
-                  ),
-              },
-          ],
-          tokenize=False,
-          add_generation_prompt=True,
-      ),
-      # passed to reward functions
+      # pre-formatted prompts for evaluation
+      "prompts": prompts,
+      # raw question for AgenticGRPOLearner to bypass formatting
       "question": question,
       # passed to reward functions
       "answer": answer,
   }
+
+
+def get_correctness_metrics(prompts, completions, rewards, advantages, **kwargs):
+  """Compute correctness statistics metrics based on rewards."""
+  del prompts, completions, advantages, kwargs
+  solve_all = (rewards > 0.1).all()
+  solve_none = (rewards == 0).all()
+  solve_partial = (~solve_all) and (~solve_none)
+  solve_ratio = (rewards > 0.1).mean()
+  return {
+      "rewards/solve_all": (
+          1 if solve_all else 0,
+          np.mean,
+      ),
+      "rewards/solve_none": (
+          1 if solve_none else 0,
+          np.mean,
+      ),
+      "rewards/solve_partial": (
+          1 if solve_partial else 0,
+          np.mean,
+      ),
+      "rewards/solve_ratio": (
+          solve_ratio,
+          np.mean,
+      ),
+  }
+
+
+class MaxTextChatParser(agentic_chat_template_parser.DefaultChatTemplateParser):
+  """
+  Custom Chat Parser for MaxText that intercepts message lists dynamically
+  during agentic rollouts and injects the necessary system templates and
+  special tokens using the shared helper.
+  """
+
+  def __init__(self, model_tokenizer, template_config, tmvp_config):
+    super().__init__(model_tokenizer)
+    self.template_config = template_config
+    self.tmvp_config = tmvp_config
+
+  def parse(
+      self,
+      messages: list[dict[str, str]],
+      add_generation_prompt: bool = False,
+      is_first_msg: bool = False,
+  ) -> str:
+    """Overrides the default parse method to apply MaxText-specific formatting to the messages."""
+    # Apply MaxText specific formatting to the messages
+    formatted_messages = format_maxtext_messages(messages, self.template_config, self.tmvp_config)
+
+    # Delegate to Tunix default parser to apply the tokenizer's chat template
+    return super().parse(
+        messages=formatted_messages, add_generation_prompt=add_generation_prompt, is_first_msg=is_first_msg
+    )

@@ -36,6 +36,12 @@ _LOGGED_ACTIVATION_SHARDINGS = set()
 _ACTIVATION_SHARDINGS_DUMP = []
 
 
+def clear_input_shardings_dump():
+  """Clear the input shardings dump"""
+  _LOGGED_ACTIVATION_SHARDINGS.clear()
+  _ACTIVATION_SHARDINGS_DUMP.clear()
+
+
 def get_input_data_sharding(config, mesh):
   """Get the input data sharding for the model"""
   if config.enable_diloco:
@@ -109,6 +115,19 @@ def maybe_shard_with_name(
     return jax.lax.with_sharding_constraint(inputs, named_sharding)
 
 
+def maybe_shard_with_pspec(inputs, mesh, shard_mode, pspec: jax.sharding.PartitionSpec | None, debug_sharding=False):
+  if pspec is None:
+    return None
+  sharding = NamedSharding(mesh, pspec)
+  return maybe_shard_with_name(
+      inputs,
+      sharding,
+      shard_mode=shard_mode,
+      debug_sharding=debug_sharding,
+      extra_stack_level=1,
+  )
+
+
 def maybe_shard_with_logical(
     inputs, logical_axes, mesh, shard_mode, rules=None, debug_sharding=False, extra_stack_level=0, sharding_desc=""
 ):
@@ -151,9 +170,9 @@ def remove_size_one_mesh_axis(spec, mesh):
     if s is None or s == P.UNCONSTRAINED:
       new_spec.append(s)  # type: ignore
     elif isinstance(s, tuple):
-      new_spec.append(tuple(i for i in s if mesh.shape[i] != 1))
+      new_spec.append(tuple(i for i in s if mesh.shape.get(i, 1) != 1))
     else:
-      new_spec.append(None if mesh.shape[s] == 1 else s)  # type: ignore
+      new_spec.append(None if mesh.shape.get(s, 1) == 1 else s)  # type: ignore
   return P(*new_spec, unreduced=spec.unreduced, reduced=spec.reduced)
 
 

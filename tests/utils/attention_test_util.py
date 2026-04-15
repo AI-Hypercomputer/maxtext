@@ -23,7 +23,7 @@ import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 from maxtext.configs import pyconfig
 from maxtext.common.gcloud_stub import is_decoupled
-from maxtext.common.common_types import AttentionType, DECODING_ACTIVE_SEQUENCE_INDICATOR, EP_AS_CONTEXT, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, ShardMode
+from maxtext.common.common_types import AttentionType, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, ShardMode
 from maxtext.layers.attention_mla import MLA
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
@@ -47,6 +47,8 @@ class MLATestBase(parameterized.TestCase):
       "qk_nope_head_dim": 128,
       "qk_rope_head_dim": 64,
       "v_head_dim": 192,
+      "dtype": "float32",
+      "mla_naive_kvcache": False,  # TODO: Test both naive/non-naive modes once b/485997160 is resolved.
   }
 
   def setUp(self):
@@ -202,12 +204,8 @@ def forward_with_context_expert_parallelism(
     decoder_positions = reordered_batch["inputs_position"]
   # apply attention with sharding
   with mesh_cp, nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
-    if cfg_cp.expert_shard_attention_option == EP_AS_CONTEXT:
-      batch_axis = "activation_batch_no_exp"
-      length_axis = "activation_length"
-    else:
-      batch_axis = "activation_batch"
-      length_axis = "activation_length_no_exp"
+    batch_axis = "activation_batch"
+    length_axis = "activation_length"
     lnx_spec = nn_partitioning.logical_to_mesh_axes(
         (batch_axis, length_axis, "activation_embed"),
         nn_partitioning.get_axis_rules(),

@@ -19,6 +19,7 @@ from typing import Any, Sequence
 import numpy as np
 
 import jax.numpy as jnp
+from flax import struct
 
 Config = Any
 
@@ -31,16 +32,12 @@ AxisNames = tuple[str, ...]
 AxisIdxes = tuple[int, ...]
 
 BATCH = "activation_batch"
-BATCH_NO_EXP = "activation_batch_no_exp"
 
 ATTN_LENGTH = "activation_attn_length"
-ATTN_LENGTH_NO_EXP = "activation_attn_length_no_exp"
 
 LENGTH = "activation_length"
-LENGTH_NO_EXP = "activation_length_no_exp"
 PREFILL_LENGTH = "prefill_activation_length"
 Q_LENGTH = "activation_q_length"
-Q_LENGTH_NO_EXP = "activation_q_length_no_exp"
 Q_LORA_UP_PROJ = "q_lora_up_proj"
 KV_LENGTH = "activation_kv_length"
 KV_LORA_UP_PROJ = "kv_lora_up_proj"
@@ -49,7 +46,6 @@ EMBED = "activation_embed"
 HEAD = "activation_heads"
 PREFILL_KV_BATCH = "activation_prefill_kv_batch"
 KV_BATCH = "activation_kv_batch"
-KV_BATCH_NO_EXP = "activation_kv_batch_no_exp"
 KV_HEAD = "activation_kv_heads"
 KV_HEAD_DIM = "activation_kv_head_dim"
 D_KV = "activation_kv"
@@ -81,6 +77,17 @@ DECODING_ACTIVE_SEQUENCE_INDICATOR = 1
 DEFAULT_MASK_VALUE = -0.7 * float(np.finfo(np.dtype("float32")).max)
 
 
+@struct.dataclass
+class MultimodalInput:
+  """Multimodal inputs for encoder processing."""
+
+  image_embeddings: Array | None = None
+  image_masks: Array | None = None
+  audio_embeddings: Array | None = None
+  audio_masks: Array | None = None
+  bidirectional_mask: Array | None = None
+
+
 class DecoderBlockType(enum.Enum):
   """Decoder block types."""
 
@@ -92,6 +99,7 @@ class DecoderBlockType(enum.Enum):
   GEMMA = "gemma"
   GEMMA2 = "gemma2"
   GEMMA3 = "gemma3"
+  GEMMA4 = "gemma4"
   QWEN2 = "qwen2"
   QWEN3 = "qwen3"
   QWEN3_MOE = "qwen3_moe"

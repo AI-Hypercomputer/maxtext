@@ -24,77 +24,82 @@ We use [Tunix](https://github.com/google/tunix), a JAX-based library designed fo
 
 Let's get started!
 
-## 1. Build and upload MaxText Docker image
+## Prerequisites
 
-This section guides you through cloning the MaxText repository, building MaxText Docker image with dependencies, and uploading the docker image to your project's Artifact Registry.
+Before starting, ensure you have:
 
-### 1.1. Clone the MaxText repository
+- Access to a Google Cloud Project with TPU quotas.
+- A Hugging Face account with an access token for downloading models.
+- Permissions for Google Artifact Registry (Artifact Registry Writer role).
+- Prerequisites for XPK installed (follow [official documentation](https://github.com/AI-Hypercomputer/xpk/blob/main/docs/installation.md#1-prerequisites)).
+- A Pathways-ready GKE cluster (see [create GKE cluster](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster)).
+- **Docker** installed and configured for sudoless use. Follow the steps to [configure sudoless Docker](https://docs.docker.com/engine/install/linux-postinstall/).
 
-```bash
-git clone https://github.com/google/maxtext.git
-cd maxtext
-```
+## Build and upload MaxText Docker image
 
-### 1.2. Build MaxText Docker image
+For instructions on building and uploading the MaxText Docker image with post-training dependencies, please refer to the [official documentation](https://maxtext.readthedocs.io/en/latest/build_maxtext.html).
 
-Before building the Docker image, follow the steps to [configure sudoless Docker](https://docs.docker.com/engine/install/linux-postinstall/). Then, authenticate to [Google Artifact Registry](https://docs.cloud.google.com/artifact-registry/docs/docker/authentication#gcloud-helper) for permission to push your images and other access.
-
-```bash
-# Authenticate your user account for gcloud CLI access
-gcloud auth login
-# Configure application default credentials for Docker and other tools
-gcloud auth application-default login
-# Configure Docker credentials and test your access
-gcloud auth configure-docker
-docker run hello-world
-```
-
-Then run the following command to create a local Docker image named `maxtext_base_image`. This build process takes approximately 10 to 15 minutes.
-
-```bash
-bash src/dependencies/scripts/docker_build_dependency_image.sh WORKFLOW=post-training
-```
-
-### 1.3. Upload the Docker image to Artifact Registry
-
-> **Note:** You will need the [**Artifact Registry Writer**](https://docs.cloud.google.com/artifact-registry/docs/access-control#permissions) role to push Docker images to your project's Artifact Registry and to allow the cluster to pull them during workload execution. If you don't have this permission, contact your project administrator to grant you this role through "Google Cloud Console -> IAM -> Grant access".
-
-```bash
-export DOCKER_IMAGE_NAME=<Docker Image Name>
-bash src/dependencies/scripts/docker_upload_runner.sh CLOUD_IMAGE_NAME=${DOCKER_IMAGE_NAME?}
-```
-
-The `docker_upload_runner.sh` script uploads your Docker image to Artifact Registry.
-
-## 2. Install XPK
-
-Install XPK by following the instructions in the [official documentation](https://github.com/AI-Hypercomputer/xpk/blob/main/docs/installation.md).
-
-## 3. Create GKE cluster
+## Create GKE cluster
 
 Use a pathways ready GKE cluster as described [here](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster).
 
-## 4. Environment configuration
+## Environment configuration
+
+Set up the following environment variables to configure your training run. Replace
+placeholders with your actual values.
 
 ```bash
-# -- Google Cloud Configuration --
-export PROJECT=<Google Cloud Project ID>
-export CLUSTER_NAME=<Name of GKE Cluster>
-export ZONE=<GKE Cluster Zone>
+# -- Model configuration --
+# The MaxText model name. See `src/maxtext/configs/types.py` for `ModelName` for a
+# full list of supported models.
+export MODEL=<MaxText Model> # e.g., deepseek3-671b
 
-# -- Workload Configuration --
-export WORKLOAD_NAME=<Name of Workload> # e.g., sft-$(date +%s)
-export TPU_TYPE=<TPU Type> # e.g., v6e-256
-export TPU_SLICE=<number of slices>
-export DOCKER_IMAGE="gcr.io/${PROJECT?}/${DOCKER_IMAGE_NAME?}"
-
-# -- MaxText Configuration --
-export OUTPUT_PATH=<GCS Path for Output/Logs> # e.g., gs://my-bucket/my-output-directory
-export STEPS=<Fine-Tuning Steps> # e.g., 1000
+# Your Hugging Face access token. Required to download gated models like Llama.
+# You can generate one at https://huggingface.co/settings/tokens.
 export HF_TOKEN=<Hugging Face Access Token>
 
-# -- Model Configuration --
-export MODEL_NAME=<Model Name> # e.g., deepseek3-671b
+# -- MaxText configuration --
+# Use a GCS bucket you own to store logs and checkpoints. Ideally in the same
+# region as your TPUs to minimize latency and costs.
+# You can list your buckets and their locations in the
+# [Cloud Console](https://console.cloud.google.com/storage/browser) or via
+# `gcloud storage buckets list --format="table(name, location)"`.
+export BASE_OUTPUT_DIRECTORY=<GCS Path for Output/Logs> # e.g., gs://my-bucket/maxtext-runs
+
+# An arbitrary string to identify this specific run.
+# We recommend to include the model, user, and timestamp.
+# Note: Kubernetes requires workload names to be valid DNS labels (lowercase, no underscores or periods).
+export RUN_NAME=<Name for this run>
+
+# -- Workload configuration --
+# Your GCP project ID. Find it on the [Cloud Console Dashboard](https://console.cloud.google.com/home/dashboard).
+# If you've already set it in your local config, you can retrieve it via:
+# gcloud config get-value project
+export PROJECT_ID=<Google Cloud Project ID>
+
+# The GCP location (listed as "Location" in the UI) and name of your
+# TPU-enabled GKE cluster. Both can be found on the
+# [Cloud Console](https://console.cloud.google.com/kubernetes/list).
+export ZONE=<GKE Cluster Zone> # e.g., 'us-central1'
+export GKE_CLUSTER=<Name of GKE Cluster>
+
+# For a full list of MaxText-supported TPU types, see: `src/maxtext/utils/accelerator_to_spec_map.py`. To see the TPU type
+# of your cluster:
+
+# 1. Connect to the cluster (required for kubectl commands later):
+# gcloud container clusters get-credentials ${GKE_CLUSTER?} --location ${ZONE?} --project ${PROJECT_ID?}
+
+# 2. Find your TPU type (e.g., 'v5p-128') by checking the accelerator labels on your nodes:
+# kubectl get nodes -l cloud.google.com/gke-tpu-accelerator -o jsonpath='{.items[*].metadata.labels.cloud\.google\.com/gke-tpu-accelerator}' | tr ' ' '\n' | sort -u
+export TPU_TYPE=<TPU Type>
+export NUM_SLICES=<number of slices>
+
+# The Docker image you pushed in the prerequisite step
+export CLOUD_IMAGE_NAME=<image name>
+export DOCKER_IMAGE="gcr.io/${PROJECT_ID?}/${CLOUD_IMAGE_NAME?}"
+
+# -- Fine-Tuning configuration --
+export STEPS=<Fine-Tuning Steps> # e.g., 1000
 
 # -- Dataset configuration --
 export DATASET_NAME=<Hugging Face Dataset Name> # e.g., HuggingFaceH4/ultrachat_200k
@@ -102,7 +107,7 @@ export TRAIN_SPLIT=<Data Split for Train> # e.g., train_sft
 export TRAIN_DATA_COLUMNS=<Data Columns to Train on> # e.g., ['messages']
 ```
 
-## 5. Get MaxText model checkpoint
+## Get MaxText model checkpoint
 
 This section explains how to prepare your model checkpoint for use with MaxText. You have two options: using an existing MaxText checkpoint or converting a Hugging Face checkpoint.
 
@@ -111,10 +116,10 @@ This section explains how to prepare your model checkpoint for use with MaxText.
 If you already have a MaxText-compatible model checkpoint, simply set the following environment variable and move on to the next section.
 
 ```bash
-export MODEL_CHECKPOINT_PATH=<gcs path for MaxText checkpoint> # e.g., gs://my-bucket/my-model-checkpoint/0/items
+export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint> # e.g., gs://my-bucket/my-model-checkpoint/0/items
 ```
 
-**Note:** Make sure that `MODEL_CHECKPOINT_PATH` has the checkpoints created using the correct storage flags:
+**Note:** Make sure that `MAXTEXT_CKPT_PATH` has the checkpoints created using the correct storage flags:
 
 ```
 export USE_PATHWAYS=0  # Set to 1 for Pathways, 0 for McJAX.
@@ -124,46 +129,46 @@ checkpoint_storage_use_ocdbt=$((1 - USE_PATHWAYS))
 
 ### Option 2: Converting a Hugging Face checkpoint
 
-Refer the steps in [Hugging Face to MaxText](../../guides/checkpointing_solutions/convert_checkpoint.md#hugging-face-to-maxtext) to convert a hugging face checkpoint to MaxText. Make sure you have correct checkpoint files converted and saved. Similar as Option 1, you can set the following environment and move on.
+Refer the steps in [Hugging Face to MaxText](https://maxtext.readthedocs.io/en/maxtext-v0.2.1/guides/checkpointing_solutions/convert_checkpoint.html#hugging-face-to-maxtext) to convert a hugging face checkpoint to MaxText. Make sure you have correct checkpoint files converted and saved. Similar as Option 1, you can set the following environment and move on.
 
 ```bash
-export MODEL_CHECKPOINT_PATH=<gcs path for MaxText checkpoint> # gs://my-bucket/my-checkpoint-directory/0/items
+export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint> # gs://my-bucket/my-checkpoint-directory/0/items
 ```
 
-## 6. Submit workload on GKE cluster
+## Submit workload on GKE cluster
 
 This section provides the command to run SFT on a GKE cluster.
 
-### 6.1. SFT with Multi-Controller JAX (McJAX)
+### SFT with Multi-Controller JAX (McJAX)
 
 ```bash
 xpk workload create \
---cluster=${CLUSTER_NAME?} \
---project=${PROJECT?} \
+--cluster=${GKE_CLUSTER?} \
+--project=${PROJECT_ID?} \
 --zone=${ZONE?} \
 --docker-image=${DOCKER_IMAGE?} \
---workload=${WORKLOAD_NAME?} \
+--workload=${RUN_NAME?} \
 --tpu-type=${TPU_TYPE?} \
---num-slices=${TPU_SLICE?} \
---command "python3 -m maxtext.trainers.post_train.sft.train_sft run_name=${WORKLOAD_NAME?} base_output_directory=${OUTPUT_PATH?} model_name=${MODEL_NAME?} load_parameters_path=${MODEL_CHECKPOINT_PATH?} hf_access_token=${HF_TOKEN?}  per_device_batch_size=1 steps=${STEPS?} profiler=xplane hf_path=${DATASET_NAME?} train_split=${TRAIN_SPLIT?} train_data_columns=${TRAIN_DATA_COLUMNS?}"
+--num-slices=${NUM_SLICES?} \
+--command "python3 -m maxtext.trainers.post_train.sft.train_sft run_name=${RUN_NAME?} base_output_directory=${BASE_OUTPUT_DIRECTORY?} model_name=${MODEL?} load_parameters_path=${MAXTEXT_CKPT_PATH?} hf_access_token=${HF_TOKEN?}  per_device_batch_size=1 steps=${STEPS?} profiler=xplane hf_path=${DATASET_NAME?} train_split=${TRAIN_SPLIT?} train_data_columns=${TRAIN_DATA_COLUMNS?}"
 ```
 
-Once the fine-tuning is completed, you can access your model checkpoints at `$OUTPUT_PATH/$WORKLOAD_NAME/checkpoints`.
+Once the fine-tuning is completed, you can access your model checkpoints at `${BASE_OUTPUT_DIRECTORY}/${RUN_NAME}/checkpoints`.
 
-### 6.2. SFT with Pathways
+### SFT with Pathways
 
 ```bash
 export USE_PATHWAYS=1
 
 xpk workload create-pathways \
---cluster=${CLUSTER_NAME?} \
---project=${PROJECT?} \
+--cluster=${GKE_CLUSTER?} \
+--project=${PROJECT_ID?} \
 --zone=${ZONE?} \
 --docker-image=${DOCKER_IMAGE?} \
---workload=${WORKLOAD_NAME?} \
+--workload=${RUN_NAME?} \
 --tpu-type=${TPU_TYPE?} \
---num-slices=${TPU_SLICE?} \
---command="JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE=1 python3 -m maxtext.trainers.post_train.sft.train_sft run_name=${WORKLOAD_NAME?} base_output_directory=${OUTPUT_PATH?} model_name=${MODEL_NAME?} load_parameters_path=${MODEL_CHECKPOINT_PATH?} hf_access_token=${HF_TOKEN?} per_device_batch_size=1 steps=${STEPS?} profiler=xplane checkpoint_storage_use_zarr3=$((1 - USE_PATHWAYS)) checkpoint_storage_use_ocdbt=$((1 - USE_PATHWAYS)) enable_single_controller=True"
+--num-slices=${NUM_SLICES?} \
+--command="JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE=1 python3 -m maxtext.trainers.post_train.sft.train_sft run_name=${RUN_NAME?} base_output_directory=${BASE_OUTPUT_DIRECTORY?} model_name=${MODEL?} load_parameters_path=${MAXTEXT_CKPT_PATH?} hf_access_token=${HF_TOKEN?} per_device_batch_size=1 steps=${STEPS?} profiler=xplane checkpoint_storage_use_zarr3=$((1 - USE_PATHWAYS)) checkpoint_storage_use_ocdbt=$((1 - USE_PATHWAYS)) enable_single_controller=True"
 ```
 
-Once the fine-tuning is completed, you can access your model checkpoints at `$OUTPUT_PATH/$WORKLOAD_NAME/checkpoints`.
+Once the fine-tuning is completed, you can access your model checkpoints at `${BASE_OUTPUT_DIRECTORY}/${RUN_NAME}/checkpoints`.

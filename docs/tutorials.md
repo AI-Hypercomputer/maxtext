@@ -41,13 +41,22 @@ Step-by-step guides for pre-training with real datasets like C4 using HuggingFac
 
 Techniques for SFT, RL, and other post-training workflows on TPU.
 :::
+
+:::{grid-item-card} 📊 Inference
+:link: tutorials/inference
+:link-type: doc
+
+Step-by-step guides for running inference of MaxText models on vLLM.
+:::
 ::::
 
 ```{toctree}
-:hidden:
-:maxdepth: 1
-
+---
+hidden:
+maxdepth: 1
+---
 tutorials/first_run.md
 tutorials/pretraining.md
 tutorials/post_training_index.md
+tutorials/inference.md
 ```

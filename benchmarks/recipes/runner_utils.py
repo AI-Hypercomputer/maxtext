@@ -16,7 +16,7 @@
 
 import logging
 
-from .. import maxtext_xpk_runner as mxr
+from benchmarks import maxtext_xpk_runner as mxr
 from benchmarks.benchmark_utils import Framework
 from benchmarks.disruption_management.disruption_manager import construct_disruption_configs
 

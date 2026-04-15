@@ -21,19 +21,8 @@ The primary goal is to demonstrate the end-to-end process of:
 
 ## Example command to run on single-host TPU:
 ```
-
-# Create a virtual environment
-export VENV_NAME=<your virtual env name> # e.g., maxtext_venv
-pip install uv
-uv venv --python 3.12 --seed ${VENV_NAME?}
-source ${VENV_NAME?}/bin/activate
-
-# Run the following commands to get all the necessary installations.
-
-uv pip install "maxtext[tpu-post-train]>=0.2.0" --resolution=lowest
-install_maxtext_tpu_post_train_extra_deps
-
-
+# For instructions on installing MaxText with post-training dependencies,
+# please refer to the https://maxtext.readthedocs.io/en/latest/install_maxtext.html documentation.
 
 # Environment configurations
 export RUN_NAME=$(date +%Y-%m-%d-%H-%M-%S)
@@ -51,17 +40,15 @@ python3 -m maxtext.examples.sft_train_and_evaluate maxtext/configs/post_train/sf
 
 ## Example command to run on multi-host TPUs using McJAX:
 ```
-# Build & upload docker image
-export DOCKER_IMAGE_NAME=${USER}_runner
-bash docker_build_dependency_image.sh MODE=post-training && \
-  bash docker_upload_runner.sh CLOUD_IMAGE_NAME=${DOCKER_IMAGE_NAME?}
+# For instructions on building and uploading the MaxText Docker image with post-training dependencies,
+# please refer to the https://maxtext.readthedocs.io/en/latest/build_maxtext.html documentation.
 
 # Environment configurations
 export PROJECT=<Google Cloud Project ID>
 export CLUSTER_NAME=<Mame of GKE cluster>
 export ZONE=<CGKE cluster zone>
 export TPU_TYPE=<TPU type>
-export DOCKER_IMAGE="gcr.io/${PROJECT?}/${DOCKER_IMAGE_NAME?}"
+export DOCKER_IMAGE="gcr.io/${PROJECT?}/${CLOUD_IMAGE_NAME?}"
 export RUN_NAME=$(date +%Y-%m-%d-%H-%M-%S)
 export OUTPUT_PATH=<GCS Bucket Path for output/logs>
 export MODEL_NAME=llama3.1-8b

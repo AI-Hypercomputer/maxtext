@@ -23,7 +23,6 @@ and evaluation parameters for convergence analysis.
 
 from benchmarks.benchmark_utils import MaxTextModel, _add_to_model_dictionary
 from benchmarks.convergence.convergence_utils import DatasetHParams, ConvHParams, _setup_model_convergence_
-
 from benchmarks.maxtext_v5p_model_configs import deepseek_v3_ep_256_v5p_512
 
 c4_pretrain_model_dict = {}

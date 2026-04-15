@@ -27,6 +27,7 @@ import os
 from absl import app
 
 import numpy as np
+import optax
 
 import pathwaysutils  # pylint: disable=unused-import
 
@@ -39,8 +40,8 @@ from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 
 from maxtext.configs import pyconfig
-from maxtext.common.common_types import ShardMode
 from maxtext.utils.globals import EPS
+from maxtext.utils import elastic_utils
 # Placeholder: internal
 
 # pylint: disable=too-many-positional-arguments
@@ -75,8 +76,10 @@ diagnostic, debug_configuration, diagnostic_configuration, stack_trace_configura
 VertexTensorboardManager, _vertex_tb_is_stub = vertex_tensorboard_modules()
 
 
-def get_first_step(state):
-  return int(state.step)
+def get_first_step(model, state):
+  if isinstance(model, nn.Module):
+    return int(state.step)
+  return int(state.optimizer.step.get_value())
 
 
 # -----------------------------------------------------------------------------
@@ -136,7 +139,12 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
         decoder_target_mask=data["targets_segmentation"],
     )
 
-    if config.num_vocab_tiling > 1:
+    if (config.use_indexer and not config.indexer_sparse_training) and is_train:
+      # In Dense Warm-up stage, we skip main model loss calculation for efficiency.
+      # The main model parameters are frozen and only the indexer is trained via KL divergence.
+      total_loss = 0.0
+      total_z_loss = 0.0
+    elif config.num_vocab_tiling > 1:
       hidden_state_key = ("intermediates", "decoder", "hidden_states")
       hidden_states = maxtext_utils.get_nested_value(intermediate_outputs, hidden_state_key)[0]
       total_loss, total_z_loss = vocab_tiling_linen_loss(hidden_states, data, config, model, params, is_train)
@@ -178,18 +186,25 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
         decoder_target_mask=data["targets_segmentation"],
     )
     intermediate_outputs = {}
-    one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
-    xent, z_loss = max_utils.cross_entropy_with_logits(logits, one_hot_targets, z_loss=config.z_loss_multiplier)
 
-    xent = nn.with_logical_constraint(xent, ("activation_embed_and_logits_batch", "activation_length"))
-    z_loss = nn.with_logical_constraint(z_loss, ("activation_embed_and_logits_batch", "activation_length"))
+    if (config.use_indexer and not config.indexer_sparse_training) and is_train:
+      # In Dense Warm-up stage, we skip main model loss calculation for efficiency.
+      # The main model parameters are frozen and only the indexer is trained via KL divergence.
+      total_loss = 0.0
+      total_z_loss = 0.0
+    else:
+      one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
+      xent, z_loss = max_utils.cross_entropy_with_logits(logits, one_hot_targets, z_loss=config.z_loss_multiplier)
 
-    # Mask out paddings at the end of each example.
-    xent = xent * (data["targets_segmentation"] != 0)
-    z_loss = z_loss * (data["targets_segmentation"] != 0)
+      xent = nn.with_logical_constraint(xent, ("activation_embed_and_logits_batch", "activation_length"))
+      z_loss = nn.with_logical_constraint(z_loss, ("activation_embed_and_logits_batch", "activation_length"))
 
-    total_loss = jnp.sum(xent)
-    total_z_loss = jnp.sum(z_loss)
+      # Mask out paddings at the end of each example.
+      xent = xent * (data["targets_segmentation"] != 0)
+      z_loss = z_loss * (data["targets_segmentation"] != 0)
+
+      total_loss = jnp.sum(xent)
+      total_z_loss = jnp.sum(z_loss)
 
   total_weights = jnp.sum(data["targets_segmentation"] != 0)
   # If gradient accumulation is enabled, we don't need to divide total_loss
@@ -220,7 +235,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
 
   # get indexer loss
   indexer_loss = 0.0
-  if config.use_sparse_indexer and config.indexer_loss_scaling_factor > 0.0:
+  if config.use_indexer and config.indexer_loss_scaling_factor > 0.0:
     indexer_losses = []
     # Extract 'indexer_loss' from model intermediates.
     # We check for paths ending in ('self_attention', 'indexer_loss').
@@ -343,6 +358,11 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       lambda x: x.astype(config.grad_dtype) if x.dtype == jnp.float32 else x,
       raw_grads,
   )
+  if config.parameter_memory_host_offload:
+    raw_grads = jax.device_put(
+        raw_grads,
+        max_utils.with_memory_kind(params_shardings, "device"),
+    )
   intermediate_outputs = aux["intermediate_outputs"]
   total_weights = aux["total_weights"]
   moe_lb_loss = aux["moe_lb_loss"]
@@ -379,7 +399,20 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
             jax.tree_util.tree_map_with_path(move, state_mesh_shardings.params),
         )
     )
-  new_state = state.apply_gradients(grads=grads)
+
+  if getattr(config, "skip_step_on_spikes", False):
+    grad_norm = max_utils.l2norm_pytree(grads)
+    # TrainState.apply_gradients doesn't pass **kwargs to tx.update, so we unpack it manually.
+    updates, new_opt_state = state.tx.update(grads, state.opt_state, state.params, loss=loss, grad_norm=grad_norm)
+    new_params = optax.apply_updates(state.params, updates)
+
+    new_state = state.replace(
+        step=state.step + 1,
+        params=new_params,
+        opt_state=new_opt_state,
+    )
+  else:
+    new_state = state.apply_gradients(grads=grads)
 
   # Apply updates for Auxiliary-Loss-Free load balancing for DeepSeek family
   if config.routed_bias and config.routed_bias_update_rate > 0.0 and moe_bias_updates is not None:
@@ -490,19 +523,18 @@ def train_loop(config, recorder, state=None):
 
   params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
 
-  p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
-      config,
-      model,
-      mesh,
-      state,
-      state_mesh_shardings,
-      train_step,
-      eval_step,
-      eval_data_iterator,
-      params_shardings,
-  )
-
-  with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
+  with jax.set_mesh(mesh), mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+    p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
+        config,
+        model,
+        mesh,
+        state,
+        state_mesh_shardings,
+        train_step,
+        eval_step,
+        eval_data_iterator,
+        params_shardings,
+    )
     shaped_batch = maxtext_utils.get_shaped_batch(config)
     if config.shard_optimizer_over_data:
       state = sharding.maybe_shard_with_name(state, state_mesh_shardings, config.shard_mode)
@@ -512,7 +544,7 @@ def train_loop(config, recorder, state=None):
       compiled_stats = compiled.memory_analysis()
       max_utils.print_compiled_memory_stats(compiled_stats)
 
-  start_step = get_first_step(state)  # this is the start_step for training
+  start_step = get_first_step(model, state)  # this is the start_step for training
   prof = profiler.Profiler(config, offset_step=start_step)
   metric_logger = MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
 
@@ -614,9 +646,7 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]
   max_utils.print_system_information()
   train_utils.validate_train_config(config)
   jax.config.update("jax_use_shardy_partitioner", config.shardy)
-  # update explicit sharding-supported config
-  if config.shard_mode == ShardMode.EXPLICIT:
-    jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
+  jax.config.update("jax_remove_size_one_mesh_axis_from_type", config.remove_size_one_mesh_axis_from_type)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path or ""
   vertex_tensorboard_manager = VertexTensorboardManager()
   if config.use_vertex_tensorboard or os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):
@@ -659,11 +689,35 @@ def run(config, recorder, diagnostic_config):
     train_loop(config, recorder)
 
 
+def get_train_func(config, recorder, diagnostic_config, argv):
+  """Returns the train function, wrapping in elastic_retry if elastic training is enabled."""
+  if config.elastic_enabled:
+    max_logging.log("Elastic utils: Elastic training enabled.")
+
+    def elastic_train_wrapper(argv: Sequence[str]) -> None:
+      """Wrapper for elastic training initializes variables and runs the train loop."""
+      elastic_config, elastic_recorder, elastic_diagnostic_config = initialize(argv)
+      run(
+          elastic_config,
+          elastic_recorder,
+          elastic_diagnostic_config,
+      )
+
+    train_func = elastic_utils.elastic_retry(config)(functools.partial(elastic_train_wrapper, argv=argv))
+  else:
+    # Use the already initialized variables
+    def train_func():
+      run(config, recorder, diagnostic_config)
+
+  return train_func
+
+
 def main(argv: Sequence[str]) -> None:
   config, recorder, diagnostic_config = initialize(argv)
   record_goodput(recorder, RECORD_JOB_START_TIME)
+  train_func = get_train_func(config, recorder, diagnostic_config, argv)
   with maybe_monitor_goodput(config):
-    run(config, recorder, diagnostic_config)
+    train_func()
 
 
 if __name__ == "__main__":

@@ -27,7 +27,7 @@ import benchmarks.recipes.args_helper as helper
 import benchmarks.maxtext_trillium_model_configs as model_configs
 import benchmarks.maxtext_xpk_runner as mxr
 from benchmarks.xpk_configs import XpkClusterConfig
-from . import user_configs
+from benchmarks.recipes import user_configs
 
 # Cluster Params
 CLUSTER = "v6e-256-cluster"

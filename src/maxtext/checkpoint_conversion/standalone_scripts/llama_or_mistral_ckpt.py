@@ -1649,9 +1649,12 @@ def shard_checkpoint(jax_weights, device_count, mem_info):
         "WARNING: hardware/simulated device mismatch. "
         f"Actual JAX devices: {len(jax.devices())}, Requested count: {device_count}."
     )
-  max_logging.log(f"shard weights across {len(jax.devices())} devices")
+  max_logging.log(f"Shard weights across {len(jax.devices())} devices")
+  max_logging.log("Note: Axis 0 sharding is the default and will not be logged individually.")
   # Pre-define sharding specs
   mesh = jax.sharding.Mesh(jax.devices(), "checkpoint_sharding_axis")
+  # No sharding (replicated specifically for 0D scalars)
+  s0 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
   # Sharding along axis 0
   s1 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("checkpoint_sharding_axis"))
   # Sharding along axis 1
@@ -1672,14 +1675,17 @@ def shard_checkpoint(jax_weights, device_count, mem_info):
       # materialize lazy tensor
       arr = np.array(arr)
 
-    if arr.shape[0] % device_count == 0:
-      max_logging.log("sharding axis 0")
+    if len(arr.shape) == 0:
+      max_logging.log("0D scalar detected, replicating")
+      return jax.device_put(arr, device=s0)
+    elif arr.shape[0] % device_count == 0:
+      # Sharding axis 0: Omit log for brevity per the summary log above.
       return jax.device_put(arr, device=s1)
     elif len(arr.shape) > 1 and arr.shape[1] % device_count == 0:
-      max_logging.log("sharding axis 1")
+      max_logging.log(f"Sharding axis 1. Tensor shape {arr.shape}")
       return jax.device_put(arr, device=s2)
     else:
-      max_logging.log("no sharding was possible, replicating")
+      max_logging.log(f"Not sharding. Tensor shape {arr.shape}")
       return jax.device_put(arr, device=s3)
 
   # Weight sharding

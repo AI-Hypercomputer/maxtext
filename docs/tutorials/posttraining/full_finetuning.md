@@ -24,33 +24,36 @@ In this tutorial we use a single host TPU VM such as `v6e-8/v5p-8`. Let's get st
 
 ## Install dependencies
 
-```sh
-# 1. Clone the repository
-git clone https://github.com/AI-Hypercomputer/maxtext.git
-cd maxtext
-
-# 2. Create virtual environment
-export VENV_NAME=<your virtual env name> # e.g., maxtext_venv
-pip install uv
-uv venv --python 3.12 --seed ${VENV_NAME?}
-source ${VENV_NAME?}/bin/activate
-
-# 3. Install dependencies in editable mode
-uv pip install -e .[tpu] --resolution=lowest
-install_maxtext_github_deps
-```
+For instructions on installing MaxText on your VM, please refer to the [official documentation](https://maxtext.readthedocs.io/en/maxtext-v0.2.1/install_maxtext.html) and use the `maxtext[tpu]` installation path to include all necessary dependencies.
 
 ## Setup environment variables
 
-```sh
+Login to Hugging Face. Provide your access token when prompted:
+
+```bash
+hf auth login
+```
+
+Set up the following environment variables to configure your training run. Replace
+placeholders with your actual values.
+
+```bash
 # -- Model configuration --
-export MODEL_NAME=<model name> # e.g., 'llama3.1-8b'
-export MODEL_TOKENIZER=<tokenizer path> # e.g., 'meta-llama/Llama-3.1-8B-Instruct'
-export HF_TOKEN=<Hugging Face access token>
+# The MaxText model name. See `src/maxtext/configs/types.py` for `ModelName` for a
+# full list of supported models.
+export MODEL=<MaxText Model> # e.g., 'llama3.1-8b-Instruct'
 
 # -- MaxText configuration --
-export BASE_OUTPUT_DIRECTORY=<output directory to store run logs> # e.g., gs://my-bucket/my-output-directory
-export RUN_NAME=<name for this run> # e.g., $(date +%Y-%m-%d-%H-%M-%S)
+# Use a GCS bucket you own to store logs and checkpoints. Ideally in the same
+# region as your TPUs to minimize latency and costs.
+# You can list your buckets and their locations in the
+# [Cloud Console](https://console.cloud.google.com/storage/browser).
+export BASE_OUTPUT_DIRECTORY=<gcs bucket path> # e.g., gs://my-bucket/maxtext-runs
+
+# An arbitrary string to identify this specific run.
+# We recommend to include the model, user, and timestamp.
+# Note: Kubernetes requires workload names to be valid DNS labels (lowercase, no underscores or periods).
+export RUN_NAME=<Name for this run>
 ```
 
 ## Hugging Face checkpoint to Maxtext checkpoint
@@ -62,15 +65,15 @@ This section explains how to prepare your model checkpoint for use with MaxText.
 If you already have a MaxText-compatible model checkpoint, simply set the following environment variable and move on to the next section.
 
 ```sh
-export MODEL_CKPT_PATH=<gcs path for MaxText checkpoint> # e.g., gs://my-bucket/my-model-checkpoint/0/items
+export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint> # e.g., gs://my-bucket/my-model-checkpoint/0/items
 ```
 
 ### Option 2: Converting a Hugging Face checkpoint
 
-Refer the steps in [Hugging Face to MaxText](../../guides/checkpointing_solutions/convert_checkpoint.md#hugging-face-to-maxtext) to convert a hugging face checkpoint to MaxText. Make sure you have correct checkpoint files converted and saved. Similar as Option 1, you can set the following environment and move on.
+Refer the steps in [Hugging Face to MaxText](https://maxtext.readthedocs.io/en/maxtext-v0.2.1/guides/checkpointing_solutions/convert_checkpoint.html#hugging-face-to-maxtext) to convert a hugging face checkpoint to MaxText. Make sure you have correct checkpoint files converted and saved. Similar as Option 1, you can set the following environment and move on.
 
 ```bash
-export MODEL_CKPT_PATH=<gcs path for MaxText checkpoint> # gs://my-bucket/my-checkpoint-directory/0/items
+export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint> # gs://my-bucket/my-checkpoint-directory/0/items
 ```
 
 ## Dataset
@@ -87,10 +90,10 @@ Run these steps once per project prior to any local development or cluster exper
 MaxText assumes these GCS buckets are created in the same project and that it has permissions to read and write from them.
 
 ```sh
-export PROJECT=<Google Cloud Project ID>
+export PROJECT_ID=<Google Cloud Project ID>
 export DATASET_GCS_BUCKET=<GCS for dataset> # e.g., gs://my-bucket/my-dataset
 
-bash tools/data_generation/download_dataset.sh ${PROJECT?} ${DATASET_GCS_BUCKET?}
+bash tools/data_generation/download_dataset.sh ${PROJECT_ID?} ${DATASET_GCS_BUCKET?}
 ```
 
 The above will download the c4 dataset to the GCS BUCKET.
@@ -103,12 +106,10 @@ Below is a sample training script.
 python3 -m maxtext.trainers.pre_train.train \
   run_name=${RUN_NAME?} \
   base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
-  load_parameters_path=${MODEL_CKPT_PATH?} \
-  model_name=${MODEL_NAME?} \
+  load_parameters_path=${MAXTEXT_CKPT_PATH?} \
+  model_name=${MODEL?} \
   dataset_path=${DATASET_GCS_BUCKET?} \
   async_checkpointing=False  \
-  tokenizer_path=${MODEL_TOKENIZER?} \
-  hf_access_token=${HF_TOKEN?} \
   steps=10 per_device_batch_size=1
 ```
 

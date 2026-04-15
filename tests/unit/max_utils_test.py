@@ -201,7 +201,7 @@ class UnscanTest(unittest.TestCase):
 
 
 class TestGpuDistributedInitialization(unittest.TestCase):
-  """Tests using CUDA_VISIBLE_DEVICES to control which GPUs are used in jax.distributed.initialize."""
+  """Tests using CUDA_VISIBLE_DEVICES / SLURM_STEP_GPUS for jax.distributed.initialize."""
 
   @mock.patch.dict(
       os.environ,
@@ -210,7 +210,7 @@ class TestGpuDistributedInitialization(unittest.TestCase):
           "JAX_COORDINATOR_PORT": "1234",
           "NNODES": "1",
           "NODE_RANK": "0",
-          "CUDA_VISIBLE_DEVICES": "0,2,3",  # Simulating Slurm/orchestrator assignment
+          "CUDA_VISIBLE_DEVICES": "0,2,3",
       },
   )
   @mock.patch("jax.distributed.initialize")
@@ -220,7 +220,6 @@ class TestGpuDistributedInitialization(unittest.TestCase):
     """Verifies that a comma-separated string of IDs is correctly parsed."""
     raw_keys = {"jax_distributed_initialization_timeout": 300}
     max_utils.initialize_jax_for_gpu(raw_keys)
-    # Check that local_device_ids was passed correctly as a list of integers
     _, kwargs = mock_init.call_args
     self.assertEqual(kwargs["local_device_ids"], [0, 2, 3])
     self.assertEqual(kwargs["coordinator_address"], "10.0.0.1:1234")
@@ -232,17 +231,16 @@ class TestGpuDistributedInitialization(unittest.TestCase):
           "JAX_COORDINATOR_PORT": "1234",
           "NNODES": "1",
           "NODE_RANK": "0",
-          "CUDA_VISIBLE_DEVICES": "GPU-8f2e3072-...",  # Invalid format for integer parsing
+          "CUDA_VISIBLE_DEVICES": "GPU-8f2e3072-...",
       },
   )
   @mock.patch("jax.distributed.initialize")
   @mock.patch("jax.devices")
   @mock.patch("maxtext.utils.max_logging.log")
-  def test_initialize_jax_for_gpu_invalid_devices(self, _mock_log, mock_devices, mock_init):
+  def test_initialize_jax_for_gpu_invalid_devices(self, _mock_log, _mock_devices, mock_init):
     """Verifies fallback behavior when parsing fails (e.g., UUIDs)."""
     raw_keys = {"jax_distributed_initialization_timeout": 300}
     max_utils.initialize_jax_for_gpu(raw_keys)
-    # Check that it falls back to None (JAX auto-detection default) on error
     _, kwargs = mock_init.call_args
     self.assertIsNone(kwargs.get("local_device_ids"))
     self.assertEqual(kwargs["coordinator_address"], "10.0.0.1:1234")
@@ -255,17 +253,95 @@ class TestGpuDistributedInitialization(unittest.TestCase):
           "NNODES": "1",
           "NODE_RANK": "0",
       },
+      clear=True,
   )
+  @mock.patch("jax.config.update")
   @mock.patch("jax.distributed.initialize")
   @mock.patch("jax.devices")
   @mock.patch("maxtext.utils.max_logging.log")
-  def test_initialize_jax_for_gpu_no_devices(self, _mock_log, mock_devices, mock_init):
-    """Verifies that no error occurs when CUDA_VISIBLE_DEVICES is not set"""
+  def test_initialize_jax_for_gpu_no_devices(self, _mock_log, _mock_devices, mock_init, mock_config_update):
+    """When coordinator env is set but neither CUDA_VISIBLE_DEVICES nor SLURM_STEP_GPUS is set, JAX uses all devices
+    (config) and init gets no local ids.
+    """
     raw_keys = {"jax_distributed_initialization_timeout": 300}
     max_utils.initialize_jax_for_gpu(raw_keys)
     _, kwargs = mock_init.call_args
     self.assertIsNone(kwargs.get("local_device_ids"))
     self.assertEqual(kwargs["coordinator_address"], "10.0.0.1:1234")
+    mock_config_update.assert_has_calls(
+        [
+            mock.call("jax_cuda_visible_devices", "all"),
+            mock.call("jax_rocm_visible_devices", "all"),
+        ]
+    )
+
+  @mock.patch("jax.distributed.initialize")
+  @mock.patch("jax.devices")
+  @mock.patch("maxtext.utils.max_logging.log")
+  def test_initialize_jax_for_gpu_uses_slurm_when_cuda_unset(self, mock_log, _mock_devices, mock_init):
+    """Uses SLURM_STEP_GPUS when CUDA_VISIBLE_DEVICES is absent (loop over env_var_list)."""
+    env = {
+        "JAX_COORDINATOR_IP": "10.0.0.1",
+        "JAX_COORDINATOR_PORT": "1234",
+        "NNODES": "1",
+        "NODE_RANK": "0",
+        "SLURM_STEP_GPUS": "1,3",
+    }
+    with mock.patch.dict(os.environ, env, clear=False):
+      os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+      raw_keys = {"jax_distributed_initialization_timeout": 300}
+      max_utils.initialize_jax_for_gpu(raw_keys)
+    _, kwargs = mock_init.call_args
+    self.assertEqual(kwargs["local_device_ids"], [1, 3])
+    mock_log.assert_any_call("Using SLURM_STEP_GPUS to initialize JAX distributed system: 1,3")
+
+  @mock.patch.dict(
+      os.environ,
+      {
+          "JAX_COORDINATOR_IP": "10.0.0.1",
+          "JAX_COORDINATOR_PORT": "1234",
+          "NNODES": "1",
+          "NODE_RANK": "0",
+          "CUDA_VISIBLE_DEVICES": "0,2",
+          "SLURM_STEP_GPUS": "4,5,6",
+      },
+  )
+  @mock.patch("jax.distributed.initialize")
+  @mock.patch("jax.devices")
+  @mock.patch("maxtext.utils.max_logging.log")
+  def test_initialize_jax_for_gpu_prefers_cuda_visible_devices_in_loop(self, mock_log, _mock_devices, mock_init):
+    """First matching env var in the list wins; CUDA_VISIBLE_DEVICES is checked before SLURM_STEP_GPUS."""
+    raw_keys = {"jax_distributed_initialization_timeout": 300}
+    max_utils.initialize_jax_for_gpu(raw_keys)
+    _, kwargs = mock_init.call_args
+    self.assertEqual(kwargs["local_device_ids"], [0, 2])
+    mock_log.assert_any_call("Using CUDA_VISIBLE_DEVICES to initialize JAX distributed system: 0,2")
+
+
+class TestMaybePad(unittest.TestCase):
+  """Tests that maybe_pad satisfies its contract."""
+
+  def test_odd_shape_padded(self):
+    inputs = jnp.ones((9, 8))
+    tile_size = 4
+
+    target_padding_amount = 3
+    target = jnp.concat((inputs, jnp.zeros((3, 8))))
+
+    padded, padding_amount = max_utils.maybe_pad(inputs, tile_size)
+    self.assertTrue(jnp.equal(padded, target).all())
+    self.assertEqual(padding_amount, target_padding_amount)
+
+  def test_regular_shape_unpadded(self):
+    inputs = jnp.ones((12, 13))
+    tile_size = 4
+
+    target_padding_amount = 0
+    target = jnp.ones((12, 13))
+
+    padded, padding_amount = max_utils.maybe_pad(inputs, tile_size)
+    self.assertTrue(jnp.equal(padded, target).all())
+    self.assertEqual(padding_amount, target_padding_amount)
 
 
 if __name__ == "__main__":

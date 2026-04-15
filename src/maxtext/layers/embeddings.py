@@ -165,11 +165,11 @@ class Embed(nnx.Module):
         if model_mode == MODEL_MODE_PREFILL
         else (
             "activation_embed_and_logits_batch",
-            "activation_length_no_exp",
+            "activation_length",
             "activation_embed",
         )
     )
-    out_pspec = logical_to_mesh_axes(output_axis_names, self.mesh)
+    out_pspec = logical_to_mesh_axes(output_axis_names, self.mesh, rules=getattr(self.config, "logical_axis_rules", None))
 
     out_sharding = NamedSharding(self.mesh, out_pspec) if self.config.shard_mode == ShardMode.EXPLICIT else None
 
@@ -507,6 +507,78 @@ class PartialRotaryEmbedding(RotaryEmbedding):
     return inputs
 
 
+class Gemma4PartialRotaryEmbedding(RotaryEmbedding):
+  """Gemma 4 Rotary Position Embedding applied to a partial fraction of dimensions.
+
+  Unlike standard PartialRotaryEmbedding which physically splits and concatenates
+  features (resulting in a [Rotated, Unrotated] layout), Gemma 4 computes frequencies
+  using the full embedding dimension denominator and pads the unrotated timescales
+  with infinity.
+
+  Because x / inf = 0, applying RoPE mathematically acts as an identity function
+  on those unrotated dimensions. Because the base Rotary class splits the full tensor
+  in half, this creates an interleaved feature layout in memory:
+  [Rotated Half 1, Unrotated Half 1, Rotated Half 2, Unrotated Half 2].
+  """
+
+  def __init__(
+      self,
+      min_timescale: int,
+      max_timescale: int,
+      mesh: Mesh,
+      embedding_dims: int = 0,
+      cast_as_fprop_dtype: bool = True,
+      fprop_dtype: DType = jnp.bfloat16,
+      partial_rotary_factor: float = 0.25,
+      shard_mode: ShardMode = ShardMode.AUTO,
+      rngs: nnx.Rngs = None,
+  ):
+    """Initializes the instance."""
+    self.head_dim = embedding_dims
+    self.partial_rotary_factor = partial_rotary_factor
+    self.rotary_dim = int(self.head_dim * self.partial_rotary_factor)
+
+    # Pass the full head_dim to the base class so it splits at head_dim / 2,
+    # ensuring the unrotated dimensions get correctly mixed into the center.
+    super().__init__(
+        min_timescale=min_timescale,
+        max_timescale=max_timescale,
+        mesh=mesh,
+        embedding_dims=self.head_dim,
+        cast_as_fprop_dtype=cast_as_fprop_dtype,
+        fprop_dtype=fprop_dtype,
+        shard_mode=shard_mode,
+        rngs=rngs,
+    )
+
+  @property
+  def timescale(self) -> jax.Array:
+    """The inf-padded timescale for Gemma 4 rotary embedding."""
+    half_rotary_dim = self.rotary_dim // 2
+
+    # Gemma 4 uniquely uses the full head_dim as the denominator
+    fraction = 2 * jnp.arange(0, half_rotary_dim) / self.head_dim
+    timescale = self.min_timescale * (self.max_timescale / self.min_timescale) ** fraction
+
+    if getattr(self, "rope_linear_scaling_factor", 1.0) != 1.0:
+      timescale = timescale * self.rope_linear_scaling_factor
+
+    # Pad the remaining angles with jnp.inf.
+    # When position is divided by inf, the angle becomes 0.
+    # sin(0)=0 and cos(0)=1, which acts as a passthrough for unrotated dims.
+    nope_angles = (self.head_dim // 2) - half_rotary_dim
+
+    return jnp.pad(
+        timescale,
+        pad_width=(0, nope_angles),
+        mode="constant",
+        constant_values=(0.0, jnp.inf),
+    )
+
+  # Note: No __call__ override is required. The base RotaryEmbedding.__call__
+  # handles the rotation perfectly using the padded self.timescale.
+
+
 class LLaMARotaryEmbedding(RotaryEmbedding):
   """LLaMA variant of ROPE."""
 
@@ -778,7 +850,7 @@ class YarnRotaryEmbedding(nnx.Module):
     self.attention_scaling = attention_scaling
 
     self.freqs_sharding = (
-        create_sharding(mesh, ("activation_batch", "activation_length_no_exp", "q_heads"))
+        create_sharding(mesh, ("activation_batch", "activation_length", "q_heads"))
         if shard_mode == ShardMode.EXPLICIT
         else None
     )
@@ -904,7 +976,7 @@ class YarnRotaryEmbedding(nnx.Module):
     inputs_complex = first_half + 1j * second_half  # shape: [B, S, N, half_dim]
     # Apply the rotary transformation via complex multiplication.
     rotated_sharding = (
-        create_sharding(self.mesh, ("activation_batch", "activation_length_no_exp", None, None))
+        create_sharding(self.mesh, ("activation_batch", "activation_length", None, None))
         if self.shard_mode == ShardMode.EXPLICIT
         else None
     )

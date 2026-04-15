@@ -53,15 +53,26 @@ class TestDeepSeekScanEngram(unittest.TestCase):
       "first_num_dense_layers=5",
       "base_num_decoder_layers=10",
       "num_decoder_layers=10",
+      "base_emb_dim=64",
+      "base_mlp_dim=64",
+      "base_moe_mlp_dim=64",
+      "base_num_query_heads=2",
+      "base_num_kv_heads=2",
+      "head_dim=32",
+      "indexer_head_dim=32",
+      "qk_nope_head_dim=32",
+      "qk_rope_head_dim=16",
+      "v_head_dim=32",
+      "vocab_size=128",
       "mhc_expansion_rate=4",
       "attention=dot_product",
-      "per_device_batch_size=2",
+      "per_device_batch_size=1",
       "max_target_length=8",
       "max_prefill_predict_length=8",
       "enable_checkpointing=False",
       "engram_num_heads=1",
-      "engram_head_dim=32",
-      "engram_vocab_bases=[226240,226240]",
+      "engram_head_dim=8",
+      "engram_vocab_bases=[128,128]",
       "engram_max_ngram_size=3",
       "engram_kernel_size=4",
       "hf_access_token=dummy",
@@ -78,7 +89,7 @@ class TestDeepSeekScanEngram(unittest.TestCase):
       pad_token_id = 0
 
       def __len__(self):
-        return 1000
+        return 128
 
       def __call__(self, x):
         return jnp.ones_like(x)

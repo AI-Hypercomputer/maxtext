@@ -25,15 +25,20 @@ on:
       device_name:
         required: true
         type: string
-      image_type:
-        required: false
+      base_image:
+        required: true
         type: string
       cloud_runner:
         required: false
         type: string
       maxtext_sha:
-        required: true
+        required: false
         type: string
+      # Flag to skip source checkout and wheel installation
+      maxtext_installed:
+        required: false
+        type: boolean
+        default: false
     secrets:
       HF_TOKEN:
         required: true
@@ -44,17 +49,20 @@ jobs:
   run:
     runs-on: ${{ inputs.cloud_runner != '' && inputs.cloud_runner || fromJson(format('["self-hosted", "{0}", "{1}"]', inputs.device_type, inputs.device_name)) }}
     container:
-      image: gcr.io/tpu-prod-env-multipod/maxtext-unit-test-${{ inputs.device_type == 'cpu' && 'tpu' || inputs.device_type }}:${{ inputs.image_type != '' && inputs.image_type }}
+      image: gcr.io/tpu-prod-env-multipod/${{ inputs.base_image }}
     steps:
       - name: Checkout MaxText
+        if: ${{ !inputs.maxtext_installed }}
         uses: actions/checkout@v5
         with:
           ref: ${{ inputs.maxtext_sha }}
       - name: Download the MaxText wheel
+        if: ${{ !inputs.maxtext_installed }}
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
         with:
           name: maxtext-wheel
       - name: Install MaxText and Dependencies
+        if: ${{ !inputs.maxtext_installed }}
         shell: bash
         run: |
           # 1. Create virtual environment
@@ -64,8 +72,7 @@ jobs:
 
           # 2. Install MaxText package and all the post training dependencies
           uv pip install ${maxtext_wheel}[tpu-post-train] --resolution=lowest
-          install_maxtext_tpu_post_train_extra_deps
-          .venv/bin/python3 -m ipykernel install --user --name maxtext_venv
+          install_tpu_post_train_extra_deps
           
           python3 -m pip freeze
       - name: Run Post-Training Notebooks
@@ -73,12 +80,26 @@ jobs:
         env:
           PYTHONPATH: "${{ github.workspace }}/src"
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          MAXTEXT_INSTALLED: ${{ inputs.maxtext_installed }}
         run: |
-          source .venv/bin/activate
+          if [ "${MAXTEXT_INSTALLED}" == "true" ]; then
+            # Move to the directory where code is baked into the image. See the Dockerfile.
+            # This is necessary because GHA sets an empty workspace by default.
+            cd /deps
+            PYTHON_EXE="python3"
+            PAPERMILL_EXE="papermill"
+          else
+            PYTHON_EXE=".venv/bin/python3"
+            PAPERMILL_EXE=".venv/bin/papermill"
+            source .venv/bin/activate
+          fi
 
           export MAXTEXT_REPO_ROOT=$(pwd)
           export MAXTEXT_PKG_DIR=$(pwd)/src/maxtext
           export MAXTEXT_NOTEBOOKS_ROOT="$MAXTEXT_REPO_ROOT/src/maxtext/examples"
+
+          # Register maxtext_venv as a selectable kernel in Jupyter
+          $PYTHON_EXE -m ipykernel install --user --name maxtext_venv
 
           for notebook in "$MAXTEXT_NOTEBOOKS_ROOT"/{sft,rl}*.ipynb; do
             filename=$(basename "$notebook")
@@ -92,7 +113,7 @@ jobs:
             echo "Running $filename ..."
             echo "------------------------------------------------------"
 
-            papermill "$notebook" "$output_name" -k maxtext_venv
+            $PAPERMILL_EXE "$notebook" "$output_name" -k maxtext_venv
           done
       - name: Upload Outputs
         if: always()

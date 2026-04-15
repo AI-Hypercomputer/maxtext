@@ -29,7 +29,7 @@ import jax.numpy as jnp
 from flax import linen as nn
 from flax import nnx
 
-from maxtext.common.common_types import AttentionType, Config, DType, Array, BATCH, LENGTH_NO_EXP, EMBED, MODEL_MODE_TRAIN
+from maxtext.common.common_types import AttentionType, Config, DType, Array, BATCH, EMBED, MODEL_MODE_TRAIN, LENGTH
 from maxtext.layers import attentions
 from maxtext.layers import initializers as max_initializers
 from maxtext.layers import moe
@@ -723,7 +723,7 @@ class Qwen3NextFullAttention(nnx.Module):
         attention_kernel=cfg.attention,
         inputs_q_shape=dummy_inputs_shape,
         inputs_kv_shape=dummy_inputs_shape,
-        out_axis_names=(BATCH, LENGTH_NO_EXP, EMBED),
+        out_axis_names=(BATCH, LENGTH, EMBED),
         mesh=self.mesh,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,

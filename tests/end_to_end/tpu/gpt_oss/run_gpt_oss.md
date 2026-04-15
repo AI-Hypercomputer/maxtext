@@ -31,7 +31,7 @@ hf download [openai/gpt-oss-20b|openai/gpt-oss-120b] --local-dir <local_mxfp4_pa
 ```
 
 
-2. Please convert it from MXFP4 to BF16 using script [dequantize_mxfp4.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/checkpoint_conversion/standalone_scripts/dequantize_mxfp4.py) on gpu.
+2. Please convert it from MXFP4 to BF16 using script [dequantize_mxfp4.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/standalone_scripts/dequantize_mxfp4.py) on gpu.
 
 ```
 python3 -m maxtext.checkpoint_conversion.standalone_scripts.dequantize_mxfp4 --input-path=<local_mxfp4_path> --output-path=<local_bf16_path> --dtype-str=bf16
@@ -39,14 +39,14 @@ python3 -m maxtext.checkpoint_conversion.standalone_scripts.dequantize_mxfp4 --i
 
 
 3. Once downloaded and converted to BF16:
-* run [convert_gpt_oss_ckpt.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/checkpoint_conversion/standalone_scripts/convert_gpt_oss_ckpt.py) to convert the checkpoint for MaxText compatibility in [Orbax](https://orbax.readthedocs.io/en/latest/guides/checkpoint/orbax_checkpoint_101.html) scanned format for training and fine-tuning.
+* run [convert_gpt_oss_ckpt.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/standalone_scripts/convert_gpt_oss_ckpt.py) to convert the checkpoint for MaxText compatibility in [Orbax](https://orbax.readthedocs.io/en/latest/guides/checkpoint/orbax_checkpoint_101.html) scanned format for training and fine-tuning.
 
 ```
 python3 -m maxtext.checkpoint_conversion.standalone_scripts.convert_gpt_oss_ckpt --base-model-path <local_bf16_path> \
     --maxtext-model-path <GCS/path/to/scanned/maxtext/ckpt> --model-size [gpt-oss-20b|gpt-oss-120b]
 ```
 
-* run [convert_gpt_oss_unscanned_ckpt.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/MaxText/checkpoint_conversion/standalone_scripts/convert_gpt_oss_unscanned_ckpt.py) to convert the checkpoint to unscanned format in Orbax for decoding.
+* run [convert_gpt_oss_unscanned_ckpt.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/standalone_scripts/convert_gpt_oss_unscanned_ckpt.py) to convert the checkpoint to unscanned format in Orbax for decoding.
 
 ```
 python3 -m maxtext.checkpoint_conversion.standalone_scripts.convert_gpt_oss_unscanned_ckpt --base-model-path <local_bf16_path> \
@@ -197,7 +197,7 @@ python3 -m tests.utils.forward_pass_logit_checker \
     dtype=float32 \
     --atol=0.1 --rtol=0.1 \
     --max_kl_div=3e-4 \
-    --golden_logits_path=${PWD}/golden_data_gpt-oss-20b.jsonl
+    --golden_logits_path=golden_data_gpt-oss-20b.jsonl
 ```
 This is to check unscanned checkpoint. To check scanned checkpoint, you can use `load_parameters_path=${SCANNED_CKPT_PATH} scan_layers=true`.
 

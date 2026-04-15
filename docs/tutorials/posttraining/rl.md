@@ -42,75 +42,48 @@ rely on the vLLM library.
 
 Let's get started!
 
-## Create virtual environment and Install MaxText dependencies
+## Install MaxText and post-training dependencies
 
-```bash
-# Create a virtual environment
-export VENV_NAME=<your virtual env name> # e.g., maxtext_venv
-pip install uv
-uv venv --python 3.12 --seed ${VENV_NAME?}
-source ${VENV_NAME?}/bin/activate
-```
+For instructions on installing MaxText with post-training dependencies on your VM, please refer to the [official documentation](https://maxtext.readthedocs.io/en/latest/install_maxtext.html) and use the `maxtext[tpu-post-train]` installation path to include all necessary post-training dependencies.
 
-### Option 1: From PyPI releases (Recommended)
-
-Run the following commands to get all the necessary installations.
-
-```bash
-uv pip install "maxtext[tpu-post-train]>=0.2.0" --resolution=lowest
-install_maxtext_tpu_post_train_extra_deps
-```
-
-It installs MaxText and then for post-training, it installs primarily the following:
-
-a. [Tunix](https://github.com/google/tunix) as the LLM Post-Training Library, and
-
-b. `vllm-tpu` which is
-[vllm](https://github.com/vllm-project/vllm) and
-[tpu-inference](https://github.com/vllm-project/tpu-inference) and thereby
-providing TPU inference for vLLM, with unified JAX and PyTorch support.
-
-### Option 2: From Github
-
-For using a version newer than the latest PyPI release, you could also install the latest vetted versions of the dependencies from MaxText in the following way:
-
-```bash
-# 1. Clone the repository
-git clone https://github.com/AI-Hypercomputer/maxtext.git
-cd maxtext
-
-# 2. Install dependencies in editable mode
-uv pip install -e .[tpu-post-train] --resolution=lowest
-install_maxtext_tpu_post_train_extra_deps
-```
+> **Note:** If you have previously installed MaxText with a different option (e.g., `maxtext[tpu]`), we strongly recommend using a fresh virtual environment for `maxtext[tpu-post-train]` to avoid potential library version conflicts.
 
 ## Setup environment variables
 
-Follow the instructions [here](https://huggingface.co/docs/huggingface_hub/v0.21.2/guides/cli) to login to Hugging Face using your access token using
+Login to Hugging Face. Provide your access token when prompted:
+You can generate one at https://huggingface.co/settings/tokens.
 
 ```bash
-huggingface-cli login
+hf auth login
 ```
 
-Setup following environment variables before running GRPO/GSPO:
+Set up the following environment variables to configure your training run. Replace
+placeholders with your actual values.
 
 ```bash
 # -- Model configuration --
+# The MaxText model name. See `src/maxtext/configs/types.py` for `ModelName` for a
+# full list of supported models.
 export MODEL=<MaxText Model> # e.g. 'llama3.1-8b-Instruct'
 
 # -- MaxText configuration --
-export BASE_OUTPUT_DIRECTORY=<output directory to store run logs> # e.g., gs://my-bucket/my-output-directory
+# Use a GCS bucket you own to store logs and checkpoints.
+# You can list your buckets and their locations in the
+# [Cloud Console](https://console.cloud.google.com/storage/browser) or via
+# `gcloud storage buckets list --format="table(name, location)"`.
+export BASE_OUTPUT_DIRECTORY=<gcs bucket path> # e.g., gs://my-bucket/maxtext-runs
 
-export RUN_NAME=<name for this run> # e.g., $(date +%Y-%m-%d-%H-%M-%S)
+# An arbitrary string to identify this specific run.
+# We recommend to include the model, user, and timestamp.
+# Note: Kubernetes requires workload names to be valid DNS labels (lowercase, no underscores or periods).
+export RUN_NAME=<Name for this run>
 
-export CHIPS_PER_VM=<the number of chips per VM> # depends on hardware, for v5p this is 4, for v6e this is 8
+# Number of accelerator chips per VM.
+# - TPU v5e (single host): 8
+# - TPU v5p (single host): 4
+# - TPU v6e (single host): 8
+export CHIPS_PER_VM=<the number of chips per VM>
 ```
-
-For the value of `CHIPS_PER_VM` on different TPU hardware, refer the official document
-
-- [TPU v5e](https://docs.cloud.google.com/tpu/docs/v5e) (single host, chips_per_vm=8)
-- [TPU v5p](https://docs.cloud.google.com/tpu/docs/v5p) (single host, chips_per_vm=4)
-- [TPU v6e](https://docs.cloud.google.com/tpu/docs/v6e) (single host, chips_per_vm=8)
 
 ## Get your model checkpoint
 
@@ -125,7 +98,7 @@ export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint> # e.g., gs://my-bucke
 
 ### Option 2: Converting from a Hugging Face checkpoint
 
-Refer the steps in [Hugging Face to MaxText](../../guides/checkpointing_solutions/convert_checkpoint.md#hugging-face-to-maxtext) to convert a hugging face checkpoint to MaxText. Make sure you have correct checkpoint files converted and saved. Similar as Option 1, you can set the following environment and move on.
+Refer the steps in [Hugging Face to MaxText](https://maxtext.readthedocs.io/en/maxtext-v0.2.1/guides/checkpointing_solutions/convert_checkpoint.html#hugging-face-to-maxtext) to convert a hugging face checkpoint to MaxText. Make sure you have correct checkpoint files converted and saved. Similar as Option 1, you can set the following environment and move on.
 
 ```bash
 export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint> # e.g., gs://my-bucket/my-model-checkpoint/0/items

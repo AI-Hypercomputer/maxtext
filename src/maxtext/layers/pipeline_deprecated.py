@@ -28,7 +28,7 @@ from flax.core import meta
 from flax import linen as nn
 from flax.linen.spmd import LogicallyPartitioned
 
-from maxtext.common.common_types import Config, MODEL_MODE_TRAIN, EP_AS_CONTEXT, ShardMode
+from maxtext.common.common_types import Config, MODEL_MODE_TRAIN, ShardMode
 from maxtext.utils.sharding import (
     maybe_shard_with_logical,
     maybe_shard_with_name,
@@ -67,12 +67,8 @@ class Pipeline(nn.Module):
     self.microbatches_per_stage = microbatches_per_stage
     self.use_circ_storage = self.need_circ_storage()
 
-    if self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-      self.batch_axis_name = "activation_batch_no_exp"
-      self.seq_len_axis_name = "activation_length"
-    else:
-      self.batch_axis_name = "activation_batch"
-      self.seq_len_axis_name = "activation_length_no_exp"
+    self.batch_axis_name = "activation_batch"
+    self.seq_len_axis_name = "activation_length"
 
     # TODO(b/470167805): replace self.spmd_axis_name with "stage" when JAX >= 0.8.2.
     self.spmd_axis_name = "stage" if self.config.shard_mode == ShardMode.AUTO else None

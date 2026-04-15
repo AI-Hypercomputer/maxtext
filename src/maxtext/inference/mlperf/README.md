@@ -42,10 +42,10 @@ cd ${DATA_DISK_DIR?}
 #### LLama2-70b:
 
 ```
-gsutil cp gs://cloud-tpu-inference-public/mlcommons/inference/language/llama2-70b/data/processed-openorca/open_orca_gpt4_tokenized_llama.calibration_1000.pkl .
+gcloud storage cp gs://cloud-tpu-inference-public/mlcommons/inference/language/llama2-70b/data/processed-openorca/open_orca_gpt4_tokenized_llama.calibration_1000.pkl .
 mv open_orca_gpt4_tokenized_llama.calibration_1000.pkl processed-calibration-data.pkl
 
-gsutil cp gs://cloud-tpu-inference-public/mlcommons/inference/language/llama2-70b/data/processed-openorca/open_orca_gpt4_tokenized_llama.sampled_24576.pkl .
+gcloud storage cp gs://cloud-tpu-inference-public/mlcommons/inference/language/llama2-70b/data/processed-openorca/open_orca_gpt4_tokenized_llama.sampled_24576.pkl .
 mv open_orca_gpt4_tokenized_llama.sampled_24576.pkl processed-data.pkl
 ```
 
@@ -59,11 +59,11 @@ mv 09292024_mixtral_15k_mintoken2_v1.pkl mixtral-processed-data.pkl
 ```
 
 ### Install Maxtext
+For instructions on installing MaxText on your VM, please refer to the [official documentation](https://maxtext.readthedocs.io/en/latest/install_maxtext.html). Then, run the following commands to install the additional dependencies:
 ```
 cd ~
 git clone https://github.com/AI-Hypercomputer/maxtext.git
 cd maxtext
-bash setup.sh
 python3 -m pip install -r src/maxtext/inference/mlperf/requirements.txt
 ```
 
@@ -131,9 +131,11 @@ python3 -m maxtext.checkpoint_conversion.load_and_quantize_checkpoint src/maxtex
 The quantized checkpoint is saved at `${SAVE_QUANT_PARAMS_PATH}`
 
 ### HuggingFace login
-```
-export HUGGING_FACE_TOKEN=<your_hugging_face_token>
-huggingface-cli login --token ${HUGGING_FACE_TOKEN?}
+
+Login to Hugging Face. Provide your access token when prompted:
+
+```bash
+hf auth login
 ```
 
 ### Run Offline Benchmarks

@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -59,6 +59,7 @@ from benchmarks.api_server.server_models import (
     ChatMessage,
 )
 from benchmarks.api_server import server_utils
+from benchmarks.api_server.encoding import encoding_dsv32
 
 # ----------------------------
 # Init
@@ -95,10 +96,13 @@ request_queue = queue.Queue()
 response_dict = {}
 response_lock = threading.Lock()
 
-# Batching configuration
-BATCH_TIMEOUT_S = 0.1  # 100ms
+# Batching configuration.
+BATCH_TIMEOUT_S = float(os.environ.get("MAXTEXT_BATCH_TIMEOUT_S", "0.1"))
 # Timeout for a client waiting for a response.
 REQUEST_TIMEOUT_S = int(os.environ.get("MAXTEXT_REQUEST_TIMEOUT_S", "36000"))
+# Define a maximum size for the request payload to be broadcasted.
+# This avoids broadcasting variable-sized arrays, which can be complex.
+MAX_REQUEST_SIZE = int(os.environ.get("MAXTEXT_REQUEST_SIZE", "655360"))
 
 
 async def _queue_and_wait_for_response(request: Union[CompletionRequest, ChatCompletionRequest]):
@@ -165,14 +169,11 @@ def run_server():
   uvicorn.run(app, host="0.0.0.0", port=8000)
 
 
-# Define a maximum size for the request payload to be broadcasted.
-# This avoids broadcasting variable-sized arrays, which can be complex.
-MAX_REQUEST_SIZE = 65536 * 10
-
-
 def _build_chat_completion_response(request, completion_result, llm):
   """Builds a ChatCompletionResponse from a single completion result."""
   text_out = completion_result.text
+  reasoning_out = None
+
   if "gpt-oss" in request.model and harmony_enc:
     try:
       parsed_messages = harmony_enc.parse_messages_from_completion_tokens(completion_result.tokens, role=Role.ASSISTANT)
@@ -185,6 +186,15 @@ def _build_chat_completion_response(request, completion_result, llm):
         )
     except (ValueError, IndexError) as e:
       logger.error("Harmony parsing failed for gpt-oss: %s. Falling back to raw text.", e, exc_info=True)
+
+  if server_utils.is_dsv32_encoding_enabled(request.model):
+    try:
+      # DeepSeek-V3.2 models often generate thinking block.
+      parsed = encoding_dsv32.parse_message_from_completion_text(text_out, thinking_mode="thinking")
+      text_out = parsed.get("content", text_out)
+      reasoning_out = parsed.get("reasoning_content")
+    except (AssertionError, ValueError, IndexError) as e:
+      logger.error("DeepSeek-V3.2 parsing failed: %s. Falling back to raw text.", e, exc_info=True)
 
   want_top_logprobs = (
       (request.top_logprobs or 0) > 0 if isinstance(request, ChatCompletionRequest) else (request.logprobs or 0) > 0
@@ -206,7 +216,7 @@ def _build_chat_completion_response(request, completion_result, llm):
       choices=[
           ChatCompletionChoice(
               index=0,
-              message=ChatMessage(role="assistant", content=text_out),
+              message=ChatMessage(role="assistant", content=text_out, reasoning_content=reasoning_out),
               finish_reason=finish_reason,
               logprobs=lp_payload,
           )
