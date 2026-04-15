@@ -43,6 +43,8 @@ INPUT_TOKENS_KEY = "input_ids"
 
 
 def normalize_features(x, column_name):
+  if column_name not in x and "ids" in x:
+    column_name = "ids"
   return {"inputs": x[column_name], "targets": x[column_name]}
 
 
@@ -85,7 +87,8 @@ def TokenizeOp(tokenizer_model, features: Features, data_keys: Iterable[str] = (
     return [modified_string]
 
   for k in data_keys:
-    features[k] = tf.py_function(_process_string, [features[k]], Tout=[tf.int32])[0]
+    if features[k].dtype == tf.string:
+      features[k] = tf.py_function(_process_string, [features[k]], Tout=[tf.int32])[0]
   return features
 
 
