@@ -742,7 +742,8 @@ class RoutedMoE(nnx.Module):
         bias_updates,
     )
 
-  def _te_permute(self, inputs, gate_logits, gate_expert_bias, rngs=None, roll_to_expert_id=None):
+  def _te_permute(self, inputs, gate_logits, gate_expert_bias, rngs=None, roll_to_expert_id=None,
+                   num_experts_per_shard=None):
     """TE routing + permutation. Delegates to te_permutation.te_permute()."""
     return te_permutation.te_permute(
         inputs,
@@ -761,6 +762,7 @@ class RoutedMoE(nnx.Module):
         routed_bias_update_rate=self.config.routed_bias_update_rate,
         te_permutation_align_size=self.config.te_permutation_align_size,
         roll_to_expert_id=roll_to_expert_id,
+        num_experts_per_shard=num_experts_per_shard,
     )
 
   def _te_unpermute(
@@ -817,7 +819,7 @@ class RoutedMoE(nnx.Module):
     return output.reshape(batch_size, sequence_length, -1).astype(self.dtype)
 
   def permute(self, inputs, gate_logits, pre_bias_logits, use_custom_sort_vjp=True, rngs=None,
-              roll_to_expert_id=None, gate_expert_bias=None):
+              roll_to_expert_id=None, gate_expert_bias=None, num_experts_per_shard=None):
     """Permute tokens to group by expert. Dispatches to TE or MT implementation.
 
     Returns:
@@ -836,6 +838,7 @@ class RoutedMoE(nnx.Module):
       (x, perm_state.row_id_map, group_sizes, lb_loss, bias_updates,
        perm_state.dense_probs, perm_state.pad_offsets) = self._te_permute(
           inputs, gate_logits, gate_expert_bias, rngs, roll_to_expert_id,
+          num_experts_per_shard=num_experts_per_shard,
       )
 
       expert_indices = jnp.arange(self.num_experts)
@@ -866,8 +869,9 @@ class RoutedMoE(nnx.Module):
       Output tensor [batch, seq, hidden].
     """
     if perm_state.use_te:
-      # When using TE with padding, mask out garbage beyond actual tokens
-      if self.config.te_permutation_align_size > 0:
+      # When using TE with padding, mask out garbage beyond actual tokens.
+      # Only needed when padding was actually applied (pad_offsets is not None).
+      if perm_state.pad_offsets is not None:
         actual_tokens = jnp.sum(group_sizes)
         mask = jnp.arange(intermediate_output.shape[0]) < actual_tokens
         intermediate_output = jnp.where(mask[:, None], intermediate_output, 0)
@@ -1291,7 +1295,7 @@ class RoutedMoE(nnx.Module):
             assert not self.config.megablox and not self.config.use_tokamax_gmm, "TE GMM is only supported when Megablox and Tokamax GMM are disabled."
             assert self.config.quantization and self.config.quantization.startswith("te_"), "TE GMM currently requires TE quantization."
             # TODO(jberchtold): Adjust this based on TE GMM requirements per recipe
-            TE_GMM_ALIGN_REQUIREMENT = 128
+            TE_GMM_ALIGN_REQUIREMENT = 8
             assert self.config.te_router_and_permutation_impl and self.config.te_permutation_align_size % TE_GMM_ALIGN_REQUIREMENT == 0 and self.config.te_permutation_align_size > 0, f"TE GMM currently requires TE permutation with alignment (te_permutation_align_size > 0 and multiple of {TE_GMM_ALIGN_REQUIREMENT})."
             return self.quant.gmm(inputs, kernel, tiling, group_sizes, expert_assignments)
 
@@ -1519,11 +1523,19 @@ class RoutedMoE(nnx.Module):
         # The ring-of-experts strategy first duplicates the inputs to all
         # expert shards, and then routes within each shard.
 
+        use_te = self.config.te_router_and_permutation_impl and te_permutation.TE_PERMUTATION_AVAILABLE and te_router.TE_ROUTER_AVAILABLE
+
         # Duplicate inputs to all expert shards.
-        x, logits, pre_bias_logits = tuple(
+        # TE path does not use pre_bias_logits, so skip its allgather
+        # to avoid a wasted collective.
+        x, logits = tuple(
             jax.lax.all_gather(z, axis_name=self._expert_parallelism_name, tiled=True)
-            for z in (x, logits, pre_bias_logits)
+            for z in (x, logits)
         )
+        if not use_te:
+          pre_bias_logits = jax.lax.all_gather(
+              pre_bias_logits, axis_name=self._expert_parallelism_name, tiled=True
+          )
 
         # "Route" tokens within each shard.
         num_experts_per_shard = self.config.num_experts // num_expert_parallelism
@@ -1531,14 +1543,14 @@ class RoutedMoE(nnx.Module):
             x, logits, pre_bias_logits, self.config.use_custom_sort_vjp,
             roll_to_expert_id=num_experts_per_shard * expert_shard_id,
             gate_expert_bias=gate_expert_bias,
+            num_experts_per_shard=num_experts_per_shard,
             rngs=rngs,
         )
 
         # Filter down to the group sizes that apply to only the experts in the
-        # current shard.
+        # current shard. ragged_dot only processes sum(group_sizes) tokens,
+        # so no input masking is needed.
         group_sizes = group_sizes[:num_experts_per_shard]
-        mask = jnp.arange(x.shape[0]) < jnp.sum(group_sizes)
-        x = jnp.where(mask[:, None], x, 0)
       else:
         # =======================================================================
         # Global Permutation (dispatches to TE or MT inside self.permute)
@@ -1732,9 +1744,14 @@ class RoutedMoE(nnx.Module):
       intermediate_output = adc.checkpoint_name(intermediate_output, "moe_mlpwo")
 
       if self.config.use_ring_of_experts:
-        # Set the outputs of tokens which were not processed to 0.
-        mask = jnp.arange(intermediate_output.shape[0]) < jnp.sum(group_sizes)
-        intermediate_output = jnp.where(mask[:, None], intermediate_output, 0)
+        # For the MT path, zero out non-local expert positions before unpermute
+        # because MT's inverse permutation reads all positions (including garbage
+        # from ragged_dot's unused rows). The TE path doesn't need this — its
+        # routing_map was already masked to local experts in _te_permute, so
+        # the row_id_map only references valid positions.
+        if not perm_state.use_te:
+          mask = jnp.arange(intermediate_output.shape[0]) < jnp.sum(group_sizes)
+          intermediate_output = jnp.where(mask[:, None], intermediate_output, 0)
 
         # Unsort and deduplicate the outputs locally.
         # Use all-gathered batch size (batch_size * EP) since inputs were all-gathered.
