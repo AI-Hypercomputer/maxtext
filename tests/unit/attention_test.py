@@ -697,9 +697,6 @@ class AttentionTest(parameterized.TestCase):
       shard_mode,
   ):
     """Test equivalence between dot_product and flash attention + context/expert parallelism"""
-    # TODO: Enable these tests after b/454764135 is fixed
-    if shard_mode == "explicit":
-      self.skipTest("Skipping explicit shard_mode tests.")
 
     num_kv_heads = self.num_kv_heads
     lnx, decoder_segment_ids, decoder_positions = self.get_data(self.dtype)
@@ -1482,9 +1479,6 @@ class MLATest(attention_test_util.MLATestBase):
       shard_mode,
   ):
     """Test equivalence between dot_product and flash attention + context/expert parallelism"""
-    # TODO: Enable these tests after b/454764135 is fixed
-    if shard_mode == "explicit":
-      self.skipTest("Skipping explicit shard_mode tests.")
 
     config_arguments = {
         "per_device_batch_size": 1.0,

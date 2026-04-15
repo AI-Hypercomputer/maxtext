@@ -67,6 +67,8 @@ logical_axis_rules: [
                       ['kv', []],
                       ['embed', ['expert', 'attn_dp_expert']],
                       ['embed', ['attn_dp_expert']],
+                      ['embed_vocab', ['expert', 'attn_dp_expert']],
+                      ['embed_vocab', ['attn_dp_expert']],
                       ['embed_moe', []],
                       ['embed_moe', []],
                       ['embed_tensor_transpose', ['attn_dp', 'model']],

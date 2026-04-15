@@ -59,6 +59,7 @@ logical_axis_rules: [
                       ['q_heads', ['tensor']],
                       ['kv_heads', ['tensor']],
                       ['embed', ['fsdp', 'expert']], # remove context from embed sharding
+                      ['embed_vocab', ['fsdp', 'expert']],
                       ['embed_moe', ['fsdp']],
                       ['q_lora', ['fsdp']],
                       ['kv_lora', ['fsdp']],

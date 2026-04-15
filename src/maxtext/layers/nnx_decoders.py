@@ -287,7 +287,7 @@ class NNXDecoder(nnx.Module):
           out_features_shape=config.vocab_size,
           weight_dtype=config.weight_dtype,
           dtype=jnp.float32 if config.logits_dot_in_fp32 else config.dtype,
-          kernel_axes=("embed", "vocab"),
+          kernel_axes=("embed_vocab", "vocab"),
           shard_mode=config.shard_mode,
           matmul_precision=self.config.matmul_precision,
           parameter_memory_host_offload=config.parameter_memory_host_offload,

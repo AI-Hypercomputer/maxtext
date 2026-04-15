@@ -25,6 +25,7 @@ logical_axis_rules: [
                       ['activation_kv_batch', ['fsdp']],
                       ['decode_batch', ['fsdp']],
                       ['embed', ['fsdp']],
+                      ['embed_vocab', ['fsdp']],
                       ['embed_moe', ['fsdp']],
                       ['q_lora', ['fsdp']],
                       ['kv_lora', ['fsdp']],

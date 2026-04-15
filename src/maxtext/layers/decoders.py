@@ -736,7 +736,7 @@ class Decoder(nn.Module):
           out_features_shape=cfg.vocab_size,
           weight_dtype=cfg.weight_dtype,
           dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
-          kernel_axes=("embed", "vocab"),
+          kernel_axes=("embed_vocab", "vocab"),
           shard_mode=cfg.shard_mode,
           name="logits_dense",
           matmul_precision=self.config.matmul_precision,

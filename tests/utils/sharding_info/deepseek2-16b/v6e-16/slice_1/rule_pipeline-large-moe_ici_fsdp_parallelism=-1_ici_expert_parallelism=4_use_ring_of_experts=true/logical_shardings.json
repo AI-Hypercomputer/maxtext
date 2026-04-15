@@ -133,7 +133,7 @@
   },
   ".params/['params']/['decoder']/['logits_dense']/['kernel']": {
     "partition_spec": [
-      "embed",
+      "embed_vocab",
       "vocab"
     ],
     "shape": [
@@ -318,7 +318,7 @@
   ".params/['params']/['token_embedder']/['embedding']": {
     "partition_spec": [
       "vocab",
-      "embed"
+      "embed_vocab"
     ],
     "shape": [
       102400,
@@ -459,7 +459,7 @@
   },
   ".opt_state/[0]/.mu/['params']/['decoder']/['logits_dense']/['kernel']": {
     "partition_spec": [
-      "embed",
+      "embed_vocab",
       "vocab"
     ],
     "shape": [
@@ -644,7 +644,7 @@
   ".opt_state/[0]/.mu/['params']/['token_embedder']/['embedding']": {
     "partition_spec": [
       "vocab",
-      "embed"
+      "embed_vocab"
     ],
     "shape": [
       102400,
@@ -781,7 +781,7 @@
   },
   ".opt_state/[0]/.nu/['params']/['decoder']/['logits_dense']/['kernel']": {
     "partition_spec": [
-      "embed",
+      "embed_vocab",
       "vocab"
     ],
     "shape": [
@@ -966,7 +966,7 @@
   ".opt_state/[0]/.nu/['params']/['token_embedder']/['embedding']": {
     "partition_spec": [
       "vocab",
-      "embed"
+      "embed_vocab"
     ],
     "shape": [
       102400,
