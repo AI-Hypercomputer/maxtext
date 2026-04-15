@@ -33,6 +33,7 @@ import sys
 import os
 import re
 import pathlib
+from maxtext.inference.inference_utils import str2bool
 
 
 def natural_sort_key(s: str):
@@ -85,6 +86,7 @@ def inspect_hf(args):
       # here we assume standard state_dict or handle the wrapper keys manually if needed.
       if isinstance(checkpoint, dict):
         for k, v in checkpoint.items():
+          # check shape
           # Handle nested state dicts or wrapper keys if common in your workflow
           shape = v.shape if hasattr(v, "shape") else "Non-tensor found"
           param_dict[k] = f"shape: {shape}"
@@ -139,11 +141,14 @@ def inspect_maxtext(args, remaining_args):
   for path_tuple, abstract_leaf_value in abstract_params_flat:
     key_parts = [k.key for k in path_tuple if hasattr(k, "key")]
     # Construct MaxText style parameter key
-    param_key = "params-" + "-".join(key_parts)
+    param_key = "params." + ".".join(key_parts)
+    # check shape
     shape = abstract_leaf_value.shape
     param_dict[param_key] = f"shape: {shape}"
-    dtype = abstract_leaf_value.dtype
-    param_dict[param_key] += f" | dtype: {dtype}"
+    # check dtype
+    if args.check_dtype:
+      dtype = abstract_leaf_value.dtype
+      param_dict[param_key] += f" | dtype: {dtype}"
 
   print_structure(param_dict)
 
@@ -179,10 +184,13 @@ def inspect_orbax(args):
     param_key = ".".join(k)
     if not param_key.startswith("params"):
       continue
+    # check shape
     shape = v.shape
     param_dict[param_key] = f"shape: {shape}"
-    dtype = v.dtype
-    param_dict[param_key] += f" | dtype: {dtype}"
+    # check dtype
+    if args.check_dtype:
+      dtype = v.dtype
+      param_dict[param_key] += f" | dtype: {dtype}"
     print(v)
 
   print("\n=== Structure ===")
@@ -193,21 +201,27 @@ def inspect_orbax(args):
 # Main CLI Driver
 # ==============================================================================
 def main():
+
+  # shared parser
+  shared_parser = argparse.ArgumentParser(add_help=False)
+  shared_parser.add_argument("--check_dtype", type=str2bool, required=False, default=False, help="Whether to check dtype")
+
+  # sub parsers
   parser = argparse.ArgumentParser(description="Consolidated Model Checkpoint Inspector")
   subparsers = parser.add_subparsers(dest="mode", required=True, help="Inspection mode: hf, maxtext, orbax")
 
   # Mode 1: HuggingFace / PyTorch
-  parser_hf = subparsers.add_parser("hf", help="Inspect .safetensors or .pth files")
+  parser_hf = subparsers.add_parser("hf", parents=[shared_parser], help="Inspect .safetensors or .pth files")
   parser_hf.add_argument("--path", type=str, required=True, help="Directory containing checkpoint files")
   parser_hf.add_argument(
       "--format", type=str, required=False, choices=["safetensors", "pth"], default="safetensors", help="File format"
   )
 
   # Mode 2: MaxText Architecture
-  parser_mt = subparsers.add_parser("maxtext", help="Inspect MaxText theoretical architecture")
+  parser_mt = subparsers.add_parser("maxtext", parents=[shared_parser], help="Inspect MaxText theoretical architecture")
 
   # Mode 3: Orbax
-  parser_orbax = subparsers.add_parser("orbax", help="Inspect saved Orbax checkpoint metadata")
+  parser_orbax = subparsers.add_parser("orbax", parents=[shared_parser], help="Inspect saved Orbax checkpoint metadata")
   parser_orbax.add_argument("--path", type=str, required=True, help="Path to checkpoint items (local or GCS)")
 
   args, remaining_args = parser.parse_known_args()
