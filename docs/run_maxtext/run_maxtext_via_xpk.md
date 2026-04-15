@@ -144,8 +144,8 @@ This guide focuses on submitting workloads to an existing cluster. Cluster creat
    # region as your TPUs to minimize latency and costs.
    # You can list your buckets and their locations in the
    # [Cloud Console](https://console.cloud.google.com/storage/browser).
-   export BASE_OUTPUT_DIRECTORY=<gcs bucket path> # e.g., gs://my-bucket/maxtext-runs
-   export DATASET_PATH="gs://your-dataset-bucket/"
+   export BASE_OUTPUT_DIRECTORY=<GCS_BUCKET> # e.g., gs://<my-bucket>/maxtext-runs
+   export DATASET_PATH="gs://<DATASET_PATH>/"
    ```
 
 2. **Configure gcloud CLI**

@@ -110,10 +110,10 @@ Note that `FILE_PATH` is optional; when provided, the script runs `ls -R` for pr
 
 ```sh
 bash src/dependencies/scripts/setup_gcsfuse.sh \
-DATASET_GCS_BUCKET=maxtext-dataset \
+DATASET_GCS_BUCKET=gs://<DATASET_PATH> \
 MOUNT_PATH=/tmp/gcsfuse && \
 python3 -m maxtext.trainers.pre_train.train \
-run_name=<RUN_NAME> base_output_directory=gs://<MY_BUCKET>  \
+run_name=<RUN_NAME> base_output_directory=gs://<GCS_BUCKET> \
 dataset_type=grain \
 grain_file_type=arrayrecord # or parquet \ 
 grain_train_files=/tmp/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record* \
