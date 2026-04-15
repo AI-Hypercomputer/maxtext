@@ -158,7 +158,6 @@ class MaxTextVllmSampler(VllmSampler):
 
     # Perform explicit garbage collection and synchronization to free up HBM memory before loading new weights
     gc.collect()
-    jax.clear_caches()
     jax.effects_barrier()
     _log_mem_stats("sampler:post_gc_clear")
 
