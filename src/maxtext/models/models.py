@@ -97,7 +97,7 @@ class TransformerLinenPure(nn.Module):
       # By convention, this is the last layer in the list.
       layer_types = self.decoder.get_decoder_layers()
       mtp_layer_linen = layer_types[-1]
-      # UNWRAP: The MTP block is pure NNX. If the decoder returned a Linen wrapper, 
+      # UNWRAP: The MTP block is pure NNX. If the decoder returned a Linen wrapper,
       # extract the native NNX class to preserve parameter tracing/scoping.
       mtp_layer_nnx = getattr(mtp_layer_linen, "module_class", mtp_layer_linen)
       self.mtp_block = multi_token_prediction_block_as_linen(
