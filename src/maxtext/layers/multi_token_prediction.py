@@ -112,7 +112,6 @@ class MultiTokenPredictionLayer(nnx.Module):
         config=cfg,
         mesh=mesh,
         model_mode=MODEL_MODE_TRAIN,
-        name=f"mtp_{k}_transformer_layer",
         rngs=rngs,
     )
 
