@@ -61,4 +61,5 @@ optimization/sharding.md
 optimization/custom_mesh_and_rule.md
 optimization/pallas_kernels_performance.md
 optimization/benchmark_and_performance.md
+optimization/custom_mesh_and_rule.md
 ```
