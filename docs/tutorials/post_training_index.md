@@ -14,7 +14,7 @@ We’re investing in performance, scale, algorithms, models, reliability, and ea
 
 MaxText was co-designed with key Google led innovations to provide a unified post training experience:
 
-- [MaxText model library](../reference/models/supported_models_and_architectures.md#supported-model-families) for JAX LLMs highly optimized for TPUs
+- [MaxText model library](supported-model-families) for JAX LLMs highly optimized for TPUs
 - [Tunix](https://github.com/google/tunix) for the latest algorithms and post-training techniques
 - [vLLM on TPU](https://github.com/vllm-project/tpu-inference) for high performance sampling (inference) for Reinforcement Learning (RL)
 - [Pathways](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/pathways-intro) for multi-host inference (sampling) and highly efficient weight transfer
@@ -24,16 +24,13 @@ MaxText was co-designed with key Google led innovations to provide a unified pos
 ## Supported techniques & models
 
 - **SFT (Supervised Fine-Tuning)**
-  - [SFT on Single-Host TPUs](../tutorials/posttraining/sft.md)
-  - [SFT on Multi-Host TPUs](../tutorials/posttraining/sft_on_multi_host.md)
-- **LoRA (Low-Rank Adaptation)**
-  - [LoRA on Single-Host TPUs](../tutorials/posttraining/lora.md)
+  - [SFT on Single-Host TPUs](./posttraining/sft)
+  - [SFT on Multi-Host TPUs](./posttraining/sft_on_multi_host)
 - **Multimodal SFT**
-  - [Multimodal Support](../tutorials/posttraining/multimodal.md)
+  - [Multimodal Support](./posttraining/multimodal)
 - **Reinforcement Learning (RL)**
-  - [RL on Single-Host TPUs](../tutorials/posttraining/rl.md)
-  - [RL on Multi-Host TPUs](../tutorials/posttraining/rl_on_multi_host.md)
-  - [RL with Qwen3-30b-a3b-base](../tutorials/posttraining/rl_qwen3_30b.md)
+  - [RL on Single-Host TPUs](./posttraining/rl)
+  - [RL on Multi-Host TPUs](./posttraining/rl_on_multi_host)
 
 ## Step by step RL
 
@@ -58,7 +55,7 @@ Pathways supercharges RL with:
 
 ## Getting started
 
-Start your Post-Training journey through quick experimentation with [Python Notebooks](../guides/run_python_notebook.md) or our Production level tutorials for [SFT](../tutorials/posttraining/sft_on_multi_host.md) and [RL](../tutorials/posttraining/rl_on_multi_host.md).
+Start your Post-Training journey through quick experimentation with [Python Notebooks](../guides/run_python_notebook) or our Production level tutorials for [SFT](./posttraining/sft_on_multi_host) and [RL](./posttraining/rl_on_multi_host).
 
 ## More tutorials
 

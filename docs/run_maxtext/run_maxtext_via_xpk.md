@@ -101,7 +101,7 @@ ______________________________________________________________________
 
 ## 3. Build the MaxText Docker image
 
-For instructions on building the MaxText Docker image, please refer to the [official documentation](../build_maxtext.md).
+For instructions on building the MaxText Docker image, please refer to the [official documentation](../../build_maxtext).
 
 ______________________________________________________________________
 

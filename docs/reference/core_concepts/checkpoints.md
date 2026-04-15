@@ -14,6 +14,8 @@
  limitations under the License.
  -->
 
+(checkpoints)=
+
 # Checkpoints
 
 ## Checkpoint formats
