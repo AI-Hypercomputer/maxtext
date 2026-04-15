@@ -249,6 +249,10 @@ def preprocessing_pipeline(
   dataset = dataset.select_columns(data_column_names)
 
   if use_sft:
+    if not chat_template and chat_template_path:
+      chat_template = instruction_data_processing.get_chat_template_from_path(
+          chat_template_path
+      )
     data_processing_utils.validate_and_configure_sft_columns(data_column_names, tokenizer, chat_template)
 
     # convert instruction dataset to conversational format

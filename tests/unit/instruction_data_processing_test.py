@@ -14,6 +14,9 @@
 
 """Instruction data processing test."""
 
+import json
+import os
+import tempfile
 import unittest
 
 from maxtext.input_pipeline import instruction_data_processing
@@ -138,6 +141,43 @@ class InstructionDataProcessingTest(unittest.TestCase):
         self.assertEqual(data["content"], "What is the capital of Germany?")
       if data["role"] == "assistant":
         self.assertEqual(data["content"], "The capital of Germany is Berlin.")
+
+  def test_get_chat_template_from_path(self):
+    with tempfile.TemporaryDirectory() as tmpdir:
+      # Test .jinja file
+      jinja_path = os.path.join(tmpdir, "test.jinja")
+      with open(jinja_path, "w", encoding="utf-8") as f:
+        f.write("test jinja template")
+      self.assertEqual(
+          instruction_data_processing.get_chat_template_from_path(jinja_path),
+          "test jinja template",
+      )
+
+      # Test .json file with chat_template
+      json_path = os.path.join(tmpdir, "test.json")
+      with open(json_path, "w", encoding="utf-8") as f:
+        json.dump({"chat_template": "test json template"}, f)
+      self.assertEqual(
+          instruction_data_processing.get_chat_template_from_path(json_path),
+          "test json template",
+      )
+
+      # Test .json file without chat_template
+      json_no_key_path = os.path.join(tmpdir, "no_key.json")
+      with open(json_no_key_path, "w", encoding="utf-8") as f:
+        json.dump({"other_key": "other_value"}, f)
+      self.assertIsNone(
+          instruction_data_processing.get_chat_template_from_path(
+              json_no_key_path
+          )
+      )
+
+      # Test non-existent file
+      self.assertIsNone(
+          instruction_data_processing.get_chat_template_from_path(
+              "non_existent.jinja"
+          )
+      )
 
 
 if __name__ == "__main__":

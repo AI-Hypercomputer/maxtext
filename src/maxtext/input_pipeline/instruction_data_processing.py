@@ -33,6 +33,37 @@ def load_template_from_file(template_path):
   return template_config
 
 
+def get_chat_template_from_path(chat_template_path):
+  """Loads a chat template from a file."""
+  if not chat_template_path:
+    return None
+
+  current_dir = os.path.dirname(os.path.abspath(__file__))
+  repo_root = os.path.abspath(os.path.join(current_dir, "..", ".."))
+  full_path = os.path.join(repo_root, chat_template_path)
+
+  if not os.path.isfile(full_path):
+    return None
+
+  if full_path.endswith((".jinja", ".j2", ".txt")):
+    with open(full_path, "r", encoding="utf-8") as f:
+      return f.read()
+
+  if full_path.endswith(".json"):
+    with open(full_path, "r", encoding="utf-8") as f:
+      try:
+        template_config = json.load(f)
+        if (
+            isinstance(template_config, dict)
+            and "chat_template" in template_config
+        ):
+          return template_config["chat_template"]
+      except json.JSONDecodeError:
+        return None
+
+  return None
+
+
 def get_template_placeholders(template):
   """Dynamically extracts the format keys (placeholders) from a template string."""
   # Finds all names inside {...}
