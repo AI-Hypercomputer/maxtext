@@ -135,7 +135,7 @@ class AotHloIdenticalTest(AotBaseTest):
     )
     train.main(train_argv)
     shutil.move(local_landing_dir, train_dump_dir)
-    jax.clear_caches()
+    # jax.clear_caches()
 
     # Generate train_compile.py HLO
     os.makedirs(local_landing_dir, exist_ok=True)
@@ -144,7 +144,7 @@ class AotHloIdenticalTest(AotBaseTest):
     compile_argv = (None, get_test_config_path()) + tuple(shared_args) + tuple(aot_args)
     train_compile.main(compile_argv)
     shutil.move(local_landing_dir, compile_dump_dir)
-    jax.clear_caches()
+    # jax.clear_caches()
 
     # Compare
     compile_hlo, real_hlo = self.find_HLO_files(compile_dump_dir, train_dump_dir)
