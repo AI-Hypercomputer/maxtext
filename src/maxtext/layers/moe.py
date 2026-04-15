@@ -1029,11 +1029,12 @@ class RoutedMoE(nnx.Module):
 
     # The batch is sharded by expert, except during inference decoding (where batch size == 1).
     # In the decoding case, the expert axis is instead replicated along the tensor's batch dimension.
-    is_batch_sharded_by_expert = inputs.shape[0] > 1
-    if is_batch_sharded_by_expert:
-      batch_logical_axis = "activation_batch"
-    else:
-      batch_logical_axis = "decode_batch_moe"
+    is_batch_sharded_by_expert = False  # inputs.shape[0] > 1
+    batch_logical_axis = "activation_batch"
+    # if is_batch_sharded_by_expert:
+    #   batch_logical_axis = "activation_batch"
+    # else:
+    #   batch_logical_axis = "decode_batch_moe"
 
     if self.get_tensor_transpose_parallelism_size() > 1:
       input_partition_pspec = self._logical_to_mesh_axes(
