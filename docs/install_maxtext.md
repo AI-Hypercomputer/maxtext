@@ -112,7 +112,7 @@ environment to avoid dependency conflicts.
    cd maxtext
    ```
 
-:::\{only} is_not_latest
+````{only} is_not_latest
 
 By default, cloning the repository provides the latest version (**HEAD**).
 If you wish to use the latest features, please follow the [latest guide](https://maxtext.readthedocs.io/en/latest/install_maxtext.html).
@@ -126,7 +126,7 @@ before proceeding with the installation.
   git checkout |version|
 ```
 
-:::
+````
 
 2. Create virtual environment:
 

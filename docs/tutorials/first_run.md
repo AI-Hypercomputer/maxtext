@@ -24,7 +24,11 @@ This topic provides a basic introduction to get your MaxText workload up and run
 
 1. To store logs and checkpoints, [Create a Cloud Storage bucket](https://cloud.google.com/storage/docs/creating-buckets) in your project. To run MaxText, the TPU or GPU VMs must have read/write permissions for the bucket. These permissions are granted by service account roles, such as the `STORAGE ADMIN` role.
 
-2. MaxText reads a yaml file for configuration. We also recommend reviewing the configurable options in `configs/base.yml`. This file includes a decoder-only model of ~1B parameters. The configurable options can be overwritten from the command line. For instance, you can change the `steps` or `log_period` by either modifying `configs/base.yml` or by passing in `steps` and `log_period` as additional arguments to the `train.py` call. Set `base_output_directory` to a folder in the bucket you just created.
+2. MaxText reads a yaml file for configuration. We also recommend reviewing the configurable options in `configs/base.yml`. This file includes a decoder-only model of ~1B parameters. The configurable options can be overwritten from the command line. For instance, you can change the `steps` or `log_period` by either modifying `configs/base.yml` or by passing in `steps` and `log_period` as additional arguments to the `train.py` call. Set `base_output_directory` to a folder in the bucket you just created. You can set set an environment variable for that:
+
+```bash
+export BASE_OUTPUT_DIRECTORY=gs://<GCS_BUCKET>
+```
 
 ## Local development for single host
 
@@ -42,7 +46,7 @@ multiple hosts but is a good way to learn about MaxText.
 ```sh
 python3 -m maxtext.trainers.pre_train.train \
   run_name=${YOUR_JOB_NAME?} \
-  base_output_directory=gs://<my-bucket> \
+  base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
   dataset_type=synthetic \
   steps=10
 ```
@@ -54,7 +58,7 @@ Optional: If you want to try training on a Hugging Face dataset, see [Data Input
 ```sh
 python3 -m maxtext.inference.decode \
   run_name=${YOUR_JOB_NAME?} \
-  base_output_directory=gs://<my-bucket> \
+  base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
   per_device_batch_size=1
 ```
 
@@ -76,7 +80,7 @@ You can use [demo_decoding.ipynb](https://github.com/AI-Hypercomputer/maxtext/bl
 ```sh
 python3 -m maxtext.trainers.pre_train.train \
   run_name=${YOUR_JOB_NAME?} \
-  base_output_directory=gs://<my-bucket> \
+  base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
   dataset_type=synthetic \
   steps=10
 ```
@@ -86,7 +90,7 @@ python3 -m maxtext.trainers.pre_train.train \
 ```sh
 python3 -m maxtext.inference.decode \
   run_name=${YOUR_JOB_NAME?} \
-  base_output_directory=gs://<my-bucket> \
+  base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
   per_device_batch_size=1
 ```
 
