@@ -12,15 +12,70 @@ from typing import Any, Optional, Tuple
 
 import functools
 import gc
+import io
 import logging
 import time
 import jax
 import jax.numpy as jnp
+import numpy as np
 from flax import nnx
 from pathwaysutils.experimental import reshard as _experimental_reshard  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
 from tunix.generate import mappings, vllm_sampler
 from tunix.generate.vllm_sampler import VllmConfig, VllmSampler
 from tunix.rl.rollout import base_rollout, vllm_rollout
+
+
+def _save_arrays_to_gcs(
+    mt_array: np.ndarray,
+    vllm_array: np.ndarray,
+    gcs_dir: str = "gs://hengtaoguo-maxtext-logs/weights",
+    flat: bool = True,
+) -> None:
+  """Save mt_array and vllm_array as .npy files to a GCS bucket.
+
+  Args:
+    mt_array: The MaxText weight array to save.
+    vllm_array: The vLLM weight array to save.
+    gcs_dir: GCS directory prefix (no trailing slash).
+    flat: If True, iterate over the first (expert) dimension and save each
+      expert slice as a separate file.  If False, save each array whole.
+  """
+  try:
+    import gcsfs  # pylint: disable=g-import-not-at-top
+    fs = gcsfs.GCSFileSystem()
+    if flat:
+      num_experts = mt_array.shape[0]
+      for expert_idx in range(num_experts):
+        for name, arr in (
+            ("tmp_mt_array", mt_array),
+            ("tmp_vllm_array", vllm_array),
+        ):
+          path = f"{gcs_dir}/{name}_{expert_idx}.npy"
+          buf = io.BytesIO()
+          np.save(buf, arr[expert_idx])
+          buf.seek(0)
+          with fs.open(path, "wb") as f:
+            f.write(buf.read())
+      logging.info(
+          "Saved %d experts for tmp_mt_array and tmp_vllm_array to %s",
+          num_experts, gcs_dir,
+      )
+    else:
+      for name, arr in (
+          ("tmp_mt_array", mt_array),
+          ("tmp_vllm_array", vllm_array),
+      ):
+        path = f"{gcs_dir}/{name}.npy"
+        buf = io.BytesIO()
+        np.save(buf, arr)
+        buf.seek(0)
+        with fs.open(path, "wb") as f:
+          f.write(buf.read())
+      logging.info(
+          "Saved tmp_mt_array and tmp_vllm_array to %s", gcs_dir,
+      )
+  except Exception as e:  # pylint: disable=broad-except
+    logging.warning("_save_arrays_to_gcs failed: %s", e)
 
 
 def _patch_tpu_inference_group_offset():
@@ -147,62 +202,54 @@ class MaxTextVllmSampler(VllmSampler):
     del filter_types
     _log_mem_stats("sampler:update_params_start")
 
-    # delete kv_cache
-    if self.llm is not None:
-      self.llm.reset_prefix_cache()
-      self.llm.collective_rpc("delete_kv_cache") # will free hbm
-    elif self._driver is not None:
-      self._driver.llm_engine.reset_prefix_cache()
-      self._driver.llm_engine.collective_rpc("delete_kv_cache")
-    _log_mem_stats("sampler:post_kv_delete")
-
-    # Perform explicit garbage collection and synchronization to free up HBM memory before loading new weights
+    # Perform explicit garbage collection and synchronization to free up HBM memory before loading new weights.
+    # NOTE: jax.clear_caches() must NOT be called here. It evicts all compiled XLA executables, forcing
+    # every @jax.jit function in the converter (including the expensive vmap+jit over all MoE layers) to
+    # recompile from scratch on every update_params call. HBM arrays are freed by dropping Python references
+    # + gc.collect() + jax.effects_barrier() -- clear_caches() adds no benefit and causes growing sync time.
     gc.collect()
-    jax.clear_caches()
     jax.effects_barrier()
     _log_mem_stats("sampler:post_gc_clear")
 
-    logging.info("MaxTextVllmSampler.update_params: starting converter.convert()...")
-    vllm_state = self._converter.convert(updated_weights)
-    jax.block_until_ready(vllm_state)
-    _log_mem_stats("sampler:post_convert")
-
-    logging.info("MaxTextVllmSampler.update_params: converter.convert() done, %d weights to assign", len(vllm_state))
+    # Use stream_convert(): yields (key, weight) pairs one at a time so each weight is resharded
+    # and assigned immediately, keeping peak HBM at ~2x model size (actor params + vLLM in-place
+    # update) instead of the old 3x peak (actor params + full converted dict + vLLM state all live
+    # simultaneously). No KV cache teardown needed as this matches the native path's memory profile.
+    logging.info("MaxTextVllmSampler.update_params: starting streaming weight conversion and assignment...")
     model_runner_state = self.transformer_state
-
-    logging.info("Weight sync: using pathwaysutils experimental_reshard")
-
-    keys = list(vllm_state.keys())
     start_time = time.time()
-    for i, key in enumerate(keys):
-      weight = vllm_state.pop(key)  # free immediately to avoid accumulating all weights in RAM
-      weight_array = weight.value if hasattr(weight, "value") else weight  # handle both jnp arrays and ShardedDeviceArrays
-      weight_shape_matches = weight_array.shape == model_runner_state[key].shape
-      assert weight_shape_matches, f"Shape mismatch for {key}: converter produced {weight_array.shape}, expected {model_runner_state[key].shape}"
-      # logging.info(f"{key}: mt {weight_array.shape} -> vllm {model_runner_state[key].shape}: {weight_shape_matches}")
+    i = 0
+    for key, weight_array in self._converter.stream_convert(updated_weights):
+      assert weight_array.shape == model_runner_state[key].shape, (
+          f"Shape mismatch for {key}: converter produced {weight_array.shape}, "
+          f"expected {model_runner_state[key].shape}"
+      )
+      # Logging for correctness check
+      if "layers.0" in key:
+        tmp_mt_array = np.asarray(weight_array)
+        tmp_vllm_array = np.asarray(model_runner_state[key])
+        allclose = np.allclose(tmp_mt_array, tmp_vllm_array, rtol=1e-1, atol=1e-1)
+        logging.info(f"{key}: allclose = {allclose}")
+        if "qkv_proj" in key and not allclose:
+          _save_arrays_to_gcs(tmp_mt_array, tmp_vllm_array, "gs://hengtaoguo-maxtext-logs/weights_qkv_proj", flat=False)
+        # if "w13_weight" in key and not allclose:
+        #   _save_arrays_to_gcs(tmp_mt_array[:5,:,:], tmp_vllm_array[:5,:,:])
       target_sharding = model_runner_state[key].sharding
       model_runner_state[key] = _experimental_reshard.reshard(
           weight_array, target_sharding, donate=True, may_alias=None,
           cache_resharding_plans=True,
       )
-      del weight, weight_array  # release TPU buffer before pushing back to device
-      # Periodically flush async ops and GC to prevent host RAM accumulation.
+      del weight_array
       if i % 16 == 15:
         jax.effects_barrier()
         gc.collect()
         _log_mem_stats(f"sampler:assign_weights_after_{i+1}")
+      i += 1
     jax.effects_barrier()
     gc.collect()
     end_time = time.time()
-    logging.info("MaxTextVllmSampler.update_params: all weights assigned in %.4f seconds", end_time - start_time)
+    logging.info("MaxTextVllmSampler.update_params: %d weights assigned in %.4f seconds", i, end_time - start_time)
     _log_mem_stats("sampler:post_assign_all")
-    
-    # reinitialize kv_cache
-    if self.llm is not None:
-      self.llm.collective_rpc("reinitialize_kv_cache")
-    elif self._driver is not None:
-      self._driver.llm_engine.collective_rpc("reinitialize_kv_cache")
-    _log_mem_stats("sampler:post_kv_reinit")
 
 
 
@@ -266,6 +313,7 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
             server_mode=rollout_config.rollout_vllm_server_mode,
             tensor_parallel_size=rollout_config.tensor_parallel_size,
             data_parallel_size=rollout_config.data_parallel_size,
+            expert_parallel_size=rollout_config.expert_parallel_size,
             enable_dp_attention=rollout_config.rollout_vllm_enable_dp_attention,
             engine_kwargs={
                 "max_model_len": cache_config_or_size,
@@ -274,6 +322,7 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
                 # Async scheduling causes KeyError in dp_scheduler on slow models
                 # (30B+) where inference latency exceeds the scheduler's window.
                 "async_scheduling": rollout_config.rollout_vllm_async_scheduling,
+                **rollout_config.rollout_vllm_kwargs,
             },
         ),
         converter=converter,

@@ -37,7 +37,7 @@ _JAX_COMPILATION_CACHE_DIR = "/tmp/jax_cache"
 # Flags
 FLAGS = flags.FLAGS
 _XPROF = flags.DEFINE_bool('xprof', False, 'xprof')
-_RAND_INIT = flags.DEFINE_bool('rand_init', True, 'Whether to use random initialization instead of loading from checkpoint, for faster testing.')  
+_RAND_INIT = flags.DEFINE_bool('rand_init', False, 'Whether to use random initialization instead of loading from checkpoint, for faster testing.')  
 
 def _setup_jax_compilation_cache():
   jax_config.update("jax_compilation_cache_dir", _JAX_COMPILATION_CACHE_DIR)
@@ -188,8 +188,12 @@ def _load_maxtext_model(base_yaml_path):
       key_proj="offload",
       value_proj="offload",
       ici_expert_parallelism=4,
-      # ici_fsdp_parallelism=,
-      # ici_tensor_parallelism=,
+      ici_data_parallelism=1,
+      # ici_expert_parallelism=2,
+      # ici_data_parallelism=2,
+      rollout_tensor_parallelism=4,
+      rollout_data_parallelism=1,
+      enable_expert_parallel=True,
       override_model_config="true",
       # debug_sharding="true",
       checkpoint_storage_concurrent_gb=80,
@@ -203,97 +207,118 @@ class MaxTextToVLLMConverter:
         self.config = config
         self.mesh = mesh
         self.num_layers = config.base_num_decoder_layers
-        self.vllm_tp = self.config.rollout_tensor_parallelism
+        # vllm tp/ep logics are weird
+        if self.config.enable_expert_parallel:
+          self.vllm_tp, self.vllm_ep = 1, self.config.rollout_tensor_parallelism
+        else:
+          self.vllm_tp, self.vllm_ep = self.config.rollout_tensor_parallelism, 1
 
-    # --- 1. Top-Level Entry Point ---
+
+    # --- 1. Top-Level Entry Points ---
+    def stream_convert(self, model_state: dict):
+        """Generator: yields (key, weight_array) pairs one group at a time.
+
+        Prefer this over convert() during RL weight sync.  The caller can
+        reshard and assign each weight immediately, keeping only one weight
+        group live in HBM at a time instead of accumulating the full
+        vllm_state dict before any assignment can begin (which was a 3x-model-
+        size peak: actor params + converted dict + vLLM current state).
+        """
+        logging.info(f"\n{GREEN}Starting streaming conversion...{RESET}")
+        _log_mem_stats("converter:start")
+        yield from self._stream_global(model_state)
+        _log_mem_stats("converter:post_global")
+        yield from self._stream_attn(model_state)
+        _log_mem_stats("converter:post_attn")
+        yield from self._stream_moe(model_state)
+        _log_mem_stats("converter:post_moe")
+
     def convert(self, model_state: dict):
-        """Main entry point to convert all weights."""
+        """Accumulate all weights into a dict (used by standalone bench scripts).
+
+        For RL weight sync prefer stream_convert() to avoid the 3x HBM peak.
+        """
         logging.info(f"\n{GREEN}Starting Conversion...{RESET}")
         start_time = time.time()
-        self.vllm_state = {}
-        _log_mem_stats("converter:start")
-
-        with timer("Convert Global Weights"):
-          self._convert_global(model_state)
-        _log_mem_stats("converter:post_global")
-        with timer("Convert Attention Weights"):
-          self._convert_attn(model_state)
-        _log_mem_stats("converter:post_attn")
-        with timer("Convert MoE Weights"):
-          self._convert_moe(model_state)
-        _log_mem_stats("converter:post_moe")
-        
+        self.vllm_state = dict(self.stream_convert(model_state))
+        elapsed = time.time() - start_time
+        logging.info(f"{GREEN}Conversion complete in {elapsed:.2f}s{RESET}")
         return self.vllm_state
 
-    def _convert_global(self, params):
-        logging.info("_convert_global: embed_tokens...")
-        self._to_embed_tokens(params)
-        logging.info("_convert_global: final_norm...")
-        self._to_final_norm(params)
-        logging.info("_convert_global: lm_head...")
-        self._to_lm_head(params)
-        logging.info("_convert_global: done")
-                
-    def _convert_attn(self, params):
-      logging.info("_convert_attn: pre_self_attention_layer_norm...")
-      pre_ln = params['base']['decoder']['layers']['pre_self_attention_layer_norm']['scale']
-      convert_pre_ln = self._transpose_unstack(pre_ln)
-      assert len(convert_pre_ln) == self.num_layers, f"Expected {self.num_layers} layers, got {len(convert_pre_ln)}"
-      for i, layer in enumerate(convert_pre_ln):
-        self.vllm_state.update({f'vllm_model.model.layers.{i}.input_layernorm.weight': layer})
-      del convert_pre_ln
+    def _stream_global(self, params):
+        logging.info("_stream_global: embed_tokens...")
+        yield "vllm_model.model.embed_tokens.weight", jnp.array(
+            params['base']['token_embedder']['embedding']
+        )
+        logging.info("_stream_global: final_norm...")
+        yield "vllm_model.model.norm.weight", jnp.array(
+            params['base']['decoder']['decoder_norm']['scale']
+        )
+        logging.info("_stream_global: lm_head...")
+        yield "vllm_model.lm_head.weight", self._transpose_2d(
+            params['base']['decoder']['logits_dense']['kernel']
+        )
+        logging.info("_stream_global: done")
 
-      logging.info("_convert_attn: post_self_attention_layer_norm...")
-      post_ln = params['base']['decoder']['layers']['post_self_attention_layer_norm']['scale']
-      converted_post_ln = self._transpose_unstack(post_ln)
-      assert len(converted_post_ln) == self.num_layers, f"Expected {self.num_layers} layers, got {len(converted_post_ln)}"
-      for i, layer in enumerate(converted_post_ln):
-        self.vllm_state.update({f'vllm_model.model.layers.{i}.post_attention_layernorm.weight': layer})      
-      del post_ln, converted_post_ln
+    def _stream_attn(self, params):
+        logging.info("_stream_attn: pre_self_attention_layer_norm...")
+        pre_ln = params['base']['decoder']['layers']['pre_self_attention_layer_norm']['scale']
+        convert_pre_ln = self._transpose_unstack(pre_ln)
+        assert len(convert_pre_ln) == self.num_layers, f"Expected {self.num_layers} layers, got {len(convert_pre_ln)}"
+        for i, layer in enumerate(convert_pre_ln):
+            yield f'vllm_model.model.layers.{i}.input_layernorm.weight', layer
+        del convert_pre_ln
 
-      logging.info("_convert_attn: self_attention (qkv/o/norms)...")
-      attn = params['base']['decoder']['layers']['self_attention']
-      self_attn = self._to_attn(attn)
-      for key, layers in self_attn.items():
-        self.vllm_state.update({f'vllm_model.model.layers.{i}.{key}': layer for i, layer in enumerate(layers)})
-      del attn, self_attn
-      logging.info("_convert_attn: done")
-      gc.collect()
+        logging.info("_stream_attn: post_self_attention_layer_norm...")
+        post_ln = params['base']['decoder']['layers']['post_self_attention_layer_norm']['scale']
+        converted_post_ln = self._transpose_unstack(post_ln)
+        assert len(converted_post_ln) == self.num_layers, f"Expected {self.num_layers} layers, got {len(converted_post_ln)}"
+        for i, layer in enumerate(converted_post_ln):
+            yield f'vllm_model.model.layers.{i}.post_attention_layernorm.weight', layer
+        del post_ln, converted_post_ln
 
-    def _convert_moe(self, params):
-      logging.info("_convert_moe: extracting moe_block...")
-      _log_mem_stats("converter:moe_start")
-      moe = params['base']['decoder']['layers']['moe_block'].to_pure_dict()
-      prefix = "vllm_model.model.layers"
+        logging.info("_stream_attn: self_attention (qkv/o/norms)...")
+        attn = params['base']['decoder']['layers']['self_attention']
+        self_attn = self._to_attn(attn)
+        for key, layers in self_attn.items():
+            for i, layer in enumerate(layers):
+                yield f'vllm_model.model.layers.{i}.{key}', layer
+        del attn, self_attn
+        logging.info("_stream_attn: done")
 
-      logging.info("_convert_moe: gate weights...")
-      self.vllm_state.update({
-          f"{prefix}.{i}.mlp.gate.weight": w 
-          for i, w in enumerate(self._to_mlp_gate(moe['gate']['kernel']))
-      })
-      del moe['gate']
-      gc.collect()
-      _log_mem_stats("converter:moe_post_gate")
+    def _stream_moe(self, params):
+        # NOTE: moe is a shallow Python dict of references. del moe['gate'] etc.
+        # only removes the key from this local dict; the underlying JAX HBM buffers
+        # remain live because params (held by the GRPO framework caller) still
+        # references them. gc.collect() is therefore a no-op for device memory
+        # here and is intentionally omitted.
+        logging.info("_stream_moe: extracting moe_block...")
+        _log_mem_stats("converter:moe_start")
+        moe = params['base']['decoder']['layers']['moe_block'].to_pure_dict()
+        prefix = "vllm_model.model.layers"
 
-      logging.info("_convert_moe: expert down (w2) weights...")
-      self.vllm_state.update({
-          f"{prefix}.{i}.mlp.experts.w2_weight": w 
-          for i, w in enumerate(self._to_mlp_expert_down(moe['wo']))
-      })
-      del moe['wo']
-      gc.collect()
-      _log_mem_stats("converter:moe_post_w2")
+        logging.info("_stream_moe: gate weights...")
+        for i, w in enumerate(self._to_mlp_gate(moe['gate']['kernel'])):
+            yield f"{prefix}.{i}.mlp.gate.weight", w
+        del moe['gate']
+        _log_mem_stats("converter:moe_post_gate")
 
-      logging.info("_convert_moe: expert gate+up (w13) weights (fuse_all jit+vmap)...")
-      self._to_mlp_expert_gate_up(
-          moe['wi_0'], moe['wi_1'], 
-          self.num_layers, prefix, 'mlp.experts.w13_weight'
-      )
-      del moe['wi_0'], moe['wi_1']
-      del moe
-      logging.info("_convert_moe: done")
-      gc.collect()
-      _log_mem_stats("converter:moe_post_w13")
+        logging.info("_stream_moe: expert down (w2) weights...")
+        for i, w in enumerate(self._to_mlp_expert_down(moe['wo'])):
+            yield f"{prefix}.{i}.mlp.experts.w2_weight", w
+        del moe['wo']
+        _log_mem_stats("converter:moe_post_w2")
+
+        logging.info("_stream_moe: expert gate+up (w13) weights (fuse_all jit+vmap)...")
+        _fuse_all = self._make_fuse_all(self.vllm_tp, self.vllm_ep)
+        fused = _fuse_all(moe['wi_0'], moe['wi_1'])
+        del moe['wi_0'], moe['wi_1'], moe
+        _log_mem_stats("converter:moe_w13_post_fuse")
+        for i, layer_i in enumerate(jnp.unstack(fused, axis=0)):
+            yield f"{prefix}.{i}.mlp.experts.w13_weight", jnp.transpose(layer_i, (0, 2, 1))
+        del fused
+        logging.info("_stream_moe: done")
+        _log_mem_stats("converter:moe_post_w13")
       
     def _to_final_norm(self, params):
       # Explicit copy: avoids aliasing the actor model's buffer into vllm_state,
@@ -314,16 +339,32 @@ class MaxTextToVLLMConverter:
       )
       
     def _to_attn(self, attn: PyTree) -> dict[str, jax.Array]:
-      tp = min(self.vllm_tp, self.config.base_num_kv_heads)  # Don't TP-shard more heads than exist in the model.
-      _compute = self._make_attn_compute(tp)
+      # tpu_inference stores qkv_proj in the global state dict in standard
+      # [Q, K, V] format (tp=1 layout) regardless of the device TP or EP
+      # degree.  Per-device reordering happens internally at inference time.
+      # When enable_expert_parallel=True, __init__ sets vllm_tp=1, so the
+      # formula tp=min(vllm_tp, num_kv_heads)=1 produces the correct layout.
+      # Do NOT multiply by vllm_ep here: that incorrectly yields tp=4 which
+      # produces a 4-block interleaved layout that mismatches the state dict.
+      tp = min(self.vllm_tp, self.config.base_num_kv_heads)
+      _compute = self._make_attn_compute(tp, self.vllm_ep)
       return _compute(attn)
 
     @staticmethod
     @functools.lru_cache(maxsize=8)
-    def _make_attn_compute(tp: int):
-      """Return a JIT-compiled attn converter for a given TP degree.
+    def _make_attn_compute(tp: int, ep: int = 1):
+      """Return a JIT-compiled attn converter for a given TP/EP degree.
 
-      Cached by tp so the same XLA executable is reused across all steps.
+      Cached by (tp, ep) so the same XLA executable is reused across steps.
+
+      EP does NOT change how attention QKV is sharded: vLLM always stores QKV
+      in the tpu_inference reordered format [q0,k0,v0, q1,k1,v1, ...] where
+      each chunk corresponds to one TP rank, regardless of EP setting.  EP
+      only affects MoE layers (w13/w2/gate).
+
+      KV replication: when num_kv_heads < tp, vLLM replicates KV heads so
+      each TP rank still gets exactly one KV shard per replica group.  We
+      tile k/v accordingly so the reordering is correct.
       """
       @jax.jit
       def _compute(attn):
@@ -332,20 +373,29 @@ class MaxTextToVLLMConverter:
         k = jnp.transpose(attn['key']['kernel'], (1, 0, 2, 3))
         v = jnp.transpose(attn['value']['kernel'], (1, 0, 2, 3))
 
+        l, d_model = q.shape[0], q.shape[1]
+        head_dim = q.shape[3]
+
         num_q_heads = q.shape[2]
         num_kv_heads = k.shape[2]
-        head_dim = q.shape[3]
-        l, d_model = q.shape[0], q.shape[1]
-
-        kv_per_tp = num_kv_heads // tp
         q_per_tp = num_q_heads // tp
 
+        if tp > num_kv_heads:
+          # KV heads are fewer than TP ranks: vLLM replicates each KV head
+          # across (tp // num_kv_heads) consecutive TP ranks.  Tile k/v so
+          # the reordering produces the right layout.
+          kv_replicas = tp // num_kv_heads
+          k = jnp.repeat(k, kv_replicas, axis=2)  # (l, d_model, tp, d)
+          v = jnp.repeat(v, kv_replicas, axis=2)
+
+        kv_per_tp = k.shape[2] // tp  # always 1 after optional tiling above
+        # Interleave per TP rank: [q0,k0,v0, q1,k1,v1, ...]
         q_by_tp = q.reshape(l, d_model, tp, q_per_tp, head_dim)
         k_by_tp = k.reshape(l, d_model, tp, kv_per_tp, head_dim)
         v_by_tp = v.reshape(l, d_model, tp, kv_per_tp, head_dim)
-
         qkv_by_tp = jnp.concatenate([q_by_tp, k_by_tp, v_by_tp], axis=3)
         qkv_flat = qkv_by_tp.reshape(l, d_model, -1)
+
         qkv_proj = jnp.transpose(qkv_flat, (0, 2, 1))
 
         o = jnp.transpose(attn['out']['kernel'], (1, 3, 0, 2))
@@ -381,7 +431,7 @@ class MaxTextToVLLMConverter:
     def _to_mlp_expert_gate_up(self, wi_0, wi_1, num_layers, layer_key_prefix, layer_key_suffix):
       # Process all layers in one JIT call using vmap to avoid per-layer dispatch
       # overhead (which was ~50 separate device syncs on multi-host v5p-64).
-      _fuse_all = self._make_fuse_all(self.vllm_tp)
+      _fuse_all = self._make_fuse_all(self.vllm_tp, self.vllm_ep)
 
       logging.info("_to_mlp_expert_gate_up: dispatching _fuse_all (single JIT+vmap)...")
       fused = _fuse_all(wi_0, wi_1)
@@ -402,10 +452,16 @@ class MaxTextToVLLMConverter:
 
     @staticmethod
     @functools.lru_cache(maxsize=8)
-    def _make_fuse_all(tp: int):
-      """Return a JIT-compiled w13 fuser for a given TP degree.
+    def _make_fuse_all(tp: int, ep: int = 1):
+      """Return a JIT-compiled w13 fuser for a given TP/EP degree.
 
-      Cached by tp so the same XLA executable is reused across all steps.
+      Cached by (tp, ep) so the same XLA executable is reused across steps.
+
+      EP=1 (TP-only): vLLM shards w13 along the inner-dim (cols), so chunks
+        of gate and up are interleaved: [gate0, up0, gate1, up1, ...].
+      EP>1: vLLM assigns whole experts to EP ranks and shards w13 along the
+        model-dim (rows) via TP.  No column interleaving is needed; the layout
+        is simply [gate_all, up_all].
       """
       @jax.jit
       def _fuse_all(wi_0, wi_1):
@@ -417,14 +473,21 @@ class MaxTextToVLLMConverter:
           # [e, d_model, d_inner] -> [e, 2*d_inner, d_model]
           w0 = jnp.transpose(w0, (0, 2, 1))  # gate: [e, d_inner, d_model]
           w1 = jnp.transpose(w1, (0, 2, 1))  # up:   [e, d_inner, d_model]
-          e, d_inner, d_model = w0.shape
-          # Chunk-level interleave to match vLLM TP sharding:
-          # layout: [gate_chunk0, up_chunk0, gate_chunk1, up_chunk1, ...]
-          chunk_size = d_inner // tp
-          gate_chunks = w0.reshape(e, tp, chunk_size, d_model)
-          up_chunks = w1.reshape(e, tp, chunk_size, d_model)
-          combined = jnp.stack([gate_chunks, up_chunks], axis=2)
-          return combined.reshape(e, 2 * d_inner, d_model)
+          if ep > 1:
+            # EP active: TP shards model-dim (rows), not inner-dim (cols).
+            # vLLM expects plain [gate_all, up_all] with no TP interleaving.
+            logging.info(f"_fuse_single: EP={ep}, TP={tp}, skipping TP interleaving for w13")
+            return jnp.concatenate([w0, w1], axis=1)  # [e, 2*d_inner, d_model]
+          else:
+            logging.info(f"_fuse_single: EP={ep}, TP={tp}, applying TP interleaving for w13")
+            e, d_inner, d_model = w0.shape
+            # Chunk-level interleave to match vLLM TP sharding:
+            # layout: [gate_chunk0, up_chunk0, gate_chunk1, up_chunk1, ...]
+            chunk_size = d_inner // tp
+            gate_chunks = w0.reshape(e, tp, chunk_size, d_model)
+            up_chunks = w1.reshape(e, tp, chunk_size, d_model)
+            combined = jnp.stack([gate_chunks, up_chunks], axis=2)
+            return combined.reshape(e, 2 * d_inner, d_model)
 
         return jax.vmap(_fuse_single)(wi_0, wi_1)  # -> (l, e, 2*d_inner, d_model)
 
@@ -516,18 +579,80 @@ def main():
     "Qwen/Qwen3-30B-A3B",
     max_model_len=16,
     tensor_parallel_size=4,
-    gpu_memory_utilization=0.5,
+    # data_parallel_size=2,
+    # expert_parallel_size=4,
+    enable_expert_parallel=True,
+    gpu_memory_utilization=0.7,
     # load_format="dummy",
   )
   print("\n" + "="*80)
   llm_state = llm.llm_engine.model_executor.driver_worker.model_runner.state
   # save_dict_to_file(llm_state, "llm_state_shapes.txt")
 
+  # Detect once whether MaxText and vLLM meshes share the same physical
+  # devices (single-VM) or are disjoint (multi-host cluster partition).
+  # Same devices → jax.jit with out_shardings lets XLA emit on-device
+  # collectives (fast, ~0.16 s for 30 B).  Disjoint devices → jax.jit
+  # raises "incompatible devices"; fall back to jax.device_put which uses
+  # ICI/DCN for the cross-host transfer without a CPU roundtrip.
+  _any_src = next(iter(vllm_state.values()))
+  _any_src_arr = _any_src.value if hasattr(_any_src, 'value') else _any_src
+  _any_dst = next(iter(llm_state.values()))
+  _same_devices = (
+      frozenset(d.id for d in _any_src_arr.sharding.mesh.devices.flat) ==
+      frozenset(d.id for d in _any_dst.sharding.mesh.devices.flat)
+  )
+  logging.info("Weight sync: same_devices=%s (jit=%s, device_put=%s)",
+               _same_devices, _same_devices, not _same_devices)
+
+  @functools.lru_cache(maxsize=None)
+  def _get_reshard_fn(dst_sharding):
+    if _same_devices:
+      return jax.jit(lambda x: x, out_shardings=dst_sharding)
+    else:
+      return functools.partial(jax.device_put, device=dst_sharding)
+
   with timer(f"Assigning {len(vllm_state)} weights to vLLM model"):
     for key, weight in vllm_state.items():
-      target_sharding = llm_state[key].sharding
-      print(f"{key} MT {weight.shape} to torchax {llm_state[key].shape}")
-      llm_state[key] = jax.device_put(np.asarray(weight), target_sharding)
+      # Unwrap NNX Param → plain jax.Array; plain arrays pass through unchanged.
+      weight_array = weight.value if hasattr(weight, 'value') else weight
+      dst_sharding = llm_state[key].sharding
+      # print(f"{key}: mt {weight_array.shape}, vllm {llm_state[key].shape}")
+      # if key == "vllm_model.model.layers.0.mlp.experts.w13_weight":
+      #   tmp_mt_array = np.array(weight_array)
+      #   tmp_vllm_array = np.array(llm_state[key])
+      #   allclose = np.allclose(tmp_mt_array, tmp_vllm_array, rtol=1e-1, atol=1e-1)
+      #   print(f"{key}: allclose={allclose}")
+      #   for expert_id in range(tmp_mt_array.shape[0]):
+      #     expert_close = np.allclose(tmp_mt_array[expert_id,:,:], tmp_vllm_array[expert_id,:,:], rtol=1e-1, atol=1e-1)
+      #     print(f"\texpert {expert_id}: allclose={expert_close}")
+      #     np.save(f"/home/hengtaoguo_google_com/projects/weights/mt/debug_w13_{expert_id}.npy", tmp_mt_array[expert_id,:,:])
+      #     np.save(f"/home/hengtaoguo_google_com/projects/weights/vllm/debug_w13_{expert_id}.npy", tmp_vllm_array[expert_id,:,:])
+      #   print(f"sharding: mt {weight_array.sharding}, vllm {llm_state[key].sharding}")
+
+      if "model.layers.0" in key:
+        tmp_mt_array = np.array(weight_array)
+        tmp_vllm_array = np.array(llm_state[key])
+        allclose = np.allclose(tmp_mt_array, tmp_vllm_array, rtol=1e-1, atol=1e-1)
+        # logging.info(f"{key}: allclose={allclose}")
+        print(f"{key}: allclose={allclose}")
+        if "qkv_proj" in key:
+          np.save(f"/home/hengtaoguo_google_com/projects/weights_local/mt/debug_qkv_proj.npy", tmp_mt_array)
+          np.save(f"/home/hengtaoguo_google_com/projects/weights_local/vllm/debug_qkv_proj.npy", tmp_vllm_array)
+          print(f"saved debug arrays for {key}: mt {tmp_mt_array.mean()}, vllm {tmp_vllm_array.mean()}")
+
+
+      # if key == "vllm_model.model.layers.0.self_attn.qkv_proj.weight":
+      #   tmp_mt_array = np.array(weight_array)
+      #   tmp_vllm_array = np.array(llm_state[key])
+      #   allclose = np.allclose(tmp_mt_array, tmp_vllm_array, rtol=1e-1, atol=1e-1)
+      #   print(f"{key}: allclose={allclose}")
+      #   np.save(f"/home/hengtaoguo_google_com/projects/weights_local/mt/debug_qkv_proj.npy", tmp_mt_array)
+      #   np.save(f"/home/hengtaoguo_google_com/projects/weights_local/vllm/debug_qkv_proj.npy", tmp_vllm_array)
+      #   print(f"saved debug arrays for {key}")
+      # llm_state[key] = _get_reshard_fn(dst_sharding)(weight_array)
+      llm_state[key] = jax.device_put(np.asarray(weight_array), dst_sharding)  # ensure on correct device for next assignments
+      # print(f"Assigned {key}, shape {weight_array.shape}")
 
   sampling_params = SamplingParams(temperature=0.0, max_tokens=10)
   print("\n" + "="*80)
