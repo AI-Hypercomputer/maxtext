@@ -64,6 +64,8 @@ _CONFIG_FILE_MAPPING: dict[str, str] = {
     "maxtext.inference.vllm_decode": "base.yml",
     "maxtext.checkpoint_conversion.to_maxtext": "base.yml",
     "maxtext.checkpoint_conversion.to_huggingface": "base.yml",
+    "maxtext.checkpoint_conversion.maxtext_to_hf_lora": "base.yml",
+    "maxtext.checkpoint_conversion.hf_lora_to_maxtext": "post_train/sft.yml",
 }
 
 
