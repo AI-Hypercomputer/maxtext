@@ -1294,7 +1294,7 @@ class RoutedMoE(nnx.Module):
             # TODO(jberchtold): Adjust this based on TE GMM requirements per recipe
             TE_GMM_ALIGN_REQUIREMENT = 128
             assert self.config.te_router_and_permutation_impl and self.config.te_permutation_align_size % TE_GMM_ALIGN_REQUIREMENT == 0 and self.config.te_permutation_align_size > 0, f"TE GMM currently requires TE permutation with alignment (te_permutation_align_size > 0 and multiple of {TE_GMM_ALIGN_REQUIREMENT})."
-            return self.quant.gmm(inputs, kernel, tiling, group_sizes, expert_assignments)
+            return self.quant.gmm(inputs, kernel, tiling, group_sizes, expert_assignments, self.config.te_gmm_quantization)
 
       # TODO (b/491979205) pipeline fsdp ag per repeat fails tokamax gmm
       if self.config.using_pipeline_parallelism and self.config.pipeline_fsdp_ag_per_repeat:
