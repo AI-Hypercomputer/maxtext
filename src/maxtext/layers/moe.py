@@ -1171,7 +1171,7 @@ class RoutedMoE(nnx.Module):
             # This would result in num_expert_shards * input_size * experts_per_shard assignments. However, if
             # experts_per_shard > num_experts_per_tok we cannot assign more than num_experts_per_tok to all of the inputs.
             max_local_experts_per_tok = min(local_expert_size, self.config.num_experts_per_tok)
-            buffer_size = int(num_expert_parallelism * batch_size * sequence_length * max_local_experts_per_tok)
+            buffer_size = int(1.0 * batch_size * sequence_length * max_local_experts_per_tok)
             output_shape = jax.lax.empty((buffer_size, self.config.emb_dim), dtype=x.dtype)
 
             x = jax.lax.ragged_all_to_all(
