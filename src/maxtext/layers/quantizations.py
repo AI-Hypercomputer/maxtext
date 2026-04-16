@@ -949,6 +949,16 @@ class TransformerEngineQuantization(Quantization):
     # quant.einsum is only required for MoE or for inference with KVCache.
     raise ValueError("Einsum is not yet supported for TransformerEngine quantization.")
 
+  def get_gmm_align_size(self, te_gmm_quantization_recipe_name: str):
+    """Get the alignment size for GMM based on the TransformerEngine quantization recipe."""
+    ALIGN_SIZES_BY_RECIPE_NAME = {
+      "te_no_quant": 8, # BF16 alignment requirement for cuBLASLt kernel which is 16B or 8 BF16 elements
+      "te_mxfp8": 128, # MXFP8BlockScaling requirement for TE grouped quant kernel and cuBLASLt MXFP8 grouped GEMM
+    }
+    if te_gmm_quantization_recipe_name not in ALIGN_SIZES_BY_RECIPE_NAME:
+      raise ValueError(f"Invalid TransformerEngine GMM quantization recipe name: {te_gmm_quantization_recipe_name}")
+    return ALIGN_SIZES_BY_RECIPE_NAME[te_gmm_quantization_recipe_name] 
+
   def gmm(self, inputs, kernel, tiling, group_sizes, expert_assignments, te_gmm_quantization_recipe_name):
     """ Grouped GEMM """
     import transformer_engine.jax.flax as te_flax  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
