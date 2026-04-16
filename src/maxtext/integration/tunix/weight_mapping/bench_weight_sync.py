@@ -15,6 +15,9 @@ from jax import config as jax_config
 from jax.sharding import PartitionSpec as P
 from jaxtyping import PyTree
 import torch
+from tpu_inference.layers.common.moe import MoEBackend
+from tpu_inference.layers.common.process_weights.moe_weights import (
+    FusedMoEWeights, process_moe_weights)
 from tunix.models.qwen3 import model as qwen3_lib
 from vllm import LLM, SamplingParams
 
@@ -382,10 +385,15 @@ class MaxTextToVLLMConverter:
           # Chunk-level interleave to match vLLM TP sharding:
           # layout: [gate_chunk0, up_chunk0, gate_chunk1, up_chunk1, ...]
           chunk_size = d_inner // tp
+          padded_chunk_size = ((chunk_size + 127) // 128) * 128
+          pad_amount = padded_chunk_size - chunk_size
           gate_chunks = w0.reshape(e, tp, chunk_size, d_model)
           up_chunks = w1.reshape(e, tp, chunk_size, d_model)
+          if pad_amount > 0:
+            gate_chunks = jnp.pad(gate_chunks, ((0, 0), (0, 0), (0, pad_amount), (0, 0)))
+            up_chunks   = jnp.pad(up_chunks,   ((0, 0), (0, 0), (0, pad_amount), (0, 0)))
           combined = jnp.stack([gate_chunks, up_chunks], axis=2)
-          return combined.reshape(e, 2 * d_inner, d_model)
+          return combined.reshape(e, 2 * padded_chunk_size * tp, d_model)
 
         return jax.vmap(_fuse_single)(wi_0, wi_1)  # -> (l, e, 2*d_inner, d_model)
 
@@ -455,7 +463,7 @@ class Gemma4ToVLLMConverter:
         logging.info(f"\n{GREEN}Starting Gemma4 Conversion (is_moe={self.is_moe}, "
                      f"num_layers={self.num_layers}, num_reps={self.num_reps})...{RESET}")
         blocks = model_state['base']['decoder']['scanned_blocks']
-        prefix = "vllm_model.model.layers"
+        prefix = "vllm_model.language_model.model.layers"
 
         with timer("Convert Global Weights"):
             self._convert_global(model_state)
@@ -476,19 +484,19 @@ class Gemma4ToVLLMConverter:
     @jax.jit
     def _pack_attn(q, k, v, o, qnorm, knorm):
         """Prepares separate q/k/v, o, and norms for all layers in a slot.
-        Input shapes (MaxText scanned):
+        Input shapes (MaxText scanned, scan axis at index 1):
           q/k/v: (d_model, L, nH, D)
-          o:     (nH, D, L, d_model)
-          norms: (D, L)
-        Returns: L × (nH*D, d_model) for q/k/v, etc.
+          o:     (nH, L, D, d_model)   # scan axis is 1, not 2
+          norms: (d_model, L)
+        Returns: L × (nH*D, d_model) for q/k/v, L × (d_model, nH*D) for o.
         """
         # q/k/v: (d_model, L, nH, D) -> (L, nH, D, d_model) -> (L, nH*D, d_model)
         q = jnp.transpose(q, (1, 2, 3, 0)).reshape(q.shape[1], -1, q.shape[0])
         k = jnp.transpose(k, (1, 2, 3, 0)).reshape(k.shape[1], -1, k.shape[0])
         v = jnp.transpose(v, (1, 2, 3, 0)).reshape(v.shape[1], -1, v.shape[0])
-        
-        # o: (nH, D, L, d_model) -> (L, d_model, nH, D) -> (L, d_model, nH*D)
-        o = jnp.transpose(o, (2, 3, 0, 1)).reshape(o.shape[2], o.shape[3], -1)
+
+        # o: (nH, L, D, d_model) -> (L, d_model, nH, D) -> (L, d_model, nH*D)
+        o = jnp.transpose(o, (1, 3, 0, 2)).reshape(o.shape[1], o.shape[3], -1)
         
         # norms: (D, L) -> (L, D)
         qnorm = jnp.transpose(qnorm, (1, 0))
@@ -501,8 +509,9 @@ class Gemma4ToVLLMConverter:
 
     def _convert_global(self, params):
         # Gemma4 uses tied embeddings: no logits_dense; lm_head.weight = embed_tokens.weight.
-        # MaxText stores embedding pre-multiplied by sqrt(d_model) (applied at runtime in HF/vLLM).
-        # Divide it out so vLLM gets the raw embedding and can apply its own normalizer.
+        # MaxText stores embedding pre-multiplied by sqrt(hidden_size) (applied during HF->MaxText
+        # conversion in param_mapping.py). vLLM/tpu-inference apply sqrt(hidden_size) at runtime,
+        # so divide out the pre-multiplied factor to give vLLM the raw embedding.
         logging.info("_convert_global: embed_tokens (de-normalize) + lm_head (tied) + final_norm...")
         normalizer = self.d_model ** 0.5
 
@@ -511,9 +520,9 @@ class Gemma4ToVLLMConverter:
             return (x / normalizer).astype(x.dtype)
 
         raw_embedding = _denorm_embed(params['base']['token_embedder']['embedding'])
-        self.vllm_state["vllm_model.model.embed_tokens.weight"] = raw_embedding
-        self.vllm_state["vllm_model.lm_head.weight"] = raw_embedding  # tied
-        self.vllm_state["vllm_model.model.norm.weight"] = (
+        self.vllm_state["vllm_model.language_model.model.embed_tokens.weight"] = raw_embedding
+        self.vllm_state["vllm_model.language_model.lm_head.weight"] = raw_embedding  # tied
+        self.vllm_state["vllm_model.language_model.model.norm.weight"] = (
             params['base']['decoder']['decoder_norm']['scale']
         )
         logging.info("_convert_global: done")
@@ -581,11 +590,23 @@ class Gemma4ToVLLMConverter:
             attn = blocks[f'layers_{slot}']['self_attention']
             pack_fn = _pack_global if is_global else _pack_local
             q_layers, k_layers, v_layers, o_layers, qnorm_layers, knorm_layers = pack_fn(attn)
+            num_kv_heads = (self.config.global_num_kv_heads if is_global
+                            else self.config.base_num_kv_heads)
+            tp = min(self.vllm_tp, num_kv_heads)
             for rep in range(self.num_reps):
                 i = rep * self.NUM_SLOTS + slot
-                self.vllm_state[f"{prefix}.{i}.self_attn.q_proj.weight"] = q_layers[rep]
-                self.vllm_state[f"{prefix}.{i}.self_attn.k_proj.weight"] = k_layers[rep]
-                self.vllm_state[f"{prefix}.{i}.self_attn.v_proj.weight"] = v_layers[rep]
+                q, k, v = q_layers[rep], k_layers[rep], v_layers[rep]
+                # QKVParallelLinear (vLLM) expects TP-interleaved layout:
+                # [q_tp0, k_tp0, v_tp0, q_tp1, k_tp1, v_tp1, ...]
+                # so each TP device's weight rows cover its own Q/K/V heads.
+                q_per_tp  = q.shape[0] // tp
+                kv_per_tp = k.shape[0] // tp
+                qkv = jnp.concatenate(
+                    [q.reshape(tp, q_per_tp,  q.shape[1]),
+                     k.reshape(tp, kv_per_tp, k.shape[1]),
+                     v.reshape(tp, kv_per_tp, v.shape[1])], axis=1
+                ).reshape(-1, q.shape[1])
+                self.vllm_state[f"{prefix}.{i}.self_attn.qkv_proj.weight"] = qkv
                 self.vllm_state[f"{prefix}.{i}.self_attn.o_proj.weight"] = o_layers[rep]
                 self.vllm_state[f"{prefix}.{i}.self_attn.q_norm.weight"] = qnorm_layers[rep]
                 self.vllm_state[f"{prefix}.{i}.self_attn.k_norm.weight"] = knorm_layers[rep]
@@ -622,15 +643,14 @@ class Gemma4ToVLLMConverter:
             # Per-expert scale: (E, L) -> L × (E,)
             per_expert_scale = jnp.unstack(routed['per_expert_scale'], axis=1)
 
-            # Fused gate+up proj for routed experts (TP-interleaved):
-            #   wi_0 (gate): (E, L, d_model, d_inner) -> (L, E, TP, d_inner//TP, d_model)
-            #   wi_1 (up):   (E, L, d_model, d_inner) -> (L, E, TP, d_inner//TP, d_model)
-            #   stack along new axis 3: (L, E, TP, 2, d_inner//TP, d_model)
-            #   reshape: (L, E, 2*d_inner, d_model) = gate_up_proj
-            w0 = jnp.transpose(routed['wi_0'], (1, 0, 3, 2)).reshape(L, E, vllm_tp, -1, d_model)
-            w1 = jnp.transpose(routed['wi_1'], (1, 0, 3, 2)).reshape(L, E, vllm_tp, -1, d_model)
-            combined = jnp.stack([w0, w1], axis=3)
-            gate_up = combined.reshape(L, E, 2 * d_inner, d_model)
+            # Fused gate+up proj for routed experts (HF format, no TP pre-interleaving):
+            #   wi_0 (gate): (E, L, d_model, d_inner) -> (L, E, d_inner, d_model)
+            #   wi_1 (up):   (E, L, d_model, d_inner) -> (L, E, d_inner, d_model)
+            #   concat along axis 2: (L, E, 2*d_inner, d_model) = gate_up_proj
+            # process_moe_weights (called below) handles TP reordering.
+            w0 = jnp.transpose(routed['wi_0'], (1, 0, 3, 2))  # (L, E, d_inner, d_model)
+            w1 = jnp.transpose(routed['wi_1'], (1, 0, 3, 2))  # (L, E, d_inner, d_model)
+            gate_up = jnp.concatenate([w0, w1], axis=2)        # (L, E, 2*d_inner, d_model)
             gate_up_proj = jnp.unstack(gate_up, axis=0)
 
             # Down proj: (E, L, d_inner, d_model) -> L × (E, d_model, d_inner)
@@ -669,14 +689,36 @@ class Gemma4ToVLLMConverter:
                 # Router
                 self.vllm_state[f"{p}.router.proj.weight"]        = router_proj[rep]
                 self.vllm_state[f"{p}.router.scale"]              = router_scale[rep]
-                self.vllm_state[f"{p}.router.per_expert_scale"]   = per_expert_scale[rep]
-                # Routed experts (fused gate+up, separate down)
-                self.vllm_state[f"{p}.experts.gate_up_proj"] = gate_up_proj[rep]
-                self.vllm_state[f"{p}.experts.down_proj"]    = down_proj[rep]
-                # Shared expert (uses mlp.* keys — same as Dense MLP naming)
-                self.vllm_state[f"{p}.mlp.gate_proj.weight"] = sh_gate[rep]
-                self.vllm_state[f"{p}.mlp.up_proj.weight"]   = sh_up[rep]
-                self.vllm_state[f"{p}.mlp.down_proj.weight"] = sh_down[rep]
+                self.vllm_state[f"{p}.moe.per_expert_scale"]      = per_expert_scale[rep]
+                # Routed experts: apply process_moe_weights (GMM_TP: swapaxes + pad + TP reorder)
+                # to produce the post-processed format that llm_state holds after model init.
+                # gate_up_proj[rep]: (E, 2*d_inner, d_model)  [HF format, TP-interleaved]
+                # down_proj[rep]:    (E, d_model, d_inner)     [HF format]
+                processed = process_moe_weights(
+                    FusedMoEWeights(
+                        w13_weight=gate_up_proj[rep],
+                        w13_weight_scale=None,
+                        w13_bias=None,
+                        w2_weight=down_proj[rep],
+                        w2_weight_scale=None,
+                        w2_bias=None,
+                    ),
+                    moe_backend=MoEBackend.GMM_TP,
+                    w13_reorder_size=self.vllm_tp,
+                    w13_interleave=False,  # Gemma4 uses gelu, not swigluoai
+                )
+                self.vllm_state[f"{p}.moe.experts.w13_weight"] = processed.w13_weight
+                self.vllm_state[f"{p}.moe.experts.w2_weight"]  = processed.w2_weight
+                # Shared expert: gate+up fused, TP-interleaved (MergedColumnParallelLinear,
+                # spec=P('model', None)): [gate_tp0, up_tp0, gate_tp1, up_tp1, ...]
+                sh_g, sh_u = sh_gate[rep], sh_up[rep]  # each (d_sh, d_model)
+                sh_per_tp = sh_g.shape[0] // self.vllm_tp
+                shared_gate_up = jnp.concatenate(
+                    [sh_g.reshape(self.vllm_tp, sh_per_tp, sh_g.shape[1]),
+                     sh_u.reshape(self.vllm_tp, sh_per_tp, sh_u.shape[1])], axis=1
+                ).reshape(-1, sh_g.shape[1])
+                self.vllm_state[f"{p}.mlp.gate_up_proj.weight"] = shared_gate_up
+                self.vllm_state[f"{p}.mlp.down_proj.weight"]    = sh_down[rep]
                 # Extra MoE norms
                 self.vllm_state[f"{p}.pre_feedforward_layernorm_2.weight"]  = pre_ln_2[rep]
                 self.vllm_state[f"{p}.post_feedforward_layernorm_1.weight"] = post_ln_1[rep]
@@ -781,13 +823,17 @@ def main():
     max_model_len=16,
     tensor_parallel_size=_ROLLOUT_TP.value,
     data_parallel_size=_FSDP_TP.value,
-    gpu_memory_utilization=0.35,
+    gpu_memory_utilization=0.65,
     async_scheduling=False,
     enforce_eager=True,
   )
   print("\n" + "="*80)
   llm_state = llm.llm_engine.model_executor.driver_worker.model_runner.state
   # save_dict_to_file(llm_state, "llm_state_shapes.txt")
+  # layer0_keys = sorted(k for k in llm_state.keys() if 'layers.0.' in k)
+  # print(f"llm_state layer 0 keys ({len(layer0_keys)}):")
+  # for k in layer0_keys:
+  #   print(f"  {k}")
 
   # Detect once whether MaxText and vLLM meshes share the same physical
   # devices (single-VM) or are disjoint (multi-host cluster partition).
@@ -812,18 +858,37 @@ def main():
     else:
       return functools.partial(jax.device_put, device=dst_sharding)
 
+  # missing_in_llm = set(vllm_state.keys()) - set(llm_state.keys())
+  # missing_in_vllm = set(llm_state.keys()) - set(vllm_state.keys())
+  # if missing_in_llm:
+  #   print(f"Keys in vllm_state but NOT in llm_state ({len(missing_in_llm)}):")
+  #   for k in sorted(missing_in_llm)[:20]:
+  #     print(f"  {k}")
+  # if missing_in_vllm:
+  #   print(f"Keys in llm_state but NOT in vllm_state ({len(missing_in_vllm)}):")
+  #   for k in sorted(missing_in_vllm)[:20]:
+  #     print(f"  {k}")
+
   with timer(f"Assigning {len(vllm_state)} weights to vLLM model"):
     for key, weight in vllm_state.items():
       # Unwrap NNX Param → plain jax.Array; plain arrays pass through unchanged.
       weight_array = weight.value if hasattr(weight, 'value') else weight
+      if key not in llm_state:
+        print(f"WARNING: skipping key not found in llm_state: {key}")
+        continue
       dst_sharding = llm_state[key].sharding
       # print(f"Assigning {key}: src shape={weight_array.shape}, src sharding={weight_array.sharding}; dst shape={llm_state[key].shape}, dst sharding={dst_sharding}")
       llm_state[key] = _get_reshard_fn(dst_sharding)(weight_array)
       # array_allclose = np.allclose(
       #     np.asarray(llm_state[key]), np.asarray(weight_array), rtol=1e-2, atol=1e-2
       # )
-      # print(f"{key}: {array_allclose}")
-      # llm_state[key] = jax.device_put(np.asarray(weight_array), dst_sharding)
+      # if not array_allclose:
+      #   print("#"*80)
+      #   print(f"{key}: {array_allclose}")
+      #   print("#"*80)
+      # else:
+      #   print(f"{key}: {array_allclose}")
+      llm_state[key] = jax.device_put(np.asarray(weight_array), dst_sharding)
     jax.effects_barrier()  # wait for all on-device reshards to finish
 
 
@@ -831,7 +896,7 @@ def main():
   print("\n" + "="*80)
   print("Generation test after weight transfer:")
   with timer("Generation"):
-    print(llm.generate("Paris is", sampling_params=sampling_params))
+    print(llm.generate("<bos>Paris is", sampling_params=sampling_params))
 
 
 if __name__ == "__main__":

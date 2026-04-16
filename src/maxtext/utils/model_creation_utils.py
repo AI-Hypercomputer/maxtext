@@ -318,10 +318,8 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
             target_for_restore
           )
           if use_rand_init:
-            fake_restored = {"params": {"params": target_for_restore}}            
+            fake_restored = {"params": {"params": target_for_restore}}
           else:
-            jax.tree.map(lambda x: x.delete(), target_for_restore)
-            del target_for_restore
             item_to_restore = {"params": {"params": target_for_restore_struct}}
             restore_args = {"params": {"params": ocp.checkpoint_utils.construct_restore_args(target_for_restore_struct)}}
         else:
