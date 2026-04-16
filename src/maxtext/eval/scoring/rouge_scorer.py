@@ -18,6 +18,11 @@ from __future__ import annotations
 
 import numpy as np
 
+import nltk  # pylint: disable=import-outside-toplevel
+
+nltk.download("punkt", quiet=True)
+nltk.download("punkt_tab", quiet=True)
+
 
 def score_batch(
     responses: list[str],
@@ -43,10 +48,7 @@ def score_batch(
     )
 
   import evaluate  # pylint: disable=import-outside-toplevel
-  import nltk  # pylint: disable=import-outside-toplevel
 
-  nltk.download("punkt", quiet=True)
-  nltk.download("punkt_tab", quiet=True)
   metric = evaluate.load("rouge")
 
   preds = []

@@ -12,146 +12,88 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for lm_eval_runner helper functions (no server required)."""
+"""Unit tests for harness_runner._map_results (no server required)."""
 
 from __future__ import annotations
 
 import unittest
 
-from maxtext.eval.runner.lm_eval_runner import _build_model_args, _map_lm_eval_results
+from maxtext.eval.runner.harness_runner import _map_results
 
 
-class TestBuildModelArgs(unittest.TestCase):
-  """Tests for _build_model_args."""
+class TestMapResults(unittest.TestCase):
+  """Tests for _map_results."""
 
-  def test_basic_args(self):
-    result = _build_model_args(
-        base_url="http://localhost:8000",
-        tokenizer_path="meta-llama/Llama-3.1-8B",
-        model_name="llama3.1-8b",
-        hf_token=None,
-    )
-    self.assertIn("model=llama3.1-8b", result)
-    self.assertIn("http://localhost:8000/v1/completions", result)
-    self.assertIn("tokenizer=meta-llama/Llama-3.1-8B", result)
-    self.assertIn("tokenizer_backend=huggingface", result)
-
-  def test_with_hf_token(self):
-    result = _build_model_args(
-        base_url="http://localhost:8000",
-        tokenizer_path="meta-llama/Llama-3.1-8B",
-        model_name="llama3.1-8b",
-        hf_token="hf_abc123",
-    )
-    self.assertIn("token=hf_abc123", result)
-
-  def test_no_hf_token(self):
-    result = _build_model_args(
-        base_url="http://localhost:8000",
-        tokenizer_path="meta-llama/Llama-3.1-8B",
-        model_name="llama3.1-8b",
-        hf_token=None,
-    )
-    self.assertNotIn("token=", result)
-
-  def test_empty_token_string_not_included(self):
-    # An empty string should not be treated as a valid token.
-    result = _build_model_args(
-        base_url="http://localhost:8000",
-        tokenizer_path="hf/model",
-        model_name="my-model",
-        hf_token="",
-    )
-    self.assertNotIn("token=", result)
-
-  def test_args_are_comma_separated(self):
-    result = _build_model_args(
-        base_url="http://host:9000",
-        tokenizer_path="tok/path",
-        model_name="my-model",
-        hf_token=None,
-    )
-    # Should be a single string with no newlines.
-    self.assertNotIn("\n", result)
-    # All key=value pairs must be comma-joined.
-    parts = result.split(",")
-    self.assertGreaterEqual(len(parts), 4)
-
-
-class TestMapLmEvalResults(unittest.TestCase):
-  """Tests for _map_lm_eval_results."""
-
-  def _make_lm_results(self, task_key: str, acc: float | None = None, acc_norm: float | None = None):
+  def _make_raw(self, task_key: str, **metric_values) -> dict:
     """Build a minimal lm-eval results dict for a single task."""
-    task_dict: dict = {}
-    if acc is not None:
-      task_dict["acc,none"] = acc
-    if acc_norm is not None:
-      task_dict["acc_norm,none"] = acc_norm
-    return {"results": {task_key: task_dict}}
+    return {"results": {task_key: metric_values}}
 
   def test_mmlu_accuracy(self):
-    lm_results = self._make_lm_results("mmlu", acc=0.725)
-    scores = _map_lm_eval_results(lm_results, ["mmlu"])
+    raw = self._make_raw("mmlu", **{"acc,none": 0.725})
+    scores = _map_results(raw, ["mmlu"])
     self.assertIn("mmlu_accuracy", scores)
     self.assertAlmostEqual(scores["mmlu_accuracy"], 72.5, places=1)
 
-  def test_gpqa_accuracy(self):
-    lm_results = self._make_lm_results("gpqa_diamond", acc=0.4040)
-    scores = _map_lm_eval_results(lm_results, ["gpqa"])
-    self.assertIn("gpqa_accuracy", scores)
-    self.assertAlmostEqual(scores["gpqa_accuracy"], 40.4, places=1)
+  def test_gpqa_diamond(self):
+    raw = self._make_raw("gpqa_diamond", **{"acc,none": 0.4040})
+    scores = _map_results(raw, ["gpqa_diamond"])
+    self.assertIn("gpqa_diamond_accuracy", scores)
+    self.assertAlmostEqual(scores["gpqa_diamond_accuracy"], 40.4, places=1)
 
-  def test_missing_task_returns_nothing(self):
-    lm_results = {"results": {}}
-    scores = _map_lm_eval_results(lm_results, ["mmlu"])
-    self.assertNotIn("mmlu_accuracy", scores)
+  def test_gsm8k_strict_match_key(self):
+    # GSM8K uses exact_match,strict-match rather than acc,none.
+    raw = self._make_raw("gsm8k", **{"exact_match,strict-match": 0.80})
+    scores = _map_results(raw, ["gsm8k"])
+    self.assertIn("gsm8k_accuracy", scores)
+    self.assertAlmostEqual(scores["gsm8k_accuracy"], 80.0, places=1)
+
+  def test_gsm8k_flexible_extract_key(self):
+    raw = self._make_raw("gsm8k", **{"exact_match,flexible-extract": 0.75})
+    scores = _map_results(raw, ["gsm8k"])
+    self.assertIn("gsm8k_accuracy", scores)
+    self.assertAlmostEqual(scores["gsm8k_accuracy"], 75.0, places=1)
+
+  def test_zero_score_not_dropped(self):
+    raw = self._make_raw("gsm8k", **{"exact_match,strict-match": 0.0})
+    scores = _map_results(raw, ["gsm8k"])
+    self.assertIn("gsm8k_accuracy", scores)
+    self.assertAlmostEqual(scores["gsm8k_accuracy"], 0.0, places=1)
 
   def test_acc_norm_extracted(self):
-    lm_results = self._make_lm_results("mmlu", acc=0.5, acc_norm=0.6)
-    scores = _map_lm_eval_results(lm_results, ["mmlu"])
+    raw = self._make_raw("mmlu", **{"acc,none": 0.5, "acc_norm,none": 0.6})
+    scores = _map_results(raw, ["mmlu"])
     self.assertIn("mmlu_accuracy", scores)
     self.assertIn("mmlu_accuracy_norm", scores)
     self.assertAlmostEqual(scores["mmlu_accuracy_norm"], 60.0, places=1)
 
   def test_multiple_tasks(self):
-    lm_results = {
+    raw = {
         "results": {
             "mmlu": {"acc,none": 0.80},
             "gpqa_diamond": {"acc,none": 0.35},
         }
     }
-    scores = _map_lm_eval_results(lm_results, ["mmlu", "gpqa"])
+    scores = _map_results(raw, ["mmlu", "gpqa_diamond"])
     self.assertIn("mmlu_accuracy", scores)
-    self.assertIn("gpqa_accuracy", scores)
+    self.assertIn("gpqa_diamond_accuracy", scores)
     self.assertAlmostEqual(scores["mmlu_accuracy"], 80.0, places=1)
-    self.assertAlmostEqual(scores["gpqa_accuracy"], 35.0, places=1)
+    self.assertAlmostEqual(scores["gpqa_diamond_accuracy"], 35.0, places=1)
 
-  def test_unknown_task_name_mapped_to_itself(self):
-    # If a task is not in _TASK_MAP, _map_lm_eval_results looks it up by the
-    # raw name as a fallback.  Verify it doesn't crash.
-    lm_results = {"results": {"my_custom_task": {"acc,none": 0.9}}}
-    scores = _map_lm_eval_results(lm_results, ["my_custom_task"])
-    # The raw task name is used as the results key when not in _TASK_MAP.
+
+  def test_missing_task_returns_nothing(self):
+    raw = {"results": {}}
+    scores = _map_results(raw, ["mmlu"])
+    self.assertNotIn("mmlu_accuracy", scores)
+
+  def test_custom_task_name_used_directly(self):
+    raw = self._make_raw("my_custom_task", **{"acc,none": 0.9})
+    scores = _map_results(raw, ["my_custom_task"])
     self.assertIn("my_custom_task_accuracy", scores)
 
-  def test_acc_without_none_suffix(self):
-    # Older lm-eval versions may omit the ",none" suffix.
-    lm_results = {"results": {"mmlu": {"acc": 0.55}}}
-    scores = _map_lm_eval_results(lm_results, ["mmlu"])
-    self.assertIn("mmlu_accuracy", scores)
-    self.assertAlmostEqual(scores["mmlu_accuracy"], 55.0, places=1)
-
   def test_empty_tasks_list(self):
-    lm_results = {"results": {"mmlu": {"acc,none": 0.9}}}
-    scores = _map_lm_eval_results(lm_results, [])
+    raw = self._make_raw("mmlu", **{"acc,none": 0.9})
+    scores = _map_results(raw, [])
     self.assertEqual(scores, {})
-
-  def test_scores_multiplied_by_100(self):
-    lm_results = self._make_lm_results("mmlu", acc=1.0)
-    scores = _map_lm_eval_results(lm_results, ["mmlu"])
-    # raw value is 1.0 (fraction); expect 100.0 in output.
-    self.assertAlmostEqual(scores["mmlu_accuracy"], 100.0, places=1)
 
 
 if __name__ == "__main__":

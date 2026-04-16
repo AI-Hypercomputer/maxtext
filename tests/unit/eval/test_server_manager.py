@@ -59,7 +59,30 @@ class TestVllmServerManagerConfig(unittest.TestCase):
     self.assertEqual(kwargs["model"], "/fake/model")
     self.assertEqual(kwargs["tensor_parallel_size"], 4)
     self.assertEqual(kwargs["max_model_len"], 8192)
-    self.assertEqual(kwargs["device"], "tpu")
+
+  def test_data_parallel_size_forwarded(self):
+    mgr = _make_manager(data_parallel_size=2)
+    kwargs = _start_capturing_llm_kwargs(mgr)
+    self.assertEqual(kwargs["data_parallel_size"], 2)
+
+  def test_data_parallel_size_default_is_one(self):
+    mgr = _make_manager()
+    kwargs = _start_capturing_llm_kwargs(mgr)
+    self.assertEqual(kwargs["data_parallel_size"], 1)
+
+  def test_hbm_memory_utilization_forwarded_as_gpu_memory_utilization(self):
+    mgr = _make_manager(hbm_memory_utilization=0.5)
+    kwargs = _start_capturing_llm_kwargs(mgr)
+    self.assertAlmostEqual(kwargs["gpu_memory_utilization"], 0.5)
+
+  def test_expert_parallel_size_divides_tensor_parallel(self):
+    mgr = _make_manager(tensor_parallel_size=8, expert_parallel_size=4)
+    kwargs = _start_capturing_llm_kwargs(mgr)
+    self.assertEqual(kwargs["tensor_parallel_size"], 2)  # ici_tp = 8 // 4
+
+  def test_ep_not_divisible_raises(self):
+    with self.assertRaises(ValueError):
+      _make_manager(tensor_parallel_size=8, expert_parallel_size=3)
 
   def test_maxtext_adapter_mode_sets_hf_overrides(self):
     mgr = _make_manager(

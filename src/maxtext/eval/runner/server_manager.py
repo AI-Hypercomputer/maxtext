@@ -210,6 +210,7 @@ class VllmServerManager:
       port: int = 8000,
       tensor_parallel_size: int = 4,
       expert_parallel_size: int = 1,
+      data_parallel_size: int = 1,
       max_model_len: int = 4096,
       dtype: str = "bfloat16",
       max_num_batched_tokens: int | None = None,
@@ -233,6 +234,7 @@ class VllmServerManager:
     self.port = port
     self.tensor_parallel_size = tensor_parallel_size
     self.expert_parallel_size = expert_parallel_size
+    self.data_parallel_size = data_parallel_size
     self.max_model_len = max_model_len
     self.dtype = dtype
     self.max_num_batched_tokens = max_num_batched_tokens
@@ -272,6 +274,7 @@ class VllmServerManager:
     vllm_kwargs: dict = {
         "model": self.model_path,
         "tensor_parallel_size": ici_tp,
+        "data_parallel_size": self.data_parallel_size,
         "max_model_len": self.max_model_len,
         "dtype": self.dtype,
         "gpu_memory_utilization": self.hbm_memory_utilization,
@@ -318,9 +321,10 @@ class VllmServerManager:
           vllm_kwargs[_k] = _v
 
     logger.info(
-        "Initializing in-process vLLM (tp=%d, ep=%d, max_len=%d)...",
+        "Initializing in-process vLLM (tp=%d, ep=%d, dp=%d, max_len=%d)...",
         ici_tp,
         ici_ep,
+        self.data_parallel_size,
         self.max_model_len,
     )
     self._llm = LLM(**vllm_kwargs)

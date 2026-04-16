@@ -65,6 +65,7 @@ def build_server_manager(cfg: dict, token: str | None) -> "VllmServerManager":
     max_num_seqs = int(max_num_seqs)
 
   expert_parallel_size = int(cfg.get("expert_parallel_size") or 1)
+  data_parallel_size = int(cfg.get("data_parallel_size") or 1)
   hbm_memory_utilization = float(cfg.get("hbm_memory_utilization") or 0.3)
 
   server_env = {"HF_TOKEN": token} if token else None
@@ -77,6 +78,7 @@ def build_server_manager(cfg: dict, token: str | None) -> "VllmServerManager":
       port=server_port,
       tensor_parallel_size=tensor_parallel_size,
       expert_parallel_size=expert_parallel_size,
+      data_parallel_size=data_parallel_size,
       max_model_len=max_model_len,
       max_num_batched_tokens=max_num_batched_tokens,
       max_num_seqs=max_num_seqs,
@@ -121,6 +123,12 @@ def add_server_args(parser: argparse.ArgumentParser) -> None:
       help=(
           "Chips allocated to the expert mesh axis (EP). "
       ),
+  )
+  parser.add_argument(
+      "--data_parallel_size",
+      type=int,
+      default=1,
+      help="Number of model replicas (DP).",
   )
   parser.add_argument(
       "--hbm_memory_utilization",

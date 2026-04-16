@@ -42,39 +42,13 @@ from maxtext.eval.runner.common import (
 
 logger = logging.getLogger(__name__)
 
-_TASK_MAP_LM_EVAL: dict[str, str] = {
-    "mmlu": "mmlu",
-    "gpqa": "gpqa_diamond",
-    "math": "hendrycks_math",
-    "gsm8k": "gsm8k",
-}
 
-_TASK_MAP_EVALCHEMY: dict[str, str] = {
-    "ifeval": "ifeval",
-    "alpacaeval": "alpaca_eval_v2",
-    "arena_hard": "arena_hard",
-    "mtbench": "mt_bench",
-    "wildbench": "wildbench",
-    "mixeval": "mixeval",
-    "zeroeval": "zeroeval",
-    "math500": "math_500",
-    "aime24": "aime2024",
-    "aime25": "aime2025",
-    "amc23": "amc2023",
-    "gpqa_diamond": "gpqa_diamond",
-    "humaneval": "humaneval",
-    "livecodebench": "livecodebench",
-    "gsm8k": "gsm8k",
-}
-
-
-def _map_results(raw_results: dict, tasks: list[str], task_map: dict[str, str]) -> dict:
+def _map_results(raw_results: dict, tasks: list[str]) -> dict:
   """Extract per-task accuracy metrics from lm-eval / evalchemy output."""
   scores: dict[str, float] = {}
   results_section = raw_results.get("results", {})
   for task in tasks:
-    lm_task = task_map.get(task, task)
-    task_r = results_section.get(lm_task, {})
+    task_r = results_section.get(task, {})
 
     acc = None
     for key in (
@@ -125,7 +99,6 @@ def run_harness(cfg: dict, hf_token: str | None = None) -> dict:
 
   Raises:
     ImportError: If lm_eval (or evalchemy for that backend) is not installed.
-    ValueError: If a requested task name is not in the backend's task map.
   """
   # pylint: disable=import-outside-toplevel
   try:
@@ -154,18 +127,7 @@ def run_harness(cfg: dict, hf_token: str | None = None) -> dict:
   gcs_results_path = cfg.get("gcs_results_path")
   token = resolve_token(cfg, hf_token)
 
-  task_map = _TASK_MAP_EVALCHEMY if backend == "evalchemy" else _TASK_MAP_LM_EVAL
   lm_model_type = "local-chat-completions" if backend == "evalchemy" else "local-completions"
-
-  lm_tasks: list[str] = []
-  for t in tasks:
-    lm_task = task_map.get(t)
-    if lm_task is None:
-      raise ValueError(
-          f"No {backend} task mapping for '{t}'. "
-          f"Known tasks: {list(task_map.keys())}"
-      )
-    lm_tasks.append(lm_task)
 
   with build_server_manager(cfg, token) as server:
     import jax as _jax
@@ -191,14 +153,14 @@ def run_harness(cfg: dict, hf_token: str | None = None) -> dict:
       logger.info(
           "Running %s tasks %s via %s at %s",
           backend,
-          lm_tasks,
+          tasks,
           lm_model_type,
           server.base_url,
       )
       raw_results = lm_eval_lib.simple_evaluate(
           model=lm_model_type,
           model_args=model_args,
-          tasks=lm_tasks,
+          tasks=tasks,
           num_fewshot=num_fewshot,
           limit=num_samples,
           log_samples=False,
@@ -214,7 +176,7 @@ def run_harness(cfg: dict, hf_token: str | None = None) -> dict:
   if not is_rank0:
     return {}
 
-  scores = _map_results(raw_results, tasks, task_map)
+  scores = _map_results(raw_results, tasks)
   logger.info("%s scores: %s", backend, scores)
 
   output = write_results(
@@ -253,9 +215,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
       nargs="+",
       default=["mmlu"],
       help=(
-          "Benchmark task names. "
-          "lm_eval choices: " + ", ".join(_TASK_MAP_LM_EVAL) + ". "
-          "evalchemy choices: " + ", ".join(_TASK_MAP_EVALCHEMY) + "."
+          "lm-eval task names passed directly to simple_evaluate. "
+          "Any task registered in lm-eval or evalchemy is accepted (e.g. gsm8k, mmlu, gpqa_diamond, ifeval, math_500)."
       ),
   )
   parser.add_argument(

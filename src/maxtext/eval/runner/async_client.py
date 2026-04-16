@@ -31,7 +31,7 @@ _DEFAULT_CONCURRENCY = 64
 _DEFAULT_MAX_TOKENS = 1024
 _DEFAULT_TEMPERATURE = 0.0
 _COMPLETIONS_PATH = "/v1/completions"
-_REQUEST_TIMEOUT_S = 600 # (TODO): Check if this is reasoanable.
+_REQUEST_TIMEOUT_S = 600
 
 
 @dataclass

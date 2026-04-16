@@ -35,9 +35,8 @@ class TestRougeScorer(unittest.TestCase):
     return mock_metric
 
   def _run_score_batch(self, responses, references, mock_metric):
-    """Import score_batch with evaluate and nltk patched, return result dict."""
+    """Import score_batch with evaluate and nltk.sent_tokenize patched, return result dict."""
     with patch("evaluate.load", return_value=mock_metric), \
-         patch("nltk.download"), \
          patch("nltk.sent_tokenize", side_effect=lambda s: [s]):
       from maxtext.eval.scoring.rouge_scorer import score_batch
       return score_batch(responses, references)

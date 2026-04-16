@@ -86,8 +86,9 @@ python -m maxtext.eval.runner.run \
 | `--model_name` | MaxText model name (e.g. `llama3.1-8b`) |
 | `--hf_path` | HF model ID or local path |
 | `--max_model_len` | vLLM max context length. |
-| `--tensor_parallel_size` | Total number of chips |
-| `--expert_parallel_size` | Number of EP chips |
+| `--tensor_parallel_size` | Chips per model replica |
+| `--expert_parallel_size` | Chips for the expert mesh axis |
+| `--data_parallel_size` | Number of model replicas |
 | `--hbm_memory_utilization` | Fraction of HBM reserved for KV cache |
 | `--hf_token` | HF token (or set `HF_TOKEN` env var) |
 | `--hf_mode` | HF safetensors mode, no MaxText checkpoint loading |
