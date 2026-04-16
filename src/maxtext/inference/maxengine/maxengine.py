@@ -499,7 +499,10 @@ class MaxEngine(_BaseEngine):
       if positions.ndim == 2:
         positions = jnp.expand_dims(positions, 1)
     else:
-      positions = jnp.broadcast_to(jnp.expand_dims(jnp.arange(start_position, start_position + input_tokens.shape[1]), 0), (input_tokens.shape[0], input_tokens.shape[1]))
+      positions = jnp.broadcast_to(
+          jnp.expand_dims(jnp.arange(start_position, start_position + input_tokens.shape[1]), 0),
+          (input_tokens.shape[0], input_tokens.shape[1]),
+      )
 
     if self.config.use_multimodal and images is not None:
       if images.ndim == 3:
@@ -526,8 +529,9 @@ class MaxEngine(_BaseEngine):
     # reshape because the cache will need multiple beams later.
     # Generally this also helps other system when they need to prefill multiple
     # prompts to save overhead.
-    sequence_indicator = jnp.broadcast_to(jnp.expand_dims(one_d_output, 0),
-                                          (input_tokens.shape[0], one_d_output.shape[0]))
+    sequence_indicator = jnp.broadcast_to(
+        jnp.expand_dims(one_d_output, 0), (input_tokens.shape[0], one_d_output.shape[0])
+    )
 
     rng, new_rng = jax.random.split(rng)
     with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
@@ -564,7 +568,7 @@ class MaxEngine(_BaseEngine):
     # sampling first token
     rng, new_rng = jax.random.split(rng)
     current_algorithm = algorithm if algorithm is not None else self.config.decode_sampling_strategy
-    # For prefill we generate the first token. Since we don't have multiple beams 
+    # For prefill we generate the first token. Since we don't have multiple beams
     # yet we used greedy for the first token then start the multi-beam search.
     prefill_algorithm = current_algorithm if current_algorithm != "diverse_beam_search" else "greedy"
 
@@ -612,7 +616,9 @@ class MaxEngine(_BaseEngine):
         "tokens": first_generated_token,
         "prompt_logp": prompt_logp,
         "token_logp": token_logp,
-        "is_dbs": jnp.full((1,), (algorithm if algorithm is not None else self.config.decode_sampling_strategy) == "diverse_beam_search"),
+        "is_dbs": jnp.full(
+            (1,), (algorithm if algorithm is not None else self.config.decode_sampling_strategy) == "diverse_beam_search"
+        ),
     }, result
 
   # Public non-JIT prefill method that updates page state
@@ -837,7 +843,9 @@ class MaxEngine(_BaseEngine):
         "next_pos": next_pos,
         "generated_tokens": generated_tokens,
         "tokens": first_generated_tokens,
-        "is_dbs": jnp.full((1,), (algorithm if algorithm is not None else self.config.decode_sampling_strategy) == "diverse_beam_search"),
+        "is_dbs": jnp.full(
+            (1,), (algorithm if algorithm is not None else self.config.decode_sampling_strategy) == "diverse_beam_search"
+        ),
     }, result
 
   @functools.partial(
@@ -1023,12 +1031,13 @@ class MaxEngine(_BaseEngine):
     # Most MaxText models use (1, 2, 0, 3) for inference KV cache, so batch is axis 2.
     order_str = self.config.ar_cache_axis_order
     if isinstance(order_str, str):
-        order = [int(i.strip()) for i in order_str.split(",")]
+      order = [int(i.strip()) for i in order_str.split(",")]
     else:
-        order = list(order_str)
+      order = list(order_str)
     batch_axis_index = order.index(0)
 
     num_layers = self.config.num_decoder_layers
+
     def reorder_tensor(tensor):
       # We use jnp.take to gather the winning parents' memories into the
       # current slots.
@@ -1048,7 +1057,7 @@ class MaxEngine(_BaseEngine):
       else:
         # Other tensors (tokens, logprobs) are likely (batch, ...)
         reorder_axis = 0
-      
+
       return jnp.take(tensor, parent_indices.squeeze(axis=-1), axis=reorder_axis)
 
     return jax.tree_util.tree_map(reorder_tensor, cache)
@@ -1104,7 +1113,7 @@ class MaxEngine(_BaseEngine):
     # previous decoding step).
     previous_token = decode_state["tokens"]
     rng, new_rng = jax.random.split(rng)
-    # run one step generation 
+    # run one step generation
     # _mesh the TPUs to use. axis_rules tells the TPUs how to split the model.
     # e.g. attention layers are split across chips 0-3, and MLP layers are split
     # across chips 4-7.
@@ -1129,9 +1138,9 @@ class MaxEngine(_BaseEngine):
     new_cache = jax.lax.with_sharding_constraint(new_vars["cache"], self.kv_cache_shardings)
     # sampling tokens
     rng, new_rng = jax.random.split(rng)
-    
+
     current_algorithm = algorithm if algorithm is not None else self.config.decode_sampling_strategy
-    
+
     is_dbs = decode_state.get("is_dbs", jnp.array([current_algorithm == "diverse_beam_search"]))
 
     # For JAX tracing: we only use the full beam count if DBS is actually selected.
@@ -1146,7 +1155,9 @@ class MaxEngine(_BaseEngine):
           dbs_num_beams,
           self.config.decode_num_beam_groups if dbs_num_beams > 1 else 1,
           self.config.decode_diversity_penalty,
-          topk=topk if (topk is not None and topk > 0) else (self.config.decode_sampling_top_k if self.config.decode_sampling_top_k > 0 else None),
+          topk=topk
+          if (topk is not None and topk > 0)
+          else (self.config.decode_sampling_top_k if self.config.decode_sampling_top_k > 0 else None),
       )
       # Execution of the "Memory Swap"
       updated_cache = self.reorder_cache(new_cache, par_idx)
@@ -1161,7 +1172,9 @@ class MaxEngine(_BaseEngine):
           # "greedy" is simply a algorithm name that the sampling function
           # understands in tracing.
           current_algorithm if current_algorithm != "diverse_beam_search" else "greedy",
-          topk=topk if (topk is not None and topk > 0) else (self.config.decode_sampling_top_k if self.config.decode_sampling_top_k > 0 else None),
+          topk=topk
+          if (topk is not None and topk > 0)
+          else (self.config.decode_sampling_top_k if self.config.decode_sampling_top_k > 0 else None),
           nucleus_topp=nucleus_topp if nucleus_topp is not None else self.config.decode_sampling_nucleus_p,
           temperature=temperature if temperature is not None else self.config.decode_sampling_temperature,
       )
@@ -1176,14 +1189,14 @@ class MaxEngine(_BaseEngine):
       updated_cache = self.reorder_cache(new_cache, dummy_parents)
       return new_tok, dummy_scores, dummy_parents, updated_cache
 
-    # Select branch based on 'is_dbs' in decode_state. 
+    # Select branch based on 'is_dbs' in decode_state.
     # This enforces that the algorithm cannot change once set.
     # Directly call the branch instead of using jax.lax.cond
     # This simplifies the JIT graph and reduces memory fragmentation
     if self.config.decode_sampling_strategy == "diverse_beam_search":
-        new_token, cumulative_logprobs, beam_parents, final_cache = dbs_sampling_branch(out_logits, decode_state)
+      new_token, cumulative_logprobs, _, final_cache = dbs_sampling_branch(out_logits, decode_state)
     else:
-        new_token, cumulative_logprobs, beam_parents, final_cache = standard_sampling_branch(out_logits, decode_state)
+      new_token, cumulative_logprobs, _, final_cache = standard_sampling_branch(out_logits, decode_state)
 
     all_valid = jnp.ones(new_token.shape, dtype=jnp.int8)
     if self.config.return_log_prob:
@@ -1345,7 +1358,8 @@ class MaxEngine(_BaseEngine):
         "token_logp": inserted_token_logp,
         "is_dbs": decode_state.get("is_dbs", unboxed_prefix.get("is_dbs", jnp.array([False]))),
         "cumulative_logprobs": decode_state.get(
-            "cumulative_logprobs", unboxed_prefix.get("cumulative_logprobs", jnp.zeros_like(inserted_tokens, dtype=jnp.float32))
+            "cumulative_logprobs",
+            unboxed_prefix.get("cumulative_logprobs", jnp.zeros_like(inserted_tokens, dtype=jnp.float32)),
         ),
     }
 
@@ -1480,7 +1494,8 @@ class MaxEngine(_BaseEngine):
         "token_logp": inserted_token_logp,
         "is_dbs": decode_state.get("is_dbs", unboxed_prefix.get("is_dbs", jnp.array([False]))),
         "cumulative_logprobs": decode_state.get(
-            "cumulative_logprobs", unboxed_prefix.get("cumulative_logprobs", jnp.zeros_like(inserted_tokens, dtype=jnp.float32))
+            "cumulative_logprobs",
+            unboxed_prefix.get("cumulative_logprobs", jnp.zeros_like(inserted_tokens, dtype=jnp.float32)),
         ),
     }
 
@@ -1742,9 +1757,7 @@ class MaxEngine(_BaseEngine):
 
     # pylint: disable=unused-argument
     def init(abstract_params, page_state):
-      num_beams = (
-          self.config.decode_num_beams if self.config.decode_sampling_strategy == "diverse_beam_search" else 1
-      )
+      num_beams = self.config.decode_num_beams if self.config.decode_sampling_strategy == "diverse_beam_search" else 1
       total_batch_size = int(self.config.per_device_batch_size * self.mesh.size) * num_beams
       x = jnp.ones(
           (total_batch_size, 1),
@@ -1841,9 +1854,7 @@ class MaxEngine(_BaseEngine):
     )
     zeroed = max_utils.unbox_logicallypartioned(init_state)
     # Metadata should not be zeroed
-    num_beams = (
-        self.config.decode_num_beams if self.config.decode_sampling_strategy == "diverse_beam_search" else 1
-    )
+    num_beams = self.config.decode_num_beams if self.config.decode_sampling_strategy == "diverse_beam_search" else 1
     total_batch_size = int(self.config.per_device_batch_size * self.mesh.size) * num_beams
     zeroed["is_dbs"] = jnp.full((total_batch_size,), self.config.decode_sampling_strategy == "diverse_beam_search")
     return zeroed
