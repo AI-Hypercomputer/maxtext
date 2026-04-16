@@ -88,6 +88,13 @@ Whenever I ask you to go through the repos understand them and go through the fi
    * Repository Branch: All tpu-inference fixes are committed and pushed to the mohit/patch_tiles branch.
    * Docker Image: The image gcr.io/tpu-prod-env-multipod/mohit-dsv3-build:20260410 is now a "golden" build containing all code fixes described above.
 
+  6. Latest Benchmark Result
+   * The DeepSeek V3 (671B) benchmarking job for weight loading and model initialization ran successfully using `run_vllm_only=True`.
+   * Executed on a 128 TPU v7x chip cluster (4x4x4 topology) via Pathways.
+   * Model weights (641.3 GiB) successfully streamed via RunAI Model Streamer in 143.55s (~4.5 GiB/s).
+   * MoE requantization to `float8_e4m3fn` and KV Cache allocation for 61 layers completed without issues.
+   * Final job completion achieved (`EXIT_CODE=0`).
+
 ## Here's how I want your developement flow to be
 
 * If you are making changes in tpu-inference repo from ~/workspace/ folder. Commit the changes and use the latest commit in Dockerfile to build the image
