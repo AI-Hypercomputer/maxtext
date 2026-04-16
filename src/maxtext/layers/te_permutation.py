@@ -355,6 +355,7 @@ def te_permute(
     routed_bias_update_rate: float,
     moe_permutation_group_align_size: int,
     roll_to_expert_id: Optional[int] = None,
+    num_experts_per_shard: Optional[int] = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, Optional[jnp.ndarray],
            Optional[jnp.ndarray], jnp.ndarray, Optional[jnp.ndarray]]:
   """TE routing + permutation: fused router then TE token dispatch.
@@ -379,6 +380,8 @@ def te_permute(
     routed_bias_update_rate: Rate for bias updates.
     moe_permutation_group_align_size: Alignment size for padding (0 disables).
     roll_to_expert_id: Expert ID offset for ring-of-experts.
+    num_experts_per_shard: Number of experts per shard in ring-of-experts mode.
+      When set, routing decisions are masked to local experts only.
 
   Returns:
     Tuple of:
@@ -409,13 +412,18 @@ def te_permute(
       roll_to_expert_id=roll_to_expert_id,
   )
 
+  # In ring-of-experts mode, mask routing decisions to local experts only.
+  # After rolling, experts [0, num_experts_per_shard) are the local ones.
+  if num_experts_per_shard is not None:
+    local_expert_mask = jnp.arange(num_experts) < num_experts_per_shard
+    routing_map = routing_map * local_expert_mask[None, :]
+    sparse_probs = sparse_probs * local_expert_mask[None, :].astype(sparse_probs.dtype)
+
   hidden_size = inputs.shape[-1]
   num_tokens = inputs.shape[0] * inputs.shape[1]
   num_out_tokens = num_tokens * num_experts_per_tok
 
-  align_size = moe_permutation_group_align_size
-  if align_size == 0:
-    align_size = None
+  align_size = moe_permutation_group_align_size if moe_permutation_group_align_size > 0 else None
 
   permuted_outputs, _permuted_probs, row_id_map, pad_offsets, tokens_per_expert = (
       te_token_dispatch(

@@ -91,12 +91,20 @@ class QuantizationType(str, Enum):
   FP8_NANO_V2 = "fp8_nanoo"
   FP8_GPU = "fp8_gpu"
   FP8_FULL = "fp8_full"
+  TE_NO_QUANT = "te_no_quant"
   TE_FP8_DS = "te_fp8_delayedscaling"
   TE_FP8_CS = "te_fp8_currentscaling"
   TE_MXFP8 = "te_mxfp8"
   TE_NVFP4 = "te_nvfp4"
   TE_NVFP4_NO_RHT = "te_nvfp4_no_rht"
 
+
+class TEGroupedGemmQuantizationType(str, Enum):
+    """Supported quantization schemes for TE grouped GEMM in MoE layers."""
+
+    EMPTY = "" # Invalid when te_use_gmm is true, an explicit precision must be specified.
+    TE_NO_QUANT = "te_no_quant" # Default precision, e.g. BF16, without quantization
+    TE_MXFP8 = "te_mxfp8"
 
 class KvQuantAxis(str, Enum):
   """Axes to quantize over for the Key-Value cache."""
@@ -661,6 +669,10 @@ class MoEGeneral(BaseModel):
   te_use_gmm: bool = Field(
       False,
       description="Whether to use TransformerEngine Grouped GEMM kernels for matmuls in MoE layers.",
+  )
+  te_gmm_quantization: None | TEGroupedGemmQuantizationType = Field(
+      TEGroupedGemmQuantizationType.EMPTY,
+      description="Quantization mode for TE GMM matmuls, must be specified when te_use_gmm is true.",
   )
   use_random_routing: bool = Field(False, description="Whether to use random routing for debugging.")
   interleave_moe_layer_step: int = Field(1, description="Frequency of MoE layers, e.g., 2 means every 2nd layer is MoE.")
@@ -2542,6 +2554,10 @@ class MaxTextConfig(
         raise ValueError("Loss-free load balancing is only supported for the DeepSeek decoder block.")
       if self.te_router_and_permutation_impl and not self.sparse_matmul:
         raise ValueError("te_router_and_permutation_impl=True requires sparse_matmul=True.")
+      if self.te_use_gmm and not self.sparse_matmul:
+        raise ValueError("te_use_gmm=True requires sparse_matmul=True.")
+      if self.te_use_gmm and self.te_gmm_quantization == TEGroupedGemmQuantizationType.EMPTY:
+        raise ValueError("te_gmm_quantization must be specified when te_use_gmm is True.")
     if self.use_multimodal:
       valid_mm_models = (
           "gemma3-4b",
