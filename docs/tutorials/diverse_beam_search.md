@@ -14,11 +14,11 @@ To use DBS in MaxText, you need to configure a few key parameters in your YAML c
 
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `num_beams` | `int` | `4` | Total number of beams across ALL groups. |
-| `num_groups` | `int` | `1` | Number of diversity groups. Must be a divisor of `num_beams`. |
-| `diversity_penalty` | `float` | `0.0` | The $\lambda$ parameter. Higher values force more diversity across groups. |
+| `decode_num_beams` | `int` | `4` | Total number of beams across ALL groups. |
+| `decode_num_beam_groups` | `int` | `1` | Number of diversity groups. Must be a divisor of `decode_num_beams`. |
+| `decode_diversity_penalty` | `float` | `0.0` | The $\lambda$ parameter. Higher values force more diversity across groups. |
 
-> **Note:** If `num_groups=1`, DBS behaves exactly like standard Beam Search.
+> **Note:** If `decode_num_beam_groups=1`, DBS behaves exactly like standard Beam Search.
 
 ## 3. How to Run DBS
 
@@ -28,9 +28,9 @@ You can enable DBS by overriding the configuration during the `decode.py` run:
 ```bash
 python3 -m maxtext.inference.decode \
     config_name=base_model \
-    num_beams=8 \
-    num_groups=4 \
-    diversity_penalty=0.5 \
+    decode_num_beams=8 \
+    decode_num_beam_groups=4 \
+    decode_diversity_penalty=0.5 \
     prompt="Explain the theory of relativity in simple terms."
 ```
 
@@ -39,9 +39,9 @@ Add the following to your model's configuration file:
 
 ```yaml
 # dbs_config.yml
-num_beams: 8
-num_groups: 4
-diversity_penalty: 0.5 # Encourages variety between the 4 groups
+decode_num_beams: 8
+decode_num_beam_groups: 4
+decode_diversity_penalty: 0.5 # Encourages variety between the 4 groups
 ```
 
 ## 4. Best Practices for Choosing Parameters
@@ -68,6 +68,21 @@ While DBS provides higher quality and more diverse outputs, there are a few impo
 
 *   **Higher Memory Requirement**: The size of the **KV Cache** scales linearly with the number of beams. For example, running with `num_beams=8` requires **8x more High-Bandwidth Memory (HBM)** to store the cache compared to standard greedy sampling. Ensure your TPU/GPU has sufficient memory for the beam-expanded batch size.
 *   **No Real-time Streaming**: Diverse Beam Search cannot stream tokens one-by-one as they are generated. Because beams can be reordered at any step based on their cumulative scores, the "best" candidate might change mid-sequence. The output is only returned once the entire generation process is complete.
+
+---
+
+## 7. Memory & Hardware Requirements
+
+DBS increases the memory footprint of both the TPU (HBM) and the Host VM (RAM) primarily due to the expanded KV Cache.
+
+| Model Size | Strategy | Recommended TPU | Min Host RAM |
+| :--- | :--- | :--- | :--- |
+| **2B** | DBS (4 beams) | v5e (16GB) | 64GB |
+| **7B** | DBS (4 beams) | v4 / v5p (32GB) | 256GB |
+| **7B** | DBS (4 beams) + Quantization | v5e (16GB) | 256GB |
+
+> [!TIP]
+> If you encounter `RESOURCE_EXHAUSTED` errors during JIT compilation or execution on smaller TPU chips, try enabling `quantization="int8"` or reducing the `per_device_batch_size`.
 
 ---
 

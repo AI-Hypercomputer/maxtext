@@ -671,6 +671,10 @@ class KVCache(BaseCache):
       )
 
     ar_cache_update_idx = jnp.squeeze(one_hot_indices)
+    # Make sure the ar_cache_update_idx is a scalar.
+    # This is to avoid error in dynamic_update_index_in_dim later.
+    if ar_cache_update_idx.ndim > 0:
+      ar_cache_update_idx = ar_cache_update_idx[0]
     ar_cache_sequence_axis = ar_cache_update_axis = ar_cache_axis_names.index(CACHE_SEQUENCE)
     ar_cache_batch_axis = ar_cache_axis_names.index(CACHE_BATCH)
 
@@ -790,8 +794,13 @@ class KVCache(BaseCache):
     if cached_ar_segment_id_var.value.shape[0] != active_indicator.shape[0]:
       cached_ar_segment_id_var.value = jnp.repeat(cached_ar_segment_id_var.value, active_indicator.shape[0], axis=0)
 
+    # Make sure ar_index_scalar is indeed a scalar.
+    ar_index_scalar = jnp.squeeze(cache_ar_index_var.value)
+    if ar_index_scalar.ndim > 0:
+      ar_index_scalar = ar_index_scalar[0]
+
     cached_ar_segment_id_var.value = jax.lax.dynamic_update_index_in_dim(
-        cached_ar_segment_id_var.value, active_indicator, jnp.squeeze(cache_ar_index_var.value), 1
+        cached_ar_segment_id_var.value, active_indicator, ar_index_scalar, 1
     )
     cache_ar_index_var.value = jnp.mod(cache_ar_index_var.value + 1, self.max_target_length - self.max_prefill_length)
     cache_ar_lengths_var.value = cache_ar_lengths_var.value.at[:].add(1)

@@ -492,14 +492,14 @@ class MaxEngine(_BaseEngine):
       previous_chunk = jnp.expand_dims(existing_prefix.common_prefix_tokens, 0)
 
     full_true_length = start_position + true_length
-
-    input_tokens = jnp.expand_dims(padded_tokens, 0)
+    # In Beam Search case the padded_tokens is already in rank of 2.
+    input_tokens = padded_tokens if padded_tokens.ndim > 1 else jnp.expand_dims(padded_tokens, 0)
 
     if positions is not None:
       if positions.ndim == 2:
         positions = jnp.expand_dims(positions, 1)
     else:
-      positions = jnp.expand_dims(jnp.arange(start_position, start_position + input_tokens.shape[1]), 0)
+      positions = jnp.broadcast_to(jnp.expand_dims(jnp.arange(start_position, start_position + input_tokens.shape[1]), 0), (input_tokens.shape[0], input_tokens.shape[1]))
 
     if self.config.use_multimodal and images is not None:
       if images.ndim == 3:
@@ -512,10 +512,22 @@ class MaxEngine(_BaseEngine):
         image_masks = image_masks[jnp.newaxis, ...] if image_masks is not None else None
 
     # sequence_indicator will be concatenated to existing_prefix decoder_segment_ids
+    # We treat all input sequences as the sequences of the same length due to
+    # true_length
     start_to_n = jnp.arange(start_position, start_position + input_tokens.shape[1])
     ones_to_keep = start_to_n < full_true_length
+    # DECODING_ACTIVE_SEQUENCE_INDICATOR is just alias for 1.
     one_d_output = ones_to_keep * DECODING_ACTIVE_SEQUENCE_INDICATOR
-    sequence_indicator = jnp.expand_dims(one_d_output, 0)
+    # Broadcast the single sequence mask to (batch, seq_len) dimensions.
+    # Originally this prefill only supports batch size of 1. But in order to
+    # support beam search, we need to support batch size > 1. This helps to
+    # maintain consistency in cache allocation with decode/generate phase. If
+    # the shape isn't consistent, it will trigger recompilation in JIT or
+    # reshape because the cache will need multiple beams later.
+    # Generally this also helps other system when they need to prefill multiple
+    # prompts to save overhead.
+    sequence_indicator = jnp.broadcast_to(jnp.expand_dims(one_d_output, 0),
+                                          (input_tokens.shape[0], one_d_output.shape[0]))
 
     rng, new_rng = jax.random.split(rng)
     with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
@@ -1007,10 +1019,37 @@ class MaxEngine(_BaseEngine):
     Returns:
       The reordered KV cache.
     """
+    # Parse ar_cache_axis_order to find the batch dimension index (logical 0).
+    # Most MaxText models use (1, 2, 0, 3) for inference KV cache, so batch is axis 2.
+    order_str = self.config.ar_cache_axis_order
+    if isinstance(order_str, str):
+        order = [int(i.strip()) for i in order_str.split(",")]
+    else:
+        order = list(order_str)
+    batch_axis_index = order.index(0)
+
+    num_layers = self.config.num_decoder_layers
     def reorder_tensor(tensor):
       # We use jnp.take to gather the winning parents' memories into the
-      # current slots. The 'axis=0' ensures we are reordering the batch.
-      return jnp.take(tensor, parent_indices.squeeze(axis=-1), axis=0)
+      # current slots.
+      # If layers are stacked (standard in MaxText scan), the shape is usually
+      # like: [Layer, Batch, Head, Seq, Dim]. Batch axes are typically shifted
+      # by 1.
+      if tensor.ndim == 5:
+        reorder_axis = batch_axis_index + 1
+      elif tensor.ndim == 4:
+        # Typical unstacked KV cache.
+        # Usual shape: [Batch, Head, Seq, Dim]
+        reorder_axis = batch_axis_index
+      elif tensor.shape[0] == num_layers:
+        # Stacked metadata (like cache_ar_index) has leading layers dimension.
+        # We assume batch is the next dimension.
+        reorder_axis = 1
+      else:
+        # Other tensors (tokens, logprobs) are likely (batch, ...)
+        reorder_axis = 0
+      
+      return jnp.take(tensor, parent_indices.squeeze(axis=-1), axis=reorder_axis)
 
     return jax.tree_util.tree_map(reorder_tensor, cache)
 
@@ -1764,7 +1803,7 @@ class MaxEngine(_BaseEngine):
           "generated_tokens": generated_tokens,
           "tokens": tokens,
           "token_logp": token_logp,
-          "is_dbs": jnp.full((1,), self.config.decode_sampling_strategy == "diverse_beam_search"),
+          "is_dbs": jnp.full((total_batch_size,), self.config.decode_sampling_strategy == "diverse_beam_search"),
           "cumulative_logprobs": jnp.zeros(
               (total_batch_size, 1),
               dtype=jnp.float32,
@@ -1801,6 +1840,12 @@ class MaxEngine(_BaseEngine):
         is_leaf=is_lp,
     )
     zeroed = max_utils.unbox_logicallypartioned(init_state)
+    # Metadata should not be zeroed
+    num_beams = (
+        self.config.decode_num_beams if self.config.decode_sampling_strategy == "diverse_beam_search" else 1
+    )
+    total_batch_size = int(self.config.per_device_batch_size * self.mesh.size) * num_beams
+    zeroed["is_dbs"] = jnp.full((total_batch_size,), self.config.decode_sampling_strategy == "diverse_beam_search")
     return zeroed
 
   @property

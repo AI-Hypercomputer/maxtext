@@ -14,6 +14,7 @@
 
 """Standalone script to benchmark BLEU and Self-BLEU for DBS vs Baseline."""
 
+import os
 import sys
 import jax
 import numpy as np
@@ -50,11 +51,14 @@ def main():
     max_examples = 100
     decode_num_beams = 1
     decode_diversity_penalty = 0.0
+    decode_num_beam_groups = 1
+    # Path to write debug logs (defaults to ~/debug_log.txt)
+    debug_log_path = os.path.expanduser("~/debug_log.txt")
     
     # Rebuild sys.argv to strip out DBS flags
     new_argv = []
     # Keys we want to strip from the command line because they aren't standard MaxTextConfig fields
-    dbs_keys_to_strip = {"max_dataset_examples", "decode_num_beams", "decode_diversity_penalty", "decode_num_beam_groups"}
+    dbs_keys_to_strip = {"max_dataset_examples", "decode_num_beams", "decode_diversity_penalty", "decode_num_beam_groups", "debug_log_path"}
     
     for arg in sys.argv:
         # Check if this arg is a key=val pair we should strip
@@ -72,6 +76,8 @@ def main():
                     decode_diversity_penalty = float(val)
                 elif key_part == "decode_num_beam_groups":
                     decode_num_beam_groups = int(val)
+                elif key_part == "debug_log_path":
+                    debug_log_path = os.path.expanduser(val)
                 is_dbs_flag = True
         
         if not is_dbs_flag:
@@ -81,21 +87,36 @@ def main():
     # Force sys.argv to be the cleaned version
     sys.argv = new_argv
     
+    def debug_log(msg, mode="a"):
+        if debug_log_path:
+            with open(debug_log_path, mode) as f:
+                f.write(msg + "\n")
+                f.flush()
+        print(msg)
+
+    debug_log("DEBUG: pyconfig starting...", mode="w")
     config = pyconfig.initialize(sys.argv)
+    
+    debug_log(f"DEBUG: Config parallelisms - FSDP: {config.ici_fsdp_parallelism}, Tensor: {config.ici_tensor_parallelism}, Data: {config.ici_data_parallelism}")
+    debug_log("DEBUG: pyconfig initialized. Injecting DBS flags...")
     
     # Manually inject the extracted flags back into the config object
     # (Using setattr because MaxConfig is a Pydantic model)
     object.__setattr__(config, 'decode_num_beams', decode_num_beams)
     object.__setattr__(config, 'decode_diversity_penalty', decode_diversity_penalty)
+    debug_log("DEBUG: DBS flags injected.")
     
     if is_mock:
-        print(f"RUNNING IN MOCK MODE (No model loading) - Beams: {decode_num_beams}")
+        debug_log(f"RUNNING IN MOCK MODE (No model loading) - Beams: {decode_num_beams}")
         engine = None
         params = None
     else:
+        debug_log("DEBUG: Importing MaxEngine...")
         from maxtext.inference.maxengine import maxengine
+        debug_log("DEBUG: Initializing MaxEngine...")
         # Note: MaxEngine initialization sets up the JAX mesh and loaded model
         engine = maxengine.MaxEngine(config)
+        debug_log("DEBUG: MaxEngine initialized.")
     
     # 4. AOT Compile (Optional but recommended for TPU performance/memory)
     print("Compiling engine...")
@@ -151,6 +172,16 @@ def main():
             tokenizer = engine.build_tokenizer(engine.get_tokenizer())
             tokens, true_length = tokenizer.encode(prompt, is_bos=True, prefill_lengths=[config.max_prefill_predict_length])
             
+            # Pad input to total_batch_size to support FSDP sharding
+            # Note: total_batch_size = devices * per_device_batch_size
+            total_bs = int(jax.device_count() * config.per_device_batch_size)
+            current_bs = tokens.shape[0]
+            if current_bs < total_bs:
+                padding = jnp.zeros((total_bs - current_bs, tokens.shape[1]), dtype=tokens.dtype)
+                tokens = jnp.concatenate([tokens, padding], axis=0)
+                padding_len = jnp.zeros((total_bs - current_bs,), dtype=true_length.dtype)
+                true_length = jnp.concatenate([true_length, padding_len], axis=0)
+
             rng, rng_gen = jax.random.split(rng)
             # Prefill once for the whole beam group
             prefill_res, first_token = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length)
