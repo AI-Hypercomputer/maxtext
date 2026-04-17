@@ -93,6 +93,7 @@ def get_reshard_data(args):
         else:
             selected_df = df
         mean_reshard_time = selected_df["reshard_sec"].mean()
+        print(selected_df)
 
     mean_weight_sync_time = float('nan')
     if weight_sync_results:
@@ -102,6 +103,7 @@ def get_reshard_data(args):
         else:
             selected_df = df
         mean_weight_sync_time = selected_df["weight_sync_sec"].mean()
+        print(selected_df)
 
     trainer_hbm = float('nan')
     sampler_hbm = float('nan')

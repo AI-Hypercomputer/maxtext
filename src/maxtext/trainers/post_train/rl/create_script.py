@@ -15,7 +15,12 @@ def generate_rl_config(
     base_output_directory, 
     run_name,
     hf_token,
-    extra_config
+    extra_config,
+    ici_fsdp_parallelism,
+    ici_tensor_parallelism,
+    num_samplers_slices,
+    num_trainer_slices,
+    num_slices
 ):
     script_template = """#!/bin/bash
 CLUSTER_NAME=next-devx-1
@@ -34,12 +39,14 @@ run_name={{ run_name }} \\
 base_output_directory={{ base_output_directory }} \\
 hf_access_token={{ hf_token }} \\
 batch_size={{ batch_size }} \\
+ici_fsdp_parallelism={{ ici_fsdp_parallelism }} \\
+ici_tensor_parallelism={{ ici_tensor_parallelism }} \\
 rl.num_generations=8 \\
 num_batches=10 \\
 rollout_data_parallelism={{ rollout_data_parallelism }} \\
 rollout_tensor_parallelism={{ rollout_tensor_parallelism }} \\
 rollout_expert_parallelism={{ rollout_expert_parallelism }} \\
-hbm_utilization_vllm=0.6 \\
+hbm_utilization_vllm=0.2 \\
 scan_layers=True \\
 allow_split_physical_axes=True \\
 vllm_hf_overrides='{architectures: [\\"MaxTextForCausalLM\\"]}' \\
@@ -47,15 +54,17 @@ vllm_additional_config='{maxtext_config: {model_name: qwen3-30b-a3b, allow_split
 trainer_devices_fraction={{ trainer_devices_fraction }} \\
 subslice_shape='{{ subslice_shape }}' \\
 enable_single_controller={{ enable_single_controller }} \\
-sampler_devices_fraction={{ sampler_devices_fraction }} {{extra_config}}"
+sampler_devices_fraction={{ sampler_devices_fraction }} \\
+num_samplers_slices={{ num_samplers_slices }} \\
+num_trainer_slices={{ num_trainer_slices }} {{extra_config}}"
 
-python3 ~/Documents/xpk/run.py workload create-pathways  --workload {{ metadata_name }} \\
+xpk workload create-pathways  --workload {{ metadata_name }} \\
 --docker-image ${IMAGE_DIR} \\
 --cluster ${CLUSTER_NAME} \\
 --tpu-type=${DEVICE_TYPE} \\
 --project=$PROJECT \\
 --zone=$ZONE \\
---num-slices=1  \\
+--num-slices={{ num_slices }}  \\
 --priority=very-high \\
 --custom-pathways-worker-args="--xprof_max_trace_buffers=16384" \\
 --command "${command}"
@@ -75,7 +84,12 @@ python3 ~/Documents/xpk/run.py workload create-pathways  --workload {{ metadata_
         base_output_directory=base_output_directory,
         run_name=run_name,
         hf_token=hf_token,
-        extra_config=extra_config
+        extra_config=extra_config,
+        ici_fsdp_parallelism=ici_fsdp_parallelism,
+        ici_tensor_parallelism=ici_tensor_parallelism,
+        num_samplers_slices=num_samplers_slices,
+        num_trainer_slices=num_trainer_slices,
+        num_slices=num_slices
     )
     
     return rendered_script
@@ -112,10 +126,15 @@ if __name__ == "__main__":
     extra_config = ""
     number_of_chips = 64
     batch_size = args.trainer_chips * 2
-    trainer_devices_fraction = args.trainer_chips / number_of_chips
+    if args.trainer_chips >= 64:
+        ici_tensor_parallelism = 2
+        ici_fsdp_parallelism = 64
+        assert args.trainer_chips % 64 == 0, "trainer_chips must be a multiple of 64 when using multiple slices"
+    else:
+        ici_fsdp_parallelism = -1
+        ici_tensor_parallelism = 1
     rollout_data_parallelism = args.sampler_replicas
     sampler_chips = args.number_of_sampler_chips_per_replica * args.sampler_replicas
-    assert sampler_chips + args.trainer_chips <= number_of_chips, "Total number of chips used by trainer and sampler must be less than or equal to available chips"
     if args.enable_tp and args.enable_ep:
         rollout_tensor_parallelism = args.number_of_sampler_chips_per_replica * 2
         rollout_expert_parallelism = rollout_tensor_parallelism // 4 if rollout_tensor_parallelism >= 4 else 1
@@ -131,7 +150,24 @@ if __name__ == "__main__":
     else:
         assert False, "At least one of tensor parallelism or expert parallelism must be enabled"
 
-    sampler_devices_fraction = sampler_chips / number_of_chips
+    if args.trainer_chips < number_of_chips:
+        trainer_devices_fraction = args.trainer_chips / number_of_chips
+        num_trainer_slices = -1
+    else:
+        trainer_devices_fraction = 1.0
+        num_trainer_slices = args.trainer_chips // number_of_chips
+        assert args.trainer_chips % number_of_chips == 0, "trainer_chips must be a multiple of available chips when trainer_devices_fraction is 1.0"
+    
+    if sampler_chips < number_of_chips:
+        sampler_devices_fraction = sampler_chips / number_of_chips
+        num_samplers_slices = -1
+    else:
+        sampler_devices_fraction = 1.0
+        num_samplers_slices = sampler_chips // number_of_chips
+        assert sampler_chips % number_of_chips == 0, "Total number of sampler chips must be a multiple of available chips when sampler_devices_fraction is 1.0"
+    
+    num_slices = max(1, num_trainer_slices + num_samplers_slices)
+
     if args.trainer_chips == 4:
       enable_single_controller = "true"
     else:
@@ -163,7 +199,12 @@ if __name__ == "__main__":
         base_output_directory=output_directory,
         run_name=args.metadata_name,
         hf_token=args.hf_token,
-        extra_config=extra_config
+        extra_config=extra_config,
+        ici_fsdp_parallelism=ici_fsdp_parallelism,
+        ici_tensor_parallelism=ici_tensor_parallelism,
+        num_samplers_slices=num_samplers_slices,
+        num_trainer_slices=num_trainer_slices,
+        num_slices=num_slices
     )
     # if the script directory does not exist, create it
     if not os.path.exists(args.store_directory):
