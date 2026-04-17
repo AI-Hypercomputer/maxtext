@@ -42,7 +42,7 @@ This step can be bypassed if the current MaxText codebase already supports all c
 
 ## 3. Checkpoint Conversion
 
-While most open-source models are distributed in Safetensors or PyTorch formats, MaxText requires conversion to the [Orbax](https://orbax.readthedocs.io/en/latest/) format.
+While most open-source models are distributed in Safetensors or PyTorch formats, MaxText requires conversion to the [Orbax](https://orbax.readthedocs.io/en/latest) format.
 
 There are [two primary formats](https://maxtext.readthedocs.io/en/latest/reference/core_concepts/checkpoints.html) for Orbax checkpoints within MaxText, and while both are technically compatible with training and inference, we recommend following these performance-optimized guidelines:
 
@@ -53,8 +53,20 @@ There are [two primary formats](https://maxtext.readthedocs.io/en/latest/referen
 
 Success starts with a clear map. You must align the parameter names from your source checkpoints (Safetensors/PyTorch) with the corresponding MaxText internal names.
 
-- You can print out the keys and shapes of your original `.safetensors` or `.pth` files.
-- To see the target structure, you can initiate a pre-training run to save a randomly initialized checkpoint for inspection.
+To see the HuggingFace checkpoint structure: You can print out the keys and shapes of your original `.safetensors` or `.pth` files.
+```
+python src/MaxText/utils/ckpt_conversion/inspect_checkpoint.py hf --path <local_hf_path> --format <safetensors | pth>
+```
+
+To see the MaxText model structure:
+```
+python src/MaxText/utils/ckpt_conversion/inspect_checkpoint.py maxtext --model_name <maxtext_model_name> --scan_layers <True | False>
+```
+
+Alternatively, if you have saved an Orbax checkpoint from pretraining, you can inspect with
+```
+python src/MaxText/utils/ckpt_conversion/inspect_checkpoint.py orbax --path <local_orbax_path | gcs_orbax_path>
+```
 
 ### 3.2 Write Script
 
