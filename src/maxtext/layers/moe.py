@@ -1608,8 +1608,9 @@ class RoutedMoE(nnx.Module):
         # Filter down to the group sizes that apply to only the experts in the
         # current shard.
         group_sizes = group_sizes[:num_experts_per_shard]
-        mask = jnp.arange(x.shape[0]) < jnp.sum(group_sizes)
-        x = jnp.where(mask[:, None], x, 0)
+        if not use_te:
+          mask = jnp.arange(x.shape[0]) < jnp.sum(group_sizes)
+          x = jnp.where(mask[:, None], x, 0)
       else:
         # =======================================================================
         # Global Permutation (dispatches to TE or MT inside self.permute)
