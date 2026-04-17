@@ -92,7 +92,7 @@ def gradient_accumulation_loss_and_grad(
   def accumulate_gradient(acc_grad_and_loss, data):
     ga_params = acc_grad_and_loss["ga_params"]
     (_, aux), cur_batch_gradient = grad_func(model, config, data, dropout_rng, ga_params, *extra_dpo_args, is_train=True)
-    acc_grad_and_loss["loss"] += aux["total_loss"]
+    acc_grad_and_loss["loss"] += aux["xent_sum"] + aux.get("dpo_loss", 0.0)
     acc_grad_and_loss["moe_lb_loss"] += aux["moe_lb_loss"]
     acc_grad_and_loss["indexer_loss"] += aux["indexer_loss"]
     acc_grad_and_loss["mtp_loss"] += aux["mtp_loss"]
@@ -111,7 +111,7 @@ def gradient_accumulation_loss_and_grad(
   init_grad = jax.tree_util.tree_map(jnp.zeros_like, ga_params)
   init_grad = jax.tree.map(_maybe_shard_with_name, init_grad, grad_shardings)
   init_grad_and_loss = {
-      "loss": 0.0,
+      "loss": 0.0,  # accumulates xent_sum across microbatches
       "grad": init_grad,
       "total_weights": 0,
       "moe_lb_loss": 0.0,

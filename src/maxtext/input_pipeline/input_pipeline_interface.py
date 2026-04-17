@@ -64,7 +64,8 @@ def create_data_iterator(config: pyconfig.HyperParameters, mesh):
 
   # Return synthetic dataset if selected
   if config.dataset_type == "synthetic":
-    return SyntheticDataIterator(config, mesh), None
+    eval_iterator = SyntheticDataIterator(config, mesh) if config.eval_interval > 0 else None
+    return SyntheticDataIterator(config, mesh), eval_iterator
   dataset_type_to_train_eval_iterator = {
       "tfds": (make_tfds_train_iterator, make_tfds_eval_iterator),
       "grain": (make_grain_train_iterator, make_grain_eval_iterator),

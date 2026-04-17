@@ -108,4 +108,4 @@ After [creating an HLO Dump](https://openxla.org/xla/hlo_dumps), you can share i
 gcloud storage cp -r /tmp/xla_dump gs://<bucket_location>
 ```
 
-When sharing the HLO dump, you will need to give Google permission to access the GCS bucket. A Google user can then download the HLO graph using `gsutil`.
+When sharing the HLO dump, you will need to give Google permission to access the GCS bucket. A Google user can then download the HLO graph using `gcloud storage`.

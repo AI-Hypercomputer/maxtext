@@ -627,5 +627,6 @@ def to_linen_class(
   ToLinenPartial.__qualname__ = class_name
 
   ToLinenPartial.__init__ = __init__
+  ToLinenPartial.module_class = base_nnx_class
 
   return ToLinenPartial

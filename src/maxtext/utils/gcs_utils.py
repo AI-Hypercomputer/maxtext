@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Common GCS Utils needed by multiple modules"""
+"""Common GCS Utils needed by multiple modules"""
 import shutil
 import json
 import os
@@ -20,6 +20,7 @@ import socket
 from pathlib import Path
 from etils import epath
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 import yaml
 
@@ -166,6 +167,35 @@ def gcs_list_directories(directory_path):
       directories.append(directory)
 
   return directories
+
+
+def gcs_delete_directory(directory_path: str):
+  """Deletes a "directory" (all blobs with the prefix) from GCS.
+
+  Args:
+      directory_path: The GCS path (gs://...) representing the "directory" to delete.
+  """
+  if not _gcs_guard("gcs_delete_directory"):
+    return
+  storage_client = storage.Client()
+  bucket_name, directory_prefix = parse_gcs_bucket_and_prefix(directory_path)
+  bucket = storage_client.bucket(bucket_name)
+
+  # Ensures the prefix has a trailing slash to avoid deleting more than intended.
+  if not directory_prefix.endswith("/"):
+    directory_prefix += "/"
+
+  blobs = list(bucket.list_blobs(prefix=directory_prefix))
+  if blobs:
+    # Uses a ThreadPoolExecutor to delete blobs in parallel to match gsutil -m performance.
+    def _delete_blob(blob):
+      try:
+        blob.delete()
+      except Exception as e:  # pylint: disable=broad-except
+        max_logging.log(f"Error deleting blob {blob.name}: {e}")
+
+    with ThreadPoolExecutor(max_workers=32) as executor:
+      executor.map(_delete_blob, blobs)
 
 
 def gcs_glob_pattern(pattern):

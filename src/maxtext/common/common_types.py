@@ -32,16 +32,12 @@ AxisNames = tuple[str, ...]
 AxisIdxes = tuple[int, ...]
 
 BATCH = "activation_batch"
-BATCH_NO_EXP = "activation_batch_no_exp"
 
 ATTN_LENGTH = "activation_attn_length"
-ATTN_LENGTH_NO_EXP = "activation_attn_length_no_exp"
 
 LENGTH = "activation_length"
-LENGTH_NO_EXP = "activation_length_no_exp"
 PREFILL_LENGTH = "prefill_activation_length"
 Q_LENGTH = "activation_q_length"
-Q_LENGTH_NO_EXP = "activation_q_length_no_exp"
 Q_LORA_UP_PROJ = "q_lora_up_proj"
 KV_LENGTH = "activation_kv_length"
 KV_LORA_UP_PROJ = "kv_lora_up_proj"
@@ -50,7 +46,6 @@ EMBED = "activation_embed"
 HEAD = "activation_heads"
 PREFILL_KV_BATCH = "activation_prefill_kv_batch"
 KV_BATCH = "activation_kv_batch"
-KV_BATCH_NO_EXP = "activation_kv_batch_no_exp"
 KV_HEAD = "activation_kv_heads"
 KV_HEAD_DIM = "activation_kv_head_dim"
 D_KV = "activation_kv"
@@ -70,10 +65,6 @@ CACHE_SCALE_KV = "cache_scale_kv"
 MODEL_MODE_AUTOREGRESSIVE = "autoregressive"
 MODEL_MODE_PREFILL = "prefill"
 MODEL_MODE_TRAIN = "train"
-
-# expert_shard_attention_option
-EP_AS_CONTEXT = "context"
-EP_AS_FSDP = "fsdp"
 
 DECODING_ACTIVE_SEQUENCE_INDICATOR = 1
 
@@ -108,6 +99,7 @@ class DecoderBlockType(enum.Enum):
   QWEN2 = "qwen2"
   QWEN3 = "qwen3"
   QWEN3_MOE = "qwen3_moe"
+  QWEN3_CUSTOM_MOE = "qwen3_custom_moe"
   QWEN3_NEXT = "qwen3_next"
   GPT3 = "gpt3"
   GPT_OSS = "gpt_oss"

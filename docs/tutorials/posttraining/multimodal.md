@@ -33,15 +33,17 @@ Install pytorch:
 python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 ```
 
-Then use this command to convert an unscanned checkpoint from HuggingFace to MaxText, and save it to `MAXTEXT_CKPT_GCS_PATH`:
+Then use this command to convert an unscanned checkpoint from HuggingFace to MaxText, and save it to `MAXTEXT_CKPT_PATH`:
 
 ```shell
-export HF_ACCESS_TOKEN=hf_...
-export MAXTEXT_CKPT_GCS_PATH=gs://...
+# Your Hugging Face access token. Required to download gated models like Llama.
+# You can generate one at https://huggingface.co/settings/tokens.
+export HF_TOKEN=<Hugging Face access token>
+export MAXTEXT_CKPT_PATH=<Checkpoint GCS path> # gs://my-bucket/path
 python -m maxtext.checkpoint_conversion.to_maxtext \
     model_name=gemma3-4b \
-    hf_access_token=${HF_ACCESS_TOKEN?} \
-    base_output_directory=${MAXTEXT_CKPT_GCS_PATH?} \
+    hf_access_token=${HF_TOKEN?} \
+    base_output_directory=${MAXTEXT_CKPT_PATH?} \
     use_multimodal=true \
     scan_layers=false
 ```
@@ -50,12 +52,12 @@ For the Llama4 model family, we are using a separate checkpoint conversion scrip
 
 ```shell
 export LOCAL_HF_MODEL_PATH=...  # Need to pre-download the safetensors from HuggingFace
-export MAXTEXT_CKPT_GCS_PATH=gs://...
+export MAXTEXT_CKPT_PATH=<Checkpoint GCS path> # gs://my-bucket/path
 python -m maxtext.checkpoint_conversion.standalone_scripts.llama4_ckpt_unscanned \
     --model-size=llama4-17b-16e \
     --huggingface-checkpoint=True \
     --base-model-path=${LOCAL_HF_MODEL_PATH?} \
-    --maxtext-model-path=${MAXTEXT_CKPT_GCS_PATH?}
+    --maxtext-model-path=${MAXTEXT_CKPT_PATH?}
 ```
 
 ## Multimodal Decode
@@ -74,9 +76,9 @@ To run a forward pass and verify the model's output, use the following command:
 # Gemma3 decode
 python -m maxtext.inference.decode \
     model_name=gemma3-4b \
-    hf_access_token=${HF_ACCESS_TOKEN?} \
+    hf_access_token=${HF_TOKEN?} \
     tokenizer_path=src/maxtext/assets/tokenizers/tokenizer.gemma3 \
-    load_parameters_path=${MAXTEXT_CKPT_GCS_PATH?}/0/items \
+    load_parameters_path=${MAXTEXT_CKPT_PATH?}/0/items \
     per_device_batch_size=1 \
     run_name=ht_test \
     max_prefill_predict_length=272 \
@@ -122,18 +124,19 @@ For larger models such as Llama4-Scout/Maverick, we suggest to run the decoding 
 ## Supervised Fine-Tuning
 
 Supervised Fine-Tuning (SFT) of multimodal LLMs in MaxText focuses specifically on post-training; we don't yet support pre-training multimodal models from scratch. The SFT process typically involves training on Visual Question Answering (VQA) datasets where the model learns to generate accurate text responses based on both visual and textual inputs. During this fine-tuning phase, we recommend to freeze the pre-trained encoder layers (such as vision transformers) to preserve their learned visual representations, while the projection layers and LLM decoder components remain trainable. This selective training strategy allows the model to adapt the cross-modal alignment and text generation capabilities without disrupting the robust feature extraction abilities of the encoders, ultimately leading to improved performance on multimodal understanding and reasoning tasks while maintaining computational efficiency. This is achieved by setting `freeze_vision_encoder_params=True` in [sft-vision-chartqa.yml](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/configs/post_train/sft-vision-chartqa.yml).
-
 Here, we use [ChartQA](https://huggingface.co/datasets/HuggingFaceM4/ChartQA) as an example to demonstrate SFT functionality:
 
 ```shell
-export UNSCANNED_CKPT_PATH=...  # either set to an already available MaxText ckpt or to the one we just converted in the previous step
+export MAXTEXT_CKPT_PATH=...  # either set to an already available MaxText ckpt or to the one we just converted in the previous step
+export BASE_OUTPUT_DIRECTORY=gs://...
+export STEPS=1000
 python -m maxtext.trainers.post_train.sft.train_sft_deprecated \
     src/maxtext/configs/post_train/sft-vision-chartqa.yml \
     run_name="chartqa-sft" \
     model_name=gemma3-4b \
     tokenizer_path="google/gemma-3-4b-it" \
-    hf_access_token=${HF_ACCESS_TOKEN?} \
-    load_parameters_path=${UNSCANNED_CKPT_PATH?} \
+    hf_access_token=${HF_TOKEN?} \
+    load_parameters_path=${MAXTEXT_CKPT_PATH?} \
     base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
     per_device_batch_size=1 \
     steps=${STEPS?} \
@@ -153,12 +156,12 @@ python -m maxtext.trainers.post_train.sft.train_sft_deprecated \
 - **Setting appropriate prefill length**: To prevent truncation and ensure your full input (text + image) is processed, the prefill length should be set longer than the total combined length of your text tokens and image tokens. This combined length makes up the final sequence fed to the decoder. We recommend to estimate the combined sequence length from your full input and then add a buffer when setting your `max_prefill_predict_length` for decoding. Token estimation rules:
   - For text tokens, a good estimate is:
 
-    $\\text{Text Tokens} \\approx 1.3 \\times \\text{Number of Words in Prompt}$.
+    $\text{Text Tokens} \approx 1.3 \times \text{Number of Words in Prompt}$.
 
   - For Gemma3, each image is resized to 896\*896 and contributes 256 tokens:
 
-    $\\text{Total Tokens} \\approx \\text{Text Tokens} + \\text{Number of Images} * 256$.
+    $\text{Total Tokens} \approx \text{Text Tokens} + \text{Number of Images} * 256$.
 
   - For Llama4 models, each image is dynamically tiled based on its size, with each resulting tile contributing 144 tokens:
 
-    $\\text{Total Tokens} \\approx \\text{Text Tokens} + 144 \\times \\sum\_{i=1}^{N} \\text{Number of Tiles of Image}\_i$.
+    $\text{Total Tokens} \approx \text{Text Tokens} + 144 \times \sum_{i=1}^{N} \text{Number of Tiles of Image}_i$.

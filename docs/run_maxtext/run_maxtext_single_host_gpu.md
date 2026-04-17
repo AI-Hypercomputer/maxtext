@@ -135,15 +135,22 @@ https://github.com/AI-Hypercomputer/maxtext/tree/main/src/maxtext/configs/gpu/a3
 echo "Running 1vm.sh"
 
 # Example command to invoke this script via XPK
-# python3 xpk/xpk.py workload create --cluster ${CLUSTER_NAME?} \
-# --workload ${WORKLOAD_NAME?} --docker-image=gcr.io/supercomputer-testing/${LOCAL_IMAGE_NAME?} \
+# python3 xpk/xpk.py workload create --cluster ${GKE_CLUSTER?} \
+# --workload ${RUN_NAME?} --docker-image=gcr.io/supercomputer-testing/${LOCAL_IMAGE_NAME?} \
 # --device-type ${DEVICE_TYPE?} --num-slices 1 \
 # --command "bash src/maxtext/configs/gpu/a3/llama_2_7b/1vm.sh"
 
 # Stop execution if any command exits with error
 set -e
 
-export OUTPUT_PATH="provide an output path"
+# Use a GCS bucket you own to store logs and checkpoints. Ideally in the same
+# region as your GPUs to minimize latency and costs.
+# You can list your buckets and their locations in the
+# [Cloud Console](https://console.cloud.google.com/storage/browser).
+export BASE_OUTPUT_DIRECTORY=<gcs bucket path> # e.g., gs://my-bucket/maxtext-runs
+
+# An arbitrary string to identify this specific run.
+# Note: Kubernetes requires workload names to be valid DNS labels (lowercase, no underscores or periods).
 export RUN_NAME="llama-2-1vm-$(date +%Y-%m-%d-%H-%M)"
 
 # Set environment variables
@@ -152,7 +159,7 @@ for ARGUMENT in "$@"; do
     export "$KEY"="$VALUE"
 done
 
-export XLA_FLAGS="--xla_dump_to=${OUTPUT_PATH?}/${RUN_NAME?}/HLO_dumps/
+export XLA_FLAGS="--xla_dump_to=${BASE_OUTPUT_DIRECTORY?}/${RUN_NAME?}/HLO_dumps/
 --xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_enable_triton_gemm=false
  --xla_gpu_enable_command_buffer='' --xla_gpu_enable_highest_priority_async_stream=true
  --xla_gpu_all_reduce_combine_threshold_bytes=134217728 --xla_gpu_all_gather_combine_threshold_bytes=134217728
@@ -165,6 +172,6 @@ export XLA_FLAGS="--xla_dump_to=${OUTPUT_PATH?}/${RUN_NAME?}/HLO_dumps/
 
 # 1 node, DATA_DP=1, ICI_FSDP=8
 python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/gpu/models/llama2_7b.yml run_name=${RUN_NAME?} dcn_data_parallelism=1 \
-  ici_fsdp_parallelism=8 base_output_directory=${OUTPUT_PATH?} attention=cudnn_flash_te scan_layers=False \
+  ici_fsdp_parallelism=8 base_output_directory=${BASE_OUTPUT_DIRECTORY?} attention=cudnn_flash_te scan_layers=False \
   use_iota_embed=True hardware=gpu
 ```

@@ -89,7 +89,7 @@ MaxText automatically saves checkpoints periodically during a training run. Thes
 
 - `base_output_directory`: Specifies the GCS bucket directory where checkpoints will be saved.
 - `enable_checkpointing`: A boolean to enable or disable checkpointing.
-- `async_checkpoint`: Support training and checkpoint saving at the same time.
+- `async_checkpointing`: Support training and checkpoint saving at the same time.
 - `checkpoint_period`: The interval, in training steps, at which to save a new checkpoint.
 
 Furthermore, MaxText supports emergency checkpointing, which saves a local copy of the checkpoint that can be restored quickly after an interruption.
@@ -99,6 +99,6 @@ Furthermore, MaxText supports emergency checkpointing, which saves a local copy 
 - `local_checkpoint_directory`: The local path for storing emergency checkpoints.
 - `local_checkpoint_period`: The interval, in training steps, for saving local checkpoints.
 
-More configs about checkpoints can be found in [here](https://github.com/AI-Hypercomputer/maxtext/blob/fafdeaa14183a8f5ca7b9f7b7542ce1655237574/src/MaxText/configs/base.yml#L23-L65).
+Additional configs related to checkpoints can be found [here](https://github.com/AI-Hypercomputer/maxtext/blob/82ece9d9e6491e320f59b462eed342e6f08309c8/src/maxtext/configs/base.yml#L32-L92).
 
-For practical guides on checkpointing, please refer to [](checkpointing_solutions).
+For more extensive information and practical guides on checkpointing, please refer to [](checkpointing_solutions).

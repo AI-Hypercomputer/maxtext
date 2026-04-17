@@ -79,7 +79,6 @@ class MultiTokenPredictionLayer(nnx.Module):
     self.layer_number = layer_number
     self.transformer_layer_module = transformer_layer_module
     self.rngs = rngs
-    k = layer_number
     cfg = self.config
 
     self.embedding_norm = RMSNorm(
@@ -112,7 +111,6 @@ class MultiTokenPredictionLayer(nnx.Module):
         config=cfg,
         mesh=mesh,
         model_mode=MODEL_MODE_TRAIN,
-        name=f"mtp_{k}_transformer_layer",
         rngs=rngs,
     )
 

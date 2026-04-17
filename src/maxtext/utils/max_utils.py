@@ -13,7 +13,8 @@
 # limitations under the License.
 
 """Common Max Utils needed by multiple modules.
-All the functions include MaxText modules, such as Pyconfig, should be moved to MaxText utils file."""
+All the functions include MaxText modules, such as Pyconfig, should be moved to MaxText utils file.
+"""
 
 import collections
 from collections.abc import Sequence
@@ -21,6 +22,7 @@ import functools
 from functools import partial
 import os
 import socket
+import re
 import subprocess
 import time
 from typing import Any
@@ -50,6 +52,43 @@ HYBRID_RING_64X4 = "hybrid_ring_64x4"
 HYBRID_RING_32X8 = "hybrid_ring_32x8"
 
 # pylint: disable=too-many-positional-arguments
+
+
+def parse_libtpu_flags_to_dict(flags_str: str) -> dict:
+  """
+  Parses a string of XLA flags into a dictionary of compilation options.
+  This function is only for compilation usage.
+  """
+  if not flags_str or not flags_str.strip():
+    return {}
+
+  # Clean the string by removing line-continuation backslashes
+  cleaned_str = flags_str.replace("\\", " ")
+
+  # Split by any whitespace (handles single spaces, multiple spaces, newlines)
+  tokens = cleaned_str.split()
+
+  options_dict = {}
+
+  # Regex to strictly match '--key=value' for an isolated token
+  # Key assumes alphanumeric + underscores. Value is anything after the '='.
+  token_pattern = re.compile(r"^--([a-zA-Z0-9_]+)=(.+)$")
+
+  for token in tokens:
+    match = token_pattern.match(token)
+    if not match:
+      # Throw an error immediately if any token fails the strict format
+      raise ValueError(f"Invalid flag format detected: '{token}'. Expected format: '--key=value'")
+
+    key, value = match.groups()
+
+    # Optional: Catch duplicate flags
+    if key in options_dict:
+      raise ValueError(f"Duplicate flag detected: '--{key}'")
+
+    options_dict[key] = value
+
+  return options_dict
 
 
 def with_memory_kind(t, memory_kind):
@@ -250,12 +289,21 @@ def initialize_jax_for_gpu(raw_keys):
   if os.environ.get("JAX_COORDINATOR_IP") is not None:
     coordinator_ip = str(os.getenv("JAX_COORDINATOR_IP"))
     coordinator_port = str(os.getenv("JAX_COORDINATOR_PORT"))
-    devices = os.getenv("CUDA_VISIBLE_DEVICES")
+    env_var_list = ["CUDA_VISIBLE_DEVICES", "SLURM_STEP_GPUS"]
+    for env_var in env_var_list:
+      devices = os.getenv(env_var)
+      if devices is not None:
+        max_logging.log(f"Using {env_var} to initialize JAX distributed system: {devices}")
+        break
+    if devices is None:
+      jax.config.update("jax_cuda_visible_devices", "all")
+      jax.config.update("jax_rocm_visible_devices", "all")
+
     if devices is not None:
       try:
         devices = [int(x) for x in devices.split(",")]
       except (ValueError, TypeError) as e:
-        max_logging.log(f"Error parsing CUDA_VISIBLE_DEVICES: {e}")
+        max_logging.log(f"Error parsing {env_var}: {e}")
         devices = None
 
     jax.distributed.initialize(
@@ -848,7 +896,14 @@ def reorder_causal_load_balanced(batch, cp_size):
           cp_size=cp_size,
       )
       if key
-      in ["inputs", "targets", "inputs_position", "targets_position", "inputs_segmentation", "targets_segmentation"]
+      in [
+          "inputs",
+          "targets",
+          "inputs_position",
+          "targets_position",
+          "inputs_segmentation",
+          "targets_segmentation",
+      ]
       else value
       for key, value in batch.items()
   }
@@ -1082,11 +1137,11 @@ def transformer_engine_context():
     yield
 
 
-def generate_representative_group_sizes(target_m: int, g: int) -> tuple[int, ...]:
-  """Generate group sizes for a given target m."""
-  np.random.seed(0)
-  repr_val = np.random.uniform(size=(g,))
-  repr_val = np.random.binomial(1, 0.9, (g,)) * repr_val
-  repr_val = np.int32((repr_val / np.sum(repr_val)) * target_m)
-  repr_val[0] += target_m - np.sum(repr_val)
-  return tuple(map(int, repr_val))
+def maybe_pad(inputs, tile_size):
+  """Pads the inputs leading dimension to be divisible by tile_size."""
+  inputs_dim = inputs.shape[0]
+  padding_amount = 0
+  if inputs_dim % tile_size:
+    padding_amount = tile_size - inputs_dim % tile_size
+    inputs = jax.lax.pad(inputs, jnp.array(0.0, dtype=inputs.dtype), [(0, padding_amount, 0), (0, 0, 0)])
+  return inputs, padding_amount

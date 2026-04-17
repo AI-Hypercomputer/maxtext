@@ -24,6 +24,7 @@ pytestmark = [pytest.mark.tpu_only, pytest.mark.post_training]
 import shutil
 import tempfile
 import unittest
+from typing import Literal
 from unittest import mock
 import jax
 import jax.numpy as jnp
@@ -38,6 +39,22 @@ from maxtext.trainers.post_train.distillation import train_distill
 from maxtext.trainers.post_train.distillation import distillation_utils
 from maxtext.configs import pyconfig
 from tests.utils.test_helpers import get_test_config_path
+
+
+DEFAULT_DATA_SHARDING = [
+    "data",
+    "stage",
+    "fsdp",
+    "fsdp_transpose",
+    "sequence",
+    "context",
+    "context_autoregressive",
+    "tensor",
+    "tensor_transpose",
+    "tensor_sequence",
+    "expert",
+    "autoregressive",
+]
 
 
 # pylint: disable=protected-access
@@ -372,12 +389,14 @@ class TrainDistillTest(unittest.TestCase):
       train_distill.get_distillation_optimizer(config, max_train_steps=100)
 
   def test_monitored_strategy(self):
-    self._test_monitored_strategy(False)
+    self._test_monitored_strategy(sft_mode=False, feature_loss_type="cosine")
+    self._test_monitored_strategy(sft_mode=False, feature_loss_type="l2")
 
   def test_monitored_strategy_sft(self):
-    self._test_monitored_strategy(True)
+    self._test_monitored_strategy(sft_mode=True, feature_loss_type="cosine")
+    self._test_monitored_strategy(sft_mode=True, feature_loss_type="l2")
 
-  def _test_monitored_strategy(self, sft_mode: bool):
+  def _test_monitored_strategy(self, *, sft_mode: bool, feature_loss_type: Literal["cosine", "l2"] = "cosine"):
     """Verifies the strategy calculates metrics and returns the correct tuple."""
     strategy = distillation_utils.CombinedDistillationStrategy(
         student_forward_fn=lambda m, **k: None,
@@ -386,6 +405,7 @@ class TrainDistillTest(unittest.TestCase):
         temperature=1.0,
         alpha=0.5,
         beta_feature=1.0,
+        feature_loss_type=feature_loss_type,
         layer_indices=None,
     )
 
@@ -995,6 +1015,7 @@ class TrainDistillTest(unittest.TestCase):
     mock_student_cfg.vocab_size = 32000
     mock_student_cfg.mesh_axes = ("data",)
     mock_student_cfg.dataset_type = "grain"
+    mock_student_cfg.data_sharding = DEFAULT_DATA_SHARDING
 
     # Add dummy numbers for optimizer math
     mock_student_cfg.learning_rate = 1e-4
@@ -1012,6 +1033,7 @@ class TrainDistillTest(unittest.TestCase):
     mock_student_cfg.distill_alpha = 0.5
     mock_student_cfg.distill_beta = 0.0
     mock_student_cfg.distill_layer_indices = None
+    mock_student_cfg.distill_feature_loss_type = "cosine"
     mock_student_cfg.use_sft = False
     mock_student_cfg.enable_dropout = False
 
@@ -1074,6 +1096,7 @@ class TrainDistillTest(unittest.TestCase):
     mock_student_cfg.vocab_size = 32000
     mock_student_cfg.mesh_axes = ("data",)
     mock_student_cfg.dataset_type = "grain"
+    mock_student_cfg.data_sharding = DEFAULT_DATA_SHARDING
 
     # Add dummy numbers for optimizer math
     mock_student_cfg.learning_rate = 1e-4
@@ -1091,6 +1114,7 @@ class TrainDistillTest(unittest.TestCase):
     mock_student_cfg.distill_alpha = 0.5
     mock_student_cfg.distill_beta = 0.0
     mock_student_cfg.distill_layer_indices = None
+    mock_student_cfg.distill_feature_loss_type = "cosine"
     mock_student_cfg.use_sft = False
     mock_student_cfg.enable_dropout = False
 

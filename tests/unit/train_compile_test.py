@@ -24,7 +24,9 @@ import os.path
 from tempfile import gettempdir
 
 import pytest
+import transformers
 
+from maxtext.checkpoint_conversion.utils.hf_model_configs import DeepseekV32Config
 from maxtext.trainers.pre_train.train_compile import main as train_compile_main
 from tests.utils.test_helpers import get_test_config_path
 
@@ -817,6 +819,8 @@ class TrainCompile(unittest.TestCase):
             "max_target_length=1024",
             "attention=flash",
             "use_tokamax_splash=True",
+            # override
+            "override_model_config=True",
             "engram_layers=[]",
             # dense warmup
             "indexer_sparse_training=False",
@@ -842,6 +846,8 @@ class TrainCompile(unittest.TestCase):
             "max_target_length=1024",
             "attention=flash",
             "use_tokamax_splash=True",
+            # override
+            "override_model_config=True",
             "engram_layers=[]",
             # sparse training
             "indexer_sparse_training=True",
@@ -869,7 +875,7 @@ class TrainCompile(unittest.TestCase):
 
   @pytest.mark.cpu_only
   def test_mhc_integration(self):
-    """AOT test for Manifold-onstrained Hyper Connection implementation"""
+    """AOT test for Manifold-constrained Hyper Connection implementation"""
     compiled_trainstep_file = "/tmp/test_mhc_integration"
     train_compile_main(
         (
@@ -881,10 +887,12 @@ class TrainCompile(unittest.TestCase):
             "model_name=deepseek-custom",
             "per_device_batch_size=4",
             "scan_layers=True",
-            "max_target_length=1024",
-            "mhc_expansion_rate=4",
             "attention=flash",
             "use_tokamax_splash=True",
+            "max_target_length=1024",
+            # override
+            "override_model_config=True",
+            "mhc_expansion_rate=4",
             "engram_layers=[]",
         )
     )
@@ -893,6 +901,7 @@ class TrainCompile(unittest.TestCase):
   def test_engram_integration(self):
     """AOT test for Engram implementation"""
     compiled_trainstep_file = "/tmp/test_engram_integration"
+    transformers.AutoConfig.register("deepseek_v32", DeepseekV32Config)
     train_compile_main(
         (
             "",

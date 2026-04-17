@@ -14,12 +14,12 @@
 
 """ Train tokenizer
 Example usage (parquet):
-  python3 -m MaxText.train_tokenizer \
+  python3 -m maxtext.trainers.tokenizer.train_tokenizer \
     --grain_train_files=gs://my-bucket/data/*.parquet \
     --grain_file_type=parquet
 
 Example usage (arrayrecord):
-  python3 -m MaxText.train_tokenizer \
+  python3 -m maxtext.trainers.tokenizer.train_tokenizer \
     --grain_train_files=gs://my-bucket/data/*.arrayrecord \
     --grain_file_type=arrayrecord \
     --data_column=text

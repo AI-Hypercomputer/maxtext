@@ -42,6 +42,7 @@ project = "MaxText"
 # pylint: disable=redefined-builtin
 copyright = "2023–2026, Google LLC"
 author = "MaxText developers"
+version = os.environ.get("READTHEDOCS_VERSION", "latest")
 
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
@@ -51,6 +52,7 @@ extensions = [
     "sphinx_design",
     "sphinx_copybutton",
     "sphinx.ext.napoleon",
+    "sphinx.ext.mathjax",
     # This needs to be before autodoc^
     "sphinx.ext.autodoc",
     "sphinx.ext.autosummary",
@@ -161,6 +163,8 @@ linkcheck_ignore = [
     r"https://cla\.developers\.google\.com/.*",
     # Ignore GitHub commit history links which frequently trigger rate limiting (429)
     r"https://github\.com/jax-ml/jax/commits/.*",
+    # Ignore Hugging Face settings links which require login
+    r"https://huggingface\.co/settings/tokens",
 ]
 
 
@@ -247,3 +251,6 @@ def setup(app):
   logger = logging.getLogger("sphinx")
   warning_handler, *_ = [h for h in logger.handlers if isinstance(h, sphinx_logging.WarningStreamHandler)]
   warning_handler.filters.insert(0, FilterSphinxWarnings(app))
+
+  if version != "latest":
+    app.tags.add("is_not_latest")

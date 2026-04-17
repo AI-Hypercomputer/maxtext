@@ -56,6 +56,9 @@ class SyntheticDataIterator:
     segmentation = jnp.ones((config.global_batch_size_to_load, config.max_target_length), dtype=jnp.int32)
     self.data = (tokens, batch_positions, segmentation)
 
+  def reset(self):
+    pass  # Synthetic data is stateless; nothing to reset.
+
   def __iter__(self):
     return self
 

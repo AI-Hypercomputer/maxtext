@@ -86,8 +86,8 @@ if [ -n "$ABSOLUTE_LINKS" ]; then
   echo "ERROR: Found symbolic links with absolute paths in the build context:"
   echo "$ABSOLUTE_LINKS"
   echo "Docker cannot follow absolute paths outside of the build context, which can cause 'failed to compute cache key' errors."
-  echo "Please remove these links or convert them to relative paths before building the Docker image."
-  echo "Alternatively, run the command again from a clean, empty directory to bypass your local file state entirely."
+  echo "Please remove these links or add the files to .dockerignore before building the Docker image."
+  echo "Do not include the ./ file prefix in .dockerignore"
   exit 1
 fi
 

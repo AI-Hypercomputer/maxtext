@@ -83,9 +83,7 @@ def _resolve_or_infer_config(argv: list[str]) -> tuple[str, list[str]]:
     return resolve_config_path(argv[1]), argv[2:]
   module = _module_from_path(argv[0])
   if module not in _CONFIG_FILE_MAPPING:
-    raise ValueError(
-        f"No config file provided and no default config found for module '{module}'"
-    )
+    raise ValueError(f"No config file provided and no default config found for module '{module}'")
   config_path = os.path.join(MAXTEXT_CONFIGS_DIR, _CONFIG_FILE_MAPPING[module])
   logger.warning("No config file provided, using default config mapping: %s", config_path)
   return config_path, argv[1:]
@@ -93,6 +91,15 @@ def _resolve_or_infer_config(argv: list[str]) -> tuple[str, list[str]]:
 
 def yaml_key_to_env_key(s: str) -> str:
   return _MAX_PREFIX + s.upper()
+
+
+def validate_no_keys_overridden_twice(keys1: list[str], keys2: list[str]):
+  overridden_keys = [k for k in keys1 if k in keys2]
+  if overridden_keys:
+    raise ValueError(
+        f"Keys {overridden_keys} are overridden by both model config and CLI/kwargs."
+        "This is not allowed, unless setting `override_model_config=True`."
+    )
 
 
 def resolve_config_path(param: str) -> str:
@@ -201,6 +208,9 @@ def _prepare_for_pydantic(raw_keys: dict[str, Any]) -> dict[str, Any]:
       new_value = None
 
     if key == "run_name" and new_value is None:
+      new_value = ""
+
+    if key in ("dump_hlo_local_module_name", "dump_hlo_module_name") and new_value is None:
       new_value = ""
 
     if key == "tokenizer_path" and new_value is None:
@@ -320,7 +330,7 @@ def initialize_pydantic(argv: list[str], **kwargs) -> MaxTextConfig:
     if not os.path.isfile(model_config_path):
       # Fallback to the default location within package
       dir_path = os.path.dirname(os.path.realpath(__file__))
-      model_config_path = os.path.join(dir_path, "configs", "models", f"{model_name}.yml")
+      model_config_path = os.path.join(dir_path, "models", f"{model_name}.yml")
 
     if os.path.exists(model_config_path):
       model_loaded_cfg = omegaconf.OmegaConf.load(model_config_path)
@@ -329,6 +339,8 @@ def initialize_pydantic(argv: list[str], **kwargs) -> MaxTextConfig:
         model_cfg = {k: v for k, v in model_loaded_cfg.items() if k not in overrides_cfg}
       else:
         model_cfg = model_loaded_cfg
+        # Validate that no keys are overridden by both model config and CLI/kwargs
+        validate_no_keys_overridden_twice(model_loaded_cfg.keys(), overrides_cfg.keys())
     else:
       logger.warning("Model config for '%s' not found at %s", model_name, model_config_path)
 
@@ -367,9 +379,16 @@ def initialize_pydantic(argv: list[str], **kwargs) -> MaxTextConfig:
   for k in tuple(raw_keys_dict.keys()):
     env_key = yaml_key_to_env_key(k)
     if env_key in os.environ:
+      # Validate that no keys are overridden by both CLI/kwargs and environment variable
       if k in cli_keys or k in kwargs_keys:
         raise ValueError(
             f"Key '{k}' is overridden by both CLI/kwargs and environment variable '{env_key}'. This is not allowed."
+        )
+      # Validate that no keys are overridden by both model config and environment variable
+      if not temp_cfg.get("override_model_config") and k in model_cfg.keys():
+        raise ValueError(
+            f"Key '{k}' is overridden by both model config and environment variable '{env_key}'."
+            "This is not allowed, unless setting `override_model_config=True`."
         )
 
       new_proposal = os.environ.get(env_key)

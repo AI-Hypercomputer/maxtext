@@ -28,23 +28,23 @@ The effectiveness of tiling stems from the **linearity** of many operations in L
 
 For instance, consider the matrix multiplication operation:
 
-$$A[M, N] \\times B[N, 1] = C[M, 1]$$
+$$A[M, N] \times B[N, 1] = C[M, 1]$$
 
-If the matrices `A` is too large to fit into memory, you can tile the operation. By splitting matrix `A` into $K$ smaller chunks along its `M` dimension ($A_0[M/K, N], \\dots, A\_{K-1}[M/K, N]$), you can load each chunk separately and compute a corresponding portion of the output matrix `C` ($C_0[M/K, 1], \\dots, C\_{K-1}[M/K, 1]$) follows
+If the matrices `A` is too large to fit into memory, you can tile the operation. By splitting matrix `A` into $K$ smaller chunks along its `M` dimension ($A_0[M/K, N], \dots, A_{K-1}[M/K, N]$), you can load each chunk separately and compute a corresponding portion of the output matrix `C` ($C_0[M/K, 1], \dots, C_{K-1}[M/K, 1]$) follows
 
-$$A_i[M/K, N]\\times B[N, 1] = C_i[M/K, 1] \\quad \\forall i=0, \\dots, K-1.$$
+$$A_i[M/K, N] \times B[N, 1] = C_i[M/K, 1] \quad \forall i=0, \dots, K-1.$$
 
 Finally, you can concatenate the smaller `C` matrices to form the complete result.
 
 This principle extends to the backward pass as well. Instead of computing the full gradient `dA[M, N]`, which also exceeds memory capacity, you can compute the gradient for each tile individually:
 
-$$dC_i[M/K, 1] \\times B^\\intercal[1, N] = dA_i[M/K, N] \\quad \\forall i=0,\\dots,K-1.$$
+$$dC_i[M/K, 1] \times B^\intercal[1, N] = dA_i[M/K, N] \quad \forall i=0,\dots,K-1.$$
 
 Similarly, the gradient on `B` is the accumulation
 
-$$\\sum\_{i=0}^{K-1}dC_i^\\intercal[1, M/K] \\times A_i[M/K, N] = dB[N, 1] \\quad \\forall i=0,\\dots,K-1.$$
+$$\sum_{i=0}^{K-1}dC_i^\intercal[1, M/K] \times A_i[M/K, N] = dB[N, 1] \quad \forall i=0,\dots,K-1.$$
 
-This tiling approach reduces the peak memory usage from $\\mathcal{O}(MN)$ to $\\mathcal{O}(MN/K)$, which facilitates model training with limited memory resources.
+This tiling approach reduces the peak memory usage from $\mathcal{O}(MN)$ to $\mathcal{O}(MN/K)$, which facilitates model training with limited memory resources.
 
 ## Tiling in MaxText
 

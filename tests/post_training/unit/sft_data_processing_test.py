@@ -496,7 +496,8 @@ class SFTChatTemplateLogicTest(unittest.TestCase):
     if not os.path.exists(cls.LLAMA_TOKENIZER_PATH):
       exit_code = subprocess.call(
           [
-              "gsutil",
+              "gcloud",
+              "storage",
               "cp",
               "-r",
               "gs://maxtext-dataset/hf/llama2-chat-tokenizer",

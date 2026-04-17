@@ -70,7 +70,7 @@ class Gemma4MoE(nnx.Module):
     self.moe_block = moe.RoutedAndSharedMoE(
         config=config,
         mesh=mesh,
-        kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_init=initializers.nd_dense_init(config.dense_init_scale, "fan_in", "truncated_normal"),
         kernel_axes=("embed", None),
         weight_dtype=config.weight_dtype,
         dtype=config.dtype,

@@ -111,7 +111,8 @@ batch_size: 1
 num_batches: 4
 # A batch can be split into multiple micro batches for memory management
 # and/or async sampling and training.
-micro_batch_size: -1
+train_micro_batch_size: -1
+rollout_micro_batch_size: -1
 # Keep `num_test_batches` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
 num_test_batches: 5  # 200

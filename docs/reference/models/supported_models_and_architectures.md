@@ -12,8 +12,8 @@ MaxText is an open-source, high-performance LLM framework written in Python/JAX.
 - **Ahead-of-Time Compilation (AOT)**: For faster model development/prototyping and earlier OOM detection.
 - **Quantization**: Via **Qwix** (recommended) and AQT. See Quantization [Guide](https://maxtext.readthedocs.io/en/maxtext-v0.2.1/reference/core_concepts/quantization.html).
 - **Diagnostics**: Structured error context via **`cloud_tpu_diagnostics`** (filters stack traces to user code), simple logging via `max_logging`, profiling in **XProf**, and visualization in **TensorBoard**.
-- **Multi-Token Prediction (MTP)**: Enables token efficient training with mutli-token prediction.
-- **Elastic Training**: Fault-tolorent and dynamic scale-up/scale-down on Cloud TPUs with Pathways.
+- **Multi-Token Prediction (MTP)**: Enables token efficient training with multi-token prediction.
+- **Elastic Training**: Fault-tolerant and dynamic scale-up/scale-down on Cloud TPUs with Pathways.
 - **Flexible Remat Policy**: Provides fine-grained control over memory-compute trade-offs. Users can select pre-defined policies (like 'full' or 'minimal') or set the policy to **'custom'**.
 
 ## Supported model families
@@ -39,18 +39,23 @@ MaxText is an open-source, high-performance LLM framework written in Python/JAX.
 
 ### DeepSeek
 
-- **Variants**: V2 (16B, 236B), V3 (671B), R1
-- **Notes**: MLA; shared/finer-grained experts; MTP; YaRN-style scaling.
+- **Variants**: V2 (16B, 236B), V3 (671B) / R1 / V3.1, V3.2 (671B)
+- **Notes**: MLA; shared/finer-grained experts; MTP; YaRN-style scaling; DeepSeek Sparse Attention (V3.2).
 
 ### Qwen3
 
-- **Variants**: Dense (0.6B–32B); MoE (30B-A3B, 235B-A22B, 480B Coder), MoE w/ Hybrid Attention (Next-80B-a3b)
+- **Variants**: Dense (0.6B–32B); MoE (30B-A3B, 235B-A22B, 480B Coder), MoE with Hybrid Attention (Next-80B-A3B)
 - **Notes**: **QK-Norm**, GQA, SwiGLU, RMSNorm, RoPE, GatedDeltaNet.
 
 ### GPT-OSS
 
 - **Variants**: 20B, 120B
 - **Notes**: Local–Global interleaved attention, GQA, attention sink; YaRN-style scaling; MoE.
+
+### Kimi
+
+- **Variants**: K2 (1T)
+- **Notes**: DeepSeek V3 architecture; MuonClip optimizer
 
 ## Parallelism building blocks
 
@@ -70,7 +75,7 @@ The following summarizes observed runtime efficiency and scaling behaviors of Ma
 
 - **High MFU**: MaxText targets high Model FLOPs Utilization across scales; exact numbers vary by model, hardware and config. See [**Performance Metrics → MFU**](../performance_metrics.md#performance-metrics) for the definition and how we calculate it.
 - **Quantization**: MaxText supports quantization via both the AQT and Qwix libraries. Qwix is the recommended approach, providing a non-intrusive way to apply various quantization techniques, including Quantization-Aware Training (QAT) and Post-Training Quantization (PTQ).
-- **MoE**: The Mixture-of-Experts implementation features dropless routing with Megablox and `jax.lax.ragged_dot` kernels for enhanced performance.
+- **MoE**: The Mixture-of-Experts implementation features dropless routing with efficient kernels including Megablox, `jax.lax.ragged_dot`, and Tokamax Ragged Dot.
 - **Multi-Token Prediction (MTP)**: This feature improves training efficiency on DeepSeek-style models by adding an auxiliary loss based on predicting multiple future tokens.
 - **Long-Context Optimizations**: Implements various efficient attention mechanisms, including: Grouped-Query Attention (GQA), Sliding-Window Attention (SWA), Local–Global interleaved attention, Multi-Head Latent Attention (MLA). They reduce the KV-cache size, making it possible to handle long contexts efficiently.
 
@@ -86,6 +91,7 @@ The following summarizes observed runtime efficiency and scaling behaviors of Ma
   - **DeepSeek**: [Guide](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/deepseek/Run_DeepSeek.md) | [DeepSeek Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/models/deepseek.py)
   - **Qwen3**: [Guide](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/qwen/moe/run_qwen_moe.md) | [Qwen3-Next Guide](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/qwen/next/run_qwen3_next.md) | [Qwen3 Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/models/qwen3.py) | [Qwen3-Next Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/models/qwen3.py)
   - **GPT-OSS**: [Guide](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/gpt_oss/run_gpt_oss.md) | [GPT-OSS Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/models/gpt_oss.py)
+  - **Kimi**: [Guide](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/kimi/Run_Kimi.md) | [K2 reuses DeepSeek Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/models/deepseek.py)
 
 - **Technical Explanations:**
 

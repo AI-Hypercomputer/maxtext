@@ -152,6 +152,14 @@ jobs:
           # omit this libtpu init args for gpu tests
           if [ "${INPUTS_DEVICE_TYPE}" != "cuda12" ]; then
             export LIBTPU_INIT_ARGS='--xla_tpu_scoped_vmem_limit_kib=65536'
+          else
+            # For cuda12, explicitly point to the pip-installed CUDA libraries
+            # to avoid conflicts with system-level installations on the runner.
+            if [ -d ".venv/lib/python3.12/site-packages/nvidia" ]; then
+              export LD_LIBRARY_PATH=$(pwd)/.venv/lib/python3.12/site-packages/nvidia/cudnn/lib:${LD_LIBRARY_PATH}
+            else
+              echo "Warning: Could not find pinned nvidia libraries in .venv."
+            fi
           fi
           if [ "${INPUTS_TOTAL_WORKERS}" -gt 1 ]; then
             $PYTHON_EXE -m pip install --quiet pytest-split pytest-xdist

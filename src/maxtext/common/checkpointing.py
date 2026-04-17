@@ -222,6 +222,8 @@ def create_orbax_checkpoint_manager(
     colocated_python_checkpointing: bool = False,
     enable_single_replica_ckpt_restoring: bool = False,
     enable_autocheckpoint: bool = False,
+    todelete_subdir: str | None = None,
+    todelete_full_path: str | None = None,
 ):
   """Returns specified Orbax (async or not) CheckpointManager or None if checkpointing is disabled."""
   if not enable_checkpointing:
@@ -279,6 +281,8 @@ def create_orbax_checkpoint_manager(
           save_decision_policy=save_decision_policy,
           preservation_policy=preservation_policy,
           async_options=async_options,
+          todelete_subdir=todelete_subdir,
+          todelete_full_path=todelete_full_path,
       ),
       logger=orbax_logger,
   )

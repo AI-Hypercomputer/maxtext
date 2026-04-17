@@ -55,6 +55,7 @@ class Train(parameterized.TestCase):
             "decoder_block=deepseek",
             "attention_type=mla",
             "num_experts=2",
+            "shared_experts=1",
             # Enable sparse_matmul.
             "sparse_matmul=True",
             # Enable ragged_dot.

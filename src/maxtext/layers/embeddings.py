@@ -132,7 +132,7 @@ class Embed(nnx.Module):
             (self.num_embeddings, self.num_features),
             self.config.weight_dtype,
         ),
-        sharding=("vocab", "embed"),
+        sharding=("vocab", "embed_vocab"),
     )
 
   def __call__(self, inputs: Array, model_mode: str = MODEL_MODE_TRAIN) -> Array:
@@ -165,11 +165,11 @@ class Embed(nnx.Module):
         if model_mode == MODEL_MODE_PREFILL
         else (
             "activation_embed_and_logits_batch",
-            "activation_length_no_exp",
+            "activation_length",
             "activation_embed",
         )
     )
-    out_pspec = logical_to_mesh_axes(output_axis_names, self.mesh)
+    out_pspec = logical_to_mesh_axes(output_axis_names, self.mesh, rules=getattr(self.config, "logical_axis_rules", None))
 
     out_sharding = NamedSharding(self.mesh, out_pspec) if self.config.shard_mode == ShardMode.EXPLICIT else None
 
@@ -850,7 +850,7 @@ class YarnRotaryEmbedding(nnx.Module):
     self.attention_scaling = attention_scaling
 
     self.freqs_sharding = (
-        create_sharding(mesh, ("activation_batch", "activation_length_no_exp", "q_heads"))
+        create_sharding(mesh, ("activation_batch", "activation_length", "q_heads"))
         if shard_mode == ShardMode.EXPLICIT
         else None
     )
@@ -976,7 +976,7 @@ class YarnRotaryEmbedding(nnx.Module):
     inputs_complex = first_half + 1j * second_half  # shape: [B, S, N, half_dim]
     # Apply the rotary transformation via complex multiplication.
     rotated_sharding = (
-        create_sharding(self.mesh, ("activation_batch", "activation_length_no_exp", None, None))
+        create_sharding(self.mesh, ("activation_batch", "activation_length", None, None))
         if self.shard_mode == ShardMode.EXPLICIT
         else None
     )

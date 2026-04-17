@@ -319,6 +319,7 @@ class TrainRLTest(unittest.TestCase):
     # Configs
     trainer_config = SimpleNamespace(
         debug=SimpleNamespace(rl=False),
+        rl=SimpleNamespace(use_agentic_rollout=False),
         tokenizer_path="dummy_path",
         dataset_name="dummy_dataset",
         train_split="train",

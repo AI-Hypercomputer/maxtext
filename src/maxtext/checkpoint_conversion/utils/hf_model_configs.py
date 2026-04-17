@@ -855,6 +855,7 @@ deepseek32_671b_dict = {
 
 # TODO(shuningjin): replace with DeepseekV32Config when available in transformers library
 class DeepseekV32Config(PTConfig):
+  model_type = "deepseek_v32"
 
   def __init__(self, **kwargs):
     self.max_position_embeddings = kwargs.get("max_position_embeddings", 163840)

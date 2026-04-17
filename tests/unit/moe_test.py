@@ -218,6 +218,8 @@ class DeepSeekRoutingTest(unittest.TestCase):
         num_experts=16,
         num_experts_per_tok=4,
         sparse_matmul=True,
+        base_moe_mlp_dim=1024,
+        base_mlp_dim=1024,
         **extra_args,
     )
     self.rngs = nnx.Rngs(params=0)
@@ -341,15 +343,13 @@ class MoeLoopBlock(nnx.Module):
     weights, selected_experts = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
     weights = jax.nn.softmax(weights.astype(jnp.float32), axis=-1).astype(self.weight_dtype)
     mlp_lnx = jnp.zeros_like(inputs)
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_length_no_exp", "activation_embed"))
+    mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_length", "activation_embed"))
 
     for k in range(self.num_experts):
       weights_exp = jnp.sum(jnp.multiply(selected_experts == k, weights), axis=-1)
       getattr(self, f"mlp_{k}")
       mlp_lnx_exp = getattr(self, f"mlp_{k}")(inputs, deterministic=deterministic)
-      mlp_lnx_exp = nn.with_logical_constraint(
-          mlp_lnx_exp, ("activation_batch", "activation_length_no_exp", "activation_embed")
-      )
+      mlp_lnx_exp = nn.with_logical_constraint(mlp_lnx_exp, ("activation_batch", "activation_length", "activation_embed"))
       mlp_lnx_exp = weights_exp[:, :, None] * mlp_lnx_exp
       mlp_lnx += mlp_lnx_exp
 
@@ -1064,6 +1064,58 @@ class RoutedMoeTest(unittest.TestCase):
       self.assertTrue(
           jnp.array_equal(recv_sz, exp_recv_sz), f"Unsharded Batch: Receive sizes mismatch for shard {expert_shard_id}"
       )
+
+  def test_ragged_buffer_balanced(self):
+    ragged_buffer_factor = 1.0
+    local_batch = 32768
+    ep_degree = 4  # unused for ragged_factor>0
+    num_experts_per_tok = 8  # unused for ragged_factor>0
+    global_experts = 256  # unused for ragged_factor>0
+
+    expected_ragged_buffer = 32768
+    actual_ragged_buffer = moe.RoutedMoE.get_ragged_buffer_size(
+        local_batch, ep_degree, global_experts, num_experts_per_tok, ragged_buffer_factor
+    )
+    self.assertEqual(expected_ragged_buffer, actual_ragged_buffer)
+
+  def test_ragged_buffer_larger(self):
+    ragged_buffer_factor = 2.0
+    local_batch = 32768
+    ep_degree = 4  # unused for ragged_factor>0
+    num_experts_per_tok = 8  # unused for ragged_factor>0
+    global_experts = 256  # unused for ragged_factor>0
+
+    expected_ragged_buffer = 65536
+    actual_ragged_buffer = moe.RoutedMoE.get_ragged_buffer_size(
+        local_batch, ep_degree, global_experts, num_experts_per_tok, ragged_buffer_factor
+    )
+    self.assertEqual(expected_ragged_buffer, actual_ragged_buffer)
+
+  def test_small_ep_worst_case(self):
+    ragged_buffer_factor = -1.0  # Not using ragged_buffer_factor
+    local_batch = 32768
+    num_experts_per_tok = 8
+    global_experts = 256
+    ep_degree = 4
+
+    expected_ragged_buffer = 131072  # local_batch * ep_degree
+    actual_ragged_buffer = moe.RoutedMoE.get_ragged_buffer_size(
+        local_batch, ep_degree, global_experts, num_experts_per_tok, ragged_buffer_factor
+    )
+    self.assertEqual(expected_ragged_buffer, actual_ragged_buffer)
+
+  def test_large_ep_worst_case(self):
+    ragged_buffer_factor = -1.0  # Not using ragged_buffer_factor
+    local_batch = 32768
+    num_experts_per_tok = 8
+    global_experts = 256
+    ep_degree = 128
+
+    expected_ragged_buffer = 1048576  # (32768) * (global_exp / top_k)
+    actual_ragged_buffer = moe.RoutedMoE.get_ragged_buffer_size(
+        local_batch, ep_degree, global_experts, num_experts_per_tok, ragged_buffer_factor
+    )
+    self.assertEqual(expected_ragged_buffer, actual_ragged_buffer)
 
 
 if __name__ == "__main__":

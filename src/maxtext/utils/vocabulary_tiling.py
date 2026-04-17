@@ -61,11 +61,11 @@ def vocab_tiling_linen_loss(
   param_spec = nn.get_partition_spec(params)
   hidden_spec = create_sharding(
       model.mesh,
-      ("activation_embed_and_logits_batch", "activation_length_no_exp", "activation_embed"),
+      ("activation_embed_and_logits_batch", "activation_length", "activation_embed"),
   )
   label_spec = create_sharding(
       model.mesh,
-      ("activation_embed_and_logits_batch", "activation_length_no_exp"),
+      ("activation_embed_and_logits_batch", "activation_length"),
   )
   reshaped_hidden_spec = create_sharding(
       model.mesh,

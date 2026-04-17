@@ -15,8 +15,9 @@
 # pylint: disable=bare-except, consider-using-generator, chained-comparison, broad-exception-caught
 """RL Utils Module."""
 import re
+import uuid
+from etils import epath
 import optax
-from maxtext.utils import max_logging
 import numpy as np
 
 
@@ -433,13 +434,6 @@ def check_numbers(prompts, completions, answer, tmvp_config, **kargs):
       extracted_responses.append(fallback_matches[-1].strip() if fallback_matches else None)
 
   scores = []
-  if tmvp_config.debug.rl:
-    max_logging.log("START ============================")
-    max_logging.log(f"Question: {question[0]}")
-    max_logging.log(f"Answer: {answer[0]}")
-    max_logging.log(f"Response: {completions[0]}")
-    max_logging.log(f"Extracted: {extracted_responses[0]}")
-    max_logging.log("END ==============================")
 
   for guess, true_answer in zip(extracted_responses, answer):
     if guess is None:
@@ -469,6 +463,20 @@ def check_numbers(prompts, completions, answer, tmvp_config, **kargs):
         scores.append(tmvp_config.reward_exact_answer if guess_val == true_val else 0.0)
       except:
         scores.append(0)
+  if tmvp_config.debug.rl:
+    debug_log_path = epath.Path(tmvp_config.base_output_directory) / tmvp_config.run_name / "debug_rl_logs"
+    debug_log_path.mkdir(parents=True, exist_ok=True)
+    log_file = debug_log_path / f"check_numbers_{uuid.uuid4().hex}.txt"
+    log_content = (
+        "START ============================\n"
+        f"Question: {question[0]}\n"
+        f"Answer: {answer[0]}\n"
+        f"Response: {completions[0]}\n"
+        f"Extracted: {extracted_responses[0]}\n"
+        f"Reward Score: {scores[0]}\n"
+        "END ==============================\n"
+    )
+    log_file.write_text(log_content)
 
   return scores
 

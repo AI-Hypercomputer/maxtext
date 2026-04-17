@@ -43,20 +43,41 @@ The following commands use placeholder variables. Before running them, set these
 
 ```bash
 # -- Google Cloud Configuration --
-export PROJECT="your-gcp-project-id"
-export ZONE="your-gcp-zone"
-export CLUSTER="your-gke-cluster-name"
+# Your GCP project ID. Find it on the [Cloud Console Dashboard](https://console.cloud.google.com/home/dashboard).
+export PROJECT_ID=<GCP project ID>
+
+# The GCP location (listed as "Location" in the UI) and name of your
+# TPU-enabled GKE cluster. Both can be found on the
+# [Cloud Console](https://console.cloud.google.com/kubernetes/list).
+export ZONE=<GCP location> # e.g., 'us-central1'
+export GKE_CLUSTER=<cluster name>
 
 # -- Workload Configuration --
-export WORKLOAD_NAME="maxtext-job-$(date +%Y%m%d-%H%M%S)"
+# An arbitrary string to identify this specific run.
+# Note: Kubernetes requires workload names to be valid DNS labels (lowercase, no underscores or periods).
+export RUN_NAME="maxtext-run-$(date +%Y%m%d-%H%M%S)"
+
+# For a full list of MaxText-supported TPU types, see: `src/maxtext/utils/accelerator_to_spec_map.py`. To see the TPU type
+# of your cluster:
+
+# 1. Connect to the cluster (required for kubectl commands later):
+# gcloud container clusters get-credentials ${GKE_CLUSTER?} --location ${ZONE?} --project ${PROJECT_ID?}
+
+# 2. Find your TPU type (e.g., 'v5p-128') by checking the accelerator labels on your nodes:
+# kubectl get nodes -l cloud.google.com/gke-tpu-accelerator -o jsonpath='{.items[*].metadata.labels.cloud\.google\.com/gke-tpu-accelerator}' | tr ' ' '\n' | sort -u
 export TPU_TYPE="v5p-8" # Or your desired TPU type, e.g., v5e-4
-export WORKLOAD_NODEPOOL_COUNT=1 # Number of TPU slices for your job
+export NUM_SLICES=1 # Number of TPU slices for your job
 
 # -- MaxText & Storage Configuration --
-export BUCKET_NAME="your-gcs-bucket-name"
-export RUN_NAME="maxtext-run-1"
+# Use a GCS bucket you own to store logs and checkpoints. Ideally in the same
+# region as your TPUs to minimize latency and costs.
+# You can list your buckets and their locations in the
+# [Cloud Console](https://console.cloud.google.com/storage/browser).
+export BASE_OUTPUT_DIRECTORY=<gcs bucket path> # e.g., gs://my-bucket/maxtext-runs
+
 # The Docker image you pushed in the prerequisite step
-export DOCKER_IMAGE="gcr.io/${PROJECT?}/${CLOUD_IMAGE_NAME}"
+export CLOUD_IMAGE_NAME=<image name>
+export DOCKER_IMAGE="gcr.io/${PROJECT_ID?}/${CLOUD_IMAGE_NAME?}"
 ```
 
 ## 3. Running a batch workload
@@ -69,15 +90,15 @@ Use the `xpk workload create-pathways` command to start the job.
 
 ```bash
 xpk workload create-pathways \
-  --workload=${WORKLOAD_NAME?} \
-  --cluster=${CLUSTER?} \
-  --num-slices=${WORKLOAD_NODEPOOL_COUNT?} \
+  --workload=${RUN_NAME?} \
+  --cluster=${GKE_CLUSTER?} \
+  --num-slices=${NUM_SLICES?} \
   --tpu-type=${TPU_TYPE?} \
-  --project=${PROJECT?} \
+  --project=${PROJECT_ID?} \
   --zone=${ZONE?} \
   --docker-image=${DOCKER_IMAGE?} \
   --command="python3 -m maxtext.trainers.pre_train.train \
-    base_output_directory=gs://${BUCKET_NAME?} \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
     per_device_batch_size=1 \
     enable_checkpointing=false \
     dataset_type=synthetic \
@@ -90,7 +111,7 @@ xpk workload create-pathways \
 You can check the status of your running workloads with the `xpk workload list` command.
 
 ```bash
-xpk workload list --cluster=${CLUSTER?} --project=${PROJECT?} --zone=${ZONE?}
+xpk workload list --cluster=${GKE_CLUSTER?} --project=${PROJECT_ID?} --zone=${ZONE?}
 ```
 
 ## 4. Running a headless (interactive) workload
@@ -104,12 +125,12 @@ This command reserves the TPUs and starts the Pathways head service on the clust
 ```bash
 xpk workload create-pathways \
   --headless \
-  --workload=${WORKLOAD_NAME?} \
-  --num-slices=${WORKLOAD_NODEPOOL_COUNT?} \
+  --workload=${RUN_NAME?} \
+  --num-slices=${NUM_SLICES?} \
   --tpu-type=${TPU_TYPE?} \
-  --project=${PROJECT?} \
+  --project=${PROJECT_ID?} \
   --zone=${ZONE?} \
-  --cluster=${CLUSTER?}
+  --cluster=${GKE_CLUSTER?}
 ```
 
 ### Step 2: Connect to the cluster via port forwarding
@@ -120,7 +141,7 @@ This command forwards local port 29000 to the controller pod in the cluster. It 
 
 ```bash
 kubectl port-forward \
-  "$(kubectl get pods -o name | grep ${WORKLOAD_NAME?}-pathways-head)" \
+  "$(kubectl get pods -o name | grep ${RUN_NAME?}-pathways-head)" \
   29000:29000 &> /dev/null &
 ```
 
@@ -135,7 +156,7 @@ export JAX_BACKEND_TARGET=grpc://127.0.0.1:29000
 
 # Run the training script
 python3 -m maxtext.trainers.pre_train.train \
-  base_output_directory=gs://${BUCKET_NAME?} \
+  base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
   per_device_batch_size=1 \
   enable_checkpointing=false \
   dataset_type=synthetic \
@@ -153,7 +174,7 @@ The output streams directly to your terminal, just as if you were running on a l
   - Ensure you have successfully pushed the image to your project's Artifact Registry.
   - Check that your GKE cluster has permissions to pull from the registry.
 - **`kubectl port-forward` fails**:
-  - Confirm that the pod from Step 1 is running (`kubectl get pods`). The name should match `${WORKLOAD_NAME?}-pathways-head-0`.
+  - Confirm that the pod from Step 1 is running (`kubectl get pods`). The name should match `${RUN_NAME?}-pathways-head-0`.
   - Ensure you are authenticated with `kubectl` and have the correct context set for your GKE cluster.
 - Make sure you import `pathwaysutils` package and call `pathwaysutils.initialize()` in your script when running the workload.
 

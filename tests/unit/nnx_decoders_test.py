@@ -70,6 +70,7 @@ def _make_config(**overrides):
       **_BASE_CONFIG,
       **extra_args,
       **overrides,
+      override_model_config=True,
   )
 
 

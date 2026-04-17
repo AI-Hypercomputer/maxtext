@@ -23,7 +23,7 @@ import tensorflow as tf
 from array_record.python import array_record_module
 
 import abc
-from typing import Any, Iterator, Optional, List, Callable
+from typing import Any, Iterator, Optional, List, Callable, Literal
 
 import flax
 from flax import nnx
@@ -262,6 +262,7 @@ class CombinedDistillationStrategy(DistillationStrategy):
       beta_feature: float = 0.0,
       layer_indices: Optional[List[int]] = None,
       feature_loss_fn: Callable[[jax.Array, jax.Array], jax.Array] | None = None,
+      feature_loss_type: Literal["cosine", "l2"] = "cosine",
       cosine_distance_axis: int | tuple[int, ...] = -1,
       vocab_size: int = 0,
   ):
@@ -275,6 +276,8 @@ class CombinedDistillationStrategy(DistillationStrategy):
         alpha: Weight to balance distillation loss and task loss (0.0 to 1.0).
         beta_feature: Weight to balance feature loss (0.0 to 1.0). 0.0 disables feature loss.
         layer_indices: Layer indices to apply feature loss.
+        feature_loss_type: The type of feature loss to use if `feature_loss_fn` is None.
+          Can be "cosine" (default) or "l2".
         feature_loss_fn: A function that takes two jax. Arrays (student_map,
           teacher_map) and returns a scalar loss. Defaults to Cosine Distance.
         cosine_distance_axis: The axis to use for cosine distance computation if
@@ -295,9 +298,16 @@ class CombinedDistillationStrategy(DistillationStrategy):
 
     self.feature_loss_fn = feature_loss_fn
     if feature_loss_fn is None:
-      self.feature_loss_fn = lambda student_features, teacher_features: jnp.mean(
-          optax.cosine_distance(student_features, teacher_features, axis=cosine_distance_axis)
-      )
+      if feature_loss_type == "cosine":
+        self.feature_loss_fn = lambda student_features, teacher_features: jnp.mean(
+            optax.cosine_distance(student_features, teacher_features, axis=cosine_distance_axis)
+        )
+      elif feature_loss_type == "l2":
+        self.feature_loss_fn = lambda student_features, teacher_features: jnp.mean(
+            optax.l2_loss(student_features, teacher_features)
+        )
+      else:
+        raise ValueError(f"Unsupported feature_loss_type: {feature_loss_type!r}")
 
   def compute_loss(
       self,

@@ -121,7 +121,7 @@ class GptOssDecoderLayer(nnx.Module):
         num_experts=config.num_experts,
         num_experts_per_tok=config.num_experts_per_tok,
         mesh=mesh,
-        kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_init=initializers.nd_dense_init(config.dense_init_scale, "fan_in", "truncated_normal"),
         kernel_axes=("embed", None),
         intermediate_dim=config.mlp_dim,
         dtype=config.dtype,
