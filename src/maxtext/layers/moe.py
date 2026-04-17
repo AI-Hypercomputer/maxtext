@@ -699,6 +699,34 @@ class RoutedMoE(nnx.Module):
 
     weights, selected_experts = self.get_topk(gate_logits, pre_bias_logits, rngs)
 
+    tokens_per_expert = jnp.bincount(selected_experts.ravel(), length=self.num_experts)
+    align_size = self.config.moe_permutation_group_align_size
+    if align_size > 0:
+      # Use (align - tokens_per_expert % align) % align so that experts already aligned to
+      # align_size need 0 padding tokens (not align_size, which would exceed the
+      # per-expert slot capacity of align_size - 1).
+      padding_tokens_per_expert = (align_size - (tokens_per_expert % align_size)) % align_size
+      # Build a static-size padding index buffer.
+      # Each expert i gets a slot of (align_size - 1) positions (worst-case padding,
+      # which occurs when tokens_per_expert[i] % align_size == 1).
+      # Within slot i: positions where offset < padding_tokens_per_expert[i]
+      # are assigned to expert i (real padding); the rest point to the last expert
+      # as overflow placeholders to keep the buffer statically sized.
+      # E.g. padding_tokens_per_expert=(1,3), align_size=8 → total=14:
+      #   [0, last, last, last, last, last, last,   # slot 0: 1 real, 6 overflow
+      #    1, 1, 1, last, last, last, last]          # slot 1: 3 real, 4 overflow
+      max_padding_per_expert = align_size - 1
+      max_total_padding_size = self.num_experts * max_padding_per_expert
+      positions = jnp.arange(max_total_padding_size)
+      expert_for_pos = positions // max_padding_per_expert
+      offset_in_slot = positions % max_padding_per_expert
+      padding_needed = padding_tokens_per_expert[expert_for_pos]
+      flatten_padding_selected_experts = jnp.where(
+          offset_in_slot < padding_needed,
+          expert_for_pos,
+          self.num_experts - 1,
+      )
+
     lb_loss = None
     if self.config.load_balance_loss_weight > 0.0:
       softmax_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
@@ -717,22 +745,44 @@ class RoutedMoE(nnx.Module):
       inputs_2d = inputs_2d * router_scores.reshape(bsz_times_seq_len, -1)
 
     flatten_selected_experts = jnp.ravel(selected_experts)
+    if align_size > 0:
+      flatten_selected_experts = jnp.concatenate([flatten_selected_experts, flatten_padding_selected_experts], axis=0)
     if roll_to_expert_id is not None:
       flatten_selected_experts = (flatten_selected_experts - roll_to_expert_id) % self.num_experts
     sorted_selected_experts = jnp.argsort(flatten_selected_experts)
     # sort inputs for number of selected experts
     replicated_inputs_2d = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
+    if align_size > 0:
+      replicated_inputs_2d = jnp.pad(
+        replicated_inputs_2d,
+        pad_width=(
+            # padding before, padding after
+            (0, flatten_padding_selected_experts.size),
+            (0, 0),
+        ),
+        mode='constant',
+        constant_values=0.0)
     sorted_inputs = _sort_activations(replicated_inputs_2d, sorted_selected_experts, use_custom_sort_vjp).astype(
         self.dtype
     )
-    group_size = jnp.bincount(flatten_selected_experts, length=self.num_experts)
-    # Return the experts for each sorted input.
-    expert_indices = jnp.arange(self.num_experts)
-    sorted_experts = jnp.repeat(
-        expert_indices,
-        repeats=group_size,
-        total_repeat_length=flatten_selected_experts.shape[0],
-    )
+    if align_size > 0:
+      # Compute group_size directly from tokens_per_expert + required padding rather than
+      # via bincount(flatten_selected_experts).  bincount would include overflow
+      # tokens (the static-buffer fill tokens pointing to num_experts-1) in
+      # group_size[num_experts-1], making it NOT a multiple of align_size.
+      # Direct computation gives each expert exactly ceil(count/align)*align tokens,
+      # all guaranteed to be multiples of align_size.
+      group_size = tokens_per_expert + padding_tokens_per_expert
+    else:
+      group_size = tokens_per_expert
+    if roll_to_expert_id is not None:
+      # Rolling shifts expert IDs; roll the group_sizes to match.
+      group_size = jnp.roll(group_size, -roll_to_expert_id)
+    # sorted_experts[i] = expert ID of the token at sorted position i.
+    # Directly index flatten_selected_experts (post-roll) by the sort permutation
+    # rather than reconstructing via jnp.repeat, which would need the overflow
+    # count to match total_repeat_length.
+    sorted_experts = flatten_selected_experts[sorted_selected_experts]
     return (
         sorted_inputs,
         sorted_selected_experts,
@@ -761,7 +811,7 @@ class RoutedMoE(nnx.Module):
         load_balance_loss_weight=self.config.load_balance_loss_weight,
         should_update_load_balance=self.should_update_load_balance(),
         routed_bias_update_rate=self.config.routed_bias_update_rate,
-        te_permutation_align_size=self.config.te_permutation_align_size,
+        moe_permutation_group_align_size=self.config.moe_permutation_group_align_size,
         roll_to_expert_id=roll_to_expert_id,
         num_experts_per_shard=num_experts_per_shard,
     )
@@ -799,6 +849,13 @@ class RoutedMoE(nnx.Module):
         use_custom_sort_vjp,
     )
     reshaped_weights = jnp.reshape(weights, (-1, self.num_experts_per_tok))
+    if self.config.moe_permutation_group_align_size > 0:
+      # Strip alignment padding tokens that were appended in _mt_permute.
+      # After unsorting, the first (batch*seq*top_k) rows hold the real token
+      # outputs; any trailing rows are padding tokens (zeroed out) and must be
+      # discarded before the reshape to (batch*seq, top_k, hidden).
+      num_real_tokens = reshaped_weights.shape[0] * self.num_experts_per_tok
+      unsort_intermediate = unsort_intermediate[:num_real_tokens]
     reshaped_intermediate = jnp.reshape(
         unsort_intermediate,
         (reshaped_weights.shape[0], self.num_experts_per_tok, -1),
@@ -1297,7 +1354,7 @@ class RoutedMoE(nnx.Module):
             assert self.config.quantization and self.config.quantization.startswith("te_"), "TE GMM currently requires TE quantization."
             # TODO(jberchtold): Adjust this based on TE GMM requirements per recipe
             te_gmm_align_size_requirement = self.quant.get_gmm_align_size(self.config.te_gmm_quantization)
-            assert self.config.te_router_and_permutation_impl and self.config.te_permutation_align_size % te_gmm_align_size_requirement == 0 and self.config.te_permutation_align_size > 0, f"TE GMM currently requires TE permutation with alignment (te_permutation_align_size > 0 and multiple of {te_gmm_align_size_requirement})."
+            assert self.config.moe_permutation_group_align_size % te_gmm_align_size_requirement == 0 and self.config.moe_permutation_group_align_size > 0, f"TE GMM currently requires permutation with alignment (moe_permutation_group_align_size > 0 and multiple of {te_gmm_align_size_requirement})."
             return self.quant.gmm(inputs, kernel, tiling, group_sizes, expert_assignments, self.config.te_gmm_quantization)
 
       # TODO (b/491979205) pipeline fsdp ag per repeat fails tokamax gmm
@@ -1524,7 +1581,7 @@ class RoutedMoE(nnx.Module):
         # The ring-of-experts strategy first duplicates the inputs to all
         # expert shards, and then routes within each shard.
 
-        use_te = self.config.te_router_and_permutation_impl and te_permutation.TE_PERMUTATION_AVAILABLE and te_router.TE_ROUTER_AVAILABLE
+        use_te = self.config.te_router_and_permutation_impl
 
         # Duplicate inputs to all expert shards.
         # TE path does not use pre_bias_logits, so skip its allgather
@@ -1549,9 +1606,11 @@ class RoutedMoE(nnx.Module):
         )
 
         # Filter down to the group sizes that apply to only the experts in the
-        # current shard. ragged_dot only processes sum(group_sizes) tokens,
-        # so no input masking is needed.
+        # current shard.
         group_sizes = group_sizes[:num_experts_per_shard]
+        if not use_te:
+          mask = jnp.arange(x.shape[0]) < jnp.sum(group_sizes)
+          x = jnp.where(mask[:, None], x, 0)
       else:
         # =======================================================================
         # Global Permutation (dispatches to TE or MT inside self.permute)
@@ -1593,18 +1652,18 @@ class RoutedMoE(nnx.Module):
             max_local_experts_per_tok = min(local_expert_size, self.config.num_experts_per_tok)
             buffer_size = int(num_expert_parallelism * batch_size * sequence_length * max_local_experts_per_tok)
 
-            # When using TE permutation with padding, the actual data size includes padding overhead.
-            # Each expert's tokens are aligned to te_permutation_align_size, which increases the
+            # When using alignment-based padding, the actual data size includes padding overhead.
+            # Each expert's tokens are aligned to moe_permutation_group_align_size, which increases the
             # total token count. We need to ensure the buffer can hold the padded data.
-            # Note: Padding is applied in global permute, so this follows global mode
-            if use_te_perm:
-              align_size = self.config.te_permutation_align_size
-              if align_size > 0:
-                # Add headroom for padding: each (shard, expert) chunk can add up to align_size-1 tokens
-                # Worst case: every chunk has 1 token, padded to align_size
-                # Total padding overhead = num_expert_parallelism * local_expert_size * (align_size - 1)
-                padding_headroom = int(num_expert_parallelism * local_expert_size * (align_size - 1))
-                buffer_size = buffer_size + padding_headroom
+            # Note: Padding is applied in global permute, so this follows global mode.
+            # Applied for both TE and MT permutation to support future per-group padding in mt_permute.
+            align_size = self.config.moe_permutation_group_align_size
+            if align_size > 0:
+              # Add headroom for padding: each (shard, expert) chunk can add up to align_size-1 tokens
+              # Worst case: every chunk has 1 token, padded to align_size
+              # Total padding overhead = num_expert_parallelism * local_expert_size * (align_size - 1)
+              padding_headroom = int(num_expert_parallelism * local_expert_size * (align_size - 1))
+              buffer_size = buffer_size + padding_headroom
 
             output_shape = jnp.zeros((buffer_size, self.config.emb_dim), dtype=x.dtype)
 
@@ -1772,17 +1831,17 @@ class RoutedMoE(nnx.Module):
         if num_expert_parallelism > 1:
           original_inputs_first_dim = batch_size * sequence_length * self.config.num_experts_per_tok
 
-          # When using TE permutation with padding, the reverse ragged_all_to_all receives
+          # When using alignment-based padding, the reverse ragged_all_to_all receives
           # padded tokens back. We need a buffer large enough to hold the padded data.
-          # Note: Padding is applied in global permute, so this follows global mode
+          # Note: Padding is applied in global permute, so this follows global mode.
+          # Applied for both TE and MT permutation to support future per-group padding in mt_permute.
           reverse_buffer_size = original_inputs_first_dim
-          if use_te_perm:
-            align_size = self.config.te_permutation_align_size
-            if align_size > 0:
-              # Add headroom for padding: same calculation as forward path
-              # Each expert's tokens can have up to align_size-1 padding overhead
-              padding_headroom = int(self.num_experts * (align_size - 1))
-              reverse_buffer_size = original_inputs_first_dim + padding_headroom
+          align_size = self.config.moe_permutation_group_align_size
+          if align_size > 0:
+            # Add headroom for padding: same calculation as forward path
+            # Each expert's tokens can have up to align_size-1 padding overhead
+            padding_headroom = int(self.num_experts * (align_size - 1))
+            reverse_buffer_size = original_inputs_first_dim + padding_headroom
 
           output_shape = jnp.zeros(
               (

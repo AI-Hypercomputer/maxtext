@@ -353,7 +353,7 @@ def te_permute(
     load_balance_loss_weight: float,
     should_update_load_balance: bool,
     routed_bias_update_rate: float,
-    te_permutation_align_size: int,
+    moe_permutation_group_align_size: int,
     roll_to_expert_id: Optional[int] = None,
     num_experts_per_shard: Optional[int] = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, Optional[jnp.ndarray],
@@ -378,7 +378,7 @@ def te_permute(
     load_balance_loss_weight: Weight for load balance loss (0 disables).
     should_update_load_balance: Whether to compute bias updates.
     routed_bias_update_rate: Rate for bias updates.
-    te_permutation_align_size: Alignment size for padding (0 disables).
+    moe_permutation_group_align_size: Alignment size for padding (0 disables).
     roll_to_expert_id: Expert ID offset for ring-of-experts.
     num_experts_per_shard: Number of experts per shard in ring-of-experts mode.
       When set, routing decisions are masked to local experts only.
@@ -423,7 +423,7 @@ def te_permute(
   num_tokens = inputs.shape[0] * inputs.shape[1]
   num_out_tokens = num_tokens * num_experts_per_tok
 
-  align_size = te_permutation_align_size if te_permutation_align_size > 0 else None
+  align_size = moe_permutation_group_align_size if moe_permutation_group_align_size > 0 else None
 
   permuted_outputs, _permuted_probs, row_id_map, pad_offsets, tokens_per_expert = (
       te_token_dispatch(
