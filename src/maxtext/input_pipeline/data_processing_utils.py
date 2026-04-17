@@ -15,6 +15,7 @@
 """Utility functions for data processing pipelines."""
 
 import functools
+import importlib
 
 import jax
 from grain.experimental import BestFitPackIterDataset, pick_performance_config
@@ -144,3 +145,10 @@ def apply_multiprocessing_and_prefetch(dataset, config, grain_worker_count, grai
       )
   )
   return dataset.mp_prefetch(multiprocessing_options)
+
+
+def load_formatter(formatting_func_path):
+  """Loads a formatter function from a given path."""
+  module_path, method_name = formatting_func_path.rsplit(".", 1)
+  module = importlib.import_module(module_path)
+  return getattr(module, method_name)

@@ -14,6 +14,9 @@
 
 """Instruction data processing test."""
 
+import json
+import os
+import tempfile
 import unittest
 
 from maxtext.input_pipeline import instruction_data_processing
@@ -21,23 +24,7 @@ from maxtext.input_pipeline import instruction_data_processing
 
 class InstructionDataProcessingTest(unittest.TestCase):
 
-  def test_load_template_from_file(self):
-    template_config = instruction_data_processing.load_template_from_file("maxtext/examples/chat_templates/gsm8k_rl.json")
-    self.assertEqual(
-        template_config,
-        {
-            "SYSTEM_PROMPT": (
-                "You are given a problem. Think about the problem and provide"
-                " your reasoning. Place it between {reasoning_start_token} and"
-                " {reasoning_end_token}. Then, provide the final answer (i.e.,"
-                " just one numerical value) between {solution_start_token} and"
-                " {solution_end_token}."
-            ),
-            "TEMPLATE": ("<start_of_turn>user\n{system_prompt}\n\n{question}<end_of_turn>\n<start_of_turn>model"),
-        },
-    )
-
-  def test_map_qa_data_to_conversation_with_prompt_completion_template(self):
+  def test_math_qa_formatting_with_prompt_completion_template(self):
     template_config = {
         "PROMPT_TEMPLATE": "This is a question: {question}",
         "COMPLETION_TEMPLATE": "<reasoning>\n{reasoning}\n</reasoning>\n<answer>\n{answer}\n</answer>",
@@ -47,7 +34,7 @@ class InstructionDataProcessingTest(unittest.TestCase):
         "question": "What is 2 + 2?",
         "answer": "Because 2 and 2 make 4.\n ## 4",
     }
-    example = instruction_data_processing.map_qa_data_to_conversation(example, template_config)
+    example = instruction_data_processing.math_qa_formatting(example, template_config)
     self.assertTrue("messages" in example)
     for data in example["messages"]:
       if data["role"] == "user":
@@ -55,7 +42,7 @@ class InstructionDataProcessingTest(unittest.TestCase):
       if data["role"] == "assistant":
         self.assertEqual(data["content"], "<reasoning>\nBecause 2 and 2 make 4.\n</reasoning>\n<answer>\n4\n</answer>")
 
-  def test_map_qa_data_to_conversation_with_no_reasoning_template(self):
+  def test_math_qa_formatting_with_no_reasoning_template(self):
     template_config = {
         "PROMPT_TEMPLATE": "This is a question: {question}",
         "COMPLETION_TEMPLATE": "The answer is: {answer}",
@@ -64,7 +51,7 @@ class InstructionDataProcessingTest(unittest.TestCase):
         "question": "What is the capital of France?",
         "answer": "The capital of France is Paris.",
     }
-    example = instruction_data_processing.map_qa_data_to_conversation(example, template_config)
+    example = instruction_data_processing.math_qa_formatting(example, template_config)
     self.assertTrue("messages" in example)
     for data in example["messages"]:
       if data["role"] == "user":
@@ -72,7 +59,7 @@ class InstructionDataProcessingTest(unittest.TestCase):
       if data["role"] == "assistant":
         self.assertEqual(data["content"], "The answer is: The capital of France is Paris.")
 
-  def test_map_qa_data_to_conversation_with_missing_reasoning_placeholder(self):
+  def test_math_qa_formatting_with_missing_reasoning_placeholder(self):
     template_config = {
         "PROMPT_TEMPLATE": "This is a question: {question}",
         "COMPLETION_TEMPLATE": "The answer is: {answer}",
@@ -82,7 +69,7 @@ class InstructionDataProcessingTest(unittest.TestCase):
         "question": "What is 2 + 2?",
         "answer": "Because 2 and 2 make 4.\n ## The answer is: 4",
     }
-    example = instruction_data_processing.map_qa_data_to_conversation(example, template_config)
+    example = instruction_data_processing.math_qa_formatting(example, template_config)
     self.assertTrue("messages" in example)
     for data in example["messages"]:
       if data["role"] == "user":
@@ -90,7 +77,7 @@ class InstructionDataProcessingTest(unittest.TestCase):
       if data["role"] == "assistant":
         self.assertEqual(data["content"], "Because 2 and 2 make 4.\n ## The answer is: 4")
 
-  def test_map_qa_data_to_conversation_with_missing_answer_placeholder(self):
+  def test_math_qa_formatting_with_missing_answer_placeholder(self):
     template_config = {
         "PROMPT_TEMPLATE": "This is a question: {question}",
         "COMPLETION_TEMPLATE": "The answer is: {reply}",
@@ -100,7 +87,7 @@ class InstructionDataProcessingTest(unittest.TestCase):
         "question": "What is 2 + 2?",
         "answer": "Because 2 and 2 make 4.\n ## The answer is: 4",
     }
-    example = instruction_data_processing.map_qa_data_to_conversation(example, template_config)
+    example = instruction_data_processing.math_qa_formatting(example, template_config)
     self.assertTrue("messages" in example)
     for data in example["messages"]:
       if data["role"] == "user":
@@ -108,7 +95,7 @@ class InstructionDataProcessingTest(unittest.TestCase):
       if data["role"] == "assistant":
         self.assertEqual(data["content"], "Because 2 and 2 make 4.\n ## The answer is: 4")
 
-  def test_map_qa_data_to_conversation_with_missing_question_placeholder(self):
+  def test_math_qa_formatting_with_missing_question_placeholder(self):
     template_config = {
         "PROMPT_TEMPLATE": "This is a question: {user_question}",
         "COMPLETION_TEMPLATE": "The answer is: {answer}",
@@ -117,7 +104,7 @@ class InstructionDataProcessingTest(unittest.TestCase):
         "question": "What is 2 + 2?",
         "answer": "Because 2 and 2 make 4.\n ## The answer is: 4",
     }
-    example = instruction_data_processing.map_qa_data_to_conversation(example, template_config)
+    example = instruction_data_processing.math_qa_formatting(example, template_config)
     self.assertTrue("messages" in example)
     for data in example["messages"]:
       if data["role"] == "user":
@@ -125,19 +112,56 @@ class InstructionDataProcessingTest(unittest.TestCase):
       if data["role"] == "assistant":
         self.assertEqual(data["content"], "The answer is: Because 2 and 2 make 4.\n ## The answer is: 4")
 
-  def test_map_qa_data_to_conversation_with_no_templates(self):
+  def test_math_qa_formatting_with_no_templates(self):
     template_config = {}
     example = {
         "question": "What is the capital of Germany?",
         "answer": "The capital of Germany is Berlin.",
     }
-    example = instruction_data_processing.map_qa_data_to_conversation(example, template_config)
+    example = instruction_data_processing.math_qa_formatting(example, template_config)
     self.assertTrue("messages" in example)
     for data in example["messages"]:
       if data["role"] == "user":
         self.assertEqual(data["content"], "What is the capital of Germany?")
       if data["role"] == "assistant":
         self.assertEqual(data["content"], "The capital of Germany is Berlin.")
+
+  def test_load_template_from_file(self):
+    with tempfile.TemporaryDirectory() as tmpdir:
+      # Test .jinja file
+      jinja_path = os.path.join(tmpdir, "test.jinja")
+      with open(jinja_path, "w", encoding="utf-8") as f:
+        f.write("test jinja template")
+      self.assertEqual(
+          instruction_data_processing.load_template_from_file(jinja_path),
+          "test jinja template",
+      )
+
+      # Test .json file with chat_template
+      json_path = os.path.join(tmpdir, "test.json")
+      with open(json_path, "w", encoding="utf-8") as f:
+        json.dump({"chat_template": "test json template"}, f)
+      self.assertEqual(
+          instruction_data_processing.load_template_from_file(json_path),
+          "test json template",
+      )
+
+      # Test .json file without chat_template
+      json_no_key_path = os.path.join(tmpdir, "no_key.json")
+      with open(json_no_key_path, "w", encoding="utf-8") as f:
+        json.dump({"other_key": "other_value"}, f)
+      self.assertIsNone(
+          instruction_data_processing.load_template_from_file(
+              json_no_key_path
+          )
+      )
+
+      # Test non-existent file
+      self.assertIsNone(
+          instruction_data_processing.load_template_from_file(
+              "non_existent.jinja"
+          )
+      )
 
 
 if __name__ == "__main__":

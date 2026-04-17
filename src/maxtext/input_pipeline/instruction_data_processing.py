@@ -23,14 +23,33 @@ from maxtext.utils import max_logging
 
 def load_template_from_file(template_path):
   """Loads a template from a file."""
-  template_config = None
+  if not template_path:
+    return None
+
   current_dir = os.path.dirname(os.path.abspath(__file__))
   repo_root = os.path.abspath(os.path.join(current_dir, "..", ".."))
-  template_path = os.path.join(repo_root, template_path)
-  if os.path.isfile(template_path) and template_path.endswith(".json"):
-    with open(template_path, encoding="utf-8") as f:
-      template_config = json.load(f)
-  return template_config
+  template_full_path = os.path.join(repo_root, template_path)
+
+  if not os.path.isfile(template_full_path):
+    return None
+
+  if template_full_path.endswith((".jinja", ".j2", ".txt")):
+    with open(template_full_path, "r", encoding="utf-8") as f:
+      return f.read()
+
+  if template_full_path.endswith(".json"):
+    with open(template_full_path, "r", encoding="utf-8") as f:
+      try:
+        template_config = json.load(f)
+        if (
+            isinstance(template_config, dict)
+            and "chat_template" in template_config
+        ):
+          return template_config["chat_template"]
+      except json.JSONDecodeError:
+        return None
+
+  return None
 
 
 def get_template_placeholders(template):
@@ -46,7 +65,7 @@ def extract_reasoning_and_answer(text, separator):
   return reasoning, answer
 
 
-def map_qa_data_to_conversation(example, template_config):
+def math_qa_formatting(example, template_config):
   """Maps question-answer pairs to conversational format."""
 
   # Initialize prompt and completion with fallback templates
@@ -111,28 +130,3 @@ def map_qa_data_to_conversation(example, template_config):
 
   example["messages"] = [prompt, completion]
   return example
-
-
-def convert_to_conversational_format(
-    dataset,
-    data_columns,
-    chat_template_path,
-):
-  """Converts instruction dataset to conversational format."""
-  import datasets  # pylint: disable=import-outside-toplevel
-
-  template_config = None
-  if chat_template_path:
-    template_config = load_template_from_file(chat_template_path)
-  if "question" in data_columns and "answer" in data_columns:
-    dataset_features = datasets.Features(
-        {"messages": [{"content": datasets.Value(dtype="string"), "role": datasets.Value(dtype="string")}]}
-    )
-    dataset = dataset.map(
-        map_qa_data_to_conversation,
-        fn_kwargs={"template_config": template_config},
-        remove_columns=data_columns,
-        features=dataset_features,
-    )
-    data_columns = ["messages"]
-  return dataset, data_columns
