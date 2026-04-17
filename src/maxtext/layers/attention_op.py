@@ -38,7 +38,7 @@ from maxtext.common.common_types import (
     AttentionType,
     AxisIdxes,
     AxisNames,
-    BATCH,
+    BATCH_ATTN as BATCH,
     CACHE_BATCH,
     CACHE_BATCH_PREFILL,
     CACHE_HEADS,
