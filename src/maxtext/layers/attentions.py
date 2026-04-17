@@ -27,7 +27,7 @@ from flax import nnx
 
 from maxtext.common.common_types import (
     DecoderBlockType,
-    BATCH,
+    BATCH_ATTN as BATCH,
     HEAD,
     PREFILL_LENGTH,
     D_KV,

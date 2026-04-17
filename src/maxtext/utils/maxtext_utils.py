@@ -13,13 +13,13 @@
 # limitations under the License.
 
 # pylint: disable=line-too-long, disable=bare-except, consider-using-generator
-""" Utils that are only interesting to MaxText. """
+"""Utils that are only interesting to MaxText."""
 
 import functools
 import pickle
 import os
 
-from flax import linen as nn
+from flax import nnx, linen as nn
 from flax.linen import partitioning as nn_partitioning
 from flax.training import train_state
 
@@ -1625,7 +1625,35 @@ def create_learning_rate_schedule(config):
   return optax.join_schedules(pieces, boundaries)
 
 
-def print_shardings_params(params, params_sharding, mesh, logical_annotations=None):
+# def print_shardings_params(params, params_sharding, mesh, logical_annotations=None):
+#   """
+#   Print state shardings comparing Logical Definition vs Physical Result.
+#   """
+#   if not hasattr(params, "params"):
+#     params = {"params": params}
+#   if not hasattr(params_sharding, "params"):
+#     params_sharding = {"params": params_sharding}
+#   if logical_annotations and not hasattr(logical_annotations, "params"):
+#     logical_annotations = {"params": logical_annotations}
+
+#   leaves_params, _ = jax.tree_util.tree_flatten_with_path(params, is_leaf=lambda x: isinstance(x, nnx.Variable))
+#   leaves_sharding, _ = jax.tree_util.tree_flatten_with_path(params_sharding, is_leaf=lambda x: isinstance(x, nnx.Variable))
+#   leaves_logical, _ = jax.tree_util.tree_flatten_with_path(logical_annotations, is_leaf=lambda x: isinstance(x, nnx.Variable))
+
+#   for (path, leaf_val), (_, leaf_sharding), (_, leaf_logical_val) in zip(leaves_params, leaves_sharding, leaves_logical):
+#     path_str = "/".join(str(p.key if hasattr(p, "key") else p.name) for p in path)
+#     shape = jax.typeof(getattr(leaf_val, "value"))
+#     pspec = sharding.remove_size_one_mesh_axis(leaf_sharding.spec, mesh)
+#     pspec_str = str(tuple(pspec))
+#     logical_str = str(getattr(leaf_logical_val, "out_sharding", None))
+
+#     message = f" {path_str}\n" f"    Shape:     {shape}\n" f"    Logical:   {logical_str}\n" f"    Physical:  {pspec_str}"
+#     max_logging.info(message)
+
+#   print(flush=True)
+
+
+def print_shardings_params(params, params_sharding, mesh, logical_annotations=None, target_layer=0):
   """
   Print state shardings comparing Logical Definition vs Physical Result.
   """
@@ -1636,16 +1664,33 @@ def print_shardings_params(params, params_sharding, mesh, logical_annotations=No
   if logical_annotations and not hasattr(logical_annotations, "params"):
     logical_annotations = {"params": logical_annotations}
 
-  leaves_params, _ = jax.tree_util.tree_flatten_with_path(params)
-  leaves_sharding, _ = jax.tree_util.tree_flatten_with_path(params_sharding)
-  leaves_logical, _ = jax.tree_util.tree_flatten_with_path(logical_annotations)
+  leaves_params, _ = jax.tree_util.tree_flatten_with_path(params, is_leaf=lambda x: isinstance(x, nnx.Variable))
+  leaves_sharding, _ = jax.tree_util.tree_flatten_with_path(
+      params_sharding, is_leaf=lambda x: isinstance(x, nnx.Variable)
+  )
+  leaves_logical, _ = jax.tree_util.tree_flatten_with_path(
+      logical_annotations, is_leaf=lambda x: isinstance(x, nnx.Variable)
+  )
 
   for (path, leaf_val), (_, leaf_sharding), (_, leaf_logical_val) in zip(leaves_params, leaves_sharding, leaves_logical):
-    path_str = "/".join(str(p.key if hasattr(p, "key") else p.name) for p in path)
-    shape = jax.typeof(leaf_val)
+    # Extract path keys to accurately check for layer names
+    path_keys = [str(p.key if hasattr(p, "key") else p.name) for p in path]
+    path_str = "/".join(path_keys)
+
+    # Check if param is inside a layer block, and if it's the target layer
+    is_layer_param = any(k.startswith("layers_") for k in path_keys)
+    is_target_layer = any(k == f"layers_{target_layer}" for k in path_keys)
+    # Skip logging if it belongs to a layer that isn't our target
+    if is_layer_param and not is_target_layer:
+      continue
+
+    if "to_nnx__rngs" in path_str:
+      continue
+
+    shape = jax.typeof(getattr(leaf_val, "value"))
     pspec = sharding.remove_size_one_mesh_axis(leaf_sharding.spec, mesh)
     pspec_str = str(tuple(pspec))
-    logical_str = str(leaf_logical_val)
+    logical_str = str(getattr(leaf_logical_val, "out_sharding", None))
 
     message = f" {path_str}\n" f"    Shape:     {shape}\n" f"    Logical:   {logical_str}\n" f"    Physical:  {pspec_str}"
     max_logging.info(message)

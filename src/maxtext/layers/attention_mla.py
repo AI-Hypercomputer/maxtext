@@ -36,7 +36,7 @@ from maxtext.common.common_types import (
     Array,
     AxisIdxes,
     AxisNames,
-    BATCH,
+    BATCH_ATTN as BATCH,
     CACHE_BATCH,
     CACHE_BATCH_PREFILL,
     CACHE_SEQUENCE,

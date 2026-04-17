@@ -29,59 +29,78 @@ weight_dtype: bfloat16
 # -------------- Logical Axis Rules --------------
 mesh_axes: ['data', 'attn_dp', 'model', 'expert', 'attn_dp_expert']
 logical_axis_rules: [
-                      ['activation_batch', ['data']],
-                      ['activation_batch_moe', ['data']],
-                      ['activation_embed_and_logits_batch', ['data', 'expert']],
-                      ['activation_embed_and_logits_batch_sequence', ['data', 'expert']],
+                      # ==========================================
+                      # Vocabulary Embedding
+                      # ==========================================
+                      # Vocab Activations
+                      ['activation_embed_and_logits_batch', ['data']],
+                      ['activation_embed_and_logits_batch_sequence', ['data']],
+                      ['activation_vocab', ['model', 'expert', 'attn_dp', 'attn_dp_expert']],
+                      # Vocab Weights
+                      ['vocab', ['model', 'expert', 'attn_dp', 'attn_dp_expert']],
+                      ['embed_vocab', []],
+                      # ==========================================
+                      # Attention
+                      # ==========================================
+                      # Attention Activations
+                      ['activation_batch_attn', ['data', 'attn_dp', 'attn_dp_expert']],
                       ['activation_heads', ['model', 'expert']],
                       ['activation_kv_heads', ['model', 'expert']],
-                      ['activation_attn_length', []],
-                      ['activation_length', []],
-                      ['activation_length_moe', []],
-                      ['activation_q_length', ['expert', 'attn_dp_expert']],
-                      ['activation_attn_embed', 'model'],
-                      # Expert is missing explicitly from activation_embed despite using TP.
-                      # We are going for a replicate-AR style of TP as opposed to our typical AG-RS style of TP
-                      # due to the output sharding of the fused_moe_gmm kernel in tpu-inference.
-                      ['activation_embed', ['model', 'attn_dp']],
-                      ['activation_embed_moe', ['model', 'attn_dp']],
-                      ['activation_mlp', ['model', 'attn_dp']],
-                      ['activation_mlp_moe', ['model', 'attn_dp']],
-                      ['activation_kv', ['model']],
-                      ['activation_prefill_kv_batch', ['expert', 'attn_dp_expert']],
-                      ['activation_kv_batch', ['data']],
-                      ['activation_kv_head_dim', ['model']],
-                      ['activation_vocab', ['model', 'attn_dp']],
-                      ['activation_norm_length', []],
-                      ['activation_norm_length_moe', []],
-                      ['activation_exp', ['expert', 'attn_dp_expert']],
-                      ['decode_batch', ['data']],
-                      ['decode_batch_moe', ['data']],
-                      ['decode_length', []],
-                      ['mlp', ['model', 'attn_dp']],
-                      ['mlp_moe', ['model', 'attn_dp']],
-                      ['mlp_no_fsdp', ['model', 'attn_dp']],
-                      ['vocab', ['model', 'attn_dp']],
-                      # Expert is intended to act like TP for attention.
-                      # We target two all-reduces, one at the end of attention out projection and one at the end of the feedforward.
+                      ['activation_attn_embed', []],
+                      ['activation_kv', ['model', 'expert']],
+                      ['activation_kv_batch', ['data', 'attn_dp', 'attn_dp_expert']],
+                      ['activation_kv_head_dim', []],
+                      # Attention Weights
                       ['heads', ['model', 'expert']],
                       ['q_heads', ['model', 'expert']],
                       ['kv_heads', ['model', 'expert']],
-                      ['kv_head_dim', []],
+                      ['qkv', []],
                       ['kv', []],
-                      ['embed', ['expert', 'attn_dp_expert']],
-                      ['embed', ['attn_dp_expert']],
-                      ['embed_vocab', ['expert', 'attn_dp_expert']],
-                      ['embed_vocab', ['attn_dp_expert']],
+                      ['kv_head_dim', []],
+                      ['q_lora', []],
+                      ["q_lora_up_proj", []],
+                      ['kv_lora', []],
+                      ["kv_lora_up_proj", []],
+                      # ==========================================
+                      # Mixture of Experts (MoE)
+                      # ==========================================
+                      # MoE Activations
+                      ['activation_batch_moe', ['data']],
+                      ['activation_embed_moe', ['model']],
+                      ['activation_mlp_moe', []],
+                      ['activation_exp', ['expert', 'attn_dp', 'attn_dp_expert']],
+                      # MoE Weights
+                      ['exp', ['expert', 'attn_dp', 'attn_dp_expert']],
+                      ['mlp_moe', []],
                       ['embed_moe', []],
-                      ['embed_moe', []],
-                      ['embed_tensor_transpose', ['attn_dp', 'model']],
-                      ['q_lora', ['expert', 'attn_dp_expert']],
-                      ['kv_lora', ['expert', 'attn_dp_expert']],
+                      # ==========================================
+                      # Standard MLP / Dense Layers / Model Structure
+                      # ==========================================
+                      # Dense Activations
+                      ['activation_mlp', ['model', 'expert', 'attn_dp', 'attn_dp_expert']],
+                      # Note activation batch and length also get used in attention and vocab
+                      ['activation_batch', ['data']],
+                      ['activation_embed', ['model', 'expert', 'attn_dp', 'attn_dp_expert']],
+                      # General Weights
+                      ['mlp', ['model', 'expert', 'attn_dp', 'attn_dp_expert']],
+                      ['embed', []],
                       ['norm', []],
+                      # ==========================================
+                      # Inference(Prefill, Decode, Cache)
+                      # ==========================================
+                      ['activation_prefill_kv_batch', ['data', 'attn_dp', 'attn_dp_expert']],
+                      ['decode_batch', ['data', 'attn_dp', 'attn_dp_expert']],
+                      ['cache_heads', ['model', 'expert']],
                       ['cache_heads', ['model']],
-                      ['exp', ['expert', 'attn_dp_expert']],
-                      ['paged_kv_heads', ['model']],
-                    ]
+                      ['paged_kv_heads', ['model', 'expert']],
+                      ['cache_batch_prefill', []],
+                      ['cache_batch', []],
+                      ['cache_heads_none', []],
+                      ['cache_kv', []],
+                      ['cache_sequence', []],
+                      ['num_pages', []],
+                      ['tokens_per_page', []],
+                      ['paged_kv_head_dim_size', []],
+                  ]
 data_sharding: [['data', 'attn_dp', 'model', 'expert', 'attn_dp_expert']]
 input_data_sharding_logical_axes: ['activation_embed_and_logits_batch']
