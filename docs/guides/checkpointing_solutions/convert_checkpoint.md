@@ -240,7 +240,7 @@ Here is an example [PR to add support for gemma3 multi-modal model](https://gith
 
 ### Common Errors
 
-- "Type ShapeDtypeStruct is not a valid JAX type": Usually caused by a mismatch in the `scan_layers` flag.
+- When loading converted checkpoint, if you see "Type ShapeDtypeStruct is not a valid JAX type", this is usually caused by a structure mismatch between the converted checkpoint and MaxText model.
 
 - If the converted checkpoint loads without errors but produces nonsensical output, likely an error in the Q/K/V weight reshaping logic during conversion.
 
