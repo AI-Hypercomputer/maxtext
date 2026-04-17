@@ -375,11 +375,6 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       fp8_stats = jax.tree_util.tree_map(lambda x: jnp.nan_to_num(x, nan=0.0), fp8_stats)
     grads = dict(grads)
     grads[maxtext_utils.OVERWRITE_WITH_GRADIENT] = fp8_stats
-  # Zero out any remaining NaN in float gradients to prevent param corruption
-  grads = jax.tree_util.tree_map(
-      lambda x: jnp.nan_to_num(x, nan=0.0) if jnp.issubdtype(x.dtype, jnp.floating) else x,
-      grads,
-  )
 
   if config.optimizer_memory_host_offload:
     state = state.replace(
