@@ -528,6 +528,38 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info,
   if has_mtp:
     max_logging.log("Processing MTP Layer")
 
+    # Initialize the mtp_block dictionary structure
+    jax_weights["mtp_block"] = {
+        "mtp_layer_1": {
+            "mtp_1_embedding_norm": {"scale": None},
+            "mtp_1_hidden_state_norm": {"scale": None},
+            "mtp_1_projection": {"kernel": None},
+            "mtp_1_transformer_layer": {
+                "pre_self_attention_layer_norm": {"scale": None},
+                "post_self_attention_layer_norm": {"scale": None},
+                "self_attention": {
+                    "kv_norm": {"scale": None},
+                    "wkv_a": {"kernel": None},
+                    "wkv_b": {"kernel": None},
+                    "out": {"kernel": None},
+                },
+                "DeepSeekMoeBlock_0": {
+                    "MoeBlock_0": {
+                        "wi_0": None,
+                        "wi_1": None,
+                        "wo": None,
+                        "gate": {"kernel": None},
+                    },
+                    "shared_experts": {
+                        "wi_0": {"kernel": None},
+                        "wi_1": {"kernel": None},
+                        "wo": {"kernel": None},
+                    },
+                },
+            },
+        }
+    }
+
     # MTP unique components
     jax_weights["mtp_block"]["mtp_layer_1"]["mtp_1_embedding_norm"]["scale"] = (
         chkpt_vars["mtp_block.mtp_layer_1.mtp_1_embedding_norm.scale"].to(torch.float16).numpy()

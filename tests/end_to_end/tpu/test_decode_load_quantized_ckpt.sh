@@ -43,7 +43,7 @@ export OUTFILE="${OUTDIR}/${script_name}.txt"
 mkdir -p $OUTDIR
 echo
 # Run script
-${cmd} python3 -m MaxText.${script_name} \
+${cmd} python3 -m maxtext.inference.${script_name} \
   "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"/base.yml \
   tokenizer_path=${TOKENIZER_PATH} \
   load_parameters_path=${LOAD_PARAMETERS_PATH} \

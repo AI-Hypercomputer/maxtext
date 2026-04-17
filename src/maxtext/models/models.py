@@ -93,14 +93,17 @@ class TransformerLinenPure(nn.Module):
     # If MTP is enabled via config, set up the MTP block.
     if self.config.mtp_num_layers > 0:
       # Get the list of layer blueprints for the current model.
-      layer_types = self.decoder.get_decoder_layers()
       # For MTP, we use the DecoderLayer blueprint to ensure architectural consistency.
       # By convention, this is the last layer in the list.
-      mtp_layer = layer_types[-1]
+      layer_types = self.decoder.get_decoder_layers()
+      mtp_layer_linen = layer_types[-1]
+      # UNWRAP: The MTP block is pure NNX. If the decoder returned a Linen wrapper,
+      # extract the native NNX class to preserve parameter tracing/scoping.
+      mtp_layer_nnx = getattr(mtp_layer_linen, "module_class", mtp_layer_linen)
       self.mtp_block = multi_token_prediction_block_as_linen(
           config=self.config,
           mesh=self.mesh,
-          transformer_layer_module=mtp_layer,
+          transformer_layer_module=mtp_layer_nnx,
           decoder=self.decoder,
           rngs=self.make_rng("mtp_block"),
       )

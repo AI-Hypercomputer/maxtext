@@ -28,6 +28,8 @@ In this tutorial we use a single host TPU VM such as `v6e-8/v5p-8`. Let's get st
 
 For instructions on installing MaxText with post-training dependencies on your VM, please refer to the [official documentation](https://maxtext.readthedocs.io/en/latest/install_maxtext.html) and use the `maxtext[tpu-post-train]` installation path to include all necessary post-training dependencies.
 
+> **Note:** If you have previously installed MaxText with a different option (e.g., `maxtext[tpu]`), we strongly recommend using a fresh virtual environment for `maxtext[tpu-post-train]` to avoid potential library version conflicts.
+
 ## Setup environment variables
 
 Login to Hugging Face. Provide your access token when prompted:
@@ -36,15 +38,27 @@ Login to Hugging Face. Provide your access token when prompted:
 hf auth login
 ```
 
-Set the following environment variables before running SFT.
+Set up the following environment variables to configure your training run. Replace
+placeholders with your actual values.
 
-```sh
+```bash
 # -- Model configuration --
+# The MaxText model name. See `src/maxtext/configs/types.py` for `ModelName` for a
+# full list of supported models.
 export MODEL=<MaxText Model> # e.g., 'llama3.1-8b-Instruct'
 
 # -- MaxText configuration --
-export BASE_OUTPUT_DIRECTORY=<output directory to store run logs> # e.g., gs://my-bucket/my-output-directory
-export RUN_NAME=<name for this run> # e.g., $(date +%Y-%m-%d-%H-%M-%S)
+# Use a GCS bucket you own to store logs and checkpoints. Ideally in the same
+# region as your TPUs to minimize latency and costs.
+# You can list your buckets and their locations in the
+# [Cloud Console](https://console.cloud.google.com/storage/browser).
+export BASE_OUTPUT_DIRECTORY=<gcs bucket path> # e.g., gs://my-bucket/maxtext-runs
+
+# An arbitrary string to identify this specific run.
+# We recommend to include the model, user, and timestamp.
+# Note: Kubernetes requires workload names to be valid DNS labels (lowercase, no underscores or periods).
+export RUN_NAME=<Name for this run>
+
 export STEPS=<number of fine-tuning steps to run> # e.g., 1000
 export PER_DEVICE_BATCH_SIZE=<batch size per device> # e.g., 1
 

@@ -27,7 +27,7 @@ import jax
 from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from maxtext.common.common_types import Config, DecoderBlockType, EP_AS_CONTEXT, ShardMode
+from maxtext.common.common_types import Config, DecoderBlockType, ShardMode
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN
 from maxtext.inference import page_manager
 from maxtext.layers import linears
@@ -42,6 +42,7 @@ from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.models import (
     deepseek,
     deepseek_batchsplit,
+    deepseek_batchsplit_fp8,
     gemma,
     gemma2,
     gemma3,
@@ -55,6 +56,7 @@ from maxtext.models import (
     olmo3,
     qwen2,
     qwen3,
+    qwen3_custom,
     simple_layer,
 )
 from maxtext.multimodal import utils as mm_utils
@@ -106,10 +108,8 @@ class DecoderLayer(nn.Module):
 
     if self.model_mode == MODEL_MODE_PREFILL:
       logical_axis_names = ("activation_batch", "prefill_activation_length", "activation_embed")
-    elif self.config.expert_shard_attention_option == EP_AS_CONTEXT and self.model_mode == MODEL_MODE_TRAIN:
-      logical_axis_names = ("activation_batch_no_exp", "activation_length", "activation_embed")
     else:
-      logical_axis_names = ("activation_batch", "activation_length_no_exp", "activation_embed")
+      logical_axis_names = ("activation_batch", "activation_length", "activation_embed")
 
     if model_mode == MODEL_MODE_PREFILL:
       inputs = _maybe_shard_with_logical(inputs, logical_axis_names)
@@ -477,6 +477,8 @@ class Decoder(nn.Module):
         return [qwen3.Qwen3DecoderLayerToLinen]
       case DecoderBlockType.QWEN3_MOE:
         return [qwen3.Qwen3MoeDecoderLayerToLinen]
+      case DecoderBlockType.QWEN3_CUSTOM_MOE:
+        return [qwen3_custom.Qwen3CustomMoeDecoderLayerToLinen]
       case DecoderBlockType.QWEN3_NEXT:
         return [qwen3.Qwen3NextScannableBlockToLinen] if self.config.scan_layers else [qwen3.Qwen3NextDecoderLayerToLinen]
       case DecoderBlockType.SIMPLE:
@@ -535,6 +537,7 @@ class Decoder(nn.Module):
         DecoderBlockType.QWEN2,
         DecoderBlockType.QWEN3,
         DecoderBlockType.QWEN3_MOE,
+        DecoderBlockType.QWEN3_CUSTOM_MOE,
         DecoderBlockType.GPT_OSS,
         DecoderBlockType.SIMPLE,
         DecoderBlockType.SIMPLE_MLP,
@@ -692,7 +695,7 @@ class Decoder(nn.Module):
 
     cfg = self.config
     if cfg.shard_mode == ShardMode.EXPLICIT:
-      norm_out_sharding = create_sharding(self.mesh, ("activation_batch", "activation_length_no_exp", "activation_embed"))
+      norm_out_sharding = create_sharding(self.mesh, ("activation_batch", "activation_length", "activation_embed"))
     else:
       norm_out_sharding = None
 
@@ -710,7 +713,7 @@ class Decoder(nn.Module):
       out_sharding = create_sharding(self.mesh, (None, None, "activation_vocab"))
     else:
       out_sharding = create_sharding(
-          self.mesh, ("activation_embed_and_logits_batch", "activation_length_no_exp", "activation_vocab")
+          self.mesh, ("activation_embed_and_logits_batch", "activation_length", "activation_vocab")
       )
 
     # [batch, length, emb_dim] -> [batch, length, vocab_size]
@@ -737,7 +740,7 @@ class Decoder(nn.Module):
           out_features_shape=cfg.vocab_size,
           weight_dtype=cfg.weight_dtype,
           dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
-          kernel_axes=("embed", "vocab"),
+          kernel_axes=("embed_vocab", "vocab"),
           shard_mode=cfg.shard_mode,
           name="logits_dense",
           matmul_precision=self.config.matmul_precision,
@@ -915,17 +918,28 @@ class Decoder(nn.Module):
             # as detected by immutable params, use deepseek_batchsplit custom
             # scan with initialized parameters.
             if cfg.use_batch_split_schedule and not self.is_mutable_collection("params"):
-              y = deepseek_batchsplit.scan_batch_split_layers(
-                  y,
-                  self.variables["params"]["moe_layers"],
-                  decoder_positions,
-                  decoder_segment_ids,
-                  model_mode=model_mode,
-                  mesh=mesh,
-                  quant=self.quant,
-                  cfg=cfg,
-                  policy=policy,
-              )
+              if cfg.use_qwix_quantization:
+                y = deepseek_batchsplit_fp8.scan_batch_split_layers(
+                    y,
+                    self.variables["params"]["moe_layers"],
+                    decoder_positions,
+                    decoder_segment_ids,
+                    model_mode=model_mode,
+                    mesh=mesh,
+                    quant=self.quant,
+                    cfg=cfg,
+                    policy=policy,
+                )
+              else:
+                # bf16 code path
+                y = deepseek_batchsplit.scan_batch_split_layers(
+                    y,
+                    self.variables["params"]["moe_layers"],
+                    decoder_positions,
+                    mesh=mesh,
+                    cfg=cfg,
+                    num_layers=num_moe_layers,
+                )
             else:
               y, _ = self.scan_decoder_layers(
                   cfg,
@@ -1104,11 +1118,14 @@ class Decoder(nn.Module):
       logits = None
     # When in the Indexer Dense Warm-up stage, skip the expensive output head projection
     # for efficiency, as the main model is frozen and the LM loss is not needed.
-    elif (cfg.use_indexer and not cfg.indexer_sparse_training) and self.model_mode == MODEL_MODE_TRAIN:
+    # TODO(b/501446870): Investigate model_mode as train at beginning for decoding stage
+    elif (
+        cfg.use_indexer and cfg.indexer_loss_scaling_factor > 0.0 and not cfg.indexer_sparse_training
+    ) and model_mode == MODEL_MODE_TRAIN:
       logits = None
     # When vocab tiling is enabled in training mode, full logits won't generate to reduce memory
     # Instead, we keep track on the hidden states, which has smaller size compared to full logits
-    elif cfg.num_vocab_tiling > 1 and self.model_mode == MODEL_MODE_TRAIN:
+    elif cfg.num_vocab_tiling > 1 and model_mode == MODEL_MODE_TRAIN:
       logits = None
       self.sow("intermediates", "hidden_states", hidden_state)
 

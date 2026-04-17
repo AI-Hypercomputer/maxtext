@@ -403,7 +403,7 @@ class Llama4DecoderLayer(nnx.Module):
       self.Llama4MoEBlock_0 = RoutedAndSharedMoE(
           config=config,
           mesh=self.mesh,
-          kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+          kernel_init=initializers.nd_dense_init(config.dense_init_scale, "fan_in", "truncated_normal"),
           kernel_axes=("embed", None),
           dtype=config.dtype,
           weight_dtype=config.weight_dtype,

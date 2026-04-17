@@ -34,13 +34,26 @@ Login to Hugging Face. Provide your access token when prompted:
 hf auth login
 ```
 
-```sh
+Set up the following environment variables to configure your training run. Replace
+placeholders with your actual values.
+
+```bash
 # -- Model configuration --
-export MODEL=<model name> # e.g., 'llama3.1-8b-Instruct'
+# The MaxText model name. See `src/maxtext/configs/types.py` for `ModelName` for a
+# full list of supported models.
+export MODEL=<MaxText Model> # e.g., 'llama3.1-8b-Instruct'
 
 # -- MaxText configuration --
-export BASE_OUTPUT_DIRECTORY=<output directory to store run logs> # e.g., gs://my-bucket/my-output-directory
-export RUN_NAME=<name for this run> # e.g., $(date +%Y-%m-%d-%H-%M-%S)
+# Use a GCS bucket you own to store logs and checkpoints. Ideally in the same
+# region as your TPUs to minimize latency and costs.
+# You can list your buckets and their locations in the
+# [Cloud Console](https://console.cloud.google.com/storage/browser).
+export BASE_OUTPUT_DIRECTORY=<gcs bucket path> # e.g., gs://my-bucket/maxtext-runs
+
+# An arbitrary string to identify this specific run.
+# We recommend to include the model, user, and timestamp.
+# Note: Kubernetes requires workload names to be valid DNS labels (lowercase, no underscores or periods).
+export RUN_NAME=<Name for this run>
 ```
 
 ## Hugging Face checkpoint to Maxtext checkpoint
@@ -77,10 +90,10 @@ Run these steps once per project prior to any local development or cluster exper
 MaxText assumes these GCS buckets are created in the same project and that it has permissions to read and write from them.
 
 ```sh
-export PROJECT=<Google Cloud Project ID>
+export PROJECT_ID=<Google Cloud Project ID>
 export DATASET_GCS_BUCKET=<GCS for dataset> # e.g., gs://my-bucket/my-dataset
 
-bash tools/data_generation/download_dataset.sh ${PROJECT?} ${DATASET_GCS_BUCKET?}
+bash tools/data_generation/download_dataset.sh ${PROJECT_ID?} ${DATASET_GCS_BUCKET?}
 ```
 
 The above will download the c4 dataset to the GCS BUCKET.

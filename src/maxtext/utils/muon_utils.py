@@ -21,7 +21,7 @@ optimizer to correctly apply its update rules.
 
 This module can also be run as a script to inspect the generated dimension
 numbers for a specific model. Example:
-  python3 -m MaxText.muon_utils qwen3-4b True
+  python3 -m maxtext.utils.muon_utils qwen3-4b True
 """
 
 

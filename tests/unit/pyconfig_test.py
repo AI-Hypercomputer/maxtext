@@ -83,8 +83,19 @@ class PyconfigTest(unittest.TestCase):
         base_emb_dim=1024,  # Defined as 3072 in gemma-7b
     )
 
-    self.assertEqual(config.base_emb_dim, 1024)
-    self.assertEqual(config.base_mlp_dim, 24576)
+    self.assertEqual(config.base_emb_dim, 1024)  # override
+    self.assertEqual(config.base_mlp_dim, 24576)  # unchanged
+
+  def test_overriding_model_raises_error(self):
+    """Test that overriding a model config with override_model_config=False raises an error."""
+    with self.assertRaises(ValueError):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          model_name="gemma-7b",
+          override_model_config=False,
+          base_emb_dim=1024,  # Defined as 3072 in gemma-7b
+      )
 
   def test_overriding_model_in_sft(self):
     # TODO: Update MAXTEXT_PKG_DIR after repo restructuring is complete.
@@ -93,10 +104,11 @@ class PyconfigTest(unittest.TestCase):
         skip_jax_distributed_system=True,
         model_name="llama3.1-8b",
         override_model_config=True,
+        base_emb_dim=1024,  # Defined as 4096 in llama3.1-8b
     )
 
-    self.assertEqual(config.base_emb_dim, 4096)
-    self.assertEqual(config.base_mlp_dim, 14336)
+    self.assertEqual(config.base_emb_dim, 1024)  # override
+    self.assertEqual(config.base_mlp_dim, 14336)  # unchanged
 
   def test_resolve_config_path(self):
     self.assertEqual(resolve_config_path("foo"), os.path.join("src", "foo"))
@@ -121,10 +133,21 @@ class PyconfigTest(unittest.TestCase):
       self.assertTrue(os.path.isfile(full_path), f"Default config for '{module}' not found at {full_path}")
 
   def test_module_from_path(self):
-    import maxtext.trainers.pre_train.train as train_module
+    import maxtext.trainers.pre_train.train as train_module  # pylint: disable=import-outside-toplevel
+
     module_file = train_module.__file__
     result = _module_from_path(module_file)
     self.assertEqual(result, "maxtext.trainers.pre_train.train")
+
+  def test_hlo_dump_module_names_none_coercion(self):
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        dump_hlo_local_module_name=None,
+        dump_hlo_module_name=None,
+    )
+    self.assertEqual(config.dump_hlo_local_module_name, "")
+    self.assertEqual(config.dump_hlo_module_name, "")
 
   def test_unknown_module_raises(self):
     with self.assertRaises(ValueError):

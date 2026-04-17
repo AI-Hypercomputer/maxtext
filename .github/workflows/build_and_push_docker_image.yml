@@ -142,6 +142,9 @@ jobs:
             # Add MaxText tag
             maxtext_hash=$(git rev-parse --short HEAD)
             gcloud container images add-tag "$SOURCE_IMAGE:${{ github.run_id }}" "$SOURCE_IMAGE:maxtext_${maxtext_hash}_${clean_date}" --quiet
+
+            # Add latest tag (TODO: add this tag only after tests pass)
+            gcloud container images add-tag "$SOURCE_IMAGE:${{ github.run_id }}" "$SOURCE_IMAGE:latest" --quiet
           fi
         env:
           INPUTS_IMAGE_NAME: ${{ inputs.image_name }}

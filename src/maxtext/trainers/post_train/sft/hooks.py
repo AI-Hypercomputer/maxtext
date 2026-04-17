@@ -25,6 +25,7 @@ else:
   from typing_extensions import override
 
 import jax
+import time
 import jax.numpy as jnp
 
 from flax import nnx
@@ -54,6 +55,7 @@ class SFTTrainingHooks(TrainingHooks):
     self.metadata = {}
     self.train_metadata = defaultdict(float)
     self.eval_metadata = defaultdict(float)
+    self.step_start_time = 0.0
 
   @override
   def on_train_start(self, train_ctx: peft_trainer.PeftTrainer):
@@ -79,6 +81,7 @@ class SFTTrainingHooks(TrainingHooks):
       )
 
     self.metadata["first_train_step"] = train_ctx.train_steps
+    self.step_start_time = time.perf_counter()
 
   @override
   def on_train_end(self, train_ctx: peft_trainer.PeftTrainer):  # pylint: disable=unused-argument
@@ -109,7 +112,7 @@ class SFTTrainingHooks(TrainingHooks):
       train_ctx: peft_trainer.PeftTrainer,
       train_step: int,
       train_loss: float,
-      step_time: float,
+      step_time: float = 0.0,  # No longer provided. See https://github.com/google/tunix/pull/1289.
   ):
     """Called at the end of training step.
     This hook is called by Tunix after the step counter has been incremented for logging purposes.
@@ -117,13 +120,17 @@ class SFTTrainingHooks(TrainingHooks):
     However, we will use the current `train_step` value to record metrics in this hook to be
     consistent with Tunix's metric logging convention.
     """
-
     assert train_step - 1 in self.train_metadata, (
         "SFTTrainingHooks.on_train_step_start() must be called before" " SFTTrainingHooks.on_train_step_end()"
     )
 
     if self.metadata["first_train_step"] == train_step - 1:
       max_utils.print_mem_stats("After params initialized")
+
+    # Use our own timing since Tunix passes 0.0
+    current_time = time.perf_counter()
+    step_time = current_time - self.step_start_time
+    self.step_start_time = current_time
 
     metrics = {
         "scalar": {

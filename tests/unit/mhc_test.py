@@ -101,13 +101,15 @@ class TestMHC(unittest.TestCase):
         per_device_batch_size=4,
         max_target_length=7,
         max_prefill_predict_length=7,
+        attention="dot_product",
+        routed_bias_update_rate=0.01,
+        load_balance_loss_weight=0.02,
+        # override
+        override_model_config=True,
         base_emb_dim=self.dim,
         mhc_expansion_rate=3,
         num_experts=4,
         num_experts_per_tok=2,
-        attention="dot_product",
-        routed_bias_update_rate=0.01,
-        load_balance_loss_weight=0.02,
         engram_layers=[],
     )
     devices_array = maxtext_utils.create_device_mesh(self.config)

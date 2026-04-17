@@ -21,8 +21,10 @@ Get LLaMA chkpt_vars from Meta
 
 Example cmd:
 To save a ckpt
-JAX_PLATFORMS=CPU python -m  MaxText.utils.ckpt_scripts.llama4_ckpt_unscanned --base-model-path [CHKPT_DIR] \
- --maxtext-model-path [OUTPUT_CHKPT_DIR] --model-size llama4-17b-16e
+JAX_PLATFORMS=CPU python -m  maxtext.checkpoint_conversion.standalone_scripts.llama4_ckpt_unscanned \
+    --base-model-path [CHKPT_DIR] \
+    --maxtext-model-path [OUTPUT_CHKPT_DIR] \
+    --model-size llama4-17b-16e
 
 If using a PT checkpoint, the base model checkpoints should be in the format `{name}.{chkpt_idx}.pth`
 For example: `llama4-17b-16e.00.pth`

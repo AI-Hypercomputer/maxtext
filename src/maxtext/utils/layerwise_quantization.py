@@ -19,7 +19,7 @@ Provides a utility to load and quantize a checkpoint layer by layer. Currently, 
 
 Example cmd:
 
-python3 -m MaxText.layerwise_quantization  src/maxtext/configs/base.yml \
+python3 -m maxtext.utils.layerwise_quantization  src/maxtext/configs/base.yml \
   tokenizer_path=${TOKENIZER_PATH?} load_parameters_path=${LOAD_PARAMS_PATH?} \
   model_name=deepseek2-16b ici_fsdp_parallelism=1 ici_autoregressive_parallelism=1 \
   ici_tensor_parallelism=-1 scan_layers=false weight_dtype=bfloat16 per_device_batch_size=1 \
@@ -30,6 +30,7 @@ python3 -m MaxText.layerwise_quantization  src/maxtext/configs/base.yml \
 
 """
 
+import functools
 import os
 from typing import Any, Sequence
 
@@ -174,12 +175,19 @@ class LayerwiseQuantization:
 
     # Model and quantization config
     self.quant = quantizations.configure_quantization(config)
-    model = models.transformer_as_linen(
-        config, mesh=self._mesh, quant=self.quant, model_mode=common_types.MODEL_MODE_TRAIN
-    )
-    self.unboxed_abstract_state, _, _ = maxtext_utils.get_abstract_state(
-        model, None, self.config, self.rng, self._mesh, False
-    )
+    if self.config.pure_nnx:
+      raise NotImplementedError("Pure NNX support has not been implemented yet.")
+    else:
+      model = models.transformer_as_linen(
+          config, mesh=self._mesh, quant=self.quant, model_mode=common_types.MODEL_MODE_TRAIN
+      )
+    if self.config.pure_nnx:
+      # NNX has a different function to init the training state.
+      raise NotImplementedError("Pure NNX support has not been implemented yet.")
+    else:
+      init_state_fn = functools.partial(maxtext_utils.init_initial_state, model, None, self.config, False, self.rng)
+
+    self.unboxed_abstract_state, _, _ = maxtext_utils.get_abstract_state(self.config, self._mesh, init_state_fn, False)
 
   def load_and_quantize(self) -> None:
     """

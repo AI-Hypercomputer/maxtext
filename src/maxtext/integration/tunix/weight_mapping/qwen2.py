@@ -67,12 +67,12 @@ class QWEN2_VLLM_MAPPING:
     return {
         # Token embeddings - shard vocab dimension
         "base.token_embedder.embedding": (
-            "model.embed.embedding",
+            "model.embed_tokens.weight",
             ("model", None),
         ),
         # Final layer norm - no sharding needed
         "base.decoder.decoder_norm.scale": (
-            "model.norm.scale",
+            "model.norm.weight",
             (None,),
         ),
         # LM head (logits projection) - shard vocab dimension
@@ -83,41 +83,41 @@ class QWEN2_VLLM_MAPPING:
         # Layer-specific mappings (scanned -> unscanned)
         # MLP components - shard hidden dimensions
         "base.decoder.layers.mlp.wi_0.kernel": (
-            "model.layers.*.mlp.gate_proj.kernel",
+            "model.layers.*.mlp.gate_proj.weight",
             (None, "layer", "model"),
         ),
         "base.decoder.layers.mlp.wi_1.kernel": (
-            "model.layers.*.mlp.up_proj.kernel",
+            "model.layers.*.mlp.up_proj.weight",
             (None, "layer", "model"),
         ),
         "base.decoder.layers.mlp.wo.kernel": (
-            "model.layers.*.mlp.down_proj.kernel",
+            "model.layers.*.mlp.down_proj.weight",
             ("model", "layer", None),
         ),
         # Layer norms - no sharding needed
         "base.decoder.layers.pre_self_attention_layer_norm.scale": (
-            "model.layers.*.input_layernorm.scale",
+            "model.layers.*.input_layernorm.weight",
             (None, "layer"),
         ),
         "base.decoder.layers.post_self_attention_layer_norm.scale": (
-            "model.layers.*.post_attention_layernorm.scale",
+            "model.layers.*.post_attention_layernorm.weight",
             (None, "layer"),
         ),
         # Attention components - shard head dimensions
         "base.decoder.layers.self_attention.query.kernel": (
-            "model.layers.*.self_attn.q_proj.kernel",
+            "model.layers.*.self_attn.q_proj.weight",
             (None, "layer", "model", None),
         ),
         "base.decoder.layers.self_attention.key.kernel": (
-            "model.layers.*.self_attn.k_proj.kernel",
+            "model.layers.*.self_attn.k_proj.weight",
             (None, "layer", "model", None),
         ),
         "base.decoder.layers.self_attention.value.kernel": (
-            "model.layers.*.self_attn.v_proj.kernel",
+            "model.layers.*.self_attn.v_proj.weight",
             (None, "layer", "model", None),
         ),
         "base.decoder.layers.self_attention.out.kernel": (
-            "model.layers.*.self_attn.o_proj.kernel",
+            "model.layers.*.self_attn.o_proj.weight",
             ("model", "layer", None, None),
         ),
         # Attention biases

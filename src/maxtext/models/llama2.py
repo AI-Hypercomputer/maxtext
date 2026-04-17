@@ -184,9 +184,7 @@ class LlamaDecoderLayer(nnx.Module):
     hidden_states = self._maybe_shard_with_logical(hidden_states, self.activation_axis_names)
 
     # MLP block.
-    mlp_intermediate_sharding = create_sharding(
-        self.mesh, ("activation_batch", "activation_length_no_exp", "activation_mlp")
-    )
+    mlp_intermediate_sharding = create_sharding(self.mesh, ("activation_batch", "activation_length", "activation_mlp"))
     mlp_lnx = self.mlp(
         hidden_states,
         deterministic=deterministic,

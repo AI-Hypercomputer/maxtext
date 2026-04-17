@@ -109,7 +109,7 @@ Note that `FILE_PATH` is optional; when provided, the script runs `ls -R` for pr
 4. Example command:
 
 ```sh
-bash tools/setup/setup_gcsfuse.sh \
+bash src/dependencies/scripts/setup_gcsfuse.sh \
 DATASET_GCS_BUCKET=maxtext-dataset \
 MOUNT_PATH=/tmp/gcsfuse && \
 python3 -m maxtext.trainers.pre_train.train \

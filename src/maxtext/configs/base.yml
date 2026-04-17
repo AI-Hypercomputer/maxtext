@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,7 +21,7 @@
 run_name: ""
 
 model_name: "default" # override config settings to match a specific model. other than the override, nothing should use this!
-override_model_config: False # When set to true allows overriding model parameters via CLI for the purpose of debugging/testing.
+override_model_config: False # When set to true allows overriding model parameters via CLI (or kwargs or env vars) for the purpose of debugging/testing.
 override_logical_axis_rules: False # When set overrides logical axis rules instead of merging them.
 debug:
   rl: False # RL-specific debugging
@@ -59,6 +59,10 @@ max_num_checkpoints_to_keep: None
 enable_continuous_checkpointing: False
 # enables one replica to read the ckpt then broadcast to the rest
 enable_single_replica_ckpt_restoring: False
+# Subdirectory to move checkpoints to before deletion. For example: ".todelete" (Ignored if directory is prefixed with gs://)
+checkpoint_todelete_subdir: None
+# Full path to move checkpoints to before deletion.
+checkpoint_todelete_full_path: None
 
 force_unroll: False # during generate_param_only_checkpoint should we unroll the loop?
 
@@ -156,8 +160,10 @@ base_emb_dim: 2048
 base_num_query_heads: 16
 base_num_kv_heads: 16
 base_mlp_dim: 7168
+dense_init_scale: 1.0
 base_num_decoder_layers: 16
 head_dim: 128
+attention_output_dim: -1
 # Those parameters are only used with global attention for Gemma4.
 global_head_dim: 0
 global_num_kv_heads: 0
@@ -192,6 +198,13 @@ num_experts_per_tok: 1
 megablox: true
 sparse_matmul: true
 capacity_factor: -1.0 # a factor to decide expert capacity for token dropping, and no dropping by default
+ragged_buffer_factor: -1.0 # a factor to determine the size of the ragged buffer for routed MoE activations.
+# By default (-1), the routed buffer is worst case size to ensure no dropping.
+# When set to 1.0 this buffer if set to the size assuming perfectly balanced. If the routing dictates
+# a size larger than this then tokens are dropped.
+# In general if ragged_buffer_factor > 0, the ragged_buffer_size is balanced_size * ragged_buffer_factor.
+moe_expert_input_dim: -1 # feature dimension of the tokens entering the MoE expert blocks.
+base_moe_mlp_dim: -1 # intermediate dimension at MoE layer. For a fully MoE model, base_mlp_dim must be equal to base_moe_mlp_dim.
 load_balance_loss_weight: 0.0 # weight for the load balance loss
 use_random_routing: false # whether to use random routing for debug/test purpose
 use_custom_sort_vjp: true # whether to use a custom VJP sort for efficient backward pass processing in sparse matmul
@@ -200,6 +213,7 @@ te_router_and_permutation_impl: false # whether to use TransformerEngine fused r
 moe_permutation_group_align_size: 128 # alignment size for MoE permutation group padding (MT and TE paths), set to 0 to disable
 te_use_gmm: false # whether to use the TE GMM implementation for MoE matmuls
 te_gmm_quantization: "" # quantization mode for TE GMM matmuls, must be specified when te_use_gmm is true.
+use_gather_mosaic_kernel: false # whether to use a custom mosaic kernel for token gather ops
 # tunable tiling dimensions used for mlp gmm
 # megablox/jax ragged dot - supports forward pass only (6 configs: `wi_tile_fwd...` and `wo_tile_fwd_...`)
 # tokamax ragged dot - supports all 18 configs
@@ -223,24 +237,9 @@ wo_tile_drhs_batch_seq: 512
 wo_tile_drhs_embed_dim: 1024
 wo_tile_drhs_mlp_dim: 1024
 
-wi_tile_fwd_buffer_count: 2
-wi_tile_dlhs_buffer_count: 2
-wi_tile_drhs_buffer_count: 2
-wo_tile_fwd_buffer_count: 2
-wo_tile_dlhs_buffer_count: 2
-wo_tile_drhs_buffer_count: 2
-
-wi_combine_scopes: False
-wo_combine_scopes: False
-
 merge_gating_gmm: False
 
 norm_topk_prob: false # boolean to enable the top-k probability normalization. qwen3-specific normalization of router weights.
-
-# how the expert axis is used to shard attention weights and activations
-# "fsdp" (ep acts as fsdp parallelism)
-# "context" (ep acts as context parallelism, training only)
-expert_shard_attention_option: "fsdp"
 
 # when moe weight matrices are sharded on both fsdp and fsdp-transpose axes, use two separate all-gather calls
 moe_fsdp_use_two_stage_all_gather: false
@@ -251,9 +250,8 @@ shard_exp_on_fsdp: False
 use_2d_fsdp_sharding: False
 
 # deepseek moe
-base_moe_mlp_dim: 7168 # intermediate dimension at MoE layer. For a fully MoE model, base_mlp_dim must be equal to base_moe_mlp_dim.
 first_num_dense_layers: 0 # number of initial dense layers in the model
-shared_experts: 1
+shared_experts: 0
 routed_scaling_factor: 1.0 # scaling factor for routing scores
 routed_score_func: "" # scoring function for routing
 routed_bias: False # a flag if a learnable bias is added for routing
@@ -447,114 +445,132 @@ hardware: 'tpu' # Supported hardware types are 'tpu', 'gpu', 'gpu_multiprocess' 
 # internal_compile allows bypassing open-source topology name mappings when using internal topologies directly via get_topology_desc.
 internal_compile: False
 internal_compile_num_devices: -1 # You must specify the number of devices when using internal_compile.
+compile_xla_flags: "" # Compiler options e.g. compile_xla_flags="--xla_tpu_num_sparse_cores_for_gather_offloading=1 --xla_tpu_scoped_vmem_limit_kib=65536" 
 
 # Parallelism
 shard_mode: "auto" # can be either auto or explicit
 custom_mesh_and_rule: "" # replace default mesh and logical rule by specifying yml name under config/mesh_and_rule/.
 mesh_axes: ['diloco', 'data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context', 'context_autoregressive', 'tensor', 'tensor_transpose', 'tensor_sequence', 'expert', 'autoregressive']
 logical_axis_rules: [
-                      ['activation_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
-                      ['activation_batch_moe', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
-                      ['activation_batch_no_exp', ['data', 'fsdp', 'fsdp_transpose']],
-                      ['activation_batch_no_exp_moe', ['data', 'fsdp', 'fsdp_transpose']],
+                      # ==========================================
+                      # Vocabulary Embedding
+                      # ==========================================
+                      # Vocab Activations
                       ['activation_embed_and_logits_batch', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_embed_and_logits_batch_sequence', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context', 'expert']],
-                      ['activation_heads', ['tensor', 'tensor_transpose', 'sequence','tensor_sequence','autoregressive']],
-                      ['activation_kv_heads', ['tensor', 'tensor_transpose', 'sequence','tensor_sequence']],
-                      ['activation_length', ['sequence', 'context', 'expert']],
-                      ['activation_length', ['context', 'expert']],
-                      ['activation_attn_length', ['sequence', 'context', 'expert']],
-                      ['activation_attn_length', ['context', 'expert']],
-                      ['activation_attn_length_no_exp', ['sequence', 'context']],
-                      ['activation_attn_length_no_exp', ['context']],
-                      ['activation_length_no_exp', ['sequence', 'context']],
-                      ['activation_length_no_exp', ['context']],
-                      ['activation_length_no_exp_moe', ['sequence', 'context']],
-                      ['activation_length_no_exp_moe', ['context']],
-                      ['activation_norm_length', ['tensor_sequence', 'context', 'sequence']],
-                      ['activation_norm_length_moe', ['tensor_sequence', 'context', 'sequence']],
-                      ['activation_q_length', ['context', 'expert']],
-                      ['activation_q_length_no_exp', ['context']],
-                      ['prefill_activation_length', ['sequence', 'context']],
-                      ['prefill_activation_norm_length', ['tensor_sequence', 'context', 'sequence']],
-                      ['activation_kv_length', []],
-                      ['activation_attn_embed', ['tensor', 'tensor_transpose']],
-                      ['activation_embed', ['tensor', 'tensor_transpose']],
-                      ['activation_embed_moe', ['tensor', 'tensor_transpose']],
-                      ['activation_mlp', ['tensor', 'tensor_transpose', 'tensor_sequence']],
-                      ['activation_kv', ['tensor', 'tensor_transpose', 'tensor_sequence']],
-                      ['activation_prefill_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
-                      ['activation_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
-                      ['activation_kv_batch_no_exp', ['data', 'fsdp', 'fsdp_transpose']],
-                      ['activation_kv_head_dim', ['tensor', 'tensor_transpose', 'tensor_sequence']],
                       ['activation_vocab', ['tensor', 'tensor_transpose', 'tensor_sequence']],
                       ['activation_vocab', ['tensor', 'tensor_transpose']],
                       ['activation_vocab', 'tensor_sequence'],
-                      ['activation_vocab', ['sequence','context']],
-                      ['activation_stage', 'stage'],
-                      ['activation_exp', ['expert']],
-                      ['decode_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
-                      ['decode_length', ['sequence']],
-                      ['mlp', ['fsdp_transpose', 'tensor', 'tensor_sequence', 'autoregressive']],
-                      ['mlp_no_fsdp', ['tensor', 'tensor_sequence', 'autoregressive']],
+                      ['activation_vocab', ['sequence', 'context']],
+                      # Vocab Weights
                       ['vocab', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
+                      ['embed_vocab', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'expert']],
+                      # ==========================================
+                      # Attention
+                      # ==========================================
+                      # Attention Activations
+                      ['activation_heads', ['tensor', 'tensor_transpose', 'sequence', 'tensor_sequence', 'autoregressive']],
+                      ['activation_kv_heads', ['tensor', 'tensor_transpose', 'sequence', 'tensor_sequence']],
+                      ['activation_attn_length', ['sequence', 'context']],
+                      ['activation_attn_length', ['context']],
+                      ['activation_q_length', ['context']],
+                      ['activation_kv_length', []],
+                      ['activation_attn_embed', ['tensor', 'tensor_transpose']],
+                      ['activation_kv', ['tensor', 'tensor_transpose', 'tensor_sequence']],
+                      ['activation_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['activation_kv_head_dim', ['tensor', 'tensor_transpose', 'tensor_sequence']],
+                      # Attention Weights
                       ['heads', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
                       ['q_heads', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
                       ['kv_heads', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
-                      ['embed', ['fsdp', 'fsdp_transpose', 'sequence', 'tensor_transpose', 'context', 'expert']],
-                      ['embed', ['fsdp', 'sequence', 'tensor_transpose', 'context' , 'expert']],
-                      ['embed', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'expert']],
-                      ['embed', ['fsdp', 'sequence', 'context', 'expert']],
-                      ['embed_no_exp', ['fsdp', 'fsdp_transpose', 'sequence', 'tensor_transpose', 'context']],
-                      ['embed_no_exp', ['fsdp', 'sequence', 'tensor_transpose', 'context']],
-                      ['embed_no_exp', ['fsdp', 'fsdp_transpose', 'sequence', 'context']],
-                      ['embed_no_exp', ['fsdp', 'sequence', 'context']],
-                      ['embed_moe', ['fsdp', 'fsdp_transpose', 'sequence', 'tensor_transpose', 'context', 'expert']],
-                      ['embed_moe', ['fsdp', 'sequence', 'tensor_transpose', 'context' , 'expert']],
-                      ['embed_moe', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'expert']],
-                      ['embed_moe', ['fsdp', 'sequence', 'context', 'expert']],
-                      ['embed_no_exp_moe', ['fsdp', 'fsdp_transpose', 'sequence', 'tensor_transpose', 'context']],
-                      ['embed_no_exp_moe', ['fsdp', 'sequence', 'tensor_transpose', 'context']],
-                      ['embed_no_exp_moe', ['fsdp', 'fsdp_transpose', 'sequence', 'context']],
-                      ['embed_no_exp_moe', ['fsdp', 'sequence', 'context']],
-                      ['embed_tensor_transpose', ['tensor_transpose']],
+                      ['qkv', []],
+                      ['kv', []],
+                      ['kv_head_dim', []],
                       ['q_lora', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'tensor_transpose', 'expert']],
                       ['q_lora', ['fsdp', 'sequence', 'context', 'tensor_transpose', 'expert']],
                       ['q_lora', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'expert']],
                       ['q_lora', ['fsdp', 'sequence', 'context', 'expert']],
-                      ["q_lora_up_proj",[]],
+                      ["q_lora_up_proj", []],
                       ['kv_lora', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'tensor_transpose', 'expert']],
                       ['kv_lora', ['fsdp', 'sequence', 'context', 'tensor_transpose', 'expert']],
                       ['kv_lora', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'expert']],
                       ['kv_lora', ['fsdp', 'sequence', 'context', 'expert']],
-                      ["kv_lora_up_proj",[]],
+                      ["kv_lora_up_proj", []],
+                      # ==========================================
+                      # Mixture of Experts (MoE)
+                      # ==========================================
+                      # MoE Activations
+                      ['activation_batch_moe', ['data', 'fsdp', 'fsdp_transpose']],
+                      ['activation_length_moe', ['sequence', 'context']],
+                      ['activation_length_moe', ['context']],
+                      ['activation_norm_length_moe', ['tensor_sequence', 'context', 'sequence']],
+                      ['activation_embed_moe', ['tensor', 'tensor_transpose']],
+                      ['activation_mlp_moe', ['tensor', 'tensor_transpose', 'tensor_sequence']],
+                      ['activation_exp', ['expert']],
+                      # MoE Weights
+                      ['exp', 'expert'],
+                      ['mlp_moe', ['fsdp_transpose', 'tensor', 'tensor_sequence', 'autoregressive']],
+                      ['embed_moe', ['fsdp', 'fsdp_transpose', 'sequence', 'tensor_transpose', 'context']],
+                      ['embed_moe', ['fsdp', 'sequence', 'tensor_transpose', 'context']],
+                      ['embed_moe', ['fsdp', 'fsdp_transpose', 'sequence', 'context']],
+                      ['embed_moe', ['fsdp', 'sequence', 'context']],
+                      # ==========================================
+                      # Standard MLP / Dense Layers / Model Structure
+                      # ==========================================
+                      # Dense Activations
+                      ['activation_mlp', ['tensor', 'tensor_transpose', 'tensor_sequence']],
+                      # Note activation batch and length also get used in attention and vocab
+                      ['activation_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['activation_length', ['sequence', 'context']],
+                      ['activation_length', ['context']],
+                      ['activation_norm_length', ['tensor_sequence', 'context', 'sequence']],
+                      ['activation_embed', ['tensor', 'tensor_transpose']],
+                      ['activation_stage', 'stage'],
+                      # General Weights
+                      ['mlp', ['fsdp_transpose', 'tensor', 'tensor_sequence', 'autoregressive']],
+                      ['embed', ['fsdp', 'fsdp_transpose', 'sequence', 'tensor_transpose', 'context', 'expert']],
+                      ['embed', ['fsdp', 'sequence', 'tensor_transpose', 'context', 'expert']],
+                      ['embed', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'expert']],
+                      ['embed', ['fsdp', 'sequence', 'context', 'expert']],
                       ['norm', ['tensor', 'tensor_transpose']],
                       ['layers', 'stage'],
-                      ['qkv', []],
-                      ['kv', []],
-                      ['kv_head_dim', []],
+                      ['diloco', 'diloco'],
+                      ['engram_dim', ['tensor']],
+                      ['dense_layers', []],
+                      ['moe_layers', []],
+                      ['mhc', []],
+                      # ==========================================
+                      # Inference(Prefill, Decode, Cache)
+                      # ==========================================
+                      ['prefill_activation_length', ['sequence', 'context']],
+                      ['prefill_activation_norm_length', ['tensor_sequence', 'context', 'sequence']],
+                      ['activation_prefill_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['decode_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['decode_length', ['sequence']],
+                      ['cache_heads', ['autoregressive', 'tensor', 'tensor_transpose', 'tensor_sequence']],
+                      ['cache_heads', ['autoregressive', 'tensor', 'tensor_sequence']],
+                      ['paged_kv_heads', ['tensor']],
                       ['cache_batch_prefill', []],
                       ['cache_batch', []],
                       ['cache_heads_none', []],
-                      ['cache_heads', ['autoregressive', 'tensor', 'tensor_transpose', 'tensor_sequence']],
-                      ['cache_heads', ['autoregressive', 'tensor', 'tensor_sequence']],
                       ['cache_kv', []],
                       ['cache_sequence', []],
-                      ['exp', 'expert'],
-                      ['exp_with_fsdp', 'fsdp'],
-                      ['paged_kv_heads', ['tensor']],
                       ['num_pages', []],
                       ['tokens_per_page', []],
                       ['paged_kv_head_dim_size', []],
-                      ['dense_layers', []],
-                      ['moe_layers', []],
-                      ['engram_dim', ['tensor']],
-                      ['mhc', []],
-                      ['diloco', 'diloco'],
-                    ]
+                      # ==========================================
+                      # Deprecated / Scheduled for Removal
+                      # ==========================================
+                      ['mlp_no_fsdp', ['tensor', 'tensor_sequence', 'autoregressive']], 
+                      ['embed_tensor_transpose', ['tensor_transpose']],                 
+                      ['exp_with_fsdp', 'fsdp'],
+                  ]
 # Axes used for DCN must be earlier in this list than ICI, see (b/339009148) for details
 data_sharding: [['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context', 'context_autoregressive', 'tensor', 'tensor_transpose', 'tensor_sequence', 'expert', 'autoregressive']]
 input_data_sharding_logical_axes: ['activation_embed_and_logits_batch', 'activation_norm_length']
+# Determines which physical axis plays the role of context parallelism for input data processing and load balancing
+# only supports "context" or "expert" (when custom_mesh_and_rule=ep-as-cp)
+context_sharding: "context"
 
 # sharding tolerance: float between 0.0 and 1.0 representing the allowed percentage of non-sharded parameters.
 sharding_tolerance: 0.02
@@ -822,6 +838,15 @@ gradient_clipping_threshold: 1.0
 gradient_accumulation_steps: 1
 
 opt_type: "adamw"  # one of "adamw", "adam_pax", "sgd", or "muon"
+
+# If True, skip the training step when loss or gradient spike is detected
+# No updates for both weights and momentums (if applies)
+skip_step_on_spikes: False
+# The rolling interval to calculate the mean and standard deviation
+skip_step_interval: 128
+# The scaling factor to determine if a spike occurred
+skip_step_scaling_factor: 6.0
+
 # List of parameter names/patterns to train.
 # If non-empty, all other parameters will be frozen. Example: ['.*indexer.*'].
 # If empty (default), all parameters are trained.
@@ -990,6 +1015,8 @@ optimize_mesh_for_tpu_v6e: False
 
 shardy: True # Whether to use shardy XLA backend (default in Jax starting 0.7.0), or GSPMD (to be fully deprecated ~2026)
 
+remove_size_one_mesh_axis_from_type: True # Whether to remove size one mesh axis from type through jax.config.
+
 use_ragged_attention: False
 ragged_block_size: 256
 
@@ -1130,8 +1157,9 @@ position_id_per_seconds: 25
 subslice_shape: ""
 
 # NNX
-enable_nnx: false
-pure_nnx_decoder: false
+enable_nnx: False
+pure_nnx_decoder: False
+pure_nnx: False
 
 ################################## Qwen3-Next Specific Configs ##################################
 # Kernel size for the 1D convolution in the Gated Delta Net
@@ -1197,4 +1225,12 @@ distill_temperature: 1.0
 # distill_beta is used for cosine similarity loss between intermediate activataitions of out_proj in teacher/student models.
 # 0.0 value disables this feature.
 distill_beta: 0.0
+# distill_feature_loss_type is the type of loss to use for feature distillation ("cosine" or "l2").
+distill_feature_loss_type: "cosine"
 distill_layer_indices: None
+
+##### Elastic training parameters
+# Elastic training is Pathways-specific and does not work on McJAX.
+elastic_enabled: false
+elastic_timeout_seconds: 300
+elastic_max_retries: 10

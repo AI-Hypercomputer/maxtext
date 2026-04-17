@@ -17,6 +17,8 @@ import re
 import unittest
 from unittest.mock import patch
 import jax
+import optax
+import jax.numpy as jnp
 
 import pytest
 from absl.testing import parameterized
@@ -426,6 +428,59 @@ class TrainableParametersMaskTest(parameterized.TestCase):
 
     # When no trainable mask is provided, nothing is frozen by this mechanism
     self.assertFalse(jax.numpy.all(updates["layer1"]["kernel"] == 0))
+
+
+class SkipStepOnSpikesTest(parameterized.TestCase):
+  """Tests for the skip_step_on_spikes optimizer wrapper."""
+
+  def _run_spike_test(self, spike_kwargs):
+    inner_opt = optax.sgd(0.1)
+    opt = optimizers.skip_step_on_spikes(inner_opt, interval=4, scaling_factor=1.0)
+
+    params = {"x": jnp.array([1.0])}
+    opt_state = opt.init(params)
+
+    # Base kwargs for warmup
+    base_kwargs = {k: jnp.array(1.0) for k in spike_kwargs.keys()}
+
+    # Step 0: count = 0 < 2, will not skip (count should be >= interval / 2)
+    updates, opt_state = opt.update({"x": jnp.array([1.0])}, opt_state, params, **base_kwargs)
+    self.assertFalse(jnp.all(updates["x"] == 0.0))
+    self.assertFalse(opt_state["is_skipped"])
+
+    # Step 1: count = 1 < 2, will not skip. mean=1.0, std=0.0 (count should be >= interval / 2)
+    updates, opt_state = opt.update({"x": jnp.array([1.0])}, opt_state, params, **base_kwargs)
+    self.assertFalse(jnp.all(updates["x"] == 0.0))
+    self.assertFalse(opt_state["is_skipped"])
+
+    # Step 2: count = 2. Spike!
+    spike_kwargs_jnp = {k: jnp.array(v) for k, v in spike_kwargs.items()}
+    updates, opt_state = opt.update({"x": jnp.array([1.0])}, opt_state, params, **spike_kwargs_jnp)
+    self.assertTrue(jnp.all(updates["x"] == 0.0))
+    self.assertTrue(opt_state["is_skipped"])
+
+  def test_skip_step_on_loss_spike(self):
+    self._run_spike_test({"loss": 100.0})
+
+  def test_skip_step_on_grad_norm_spike(self):
+    self._run_spike_test({"loss": 1.0, "grad_norm": 100.0})
+
+  def test_skip_step_on_both_spike(self):
+    self._run_spike_test({"loss": 100.0, "grad_norm": 100.0})
+
+  def test_no_skip_without_kwargs(self):
+    inner_opt = optax.sgd(0.1)
+    opt = optimizers.skip_step_on_spikes(inner_opt, interval=4, scaling_factor=1.0)
+
+    params = {"x": jnp.array([1.0])}
+    opt_state = opt.init(params)
+
+    # Missing kwargs should act normally
+    updates, opt_state = opt.update({"x": jnp.array([1.0])}, opt_state, params)
+    self.assertFalse(jnp.all(updates["x"] == 0.0))
+    self.assertFalse(opt_state["is_skipped"])
+    # Count shouldn't have incremented
+    self.assertEqual(opt_state["count"], 0)
 
 
 if __name__ == "__main__":

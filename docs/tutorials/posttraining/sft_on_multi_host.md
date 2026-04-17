@@ -45,24 +45,61 @@ Use a pathways ready GKE cluster as described [here](https://docs.cloud.google.c
 
 ## Environment configuration
 
+Set up the following environment variables to configure your training run. Replace
+placeholders with your actual values.
+
 ```bash
-# -- Google Cloud Configuration --
-export PROJECT=<Google Cloud Project ID>
-export CLUSTER_NAME=<Name of GKE Cluster>
-export ZONE=<GKE Cluster Zone>
+# -- Model configuration --
+# The MaxText model name. See `src/maxtext/configs/types.py` for `ModelName` for a
+# full list of supported models.
+export MODEL=<MaxText Model> # e.g., deepseek3-671b
 
-# -- Workload Configuration --
-export WORKLOAD_NAME=<Name of Workload> # e.g., sft-$(date +%s)
-export TPU_TYPE=<TPU Type> # e.g., v6e-256
-export TPU_SLICE=<number of slices>
-
-# -- MaxText Configuration --
-export OUTPUT_PATH=<GCS Path for Output/Logs> # e.g., gs://my-bucket/my-output-directory
-export STEPS=<Fine-Tuning Steps> # e.g., 1000
+# Your Hugging Face access token. Required to download gated models like Llama.
+# You can generate one at https://huggingface.co/settings/tokens.
 export HF_TOKEN=<Hugging Face Access Token>
 
-# -- Model Configuration --
-export MODEL=<MaxText Model> # e.g., deepseek3-671b
+# -- MaxText configuration --
+# Use a GCS bucket you own to store logs and checkpoints. Ideally in the same
+# region as your TPUs to minimize latency and costs.
+# You can list your buckets and their locations in the
+# [Cloud Console](https://console.cloud.google.com/storage/browser) or via
+# `gcloud storage buckets list --format="table(name, location)"`.
+export BASE_OUTPUT_DIRECTORY=<GCS Path for Output/Logs> # e.g., gs://my-bucket/maxtext-runs
+
+# An arbitrary string to identify this specific run.
+# We recommend to include the model, user, and timestamp.
+# Note: Kubernetes requires workload names to be valid DNS labels (lowercase, no underscores or periods).
+export RUN_NAME=<Name for this run>
+
+# -- Workload configuration --
+# Your GCP project ID. Find it on the [Cloud Console Dashboard](https://console.cloud.google.com/home/dashboard).
+# If you've already set it in your local config, you can retrieve it via:
+# gcloud config get-value project
+export PROJECT_ID=<Google Cloud Project ID>
+
+# The GCP location (listed as "Location" in the UI) and name of your
+# TPU-enabled GKE cluster. Both can be found on the
+# [Cloud Console](https://console.cloud.google.com/kubernetes/list).
+export ZONE=<GKE Cluster Zone> # e.g., 'us-central1'
+export GKE_CLUSTER=<Name of GKE Cluster>
+
+# For a full list of MaxText-supported TPU types, see: `src/maxtext/utils/accelerator_to_spec_map.py`. To see the TPU type
+# of your cluster:
+
+# 1. Connect to the cluster (required for kubectl commands later):
+# gcloud container clusters get-credentials ${GKE_CLUSTER?} --location ${ZONE?} --project ${PROJECT_ID?}
+
+# 2. Find your TPU type (e.g., 'v5p-128') by checking the accelerator labels on your nodes:
+# kubectl get nodes -l cloud.google.com/gke-tpu-accelerator -o jsonpath='{.items[*].metadata.labels.cloud\.google\.com/gke-tpu-accelerator}' | tr ' ' '\n' | sort -u
+export TPU_TYPE=<TPU Type>
+export NUM_SLICES=<number of slices>
+
+# The Docker image you pushed in the prerequisite step
+export CLOUD_IMAGE_NAME=<image name>
+export DOCKER_IMAGE="gcr.io/${PROJECT_ID?}/${CLOUD_IMAGE_NAME?}"
+
+# -- Fine-Tuning configuration --
+export STEPS=<Fine-Tuning Steps> # e.g., 1000
 
 # -- Dataset configuration --
 export DATASET_NAME=<Hugging Face Dataset Name> # e.g., HuggingFaceH4/ultrachat_200k
@@ -106,17 +143,17 @@ This section provides the command to run SFT on a GKE cluster.
 
 ```bash
 xpk workload create \
---cluster=${CLUSTER_NAME?} \
---project=${PROJECT?} \
+--cluster=${GKE_CLUSTER?} \
+--project=${PROJECT_ID?} \
 --zone=${ZONE?} \
---docker-image=gcr.io/${PROJECT_ID?}/${CLOUD_IMAGE_NAME?} \
---workload=${WORKLOAD_NAME?} \
+--docker-image=${DOCKER_IMAGE?} \
+--workload=${RUN_NAME?} \
 --tpu-type=${TPU_TYPE?} \
---num-slices=${TPU_SLICE?} \
---command "python3 -m maxtext.trainers.post_train.sft.train_sft run_name=${WORKLOAD_NAME?} base_output_directory=${OUTPUT_PATH?} model_name=${MODEL?} load_parameters_path=${MAXTEXT_CKPT_PATH?} hf_access_token=${HF_TOKEN?}  per_device_batch_size=1 steps=${STEPS?} profiler=xplane hf_path=${DATASET_NAME?} train_split=${TRAIN_SPLIT?} train_data_columns=${TRAIN_DATA_COLUMNS?}"
+--num-slices=${NUM_SLICES?} \
+--command "python3 -m maxtext.trainers.post_train.sft.train_sft run_name=${RUN_NAME?} base_output_directory=${BASE_OUTPUT_DIRECTORY?} model_name=${MODEL?} load_parameters_path=${MAXTEXT_CKPT_PATH?} hf_access_token=${HF_TOKEN?}  per_device_batch_size=1 steps=${STEPS?} profiler=xplane hf_path=${DATASET_NAME?} train_split=${TRAIN_SPLIT?} train_data_columns=${TRAIN_DATA_COLUMNS?}"
 ```
 
-Once the fine-tuning is completed, you can access your model checkpoints at `$OUTPUT_PATH/$WORKLOAD_NAME/checkpoints`.
+Once the fine-tuning is completed, you can access your model checkpoints at `${BASE_OUTPUT_DIRECTORY}/${RUN_NAME}/checkpoints`.
 
 ### SFT with Pathways
 
@@ -124,14 +161,14 @@ Once the fine-tuning is completed, you can access your model checkpoints at `$OU
 export USE_PATHWAYS=1
 
 xpk workload create-pathways \
---cluster=${CLUSTER_NAME?} \
---project=${PROJECT?} \
+--cluster=${GKE_CLUSTER?} \
+--project=${PROJECT_ID?} \
 --zone=${ZONE?} \
---docker-image=gcr.io/${PROJECT_ID?}/${CLOUD_IMAGE_NAME?} \
---workload=${WORKLOAD_NAME?} \
+--docker-image=${DOCKER_IMAGE?} \
+--workload=${RUN_NAME?} \
 --tpu-type=${TPU_TYPE?} \
---num-slices=${TPU_SLICE?} \
---command="JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE=1 python3 -m maxtext.trainers.post_train.sft.train_sft run_name=${WORKLOAD_NAME?} base_output_directory=${OUTPUT_PATH?} model_name=${MODEL?} load_parameters_path=${MAXTEXT_CKPT_PATH?} hf_access_token=${HF_TOKEN?} per_device_batch_size=1 steps=${STEPS?} profiler=xplane checkpoint_storage_use_zarr3=$((1 - USE_PATHWAYS)) checkpoint_storage_use_ocdbt=$((1 - USE_PATHWAYS)) enable_single_controller=True"
+--num-slices=${NUM_SLICES?} \
+--command="JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE=1 python3 -m maxtext.trainers.post_train.sft.train_sft run_name=${RUN_NAME?} base_output_directory=${BASE_OUTPUT_DIRECTORY?} model_name=${MODEL?} load_parameters_path=${MAXTEXT_CKPT_PATH?} hf_access_token=${HF_TOKEN?} per_device_batch_size=1 steps=${STEPS?} profiler=xplane checkpoint_storage_use_zarr3=$((1 - USE_PATHWAYS)) checkpoint_storage_use_ocdbt=$((1 - USE_PATHWAYS)) enable_single_controller=True"
 ```
 
-Once the fine-tuning is completed, you can access your model checkpoints at `$OUTPUT_PATH/$WORKLOAD_NAME/checkpoints`.
+Once the fine-tuning is completed, you can access your model checkpoints at `${BASE_OUTPUT_DIRECTORY}/${RUN_NAME}/checkpoints`.
