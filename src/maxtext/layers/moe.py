@@ -1337,8 +1337,7 @@ class RoutedMoE(nnx.Module):
     """Selects bias values for a variable number of bias tensors based on chosen experts."""
     return tuple(bias[experts_index] for bias in biases)
 
-  @staticmethod
-  def get_ragged_buffer_size(local_batch, ep_degree, global_experts, top_k, ragged_buffer_factor):
+  def get_ragged_buffer_size(self, local_batch, ep_degree, global_experts, top_k, ragged_buffer_factor):
     """Calculates the token batch size of the ragged buffer.
     When explicitly setting ragged_buffer_factor>0, this is balanced_size * ragged_buffer_factor, which can drop tokens.
     Otherwise this will be worst case size to ensure no dropping.
@@ -1355,6 +1354,8 @@ class RoutedMoE(nnx.Module):
     """
     balanced_size = local_batch
     if ragged_buffer_factor > 0.0:
+      if self.config.te_use_gmm or self.config.te_router_and_permutation_impl:
+        raise ValueError("ragged_buffer_factor is not supported with TE-based GMM or permutation.")
       # This will drop tokens if the true distribution exceeds this buffer.
       return int(balanced_size * ragged_buffer_factor)
     else:
@@ -1371,7 +1372,22 @@ class RoutedMoE(nnx.Module):
       # 256 exp / 8 top_k = 32. In practice the imbalance should be much less and potentially can use
       # ragged_buffer_factor set to >1  e.g. 3.0, and likely have no dropping (not guaranteed)
       worst_case_factor = min(ep_degree, global_experts / top_k)
-      return int(balanced_size * worst_case_factor)
+      buffer_size = int(balanced_size * worst_case_factor)
+
+      # When using alignment-based padding, the actual data size includes padding overhead.
+      # Each expert's tokens are aligned to moe_permutation_group_align_size, which increases the
+      # total token count. We need to ensure the buffer can hold the padded data.
+      # Note: Padding is applied in global permute, so this follows global mode.
+      # Applied for both TE and MT permutation to support future per-group padding in mt_permute.
+      align_size = self.config.moe_permutation_group_align_size
+      if align_size > 0:
+        local_expert_size = self.config.num_experts // ep_degree
+        # Add headroom for padding: each (shard, expert) chunk can add up to align_size-1 tokens
+        # Worst case: every chunk has 1 token, padded to align_size
+        # Total padding overhead = ep_degree * local_expert_size * (align_size - 1)
+        padding_headroom = int(ep_degree * local_expert_size * (align_size - 1))
+        buffer_size = buffer_size + padding_headroom
+      return buffer_size
 
   def sparse_matmul(
       self,
@@ -1387,7 +1403,6 @@ class RoutedMoE(nnx.Module):
   ):
     """Perform sparse matrix multiplication of inputs and Experts."""
 
-<<<<<<< HEAD
     # Extract gate expert bias internally when TE path is active.
     # This avoids exposing gate_expert_bias in the public API.
     use_te = self.config.te_router_and_permutation_impl
@@ -1396,19 +1411,6 @@ class RoutedMoE(nnx.Module):
     else:
       gate_expert_bias = jnp.empty((0,), dtype=self.dtype)
 
-    def gmm(
-        inputs, kernel, tiling, group_sizes, expert_assignments, weight_gather_axes, input_buffer_count, combine_scopes
-    ):
-      use_te_gmm = self.config.te_use_gmm
-      if use_te_gmm:
-            assert not self.config.megablox and not self.config.use_tokamax_gmm, "TE GMM is only supported when Megablox and Tokamax GMM are disabled."
-            assert self.config.quantization and self.config.quantization.startswith("te_"), "TE GMM currently requires TE quantization."
-            # TODO(jberchtold): Adjust this based on TE GMM requirements per recipe
-            te_gmm_align_size_requirement = self.quant.get_gmm_align_size(self.config.te_gmm_quantization)
-            assert self.config.moe_permutation_group_align_size % te_gmm_align_size_requirement == 0 and self.config.moe_permutation_group_align_size > 0, f"TE GMM currently requires permutation with alignment (moe_permutation_group_align_size > 0 and multiple of {te_gmm_align_size_requirement})."
-            return self.quant.gmm(inputs, kernel, tiling, group_sizes, expert_assignments, self.config.te_gmm_quantization)
-
-=======
     def jax_ragged_dot_gmm(inputs, kernel, tiling, group_sizes, expert_assignments, padding_amount):
       """Execute jax.lax.ragged_dot, with potential quantization"""
       m, k, n = inputs.shape[0], inputs.shape[1], kernel.shape[2]
@@ -1452,8 +1454,16 @@ class RoutedMoE(nnx.Module):
         output *= scales
       return output
 
+    def te_gmm(inputs, kernel, tiling, group_sizes, expert_assignments):
+      """ Execute GMM using TE-based implementation, with potential quantization. """
+      assert not self.config.megablox and not self.config.use_tokamax_gmm, "TE GMM is only supported when Megablox and Tokamax GMM are disabled."
+      assert self.config.quantization and self.config.quantization.startswith("te_"), "TE GMM currently requires TE quantization."
+      # TODO(jberchtold): Adjust this based on TE GMM requirements per recipe
+      te_gmm_align_size_requirement = self.quant.get_gmm_align_size(self.config.te_gmm_quantization)
+      assert self.config.moe_permutation_group_align_size % te_gmm_align_size_requirement == 0 and self.config.moe_permutation_group_align_size > 0, f"TE GMM currently requires permutation with alignment (moe_permutation_group_align_size > 0 and multiple of {te_gmm_align_size_requirement})."
+      return self.quant.gmm(inputs, kernel, tiling, group_sizes, expert_assignments, self.config.te_gmm_quantization)
+
     def get_tokamax_group_sizes(group_sizes, inputs, kernel):
->>>>>>> official-upstream/main
       # TODO (b/491979205) pipeline fsdp ag per repeat fails tokamax gmm
       if self.config.using_pipeline_parallelism and self.config.pipeline_fsdp_ag_per_repeat:
         return group_sizes
@@ -1471,6 +1481,9 @@ class RoutedMoE(nnx.Module):
       return lhs_quantize_dtype, rhs_quantize_dtype
 
     def gmm(inputs, kernel, tiling, group_sizes, expert_assignments, weight_gather_axes):
+      if self.config.te_use_gmm:
+        return te_gmm(inputs, kernel, tiling, group_sizes, expert_assignments)
+
       if inputs.shape[0] != expert_assignments.shape[0]:
         raise ValueError("The number of input tokens must match the number of expert assignments!")
 
@@ -1506,55 +1519,6 @@ class RoutedMoE(nnx.Module):
               preferred_element_type=self.dtype,
               implementation="mosaic",
           )
-<<<<<<< HEAD
-      else:
-        if self.config.megablox:
-          output = mblx.gmm(
-              lhs=inputs,
-              rhs=kernel,
-              group_sizes=group_sizes,
-              preferred_element_type=self.dtype,
-              tiling=tiling,
-              lhs_quantize_dtype=lhs_quantize_dtype,
-              rhs_quantize_dtype=rhs_quantize_dtype,
-              use_qwix_quantization=self.config.use_qwix_quantization,
-              use_tokamax_backend=self.config.use_tokamax_gmm,
-              weight_gather_axes=weight_gather_axes,
-          )
-        else:
-          rhs_inputs = kernel
-          if isinstance(kernel, aqt.QTensor):
-            if kernel.bias or kernel.sparsity_mask or len(kernel.scale) > 1:
-              raise ValueError("Unsupported usecase for ragged_dot with quantized kernel.")
-            rhs_inputs = kernel.qvalue
-          if self.config.use_qwix_quantization:
-            # Use full contraction for QWIX quantization to allow quantization
-            # fusion (max reduce over contracting dimension).
-            tiling = (tiling[0], k, tiling[2])
-          is_tpu = self.mesh.devices.flat[0] == "tpu"
-          # TPU needs random mosaic_fusion_group; GPU/CPU needs deterministic ID for autotuner sync
-          mosaic_group_id = f"{random.randint(0, 1000000000)}" if is_tpu else "0"
-          with set_xla_metadata(
-              ragged_dot_tiling=",".join([str(t) for t in tiling]),
-              mosaic_fusion_group=mosaic_group_id,
-          ):
-            output = jax.lax.ragged_dot(
-                lhs=inputs,
-                rhs=rhs_inputs,
-                group_sizes=group_sizes,
-                preferred_element_type=self.dtype,
-            )
-          if isinstance(kernel, aqt.QTensor):
-            # Multiply outputs by the kernely scale
-            scales = jnp.take(kernel.scale[0].squeeze(), indices=expert_assignments, axis=0)
-            if padding_amount > 0:
-              scales = jax.lax.pad(
-                  scales,
-                  jnp.array(0.0, dtype=scales.dtype),
-                  [(0, padding_amount, 0), (0, 0, 0)],
-              )
-            output *= scales
-=======
       elif self.config.megablox:  # Older forked megablox
         output = mblx.gmm(
             lhs=inputs,
@@ -1570,7 +1534,6 @@ class RoutedMoE(nnx.Module):
         )
       else:  # jax.lax.ragged_dot
         output = jax_ragged_dot_gmm(inputs, kernel, tiling, group_sizes, expert_assignments, padding_amount)
->>>>>>> official-upstream/main
       if padding_amount > 0:
         output = output[: orig_inputs_shape[0]]
       return output
@@ -1730,33 +1693,6 @@ class RoutedMoE(nnx.Module):
                 )
             )
 
-<<<<<<< HEAD
-            # TODO(ranran): For better performance, we could update output buffer to a smaller
-            # size to replace self.get_expert_parallelism_size() for efficiency,
-            # Or we could apply capacity_factor for excessive experts.
-            # Note: Reducing buffer increase the risk of token dropping under unbalanced distribution.
-
-            # In the worst case, all of the global input data is assigned to each expert in the current shard.
-            # This would result in num_expert_shards * input_size * experts_per_shard assignments. However, if
-            # experts_per_shard > num_experts_per_tok we cannot assign more than num_experts_per_tok to all of the inputs.
-            max_local_experts_per_tok = min(local_expert_size, self.config.num_experts_per_tok)
-            buffer_size = int(num_expert_parallelism * batch_size * sequence_length * max_local_experts_per_tok)
-
-            # When using alignment-based padding, the actual data size includes padding overhead.
-            # Each expert's tokens are aligned to moe_permutation_group_align_size, which increases the
-            # total token count. We need to ensure the buffer can hold the padded data.
-            # Note: Padding is applied in global permute, so this follows global mode.
-            # Applied for both TE and MT permutation to support future per-group padding in mt_permute.
-            align_size = self.config.moe_permutation_group_align_size
-            if align_size > 0:
-              # Add headroom for padding: each (shard, expert) chunk can add up to align_size-1 tokens
-              # Worst case: every chunk has 1 token, padded to align_size
-              # Total padding overhead = num_expert_parallelism * local_expert_size * (align_size - 1)
-              padding_headroom = int(num_expert_parallelism * local_expert_size * (align_size - 1))
-              buffer_size = buffer_size + padding_headroom
-
-            output_shape = jnp.zeros((buffer_size, self.config.emb_dim), dtype=x.dtype)
-=======
             buffer_size = self.get_ragged_buffer_size(
                 jnp.shape(x)[0],
                 num_expert_parallelism,
@@ -1765,7 +1701,6 @@ class RoutedMoE(nnx.Module):
                 self.config.ragged_buffer_factor,
             )
             output_shape = jax.lax.empty((buffer_size, self.moe_expert_input_dim), dtype=x.dtype)
->>>>>>> official-upstream/main
 
             x = jax.lax.ragged_all_to_all(
                 x,
@@ -1914,7 +1849,6 @@ class RoutedMoE(nnx.Module):
         # =======================================================================
         if num_expert_parallelism > 1:
           original_inputs_first_dim = batch_size * sequence_length * self.config.num_experts_per_tok
-<<<<<<< HEAD
 
           # When using alignment-based padding, the reverse ragged_all_to_all receives
           # padded tokens back. We need a buffer large enough to hold the padded data.
@@ -1928,18 +1862,12 @@ class RoutedMoE(nnx.Module):
             padding_headroom = int(self.num_experts * (align_size - 1))
             reverse_buffer_size = original_inputs_first_dim + padding_headroom
 
-          output_shape = jnp.zeros(
-              (
-                  reverse_buffer_size,
-                  self.config.emb_dim // self.get_tensor_parallelism_size(),
-=======
           if sorted_selected_experts.shape[0] != original_inputs_first_dim:
             raise ValueError("original_inputs_first_dim does not match the original tensor" " shape!")
           output_shape = jax.lax.empty(
               (
-                  original_inputs_first_dim,
+                  reverse_buffer_size,
                   self.moe_expert_input_dim // self.get_tensor_parallelism_size(),
->>>>>>> official-upstream/main
               ),
               dtype=intermediate_output.dtype,
           )
