@@ -100,6 +100,9 @@ def decode_with_vllm(config: Config) -> None:
   enable_expert_parallel = config.ici_expert_parallelism > 1
   if enable_expert_parallel:
     vllm_args["additional_config"]["sharding"]["sharding_strategy"]["expert_parallelism"] = config.ici_expert_parallelism
+    vllm_args["additional_config"]["sharding"]["sharding_strategy"][
+        "attention_data_expert_parallelism"
+    ] = config.ici_attn_dp_expert_parallelism
     vllm_args["enable_expert_parallel"] = enable_expert_parallel
 
   max_logging.log(

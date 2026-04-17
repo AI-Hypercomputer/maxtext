@@ -886,6 +886,7 @@ class IciParallelism(BaseModel):
   ici_autoregressive_parallelism: int = Field(1, description="ICI axis for autoregressive parallelism.")
   ici_pipeline_parallelism: int = Field(1, description="ICI axis for pipeline parallelism.")
   ici_expert_parallelism: int = Field(1, description="ICI axis for expert parallelism.")
+  ici_attn_dp_expert_parallelism: int = Field(1, description="ICI axis for attn dp expert parallelism.")
 
 
 class PipelineParallelism(BaseModel):
@@ -2746,7 +2747,7 @@ class MaxTextConfig(
         "expert": self.ici_expert_parallelism,
         "autoregressive": self.ici_autoregressive_parallelism,
         "attn_dp": 1,  # initialized to 1, vLLM will auto calculate this value based on TP and num_kv_heads
-        "attn_dp_expert": 1,  # initialized to 1, vLLM will auto calculate this value based on EP
+        "attn_dp_expert": self.ici_attn_dp_expert_parallelism,
     }
     self.ici_parallelism = [ici_map[axis] for axis in self.mesh_axes]
 
