@@ -19,6 +19,11 @@ name: Run Tests Against MaxText Package
 on:
   workflow_call:
     inputs:
+      flavor:
+        description: 'Test flavor name (e.g. cpu-unit, tpu-unit) - used for artifact naming'
+        required: false
+        type: string
+        default: ''
       device_type:
         required: true
         type: string
@@ -164,6 +169,11 @@ jobs:
           if [ "${INPUTS_TOTAL_WORKERS}" -gt 1 ]; then
             $PYTHON_EXE -m pip install --quiet pytest-split pytest-xdist
             SPLIT_ARGS="--splits ${INPUTS_TOTAL_WORKERS} --group ${INPUTS_WORKER_GROUP} -n auto"
+            # On scheduled runs, record per-shard durations so future splits balance by time (LPT).
+            # Merge artifacts offline and commit as .test_durations at repo root.
+            if [ "${INPUTS_IS_SCHEDULED_RUN}" == "true" ]; then
+              SPLIT_ARGS="${SPLIT_ARGS} --store-durations --durations-path=.test_durations.${INPUTS_WORKER_GROUP}"
+            fi
           else
             SPLIT_ARGS=""
           fi
@@ -195,3 +205,11 @@ jobs:
           # If scheduled, upload to scheduled flag only. If PR, upload to regular flag only.
           flags: ${{ inputs.is_scheduled_run == 'true' && 'scheduled' || 'regular' }}
           verbose: true
+      - name: Upload test durations artifact
+        if: ${{ inputs.is_scheduled_run == 'true' && inputs.total_workers > 1 }}
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: test-durations-${{ inputs.flavor }}-${{ inputs.worker_group }}
+          path: .test_durations.*
+          if-no-files-found: ignore
