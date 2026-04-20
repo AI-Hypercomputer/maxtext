@@ -330,8 +330,12 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
           params,
           params_shardings,
       )
-    grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
-    (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, params, *extra_dpo_args, is_train=True)
+    if getattr(config, "forward_pass_only", False):
+      loss, aux = _loss_fn(model, config, data, dropout_rng, params, *extra_dpo_args, is_train=True)
+      raw_grads = jax.tree.map(jnp.zeros_like, params)  # dummy grads for fprop-only
+    else:
+      grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
+      (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, params, *extra_dpo_args, is_train=True)
 
   raw_grads = jax.tree_util.tree_map(
       lambda x: x.astype(config.grad_dtype) if x.dtype == jnp.float32 else x,
@@ -516,6 +520,15 @@ def eval_step(model, config, state, data, dropout_rng):
 
 def train_loop(config, recorder, state=None):
   """Main Training loop."""
+  # Initialize HybridEP buffer manager BEFORE setup_train_loop, because model creation
+  # during setup traces shard_map which calls hybrid_ep_dispatch_ffi (needs buffer manager).
+  if config.use_hybrid_ep:
+    import jax_deep_ep
+    from jax_deep_ep.ffi_ops import set_buffer_manager as ffi_set_buffer_manager
+    mgr = jax_deep_ep.init(maxtext_config=config)
+    ffi_set_buffer_manager(mgr)
+    max_logging.log("HybridEP buffer manager initialized")
+
   (
       init_rng,
       checkpoint_manager,
