@@ -959,7 +959,7 @@ def compute(x, w0, w1, wo, group_sizes, weights, *, config, mesh):
           use_qwix_quantization=config.use_qwix_quantization,
           use_tokamax_backend=config.use_tokamax_gmm,
           weight_gather_axes=weight_gather_axes,
-          qwix_rule=quantizations.get_fp8_full_qwix_rule(config),
+          qwix_rule=quantizations.get_fp8_full_qwix_rule_w_sparsity(config),
       )
     else:
       output = tokamax.ragged_dot(

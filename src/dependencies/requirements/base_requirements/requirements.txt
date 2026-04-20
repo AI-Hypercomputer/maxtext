@@ -46,4 +46,4 @@ tiktoken
 tokamax!=0.1.0
 transformers
 uvloop
-qwix
+qwix>=0.1.6
