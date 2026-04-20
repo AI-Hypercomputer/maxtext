@@ -33,15 +33,10 @@ from typing import Sequence
 
 import jax
 import jax.numpy as jnp
-from maxtext.kernels import attention, sort_activations
-
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
 
-import tokamax
-import qwix
-from maxtext.src.maxtext.kernels import megablox, sort_activations
+from maxtext.kernels import attention, sort_activations, megablox
 from maxtext.layers import quantizations
-# from quantization import QwixQuantization
 
 
 def scheduling_group(group_id) -> contextlib.AbstractContextManager[None]:
