@@ -769,6 +769,10 @@ class DeepSeekMoE(BaseModel):
       1,
       description="Factor by which to split the batch into micro-batches. Only used if use_batch_split_schedule is True.",
   )
+  use_fp8_for_batch_split: bool = Field(
+      False,
+      description="Whether to use fp8 for batch split. Only used if use_batch_split_schedule is True.",
+  )
 
 
 class Qwen3Next(BaseModel):
