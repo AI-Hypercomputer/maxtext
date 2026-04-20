@@ -1137,6 +1137,16 @@ def transformer_engine_context():
     yield
 
 
+def generate_representative_group_sizes(target_m: int, g: int) -> tuple[int, ...]:
+  """Generate group sizes for a given target m."""
+  np.random.seed(0)
+  repr_val = np.random.uniform(size=(g,))
+  repr_val = np.random.binomial(1, 0.9, (g,)) * repr_val
+  repr_val = np.int32((repr_val / np.sum(repr_val)) * target_m)
+  repr_val[0] += target_m - np.sum(repr_val)
+  return tuple(map(int, repr_val))
+
+
 def maybe_pad(inputs, tile_size):
   """Pads the inputs leading dimension to be divisible by tile_size."""
   inputs_dim = inputs.shape[0]

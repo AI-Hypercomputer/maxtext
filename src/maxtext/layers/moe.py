@@ -989,7 +989,10 @@ class RoutedMoE(nnx.Module):
       elif self.config.attention == "vllm_rpa":
         return group_sizes
       else:
-        return tokamax.RaggedDotGroupSizes(group_sizes, len(inputs))
+        return tokamax.RaggedDotGroupSizes(
+            group_sizes,
+            max_utils.generate_representative_group_sizes(inputs.shape[0], kernel.shape[0]),
+        )
 
     def get_quantization_dtypes():
       lhs_quantize_dtype, rhs_quantize_dtype = None, None

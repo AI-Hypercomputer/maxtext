@@ -33,11 +33,11 @@ logical_axis_rules: [
                       # Vocabulary Embedding
                       # ==========================================
                       # Vocab Activations
-                      ['activation_embed_and_logits_batch', ['data']],
-                      ['activation_embed_and_logits_batch_sequence', ['data']],
-                      ['activation_vocab', ['model', 'expert', 'attn_dp', 'attn_dp_expert']],
+                      ['activation_embed_and_logits_batch', ['data', 'attn_dp', 'attn_dp_expert']],
+                      ['activation_embed_and_logits_batch_sequence', ['data', 'attn_dp', 'attn_dp_expert']],
+                      ['activation_vocab', ['model', 'expert']],
                       # Vocab Weights
-                      ['vocab', ['model', 'expert', 'attn_dp', 'attn_dp_expert']],
+                      ['vocab', []],
                       ['embed_vocab', []],
                       # ==========================================
                       # Attention
@@ -46,8 +46,8 @@ logical_axis_rules: [
                       ['activation_batch_attn', ['data', 'attn_dp', 'attn_dp_expert']],
                       ['activation_heads', ['model', 'expert']],
                       ['activation_kv_heads', ['model', 'expert']],
-                      ['activation_attn_embed', ['model', 'expert']],
-                      ['activation_kv', ['model', 'expert']],
+                      ['activation_attn_embed', []],
+                      ['activation_kv', []],
                       ['activation_kv_batch', ['data', 'attn_dp', 'attn_dp_expert']],
                       ['activation_kv_head_dim', []],
                       # Attention Weights
@@ -65,33 +65,32 @@ logical_axis_rules: [
                       # Mixture of Experts (MoE)
                       # ==========================================
                       # MoE Activations
-                      ['activation_batch_moe', ['data']],
-                      ['activation_embed_moe', ['model']],
-                      ['activation_mlp_moe', []],
-                      ['activation_exp', ['expert', 'attn_dp', 'attn_dp_expert']],
+                      ['activation_batch_moe', ['data', 'attn_dp', 'attn_dp_expert']],
+                      ['activation_embed_moe', ['model', 'attn_dp']],
+                      ['activation_mlp_moe', ['model', 'attn_dp']],
+                      ['activation_exp', ['attn_dp_expert', 'expert']],
                       # MoE Weights
-                      ['exp', ['expert', 'attn_dp', 'attn_dp_expert']],
-                      ['mlp_moe', []],
+                      ['exp', ['attn_dp_expert', 'expert']],
+                      ['mlp_moe', ['model', 'attn_dp']],
                       ['embed_moe', []],
                       # ==========================================
                       # Standard MLP / Dense Layers / Model Structure
                       # ==========================================
                       # Dense Activations
-                      ['activation_mlp', ['model', 'expert', 'attn_dp', 'attn_dp_expert']],
+                      ['activation_mlp', ['model', 'attn_dp']],
                       # Note activation batch and length also get used in attention and vocab
-                      ['activation_batch', ['data']],
-                      ['activation_embed', ['model', 'expert', 'attn_dp', 'attn_dp_expert']],
+                      ['activation_batch', ['data', 'attn_dp', 'attn_dp_expert']],
+                      ['activation_embed', []],
                       # General Weights
-                      ['mlp', ['model', 'expert', 'attn_dp', 'attn_dp_expert']],
+                      ['mlp', ['model', 'attn_dp']],
                       ['embed', []],
-                      ['norm', ['model', 'expert', 'attn_dp', 'attn_dp_expert']],
+                      ['norm', []],
                       # ==========================================
                       # Inference(Prefill, Decode, Cache)
                       # ==========================================
                       ['activation_prefill_kv_batch', ['data', 'attn_dp', 'attn_dp_expert']],
                       ['decode_batch', ['data', 'attn_dp', 'attn_dp_expert']],
                       ['cache_heads', ['model', 'expert']],
-                      ['cache_heads', ['model']],
                       ['paged_kv_heads', ['model', 'expert']],
                       ['cache_batch_prefill', []],
                       ['cache_batch', []],
