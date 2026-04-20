@@ -680,8 +680,8 @@ class MoEGeneral(BaseModel):
       description="Whether to use DeepEP hybridEP for MoE dispatch/combine (NVLink domain, GPU only).",
   )
   hybrid_ep_pad_multiple: int = Field(
-      32,
-      description="Padding alignment for hybridEP expert GEMMs. DeepEP pads each expert's tokens to this multiple.",
+      128,
+      description="Padding alignment for hybridEP expert GEMMs. DeepEP pads each expert's tokens to this multiple. Must be 128 for te_mxfp8.",
   )
   forward_pass_only: bool = Field(
       False,

@@ -210,7 +210,7 @@ use_random_routing: false # whether to use random routing for debug/test purpose
 use_custom_sort_vjp: true # whether to use a custom VJP sort for efficient backward pass processing in sparse matmul
 use_ring_of_experts: false # whether to use ring of experts for sparse matmul expert parallelism
 use_hybrid_ep: false # whether to use DeepEP hybridEP for MoE dispatch/combine (NVLink domain, GPU only)
-hybrid_ep_pad_multiple: 32 # padding alignment for hybridEP expert GEMMs
+hybrid_ep_pad_multiple: 128 # padding alignment for hybridEP expert GEMMs (128 required for te_mxfp8)
 forward_pass_only: false # skip gradient computation in train_step (forward pass only with dummy zero gradients)
 te_router_and_permutation_impl: false # whether to use TransformerEngine fused router and permutation kernels for MoE routing and token dispatch/combine
 moe_permutation_group_align_size: 128 # alignment size for MoE permutation group padding (MT and TE paths), set to 0 to disable
