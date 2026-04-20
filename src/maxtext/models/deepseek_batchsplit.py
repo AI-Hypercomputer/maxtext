@@ -40,7 +40,8 @@ from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_ma
 import tokamax
 import qwix
 from maxtext.src.maxtext.kernels import megablox, sort_activations
-from quantization import QwixQuantization
+from maxtext.layers import quantizations
+# from quantization import QwixQuantization
 
 
 def scheduling_group(group_id) -> contextlib.AbstractContextManager[None]:
@@ -1126,10 +1127,10 @@ def staggered_call(fn, xs):
   return xs, jax.tree_util.tree_map(lambda *rs: list(rs), *res_dicts)
 
 
-def dot(x, y, use_fp8, quant=None, axes=1):
+def dot(x, y, use_fp8, axes=1):
   # TODO(shuningjin): Add support for fp8 matmul here.
   if use_fp8:
-    quant = QwixQuantization(
+    quant = quantizations.QwixQuantization(
         act_calibration_method="fixed,-224,224",
         weight_calibration_method="fixed,-224,224",
         bwd_calibration_method="absmax",
@@ -1896,36 +1897,76 @@ route_impl.defvjp(route_impl_fwd, route_impl_bwd)
 unroute_impl.defvjp(unroute_impl_fwd, unroute_impl_bwd)
 
 
-def compute_gating(x, w0, w1, group_sizes, *, dtype, use_fp8):
+def compute_gating(x, w0, w1, group_sizes, *, dtype, use_fp8, config):
   """Computes the gating GMMs."""
   if use_fp8:
-    # TODO(shuningjin): Add support for fp8 here and change to `tokamax.ragged_dot()`.
-    raise NotImplementedError("fp8 is not supported for gating yet.")
+    wi_tile_size = (
+        config.wi_tile_fwd_batch_seq,
+        config.wi_tile_fwd_embed_dim,
+        config.wi_tile_fwd_mlp_dim,
+        config.wi_tile_dlhs_batch_seq,
+        config.wi_tile_dlhs_embed_dim,
+        config.wi_tile_dlhs_mlp_dim,
+        config.wi_tile_drhs_batch_seq,
+        config.wi_tile_drhs_embed_dim,
+        config.wi_tile_drhs_mlp_dim,
+    )
+    gmm_fn = functools.partial(
+        megablox.gmm,
+        group_sizes=group_sizes,
+        preferred_element_type=dtype,
+        tiling=wi_tile_size,
+        use_qwix_quantization=True,
+        use_tokamax_backend=True,
+        weight_gather_axes=None,  # skip QAG in gmm fwd
+        qwix_rule=quantizations.get_fp8_full_qwix_rule(config),
+    )
   else:
-    layer_w0 = jax.lax.ragged_dot(
-        x,
-        w0,
+    gmm_fn = functools.partial(
+        jax.lax.ragged_dot,
         group_sizes=group_sizes,
         precision=jax.lax.Precision.DEFAULT,
         preferred_element_type=dtype,
     )
-    layer_w1 = jax.lax.ragged_dot(
-        x,
-        w1,
-        group_sizes=group_sizes,
-        precision=jax.lax.Precision.DEFAULT,
-        preferred_element_type=dtype,
-    )
-    return layer_w0, layer_w1
+
+  if config.merge_gating_gmm:
+    w01 = jnp.concatenate([w0, w1], axis=-1)
+    layer_w01 = gmm_fn(x, w01)
+    layer_w0, layer_w1 = jnp.split(layer_w01, 2, axis=-1)
+  else:
+    layer_w0 = gmm_fn(x, w0)
+    layer_w1 = gmm_fn(x, w1)
+
+  return layer_w0, layer_w1
 
 
-def compute_linear(layer_w0, layer_w1, wo, group_sizes, weights, *, dtype, use_fp8):
+def compute_linear(layer_w0, layer_w1, wo, group_sizes, weights, *, dtype, use_fp8, config):
   """Combines the outputs of the gating GMMs and computes the final GMM."""
   intermediate_layer = jax.nn.silu(layer_w0) * layer_w1
   intermediate_layer *= weights[:, None]
   if use_fp8:
-    # TODO(shuningjin): Add support for fp8 here and change to `tokamax.ragged_dot()`.
-    raise NotImplementedError("fp8 is not supported for gating yet.")
+    wo_tile_size = (
+        config.wo_tile_fwd_batch_seq,
+        config.wo_tile_fwd_embed_dim,
+        config.wo_tile_fwd_mlp_dim,
+        config.wo_tile_dlhs_batch_seq,
+        config.wo_tile_dlhs_embed_dim,
+        config.wo_tile_dlhs_mlp_dim,
+        config.wo_tile_drhs_batch_seq,
+        config.wo_tile_drhs_embed_dim,
+        config.wo_tile_drhs_mlp_dim,
+    )
+    layer_wo = megablox.gmm(
+        lhs=intermediate_layer,
+        rhs=wo,
+        group_sizes=group_sizes,
+        preferred_element_type=dtype,
+        tiling=wo_tile_size,
+        use_qwix_quantization=True,
+        use_tokamax_backend=True,
+        weight_gather_axes=None,  # skip QAG in gmm fwd
+        qwix_rule=quantizations.get_fp8_full_qwix_rule(config),
+    )
   else:
     layer_wo = jax.lax.ragged_dot(
         intermediate_layer,
@@ -1934,7 +1975,7 @@ def compute_linear(layer_w0, layer_w1, wo, group_sizes, weights, *, dtype, use_f
         precision=jax.lax.Precision.DEFAULT,
         preferred_element_type=dtype,
     )
-    return layer_wo
+  return layer_wo
 
 
 def route_compute_unroute(
@@ -1949,6 +1990,7 @@ def route_compute_unroute(
     normalization_layer_epsilon,
     dtype,
     use_fp8,
+    config,
 ):
   """Routes, processes, and unroutes activations."""
   target_length = xs[0].shape[1]
@@ -1994,6 +2036,7 @@ def route_compute_unroute(
         group_sizes,
         dtype=dtype,
         use_fp8=use_fp8,
+        config=config,
     )
     return layer_w0, layer_w1
 
@@ -2007,6 +2050,7 @@ def route_compute_unroute(
         weights,
         dtype=dtype,
         use_fp8=use_fp8,
+        config=config,
     )
     return x
 
@@ -2184,6 +2228,7 @@ def route_compute_unroute_bwd(
     normalization_layer_epsilon,
     dtype,
     use_fp8,
+    config,
 ):
   """Performs the backward pass for route_compute_unroute."""
   xs = residuals.pop("mla_out")
@@ -2267,6 +2312,7 @@ def route_compute_unroute_bwd(
             compute_gating,
             dtype=dtype,
             use_fp8=use_fp8,
+            config=config,
         ),
         x,
         routed_w0,
@@ -2282,6 +2328,7 @@ def route_compute_unroute_bwd(
             compute_linear,
             dtype=dtype,
             use_fp8=use_fp8,
+            config=config,
         ),
         layer_w0,
         layer_w1,
@@ -2361,6 +2408,7 @@ def moe(
           normalization_layer_epsilon=normalization_layer_epsilon,
           dtype=dtype,
           use_fp8=use_fp8,
+          config=config,
       ),
       mesh=mesh,
       in_specs=(
@@ -2431,6 +2479,7 @@ def moe_bwd(
           normalization_layer_epsilon=normalization_layer_epsilon,
           dtype=dtype,
           use_fp8=use_fp8,
+          config=config,
       ),
       mesh=mesh,
       in_specs=(
