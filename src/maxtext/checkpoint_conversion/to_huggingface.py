@@ -130,6 +130,10 @@ def _get_model_mappings(
 ):
   """Retrieves parameter, shape, and hook function mappings for the model.
 
+  This handles both `atomic` keys and `composite_mt_key` architectures.
+  A `composite_mt_key` occurs when multiple MaxText keys must be fused back into a
+  single HF parameter (e.g., fusing MT `wi_0` and `wi_1` back into HF `gate_up_proj`).
+
   Args:
     model_name: The name of the model (e.g., "gemma2-2b").
     scan_layers: Boolean indicating if the model was trained with scanned layers.
