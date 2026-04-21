@@ -431,6 +431,7 @@ def main(config, test_args):  # pylint: disable=W0621
     torch_dtype = dtype_mapping.get(config.dtype.name, torch.bfloat16)
     max_logging.log(f"Loading HF model with dtype: {torch_dtype} (derived from config.dtype: {config.dtype})")
 
+<<<<<<< HEAD
     hf_model = AutoModelForCausalLM.from_pretrained(test_args.hf_model_path, torch_dtype=torch_dtype, token=hf_token)
     hf_lora_path = config.hf_lora_adapter_path
     if hf_lora_path:
@@ -440,16 +441,19 @@ def main(config, test_args):  # pylint: disable=W0621
       except ImportError as exc:
         raise ImportError("peft library is required to load HF LoRA adapter. Run `pip install peft`.") from exc
       hf_model = PeftModel.from_pretrained(hf_model, hf_lora_path)
+=======
+    hf_model = AutoModelForCausalLM.from_pretrained(test_args.hf_model_path, dtype=torch_dtype, token=hf_token, trust_remote_code=True)
+>>>>>>> 6223519c5 (Add flags for lazy loading)
 
     # Load tokenizer: `test_args.hf_model_path` or fallback to `config.tokenizer_path`
     try:
       # Try loading from `test_args.hf_model_path`
       max_logging.log(f"Loading tokenizer from {test_args.hf_model_path}.")
-      tokenizer = AutoTokenizer.from_pretrained(test_args.hf_model_path, token=hf_token)
+      tokenizer = AutoTokenizer.from_pretrained(test_args.hf_model_path, token=hf_token, trust_remote_code=True)
     except Exception as e:  # pylint: disable=broad-except
       # Fallback to `config.tokenizer_path`. local hf directory may not contain tokenizer, read from remote tokenizer
       max_logging.log(f"Tokenizer loading error: {e}.\nLoading tokenizer from {config.tokenizer_path}.")
-      tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_path, token=hf_token)
+      tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_path, token=hf_token, trust_remote_code=True)
 
     # maxtext model prefix, use eos token as pad token
     pad_token_prefixes = ["llama3.1", "mixtral"]

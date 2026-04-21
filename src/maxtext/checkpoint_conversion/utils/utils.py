@@ -179,14 +179,32 @@ def convert_jax_weight_to_numpy(weight: "jax.Array", dtype_str: None | str = Non
 
 def _process(hf_path, processed_slice, output_weights, current_hook_fns, hf_shape_map, save_dtype):
   """Applies hooks, converts a JAX slice to NumPy, and appends it to the output list, used in to_huggingface"""
-  if hf_path not in hf_shape_map:
-    raise ValueError(f"HF path '{hf_path}' not found in hf_shape_map.")
-  target_hf_shape = hf_shape_map[hf_path]
-  # If hook is unsepecified, use identity
-  if current_hook_fns:
-    processed_slice = apply_hook_fns(processed_slice, target_hf_shape, current_hook_fns)
-  numpy_slice = convert_jax_weight_to_numpy(processed_slice, save_dtype).reshape(target_hf_shape)
-  output_weights.append((hf_path, numpy_slice))
+  # --- Case 1: 1-to-N Splitting (hf_path is a tuple) ---
+  if isinstance(hf_path, tuple):
+    # Perform safety check on the collective tuple key first
+    if hf_path not in hf_shape_map:
+      raise ValueError(f"HF path tuple '{hf_path}' not found in hf_shape_map.")
+    target_hf_shapes = hf_shape_map[hf_path]
+    
+    # Apply hooks (your hook function returns a tuple of sliced JAX arrays)
+    if current_hook_fns:
+      processed_slice = apply_hook_fns(processed_slice, target_hf_shapes, current_hook_fns)
+    
+    # Iterate, unpack, and convert each component independently
+    for path, single_slice, shape in zip(hf_path, processed_slice, target_hf_shapes):
+      numpy_slice = convert_jax_weight_to_numpy(single_slice, save_dtype).reshape(shape)
+      output_weights.append((path, numpy_slice))
+
+  # --- Case 2: Legacy Standard 1-to-1 Mapping (hf_path is a single string) ---
+  else:
+    if hf_path not in hf_shape_map:
+      raise ValueError(f"HF path '{hf_path}' not found in hf_shape_map.")
+    target_hf_shape = hf_shape_map[hf_path]
+    
+    if current_hook_fns:
+      processed_slice = apply_hook_fns(processed_slice, target_hf_shape, current_hook_fns)
+    numpy_slice = convert_jax_weight_to_numpy(processed_slice, save_dtype).reshape(target_hf_shape)
+    output_weights.append((hf_path, numpy_slice))
 
 
 def process_maxtext_param(
