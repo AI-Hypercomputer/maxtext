@@ -34,6 +34,8 @@ from maxtext.common.common_types import ShardMode
 from maxtext.kernels import megablox as mblx
 from maxtext.layers import attentions, linears, nnx_wrappers, quantizations
 from maxtext.layers.initializers import NdInitializer, default_bias_init, nd_dense_init, variable_to_logically_partitioned
+from maxtext.kernels import megablox as mblx
+from maxtext.kernels.ragged_gather import ragged_gather
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils.sharding import create_sharding, maybe_shard_with_logical, maybe_shard_with_pspec
@@ -107,6 +109,87 @@ def get_batchsplit_init_kernel_axes():
       ("embed_moe", None, "expert_only"),
       ("embed_moe", "expert_only", None),
   )
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(0,))
+def _process_tokens_locally(config, hidden_states_local, topk_indices_local):
+  """Sort and gather activations to different EP shards."""
+  return _process_tokens_locally_fwd(config, hidden_states_local, topk_indices_local)[0]
+
+
+def _process_tokens_locally_fwd(config, hidden_states_local, topk_indices_local):
+  """Forward pass of ragged token sorting and gathering."""
+
+  num_tokens_local = hidden_states_local.shape[0]
+
+  topk_indices_flat = topk_indices_local.flatten()  # num_tokens_local x topk
+  topk_argsort_indices = jnp.argsort(topk_indices_flat)  # num_tokens_local x topk
+
+  token_indices = jnp.arange(num_tokens_local, dtype=jnp.int32).repeat(
+      config.num_experts_per_tok
+  )  # num_tokens_local x topk
+  token_indices_sorted = token_indices[topk_argsort_indices]  # num_tokens_local x topk
+
+  group_sizes_local = jax.nn.one_hot(topk_indices_flat, config.num_experts, dtype=jnp.int32).sum(
+      axis=0
+  )  # GLOBAL_NUM_EXPERTS
+
+  topk_argsort_revert_indices = jnp.argsort(topk_argsort_indices)  # num_tokens_local x topk
+  shard_idx = jax.lax.axis_index("expert")
+
+  local_num_experts = config.num_experts // config.num_target_devices
+  experts_start = shard_idx * local_num_experts
+  experts_end = experts_start + local_num_experts
+  group_offsets = jnp.cumulative_sum(group_sizes_local, include_initial=True)
+  shard_output_start = group_offsets[experts_start]
+  shard_output_end = group_offsets[experts_end]
+
+  x = ragged_gather(
+      hidden_states_local,
+      token_indices_sorted,
+      shard_output_start,
+      shard_output_end,
+  )
+
+  out = (x, group_sizes_local, topk_argsort_revert_indices)
+
+  res = (
+      token_indices_sorted,
+      shard_output_start,
+      hidden_states_local.shape,
+      local_num_experts,
+  )
+
+  return out, res
+
+
+def _process_tokens_locally_bwd(res, g_out):
+  """
+  Executes the backward pass for local token processing.
+
+  This function collects gradients from the outputs and accumulates them back into
+  the original hidden states using the sorted token indices. Because the sorting
+  indices have a small memory footprint, they are checkpointed during the forward
+  pass and reused here to accurately route the gradients.
+  """
+
+  token_indices_sorted, shard_output_start, hidden_states_local_shape, local_num_experts = res
+  g_x, _, _ = g_out
+  g_hidden_states_local = jnp.zeros(hidden_states_local_shape, dtype=g_x.dtype)
+
+  def effective_slicing(inputs):
+    return jax.lax.dynamic_slice_in_dim(
+        inputs,
+        start_index=shard_output_start,
+        slice_size=local_num_experts,
+    )
+
+  effective_g_x, effective_indices = effective_slicing(g_x), effective_slicing(token_indices_sorted)
+  grad_hidden_states = g_hidden_states_local.at[effective_indices].add(effective_g_x)
+  return grad_hidden_states, None
+
+
+_process_tokens_locally.defvjp(_process_tokens_locally_fwd, _process_tokens_locally_bwd)
 
 
 def random_routing(rng_key, gate_logits, num_experts_per_tok):
