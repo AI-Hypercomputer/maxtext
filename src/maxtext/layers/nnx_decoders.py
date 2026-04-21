@@ -59,6 +59,7 @@ from maxtext.models import (
     mixtral,
     olmo3,
     qwen3,
+    qwen3_5,
     simple_layer,
 )
 from maxtext.multimodal import utils as mm_utils
@@ -426,7 +427,7 @@ class NNXDecoder(nnx.Module):
                 "is_nope_layer": llama4.determine_is_nope_layer(lyr, self.config.nope_layer_interval),
                 "is_moe_layer": llama4.determine_is_moe_layer(lyr, self.config.interleave_moe_layer_step),
             }
-          elif config.decoder_block == DecoderBlockType.QWEN3_NEXT:
+          elif config.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
             layer_kwargs = {"layer_idx": lyr}
           elif config.decoder_block == DecoderBlockType.GPT_OSS:
             layer_kwargs = {"attention_type": gpt_oss.get_attention_type(layer_id=lyr)}
@@ -688,6 +689,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.DEEPSEEK: get_deepseek(),
         DecoderBlockType.GPT_OSS: get_scannable(gpt_oss.GptOssDecoderLayer, gpt_oss.GptOssScannableBlock),
         DecoderBlockType.QWEN3_NEXT: get_scannable(qwen3.Qwen3NextDecoderLayer, qwen3.Qwen3NextScannableBlock),
+        DecoderBlockType.QWEN3_5: get_scannable(qwen3_5.Qwen3_5DecoderLayer, qwen3_5.Qwen3_5ScannableBlock),
         DecoderBlockType.LLAMA4: get_scannable(llama4.Llama4DecoderLayer, llama4.Llama4ScannableBlock),
         DecoderBlockType.OLMO3: get_scannable(olmo3.Olmo3DecoderLayer, olmo3.Olmo3ScannableBlock),
     }
@@ -841,7 +843,7 @@ class NNXDecoder(nnx.Module):
       return functools.partial(
           gpt3.Gpt3LayerNorm, num_features=num_features, reductions_in_fp32=False, use_bias=True, rngs=rngs
       )
-    elif self.config.decoder_block == DecoderBlockType.QWEN3_NEXT:
+    elif self.config.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
       return functools.partial(
           normalizations.RMSNorm, num_features=num_features, shard_mode=self.config.shard_mode, rngs=rngs
       )

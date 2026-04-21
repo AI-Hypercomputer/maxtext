@@ -1032,3 +1032,24 @@ class TrainCompile(parameterized.TestCase):
             "weight_dtype=bfloat16",
         )
     )
+
+  @pytest.mark.cpu_only
+  def test_qwen3_5(self):
+    """AOT test for qwen3-5"""
+    compiled_trainstep_file = "/tmp/test_qwen3_5"
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-512",
+            "compile_topology_num_slices=1",
+            "model_name=qwen3.5-397b-a17b",
+            "per_device_batch_size=1.0",
+            "max_target_length=1024",
+            "sparse_matmul=True",
+            "megablox=True",
+            "attention=flash",
+            "use_tokamax_splash=True",
+        )
+    )

@@ -57,6 +57,7 @@ from maxtext.models import (
     qwen2,
     qwen3,
     qwen3_custom,
+    qwen3_5,
     simple_layer,
 )
 from maxtext.multimodal import utils as mm_utils
@@ -483,6 +484,8 @@ class Decoder(nn.Module):
         return [qwen3_custom.Qwen3CustomMoeDecoderLayerToLinen]
       case DecoderBlockType.QWEN3_NEXT:
         return [qwen3.Qwen3NextScannableBlockToLinen] if self.config.scan_layers else [qwen3.Qwen3NextDecoderLayerToLinen]
+      case DecoderBlockType.QWEN3_5:
+        return [qwen3_5.Qwen3_5ScannableBlockToLinen] if self.config.scan_layers else [qwen3_5.Qwen3_5DecoderLayerToLinen]
       case DecoderBlockType.SIMPLE:
         return [simple_layer.SimpleDecoderLayerToLinen]
       case DecoderBlockType.SIMPLE_MLP:
@@ -550,7 +553,7 @@ class Decoder(nn.Module):
       return functools.partial(rms_norm, num_features=num_features, shard_mode=self.config.shard_mode)
     elif self.config.decoder_block == DecoderBlockType.GPT3:
       return functools.partial(gpt3.gpt3_layer_norm, num_features=num_features, reductions_in_fp32=False, use_bias=True)
-    elif self.config.decoder_block == DecoderBlockType.QWEN3_NEXT:
+    elif self.config.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
       return functools.partial(
           normalizations.Qwen3NextRMSNormLinen, num_features=num_features, shard_mode=self.config.shard_mode
       )
@@ -1104,13 +1107,13 @@ class Decoder(nn.Module):
                   "is_nope_layer": llama4.determine_is_nope_layer(lyr, self.config.nope_layer_interval),
                   "is_moe_layer": llama4.determine_is_moe_layer(lyr, self.config.interleave_moe_layer_step),
               }
-            if cfg.decoder_block == DecoderBlockType.QWEN3_NEXT:
+            if cfg.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
               layer_kwargs = {"layer_idx": lyr}
             kv_cache = None
-            if kv_caches is not None and cfg.decoder_block != DecoderBlockType.QWEN3_NEXT:
+            if kv_caches is not None and cfg.decoder_block not in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
               kv_cache = kv_caches[lyr]
-            elif kv_caches is not None and cfg.decoder_block == DecoderBlockType.QWEN3_NEXT:
-              # For Qwen3Next, kv_caches is a dictionary of lists of caches.
+            elif kv_caches is not None and cfg.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
+              # For Qwen3Next & Qwen3.5, kv_caches is a dictionary of lists of caches.
               if (lyr + 1) % cfg.inhomogeneous_layer_cycle_interval == 0:
                 kv_cache = (kv_caches["key_cache"][lyr], kv_caches["value_cache"][lyr])
 
@@ -1135,7 +1138,7 @@ class Decoder(nn.Module):
                 **layer_call_kwargs,
             )
             if kv_caches is not None and returned_cache is not None:
-              if cfg.decoder_block != DecoderBlockType.QWEN3_NEXT:
+              if cfg.decoder_block not in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
                 kv_caches[lyr] = returned_cache
               elif (lyr + 1) % cfg.inhomogeneous_layer_cycle_interval == 0:
                 kv_caches["key_cache"][lyr] = returned_cache[0]

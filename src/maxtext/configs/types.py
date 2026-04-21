@@ -259,6 +259,7 @@ ModelName = Literal[
     "qwen3-next-80b-a3b",
     "qwen3-omni-30b-a3b",
     "qwen3-custom-30b-a3b",
+    "qwen3.5-397b-a17b",
     "gpt3-175b",
     "gpt3-22b",
     "gpt3-6b",
@@ -2871,7 +2872,10 @@ class MaxTextConfig(
             f"The number of decoder layers ({self.base_num_decoder_layers}) must be divisible by interleave moe layer step "
             f"({self.interleave_moe_layer_step})"
         )
-    if self.decoder_block == DecoderBlockType.QWEN3_NEXT:
+    if self.decoder_block in (
+        DecoderBlockType.QWEN3_NEXT,
+        DecoderBlockType.QWEN3_5,
+    ):
       if int(self.gdn_num_value_heads) % int(self.gdn_num_key_heads) != 0:
         raise ValueError("gdn_num_value_heads must be divisible by gdn_num_key_heads")
       rotary_dim = int(self.head_dim * self.partial_rotary_factor)

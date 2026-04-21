@@ -894,7 +894,10 @@ class FlopCalculation(parameterized.TestCase):
       ) + config.kv_lora_rank * config.num_query_heads * (config.qk_nope_head_dim + config.v_head_dim)
       proj_params = config.emb_dim * config.num_query_heads * config.v_head_dim
       total_qkv_proj_params = (q_params + kv_params + proj_params) * config.num_decoder_layers
-    elif getattr(config, "decoder_block", None) == maxtext_utils.DecoderBlockType.QWEN3_NEXT:
+    elif getattr(config, "decoder_block", None) in (
+        maxtext_utils.DecoderBlockType.QWEN3_NEXT,
+        maxtext_utils.DecoderBlockType.QWEN3_5,
+    ):
       # Interleaved Full Attention and Gated Delta Net (Linear Attention)
       cycle_interval = config.inhomogeneous_layer_cycle_interval
       num_full_attn_layers = config.num_decoder_layers // cycle_interval

@@ -616,7 +616,7 @@ def get_dense_moe_layers(config):
     num_moe_layers = config.num_decoder_layers // config.interleave_moe_layer_step
     num_dense_layers = config.num_decoder_layers - num_moe_layers
     return num_dense_layers, num_moe_layers
-  elif config.decoder_block == DecoderBlockType.QWEN3_NEXT:
+  elif config.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
     return 0, config.num_decoder_layers
   elif config.decoder_block == DecoderBlockType.DEFAULT:
     raise ValueError("Unsupported decoder block for dense/MoE layer calculation")
@@ -862,6 +862,7 @@ def calculate_tflops_training_per_device(config, log=True):
         DecoderBlockType.DEEPSEEK,
         DecoderBlockType.LLAMA4,
         DecoderBlockType.QWEN3_NEXT,
+        DecoderBlockType.QWEN3_5,
         DecoderBlockType.GEMMA4,
     ):
       total_ffn_flops = calculate_routed_and_shared_ffn_tflops_per_device(config)
@@ -972,7 +973,10 @@ def calculate_tflops_training_per_device(config, log=True):
     total_weight_flops = total_ffn_flops_all_layers + per_layer_flops * config.num_decoder_layers + embedding_flops
     learnable_weight_tflops = total_weight_flops * 3 / 10**12
     attention_tflops = causal_attention_flops * config.num_decoder_layers * 3 / 10**12
-  elif config.decoder_block == DecoderBlockType.QWEN3_NEXT:
+  elif config.decoder_block in (
+      DecoderBlockType.QWEN3_NEXT,
+      DecoderBlockType.QWEN3_5,
+  ):
     gdn_weight_flops_per_layer, gdn_attn_flops_per_layer = calculate_gated_delta_net_flops_per_device(config)
     cycle_interval = config.inhomogeneous_layer_cycle_interval
     num_full_attn_layers = config.num_decoder_layers // cycle_interval
