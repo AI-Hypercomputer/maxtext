@@ -256,10 +256,22 @@ class VllmServerManager:
     """Initialise the in-process vLLM LLM and start the HTTP server."""
     # pylint: disable=import-outside-toplevel
 
+    # Disable V1 multiprocessing so EngineCore runs in-process instead.
+    # V1 engine architecture is otherwise preserved (tpu-inference plugin works),
+    # and JAX/TPU is initialised exactly once inside LLM() in this process.
+    os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    os.environ.setdefault("NEW_MODEL_DESIGN", "1")
+    os.environ.setdefault("SKIP_JAX_PRECOMPILE", "1")
+
+    if self.env:
+      os.environ.update(self.env)
+
     # Workaround for https://github.com/vllm-project/tpu-inference/pull/2268:
     # hbm_usages_bytes calls device.memory_stats() on all JAX devices including
     # non-local ones, which raises INVALID_ARGUMENT on multi-host setups.
+    # Applied after env-var setup so any JAX/TPU env vars are in place first.
     # Remove once a tpu-inference release containing the fix is in the deps.
+    logger.info("Attempting to apply tpu_inference.utils.hbm_usages_bytes multi-host patch...")
     try:
       import tpu_inference.utils as _tpi_utils  # pylint: disable=import-error
 
@@ -278,21 +290,11 @@ class VllmServerManager:
         return usage
 
       _tpi_utils.hbm_usages_bytes = _hbm_usages_bytes_multihost
-      logger.info("Applied tpu_inference.utils.hbm_usages_bytes multi-host patch.")
-    except ImportError:
-      pass
+      logger.info("tpu_inference multi-host patch applied to %s", _tpi_utils.__file__)
+    except Exception as _patch_err:  # pylint: disable=broad-except
+      logger.warning("tpu_inference multi-host patch skipped: %s", _patch_err)
 
     from vllm import LLM
-
-    # Disable V1 multiprocessing so EngineCore runs in-process instead.
-    # V1 engine architecture is otherwise preserved (tpu-inference plugin works),
-    # and JAX/TPU is initialised exactly once inside LLM() in this process.
-    os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-    os.environ.setdefault("NEW_MODEL_DESIGN", "1")
-    os.environ.setdefault("SKIP_JAX_PRECOMPILE", "1")
-
-    if self.env:
-      os.environ.update(self.env)
 
     # total chips = ici_tensor_parallelism x ici_expert_parallelism.
     ici_tp = self.tensor_parallel_size // self.expert_parallel_size
