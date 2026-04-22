@@ -30,13 +30,6 @@ link-type: doc
 Step-by-step guide for building MaxText docker images.
 ```
 
-```{grid-item-card} 📚 Pre-training
-:link: tutorials/pretraining
-:link-type: doc
-
-Step-by-step guides for pre-training with real datasets like C4 using HuggingFace, Grain, or TFDS.
-```
-
 ```{grid-item-card} 🧩 Post-training
 :link: tutorials/post_training_index
 :link-type: doc
@@ -58,7 +51,6 @@ hidden:
 maxdepth: 1
 ---
 tutorials/build_maxtext.md
-tutorials/pretraining.md
 tutorials/post_training_index.md
 tutorials/inference.md
 ```

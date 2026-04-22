@@ -32,9 +32,14 @@ Grain ensures determinism in data input pipelines by saving the pipeline's state
 
 ## Using Grain
 
-1. Grain currently supports three data formats: [ArrayRecord](https://github.com/google/array_record) (random access), [Parquet](https://arrow.apache.org/docs/python/parquet.html) (partial random-access through row groups) and [TFRecord](https://www.tensorflow.org/tutorials/load_data/tfrecord)(sequential access). Only the ArrayRecord format supports the global shuffle mentioned above. For converting a dataset into ArrayRecord, see [Apache Beam Integration for ArrayRecord](https://github.com/google/array_record/tree/main/beam). Additionally, other random access data sources can be supported via a custom [data source](https://google-grain.readthedocs.io/en/latest/data_sources/protocol.html) class.
-   - **Community Resource**: The MaxText community has created a [ArrayRecord Documentation](https://array-record.readthedocs.io/). Note: we appreciate the contribution from the community, but as of now it has not been verified by the MaxText or ArrayRecord developers yet.
-2. If the dataset is hosted on a Cloud Storage bucket, the path `gs://` can be provided directly. However, for the best performance, it's recommended to read the bucket through [Cloud Storage FUSE](https://cloud.google.com/storage/docs/gcs-fuse). This will significantly improve the perf for the ArrayRecord format as it allows meta data caching to speeds up random access. The installation of Cloud Storage FUSE is included in [setup.sh](https://github.com/google/maxtext/blob/main/src/dependencies/scripts/setup.sh). The user then needs to mount the Cloud Storage bucket to a local path for each worker, using the script [setup_gcsfuse.sh](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/dependencies/scripts/setup_gcsfuse.sh). The script configures some parameters for the mount.
+Grain currently supports three data formats: [ArrayRecord](https://github.com/google/array_record) (random access), [Parquet](https://arrow.apache.org/docs/python/parquet.html) (partial random-access through row groups) and [TFRecord](https://www.tensorflow.org/tutorials/load_data/tfrecord)(sequential access). Only the ArrayRecord format supports the global shuffle mentioned above. For converting a dataset into ArrayRecord, see [Apache Beam Integration for ArrayRecord](https://github.com/google/array_record/tree/main/beam). Additionally, other random access data sources can be supported via a custom [data source](https://google-grain.readthedocs.io/en/latest/data_sources/protocol.html) class.
+
+```{admonition} Community Resource
+
+The MaxText community has created a [ArrayRecord Documentation](https://array-record.readthedocs.io/). Note: we appreciate the contribution from the community, but as of now it has not been verified by the MaxText or ArrayRecord developers yet.
+```
+
+If the dataset is hosted on a Cloud Storage bucket, the path `gs://` can be provided directly. However, for the best performance, it's recommended to read the bucket through [Cloud Storage FUSE](https://cloud.google.com/storage/docs/gcs-fuse). This will significantly improve the perf for the ArrayRecord format as it allows meta data caching to speeds up random access. The installation of Cloud Storage FUSE is included in [setup.sh](https://github.com/google/maxtext/blob/main/src/dependencies/scripts/setup.sh). The user then needs to mount the Cloud Storage bucket to a local path for each worker, using the script [setup_gcsfuse.sh](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/dependencies/scripts/setup_gcsfuse.sh). The script configures some parameters for the mount.
 
 ```sh
 bash src/dependencies/scripts/setup_gcsfuse.sh \
@@ -45,11 +50,13 @@ MOUNT_PATH=${MOUNT_PATH?} \
 
 Note that `FILE_PATH` is optional; when provided, the script runs `ls -R` for pre-filling the metadata cache (see ["Performance tuning best practices" on the Google Cloud documentation](https://docs.cloud.google.com/storage/docs/cloud-storage-fuse/performance)).
 
+### Configuration
+
 1. Set `dataset_type=grain`, `grain_file_type={arrayrecord|parquet|tfrecord}`, `grain_train_files` in `src/maxtext/configs/base.yml` or through command line arguments to match the file pattern on the mounted local path.
 
 2. Tune `grain_worker_count` for performance. This parameter controls the number of child processes used by Grain (more details in [behind_the_scenes](https://google-grain.readthedocs.io/en/latest/behind_the_scenes.html)). If you use a large number of workers, check your config for gcsfuse in [setup_gcsfuse.sh](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/dependencies/scripts/setup_gcsfuse.sh) to avoid gcsfuse throttling.
 
-3. ArrayRecord Only: For multi-source blending, you can specify multiple data sources with their respective weights using semicolon (;) as a separator and a comma (,) for weights. The weights will be automatically normalized to sum to 1.0. For example:
+3. *ArrayRecord Only*: For multi-source blending, you can specify multiple data sources with their respective weights using semicolon (;) as a separator and a comma (,) for weights. The weights will be automatically normalized to sum to 1.0. For example:
 
    ```
    # Blend two data sources with 30% from first source and 70% from second source
@@ -120,9 +127,9 @@ grain_train_files=/tmp/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record* \
 grain_worker_count=2
 ```
 
-1. Using validation set for evaluation
+### Using validation set for evaluation
 
-When setting eval_interval > 0, evaluation will be run with a specified eval dataset. Example config (set in [`src/maxtext/configs/base.yml`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/configs/base.yml) or through command line):
+When setting `eval_interval > 0`, evaluation will be run with a specified eval dataset. Example config (set in [`src/maxtext/configs/base.yml`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/configs/base.yml) or through command line):
 
 ```yaml
 eval_interval: 10000
@@ -130,7 +137,22 @@ eval_steps: 50
 grain_eval_files: '/tmp/gcsfuse/array-record/c4/en/3.0.1/c4-validation.array_record*'
 ```
 
-1. Experimental: resuming training with a different chip count
+### Tokenizer support
+
+Grain pipeline supports three tokenizer types:
+
+- `sentencepiece`: For SentencePiece tokenizers;
+- `huggingface`: For HuggingFace tokenizers (requires `hf_access_token` for gated models);
+- `tiktoken`: For OpenAI's tiktoken tokenizers.
+
+Example with SentencePiece:
+
+```bash
+tokenizer_type=sentencepiece \
+tokenizer_path=gs://<your-bucket>/tokenizers/c4_en_301_5Mexp2_spm.model
+```
+
+### Experimental: resuming training with a different chip count
 
 In Grain checkpoints, each data-loading host has a corresponding JSON file. For cases where a user wants to resume training with a different number of data-loading hosts, MaxText provides an experimental feature:
 
