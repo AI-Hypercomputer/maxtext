@@ -300,6 +300,9 @@ class VllmServerManager:
       }
       if ici_ep > 1:
         vllm_kwargs["additional_config"]["sharding"]["sharding_strategy"]["expert_parallelism"] = ici_ep
+        vllm_kwargs["enable_expert_parallel"] = True
+      if self.data_parallel_size > 1:
+        vllm_kwargs["additional_config"]["sharding"]["sharding_strategy"]["enable_dp_attention"] = True
     else:
       vllm_kwargs["load_format"] = "auto"
 

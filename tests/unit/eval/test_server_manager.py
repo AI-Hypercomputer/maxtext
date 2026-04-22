@@ -84,6 +84,50 @@ class TestVllmServerManagerConfig(unittest.TestCase):
     with self.assertRaises(ValueError):
       _make_manager(tensor_parallel_size=8, expert_parallel_size=3)
 
+  def test_expert_parallel_sets_enable_expert_parallel_flag(self):
+    mgr = _make_manager(
+        checkpoint_path="gs://bucket/run/0/items",
+        maxtext_model_name="llama3.1-8b",
+        tensor_parallel_size=8,
+        expert_parallel_size=4,
+    )
+    kwargs = _start_capturing_llm_kwargs(mgr)
+    self.assertTrue(kwargs.get("enable_expert_parallel"))
+
+  def test_no_expert_parallel_omits_enable_expert_parallel_flag(self):
+    mgr = _make_manager(
+        checkpoint_path="gs://bucket/run/0/items",
+        maxtext_model_name="llama3.1-8b",
+    )
+    kwargs = _start_capturing_llm_kwargs(mgr)
+    self.assertNotIn("enable_expert_parallel", kwargs)
+
+  def test_data_parallel_gt1_sets_enable_dp_attention(self):
+    mgr = _make_manager(
+        checkpoint_path="gs://bucket/run/0/items",
+        maxtext_model_name="llama3.1-8b",
+        data_parallel_size=2,
+    )
+    kwargs = _start_capturing_llm_kwargs(mgr)
+    sharding = kwargs["additional_config"]["sharding"]["sharding_strategy"]
+    self.assertTrue(sharding.get("enable_dp_attention"))
+
+  def test_data_parallel_1_omits_enable_dp_attention(self):
+    mgr = _make_manager(
+        checkpoint_path="gs://bucket/run/0/items",
+        maxtext_model_name="llama3.1-8b",
+        data_parallel_size=1,
+    )
+    kwargs = _start_capturing_llm_kwargs(mgr)
+    sharding = kwargs["additional_config"]["sharding"]["sharding_strategy"]
+    self.assertNotIn("enable_dp_attention", sharding)
+
+  def test_hf_mode_dp_gt1_no_additional_config(self):
+    mgr = _make_manager(data_parallel_size=2)  # HF mode, no checkpoint
+    kwargs = _start_capturing_llm_kwargs(mgr)
+    self.assertNotIn("additional_config", kwargs)
+    self.assertEqual(kwargs["data_parallel_size"], 2)
+
   def test_maxtext_adapter_mode_sets_hf_overrides(self):
     mgr = _make_manager(
         checkpoint_path="gs://bucket/run/0/items",
