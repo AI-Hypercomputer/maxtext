@@ -56,63 +56,39 @@ COPY libtpu.so* /root/custom_libtpu/
 RUN echo "Running command: bash setup.sh MODE=$ENV_MODE WORKFLOW=$ENV_WORKFLOW JAX_VERSION=$ENV_JAX_VERSION LIBTPU_VERSION=$ENV_LIBTPU_VERSION DEVICE=${ENV_DEVICE}"
 RUN --mount=type=cache,target=/root/.cache/pip --mount=type=cache,target=/root/.cache/uv bash /deps/tools/setup/setup.sh MODE=${ENV_MODE} WORKFLOW=${ENV_WORKFLOW} JAX_VERSION=${ENV_JAX_VERSION} LIBTPU_VERSION=${ENV_LIBTPU_VERSION} DEVICE=${ENV_DEVICE}
 
-# Patch tpu_inference.utils.hbm_usages_bytes for multi-host TPU support.
+# Monkey-patch tpu_inference.utils.hbm_usages_bytes for multi-host TPU support.
 # Workaround for https://github.com/vllm-project/tpu-inference/pull/2268 —
 # remove once a tpu-inference release with this fix is in the post-training deps.
 RUN python3 - <<'EOF'
-import inspect, pathlib
-import tpu_inference.utils as _u
+import pathlib, sys
 
-# inspect.getfile() may return a .pyc path for compiled installs;
-# resolve to the actual .py source file.
-src = pathlib.Path(inspect.getfile(_u))
-if src.suffix != ".py":
-    # e.g. __pycache__/utils.cpython-312.pyc -> utils.py
-    src = src.parent.parent / (src.stem.split(".")[0] + ".py")
-assert src.exists() and src.suffix == ".py", f"Could not locate source file: {src}"
-print(f"Patching {src}")
+site_packages = next(p for p in sys.path if "site-packages" in p and pathlib.Path(p).is_dir())
+sitecustomize = pathlib.Path(site_packages) / "sitecustomize.py"
 
-lines = src.read_text().splitlines(keepends=True)
+patch = """
+try:
+    import tpu_inference.utils as _tpi_utils
+    def _hbm_usages_bytes_multihost(devices):
+        import jax as _jax
+        current_process = _jax.process_index()
+        usage = []
+        for device in devices:
+            if device.process_index != current_process:
+                continue
+            hbm_used = device.memory_stats()["bytes_in_use"]
+            hbm_limit = device.memory_stats()["bytes_limit"]
+            usage.append((hbm_used, hbm_limit))
+        if usage and len(usage) < len(list(devices)):
+            usage = [usage[0]] * len(list(devices))
+        return usage
+    _tpi_utils.hbm_usages_bytes = _hbm_usages_bytes_multihost
+except ImportError:
+    pass
+"""
 
-# Find the start of hbm_usages_bytes
-start = next(
-    (i for i, l in enumerate(lines) if l.startswith("def hbm_usages_bytes(")),
-    None,
-)
-assert start is not None, "hbm_usages_bytes not found in " + str(src)
-
-# Find the end: first subsequent top-level (non-indented, non-blank, non-comment) line
-end = len(lines)
-for i in range(start + 1, len(lines)):
-    l = lines[i]
-    if l.strip() and not l[0].isspace() and not l.startswith("#"):
-        end = i
-        break
-
-new_func = [
-    "def hbm_usages_bytes(devices):\n",
-    "    import jax as _jax\n",
-    "    current_process = _jax.process_index()\n",
-    "    usage = []\n",
-    "    for device in devices:\n",
-    "        if device.process_index != current_process:\n",
-    "            continue\n",
-    '        hbm_used = device.memory_stats()["bytes_in_use"]\n',
-    '        hbm_limit = device.memory_stats()["bytes_limit"]\n',
-    "        usage.append((hbm_used, hbm_limit))\n",
-    "    if usage and len(usage) < len(list(devices)):\n",
-    "        usage = [usage[0]] * len(list(devices))\n",
-    "    return usage\n",
-]
-
-src.write_text("".join(lines[:start] + new_func + lines[end:]))
-print(f"Patched {src} (replaced lines {start}-{end})")
-
-# Remove stale bytecode so Python uses the patched source at runtime.
-cache_dir = src.parent / "__pycache__"
-for pyc in cache_dir.glob(src.stem + "*.pyc"):
-    pyc.unlink()
-    print(f"Removed stale bytecode: {pyc}")
+existing = sitecustomize.read_text() if sitecustomize.exists() else ""
+sitecustomize.write_text(existing + patch)
+print(f"Wrote monkey-patch to {sitecustomize}")
 EOF
 
 # Install lm-eval before copying source so this layer is cached across source changes.
