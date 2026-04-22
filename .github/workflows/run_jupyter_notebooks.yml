@@ -73,13 +73,14 @@ jobs:
           # 2. Install MaxText package and all the post training dependencies
           uv pip install ${maxtext_wheel}[tpu-post-train] --resolution=lowest
           install_tpu_post_train_extra_deps
-          
+
           python3 -m pip freeze
       - name: Run Post-Training Notebooks
         shell: bash
         env:
           PYTHONPATH: "${{ github.workspace }}/src"
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          MY_HF_TOKEN: ${{ secrets.HF_TOKEN }}
           MAXTEXT_INSTALLED: ${{ inputs.maxtext_installed }}
           # TODO: Fix evaluation in sft_qwen3_demo.ipynb and remove this env variable
           RUN_EVALUATION: "False"
@@ -99,6 +100,9 @@ jobs:
           export MAXTEXT_REPO_ROOT=$(pwd)
           export MAXTEXT_PKG_DIR=$(pwd)/src/maxtext
           export MAXTEXT_NOTEBOOKS_ROOT="$MAXTEXT_REPO_ROOT/src/maxtext/examples"
+          export HF_TOKEN=${MY_HF_TOKEN}
+          echo "MY_HF_TOKEN $MY_HF_TOKEN"
+          echo "HF_TOKEN $HF_TOKEN"
 
           # Register maxtext_venv as a selectable kernel in Jupyter
           $PYTHON_EXE -m ipykernel install --user --name maxtext_venv
@@ -116,7 +120,7 @@ jobs:
             echo "Running $filename ..."
             echo "------------------------------------------------------"
 
-            $PAPERMILL_EXE "$notebook" "$output_name" -k maxtext_venv
+            $PAPERMILL_EXE "$notebook" "$output_name" -k maxtext_venv --log-output --log-level INFO
           done
       - name: Upload Outputs
         if: always()
