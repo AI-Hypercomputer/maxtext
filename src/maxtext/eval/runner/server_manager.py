@@ -255,6 +255,33 @@ class VllmServerManager:
   def start(self) -> None:
     """Initialise the in-process vLLM LLM and start the HTTP server."""
     # pylint: disable=import-outside-toplevel
+
+    # Workaround for https://github.com/vllm-project/tpu-inference/pull/2268:
+    # hbm_usages_bytes calls device.memory_stats() on all JAX devices including
+    # non-local ones, which raises INVALID_ARGUMENT on multi-host setups.
+    # Remove once a tpu-inference release containing the fix is in the deps.
+    try:
+      import tpu_inference.utils as _tpi_utils  # pylint: disable=import-error
+
+      def _hbm_usages_bytes_multihost(devices):
+        import jax as _jax
+        current_process = _jax.process_index()
+        usage = []
+        for device in devices:
+          if device.process_index != current_process:
+            continue
+          hbm_used = device.memory_stats()["bytes_in_use"]
+          hbm_limit = device.memory_stats()["bytes_limit"]
+          usage.append((hbm_used, hbm_limit))
+        if usage and len(usage) < len(list(devices)):
+          usage = [usage[0]] * len(list(devices))
+        return usage
+
+      _tpi_utils.hbm_usages_bytes = _hbm_usages_bytes_multihost
+      logger.info("Applied tpu_inference.utils.hbm_usages_bytes multi-host patch.")
+    except ImportError:
+      pass
+
     from vllm import LLM
 
     # Disable V1 multiprocessing so EngineCore runs in-process instead.

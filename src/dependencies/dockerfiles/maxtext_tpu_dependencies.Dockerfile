@@ -56,41 +56,6 @@ COPY libtpu.so* /root/custom_libtpu/
 RUN echo "Running command: bash setup.sh MODE=$ENV_MODE WORKFLOW=$ENV_WORKFLOW JAX_VERSION=$ENV_JAX_VERSION LIBTPU_VERSION=$ENV_LIBTPU_VERSION DEVICE=${ENV_DEVICE}"
 RUN --mount=type=cache,target=/root/.cache/pip --mount=type=cache,target=/root/.cache/uv bash /deps/tools/setup/setup.sh MODE=${ENV_MODE} WORKFLOW=${ENV_WORKFLOW} JAX_VERSION=${ENV_JAX_VERSION} LIBTPU_VERSION=${ENV_LIBTPU_VERSION} DEVICE=${ENV_DEVICE}
 
-# Monkey-patch tpu_inference.utils.hbm_usages_bytes for multi-host TPU support.
-# Workaround for https://github.com/vllm-project/tpu-inference/pull/2268 —
-# remove once a tpu-inference release with this fix is in the post-training deps.
-RUN python3 - <<'EOF'
-import pathlib, sys
-
-site_packages = next(p for p in sys.path if "site-packages" in p and pathlib.Path(p).is_dir())
-sitecustomize = pathlib.Path(site_packages) / "sitecustomize.py"
-
-patch = """
-try:
-    import tpu_inference.utils as _tpi_utils
-    def _hbm_usages_bytes_multihost(devices):
-        import jax as _jax
-        current_process = _jax.process_index()
-        usage = []
-        for device in devices:
-            if device.process_index != current_process:
-                continue
-            hbm_used = device.memory_stats()["bytes_in_use"]
-            hbm_limit = device.memory_stats()["bytes_limit"]
-            usage.append((hbm_used, hbm_limit))
-        if usage and len(usage) < len(list(devices)):
-            usage = [usage[0]] * len(list(devices))
-        return usage
-    _tpi_utils.hbm_usages_bytes = _hbm_usages_bytes_multihost
-except ImportError:
-    pass
-"""
-
-existing = sitecustomize.read_text() if sitecustomize.exists() else ""
-sitecustomize.write_text(existing + patch)
-print(f"Wrote monkey-patch to {sitecustomize}")
-EOF
-
 # Install lm-eval before copying source so this layer is cached across source changes.
 # vLLM + tpu-inference are installed by setup.sh when WORKFLOW=post-training.
 # The MaxText vLLM adapter install (pip install -e) is deferred until after COPY . . below.
