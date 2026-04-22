@@ -269,32 +269,33 @@ class VllmServerManager:
     # Workaround for https://github.com/vllm-project/tpu-inference/pull/2268:
     # hbm_usages_bytes calls device.memory_stats() on all JAX devices including
     # non-local ones, which raises INVALID_ARGUMENT on multi-host setups.
-    # Applied after env-var setup so any JAX/TPU env vars are in place first.
     # Remove once a tpu-inference release containing the fix is in the deps.
-    logger.info("Attempting to apply tpu_inference.utils.hbm_usages_bytes multi-host patch...")
-    try:
-      import tpu_inference.utils as _tpi_utils  # pylint: disable=import-error
+    def _hbm_usages_bytes_multihost(devices):
+      import jax as _jax  # pylint: disable=import-outside-toplevel
+      current_process = _jax.process_index()
+      usage = []
+      for device in devices:
+        if device.process_index != current_process:
+          continue
+        hbm_used = device.memory_stats()["bytes_in_use"]
+        hbm_limit = device.memory_stats()["bytes_limit"]
+        usage.append((hbm_used, hbm_limit))
+      if usage and len(usage) < len(list(devices)):
+        usage = [usage[0]] * len(list(devices))
+      return usage
 
-      def _hbm_usages_bytes_multihost(devices):
-        import jax as _jax
-        current_process = _jax.process_index()
-        usage = []
-        for device in devices:
-          if device.process_index != current_process:
-            continue
-          hbm_used = device.memory_stats()["bytes_in_use"]
-          hbm_limit = device.memory_stats()["bytes_limit"]
-          usage.append((hbm_used, hbm_limit))
-        if usage and len(usage) < len(list(devices)):
-          usage = [usage[0]] * len(list(devices))
-        return usage
+    def _apply_tpi_patch(label: str) -> None:
+      try:
+        import tpu_inference.utils as _tpi_utils  # pylint: disable=import-error
+        _tpi_utils.hbm_usages_bytes = _hbm_usages_bytes_multihost
+        logger.info("[%s] tpu_inference patch applied; active: %s", label, _tpi_utils.hbm_usages_bytes)
+      except Exception as _e:  # pylint: disable=broad-except
+        logger.warning("[%s] tpu_inference patch skipped: %s", label, _e)
 
-      _tpi_utils.hbm_usages_bytes = _hbm_usages_bytes_multihost
-      logger.info("tpu_inference multi-host patch applied to %s", _tpi_utils.__file__)
-    except Exception as _patch_err:  # pylint: disable=broad-except
-      logger.warning("tpu_inference multi-host patch skipped: %s", _patch_err)
-
+    _apply_tpi_patch("pre-vllm-import")
     from vllm import LLM
+    # Re-apply after vLLM import: vLLM's plugin loader may reload tpu_inference.utils.
+    _apply_tpi_patch("post-vllm-import")
 
     # total chips = ici_tensor_parallelism x ici_expert_parallelism.
     ici_tp = self.tensor_parallel_size // self.expert_parallel_size
@@ -351,6 +352,9 @@ class VllmServerManager:
               vllm_kwargs["additional_config"][_sub_k] = _sub_v
         else:
           vllm_kwargs[_k] = _v
+
+    # Re-apply immediately before LLM() as a final safety net.
+    _apply_tpi_patch("pre-llm-init")
 
     logger.info(
         "Initializing in-process vLLM (tp=%d, ep=%d, dp=%d, max_len=%d)...",
