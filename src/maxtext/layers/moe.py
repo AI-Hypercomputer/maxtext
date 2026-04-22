@@ -1228,26 +1228,26 @@ class RoutedMoE(nnx.Module):
           expert_assignments=selected_experts,
       )
       wi_tile_size = (
-          self.config.wi_tile_fwd_batch_seq,
-          self.config.wi_tile_fwd_embed_dim,
-          self.config.wi_tile_fwd_mlp_dim,
-          self.config.wi_tile_dlhs_batch_seq,
-          self.config.wi_tile_dlhs_embed_dim,
-          self.config.wi_tile_dlhs_mlp_dim,
-          self.config.wi_tile_drhs_batch_seq,
-          self.config.wi_tile_drhs_embed_dim,
-          self.config.wi_tile_drhs_mlp_dim,
+          self.config.wi_tile_fwd_batch_seq, # m 
+          self.config.wi_tile_fwd_embed_dim, # k 
+          self.config.wi_tile_fwd_mlp_dim, # n
+          self.config.wi_tile_dlhs_batch_seq, # m
+          self.config.wi_tile_dlhs_mlp_dim, # k 
+          self.config.wi_tile_dlhs_embed_dim, # n
+          self.config.wi_tile_drhs_embed_dim, # m
+          self.config.wi_tile_drhs_batch_seq, # k
+          self.config.wi_tile_drhs_mlp_dim, # n
       )
       wo_tile_size = (
-          self.config.wo_tile_fwd_batch_seq,
-          self.config.wo_tile_fwd_embed_dim,
-          self.config.wo_tile_fwd_mlp_dim,
-          self.config.wo_tile_dlhs_batch_seq,
-          self.config.wo_tile_dlhs_embed_dim,
-          self.config.wo_tile_dlhs_mlp_dim,
-          self.config.wo_tile_drhs_batch_seq,
-          self.config.wo_tile_drhs_embed_dim,
-          self.config.wo_tile_drhs_mlp_dim,
+          self.config.wo_tile_fwd_batch_seq, # m
+          self.config.wo_tile_fwd_mlp_dim, # k
+          self.config.wo_tile_fwd_embed_dim, # n
+          self.config.wo_tile_dlhs_batch_seq, # m
+          self.config.wo_tile_dlhs_embed_dim, # k
+          self.config.wo_tile_dlhs_mlp_dim, # n
+          self.config.wo_tile_drhs_mlp_dim, # m
+          self.config.wo_tile_drhs_batch_seq, # k 
+          self.config.wo_tile_drhs_embed_dim, # n
       )
       wi_input_buffer_count = (
           self.config.wi_tile_fwd_buffer_count,
