@@ -267,10 +267,10 @@ class VllmServerManager:
       os.environ.update(self.env)
 
     # Workaround for https://github.com/vllm-project/tpu-inference/pull/2268:
-    # hbm_usages_bytes calls device.memory_stats() on all JAX devices including
+    # hbm_usage_bytes calls device.memory_stats() on all JAX devices including
     # non-local ones, which raises INVALID_ARGUMENT on multi-host setups.
     # Remove once a tpu-inference release containing the fix is in the deps.
-    def _hbm_usages_bytes_multihost(devices):
+    def _hbm_usage_bytes_multihost(devices):
       import jax as _jax  # pylint: disable=import-outside-toplevel
       current_process = _jax.process_index()
       usage = []
@@ -287,8 +287,12 @@ class VllmServerManager:
     def _apply_tpi_patch(label: str) -> None:
       try:
         import tpu_inference.utils as _tpi_utils  # pylint: disable=import-error
-        _tpi_utils.hbm_usages_bytes = _hbm_usages_bytes_multihost
-        logger.info("[%s] tpu_inference patch applied; active: %s", label, _tpi_utils.hbm_usages_bytes)
+        assert hasattr(_tpi_utils, "hbm_usage_bytes"), (
+            f"hbm_usage_bytes not found in {_tpi_utils.__file__}; "
+            f"available: {[x for x in dir(_tpi_utils) if 'hbm' in x]}"
+        )
+        _tpi_utils.hbm_usage_bytes = _hbm_usage_bytes_multihost
+        logger.info("[%s] tpu_inference patch applied; active: %s", label, _tpi_utils.hbm_usage_bytes)
       except Exception as _e:  # pylint: disable=broad-except
         logger.warning("[%s] tpu_inference patch skipped: %s", label, _e)
 

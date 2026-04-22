@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import sys
 
 from maxtext.eval.runner.common import (
     add_server_args,
@@ -236,6 +237,7 @@ def main() -> None:
   _logging.basicConfig(
       level=getattr(_logging, args.log_level),
       format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+      stream=sys.stdout,
   )
 
   results_path = f"{args.base_output_directory.rstrip('/')}/{args.run_name}/eval_results"
