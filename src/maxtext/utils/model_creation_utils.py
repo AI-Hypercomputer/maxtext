@@ -182,6 +182,14 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
         # Get the structure of checkpoint in `config.load_parameters_path`
         metadata = ckptr.metadata(config.load_parameters_path)
 
+        # Build ArrayRestoreArgs with explicit dtype so that arrays with no
+        # addressable shards (multi-host) don't cause Orbax to fail trying to
+        # infer dtype from local data.
+        def _make_restore_args(arr):
+          if isinstance(arr, jax.Array):
+            return ocp.ArrayRestoreArgs(sharding=arr.sharding, global_shape=arr.shape, dtype=arr.dtype)
+          return ocp.RestoreArgs()
+
         is_nnx_checkpoint = True
         if (
             "params" in metadata.item_metadata.tree.keys()
@@ -196,7 +204,7 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
           )
 
           item_to_restore = {"params": {"params": target_for_restore}}
-          restore_args = {"params": {"params": ocp.checkpoint_utils.construct_restore_args(target_for_restore)}}
+          restore_args = {"params": {"params": jax.tree.map(_make_restore_args, target_for_restore)}}
         else:
           # structure of nnx checkpoint: {'decoder': {'value': ...}}
           target_for_restore = jax.tree.map(
@@ -205,7 +213,7 @@ def create_nnx_model(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAI
               is_leaf=lambda n: isinstance(n, nnx.Variable),
           )
           item_to_restore = target_for_restore
-          restore_args = ocp.checkpoint_utils.construct_restore_args(target_for_restore)
+          restore_args = jax.tree.map(_make_restore_args, target_for_restore)
 
         restored = ckptr.restore(
             epath.Path(config.load_parameters_path),
