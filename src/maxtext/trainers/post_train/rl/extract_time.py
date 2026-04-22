@@ -85,25 +85,29 @@ def get_reshard_data(args):
         print("2. If that returns nothing, your local gcloud credentials don't have permission for this project.")
 
     mean_reshard_time = float('nan')
-    if reshard_results:
-        df = pd.DataFrame(reshard_results).sort_values("timestamp")
-        # Only keep from the 3rd to max_steps and compute the mean of them
-        if df.shape[0] > 2:
-            selected_df = df.iloc[2:min(df.shape[0], args.max_steps)]
-        else:
-            selected_df = df
-        mean_reshard_time = selected_df["reshard_sec"].mean()
-        print(selected_df)
-
     mean_weight_sync_time = float('nan')
-    if weight_sync_results:
-        df = pd.DataFrame(weight_sync_results).sort_values("timestamp")
-        if df.shape[0] > 2:
-            selected_df = df.iloc[2:min(df.shape[0], args.max_steps)]
+    if reshard_results and weight_sync_results:
+        reshard_df = pd.DataFrame(reshard_results).sort_values("timestamp")
+        weight_df = pd.DataFrame(weight_sync_results).sort_values("timestamp")
+        if reshard_df.shape[0] < 2 or weight_df.shape[0] < 2:
+            print("Not enough log entries found to compute mean times. Need at least 3 entries for reshard and weight sync each.")
+            print("Reshard results:")
+            print(reshard_df)
+            print("Weight sync results:")
+            print(weight_df)
         else:
-            selected_df = df
-        mean_weight_sync_time = selected_df["weight_sync_sec"].mean()
-        print(selected_df)
+            print(reshard_df)
+            print(weight_df)
+            reshard_df = reshard_df.iloc[2:]
+            weight_df = weight_df.iloc[2:]
+            length = min(reshard_df.shape[0], weight_df.shape[0])
+            length = min(length, args.max_steps)
+            selected_reshard_df = reshard_df.iloc[-length:]
+            selected_weight_df = weight_df.iloc[-length:]
+            mean_reshard_time = selected_reshard_df["reshard_sec"].mean()
+            mean_weight_sync_time = selected_weight_df["weight_sync_sec"].mean()
+            print(selected_reshard_df)
+            print(selected_weight_df)
 
     trainer_hbm = float('nan')
     sampler_hbm = float('nan')
