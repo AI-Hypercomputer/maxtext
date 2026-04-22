@@ -345,7 +345,7 @@ class TestCreateNnxModel(unittest.TestCase):
   @patch("maxtext.utils.model_creation_utils.ocp")
   def test_load_nnx_checkpoint(self, mock_ocp):
     """NNX-format checkpoint: restored values are wrapped under a 'value' key."""
-    # Echo back the `item` argument passed by create_nnx_model to ckptr.restore.
+    # Echo back the `item` argument passed by from_pretrained to ckptr.restore.
     # For NNX checkpoints, item IS already {leaf: {"value": array}, ...}, so
     # returning it directly gives a correctly-structured restored dict that
     # matches the model's own state — regardless of the exact leaf count.
@@ -364,7 +364,7 @@ class TestCreateNnxModel(unittest.TestCase):
   @patch("maxtext.utils.model_creation_utils.ocp")
   def test_load_linen_checkpoint(self, mock_ocp):
     """Linen-format checkpoint: restored values are nested under 'params'/'params'."""
-    # Echo back the `item` argument passed by create_nnx_model to ckptr.restore.
+    # Echo back the `item` argument passed by from_pretrained to ckptr.restore.
     # For Linen checkpoints, item IS already {"params": {"params": arrays}}, so
     # returning it directly gives a correctly-structured restored dict that
     # matches the model's own state — regardless of the exact leaf count.

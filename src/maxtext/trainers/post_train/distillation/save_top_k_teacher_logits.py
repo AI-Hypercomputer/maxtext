@@ -96,7 +96,7 @@ def generate_and_save_data(config, local_args):
 
   # Loading teacher model and dataset iterator
   max_logging.log(f"Loading Teacher Model from {config.load_parameters_path}...")
-  teacher_model, _ = model_creation_utils.create_nnx_model(config, mesh=mesh)
+  teacher_model = model_creation_utils.from_pretrained(config, mesh=mesh)
   train_iter, _ = input_pipeline_interface.create_data_iterator(config, mesh)
 
   # Determine start_step for resuming

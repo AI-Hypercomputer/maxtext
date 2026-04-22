@@ -226,9 +226,9 @@ def create_model(config, mesh, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rng
 def create_nnx_abstract_model(config, mesh, model_mode=MODEL_MODE_TRAIN, rng_key=None):
   """Returns (_create_model_partial, abstract_model) for AOT compilation.
 
-  Unlike create_nnx_model, this does not shard parameters or load checkpoints.
-  It only builds the abstract shape/dtype structure needed by get_abstract_state
-  and optimizer construction (e.g. Muon).
+  This does not shard parameters or load checkpoints. It only builds the
+  abstract shape/dtype structure needed by get_abstract_state and optimizer
+  construction (e.g. Muon).
 
   Args:
     config: the configuration
