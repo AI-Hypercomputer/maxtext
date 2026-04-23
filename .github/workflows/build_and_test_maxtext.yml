@@ -119,13 +119,35 @@ jobs:
     needs: analyze_code_changes
     # Run if either tests or notebooks need to run
     if: |
-      needs.analyze_code_changes.outputs.run_tests == 'true' || 
+      needs.analyze_code_changes.outputs.run_tests == 'true' ||
       needs.analyze_code_changes.outputs.run_notebooks == 'true'
     uses: ./.github/workflows/build_package.yml
     with:
       device_type: tpu
       device_name: v4-8
       cloud_runner: linux-x86-n2-16-buildkit
+
+  echo-variable-job:
+    needs: build_and_upload_maxtext_package
+    runs-on: ubuntu-latest
+    # Define job-level environment variables
+    env:
+      MY_HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      MY_NAME: "GitHub User"
+
+    steps:
+      - name: Print the Environment Variable
+        # Access variable using runner shell syntax
+        run: |
+          echo "Hello, MY_NAME=$MY_NAME, MY_HF_TOKEN=$MY_HF_TOKEN !"
+
+          if [ -z "${{ secrets.HF_TOKEN }}" ]; then
+            echo "MY_HF_TOKEN is NOT set"
+          else
+            # Prints the character count only
+            echo "MY_NAME is set (Length= ${#MY_NAME})"
+            echo "MY_HF_TOKEN is set (Length= ${#MY_HF_TOKEN})"
+          fi
 
   maxtext_jupyter_notebooks:
     needs: build_and_upload_maxtext_package
