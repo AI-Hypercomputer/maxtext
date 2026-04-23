@@ -127,9 +127,12 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
     rng1, aqt_rng = jax.random.split(dropout_rng)
 
     # Flax Linen model
-    model_vars = {"params": params}
-    if sparsity_state:
-      model_vars["batch_stats"] = sparsity_state
+    if sparsity_enabled:
+      model_vars = {"params": params}
+      if sparsity_state:
+        model_vars["batch_stats"] = sparsity_state
+    else:
+      model_vars = params
     logits, intermediate_outputs = model.apply(
         model_vars,
         data["inputs"],
@@ -336,7 +339,8 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
           params,
           params_shardings,
       )
-    pure_params = params["params"] if "params" in params else params
+    sparsity_enabled = config.weight_sparsity_n and config.weight_sparsity_m
+    pure_params = params["params"] if sparsity_enabled else params
     batch_stats = params.get("batch_stats", {})
 
     grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
@@ -424,9 +428,10 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
         )
     )
   # Re-wrap grads to match state.params structure if it's a dict of collections
-  if isinstance(state.params, dict) and "params" in state.params:
+  sparsity_enabled = config.weight_sparsity_n and config.weight_sparsity_m
+  if sparsity_enabled:
     full_grads = {"params": grads}
-    if "batch_stats" in state.params:
+    if sparsity_enabled and "batch_stats" in state.params:
       batch_stats_grads = jax.tree_util.tree_map(jnp.zeros_like, state.params.get("batch_stats", {}))
       full_grads["batch_stats"] = batch_stats_grads
     full_grads = max_utils.unbox_logicallypartioned(full_grads)
@@ -521,7 +526,8 @@ def eval_step(model, config, state, data, dropout_rng):
     extra_dpo_args = [reference_params]
     _loss_fn = dpo_loss_fn
 
-  pure_params = state.params["params"] if "params" in state.params else state.params
+  sparsity_enabled = config.weight_sparsity_n and config.weight_sparsity_m
+  pure_params = state.params["params"] if sparsity_enabled else state.params
   batch_stats = state.params.get("batch_stats", {})
 
   eval_loss_fn = functools.partial(_loss_fn, model, config, data, dropout_rng, is_train=False)
