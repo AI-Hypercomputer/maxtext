@@ -1228,26 +1228,26 @@ class RoutedMoE(nnx.Module):
           expert_assignments=selected_experts,
       )
       wi_tile_size = (
-          self.config.wi_tile_fwd_batch_seq, # m 
-          self.config.wi_tile_fwd_embed_dim, # k 
-          self.config.wi_tile_fwd_mlp_dim, # n
-          self.config.wi_tile_dlhs_batch_seq, # m
-          self.config.wi_tile_dlhs_mlp_dim, # k 
-          self.config.wi_tile_dlhs_embed_dim, # n
+          self.config.wi_tile_fwd_batch_seq, # m (LHS batch)
+          self.config.wi_tile_fwd_embed_dim, # k  (contracting)
+          self.config.wi_tile_fwd_mlp_dim, # n (RHS batch)
+          self.config.wi_tile_dlhs_batch_seq, # m (LHS batch)
+          self.config.wi_tile_dlhs_mlp_dim, # k (contracting) 
+          self.config.wi_tile_dlhs_embed_dim, # n (RHS batch)
           self.config.wi_tile_drhs_batch_seq, # Called m in megablox, but this is contracting
           self.config.wi_tile_drhs_embed_dim, # Called k in megablox, but this is LHS batch dim
-          self.config.wi_tile_drhs_mlp_dim, # Called n in megablox, but this RHS batch dim (k)
+          self.config.wi_tile_drhs_mlp_dim, # Called n in megablox, and inded is the RHS batch dim
       )
       wo_tile_size = (
-          self.config.wo_tile_fwd_batch_seq, # m
-          self.config.wo_tile_fwd_mlp_dim, # k
-          self.config.wo_tile_fwd_embed_dim, # n
-          self.config.wo_tile_dlhs_batch_seq, # m
-          self.config.wo_tile_dlhs_embed_dim, # k
-          self.config.wo_tile_dlhs_mlp_dim, # n
+          self.config.wo_tile_fwd_batch_seq, # m (LHS batch)
+          self.config.wo_tile_fwd_mlp_dim, # k (contracting)
+          self.config.wo_tile_fwd_embed_dim, # n (RHS batch)
+          self.config.wo_tile_dlhs_batch_seq, # m (LHS batch)
+          self.config.wo_tile_dlhs_embed_dim, # k (contracting)
+          self.config.wo_tile_dlhs_mlp_dim, # n (RHS)
           self.config.wo_tile_drhs_batch_seq, # Called m in megablox, but this is contracting
           self.config.wo_tile_drhs_mlp_dim, # Called k in megablox, but this is LHS batch dim
-          self.config.wo_tile_drhs_embed_dim, # Called n in megablox, but this RHS batch dim (k)
+          self.config.wo_tile_drhs_embed_dim, # Called n in megablox, and inded is the RHS batch dim
       )
       wi_input_buffer_count = (
           self.config.wi_tile_fwd_buffer_count,
