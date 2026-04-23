@@ -481,9 +481,10 @@ class NNXDecoder(nnx.Module):
 
     return final_carry, nnx.merge(graphdef, scanned_state)
 
-  def get_decoder_layers(self):
+  def get_decoder_layers(self, decoder_block_type=None):
     """Retrieves decoder layer classes based on config using a dictionary lookup."""
     cfg = self.config
+    block_type = decoder_block_type or cfg.decoder_block
 
     def get_scannable(normal_cls, scannable_cls):
       return [scannable_cls] if cfg.scan_layers else [normal_cls]
@@ -513,10 +514,10 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.OLMO3: get_scannable(olmo3.Olmo3DecoderLayer, olmo3.Olmo3ScannableBlock),
     }
 
-    if cfg.decoder_block not in layer_map:
-      raise ValueError(f"Incorrect decoder_block name {cfg.decoder_block.value=}")
+    if block_type not in layer_map:
+      raise ValueError(f"Incorrect decoder_block name {block_type.value=}")
 
-    return layer_map[cfg.decoder_block]
+    return layer_map[block_type]
 
   def minimal_policy(self, with_context=False, with_quantization=False):
     """Helper for creating minimal checkpoint policies."""

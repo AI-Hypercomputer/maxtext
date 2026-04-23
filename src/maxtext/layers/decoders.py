@@ -438,13 +438,14 @@ class Decoder(nn.Module):
         policy = None
     return policy
 
-  def get_decoder_layers(self):
+  def get_decoder_layers(self, decoder_block_type=None):
     """Retrieves a list of decoder layer classes based on the `decoder_block` config.
 
     Returns:
         A list containing one or more `nn.Module` classes for the decoder.
     """
-    match self.config.decoder_block:
+    block_type = decoder_block_type or self.config.decoder_block
+    match block_type:
       case DecoderBlockType.DEFAULT:
         return [DecoderLayer]
       case DecoderBlockType.LLAMA2:

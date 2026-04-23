@@ -492,6 +492,10 @@ class MTP(BaseModel):
       0,
       description="Specifies which MTP layer is used to calculate metrics.",
   )
+  mtp_decoder_type: str = Field(
+      "",
+      description="MTP decoder layer type. Defaults to base model's last layer if empty.",
+  )
 
 
 class Logits(BaseModel):
