@@ -1013,10 +1013,28 @@ class RoutedMoE(nnx.Module):
       )
     except:  # pylint: disable=bare-except
       is_batch_sharded_by_expert = False
+    # Compute the total batch sharding factor for activation_batch_no_exp so we
+    # can check if the batch size is evenly divisible before using it. For
+    # example, with ici_tensor_parallelism=4 on 8 chips, fsdp=2 which means
+    # a batch_size=1 prefill cannot be sharded on that axis.
+    no_exp_axes = next(
+        (tup[1] for tup in self.config.logical_axis_rules if tup[0] == "activation_batch_no_exp"),
+        [],
+    )
+    if isinstance(no_exp_axes, str):
+      no_exp_axes = [no_exp_axes]
+    batch_no_exp_sharding = 1
+    for ax in (no_exp_axes or []):
+      batch_no_exp_sharding *= self.mesh.shape.get(ax, 1)
+
     if is_batch_sharded_by_expert and inputs.shape[0] > 1:
       batch_logical_axis = "activation_batch"
-    else:
+    elif inputs.shape[0] % batch_no_exp_sharding == 0:
       batch_logical_axis = "activation_batch_no_exp"
+    else:
+      # Batch size is not evenly divisible by the data-parallel sharding factor
+      # (e.g. batch_size=1 but fsdp=2). Replicate the batch dimension instead.
+      batch_logical_axis = None
 
     if self.get_tensor_transpose_parallelism_size() > 1:
       input_partition_pspec = self._logical_to_mesh_axes(

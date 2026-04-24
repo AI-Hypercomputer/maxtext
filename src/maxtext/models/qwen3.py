@@ -1709,12 +1709,14 @@ class Qwen3OmniMoeVisionEncoder(nnx.Module):
         - encoder_output: shape (batch, T*H*W, hidden_size_for_vit)
         - deep_features: List of intermediate features, each of shape (batch, T*H*W, out_hidden_size)
     """
-    _, _, num_frames, height, width = hidden_states.shape
+    batch_size, _, num_frames, height, width = hidden_states.shape
     num_frames = num_frames // self.config.temporal_patch_size_for_vit
     height = height // self.config.patch_size_for_vit
     width = width // self.config.patch_size_for_vit
+    hidden_states = hidden_states.reshape(-1, self.config.num_channels_for_vit, self.config.temporal_patch_size_for_vit, self.config.patch_size_for_vit, self.config.patch_size_for_vit)
 
     x = self.patch_embed(hidden_states)
+    x = x.reshape(batch_size, -1, self.config.hidden_size_for_vit)
     pos = self.pos_embed_interpolate(num_frames, height, width)
 
     pos = pos[jnp.newaxis, :, :]

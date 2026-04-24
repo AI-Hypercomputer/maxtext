@@ -1302,7 +1302,7 @@ class MaxEngine(_BaseEngine):
       )
 
     inserted_logits = jax.lax.dynamic_update_index_in_dim(decode_state["logits"], unboxed_prefix["logits"], slot, 0)
-    inserted_next_pos = jax.lax.dynamic_update_index_in_dim(decode_state["next_pos"], unboxed_prefix["next_pos"], slot, 0)
+    inserted_next_pos = jax.lax.dynamic_update_index_in_dim(decode_state["next_pos"], jnp.asarray(unboxed_prefix["next_pos"], dtype=decode_state["next_pos"].dtype), slot, 0)
     inserted_generated_tokens = jax.lax.dynamic_update_index_in_dim(
         decode_state["generated_tokens"],
         unboxed_prefix["generated_tokens"],
