@@ -35,6 +35,7 @@ from maxtext.common.common_types import (
     MODEL_MODE_TRAIN,
     Config,
     DecoderBlockType,
+    MultimodalInput,
     ShardMode,
 )
 from maxtext.inference import page_manager
@@ -1061,10 +1062,10 @@ class NNXDecoder(nnx.Module):
       previous_chunk=None,
       slot: None | int = None,
       page_state: None | page_manager.PageState = None,
-      multimodal_input: None | Any = None,
       kv_caches: list[jax.Array] | None = None,
       attention_metadata=None,
       deepstack_visual_embeds: None | list[jnp.ndarray] = None,
+      multimodal_input: None | MultimodalInput = None,
   ):
     cfg = self.config
     assert decoder_input_tokens.ndim == 2  # [batch, len]

@@ -31,7 +31,13 @@ from flax import linen as nn
 from flax import nnx
 from jax.sharding import Mesh
 
-from maxtext.common.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, DecoderBlockType
+from maxtext.common.common_types import (
+    DECODING_ACTIVE_SEQUENCE_INDICATOR,
+    MODEL_MODE_PREFILL,
+    MODEL_MODE_TRAIN,
+    DecoderBlockType,
+    MultimodalInput,
+)
 from maxtext.configs import pyconfig
 from maxtext.layers import linears
 from maxtext.layers.attentions import Attention
@@ -572,6 +578,71 @@ class TestNNXDecoderForwardPass(unittest.TestCase):
         model_mode=MODEL_MODE_TRAIN,
     )
     self.assertTrue(jnp.all(jnp.isfinite(logits)))
+
+  def test_multimodal_input_forwarded_to_apply_embedding(self):
+    """`multimodal_input` must reach `_apply_embedding` as the original struct.
+
+    `NNXDecoder.__call__` takes a `MultimodalInput` struct and hands it to
+    `_apply_embedding`, which is the layer that actually unpacks the fields
+    and merges the embeddings. This test stubs `_apply_embedding` to capture
+    the forwarded struct without running the real embedding path (the test
+    config has `use_multimodal=False`).
+    """
+    ids, segment_ids, positions = self._make_token_inputs()
+
+    # Distinct sentinels so each field can be traced independently.
+    sentinel_img_emb = jnp.full((1, 1), 11.0)
+    sentinel_img_mask = jnp.full((1, 1), 22.0)
+    sentinel_aud_emb = jnp.full((1, 1), 33.0)
+    sentinel_aud_mask = jnp.full((1, 1), 44.0)
+    sentinel_bidir = jnp.full((1, 1), 55.0)
+
+    mm_input = MultimodalInput(
+        image_embeddings=sentinel_img_emb,
+        image_masks=sentinel_img_mask,
+        audio_embeddings=sentinel_aud_emb,
+        audio_masks=sentinel_aud_mask,
+        bidirectional_mask=sentinel_bidir,
+    )
+
+    captured = {}
+
+    def fake_apply_embedding(
+        _shared_embedding,
+        _ids,
+        _positions,
+        _deterministic,
+        _model_mode,
+        multimodal_input=None,
+    ):
+      captured["multimodal_input"] = multimodal_input
+      batch = self.cfg.global_batch_size_to_train_on
+      seq_len = self.cfg.max_target_length
+      emb_dim = self.cfg.emb_dim
+      return jnp.zeros((batch, seq_len, emb_dim), dtype=self.cfg.dtype)
+
+    self.decoder._apply_embedding = fake_apply_embedding  # pylint: disable=protected-access
+    try:
+      self.decoder(
+          self.shared_embedding,
+          ids,
+          positions,
+          decoder_segment_ids=segment_ids,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+          multimodal_input=mm_input,
+      )
+    finally:
+      # NNX modules bind attributes statefully; remove the override to avoid leaking.
+      del self.decoder._apply_embedding  # pylint: disable=protected-access
+
+    forwarded = captured["multimodal_input"]
+    self.assertIsNotNone(forwarded)
+    self.assertTrue(jnp.array_equal(forwarded.image_embeddings, sentinel_img_emb))
+    self.assertTrue(jnp.array_equal(forwarded.image_masks, sentinel_img_mask))
+    self.assertTrue(jnp.array_equal(forwarded.audio_embeddings, sentinel_aud_emb))
+    self.assertTrue(jnp.array_equal(forwarded.audio_masks, sentinel_aud_mask))
+    self.assertTrue(jnp.array_equal(forwarded.bidirectional_mask, sentinel_bidir))
 
   def test_different_random_seeds_produce_different_logits(self):
     """Two randomly-initialised decoders should not produce identical logits."""
