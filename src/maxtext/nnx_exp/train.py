@@ -7,6 +7,11 @@ import optax
 
 from maxtext.nnx_exp.models import Llama, LlamaConfig
 from maxtext.nnx_exp.sharding import LlamaSharding, create_mesh
+from maxtext.nnx_exp.infra import (
+    apply_remat,
+    maybe_quantize,
+    to_host,
+)
 
 
 def _target_distribution(logits, targets):
@@ -35,15 +40,7 @@ def train_step(state, tokens, positions, mask, targets):
 
 def main():
   # Simple config for prototype
-  config = LlamaConfig(
-    vocab_size=1000,
-    emb_dim=256,
-    num_heads=4,
-    num_kv_heads=2,
-    num_layers=2,
-    mlp_dim=512,
-    head_dim=64,
-  )
+  config = LlamaConfig(dtype="bfloat16")
   
   # Mock cluster config for single-host TPU or local CPU/GPU
   cluster_cfg = {
@@ -54,13 +51,36 @@ def main():
   }
   
   mesh = create_mesh(cluster_cfg)
+  print(f"Total devices: {jax.device_count()}")
+  print(f"Mesh: {mesh}")
   
   with jax.set_mesh(mesh):
     sharding = LlamaSharding()
     rngs = nnx.Rngs(42)
     
+    # Generate mock data (needed for quantization tracing)
+    batch_size = 2
+    seq_len = 128
+    
+    tokens = jnp.zeros((batch_size, seq_len), dtype=jnp.int32)
+    targets = jnp.zeros((batch_size, seq_len), dtype=jnp.int32)
+    positions = jnp.broadcast_to(jnp.arange(seq_len), (batch_size, seq_len))
+    mask = None
+    
+    # Place inputs on devices with explicit sharding
+    tokens, targets, positions, mask = sharding.place_inputs(tokens, targets, positions, mask)
+
     # Initialize model
     model = Llama(config, rngs=rngs, sharding=sharding)
+    print(f"Embedding sharding: {model.embed.embedding.sharding}")
+    
+    # 1. Apply Rematerialization
+    print("Applying rematerialization...")
+    apply_remat(model, policy="full")
+    
+    # 2. Apply Quantization (INT8)
+    print("Applying quantization...")
+    model = maybe_quantize(model, "int8", tokens, positions)
     
     # Split model into graphdef and params
     gdef, params = nnx.split(model, nnx.Param)
@@ -71,17 +91,11 @@ def main():
     # Create TrainState
     state = nnx.TrainState.create(gdef, params=params, tx=tx)
     
-    # Generate mock data
-    batch_size = 2
-    seq_len = 32
-    
-    tokens = jnp.zeros((batch_size, seq_len), dtype=jnp.int32)
-    targets = jnp.zeros((batch_size, seq_len), dtype=jnp.int32)
-    positions = jnp.broadcast_to(jnp.arange(seq_len), (batch_size, seq_len))
-    mask = None
-    
-    # Place inputs on devices with explicit sharding
-    tokens, targets, positions, mask = sharding.place_inputs(tokens, targets, positions, mask)
+    # 3. Apply Host Offloading to Optimizer State (Disabled due to JAX memory space mismatch)
+    # print("Offloading optimizer state to host...")
+    # state = state.replace(opt_state=to_host(state.opt_state))
+
+
     
     print("Starting dummy training step...")
     state, loss = train_step(state, tokens, positions, mask, targets)
