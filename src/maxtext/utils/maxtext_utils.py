@@ -45,6 +45,7 @@ from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import sharding
+from pathwaysutils.elastic import manager
 
 OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
 
@@ -1133,6 +1134,10 @@ def setup_initial_state(
   )
 
   # Initialization
+  elastic_manager = getattr(max_utils, "elastic_manager", None)
+  if elastic_manager and elastic_manager.new_slice_event.is_set():
+    raise manager.ScaleUpSignalError("Scale up during setup (before load_state)")
+
   with nn_partitioning.axis_rules(config.logical_axis_rules):
     restored, raw_params = checkpointing.load_state_if_possible(
         checkpoint_manager,

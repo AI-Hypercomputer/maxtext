@@ -23,6 +23,7 @@ import contextlib
 import datetime
 import functools
 import os
+import threading
 
 from absl import app
 
@@ -473,6 +474,42 @@ def train_loop(config, recorder, state=None):
   """Main Training loop."""
   # Kills the workload if initialization takes longer than 20 minutes
   with watchdog.watchdog(name="initialization", timeout=20 * 60, repeat=False):
+    setup_results = {}
+    init_complete_event = threading.Event()
+
+    def run_setup():
+      try:
+        results = train_utils.setup_train_loop(config, recorder)
+        setup_results['results'] = results
+      except Exception as e:
+        setup_results['exception'] = e
+      finally:
+        init_complete_event.set()
+
+    setup_thread = threading.Thread(target=run_setup, daemon=True)
+    setup_thread.start()
+
+    elastic_manager = getattr(max_utils, "elastic_manager", None)
+
+    while True:
+      init_done = init_complete_event.wait(timeout=1)
+
+      if elastic_manager and os.getenv("ELASTIC_MODE", "").lower() == "replica-resize":
+        new_slice = elastic_manager.new_slice_event.is_set()
+
+        if new_slice and not init_done:
+          max_logging.log("New slice detected during initialization. Triggering retry.")
+          raise manager.ScaleUpSignalError("Scale up during initialization")
+
+        if init_done and new_slice:
+          raise manager.ScaleUpSignalError("Both events set during initialization")
+
+      if init_done:
+        break
+
+    if 'exception' in setup_results:
+      raise setup_results['exception']
+
     (
         init_rng,
         checkpoint_manager,
@@ -485,7 +522,7 @@ def train_loop(config, recorder, state=None):
         rampup_manager,
         eval_data_iterator,
         state,
-    ) = train_utils.setup_train_loop(config, recorder)
+    ) = setup_results['results']
 
     if config.use_dpo:
       if "reference_params" not in state.params:

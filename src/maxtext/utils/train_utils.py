@@ -31,6 +31,7 @@ from maxtext.utils import model_creation_utils
 from maxtext.utils import sharding
 from maxtext.utils.rampup_batch import create_rampup_manager
 from maxtext.trainers.diloco import diloco
+from pathwaysutils.elastic import manager
 
 
 def create_training_tools(config, model, mesh):
@@ -201,6 +202,9 @@ def setup_train_loop(config, recorder, devices=None):
     init_rng, checkpoint_manager, learning_rate_schedule, tx = create_training_tools(config, model, mesh)
 
   with maybe_record_goodput(recorder, GoodputEvent.TRAINING_PREPARATION):
+    elastic_manager = getattr(max_utils, "elastic_manager", None)
+    if elastic_manager and elastic_manager.new_slice_event.is_set():
+      raise manager.ScaleUpSignalError("Scale up during setup (before data iterator)")
     data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
     rampup_manager = create_rampup_manager(config, checkpoint_manager)
     data_loader = create_dataloader(config, mesh, data_iterator, recorder, rampup_manager)
@@ -223,6 +227,8 @@ def setup_train_loop(config, recorder, devices=None):
               eval_data_iterator,
           )
 
+    if elastic_manager and elastic_manager.new_slice_event.is_set():
+      raise manager.ScaleUpSignalError("Scale up during setup (before state restore)")
     state, _, state_mesh_shardings, data_iterator = maxtext_utils.setup_training_state(
         model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
     )
