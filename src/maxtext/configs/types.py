@@ -177,6 +177,7 @@ class DatasetType(str, Enum):
   GRAIN = "grain"
   TFDS = "tfds"
   C4MLPERF = "c4_mlperf"
+  OLMO_GRAIN = "olmo_grain"
 
 
 class SamplingStrategy(str, Enum):
@@ -1156,6 +1157,32 @@ class GrainDataset(BaseModel):
       description="Max workers for ThreadPoolExecutor when mixing multiple Grain data sources.",
   )
   grain_shuffle_buffer_size: int = Field(100, description="Shuffle buffer size when using Parquet or TFRecord.")
+
+
+class OlmoGrainDataset(BaseModel):
+  """Configuration for the OLMo numpy fixed-seq-length input pipeline (dataset_type=olmo_grain).
+
+  Separate from the standard grain config because this pipeline reads
+  pre-tokenized fixed-length sequences from raw npy files (one ``int32``
+  token per element, ``sequence_length`` from an index JSON), not
+  arrayrecord/tfds shards — so flags like ``grain_train_files`` /
+  ``packing`` don't apply.
+
+  Worker count, per-worker buffer size, and shuffle seed reuse the standard
+  grain flags (``grain_worker_count``, ``grain_per_worker_buffer_size``,
+  ``data_shuffle_seed``); only OLMo-specific fields are listed here.
+  """
+
+  olmo_index_path: PathStr = Field("", description="Path or gs:// URI to the JSON index from build_olmo_npy_index.py.")
+  olmo_path_remap_from: PathStr = Field(
+      "",
+      description="If set, rewrite index file paths starting with this prefix to olmo_path_remap_to.",
+  )
+  olmo_path_remap_to: PathStr = Field(
+      "",
+      description="Replacement prefix used together with olmo_path_remap_from (e.g. /mnt/disks/.../).",
+  )
+  olmo_apply_ngram_filter: bool = Field(True, description="Mask repetitive instances per OLMo-core's repetition filter.")
 
 
 class FineTuning(BaseModel):
@@ -2154,6 +2181,7 @@ class MaxTextConfig(
     TfdsDataset,
     HfDataset,
     GrainDataset,
+    OlmoGrainDataset,
     Tokenizer,
     # Inference
     InferenceGeneral,
