@@ -1,4 +1,4 @@
-# Copyright 2026 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,111 +13,100 @@
 # limitations under the License.
 
 """
-Weight Transfer Benchmark for the RL Trainer.
-Similar to reshard_debug.py but only considers weight transfer.
+Weight Transfer Benchmark Script
+
+This script benchmarks the latency of transferring a 20GiB array from trainer chips
+to sampler chips using Pathways.
 """
 
 from __future__ import annotations
-
+import time
 import os
-
-# for vLLM we can skip JAX precompilation with this flag, it makes startup faster
-os.environ["SKIP_JAX_PRECOMPILE"] = "1"
-
+from typing import Sequence
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
-import time
 import pathwaysutils
-
-
+from absl import app
+from maxtext.utils import max_logging
 from maxtext.configs import pyconfig
-from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
-from maxtext.utils import max_logging, max_utils
-from tunix.rl import reshard
+from maxtext.utils import max_utils
 from tunix.sft.utils import show_hbm_usage
 
-import argparse
-
-def main(args):
-  print("DEBUG: Entering main", flush=True)
+def main(argv: Sequence[str]) -> None:
   pathwaysutils.initialize()
-  print("DEBUG: After pathwaysutils.initialize()", flush=True)
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
+  max_utils.print_system_information()
 
-  # max_utils.print_system_information()
-  print("DEBUG: Skipped print_system_information", flush=True)
-
-  devices = jax.devices()
-  print(f"DEBUG: Found {len(devices)} devices", flush=True)
-  req_devices = args.device_size * 2
-  if len(devices) < req_devices:
-    raise ValueError(f"Need at least {req_devices} devices for this benchmark, got {len(devices)}")
-
-  max_logging.log(f"Using specific {args.device_size}/{args.device_size} split for trainer/sampler on {req_devices} chips.")
-  trainer_devices = devices[:args.device_size]
-  sampler_devices = devices[args.device_size:req_devices]
-
-  import numpy as np
-  trainer_mesh = Mesh(np.array(trainer_devices).reshape(args.device_size), ('tensor',))
-  sampler_mesh = Mesh(np.array(sampler_devices).reshape(args.device_size), ('tensor',))
-
-  max_logging.log(f"Trainer mesh shape: {trainer_mesh.shape}")
-  max_logging.log(f"Sampler mesh shape: {sampler_mesh.shape}")
-
-  # Define array size
-  total_bytes = args.data_size_gb * 1024 * 1024 * 1024
-  element_size = 2  # bfloat16
-  total_elements = total_bytes // element_size
-
-  num_trainer_chips = args.device_size
-  elements_per_chip = total_elements // num_trainer_chips
-
-  max_logging.log(f"Total elements: {total_elements}")
-  max_logging.log(f"Elements per chip: {elements_per_chip}")
-
-  # Create a 2D array where axis 0 is sharded across trainer chips (size 8)
-  shape = (num_trainer_chips, elements_per_chip)
+  config = pyconfig.initialize_pydantic(argv)
   
-  # Shard only across ici_tensor_parallelism ('tensor' axis)
-  trainer_sharding = NamedSharding(trainer_mesh, P('tensor', None))
-  sampler_sharding = NamedSharding(sampler_mesh, P('tensor', None))
-
-  key = jax.random.PRNGKey(42)
-
-  # Create data on trainer mesh
-  with trainer_mesh:
-    def _create_data(k):
-      return jax.random.uniform(k, shape, dtype=jnp.bfloat16)
-    create_data = jax.jit(_create_data, out_shardings=trainer_sharding)
-    data_trainer = create_data(key)
-    jax.block_until_ready(data_trainer)
-    max_logging.log("Created data on trainer mesh.")
-    show_hbm_usage("HBM after data creation on trainer:")
-
-  # Benchmark transfer
-  num_loops = 10
-  times = []
-
+  devices = jax.devices()
+  num_devices = len(devices)
+  max_logging.log(f"Total devices detected: {num_devices}")
+  
+  # Default fractions if not provided in config
+  trainer_fraction = getattr(config, "trainer_devices_fraction", 0.5)
+  sampler_fraction = getattr(config, "sampler_devices_fraction", 0.5)
+  transfer_size_gb = getattr(config, "batch_size", 10)
+  num_loops = getattr(config, "num_batches", 10)
+  
+  num_trainer_devices = int(num_devices * trainer_fraction)
+  num_sampler_devices = int(num_devices * sampler_fraction)
+  
+  max_logging.log(f"Allocating {num_trainer_devices} trainer devices and {num_sampler_devices} sampler devices.")
+  
+  if num_trainer_devices + num_sampler_devices > num_devices:
+    raise ValueError("Sum of trainer and sampler devices exceeds total available devices.")
+    
+  trainer_devices = devices[:num_trainer_devices]
+  sampler_devices = devices[num_devices - num_sampler_devices :]
+  
+  max_logging.log(f"Trainer devices: {[d.id for d in trainer_devices]}")
+  max_logging.log(f"Sampler devices: {[d.id for d in sampler_devices]}")
+  
+  # Create meshes
+  # Assuming 1D sharding for simplicity
+  trainer_mesh = Mesh(trainer_devices, ('data',))
+  sampler_mesh = Mesh(sampler_devices, ('data',))
+  
+  # 20 GiB in bfloat16
+  num_elements = (transfer_size_gb * 1024**3) // 2
+  
+  # Shape must be divisible by number of trainer devices.
+  # We use a shape where the first axis is the number of devices.
+  shape = (len(trainer_devices), num_elements // len(trainer_devices))
+  
+  max_logging.log(f"Creating array of shape {shape} on Trainer mesh...")
+  
+  show_hbm_usage(f"HBM before loading data to trainer devices:")
+  trainer_sharding = NamedSharding(trainer_mesh, P('data', None))
+  
+  dummy_data = jax.device_put(jnp.ones(shape, dtype=jnp.bfloat16), trainer_sharding)
+  jax.block_until_ready(dummy_data)
+  show_hbm_usage(f"HBM after loading data to trainer devices:")
+    
+  max_logging.log("Array created on Trainer mesh.")
+  
+  sampler_sharding = NamedSharding(sampler_mesh, P('data', None))
+  
+  # Transfer benchmark
+  latencies = []
+  
+  max_logging.log(f"Starting weight transfer benchmark for {num_loops} loops...")
+  
   for i in range(num_loops):
     start_time = time.time()
-    # Transfer using reshard_pytree
-    data_rollout = reshard.reshard_pytree(data_trainer, sampler_sharding)
-    jax.block_until_ready(data_rollout)
+    transferred_data = jax.device_put(dummy_data, sampler_sharding)
+    jax.block_until_ready(transferred_data)
     end_time = time.time()
-    elapsed = end_time - start_time
-    times.append(elapsed)
-    max_logging.log(f"Loop {i}: Transfer time: {elapsed:.4f}s")
-
-  max_logging.log(f"Weight Transfer Benchmark completed.")
-  max_logging.log(f"Average Transfer Time: {sum(times)/len(times):.4f}s")
-  max_logging.log(f"Max Transfer Time: {max(times):.4f}s")
-  max_logging.log(f"Min Transfer Time: {min(times):.4f}s")
+    
+    latency = end_time - start_time
+    latencies.append(latency)
+    max_logging.log(f"Loop {i+1}: {latency:.4f}s")
+    show_hbm_usage(f"HBM after transfer {i+1}:")
+    
+  avg_latency = sum(latencies) / num_loops
+  max_logging.log(f"Average weight transfer latency: {avg_latency:.4f}s")
 
 if __name__ == "__main__":
-    import sys
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--data_size_gb', type=int, default=10, help='Total data size in GiB')
-    parser.add_argument('--device_size', type=int, default=4, help='Number of devices for both trainer and sampler')
-    args, unknown = parser.parse_known_args(sys.argv[1:])
-    main(args)
+  app.run(main)
