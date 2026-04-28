@@ -537,29 +537,26 @@ def setup_train_loop(
       - eval_data_iterator: The iterator for the evaluation dataset (or None).
       - state: The initialized training state.
   """
+  # GRPO is Linen-shaped end-to-end (inference goes through Linen MaxEngine).
+  # Route to Linen regardless of pure_nnx; warn since NNX checkpoints won't load.
+  if config.pure_nnx or config_inference.pure_nnx:
+    max_logging.log(
+        "WARNING: GRPO RL trainer does not yet support pure_nnx natively; "
+        "running on the Linen path. NNX-format checkpoints will not load correctly here."
+    )
   with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
     max_logging.log("Training mesh used for the workload")
     num_inference_devices = config.inference_devices_per_replica * config.inference_replicas
     training_devices = jax.devices()[num_inference_devices:]
-    if config.pure_nnx:
-      raise NotImplementedError("Pure NNX support has not been implemented yet.")
-    else:
-      model = mt.from_config(config, devices=training_devices)
+    model = mt.from_config(config, devices=training_devices)
     mesh = model.mesh
     max_logging.log("Inference mesh used for the workload")
     inference_devices = jax.devices()[:num_inference_devices]
-    if config_inference.pure_nnx:
-      raise NotImplementedError("Pure NNX support has not been implemented yet.")
-    else:
-      inference_model = mt.from_config(config_inference, devices=inference_devices)
+    inference_model = mt.from_config(config_inference, devices=inference_devices)
     inference_mesh = inference_model.mesh
     init_rng = jax.random.PRNGKey(config.init_weights_seed)
     learning_rate_schedule, tx = train_utils.create_training_optimizer(config, model)
-    if config.pure_nnx:
-      # NNX has a different function to init the training state.
-      raise NotImplementedError("Pure NNX support has not been implemented yet.")
-    else:
-      init_state_fn = functools.partial(maxtext_utils.init_initial_state, model, tx, config, True, init_rng)
+    init_state_fn = functools.partial(maxtext_utils.init_initial_state, model, tx, config, True, init_rng)
     checkpoint_manager = train_utils.create_checkpoint_manager(config, mesh, init_state_fn)
 
   with maybe_record_goodput(recorder, GoodputEvent.TRAINING_PREPARATION):
@@ -568,14 +565,10 @@ def setup_train_loop(
         data_iterator, config, mesh, checkpoint_manager, init_state_fn
     )
 
-  # create inference_state_mesh_shardings from inference_mesh
-  if config_inference.pure_nnx:
-    # NNX has a different function to init the training state.
-    raise NotImplementedError("Pure NNX support has not been implemented yet.")
-  else:
-    init_inference_state_fn = functools.partial(
-        maxtext_utils.init_initial_state, inference_model, tx, config_inference, False, init_rng
-    )
+  # create inference_state_mesh_shardings from inference_mesh (Linen path; see warning above)
+  init_inference_state_fn = functools.partial(
+      maxtext_utils.init_initial_state, inference_model, tx, config_inference, False, init_rng
+  )
   inference_state_mesh_shardings = maxtext_utils.get_abstract_state(
       config_inference, inference_mesh, init_inference_state_fn, is_training=False
   )[2]
