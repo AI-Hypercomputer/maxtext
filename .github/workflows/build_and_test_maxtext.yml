@@ -135,9 +135,9 @@ jobs:
         fail-fast: false
     with:
       device_type: tpu
-      device_name: v6e-4
+      device_name: v6e-8
       base_image: maxtext-unit-test-tpu:py312
-      cloud_runner: linux-x86-ct6e-180-4tpu
+      cloud_runner: linux-x86-ct6e-180-8tpu
       maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -195,9 +195,9 @@ jobs:
         fail-fast: false
     with:
       device_type: tpu
-      device_name: v6e-4
+      device_name: v6e-8
       base_image: maxtext-unit-test-tpu:py312
-      cloud_runner: linux-x86-ct6e-180-4tpu
+      cloud_runner: linux-x86-ct6e-180-8tpu
       pytest_marker: 'not cpu_only and not gpu_only and not integration_test and not post_training'
       pytest_addopts: '--ignore=tests/post_training'
       xla_python_client_mem_fraction: 0.75
@@ -214,9 +214,9 @@ jobs:
         fail-fast: false
     with:
       device_type: tpu
-      device_name: v6e-4
+      device_name: v6e-8
       base_image: maxtext-unit-test-tpu:py312
-      cloud_runner: linux-x86-ct6e-180-4tpu
+      cloud_runner: linux-x86-ct6e-180-8tpu
       pytest_marker: 'not cpu_only and not gpu_only and integration_test and not post_training'
       pytest_addopts: '--ignore=tests/post_training --ignore=tests/integration/hlo_diff_test.py'
       xla_python_client_mem_fraction: 0.75

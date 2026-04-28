@@ -105,14 +105,18 @@ class ContextParallelismTest(unittest.TestCase):
     # Create a mapping from the expected device (in logical mesh order) to its expected properties
     # current_test_devices defines the logical order of devices in the mesh
     current_test_devices = self.mesh_cp.devices.flatten()
+    context_axis_idx = list(self.cfg_cp.mesh_axes).index("context")
+    device_to_context_idx = {
+        self.mesh_cp.devices[idx]: idx[context_axis_idx] for idx in np.ndindex(self.mesh_cp.devices.shape)
+    }
 
     expected_map = {
-        current_test_devices[i]: {
-            "index": expected_indices_per_logical_device[i],
+        device: {
+            "index": expected_indices_per_logical_device[ctx_idx],
             "shape": expected_shard_shape_2d,
-            "data": global_data_2d[expected_indices_per_logical_device[i]],
+            "data": global_data_2d[expected_indices_per_logical_device[ctx_idx]],
         }
-        for i in range(len(current_test_devices))
+        for device, ctx_idx in device_to_context_idx.items()
     }
 
     found_devices_in_shards = set()

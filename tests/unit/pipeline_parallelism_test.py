@@ -277,6 +277,11 @@ class PipelineParallelismTest(unittest.TestCase):
         num_pipeline_microbatches=8,
         per_device_batch_size=4,
         pipeline_fsdp_ag_once=True,
+        # Force FP32 to eliminate bfloat16 non-associative rounding noise
+        dtype="float32",
+        weight_dtype="float32",
+        # Use dot_product to avoid Flash Attention precision loss on unaligned dims
+        attention="dot_product"
     )
     self.assert_pipeline_same_output_and_grad(config)
 
@@ -295,6 +300,11 @@ class PipelineParallelismTest(unittest.TestCase):
         num_pipeline_microbatches=8,
         per_device_batch_size=4,
         pipeline_fsdp_ag_per_repeat=True,
+        # Force FP32 to eliminate bfloat16 non-associative rounding noise
+        dtype="float32",
+        weight_dtype="float32",
+        # Use dot_product to avoid Flash Attention precision loss on unaligned dims
+        attention="dot_product"
     )
     self.assert_pipeline_same_output_and_grad(config)
 

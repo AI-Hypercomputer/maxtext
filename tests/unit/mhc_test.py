@@ -98,7 +98,7 @@ class TestMHC(unittest.TestCase):
         run_name="test_mhc",
         enable_checkpointing=False,
         model_name="deepseek-custom",
-        per_device_batch_size=4,
+        per_device_batch_size=jax.device_count(),
         max_target_length=7,
         max_prefill_predict_length=7,
         attention="dot_product",

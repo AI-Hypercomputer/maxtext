@@ -403,7 +403,7 @@ class RoutedMoeTest(unittest.TestCase):
     )
     variables = model.init(
         {"params": rng, "dropout": rng},
-        jax.random.normal(rng, (int(cfg.per_device_batch_size), cfg.max_target_length, cfg.base_emb_dim)),
+        jax.random.normal(rng, hidden_states.shape),
     )
 
     output = jax.jit(model.apply)(variables, hidden_states)  # pylint: disable=not-callable
@@ -614,7 +614,7 @@ class RoutedMoeTest(unittest.TestCase):
         megablox=True,
         sparse_matmul=True,
         per_device_batch_size=4,  # TODO(b/450900273): sharding error if pdbs=1
-        ici_fsdp_parallelism=2,
+        ici_fsdp_parallelism=4,
         ici_fsdp_transpose_parallelism=2,
         moe_fsdp_use_two_stage_all_gather=True,
         max_target_length=128,

@@ -80,10 +80,10 @@ jobs:
 
       device_name: >-
         ${{ fromJSON('{
-          "tpu-unit": "v6e-4",
-          "tpu-integration": "v6e-4",
-          "tpu-post-training-unit": "v6e-4",
-          "tpu-post-training-integration": "v6e-4",
+          "tpu-unit": "v6e-8",
+          "tpu-integration": "v6e-8",
+          "tpu-post-training-unit": "v6e-8",
+          "tpu-post-training-integration": "v6e-8",
           "gpu-unit": "a100-40gb-4",
           "gpu-integration": "a100-40gb-4",
           "cpu-unit": "X64",
@@ -92,14 +92,14 @@ jobs:
 
       cloud_runner: >-
         ${{ fromJSON('{
-          "tpu-unit": "linux-x86-ct6e-180-4tpu",
-          "tpu-integration": "linux-x86-ct6e-180-4tpu",
-          "tpu-post-training-unit": "linux-x86-ct6e-180-4tpu",
-          "tpu-post-training-integration": "linux-x86-ct6e-180-4tpu",
+          "tpu-unit": "linux-x86-ct6e-180-8tpu",
+          "tpu-integration": "linux-x86-ct6e-180-8tpu",
+          "tpu-post-training-unit": "linux-x86-ct6e-180-8tpu",
+          "tpu-post-training-integration": "linux-x86-ct6e-180-8tpu",
           "gpu-unit": "linux-x86-a2-48-a100-4gpu",
           "gpu-integration": "linux-x86-a2-48-a100-4gpu",
-          "cpu-unit": "linux-x86-n2-16",
-          "cpu-post-training-unit": "linux-x86-n2-16"
+          "cpu-unit": "linux-x86-n2-32",
+          "cpu-post-training-unit": "linux-x86-n2-32"
         }')[inputs.flavor] }}
       # Pytest Marker Mapping
       pytest_marker: >-
