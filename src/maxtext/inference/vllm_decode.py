@@ -42,6 +42,8 @@ from maxtext.utils import model_creation_utils
 from maxtext.utils import max_logging
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
 from maxtext.common.common_types import Config
+from maxtext.multimodal import processor as mm_processor
+from maxtext.multimodal import utils as mm_utils
 from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from tunix.rl.rollout import base_rollout
 from tunix.rl.rollout.vllm_rollout import VllmRollout
@@ -51,6 +53,57 @@ from maxtext.configs import pyconfig
 
 os.environ["SKIP_JAX_PRECOMPILE"] = "1"
 os.environ["NEW_MODEL_DESIGN"] = "1"
+
+
+def _prepare_multimodal_inputs(config: Config) -> tuple[str, mm_utils.PreprocessorOutput]:
+  """Preprocesses multimodal data and reformats the prompt for vLLM decoding.
+
+  Delegates all model- and modality-specific logic to mm_processor, which
+  routes to per-model preprocessors (gemma3, gemma4, llama4, qwen3-omni, …).
+  To add support for a new model or modality, extend mm_processor instead of
+  this function.
+
+  Args:
+    config: MaxText config. Must include image_path / video_path / audio paths
+      and corresponding flags (use_multimodal, etc.) for the desired modalities.
+
+  Returns:
+    A (formatted_text, processor_outputs) tuple.
+  """
+  processor_outputs = mm_processor.preprocess_mm_data(config)
+  text = mm_processor.reformat_prompt(
+      prompt=config.prompt,
+      image_placeholder=config.image_placeholder,
+      video_placeholder=config.video_placeholder,
+      model_name=config.model_name,
+      num_images=processor_outputs.num_images,
+      num_videos=getattr(processor_outputs, "num_videos", 0),
+  )
+  return text, processor_outputs
+
+
+def _build_mm_data_for_vllm(processor_outputs: mm_utils.PreprocessorOutput) -> dict[str, Any]:
+  """Converts PreprocessorOutput to a vLLM multi_modal_data dict.
+
+  This is the single extension point for new modalities: map each new
+  PreprocessorOutput field to its vLLM key here.
+
+  Args:
+    processor_outputs: Preprocessor outputs from _prepare_multimodal_inputs.
+
+  Returns:
+    A dict for use as the vLLM multi_modal_data value, or an empty dict when
+    no multimodal inputs are present.
+  """
+  mm_data: dict[str, Any] = {}
+  if processor_outputs.pixel_values is not None:
+    mm_data["image"] = processor_outputs.pixel_values
+  if processor_outputs.audio_values is not None:
+    mm_data["audio"] = processor_outputs.audio_values
+  # Future modalities — add entries here as new PreprocessorOutput fields land:
+  # if getattr(processor_outputs, "video_values", None) is not None:
+  #   mm_data["video"] = processor_outputs.video_values
+  return mm_data
 
 
 # --- DEFINE FLAGS GLOBALLY ---
@@ -120,21 +173,29 @@ def decode_with_vllm(config: Config) -> None:
       token=config.hf_access_token,
   )
 
-  prompts = [config.prompt]
-  if config.use_chat_template:
-    # Format the prompt using chat template if specified
+  text = config.prompt
+  processor_outputs = mm_utils.PreprocessorOutput()
+
+  if config.use_multimodal:
+    # Multimodal: reformat prompt and preprocess media; this subsumes chat template
+    # formatting for models that define it in mm_processor.reformat_prompt.
+    text, processor_outputs = _prepare_multimodal_inputs(config)
+  elif config.use_chat_template:
+    # Text-only: apply chat template
     messages = [
         {"role": "user", "content": config.prompt},
     ]
-    input_with_chat_template = tokenizer.apply_chat_template(
+    text = tokenizer.apply_chat_template(
         messages,
         tokenize=False,  # Set to False to get the string
         add_generation_prompt=True,
         add_special_tokens=False,  # Prevent adding special tokens
     )
-    prompts = [input_with_chat_template]
 
-  max_prompt_length = max(len(tokenizer.encode(p)) for p in prompts)
+  mm_data = _build_mm_data_for_vllm(processor_outputs)
+  prompt_input: str | dict[str, Any] = {"prompt": text, "multi_modal_data": mm_data} if mm_data else text
+
+  max_prompt_length = len(tokenizer.encode(text))
   max_tokens_to_generate = config.max_target_length - max_prompt_length
   if max_tokens_to_generate <= 0:
     raise ValueError(
@@ -148,11 +209,11 @@ def decode_with_vllm(config: Config) -> None:
       top_p=config.decode_sampling_nucleus_p,
   )
 
-  outputs = llm.generate(prompts, sampling_params)
+  outputs = llm.generate([prompt_input], sampling_params)
 
   # max_logging.log Outputs
   for output in outputs:
-    prompt = output.prompt
+    prompt = output.prompt or text
     generated_text = output.outputs[0].text
     max_logging.log(f"Prompt: {prompt}, Generated text: {generated_text}")
 
@@ -180,21 +241,29 @@ def decode_with_tunix(
   )
   tokenizer.bos_token = None
 
-  prompts = [config.prompt]
-  if config.use_chat_template:
-    # Format the prompt using chat template if specified
+  text = config.prompt
+  processor_outputs = mm_utils.PreprocessorOutput()
+
+  if config.use_multimodal:
+    # Multimodal: reformat prompt and preprocess media.
+    text, processor_outputs = _prepare_multimodal_inputs(config)
+  elif config.use_chat_template:
+    # Text-only: apply chat template
     messages = [
         {"role": "user", "content": config.prompt},
     ]
-    input_with_chat_template = tokenizer.apply_chat_template(
+    text = tokenizer.apply_chat_template(
         messages,
         tokenize=False,  # Set to False to get the string
         add_generation_prompt=True,
         add_special_tokens=False,  # Prevent adding special tokens
     )
-    prompts = [input_with_chat_template]
 
-  max_prompt_length = max(len(tokenizer.encode(p)) for p in prompts)
+  mm_data = _build_mm_data_for_vllm(processor_outputs)
+  prompt_input: str | dict[str, Any] = {"prompt": text, "multi_modal_data": mm_data} if mm_data else text
+  prompts = [prompt_input]
+
+  max_prompt_length = len(tokenizer.encode(text))
   max_tokens_to_generate = config.max_target_length - max_prompt_length
   if max_tokens_to_generate <= 0:
     raise ValueError(
