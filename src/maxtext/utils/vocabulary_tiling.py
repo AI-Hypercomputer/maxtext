@@ -17,6 +17,7 @@
 import functools
 
 from flax import linen as nn
+from flax import nnx
 
 import jax
 import jax.numpy as jnp
@@ -138,7 +139,7 @@ def vocab_tiling_linen_loss(
           {"params": gathered_params["params"]},
           hidden_chunk,
           deterministic=deterministic,
-          method="logits_from_hidden_states",
+          method="logits_from_hidden_states_for_vocab_tiling",
       )
       chunk_logits = _maybe_shard_with_name(chunk_logits, chunked_logits_spec)
       one_hot_label_chunk = jax.nn.one_hot(label_chunk, config.vocab_size)
@@ -183,7 +184,7 @@ def vocab_tiling_linen_loss(
           {"params": input_params["params"]},
           input_hidden_chunk,
           deterministic=deterministic,
-          method="logits_from_hidden_states",
+          method="logits_from_hidden_states_for_vocab_tiling",
       )
       chunk_logits = _maybe_shard_with_name(chunk_logits, chunked_logits_spec)
       one_hot_label_chunk = jax.nn.one_hot(input_label_chunk, config.vocab_size)
@@ -246,4 +247,115 @@ def vocab_tiling_linen_loss(
       segmentation,
   )
 
+  return total_loss, total_z_loss
+
+
+def vocab_tiling_nnx_loss(model, hidden_states, data, config, is_train):
+  """Computes cross-entropy loss with vocab tiling for NNX models.
+
+  NNX equivalent of ``vocab_tiling_linen_loss``. Scans the vocab dimension
+  and calls ``model.logits_from_hidden_states_for_vocab_tiling`` per chunk. The NNX model
+  carries its own parameters, so no explicit gather is needed.
+
+  Uses default autograd; a custom_vjp for backward memory savings can be
+  added later if needed.
+
+  Args:
+    model: NNX model exposing ``logits_from_hidden_states_for_vocab_tiling``.
+    hidden_states: Final hidden states from the decoder.
+    data: Dict with ``targets`` and ``targets_segmentation``.
+    config: Model and training config.
+    is_train: Whether the model is in training mode.
+
+  Returns:
+    A tuple ``(total_loss, total_z_loss)``.
+  """
+  labels = data["targets"]
+  segmentation = data["targets_segmentation"]
+  deterministic = not config.enable_dropout if is_train else True
+  model_mode = "train"
+
+  hidden_spec = create_sharding(
+      model.mesh,
+      ("activation_embed_and_logits_batch", "activation_length", "activation_embed"),
+  )
+  label_spec = create_sharding(
+      model.mesh,
+      ("activation_embed_and_logits_batch", "activation_length"),
+  )
+  reshaped_hidden_spec = create_sharding(
+      model.mesh,
+      ("num_tile", "activation_embed_and_logits_batch_sequence", "activation_embed"),
+  )
+  reshaped_data_spec = create_sharding(
+      model.mesh,
+      ("num_tile", "activation_embed_and_logits_batch_sequence"),
+  )
+  chunked_hidden_spec = create_sharding(
+      model.mesh,
+      ("activation_embed_and_logits_batch_sequence", "activation_embed"),
+  )
+  chunked_data_spec = create_sharding(
+      model.mesh,
+      ("activation_embed_and_logits_batch_sequence",),
+  )
+  chunked_logits_spec = create_sharding(
+      model.mesh,
+      ("activation_embed_and_logits_batch_sequence", "activation_vocab"),
+  )
+
+  _maybe_shard_with_name = functools.partial(
+      maybe_shard_with_name,
+      shard_mode=config.shard_mode,
+      debug_sharding=config.debug_sharding,
+      extra_stack_level=1,
+  )
+
+  def _reshape(inputs, out_shape, out_sharding):
+    reshape_out_sharding = out_sharding if config.shard_mode == ShardMode.EXPLICIT else None
+    inputs = jax.lax.reshape(inputs, out_shape, out_sharding=reshape_out_sharding)
+    return _maybe_shard_with_name(inputs, out_sharding)
+
+  hidden_states = _maybe_shard_with_name(hidden_states, hidden_spec)
+  labels = _maybe_shard_with_name(labels, label_spec)
+  segmentation = _maybe_shard_with_name(segmentation, label_spec)
+
+  batch_size, seq_len, emb_dim = hidden_states.shape
+  vocab_tile_size = (batch_size * seq_len) // config.num_vocab_tiling
+
+  reshaped_hidden_states = _reshape(
+      hidden_states, (config.num_vocab_tiling, vocab_tile_size, emb_dim), reshaped_hidden_spec
+  )
+  reshaped_labels = _reshape(labels, (config.num_vocab_tiling, vocab_tile_size), reshaped_data_spec)
+  reshaped_segmentation = _reshape(segmentation, (config.num_vocab_tiling, vocab_tile_size), reshaped_data_spec)
+
+  # Rebuild the model per chunk inside the scan: the output head pulls an rng stream, and
+  # mutating the outer model's rng inside scan's sub-trace raises TraceContextError.
+  # nnx.merge(..., copy=True) makes fresh Variables local to each iteration.
+  graphdef, model_state = nnx.split(model)
+
+  def _scan_body(accumulators, chunk_data):
+    loss_accumulator, z_loss_accumulator = accumulators
+    hidden_chunk, label_chunk, segmentation_chunk = chunk_data
+    hidden_chunk = _maybe_shard_with_name(hidden_chunk, chunked_hidden_spec)
+    label_chunk = _maybe_shard_with_name(label_chunk, chunked_data_spec)
+    segmentation_chunk = _maybe_shard_with_name(segmentation_chunk, chunked_data_spec)
+
+    chunk_model = nnx.merge(graphdef, model_state, copy=True)
+    chunk_logits = chunk_model.logits_from_hidden_states_for_vocab_tiling(hidden_chunk, deterministic, model_mode)
+    chunk_logits = _maybe_shard_with_name(chunk_logits, chunked_logits_spec)
+    one_hot_label_chunk = jax.nn.one_hot(label_chunk, config.vocab_size)
+    chunk_xent, chunk_z_loss = max_utils.cross_entropy_with_logits(
+        chunk_logits, one_hot_label_chunk, z_loss=config.z_loss_multiplier
+    )
+
+    masked_xent = jnp.sum(chunk_xent * (segmentation_chunk != 0))
+    masked_z_loss = jnp.sum(chunk_z_loss * (segmentation_chunk != 0))
+
+    return (loss_accumulator + masked_xent, z_loss_accumulator + masked_z_loss), None
+
+  initial_acc = (jnp.zeros((), dtype=hidden_states.dtype), jnp.zeros((), dtype=hidden_states.dtype))
+  (total_loss, total_z_loss), _ = jax.lax.scan(
+      _scan_body, initial_acc, (reshaped_hidden_states, reshaped_labels, reshaped_segmentation)
+  )
   return total_loss, total_z_loss

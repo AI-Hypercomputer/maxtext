@@ -52,18 +52,13 @@ def checkpoint_loop(config, state=None):
 
   Returns:
   """
-  if config.pure_nnx:
-    raise NotImplementedError("Pure NNX support has not been implemented yet.")
-  else:
-    model = from_config(config)
+  # Save/restore exerciser uses Linen-shaped optimizer state via
+  # add_entropy_to_checkpoint(). Route to Linen regardless of pure_nnx.
+  model = from_config(config)
   mesh = model.mesh
   init_rng = jax.random.PRNGKey(config.init_weights_seed)
   _, tx = train_utils.create_training_optimizer(config, model)
-  if config.pure_nnx:
-    # NNX has a different function to init the training state.
-    raise NotImplementedError("Pure NNX support has not been implemented yet.")
-  else:
-    init_state_fn = partial(maxtext_utils.init_initial_state, model, tx, config, True, init_rng)
+  init_state_fn = partial(maxtext_utils.init_initial_state, model, tx, config, True, init_rng)
   checkpoint_manager = train_utils.create_checkpoint_manager(config, mesh, init_state_fn)
 
   unboxed_abstract_state, _, _ = maxtext_utils.get_abstract_state(config, mesh, init_state_fn, is_training=True)

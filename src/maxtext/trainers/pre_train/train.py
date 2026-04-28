@@ -72,7 +72,7 @@ from maxtext.utils import sharding
 from maxtext.utils import maxtext_utils_nnx
 from maxtext.utils import train_utils
 from maxtext.utils.gradient_accumulation import gradient_accumulation_loss_and_grad
-from maxtext.utils.vocabulary_tiling import vocab_tiling_linen_loss
+from maxtext.utils.vocabulary_tiling import vocab_tiling_linen_loss, vocab_tiling_nnx_loss
 
 _diag_modules = _cloud_diag()
 diagnostic, debug_configuration, diagnostic_configuration, stack_trace_configuration = _diag_modules
@@ -203,9 +203,10 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
     intermediate_outputs = intermediates.to_pure_dict()
 
     if config.num_vocab_tiling > 1:
-      raise NotImplementedError("Vocab tiling for NNX modules has not been implemented.")
-
-    if (config.use_indexer and not config.indexer_sparse_training) and is_train:
+      hidden_state_key = ("decoder", "hidden_states")
+      hidden_states = maxtext_utils.get_nested_value(intermediate_outputs, hidden_state_key)[0]
+      xent_sum, total_z_loss = vocab_tiling_nnx_loss(model, hidden_states, data, config, is_train)
+    elif (config.use_indexer and not config.indexer_sparse_training) and is_train:
       # In Dense Warm-up stage, we skip main model loss calculation for efficiency.
       # The main model parameters are frozen and only the indexer is trained via KL divergence.
       xent_sum = 0.0
@@ -323,7 +324,12 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     ga_fn, ga_model, ga_params, ga_rng, ga_dpo = _loss_fn, model, params, dropout_rng, extra_dpo_args
   else:
     if config.use_dpo:
-      raise NotImplementedError("DPO for NNX modules has not been implemented.")
+      raise NotImplementedError(
+          "DPO is not yet supported for NNX modules. DPO requires a reference model "
+          "stored alongside the policy model (Linen path uses state.params['reference_params']); "
+          "the NNX TrainState equivalent has not been wired up. As a workaround, set "
+          "pure_nnx=False for DPO runs."
+      )
     state = nnx.merge(model, state)  # reconstruct TrainStateNNX
     ga_fn, ga_model, ga_params, ga_rng, ga_dpo = loss_fn, state.model, None, None, []
 
@@ -557,7 +563,9 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     if config.use_dpo:
       new_state = _merge_dpo_state(new_state, reference_params)
     return new_state, metrics
-  return nnx.state(new_state), metrics
+  # Drop Intermediates (e.g. sowed max_logits for QK-Clip) before returning;
+  # they're absent from state_mesh_shardings and would cause a leaf-count mismatch.
+  return nnx.state(new_state, nnx.Not(nnx.Intermediate)), metrics
 
 
 def eval_step(model, config, state, data, dropout_rng=None):

@@ -29,6 +29,7 @@ from absl import app
 from flax import nnx
 from flax.linen import partitioning as nn_partitioning
 import jax
+import jax.numpy as jnp
 from jax.experimental.serialize_executable import serialize
 from jax.experimental.topologies import get_topology_desc
 from jax.sharding import AxisType, Mesh
@@ -91,6 +92,28 @@ def get_topology_mesh(config):
   return topology_mesh
 
 
+def _collect_nnx_activation_shardings(create_model_fn, config, mesh):
+  """Runs an abstract NNX forward pass to populate `_ACTIVATION_SHARDINGS_DUMP`.
+
+  `get_abstract_state_nnx` only traces `__init__`; activation shardings need
+  a forward pass to be collected.
+  """
+  input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
+  abstract_input = jax.ShapeDtypeStruct(input_shape, jnp.int32)
+
+  def _nnx_forward(decoder_input_tokens, decoder_positions, decoder_segment_ids):
+    model_instance = create_model_fn()
+    return model_instance(
+        decoder_input_tokens=decoder_input_tokens,
+        decoder_positions=decoder_positions,
+        decoder_segment_ids=decoder_segment_ids,
+        enable_dropout=False,
+    )
+
+  with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
+    jax.eval_shape(_nnx_forward, abstract_input, abstract_input, abstract_input)
+
+
 def get_shaped_inputs(topology_mesh, config):
   """Get shaped abstractions of inputs to train_step: state, batch and rng"""
   # Construct the model and optimizer to get shaped versions of the state
@@ -128,7 +151,8 @@ def get_shaped_inputs(topology_mesh, config):
     # For NNX, get_functional_train_with_signature expects the graphdef (static structure),
     # not the raw model — mirroring how the training loop does nnx.split(train_state).
     with nn_partitioning.axis_rules(config.logical_axis_rules):
-      graphdef, _ = nnx.get_abstract_model(init_state_fn, topology_mesh)
+      abs_train_state = nnx.eval_shape(init_state_fn)
+      graphdef, _ = nnx.split(abs_train_state)
     model = graphdef
   else:
     # unsharded logical annotations
@@ -138,10 +162,16 @@ def get_shaped_inputs(topology_mesh, config):
   shaped_batch = maxtext_utils.get_shaped_batch(config)
 
   if config.pure_nnx:
-    shaped_train_args = (abstract_state, shaped_batch, None)  # NNX doesn't use dropout_rng
+    shaped_train_args = (abstract_state, shaped_batch)  # NNX doesn't use dropout_rng
   else:
     shaped_train_args = (abstract_state, shaped_batch, shaped_rng)
   shaped_train_kwargs = {}
+
+  # Collect NNX activation shardings via an abstract forward pass (must run
+  # after get_abstract_state, which only traces __init__).
+  if config.debug_sharding and config.pure_nnx:
+    _collect_nnx_activation_shardings(_create_model_partial, config, topology_mesh)
+
   return shaped_train_args, shaped_train_kwargs, state_mesh_shardings, logical_annotations, model
 
 
@@ -299,7 +329,9 @@ def main(argv: Sequence[str]) -> None:
     diloco_state, state_mesh_shardings, inner_state_shardings = diloco.build_abstract_diloco_state(
         config, abstract_state, state_mesh_shardings, topology_mesh
     )
-    shaped_train_args = (diloco_state, shaped_train_args[1], shaped_train_args[2])
+    # For NNX, shaped_train_args has 2 elements (state, batch) — no rng; pass None for prng.
+    shaped_rng_arg = shaped_train_args[2] if len(shaped_train_args) > 2 else None
+    shaped_train_args = (diloco_state, shaped_train_args[1], shaped_rng_arg)
 
     # Wrap train_step with diloco
     train_step_partial = functools.partial(train.train_step, model, config, inner_state_shardings, params_shardings)
