@@ -18,24 +18,27 @@ _DTYPES = {"float32": jnp.float32, "bfloat16": jnp.bfloat16, "float16": jnp.floa
 
 
 def _sharded_init(init_fn: Callable[..., jax.Array], sharding):
-  return partial(init_fn, out_sharding=sharding)
+  def init(*args, **kwargs):
+    x = init_fn(*args, **kwargs)
+    return jax.device_put(x, sharding)
+  return init
 
 
 def _sharded_constant_init(value, sharding):
   def init(_key, shape, dtype=jnp.float32):
     match value:
       case 0:
-        return jnp.zeros(shape, dtype=dtype, out_sharding=sharding)
+        x = jnp.zeros(shape, dtype=dtype)
       case 1:
-        return jnp.ones(shape, dtype=dtype, out_sharding=sharding)
+        x = jnp.ones(shape, dtype=dtype)
       case _:
-        return jnp.zeros(shape, dtype=dtype, out_sharding=sharding) + jnp.asarray(value, dtype=dtype)
-
+        x = jnp.zeros(shape, dtype=dtype) + jnp.asarray(value, dtype=dtype)
+    return jax.device_put(x, sharding)
   return init
 
 
 def _stamp_sharding(x, sharding):
-  return jnp.broadcast_to(x, x.shape, out_sharding=sharding)
+  return jax.device_put(jnp.broadcast_to(x, x.shape), sharding)
 
 
 @dataclass
@@ -66,9 +69,7 @@ class Attention(nnx.Module):
     self.kv_repeat = config.num_heads // config.num_kv_heads
     self.sharding = sharding
     self.scale = config.head_dim ** -0.5
-    self.rope_freq = nnx.static(
-      tuple(np.asarray(rope_frequencies(config.head_dim, config.rope_max_timescale), dtype=np.float32))
-    )
+    self.rope_freq = tuple(np.asarray(rope_frequencies(config.head_dim, config.rope_max_timescale), dtype=np.float32))
 
     dt = _DTYPES[config.dtype]
     kernel_init = nnx.initializers.lecun_normal()
@@ -204,7 +205,7 @@ class Llama(nnx.Module):
       rngs=rngs,
       embedding_init=_sharded_init(embedding_init, sharding.init_weight_spec("embed", ("vocab",), ("embed",))),
     )
-    self.layers = nnx.List([DecoderLayer(config, rngs=rngs, sharding=sharding) for _ in range(config.num_layers)])
+    self.layers = nnx.Sequential([DecoderLayer(config, rngs=rngs, sharding=sharding) for _ in range(config.num_layers)])
     self.norm = nnx.RMSNorm(
       config.emb_dim,
       epsilon=config.norm_eps,
@@ -221,7 +222,7 @@ class Llama(nnx.Module):
 
   def __call__(self, tokens, positions, mask=None):
     x = self.embed_tokens(tokens)
-    for layer in self.layers:
+    for layer in self.layers.iter_children():
       x = layer(x, positions, mask)
     x = _stamp_sharding(self.norm(x), self.sharding.sequence_spec("final_norm"))
     

@@ -14,25 +14,17 @@ from maxtext.nnx_exp.infra import (
 )
 
 
-def _target_distribution(logits, targets):
-  target_dist = jax.nn.one_hot(targets, logits.shape[-1], dtype=jnp.float32)
-  try:
-    out_sharding = logits.sharding.spec
-  except AttributeError:
-    out_sharding = jax.typeof(logits).sharding.spec
-  return jnp.reshape(target_dist, target_dist.shape, out_sharding=out_sharding)
-
-
-def cross_entropy_loss(logits, targets):
+def cross_entropy_loss(logits, one_hot_targets):
   log_probs = jax.nn.log_softmax(logits.astype(jnp.float32), axis=-1)
-  return -jnp.sum(log_probs * _target_distribution(logits, targets)) / targets.size
+  total_tokens = one_hot_targets.size // one_hot_targets.shape[-1]
+  return -jnp.sum(log_probs * one_hot_targets) / total_tokens
 
 
 @jax.jit
-def train_step(state, tokens, positions, mask, targets):
+def train_step(state, tokens, positions, mask, one_hot_targets):
   def loss_fn(params):
     logits = nnx.merge(state.graphdef, params)(tokens, positions, mask=mask)
-    return cross_entropy_loss(logits, targets)
+    return cross_entropy_loss(logits, one_hot_targets)
 
   loss, grads = jax.value_and_grad(loss_fn)(state.params)
   return state.apply_gradients(grads=grads), loss
@@ -54,7 +46,7 @@ def main():
   print(f"Total devices: {jax.device_count()}")
   print(f"Mesh: {mesh}")
   
-  with jax.set_mesh(mesh):
+  with jax.sharding.use_mesh(mesh):
     sharding = LlamaSharding()
     rngs = nnx.Rngs(42)
     
@@ -67,8 +59,14 @@ def main():
     positions = jnp.broadcast_to(jnp.arange(seq_len), (batch_size, seq_len))
     mask = None
     
+    # Create one-hot targets
+    one_hot_targets = jax.nn.one_hot(targets, config.vocab_size, dtype=jnp.float32)
+    
     # Place inputs on devices with explicit sharding
-    tokens, targets, positions, mask = sharding.place_inputs(tokens, targets, positions, mask)
+    tokens, _, positions, mask = sharding.place_inputs(tokens, None, positions, mask)
+    
+    from jax.sharding import NamedSharding
+    one_hot_targets = jax.device_put(one_hot_targets, NamedSharding(mesh, sharding.logits_spec()))
 
     # Initialize model
     model = Llama(config, rngs=rngs, sharding=sharding)
@@ -97,9 +95,25 @@ def main():
 
 
     
-    print("Starting dummy training step...")
-    state, loss = train_step(state, tokens, positions, mask, targets)
-    print(f"Step 1 loss: {loss}")
+    print("Starting training loop...")
+    num_steps = 10
+    profile_dir = "nnx_profile_traces"
+    
+    loss = None
+    for step in range(num_steps):
+      if step == 5:
+        if loss is not None:
+          loss.block_until_ready()
+        print(f"Starting profiler at step {step}...")
+        jax.profiler.start_trace(profile_dir)
+        
+      state, loss = train_step(state, tokens, positions, mask, one_hot_targets)
+      print(f"Step {step} loss: {loss}")
+      
+      if step == 7:
+        loss.block_until_ready()
+        print(f"Stopping profiler at step {step}...")
+        jax.profiler.stop_trace()
 
 if __name__ == "__main__":
   main()
