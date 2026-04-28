@@ -90,20 +90,14 @@ def _possibly_unroll_params(config, training_state, training_state_annotations, 
 
 def _read_train_checkpoint(config, checkpoint_manager, mesh):
   """Read training checkpoint at path defined by load_full_state_path."""
-  # Model and Optimizer definition
+  # Input and output are both Linen-format (downstream uses Linen tree paths).
+  # Route to Linen regardless of pure_nnx.
   quant = quantizations.configure_quantization(config)
-  if config.pure_nnx:
-    raise NotImplementedError("Pure NNX support has not been implemented yet.")
-  else:
-    model = models.transformer_as_linen(config, mesh, quant, MODEL_MODE_TRAIN)
+  model = models.transformer_as_linen(config, mesh, quant, MODEL_MODE_TRAIN)
   rng = random.PRNGKey(0)
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
-  if config.pure_nnx:
-    # NNX has a different function to init the training state.
-    raise NotImplementedError("Pure NNX support has not been implemented yet.")
-  else:
-    init_state_fn = functools.partial(maxtext_utils.init_initial_state, model, tx, config, True, rng)
+  init_state_fn = functools.partial(maxtext_utils.init_initial_state, model, tx, config, True, rng)
   state, state_mesh_notations, _, _ = maxtext_utils.setup_training_state(
       None, config, mesh, checkpoint_manager, init_state_fn
   )
@@ -114,12 +108,11 @@ def _read_train_checkpoint(config, checkpoint_manager, mesh):
 
 def _generate_lora_decode_checkpoints(config, mesh):
   """Read lora checkpoints checkpoint at path defined by load_full_state_path."""
-  # Model and Optimizer definition
+  # Model and Optimizer definition.
+  # LoRA adapters and downstream `_save_decode_checkpoint`/`_possibly_unroll_params`
+  # are Linen-shaped; use the Linen path regardless of pure_nnx.
   quant = quantizations.configure_quantization(config)
-  if config.pure_nnx:
-    raise NotImplementedError("Pure NNX support has not been implemented yet.")
-  else:
-    model = models.transformer_as_linen(config, mesh, quant, MODEL_MODE_TRAIN)
+  model = models.transformer_as_linen(config, mesh, quant, MODEL_MODE_TRAIN)
   rng = random.PRNGKey(0)
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
