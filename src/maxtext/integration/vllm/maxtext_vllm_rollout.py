@@ -10,6 +10,7 @@ MaxTextToVLLMConverter from bench_weight_sync.py, which handles:
 
 from typing import Any, Optional, Tuple
 
+import ctypes
 import functools
 import gc
 import logging
@@ -17,7 +18,7 @@ import time
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from pathwaysutils.experimental import reshard as _experimental_reshard  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
+from tunix.rl.reshard import reshard_pytree
 from tunix.generate import mappings, vllm_sampler
 from tunix.generate.vllm_sampler import VllmConfig, VllmSampler
 from tunix.rl.rollout import base_rollout, vllm_rollout
@@ -95,6 +96,14 @@ def _patch_tpu_inference_group_offset():
 _patch_tpu_inference_group_offset()
 
 
+def _malloc_trim():
+  """Return freed Python heap pages to the OS. Counters host RSS creep."""
+  try:
+    ctypes.cdll.LoadLibrary("libc.so.6").malloc_trim(0)
+  except Exception:  # pylint: disable=broad-except
+    pass
+
+
 def _log_mem_stats(tag: str) -> None:
   """Log JAX live-array count/bytes and process RSS.
 
@@ -145,63 +154,81 @@ class MaxTextVllmSampler(VllmSampler):
       return super().update_params(updated_weights, filter_types)
 
     del filter_types
-    _log_mem_stats("sampler:update_params_start")
+    # _log_mem_stats("sampler:update_params_start")
 
-    # delete kv_cache
+    # Delete KV cache to free HBM before weight conversion begins.
+    # effects_barrier after the RPC ensures the deallocation is complete on
+    # device before we start dispatching conversion ops.
     if self.llm is not None:
       self.llm.reset_prefix_cache()
-      self.llm.collective_rpc("delete_kv_cache") # will free hbm
+      self.llm.collective_rpc("delete_kv_cache")
     elif self._driver is not None:
       self._driver.llm_engine.reset_prefix_cache()
       self._driver.llm_engine.collective_rpc("delete_kv_cache")
-    _log_mem_stats("sampler:post_kv_delete")
-
-    # Perform explicit garbage collection and synchronization to free up HBM memory before loading new weights
-    gc.collect()
     jax.effects_barrier()
-    _log_mem_stats("sampler:post_gc_clear")
+    gc.collect()
+    # _log_mem_stats("sampler:post_kv_delete")
 
-    logging.info("MaxTextVllmSampler.update_params: starting converter.convert()...")
-    vllm_state = self._converter.convert(updated_weights)
-    jax.block_until_ready(vllm_state)
-    _log_mem_stats("sampler:post_convert")
-
-    logging.info("MaxTextVllmSampler.update_params: converter.convert() done, %d weights to assign", len(vllm_state))
     model_runner_state = self.transformer_state
-
-    logging.info("Weight sync: using pathwaysutils experimental_reshard")
-
-    keys = list(vllm_state.keys())
+    assigned = 0
     start_time = time.time()
-    for i, key in enumerate(keys):
-      weight = vllm_state.pop(key)  # free immediately to avoid accumulating all weights in RAM
-      weight_array = weight.value if hasattr(weight, "value") else weight  # handle both jnp arrays and ShardedDeviceArrays
-      weight_shape_matches = weight_array.shape == model_runner_state[key].shape
-      assert weight_shape_matches, f"Shape mismatch for {key}: converter produced {weight_array.shape}, expected {model_runner_state[key].shape}"
-      # logging.info(f"{key}: mt {weight_array.shape} -> vllm {model_runner_state[key].shape}: {weight_shape_matches}")
-      target_sharding = model_runner_state[key].sharding
-      model_runner_state[key] = _experimental_reshard.reshard(
-          weight_array, target_sharding, donate=True, may_alias=None,
-          cache_resharding_plans=True,
-      )
-      del weight, weight_array  # release TPU buffer before pushing back to device
-      # Periodically flush async ops and GC to prevent host RAM accumulation.
-      if i % 16 == 15:
+
+    # Stream weights one-at-a-time: convert a chunk → reshard → assign → free.
+    # This avoids holding all converted weights in HBM simultaneously, which
+    # was the cause of OOMs at hbm_utilization > 0.5.  Peak HBM is now bounded
+    # to one w13 chunk (8 layers) + attention weights, not the full model.
+    for _layer_idx, weight_dict in self._converter.convert_streaming_per_layer(updated_weights):
+      jax.block_until_ready(weight_dict)
+      target_sharding_tree = {}
+      for key, weight_array in weight_dict.items():
+        weight_array = weight_array.value if hasattr(weight_array, "value") else weight_array
+        assert weight_array.shape == model_runner_state[key].shape, (
+            f"Shape mismatch for {key}: converter produced {weight_array.shape}, "
+            f"expected {model_runner_state[key].shape}"
+        )
+        target_sharding = model_runner_state[key].sharding
+        if weight_array.ndim == 1 and len(target_sharding.spec) > 1:
+          target_sharding = jax.sharding.NamedSharding(target_sharding.mesh, jax.sharding.PartitionSpec())
+        target_sharding_tree[key] = target_sharding
+
+      for key in weight_dict:
+        if key in model_runner_state:
+          model_runner_state[key].delete()
+      model_runner_state.update(reshard_pytree(
+          weight_dict, target_sharding_tree, donate_input=False, cache_plan=True,
+          use_experimental_pre_reshard=True
+      ))
+      for key in weight_dict:
+        jax.block_until_ready(model_runner_state[key])
+        assigned += 1
+      del weight_dict, target_sharding_tree
+      if assigned % 4 == 0:
         jax.effects_barrier()
         gc.collect()
-        _log_mem_stats(f"sampler:assign_weights_after_{i+1}")
+        _malloc_trim()
+
     jax.effects_barrier()
     gc.collect()
-    end_time = time.time()
-    logging.info("MaxTextVllmSampler.update_params: all weights assigned in %.4f seconds", end_time - start_time)
-    _log_mem_stats("sampler:post_assign_all")
-    
-    # reinitialize kv_cache
+    _malloc_trim()
+    # Release the converter's internal state so it doesn't hold HBM across steps.
+    self._converter.vllm_state = {}
+    logging.info("MaxTextVllmSampler.update_params: %d weights assigned in %.4f s",
+                 assigned, time.time() - start_time)
+    # _log_mem_stats("sampler:post_assign_all")
+
+    # Reinitialize KV cache.
     if self.llm is not None:
       self.llm.collective_rpc("reinitialize_kv_cache")
     elif self._driver is not None:
       self._driver.llm_engine.collective_rpc("reinitialize_kv_cache")
-    _log_mem_stats("sampler:post_kv_reinit")
+    # _log_mem_stats("sampler:post_kv_reinit")
+  def load_checkpoint(self, state):
+    """Override load_checkpoint to use streaming update if converter is available."""
+    if self._converter is not None:
+      logging.info("MaxTextVllmSampler: Using streaming update_params for load_checkpoint")
+      return self.update_params(state)
+    else:
+      return super().load_checkpoint(state)
 
 
 
@@ -246,7 +273,8 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
     if cache_config_or_size is None:
       cache_config_or_size = rollout_config.kv_cache_size
 
-    converter = MaxTextToVLLMConverter(config=maxtext_config, mesh=mesh)
+    use_ep = rollout_config.expert_parallel_size > 1
+    converter = MaxTextToVLLMConverter(config=maxtext_config, mesh=mesh, use_ep=use_ep)
 
     mapping_config = mappings.MappingConfig.build(
         mapping_obj=rollout_config.rollout_mapping_config,
@@ -265,6 +293,7 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
             server_mode=rollout_config.rollout_vllm_server_mode,
             tensor_parallel_size=rollout_config.tensor_parallel_size,
             data_parallel_size=rollout_config.data_parallel_size,
+            expert_parallel_size=rollout_config.expert_parallel_size,
             enable_dp_attention=rollout_config.rollout_vllm_enable_dp_attention,
             engine_kwargs={
                 "max_model_len": cache_config_or_size,

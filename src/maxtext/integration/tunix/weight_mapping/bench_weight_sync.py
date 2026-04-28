@@ -1,7 +1,10 @@
+import os
+os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
+from vllm import LLM, SamplingParams
 import functools
 import gc
+import pathwaysutils
 import logging
-import os
 import sys
 import time
 from contextlib import contextmanager
@@ -14,9 +17,8 @@ from flax import nnx
 from jax import config as jax_config
 from jax.sharding import PartitionSpec as P
 from jaxtyping import PyTree
-import torch
+
 from tunix.models.qwen3 import model as qwen3_lib
-from vllm import LLM, SamplingParams
 
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE
 from maxtext.configs import pyconfig
@@ -37,8 +39,19 @@ _JAX_COMPILATION_CACHE_DIR = "/tmp/jax_cache"
 # Flags
 FLAGS = flags.FLAGS
 _XPROF = flags.DEFINE_bool('xprof', False, 'xprof')
+_MODEL_NAME = flags.DEFINE_string('model_name', 'qwen3-30b-a3b', 'Model name')
+_TOKENIZER_PATH = flags.DEFINE_string('tokenizer_path', 'Qwen/Qwen3-30B-A3B', 'Tokenizer path')
+_TP_SIZE = flags.DEFINE_integer('tp_size', 8, 'tensor parallelism size')
 _RAND_INIT = False  # Whether to use random initialization instead of loading from checkpoint, for faster testing
-load_parameters_path = "" if _RAND_INIT else "gs://hengtaoguo-maxtext-logs/checkpoints/qwen3-30b-a3b/scanned/2026-01-23-14-00/0/items/0/items"
+_LOAD_PARAMETERS_PATH = flags.DEFINE_string(
+    'load_parameters_path',
+    'gs://hengtaoguo-maxtext-logs/checkpoints/qwen3-30b-a3b/scanned/2026-01-23-14-00/0/items/0/items',
+    'Path to load parameters from'
+)
+
+_SAVE_WEIGHTS = flags.DEFINE_bool('save_weights', False, 'Save Layer 0 weights for debugging')
+_TARGET_LAYER = flags.DEFINE_integer('target_layer', 0, 'Target layer for comparison and saving')
+_GCS_BUCKET = flags.DEFINE_string('gcs_bucket', '', 'GCS bucket for uploading saved weights')
 
 def _setup_jax_compilation_cache():
   jax_config.update("jax_compilation_cache_dir", _JAX_COMPILATION_CACHE_DIR)
@@ -96,11 +109,11 @@ def _log_mem_stats(tag: str) -> None:
   )
 
 
-def _get_maxtext_model(config):
+def _get_maxtext_model(config, devices=None):
   """Creates and returns a Tunix-adapted MaxText model and mesh."""
   logging.info(f'Creating model with config: {config}')
   model, mesh = model_creation_utils.create_nnx_model(
-    config, model_mode=MODEL_MODE_AUTOREGRESSIVE)
+    config, model_mode=MODEL_MODE_AUTOREGRESSIVE, devices=devices)
     # config, model_mode=MODEL_MODE_AUTOREGRESSIVE, use_rand_init=_RAND_INIT.value)    
   with mesh:
     tunix_model = TunixMaxTextAdapter(base_model=model)
@@ -128,7 +141,7 @@ def _get_maxtext_model(config):
     tunix_model.config = model_config
   return tunix_model, mesh
 
-def _load_maxtext_model(base_yaml_path):
+def _load_maxtext_model(base_yaml_path, devices=None):
   # Initialize MaxText config
   # config_ref = pyconfig.initialize(
   #     [ "", BASE_YAML_PATH, ],
@@ -163,14 +176,18 @@ def _load_maxtext_model(base_yaml_path):
   #     override_model_config="true",
   #     # base_num_decoder_layers=2,
   # )  
+  rollout_dp = int(os.environ.get("rollout_data_parallelism", "16"))
+  rollout_tp = int(os.environ.get("rollout_tensor_parallelism", str(_TP_SIZE.value)))
+  rollout_ep = int(os.environ.get("rollout_expert_parallelism", "1"))
+
   config_ref = pyconfig.initialize(
       [ "", base_yaml_path, ],
       base_output_directory="gs://wyzhang-dev/tmp",  # Not used in Tunix.
       run_name="test-tunix-maxtext-qwen3",
       tokenizer_type="huggingface",
       tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "qwen3-tokenizer"),
-      model_name="qwen3-30b-a3b",
-      load_parameters_path=load_parameters_path,
+      model_name=_MODEL_NAME.value,
+      load_parameters_path=_LOAD_PARAMETERS_PATH.value,
       scan_layers="true",
       per_device_batch_size=1,
       max_prefill_predict_length=8,
@@ -186,21 +203,30 @@ def _load_maxtext_model(base_yaml_path):
       query_proj="offload",
       key_proj="offload",
       value_proj="offload",
-      ici_expert_parallelism=4,
-      rollout_tensor_parallelism=4,  # for converter to determine how to fuse/unfuse TP-sharded weights
+      rollout_data_parallelism=rollout_dp,
+      rollout_tensor_parallelism=rollout_tp,
+      rollout_expert_parallelism=rollout_ep,
+      ici_fsdp_parallelism=-1,
+      num_samplers_slices=1,
+      num_trainer_slices=1,
+      num_slices=1,
+      # ici_tensor_parallelism=8,
       override_model_config="true",
       checkpoint_storage_concurrent_gb=80,
       async_scheduling="false",
+      colocated_python_checkpointing="true",
+      enable_single_controller="true",
   )
-  model, mesh = _get_maxtext_model(config_ref)
+  model, mesh = _get_maxtext_model(config_ref, devices=devices)
   return config_ref, model, mesh
 
 class MaxTextToVLLMConverter:
-    def __init__(self, config, mesh):
+    def __init__(self, config, mesh, use_ep: bool = False):
         self.config = config
         self.mesh = mesh
         self.num_layers = config.base_num_decoder_layers
         self.vllm_tp = self.config.rollout_tensor_parallelism
+        self.use_ep = use_ep
 
     # --- 1. Top-Level Entry Point ---
     def convert(self, model_state: dict):
@@ -263,30 +289,44 @@ class MaxTextToVLLMConverter:
       moe = params['base']['decoder']['layers']['moe_block'].to_pure_dict()
       prefix = "vllm_model.model.layers"
 
-      logging.info("_convert_moe: gate weights...")
-      self.vllm_state.update({
-          f"{prefix}.{i}.mlp.gate.weight": w 
-          for i, w in enumerate(self._to_mlp_gate(moe['gate']['kernel']))
-      })
-      del moe['gate']
-      gc.collect()
-      _log_mem_stats("converter:moe_post_gate")
+      if self.use_ep:
+        logging.info("_convert_moe: generating unfused expert weights for EP...")
+        wi_0 = moe['wi_0']
+        wi_1 = moe['wi_1']
+        wo = moe['wo']
+        for i in range(self.num_layers):
+          self.vllm_state.update({
+            f"{prefix}.{i}.mlp.experts.kernel_gating_EDF": jnp.transpose(wi_0[:, i, :, :], (0, 1, 2)),
+            f"{prefix}.{i}.mlp.experts.kernel_up_proj_EDF": jnp.transpose(wi_1[:, i, :, :], (0, 1, 2)),
+            f"{prefix}.{i}.mlp.experts.kernel_down_proj_EFD": wo[:, i, :, :],
+          })
+        del wi_0, wi_1, wo
+      else:
+        logging.info("_convert_moe: gate weights...")
+        self.vllm_state.update({
+            f"{prefix}.{i}.mlp.gate.weight": w 
+            for i, w in enumerate(self._to_mlp_gate(moe['gate']['kernel']))
+        })
+        del moe['gate']
+        gc.collect()
+        _log_mem_stats("converter:moe_post_gate")
 
-      logging.info("_convert_moe: expert down (w2) weights...")
-      self.vllm_state.update({
-          f"{prefix}.{i}.mlp.experts.w2_weight": w 
-          for i, w in enumerate(self._to_mlp_expert_down(moe['wo']))
-      })
-      del moe['wo']
-      gc.collect()
-      _log_mem_stats("converter:moe_post_w2")
+        logging.info("_convert_moe: expert down (w2) weights...")
+        self.vllm_state.update({
+            f"{prefix}.{i}.mlp.experts.w2_weight": w 
+            for i, w in enumerate(self._to_mlp_expert_down(moe['wo']))
+        })
+        del moe['wo']
+        gc.collect()
+        _log_mem_stats("converter:moe_post_w2")
 
-      logging.info("_convert_moe: expert gate+up (w13) weights (fuse_all jit+vmap)...")
-      self._to_mlp_expert_gate_up(
-          moe['wi_0'], moe['wi_1'], 
-          self.num_layers, prefix, 'mlp.experts.w13_weight'
-      )
-      del moe['wi_0'], moe['wi_1']
+        logging.info("_convert_moe: expert gate+up (w13) weights (fuse_all jit+vmap)...")
+        self._to_mlp_expert_gate_up(
+            moe['wi_0'], moe['wi_1'], 
+            self.num_layers, prefix, 'mlp.experts.w13_weight'
+        )
+        del moe['wi_0'], moe['wi_1']
+
       del moe
       logging.info("_convert_moe: done")
       gc.collect()
@@ -334,15 +374,12 @@ class MaxTextToVLLMConverter:
         head_dim = q.shape[3]
         l, d_model = q.shape[0], q.shape[1]
 
-        kv_per_tp = num_kv_heads // tp
-        q_per_tp = num_q_heads // tp
-
-        q_by_tp = q.reshape(l, d_model, tp, q_per_tp, head_dim)
-        k_by_tp = k.reshape(l, d_model, tp, kv_per_tp, head_dim)
-        v_by_tp = v.reshape(l, d_model, tp, kv_per_tp, head_dim)
-
-        qkv_by_tp = jnp.concatenate([q_by_tp, k_by_tp, v_by_tp], axis=3)
-        qkv_flat = qkv_by_tp.reshape(l, d_model, -1)
+        # vLLM QKVParallelLinear logical layout: [Q_all, K_all, V_all].
+        # TP sharding is applied externally via _get_reshard_fn — don't pre-interleave.
+        q_flat = q.reshape(l, d_model, num_q_heads * head_dim)
+        k_flat = k.reshape(l, d_model, num_kv_heads * head_dim)
+        v_flat = v.reshape(l, d_model, num_kv_heads * head_dim)
+        qkv_flat = jnp.concatenate([q_flat, k_flat, v_flat], axis=2)
         qkv_proj = jnp.transpose(qkv_flat, (0, 2, 1))
 
         o = jnp.transpose(attn['out']['kernel'], (1, 3, 0, 2))
@@ -374,6 +411,230 @@ class MaxTextToVLLMConverter:
       # So for each layer, do param[i]: (E, Inter, Hidden) -> (E, Hidden, Inter)
       param = jnp.transpose(param, (0, 1, 3, 2))
       return self._unstack_layer(param)
+
+    # --- 2. Streaming API (memory-efficient path for production) ---
+
+    @staticmethod
+    @functools.lru_cache(maxsize=8)
+    def _make_attn_compute_single(tp: int):
+      """Return a JIT-compiled attn converter for a given TP degree."""
+      @jax.jit
+      def _compute(q, k, v, o, q_norm, k_norm):
+        num_q_heads = q.shape[1]
+        num_kv_heads = k.shape[1]
+        head_dim = q.shape[2]
+        d_model = q.shape[0]
+
+        # vLLM QKVParallelLinear logical layout: [Q_all, K_all, V_all].
+        # TP sharding is applied externally via _get_reshard_fn — don't pre-interleave.
+        q_flat = q.reshape(d_model, num_q_heads * head_dim)
+        k_flat = k.reshape(d_model, num_kv_heads * head_dim)
+        v_flat = v.reshape(d_model, num_kv_heads * head_dim)
+        qkv_flat = jnp.concatenate([q_flat, k_flat, v_flat], axis=1)
+        qkv_proj = jnp.transpose(qkv_flat)
+
+        if o.ndim == 2:
+          o_proj = jnp.transpose(o)
+        else:
+          o_proj = jnp.transpose(o, (2, 0, 1)).reshape(d_model, -1)
+
+        return {
+            "self_attn.qkv_proj.weight": qkv_proj,
+            "self_attn.o_proj.weight": o_proj,
+            "self_attn.q_norm.weight": q_norm,
+            "self_attn.k_norm.weight": k_norm
+        }
+
+      return _compute
+
+    def convert_streaming(self, model_state: dict):
+      """Yield (key, array) pairs without ever accumulating the full vllm_state."""
+      yield from self._stream_global(model_state)
+      yield from self._stream_attn(model_state)
+      yield from self._stream_moe(model_state)
+
+    def convert_streaming_per_layer(self, params: dict):
+      """Yield dictionaries of weights (per layer) to minimize program loading OOM."""
+      # 1. Global weights
+      global_dict = {}
+      for key, arr in self._stream_global(params):
+        global_dict[key] = arr
+      yield -1, global_dict
+      
+      # 2. Per-layer weights
+      prefix = "vllm_model.model.layers"
+      moe = params['base']['decoder']['layers']['moe_block']
+      attn = params['base']['decoder']['layers']['self_attention']
+      pre_ln = params['base']['decoder']['layers']['pre_self_attention_layer_norm']['scale']
+      post_ln = params['base']['decoder']['layers']['post_self_attention_layer_norm']['scale']
+      
+      tp = min(self.vllm_tp, self.config.base_num_kv_heads)
+      _attn_compute = self._make_attn_compute_single(tp)
+      _fuse_chunk = self._make_fuse_chunk(self.vllm_tp, 1)
+
+      # Unstack continuous weight arrays to free original large buffers
+      q_list = jnp.unstack(attn['query']['kernel'][...], axis=1)
+      k_list = jnp.unstack(attn['key']['kernel'][...], axis=1)
+      v_list = jnp.unstack(attn['value']['kernel'][...], axis=1)
+      o_list = jnp.unstack(attn['out']['kernel'][...], axis=1)
+      q_norm_list = jnp.unstack(attn['query_norm']['scale'][...], axis=1)
+      k_norm_list = jnp.unstack(attn['key_norm']['scale'][...], axis=1)
+
+      pre_ln_list = jnp.unstack(pre_ln[...], axis=1)
+      post_ln_list = jnp.unstack(post_ln[...], axis=1)
+
+      if self.use_ep:
+        wi_0_list = jnp.unstack(moe['wi_0'][...], axis=1)
+        wi_1_list = jnp.unstack(moe['wi_1'][...], axis=1)
+        wo_list = jnp.unstack(moe['wo'][...], axis=1)
+      else:
+        gate_list = jnp.unstack(moe['gate']['kernel'][...], axis=1)
+        wo_list = jnp.unstack(moe['wo'][...], axis=1)
+        wi_0_list = jnp.unstack(moe['wi_0'][...], axis=1)
+        wi_1_list = jnp.unstack(moe['wi_1'][...], axis=1)
+
+      gc.collect()
+
+      for i in range(self.num_layers):
+        logging.info(f"[STREAMING DEBUG] Slicing and converting layer {i}/{self.num_layers}")
+        # 1. Attention weights
+        attn_dict = {}
+        q_i = q_list[i]
+        k_i = k_list[i]
+        v_i = v_list[i]
+        o_i = o_list[i]
+        q_norm_i = q_norm_list[i]
+        k_norm_i = k_norm_list[i]
+        
+        converted_attn = _attn_compute(q_i, k_i, v_i, o_i, q_norm_i, k_norm_i)
+        
+        pre_ln_i = pre_ln_list[i]
+        post_ln_i = post_ln_list[i]
+        
+        attn_dict[f'{prefix}.{i}.input_layernorm.weight'] = pre_ln_i
+        attn_dict[f'{prefix}.{i}.post_attention_layernorm.weight'] = post_ln_i
+        
+        for suffix, arr in converted_attn.items():
+          attn_dict[f'{prefix}.{i}.{suffix}'] = arr
+          
+        yield i, attn_dict
+
+        # Cleanup attention arrays
+        del attn_dict, converted_attn, q_i, k_i, v_i, o_i, q_norm_i, k_norm_i, pre_ln_i, post_ln_i
+        gc.collect()
+        
+        # 2. MoE weights
+        moe_dict = {}
+        if self.use_ep:
+          wi_0_i = wi_0_list[i]
+          wi_1_i = wi_1_list[i]
+          wo_i = wo_list[i]
+          moe_dict[f"{prefix}.{i}.mlp.experts.kernel_gating_EDF"] = jnp.transpose(wi_0_i, (0, 1, 2))
+          moe_dict[f"{prefix}.{i}.mlp.experts.kernel_up_proj_EDF"] = jnp.transpose(wi_1_i, (0, 1, 2))
+          moe_dict[f"{prefix}.{i}.mlp.experts.kernel_down_proj_EFD"] = wo_i
+          yield i, moe_dict
+
+          del wi_0_i, wi_1_i, wo_i
+        else:
+          gate_i = gate_list[i]
+          moe_dict[f"{prefix}.{i}.mlp.gate.weight"] = jnp.transpose(gate_i, (1, 0))
+
+          w2_i = wo_list[i]
+          moe_dict[f"{prefix}.{i}.mlp.experts.w2_weight"] = w2_i
+
+          wi_0_i = wi_0_list[i]
+          wi_1_i = wi_1_list[i]
+          fused = _fuse_chunk(jnp.expand_dims(wi_0_i, axis=1), jnp.expand_dims(wi_1_i, axis=1))
+          moe_dict[f"{prefix}.{i}.mlp.experts.w13_weight"] = jnp.transpose(jnp.unstack(fused, axis=0)[0], (0, 2, 1))
+          yield i, moe_dict
+
+          del gate_i, w2_i, wi_0_i, wi_1_i, fused
+
+        del moe_dict
+        gc.collect()
+
+
+    def _stream_global(self, params):
+      yield "vllm_model.model.embed_tokens.weight", jnp.array(
+          params['base']['token_embedder']['embedding'][...])
+      yield "vllm_model.model.norm.weight", jnp.array(
+          params['base']['decoder']['decoder_norm']['scale'][...])
+      yield "vllm_model.lm_head.weight", self._transpose_2d(
+          params['base']['decoder']['logits_dense']['kernel'][...])
+
+    def _stream_attn(self, params):
+      pre_ln = self._transpose_unstack(
+          params['base']['decoder']['layers']['pre_self_attention_layer_norm']['scale'][...])
+      post_ln = self._transpose_unstack(
+          params['base']['decoder']['layers']['post_self_attention_layer_norm']['scale'][...])
+      attn = params['base']['decoder']['layers']['self_attention']
+      self_attn = self._to_attn(attn)
+      for i in range(self.num_layers):
+        yield f'vllm_model.model.layers.{i}.input_layernorm.weight', pre_ln[i]
+        yield f'vllm_model.model.layers.{i}.post_attention_layernorm.weight', post_ln[i]
+        for suffix, layers in self_attn.items():
+          yield f'vllm_model.model.layers.{i}.{suffix}', layers[i]
+      del pre_ln, post_ln, self_attn
+      gc.collect()
+
+    def _stream_moe(self, params, chunk_size: int = 1):
+      prefix = "vllm_model.model.layers"
+      moe = params['base']['decoder']['layers']['moe_block']
+
+      for i in range(self.num_layers):
+        if self.use_ep:
+          wi_0_i = moe['wi_0'][...][:, i, :, :]
+          wi_1_i = moe['wi_1'][...][:, i, :, :]
+          wo_i = moe['wo'][...][:, i, :, :]
+          yield f"{prefix}.{i}.mlp.experts.kernel_gating_EDF", jnp.transpose(wi_0_i, (0, 1, 2))
+          yield f"{prefix}.{i}.mlp.experts.kernel_up_proj_EDF", jnp.transpose(wi_1_i, (0, 1, 2))
+          yield f"{prefix}.{i}.mlp.experts.kernel_down_proj_EFD", wo_i
+          del wi_0_i, wi_1_i, wo_i
+        else:
+          gate_i = moe['gate']['kernel'][...][:, i, :]
+          yield f"{prefix}.{i}.mlp.gate.weight", jnp.transpose(gate_i, (1, 0))
+
+          w2_i = moe['wo'][...][:, i, :, :]
+          yield f"{prefix}.{i}.mlp.experts.w2_weight", w2_i
+
+          wi_0 = jax.lax.slice_in_dim(moe['wi_0'][...], i, i + 1, axis=1)
+          wi_1 = jax.lax.slice_in_dim(moe['wi_1'][...], i, i + 1, axis=1)
+          fused = self._make_fuse_chunk(self.vllm_tp, 1)(wi_0, wi_1)
+          yield f"{prefix}.{i}.mlp.experts.w13_weight", jnp.transpose(jnp.unstack(fused, axis=0)[0], (0, 2, 1))
+          del gate_i, w2_i, wi_0, wi_1, fused
+        gc.collect()
+
+    @staticmethod
+    @functools.lru_cache(maxsize=16)
+    def _make_fuse_chunk(tp: int, chunk_L: int):
+      """JIT-compiled w13 fuser keyed by (tp, chunk_L) for per-chunk caching."""
+      @jax.jit
+      def _fuse(wi_0, wi_1):
+        wi_0 = jnp.transpose(wi_0, (1, 0, 2, 3))
+        wi_1 = jnp.transpose(wi_1, (1, 0, 2, 3))
+
+        def _fuse_single(w0, w1):
+          w0 = jnp.transpose(w0, (0, 2, 1))
+          w1 = jnp.transpose(w1, (0, 2, 1))
+          e, d_inner, d_model = w0.shape
+          c = d_inner // tp
+          gate_c = w0.reshape(e, tp, c, d_model)
+          up_c = w1.reshape(e, tp, c, d_model)
+                    
+          # Pad local chunk dimension to multiple of 128 to match tpu-inference expectation
+          padded_c = (c + 127) // 128 * 128
+          pad_amount = padded_c - c
+          gate_c = jnp.pad(gate_c, ((0, 0), (0, 0), (0, pad_amount), (0, 0)))
+          up_c = jnp.pad(up_c, ((0, 0), (0, 0), (0, pad_amount), (0, 0)))
+          
+          combined = jnp.stack([gate_c, up_c], axis=2)
+          return combined.reshape(e, 2 * tp * padded_c, d_model)
+
+        return jax.vmap(_fuse_single)(wi_0, wi_1)
+
+      return _fuse
+
+    # --- 3. Original bulk-convert helpers (kept for bench_weight_sync main()) ---
 
     def _to_mlp_expert_gate_up(self, wi_0, wi_1, num_layers, layer_key_prefix, layer_key_suffix):
       # Process all layers in one JIT call using vmap to avoid per-layer dispatch
@@ -460,29 +721,69 @@ def save_dict_to_file(dict, filename):
 
 
 def main():
-  print(f"JAX devices: {jax.devices()}")  
+  pathwaysutils.initialize()
+  all_devices = jax.devices()
+  print(f"JAX devices: {all_devices}")  
   _setup_jax_compilation_cache()
   _setup_vllm()
   _clean_device_memory()
 
   FLAGS(sys.argv)
 
+  if _SAVE_WEIGHTS.value and _GCS_BUCKET.value:
+    logging.info("Testing GCS write permission early...")
+    dummy_file = "/tmp/permission_test.txt"
+    try:
+      with open(dummy_file, "w") as f:
+        f.write("test")
+      gcs_path = os.path.join(_GCS_BUCKET.value, "permission_test.txt")
+      cmd = f"gsutil cp {dummy_file} {gcs_path}"
+      ret = os.system(cmd)
+      if ret != 0:
+        logging.error(f"GCS write permission check failed for bucket {_GCS_BUCKET.value}. Exit code: {ret}")
+        sys.exit(1)
+      else:
+        logging.info("GCS write permission check passed. Cleaning up test file.")
+        os.system(f"gsutil rm {gcs_path}")
+    except Exception as e:
+      logging.error(f"Error checking GCS permission: {e}")
+      sys.exit(1)
+    finally:
+      if os.path.exists(dummy_file):
+        os.remove(dummy_file)
+
+  # Split devices for MaxText and vLLM by slice_index
+  devices_by_slice = {}
+  for d in all_devices:
+      idx = getattr(d, 'slice_index', 0)
+      if idx not in devices_by_slice:
+          devices_by_slice[idx] = []
+      devices_by_slice[idx].append(d)
+  
+  slice_indices = sorted(devices_by_slice.keys())
+  print(f"Found slices: {slice_indices}")
+  
+  if len(slice_indices) >= 2:
+      maxtext_devices = devices_by_slice[slice_indices[0]]
+      vllm_devices = devices_by_slice[slice_indices[1]]
+  else:
+      # Fallback if less than 2 slices, split in half
+      half = len(all_devices) // 2
+      maxtext_devices = all_devices[:half]
+      vllm_devices = all_devices[half:]
+      
+  print(f"MaxText devices: {len(maxtext_devices)}")
+  print(f"vLLM devices: {len(vllm_devices)}")
+
   # Load maxtext model
   print("="*80)
   print("Loading MaxText model...")
   print("="*80)
-  # path1 = "/home/wyzhang_google_com/mnt/rl/maxtext/src/maxtext/configs/base.yml"
-  path1 = "/home/hengtaoguo_google_com/projects/maxtext/src/maxtext/configs/base.yml"
-  path2 = os.path.join(os.path.expanduser("~"), "mnt/rl/maxtext/src/maxtext/configs/base.yml")
-  if os.path.exists(path1):
-    base_yaml_path = path1
-  elif os.path.exists(path2):
-    base_yaml_path = path2
-  else:
-    raise FileNotFoundError(
-        f"Could not find base.yml in the expected locations: {path1} or {path2}"
-    )
-  config, model, mesh = _load_maxtext_model(base_yaml_path)
+  base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+  base_yaml_path = os.path.join(base_dir, "configs", "post_train", "rl.yml")
+  if not os.path.exists(base_yaml_path):
+    raise FileNotFoundError(f"Could not find base.yml at expected location: {base_yaml_path}")
+  config, model, mesh = _load_maxtext_model(base_yaml_path, devices=maxtext_devices)
   print(f"{GREEN}MaxText model loaded successfully{RESET}")
   print(f"Model: {config.model_name}")
   print(f"Mesh: {mesh}")
@@ -492,50 +793,39 @@ def main():
   print("Converting weights to VLLM format")
   print("="*80)
   model_state = nnx.state(model)
-  for path, leaf in jax.tree_util.tree_flatten_with_path(model_state)[0]:
-    if hasattr(leaf, 'shape') and hasattr(leaf, 'sharding'):
-      path_str = jax.tree_util.keystr(path)
-      logging.info(f"Name: {path_str}, shape: {leaf.shape}")
-      logging.info(f"\tSharding: {leaf.sharding}")
-  
-  converter = MaxTextToVLLMConverter(config, mesh)
-  with timer("Overall Conversion "):
-    vllm_state = converter.convert(model_state)
-  del model_state
+  del model
   gc.collect()
-  # save_dict_to_file(vllm_state, "vllm_state_shapes.txt")
-
-  # Load vLLM model and run generation test
+  
   print("="*80)
   print("Loading vLLM model for generation test...")
   print("="*80)
+  
+  vllm_device_indexes = [d.id for d in vllm_devices]
+  rollout_ep = int(os.environ.get("rollout_expert_parallelism", "1"))
+  
   llm = LLM(
-    "Qwen/Qwen3-30B-A3B",
+    _TOKENIZER_PATH.value,
     max_model_len=16,
-    tensor_parallel_size=4,
-    gpu_memory_utilization=0.5,
-    # load_format="dummy",
+    data_parallel_size=16,
+    tensor_parallel_size=_TP_SIZE.value,
+    gpu_memory_utilization=0.9,
+    additional_config={
+        "sharding": {
+            "sharding_strategy": {
+                "device_indexes": vllm_device_indexes,
+                "expert_parallelism": rollout_ep,
+            }
+        }
+    }
   )
+  
   print("\n" + "="*80)
   llm_state = llm.llm_engine.model_executor.driver_worker.model_runner.state
-  # save_dict_to_file(llm_state, "llm_state_shapes.txt")
 
-  # Detect once whether MaxText and vLLM meshes share the same physical
-  # devices (single-VM) or are disjoint (multi-host cluster partition).
-  # Same devices → jax.jit with out_shardings lets XLA emit on-device
-  # collectives (fast, ~0.16 s for 30 B).  Disjoint devices → jax.jit
-  # raises "incompatible devices"; fall back to jax.device_put which uses
-  # ICI/DCN for the cross-host transfer without a CPU roundtrip.
-  _any_src = next(iter(vllm_state.values()))
-  _any_src_arr = _any_src.value if hasattr(_any_src, 'value') else _any_src
-  _any_dst = next(iter(llm_state.values()))
-  _same_devices = (
-      frozenset(d.id for d in _any_src_arr.sharding.mesh.devices.flat) ==
-      frozenset(d.id for d in _any_dst.sharding.mesh.devices.flat)
-  )
-  logging.info("Weight sync: same_devices=%s (jit=%s, device_put=%s)",
-               _same_devices, _same_devices, not _same_devices)
+  converter = MaxTextToVLLMConverter(config, mesh)
+  mismatches = 0
 
+  _same_devices = False
   @functools.lru_cache(maxsize=None)
   def _get_reshard_fn(dst_sharding):
     if _same_devices:
@@ -543,14 +833,77 @@ def main():
     else:
       return functools.partial(jax.device_put, device=dst_sharding)
 
-  with timer(f"Assigning {len(vllm_state)} weights to vLLM model"):
-    for key, weight in vllm_state.items():
-      weight_array = weight.value if hasattr(weight, 'value') else weight
+  print("="*80)
+  print("Comparing and transferring weights layer by layer...")
+  for i, layer_dict in converter.convert_streaming_per_layer(model_state):
+    for key, stream_w in layer_dict.items():
+      if key not in llm_state:
+        print(f"Missing key in real vLLM: {key}")
+        mismatches += 1
+        continue
+
+      llm_w = llm_state[key]
+      llm_w = llm_w.value if hasattr(llm_w, 'value') else llm_w
+      stream_w = stream_w.value if hasattr(stream_w, 'value') else stream_w
+
+      if llm_w.shape != stream_w.shape:
+        print(f"Shape mismatch for {key}: vLLM={llm_w.shape}, streaming={stream_w.shape}")
+        mismatches += 1
+        continue
+
       dst_sharding = llm_state[key].sharding
-      llm_state[key] = _get_reshard_fn(dst_sharding)(weight_array)
+      stream_w_resharded = _get_reshard_fn(dst_sharding)(stream_w)
+
+      is_target = (i == _TARGET_LAYER.value) or (i == -1 and _TARGET_LAYER.value < 0)
+      if jax.process_index() == 0 and _SAVE_WEIGHTS.value and is_target:
+        local_dir = "/tmp/saved_weights"
+        os.makedirs(local_dir, exist_ok=True)
+
+        key_clean = key.replace(".", "_")
+        try:
+          llm_w_np = jax.device_get(llm_w)
+          stream_w_np = jax.device_get(stream_w)
+
+          np.save(os.path.join(local_dir, f"vllm_{key_clean}.npy"), llm_w_np)
+          np.save(os.path.join(local_dir, f"maxtext_{key_clean}.npy"), stream_w_np)
+          logging.info(f"Saved weights for {key} to {local_dir}")
+        except Exception as e:
+          logging.error(f"Error saving weights for {key}: {e}")
+
+      if is_target:
+        try:
+          max_diff = jnp.max(jnp.abs(llm_w - stream_w_resharded))
+          is_close = bool(max_diff < 1e-5)
+          if not is_close:
+            print(f"Value mismatch for {key} (max diff: {max_diff})")
+            mismatches += 1
+        except Exception as e:
+          print(f"Error comparing {key}: {e}")
+          mismatches += 1
+
+      llm_state[key] = stream_w_resharded
+    
+    del layer_dict
+    gc.collect()
+
+  print(f"Total mismatches found: {mismatches}")
+  print("="*80)
+
+  if jax.process_index() == 0 and _SAVE_WEIGHTS.value and _GCS_BUCKET.value:
+    local_dir = "/tmp/saved_weights"
+    gcs_path = os.path.join(_GCS_BUCKET.value, "saved_weights")
+    logging.info(f"Uploading saved weights from {local_dir} to {gcs_path}...")
+    cmd = f"gsutil -m cp -r {local_dir}/* {gcs_path}/"
+    ret = os.system(cmd)
+    if ret == 0:
+      logging.info("Upload successful.")
+    else:
+      logging.error(f"Upload failed with exit code {ret}.")
+
+
       # llm_state[key] = jax.device_put(np.asarray(weight_array), dst_sharding)  # when mesh mismatch, fallback to CPU
 
-  sampling_params = SamplingParams(temperature=0.0, max_tokens=10)
+  sampling_params = SamplingParams(temperature=0.0, max_tokens=30)
   print("\n" + "="*80)
   print("Generation test after weight transfer:")
   with timer("Generation"):
