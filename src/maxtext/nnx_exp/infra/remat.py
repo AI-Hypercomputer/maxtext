@@ -54,9 +54,10 @@ def _require_activation_offload_backend():
 
 
 def apply_remat(model, policy: RematPolicy = "full"):
-    remat_policy = _resolve_policy(policy)
-    for i in range(len(model.layers)):
-        model.layers[i] = _make_remat(model.layers[i], remat_policy)
+    new_layers = []
+    for layer in model.layers.iter_children():
+        new_layers.append(_make_remat(layer, remat_policy))
+    model.layers = nnx.Sequential(new_layers)
 
 
 def maybe_apply_remat(model, policy: RematPolicy | None = None):
