@@ -33,9 +33,10 @@ from typing import Sequence
 
 import jax
 import jax.numpy as jnp
-from maxtext.kernels import attention, sort_activations
-
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
+
+from maxtext.kernels import attention, sort_activations, megablox
+from maxtext.layers import quantizations
 
 
 def scheduling_group(group_id) -> contextlib.AbstractContextManager[None]:
@@ -121,7 +122,7 @@ def insert_layer_ws_grad(all_ws_grad, ws_grad, layer_idx, layer_axis):
   )
 
 
-def gather_weights(weights, mesh):
+def gather_weights(weights, mesh, use_fp8):
   """all-gathers FSDP sharded weights."""
 
   def fn(weights):
@@ -166,9 +167,16 @@ def gather_weights(weights, mesh):
     wkv_b = jax.lax.all_gather(wkv_b, axis_name="fsdp", tiled=True, to="reduced")
     out = jax.lax.all_gather(out, axis_name="fsdp", tiled=True, axis=2, to="reduced")
     gate = jax.lax.all_gather(gate, axis_name="fsdp", tiled=True, to="reduced")
+
+    # if use_fp8:
+    #   # TODO(jesselu): Implement fp8 gmm weight AGs here.
+    #   # similar logic to kernels.megablox.op._gmm_fwd QAG
+    #   raise NotImplementedError("fp8 gmm weight AGs are not implemented yet.")
+    # else:
     routed_wi_0 = jax.lax.all_gather(routed_wi_0, axis_name="fsdp", tiled=True, to="reduced")
     routed_wi_1 = jax.lax.all_gather(routed_wi_1, axis_name="fsdp", tiled=True, to="reduced")
     routed_wo = jax.lax.all_gather(routed_wo, axis_name="fsdp", tiled=True, to="reduced")
+
     shared_wi_0 = jax.lax.all_gather(shared_wi_0, axis_name="fsdp", tiled=True, to="reduced")
     shared_wi_1 = jax.lax.all_gather(shared_wi_1, axis_name="fsdp", tiled=True, to="reduced")
     shared_wo = jax.lax.all_gather(shared_wo, axis_name="fsdp", tiled=True, axis=1, to="reduced")
@@ -282,6 +290,7 @@ def reduce_scatter_ws_grad(ws_grad, mesh):
     wkv_b = jax.lax.psum_scatter(wkv_b, axis_name="fsdp", tiled=True)
     out = jax.lax.psum_scatter(out, axis_name="fsdp", tiled=True, scatter_dimension=2)
     gate = jax.lax.psum_scatter(gate, axis_name="fsdp", tiled=True)
+    # NOTE: we do not use fp8 for gmm weight gradient RS, due to quality degradation
     routed_wi_0 = jax.lax.psum_scatter(routed_wi_0, axis_name="fsdp", tiled=True)
     routed_wi_1 = jax.lax.psum_scatter(routed_wi_1, axis_name="fsdp", tiled=True)
     routed_wo = jax.lax.psum_scatter(routed_wo, axis_name="fsdp", tiled=True)
@@ -688,7 +697,11 @@ def scan_batch_split_layers(
       inputs, ws = carry
       # Prefetch weights for next layer.
       with scheduling_group(group_id=group_id):
-        next_ws = gather_weights(extract_layer_weights(all_weights, layer_idx + 1, cfg.param_scan_axis), mesh)
+        next_ws = gather_weights(
+            extract_layer_weights(all_weights, layer_idx + 1, cfg.param_scan_axis),
+            mesh,
+            use_fp8=cfg.use_fp8_for_batch_split,
+        )
       # Combine for previous layer's second microbatch.
       moe_inputs, routed_expert_out, shared_expert_out, selected_experts = inputs[1]
       inputs[1], unroute_res = unroute_ubatch_shard_mapped(
@@ -722,9 +735,13 @@ def scan_batch_split_layers(
 
     # Prologue: do first two layers and prefetch weights for third layer.
     with scheduling_group(group_id=40):
-      first_ws = gather_weights(extract_layer_weights(all_weights, 0, cfg.param_scan_axis), mesh)
+      first_ws = gather_weights(
+          extract_layer_weights(all_weights, 0, cfg.param_scan_axis), mesh, use_fp8=cfg.use_fp8_for_batch_split
+      )
     with scheduling_group(group_id=41):
-      second_ws = gather_weights(extract_layer_weights(all_weights, 1, cfg.param_scan_axis), mesh)
+      second_ws = gather_weights(
+          extract_layer_weights(all_weights, 1, cfg.param_scan_axis), mesh, use_fp8=cfg.use_fp8_for_batch_split
+      )
     second_inputs, first_res = batch_split_schedule(
         inputs,
         first_ws,
@@ -824,7 +841,11 @@ def scan_batch_split_layers(
       res, unroute_res, layer_idx = res_and_layer_idx
       # Prefetch weights and post-scatter weight grads.
       with scheduling_group(group_id=group_id):
-        prev_ws = gather_weights(extract_layer_weights(all_weights, layer_idx - 1, cfg.param_scan_axis), mesh)
+        prev_ws = gather_weights(
+            extract_layer_weights(all_weights, layer_idx - 1, cfg.param_scan_axis),
+            mesh,
+            use_fp8=cfg.use_fp8_for_batch_split,
+        )
         next_ws_grad = reduce_scatter_ws_grad(next_ws_grad, mesh)
       next_next_ws_grad = all_reduce_ws_grad_dcn(next_next_ws_grad, mesh)
       all_layer_ws_grad = insert_layer_ws_grad(all_layer_ws_grad, next_next_ws_grad, layer_idx + 2, cfg.param_scan_axis)
@@ -858,7 +879,11 @@ def scan_batch_split_layers(
 
     # Prologue: do computation for last two layers and prefetch weights.
     with scheduling_group(group_id=50):
-      prev_ws = gather_weights(extract_layer_weights(all_weights, num_layers - 2, cfg.param_scan_axis), mesh)
+      prev_ws = gather_weights(
+          extract_layer_weights(all_weights, num_layers - 2, cfg.param_scan_axis),
+          mesh,
+          use_fp8=cfg.use_fp8_for_batch_split,
+      )
     g[1] = unroute_ubatch_remat_and_bwd_shard_mapped(
         epilogue_unroute_res["selected_experts"],
         g[1],
@@ -887,7 +912,11 @@ def scan_batch_split_layers(
         activation_pspec=activation_pspec,
     )
     with scheduling_group(group_id=51):
-      prev_prev_ws = gather_weights(extract_layer_weights(all_weights, num_layers - 3, cfg.param_scan_axis), mesh)
+      prev_prev_ws = gather_weights(
+          extract_layer_weights(all_weights, num_layers - 3, cfg.param_scan_axis),
+          mesh,
+          use_fp8=cfg.use_fp8_for_batch_split,
+      )
       ws_grad = reduce_scatter_ws_grad(ws_grad, mesh)
     # Get residuals from host.
     for residual_name in ("mlpwi_0", "mlpwi_1", "attn_out", "layer_inputs"):
@@ -1004,6 +1033,7 @@ def batch_split_schedule(
       pairwise_swap_and_negate_mask=pairwise_swap_and_negate_mask,
       dtype=cfg.dtype,
       activation_pspec=activation_pspec,
+      use_fp8=cfg.use_fp8_for_batch_split,
   )
   xs, moe_res = moe(
       xs,
@@ -1018,6 +1048,7 @@ def batch_split_schedule(
       normalization_layer_epsilon=cfg.normalization_layer_epsilon,
       dtype=cfg.dtype,
       activation_pspec=activation_pspec,
+      use_fp8=cfg.use_fp8_for_batch_split,
   )
   return xs, {"layer_inputs": inputs, **attn_res, **moe_res}
 
@@ -1054,6 +1085,7 @@ def batch_split_schedule_bwd(
       pairwise_swap_and_negate_mask=pairwise_swap_and_negate_mask,
       dtype=cfg.dtype,
       activation_pspec=activation_pspec,
+      use_fp8=cfg.use_fp8_for_batch_split,
   )
   residuals["mla_out"] = mla_out
   attn_out_grad, moe_ws_grad = moe_bwd(
@@ -1070,6 +1102,7 @@ def batch_split_schedule_bwd(
       normalization_layer_epsilon=cfg.normalization_layer_epsilon,
       dtype=cfg.dtype,
       activation_pspec=activation_pspec,
+      use_fp8=cfg.use_fp8_for_batch_split,
   )
   inputs_grad, norm_mla_ws_grad = mla_with_norms_bwd(attn_out_grad, mla_bwds)
   return inputs_grad, (norm_mla_ws_grad, moe_ws_grad)
@@ -1089,8 +1122,26 @@ def staggered_call(fn, xs):
   return xs, jax.tree_util.tree_map(lambda *rs: list(rs), *res_dicts)
 
 
-def dot(x, y, axes=1):
-  return jnp.tensordot(x, y, axes=axes)
+def dot(x, y, use_fp8, axes=1):
+  # TODO(shuningjin): Add support for fp8 matmul here.
+  if use_fp8:
+    quant = quantizations.QwixQuantization(
+        act_calibration_method="fixed,-224,224",
+        weight_calibration_method="fixed,-224,224",
+        bwd_calibration_method="absmax",
+    )
+    # Convert axes to jax.lax.dot_general dimension_numbers
+    if isinstance(axes, int):
+      x_contract = tuple(range(x.ndim - axes, x.ndim))
+      y_contract = tuple(range(axes))
+    else:
+      x_contract, y_contract = axes
+    dimension_numbers = ((x_contract, y_contract), ((), ()))
+    # Instantiate and call qwix dot_general
+    custom_dot = quant.dot_general_cls()()
+    return custom_dot(lhs=x, rhs=y, dimension_numbers=dimension_numbers)
+  else:
+    return jnp.tensordot(x, y, axes=axes)
 
 
 def mla_with_norms(
@@ -1112,6 +1163,7 @@ def mla_with_norms(
     pairwise_swap_and_negate_mask,
     dtype,
     activation_pspec,
+    use_fp8,
 ):
   """Performs MLA with pre-normalization."""
   pre_attn_scale, attn_ws = weights
@@ -1144,6 +1196,7 @@ def mla_with_norms(
         splash_kernel=splash_kernel,
         mesh=mesh,
         activation_pspec=activation_pspec,
+        use_fp8=use_fp8,
     )
     # Prevent fusion with MoE ops, especially the RMS norm.
     # Unfortunately, this seems to be needed to avoid slight numerical differences
@@ -1172,6 +1225,7 @@ def mla_with_norms_remat(
     pairwise_swap_and_negate_mask,
     dtype,
     activation_pspec,
+    use_fp8,
 ):
   """Performs remat for the mla_with_norms function."""
   xs = residuals.pop("layer_inputs")
@@ -1208,6 +1262,7 @@ def mla_with_norms_remat(
         splash_kernel=splash_kernel,
         mesh=mesh,
         activation_pspec=activation_pspec,
+        use_fp8=use_fp8,
     )
     out = x + mla_out
     # Prevent fusion with MoE ops, especially the RMS norm.
@@ -1262,6 +1317,7 @@ def mla(
     dtype,
     mesh,
     activation_pspec,
+    use_fp8,
 ):
   """Performs MLA."""
   (
@@ -1290,6 +1346,7 @@ def mla(
       mscale=mscale,
       mesh=mesh,
       activation_pspec=activation_pspec,
+      use_fp8=use_fp8,
   )
   key, value = kv_projection(
       inputs,
@@ -1305,6 +1362,7 @@ def mla(
       num_query_heads=num_query_heads,
       mesh=mesh,
       activation_pspec=activation_pspec,
+      use_fp8=use_fp8,
   )
   attn_out, lse = tpu_flash_attention(
       query,
@@ -1314,7 +1372,7 @@ def mla(
       splash_kernel=splash_kernel,
       activation_pspec=activation_pspec,
   )
-  out = dot(attn_out, out_weights, axes=2)
+  out = dot(attn_out, out_weights, axes=2, use_fp8=use_fp8)
   return out, {"attn_out": attn_out, "lse": lse}
 
 
@@ -1338,6 +1396,7 @@ def mla_remat(
     dtype,
     mesh,
     activation_pspec,
+    use_fp8,
 ):
   """Performs remat for the mla function."""
   inputs, attn_out, lse = residuals
@@ -1364,6 +1423,7 @@ def mla_remat(
           mscale=mscale,
           mesh=mesh,
           activation_pspec=activation_pspec,
+          use_fp8=use_fp8,
       ),
       inputs,
       yarn_freqs,
@@ -1382,6 +1442,7 @@ def mla_remat(
           num_query_heads=num_query_heads,
           mesh=mesh,
           activation_pspec=activation_pspec,
+          use_fp8=use_fp8,
       ),
       inputs,
       yarn_freqs,
@@ -1393,6 +1454,7 @@ def mla_remat(
       functools.partial(
           dot,
           axes=2,
+          use_fp8=use_fp8,
       ),
       attn_out,
       out_weights,
@@ -1459,6 +1521,7 @@ def query_projection(
     mscale,
     mesh,
     activation_pspec,
+    use_fp8,
 ):
   """Performs query projection."""
   # Set softmax scaling.
@@ -1469,7 +1532,7 @@ def query_projection(
     softmax_scale = softmax_scale * m * m
 
   # LoRA path
-  low_rank_q = dot(inputs_q, wq_a_weights)
+  low_rank_q = dot(inputs_q, wq_a_weights, use_fp8=use_fp8)
   low_rank_q = rms_norm(
       low_rank_q,
       q_norm_scale_weights,
@@ -1477,7 +1540,7 @@ def query_projection(
       dtype=dtype,
       out_sharding=jax.sharding.NamedSharding(mesh, activation_pspec),
   )
-  q = dot(low_rank_q, wq_b_weights)
+  q = dot(low_rank_q, wq_b_weights, use_fp8=use_fp8)
 
   # Split into non-positional and rotary parts.
   q_nope, q_pe = jnp.split(q, [qk_nope_head_dim], axis=-1)
@@ -1506,9 +1569,10 @@ def kv_projection(
     num_query_heads,
     mesh,
     activation_pspec,
+    use_fp8,
 ):
   """Performs KV projection."""
-  low_rank = dot(inputs, wkv_a_weights)
+  low_rank = dot(inputs, wkv_a_weights, use_fp8=use_fp8)
   low_rank_main, low_rank_rope = jnp.split(low_rank, [kv_lora_rank], axis=-1)
   low_rank_main = rms_norm(
       low_rank_main,
@@ -1531,12 +1595,13 @@ def kv_projection(
       wkv_b_weights,
       qk_nope_head_dim=qk_nope_head_dim,
       num_query_heads=num_query_heads,
+      use_fp8=use_fp8,
   )
 
 
-def get_key_value(low_rank_main, key_rope, wkv_b_weights, *, qk_nope_head_dim, num_query_heads):
+def get_key_value(low_rank_main, key_rope, wkv_b_weights, *, qk_nope_head_dim, num_query_heads, use_fp8):
   """Gets key and value from compressed KV latent vector and key rope."""
-  kv_out = dot(low_rank_main, wkv_b_weights)
+  kv_out = dot(low_rank_main, wkv_b_weights, use_fp8=use_fp8)
 
   # Split kv_out into key_nope and value parts.
   key_nope, value = jnp.split(kv_out, [qk_nope_head_dim], axis=-1)
@@ -1646,6 +1711,7 @@ def shared_expert_and_route(
     use_gather_mosaic_kernel,
     normalization_layer_epsilon,
     dtype,
+    use_fp8,
 ):
   """Computes the shared expert and routes the activations."""
   inputs = rms_norm(
@@ -1654,7 +1720,7 @@ def shared_expert_and_route(
       epsilon=normalization_layer_epsilon,
       dtype=dtype,
   )
-  y = shared_expert(inputs, shared_w0, shared_w1, shared_wo)
+  y = shared_expert(inputs, shared_w0, shared_w1, shared_wo, use_fp8=use_fp8)
 
   inputs = jnp.reshape(inputs, (-1, inputs.shape[-1]))
   selected_experts, weights, group_sizes = expert_selection(
@@ -1664,6 +1730,7 @@ def shared_expert_and_route(
       num_experts=num_experts,
       num_experts_per_tok=num_experts_per_tok,
       routed_scaling_factor=routed_scaling_factor,
+      use_fp8=use_fp8,
   )
   x, selected_experts, weights, group_sizes = route(
       inputs,
@@ -1676,8 +1743,12 @@ def shared_expert_and_route(
   return x, y, selected_experts, weights, group_sizes
 
 
-def shared_expert(inputs, shared_w0, shared_w1, shared_wo):
-  return dot(jax.nn.silu(dot(inputs, shared_w0)) * dot(inputs, shared_w1), shared_wo)
+def shared_expert(inputs, shared_w0, shared_w1, shared_wo, use_fp8):
+  return dot(
+      jax.nn.silu(dot(inputs, shared_w0, use_fp8=use_fp8)) * dot(inputs, shared_w1, use_fp8=use_fp8),
+      shared_wo,
+      use_fp8=use_fp8,
+  )
 
 
 def expert_indices_and_weights(
@@ -1704,9 +1775,10 @@ def expert_selection(
     num_experts,
     num_experts_per_tok,
     routed_scaling_factor,
+    use_fp8,
 ):
   """Selects experts for each token and calculates group sizes for each expert."""
-  pre_bias_logits = jax.nn.sigmoid(dot(x, routing_kernel))
+  pre_bias_logits = jax.nn.sigmoid(dot(x, routing_kernel, use_fp8=use_fp8))
   logits = pre_bias_logits + routing_bias
 
   selected_experts, weights = expert_indices_and_weights(
@@ -1820,36 +1892,84 @@ route_impl.defvjp(route_impl_fwd, route_impl_bwd)
 unroute_impl.defvjp(unroute_impl_fwd, unroute_impl_bwd)
 
 
-def compute_gating(x, w0, w1, group_sizes, *, dtype):
+def compute_gating(x, w0, w1, group_sizes, *, dtype, use_fp8, config):
   """Computes the gating GMMs."""
-  layer_w0 = jax.lax.ragged_dot(
-      x,
-      w0,
-      group_sizes=group_sizes,
-      precision=jax.lax.Precision.DEFAULT,
-      preferred_element_type=dtype,
-  )
-  layer_w1 = jax.lax.ragged_dot(
-      x,
-      w1,
-      group_sizes=group_sizes,
-      precision=jax.lax.Precision.DEFAULT,
-      preferred_element_type=dtype,
-  )
+  if use_fp8:
+    wi_tile_size = (
+        config.wi_tile_fwd_batch_seq,
+        config.wi_tile_fwd_embed_dim,
+        config.wi_tile_fwd_mlp_dim,
+        config.wi_tile_dlhs_batch_seq,
+        config.wi_tile_dlhs_embed_dim,
+        config.wi_tile_dlhs_mlp_dim,
+        config.wi_tile_drhs_batch_seq,
+        config.wi_tile_drhs_embed_dim,
+        config.wi_tile_drhs_mlp_dim,
+    )
+    gmm_fn = functools.partial(
+        megablox.gmm,
+        group_sizes=group_sizes,
+        preferred_element_type=dtype,
+        tiling=wi_tile_size,
+        use_qwix_quantization=True,
+        use_tokamax_backend=True,
+        weight_gather_axes=None,  # skip QAG in gmm fwd
+        qwix_rule=quantizations.get_fp8_full_qwix_rule(config),
+    )
+  else:
+    gmm_fn = functools.partial(
+        jax.lax.ragged_dot,
+        group_sizes=group_sizes,
+        precision=jax.lax.Precision.DEFAULT,
+        preferred_element_type=dtype,
+    )
+
+  if config.merge_gating_gmm:
+    w01 = jnp.concatenate([w0, w1], axis=-1)
+    layer_w01 = gmm_fn(x, w01)
+    layer_w0, layer_w1 = jnp.split(layer_w01, 2, axis=-1)
+  else:
+    layer_w0 = gmm_fn(x, w0)
+    layer_w1 = gmm_fn(x, w1)
+
   return layer_w0, layer_w1
 
 
-def compute_linear(layer_w0, layer_w1, wo, group_sizes, weights, *, dtype):
+def compute_linear(layer_w0, layer_w1, wo, group_sizes, weights, *, dtype, use_fp8, config):
   """Combines the outputs of the gating GMMs and computes the final GMM."""
   intermediate_layer = jax.nn.silu(layer_w0) * layer_w1
   intermediate_layer *= weights[:, None]
-  layer_wo = jax.lax.ragged_dot(
-      intermediate_layer,
-      wo,
-      group_sizes=group_sizes,
-      precision=jax.lax.Precision.DEFAULT,
-      preferred_element_type=dtype,
-  )
+  if use_fp8:
+    wo_tile_size = (
+        config.wo_tile_fwd_batch_seq,
+        config.wo_tile_fwd_embed_dim,
+        config.wo_tile_fwd_mlp_dim,
+        config.wo_tile_dlhs_batch_seq,
+        config.wo_tile_dlhs_embed_dim,
+        config.wo_tile_dlhs_mlp_dim,
+        config.wo_tile_drhs_batch_seq,
+        config.wo_tile_drhs_embed_dim,
+        config.wo_tile_drhs_mlp_dim,
+    )
+    layer_wo = megablox.gmm(
+        lhs=intermediate_layer,
+        rhs=wo,
+        group_sizes=group_sizes,
+        preferred_element_type=dtype,
+        tiling=wo_tile_size,
+        use_qwix_quantization=True,
+        use_tokamax_backend=True,
+        weight_gather_axes=None,  # skip QAG in gmm fwd
+        qwix_rule=quantizations.get_fp8_full_qwix_rule(config),
+    )
+  else:
+    layer_wo = jax.lax.ragged_dot(
+        intermediate_layer,
+        wo,
+        group_sizes=group_sizes,
+        precision=jax.lax.Precision.DEFAULT,
+        preferred_element_type=dtype,
+    )
   return layer_wo
 
 
@@ -1864,6 +1984,8 @@ def route_compute_unroute(
     use_gather_mosaic_kernel,
     normalization_layer_epsilon,
     dtype,
+    use_fp8,
+    config,
 ):
   """Routes, processes, and unroutes activations."""
   target_length = xs[0].shape[1]
@@ -1890,6 +2012,7 @@ def route_compute_unroute(
         use_gather_mosaic_kernel=use_gather_mosaic_kernel,
         normalization_layer_epsilon=normalization_layer_epsilon,
         dtype=dtype,
+        use_fp8=use_fp8,
     )
     return (inputs, x, y, selected_experts, weights, group_sizes), {}
 
@@ -1907,6 +2030,8 @@ def route_compute_unroute(
         routed_w1,
         group_sizes,
         dtype=dtype,
+        use_fp8=use_fp8,
+        config=config,
     )
     return layer_w0, layer_w1
 
@@ -1919,6 +2044,8 @@ def route_compute_unroute(
         group_sizes,
         weights,
         dtype=dtype,
+        use_fp8=use_fp8,
+        config=config,
     )
     return x
 
@@ -2095,6 +2222,8 @@ def route_compute_unroute_bwd(
     use_gather_mosaic_kernel,
     normalization_layer_epsilon,
     dtype,
+    use_fp8,
+    config,
 ):
   """Performs the backward pass for route_compute_unroute."""
   xs = residuals.pop("mla_out")
@@ -2116,6 +2245,7 @@ def route_compute_unroute_bwd(
             use_gather_mosaic_kernel=use_gather_mosaic_kernel,
             normalization_layer_epsilon=normalization_layer_epsilon,
             dtype=dtype,
+            use_fp8=use_fp8,
         ),
         inputs,
         post_attn_scale,
@@ -2176,6 +2306,8 @@ def route_compute_unroute_bwd(
         functools.partial(
             compute_gating,
             dtype=dtype,
+            use_fp8=use_fp8,
+            config=config,
         ),
         x,
         routed_w0,
@@ -2190,6 +2322,8 @@ def route_compute_unroute_bwd(
         functools.partial(
             compute_linear,
             dtype=dtype,
+            use_fp8=use_fp8,
+            config=config,
         ),
         layer_w0,
         layer_w1,
@@ -2255,6 +2389,7 @@ def moe(
     normalization_layer_epsilon,
     dtype,
     activation_pspec,
+    use_fp8,
 ):
   """Performs dropless MoE with tensor/expert parallelism."""
   return jax.shard_map(
@@ -2267,6 +2402,8 @@ def moe(
           use_gather_mosaic_kernel=use_gather_mosaic_kernel,
           normalization_layer_epsilon=normalization_layer_epsilon,
           dtype=dtype,
+          use_fp8=use_fp8,
+          config=config,
       ),
       mesh=mesh,
       in_specs=(
@@ -2323,6 +2460,7 @@ def moe_bwd(
     normalization_layer_epsilon,
     dtype,
     activation_pspec,
+    use_fp8,
 ):
   """Performs the backward pass for the moe function."""
   return jax.shard_map(
@@ -2335,6 +2473,8 @@ def moe_bwd(
           use_gather_mosaic_kernel=use_gather_mosaic_kernel,
           normalization_layer_epsilon=normalization_layer_epsilon,
           dtype=dtype,
+          use_fp8=use_fp8,
+          config=config,
       ),
       mesh=mesh,
       in_specs=(

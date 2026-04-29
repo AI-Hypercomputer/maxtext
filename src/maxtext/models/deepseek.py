@@ -537,7 +537,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       weights = deepseek_batchsplit.fetch_weights(
           nnx.to_pure_dict(nnx.state(self, nnx.Param), extract_fn), self.config.dtype
       )
-      weights = deepseek_batchsplit.gather_weights(weights, self.mesh)
+      weights = deepseek_batchsplit.gather_weights(weights, self.mesh, use_fp8=self.config.use_fp8_for_batch_split)
       outputs, _ = deepseek_batchsplit.batch_split_schedule(
           inputs,
           weights,

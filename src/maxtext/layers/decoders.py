@@ -922,7 +922,8 @@ class Decoder(nn.Module):
             # as detected by immutable params, use deepseek_batchsplit custom
             # scan with initialized parameters.
             if cfg.use_batch_split_schedule and not self.is_mutable_collection("params"):
-              if cfg.use_qwix_quantization:
+              if not cfg.use_fp8_for_batch_split:
+                max_logging.log("Using deepseek_batchsplit_fp8")
                 y = deepseek_batchsplit_fp8.scan_batch_split_layers(
                     y,
                     self.variables["params"]["moe_layers"],
@@ -935,7 +936,8 @@ class Decoder(nn.Module):
                     policy=policy,
                 )
               else:
-                # bf16 code path
+                # bf16 and fp8
+                max_logging.log("Using deepseek_batchsplit")
                 y = deepseek_batchsplit.scan_batch_split_layers(
                     y,
                     self.variables["params"]["moe_layers"],
