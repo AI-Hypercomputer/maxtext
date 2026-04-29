@@ -1,0 +1,81 @@
+
+name: Documentation Link Checker
+
+on:
+  schedule:
+    # Run every Monday at 9:00 AM UTC
+    - cron: '0 9 * * 1'
+  workflow_call:
+  workflow_dispatch: # Allow manual triggering
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  linkcheck:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3  # v6.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Install uv and set the Python version
+        uses: astral-sh/setup-uv@eb1897b8dc4b5d5bfe39a428a8f2304605e0983c  # v7.0.0
+        with:
+          python-version: '3.12'
+          enable-cache: true
+
+      - name: Set venv
+        run: uv venv --python 3.12 $GITHUB_WORKSPACE/venv
+
+      - name: Install dependencies
+        run: . $GITHUB_WORKSPACE/venv/bin/activate && uv pip install -r src/dependencies/requirements/requirements_docs.txt
+
+      - name: Run Sphinx linkcheck
+        id: linkcheck
+        continue-on-error: true
+        run: |
+          . $GITHUB_WORKSPACE/venv/bin/activate
+          sphinx-build -b linkcheck docs docs/_build/linkcheck -q --keep-going
+          echo "exit_code=$?" >> $GITHUB_OUTPUT
+
+      - name: Prepare issue body
+        if: steps.linkcheck.outcome == 'failure'
+        run: |
+          DATE=$(date +%Y-%m-%d)
+          echo "ISSUE_DATE=$DATE" >> $GITHUB_ENV
+
+          cat > issue-body.md << 'EOF'
+          ## Documentation Link Check Failed
+
+          The weekly documentation link checker has detected broken links.
+
+          **Workflow Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          ### Broken Links Report
+
+          EOF
+
+          if [ -f docs/_build/linkcheck/output.txt ]; then
+            echo '```' >> issue-body.md
+            cat docs/_build/linkcheck/output.txt >> issue-body.md
+            echo '```' >> issue-body.md
+          else
+            echo 'No output file generated.' >> issue-body.md
+          fi
+
+          echo '' >> issue-body.md
+          echo 'Please review and fix the broken links in the documentation.' >> issue-body.md
+
+      - name: Create issue for broken links
+        if: steps.linkcheck.outcome == 'failure'
+        uses: peter-evans/create-issue-from-file@fca9117c27cdc29c6c4db3b86c48e4115a786710  # v6.0.0
+        with:
+          title: Documentation Link Check Failed - ${{ env.ISSUE_DATE }}
+          content-filepath: ./issue-body.md
+          labels: |
+            documentation
