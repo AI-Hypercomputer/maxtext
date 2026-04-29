@@ -1,0 +1,94 @@
+name: Compile
+
+on:
+  pull_request:
+    branches: ["main"]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.gitignore'
+      - 'LICENSE'
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v7
+      - name: Build maxtext
+        run: |
+          uv venv --python 3.12
+          uv pip install -e .[tpu]
+
+      - name: Compile
+        run: |
+          uv run --no-sync python -m maxtext.trainers.pre_train.train_compile maxtext/configs/base.yml \
+            compile_topology=v6e-256 \
+            compile_topology_num_slices=1 \
+            model_name='gemma4-31b' \
+            run_name='gemma-5-1-part-2-compile' \
+            base_num_decoder_layers=36 \
+            base_emb_dim=1280 \
+            base_num_query_heads=10 \
+            base_num_kv_heads=5 \
+            base_mlp_dim=6144 \
+            mlp_activations='["silu", "linear"]' \
+            head_dim=128 \
+            global_head_dim=256 \
+            vocab_size=65536 \
+            decoder_block="gemma4" \
+            normalization_layer_epsilon=1e-6 \
+            logits_via_embedding=True \
+            use_post_attn_norm=True \
+            use_post_ffw_norm=True \
+            sliding_window_size=1024 \
+            share_kv_projections=True \
+            v_norm_with_scale=False \
+            local_rope_max_timescale=10000 \
+            global_rope_max_timescale=1000000 \
+            rope_max_timescale=1000000 \
+            global_rope_proportion=0.25 \
+            local_rope_proportion=1.0 \
+            final_logits_soft_cap=30.0 \
+            use_qk_norm=True \
+            normalize_embedding_logits=False \
+            enable_dropout=False \
+            ici_fsdp_parallelism=1 \
+            ici_data_parallelism=16 \
+            ici_tensor_parallelism=1 \
+            ici_fsdp_transpose_parallelism=16 \
+            dcn_data_parallelism=1 \
+            per_device_batch_size=8 \
+            max_target_length=4096 \
+            weight_dtype='bfloat16' \
+            attention='flash' \
+            use_tokamax_splash=True \
+            allow_split_physical_axes=True \
+            optimize_mesh_for_tpu_v6e=True \
+            scan_layers=True \
+            remat_policy='full' \
+            dataset_type='grain' \
+            grain_packing_type='best_fit' \
+            tokenizer_path='BrahmAI/superbpe-brahmai-65k-ev' \
+            tokenizer_type='huggingface' \
+            grain_train_mixture_config_path='/lustre-data/main-training-data/data_mixture_1b_2t_run_phase_2.json' \
+            grain_worker_count=4 \
+            grain_prefetch_buffer_size=8 \
+            data_shuffle_seed=42 \
+            init_weights_seed=42 \
+            learning_rate=3e-04 \
+            num_epoch=5 \
+            lr_schedule_type='wsd' \
+            learning_rate_final_fraction=0.001 \
+            wsd_decay_steps_fraction=0.1 \
+            wsd_decay_style='linear' \
+            warmup_steps_fraction=0.05 \
+            learning_rate_schedule_steps=100 \
+            opt_type='adamw' \
+            use_truncation=True \
+            packing=True \
+            steps=100 \
+            enable_orbax_v1=True \
+            compiled_trainstep_file=brahmai_1b_v6e_256_compiled.pickle \
+            override_model_config=True \
+            global_num_kv_heads=5
