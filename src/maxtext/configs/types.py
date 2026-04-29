@@ -688,6 +688,9 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to use Ring of Experts for sparse matmul expert parallelism.",
   )
+  use_ragged_sort: bool = Field(
+      False, description="Whether to use ragged kernel for sorting, only valid when EP is enabled."
+  )
   use_gather_mosaic_kernel: bool = Field(
       False,
       description="Whether to use a custom mosaic kernel for token gather ops.",
