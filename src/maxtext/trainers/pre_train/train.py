@@ -724,31 +724,9 @@ def main(argv: Sequence[str]) -> None:
 
       max_logging.log(f"Using {elastic_mode=}")
       if elastic_mode == "replica-resize":
-        def pre_callback():
-          # Wait up to 1 minute before starting if there are any inactive slices
-          if max_utils.elastic_manager.inactive_slice_indices:
-            try:
-              max_utils.elastic_manager.active_slice_indices = (
-                  elastic.wait_for_slices(
-                      slice_count=max_utils.elastic_manager.total_slice_count,
-                      slice_to_devices=max_utils.elastic_manager.slice_to_devices,
-                      poll_interval=10,
-                      timeout=90,
-                  )
-              )
-            except TimeoutError:
-              # If there are still inactive slices, we must update the active
-              # slices with one final check and then proceed.
-              max_utils.elastic_manager.active_slice_indices = (
-                  elastic.get_active_slice_indices(
-                      slice_to_devices=max_utils.elastic_manager.slice_to_devices,
-                  )
-              )
-
         train = max_utils.elastic_manager.replica_resize(
             max_resizes=10,  # Handle up to 10 slice up or slice down transitions
             poll_interval=10,  # Monitor thread checks inactive slice health every 10 seconds
-            pre_callback=pre_callback,
             on_elastic_event_callback=clean_up_checkpoints,
         )(train)
 
