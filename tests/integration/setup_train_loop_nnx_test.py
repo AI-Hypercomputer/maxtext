@@ -28,6 +28,7 @@ import unittest
 import pytest
 
 import jax
+import jax.numpy as jnp
 from flax import nnx
 
 from maxtext.configs import pyconfig
@@ -126,14 +127,32 @@ class SetupTrainLoopNNXIntegrationTest(unittest.TestCase):
 
     del model
 
-  def test_pure_nnx_dpo_raises_not_implemented(self):
-    """The use_dpo branch (train_utils.py:319-320) must raise for NNX."""
-    # use_dpo requires a few prerequisites; the simplest is to set the flag and
-    # let setup_train_loop reach the NotImplementedError check before the more
-    # involved DPO path runs.
+  def test_pure_nnx_dpo_setup_materializes_reference_model(self):
+    """With use_dpo=True the NNX init_state_fn materializes a frozen reference
+    model alongside the policy (train_utils.py:233-237). Both come from
+    _create_model_partial() with the same init_weights_seed, so absent a step-0
+    checkpoint the reference starts bit-identical to the policy.
+
+    Positive replacement for the removed test_pure_nnx_dpo_raises_not_implemented:
+    NNX DPO is supported now, so setup_train_loop builds the reference instead of
+    raising.
+    """
     config = _tiny_nnx_pyconfig(use_dpo=True, packing=False)
-    with self.assertRaises(NotImplementedError):
-      setup_train_loop(config, recorder=None)
+    *_, train_state = setup_train_loop(config, recorder=None)
+
+    self.assertIsInstance(train_state, train_state_nnx.TrainStateNNX)
+    # The reference is a sibling NNX module, distinct from the policy.
+    self.assertTrue(hasattr(train_state, "reference_model"))
+    self.assertIsInstance(train_state.reference_model, nnx.Module)
+    self.assertIsNot(train_state.reference_model, train_state.model)
+
+    # Same param tree, identical values at init (same seed, no step-0 override).
+    policy_leaves = jax.tree.leaves(nnx.state(train_state.model, nnx.Param))
+    reference_leaves = jax.tree.leaves(nnx.state(train_state.reference_model, nnx.Param))
+    self.assertGreater(len(policy_leaves), 0)
+    self.assertEqual(len(policy_leaves), len(reference_leaves))
+    for p, r in zip(policy_leaves, reference_leaves):
+      self.assertTrue(jnp.array_equal(p, r))
 
 
 if __name__ == "__main__":

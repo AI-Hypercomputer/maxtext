@@ -225,10 +225,16 @@ def setup_train_loop(config, recorder, devices=None):
 
     if config.pure_nnx:
       # For NNX, the train state is wrapped in the TrainStateNNX module.
+      # When DPO is enabled, also materialize a frozen reference model alongside
+      # the policy. Both are constructed by `_create_model_partial()` (which uses
+      # `config.init_weights_seed`), so the reference starts identical to the
+      # policy — standard DPO practice. The reference is later overwritten by
+      # the step-0 checkpoint in `setup_post_setup_state` below.
       def create_train_state_fn():
         model = _create_model_partial()
         optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
-        return train_state_nnx.TrainStateNNX(model, optimizer)
+        reference_model = _create_model_partial() if config.use_dpo else None
+        return train_state_nnx.TrainStateNNX(model, optimizer, reference_model=reference_model)
 
       init_state_fn = create_train_state_fn
     else:
@@ -316,8 +322,6 @@ def setup_train_loop(config, recorder, devices=None):
       maxtext_utils.print_shardings_params(state_params, state_mesh_shardings_params, mesh, logical_annotations_params)
 
     if config.use_dpo:
-      if config.pure_nnx:
-        raise NotImplementedError("DPO is not supported yet by NNX models.")
       abstract_state, _, _ = maxtext_utils.get_abstract_state(config, mesh, init_state_fn, is_training)
       max_logging.log(
           "Restoring reference parameters for DPO from" f" '{os.path.join(str(config.checkpoint_dir), str(0))}'"
@@ -342,9 +346,17 @@ def setup_train_loop(config, recorder, devices=None):
       except FileNotFoundError:
         step0_restored = None
       if step0_restored is not None:
-        # TODO: For pure_nnx, the dpo state manipulation is different.
-        reference_params = step0_restored["items"].params["params"]
-        state = _merge_dpo_state(state, reference_params)
+        if config.pure_nnx:
+          # step0_restored["items"] is the flat nnx.State of the step-0 TrainStateNNX
+          # (typically from a non-DPO pre-training run, so its top-level fields are
+          # `model` and `optimizer` — no `reference_model`). Copy its `model` substate
+          # into our current state's `reference_model` slot.
+          step0_state = step0_restored["items"]
+          step0_model_substate = step0_state["model"] if "model" in step0_state else step0_state
+          state["reference_model"] = step0_model_substate
+        else:
+          reference_params = step0_restored["items"].params["params"]
+          state = _merge_dpo_state(state, reference_params)
       else:
         max_logging.log(
             "Could not restore reference parameters for DPO from" f" '{os.path.join(str(config.checkpoint_dir), str(0))}'"
