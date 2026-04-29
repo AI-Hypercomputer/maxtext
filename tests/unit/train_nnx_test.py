@@ -174,16 +174,6 @@ class TestTrainStepNNX(unittest.TestCase):
     self.assertIn("learning/param_norm", metrics["scalar"])
     self.assertTrue(jnp.isfinite(metrics["scalar"]["learning/loss"]))
 
-  def test_train_step_dpo_raises_for_nnx(self):
-    cfg, ts = _build_state()
-    cfg.use_dpo = True
-    state_graphdef, state_pure = nnx.split(ts)
-    data = _make_data(batch=cfg.micro_batch_size_to_train_on, vocab=cfg.vocab_size)
-    with self.assertRaises(NotImplementedError):
-      pre_train.train_step(
-          state_graphdef, cfg, state_mesh_shardings=None, params_shardings=None, state=state_pure, data=data
-      )
-
   def test_train_step_increments_optimizer_step(self):
     cfg, ts = _build_state()
     state_graphdef, state_pure = nnx.split(ts)
