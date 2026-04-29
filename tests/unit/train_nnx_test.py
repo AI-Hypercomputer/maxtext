@@ -50,6 +50,8 @@ class _Cfg:
   mtp_num_layers: int = 0
   mtp_eval_target_module: int = 0
   use_dpo: bool = False
+  dpo_label_smoothing: float = 0.0
+  dpo_beta: float = 0.1
   use_qk_clip: bool = False
   use_tunix_gradient_accumulation: bool = False
   gradient_accumulation_steps: int = 1
@@ -103,11 +105,37 @@ def _make_data(batch=2, seq=4, vocab=8):
   }
 
 
+def _make_dpo_data(batch=2, seq=5):
+  """DPO-shaped batch: chosen/rejected share a prefix, differ mid-sequence, pad at the end."""
+  chosen = jnp.array([[1, 2, 3, 4, 0]] * batch, dtype=jnp.int32)
+  rejected = jnp.array([[1, 2, 5, 6, 0]] * batch, dtype=jnp.int32)
+  positions = jnp.tile(jnp.arange(seq, dtype=jnp.int32), (batch, 1))
+  segmentation = jnp.array([[1, 1, 1, 1, 0]] * batch, dtype=jnp.int32)
+  return {
+      "chosen": chosen,
+      "rejected": rejected,
+      "chosen_position": positions,
+      "rejected_position": positions,
+      "chosen_segmentation": segmentation,
+      "rejected_segmentation": segmentation,
+  }
+
+
 def _build_state():
   cfg = _Cfg()
   model = _TinyDecoder(cfg.vocab_size, hidden=4, rngs=nnx.Rngs(0))
   optimizer = nnx.Optimizer(model, optax.sgd(0.01), wrt=nnx.Param)
   ts = train_state_nnx.TrainStateNNX(model, optimizer)
+  return cfg, ts
+
+
+def _build_dpo_state():
+  """TrainStateNNX with a frozen reference model alongside the policy (identical init)."""
+  cfg = _Cfg(use_dpo=True)
+  model = _TinyDecoder(cfg.vocab_size, hidden=4, rngs=nnx.Rngs(0))
+  reference = _TinyDecoder(cfg.vocab_size, hidden=4, rngs=nnx.Rngs(0))
+  optimizer = nnx.Optimizer(model, optax.sgd(0.01), wrt=nnx.Param)
+  ts = train_state_nnx.TrainStateNNX(model, optimizer, reference_model=reference)
   return cfg, ts
 
 
@@ -174,16 +202,6 @@ class TestTrainStepNNX(unittest.TestCase):
     self.assertIn("learning/param_norm", metrics["scalar"])
     self.assertTrue(jnp.isfinite(metrics["scalar"]["learning/loss"]))
 
-  def test_train_step_dpo_raises_for_nnx(self):
-    cfg, ts = _build_state()
-    cfg.use_dpo = True
-    state_graphdef, state_pure = nnx.split(ts)
-    data = _make_data(batch=cfg.micro_batch_size_to_train_on, vocab=cfg.vocab_size)
-    with self.assertRaises(NotImplementedError):
-      pre_train.train_step(
-          state_graphdef, cfg, state_mesh_shardings=None, params_shardings=None, state=state_pure, data=data
-      )
-
   def test_train_step_increments_optimizer_step(self):
     cfg, ts = _build_state()
     state_graphdef, state_pure = nnx.split(ts)
@@ -205,6 +223,32 @@ class TestTrainStepNNX(unittest.TestCase):
     )
     self.assertIsInstance(new_state, nnx.State)
     self.assertTrue(jnp.isfinite(metrics["scalar"]["learning/loss"]))
+
+
+class TestTrainStepDPONNX(unittest.TestCase):
+  """train_step must run the NNX DPO path end-to-end.
+
+  Positive replacement for the removed test_train_step_dpo_raises_for_nnx: DPO is
+  now supported on NNX, so train_step routes to dpo_loss_fn_nnx with the reference
+  model from state and returns updated state plus DPO metrics.
+  """
+
+  def test_train_step_dpo_runs_for_nnx(self):
+    cfg, ts = _build_dpo_state()
+    pre_step = int(ts.optimizer.step.get_value())
+    state_graphdef, state_pure = nnx.split(ts)
+    data = _make_dpo_data(batch=cfg.micro_batch_size_to_train_on)
+
+    new_state, metrics = pre_train.train_step(
+        state_graphdef, cfg, state_mesh_shardings=None, params_shardings=None, state=state_pure, data=data
+    )
+
+    self.assertIsInstance(new_state, nnx.State)
+    self.assertEqual(int(new_state.optimizer.step.get_value()), pre_step + 1)
+    self.assertTrue(jnp.isfinite(metrics["scalar"]["learning/loss"]))
+    # DPO-specific metrics are surfaced only on the use_dpo path.
+    self.assertIn("learning/dpo_loss", metrics["scalar"])
+    self.assertIn("learning/dpo_reward_accuracy", metrics["scalar"])
 
 
 class TestEvalStepNNX(unittest.TestCase):
