@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" The NNX Unified TrainState. """
+"""The NNX Unified TrainState."""
 
 from typing import Any
 
@@ -25,20 +25,34 @@ class TrainStateNNX(nnx.Module):
   This replaces Linen's TrainState for checkpointing.
 
   Linen TrainState pytree:
-    {“params”: {...}, “opt_state”: {}...}
+    {"params": {...}, "opt_state": {}...}
   TrainStateNNX state pytree:
-    {“model”: {...}, “optimizer”: {“opt_state”: {...}}
+    {"model": {...}, "optimizer": {"opt_state": {...}}}
+
+  For DPO (Direct Preference Optimization), an optional `reference_model`
+  carries a frozen copy of the same architecture used to compute reference
+  log-probabilities. Only `model` is updated by `apply_gradients`; the
+  reference is held alongside so it is sharded, jit-traced, and checkpointed
+  with the rest of the train state.
   """
 
-  def __init__(self, model: nnx.Module, optimizer: nnx.Optimizer | None):
+  def __init__(
+      self,
+      model: nnx.Module,
+      optimizer: nnx.Optimizer | None,
+      reference_model: nnx.Module | None = None,
+  ):
     self.model = model
     self.optimizer = optimizer
+    if reference_model is not None:
+      self.reference_model = reference_model
 
   def apply_gradients(self, grads: Any):
     """
     Mimics the Linen apply_gradients function.
     Updates the optimizer state, applies updates to parameters,
-    and increments the step counter.
+    and increments the step counter. Only updates `self.model`;
+    `self.reference_model` (if present) is left untouched.
     """
     if self.optimizer is None:
       raise RuntimeError(
