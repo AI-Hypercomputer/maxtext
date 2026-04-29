@@ -31,7 +31,7 @@ from flax import linen as nn
 from flax import nnx
 from jax.sharding import Mesh
 
-from maxtext.common.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_TRAIN, DecoderBlockType
+from maxtext.common.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, DecoderBlockType
 from maxtext.configs import pyconfig
 from maxtext.layers import linears
 from maxtext.layers.attentions import Attention
@@ -65,13 +65,8 @@ _BASE_CONFIG = {
 def _make_config(**overrides):
   """Return a pyconfig Config object suitable for unit tests."""
   extra_args = get_decoupled_parallelism_overrides()
-  return pyconfig.initialize(
-      [sys.argv[0], get_test_config_path()],
-      **_BASE_CONFIG,
-      **extra_args,
-      **overrides,
-      override_model_config=True,
-  )
+  merged = {**_BASE_CONFIG, **extra_args, **overrides}
+  return pyconfig.initialize([sys.argv[0], get_test_config_path()], override_model_config=True, **merged)
 
 
 def _make_mesh(cfg):
@@ -87,6 +82,7 @@ def _make_mesh(cfg):
 class TestDeepstackProcess(unittest.TestCase):
   """Tests for the deepstack_process pure function."""
 
+  # pylint: disable=too-many-positional-arguments
   def _make_inputs(self, batch=2, seq_len=8, hidden_dim=16, num_visual=3, seed=0):
     key = jax.random.PRNGKey(seed)
     k1, k2 = jax.random.split(key)
@@ -188,9 +184,9 @@ class TestNNXDecoderLayer(unittest.TestCase):
     self.mesh = _make_mesh(self.cfg)
     self.rng = jax.random.PRNGKey(0)
 
-  def _make_layer(self, model_mode=MODEL_MODE_TRAIN):
+  def _make_layer(self, model_mode=MODEL_MODE_TRAIN, config=None):
     return NNXDecoderLayer(
-        config=self.cfg,
+        config=config if config is not None else self.cfg,
         mesh=self.mesh,
         model_mode=model_mode,
         rngs=nnx.Rngs(params=0, dropout=1),
@@ -228,15 +224,59 @@ class TestNNXDecoderLayer(unittest.TestCase):
     """Forward pass output shape matches input shape in train mode."""
     layer = self._make_layer(MODEL_MODE_TRAIN)
     inputs, segment_ids, positions = self._make_inputs()
-    out, _ = layer(inputs, segment_ids, positions, deterministic=True, model_mode=MODEL_MODE_TRAIN)
+    out, _ = layer(
+        inputs,
+        segment_ids,
+        positions,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
     self.assertEqual(out.shape, inputs.shape)
 
   def test_forward_output_dtype(self):
     """Output dtype matches config dtype."""
     layer = self._make_layer()
     inputs, segment_ids, positions = self._make_inputs()
-    out, _ = layer(inputs, segment_ids, positions, deterministic=True, model_mode=MODEL_MODE_TRAIN)
+    out, _ = layer(
+        inputs,
+        segment_ids,
+        positions,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
     self.assertEqual(out.dtype, self.cfg.dtype)
+
+  def test_forward_prefill_mode(self):
+    """Test forward pass in prefill mode."""
+    layer = self._make_layer(MODEL_MODE_PREFILL)
+    inputs, segment_ids, positions = self._make_inputs()
+    out, _ = layer(
+        inputs,
+        segment_ids,
+        positions,
+        deterministic=True,
+        model_mode=MODEL_MODE_PREFILL,
+    )
+    self.assertEqual(out.shape, inputs.shape)
+
+  def test_record_metrics(self):
+    """Test recording intermediate activation metrics."""
+    cfg = _make_config(record_internal_nn_metrics=1)
+    layer = self._make_layer(MODEL_MODE_TRAIN, config=cfg)
+    inputs, segment_ids, positions = self._make_inputs()
+
+    # Use nnx.capture to retrieve sown variables
+    _, state = nnx.capture(layer, nnx.Intermediate)(
+        inputs,
+        segment_ids,
+        positions,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+    metrics_keys = state.keys()
+    self.assertIn("activation_mean", metrics_keys)
+    self.assertIn("activation_stdev", metrics_keys)
+    self.assertIn("activation_fraction_zero", metrics_keys)
 
   def test_forward_kv_cache_is_none_when_scan_layers_false(self):
     """kv_cache return value is not None when scan_layers=False (non-scan returns cache)."""
@@ -245,7 +285,13 @@ class TestNNXDecoderLayer(unittest.TestCase):
     # verify the call doesn't raise and returns a 2-tuple.
     layer = self._make_layer()
     inputs, segment_ids, positions = self._make_inputs()
-    result = layer(inputs, segment_ids, positions, deterministic=True, model_mode=MODEL_MODE_TRAIN)
+    result = layer(
+        inputs,
+        segment_ids,
+        positions,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
     self.assertIsInstance(result, tuple)
     self.assertEqual(len(result), 2)
 
@@ -253,8 +299,20 @@ class TestNNXDecoderLayer(unittest.TestCase):
     """Output shape is the same regardless of the deterministic flag."""
     layer = self._make_layer()
     inputs, segment_ids, positions = self._make_inputs()
-    out_det, _ = layer(inputs, segment_ids, positions, deterministic=True, model_mode=MODEL_MODE_TRAIN)
-    out_stoch, _ = layer(inputs, segment_ids, positions, deterministic=False, model_mode=MODEL_MODE_TRAIN)
+    out_det, _ = layer(
+        inputs,
+        segment_ids,
+        positions,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+    out_stoch, _ = layer(
+        inputs,
+        segment_ids,
+        positions,
+        deterministic=False,
+        model_mode=MODEL_MODE_TRAIN,
+    )
     self.assertEqual(out_det.shape, out_stoch.shape)
 
 
@@ -476,7 +534,11 @@ class TestNNXDecoderForwardPass(unittest.TestCase):
         deterministic=True,
         model_mode=MODEL_MODE_TRAIN,
     )
-    expected = (cfg.global_batch_size_to_train_on, cfg.max_target_length, cfg.vocab_size)
+    expected = (
+        cfg.global_batch_size_to_train_on,
+        cfg.max_target_length,
+        cfg.vocab_size,
+    )
     self.assertEqual(logits.shape, expected)
 
   def test_hidden_state_shape(self):
@@ -491,7 +553,11 @@ class TestNNXDecoderForwardPass(unittest.TestCase):
         deterministic=True,
         model_mode=MODEL_MODE_TRAIN,
     )
-    expected = (cfg.global_batch_size_to_train_on, cfg.max_target_length, cfg.emb_dim)
+    expected = (
+        cfg.global_batch_size_to_train_on,
+        cfg.max_target_length,
+        cfg.emb_dim,
+    )
     self.assertEqual(hidden_state.shape, expected)
 
   def test_logits_are_finite(self):
@@ -532,6 +598,101 @@ class TestNNXDecoderForwardPass(unittest.TestCase):
     logits2, _, _ = decoder2(shared_emb2, ids, positions, **common_kwargs)
     self.assertFalse(jnp.allclose(logits1, logits2))
 
+  def test_scan_layers(self):
+    """Test NNXDecoder with scan_layers=True."""
+    cfg = _make_config(scan_layers=True)
+    rngs = nnx.Rngs(params=0, dropout=1)
+    decoder = NNXDecoder(
+        config=cfg,
+        mesh=self.mesh,
+        model_mode=MODEL_MODE_TRAIN,
+        rngs=rngs,
+    )
+    shared_embedding = Embed(
+        num_embeddings=cfg.vocab_size,
+        num_features=cfg.emb_dim,
+        dtype=cfg.dtype,
+        embedding_init=nn.initializers.normal(stddev=1.0),
+        config=cfg,
+        mesh=self.mesh,
+        rngs=rngs,
+    )
+
+    batch = cfg.global_batch_size_to_train_on
+    seq_len = cfg.max_target_length
+    ids = jax.random.randint(self.rng, (batch, seq_len), 0, cfg.vocab_size)
+    segment_ids = jnp.full((batch, seq_len), DECODING_ACTIVE_SEQUENCE_INDICATOR)
+    positions = jnp.broadcast_to(jnp.arange(seq_len)[None], (batch, seq_len))
+
+    logits, _, _ = decoder(
+        shared_embedding,
+        ids,
+        positions,
+        decoder_segment_ids=segment_ids,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+    self.assertEqual(logits.shape, (batch, seq_len, cfg.vocab_size))
+
 
 if __name__ == "__main__":
   unittest.main()
+
+
+class TestNNXDecoderDeepseekAndGemma4(unittest.TestCase):
+  """Tests for Deepseek and Gemma4 specific decoder logic."""
+
+  def setUp(self):
+    super().setUp()
+    self.cfg = _make_config()
+    self.mesh = _make_mesh(self.cfg)
+    self.rng = jax.random.PRNGKey(0)
+    self.rngs = nnx.Rngs(params=0, dropout=1)
+
+  def _make_token_inputs(self, cfg):
+    batch = cfg.global_batch_size_to_train_on
+    seq_len = cfg.max_target_length
+    ids = jax.random.randint(self.rng, (batch, seq_len), 0, cfg.vocab_size)
+    segment_ids = jnp.full((batch, seq_len), DECODING_ACTIVE_SEQUENCE_INDICATOR)
+    positions = jnp.broadcast_to(jnp.arange(seq_len)[None], (batch, seq_len))
+    return ids, segment_ids, positions
+
+  def _make_shared_embedding(self, cfg):
+    return Embed(
+        num_embeddings=cfg.vocab_size,
+        num_features=cfg.emb_dim,
+        dtype=cfg.dtype,
+        embedding_init=nn.initializers.normal(stddev=1.0),
+        config=cfg,
+        mesh=self.mesh,
+        rngs=self.rngs,
+    )
+
+  def test_gemma4_scanned_layers(self):
+    """Test NNXDecoder with gemma4 block and scan_layers=True."""
+    cfg = _make_config(
+        decoder_block="gemma4",
+        scan_layers=True,
+        num_decoder_layers=3,  # Not a multiple of the pattern length (which is usually larger) to test remainder logic
+    )
+    decoder = NNXDecoder(
+        config=cfg,
+        mesh=self.mesh,
+        model_mode=MODEL_MODE_TRAIN,
+        rngs=self.rngs,
+    )
+    shared_embedding = self._make_shared_embedding(cfg)
+    ids, segment_ids, positions = self._make_token_inputs(cfg)
+
+    logits, _, _ = decoder(
+        shared_embedding,
+        ids,
+        positions,
+        decoder_segment_ids=segment_ids,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+    self.assertEqual(
+        logits.shape,
+        (cfg.global_batch_size_to_train_on, cfg.max_target_length, cfg.vocab_size),
+    )
