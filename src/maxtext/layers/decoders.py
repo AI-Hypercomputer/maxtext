@@ -922,7 +922,8 @@ class Decoder(nn.Module):
             # as detected by immutable params, use deepseek_batchsplit custom
             # scan with initialized parameters.
             if cfg.use_batch_split_schedule and not self.is_mutable_collection("params"):
-              if cfg.use_qwix_quantization:
+              # old version of batch-split that fully uses qwix quantization.
+              if cfg.use_qwix_quantization and not cfg.use_manual_quantization:
                 y = deepseek_batchsplit_fp8.scan_batch_split_layers(
                     y,
                     self.variables["params"]["moe_layers"],
@@ -935,7 +936,9 @@ class Decoder(nn.Module):
                     policy=policy,
                 )
               else:
-                # bf16 code path
+                # bf16 and fp8 code path for pure-JAX batch-split.
+                # fp8 code path supports both manual quantization and qwix
+                # quantization.
                 y = deepseek_batchsplit.scan_batch_split_layers(
                     y,
                     self.variables["params"]["moe_layers"],

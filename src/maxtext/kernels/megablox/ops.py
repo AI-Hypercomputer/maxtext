@@ -22,6 +22,7 @@ from typing import List, Literal, Tuple
 import jax
 import jax.numpy as jnp
 from maxtext.kernels.megablox import backend
+from maxtext.layers import quantizations
 import qwix
 import qwix.pallas as qpl
 import tokamax
@@ -61,6 +62,7 @@ def gmm(
     weight_gather_axes: List[Tuple[str, int]] | None = None,
     # TODO(amandaliang): get rid of the qwix_rule in favor of Qwix's interception feature
     qwix_rule: qwix.QtRule | None = None,
+    use_manual_quantization: bool = False,
 ):
   """Grouped matrix multiplication operation."""
   quantization_rule = None
@@ -80,7 +82,7 @@ def gmm(
       )
 
   gmm_fwd_bwd = lambda *args: _gmm_fwd(*args)[0]  # pylint: disable=C3001
-  gmm_fwd_bwd = jax.custom_vjp(gmm_fwd_bwd, nondiff_argnums=(3, 4, 7, 8, 9, 10, 11))
+  gmm_fwd_bwd = jax.custom_vjp(gmm_fwd_bwd, nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12))
   gmm_fwd_bwd.defvjp(_gmm_fwd, functools.partial(_gmm_bwd, lhs.dtype, rhs.dtype))
   return gmm_fwd_bwd(
       lhs,
@@ -95,6 +97,7 @@ def gmm(
       quantization_rule,
       use_tokamax_backend,
       weight_gather_axes,
+      use_manual_quantization,
   )
 
 
@@ -121,6 +124,7 @@ def _gmm_fwd(
     quantization_rule: qwix.QtRule | None = None,
     use_tokamax_backend: bool = False,
     weight_gather_axes: List[Tuple[str, int]] | None = None,
+    use_manual_quantization: bool = False,
 ) -> tuple[
     jnp.ndarray,
     tuple[
@@ -140,15 +144,20 @@ def _gmm_fwd(
           calibration_method=quantization_rule.act_calibration_method,
       )
     if quantization_rule.weight_qtype and not isinstance(rhs, qpl.QArray):
-      rhs = qpl.quantize(
-          rhs,
-          quantization_rule.weight_qtype,
-          # If only considering the fwd pass, we could also enable channelwise
-          # axes for the group axis, i.e., [0, 1 or 2]. However, this makes the
-          # bwd pass unable to reuse the scale easily.
-          channelwise_axes=[] if quantization_rule.disable_channelwise_axes else ([1] if transpose_rhs else [2]),
-          calibration_method=quantization_rule.weight_calibration_method,
-      )
+      if not use_manual_quantization:
+        rhs = qpl.quantize(
+            rhs,
+            quantization_rule.weight_qtype,
+            # If only considering the fwd pass, we could also enable channelwise
+            # axes for the group axis, i.e., [0, 1 or 2]. However, this makes the
+            # bwd pass unable to reuse the scale easily.
+            channelwise_axes=([] if quantization_rule.disable_channelwise_axes else ([1] if transpose_rhs else [2])),
+            calibration_method=quantization_rule.weight_calibration_method,
+        )
+      else:
+        rhs = quantizations.manual_quantize(
+            rhs, quantization_rule.weight_calibration_method, quantization_rule.weight_qtype
+        )
       # QAG is only supported for following conditions
   if use_tokamax_backend:
     if quantization_rule and quantization_rule.bwd_qtype:
@@ -169,6 +178,9 @@ def _gmm_fwd(
         preferred_element_type=preferred_element_type,
         group_offset=group_offset,
         implementation="mosaic",
+        manual_axis_type=jax.sharding.ManualAxisType(varying=frozenset(["data", "fsdp", "expert"]))
+        if use_manual_quantization
+        else None,
     )
   else:
     out = backend.gmm(
@@ -195,6 +207,7 @@ def _gmm_bwd(
     quantization_rule: qwix.QtRule | None,
     use_tokamax_backend: bool,
     weight_gather_axes: List[Tuple[str, int]] | None,
+    use_manual_quantization: bool,
     residual: tuple[
         jnp.ndarray | qpl.QArray,
         jnp.ndarray | qpl.QArray,
@@ -257,6 +270,9 @@ def _gmm_bwd(
         preferred_element_type=lhs_dtype,
         group_offset=group_offset,
         implementation="mosaic",
+        manual_axis_type=jax.sharding.ManualAxisType(varying=frozenset(["data", "fsdp", "expert"]))
+        if use_manual_quantization
+        else None,
     )
     drhs = tokamax.ragged_dot_general(
         lhs=lhs,
@@ -267,6 +283,9 @@ def _gmm_bwd(
         preferred_element_type=rhs_dtype,
         group_offset=group_offset,
         implementation="mosaic",
+        manual_axis_type=jax.sharding.ManualAxisType(varying=frozenset(["expert"]), unreduced=frozenset(["data", "fsdp"]))
+        if use_manual_quantization
+        else None,
     )
     if quantization_rule and quantization_rule.bwd_qtype and weight_gather_axes:
       # Scatter back in reverse order of gather

@@ -451,7 +451,8 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
     # That is also why we can split/merge activations here as well as
     # in `Decoder`, since they will never be executed together.
     if self.config.use_batch_split_schedule:
-      if self.config.use_qwix_quantization:
+      # The older version of batch-split that fully uses qwix quantization.
+      if self.config.use_qwix_quantization and not self.config.use_manual_quantization:
         activation_pspec = jax.sharding.PartitionSpec(
             ("data", "fsdp", "fsdp_transpose", "expert", "context"),
             None,
@@ -490,7 +491,9 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
         )(outputs)
         return outputs, None
 
-      # bf16 code path
+      # bf16 and fp8 code path for pure-JAX batch-split.
+      # fp8 code path supports both manual quantization and qwix
+      # quantization.
       input_sharding = jax.typeof(inputs).sharding
       activation_pspec = jax.sharding.PartitionSpec(
           ("data", "fsdp", "expert"),

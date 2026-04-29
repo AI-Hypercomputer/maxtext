@@ -143,6 +143,7 @@ save_quantized_params_path: ""
 # accepted values are "inference"
 model_call_mode: ""
 use_qwix_quantization: false # whether to use qwix for quantization. if set to true, the model will be quantized using qwix.
+use_manual_quantization: false # a flag if to use manual quantization for batch split. Only used if use_batch_split_schedule is True.
 # quantization calibration method used for weights and activations. supported methods can be found in https://github.com/google/qwix/blob/dc2a0770351c740e5ab3cce7c0efe9f7beacce9e/qwix/qconfig.py#l70-l80
 weight_quantization_calibration_method: "absmax"
 act_quantization_calibration_method: "absmax"

@@ -16,6 +16,7 @@
 
 import functools
 import json
+import qwix.pallas as qpl
 import re
 from typing import Tuple, Sequence, Callable
 from dataclasses import dataclass
@@ -629,13 +630,15 @@ def get_quant_mode(quant_mode_str: str = "train"):
 def configure_quantization(config: Config, quant_mode_str: str = "train"):
   """Configure quantization based on user config and quant mode."""
   if config.use_batch_split_schedule and config.quantization:
-    if not (config.use_qwix_quantization and config.quantization == "fp8_full"):
-      raise ValueError("Batch split quantization only supports `use_qwix_quantization=True` and `quantization=fp8_full`")
-    return QwixQuantization(
-        weight_calibration_method=config.weight_quantization_calibration_method,
-        act_calibration_method=config.act_quantization_calibration_method,
-        bwd_calibration_method=config.bwd_quantization_calibration_method,
-    )
+    # The older version of batch-split that fully uses qwix quantization.
+    if config.quantization == "fp8_full" and not config.use_manual_quantization:
+      return QwixQuantization(
+          weight_calibration_method=config.weight_quantization_calibration_method,
+          act_calibration_method=config.act_quantization_calibration_method,
+          bwd_calibration_method=config.bwd_quantization_calibration_method,
+      )
+    # The pure JAX version of batch-split that uses manual quantization.
+    return None
 
   if config.use_qwix_quantization:
     return None
@@ -764,8 +767,7 @@ def get_quantization_rule(config: Config):
               weight_qtype=jnp.int4,
               act_qtype=jnp.int4,
               bwd_qtype=jnp.int4,
-              bwd_weight_grad_tile_size=1
-              / config.quantization_local_shard_count,
+              bwd_weight_grad_tile_size=1 / config.quantization_local_shard_count,
               op_names=("dot_general",),
           )
       ]
@@ -776,8 +778,7 @@ def get_quantization_rule(config: Config):
               weight_qtype=jnp.int8,
               act_qtype=jnp.int8,
               bwd_qtype=jnp.int8,
-              bwd_weight_grad_tile_size=1
-              / config.quantization_local_shard_count,
+              bwd_weight_grad_tile_size=1 / config.quantization_local_shard_count,
               op_names=("dot_general",),
           )
       ]
@@ -788,8 +789,7 @@ def get_quantization_rule(config: Config):
               weight_qtype=jnp.float8_e4m3fn,
               act_qtype=jnp.float8_e4m3fn,
               bwd_qtype=jnp.float8_e4m3fn,
-              bwd_weight_grad_tile_size=1
-              / config.quantization_local_shard_count,
+              bwd_weight_grad_tile_size=1 / config.quantization_local_shard_count,
               op_names=("dot_general",),
           )
       ]
@@ -802,8 +802,7 @@ def get_quantization_rule(config: Config):
               weight_qtype=jnp.float8_e4m3fn,
               act_qtype=jnp.float8_e4m3fn,
               bwd_qtype=jnp.float8_e4m3fn,
-              bwd_weight_grad_tile_size=1
-              / config.quantization_local_shard_count,
+              bwd_weight_grad_tile_size=1 / config.quantization_local_shard_count,
               op_names=("dot_general",),
           )
       ]
@@ -814,8 +813,7 @@ def get_quantization_rule(config: Config):
               weight_qtype=jnp.float8_e4m3fn,
               act_qtype=jnp.float8_e4m3fn,
               bwd_qtype=jnp.float8_e4m3fn,
-              bwd_weight_grad_tile_size=1
-              / config.quantization_local_shard_count,
+              bwd_weight_grad_tile_size=1 / config.quantization_local_shard_count,
               op_names=("dot_general",),
           )
       ]
@@ -849,6 +847,71 @@ def maybe_quantize_model(model, config):
     if quantization_provider:
       model = qwix.quantize_model(model, quantization_provider)
   return model
+
+
+def _cast_reduced_from(arr, reduced_arr):
+  aval = jax.typeof(reduced_arr)
+  # In shard map
+  if aval.sharding.mesh.axis_types[0] == jax.sharding.AxisType.Manual:
+    for axis in aval.mat.reduced:
+      arr = jax.lax.pcast(arr, axis, to="reduced")
+    return arr
+  # Outside shard map
+  return jax.reshard(arr, aval.sharding)
+
+
+def _make_scale_tensor(scale, arr):
+  scale_tensor = jnp.full_like(arr, scale, dtype=jnp.bfloat16)
+  return _cast_reduced_from(scale_tensor, arr)
+
+
+def _get_max_min(target_dtype):
+  if target_dtype in (jnp.int4, jnp.int8):
+    return jnp.iinfo(target_dtype).max, jnp.iinfo(target_dtype).min
+  else:
+    return jnp.finfo(target_dtype).max.astype(jnp.bfloat16), jnp.finfo(target_dtype).min.astype(jnp.bfloat16)
+
+
+def manual_quantize(tensor, calibration_method, dtype=jnp.float8_e4m3fn):
+  """Manually quantizes a tensor based on a fixed calibration method.
+
+  Args:
+    tensor: The tensor to quantize.
+    calibration_method: A string specifying the calibration method. Expected
+      format is "fixed,{scale},{max_val}".
+
+  Returns:
+    A qwix.QArray containing the quantized value and the scale.
+
+  Raises:
+    ValueError: If calibration_method is None or has an unexpected format.
+  """
+  calib_method = calibration_method
+  if calib_method is None:
+    raise ValueError("calibration_method cannot be None for manual quantization")
+  if not calib_method.startswith("fixed"):
+    raise ValueError("Only static weight/activation quantization is supported, but got" f" {calib_method}")
+
+  parts = calib_method.split(",")
+  if len(parts) != 3:
+    raise ValueError(f"Unexpected format for weight calibration method: {calib_method}")
+
+  dtype_max, dtype_min = _get_max_min(dtype)
+  max_val = float(parts[2])
+  scale = max_val / dtype_max
+  scale = jnp.where(scale == 0, 1.0, scale)
+  # scale must be converted to a tensor because grad has reduced axes.
+  scale_tensor = _make_scale_tensor(scale, tensor)
+  min_bound = _make_scale_tensor(dtype_min, tensor)
+  max_bound = _make_scale_tensor(dtype_max, tensor)
+  q_tensor = jnp.clip(tensor / scale_tensor, min_bound, max_bound).astype(dtype)
+
+  # get scale for QArray
+  scale_shape = [1] * tensor.ndim
+  # It must stay fully replicated for the backward pass and Pallas.
+  scale_tensor_qpl = jnp.full(scale_shape, scale, dtype=tensor.dtype)
+  # wrap in QArray
+  return qpl.QArray(qvalue=q_tensor, scale=scale_tensor_qpl)
 
 
 class TransformerEngineQuantization(Quantization):

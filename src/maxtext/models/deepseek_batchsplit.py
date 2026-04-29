@@ -33,9 +33,10 @@ from typing import Sequence
 
 import jax
 import jax.numpy as jnp
-from maxtext.kernels import attention, sort_activations
-
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
+
+from maxtext.kernels import attention, sort_activations, megablox
+from maxtext.layers import quantizations
 
 
 def scheduling_group(group_id) -> contextlib.AbstractContextManager[None]:
@@ -991,6 +992,7 @@ def batch_split_schedule(
       norm_mla_ws,
       positions,
       mesh=mesh,
+      config=cfg,
       splash_kernel=splash_kernel,
       normalization_layer_epsilon=cfg.normalization_layer_epsilon,
       kv_lora_rank=cfg.kv_lora_rank,
@@ -1041,6 +1043,7 @@ def batch_split_schedule_bwd(
       norm_mla_ws,
       positions,
       mesh=mesh,
+      config=cfg,
       splash_kernel=splash_kernel,
       normalization_layer_epsilon=cfg.normalization_layer_epsilon,
       kv_lora_rank=cfg.kv_lora_rank,
@@ -1099,6 +1102,7 @@ def mla_with_norms(
     yarn_freqs,
     *,
     mesh,
+    config,
     splash_kernel,
     normalization_layer_epsilon,
     kv_lora_rank,
@@ -1141,6 +1145,7 @@ def mla_with_norms(
         pairwise_swap_and_negate_mask=pairwise_swap_and_negate_mask,
         dtype=dtype,
         mscale=mscale,
+        config=config,
         splash_kernel=splash_kernel,
         mesh=mesh,
         activation_pspec=activation_pspec,
@@ -1159,6 +1164,7 @@ def mla_with_norms_remat(
     yarn_freqs,
     *,
     mesh,
+    config,
     splash_kernel,
     normalization_layer_epsilon,
     kv_lora_rank,
@@ -1205,6 +1211,7 @@ def mla_with_norms_remat(
         pairwise_swap_and_negate_mask=pairwise_swap_and_negate_mask,
         dtype=dtype,
         mscale=mscale,
+        config=config,
         splash_kernel=splash_kernel,
         mesh=mesh,
         activation_pspec=activation_pspec,
@@ -1257,6 +1264,7 @@ def mla(
     original_max_position_embeddings,
     rope_factor,
     mscale,
+    config,
     splash_kernel,
     pairwise_swap_and_negate_mask,
     dtype,
@@ -1288,6 +1296,7 @@ def mla(
       dtype=dtype,
       qk_nope_head_dim=qk_nope_head_dim,
       mscale=mscale,
+      config=config,
       mesh=mesh,
       activation_pspec=activation_pspec,
   )
@@ -1303,6 +1312,7 @@ def mla(
       dtype=dtype,
       qk_nope_head_dim=qk_nope_head_dim,
       num_query_heads=num_query_heads,
+      config=config,
       mesh=mesh,
       activation_pspec=activation_pspec,
   )
@@ -1333,6 +1343,7 @@ def mla_remat(
     original_max_position_embeddings,
     rope_factor,
     mscale,
+    config,
     splash_kernel,
     pairwise_swap_and_negate_mask,
     dtype,
@@ -1362,6 +1373,7 @@ def mla_remat(
           dtype=dtype,
           qk_nope_head_dim=qk_nope_head_dim,
           mscale=mscale,
+          config=config,
           mesh=mesh,
           activation_pspec=activation_pspec,
       ),
@@ -1380,6 +1392,7 @@ def mla_remat(
           dtype=dtype,
           qk_nope_head_dim=qk_nope_head_dim,
           num_query_heads=num_query_heads,
+          config=config,
           mesh=mesh,
           activation_pspec=activation_pspec,
       ),
@@ -1422,7 +1435,6 @@ def mla_bwd(
   """Performs the backward pass for the mla function."""
   query_projection_bwd, kv_projection_bwd, attn_op_bwd, out_projection_bwd = bwds
   attn_out_grad, out_weights_grad = out_projection_bwd(out_grad)
-  # query_grad, key_grad, value_grad, _ = attention_op_bwd(attn_out_grad)
   query_grad, key_grad, value_grad = attn_op_bwd(attn_out_grad)
   inputs_grad_from_kv, _, wkv_a_weights_grad, wkv_b_weights_grad, kv_norm_scale_weights_grad = kv_projection_bwd(
       (key_grad, value_grad)
@@ -1457,6 +1469,7 @@ def query_projection(
     pairwise_swap_and_negate_mask,
     dtype,
     mscale,
+    config,
     mesh,
     activation_pspec,
 ):
@@ -1504,6 +1517,7 @@ def kv_projection(
     dtype,
     qk_nope_head_dim,
     num_query_heads,
+    config,
     mesh,
     activation_pspec,
 ):
@@ -1644,6 +1658,7 @@ def shared_expert_and_route(
     routed_scaling_factor,
     expert_axis_name,
     use_gather_mosaic_kernel,
+    config,
     normalization_layer_epsilon,
     dtype,
 ):
@@ -1820,35 +1835,83 @@ route_impl.defvjp(route_impl_fwd, route_impl_bwd)
 unroute_impl.defvjp(unroute_impl_fwd, unroute_impl_bwd)
 
 
-def compute_gating(x, w0, w1, group_sizes, *, dtype):
+def gmm(
+    inputs,
+    kernel,
+    group_sizes,
+    preferred_element_type,
+    config,
+):
+  """Performs a Grouped Matrix Multiplication (GMM).
+
+  This function can use either a quantized Megablox kernel or a standard
+  jax.lax.ragged_dot for the GMM operation, based on the configuration.
+
+  Args:
+    inputs: The left-hand side operand of the GMM.
+    kernel: The right-hand side operand (kernel) of the GMM.
+    group_sizes: An array indicating the size of each group.
+    preferred_element_type: The preferred element type for the computation.
+    config: Configuration object containing model settings, including
+      `use_qwix_quantization` and `merge_gating_gmm`.
+
+  Returns:
+    The result of the grouped matrix multiplication.
+  """
+  if config.quantization:
+    output = megablox.gmm(
+        lhs=inputs,
+        rhs=kernel,
+        group_sizes=group_sizes,
+        preferred_element_type=preferred_element_type,
+        use_qwix_quantization=True,
+        use_tokamax_backend=True,
+        qwix_rule=quantizations.get_fp8_full_qwix_rule_w_sparsity(config)[0],
+        use_manual_quantization=True,
+    )
+  else:
+    output = jax.lax.ragged_dot(
+        lhs=inputs,
+        rhs=kernel,
+        group_sizes=group_sizes,
+        precision=jax.lax.Precision.DEFAULT,
+        preferred_element_type=preferred_element_type,
+    )
+  return output
+
+
+def compute_gating(x, w0, w1, group_sizes, *, dtype, config):
   """Computes the gating GMMs."""
-  layer_w0 = jax.lax.ragged_dot(
-      x,
-      w0,
+  gmm_fn = functools.partial(
+      gmm,
       group_sizes=group_sizes,
-      precision=jax.lax.Precision.DEFAULT,
       preferred_element_type=dtype,
+      config=config,
   )
-  layer_w1 = jax.lax.ragged_dot(
-      x,
-      w1,
-      group_sizes=group_sizes,
-      precision=jax.lax.Precision.DEFAULT,
-      preferred_element_type=dtype,
-  )
+  if config.merge_gating_gmm:
+    w01 = jnp.concatenate([w0, w1], axis=-1)
+    layer_w01 = gmm_fn(x, w01)
+    layer_w0, layer_w1 = jnp.split(layer_w01, 2, axis=-1)
+  else:
+    layer_w0 = gmm_fn(x, w0)
+    layer_w1 = gmm_fn(x, w1)
+
   return layer_w0, layer_w1
 
 
-def compute_linear(layer_w0, layer_w1, wo, group_sizes, weights, *, dtype):
+def compute_linear(layer_w0, layer_w1, wo, group_sizes, weights, *, dtype, config):
   """Combines the outputs of the gating GMMs and computes the final GMM."""
   intermediate_layer = jax.nn.silu(layer_w0) * layer_w1
   intermediate_layer *= weights[:, None]
-  layer_wo = jax.lax.ragged_dot(
+  gmm_fn = functools.partial(
+      gmm,
+      group_sizes=group_sizes,
+      preferred_element_type=dtype,
+      config=config,
+  )
+  layer_wo = gmm_fn(
       intermediate_layer,
       wo,
-      group_sizes=group_sizes,
-      precision=jax.lax.Precision.DEFAULT,
-      preferred_element_type=dtype,
   )
   return layer_wo
 
@@ -1864,6 +1927,7 @@ def route_compute_unroute(
     use_gather_mosaic_kernel,
     normalization_layer_epsilon,
     dtype,
+    config,
 ):
   """Routes, processes, and unroutes activations."""
   target_length = xs[0].shape[1]
@@ -1888,6 +1952,7 @@ def route_compute_unroute(
         routed_scaling_factor=routed_scaling_factor,
         expert_axis_name=expert_axis_name,
         use_gather_mosaic_kernel=use_gather_mosaic_kernel,
+        config=config,
         normalization_layer_epsilon=normalization_layer_epsilon,
         dtype=dtype,
     )
@@ -1907,6 +1972,7 @@ def route_compute_unroute(
         routed_w1,
         group_sizes,
         dtype=dtype,
+        config=config,
     )
     return layer_w0, layer_w1
 
@@ -1919,6 +1985,7 @@ def route_compute_unroute(
         group_sizes,
         weights,
         dtype=dtype,
+        config=config,
     )
     return x
 
@@ -2095,6 +2162,7 @@ def route_compute_unroute_bwd(
     use_gather_mosaic_kernel,
     normalization_layer_epsilon,
     dtype,
+    config,
 ):
   """Performs the backward pass for route_compute_unroute."""
   xs = residuals.pop("mla_out")
@@ -2114,6 +2182,7 @@ def route_compute_unroute_bwd(
             routed_scaling_factor=routed_scaling_factor,
             expert_axis_name=expert_axis_name,
             use_gather_mosaic_kernel=use_gather_mosaic_kernel,
+            config=config,
             normalization_layer_epsilon=normalization_layer_epsilon,
             dtype=dtype,
         ),
@@ -2176,6 +2245,7 @@ def route_compute_unroute_bwd(
         functools.partial(
             compute_gating,
             dtype=dtype,
+            config=config,
         ),
         x,
         routed_w0,
@@ -2190,6 +2260,7 @@ def route_compute_unroute_bwd(
         functools.partial(
             compute_linear,
             dtype=dtype,
+            config=config,
         ),
         layer_w0,
         layer_w1,
@@ -2267,6 +2338,7 @@ def moe(
           use_gather_mosaic_kernel=use_gather_mosaic_kernel,
           normalization_layer_epsilon=normalization_layer_epsilon,
           dtype=dtype,
+          config=config,
       ),
       mesh=mesh,
       in_specs=(
@@ -2335,6 +2407,7 @@ def moe_bwd(
           use_gather_mosaic_kernel=use_gather_mosaic_kernel,
           normalization_layer_epsilon=normalization_layer_epsilon,
           dtype=dtype,
+          config=config,
       ),
       mesh=mesh,
       in_specs=(

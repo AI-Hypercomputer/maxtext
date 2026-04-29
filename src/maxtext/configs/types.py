@@ -422,6 +422,10 @@ class Quantization(BaseModel):
   kv_quant_dtype: Literal["int8", "int4"] = Field("int8", description="Data type for KV cache quantization.")
   quantization_local_shard_count: int = Field(-1, description="Shards the range finding operation for quantization.")
   use_qwix_quantization: bool = Field(False, description="Whether to use qwix for quantization.")
+  use_manual_quantization: bool = Field(
+      False,
+      description="Whether to use manual quantization for batch split. Only used if use_batch_split_schedule is True.",
+  )
   weight_quantization_calibration_method: str = Field(
       "absmax",
       description="Quantization calibration method used for weights.",
@@ -2727,8 +2731,6 @@ class MaxTextConfig(
             f"Decoder '{self.decoder_block.value}' is not supported with 'explicit' sharding. "
             f"Supported options are: {list(supported_decoders)}."
         )
-      if self.quantization:
-        raise ValueError("Quantization is not supported with 'explicit' sharding.")
     if self.context_sharding not in ("context", "expert"):
       raise ValueError(f"Assigned context_sharding f{self.context_sharding} is not supported.")
     if (
@@ -2835,10 +2837,8 @@ class MaxTextConfig(
       self.use_grpo = False
 
     if self.use_batch_split_schedule:
-      if self.quantization and not (self.use_qwix_quantization and self.quantization == "fp8_full"):
-        raise ValueError(
-            "Batch split quantization only supports `use_qwix_quantization=True` and `quantization=fp8_full`"
-        )
+      if self.quantization and not self.quantization == "fp8_full":
+        raise ValueError("Batch split quantization only supports `quantization=fp8_full`")
 
     if self.opt_type == "muon" and self.decoder_block not in [
         DecoderBlockType.DEEPSEEK,
