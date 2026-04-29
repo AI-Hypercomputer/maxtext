@@ -22,16 +22,19 @@ to sampler chips using Pathways.
 from __future__ import annotations
 import time
 import os
+import math
 from typing import Sequence
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 import pathwaysutils
+from pathwaysutils.experimental import reshard as experimental_reshard
 from absl import app
 from maxtext.utils import max_logging
 from maxtext.configs import pyconfig
 from maxtext.utils import max_utils
 from tunix.sft.utils import show_hbm_usage
+from tunix.rl import reshard
 
 def main(argv: Sequence[str]) -> None:
   pathwaysutils.initialize()
@@ -49,6 +52,7 @@ def main(argv: Sequence[str]) -> None:
   sampler_fraction = getattr(config, "sampler_devices_fraction", 0.5)
   transfer_size_gb = getattr(config, "batch_size", 10)
   num_loops = getattr(config, "num_batches", 10)
+  data_transfer_method = getattr(config, "chat_template_path", "device_put")
   
   num_trainer_devices = int(num_devices * trainer_fraction)
   num_sampler_devices = int(num_devices * sampler_fraction)
@@ -72,9 +76,11 @@ def main(argv: Sequence[str]) -> None:
   # 20 GiB in bfloat16
   num_elements = (transfer_size_gb * 1024**3) // 2
   
-  # Shape must be divisible by number of trainer devices.
-  # We use a shape where the first axis is the number of devices.
-  shape = (len(trainer_devices), num_elements // len(trainer_devices))
+  # Shape must be divisible by both trainer and sampler devices for sharding.
+  lcm_devices = math.lcm(len(trainer_devices), len(sampler_devices))
+  # Ensure num_elements is divisible by lcm_devices
+  num_elements = (num_elements // lcm_devices) * lcm_devices
+  shape = (lcm_devices, num_elements // lcm_devices)
   
   max_logging.log(f"Creating array of shape {shape} on Trainer mesh...")
   
@@ -92,11 +98,28 @@ def main(argv: Sequence[str]) -> None:
   # Transfer benchmark
   latencies = []
   
+  # Warm-up loop
+  max_logging.log("Running warm-up loop...")
+  for _ in range(3):
+    if data_transfer_method == "device_put":
+      transferred_data = jax.device_put(dummy_data, sampler_sharding)
+    elif data_transfer_method == "reshard":
+      transferred_data = experimental_reshard.reshard(dummy_data, sampler_sharding)
+    elif data_transfer_method == "reshard_directly":
+      transferred_data = reshard.reshard_pytree(dummy_data, sampler_sharding)
+    jax.block_until_ready(transferred_data)
+  max_logging.log("Warm-up complete.")
+  
   max_logging.log(f"Starting weight transfer benchmark for {num_loops} loops...")
   
   for i in range(num_loops):
     start_time = time.time()
-    transferred_data = jax.device_put(dummy_data, sampler_sharding)
+    if data_transfer_method == "device_put":
+      transferred_data = jax.device_put(dummy_data, sampler_sharding)
+    elif data_transfer_method == "reshard":
+      transferred_data = experimental_reshard.reshard(dummy_data, sampler_sharding)
+    elif data_transfer_method == "reshard_directly":
+      transferred_data = reshard.reshard_pytree(dummy_data, sampler_sharding)
     jax.block_until_ready(transferred_data)
     end_time = time.time()
     
