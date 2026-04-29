@@ -16,6 +16,7 @@
 
 from flax import nnx
 from maxtext.utils import max_logging
+import re
 
 
 def _nav_to_attr(root, parts):
@@ -77,41 +78,56 @@ def prepare_student_weights(
   student_graph = {"/".join(map(str, path)): node for path, node in nnx.graph.iter_graph(student_model)}
 
   # --- Weight sharing (alias destination -> source Variable) ---
-  for source_path, dest_path in student_weights_share_map.items():
-    source_node = student_graph.get(source_path)
-    dest_node = student_graph.get(dest_path)
-    assert (
-        source_node is not None
-    ), f"Student parameter sharing: Could not find source_node model parameter at path: {source_path}"
-    assert (
-        dest_node is not None
-    ), f"Student parameter sharing: Could not find dest_node model parameter at path: {dest_path}"
 
-    assert source_node.value.shape == dest_node.value.shape, (
-        f"Shape mismatch for sharing parameter between {source_path} and {dest_path}: "
-        f"{source_node.value.shape} vs {dest_node.value.shape}"
-    )
+  for source_pattern, dest_pattern in student_weights_share_map.items():
+    matched_any = False
+    for source_path, source_node in student_graph.items():
+      match = re.fullmatch(source_pattern, source_path)
+      if match:
+        matched_any = True
+        dest_path = source_path if source_pattern == dest_pattern else match.expand(dest_pattern)
+        dest_node = student_graph.get(dest_path)
+        assert (
+            dest_node is not None
+        ), f"Student parameter sharing: Could not find dest_node model parameter at path: {dest_path}"
+        assert source_node.get_value().shape == dest_node.get_value().shape, (
+            f"Shape mismatch for sharing parameter between {source_path} and {dest_path}: "
+            f"{source_node.get_value().shape} vs {dest_node.get_value().shape}"
+        )
+        max_logging.info(f"Sharing parameter {source_path} with {dest_path}")
+        dest_parts = dest_path.split("/")
+        dest_parent = _nav_to_attr(student_model, dest_parts[:-1])
+        dest_attr = dest_parts[-1]
+        if hasattr(dest_parent, dest_attr):
+          setattr(dest_parent, dest_attr, source_node)
+        else:
+          dest_parent[dest_attr] = source_node
 
-    max_logging.info(f"Sharing parameter {source_path} with {dest_path}")
-    dest_parts = dest_path.split("/")
+    if not matched_any:
+      raise ValueError(f"Student parameter sharing: No paths matched the source pattern: {source_pattern}")
 
-    dest_parent = _nav_to_attr(student_model, dest_parts[:-1])
-    dest_attr = dest_parts[-1]
+  # --- teacher to student weights copying  ---
+  for teacher_pattern, student_pattern in teacher_weights_copy_map.items():
+    matched_any = False
+    for teacher_path, teacher_node in teacher_graph.items():
+      match = re.fullmatch(teacher_pattern, teacher_path)
+      if match:
+        matched_any = True
+        student_path = teacher_path if teacher_pattern == student_pattern else match.expand(student_pattern)
+        student_path_parts = student_path.split("/")
+        student_node = _nav_to_attr(student_model, student_path_parts)  # student_graph.get(student_path)
 
-    if hasattr(dest_parent, dest_attr):
-      setattr(dest_parent, dest_attr, source_node)
-    else:
-      dest_parent[dest_attr] = source_node
+        assert (
+            student_node is not None
+        ), f"Could not find student model parameter at path: {student_path} for teacher parameter {teacher_path}"
+        assert student_node.get_value().shape == teacher_node.get_value().shape, (
+            f"Shape mismatch for {teacher_path}. Teacher: {teacher_node.get_value().shape},"
+            f" Student: {student_node.get_value().shape}"
+        )
+        student_node.set_value(teacher_node.get_value())
+        max_logging.info(f"Inserted teacher weight parameter {teacher_path} to the student at {student_path}")
 
-  for teacher_path, student_path in teacher_weights_copy_map.items():
-    teacher_node = teacher_graph.get(teacher_path)
-    student_node = student_graph.get(student_path)
-    assert teacher_node is not None, f"Could not find teacher model parameter at path: {teacher_path}"
-    assert student_node is not None, f"Could not find student model parameter at path: {student_path}"
-    assert (
-        student_node.value.shape == teacher_node.value.shape
-    ), f"Shape mismatch for {teacher_path}. Teacher: {teacher_node.value.shape}, Student: {student_node.value.shape}"
-    student_node.value = teacher_node.value
-    max_logging.info(f"Inserted teacher weight parameter {teacher_path} to the student at {student_path}")
+    if not matched_any:
+      raise ValueError(f"Teacher weight injection: No paths matched the source pattern: {teacher_pattern}")
 
   max_logging.info("Teacher weight injection complete.")
