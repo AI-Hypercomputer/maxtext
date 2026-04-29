@@ -13,7 +13,7 @@
 # limitations under the License.
 
 """Ragged gather kernel implementation from tpu-inference."""
-# Source from https://github.com/vllm-project/tpu-inference/blob/main/tpu_inference/kernels/gather/ragged_gather.py
+# Source from https://github.com/vllm-project/tpu-inference/blob/main/tpu_inference/kernels/sparse_core/ragged_gather.py
 
 import functools
 
