@@ -1,5 +1,7 @@
 """Simplified training loop for NNX experimental track in MaxText."""
 
+from datetime import datetime
+
 import jax
 import jax.numpy as jnp
 from flax import nnx
@@ -46,7 +48,7 @@ def main():
   print(f"Total devices: {jax.device_count()}")
   print(f"Mesh: {mesh}")
   
-  with jax.sharding.use_mesh(mesh):
+  with jax.set_mesh(mesh):
     sharding = LlamaSharding()
     rngs = nnx.Rngs(42)
     
@@ -97,7 +99,7 @@ def main():
     
     print("Starting training loop...")
     num_steps = 10
-    profile_dir = "nnx_profile_traces"
+    profile_dir = "gs://bvandermoon-multipod-maxtext/m3_profile_traces/" + datetime.now().strftime("%Y-%m-%d-%H-%M-%S") 
     
     loss = None
     for step in range(num_steps):

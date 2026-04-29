@@ -121,7 +121,8 @@ def _dot_general_qt_bwd(dimension_numbers, config, out_sharding, residuals, g):
                 calibration_method=g_calibration_method,
                 noise_fn=g_noise_fn,
             )
-            if config.disable_channelwise_axes:
+            disable_channelwise = config.lhs_disable_channelwise_axes if for_dlhs else config.rhs_disable_channelwise_axes
+            if disable_channelwise:
                 g_how = dataclasses.replace(g_how, channelwise_axes=[])
             g = qarray.quantize(g, g_how)
 
@@ -178,7 +179,7 @@ def _dot_general_qt(lhs, rhs, dimension_numbers, config, out_sharding=None):
             tile_size=config.tile_size,
             calibration_method=config.lhs_calibration_method,
         )
-        if config.disable_channelwise_axes:
+        if config.lhs_disable_channelwise_axes:
             lhs_how = dataclasses.replace(lhs_how, channelwise_axes=[])
         lhs_calibration = qarray.calibrate(lhs, lhs_how)
         if config.lhs_collect_quant_stat:
@@ -193,7 +194,7 @@ def _dot_general_qt(lhs, rhs, dimension_numbers, config, out_sharding=None):
             tile_size=config.tile_size,
             calibration_method=config.rhs_calibration_method,
         )
-        if config.disable_channelwise_axes:
+        if config.rhs_disable_channelwise_axes:
             rhs_how = dataclasses.replace(rhs_how, channelwise_axes=[])
         rhs_calibration = qarray.calibrate(rhs, rhs_how)
         if config.rhs_collect_quant_stat:
