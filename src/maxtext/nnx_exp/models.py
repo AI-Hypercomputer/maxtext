@@ -185,10 +185,12 @@ class DecoderLayer(nnx.Module):
     self.mlp = MLP(config, rngs=rngs, sharding=sharding)
 
   def __call__(self, x, positions, mask=None):
+    print('running decoder layer call')
     attn_in = _stamp_sharding(self.attn_norm(x), self.sharding.sequence_spec("attn_input"))
     x = _stamp_sharding(x + self.attn(attn_in, positions, mask), self.sharding.sequence_spec("post_attn"))
     mlp_in = _stamp_sharding(self.mlp_norm(x), self.sharding.sequence_spec("mlp_input"))
     x = _stamp_sharding(x + self.mlp(mlp_in), self.sharding.sequence_spec("post_mlp"))
+    print('done with decoder layer call')
     return x
 
 
@@ -205,7 +207,7 @@ class Llama(nnx.Module):
       rngs=rngs,
       embedding_init=_sharded_init(embedding_init, sharding.init_weight_spec("embed", ("vocab",), ("embed",))),
     )
-    self.layers = nnx.Sequential([DecoderLayer(config, rngs=rngs, sharding=sharding) for _ in range(config.num_layers)])
+    self.layers = nnx.Sequential(*[DecoderLayer(config, rngs=rngs, sharding=sharding) for _ in range(config.num_layers)])
     self.norm = nnx.RMSNorm(
       config.emb_dim,
       epsilon=config.norm_eps,
@@ -222,7 +224,7 @@ class Llama(nnx.Module):
 
   def __call__(self, tokens, positions, mask=None):
     x = self.embed_tokens(tokens)
-    for layer in self.layers.iter_children():
+    for layer in self.layers.layers:
       x = layer(x, positions, mask)
     x = _stamp_sharding(self.norm(x), self.sharding.sequence_spec("final_norm"))
     
