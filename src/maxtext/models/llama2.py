@@ -34,7 +34,7 @@ from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_utils
 from maxtext.utils.sharding import create_sharding, maybe_shard_with_logical
-from maxtext.layers.learn_to_init_layer import LearnToInitDecoderLayer
+from maxtext.layers.learn_to_init_layer import apply_lti_modification
 
 # -----------------------------------------
 # The Decoder Layer specific for Llama2
@@ -228,21 +228,8 @@ class LlamaDecoderLayer(nnx.Module):
       return layer_output, kv_cache
 
 
-class LlamaLTIDecoderLayer(LearnToInitDecoderLayer):
-  """A Type-bounded version of Llama-specific LearnToInitDecoderLayer.
-  Temporal LTI wrapper before it is generalized for other models.
-  """
-
-  def __init__(self, *args, **kwargs):
-    super().__init__(*args, base_layer_cls=LlamaDecoderLayer, **kwargs)
-
-
-LlamaLTIDecoderLayerToLinen = nnx_wrappers.to_linen_class(
-    LlamaLTIDecoderLayer,
-    base_metadata_fn=initializers.variable_to_logically_partitioned,
-)
-
 LlamaDecoderLayerToLinen = nnx_wrappers.to_linen_class(
     LlamaDecoderLayer,
     base_metadata_fn=initializers.variable_to_logically_partitioned,
+    nnx_module_augment_fn=apply_lti_modification,
 )

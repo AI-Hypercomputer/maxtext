@@ -25,7 +25,7 @@ from maxtext.layers.learn_to_init_layer import LearnToInitDense
 from maxtext.trainers.post_train.distillation.lti_utils import prepare_student_weights
 from unittest import mock
 from maxtext.models.llama2 import LlamaDecoderLayer
-from maxtext.layers.learn_to_init_layer import LearnToInitDecoderLayer
+from maxtext.layers.learn_to_init_layer import apply_lti_modification
 
 
 # Minimal dummy models for testing
@@ -90,11 +90,7 @@ class PrepareStudentWeightsTest(unittest.TestCase):
     # Since student's layer2 was "shared" from layer1, the copy operation
     # overwrites student's layer1.
     self.assertTrue(jnp.array_equal(student.layer1.kernel.value, teacher.layer2.kernel.value))
-
-    # The actual layer2 of the student remains unchanged because the dictionary
-    # reference was rerouted. We verify it still has its original initialization.
-    student_original_layer2 = DummyModel(nnx.Rngs(1)).layer2.kernel.value
-    self.assertTrue(jnp.array_equal(student.layer2.kernel.value, student_original_layer2))
+    self.assertTrue(jnp.array_equal(student.layer2.kernel.value, teacher.layer2.kernel.value))
 
   def test_prepare_student_weights_shape_mismatch(self):
     """Verifies that an error is raised when trying to copy misaligned shapes."""
@@ -214,19 +210,21 @@ class LearnToInitDenseTest(unittest.TestCase):
     self.assertEqual(out.shape, (batch_size, seq_len, student_heads, student_head_dim))
 
 
-class LearnToInitDecoderLayerTest(unittest.TestCase):
+class ApplyLtiModificationTest(unittest.TestCase):
+  """Test LTI module augmentation functionality."""
 
-  def test_llama_lti_decoder_layer_initialization(self):
-    """Verifies LearnToInitDecoderLayer initializes and modifies LlamaDecoderLayer correctly."""
+  def get_mock_config(self):
+    """Setup mock teacher & student configs."""
 
-    # 1. Setup mock teacher config
     mock_teacher_config = mock.MagicMock()
     mock_teacher_config.base_num_query_heads = 4
     mock_teacher_config.base_num_kv_heads = 2
     mock_teacher_config.head_dim = 16
 
-    # 2. Setup mock student config
+    # Setup mock student config
     mock_config = mock.MagicMock()
+    mock_config.learn_to_init_mode = True
+    mock_config.attn_module_name = "self_attention"
     mock_config.lti_use_general_linear_map = False
     mock_config.teacher_config = mock_teacher_config
 
@@ -259,8 +257,11 @@ class LearnToInitDecoderLayerTest(unittest.TestCase):
     mock_config.scan_layers = False
     mock_config.ici_context_autoregressive_parallelism = 1
     mock_config.fused_qkv = False
+    return mock_config
 
-    # 3. Dummy Jax sharding mesh and NNX Rngs
+  def test_apply_lti_modification_initialization(self):
+    """Verifies apply_lti_modification modifies LlamaDecoderLayer correctly."""
+    mock_config = self.get_mock_config()
     mesh = jax.sharding.Mesh(jax.devices(), ("data",))
     rngs = nnx.Rngs(0)
 
@@ -271,21 +272,16 @@ class LearnToInitDecoderLayerTest(unittest.TestCase):
     ):
 
       # This effectively initializes LlamaLTIDecoderLayer and implicitly calls _customize_attention_modules
-      layer = LearnToInitDecoderLayer(
-          base_layer_cls=LlamaDecoderLayer,
+      layer = LlamaDecoderLayer(
           config=mock_config,
           model_mode="train",
           mesh=mesh,
           rngs=rngs,
       )
+      layer = apply_lti_modification(layer)
 
-    # 4. Verify initialization result
-    self.assertIsInstance(layer.learn_to_init_wrapper, LlamaDecoderLayer)
-    self.assertEqual(layer.self_attention_module_name, "self_attention")
-
-    # 5. Verify the behavior of _customize_attention_modules
-    # It should correctly replace query, key, value, and out with LearnToInitDense
-    attention_module = layer.learn_to_init_wrapper.self_attention
+    self.assertIsInstance(layer, LlamaDecoderLayer)
+    attention_module = layer.self_attention
 
     for proj_name in ["query", "key", "value", "out"]:
       child = getattr(attention_module, proj_name)
@@ -301,6 +297,30 @@ class LearnToInitDecoderLayerTest(unittest.TestCase):
       elif proj_name == "out":
         # (teacher_heads, head_dim, emb_dim) -> (4, 16, 64)
         self.assertEqual(child.C.value.shape, (4, 16, 64))
+
+  def test_apply_lti_modification_skips_when_disabled(self):
+    """Verifies apply_lti_modification does not modify when learn_to_init_mode is False."""
+    mock_config = self.get_mock_config()
+    mock_config.learn_to_init_mode = False
+    mesh = jax.sharding.Mesh(jax.devices(), ("data",))
+    rngs = nnx.Rngs(0)
+
+    with (
+        mock.patch("maxtext.utils.max_utils.get_batch_seq_len_for_mode", return_value=(2, 32)),
+        mock.patch("maxtext.layers.quantizations.configure_kv_quant", return_value=None),
+    ):
+      layer = LlamaDecoderLayer(
+          config=mock_config,
+          model_mode="train",
+          mesh=mesh,
+          rngs=rngs,
+      )
+      layer = apply_lti_modification(layer)
+
+    attention_module = layer.self_attention
+    for proj_name in ["query", "key", "value", "out"]:
+      child = getattr(attention_module, proj_name)
+      self.assertNotIsInstance(child, LearnToInitDense, f"{proj_name} was unexpectedly swapped to LearnToInitDense")
 
 
 if __name__ == "__main__":

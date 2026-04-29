@@ -110,8 +110,6 @@ class DecoderBlockType(enum.Enum):
   LLAMA4 = "llama4"
   OLMO3 = "olmo3"
 
-  LLAMA2LTI = "llama2_learn_to_init"
-
 
 class AttentionType(enum.Enum):
   GLOBAL = "global"  # default, with causality

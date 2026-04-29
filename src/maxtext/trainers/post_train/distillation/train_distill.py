@@ -44,6 +44,7 @@ from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
 import optax
+import re
 from orbax import checkpoint
 
 # MaxText Imports
@@ -688,11 +689,12 @@ def train_distill(
     max_logging.log(f"Loading Student from {student_config.load_parameters_path}...")
     _log_config_details(student_config, "Student")
     student_model = get_maxtext_model(student_config, mesh)
-    student_params_to_update = getattr(student_config, "student_params_to_update", [])
+    student_params_to_update = getattr(student_config, "student_params_to_update", []) or []
+    student_param_update_templates = [re.compile(t) for t in student_params_to_update]
 
     def student_freeze_param_fn(path) -> bool:
       path_str = "/".join(str(p) for p in path)
-      return not any(template in path_str for template in student_params_to_update)
+      return not any(regex.search(path_str) for regex in student_param_update_templates)
 
     # Inject the teacher's frozen weights into the student model
     if teacher_model:
