@@ -565,6 +565,8 @@ class NNXDecoder(nnx.Module):
       (final_carry, updated_layers) when kv_caches_stacked is None.
       (final_carry, updated_layers, returned_kv_stacked) otherwise.
     """
+    if length == 0:
+      return x_in, layers, kv_caches_stacked if kv_caches_stacked is not None else None
     policy = self.get_remat_policy()
     prevent_cse = maxtext_utils.should_prevent_cse_in_remat(self.config)
     graphdef, params, state = nnx.split(layers, nnx.Param, ...)
@@ -652,9 +654,12 @@ class NNXDecoder(nnx.Module):
       returned_kv_stacked = None
 
     if scan_axis != 0:
-      params = jax.tree.map(lambda x: jnp.moveaxis(x, 0, scan_axis), params)
+      new_params, new_rest = scanned_state.split(nnx.Param, ...)
+      new_params = jax.tree.map(lambda x: jnp.moveaxis(x, 0, scan_axis), new_params)
+      scanned_state = nnx.merge_state(new_params, new_rest)
 
-    return final_carry, nnx.merge(graphdef, scanned_state), returned_kv_stacked if use_kv else None
+    nnx.update(layers, scanned_state)
+    return final_carry, layers, returned_kv_stacked if use_kv else None
 
   def get_decoder_layers(self):
     """Retrieves decoder layer classes based on config using a dictionary lookup."""
@@ -1152,8 +1157,8 @@ class NNXDecoder(nnx.Module):
                   num_layers=num_moe,
               )
           else:
-            y, self.moe_layer, _ = self._apply_layers_sequentially(
-                self.moe_layer, y, *layer_args, length=num_moe, **layer_kwargs
+            y, self.moe_layers, _ = self._apply_layers_sequentially(
+                self.moe_layers, y, *layer_args, length=num_moe, **layer_kwargs
             )
       elif self.is_gemma3:
         y = self._apply_gemma3_scanned_blocks(
