@@ -326,7 +326,7 @@ class QuantTest(unittest.TestCase):
   """Tests for quantized model correctness."""
 
   def setUp(self):
-    self.cfg = self.init_pyconfig()
+    self.cfg = self.init_pyconfig(scan_layers=False)
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
     self.mesh = Mesh(devices_array, self.cfg.mesh_axes)
     self.inputs = jnp.ones((4, 16))
@@ -391,79 +391,77 @@ class QuantTest(unittest.TestCase):
 
     jax.tree_util.tree_map_with_path(compare_fn, a, b)
 
-  def quantization_config(self, quant, logits_tolerance=2e-1, grad_tolerance=5e-1):
+  def quantization_config(self, quant, logits_tolerance=2e-1, grad_tolerance=5e-1, scan_layers=False):
     """Run forward pass and backward pass for quantized model and compare with base model."""
-    cfg = self.init_pyconfig(quantization=quant)
-    model = model_creation_utils.create_model(self.cfg, self.mesh)
-    qt_model = model_creation_utils.create_model(cfg, self.mesh)
+    cfg = self.init_pyconfig(quantization=quant, scan_layers=scan_layers)
+    # Rebuild base config and mesh with matching scan_layers for fair comparison
+    base_cfg = self.init_pyconfig(scan_layers=scan_layers)
+    devices_array = maxtext_utils.create_device_mesh(base_cfg)
+    mesh = Mesh(devices_array, base_cfg.mesh_axes)
+
+    rngs = nnx.Rngs(params=self.rng, aqt=self.rng, dropout=self.rng)
+    model = model_creation_utils.create_model(base_cfg, mesh, rngs=rngs)
+
+    rngs_qt = nnx.Rngs(params=self.rng, aqt=self.rng, dropout=self.rng)
+    qt_model = model_creation_utils.create_model(cfg, mesh, rngs=rngs_qt)
 
     ids, decoder_segment_ids, decoder_positions = self.get_data()
-    var = model.init(
-        {"params": self.rng, "aqt": self.rng, "dropout": self.rng},
-        ids,
-        decoder_positions,
-        decoder_segment_ids,
-        enable_dropout=False,
-        mutable=True,
-    )
-    quantized_vars = qt_model.init(
-        {"params": self.rng, "aqt": self.rng, "dropout": self.rng},
-        ids,
-        decoder_positions,
-        decoder_segment_ids,
-        enable_dropout=False,
-        mutable=True,
-    )
 
-    def loss_base(all_vars, inputs):
-      logits, _ = model.apply(
-          all_vars,
+    # fp8_gpu/fp8_nanoo: FP8 handled by DenseGeneral's ToNNX wrapper at init time.
+    # Other QWIX modes: apply quantization via Qwix provider interception.
+
+    _, params_base, _ = nnx.split(model, nnx.Param, ...)
+    nnx.update(qt_model, params_base)
+    
+    _, params_qt, _ = nnx.split(qt_model, nnx.Param, ...)
+    print("Max weight diff after sync:", max(jax.tree_util.tree_leaves(jax.tree.map(lambda x, y: jnp.abs(x - y).max(), params_base, params_qt))))
+
+    def loss_base(model, inputs):
+      logits = model(
           *inputs,
           enable_dropout=False,
-          rngs={"params": self.rng},
-          mutable=True,
       )
       return jnp.mean((logits) ** 2)
 
-    def loss_quant(all_vars, inputs):
-      logits, _ = qt_model.apply(
-          all_vars,
+    def loss_quant(qt_model, inputs):
+      logits = qt_model(
           *inputs,
           enable_dropout=False,
-          rngs={"params": self.rng},
-          mutable=True,
       )
       return jnp.mean((logits) ** 2)
 
     # Compute gradients w.r.t. both models
-    grads_base = jax.grad(loss_base)(var, (ids, decoder_positions, decoder_segment_ids))
-    grads_quant = jax.grad(loss_quant)(quantized_vars, (ids, decoder_positions, decoder_segment_ids))
+    grads_base = nnx.grad(loss_base)(model, (ids, decoder_positions, decoder_segment_ids))
+    grads_quant = nnx.grad(loss_quant)(qt_model, (ids, decoder_positions, decoder_segment_ids))
 
-    logits, _ = model.apply(
-        var,
+    logits = model(
         ids,
         decoder_positions,
         decoder_segment_ids,
         enable_dropout=False,
-        rngs={"params": self.rng},
-        mutable=True,
     )
-    quant_logits, _ = qt_model.apply(
-        quantized_vars,
+    quant_logits = qt_model(
         ids,
         decoder_positions,
         decoder_segment_ids,
         enable_dropout=False,
-        rngs={"params": self.rng},
-        mutable=True,
     )
+
+    inputs = (ids, decoder_positions, decoder_segment_ids)
+    print("\n=== Vanilla Model Structure ===")
+    print(model)
+    
+    print("\n=== Quantized Model Structure ===")
+    print(qt_model)
+
+
     print("relative error in logits:" f" {jnp.abs(quant_logits - logits).mean() / jnp.abs(logits).mean()}")
     assert jnp.abs(quant_logits - logits).mean() / jnp.abs(logits).mean() < logits_tolerance
-    self.print_grad_diff(grads_base["params"], grads_quant["params"])
+    self.print_grad_diff(grads_base, grads_quant)
     self.assertTrue(
         self.pytree_allclose(
-            grads_base["params"],
-            grads_quant["params"],
+            grads_base,
+            grads_quant,
             tolerance=grad_tolerance,
         )
     )
@@ -480,33 +478,45 @@ class QuantTest(unittest.TestCase):
   def test_fp8_full_quantization(self):
     self.quantization_config("fp8_full")
 
-  @pytest.mark.gpu_only
-  @pytest.mark.external_serving
+  # @pytest.mark.gpu_only
+  # @pytest.mark.external_serving
   def test_fp8_gpu_quantization(self):
     self.quantization_config("fp8_gpu", grad_tolerance=1.0)
 
-  @pytest.mark.gpu_only
-  @pytest.mark.external_serving
+  # @pytest.mark.gpu_only
+  # @pytest.mark.external_serving
+  def test_fp8_gpu_quantization_with_scan(self):
+    """Verify fp8_gpu works with scan_layers=True (ToNNX wrapping fix)."""
+    self.quantization_config("fp8_gpu", grad_tolerance=1.0, scan_layers=True)
+
+  # @pytest.mark.gpu_only
+  # @pytest.mark.external_serving
   def test_fp8_nanoo_quantization(self):
     self.quantization_config("fp8_nanoo", grad_tolerance=1.0)
 
+  # @pytest.mark.gpu_only
+  # @pytest.mark.external_serving
+  def test_fp8_nanoo_quantization_with_scan(self):
+    """Verify fp8_nanoo works with scan_layers=True (ToNNX wrapping fix)."""
+    self.quantization_config("fp8_nanoo", grad_tolerance=1.0, scan_layers=True)
+
   @pytest.mark.skip(reason="No runner with GPU arch >= 89 is available")
-  @pytest.mark.gpu_only
+  # @pytest.mark.gpu_only
   def test_fp8_te_fp8_delayedscaling_quantization(self):
     self.quantization_config("te_fp8_delayedscaling", grad_tolerance=1.0)
 
   @pytest.mark.skip(reason="No runner with GPU arch >= 89 is available")
-  @pytest.mark.gpu_only
+  # @pytest.mark.gpu_only
   def test_fp8_te_fp8_currentscaling_quantization(self):
     self.quantization_config("te_fp8_currentscaling", grad_tolerance=1.0)
 
   @pytest.mark.skip(reason="No runner with GPU arch >= 100 is available")
-  @pytest.mark.gpu_only
+  # @pytest.mark.gpu_only
   def test_fp8_te_mxfp8_quantization(self):
     self.quantization_config("te_mxfp8", grad_tolerance=1.0)
 
   @pytest.mark.skip(reason="No runner with GPU arch >= 100 is available")
-  @pytest.mark.gpu_only
+  # @pytest.mark.gpu_only
   def test_fp8_te_nvfp4_quantization(self):
     self.quantization_config("te_nvfp4", grad_tolerance=1.0)
 

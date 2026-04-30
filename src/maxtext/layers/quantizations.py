@@ -712,13 +712,37 @@ class NvidaFp8Provider(qwix.QtProvider):
     rule, op_id = self._get_current_rule_and_op_id("dot_general")
     if rule is None:
       return jax.lax.dot_general(*args, **kwargs)
-    return nn.Fp8DirectDotGeneralOp(name=op_id)(*args, **kwargs)
+    
+    from qwix._src import flax_util
+    module = flax_util.get_current_module()
+    from flax import nnx
+    from src.maxtext.layers.nnx_wrappers import ToLinen, ToNNX
+    if isinstance(module, nnx.Module) and not isinstance(module, ToLinen):
+      if not hasattr(module, op_id):
+        op = ToNNX(nn.Fp8DirectDotGeneralOp(name=op_id))
+        op.lazy_init(*args, **kwargs)
+        setattr(module, op_id, op)
+      return getattr(module, op_id)(*args, **kwargs)
+    else:
+      return nn.Fp8DirectDotGeneralOp(name=op_id)(*args, **kwargs)
 
   def einsum(self, *args, **kwargs):
     rule, op_id = self._get_current_rule_and_op_id("einsum")
     if rule is None:
       return jnp.einsum(*args, **kwargs)
-    return nn.Fp8Einsum(name=op_id)(*args, **kwargs)
+    
+    from qwix._src import flax_util
+    module = flax_util.get_current_module()
+    from flax import nnx
+    from src.maxtext.layers.nnx_wrappers import ToLinen, ToNNX
+    if isinstance(module, nnx.Module) and not isinstance(module, ToLinen):
+      if not hasattr(module, op_id):
+        op = ToNNX(nn.Fp8Einsum(name=op_id))
+        op.lazy_init(*args, **kwargs)
+        setattr(module, op_id, op)
+      return getattr(module, op_id)(*args, **kwargs)
+    else:
+      return nn.Fp8Einsum(name=op_id)(*args, **kwargs)
 
 
 class NANOOFp8Provider(qwix.QtProvider):
@@ -728,31 +752,37 @@ class NANOOFp8Provider(qwix.QtProvider):
     rule, op_id = self._get_current_rule_and_op_id("dot_general")
     if rule is None:
       return jax.lax.dot_general(*args, **kwargs)
-    return nn.NANOOFp8DotGeneralOp(name=op_id)(*args, **kwargs)
 
+    from qwix._src import flax_util
+    module = flax_util.get_current_module()
+    from flax import nnx
+    from src.maxtext.layers.nnx_wrappers import ToLinen, ToNNX
+    if isinstance(module, nnx.Module) and not isinstance(module, ToLinen):
+      if not hasattr(module, op_id):
+        op = ToNNX(nn.NANOOFp8DotGeneralOp(name=op_id))
+        op.lazy_init(*args, **kwargs)
+        setattr(module, op_id, op)
+      return getattr(module, op_id)(*args, **kwargs)
+    else:
+      return nn.NANOOFp8DotGeneralOp(name=op_id)(*args, **kwargs)
 
-def get_fp8_full_qwix_rule_w_sparsity(config: Config):
-  sparsity_rule = None
-  if config.weight_sparsity_n and config.weight_sparsity_m:
-    sparsity_rule = sparsity.SparsityRule(
-        weight_sparsity_n=config.weight_sparsity_n,
-        weight_sparsity_m=config.weight_sparsity_m,
-        weight_sparsity_update_step=config.weight_sparsity_update_step,
-        weight_sparsity_start_step=config.weight_sparsity_start_step,
-    )
-  return [
-      qwix.QtRule(
-          module_path="decoder/.*layers.*",
-          weight_qtype=jnp.float8_e4m3fn,
-          act_qtype=jnp.float8_e4m3fn,
-          bwd_qtype=jnp.float8_e5m2,
-          weight_calibration_method=config.weight_quantization_calibration_method,
-          act_calibration_method=config.act_quantization_calibration_method,
-          bwd_calibration_method=config.bwd_quantization_calibration_method,
-          additional_qt_config={"sparsity_rule": sparsity_rule},
-          op_names=("dot_general", "gmm", "ragged_dot"),
-      ),
-  ]
+  def einsum(self, *args, **kwargs):
+    rule, op_id = self._get_current_rule_and_op_id("einsum")
+    if rule is None:
+      return jnp.einsum(*args, **kwargs)
+    # NANOOFp8 doesn't have an Einsum op, so we fall back to Fp8Einsum
+    from qwix._src import flax_util
+    module = flax_util.get_current_module()
+    from flax import nnx
+    from src.maxtext.layers.nnx_wrappers import ToLinen, ToNNX
+    if isinstance(module, nnx.Module) and not isinstance(module, ToLinen):
+      if not hasattr(module, op_id):
+        op = ToNNX(nn.Fp8Einsum(name=op_id))
+        op.lazy_init(*args, **kwargs)
+        setattr(module, op_id, op)
+      return getattr(module, op_id)(*args, **kwargs)
+    else:
+      return nn.Fp8Einsum(name=op_id)(*args, **kwargs)
 
 
 def get_quantization_rule(config: Config):
@@ -847,7 +877,18 @@ def maybe_quantize_model(model, config):
   if config.use_qwix_quantization and not config.use_batch_split_schedule:
     quantization_provider = get_qt_provider(config)
     if quantization_provider:
-      model = qwix.quantize_model(model, quantization_provider)
+      from flax import nnx
+      from src.maxtext.layers.nnx_wrappers import ToLinen
+      if isinstance(model, nnx.Module) and not isinstance(model, ToLinen):
+        import jax.numpy as jnp
+        batch_size = config.global_batch_size_to_train_on
+        seq_len = config.max_target_length
+        ids = jnp.zeros((batch_size, seq_len), dtype=jnp.int32)
+        decoder_segment_ids = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
+        decoder_positions = jnp.tile(jnp.arange(seq_len, dtype=jnp.int32), (batch_size, 1))
+        model = qwix.quantize_model(model, quantization_provider, ids, decoder_positions, decoder_segment_ids, enable_dropout=False)
+      else:
+        model = qwix.quantize_model(model, quantization_provider)
   return model
 
 

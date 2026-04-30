@@ -1195,6 +1195,10 @@ class NNXDecoder(nnx.Module):
           )
           # kv_caches list is updated in-place inside _apply_layers_sequentially
         else:
+          if not hasattr(self.layers, "_qwix_initialized"):
+            self.layers._qwix_initialized = True
+            # We must evaluate it outside scan to attach Qwix nodes dynamically.
+            self.layers(y, *layer_args, **layer_kwargs)
           y, self.layers, _ = self._apply_layers_sequentially(
               self.layers, y, *layer_args, length=scan_length, **layer_kwargs
           )
@@ -1229,6 +1233,11 @@ class NNXDecoder(nnx.Module):
         input_tokens = decoder_input_tokens if cfg.engram_layers else None
         if input_tokens is not None:
           layer_kwargs["decoder_input_tokens"] = input_tokens
+
+        if not hasattr(layer, "_qwix_initialized"):
+          layer._qwix_initialized = True
+          # Pre-run WITHOUT jax.checkpoint to mutate the PyTree natively!
+          layer(y, *layer_args, **layer_kwargs)
 
         y, kv_cache, new_state = checkpointed_fn(graphdef, state, y, kv_cache)
         nnx.update(layer, new_state)
