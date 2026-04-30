@@ -1,0 +1,88 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This rule uses data, FSDP, and expert. Expert axis acts as tensor parallelism in  
+# components except RoutedMoE part.
+mesh_axes: ['data', 'fsdp', 'expert']
+data_sharding: [['data', 'fsdp', 'expert']]
+logical_axis_rules: [
+                      # ==========================================
+                      # Vocabulary Embedding
+                      # ==========================================
+                      # Vocab Activations
+                      ['activation_embed_and_logits_batch', ['data', 'fsdp']],
+                      ['activation_embed_and_logits_batch_sequence', ['data', 'fsdp']],
+                      ['activation_vocab', ['expert']],
+                      # Vocab Weights
+                      ['vocab', ['expert']],
+                      ['embed_vocab', []],
+                      # ==========================================
+                      # Attention
+                      # ==========================================
+                      # Attention Activations
+                      ['activation_heads', ['expert']],
+                      ['activation_kv_heads', ['expert']],
+                      ['activation_attn_length', []],
+                      ['activation_attn_length', []],
+                      ['activation_q_length', []],
+                      ['activation_kv_length', []],
+                      ['activation_attn_embed', ['expert']],
+                      ['activation_kv', ['expert']],
+                      ['activation_kv_batch', ['data', 'fsdp']],
+                      ['activation_kv_head_dim', ['expert']],
+                      # Attention Weights
+                      ['heads', ['expert']],
+                      ['q_heads', ['expert']],
+                      ['kv_heads', ['expert']],
+                      ['qkv', []],
+                      ['kv', []],
+                      ['kv_head_dim', []],
+                      ['q_lora', ['fsdp']],
+                      ["q_lora_up_proj", []],
+                      ['kv_lora', ['fsdp']],
+                      ["kv_lora_up_proj", []],
+                      # ==========================================
+                      # Mixture of Experts (MoE)
+                      # ==========================================
+                      # MoE Activations
+                      ['activation_batch_moe', ['data', 'fsdp']],
+                      ['activation_length_moe', []],
+                      ['activation_norm_length_moe', []],
+                      ['activation_embed_moe', []],
+                      ['activation_mlp_moe', []],
+                      ['activation_exp', ['expert']],
+                      # MoE Weights
+                      ['exp', 'expert'],
+                      ['mlp_moe', []],
+                      ['embed_moe', ['fsdp']],
+                      # ==========================================
+                      # Standard MLP / Dense Layers / Model Structure
+                      # ==========================================
+                      # Dense Activations
+                      ['activation_mlp', ['expert']],
+                      ['activation_batch', ['data', 'fsdp']],
+                      ['activation_length', []],
+                      ['activation_norm_length', []],
+                      ['activation_embed', ['expert']],
+                      # General Weights
+                      ['mlp', ['expert']],
+                      ['embed', ['fsdp']],
+                      ['norm', ['expert']],
+                      ['engram_dim', ['expert']],
+                      # ==========================================
+                      # Deprecated / Scheduled for Removal
+                      # ==========================================
+                      ['mlp_no_fsdp', ['expert']],             
+                      ['exp_with_fsdp', 'fsdp'],
+                  ]
