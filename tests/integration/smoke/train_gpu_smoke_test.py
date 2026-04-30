@@ -48,6 +48,7 @@ class Train(unittest.TestCase):
             f"base_output_directory={self.base_output_directory}",
             "run_name=runner_test",
             r"dataset_path={self.dataset_path}",
+            f"dataset_path={self.dataset_path}",
             "enable_checkpointing=False",
             rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
             "enable_goodput_recording=False",

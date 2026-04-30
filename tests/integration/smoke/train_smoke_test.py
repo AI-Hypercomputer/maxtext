@@ -46,7 +46,7 @@ class Train(unittest.TestCase):
             # pylint: disable=f-string-without-interpolation
             f"base_output_directory={self.base_output_directory}",
             "run_name=runner_test",
-            r"dataset_path={self.dataset_path}",
+            f"dataset_path={self.dataset_path}",
             "base_emb_dim=8",
             "base_num_query_heads=4",
             "base_num_kv_heads=4",
@@ -74,7 +74,7 @@ class Train(unittest.TestCase):
             # pylint: disable=f-string-without-interpolation
             f"base_output_directory={self.base_output_directory}",
             "run_name=runner_test",
-            r"dataset_path={self.dataset_path}",
+            f"dataset_path={self.dataset_path}",
             "base_emb_dim=8",
             "base_num_query_heads=4",
             "base_num_kv_heads=4",
@@ -103,7 +103,7 @@ class Train(unittest.TestCase):
             # pylint: disable=f-string-without-interpolation
             f"base_output_directory={self.base_output_directory}",
             "run_name=runner_test",
-            r"dataset_path={self.dataset_path}",
+            f"dataset_path={self.dataset_path}",
             "base_emb_dim=8",
             "base_num_query_heads=4",
             "base_num_kv_heads=4",
@@ -135,7 +135,7 @@ class Train(unittest.TestCase):
             # pylint: disable=f-string-without-interpolation
             f"base_output_directory={self.base_output_directory}",
             "run_name=runner_test",
-            r"dataset_path={self.dataset_path}",
+            f"dataset_path={self.dataset_path}",
             "base_emb_dim=256",
             "attention_output_dim=256",
             "moe_expert_input_dim=256",
@@ -169,7 +169,7 @@ class Train(unittest.TestCase):
             # pylint: disable=f-string-without-interpolation
             f"base_output_directory={self.base_output_directory}",
             "run_name=runner_test",
-            r"dataset_path={self.dataset_path}",
+            f"dataset_path={self.dataset_path}",
             "base_emb_dim=8",
             "base_num_query_heads=4",
             "base_num_kv_heads=4",
@@ -198,7 +198,7 @@ class Train(unittest.TestCase):
             # pylint: disable=f-string-without-interpolation
             f"base_output_directory={self.base_output_directory}",
             "run_name=runner_test",
-            r"dataset_path={self.dataset_path}",
+            f"dataset_path={self.dataset_path}",
             "base_emb_dim=8",
             "base_num_query_heads=4",
             "base_num_kv_heads=4",
@@ -215,6 +215,7 @@ class Train(unittest.TestCase):
             "remove_size_one_mesh_axis_from_type=false",
             "enable_checkpointing=False",
             rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
+            "scan_layers=False",
             "enable_goodput_recording=False",
             "enable_checkpoint_cloud_logger=False",
             "monitor_goodput=False",
