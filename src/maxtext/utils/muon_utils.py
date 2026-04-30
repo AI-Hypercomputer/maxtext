@@ -21,7 +21,7 @@ optimizer to correctly apply its update rules.
 
 This module can also be run as a script to inspect the generated dimension
 numbers for a specific model. Example:
-  python3 -m MaxText.muon_utils qwen3-4b True
+  python3 -m maxtext.utils.muon_utils qwen3-4b True
 """
 
 
@@ -168,7 +168,7 @@ def get_model_mdn(model_name, scan_layers=True, verbose=False):
 
 if __name__ == "__main__":
   if len(sys.argv) != 3:
-    print("Usage: python3 -m MaxText.muon_utils <model_name> <scan_layers:True/False>")
+    print("Usage: python3 -m maxtext.utils.muon_utils <model_name> <scan_layers:True/False>")
     sys.exit(1)
   model_name_arg = sys.argv[1]
   scan_layers_arg = sys.argv[2].lower() == "true"

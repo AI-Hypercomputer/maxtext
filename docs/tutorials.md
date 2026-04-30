@@ -51,9 +51,10 @@ Step-by-step guides for running inference of MaxText models on vLLM.
 ::::
 
 ```{toctree}
-:hidden:
-:maxdepth: 1
-
+---
+hidden:
+maxdepth: 1
+---
 tutorials/first_run.md
 tutorials/pretraining.md
 tutorials/post_training_index.md

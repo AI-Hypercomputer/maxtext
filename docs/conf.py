@@ -42,6 +42,7 @@ project = "MaxText"
 # pylint: disable=redefined-builtin
 copyright = "2023–2026, Google LLC"
 author = "MaxText developers"
+version = os.environ.get("READTHEDOCS_VERSION", "latest")
 
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
@@ -51,6 +52,7 @@ extensions = [
     "sphinx_design",
     "sphinx_copybutton",
     "sphinx.ext.napoleon",
+    "sphinx.ext.mathjax",
     # This needs to be before autodoc^
     "sphinx.ext.autodoc",
     "sphinx.ext.autosummary",
@@ -119,9 +121,53 @@ exclude_patterns = [
     os.path.join("run_maxtext", "run_maxtext_via_multihost_job.md"),
     os.path.join("run_maxtext", "run_maxtext_via_multihost_runner.md"),
     os.path.join("reference", "core_concepts", "llm_calculator.ipynb"),
+    os.path.join("reference", "api.rst"),
+    os.path.join("reference", "api_generated", "MaxText*.rst"),
     os.path.join("reference", "api_generated", "modules.rst"),
     os.path.join("reference", "api_generated", "dependencies.github_deps.rst"),
     os.path.join("reference", "api_generated", "dependencies.github_deps.install_pre_train_deps.rst"),
+]
+
+# -- Options for linkcheck ----------------------------------------------------
+# Only report broken links (status 'broken') in the output
+linkcheck_report_timeouts_as_broken = True
+
+# Enable anchor checking so Sphinx looks for the #section-name
+linkcheck_anchors = True
+
+# Ignore the dynamic anchors that are generated in the documentation which can cause false positives in link checking
+linkcheck_anchors_ignore = [
+    r"^L\d+",
+    r"badput-breakdown-details",
+    r"online-inference",
+    r"install-the-seed-env-tool",
+    r"collect-stack-traces",
+    r"1-prerequisites",
+]
+
+# Disable reporting of allowed redirects to reduce noise in the output
+linkcheck_allowed_redirects = {
+    r"https://github\.com/google/maxtext": r"https://github\.com/AI-Hypercomputer/maxtext/.*",
+    r"https://cloud\.google\.com/.*": r"https://docs\.cloud\.google\.com/.*",
+    r"https://jax\.readthedocs\.io/.*": r"https://docs\.jax\.dev/.*",
+    r"https://twitter\.com/.*": r"https://x\.com/.*",
+    r"https://www\.sphinx-doc\.org": r"https://www\.sphinx-doc\.org/en/master/.*",
+    r"https://.*\.readthedocs\.io": r"https://.*\.readthedocs\.io/en/.*",
+}
+
+# Ignore specific links that are known to be inaccessible during the build process
+linkcheck_ignore = [
+    # Ignore Google Auth/Console redirects which require login
+    r"https://accounts\.google\.com/.*",
+    r"https://console\.cloud\.google\.com/.*",
+    r"https://cla\.developers\.google\.com/.*",
+    # Ignore GitHub commit history links which frequently trigger rate limiting (429)
+    r"https://github\.com/jax-ml/jax/commits/.*",
+    # Ignore Hugging Face settings links which require login
+    r"https://huggingface\.co/settings/tokens",
+    # Ignore GitHub PRs and blobs that trigger rate limiting
+    r"https://github\.com/AI-Hypercomputer/maxtext/pull/.*",
+    r"https://github\.com/google/maxtext/blob/.*",
 ]
 
 
@@ -208,3 +254,6 @@ def setup(app):
   logger = logging.getLogger("sphinx")
   warning_handler, *_ = [h for h in logger.handlers if isinstance(h, sphinx_logging.WarningStreamHandler)]
   warning_handler.filters.insert(0, FilterSphinxWarnings(app))
+
+  if version != "latest":
+    app.tags.add("is_not_latest")

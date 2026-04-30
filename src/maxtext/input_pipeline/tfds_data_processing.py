@@ -232,7 +232,9 @@ def make_tfds_train_iterator(
         hf_access_token=config.hf_access_token,
     )
     global_shape = (config.global_batch_size_to_load, config.max_target_length)
-    return multihost_dataloading.RemoteIterator(get_ds_fn, preprocessing_fn, global_mesh, global_shape)
+    return multihost_dataloading.RemoteIteratorWrapper(
+        get_ds_fn, preprocessing_fn, global_mesh, global_shape, checkpoint_path=config.checkpoint_dir
+    )
 
 
 def make_tfds_eval_iterator(
@@ -296,4 +298,6 @@ def make_tfds_eval_iterator(
         use_dpo=config.use_dpo,
         hf_access_token=config.hf_access_token,
     )
-    return multihost_dataloading.RemoteIterator(get_ds_fn, preprocessing_fn, config, global_mesh)
+    return multihost_dataloading.RemoteIteratorWrapper(
+        get_ds_fn, preprocessing_fn, config, global_mesh, checkpoint_path=config.checkpoint_dir
+    )

@@ -22,7 +22,9 @@ from functools import partial
 from typing import Union, Sequence
 from collections.abc import Iterator, Iterable
 import time
+import json
 
+from etils import epath
 import tensorflow as tf  # pylint: disable=g-import-not-at-top
 
 import numpy as np
@@ -158,41 +160,6 @@ class MultiHostDataLoadIterator:
     return jtu.tree_map(lambda x: jnp.full_like(x, 0), self.last_local_data)
 
 
-@colocated_python.colocated_python
-def _get_next(dummy_array):
-  """get next batch from the iterator stored in the state of colocated python"""
-  if "iterator" not in colocated_python.__dict__:
-    raise ValueError("iterator not found in colocated_python.__dict__")
-  if "global_shape" not in colocated_python.__dict__:
-    raise ValueError("_global_shape not found in colocated_python.__dict__")
-  local_data = next(colocated_python.__dict__["iterator"])
-  global_shape = colocated_python.__dict__["global_shape"]
-  for k, v in local_data.items():
-    local_data[k] = jnp.asarray(v)
-
-  def form_global_array_colocated_python(path, array, devices, global_shape, sharding):
-    try:
-      device_arrays = np.split(array, len(devices), axis=0)
-    except ValueError as array_split_error:
-      raise ValueError(
-          f"Unable to put to devices shape {array.shape} with "
-          f"local device count {len(devices)} "
-          f"at {jtu.keystr(path)}"
-      ) from array_split_error
-    device_arrays = jax.device_put(device_arrays, devices)
-    return jax.make_array_from_single_device_arrays(shape=global_shape, sharding=sharding, arrays=device_arrays)
-
-  return jtu.tree_map_with_path(
-      partial(
-          form_global_array_colocated_python,
-          devices=list(dummy_array.sharding.addressable_devices),
-          global_shape=global_shape,
-          sharding=dummy_array.sharding,
-      ),
-      local_data,
-  )
-
-
 def _colocated_cpu_devices(
     devices: Sequence[jax.Device],
 ) -> Sequence[jax.Device]:
@@ -205,10 +172,91 @@ def _colocated_cpu_mesh(mesh: Mesh) -> Mesh:
   return colocated_python.colocated_cpu_devices(mesh)
 
 
+@colocated_python.colocated_python_class
 class RemoteIterator:
-  "iterator class for using colocated python, iterator is initiated remotely and stored in the state of colocated python"
+  "iterator class for using colocated python class"
 
-  def __init__(self, get_ds_fn, preprocessing_fn, global_mesh, global_shape):
+  def __init__(self, get_ds_fn, preprocessing_fn, global_shape, checkpoint_path, elastic=False):
+    self.get_ds_fn = get_ds_fn
+    self.preprocessing_fn = preprocessing_fn
+    self.global_shape = global_shape
+    self.checkpoint_path = checkpoint_path
+    self.elastic = elastic
+    self.reset()
+    max_logging.log("RemoteIterator initiated")
+
+  def reset(self):
+    ds = self.get_ds_fn(dataloading_host_index=jax.process_index(), dataloading_host_count=jax.process_count())
+    dataloader = self.preprocessing_fn(dataset=ds)
+    if isinstance(dataloader, tf.data.Dataset):
+      self.iterator = dataloader.as_numpy_iterator()
+    elif isinstance(dataloader, Iterable):
+      self.iterator = iter(dataloader)
+    else:
+      raise ValueError("Type error: dataloader should be Iterable.")
+
+  def get_next(self, dummy_array):
+    """Gets the next batch of data and forms a global array."""
+    local_data = next(self.iterator)
+
+    def form_global_array_colocated_python(path, array, devices, global_shape, sharding):
+      try:
+        device_arrays = np.split(array, len(devices), axis=0)
+      except ValueError as array_split_error:
+        raise ValueError(
+            f"Unable to put to devices shape {array.shape} with "
+            f"local device count {len(devices)} "
+            f"at {jtu.keystr(path)}"
+        ) from array_split_error
+      device_arrays = jax.device_put(device_arrays, devices)
+      return jax.make_array_from_single_device_arrays(shape=global_shape, sharding=sharding, arrays=device_arrays)
+
+    return jtu.tree_map_with_path(
+        partial(
+            form_global_array_colocated_python,
+            devices=list(dummy_array.sharding.addressable_devices),
+            global_shape=self.global_shape,
+            sharding=dummy_array.sharding,
+        ),
+        local_data,
+    )
+
+  def save_state(self, step_array):
+    """Saves the iterator state to a file."""
+    step = step_array.addressable_data(0).item()
+    directory = epath.Path(self.checkpoint_path) / str(step) / "iter"
+    if self.elastic:
+      # ElasticIterator state is a single global scalar shared by all shards,
+      # so we write one fixed file (from process 0 only) and every process
+      # reads the same file on restore — this survives elastic resizes that
+      # change `jax.process_count()`.
+      if jax.process_index() == 0:
+        directory.mkdir(parents=True, exist_ok=True)
+        filename = directory / "process_0.json"
+        filename.write_text(json.dumps(self.iterator.get_state(), indent=4))
+      return step_array
+    directory.mkdir(parents=True, exist_ok=True)
+    filename = directory / f"process_{jax.process_index()}-of-{jax.process_count()}.json"
+    state = json.dumps(self.iterator.get_state(), indent=4)
+    filename.write_text(state)
+    return step_array
+
+  def restore_state(self, step_array):
+    step = step_array.addressable_data(0).item()
+    directory = epath.Path(self.checkpoint_path) / str(step) / "iter"
+    if self.elastic:
+      filename = directory / "process_0.json"
+    else:
+      filename = directory / f"process_{jax.process_index()}-of-{jax.process_count()}.json"
+    state = json.loads(filename.read_text())
+    self.iterator.set_state(state)
+    return step_array
+
+
+class RemoteIteratorWrapper:
+  """Wrapper for RemoteIterator that handles device placement."""
+
+  def __init__(self, get_ds_fn, preprocessing_fn, global_mesh, global_shape, checkpoint_path="", elastic=False):
     self.cpu_devices = _colocated_cpu_devices(jax.local_devices())
     self.tpu_devices = jax.local_devices()
     self.cpu_mesh = _colocated_cpu_mesh(global_mesh)
@@ -216,42 +264,28 @@ class RemoteIterator:
     self.cpu_sharding = jax.sharding.NamedSharding(self.cpu_mesh, PartitionSpec(self.cpu_mesh.axis_names))
     self.dummy_array = jnp.zeros((len(self.cpu_devices)))
     self.dummy_array = jax.device_put(self.dummy_array, self.cpu_sharding)
-
-    @colocated_python.colocated_python
-    def init(dummy_array):
-      colocated_python.global_shape = global_shape
-      ds = get_ds_fn(dataloading_host_index=jax.process_index(), dataloading_host_count=jax.process_count())
-      dataloader = preprocessing_fn(dataset=ds)
-      if isinstance(dataloader, tf.data.Dataset):
-        colocated_python.iterator = dataloader.as_numpy_iterator()
-      elif isinstance(dataloader, Iterable):
-        colocated_python.iterator = iter(dataloader)
-      else:
-        raise ValueError("Type error: dataloader should be either tf.data.Dataset or grain.DataLoader.")
-      return dummy_array
-
-    max_logging.log("Initiating RemoteIterator")
-    try:
-      out = jax.device_get(init(self.dummy_array))
-      if out is not None:
-        max_logging.log(f"RemoteIterator initiated. Test output: {out}")
-    except Exception as e:
-      max_logging.log(f"RemoteIterator init FAILED with error: {type(e).__name__}: {e}")
-      raise
+    # This is a proxy to a RemoteIterator running in a colocated process,
+    # named "local_iterator" to match MultiHostDataLoadIterator's interface.
+    self.local_iterator = RemoteIterator(get_ds_fn, preprocessing_fn, global_shape, checkpoint_path, elastic=elastic)
+    max_logging.log("RemoteIteratorWrapper initiated")
 
   def __iter__(self):
     return self
 
+  def reset(self):
+    self.local_iterator.reset()
+
   def __next__(self):
-    out = _get_next(self.dummy_array)
+    out = self.local_iterator.get_next(self.dummy_array)
+    # use tree_map is out is a dict
+    return jax.device_put(out, self.tpu_sharding)
 
-    def put_to_tpu_devices(path, array, sharding):
-      try:
-        return jax.device_put(array, sharding)
-      except Exception as e:  # pylint: disable=broad-exception-caught
-        max_logging.log(f"Error putting data to TPU device path{path}, exception={e}")
-        raise
+  def save_state(self, step):
+    step_array = jnp.full(self.dummy_array.shape, step, dtype=jnp.int32)
+    step_array = jax.device_put(step_array, self.cpu_sharding)
+    self.local_iterator.save_state(step_array)
 
-    input_gdas = jtu.tree_map_with_path(partial(put_to_tpu_devices, sharding=self.tpu_sharding), out)
-
-    return input_gdas
+  def restore_state(self, step):
+    step_array = jnp.full(self.dummy_array.shape, step, dtype=jnp.int32)
+    step_array = jax.device_put(step_array, self.cpu_sharding)
+    self.local_iterator.restore_state(step_array)

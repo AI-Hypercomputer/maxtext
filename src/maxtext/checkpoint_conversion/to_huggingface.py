@@ -28,6 +28,9 @@ Key Parameters (to be set in the config file or as command-line overrides):
                          Defaults to "./mt_output/".
   scan_layers: (bool) Whether the MaxText model was trained with scanned layers.
                This must match the training configuration of the checkpoint.
+  weight_dtype: (Optional) It affects the resulting Hugging Face weight dtype.
+                Default value is `float32`. We recommend using `bfloat16`
+                to save memory and speed up conversion.
 
 Optional Flags:
   --override_model_architecture: If set, overrides the HF model configuration
@@ -44,7 +47,7 @@ Example Usage:
   To convert a gemma2-2b MaxText checkpoint and save it to a local directory:
 
   export HF_AUTH_TOKEN="hf_YOUR_TOKEN"
-  python src/MaxText/checkpoint_conversion/to_huggingface.py \
+  python src/maxtext/checkpoint_conversion/to_huggingface.py \
     src/maxtext/configs/base.yml \
     model_name="gemma2-2b" \
     load_parameters_path="/path/to/your/maxtext/checkpoint/" \
@@ -137,14 +140,37 @@ def _validate_or_update_architecture(hf_config, max_config, override: bool):
   # Mapping from Hugging Face config attribute -> MaxText config attribute
   # Note: We use derived MaxText attributes (e.g. emb_dim) which account for scale factors.
   attributes_to_check = [
-      ("num_attention_heads", "num_query_heads"),
-      ("num_key_value_heads", "num_kv_heads"),
-      ("head_dim", "head_dim"),
       ("hidden_size", "emb_dim"),
       ("intermediate_size", "mlp_dim"),
+      ("kv_lora_rank", "kv_lora_rank"),
+      ("moe_intermediate_size", "moe_mlp_dim"),
+      ("n_routed_experts", "num_experts"),
+      ("n_shared_experts", "shared_experts"),
+      ("num_attention_heads", "num_query_heads"),
+      ("num_experts", "num_experts"),
+      ("num_experts_per_tok", "num_experts_per_tok"),
       ("num_hidden_layers", "num_decoder_layers"),
+      ("num_key_value_heads", "num_kv_heads"),
+      ("num_local_experts", "num_experts"),
+      ("q_lora_rank", "q_lora_rank"),
+      ("qk_nope_head_dim", "qk_nope_head_dim"),
+      ("qk_rope_head_dim", "qk_rope_head_dim"),
+      ("v_head_dim", "v_head_dim"),
       ("vocab_size", "vocab_size"),
   ]
+
+  if max_config.attention_type == "mla":
+    attributes_to_check.extend(
+        [
+            ("qk_nope_head_dim", "qk_nope_head_dim"),
+            ("qk_rope_head_dim", "qk_rope_head_dim"),
+            ("v_head_dim", "v_head_dim"),
+            ("kv_lora_rank", "kv_lora_rank"),
+            ("q_lora_rank", "q_lora_rank"),
+        ]
+    )
+  else:
+    attributes_to_check.append(("head_dim", "head_dim"))
 
   mismatches = []
 
@@ -163,6 +189,17 @@ def _validate_or_update_architecture(hf_config, max_config, override: bool):
     # Handle None values
     if hf_value is None or mt_value is None:
       continue
+
+    # Special handling for Gemma 2 where local and global layers are bundled
+    if max_config.model_name.startswith("gemma2") and hf_attr == "num_hidden_layers":
+      if isinstance(mt_value, int):
+        mt_value = mt_value * 2
+
+    # Handle vocab size padding
+    if hf_attr == "vocab_size" and isinstance(mt_value, int) and isinstance(hf_value, int):
+      # MaxText often pads vocab size to a multiple of 128 or 256 for TPU efficiency
+      if mt_value >= hf_value and (mt_value - hf_value) < 256:
+        mt_value = hf_value
 
     # Compare values (with tolerance for floats)
     is_match = False
@@ -215,6 +252,7 @@ def main(argv: Sequence[str]) -> None:
   checkpoint_dict = load_orbax_checkpoint(config)
   max_logging.log(f"Elapse for checkpoint load: {(time.time() - start) / 60:.2f} min")
 
+  # Define output directory
   if not config.base_output_directory:
     output_directory = f"tmp/{config.run_name}"
   else:
@@ -268,6 +306,8 @@ def main(argv: Sequence[str]) -> None:
 
     processed_params = process_maxtext_param(key, weight, param_map, hook_fn_map, shape_map, config)
     processed_params_list.extend(processed_params)
+
+  max_logging.log(f"Weight dtype after transform: {type(processed_params[0][1].dtype)}")
 
   transformed_hf_weights = dict(processed_params_list)
   max_logging.log(f"Elapse for transform: {(time.time() - start) / 60:.2f} min")

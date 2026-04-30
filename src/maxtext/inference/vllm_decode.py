@@ -48,6 +48,9 @@ from tunix.rl.rollout.vllm_rollout import VllmRollout
 from vllm import LLM
 from vllm.sampling_params import SamplingParams
 from maxtext.configs import pyconfig
+import maxtext.integration.vllm.maxtext_vllm_adapter as adapter
+
+adapter.register()
 
 os.environ["SKIP_JAX_PRECOMPILE"] = "1"
 os.environ["NEW_MODEL_DESIGN"] = "1"
@@ -82,6 +85,8 @@ def decode_with_vllm(config: Config) -> None:
               "weight_dtype": "bfloat16",
               "allow_split_physical_axes": True,
               "debug_sharding": config.debug_sharding,
+              "prefuse_moe_weights": config.prefuse_moe_weights,
+              "scan_layers": config.scan_layers,
           },
           "sharding": {
               "sharding_strategy": {
@@ -140,12 +145,15 @@ def decode_with_vllm(config: Config) -> None:
         f"max_target_length ({config.max_target_length}) must be greater than max_prompt_length ({max_prompt_length})"
     )
 
+  # MaxText uses -1 to mean "disabled"; vLLM requires top_p in (0, 1].
+  top_p = config.decode_sampling_nucleus_p if config.decode_sampling_nucleus_p > 0 else 1.0
+  top_k = config.decode_sampling_top_k if config.decode_sampling_top_k > 0 else -1
+
   sampling_params = SamplingParams(
       temperature=config.decode_sampling_temperature,
       max_tokens=max_tokens_to_generate,
-      top_k=config.decode_sampling_top_k,
-      top_p=config.decode_sampling_nucleus_p,
-      seed=FLAGS.seed,
+      top_k=top_k,
+      top_p=top_p,
   )
 
   outputs = llm.generate(prompts, sampling_params)
@@ -242,7 +250,7 @@ def main(argv: Sequence[str]) -> None:
   config = pyconfig.initialize(argv)
 
   if FLAGS.use_tunix:
-    maxtext_model, mesh = model_creation_utils.create_nnx_model(config)
+    maxtext_model, mesh = model_creation_utils.from_pretrained(config)
     decode_with_tunix(config, model=maxtext_model, mesh=mesh)
   else:
     decode_with_vllm(config)

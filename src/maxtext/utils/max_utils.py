@@ -13,7 +13,8 @@
 # limitations under the License.
 
 """Common Max Utils needed by multiple modules.
-All the functions include MaxText modules, such as Pyconfig, should be moved to MaxText utils file."""
+All the functions include MaxText modules, such as Pyconfig, should be moved to MaxText utils file.
+"""
 
 import collections
 from collections.abc import Sequence
@@ -21,9 +22,12 @@ import functools
 from functools import partial
 import os
 import socket
+import re
 import subprocess
 import time
 from typing import Any
+
+from packaging.version import Version
 
 from etils import epath
 import flax
@@ -38,6 +42,7 @@ import orbax.checkpoint as ocp
 from orbax.checkpoint.experimental.emergency.multi_tier_checkpointing import initialization
 import psutil
 
+from maxtext.utils import elastic_utils
 from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.common.gcloud_stub import writer, _TENSORBOARDX_AVAILABLE
 from maxtext.utils import max_logging
@@ -48,6 +53,43 @@ HYBRID_RING_64X4 = "hybrid_ring_64x4"
 HYBRID_RING_32X8 = "hybrid_ring_32x8"
 
 # pylint: disable=too-many-positional-arguments
+
+
+def parse_libtpu_flags_to_dict(flags_str: str) -> dict:
+  """
+  Parses a string of XLA flags into a dictionary of compilation options.
+  This function is only for compilation usage.
+  """
+  if not flags_str or not flags_str.strip():
+    return {}
+
+  # Clean the string by removing line-continuation backslashes
+  cleaned_str = flags_str.replace("\\", " ")
+
+  # Split by any whitespace (handles single spaces, multiple spaces, newlines)
+  tokens = cleaned_str.split()
+
+  options_dict = {}
+
+  # Regex to strictly match '--key=value' for an isolated token
+  # Key assumes alphanumeric + underscores. Value is anything after the '='.
+  token_pattern = re.compile(r"^--([a-zA-Z0-9_]+)=(.+)$")
+
+  for token in tokens:
+    match = token_pattern.match(token)
+    if not match:
+      # Throw an error immediately if any token fails the strict format
+      raise ValueError(f"Invalid flag format detected: '{token}'. Expected format: '--key=value'")
+
+    key, value = match.groups()
+
+    # Optional: Catch duplicate flags
+    if key in options_dict:
+      raise ValueError(f"Duplicate flag detected: '--{key}'")
+
+    options_dict[key] = value
+
+  return options_dict
 
 
 def with_memory_kind(t, memory_kind):
@@ -82,7 +124,7 @@ def calculate_num_params_from_pytree(params):
 def device_space():
   """Version guard for jax.memory.Space.Device."""
   # See b/436565838 for more.
-  if jax.__version__ >= "0.7.1":
+  if Version(jax.__version__) >= Version("0.7.1"):
     return jax.memory.Space.Device  # pytype: disable=module-attr
   else:
     return jax._src.sharding_impls.TransferToMemoryKind("device")  # pylint: disable=protected-access # pytype: disable=module-attr
@@ -248,12 +290,21 @@ def initialize_jax_for_gpu(raw_keys):
   if os.environ.get("JAX_COORDINATOR_IP") is not None:
     coordinator_ip = str(os.getenv("JAX_COORDINATOR_IP"))
     coordinator_port = str(os.getenv("JAX_COORDINATOR_PORT"))
-    devices = os.getenv("CUDA_VISIBLE_DEVICES")
+    env_var_list = ["CUDA_VISIBLE_DEVICES", "SLURM_STEP_GPUS"]
+    for env_var in env_var_list:
+      devices = os.getenv(env_var)
+      if devices is not None:
+        max_logging.log(f"Using {env_var} to initialize JAX distributed system: {devices}")
+        break
+    if devices is None:
+      jax.config.update("jax_cuda_visible_devices", "all")
+      jax.config.update("jax_rocm_visible_devices", "all")
+
     if devices is not None:
       try:
         devices = [int(x) for x in devices.split(",")]
       except (ValueError, TypeError) as e:
-        max_logging.log(f"Error parsing CUDA_VISIBLE_DEVICES: {e}")
+        max_logging.log(f"Error parsing {env_var}: {e}")
         devices = None
 
     jax.distributed.initialize(
@@ -328,7 +379,7 @@ def _retrieve_jax_init_info(raw_keys):
   return "", ""
 
 
-def get_num_slices(raw_keys):
+def get_num_slices(raw_keys, config=None):
   """Calculate num_slices based on number of devices."""
   if raw_keys.get("num_slices", -1) != -1:
     max_logging.log(f"Using num_slices={raw_keys['num_slices']} per user request.")
@@ -339,9 +390,8 @@ def get_num_slices(raw_keys):
   if int(raw_keys["compile_topology_num_slices"]) > 0:
     return raw_keys["compile_topology_num_slices"]
   else:
-    devices = jax.devices()
     try:
-      return 1 + max(d.slice_index for d in devices)
+      return len(elastic_utils.live_slice_indices(config))
     except (ValueError, AttributeError):
       return 1
 
@@ -837,19 +887,85 @@ def reorder_sequence(tensor, cp_size: int, seq_dim: int = 1, to_contiguous: bool
   return reordered.reshape(ori_tensor_shape)
 
 
-@partial(jax.jit, static_argnums=1)
-def reorder_causal_load_balanced(batch, cp_size):
-  """Reorders the example batch sequences"""
-  return {
-      key: reorder_sequence(
-          value,  # Pass each key's value inside batch separately
-          cp_size=cp_size,
-      )
-      if key
-      in ["inputs", "targets", "inputs_position", "targets_position", "inputs_segmentation", "targets_segmentation"]
-      else value
-      for key, value in batch.items()
+@partial(jax.jit, static_argnums=(1, 2, 3))
+def reorder_causal_load_balanced(batch, cp_size, reorder_strategy, hardware="tpu"):
+  """Reorders the example batch sequences using a hardware-appropriate backend.
+
+  On GPU (hardware="gpu" or "gpu_multiprocess"), uses Transformer Engine's
+  reorder_causal_load_balancing which supports both DUAL_CHUNK_SWAP and STRIPED strategies.
+  On TPU/CPU, falls back to the pure-JAX reorder_sequence (DUAL_CHUNK_SWAP only).
+
+  Args:
+    batch: The batch to reorder.
+    cp_size: The size of the compute parallelism.
+    reorder_strategy: The ReorderStrategy enum value (DUAL_CHUNK_SWAP or STRIPED).
+    hardware: The hardware type string ("tpu", "gpu", "gpu_multiprocess", "cpu").
+
+  Returns:
+    The reordered batch.
+
+  Reorder Strategy:
+  - DUAL_CHUNK_SWAP: This strategy splits each query into two chunks and do the mirror swap between
+    GPUs. This is currently used for non-THD load balance. It requires the max_seqlens be the
+    multiple of 2 * cp_size.
+    Examples:
+    - Before reorder: GPU0: [0, 1, 2, 3]; GPU1: [4, 5, 6, 7]; GPU2: [8, 9, 10, 11]; GPU3: [12, 13, 14, 15];
+    - After reorder: GPU0: [0, 1, 14, 15]; GPU1: [4, 5, 10, 11]; GPU2: [8, 9, 6, 7]; GPU3: [12, 13, 2, 3]
+
+  - STRIPED: This strategy distributes the tokens in a striped (interleaved) manner across
+    the sequence. This is currently used for THD load balance.
+    Example: Consider 4 GPUs with seqlens=16.
+    - Before reorder: GPU0: [0, 1, 2, 3]; GPU1: [4, 5, 6, 7]; ...; GPU3: [12, 13, 14, 15]
+    - After reorder: GPU0: [0, 4, 8, 12]; GPU1: [1, 5, 9, 13]; ...; GPU3: [3, 7, 11, 15]
+
+  See: https://github.com/NVIDIA/TransformerEngine/blob/main/transformer_engine/jax/attention.py
+  """
+  # pylint: disable=import-outside-toplevel
+  from maxtext.common.common_types import ReorderStrategy
+
+  _reorder_keys = {
+      "inputs",
+      "targets",
+      "inputs_position",
+      "targets_position",
+      "inputs_segmentation",
+      "targets_segmentation",
   }
+
+  if hardware in ("gpu", "gpu_multiprocess"):
+    from transformer_engine.jax.attention import ReorderStrategy as TE_ReorderStrategy
+    from transformer_engine.jax.attention import reorder_causal_load_balancing
+
+    reorder_strategy_map = {
+        ReorderStrategy.DUAL_CHUNK_SWAP: TE_ReorderStrategy.DualChunkSwap,
+        ReorderStrategy.STRIPED: TE_ReorderStrategy.Striped,
+    }
+
+    return {
+        key: reorder_causal_load_balancing(
+            value,
+            reorder_strategy_map[reorder_strategy],
+            cp_size=cp_size,
+            seq_dim=1,
+        )
+        if key in _reorder_keys
+        else value
+        for key, value in batch.items()
+    }
+  else:
+    if reorder_strategy == ReorderStrategy.STRIPED:
+      raise ValueError(
+          f"STRIPED reorder strategy requires Transformer Engine and is only supported on GPU, got hardware={hardware!r}."
+      )
+    return {
+        key: reorder_sequence(
+            value,
+            cp_size=cp_size,
+        )
+        if key in _reorder_keys
+        else value
+        for key, value in batch.items()
+    }
 
 
 @staticmethod
@@ -1080,11 +1196,11 @@ def transformer_engine_context():
     yield
 
 
-def generate_representative_group_sizes(target_m: int, g: int) -> tuple[int, ...]:
-  """Generate group sizes for a given target m."""
-  np.random.seed(0)
-  repr_val = np.random.uniform(size=(g,))
-  repr_val = np.random.binomial(1, 0.9, (g,)) * repr_val
-  repr_val = np.int32((repr_val / np.sum(repr_val)) * target_m)
-  repr_val[0] += target_m - np.sum(repr_val)
-  return tuple(map(int, repr_val))
+def maybe_pad(inputs, tile_size):
+  """Pads the inputs leading dimension to be divisible by tile_size."""
+  inputs_dim = inputs.shape[0]
+  padding_amount = 0
+  if inputs_dim % tile_size:
+    padding_amount = tile_size - inputs_dim % tile_size
+    inputs = jax.lax.pad(inputs, jnp.array(0.0, dtype=inputs.dtype), [(0, padding_amount, 0), (0, 0, 0)])
+  return inputs, padding_amount

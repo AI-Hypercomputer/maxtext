@@ -19,6 +19,7 @@ from typing import Any, Sequence
 import numpy as np
 
 import jax.numpy as jnp
+from flax import struct
 
 Config = Any
 
@@ -31,25 +32,21 @@ AxisNames = tuple[str, ...]
 AxisIdxes = tuple[int, ...]
 
 BATCH = "activation_batch"
-BATCH_NO_EXP = "activation_batch_no_exp"
+BATCH_ATTN = "activation_batch_attn"
 
-ATTN_LENGTH = "activation_attn_length"
-ATTN_LENGTH_NO_EXP = "activation_attn_length_no_exp"
+ATTN_LENGTH = "activation_length_attn"
 
 LENGTH = "activation_length"
-LENGTH_NO_EXP = "activation_length_no_exp"
 PREFILL_LENGTH = "prefill_activation_length"
 Q_LENGTH = "activation_q_length"
-Q_LENGTH_NO_EXP = "activation_q_length_no_exp"
 Q_LORA_UP_PROJ = "q_lora_up_proj"
 KV_LENGTH = "activation_kv_length"
 KV_LORA_UP_PROJ = "kv_lora_up_proj"
-ATTN_EMBED = "activation_attn_embed"
+ATTN_EMBED = "activation_embed_attn"
 EMBED = "activation_embed"
 HEAD = "activation_heads"
 PREFILL_KV_BATCH = "activation_prefill_kv_batch"
 KV_BATCH = "activation_kv_batch"
-KV_BATCH_NO_EXP = "activation_kv_batch_no_exp"
 KV_HEAD = "activation_kv_heads"
 KV_HEAD_DIM = "activation_kv_head_dim"
 D_KV = "activation_kv"
@@ -70,15 +67,22 @@ MODEL_MODE_AUTOREGRESSIVE = "autoregressive"
 MODEL_MODE_PREFILL = "prefill"
 MODEL_MODE_TRAIN = "train"
 
-# expert_shard_attention_option
-EP_AS_CONTEXT = "context"
-EP_AS_FSDP = "fsdp"
-
 DECODING_ACTIVE_SEQUENCE_INDICATOR = 1
 
 # A large negative mask value is used for masking to ensure that the
 # softmax function assigns an extremely low probability to the masked positions.
 DEFAULT_MASK_VALUE = -0.7 * float(np.finfo(np.dtype("float32")).max)
+
+
+@struct.dataclass
+class MultimodalInput:
+  """Multimodal inputs for encoder processing."""
+
+  image_embeddings: Array | None = None
+  image_masks: Array | None = None
+  audio_embeddings: Array | None = None
+  audio_masks: Array | None = None
+  bidirectional_mask: Array | None = None
 
 
 class DecoderBlockType(enum.Enum):
@@ -92,9 +96,11 @@ class DecoderBlockType(enum.Enum):
   GEMMA = "gemma"
   GEMMA2 = "gemma2"
   GEMMA3 = "gemma3"
+  GEMMA4 = "gemma4"
   QWEN2 = "qwen2"
   QWEN3 = "qwen3"
   QWEN3_MOE = "qwen3_moe"
+  QWEN3_CUSTOM_MOE = "qwen3_custom_moe"
   QWEN3_NEXT = "qwen3_next"
   GPT3 = "gpt3"
   GPT_OSS = "gpt_oss"
@@ -102,6 +108,8 @@ class DecoderBlockType(enum.Enum):
   SIMPLE_MLP = "simple_mlp"
   LLAMA4 = "llama4"
   OLMO3 = "olmo3"
+
+  LLAMA2LTI = "llama2_learn_to_init"
 
 
 class AttentionType(enum.Enum):
@@ -115,6 +123,16 @@ class AttentionType(enum.Enum):
 class ShardMode(enum.Enum):
   AUTO = "auto"  # default
   EXPLICIT = "explicit"
+
+
+class ReorderStrategy(enum.Enum):
+  """Reorder strategies for load-balanced context parallelism.
+  Maps to transformer_engine.jax.attention.ReorderStrategy at runtime.
+  """
+
+  AUTO = "auto"
+  DUAL_CHUNK_SWAP = "dual_chunk_swap"
+  STRIPED = "striped"
 
 
 class HyperConnectionType(enum.Enum):

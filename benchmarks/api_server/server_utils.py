@@ -32,6 +32,7 @@ from fastapi import HTTPException
 
 from benchmarks.api_server.maxtext_generator import MaxTextGenerator
 from benchmarks.api_server.server_models import LogProbsPayload
+from benchmarks.api_server.encoding import encoding_dsv32
 
 # ----------------------------
 # Debugging
@@ -40,6 +41,19 @@ from benchmarks.api_server.server_models import LogProbsPayload
 DEBUG_MODE = os.environ.get("MAXTEXT_SERVER_DEBUG", "0") == "1"
 DEBUG_LOG_FILE = os.environ.get("MAXTEXT_DEBUG_LOG_FILE", "benchmarks/api_server/server_debug_log.jsonl")
 logger = logging.getLogger(__name__)
+
+# Indicate if we should disable specific encoding for DeepSeek-V3.2 family.
+# Encoding is needed for v3.2 and v3.2-speciale, but not deepseek v3.2-exp.
+DISABLE_DSV32_ENCODING = os.environ.get("DISABLE_DSV32_ENCODING", "0") == "1"
+
+
+def is_dsv32_encoding_enabled(model_name: str) -> bool:
+  """
+  Checks if DeepSeek-V3.2 specific encoding should be applied to the given model.
+  """
+  if DISABLE_DSV32_ENCODING:
+    return False
+  return "deepseek3.2" in model_name.lower()
 
 
 def log_debug_event(request_id: str, event_type: str, content: dict):
@@ -114,6 +128,11 @@ def get_prompts_for_request(req: any, llm: MaxTextGenerator) -> List[str]:
       A list of string prompts.
   """
   if hasattr(req, "messages"):  # ChatCompletionRequest
+    if is_dsv32_encoding_enabled(req.model):
+      messages = [m.model_dump(exclude_none=True) for m in req.messages]
+      encode_config = {"thinking_mode": "thinking", "drop_thinking": True, "add_default_bos_token": True}
+      return [encoding_dsv32.encode_messages(messages, **encode_config)]
+
     messages = [m.model_dump() for m in req.messages]
     formatted_prompt = llm.tokenizer.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     return [formatted_prompt]

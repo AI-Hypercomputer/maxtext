@@ -30,7 +30,6 @@ from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
 
 from maxtext.common.common_types import (
-    EP_AS_CONTEXT,
     MODEL_MODE_AUTOREGRESSIVE,
     MODEL_MODE_PREFILL,
     MODEL_MODE_TRAIN,
@@ -169,10 +168,8 @@ class NNXDecoderLayer(nnx.Module):
 
     if self.model_mode == MODEL_MODE_PREFILL:
       logical_axis_names = ("activation_batch", "prefill_activation_length", "activation_embed")
-    elif self.config.expert_shard_attention_option == EP_AS_CONTEXT and self.model_mode == MODEL_MODE_TRAIN:
-      logical_axis_names = ("activation_batch_no_exp", "activation_length", "activation_embed")
     else:
-      logical_axis_names = ("activation_batch", "activation_length_no_exp", "activation_embed")
+      logical_axis_names = ("activation_batch", "activation_length", "activation_embed")
 
     inputs = _maybe_shard_with_logical(inputs, logical_axis_names)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
@@ -290,7 +287,7 @@ class NNXDecoder(nnx.Module):
           out_features_shape=config.vocab_size,
           weight_dtype=config.weight_dtype,
           dtype=jnp.float32 if config.logits_dot_in_fp32 else config.dtype,
-          kernel_axes=("embed", "vocab"),
+          kernel_axes=("embed_vocab", "vocab"),
           shard_mode=config.shard_mode,
           matmul_precision=self.config.matmul_precision,
           parameter_memory_host_offload=config.parameter_memory_host_offload,
@@ -431,8 +428,23 @@ class NNXDecoder(nnx.Module):
 
     return out
 
-  def _apply_layers_sequentially(self, layers, x_in, *args, length: int, **kwargs):
-    """Runs the layer stack using nnx.scan."""
+  def _apply_layers_sequentially(self, layers, x_in, *args, length: int, kv_caches_stacked=None, **kwargs):
+    """Runs the layer stack using nnx.scan.
+
+    Args:
+      layers: The stacked NNX module whose params are scanned over.
+      x_in: The carry (hidden state) fed into the first layer.
+      *args: Positional args broadcast to every layer call.
+      length: Number of scan iterations (= number of layers).
+      kv_caches_stacked: Optional pytree whose leaves have shape [num_layers, ...].
+        When provided, the i-th slice is passed as `kv_cache=` to layer i and the
+        updated caches are returned as a third element of the tuple.
+      **kwargs: Keyword args forwarded to the layer (filtered by the layer signature).
+
+    Returns:
+      (final_carry, updated_layers) when kv_caches_stacked is None.
+      (final_carry, updated_layers, returned_kv_stacked) otherwise.
+    """
     policy = self.get_remat_policy()
     prevent_cse = maxtext_utils.should_prevent_cse_in_remat(self.config)
     graphdef, params, state = nnx.split(
@@ -453,9 +465,15 @@ class NNXDecoder(nnx.Module):
     # Filter kwargs to only include keys that exist in the layer's signature
     valid_kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters or "kwargs" in sig.parameters}
 
+    use_kv = kv_caches_stacked is not None
+
     def layer_fn(carry, scanned_vars):
       # Unpack the sliced variables for THIS layer
-      current_params, current_state = scanned_vars
+      if use_kv:
+        current_params, current_state, kv_cache_layer = scanned_vars
+      else:
+        current_params, current_state = scanned_vars
+        kv_cache_layer = None
 
       if self.config.parameter_memory_host_offload:
         current_params = jax.tree.map(lambda x: jax.device_put(x, max_utils.device_space()), current_params)
@@ -463,26 +481,64 @@ class NNXDecoder(nnx.Module):
       # Merge using the SLICED state
       layer = nnx.merge(graphdef, current_params, current_state)
 
-      # Run the layer (Filter kwargs if using the solution from previous turn)
-      layer_out = layer(carry, *args, **valid_kwargs)
+      # Build call kwargs, injecting per-layer kv_cache when available
+      call_kwargs = dict(valid_kwargs)
+      if kv_cache_layer is not None:
+        call_kwargs["kv_cache"] = kv_cache_layer
 
-      new_carry = layer_out[0] if isinstance(layer_out, tuple) else layer_out
+      layer_out = layer(carry, *args, **call_kwargs)
+
+      if isinstance(layer_out, tuple):
+        new_carry = layer_out[0]
+        updated_kv = layer_out[1] if len(layer_out) > 1 else None
+      else:
+        new_carry = layer_out
+        updated_kv = None
 
       # Extract the updated state to return it
-      # _, new_current_state = nnx.split(layer, nnx.Param, ...)
       new_current_state = nnx.state(layer)
+
+      if use_kv:
+        return new_carry, (new_current_state, updated_kv)
       return new_carry, new_current_state
 
     layer_fn = jax.checkpoint(layer_fn, policy=policy, prevent_cse=prevent_cse)
 
-    final_carry, scanned_state = jax.lax.scan(layer_fn, x_in, (params, state))
+    if use_kv:
+      # If kv_caches is provided (e.g., from vLLM), we CANNOT use jax.lax.scan
+      # because scanning requires stacking the kv_caches list, which creates a copy
+      # and breaks the in-place memory updates required by vLLM's PagedAttention.
+      # Therefore, we must unroll the loop statically when kv_caches is provided.
+
+      # kv_caches_stacked is actually the original kv_caches list in this new flow
+      kv_caches_list = kv_caches_stacked
+
+      current_carry = x_in
+
+      for i in range(length):
+        # Statically slice the parameters and state for this layer
+        current_params = jax.tree.map(lambda x, i=i: x[i], params)
+        current_state = jax.tree.map(lambda x, i=i: x[i], state)
+
+        # Call the layer
+        current_carry, (_, updated_kv) = layer_fn(current_carry, (current_params, current_state, kv_caches_list[i]))
+
+        # Update the list in-place (mutates the list passed by reference)
+        kv_caches_list[i] = updated_kv
+
+      # We don't need to rebuild scanned_state or return it because during
+      # inference with vLLM, parameters do not change and we don't need intermediates.
+      return current_carry, layers, None
+    else:
+      final_carry, scanned_state = jax.lax.scan(layer_fn, x_in, (params, state))
+      returned_kv_stacked = None
 
     if scan_axis != 0:
       scanned_params, scanned_other = scanned_state.split(nnx.Param, ...)
       scanned_params = jax.tree.map(lambda x: jnp.moveaxis(x, 0, scan_axis), scanned_params)
       scanned_state = nnx.State.merge(scanned_params, scanned_other)
 
-    return final_carry, nnx.merge(graphdef, scanned_state)
+    return final_carry, nnx.merge(graphdef, scanned_state), returned_kv_stacked if use_kv else None
 
   def get_decoder_layers(self):
     """Retrieves decoder layer classes based on config using a dictionary lookup."""
@@ -739,7 +795,7 @@ class NNXDecoder(nnx.Module):
 
     cfg = self.config
     if cfg.shard_mode == ShardMode.EXPLICIT:
-      norm_out_sharding = create_sharding(self.mesh, ("activation_batch", "activation_length_no_exp", "activation_embed"))
+      norm_out_sharding = create_sharding(self.mesh, ("activation_batch", "activation_length", "activation_embed"))
     else:
       norm_out_sharding = None
 
@@ -750,7 +806,7 @@ class NNXDecoder(nnx.Module):
       out_sharding = create_sharding(self.mesh, (None, None, "activation_vocab"))
     else:
       out_sharding = create_sharding(
-          self.mesh, ("activation_embed_and_logits_batch", "activation_length_no_exp", "activation_vocab")
+          self.mesh, ("activation_embed_and_logits_batch", "activation_length", "activation_vocab")
       )
 
     # [batch, length, emb_dim] -> [batch, length, vocab_size]
@@ -862,7 +918,7 @@ class NNXDecoder(nnx.Module):
       chunk_stack = nnx.merge(graphdef, chunk_state)
 
       # Apply sequentially
-      y, chunk_stack = self._apply_layers_sequentially(
+      y, chunk_stack, _ = self._apply_layers_sequentially(
           chunk_stack, y, *args, length=scan_length, **kwargs.get("layer_kwargs", {})
       )
 
@@ -969,30 +1025,25 @@ class NNXDecoder(nnx.Module):
               **common_kwargs,
           )
         else:
-          y, self.dense_layers = self._apply_layers_sequentially(
+          y, self.dense_layers, _ = self._apply_layers_sequentially(
               self.dense_layers, y, *layer_args, length=cfg.first_num_dense_layers, **layer_kwargs
           )
 
           num_moe = cfg.num_decoder_layers - cfg.first_num_dense_layers
 
           if cfg.use_batch_split_schedule:
-            policy = self.get_remat_policy()
-
             mock_params = self._build_linen_params(self.moe_layer)
 
             y = deepseek_batchsplit.scan_batch_split_layers(
                 y,
                 mock_params,
                 decoder_positions,
-                decoder_segment_ids,
-                model_mode=model_mode,
                 mesh=self.mesh,
-                quant=self.quant,
                 cfg=cfg,
-                policy=policy,
+                num_layers=num_moe,
             )
           else:
-            y, self.moe_layer = self._apply_layers_sequentially(
+            y, self.moe_layer, _ = self._apply_layers_sequentially(
                 self.moe_layer, y, *layer_args, length=num_moe, **layer_kwargs
             )
       elif self.is_gemma3:
@@ -1009,7 +1060,18 @@ class NNXDecoder(nnx.Module):
         )
       else:
         scan_length = int(cfg.num_decoder_layers / cfg.inhomogeneous_layer_cycle_interval)
-        y, self.layers = self._apply_layers_sequentially(self.layers, y, *layer_args, length=scan_length, **layer_kwargs)
+        if kv_caches is not None:
+          # Pass the kv_caches list directly to avoid copying in jnp.stack,
+          # which breaks vLLM PagedAttention in-place memory updates.
+          # The _apply_layers_sequentially function will handle it by statically unrolling.
+          y, self.layers, _ = self._apply_layers_sequentially(
+              self.layers, y, *layer_args, length=scan_length, kv_caches_stacked=kv_caches, **layer_kwargs
+          )
+          # kv_caches list is updated in-place inside _apply_layers_sequentially
+        else:
+          y, self.layers, _ = self._apply_layers_sequentially(
+              self.layers, y, *layer_args, length=scan_length, **layer_kwargs
+          )
     else:
       prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg)
 
@@ -1093,7 +1155,7 @@ class NNXDecoder(nnx.Module):
 
     # Apply the main scan over the full blocks
     if scan_length > 0:
-      y, self.layers = self._apply_layers_sequentially(self.layers, y, *layer_args, length=scan_length, **layer_kwargs)
+      y, self.layers, _ = self._apply_layers_sequentially(self.layers, y, *layer_args, length=scan_length, **layer_kwargs)
 
     # Apply any remaining layers that did not fit into a full scanned block
     num_remaining_layers = cfg.num_decoder_layers % attention_pattern_length

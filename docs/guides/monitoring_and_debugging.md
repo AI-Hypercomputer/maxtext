@@ -14,7 +14,6 @@
  limitations under the License.
  -->
 
-
 # Monitoring and debugging
 
 ::::{grid} 1 2 2 2
@@ -71,9 +70,10 @@ Profiling performance with XProf.
 ::::
 
 ```{toctree}
-:hidden:
-:maxdepth: 1
-
+---
+hidden:
+maxdepth: 1
+---
 monitoring_and_debugging/features_and_diagnostics.md
 monitoring_and_debugging/gcp_workload_observability.md
 monitoring_and_debugging/megascale_hang_playbook.md

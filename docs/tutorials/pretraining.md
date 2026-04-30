@@ -20,6 +20,10 @@
 
 In this tutorial, we introduce how to run pretraining with real datasets. While synthetic data is commonly used for benchmarking, we rely on real datasets to obtain meaningful weights. Currently, MaxText supports three dataset input pipelines: HuggingFace, Grain, and TensorFlow Datasets (TFDS). We will walk you through: setting up dataset, modifying the [dataset configs](https://github.com/AI-Hypercomputer/maxtext/blob/f11f5507c987fdb57272c090ebd2cbdbbadbd36c/src/maxtext/configs/base.yml#L631-L675) and [tokenizer configs](https://github.com/AI-Hypercomputer/maxtext/blob/f11f5507c987fdb57272c090ebd2cbdbbadbd36c/src/maxtext/configs/base.yml#L566) for training, and optionally enabling evaluation.
 
+```{note}
+Before starting this tutorial, ensure you have installed MaxText following the [official documentation](https://maxtext.readthedocs.io/en/latest/install_maxtext.html). For pre-training, install `maxtext[tpu]` for TPUs or `maxtext[cuda12]` for GPUs.
+```
+
 To start with, we focus on HuggingFace datasets for convenience.
 
 - Later on, we will give brief examples for Grain and TFDS. For a comprehensive guide, see the [Data Input Pipeline](../guides/data_input_pipeline.md) topic.
@@ -87,7 +91,7 @@ eval metrics after step: 9, loss=9.420, total_weights=75264.0
 
 Grain is a library for reading data for training and evaluating JAX models. It is the recommended input pipeline for determinism and resilience! It supports data formats like ArrayRecord and Parquet. You can check [Grain pipeline](../guides/data_input_pipeline/data_input_grain.md) for more details.
 
-**Data preparation**: You need to download data to a Cloud Storage bucket, and read data via Cloud Storage Fuse with [setup_gcsfuse.sh](https://github.com/AI-Hypercomputer/maxtext/blob/main/tools/setup/setup_gcsfuse.sh).
+**Data preparation**: You need to download data to a Cloud Storage bucket, and read data via Cloud Storage Fuse with [setup_gcsfuse.sh](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/dependencies/scripts/setup_gcsfuse.sh).
 
 - For example, we can mount the bucket `gs://maxtext-dataset` on the local path `/tmp/gcsfuse` before training
   ```bash

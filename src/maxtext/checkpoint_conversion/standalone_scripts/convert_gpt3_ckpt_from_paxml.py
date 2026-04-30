@@ -35,6 +35,7 @@ python3 -m maxtext.checkpoint_conversion.standalone_scripts.convert_gpt3_ckpt_fr
 """
 
 import argparse
+import functools
 import gc
 import os
 import sys
@@ -87,7 +88,10 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
   mesh = Mesh(devices_array, cfg.mesh_axes)
 
   quant = quantizations.configure_quantization(cfg)
-  model = transformer_as_linen(cfg, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+  if cfg.pure_nnx:
+    raise NotImplementedError("Pure NNX support has not been implemented yet.")
+  else:
+    model = transformer_as_linen(cfg, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(cfg)
   tx = optimizers.get_optimizer(cfg, learning_rate_schedule)
 
@@ -98,7 +102,12 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
       cfg.checkpoint_period,
   )
 
-  state, _, _, _ = maxtext_utils.setup_training_state(model, None, tx, cfg, init_rng, mesh, checkpoint_manager)
+  if cfg.pure_nnx:
+    # NNX has a different function to init the training state.
+    raise NotImplementedError("Pure NNX support has not been implemented yet.")
+  else:
+    init_state_fn = functools.partial(maxtext_utils.init_initial_state, model, tx, cfg, True, init_rng)
+  state, _, _, _ = maxtext_utils.setup_training_state(None, cfg, mesh, checkpoint_manager, init_state_fn)
   max_logging.log("start")
   max_utils.print_mem_stats("After params initialized")
 

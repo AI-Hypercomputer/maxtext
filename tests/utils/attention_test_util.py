@@ -23,7 +23,7 @@ import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 from maxtext.configs import pyconfig
 from maxtext.common.gcloud_stub import is_decoupled
-from maxtext.common.common_types import AttentionType, DECODING_ACTIVE_SEQUENCE_INDICATOR, EP_AS_CONTEXT, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, ShardMode
+from maxtext.common.common_types import AttentionType, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, ShardMode
 from maxtext.layers.attention_mla import MLA
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
@@ -47,6 +47,8 @@ class MLATestBase(parameterized.TestCase):
       "qk_nope_head_dim": 128,
       "qk_rope_head_dim": 64,
       "v_head_dim": 192,
+      "dtype": "float32",
+      "mla_naive_kvcache": False,  # TODO: Test both naive/non-naive modes once b/485997160 is resolved.
   }
 
   def setUp(self):
@@ -189,6 +191,8 @@ def forward_with_context_expert_parallelism(
   # If load balanced cp, shuffle along seq dim for input
   # This corresponds to the pre-shuffle step in training
   context_parallel_size = cfg_cp.context_parallel_size
+  # This helper is TPU-oriented and uses the TPU-compatible DUAL_CHUNK_SWAP reorder path.
+  # It does not model GPU-specific packed/striped reorder behavior.
   if context_parallel_size > 1 and cfg_cp.context_parallel_load_balance:
     batch = {
         "inputs": lnx,
@@ -196,18 +200,16 @@ def forward_with_context_expert_parallelism(
         "inputs_position": decoder_positions,
     }
     with mesh_cp:
-      reordered_batch = maxtext_utils.get_reorder_callable(context_parallel_size, ShardMode.AUTO)(batch)
+      reordered_batch = maxtext_utils.get_reorder_callable(
+          context_parallel_size, ShardMode.AUTO, hardware=cfg_cp.hardware
+      )(batch)
     lnx = reordered_batch["inputs"]
     decoder_segment_ids = reordered_batch["inputs_segmentation"]
     decoder_positions = reordered_batch["inputs_position"]
   # apply attention with sharding
   with mesh_cp, nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
-    if cfg_cp.expert_shard_attention_option == EP_AS_CONTEXT:
-      batch_axis = "activation_batch_no_exp"
-      length_axis = "activation_length"
-    else:
-      batch_axis = "activation_batch"
-      length_axis = "activation_length_no_exp"
+    batch_axis = "activation_batch"
+    length_axis = "activation_length"
     lnx_spec = nn_partitioning.logical_to_mesh_axes(
         (batch_axis, length_axis, "activation_embed"),
         nn_partitioning.get_axis_rules(),

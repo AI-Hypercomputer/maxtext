@@ -30,7 +30,7 @@ import omegaconf
 
 from maxtext.utils import accelerator_to_spec_map
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_REPO_ROOT, MAXTEXT_PKG_DIR
-from maxtext.common.common_types import AttentionType, DecoderBlockType, ShardMode
+from maxtext.common.common_types import AttentionType, DecoderBlockType, ReorderStrategy, ShardMode
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
@@ -460,6 +460,7 @@ def validate_model_name(s: str) -> bool:
       "gemma3-4b",
       "gemma3-12b",
       "gemma3-27b",
+      "qwen2.5-1.5b",
       "qwen2.5-7b",
       "qwen2.5-14b",
       "qwen3-0.6b",
@@ -855,6 +856,7 @@ class _HyperParameters:
 
     raw_keys["decoder_block"] = DecoderBlockType(raw_keys["decoder_block"])
     raw_keys["shard_mode"] = ShardMode(raw_keys["shard_mode"])
+    raw_keys["context_parallel_reorder_strategy"] = ReorderStrategy(raw_keys["context_parallel_reorder_strategy"])
 
   @staticmethod
   def configure_gpt3_task(raw_keys):
@@ -1172,9 +1174,10 @@ def validate_mlp_dim(raw_keys):
   base_mlp_dim = raw_keys["base_mlp_dim"]
   base_moe_mlp_dim = raw_keys["base_moe_mlp_dim"]
   if is_fully_moe_model and (base_mlp_dim != base_moe_mlp_dim):
-    raise ValueError(
-        f"For a fully MoE model, base_mlp_dim must be equal to base_moe_mlp_dim. Received base_mlp_dim={base_mlp_dim} and base_moe_mlp_dim={base_moe_mlp_dim}."
-    )
+    if raw_keys.get("decoder_block") != "gemma4":
+      raise ValueError(
+          f"For a fully MoE model, base_mlp_dim must be equal to base_moe_mlp_dim. Received base_mlp_dim={base_mlp_dim} and base_moe_mlp_dim={base_moe_mlp_dim}."
+      )
 
 
 def validate_gpt_oss_moe(raw_keys):

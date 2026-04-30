@@ -24,7 +24,9 @@ import os.path
 from tempfile import gettempdir
 
 import pytest
+import transformers
 
+from maxtext.checkpoint_conversion.utils.hf_model_configs import DeepseekV32Config
 from maxtext.trainers.pre_train.train_compile import main as train_compile_main
 from tests.utils.test_helpers import get_test_config_path
 
@@ -181,25 +183,6 @@ class TrainCompile(unittest.TestCase):
     )
 
   @pytest.mark.cpu_only
-  def test_sequence_parallelism(self):
-    temp_dir = gettempdir()
-    compiled_trainstep_file = os.path.join(temp_dir, "test_compiled.pickle")
-    train_compile_main(
-        (
-            "",
-            get_test_config_path(),
-            f"compiled_trainstep_file={compiled_trainstep_file}",
-            "compile_topology=v5p-64",
-            "use_iota_embed=true",
-            "compile_topology_num_slices=1",
-            "ici_sequence_parallelism=16",
-            "global_parameter_scale=32",
-            "per_device_batch_size=0.0625",
-            "max_target_length=65536",
-        )
-    )
-
-  @pytest.mark.cpu_only
   def test_remat_save_dot_except_mlpwi(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_remat_save_dot_except_mlpwi.pickle")
@@ -303,7 +286,7 @@ class TrainCompile(unittest.TestCase):
             "compile_topology=v6e-256",
             "use_iota_embed=true",
             "compile_topology_num_slices=1",
-            "ici_sequence_parallelism=4",
+            "ici_context_parallelism=4",
             "global_parameter_scale=32",
             "per_device_batch_size=0.25",
             "max_target_length=65536",
@@ -817,6 +800,8 @@ class TrainCompile(unittest.TestCase):
             "max_target_length=1024",
             "attention=flash",
             "use_tokamax_splash=True",
+            # override
+            "override_model_config=True",
             "engram_layers=[]",
             # dense warmup
             "indexer_sparse_training=False",
@@ -842,6 +827,8 @@ class TrainCompile(unittest.TestCase):
             "max_target_length=1024",
             "attention=flash",
             "use_tokamax_splash=True",
+            # override
+            "override_model_config=True",
             "engram_layers=[]",
             # sparse training
             "indexer_sparse_training=True",
@@ -869,7 +856,7 @@ class TrainCompile(unittest.TestCase):
 
   @pytest.mark.cpu_only
   def test_mhc_integration(self):
-    """AOT test for Manifold-onstrained Hyper Connection implementation"""
+    """AOT test for Manifold-constrained Hyper Connection implementation"""
     compiled_trainstep_file = "/tmp/test_mhc_integration"
     train_compile_main(
         (
@@ -881,10 +868,12 @@ class TrainCompile(unittest.TestCase):
             "model_name=deepseek-custom",
             "per_device_batch_size=4",
             "scan_layers=True",
-            "max_target_length=1024",
-            "mhc_expansion_rate=4",
             "attention=flash",
             "use_tokamax_splash=True",
+            "max_target_length=1024",
+            # override
+            "override_model_config=True",
+            "mhc_expansion_rate=4",
             "engram_layers=[]",
         )
     )
@@ -893,6 +882,7 @@ class TrainCompile(unittest.TestCase):
   def test_engram_integration(self):
     """AOT test for Engram implementation"""
     compiled_trainstep_file = "/tmp/test_engram_integration"
+    transformers.AutoConfig.register("deepseek_v32", DeepseekV32Config)
     train_compile_main(
         (
             "",
@@ -963,5 +953,24 @@ class TrainCompile(unittest.TestCase):
             "weight_dtype=float32",
             "use_qk_clip=true",
             "qk_clip_threshold=100",
+        )
+    )
+
+  @pytest.mark.cpu_only
+  def test_vocab_tiling_bf16(self):
+    """test vocab_tiling when weight_dtype=bfloat16"""
+    compiled_trainstep_file = "/tmp/test_vocab_tiling_bf16.pickle"
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-8",
+            "compile_topology_num_slices=1",
+            "base_num_decoder_layers=2",
+            "per_device_batch_size=2",
+            "max_target_length=1024",
+            "num_vocab_tiling=4",
+            "weight_dtype=bfloat16",
         )
     )

@@ -29,7 +29,7 @@ import jax.numpy as jnp
 from flax import linen as nn
 from flax import nnx
 
-from maxtext.common.common_types import AttentionType, Config, DType, Array, BATCH, LENGTH_NO_EXP, EMBED, MODEL_MODE_TRAIN
+from maxtext.common.common_types import AttentionType, Config, DType, Array, BATCH, EMBED, MODEL_MODE_TRAIN, LENGTH
 from maxtext.layers import attentions
 from maxtext.layers import initializers as max_initializers
 from maxtext.layers import moe
@@ -723,7 +723,7 @@ class Qwen3NextFullAttention(nnx.Module):
         attention_kernel=cfg.attention,
         inputs_q_shape=dummy_inputs_shape,
         inputs_kv_shape=dummy_inputs_shape,
-        out_axis_names=(BATCH, LENGTH_NO_EXP, EMBED),
+        out_axis_names=(BATCH, LENGTH, EMBED),
         mesh=self.mesh,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
@@ -785,7 +785,7 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
         num_experts=cfg.num_experts,
         num_experts_per_tok=cfg.num_experts_per_tok,
         mesh=self.mesh,
-        kernel_init=max_initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_init=max_initializers.nd_dense_init(cfg.dense_init_scale, "fan_in", "truncated_normal"),
         kernel_axes=("embed", None),
         intermediate_dim=cfg.moe_mlp_dim,
         dtype=cfg.dtype,
@@ -815,7 +815,7 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
         out_features_shape=1,
         use_bias=False,  # Qwen3-Next shared_expert_gate does not have a bias
         dtype=cfg.dtype,
-        kernel_init=max_initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_init=max_initializers.nd_dense_init(cfg.dense_init_scale, "fan_in", "truncated_normal"),
         kernel_axes=("embed", None),
         matmul_precision=cfg.matmul_precision,
         rngs=rngs,
@@ -896,6 +896,8 @@ class Qwen3NextScannableBlock(nnx.Module):
       previous_chunk=None,
       page_state: None | page_manager.PageState = None,
       slot: None | int = None,
+      kv_cache=None,
+      attention_metadata=None,
   ) -> tuple[Array, None]:
     """Applies the block of decoder layers to the input carry.
 
@@ -924,6 +926,8 @@ class Qwen3NextScannableBlock(nnx.Module):
           previous_chunk,
           page_state,
           slot,
+          kv_cache=kv_cache,
+          attention_metadata=attention_metadata,
       )
 
     # The output of the block is the carry for the next scan iteration.
@@ -1055,7 +1059,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
     # We sow the load balancing loss so it can be collected and added to the total loss
     # during training.
     if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
-      self.sow("intermediates", "moe_lb_loss", load_balance_loss)
+      self.moe_lb_loss = nnx.Intermediate(load_balance_loss)
 
     # Final residual connection (after the MoE block)
     layer_output = residual + mlp_output
@@ -1235,10 +1239,7 @@ class Qwen3DecoderLayer(AttentionWithNorm):
     layer_output = intermediate_inputs + mlp_lnx
     layer_output = nn.with_logical_constraint(layer_output, self.activation_axis_names)
 
-    if self.config.scan_layers:
-      return layer_output, None
-    else:
-      return layer_output, kv_cache
+    return layer_output, kv_cache
 
 
 # -----------------------------------------
@@ -1261,7 +1262,7 @@ class Qwen3MoeDecoderLayer(AttentionWithNorm):
         num_experts=config.num_experts,
         num_experts_per_tok=config.num_experts_per_tok,
         mesh=mesh,
-        kernel_init=max_initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_init=max_initializers.nd_dense_init(config.dense_init_scale, "fan_in", "truncated_normal"),
         kernel_axes=("embed", None),
         intermediate_dim=config.moe_mlp_dim,  # same as config.mlp_dim
         dtype=config.dtype,
@@ -1284,6 +1285,14 @@ class Qwen3MoeDecoderLayer(AttentionWithNorm):
       attention_metadata: None | dict[str, Any] = None,
   ):
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
+    is_scan_carry = False
+    if isinstance(inputs, tuple) and len(inputs) == 3:
+      hidden_states, stacked_kv_cache, layer_idx = inputs
+      kv_cache = stacked_kv_cache[layer_idx]
+      inputs = hidden_states
+      is_scan_carry = True
+    elif isinstance(inputs, tuple):
+      inputs = inputs[0]
     if isinstance(inputs, tuple):
       inputs = inputs[0]
     hidden_states, intermediate_inputs, kv_cache = self.apply_attention_with_norm(
@@ -1299,13 +1308,20 @@ class Qwen3MoeDecoderLayer(AttentionWithNorm):
     mlp_lnx, load_balance_loss, _ = self.moe_block(hidden_states)
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, self.activation_axis_names)
     if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
-      self.sow("intermediates", "moe_lb_loss", load_balance_loss)
+      self.moe_lb_loss = nnx.Intermediate(load_balance_loss)
 
     layer_output = intermediate_inputs + mlp_lnx
     layer_output = nn.with_logical_constraint(layer_output, self.activation_axis_names)
 
-    if self.config.scan_layers:
-      return layer_output, None
+    if is_scan_carry:
+
+      def update_cache(cache, val):
+        if jnp.size(val) > 0:
+          return cache.at[layer_idx].set(val)
+        return cache
+
+      stacked_kv_cache = jax.tree_util.tree_map(update_cache, stacked_kv_cache, kv_cache)
+      return (layer_output, stacked_kv_cache, layer_idx + 1), None
     else:
       return layer_output, kv_cache
 
@@ -1781,12 +1797,20 @@ class Qwen3OmniMoeVisionEncoder(nnx.Module):
         - encoder_output: shape (batch, T*H*W, hidden_size_for_vit)
         - deep_features: List of intermediate features, each of shape (batch, T*H*W, out_hidden_size)
     """
-    _, _, num_frames, height, width = hidden_states.shape
+    batch_size, _, num_frames, height, width = hidden_states.shape
     num_frames = num_frames // self.config.temporal_patch_size_for_vit
     height = height // self.config.patch_size_for_vit
     width = width // self.config.patch_size_for_vit
+    hidden_states = hidden_states.reshape(
+        -1,
+        self.config.num_channels_for_vit,
+        self.config.temporal_patch_size_for_vit,
+        self.config.patch_size_for_vit,
+        self.config.patch_size_for_vit,
+    )
 
     x = self.patch_embed(hidden_states)
+    x = x.reshape(batch_size, -1, self.config.hidden_size_for_vit)
     pos = self.pos_embed_interpolate(num_frames, height, width)
 
     pos = pos[jnp.newaxis, :, :]
@@ -1923,7 +1947,7 @@ class Qwen3OmniAudioEncoderLayer(nnx.Module):
         in_features=self.config.d_model_for_audio,
         intermediate_dim=self.config.encoder_ffn_dim_for_audio,
         activations=("gelu",),  # Single GELU activation
-        kernel_init=max_initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_init=max_initializers.nd_dense_init(self.config.dense_init_scale, "fan_in", "truncated_normal"),
         intermediate_dropout_rate=0.0,  # No dropout to match AudioMLP
         dtype=self.config.dtype_mm,
         weight_dtype=self.config.weight_dtype,
@@ -2039,7 +2063,7 @@ class Qwen3OmniAudioEncoder(nnx.Module):
         use_bias=False,
         dtype=self.config.dtype_mm,
         weight_dtype=self.config.weight_dtype,
-        kernel_init=nd_dense_init(1.0, "fan_in", "normal"),
+        kernel_init=nd_dense_init(self.config.dense_init_scale, "fan_in", "normal"),
         matmul_precision=self.config.matmul_precision,
         rngs=self.rngs,
     )
@@ -2130,7 +2154,7 @@ class Qwen3OmniAudioProjector(nnx.Module):
         use_bias=True,
         dtype=config.dtype_mm,
         weight_dtype=config.weight_dtype,
-        kernel_init=nd_dense_init(1.0, "fan_in", "normal"),
+        kernel_init=nd_dense_init(config.dense_init_scale, "fan_in", "normal"),
         matmul_precision=config.matmul_precision,
         rngs=rngs,
     )
@@ -2141,7 +2165,7 @@ class Qwen3OmniAudioProjector(nnx.Module):
         use_bias=True,
         dtype=config.dtype_mm,
         weight_dtype=config.weight_dtype,
-        kernel_init=nd_dense_init(1.0, "fan_in", "normal"),
+        kernel_init=nd_dense_init(config.dense_init_scale, "fan_in", "normal"),
         matmul_precision=config.matmul_precision,
         rngs=rngs,
     )

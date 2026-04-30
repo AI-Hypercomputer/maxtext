@@ -21,14 +21,10 @@ import pytest
 from types import SimpleNamespace
 import jax
 
+from maxtext.trainers.post_train.rl import train_rl
 
 pytestmark = [pytest.mark.post_training]
-
-# Same as in rl_utils_test.py.
-train_rl = pytest.importorskip(
-    "maxtext.trainers.post_train.rl.train_rl",
-    reason="Tunix is not installed on the GPU image",
-)
+from maxtext.utils import model_creation_utils
 
 
 def _get_mock_devices(devices_per_slice, num_slices=1):
@@ -62,9 +58,9 @@ class TrainRLTest(unittest.TestCase):
     # Following the pattern in distillation_checkpointing_test.py for mocking jax objects
     with (
         mock.patch.object(jax, "devices", return_value=mock_devices),
-        mock.patch("maxtext.trainers.post_train.rl.train_rl.pyconfig.initialize_pydantic", return_value=mock_config),
+        mock.patch("maxtext.utils.model_creation_utils.pyconfig.initialize_pydantic", return_value=mock_config),
     ):
-      trainer_config, sampler_config, trainer_devices, sampler_devices = train_rl.setup_configs_and_devices(
+      trainer_config, sampler_config, trainer_devices, sampler_devices = model_creation_utils.setup_configs_and_devices(
           ["dummy", "dummy"]
       )
 
@@ -91,9 +87,9 @@ class TrainRLTest(unittest.TestCase):
 
     with (
         mock.patch.object(jax, "devices", return_value=mock_devices),
-        mock.patch("maxtext.trainers.post_train.rl.train_rl.pyconfig.initialize_pydantic", return_value=mock_config),
+        mock.patch("maxtext.utils.model_creation_utils.pyconfig.initialize_pydantic", return_value=mock_config),
     ):
-      _, _, trainer_devices, sampler_devices = train_rl.setup_configs_and_devices(["dummy", "dummy"])
+      _, _, trainer_devices, sampler_devices = model_creation_utils.setup_configs_and_devices(["dummy", "dummy"])
 
       self.assertEqual(len(trainer_devices), 2)
       self.assertEqual(len(sampler_devices), 6)
@@ -118,12 +114,12 @@ class TrainRLTest(unittest.TestCase):
     with (
         mock.patch.object(jax, "devices", return_value=mock_devices),
         mock.patch(
-            "maxtext.trainers.post_train.rl.train_rl.pyconfig.initialize_pydantic",
+            "maxtext.utils.model_creation_utils.pyconfig.initialize_pydantic",
             side_effect=side_effect,
         ),
     ):
       with self.assertRaisesRegex(ValueError, "Not enough slices for trainer and samplers"):
-        train_rl.setup_configs_and_devices(["dummy", "dummy"])
+        model_creation_utils.setup_configs_and_devices(["dummy", "dummy"])
 
   @pytest.mark.cpu_only
   def test_setup_configs_and_devices_multislice_invalid_tp(self):
@@ -145,12 +141,12 @@ class TrainRLTest(unittest.TestCase):
     with (
         mock.patch.object(jax, "devices", return_value=mock_devices),
         mock.patch(
-            "maxtext.trainers.post_train.rl.train_rl.pyconfig.initialize_pydantic",
+            "maxtext.utils.model_creation_utils.pyconfig.initialize_pydantic",
             side_effect=side_effect,
         ),
     ):
       with self.assertRaisesRegex(ValueError, "must be divisible by tensor parallelism"):
-        train_rl.setup_configs_and_devices(["dummy", "dummy"])
+        model_creation_utils.setup_configs_and_devices(["dummy", "dummy"])
 
   @pytest.mark.cpu_only
   def test_setup_configs_and_devices_multislice_invalid_tp_fsdp(self):
@@ -172,12 +168,12 @@ class TrainRLTest(unittest.TestCase):
     with (
         mock.patch.object(jax, "devices", return_value=mock_devices),
         mock.patch(
-            "maxtext.trainers.post_train.rl.train_rl.pyconfig.initialize_pydantic",
+            "maxtext.utils.model_creation_utils.pyconfig.initialize_pydantic",
             side_effect=side_effect,
         ),
     ):
       with self.assertRaisesRegex(ValueError, "must equal devices_per_slice"):
-        train_rl.setup_configs_and_devices(["dummy", "dummy"])
+        model_creation_utils.setup_configs_and_devices(["dummy", "dummy"])
 
   @pytest.mark.cpu_only
   def test_get_rollout_kwargs_no_dp(self):
@@ -305,26 +301,41 @@ class TrainRLTest(unittest.TestCase):
     mock_tokenizer.tokenize.side_effect = tokenize_side_effect
 
     # Define dataset mock data
-    train_data = [{"prompts": "short"}, {"prompts": "long"}, {"prompts": "short"}, {"prompts": "long"}]
-    test_data = [{"prompts": "short"}, {"prompts": "long"}]
+    train_data = [
+        {"question": "short", "answer": "a1"},
+        {"question": "long", "answer": "a2"},
+        {"question": "short", "answer": "a3"},
+        {"question": "long", "answer": "a4"},
+    ]
+    test_data = [{"question": "short", "answer": "a5"}, {"question": "long", "answer": "a6"}]
     train_map_ds = grain.MapDataset.source(train_data)
     test_map_ds = grain.MapDataset.source(test_data)
 
-    def get_dataset_side_effect(model_tokenizer, config, data_dir, split, data_files=None, dataset_name=None):
+    def get_dataset_side_effect(config, split, data_files=None, dataset_name=None):
       if split == "train":
         return train_map_ds
       else:
         return test_map_ds
 
+    def get_filtered_data_side_effect(dataset_name, model_tokenizer, template_config, trainer_config, x):
+      return {
+          "prompts": x["question"],
+          "question": x["question"],
+          "answer": f"[{x['answer'], x['answer']}]",
+      }
+
     # Configs
     trainer_config = SimpleNamespace(
         debug=SimpleNamespace(rl=False),
+        rl=SimpleNamespace(use_agentic_rollout=False),
         tokenizer_path="dummy_path",
         dataset_name="dummy_dataset",
         train_split="train",
         eval_split="eval",
         hf_train_files=None,
         hf_eval_files=None,
+        chat_template_path="maxtext/examples/chat_templates/gsm8k_rl.json",
+        data_shuffle_seed=42,
         max_prefill_predict_length=10,
         batch_size=2,
         num_batches=2,
@@ -334,11 +345,9 @@ class TrainRLTest(unittest.TestCase):
         test_batch_start_index=0,
     )
 
-    # Patch everything!
     with (
         mock.patch("maxtext.trainers.post_train.rl.train_rl.get_dataset", side_effect=get_dataset_side_effect),
-        mock.patch("maxtext.trainers.post_train.rl.train_rl.os.makedirs"),
-        mock.patch("maxtext.trainers.post_train.rl.train_rl.os.path.exists", return_value=True),
+        mock.patch("maxtext.trainers.post_train.rl.utils_rl.process_data", side_effect=get_filtered_data_side_effect),
     ):
       train_dataset, test_dataset = train_rl.prepare_datasets(trainer_config, mock_tokenizer)
 
@@ -363,6 +372,104 @@ class TrainRLTest(unittest.TestCase):
       test_batch = test_elements[0]
       self.assertEqual(len(test_batch["prompts"]), 1)
       self.assertEqual(test_batch["prompts"][0], "short")
+
+  @pytest.mark.cpu_only
+  @mock.patch("datasets.load_dataset")
+  def test_prepare_datasets_with_split(self, mock_load):
+    mock_ds = mock.MagicMock()
+    mock_split_result = {
+        "train": [{"question": "q1", "answer": "a1"}, {"question": "q2", "answer": "a2"}],
+        "test": [{"question": "q3", "answer": "a3"}],
+    }
+    mock_ds.train_test_split.return_value = mock_split_result
+    mock_load.return_value = mock_ds
+    mock_config = SimpleNamespace(
+        debug=SimpleNamespace(rl=False),
+        dataset_name="open-r1/OpenR1-Math-220k",
+        eval_dataset_name="open-r1/OpenR1-Math-220k",
+        train_split="train",
+        hf_train_files="hf://open-r1/OpenR1-Math-220k/data/dummy.parquet",
+        chat_template_path="maxtext/examples/chat_templates/gsm8k_rl.json",
+        data_shuffle_seed=42,
+        num_batches=1,
+        batch_size=5,
+        train_fraction=1.0,
+        num_epoch=1,
+        num_test_batches=1,
+        test_batch_start_index=0,
+        rl=SimpleNamespace(use_agentic_rollout=False),
+        reasoning_start_token="<reasoning>",
+        reasoning_end_token="</reasoning>",
+        solution_start_token="<answer>",
+        solution_end_token="</answer>",
+        max_prefill_predict_length=256,
+    )
+
+    train_ds, test_ds = train_rl.prepare_datasets(
+        trainer_config=mock_config,
+        model_tokenizer=mock.MagicMock(),
+    )
+
+    mock_load.assert_called_once_with(
+        "parquet",
+        data_files={mock_config.train_split: mock_config.hf_train_files},
+        split=mock_config.train_split,
+    )
+    mock_ds.train_test_split.assert_called_once_with(test_size=0.05, seed=mock_config.data_shuffle_seed)
+    train_batches, test_batches = list(train_ds), list(test_ds)
+    total_train_examples = sum(len(batch["question"]) for batch in train_batches)
+    assert total_train_examples == 2
+    total_test_examples = sum(len(batch["question"]) for batch in test_batches)
+    assert total_test_examples == 1
+
+  @pytest.mark.cpu_only
+  @mock.patch("datasets.load_dataset")
+  def test_prepare_datasets_without_split(self, mock_load):
+    mock_ds = mock.MagicMock()
+    mock_load.return_value = mock_ds
+    mock_config = SimpleNamespace(
+        debug=SimpleNamespace(rl=False),
+        dataset_name="openai/gsm8k",
+        eval_dataset_name="openai/gsm8k",
+        train_split="train",
+        eval_split="test",
+        hf_train_files="hf://openai/gsm8k/data/dummy.parquet",
+        hf_eval_files="hf://openai/gsm8k/data/dummy.parquet",
+        chat_template_path="maxtext/examples/chat_templates/gsm8k_rl.json",
+        data_shuffle_seed=42,
+        num_batches=1,
+        batch_size=5,
+        train_fraction=1.0,
+        num_epoch=1,
+        num_test_batches=1,
+        test_batch_start_index=0,
+        rl=SimpleNamespace(use_agentic_rollout=False),
+        reasoning_start_token="<reasoning>",
+        reasoning_end_token="</reasoning>",
+        solution_start_token="<answer>",
+        solution_end_token="</answer>",
+        max_prefill_predict_length=256,
+    )
+
+    _, _ = train_rl.prepare_datasets(
+        trainer_config=mock_config,
+        model_tokenizer=mock.MagicMock(),
+    )
+
+    expected_calls = [
+        mock.call(
+            "parquet",
+            data_files={mock_config.train_split: mock_config.hf_train_files},
+            split=mock_config.train_split,
+        ),
+        mock.call(
+            "parquet",
+            data_files={mock_config.eval_split: mock_config.hf_eval_files},
+            split=mock_config.eval_split,
+        ),
+    ]
+    mock_load.assert_has_calls(expected_calls, any_order=True)
+    assert mock_load.call_count == len(expected_calls)
 
 
 if __name__ == "__main__":

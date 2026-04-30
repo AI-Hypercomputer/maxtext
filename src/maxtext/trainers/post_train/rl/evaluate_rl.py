@@ -16,7 +16,11 @@
 """
 RL Evaluation Module.
 """
-from math_verify import parse
+import collections
+import json
+import re
+from typing import Any
+
 from tqdm.auto import tqdm
 from tunix.rl.rollout.base_rollout import RolloutConfig
 
@@ -86,85 +90,97 @@ def generate_responses(
   return multiple_call_responses
 
 
-def score_responses(tmvp_config, question, responses, answer):
-  """
-  Score a set of responses for a single question.
+def _score_single(
+    extracted_response: str,
+    raw_response: str,
+    answers: list[str],
+    tmvp_config: Any,
+    match_format: re.Pattern[str],
+) -> tuple[bool, bool, bool]:
+  """Score one (extracted answer, raw response) pair. Returns (is_correct, is_partially_correct, has_correct_format)."""
+  has_correct_format = match_format.search(raw_response) is not None
+  try:
+    is_correct, is_partially_correct = utils_rl.check_correctness(extracted_response, answers, tmvp_config)
+    if tmvp_config.debug.rl:
+      max_logging.log(f"Result has_correct_format: {has_correct_format}")
+      max_logging.log(f"Result is_correct: {is_correct}")
+      max_logging.log(f"Result is_partially_correct: {is_partially_correct}")
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    is_correct, is_partially_correct = False, False
+    if tmvp_config.debug.rl:
+      max_logging.log(f"Evaluation Exception: {e} — SKIPPED")
+  return is_correct, is_partially_correct, has_correct_format
+
+
+def score_responses(tmvp_config, question, responses, answers):
+  """Score a set of responses for a single question.
 
   Args:
       tmvp_config: Configuration object
       question: The evaluation question
       responses: List of generated responses for this question
-      answer: The correct answer
+      answers: List of correct answers
 
   Returns:
       Tuple of (is_correct, is_partially_correct, has_correct_format)
   """
-  match_format = utils_rl.get_match_format_regex(tmvp_config)
-  answer_fallback = utils_rl.get_answer_fallback_regex(tmvp_config)
-
   if tmvp_config.debug.rl:
     max_logging.log("========================================")
     max_logging.log(f"Evaluation Question: {question}")
-    max_logging.log(f"Evaluation Answer: {answer}")
+    max_logging.log(f"Evaluation Answer: {answers}")
     max_logging.log(f"Evaluation Responses: {responses}")
     max_logging.log("========================================")
 
-  is_correct = False
-  is_partially_correct = False
-  has_correct_format = False
+  eval_mode = getattr(tmvp_config, "eval_mode", "pass")
+  match_format = utils_rl.get_match_format_regex(tmvp_config)
+  extracted_responses = [utils_rl.extract_answer(r, tmvp_config) for r in responses]
 
-  for response in responses:
-    # Extract answer: prefer the full format match; fall back to the last
-    # <answer>...</answer> tag if full format match is not found, so result
-    # scoring is decoupled from format.
-    full_match = match_format.search(response)
-    if full_match is not None:
-      extracted_response = full_match.group(1)
-    else:
-      # Find the *last* occurrence of the answer tag (most likely the final answer).
-      fallback_matches = answer_fallback.findall(response)
-      extracted_response = fallback_matches[-1].strip() if fallback_matches else "-1000000"
+  if not extracted_responses:
+    return False, False, False
+
+  if eval_mode == "maj":
+    # extract the single-most frequent response
+    counter = collections.Counter(extracted_responses)
+    majority = counter.most_common(1)[0][0]
     if tmvp_config.debug.rl:
-      used = "full format" if full_match is not None else "answer-tag fallback"
-      max_logging.log(f"Evaluation extracted_response ({used}): {extracted_response}")
+      max_logging.log(f"Majority Response: {majority} (Count: {counter[majority]})")
 
-    # Check exact correctness
-    try:
-      # Fix LaTeX escaping issues for both ground truth and extracted answer
-      norm_answer = utils_rl.fix_latex_escaping(answer)
-      norm_extracted = utils_rl.fix_latex_escaping(extracted_response)
-      # Normalize Normalize for certain datasets and parse
-      if "DAPO" in tmvp_config.dataset_name or "OpenMathInstruct" in tmvp_config.dataset_name:
-        norm_extracted = utils_rl.normalize_final_answer(norm_extracted).strip()
-        norm_answer = utils_rl.normalize_final_answer(answer).strip()
-      is_correct = utils_rl.math_verify_func([utils_rl.boxed(norm_answer)], [utils_rl.boxed(norm_extracted)])[0] > 0.1
-      if tmvp_config.debug.rl:
-        # is_correct is a tuple, if first value is 1.0 means it's a match;
-        # 0.0 means a mismatch. e.g. (0.0, (['3', '3'], ['3/5', '\\frac{3}{5}']))
-        max_logging.log(f"Result is_correct: {is_correct}")
+    # Check the format for the majority response
+    has_correct_format = any(
+        match_format.search(responses[idx]) is not None
+        for idx, response in enumerate(extracted_responses)
+        if response == majority
+    )
+    is_correct, is_partially_correct, _ = _score_single(majority, responses[0], answers, tmvp_config, match_format)
+    return is_correct, is_partially_correct, has_correct_format
 
-      val_extracted = parse(utils_rl.boxed(norm_extracted))
-      val_answer = parse(utils_rl.boxed(norm_answer))
+  if eval_mode == "pass":
+    result = False, False, False
+    for extracted, response in zip(extracted_responses, responses):
+      result = _score_single(extracted, response, answers, tmvp_config, match_format)
+      # Early exit if all criteria are met
+      if all(result):
+        return result
+    return result
 
-      # Check partial correctness if values can be extracted (within 10%)
-      if val_extracted and val_answer:
-        ratio = (val_extracted[0] + utils_rl.EPSILON) / (val_answer[0] + utils_rl.EPSILON)
-        is_partially_correct = 0.9 <= ratio <= 1.1
+  if eval_mode == "pass_at_1":
+    # Estimate pass@1: fraction of N samples that are correct per problem.
+    # Returns floats in [0, 1] instead of booleans.
+    scores = [
+        _score_single(extracted_response, response, answers, tmvp_config, match_format)
+        for extracted_response, response in zip(extracted_responses, responses)
+    ]
+    n_samples = len(scores)
+    frac_correct = sum(s[0] for s in scores) / n_samples
+    frac_partial = sum(s[1] for s in scores) / n_samples
+    frac_format = sum(s[2] for s in scores) / n_samples
+    if tmvp_config.debug.rl:
+      max_logging.log(f"{frac_correct*n_samples:.0f}/{n_samples} correct")
+      max_logging.log(f"{frac_partial*n_samples:.0f}/{n_samples} partial")
+      max_logging.log(f"{frac_format*n_samples:.0f}/{n_samples} format")
+    return frac_correct, frac_partial, frac_format
 
-    except Exception as e:
-      if tmvp_config.debug.rl:
-        max_logging.log(f"Evaluation Exception: {e}")
-        max_logging.log("SKIPPED")
-
-    # Check format correctness (requires the full <reasoning>...</reasoning><answer>...</answer> structure)
-    if full_match is not None:
-      has_correct_format = True
-
-    # Early exit if all criteria are met
-    if is_correct and is_partially_correct and has_correct_format:
-      break
-
-  return is_correct, is_partially_correct, has_correct_format
+  raise ValueError(f"Unknown eval_mode: {eval_mode!r}")
 
 
 def evaluate(
@@ -210,27 +226,28 @@ def evaluate(
 
     # Score each question-answer pair
     for question, responses, answer in zip(questions, multiple_call_responses, answers):
+      # decode the json-encoded list of acceptable answers
+      answer = list(dict.fromkeys(json.loads(answer)))
       is_correct, is_partially_correct, has_correct_format = score_responses(
           tmvp_config=tmvp_config,
           question=question,
           responses=responses,
-          answer=answer,
+          answers=answer,
       )
 
-      # Update counters
-      if is_correct:
-        corr += 1
-        if corr_lst and make_lst:
-          response_lst.append((question, answer, responses))
-      else:
-        if not corr_lst and make_lst:
-          response_lst.append((question, answer, responses))
+      # Update counters. For "pass" and "maj" modes, scores are booleans
+      # (True=1, False=0). For "pass_at_1" mode, scores are floats in [0, 1]
+      # representing the fraction of samples correct. Using += works for both:
+      # bool is a subtype of int in Python, so True += is the same as += 1.
+      corr += is_correct
+      partially_corr += is_partially_correct
+      corr_format += has_correct_format
 
-      if is_partially_correct:
-        partially_corr += 1
-
-      if has_correct_format:
-        corr_format += 1
+      if make_lst:
+        if corr_lst and is_correct:
+          response_lst.append((question, answer, responses))
+        elif not corr_lst and not is_correct:
+          response_lst.append((question, answer, responses))
 
       total += 1
 

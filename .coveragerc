@@ -1,7 +1,7 @@
 # .coveragerc
 
 [run]
-source = MaxText
+source = maxtext
 branch = True
 omit =
     tests/*
@@ -10,7 +10,7 @@ omit =
 [paths]
 source =
     src/MaxText
-    src/MaxText
+    src/maxtext
     */site-packages/MaxText
     */site-packages/maxtext
 

@@ -54,6 +54,24 @@ rl:
   grpo_epsilon: 0.2
   loss_algo: 'grpo' # grpo or gspo-token
 
+  # ====== Agentic Rollout ======
+  # If True, uses the async AgenticGRPOLearner, which overlaps rollout generation
+  # with training for faster throughput via online vLLM inference.
+  use_agentic_rollout: False
+  # Max concurrent rollout requests when using agentic rollout.
+  max_concurrency: 256
+  # Number of off-policy steps tolerated before requiring a policy update.
+  off_policy_steps: 0
+  # System prompt injected into the agent at rollout time.
+  system_prompt: ''
+  # If True, mask degenerate groups (all-zero advantages) from contributing to the loss.
+  degenerate_group_masking: True
+  # Upper-bound clipping epsilon for GRPO loss; defaults to grpo_epsilon when null.
+  epsilon_high: null
+  # Number of model keys to chunk for resharding tensors between trainer and rollout devices.
+  # If null, the entire model is resharded at once.
+  reshard_chunk_size: null
+
 
 # ====== Models ======
 # for MaxText
@@ -81,6 +99,7 @@ checkpoint_storage_use_ocdbt: False # For Pathways
 checkpoint_storage_use_zarr3: False # For Pathways
 use_pathways: True
 log_period: 20
+convert_checkpoint_if_possible: True
 
 # ====== Debugging ======
 debug:
@@ -96,7 +115,8 @@ batch_size: 1
 num_batches: 4
 # A batch can be split into multiple micro batches for memory management
 # and/or async sampling and training.
-micro_batch_size: -1
+train_micro_batch_size: -1
+rollout_micro_batch_size: -1
 # Keep `num_test_batches` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
 num_test_batches: 5  # 200
@@ -131,6 +151,7 @@ generation_configs:
 num_eval_passes: 1 # Number of generation passes during evaluation
 eval_corr_lst: False # If True, only include correct responses in the list during evaluation
 eval_make_lst: False # If True, return a list of (question, answer, responses) during evaluation
+eval_mode: "pass" # Evaluation mode ("pass" for pass@K, "maj" for majority voting maj@K, "pass_at_1" for pass@1 estimation)
 
 # ====== Inference ======
 # === Generation during GRPO training ===
@@ -173,6 +194,12 @@ reward_ratio_guess_to_answer_low: 0.0
 penalty_incorrect_format: 0.0
 penalty_incorrect_answer: 0.0
 
+# ====== Configuration for math_verify Pool ======
+# Global timeout (seconds) for math_verify calls across all examples in a batch
+math_verify_timeout: 120
+# Max worker processes for the math_verify pool. null ⇒ min(batch_size, cpu_count())
+math_verify_num_procs: null
+
 # ====== Special tokens/templates for GSM8K reasoning ======
 reasoning_start_token: '<reasoning>'
 reasoning_end_token: '</reasoning>'
@@ -181,10 +208,23 @@ solution_end_token: '</answer>'
 chat_template_path: 'maxtext/examples/chat_templates/gsm8k_rl.json'
 skip_jax_distributed_system: True
 
-# # TODO(@mazumdera): fix this
-# Dataset Configuration
-dataset_name: 'gsm8k' # huggingface:open-r1/DAPO-Math-17k-Processed
-eval_dataset_name: 'gsm8k' # huggingface:BytedTsinghua-SIA/AIME-2024
+# ====== Dataset Configuration ======
+# Supported values for dataset_name:
+#   ['openai/gsm8k', 'nvidia/OpenMathInstruct-2', 'nvidia/OpenMathReasoning', 'open-r1/OpenR1-Math-220k', 'bethgelab/CuratedThoughts']
+#
+# Scenarios:
+#   1. dataset_name='openai/gsm8k' and eval_dataset_name='openai/gsm8k'
+#      Loads the train and test splits of GSM8K directly.
+#
+#   2. Datasets other than 'gsm8k' with same eval: dataset_name=eval_dataset_name=<dataset>
+#      The dataset has no separate test split, so the training data is
+#      automatically split into train and test sets internally.
+#
+#   3. Train and evaluation on different datasets: dataset_name=<train_dataset>, eval_dataset_name=<eval_dataset>
+#      Loads separate dataset for training and evaluation (e.g., train on OpenMathInstruct-2, eval on GSM8K).
+dataset_name: 'openai/gsm8k'
+eval_dataset_name: 'openai/gsm8k'
 train_split: 'train'
 eval_split: 'test'
+hf_name: 'main' # subset of Hugging Face dataset
 tokenizer_type: 'huggingface'

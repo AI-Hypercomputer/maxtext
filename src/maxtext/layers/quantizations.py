@@ -28,6 +28,7 @@ from aqt.jax.v2 import calibration
 
 import qwix
 from qwix._src.core import dot_general_qt
+from qwix._src.core import sparsity
 
 import jax
 import jax.numpy as jnp
@@ -730,68 +731,94 @@ class NANOOFp8Provider(qwix.QtProvider):
     return nn.NANOOFp8DotGeneralOp(name=op_id)(*args, **kwargs)
 
 
-def get_fp8_full_qwix_rule(config: Config):
-  return qwix.QtRule(
-      module_path="decoder/.*layers.*",
-      weight_qtype=jnp.float8_e4m3fn,
-      act_qtype=jnp.float8_e4m3fn,
-      bwd_qtype=jnp.float8_e5m2,
-      weight_calibration_method=config.weight_quantization_calibration_method,
-      act_calibration_method=config.act_quantization_calibration_method,
-      bwd_calibration_method=config.bwd_quantization_calibration_method,
-      op_names=("dot_general", "gmm", "ragged_dot"),
-  )
+def get_fp8_full_qwix_rule_w_sparsity(config: Config):
+  sparsity_rule = None
+  if config.weight_sparsity_n and config.weight_sparsity_m:
+    sparsity_rule = sparsity.SparsityRule(
+        weight_sparsity_n=config.weight_sparsity_n,
+        weight_sparsity_m=config.weight_sparsity_m,
+        weight_sparsity_update_step=config.weight_sparsity_update_step,
+        weight_sparsity_start_step=config.weight_sparsity_start_step,
+    )
+  return [
+      qwix.QtRule(
+          module_path="decoder/.*layers.*",
+          weight_qtype=jnp.float8_e4m3fn,
+          act_qtype=jnp.float8_e4m3fn,
+          bwd_qtype=jnp.float8_e5m2,
+          weight_calibration_method=config.weight_quantization_calibration_method,
+          act_calibration_method=config.act_quantization_calibration_method,
+          bwd_calibration_method=config.bwd_quantization_calibration_method,
+          additional_qt_config={"sparsity_rule": sparsity_rule},
+          op_names=("dot_general", "gmm", "ragged_dot"),
+      ),
+  ]
 
 
 def get_quantization_rule(config: Config):
   match config.quantization:
     case "int4":
-      return qwix.QtRule(
-          module_path="decoder/.*layers.*",
-          weight_qtype=jnp.int4,
-          act_qtype=jnp.int4,
-          bwd_qtype=jnp.int4,
-          bwd_weight_grad_tile_size=1 / config.quantization_local_shard_count,
-          op_names=("dot_general",),
-      )
+      return [
+          qwix.QtRule(
+              module_path="decoder/.*layers.*",
+              weight_qtype=jnp.int4,
+              act_qtype=jnp.int4,
+              bwd_qtype=jnp.int4,
+              bwd_weight_grad_tile_size=1
+              / config.quantization_local_shard_count,
+              op_names=("dot_general",),
+          )
+      ]
     case "int8":
-      return qwix.QtRule(
-          module_path="decoder/.*layers.*",
-          weight_qtype=jnp.int8,
-          act_qtype=jnp.int8,
-          bwd_qtype=jnp.int8,
-          bwd_weight_grad_tile_size=1 / config.quantization_local_shard_count,
-          op_names=("dot_general",),
-      )
+      return [
+          qwix.QtRule(
+              module_path="decoder/.*layers.*",
+              weight_qtype=jnp.int8,
+              act_qtype=jnp.int8,
+              bwd_qtype=jnp.int8,
+              bwd_weight_grad_tile_size=1
+              / config.quantization_local_shard_count,
+              op_names=("dot_general",),
+          )
+      ]
     case "fp8":
-      return qwix.QtRule(
-          module_path="decoder/.*layers.*",
-          weight_qtype=jnp.float8_e4m3fn,
-          act_qtype=jnp.float8_e4m3fn,
-          bwd_qtype=jnp.float8_e4m3fn,
-          bwd_weight_grad_tile_size=1 / config.quantization_local_shard_count,
-          op_names=("dot_general",),
-      )
+      return [
+          qwix.QtRule(
+              module_path="decoder/.*layers.*",
+              weight_qtype=jnp.float8_e4m3fn,
+              act_qtype=jnp.float8_e4m3fn,
+              bwd_qtype=jnp.float8_e4m3fn,
+              bwd_weight_grad_tile_size=1
+              / config.quantization_local_shard_count,
+              op_names=("dot_general",),
+          )
+      ]
     case "fp8_full":
-      return get_fp8_full_qwix_rule(config)
+      return get_fp8_full_qwix_rule_w_sparsity(config)
     case "fp8_gpu":
-      return qwix.QtRule(
-          module_path="decoder/.*layers.*",
-          weight_qtype=jnp.float8_e4m3fn,
-          act_qtype=jnp.float8_e4m3fn,
-          bwd_qtype=jnp.float8_e4m3fn,
-          bwd_weight_grad_tile_size=1 / config.quantization_local_shard_count,
-          op_names=("dot_general",),
-      )
+      return [
+          qwix.QtRule(
+              module_path="decoder/.*layers.*",
+              weight_qtype=jnp.float8_e4m3fn,
+              act_qtype=jnp.float8_e4m3fn,
+              bwd_qtype=jnp.float8_e4m3fn,
+              bwd_weight_grad_tile_size=1
+              / config.quantization_local_shard_count,
+              op_names=("dot_general",),
+          )
+      ]
     case "fp8_nanoo":
-      return qwix.QtRule(
-          module_path="decoder/.*layers.*",
-          weight_qtype=jnp.float8_e4m3fn,
-          act_qtype=jnp.float8_e4m3fn,
-          bwd_qtype=jnp.float8_e4m3fn,
-          bwd_weight_grad_tile_size=1 / config.quantization_local_shard_count,
-          op_names=("dot_general",),
-      )
+      return [
+          qwix.QtRule(
+              module_path="decoder/.*layers.*",
+              weight_qtype=jnp.float8_e4m3fn,
+              act_qtype=jnp.float8_e4m3fn,
+              bwd_qtype=jnp.float8_e4m3fn,
+              bwd_weight_grad_tile_size=1
+              / config.quantization_local_shard_count,
+              op_names=("dot_general",),
+          )
+      ]
     case "":
       return None
 
@@ -800,17 +827,17 @@ def get_qt_provider(config):
   """Get quantization rules based on the config."""
   match config.quantization:
     case "int8":
-      return qwix.QtProvider([get_quantization_rule(config)])
+      return qwix.QtProvider(get_quantization_rule(config))
     case "int4":
-      return qwix.QtProvider([get_quantization_rule(config)])
+      return qwix.QtProvider(get_quantization_rule(config))
     case "fp8":
-      return qwix.QtProvider([get_quantization_rule(config)])
+      return qwix.QtProvider(get_quantization_rule(config))
     case "fp8_full":
-      return qwix.QtProvider([get_quantization_rule(config)])
+      return qwix.QtProvider(get_quantization_rule(config))
     case "fp8_gpu":
-      return NvidaFp8Provider([get_quantization_rule(config)])
+      return NvidaFp8Provider(get_quantization_rule(config))
     case "fp8_nanoo":
-      return NANOOFp8Provider([get_quantization_rule(config)])
+      return NANOOFp8Provider(get_quantization_rule(config))
   return None
 
 

@@ -1,0 +1,49 @@
+name: "Update HLO References (for hlo_diff_test.py)"
+
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+
+jobs:
+  build-wheel:
+    uses: ./.github/workflows/build_package.yml
+    with:
+      device_type: tpu
+      device_name: v6e-4
+      cloud_runner: linux-x86-n2-16-buildkit
+
+  run-tests:
+    needs: build-wheel
+    uses: ./.github/workflows/run_tests_coordinator.yml
+    with:
+      flavor: tpu-integration
+      base_image: maxtext-unit-test-tpu:py312
+      is_scheduled_run: false
+      maxtext_sha: ${{ github.sha }}
+      is_update_hlo: true
+
+  commit-changes:
+    needs: run-tests # Wait for tests to finish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Download Reference HLO
+        uses: actions/download-artifact@v4
+        with:
+          name: reference-hlo
+          path: tests/utils/
+
+      - name: Commit and Push changes
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add tests/utils/reference_hlo_*.txt
+          git commit -m "Update reference HLO from CI artifact"
+          git push

@@ -309,6 +309,9 @@ def _gcs_stubs():  # pragma: no cover - simple no-op placeholders
     def bucket(self, *a, **k):  # pylint: disable=unused-argument
       return _StubBucket()
 
+    def list_blobs(self, *a, **k):  # pylint: disable=unused-argument
+      return iter([])
+
   return SimpleNamespace(Client=_StubClient, _IS_STUB=True)
 
 

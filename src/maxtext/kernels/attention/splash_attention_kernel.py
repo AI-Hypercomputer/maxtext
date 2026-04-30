@@ -428,7 +428,9 @@ def make_attention_reference(
         if activations.ndim == 4:  # pytype: disable=attribute-error
           kv_heads, q_heads_per_kv_head, q_seq_len, head_dim = activations.shape  # pytype: disable=attribute-error
           return activations.reshape(
-              kv_heads * q_heads_per_kv_head, q_seq_len, head_dim
+              kv_heads * q_heads_per_kv_head,
+              q_seq_len,
+              head_dim,
           )  # pytype: disable=attribute-error
         return activations
 
@@ -1606,7 +1608,6 @@ def _flash_attention_dkv_kernel(
   )
 
   def body(i, _):
-
     slice_k = pl.ds(i * bkv_compute, bkv_compute)
     q = q_ref[...]  # We keep q potentially transposed, since it's always RHS
 
@@ -2238,6 +2239,126 @@ def _splash_attention(
   )
 
 
+@partial(
+    jax.jit,
+    static_argnames=[
+        "is_mqa",
+        "block_sizes",
+        "save_residuals",
+        "mask_value",
+        "attn_logits_soft_cap",
+        "residual_checkpoint_name",
+        "mask_function",
+        "interpret",
+    ],
+)
+def _splash_attention_manual_fwd(
+    fwd_mask_info: mask_info_lib.MaskInfo,
+    dq_mask_info: mask_info_lib.MaskInfo | None,
+    dkv_mask_info: mask_info_lib.MaskInfo | None,
+    q: jax.Array,
+    k: jax.Array,
+    v: jax.Array,
+    segment_ids: SegmentIds | None = None,
+    sinks: jax.Array | None = None,
+    *,
+    is_mqa: bool,
+    block_sizes: BlockSizes | None,
+    save_residuals: bool,
+    mask_value: float,
+    attn_logits_soft_cap: float | None,
+    residual_checkpoint_name: str | None,
+    mask_function: MaskFunctionType | None,
+    interpret: bool,
+) -> SplashCustomReturnType:
+  """Returns both the attention output and logsumexp.
+
+  This is useful when manually controlling remat in the backward pass, as both
+  can be returned as residuals from the forward pass."""
+
+  def _collapse_partial_mask_blocks(mask_info: mask_info_lib.MaskInfo | None):
+    if mask_info is None or mask_info.partial_mask_blocks is None:
+      return mask_info
+
+    return mask_info._replace(
+        partial_mask_blocks=mask_info.partial_mask_blocks.reshape(-1, *mask_info.partial_mask_blocks.shape[-2:])
+    )
+
+  if not save_residuals:
+    raise ValueError("Expected save_residuals to be `True`.")
+
+  fwd_mask_info = _collapse_partial_mask_blocks(fwd_mask_info)
+  dq_mask_info = _collapse_partial_mask_blocks(dq_mask_info)
+  dkv_mask_info = _collapse_partial_mask_blocks(dkv_mask_info)
+  del dq_mask_info, dkv_mask_info
+
+  out, (logsumexp,) = _splash_attention_forward(  # pytype: disable=wrong-arg-types
+      fwd_mask_info,
+      q,
+      k,
+      v,
+      segment_ids,
+      mask_value=mask_value,
+      is_mqa=is_mqa,
+      block_sizes=block_sizes,
+      residual_checkpoint_name=residual_checkpoint_name,
+      save_residuals=True,
+      mask_function=mask_function,
+      attn_logits_soft_cap=attn_logits_soft_cap,
+      interpret=interpret,
+  )
+  return out, logsumexp
+
+
+def _splash_attention_manual_bwd(
+    fwd_mask_info: mask_info_lib.MaskInfo,
+    dq_mask_info: mask_info_lib.MaskInfo | None,
+    dkv_mask_info: mask_info_lib.MaskInfo | None,
+    q: jax.Array,
+    k: jax.Array,
+    v: jax.Array,
+    out: jax.Array,
+    logsumexp: jax.Array,
+    do: jax.Array,
+    segment_ids: SegmentIds | None = None,
+    sinks: jax.Array | None = None,
+    *,
+    is_mqa: bool,
+    block_sizes: BlockSizes | None,
+    save_residuals: bool,
+    mask_value: float,
+    attn_logits_soft_cap: float | None,
+    residual_checkpoint_name: str | None,
+    mask_function: MaskFunctionType | None,
+    interpret: bool,
+):
+  """Transpose of _splash_attention_manual_fwd that uses attention output and logsumexp."""
+  del fwd_mask_info
+  res = (
+      q,
+      k,
+      v,
+      segment_ids,
+      out,
+      logsumexp,
+      dq_mask_info,
+      dkv_mask_info,
+  )
+  _, _, _, dq, dk, dv, _ = _splash_attention_bwd(
+      save_residuals=save_residuals,
+      mask_value=mask_value,
+      is_mqa=is_mqa,
+      block_sizes=block_sizes,
+      residual_checkpoint_name=residual_checkpoint_name,
+      mask_function=mask_function,
+      attn_logits_soft_cap=attn_logits_soft_cap,
+      interpret=interpret,
+      res=res,
+      do=do,
+  )
+  return dq, dk, dv
+
+
 @jax.tree_util.register_pytree_node_class
 class SplashAttentionKernel:
   """Defines a SplashAttention kernel object."""
@@ -2256,6 +2377,26 @@ class SplashAttentionKernel:
 
   def __call__(self, *args, **kwargs) -> SplashCustomReturnType:
     return _splash_attention(
+        self.fwd_mask_info,
+        self.dq_mask_info,
+        self.dkv_mask_info,
+        *args,
+        **kwargs,
+        **self.kwargs,
+    )
+
+  def manual_fwd(self, *args, **kwargs) -> SplashCustomReturnType:
+    return _splash_attention_manual_fwd(
+        self.fwd_mask_info,
+        self.dq_mask_info,
+        self.dkv_mask_info,
+        *args,
+        **kwargs,
+        **self.kwargs,
+    )
+
+  def manual_bwd(self, *args, **kwargs):
+    return _splash_attention_manual_bwd(
         self.fwd_mask_info,
         self.dq_mask_info,
         self.dkv_mask_info,

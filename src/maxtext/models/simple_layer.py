@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Simple decoder layers for testing and debugging purposes."""
+"""Simple decoder layers for testing and debugging purposes."""
 
 from jax import numpy as jnp
 from jax.sharding import Mesh
@@ -58,7 +58,17 @@ class SimpleDecoderLayer(nnx.Module):
     )
 
   def __call__(
-      self, inputs: jnp.ndarray, positions, segmentation, deterministic, model_mode, previous_chunk=None, page_state=None
+      self,
+      inputs: jnp.ndarray,
+      positions,
+      segmentation,
+      deterministic,
+      model_mode,
+      previous_chunk=None,
+      page_state=None,
+      slot=None,
+      kv_cache=None,
+      attention_metadata=None,
   ):
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
     if isinstance(inputs, tuple):
@@ -121,6 +131,8 @@ class SimpleMlpDecoderLayer(nnx.Module):
       previous_chunk=None,
       page_state=None,
       slot=0,
+      kv_cache=None,
+      attention_metadata=None,
   ):
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
     if isinstance(inputs, tuple):

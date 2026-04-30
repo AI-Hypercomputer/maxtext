@@ -61,11 +61,11 @@ def vocab_tiling_linen_loss(
   param_spec = nn.get_partition_spec(params)
   hidden_spec = create_sharding(
       model.mesh,
-      ("activation_embed_and_logits_batch", "activation_length_no_exp", "activation_embed"),
+      ("activation_embed_and_logits_batch", "activation_length", "activation_embed"),
   )
   label_spec = create_sharding(
       model.mesh,
-      ("activation_embed_and_logits_batch", "activation_length_no_exp"),
+      ("activation_embed_and_logits_batch", "activation_length"),
   )
   reshaped_hidden_spec = create_sharding(
       model.mesh,
@@ -224,10 +224,10 @@ def vocab_tiling_linen_loss(
         _bwd_scan_body, initial_grad_params_acc, (reshaped_hidden_states, reshaped_labels, reshaped_segmentation)
     )
     grad_reshaped_hidden_states = _maybe_shard_with_name(grad_reshaped_hidden_states, reshaped_hidden_spec)
-    # TODO (chengnuojin): we may want to convert grad_params to bf16 to save memory
-    # grad_params = jax.tree_util.tree_map(lambda x, y: y.astype(x.dtype), gathered_params, grad_params)
     # Chain-rule to accumulate gradients
     grad_params = jax.tree_util.tree_map(lambda g: g * loss_cotangent, grad_params)
+    # Cast cotangents back to each primal's dtype; custom_vjp requires dtype match.
+    grad_params = jax.tree_util.tree_map(lambda x, y: y.astype(x.dtype), gathered_params, grad_params)
     # Give back sharding constraint
     grad_reshaped_hidden_states = _reshape(grad_reshaped_hidden_states, (batch_size, seq_len, emb_dim), hidden_spec)
     return (

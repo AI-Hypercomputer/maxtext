@@ -25,7 +25,7 @@ We support inference of MaxText models on vLLM via an [out-of-tree](https://gith
 
 # Installation
 
-Follow the instructions in [install maxtext](https://maxtext.readthedocs.io/en/latest/install_maxtext.html) to install MaxText with post-training dependencies. We recommend installing from PyPI to ensure you have the latest stable versionset of dependencies.
+Follow the instructions in [install maxtext](https://maxtext.readthedocs.io/en/latest/install_maxtext.html) to install MaxText. For this inference tutorial on TPU (which uses vLLM), you must install `maxtext[tpu-post-train]`, as it includes the required adapter plugin. We recommend installing from PyPI to ensure you have the latest stable version of dependencies.
 
 After finishing the installation, ensure that the MaxText on vLLM adapter plugin has been installed. To do so, run the following command:
 
@@ -47,7 +47,7 @@ Required-by:
 If the plugin is not installed, please run the install post training extra dependencies script again with the following command:
 
 ```bash
-install_maxtext_tpu_post_train_extra_deps
+install_tpu_post_train_extra_deps
 ```
 
 # Offline Inference
@@ -130,7 +130,7 @@ curl http://localhost:8000/v1/completions \
 > **_NOTE:_**
 > You will need a HuggingFace token to run this command in addition to a MaxText model checkpoint. Please see the following [guide](https://huggingface.co/docs/hub/en/security-tokens) to generate one.
 
-To use a MaxText model architecture for samplers in reinforcement learning algorithms like GRPO, we can override the vLLM model architecture and pass in MaxText specific config arguments similar to the [online inference](online-inference) use-case. An example of an RL command using the MaxText model for samplers can be found below:
+To use a MaxText model architecture for samplers in reinforcement learning algorithms like GRPO, we can override the vLLM model architecture and pass in MaxText specific config arguments similar to the [online inference](https://maxtext.readthedocs.io/en/latest/tutorials/inference.html#online-inference) use-case. An example of an RL command using the MaxText model for samplers can be found below:
 
 ```bash
 python3 -m src.maxtext.trainers.post_train.rl.train_rl \

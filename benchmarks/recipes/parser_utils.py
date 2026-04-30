@@ -151,6 +151,13 @@ def add_arguments(parser: argparse.ArgumentParser):
       help="BigQuery dataset name where metrics will be written.",
   )
 
+  parser.add_argument(
+      "--skip-validation",
+      action="store_true",
+      default=False,
+      help="Skip xpk health checks and system dependency validation during workload execution",
+)
+
   # Other configurations
   parser.add_argument("--xpk_path", type=str, default="~/xpk", help="Path to xpk.")
   parser.add_argument("--delete", action="store_true", help="Delete the cluster workload")

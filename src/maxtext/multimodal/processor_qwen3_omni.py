@@ -481,6 +481,17 @@ def preprocess_mm_data_qwen3_omni(config):
   if config.image_path:
     images = [mm_utils.load_image_from_path(p) for p in config.image_path.split(",")]
     pixel_values, pixel_grid_thw = pre_process_qwen3_image(images, config)
+    # Reshape to align with current Qwen3OmniMoeVisionEncoder, which carries grid_thw information
+    pixel_values = np.reshape(
+        pixel_values,
+        (
+            1,
+            config.num_channels_for_vit,
+            config.temporal_patch_size_for_vit * pixel_grid_thw[0, 0],
+            config.patch_size_for_vit * pixel_grid_thw[0, 1],
+            config.patch_size_for_vit * pixel_grid_thw[0, 2],
+        ),
+    )
     processor_outputs.pixel_values = pixel_values
     processor_outputs.pixel_grid_thw = pixel_grid_thw
     processor_outputs.num_images = len(images)

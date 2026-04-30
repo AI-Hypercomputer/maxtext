@@ -1,0 +1,4 @@
+flax==0.12.4
+google-metrax>=0.2.3
+libtpu>=0.0.39
+optax==0.2.6

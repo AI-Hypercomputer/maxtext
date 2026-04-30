@@ -1,5 +1,0 @@
--r post_train_base_deps.txt
-google-jetstream @ https://github.com/AI-Hypercomputer/JetStream/archive/29329e8e73820993f77cfc8efe34eb2a73f5de98.zip
-mlperf-logging @ https://github.com/mlcommons/logging/archive/38ab22670527888c8eb7825a4ece176fcc36a95d.zip
-tpu-inference @ https://github.com/vllm-project/tpu-inference/archive/0cae84fc9a883ba1bde02d4f07930e6af9e92958.zip
-vllm @ git+https://github.com/vllm-project/vllm@ee8a29511fc69e3f0f6291fa6ff1cf6e47f7750d

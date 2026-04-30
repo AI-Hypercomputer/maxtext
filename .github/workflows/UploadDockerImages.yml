@@ -32,6 +32,11 @@ on:
           - all
           - tpu
           - gpu
+      image_suffix:
+        description: 'An image suffix can be provided to add to the image name'
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -55,7 +60,7 @@ jobs:
         # Image date
         echo "image_date=$(date +%Y-%m-%d)" >> $GITHUB_OUTPUT
 
-  tpu-pre-training:
+  build-and-push:
     name: ${{ matrix.image_name }}
     needs: setup
     strategy:
@@ -64,54 +69,74 @@ jobs:
         include:
           - device: tpu
             build_mode: stable
+            workflow: pre-training
             image_name: maxtext_jax_stable
             dockerfile: ./src/dependencies/dockerfiles/maxtext_tpu_dependencies.Dockerfile
           - device: tpu
             build_mode: nightly
+            workflow: pre-training
             image_name: maxtext_jax_nightly
             dockerfile: ./src/dependencies/dockerfiles/maxtext_tpu_dependencies.Dockerfile
-    uses: ./.github/workflows/build_and_push_docker_image.yml
-    with:
-      image_name: ${{ matrix.image_name }}
-      device: ${{ matrix.device }}
-      build_mode: ${{ matrix.build_mode }}
-      dockerfile: ${{ matrix.dockerfile }}
-      maxtext_sha: ${{ needs.setup.outputs.maxtext_sha }}
-      image_date: ${{ needs.setup.outputs.image_date }}
-
-  tpu-post-training-nightly:
-    name: tpu-post-training-nightly
-    needs: [setup]
-    uses: ./.github/workflows/build_and_push_docker_image.yml
-    with:
-      image_name: maxtext_post_training_nightly
-      device: tpu
-      build_mode: nightly
-      workflow: post-training
-      dockerfile: ./src/dependencies/dockerfiles/maxtext_tpu_dependencies.Dockerfile
-      maxtext_sha: ${{ needs.setup.outputs.maxtext_sha }}
-      image_date: ${{ needs.setup.outputs.image_date }}
-
-  gpu-pre-training:
-    name: ${{ matrix.image_name }}
-    needs: setup
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
+          - device: tpu
+            build_mode: nightly
+            workflow: post-training
+            image_name: maxtext_post_training_nightly
+            dockerfile: ./src/dependencies/dockerfiles/maxtext_tpu_dependencies.Dockerfile
           - device: gpu
             build_mode: stable
+            workflow: pre-training
             image_name: maxtext_gpu_jax_stable
             dockerfile: ./src/dependencies/dockerfiles/maxtext_gpu_dependencies.Dockerfile
           - device: gpu
             build_mode: nightly
+            workflow: pre-training
             image_name: maxtext_gpu_jax_nightly
             dockerfile: ./src/dependencies/dockerfiles/maxtext_gpu_dependencies.Dockerfile
     uses: ./.github/workflows/build_and_push_docker_image.yml
     with:
-      image_name: ${{ matrix.image_name }}
+      image_name: ${{ matrix.image_name }}${{ inputs.image_suffix  }}
       device: ${{ matrix.device }}
       build_mode: ${{ matrix.build_mode }}
+      workflow: ${{ matrix.workflow }}
       dockerfile: ${{ matrix.dockerfile }}
       maxtext_sha: ${{ needs.setup.outputs.maxtext_sha }}
       image_date: ${{ needs.setup.outputs.image_date }}
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
+  promote:
+    name: promote-${{ matrix.image_name }}
+    needs: build-and-push
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - device: tpu
+            build_mode: stable
+            workflow: pre-training
+            image_name: maxtext_jax_stable
+          - device: tpu
+            build_mode: nightly
+            workflow: pre-training
+            image_name: maxtext_jax_nightly
+          - device: tpu
+            build_mode: nightly
+            workflow: post-training
+            image_name: maxtext_post_training_nightly
+          - device: gpu
+            build_mode: stable
+            workflow: pre-training
+            image_name: maxtext_gpu_jax_stable
+          - device: gpu
+            build_mode: nightly
+            workflow: pre-training
+            image_name: maxtext_gpu_jax_nightly
+
+    uses: ./.github/workflows/promote_docker_image.yml
+    with:
+      image_name: ${{ matrix.image_name }}${{ inputs.image_suffix  }}
+      image_tag: ${{ github.run_id }}
+      device: ${{ matrix.device }}
+      workflow: ${{ matrix.workflow }}
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}

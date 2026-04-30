@@ -16,9 +16,8 @@ name: Add Label
 
 on:
   workflow_run:
-    workflows: [Tests, CodeQL]
-    types:
-      - completed
+    workflows: ["MaxText Package Tests"]
+    types: [completed]
   pull_request_review:
   pull_request_review_comment:
   workflow_dispatch:
@@ -31,86 +30,98 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/github-script@v7
+      - name: Add Pull Request Label
+        uses: actions/github-script@v7
         with:
           script: |
-            const owner = "google"
-            const repo = "maxtext"
             let pull_number = -1
             if (context.payload.pull_request !== undefined) {
               pull_number = context.payload.pull_request.number
             } else if (context.payload.workflow_run !== undefined) {
               if (context.payload.workflow_run.pull_requests.length === 0) {
-                console.log("This workflow is NOT running within a PR's context")
-                process.exit()
+                core.setFailed("This workflow is NOT running within a PR's context")
+                return
               }
               console.log(context.payload.workflow_run.pull_requests)
               pull_number = context.payload.workflow_run.pull_requests[0].number
             } else {
-              console.log("This workflow is running within an invalid context")
-              process.exit(1)
+              core.setFailed("This workflow is running within an invalid context")
+              return
             }
-            const reviews = await github.rest.pulls.listReviews({
-              owner,
-              repo,
-              pull_number,
-            })
+
             const decision_query = `
               query($owner: String!, $repo: String!, $pull_number: Int!) {
                 repository(owner: $owner, name: $repo) {
                   pullRequest(number: $pull_number) {
                     reviewDecision # Fetches the overall review status
+                    reviews(last: 100) {
+                      nodes {
+                        state
+                        author { login }
+                      }
+                    }
                   }
                 }
               }
             `;
-            const decision_result = await github.graphql(decision_query, { owner, repo, pull_number });
 
-            if (reviews.data.length === 0) {
-              console.log("Not adding pull ready because the PR is not approved yet.")
-              process.exit()
-            }
-            let is_approved = false
-            if (decision_result.repository.pullRequest.reviewDecision === "APPROVED") {
-              is_approved = true
-            }
-            if (!is_approved) {
-              console.log("Not adding pull ready because the PR is not approved yet by sufficient code owners.")
-              process.exit()
+            const decision_result = await github.graphql(decision_query, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pull_number
+            });
+
+            const pullRequest = decision_result.repository.pullRequest;
+            const uniqueApprovers = new Set(
+              pullRequest.reviews.nodes
+                .filter(r => r.state === 'APPROVED')
+                .map(r => r.author.login)
+            );
+
+            if (pullRequest.reviewDecision !== 'APPROVED' || uniqueApprovers.size < 2) {
+              core.info(`PR is not ready. Decision: ${pullRequest.reviewDecision}, Approvals: ${uniqueApprovers.size}`);
+              return;
             }
 
             const commits = await github.rest.pulls.listCommits({
-              owner,
-              repo,
-              pull_number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pull_number,
               per_page: 100,
             })
             // Check that the number of commits in the PR is 1.
             if (commits.data.length !== 1) {
-              console.log("Not adding pull ready because the PR has more than one commit. Please squash your commits.")
-              process.exit(1)
+              core.setFailed("Not adding pull ready because the PR has more than one commit. Please squash your commits.")
+              return
             }
-            const ref = commits.data.slice(-1)[0].sha
-            const checkRuns = await github.rest.checks.listForRef({
-              owner,
-              repo,
-              ref,
-            })
-            if (checkRuns.data.check_runs.length === 0) {
-              console.log("Not adding pull ready because no check runs are associated with the last commit: " + ref)
-              process.exit()
+
+            const last_commit_sha = commits.data.slice(-1)[0].sha
+
+            const { data: checkRuns } = await github.rest.checks.listForRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: last_commit_sha,
+            });
+
+            if (checkRuns.check_runs.length === 0) {
+              core.info("Not adding pull ready because no check runs are associated with the last commit: " + last_commit_sha)
+              return
             }
-            for (const checkRun of checkRuns.data.check_runs) {
+
+            for (const checkRun of checkRuns.check_runs) {
+              // Ignore the current running workflow
               if (checkRun.name.endsWith(context.job)) continue
-              if (checkRun.conclusion !== "success") {
-                console.log("Not adding pull ready because " + checkRun.name + " has not passed yet: " + checkRun.html_url)
-                process.exit()
+
+              if (checkRun.status !== 'completed' || checkRun.conclusion !== 'success') {
+                core.info(`Waiting for check: ${checkRun.name} (Status: ${checkRun.status}, Conclusion: ${checkRun.conclusion})`);
+                return; // Exit without failing
               }
             }
+
             console.log("Adding pull ready label because the PR is approved AND all the check runs have passed")
             await github.rest.issues.addLabels({
               issue_number: pull_number,
               labels: ["pull ready"],
-              owner,
-              repo,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
             })

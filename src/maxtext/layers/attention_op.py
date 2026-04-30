@@ -32,14 +32,13 @@ from jax.experimental.pallas.ops.gpu import decode_attention as gpu_pallas_decod
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
 import jax.numpy as jnp
-from jax.sharding import Mesh, NamedSharding
+from jax.sharding import Mesh
 from maxtext.common.common_types import (
     Array,
     AttentionType,
     AxisIdxes,
     AxisNames,
-    BATCH,
-    BATCH_NO_EXP,
+    BATCH_ATTN,
     CACHE_BATCH,
     CACHE_BATCH_PREFILL,
     CACHE_HEADS,
@@ -56,18 +55,14 @@ from maxtext.common.common_types import (
     DEFAULT_MASK_VALUE,
     DType,
     D_KV,
-    EP_AS_CONTEXT,
-    EP_AS_FSDP,
     HEAD,
     KV_LENGTH,
     LENGTH,
-    LENGTH_NO_EXP,
     MODEL_MODE_AUTOREGRESSIVE,
     MODEL_MODE_PREFILL,
     MODEL_MODE_TRAIN,
     PREFILL_LENGTH,
     Q_LENGTH,
-    Q_LENGTH_NO_EXP,
 )
 from maxtext.inference import page_manager
 from maxtext.inference.kvcache import KVQuant, KVTensor
@@ -78,7 +73,7 @@ from maxtext.layers import nnx_wrappers
 from maxtext.layers.initializers import variable_to_logically_partitioned
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_utils
-from maxtext.utils.sharding import logical_to_mesh_axes, maybe_shard_with_name
+from maxtext.utils.sharding import logical_to_mesh_axes, maybe_shard_with_pspec
 import numpy as np
 from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel as tokamax_splash_kernel
 from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask as tokamax_splash_mask
@@ -302,12 +297,9 @@ def attention_op_as_linen(
     float32_qk_product: bool = False,
     max_prefill_predict_length: int = -1,
     float32_logits: bool = False,
-    flash_axis_names_q: AxisNames = (BATCH, HEAD, LENGTH_NO_EXP, D_KV),
-    flash_axis_names_q_ep: AxisNames = (BATCH_NO_EXP, HEAD, LENGTH, D_KV),
-    flash_axis_names_kv: AxisNames = (BATCH, HEAD, KV_LENGTH, D_KV),
-    flash_axis_names_kv_ep: AxisNames = (BATCH_NO_EXP, HEAD, KV_LENGTH, D_KV),
-    flash_axis_names_splash_kernel: AxisNames = (HEAD, LENGTH_NO_EXP),
-    flash_axis_names_splash_kernel_ep: AxisNames = (HEAD, LENGTH),
+    flash_axis_names_q: AxisNames = (BATCH_ATTN, HEAD, LENGTH, D_KV),
+    flash_axis_names_kv: AxisNames = (BATCH_ATTN, HEAD, KV_LENGTH, D_KV),
+    flash_axis_names_splash_kernel: AxisNames = (HEAD, LENGTH),
     prefill_cache_logical_axis_names: AxisNames = (
         CACHE_BATCH_PREFILL,
         CACHE_SEQUENCE,
@@ -364,11 +356,8 @@ def attention_op_as_linen(
       max_prefill_predict_length=max_prefill_predict_length,
       float32_logits=float32_logits,
       flash_axis_names_q=flash_axis_names_q,
-      flash_axis_names_q_ep=flash_axis_names_q_ep,
       flash_axis_names_kv=flash_axis_names_kv,
-      flash_axis_names_kv_ep=flash_axis_names_kv_ep,
       flash_axis_names_splash_kernel=flash_axis_names_splash_kernel,
-      flash_axis_names_splash_kernel_ep=flash_axis_names_splash_kernel_ep,
       prefill_cache_logical_axis_names=prefill_cache_logical_axis_names,
       cache_logical_axis_names=cache_logical_axis_names,
       cache_scale_logical_axis_names=cache_scale_logical_axis_names,
@@ -405,12 +394,9 @@ class AttentionOp(nnx.Module):
       float32_qk_product: bool = False,
       max_prefill_predict_length: int = -1,
       float32_logits: bool = False,
-      flash_axis_names_q: AxisNames = (BATCH, HEAD, LENGTH_NO_EXP, D_KV),
-      flash_axis_names_q_ep: AxisNames = (BATCH_NO_EXP, HEAD, LENGTH, D_KV),
-      flash_axis_names_kv: AxisNames = (BATCH, HEAD, KV_LENGTH, D_KV),
-      flash_axis_names_kv_ep: AxisNames = (BATCH_NO_EXP, HEAD, KV_LENGTH, D_KV),
-      flash_axis_names_splash_kernel: AxisNames = (HEAD, LENGTH_NO_EXP),
-      flash_axis_names_splash_kernel_ep: AxisNames = (HEAD, LENGTH),
+      flash_axis_names_q: AxisNames = (BATCH_ATTN, HEAD, LENGTH, D_KV),
+      flash_axis_names_kv: AxisNames = (BATCH_ATTN, HEAD, KV_LENGTH, D_KV),
+      flash_axis_names_splash_kernel: AxisNames = (HEAD, LENGTH),
       prefill_cache_logical_axis_names: AxisNames = (
           CACHE_BATCH_PREFILL,
           CACHE_SEQUENCE,
@@ -492,11 +478,8 @@ class AttentionOp(nnx.Module):
     self.max_prefill_predict_length = max_prefill_predict_length
     self.float32_logits = float32_logits
     self.flash_axis_names_q = flash_axis_names_q
-    self.flash_axis_names_q_ep = flash_axis_names_q_ep
     self.flash_axis_names_kv = flash_axis_names_kv
-    self.flash_axis_names_kv_ep = flash_axis_names_kv_ep
     self.flash_axis_names_splash_kernel = flash_axis_names_splash_kernel
-    self.flash_axis_names_splash_kernel_ep = flash_axis_names_splash_kernel_ep
     self.prefill_cache_logical_axis_names = prefill_cache_logical_axis_names
     self.cache_logical_axis_names = cache_logical_axis_names
     self.cache_scale_logical_axis_names = cache_scale_logical_axis_names
@@ -593,6 +576,16 @@ class AttentionOp(nnx.Module):
     assert key.shape[-3] == value.shape[-3], "k, v lengths must match."
     assert query.shape[-1] == key.shape[-1], "q, k depths must match."
 
+  def _maybe_shard_with_pspec(self, inputs, pspec: jax.sharding.PartitionSpec | None):
+    return maybe_shard_with_pspec(
+        inputs,
+        pspec,
+        mesh=self.mesh,
+        shard_mode=self.config.shard_mode,
+        debug_sharding=self.config.debug_sharding,
+        extra_stack_level=1,
+    )
+
   def generate_attention_mask(
       self,
       query,
@@ -677,7 +670,7 @@ class AttentionOp(nnx.Module):
           Chunked Prefills - ArXiv:2308.16369 (https://arxiv.org/abs/2308.16369)
     """
     mask = None
-    if model_mode == MODEL_MODE_AUTOREGRESSIVE:
+    if model_mode == MODEL_MODE_AUTOREGRESSIVE and decoder_segment_ids is not None:
       mask = decoder_segment_ids[:, None, None, None, :] == DECODING_ACTIVE_SEQUENCE_INDICATOR
     elif decoder_segment_ids is not None:
       mask = decoder_segment_ids[:, :, None] == decoder_segment_ids[:, None, :]
@@ -878,6 +871,7 @@ class AttentionOp(nnx.Module):
       key: Array | KVTensor,
       value: Array | KVTensor,
       decoder_segment_ids: Array | None,
+      segment_positions: Array | None,
       lengths: Array | None,
       model_mode: str,
       use_ragged_attention: bool = False,
@@ -1010,7 +1004,7 @@ class AttentionOp(nnx.Module):
                            Use `dot_product` instead."""
         )
       return (
-          self.cudnn_flash_attention(query, key, value, decoder_segment_ids, model_mode),
+          self.cudnn_flash_attention(query, key, value, decoder_segment_ids, segment_positions, model_mode),
           None,
           None,
       )
@@ -1150,23 +1144,13 @@ class AttentionOp(nnx.Module):
     segment_axis_names_kv = None
     sink_axis_names = self._logical_to_mesh_axes((HEAD,))
     if decoder_segment_ids is not None:
-      if self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-        segment_axis_names_q = self._logical_to_mesh_axes((BATCH_NO_EXP, Q_LENGTH))
-        segment_axis_names_kv = self._logical_to_mesh_axes((BATCH_NO_EXP, KV_LENGTH))
-      else:
-        segment_axis_names_q = self._logical_to_mesh_axes((BATCH, Q_LENGTH_NO_EXP))
-        segment_axis_names_kv = self._logical_to_mesh_axes((BATCH, KV_LENGTH))
+      segment_axis_names_q = self._logical_to_mesh_axes((BATCH_ATTN, Q_LENGTH))
+      segment_axis_names_kv = self._logical_to_mesh_axes((BATCH_ATTN, KV_LENGTH))
 
-    if self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-      axis_names_splash_kernel = self._logical_to_mesh_axes(self.flash_axis_names_splash_kernel_ep)
-      axis_names_q = self._logical_to_mesh_axes(self.flash_axis_names_q_ep)
-      axis_names_kv = self._logical_to_mesh_axes(self.flash_axis_names_kv_ep)
-      indexer_mask_axis_names = self._logical_to_mesh_axes((BATCH_NO_EXP, Q_LENGTH, KV_LENGTH))
-    else:
-      axis_names_splash_kernel = self._logical_to_mesh_axes(self.flash_axis_names_splash_kernel)
-      axis_names_q = self._logical_to_mesh_axes(self.flash_axis_names_q)
-      axis_names_kv = self._logical_to_mesh_axes(self.flash_axis_names_kv)
-      indexer_mask_axis_names = self._logical_to_mesh_axes((BATCH, Q_LENGTH, KV_LENGTH))
+    axis_names_splash_kernel = self._logical_to_mesh_axes(self.flash_axis_names_splash_kernel)
+    axis_names_q = self._logical_to_mesh_axes(self.flash_axis_names_q)
+    axis_names_kv = self._logical_to_mesh_axes(self.flash_axis_names_kv)
+    indexer_mask_axis_names = self._logical_to_mesh_axes((BATCH_ATTN, Q_LENGTH, KV_LENGTH))
 
     global global_block_q, global_block_kv, global_block_kv_compute, global_block_q_dkv, global_block_kv_dkv
     global global_block_kv_dkv_compute, global_block_q_dq, global_block_kv_dq, global_use_fused_bwd_kernel
@@ -1295,14 +1279,12 @@ class AttentionOp(nnx.Module):
         return splash_kernel
 
       splash_kernel = wrap_splash_kernel(single_head_mask)
-      if self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-        segment_axis_names_splash_kernel = self._logical_to_mesh_axes((Q_LENGTH,))
-      else:
-        segment_axis_names_splash_kernel = self._logical_to_mesh_axes((Q_LENGTH_NO_EXP,))
-    elif self.config.use_jax_splash and self.config.expert_shard_attention_option == EP_AS_FSDP:
+      segment_axis_names_splash_kernel = self._logical_to_mesh_axes((Q_LENGTH,))
+      splash_kernel = self._maybe_shard_with_pspec(splash_kernel, segment_axis_names_splash_kernel)
+    elif self.config.use_jax_splash:
       if self.config.use_max_logit_estimate > 0:
         sa_config = dataclasses.replace(sa_config, max_logit_const=self.config.use_max_logit_estimate)
-      segment_axis_names_splash_kernel = nn.logical_to_mesh_axes((Q_LENGTH_NO_EXP,))
+      segment_axis_names_splash_kernel = nn.logical_to_mesh_axes((Q_LENGTH,))
     else:
       # Create multi-head mask
       multi_head_mask = splash_attention_mask.MultiHeadMask(masks=(mask,) * query.shape[1])
@@ -1332,6 +1314,12 @@ class AttentionOp(nnx.Module):
       splash_kernel = wrap_splash_kernel(multi_head_mask, shard_head_size)
       named_sharding = jax.sharding.NamedSharding(self.mesh, axis_names_splash_kernel)
       segment_axis_names_splash_kernel = splash_kernel.manual_sharding_spec(named_sharding)
+      splash_kernel = jax.tree.map(
+          lambda arr, spec: None if arr is None else self._maybe_shard_with_pspec(arr, spec),
+          splash_kernel,
+          segment_axis_names_splash_kernel,
+          is_leaf=lambda x: x is None,
+      )
 
     # Now call the function wrap_flash_attention which does the actual computation.
     # The splash kernel is passed as a parameter to the function. Since we have the shard map
@@ -1484,26 +1472,13 @@ class AttentionOp(nnx.Module):
 
       return attention_output, None
 
-    def _maybe_shard_with_pspec(inputs, pspec: jax.sharding.PartitionSpec | None):
-      # decoder_segment_ids can be None
-      if pspec is None:
-        return None
-      sharding = NamedSharding(self.mesh, pspec)
-      return maybe_shard_with_name(
-          inputs,
-          sharding,
-          shard_mode=self.config.shard_mode,
-          debug_sharding=self.config.debug_sharding,
-          extra_stack_level=1,
-      )
-
-    query = _maybe_shard_with_pspec(query, axis_names_q)
-    key = _maybe_shard_with_pspec(key, axis_names_kv)
-    value = _maybe_shard_with_pspec(value, axis_names_kv)
-    decoder_segment_ids_q = _maybe_shard_with_pspec(decoder_segment_ids, segment_axis_names_q)
-    decoder_segment_ids_kv = _maybe_shard_with_pspec(decoder_segment_ids, segment_axis_names_kv)
-    sinks = _maybe_shard_with_pspec(sinks, sink_axis_names)
-    indexer_mask = _maybe_shard_with_pspec(indexer_mask, indexer_mask_axis_names)
+    query = self._maybe_shard_with_pspec(query, axis_names_q)
+    key = self._maybe_shard_with_pspec(key, axis_names_kv)
+    value = self._maybe_shard_with_pspec(value, axis_names_kv)
+    decoder_segment_ids_q = self._maybe_shard_with_pspec(decoder_segment_ids, segment_axis_names_q)
+    decoder_segment_ids_kv = self._maybe_shard_with_pspec(decoder_segment_ids, segment_axis_names_kv)
+    sinks = self._maybe_shard_with_pspec(sinks, sink_axis_names)
+    indexer_mask = self._maybe_shard_with_pspec(indexer_mask, indexer_mask_axis_names)
 
     ret = wrap_flash_attention(
         query,
@@ -1539,12 +1514,15 @@ class AttentionOp(nnx.Module):
       key: Array,
       value: Array,
       decoder_segment_ids: Array | None,
+      segment_positions: Array | None,
       model_mode: str = MODEL_MODE_TRAIN,
   ) -> Array:
     """CUDNN Flash Attention with Transformer Engine.
-
-    1. Stable API, supports MHA, GQA, SWA, Packing and Context Parallelism 2.
-    Context Parallelism currently only supports causal masking and no packing
+    1. Stable API, supports MHA, GQA, SWA, Packing and Context Parallelism
+    2. Context Parallelism currently only supports causal masking
+    3. Only Ring attention has packing support with striped load balancing
+      (context_parallel_strategy="ring" and context_parallel_load_balance=true)
+    4. Breaks with TE 2.12 and 2.13 (known bug); works with TE stable release <=2.11 or >=2.14.
     """
     # These imports are only meant to work in a GPU build.
     # pylint: disable=import-outside-toplevel
@@ -1553,7 +1531,12 @@ class AttentionOp(nnx.Module):
 
     _, _, _, head_dim = query.shape  # pylint: disable=unused-variable
 
-    using_context_parallelism = self.mesh.shape["context"] > 1
+    using_context_parallelism = self.mesh.shape[self.config.context_sharding] > 1
+    using_load_balanced_ring_cp = (
+        using_context_parallelism
+        and self.config.context_parallel_strategy == "ring"
+        and self.config.context_parallel_load_balance
+    )
 
     # Initialize default attention configuration
     sliding_window_size = None
@@ -1567,18 +1550,32 @@ class AttentionOp(nnx.Module):
 
     # Handle packing configurations
     if self.config.packing and self.config.dataset_type != "synthetic":
+      if using_context_parallelism and not using_load_balanced_ring_cp:
+        raise ValueError("Packing is only supported for load balanced ring attention with context parallelism.")
       qkv_layout = "THD_THD_THD"  # Packed format: 'T3HD', 'THD_T2HD' or 'THD_THD_THD'
       if decoder_segment_ids is None:
         decoder_segment_ids = jnp.ones(shape=query.shape[:2], dtype=jnp.int32)
-      attn_mask = SequenceDescriptor.from_segment_ids_and_pos(segment_ids=decoder_segment_ids, segment_pos=None)
+      attn_mask = SequenceDescriptor.from_segment_ids_and_pos(
+          segment_ids=decoder_segment_ids, segment_pos=segment_positions
+      )
       # Create dummy SequenceDescriptor for lazy_init
       dummy_segment_ids = jnp.ones(shape=query.shape[:2], dtype=jnp.int32)
-      dummy_attn_mask = SequenceDescriptor.from_segment_ids_and_pos(segment_ids=dummy_segment_ids, segment_pos=None)
+      dummy_attn_mask = SequenceDescriptor.from_segment_ids_and_pos(
+          segment_ids=dummy_segment_ids, segment_pos=segment_positions
+      )
       max_segments_per_seq = self.config.max_segments_per_seq
     elif using_context_parallelism:
       if self.attention_type == AttentionType.LOCAL_SLIDING:
-        raise AssertionError("Sliding window attention is not supported for context parallelism")
-      # Context parallelism without packing: only supports causal masking
+        raise AssertionError(
+            "Sliding window attention requires context parallelism with load-balanced ring strategy "
+            "and packing enabled."
+        )
+      # Context parallelism without packing: only supports causal masking, but not sliding window attention
+      attn_mask = None
+      dummy_attn_mask = None
+      mask_type = "causal"
+    elif model_mode == MODEL_MODE_PREFILL and self.config.attention_kernel == "cudnn":
+      # Prefill with CUDNN attention does not support packing or context parallelism.
       attn_mask = None
       dummy_attn_mask = None
       mask_type = "causal"
@@ -1606,7 +1603,7 @@ class AttentionOp(nnx.Module):
         transpose_batch_sequence=False,
         window_size=sliding_window_size,
         context_parallel_causal_load_balanced=self.config.context_parallel_load_balance,
-        context_parallel_axis="context",
+        context_parallel_axis=self.config.context_sharding,
         context_parallel_strategy=self.config.context_parallel_strategy,
         max_segments_per_seq=max_segments_per_seq,
     )
@@ -1672,7 +1669,7 @@ class AttentionOp(nnx.Module):
           key,
           value,
           mask_type=MaskType.CAUSAL,
-          scale=1.0 / math.sqrt(head_dim),
+          scale=1.0,
           dropout_rate=self.dropout_rate,
           qkv_layout="BTNH",
           return_residual=True,
@@ -1733,7 +1730,7 @@ class AttentionOp(nnx.Module):
     if model_mode == MODEL_MODE_AUTOREGRESSIVE and self.is_partition_in_decode(q_seq_len):
       local_out = partitioning.with_sharding_constraint(local_out, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
     elif model_mode == MODEL_MODE_PREFILL:
-      local_out = partitioning.with_sharding_constraint(local_out, (BATCH, KV_LENGTH, HEAD, D_KV))
+      local_out = partitioning.with_sharding_constraint(local_out, (BATCH_ATTN, KV_LENGTH, HEAD, D_KV))
 
     if self.reshape_q and q_seq_len == 1:
       local_max = local_max[:, 0:1, :, :]
@@ -1777,7 +1774,7 @@ class AttentionOp(nnx.Module):
 
     # special sharding for decode
     q_seq_len = query.shape[1]
-    prefill_qkv_sharding = (BATCH, PREFILL_LENGTH, HEAD, D_KV)
+    prefill_qkv_sharding = (BATCH_ATTN, PREFILL_LENGTH, HEAD, D_KV)
     decode_qkv_sharding = (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV)
     if self.is_partition_in_decode(q_seq_len):
       query = partitioning.with_sharding_constraint(query, decode_qkv_sharding)
@@ -1802,7 +1799,9 @@ class AttentionOp(nnx.Module):
     if self.is_partition_in_decode(q_seq_len):
       attn_weights = partitioning.with_sharding_constraint(attn_weights, (KV_LENGTH, HEAD, None, None, None))
     elif model_mode == MODEL_MODE_PREFILL:
-      attn_weights = partitioning.with_sharding_constraint(attn_weights, (BATCH, HEAD, None, PREFILL_LENGTH, KV_LENGTH))
+      attn_weights = partitioning.with_sharding_constraint(
+          attn_weights, (BATCH_ATTN, HEAD, None, PREFILL_LENGTH, KV_LENGTH)
+      )
 
     if self.attn_logits_soft_cap:
       attn_weights = jnp.tanh(attn_weights / self.attn_logits_soft_cap)
@@ -1849,7 +1848,7 @@ class AttentionOp(nnx.Module):
     if self.is_partition_in_decode(q_seq_len):
       attn_mask = partitioning.with_sharding_constraint(attn_mask, (KV_LENGTH, HEAD, None, None, None))
     elif model_mode == MODEL_MODE_PREFILL:
-      attn_mask = partitioning.with_sharding_constraint(attn_mask, (BATCH, HEAD, None, PREFILL_LENGTH, KV_LENGTH))
+      attn_mask = partitioning.with_sharding_constraint(attn_mask, (BATCH_ATTN, HEAD, None, PREFILL_LENGTH, KV_LENGTH))
     if attn_mask is not None:
       attn_weights = apply_mask_to_logits(attn_weights, attn_mask)
 
@@ -2024,6 +2023,7 @@ class AttentionOp(nnx.Module):
       key,
       value,
       decoder_segment_ids,
+      inputs_positions,
       model_mode,
       cached_values=None,
       previous_chunk=None,
@@ -2042,18 +2042,27 @@ class AttentionOp(nnx.Module):
       assert prefill_kv_cache
       key, value, decoder_segment_ids = prefill_kv_cache
 
+    indexer_mask_prefill = None
+    indexer_mask_ar = None
+    if indexer_mask is not None:
+      prefill_len = key.shape[1]
+      indexer_mask_prefill = indexer_mask[:, :, :prefill_len]
+      if ar_kv_cache is not None:
+        indexer_mask_ar = indexer_mask[:, :, prefill_len:]
+
     prefill_unnormalized_output, prefill_exponentials_max, prefill_exponentials_sum = self.apply_attention(
         query=query,
         key=key,
         value=value,
         decoder_segment_ids=decoder_segment_ids,
+        segment_positions=inputs_positions,
         lengths=None,
         model_mode=model_mode,
         use_ragged_attention=self.use_ragged_attention,
         previous_chunk=previous_chunk,
         bidirectional_mask=bidirectional_mask,
         sinks=sinks,
-        indexer_mask=indexer_mask,
+        indexer_mask=indexer_mask_prefill,
         record_max_logits=record_max_logits,
         qk_product_einsum=self.AqtEinsum_0,
         wv_product_einsum=self.AqtEinsum_1,
@@ -2072,10 +2081,12 @@ class AttentionOp(nnx.Module):
         key=key,
         value=value,
         decoder_segment_ids=decoder_segment_ids,
+        segment_positions=inputs_positions,
         lengths=lengths,
         model_mode=model_mode,
         use_ragged_attention=self.use_ragged_attention,
         bidirectional_mask=bidirectional_mask,
+        indexer_mask=indexer_mask_ar,
         qk_product_einsum=self.AqtEinsum_2,
         wv_product_einsum=self.AqtEinsum_3,
     )

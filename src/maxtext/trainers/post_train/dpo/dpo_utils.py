@@ -42,8 +42,14 @@ def dpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_t
     is_train: True for train_step and False for eval_step
 
   Returns:
-    loss: average loss
-    aux: a dictionary including intermediate_outputs, total_loss, and total_weights
+    loss: DPO preference loss + MoE load balance loss (if applicable)
+    aux: a dictionary with:
+      - intermediate_outputs: model intermediates from forward pass
+      - xent_sum: always 0.0 (DPO has no per-token cross-entropy)
+      - dpo_loss: pure preference loss before auxiliary losses
+      - total_weights: number of samples in the batch
+      - moe_lb_loss: MoE load balance loss (0.0 if num_experts <= 1)
+      - reward_accuracy: fraction of examples where chosen is preferred over rejected
   """
   # inputs, targets, segments, positions = apply_args
   rng1, aqt_rng = jax.random.split(dropout_rng)
@@ -130,14 +136,15 @@ def dpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_t
 
   moe_lb_loss = 0.0
   if config.num_experts > 1:
-    nested_key = ("intermediates", "decoder", "layers", "moe_lb_loss")
-    total_moe_lb_loss = maxtext_utils.get_nested_value(intermediate_outputs, nested_key, 0.0)
-    moe_lb_loss = jnp.mean(jnp.array(total_moe_lb_loss))
-    loss += moe_lb_loss
+    moe_lb_losses = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "moe_lb_loss")
+    if moe_lb_losses:
+      moe_lb_loss = jnp.mean(jnp.concatenate(moe_lb_losses))
+      loss += moe_lb_loss
   reward_accuracy = jnp.mean(chosen_logratios > rejected_logratios)
   aux = {
       "intermediate_outputs": intermediate_outputs,
-      "total_loss": total_loss,
+      "xent_sum": 0.0,  # DPO has no per-token cross-entropy sum; set to 0 for train_step compatibility
+      "dpo_loss": total_loss,  # pure preference loss before MoE lb, analogous to lm_loss in pre-training
       "total_weights": total_weights,
       "moe_lb_loss": moe_lb_loss,
       "reward_accuracy": reward_accuracy,

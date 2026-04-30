@@ -62,16 +62,25 @@ Interactive development guides for running MaxText on Google Colab or local Jupy
 
 A step-by-step guide for the community to help expand MaxText's model library.
 :::
+
+:::{grid-item-card} 🎓 Distillation
+:link: guides/distillation
+:link-type: doc
+
+How online distillation works in MaxText: loss anatomy, α / β / temperature schedule tuning, layer indices, monitoring metrics, and troubleshooting.
+:::
 ::::
 
 ```{toctree}
-:hidden:
-:maxdepth: 1
-
+---
+hidden:
+maxdepth: 1
+---
 guides/optimization.md
 guides/data_input_pipeline.md
 guides/checkpointing_solutions.md
 guides/monitoring_and_debugging.md
 guides/run_python_notebook.md
 guides/model_bringup.md
+guides/distillation.md
 ```

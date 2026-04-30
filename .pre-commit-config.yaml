@@ -42,7 +42,7 @@ repos:
   #        args:
   #          - '--jobs=auto'
   #          - '--keep-going'
-  #          - 'src/MaxText/'
+  #          - 'src/maxtext/'
 
   - repo: https://github.com/google/pyink
     rev: 24.10.1
@@ -60,4 +60,4 @@ repos:
         args: ['--number']
         additional_dependencies: [mdformat-myst, mdformat-ruff]
         files: (docs/.)
-        exclude: docs/guides/checkpointing_solutions.md
+        exclude: docs/guides/checkpointing_solutions.md|docs/guides.md

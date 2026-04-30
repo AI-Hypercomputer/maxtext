@@ -77,22 +77,61 @@ def _module_from_path(path: str) -> str | None:
   return None
 
 
-def _resolve_or_infer_config(argv: list[str]) -> tuple[str, list[str]]:
+def _resolve_or_infer_config(argv: list[str] | None = None, **kwargs) -> tuple[str, list[str]]:
   """Resolves or infers config file path from module."""
+  if argv is None:
+    argv = [""]
+
+  if kwargs.get("base_config"):
+    logger.info("Using config : %s", kwargs["base_config"])
+    return resolve_config_path(kwargs["base_config"]), argv[1:]
+
+  # if passing at least two arguments via list (no kwargs), then we have to specify
+  # first one as either "" or python script like train_rl.py or train.py
+  # the second argument is the yaml file
   if len(argv) >= 2 and argv[1].endswith(".yml"):
     return resolve_config_path(argv[1]), argv[2:]
-  module = _module_from_path(argv[0])
+  module = _module_from_path(argv[0]) if len(argv) > 0 else None
   if module not in _CONFIG_FILE_MAPPING:
-    raise ValueError(
-        f"No config file provided and no default config found for module '{module}'"
-    )
-  config_path = os.path.join(MAXTEXT_CONFIGS_DIR, _CONFIG_FILE_MAPPING[module])
-  logger.warning("No config file provided, using default config mapping: %s", config_path)
-  return config_path, argv[1:]
+    config_path = os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")
+    logger.warning("No config file provided and no default config found for module '%s', using base.yml", module)
+  else:
+    config_path = os.path.join(MAXTEXT_CONFIGS_DIR, _CONFIG_FILE_MAPPING[module])
+    logger.warning("No config file provided, using default config mapping: %s", config_path)
+  remaining_argv = argv[1:]
+
+  return config_path, remaining_argv
+
+
+def _resolve_or_infer_addl_config(**kwargs):
+  """Resolves or infers more configs from module."""
+  inferred_kwargs = {}
+  # if base_output_directory key is not seen
+  if not kwargs.get("base_output_directory"):
+    max_logging.warning("base_output_directory is not provided; Using local directory called maxtext_output")
+    base_output_directory = os.path.abspath("maxtext_output")
+    inferred_kwargs["base_output_directory"] = base_output_directory
+
+  # if hf_access_token key is not seen
+  if not kwargs.get("hf_access_token"):
+    hf_access_token = os.environ.get("HF_TOKEN")
+    if hf_access_token:
+      inferred_kwargs["hf_access_token"] = hf_access_token
+
+  return inferred_kwargs
 
 
 def yaml_key_to_env_key(s: str) -> str:
   return _MAX_PREFIX + s.upper()
+
+
+def validate_no_keys_overridden_twice(keys1: list[str], keys2: list[str]):
+  overridden_keys = [k for k in keys1 if k in keys2]
+  if overridden_keys:
+    raise ValueError(
+        f"Keys {overridden_keys} are overridden by both model config and CLI/kwargs."
+        "This is not allowed, unless setting `override_model_config=True`."
+    )
 
 
 def resolve_config_path(param: str) -> str:
@@ -203,6 +242,9 @@ def _prepare_for_pydantic(raw_keys: dict[str, Any]) -> dict[str, Any]:
     if key == "run_name" and new_value is None:
       new_value = ""
 
+    if key in ("dump_hlo_local_module_name", "dump_hlo_module_name") and new_value is None:
+      new_value = ""
+
     if key == "tokenizer_path" and new_value is None:
       try:
         new_value = HF_IDS[raw_keys["model_name"]]
@@ -279,19 +321,19 @@ class HyperParameters:
     return self._flat_config
 
 
-def initialize(argv: list[str], **kwargs) -> HyperParameters:
+def initialize(argv: list[str] | None = None, **kwargs) -> HyperParameters:
   """Initializes the configuration by loading YAML files, and applying CLI, env, and kwarg overrides."""
   pydantic_config = initialize_pydantic(argv, **kwargs)
   config = HyperParameters(pydantic_config)
   return config
 
 
-def initialize_pydantic(argv: list[str], **kwargs) -> MaxTextConfig:
+def initialize_pydantic(argv: list[str] | None = None, **kwargs) -> MaxTextConfig:
   """Initializes the configuration by loading YAML files, and applying CLI, env, and kwarg overrides.
   Returns pydantic MaxTextConfig class whereas `initialize` returns the og `HyperParameters`
   """
   # 1. Load base and inherited configs from file(s)
-  config_path, cli_args = _resolve_or_infer_config(argv)
+  config_path, cli_args = _resolve_or_infer_config(argv, **kwargs)
   base_yml_config = _load_config(config_path)
 
   # 2. Get overrides from CLI and kwargs
@@ -299,8 +341,15 @@ def initialize_pydantic(argv: list[str], **kwargs) -> MaxTextConfig:
   kwargs_cfg = omegaconf.OmegaConf.create(kwargs)
   overrides_cfg = omegaconf.OmegaConf.merge(cli_cfg, kwargs_cfg)
 
-  # 3. Handle model-specific config
+  temp_cfg1 = omegaconf.OmegaConf.merge(base_yml_config, overrides_cfg)
+  # 3.1. infer more configs if possible
+  temp_cfg1 = _resolve_or_infer_addl_config(**temp_cfg1)
+  # update overrides_cfg with temp_cfg1
+  overrides_cfg = omegaconf.OmegaConf.merge(overrides_cfg, temp_cfg1)
   temp_cfg = omegaconf.OmegaConf.merge(base_yml_config, overrides_cfg)
+
+  # 3.2. Handle model-specific config
+
   model_name = temp_cfg.get("model_name", "default")
   # The architecture for -Instruct v/s base models are the same, so for identifying the
   # architecture we replace "-Instruct" from the model_name and get the base model name
@@ -320,7 +369,7 @@ def initialize_pydantic(argv: list[str], **kwargs) -> MaxTextConfig:
     if not os.path.isfile(model_config_path):
       # Fallback to the default location within package
       dir_path = os.path.dirname(os.path.realpath(__file__))
-      model_config_path = os.path.join(dir_path, "configs", "models", f"{model_name}.yml")
+      model_config_path = os.path.join(dir_path, "models", f"{model_name}.yml")
 
     if os.path.exists(model_config_path):
       model_loaded_cfg = omegaconf.OmegaConf.load(model_config_path)
@@ -329,6 +378,8 @@ def initialize_pydantic(argv: list[str], **kwargs) -> MaxTextConfig:
         model_cfg = {k: v for k, v in model_loaded_cfg.items() if k not in overrides_cfg}
       else:
         model_cfg = model_loaded_cfg
+        # Validate that no keys are overridden by both model config and CLI/kwargs
+        validate_no_keys_overridden_twice(model_loaded_cfg.keys(), overrides_cfg.keys())
     else:
       logger.warning("Model config for '%s' not found at %s", model_name, model_config_path)
 
@@ -367,9 +418,16 @@ def initialize_pydantic(argv: list[str], **kwargs) -> MaxTextConfig:
   for k in tuple(raw_keys_dict.keys()):
     env_key = yaml_key_to_env_key(k)
     if env_key in os.environ:
+      # Validate that no keys are overridden by both CLI/kwargs and environment variable
       if k in cli_keys or k in kwargs_keys:
         raise ValueError(
             f"Key '{k}' is overridden by both CLI/kwargs and environment variable '{env_key}'. This is not allowed."
+        )
+      # Validate that no keys are overridden by both model config and environment variable
+      if not temp_cfg.get("override_model_config") and k in model_cfg.keys():
+        raise ValueError(
+            f"Key '{k}' is overridden by both model config and environment variable '{env_key}'."
+            "This is not allowed, unless setting `override_model_config=True`."
         )
 
       new_proposal = os.environ.get(env_key)
@@ -418,3 +476,13 @@ def initialize_pydantic(argv: list[str], **kwargs) -> MaxTextConfig:
 # Shim for backward compatibility with pyconfig_deprecated_test.py
 validate_and_update_keys = pyconfig_deprecated.validate_and_update_keys
 __all__ = ["initialize", "initialize_pydantic"]
+
+
+class _CallablePyconfigModule(sys.modules[__name__].__class__):
+  """Allows calling the module directly as mt.pyconfig()."""
+
+  def __call__(self, argv: list[str] | None = None, **kwargs) -> HyperParameters:
+    return initialize(argv, **kwargs)
+
+
+sys.modules[__name__].__class__ = _CallablePyconfigModule

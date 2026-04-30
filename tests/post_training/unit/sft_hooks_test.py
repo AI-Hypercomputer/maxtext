@@ -13,6 +13,8 @@
 # limitations under the License.
 
 """Tests for training and data loading hooks for SFT"""
+
+from collections import defaultdict
 import pytest
 
 pytest.importorskip("tunix")
@@ -21,7 +23,10 @@ pytestmark = [pytest.mark.tpu_only, pytest.mark.external_training, pytest.mark.p
 import jax
 
 import numpy as np
+import json
 import os
+import shutil
+import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 from jax.sharding import Mesh
@@ -29,6 +34,7 @@ from jax.sharding import Mesh
 from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
 from maxtext.trainers.post_train.sft import hooks
+from maxtext.common.metric_logger import MetricLogger
 from maxtext.utils import maxtext_utils
 
 
@@ -36,18 +42,29 @@ class SFTHooksTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
+    self.test_dir = tempfile.mkdtemp()
+    self.metrics_file = os.path.join(self.test_dir, "metrics.txt")
     self.config = pyconfig.initialize(
         ["", os.path.join(MAXTEXT_CONFIGS_DIR, "post_train", "sft.yml")],
         per_device_batch_size=1,
         run_name="test",
-        base_output_directory="test",
+        base_output_directory=self.test_dir,
+        tensorboard_dir=self.test_dir,
+        metrics_dir=self.test_dir,
+        metrics_file=self.metrics_file,
         skip_jax_distributed_system=True,
     )
     self.mesh = Mesh(maxtext_utils.create_device_mesh(self.config), self.config.mesh_axes)
     learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(self.config)
 
     self.training_hooks = hooks.SFTTrainingHooks(self.config, self.mesh, learning_rate_schedule, goodput_recorder=None)
-    self.training_hooks.metric_logger = MagicMock()
+    # We will use the written metrics to validate the correctness.
+    # The reason to use a real MetricLogger is to avoid a problem like what was observed in
+    # https://github.com/AI-Hypercomputer/maxtext/pull/3691, where the MetricLogger was changed
+    # to expect a new metric that the SFT code did not provide.
+    self.training_hooks.metric_logger = MetricLogger(self.config, learning_rate_schedule)
+    # Initialize metadata to avoid KeyErrors in real MetricLogger
+    self.training_hooks.metric_logger.metadata = defaultdict(float)
 
     expected_shape = [jax.device_count(), self.config.max_target_length]
     self.expected_batch = {
@@ -58,6 +75,20 @@ class SFTHooksTest(unittest.TestCase):
     self.mock_data_iterator.__next__.return_value = self.expected_batch
 
     self.mock_train_ctx = MagicMock()
+
+  def tearDown(self):
+    shutil.rmtree(self.test_dir)
+    super().tearDown()
+
+  def _read_logged_metrics(self, num_expected=1):
+    """Read and parse metrics logged by the MetricLogger."""
+    metrics = []
+    if os.path.exists(self.metrics_file):
+      with open(self.metrics_file, "r", encoding="utf8") as f:
+        for line in f:
+          metrics.append(json.loads(line))
+    self.assertEqual(len(metrics), num_expected)
+    return metrics
 
   @patch("maxtext.trainers.post_train.sft.hooks.create_data_iterator")
   def test_data_hooks_load_next_train_batch(self, mock_create_data_iterator):
@@ -88,15 +119,10 @@ class SFTHooksTest(unittest.TestCase):
     self.training_hooks.on_train_step_start(self.mock_train_ctx)
     self.training_hooks.on_train_step_end(self.mock_train_ctx, train_step=1, train_loss=5.0, step_time=0.004)
 
-    expected_metrics = {
-        "scalar": {
-            "learning/loss": 5.0,
-            "learning/total_weights": (jax.device_count() * self.config.max_target_length),
-        }
-    }
-    self.training_hooks.metric_logger.record_train_metrics.assert_called()
-    self.training_hooks.metric_logger.write_metrics.assert_called_with(expected_metrics, 1)
-    self.assertEqual(len(self.training_hooks.train_metadata), 1)
+    metrics = self._read_logged_metrics(num_expected=1)[0]
+    self.assertEqual(metrics["step"], 1)
+    self.assertAlmostEqual(metrics["learning/loss"], 5.0)
+    self.assertEqual(metrics["learning/total_weights"], (jax.device_count() * self.config.max_target_length))
 
   def test_training_hooks_for_eval_step(self):
     self.mock_train_ctx.data_hooks.eval_batch = self.expected_batch
@@ -106,15 +132,12 @@ class SFTHooksTest(unittest.TestCase):
       self.training_hooks.on_eval_step_start(self.mock_train_ctx)
     self.training_hooks.on_eval_step_end(self.mock_train_ctx, eval_loss=10.0)
 
-    expected_metrics = {
-        "scalar": {
-            "eval/total_loss": 10.0,
-            "eval/avg_loss": 5.0,
-            "eval/total_weights": jax.device_count() * self.config.max_target_length * total_eval_steps,
-        }
-    }
-    self.training_hooks.metric_logger.write_metrics.assert_called_with(expected_metrics, 0, is_training=False)
-    self.assertEqual(len(self.training_hooks.eval_metadata), 0)
+    metrics = self._read_logged_metrics(num_expected=1)[0]
+    self.assertEqual(metrics["step"], 0)
+    self.assertAlmostEqual(metrics["eval/total_loss"], 10.0)
+    self.assertAlmostEqual(metrics["eval/avg_loss"], 5.0)
+    self.assertAlmostEqual(metrics["eval/avg_perplexity"], np.exp(5.0), places=2)
+    self.assertEqual(metrics["eval/total_weights"], jax.device_count() * self.config.max_target_length * total_eval_steps)
 
   def test_on_train_end_asserts_if_on_train_start_not_called(self):
     with self.assertRaises(AssertionError):

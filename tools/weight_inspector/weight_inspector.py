@@ -17,7 +17,7 @@ This assumes weights are dumped in a pickle file
 
 Usage:
 
-python3 -m MaxText.weight_inspector --lhs left_hand.pkl --rhs right_hand.pkl
+python3 -m tools.weight_inspector.weight_inspector --lhs left_hand.pkl --rhs right_hand.pkl
 
 """
 

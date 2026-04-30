@@ -61,19 +61,60 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
 
   ckpt_paths = sorted(pathlib.Path(base_model_path).glob("[!.]*.safetensors"))
   chkpt_vars = {}
+  is_compressed = bool(model_params.get("compressed_int4", False))
+  hf_key_prefix = model_params.get("hf_key_prefix", "")
+
+  def _normalize(raw_key):
+    if not hf_key_prefix:
+      return raw_key
+    if raw_key.startswith(hf_key_prefix):
+      return raw_key[len(hf_key_prefix) :]
+    return None
+
   for i, ckpt_path in enumerate(ckpt_paths):
     max_logging.log(f"Loading checkpoint {i+1} of {len(ckpt_paths)} ...")
     with safe_open(ckpt_path, framework="pt", device="cpu") as f:
-      for key in f.keys():
+      for raw_key in f.keys():
+        key = _normalize(raw_key)
+        if key is None:
+          continue
+
+        if is_compressed and key.endswith(".weight_packed"):
+          base = key[: -len(".weight_packed")]
+          hf_key = base + ".weight"
+          parts = hf_key.split(".")
+          layer = int(parts[2]) if "layers" in hf_key else 0
+          if not ds_ckpt.is_key_allowed(hf_key, ds_ckpt.MTP_KEYS_TO_SKIP):
+            continue
+          mapped_key = ds_ckpt.hf_to_maxtext_mapping(
+              layer, num_experts, first_num_dense_layers, base_num_decoder_layers
+          ).get(hf_key)
+          if not mapped_key:
+            continue
+          raw_base = raw_key[: -len(".weight_packed")]
+          shape_t = f.get_tensor(raw_base + ".weight_shape")
+          chkpt_vars[mapped_key] = ds_ckpt.dequantize_pack_quantized_int4(
+              f.get_tensor(raw_key),
+              f.get_tensor(raw_base + ".weight_scale"),
+              shape_t.tolist(),
+          )
+          continue
+        if is_compressed and key.endswith((".weight_scale", ".weight_shape")):
+          continue
+
         parts = key.split(".")
         layer = int(parts[2]) if "layers" in key else 0
         if key.endswith("_scale_inv"):
           raise ValueError("fp8 checkpoint is not supported.")
         if ds_ckpt.is_key_allowed(key, ds_ckpt.MTP_KEYS_TO_SKIP):
-          mapped_key = ds_ckpt.hf_to_maxtext_mapping(layer, num_experts, first_num_dense_layers, base_num_decoder_layers)[
-              key
-          ]
-          chkpt_vars[mapped_key] = f.get_tensor(key)
+          mapped_key = ds_ckpt.hf_to_maxtext_mapping(
+              layer, num_experts, first_num_dense_layers, base_num_decoder_layers
+          ).get(key)
+          if mapped_key:
+            chkpt_vars[mapped_key] = f.get_tensor(raw_key)
+          else:
+            # This catches keys that are allowed but missing from the mapping dictionary
+            max_logging.log(f"Debug: Allowed key '{key}' (layer {layer}) has no mapping in hf_to_maxtext_mapping.")
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 

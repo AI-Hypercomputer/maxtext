@@ -33,9 +33,24 @@ def get_tpu_dependencies():
 
 
 class CustomBuildHook(BuildHookInterface):
-  """A custom hook to inject TPU dependencies into the core wheel dependencies."""
+  """A custom hook to handle platform-specific package configuration for MaxText."""
 
   def initialize(self, version, build_data):  # pylint: disable=unused-argument
-    tpu_deps = get_tpu_dependencies()
-    build_data["dependencies"] = tpu_deps
-    print(f"Successfully injected {len(tpu_deps)} TPU dependencies into the wheel's core requirements.")
+    """Adjusts the build_data dictionary to customize the wheel's package structure."""
+
+    # Avoid case-sensitivity issues with `MaxText` and `maxtext` directories on case-insensitive platforms.
+    build_data["force_include"] = build_data.get("force_include", {})
+
+    # Detect case-insensitivity by checking if this file can be accessed via a different case.
+    # On case-insensitive filesystems flipping the case of the filename still points to the same file.
+    is_case_insensitive = os.path.exists(__file__.upper()) and os.path.exists(__file__.lower())
+
+    if is_case_insensitive:
+      print("Skipping legacy MaxText shims to avoid case-sensitivity conflicts.")
+      # Always include the __init__.py in the lowercase 'maxtext'.
+      # This ensures that 'import maxtext' (and thus 'import MaxText') has the proper version and metadata.
+      build_data["force_include"]["src/MaxText/__init__.py"] = "maxtext/__init__.py"
+    else:
+      # On other platforms, include 'src/MaxText' as its own top-level package for legacy support.
+      # We do NOT add __init__.py to 'maxtext' here to maintain exact parity with previous builds.
+      build_data["force_include"]["src/MaxText"] = "MaxText"

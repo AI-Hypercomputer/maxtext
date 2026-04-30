@@ -24,6 +24,7 @@ Usage:
   pytest tests/post_training/integration/sft_trainer_correctness_test.py
 """
 
+import functools
 import os.path
 import subprocess
 import sys
@@ -117,8 +118,13 @@ def setup_maxtext_model(config):
   quant = quantizations.configure_quantization(config)
   devices_array = maxtext_utils.create_device_mesh(config)
   mesh = Mesh(devices_array, config.mesh_axes)
-  maxtext_model = models.transformer_as_linen(config=config, mesh=mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
-  state, _ = maxtext_utils.setup_decode_state(maxtext_model, config, init_rng, mesh, None)
+  if config.pure_nnx:
+    # NNX has a different function to init the training state.
+    raise NotImplementedError("Pure NNX support has not been implemented yet.")
+  else:
+    maxtext_model = models.transformer_as_linen(config=config, mesh=mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+    init_state_fn = functools.partial(maxtext_utils.init_initial_state, maxtext_model, None, config, False, init_rng)
+  state, _ = maxtext_utils.setup_decode_state(config, mesh, None, init_state_fn)
   return maxtext_model, state, init_rng
 
 
@@ -147,7 +153,7 @@ def get_token_log_probs(logits, inputs):
   return token_log_probs
 
 
-@pytest.mark.external_training  # setUpClass does gsutil tokenizer
+@pytest.mark.external_training  # setUpClass does gcloud storage tokenizer
 class SFTTrainerCorrectnessTest(unittest.TestCase):
 
   @classmethod
@@ -160,15 +166,16 @@ class SFTTrainerCorrectnessTest(unittest.TestCase):
 
     exit_code = subprocess.call(
         [
-            "gsutil",
+            "gcloud",
+            "storage",
             "cp",
-            "-r",
+            "--recursive",
             "gs://maxtext-dataset/hf/llama2-chat-tokenizer",
             os.path.join(MAXTEXT_ASSETS_ROOT, ""),
         ]
     )
     if exit_code != 0:
-      raise ValueError(f"Download tokenizer with gsutil cp failed with exit code: {exit_code}")
+      raise ValueError(f"Download tokenizer with gcloud storage cp failed with exit code: {exit_code}")
 
   @pytest.mark.skip(reason="Logit output test fragile, failing on jax upgrade to 0.6.2 b/425997645")
   @pytest.mark.integration_test

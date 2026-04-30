@@ -48,6 +48,39 @@ from maxtext.utils import max_logging
 absl.logging.set_verbosity(absl.logging.INFO)  # for max_logging.log
 
 
+# Group size used by Kimi-K2 quantized variants for per-group symmetric int4 scales.
+# Matches `quantization_config.config_groups.group_0.weights.group_size` in the HF config.
+INT4_GROUP_SIZE = 32
+
+
+def dequantize_pack_quantized_int4(
+    packed: torch.Tensor,
+    scale: torch.Tensor,
+    out_shape,
+) -> torch.Tensor:
+  """Dequantize a compressed-tensors pack-quantized int4 weight to bf16.
+
+  packed: int32 [out, in/8]. Each int32 packs 8 weights along the input dim;
+    weight k lives in bits [4k : 4k+4] (so the first weight is in the low 4 bits).
+  scale:  bf16/fp16 [out, in/group_size], symmetric (no zero point).
+
+  Each 4-bit value is unsigned 0..15; subtract 8 to get the signed weight in [-8, 7].
+  """
+  out_features, in_features = int(out_shape[0]), int(out_shape[1])
+  if in_features % INT4_GROUP_SIZE != 0:
+    raise ValueError(f"in_features={in_features} not divisible by group_size={INT4_GROUP_SIZE}")
+
+  shifts = torch.arange(8, dtype=torch.int32) * 4
+  nibbles = (packed.to(torch.int32).unsqueeze(-1) >> shifts) & 0xF
+  w_int = (nibbles - 8).reshape(out_features, -1)[:, :in_features].to(torch.float32)
+
+  s = scale.to(torch.float32).unsqueeze(-1)
+  w = (w_int.reshape(out_features, in_features // INT4_GROUP_SIZE, INT4_GROUP_SIZE) * s).reshape(
+      out_features, in_features
+  )
+  return w.to(torch.bfloat16)
+
+
 MODEL_PARAMS_DICT = {
     "deepseek2-16b": {
         "num_layers": 27,
@@ -87,6 +120,56 @@ MODEL_PARAMS_DICT = {
         "qk_rope_head_dim": 64,
         "v_head_dim": 128,
         "has_mtp": False,
+    },
+    "kimi-k2-thinking": {
+        "num_layers": 61,
+        "first_num_dense_layers": 1,
+        "base_num_query_heads": 64,
+        "base_emb_dim": 7168,
+        "num_experts": 384,
+        "q_lora_rank": 1536,
+        "kv_lora_rank": 512,
+        "qk_nope_head_dim": 128,
+        "qk_rope_head_dim": 64,
+        "v_head_dim": 128,
+        "has_mtp": False,
+        # Only routed-expert projections are int4 (group_size=32, symmetric);
+        # attention, shared experts, dense MLP, and lm_head stay bf16.
+        "compressed_int4": True,
+    },
+    # Multimodal wrapper; text branch matches kimi-k2-thinking but keys are
+    # prefixed `language_model.`. Vision keys are dropped (text-only target).
+    "kimi-k2.5-text": {
+        "num_layers": 61,
+        "first_num_dense_layers": 1,
+        "base_num_query_heads": 64,
+        "base_emb_dim": 7168,
+        "num_experts": 384,
+        "q_lora_rank": 1536,
+        "kv_lora_rank": 512,
+        "qk_nope_head_dim": 128,
+        "qk_rope_head_dim": 64,
+        "v_head_dim": 128,
+        "has_mtp": False,
+        "compressed_int4": True,
+        "hf_key_prefix": "language_model.",
+    },
+    # K2.6 reuses the K2.5 multimodal wrapper (KimiK25ForConditionalGeneration);
+    # text branch shape and quantization layout are identical to kimi-k2.5-text.
+    "kimi-k2.6-text": {
+        "num_layers": 61,
+        "first_num_dense_layers": 1,
+        "base_num_query_heads": 64,
+        "base_emb_dim": 7168,
+        "num_experts": 384,
+        "q_lora_rank": 1536,
+        "kv_lora_rank": 512,
+        "qk_nope_head_dim": 128,
+        "qk_rope_head_dim": 64,
+        "v_head_dim": 128,
+        "has_mtp": False,
+        "compressed_int4": True,
+        "hf_key_prefix": "language_model.",
     },
 }
 
@@ -232,20 +315,52 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info,
 
   ckpt_paths = sorted(pathlib.Path(base_model_path).glob("[!.]*.safetensors"))
   chkpt_vars = {}
+  is_compressed = bool(model_params.get("compressed_int4", False))
+  hf_key_prefix = model_params.get("hf_key_prefix", "")  # for multimodal text-only
+
+  def _normalize(raw_key):
+    """Strip multimodal prefix; return None to drop keys outside the text branch."""
+    if not hf_key_prefix:
+      return raw_key
+    if raw_key.startswith(hf_key_prefix):
+      return raw_key[len(hf_key_prefix) :]
+    return None
+
   for i, ckpt_path in enumerate(ckpt_paths):
     max_logging.log(f"Loading checkpoint {i+1} of {len(ckpt_paths)} ...")
     with safe_open(ckpt_path, framework="pt", device="cpu") as f:
-      for key in f.keys():
-        parts = key.split(".")
-        layer = int(parts[2]) if "layers" in key else 0
+      for raw_key in f.keys():
+        key = _normalize(raw_key)
+        if key is None:
+          continue  # vision_tower / mm_projector etc. when text-only
         if key.endswith("_scale_inv"):
           raise ValueError("fp8 checkpoint is not supported.")
-        if is_key_allowed(key, MTP_KEYS_TO_SKIP):
-          mapped_key = hf_to_maxtext_mapping(
-              layer, num_experts, first_num_dense_layers, base_num_decoder_layers, has_mtp
-          ).get(key)
-          if mapped_key:
-            chkpt_vars[mapped_key] = f.get_tensor(key)
+        if is_compressed and key.endswith((".weight_scale", ".weight_shape")):
+          continue  # consumed alongside the matching .weight_packed
+
+        # Compressed weights advertise as ".weight_packed"; resolve back to the
+        # logical ".weight" name so it matches the maxtext mapping table.
+        is_packed = is_compressed and key.endswith(".weight_packed")
+        hf_key = key[: -len(".weight_packed")] + ".weight" if is_packed else key
+
+        if not is_key_allowed(hf_key, MTP_KEYS_TO_SKIP):
+          continue
+        layer = int(hf_key.split(".")[2]) if "layers" in hf_key else 0
+        mapped_key = hf_to_maxtext_mapping(
+            layer, num_experts, first_num_dense_layers, base_num_decoder_layers, has_mtp
+        ).get(hf_key)
+        if not mapped_key:
+          continue
+
+        if is_packed:
+          raw_base = raw_key[: -len(".weight_packed")]
+          chkpt_vars[mapped_key] = dequantize_pack_quantized_int4(
+              f.get_tensor(raw_key),
+              f.get_tensor(raw_base + ".weight_scale"),
+              f.get_tensor(raw_base + ".weight_shape").tolist(),
+          )
+        else:
+          chkpt_vars[mapped_key] = f.get_tensor(raw_key)
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
@@ -527,6 +642,38 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info,
   # MTP Layer Processing ################################################
   if has_mtp:
     max_logging.log("Processing MTP Layer")
+
+    # Initialize the mtp_block dictionary structure
+    jax_weights["mtp_block"] = {
+        "mtp_layer_1": {
+            "mtp_1_embedding_norm": {"scale": None},
+            "mtp_1_hidden_state_norm": {"scale": None},
+            "mtp_1_projection": {"kernel": None},
+            "mtp_1_transformer_layer": {
+                "pre_self_attention_layer_norm": {"scale": None},
+                "post_self_attention_layer_norm": {"scale": None},
+                "self_attention": {
+                    "kv_norm": {"scale": None},
+                    "wkv_a": {"kernel": None},
+                    "wkv_b": {"kernel": None},
+                    "out": {"kernel": None},
+                },
+                "DeepSeekMoeBlock_0": {
+                    "MoeBlock_0": {
+                        "wi_0": None,
+                        "wi_1": None,
+                        "wo": None,
+                        "gate": {"kernel": None},
+                    },
+                    "shared_experts": {
+                        "wi_0": {"kernel": None},
+                        "wi_1": {"kernel": None},
+                        "wo": {"kernel": None},
+                    },
+                },
+            },
+        }
+    }
 
     # MTP unique components
     jax_weights["mtp_block"]["mtp_layer_1"]["mtp_1_embedding_norm"]["scale"] = (

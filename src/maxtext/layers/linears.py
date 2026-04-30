@@ -30,7 +30,7 @@ from flax import nnx
 import flax.linen as nn
 
 from maxtext.common.common_types import DecoderBlockType, ShardMode, DType, Array, Config
-from maxtext.common.common_types import MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, EP_AS_CONTEXT
+from maxtext.common.common_types import MODEL_MODE_PREFILL
 from maxtext.layers import nnx_wrappers, quantizations
 from maxtext.layers import normalizations
 from maxtext.layers.initializers import NdInitializer, nd_dense_init, default_bias_init, variable_to_logically_partitioned
@@ -404,10 +404,8 @@ class MlpBlock(nnx.Module):
 
     if self.model_mode == MODEL_MODE_PREFILL:
       self.intermediate_logical = ("activation_batch", "prefill_activation_length", "activation_mlp")
-    elif config.expert_shard_attention_option == EP_AS_CONTEXT and self.model_mode == MODEL_MODE_TRAIN:
-      self.intermediate_logical = ("activation_batch_no_exp", "activation_length", "activation_mlp")
     else:
-      self.intermediate_logical = ("activation_batch", "activation_length_no_exp", "activation_mlp")
+      self.intermediate_logical = ("activation_batch", "activation_length", "activation_mlp")
 
     if config.fused_mlp:
       self.wi = DenseGeneral(

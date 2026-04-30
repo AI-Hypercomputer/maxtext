@@ -1,6 +1,7 @@
 base_config: "base.yml"
 
 use_dpo: true
+packing: false
 train_data_columns: ['chosen', 'rejected']
 eval_data_columns: ['chosen', 'rejected']
 base_output_directory: 'gs://maxtext-external/logs'

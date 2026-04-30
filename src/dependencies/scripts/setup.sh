@@ -215,8 +215,8 @@ install_maxtext_with_deps() {
         dep_name='src/dependencies/requirements/generated_requirements/tpu-requirements.txt'
     fi
     echo "Installing requirements from $dep_name"
-    python3 -m uv pip install --resolution=lowest -r "$dep_name" \
-        -r 'src/dependencies/github_deps/pre_train_deps.txt'
+    python3 -m uv pip install --resolution=lowest -r "$dep_name"
+    python3 -m src.dependencies.scripts.install_pre_train_extra_deps
 
     install_maxtext_package_without_deps
 }
@@ -230,7 +230,7 @@ install_post_training_deps() {
     dep_name='src/dependencies/requirements/generated_requirements/tpu-post-train-requirements.txt'
     echo "Installing requirements from $dep_name"
     python3 -m uv pip install --resolution=lowest -r "$dep_name"
-    python3 -m src.dependencies.github_deps.install_post_train_deps
+    python3 -m src.dependencies.scripts.install_post_train_extra_deps
 }
 
 # ---------- Post-Training workflow installation ----------

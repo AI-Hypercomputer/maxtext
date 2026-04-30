@@ -170,12 +170,23 @@ class MetricLogger:
           ]
       )
 
+    lm_loss = scalars.get("learning/lm_loss", 0.0)
+    perplexity = scalars.get("learning/perplexity", 0.0)
     log_parts.extend(
         [
             f"total_weights: {scalars['learning/total_weights']}",
             f"loss: {loss:.3f}",
+            f"lm_loss: {lm_loss:.3f}",
+            f"perplexity: {perplexity:.3f}",
         ]
     )
+    if self.config.use_dpo:
+      dpo_loss = scalars.get("learning/dpo_loss", 0.0)
+      log_parts.append(f"dpo_loss: {dpo_loss:.3f}")
+
+    if self.config.num_experts > 1:
+      moe_lb_loss = scalars.get("learning/moe_lb_loss", 0.0)
+      log_parts.append(f"moe_lb_loss: {moe_lb_loss:.3f}")
 
     if self.config.mtp_num_layers > 0:
       mtp_loss = scalars.get("learning/mtp_loss", 0.0)
@@ -190,6 +201,7 @@ class MetricLogger:
     log_parts = [
         f"eval metrics after step: {step}",
         f"loss={scalars['eval/avg_loss']:.3f}",
+        f"perplexity={scalars['eval/avg_perplexity']:.3f}",
         f"total_weights={scalars['eval/total_weights']}",
     ]
 
@@ -219,7 +231,7 @@ class MetricLogger:
     return step in boundary_steps
 
   def _maybe_abort_after_write_metrics(self, metrics):
-    """ This function checks whether we have nan or inf values in training"""
+    """This function checks whether we have nan or inf values in training"""
     loss = metrics["scalar"].get("learning/loss")
     if self.config.abort_on_nan_loss and np.isnan(loss):
       max_logging.log("Aborting training due to NaN loss.")
@@ -227,7 +239,7 @@ class MetricLogger:
     if self.config.abort_on_inf_loss and np.isinf(loss):
       max_logging.log("Aborting training due to Inf loss.")
       sys.exit(1)
-    
+
   def write_metrics_locally(self, metrics, step):
     """Writes metrics locally for testing."""
     with open(self.config.metrics_file, "a", encoding="utf8") as local_metrics_file:
@@ -359,6 +371,7 @@ class MetricLogger:
       self.cumulative_eval_metrics["scalar"]["eval/mtp_acceptance_rate_percent"] += float(
           metrics["scalar"].get("evaluation/mtp_acceptance_rate_percent", 0.0)
       )
+      self.cumulative_eval_metrics["scalar"]["eval/z_loss"] += float(metrics["scalar"].get("evaluation/z_loss", 0.0))
       if self.config.use_dpo:
         self.cumulative_eval_metrics["scalar"]["eval/dpo_reward_accuracy"] += float(
             metrics["scalar"].get("evaluation/dpo_reward_accuracy", 0.0)
@@ -369,6 +382,7 @@ class MetricLogger:
           self.cumulative_eval_metrics["scalar"]["eval/total_weights"] + EPS
       )
       self.cumulative_eval_metrics["scalar"]["eval/avg_loss"] = eval_loss
+      self.cumulative_eval_metrics["scalar"]["eval/avg_perplexity"] = np.exp(eval_loss)
       self.cumulative_eval_metrics["scalar"]["eval/avg_moe_lb_loss"] = (
           self.cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] / eval_step_count
       )
@@ -380,6 +394,9 @@ class MetricLogger:
       )
       self.cumulative_eval_metrics["scalar"]["eval/avg_mtp_acceptance_rate_percent"] = (
           self.cumulative_eval_metrics["scalar"]["eval/mtp_acceptance_rate_percent"] / eval_step_count
+      )
+      self.cumulative_eval_metrics["scalar"]["eval/avg_z_loss"] = (
+          self.cumulative_eval_metrics["scalar"]["eval/z_loss"] / eval_step_count
       )
       if self.config.use_dpo:
         self.cumulative_eval_metrics["scalar"]["eval/dpo_reward_accuracy"] = (

@@ -113,7 +113,7 @@ def main(argv: Sequence[str]) -> None:
         video_placeholder=config.video_placeholder,
         model_name=config.model_name,
         num_images=processor_outputs.num_images,
-        num_videos=getattr(processor_outputs, 'num_videos', 0),
+        num_videos=getattr(processor_outputs, "num_videos", 0),
     )
 
   metadata = engine.get_tokenizer()
@@ -131,7 +131,8 @@ def main(argv: Sequence[str]) -> None:
     has_chat_template = getattr(tokenizer_model.tokenizer, "chat_template", False)  # pytype: disable=attribute-error
   except AttributeError as _:
     has_chat_template = False
-  tokens, true_length = tokenizer_model.encode(text, is_bos=not has_chat_template, prefill_lengths=[prefill_length])
+  is_bos = config.add_bos and not has_chat_template
+  tokens, true_length = tokenizer_model.encode(text, is_bos=is_bos, prefill_lengths=[prefill_length])
 
   position_ids = None
   mrope_position_deltas = None
@@ -144,11 +145,11 @@ def main(argv: Sequence[str]) -> None:
       from maxtext.multimodal import processor_qwen3_omni  # pylint: disable=import-outside-toplevel
 
       position_ids, mrope_position_deltas = processor_qwen3_omni.get_rope_index(
-          input_ids=tokens,
+          input_ids=tokens[np.newaxis, :],  # Add batch dimension for processing
           image_grid_thw=processor_outputs.pixel_grid_thw,  # pytype: disable=attribute-error
           video_grid_thw=processor_outputs.video_grid_thw,  # pytype: disable=attribute-error
-          attention_mask=np.ones_like(tokens),
-          use_audio_in_video=config.use_audio and getattr(processor_outputs, 'num_videos', 0) > 0,
+          attention_mask=np.ones_like(tokens)[np.newaxis, :],
+          use_audio_in_video=config.use_audio and getattr(processor_outputs, "num_videos", 0) > 0,
           audio_lengths=processor_outputs.audio_lengths,  # pytype: disable=attribute-error
           second_per_grids=processor_outputs.video_second_per_grid,  # pytype: disable=attribute-error
           spatial_merge_size=config.spatial_merge_size_for_vit,  # pytype: disable=attribute-error

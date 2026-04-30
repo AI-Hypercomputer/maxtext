@@ -19,6 +19,7 @@ import math
 
 from flax import linen as nn
 from flax import nnx
+import jax
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
@@ -403,7 +404,7 @@ class Llama4DecoderLayer(nnx.Module):
       self.Llama4MoEBlock_0 = RoutedAndSharedMoE(
           config=config,
           mesh=self.mesh,
-          kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+          kernel_init=initializers.nd_dense_init(config.dense_init_scale, "fan_in", "truncated_normal"),
           kernel_axes=("embed", None),
           dtype=config.dtype,
           weight_dtype=config.weight_dtype,
@@ -442,9 +443,9 @@ class Llama4DecoderLayer(nnx.Module):
       decoder_positions,
       deterministic,
       model_mode,
+      previous_chunk=None,
       slot: None | int = None,
       page_state: None | page_manager.PageState = None,
-      previous_chunk=None,
       kv_cache=None,
       attention_metadata=None,
   ):
@@ -452,7 +453,13 @@ class Llama4DecoderLayer(nnx.Module):
     assert cfg.num_experts >= 1, "Expected the Llama4 config to have `num_experts > 1`."
 
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
-    if isinstance(inputs, tuple):
+    is_scan_carry = False
+    if isinstance(inputs, tuple) and len(inputs) == 3:
+      hidden_states, stacked_kv_cache, layer_idx = inputs
+      kv_cache = stacked_kv_cache[layer_idx]
+      inputs = hidden_states
+      is_scan_carry = True
+    elif isinstance(inputs, tuple):
       inputs = inputs[0]
     inputs = nn.with_logical_constraint(inputs, self.activation_axis_names)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
@@ -504,7 +511,16 @@ class Llama4DecoderLayer(nnx.Module):
           jnp.sum(layer_output == 0) / jnp.size(layer_output),
       )
 
-    if cfg.scan_layers:
+    if is_scan_carry:
+
+      def update_cache(cache, val):
+        if jnp.size(val) > 0:
+          return cache.at[layer_idx].set(val)
+        return cache
+
+      stacked_kv_cache = jax.tree_util.tree_map(update_cache, stacked_kv_cache, kv_cache)
+      return (layer_output, stacked_kv_cache, layer_idx + 1), None
+    elif cfg.scan_layers:
       return layer_output, None
     else:
       return layer_output, kv_cache
@@ -570,9 +586,11 @@ class Llama4ScannableBlock(nnx.Module):
       decoder_positions,
       deterministic,
       model_mode,
+      previous_chunk=None,
       slot: None | int = None,
       page_state: None | page_manager.PageState = None,
-      previous_chunk=None,
+      kv_cache=None,
+      attention_metadata=None,
   ):
 
     cfg = self.config
@@ -590,6 +608,8 @@ class Llama4ScannableBlock(nnx.Module):
           previous_chunk=previous_chunk,
           page_state=page_state,
           slot=slot,
+          kv_cache=kv_cache,
+          attention_metadata=attention_metadata,
       )
       if cfg.scan_layers:
         y = y[0]

@@ -68,24 +68,61 @@ For instructions on building and uploading the MaxText Docker image with post-tr
 
 ## Setup Environment Variables
 
-Set up the following environment variables. Replace placeholders with your
-actual values.
+Set up the following environment variables to configure your training run. Replace
+placeholders with your actual values.
 
 ```bash
 # -- Model configuration --
-export MODEL=<MaxText Model> # e.g. 'llama3.1-70b-Instruct'
-export HF_TOKEN=<Hugging Face access token>
+# The MaxText model name. See `src/maxtext/configs/types.py` for `ModelName` for a
+# full list of supported models.
+export MODEL=<MODEL_NAME> # e.g. 'llama3.1-70b-Instruct'
+
+# Your Hugging Face access token. Required to download gated models like Llama.
+# You can generate one at https://huggingface.co/settings/tokens.
+export HF_TOKEN=<HF_TOKEN>
 
 # -- MaxText configuration --
-export BASE_OUTPUT_DIRECTORY=<output directory to store run logs> # e.g., gs://my-bucket/my-output-directory
-export WORKLOAD=<Name for this run> # e.g., llama-3-70b-grpo
-export MAXTEXT_CKPT_PATH=${BASE_OUTPUT_DIRECTORY?}/${WORKLOAD?}/0/items
+# Use a GCS bucket you own to store logs and checkpoints. Ideally in the same
+# region as your TPUs to minimize latency and costs.
+# You can list your buckets and their locations in the
+# [Cloud Console](https://console.cloud.google.com/storage/browser).
+export BASE_OUTPUT_DIRECTORY=<GCS_BUCKET> # e.g., gs://my-bucket/maxtext-runs
+
+# An arbitrary string to identify this specific run.
+# We recommend to include the model, user, and timestamp.
+# Note: Kubernetes requires workload names to be valid DNS labels (lowercase, no underscores or periods).
+export RUN_NAME=<RUN_NAME>
+
+# The directory containing the MaxText-compatible model checkpoint.
+# If you are converting from a Hugging Face checkpoint, see:
+# [Checkpoint Conversion Guide](../../guides/checkpointing_solutions/convert_checkpoint.md)
+export MAXTEXT_CKPT_PATH=${BASE_OUTPUT_DIRECTORY?}/${RUN_NAME?}/0/items
 
 # -- Workload configuration --
-export TPU_TYPE=<TPU Type> # e.g., 'v5p-128'
-export TPU_CLUSTER=<cluster name>
-export PROJECT_ID=<GCP project ID>
-export ZONE=<GCP zone>
+# Your GCP project ID. Find it on the [Cloud Console Dashboard](https://console.cloud.google.com/home/dashboard).
+# If you've already set it in your local config, you can retrieve it via:
+# gcloud config get-value project
+export PROJECT_ID=<PROJECT_ID>
+
+# The GCP location (listed as "Location" in the UI) and name of your
+# TPU-enabled GKE cluster. Both can be found on the
+# [Cloud Console](https://console.cloud.google.com/kubernetes/list).
+export ZONE=<ZONE> # e.g., 'us-central1' or 'us-central1-a'
+export GKE_CLUSTER=<CLUSTER_NAME>
+
+# For a full list of MaxText-supported TPU types, see: `src/maxtext/utils/accelerator_to_spec_map.py`. To see the TPU type
+# of your cluster:
+
+# 1. Connect to the cluster (required for kubectl commands later):
+# gcloud container clusters get-credentials ${GKE_CLUSTER?} --location ${ZONE?} --project ${PROJECT_ID?}
+
+# 2. Find your TPU type (e.g., 'v5p-128') by checking the accelerator labels on your nodes:
+# kubectl get nodes -l cloud.google.com/gke-tpu-accelerator -o jsonpath='{.items[*].metadata.labels.cloud\.google\.com/gke-tpu-accelerator}' | tr ' ' '\n' | sort -u
+export TPU_TYPE=<TPU_TYPE>
+
+# The Docker image you pushed in the prerequisite step
+export CLOUD_IMAGE_NAME=<IMAGE_NAME>
+export DOCKER_IMAGE="gcr.io/${PROJECT_ID?}/${CLOUD_IMAGE_NAME?}"
 ```
 
 ## Get Your Model Checkpoint
@@ -96,15 +133,15 @@ If you already have a MaxText-compatible model checkpoint, simply set the
 following environment variable and move on to the next section.
 
 ```bash
-export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint> # e.g., gs://my-bucket/my-model-checkpoint/0/items
+export MAXTEXT_CKPT_PATH=<CKPT_PATH> # e.g., gs://my-bucket/my-model-checkpoint/0/items
 ```
 
 ### Option 2: Converting from a Hugging Face checkpoint
 
-Refer the steps in [Hugging Face to MaxText](../../guides/checkpointing_solutions/convert_checkpoint.md#hugging-face-to-maxtext) to convert a hugging face checkpoint to MaxText. Make sure you have correct checkpoint files converted and saved. Similar as Option 1, you can set the following environment and move on.
+Refer to the steps in [Hugging Face to MaxText](../../guides/checkpointing_solutions/convert_checkpoint.md) to convert a hugging face checkpoint to MaxText. Make sure you have correct checkpoint files converted and saved. Similar as Option 1, you can set the following environment and move on.
 
 ```bash
-export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint> # e.g., gs://my-bucket/my-model-checkpoint/0/items
+export MAXTEXT_CKPT_PATH=<CKPT_PATH> # e.g., gs://my-bucket/my-model-checkpoint/0/items
 ```
 
 ## Submit your RL workload via Pathways
@@ -117,13 +154,13 @@ submit the `train_rl.py` script via XPK.
 
 > **Note:** XPK v0.14.0+ automatically discovers your cluster's location from
 > GCP. You don't need to specify `--zone` in the commands below. If using an
-> older XPK version, add `--zone=<zone>` to the workload commands.
+> older XPK version, add `--zone=<ZONE>` to the workload commands.
 
 ### Submit GRPO workload
 
 ```bash
-xpk workload create-pathways --workload ${WORKLOAD?} \
---docker-image gcr.io/${PROJECT_ID?}/${CLOUD_IMAGE_NAME?} --cluster ${TPU_CLUSTER?} \
+xpk workload create-pathways --workload ${RUN_NAME?} \
+--docker-image ${DOCKER_IMAGE?} --cluster ${GKE_CLUSTER?} \
 --tpu-type=${TPU_TYPE?} --num-slices=1 \
 --project=${PROJECT_ID?} --priority=high \
 --zone=${ZONE?} \
@@ -131,7 +168,7 @@ xpk workload create-pathways --workload ${WORKLOAD?} \
 python3 -m maxtext.trainers.post_train.rl.train_rl \
   model_name=${MODEL?} \
   load_parameters_path=${MAXTEXT_CKPT_PATH?} \
-  run_name=${WORKLOAD?} \
+  run_name=${RUN_NAME?} \
   base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
   hf_access_token=${HF_TOKEN?}"
 ```
@@ -139,8 +176,8 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
 ### Submit GSPO workload
 
 ```bash
-xpk workload create-pathways --workload ${WORKLOAD?} \
---docker-image gcr.io/${PROJECT_ID?}/${CLOUD_IMAGE_NAME?} --cluster ${TPU_CLUSTER?} \
+xpk workload create-pathways --workload ${RUN_NAME?} \
+--docker-image ${DOCKER_IMAGE?} --cluster ${GKE_CLUSTER?} \
 --tpu-type=${TPU_TYPE?} --num-slices=1 \
 --project=${PROJECT_ID?} --priority=high \
 --zone=${ZONE?} \
@@ -148,7 +185,7 @@ xpk workload create-pathways --workload ${WORKLOAD?} \
 python3 -m maxtext.trainers.post_train.rl.train_rl \
   model_name=${MODEL?} \
   load_parameters_path=${MAXTEXT_CKPT_PATH?} \
-  run_name=${WORKLOAD?} \
+  run_name=${RUN_NAME?} \
   base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
   hf_access_token=${HF_TOKEN?} \
   loss_algo=gspo-token"
@@ -160,12 +197,12 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
 - **Delete a workload**: To remove a failed or unwanted Pathways job, use XPK:
   ```bash
   xpk workload delete \
-      --workload ${WORKLOAD?} \
-      --cluster ${TPU_CLUSTER?} \
+      --workload ${RUN_NAME?} \
+      --cluster ${GKE_CLUSTER?} \
       --project ${PROJECT_ID?}
   ```
   In case the job still lingers on, you can use
-  `kubectl get pods` to obtain the name of the pod and then run: `kubectl delete pod <pod-name>`.
+  `kubectl get pods` to obtain the name of the pod and then run: `kubectl delete pod <POD_NAME>`.
 
 ## Troubleshooting
 
@@ -178,12 +215,12 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
 - **Workload Failures**: Review the logs for specific error messages and
   ensure all environment variables are properly set.
 - **Workload retry / resume**:
-  - **Retry (fresh run)**: Use a unique workload name to avoid overwriting
-    outputs: `export WORKLOAD=${WORKLOAD}-retry1 export MAXTEXT_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/${WORKLOAD}/0/items`. Then
+  - **Retry (fresh run)**: Use a unique run name to avoid overwriting
+    outputs: `export RUN_NAME=${RUN_NAME?}-retry1 export MAXTEXT_CKPT_PATH=${BASE_OUTPUT_DIRECTORY?}/${RUN_NAME?}/0/items`. Then
     submit the XPK workload. If "workload already exists" error occurs, pick
     a new name or list jobs: `kubectl get pathwaysjob`.
-  - **Resume from checkpoint**: Keep the same `WORKLOAD` and set the
-    checkpoint path: `export load_parameters_path=${MAXTEXT_CKPT_PATH}/checkpoint-0000`. Then submit
+  - **Resume from checkpoint**: Keep the same `RUN_NAME` and set the
+    checkpoint path: `export load_parameters_path=${MAXTEXT_CKPT_PATH?}/checkpoint-0000`. Then submit
     the workload again.
   - **Tip**: Verify the checkpoint exists in GCS with read access before
     resuming.

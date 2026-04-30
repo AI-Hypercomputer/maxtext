@@ -21,15 +21,17 @@ import unittest
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
+import numpy as np
+import pytest
 from maxtext.configs import pyconfig
 from maxtext.common.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_PREFILL
 from maxtext.layers import quantizations
+
+pytest.importorskip("jetstream", reason="jetstream not installed")
 from maxtext.inference.maxengine import maxengine
 from maxtext.models import models
 from maxtext.utils import maxtext_utils
 from tests.utils.test_helpers import get_test_config_path
-import numpy as np
-import pytest
 
 pytestmark = [pytest.mark.external_serving]
 

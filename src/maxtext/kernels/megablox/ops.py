@@ -16,15 +16,22 @@
 
 # pylint: disable=too-many-positional-arguments
 
-import functools
 import dataclasses
-from typing import Literal, List, Tuple
+import functools
+from typing import List, Literal, Tuple
 import jax
 import jax.numpy as jnp
 from maxtext.kernels.megablox import backend
-from tokamax._src.ops.ragged_dot import pallas_mosaic_tpu_kernel as tokamax_backend
 import qwix
 import qwix.pallas as qpl
+import tokamax
+
+
+DRHS_RAGGED_DOT_DIM_NUMS = jax.lax.RaggedDotDimensionNumbers(
+    dot_dimension_numbers=(([0], [0]), ([], [])),
+    lhs_ragged_dimensions=[0],
+    rhs_group_dimensions=[],
+)
 
 
 def gmm(
@@ -32,7 +39,17 @@ def gmm(
     rhs: jnp.ndarray,
     group_sizes: jnp.ndarray,
     preferred_element_type: jnp.dtype = jnp.float32,
-    tiling: tuple[int, int, int, int, int, int, int, int, int] = (128, 128, 128, 128, 128, 128, 128, 128, 128),
+    tiling: tuple[int, int, int, int, int, int, int, int, int] = (
+        128,
+        128,
+        128,
+        128,
+        128,
+        128,
+        128,
+        128,
+        128,
+    ),
     group_offset: jnp.ndarray | None = None,
     existing_out: jnp.ndarray | None = None,
     transpose_rhs: bool = False,
@@ -46,6 +63,8 @@ def gmm(
     combine_scopes: bool = False,
     lhs_vma_axes: tuple = tuple(),
     rhs_vma_axes: tuple = tuple(),
+    # TODO(amandaliang): get rid of the qwix_rule in favor of Qwix's interception feature
+    qwix_rule: qwix.QtRule | None = None,
 ):
   """Grouped matrix multiplication operation."""
   quantization_rule = None
@@ -77,8 +96,6 @@ def gmm(
       group_sizes,
       preferred_element_type,
       tiling,
-      input_buffer_count,
-      combine_scopes,
       group_offset,
       existing_out,
       transpose_rhs,
@@ -95,9 +112,17 @@ def _gmm_fwd(
     rhs: jnp.ndarray,
     group_sizes: jnp.ndarray,
     preferred_element_type: jnp.dtype = jnp.float32,
-    tiling: tuple[int, int, int, int, int, int, int, int, int] = (128, 128, 128, 128, 128, 128, 128, 128, 128),
-    input_buffer_count: tuple[int, int, int] = (2, 2, 2),
-    combine_scopes: bool = False,
+    tiling: tuple[int, int, int, int, int, int, int, int, int] = (
+        128,
+        128,
+        128,
+        128,
+        128,
+        128,
+        128,
+        128,
+        128,
+    ),
     group_offset: jnp.ndarray | None = None,
     existing_out: jnp.ndarray | None = None,
     transpose_rhs: bool = False,
@@ -142,17 +167,18 @@ def _gmm_fwd(
           for axis_name, axis_idx in weight_gather_axes:
             rhs_qvalue = jax.lax.all_gather(rhs.qvalue, axis_name, axis=axis_idx, tiled=True)
             rhs = dataclasses.replace(rhs, qvalue=rhs_qvalue)
-    out = tokamax_backend.gmm(
+    # Handle transpose_rhs manually as ragged_dot assumes (G, K, N)
+    if transpose_rhs:
+      rhs = rhs.swapaxes(1, 2)
+
+    out = tokamax.ragged_dot(
         lhs=lhs,
         rhs=rhs,
         group_sizes=group_sizes,
         precision=jax.lax.Precision.DEFAULT,
-        out_dtype=preferred_element_type,
-        tiling=tiling[:3],
+        preferred_element_type=preferred_element_type,
         group_offset=group_offset,
-        transpose_rhs=transpose_rhs,
-        interpret=interpret,
-        input_buffer_count=input_buffer_count[0],
+        implementation="mosaic",
     )
   else:
     out = backend.gmm(
@@ -176,8 +202,6 @@ def _gmm_bwd(
     rhs_dtype: jax.typing.DTypeLike,
     preferred_element_type: jnp.dtype,
     tiling: tuple[int, int, int, int, int, int, int, int, int],
-    input_buffer_count: tuple[int, int, int],
-    combine_scopes: bool,
     transpose_rhs: bool,
     interpret: bool,
     quantization_rule: qwix.QtRule | None,
@@ -233,31 +257,30 @@ def _gmm_bwd(
         channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [1],
         calibration_method=quantization_rule.bwd_calibration_method,
     )
-  if use_tokamax_backend:  # false
-    dlhs = tokamax_backend.gmm(
+  if use_tokamax_backend:
+    # Handle transpose_rhs manually
+    dlhs_rhs = rhs
+    if not transpose_rhs:
+      dlhs_rhs = dlhs_rhs.swapaxes(1, 2)
+
+    dlhs = tokamax.ragged_dot(
         lhs=dlhs_dout,
-        rhs=rhs,
+        rhs=dlhs_rhs,
         group_sizes=group_sizes,
         precision=jax.lax.Precision.DEFAULT,
-        out_dtype=lhs_dtype,
-        tiling=tiling[3:6],
+        preferred_element_type=lhs_dtype,
         group_offset=group_offset,
-        transpose_rhs=not transpose_rhs,
-        interpret=interpret,
-        input_buffer_count=input_buffer_count[1],
+        implementation="mosaic",
     )
-    drhs = tokamax_backend.tgmm(
-        lhs=lhs.swapaxes(0, 1),
+    drhs = tokamax.ragged_dot_general(
+        lhs=lhs,
         rhs=drhs_dout,
         group_sizes=group_sizes,
+        ragged_dot_dimension_numbers=DRHS_RAGGED_DOT_DIM_NUMS,
         precision=jax.lax.Precision.DEFAULT,
-        out_dtype=rhs_dtype,
-        tiling=tiling[-3:],
+        preferred_element_type=rhs_dtype,
         group_offset=group_offset,
-        num_actual_groups=num_actual_groups,
-        interpret=interpret,
-        input_buffer_count=input_buffer_count[2],
-        combine_scopes=combine_scopes,
+        implementation="mosaic",
     )
     if quantization_rule and quantization_rule.bwd_qtype and weight_gather_axes:
       # Scatter back in reverse order of gather

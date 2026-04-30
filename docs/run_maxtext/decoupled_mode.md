@@ -51,10 +51,10 @@ Optional environment variables:
 
 ## Centralized Decoupling API (`gcloud_stub.py`)
 
-MaxText exposes a single module `MaxText.gcloud_stub` to avoid scattering environment checks:
+MaxText exposes a single module `maxtext.common.gcloud_stub` to avoid scattering environment checks:
 
 ```python
-from MaxText.gcloud_stub import is_decoupled, cloud_diagnostics, jetstream
+from maxtext.common.gcloud_stub import is_decoupled, cloud_diagnostics, jetstream
 
 if is_decoupled():
     # Skip optional integrations or use local fallbacks

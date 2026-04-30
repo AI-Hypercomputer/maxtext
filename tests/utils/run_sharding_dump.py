@@ -58,36 +58,42 @@ FLAGS = flags.FLAGS
 flags.DEFINE_string("model_name", None, "Specific model name to dump.")
 flags.DEFINE_string("topology", None, "Specific topology to dump.")
 flags.DEFINE_string("num_slice", None, "Specific number of slices to dump.")
+flags.DEFINE_string("custom_mesh_and_rule", None, "Specific custom_mesh_and_rule to dump.")
 
 
-def run_single_dump(model_name: str, topology: str, num_slice: str) -> None:
-  """Generate sharding json file for one specific model, topology and slice."""
-  subprocess.run(
-      [
-          "python3",
-          "-m",
-          "tests.utils.sharding_dump",
-          get_test_config_path(),
-          f"compile_topology={topology}",
-          f"compile_topology_num_slices={num_slice}",
-          f"model_name={model_name}",
-          "weight_dtype=float32",
-          "log_config=false",
-          "debug_sharding=true",
-      ],
-      check=True,
-  )
+def run_single_dump(model_name: str, topology: str, num_slice: str, custom_mesh_and_rule: str, overrides: tuple) -> None:
+  """Generate sharding json file for one specific model, topology, slice and rule."""
+  args = [
+      "python3",
+      "-m",
+      "tests.utils.sharding_dump",
+      get_test_config_path(),
+      f"compile_topology={topology}",
+      f"compile_topology_num_slices={num_slice}",
+      f"model_name={model_name}",
+      "weight_dtype=float32",
+      "log_config=false",
+      "debug_sharding=true",
+  ]
+  if custom_mesh_and_rule:
+    args.append(f"custom_mesh_and_rule={custom_mesh_and_rule}")
+  if overrides:
+    args.extend(overrides)
+  subprocess.run(args, check=True)
 
 
 def main(argv: Sequence[str]) -> None:
-  """Generate json files for every combination of model, topology and slices."""
+  """Generate json files for every combination of model, topology, slices and rule."""
   if FLAGS.model_name and FLAGS.topology and FLAGS.num_slice:
-    cases_to_run = [(FLAGS.model_name, FLAGS.topology, FLAGS.num_slice)]
+    cmr = FLAGS.custom_mesh_and_rule if FLAGS.custom_mesh_and_rule is not None else ""
+    # We do not natively support overrides via CLI FLAGS. To test explicit cases,
+    # rely on the predefined TEST_CASES.
+    cases_to_run = [(FLAGS.model_name, FLAGS.topology, FLAGS.num_slice, cmr, ())]
     print(
         "Running specific case from command line: "
-        f"Model={FLAGS.model_name}, Topology={FLAGS.topology}, NumSlice={FLAGS.num_slice}"
+        f"Model={FLAGS.model_name}, Topology={FLAGS.topology}, NumSlice={FLAGS.num_slice}, Rule={cmr}"
     )
-  elif FLAGS.model_name or FLAGS.topology or FLAGS.num_slice:
+  elif FLAGS.model_name or FLAGS.topology or FLAGS.num_slice or FLAGS.custom_mesh_and_rule:
     print("Error: To specify a single test case, --model_name, --topology, and --num_slice must all be provided.")
     return
   else:
@@ -95,10 +101,15 @@ def main(argv: Sequence[str]) -> None:
     print(f"Running all {len(TEST_CASES)} predefined test cases.")
 
   total = len(cases_to_run)
-  for i, (model_name, topology, num_slice) in enumerate(cases_to_run):
-    print(f"\n[{i+1}/{total}] Processing: {model_name} | {topology} | Slice {num_slice}")
+  for i, (model_name, topology, num_slice, custom_mesh_and_rule, overrides) in enumerate(cases_to_run):
+    rule_name = f"rule_{custom_mesh_and_rule}" if custom_mesh_and_rule else "rule_default"
+    if overrides:
+      rule_name += "_" + "_".join(overrides)
+    print(f"\n[{i+1}/{total}] Processing: {model_name} | {topology} | Slice {num_slice} | Rule {rule_name}")
 
-    base_path = Path(f"{MAXTEXT_REPO_ROOT}/tests/utils/sharding_info/{model_name}/" f"{topology}/slice_{num_slice}/")
+    base_path = Path(
+        f"{MAXTEXT_REPO_ROOT}/tests/utils/sharding_info/{model_name}/" f"{topology}/slice_{num_slice}/{rule_name}/"
+    )
     json_path_named = base_path / "named_shardings.json"
     json_path_logical = base_path / "logical_shardings.json"
 
@@ -106,9 +117,9 @@ def main(argv: Sequence[str]) -> None:
       print("  -> Sharding files already exist. Regenerating to overwrite.")
 
     try:
-      run_single_dump(model_name, topology, str(num_slice))
+      run_single_dump(model_name, topology, str(num_slice), custom_mesh_and_rule, overrides)
     except subprocess.CalledProcessError:
-      print(f"!!! FAILED: {model_name} {topology} {num_slice}")
+      print(f"!!! FAILED: {model_name} {topology} {num_slice} {custom_mesh_and_rule} overrides={overrides}")
 
 
 if __name__ == "__main__":

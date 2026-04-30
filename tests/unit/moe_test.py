@@ -20,6 +20,7 @@ import flax.linen as nn
 from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax.sharding import Mesh
 from maxtext.configs import pyconfig
 from maxtext.common.common_types import Config, DType
@@ -218,6 +219,8 @@ class DeepSeekRoutingTest(unittest.TestCase):
         num_experts=16,
         num_experts_per_tok=4,
         sparse_matmul=True,
+        base_moe_mlp_dim=1024,
+        base_mlp_dim=1024,
         **extra_args,
     )
     self.rngs = nnx.Rngs(params=0)
@@ -341,15 +344,13 @@ class MoeLoopBlock(nnx.Module):
     weights, selected_experts = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
     weights = jax.nn.softmax(weights.astype(jnp.float32), axis=-1).astype(self.weight_dtype)
     mlp_lnx = jnp.zeros_like(inputs)
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_length_no_exp", "activation_embed"))
+    mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_length", "activation_embed"))
 
     for k in range(self.num_experts):
       weights_exp = jnp.sum(jnp.multiply(selected_experts == k, weights), axis=-1)
       getattr(self, f"mlp_{k}")
       mlp_lnx_exp = getattr(self, f"mlp_{k}")(inputs, deterministic=deterministic)
-      mlp_lnx_exp = nn.with_logical_constraint(
-          mlp_lnx_exp, ("activation_batch", "activation_length_no_exp", "activation_embed")
-      )
+      mlp_lnx_exp = nn.with_logical_constraint(mlp_lnx_exp, ("activation_batch", "activation_length", "activation_embed"))
       mlp_lnx_exp = weights_exp[:, :, None] * mlp_lnx_exp
       mlp_lnx += mlp_lnx_exp
 
@@ -1064,6 +1065,341 @@ class RoutedMoeTest(unittest.TestCase):
       self.assertTrue(
           jnp.array_equal(recv_sz, exp_recv_sz), f"Unsharded Batch: Receive sizes mismatch for shard {expert_shard_id}"
       )
+
+  def test_ragged_buffer_balanced(self):
+    ragged_buffer_factor = 1.0
+    local_batch = 32768
+    ep_degree = 4  # unused for ragged_factor>0
+    num_experts_per_tok = 8  # unused for ragged_factor>0
+    global_experts = 256  # unused for ragged_factor>0
+
+    expected_ragged_buffer = 32768
+    actual_ragged_buffer = moe.RoutedMoE.get_ragged_buffer_size(
+        local_batch, ep_degree, global_experts, num_experts_per_tok, ragged_buffer_factor
+    )
+    self.assertEqual(expected_ragged_buffer, actual_ragged_buffer)
+
+  def test_ragged_buffer_larger(self):
+    ragged_buffer_factor = 2.0
+    local_batch = 32768
+    ep_degree = 4  # unused for ragged_factor>0
+    num_experts_per_tok = 8  # unused for ragged_factor>0
+    global_experts = 256  # unused for ragged_factor>0
+
+    expected_ragged_buffer = 65536
+    actual_ragged_buffer = moe.RoutedMoE.get_ragged_buffer_size(
+        local_batch, ep_degree, global_experts, num_experts_per_tok, ragged_buffer_factor
+    )
+    self.assertEqual(expected_ragged_buffer, actual_ragged_buffer)
+
+  def test_small_ep_worst_case(self):
+    ragged_buffer_factor = -1.0  # Not using ragged_buffer_factor
+    local_batch = 32768
+    num_experts_per_tok = 8
+    global_experts = 256
+    ep_degree = 4
+
+    expected_ragged_buffer = 131072  # local_batch * ep_degree
+    actual_ragged_buffer = moe.RoutedMoE.get_ragged_buffer_size(
+        local_batch, ep_degree, global_experts, num_experts_per_tok, ragged_buffer_factor
+    )
+    self.assertEqual(expected_ragged_buffer, actual_ragged_buffer)
+
+  def test_large_ep_worst_case(self):
+    ragged_buffer_factor = -1.0  # Not using ragged_buffer_factor
+    local_batch = 32768
+    num_experts_per_tok = 8
+    global_experts = 256
+    ep_degree = 128
+
+    expected_ragged_buffer = 1048576  # (32768) * (global_exp / top_k)
+    actual_ragged_buffer = moe.RoutedMoE.get_ragged_buffer_size(
+        local_batch, ep_degree, global_experts, num_experts_per_tok, ragged_buffer_factor
+    )
+    self.assertEqual(expected_ragged_buffer, actual_ragged_buffer)
+
+
+def make_moe(cfg, mesh):
+  return moe.RoutedMoE(
+      config=cfg,
+      num_experts=cfg.num_experts,
+      num_experts_per_tok=cfg.num_experts_per_tok,
+      mesh=mesh,
+      kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+      kernel_axes=("embed", "mlp"),
+      dtype=cfg.dtype,
+      rngs=nnx.Rngs(params=0),
+  )
+
+
+def copy_weights(src_model, dst_model):
+  """Copy wi_0, wi_1, wo, and gate weights from src to dst."""
+  dst_model.wi_0 = src_model.wi_0
+  dst_model.wi_1 = src_model.wi_1
+  dst_model.wo = src_model.wo
+  dst_model.gate = src_model.gate
+
+
+def copy_weights_prefused(src_model, dst_model):
+  """Copy weights from a split-weight model into a prefuse_moe_weights=True model.
+
+  Concatenates src wi_0 and wi_1 along the last axis to produce the fused wi.
+  """
+  wi_fused = jnp.concatenate([src_model.wi_0[...], src_model.wi_1[...]], axis=-1)
+  dst_model.wi = nnx.Param(wi_fused)
+  dst_model.wo = src_model.wo
+  dst_model.gate = src_model.gate
+
+
+@pytest.mark.tpu_only
+@pytest.mark.post_training
+class FusedMoeTPUTest(unittest.TestCase):
+  """Tests for fused_moe_matmul (vllm_rpa path) in RoutedMoE."""
+
+  def __init__(self, *args, **kwargs):
+    super().__init__(*args, **kwargs)
+    self._B = 1  # per-device batch size
+    self._S = 16  # sequence length
+
+  def setUp(self):
+    super().setUp()
+    self.rng = jax.random.PRNGKey(42)
+
+    # Dense reference config (no vllm, einsum-based)
+    extra_args = get_decoupled_parallelism_overrides()
+    self.dense_cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="fused_moe_dense_ref",
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        dtype="bfloat16",
+        sparse_matmul=False,
+        megablox=False,
+        ici_expert_parallelism=jax.device_count(),
+        log_config=False,
+        max_target_length=self._S,
+        per_device_batch_size=self._B,
+        **extra_args,
+    )
+    dense_devices = maxtext_utils.create_device_mesh(self.dense_cfg)
+    self.dense_mesh = Mesh(dense_devices, self.dense_cfg.mesh_axes)
+    self.dense_model = make_moe(self.dense_cfg, self.dense_mesh)
+
+    # vllm_rpa fused config
+    self.fused_cfg = pyconfig.initialize(
+        [None, get_test_config_path("inference/vllm.yml")],
+        run_name="fused_moe_vllm",
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        dtype="bfloat16",
+        ici_expert_parallelism=jax.device_count(),
+        log_config=False,
+        max_target_length=self._S,
+        per_device_batch_size=self._B,
+    )
+    fused_devices = maxtext_utils.create_device_mesh(self.fused_cfg)
+    self.fused_mesh = Mesh(fused_devices, self.fused_cfg.mesh_axes)
+    self.fused_model = make_moe(self.fused_cfg, self.fused_mesh)
+    copy_weights(self.dense_model, self.fused_model)
+
+  def _inputs(self):
+    return jax.random.normal(self.rng, (self._B, self._S, self.dense_cfg.base_emb_dim), dtype=jnp.bfloat16)
+
+  def test_fused_vs_dense_softmax(self):
+    """fused_moe_matmul agrees with dense_matmul under softmax routing."""
+    inputs = self._inputs()
+
+    dense_out, _, _ = self.dense_model(inputs)
+    fused_out, lb_loss, bias_updates = self.fused_model(inputs)
+
+    np.testing.assert_allclose(
+        np.array(dense_out, dtype=np.float32),
+        np.array(fused_out, dtype=np.float32),
+        rtol=1e-2,
+        atol=1e-2,
+    )
+    self.assertIsNone(lb_loss)
+    self.assertIsNone(bias_updates)
+
+  def test_fused_vs_sparse_softmax(self):
+    """fused_moe_matmul agrees with sparse_matmul (Megablox) under softmax routing."""
+    extra_args = get_decoupled_parallelism_overrides()
+    sparse_cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="fused_moe_sparse_ref",
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        dtype="bfloat16",
+        sparse_matmul=True,
+        megablox=True,
+        ici_expert_parallelism=jax.device_count(),
+        log_config=False,
+        max_target_length=self._S,
+        per_device_batch_size=self._B,
+        **extra_args,
+    )
+    sparse_devices = maxtext_utils.create_device_mesh(sparse_cfg)
+    sparse_mesh = Mesh(sparse_devices, sparse_cfg.mesh_axes)
+    sparse_model = make_moe(sparse_cfg, sparse_mesh)
+    copy_weights(self.dense_model, sparse_model)
+
+    inputs = self._inputs()
+    sparse_out, _, _ = sparse_model(inputs)
+    fused_out, lb_loss, bias_updates = self.fused_model(inputs)
+
+    np.testing.assert_allclose(
+        np.array(sparse_out, dtype=np.float32),
+        np.array(fused_out, dtype=np.float32),
+        rtol=1e-2,
+        atol=1e-2,
+    )
+    self.assertIsNone(lb_loss)
+    self.assertIsNone(bias_updates)
+
+  def test_fused_output_shape_and_dtype(self):
+    """Output shape is (B, S, D), dtype matches cfg.dtype, and losses are None."""
+    inputs = self._inputs()
+    fused_out, lb_loss, bias_updates = self.fused_model(inputs)
+
+    expected_shape = (self._B, self._S, self.fused_cfg.base_emb_dim)
+    self.assertEqual(fused_out.shape, expected_shape)
+    self.assertEqual(fused_out.dtype, self.fused_cfg.dtype)
+    self.assertIsNone(lb_loss)
+    self.assertIsNone(bias_updates)
+
+  def test_fused_vs_dense_renormalize(self):
+    """fused_moe_matmul agrees with dense_matmul when norm_topk_prob=True."""
+    extra_args = get_decoupled_parallelism_overrides()
+    dense_renorm_cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="fused_moe_dense_renorm",
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        dtype="bfloat16",
+        sparse_matmul=False,
+        megablox=False,
+        ici_expert_parallelism=jax.device_count(),
+        log_config=False,
+        norm_topk_prob=True,
+        max_target_length=self._S,
+        per_device_batch_size=self._B,
+        **extra_args,
+    )
+    dense_renorm_devices = maxtext_utils.create_device_mesh(dense_renorm_cfg)
+    dense_renorm_mesh = Mesh(dense_renorm_devices, dense_renorm_cfg.mesh_axes)
+    dense_renorm_model = make_moe(dense_renorm_cfg, dense_renorm_mesh)
+
+    fused_renorm_cfg = pyconfig.initialize(
+        [None, get_test_config_path("inference/vllm.yml")],
+        run_name="fused_moe_vllm_renorm",
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        dtype="bfloat16",
+        norm_topk_prob=True,
+        ici_expert_parallelism=jax.device_count(),
+        log_config=False,
+        max_target_length=self._S,
+        per_device_batch_size=self._B,
+    )
+    fused_renorm_devices = maxtext_utils.create_device_mesh(fused_renorm_cfg)
+    fused_renorm_mesh = Mesh(fused_renorm_devices, fused_renorm_cfg.mesh_axes)
+    fused_renorm_model = make_moe(fused_renorm_cfg, fused_renorm_mesh)
+    copy_weights(dense_renorm_model, fused_renorm_model)
+
+    inputs = self._inputs()
+    dense_out, _, _ = dense_renorm_model(inputs)
+    fused_out, lb_loss, bias_updates = fused_renorm_model(inputs)
+
+    np.testing.assert_allclose(
+        np.array(dense_out, dtype=np.float32),
+        np.array(fused_out, dtype=np.float32),
+        rtol=1e-2,
+        atol=1e-2,
+    )
+    self.assertIsNone(lb_loss)
+    self.assertIsNone(bias_updates)
+
+  def test_prefused_vs_dense_softmax(self):
+    """prefuse_moe_weights=True agrees with dense_matmul under softmax routing."""
+    prefused_cfg = pyconfig.initialize(
+        [None, get_test_config_path("inference/vllm.yml")],
+        run_name="fused_moe_vllm_prefused",
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        dtype="bfloat16",
+        ici_expert_parallelism=jax.device_count(),
+        log_config=False,
+        prefuse_moe_weights=True,
+        max_target_length=self._S,
+        per_device_batch_size=self._B,
+    )
+    prefused_devices = maxtext_utils.create_device_mesh(prefused_cfg)
+    prefused_mesh = Mesh(prefused_devices, prefused_cfg.mesh_axes)
+    prefused_model = make_moe(prefused_cfg, prefused_mesh)
+    copy_weights_prefused(self.dense_model, prefused_model)
+
+    inputs = self._inputs()
+    dense_out, _, _ = self.dense_model(inputs)
+    prefused_out, lb_loss, bias_updates = prefused_model(inputs)
+
+    np.testing.assert_allclose(
+        np.array(dense_out, dtype=np.float32),
+        np.array(prefused_out, dtype=np.float32),
+        rtol=1e-2,
+        atol=1e-2,
+    )
+    self.assertIsNone(lb_loss)
+    self.assertIsNone(bias_updates)
+
+  def test_prefused_vs_sparse_softmax(self):
+    """prefuse_moe_weights=True agrees with sparse_matmul (Megablox) under softmax routing."""
+    extra_args = get_decoupled_parallelism_overrides()
+    sparse_cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="fused_moe_sparse_ref2",
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        dtype="bfloat16",
+        sparse_matmul=True,
+        megablox=True,
+        ici_expert_parallelism=jax.device_count(),
+        max_target_length=self._S,
+        per_device_batch_size=self._B,
+        **extra_args,
+    )
+    sparse_devices = maxtext_utils.create_device_mesh(sparse_cfg)
+    sparse_mesh = Mesh(sparse_devices, sparse_cfg.mesh_axes)
+    sparse_model = make_moe(sparse_cfg, sparse_mesh)
+    copy_weights(self.dense_model, sparse_model)
+
+    prefused_cfg = pyconfig.initialize(
+        [None, get_test_config_path("inference/vllm.yml")],
+        run_name="fused_moe_vllm_prefused2",
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        dtype="bfloat16",
+        ici_expert_parallelism=jax.device_count(),
+        prefuse_moe_weights=True,
+        max_target_length=self._S,
+        per_device_batch_size=self._B,
+    )
+    prefused_devices = maxtext_utils.create_device_mesh(prefused_cfg)
+    prefused_mesh = Mesh(prefused_devices, prefused_cfg.mesh_axes)
+    prefused_model = make_moe(prefused_cfg, prefused_mesh)
+    copy_weights_prefused(self.dense_model, prefused_model)
+
+    inputs = self._inputs()
+    sparse_out, _, _ = sparse_model(inputs)
+    prefused_out, lb_loss, bias_updates = prefused_model(inputs)
+
+    np.testing.assert_allclose(
+        np.array(sparse_out, dtype=np.float32),
+        np.array(prefused_out, dtype=np.float32),
+        rtol=1e-2,
+        atol=1e-2,
+    )
+    self.assertIsNone(lb_loss)
+    self.assertIsNone(bias_updates)
 
 
 if __name__ == "__main__":

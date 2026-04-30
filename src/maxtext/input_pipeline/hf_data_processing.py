@@ -26,9 +26,11 @@ import grain.python as grain
 
 import numpy as np
 
+from maxtext.input_pipeline import data_processing_utils
 from maxtext.input_pipeline import input_pipeline_utils
 from maxtext.input_pipeline import instruction_data_processing
 from maxtext.input_pipeline import multihost_dataloading
+from maxtext.utils import elastic_utils
 
 
 def _get_pad_id(tokenizer):
@@ -56,10 +58,14 @@ def vision_sft_preprocessing_pipeline(
   assert len(text_columns) == 2, f"Need two text_columns for query and response, received {text_columns=}"
   # Tunix GA requires per-micro-batch slicing at the data level,
   # whereas Native GA processes the full batch and splits it internally.
-  if config.use_tunix_gradient_accumulation:
-    batch_size = global_batch_size // jax.process_count() // config.gradient_accumulation_steps
+  if config.elastic_enabled:
+    local_batch_size = elastic_utils.get_local_batch_size(config)
   else:
-    batch_size = global_batch_size // jax.process_count()
+    local_batch_size = global_batch_size // jax.process_count()
+  if config.use_tunix_gradient_accumulation:
+    batch_size = local_batch_size // config.gradient_accumulation_steps
+  else:
+    batch_size = local_batch_size
 
   # for multi-epoch with shuffle, shuffle each epoch with different seeds then concat
   import datasets  # pylint: disable=import-outside-toplevel
@@ -145,7 +151,7 @@ def vision_sft_preprocessing_pipeline(
           query_column=text_columns[0],
           response_column=text_columns[1],
           max_target_length=config.max_target_length,
-          unk_id=pad_id,
+          pad_id=pad_id,
       )
   )
   # TODO(aireenmei, hengtaoguo): support packing
@@ -153,7 +159,7 @@ def vision_sft_preprocessing_pipeline(
       input_pipeline_utils.PadOrTrimToMaxLength(
           config.max_target_length,
           pad_id,
-          model_name=config.model_name,
+          config=config,
           max_num_images_per_example=config.max_num_images_per_example,
       )
   )
@@ -191,6 +197,7 @@ def preprocessing_pipeline(
     dataloading_host_count,
     global_mesh,
     dataset,
+    config,
     data_column_names,
     tokenize,
     tokenizer_path,
@@ -216,6 +223,8 @@ def preprocessing_pipeline(
     max_segments_per_seq=None,
     num_epoch=1,
     chat_template: Optional[str] = None,
+    formatting_func_path: Optional[str] = None,
+    formatting_func_kwargs: Optional[dict] = None,
 ):
   """pipeline for preprocessing HF dataset"""
   import datasets  # pylint: disable=import-outside-toplevel
@@ -223,10 +232,14 @@ def preprocessing_pipeline(
   assert global_batch_size % global_mesh.size == 0, "Batch size should be divisible by number of global devices."
   # Tunix GA requires per-micro-batch slicing at the data level,
   # whereas Native GA processes the full batch and splits it internally.
-  if use_tunix_gradient_accumulation:
-    batch_size = global_batch_size // jax.process_count() // num_microbatches
+  if config.elastic_enabled:
+    local_batch_size = elastic_utils.get_local_batch_size(config)
   else:
-    batch_size = global_batch_size // jax.process_count()
+    local_batch_size = global_batch_size // jax.process_count()
+  if use_tunix_gradient_accumulation:
+    batch_size = local_batch_size // num_microbatches
+  else:
+    batch_size = local_batch_size
 
   # for multi-epoch with shuffle, shuffle each epoch with different seeds then concat
   if shuffle and num_epoch > 1:
@@ -248,19 +261,19 @@ def preprocessing_pipeline(
   dataset = dataset.select_columns(data_column_names)
 
   if use_sft:
-    if chat_template:
-      tokenizer.chat_template = chat_template
+    if not chat_template:
+      chat_template = instruction_data_processing.load_chat_template_from_file(chat_template_path)
 
-    supported_columns = [["prompt", "completion"], ["messages"], ["question", "answer"]]
-    assert any(
-        set(data_column_names) == set(supported) for supported in supported_columns
-    ), f"Dataset column names mismatch. Expected columns to match one of {supported_columns}, but got {data_column_names}"
+    data_processing_utils.validate_and_configure_sft_columns(data_column_names, tokenizer, chat_template)
 
     # convert instruction dataset to conversational format
-    # currently only works for Q&A datasets
     dataset, data_column_names = instruction_data_processing.convert_to_conversational_format(
-        dataset=dataset, data_columns=data_column_names, chat_template_path=chat_template_path
+        dataset=dataset,
+        data_columns=data_column_names,
+        formatting_func_path=formatting_func_path,
+        formatting_func_kwargs=formatting_func_kwargs,
     )
+
     assert input_pipeline_utils.is_conversational(
         dataset.features, data_column_names
     ), "Dataset is not in conversational format."
@@ -307,6 +320,7 @@ def preprocessing_pipeline(
   )
   operations = []
   if use_sft:
+    input_pipeline_utils.verify_chat_template_generation_prompt_logic(tokenizer)
     operations.append(
         input_pipeline_utils.SFTPromptMasking(
             text_column_name=data_column_names[0],
@@ -410,6 +424,7 @@ def make_hf_train_iterator(
         dataloading_host_count=len(process_indices_train),
         global_mesh=global_mesh,
         dataset=train_ds,
+        config=config,
         data_column_names=config.train_data_columns,
         tokenize=config.tokenize_train_data,
         tokenizer_path=config.tokenizer_path,
@@ -431,6 +446,8 @@ def make_hf_train_iterator(
         max_segments_per_seq=config.max_segments_per_seq,
         num_epoch=config.num_epoch,
         chat_template=config.chat_template,
+        formatting_func_path=config.formatting_func_path,
+        formatting_func_kwargs=config.formatting_func_kwargs,
     )
   return train_iter
 
@@ -469,6 +486,7 @@ def make_hf_eval_iterator(
         dataloading_host_count=len(process_indices_eval),
         global_mesh=global_mesh,
         dataset=eval_ds,
+        config=config,
         data_column_names=config.eval_data_columns,
         tokenize=config.tokenize_eval_data,
         tokenizer_path=config.tokenizer_path,
@@ -488,5 +506,7 @@ def make_hf_eval_iterator(
         chat_template_path=config.chat_template_path,
         max_segments_per_seq=config.max_segments_per_seq,
         chat_template=config.chat_template,
+        formatting_func_path=config.formatting_func_path,
+        formatting_func_kwargs=config.formatting_func_kwargs,
     )
   return eval_iter
