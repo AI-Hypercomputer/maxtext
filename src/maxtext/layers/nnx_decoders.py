@@ -1195,10 +1195,6 @@ class NNXDecoder(nnx.Module):
           )
           # kv_caches list is updated in-place inside _apply_layers_sequentially
         else:
-          if not hasattr(self.layers, "_qwix_initialized"):
-            self.layers._qwix_initialized = True
-            # We must evaluate it outside scan to attach Qwix nodes dynamically.
-            self.layers(y, *layer_args, **layer_kwargs)
           y, self.layers, _ = self._apply_layers_sequentially(
               self.layers, y, *layer_args, length=scan_length, **layer_kwargs
           )
