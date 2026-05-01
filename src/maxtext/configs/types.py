@@ -2212,6 +2212,12 @@ class MaxTextConfig(
     if self.use_ring_of_experts:
       raise ValueError("Currently we only support ragged buffer factor with ragged a2a approach.")
 
+  def validate_ragged_sort(self):
+    if not self.use_ragged_sort:
+      return
+    if not self.use_ring_of_experts:
+      raise ValueError("Ragged sorting kernels only work when use_ring_of_experts=True.")
+
   @model_validator(mode="after")
   def set_derived_and_validate_values(self) -> "MaxTextConfig":
     """
@@ -2757,6 +2763,7 @@ class MaxTextConfig(
       if self.routed_bias and self.routed_bias_update_rate > 0.0 and self.decoder_block != DecoderBlockType.DEEPSEEK:
         raise ValueError("Loss-free load balancing is only supported for the DeepSeek decoder block.")
       self.validate_ragged_buffer_factor()
+      self.validate_ragged_sort()
     if self.use_multimodal:
       valid_mm_models = (
           "gemma3-4b",
