@@ -614,11 +614,14 @@ class RoutedMoeTest(unittest.TestCase):
     """
 
     def _build_cfg(use_ragged_sort: bool):
+      # Use deepseek3-test (num_experts_per_tok=8) because gather_reduce_sc
+      # hard-codes reduce_group_size=8 (row_chunk_size==vreg_size==16, with the
+      # inner reduction loop unrolled for 8).
       return pyconfig.initialize(
           [None, get_test_config_path()],
           run_name=f"moe_block_use_ragged_sort_{use_ragged_sort}_test",
           enable_checkpointing=False,
-          model_name="mixtral-8x7b",
+          model_name="deepseek3-test",
           dtype="bfloat16",
           megablox=True,
           sparse_matmul=True,
@@ -651,7 +654,7 @@ class RoutedMoeTest(unittest.TestCase):
           loss = loss + lb_loss.astype(jnp.float32)
         return loss
 
-      return jax.jit(jax.value_and_grad(loss_fn))(variables["params"], hidden_states)
+      return jax.jit(jax.value_and_grad(loss_fn, argnums=(0, 1)))(variables["params"], hidden_states)
 
     rng = jax.random.PRNGKey(2345)
     rng_model, rng_hidden_states = jax.random.split(rng)
@@ -669,7 +672,7 @@ class RoutedMoeTest(unittest.TestCase):
     model_ref = _build_model(cfg_ref, mesh_ref)
     with nn_partitioning.axis_rules(cfg_ref.logical_axis_rules):
       variables = model_ref.init({"params": rng_model, "dropout": rng_model}, hidden_states)
-      loss_ref, grads_ref = _loss_and_grad(model_ref, variables, hidden_states)
+      loss_ref, (grads_ref, x_grad_ref) = _loss_and_grad(model_ref, variables, hidden_states)
 
     # Target run: use_ragged_sort=True, sharing variables with the reference.
     cfg_rs = _build_cfg(use_ragged_sort=True)
@@ -677,12 +680,24 @@ class RoutedMoeTest(unittest.TestCase):
     mesh_rs = Mesh(devices_array_rs, cfg_rs.mesh_axes)
     model_rs = _build_model(cfg_rs, mesh_rs)
     with nn_partitioning.axis_rules(cfg_rs.logical_axis_rules):
-      loss_rs, grads_rs = _loss_and_grad(model_rs, variables, hidden_states)
+      loss_rs, (grads_rs, x_grad_rs) = _loss_and_grad(model_rs, variables, hidden_states)
 
     # Loss correctness.
     self.assertTrue(
         jnp.allclose(loss_rs, loss_ref, rtol=1e-2, atol=1e-2),
         msg=f"Loss mismatch: ragged={loss_rs} ref={loss_ref}",
+    )
+
+    # Hidden-state gradient correctness. This is the cotangent that flows
+    # through `gather_tokens_locally`'s custom_vjp backward (the kernel under
+    # test). Without checking this, DCE removes the bwd entirely.
+    self.assertEqual(x_grad_ref.shape, x_grad_rs.shape, "Hidden-state grad shape mismatch")
+    self.assertTrue(
+        jnp.allclose(x_grad_rs.astype(jnp.float32), x_grad_ref.astype(jnp.float32), rtol=1e-2, atol=1e-2),
+        msg=(
+            "Hidden-state gradient mismatch: max abs diff="
+            f"{jnp.max(jnp.abs(x_grad_rs.astype(jnp.float32) - x_grad_ref.astype(jnp.float32)))}"
+        ),
     )
 
     # Gradient correctness across the full pytree.

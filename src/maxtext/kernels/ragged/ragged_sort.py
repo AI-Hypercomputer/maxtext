@@ -16,7 +16,7 @@
 
 import jax
 import jax.numpy as jnp
-from maxtext.kernels.gather_reduce_pallas import sc_gather_reduce
+from maxtext.kernels.gather_reduce_sc import sc_gather_reduce
 from maxtext.kernels.ragged.ragged_gather import ragged_gather
 from maxtext.kernels.ragged.ragged_scatter import ragged_scatter
 
