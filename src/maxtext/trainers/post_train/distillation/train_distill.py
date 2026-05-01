@@ -217,7 +217,7 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
       optimizer,
       training_config,
       student_config: pyconfig.HyperParameters,
-      teacher_config: pyconfig.HyperParameters | None,
+      teacher_config: pyconfig.HyperParameters | None = None,
       is_offline: bool = False,
       student_freeze_param_filter: Callable[[Any], bool] | None = None,
       **kwargs,
@@ -345,7 +345,7 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
 
   def _log_metrics(self, loss, step=None, step_time_delta=None, additional_metrics=None):
     """Adds per-device TFLOPs (and per-sec variants) to the standard Tunix metrics."""
-    super()._log_metrics(loss=loss, step=step, step_time_delta=step_time_delta, additional_metrics=additional_metrics)
+    super()._log_metrics(loss=loss, step=step, additional_metrics=additional_metrics)
 
     tflops_metrics = {
         "perf/per_device_tflops": self._tflops_combined,
