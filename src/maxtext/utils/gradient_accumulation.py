@@ -68,7 +68,7 @@ def gradient_accumulation_loss_and_grad(
     return maybe_shard_with_name(inputs, sharding_names, config.shard_mode, debug_sharding=config.debug_sharding)
 
   # For more efficient DP/ZeRO-1 + GA
-  if config.shard_mode == ShardMode.EXPLICIT and config.ici_data_parallelism > 1:
+  if config.shard_mode == ShardMode.EXPLICIT and model.mesh.shape.get("data", 1) > 1:
     ga_params_shardings = jax.tree.map(update_sharding_for_reduced, params_shardings)
     grad_shardings = jax.tree.map(update_sharding_for_unreduced, params_shardings)
   else:
