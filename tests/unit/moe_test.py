@@ -604,7 +604,104 @@ class RoutedMoeTest(unittest.TestCase):
       self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
 
   @pytest.mark.tpu_only
+  def test_ragged_sort_loss_and_grad(self):
+    """Loss and gradient correctness for the use_ragged_sort flag.
+
+    Compares an EP+ring-of-experts run with use_ragged_sort=True against the
+    same configuration with use_ragged_sort=False, sharing the same model
+    variables and inputs. Both the scalar loss and the full pytree of
+    parameter gradients must match within bf16 tolerance.
+    """
+
+    def _build_cfg(use_ragged_sort: bool):
+      return pyconfig.initialize(
+          [None, get_test_config_path()],
+          run_name=f"moe_block_use_ragged_sort_{use_ragged_sort}_test",
+          enable_checkpointing=False,
+          model_name="mixtral-8x7b",
+          dtype="bfloat16",
+          megablox=True,
+          sparse_matmul=True,
+          per_device_batch_size=4,  # TODO(b/450900273): sharding error if pdbs=1
+          ici_expert_parallelism=2,
+          use_ring_of_experts=True,
+          ici_tensor_parallelism=2,
+          max_target_length=128,
+          use_ragged_sort=use_ragged_sort,
+      )
+
+    def _build_model(cfg, mesh):
+      return moe.get_routed_moe(
+          name="MoeBlock",
+          config=cfg,
+          num_experts=cfg.num_experts,
+          num_experts_per_tok=cfg.num_experts_per_tok,
+          mesh=mesh,
+          kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+          kernel_axes=("embed", "mlp"),
+          intermediate_dim=cfg.mlp_dim,
+          dtype=cfg.dtype,
+      )
+
+    def _loss_and_grad(model, variables, hidden_states):
+      def loss_fn(params, x):
+        out, lb_loss, _ = model.apply({"params": params}, x)
+        loss = jnp.mean(out.astype(jnp.float32) ** 2)
+        if lb_loss is not None:
+          loss = loss + lb_loss.astype(jnp.float32)
+        return loss
+
+      return jax.jit(jax.value_and_grad(loss_fn))(variables["params"], hidden_states)
+
+    rng = jax.random.PRNGKey(2345)
+    rng_model, rng_hidden_states = jax.random.split(rng)
+    device_count = jax.device_count()
+
+    # Reference run: use_ragged_sort=False.
+    cfg_ref = _build_cfg(use_ragged_sort=False)
+    hidden_states = jax.random.uniform(
+        rng_hidden_states,
+        (int(cfg_ref.per_device_batch_size) * device_count, cfg_ref.max_target_length, cfg_ref.base_emb_dim),
+        dtype=cfg_ref.dtype,
+    )
+    devices_array_ref = maxtext_utils.create_device_mesh(cfg_ref)
+    mesh_ref = Mesh(devices_array_ref, cfg_ref.mesh_axes)
+    model_ref = _build_model(cfg_ref, mesh_ref)
+    with nn_partitioning.axis_rules(cfg_ref.logical_axis_rules):
+      variables = model_ref.init({"params": rng_model, "dropout": rng_model}, hidden_states)
+      loss_ref, grads_ref = _loss_and_grad(model_ref, variables, hidden_states)
+
+    # Target run: use_ragged_sort=True, sharing variables with the reference.
+    cfg_rs = _build_cfg(use_ragged_sort=True)
+    devices_array_rs = maxtext_utils.create_device_mesh(cfg_rs)
+    mesh_rs = Mesh(devices_array_rs, cfg_rs.mesh_axes)
+    model_rs = _build_model(cfg_rs, mesh_rs)
+    with nn_partitioning.axis_rules(cfg_rs.logical_axis_rules):
+      loss_rs, grads_rs = _loss_and_grad(model_rs, variables, hidden_states)
+
+    # Loss correctness.
+    self.assertTrue(
+        jnp.allclose(loss_rs, loss_ref, rtol=1e-2, atol=1e-2),
+        msg=f"Loss mismatch: ragged={loss_rs} ref={loss_ref}",
+    )
+
+    # Gradient correctness across the full pytree.
+    leaves_ref, treedef_ref = jax.tree_util.tree_flatten(grads_ref)
+    leaves_rs, treedef_rs = jax.tree_util.tree_flatten(grads_rs)
+    self.assertEqual(treedef_ref, treedef_rs, "Gradient pytree structures differ")
+    for i, (g_ref, g_rs) in enumerate(zip(leaves_ref, leaves_rs)):
+      self.assertEqual(g_ref.shape, g_rs.shape, f"Grad shape mismatch at leaf {i}")
+      self.assertTrue(
+          jnp.allclose(g_rs.astype(jnp.float32), g_ref.astype(jnp.float32), rtol=1e-2, atol=1e-2),
+          msg=(
+              f"Gradient mismatch at leaf {i} (shape={g_ref.shape}): "
+              f"max abs diff={jnp.max(jnp.abs(g_rs.astype(jnp.float32) - g_ref.astype(jnp.float32)))}"
+          ),
+      )
+
+  @pytest.mark.tpu_only
   def test_moe_fsdp_two_stage_parallelism_tpu_only(self):
+
     cfg = pyconfig.initialize(
         [None, get_test_config_path()],
         run_name="moe_block_megablox_ep_test",
