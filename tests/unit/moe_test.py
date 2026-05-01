@@ -622,6 +622,8 @@ class RoutedMoeTest(unittest.TestCase):
           run_name=f"moe_block_use_ragged_sort_{use_ragged_sort}_test",
           enable_checkpointing=False,
           model_name="deepseek3-test",
+          override_model_config=True,
+          base_num_decoder_layers=4,
           dtype="bfloat16",
           megablox=True,
           sparse_matmul=True,
