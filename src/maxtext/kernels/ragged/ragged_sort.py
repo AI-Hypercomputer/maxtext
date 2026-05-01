@@ -16,9 +16,9 @@
 
 import jax
 import jax.numpy as jnp
+from maxtext.kernels.gather_reduce_pallas import sc_gather_reduce
 from maxtext.kernels.ragged.ragged_gather import ragged_gather
 from maxtext.kernels.ragged.ragged_scatter import ragged_scatter
-from maxtext.kernels.ragged.ragged_scatter_add import ragged_scatter_add
 
 
 def gather_tokens_locally(hidden_states_local, topk_indices_local, num_experts, topk, ep_name, ep_size):
@@ -66,7 +66,7 @@ def gather_tokens_locally(hidden_states_local, topk_indices_local, num_experts, 
     out = (x, group_sizes_local, topk_argsort_revert_indices)
 
     res = (
-        token_indices_sorted,
+        topk_argsort_revert_indices,
         shard_output_start,
         shard_output_end,
         hidden_states_local.shape,
@@ -86,14 +86,19 @@ def gather_tokens_locally(hidden_states_local, topk_indices_local, num_experts, 
 
     which is exactly a ragged scatter-add.
     """
-    token_indices_sorted, shard_output_start, shard_output_end, hidden_states_local_shape = res
+    topk_argsort_revert_indices, shard_output_start, shard_output_end, _ = res
     g_x, _, _ = g_out
-    grad_hidden_states = ragged_scatter_add(
-        g_x,
-        token_indices_sorted,
-        shard_output_start,
-        shard_output_end,
-        out_num_rows=hidden_states_local_shape[0],
+    # Restrict to the [start, end) source range: rows outside contribute 0.
+    pos = jnp.arange(g_x.shape[0])
+    valid = (pos >= shard_output_start) & (pos < shard_output_end)
+    g_x_masked = jnp.where(valid[:, None], g_x, jnp.zeros_like(g_x))
+    # The forward scatter-add over `token_indices_sorted` is equivalent to a
+    # gather-reduce: each input token has exactly `topk` contributions located
+    # at sorted positions `topk_argsort_revert_indices[t*topk:(t+1)*topk]`.
+    grad_hidden_states = sc_gather_reduce(
+        g_x_masked,
+        topk_argsort_revert_indices,
+        reduce_group_size=topk,
     )
     return grad_hidden_states, None
 
