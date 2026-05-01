@@ -16,6 +16,7 @@
 
 import warnings
 import functools
+import math
 
 import ml_collections
 
@@ -54,21 +55,33 @@ def get_datasets(
   else:
     read_config = tfds.ReadConfig()
 
-  if ds_builder.info.splits[data_split].num_shards >= dataloading_host_count:
-    read_config.input_context = tf.distribute.InputContext(
-        input_pipeline_id=dataloading_host_index,
-        num_input_pipelines=dataloading_host_count,
-    )
-    ds = ds_builder.as_dataset(split=data_split, read_config=read_config, shuffle_files=shuffle_files)
+  num_shards = ds_builder.info.splits[data_split].num_shards
+  _, _, row_shard = input_pipeline_utils.compute_file_sharding(
+      num_shards, dataloading_host_index, dataloading_host_count
+  )
+  if num_shards >= dataloading_host_count:
+    input_pipeline_id = dataloading_host_index
+    num_input_pipelines = dataloading_host_count
   else:
+    # When `num_shards < dataloading_host_count`, falls back to hybrid sharding: each TFDS
+    # shard is read by a `ceil(host_count/num_shards)` group of hosts, and within that group
+    # hosts split records via `Dataset.shard`. This bounds concurrent readers per shard,
+    # avoiding the thundering-herd I/O pattern of a "every host reads all shards" fallback.
+    input_pipeline_id = dataloading_host_index % num_shards
+    num_input_pipelines = num_shards
     warnings.warn(
-        f"WARNING: Inefficient dataloading. Your {dataset_name} contains {ds_builder.info.splits[data_split].num_shards}"
-        f"shards, smaller than {dataloading_host_count=}. This is known to lead to inefficient dataloading."
-        "see https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md"
-        "#multihost-dataloading-best-practice"
+        f"{dataset_name}: shard count ({num_shards}) < host count ({dataloading_host_count}). "
+        f"Each data shard Will be read by at most {math.ceil(dataloading_host_count / num_shards)} hosts"
+        f"Concurrent reading by multiple hosts may cause slow down."
     )
-    ds = ds_builder.as_dataset(split=data_split, read_config=read_config, shuffle_files=shuffle_files)
-    ds = ds.shard(num_shards=dataloading_host_count, index=dataloading_host_index)
+
+  read_config.input_context = tf.distribute.InputContext(
+      input_pipeline_id=input_pipeline_id,
+      num_input_pipelines=num_input_pipelines,
+  )
+  ds = ds_builder.as_dataset(split=data_split, read_config=read_config, shuffle_files=shuffle_files)
+  if row_shard is not None:
+    ds = ds.shard(num_shards=row_shard[1], index=row_shard[0])
 
   return ds
 
