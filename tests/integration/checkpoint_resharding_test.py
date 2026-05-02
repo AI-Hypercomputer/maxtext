@@ -96,19 +96,19 @@ def test_checkpoint_resharding():
   dataset_path = get_test_dataset_path()
 
   # Phase 1: Train and Save Checkpoint
-  # Topology: FSDP=4, Tensor=1
+  # Topology: FSDP=8, Tensor=1
   save_parallelism = [
       "checkpoint_period=10",
-      "save_checkpoint_on_completion=True",  # Saves Checkpoint 0 upon job completion (model state after step 0)
-      "dcn_data_parallelism=2",
+      "save_checkpoint_on_completion=True",
+      "dcn_data_parallelism=1",
       "dcn_fsdp_parallelism=1",
-      "ici_fsdp_parallelism=4",
+      "ici_fsdp_parallelism=8",
       "ici_tensor_parallelism=1",
   ]
   train_main(
       get_resharding_command(
           run_date,
-          steps=1,  # Executes Step 0
+          steps=1,
           metrics_file="saved_metrics.txt",
           base_output_directory=base_output_directory,
           dataset_path=dataset_path,
@@ -117,11 +117,11 @@ def test_checkpoint_resharding():
   )
 
   # Phase 2: Restore and Continue
-  # Topology: FSDP=2, Tensor=2
+  # Topology: FSDP=4, Tensor=2
   restore_parallelism = [
-      "dcn_data_parallelism=2",
+      "dcn_data_parallelism=1",
       "dcn_fsdp_parallelism=1",
-      "ici_fsdp_parallelism=2",
+      "ici_fsdp_parallelism=4",
       "ici_tensor_parallelism=2",
   ]
   train_main(
