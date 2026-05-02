@@ -108,7 +108,7 @@ def test_checkpoint_resharding():
   train_main(
       get_resharding_command(
           run_date,
-          steps=1,
+          steps=1,  # Executes Step 0
           metrics_file="saved_metrics.txt",
           base_output_directory=base_output_directory,
           dataset_path=dataset_path,
