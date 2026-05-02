@@ -56,11 +56,6 @@ on:
         required: false
         type: string
         default: ''
-      modified_tests:
-        description: 'List of modified tests separated by semicolon'
-        required: false
-        type: string
-        default: ''
 
 permissions:
   contents: read
@@ -166,4 +161,3 @@ jobs:
       total_workers: ${{ contains(inputs.flavor, 'cpu-unit') && 2 || 1 }}
       maxtext_sha: ${{ inputs.maxtext_sha }}
       is_update_hlo: ${{ inputs.is_update_hlo }}
-      modified_tests: ${{ inputs.modified_tests }}

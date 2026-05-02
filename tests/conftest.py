@@ -127,18 +127,6 @@ def pytest_collection_modifyitems(config, items):
     for item in remaining:
       item.add_marker(pytest.mark.decoupled)
 
-  import os
-  modified_tests = os.environ.get("MODIFIED_TESTS", "").split(";")
-  if modified_tests and modified_tests[0]:
-    import os.path
-    for item in remaining:
-      try:
-        rel_path = os.path.relpath(str(item.fspath), os.getcwd())
-        if rel_path in modified_tests:
-          item.add_marker(pytest.mark.force_run)
-      except Exception: # pragma: no cover
-        pass
-
 
 def pytest_configure(config):
   for m in [
@@ -148,6 +136,5 @@ def pytest_configure(config):
       "external_serving: JetStream / serving / decode server components",
       "external_training: goodput integrations",
       "decoupled: marked on tests that are not skipped due to GCP deps, when DECOUPLE_GCLOUD=TRUE",
-      "force_run: force execution of scheduled tests if their file was modified",
   ]:
     config.addinivalue_line("markers", m)

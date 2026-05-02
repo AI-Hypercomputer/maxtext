@@ -74,10 +74,6 @@ on:
         required: false
         type: boolean
         default: false
-      modified_tests:
-        required: false
-        type: string
-        default: ''
 
 permissions:
   contents: read
@@ -90,7 +86,6 @@ jobs:
         XLA_PYTHON_CLIENT_MEM_FRACTION: ${{ inputs.xla_python_client_mem_fraction }}
         TF_FORCE_GPU_ALLOW_GROWTH: ${{ inputs.tf_force_gpu_allow_growth }}
         TPU_SKIP_MDS_QUERY: ${{ inputs.device_type == 'cpu' && '1' || '' }}
-        MODIFIED_TESTS: ${{ inputs.modified_tests }}
         MAXTEXT_PACKAGE_EXTRA: >-
           ${{ 
             !contains(inputs.pytest_marker, 'not post_training') && 'tpu-post-train' 
@@ -151,7 +146,7 @@ jobs:
           if [ "${INPUTS_IS_SCHEDULED_RUN}" == "true" ]; then
             FINAL_PYTEST_MARKER="${INPUTS_PYTEST_MARKER}"
           else
-            FINAL_PYTEST_MARKER="${INPUTS_PYTEST_MARKER} and (not scheduled_only or force_run)"
+            FINAL_PYTEST_MARKER="${INPUTS_PYTEST_MARKER} and not scheduled_only"
           fi
           # TODO: Use package data for testing and remove the env vars
           export MAXTEXT_REPO_ROOT=$(pwd)

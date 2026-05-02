@@ -43,7 +43,6 @@ jobs:
     outputs:
       run_tests: ${{ steps.check.outputs.run_tests }}
       run_notebooks: ${{ steps.check.outputs.run_notebooks }}
-      modified_tests: ${{ steps.check.outputs.modified_tests }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -64,13 +63,24 @@ jobs:
           echo "Changed files:"
           echo "$CHANGED_FILES"
 
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "No files detected or diff failed. Running everything as a fail-safe."
+            echo "run_tests=true" >> $GITHUB_OUTPUT
+            echo "run_notebooks=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
           # default to running everything if something goes wrong with the checks
           echo "run_tests=true" >> $GITHUB_OUTPUT
           echo "run_notebooks=true" >> $GITHUB_OUTPUT
-          echo "modified_tests=" >> $GITHUB_OUTPUT
 
-          MODIFIED_TESTS=$(echo "$CHANGED_FILES" | grep -E '^tests/.*\.py$' | paste -sd ";" - || echo "")
-          echo "modified_tests=$MODIFIED_TESTS" >> $GITHUB_OUTPUT
+          # 1. Check if only documentation files (.md) were changed
+          if ! echo "$CHANGED_FILES" | grep -v -E '\.md$' > /dev/null; then
+            echo "Documentation-only files changed, skipping all tests and notebooks."
+            echo "run_tests=false" >> $GITHUB_OUTPUT
+            echo "run_notebooks=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
 
           # 2. Check if dependencies or Github workflows were changed
           if echo "$CHANGED_FILES" | grep -E '(^|/)(src/dependencies/|\.github/workflows/)' > /dev/null; then
@@ -146,7 +156,6 @@ jobs:
       base_image: maxtext-unit-test-tpu:py312
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
       maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
-      modified_tests: ${{ needs.analyze_code_changes.outputs.modified_tests }}
 
   gpu-tests:
     name: ${{ matrix.flavor }} tests
@@ -162,7 +171,6 @@ jobs:
       base_image: maxtext-unit-test-cuda12:py312
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
       maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
-      modified_tests: ${{ needs.analyze_code_changes.outputs.modified_tests }}
 
   cpu-tests:
     name: ${{ matrix.flavor }} tests
@@ -178,7 +186,6 @@ jobs:
       base_image: maxtext-unit-test-tpu:py312
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
       maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
-      modified_tests: ${{ needs.analyze_code_changes.outputs.modified_tests }}
 
   maxtext_tpu_pathways_unit_tests:
     needs: build_and_upload_maxtext_package
