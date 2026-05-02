@@ -99,7 +99,7 @@ def test_checkpoint_resharding():
   # Topology: FSDP=4, Tensor=1
   save_parallelism = [
       "checkpoint_period=10",
-      "save_checkpoint_on_completion=True",
+      "save_checkpoint_on_completion=True",  # Saves Checkpoint 0 upon job completion (model state after step 0)
       "dcn_data_parallelism=1",
       "dcn_fsdp_parallelism=1",
       "ici_fsdp_parallelism=4",
