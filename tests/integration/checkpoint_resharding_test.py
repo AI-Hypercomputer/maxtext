@@ -89,7 +89,6 @@ def check_loss(metrics_file, target):
 
 @pytest.mark.integration_test
 @pytest.mark.tpu_only
-@pytest.mark.scheduled_only
 def test_checkpoint_resharding():
   """Tests checkpoint resharding by saving and restoring with different mesh topologies."""
   run_date = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
