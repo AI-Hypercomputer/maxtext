@@ -52,7 +52,7 @@ def get_resharding_command(run_date, steps, metrics_file, base_output_directory,
           f"metrics_file={metrics_file}",
           f"base_output_directory={base_output_directory}",
           f"dataset_path={dataset_path}",
-          "dataset_type=grain",
+          "dataset_type=synthetic",
           "grain_worker_count=0",
           "collect_stack_trace=False",
       ]
