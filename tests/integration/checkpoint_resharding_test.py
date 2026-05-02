@@ -65,7 +65,7 @@ def check_loss(metrics_file, target):
   """Asserts that loss values match between saved and restored checkpoints.
 
   Verifies the resharding restoration is mathematically consistent by comparing
-   the final logged loss of the initial (saved) run against the initial logged 
+   the final logged loss of the initial (saved) run against the initial logged
   loss of the resumed (restored) run within a relative tolerance.
   """
   metrics_file_saved = "saved_" + metrics_file
