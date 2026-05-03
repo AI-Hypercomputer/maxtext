@@ -141,7 +141,7 @@ def nnx_attrs_to_linen_vars(nnx_attrs: dict) -> dict:
 def _set_initializing(module: Module, initializing: bool):
   for _, value in graph.iter_graph(module):
     if isinstance(value, Pytree):
-      value._object__state._initializing = initializing  # pylint: disable=protected-access
+      value._pytree__state._initializing = initializing  # pylint: disable=protected-access
 
 
 def lazy_init(fn: Module | tp.Callable[..., tp.Any], *args, **kwargs):
@@ -249,7 +249,7 @@ class ToNNX(Module):
     # rename default to params
     if "params" not in _rngs and "default" in _rngs:
       _rngs["params"] = _rngs.pop("default")
-    if self._object__state.initializing:
+    if self._pytree__state.initializing:
       out, updates = self.to_nnx__module.init_with_output(_rngs, *args, method=method, **kwargs)
     else:
       nnx_attrs = {
