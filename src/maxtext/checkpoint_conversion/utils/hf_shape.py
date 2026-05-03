@@ -464,7 +464,10 @@ def QWEN3_NEXT_HF_WEIGHTS_TO_SHAPE(config):
               f"{layer_prefix}.mlp.experts.{e}.down_proj.weight": [hidden_size, moe_intermediate_size],
           }
       )
+    return mapping
 
+def QWEN3_5_HF_WEIGHTS_TO_SHAPE(config):
+    return QWEN3_NEXT_HF_WEIGHTS_TO_SHAPE(config)
 
 def GPT_OSS_HF_WEIGHTS_TO_SHAPE(config):
   """Returns mapping between HuggingFace GptOss weights path and their shape."""
@@ -802,6 +805,7 @@ HF_SHAPE = {
     "qwen3-30b-a3b": QWEN_HF_WEIGHTS_TO_SHAPE,
     "qwen3-235b-a22b": QWEN_HF_WEIGHTS_TO_SHAPE,
     "qwen3-480b-a35b": QWEN_HF_WEIGHTS_TO_SHAPE,
+    "qwen3.5-397b-a17b": QWEN3_5_HF_WEIGHTS_TO_SHAPE,
     "deepseek2-16b": DEEPSEEK_HF_WEIGHTS_TO_SHAPE,
     "deepseek3-671b": DEEPSEEK_HF_WEIGHTS_TO_SHAPE,
     "deepseek3.2-671b": DEEPSEEK_HF_WEIGHTS_TO_SHAPE,
