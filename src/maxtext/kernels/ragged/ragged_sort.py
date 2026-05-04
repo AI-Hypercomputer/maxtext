@@ -16,8 +16,8 @@
 
 import jax
 import jax.numpy as jnp
-from maxtext.kernels.gather_reduce_sc import sc_gather_reduce
 from maxtext.kernels.ragged.ragged_gather import ragged_gather
+from maxtext.kernels.ragged.ragged_gather_reduce import ragged_gather_reduce
 from maxtext.kernels.ragged.ragged_scatter import ragged_scatter
 
 
@@ -88,16 +88,22 @@ def gather_tokens_locally(hidden_states_local, topk_indices_local, num_experts, 
     """
     topk_argsort_revert_indices, shard_output_start, shard_output_end, _ = res
     g_x, _, _ = g_out
-    # Restrict to the [start, end) source range: rows outside contribute 0.
-    pos = jnp.arange(g_x.shape[0])
-    valid = (pos >= shard_output_start) & (pos < shard_output_end)
-    g_x_masked = jnp.where(valid[:, None], g_x, jnp.zeros_like(g_x))
+    # Restrict to the [start, end) source range via a validity bitmask. The
+    # ragged kernel packs valid rows to the front of each row-partition and
+    # only iterates over the populated prefix, so we hand it the mask directly
+    # rather than materializing a (mostly-zero) dense buffer ourselves.
+    n = topk_argsort_revert_indices.shape[0]
+    pos = jnp.arange(n)
+    valid_rows_mask = (pos >= shard_output_start) & (pos < shard_output_end)
     # The forward scatter-add over `token_indices_sorted` is equivalent to a
     # gather-reduce: each input token has exactly `topk` contributions located
     # at sorted positions `topk_argsort_revert_indices[t*topk:(t+1)*topk]`.
-    grad_hidden_states = sc_gather_reduce(
-        g_x_masked,
+    # `topk_weights` is set to ones because this op has no per-row weighting.
+    grad_hidden_states = ragged_gather_reduce(
+        g_x,
         topk_argsort_revert_indices,
+        topk_weights=jnp.ones((n,), dtype=jnp.float32),
+        valid_rows_mask=valid_rows_mask,
         reduce_group_size=topk,
     )
     return grad_hidden_states, None
