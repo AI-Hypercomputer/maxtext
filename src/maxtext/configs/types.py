@@ -603,6 +603,13 @@ class AttentionIndexer(BaseModel):
   indexer_loss_scaling_factor: float = Field(0.0, description="Multiplier for the indexer KL divergence loss.")
 
 
+class DeepSeekV4Attention(BaseModel):
+  """Configuration for DeepSeek-V4 Compressed Attention."""
+
+  compress_ratios: list[int] = Field([], description="Layer-specific ratios for token compression.")
+  compressed_dim: int = Field(512, description="Dimension for the compressed token representations.")
+
+
 class Llama4Attention(BaseModel):
   """Configuration specific to Llama4-style models."""
 
@@ -2113,6 +2120,7 @@ class MaxTextConfig(
     MlaAttention,
     MoBa,
     AttentionIndexer,
+    DeepSeekV4Attention,
     Llama4Attention,
     SplashAttention,
     PagedAttention,
