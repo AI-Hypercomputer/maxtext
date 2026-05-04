@@ -715,7 +715,7 @@ class RoutedMoeTest(unittest.TestCase):
     self._run_ragged_sort_loss_and_grad(use_ring_of_experts=True)
 
   @pytest.mark.tpu_only
-  @pytest.skip(reason="Ragged sort currently only supports use ring of experts.")
+  @pytest.mark.skip(reason="Ragged sort currently only supports use ring of experts.")
   def test_ragged_sort_loss_and_grad_no_ring_of_experts(self):
     self._run_ragged_sort_loss_and_grad(use_ring_of_experts=False)
 
