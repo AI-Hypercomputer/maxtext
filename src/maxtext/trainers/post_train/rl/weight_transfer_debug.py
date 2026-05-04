@@ -24,6 +24,7 @@ import time
 import os
 import math
 from typing import Sequence
+from etils import epath
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
@@ -53,6 +54,7 @@ def main(argv: Sequence[str]) -> None:
   transfer_size_gb = getattr(config, "batch_size", 10)
   num_loops = getattr(config, "num_batches", 10)
   data_transfer_method = getattr(config, "chat_template_path", "device_put")
+  sampler_devices_loc = getattr(config, "num_eval_passes", 1)
   
   num_trainer_devices = int(num_devices * trainer_fraction)
   num_sampler_devices = int(num_devices * sampler_fraction)
@@ -61,9 +63,14 @@ def main(argv: Sequence[str]) -> None:
   
   if num_trainer_devices + num_sampler_devices > num_devices:
     raise ValueError("Sum of trainer and sampler devices exceeds total available devices.")
+  if (sampler_devices_loc+1)*num_sampler_devices > num_devices:
+    raise ValueError("Sampler devices location exceeds available devices.")
+  if num_trainer_devices > sampler_devices_loc*num_sampler_devices:
+    raise ValueError("Trainer devices overlap with sampler devices based on the provided location and number of sampler devices.")
     
   trainer_devices = devices[:num_trainer_devices]
-  sampler_devices = devices[num_devices - num_sampler_devices :]
+  sampler_devices = devices[sampler_devices_loc*num_sampler_devices : (sampler_devices_loc+1)*num_sampler_devices]
+  
   
   max_logging.log(f"Trainer devices: {[d.id for d in trainer_devices]}")
   max_logging.log(f"Sampler devices: {[d.id for d in sampler_devices]}")
@@ -110,23 +117,35 @@ def main(argv: Sequence[str]) -> None:
     jax.block_until_ready(transferred_data)
   max_logging.log("Warm-up complete.")
   
+  if not epath.Path(config.tensorboard_dir).exists():
+    epath.Path(config.tensorboard_dir).mkdir(parents=True, exist_ok=True)
+
   max_logging.log(f"Starting weight transfer benchmark for {num_loops} loops...")
   
   for i in range(num_loops):
+    if i == config.skip_first_n_steps_for_profiler:
+      max_logging.log(f"Starting XProf trace in {config.tensorboard_dir}")
+      jax.profiler.start_trace(config.tensorboard_dir)
+
     start_time = time.time()
-    if data_transfer_method == "device_put":
-      transferred_data = jax.device_put(dummy_data, sampler_sharding)
-    elif data_transfer_method == "reshard":
-      transferred_data = experimental_reshard.reshard(dummy_data, sampler_sharding)
-    elif data_transfer_method == "reshard_directly":
-      transferred_data = reshard.reshard_pytree(dummy_data, sampler_sharding)
-    jax.block_until_ready(transferred_data)
+    with jax.profiler.TraceAnnotation("data_transfer"):
+      if data_transfer_method == "device_put":
+        transferred_data = jax.device_put(dummy_data, sampler_sharding)
+      elif data_transfer_method == "reshard":
+        transferred_data = experimental_reshard.reshard(dummy_data, sampler_sharding)
+      elif data_transfer_method == "reshard_directly":
+        transferred_data = reshard.reshard_pytree(dummy_data, sampler_sharding)
+      jax.block_until_ready(transferred_data)
     end_time = time.time()
     
     latency = end_time - start_time
     latencies.append(latency)
     max_logging.log(f"Loop {i+1}: {latency:.4f}s")
     show_hbm_usage(f"HBM after transfer {i+1}:")
+    
+    if i == config.skip_first_n_steps_for_profiler + config.profiler_steps - 1:
+      jax.profiler.stop_trace()
+      max_logging.log("Stopped XProf trace.")
     
   avg_latency = sum(latencies) / num_loops
   max_logging.log(f"Average weight transfer latency: {avg_latency:.4f}s")
