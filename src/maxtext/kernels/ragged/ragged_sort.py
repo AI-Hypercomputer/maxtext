@@ -18,7 +18,6 @@ import jax
 import jax.numpy as jnp
 from maxtext.kernels.ragged.ragged_gather import ragged_gather
 from maxtext.kernels.ragged.ragged_gather_reduce import ragged_gather_reduce
-from maxtext.kernels.ragged.ragged_scatter import ragged_scatter
 
 
 def gather_tokens_locally(hidden_states_local, topk_indices_local, num_experts, topk, ep_name, ep_size):
@@ -135,10 +134,22 @@ def scatter_tokens_locally(
     shard_output_start = group_offsets[experts_start]
     shard_output_end = group_offsets[experts_end]
 
-    out = ragged_scatter(sorted_tokens_local, topk_argsort_revert_indices, shard_output_start, shard_output_end)
-
-    valid_mask = (topk_argsort_revert_indices >= shard_output_start) & (topk_argsort_revert_indices < shard_output_end)
-    out = jnp.where(valid_mask[:, None], out, 0.0)
+    # Express the scatter as a degenerate gather-reduce: each output row pulls
+    # from sorted_tokens_local at position `topk_argsort_revert_indices[i]` if
+    # that position is within this shard's [start, end) range, else zero.
+    # `reduce_group_size=1` and all-ones weights make this a pure gather; the
+    # kernel itself zeros rows whose `valid_rows_mask` entry is False.
+    n = topk_argsort_revert_indices.shape[0]
+    valid_rows_mask = (topk_argsort_revert_indices >= shard_output_start) & (
+        topk_argsort_revert_indices < shard_output_end
+    )
+    out = ragged_gather_reduce(
+        sorted_tokens_local,
+        topk_argsort_revert_indices,
+        topk_weights=jnp.ones((n,), dtype=jnp.float32),
+        valid_rows_mask=valid_rows_mask,
+        reduce_group_size=1,
+    )
 
     res = (
         topk_argsort_revert_indices,
