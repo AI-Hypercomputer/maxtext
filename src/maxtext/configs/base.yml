@@ -389,6 +389,10 @@ indexer_sparse_training: False
 # Multiplier for the indexer KL divergence loss
 indexer_loss_scaling_factor: 0.0
 
+# DeepSeek-V4 Compressed Attention
+compress_ratios: []
+compressed_dim: 512
+
 # MLA parameters
 q_lora_rank: 0
 kv_lora_rank: 512
