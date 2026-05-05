@@ -1760,17 +1760,18 @@ def save_weights_to_checkpoint(
       use_ocdbt=use_ocdbt,
       use_zarr3=use_zarr3,
   )
+  if checkpoint_manager is None:
+    raise RuntimeError("Failed to create Orbax checkpoint manager.")
 
   state_new = train_state.TrainState(
-      step=0, apply_fn=None, params={"params": jax_weights}, tx=None, opt_state={}  # type: ignore
+      step=step_number_to_save_new_ckpt, apply_fn=None, params={"params": jax_weights}, tx=None, opt_state={}  # type: ignore
   )
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
-  if checkpoint_manager is not None:
-    if checkpointing.save_checkpoint(checkpoint_manager, step_number_to_save_new_ckpt, state_new):
-      max_logging.log(f"saved a checkpoint at step {step_number_to_save_new_ckpt}")
-    # Upon preemption, exit when and only when all ongoing saves are complete.
-    checkpoint_manager.wait_until_finished()
+  if checkpointing.save_checkpoint(checkpoint_manager, step_number_to_save_new_ckpt, state_new):
+    max_logging.log(f"saved a checkpoint at step {step_number_to_save_new_ckpt}")
+  # Upon preemption, exit when and only when all ongoing saves are complete.
+  checkpoint_manager.wait_until_finished()
 
   max_logging.log(f"Elapse for checkpoint save: {(time.time() - start) / 60:.2f} min")
 
