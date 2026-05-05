@@ -60,6 +60,8 @@ def gmm(
     use_qwix_quantization: bool = False,
     use_tokamax_backend: bool = False,
     weight_gather_axes: List[Tuple[str, int]] | None = None,
+    lhs_vma_axes: tuple = tuple(),
+    rhs_vma_axes: tuple = tuple(),
     # TODO(amandaliang): get rid of the qwix_rule in favor of Qwix's interception feature
     qwix_rule: qwix.QtRule | None = None,
     use_manual_quantization: bool = False,
@@ -82,7 +84,7 @@ def gmm(
       )
 
   gmm_fwd_bwd = lambda *args: _gmm_fwd(*args)[0]  # pylint: disable=C3001
-  gmm_fwd_bwd = jax.custom_vjp(gmm_fwd_bwd, nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12))
+  gmm_fwd_bwd = jax.custom_vjp(gmm_fwd_bwd, nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14))
   gmm_fwd_bwd.defvjp(_gmm_fwd, functools.partial(_gmm_bwd, lhs.dtype, rhs.dtype))
   return gmm_fwd_bwd(
       lhs,
@@ -98,6 +100,8 @@ def gmm(
       use_tokamax_backend,
       weight_gather_axes,
       use_manual_quantization,
+      lhs_vma_axes,
+      rhs_vma_axes,
   )
 
 
@@ -125,6 +129,8 @@ def _gmm_fwd(
     use_tokamax_backend: bool = False,
     weight_gather_axes: List[Tuple[str, int]] | None = None,
     use_manual_quantization: bool = False,
+    lhs_vma_axes: tuple = tuple(),
+    rhs_vma_axes: tuple = tuple(),
 ) -> tuple[
     jnp.ndarray,
     tuple[
@@ -205,6 +211,9 @@ def _gmm_fwd(
         transpose_rhs=transpose_rhs,
         interpret=interpret,
     )
+    for axis in lhs_vma_axes:
+      out = jax.lax.pcast(out, axis_name=axis, to="varying")
+
   return out, (lhs, rhs, group_sizes, group_offset)
 
 
@@ -219,6 +228,8 @@ def _gmm_bwd(
     use_tokamax_backend: bool,
     weight_gather_axes: List[Tuple[str, int]] | None,
     use_manual_quantization: bool,
+    lhs_vma_axes: tuple,
+    rhs_vma_axes: tuple,
     residual: tuple[
         jnp.ndarray | qpl.QArray,
         jnp.ndarray | qpl.QArray,
@@ -334,7 +345,9 @@ def _gmm_bwd(
         group_offset,
         transpose_rhs=not transpose_rhs,
         interpret=interpret,
+        varying_axes=lhs_vma_axes
     )
+
     drhs = backend.tgmm(
         lhs.swapaxes(0, 1),
         drhs_dout,
@@ -344,6 +357,7 @@ def _gmm_bwd(
         group_offset,
         num_actual_groups,
         interpret=interpret,
+        varying_axes=rhs_vma_axes
     )
 
   # NOTE: If the rhs transposition is fused into the forward pass we need to
