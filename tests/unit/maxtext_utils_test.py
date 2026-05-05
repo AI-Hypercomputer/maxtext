@@ -764,6 +764,101 @@ class TestSamplingFunctions(unittest.TestCase):
     for token in tokens:
       self.assertIn(token.item(), top_k_indices)
 
+  def test_diverse_beam_search_step_diversity(self):
+    """Tests that diversity penalty correctly affects token selection."""
+    user_batch_size = 1
+    num_beams = 4
+    num_groups = 2
+    total_batch_size = user_batch_size * num_beams
+    vocab_size = 10
+
+    # Logits where token 5 and 6 are very likely, but prioritized differently per beam
+    # Group 0: beam 0 favors 5, beam 1 favors 6
+    # Group 1: beam 2 favors 5, beam 3 favors 6
+    logits = jnp.zeros((total_batch_size, 1, vocab_size))
+    logits = logits.at[0, 0, 5].set(10.0)
+    logits = logits.at[1, 0, 6].set(10.0)
+    # Group 1: 
+    # Beam 2 should produce one winner (via token 0)
+    # Beam 3 should produce one winner (via token 1)
+    # All other tokens besides 5 and 6 are -10.0
+    logits = logits.at[2:4, 0, :].set(-10.0)
+    logits = logits.at[2, 0, 0].set(5.0)  # Strong, but not as strong as 5/6 were
+    logits = logits.at[3, 0, 1].set(6.0)  # Stronger than Beam 2's tokens
+    logits = logits.at[2, 0, 5].set(10.0)
+    logits = logits.at[3, 0, 6].set(10.0)
+    cumulative_logprobs = jnp.zeros((total_batch_size, 1))
+
+    # With high penalty, token 5 and 6 should be avoided in the second group
+    # but since we have two different high tokens (5 and 6), group 0 will pick both.
+    # Group 1 will then pick other tokens.
+    diversity_penalty = 20.0
+    chosen_tokens, _, chosen_parents = inference_utils.sample_diverse_beam_search_step(
+        logits, cumulative_logprobs, num_beams, num_groups, diversity_penalty
+    )
+
+    tokens = chosen_tokens.flatten()
+    # First group (beams 0,1) should pick their respective high-score tokens
+    self.assertEqual(tokens[0], 5)
+    self.assertEqual(tokens[1], 6)
+    # Second group (beams 2,3) should NOT pick tokens 5 or 6
+    self.assertNotIn(tokens[2], [5, 6])
+    self.assertNotIn(tokens[3], [5, 6])
+
+    # Check parents are correctly mapped (order within group depends on score)
+    parents = chosen_parents.flatten().tolist()
+    # Beams 0 and 1 should produce offspring for group 0
+    self.assertEqual(set(parents[0:2]), {0, 1})
+    # Beams 2 and 3 should produce offspring for group 1
+    self.assertEqual(set(parents[2:4]), {2, 3})
+
+  def test_diverse_beam_search_step_divisibility(self):
+    """Tests that invalid beam/group combinations raise ValueError."""
+    logits = jnp.zeros((4, 1, 10))
+    logprobs = jnp.zeros((4, 1))
+    with self.assertRaises(ValueError):
+      # 4 beams, 3 groups (not divisible)
+      inference_utils.sample_diverse_beam_search_step(logits, logprobs, 4, 3, 0.5)
+
+  def test_diverse_beam_search_step_batch_2(self):
+    """Tests Diverse Beam Search with user batch size > 1."""
+    user_batch_size = 2
+    num_beams = 2
+    num_groups = 1
+    total_batch_size = user_batch_size * num_beams
+    vocab_size = 10
+
+    # User 0: favors token 5
+    # User 1: favors token 6
+    logits = jnp.zeros((total_batch_size, 1, vocab_size))
+    # Beams 0-1 are User 0
+    logits = logits.at[0:2, 0, 5].set(10.0)
+    # Beams 2-3 are User 1
+    logits = logits.at[2:4, 0, 6].set(10.0)
+    
+    cumulative_logprobs = jnp.zeros((total_batch_size, 1))
+    diversity_penalty = 1.0
+
+    chosen_tokens, _, chosen_parents = inference_utils.sample_diverse_beam_search_step(
+        logits, cumulative_logprobs, num_beams, num_groups, diversity_penalty
+    )
+
+    # chosen_tokens shape (4, 1)
+    tokens = chosen_tokens.flatten()
+    self.assertEqual(tokens[0], 5)
+    self.assertEqual(tokens[1], 5)
+    self.assertEqual(tokens[2], 6)
+    self.assertEqual(tokens[3], 6)
+
+    # Check parents
+    parents = chosen_parents.flatten().tolist()
+    # User 0: parents should be in [0, 1]
+    for p in parents[0:2]:
+      self.assertTrue(0 <= p < 2)
+    # User 1: parents should be in [2, 3]
+    for p in parents[2:4]:
+      self.assertTrue(2 <= p < 4)
+
 
 class TestCalculateBytesFromPytree(unittest.TestCase):
   """Test suite for the byte calculation utility function."""

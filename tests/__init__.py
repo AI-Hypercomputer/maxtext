@@ -16,6 +16,8 @@
 Test initialization
 """
 
-import pathwaysutils
+from maxtext.common.gcloud_stub import is_decoupled
 
-pathwaysutils.initialize()
+if not is_decoupled():
+  import pathwaysutils
+  pathwaysutils.initialize()

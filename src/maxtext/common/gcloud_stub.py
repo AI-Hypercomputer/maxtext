@@ -30,6 +30,7 @@ integrations while still allowing local unit tests to import modules. This modul
 All stubs raise RuntimeError only when actually invoked, not at import time, so test collection proceeds.
 """
 from __future__ import annotations
+import jax
 
 from collections.abc import Callable
 from types import SimpleNamespace
@@ -180,6 +181,24 @@ def _jetstream_stubs():
       self.log_prob = log_prob
       self.samples_per_slot = samples_per_slot
 
+  # Register ResultTokens stub as a pytree node so it can be used in
+  # GCLOUD_DECOUPLED mode.
+  jax.tree_util.register_pytree_node(
+      ResultTokens,
+      lambda x: (
+          (x.data, x.tokens_idx, x.valid_idx, x.length_idx, x.log_prob),
+          (x.samples_per_slot,),
+      ),
+      lambda aux, children: ResultTokens(
+          data=children[0],
+          tokens_idx=children[1],
+          valid_idx=children[2],
+          length_idx=children[3],
+          log_prob=children[4],
+          samples_per_slot=aux[0],
+      ),
+  )
+
   # Tokenizer placeholders (unused in decoupled tests due to runtime guard).
   class TokenizerParameters:  # pragma: no cover - placeholder
 
@@ -229,30 +248,20 @@ def jetstream():
     from jetstream.engine import engine_api, token_utils, tokenizer_api  # type: ignore  # pylint: disable=import-outside-toplevel
     from jetstream.engine.tokenizer_pb2 import TokenizerParameters, TokenizerType  # type: ignore  # pylint: disable=import-outside-toplevel
     # Mark real modules as not stubs so consumers can detect the difference.
-    try:
-      setattr(config_lib, "_IS_STUB", False)
-    except Exception:  # pylint: disable=broad-exception-caught
-      pass
-    try:
-      setattr(engine_api, "_IS_STUB", False)
-    except Exception:  # pylint: disable=broad-exception-caught
-      pass
-    try:
-      setattr(token_utils, "_IS_STUB", False)
-    except Exception:  # pylint: disable=broad-exception-caught
-      pass
-    try:
-      setattr(tokenizer_api, "_IS_STUB", False)
-    except Exception:  # pylint: disable=broad-exception-caught
-      pass
+    for mod_obj in [config_lib, engine_api, token_utils, tokenizer_api]:
+      try:
+        setattr(mod_obj, "_IS_STUB", False)
+      except Exception:  # pylint: disable=broad-exception-caught
+        pass
     token_params_ns = SimpleNamespace(TokenizerParameters=TokenizerParameters, TokenizerType=TokenizerType)
     setattr(token_params_ns, "_IS_STUB", False)
     return config_lib, engine_api, token_utils, tokenizer_api, token_params_ns
-  except ModuleNotFoundError:
-    if is_decoupled():
-      print("[DECOUPLED NO-OP] jetstream: dependency missing; using stubs.")
-      return _jetstream_stubs()
-    raise
+  except (ModuleNotFoundError, ImportError):
+    # Automatically fallback to stubs if dependencies are missing, 
+    # ensuring that MaxEngine can always be imported and tested locally.
+    if not is_decoupled():
+      print("[INFO] jetstream dependencies not found; automatically using stubs for local compatibility.")
+    return _jetstream_stubs()
 
 
 # ---------------- GCS -----------------

@@ -187,6 +187,7 @@ class SamplingStrategy(str, Enum):
   NUCLEUS = "nucleus"
   TOPK = "topk"
   COMPOSITE = "composite"
+  DIVERSE_BEAM_SEARCH = "diverse_beam_search"
 
 
 class ProfilerType(str, Enum):
@@ -1475,6 +1476,9 @@ class Decoding(BaseModel):
   decode_sampling_nucleus_p: int | float = Field(-1.0, description="Nucleus (top-p) sampling probability. -1 to disable.")
   decode_sampling_top_k: int = Field(0, description="Top-k sampling value. 0 to disable.")
   decode_sampling_temperature: float = Field(1.0, description="Sampling temperature.")
+  decode_num_beams: int = Field(4, description="Number of beams for beam search. Must be divisible by decode_num_beam_groups.")
+  decode_num_beam_groups: int = Field(2, description="Number of beam groups for diverse beam search. Must divide decode_num_beams.")
+  decode_diversity_penalty: float = Field(0.5, description="Diversity penalty for diverse beam search.")
 
 
 class InferenceLayout(BaseModel):

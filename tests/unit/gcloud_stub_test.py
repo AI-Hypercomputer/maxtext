@@ -21,6 +21,7 @@ are installed or not, and they focus only on decoupling behavior.
 import importlib
 import os
 import unittest
+import jax
 from unittest import mock
 
 import pytest
@@ -176,6 +177,27 @@ class GCloudStubTest(unittest.TestCase):
         maxengine_config.create_exp_maxengine(mock_devices, mock_config)
         mock_engine.assert_called_once_with(config=mock_config, devices=mock_devices)
 
+
+  def test_result_tokens_is_pytree(self):
+    """Verify that the ResultTokens stub is a valid JAX pytree."""
+    with mock.patch.dict(os.environ, {"DECOUPLE_GCLOUD": "TRUE"}):
+      with mock.patch("maxtext.common.gcloud_stub.importlib.util.find_spec", return_value=None):
+        _, engine_api, _, _, _ = gcloud_stub.jetstream()
+        rt = engine_api.ResultTokens(
+            data=jax.numpy.zeros((1, 4)),
+            tokens_idx=(0, 1),
+            valid_idx=(1, 2),
+            length_idx=(2, 3),
+            log_prob=jax.numpy.zeros((1, 1)),
+            samples_per_slot=1,
+        )
+
+        children, treedef = jax.tree_util.tree_flatten(rt)
+        self.assertEqual(len(children), 8)  # data + 2*tokens_idx + 2*valid_idx + 2*length_idx + log_prob
+
+        rt_new = jax.tree_util.tree_unflatten(treedef, children)
+        self.assertIsInstance(rt_new, engine_api.ResultTokens)
+        self.assertEqual(rt_new.samples_per_slot, 1)
 
 if __name__ == "__main__":
   unittest.main()

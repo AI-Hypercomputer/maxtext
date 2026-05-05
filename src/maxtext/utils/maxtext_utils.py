@@ -1252,9 +1252,12 @@ def init_initial_state(model, tx, config, is_training, key):
 
   Args: model, tx, config, is_training, key
   """
-  input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
+  num_beams = (
+      config.decode_num_beams if getattr(config, "decode_sampling_strategy", "") == "diverse_beam_search" else 1
+  )
+  input_shape = (int(config.micro_batch_size_to_train_on * num_beams), config.max_target_length)
   image_shape = mm_processor.get_dummy_image_shape_for_init(
-      config.model_name, batch_size=config.micro_batch_size_to_train_on
+      config.model_name, batch_size=int(config.micro_batch_size_to_train_on * num_beams)
   )
   audio_shape = mm_processor.get_dummy_audio_shape_for_init(config)
   # Split the master key into independent keys for each RNG collection
@@ -1276,14 +1279,17 @@ def init_initial_state(model, tx, config, is_training, key):
 
 def get_abstract_param(model, config):
   """Get abstract model structure (name, shape) without materializing the weights to save memory"""
+  num_beams = (
+      config.decode_num_beams if getattr(config, "decode_sampling_strategy", "") == "diverse_beam_search" else 1
+  )
   with model.mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     key = jax.random.PRNGKey(0)
-    input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
+    input_shape = (int(config.micro_batch_size_to_train_on * num_beams), config.max_target_length)
 
   # Cleanly fetch the shapes from the processor using the correct micro_batch_size
   if config.use_multimodal:
     image_shape = mm_processor.get_dummy_image_shape_for_init(
-        config.model_name, batch_size=config.micro_batch_size_to_train_on
+        config.model_name, batch_size=int(config.micro_batch_size_to_train_on * num_beams)
     )
   else:
     image_shape = None
@@ -1491,12 +1497,15 @@ def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: None 
   """Get a shaped abstraction of the state (including optimizer)"""
 
   def init_kv_cache(model, config):
+    num_beams = (
+        config.decode_num_beams if getattr(config, "decode_sampling_strategy", "") == "diverse_beam_search" else 1
+    )
     input_shape = (
-        config.micro_batch_size_to_train_on,
+        int(config.micro_batch_size_to_train_on * num_beams),
         config.max_prefill_predict_length,
     )
     image_shape = mm_processor.get_dummy_image_shape_for_init(
-        config.model_name, batch_size=config.micro_batch_size_to_train_on
+        config.model_name, batch_size=int(config.micro_batch_size_to_train_on * num_beams)
     )
     audio_shape = mm_processor.get_dummy_audio_shape_for_init(config)
 
@@ -1525,9 +1534,12 @@ def get_kv_cache_annotations(model, config, rng, mesh, page_state: None | PageSt
   """Get a shaped abstraction of the state (including optimizer)"""
 
   def init_kv_cache(model, config):
-    input_shape = (config.micro_batch_size_to_train_on, 1)
+    num_beams = (
+        config.decode_num_beams if getattr(config, "decode_sampling_strategy", "") == "diverse_beam_search" else 1
+    )
+    input_shape = (int(config.micro_batch_size_to_train_on * num_beams), 1)
     image_shape = mm_processor.get_dummy_image_shape_for_init(
-        config.model_name, batch_size=config.micro_batch_size_to_train_on
+        config.model_name, batch_size=int(config.micro_batch_size_to_train_on * num_beams)
     )
     audio_shape = mm_processor.get_dummy_audio_shape_for_init(config)
 
