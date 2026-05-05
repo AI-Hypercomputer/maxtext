@@ -1095,6 +1095,16 @@ class RoutedMoE(nnx.Module):
       return lhs_quantize_dtype, rhs_quantize_dtype
 
     def gmm(inputs, kernel, tiling, group_sizes, expert_assignments, weight_gather_axes):
+      def extract_vma(tensor):
+        type_str = str(jax.typeof(tensor))
+        if "{V:" in type_str:
+          start = type_str.index("{V:") + 3
+          end = type_str.index("}", start)
+          vma_content = type_str[start:end].strip("()")
+          return tuple(sorted(a.strip() for a in vma_content.split(",")))
+
+      lhs_vma_axes = extract_vma(inputs)
+      rhs_vma_axes = extract_vma(kernel)
       if inputs.shape[0] != expert_assignments.shape[0]:
         raise ValueError("The number of input tokens must match the number of expert assignments!")
 
@@ -1120,6 +1130,8 @@ class RoutedMoE(nnx.Module):
               use_qwix_quantization=self.config.use_qwix_quantization,
               use_tokamax_backend=self.config.use_tokamax_gmm,
               weight_gather_axes=weight_gather_axes,
+              lhs_vma_axes=lhs_vma_axes,
+              rhs_vma_axes=rhs_vma_axes,
           )
         else:  # tokamax (unquantized)
           output = tokamax.ragged_dot(
@@ -1142,6 +1154,8 @@ class RoutedMoE(nnx.Module):
             use_qwix_quantization=self.config.use_qwix_quantization,
             use_tokamax_backend=self.config.use_tokamax_gmm,
             weight_gather_axes=weight_gather_axes,
+            lhs_vma_axes=lhs_vma_axes,
+            rhs_vma_axes=rhs_vma_axes,
         )
       else:  # jax.lax.ragged_dot
         output = jax_ragged_dot_gmm(inputs, kernel, tiling, group_sizes, expert_assignments, padding_amount)
@@ -1268,7 +1282,7 @@ class RoutedMoE(nnx.Module):
             P(),  # Handle None or replicate the output
             P(),  # Handle None or replicate the output
         ),
-        check_vma=False,
+        check_vma=self.config.check_vma,
     )
     def wrapper(x, logits, pre_bias_logits, w0, w1, wo, w0_bias, w1_bias, wo_bias, rngs):
       batch_size, sequence_length, _ = x.shape
