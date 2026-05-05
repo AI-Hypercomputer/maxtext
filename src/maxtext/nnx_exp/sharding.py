@@ -1,11 +1,14 @@
 """Explicit sharding helpers for the NNX experimental track."""
 
+from collections.abc import Callable
 from abc import ABC, abstractmethod
 from enum import Enum
 from itertools import chain
 from typing import TypeAlias
 
+from flax import nnx
 import jax
+import jax.numpy as jnp
 import numpy as np
 from jax.sharding import AxisType, PartitionSpec as P
 
@@ -237,3 +240,187 @@ def create_mesh(cfg=None, **overrides):
 
   axis_types = (AxisType.Explicit,) * len(shape)
   return jax.make_mesh(shape, tuple(dims.keys()), axis_types=axis_types)
+
+
+def sharded_init(init_fn: Callable[..., jax.Array], sharding):
+  def init(*args, **kwargs):
+    x = init_fn(*args, **kwargs)
+    return jax.device_put(x, sharding)
+  return init
+
+
+def sharded_constant_init(value, sharding):
+  def init(_key, shape, dtype=jnp.float32):
+    match value:
+      case 0:
+        x = jnp.zeros(shape, dtype=dtype)
+      case 1:
+        x = jnp.ones(shape, dtype=dtype)
+      case _:
+        x = jnp.zeros(shape, dtype=dtype) + jnp.asarray(value, dtype=dtype)
+    return jax.device_put(x, sharding)
+  return init
+
+
+def stamp_sharding(x, sharding_spec):
+  mesh = jax.sharding.get_abstract_mesh()
+  if mesh is None:
+    return x
+  return jax.device_put(jnp.broadcast_to(x, x.shape), sharding_spec)
+
+
+def get_parameter_spec(path: tuple[str | int, ...], shape: tuple[int, ...], sharding: Sharding):
+  path_str = "/".join(str(p) for p in path)
+  
+  if "embed/embedding" in path_str:
+    return sharding.init_weight_spec("embed", ("vocab",), ("embed",))
+  elif "qkv_proj/kernel" in path_str:
+    return sharding.init_weight_spec("qkv_proj", ("embed",), ("qkv_heads", "head_dim"))
+  elif "o_proj/kernel" in path_str:
+    return sharding.init_weight_spec("o_proj", ("heads", "head_dim"), ("embed",))
+  elif "gate_up/kernel" in path_str:
+    return sharding.init_weight_spec("gate_up", ("embed",), ("mlp",))
+  elif "down/kernel" in path_str:
+    return sharding.init_weight_spec("down", ("mlp",), ("embed",))
+  elif "attn_norm/scale" in path_str:
+    return sharding.weight_spec("attn_norm", ("norm",))
+  elif "mlp_norm/scale" in path_str:
+    return sharding.weight_spec("mlp_norm", ("norm",))
+  elif "norm/scale" in path_str:
+    return sharding.weight_spec("final_norm", ("norm",))
+  else:
+    raise ValueError(f"Unknown parameter path: {path_str}")
+
+
+def shard_model_parameters(model: nnx.Module, sharding: Sharding):
+  graphdef, state = nnx.split(model, nnx.Param)
+  
+  fs = state.flat_state()
+  sharded_flat = {}
+  
+  for path, param in zip(fs.paths, fs.leaves):
+    spec = get_parameter_spec(path, param.shape, sharding)
+    print(f"Sharding parameter: {path}, Shape: {param.shape}, Spec: {spec}")
+    sharded_flat[path] = nnx.Param(jax.device_put(param.value, spec))
+    
+  sharded_state = nnx.State.from_flat_path(sharded_flat)
+  nnx.update(model, sharded_state)
+
+
+class LlamaShardingHook:
+  def __init__(self, sharding: Sharding):
+    self.sharding = sharding
+
+  def get_spec(self, name: str):
+    s = self.sharding
+    mesh = jax.sharding.get_abstract_mesh()
+    if mesh is None:
+      return None
+    from jax.sharding import NamedSharding
+    match name:
+      case "embed_tokens":
+        return NamedSharding(mesh, s.sequence_spec("embed_tokens"))
+      case "logits":
+        return NamedSharding(mesh, s.logits_spec("logits"))
+      case "qkv":
+        return NamedSharding(mesh, s.attention_spec("qkv", head_axis="qkv_heads"))
+      case "gate" | "up" | "mlpwi":
+        return NamedSharding(mesh, s.mlp_spec("mlpwi"))
+      case "post_attn":
+        return NamedSharding(mesh, s.sequence_spec("post_attn"))
+      case "post_mlp":
+        return NamedSharding(mesh, s.sequence_spec("post_mlp"))
+      case "key_repeated" | "value_repeated":
+        return NamedSharding(mesh, s.query_spec(name))
+      case _:
+        return None
+
+  def __call__(self, tensor, name: str):
+    s = self.sharding
+    mesh = jax.sharding.get_abstract_mesh()
+    if mesh is None:
+      return tensor
+
+    from jax.sharding import NamedSharding, PartitionSpec as P, reshard
+    
+    match name:
+      case "embed_embedding_init":
+        return sharded_init(tensor, s.init_weight_spec("embed", ("vocab",), ("embed",)))
+      case "qkv_proj_kernel_init":
+        return sharded_init(tensor, s.init_weight_spec("qkv_proj", ("embed",), ("qkv_heads", "head_dim")))
+      case "o_proj_kernel_init":
+        return sharded_init(tensor, s.init_weight_spec("o_proj", ("heads", "head_dim"), ("embed",)))
+      case "gate_up_kernel_init":
+        return sharded_init(tensor, s.init_weight_spec("gate_up", ("embed",), ("mlp",)))
+      case "down_kernel_init":
+        return sharded_init(tensor, s.init_weight_spec("down", ("mlp",), ("embed",)))
+      case "attn_norm_scale_init":
+        return sharded_constant_init(tensor, s.weight_spec("attn_norm", ("norm",)))
+      case "mlp_norm_scale_init":
+        return sharded_constant_init(tensor, s.weight_spec("mlp_norm", ("norm",)))
+      case "final_norm_scale_init":
+        return sharded_constant_init(tensor, s.weight_spec("final_norm", ("norm",)))
+
+      case "qkv_proj_kernel":
+        tp_spec = s.map_axis("qkv_heads", "qkv_proj", TensorType.Weight)
+        spec = P(None, tp_spec)
+        return reshard(tensor, NamedSharding(mesh, spec))
+        
+      case "qkv":
+        return reshard(tensor, NamedSharding(mesh, s.attention_spec("qkv", head_axis="qkv_heads")))
+        
+      case "query":
+        return stamp_sharding(tensor, s.query_spec("query"))
+        
+      case "key":
+        return stamp_sharding(tensor, s.kv_spec("key"))
+        
+      case "value":
+        return stamp_sharding(tensor, s.kv_spec("value"))
+        
+      case "key_repeated":
+        return stamp_sharding(tensor, s.query_spec("key_repeated"))
+        
+      case "value_repeated":
+        return stamp_sharding(tensor, s.query_spec("value_repeated"))
+        
+      case "attn_out":
+        return stamp_sharding(tensor, s.query_spec("attn_out"))
+        
+      case "post_attn":
+        return reshard(tensor, NamedSharding(mesh, s.sequence_spec("post_attn")))
+        
+      case "gate_up_kernel":
+        tp_spec = s.map_axis("mlp", "gate_up", TensorType.Weight)
+        spec = P(None, tp_spec)
+        return reshard(tensor, NamedSharding(mesh, spec))
+        
+      case "gate":
+        return reshard(tensor, NamedSharding(mesh, s.mlp_spec("mlpwi")))
+        
+      case "up":
+        return reshard(tensor, NamedSharding(mesh, s.mlp_spec("mlpwi")))
+        
+      case "mlpwi":
+        return stamp_sharding(tensor, s.mlp_spec("mlpwi"))
+        
+      case "post_mlp":
+        return reshard(tensor, NamedSharding(mesh, s.sequence_spec("post_mlp")))
+        
+      case "attn_input":
+        return stamp_sharding(tensor, s.sequence_spec("attn_input"))
+        
+      case "mlp_input":
+        return stamp_sharding(tensor, s.sequence_spec("mlp_input"))
+        
+      case "embed_tokens":
+        return reshard(tensor, NamedSharding(mesh, s.sequence_spec("embed_tokens")))
+        
+      case "final_norm":
+        return stamp_sharding(tensor, s.sequence_spec("final_norm"))
+        
+      case "logits":
+        return reshard(tensor, NamedSharding(mesh, s.logits_spec("logits")))
+        
+      case _:
+        return tensor
