@@ -4,7 +4,7 @@ from flax import nnx
 import pytest
 
 from maxtext.nnx_exp.models import Llama, LlamaConfig
-from maxtext.nnx_exp.sharding import LlamaSharding, create_mesh
+from maxtext.nnx_exp.sharding import LlamaSharding, create_mesh, LlamaShardingHook
 from maxtext.nnx_exp.infra import (
     apply_remat,
     maybe_apply_remat,
@@ -30,8 +30,9 @@ def test_remat():
     mesh = create_mesh({"ici_dp_parallelism": 1, "ici_fsdp_parallelism": -1, "ici_tensor_parallelism": 1})
     with jax.set_mesh(mesh):
         sharding = LlamaSharding()
+        sharding_hook = LlamaShardingHook(sharding)
         rngs = nnx.Rngs(42)
-        model = Llama(CONFIG, rngs=rngs, sharding=sharding)
+        model = Llama(CONFIG, rngs=rngs, sharding_hook=sharding_hook)
         
         # Apply full remat
         apply_remat(model, "full")
@@ -47,8 +48,9 @@ def test_remat_selective():
     mesh = create_mesh({"ici_dp_parallelism": 1, "ici_fsdp_parallelism": -1, "ici_tensor_parallelism": 1})
     with jax.set_mesh(mesh):
         sharding = LlamaSharding()
+        sharding_hook = LlamaShardingHook(sharding)
         rngs = nnx.Rngs(42)
-        model = Llama(CONFIG, rngs=rngs, sharding=sharding)
+        model = Llama(CONFIG, rngs=rngs, sharding_hook=sharding_hook)
         
         # Apply selective remat
         apply_remat(model, {"save": ["query_proj", "key_proj", "value_proj", "attention_out", "mlpwi"]})
@@ -63,8 +65,9 @@ def test_offload():
     mesh = create_mesh({"ici_dp_parallelism": 1, "ici_fsdp_parallelism": -1, "ici_tensor_parallelism": 1})
     with jax.set_mesh(mesh):
         sharding = LlamaSharding()
+        sharding_hook = LlamaShardingHook(sharding)
         rngs = nnx.Rngs(42)
-        model = Llama(CONFIG, rngs=rngs, sharding=sharding)
+        model = Llama(CONFIG, rngs=rngs, sharding_hook=sharding_hook)
         
         gdef, params = nnx.split(model, nnx.Param)
         
@@ -87,12 +90,13 @@ def test_scan():
     mesh = create_mesh({"ici_dp_parallelism": 1, "ici_fsdp_parallelism": -1, "ici_tensor_parallelism": 1})
     with jax.set_mesh(mesh):
         sharding = LlamaSharding()
+        sharding_hook = LlamaShardingHook(sharding)
         rngs = nnx.Rngs(42)
         
         from maxtext.nnx_exp.models import DecoderLayer
         
         # Create scanned layers
-        blocks = create_scanned_layers(DecoderLayer, CONFIG, CONFIG.num_layers, rngs=rngs, sharding=sharding)
+        blocks = create_scanned_layers(DecoderLayer, CONFIG, CONFIG.num_layers, rngs=rngs, sharding_hook=sharding_hook)
         
         # Mock inputs
         x = jax.device_put(jnp.zeros((2, 32, CONFIG.emb_dim)), sharding.sequence_spec())
@@ -107,12 +111,13 @@ def test_scan_remat():
     mesh = create_mesh({"ici_dp_parallelism": 1, "ici_fsdp_parallelism": -1, "ici_tensor_parallelism": 1})
     with jax.set_mesh(mesh):
         sharding = LlamaSharding()
+        sharding_hook = LlamaShardingHook(sharding)
         rngs = nnx.Rngs(42)
         
         from maxtext.nnx_exp.models import DecoderLayer
         
         # Create scanned remat layers
-        blocks = create_scanned_remat_layers(DecoderLayer, CONFIG, CONFIG.num_layers, rngs=rngs, policy="full", sharding=sharding)
+        blocks = create_scanned_remat_layers(DecoderLayer, CONFIG, CONFIG.num_layers, rngs=rngs, policy="full", sharding_hook=sharding_hook)
         
         x = jax.device_put(jnp.zeros((2, 32, CONFIG.emb_dim)), sharding.sequence_spec())
         positions = jnp.broadcast_to(jnp.arange(32), (2, 32))
@@ -125,8 +130,9 @@ def test_quantization():
     mesh = create_mesh({"ici_dp_parallelism": 1, "ici_fsdp_parallelism": -1, "ici_tensor_parallelism": 1})
     with jax.set_mesh(mesh):
         sharding = LlamaSharding()
+        sharding_hook = LlamaShardingHook(sharding)
         rngs = nnx.Rngs(42)
-        model = Llama(CONFIG, rngs=rngs, sharding=sharding)
+        model = Llama(CONFIG, rngs=rngs, sharding_hook=sharding_hook)
         
         tokens = jnp.zeros((2, 32), dtype=jnp.int32)
         positions = jnp.broadcast_to(jnp.arange(32), (2, 32))
