@@ -63,6 +63,10 @@ class MaxTextVllmSampler(VllmSampler):
     super().__init__(tokenizer=tokenizer, config=config)
     self._converter = converter
 
+  def load_checkpoint(self, path_or_weights):
+    """Override to route through MaxTextVllmSampler.update_params, not the base class."""
+    self.update_params(updated_weights=path_or_weights, filter_types=None)
+
   def update_params(
       self,
       updated_weights,
