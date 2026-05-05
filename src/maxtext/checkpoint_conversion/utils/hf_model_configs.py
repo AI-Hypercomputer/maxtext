@@ -48,6 +48,7 @@ gemma4_26b_dict = {
         "enable_moe_block": True,
         "eos_token_id": 1,
         "expert_intermediate_size": 704,
+        "moe_intermediate_size": 704,
         "final_logit_softcapping": 30.0,
         "global_head_dim": 512,
         "head_dim": 256,

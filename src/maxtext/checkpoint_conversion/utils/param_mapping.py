@@ -2361,10 +2361,7 @@ def GEMMA4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False
               f"{prefix}-mlp-moe_block-MoeBlock_0-gate-kernel": [
                   f"{text_base}.layers.{i}.router.proj.weight" if num_experts > 1 else None for i in hf_indices
               ],
-              f"{prefix}-mlp-moe_block-MoeBlock_0-wi_0": [
-                  f"{text_base}.layers.{i}.experts.gate_up_proj" if num_experts > 1 else None for i in hf_indices
-              ],
-              f"{prefix}-mlp-moe_block-MoeBlock_0-wi_1": [
+              (f"{prefix}-mlp-moe_block-MoeBlock_0-wi_0", f"{prefix}-mlp-moe_block-MoeBlock_0-wi_1"): [
                   f"{text_base}.layers.{i}.experts.gate_up_proj" if num_experts > 1 else None for i in hf_indices
               ],
               f"{prefix}-mlp-moe_block-MoeBlock_0-wo": [
@@ -2440,10 +2437,7 @@ def GEMMA4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False
                 f"{prefix}-mlp-moe_block-MoeBlock_0-gate-kernel": f"{hf_prefix}.router.proj.weight"
                 if num_experts > 1
                 else None,
-                f"{prefix}-mlp-moe_block-MoeBlock_0-wi_0": f"{hf_prefix}.experts.gate_up_proj"
-                if num_experts > 1
-                else None,
-                f"{prefix}-mlp-moe_block-MoeBlock_0-wi_1": f"{hf_prefix}.experts.gate_up_proj"
+                (f"{prefix}-mlp-moe_block-MoeBlock_0-wi_0", f"{prefix}-mlp-moe_block-MoeBlock_0-wi_1"): f"{hf_prefix}.experts.gate_up_proj"
                 if num_experts > 1
                 else None,
                 f"{prefix}-mlp-moe_block-MoeBlock_0-wo": f"{hf_prefix}.experts.down_proj" if num_experts > 1 else None,
@@ -2506,8 +2500,7 @@ def GEMMA4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False
               f"{prefix}-mlp-moe_block-MoeBlock_0-gate-kernel": f"{hf_prefix}.router.proj.weight"
               if num_experts > 1
               else None,
-              f"{prefix}-mlp-moe_block-MoeBlock_0-wi_0": f"{hf_prefix}.experts.gate_up_proj" if num_experts > 1 else None,
-              f"{prefix}-mlp-moe_block-MoeBlock_0-wi_1": f"{hf_prefix}.experts.gate_up_proj" if num_experts > 1 else None,
+              (f"{prefix}-mlp-moe_block-MoeBlock_0-wi_0", f"{prefix}-mlp-moe_block-MoeBlock_0-wi_1"): f"{hf_prefix}.experts.gate_up_proj" if num_experts > 1 else None,
               f"{prefix}-mlp-moe_block-MoeBlock_0-wo": f"{hf_prefix}.experts.down_proj" if num_experts > 1 else None,
               f"{prefix}-mlp-moe_block-MoeBlock_0-per_expert_scale": f"{hf_prefix}.router.per_expert_scale"
               if num_experts > 1
@@ -2558,24 +2551,35 @@ def GEMMA4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False
     # Shift of 1.0 is now folded into Gemma 4 text and vision checkpoint weights
     return input_tensor.reshape(target_shape)
 
-  def split_moe_wi0(input_tensor, target_shape):
-    if saving_to_hf:
-      raise NotImplementedError("Saving to HF for fused gate_up_proj requires custom concat hook.")
-    # input_tensor: [E, 2*FF, H], target: [E, H, FF]
-    _, two_FF, _ = input_tensor.shape
-    FF = two_FF // 2
-    return input_tensor[:, :FF, :].transpose(0, 2, 1)
+  def moe_gate_up_proj_hook(weight, target_shape):
+    """Bidirectional hook for the fused MoE gate+up projection (gate_up_proj).
 
-  def split_moe_wi1(input_tensor, target_shape):
+    For saving_to_hf=True: `weight` is a list [wi_0, wi_1] of MaxText tensors
+    each with shape [E, H, FF]. Concatenates to produce HF gate_up_proj [E, 2*FF, H].
+
+    For saving_to_hf=False (loading from HF): `weight` is the HF gate_up_proj
+    tensor [E, 2*FF, H]. Splits into [gate, up] stacked on the last axis as
+    [E, H, FF, 2] so the caller can slice [..., 0] for wi_0 and [..., 1] for wi_1.
+    """
     if saving_to_hf:
-      raise NotImplementedError("Saving to HF for fused gate_up_proj requires custom concat hook.")
-    _, two_FF, _ = input_tensor.shape
-    FF = two_FF // 2
-    return input_tensor[:, FF:, :].transpose(0, 2, 1)
+      # weight is a list [wi_0, wi_1], each [E, H, FF]
+      wi_0, wi_1 = weight[0], weight[1]
+      gate = jax.numpy.transpose(jax.numpy.array(wi_0), (0, 2, 1))  # [E, FF, H]
+      up = jax.numpy.transpose(jax.numpy.array(wi_1), (0, 2, 1))    # [E, FF, H]
+      return jax.numpy.concatenate([gate, up], axis=1)               # [E, 2*FF, H]
+    else:
+      # weight is gate_up_proj [E, 2*FF, H]
+      FF = weight.shape[1] // 2
+      gate = weight[:, :FF, :].transpose(0, 2, 1)   # [E, H, FF]
+      up = weight[:, FF:, :].transpose(0, 2, 1)     # [E, H, FF]
+      return np.stack([gate, up], axis=-1)           # [E, H, FF, 2]
 
   def reshape_moe_wo(input_tensor, target_shape):
-    # input_tensor: [E, H, FF], target: [E, FF, H]
-    return input_tensor.transpose(0, 2, 1)
+    # MaxText wo: [E, FF, H], HF down_proj: [E, H, FF] — transpose axes 1 and 2
+    if saving_to_hf:
+      return jax.numpy.transpose(jax.numpy.array(input_tensor), (0, 2, 1))  # [E, FF, H] -> [E, H, FF]
+    else:
+      return np.transpose(input_tensor, (0, 2, 1))  # [E, H, FF] -> [E, FF, H]
 
   hooks["params-token_embedder-embedding"] = pad_hf_embedding_layer
   hooks["params-decoder-decoder_norm-scale"] = scale_rmsnorm_layer
@@ -2679,9 +2683,8 @@ def GEMMA4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False
       for key in norm_keys:
         hooks[f"{prefix}-{key}"] = scale_rmsnorm_layer
 
-      # Add these specialized 3D tensor hooks inside the loop
-      hooks[f"{prefix}-mlp-moe_block-MoeBlock_0-wi_0"] = split_moe_wi0
-      hooks[f"{prefix}-mlp-moe_block-MoeBlock_0-wi_1"] = split_moe_wi1
+      # Composite hook for fused gate_up_proj (wi_0 and wi_1 share the same HF key)
+      hooks[(f"{prefix}-mlp-moe_block-MoeBlock_0-wi_0", f"{prefix}-mlp-moe_block-MoeBlock_0-wi_1")] = moe_gate_up_proj_hook
       hooks[f"{prefix}-mlp-moe_block-MoeBlock_0-wo"] = reshape_moe_wo
 
     # Remainder sub-layer prefixes
@@ -2699,9 +2702,8 @@ def GEMMA4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False
         for key in norm_keys:
           hooks[f"{prefix}-{key}"] = scale_rmsnorm_layer
 
-        # Add these specialized 3D tensor hooks inside the loop
-        hooks[f"{prefix}-mlp-moe_block-MoeBlock_0-wi_0"] = split_moe_wi0
-        hooks[f"{prefix}-mlp-moe_block-MoeBlock_0-wi_1"] = split_moe_wi1
+        # Composite hook for fused gate_up_proj (wi_0 and wi_1 share the same HF key)
+        hooks[(f"{prefix}-mlp-moe_block-MoeBlock_0-wi_0", f"{prefix}-mlp-moe_block-MoeBlock_0-wi_1")] = moe_gate_up_proj_hook
         hooks[f"{prefix}-mlp-moe_block-MoeBlock_0-wo"] = reshape_moe_wo
   else:
     for i in range(nlayers):
@@ -2716,9 +2718,8 @@ def GEMMA4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False
       for key in norm_keys:
         hooks[f"{prefix}-{key}"] = scale_rmsnorm_layer
 
-      # Add these specialized 3D tensor hooks inside the loop
-      hooks[f"{prefix}-mlp-moe_block-MoeBlock_0-wi_0"] = split_moe_wi0
-      hooks[f"{prefix}-mlp-moe_block-MoeBlock_0-wi_1"] = split_moe_wi1
+      # Composite hook for fused gate_up_proj (wi_0 and wi_1 share the same HF key)
+      hooks[(f"{prefix}-mlp-moe_block-MoeBlock_0-wi_0", f"{prefix}-mlp-moe_block-MoeBlock_0-wi_1")] = moe_gate_up_proj_hook
       hooks[f"{prefix}-mlp-moe_block-MoeBlock_0-wo"] = reshape_moe_wo
   return hooks
 

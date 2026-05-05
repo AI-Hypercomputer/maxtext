@@ -416,7 +416,10 @@ def _build_single_axis_stacked_tensor(
 
   # The hook function needs the shape of an individual slice, not the full stacked tensor.
   # We calculate it by removing the stacking dimension from the final target shape.
-  mt_slice_shape_list = list(target_shape)
+  # For composite keys, target_shape is a list of shapes; use the first one to determine the
+  # per-slice shape (all components are expected to have the same shape).
+  base_shape = target_shape[0] if isinstance(target_shape, list) else target_shape
+  mt_slice_shape_list = list(base_shape)
   del mt_slice_shape_list[axis_to_stack]
   mt_slice_shape = tuple(mt_slice_shape_list)
 

@@ -779,6 +779,138 @@ def MIXTRAL_HF_WEIGHTS_TO_SHAPE(config):
   return shapes
 
 
+def GEMMA4_HF_WEIGHTS_TO_SHAPE(config):
+  """Generates a shape mapping for HuggingFace Gemma4 parameters.
+
+  Supports both text-only (gemma4-31b dense) and multimodal (gemma4-26b MoE)
+  variants. Shapes are derived from the text_config and optional vision_config
+  sub-dicts.
+  """
+  shapes = {}
+
+  tcfg = config.get("text_config", config)
+  vcfg = config.get("vision_config", {})
+  text_base = "model.language_model" if vcfg else "model"
+
+  hidden_size = tcfg["hidden_size"]
+  num_hidden_layers = tcfg["num_hidden_layers"]
+  num_attention_heads = tcfg["num_attention_heads"]
+  num_key_value_heads = tcfg["num_key_value_heads"]
+  head_dim = tcfg.get("head_dim", hidden_size // num_attention_heads)
+  global_head_dim = tcfg.get("global_head_dim", head_dim)
+  num_global_kv_heads = tcfg.get("num_global_key_value_heads", num_key_value_heads)
+  intermediate_size = tcfg["intermediate_size"]
+  num_experts = tcfg.get("num_experts")
+  expert_intermediate_size = tcfg.get("expert_intermediate_size")
+  vocab_size = tcfg["vocab_size"]
+  # `attention_k_eq_v=True` means global layers share k/v projections (no v_proj)
+  share_kv = tcfg.get("attention_k_eq_v", False)
+
+  # Text embeddings and final norm
+  shapes[f"{text_base}.embed_tokens.weight"] = [vocab_size, hidden_size]
+  shapes[f"{text_base}.norm.weight"] = [hidden_size]
+
+  for i in range(num_hidden_layers):
+    hf_prefix = f"{text_base}.layers.{i}"
+    is_global = i % 6 == 5
+
+    if is_global:
+      q_head_dim = global_head_dim
+      kv_head_dim = global_head_dim
+      n_kv = num_global_kv_heads
+    else:
+      q_head_dim = head_dim
+      kv_head_dim = head_dim
+      n_kv = num_key_value_heads
+
+    q_dim = num_attention_heads * q_head_dim
+    kv_dim = n_kv * kv_head_dim
+
+    # Attention projections
+    shapes[f"{hf_prefix}.self_attn.q_proj.weight"] = [q_dim, hidden_size]
+    shapes[f"{hf_prefix}.self_attn.k_proj.weight"] = [kv_dim, hidden_size]
+    if not (is_global and share_kv):
+      shapes[f"{hf_prefix}.self_attn.v_proj.weight"] = [kv_dim, hidden_size]
+    shapes[f"{hf_prefix}.self_attn.o_proj.weight"] = [hidden_size, q_dim]
+    shapes[f"{hf_prefix}.self_attn.q_norm.weight"] = [q_head_dim]
+    shapes[f"{hf_prefix}.self_attn.k_norm.weight"] = [kv_head_dim]
+
+    # Layer norms
+    shapes[f"{hf_prefix}.input_layernorm.weight"] = [hidden_size]
+    shapes[f"{hf_prefix}.post_attention_layernorm.weight"] = [hidden_size]
+    shapes[f"{hf_prefix}.pre_feedforward_layernorm.weight"] = [hidden_size]
+    shapes[f"{hf_prefix}.post_feedforward_layernorm.weight"] = [hidden_size]
+
+    # Per-layer scalar — stored as a scalar (); squeeze() in _process removes the size-1 dim
+    shapes[f"{hf_prefix}.layer_scalar"] = []
+
+    if num_experts and num_experts > 1 and expert_intermediate_size:
+      # MoE layer
+      shapes[f"{hf_prefix}.pre_feedforward_layernorm_2.weight"] = [hidden_size]
+      shapes[f"{hf_prefix}.post_feedforward_layernorm_1.weight"] = [hidden_size]
+      shapes[f"{hf_prefix}.post_feedforward_layernorm_2.weight"] = [hidden_size]
+      shapes[f"{hf_prefix}.router.scale"] = [hidden_size]
+      shapes[f"{hf_prefix}.router.proj.weight"] = [num_experts, hidden_size]
+      shapes[f"{hf_prefix}.router.per_expert_scale"] = [num_experts]
+      # gate_up_proj: fused [gate; up] along axis 1 -> [E, 2*FF, H]
+      shapes[f"{hf_prefix}.experts.gate_up_proj"] = [num_experts, 2 * expert_intermediate_size, hidden_size]
+      # down_proj: [E, H, FF]
+      shapes[f"{hf_prefix}.experts.down_proj"] = [num_experts, hidden_size, expert_intermediate_size]
+      # Shared expert (dense MLP)
+      shapes[f"{hf_prefix}.mlp.gate_proj.weight"] = [intermediate_size, hidden_size]
+      shapes[f"{hf_prefix}.mlp.up_proj.weight"] = [intermediate_size, hidden_size]
+      shapes[f"{hf_prefix}.mlp.down_proj.weight"] = [hidden_size, intermediate_size]
+    else:
+      # Dense MLP (gemma4-31b or non-MoE layers)
+      shapes[f"{hf_prefix}.mlp.gate_proj.weight"] = [intermediate_size, hidden_size]
+      shapes[f"{hf_prefix}.mlp.up_proj.weight"] = [intermediate_size, hidden_size]
+      shapes[f"{hf_prefix}.mlp.down_proj.weight"] = [hidden_size, intermediate_size]
+
+  # Vision encoder (always present for gemma4 configs)
+  if vcfg:
+    vis_hidden = vcfg["hidden_size"]
+    vis_num_layers = vcfg["num_hidden_layers"]
+    vis_head_dim = vcfg.get("head_dim", 72)
+    vis_intermediate = vcfg["intermediate_size"]
+    vis_patch_size = vcfg["patch_size"]
+    vis_num_channels = 3  # standard RGB
+    vis_pos_emb_size = vcfg.get("position_embedding_size", 10240)
+
+    # Patch embedder
+    shapes["model.vision_tower.patch_embedder.input_proj.weight"] = [
+        vis_hidden,
+        vis_num_channels * vis_patch_size * vis_patch_size,
+    ]
+    # Factorized positional embeddings: (2, pos_emb_size, hidden) in HF
+    shapes["model.vision_tower.patch_embedder.position_embedding_table"] = [2, vis_pos_emb_size, vis_hidden]
+
+    # Input standardization parameters
+    shapes["model.vision_tower.std_scale"] = [vis_hidden]
+    shapes["model.vision_tower.std_bias"] = [vis_hidden]
+
+    # Vision encoder layers
+    for i in range(vis_num_layers):
+      hf_vit = f"model.vision_tower.encoder.layers.{i}"
+      shapes[f"{hf_vit}.self_attn.q_proj.linear.weight"] = [vis_hidden, vis_hidden]
+      shapes[f"{hf_vit}.self_attn.k_proj.linear.weight"] = [vis_hidden, vis_hidden]
+      shapes[f"{hf_vit}.self_attn.v_proj.linear.weight"] = [vis_hidden, vis_hidden]
+      shapes[f"{hf_vit}.self_attn.o_proj.linear.weight"] = [vis_hidden, vis_hidden]
+      shapes[f"{hf_vit}.self_attn.q_norm.weight"] = [vis_head_dim]
+      shapes[f"{hf_vit}.self_attn.k_norm.weight"] = [vis_head_dim]
+      shapes[f"{hf_vit}.input_layernorm.weight"] = [vis_hidden]
+      shapes[f"{hf_vit}.post_attention_layernorm.weight"] = [vis_hidden]
+      shapes[f"{hf_vit}.pre_feedforward_layernorm.weight"] = [vis_hidden]
+      shapes[f"{hf_vit}.post_feedforward_layernorm.weight"] = [vis_hidden]
+      shapes[f"{hf_vit}.mlp.gate_proj.linear.weight"] = [vis_intermediate, vis_hidden]
+      shapes[f"{hf_vit}.mlp.up_proj.linear.weight"] = [vis_intermediate, vis_hidden]
+      shapes[f"{hf_vit}.mlp.down_proj.linear.weight"] = [vis_hidden, vis_intermediate]
+
+    # Vision projector (vision -> text embedding space)
+    shapes["model.embed_vision.embedding_projection.weight"] = [hidden_size, vis_hidden]
+
+  return shapes
+
+
 # {maxtext model name: {hf weight name: hf shape}}
 HF_SHAPE = {
     "gemma2-2b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
@@ -787,6 +919,8 @@ HF_SHAPE = {
     "gemma3-4b": GEMMA3_HF_WEIGHTS_TO_SHAPE,
     "gemma3-12b": GEMMA3_HF_WEIGHTS_TO_SHAPE,
     "gemma3-27b": GEMMA3_HF_WEIGHTS_TO_SHAPE,
+    "gemma4-26b": GEMMA4_HF_WEIGHTS_TO_SHAPE,
+    "gemma4-31b": GEMMA4_HF_WEIGHTS_TO_SHAPE,
     "qwen2.5-1.5b": QWEN_HF_WEIGHTS_TO_SHAPE,
     "qwen2.5-7b": QWEN_HF_WEIGHTS_TO_SHAPE,
     "qwen2.5-14b": QWEN_HF_WEIGHTS_TO_SHAPE,
