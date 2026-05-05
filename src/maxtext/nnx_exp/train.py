@@ -53,8 +53,8 @@ def main():
     rngs = nnx.Rngs(42)
     
     # Generate mock data (needed for quantization tracing)
-    batch_size = 2
-    seq_len = 128
+    batch_size = 1
+    seq_len = 2048
     
     tokens = jnp.zeros((batch_size, seq_len), dtype=jnp.int32)
     targets = jnp.zeros((batch_size, seq_len), dtype=jnp.int32)
@@ -80,7 +80,7 @@ def main():
     
     # 2. Apply Quantization (INT8)
     print("Applying quantization...")
-    model = maybe_quantize(model, "int8", tokens, positions)
+    model = maybe_quantize(model, "", tokens, positions)
     
     # Split model into graphdef and params
     gdef, params = nnx.split(model, nnx.Param)
@@ -99,7 +99,7 @@ def main():
     
     print("Starting training loop...")
     num_steps = 10
-    profile_dir = "gs://bvandermoon-multipod-maxtext/m3_profile_traces/" + datetime.now().strftime("%Y-%m-%d-%H-%M-%S") 
+    profile_dir = "gs://bvandermoon-multipod-maxtext/m3_profile_traces/" + datetime.now().strftime("%Y-%m-%d-%H:%M:%S")
     
     loss = None
     for step in range(num_steps):
@@ -116,6 +116,7 @@ def main():
         loss.block_until_ready()
         print(f"Stopping profiler at step {step}...")
         jax.profiler.stop_trace()
+        print(f"Access profile at {profile_dir}")
 
 if __name__ == "__main__":
   main()

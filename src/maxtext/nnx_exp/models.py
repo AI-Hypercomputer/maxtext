@@ -11,7 +11,7 @@ from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 
 from maxtext.nnx_exp.rope import apply_rope_factors, rope_factors, rope_frequencies
-from maxtext.nnx_exp.sharding import Sharding
+from maxtext.nnx_exp.sharding import Sharding, TensorType
 
 
 _DTYPES = {"float32": jnp.float32, "bfloat16": jnp.bfloat16, "float16": jnp.float16}
@@ -99,7 +99,17 @@ class Attention(nnx.Module):
 
   def __call__(self, x, positions, mask=None):
     s = self.sharding
-    qkv = self.qkv_proj(x, out_sharding=s.attention_spec("qkv", head_axis="qkv_heads"))
+    
+    from jax.sharding import NamedSharding, PartitionSpec as P, reshard
+    
+    qkv_kernel = self.qkv_proj.kernel[...]
+    mesh = jax.sharding.get_abstract_mesh()
+    if mesh is not None:
+      tp_spec = s.map_axis("qkv_heads", "qkv_proj", TensorType.Weight)
+      spec = P(None, tp_spec)
+      qkv_kernel = reshard(qkv_kernel, NamedSharding(mesh, spec))
+      
+    qkv = jnp.tensordot(x, qkv_kernel, axes=((-1,), (0,)), out_sharding=s.attention_spec("qkv", head_axis="qkv_heads"))
     q, k, v = jnp.split(qkv, (self.num_heads, self.num_heads + self.num_kv_heads), axis=-2)
 
     cos, sin = rope_factors(positions, jnp.asarray(self.rope_freq, dtype=jnp.float32), q.ndim, q.dtype)
@@ -154,6 +164,15 @@ class MLP(nnx.Module):
     mlp_spec = self.sharding.mlp_spec("mlpwi")
     gate_kernel, up_kernel = jnp.split(self.gate_up.kernel[...], 2, axis=-1)
     
+    from jax.sharding import NamedSharding, PartitionSpec as P, reshard
+    
+    mesh = jax.sharding.get_abstract_mesh()
+    if mesh is not None:
+      tp_spec = self.sharding.map_axis("mlp", "gate_up", TensorType.Weight)
+      spec = P(None, tp_spec)
+      gate_kernel = reshard(gate_kernel, NamedSharding(mesh, spec))
+      up_kernel = reshard(up_kernel, NamedSharding(mesh, spec))
+    
     # Simple GLU implementation
     gate = jnp.tensordot(x, gate_kernel, axes=((-1,), (0,)), out_sharding=mlp_spec)
     up = jnp.tensordot(x, up_kernel, axes=((-1,), (0,)), out_sharding=mlp_spec)
@@ -185,12 +204,10 @@ class DecoderLayer(nnx.Module):
     self.mlp = MLP(config, rngs=rngs, sharding=sharding)
 
   def __call__(self, x, positions, mask=None):
-    print('running decoder layer call')
     attn_in = _stamp_sharding(self.attn_norm(x), self.sharding.sequence_spec("attn_input"))
     x = _stamp_sharding(x + self.attn(attn_in, positions, mask), self.sharding.sequence_spec("post_attn"))
     mlp_in = _stamp_sharding(self.mlp_norm(x), self.sharding.sequence_spec("mlp_input"))
     x = _stamp_sharding(x + self.mlp(mlp_in), self.sharding.sequence_spec("post_mlp"))
-    print('done with decoder layer call')
     return x
 
 

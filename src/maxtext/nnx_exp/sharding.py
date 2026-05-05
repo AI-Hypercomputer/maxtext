@@ -195,7 +195,8 @@ class LlamaSharding(Sharding):
       case "batch",                            _,                  _:             return "dp"
       case "embed_and_logits_batch",           _,                  _:             return ("dp", "pp")
       case "norm",                             _,                  _:             return ("fsdp", "fsdp_t")
-      case "embed",                            _,                  _:             return ("fsdp", "fsdp_t")
+      case "embed",                            _,                  TensorType.Weight: return ("fsdp", "fsdp_t")
+      case "embed",                            _,                  _:                 return None
       case "vocab",                            _,                  _:             return ("tp", "tp_s")
       case ("heads" | "q_heads" | "kv_heads" | "qkv_heads"), _,    _:             return ("tp", "tp_t")
       case "head_dim",                         _,                  _:             return None
