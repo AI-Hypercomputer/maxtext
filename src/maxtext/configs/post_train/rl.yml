@@ -133,7 +133,7 @@ adam_b2: 0.99 # Exponential decay rate to track the second moment of past gradie
 gradient_clipping_threshold: 0.1
 
 # ====== Evaluation ======
-eval_sampling_strategy: "greedy" # can be "greedy", "standard", or "liberal"
+eval_sampling_strategy: "standard" # can be "greedy", "standard", or "liberal"
 generation_configs:
   greedy:
     eval_temperature: 0.01

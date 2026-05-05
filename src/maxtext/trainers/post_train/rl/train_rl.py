@@ -580,6 +580,14 @@ def rl_train(argv: Sequence[str], kwargs: dict):
           break
         pprint(ele)
 
+  if trainer_config.enable_single_controller and trainer_config.colocated_python_checkpointing:
+    max_logging.log("Registering colocated python array handler")
+    checkpointing_impl = ocp.pathways.CheckpointingImpl.from_options(use_colocated_python=True)
+    ocp.pathways.register_type_handlers(
+        use_single_replica_array_handler=trainer_config.enable_single_replica_ckpt_restoring,
+        checkpointing_impl=checkpointing_impl,
+    )
+
   if trainer_config.debug.rl:
     max_logging.log("Reference Model initialized successfully")
     nnx.display(reference_model)

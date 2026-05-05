@@ -26,15 +26,15 @@ This module provides a config-driven validation entrypoint that:
 			load_parameters_path=<your_maxtext_checkpoint_path> run_name=qwen3_converter_validation \
 			per_device_batch_size=1 max_prefill_predict_length=8 max_target_length=16 steps=1 \
 			scan_layers=true skip_jax_distributed_system=true weight_dtype=bfloat16 \
-			attention=dot_product remat_policy=custom decoder_layer_input=offload \
-			query_proj=offload key_proj=offload value_proj=offload \
 			rollout_tensor_parallelism=4 hbm_utilization_vllm=0.6 async_scheduling=false \
 			prompt="Paris is" hf_access_token=<token>
+
+  For multislice (e.g. 2x128-device slices), additionally pass:
+        num_trainer_slices=1 num_samplers_slices=1
 
 Currently this validator supports qwen3 converter flows.
 """
 
-import functools
 import gc
 import logging
 import os
@@ -43,11 +43,12 @@ from typing import Sequence
 from absl import app
 import jax
 from flax import nnx
+from tunix.rl.reshard import reshard_pytree
 from vllm import LLM
 from vllm import SamplingParams
+import pathwaysutils
 
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE
-from maxtext.configs import pyconfig
 from maxtext.integration.vllm.torchax_converter.base import GREEN
 from maxtext.integration.vllm.torchax_converter.base import RESET
 from maxtext.integration.vllm.torchax_converter.base import timer
@@ -87,23 +88,37 @@ def _clean_device_memory():
   logging.info("Device memory cleanup complete.")
 
 
-def _get_maxtext_model(config):
-  logging.info("Creating model with config: %s", config)
+def validate_converter(argv) -> None:
+  """Run end-to-end validation for MaxText to vLLM weight conversion.
+
+  Device/config split mirrors train_rl.py:
+    - trainer_config uses ici_* parallelism for the MaxText mesh
+    - sampler_config uses rollout_* parallelism for the vLLM mesh
+  Single-slice (num_trainer_slices == -1): trainer and sampler share all devices.
+  Multislice: first num_trainer_slices slices go to MaxText, the next
+  num_samplers_slices slices go to vLLM.
+  """
+  trainer_config, sampler_config, trainer_devices, sampler_devices = (
+      model_creation_utils.setup_configs_and_devices(argv)
+  )
+
+  if not trainer_config.model_name.startswith("qwen3"):
+    raise ValueError(
+        "validate_converter.py currently supports qwen3 models only. "
+        f"Got {trainer_config.model_name}."
+    )
+
+  # In single-slice mode setup_configs_and_devices returns the same object for both.
+  multislice = trainer_devices is not sampler_devices
+
+  logging.info("Creating MaxText model...")
   model, mesh = model_creation_utils.from_pretrained(
-      config,
+      trainer_config,
+      devices=trainer_devices,
       model_mode=MODEL_MODE_AUTOREGRESSIVE,
   )
-  return model, mesh
-
-
-def validate_converter(config) -> None:
-  """Run end-to-end validation for MaxText to vLLM weight conversion."""
-  if not config.model_name.startswith("qwen3"):
-    raise ValueError("validate_converter.py currently supports qwen3 models only. " f"Got {config.model_name}.")
-
-  model, mesh = _get_maxtext_model(config)
   print(f"{GREEN}MaxText model loaded successfully{RESET}")
-  print(f"Model: {config.model_name}")
+  print(f"Model: {trainer_config.model_name}")
   print(f"Mesh: {mesh}")
 
   print("=" * 80)
@@ -116,7 +131,7 @@ def validate_converter(config) -> None:
       logging.info("Name: %s, shape: %s", path_str, leaf.shape)
       logging.info("\tSharding: %s", leaf.sharding)
 
-  converter = Qwen3MaxTextToVLLMConverter(config, mesh)
+  converter = Qwen3MaxTextToVLLMConverter(trainer_config, mesh)
   with timer("Overall Conversion"):
     vllm_state = converter.convert(model_state)
   del model_state
@@ -125,34 +140,27 @@ def validate_converter(config) -> None:
   print("=" * 80)
   print("Loading vLLM model for generation test...")
   print("=" * 80)
-  llm = LLM(
-      model=vllm_model_name_mapping[config.model_name],
-      max_model_len=config.max_target_length,
-      tensor_parallel_size=config.rollout_tensor_parallelism,
-      gpu_memory_utilization=getattr(config, "hbm_utilization_vllm", 0.5),
-      async_scheduling=getattr(config, "async_scheduling", False),
+  # vLLM parallelism is driven by rollout_* params from sampler_config.
+  vllm_kwargs = dict(
+      model=vllm_model_name_mapping[trainer_config.model_name],
+      max_model_len=trainer_config.max_target_length,
+      data_parallel_size=sampler_config.rollout_data_parallelism,
+      tensor_parallel_size=sampler_config.rollout_tensor_parallelism,
+      gpu_memory_utilization=getattr(sampler_config, "hbm_utilization_vllm", 0.5),
+      async_scheduling=getattr(sampler_config, "async_scheduling", False),
   )
+  if multislice:
+    # Pin vLLM to its assigned sampler devices so it doesn't overlap with trainer.
+    vllm_kwargs["additional_config"] = {
+        "sharding": {
+            "sharding_strategy": {
+                "device_indexes": [d.id for d in sampler_devices],
+            }
+        }
+    }
+  llm = LLM(**vllm_kwargs)
   print("\n" + "=" * 80)
   llm_state = llm.llm_engine.model_executor.driver_worker.model_runner.state
-
-  any_src = next(iter(vllm_state.values()))
-  any_src_arr = any_src.value if hasattr(any_src, "value") else any_src
-  any_dst = next(iter(llm_state.values()))
-  same_devices = frozenset(device.id for device in any_src_arr.sharding.mesh.devices.flat) == frozenset(
-      device.id for device in any_dst.sharding.mesh.devices.flat
-  )
-  logging.info(
-      "Weight sync: same_devices=%s (jit=%s, device_put=%s)",
-      same_devices,
-      same_devices,
-      not same_devices,
-  )
-
-  @functools.lru_cache(maxsize=None)
-  def _get_reshard_fn(dst_sharding):
-    if same_devices:
-      return jax.jit(lambda x: x, out_shardings=dst_sharding)
-    return functools.partial(jax.device_put, device=dst_sharding)
 
   with timer(f"Assigning {len(vllm_state)} weights to vLLM model"):
     for key, weight in vllm_state.items():
@@ -161,10 +169,10 @@ def validate_converter(config) -> None:
       assert (
           llm_state[key].shape == weight_array.shape
       ), f"Shape mismatch for {key}: expected {llm_state[key].shape}, got {weight_array.shape}"
-      llm_state[key] = _get_reshard_fn(dst_sharding)(weight_array)
+      llm_state[key] = reshard_pytree(weight_array, dst_sharding, donate_input=False, cache_plan=True)
 
-  sampling_params = SamplingParams(temperature=0.0, max_tokens=10)
-  prompt = getattr(config, "prompt", "Paris is")
+  sampling_params = SamplingParams(temperature=0.0, max_tokens=trainer_config.max_target_length - trainer_config.max_prefill_predict_length)
+  prompt = getattr(trainer_config, "prompt", trainer_config.prompt)
   print("\n" + "=" * 80)
   print("Generation test after weight transfer:")
   with timer("Generation"):
@@ -172,13 +180,13 @@ def validate_converter(config) -> None:
 
 
 def main(argv: Sequence[str]) -> None:
+  pathwaysutils.initialize()
   print(f"JAX devices: {jax.devices()}")
   _setup_jax_compilation_cache()
   _setup_vllm_environment()
   _clean_device_memory()
 
-  config = pyconfig.initialize(argv)
-  validate_converter(config)
+  validate_converter(argv)
 
 
 if __name__ == "__main__":
