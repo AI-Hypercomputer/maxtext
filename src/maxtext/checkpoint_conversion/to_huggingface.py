@@ -121,10 +121,25 @@ def _get_model_mappings(
   if model_name not in PARAM_MAPPING or model_name not in HF_SHAPE or model_name not in HOOK_FNS:
     raise ValueError(f"Mappings not found for model: {model_name}. Available PARAM_MAPPING keys: {PARAM_MAPPING.keys()}")
 
+  param_mapping = PARAM_MAPPING[model_name](hf_config_dict, maxtext_config, scan_layers)
+  hook_fn_mapping = HOOK_FNS[model_name](hf_config_dict, maxtext_config, scan_layers, saving_to_hf=True)
+
+  # Promote composite hook keys into param_mapping.
+  # If HOOK_FNS defines a composite tuple key (e.g., (wi_0, wi_1) for MoE gate_up_proj),
+  # replace the individual entries in param_mapping with one composite entry so
+  # process_maxtext_param receives both tensors together and passes them to the hook.
+  for hook_key in list(hook_fn_mapping.keys()):
+    if isinstance(hook_key, tuple):
+      hf_path = param_mapping.get(hook_key[0])
+      if hf_path is not None:
+        param_mapping[hook_key] = hf_path
+        for k in hook_key:
+          param_mapping.pop(k, None)
+
   return {
-      "param_mapping": PARAM_MAPPING[model_name](hf_config_dict, maxtext_config, scan_layers),
+      "param_mapping": param_mapping,
       "shape_mapping": HF_SHAPE[model_name](hf_config_dict),
-      "hook_fn_mapping": HOOK_FNS[model_name](hf_config_dict, maxtext_config, scan_layers, saving_to_hf=True),
+      "hook_fn_mapping": hook_fn_mapping,
   }
 
 
@@ -288,6 +303,17 @@ def main(argv: Sequence[str]) -> None:
 
   # Validate that checkpoint keys match the parameter mapping
   filtered_map_keys = validate_and_filter_param_map_keys(param_map.keys(), maxtext_state_dict.keys())
+
+  # When not converting a multimodal model, skip vision encoder weights even if
+  # they are present in the checkpoint (e.g. converting text-only from a
+  # multimodal checkpoint).
+  if not config.use_multimodal:
+    filtered_map_keys = [
+        k
+        for k in filtered_map_keys
+        if not (isinstance(k, str) and "vision_encoder" in k)
+        and not (isinstance(k, tuple) and any("vision_encoder" in sub for sub in k))
+    ]
 
   # Iterate through the parameter map to transform and collect weights.
   # This loop handles both simple 1-to-1 mappings and complex N-to-1 mappings

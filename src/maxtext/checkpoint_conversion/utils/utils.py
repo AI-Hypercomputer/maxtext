@@ -99,11 +99,19 @@ def validate_and_filter_param_map_keys(param_map_keys, maxtext_state_keys):
   # 1 Validate: every maxtext state key must be covered by param map
   missing_keys = maxtext_state_keys - flattened_map_keys
   if missing_keys:
+    hint = ""
+    ckpt_has_scanned = any("scanned_blocks" in k for k in missing_keys)
+    map_has_scanned = any("scanned_blocks" in k for k in flattened_map_keys)
+    if ckpt_has_scanned and not map_has_scanned:
+      hint = "\nHint: checkpoint keys contain 'scanned_blocks' but param_map does not — try scan_layers=True."
+    elif map_has_scanned and not ckpt_has_scanned:
+      hint = "\nHint: param_map contains 'scanned_blocks' keys but checkpoint does not — try scan_layers=False."
     raise ValueError(
         "maxtext_state_dict must be a subset of flattened param_map"
         + f"\nparam map\n{param_map_keys}"
         + f"\nmaxtext:\n{maxtext_state_keys}"
         + f"\nmissing keys:\n{missing_keys}"
+        + hint
     )
 
   # 2 Filter: param map may have extra keys
@@ -172,9 +180,7 @@ def _process(hf_path, processed_slice, output_weights, current_hook_fns, hf_shap
   # If hook is unsepecified, use identity
   if current_hook_fns:
     processed_slice = apply_hook_fns(processed_slice, target_hf_shape, current_hook_fns)
-  numpy_slice = convert_jax_weight_to_numpy(processed_slice, save_dtype).squeeze()
-  if numpy_slice.shape != tuple(target_hf_shape):
-    raise ValueError(f"Shape mismatch for {hf_path}: Expect {target_hf_shape}, got {numpy_slice.shape}")
+  numpy_slice = convert_jax_weight_to_numpy(processed_slice, save_dtype).reshape(target_hf_shape)
   output_weights.append((hf_path, numpy_slice))
 
 

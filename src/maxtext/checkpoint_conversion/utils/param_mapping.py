@@ -2240,7 +2240,7 @@ def GEMMA4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False
       "params-token_embedder-embedding": f"{text_base}.embed_tokens.weight",
       "params-decoder-decoder_norm-scale": f"{text_base}.norm.weight",
   }
-  if maxtext_config.use_multimodal and vcfg:
+  if vcfg:
     nvis = vcfg.get("num_hidden_layers", 0)
     mapping.update(
         {
@@ -2577,6 +2577,14 @@ def GEMMA4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False
     # input_tensor: [E, H, FF], target: [E, FF, H]
     return input_tensor.transpose(0, 2, 1)
 
+  def moe_gate_up_hook(weight_list, target_shape):
+    # Inverse of split_moe_wi0/wi1: fuse MaxText wi_0, wi_1 → HF experts.gate_up_proj.
+    # weight_list: [wi_0, wi_1], each [..., H, FF]
+    # Returns: [..., 2*FF, H]
+    wi_0 = jnp.asarray(weight_list[0])
+    wi_1 = jnp.asarray(weight_list[1])
+    return jnp.swapaxes(jnp.concatenate([wi_0, wi_1], axis=-1), -2, -1)
+
   hooks["params-token_embedder-embedding"] = pad_hf_embedding_layer
   hooks["params-decoder-decoder_norm-scale"] = scale_rmsnorm_layer
   # REMOVED: logits_dense-kernel hook (handled by logits_via_embedding: True)
@@ -2631,7 +2639,7 @@ def GEMMA4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False
   # of norm_keys means they perfectly default to the identity mapping.
 
   vcfg = config.get("vision_config", {})
-  if maxtext_config.use_multimodal and vcfg:
+  if vcfg:
     nvis = vcfg.get("num_hidden_layers", 0)
 
     def reshape_vision_patch(x, target_shape):
@@ -2680,8 +2688,13 @@ def GEMMA4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False
         hooks[f"{prefix}-{key}"] = scale_rmsnorm_layer
 
       # Add these specialized 3D tensor hooks inside the loop
-      hooks[f"{prefix}-mlp-moe_block-MoeBlock_0-wi_0"] = split_moe_wi0
-      hooks[f"{prefix}-mlp-moe_block-MoeBlock_0-wi_1"] = split_moe_wi1
+      if saving_to_hf and num_experts > 1:
+        wi0_key = f"{prefix}-mlp-moe_block-MoeBlock_0-wi_0"
+        wi1_key = f"{prefix}-mlp-moe_block-MoeBlock_0-wi_1"
+        hooks[(wi0_key, wi1_key)] = moe_gate_up_hook
+      else:
+        hooks[f"{prefix}-mlp-moe_block-MoeBlock_0-wi_0"] = split_moe_wi0
+        hooks[f"{prefix}-mlp-moe_block-MoeBlock_0-wi_1"] = split_moe_wi1
       hooks[f"{prefix}-mlp-moe_block-MoeBlock_0-wo"] = reshape_moe_wo
 
     # Remainder sub-layer prefixes
@@ -2700,8 +2713,13 @@ def GEMMA4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False
           hooks[f"{prefix}-{key}"] = scale_rmsnorm_layer
 
         # Add these specialized 3D tensor hooks inside the loop
-        hooks[f"{prefix}-mlp-moe_block-MoeBlock_0-wi_0"] = split_moe_wi0
-        hooks[f"{prefix}-mlp-moe_block-MoeBlock_0-wi_1"] = split_moe_wi1
+        if saving_to_hf and num_experts > 1:
+          wi0_key = f"{prefix}-mlp-moe_block-MoeBlock_0-wi_0"
+          wi1_key = f"{prefix}-mlp-moe_block-MoeBlock_0-wi_1"
+          hooks[(wi0_key, wi1_key)] = moe_gate_up_hook
+        else:
+          hooks[f"{prefix}-mlp-moe_block-MoeBlock_0-wi_0"] = split_moe_wi0
+          hooks[f"{prefix}-mlp-moe_block-MoeBlock_0-wi_1"] = split_moe_wi1
         hooks[f"{prefix}-mlp-moe_block-MoeBlock_0-wo"] = reshape_moe_wo
   else:
     for i in range(nlayers):
@@ -2717,8 +2735,13 @@ def GEMMA4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False
         hooks[f"{prefix}-{key}"] = scale_rmsnorm_layer
 
       # Add these specialized 3D tensor hooks inside the loop
-      hooks[f"{prefix}-mlp-moe_block-MoeBlock_0-wi_0"] = split_moe_wi0
-      hooks[f"{prefix}-mlp-moe_block-MoeBlock_0-wi_1"] = split_moe_wi1
+      if saving_to_hf and num_experts > 1:
+        wi0_key = f"{prefix}-mlp-moe_block-MoeBlock_0-wi_0"
+        wi1_key = f"{prefix}-mlp-moe_block-MoeBlock_0-wi_1"
+        hooks[(wi0_key, wi1_key)] = moe_gate_up_hook
+      else:
+        hooks[f"{prefix}-mlp-moe_block-MoeBlock_0-wi_0"] = split_moe_wi0
+        hooks[f"{prefix}-mlp-moe_block-MoeBlock_0-wi_1"] = split_moe_wi1
       hooks[f"{prefix}-mlp-moe_block-MoeBlock_0-wo"] = reshape_moe_wo
   return hooks
 

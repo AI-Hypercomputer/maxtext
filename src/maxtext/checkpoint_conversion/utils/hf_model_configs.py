@@ -47,7 +47,7 @@ gemma4_26b_dict = {
         "dtype": "bfloat16",
         "enable_moe_block": True,
         "eos_token_id": 1,
-        "expert_intermediate_size": 704,
+        "moe_intermediate_size": 704,
         "final_logit_softcapping": 30.0,
         "global_head_dim": 512,
         "head_dim": 256,
@@ -123,7 +123,6 @@ gemma4_31b_dict["text_config"] = gemma4_26b_dict["text_config"].copy()
 gemma4_31b_dict["text_config"].update(
     {
         "enable_moe_block": False,
-        "expert_intermediate_size": None,
         "hidden_size": 5376,
         "intermediate_size": 21504,
         "layer_types": [
