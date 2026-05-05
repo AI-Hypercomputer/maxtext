@@ -921,6 +921,11 @@ class LayoutAndSharding(BaseModel):
       le=1.0,
       description="Allowed percentage of non-sharded parameters.",
   )
+  check_vma: bool = Field(
+      False,
+      description="Enabled check_vma flag in shard_map calls. Recommended for improved performance but only supported "
+      "with auto sharding, megablox kernel, and EP / FSDP parallelisms.",
+  )
   shard_optimizer_over_data: bool = Field(False, description="Enable ZeRO-1 optimizer sharding over the data axis.")
   internal_compile: bool = Field(False, description="Use internal_compile to bypass open-source topology mappings.")
   internal_compile_num_devices: int = Field(-1, description="Number of devices when using internal_compile.")
@@ -2348,6 +2353,26 @@ class MaxTextConfig(
     """This method is a no-op because `pyconfig` handles model-specific config loading."""
     return values
 
+  def _validate_check_vma_is_supported(self):
+    """Validates that check_vma is used with supported settings."""
+    if not self.check_vma:
+      return
+    if self.shard_mode != ShardMode.AUTO:
+      raise ValueError(f"check_vma requires shard_mode='auto', got shard_mode='{self.shard_mode.value}'.")
+    if self.use_tokamax_gmm:
+      raise ValueError("check_vma is not yet supported with tokamax gmm kernel.")
+    if self.use_ragged_sort:
+      raise ValueError("check_vma is not yet supported with ragged sort kernel.")
+    if self.use_ring_of_experts:
+      raise ValueError("check_vma is not yet supported with ring of experts.")
+    _allowed = {"ici_expert_parallelism", "ici_fsdp_parallelism"}
+    active = [name for name in IciParallelism.model_fields if name not in _allowed and getattr(self, name) != 1]
+    if active:
+      raise ValueError(
+          f"check_vma=True only supports ici_expert_parallelism and ici_fsdp_parallelism. "
+          f"Found other ICI axes enabled: {active}."
+      )
+
   def validate_ragged_buffer_factor(self):
     if self.ragged_buffer_factor <= 0:
       return  # Nothing to validate if not using ragged buffer factor
@@ -3200,6 +3225,8 @@ class MaxTextConfig(
           "incompatibility between tokamax's GroupSizes vmap_rule and JAX's scan batching. "
           "Please set use_tokamax_gmm=False."
       )
+
+    self._validate_check_vma_is_supported()
 
     # Final string-to-enum conversions if they haven't been coerced by pydantic yet.
     if isinstance(self.decoder_block, str):
