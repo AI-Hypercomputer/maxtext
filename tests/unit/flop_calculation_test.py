@@ -659,6 +659,140 @@ class FlopCalculation(parameterized.TestCase):
 
     self.assertAlmostEqual(learnable_weight_tflops, expected_learnable_tflops, places=5)
 
+  def test_calculate_gemma4_small_tflops_e2b(self):
+    """E2B: KV sharing (20 of 35 layers), double-wide MLP on shared, period-5 pattern, PLE."""
+    config = MagicMock()
+    config.model_name = "gemma4-e2b"
+    config.per_device_batch_size = 1
+    config.max_target_length = 2048
+    config.sliding_window_size = 512
+    config.num_query_heads = 8
+    config.num_kv_heads = 1
+    config.head_dim = 256
+    config.global_head_dim = 512
+    config.global_num_kv_heads = 0  # falls back to num_kv_heads
+    config.num_decoder_layers = 35
+    config.num_kv_shared_layers = 20
+    config.use_double_wide_mlp = True
+    config.emb_dim = 1536
+    config.mlp_dim = 6144
+    config.mlp_activations = ["gelu", "linear"]
+    config.hidden_size_per_layer_input = 256
+
+    embedding_flops = 12345
+    attn_tflops, learn_tflops = maxtext_utils.calculate_gemma4_small_tflops_training_per_device(config, embedding_flops)
+
+    b = config.per_device_batch_size
+    s = config.max_target_length
+    w = min(config.sliding_window_size, s)
+    h = config.num_query_heads
+    d = config.head_dim
+    gd = config.global_head_dim
+
+    # E2B period-5 -> 7 global, 28 local; KV sharing starts at layer 15
+    # so layers 15..34 are shared. Global layers are i=4,9,14,19,24,29,34
+    # -> 4 of those 7 global are shared, 3 are unshared.
+    # Local 28 total, 16 shared, 12 unshared.
+    num_global = 7
+    num_local = 28
+    num_global_unshared = 3
+    num_local_unshared = 12
+
+    expected_attn = num_global * 2 * b * s * s * h * gd + num_local * 4 * b * (s * w - 0.5 * w**2) * h * d
+    expected_attn_tflops = expected_attn * 3 / 10**12
+    self.assertAlmostEqual(attn_tflops, expected_attn_tflops, places=5)
+
+    qo_global_per_layer = 2 * (2 * b * s * config.emb_dim * h * gd)
+    qo_local_per_layer = 2 * (2 * b * s * config.emb_dim * h * d)
+    kv_global = 2 * b * s * config.emb_dim * (2 * config.num_kv_heads) * gd
+    kv_local = 2 * b * s * config.emb_dim * (2 * config.num_kv_heads) * d
+
+    projection_flops = (
+        num_global * qo_global_per_layer
+        + num_local * qo_local_per_layer
+        + num_global_unshared * kv_global
+        + num_local_unshared * kv_local
+    )
+
+    ffn_per_layer = 2 * b * s * config.mlp_dim * config.emb_dim * 3  # gate+up (2 acts) + down
+    num_unshared = config.num_decoder_layers - config.num_kv_shared_layers
+    # use_double_wide_mlp doubles ffn on shared layers
+    ffn_flops = num_unshared * ffn_per_layer + config.num_kv_shared_layers * 2 * ffn_per_layer
+
+    ple = config.hidden_size_per_layer_input
+    ple_flops = 2 * b * s * config.emb_dim * (config.num_decoder_layers * ple) + config.num_decoder_layers * (
+        2 * 2 * b * s * config.emb_dim * ple
+    )
+
+    expected_learn = (projection_flops + ffn_flops + ple_flops + embedding_flops) * 3 / 10**12
+    self.assertAlmostEqual(learn_tflops, expected_learn, places=5)
+
+  def test_calculate_gemma4_small_tflops_e4b(self):
+    """E4B: KV sharing (18 of 42 layers), no double-wide MLP, period-6, PLE."""
+    config = MagicMock()
+    config.model_name = "gemma4-e4b"
+    config.per_device_batch_size = 1
+    config.max_target_length = 2048
+    config.sliding_window_size = 512
+    config.num_query_heads = 8
+    config.num_kv_heads = 2
+    config.head_dim = 256
+    config.global_head_dim = 512
+    config.global_num_kv_heads = 0
+    config.num_decoder_layers = 42
+    config.num_kv_shared_layers = 18
+    config.use_double_wide_mlp = False
+    config.emb_dim = 2560
+    config.mlp_dim = 10240
+    config.mlp_activations = ["gelu", "linear"]
+    config.hidden_size_per_layer_input = 256
+
+    embedding_flops = 99999
+    attn_tflops, learn_tflops = maxtext_utils.calculate_gemma4_small_tflops_training_per_device(config, embedding_flops)
+
+    b = config.per_device_batch_size
+    s = config.max_target_length
+    w = min(config.sliding_window_size, s)
+    h = config.num_query_heads
+    d = config.head_dim
+    gd = config.global_head_dim
+
+    # E4B period-6 -> 7 global, 35 local; sharing starts at layer 24.
+    # Global layers are i=5,11,17,23,29,35,41 -> 3 of those 7 global are shared,
+    # 4 unshared. Local 35 total, 15 shared, 20 unshared.
+    num_global = 7
+    num_local = 35
+    num_global_unshared = 4
+    num_local_unshared = 20
+
+    expected_attn = num_global * 2 * b * s * s * h * gd + num_local * 4 * b * (s * w - 0.5 * w**2) * h * d
+    expected_attn_tflops = expected_attn * 3 / 10**12
+    self.assertAlmostEqual(attn_tflops, expected_attn_tflops, places=5)
+
+    qo_global_per_layer = 2 * (2 * b * s * config.emb_dim * h * gd)
+    qo_local_per_layer = 2 * (2 * b * s * config.emb_dim * h * d)
+    kv_global = 2 * b * s * config.emb_dim * (2 * config.num_kv_heads) * gd
+    kv_local = 2 * b * s * config.emb_dim * (2 * config.num_kv_heads) * d
+
+    projection_flops = (
+        num_global * qo_global_per_layer
+        + num_local * qo_local_per_layer
+        + num_global_unshared * kv_global
+        + num_local_unshared * kv_local
+    )
+
+    ffn_per_layer = 2 * b * s * config.mlp_dim * config.emb_dim * 3
+    # No double-wide -> all 42 layers use plain ffn_per_layer
+    ffn_flops = config.num_decoder_layers * ffn_per_layer
+
+    ple = config.hidden_size_per_layer_input
+    ple_flops = 2 * b * s * config.emb_dim * (config.num_decoder_layers * ple) + config.num_decoder_layers * (
+        2 * 2 * b * s * config.emb_dim * ple
+    )
+
+    expected_learn = (projection_flops + ffn_flops + ple_flops + embedding_flops) * 3 / 10**12
+    self.assertAlmostEqual(learn_tflops, expected_learn, places=5)
+
   def test_calculate_routed_and_shared_ffn_tflops_per_device(self):
     """Test calculate_routed_and_shared_ffn_tflops_per_device."""
     config = MagicMock()

@@ -140,6 +140,8 @@ GEMMA_CONFIGS = [
     os.path.join(CONFIGS_DIR, "models", "gemma3-4b.yml"),
     os.path.join(CONFIGS_DIR, "models", "gemma3-12b.yml"),
     os.path.join(CONFIGS_DIR, "models", "gemma3-27b.yml"),
+    os.path.join(CONFIGS_DIR, "models", "gemma4-e2b.yml"),
+    os.path.join(CONFIGS_DIR, "models", "gemma4-e4b.yml"),
 ]
 
 
