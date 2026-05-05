@@ -199,7 +199,6 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
             engine_kwargs={
                 "max_model_len": cache_config_or_size,
                 "model": rollout_config.rollout_vllm_model_version,
-                "swap_space": rollout_config.rollout_vllm_swap_space_size_gb,
                 # Async scheduling causes KeyError in dp_scheduler on slow models
                 # (30B+) where inference latency exceeds the scheduler's window.
                 "async_scheduling": rollout_config.rollout_vllm_async_scheduling,
