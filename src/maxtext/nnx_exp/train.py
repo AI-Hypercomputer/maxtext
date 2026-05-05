@@ -8,7 +8,7 @@ from flax import nnx
 import optax
 
 from maxtext.nnx_exp.models import Llama, LlamaConfig
-from maxtext.nnx_exp.sharding import LlamaSharding, create_mesh
+from maxtext.nnx_exp.sharding import LlamaSharding, create_mesh, LlamaShardingHook, shard_model_parameters
 from maxtext.nnx_exp.infra import (
     apply_remat,
     maybe_quantize,
@@ -70,8 +70,9 @@ def main():
     from jax.sharding import NamedSharding
     one_hot_targets = jax.device_put(one_hot_targets, NamedSharding(mesh, sharding.logits_spec()))
 
-    # Initialize model
-    model = Llama(config, rngs=rngs, sharding=sharding)
+    # Initialize model with sharding callback hook (handles both Initializer-Time weight sharding and Activation sharding)
+    sharding_hook = LlamaShardingHook(sharding)
+    model = Llama(config, rngs=rngs, sharding_hook=sharding_hook)
     print(f"Embedding sharding: {model.embed.embedding.sharding}")
     
     # 1. Apply Rematerialization

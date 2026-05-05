@@ -11,34 +11,9 @@ from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 
 from maxtext.nnx_exp.rope import apply_rope_factors, rope_factors, rope_frequencies
-from maxtext.nnx_exp.sharding import Sharding, TensorType
 
 
 _DTYPES = {"float32": jnp.float32, "bfloat16": jnp.bfloat16, "float16": jnp.float16}
-
-
-def _sharded_init(init_fn: Callable[..., jax.Array], sharding):
-  def init(*args, **kwargs):
-    x = init_fn(*args, **kwargs)
-    return jax.device_put(x, sharding)
-  return init
-
-
-def _sharded_constant_init(value, sharding):
-  def init(_key, shape, dtype=jnp.float32):
-    match value:
-      case 0:
-        x = jnp.zeros(shape, dtype=dtype)
-      case 1:
-        x = jnp.ones(shape, dtype=dtype)
-      case _:
-        x = jnp.zeros(shape, dtype=dtype) + jnp.asarray(value, dtype=dtype)
-    return jax.device_put(x, sharding)
-  return init
-
-
-def _stamp_sharding(x, sharding):
-  return jax.device_put(jnp.broadcast_to(x, x.shape), sharding)
 
 
 @dataclass
@@ -62,14 +37,14 @@ class LlamaConfig:
 
 
 class Attention(nnx.Module):
-  def __init__(self, config: LlamaConfig, *, rngs: nnx.Rngs, sharding: Sharding):
+  def __init__(self, config: LlamaConfig, *, rngs: nnx.Rngs, sharding_hook: Callable = None):
     self.num_heads = config.num_heads
     self.num_kv_heads = config.num_kv_heads
     self.head_dim = config.head_dim
     self.kv_repeat = config.num_heads // config.num_kv_heads
-    self.sharding = sharding
     self.scale = config.head_dim ** -0.5
     self.rope_freq = tuple(np.asarray(rope_frequencies(config.head_dim, config.rope_max_timescale), dtype=np.float32))
+    self.sharding_hook = sharding_hook or (lambda x, name: x)
 
     dt = _DTYPES[config.dtype]
     kernel_init = nnx.initializers.lecun_normal()
@@ -79,10 +54,7 @@ class Attention(nnx.Module):
       use_bias=False,
       dtype=dt,
       rngs=rngs,
-      kernel_init=_sharded_init(
-        kernel_init,
-        sharding.init_weight_spec("qkv_proj", ("embed",), ("qkv_heads", "head_dim")),
-      ),
+      kernel_init=self.sharding_hook(kernel_init, "qkv_proj_kernel_init"),
     )
     self.o_proj = nnx.LinearGeneral(
       (config.num_heads, config.head_dim),
@@ -91,35 +63,28 @@ class Attention(nnx.Module):
       use_bias=False,
       dtype=dt,
       rngs=rngs,
-      kernel_init=_sharded_init(
-        kernel_init,
-        sharding.init_weight_spec("o_proj", ("heads", "head_dim"), ("embed",)),
-      ),
+      kernel_init=self.sharding_hook(kernel_init, "o_proj_kernel_init"),
     )
 
   def __call__(self, x, positions, mask=None):
-    s = self.sharding
-    
-    from jax.sharding import NamedSharding, PartitionSpec as P, reshard
+    hook = self.sharding_hook
     
     qkv_kernel = self.qkv_proj.kernel[...]
-    mesh = jax.sharding.get_abstract_mesh()
-    if mesh is not None:
-      tp_spec = s.map_axis("qkv_heads", "qkv_proj", TensorType.Weight)
-      spec = P(None, tp_spec)
-      qkv_kernel = reshard(qkv_kernel, NamedSharding(mesh, spec))
+    qkv_kernel = hook(qkv_kernel, "qkv_proj_kernel")
       
-    qkv = jnp.tensordot(x, qkv_kernel, axes=((-1,), (0,)), out_sharding=s.attention_spec("qkv", head_axis="qkv_heads"))
+    qkv = hook(jnp.tensordot(x, qkv_kernel, axes=((-1,), (0,))), "qkv")
     q, k, v = jnp.split(qkv, (self.num_heads, self.num_heads + self.num_kv_heads), axis=-2)
 
     cos, sin = rope_factors(positions, jnp.asarray(self.rope_freq, dtype=jnp.float32), q.ndim, q.dtype)
-    q = checkpoint_name(_stamp_sharding(apply_rope_factors(q, cos, sin), s.query_spec("query")), "query_proj")
-    k = checkpoint_name(_stamp_sharding(apply_rope_factors(k, cos, sin), s.kv_spec("key")), "key_proj")
-    v = checkpoint_name(_stamp_sharding(v, s.kv_spec("value")), "value_proj")
+    q = checkpoint_name(hook(apply_rope_factors(q, cos, sin), "query"), "query_proj")
+    k = checkpoint_name(hook(apply_rope_factors(k, cos, sin), "key"), "key_proj")
+    v = checkpoint_name(hook(v, "value"), "value_proj")
 
     if self.kv_repeat != 1:
-      k = jnp.repeat(k, self.kv_repeat, axis=-2, out_sharding=s.query_spec("key_repeated"))
-      v = jnp.repeat(v, self.kv_repeat, axis=-2, out_sharding=s.query_spec("value_repeated"))
+      k_sharding = hook.get_spec("key_repeated") if hasattr(hook, "get_spec") else None
+      v_sharding = hook.get_spec("value_repeated") if hasattr(hook, "get_spec") else None
+      k = hook(jnp.repeat(k, self.kv_repeat, axis=-2, out_sharding=k_sharding), "key_repeated")
+      v = hook(jnp.repeat(v, self.kv_repeat, axis=-2, out_sharding=v_sharding), "value_repeated")
 
     out = jax.nn.dot_product_attention(
       q * self.scale,
@@ -128,13 +93,14 @@ class Attention(nnx.Module):
       mask=mask,
       is_causal=True,
     )
-    out = checkpoint_name(_stamp_sharding(out, s.query_spec("attn_out")), "attention_out")
-    return self.o_proj(out, out_sharding=s.sequence_spec("post_attn"))
+    out = checkpoint_name(hook(out, "attn_out"), "attention_out")
+    out_sharding = hook.get_spec("post_attn") if hasattr(hook, "get_spec") else None
+    return hook(self.o_proj(out, out_sharding=out_sharding), "post_attn")
 
 
 class MLP(nnx.Module):
-  def __init__(self, config: LlamaConfig, *, rngs: nnx.Rngs, sharding: Sharding):
-    self.sharding = sharding
+  def __init__(self, config: LlamaConfig, *, rngs: nnx.Rngs, sharding_hook: Callable = None):
+    self.sharding_hook = sharding_hook or (lambda x, name: x)
     dt = _DTYPES[config.dtype]
     kernel_init = nnx.initializers.lecun_normal()
     self.gate_up = nnx.Linear(
@@ -143,10 +109,7 @@ class MLP(nnx.Module):
       use_bias=False,
       dtype=dt,
       rngs=rngs,
-      kernel_init=_sharded_init(
-        kernel_init,
-        sharding.init_weight_spec("gate_up", ("embed",), ("mlp",)),
-      ),
+      kernel_init=self.sharding_hook(kernel_init, "gate_up_kernel_init"),
     )
     self.down = nnx.Linear(
       config.mlp_dim,
@@ -154,67 +117,59 @@ class MLP(nnx.Module):
       use_bias=False,
       dtype=dt,
       rngs=rngs,
-      kernel_init=_sharded_init(
-        kernel_init,
-        sharding.init_weight_spec("down", ("mlp",), ("embed",)),
-      ),
+      kernel_init=self.sharding_hook(kernel_init, "down_kernel_init"),
     )
 
   def __call__(self, x):
-    mlp_spec = self.sharding.mlp_spec("mlpwi")
+    hook = self.sharding_hook
     gate_kernel, up_kernel = jnp.split(self.gate_up.kernel[...], 2, axis=-1)
     
-    from jax.sharding import NamedSharding, PartitionSpec as P, reshard
+    gate_kernel = hook(gate_kernel, "gate_up_kernel")
+    up_kernel = hook(up_kernel, "gate_up_kernel")
     
-    mesh = jax.sharding.get_abstract_mesh()
-    if mesh is not None:
-      tp_spec = self.sharding.map_axis("mlp", "gate_up", TensorType.Weight)
-      spec = P(None, tp_spec)
-      gate_kernel = reshard(gate_kernel, NamedSharding(mesh, spec))
-      up_kernel = reshard(up_kernel, NamedSharding(mesh, spec))
-    
-    # Simple GLU implementation
-    gate = jnp.tensordot(x, gate_kernel, axes=((-1,), (0,)), out_sharding=mlp_spec)
-    up = jnp.tensordot(x, up_kernel, axes=((-1,), (0,)), out_sharding=mlp_spec)
+    gate = hook(jnp.tensordot(x, gate_kernel, axes=((-1,), (0,))), "gate")
+    up = hook(jnp.tensordot(x, up_kernel, axes=((-1,), (0,))), "up")
     hidden = jax.nn.silu(gate) * up
     
-    hidden = checkpoint_name(_stamp_sharding(hidden, mlp_spec), "mlpwi")
-    return self.down(hidden, out_sharding=self.sharding.sequence_spec("post_mlp"))
+    hidden = checkpoint_name(hook(hidden, "mlpwi"), "mlpwi")
+    out_sharding = hook.get_spec("post_mlp") if hasattr(hook, "get_spec") else None
+    return hook(self.down(hidden, out_sharding=out_sharding), "post_mlp")
 
 
 class DecoderLayer(nnx.Module):
-  def __init__(self, config: LlamaConfig, *, rngs: nnx.Rngs, sharding: Sharding):
-    self.sharding = sharding
+  def __init__(self, config: LlamaConfig, *, rngs: nnx.Rngs, sharding_hook: Callable = None):
+    self.sharding_hook = sharding_hook or (lambda x, name: x)
     dt = _DTYPES[config.dtype]
     self.attn_norm = nnx.RMSNorm(
       config.emb_dim,
       epsilon=config.norm_eps,
       dtype=dt,
       rngs=rngs,
-      scale_init=_sharded_constant_init(1, sharding.weight_spec("attn_norm", ("norm",))),
+      scale_init=self.sharding_hook(1, "attn_norm_scale_init"),
     )
-    self.attn = Attention(config, rngs=rngs, sharding=sharding)
+    self.attn = Attention(config, rngs=rngs, sharding_hook=sharding_hook)
     self.mlp_norm = nnx.RMSNorm(
       config.emb_dim,
       epsilon=config.norm_eps,
       dtype=dt,
       rngs=rngs,
-      scale_init=_sharded_constant_init(1, sharding.weight_spec("mlp_norm", ("norm",))),
+      scale_init=self.sharding_hook(1, "mlp_norm_scale_init"),
     )
-    self.mlp = MLP(config, rngs=rngs, sharding=sharding)
+    self.mlp = MLP(config, rngs=rngs, sharding_hook=sharding_hook)
 
   def __call__(self, x, positions, mask=None):
-    attn_in = _stamp_sharding(self.attn_norm(x), self.sharding.sequence_spec("attn_input"))
-    x = _stamp_sharding(x + self.attn(attn_in, positions, mask), self.sharding.sequence_spec("post_attn"))
-    mlp_in = _stamp_sharding(self.mlp_norm(x), self.sharding.sequence_spec("mlp_input"))
-    x = _stamp_sharding(x + self.mlp(mlp_in), self.sharding.sequence_spec("post_mlp"))
+    hook = self.sharding_hook
+    attn_in = hook(self.attn_norm(x), "attn_input")
+    x = hook(x + self.attn(attn_in, positions, mask), "post_attn")
+    mlp_in = hook(self.mlp_norm(x), "mlp_input")
+    x = hook(x + self.mlp(mlp_in), "post_mlp")
     return x
 
 
 class Llama(nnx.Module):
-  def __init__(self, config: LlamaConfig, *, rngs: nnx.Rngs, sharding: Sharding):
-    self.sharding = sharding
+  def __init__(self, config: LlamaConfig, *, rngs: nnx.Rngs, sharding_hook: Callable = None):
     self.config = config
+    self.sharding_hook = sharding_hook or (lambda x, name: x)
     dt = _DTYPES[config.dtype]
     embedding_init = nnx.initializers.variance_scaling(1.0, "fan_in", "normal", out_axis=0)
     self.embed = nnx.Embed(
@@ -222,34 +177,37 @@ class Llama(nnx.Module):
       config.emb_dim,
       dtype=dt,
       rngs=rngs,
-      embedding_init=_sharded_init(embedding_init, sharding.init_weight_spec("embed", ("vocab",), ("embed",))),
+      embedding_init=self.sharding_hook(embedding_init, "embed_embedding_init"),
     )
-    self.layers = nnx.Sequential(*[DecoderLayer(config, rngs=rngs, sharding=sharding) for _ in range(config.num_layers)])
+    self.layers = nnx.Sequential(*[DecoderLayer(config, rngs=rngs, sharding_hook=sharding_hook) for _ in range(config.num_layers)])
     self.norm = nnx.RMSNorm(
       config.emb_dim,
       epsilon=config.norm_eps,
       dtype=dt,
       rngs=rngs,
-      scale_init=_sharded_constant_init(1, sharding.weight_spec("final_norm", ("norm",))),
+      scale_init=self.sharding_hook(1, "final_norm_scale_init"),
     )
 
   def embed_tokens(self, tokens):
-    return self.embed.embedding.at[tokens].get(
-      mode="promise_in_bounds",
-      out_sharding=self.sharding.sequence_spec("embed_tokens"),
+    hook = self.sharding_hook
+    out_sharding = hook.get_spec("embed_tokens") if hasattr(hook, "get_spec") else None
+    return hook(
+      self.embed.embedding.at[tokens].get(mode="promise_in_bounds", out_sharding=out_sharding),
+      "embed_tokens"
     )
 
   def __call__(self, tokens, positions, mask=None):
+    hook = self.sharding_hook
     x = self.embed_tokens(tokens)
     for layer in self.layers.layers:
       x = layer(x, positions, mask)
-    x = _stamp_sharding(self.norm(x), self.sharding.sequence_spec("final_norm"))
+    x = hook(self.norm(x), "final_norm")
     
-    # Compute logits by sharing weights with embedding
+    out_sharding = hook.get_spec("logits") if hasattr(hook, "get_spec") else None
     logits = jax.lax.dot_general(
       x,
       self.embed.embedding.T,
       (((x.ndim - 1,), (0,)), ((), ())),
-      out_sharding=self.sharding.logits_spec("logits")
+      out_sharding=out_sharding,
     )
-    return logits
+    return hook(logits, "logits")
