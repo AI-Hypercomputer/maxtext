@@ -2329,11 +2329,10 @@ class MaxTextConfig(
       raise ValueError("Currently we only support ragged buffer factor with ragged a2a approach.")
 
   def validate_ragged_sort(self):
-    pass
-    # if not self.use_ragged_sort:
-    #   return
-    # if not self.use_ring_of_experts:
-    #   raise ValueError("Ragged sorting kernels only work when use_ring_of_experts=True.")
+    if not self.use_ragged_sort:
+      return
+    if not self.use_ring_of_experts:
+      raise ValueError("Ragged sorting kernels only work when use_ring_of_experts=True.")
 
   @model_validator(mode="after")
   def set_derived_and_validate_values(self) -> "MaxTextConfig":
