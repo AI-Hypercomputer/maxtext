@@ -43,6 +43,8 @@ import qwix
 from qwix.contrib.sparsity import sparsity_module
 import qwix.pallas as qpl
 import tokamax
+from tokamax import config as tokamax_config
+from tokamax._src.ops.ragged_dot.pallas_mosaic_tpu import PallasMosaicTpuRaggedDot, Config
 
 set_xla_metadata = xla_metadata.set_xla_metadata
 
@@ -1121,14 +1123,25 @@ class RoutedMoE(nnx.Module):
               weight_gather_axes=weight_gather_axes,
           )
         else:  # tokamax (unquantized)
-          output = tokamax.ragged_dot(
-              lhs=inputs,
-              rhs=kernel,
-              group_sizes=tokamax_group_sizes,
-              precision=jax.lax.Precision.DEFAULT,
-              preferred_element_type=self.dtype,
-              implementation="mosaic",
-          )
+          if self.config.tokamax_gmm_autotune:
+            with tokamax_config.autotuning_cache_miss_fallback("autotune"):
+              output = tokamax.ragged_dot(
+                  lhs=inputs,
+                  rhs=kernel,
+                  group_sizes=tokamax_group_sizes,
+                  precision=jax.lax.Precision.DEFAULT,
+                  preferred_element_type=self.dtype,
+                  implementation="mosaic",
+              )
+          else:
+            output = tokamax.ragged_dot(
+                lhs=inputs,
+                rhs=kernel,
+                group_sizes=tokamax_group_sizes,
+                precision=jax.lax.Precision.DEFAULT,
+                preferred_element_type=self.dtype,
+                implementation="mosaic",
+            )
       elif self.config.megablox:  # Older forked megablox
         output = mblx.gmm(
             lhs=inputs,

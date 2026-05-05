@@ -563,6 +563,7 @@ class Attention(BaseModel):
       False,
       description="Whether to use the Tokamax library for GMM kernel implementation.",
   )
+  tokamax_gmm_autotune: bool = Field(False, description="Whether to use tokamax auto-tuner for GMM.")
   ragged_block_size: int = Field(256, description="Block size for ragged attention.")
   enable_padding_causal_mask: bool = Field(True, description="Temporary flag for TE padding.")
   use_tokamax_splash: bool = Field(False, description="Whether to use tokamax splash attention.")
