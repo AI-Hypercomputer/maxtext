@@ -21,20 +21,19 @@ This module provides a config-driven validation entrypoint that:
 4. assigns the converted weights before running a short generation check.
 
 	python -m maxtext.integration.vllm.torchax_converter.validate_converter \
-			src/maxtext/configs/base.yml model_name=qwen3-30b-a3b \
+			src/maxtext/configs/post_train/rl.yml model_name=qwen3-30b-a3b \
 			tokenizer_type=huggingface tokenizer_path=Qwen/Qwen3-30B-A3B \
 			load_parameters_path=<your_maxtext_checkpoint_path> run_name=qwen3_converter_validation \
 			per_device_batch_size=1 max_prefill_predict_length=8 max_target_length=16 steps=1 \
 			scan_layers=true skip_jax_distributed_system=true weight_dtype=bfloat16 \
-			attention=dot_product remat_policy=custom decoder_layer_input=offload \
-			query_proj=offload key_proj=offload value_proj=offload \
 			rollout_tensor_parallelism=4 hbm_utilization_vllm=0.6 async_scheduling=false \
-			prompt="Paris is" hf_access_token=<token>
+			prompt="Paris is" hf_access_token=<token> use_chat_template=true
+  For multislice (e.g. 2x128-device slices), additionally pass:
+        num_trainer_slices=1 num_samplers_slices=1
 
 Currently this validator supports: qwen3-30b-a3b, qwen3-30b-a3b-base, qwen3-235b-a22b, gemma4-26b.
 """
 
-import functools
 import gc
 import logging
 import os
@@ -44,11 +43,12 @@ from absl import app
 import jax
 from flax import nnx
 import transformers
+from tunix.rl.reshard import reshard_pytree
 from vllm import LLM
 from vllm import SamplingParams
+import pathwaysutils
 
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE
-from maxtext.configs import pyconfig
 from maxtext.integration.vllm.torchax_converter.base import GREEN
 from maxtext.integration.vllm.torchax_converter.base import RESET
 from maxtext.integration.vllm.torchax_converter.base import timer
@@ -89,33 +89,43 @@ def _clean_device_memory():
     array.delete()
   logging.info("Device memory cleanup complete.")
 
-
-def _get_maxtext_model(config):
-  logging.info("Creating model with config: %s", config)
-  model, mesh = model_creation_utils.from_pretrained(
-      config,
-      model_mode=MODEL_MODE_AUTOREGRESSIVE,
-  )
-  return model, mesh
-
-
 def save_dict_to_file(state_dict, filename):
   with open(filename, "w", encoding="utf-8") as f:
     for key in sorted(state_dict.keys()):
       f.write(f"{key}: {state_dict[key].shape}\n")
 
 
-def validate_converter(config) -> None:
-  """Run end-to-end validation for MaxText to vLLM weight conversion."""
-  if config.model_name not in vllm_model_name_mapping:
+def validate_converter(argv) -> None:
+  """Run end-to-end validation for MaxText to vLLM weight conversion.
+
+  Device/config split mirrors train_rl.py:
+    - trainer_config uses ici_* parallelism for the MaxText mesh
+    - sampler_config uses rollout_* parallelism for the vLLM mesh
+  Single-slice (num_trainer_slices == -1): trainer and sampler share all devices.
+  Multislice: first num_trainer_slices slices go to MaxText, the next
+  num_samplers_slices slices go to vLLM.
+  """
+  trainer_config, sampler_config, trainer_devices, sampler_devices = (
+      model_creation_utils.setup_configs_and_devices(argv)
+  )
+
+  if trainer_config.model_name not in vllm_model_name_mapping:
     raise ValueError(
-        f"validate_converter.py does not support model '{config.model_name}'. "
+        f"validate_converter.py does not support model '{trainer_config.model_name}'. "
         f"Supported models: {sorted(vllm_model_name_mapping.keys())}"
     )
 
-  model, mesh = _get_maxtext_model(config)
+  # In single-slice mode setup_configs_and_devices returns the same object for both.
+  multislice = trainer_devices is not sampler_devices
+
+  logging.info("Creating MaxText model...")
+  model, mesh = model_creation_utils.from_pretrained(
+      trainer_config,
+      devices=trainer_devices,
+      model_mode=MODEL_MODE_AUTOREGRESSIVE,
+  )
   print(f"{GREEN}MaxText model loaded successfully{RESET}")
-  print(f"Model: {config.model_name}")
+  print(f"Model: {trainer_config.model_name}")
   print(f"Mesh: {mesh}")
 
   print("=" * 80)
@@ -128,49 +138,50 @@ def validate_converter(config) -> None:
       logging.info("Name: %s, shape: %s", path_str, leaf.shape)
       logging.info("\tSharding: %s", leaf.sharding)
 
-  if config.model_name.startswith("gemma4"):
-    converter = Gemma4MaxTextToVLLMConverter(config, mesh)
+  if trainer_config.model_name.startswith("gemma4"):
+    converter = Gemma4MaxTextToVLLMConverter(trainer_config, mesh)
   else:
-    converter = Qwen3MaxTextToVLLMConverter(config, mesh)
+    converter = Qwen3MaxTextToVLLMConverter(trainer_config, mesh)
   with timer("Overall Conversion"):
     vllm_state = converter.convert(model_state)
-  del model_state
+  # Explicitly delete MaxText device buffers before resharding. Python del + gc
+  # is not enough — Pathways holds buffers in its object store independently of
+  # Python GC, so we must call .delete() on each array to free HBM.
+  for arr in jax.tree_util.tree_leaves(model_state):
+    if hasattr(arr, "delete"):
+      arr.delete()
+  del model_state, model, mesh, converter
   gc.collect()
 
   print("=" * 80)
   print("Loading vLLM model for generation test...")
   print("=" * 80)
-  llm = LLM(
-      model=vllm_model_name_mapping[config.model_name],
-      max_model_len=config.max_target_length,
-      tensor_parallel_size=config.rollout_tensor_parallelism,
-      gpu_memory_utilization=getattr(config, "hbm_utilization_vllm", 0.5),
-      async_scheduling=getattr(config, "async_scheduling", False),
-      # load_format="dummy",
+  # vLLM parallelism is driven by rollout_* params from sampler_config.
+  # load_format="dummy" skips loading real weights — converted MaxText weights
+  # are assigned afterwards, so real HF weights are never needed here.
+  vllm_kwargs = dict(
+      model=vllm_model_name_mapping[trainer_config.model_name],
+      max_model_len=trainer_config.max_target_length,
+      load_format="dummy",
+      data_parallel_size=sampler_config.rollout_data_parallelism,
+      tensor_parallel_size=sampler_config.rollout_tensor_parallelism,
+      gpu_memory_utilization=getattr(sampler_config, "hbm_utilization_vllm", 0.5),
+      async_scheduling=getattr(sampler_config, "async_scheduling", False),
   )
+  if multislice:
+    # Pin vLLM to its assigned sampler devices so it doesn't overlap with trainer.
+    vllm_kwargs["additional_config"] = {
+        "sharding": {
+            "sharding_strategy": {
+                "device_indexes": [d.id for d in sampler_devices],
+            }
+        }
+    }
+  llm = LLM(**vllm_kwargs)
   print("\n" + "=" * 80)
   llm_state = llm.llm_engine.model_executor.driver_worker.model_runner.state
   # save_dict_to_file(llm_state, "vllm_model_state.txt")
   # save_dict_to_file(vllm_state, "converted_vllm_state.txt")
-
-  any_src = next(iter(vllm_state.values()))
-  any_src_arr = any_src.value if hasattr(any_src, "value") else any_src
-  any_dst = next(iter(llm_state.values()))
-  same_devices = frozenset(device.id for device in any_src_arr.sharding.mesh.devices.flat) == frozenset(
-      device.id for device in any_dst.sharding.mesh.devices.flat
-  )
-  logging.info(
-      "Weight sync: same_devices=%s (jit=%s, device_put=%s)",
-      same_devices,
-      same_devices,
-      not same_devices,
-  )
-
-  @functools.lru_cache(maxsize=None)
-  def _get_reshard_fn(dst_sharding):
-    if same_devices:
-      return jax.jit(lambda x: x, out_shardings=dst_sharding)
-    return functools.partial(jax.device_put, device=dst_sharding)
 
   with timer(f"Assigning {len(vllm_state)} weights to vLLM model"):
     for key, weight in vllm_state.items():
@@ -179,15 +190,15 @@ def validate_converter(config) -> None:
       assert (
           llm_state[key].shape == weight_array.shape
       ), f"Shape mismatch for {key}: expected {llm_state[key].shape}, got {weight_array.shape}"
-      llm_state[key] = _get_reshard_fn(dst_sharding)(weight_array)
+      llm_state[key] = reshard_pytree(weight_array, dst_sharding, donate_input=False, cache_plan=True)
 
-  sampling_params = SamplingParams(temperature=0.0, max_tokens=10)
-  prompt = getattr(config, "prompt", "Paris is")
-  if getattr(config, "use_chat_template", False):
-    tokenizer_path = getattr(config, "tokenizer_path", None) or vllm_model_name_mapping[config.model_name]
+  sampling_params = SamplingParams(temperature=0.0, max_tokens=trainer_config.max_target_length - trainer_config.max_prefill_predict_length)
+  prompt = getattr(trainer_config, "prompt", "Paris is")
+  if getattr(trainer_config, "use_chat_template", False):
+    tokenizer_path = getattr(trainer_config, "tokenizer_path", None) or vllm_model_name_mapping[trainer_config.model_name]
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         tokenizer_path,
-        token=getattr(config, "hf_access_token", None),
+        token=getattr(trainer_config, "hf_access_token", None),
     )
     messages = [{"role": "user", "content": prompt}]
     prompt = tokenizer.apply_chat_template(
@@ -196,22 +207,23 @@ def validate_converter(config) -> None:
         add_generation_prompt=True,
         add_special_tokens=False,
     )
-  elif config.model_name.startswith("gemma4") and not prompt.startswith("<bos>"):
+  elif trainer_config.model_name.startswith("gemma4") and not prompt.startswith("<bos>"):
     prompt = "<bos>" + prompt
+
   print("\n" + "=" * 80)
   print("Generation test after weight transfer:")
   with timer("Generation"):
-    print(llm.generate(prompt, sampling_params=sampling_params))
+    print(llm.generate(prompt, sampling_params=sampling_params, use_tqdm=False))
 
 
 def main(argv: Sequence[str]) -> None:
+  pathwaysutils.initialize()
   print(f"JAX devices: {jax.devices()}")
   _setup_jax_compilation_cache()
   _setup_vllm_environment()
   _clean_device_memory()
 
-  config = pyconfig.initialize(argv)
-  validate_converter(config)
+  validate_converter(argv)
 
 
 if __name__ == "__main__":
