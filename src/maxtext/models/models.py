@@ -443,6 +443,7 @@ class Transformer(nnx.Module):
       decoder_target_mask: jax.Array | None = None,
       kv_caches: list[jax.Array] | None = None,
       attention_metadata: dict[str, Any] | None = None,
+      precomputed_multimodal_embeddings: jax.Array | None = None,
   ):
     """Applies the Zero-1 FSDP wrapped Transformer model.
 
@@ -478,7 +479,10 @@ class Transformer(nnx.Module):
     bidirectional_mask = None
     image_embeddings = None
     deepstack_visual_embeds = None
-    if self.config.use_multimodal and encoder_images is not None:
+    if precomputed_multimodal_embeddings is not None:
+      image_embeddings = precomputed_multimodal_embeddings
+      bidirectional_mask = mm_processor.get_bidirectional_mask_vision(self.config, decoder_input_tokens)
+    elif self.config.use_multimodal and encoder_images is not None:
       image_embeddings, deepstack_visual_embeds = self.vision_encoder(
           input_images=encoder_images, deterministic=not enable_dropout
       )
