@@ -1998,7 +1998,11 @@ class DerivedValues(BaseModel):
 
   num_target_devices: None | int = Field(
       None,
-      description="The number of devices computed from topology in train_compile or jax.devices() in train",
+      description=(
+          "The number of devices computed from topology in train_compile, "
+          "from elastic_utils.live_devices() when elastic_enabled "
+          "(enabling Elastic training), or jax.devices() in train."
+      ),
   )
 
   global_batch_size_to_train_on: None | int = Field(
@@ -2396,7 +2400,7 @@ class MaxTextConfig(
 
     # E. HARDWARE-DEPENDENT CALCULATIONS
     if self.elastic_enabled:
-      elastic_utils.ensure_elastic_manager_initialized(self)
+      elastic_utils.ensure_elastic_manager_initialized(self.elastic_enabled)
 
     def get_num_target_devices():
       """Get the number of devices for the target topology, handling AOT compilation and single-controller modes."""
@@ -2412,7 +2416,7 @@ class MaxTextConfig(
         shape_tuple = tuple(int(x) for x in self.subslice_shape.split(","))
         return prod(shape_tuple)
       elif self.elastic_enabled:
-        return len(elastic_utils.live_devices(config=self))
+        return len(elastic_utils.live_devices(self.elastic_enabled))
       else:
         return len(jax.devices())
 

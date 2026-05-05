@@ -38,6 +38,7 @@ from jax.experimental import colocated_python
 import jax.numpy as jnp
 
 from maxtext.utils import max_logging
+from maxtext.utils import elastic_utils
 
 
 def _build_global_shape_and_sharding(
@@ -257,8 +258,8 @@ class RemoteIteratorWrapper:
   """Wrapper for RemoteIterator that handles device placement."""
 
   def __init__(self, get_ds_fn, preprocessing_fn, global_mesh, global_shape, checkpoint_path="", elastic=False):
-    self.cpu_devices = _colocated_cpu_devices(jax.local_devices())
-    self.tpu_devices = jax.local_devices()
+    self.tpu_devices = elastic_utils.live_devices(elastic) if elastic else jax.local_devices()
+    self.cpu_devices = _colocated_cpu_devices(self.tpu_devices)
     self.cpu_mesh = _colocated_cpu_mesh(global_mesh)
     self.tpu_sharding = jax.sharding.NamedSharding(global_mesh, PartitionSpec(global_mesh.axis_names))
     self.cpu_sharding = jax.sharding.NamedSharding(self.cpu_mesh, PartitionSpec(self.cpu_mesh.axis_names))
@@ -289,3 +290,4 @@ class RemoteIteratorWrapper:
     step_array = jnp.full(self.dummy_array.shape, step, dtype=jnp.int32)
     step_array = jax.device_put(step_array, self.cpu_sharding)
     self.local_iterator.restore_state(step_array)
+

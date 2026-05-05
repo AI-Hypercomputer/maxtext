@@ -136,7 +136,7 @@ class ElasticUtilsTest(unittest.TestCase):
     self.fake_jax.devices.return_value = [device0]
 
     config = FakeConfig()
-    devices = elastic_utils.live_devices(config)
+    devices = elastic_utils.live_devices(config.elastic_enabled)
     self.assertEqual(devices, [device0])
 
   def test_live_devices_pathways(self):
@@ -148,7 +148,7 @@ class ElasticUtilsTest(unittest.TestCase):
     self.fake_manager.active_slice_indices = {0}
 
     config = FakeConfig()
-    devices = elastic_utils.live_devices(config)
+    devices = elastic_utils.live_devices(config.elastic_enabled)
     self.assertEqual(devices, [device0])
 
   def test_elastic_retry_disabled(self):
@@ -285,6 +285,7 @@ class ElasticUtilsTest(unittest.TestCase):
 
     class ReadOnlyConfig:
       elastic_manager = None
+      elastic_enabled: bool = True
 
       def __init__(self):
         object.__setattr__(self, "elastic_enabled", True)
@@ -296,7 +297,7 @@ class ElasticUtilsTest(unittest.TestCase):
     self.fake_pathwaysutils.is_pathways_backend_used.return_value = True
 
     # Should not raise ValueError
-    elastic_utils.ensure_elastic_manager_initialized(config)
+    elastic_utils.ensure_elastic_manager_initialized(config.elastic_enabled)
     self.assertEqual(elastic_utils.elastic_manager, self.fake_manager)
 
 

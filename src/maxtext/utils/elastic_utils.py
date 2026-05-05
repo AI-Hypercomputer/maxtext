@@ -65,10 +65,10 @@ def clean_up_checkpoints(checkpoint_dir: str):
     max_logging.log(f"Found commit_success file. Keeping {latest_checkpoint_path}.")
 
 
-def ensure_elastic_manager_initialized(config):
+def ensure_elastic_manager_initialized(is_elastic_enabled: bool):
   """Initializes elastic manager if it's not initialized and pathways is used."""
   global elastic_manager
-  if pathwaysutils.is_pathways_backend_used() and config.elastic_enabled and elastic_manager is None:
+  if pathwaysutils.is_pathways_backend_used() and is_elastic_enabled and elastic_manager is None:
     elastic_manager = manager.Manager()
 
 
@@ -77,11 +77,11 @@ def get_local_batch_size(config) -> int:
   return config.per_device_batch_size * get_devices_per_host(config)
 
 
-def live_devices(config=None):
+def live_devices(is_elastic_enabled: bool = False):
   """Returns the list of live devices."""
-  # If pathways is not used or elastic_manager is not initialized, return all devices
-  if pathwaysutils.is_pathways_backend_used() and config is not None:
-    ensure_elastic_manager_initialized(config)
+  # If pathways is not used or elastic training is not enabled, return all devices
+  if pathwaysutils.is_pathways_backend_used() and is_elastic_enabled:
+    ensure_elastic_manager_initialized(is_elastic_enabled)
     assert elastic_manager is not None
     # Filter devices that are in active slices
     return [
@@ -92,12 +92,12 @@ def live_devices(config=None):
 
 def live_slice_indices(config) -> set[int]:
   """Returns the set of live slice indices."""
-  return {getattr(d, "slice_index", 0) for d in live_devices(config) if d is not None}
+  return {getattr(d, "slice_index", 0) for d in live_devices(config.elastic_enabled) if d is not None}
 
 
 def get_devices_per_host(config):
   """Dynamically calculates the number of chips per physical worker VM."""
-  devices = Counter(d.task_id for d in live_devices(config))
+  devices = Counter(d.task_id for d in live_devices(config.elastic_enabled))
 
   max_logging.log(f"elastic_utils: Device counts per task: {devices}")
   if not devices:
@@ -149,7 +149,7 @@ def elastic_retry(config, callback_fn=None):
 
   max_logging.log("Elastic Retry Enabled")
 
-  ensure_elastic_manager_initialized(config)
+  ensure_elastic_manager_initialized(config.elastic_enabled)
   assert elastic_manager is not None
 
   cleanup_partial = functools.partial(clean_up_checkpoints, config.checkpoint_dir)
@@ -170,7 +170,7 @@ def elastic_retry(config, callback_fn=None):
 def is_scale_up_event(config) -> bool:
   """Returns whether a scale up event is detected."""
   if elastic_enabled(config):
-    ensure_elastic_manager_initialized(config)
+    ensure_elastic_manager_initialized(config.elastic_enabled)
     assert elastic_manager is not None
     return elastic_manager.new_slice_event.is_set()
 

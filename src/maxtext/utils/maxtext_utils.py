@@ -1579,7 +1579,7 @@ def create_device_mesh(config, devices=None):
     devices = jax.devices()
 
   if config.elastic_enabled:
-    devices = elastic_utils.live_devices(config)
+    devices = elastic_utils.live_devices(config.elastic_enabled)
     num_slices = len(elastic_utils.live_slice_indices(config))
   else:
     num_slices = config.num_slices
