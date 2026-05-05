@@ -17,6 +17,9 @@
 # pylint: disable=no-name-in-module
 
 from typing import Any
+import logging
+
+logger = logging.getLogger(__name__)
 
 import jax
 import jax.numpy as jnp
@@ -27,7 +30,7 @@ from flax import nnx
 
 from maxtext.common.common_types import Config, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN, MultimodalInput
 from maxtext.inference import page_manager
-from maxtext.layers.nnx_decoders import NNXDecoder
+from maxtext.layers.nnx_decoders import NNXDecoder, DecoderBlockType
 from maxtext.layers import initializers
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.decoders import Decoder
@@ -96,7 +99,14 @@ class TransformerLinenPure(nn.Module):
       # For MTP, we use the DecoderLayer blueprint to ensure architectural consistency.
       # By convention, this is the last layer in the list.
       layer_types = self.decoder.get_decoder_layers()
-      mtp_layer_linen = layer_types[-1]
+      mtp_decoder_type = getattr(self.config, "mtp_decoder_type", None)
+      if mtp_decoder_type:
+        mtp_block_enum = DecoderBlockType(mtp_decoder_type)
+        mtp_layer_linen = self.decoder.get_decoder_layers(decoder_block_type=mtp_block_enum)[-1]
+        logger.info("MTP using layer type from decoder_block_type: %s", mtp_block_enum)
+      else:
+        mtp_layer_linen = layer_types[-1]
+        logger.info("MTP using default fallback layer type: %s", mtp_layer_linen)
       # UNWRAP: The MTP block is pure NNX. If the decoder returned a Linen wrapper,
       # extract the native NNX class to preserve parameter tracing/scoping.
       mtp_layer_nnx = getattr(mtp_layer_linen, "module_class", mtp_layer_linen)
@@ -383,9 +393,14 @@ class Transformer(nnx.Module):
     if self.config.mtp_num_layers > 0:
       # Get the list of layer blueprints for the current model.
       layer_types = self.decoder.get_decoder_layers()
-      # For MTP, we use the DecoderLayer blueprint to ensure architectural consistency.
-      # By convention, this is the last layer in the list.
-      mtp_layer = layer_types[-1]
+      mtp_decoder_type = getattr(self.config, "mtp_decoder_type", None)
+      if mtp_decoder_type:
+        mtp_block_enum = DecoderBlockType(mtp_decoder_type)
+        mtp_layer = self.decoder.get_decoder_layers(decoder_block_type=mtp_block_enum)[-1]
+        logger.info("MTP using layer type from decoder_block_type: %s", mtp_block_enum)
+      else:
+        mtp_layer = layer_types[-1]
+        logger.info("MTP using default fallback layer type: %s", mtp_layer)
       mtp_block_linen = multi_token_prediction_block_as_linen(
           config=self.config,
           mesh=self.mesh,

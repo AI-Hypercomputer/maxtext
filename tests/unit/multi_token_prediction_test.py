@@ -120,7 +120,7 @@ class MultiTokenPredictionLayerTest(unittest.TestCase):
 class MTPBlockTestModel(nnx.Module):
   """A lightweight wrapper model for testing the MTPBlock."""
 
-  def __init__(self, config: Config, mesh: Mesh, *, rngs: nnx.Rngs):
+  def __init__(self, config: Config, mesh: Mesh, *, rngs: nnx.Rngs, transformer_layer_module=NNXDecoderLayer):
     """Initializes the MTP block and its dependencies for the test."""
     self.config = config
     self.mesh = mesh
@@ -156,7 +156,7 @@ class MTPBlockTestModel(nnx.Module):
     self.mtp_block = multi_token_prediction.MultiTokenPredictionBlock(
         config=self.config,
         mesh=self.mesh,
-        transformer_layer_module=NNXDecoderLayer,
+        transformer_layer_module=transformer_layer_module,
         decoder=self.decoder,
         rngs=self.rngs,
     )
@@ -374,6 +374,66 @@ class TestRollAndMask(unittest.TestCase):
     # This should result in no change to the tensor.
     rolled_by_0 = multi_token_prediction.roll_and_mask(input_tensor, shift=0)
     self.assertTrue(jnp.array_equal(rolled_by_0, input_tensor), "A shift of 0 should be a no-op.")
+
+
+class FlexibleMultiTokenPredictionBlockTest(unittest.TestCase):
+  """Unit tests for the MultiTokenPredictionBlock with flexible layer types."""
+
+  def test_instantiate_with_dummy_layer(self):
+    """Test that we can instantiate MTP block with a different layer type."""
+    extra_args = get_decoupled_parallelism_overrides()
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="flexible_mtp_test",
+        skip_jax_distributed_system=True,
+        base_emb_dim=16,
+        mtp_num_layers=1,
+        **extra_args,
+    )
+    rng = jax.random.PRNGKey(42)
+    rngs = nnx.Rngs(params=rng, dropout=rng)
+    devices_array = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices_array, cfg.mesh_axes)
+
+    # Define a dummy layer that is NOT NNXDecoderLayer
+    class DummyMtpLayer(nnx.Module):
+
+      def __init__(self, config: Config, mesh: Mesh, model_mode: str, rngs: nnx.Rngs):
+        self.config = config
+        self.mesh = mesh
+        self.model_mode = model_mode
+        self.weight = nnx.Param(jnp.ones((1,)))
+
+      def __call__(self, inputs, decoder_segment_ids, decoder_positions, deterministic, model_mode):
+        return inputs
+
+    test_model = MTPBlockTestModel(
+        config=cfg,
+        mesh=mesh,
+        rngs=rngs,
+        transformer_layer_module=DummyMtpLayer,  # Passing dummy layer here
+    )
+
+    # Try a dummy forward pass
+    batch_size = jax.device_count()
+    seq_len = 8
+    main_hidden_state = jnp.zeros((batch_size, seq_len, cfg.base_emb_dim))
+    input_ids = jnp.zeros((batch_size, seq_len), dtype=jnp.int32)
+    target_ids = jnp.zeros((batch_size, seq_len), dtype=jnp.int32)
+    target_mask = jnp.ones((batch_size, seq_len))
+    position_ids = jnp.zeros((batch_size, seq_len), dtype=jnp.int32)
+    decoder_segment_ids = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
+
+    test_model(
+        main_hidden_state=main_hidden_state,
+        input_ids=input_ids,
+        target_ids=target_ids,
+        target_mask=target_mask,
+        position_ids=position_ids,
+        decoder_segment_ids=decoder_segment_ids,
+        model_mode=MODEL_MODE_TRAIN,
+        deterministic=True,
+    )
 
 
 if __name__ == "__main__":

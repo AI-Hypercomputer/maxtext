@@ -199,6 +199,9 @@ mtp_loss_scaling_factor: 0.1
 # acceptance rate during evaluation. for example, a value of `1` targets the
 # first auxiliary prediction head. set to 0 to disable this specific evaluation
 mtp_eval_target_module: 0
+# the type of decoder layer to use for mtp blocks. if empty, defaults to the last
+# decoder layer type of the base model.
+mtp_decoder_type: ''
 
 # mixture of experts (moe)
 num_experts: 1
