@@ -34,7 +34,7 @@ def preprocess_mm_data(config):
 
     images = [mm_utils.load_image_from_path(p) for p in config.image_path.split(",")]
     processor_outputs = preprocess_mm_data_gemma3(images)
-  elif config.model_name in ["gemma4-26b", "gemma4-31b"]:
+  elif config.model_name in ["gemma4-26b", "gemma4-31b", "gemma4-e2b", "gemma4-e4b"]:
     from maxtext.multimodal.processor_gemma4 import preprocess_mm_data_gemma4  # pylint: disable=import-outside-toplevel
 
     images = [mm_utils.load_image_from_path(p) for p in config.image_path.split(",")]
@@ -60,7 +60,7 @@ def preprocess_image_for_training(image, model_name):
     from maxtext.multimodal.processor_gemma3 import preprocess_mm_data_gemma3  # pylint: disable=import-outside-toplevel
 
     return preprocess_mm_data_gemma3(image)
-  elif model_name in ["gemma4-26b", "gemma4-31b"]:
+  elif model_name in ["gemma4-26b", "gemma4-31b", "gemma4-e2b", "gemma4-e4b"]:
     from maxtext.multimodal.processor_gemma4 import preprocess_mm_data_gemma4  # pylint: disable=import-outside-toplevel
 
     return preprocess_mm_data_gemma4(image)
@@ -82,7 +82,7 @@ def get_image_offsets(config, processor_output: mm_utils.PreprocessorOutput | No
     from maxtext.multimodal.processor_gemma3 import get_image_offsets_gemma3  # pylint: disable=import-outside-toplevel
 
     return get_image_offsets_gemma3(processor_output)
-  elif config.model_name in ["gemma4-26b", "gemma4-31b"]:
+  elif config.model_name in ["gemma4-26b", "gemma4-31b", "gemma4-e2b", "gemma4-e4b"]:
     from maxtext.multimodal.processor_gemma4 import get_image_offsets_gemma4  # pylint: disable=import-outside-toplevel
 
     return get_image_offsets_gemma4(processor_output)
@@ -104,7 +104,7 @@ def reformat_prompt(prompt, image_placeholder, model_name, num_images, video_pla
     from maxtext.multimodal.processor_gemma3 import reformat_prompt_gemma3  # pylint: disable=import-outside-toplevel
 
     return reformat_prompt_gemma3(prompt, image_placeholder, num_images)
-  elif model_name in ["gemma4-26b", "gemma4-31b"]:
+  elif model_name in ["gemma4-26b", "gemma4-31b", "gemma4-e2b", "gemma4-e4b"]:
     from maxtext.multimodal.processor_gemma4 import reformat_prompt_gemma4  # pylint: disable=import-outside-toplevel
 
     return reformat_prompt_gemma4(prompt, image_placeholder, num_images)
@@ -134,7 +134,7 @@ def reformat_response(response, model_name):
   elif model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
     formatted_response = f"{response}<end_of_turn>"
     return formatted_response
-  elif model_name in ["gemma4-26b", "gemma4-31b"]:
+  elif model_name in ["gemma4-26b", "gemma4-31b", "gemma4-e2b", "gemma4-e4b"]:
     formatted_response = f"{response}<end_of_turn>"
     return formatted_response
   elif model_name in ["qwen3-omni-30b-a3b"]:
@@ -150,7 +150,7 @@ def prepare_text_for_image_fusion(tokens, config, processor_output=None):
     from maxtext.multimodal.processor_gemma3 import add_extra_tokens_for_images_gemma3  # pylint: disable=import-outside-toplevel
 
     return add_extra_tokens_for_images_gemma3(tokens, max_num_images=processor_output.num_images)
-  elif config.model_name in ["gemma4-26b", "gemma4-31b"]:
+  elif config.model_name in ["gemma4-26b", "gemma4-31b", "gemma4-e2b", "gemma4-e4b"]:
     from maxtext.multimodal.processor_gemma4 import add_extra_tokens_for_images_gemma4  # pylint: disable=import-outside-toplevel
 
     return add_extra_tokens_for_images_gemma4(tokens, max_num_images=processor_output.num_images)
@@ -214,7 +214,7 @@ def get_bidirectional_mask_vision(config, decoder_input_tokens):
     from maxtext.multimodal.processor_gemma3 import GEMMA_TOKEN_PLACEHOLDER  # pylint: disable=import-outside-toplevel
 
     bidirectional_mask_vision = decoder_input_tokens == GEMMA_TOKEN_PLACEHOLDER
-  elif config.model_name in ["gemma4-26b", "gemma4-31b"]:
+  elif config.model_name in ["gemma4-26b", "gemma4-31b", "gemma4-e2b", "gemma4-e4b"]:
     from maxtext.multimodal.processor_gemma4 import GEMMA4_TOKEN_PLACEHOLDER  # pylint: disable=import-outside-toplevel
 
     bidirectional_mask_vision = decoder_input_tokens == GEMMA4_TOKEN_PLACEHOLDER
