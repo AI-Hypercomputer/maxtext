@@ -284,6 +284,92 @@ def GEMMA4_HF_WEIGHTS_TO_SHAPE(config):
   return shapes
 
 
+def GEMMA4_SMALL_HF_WEIGHTS_TO_SHAPE(config):
+  """Generates HF parameter shapes for Gemma 4 small (E2B / E4B).
+
+  Differs from GEMMA4_HF_WEIGHTS_TO_SHAPE in that it:
+    * derives global-vs-sliding from the per-model ``layer_types`` list
+      (E2B has period-5, E4B has period-6),
+    * emits the Per-Layer-Embedding parameters when ``hidden_size_per_layer_input`` > 0,
+    * omits k_proj/v_proj/k_norm/v_norm shapes on KV-shared layers, and
+    * doubles ``intermediate_size`` on shared layers when ``use_double_wide_mlp``
+      is set (E2B).
+  """
+  shapes = {}
+
+  text_cfg = config.get("text_config", config)
+  vision_cfg = config.get("vision_config", {})
+  text_base = "model.language_model" if vision_cfg else "model"
+
+  hidden_size = text_cfg["hidden_size"]
+  intermediate_size = text_cfg["intermediate_size"]
+  num_hidden_layers = text_cfg["num_hidden_layers"]
+  num_attention_heads = text_cfg["num_attention_heads"]
+  num_key_value_heads = text_cfg["num_key_value_heads"]
+  num_global_key_value_heads = text_cfg.get("num_global_key_value_heads") or num_key_value_heads
+  head_dim = text_cfg["head_dim"]
+  global_head_dim = text_cfg.get("global_head_dim", head_dim)
+  vocab_size = text_cfg["vocab_size"]
+  layer_types = text_cfg.get("layer_types", [])
+
+  ple_dim = text_cfg.get("hidden_size_per_layer_input", 0) or 0
+  vocab_ple = text_cfg.get("vocab_size_per_layer_input", 0) or 0
+  num_kv_shared = text_cfg.get("num_kv_shared_layers", 0) or 0
+  first_shared = max(0, num_hidden_layers - num_kv_shared) if num_kv_shared > 0 else num_hidden_layers
+  use_double_wide_mlp = bool(text_cfg.get("use_double_wide_mlp", False))
+
+  shapes[f"{text_base}.embed_tokens.weight"] = [vocab_size, hidden_size]
+  shapes[f"{text_base}.norm.weight"] = [hidden_size]
+
+  if ple_dim > 0:
+    shapes[f"{text_base}.embed_tokens_per_layer.weight"] = [vocab_ple, num_hidden_layers * ple_dim]
+    shapes[f"{text_base}.per_layer_model_projection.weight"] = [num_hidden_layers * ple_dim, hidden_size]
+    shapes[f"{text_base}.per_layer_projection_norm.weight"] = [ple_dim]
+
+  for i in range(num_hidden_layers):
+    hf_prefix = f"{text_base}.layers.{i}"
+    is_global = i < len(layer_types) and layer_types[i] == "full_attention"
+    is_shared = num_kv_shared > 0 and i >= first_shared
+
+    if is_global:
+      q_dim = num_attention_heads * global_head_dim
+      kv_dim = num_global_key_value_heads * global_head_dim
+      norm_dim = global_head_dim
+    else:
+      q_dim = num_attention_heads * head_dim
+      kv_dim = num_key_value_heads * head_dim
+      norm_dim = head_dim
+
+    shapes[f"{hf_prefix}.self_attn.q_proj.weight"] = [q_dim, hidden_size]
+    shapes[f"{hf_prefix}.self_attn.o_proj.weight"] = [hidden_size, q_dim]
+    shapes[f"{hf_prefix}.self_attn.q_norm.weight"] = [norm_dim]
+    if not is_shared:
+      shapes[f"{hf_prefix}.self_attn.k_proj.weight"] = [kv_dim, hidden_size]
+      shapes[f"{hf_prefix}.self_attn.v_proj.weight"] = [kv_dim, hidden_size]
+      shapes[f"{hf_prefix}.self_attn.k_norm.weight"] = [norm_dim]
+      # v_norm only when scale is enabled in MaxText; param_mapping suppresses
+      # this key otherwise, so emit the shape unconditionally — extras are ignored.
+      shapes[f"{hf_prefix}.self_attn.v_norm.weight"] = [norm_dim]
+
+    shapes[f"{hf_prefix}.input_layernorm.weight"] = [hidden_size]
+    shapes[f"{hf_prefix}.post_attention_layernorm.weight"] = [hidden_size]
+    shapes[f"{hf_prefix}.pre_feedforward_layernorm.weight"] = [hidden_size]
+    shapes[f"{hf_prefix}.post_feedforward_layernorm.weight"] = [hidden_size]
+    shapes[f"{hf_prefix}.layer_scalar"] = [1]
+
+    mlp_dim = intermediate_size * 2 if (is_shared and use_double_wide_mlp) else intermediate_size
+    shapes[f"{hf_prefix}.mlp.gate_proj.weight"] = [mlp_dim, hidden_size]
+    shapes[f"{hf_prefix}.mlp.up_proj.weight"] = [mlp_dim, hidden_size]
+    shapes[f"{hf_prefix}.mlp.down_proj.weight"] = [hidden_size, mlp_dim]
+
+    if ple_dim > 0:
+      shapes[f"{hf_prefix}.per_layer_input_gate.weight"] = [ple_dim, hidden_size]
+      shapes[f"{hf_prefix}.per_layer_projection.weight"] = [hidden_size, ple_dim]
+      shapes[f"{hf_prefix}.post_per_layer_input_norm.weight"] = [hidden_size]
+
+  return shapes
+
+
 def GEMMA2_HF_WEIGHTS_TO_SHAPE(config):
   """Returns mapping between HuggingFace weights path and weights shape.
 
@@ -920,6 +1006,8 @@ HF_SHAPE = {
     "gemma3-27b": GEMMA3_HF_WEIGHTS_TO_SHAPE,
     "gemma4-26b": GEMMA4_HF_WEIGHTS_TO_SHAPE,
     "gemma4-31b": GEMMA4_HF_WEIGHTS_TO_SHAPE,
+    "gemma4-e2b": GEMMA4_SMALL_HF_WEIGHTS_TO_SHAPE,
+    "gemma4-e4b": GEMMA4_SMALL_HF_WEIGHTS_TO_SHAPE,
     "qwen2.5-1.5b": QWEN_HF_WEIGHTS_TO_SHAPE,
     "qwen2.5-7b": QWEN_HF_WEIGHTS_TO_SHAPE,
     "qwen2.5-14b": QWEN_HF_WEIGHTS_TO_SHAPE,
