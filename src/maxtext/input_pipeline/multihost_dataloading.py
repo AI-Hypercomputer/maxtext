@@ -38,6 +38,7 @@ from jax.experimental import colocated_python
 import jax.numpy as jnp
 
 from maxtext.utils import max_logging
+from maxtext.utils import elastic_utils
 
 
 def _build_global_shape_and_sharding(
@@ -176,12 +177,12 @@ def _colocated_cpu_mesh(mesh: Mesh) -> Mesh:
 class RemoteIterator:
   "iterator class for using colocated python class"
 
-  def __init__(self, get_ds_fn, preprocessing_fn, global_shape, checkpoint_path, elastic=False):
+  def __init__(self, get_ds_fn, preprocessing_fn, global_shape, checkpoint_path, elastic_enabled=False):
     self.get_ds_fn = get_ds_fn
     self.preprocessing_fn = preprocessing_fn
     self.global_shape = global_shape
     self.checkpoint_path = checkpoint_path
-    self.elastic = elastic
+    self.elastic_enabled = elastic_enabled
     self.reset()
     max_logging.log("RemoteIterator initiated")
 
@@ -225,7 +226,7 @@ class RemoteIterator:
     """Saves the iterator state to a file."""
     step = step_array.addressable_data(0).item()
     directory = epath.Path(self.checkpoint_path) / str(step) / "iter"
-    if self.elastic:
+    if self.elastic_enabled:
       # ElasticIterator state is a single global scalar shared by all shards,
       # so we write one fixed file (from process 0 only) and every process
       # reads the same file on restore — this survives elastic resizes that
@@ -244,7 +245,7 @@ class RemoteIterator:
   def restore_state(self, step_array):
     step = step_array.addressable_data(0).item()
     directory = epath.Path(self.checkpoint_path) / str(step) / "iter"
-    if self.elastic:
+    if self.elastic_enabled:
       filename = directory / "process_0.json"
     else:
       filename = directory / f"process_{jax.process_index()}-of-{jax.process_count()}.json"
@@ -256,9 +257,9 @@ class RemoteIterator:
 class RemoteIteratorWrapper:
   """Wrapper for RemoteIterator that handles device placement."""
 
-  def __init__(self, get_ds_fn, preprocessing_fn, global_mesh, global_shape, checkpoint_path="", elastic=False):
-    self.cpu_devices = _colocated_cpu_devices(jax.local_devices())
-    self.tpu_devices = jax.local_devices()
+  def __init__(self, get_ds_fn, preprocessing_fn, global_mesh, global_shape, checkpoint_path="", elastic_enabled=False):
+    self.tpu_devices = elastic_utils.live_devices(elastic_enabled) if elastic_enabled else jax.local_devices()
+    self.cpu_devices = _colocated_cpu_devices(self.tpu_devices)
     self.cpu_mesh = _colocated_cpu_mesh(global_mesh)
     self.tpu_sharding = jax.sharding.NamedSharding(global_mesh, PartitionSpec(global_mesh.axis_names))
     self.cpu_sharding = jax.sharding.NamedSharding(self.cpu_mesh, PartitionSpec(self.cpu_mesh.axis_names))
@@ -266,7 +267,9 @@ class RemoteIteratorWrapper:
     self.dummy_array = jax.device_put(self.dummy_array, self.cpu_sharding)
     # This is a proxy to a RemoteIterator running in a colocated process,
     # named "local_iterator" to match MultiHostDataLoadIterator's interface.
-    self.local_iterator = RemoteIterator(get_ds_fn, preprocessing_fn, global_shape, checkpoint_path, elastic=elastic)
+    self.local_iterator = RemoteIterator(
+        get_ds_fn, preprocessing_fn, global_shape, checkpoint_path, elastic_enabled=elastic_enabled
+    )
     max_logging.log("RemoteIteratorWrapper initiated")
 
   def __iter__(self):

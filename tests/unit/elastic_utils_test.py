@@ -97,18 +97,18 @@ class ElasticUtilsTest(unittest.TestCase):
     elastic_utils.pending_elastic_event_type = None
     super().tearDown()
 
-  def test_elastic_enabled(self):
+  def test_is_elastic_enabled(self):
     config = FakeConfig()
     self.fake_pathwaysutils.is_pathways_backend_used.return_value = True
     config.elastic_enabled = True
-    self.assertTrue(elastic_utils.elastic_enabled(config))
+    self.assertTrue(elastic_utils.is_elastic_enabled(config))
 
     config.elastic_enabled = False
-    self.assertFalse(elastic_utils.elastic_enabled(config))
+    self.assertFalse(elastic_utils.is_elastic_enabled(config))
 
     config.elastic_enabled = True
     self.fake_pathwaysutils.is_pathways_backend_used.return_value = False
-    self.assertFalse(elastic_utils.elastic_enabled(config))
+    self.assertFalse(elastic_utils.is_elastic_enabled(config))
 
   def test_clean_up_checkpoints_no_checkpoints(self):
     self.fake_gcs_utils.gcs_list_directories.return_value = []
@@ -138,7 +138,7 @@ class ElasticUtilsTest(unittest.TestCase):
     self.fake_jax.devices.return_value = [device0]
 
     config = FakeConfig()
-    devices = elastic_utils.live_devices(config)
+    devices = elastic_utils.live_devices(config.elastic_enabled)
     self.assertEqual(devices, [device0])
 
   def test_live_devices_pathways(self):
@@ -150,7 +150,7 @@ class ElasticUtilsTest(unittest.TestCase):
     self.fake_manager.active_slice_indices = {0}
 
     config = FakeConfig()
-    devices = elastic_utils.live_devices(config)
+    devices = elastic_utils.live_devices(config.elastic_enabled)
     self.assertEqual(devices, [device0])
 
   def test_elastic_retry_disabled(self):
@@ -206,7 +206,7 @@ class ElasticUtilsTest(unittest.TestCase):
     self.fake_manager.all_slice_indices = {0}
     self.fake_manager.active_slice_indices = {0}
 
-    batch_size = elastic_utils.get_local_batch_size(config)
+    batch_size = elastic_utils.get_local_batch_size(config.elastic_enabled, config.per_device_batch_size)
     self.assertEqual(batch_size, 4)
 
   def test_get_local_batch_size_non_elastic(self):
@@ -218,7 +218,8 @@ class ElasticUtilsTest(unittest.TestCase):
     self.fake_jax.devices.return_value = [FakeDevice(slice_index=0, process_index=0, task_id=0) for _ in range(8)]
     self.fake_pathwaysutils.is_pathways_backend_used.return_value = False
 
-    batch_size = elastic_utils.get_local_batch_size(config)
+    config.per_device_batch_size = 4
+    batch_size = elastic_utils.get_local_batch_size(config.elastic_enabled, config.per_device_batch_size)
     self.assertEqual(batch_size, 32)
 
   def test_live_slice_indices(self):
@@ -230,7 +231,7 @@ class ElasticUtilsTest(unittest.TestCase):
     config = FakeConfig()
     elastic_utils.elastic_manager = self.fake_manager
     self.fake_manager.active_slice_indices = {0, 1}
-    indices = elastic_utils.live_slice_indices(config)
+    indices = elastic_utils.live_slice_indices(config.elastic_enabled)
     self.assertEqual(indices, {0, 1})
 
   def test_get_devices_per_host(self):
@@ -243,7 +244,7 @@ class ElasticUtilsTest(unittest.TestCase):
     self.fake_manager.active_slice_indices = {0}
 
     config = FakeConfig()
-    count = elastic_utils.get_devices_per_host(config)
+    count = elastic_utils.get_devices_per_host(config.elastic_enabled)
     self.assertEqual(count, 2)
 
   def test_maybe_elastic_scale_up(self):
@@ -264,7 +265,7 @@ class ElasticUtilsTest(unittest.TestCase):
     self.fake_manager.new_slice_event.is_set.return_value = True
 
     with self.assertRaises(ScaleUpSignalError):
-      elastic_utils.maybe_elastic_scale_up(config, cm)
+      elastic_utils.maybe_elastic_scale_up(config.elastic_enabled, cm)
 
     self.assertTrue(cm.wait_called)
 
@@ -310,12 +311,12 @@ class ElasticUtilsTest(unittest.TestCase):
     fake_recorder = Mock()
     config = FakeConfig()
 
-    elastic_utils.record_elastic_event_start(fake_recorder, config)
+    elastic_utils.record_elastic_event_start(fake_recorder, config.elastic_enabled)
 
     fake_recorder.record_custom_badput_event_start_time.assert_called_once_with(
-        custom_badput_event_type='elastic_slice_down'
+        custom_badput_event_type="elastic_slice_down"
     )
-    self.assertEqual(elastic_utils.pending_elastic_event_type, 'elastic_slice_down')
+    self.assertEqual(elastic_utils.pending_elastic_event_type, "elastic_slice_down")
 
   def test_record_elastic_event_start_scale_up(self):
     """Tests recording an elastic slice scale up start."""
@@ -324,10 +325,10 @@ class ElasticUtilsTest(unittest.TestCase):
     fake_recorder = Mock()
     config = FakeConfig()
 
-    elastic_utils.record_elastic_event_start(fake_recorder, config)
+    elastic_utils.record_elastic_event_start(fake_recorder, config.elastic_enabled)
 
     fake_recorder.record_custom_badput_event_start_time.assert_called_once_with(
-        custom_badput_event_type='elastic_scale_up'
+        custom_badput_event_type="elastic_scale_up"
     )
 
   def test_record_elastic_wait_end_and_reinit_start_noop_on_first_attempt(self):
@@ -343,16 +344,16 @@ class ElasticUtilsTest(unittest.TestCase):
 
   def test_record_elastic_wait_end_and_reinit_start(self):
     """Test recording end of slice down and start of reinit."""
-    elastic_utils.pending_elastic_event_type = 'elastic_slice_down'
+    elastic_utils.pending_elastic_event_type = "elastic_slice_down"
     fake_recorder = Mock()
 
     elastic_utils.record_elastic_wait_end_and_reinit_start(fake_recorder)
 
     fake_recorder.record_custom_badput_event_end_time.assert_called_once_with(
-        custom_badput_event_type='elastic_slice_down'
+        custom_badput_event_type="elastic_slice_down"
     )
     fake_recorder.record_custom_badput_event_start_time.assert_called_once_with(
-        custom_badput_event_type='elastic_reinitialization'
+        custom_badput_event_type="elastic_reinitialization"
     )
     self.assertIs(elastic_utils.pending_reinit_recorder, fake_recorder)
     self.assertIsNone(elastic_utils.pending_elastic_event_type)
@@ -365,7 +366,7 @@ class ElasticUtilsTest(unittest.TestCase):
     elastic_utils.record_elastic_reinit_end()
 
     fake_recorder.record_custom_badput_event_end_time.assert_called_once_with(
-        custom_badput_event_type='elastic_reinitialization'
+        custom_badput_event_type="elastic_reinitialization"
     )
     self.assertIsNone(elastic_utils.pending_reinit_recorder)
 
@@ -380,6 +381,7 @@ class ElasticUtilsTest(unittest.TestCase):
 
     class ReadOnlyConfig:
       elastic_manager = None
+      elastic_enabled: bool = True
 
       def __init__(self):
         object.__setattr__(self, "elastic_enabled", True)
@@ -391,7 +393,7 @@ class ElasticUtilsTest(unittest.TestCase):
     self.fake_pathwaysutils.is_pathways_backend_used.return_value = True
 
     # Should not raise ValueError
-    elastic_utils.ensure_elastic_manager_initialized(config)
+    elastic_utils.ensure_elastic_manager_initialized(config.elastic_enabled)
     self.assertEqual(elastic_utils.elastic_manager, self.fake_manager)
 
 

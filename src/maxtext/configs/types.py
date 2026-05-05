@@ -27,6 +27,8 @@ import os
 from tempfile import gettempdir
 import yaml
 from typing import Any, Literal, NewType, Optional
+import pathwaysutils
+
 
 import jax
 from maxtext.common.common_types import AttentionType, DecoderBlockType, ReorderStrategy, ShardMode, CustomRule
@@ -87,8 +89,6 @@ class QuantizationType(str, Enum):
   INT4 = "int4"
   INT8 = "int8"
   INTMP = "intmp"
-  FP8_E5M2 = "fp8_e5m2"
-  FP8_E4M3 = "fp8_e4m3"
   FP8 = "fp8"
   NANOO_FP8 = "nanoo_fp8"
   FP8_NANO_V2 = "fp8_nanoo"
@@ -2109,7 +2109,11 @@ class DerivedValues(BaseModel):
 
   num_target_devices: None | int = Field(
       None,
-      description="The number of devices computed from topology in train_compile or jax.devices() in train",
+      description=(
+          "The number of devices computed from topology in train_compile, "
+          "from elastic_utils.live_devices() when elastic_enabled "
+          "(enabling Elastic training), or jax.devices() in train."
+      ),
   )
 
   global_batch_size_to_train_on: None | int = Field(
@@ -2512,7 +2516,7 @@ class MaxTextConfig(
 
     # E. HARDWARE-DEPENDENT CALCULATIONS
     if self.elastic_enabled:
-      elastic_utils.ensure_elastic_manager_initialized(self)
+      elastic_utils.ensure_elastic_manager_initialized(self.elastic_enabled)
 
     def get_num_target_devices():
       """Get the number of devices for the target topology, handling AOT compilation and single-controller modes."""
@@ -2528,7 +2532,7 @@ class MaxTextConfig(
         shape_tuple = tuple(int(x) for x in self.subslice_shape.split(","))
         return prod(shape_tuple)
       elif self.elastic_enabled:
-        return len(elastic_utils.live_devices(config=self))
+        return len(elastic_utils.live_devices(self.elastic_enabled))
       else:
         return len(jax.devices())
 
@@ -2761,8 +2765,12 @@ class MaxTextConfig(
     # H. RUN ALL CROSS-FIELD VALIDATIONS
     if self.load_parameters_path and self.load_full_state_path:
       raise ValueError("At most one of `load_parameters_path` or `load_full_state_path` should be set.")
-    if self.elastic_enabled and not self.enable_single_controller:
-      raise ValueError("Elastic training is only supported with Pathways (`enable_single_controller=True`).")
+    if self.elastic_enabled and not self.enable_single_controller and not pathwaysutils.is_pathways_backend_used():
+      raise ValueError(
+          "Elastic training is only supported with Pathways "
+          f"(`enable_single_controller={self.enable_single_controller}`) and "
+          f"Pathways backend (`is_pathways_backend_used={pathwaysutils.is_pathways_backend_used()}`)."
+      )
     if self.grain_use_elastic_iterator and self.grain_file_type != "arrayrecord":
       raise ValueError(
           "`grain_use_elastic_iterator=True` only supports `grain_file_type=arrayrecord`. "

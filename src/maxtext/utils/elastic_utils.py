@@ -28,10 +28,10 @@ pending_reinit_recorder = None
 pending_elastic_event_type = None
 
 
-def record_elastic_event_start(recorder, config) -> None:
+def record_elastic_event_start(recorder, elastic_enabled: bool) -> None:
   """Records start of an elastic scale up event."""
   global pending_elastic_event_type
-  event_type = 'elastic_scale_up' if is_scale_up_event(config) else 'elastic_slice_down'
+  event_type = "elastic_scale_up" if is_scale_up_event(elastic_enabled) else "elastic_slice_down"
   pending_elastic_event_type = event_type
   if recorder:
     recorder.record_custom_badput_event_start_time(custom_badput_event_type=event_type)
@@ -46,7 +46,7 @@ def record_elastic_wait_end_and_reinit_start(recorder) -> None:
   pending_elastic_event_type = None
   if recorder:
     recorder.record_custom_badput_event_end_time(custom_badput_event_type=event_type)
-    recorder.record_custom_badput_event_start_time(custom_badput_event_type='elastic_reinitialization')
+    recorder.record_custom_badput_event_start_time(custom_badput_event_type="elastic_reinitialization")
   pending_reinit_recorder = recorder
 
 
@@ -54,13 +54,11 @@ def record_elastic_reinit_end() -> None:
   """Records end of elastic reinitialization event."""
   global pending_reinit_recorder
   if pending_reinit_recorder is not None:
-    pending_reinit_recorder.record_custom_badput_event_end_time(
-        custom_badput_event_type='elastic_reinitialization'
-    )
+    pending_reinit_recorder.record_custom_badput_event_end_time(custom_badput_event_type="elastic_reinitialization")
     pending_reinit_recorder = None
 
 
-def elastic_enabled(config) -> bool:
+def is_elastic_enabled(config) -> bool:
   """Returns whether elastic mode is enabled."""
   return pathwaysutils.is_pathways_backend_used() and config.elastic_enabled
 
@@ -99,23 +97,23 @@ def clean_up_checkpoints(checkpoint_dir: str):
     max_logging.log(f"Found commit_success file. Keeping {latest_checkpoint_path}.")
 
 
-def ensure_elastic_manager_initialized(config):
+def ensure_elastic_manager_initialized(elastic_enabled: bool):
   """Initializes elastic manager if it's not initialized and pathways is used."""
   global elastic_manager
-  if pathwaysutils.is_pathways_backend_used() and config.elastic_enabled and elastic_manager is None:
+  if elastic_enabled and elastic_manager is None:
     elastic_manager = manager.Manager()
 
 
-def get_local_batch_size(config) -> int:
+def get_local_batch_size(elastic_enabled: bool, per_device_batch_size: int) -> int:
   """Returns the local batch size based on the config."""
-  return config.per_device_batch_size * get_devices_per_host(config)
+  return per_device_batch_size * get_devices_per_host(elastic_enabled)
 
 
-def live_devices(config=None):
+def live_devices(elastic_enabled: bool = False):
   """Returns the list of live devices."""
-  # If pathways is not used or elastic_manager is not initialized, return all devices
-  if pathwaysutils.is_pathways_backend_used() and config is not None:
-    ensure_elastic_manager_initialized(config)
+  # If pathways is not used or elastic training is not enabled, return all devices
+  if pathwaysutils.is_pathways_backend_used() and elastic_enabled:
+    ensure_elastic_manager_initialized(elastic_enabled)
     assert elastic_manager is not None
     # Filter devices that are in active slices
     return [
@@ -124,14 +122,14 @@ def live_devices(config=None):
   return jax.devices()
 
 
-def live_slice_indices(config) -> set[int]:
+def live_slice_indices(elastic_enabled: bool) -> set[int]:
   """Returns the set of live slice indices."""
-  return {getattr(d, "slice_index", 0) for d in live_devices(config) if d is not None}
+  return {getattr(d, "slice_index", 0) for d in live_devices(elastic_enabled) if d is not None}
 
 
-def get_devices_per_host(config):
+def get_devices_per_host(elastic_enabled: bool):
   """Dynamically calculates the number of chips per physical worker VM."""
-  devices = Counter(d.task_id for d in live_devices(config))
+  devices = Counter(d.task_id for d in live_devices(elastic_enabled))
 
   max_logging.log(f"elastic_utils: Device counts per task: {devices}")
   if not devices:
@@ -172,7 +170,7 @@ def elastic_retry(config, callback_fn=None, pre_callback_fn=None):
   Returns:
     A decorator for elastic retry.
   """
-  if not elastic_enabled(config):
+  if not is_elastic_enabled(config):
     msg = (
         "Elastic training requires the Pathways backend, and elastic_enabled"
         " must be set to True: current config.elastic_enabled:"
@@ -183,7 +181,7 @@ def elastic_retry(config, callback_fn=None, pre_callback_fn=None):
 
   max_logging.log("Elastic Retry Enabled")
 
-  ensure_elastic_manager_initialized(config)
+  ensure_elastic_manager_initialized(config.elastic_enabled)
   assert elastic_manager is not None
 
   cleanup_partial = functools.partial(clean_up_checkpoints, config.checkpoint_dir)
@@ -202,19 +200,19 @@ def elastic_retry(config, callback_fn=None, pre_callback_fn=None):
   )
 
 
-def is_scale_up_event(config) -> bool:
+def is_scale_up_event(elastic_enabled: bool) -> bool:
   """Returns whether a scale up event is detected."""
-  if elastic_enabled(config):
-    ensure_elastic_manager_initialized(config)
+  if elastic_enabled:
+    ensure_elastic_manager_initialized(elastic_enabled)
     assert elastic_manager is not None
     return elastic_manager.new_slice_event.is_set()
 
   return False
 
 
-def maybe_elastic_scale_up(config, checkpoint_manager):
+def maybe_elastic_scale_up(elastic_enabled: bool, checkpoint_manager):
   """Waits for a checkpoint to finish before interrupting for scale up."""
-  if is_scale_up_event(config):
+  if is_scale_up_event(elastic_enabled):
     max_logging.log(
         "Started a checkpoint and a new slice is available. Waiting for current"
         " checkpoint to finish before interrupting."

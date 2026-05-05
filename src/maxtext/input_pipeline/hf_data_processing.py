@@ -59,7 +59,7 @@ def vision_sft_preprocessing_pipeline(
   # Tunix GA requires per-micro-batch slicing at the data level,
   # whereas Native GA processes the full batch and splits it internally.
   if config.elastic_enabled:
-    local_batch_size = elastic_utils.get_local_batch_size(config)
+    local_batch_size = elastic_utils.get_local_batch_size(config.elastic_enabled, config.per_device_batch_size)
   else:
     local_batch_size = global_batch_size // jax.process_count()
   if config.use_tunix_gradient_accumulation:
@@ -233,7 +233,7 @@ def preprocessing_pipeline(
   # Tunix GA requires per-micro-batch slicing at the data level,
   # whereas Native GA processes the full batch and splits it internally.
   if config.elastic_enabled:
-    local_batch_size = elastic_utils.get_local_batch_size(config)
+    local_batch_size = elastic_utils.get_local_batch_size(config.elastic_enabled, config.per_device_batch_size)
   else:
     local_batch_size = global_batch_size // jax.process_count()
   if use_tunix_gradient_accumulation:

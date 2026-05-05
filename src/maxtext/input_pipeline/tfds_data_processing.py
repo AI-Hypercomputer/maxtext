@@ -253,7 +253,12 @@ def make_tfds_train_iterator(
     )
     global_shape = (config.global_batch_size_to_load, config.max_target_length)
     return multihost_dataloading.RemoteIteratorWrapper(
-        get_ds_fn, preprocessing_fn, global_mesh, global_shape, checkpoint_path=config.checkpoint_dir
+        get_ds_fn,
+        preprocessing_fn,
+        global_mesh,
+        global_shape,
+        checkpoint_path=config.checkpoint_dir,
+        elastic_enabled=config.elastic_enabled,
     )
 
 
