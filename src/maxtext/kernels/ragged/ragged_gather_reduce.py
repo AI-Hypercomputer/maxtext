@@ -476,7 +476,7 @@ def ragged_gather_reduce(
           num_row_partitions=num_rows_partitions,
           num_column_partitions=num_column_partitions,
       ),
-      out_shape=jax.ShapeDtypeStruct(
+      out_type=jax.ShapeDtypeStruct(
           (padded_input_size // reduce_group_size, aligned_hidden_size),
           jnp.float32,
       ),
@@ -484,7 +484,7 @@ def ragged_gather_reduce(
           use_tc_tiling_on_sc=True,
           disable_bounds_checks=True,
       ),
-      scratch_shapes=dict(  # pylint: disable=use-dict-literal
+      scratch_types=dict(  # pylint: disable=use-dict-literal
           num_rows_per_row_partition_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
           out_vmem_ref=pltpu.VMEM((num_simd_lanes, col_size), jnp.uint32),
           prev_iter_last_row_vmem_ref=pltpu.VMEM((1, col_size), jnp.uint32),
