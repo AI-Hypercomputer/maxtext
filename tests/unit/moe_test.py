@@ -711,6 +711,7 @@ class RoutedMoeTest(unittest.TestCase):
       )
 
   @pytest.mark.tpu_only
+  @pytest.mark.skip(reason="Ragged sort requires JAX>=0.10.0.")
   def test_ragged_sort_loss_and_grad_ring_of_experts(self):
     self._run_ragged_sort_loss_and_grad(use_ring_of_experts=True)
 

@@ -13,7 +13,7 @@
 # limitations under the License.
 
 """Ragged gather reduce kernel implementation from tpu-inference."""
-# Source from cl/908226344
+# Source from google3/experimental/users/kyuyeunk/vllm/kernels/sparse_core/ragged_gather_reduce.py
 
 import functools
 import math
@@ -22,6 +22,16 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 from jax.experimental.pallas import tpu_sc as plsc
 import jax.numpy as jnp
+from packaging.version import Version
+
+# JAX <= 0.10.0 used `out_shape`/`scratch_shapes` kwargs for `pl.kernel`; later
+# versions renamed them to `out_type`/`scratch_types`.
+if Version(jax.__version__) <= Version("0.10.0"):
+  _OUT_KW = "out_shape"
+  _SCRATCH_KW = "scratch_shapes"
+else:
+  _OUT_KW = "out_type"
+  _SCRATCH_KW = "scratch_types"
 
 
 # ceil up to the nearest multiple of b.
@@ -476,25 +486,27 @@ def ragged_gather_reduce(
           num_row_partitions=num_rows_partitions,
           num_column_partitions=num_column_partitions,
       ),
-      out_shape=jax.ShapeDtypeStruct(
-          (padded_input_size // reduce_group_size, aligned_hidden_size),
-          jnp.float32,
-      ),
       compiler_params=pltpu.CompilerParams(
           use_tc_tiling_on_sc=True,
           disable_bounds_checks=True,
       ),
-      scratch_shapes=dict(  # pylint: disable=use-dict-literal
-          num_rows_per_row_partition_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
-          out_vmem_ref=pltpu.VMEM((num_simd_lanes, col_size), jnp.uint32),
-          prev_iter_last_row_vmem_ref=pltpu.VMEM((1, col_size), jnp.uint32),
-          src_indices_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
-          dst_indices_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
-          topk_weights_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.float32),
-          sem_ref=pltpu.SemaphoreType.DMA((2,)),
-      ),
       mesh=vector_mesh,
       name="sc_ragged_gather_reduce",
+      **{
+          _OUT_KW: jax.ShapeDtypeStruct(
+              (padded_input_size // reduce_group_size, aligned_hidden_size),
+              jnp.float32,
+          ),
+          _SCRATCH_KW: dict(  # pylint: disable=use-dict-literal
+              num_rows_per_row_partition_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
+              out_vmem_ref=pltpu.VMEM((num_simd_lanes, col_size), jnp.uint32),
+              prev_iter_last_row_vmem_ref=pltpu.VMEM((1, col_size), jnp.uint32),
+              src_indices_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
+              dst_indices_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
+              topk_weights_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.float32),
+              sem_ref=pltpu.SemaphoreType.DMA((2,)),
+          ),
+      },
   )(num_src_rows_per_row_partition, x, src_indices, dst_indices, topk_weights)
 
   # If there is no valid source row in a reduce group, set that group's output
