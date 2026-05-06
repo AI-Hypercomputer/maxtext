@@ -33,7 +33,7 @@ import numpy as np
 from maxtext.layers.embeddings import PartialRotaryEmbedding, RotaryEmbedding, Gemma4PartialRotaryEmbedding
 from maxtext.configs import pyconfig
 from maxtext.utils import maxtext_utils
-from tests.utils.test_helpers import get_test_config_path, get_decoupled_parallelism_overrides
+from tests.utils.test_helpers import get_test_config_path
 
 
 class PartialRotaryEmbeddingTest(unittest.TestCase):
@@ -42,12 +42,10 @@ class PartialRotaryEmbeddingTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     # build a simple config and mesh like other embedding tests
-    extra_args = get_decoupled_parallelism_overrides()
     self.cfg = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         run_name="test_embeddings",
         enable_checkpointing=False,
-        **extra_args,
     )
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
     self.mesh = Mesh(devices_array, self.cfg.mesh_axes)
@@ -186,12 +184,10 @@ class Gemma4PartialRotaryEmbeddingTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
-    extra_args = get_decoupled_parallelism_overrides()
     self.cfg = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         run_name="test_embeddings",
         enable_checkpointing=False,
-        **extra_args,
     )
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
     self.mesh = Mesh(devices_array, self.cfg.mesh_axes)
