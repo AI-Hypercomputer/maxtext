@@ -17,6 +17,7 @@ llguidance
 loguru
 lxml
 mistral_common
+model-hosting-container-standards
 openai
 openai-harmony
 papermill
@@ -35,6 +36,7 @@ sortedcontainers
 torchax
 torchvision
 tpu-info
+watchfiles
 xgrammar
 xprof
 yapf
