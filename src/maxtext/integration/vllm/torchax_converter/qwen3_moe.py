@@ -15,6 +15,7 @@
 """Qwen3 MaxText to vLLM weight converters."""
 
 import functools
+from functools import partial
 import gc
 import logging
 
@@ -23,6 +24,9 @@ import jax.numpy as jnp
 from jaxtyping import PyTree
 
 from maxtext.integration.vllm.torchax_converter.base import BaseMaxTextToVLLMConverter
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from tpu_inference.layers.common.moe import MoEBackend
+from tpu_inference.layers.common.quantization.unquantized import process_unquantized_moe_weights
 
 
 class Qwen3MaxTextToVLLMConverter(BaseMaxTextToVLLMConverter):
@@ -75,21 +79,14 @@ class Qwen3MaxTextToVLLMConverter(BaseMaxTextToVLLMConverter):
     del moe["gate"]
     gc.collect()
 
-    logging.info("_convert_moe: expert down (w2) weights...")
-    self.vllm_state.update(
-        {f"{prefix}.{i}.mlp.experts.w2_weight": weight for i, weight in enumerate(self._to_mlp_expert_down(moe["wo"]))}
-    )
-    del moe["wo"]
-    gc.collect()
-
-    logging.info("_convert_moe: expert gate+up (w13) weights (fuse_all jit+vmap)...")
-    self._to_mlp_expert_gate_up(
+    logging.info("_convert_moe: expert gate+up (w13) and expert down (w2) weights (jax-native process_unquantized_moe_weights)...")
+    self._to_mlp_experts(
         moe["wi_0"],
         moe["wi_1"],
+        moe["wo"],
         prefix,
-        "mlp.experts.w13_weight",
     )
-    del moe["wi_0"], moe["wi_1"], moe
+    del moe["wi_0"], moe["wi_1"], moe["wo"], moe
     logging.info("_convert_moe: done")
     gc.collect()
 
@@ -155,73 +152,55 @@ class Qwen3MaxTextToVLLMConverter(BaseMaxTextToVLLMConverter):
     param = self._transpose_gate(param)
     return self._unstack_layer(param)
 
-  def _to_mlp_expert_down(self, param):
-    param = self._transpose_expert_down(param)
-    param = jnp.transpose(param, (0, 1, 3, 2))
-    return self._unstack_layer(param)
-
-  def _to_mlp_expert_gate_up(self, wi_0, wi_1, layer_key_prefix, layer_key_suffix):
-    """Fuse MoE gate and up projections into the vLLM `w13` layout.
-
-    The stored format expected by tpu-inference (post process_moe_weights for GMM_TP)
-    is [E, d_model, 2*padded_chunk_size*tp], with TP-shard interleaving:
-    [gate_shard0, up_shard0, gate_shard1, up_shard1, ...].
-    """
-    fuse_all = self._make_fuse_all(self.vllm_tp)
-
-    logging.info("_to_mlp_expert_gate_up: dispatching _fuse_all (single JIT+vmap)...")
-    fused = fuse_all(wi_0, wi_1)
-    logging.info(
-        "_to_mlp_expert_gate_up: _fuse_all complete, shape=%s, unstacking layers...",
-        fused.shape,
+  @partial(jax.jit, static_argnums=(0,))
+  def _process_moe_layer(self, w1, w2, w3):
+    # Input shapes (MaxText):
+    # w1 (gate): (num_experts, hidden_size, intermediate_size)
+    # w2 (up):   (num_experts, hidden_size, intermediate_size)
+    # w3 (down): (num_experts, intermediate_size, hidden_size)
+    
+    # 1. Concatenate w1 (gate) and w2 (up) along axis 2 (intermediate_size)
+    w13 = jnp.concatenate([w1, w2], axis=2) # (num_experts, hidden_size, 2 * intermediate_size)
+    # Swap axes to get (num_experts, 2 * intermediate_size, hidden_size) for process_moe_weights
+    w13_input = jnp.swapaxes(w13, 1, 2)
+    
+    # w2_weight input to process_moe_weights should be (num_experts, hidden_size, intermediate_size)
+    w2_input = jnp.swapaxes(w3, 1, 2)
+    
+    processed = process_unquantized_moe_weights(
+        mesh=self.mesh,
+        moe_backend=MoEBackend.GMM_TP,
+        activation=MoEActivation.SILU,
+        w13_weight=w13_input,
+        w13_bias=None,
+        w2_weight=w2_input,
+        w2_bias=None,
     )
-    del wi_0, wi_1
-    gc.collect()
+    return processed.w13_weight, processed.w2_weight
 
-    for i, layer_i in enumerate(jnp.unstack(fused, axis=0)):
-      layer_i = jnp.transpose(layer_i, (0, 2, 1))
-      self.vllm_state[f"{layer_key_prefix}.{i}.{layer_key_suffix}"] = layer_i
-      if i % 8 == 7:
+  def _to_mlp_experts(self, wi_0, wi_1, wo, prefix):
+    """Process expert w13 and w2 weights layer-by-layer using JAX-native process_unquantized_moe_weights."""
+    # Stacked input shapes:
+    # wi_0 (gate): (num_experts, num_layers, hidden_size, intermediate_size)
+    # wi_1 (up):   (num_experts, num_layers, hidden_size, intermediate_size)
+    # wo (down):   (num_experts, num_layers, intermediate_size, hidden_size)
+    
+    # Swap num_experts and num_layers so we can loop over layers easily
+    wi_0 = jnp.transpose(wi_0, (1, 0, 2, 3)) # (num_layers, num_experts, hidden_size, intermediate_size)
+    wi_1 = jnp.transpose(wi_1, (1, 0, 2, 3)) # (num_layers, num_experts, hidden_size, intermediate_size)
+    wo = jnp.transpose(wo, (1, 0, 2, 3))     # (num_layers, num_experts, intermediate_size, hidden_size)
+    
+    for l in range(self.num_layers):
+      logging.info("Processing expert weights for layer %d...", l)
+      w13_fused_layer, w2_processed_layer = self._process_moe_layer(
+          wi_0[l],
+          wi_1[l],
+          wo[l],
+      )
+      self.vllm_state[f"{prefix}.{l}.mlp.experts.w13_weight"] = w13_fused_layer
+      self.vllm_state[f"{prefix}.{l}.mlp.experts.w2_weight"] = w2_processed_layer
+      if l % 8 == 7:
         gc.collect()
-    del fused
-    gc.collect()
-
-  @staticmethod
-  @functools.lru_cache(maxsize=8)
-  def _make_fuse_all(tp: int):
-    """Build the cached JIT that fuses all expert gate and up weights.
-
-    Produces [layers, E, 2*padded_chunk_size*tp, d_model] with interleaving
-    [gate_shard0, up_shard0, gate_shard1, up_shard1, ...] matching the layout
-    that tpu-inference's process_moe_weights (GMM_TP) outputs from HF weights.
-    """
-
-    @jax.jit
-    def _fuse_all(wi_0, wi_1):
-      wi_0 = jnp.transpose(wi_0, (1, 0, 2, 3))
-      wi_1 = jnp.transpose(wi_1, (1, 0, 2, 3))
-
-      def _fuse_single(w0, w1):
-        # [e, d_model, d_inner] -> [e, d_inner, d_model]
-        w0 = jnp.transpose(w0, (0, 2, 1))
-        w1 = jnp.transpose(w1, (0, 2, 1))
-        num_experts, d_inner, d_model = w0.shape
-        chunk_size = d_inner // tp
-        # Pad each TP chunk to the next multiple of 128 for TPU GMM alignment,
-        # matching process_w13_for_gmm in tpu_inference.
-        padded_chunk_size = ((chunk_size + 127) // 128) * 128
-        pad_amount = padded_chunk_size - chunk_size
-        gate_chunks = w0.reshape(num_experts, tp, chunk_size, d_model)
-        up_chunks = w1.reshape(num_experts, tp, chunk_size, d_model)
-        if pad_amount > 0:
-          gate_chunks = jnp.pad(gate_chunks, ((0, 0), (0, 0), (0, pad_amount), (0, 0)))
-          up_chunks = jnp.pad(up_chunks, ((0, 0), (0, 0), (0, pad_amount), (0, 0)))
-        combined = jnp.stack([gate_chunks, up_chunks], axis=2)
-        return combined.reshape(num_experts, 2 * padded_chunk_size * tp, d_model)
-
-      return jax.vmap(_fuse_single)(wi_0, wi_1)
-
-    return _fuse_all
 
   @staticmethod
   @jax.jit

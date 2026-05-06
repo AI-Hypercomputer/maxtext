@@ -354,6 +354,12 @@ def validate_converter(argv) -> None:
       dst_sharding = llm_state[key].sharding
       llm_state[key] = reshard_pytree(weight_array, dst_sharding, donate_input=False, cache_plan=True)
 
+  if debug_converter:
+    print("=" * 80)
+    print("Weight stats AFTER assignment:")
+    print("=" * 80)
+    _log_weight_stats(vllm_state, llm_state, compare=True)
+
   # --- Generation test ------------------------------------------------------
   sampling_params = SamplingParams(
       temperature=0.0,
