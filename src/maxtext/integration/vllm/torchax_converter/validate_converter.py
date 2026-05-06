@@ -95,6 +95,7 @@ def _setup_vllm_environment():
   os.environ["SKIP_JAX_PRECOMPILE"] = "1"
   os.environ["JAX_RANDOM_WEIGHTS"] = "False"
   os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+  os.environ["NEW_MODEL_DESIGN"] = "1"
 
 
 def _clean_device_memory():
