@@ -15,18 +15,21 @@ from maxtext.nnx_exp.infra import (
     to_host,
 )
 
-
-def cross_entropy_loss(logits, one_hot_targets):
-  log_probs = jax.nn.log_softmax(logits.astype(jnp.float32), axis=-1)
-  total_tokens = one_hot_targets.size // one_hot_targets.shape[-1]
-  return -jnp.sum(log_probs * one_hot_targets) / total_tokens
+def cross_entropy_loss(logits, targets):
+  from jax.sharding import NamedSharding, PartitionSpec as P, reshard
+  mesh = jax.sharding.get_abstract_mesh()
+  if mesh is not None:
+    logits = reshard(logits, NamedSharding(mesh, P(("dp", "pp"), None, None)))
+    targets = reshard(targets, NamedSharding(mesh, P(("dp", "pp"), None)))
+  loss = optax.softmax_cross_entropy_with_integer_labels(logits.astype(jnp.float32), targets)
+  return jnp.mean(loss)
 
 
 @jax.jit
-def train_step(state, tokens, positions, mask, one_hot_targets):
+def train_step(state, tokens, positions, mask, targets):
   def loss_fn(params):
     logits = nnx.merge(state.graphdef, params)(tokens, positions, mask=mask)
-    return cross_entropy_loss(logits, one_hot_targets)
+    return cross_entropy_loss(logits, targets)
 
   loss, grads = jax.value_and_grad(loss_fn)(state.params)
   return state.apply_gradients(grads=grads), loss
@@ -53,26 +56,20 @@ def main():
     rngs = nnx.Rngs(42)
     
     # Generate mock data (needed for quantization tracing)
-    batch_size = 1
-    seq_len = 2048
+    batch_size = 2
+    seq_len = 4096
     
     tokens = jnp.zeros((batch_size, seq_len), dtype=jnp.int32)
     targets = jnp.zeros((batch_size, seq_len), dtype=jnp.int32)
     positions = jnp.broadcast_to(jnp.arange(seq_len), (batch_size, seq_len))
     mask = None
     
-    # Create one-hot targets
-    one_hot_targets = jax.nn.one_hot(targets, config.vocab_size, dtype=jnp.float32)
-    
     # Place inputs on devices with explicit sharding
-    tokens, _, positions, mask = sharding.place_inputs(tokens, None, positions, mask)
-    
-    from jax.sharding import NamedSharding
-    one_hot_targets = jax.device_put(one_hot_targets, NamedSharding(mesh, sharding.logits_spec()))
+    tokens, targets, positions, mask = sharding.place_inputs(tokens, targets, positions, mask)
 
     # Initialize model with sharding callback hook (handles both Initializer-Time weight sharding and Activation sharding)
     sharding_hook = LlamaShardingHook(sharding)
-    model = Llama(config, rngs=rngs, sharding_hook=sharding_hook)
+    model = Llama(config, rngs=rngs, sharding_hook=sharding_hook, scan=True)
     print(f"Embedding sharding: {model.embed.embedding.sharding}")
     
     # 1. Apply Rematerialization
@@ -87,7 +84,8 @@ def main():
     gdef, params = nnx.split(model, nnx.Param)
     
     # Create optimizer
-    tx = optax.adam(learning_rate=3e-4)
+    #tx = optax.adam(learning_rate=3e-4)
+    tx = optax.sgd(learning_rate=3e-4, momentum=0.9)
     
     # Create TrainState
     state = nnx.TrainState.create(gdef, params=params, tx=tx)
@@ -110,7 +108,7 @@ def main():
         print(f"Starting profiler at step {step}...")
         jax.profiler.start_trace(profile_dir)
         
-      state, loss = train_step(state, tokens, positions, mask, one_hot_targets)
+      state, loss = train_step(state, tokens, positions, mask, targets)
       print(f"Step {step} loss: {loss}")
       
       if step == 7:
