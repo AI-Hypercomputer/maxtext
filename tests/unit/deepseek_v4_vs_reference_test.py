@@ -581,7 +581,9 @@ class DeepseekV4VsReferenceTest(unittest.TestCase):
     self.assertEqual(reconstructed.config.o_lora_rank, 1024)
 
 
-# --- PyTorch RoPE and Attention Operator reference mocks for parity ---
+# =============================================================================
+# PyTorch Golden Reference Classes
+# =============================================================================
 class DeepSeekV4RotaryEmbeddingPT(nn.Module):
   """PyTorch reference mock for DeepSeek-V4 interleaved RoPE."""
 
@@ -642,7 +644,9 @@ def deepseek_v4_attention_forward_pt(q_local, k_local, v_local, k_comp, v_comp, 
   return apply_conjugate_unrotation_pt(attn_output, cos_unrotate, sin_unrotate)
 
 
-# --- New JAX RoPE and Attention Operator Parity Tests ---
+# =============================================================================
+# JAX / PyTorch Coordinate Parity Tests
+# =============================================================================
 class DeepSeekV4CoordinateSystemsTest(unittest.TestCase):
 
   def setUp(self):
