@@ -88,6 +88,7 @@ If you have made changes to TPU pre-training dependencies in `src/dependencies/r
 bash src/dependencies/scripts/generate_requirements.sh \
 --base-requirements src/dependencies/requirements/base_requirements/tpu-requirements.txt \
 --generated-requirements tpu-requirements.txt \
+--override-requirements src/dependencies/extra_deps/tpu_overrides.txt \
 --seed-commit <jax-build-commit-hash>
 
 # Copy generated requirements to src/dependencies/requirements/generated_requirements
@@ -104,7 +105,7 @@ If you have made changes to the post-training dependencies in `src/dependencies/
 bash src/dependencies/scripts/generate_requirements.sh \
 --base-requirements src/dependencies/requirements/base_requirements/tpu-post-train-requirements.txt \
 --generated-requirements tpu-post-train-requirements.txt \
---override-requirements src/dependencies/extra_deps/post_train_overrides.txt \
+--override-requirements src/dependencies/extra_deps/tpu_post_train_overrides.txt \
 --seed-commit <jax-build-commit-hash>
 
 # Copy generated requirements to src/dependencies/requirements/generated_requirements
