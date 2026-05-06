@@ -21,8 +21,9 @@ import jax.numpy as jnp
 import jaxtyping
 from typing import Any, Callable
 
+from flax import nnx
+
 from maxtext.common.common_types import DecoderBlockType
-from maxtext.inference.offline_engine import InputData
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 
@@ -112,6 +113,48 @@ def compute_log_probs(
   return token_log_probs, intermediate_outputs
 
 
+def compute_log_probs_nnx(
+    model,
+    inputs,
+    inputs_position,
+    inputs_segmentation,
+    completion_segmentation,
+    config,
+    is_train=False,
+):
+  """`compute_log_probs` for the NNX path.
+
+  `model` is an `nnx.Module` (carries its own params + RNG state), so there's
+  no `params` arg. Intermediates are pulled off the model after the forward
+  via `nnx.state(model, nnx.Intermediate).to_pure_dict()`.
+  """
+  logits = model(
+      decoder_input_tokens=inputs,
+      decoder_positions=inputs_position,
+      decoder_segment_ids=inputs_segmentation,
+      enable_dropout=(config.enable_dropout if is_train else False),
+  )
+  intermediate_outputs = nnx.state(model, nnx.Intermediate).to_pure_dict()
+  logits = logits / config.decode_sampling_temperature
+
+  targets = inputs[:, 1:]
+  shifted_completion_segmentation = jax.lax.dynamic_slice(
+      completion_segmentation, (0, 1), (completion_segmentation.shape[0], completion_segmentation.shape[1] - 1)
+  )
+  shifted_completion_segmentation = jnp.pad(
+      shifted_completion_segmentation, ((0, 0), (0, 1)), mode="constant", constant_values=0
+  )
+  mask = shifted_completion_segmentation[..., None]
+  mask = jnp.broadcast_to(mask, logits.shape)
+  masked_logits = jnp.where(mask, logits, -jnp.inf)
+  log_probs = jax.nn.log_softmax(masked_logits, axis=-1)
+  log_probs = jnp.where(mask, log_probs, -0.0)
+  log_probs = log_probs[:, :-1, :]
+  token_log_probs = jnp.take_along_axis(log_probs, targets[..., None], axis=-1)[..., 0]
+  token_log_probs = token_log_probs * shifted_completion_segmentation[:, :-1]
+  return token_log_probs, intermediate_outputs
+
+
 def generate_offline_completions(config, tokenizer_model, inference_engine, data):
   """Generates completions for a batch of prompts using an offline engine.
 
@@ -125,6 +168,10 @@ def generate_offline_completions(config, tokenizer_model, inference_engine, data
     The input `data` dictionary updated with the generated completions,
     segmentations, positions, and log-probabilities.
   """
+  # Lazy import: pulls in maxengine and jetstream stubs, which we only want to
+  # touch when this function is actually called (i.e. during a real GRPO run).
+  from maxtext.inference.offline_engine import InputData  # pylint: disable=import-outside-toplevel
+
   data[config.train_data_columns] = np.asarray(
       jnp.repeat(data[config.train_data_columns], config.num_generations, axis=0)
   )
@@ -173,6 +220,30 @@ def generate_offline_completions(config, tokenizer_model, inference_engine, data
   else:
     data["completions_logprobs"] = None
   return data
+
+
+def pathways_reshard_nnx(
+    config, inference_engine, policy_state_model, source_shardings_model, destination_shardings_model
+):
+  """`pathways_reshard` for the NNX path.
+
+  Reshard the policy params onto the inference mesh and push them into the
+  inference engine. Requires `scan_layers=True` (no NNX-aware unscan helper yet).
+  """
+  if not config.scan_layers:
+    raise NotImplementedError(
+        "GRPO + pure_nnx + scan_layers=False not supported yet. " "Use scan_layers=True or pure_nnx=False."
+    )
+  _, policy_params, _ = nnx.split(policy_state_model, nnx.Param, ...)
+  _, source_param_shardings, _ = nnx.split(source_shardings_model, nnx.Param, ...)
+  _, dest_param_shardings, _ = nnx.split(destination_shardings_model, nnx.Param, ...)
+  del source_param_shardings  # already encoded on policy_params
+  with (
+      jax.transfer_guard_device_to_host("disallow_explicit"),
+      jax.transfer_guard_host_to_device("disallow_explicit"),
+  ):
+    resharded_params = reshard_pytree(policy_params, dest_param_shardings)
+  inference_engine.update_params(resharded_params)
 
 
 def pathways_reshard(config, inference_engine, params, source_shardings, source_mesh, destination_shardings):
