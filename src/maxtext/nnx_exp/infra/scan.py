@@ -51,9 +51,11 @@ def create_scanned_remat_layers(layer_cls, config, num_layers, *, rngs, policy="
     return ScannedLayers(graphdef=graphdef, state=_stack_states(states))
 
 
-def scan_forward(x, blocks, positions, mask):
+def scan_forward(x, blocks, positions, mask, use_remat=False, remat_policy=None):
     def forward(carry, layer_state):
         layer = nnx.merge(blocks.graphdef, layer_state)
+        if use_remat:
+            return nnx.remat(layer, policy=remat_policy)(carry, positions, mask), None
         return layer(carry, positions, mask), None
 
     return jax.lax.scan(forward, x, blocks.state)[0]

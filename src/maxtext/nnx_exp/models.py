@@ -167,8 +167,9 @@ class DecoderLayer(nnx.Module):
 
 
 class Llama(nnx.Module):
-  def __init__(self, config: LlamaConfig, *, rngs: nnx.Rngs, sharding_hook: Callable = None):
+  def __init__(self, config: LlamaConfig, *, rngs: nnx.Rngs, sharding_hook: Callable = None, scan: bool = False):
     self.config = config
+    self.scan = scan
     self.sharding_hook = sharding_hook or (lambda x, name: x)
     dt = _DTYPES[config.dtype]
     embedding_init = nnx.initializers.variance_scaling(1.0, "fan_in", "normal", out_axis=0)
@@ -179,7 +180,19 @@ class Llama(nnx.Module):
       rngs=rngs,
       embedding_init=self.sharding_hook(embedding_init, "embed_embedding_init"),
     )
-    self.layers = nnx.Sequential(*[DecoderLayer(config, rngs=rngs, sharding_hook=sharding_hook) for _ in range(config.num_layers)])
+    if scan:
+      from maxtext.nnx_exp.infra.scan import create_scanned_layers
+      self.layers = nnx.data(create_scanned_layers(
+          DecoderLayer,
+          config,
+          config.num_layers,
+          rngs=rngs,
+          sharding_hook=sharding_hook
+      ))
+    else:
+      self.layers = nnx.Sequential(*[DecoderLayer(config, rngs=rngs, sharding_hook=sharding_hook) for _ in range(config.num_layers)])
+    self.use_remat = False
+    self.remat_policy = None
     self.norm = nnx.RMSNorm(
       config.emb_dim,
       epsilon=config.norm_eps,
@@ -199,8 +212,16 @@ class Llama(nnx.Module):
   def __call__(self, tokens, positions, mask=None):
     hook = self.sharding_hook
     x = self.embed_tokens(tokens)
-    for layer in self.layers.layers:
-      x = layer(x, positions, mask)
+    if self.scan:
+      from maxtext.nnx_exp.infra.scan import scan_forward
+      x = scan_forward(x, self.layers, positions, mask, use_remat=getattr(self, "use_remat", False), remat_policy=getattr(self, "remat_policy", None))
+    else:
+      for layer in self.layers.layers:
+        remat_policy = getattr(self, "remat_policy", None)
+        if remat_policy is not None:
+          x = nnx.remat(layer, policy=remat_policy)(x, positions, mask)
+        else:
+          x = layer(x, positions, mask)
     x = hook(self.norm(x), "final_norm")
     
     out_sharding = hook.get_spec("logits") if hasattr(hook, "get_spec") else None
