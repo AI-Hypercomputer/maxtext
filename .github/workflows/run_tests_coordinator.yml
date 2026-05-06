@@ -70,6 +70,7 @@ jobs:
 
     uses: ./.github/workflows/run_tests_against_package.yml
     with:
+      flavor: ${{ inputs.flavor }}
       # Infrastructure Mapping
       device_type: >-
         ${{ fromJSON('{

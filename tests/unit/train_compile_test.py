@@ -17,6 +17,12 @@
 This module contains unit tests for `train_compile.py`, ensuring that various
 model configurations and parallelism strategies can be successfully compiled
 for different hardware topologies.
+
+These tests exercise the compilation pipeline only, not numerical correctness,
+so most use `override_model_config=true` with a reduced `base_num_decoder_layers`
+to keep CPU compile times bounded. Full-scale model correctness is covered
+elsewhere. Tests that deliberately keep the full layer count do so to exercise
+sharding/pipeline edge cases and are annotated inline.
 """
 
 from absl.testing import parameterized
@@ -354,6 +360,8 @@ class TrainCompile(parameterized.TestCase):
             "use_iota_embed=true",
             "compile_topology_num_slices=1",
             "model_name=mixtral-8x7b",
+            "override_model_config=true",
+            "base_num_decoder_layers=8",
             "sparse_matmul=False",
             "capacity_factor=1",
             "per_device_batch_size=4",
@@ -401,6 +409,8 @@ class TrainCompile(parameterized.TestCase):
             "use_iota_embed=true",
             "compile_topology_num_slices=1",
             "model_name=mixtral-8x7b",
+            "override_model_config=true",
+            "base_num_decoder_layers=8",
             "sparse_matmul=True",
             "megablox=True",
             "per_device_batch_size=4",
@@ -423,6 +433,8 @@ class TrainCompile(parameterized.TestCase):
             "use_iota_embed=true",
             "compile_topology_num_slices=1",
             "model_name=deepseek3-test",
+            "override_model_config=true",
+            "base_num_decoder_layers=8",
             "sparse_matmul=True",
             "megablox=True",
             "per_device_batch_size=4",
@@ -447,6 +459,8 @@ class TrainCompile(parameterized.TestCase):
             "use_iota_embed=true",
             "compile_topology_num_slices=1",
             "model_name=mixtral-8x7b",
+            "override_model_config=true",
+            "base_num_decoder_layers=8",
             "sparse_matmul=True",
             "megablox=False",
             "per_device_batch_size=4",
@@ -469,6 +483,8 @@ class TrainCompile(parameterized.TestCase):
             "use_iota_embed=true",
             "compile_topology_num_slices=1",
             "model_name=mixtral-8x7b",
+            "override_model_config=true",
+            "base_num_decoder_layers=8",
             "sparse_matmul=False",
             "capacity_factor=-1",
             "per_device_batch_size=4",
@@ -515,6 +531,8 @@ class TrainCompile(parameterized.TestCase):
             "use_iota_embed=true",
             "compile_topology_num_slices=2",
             "model_name=mixtral-8x7b",
+            "override_model_config=true",
+            "base_num_decoder_layers=8",
             "sparse_matmul=False",
             "capacity_factor=1",
             "per_device_batch_size=4",
@@ -539,6 +557,8 @@ class TrainCompile(parameterized.TestCase):
             "use_iota_embed=true",
             "compile_topology_num_slices=1",
             "model_name=deepseek3-test",
+            "override_model_config=true",
+            "base_num_decoder_layers=8",
             "sparse_matmul=True",
             "megablox=False",
             "per_device_batch_size=2",
@@ -586,6 +606,8 @@ class TrainCompile(parameterized.TestCase):
             "use_iota_embed=true",
             "compile_topology_num_slices=1",
             "model_name=deepseek3-test",
+            "override_model_config=true",
+            "base_num_decoder_layers=8",
             "sparse_matmul=True",
             "megablox=False",
             "per_device_batch_size=1",
@@ -600,14 +622,16 @@ class TrainCompile(parameterized.TestCase):
 
   @pytest.mark.cpu_only
   def test_moe_deepseek_pipeline_subset(self):
+    # Keeps the full layer count so pipeline_parallel_layers=56 exercises
+    # the real stage boundaries.
     compiled_trainstep_file = "/tmp/test_moe_deepseek_pipeline_subset.pickle"
     train_compile_main(
         (
             "",
             get_test_config_path(),
             f"compiled_trainstep_file={compiled_trainstep_file}",
-            "compile_topology=v5p-64",
-            "compile_topology_num_slices=8",
+            "compile_topology=v5p-8",
+            "compile_topology_num_slices=2",
             "use_iota_embed=true",
             "model_name=deepseek3-test",
             "megablox=True",
@@ -616,8 +640,9 @@ class TrainCompile(parameterized.TestCase):
             "per_device_batch_size=1",
             "max_target_length=1024",
             "pipeline_parallel_layers=56",
-            "ici_expert_parallelism=16",
-            "dcn_pipeline_parallelism=8",
+            "ici_expert_parallelism=4",
+            "ici_fsdp_parallelism=1",
+            "dcn_pipeline_parallelism=2",
         )
     )
 
@@ -649,62 +674,50 @@ class TrainCompile(parameterized.TestCase):
             "",
             get_test_config_path(),
             f"compiled_trainstep_file={compiled_trainstep_file}",
-            "compile_topology=v5p-128",
+            "compile_topology=v5p-16",
             "compile_topology_num_slices=1",
             "model_name=llama4-17b-16e",
+            "override_model_config=true",
+            "base_num_decoder_layers=4",
             "per_device_batch_size=1",
             "max_target_length=1024",
             "dtype=bfloat16",
             "weight_dtype=bfloat16",
             "scan_layers=True",
-            "ici_fsdp_parallelism=16",
-            "ici_tensor_parallelism=4",
+            "ici_fsdp_parallelism=4",
+            "ici_tensor_parallelism=2",
+        )
+    )
+
+  def _run_moe_gpt_oss_20b(self, suffix, matmul_args):
+    compiled_trainstep_file = f"/tmp/test_moe_gpt_oss_20b_{suffix}.pickle"
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-16",
+            "compile_topology_num_slices=1",
+            "model_name=gpt-oss-20b",
+            "override_model_config=true",
+            "base_num_decoder_layers=8",
+            "per_device_batch_size=1",
+            "max_target_length=1024",
+            "dtype=bfloat16",
+            "weight_dtype=bfloat16",
+            "scan_layers=True",
+            "attention=flash",
+            *matmul_args,
         )
     )
 
   @pytest.mark.cpu_only
   def test_moe_gpt_oss_20b_sparse_matmul(self):
-    compiled_trainstep_file = "/tmp/test_moe_gpt_oss_20b_sparse_matmul.pickle"
-    train_compile_main(
-        (
-            "",
-            get_test_config_path(),
-            f"compiled_trainstep_file={compiled_trainstep_file}",
-            "compile_topology=v5p-16",
-            "compile_topology_num_slices=1",
-            "model_name=gpt-oss-20b",
-            "per_device_batch_size=1",
-            "max_target_length=1024",
-            "dtype=bfloat16",
-            "weight_dtype=bfloat16",
-            "scan_layers=True",
-            "sparse_matmul=True",
-            "megablox=True",
-            "attention=flash",
-        )
-    )
+    self._run_moe_gpt_oss_20b("sparse_matmul", ["sparse_matmul=True", "megablox=True"])
 
   @pytest.mark.cpu_only
   def test_moe_gpt_oss_20b_dense_matmul(self):
-    compiled_trainstep_file = "/tmp/test_moe_gpt_oss_20b_dense_matmul.pickle"
-    train_compile_main(
-        (
-            "",
-            get_test_config_path(),
-            f"compiled_trainstep_file={compiled_trainstep_file}",
-            "compile_topology=v5p-16",
-            "compile_topology_num_slices=1",
-            "model_name=gpt-oss-20b",
-            "per_device_batch_size=1",
-            "max_target_length=1024",
-            "dtype=bfloat16",
-            "weight_dtype=bfloat16",
-            "scan_layers=True",
-            "sparse_matmul=False",
-            "capacity_factor=-1",
-            "attention=flash",
-        )
-    )
+    self._run_moe_gpt_oss_20b("dense_matmul", ["sparse_matmul=False", "capacity_factor=-1"])
 
   @pytest.mark.cpu_only
   def test_gpt3_6b(self):
@@ -749,6 +762,8 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology=v5p-64",
             "compile_topology_num_slices=1",
             "model_name=qwen3-next-80b-a3b",
+            "override_model_config=true",
+            "base_num_decoder_layers=8",
             "per_device_batch_size=1",
             "max_target_length=1024",
         )
@@ -844,6 +859,8 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology=v5p-8",
             "compile_topology_num_slices=1",
             "model_name=olmo3-7b",
+            "override_model_config=true",
+            "base_num_decoder_layers=8",
             "per_device_batch_size=1",
             "scan_layers=True",
             "max_target_length=1024",
