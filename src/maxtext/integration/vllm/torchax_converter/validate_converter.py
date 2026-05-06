@@ -41,6 +41,7 @@ from typing import Sequence
 
 from absl import app
 import jax
+import jax.numpy as jnp
 from flax import nnx
 import transformers
 from tunix.rl.reshard import reshard_pytree
@@ -183,6 +184,10 @@ def validate_converter(argv) -> None:
   # save_dict_to_file(llm_state, "vllm_model_state.txt")
   # save_dict_to_file(vllm_state, "converted_vllm_state.txt")
 
+  _embed_key = "vllm_model.model.embed_tokens.weight"
+  _embed_before = float(jnp.mean(jnp.abs(jnp.array(llm_state[_embed_key])))) if _embed_key in llm_state else None
+  logging.info("embed_tokens mean-abs BEFORE assignment: %s", _embed_before)
+
   with timer(f"Assigning {len(vllm_state)} weights to vLLM model"):
     for key, weight in vllm_state.items():
       weight_array = weight.value if hasattr(weight, "value") else weight
@@ -191,6 +196,11 @@ def validate_converter(argv) -> None:
           llm_state[key].shape == weight_array.shape
       ), f"Shape mismatch for {key}: expected {llm_state[key].shape}, got {weight_array.shape}"
       llm_state[key] = reshard_pytree(weight_array, dst_sharding, donate_input=False, cache_plan=True)
+
+  _embed_after = float(jnp.mean(jnp.abs(jnp.array(llm_state[_embed_key])))) if _embed_key in llm_state else None
+  logging.info("embed_tokens mean-abs AFTER assignment: %s", _embed_after)
+  if _embed_before is not None and _embed_after is not None:
+    logging.info("Weight assignment changed embed_tokens: %s", abs(_embed_before - _embed_after) > 1e-6)
 
   sampling_params = SamplingParams(temperature=0.0, max_tokens=trainer_config.max_target_length - trainer_config.max_prefill_predict_length)
   prompt = getattr(trainer_config, "prompt", "Paris is")

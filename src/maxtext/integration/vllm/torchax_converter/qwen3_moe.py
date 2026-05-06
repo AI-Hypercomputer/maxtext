@@ -104,14 +104,13 @@ class Qwen3MaxTextToVLLMConverter(BaseMaxTextToVLLMConverter):
 
   def _to_attn(self, attn: PyTree) -> dict[str, jax.Array]:
     """Convert MaxText attention parameters into per-layer vLLM weights."""
-    tp = min(self.vllm_tp, self.config.base_num_kv_heads)
-    compute = self._make_attn_compute(tp)
+    compute = self._make_attn_compute()
     return compute(attn)
 
   @staticmethod
-  @functools.lru_cache(maxsize=8)
-  def _make_attn_compute(tp: int):
-    """Build the cached JIT that packs QKV and output projections for a TP size."""
+  @functools.lru_cache(maxsize=1)
+  def _make_attn_compute():
+    """Build the cached JIT that packs QKV and output projections."""
 
     @jax.jit
     def _compute(attn):
@@ -124,15 +123,13 @@ class Qwen3MaxTextToVLLMConverter(BaseMaxTextToVLLMConverter):
       head_dim = q.shape[3]
       num_layers, d_model = q.shape[0], q.shape[1]
 
-      kv_per_tp = num_kv_heads // tp
-      q_per_tp = num_q_heads // tp
-
-      q_by_tp = q.reshape(num_layers, d_model, tp, q_per_tp, head_dim)
-      k_by_tp = k.reshape(num_layers, d_model, tp, kv_per_tp, head_dim)
-      v_by_tp = v.reshape(num_layers, d_model, tp, kv_per_tp, head_dim)
-
-      qkv_by_tp = jnp.concatenate([q_by_tp, k_by_tp, v_by_tp], axis=3)
-      qkv_flat = qkv_by_tp.reshape(num_layers, d_model, -1)
+      # Pack in standard [all_Q, all_K, all_V] order.  vLLM stores the full
+      # (non-TP-sharded) weight and splits Q/K/V by offset, so TP-interleaved
+      # packing would mix heads from different projections.
+      q_flat = q.reshape(num_layers, d_model, num_q_heads * head_dim)
+      k_flat = k.reshape(num_layers, d_model, num_kv_heads * head_dim)
+      v_flat = v.reshape(num_layers, d_model, num_kv_heads * head_dim)
+      qkv_flat = jnp.concatenate([q_flat, k_flat, v_flat], axis=2)
       qkv_proj = jnp.transpose(qkv_flat, (0, 2, 1))
 
       o = jnp.transpose(attn["out"]["kernel"], (1, 3, 0, 2))
@@ -160,7 +157,12 @@ class Qwen3MaxTextToVLLMConverter(BaseMaxTextToVLLMConverter):
     return self._unstack_layer(param)
 
   def _to_mlp_expert_gate_up(self, wi_0, wi_1, layer_key_prefix, layer_key_suffix):
-    """Fuse MoE gate and up projections into the vLLM `w13` layout."""
+    """Fuse MoE gate and up projections into the vLLM `w13` layout.
+
+    The stored format expected by tpu-inference (post process_moe_weights for GMM_TP)
+    is [E, d_model, 2*padded_chunk_size*tp], with TP-shard interleaving:
+    [gate_shard0, up_shard0, gate_shard1, up_shard1, ...].
+    """
     fuse_all = self._make_fuse_all(self.vllm_tp)
 
     logging.info("_to_mlp_expert_gate_up: dispatching _fuse_all (single JIT+vmap)...")
@@ -183,7 +185,12 @@ class Qwen3MaxTextToVLLMConverter(BaseMaxTextToVLLMConverter):
   @staticmethod
   @functools.lru_cache(maxsize=8)
   def _make_fuse_all(tp: int):
-    """Build the cached JIT that fuses all expert gate and up weights."""
+    """Build the cached JIT that fuses all expert gate and up weights.
+
+    Produces [layers, E, 2*padded_chunk_size*tp, d_model] with interleaving
+    [gate_shard0, up_shard0, gate_shard1, up_shard1, ...] matching the layout
+    that tpu-inference's process_moe_weights (GMM_TP) outputs from HF weights.
+    """
 
     @jax.jit
     def _fuse_all(wi_0, wi_1):
@@ -191,14 +198,13 @@ class Qwen3MaxTextToVLLMConverter(BaseMaxTextToVLLMConverter):
       wi_1 = jnp.transpose(wi_1, (1, 0, 2, 3))
 
       def _fuse_single(w0, w1):
-        # [e, d_model, d_inner] -> [e, 2*padded_chunk_size*tp, d_model]
+        # [e, d_model, d_inner] -> [e, d_inner, d_model]
         w0 = jnp.transpose(w0, (0, 2, 1))
         w1 = jnp.transpose(w1, (0, 2, 1))
         num_experts, d_inner, d_model = w0.shape
         chunk_size = d_inner // tp
         # Pad each TP chunk to the next multiple of 128 for TPU GMM alignment,
         # matching process_w13_for_gmm in tpu_inference.
-        # Example: d_inner=768 gives chunk=192 -> 256 with tp=4, or 96 -> 128 with tp=8.
         padded_chunk_size = ((chunk_size + 127) // 128) * 128
         pad_amount = padded_chunk_size - chunk_size
         gate_chunks = w0.reshape(num_experts, tp, chunk_size, d_model)
