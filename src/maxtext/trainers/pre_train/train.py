@@ -561,6 +561,13 @@ def train_loop(config, recorder, state=None):
     # Write train config params, num model params, and XLA flags to tensorboard
     metric_logger.write_setup_info_to_tensorboard(state.params)
 
+  _reinit_recorder = max_utils._pending_reinit_recorder
+  if _reinit_recorder is not None:
+    _reinit_recorder.record_custom_badput_event_end_time(
+        custom_badput_event_type='elastic_reinitialization'
+    )
+    max_utils._pending_reinit_recorder = None
+
   _job_completed_gracefully = False
   try:
     last_step_completion = datetime.datetime.now()
@@ -711,9 +718,40 @@ def main(argv: Sequence[str]) -> None:
   config, recorder, diagnostic_config = initialize(argv)
   record_goodput(recorder, RECORD_JOB_START_TIME)
 
+  outer_recorder = recorder
   clean_up_checkpoints = functools.partial(max_utils.clean_up_checkpoints, checkpoint_dir=config.checkpoint_dir)
 
+  _elastic_event_state = {}
+
+  def on_elastic_event():
+    em = max_utils.elastic_manager
+    if em is not None and em.new_slice_event.is_set():
+      event_type = 'elastic_scale_up'
+    else:
+      event_type = 'elastic_slice_down'
+    _elastic_event_state['event_type'] = event_type
+    if outer_recorder:
+      outer_recorder.record_custom_badput_event_start_time(
+          custom_badput_event_type=event_type
+      )
+
+  def on_slices_ready():
+    event_type = _elastic_event_state.pop('event_type', 'elastic_slice_down')
+    if outer_recorder:
+      outer_recorder.record_custom_badput_event_end_time(
+          custom_badput_event_type=event_type
+      )
+
+  def on_elastic_event_with_cleanup():
+    clean_up_checkpoints()
+    on_elastic_event()
+
   def train():
+    if outer_recorder:
+      outer_recorder.record_custom_badput_event_start_time(
+          custom_badput_event_type='elastic_reinitialization'
+      )
+    max_utils._pending_reinit_recorder = outer_recorder
     config, recorder, diagnostic_config = initialize(argv)
     run(config, recorder, diagnostic_config)
 
@@ -727,7 +765,8 @@ def main(argv: Sequence[str]) -> None:
         train = max_utils.elastic_manager.replica_resize(
             max_resizes=10,  # Handle up to 10 slice up or slice down transitions
             poll_interval=10,  # Monitor thread checks inactive slice health every 10 seconds
-            on_elastic_event_callback=clean_up_checkpoints,
+            pre_callback=on_slices_ready,
+            on_elastic_event_callback=on_elastic_event_with_cleanup,
         )(train)
 
       elif elastic_mode == "pause-resume":
@@ -735,7 +774,8 @@ def main(argv: Sequence[str]) -> None:
             max_retries=10,  # Handle up to 10 disruptions before restarting
             poll_interval=10,  # While paused, checks every 10 seconds for health
             timeout=300,  # Waits for slices to rejoin for 5 minutes
-            on_elastic_event_callback=clean_up_checkpoints,
+            pre_callback=on_slices_ready,
+            on_elastic_event_callback=on_elastic_event_with_cleanup,
         )(train)
 
       else:
