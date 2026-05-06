@@ -255,12 +255,32 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   # get MoE load balance loss
   moe_lb_loss = 0.0
   if config.num_experts > 1:
-    moe_lb_losses = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "moe_lb_loss")
-    if moe_lb_losses:
-      moe_lb_loss = jnp.mean(jnp.concatenate(moe_lb_losses))
-      loss += moe_lb_loss
-    else:
+    # Note: the key is affected by the model implementation
+    possible_keys = [
+        ("intermediates", "decoder", "layers", "moe_lb_loss"),
+        ("intermediates", "decoder", "moe_layers", "moe_lb_loss"),
+    ]
+
+    total_moe_lb_loss = 0.0
+    found_loss = False
+    for nested_key in possible_keys:
+      total_moe_lb_loss = maxtext_utils.get_nested_value(intermediate_outputs, nested_key, 0.0)
+      if total_moe_lb_loss != 0.0:
+        found_loss = True
+        break
+
+    if not found_loss:
       max_logging.debug("\nNo MoE load balance loss found. Defaulting to 0.0.")
+
+    moe_lb_loss = jnp.mean(jnp.array(total_moe_lb_loss))
+    loss += moe_lb_loss
+
+    # moe_lb_losses = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "moe_lb_loss")
+    # if moe_lb_losses:
+    #   moe_lb_loss = jnp.mean(jnp.concatenate(moe_lb_losses))
+    #   loss += moe_lb_loss
+    # else:
+    #   max_logging.debug("\nNo MoE load balance loss found. Defaulting to 0.0.")
 
   # get MoE routed bias term updates
   moe_bias_updates = None
