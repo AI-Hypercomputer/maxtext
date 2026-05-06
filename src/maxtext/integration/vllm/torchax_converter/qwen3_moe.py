@@ -123,13 +123,17 @@ class Qwen3MaxTextToVLLMConverter(BaseMaxTextToVLLMConverter):
       head_dim = q.shape[3]
       num_layers, d_model = q.shape[0], q.shape[1]
 
-      # Pack in standard [all_Q, all_K, all_V] order.  vLLM stores the full
-      # (non-TP-sharded) weight and splits Q/K/V by offset, so TP-interleaved
-      # packing would mix heads from different projections.
-      q_flat = q.reshape(num_layers, d_model, num_q_heads * head_dim)
-      k_flat = k.reshape(num_layers, d_model, num_kv_heads * head_dim)
-      v_flat = v.reshape(num_layers, d_model, num_kv_heads * head_dim)
-      qkv_flat = jnp.concatenate([q_flat, k_flat, v_flat], axis=2)
+      # Pack in GQA-interleaved order: [Q_group_0, K0, V0, Q_group_1, K1, V1, ...]
+      # where each Q_group has (num_q_heads // num_kv_heads) heads.
+      # tpu-inference's vLLM Qwen3MoeForCausalLM stores qkv_proj in this layout
+      # so that a simple row-wise TP split gives each rank exactly its Q group + K + V.
+      num_q_per_kv = num_q_heads // num_kv_heads
+      q_grouped = q.reshape(num_layers, d_model, num_kv_heads, num_q_per_kv * head_dim)
+      k_grouped = k.reshape(num_layers, d_model, num_kv_heads, head_dim)
+      v_grouped = v.reshape(num_layers, d_model, num_kv_heads, head_dim)
+      # After concat axis=3: (num_layers, d_model, num_kv_heads, (num_q_per_kv+2)*head_dim)
+      qkv_grouped = jnp.concatenate([q_grouped, k_grouped, v_grouped], axis=3)
+      qkv_flat = qkv_grouped.reshape(num_layers, d_model, -1)
       qkv_proj = jnp.transpose(qkv_flat, (0, 2, 1))
 
       o = jnp.transpose(attn["out"]["kernel"], (1, 3, 0, 2))
