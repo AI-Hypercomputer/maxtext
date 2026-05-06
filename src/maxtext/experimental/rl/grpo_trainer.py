@@ -54,8 +54,11 @@ import jax.numpy as jnp
 from jax import random
 
 from flax.linen import partitioning as nn_partitioning
+from flax import nnx
 from flax import struct
 from flax.nnx import TrainState
+
+from maxtext.layers import train_state_nnx
 
 from cloud_tpu_diagnostics import diagnostic
 from cloud_tpu_diagnostics.configuration import debug_configuration
@@ -85,11 +88,12 @@ from maxtext.experimental.rl import grpo_input_pipeline
 from maxtext.experimental.rl import grpo_utils
 from maxtext.common.metric_logger import MetricLogger
 from maxtext.common.vertex_tensorboard import VertexTensorboardManager
-from maxtext.inference import offline_engine
 from maxtext.utils import exceptions
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
+from maxtext.utils import maxtext_utils_nnx
+from maxtext.utils import model_creation_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import sharding
 from maxtext.utils import train_utils
@@ -335,34 +339,190 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
   return loss, aux
 
 
+def grpo_loss_fn_nnx(policy_model, config, data, dropout_rng, params, reference_model, is_train=True):
+  """GRPO loss for the NNX path.
+
+  Signature matches the Linen `grpo_loss_fn` so callers can dispatch on the
+  same shape. `dropout_rng` and `params` are unused (NNX models carry these
+  themselves); `reference_model` is the frozen reference `nnx.Module`. The
+  reference forward is wrapped in `stop_gradient` so grads only flow into the
+  policy. Returns `(loss, LossAux)`.
+  """
+  del dropout_rng, params  # NNX models carry these themselves
+
+  prompt_with_completions = data[f"{config.train_data_columns}_completions"]
+  prompt_completions_position = data[f"{config.train_data_columns}_completions_position"]
+  prompt_completions_segmentation = data[f"{config.train_data_columns}_completions_segmentation"]
+  completions_segmentation = data["ar_completions_segmentation"]
+
+  token_logps_policy, intermediate_outputs = grpo_utils.compute_log_probs_nnx(
+      policy_model,
+      prompt_with_completions,
+      prompt_completions_position,
+      prompt_completions_segmentation,
+      completions_segmentation,
+      config,
+      is_train=is_train,
+  )
+
+  completion_target_segmentation = data["ar_completions_segmentation"][..., 1:]
+  valid_seq_mask = completion_target_segmentation != 0
+
+  rewards = grpo_utils.dummy_reward_len(valid_seq_mask)
+  rewards = jnp.array(rewards)
+
+  G = config.num_generations
+  rewards_grouped = rewards.reshape(-1, G)
+  group_mean = jnp.mean(rewards_grouped, axis=1)
+  group_std = jnp.std(rewards_grouped, axis=1)
+  repeated_group_mean = jnp.repeat(group_mean, G)
+  repeated_group_std = jnp.repeat(group_std, G)
+  advantages = (rewards - repeated_group_mean) / (repeated_group_std + EPS)
+  advantages_exp = advantages[:, None]
+
+  if data["completions_logprobs"] is None:  # off-policy
+    old_per_token_logps = jax.lax.stop_gradient(token_logps_policy)
+  else:  # on-policy
+    old_per_token_logps = data["completions_logprobs"]
+
+  policy_diff = token_logps_policy - old_per_token_logps
+  coef_1 = jnp.exp(policy_diff)
+  coef_2 = jnp.clip(coef_1, 1 - config.grpo_epsilon, 1 + config.grpo_epsilon)
+  loss_tokens = -jnp.minimum(coef_1 * advantages_exp, coef_2 * advantages_exp)
+
+  if config.grpo_beta != 0.0:
+    token_logps_ref, _ = grpo_utils.compute_log_probs_nnx(
+        reference_model,
+        prompt_with_completions,
+        prompt_completions_position,
+        prompt_completions_segmentation,
+        completions_segmentation,
+        config,
+        is_train=False,
+    )
+    token_logps_ref = jax.lax.stop_gradient(token_logps_ref)
+    token_diff_logps_ref_policy = token_logps_ref - token_logps_policy
+    per_token_kl = jnp.exp(token_diff_logps_ref_policy) - token_diff_logps_ref_policy - 1
+    per_token_kl = per_token_kl * valid_seq_mask
+    loss_tokens += config.grpo_beta * per_token_kl
+
+  loss_per_example = jnp.sum(loss_tokens * valid_seq_mask, axis=1) / jnp.clip(jnp.sum(valid_seq_mask, axis=1), min=1)
+  loss = jnp.mean(loss_per_example)
+  total_weights = jnp.sum(valid_seq_mask)
+
+  moe_lb_loss = 0.0
+  if config.num_experts > 1:
+    moe_lb_losses = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "moe_lb_loss")
+    if moe_lb_losses:
+      moe_lb_loss = jnp.mean(jnp.concatenate(moe_lb_losses))
+      loss += moe_lb_loss
+
+  if config.grpo_beta != 0.0:
+    avg_kl = jnp.mean((per_token_kl * valid_seq_mask) / jnp.clip(jnp.sum(valid_seq_mask, axis=1, keepdims=True), min=1))
+  else:
+    avg_kl = None
+  avg_completion_length = jnp.mean(jnp.sum(data["ar_completions_segmentation"] != 0, axis=1))
+  aux = LossAux(
+      total_loss=loss,
+      avg_reward=jnp.mean(rewards),
+      avg_reward_std=jnp.mean(repeated_group_std),
+      avg_advantage=jnp.mean(advantages),
+      avg_kl=avg_kl,
+      completion_length=avg_completion_length,
+      moe_lb_loss=moe_lb_loss,
+      total_weights=total_weights,
+  )
+  return loss, aux
+
+
 # -----------------------------------------------------------------------------
 # Trainer and top level training functions
 # -----------------------------------------------------------------------------
 
 
-def train_step(model, config, state_mesh_shardings, params_shardings, state, data, dropout_rng):
-  """Performs a single training step of the GRPO algorithm.
+def _train_step_nnx(model_graphdef, config, state_mesh_shardings, state, data):
+  """GRPO train_step body for the NNX path.
 
-  This function computes the GRPO loss, calculates gradients, and updates the
-  model's parameters. It handles gradient accumulation and clipping as configured.
-  The reference model's parameters are held constant during the update.
-
-  Args:
-    model: The transformer model to be trained.
-    config: The training configuration object.
-    state_mesh_shardings: Pytree of sharding specifications for the training state.
-    params_shardings: Pytree of sharding specifications for the model parameters.
-                      This argument is not used and is kept to match the signature of other trainers.
-    state: The current training state, including parameters and optimizer state.
-    data: A batch of training data, including prompts and generated completions.
-    dropout_rng: JAX PRNG key for dropout.
-
-  Returns:
-    A tuple containing:
-      - new_state: The updated training state after applying gradients.
-      - metrics: A dictionary of metrics for logging, including loss, reward,
-        and gradient norms.
+  Reconstructs `TrainStateNNX` from `(model_graphdef, state)`, splits out
+  the policy params for value_and_grad, applies gradients, and returns the
+  new state with `nnx.Intermediate` filtered out (transient sown values
+  must not persist across steps).
   """
+  del state_mesh_shardings  # host-offload paths not yet wired up here
+
+  if config.gradient_accumulation_steps > 1:
+    raise NotImplementedError(
+        "GRPO + pure_nnx + gradient_accumulation_steps>1 not supported yet. "
+        "Set gradient_accumulation_steps=1 or pure_nnx=False."
+    )
+
+  state = nnx.merge(model_graphdef, state)  # reconstruct TrainStateNNX
+  policy_graphdef, curr_params, rest = nnx.split(state.model, nnx.Param, ...)
+
+  def diff_wrapper(param, rest, config, data):
+    local_model = nnx.merge(policy_graphdef, param, rest, copy=True)
+    loss, aux = grpo_loss_fn_nnx(local_model, config, data, None, None, state.reference_model, is_train=True)
+    _, _, new_rest = nnx.split(local_model, nnx.Param, ...)
+    return loss, (aux, new_rest)
+
+  grad_func = jax.value_and_grad(diff_wrapper, argnums=0, has_aux=True)
+  (loss, (aux, new_rest)), raw_grads = grad_func(curr_params, rest, config, data)
+  nnx.update(state.model, new_rest)
+
+  if config.gradient_clipping_threshold > 0:
+    grads = maxtext_utils.apply_gradient_clipping(raw_grads, None, config.gradient_clipping_threshold)
+  else:
+    grads = raw_grads
+  state.apply_gradients(grads)
+  new_state = state
+
+  scalar_metrics = {
+      "learning/loss": loss,
+      "learning/avg_reward": aux.avg_reward,
+      "learning/avg_reward_std": aux.avg_reward_std,
+      "learning/avg_advantage": aux.avg_advantage,
+      "learning/avg_kl": aux.avg_kl,
+      "learning/completion_length": aux.completion_length,
+      "learning/moe_lb_loss": aux.moe_lb_loss,
+      "learning/total_weights": aux.total_weights,
+      "learning/grad_norm": max_utils.l2norm_pytree(grads),
+      "learning/raw_grad_norm": max_utils.l2norm_pytree(raw_grads),
+  }
+  _, new_policy_params, _ = nnx.split(new_state.model, nnx.Param, ...)
+  scalar_metrics["learning/param_norm"] = max_utils.l2norm_pytree(new_policy_params)
+  metrics = {"scalar": scalar_metrics, "scalars": {}}
+
+  return nnx.state(new_state, nnx.Not(nnx.Intermediate)), metrics
+
+
+def _eval_step_nnx(model_graphdef, config, state, data):
+  """GRPO eval_step body for the NNX path. No state update."""
+  state = nnx.merge(model_graphdef, state)
+  loss, aux = grpo_loss_fn_nnx(state.model, config, data, None, None, state.reference_model, is_train=False)
+  metrics = {
+      "scalar": {
+          "evaluation/loss": loss,
+          "evaluation/total_loss": aux.total_loss,
+          "evaluation/total_weights": aux.total_weights,
+          "evaluation/moe_lb_loss": aux.moe_lb_loss,
+      },
+  }
+  return metrics
+
+
+def train_step(model, config, state_mesh_shardings, params_shardings, state, data, dropout_rng):
+  """Single GRPO training step.
+
+  Computes the GRPO loss, gradients, and applies them to the policy. The
+  reference model is held constant. Linen and NNX paths split below; on
+  NNX, `model` is a GraphDef and `state` is a flat `nnx.State` of a
+  `TrainStateNNX` (with `model`, `optimizer`, and `reference_model`).
+
+  Returns `(new_state, metrics)`.
+  """
+  if config.pure_nnx:
+    return _train_step_nnx(model, config, state_mesh_shardings, state, data)
+
   state, reference_params = _split_grpo_state(state)
   state_mesh_shardings, reference_params_sharding = _split_grpo_state(state_mesh_shardings)
   extra_grpo_args = [reference_params]
@@ -473,6 +633,8 @@ def eval_step(model, config, state, data, dropout_rng):
   Returns:
     A dictionary of evaluation metrics.
   """
+  if config.pure_nnx:
+    return _eval_step_nnx(model, config, state, data)
 
   reference_params, extra_grpo_args, _loss_fn = [], [], grpo_loss_fn
   state, reference_params = _split_grpo_state(state)
@@ -542,26 +704,50 @@ def setup_train_loop(
       - eval_data_iterator: The iterator for the evaluation dataset (or None).
       - state: The initialized training state.
   """
-  # GRPO is Linen-shaped end-to-end (inference goes through Linen MaxEngine).
-  # Route to Linen regardless of pure_nnx; warn since NNX checkpoints won't load.
-  if config.pure_nnx or config_inference.pure_nnx:
-    max_logging.log(
-        "WARNING: GRPO RL trainer does not yet support pure_nnx natively; "
-        "running on the Linen path. NNX-format checkpoints will not load correctly here."
+  if config.pure_nnx != config_inference.pure_nnx:
+    raise ValueError(
+        f"config.pure_nnx ({config.pure_nnx}) and config_inference.pure_nnx " f"({config_inference.pure_nnx}) must agree."
     )
   with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
     max_logging.log("Training mesh used for the workload")
     num_inference_devices = config.inference_devices_per_replica * config.inference_replicas
     training_devices = jax.devices()[num_inference_devices:]
-    model = mt.from_config(config, devices=training_devices)
+    init_rng = jax.random.PRNGKey(config.init_weights_seed)
+
+    if config.pure_nnx:
+      training_mesh = maxtext_utils.get_mesh_from_config(config, devices=training_devices)
+      training_rngs = maxtext_utils_nnx.create_nnx_rngs(config, rng_key=init_rng)
+      model = mt.from_config(config, devices=training_devices, mesh=training_mesh, rngs=training_rngs)
+    else:
+      model = mt.from_config(config, devices=training_devices)
     mesh = model.mesh
+
     max_logging.log("Inference mesh used for the workload")
     inference_devices = jax.devices()[:num_inference_devices]
-    inference_model = mt.from_config(config_inference, devices=inference_devices)
+    if config_inference.pure_nnx:
+      inference_mesh_obj = maxtext_utils.get_mesh_from_config(config_inference, devices=inference_devices)
+      inference_rngs = maxtext_utils_nnx.create_nnx_rngs(config_inference, rng_key=init_rng)
+      inference_model = mt.from_config(
+          config_inference, devices=inference_devices, mesh=inference_mesh_obj, rngs=inference_rngs
+      )
+    else:
+      inference_model = mt.from_config(config_inference, devices=inference_devices)
     inference_mesh = inference_model.mesh
-    init_rng = jax.random.PRNGKey(config.init_weights_seed)
+
     learning_rate_schedule, tx = train_utils.create_training_optimizer(config, model)
-    init_state_fn = functools.partial(maxtext_utils.init_initial_state, model, tx, config, True, init_rng)
+
+    if config.pure_nnx:
+      _create_model_partial, _ = model_creation_utils.create_nnx_abstract_model(config, mesh, devices=training_devices)
+
+      def init_state_fn():
+        nnx_model = _create_model_partial()
+        optimizer = nnx.Optimizer(nnx_model, tx, wrt=nnx.Param)
+        # Reference uses the same init seed so it starts identical to the policy.
+        reference_model = _create_model_partial()
+        return train_state_nnx.TrainStateNNX(nnx_model, optimizer, reference_model=reference_model)
+
+    else:
+      init_state_fn = functools.partial(maxtext_utils.init_initial_state, model, tx, config, True, init_rng)
     checkpoint_manager = train_utils.create_checkpoint_manager(config, mesh, init_state_fn)
 
   with maybe_record_goodput(recorder, GoodputEvent.TRAINING_PREPARATION):
@@ -570,16 +756,29 @@ def setup_train_loop(
         data_iterator, config, mesh, checkpoint_manager, init_state_fn
     )
 
-  # create inference_state_mesh_shardings from inference_mesh (Linen path; see warning above)
-  init_inference_state_fn = functools.partial(
-      maxtext_utils.init_initial_state, inference_model, tx, config_inference, False, init_rng
-  )
+  if config_inference.pure_nnx:
+    _create_inference_partial, _ = model_creation_utils.create_nnx_abstract_model(
+        config_inference, inference_mesh, devices=inference_devices
+    )
+
+    def init_inference_state_fn():
+      inference_nnx_model = _create_inference_partial()
+      return train_state_nnx.TrainStateNNX(inference_nnx_model, None)
+
+  else:
+    init_inference_state_fn = functools.partial(
+        maxtext_utils.init_initial_state, inference_model, tx, config_inference, False, init_rng
+    )
   inference_state_mesh_shardings = maxtext_utils.get_abstract_state(
       config_inference, inference_mesh, init_inference_state_fn, is_training=False
   )[2]
   if not config.using_pipeline_parallelism:
     # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage
-    sharding.assert_params_sufficiently_sharded(state.params, mesh, config.sharding_tolerance)
+    if config.pure_nnx:
+      _, params_for_check, _ = nnx.split(state.model, nnx.Param, ...)
+      sharding.assert_params_sufficiently_sharded(params_for_check, mesh, config.sharding_tolerance)
+    else:
+      sharding.assert_params_sufficiently_sharded(state.params, mesh, config.sharding_tolerance)
 
   return (
       init_rng,
@@ -692,16 +891,24 @@ def train_loop(config, config_inference, recorder, state=None):
       token=config.hf_access_token,
   )
 
-  if "reference_params" not in state.params:
-    reference_params = jax.tree.map(jnp.copy, state.params["params"])
-    state = _merge_grpo_state(state, reference_params)
-  state_mesh_shardings = _merge_grpo_state(state_mesh_shardings, state_mesh_shardings.params["params"])
+  if config.pure_nnx:
+    # `reference_model` is set up by init_state_fn as a sibling field — nothing to merge.
+    if not hasattr(state, "reference_model"):
+      raise RuntimeError("NNX GRPO state is missing reference_model; check setup_train_loop.")
+  else:
+    if "reference_params" not in state.params:
+      reference_params = jax.tree.map(jnp.copy, state.params["params"])
+      state = _merge_grpo_state(state, reference_params)
+    state_mesh_shardings = _merge_grpo_state(state_mesh_shardings, state_mesh_shardings.params["params"])
 
   p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
       config, model, mesh, state, state_mesh_shardings, train_step, eval_step, eval_data_iterator
   )
 
   data_sharding = sharding.get_input_data_sharding(config, mesh)
+
+  # Lazy import: pulls in maxengine and jetstream stubs.
+  from maxtext.inference import offline_engine  # pylint: disable=import-outside-toplevel
 
   inference_engine = offline_engine.OfflineEngine(
       config=config_inference,
@@ -717,7 +924,11 @@ def train_loop(config, config_inference, recorder, state=None):
   metric_logger = MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
 
   # Write train config params, num model params, and XLA flags to tensorboard
-  metric_logger.write_setup_info_to_tensorboard(state.params["params"])
+  if config.pure_nnx:
+    _, _params_for_metrics, _ = nnx.split(state.model, nnx.Param, ...)
+    metric_logger.write_setup_info_to_tensorboard(_params_for_metrics)
+  else:
+    metric_logger.write_setup_info_to_tensorboard(state.params["params"])
 
   def generation_worker_fn(
       worker_inference_engine,
@@ -841,21 +1052,32 @@ def train_loop(config, config_inference, recorder, state=None):
           state, metrics = p_train_step(state, example_batch, train_rng)
       with jax.profiler.StepTraceAnnotation("transfer data", step_num=step):
         if step != 0 and step % config.inference_rollouts == 0:
-          grpo_utils.pathways_reshard(
-              config_inference,
-              inference_engine,
-              {"params": state.params["params"]},
-              {"params": state_mesh_shardings.params["params"]},
-              mesh,
-              {"params": inference_state_mesh_shardings.params["params"]},
-          )
+          if config.pure_nnx:
+            grpo_utils.pathways_reshard_nnx(
+                config_inference,
+                inference_engine,
+                state.model,
+                state_mesh_shardings.model,
+                inference_state_mesh_shardings.model,
+            )
+          else:
+            grpo_utils.pathways_reshard(
+                config_inference,
+                inference_engine,
+                {"params": state.params["params"]},
+                {"params": state_mesh_shardings.params["params"]},
+                mesh,
+                {"params": inference_state_mesh_shardings.params["params"]},
+            )
           with data_buffer_lock:
             data_buffer.clear()
 
       step_time_delta = datetime.datetime.now() - last_step_completion
       last_step_completion = datetime.datetime.now()
 
-      state_to_save = _split_grpo_state(state)[0]
+      # Linen embeds reference in `state.params` and strips it for save; NNX
+      # holds it as a sibling field on TrainStateNNX so the whole state goes.
+      state_to_save = state if config.pure_nnx else _split_grpo_state(state)[0]
       checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator, step)
 
       if config.dump_hlo and step == start_step:
@@ -893,7 +1115,7 @@ def train_loop(config, config_inference, recorder, state=None):
       metric_logger.buffer_and_write_train_metrics(metrics, step, step_time_delta)
 
       if config.save_checkpoint_on_completion:
-        state_to_save = _split_grpo_state(state)[0]
+        state_to_save = state if config.pure_nnx else _split_grpo_state(state)[0]
         checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator)
       elif checkpoint_manager is not None:
         # in case the last checkpoint_period checkpoint is still in progress
