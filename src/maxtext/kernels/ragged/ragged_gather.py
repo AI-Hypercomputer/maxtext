@@ -286,7 +286,11 @@ def ragged_gather(x: jax.Array, indices: jax.Array, start: jax.Array, end: jax.A
       mesh=vector_mesh,
       name="sc_ragged_gather",
       **{
-          _OUT_KW: jax.ShapeDtypeStruct((out_size + out_pad_size, aligned_hidden_size), dtype),
+          _OUT_KW: jax.ShapeDtypeStruct(
+              (out_size + out_pad_size, aligned_hidden_size),
+              dtype,
+              manual_axis_type=jax.sharding.ManualAxisType(varying={"data", "fsdp", "expert"}),
+          ),
           _SCRATCH_KW: [
               pltpu.VMEM((num_simd_lanes,), jnp.int32),
               pltpu.VMEM((num_simd_lanes,), jnp.int32),
