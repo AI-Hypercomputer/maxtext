@@ -25,7 +25,7 @@ from maxtext.layers import quantizations
 from maxtext.models import models
 from maxtext.optimizers import optimizers
 from maxtext.utils import maxtext_utils
-from tests.utils.test_helpers import get_test_config_path, get_decoupled_parallelism_overrides
+from tests.utils.test_helpers import get_test_config_path
 
 Transformer = models.transformer_as_linen
 
@@ -35,9 +35,6 @@ class StateDtypes(unittest.TestCase):
 
   def get_state(self, argv):
     """Gets model state including weights and optimizer state"""
-    # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
-    argv = list(argv) + get_decoupled_parallelism_overrides(as_argv=True)
-
     # Setup necessary inputs to build a model state
     config = pyconfig.initialize(argv)
     quant = quantizations.configure_quantization(config)

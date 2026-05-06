@@ -30,7 +30,7 @@ from maxtext.layers import attention_mla, linears, mhc, moe
 from maxtext.layers.initializers import nd_dense_init
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.utils import maxtext_utils
-from tests.utils.test_helpers import get_test_config_path, get_decoupled_parallelism_overrides
+from tests.utils.test_helpers import get_test_config_path
 
 
 class TestExpandReduce(unittest.TestCase):
@@ -91,14 +91,12 @@ class TestMHC(unittest.TestCase):
 
   def setUp(self):
     self.dim = 16
-    extra_args = get_decoupled_parallelism_overrides()
     self.config = pyconfig.initialize(
         [None, get_test_config_path()],
-        **extra_args,
         run_name="test_mhc",
         enable_checkpointing=False,
         model_name="deepseek-custom",
-        per_device_batch_size=4,
+        per_device_batch_size=jax.device_count(),
         max_target_length=7,
         max_prefill_predict_length=7,
         attention="dot_product",

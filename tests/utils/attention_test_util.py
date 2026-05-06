@@ -28,7 +28,7 @@ from maxtext.layers.attention_mla import MLA
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils.sharding import maybe_shard_with_name
-from tests.utils.test_helpers import get_test_config_path, get_decoupled_parallelism_overrides
+from tests.utils.test_helpers import get_test_config_path
 
 
 class MLATestBase(parameterized.TestCase):
@@ -61,9 +61,6 @@ class MLATestBase(parameterized.TestCase):
         jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
       except AttributeError:
         pass
-      # In decoupled mode, adapt mesh/ICI parallelism to local devices so
-      # fill_unspecified_mesh_axes matches the available device count.
-      config_args.update(get_decoupled_parallelism_overrides(include_mesh_defaults=True))
     else:
       jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
 

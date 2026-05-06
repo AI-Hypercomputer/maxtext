@@ -38,7 +38,6 @@ from maxtext.utils.globals import MAXTEXT_PKG_DIR
 from tests.utils.test_helpers import (
     get_test_config_path,
     get_test_base_output_directory,
-    get_decoupled_parallelism_overrides,
 )
 
 
@@ -73,10 +72,6 @@ def get_checkpointing_command(run_date, hardware, steps, metrics_file, attention
         "checkpoint_storage_use_zarr3=False",
     ]
 
-  extra_parallelism = []
-  if is_decoupled():  # Match device topology in decoupled/local mode
-    extra_parallelism.extend(get_decoupled_parallelism_overrides(as_argv=True))
-
   return (
       [
           None,
@@ -96,7 +91,6 @@ def get_checkpointing_command(run_date, hardware, steps, metrics_file, attention
       ]
       + model_params
       + pathways_command
-      + extra_parallelism
   )
 
 

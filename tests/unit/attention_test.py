@@ -46,7 +46,7 @@ import numpy as np
 import pytest
 
 from tests.utils import attention_test_util
-from tests.utils.test_helpers import get_test_config_path, get_decoupled_parallelism_overrides
+from tests.utils.test_helpers import get_test_config_path
 
 
 class BidirectionalBlockMaskTest(unittest.TestCase):
@@ -290,14 +290,11 @@ class AttentionTest(parameterized.TestCase):
   def setUp(self):
     """Initializes the configuration for each test"""
     super().setUp()
-    # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
-    extra_args = get_decoupled_parallelism_overrides()
     if not is_decoupled():
       jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
     config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         **self.config_arguments,
-        **extra_args,
     )
     self.cfg = config
 
@@ -1364,11 +1361,9 @@ class MLATest(attention_test_util.MLATestBase):
     # Create a copy of the arguments and override the attention_type for the base model
     attention_config_args = self.config_arguments.copy()
     attention_config_args["attention_type"] = AttentionType.GLOBAL.value
-    extra_args = get_decoupled_parallelism_overrides()
     attention_cfg = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         **attention_config_args,
-        **extra_args,
     )
     dummy_inputs_q = jnp.ones(
         (attention_cfg.global_batch_size_to_train_on, attention_cfg.max_target_length, attention_cfg.base_emb_dim)
@@ -1400,8 +1395,6 @@ class MLATest(attention_test_util.MLATestBase):
 
     # 3. Initialize the MLA layer
     mla_config_args = self.config_arguments.copy()
-    mla_extra_args = get_decoupled_parallelism_overrides()
-    mla_config_args.update(mla_extra_args)
     _, mla_layer = self.init_mla(mla_config_args, rope_type="default")
 
     # 4. Assert that the MLA layer DOES NOT HAVE the base projections
@@ -1596,7 +1589,6 @@ class MLATest(attention_test_util.MLATestBase):
   def test_indexer_loss(self):
     """Test indexer loss computation."""
     mla_config_args = self.config_arguments.copy()
-    mla_config_args.update(get_decoupled_parallelism_overrides())
     mla_config_args["use_indexer"] = True
     mla_config_args["attention"] = "dot_product"
     _, mla = self.init_mla(mla_config_args, rope_type="default")
@@ -1643,7 +1635,6 @@ class MLATest(attention_test_util.MLATestBase):
   def test_indexer_loss_kl_divergence_zero(self):
     """Test that KL divergence is 0 when target and pred distributions match exactly."""
     mla_config_args = self.config_arguments.copy()
-    mla_config_args.update(get_decoupled_parallelism_overrides())
     mla_config_args["use_indexer"] = True
     mla_config_args["attention"] = "dot_product"
     _, mla = self.init_mla(mla_config_args, rope_type="default")

@@ -40,10 +40,10 @@ from maxtext.layers import quantizations
 from maxtext.models import models
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
+from maxtext.utils import maxtext_utils_nnx
 from maxtext.utils import sharding
 from maxtext.utils.sharding import assert_params_sufficiently_sharded, get_formatted_sharding_annotations
-from tests.utils.test_helpers import get_test_config_path, get_decoupled_parallelism_overrides
-from maxtext.utils import maxtext_utils_nnx
+from tests.utils.test_helpers import get_test_config_path
 
 Transformer = models.transformer_as_linen
 
@@ -346,9 +346,7 @@ class MaxUtilsInitTransformerState(unittest.TestCase):
   """Tests initialization of transformer states in max_utils.py"""
 
   def setUp(self):
-    # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
-    extra_args = get_decoupled_parallelism_overrides()
-    self.config = pyconfig.initialize([None, get_test_config_path()], enable_checkpointing=False, **extra_args)
+    self.config = pyconfig.initialize([None, get_test_config_path()], enable_checkpointing=False)
     devices_array = maxtext_utils.create_device_mesh(self.config)
     self.mesh = Mesh(devices_array, self.config.mesh_axes)
     quant = quantizations.configure_quantization(self.config)
@@ -1336,8 +1334,7 @@ class TestSetupTrainingState(unittest.TestCase):
   """Tests for setup_training_state (thin wrapper over setup_initial_state)."""
 
   def setUp(self):
-    extra_args = get_decoupled_parallelism_overrides()
-    self.config = pyconfig.initialize([None, get_test_config_path()], enable_checkpointing=False, **extra_args)
+    self.config = pyconfig.initialize([None, get_test_config_path()], enable_checkpointing=False)
     devices_array = maxtext_utils.create_device_mesh(self.config)
     self.mesh = Mesh(devices_array, self.config.mesh_axes)
     quant = quantizations.configure_quantization(self.config)
@@ -1358,8 +1355,7 @@ class TestGetLogicalAnnotations(unittest.TestCase):
   """Tests for get_logical_annotations."""
 
   def setUp(self):
-    extra_args = get_decoupled_parallelism_overrides()
-    self.config = pyconfig.initialize([None, get_test_config_path()], enable_checkpointing=False, **extra_args)
+    self.config = pyconfig.initialize([None, get_test_config_path()], enable_checkpointing=False)
     devices_array = maxtext_utils.create_device_mesh(self.config)
     self.mesh = Mesh(devices_array, self.config.mesh_axes)
     quant = quantizations.configure_quantization(self.config)

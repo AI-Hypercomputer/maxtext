@@ -47,7 +47,7 @@ from maxtext.layers.normalizations import RMSNorm
 from maxtext.models.gpt3 import Gpt3LayerNorm
 from maxtext.models.llama2 import LlamaDecoderLayer
 from maxtext.utils import maxtext_utils
-from tests.utils.test_helpers import get_decoupled_parallelism_overrides, get_test_config_path
+from tests.utils.test_helpers import get_test_config_path
 
 # ---------------------------------------------------------------------------
 # Shared minimal config overrides used across most tests
@@ -70,8 +70,7 @@ _BASE_CONFIG = {
 
 def _make_config(**overrides):
   """Return a pyconfig Config object suitable for unit tests."""
-  extra_args = get_decoupled_parallelism_overrides()
-  merged = {**_BASE_CONFIG, **extra_args, **overrides}
+  merged = {**_BASE_CONFIG, **overrides}
   return pyconfig.initialize([sys.argv[0], get_test_config_path()], override_model_config=True, **merged)
 
 

@@ -33,7 +33,7 @@ from maxtext.kernels.megablox import gmm
 from maxtext.layers import nnx_wrappers, quantizations
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
-from tests.utils.test_helpers import get_test_config_path, get_decoupled_parallelism_overrides
+from tests.utils.test_helpers import get_test_config_path
 import numpy as np
 import pytest
 
@@ -336,8 +336,6 @@ class QuantTest(unittest.TestCase):
 
   def init_pyconfig(self, **kwargs):
     """Initialize MaxText pyconfig."""
-    # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
-    extra_args = get_decoupled_parallelism_overrides()
     init_kwargs = (
         {
             "run_name": "test",
@@ -356,7 +354,6 @@ class QuantTest(unittest.TestCase):
             "max_target_length": 16,
         }
         | kwargs
-        | extra_args
     )
     config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],

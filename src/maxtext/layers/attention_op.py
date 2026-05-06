@@ -1555,14 +1555,23 @@ class AttentionOp(nnx.Module):
       qkv_layout = "THD_THD_THD"  # Packed format: 'T3HD', 'THD_T2HD' or 'THD_THD_THD'
       if decoder_segment_ids is None:
         decoder_segment_ids = jnp.ones(shape=query.shape[:2], dtype=jnp.int32)
-      attn_mask = SequenceDescriptor.from_segment_ids_and_pos(
-          segment_ids=decoder_segment_ids, segment_pos=segment_positions
-      )
+
+      # TE 2.12+ requires THD metadata; older TE versions infer it.
+      def _sequence_descriptor(segment_ids):
+        try:
+          return SequenceDescriptor.from_segment_ids_and_pos(
+              segment_ids=segment_ids,
+              segment_pos=segment_positions,
+              is_thd=True,
+              is_segment_ids_reordered=False,
+          )
+        except TypeError:
+          return SequenceDescriptor.from_segment_ids_and_pos(segment_ids=segment_ids, segment_pos=segment_positions)
+
+      attn_mask = _sequence_descriptor(decoder_segment_ids)
       # Create dummy SequenceDescriptor for lazy_init
       dummy_segment_ids = jnp.ones(shape=query.shape[:2], dtype=jnp.int32)
-      dummy_attn_mask = SequenceDescriptor.from_segment_ids_and_pos(
-          segment_ids=dummy_segment_ids, segment_pos=segment_positions
-      )
+      dummy_attn_mask = _sequence_descriptor(dummy_segment_ids)
       max_segments_per_seq = self.config.max_segments_per_seq
     elif using_context_parallelism:
       if self.attention_type == AttentionType.LOCAL_SLIDING:
