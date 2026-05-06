@@ -1870,7 +1870,12 @@ class RoutedMoE(nnx.Module):
         layer_w1 = layer_w1 + w1_bias
       layer_w1 = adc.checkpoint_name(layer_w1, "moe_mlpwi_1")
       intermediate_layer = self.apply_ffn_activation(layer_w0, layer_w1)
-
+      if self.config.use_hybrid_ep:
+        if self.config.decoder_block != ctypes.DecoderBlockType.LLAMA4:
+          intermediate_layer = (
+              intermediate_layer * dispatched_probs[:intermediate_layer.shape[0], None]
+          ).astype(jnp.bfloat16)
+          
       intermediate_output = gmm_fn(
           intermediate_layer,
           wo,
@@ -1886,17 +1891,6 @@ class RoutedMoE(nnx.Module):
       intermediate_output = adc.checkpoint_name(intermediate_output, "moe_mlpwo")
 
       if self.config.use_hybrid_ep:
-        # =======================================================================
-        # HybridEP combine: pre-weight expert outputs, then DeepEP combine
-        # =======================================================================
-        # Pre-weight: apply routing weights before combine so the sum is weighted correctly.
-        # dispatched_probs[i] is the routing weight for the i-th permuted token.
-        # For LLAMA4, weights are already applied via sigmoid pre-multiplication.
-        if self.config.decoder_block != ctypes.DecoderBlockType.LLAMA4:
-          intermediate_output = (
-              intermediate_output * dispatched_probs[:intermediate_output.shape[0], None]
-          ).astype(jnp.bfloat16)
-
         # HybridEP combine with custom_vjp (backward = dispatch)
         if intermediate_output.dtype != jnp.bfloat16:
           intermediate_output = intermediate_output.astype(jnp.bfloat16)
