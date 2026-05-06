@@ -228,3 +228,8 @@ train_split: 'train'
 eval_split: 'test'
 hf_name: 'main' # subset of Hugging Face dataset
 tokenizer_type: 'huggingface'
+
+##### MaxText to VLLM Converter validation parameters
+vllm_load_format: dummy # Format to load the model for conversion. Options are "auto", "dummy"
+debug_converter: False # If True, run key coverage check, weight stats, and GCS upload then exit without generation.
+gcs_debug_path: "" # If set and debug_converter=True, upload converted layer-0 and global tensors as .npy to this GCS prefix.
