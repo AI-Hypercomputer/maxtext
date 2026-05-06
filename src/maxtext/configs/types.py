@@ -224,6 +224,7 @@ ModelName = Literal[
     "deepseek3-671b-batchsplit",
     "deepseek3-test",
     "deepseek3-tiny",
+    "deepseek4-flash",
     "deepseek3.2-671b",
     "deepseek-custom",
     "kimi-k2-1t",

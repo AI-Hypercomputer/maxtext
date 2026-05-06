@@ -625,15 +625,17 @@ class GroupedLinear(nnx.Module):
     o_groups = self.config.o_groups
     heads_per_group = H // o_groups
 
-    # Reshape into groups
+    # Reshape into groups: [B, S, H, D] ➔ [B, S, o_groups, heads_per_group * D]
     x_grouped = jnp.reshape(x, (B, S, o_groups, heads_per_group * D))
 
-    # Perform block-diagonal grouped matrix multiplication
+    # Perform block-diagonal grouped matrix multiplication:
+    # Contract the in-group feature axis 'd' (heads_per_group * D) to 'r' (o_lora_rank) for each group 'g':
+    # [B, S, o_groups, heads_per_group * D] ➔ [B, S, o_groups, o_lora_rank]
     grouped_out = jnp.einsum("bsgd,gdr -> bsgr", x_grouped, self.w_a[...])
 
-    # Flatten the grouped bottlenecks
+    # Flatten the grouped bottlenecks: [B, S, o_groups, o_lora_rank] ➔ [B, S, o_groups * o_lora_rank]
     flattened = jnp.reshape(grouped_out, (B, S, o_groups * self.config.o_lora_rank))
 
-    # Project back to hidden_size using standard DenseGeneral
+    # Project back to hidden_size using standard DenseGeneral: [B, S, o_groups * o_lora_rank] ➔ [B, S, hidden_size]
     out = self.o_b_proj(flattened)
     return out

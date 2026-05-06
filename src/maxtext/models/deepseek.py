@@ -27,7 +27,10 @@ from jax.sharding import Mesh
 from maxtext.common.common_types import Config
 from maxtext.common.common_types import HyperConnectionType, MODEL_MODE_PREFILL
 from maxtext.inference import page_manager
-from maxtext.layers import attention_mla
+from maxtext.layers.attentions import Attention
+from maxtext.layers.attention_compressed import Compressor
+from maxtext.layers.embeddings import DeepSeekV4RotaryEmbedding
+from maxtext.common.common_types import AttentionType
 from maxtext.layers import initializers
 from maxtext.layers import linears
 from maxtext.layers import mhc
@@ -139,36 +142,63 @@ class DeepSeekGenericLayer(nnx.Module):
       self.engram_layer_norm = None
       self.engram = None
 
-    self.self_attention = attention_mla.MLA(
-        config=self.config,
+    # 1. Determine Compression Ratio for Current Layer
+    self.compress_ratio = 0
+    if getattr(self.config, "compress_ratios", None):
+      self.compress_ratio = self.config.compress_ratios[self.layer_idx]
+
+    # 2. Dynamic Scan-Safe routing block instantiations:
+    # Unconditionally instantiate both MHA and Decoupled DSA attention blocks for all layers
+    # to ensure identical parameter PyTrees across scanned steps.
+    self.self_attention_mha = Attention(
+        self.config,
         num_query_heads=self.config.num_query_heads,
         num_kv_heads=self.config.num_kv_heads,
         head_dim=self.config.head_dim,
         max_target_length=self.config.max_target_length,
         max_prefill_predict_length=self.config.max_prefill_predict_length,
         attention_kernel=self.config.attention,
-        attention_type=self.config.attention_type,
+        attention_type=AttentionType.LOCAL_SLIDING,
         inputs_q_shape=self.dummy_inputs_shape,
         inputs_kv_shape=self.dummy_inputs_shape,
         mesh=mesh,
         dtype=self.config.dtype,
         weight_dtype=self.config.weight_dtype,
         dropout_rate=self.config.dropout_rate,
-        name="self_attention",
         quant=quant,
         kv_quant=quantizations.configure_kv_quant(config),
-        q_lora_rank=self.config.q_lora_rank,
-        kv_lora_rank=self.config.kv_lora_rank,
-        qk_nope_head_dim=self.config.qk_nope_head_dim,
-        qk_rope_head_dim=self.config.qk_rope_head_dim,
-        v_head_dim=self.config.v_head_dim,
-        max_position_embeddings=self.config.max_position_embeddings,
-        original_max_position_embeddings=self.config.original_max_position_embeddings,
-        mscale=self.config.mscale,
-        rope_factor=self.config.rope_factor,
         model_mode=model_mode,
         rngs=rngs,
-        attn_logits_soft_cap=self.config.attn_logits_soft_cap,
+        sliding_window_size=self.config.sliding_window_size,
+    )
+    self.self_attention_dsa = Attention(
+        self.config,
+        num_query_heads=self.config.num_query_heads,
+        num_kv_heads=self.config.num_kv_heads,
+        head_dim=self.config.head_dim,
+        max_target_length=self.config.max_target_length,
+        max_prefill_predict_length=self.config.max_prefill_predict_length,
+        attention_kernel=self.config.attention,
+        attention_type=AttentionType.DEEPSEEK_V4,
+        inputs_q_shape=self.dummy_inputs_shape,
+        inputs_kv_shape=(batch_size, sequence_length // max(self.compress_ratio, 1), config.compressed_dim),
+        mesh=mesh,
+        dtype=self.config.dtype,
+        weight_dtype=self.config.weight_dtype,
+        dropout_rate=self.config.dropout_rate,
+        quant=quant,
+        kv_quant=quantizations.configure_kv_quant(config),
+        model_mode=model_mode,
+        rngs=rngs,
+        sliding_window_size=self.config.sliding_window_size,
+    )
+    self.compressor = Compressor(self.config, self.compress_ratio, rngs=rngs)
+    self.grouped_linear = None
+    self.v4_rotary_embedding = DeepSeekV4RotaryEmbedding(
+        dim=self.config.qk_rope_head_dim,
+        max_position_embeddings=self.config.max_position_embeddings,
+        rope_theta=getattr(self.config, "rope_max_timescale", 10000.0),
+        compress_rope_theta=getattr(self.config, "compress_rope_max_timescale", 160000.0),
     )
 
     self.dropout = Dropout(rate=self.config.dropout_rate, broadcast_dims=(-2,), rngs=self.rngs)
@@ -205,28 +235,65 @@ class DeepSeekGenericLayer(nnx.Module):
 
   def attention_op(
       self,
-      x,
-      decoder_segment_ids,
-      decoder_positions,
-      deterministic,
+      x=None,
+      decoder_segment_ids=None,
+      decoder_positions=None,
+      deterministic=True,
       previous_chunk=None,
       page_state: None | page_manager.PageState = None,
       slot: None | int = None,
+      inputs_q=None,
+      inputs_kv=None,
+      **kwargs,
   ):
-    """Executes the attention layer."""
-    attention_result, _ = self.self_attention(
-        x,
-        x,
-        decoder_positions,
-        decoder_segment_ids=decoder_segment_ids,
-        deterministic=deterministic,
-        model_mode=self.model_mode,
-        out_sharding=self.out_sharding,
-        previous_chunk=previous_chunk,
-        page_state=page_state,
-        slot=slot,
-    )
-    return self.with_logical_constraint(attention_result)
+    """Executes the attention layer supporting Decoupled Sparse Attention (DSA)."""
+    if x is None:
+      x = inputs_q
+    if decoder_positions is None:
+      decoder_positions = kwargs.get("inputs_positions", None)
+    if decoder_segment_ids is None:
+      decoder_segment_ids = kwargs.get("decoder_segment_ids", None)
+    # DYNAMIC JIT-SAFE TRACER FORWARD PASS:
+    # Compute condition from dynamic traced self.layer_idx array/tensor
+    dynamic_compress_ratio = jnp.asarray(self.config.compress_ratios)[self.layer_idx]
+    is_mha_layer = dynamic_compress_ratio == 0
+
+    def run_mha(_x):
+      res, _ = self.self_attention_mha(
+          _x,
+          _x,
+          decoder_positions,
+          decoder_segment_ids=decoder_segment_ids,
+          deterministic=deterministic,
+          model_mode=self.model_mode,
+          out_sharding=self.out_sharding,
+          previous_chunk=previous_chunk,
+          page_state=page_state,
+          slot=slot,
+      )
+      return res
+
+    def run_dsa(_x):
+      compressed_kv = self.compressor(_x)
+      res, _ = self.self_attention_dsa(
+          _x,
+          compressed_kv,
+          decoder_positions,
+          decoder_segment_ids=decoder_segment_ids,
+          deterministic=deterministic,
+          model_mode=self.model_mode,
+          out_sharding=self.out_sharding,
+          previous_chunk=previous_chunk,
+          page_state=page_state,
+          slot=slot,
+      )
+      if self.grouped_linear is not None:
+        res = self.grouped_linear(res)
+      return res
+
+    # jax.lax.cond guarantees both branches compile, avoiding control flow unrolling
+    attention_result = jax.lax.cond(is_mha_layer, run_mha, run_dsa, x)
+    return self.with_logical_constraint(attention_result), None
 
   @property
   def logical_axis_names(self):
@@ -278,7 +345,7 @@ class DeepSeekGenericLayer(nnx.Module):
     if self.is_mhc_enabled:
       intermediate_inputs, _ = self.mhc_attention(
           self.pre_attention_norm_op,
-          self.self_attention,
+          self.attention_op,
           x=inputs,
           mhc_type=HyperConnectionType.ATTENTION,
           decoder_segment_ids=decoder_segment_ids,

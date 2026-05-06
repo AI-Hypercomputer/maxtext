@@ -2246,6 +2246,13 @@ def deepseek_v4_attention_forward(q_local, k_local, v_local, k_compressed, v_com
   _, S_local, _, D = q_local.shape
   _, S_comp, _, _ = k_compressed.shape
 
+  jax.debug.print(
+      "[SYSTEM AUDIT] deepseek_v4_attention_forward: executing dual-branch"
+      " sequence concatenation with local seq_local={s_local}, compressed"
+      " seq_comp={s_comp}",
+      s_local=S_local,
+      s_comp=S_comp,
+  )
   # 1. Dual-branch sequence concatenation (combine sliced local window with historical past compressed blocks)
   k_combined = jnp.concatenate([k_compressed, k_local], axis=1)  # [B, S_comp + S_local, N_k, D]
   v_combined = jnp.concatenate([v_compressed, v_local], axis=1)

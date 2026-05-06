@@ -1859,7 +1859,9 @@ class DeepSeekV4RotaryEmbedding(nnx.Module):
 
   def __call__(self, x, position_ids, is_compressed=False):
     inv_freq = self.inv_freq_comp if is_compressed else self.inv_freq
-
+    jax.debug.print(
+        "[SYSTEM AUDIT] apply_rotary: shapes x={x_shape}," " is_compressed={comp}", x_shape=x.shape, comp=is_compressed
+    )
     # position_ids shape: [Batch, SeqLen]
     freqs = jnp.einsum("i,j->ij", position_ids.flatten(), inv_freq)
     freqs = freqs.reshape(*position_ids.shape, -1)  # [Batch, SeqLen, dim // 2]
@@ -1896,6 +1898,11 @@ def apply_conjugate_unrotation(inputs: jax.Array, cos: jax.Array, sin: jax.Array
   # cos shape: [..., rope_dim // 2], hence the native rope_dim is 2 * cos.shape[-1].
   rope_dim = cos.shape[-1] * 2
 
+  jax.debug.print(
+      "[SYSTEM AUDIT] apply_conjugate_unrotation: shapes" " inputs={in_shape}, rope_dim={r_dim}",
+      in_shape=inputs.shape,
+      r_dim=rope_dim,
+  )
   # DeepSeek-V4 selectively applies complex algorithms exclusively to the trailing slice.
   x_nope, x_rope = inputs[..., :-rope_dim], inputs[..., -rope_dim:]
 

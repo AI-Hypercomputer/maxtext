@@ -76,13 +76,13 @@ class Compressor(nnx.Module):
     Forward pass for the token compressor.
 
     Args:
-        x: Input sequence tensor.
-           Shape: [Batch, SeqLen, Dim]
+      x: Input sequence tensor.
+         Shape: [Batch, SeqLen, Dim]
 
     Returns:
-        compressed_x: The compressed representation.
-                      Shape for HCA: [Batch, SeqLen // compress_ratio, CompressedDim]
-                      Shape for CSA: [Batch, SeqLen // compress_ratio, CompressedDim]
+      compressed_x: The compressed representation.
+                    Shape for HCA: [Batch, SeqLen // compress_ratio, CompressedDim]
+                    Shape for CSA: [Batch, SeqLen // compress_ratio, CompressedDim]
     """
     if self.overlap:
       # ---------------------------------------------------------------------
@@ -94,7 +94,7 @@ class Compressor(nnx.Module):
       # Safely truncate the sequence length to the nearest multiple of compress_ratio (R)
       # to ensure shape-divisibility during chunk-wise reshape operations and prevent Tracer crashes
       B, S, _ = x.shape
-      R = self.compress_ratio  # R = 4 for CSA
+      R = max(self.compress_ratio, 1)  # R = 4 for CSA
       usable_S = (S // R) * R
       x_usable = x[:, :usable_S, :]
       C = usable_S // R
@@ -168,7 +168,7 @@ class Compressor(nnx.Module):
     # Safely truncate the sequence length to the nearest multiple of compress_ratio (R)
     # to ensure shape-divisibility during chunk-wise reshape operations and prevent Tracer crashes
     B, S, _ = x.shape
-    R = self.compress_ratio
+    R = max(self.compress_ratio, 1)
     usable_S = (S // R) * R
     x_usable = x[:, :usable_S, :]
     C = usable_S // R
