@@ -41,7 +41,7 @@ from maxtext.utils.model_creation_utils import (
     _stored_shape_evenly_shardable,
     _zero_pad_axis,
 )
-from tests.utils.test_helpers import get_test_config_path, get_decoupled_parallelism_overrides
+from tests.utils.test_helpers import get_test_config_path
 
 
 # ---------------------------------------------------------------------------
@@ -77,7 +77,6 @@ def _make_restore_arg(global_shape):
 
 def _make_config(**kwargs):
   """Returns a minimal pyconfig suitable for model-creation tests."""
-  extra = get_decoupled_parallelism_overrides()
   defaults = {
       "per_device_batch_size": 1.0,
       "run_name": "test",
@@ -94,7 +93,6 @@ def _make_config(**kwargs):
   return pyconfig.initialize(
       [sys.argv[0], get_test_config_path()],
       **defaults,
-      **extra,
   )
 
 

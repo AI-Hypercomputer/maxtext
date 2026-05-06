@@ -17,6 +17,7 @@
 import itertools
 import random
 import sys
+import types
 import unittest
 from unittest import mock
 
@@ -37,7 +38,13 @@ from maxtext.common.common_types import (
     DEFAULT_MASK_VALUE,
 )
 from maxtext.layers.attention_mla import MLA
-from maxtext.layers.attention_op import ChunkedCausalMask, _generate_chunk_attention_mask, _make_bidirectional_block_mask
+from maxtext.layers import attention_op
+from maxtext.layers.attention_op import (
+    AttentionOp,
+    ChunkedCausalMask,
+    _generate_chunk_attention_mask,
+    _make_bidirectional_block_mask,
+)
 from maxtext.layers.attentions import Attention
 from maxtext.layers import embeddings
 from maxtext.configs import pyconfig
@@ -46,7 +53,7 @@ import numpy as np
 import pytest
 
 from tests.utils import attention_test_util
-from tests.utils.test_helpers import get_test_config_path, get_decoupled_parallelism_overrides
+from tests.utils.test_helpers import get_test_config_path
 
 
 class BidirectionalBlockMaskTest(unittest.TestCase):
@@ -266,6 +273,106 @@ class ChunkedCausalMaskTest(unittest.TestCase):
       _generate_chunk_attention_mask(mask_shape=(4, 4), chunk_size=0)
 
 
+class CudnnTePackedSequenceDescriptorTest(unittest.TestCase):
+  """Tests packed Transformer Engine attention metadata handling."""
+
+  def _call_packed_attention(self, sequence_descriptor):
+    """Runs packed TE attention with fake Transformer Engine modules."""
+    sequence_descriptor.calls = []
+
+    class FakeWrappedAttention:
+
+      def lazy_init(self, *args, **kwargs):  # pylint: disable=unused-argument
+        return self
+
+      def __call__(self, *args, **kwargs):
+        del args
+        return kwargs["sequence_descriptor"]
+
+    def fake_to_nnx(*args, **kwargs):  # pylint: disable=unused-argument
+      return FakeWrappedAttention()
+
+    transformer_module = types.ModuleType("transformer_engine.jax.flax.transformer")
+    transformer_module.DotProductAttention = mock.Mock()
+    attention_module = types.ModuleType("transformer_engine.jax.attention")
+    attention_module.SequenceDescriptor = sequence_descriptor
+    fake_modules = {
+        "transformer_engine": types.ModuleType("transformer_engine"),
+        "transformer_engine.jax": types.ModuleType("transformer_engine.jax"),
+        "transformer_engine.jax.flax": types.ModuleType("transformer_engine.jax.flax"),
+        "transformer_engine.jax.flax.transformer": transformer_module,
+        "transformer_engine.jax.attention": attention_module,
+    }
+
+    config = types.SimpleNamespace(
+        context_sharding="context",
+        context_parallel_strategy="ring",
+        context_parallel_load_balance=False,
+        packing=True,
+        dataset_type="tfds",
+        max_segments_per_seq=4,
+        head_dim=2,
+        attention_kernel="cudnn_flash_te",
+    )
+    mesh = types.SimpleNamespace(shape={"context": 1})
+    attention = AttentionOp(
+        config=config,
+        mesh=mesh,
+        attention_kernel="cudnn_flash_te",
+        max_target_length=4,
+        num_query_heads=2,
+        num_kv_heads=2,
+        dtype=jnp.float32,
+    )
+    query = jnp.zeros((1, 4, 2, 2), dtype=jnp.float32)
+    key = jnp.zeros((1, 4, 2, 2), dtype=jnp.float32)
+    value = jnp.zeros((1, 4, 2, 2), dtype=jnp.float32)
+    segment_positions = jnp.arange(4, dtype=jnp.int32)[None, :]
+
+    with (
+        mock.patch.dict(sys.modules, fake_modules),
+        mock.patch.object(attention_op.nnx_wrappers, "ToNNX", side_effect=fake_to_nnx),
+    ):
+      output = attention.cudnn_flash_attention(
+          query=query,
+          key=key,
+          value=value,
+          decoder_segment_ids=None,
+          segment_positions=segment_positions,
+      )
+
+    return output, sequence_descriptor.calls
+
+  def test_packed_attention_sequence_descriptor_uses_thd_metadata_with_legacy_fallback(self):
+    class SequenceDescriptor:
+      calls = []
+      reject_thd_kwargs = False
+
+      @classmethod
+      def from_segment_ids_and_pos(cls, **kwargs):
+        cls.calls.append(kwargs)
+        if cls.reject_thd_kwargs and "is_thd" in kwargs:
+          raise TypeError("older Transformer Engine does not accept THD metadata")
+        return kwargs
+
+    output, descriptor_calls = self._call_packed_attention(SequenceDescriptor)
+
+    self.assertEqual(len(descriptor_calls), 2)
+    for call in descriptor_calls:
+      self.assertTrue(call["is_thd"])
+      self.assertFalse(call["is_segment_ids_reordered"])
+    self.assertIs(output, descriptor_calls[0])
+
+    SequenceDescriptor.reject_thd_kwargs = True
+    output, descriptor_calls = self._call_packed_attention(SequenceDescriptor)
+    self.assertEqual(len(descriptor_calls), 4)
+    self.assertIn("is_thd", descriptor_calls[0])
+    self.assertNotIn("is_thd", descriptor_calls[1])
+    self.assertIn("is_thd", descriptor_calls[2])
+    self.assertNotIn("is_thd", descriptor_calls[3])
+    self.assertIs(output, descriptor_calls[1])
+
+
 class AttentionTest(parameterized.TestCase):
   """Test for the Attention"""
 
@@ -290,14 +397,11 @@ class AttentionTest(parameterized.TestCase):
   def setUp(self):
     """Initializes the configuration for each test"""
     super().setUp()
-    # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
-    extra_args = get_decoupled_parallelism_overrides()
     if not is_decoupled():
       jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
     config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         **self.config_arguments,
-        **extra_args,
     )
     self.cfg = config
 
@@ -1364,11 +1468,9 @@ class MLATest(attention_test_util.MLATestBase):
     # Create a copy of the arguments and override the attention_type for the base model
     attention_config_args = self.config_arguments.copy()
     attention_config_args["attention_type"] = AttentionType.GLOBAL.value
-    extra_args = get_decoupled_parallelism_overrides()
     attention_cfg = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         **attention_config_args,
-        **extra_args,
     )
     dummy_inputs_q = jnp.ones(
         (attention_cfg.global_batch_size_to_train_on, attention_cfg.max_target_length, attention_cfg.base_emb_dim)
@@ -1400,8 +1502,6 @@ class MLATest(attention_test_util.MLATestBase):
 
     # 3. Initialize the MLA layer
     mla_config_args = self.config_arguments.copy()
-    mla_extra_args = get_decoupled_parallelism_overrides()
-    mla_config_args.update(mla_extra_args)
     _, mla_layer = self.init_mla(mla_config_args, rope_type="default")
 
     # 4. Assert that the MLA layer DOES NOT HAVE the base projections
@@ -1596,7 +1696,6 @@ class MLATest(attention_test_util.MLATestBase):
   def test_indexer_loss(self):
     """Test indexer loss computation."""
     mla_config_args = self.config_arguments.copy()
-    mla_config_args.update(get_decoupled_parallelism_overrides())
     mla_config_args["use_indexer"] = True
     mla_config_args["attention"] = "dot_product"
     _, mla = self.init_mla(mla_config_args, rope_type="default")
@@ -1643,7 +1742,6 @@ class MLATest(attention_test_util.MLATestBase):
   def test_indexer_loss_kl_divergence_zero(self):
     """Test that KL divergence is 0 when target and pred distributions match exactly."""
     mla_config_args = self.config_arguments.copy()
-    mla_config_args.update(get_decoupled_parallelism_overrides())
     mla_config_args["use_indexer"] = True
     mla_config_args["attention"] = "dot_product"
     _, mla = self.init_mla(mla_config_args, rope_type="default")

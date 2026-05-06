@@ -50,6 +50,7 @@ def run_e2e_test_flow(hardware, model_config, attention_type="autoselected", sta
       get_test_config_path(),
       f"base_output_directory={base_output_directory}",
       "async_checkpointing=False",
+      "enable_checkpointing=True",
       f"hardware={hardware}",
       f"attention={attention_type}",
       "max_target_length=128",

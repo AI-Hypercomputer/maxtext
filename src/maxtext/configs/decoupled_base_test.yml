@@ -1,6 +1,7 @@
 # Decoupled base test config: used when DECOUPLE_GCLOUD=TRUE for tests that previously relied on base.yml.
 # Inherit all model defaults (PyDantic already does this) but override any cloud-coupled paths and disable 
 # optional cloud features.
+base_config: base.yml
 
 # Output goes to a local relative directory so tests do not require GCS.
 base_output_directory: ./maxtext_local_output/gcloud_decoupled_test_logs
@@ -44,7 +45,7 @@ ici_context_parallelism: 1
 ici_tensor_transpose_parallelism: 1
 ici_tensor_sequence_parallelism: 1
 ici_autoregressive_parallelism: 1
-ici_fsdp_parallelism: 1
+ici_fsdp_parallelism: -1
 ici_fsdp_transpose_parallelism: 1
 # Allow higher unsharded parameter percentage for small device count
 sharding_tolerance: 0.3
