@@ -608,6 +608,8 @@ class DeepSeekV4Attention(BaseModel):
 
   compress_ratios: list[int] = Field([], description="Layer-specific ratios for token compression.")
   compressed_dim: int = Field(512, description="Dimension for the compressed token representations.")
+  o_groups: int = Field(8, description="Number of groups for the grouped output projection.")
+  o_lora_rank: int = Field(1024, description="LoRA rank for the grouped output projection.")
 
 
 class Llama4Attention(BaseModel):

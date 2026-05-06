@@ -567,3 +567,73 @@ def mlp_block(
       abstract_init=False,
   )
   return module
+
+
+class GroupedLinear(nnx.Module):
+  """Grouped Output Projection layer for DeepSeek-V4.
+
+  Instead of projecting the extremely wide query/key head representations ([H * D]) directly to
+  the hidden dim ([hidden_size]) which would be computationally prohibitive, the heads are divided
+  into G independent groups (o_groups). Each group is projected block-diagonally to an intermediate
+  bottleneck rank (o_lora_rank), and then mixed back to hidden_size using a follow-up dense layer
+  (self.o_b_proj).
+
+  Shape Transformations:
+  1. Reshape: [B, S, H, D] -> [B, S, G, heads_per_group * D]
+  2. Grouped GEMM (Einsum): Contract the group feature axis to o_lora_rank -> [B, S, G, o_lora_rank]
+  3. Flatten: Flatten groups and bottlenecks -> [B, S, G * o_lora_rank]
+  4. Output Projection: Project mixed bottlenecks back to hidden dim -> [B, S, hidden_size]
+  """
+
+  def __init__(self, config, rngs: nnx.Rngs):
+    super().__init__()
+    self.config = config
+
+    o_groups = config.o_groups
+    o_lora_rank = config.o_lora_rank
+
+    num_heads = config.base_num_query_heads
+    head_dim = config.head_dim
+    assert num_heads % o_groups == 0
+    heads_per_group = num_heads // o_groups
+    in_group_dim = heads_per_group * head_dim
+
+    w_a_shape = (o_groups, in_group_dim, o_lora_rank)
+    self.w_a = nnx.Param(
+        nd_dense_init(1.0, "fan_in", "truncated_normal")(rngs.params(), w_a_shape, config.dtype, (1,), (2,)),
+        sharding=("o_groups", "group_heads", "o_lora_rank"),
+    )
+
+    self.o_b_proj = DenseGeneral(
+        in_features_shape=o_groups * o_lora_rank,
+        out_features_shape=config.emb_dim,
+        axis=-1,
+        kernel_axes=("embed", "kv"),
+        use_bias=False,
+        dtype=config.dtype,
+        rngs=rngs,
+    )
+
+  def __call__(self, x):
+    """
+    Args:
+        x: Input tensor of shape [Batch, SeqLen, num_heads, head_dim]
+    Returns:
+        Projected output of shape [Batch, SeqLen, emb_dim]
+    """
+    B, S, H, D = x.shape
+    o_groups = self.config.o_groups
+    heads_per_group = H // o_groups
+
+    # Reshape into groups
+    x_grouped = jnp.reshape(x, (B, S, o_groups, heads_per_group * D))
+
+    # Perform block-diagonal grouped matrix multiplication
+    grouped_out = jnp.einsum("bsgd,gdr -> bsgr", x_grouped, self.w_a[...])
+
+    # Flatten the grouped bottlenecks
+    flattened = jnp.reshape(grouped_out, (B, S, o_groups * self.config.o_lora_rank))
+
+    # Project back to hidden_size using standard DenseGeneral
+    out = self.o_b_proj(flattened)
+    return out

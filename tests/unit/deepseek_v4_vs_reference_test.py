@@ -31,6 +31,7 @@ import torch
 from torch import nn
 
 from maxtext.layers import attention_compressed
+from maxtext.layers import linears
 
 # =============================================================================
 # 1. Inline PyTorch Golden Reference Classes
@@ -45,6 +46,9 @@ class DeepseekV4Config:
     self.head_dim = head_dim
     self.hidden_size = hidden_size
     self.rms_norm_eps = 1e-5
+    self.o_groups = 8
+    self.o_lora_rank = 1024
+    self.num_attention_heads = 128
 
 
 class DeepseekV4RMSNorm(nn.Module):
@@ -203,6 +207,28 @@ class DeepseekV4CSACompressor(nn.Module):
     return compressed_kv
 
 
+class DeepseekV4GroupedLinear(nn.Module):
+  """Exact copy of Grouped Output Projection from official DeepSeek-V4 modeling code."""
+
+  def __init__(self, config: DeepseekV4Config):
+    super().__init__()
+    self.o_groups = config.o_groups
+    self.o_lora_rank = config.o_lora_rank
+    self.head_dim = config.head_dim
+    self.num_heads = config.num_attention_heads
+    self.in_group_dim = (self.num_heads // self.o_groups) * self.head_dim
+
+    self.w_a = nn.Parameter(torch.empty(self.o_groups, self.in_group_dim, self.o_lora_rank))
+    self.o_b_proj = nn.Linear(self.o_groups * self.o_lora_rank, config.hidden_size, bias=False)
+
+  def forward(self, x: torch.Tensor) -> torch.Tensor:
+    B, S, _, _ = x.shape
+    x_grouped = x.view(B, S, self.o_groups, -1)
+    grouped_out = torch.einsum("bsgd,gdr->bsgr", x_grouped, self.w_a)
+    flattened = grouped_out.reshape(B, S, -1)
+    return self.o_b_proj(flattened)
+
+
 # =============================================================================
 # 2. MaxText JAX Unit and Equivalence Tests
 # =============================================================================
@@ -218,6 +244,9 @@ class DummyConfig:
     self.emb_dim = emb_dim
     self.dtype = dtype
     self.normalization_layer_epsilon = 1e-5
+    self.o_groups = 8
+    self.o_lora_rank = 1024
+    self.base_num_query_heads = 128
 
 
 class DeepseekV4VsReferenceTest(unittest.TestCase):
@@ -464,6 +493,90 @@ class DeepseekV4VsReferenceTest(unittest.TestCase):
     # Assert parameter equivalence
     np.testing.assert_allclose(np.array(compressor_1.wkv.kernel[...]), np.array(compressor_2.wkv.kernel[...]))
     np.testing.assert_allclose(np.array(compressor_1.ape[...]), np.array(compressor_2.ape[...]))
+
+  def test_grouped_linear_shape(self):
+    """Verify GroupedLinear shape boundaries."""
+    config = DummyConfig(
+        compress_ratio=4, compressed_dim=self.head_dim, head_dim=self.head_dim, emb_dim=self.hidden_dim, dtype=self.dtype
+    )
+    layer = linears.GroupedLinear(config, rngs=self.nnx_rng)
+
+    key = jax.random.PRNGKey(42)
+    x = jax.random.normal(
+        key, (self.batch_size, self.seq_len, config.base_num_query_heads, self.head_dim), dtype=self.dtype
+    )
+    out = layer(x)
+
+    expected_shape = (self.batch_size, self.seq_len, self.hidden_dim)
+    self.assertEqual(out.shape, expected_shape)
+    self.assertEqual(out.dtype, self.dtype)
+    self.assertTrue(jnp.all(jnp.isfinite(out)))
+
+  def test_grouped_linear_pytorch_equivalence(self):
+    """Verify GroupedLinear numerical equivalence against PyTorch reference."""
+    config = DummyConfig(
+        compress_ratio=4, compressed_dim=self.head_dim, head_dim=self.head_dim, emb_dim=self.hidden_dim, dtype=self.dtype
+    )
+    py_config = DeepseekV4Config(
+        compress_ratio=4, compressed_dim=self.head_dim, head_dim=self.head_dim, hidden_size=self.hidden_dim
+    )
+
+    jax_layer = linears.GroupedLinear(config, rngs=self.nnx_rng)
+    pytorch_layer = DeepseekV4GroupedLinear(py_config)
+
+    # Weight Sync
+    pytorch_layer.w_a.data.normal_(0.0, 0.02)
+    jax_layer.w_a[...] = jnp.array(pytorch_layer.w_a.detach().numpy())
+
+    pytorch_layer.o_b_proj.weight.data.normal_(0.0, 0.02)
+    jax_layer.o_b_proj.kernel[...] = jnp.array(pytorch_layer.o_b_proj.weight.detach().numpy().T)
+
+    # Identical deterministic inputs
+    np_input = np.random.normal(size=(self.batch_size, self.seq_len, config.base_num_query_heads, self.head_dim)).astype(
+        np.float32
+    )
+
+    # Run PyTorch forward
+    torch_in = torch.from_numpy(np_input)
+    with torch.no_grad():
+      torch_out = pytorch_layer(torch_in)
+
+      # Intermediates for assert
+      B, S, _, _ = torch_in.shape
+      x_grouped = torch_in.view(B, S, pytorch_layer.o_groups, -1)
+      pt_grouped_out = torch.einsum("bsgd,gdr->bsgr", x_grouped, pytorch_layer.w_a)
+      pt_flattened = pt_grouped_out.reshape(B, S, -1)
+
+    # Run JAX forward
+    jax_in = jnp.array(np_input)
+    jax_out = jax_layer(jax_in)
+
+    # Compute JAX intermediates explicitly to verify JAX parameters
+    B, S, _, _ = jax_in.shape
+    jax_x_grouped = jnp.reshape(jax_in, (B, S, config.o_groups, -1))
+    jax_grouped_out = jnp.einsum("bsgd,gdr -> bsgr", jax_x_grouped, jax_layer.w_a[...])
+    jax_flattened = jnp.reshape(jax_grouped_out, (B, S, -1))
+
+    # Assert intermediate bottlenecks and final outputs
+    np.testing.assert_allclose(np.array(jax_flattened), pt_flattened.numpy(), rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(np.array(jax_out), torch_out.numpy(), rtol=1e-5, atol=1e-5)
+
+  def test_grouped_linear_nnx_state(self):
+    """Verify that JAX NNX can split and merge GroupedLinear state cleanly."""
+    config = DummyConfig(
+        compress_ratio=4, compressed_dim=self.head_dim, head_dim=self.head_dim, emb_dim=self.hidden_dim, dtype=self.dtype
+    )
+    layer = linears.GroupedLinear(config, rngs=self.nnx_rng)
+
+    # Extract State and Graph Definition
+    graphdef, state = nnx.split(layer)
+    self.assertIsNotNone(graphdef)
+    self.assertIsNotNone(state)
+
+    # Reconstruct Module from split state
+    reconstructed = nnx.merge(graphdef, state)
+    self.assertEqual(reconstructed.config.o_groups, 8)
+    self.assertEqual(reconstructed.config.o_lora_rank, 1024)
 
 
 if __name__ == "__main__":

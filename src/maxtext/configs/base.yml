@@ -392,6 +392,8 @@ indexer_loss_scaling_factor: 0.0
 # DeepSeek-V4 Compressed Attention
 compress_ratios: []
 compressed_dim: 512
+o_groups: 8
+o_lora_rank: 1024
 
 # MLA parameters
 q_lora_rank: 0
