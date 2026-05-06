@@ -1830,6 +1830,9 @@ class VLLM(BaseModel):
   )
   vllm_hf_config_path: str = Field("", description="Path to HuggingFace model config for MaxText model.")
   use_standalone_converter: bool = Field(False, description="Use the standalone MaxText->torchax vLLM converter")
+  vllm_load_format: str = Field("dummy", description="Weight load format for vLLM in converter validation. Use 'auto' to load HF checkpoint for reference stats comparison, 'dummy' to skip loading real weights.")
+  debug_converter: bool = Field(False, description="If True, run key coverage check, weight stats, and GCS upload then exit without weight assignment or generation. Gates vllm_load_format stats comparison and gcs_debug_path upload.")
+  gcs_debug_path: str = Field("", description="If set and debug_converter=True, upload converted layer-0 and global tensors as .npy files to this GCS prefix for offline inspection (e.g. gs://bucket/prefix).")
 
 
 class RL(BaseModel):

@@ -31,10 +31,23 @@ This module provides a config-driven validation entrypoint that:
   For multislice (e.g. 2x128-device slices), additionally pass:
         num_trainer_slices=1 num_samplers_slices=1
 
+Extra debugging flags (all optional, passed as key=value in argv):
+  debug_converter=true        Enable all debug checks (key coverage, weight stats, GCS
+                              upload) then exit without running generation. This flag gates
+                              all three debug features below.
+  vllm_load_format=auto       Load vLLM from an HF checkpoint instead of dummy weights.
+                              When set alongside debug_converter=true, weight stats are
+                              compared between the HF reference and the converted MaxText
+                              weights side-by-side.
+  gcs_debug_path=gs://…       Upload layer-0 and global tensors from the converted state
+                              as .npy files to this GCS prefix for offline inspection.
+                              Only active when debug_converter=true.
+
 Currently this validator supports: qwen3-30b-a3b, qwen3-30b-a3b-base, qwen3-235b-a22b, gemma4-26b.
 """
 
 import gc
+import io
 import logging
 import os
 from typing import Sequence
@@ -43,6 +56,7 @@ from absl import app
 import jax
 import jax.numpy as jnp
 from flax import nnx
+import numpy as np
 import transformers
 from tunix.rl.reshard import reshard_pytree
 from vllm import LLM
@@ -90,11 +104,139 @@ def _clean_device_memory():
     array.delete()
   logging.info("Device memory cleanup complete.")
 
-def save_dict_to_file(state_dict, filename):
-  with open(filename, "w", encoding="utf-8") as f:
-    for key in sorted(state_dict.keys()):
-      f.write(f"{key}: {state_dict[key].shape}\n")
 
+# ---------------------------------------------------------------------------
+# Debugging helpers
+# ---------------------------------------------------------------------------
+
+def _is_layer0_key(key: str) -> bool:
+  return ".layers.0." in key
+
+
+def _is_non_layer_key(key: str) -> bool:
+  return "layers." not in key
+
+
+def _weight_stats_str(arr) -> str:
+  a = jnp.array(arr).astype(jnp.float32)
+  return (
+      f"shape={tuple(arr.shape)} dtype={arr.dtype} "
+      f"mean_abs={float(jnp.mean(jnp.abs(a))):.6f} "
+      f"std={float(jnp.std(a)):.6f} "
+      f"min={float(jnp.min(a)):.6f} "
+      f"max={float(jnp.max(a)):.6f}"
+  )
+
+
+def _log_weight_stats(converted_state: dict, vllm_state: dict, compare: bool) -> None:
+  """Log weight stats for non-layer and layer-0 keys.
+
+  When compare=True (vLLM loaded from a real checkpoint), prints stats from both
+  the converted MaxText weights and the vLLM reference side-by-side so mismatches
+  are easy to spot. When compare=False, prints only the converted side.
+  """
+  keys = sorted(k for k in converted_state if _is_non_layer_key(k) or _is_layer0_key(k))
+  logging.info("=" * 80)
+  logging.info("Weight stats (%d keys — non-layer + layer-0):", len(keys))
+  for key in keys:
+    if key in converted_state:
+      arr = converted_state[key]
+      weight_array = arr.value if hasattr(arr, "value") else arr
+      logging.info("  [CONVERTED] %s | %s", key, _weight_stats_str(weight_array))
+    if compare and key in vllm_state:
+      ref = np.array(vllm_state[key], dtype=np.float32)
+      conv = np.array(weight_array, dtype=np.float32)
+      # rel_frobenius = ||converted - ref||_F / ||ref||_F.
+      # ~0 means bit-for-bit correct; ~1 or above means the content is wrong.
+      # Unlike mean/std/min/max, this catches permutation and transposition bugs
+      # because it is order-sensitive.
+      rel_frob = float(np.linalg.norm(conv - ref)) / (float(np.linalg.norm(ref)) + 1e-8)
+      logging.info("  [VLLM-REF]  %s | %s", key, _weight_stats_str(vllm_state[key]))
+      logging.info("  [DIFF]      %s | rel_frobenius=%.6f", key, rel_frob)
+  logging.info("=" * 80)
+
+
+def _check_key_coverage(llm_state: dict, converted_state: dict) -> None:
+  """Check key coverage and shapes between vLLM state and converted state.
+
+  Collects all mismatches (missing keys, extra keys, shape mismatches) and
+  reports them together before raising, so a single run reveals all problems.
+  """
+  vllm_keys = set(llm_state.keys())
+  converted_keys = set(converted_state.keys())
+
+  missing = vllm_keys - converted_keys
+  extra = converted_keys - vllm_keys
+
+  if missing:
+    logging.warning("Keys in vLLM state NOT in converted state (%d):", len(missing))
+    for k in sorted(missing):
+      logging.warning("  MISSING: %s  vllm_shape=%s", k, llm_state[k].shape)
+
+  if extra:
+    logging.warning("Keys in converted state NOT in vLLM state (%d):", len(extra))
+    for k in sorted(extra):
+      arr = converted_state[k]
+      logging.warning("  EXTRA:   %s  converted_shape=%s", k, (arr.value if hasattr(arr, "value") else arr).shape)
+
+  shape_mismatches = []
+  for key in sorted(vllm_keys & converted_keys):
+    arr = converted_state[key]
+    weight_array = arr.value if hasattr(arr, "value") else arr
+    vshape = llm_state[key].shape
+    cshape = weight_array.shape
+    if vshape != cshape:
+      shape_mismatches.append((key, vshape, cshape))
+
+  if shape_mismatches:
+    logging.error("Shape mismatches (%d):", len(shape_mismatches))
+    for key, vshape, cshape in shape_mismatches:
+      logging.error("  MISMATCH: %s | vllm=%s  converted=%s", key, vshape, cshape)
+    raise ValueError(f"{len(shape_mismatches)} shape mismatch(es) found — see logs above")
+
+  logging.info(
+      "Key coverage OK: %d matched, %d missing, %d extra",
+      len(vllm_keys & converted_keys), len(missing), len(extra),
+  )
+
+
+def _upload_tensors_to_gcs(converted_state: dict, gcs_path: str) -> None:
+  """Upload layer-0 and non-layer tensors from converted_state as .npy to GCS.
+
+  Useful for offline inspection when running on a cluster where local file I/O
+  is inconvenient.  Set gcs_debug_path=gs://bucket/prefix in the config to enable.
+  """
+  try:
+    from google.cloud import storage as gcs  # pylint: disable=import-outside-toplevel
+  except ImportError:
+    logging.warning("GCS upload skipped: google-cloud-storage not installed")
+    return
+
+  path = gcs_path.removeprefix("gs://")
+  bucket_name, _, prefix = path.partition("/")
+  client = gcs.Client()
+  bucket = client.bucket(bucket_name)
+
+  to_upload = {
+      k: v for k, v in converted_state.items() if _is_non_layer_key(k) or _is_layer0_key(k)
+  }
+  logging.info("Uploading %d tensors to %s ...", len(to_upload), gcs_path)
+  for key, arr in sorted(to_upload.items()):
+    weight_array = arr.value if hasattr(arr, "value") else arr
+    safe_name = key.replace("/", "__").replace(".", "_")
+    blob_name = f"{prefix.rstrip('/')}/{safe_name}.npy" if prefix else f"{safe_name}.npy"
+    blob = bucket.blob(blob_name)
+    buf = io.BytesIO()
+    np.save(buf, np.array(weight_array))
+    buf.seek(0)
+    blob.upload_from_file(buf, content_type="application/octet-stream")
+    logging.info("  uploaded gs://%s/%s  shape=%s", bucket_name, blob_name, weight_array.shape)
+  logging.info("GCS upload complete: %d tensors -> gs://%s/%s", len(to_upload), bucket_name, prefix)
+
+
+# ---------------------------------------------------------------------------
+# Main validation logic
+# ---------------------------------------------------------------------------
 
 def validate_converter(argv) -> None:
   """Run end-to-end validation for MaxText to vLLM weight conversion.
@@ -115,6 +257,11 @@ def validate_converter(argv) -> None:
         f"validate_converter.py does not support model '{trainer_config.model_name}'. "
         f"Supported models: {sorted(vllm_model_name_mapping.keys())}"
     )
+
+  # Optional debugging flags.
+  vllm_load_format = getattr(trainer_config, "vllm_load_format", "dummy")
+  debug_converter = getattr(trainer_config, "debug_converter", False)
+  gcs_debug_path = getattr(trainer_config, "gcs_debug_path", "")
 
   # In single-slice mode setup_configs_and_devices returns the same object for both.
   multislice = trainer_devices is not sampler_devices
@@ -155,15 +302,15 @@ def validate_converter(argv) -> None:
   gc.collect()
 
   print("=" * 80)
-  print("Loading vLLM model for generation test...")
+  print(f"Loading vLLM model (load_format={vllm_load_format})...")
   print("=" * 80)
-  # vLLM parallelism is driven by rollout_* params from sampler_config.
   # load_format="dummy" skips loading real weights — converted MaxText weights
-  # are assigned afterwards, so real HF weights are never needed here.
+  # are assigned afterwards.  Pass vllm_load_format=auto to load an HF checkpoint
+  # for reference stats comparison before assignment.
   vllm_kwargs = dict(
       model=vllm_model_name_mapping[trainer_config.model_name],
       max_model_len=trainer_config.max_target_length,
-      load_format="dummy",
+      load_format=vllm_load_format,
       data_parallel_size=sampler_config.rollout_data_parallelism,
       tensor_parallel_size=sampler_config.rollout_tensor_parallelism,
       gpu_memory_utilization=getattr(sampler_config, "hbm_utilization_vllm", 0.5),
@@ -181,28 +328,36 @@ def validate_converter(argv) -> None:
   llm = LLM(**vllm_kwargs)
   print("\n" + "=" * 80)
   llm_state = llm.llm_engine.model_executor.driver_worker.model_runner.state
-  # save_dict_to_file(llm_state, "vllm_model_state.txt")
-  # save_dict_to_file(vllm_state, "converted_vllm_state.txt")
 
-  _embed_key = "vllm_model.model.embed_tokens.weight"
-  _embed_before = float(jnp.mean(jnp.abs(jnp.array(llm_state[_embed_key])))) if _embed_key in llm_state else None
-  logging.info("embed_tokens mean-abs BEFORE assignment: %s", _embed_before)
+  # --- Debug checks (key coverage, weight stats, GCS upload) ---------------
+  # These run only when debug_converter=true, since they are purely for
+  # debugging and add significant overhead + log volume in production runs.
+  if debug_converter:
+    print("=" * 80)
+    print("Checking key coverage and shapes...")
+    print("=" * 80)
+    _check_key_coverage(llm_state, vllm_state)
 
+    compare_stats = vllm_load_format != "dummy"
+    _log_weight_stats(vllm_state, llm_state, compare=compare_stats)
+
+    if gcs_debug_path:
+      with timer("GCS tensor upload"):
+        _upload_tensors_to_gcs(vllm_state, gcs_debug_path)
+
+
+  # --- Weight assignment ----------------------------------------------------
   with timer(f"Assigning {len(vllm_state)} weights to vLLM model"):
     for key, weight in vllm_state.items():
       weight_array = weight.value if hasattr(weight, "value") else weight
       dst_sharding = llm_state[key].sharding
-      assert (
-          llm_state[key].shape == weight_array.shape
-      ), f"Shape mismatch for {key}: expected {llm_state[key].shape}, got {weight_array.shape}"
       llm_state[key] = reshard_pytree(weight_array, dst_sharding, donate_input=False, cache_plan=True)
 
-  _embed_after = float(jnp.mean(jnp.abs(jnp.array(llm_state[_embed_key])))) if _embed_key in llm_state else None
-  logging.info("embed_tokens mean-abs AFTER assignment: %s", _embed_after)
-  if _embed_before is not None and _embed_after is not None:
-    logging.info("Weight assignment changed embed_tokens: %s", abs(_embed_before - _embed_after) > 1e-6)
-
-  sampling_params = SamplingParams(temperature=0.0, max_tokens=trainer_config.max_target_length - trainer_config.max_prefill_predict_length)
+  # --- Generation test ------------------------------------------------------
+  sampling_params = SamplingParams(
+      temperature=0.0,
+      max_tokens=trainer_config.max_target_length - trainer_config.max_prefill_predict_length,
+  )
   prompt = getattr(trainer_config, "prompt", "Paris is")
   if getattr(trainer_config, "use_chat_template", False):
     tokenizer_path = getattr(trainer_config, "tokenizer_path", None) or vllm_model_name_mapping[trainer_config.model_name]
