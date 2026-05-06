@@ -394,6 +394,8 @@ compress_ratios: []
 compressed_dim: 512
 o_groups: 8
 o_lora_rank: 1024
+compress_rope_max_timescale: 160000.0
+compress_sequence_length: 0
 
 # MLA parameters
 q_lora_rank: 0

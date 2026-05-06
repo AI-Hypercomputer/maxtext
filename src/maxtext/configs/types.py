@@ -610,6 +610,14 @@ class DeepSeekV4Attention(BaseModel):
   compressed_dim: int = Field(512, description="Dimension for the compressed token representations.")
   o_groups: int = Field(8, description="Number of groups for the grouped output projection.")
   o_lora_rank: int = Field(1024, description="LoRA rank for the grouped output projection.")
+  compress_rope_max_timescale: float = Field(
+      160000.0,
+      description="DeepSeek-V4 decoupled dual theta basis (compress_rope_theta) applied exclusively to compressed history.",
+  )
+  compress_sequence_length: int = Field(
+      0,
+      description="Static sequence length bounds allocated for gathered compressed historical past blocks (seq_comp).",
+  )
 
 
 class Llama4Attention(BaseModel):

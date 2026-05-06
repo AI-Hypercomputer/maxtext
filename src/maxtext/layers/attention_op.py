@@ -72,6 +72,7 @@ from maxtext.kernels.attention.ragged_attention import ragged_mha
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.initializers import variable_to_logically_partitioned
 from maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.layers.embeddings import apply_conjugate_unrotation
 from maxtext.utils import max_utils
 from maxtext.utils.sharding import logical_to_mesh_axes, maybe_shard_with_pspec
 import numpy as np
@@ -2169,3 +2170,40 @@ class LoadBalancedCausalMask(splash_attention_mask._ComputableMask):
             self.q_sequence.tobytes() if self.q_sequence is not None else None,
         )
     )
+
+
+def deepseek_v4_attention_forward(q_local, k_local, v_local, k_compressed, v_compressed, cos_unrotate, sin_unrotate):
+  """Executes DeepSeek-V4 attention with sequence concatenation, causal right-padding, and conjugate un-rotation.
+
+  q_local: [B, S_local, N_q, D]
+  k_local, v_local: [B, S_local, N_k, D]
+  k_compressed, v_compressed: [B, S_comp, N_k, D]
+  cos_unrotate, sin_unrotate: [B, S_local, 1, D // 2]
+  """
+  _, S_local, _, D = q_local.shape
+  _, S_comp, _, _ = k_compressed.shape
+
+  # 1. Dual-branch sequence concatenation (combine sliced local window with historical past compressed blocks)
+  k_combined = jnp.concatenate([k_compressed, k_local], axis=1)  # [B, S_comp + S_local, N_k, D]
+  v_combined = jnp.concatenate([v_compressed, v_local], axis=1)
+
+  # 2. Causal mask right-padding to cover appended compressed key/values
+  mask_comp = jnp.zeros((S_local, S_comp), dtype=q_local.dtype)
+  mask_local = jnp.triu(jnp.full((S_local, S_local), -jnp.inf, dtype=q_local.dtype), k=1)
+
+  attn_mask = jnp.concatenate([mask_comp, mask_local], axis=1)
+  attn_mask = attn_mask[None, None, :, :]  # [1, 1, S_local, S_comp + S_local]
+
+  q_scaled = q_local * (D**-0.5)
+
+  # Compute core attention scores
+  attn_scores = jnp.einsum("bsqd,bckd->bqsc", q_scaled, k_combined)
+  attn_scores = attn_scores + attn_mask
+
+  attn_weights = jax.nn.softmax(attn_scores, axis=-1)
+  attn_output = jnp.einsum("bqsc,bckd->bsqd", attn_weights, v_combined)
+
+  # 3. Apply conjugate un-rotation -sin on output trailing slice before grouped output projection
+  attn_output_unrotated = apply_conjugate_unrotation(attn_output, cos_unrotate, sin_unrotate)
+
+  return attn_output_unrotated

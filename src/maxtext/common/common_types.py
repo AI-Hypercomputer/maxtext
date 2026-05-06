@@ -117,6 +117,7 @@ class AttentionType(enum.Enum):
   LOCAL_SLIDING = "local_sliding"
   CHUNK = "chunk"
   MLA = "mla"
+  DEEPSEEK_V4 = "deepseek_v4"
   FULL = "full"
 
 

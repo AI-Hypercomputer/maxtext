@@ -31,6 +31,8 @@ import torch
 from torch import nn
 
 from maxtext.layers import attention_compressed
+from maxtext.layers import embeddings as jax_embeddings
+from maxtext.layers import attention_op as jax_attention_op
 from maxtext.layers import linears
 
 # =============================================================================
@@ -577,6 +579,226 @@ class DeepseekV4VsReferenceTest(unittest.TestCase):
     reconstructed = nnx.merge(graphdef, state)
     self.assertEqual(reconstructed.config.o_groups, 8)
     self.assertEqual(reconstructed.config.o_lora_rank, 1024)
+
+
+# --- PyTorch RoPE and Attention Operator reference mocks for parity ---
+class DeepSeekV4RotaryEmbeddingPT(nn.Module):
+  """PyTorch reference mock for DeepSeek-V4 interleaved RoPE."""
+
+  def __init__(self, dim, rope_theta=10000.0, compress_rope_theta=160000.0):
+    super().__init__()
+    self.dim = dim
+    inv_freq = 1.0 / (rope_theta ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
+    inv_freq_comp = 1.0 / (compress_rope_theta ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
+    self.register_buffer("inv_freq", inv_freq)
+    self.register_buffer("inv_freq_comp", inv_freq_comp)
+
+  def forward(self, x, position_ids, is_compressed=False):
+    inv_freq = self.inv_freq_comp if is_compressed else self.inv_freq
+    freqs = torch.einsum("i,j->ij", position_ids.flatten(), inv_freq)
+    freqs = freqs.view(*position_ids.shape, -1)
+    cos = freqs.cos()
+    sin = freqs.sin()
+    x_rotated = apply_rotary_pos_emb_pt(x, cos, sin)
+    return x_rotated, cos, sin
+
+
+def apply_rotary_pos_emb_pt(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+  cos_interleaved = cos.repeat_interleave(2, dim=-1).unsqueeze(2)
+  sin_interleaved = sin.repeat_interleave(2, dim=-1).unsqueeze(2)
+  rope_dim = cos_interleaved.shape[-1]
+  nope, rope = x[..., :-rope_dim], x[..., -rope_dim:]
+  rotated = ((rope.float() * cos_interleaved) + (rotate_half(rope).float() * sin_interleaved)).to(x.dtype)
+  return torch.cat([nope, rotated], dim=-1)
+
+
+def apply_conjugate_unrotation_pt(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+  cos_interleaved = cos.repeat_interleave(2, dim=-1).unsqueeze(2)
+  sin_interleaved = -sin.repeat_interleave(2, dim=-1).unsqueeze(2)  # negate sin for conjugate
+  rope_dim = cos_interleaved.shape[-1]
+  nope, rope = x[..., :-rope_dim], x[..., -rope_dim:]
+  rotated = ((rope.float() * cos_interleaved) + (rotate_half(rope).float() * sin_interleaved)).to(x.dtype)
+  return torch.cat([nope, rotated], dim=-1)
+
+
+def deepseek_v4_attention_forward_pt(q_local, k_local, v_local, k_comp, v_comp, cos_unrotate, sin_unrotate):
+  """PyTorch reference mock for DeepSeek-V4 attention forward pass."""
+  _, S_local, _, D = q_local.shape
+  _, S_comp, _, _ = k_comp.shape
+
+  k_combined = torch.cat([k_comp, k_local], dim=1)
+  v_combined = torch.cat([v_comp, v_local], dim=1)
+
+  mask_comp = torch.zeros((S_local, S_comp), dtype=q_local.dtype)
+  mask_local = torch.triu(torch.full((S_local, S_local), float("-inf"), dtype=q_local.dtype), diagonal=1)
+
+  attn_mask = torch.cat([mask_comp, mask_local], dim=1).unsqueeze(0).unsqueeze(0)
+  q_scaled = q_local * (D**-0.5)
+
+  attn_scores = torch.einsum("bsqd,bckd->bqsc", q_scaled, k_combined) + attn_mask
+  attn_weights = torch.softmax(attn_scores, dim=-1)
+  attn_output = torch.einsum("bqsc,bckd->bsqd", attn_weights, v_combined)
+
+  return apply_conjugate_unrotation_pt(attn_output, cos_unrotate, sin_unrotate)
+
+
+# --- New JAX RoPE and Attention Operator Parity Tests ---
+class DeepSeekV4CoordinateSystemsTest(unittest.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    self.batch = 2
+    self.seq_local = 128
+    self.seq_comp = 256
+    self.heads = 4
+    self.dim = 128
+    self.rope_dim = 64
+    self.rope_theta = 10000.0
+    self.compress_rope_theta = 160000.0
+    self.nnx_rng = nnx.Rngs(params=0)
+
+  def test_interleaved_rope_parity(self):
+    np.random.seed(42)
+    x_np = np.random.randn(self.batch, self.seq_local, self.heads, self.dim).astype(np.float32)
+    pos_np = np.arange(self.seq_local).reshape(1, self.seq_local).repeat(self.batch, axis=0)
+
+    pt_module = DeepSeekV4RotaryEmbeddingPT(self.rope_dim, self.rope_theta, self.compress_rope_theta)
+    y_pt, _, _ = pt_module(torch.tensor(x_np), torch.tensor(pos_np), is_compressed=False)
+
+    jax_module = jax_embeddings.DeepSeekV4RotaryEmbedding(
+        self.rope_dim, rope_theta=self.rope_theta, compress_rope_theta=self.compress_rope_theta
+    )
+    y_jax, _, _ = jax_module(jnp.array(x_np), jnp.array(pos_np), is_compressed=False)
+
+    np.testing.assert_allclose(y_pt.detach().numpy(), y_jax, rtol=1e-5, atol=1e-5)
+
+  def test_attention_forward_parity(self):
+    np.random.seed(45)
+    q_local = np.random.randn(self.batch, self.seq_local, self.heads, self.dim).astype(np.float32)
+    k_local = np.random.randn(self.batch, self.seq_local, self.heads, self.dim).astype(np.float32)
+    v_local = np.random.randn(self.batch, self.seq_local, self.heads, self.dim).astype(np.float32)
+    k_comp = np.random.randn(self.batch, self.seq_comp, self.heads, self.dim).astype(np.float32)
+    v_comp = np.random.randn(self.batch, self.seq_comp, self.heads, self.dim).astype(np.float32)
+
+    # Test conjugate un-rotation with rope_dim
+    cos_un = np.random.randn(self.batch, self.seq_local, self.rope_dim // 2).astype(np.float32)
+    sin_un = np.random.randn(self.batch, self.seq_local, self.rope_dim // 2).astype(np.float32)
+
+    out_pt = deepseek_v4_attention_forward_pt(
+        torch.tensor(q_local),
+        torch.tensor(k_local),
+        torch.tensor(v_local),
+        torch.tensor(k_comp),
+        torch.tensor(v_comp),
+        torch.tensor(cos_un),
+        torch.tensor(sin_un),
+    )
+
+    # Expand cos_un/sin_un for JAX to broadcast cleanly over heads -> [B, S, 1, rope_dim // 2]
+    cos_jax = jnp.array(cos_un)[..., None, :]
+    sin_jax = jnp.array(sin_un)[..., None, :]
+
+    out_jax = jax_attention_op.deepseek_v4_attention_forward(
+        jnp.array(q_local),
+        jnp.array(k_local),
+        jnp.array(v_local),
+        jnp.array(k_comp),
+        jnp.array(v_comp),
+        cos_jax,
+        sin_jax,
+    )
+
+    np.testing.assert_allclose(out_pt.detach().numpy(), out_jax, rtol=1e-4, atol=1e-4)
+
+  def test_nnx_state_split_merge_and_jit(self):
+    """Verifies that DeepSeekV4RotaryEmbedding satisfies NNX split/merge and JIT tracing without TracerLeaks."""
+    module = jax_embeddings.DeepSeekV4RotaryEmbedding(
+        self.rope_dim, rope_theta=self.rope_theta, compress_rope_theta=self.compress_rope_theta
+    )
+
+    # Extract State and Graph Definition
+    graphdef, state = nnx.split(module)
+
+    @jax.jit
+    def compile_and_forward(state_in, x, pos):
+      # Reconstruct module cleanly inside the compiled XLA JIT block
+      mod = nnx.merge(graphdef, state_in)
+      return mod(x, pos, is_compressed=False)
+
+    x_jax = jnp.ones((self.batch, self.seq_local, self.heads, self.dim), dtype=jnp.float32)
+    pos_jax = jnp.arange(self.seq_local).reshape(1, self.seq_local).repeat(self.batch, axis=0)
+
+    # Execute JIT compilation and forward pass
+    y_jax, cos_jax, _ = compile_and_forward(state, x_jax, pos_jax)
+
+    self.assertEqual(y_jax.shape, x_jax.shape)
+    self.assertEqual(cos_jax.shape, (self.batch, self.seq_local, 1, self.rope_dim // 2))
+
+  def test_attention_varying_sequence_boundaries(self):
+    """Verifies attention parity under extreme oversized and empty compressed sequence boundaries."""
+    np.random.seed(46)
+
+    # Edge Case A: Oversized Compressed History (seq_comp > seq_local)
+    seq_local_small = 32
+    seq_comp_large = 512
+
+    q_l = np.random.randn(self.batch, seq_local_small, self.heads, self.dim).astype(np.float32)
+    k_l = np.random.randn(self.batch, seq_local_small, self.heads, self.dim).astype(np.float32)
+    v_l = np.random.randn(self.batch, seq_local_small, self.heads, self.dim).astype(np.float32)
+    k_c = np.random.randn(self.batch, seq_comp_large, self.heads, self.dim).astype(np.float32)
+    v_c = np.random.randn(self.batch, seq_comp_large, self.heads, self.dim).astype(np.float32)
+
+    cos_u = np.random.randn(self.batch, seq_local_small, self.rope_dim // 2).astype(np.float32)
+    sin_u = np.random.randn(self.batch, seq_local_small, self.rope_dim // 2).astype(np.float32)
+
+    out_pt = deepseek_v4_attention_forward_pt(
+        torch.tensor(q_l),
+        torch.tensor(k_l),
+        torch.tensor(v_l),
+        torch.tensor(k_c),
+        torch.tensor(v_c),
+        torch.tensor(cos_u),
+        torch.tensor(sin_u),
+    )
+
+    cos_jax = jnp.array(cos_u)[..., None, :]
+    sin_jax = jnp.array(sin_u)[..., None, :]
+
+    out_jax = jax_attention_op.deepseek_v4_attention_forward(
+        jnp.array(q_l),
+        jnp.array(k_l),
+        jnp.array(v_l),
+        jnp.array(k_c),
+        jnp.array(v_c),
+        cos_jax,
+        sin_jax,
+    )
+    np.testing.assert_allclose(out_pt.detach().numpy(), out_jax, rtol=1e-4, atol=1e-4)
+
+    # Edge Case B: Empty Compressed History (seq_comp = 0)
+    k_c_zero = np.zeros((self.batch, 0, self.heads, self.dim), dtype=np.float32)
+    v_c_zero = np.zeros((self.batch, 0, self.heads, self.dim), dtype=np.float32)
+
+    out_pt_zero = deepseek_v4_attention_forward_pt(
+        torch.tensor(q_l),
+        torch.tensor(k_l),
+        torch.tensor(v_l),
+        torch.tensor(k_c_zero),
+        torch.tensor(v_c_zero),
+        torch.tensor(cos_u),
+        torch.tensor(sin_u),
+    )
+
+    out_jax_zero = jax_attention_op.deepseek_v4_attention_forward(
+        jnp.array(q_l),
+        jnp.array(k_l),
+        jnp.array(v_l),
+        jnp.array(k_c_zero),
+        jnp.array(v_c_zero),
+        cos_jax,
+        sin_jax,
+    )
+    np.testing.assert_allclose(out_pt_zero.detach().numpy(), out_jax_zero, rtol=1e-4, atol=1e-4)
 
 
 if __name__ == "__main__":

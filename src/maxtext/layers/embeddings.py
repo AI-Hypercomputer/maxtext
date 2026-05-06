@@ -1800,3 +1800,116 @@ def qwen3_omni_mrope_embedding_as_linen(
       metadata_fn=variable_to_logically_partitioned,
       name=name,
   )
+
+
+class DeepSeekV4RotaryEmbedding(nnx.Module):
+  """Interleaved Rotary Position Embedding for DeepSeek-V4 trailing dimensions.
+
+  Instead of rotating the first half against the second half (LLaMA style),
+  DeepSeek-V4 rotates adjacent even/odd coordinate pairs on the trailing head slice.
+  """
+
+  def __init__(
+      self,
+      dim: int,  # This represents the rope_dim (e.g., 64)
+      max_position_embeddings: int = 2048,
+      rope_theta: float = 10000.0,
+      compress_rope_theta: float = 160000.0,
+  ):
+    super().__init__()
+    self.dim = dim
+    self.max_position_embeddings = max_position_embeddings
+    self.rope_theta = rope_theta
+    self.compress_rope_theta = compress_rope_theta
+
+    # Standard token base frequencies
+    self.inv_freq = 1.0 / (self.rope_theta ** (jnp.arange(0, dim, 2, dtype=jnp.float32) / dim))
+    # Compressed historical base frequencies (paired with compress_rope_theta)
+    self.inv_freq_comp = 1.0 / (self.compress_rope_theta ** (jnp.arange(0, dim, 2, dtype=jnp.float32) / dim))
+
+  def apply_rotary(self, x, cos, sin):
+    """Applies interleaved rotary position embedding on adjacent coordinate pairs."""
+    dim = x.shape[-1]
+    # Reshape to interleaved pairs: [..., dim // 2, 2]
+    x_reshaped = x.reshape(*x.shape[:-1], dim // 2, 2)
+    x_even, x_odd = x_reshaped[..., 0], x_reshaped[..., 1]
+
+    # Complex multiplication: (x_even + i * x_odd) * (cos + i * sin)
+    x_rotated_even = x_even * cos - x_odd * sin
+    x_rotated_odd = x_odd * cos + x_even * sin
+
+    # Re-interleave and reshape back to original shape
+    x_rotated = jnp.stack([x_rotated_even, x_rotated_odd], axis=-1)
+    return x_rotated.reshape(*x.shape)
+
+  def apply_conjugate_unrotation(self, x, cos, sin):
+    """Applies conjugate un-rotation (-sin) on adjacent coordinate pairs."""
+    dim = x.shape[-1]
+    # Reshape to interleaved pairs
+    x_reshaped = x.reshape(*x.shape[:-1], dim // 2, 2)
+    x_even, x_odd = x_reshaped[..., 0], x_reshaped[..., 1]
+
+    # Complex conjugate multiplication: (a + i * b) * (cos - i * sin)
+    x_unrotated_even = x_even * cos + x_odd * sin
+    x_unrotated_odd = x_odd * cos - x_even * sin
+
+    # Re-interleave and reshape back
+    x_unrotated = jnp.stack([x_unrotated_even, x_unrotated_odd], axis=-1)
+    return x_unrotated.reshape(*x.shape)
+
+  def __call__(self, x, position_ids, is_compressed=False):
+    inv_freq = self.inv_freq_comp if is_compressed else self.inv_freq
+
+    # position_ids shape: [Batch, SeqLen]
+    freqs = jnp.einsum("i,j->ij", position_ids.flatten(), inv_freq)
+    freqs = freqs.reshape(*position_ids.shape, -1)  # [Batch, SeqLen, dim // 2]
+
+    cos = jnp.cos(freqs)[..., None, :]  # [Batch, SeqLen, 1, dim // 2]
+    sin = jnp.sin(freqs)[..., None, :]  # [Batch, SeqLen, 1, dim // 2]
+
+    rope_dim = self.dim
+    # DeepSeek-V4 strictly applies RoPE to the trailing head dimensions
+    x_nope, x_rope = x[..., :-rope_dim], x[..., -rope_dim:]
+    x_rotated = self.apply_rotary(x_rope, cos, sin)
+    rotated_x = jnp.concatenate([x_nope, x_rotated], axis=-1)
+
+    return rotated_x, cos, sin
+
+
+def apply_conjugate_unrotation(inputs: jax.Array, cos: jax.Array, sin: jax.Array) -> jax.Array:
+  """Applies DeepSeek-V4 conjugate un-rotation (reverse rotation) strictly on the trailing dimensions.
+
+  This function unwinds the previously applied interleaved rotary position embedding
+  by performing complex multiplication with the conjugate exponential (e^{-i*theta}).
+  This is mathematically equivalent to negating the sine term, ensuring parity with
+  PyTorch's trailing slice logic.
+
+  Args:
+      inputs: Attention output array of shape [batch_size, seq_len, num_heads, head_dim].
+      cos: Cosine frequencies of shape [batch_size, seq_len, 1, rope_dim // 2].
+      sin: Sine frequencies of shape [batch_size, seq_len, 1, rope_dim // 2].
+
+  Returns:
+      Un-rotated inputs of identical shape [batch_size, seq_len, num_heads, head_dim].
+  """
+  # Deduce the applied embedding coordinate length from the active frequency matrices.
+  # cos shape: [..., rope_dim // 2], hence the native rope_dim is 2 * cos.shape[-1].
+  rope_dim = cos.shape[-1] * 2
+
+  # DeepSeek-V4 selectively applies complex algorithms exclusively to the trailing slice.
+  x_nope, x_rope = inputs[..., :-rope_dim], inputs[..., -rope_dim:]
+
+  # Reshape the trailing dimensions to isolate even/odd adjacent coordinate pairs.
+  # Dimensional Transition: [..., rope_dim] -> [..., rope_dim // 2, 2]
+  x_reshaped = x_rope.reshape(*x_rope.shape[:-1], rope_dim // 2, 2)
+  x_even, x_odd = x_reshaped[..., 0], x_reshaped[..., 1]
+
+  # Execute interleaved complex conjugate mapping: (x + iy) * (cos - isin)
+  x_unrotated_even = x_even * cos + x_odd * sin
+  x_unrotated_odd = x_odd * cos - x_even * sin
+
+  # Re-interleave the un-rotated components natively via jnp.stack to bypass XLA slice overheads.
+  x_unrotated = jnp.stack([x_unrotated_even, x_unrotated_odd], axis=-1).reshape(*x_rope.shape)
+
+  # Re-assemble the partition mapping.
+  return jnp.concatenate([x_nope, x_unrotated], axis=-1)
