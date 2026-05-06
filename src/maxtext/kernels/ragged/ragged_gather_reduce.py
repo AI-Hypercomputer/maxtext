@@ -479,6 +479,7 @@ def ragged_gather_reduce(
       out_type=jax.ShapeDtypeStruct(
           (padded_input_size // reduce_group_size, aligned_hidden_size),
           jnp.float32,
+          manual_axis_type=jax.sharding.ManualAxisType(varying={"data", "fsdp", "expert"}),
       ),
       compiler_params=pltpu.CompilerParams(
           use_tc_tiling_on_sc=True,

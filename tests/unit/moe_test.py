@@ -29,6 +29,7 @@ from maxtext.layers import moe
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.initializers import NdInitializer, nd_dense_init, variable_to_logically_partitioned
 from maxtext.layers.quantizations import Fp8Quantization
+from maxtext.models import deepseek_batchsplit
 from maxtext.utils import maxtext_utils
 from tests.utils.test_helpers import get_test_config_path, get_decoupled_parallelism_overrides
 import pytest
@@ -1517,6 +1518,70 @@ class FusedMoeTPUTest(unittest.TestCase):
     )
     self.assertIsNone(lb_loss)
     self.assertIsNone(bias_updates)
+
+
+class DeepSeekBatchSplitRaggedSortTest(unittest.TestCase):
+  """Tests `use_ragged_sort` plumbing in `deepseek_batchsplit`.
+
+  The `unroute_ubatch_shard_mapped` / `unroute_ubatch_remat_and_bwd_shard_mapped`
+  wrappers are the call sites where a missing `use_ragged_sort` kwarg blew up
+  at runtime. These tests pin the kwarg in place and verify numerical
+  equivalence between the dense (`use_ragged_sort=False`) and ragged
+  (`use_ragged_sort=True`) paths through `route` / `unroute` in
+  `deepseek_batchsplit`. The ragged kernels fall back to JAX when SparseCore is
+  unavailable, so this is CPU-friendly.
+  """
+
+  def _make_inputs(self, num_tokens=8, topk=4, hidden=16, num_experts=8, seed=0):
+    rng = np.random.RandomState(seed)
+    tokens = rng.normal(size=(num_tokens * topk, hidden)).astype(np.float32)
+    selected = np.stack(
+        [rng.choice(num_experts, size=topk, replace=False) for _ in range(num_tokens)],
+        axis=0,
+    ).astype(np.int32)
+    return jnp.asarray(tokens), jnp.asarray(selected)
+
+  def test_unroute_ubatch_fn_kwargs_and_match(self):
+    """Direct call: `unroute_ubatch_fn` must accept `use_ragged_sort=` and
+    produce the same result as the dense path under a single-device mesh.
+    """
+
+    num_tokens, topk, hidden, num_experts, target_len = 8, 4, 16, 8, 4
+    tokens, selected = self._make_inputs(num_tokens, topk, hidden, num_experts)
+    # `unroute_ubatch_fn` expects `routed_expert_out` of shape (n_tokens*topk, hidden)
+    # and `shared_expert_out` / `moe_inputs` of shape (batch, target_len, hidden)
+    # where batch * target_len = n_tokens.
+    batch = num_tokens // target_len
+    moe_inputs = jnp.asarray(np.random.RandomState(1).normal(size=(batch, target_len, hidden)).astype(np.float32))
+    shared = jnp.asarray(np.random.RandomState(2).normal(size=(batch, target_len, hidden)).astype(np.float32))
+
+    # Build a single-device mesh so `route`/`unroute` (which use psum_scatter /
+    # all_gather across `expert`) reduce to identity.
+    mesh = Mesh(np.array(jax.devices()[:1]).reshape(1, 1, 1), ("data", "fsdp", "expert"))  # pylint: disable=too-many-function-args
+
+    def run(use_ragged_sort):
+      with mesh:
+        out, res = deepseek_batchsplit.unroute_ubatch_shard_mapped(
+            moe_inputs,
+            tokens,
+            shared,
+            selected,
+            expert_axis_name="expert",
+            use_gather_mosaic_kernel=False,
+            use_ragged_sort=use_ragged_sort,
+            target_length=target_len,
+            mesh=mesh,
+            activation_pspec=jax.sharding.PartitionSpec(("data", "fsdp", "expert"), None, None),
+        )
+      # The residual structure should be the same regardless of which kernel was used.
+      self.assertIn("selected_experts", res)
+      return np.asarray(out)
+
+    out_dense = run(use_ragged_sort=False)
+    out_ragged = run(use_ragged_sort=True)
+    # Ragged kernels reorder the summation, so the result agrees with the
+    # dense path only up to numeric ordering noise.
+    np.testing.assert_allclose(out_ragged.astype(np.float32), out_dense.astype(np.float32), atol=2e-2, rtol=2e-2)
 
 
 if __name__ == "__main__":

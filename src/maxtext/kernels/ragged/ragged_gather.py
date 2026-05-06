@@ -268,7 +268,11 @@ def ragged_gather(x: jax.Array, indices: jax.Array, start: jax.Array, end: jax.A
           core_axis_name=vector_mesh.core_axis_name,
           subcore_axis_name=vector_mesh.subcore_axis_name,
       ),
-      out_type=jax.ShapeDtypeStruct((out_size + out_pad_size, aligned_hidden_size), dtype),
+      out_type=jax.ShapeDtypeStruct(
+          (out_size + out_pad_size, aligned_hidden_size),
+          dtype,
+          manual_axis_type=jax.sharding.ManualAxisType(varying={"data", "fsdp", "expert"}),
+      ),
       compiler_params=pltpu.CompilerParams(
           use_tc_tiling_on_sc=True,
           disable_bounds_checks=True,
