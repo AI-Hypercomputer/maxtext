@@ -438,12 +438,11 @@ class MaxEngine(_BaseEngine):
     return params_state
 
   def load_single_adapter(self, adapter_path):
+    """Load a single LoRA adapter from `adapter_path`.
+
+    Expects `adapter_config.json` plus adapter weights at `<adapter_path>/0/items`.
+    The returned `params` shape matches `self.abstract_params` (NNX or Linen).
     """
-    Load Single adapter from adapter_path.
-    Expect adapter_config.json and LoRA adapter weights at this path within subdirectory `/0/items`.
-    """
-    if self.config.pure_nnx:
-      raise NotImplementedError("pure_nnx + LoRA not yet supported. Use pure_nnx=False.")
     adapter_config_path = os.path.join(adapter_path, "adapter_config.json")
     adapter_weights_path = os.path.join(adapter_path, "0", "items")
 
@@ -466,14 +465,20 @@ class MaxEngine(_BaseEngine):
 
     lora_rank = int(adapter_config["r"])
     lora_scale_factor = float(adapter_config["lora_alpha"]) / lora_rank
-    lora_utils.apply_lora_on_base_params(base_params, adapter_params, lora_scale_factor)
+    if self.config.pure_nnx:
+      lora_utils.apply_lora_on_base_params_nnx(base_params, adapter_params, lora_scale_factor)
+    else:
+      lora_utils.apply_lora_on_base_params(base_params, adapter_params, lora_scale_factor)
 
   def unapply_adapter(self, base_params, adapter_config, adapter_params):
     """Unapply the adapter params from the merged params to get back the base params."""
 
     lora_rank = int(adapter_config["r"])
     lora_scale_factor = float(adapter_config["lora_alpha"]) / lora_rank
-    lora_utils.unapply_lora_from_base_params(base_params, adapter_params, lora_scale_factor)
+    if self.config.pure_nnx:
+      lora_utils.unapply_lora_from_base_params_nnx(base_params, adapter_params, lora_scale_factor)
+    else:
+      lora_utils.unapply_lora_from_base_params(base_params, adapter_params, lora_scale_factor)
 
   def quantize_params(self, state, rng: PRNGKeyType | None = None):
     """Forward pass to quantize decode params."""
