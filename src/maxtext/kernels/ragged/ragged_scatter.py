@@ -22,6 +22,16 @@ import jax.numpy as jnp
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 from jax.experimental.pallas import tpu_sc as plsc
+from packaging.version import Version
+
+# JAX <= 0.10.0 used `out_shape`/`scratch_shapes` kwargs for `pl.kernel`; later
+# versions renamed them to `out_type`/`scratch_types`.
+if Version(jax.__version__) <= Version("0.10.0"):
+  _OUT_KW = "out_shape"
+  _SCRATCH_KW = "scratch_shapes"
+else:
+  _OUT_KW = "out_type"
+  _SCRATCH_KW = "scratch_types"
 
 
 def main_kernel(
@@ -416,18 +426,20 @@ def ragged_scatter(x: jax.Array, indices: jax.Array, start: jax.Array, end: jax.
           core_axis_name=vector_mesh.core_axis_name,
           subcore_axis_name=vector_mesh.subcore_axis_name,
       ),
-      out_shape=jax.ShapeDtypeStruct((out_size + out_pad_size, aligned_hidden_size), dtype),
       compiler_params=pltpu.CompilerParams(
           use_tc_tiling_on_sc=True,
           disable_bounds_checks=True,
       ),
-      scratch_shapes=[
-          pltpu.VMEM((num_simd_lanes,), jnp.int32),  # total_num_rows
-          pltpu.VMEM((num_simd_lanes, col_size), jnp.uint32),
-          pltpu.VMEM((num_simd_lanes,), jnp.int32),  # src_indices
-          pltpu.VMEM((num_simd_lanes,), jnp.int32),  # dst_indices
-          pltpu.SemaphoreType.DMA((2,)),
-      ],
       mesh=vector_mesh,
       name="sc_ragged_scatter",
+      **{
+          _OUT_KW: jax.ShapeDtypeStruct((out_size + out_pad_size, aligned_hidden_size), dtype),
+          _SCRATCH_KW: [
+              pltpu.VMEM((num_simd_lanes,), jnp.int32),  # total_num_rows
+              pltpu.VMEM((num_simd_lanes, col_size), jnp.uint32),
+              pltpu.VMEM((num_simd_lanes,), jnp.int32),  # src_indices
+              pltpu.VMEM((num_simd_lanes,), jnp.int32),  # dst_indices
+              pltpu.SemaphoreType.DMA((2,)),
+          ],
+      },
   )(total_num_rows, x, src_indices, dst_indices)[:out_size, :hidden_size]
