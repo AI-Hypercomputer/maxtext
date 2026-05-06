@@ -705,9 +705,9 @@ deepseek2_16b_dict = {
     "qk_rope_head_dim": 64,
     "rms_norm_eps": 1e-06,
     "rope_scaling": {
-        "beta_fast": 32,
-        "beta_slow": 1,
-        "factor": 40,
+        "beta_fast": 32.0,
+        "beta_slow": 1.0,
+        "factor": 40.0,
         "mscale": 0.707,
         "mscale_all_dim": 0.707,
         "original_max_position_embeddings": 4096,
@@ -767,9 +767,9 @@ deepseek3_671b_dict = {
     "qk_rope_head_dim": 64,
     "rms_norm_eps": 1e-06,
     "rope_scaling": {
-        "beta_fast": 32,
-        "beta_slow": 1,
-        "factor": 40,
+        "beta_fast": 32.0,
+        "beta_slow": 1.0,
+        "factor": 40.0,
         "mscale": 1.0,
         "mscale_all_dim": 1.0,
         "original_max_position_embeddings": 4096,
@@ -1139,6 +1139,42 @@ mixtral_8x22b_dict = {
 mixtral_8x22b_config = transformers.MixtralConfig(**mixtral_8x22b_dict)
 
 
+# shared by olmo3-7b and olmo3-7b-pt (only rope_scaling/max_position_embeddings differ)
+olmo3_7b_dict = {
+    "architectures": ["Olmo3ForCausalLM"],
+    "model_type": "olmo3",
+    "hidden_size": 4096,
+    "num_hidden_layers": 32,
+    "num_attention_heads": 32,
+    "num_key_value_heads": 32,
+    "intermediate_size": 11008,
+    "vocab_size": 100278,
+    "max_position_embeddings": 8192,
+    "rope_theta": 500000,
+    "sliding_window": 4096,
+    "rms_norm_eps": 1.0e-6,
+    "torch_dtype": "bfloat16",
+    "tie_word_embeddings": False,
+    "pad_token_id": 100277,
+    "hidden_act": "silu",
+    "attention_bias": False,
+    "attention_dropout": 0.0,
+    "use_cache": True,
+}
+olmo3_7b_config = transformers.Olmo3Config(**olmo3_7b_dict)
+
+# from https://huggingface.co/allenai/Olmo-3.1-32B-Instruct/blob/main/config.json
+olmo3_32b_dict = {
+    **olmo3_7b_dict,
+    "hidden_size": 5120,
+    "num_hidden_layers": 64,
+    "num_attention_heads": 40,
+    "num_key_value_heads": 8,
+    "intermediate_size": 27648,
+}
+olmo3_32b_config = transformers.Olmo3Config(**olmo3_32b_dict)
+
+
 # {maxtext model name: hf model config}
 HF_MODEL_CONFIGS = {
     "gemma2-2b": gemma2_2b_config,
@@ -1180,4 +1216,7 @@ HF_MODEL_CONFIGS = {
     "qwen3-next-80b-a3b": qwen3_next_80b_a3b_config,
     "mixtral-8x7b": mixtral_8x7b_config,
     "mixtral-8x22b": mixtral_8x22b_config,
+    "olmo3-7b": olmo3_7b_config,
+    "olmo3-7b-pt": olmo3_7b_config,
+    "olmo3-32b": olmo3_32b_config,
 }

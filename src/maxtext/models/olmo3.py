@@ -96,9 +96,11 @@ class Olmo3DecoderLayer(nnx.Module):
         rngs=rngs,
     )
 
+    # Match HF runtime: a single rotary (with rope_scaling/YaRN) is applied to every layer,
+    # including sliding-window. The "RoPE scaling is not applied to sliding window attention
+    # layers" comment in HF's modular_olmo3.py is unimplemented design intent — its code
+    # passes the same (cos, sin) to all layers.
     current_rope_type = config.rope_type.lower()
-    if self.attention_type == attentions.AttentionType.LOCAL_SLIDING:
-      current_rope_type = "default"
 
     # Self-attention block
     self.attention = Attention(

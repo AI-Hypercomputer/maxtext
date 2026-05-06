@@ -27,7 +27,6 @@ import ast
 import bisect
 import dataclasses
 import hashlib
-import io
 import json
 import os
 import struct
