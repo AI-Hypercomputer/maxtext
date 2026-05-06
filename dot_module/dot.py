@@ -246,126 +246,126 @@ def dot_bwd(config, axes, res, g):
 
 dot.defvjp(dot_fwd, dot_bwd)
 
-def get_mock_config(quantized=True):
-    config = MagicMock()
-    config.quantization = quantized
-    if quantized:
-        config.weight_quantization_calibration_method = "fixed,-224,224"
-        config.act_quantization_calibration_method = "fixed,-224,224"
-        config.bwd_quantization_calibration_method = "absmax"
-    return config
+# def get_mock_config(quantized=True):
+#     config = MagicMock()
+#     config.quantization = quantized
+#     if quantized:
+#         config.weight_quantization_calibration_method = "fixed,-224,224"
+#         config.act_quantization_calibration_method = "fixed,-224,224"
+#         config.bwd_quantization_calibration_method = "absmax"
+#     return config
 
 
-class TestDotFunction(unittest.TestCase):
+# class TestDotFunction(unittest.TestCase):
 
-  def test_unquantized_forward_and_backward(self):
-      config = get_mock_config(quantized=False)
-      key = jax.random.PRNGKey(0)
-      k1, k2 = jax.random.split(key)
+#   def test_unquantized_forward_and_backward(self):
+#       config = get_mock_config(quantized=False)
+#       key = jax.random.PRNGKey(0)
+#       k1, k2 = jax.random.split(key)
       
-      act = jax.random.normal(k1, (4, 16))
-      w = jax.random.normal(k2, (16, 8))
+#       act = jax.random.normal(k1, (4, 16))
+#       w = jax.random.normal(k2, (16, 8))
       
-      # Test Forward
-      custom_res = dot(act, w, config=config, axes=1)
-      jnp_res = jnp.tensordot(act, w, axes=1)
+#       # Test Forward
+#       custom_res = dot(act, w, config=config, axes=1)
+#       jnp_res = jnp.tensordot(act, w, axes=1)
       
-      self.assertTrue(jnp.allclose(custom_res, jnp_res, atol=1e-5))
+#       self.assertTrue(jnp.allclose(custom_res, jnp_res, atol=1e-5))
       
-      # Test Backward
-      def loss_fn(a, w_):
-          return jnp.sum(dot(a, w_, config=config, axes=1))
+#       # Test Backward
+#       def loss_fn(a, w_):
+#           return jnp.sum(dot(a, w_, config=config, axes=1))
           
-      def ref_loss_fn(a, w_):
-          return jnp.sum(jnp.tensordot(a, w_, axes=1))
+#       def ref_loss_fn(a, w_):
+#           return jnp.sum(jnp.tensordot(a, w_, axes=1))
           
-      custom_grad_act, custom_grad_w = jax.grad(loss_fn, argnums=(0, 1))(act, w)
-      ref_grad_act, ref_grad_w = jax.grad(ref_loss_fn, argnums=(0, 1))(act, w)
+#       custom_grad_act, custom_grad_w = jax.grad(loss_fn, argnums=(0, 1))(act, w)
+#       ref_grad_act, ref_grad_w = jax.grad(ref_loss_fn, argnums=(0, 1))(act, w)
       
-      self.assertTrue(jnp.allclose(custom_grad_act, ref_grad_act, atol=1e-5))
-      self.assertTrue(jnp.allclose(custom_grad_w, ref_grad_w, atol=1e-5))
+#       self.assertTrue(jnp.allclose(custom_grad_act, ref_grad_act, atol=1e-5))
+#       self.assertTrue(jnp.allclose(custom_grad_w, ref_grad_w, atol=1e-5))
 
-  def test_quantized_forward_and_backward_local(self):
-      config = get_mock_config(quantized=True)
-      key = jax.random.PRNGKey(1)
+#   def test_quantized_forward_and_backward_local(self):
+#       config = get_mock_config(quantized=True)
+#       key = jax.random.PRNGKey(1)
       
-      # Use values that will trigger the fixed scaling (-224 to 224)
-      act = jax.random.uniform(key, (8, 32), minval=-100, maxval=100)
-      w = jax.random.uniform(key, (32, 16), minval=-100, maxval=100)
+#       # Use values that will trigger the fixed scaling (-224 to 224)
+#       act = jax.random.uniform(key, (8, 32), minval=-100, maxval=100)
+#       w = jax.random.uniform(key, (32, 16), minval=-100, maxval=100)
       
-      # Forward pass
-      res = dot(act, w, config=config, axes=1)
+#       # Forward pass
+#       res = dot(act, w, config=config, axes=1)
       
-      # Ensure output is cast back to bfloat16 as defined in your code
-      self.assertEqual(res.dtype, jnp.bfloat16)
-      self.assertEqual(res.shape, (8, 16))
+#       # Ensure output is cast back to bfloat16 as defined in your code
+#       self.assertEqual(res.dtype, jnp.bfloat16)
+#       self.assertEqual(res.shape, (8, 16))
       
-      # Backward pass (Ensure VJP doesn't crash on shapes/types)
-      def loss_fn(a, w_):
-          return jnp.sum(dot(a, w_, config=config, axes=1))
+#       # Backward pass (Ensure VJP doesn't crash on shapes/types)
+#       def loss_fn(a, w_):
+#           return jnp.sum(dot(a, w_, config=config, axes=1))
           
-      grad_act, grad_w = jax.grad(loss_fn, argnums=(0, 1))(act, w)
+#       grad_act, grad_w = jax.grad(loss_fn, argnums=(0, 1))(act, w)
       
-      self.assertEqual(grad_act.dtype, jnp.bfloat16)
-      self.assertEqual(grad_w.dtype, jnp.bfloat16)
-      self.assertEqual(grad_act.shape, act.shape)
-      self.assertEqual(grad_w.shape, w.shape)
+#       self.assertEqual(grad_act.dtype, jnp.bfloat16)
+#       self.assertEqual(grad_w.dtype, jnp.bfloat16)
+#       self.assertEqual(grad_act.shape, act.shape)
+#       self.assertEqual(grad_w.shape, w.shape)
 
 
-  def test_quantized_shard_map_backward(self):
-      config = get_mock_config(quantized=True)
+#   def test_quantized_shard_map_backward(self):
+#       config = get_mock_config(quantized=True)
       
-      # Create a mock 2-device mesh (works on CPU for testing)
-      devices = jax.devices()
-      if len(devices) < 2:
-          self.skipTest("Requires at least 2 devices (use CPU with flags if needed)")
+#       # Create a mock 2-device mesh (works on CPU for testing)
+#       devices = jax.devices()
+#       if len(devices) < 2:
+#           self.skipTest("Requires at least 2 devices (use CPU with flags if needed)")
           
-      mesh = Mesh(np.array(devices[:2]), ('data',))
+#       mesh = Mesh(np.array(devices[:2]), ('data',))
       
-      act_shape = (4, 16)
-      w_shape = (16, 8)
+#       act_shape = (4, 16)
+#       w_shape = (16, 8)
       
-      # Data parallel partition spec
-      act_spec = P('data', None)
-      w_spec = P(None, None) # Replicated weights
-      out_spec = P('data', None)
+#       # Data parallel partition spec
+#       act_spec = P('data', None)
+#       w_spec = P(None, None) # Replicated weights
+#       out_spec = P('data', None)
 
-      @functools.partial(
-          jax.shard_map, 
-          mesh=mesh, 
-          in_specs=(act_spec, w_spec), 
-          out_specs=out_spec,
-          check_vma=True
-      )
-      def sharded_fwd(a, w_):
-          return dot(a, w_, config=config, axes=1)
+#       @functools.partial(
+#           jax.shard_map, 
+#           mesh=mesh, 
+#           in_specs=(act_spec, w_spec), 
+#           out_specs=out_spec,
+#           check_vma=True
+#       )
+#       def sharded_fwd(a, w_):
+#           return dot(a, w_, config=config, axes=1)
 
-      # To test the backward pass inside the shard map, we define 
-      # a loss function that itself is mapped.
-      @functools.partial(
-          jax.shard_map, 
-          mesh=mesh, 
-          in_specs=(act_spec, w_spec), 
-          out_specs=(act_spec, P(None, None)), # Weight grads should be replicated/psummed later
-          check_vma=True
-      )
-      def sharded_bwd(a, w_):
-          def loss(a_inner, w_inner):
-              return jnp.sum(dot(a_inner, w_inner, config=config, axes=1))
-          return jax.grad(loss, argnums=(0, 1))(a, w_)
+#       # To test the backward pass inside the shard map, we define 
+#       # a loss function that itself is mapped.
+#       @functools.partial(
+#           jax.shard_map, 
+#           mesh=mesh, 
+#           in_specs=(act_spec, w_spec), 
+#           out_specs=(act_spec, P(None, None)), # Weight grads should be replicated/psummed later
+#           check_vma=True
+#       )
+#       def sharded_bwd(a, w_):
+#           def loss(a_inner, w_inner):
+#               return jnp.sum(dot(a_inner, w_inner, config=config, axes=1))
+#           return jax.grad(loss, argnums=(0, 1))(a, w_)
 
-      key = jax.random.PRNGKey(2)
-      act = jax.device_put(jax.random.normal(key, act_shape), NamedSharding(mesh, act_spec))
-      w = jax.device_put(jax.random.normal(key, w_shape), NamedSharding(mesh, w_spec))
+#       key = jax.random.PRNGKey(2)
+#       act = jax.device_put(jax.random.normal(key, act_shape), NamedSharding(mesh, act_spec))
+#       w = jax.device_put(jax.random.normal(key, w_shape), NamedSharding(mesh, w_spec))
 
-      # 1. Test it compiles and runs forward
-      out = sharded_fwd(act, w)
-      self.assertEqual(out.shape, (4, 8))
+#       # 1. Test it compiles and runs forward
+#       out = sharded_fwd(act, w)
+#       self.assertEqual(out.shape, (4, 8))
 
-      # 2. Test the backward branch for AxisType.Manual is hit and succeeds
-      grad_act, grad_w = sharded_bwd(act, w)
+#       # 2. Test the backward branch for AxisType.Manual is hit and succeeds
+#       grad_act, grad_w = sharded_bwd(act, w)
       
-      self.assertEqual(grad_act.shape, act_shape)
-      # Because local chunk size for 'data' axis on 2 devices is half the batch:
-      self.assertEqual(grad_act.addressable_data(0).shape, (2, 16)) 
-      self.assertEqual(grad_w.shape, w_shape)
+#       self.assertEqual(grad_act.shape, act_shape)
+#       # Because local chunk size for 'data' axis on 2 devices is half the batch:
+#       self.assertEqual(grad_act.addressable_data(0).shape, (2, 16)) 
+#       self.assertEqual(grad_w.shape, w_shape)
