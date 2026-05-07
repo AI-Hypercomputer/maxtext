@@ -734,6 +734,14 @@ grain_use_elastic_iterator: False # For elastic training, set to this true and p
 # for using pathways
 colocated_python_data_input: False  # experimental feature, under testing
 
+# OLMo numpy pipeline (dataset_type=olmo_grain). Worker count, buffer size,
+# and shuffle seed reuse grain_worker_count / grain_per_worker_buffer_size /
+# data_shuffle_seed.
+olmo_index_path: '' # JSON from tools/data_generation/build_olmo_npy_index.py
+olmo_path_remap_from: '' # rewrite index paths starting with this prefix...
+olmo_path_remap_to: ''   # ...to this one (e.g. gs://bucket/ -> /mnt/.../ for gcsfuse).
+olmo_apply_ngram_filter: True # mask instances with repetitive n-grams (OLMo-core filter)
+
 # Training loop
 steps: 150_001 # If set to -1 then will inherit value from learning_rate_schedule_steps
 log_period: 100 # The frequency of Tensorboard flush, gcs metrics writing, and managed profiler metrics updating.
