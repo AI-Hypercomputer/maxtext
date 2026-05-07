@@ -1627,8 +1627,17 @@ def get_nnx_named_sharding_with_scan_axis(abs_var_state: nnx.State, mesh) -> nnx
   def _make_named_sharding(v):
     val = v.get_value()
     if not hasattr(val, "shape"):
-      # Non-tensor value (e.g., optax MaskedNode for non-trainable params). Preserve
-      # as-is so the treedef matches abs_var_state in the downstream jax.tree.map.
+      # `val` is either truly leafless (e.g. optax MaskedNode) or a composite
+      # pytree of tensors (e.g. AQT QTensor on serve-mode quantized variables —
+      # a `qvalue` int8 array + a list of `scale` bf16 arrays). For the latter
+      # we must emit a parallel tree of NamedSharding leaves so the downstream
+      # `jax.tree.map(lambda a, s: ShapeDtypeStruct(..., sharding=s), abs, names)`
+      # finds a real Sharding at every position. Replicated sharding is a safe
+      # default — AQT serve-mode QTensors are normally small (per-channel scale
+      # factors and packed int8 weights) and don't need axis-aware sharding.
+      if jax.tree_util.tree_leaves(val):
+        replicated = NamedSharding(mesh, PartitionSpec())
+        return v.replace(jax.tree.map(lambda _: replicated, val))
       return v
     metadata = v.get_metadata()
     out_sharding = metadata.get("out_sharding") or metadata.get("sharding_names") or metadata.get("sharding")
