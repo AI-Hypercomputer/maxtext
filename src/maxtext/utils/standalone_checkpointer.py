@@ -24,15 +24,19 @@ import os
 from typing import Sequence
 
 from absl import app
+from flax import nnx
 from flax.linen import partitioning as nn_partitioning
 import jax
 from jax import numpy as jnp
 from maxtext.configs import pyconfig
 from maxtext.common import checkpointing
+from maxtext.layers import train_state_nnx
 from maxtext.models import models
 from maxtext.trainers.pre_train.train import get_first_step
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils
+from maxtext.utils import maxtext_utils_nnx
+from maxtext.utils import model_creation_utils
 from maxtext.utils import train_utils
 from maxtext.utils.model_creation_utils import from_config
 import numpy as np
@@ -41,24 +45,30 @@ Transformer = models.transformer_as_linen
 
 
 def checkpoint_loop(config, state=None):
-  """Main Checkpointing loop.
+  """Save/restore exerciser.
 
-  Saves checkpoints.
-
-  Args:
-    config:
-    state:
-    ckpt_path:
-
-  Returns:
+  Builds an abstract train state, restores or initializes it, perturbs the
+  optimizer moments via `add_entropy_to_checkpoint`, then writes checkpoints
+  on the configured cadence. Works on both Linen and NNX state shapes.
   """
-  # Save/restore exerciser uses Linen-shaped optimizer state via
-  # add_entropy_to_checkpoint(). Route to Linen regardless of pure_nnx.
-  model = from_config(config)
-  mesh = model.mesh
   init_rng = jax.random.PRNGKey(config.init_weights_seed)
-  _, tx = train_utils.create_training_optimizer(config, model)
-  init_state_fn = partial(maxtext_utils.init_initial_state, model, tx, config, True, init_rng)
+  if config.pure_nnx:
+    mesh = maxtext_utils.get_mesh_from_config(config)
+    rngs = maxtext_utils_nnx.create_nnx_rngs(config, rng_key=init_rng)
+    model = from_config(config, mesh=mesh, rngs=rngs)
+    _, tx = train_utils.create_training_optimizer(config, model)
+    _create_model_partial, _ = model_creation_utils.create_nnx_abstract_model(config, mesh)
+
+    def init_state_fn():
+      nnx_model = _create_model_partial()
+      optimizer = nnx.Optimizer(nnx_model, tx, wrt=nnx.Param)
+      return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
+
+  else:
+    model = from_config(config)
+    mesh = model.mesh
+    _, tx = train_utils.create_training_optimizer(config, model)
+    init_state_fn = partial(maxtext_utils.init_initial_state, model, tx, config, True, init_rng)
   checkpoint_manager = train_utils.create_checkpoint_manager(config, mesh, init_state_fn)
 
   unboxed_abstract_state, _, _ = maxtext_utils.get_abstract_state(config, mesh, init_state_fn, is_training=True)
@@ -108,22 +118,38 @@ def checkpoint_loop(config, state=None):
 
 
 def add_entropy_to_checkpoint(state):
-  """Introduce randomness in checkpoints.
+  """Replace adam mu/nu with cos/sin of params.
 
-  This is useful to simulate real checkpoints, without training.
-
-  Args:
-    state: Initial state
-
-  Returns:
-    state: Returns state with entropy added to the optimizer state.
+  Stand-in for real training when exercising checkpoint save/restore. Handles
+  three shapes:
+    * Linen `TrainState`: `state.params` + `state.opt_state` (tuple).
+    * NNX `TrainStateNNX` (Module): `state.model` is an `nnx.Module`; the
+      optimizer's `opt_state` is the optax tuple of NamedTuples.
+    * NNX `nnx.State` (post-split, what `setup_training_state` returns under
+      `pure_nnx`): `state.model` and `state.optimizer.opt_state` are sub-States;
+      `opt_state[0].mu`/`nu` are themselves States that can be reassigned.
   """
+  if hasattr(state, "model"):
+    if isinstance(state, nnx.Module):
+      params = nnx.state(state.model, nnx.Param)
+    else:
+      params = state.model.filter(nnx.Param) if hasattr(state.model, "filter") else state.model
+    new_mu = jax.tree_util.tree_map(lambda k: jnp.cos(1000 * k), params)
+    new_nu = jax.tree_util.tree_map(lambda k: jnp.sin(1000 * k), params)
+
+    if isinstance(state, nnx.Module):
+      opt = state.optimizer
+      opt.opt_state = (opt.opt_state[0]._replace(mu=new_mu, nu=new_nu),) + tuple(opt.opt_state[1:])
+    else:
+      state.optimizer.opt_state[0].mu = new_mu
+      state.optimizer.opt_state[0].nu = new_nu
+    return state
+
   opt_0 = state.opt_state[0]
   opt_0 = opt_0._replace(mu=jax.tree_util.tree_map(lambda k: jnp.cos(1000 * k), state.params))
   opt_0 = opt_0._replace(nu=jax.tree_util.tree_map(lambda k: jnp.sin(1000 * k), state.params))
   new_opt = [opt_0] + list(state.opt_state[1:])
-  state = state.replace(opt_state=new_opt)
-  return state
+  return state.replace(opt_state=new_opt)
 
 
 def main(argv: Sequence[str]) -> None:
