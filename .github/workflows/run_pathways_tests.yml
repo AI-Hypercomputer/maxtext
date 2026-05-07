@@ -115,6 +115,15 @@ jobs:
           else
             echo "Docker not available or cannot connect to daemon. Skipping explicit cleanup."
           fi
+      - name: Debug Resource Usage
+        if: always()
+        run: |
+          echo "=== Memory Usage ==="
+          free -m || true
+          echo "=== Network Connections ==="
+          netstat -tuln || true
+          echo "=== File Descriptors ==="
+          cat /proc/sys/fs/file-nr || true
     services:
       resource_manager:
         image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260413-jax_0.9.2
