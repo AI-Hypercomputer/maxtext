@@ -239,6 +239,8 @@ def maybe_initialize_jax_distributed_system(raw_keys):
 
   For CPUs, we call jax.distributed.initialize() explicitly, with the specified arguments.
   """
+
+  # Early exit for cases where we don't need to initialize the jax distributed system.
   if raw_keys["skip_jax_distributed_system"]:
     max_logging.log("Skipping jax distributed system due to skip_jax_distributed_system=True flag.")
     return
@@ -248,22 +250,40 @@ def maybe_initialize_jax_distributed_system(raw_keys):
   if jax.distributed.is_initialized():
     max_logging.log("Jax distributed system is already initialized.")
     return
-  if raw_keys["inference_benchmark_test"]:
-    # Disable initialization for inference benmark test.
+  if raw_keys["inference_benchmark_test"] or raw_keys["compile_topology"]:
+    max_logging.log("Skipping jax distributed system initialization.")
     return
-  if raw_keys["compile_topology"]:
-    # Don't initialize jax distributed with AOT compilation
-    return
+
+  # Initialization for gpu backend
   if is_gpu_backend(raw_keys):
     max_logging.log("Attempting to initialize the jax distributed system for GPU backend...")
     initialize_jax_for_gpu(raw_keys)
     max_logging.log("Jax distributed system initialized on GPU!")
-  elif is_cpu_backend(raw_keys):
+    return
+
+  # Initialization for cpu backend
+  if is_cpu_backend(raw_keys):
     max_logging.log("Attempting to initialize the jax distributed system for CPU backend...")
     initialize_jax_for_cpu(raw_keys)
     max_logging.log("Jax distributed system initialized on CPUs!")
-  elif raw_keys["enable_multi_tier_checkpointing"]:
-    max_logging.log("Attempting to initialize the jax distributed system for multi-tier " "checkpointing...")
+    return
+
+  # Initialization for gpu_multiprocess hardware
+  if raw_keys["hardware"] == "gpu_multiprocess":
+    max_logging.log("Attempting to initialize the jax distributed system for gpu_multiprocess hardware...")
+    if not raw_keys["enable_emergency_checkpoint"]:
+      jax.distributed.initialize(initialization_timeout=raw_keys["jax_distributed_initialization_timeout"])
+    else:
+      max_logging.log("Initializing jax distributed to support local checkpointing with GPUs...")
+      jax.distributed.initialize(initialization_timeout=raw_keys["jax_distributed_initialization_timeout"])
+      ocp.multihost.initialize_runtime_to_distributed_ids()
+      ocp.multihost.initialize_distributed_to_device_ids()
+      max_logging.log("Jax distributed system initialized!")
+    return
+
+  # Initialization for tpu backend
+  max_logging.log("Attempting to initialize the jax distributed system for TPU backend...")
+  if raw_keys["enable_multi_tier_checkpointing"]:
     initialize_multi_tier_checkpointing(
         local_checkpoint_directory=raw_keys["local_checkpoint_directory"],
         backup_interval_minutes=raw_keys["multi_tier_checkpointing_backup_interval_minutes"],
@@ -271,22 +291,13 @@ def maybe_initialize_jax_distributed_system(raw_keys):
         jax_initialization_timeout_seconds=raw_keys["jax_distributed_initialization_timeout"],
         data_parallelism=raw_keys["mtc_data_parallelism"],
     )
-    max_logging.log("Jax distributed system initialized for multi-tier checkpointing!")
-  elif (raw_keys["enable_checkpointing"] and raw_keys["compile_topology_num_slices"] == -1) or raw_keys[
-      "hardware"
-  ] == "gpu_multiprocess":
-    max_logging.log("Attempting to initialize the jax distributed system...")
+    max_logging.log("Jax distributed system initialized on TPUs for multi-tier checkpointing!")
+  elif raw_keys["enable_checkpointing"] and raw_keys["compile_topology_num_slices"] == -1:
     if not raw_keys["enable_emergency_checkpoint"]:
       jax.distributed.initialize(initialization_timeout=raw_keys["jax_distributed_initialization_timeout"])
     else:
-      if raw_keys["hardware"] == "gpu_multiprocess":
-        max_logging.log("Initializing jax distribtued to support local checkpointing with" " GPUs...")
-        jax.distributed.initialize(initialization_timeout=raw_keys["jax_distributed_initialization_timeout"])
-        ocp.multihost.initialize_runtime_to_distributed_ids()
-        ocp.multihost.initialize_distributed_to_device_ids()
-      else:
-        initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys)
-    max_logging.log("Jax distributed system initialized!")
+      initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys)
+    max_logging.log("Jax distributed system initialized on TPUs!")
 
 
 def initialize_jax_for_gpu(raw_keys):
