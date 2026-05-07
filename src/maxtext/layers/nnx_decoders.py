@@ -224,7 +224,7 @@ def deepstack_process(hidden_states, bidirectional_mask, visual_embeds):
     visual_embeds: [batch, num_visual_tokens, hidden_dim] visual features from encoder layer
 
   Returns:
-    Updated hidden_states with visual features added at visual positions
+    Updated hidden_states with visual features added at visual positions.
   """
   # Expand mask to [batch, seq_len, 1] for broadcasting
   mask_expanded = bidirectional_mask[:, :, jnp.newaxis]
