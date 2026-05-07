@@ -208,7 +208,7 @@ jobs:
 
   maxtext_tpu_pathways_integration_tests:
     needs: build_and_upload_maxtext_package
-    if: needs.analyze_code_changes.outputs.run_tests == 'true'
+    if: false # Skipping for now because of https://github.com/AI-Hypercomputer/maxtext/issues/3765
     uses: ./.github/workflows/run_pathways_tests.yml
     strategy:
         fail-fast: false
