@@ -38,14 +38,59 @@ jobs:
       run: echo "Release approved, proceeding to build, test and publish MaxText package."
 
   build_and_test_maxtext_package:
-    name: Build and Test MaxText Package
+    name: ${{ matrix.image_name }}
     needs: [release_approval]
-    uses: ./.github/workflows/build_and_test_maxtext.yml
-    secrets: inherit
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - device: tpu
+            build_mode: stable
+            image_name: maxtext_jax_stable
+            workflow: pre-training
+            dockerfile: maxtext_tpu_dependencies.Dockerfile
+          - device: gpu
+            build_mode: stable
+            image_name: maxtext_gpu_jax_stable
+            workflow: pre-training
+            dockerfile: maxtext_gpu_dependencies.Dockerfile
+          - device: tpu
+            build_mode: stable
+            image_name: maxtext_post_training_stable
+            workflow: post-training
+            dockerfile: maxtext_tpu_dependencies.Dockerfile
+    uses: ./.github/workflows/build_and_push_docker_image.yml
+    with:
+      image_name: ${{ matrix.image_name }}
+      device: ${{ matrix.device }}
+      build_mode: ${{ matrix.build_mode }}
+      workflow: ${{ matrix.workflow }}
+      dockerfile: ${{ matrix.dockerfile }}
+      maxtext_sha: ${{ github.sha }}
+      version_name: ${{ needs.get_latest_maxtext_pypi_version.outputs.latest_pypi_version }}
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
+  run_e2e_tests:
+    name: ${{ matrix.image_name }}
+    needs: [build_release_candidate_images]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - dag_id: maxtext_e2e_tpu_pre_training
+            candidate_image: "gcr.io/${{ vars.PROJECT_NAME }}/maxtext_jax_stable:${{ github.run_id }}"
+          - dag_id: maxtext_e2e_tpu_post_training
+            candidate_image: "gcr.io/${{ vars.PROJECT_NAME }}/maxtext_post_training_stable:${{ github.run_id }}"
+    uses: ./.github/workflows/run_e2e_tests.yml
+    with:
+      dag_id: ${{ matrix.dag_id }}
+      candidate_image: ${{ matrix.candidate_image }}
+    uses: ./.github/workflows/run_e2e_tests.yml
       
   publish_maxtext_package_to_pypi:
     name: Publish MaxText package to PyPI
-    needs: [build_and_test_maxtext_package]
+    needs: [run_e2e_tests]
     runs-on: ubuntu-latest
     environment: release
     steps:
@@ -89,39 +134,23 @@ jobs:
           # Set the output variable for other jobs to consume
           echo "version=$latest_version" >> "$GITHUB_OUTPUT"
 
-  # This job builds and pushes MaxText stable Docker images for both TPU and GPU devices.
-  # It runs only after a new release is published to PyPI.
-  # Creates docker image for MaxText commit corresponding to the release.
-  upload_maxtext_docker_images:
-    name: ${{ matrix.image_name }}
-    needs: [get_latest_maxtext_pypi_version]
+  promote_release_images:
+    name: Promote Release Images - ${{ matrix.image_name }}
+    needs: [publish_maxtext_package_to_pypi, get_latest_maxtext_pypi_version]
+    runs-on: linux-x86-n2-16-buildkit
+    container: google/cloud-sdk:524.0.0
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - device: tpu
-            build_mode: stable
-            image_name: maxtext_jax_stable
-            workflow: pre-training
-            dockerfile: maxtext_tpu_dependencies.Dockerfile
-          - device: gpu
-            build_mode: stable
-            image_name: maxtext_gpu_jax_stable
-            workflow: pre-training
-            dockerfile: maxtext_gpu_dependencies.Dockerfile
-          - device: tpu
-            build_mode: stable
-            image_name: maxtext_post_training_stable
-            workflow: post-training
-            dockerfile: maxtext_tpu_dependencies.Dockerfile
-    uses: ./.github/workflows/build_and_push_docker_image.yml
-    with:
-      image_name: ${{ matrix.image_name }}
-      device: ${{ matrix.device }}
-      build_mode: ${{ matrix.build_mode }}
-      workflow: ${{ matrix.workflow }}
-      dockerfile: ${{ matrix.dockerfile }}
-      maxtext_sha: ${{ github.sha }}
-      version_name: ${{ needs.get_latest_maxtext_pypi_version.outputs.latest_pypi_version }}
-    secrets:
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        image_name:
+          - maxtext_jax_stable
+          - maxtext_post_training_stable
+    steps:
+      - name: Configure Docker
+        run: gcloud auth configure-docker us-docker.pkg.dev,gcr.io -q
+
+      - name: Add tags to Docker image
+        shell: bash
+        run: |
+          SOURCE_IMAGE="gcr.io/${{ vars.PROJECT_NAME }}/${{ matrix.image_name }}"
+          gcloud container images add-tag "${SOURCE_IMAGE}:${{ github.run_id }}" "${SOURCE_IMAGE}:${{ needs.get_latest_maxtext_pypi_version.outputs.latest_pypi_version }}" --quiet
