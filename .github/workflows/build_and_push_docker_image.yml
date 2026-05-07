@@ -38,10 +38,6 @@ on:
         required: false
         type: string
         default: 'pre-training'
-      version_name:
-        required: false
-        type: string
-        default: ''
       include_test_assets:
         required: false
         type: boolean
@@ -163,27 +159,19 @@ jobs:
         run: |
           SOURCE_IMAGE="gcr.io/${{ vars.PROJECT_NAME }}/${INPUTS_IMAGE_NAME}"
           TEMP_IMG="${SOURCE_IMAGE}:${{ github.run_id }}"
+          
+          # Add date tag
+          IMAGE_DATE="$(date +%Y-%m-%d)"
+          gcloud container images add-tag "${TEMP_IMG}" "$SOURCE_IMAGE:$IMAGE_DATE" --quiet
 
-          if [[ $INPUTS_VERSION_NAME ]]; then
-            echo "Tagging docker images corresponding to PyPI release..."
-            gcloud container images add-tag "${TEMP_IMG}" "${SOURCE_IMAGE}:${INPUTS_VERSION_NAME}" --quiet
-          else
-            echo "Tagging docker images corresponding to nightly release..."
+          # Convert date to YYYYMMDD format
+          clean_date=$(echo "$IMAGE_DATE" | sed 's/[-:]//g' | cut -c1-8)
 
-            # Add date tag
-            IMAGE_DATE="$(date +%Y-%m-%d)"
-            gcloud container images add-tag "${TEMP_IMG}" "$SOURCE_IMAGE:$IMAGE_DATE" --quiet
-
-            # Convert date to YYYYMMDD format
-            clean_date=$(echo "$IMAGE_DATE" | sed 's/[-:]//g' | cut -c1-8)
-
-            # Add MaxText tag
-            MAXTEXT_SHA=$(git rev-parse --short HEAD)
-            gcloud container images add-tag "${TEMP_IMG}" "${SOURCE_IMAGE}:maxtext_${MAXTEXT_SHA}_${clean_date}" --quiet
-          fi
+          # Add MaxText tag
+          MAXTEXT_SHA=$(git rev-parse --short HEAD)
+          gcloud container images add-tag "${TEMP_IMG}" "${SOURCE_IMAGE}:maxtext_${MAXTEXT_SHA}_${clean_date}" --quiet
         env:
           INPUTS_IMAGE_NAME: ${{ inputs.image_name }}
-          INPUTS_VERSION_NAME: ${{ inputs.version_name }}
 
   promote_image:
     needs: [pre_build_check, build_and_push]

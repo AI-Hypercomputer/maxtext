@@ -12,54 +12,85 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# This workflow will build, test and automatically release MaxText package to PyPI using Trusted Publishing (OIDC).
+# This workflow publishes MaxText to PyPI once the parent Airflow E2E DAG reports success.
+# The parent DAG fans out to all child E2E DAGs, waits for them, then fires a single callback.
 
 name: Publish MaxText to PyPI
 
-# Triggers when a new "release" is published in the GitHub UI
+# Triggered by Airflow via POST /repos/{owner}/{repo}/dispatches when the E2E DAG completes.
+# Airflow passes the result in client_payload: { state, dag_id, dag_run_id, sha, github_run_id }.
 on:
-  release:
-    types: [published]
+  repository_dispatch:
+    types: [airflow-dag-complete]
 
 permissions:
   contents: read
-  issues: write
-  id-token: write
+  id-token: write  # required for PyPI Trusted Publishing (OIDC)
 
 jobs:
+  handle_result:
+    name: Handle Airflow DAG Result - ${{ github.event.client_payload.dag_id }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report DAG result
+        run: |
+          STATE="${{ github.event.client_payload.state }}"
+          DAG_ID="${{ github.event.client_payload.dag_id }}"
+          DAG_RUN_ID="${{ github.event.client_payload.dag_run_id }}"
+          SHA="${{ github.event.client_payload.sha }}"
+
+          echo "================================"
+          echo "DAG ID:      ${DAG_ID}"
+          echo "DAG Run ID:  ${DAG_RUN_ID}"
+          echo "Commit SHA:  ${SHA}"
+          echo "State:       ${STATE}"
+          echo "================================"
+
+          case "$STATE" in
+            success) echo "E2E tests PASSED." ;;
+            failed|upstream_failed) echo "E2E tests FAILED."; exit 1 ;;
+            *) echo "DAG ended with unexpected state: ${STATE}"; exit 1 ;;
+          esac
+
   release_approval:
     name: Approve Release
     runs-on: ubuntu-latest
+    needs: handle_result
+    if: github.event.client_payload.state == 'success'
     # "release" environment is configured in MaxText repository settings.
     # This environment requires manual approval before proceeding to the next job.
     environment: release
     steps:
     - name: Acknowledge Approval
-      run: echo "Release approved, proceeding to build, test and publish MaxText package."
+      run: echo "Release approved, proceeding to publishing MaxText package."
 
-  build_and_test_maxtext_package:
-    name: Build and Test MaxText Package
-    needs: [release_approval]
-    uses: ./.github/workflows/build_and_test_maxtext.yml
-    secrets: inherit
-      
   publish_maxtext_package_to_pypi:
     name: Publish MaxText package to PyPI
-    needs: [build_and_test_maxtext_package]
+    needs: [handle_result, release_approval]
+    if: github.event.client_payload.state == 'success'
     runs-on: ubuntu-latest
     environment: release
     steps:
-    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-    - name: Download MaxText wheel
-      uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
-      with:
-        name: maxtext-wheel
-        path: dist/
-    - name: Publish MaxText wheel to PyPI
-      # Official action for PyPI Trusted Publishing
-      uses: pypa/gh-action-pypi-publish@release/v1
-      with:
-        packages-dir: dist/
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Download MaxText wheel from release build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ORIGINAL_RUN_ID="${{ github.event.client_payload.github_run_id }}"
+          ARTIFACT_ID=$(gh api "/repos/${{ github.repository }}/actions/runs/${ORIGINAL_RUN_ID}/artifacts" \
+            --jq '.artifacts[] | select(.name == "maxtext-wheel") | .id')
+          if [ -z "${ARTIFACT_ID}" ]; then
+            echo "Error: could not find maxtext-wheel artifact in run ${ORIGINAL_RUN_ID}"
+            exit 1
+          fi
+          mkdir -p dist
+          gh api "/repos/${{ github.repository }}/actions/artifacts/${ARTIFACT_ID}/zip" > dist/maxtext-wheel.zip
+          unzip dist/maxtext-wheel.zip -d dist/
+          rm dist/maxtext-wheel.zip
+      - name: Publish MaxText wheel to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
 
   get_latest_maxtext_pypi_version:
     name: Get latest MaxText PyPI version
@@ -68,60 +99,38 @@ jobs:
     outputs:
       latest_pypi_version: ${{ steps.get_version.outputs.version }}
     steps:
-      - name: Install jq
-        run: sudo apt-get update && sudo apt-get install -y jq
       - name: Fetch latest version of maxtext from PyPI
         id: get_version
         run: |
-          # Fetch JSON from PyPI for 'maxtext'
-          echo "Fetching latest version from https://pypi.org/pypi/maxtext/json"
           pypi_json=$(curl -s https://pypi.org/pypi/maxtext/json)
-
-          # Extract the version from the "info" section using jq
-          latest_version=$(echo "$pypi_json" | jq -r ".info.version")
-
-          if [ -z "$latest_version" ] || [ "$latest_version" == "null" ]; then
+          latest_version=$(echo "$pypi_json" | python3 -c "import sys,json; print(json.load(sys.stdin)['info']['version'])")
+          if [ -z "$latest_version" ] || [ "$latest_version" = "null" ]; then
             echo "Error: Could not parse latest version from PyPI JSON."
             exit 1
           fi
-
-          echo "Successfully fetched latest MaxText version on PyPI: $latest_version"
-          # Set the output variable for other jobs to consume
+          echo "Latest MaxText version on PyPI: $latest_version"
           echo "version=$latest_version" >> "$GITHUB_OUTPUT"
 
-  # This job builds and pushes MaxText stable Docker images for both TPU and GPU devices.
-  # It runs only after a new release is published to PyPI.
-  # Creates docker image for MaxText commit corresponding to the release.
-  upload_maxtext_docker_images:
-    name: ${{ matrix.image_name }}
-    needs: [get_latest_maxtext_pypi_version]
+  promote_release_images:
+    name: Promote Release Images - ${{ matrix.image_name }}
+    needs: [publish_maxtext_package_to_pypi, get_latest_maxtext_pypi_version]
+    runs-on: linux-x86-n2-16-buildkit
+    container: google/cloud-sdk:524.0.0
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - device: tpu
-            build_mode: stable
-            image_name: maxtext_jax_stable
-            workflow: pre-training
-            dockerfile: maxtext_tpu_dependencies.Dockerfile
-          - device: gpu
-            build_mode: stable
-            image_name: maxtext_gpu_jax_stable
-            workflow: pre-training
-            dockerfile: maxtext_gpu_dependencies.Dockerfile
-          - device: tpu
-            build_mode: stable
-            image_name: maxtext_post_training_stable
-            workflow: post-training
-            dockerfile: maxtext_tpu_dependencies.Dockerfile
-    uses: ./.github/workflows/build_and_push_docker_image.yml
-    with:
-      image_name: ${{ matrix.image_name }}
-      device: ${{ matrix.device }}
-      build_mode: ${{ matrix.build_mode }}
-      workflow: ${{ matrix.workflow }}
-      dockerfile: ${{ matrix.dockerfile }}
-      maxtext_sha: ${{ github.sha }}
-      version_name: ${{ needs.get_latest_maxtext_pypi_version.outputs.latest_pypi_version }}
-    secrets:
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        image_name:
+          - maxtext_jax_stable
+          - maxtext_post_training_stable
+    steps:
+      - name: Configure Docker
+        run: gcloud auth configure-docker us-docker.pkg.dev,gcr.io -q
+      - name: Add tags to Docker image
+        shell: bash
+        run: |
+          SOURCE_IMAGE="gcr.io/${{ vars.PROJECT_NAME }}/${{ matrix.image_name }}"
+          ORIGINAL_RUN_ID="${{ github.event.client_payload.github_run_id }}"
+          gcloud container images add-tag \
+            "${SOURCE_IMAGE}:${ORIGINAL_RUN_ID}" \
+            "${SOURCE_IMAGE}:${{ needs.get_latest_maxtext_pypi_version.outputs.latest_pypi_version }}" \
+            --quiet

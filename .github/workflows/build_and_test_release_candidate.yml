@@ -1,0 +1,85 @@
+# Copyright 2023-2026 Google LLC
+
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+
+#     https://www.apache.org/licenses/LICENSE-2.0
+
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This workflow will build MaxText release candidate and trigger CI tests and E2E airflow tests.
+
+name: Build and Test MaxText Release Candidate
+
+# Triggers when a new "release" is published in the GitHub UI
+on:
+  release:
+    types: [published]
+  pull_request: # TODO: Remove this trigger
+
+permissions:
+  contents: read
+  issues: write
+  id-token: write
+
+jobs:
+  #release_approval:
+  #  name: Approve Release
+  #  runs-on: ubuntu-latest
+  #  # "release" environment is configured in MaxText repository settings.
+  #  # This environment requires manual approval before proceeding to the next job.
+  #  environment: release
+  #  steps:
+  #  - name: Acknowledge Approval
+  #   run: echo "Release approved, proceeding to build and test MaxText package."
+
+  build_and_test_maxtext_package:
+    name: Build and Test MaxText Package
+    #needs: [release_approval]
+    uses: ./.github/workflows/build_and_test_maxtext.yml
+    secrets: inherit
+
+  build_release_candidate_images:
+    name: Build ${{ matrix.image_name }}
+    needs: [build_and_test_maxtext_package]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - device: tpu
+            build_mode: stable
+            image_name: maxtext_jax_stable
+            workflow: pre-training
+            dockerfile: maxtext_tpu_dependencies.Dockerfile
+          - device: gpu
+            build_mode: stable
+            image_name: maxtext_gpu_jax_stable
+            workflow: pre-training
+            dockerfile: maxtext_gpu_dependencies.Dockerfile
+          - device: tpu
+            build_mode: stable
+            image_name: maxtext_post_training_stable
+            workflow: post-training
+            dockerfile: maxtext_tpu_dependencies.Dockerfile
+    uses: ./.github/workflows/build_and_push_docker_image.yml
+    with:
+      image_name: ${{ matrix.image_name }}
+      device: ${{ matrix.device }}
+      build_mode: ${{ matrix.build_mode }}
+      workflow: ${{ matrix.workflow }}
+      dockerfile: ${{ matrix.dockerfile }}
+      maxtext_sha: ${{ github.sha }}
+    secrets: inherit
+
+  run_e2e_tests:
+    name: Run E2E Pre-Training and Post-Training Tests
+    needs: [build_release_candidate_images]
+    uses: ./.github/workflows/run_e2e_tests.yml
+    with:
+      mode: stable
+    secrets: inherit

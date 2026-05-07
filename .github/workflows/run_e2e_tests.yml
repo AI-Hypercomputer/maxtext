@@ -1,0 +1,65 @@
+name: MaxText E2E Airflow Tests
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: 'Build mode to test: stable or nightly'
+        required: false
+        type: string
+        default: 'stable'
+
+permissions:
+  contents: read
+
+jobs:
+  e2e_airflow_tests:
+    name: E2E Airflow Tests
+    runs-on: linux-x86-n2-16-buildkit
+    container: google/cloud-sdk:524.0.0
+    steps:
+      - name: Get Airflow URI
+        id: info
+        run: |
+          AIRFLOW_URI=$(gcloud composer environments describe ml-automation-solutions \
+            --location us-central1 \
+            --project cloud-ml-auto-solutions \
+            --format "value(config.airflowUri)")
+          echo "airflow_uri=${AIRFLOW_URI}" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger DAG
+        id: trigger
+        run: |
+          IAP_TOKEN=$(gcloud auth print-access-token)
+          DAG_ID="maxtext_sft""
+
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+            "${{ steps.info.outputs.airflow_uri }}/api/v1/dags/${DAG_ID}/dagRuns" \
+            -H "Authorization: Bearer ${IAP_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"conf\": {
+                \"maxtext_sha\": \"${{ github.sha }}\",
+                \"github_run_id\": \"${{ github.run_id }}\",
+                \"github_repo\": \"${{ github.repository }}\",
+                \"github_callback_token\": \"${{ secrets.AIRFLOW_CALLBACK_TOKEN }}\",
+                \"mode\": \"${{ inputs.mode }}\"
+              }
+            }")
+
+          HTTP_STATUS=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          echo "HTTP status: ${HTTP_STATUS}"
+          echo "Response body: ${BODY}"
+
+          if [ "${HTTP_STATUS}" -lt 200 ] || [ "${HTTP_STATUS}" -ge 300 ]; then
+            echo "Error: Airflow API returned HTTP ${HTTP_STATUS}"
+            exit 1
+          fi
+
+          DAG_RUN_ID=$(echo "$BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('dag_run_id',''))")
+          if [ -z "${DAG_RUN_ID}" ] || [ "${DAG_RUN_ID}" = "null" ]; then
+            echo "Error: could not parse dag_run_id from response"
+            exit 1
+          fi
+          echo "dag_run_id=${DAG_RUN_ID}" >> "$GITHUB_OUTPUT"
