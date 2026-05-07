@@ -81,31 +81,38 @@ class MaxTextTrainingInput(peft_trainer.TrainingInput):
 
 
 class OfflineArrayRecordIterator:
-  """Reads the pre-generated global top-k logits file."""
+  """Reads the pre-generated global top-k logits files."""
 
   def __init__(self, data_dir: str, epochs: int = 100):
-    self.filepath = data_dir
+    self.pattern = data_dir
+    self.filepaths = sorted(tf.io.gfile.glob(self.pattern))
 
-    if not tf.io.gfile.exists(self.filepath):
-      raise FileNotFoundError(f"Offline distillation file not found: {self.filepath}")
+    if not self.filepaths:
+      raise FileNotFoundError(f"Offline distillation files not found for pattern: {self.pattern}")
 
-    self.reader = array_record_module.ArrayRecordReader(self.filepath)
-    self.num_records = self.reader.num_records()
     self.epochs = epochs
     self.current_epoch = 0
+    self.file_index = 0
+    self._open_current_file()
+
+  def _open_current_file(self):
+    self.reader = array_record_module.ArrayRecordReader(self.filepaths[self.file_index])
+    self.num_records = self.reader.num_records()
     self.record_index = 0
 
   def __iter__(self):
     return self
 
   def __next__(self):
-    if self.record_index >= self.num_records:
-      self.current_epoch += 1
-      if self.current_epoch >= self.epochs:
-        raise StopIteration
-
-      self.record_index = 0
-      self.reader = array_record_module.ArrayRecordReader(self.filepath)
+    while self.record_index >= self.num_records:
+      self.file_index += 1
+      if self.file_index >= len(self.filepaths):
+        self.current_epoch += 1
+        if self.current_epoch >= self.epochs:
+          raise StopIteration
+        self.file_index = 0
+      
+      self._open_current_file()
 
     record = self.reader.read()
     self.record_index += 1

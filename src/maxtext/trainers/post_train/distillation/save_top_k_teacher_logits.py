@@ -24,6 +24,9 @@ python3 src/maxtext/trainers/post_train/distillation/save_top_k_teacher_logits.p
 """
 
 import os
+
+# Force the pure Python protobuf implementation to avoid UPB compatibility issues with TFDS
+os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
 import pickle
 from typing import Sequence
 import argparse
@@ -34,6 +37,7 @@ import re
 
 import jax
 import jax.numpy as jnp
+from flax import nnx
 import functools
 from itertools import islice
 
@@ -81,6 +85,17 @@ def get_start_step(config, local_args):
   max_logging.log(f"Found existing data, resuming from step {start_step}")
   return start_step
 
+@nnx.jit(static_argnames=("k",))
+def teacher_step(model, batch, k):
+    logits = model(
+        decoder_input_tokens=batch["inputs"],
+        decoder_positions=batch["inputs_position"],
+        decoder_segment_ids=batch.get("inputs_segmentation"),
+        decoder_target_tokens=batch.get("targets"),
+        decoder_target_mask=batch.get("targets_segmentation"),
+        enable_dropout=False,
+    )
+    return get_top_k_logits(logits, k=k)
 
 def generate_and_save_data(config, local_args):
   """Generates top-k logits from the teacher model and saves them locally, optionally uploading to GCS"""
@@ -112,65 +127,68 @@ def generate_and_save_data(config, local_args):
   # Sync all hosts before starting the loop
   multihost_utils.sync_global_devices("start_generation_loop")
 
-  max_logging.log(f"Starting Top-K generation loop for {config.steps - start_step} steps...")
-  loop_start = time.time()
+  with mesh:
+    max_logging.log(f"Starting Top-K generation loop for {config.steps - start_step} steps...")
+    loop_start = time.time()
 
-  for step, batch in enumerate(islice(train_iter, start_step, config.steps), start=start_step):
-    step_start = time.time()
+    for step, batch in enumerate(islice(train_iter, start_step, config.steps), start=start_step):
+      step_start = time.time()
 
-    # Open a new writer for each file chunk on process 0
-    if jax.process_index() == 0 and step % steps_per_file == 0:
-      if writer:
-        writer.close()
-        if gcs_upload_path:
-          # Upload the previous file
-          gcs_file_path = os.path.join(gcs_upload_path, os.path.basename(local_output_path))
-          max_logging.log(f"Uploading {local_output_path} to {gcs_file_path}")
-          tf.io.gfile.copy(local_output_path, gcs_file_path, overwrite=True)
-          os.remove(local_output_path)
-          max_logging.log("Upload complete.")
+      # Open a new writer for each file chunk on process 0
+      if jax.process_index() == 0 and step % steps_per_file == 0:
+        if writer:
+          writer.close()
+          if gcs_upload_path:
+            # Upload the previous file
+            gcs_file_path = os.path.join(gcs_upload_path, os.path.basename(local_output_path))
+            max_logging.log(f"Uploading {local_output_path} to {gcs_file_path}")
+            tf.io.gfile.copy(local_output_path, gcs_file_path, overwrite=True)
+            os.remove(local_output_path)
+            max_logging.log("Upload complete.")
 
-      file_index = step // steps_per_file
-      filename = f"teacher_top_k_part_{file_index:05d}.array_record"
-      local_output_path = os.path.join(local_tmp_dir, filename)
-      max_logging.log(f"Process 0 writing to new chunk: {local_output_path}")
-      writer = array_record_module.ArrayRecordWriter(local_output_path, "group_size:1000")
+        file_index = step // steps_per_file
+        filename = f"teacher_top_k_part_{file_index:05d}.array_record"
+        local_output_path = os.path.join(local_tmp_dir, filename)
+        max_logging.log(f"Process 0 writing to new chunk: {local_output_path}")
+        writer = array_record_module.ArrayRecordWriter(local_output_path, "group_size:1000")
 
-    tokens = batch["inputs"]
-    # segment_ids prevents cross-document attention under packing; target_tokens/mask are consumed by
-    # the MTP block when enabled.
-    logits = teacher_model(
-        decoder_input_tokens=tokens,
-        decoder_positions=batch["inputs_position"],
-        decoder_segment_ids=batch.get("inputs_segmentation"),
-        decoder_target_tokens=batch.get("targets"),
-        decoder_target_mask=batch.get("targets_segmentation"),
-        enable_dropout=False,
-    )
-    top_k_vals, top_k_idx = get_top_k_logits(logits, k=k_val)
+      tokens = batch["inputs"]
+      
+      if step == start_step:
+        max_logging.log(f"Confirmed input tokens shape from pipeline: {tokens.shape}")
+        
+      top_k_vals, top_k_idx = teacher_step(teacher_model, batch, k_val)
 
-    # Fetch the global distributed jax arrays
-    global_vals = jax.device_get(top_k_vals)
-    global_idx = jax.device_get(top_k_idx)
-    global_tokens = jax.device_get(tokens)
+      # NOTE: process_allgather is a collective operation and MUST be called by all processes
+      # to avoid deadlocks. Therefore, we gather on all devices, but only save on host 0.
+      global_vals = jax.experimental.multihost_utils.process_allgather(top_k_vals, tiled=True)
+      global_idx = jax.experimental.multihost_utils.process_allgather(top_k_idx, tiled=True)
+      global_tokens = jax.experimental.multihost_utils.process_allgather(tokens, tiled=True)
 
-    if jax.process_index() == 0:
-      record_dict = {
-          "tokens": global_tokens,
-          "top_k_logits": global_vals,
-          "top_k_indices": global_idx,
-      }
-
+      optional_data = {}
       for key in optional_keys:
         if key in batch:
-          record_dict[key] = jax.device_get(batch[key])
+          optional_data[key] = jax.experimental.multihost_utils.process_allgather(batch[key], tiled=True)
 
-      writer.write(pickle.dumps(record_dict))
+      if jax.process_index() == 0:
+        record_dict = {
+            "tokens": global_tokens,
+            "top_k_logits": global_vals,
+            "top_k_indices": global_idx,
+        }
+        for key, val in optional_data.items():
+          record_dict[key] = val
 
-      if step % 50 == 0:
-        max_logging.log(f"Successfully processed step {step} in {time.time() - step_start:.4f}s")
+        if writer:
+          writer.write(pickle.dumps(record_dict))
 
-  max_logging.log(f"Generation loop finished in {time.time() - loop_start:.2f}s")
+        if step % 50 == 0:
+          max_logging.log(f"Successfully processed step {step} in {time.time() - step_start:.4f}s")
+          
+      # Synchronize all hosts after potential write on host 0
+      multihost_utils.sync_global_devices(f"step_{step}_complete")
+
+    max_logging.log(f"Generation loop finished in {time.time() - loop_start:.2f}s")
 
   # Sync to ensure all hosts finish the forward passes before host 0 starts uploading
   multihost_utils.sync_global_devices("loop_finished")
