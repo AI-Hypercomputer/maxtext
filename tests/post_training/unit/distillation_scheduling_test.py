@@ -412,9 +412,15 @@ class TrainerStepCounterTest(unittest.TestCase):
     self.assertEqual(int(bundle.training_step[...]), 2)
 
   @mock.patch("maxtext.trainers.post_train.distillation.train_distill.optax.global_norm")
-  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.nnx.value_and_grad")
-  def test_train_step_increments_and_passes_step(self, mock_value_and_grad, mock_global_norm):
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.nnx.update")
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.nnx.merge")
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.nnx.split")
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.jax.value_and_grad")
+  def test_train_step_increments_and_passes_step(
+      self, mock_value_and_grad, mock_split, mock_merge, mock_update, mock_global_norm
+  ):
     """_train_step passes pre-increment step to compute_loss and increments after."""
+    del mock_merge, mock_update
     # pylint: disable=no-value-for-parameter
     trainer = train_distill.MaxTextDistillationTrainer.__new__(train_distill.MaxTextDistillationTrainer)
     trainer.strategy = mock.Mock()
@@ -442,37 +448,54 @@ class TrainerStepCounterTest(unittest.TestCase):
     # Simulate resume from step 5
     model_bundle.training_step.set_value(jnp.array(5, dtype=jnp.int32))
 
-    mock_grad_fn = mock.Mock(return_value=((mock.Mock(), {}), mock.Mock()))
+    # nnx.split returns (graphdef, diff_params, rest); loss_wrapper_pure takes (diff_params, rest).
+    mock_graphdef, mock_diff_params, mock_rest = mock.Mock(), mock.Mock(), mock.Mock()
+    mock_split.return_value = (mock_graphdef, mock_diff_params, mock_rest)
+
+    # grad_fn returns ((loss, (aux, new_rest)), grads)
+    mock_grad_fn = mock.Mock(return_value=((mock.Mock(), ({}, mock.Mock())), mock.Mock()))
     mock_value_and_grad.return_value = mock_grad_fn
     mock_global_norm.return_value = mock.Mock()
+    trainer.strategy.compute_loss.return_value = (mock.Mock(), {})
 
     trainer._train_step(model_bundle, optimizer, mock.Mock())
 
     # Step should have incremented to 6
     self.assertEqual(int(model_bundle.training_step[...]), 6)
 
-    # Trigger loss_wrapper to verify step=5 was passed to compute_loss
+    # Trigger loss_wrapper_pure to verify step=5 was passed to compute_loss.
+    # Signature is (diff_params, rest).
     loss_wrapper = mock_value_and_grad.call_args[0][0]
-    loss_wrapper(student_model, teacher_model, mock_batch)
+    loss_wrapper(mock_diff_params, mock_rest)
 
     call_kwargs = trainer.strategy.compute_loss.call_args
     self.assertIn("step", call_kwargs.kwargs)
     self.assertEqual(int(call_kwargs.kwargs["step"]), 5)
 
   @mock.patch("maxtext.trainers.post_train.distillation.train_distill.optax.global_norm")
-  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.nnx.value_and_grad")
-  def test_consecutive_train_steps_increment(self, mock_value_and_grad, mock_global_norm):
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.nnx.update")
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.nnx.merge")
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.nnx.split")
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.jax.value_and_grad")
+  def test_consecutive_train_steps_increment(
+      self, mock_value_and_grad, mock_split, mock_merge, mock_update, mock_global_norm
+  ):
     """training_step increments 0→1→2→3 across consecutive _train_step calls."""
+    del mock_merge, mock_update
     # pylint: disable=no-value-for-parameter
     trainer = train_distill.MaxTextDistillationTrainer.__new__(train_distill.MaxTextDistillationTrainer)
     trainer.strategy = mock.Mock()
     trainer.wrt_filter = lambda path, x: True  # type: ignore
 
+    # Use a real DistillationForwardOutput so jax.tree.map(stop_gradient, ...) works.
+    fake_teacher_output = distillation_utils.DistillationForwardOutput(
+        logits=jnp.zeros((1, 2, 4)), out_projection_activations=None
+    )
     mock_batch = {
         "input_tokens": mock.Mock(),
         "positions": mock.Mock(),
         "targets": mock.Mock(),
-        "teacher_output": mock.Mock(),
+        "teacher_output": fake_teacher_output,
     }
     trainer.gen_model_input_fn = mock.Mock(return_value=mock_batch)
 
@@ -480,7 +503,10 @@ class TrainerStepCounterTest(unittest.TestCase):
     model_bundle = train_distill.ModelBundle(teacher_model=teacher_model, student_model=student_model)
     optimizer = mock.Mock()
 
-    mock_grad_fn = mock.Mock(return_value=((mock.Mock(), {}), mock.Mock()))
+    mock_graphdef, mock_diff_params, mock_rest = mock.Mock(), mock.Mock(), mock.Mock()
+    mock_split.return_value = (mock_graphdef, mock_diff_params, mock_rest)
+
+    mock_grad_fn = mock.Mock(return_value=((mock.Mock(), ({}, mock.Mock())), mock.Mock()))
     mock_value_and_grad.return_value = mock_grad_fn
     mock_global_norm.return_value = mock.Mock()
 

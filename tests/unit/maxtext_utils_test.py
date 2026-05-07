@@ -1480,15 +1480,20 @@ class TestPrintShardingsParams(unittest.TestCase):
     logical = {"w": PartitionSpec(None)}
     return params, param_sharding, logical
 
-  def test_runs_without_error_dict_inputs(self):
-    """print_shardings_params should not raise with plain dict inputs."""
+  def test_runs_with_dict_inputs_and_logical(self):
+    """Linen-style dict inputs get wrapped in {"params": ...} before traversal."""
     params, param_sharding, logical = self._make_simple_params()
-    # Should complete without raising
-    maxtext_utils.print_shardings_params(params, param_sharding, logical)
+    maxtext_utils.print_shardings_params(params, param_sharding, mesh=self.mesh, logical_annotations=logical)
 
   def test_runs_without_logical_annotations(self):
     """logical_annotations=None should be handled (no logical column)."""
     params, param_sharding, _ = self._make_simple_params()
+    maxtext_utils.print_shardings_params(params, param_sharding, mesh=self.mesh, logical_annotations=None)
+
+  def test_runs_with_nnx_state_input(self):
+    """nnx.State input bypasses the {"params": ...} wrapping path."""
+    params = nnx.State({"w": nnx.Param(jnp.ones((4,)))})
+    param_sharding = nnx.State({"w": nnx.Param(NamedSharding(self.mesh, PartitionSpec(None)))})
     maxtext_utils.print_shardings_params(params, param_sharding, mesh=self.mesh, logical_annotations=None)
 
 

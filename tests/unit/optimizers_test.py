@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Unit tests for all optimizers. """
+"""Unit tests for all optimizers."""
 import re
 import unittest
 from unittest.mock import patch, MagicMock
@@ -362,6 +362,45 @@ class AdamWMaskTest(parameterized.TestCase):
       mock_opt.assert_called_once()
       _, kwargs = mock_opt.call_args
       self.assertIsNone(kwargs["mask"])
+
+
+class AdamPaxScalarLearningRateTest(parameterized.TestCase):
+  """Cover both branches of adam_pax's callable-vs-scalar learning_rate_fn guard.
+
+  adam_pax accepts either a callable schedule (the usual case) or a pre-evaluated
+  scalar (when wrapped by optax.inject_hyperparams). Both must produce identical
+  parameter updates for the same effective learning rate.
+  """
+
+  def test_adam_pax_callable_and_scalar_lr_produce_same_update(self):
+    lr_value = 0.1
+    params = {"w": jnp.ones((2,))}
+    grads = {"w": jnp.ones((2,))}
+
+    opt_callable = optimizers.adam_pax(
+        learning_rate_fn=lambda step: lr_value,
+        beta1=0.9,
+        beta2=0.999,
+        epsilon=1e-8,
+        epsilon_root=0.0,
+        weight_decay=0.0,
+    )
+    opt_scalar = optimizers.adam_pax(
+        learning_rate_fn=jnp.array(lr_value),
+        beta1=0.9,
+        beta2=0.999,
+        epsilon=1e-8,
+        epsilon_root=0.0,
+        weight_decay=0.0,
+    )
+    state_c = opt_callable.init(params)
+    state_s = opt_scalar.init(params)
+    updates_c, _ = opt_callable.update(grads, state_c, params)
+    updates_s, _ = opt_scalar.update(grads, state_s, params)
+
+    self.assertTrue(jnp.allclose(updates_c["w"], updates_s["w"], rtol=1e-6))
+    # Sanity: with positive grads + negative step_size, updates should be negative.
+    self.assertLess(float(updates_c["w"][0]), 0.0)
 
 
 class TrainableParametersMaskTest(parameterized.TestCase):

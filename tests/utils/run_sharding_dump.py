@@ -59,9 +59,12 @@ flags.DEFINE_string("model_name", None, "Specific model name to dump.")
 flags.DEFINE_string("topology", None, "Specific topology to dump.")
 flags.DEFINE_string("num_slice", None, "Specific number of slices to dump.")
 flags.DEFINE_string("custom_mesh_and_rule", None, "Specific custom_mesh_and_rule to dump.")
+flags.DEFINE_bool("pure_nnx", False, "Use pure NNX model.")
 
 
-def run_single_dump(model_name: str, topology: str, num_slice: str, custom_mesh_and_rule: str, overrides: tuple) -> None:
+def run_single_dump(
+    model_name: str, topology: str, num_slice: str, custom_mesh_and_rule: str, overrides: tuple, pure_nnx: bool = False
+) -> None:
   """Generate sharding json file for one specific model, topology, slice and rule."""
   args = [
       "python3",
@@ -79,6 +82,8 @@ def run_single_dump(model_name: str, topology: str, num_slice: str, custom_mesh_
     args.append(f"custom_mesh_and_rule={custom_mesh_and_rule}")
   if overrides:
     args.extend(overrides)
+  if pure_nnx:
+    args.append("pure_nnx=true")
   subprocess.run(args, check=True)
 
 
@@ -117,7 +122,7 @@ def main(argv: Sequence[str]) -> None:
       print("  -> Sharding files already exist. Regenerating to overwrite.")
 
     try:
-      run_single_dump(model_name, topology, str(num_slice), custom_mesh_and_rule, overrides)
+      run_single_dump(model_name, topology, str(num_slice), custom_mesh_and_rule, overrides, pure_nnx=FLAGS.pure_nnx)
     except subprocess.CalledProcessError:
       print(f"!!! FAILED: {model_name} {topology} {num_slice} {custom_mesh_and_rule} overrides={overrides}")
 

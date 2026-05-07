@@ -336,7 +336,9 @@ def adam_pax(
       else:
         updates = jax.tree_util.tree_map(lambda x, v: x + weight_decay * v, updates, params)
 
-    step_size = -1.0 * learning_rate_fn(count)
+    # learning_rate_fn may be a callable schedule or a scalar (e.g. when wrapped
+    # by optax.inject_hyperparams, it is passed as a pre-evaluated scalar).
+    step_size = -1.0 * (learning_rate_fn(count) if callable(learning_rate_fn) else learning_rate_fn)
     # Finally, fold in step size.
     updates = jax.tree_util.tree_map(lambda x: step_size * x, updates)
 

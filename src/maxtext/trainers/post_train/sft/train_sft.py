@@ -35,7 +35,8 @@ Training:
     eval_interval=-1 steps=10 profiler=xplane weight_dtype=bfloat16
 """
 
-from typing import Sequence
+import inspect
+from typing import Any, Sequence
 
 from absl import app
 import os
@@ -43,6 +44,7 @@ import jax
 import optax
 import pathwaysutils
 
+from flax import nnx
 from flax.linen import partitioning as nn_partitioning
 
 from orbax import checkpoint as ocp
@@ -67,6 +69,78 @@ from maxtext.utils import max_utils
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
+
+
+class MaxTextPeftTrainer(peft_trainer.PeftTrainer):
+  """MaxText-specific PeftTrainer that avoids nested NNX transformations.
+
+  Tunix's default PeftTrainer._train_step creates nnx.value_and_grad inside
+  nnx.jit. This nesting causes Flax NNX to assign conflicting outer_index
+  values to graph nodes, resulting in:
+    ValueError: The graph structure of a node added to cached_partial was
+    mutated inside the transformation.
+
+  This subclass overrides create_train_step_fn to use jax.value_and_grad
+  with an explicit split/merge pattern (matching MaxText's pre-training NNX
+  train_step), which avoids the nested NNX transformation issue entirely.
+  """
+
+  def create_train_step_fn(self):
+    """Creates a train step using jax.value_and_grad with explicit NNX split/merge."""
+    loss_fn_ref = self.loss_fn
+    has_aux = self._has_aux
+    gen_fn = self.gen_model_input_fn
+    is_lora_enabled = self._lora_enabled
+    wrt = nnx.LoRAParam if is_lora_enabled else nnx.Param
+
+    # Detect whether Tunix's train() expects (loss, aux, grad_norm) or just
+    # (loss, aux) by inspecting the source of PeftTrainer._train_step.
+    tunix_expects_grad_norm = False
+    try:
+      source = inspect.getsource(peft_trainer.PeftTrainer._train_step)  # pylint: disable=protected-access
+      tunix_expects_grad_norm = "grad_norm" in source
+    except (TypeError, OSError):
+      pass
+
+    # Capture the graphdef once outside of JIT so that split/merge inside
+    # jax.value_and_grad can use a stable (non-traced) structural descriptor.
+    graphdef, _, _ = nnx.split(self.model, wrt, ...)
+
+    def train_step(model: nnx.Module, optimizer: nnx.Optimizer, inputs: Any):
+      inputs = gen_fn(inputs)
+
+      # Split model into differentiable params and non-differentiable rest.
+      # Using jax.value_and_grad (not nnx.value_and_grad) avoids nesting NNX
+      # transforms inside nnx.jit, which would corrupt outer_index tracking.
+      _, diff_params, rest = nnx.split(model, wrt, ...)
+
+      def loss_wrapper(diff_params, rest, **inputs_kw):
+        local_model = nnx.merge(graphdef, diff_params, rest, copy=True)
+        out = loss_fn_ref(local_model, **inputs_kw)
+        # Capture updated non-param state (e.g. RNG counters) from local_model.
+        _, _, new_rest = nnx.split(local_model, wrt, ...)
+        if has_aux:
+          loss, aux = out
+          return loss, (aux, new_rest)
+        else:
+          return out, (None, new_rest)
+
+      grad_fn = jax.value_and_grad(loss_wrapper, argnums=0, has_aux=True)
+      (out_val, (aux, new_rest)), grads = grad_fn(diff_params, rest, **inputs)
+
+      # Propagate updated non-param state (RNG counters, etc.) back to model.
+      nnx.update(model, new_rest)
+
+      # Apply optimizer update. grads has the same nnx.State(wrt) structure
+      # as diff_params, which is compatible with optimizer.update.
+      optimizer.update(model, grads)
+
+      aux_out = aux if has_aux else None
+      if tunix_expects_grad_norm:
+        return out_val, aux_out, optax.global_norm(grads)
+      return out_val, aux_out
+
+    return train_step
 
 
 def get_tunix_config(mt_config):
@@ -110,6 +184,7 @@ def get_tunix_config(mt_config):
       checkpointing_options=checkpointing_options,
       metrics_logging_options=metrics_logging_options,
       profiler_options=profiler_options,
+      data_sharding_axis=tuple(mt_config.data_sharding),
   )
 
 
@@ -176,10 +251,9 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
 
     # Provide rules context so 'norm' is translated to mesh axes during maybe_restore
     with nn_partitioning.axis_rules(mt_config.logical_axis_rules):
-      trainer = peft_trainer.PeftTrainer(model, optimizer, tunix_config)
+      trainer = MaxTextPeftTrainer(model, optimizer, tunix_config)
       if mt_config.lora.lora_restore_path:
         trainer = lora_utils.restore_lora_from_path(trainer, mt_config)
-
       trainer.with_training_hooks(training_hooks)
       trainer.with_data_hooks(data_hooks)
       trainer = use_maxtext_loss_function(trainer, mt_config)
