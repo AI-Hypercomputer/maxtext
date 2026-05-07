@@ -163,6 +163,22 @@ class GrainCheckpointRestore(ocp.args.CheckpointArgs):
   process_index: Optional[int | list[int]] = None
   process_count: Optional[int] = None
 
+def map_to_pspec(data):
+  pspec = data.sharding.spec
+  mesh = data.sharding.mesh
+  replica_axis_index = 0
+  replica_devices = _replica_devices(mesh.devices, replica_axis_index)
+  replica_mesh = jax.sharding.Mesh(replica_devices, mesh.axis_names)
+  single_replica_sharding = jax.sharding.NamedSharding(replica_mesh, pspec)
+
+  max.logging.log("single replica array restore args")
+  return ocp.type_handlers.SingleReplicaArrayRestoreArgs(
+      sharding=jax.sharding.NamedSharding(mesh, pspec),
+      single_replica_sharding=single_replica_sharding,
+      global_shape=data.shape,
+      dtype=data.dtype,
+  )
+
 
 def _load_full_state_from_path(
     path,
@@ -171,6 +187,7 @@ def _load_full_state_from_path(
     checkpoint_conversion_fn,
     source_checkpoint_layout,
     checkpoint_storage_concurrent_gb,
+    enable_single_replica_ckpt_restoring,
     use_ocdbt,
     use_zarr3,
 ):
@@ -186,6 +203,7 @@ def _load_full_state_from_path(
     source_checkpoint_layout: String representation of the checkpoint layout of
       the source checkpoint.
     checkpoint_storage_concurrent_gb: concurrent GB for checkpoint byte I/O.
+    enable_single_replica_ckpt_restoring: Restore single-replica checkpoint layout.
     use_ocdbt: Whether to use OCDBT format.
     use_zarr3: Whether to use Zarr3 format.
 
@@ -223,10 +241,12 @@ def _load_full_state_from_path(
         use_ocdbt=use_ocdbt,
         use_zarr3=use_zarr3,
     )
-    # Provide sharding info to ensure restoration returns JAX arrays (not NumPy arrays).
-    restore_args = jax.tree_util.tree_map(
+    if not enable_single_replica_ckpt_restoring:
+      restore_args = jax.tree_util.tree_map(
         lambda x: ocp.type_handlers.ArrayRestoreArgs(sharding=x.sharding), abstract_unboxed_pre_state
-    )
+      )
+    else:
+      restore_args = jax.tree_util.tree_map(map_to_pspec, abstract_unboxed_pre_state)
     return ocp.Checkpointer(handler).restore(p, abstract_unboxed_pre_state, restore_args=restore_args)
 
 
@@ -255,6 +275,19 @@ def create_orbax_checkpoint_manager(
     return None
 
   max_logging.log(f"Creating checkpoint manager with ocdbt={use_ocdbt} and zarr3={use_zarr3}")
+
+  if enable_single_replica_ckpt_restoring:
+      array_handler = ocp.type_handlers.SingleReplicaArrayHandler(
+          replica_axis_index=0,
+          broadcast_memory_limit_bytes=1024 * 1024 * 1000,  # 1000 MB limit
+          use_replica_parallel=False,
+      )
+  else:
+      array_handler = ocp.type_handlers.ArrayHandler(
+          use_replica_parallel=False,
+      )
+
+  ocp.type_handlers.register_type_handler(jax.Array, array_handler, override=True)
 
   # Base configuration for all dataset types
   item_names = ("items",)
@@ -615,31 +648,10 @@ def load_state_if_possible(
     if step is not None:
       max_logging.log(f"restoring from this run's directory step {step}")
 
-      def map_to_pspec(data):
-        if not enable_single_replica_ckpt_restoring:
-          return ocp.type_handlers.ArrayRestoreArgs(sharding=data.sharding)
-        pspec = data.sharding.spec
-        mesh = data.sharding.mesh
-        replica_axis_index = 0
-        replica_devices = _replica_devices(mesh.devices, replica_axis_index)
-        replica_mesh = jax.sharding.Mesh(replica_devices, mesh.axis_names)
-        single_replica_sharding = jax.sharding.NamedSharding(replica_mesh, pspec)
-
-        return ocp.type_handlers.SingleReplicaArrayRestoreArgs(
-            sharding=jax.sharding.NamedSharding(mesh, pspec),
-            single_replica_sharding=single_replica_sharding,
-            global_shape=data.shape,
-            dtype=data.dtype,
-        )
-
-      if enable_single_replica_ckpt_restoring:
-        array_handler = ocp.type_handlers.SingleReplicaArrayHandler(
-            replica_axis_index=0,
-            broadcast_memory_limit_bytes=1024 * 1024 * 1000,  # 1000 MB limit
-        )
-        ocp.type_handlers.register_type_handler(jax.Array, array_handler, override=True)
-
-      restore_args = jax.tree_util.tree_map(map_to_pspec, abstract_unboxed_pre_state)
+      if not enable_single_replica_ckpt_restoring:
+        restore_args = ocp.type_handlers.ArrayRestoreArgs(sharding=abstract_unboxed_pre_state.sharding)
+      else:
+        restore_args = jax.tree_util.tree_map(map_to_pspec, abstract_unboxed_pre_state)
       checkpoint_args = ocp.args.PyTreeRestore(
           item=abstract_unboxed_pre_state,
           restore_args=restore_args,
@@ -696,6 +708,7 @@ def load_state_if_possible(
         checkpoint_conversion_fn=checkpoint_conversion_fn,
         source_checkpoint_layout=source_checkpoint_layout,
         checkpoint_storage_concurrent_gb=checkpoint_storage_concurrent_gb,
+        enable_single_replica_ckpt_restoring=enable_single_replica_ckpt_restoring,
         use_ocdbt=use_ocdbt,
         use_zarr3=use_zarr3,
     )
@@ -832,14 +845,22 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
       )
 
   # specify chunk_byte_size to force orbax to control maximum file size in checkpoint
+  ocdbt_target_data_file_size = (
+      config.checkpoint_storage_target_data_file_size_bytes
+      if config and config.checkpoint_storage_target_data_file_size_bytes is not None
+      else DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
+  )
+
   chunk_byte_size = (
-      config.checkpoint_storage_target_data_file_size_bytes if config else DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
+      config.checkpoint_storage_pytree_chunk_size_bytes
+      if config and config.checkpoint_storage_pytree_chunk_size_bytes is not None
+      else ocdbt_target_data_file_size
   )
 
   checkpoint_args = ocp.args.PyTreeSave(
       item=state,
       save_args=jax.tree.map(lambda _: ocp.SaveArgs(chunk_byte_size=chunk_byte_size), state),
-      ocdbt_target_data_file_size=chunk_byte_size,
+      ocdbt_target_data_file_size=ocdbt_target_data_file_size,
   )
   save_args_composite = {"items": checkpoint_args}
 
