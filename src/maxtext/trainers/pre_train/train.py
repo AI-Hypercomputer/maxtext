@@ -526,11 +526,11 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       "learning/total_weights": total_weights,
   }
   if config.use_qk_clip:
-    # Apply QK-Clip (Linen path only; NNX uses different state layout — TODO: implement for NNX)
     if isinstance(model, nn.Module):
       new_state = qk_clip_utils.apply_qk_clip(new_state, intermediate_outputs, config)
+    else:
+      new_state = qk_clip_utils.apply_qk_clip_nnx(new_state, intermediate_outputs, config)
 
-    # Report max_logits metric
     global_max_logit = qk_clip_utils.calculate_max_logit_metric(intermediate_outputs)
     if global_max_logit is not None:
       scalar_metrics["learning/max_logits"] = global_max_logit
