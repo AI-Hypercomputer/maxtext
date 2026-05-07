@@ -189,7 +189,7 @@ class BaseTrainingHooks(TrainingHooks, abc.ABC):
     if "eval/avg_perplexity" not in metrics["scalar"]:
       metrics["scalar"]["eval/avg_perplexity"] = float(jnp.exp(avg_loss))
 
-    self.metric_logger.write_metrics(metrics, train_ctx.train_steps, is_training=False)
+    self.metric_logger.write_metrics(metrics, train_ctx.train_steps, metric_type="eval")
     self.eval_metadata.clear()
 
     if avg_loss <= self.config.target_eval_loss:
