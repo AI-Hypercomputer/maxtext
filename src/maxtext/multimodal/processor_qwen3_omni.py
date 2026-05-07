@@ -474,6 +474,23 @@ def pre_process_audio_qwen3_omni(audio_array):
   return audio_features, audio_features_mask
 
 
+def preprocess_mm_data_qwen3_omni_for_training(images):
+  """Preprocesses image(s) for Qwen3-Omni SFT training using default model constants."""
+
+  class _DefaultConfig:
+    patch_size_for_vit = 14
+    spatial_merge_size_for_vit = 2
+    temporal_patch_size_for_vit = QWEN3_TEMPORAL_PATCH_SIZE
+
+  images_in = [images] if isinstance(images, np.ndarray) else images
+  pixel_values, pixel_grid_thw = pre_process_qwen3_image(images_in, _DefaultConfig())
+  return Qwen3OmniPreprocessorOutput(
+      num_images=len(images_in),
+      pixel_values=pixel_values,
+      pixel_grid_thw=pixel_grid_thw,
+  )
+
+
 def preprocess_mm_data_qwen3_omni(config):
   """Placeholder for multimodal data preprocessing."""
   processor_outputs = Qwen3OmniPreprocessorOutput()

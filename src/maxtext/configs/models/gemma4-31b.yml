@@ -14,7 +14,7 @@
 
 # model config for gemma4-31b Dense
 
-base_num_decoder_layers: 60
+base_num_decoder_layers: 1
 base_emb_dim: 5376
 base_num_query_heads: 32
 base_num_kv_heads: 16
