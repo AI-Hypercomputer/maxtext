@@ -54,7 +54,7 @@ MaxText is an open-source, high-performance LLM framework written in Python/JAX.
 
 ### Kimi
 
-- **Variants**: K2 (1T)
+- **Variants**: K2 (1T), K2-Thinking (1T), K2.5 (text), K2.6 (text)
 - **Notes**: DeepSeek V3 architecture; MuonClip optimizer
 
 ## Parallelism building blocks

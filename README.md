@@ -41,6 +41,7 @@ See our guide on running MaxText in decoupled mode, without any GCP dependencies
 
 ## 🔥 Latest news 🔥
 
+* \[May 6, 2026\] Kimi-K2-Thinking, Kimi-K2.5 (text), and Kimi-K2.6 (text) are now supported. See [Run_Kimi.md](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/kimi/Run_Kimi.md#quantized-variants-k2-thinking-k25-k26) for details.
 * \[April 18, 2026\] Added a new notebook [maxtext_with_gepa.ipynb](https://github.com/AI-Hypercomputer/maxtext/blob/3c7d8d27864fc12cccac07786f02bd0e5262c982/src/maxtext/examples/maxtext_with_gepa.ipynb) for optimizing AIME prompts using the GEPA framework with Maxtext.
 * \[April 14, 2026\] Legacy `MaxText.*` post-training shims have been removed. Please refer to [src/MaxText/README.md](https://github.com/AI-Hypercomputer/maxtext/blob/0536605a8ca116087ed93178433a67e905be566c/src/MaxText/README.md) for details on the new command locations and how to migrate. 
 * \[April 13, 2026\] Kimi-K2 is now supported, along with MuonClip optimizer. Try the [kimi-k2-1t](https://github.com/AI-Hypercomputer/maxtext/blob/fa5b5ebf9a8e4f7a33bd88eae051dc21f3147791/src/maxtext/configs/models/kimi-k2-1t.yml) config and check the [user guide](https://github.com/AI-Hypercomputer/maxtext/blob/fa5b5ebf9a8e4f7a33bd88eae051dc21f3147791/tests/end_to_end/tpu/kimi/Run_Kimi.md).  
@@ -128,7 +129,8 @@ MaxText aims to provide you with the best OSS models, whether as a reference imp
   * DeepSeek V3 0324 (671B), DeepSeek R1 0528 (671B)
   * DeepSeek V2 (16B, 236B)
 * Moonshot AI
-  * Kimi K2 (1T)
+  * Kimi K2 (1T), Kimi K2-Thinking (1T)
+  * Kimi K2.5 (text), Kimi K2.6 (text)
 * Meta
   * Llama 4 Scout (109B) & Maverick (400B)
   * Llama 3.3 (70B), 3.1 (8B, 70B, 405B), 3.0 (8B, 70B, 405B)
