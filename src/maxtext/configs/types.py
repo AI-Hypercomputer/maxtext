@@ -1598,6 +1598,12 @@ class Profiling(BaseModel):
   hide_profiler_step_metric: bool = Field(False, description="Whether to enable profiler step metric.")
   enable_jax_profiler: bool = Field(False, description="Enable the JAX live profiler.")
   jax_profiler_port: int = Field(9999, description="Port for the JAX profiler.")
+  enable_tpu_profiling_options: bool = Field(False, description="Enable TPU advanced profiling options.")
+  tpu_num_chips_to_profile_per_task: int = Field(1, description="Specifies the number of TPU chips to profile per task.")
+  tpu_num_sparse_cores_to_trace: int = Field(2, description="Specifies the number of TPU chips to profile per task.")
+  tpu_num_sparse_core_tiles_to_trace: int = Field(
+      1, description="Specifies the number of tiles within each sparse core to trace on the TPU."
+  )
   xprof_tpu_power_trace_level: XProfTPUPowerTraceMode = Field(
       XProfTPUPowerTraceMode.POWER_TRACE_NONE,
       description=(
