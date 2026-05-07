@@ -117,15 +117,24 @@ class MaxEngine(_BaseEngine):
     # Model and Optimizer definition.
     quant = quantizations.configure_quantization(config)
     if config.pure_nnx:
+      # `serve` only when the on-disk checkpoint already carries `qrhs.frozen`
+      # (no full-precision kernel). For `checkpoint_is_quantized=False` with
+      # quant enabled we stay in `train` mode and let AQT quantize per-forward
+      # against the full-precision kernel — same numerical result as `serve`
+      # for absmax calibration, just slower.
+      nnx_quant_mode_str = "serve" if (quant is not None and config.checkpoint_is_quantized) else "train"
       # We need both PREFILL and AR abstract models because the cache vars inherit
       # CACHE_BATCH_PREFILL vs CACHE_BATCH from the construction model_mode, and
       # bulk_insert searches for the substring "cache_batch" in the AR-mode names.
       # Calling nnx.eval_shape directly (instead of create_nnx_abstract_model) avoids
       # the jax.set_mesh wrap that trips Flax 0.12.6 on logical-only axes like "norm".
-      _create_model = model_creation_utils.get_nnx_create_model_fn(config, mesh=self._mesh, model_mode=MODEL_MODE_PREFILL)
-      _create_model_ar = model_creation_utils.get_nnx_create_model_fn(
-          config, mesh=self._mesh, model_mode=MODEL_MODE_AUTOREGRESSIVE
+      _create_model = model_creation_utils.get_nnx_create_model_fn(
+          config, mesh=self._mesh, model_mode=MODEL_MODE_PREFILL, quant_mode_str=nnx_quant_mode_str
       )
+      _create_model_ar = model_creation_utils.get_nnx_create_model_fn(
+          config, mesh=self._mesh, model_mode=MODEL_MODE_AUTOREGRESSIVE, quant_mode_str=nnx_quant_mode_str
+      )
+      self._nnx_quant_mode_str = nnx_quant_mode_str
       with nn_partitioning.axis_rules(config.logical_axis_rules):
         abstract_model = nnx.eval_shape(_create_model)
         abstract_model_ar = nnx.eval_shape(_create_model_ar)
@@ -371,9 +380,15 @@ class MaxEngine(_BaseEngine):
     return params
 
   def _load_params_nnx(self, params, rng):
-    """NNX equivalent of load_params: returns an nnx.Param state and populates KV cache shardings."""
-    if self.model.quant is not None:
-      raise NotImplementedError("pure_nnx + quantization not yet supported. Use pure_nnx=False.")
+    """NNX equivalent of load_params: returns an nnx.Param state and populates KV cache shardings.
+
+    Quantization handling:
+      * `checkpoint_is_quantized=True`: model built in `serve` mode (no full
+        kernel), `from_pretrained` reads `qrhs.frozen` from disk.
+      * `checkpoint_is_quantized=False` + `quantization=...`: model built in
+        `train` mode, full-precision kernel loaded; AQT layers quantize per
+        forward. Same output as serve mode (absmax calibration), slower.
+    """
 
     if params:
       print("Resharding given NNX params")
@@ -396,13 +411,46 @@ class MaxEngine(_BaseEngine):
       max_logging.log("Loading NNX params via from_pretrained")
       with self._mesh:
         nnx_model = model_creation_utils.from_pretrained(
-            self.config, mesh=self._mesh, model_mode=MODEL_MODE_AUTOREGRESSIVE
+            self.config,
+            mesh=self._mesh,
+            model_mode=MODEL_MODE_AUTOREGRESSIVE,
+            quant_mode_str=self._nnx_quant_mode_str,
         )
-      # Refresh graphdef from the concrete loaded model so subsequent merges line up.
-      graphdef, params_state, _, rest_state = nnx.split(nnx_model, nnx.Param, nnx.Cache, ...)
+      # 4-way split keeps the loaded AQT `qrhs.frozen` leaves (and any other
+      # non-Param/non-Cache vars) in `loaded_rest_state` so they survive into
+      # `_nnx_rest_state`. Param-only filtering would silently drop them and
+      # the model would run with random qrhs values.
+      _, params_state, _, loaded_rest_state = nnx.split(nnx_model, nnx.Param, nnx.Cache, ...)
+      # `_prefill_jit` re-merges with `self.graphdef`, which must be the PREFILL
+      # graphdef built in `__init__` (matching `_create_model_fn`). Don't
+      # overwrite with the AR-mode graphdef from `from_pretrained` — the
+      # PREFILL/AR attention ops have different cache variable shapes, and a
+      # mismatch trips the `assert prefill_kv_cache` check inside attention_op.
+      with nn_partitioning.axis_rules(self.config.logical_axis_rules):
+        concrete_model = self._create_model_fn()
+      graphdef, _, _, rest_state = nnx.split(concrete_model, nnx.Param, nnx.Cache, ...)
+      # Overlay loaded non-Param/non-Cache leaves (e.g. AQT qrhs.frozen) onto
+      # the PREFILL-mode rest_state. The PREFILL concrete_model already has
+      # placeholder qrhs vars at the right paths; we just swap in the loaded
+      # values. Anything only in `loaded_rest_state` (e.g. AR-only RNG slots)
+      # is ignored. We keep PREFILL rest_state as the base so RNG variables
+      # match the PREFILL graphdef's expectations.
+      loaded_rest_dict = loaded_rest_state.to_pure_dict()
+      rest_dict = rest_state.to_pure_dict()
+
+      def _overlay(dst, src):
+        if isinstance(dst, dict):
+          for k, v in dst.items():
+            if k in src:
+              dst[k] = _overlay(v, src[k])
+          return dst
+        return src if not isinstance(src, dict) else dst
+
+      rest_dict = _overlay(rest_dict, loaded_rest_dict)
+      nnx.replace_by_pure_dict(rest_state, rest_dict)
       self.graphdef = graphdef
       self._nnx_rest_state = rest_state
-      del nnx_model
+      del nnx_model, concrete_model
 
     self.abstract_params = jax.tree.map(
         lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding)
@@ -485,7 +533,16 @@ class MaxEngine(_BaseEngine):
     if rng is None:
       rng = jax.random.PRNGKey(0)
     if self.config.pure_nnx:
-      raise NotImplementedError("pure_nnx + quantize_params not yet supported.")
+      # NNX takes a different code path: convert-on-load lives in `_load_params_nnx`
+      # via `_convert_and_quantize_nnx`, which runs the dummy forward against a
+      # CONVERT-mode model and transfers `qrhs.frozen` into the SERVE model.
+      # The standalone `quantize_params(state, rng)` API expects a Linen-shape
+      # `state.params` dict and isn't reachable on the NNX pathway in maxengine
+      # (load_params already dispatched to _load_params_nnx).
+      raise NotImplementedError(
+          "Use load_params() on NNX — the convert step runs inside _load_params_nnx via "
+          "_convert_and_quantize_nnx. quantize_params(state, rng) is the Linen API."
+      )
 
     self.model.quant.quant_mode = quantizations.get_quant_mode("convert")
 
