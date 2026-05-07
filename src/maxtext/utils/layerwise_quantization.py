@@ -47,6 +47,8 @@ from maxtext.models import deepseek, models
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
+from maxtext.utils import maxtext_utils_nnx
+from maxtext.utils import model_creation_utils
 import orbax.checkpoint as ocp
 from tqdm import tqdm
 from maxtext.configs import pyconfig
@@ -164,18 +166,25 @@ class LayerwiseQuantization:
     self.config = config
     self.rng = rng
 
-    # TODO(ranlihao): Remove this assertion once the Layerwise quantization is supported for other decoder blocks.
-    assert (
-        config.decoder_block == common_types.DecoderBlockType.DEEPSEEK
-    ), f"Layerwise quantization is only supported for {common_types.DecoderBlockType.DEEPSEEK}\
-      , but got {config.decoder_block}."
+    # The Linen path runs layer-by-layer (memory-efficient for big DeepSeek
+    # models) and is DeepSeek-specific because it relies on the per-layer
+    # `DeepSeek*ToLinen` wrappers. The NNX path runs whole-model convert
+    # forward and is model-agnostic — see `_load_and_quantize_nnx`.
+    if not config.pure_nnx:
+      assert config.decoder_block == common_types.DecoderBlockType.DEEPSEEK, (
+          f"Linen layerwise quantization only supports {common_types.DecoderBlockType.DEEPSEEK}, "
+          f"got {config.decoder_block}."
+      )
     # Mesh definition
     devices_array = maxtext_utils.create_device_mesh(config=config)
     self._mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
 
-    # Input and output are both Linen-format (uses DeepSeek*ToLinen layers below).
-    # Route to Linen regardless of pure_nnx.
     self.quant = quantizations.configure_quantization(config)
+    if config.pure_nnx:
+      # NNX takes a separate code path that builds the model via from_pretrained;
+      # no Linen abstract-state bookkeeping is needed here.
+      self.unboxed_abstract_state = None
+      return
     model = models.transformer_as_linen(
         config, mesh=self._mesh, quant=self.quant, model_mode=common_types.MODEL_MODE_TRAIN
     )
@@ -187,6 +196,9 @@ class LayerwiseQuantization:
     """
     Load parameters layer by layer and quantize them.
     """
+    if self.config.pure_nnx:
+      self._load_and_quantize_nnx()
+      return
     quantized_params = {}
     quantized_params["params"] = {"decoder": {}}
     quantized_params["aqt"] = {"decoder": {}}
@@ -271,6 +283,132 @@ class LayerwiseQuantization:
     quantized_params["params"]["token_embedder"] = self._load_layer("token_embedder")["params"]["token_embedder"]
 
     maxtext_utils.save_quantized_checkpoint_if_configured(self.config, quantized_params)
+
+  def _load_and_quantize_nnx(self) -> None:
+    """Whole-model NNX convert: load full-precision via TRAIN-mode `from_pretrained`,
+    transfer kernels into a fresh CONVERT-mode model, run a forward (the
+    `ToNNX(AqtDotGeneral)` bridge auto-captures `qrhs.frozen`), strip kernels at
+    quantized paths, and save the serve-mode-shaped state.
+
+    Two-step load: input checkpoints are typically full-precision (no AQT state
+    on disk), so we can't `from_pretrained(quant_mode_str="convert")` directly —
+    orbax would fail to find the missing `qrhs.frozen` leaves. Instead we load
+    in TRAIN mode (which has only kernels), then copy them into a randomly
+    initialized CONVERT model that already has the AQT variables provisioned.
+    """
+    config = self.config
+    # MODEL_MODE_TRAIN avoids the PREFILL/AUTOREGRESSIVE cache plumbing — AQT
+    # layers populate `qrhs.frozen` regardless of model_mode, so train mode is
+    # simpler and faster.
+    max_logging.log("Loading full-precision NNX checkpoint in TRAIN mode...")
+    with self._mesh:
+      train_model = model_creation_utils.from_pretrained(
+          config,
+          mesh=self._mesh,
+          model_mode=common_types.MODEL_MODE_TRAIN,
+          quant_mode_str="train",
+      )
+
+    max_logging.log("Building CONVERT-mode model (random init) and copying kernels in...")
+    rngs = maxtext_utils_nnx.create_nnx_rngs(config, rng_key=self.rng)
+    with nn_partitioning.axis_rules(config.logical_axis_rules):
+      convert_model = model_creation_utils.from_config(
+          config,
+          mesh=self._mesh,
+          rngs=rngs,
+          model_mode=common_types.MODEL_MODE_TRAIN,
+          quant_mode_str="convert",
+      )
+    self._copy_kernel_leaves_(convert_model, train_model)
+    del train_model
+
+    # Forward populates AqtDotGeneral_0.qrhs.frozen on every quantized layer.
+    L = config.max_target_length
+    decoder_input_tokens = jnp.zeros((1, L), dtype=jnp.int32)
+    decoder_positions = jnp.arange(L, dtype=jnp.int32)[None, :]
+    decoder_segment_ids = jnp.ones((1, L), dtype=jnp.int32)
+    max_logging.log("Running CONVERT-mode forward to populate AQT scale factors...")
+    with nn_partitioning.axis_rules(config.logical_axis_rules):
+      _ = convert_model(
+          decoder_input_tokens,
+          decoder_positions,
+          decoder_segment_ids=decoder_segment_ids,
+          enable_dropout=False,
+          model_mode=common_types.MODEL_MODE_TRAIN,
+      )
+
+    # Convert-mode state has both `kernel` (full precision) and `AqtDotGeneral_0.qrhs.frozen`
+    # at every quantized DenseGeneral; the serve-mode reader expects only the latter.
+    convert_state = nnx.state(convert_model).to_pure_dict()
+    serve_state = self._strip_kernels_at_quantized_paths(convert_state)
+
+    if config.save_quantized_params_path:
+      max_logging.log(f"Saving NNX-format quantized checkpoint to {config.save_quantized_params_path}")
+
+      # Wrap each leaf in `{"value": <array>}` so the on-disk shape matches what
+      # `from_pretrained`'s NNX-detection branch reads back (it later does
+      # `tree.map(lambda v: v["value"], ...)` on each leaf). Save directly via
+      # orbax — `save_params_to_path` would add an outer `{"params": ...}` wrap
+      # that the NNX path doesn't expect.
+      def _wrap_value(node):
+        if isinstance(node, dict):
+          return {k: _wrap_value(v) for k, v in node.items()}
+        return {"value": node}
+
+      wrapped = _wrap_value(serve_state)
+      orbax_checkpointer = ocp.PyTreeCheckpointer(
+          use_ocdbt=config.checkpoint_storage_use_ocdbt,
+          use_zarr3=config.checkpoint_storage_use_zarr3,
+      )
+      orbax_checkpointer.save(config.save_quantized_params_path, wrapped, force=True)
+      max_logging.log(f"Saved NNX-format quantized checkpoint at: {config.save_quantized_params_path}")
+    else:
+      max_logging.log("Skipping save: save_quantized_params_path is null.")
+
+  @staticmethod
+  def _copy_kernel_leaves_(dst_model, src_model):
+    """Copy the full-precision parameter leaves (kernel/embedding/scale/bias)
+    from src into dst, leaving dst's AQT and RNG variables untouched.
+    """
+    src_dict = nnx.state(src_model).to_pure_dict()
+    dst_state = nnx.state(dst_model)
+    dst_dict = dst_state.to_pure_dict()
+
+    def walk(d_node, s_node):
+      if not (isinstance(d_node, dict) and isinstance(s_node, dict)):
+        return
+      for key, d_child in d_node.items():
+        if key not in s_node:
+          continue
+        s_child = s_node[key]
+        if key in ("kernel", "embedding", "scale", "bias") and not isinstance(d_child, dict):
+          d_node[key] = s_child
+        elif isinstance(d_child, dict):
+          walk(d_child, s_child)
+
+    walk(dst_dict, src_dict)
+    nnx.replace_by_pure_dict(dst_state, dst_dict)
+    nnx.update(dst_model, dst_state)
+
+  @staticmethod
+  def _strip_kernels_at_quantized_paths(state_dict):
+    """Drop `kernel` keys at any node that has a sibling `AqtDotGeneral_0`.
+
+    In convert mode each quantized DenseGeneral keeps both the full-precision
+    `kernel` (an nnx.Param) and the AQT-quantized `AqtDotGeneral_0.qrhs.frozen`
+    side-by-side. Serve mode (the on-disk shape `from_pretrained` reads back)
+    only carries the latter; the kernel is recreated as a dummy zero in
+    `linears.DenseGeneral.__call__`.
+    """
+    if not isinstance(state_dict, dict):
+      return state_dict
+    has_aqt = "AqtDotGeneral_0" in state_dict
+    out = {}
+    for k, v in state_dict.items():
+      if k == "kernel" and has_aqt:
+        continue
+      out[k] = LayerwiseQuantization._strip_kernels_at_quantized_paths(v) if isinstance(v, dict) else v
+    return out
 
   def _load_layer(self, layer_name):
     """Loads a specific layer's parameters from the checkpoint."""

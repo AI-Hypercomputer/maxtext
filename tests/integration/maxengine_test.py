@@ -243,12 +243,51 @@ class MaxEngineTest(unittest.TestCase):
           msg=f"next_pos didn't advance at step {step}",
       )
 
-  def test_quantize_raises_for_nnx(self):
-    """pure_nnx + quantization raises NotImplementedError."""
+  def test_quantize_passes_gate_for_nnx(self):
+    """pure_nnx + quantization (convert-on-load) reaches the actual machinery in train mode."""
+    # checkpoint_is_quantized defaults to False — full-precision on disk, AQT
+    # quantizes per-forward against the loaded kernel (train mode).
     cfg = self._init_nnx_pyconfig(quantization="int8")
     engine = maxengine.MaxEngine(cfg, jax.devices())
-    with self.assertRaises(NotImplementedError):
+    self.assertEqual(engine._nnx_quant_mode_str, "train")  # pylint: disable=protected-access
+    try:
       engine.load_params(rng=self.rng)
+    except NotImplementedError as e:
+      self.fail(f"convert-on-load path should not raise NotImplementedError; got: {e}")
+    except Exception:  # pylint: disable=broad-except
+      pass  # any other failure (e.g. checkpoint not found) is fine for this test
+
+  def test_load_pre_quantized_nnx_passes_quant_gate(self):
+    """pure_nnx + quantization + checkpoint_is_quantized=True clears the load gate."""
+    cfg = self._init_nnx_pyconfig(quantization="int8", checkpoint_is_quantized=True)
+    engine = maxengine.MaxEngine(cfg, jax.devices())
+    self.assertEqual(engine._nnx_quant_mode_str, "serve")  # pylint: disable=protected-access
+    try:
+      engine.load_params(rng=self.rng)
+    except NotImplementedError as e:
+      self.fail(f"checkpoint_is_quantized=True path should not raise NotImplementedError; got: {e}")
+    except Exception:  # pylint: disable=broad-except
+      pass  # any other failure (e.g. checkpoint not found) is fine for this test
+
+  def test_quantized_prefill_nnx_train_mode(self):
+    """End-to-end: NNX prefill with quantization=int8 + checkpoint_is_quantized=False.
+
+    TRAIN-mode AQT layers quantize per-forward against the loaded full-precision
+    kernel; output must be finite and shape-valid. This is the real numerical
+    verification that the convert-on-load path produces a usable model.
+    """
+    cfg = self._init_nnx_pyconfig(quantization="int8")
+    self.assertFalse(cfg.checkpoint_is_quantized)
+    devices_array = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices_array, cfg.mesh_axes)
+    params_state = self._build_nnx_params(cfg, mesh)
+
+    engine = maxengine.MaxEngine(cfg, jax.devices())
+    self.assertEqual(engine._nnx_quant_mode_str, "train")  # pylint: disable=protected-access
+    params = engine.load_params(params=params_state)
+    input_tokens = jnp.array([1, 306, 5360, 304, 0, 0, 0, 0])
+    prefill_result, _ = engine.prefill(params=params, padded_tokens=input_tokens, true_length=4)
+    self.assertTrue(jnp.all(jnp.isfinite(prefill_result["logits"])))
 
   def test_lora_load_single_adapter_reaches_loader_on_nnx(self):
     """pure_nnx + LoRA: load_single_adapter dispatches to the NNX loader.
