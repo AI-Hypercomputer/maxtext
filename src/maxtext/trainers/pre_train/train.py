@@ -69,6 +69,7 @@ from maxtext.utils import maxtext_utils
 from maxtext.utils import qk_clip_utils
 from maxtext.utils import sharding
 from maxtext.utils import train_utils
+from maxtext.utils import mllog_utils
 from maxtext.utils.gradient_accumulation import gradient_accumulation_loss_and_grad
 from maxtext.utils.vocabulary_tiling import vocab_tiling_linen_loss
 
@@ -579,6 +580,12 @@ def train_loop(config, recorder, state=None):
   _job_completed_gracefully = False
   try:
     last_step_completion = datetime.datetime.now()
+
+    mllog_utils.init_print(config, start_step)
+    mllog_utils.init_stop()
+    mllog_utils.run_start()
+    mllog_utils.block_start(config)
+
     for step in np.arange(start_step, config.steps):
       prof.maybe_activate_profiler(step, state)
 
@@ -627,7 +634,10 @@ def train_loop(config, recorder, state=None):
           max_logging.log(f"Completed eval step {eval_step_count}")
           eval_step_count += 1
         metric_logger_instance.record_eval_metrics(step, eval_step_count=eval_step_count)
-        if metric_logger_instance.cumulative_eval_metrics["scalar"]["eval/avg_loss"] <= config.target_eval_loss:
+
+        eval_loss = metric_logger_instance.cumulative_eval_metrics["scalar"]["eval/avg_loss"]
+        mllog_utils.check_eval(config, step, eval_loss, start_step)
+        if eval_loss <= config.target_eval_loss:
           prof.deactivate()
           raise exceptions.StopTraining(f"Target loss {config.target_eval_loss=} is achieved.")
 
@@ -680,6 +690,7 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]
     vertex_tensorboard_manager.configure_vertex_tensorboard(config)
 
   # Create the Goodput recorder
+  mllog_utils.init_start()
   recorder = create_goodput_recorder(config)
 
   # Stack traces configurations
