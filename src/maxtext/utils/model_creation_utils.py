@@ -39,9 +39,11 @@ import subprocess
 import sys
 from etils import epath
 from flax import nnx
+from flax.core.meta import Partitioned
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax.sharding import Mesh
 from maxtext.configs import pyconfig
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN
@@ -228,6 +230,8 @@ def _fuse_moe_weights(ckpt_tree, model_arrays_tree):
       return key.key
     if hasattr(key, "attr"):
       return key.attr
+    if hasattr(key, "name"):
+      return key.name
     return key
 
   def _lookup_model(path):
@@ -364,17 +368,33 @@ def _fix_restore_args_for_shape_mismatch(restore_args, stored_metadata_tree, mes
       return str(key.key)
     if hasattr(key, "attr"):
       return str(key.attr)
+    if hasattr(key, "name"):
+      return str(key.name)
     return str(key)
 
   def _lookup_stored_meta(path):
     """Navigate stored_metadata_tree using path keys from the restore_args tree."""
+    # Try the clean name (e.g. `qvalue`) first, then fall back to `str(key)`
+    # (e.g. `.qvalue`) — orbax may use either form for GetAttrKey. SequenceKey
+    # indexes into lists/tuples (e.g. QTensor.scale is `list[ArrayMetadata]`).
     node = stored_metadata_tree
     for key in path:
-      name = _key_str(key)
-      if isinstance(node, dict) and name in node:
-        node = node[name]
-      else:
+      if isinstance(key, jax.tree_util.SequenceKey):
+        if isinstance(node, (list, tuple)) and 0 <= key.idx < len(node):
+          node = node[key.idx]
+          continue
         return None
+      if not isinstance(node, dict):
+        return None
+      name = _key_str(key)
+      if name in node:
+        node = node[name]
+        continue
+      raw = str(key)
+      if raw in node:
+        node = node[raw]
+        continue
+      return None
     return node
 
   mismatched_paths_sharded = []
@@ -466,6 +486,7 @@ def from_config(
     *,
     model_mode: str = MODEL_MODE_TRAIN,
     rngs: None = None,
+    quant_mode_str: str = "train",
 ) -> nn.Module:
   ...
 
@@ -478,6 +499,7 @@ def from_config(
     *,
     model_mode: str = MODEL_MODE_TRAIN,
     rngs: nnx.Rngs,
+    quant_mode_str: str = "train",
 ) -> models.Transformer:
   ...
 
@@ -489,25 +511,18 @@ def from_config(
     *,
     model_mode: str = MODEL_MODE_TRAIN,
     rngs: nnx.Rngs | None = None,
+    quant_mode_str: str = "train",
 ) -> nn.Module | models.Transformer:
   """Load a pretrained MaxText model from checkpoint.
 
-  This function loads a model from a checkpoint.
-
-  Args:
-      config: Config object.
-      devices: Sequence of devices to use for the model. If None, use all
-        available devices.
-
-  Returns:
-      Transformer: The loaded model instance (only the model)
-
-  Example:
-      model = from_config(config)
+  `quant_mode_str` is one of "train", "convert", "serve" — controls the AQT
+  quantization mode at model construction time. NNX layers freeze their
+  param shape on `quant_mode_str` (e.g. SERVE skips the full-precision kernel),
+  so callers loading a pre-quantized checkpoint must pass `"serve"`.
   """
   if mesh is None:
     mesh = maxtext_utils.get_mesh_from_config(config, devices)
-  model = create_model(config, mesh, model_mode=model_mode, rngs=rngs)
+  model = create_model(config, mesh, model_mode=model_mode, rngs=rngs, quant_mode_str=quant_mode_str)
 
   # Return only the model
   return model
@@ -521,28 +536,35 @@ def get_transformer_model(config, mesh, quant, model_mode: str = MODEL_MODE_TRAI
     return models.transformer_as_linen(config, mesh, quant=quant, model_mode=model_mode)
 
 
-def create_model(config, mesh, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rngs | None = None):
+def create_model(
+    config, mesh, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rngs | None = None, *, quant_mode_str: str = "train"
+):
   """Instantiates and returns the model object, sharded across the mesh."""
   # Model definition
-  quant = quantizations.configure_quantization(config)
+  quant = quantizations.configure_quantization(config, quant_mode_str=quant_mode_str)
   model = get_transformer_model(config, mesh, quant, model_mode=model_mode, rngs=rngs)
   model = quantizations.maybe_quantize_model(model, config)
   return model
 
 
-def get_nnx_create_model_fn(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAIN, rng_key=None) -> Callable:
+def get_nnx_create_model_fn(
+    config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAIN, rng_key=None, *, quant_mode_str: str = "train"
+) -> Callable:
 
   def _create_model():
     rngs = maxtext_utils_nnx.create_nnx_rngs(config, model_mode=model_mode, rng_key=rng_key)
-    return from_config(config, devices, mesh, rngs=rngs, model_mode=model_mode)
+    return from_config(config, devices, mesh, rngs=rngs, model_mode=model_mode, quant_mode_str=quant_mode_str)
 
   return _create_model
 
 
 def create_nnx_abstract_model(
-    config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAIN, rng_key=None
+    config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAIN, rng_key=None, *, quant_mode_str: str = "train"
 ) -> tuple[Callable, nnx.Module]:
   """Creates an abstract NNX model.
+
+  `quant_mode_str` is forwarded to model construction so AQT layers freeze
+  the right param shape (e.g. SERVE skips the full-precision kernel).
 
   Returns:
     A tuple containing (create_model_fn, abstract_model):
@@ -551,7 +573,7 @@ def create_nnx_abstract_model(
   """
 
   with nn.logical_axis_rules(config.logical_axis_rules):
-    _create_model = get_nnx_create_model_fn(config, mesh, devices, model_mode, rng_key)
+    _create_model = get_nnx_create_model_fn(config, mesh, devices, model_mode, rng_key, quant_mode_str=quant_mode_str)
     if mesh is None:
       _tmp = nnx.eval_shape(_create_model)
       mesh = _tmp.mesh
@@ -559,8 +581,11 @@ def create_nnx_abstract_model(
     # nnx.get_abstract_model, which uses get_var_pspec internally and ignores
     # param_scan_axis / nnx.PARTITION_NAME metadata set by _create_scanned_layers,
     # causing the stacked layers axis to be missing from the PartitionSpec.
-    with jax.set_mesh(mesh):
-      abs_model = nnx.eval_shape(_create_model)
+    # Wrapping in `jax.set_mesh(mesh)` trips Flax 0.12.6's `_to_variable` for
+    # serve-mode AQT variables (NamedSharding with `spec=None` rejected under
+    # AbstractMesh). Sharding is resolved afterwards via the helper, so the
+    # wrap is unnecessary here.
+    abs_model = nnx.eval_shape(_create_model)
     graphdef, abs_var_state = nnx.split(abs_model)
     named_sharding_state = maxtext_utils.get_nnx_named_sharding_with_scan_axis(abs_var_state, mesh)
     abstract_state = jax.tree.map(
@@ -749,9 +774,21 @@ def create_models_and_meshes(trainer_config, sampler_config, trainer_devices, sa
 
 
 def from_pretrained(
-    config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAIN, rng_key=None, wrap_with_tunix_adapter=False
+    config,
+    mesh=None,
+    devices=None,
+    model_mode=MODEL_MODE_TRAIN,
+    rng_key=None,
+    wrap_with_tunix_adapter=False,
+    *,
+    quant_mode_str: str = "train",
 ):
-  """Creates a NNX model with sharded parameters, possibly loading from a checkpoint."""
+  """Creates a NNX model with sharded parameters, possibly loading from a checkpoint.
+
+  `quant_mode_str` is forwarded to model construction. Pass `"serve"` when
+  loading a pre-quantized checkpoint so AQT layers materialize the on-disk
+  scale factors instead of full-precision kernels.
+  """
   original_mesh = mesh
   if config.convert_checkpoint_if_possible and not config.load_parameters_path:
     if not (epath.Path(config.base_output_directory) / "0" / "items").exists():
@@ -811,7 +848,9 @@ def from_pretrained(
     config = pyconfig.HyperParameters(new_config)
 
   if config.pure_nnx:
-    _create_model, abstract_model = create_nnx_abstract_model(config, mesh, devices, model_mode, rng_key)
+    _create_model, abstract_model = create_nnx_abstract_model(
+        config, mesh, devices, model_mode, rng_key, quant_mode_str=quant_mode_str
+    )
     model = maxtext_utils_nnx.create_nnx_sharded_model(abstract_model, _create_model, mesh=mesh)
     # TODO: print debug_sharding info
   else:
@@ -822,7 +861,9 @@ def from_pretrained(
   # the checkpoint-loading branch below needs the logical PartitionSpec tree
   # (axis names like "kv_heads", "mlp_moe") for repeat/zero-pad dispatch in
   # _align_checkpoint_to_model_shapes. nnx.eval_shape is cheap (abstract trace).
-  _create_model_for_specs = get_nnx_create_model_fn(config, mesh, devices, model_mode, rng_key)
+  _create_model_for_specs = get_nnx_create_model_fn(
+      config, mesh, devices, model_mode, rng_key, quant_mode_str=quant_mode_str
+  )
   with nn.logical_axis_rules(config.logical_axis_rules):
     _abs_model_for_specs = nnx.eval_shape(_create_model_for_specs)
   _, _abs_state_for_specs = nnx.split(_abs_model_for_specs)
@@ -926,10 +967,48 @@ def from_pretrained(
           }
         else:
           # NNX checkpoint: {'decoder': {'value': ...}}, or NNX-RL with extra 'base' nesting.
-          # Restore only nnx.Param — RNG variable shapes may differ between checkpoint and model.
+          # Restore only nnx.Param — RNG variable shapes may differ between checkpoint and model,
+          # and pure-dict checkpoints written by `layerwise_quantization._load_and_quantize_nnx`
+          # don't carry RNG/dropout state at all (they only persist nnx.Param leaves, including
+          # AQT serve-mode `qrhs.frozen` which is a Param subclass).
+          def _build_value_target(v):
+            # `v[...]` (a.k.a. `v.get_value(index=...)`) descends into the inner
+            # value with `value[Ellipsis]`. AQT serve-mode `qrhs.frozen` variables
+            # wrap a QTensor whose `__getitem__` calls `qvalue[idx]` on a
+            # `LogicallyPartitioned` wrapper — that fails. For QTensor (and any
+            # composite pytree value), use the unwrapped value directly so the
+            # restore target preserves the QTensor's qvalue/scale sub-structure.
+            inner = v.get_value() if hasattr(v, "get_value") else v[...]
+            if hasattr(inner, "shape"):
+              return {"value": v[...]}
+            # AQT QTensor: qvalue/scale leaves come back wrapped in flax
+            # `Partitioned` (a logical-axis sharding box). The on-disk save in
+            # `_load_and_quantize_nnx` flushes the QTensor as plain arrays —
+            # paths look like `qrhs.frozen.value.qvalue` / `...scale.0`. If we
+            # leave Partitioned in place, jax.tree adds an extra `.value` key
+            # under each leaf (`qrhs.frozen.value.qvalue.value`) and orbax
+            # silently fills with zeros because that path doesn't exist on
+            # disk. Strip Partitioned wrappers so the target tree matches.
+            inner = jax.tree.map(
+                lambda x: x.value if isinstance(x, Partitioned) else x,
+                inner,
+                is_leaf=lambda x: isinstance(x, Partitioned),
+            )
+            return {"value": inner}
+
+          # Keep persisted weight-like leaves: `nnx.Param` plus AQT serve-mode
+          # `qrhs.frozen` (a separate `aqt` Variable type, NOT a Param subclass).
+          # Excluded: `nnx.RngState` (regenerated per load, shapes can drift) and
+          # `nnx.Cache` (PREFILL/AR scratch, not persisted). Pure-dict checkpoints
+          # written by `layerwise_quantization._load_and_quantize_nnx` carry both
+          # Param kernels and `aqt`-typed `qrhs.frozen` quantized payloads.
+          if hasattr(sharded_state, "filter"):
+            param_state = sharded_state.filter(lambda path, var: not isinstance(var, (nnx.RngState, nnx.Cache)))
+          else:
+            param_state = sharded_state
           target_for_restore = jax.tree.map(
-              lambda v: {"value": v[...]},
-              sharded_state,
+              _build_value_target,
+              param_state,
               is_leaf=lambda n: isinstance(n, nnx.Variable),
           )
           has_base_key = "base" in metadata.item_metadata.tree
@@ -943,10 +1022,14 @@ def from_pretrained(
 
         # Free memory used by initial sharded_state before restore, to make room for the incoming checkpoint arrays.
         def _free_device_memory(node):
+          val = node
           if isinstance(node, nnx.Variable) and not isinstance(node, nnx.RngState):
-            val = node[...]
-          else:
-            val = node
+            inner = node.get_value() if hasattr(node, "get_value") else node[...]
+            # Same QTensor caveat as `_build_value_target`: AQT serve-mode `qrhs.frozen`
+            # wraps a QTensor whose `__getitem__` fails on `LogicallyPartitioned`.
+            # We only need to free a single jax.Array leaf — for composite values
+            # there's nothing to free at this level, so skip.
+            val = inner if hasattr(inner, "shape") else None
 
           if isinstance(val, jax.Array) and not val.is_deleted():
             val.delete()
@@ -973,8 +1056,14 @@ def from_pretrained(
           checkpoint = restored["params"]["params"]
 
         if checkpoint:
+          # Same QTensor caveat as `_build_value_target` / `_free_device_memory`:
+          # `v[...]` fails on Variables wrapping QTensors. Use `get_value()` to
+          # access the inner value directly without index-style descent.
+          def _unwrap_for_align(v):
+            return v.get_value() if hasattr(v, "get_value") else v[...]
+
           model_arrays = jax.tree.map(
-              lambda v: v[...],
+              _unwrap_for_align,
               sharded_state,
               is_leaf=lambda n: isinstance(n, nnx.Variable),
           )
@@ -1023,6 +1112,12 @@ def from_pretrained(
                   )
                   for k, v in ckpt.items()
               }
+            # AQT serve-mode `qrhs.frozen` wraps a QTensor (composite pytree of
+            # qvalue+scale arrays), not a single jax.Array. Shape alignment
+            # only makes sense for full-precision kernels — quantized payloads
+            # are saved in the exact shape the model expects, so pass through.
+            if not isinstance(ckpt, (jax.Array, jax.ShapeDtypeStruct, np.ndarray)):
+              return ckpt
             return _align_checkpoint_to_model_shapes(ckpt, model_arr, axes)
 
           checkpoint = _walk_align(checkpoint, model_arrays, logical_axes_tree)
