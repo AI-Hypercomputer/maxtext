@@ -40,6 +40,7 @@ import gc
 import os
 import sys
 
+from flax import nnx
 import jax
 from jax import random
 from jax.sharding import Mesh
@@ -48,11 +49,15 @@ from maxtext.utils.globals import MAXTEXT_PKG_DIR
 from maxtext.common import checkpointing
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.layers import quantizations
+from maxtext.layers import train_state_nnx
 from maxtext.models.models import transformer_as_linen
 from maxtext.optimizers import optimizers
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
+from maxtext.utils import maxtext_utils_nnx
+from maxtext.utils import model_creation_utils
+from maxtext.utils import train_utils
 import numpy as np
 from psutil import Process
 import tensorstore as ts
@@ -87,12 +92,23 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
   devices_array = maxtext_utils.create_device_mesh(cfg)
   mesh = Mesh(devices_array, cfg.mesh_axes)
 
-  # Output is Linen-format (keystr_map below uses Linen tree paths). Route to
-  # Linen regardless of pure_nnx.
-  quant = quantizations.configure_quantization(cfg)
-  model = transformer_as_linen(cfg, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
-  learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(cfg)
-  tx = optimizers.get_optimizer(cfg, learning_rate_schedule)
+  if cfg.pure_nnx:
+    rngs = maxtext_utils_nnx.create_nnx_rngs(cfg, rng_key=init_rng)
+    model = model_creation_utils.from_config(cfg, mesh=mesh, rngs=rngs)
+    _, tx = train_utils.create_training_optimizer(cfg, model)
+    _create_model_partial, _ = model_creation_utils.create_nnx_abstract_model(cfg, mesh)
+
+    def init_state_fn():
+      nnx_model = _create_model_partial()
+      optimizer = nnx.Optimizer(nnx_model, tx, wrt=nnx.Param)
+      return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
+
+  else:
+    quant = quantizations.configure_quantization(cfg)
+    model = transformer_as_linen(cfg, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+    learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(cfg)
+    tx = optimizers.get_optimizer(cfg, learning_rate_schedule)
+    init_state_fn = functools.partial(maxtext_utils.init_initial_state, model, tx, cfg, True, init_rng)
 
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
       cfg.checkpoint_dir,
@@ -101,7 +117,6 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
       cfg.checkpoint_period,
   )
 
-  init_state_fn = functools.partial(maxtext_utils.init_initial_state, model, tx, cfg, True, init_rng)
   state, _, _, _ = maxtext_utils.setup_training_state(None, cfg, mesh, checkpoint_manager, init_state_fn)
   max_logging.log("start")
   max_utils.print_mem_stats("After params initialized")
@@ -186,10 +201,21 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
       "['decoder']['decoder_norm']['bias']": (".params.lm.final_ln.bias", None),
   }
 
-  state_map = {
-      ".step": ("step", None),
-      ".opt_state.count": ("opt_states_0.no_prefix_0.count", None),
-  }
+  if cfg.pure_nnx:
+    # NNX state-tree paths after `nnx.split(TrainStateNNX)`:
+    #   model params     -> ['model']<rest>.value
+    #   adam mu / nu     -> ['optimizer']['opt_state']['mu' | 'nu']<rest>.value
+    #   step             -> ['optimizer']['step'].value
+    #   opt count        -> ['optimizer']['opt_state']['count'].value
+    state_map = {
+        ".optimizer.step.value": ("step", None),
+        ".optimizer.opt_state.count.value": ("opt_states_0.no_prefix_0.count", None),
+    }
+  else:
+    state_map = {
+        ".step": ("step", None),
+        ".opt_state.count": ("opt_states_0.no_prefix_0.count", None),
+    }
 
   def get_layer_prefix(keystr_pax):
     # different path format between decoder_layer variable
@@ -201,19 +227,27 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
     return prefix_pax_opt_state
 
   for keystr_maxtext, (keystr_pax, transform_fn) in keystr_map.items():
-    # model variable
-    state_map[f".params['params']{keystr_maxtext}"] = (f"mdl_vars{keystr_pax}", transform_fn)
     prefix_pax_opt_state = get_layer_prefix(keystr_pax)
-    # first momentum in optimizer state
-    state_map[f".opt_state.mu['params']{keystr_maxtext}"] = (
-        f"opt_states_0.{prefix_pax_opt_state}.m{keystr_pax}",
-        transform_fn,
-    )
-    # second momentum in optimizer state
-    state_map[f".opt_state.nu['params']{keystr_maxtext}"] = (
-        f"opt_states_0.{prefix_pax_opt_state}.v{keystr_pax}",
-        transform_fn,
-    )
+    if cfg.pure_nnx:
+      state_map[f".model{keystr_maxtext}.value"] = (f"mdl_vars{keystr_pax}", transform_fn)
+      state_map[f".optimizer.opt_state.mu{keystr_maxtext}.value"] = (
+          f"opt_states_0.{prefix_pax_opt_state}.m{keystr_pax}",
+          transform_fn,
+      )
+      state_map[f".optimizer.opt_state.nu{keystr_maxtext}.value"] = (
+          f"opt_states_0.{prefix_pax_opt_state}.v{keystr_pax}",
+          transform_fn,
+      )
+    else:
+      state_map[f".params['params']{keystr_maxtext}"] = (f"mdl_vars{keystr_pax}", transform_fn)
+      state_map[f".opt_state.mu['params']{keystr_maxtext}"] = (
+          f"opt_states_0.{prefix_pax_opt_state}.m{keystr_pax}",
+          transform_fn,
+      )
+      state_map[f".opt_state.nu['params']{keystr_maxtext}"] = (
+          f"opt_states_0.{prefix_pax_opt_state}.v{keystr_pax}",
+          transform_fn,
+      )
 
   def verify_fn(key_path, _):
     keystr = jax.tree_util.keystr(key_path)
@@ -265,10 +299,11 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
   max_logging.log("converted state finished")
   max_utils.print_mem_stats("converted state finished")
 
-  if checkpointing.save_checkpoint(checkpoint_manager, converted_state.step, converted_state):
-    max_logging.log(f"saved a checkpoint at step {converted_state.step}")
+  step_value = int(converted_state.optimizer.step.value) if cfg.pure_nnx else converted_state.step
+  if checkpointing.save_checkpoint(checkpoint_manager, step_value, converted_state):
+    max_logging.log(f"saved a checkpoint at step {step_value}")
   # Upon preemption, exit when and only when all ongoing saves are complete.
-  if checkpoint_manager.reached_preemption(converted_state.step):
+  if checkpoint_manager.reached_preemption(step_value):
     checkpoint_manager.wait_until_finished()
     sys.exit()
 
