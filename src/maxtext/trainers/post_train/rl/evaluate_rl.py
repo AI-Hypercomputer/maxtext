@@ -19,6 +19,7 @@ RL Evaluation Module.
 import collections
 import json
 import re
+from enum import Enum
 from typing import Any
 
 from tqdm.auto import tqdm
@@ -46,6 +47,11 @@ from maxtext.utils import max_logging
 # We'll also print outputs for a few given questions so that we can compare the generated output later.
 #
 # pylint: disable=broad-exception-caught
+
+
+class EvalPhase(Enum):
+  PRE_TRAINING = "Pre RL Training"
+  POST_TRAINING = "Post RL Training"
 
 
 def generate_responses(
@@ -268,3 +274,17 @@ def evaluate(
   )
 
   return to_return, response_lst
+
+
+def run_eval(phase: EvalPhase, trainer_config, test_dataset, rl_cluster) -> None:
+  (corr, total, accuracy, partial_accuracy, format_accuracy), _ = evaluate(
+      trainer_config,
+      test_dataset,
+      rl_cluster=rl_cluster,
+      num_passes=trainer_config.num_eval_passes,
+      corr_lst=trainer_config.eval_corr_lst,
+      make_lst=trainer_config.eval_make_lst,
+  )
+  max_logging.warning(
+      f"{phase.value}: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%, {format_accuracy=}%"
+  )

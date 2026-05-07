@@ -21,7 +21,7 @@ import pytest
 from types import SimpleNamespace
 import jax
 
-from maxtext.trainers.post_train.rl import train_rl
+from maxtext.trainers.post_train.rl import trainer_setup, data_pipeline
 
 pytestmark = [pytest.mark.post_training]
 from maxtext.utils import model_creation_utils
@@ -189,7 +189,7 @@ class TrainRLTest(unittest.TestCase):
         "tensor_parallel_size": 2,
         "expert_parallel_size": 4,
     }
-    self.assertEqual(train_rl.get_rollout_kwargs_for_parallelism(sampler_config, 16), expected_result)
+    self.assertEqual(trainer_setup.get_rollout_kwargs_for_parallelism(sampler_config, 16), expected_result)
 
   @pytest.mark.cpu_only
   def test_get_rollout_kwargs_auto_tp(self):
@@ -204,7 +204,7 @@ class TrainRLTest(unittest.TestCase):
         "tensor_parallel_size": 2,
         "expert_parallel_size": 1,
     }
-    self.assertEqual(train_rl.get_rollout_kwargs_for_parallelism(sampler_config, 4), expected_result)
+    self.assertEqual(trainer_setup.get_rollout_kwargs_for_parallelism(sampler_config, 4), expected_result)
 
   @pytest.mark.cpu_only
   def test_get_rollout_kwargs_fixed_tp_dp(self):
@@ -219,7 +219,7 @@ class TrainRLTest(unittest.TestCase):
         "tensor_parallel_size": 2,
         "expert_parallel_size": 1,
     }
-    self.assertEqual(train_rl.get_rollout_kwargs_for_parallelism(sampler_config, 4), expected_result)
+    self.assertEqual(trainer_setup.get_rollout_kwargs_for_parallelism(sampler_config, 4), expected_result)
 
   @pytest.mark.cpu_only
   def test_get_rollout_kwargs_auto_ep(self):
@@ -235,7 +235,7 @@ class TrainRLTest(unittest.TestCase):
         "tensor_parallel_size": 2,
         "expert_parallel_size": 2,
     }
-    self.assertEqual(train_rl.get_rollout_kwargs_for_parallelism(sampler_config, 8), expected_result)
+    self.assertEqual(trainer_setup.get_rollout_kwargs_for_parallelism(sampler_config, 8), expected_result)
 
   @pytest.mark.cpu_only
   def test_get_rollout_kwargs_errors(self):
@@ -247,7 +247,7 @@ class TrainRLTest(unittest.TestCase):
         rollout_expert_parallelism=1,
     )
     with self.assertRaisesRegex(ValueError, "At most one of .* can be -1"):
-      train_rl.get_rollout_kwargs_for_parallelism(sampler_config, 4)
+      trainer_setup.get_rollout_kwargs_for_parallelism(sampler_config, 4)
 
     # num_devices % (tp * ep) != 0 when dp == -1
     sampler_config = SimpleNamespace(
@@ -256,7 +256,7 @@ class TrainRLTest(unittest.TestCase):
         rollout_expert_parallelism=1,
     )
     with self.assertRaisesRegex(ValueError, "must be divisible by"):
-      train_rl.get_rollout_kwargs_for_parallelism(sampler_config, 4)
+      trainer_setup.get_rollout_kwargs_for_parallelism(sampler_config, 4)
 
     # num_devices % (tp * dp) != 0 when ep == -1
     sampler_config = SimpleNamespace(
@@ -265,7 +265,7 @@ class TrainRLTest(unittest.TestCase):
         rollout_expert_parallelism=-1,
     )
     with self.assertRaisesRegex(ValueError, "must be divisible by"):
-      train_rl.get_rollout_kwargs_for_parallelism(sampler_config, 8)
+      trainer_setup.get_rollout_kwargs_for_parallelism(sampler_config, 8)
 
     # num_devices % (dp * ep) != 0 when tp == -1
     sampler_config = SimpleNamespace(
@@ -274,7 +274,7 @@ class TrainRLTest(unittest.TestCase):
         rollout_expert_parallelism=2,
     )
     with self.assertRaisesRegex(ValueError, "must be divisible by"):
-      train_rl.get_rollout_kwargs_for_parallelism(sampler_config, 8)
+      trainer_setup.get_rollout_kwargs_for_parallelism(sampler_config, 8)
 
     # tp * dp * ep != num_sampler_devices when all are positive
     sampler_config = SimpleNamespace(
@@ -283,7 +283,7 @@ class TrainRLTest(unittest.TestCase):
         rollout_expert_parallelism=1,
     )
     with self.assertRaisesRegex(ValueError, r"!= len\(sampler_devices\)"):
-      train_rl.get_rollout_kwargs_for_parallelism(sampler_config, 8)
+      trainer_setup.get_rollout_kwargs_for_parallelism(sampler_config, 8)
 
   @pytest.mark.cpu_only
   def test_prompt_filtering(self):
@@ -346,10 +346,10 @@ class TrainRLTest(unittest.TestCase):
     )
 
     with (
-        mock.patch("maxtext.trainers.post_train.rl.train_rl.get_dataset", side_effect=get_dataset_side_effect),
+        mock.patch("maxtext.trainers.post_train.rl.data_pipeline.get_dataset", side_effect=get_dataset_side_effect),
         mock.patch("maxtext.trainers.post_train.rl.utils_rl.process_data", side_effect=get_filtered_data_side_effect),
     ):
-      train_dataset, test_dataset = train_rl.prepare_datasets(trainer_config, mock_tokenizer)
+      train_dataset, test_dataset = data_pipeline.prepare_datasets(trainer_config, mock_tokenizer)
 
       # Check filtered train dataset
       elements = list(train_dataset)
@@ -405,7 +405,7 @@ class TrainRLTest(unittest.TestCase):
         max_prefill_predict_length=256,
     )
 
-    train_ds, test_ds = train_rl.prepare_datasets(
+    train_ds, test_ds = data_pipeline.prepare_datasets(
         trainer_config=mock_config,
         model_tokenizer=mock.MagicMock(),
     )
@@ -451,7 +451,7 @@ class TrainRLTest(unittest.TestCase):
         max_prefill_predict_length=256,
     )
 
-    _, _ = train_rl.prepare_datasets(
+    _, _ = data_pipeline.prepare_datasets(
         trainer_config=mock_config,
         model_tokenizer=mock.MagicMock(),
     )
