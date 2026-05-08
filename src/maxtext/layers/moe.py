@@ -19,6 +19,7 @@ import enum
 import functools
 import math
 import random
+import os
 from typing import Iterable, Optional, Tuple, Union
 
 from aqt.jax.v2 import aqt_tensor as aqt
@@ -1082,9 +1083,10 @@ class RoutedMoE(nnx.Module):
       elif self.config.attention == "vllm_rpa":
         return group_sizes
       else:
+        ep = self.get_expert_parallelism_size()
         return tokamax.RaggedDotGroupSizes(
             group_sizes,
-            (inputs.shape[0] // kernel.shape[0],) * kernel.shape[0],
+            (inputs.shape[0] // kernel.shape[0] // ep,) * kernel.shape[0],
         )
 
     def get_quantization_dtypes():
@@ -1124,14 +1126,23 @@ class RoutedMoE(nnx.Module):
           )
         else:  # tokamax (unquantized)
           if self.config.tokamax_gmm_autotune:
-            with tokamax_config.autotuning_cache_miss_fallback("autotune"):
+            cache_file = "tokamax_autotune_cache.json"
+            if os.path.exists(cache_file):
+              with open(cache_file, "r") as f:
+                autotune_result_json = f.read()
+              autotune_result = tokamax.AutotuningResult.loads(autotune_result_json)
+              autotune_context = autotune_result
+            else:
+              autotune_context = tokamax_config.autotuning_cache_miss_fallback("heuristics")
+              
+            with autotune_context:
               output = tokamax.ragged_dot(
                   lhs=inputs,
                   rhs=kernel,
                   group_sizes=tokamax_group_sizes,
                   precision=jax.lax.Precision.DEFAULT,
                   preferred_element_type=self.dtype,
-                  implementation="mosaic",
+                  implementation=None,
               )
           else:
             output = tokamax.ragged_dot(
