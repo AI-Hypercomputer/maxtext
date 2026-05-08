@@ -477,6 +477,10 @@ class ModelArchitecture(BaseModel):
   )
   normalization_layer_epsilon: float = Field(1.0e-05, description="Epsilon value for normalization layers.")
   fused_qkv: bool = Field(False, description="If supported, fuse the Q, K, and V projections.")
+  fused_mla_lora_proj: bool = Field(
+      False,
+      description="Fuse MLA Q and KV LoRA up-projections (wq_a + wkv_a) into a single matmul. Requires q_lora_rank > 0.",
+  )
   attention_bias: bool = Field(
       False,
       description="If True, adds a learnable bias to the query, key, and value projections.",
@@ -702,6 +706,14 @@ class MoEGeneral(BaseModel):
   te_gmm_quantization: None | TEGroupedGemmQuantizationType = Field(
       TEGroupedGemmQuantizationType.EMPTY,
       description="Quantization mode for TE GMM matmuls, must be specified when te_use_gmm is true.",
+  )
+  fused_moe_mlp: bool = Field(
+      False,
+      description="Fuse wi_0 and wi_1 into a single grouped GEMM call for MoE FFN1, "
+                  "analogous to fused_mlp for dense models. Works with all gmm backends "
+                  "(te_use_gmm, tokamax, megablox, ragged_dot). Concatenates the two expert "
+                  "weight matrices along the output dimension and splits the result, halving "
+                  "FFN1 kernel launches and loading input activations from HBM once.",
   )
   use_gather_mosaic_kernel: bool = Field(
       False,
@@ -2636,6 +2648,8 @@ class MaxTextConfig(
         raise ValueError("te_use_gmm=True requires sparse_matmul=True.")
       if self.te_use_gmm and self.te_gmm_quantization == TEGroupedGemmQuantizationType.EMPTY:
         raise ValueError("te_gmm_quantization must be specified when te_use_gmm is True.")
+      if self.fused_moe_mlp and not self.sparse_matmul:
+        raise ValueError("fused_moe_mlp=True requires sparse_matmul=True.")
       self.validate_ragged_buffer_factor()
     if self.use_multimodal:
       valid_mm_models = (
@@ -2790,6 +2804,11 @@ class MaxTextConfig(
       raise ValueError("`share_kv_projections` is not compatible with `fused_qkv`.")
     if self.share_kv_projections and self.attention_type == "mla":
       raise ValueError("`share_kv_projections` is not compatible with `attention_type='mla'`.")
+
+    if self.fused_mla_lora_proj and self.q_lora_rank == 0:
+      raise ValueError("`fused_mla_lora_proj` requires `q_lora_rank > 0`.")
+    if self.fused_mla_lora_proj and self.attention_type != "mla":
+      raise ValueError("`fused_mla_lora_proj` is only valid with `attention_type='mla'`.")
 
     # I. FINAL TYPE CONVERSIONS AND DERIVED LISTS
     ici_map = {

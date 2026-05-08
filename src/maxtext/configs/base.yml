@@ -216,6 +216,7 @@ te_router_and_permutation_impl: false # whether to use TransformerEngine fused r
 moe_permutation_group_align_size: 128 # alignment size for MoE permutation group padding (MT and TE paths), set to 0 to disable
 te_use_gmm: false # whether to use the TE GMM implementation for MoE matmuls
 te_gmm_quantization: "" # quantization mode for TE GMM matmuls, must be specified when te_use_gmm is true.
+fused_moe_mlp: false # fuse wi_0 and wi_1 grouped GEMMs into one call, analogous to fused_mlp for dense models
 use_gather_mosaic_kernel: false # whether to use a custom mosaic kernel for token gather ops
 # tunable tiling dimensions used for mlp gmm
 # megablox/jax ragged dot - supports forward pass only (6 configs: `wi_tile_fwd...` and `wo_tile_fwd_...`)
@@ -402,6 +403,7 @@ qk_clip_threshold: 100.0  # Threshold for clipping (tau in the paper)
 
 # Combine matmuls for QKV and MLP
 fused_qkv: False
+fused_mla_lora_proj: False  # Fuse MLA Q+KV LoRA up-projections (wq_a+wkv_a) into a single matmul. Requires q_lora_rank > 0.
 fused_mlp: False
 
 record_internal_nn_metrics: 0

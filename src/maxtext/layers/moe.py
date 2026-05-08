@@ -458,6 +458,27 @@ class RoutedMoE(nnx.Module):
       self.wi_0 = jnp.zeros((num_experts, self.moe_expert_input_dim, intermediate_dim))
       self.wi_1 = jnp.zeros((num_experts, self.moe_expert_input_dim, intermediate_dim))
       self.wo = jnp.zeros((num_experts, intermediate_dim, self.moe_expert_input_dim))
+    elif self.config.fused_moe_mlp:
+      self.wi = nnx.Param(
+          self.kernel_init(
+              self.rngs.params(),
+              (num_experts, self.moe_expert_input_dim, intermediate_dim * 2),
+              weight_dtype,
+              kernel_in_axis,
+              kernel_out_axis,
+          ),
+          sharding=self.wi_kernel_axes,
+      )
+      self.wo = nnx.Param(
+          self.kernel_init(
+              self.rngs.params(),
+              (self.num_experts, self.intermediate_dim, self.moe_expert_input_dim),
+              self.weight_dtype,
+              kernel_in_axis,
+              kernel_out_axis,
+          ),
+          sharding=self.wo_kernel_axes,
+      )
     else:
       self.wi_0 = nnx.Param(
           self.kernel_init(
@@ -1846,36 +1867,50 @@ class RoutedMoE(nnx.Module):
           self.config.wo_tile_drhs_mlp_dim,
       )
 
-      layer_w0 = gmm_fn(
-          x,
-          w0,
-          tiling=wi_tile_size,
-          weight_gather_axes=wi_gather_axes,
-      )
-      if self.get_tensor_transpose_parallelism_size() > 1:
-        layer_w0 = jax.lax.psum(layer_w0, "tensor_transpose")
-      if self.config.mlp_bias:
-        layer_w0 = layer_w0 + w0_bias
-      layer_w0 = adc.checkpoint_name(layer_w0, "moe_mlpwi_0")
+      if self.config.fused_moe_mlp:
+        w_fused = jnp.concatenate([w0, w1], axis=-1)
+        out = gmm_fn(x, w_fused, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes)
+        n = w0.shape[-1]
+        layer_w0, layer_w1 = out[:, :n], out[:, n:]
+        if self.get_tensor_transpose_parallelism_size() > 1:
+          layer_w0 = jax.lax.psum(layer_w0, "tensor_transpose")
+          layer_w1 = jax.lax.psum(layer_w1, "tensor_transpose")
+        if self.config.mlp_bias:
+          layer_w0 = layer_w0 + w0_bias
+          layer_w1 = layer_w1 + w1_bias
+        layer_w0 = adc.checkpoint_name(layer_w0, "moe_mlpwi_0")
+        layer_w1 = adc.checkpoint_name(layer_w1, "moe_mlpwi_1")
+      else:
+        layer_w0 = gmm_fn(
+            x,
+            w0,
+            tiling=wi_tile_size,
+            weight_gather_axes=wi_gather_axes,
+        )
+        if self.get_tensor_transpose_parallelism_size() > 1:
+          layer_w0 = jax.lax.psum(layer_w0, "tensor_transpose")
+        if self.config.mlp_bias:
+          layer_w0 = layer_w0 + w0_bias
+        layer_w0 = adc.checkpoint_name(layer_w0, "moe_mlpwi_0")
 
-      layer_w1 = gmm_fn(
-          x,
-          w1,
-          tiling=wi_tile_size,
-          weight_gather_axes=wi_gather_axes,
-      )
-      if self.get_tensor_transpose_parallelism_size() > 1:
-        layer_w1 = jax.lax.psum(layer_w1, "tensor_transpose")
-      if self.config.mlp_bias:
-        layer_w1 = layer_w1 + w1_bias
-      layer_w1 = adc.checkpoint_name(layer_w1, "moe_mlpwi_1")
+        layer_w1 = gmm_fn(
+            x,
+            w1,
+            tiling=wi_tile_size,
+            weight_gather_axes=wi_gather_axes,
+        )
+        if self.get_tensor_transpose_parallelism_size() > 1:
+          layer_w1 = jax.lax.psum(layer_w1, "tensor_transpose")
+        if self.config.mlp_bias:
+          layer_w1 = layer_w1 + w1_bias
+        layer_w1 = adc.checkpoint_name(layer_w1, "moe_mlpwi_1")
       intermediate_layer = self.apply_ffn_activation(layer_w0, layer_w1)
       if self.config.use_hybrid_ep:
         if self.config.decoder_block != ctypes.DecoderBlockType.LLAMA4:
           intermediate_layer = (
               intermediate_layer * dispatched_probs[:intermediate_layer.shape[0], None]
           ).astype(jnp.bfloat16)
-          
+
       intermediate_output = gmm_fn(
           intermediate_layer,
           wo,
@@ -2633,8 +2668,14 @@ class RoutedMoE(nnx.Module):
     else:
       gate_logits, pre_bias_logits = self.gate(routing_inputs)
 
-    w0_kernel = jnp.asarray(self.wi_0[...], self.dtype)
-    w1_kernel = jnp.asarray(self.wi_1[...], self.dtype)
+    if cfg.fused_moe_mlp:
+      wi = jnp.asarray(self.wi[...], self.dtype)
+      n = wi.shape[-1] // 2
+      w0_kernel = wi[..., :n]
+      w1_kernel = wi[..., n:]
+    else:
+      w0_kernel = jnp.asarray(self.wi_0[...], self.dtype)
+      w1_kernel = jnp.asarray(self.wi_1[...], self.dtype)
     wo_kernel = jnp.asarray(self.wo[...], self.dtype)
 
     if self.per_expert_scale is not None:
