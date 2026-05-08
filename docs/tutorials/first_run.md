@@ -18,25 +18,24 @@
 
 # Getting started: First run
 
-This topic provides a basic introduction to get your MaxText workload up and running on single host and multihost environments using Cloud TPUs or NVIDIA GPUs. To help you get familiar with MaxText, we recommend starting with a single host first and then moving to multihost.
+This page provides a basic introduction to get your MaxText workload up and running on single host and multihost environments using Cloud TPUs or NVIDIA GPUs. To help you get familiar with MaxText, we recommend starting with a single host first and then moving to multihost.
 
 ## Prerequisites: Set up storage and configure MaxText
 
-1. To store logs and checkpoints, [Create a Cloud Storage bucket](https://cloud.google.com/storage/docs/creating-buckets) in your project. To run MaxText, the TPU or GPU VMs must have read/write permissions for the bucket. These permissions are granted by service account roles, such as the `STORAGE ADMIN` role.
+- To store logs and checkpoints, [Create a Cloud Storage bucket](https://cloud.google.com/storage/docs/creating-buckets) in your project. To run MaxText, the TPU or GPU VMs must have read/write permissions for the bucket. These permissions are granted by service account roles, such as the `STORAGE ADMIN` role.
 
-2. MaxText reads a yaml file for configuration. We also recommend reviewing the configurable options in `configs/base.yml`. This file includes a decoder-only model of ~1B parameters. The configurable options can be overwritten from the command line. For instance, you can change the `steps` or `log_period` by either modifying `configs/base.yml` or by passing in `steps` and `log_period` as additional arguments to the `train.py` call. Set `base_output_directory` to a folder in the bucket you just created.
+- MaxText reads a yaml file for configuration. We also recommend reviewing the configurable options in [`configs/base.yml`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/configs/base.yml). This file includes a decoder-only model of ~1B parameters. The configurable options can be overwritten from the command line. Make sure to set `base_output_directory` to a folder in the Cloud Storage bucket you just created.
 
 ## Local development for single host
 
-This procedure describes how to run MaxText on a single GPU or TPU host.
+These instructions describe how to run MaxText on a single GPU or TPU host.
 
-### Run MaxText on cloud TPUs
+### Run MaxText on Cloud TPUs
 
-Local development is a convenient way to run MaxText on a single host. It doesn't scale to
-multiple hosts but is a good way to learn about MaxText.
+Local development is useful if you want to learn how to run MaxText on a single host, but it does not scale to multiple hosts.
 
-1. [Create and SSH to the single host VM of your choice](https://cloud.google.com/tpu/docs/managing-tpus-tpu-vm). You can use any available single host TPU, such as `v5litepod-8`, `v5p-8`, or `v4-8`.
-2. For instructions on installing MaxText on your VM, please refer to the [official documentation](../install_maxtext.md). For this tutorial on TPUs, install `maxtext[tpu]`.
+1. [Create and SSH to the single host VM of your choice](https://cloud.google.com/tpu/docs/managing-tpus-tpu-vm). You can use any available single host TPU, such as `v5litepod-8` or `v5p-8`.
+2. For instructions on installing MaxText on your VM, please refer to the [installation guide](../install_maxtext.md). For this tutorial on TPUs, install `maxtext[tpu]`.
 3. After installation completes, run training on synthetic data with the following command:
 
 ```sh
@@ -58,11 +57,21 @@ python3 -m maxtext.inference.decode \
   per_device_batch_size=1
 ```
 
-This command uses a model with randomly initialized weights, so the outputs are also random. To get high quality output you need pass in a checkpoint, typically via the `load_parameters_path` argument.
+This command uses a model with randomly initialized weights, so the outputs are also random. To get high quality output you need pass in a checkpoint, typically via the `load_parameters_path` argument:
+
+```sh
+python3 -m maxtext.inference.decode \
+  run_name=${YOUR_JOB_NAME?} \
+  base_output_directory=gs://<my-bucket> \
+  per_device_batch_size=1 \
+  load_parameters_path=gs://<my-bucket>/path-to-checkpoint
+```
 
 ### Run MaxText via notebook
 
-In the same TPU VM where you just installed all the dependencies of MaxText, You can also run training and decoding in MaxText via Notebook (for e.g., via Jupyter or Colab).
+You can also run training and decoding in MaxText via Notebook (for e.g., via Jupyter or Colab). See
+[Running MaxText in a Python Notebook](../guides/run_python_notebook.md) for instructions on how to set up a notebook
+environment in your TPU VM and run MaxText from there.
 
 #### Decoding in MaxText via notebook
 
@@ -70,7 +79,7 @@ You can use [demo_decoding.ipynb](https://github.com/AI-Hypercomputer/maxtext/bl
 
 ### Run MaxText on NVIDIA GPUs
 
-1. For instructions on installing MaxText on your VM, please refer to the [official documentation](../install_maxtext.md). For this tutorial on GPUs, install `maxtext[cuda12]`.
+1. For instructions on installing MaxText on your VM, please refer to the [installation guide](../install_maxtext.md). For this tutorial on GPUs, install `maxtext[cuda12]`.
 2. After installation is complete, run training with the following command on synthetic data:
 
 ```sh
@@ -99,7 +108,3 @@ Failed to execute XLA Runtime executable: run time error: custom call 'xla.gpu.a
 ## Multihost development
 
 Google Kubernetes Engine (GKE) is the recommended way to run MaxText on multiple hosts. It provides a managed environment for deploying and scaling containerized applications, including those that require TPUs or GPUs. See [Running Maxtext with XPK](../run_maxtext/run_maxtext_via_xpk.md) for details.
-
-## Next steps: preflight optimizations
-
-After you get workloads running, there are optimizations you can apply to improve performance. For more information, see [PREFLIGHT.md](https://github.com/google/maxtext/blob/main/PREFLIGHT.md).
