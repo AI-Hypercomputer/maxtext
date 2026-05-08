@@ -1,6 +1,3 @@
-# Copy of the MaxText/configs/v5e/64b.sh file from MaxText codebase
-# with Tessellations specific changes.
-#
 echo "Running 64b.sh"
 # 64B parameter model.
 # This config will work out of the box for any number of v5e-256 slices.
@@ -11,16 +8,16 @@ echo "Running 64b.sh"
 # RUN_NAME (Required, unless run_name is already set in base.yml or running with XPK/GKE)
 #
 # Example to invoke this script:
-# bash MaxText/configs/v5e/64b.sh RUN_NAME="<your_run_name>" OUTPUT_PATH="gs://<your_output_path>" DATASET_PATH="gs://<your_dataset_path>"
+# bash src/maxtext/configs/tpu/v5e/64b.sh RUN_NAME="<your_run_name>" OUTPUT_PATH="gs://<your_output_path>" DATASET_PATH="gs://<your_dataset_path>"
 #
 # Example to AOT compile:
-# bash MaxText/configs/v5e/64b.sh EXECUTABLE=train_compile.py M_COMPILE_TOPOLOGY=v5e-256 M_COMPILE_TOPOLOGY_NUM_SLICES=2
+# bash src/maxtext/configs/tpu/v5e/64b.sh EXECUTABLE=train_compile M_COMPILE_TOPOLOGY=v5e-256 M_COMPILE_TOPOLOGY_NUM_SLICES=2
 
 
 # Stop execution if any command exits with error
 set -e
 
-export EXECUTABLE="train.py" # or train_compile.py
+export EXECUTABLE="train" # or train_compile
 export RUN_PREFLIGHT="true"
 
 # Set environment variables
@@ -45,8 +42,6 @@ fi
 if [ "$RUN_PREFLIGHT" = "true" ]; then
     bash src/dependencies/scripts/preflight.sh
 fi
-
-echo "Starting the benchmark."
 
 # Train
 export LIBTPU_INIT_ARGS="--xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true"

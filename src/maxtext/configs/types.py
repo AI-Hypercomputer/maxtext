@@ -306,7 +306,7 @@ class Checkpointing(BaseModel):
   """Core configuration for checkpointing and run restoration."""
 
   load_parameters_path: PathStr = Field("", description="Loads only model parameters from a specific checkpoint path.")
-  loror_input_adapters_path: PathStr = Field("", description="Input GCS path for LoRA adapters.")
+  lora_input_adapters_path: PathStr = Field("", description="Input GCS path for LoRA adapters.")
   load_full_state_path: PathStr = Field("", description="Loads the complete training state from a checkpoint path.")
   enable_checkpointing: bool = Field(True, description="If True, enables saving checkpoints during training.")
   load_checkpoint_only_once: bool = Field(False, description="If True, deep copy the reference model to the actor model.")
