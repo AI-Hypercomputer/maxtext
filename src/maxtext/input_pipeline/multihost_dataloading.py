@@ -262,7 +262,7 @@ class RemoteIterator:
 class RemoteIteratorWrapper:
   """Wrapper for RemoteIterator that handles device placement."""
 
-  def __init__(self, get_ds_fn, preprocessing_fn, global_mesh, global_shape, checkpoint_path="", elastic=False):
+  def __init__(self, get_ds_fn, preprocessing_fn, global_mesh, global_shape, checkpoint_path="", elastic=False, config=None):
     self.cpu_devices = _colocated_cpu_devices(tuple(global_mesh.devices.flat))
     self.cpu_mesh = _colocated_cpu_mesh(global_mesh)
     self.tpu_sharding = jax.sharding.NamedSharding(global_mesh, PartitionSpec(global_mesh.axis_names))

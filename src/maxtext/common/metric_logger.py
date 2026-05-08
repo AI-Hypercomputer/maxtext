@@ -164,10 +164,12 @@ class MetricLogger:
           f"completed profiler activation/deactivation step: {step}",
       )
     else:
+      active_slices = len(elastic_utils.live_slice_indices(self.config)) if elastic_utils.elastic_enabled(self.config) else 1
       log_parts.extend(
           [
               f"completed step: {step}",
               f"seconds: {scalars['perf/step_time_seconds']:.3f}",
+              f"active_slices: {active_slices}",
           ]
       )
       if elastic_utils.elastic_enabled(self.config):
