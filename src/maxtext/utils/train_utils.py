@@ -93,6 +93,7 @@ def create_checkpoint_manager(config, mesh, init_state_fn):
         config.enable_autocheckpoint,
         config.checkpoint_todelete_subdir,
         config.checkpoint_todelete_full_path,
+        config.checkpoint_use_replica_parallel,
     )
 
   return checkpoint_manager

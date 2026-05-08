@@ -306,7 +306,7 @@ class Checkpointing(BaseModel):
   """Core configuration for checkpointing and run restoration."""
 
   load_parameters_path: PathStr = Field("", description="Loads only model parameters from a specific checkpoint path.")
-  lora_input_adapters_path: PathStr = Field("", description="Input GCS path for LoRA adapters.")
+  loror_input_adapters_path: PathStr = Field("", description="Input GCS path for LoRA adapters.")
   load_full_state_path: PathStr = Field("", description="Loads the complete training state from a checkpoint path.")
   enable_checkpointing: bool = Field(True, description="If True, enables saving checkpoints during training.")
   load_checkpoint_only_once: bool = Field(False, description="If True, deep copy the reference model to the actor model.")
@@ -346,11 +346,13 @@ class Checkpointing(BaseModel):
   enable_autocheckpoint: bool = Field(
       False, description="If True, enables autocheckpoint or preemption induced checkpointing."
   )
+  final_ckpts_deletion_timeout_in_s: int = Field(0, description="Default timeout of deletes of checkpoints.")
 
 
 class OrbaxStorage(BaseModel):
   """Configuration for Orbax checkpoint storage options."""
 
+  checkpoint_storage_pytree_chunk_size_bytes: Optional[int] = Field(None, description="Chunk size for pytree arrays.")
   checkpoint_storage_target_data_file_size_bytes: int = Field(
       2147483648, description="Target file size for chunking large arrays in Orbax."
   )
@@ -359,6 +361,10 @@ class OrbaxStorage(BaseModel):
       True, description="Whether to use Zarr3 with OCDbT. Requires use_ocdbt=True."
   )
   checkpoint_storage_concurrent_gb: int = Field(96, description="Concurrent GB for I/O operations during checkpointing.")
+  checkpoint_use_replica_parallel: Optional[bool] = Field(
+      None,
+      description="Whether to use replica-parallel checkpointing. If None, uses default behavior.",
+  )
 
 
 class EmergencyCheckpointing(BaseModel):
@@ -1651,6 +1657,8 @@ class Metrics(BaseModel):
   """General configuration for metrics and monitoring."""
 
   metrics_file: None | PathStr = Field(None, description="Local file to store scalar metrics for testing.")
+  gcs_metrics_bucket: PathStr = Field("", description="Path to save metrics to GCS bucket.")
+  per_step_interval: float = Field(0.0, description="Per step interval metrics.")
   gcs_metrics: bool = Field(False, description="If True, save metrics to GCS.")
   save_config_to_gcs: bool = Field(False, description="If True, save config to GCS.")
   record_internal_nn_metrics: int = Field(0, description="Record internal neural network metrics.")
