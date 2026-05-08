@@ -481,7 +481,7 @@ StackFrames
 }
 
 %fused_computation.326 (param_0.1383: f32[4,16,128,2048]) -> f32[] {
-  %param_0.1383 = f32[4,16,128,2048]{3,2,0,1:T(8,128)S(1)} parameter(0)
+  %param_0.1383 = f32[4,16,128,2048]{3,2,0,1:T(8,128)} parameter(0)
   %bitcast.366 = f32[16,4,128,2048]{3,2,1,0:T(8,128)} bitcast(%param_0.1383), metadata={op_name="jit(train_step)/transpose(jvp(TransformerLinenPure.apply))/TransformerLinenPure/decoder/transpose" stack_frame_id=0}
   %square.233 = f32[16,4,128,2048]{3,2,1,0:T(8,128)} multiply(%bitcast.366, %bitcast.366), metadata={op_name="jit(train_step)/square" stack_frame_id=0}
   %constant.1215 = f32[]{:T(128)} constant(0)
@@ -512,7 +512,7 @@ StackFrames
   %mul.1950.clone.1 = f32[2048,4,16,128]{3,2,1,0:T(8,128)} broadcast(%param_3.921), dimensions={}, metadata={op_name="jit(train_step)/mul" stack_frame_id=0}
   %param_7.204 = pred[]{:T(512)S(6)} parameter(7)
   %select_n.280.clone.1 = pred[2048,4,16,128]{3,2,1,0:T(8,128)(4,1)} broadcast(%param_7.204), dimensions={}, metadata={op_name="jit(train_step)/select_n" stack_frame_id=0}
-  %param_6.361 = f32[4,2048,16,128]{3,2,0,1:T(8,128)S(1)} parameter(6)
+  %param_6.361 = f32[4,2048,16,128]{3,2,0,1:T(8,128)} parameter(6)
   %bitcast.470.clone.1 = f32[2048,4,16,128]{3,2,1,0:T(8,128)} bitcast(%param_6.361), metadata={op_name="jit(train_step)/transpose(jvp(TransformerLinenPure.apply))/TransformerLinenPure/decoder/transpose" stack_frame_id=0}
   %param_5.471 = f32[]{:T(128)} parameter(5)
   %div.884.clone.1 = f32[2048,4,16,128]{3,2,1,0:T(8,128)} broadcast(%param_5.471), dimensions={}, metadata={op_name="jit(train_step)/div" stack_frame_id=0}
@@ -638,7 +638,7 @@ StackFrames
   %square.238 = f32[2048,4,8,128]{3,2,1,0:T(8,128)} multiply(%bitcast.371, %bitcast.371), metadata={op_name="jit(train_step)/square" stack_frame_id=0}
   %constant.1217 = f32[]{:T(128)} constant(0)
   %reduce.196 = f32[]{:T(128)} reduce(%square.238, %constant.1217), dimensions={0,1,2,3}, to_apply=%region_41.46, metadata={op_name="jit(train_step)/reduce_sum" stack_frame_id=0}
-  %param_1.1571 = f32[4,2048,8,128]{3,2,0,1:T(8,128)S(1)} parameter(1)
+  %param_1.1571 = f32[4,2048,8,128]{3,2,0,1:T(8,128)} parameter(1)
   %bitcast.375.clone.1 = f32[2048,4,8,128]{3,2,1,0:T(8,128)} bitcast(%param_1.1571), metadata={op_name="jit(train_step)/transpose(jvp(TransformerLinenPure.apply))/TransformerLinenPure/decoder/transpose" stack_frame_id=0}
   %square.241.clone.1 = f32[2048,4,8,128]{3,2,1,0:T(8,128)} multiply(%bitcast.375.clone.1, %bitcast.375.clone.1), metadata={op_name="jit(train_step)/square" stack_frame_id=0}
   %reduce.197.clone.1 = f32[]{:T(128)} reduce(%square.241.clone.1, %constant.1217), dimensions={0,1,2,3}, to_apply=%region_36.41, metadata={op_name="jit(train_step)/reduce_sum" stack_frame_id=0}
@@ -727,7 +727,7 @@ StackFrames
 }
 
 %fused_computation.346 (param_0.1374: f32[2048,4,8,128], param_1.1562: f32[], param_2.1320: f32[], param_3.924: f32[], param_4.562: f32[2048,4,8,128], param_5.474: f32[], param_6.364: f32[4,2048,8,128], param_7.207: pred[], param_8.124: f32[2048,4,8,128]) -> (f32[], f32[2048,4,8,128], f32[2048,4,8,128], f32[2048,4,8,128], f32[]) {
-  %param_0.1374 = f32[2048,4,8,128]{3,2,1,0:T(8,128)S(1)} parameter(0)
+  %param_0.1374 = f32[2048,4,8,128]{3,2,1,0:T(8,128)} parameter(0)
   %param_3.924 = f32[]{:T(128)S(6)} parameter(3)
   %mul.1977.clone.1 = f32[2048,4,8,128]{3,2,1,0:T(8,128)} broadcast(%param_3.924), dimensions={}, metadata={op_name="jit(train_step)/mul" stack_frame_id=0}
   %param_7.207 = pred[]{:T(512)S(6)} parameter(7)
@@ -769,12 +769,12 @@ StackFrames
   %mul.1976.clone.1 = f32[2048,4,8,128]{3,2,1,0:T(8,128)} multiply(%param_0.1374, %broadcast.872.clone.1), metadata={op_name="jit(train_step)/mul" stack_frame_id=0}
   %add.970.clone.1 = f32[2048,4,8,128]{3,2,1,0:T(8,128)} add(%div.901.clone.1, %mul.1976.clone.1), metadata={op_name="jit(train_step)/add" stack_frame_id=0}
   %mul.1975.clone.1 = f32[2048,4,8,128]{3,2,1,0:T(8,128)} multiply(%mul.1977.clone.1, %add.970.clone.1), metadata={op_name="jit(train_step)/mul" stack_frame_id=0}
-  %add.969.clone.1 = f32[2048,4,8,128]{3,2,1,0:T(8,128)S(1)} add(%param_0.1374, %mul.1975.clone.1), metadata={op_name="jit(train_step)/add" stack_frame_id=0}
+  %add.969.clone.1 = f32[2048,4,8,128]{3,2,1,0:T(8,128)} add(%param_0.1374, %mul.1975.clone.1), metadata={op_name="jit(train_step)/add" stack_frame_id=0}
   %square.243 = f32[2048,4,8,128]{3,2,1,0:T(8,128)} multiply(%add.969.clone.1, %add.969.clone.1), metadata={op_name="jit(train_step)/square" stack_frame_id=0}
   %constant.1206 = f32[]{:T(128)} constant(0)
   %reduce.199 = f32[]{:T(128)} reduce(%square.243, %constant.1206), dimensions={0,1,2,3}, to_apply=%region_65.70, metadata={op_name="jit(train_step)/reduce_sum" stack_frame_id=0}
   %reduce.201.clone.1 = f32[]{:T(128)} reduce(%integer_pow.71.clone.1, %constant.1206), dimensions={0,1,2,3}, to_apply=%region_50.55, metadata={op_name="jit(train_step)/reduce_sum" stack_frame_id=0}
-  ROOT %tuple.151 = (f32[]{:T(128)}, f32[2048,4,8,128]{3,2,1,0:T(8,128)S(1)}, f32[2048,4,8,128]{3,2,1,0:T(8,128)}, f32[2048,4,8,128]{3,2,1,0:T(8,128)}, f32[]{:T(128)}) tuple(%reduce.199, %add.969.clone.1, %add.972.clone.1, %add.973.clone.1, %reduce.201.clone.1)
+  ROOT %tuple.151 = (f32[]{:T(128)}, f32[2048,4,8,128]{3,2,1,0:T(8,128)}, f32[2048,4,8,128]{3,2,1,0:T(8,128)}, f32[2048,4,8,128]{3,2,1,0:T(8,128)}, f32[]{:T(128)}) tuple(%reduce.199, %add.969.clone.1, %add.972.clone.1, %add.973.clone.1, %reduce.201.clone.1)
 }
 
 %fused_computation.362 (param_0.1056: bf16[4,128,2048], param_1.1117: f32[4,128], param_2.830: f32[4,128], param_3.495: bf16[4,128,2048], param_4.296: bf16[2048]) -> bf16[4,128,2048] {

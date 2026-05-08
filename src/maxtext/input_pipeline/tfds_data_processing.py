@@ -274,6 +274,7 @@ def make_tfds_eval_iterator(
         shuffle_seed=config.data_shuffle_seed,
         dataloading_host_index=process_indices_eval.index(jax.process_index()),
         dataloading_host_count=len(process_indices_eval),
+        dataset_path=config.dataset_path,
     )
     eval_dataloader = preprocessing_pipeline(
         dataset=eval_ds,

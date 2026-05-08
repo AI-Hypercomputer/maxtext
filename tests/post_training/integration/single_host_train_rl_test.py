@@ -27,20 +27,12 @@ from absl.testing import absltest
 from flax import nnx
 from transformers import AutoTokenizer
 
+from maxtext.trainers.post_train.rl import train_rl
+from maxtext.trainers.post_train.rl import evaluate_rl
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
 from maxtext.utils import max_logging
 
-
-train_rl = pytest.importorskip(
-    "maxtext.trainers.post_train.rl.train_rl",
-    reason="Tunix is not installed on the GPU image",
-)
-
-
-evaluate_rl = pytest.importorskip(
-    "maxtext.trainers.post_train.rl.evaluate_rl",
-    reason="math_verify is not installed on the GPU image",
-)
+pytestmark = [pytest.mark.post_training]
 
 
 @pytest.mark.external_training
@@ -201,20 +193,14 @@ class RLTrainerIntegrationTests(unittest.TestCase):
   @pytest.mark.skip
   def test_rl_train_maxtext_on_vllm(self):
     """Tests the rl_train API with the maxtext on vllm config."""
-    trainer_config, sampler_config, trainer_devices, sampler_devices = train_rl.setup_configs_and_devices(
-        self.CONFIGS["maxtext_on_vllm"]
-    )
-    train_rl.rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices)
+    train_rl.main(self.base_argv + self.CONFIGS["maxtext_on_vllm"])
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only
   @pytest.mark.skip
   def test_rl_train_native(self):
     """Tests the rl_train API with the vllm native config."""
-    trainer_config, sampler_config, trainer_devices, sampler_devices = train_rl.setup_configs_and_devices(
-        self.CONFIGS["vllm_native"]
-    )
-    train_rl.rl_train(trainer_config, sampler_config, trainer_devices, sampler_devices)
+    train_rl.main(self.base_argv + self.CONFIGS["vllm_native"])
 
 
 if __name__ == "__main__":
