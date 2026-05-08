@@ -34,8 +34,9 @@ ray
 runai-model-streamer[s3,gcs]
 setuptools<81.0.0
 sortedcontainers
-torchax
-torchvision
+torch==2.11.0
+torchax==0.0.11
+torchvision==0.25.0
 tpu-info
 watchfiles
 xgrammar
