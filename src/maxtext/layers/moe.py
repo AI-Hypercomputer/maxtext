@@ -2193,8 +2193,6 @@ class RoutedMoE(nnx.Module):
         use_ep=use_ep,
         activation=activation,
         scoring_fn=scoring_fn,
-        sc_kernel_threshold=16777216,
-        sc_kernel_col_chunk_size=1024,
     )
 
     # Reshape output 2D [T, D] -> 3D [B, S, D]

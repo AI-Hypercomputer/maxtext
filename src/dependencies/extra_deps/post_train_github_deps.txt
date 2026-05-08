@@ -1,3 +1,3 @@
--r post_train_base_deps.txt
-tpu-inference @ https://github.com/vllm-project/tpu-inference/archive/39d9a9d38d3c96a7e1e57f9e693cf1c96a44e87d.zip
-vllm @ git+https://github.com/vllm-project/vllm@529c671e8075d265a48b72e0eaaeb5e30d2f1630
+google-tunix @ https://github.com/google/tunix/archive/387072374f99a100cb11f99dec951940b1475a04.zip
+tpu-inference @ https://github.com/vllm-project/tpu-inference/archive/a46baf9ee149da0fbc1cfe335650e3780e30b585.zip
+vllm @ git+https://github.com/vllm-project/vllm@a51376b3f05a2f74eac6ceeed7e52598b871a0fb
