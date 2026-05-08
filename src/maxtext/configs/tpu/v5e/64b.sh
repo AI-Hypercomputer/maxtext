@@ -26,6 +26,10 @@ for ARGUMENT in "$@"; do
     export "$KEY"="$VALUE"
 done
 
+# Use 64b parameters if not set.
+PARAMETERS="${PARAMETERS:-64}"
+echo "Using ${PARAMETERS}b parameters"
+
 # The setup accommodates two cases:
 # 1) Passing the 'RUN_NAME' variable at runtime
 # 2) Propagating the 'M_RUN_NAME' variable within an Airflow sweeping workflow
@@ -41,9 +45,19 @@ fi
 
 # Train
 export LIBTPU_INIT_ARGS="--xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true"
-python3 -m maxtext.trainers.pre_train.$EXECUTABLE "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml\
-    steps=15 per_device_batch_size=2 enable_checkpointing=false\
-    remat_policy=full global_parameter_scale=64\
+JAX_PLATFORMS=cpu python3 -m maxtext.utils.${EXECUTABLE%.py} "${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/MaxText}/"configs/base.yml\
+    steps=$STEPS checkpoint_period=$CHECKPOINT_PERIOD per_device_batch_size=1 enable_checkpointing=true\
+    async_checkpointing=$ASYNC_CHECKPOINTING\
+    remat_policy=full global_parameter_scale=$PARAMETERS\
     max_target_length=2048 base_output_directory=$OUTPUT_PATH\
-    dataset_path=$DATASET_PATH use_iota_embed=true reuse_example_batch=1\
-    dataset_type=synthetic attention='flash' gcs_metrics=true
+    hardware=$HARDWARE\
+    use_iota_embed=true reuse_example_batch=1\
+    dataset_type=synthetic attention='flash' gcs_metrics=true\
+    load_full_state_path=$PREVIOUS_STATE\
+    gcs_metrics_bucket=$GCS_METRICS_BUCKET\
+    per_step_interval=$PER_STEP_INTERVAL\
+    checkpoint_storage_target_data_file_size_bytes=$OCDBT_TARGET_DATA_FILE_SIZE\
+    checkpoint_storage_pytree_chunk_size_bytes=$PYTREE_CHUNK_SIZE_IN_BYTES\
+    final_ckpts_deletion_timeout_in_s=$FINAL_CKPTS_DELETION_TIMEOUT_IN_S\
+    enable_single_replica_ckpt_restoring=$ENABLE_SINGLE_REPLICA_CKPT_RESTORING\
+    checkpoint_use_replica_parallel=$CHECKPOINT_USE_REPLICA_PARALLEL\

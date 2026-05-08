@@ -1258,3 +1258,14 @@ elastic_enabled: false
 elastic_timeout_seconds: 300
 elastic_max_retries: 10
 elastic_min_slice_count: -1
+
+# Attributes needed for the MaxText checkpointing loop using standalone_checkpointer.
+gcs_metrics_bucket: distributed-checkpointing-metrics
+# The simulated interval of a step.
+per_step_interval: 0.1
+# At the end of the workload, the maximum time the workload will wait for any lingering
+# old checkpoints to be deleted. Default to be 20 hrs.
+final_ckpts_deletion_timeout_in_s: 72000
+# The chunk size (in bytes) for pytrees in checkpoint storage.
+checkpoint_storage_pytree_chunk_size_bytes: 33554432
+

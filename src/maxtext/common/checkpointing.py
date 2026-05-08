@@ -163,7 +163,6 @@ class GrainCheckpointRestore(ocp.args.CheckpointArgs):
   process_index: Optional[int | list[int]] = None
   process_count: Optional[int] = None
 
-
 def _load_full_state_from_path(
     path,
     abstract_unboxed_pre_state,
@@ -248,6 +247,7 @@ def create_orbax_checkpoint_manager(
     enable_autocheckpoint: bool = False,
     todelete_subdir: str | None = None,
     todelete_full_path: str | None = None,
+    checkpoint_use_replica_parallel: bool | None = True,
 ):
   """Returns specified Orbax (async or not) CheckpointManager or None if checkpointing is disabled."""
   if not enable_checkpointing:
@@ -255,6 +255,28 @@ def create_orbax_checkpoint_manager(
     return None
 
   max_logging.log(f"Creating checkpoint manager with ocdbt={use_ocdbt} and zarr3={use_zarr3}")
+
+  if enable_single_replica_ckpt_restoring:
+      array_handler = ocp.type_handlers.SingleReplicaArrayHandler(
+          replica_axis_index=0,
+          broadcast_memory_limit_bytes=1024 * 1024 * 1000,  # 1000 MB limit
+          use_replica_parallel=False,
+      )
+      if checkpoint_use_replica_parallel is not None:
+        max_logging.log(
+            f"Overriding use_replica_parallel to {checkpoint_use_replica_parallel} for SingleReplicaArrayHandler based on checkpoint_use_replica_parallel flag."
+        )
+        array_handler.use_replica_parallel = checkpoint_use_replica_parallel
+  else:
+      if checkpoint_use_replica_parallel is not None:
+        max_logging.log(
+            f"Setting use_replica_parallel to {checkpoint_use_replica_parallel} for ArrayHandler based on checkpoint_use_replica_parallel flag."
+        )
+        array_handler = ocp.type_handlers.ArrayHandler(
+            use_replica_parallel=checkpoint_use_replica_parallel,
+        )
+
+  ocp.type_handlers.register_type_handler(jax.Array, array_handler, override=True)
 
   # Base configuration for all dataset types
   item_names = ("items",)
@@ -632,13 +654,6 @@ def load_state_if_possible(
             dtype=data.dtype,
         )
 
-      if enable_single_replica_ckpt_restoring:
-        array_handler = ocp.type_handlers.SingleReplicaArrayHandler(
-            replica_axis_index=0,
-            broadcast_memory_limit_bytes=1024 * 1024 * 1000,  # 1000 MB limit
-        )
-        ocp.type_handlers.register_type_handler(jax.Array, array_handler, override=True)
-
       restore_args = jax.tree_util.tree_map(map_to_pspec, abstract_unboxed_pre_state)
       checkpoint_args = ocp.args.PyTreeRestore(
           item=abstract_unboxed_pre_state,
@@ -832,14 +847,24 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
       )
 
   # specify chunk_byte_size to force orbax to control maximum file size in checkpoint
-  chunk_byte_size = (
-      config.checkpoint_storage_target_data_file_size_bytes if config else DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
+  ocdbt_target_data_file_size = (
+      config.checkpoint_storage_target_data_file_size_bytes
+      if config and config.checkpoint_storage_target_data_file_size_bytes is not None
+      else DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
   )
+
+  chunk_byte_size = (
+      config.checkpoint_storage_pytree_chunk_size_bytes
+      if config and config.checkpoint_storage_pytree_chunk_size_bytes is not None
+      else ocdbt_target_data_file_size
+  )
+
+  max_logging.log(f"Saving checkpoint with chunk_byte_size={chunk_byte_size} and ocdbt_target_data_file_size={ocdbt_target_data_file_size}")
 
   checkpoint_args = ocp.args.PyTreeSave(
       item=state,
       save_args=jax.tree.map(lambda _: ocp.SaveArgs(chunk_byte_size=chunk_byte_size), state),
-      ocdbt_target_data_file_size=chunk_byte_size,
+      ocdbt_target_data_file_size=ocdbt_target_data_file_size,
   )
   save_args_composite = {"items": checkpoint_args}
 
