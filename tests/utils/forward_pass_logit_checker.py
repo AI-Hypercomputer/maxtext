@@ -54,6 +54,7 @@ from maxtext.models import models
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
+from maxtext.utils import lora_utils
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -245,21 +246,28 @@ def get_data(golden_data_point, config):
 
 def main(config, test_args):  # pylint: disable=W0621
   """Test the Whole Model of model_name"""
+  init_rng = jax.random.PRNGKey(config.init_weights_seed)
+  init_rng, rng1 = jax.random.split(init_rng)
+  devices_array = maxtext_utils.create_device_mesh(config)
+  mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
+
   if not test_args.run_hf_model:
     """Comparing maxtext/huggingface model with pre-loaded golden logitis"""
     max_logging.log("Initializing MaxText model")
-    init_rng = jax.random.PRNGKey(config.init_weights_seed)
-    init_rng, rng1 = jax.random.split(init_rng)
-    devices_array = maxtext_utils.create_device_mesh(config)
-    mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
     quant = quantizations.configure_quantization(config)
-    if config.pure_nnx:
-      # NNX has a different function to init the training state.
-      raise NotImplementedError("Pure NNX support has not been implemented yet.")
+    if config.pure_nnx_decoder and config.enable_nnx:
+      model = model_creation_utils.from_pretrained(config, mesh=mesh, model_mode=MODEL_MODE_TRAIN)
+
+      if config.lora.enable_lora:
+        model = lora_utils.apply_lora_to_model(model, mesh, config)
+        if config.lora.lora_restore_path:
+          mock_trainer = type("MockTrainer", (), {"model": model, "train_steps": 0})
+          lora_utils.restore_lora_from_path(mock_trainer, config)
+      state = None
     else:
       model = models.transformer_as_linen(config, mesh=mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
       init_state_fn = functools.partial(maxtext_utils.init_initial_state, model, None, config, False, rng1)
-    state, _ = maxtext_utils.setup_decode_state(config, mesh, None, init_state_fn)
+      state, _ = maxtext_utils.setup_decode_state(config, mesh, None, init_state_fn)
 
     if test_args.golden_logits_path == "":
       input_golden_data_path = os.path.join(
@@ -284,15 +292,24 @@ def main(config, test_args):  # pylint: disable=W0621
       max_logging.log(f"\n--- Comparing forward pass for golden data index: {golden_data_index} ---")
       ids, decoder_segment_ids, decoder_positions, golden_logits, seq_len, images = get_data(golden_data_point, config)
       max_logging.log("maxtext forward pass")
-      full_train_logits = model.apply(
-          state.params,
-          ids,
-          decoder_positions,
-          decoder_segment_ids,
-          encoder_images=images,
-          enable_dropout=False,
-          rngs={"aqt": init_rng},
-      )
+      if state is None:
+        full_train_logits = model(
+            decoder_input_tokens=ids,
+            decoder_positions=decoder_positions,
+            decoder_segment_ids=decoder_segment_ids,
+            encoder_images=images,
+            enable_dropout=False,
+        )
+      else:
+        full_train_logits = model.apply(
+            state.params,
+            ids,
+            decoder_positions,
+            decoder_segment_ids,
+            encoder_images=images,
+            enable_dropout=False,
+            rngs={"aqt": init_rng},
+        )
 
       full_train_logits = jax.experimental.multihost_utils.process_allgather(full_train_logits, tiled=True)
       # if full_train_logits shape is [num_hosts, batch_size, seq_len, vocab_size]
@@ -374,7 +391,7 @@ def main(config, test_args):  # pylint: disable=W0621
         max_logging.log("\n[test criteria]")
         max_logging.log(
             f"Checking Numerical Differences between train logits and golden logits against "
-            f"atol={test_args.rtol} rtol={test_args.atol}."
+            f"atol={test_args.atol} rtol={test_args.rtol}."
         )
         rtol_val = float(test_args.rtol)
         atol_val = float(test_args.atol)
@@ -414,7 +431,15 @@ def main(config, test_args):  # pylint: disable=W0621
     torch_dtype = dtype_mapping.get(config.dtype.name, torch.bfloat16)
     max_logging.log(f"Loading HF model with dtype: {torch_dtype} (derived from config.dtype: {config.dtype})")
 
-    hf_model = AutoModelForCausalLM.from_pretrained(test_args.hf_model_path, dtype=torch_dtype, token=hf_token)
+    hf_model = AutoModelForCausalLM.from_pretrained(test_args.hf_model_path, torch_dtype=torch_dtype, token=hf_token)
+    hf_lora_path = config.hf_lora_adapter_path
+    if hf_lora_path:
+      max_logging.log(f"Loading HF PEFT LoRA adapter from {hf_lora_path}")
+      try:
+        from peft import PeftModel  # pylint: disable=import-outside-toplevel
+      except ImportError as exc:
+        raise ImportError("peft library is required to load HF LoRA adapter. Run `pip install peft`.") from exc
+      hf_model = PeftModel.from_pretrained(hf_model, hf_lora_path)
 
     # Load tokenizer: `test_args.hf_model_path` or fallback to `config.tokenizer_path`
     try:
@@ -431,21 +456,23 @@ def main(config, test_args):  # pylint: disable=W0621
     if any(config.model_name.startswith(prefix) for prefix in pad_token_prefixes):
       tokenizer.pad_token = tokenizer.eos_token
 
-    init_rng = jax.random.PRNGKey(config.init_weights_seed)
-    init_rng, rng1 = jax.random.split(init_rng)
-    devices_array = maxtext_utils.create_device_mesh(config)
-    mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
     quant = quantizations.configure_quantization(config)
-    if config.pure_nnx:
-      # NNX has a different function to init the training state.
-      raise NotImplementedError("Pure NNX support has not been implemented yet.")
+    if config.pure_nnx_decoder and config.enable_nnx:
+      maxtext_model = model_creation_utils.from_pretrained(config, mesh=mesh, model_mode=MODEL_MODE_TRAIN)
+
+      if config.lora.enable_lora:
+        maxtext_model = lora_utils.apply_lora_to_model(maxtext_model, mesh, config)
+        if config.lora.lora_restore_path:
+          mock_trainer = type("MockTrainer", (), {"model": maxtext_model, "train_steps": 0})
+          lora_utils.restore_lora_from_path(mock_trainer, config)
+      maxtext_state = None
     else:
       maxtext_model = models.transformer_as_linen(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
       init_state_fn = functools.partial(maxtext_utils.init_initial_state, maxtext_model, None, config, False, rng1)
-    if test_args.ckpt_type == "linen":
-      maxtext_state, _ = maxtext_utils.setup_decode_state(config, mesh, None, init_state_fn)
-    else:
-      maxtext_state, _ = model_creation_utils.setup_decode_state_from_nnx(maxtext_model, config, rng1, mesh)
+      if test_args.ckpt_type == "linen":
+        maxtext_state, _ = maxtext_utils.setup_decode_state(config, mesh, None, init_state_fn)
+      else:
+        maxtext_state, _ = model_creation_utils.setup_decode_state_from_nnx(maxtext_model, config, rng1, mesh)
 
     prompts = ["I love to", "Today is a", "What is the"]
     all_data_to_save = []
@@ -480,14 +507,22 @@ def main(config, test_args):  # pylint: disable=W0621
         hf_logits_torch = hf_model(**inputs).logits
 
       # --- MaxText Forward Pass ---
-      mt_logits_jax = maxtext_model.apply(
-          maxtext_state.params,
-          mt_ids,
-          mt_decoder_positions,
-          mt_decoder_segment_ids,
-          enable_dropout=False,
-          rngs={"aqt": init_rng},
-      )
+      if maxtext_state is None:
+        mt_logits_jax = maxtext_model(
+            decoder_input_tokens=mt_ids,
+            decoder_positions=mt_decoder_positions,
+            decoder_segment_ids=mt_decoder_segment_ids,
+            enable_dropout=False,
+        )
+      else:
+        mt_logits_jax = maxtext_model.apply(
+            maxtext_state.params,
+            mt_ids,
+            mt_decoder_positions,
+            mt_decoder_segment_ids,
+            enable_dropout=False,
+            rngs={"aqt": init_rng},
+        )
       mt_logits_jax_sliced = mt_logits_jax[:, :actual_seq_len, :]
       mt_logits_torch = convert_jax_weight_to_torch(mt_logits_jax_sliced)
 
@@ -566,7 +601,7 @@ if __name__ == "__main__":
   # Reconstruct model_args (script name + the args MaxText needs)
   model_args = [sys.argv[0]] + remaining_args
 
-  cfg = pyconfig.initialize(model_args)
+  cfg = pyconfig.initialize_pydantic(model_args)
   assert (
       test_args.atol is not None or test_args.max_kl_div is not None
   ), "At least one of --atol or --max_kl_div must be specified to define the test criteria."

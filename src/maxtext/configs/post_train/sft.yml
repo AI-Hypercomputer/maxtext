@@ -21,6 +21,15 @@ sft_train_on_completion_only: True
 packing: True
 learning_rate: 2.e-5
 
+# -------------- LoRA / QLoRA --------------
+lora:
+  enable_lora: False
+  lora_rank: 0
+  lora_alpha: 0.0
+  lora_module_path: ""
+  # Optional path to LoRA weights to load before training. Ignored if the current run is resumed.
+  lora_restore_path: ""
+
 # -------------- HF pipeline --------------
 dataset_type: hf
 hf_path: 'HuggingFaceH4/ultrachat_200k'

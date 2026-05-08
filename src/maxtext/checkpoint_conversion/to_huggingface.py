@@ -12,7 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Converts a MaxText checkpoint to a HuggingFace-compatible model checkpoint.
+"""Converts a MaxText checkpoint to a HuggingFace-compatible format.
+
+This script supports three conversion modes:
+1. Base: Converts a standard MaxText model to a full Hugging Face model.
+   (Requires `load_parameters_path`)
+2. Adapter: Converts a standalone MaxText LoRA checkpoint to HF PEFT format.
+   (Requires `lora.lora_restore_path`)
+3. Merged: Merges MaxText LoRA weights into the base model to produce a full HF model.
+   (Requires both `load_parameters_path` and `lora.lora_restore_path`)
 
 It is invoked using MaxText's pyconfig, which means you provide a base config
 file and can override parameters on the command line.
@@ -20,8 +28,10 @@ file and can override parameters on the command line.
 Key Parameters (to be set in the config file or as command-line overrides):
   model_name: (Required) The name of the model to convert (e.g., "gemma2-2b").
               Must be a key in `maxtext.utils.globals.HF_IDS`.
-  load_parameters_path: (Required) Path to the MaxText checkpoint directory
-                        containing the parameter-only checkpoint.
+  load_parameters_path: (Required for Base/Merged) Path to the MaxText base
+                        parameter-only checkpoint.
+  lora.lora_restore_path: (Required for Adapter/Merged) Path to the MaxText
+                          LoRA checkpoint directory.
   base_output_directory: (Optional) The directory where the converted HuggingFace
                          checkpoint will be saved. Can be a local path, a GCS
                          path (gs://...), or a HuggingFace Hub repo ID (hf://...).
@@ -44,22 +54,20 @@ Environment Variables:
                  is a Hub repo ID (e.g., "hf://my-user/my-model").
 
 Example Usage:
-  To convert a gemma2-2b MaxText checkpoint and save it to a local directory:
+  To merge a LoRA adapter into a base model and save as a full HF model:
 
   export HF_AUTH_TOKEN="hf_YOUR_TOKEN"
   python src/maxtext/checkpoint_conversion/to_huggingface.py \
     src/maxtext/configs/base.yml \
-    model_name="gemma2-2b" \
-    load_parameters_path="/path/to/your/maxtext/checkpoint/" \
-    base_output_directory="/path/to/your/output/directory" \
-    scan_layers=False
-
-  Note: Other parameters in base.yml (like per_device_batch_size, max_target_length, etc.)
-  are used to initialize the model structure and should be consistent with the
-  checkpoint being converted, but often don't need to be changed from their defaults.
+    model_name="gemma3-4b" \
+    load_parameters_path="/path/to/base/checkpoint/" \
+    lora.lora_restore_path="/path/to/lora/checkpoint/" \
+    base_output_directory="/path/to/output/" \
+    scan_layers=True
 """
 
 import jax
+import jax.numpy as jnp
 import os
 from typing import Sequence
 import time
@@ -84,6 +92,7 @@ from maxtext.checkpoint_conversion.utils.utils import (
     detect_and_extract_checkpoint,
     MemoryMonitorTqdm,
     print_peak_memory,
+    save_adapter_files,
 )
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
@@ -98,6 +107,22 @@ flags.DEFINE_bool(
 )
 
 FLAGS = flags.FLAGS
+
+
+def _get_lora_delta(key, lora_state_dict, lora_scaling):
+  """Calculates the LoRA delta for a given parameter key."""
+  a_key, b_key = key + "_lora_a", key + "_lora_b"
+  if a_key not in lora_state_dict and key.startswith("params-"):
+    a_key, b_key = key[7:] + "_lora_a", key[7:] + "_lora_b"
+
+  if a_key in lora_state_dict and b_key in lora_state_dict:
+    data_a, data_b = jnp.asarray(lora_state_dict[a_key], dtype=jnp.float32), jnp.asarray(
+        lora_state_dict[b_key], dtype=jnp.float32
+    )
+    if data_a.ndim > 2:
+      return jnp.einsum("ipr,rpo->ipo", data_a, data_b) * lora_scaling
+    return jnp.matmul(data_a, data_b) * lora_scaling
+  return None
 
 
 def _get_model_mappings(
@@ -246,6 +271,89 @@ def _validate_or_update_architecture(hf_config, max_config, override: bool):
     raise ValueError(error_msg)
 
 
+def _transform_weights_to_adapter(param_map, state_dict):
+  """Extracts standalone PEFT weights from MaxText state dict."""
+  processed_params_list = []
+  found_hf_modules = set()
+  for mt_key, hf_paths in param_map.items():
+    a_key, b_key = mt_key + "_lora_a", mt_key + "_lora_b"
+    if a_key not in state_dict and mt_key.startswith("params-"):
+      a_key, b_key = mt_key[7:] + "_lora_a", mt_key[7:] + "_lora_b"
+    if a_key in state_dict and b_key in state_dict:
+      data_a, data_b = state_dict[a_key], state_dict[b_key]
+      hf_paths = [hf_paths] if not isinstance(hf_paths, list) else hf_paths
+      for i in range(min(data_a.shape[1] if data_a.ndim > 2 else 1, len(hf_paths))):
+        found_hf_modules.add(hf_paths[i].split(".")[-2])
+        name = hf_paths[i].replace(".weight", "")
+        processed_params_list.append(
+            (
+                f"base_model.model.{name}.lora_A.weight",
+                jax.numpy.asarray((data_a[:, i, :] if data_a.ndim > 2 else data_a).T),
+            )
+        )
+        processed_params_list.append(
+            (
+                f"base_model.model.{name}.lora_B.weight",
+                jax.numpy.asarray((data_b[:, i, :] if data_b.ndim > 2 else data_b).T),
+            )
+        )
+  return dict(processed_params_list), found_hf_modules
+
+
+def _transform_weights_to_full_model(config, filtered_map_keys, state_dict, param_map, hook_fn_map, shape_map):
+  """Transforms MaxText weights to HF full model format, with optional LoRA merging."""
+  processed_params_list = []
+  lora_scaling = config.lora.lora_alpha / config.lora.lora_rank if config.lora.lora_rank > 0 else 1.0
+  for key in MemoryMonitorTqdm(filtered_map_keys, leave=True):
+    weight = [state_dict[subkey] for subkey in key] if isinstance(key, tuple) else state_dict.get(key)
+    if weight is not None and not isinstance(key, tuple):
+      delta = _get_lora_delta(key, state_dict, lora_scaling)
+      if delta is not None:
+        if delta.shape != weight.shape and delta.size == weight.size:
+          delta = delta.reshape(weight.shape)
+        weight = (jnp.asarray(weight, dtype=jnp.float32) + delta).astype(weight.dtype)
+    if weight is not None:
+      processed_params_list.extend(process_maxtext_param(key, weight, param_map, hook_fn_map, shape_map, config))
+  return dict(processed_params_list)
+
+
+def _transform_and_save_weights(
+    config,
+    lora_restore_path,
+    load_parameters_path,
+    param_map,
+    maxtext_state_dict,
+    filtered_map_keys,
+    hook_fn_map,
+    shape_map,
+    output_directory,
+    hf_config_obj,
+    tokenizer,
+    processor,
+):
+  """Orchestrates weight transformation and saving based on conversion mode."""
+  start = time.time()
+  if lora_restore_path and not load_parameters_path:
+    # Adapter Mode
+    transformed_hf_weights, found_hf_modules = _transform_weights_to_adapter(param_map, maxtext_state_dict)
+    save_adapter_files(output_directory, transformed_hf_weights, config, found_hf_modules, HF_IDS.get(config.model_name))
+    max_logging.log(f"✅ LoRA adapter successfully saved at {output_directory}")
+  else:
+    # Base or Merged Mode
+    transformed_hf_weights = _transform_weights_to_full_model(
+        config, filtered_map_keys, maxtext_state_dict, param_map, hook_fn_map, shape_map
+    )
+
+    if not transformed_hf_weights:
+      raise ValueError("Error: No weights were transformed. Check mappings and parameter paths.")
+
+    max_logging.log("\nSaving HuggingFace model...")
+    save_model_files(transformed_hf_weights, hf_config_obj, tokenizer, processor, output_directory)
+    max_logging.log(f"✅ MaxText model successfully saved in HuggingFace format at {output_directory}")
+
+  max_logging.log(f"Elapse for transform and save: {(time.time() - start) / 60:.2f} min")
+
+
 def main(argv: Sequence[str]) -> None:
   """Main function to convert a MaxText checkpoint to HuggingFace format.
 
@@ -265,8 +373,14 @@ def main(argv: Sequence[str]) -> None:
   max_utils.print_system_information()
   overall_start = time.time()
 
-  # Load Maxtext checkpoint using Orbax to get full parameter dict
-  max_logging.log(f"\nLoading Orbax checkpoint from: {config.load_parameters_path}")
+  lora_restore_path = config.lora.lora_restore_path
+  load_parameters_path = config.load_parameters_path
+
+  if not load_parameters_path and not lora_restore_path:
+    raise ValueError("Either load_parameters_path or lora_restore_path must be specified.")
+
+  # Load Maxtext checkpoint using Orbax (now smart enough to load both if present)
+  max_logging.log("\nLoading Orbax checkpoint(s)...")
   start = time.time()
   checkpoint_dict = load_orbax_checkpoint(config)
   max_logging.log(f"Elapse for checkpoint load: {(time.time() - start) / 60:.2f} min")
@@ -306,7 +420,10 @@ def main(argv: Sequence[str]) -> None:
   maxtext_state_dict = detect_and_extract_checkpoint(checkpoint_dict)
 
   # Validate that checkpoint keys match the parameter mapping
-  filtered_map_keys = validate_and_filter_param_map_keys(param_map.keys(), maxtext_state_dict.keys())
+  state_keys = set(maxtext_state_dict) | {
+      k.replace("_lora_a", "").replace("_lora_b", "") for k in maxtext_state_dict if "_lora_" in k
+  }
+  filtered_map_keys = validate_and_filter_param_map_keys(param_map, state_keys)
 
   # When not converting a multimodal model, skip vision encoder weights even if
   # they are present in the checkpoint (e.g. converting text-only from a
@@ -320,44 +437,22 @@ def main(argv: Sequence[str]) -> None:
     ]
 
   # Iterate through the parameter map to transform and collect weights.
-  # This loop handles both simple 1-to-1 mappings and complex N-to-1 mappings
-  # (where multiple MaxText weights are combined into a single HF weight).
-  max_logging.log("\nProccessing weight...")
-  start = time.time()
-  processed_params_list = []
-
-  for key in MemoryMonitorTqdm(filtered_map_keys, total=len(filtered_map_keys), leave=True):
-    if isinstance(key, tuple):
-      # if key is tuple of param names, weight is list of param weights
-      weight = [maxtext_state_dict[subkey] for subkey in key]
-    else:
-      # if key is single param name, weight is single param weight
-      weight = maxtext_state_dict[key]
-
-    processed_params = process_maxtext_param(key, weight, param_map, hook_fn_map, shape_map, config)
-    processed_params_list.extend(processed_params)
-
-  max_logging.log(f"Weight dtype after transform: {type(processed_params[0][1].dtype)}")
-
-  transformed_hf_weights = dict(processed_params_list)
-  max_logging.log(f"Elapse for transform: {(time.time() - start) / 60:.2f} min")
-
-  # 5. Save in HuggingFace Format
-  if not transformed_hf_weights:
-    print("Error: No weights were transformed. Check mappings and parameter paths.")
-    return
-
-  max_logging.log("\nSaving HuggingFace model...")
-  start = time.time()
-  save_model_files(
-      weight_arrays=transformed_hf_weights,
-      config=hf_config_obj,
-      tokenizer=tokenizer,
-      processor=processor,
-      output_dir=output_directory,
+  max_logging.log("\nProcessing weights...")
+  _transform_and_save_weights(
+      config,
+      lora_restore_path,
+      load_parameters_path,
+      param_map,
+      maxtext_state_dict,
+      filtered_map_keys,
+      hook_fn_map,
+      shape_map,
+      output_directory,
+      hf_config_obj,
+      tokenizer,
+      processor,
   )
-  max_logging.log(f"✅ MaxText model successfully saved in HuggingFace format at {output_directory}")
-  max_logging.log(f"Elapse for save: {(time.time() - start) / 60:.2f} min")
+
   max_logging.log(f"Overall Elapse: {(time.time() - overall_start) / 60:.2f} min")
   print_peak_memory()
 

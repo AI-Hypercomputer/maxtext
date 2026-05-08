@@ -22,6 +22,7 @@ openai
 openai-harmony
 papermill
 partial-json-parser
+peft
 perfetto
 prometheus-fastapi-instrumentator
 py-cpuinfo

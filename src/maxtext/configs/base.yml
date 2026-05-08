@@ -43,6 +43,7 @@ load_parameters_path: ""
 
 # LoRA adapter support configs
 lora_input_adapters_path: ""    # Input GCS path for a parent directory which has all the LoRA adapters (lora_id as subdir)
+hf_lora_adapter_path: ""        # Input HF repo ID or local path for HF LoRA adapter
 
 # Loads a full checkpoint including optimizer state and step count from a specific directory
 # e.g. gs://my-base-output-directory/my-previous-run-name/checkpoints/items/NUMBER or NUMBER/items

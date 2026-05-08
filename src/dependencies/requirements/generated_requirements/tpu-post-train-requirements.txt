@@ -2,6 +2,7 @@
 #    See https://maxtext.readthedocs.io/en/latest/development/update_dependencies.html for details.
 
 absl-py>=2.4.0
+accelerate>=1.13.0
 aiofiles>=25.1.0
 aiohappyeyeballs>=2.6.1
 aiohttp>=3.13.5
@@ -77,15 +78,15 @@ gcsfs>=2026.2.0
 gepa>=0.1.1
 gguf>=0.19.0
 google-api-core>=2.30.3
-google-api-python-client>=2.195.0
-google-auth>=2.50.0
-google-auth-httplib2>=0.3.1
-google-auth-oauthlib>=1.3.1
+google-api-python-client>=2.196.0
+google-auth>=2.51.0
+google-auth-httplib2>=0.4.0
+google-auth-oauthlib>=1.4.0
 google-cloud-aiplatform>=1.150.0
 google-cloud-appengine-logging>=1.9.0
 google-cloud-audit-log>=0.5.0
 google-cloud-bigquery>=3.41.0
-google-cloud-core>=2.5.1
+google-cloud-core>=2.6.0
 google-cloud-logging>=3.15.0
 google-cloud-mldiagnostics>=1.0.2
 google-cloud-monitoring>=2.30.0
@@ -96,9 +97,9 @@ google-crc32c>=1.8.0
 google-genai>=1.75.0
 google-metrax>=0.2.3
 google-pasta>=0.2.0
-google-resumable-media>=2.8.2
+google-resumable-media>=2.9.0
 google-tunix>=0.1.3
-googleapis-common-protos>=1.74.0
+googleapis-common-protos>=1.75.0
 grain>=0.2.16
 grpc-google-iam-v1>=0.14.4
 grpcio>=1.78.0
@@ -219,6 +220,7 @@ parso>=0.8.7
 partial-json-parser>=0.2.1.1.post7
 pathspec>=1.1.1
 pathwaysutils>=0.1.8
+peft>=0.19.1
 perfetto>=0.16.0
 pexpect>=4.9.0 ; sys_platform != 'emscripten' and sys_platform != 'win32'
 pillow>=12.1.1
@@ -231,7 +233,7 @@ prometheus-fastapi-instrumentator>=7.1.0
 promise>=2.3
 prompt-toolkit>=3.0.52
 propcache>=0.4.1
-proto-plus>=1.27.2
+proto-plus>=1.28.0
 protobuf>=6.33.6
 psutil>=7.2.2
 ptyprocess>=0.7.0 ; sys_platform != 'emscripten' and sys_platform != 'win32'
