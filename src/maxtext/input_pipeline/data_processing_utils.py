@@ -29,9 +29,9 @@ def parse_and_keep_features(dataset, config, data_columns, tokenize):
   """Parse arrayrecord features or keep specified columns for other formats."""
   if config.grain_file_type in ("arrayrecord", "tfrecord"):
     dataset = dataset.map(input_pipeline_utils.ParseFeatures(data_columns, tokenize))
-    dataset = dataset.map(input_pipeline_utils.NormalizeFeatures(data_columns, tokenize))
   else:
     dataset = dataset.map(input_pipeline_utils.KeepFeatures(feature_names=data_columns))
+  dataset = dataset.map(input_pipeline_utils.NormalizeFeatures(data_columns, tokenize))
   return dataset
 
 

@@ -102,6 +102,8 @@ def preprocessing_pipeline(
         "Please set train_data_columns or eval_data_columns accordingly."
     )
 
+  input_pipeline_utils.validate_tfds_data_types(dataset, data_column_names, tokenize)
+
   if not use_dpo:
     assert len(data_column_names) == 1
     dataset = dataset.map(
