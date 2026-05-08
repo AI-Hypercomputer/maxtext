@@ -29,6 +29,7 @@ from absl import app
 import optax
 
 import pathwaysutils  # pylint: disable=unused-import
+from pathwaysutils.debug import watchdog
 
 import tensorflow as tf
 
@@ -750,25 +751,68 @@ def training_loop_iteration(
 
 def train_loop(config, recorder, state=None):
   """Main Training loop."""
-  (
-      init_rng,
-      checkpoint_manager,
-      state_mesh_shardings,
-      model,
-      mesh,
-      learning_rate_schedule,
-      data_iterator,
-      data_loader,
-      rampup_manager,
-      eval_data_iterator,
-      state,
-  ) = train_utils.setup_train_loop(config, recorder)
+  # Kills the workload if initialization takes longer than 20 minutes
+  with watchdog.watchdog(name="initialization", timeout=20 * 60, repeat=False):
+    (
+        init_rng,
+        checkpoint_manager,
+        state_mesh_shardings,
+        model,
+        mesh,
+        learning_rate_schedule,
+        data_iterator,
+        data_loader,
+        rampup_manager,
+        eval_data_iterator,
+        state,
+    ) = train_utils.setup_train_loop(config, recorder)
+
+    start_step = get_first_step(model, state)  # this is the start_step for training
+    train_utils.validate_completed_steps(start_step, config.steps)
+
+    if isinstance(model, nn.Module):
+      jit_model = model
+    else:
+      jit_model, state = nnx.split(state)
+
+    params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
+
+    p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
+        config,
+        jit_model,
+        mesh,
+        state,
+        state_mesh_shardings,
+        train_step,
+        eval_step,
+        eval_data_iterator,
+        params_shardings,
+    )
+
+    with jax.set_mesh(mesh), mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+      data_sharding = sharding.get_input_data_sharding(config, mesh)
+      shaped_batch = maxtext_utils.get_shaped_batch(config, batch_sharding=data_sharding)
+      if config.shard_optimizer_over_data and isinstance(model, nn.Module):
+        state = sharding.maybe_shard_with_name(state, state_mesh_shardings, config.shard_mode)
+      elif config.shard_optimizer_over_data:
+        # NNX: reshard state so params match the data-sharded in_shardings (Zero-1 layout)
+        state = jax.device_put(state, state_mesh_shardings)
+      if isinstance(model, nn.Module):
+        lower_args = (state, shaped_batch, init_rng)
+      else:
+        lower_args = (state, shaped_batch)
+      maxtext_utils.maybe_dump_jaxpr(config, p_train_step, lower_args)
+      if config.compiled_trainstep_file == "":  # compile only when there is no pre-compiled file loaded
+        compiled = p_train_step.lower(state, shaped_batch, init_rng).compile()
+        compiled_stats = compiled.memory_analysis()
+        max_utils.print_compiled_memory_stats(compiled_stats)
 
   # Throttling is applied only if configured (dcn_bandwidth_limit is set).
   # The default flag value is empty, meaning no throttling is applied by default.
   train_utils.maybe_apply_dcn_throttling(config)
 
   start_step = get_first_step(model, state)  # this is the start_step for training
+<<<<<<< HEAD
   train_utils.validate_completed_steps(start_step, config.steps)
 
   if isinstance(model, nn.Module):
@@ -886,7 +930,12 @@ def train_loop(config, recorder, state=None):
 
     # Using while loop to allow for potential dynamic 'steps' adjustment in future
     while python_vars["step"] < immutable_data["steps"]:
-      training_loop_iteration(jax_device_state, python_vars, immutable_data)
+      # Print the stacktrace every 60s and also exit the workload if longer than 600s
+      with (
+          watchdog.watchdog("step-stack-status", timeout=60),
+          watchdog.watchdog("step-timebomb", timeout=10 * 60, repeat=False),
+      ):
+        training_loop_iteration(jax_device_state, python_vars, immutable_data)
       python_vars["step"] += 1
 
     # Unpack state for post-loop actions
