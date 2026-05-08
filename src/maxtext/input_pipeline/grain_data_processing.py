@@ -451,6 +451,7 @@ def make_grain_train_iterator(
         global_shape,
         checkpoint_path=config.checkpoint_dir,
         elastic=config.grain_use_elastic_iterator,
+        config=config,
     )
 
   if 0 < config.expansion_factor_real_data < 1:
@@ -550,4 +551,5 @@ def make_grain_eval_iterator(
         global_shape,
         checkpoint_path=config.checkpoint_dir,
         elastic=config.grain_use_elastic_iterator,
+        config=config,
     )
