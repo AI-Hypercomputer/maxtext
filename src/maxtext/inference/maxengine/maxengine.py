@@ -446,12 +446,16 @@ class MaxEngine(_BaseEngine):
       rest_dict = rest_state.to_pure_dict()
 
       def _overlay(dst, src):
-        if isinstance(dst, dict):
+        if isinstance(dst, dict) and isinstance(src, dict):
           for k, v in dst.items():
             if k in src:
               dst[k] = _overlay(v, src[k])
           return dst
-        return src if not isinstance(src, dict) else dst
+        # On structural mismatch keep dst (PREFILL); swapping a leaf for a subtree
+        # (or the other way) would corrupt the model. Both-leaves is the overlay case.
+        if isinstance(dst, dict) or isinstance(src, dict):
+          return dst
+        return src
 
       rest_dict = _overlay(rest_dict, loaded_rest_dict)
       nnx.replace_by_pure_dict(rest_state, rest_dict)

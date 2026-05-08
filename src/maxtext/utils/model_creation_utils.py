@@ -1039,16 +1039,14 @@ def from_pretrained(
         def _free_device_memory(node):
           if isinstance(node, nnx.Variable) and not isinstance(node, (nnx.RngState, nnx.Cache)):
             inner = node.get_value() if hasattr(node, "get_value") else node[...]
-            # Same QTensor caveat as `_build_value_target`: AQT serve-mode `qrhs.frozen`
-            # wraps a QTensor whose `__getitem__` fails on `LogicallyPartitioned`.
-            # We only need to free a single jax.Array leaf — for composite values
-            # there's nothing to free at this level, so skip.
-            val = inner if hasattr(inner, "shape") else None
-          else:
-            val = node
-
-          if isinstance(val, jax.Array) and not val.is_deleted():
-            val.delete()
+            # AQT serve-mode `qrhs.frozen` wraps a QTensor (composite pytree) rather
+            # than a single jax.Array. Walking via tree_leaves frees the qvalue/scale
+            # arrays too; the single-leaf case is a 1-element tree.
+            for leaf in jax.tree_util.tree_leaves(inner):
+              if isinstance(leaf, jax.Array) and not leaf.is_deleted():
+                leaf.delete()
+          elif isinstance(node, jax.Array) and not node.is_deleted():
+            node.delete()
 
           return node
 
