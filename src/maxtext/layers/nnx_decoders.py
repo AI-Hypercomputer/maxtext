@@ -984,7 +984,10 @@ class NNXDecoder(nnx.Module):
     if cfg.logits_via_embedding:
       # Use the transpose of embedding matrix for logit transform.
       if isinstance(shared_embedding, nnx.Module):
-        embedding_table = shared_embedding.embedding.value
+        # Modern NNX API; the deprecated `.value` shim registers the access in NNX's
+        # mutation tracking, which JAX detects as a tracer leak when the embedding is
+        # closure-captured across a custom_vjp boundary (e.g. vocab_tiling_nnx_loss).
+        embedding_table = shared_embedding.embedding[...]
       else:
         embedding_table = shared_embedding.variables["params"]["embedding"]
       if isinstance(embedding_table, nn.spmd.LogicallyPartitioned):

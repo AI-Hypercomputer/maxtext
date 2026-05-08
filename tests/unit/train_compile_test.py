@@ -1024,10 +1024,6 @@ class TrainCompile(parameterized.TestCase):
   @pytest.mark.cpu_only
   def test_vocab_tiling_bf16(self):
     """test vocab_tiling when weight_dtype=bfloat16"""
-    cfg = pyconfig.initialize([None, get_test_config_path()])
-    if getattr(cfg, "enable_nnx", False):
-      pytest.skip("Vocab tiling not supported on NNX.")
-
     compiled_trainstep_file = "/tmp/test_vocab_tiling_bf16.pickle"
     train_compile_main(
         (
@@ -1121,5 +1117,33 @@ class TrainCompile(parameterized.TestCase):
             "ici_data_parallelism=4",
             "shard_optimizer_over_data=true",
             "shard_mode=explicit",
+        )
+    )
+
+  @pytest.mark.cpu_only
+  def test_vocab_tiling_bf16_nnx(self):
+    """AOT compile vocab tiling on the NNX path (vocab_tiling_nnx_loss + custom_vjp).
+
+    Sets `pure_nnx`/`enable_nnx`/`pure_nnx_decoder` explicitly so the NNX AOT
+    path is covered regardless of the default values. Once those defaults flip
+    to True, `test_vocab_tiling_bf16` above will already exercise this same
+    path via defaults.
+    """
+    compiled_trainstep_file = "/tmp/test_vocab_tiling_bf16_nnx.pickle"
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-8",
+            "compile_topology_num_slices=1",
+            "base_num_decoder_layers=2",
+            "per_device_batch_size=2",
+            "max_target_length=1024",
+            "num_vocab_tiling=4",
+            "weight_dtype=bfloat16",
+            "pure_nnx=true",
+            "enable_nnx=true",
+            "pure_nnx_decoder=true",
         )
     )
