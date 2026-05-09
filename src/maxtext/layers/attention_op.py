@@ -75,6 +75,7 @@ from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_utils
 from maxtext.utils.sharding import logical_to_mesh_axes, maybe_shard_with_pspec
 import numpy as np
+from tokamax._src.ops.attention import api as tokamax_attention_api
 from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel as tokamax_splash_kernel
 from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask as tokamax_splash_mask
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
@@ -948,6 +949,7 @@ class AttentionOp(nnx.Module):
             decoder_segment_ids,
             self.attn_logits_soft_cap,
             sinks,
+            indexer_mask=indexer_mask,
             record_max_logits=record_max_logits,
         )
         if max_logits is not None:
@@ -1135,6 +1137,71 @@ class AttentionOp(nnx.Module):
 
     cp_size = self.config.context_parallel_size
     load_balanced_context_parallel = self.config.context_parallel_load_balance
+
+    if getattr(self.config, "use_tokamax_splash_attention_api", False):
+      q_logical_layout = (BATCH_ATTN, LENGTH, HEAD, D_KV)
+      q_pspec = self._logical_to_mesh_axes(q_logical_layout)
+      if q_pspec[1] is not None or cp_size > 1:
+        raise NotImplementedError(
+             "Tokamax API (mosaic_tpu) does not support sequence sharding "
+             "(Context Parallelism) yet."
+         )
+      query = self._maybe_shard_with_pspec(query, q_pspec)
+
+      kv_pspec = self._logical_to_mesh_axes((BATCH_ATTN, KV_LENGTH, HEAD, D_KV))
+      key = self._maybe_shard_with_pspec(key, kv_pspec)
+      value = self._maybe_shard_with_pspec(value, kv_pspec)
+
+      q_sharding = jax.sharding.NamedSharding(self.mesh, q_pspec)
+      mask = None
+      if decoder_segment_ids is not None:
+        mask = (
+            decoder_segment_ids[:, :, None] == decoder_segment_ids[:, None, :]
+        )
+        mask = mask[:, None, :, :]
+
+      if self.config.use_indexer and indexer_mask is not None:
+        indexer_bool = jnp.isclose(indexer_mask, 0.0)[:, None, :, :]
+        mask = mask & indexer_bool if mask is not None else indexer_bool
+
+      if self.attention_type == AttentionType.CHUNK:
+        if self.chunk_attn_window_size is None:
+          raise ValueError("chunk_attn_window_size must be set for chunk attention type")
+        chunk_bool = _generate_chunk_attention_mask(
+            mask_shape=(query.shape[1], key.shape[1]),
+            chunk_size=self.chunk_attn_window_size,
+            q_offset=0 # Offset is 0 for training/prefill
+        )
+        chunk_bool = chunk_bool[None, None, :, :] # [B, 1, Q, KV]
+        mask = mask & chunk_bool if mask is not None else chunk_bool
+
+      if mask is not None:
+        mask_logical_layout = (BATCH_ATTN, HEAD, LENGTH, KV_LENGTH)
+        mask_pspec = self._logical_to_mesh_axes(mask_logical_layout)
+        mask = self._maybe_shard_with_pspec(mask, mask_pspec)
+
+      is_causal = self.attention_type != AttentionType.FULL
+      local_window_size = None
+      if self.attention_type == AttentionType.LOCAL_SLIDING:
+        if self.sliding_window_size is None:
+          raise ValueError("Sliding_window_size must be set if Local Sliding attention type")
+        local_window_size = (self.sliding_window_size, self.sliding_window_size)
+
+      scale = 1.0 / math.sqrt(query.shape[-1])
+      attention_output = tokamax_attention_api.dot_product_attention(
+          query,
+          key,
+          value,
+          mask=mask,
+          scale=scale,
+          is_causal=is_causal,
+          local_window_size=local_window_size,
+          logits_soft_cap=attn_logits_soft_cap,
+          precision=self.config.matmul_precision,
+          implementation="mosaic_tpu",
+          q_sharding=q_sharding,
+      )
+      return attention_output, None
 
     # Transpose to ('batch', 'heads', 'length', 'kv')
     query = jnp.transpose(query, axes=(0, 2, 1, 3))
