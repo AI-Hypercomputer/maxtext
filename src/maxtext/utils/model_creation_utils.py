@@ -570,24 +570,54 @@ def setup_configs_and_devices(argv: list[str] | None = None, kwargs: dict | None
       num_devices = len(devices)
       num_trainer_devices = int(num_devices * config.trainer_devices_fraction)
       num_sampler_devices = int(num_devices * config.sampler_devices_fraction)
-      trainer_device_indices_str = os.environ.get("TRAINER_DEVICE_INDICES")
-      if trainer_device_indices_str:
-        trainer_device_indices = [int(x.strip()) for x in trainer_device_indices_str.split(",")]
-        max_logging.log(f"Using custom trainer device indices: {trainer_device_indices}")
-        trainer_devices = [devices[i] for i in trainer_device_indices]
+      trainer_z_index_str = config.trainer_z_index or os.environ.get("TRAINER_Z_INDEX")
+      if trainer_z_index_str:
+        # Group devices by Z coordinate (index 2 of coords [X, Y, Z, Core])
+        devices_by_z = collections.defaultdict(list)
+        for d in devices:
+          if hasattr(d, "coords") and d.coords is not None and len(d.coords) >= 3:
+            z = d.coords[2]
+          else:
+            z = 0  # Fallback for environments without coords (e.g. CPU testing)
+          devices_by_z[z].append(d)
+
+        max_z = max(devices_by_z.keys()) if devices_by_z else 0
+
+        if trainer_z_index_str.lower() == "top":
+          target_z_indices = [max_z]
+        elif trainer_z_index_str.lower() == "bottom":
+          target_z_indices = [0]
+        else:
+          target_z_indices = [int(x.strip()) for x in trainer_z_index_str.split(",")]
+
+        max_logging.log(
+            f"Using custom trainer Z indices: {target_z_indices} (detected max_z: {max_z})"
+        )
+
+        trainer_devices = []
+        for z in target_z_indices:
+          if z in devices_by_z:
+            trainer_devices.extend(devices_by_z[z])
+          else:
+            max_logging.warning(f"Requested Z index {z} not found in available devices.")
+
         sampler_devices = [d for d in devices if d not in trainer_devices]
+
         if len(trainer_devices) != num_trainer_devices:
-          max_logging.warning(
-              f"Custom trainer device count ({len(trainer_devices)}) does not match "
-              f"fraction-based count ({num_trainer_devices}). Using custom indices."
+          raise ValueError(
+              f"trainer_z_index selected {len(trainer_devices)} devices, but "
+              f"trainer_devices_fraction ({config.trainer_devices_fraction}) "
+              f"requires {num_trainer_devices} devices. They must be consistent."
           )
       else:
         trainer_devices = devices[:num_trainer_devices]
         sampler_devices = devices[num_devices - num_sampler_devices :]
-      if config.trainer_devices_fraction != 1.0:
-        max_logging.log(f"Using first {len(trainer_devices)} devices as Trainer devices")
-      if config.sampler_devices_fraction != 1.0:
-        max_logging.log(f"Using last {len(sampler_devices)} devices as Sampler devices")
+      if config.trainer_devices_fraction != 1.0 or trainer_z_index_str:
+        trainer_ids = [d.id for d in trainer_devices]
+        max_logging.log(f"Allocated {len(trainer_devices)} Trainer devices with IDs: {trainer_ids}")
+      if config.sampler_devices_fraction != 1.0 or trainer_z_index_str:
+        sampler_ids = [d.id for d in sampler_devices]
+        max_logging.log(f"Allocated {len(sampler_devices)} Sampler devices with IDs: {sampler_ids}")
     trainer_config = config
     sampler_config = config
   elif config.num_trainer_slices > 0 and config.num_samplers_slices > 0:

@@ -1833,6 +1833,11 @@ class RLHardware(BaseModel):
   use_pathways: bool = Field(True, description="Whether to use Pathways for multihost orchestration.")
   num_trainer_slices: int = Field(-1, description="Number of slices for the trainer.")
   num_samplers_slices: int = Field(-1, description="Number of slices for the samplers.")
+  trainer_z_index: None | str = Field(
+      None,
+      description="Z-coordinate indices of devices to assign to the trainer (e.g. 'top', 'bottom', '3', or '2,3'). "
+      "Must be consistent with trainer_devices_fraction and sampler_devices_fraction.",
+  )
   rollout_data_parallelism: int = Field(
       -1,
       description="Total model replicas for rollout. It should only be specified when you would like to use more "

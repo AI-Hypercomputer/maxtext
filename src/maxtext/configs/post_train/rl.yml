@@ -23,6 +23,16 @@ sampler_devices_fraction: 0.5
 chips_per_vm: 4  # depends on hardware, for v5p this is 4
 num_trainer_slices: -1
 num_samplers_slices: -1
+# Z-coordinate based partitioning of the TPU cube for disaggregated RL.
+# Highly recommended for resolving Pathways sidechannel deadlocks on asymmetric splits (e.g. 0.25/0.75).
+# By setting to 'top', the Trainer mesh is assigned the top face (Z=max_z, e.g. Z=3 on 4x4x4)
+# and the Sampler mesh gets the remaining bottom layers (Z=[0..2], containing Host 0/Rank 0).
+# Supported values: 
+#   - 'top' (Trainer on top plane, Sampler on bottom)
+#   - 'bottom' (Trainer on bottom plane, Sampler on top)
+#   - a specific Z index (e.g. '3') or comma-separated list of indices (e.g. '2,3')
+# Must be consistent with trainer_devices_fraction and sampler_devices_fraction (raises an error if they don't match).
+trainer_z_index: null
 # Only specify rollout_data_parallelism when you would like to use more than one model
 # replicas in rollout. If not specified, rollout_tensor_parallelism will be auto-determined.
 rollout_data_parallelism: -1
