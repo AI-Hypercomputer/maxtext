@@ -33,6 +33,8 @@ from pathwaysutils.experimental import reshard as _experimental_reshard
 from tunix.generate import mappings
 from tunix.generate.vllm_sampler import VllmConfig, VllmSampler
 from tunix.rl.rollout import base_rollout, vllm_rollout
+from tunix.generate.utils import _reshard_in_chunks
+from tunix.rl.reshard import reshard_pytree
 
 from maxtext.integration.vllm.torchax_converter.qwen3_moe import Qwen3MaxTextToVLLMConverter
 
@@ -98,34 +100,28 @@ class MaxTextVllmSampler(VllmSampler):
     logging.info("MaxTextVllmSampler.update_params: converter.convert() done, %d weights to assign", len(vllm_state))
     model_runner_state = self.transformer_state
 
-    logging.info("Weight sync: using pathwaysutils experimental_reshard")
+    logging.info("Weight sync: using tunix chunked resharding (_reshard_in_chunks)")
+    # Convert string keys to tuple keys for flax traverse_util compatibility inside _reshard_in_chunks
+    src_flat = {tuple(k.split(".")): (v.value if hasattr(v, "value") else v) for k, v in vllm_state.items()}
+    spec_flat = {
+        tuple(k.split(".")): model_runner_state[k] for k in vllm_state.keys()
+    }
 
-    keys = list(vllm_state.keys())
+    chunk_size = self.config.reshard_chunk_size or 4
     start_time = time.time()
-    for i, key in enumerate(keys):
-      weight = vllm_state.pop(key)  # free immediately to avoid accumulating all weights in RAM
-      weight_array = (
-          weight.value if hasattr(weight, "value") else weight
-      )  # handle both jnp arrays and ShardedDeviceArrays
-      weight_shape_matches = weight_array.shape == model_runner_state[key].shape
-      assert (
-          weight_shape_matches
-      ), f"Shape mismatch for {key}: converter produced {weight_array.shape}, expected {model_runner_state[key].shape}"
-      # logging.info(f"{key}: mt {weight_array.shape} -> vllm {model_runner_state[key].shape}: {weight_shape_matches}")
-      target_sharding = model_runner_state[key].sharding
-      model_runner_state[key] = _experimental_reshard.reshard(
-          weight_array,
-          target_sharding,
-          donate=True,
-          may_alias=None,
-          cache_resharding_plans=True,
-      )
-      del weight, weight_array  # release TPU buffer before pushing back to device
-      # Periodically flush async ops and GC to prevent host RAM accumulation.
-      if i % 16 == 15:
-        jax.effects_barrier()
-        gc.collect()
-    jax.effects_barrier()
+    resharded_flat_tuples = _reshard_in_chunks(
+        src_flat=src_flat,
+        spec_flat=spec_flat,
+        reshard_fn=reshard_pytree,
+        chunk_size=chunk_size,
+        delete_spec_buffers=True,
+    )
+
+    # Re-assign resharded weights to the model_runner_state
+    for k_tuple, resharded_weight in resharded_flat_tuples.items():
+      key = ".".join(k_tuple)
+      model_runner_state[key] = resharded_weight
+
     gc.collect()
     end_time = time.time()
     logging.info("MaxTextVllmSampler.update_params: all weights assigned in %.4f seconds", end_time - start_time)
@@ -196,6 +192,7 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
             tensor_parallel_size=rollout_config.tensor_parallel_size,
             data_parallel_size=rollout_config.data_parallel_size,
             enable_dp_attention=rollout_config.rollout_vllm_enable_dp_attention,
+            reshard_chunk_size=rollout_config.rollout_vllm_reshard_chunk_size,
             engine_kwargs={
                 "max_model_len": cache_config_or_size,
                 "model": rollout_config.rollout_vllm_model_version,

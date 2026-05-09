@@ -2294,17 +2294,15 @@ class MaxTextConfig(
     # Construct full paths for output directories based on the base directory and run name.
     if self.run_name and self.base_output_directory:
       output_dir = os.path.join(self.base_output_directory, self.run_name)
-      self.checkpoint_dir = os.path.join(output_dir, "checkpoints", "")
-      self.metrics_dir = os.path.join(output_dir, "metrics", "")
-      self.tensorboard_dir = os.path.join(output_dir, "tensorboard", "")
+      if self.checkpoint_dir is None:
+        self.checkpoint_dir = os.path.join(output_dir, "checkpoints", "")
+      if self.metrics_dir is None:
+        self.metrics_dir = os.path.join(output_dir, "metrics", "")
+      if self.tensorboard_dir is None:
+        self.tensorboard_dir = os.path.join(output_dir, "tensorboard", "")
       # To work around SDK bug b/454725283, remove the trailing back slash from the managed_mldiagnostics_dir.
-      self.managed_mldiagnostics_dir = os.path.join(output_dir, "managed-mldiagnostics")
-    else:
-      self.checkpoint_dir, self.metrics_dir, self.tensorboard_dir = (
-          None,
-          None,
-          None,
-      )
+      if self.managed_mldiagnostics_dir is None:
+        self.managed_mldiagnostics_dir = os.path.join(output_dir, "managed-mldiagnostics")
 
     # B. RESOLVE TOKENIZER PATH
     # If the tokenizer path is a relative name without a directory, resolve it against the assets root.

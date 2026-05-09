@@ -570,8 +570,20 @@ def setup_configs_and_devices(argv: list[str] | None = None, kwargs: dict | None
       num_devices = len(devices)
       num_trainer_devices = int(num_devices * config.trainer_devices_fraction)
       num_sampler_devices = int(num_devices * config.sampler_devices_fraction)
-      trainer_devices = devices[:num_trainer_devices]
-      sampler_devices = devices[num_devices - num_sampler_devices :]
+      trainer_device_indices_str = os.environ.get("TRAINER_DEVICE_INDICES")
+      if trainer_device_indices_str:
+        trainer_device_indices = [int(x.strip()) for x in trainer_device_indices_str.split(",")]
+        max_logging.log(f"Using custom trainer device indices: {trainer_device_indices}")
+        trainer_devices = [devices[i] for i in trainer_device_indices]
+        sampler_devices = [d for d in devices if d not in trainer_devices]
+        if len(trainer_devices) != num_trainer_devices:
+          max_logging.warning(
+              f"Custom trainer device count ({len(trainer_devices)}) does not match "
+              f"fraction-based count ({num_trainer_devices}). Using custom indices."
+          )
+      else:
+        trainer_devices = devices[:num_trainer_devices]
+        sampler_devices = devices[num_devices - num_sampler_devices :]
       if config.trainer_devices_fraction != 1.0:
         max_logging.log(f"Using first {len(trainer_devices)} devices as Trainer devices")
       if config.sampler_devices_fraction != 1.0:
