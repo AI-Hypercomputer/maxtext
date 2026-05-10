@@ -44,6 +44,12 @@ qk_nope_head_dim: 128
 qk_rope_head_dim: 64
 v_head_dim: 128
 mscale: 1.0
+# Initialize MLA projections with N(0, std); output proj further scaled
+# by 1/sqrt(2*num_decoder_layers). No effect when loading a checkpoint.
+mla_init_std: 0.001
+# Mask tokens whose backward-gradient RMS exceeds threshold at each
+# decoder-layer boundary. Defensive against bf16 overflow; rarely fires.
+grad_mask_threshold: 100.0
 # RoPE
 rope_type: "yarn"
 rope_max_timescale: 10_000 # DeepSeek uses  "rope_theta": 10000

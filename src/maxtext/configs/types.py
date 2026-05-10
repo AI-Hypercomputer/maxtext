@@ -589,6 +589,13 @@ class MlaAttention(BaseModel):
   qk_nope_head_dim: NonNegativeInt = Field(128, description="Dimension for non-RoPE part of QK heads in MLA.")
   qk_rope_head_dim: NonNegativeInt = Field(64, description="Dimension for RoPE part of QK heads in MLA.")
   v_head_dim: NonNegativeInt = Field(128, description="Dimension of V heads in MLA.")
+  mla_init_std: NonNegativeFloat = Field(
+      0.0,
+      description=(
+          "Constant-std init for MLA projections; output proj scaled by "
+          "1/sqrt(2*num_decoder_layers). 0 keeps fan_in scaling."
+      ),
+  )
 
 
 class AttentionIndexer(BaseModel):
@@ -1346,6 +1353,14 @@ class Optimizer(BaseModel):
   )
   gradient_clipping_threshold: NonNegativeFloat = Field(
       1.0, description="The threshold for gradient clipping. 0 disables clipping."
+  )
+  grad_mask_threshold: NonNegativeFloat = Field(
+      0.0,
+      description=(
+          "Per-token gradient mask at the decoder-layer boundary "
+          "(DeepSeek-V3 only). Forward identity; backward zeros tokens "
+          "whose feature-axis RMS exceeds threshold. 0 disables."
+      ),
   )
   learning_rate: NonNegativeFloat = Field(3.0e-5, description="The peak learning rate.")
   lr_schedule_type: LearningRateScheduleType = Field(
