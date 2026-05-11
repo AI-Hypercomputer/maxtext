@@ -736,22 +736,23 @@ def main(argv: Sequence[str]) -> None:
       )
 
   def on_slices_ready():
-    event_type = _elastic_event_state.pop('event_type', 'elastic_slice_down')
+    if not _elastic_event_state:
+      return
+    event_type = _elastic_event_state.pop('event_type')
     if outer_recorder:
       outer_recorder.record_custom_badput_event_end_time(
           custom_badput_event_type=event_type
       )
+      outer_recorder.record_custom_badput_event_start_time(
+          custom_badput_event_type='elastic_reinitialization'
+      )
+    max_utils._pending_reinit_recorder = outer_recorder
 
   def on_elastic_event_with_cleanup():
     clean_up_checkpoints()
     on_elastic_event()
 
   def train():
-    if outer_recorder:
-      outer_recorder.record_custom_badput_event_start_time(
-          custom_badput_event_type='elastic_reinitialization'
-      )
-    max_utils._pending_reinit_recorder = outer_recorder
     config, recorder, diagnostic_config = initialize(argv)
     run(config, recorder, diagnostic_config)
 
