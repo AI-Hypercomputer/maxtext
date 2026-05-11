@@ -539,6 +539,14 @@ class RoutedMoE(nnx.Module):
     else:
       self.per_expert_scale = None
 
+    # Scale the output projection ahead of time during inference for higher generation throughput.
+    if (
+        self.per_expert_scale is not None
+        and self.config.model_call_mode == "inference"
+        and self.config.fuse_expert_scales
+    ):
+      self.wo.value = self.wo.value * self.per_expert_scale.value[:, None, None]
+
   def _maybe_shard_with_logical(self, inputs, logical_name):
     return maybe_shard_with_logical(
         inputs,
@@ -2242,7 +2250,8 @@ class RoutedMoE(nnx.Module):
       w0_kernel = jnp.asarray(self.wi_0[...], self.dtype)
       w1_kernel = jnp.asarray(self.wi_1[...], self.dtype)
 
-    if self.per_expert_scale is not None:
+    # Only apply per expert scales if we have not fused with the out-projections at init time.
+    if self.per_expert_scale is not None and cfg.model_call_mode != "inference" and not cfg.fuse_expert_scales:
       wo_kernel = wo_kernel * jnp.asarray(self.per_expert_scale[...], self.dtype)[:, None, None]
 
     if self.wi_0_sparsity_module is not None:

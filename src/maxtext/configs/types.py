@@ -726,6 +726,11 @@ class MoEGeneral(BaseModel):
       description="Whether to pre-fuse MoE weights (w0 and w1) during initialization. "
       "This is useful for inference performance in vllm_rpa mode.",
   )
+  fuse_expert_scales: bool = Field(
+      False,
+      description="Whether to fuse the expert scaling factors into the expert weights. "
+      "This can improve inference performance.",
+  )
 
 
 class MoEKernels(BaseModel):
