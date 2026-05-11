@@ -172,18 +172,27 @@ def _gmm_fwd(
     if transpose_rhs:
       rhs = rhs.swapaxes(1, 2)
 
-    out = tokamax.ragged_dot(
-        lhs=lhs,
-        rhs=rhs,
-        group_sizes=group_sizes,
-        precision=jax.lax.Precision.DEFAULT,
-        preferred_element_type=preferred_element_type,
-        group_offset=group_offset,
-        implementation="mosaic",
-        manual_axis_type=jax.sharding.ManualAxisType(
-            varying=frozenset(["data", "fsdp", "expert"])
-        ) if use_manual_quantization else None,
-    )
+    if use_manual_quantization:
+      out = tokamax.ragged_dot(
+          lhs=lhs,
+          rhs=rhs,
+          group_sizes=group_sizes,
+          precision=jax.lax.Precision.DEFAULT,
+          preferred_element_type=preferred_element_type,
+          group_offset=group_offset,
+          implementation="mosaic",
+          manual_axis_type=jax.sharding.ManualAxisType(varying=frozenset(["data", "fsdp", "expert"])),
+      )
+    else:
+      out = tokamax.ragged_dot(
+          lhs=lhs,
+          rhs=rhs,
+          group_sizes=group_sizes,
+          precision=jax.lax.Precision.DEFAULT,
+          preferred_element_type=preferred_element_type,
+          group_offset=group_offset,
+          implementation="mosaic",
+      )
   else:
     out = backend.gmm(
         lhs,
@@ -264,32 +273,53 @@ def _gmm_bwd(
     if not transpose_rhs:
       dlhs_rhs = dlhs_rhs.swapaxes(1, 2)
 
-    dlhs = tokamax.ragged_dot(
-        lhs=dlhs_dout,
-        rhs=dlhs_rhs,
-        group_sizes=group_sizes,
-        precision=jax.lax.Precision.DEFAULT,
-        preferred_element_type=lhs_dtype,
-        group_offset=group_offset,
-        implementation="mosaic",
-        manual_axis_type=jax.sharding.ManualAxisType(
-            varying=frozenset(["data", "fsdp", "expert"])
-        ) if use_manual_quantization else None,
-    )
-    drhs = tokamax.ragged_dot_general(
-        lhs=lhs,
-        rhs=drhs_dout,
-        group_sizes=group_sizes,
-        ragged_dot_dimension_numbers=DRHS_RAGGED_DOT_DIM_NUMS,
-        precision=jax.lax.Precision.DEFAULT,
-        preferred_element_type=rhs_dtype,
-        group_offset=group_offset,
-        implementation="mosaic",
-        manual_axis_type=jax.sharding.ManualAxisType(
-            varying=frozenset(["expert"]),
-            unreduced=frozenset(["data", "fsdp"])
-        ) if use_manual_quantization else None,
-    )
+    if use_manual_quantization:
+      dlhs = tokamax.ragged_dot(
+          lhs=dlhs_dout,
+          rhs=dlhs_rhs,
+          group_sizes=group_sizes,
+          precision=jax.lax.Precision.DEFAULT,
+          preferred_element_type=lhs_dtype,
+          group_offset=group_offset,
+          implementation="mosaic",
+          manual_axis_type=jax.sharding.ManualAxisType(varying=frozenset(["data", "fsdp", "expert"])),
+      )
+    else:
+      dlhs = tokamax.ragged_dot(
+          lhs=dlhs_dout,
+          rhs=dlhs_rhs,
+          group_sizes=group_sizes,
+          precision=jax.lax.Precision.DEFAULT,
+          preferred_element_type=lhs_dtype,
+          group_offset=group_offset,
+          implementation="mosaic",
+      )
+    if use_manual_quantization:
+      drhs = tokamax.ragged_dot_general(
+          lhs=lhs,
+          rhs=drhs_dout,
+          group_sizes=group_sizes,
+          ragged_dot_dimension_numbers=DRHS_RAGGED_DOT_DIM_NUMS,
+          precision=jax.lax.Precision.DEFAULT,
+          preferred_element_type=rhs_dtype,
+          group_offset=group_offset,
+          implementation="mosaic",
+          manual_axis_type=jax.sharding.ManualAxisType(
+              varying=frozenset(["expert"]),
+              unreduced=frozenset(["data", "fsdp"]),
+          ),
+      )
+    else:
+      drhs = tokamax.ragged_dot_general(
+          lhs=lhs,
+          rhs=drhs_dout,
+          group_sizes=group_sizes,
+          ragged_dot_dimension_numbers=DRHS_RAGGED_DOT_DIM_NUMS,
+          precision=jax.lax.Precision.DEFAULT,
+          preferred_element_type=rhs_dtype,
+          group_offset=group_offset,
+          implementation="mosaic",
+      )
     if quantization_rule and quantization_rule.bwd_qtype and weight_gather_axes:
       # Scatter back in reverse order of gather
       for axis_name, axis_idx in reversed(weight_gather_axes):
