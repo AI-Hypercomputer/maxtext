@@ -210,6 +210,10 @@ def _validate_or_update_architecture(hf_config, max_config, override: bool):
       if isinstance(mt_value, int):
         mt_value = mt_value * 2
 
+    # Special handling for Qwen3-MoE: hf.intermediate_size is the aggregated dense MLP dim, but mt.mlp_dim is dim per expert
+    if "qwen3" in max_config.model_name and getattr(max_config, "num_experts", 0) > 1 and hf_attr == "intermediate_size":
+      mt_value = mt_value * getattr(max_config, "num_experts_per_tok", 1)
+
     # Handle vocab size padding
     if hf_attr == "vocab_size" and isinstance(mt_value, int) and isinstance(hf_value, int):
       # MaxText often pads vocab size to a multiple of 128 or 256 for TPU efficiency

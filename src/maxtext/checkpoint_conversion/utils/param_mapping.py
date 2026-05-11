@@ -607,7 +607,7 @@ def QWEN_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
       or scanned with expert stacking (nested list of strings).
   """
   n_layers = config["num_hidden_layers"]
-  num_experts = config.get("num_experts", 0)
+  num_experts = config.get("num_experts", config.get("num_local_experts", 0))
 
   mapping = {
       "params-token_embedder-embedding": "model.embed_tokens.weight",
@@ -753,7 +753,7 @@ def QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, 
       transformation functions.
   """
   n_layers = config["num_hidden_layers"]
-  num_experts = config.get("num_experts", 0)
+  num_experts = config.get("num_experts", config.get("num_local_experts", 0))
 
   def pad_embedding_layer(input_tensor, target_shape):
     """Pads or truncates embedding layer to match target vocab size."""

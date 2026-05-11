@@ -813,7 +813,7 @@ if __name__ == "__main__":
       "--eager_load_method",
       type=str,
       required=False,
-      default="transformers",
+      default="safetensors",
       choices=["transformers", "safetensors"],
       help="Backend to use for eager loading: `transformers_class.from_pretrained` or `safetensors.safe_open` with pt",
   )
