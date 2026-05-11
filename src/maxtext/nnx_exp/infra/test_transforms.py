@@ -37,12 +37,12 @@ def test_remat():
         # Apply full remat
         apply_remat(model, "full")
         
-        tokens = jnp.zeros((2, 32), dtype=jnp.int32)
-        positions = jnp.broadcast_to(jnp.arange(32), (2, 32))
+        tokens = jnp.zeros((8, 32), dtype=jnp.int32)
+        positions = jnp.broadcast_to(jnp.arange(32), (8, 32))
         
         # Forward pass
         out = model(tokens, positions)
-        assert out.shape == (2, 32, CONFIG.vocab_size)
+        assert out.shape == (8, 32, CONFIG.vocab_size)
 
 def test_remat_selective():
     mesh = create_mesh({"ici_dp_parallelism": 1, "ici_fsdp_parallelism": -1, "ici_tensor_parallelism": 1})
@@ -55,11 +55,11 @@ def test_remat_selective():
         # Apply selective remat
         apply_remat(model, {"save": ["query_proj", "key_proj", "value_proj", "attention_out", "mlpwi"]})
         
-        tokens = jnp.zeros((2, 32), dtype=jnp.int32)
-        positions = jnp.broadcast_to(jnp.arange(32), (2, 32))
+        tokens = jnp.zeros((8, 32), dtype=jnp.int32)
+        positions = jnp.broadcast_to(jnp.arange(32), (8, 32))
         
         out = model(tokens, positions)
-        assert out.shape == (2, 32, CONFIG.vocab_size)
+        assert out.shape == (8, 32, CONFIG.vocab_size)
 
 def test_offload():
     mesh = create_mesh({"ici_dp_parallelism": 1, "ici_fsdp_parallelism": -1, "ici_tensor_parallelism": 1})
@@ -80,11 +80,11 @@ def test_offload():
         # Reconstruct model
         model = nnx.merge(gdef, params_device)
         
-        tokens = jnp.zeros((2, 32), dtype=jnp.int32)
-        positions = jnp.broadcast_to(jnp.arange(32), (2, 32))
+        tokens = jnp.zeros((8, 32), dtype=jnp.int32)
+        positions = jnp.broadcast_to(jnp.arange(32), (8, 32))
         
         out = model(tokens, positions)
-        assert out.shape == (2, 32, CONFIG.vocab_size)
+        assert out.shape == (8, 32, CONFIG.vocab_size)
 
 def test_scan():
     mesh = create_mesh({"ici_dp_parallelism": 1, "ici_fsdp_parallelism": -1, "ici_tensor_parallelism": 1})
@@ -99,13 +99,13 @@ def test_scan():
         blocks = create_scanned_layers(DecoderLayer, CONFIG, CONFIG.num_layers, rngs=rngs, sharding_hook=sharding_hook)
         
         # Mock inputs
-        x = jax.device_put(jnp.zeros((2, 32, CONFIG.emb_dim)), sharding.sequence_spec())
-        positions = jnp.broadcast_to(jnp.arange(32), (2, 32))
+        x = jax.device_put(jnp.zeros((8, 32, CONFIG.emb_dim)), sharding.sequence_spec())
+        positions = jnp.broadcast_to(jnp.arange(32), (8, 32))
         mask = None
         
         # Forward pass via scan
         out = scan_forward(x, blocks, positions, mask)
-        assert out.shape == (2, 32, CONFIG.emb_dim)
+        assert out.shape == (8, 32, CONFIG.emb_dim)
 
 def test_scan_remat():
     mesh = create_mesh({"ici_dp_parallelism": 1, "ici_fsdp_parallelism": -1, "ici_tensor_parallelism": 1})
@@ -119,12 +119,12 @@ def test_scan_remat():
         # Create scanned remat layers
         blocks = create_scanned_remat_layers(DecoderLayer, CONFIG, CONFIG.num_layers, rngs=rngs, policy="full", sharding_hook=sharding_hook)
         
-        x = jax.device_put(jnp.zeros((2, 32, CONFIG.emb_dim)), sharding.sequence_spec())
-        positions = jnp.broadcast_to(jnp.arange(32), (2, 32))
+        x = jax.device_put(jnp.zeros((8, 32, CONFIG.emb_dim)), sharding.sequence_spec())
+        positions = jnp.broadcast_to(jnp.arange(32), (8, 32))
         mask = None
         
         out = scan_forward(x, blocks, positions, mask)
-        assert out.shape == (2, 32, CONFIG.emb_dim)
+        assert out.shape == (8, 32, CONFIG.emb_dim)
 
 def test_quantization():
     mesh = create_mesh({"ici_dp_parallelism": 1, "ici_fsdp_parallelism": -1, "ici_tensor_parallelism": 1})
@@ -134,8 +134,8 @@ def test_quantization():
         rngs = nnx.Rngs(42)
         model = Llama(CONFIG, rngs=rngs, sharding_hook=sharding_hook)
         
-        tokens = jnp.zeros((2, 32), dtype=jnp.int32)
-        positions = jnp.broadcast_to(jnp.arange(32), (2, 32))
+        tokens = jnp.zeros((8, 32), dtype=jnp.int32)
+        positions = jnp.broadcast_to(jnp.arange(32), (8, 32))
         
         from maxtext.nnx_exp.infra import quantize_model, int8_rules
         
@@ -143,5 +143,5 @@ def test_quantization():
         quantized_model = quantize_model(model, int8_rules(), tokens, positions)
         
         out = quantized_model(tokens, positions)
-        assert out.shape == (2, 32, CONFIG.vocab_size)
+        assert out.shape == (8, 32, CONFIG.vocab_size)
 
