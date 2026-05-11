@@ -1172,8 +1172,8 @@ position_id_per_seconds: 25
 subslice_shape: ""
 
 # NNX
-enable_nnx: False
-pure_nnx_decoder: False
+enable_nnx: True
+pure_nnx_decoder: True
 pure_nnx: False
 
 ################################## Qwen3-Next Specific Configs ##################################

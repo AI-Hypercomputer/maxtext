@@ -1232,6 +1232,11 @@ class NNXDecoder(nnx.Module):
         if input_tokens is not None:
           layer_kwargs["decoder_input_tokens"] = input_tokens
 
+        if not hasattr(layer, "_qwix_initialized"):
+          layer._qwix_initialized = True
+          # Pre-run WITHOUT jax.checkpoint to mutate the PyTree natively!
+          layer(y, *layer_args, **layer_kwargs)
+
         y, kv_cache, new_state = checkpointed_fn(graphdef, state, y, kv_cache)
         nnx.update(layer, new_state)
 
