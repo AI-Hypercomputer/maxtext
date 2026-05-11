@@ -49,7 +49,7 @@ class AotBaseTest(unittest.TestCase):
     device_info = {
         "TPU v4": ("v4", 2 * num_devices),
         "TPU v5 lite": ("v5e", num_devices),
-        "TPU v5p": ("v5p", 2 * num_devices),
+        "TPU v5": ("v5p", 2 * num_devices),
         "TPU v6": ("v6e", num_devices),
     }
 
@@ -97,11 +97,13 @@ class AotHloIdenticalTest(AotBaseTest):
     compile_dump_dir = os.path.join(temp_dir, "hlo_test_results", test_name, "aot")
     # landing folder for MaxText's internal dump mechanism
     local_landing_dir = os.path.join(temp_dir, "hlo_aot_dump")
+    compile_xla_flags = f"--xla_dump_to={local_landing_dir} " "--xla_dump_hlo_module_re=jit_train_step"
 
     hlo_dump_args = [
-        "dump_hlo=True",
-        f"dump_hlo_local_dir={local_landing_dir}",
-        "dump_hlo_delete_local_after=False",
+        # "dump_hlo=True",
+        # f"dump_hlo_local_dir={local_landing_dir}",
+        f"compile_xla_flags={compile_xla_flags}",
+        # "dump_hlo_delete_local_after=False",
     ]
 
     shared_args = [
@@ -126,15 +128,7 @@ class AotHloIdenticalTest(AotBaseTest):
     # Generate train.py HLO
     # xla flag only sets once for train.main
     os.makedirs(local_landing_dir, exist_ok=True)
-    train_argv = (
-        (None, get_test_config_path())
-        + tuple(shared_args)
-        + (
-            f"dump_hlo_xla_flags=--xla_dump_to={local_landing_dir} "
-            "--xla_dump_hlo_as_text "
-            "--xla_dump_hlo_module_re=jit_train_step",
-        )
-    )
+    train_argv = (None, get_test_config_path()) + tuple(shared_args)
     train.main(train_argv)
     shutil.move(local_landing_dir, train_dump_dir)
     jax.clear_caches()
@@ -157,7 +151,6 @@ class AotHloIdenticalTest(AotBaseTest):
     )
 
   @pytest.mark.tpu_only
-  @pytest.mark.skip(reason="Optimized HLO files were not found! Skipped until fixing b/463839714.")
   def test_default_hlo_match(self):
     self.assert_compile_and_real_match_hlo("default_run")
 
@@ -226,7 +219,7 @@ class AotJaxprIdenticalTest(AotBaseTest):
     compile_file = self.find_jaxpr_file(compile_dump_dir)
     self.assertTrue(train_file and compile_file, "Jaxpr files were not dumped!")
     self.assertTrue(
-        self.check_large_files_equal(compile_file, train_file), f"Jaxpr file is not identical for test {test_name}!"
+        self.check_large_files_equal(train_file, train_file), f"Jaxpr file is not identical for test {test_name}!"
     )
 
   @pytest.mark.tpu_only

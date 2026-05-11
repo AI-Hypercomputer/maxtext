@@ -658,7 +658,8 @@ def train_loop(config, recorder, state=None):
       lower_args = (state, shaped_batch)
     maxtext_utils.maybe_dump_jaxpr(config, p_train_step, lower_args)
     if config.compiled_trainstep_file == "":  # compile only when there is no pre-compiled file loaded
-      compiled = p_train_step.lower(*lower_args).compile()
+      compiler_options = max_utils.parse_libtpu_flags_to_dict(config.compile_xla_flags)
+      compiled = p_train_step.lower(*lower_args).compile(compiler_options=compiler_options)
       compiled_stats = compiled.memory_analysis()
       max_utils.print_compiled_memory_stats(compiled_stats)
 
