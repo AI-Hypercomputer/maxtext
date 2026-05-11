@@ -309,6 +309,8 @@ class _MaxTextStubProcessor:
     self.tokenizer = tokenizer
 
   def __call__(self, text=None, images=None, audios=None, return_tensors=None, **_):
+    from maxtext.utils import max_logging
+    max_logging.log(f"_MaxTextStubProcessor called with text={text is not None}, images={type(images)} len={len(images) if images else 0}, audios={type(audios)} len={len(audios) if audios else 0}")
     out: dict = {}
     if text is not None:
       tokenized = self.tokenizer(text, return_tensors=return_tensors)
@@ -316,15 +318,21 @@ class _MaxTextStubProcessor:
       if "attention_mask" in tokenized:
         out["attention_mask"] = tokenized["attention_mask"]
     if images:
-      out["pixel_values"] = self._preprocess_images(images)
+      try:
+        out["pixel_values"] = self._preprocess_images(images)
+        max_logging.log(f"_MaxTextStubProcessor returned pixel_values shape={out['pixel_values'].shape}")
+      except Exception as e:
+        max_logging.log(f"_MaxTextStubProcessor _preprocess_images failed: {e}")
+        raise
     if audios:
       out["input_audio_features"] = self._stack_audios(audios)
     try:
       from transformers.feature_extraction_utils import BatchFeature  # pylint: disable=import-outside-toplevel
-
-      return BatchFeature(out)
+      res = BatchFeature(out)
     except ImportError:
-      return out
+      res = out
+    max_logging.log(f"_MaxTextStubProcessor returning keys={list(res.keys())}")
+    return res
 
   def _preprocess_images(self, images):
     """Convert PIL images → MaxText per-model `pixel_values` numpy array."""
@@ -356,6 +364,13 @@ class _MaxTextStubProcessor:
 
   def _stack_audios(self, audios):
     waveforms = [item[0] if isinstance(item, tuple) else item for item in audios]
+    if self.model_name.startswith("qwen3-omni"):
+      from maxtext.multimodal.processor_qwen3_omni import _np_extract_fbank_features
+      max_len = max(len(w) for w in waveforms)
+      padded = np.zeros((len(waveforms), max_len), dtype=np.float32)
+      for i, w in enumerate(waveforms):
+        padded[i, : len(w)] = w
+      return _np_extract_fbank_features(padded)
     max_len = max(len(w) for w in waveforms)
     out = np.zeros((len(waveforms), max_len), dtype=np.float32)
     for i, w in enumerate(waveforms):
@@ -440,12 +455,19 @@ class MaxTextMultiModalProcessor(BaseMultiModalProcessor[MaxTextProcessingInfo])
   """
 
   def _call_hf_processor(self, prompt, mm_data, mm_kwargs, tok_kwargs=None):
+    from maxtext.utils import max_logging
+    max_logging.log(f"_call_hf_processor called with mm_data keys={list(mm_data.keys()) if mm_data else None}")
     del tok_kwargs
     processor = self.info.get_hf_processor(**(mm_kwargs or {}))
+    images = None
+    audios = None
+    if mm_data:
+      images = mm_data.get("image") or mm_data.get("images")
+      audios = mm_data.get("audio") or mm_data.get("audios")
     return processor(
         text=prompt,
-        images=mm_data.get("image"),
-        audios=mm_data.get("audio"),
+        images=images,
+        audios=audios,
         return_tensors="np",
     )
 
@@ -465,26 +487,47 @@ class MaxTextMultiModalProcessor(BaseMultiModalProcessor[MaxTextProcessingInfo])
     updates = []
     
     # Image no-op replacement
-    if mm_items.get_items("image", object):
-      img_id = self.info.mm_info.image_placeholder_id
-      updates.append(
-          PromptReplacement(
-              modality="image",
-              target=img_id,
-              replacement=img_id * self.info.mm_info.tokens_per_image,
-          )
-      )
-      
+    img_id = self.info.mm_info.image_placeholder_id
+    if img_id is not None:
+      img_id = int(img_id)
+      try:
+        images = mm_items.get_items("image", object)
+      except KeyError:
+        images = []
+      if images:
+        target_id = 2 if self.info._model_name.startswith("gemma3") else img_id
+        repl_len = 1 if self.info._model_name.startswith("gemma3") else int(self.info.mm_info.tokens_per_image)
+        updates.append(
+            PromptReplacement(
+                modality="image",
+                target=[target_id],
+                replacement=[target_id] * repl_len,
+            )
+        )
+        
     # Audio no-op replacement
     audio_id = self.info.mm_info.audio_placeholder_id
-    if audio_id is not None and mm_items.get_items("audio", object):
-      updates.append(
-          PromptReplacement(
-              modality="audio",
-              target=audio_id,
-              replacement=audio_id * self.info.mm_info.tokens_per_audio,
-          )
-      )
+    if audio_id is not None:
+      try:
+        audios = mm_items.get_items("audio", object)
+      except KeyError:
+        audios = []
+      if audios:
+        tokens_per_audio = self.info.mm_info.tokens_per_audio
+        if self.info._model_name.startswith("qwen3-omni"):
+          waveforms = [item[0] if isinstance(item, tuple) else item for item in audios]
+          max_len = max(len(w) for w in waveforms)
+          from maxtext.multimodal.processor_qwen3_omni import _np_extract_fbank_features, _get_feat_extract_output_lengths
+          dummy_fbank = _np_extract_fbank_features(np.zeros((1, max_len), dtype=np.float32))
+          tokens_per_audio = int(_get_feat_extract_output_lengths(np.array(dummy_fbank.shape[2])))
+          
+        updates.append(
+            PromptReplacement(
+                modality="audio",
+                target=[audio_id],
+                replacement=[audio_id] * tokens_per_audio,
+            )
+        )
       
     return updates
 
@@ -502,6 +545,7 @@ class MaxTextForConditionalGeneration(MaxTextForCausalLM):
   passes precomputed embeddings into the decoder forward pass.
   """
 
+  _self_manages_sharding: bool = True
   supports_multimodal = True
 
   def _parse_and_validate_image_input(self, **kwargs) -> jnp.ndarray | None:
@@ -524,41 +568,86 @@ class MaxTextForConditionalGeneration(MaxTextForCausalLM):
 
     return jnp.asarray(pixel_values)
 
+  def _parse_and_validate_audio_input(self, **kwargs) -> jnp.ndarray | None:
+    input_audio_features = kwargs.pop("input_audio_features", None)
+    if input_audio_features is None:
+      return None
+    if hasattr(input_audio_features, "numpy"):
+      input_audio_features = input_audio_features.numpy()
+    return jnp.asarray(input_audio_features)
+
   def embed_multimodal(self, **kwargs) -> list[jax.Array]:
     """Generate multimodal embeddings for vLLM's two-stage execution."""
+    embeds = []
     pixel_values = self._parse_and_validate_image_input(**kwargs)
-    if pixel_values is None:
-      return []
+    if pixel_values is not None:
+      if not isinstance(self.model, nnx.Module):
+        raise ValueError("Model is not initialized.")
 
-    if not isinstance(self.model, nnx.Module):
-      raise ValueError("Model is not initialized.")
+      with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
+        image_embeddings, _ = self.model.vision_encoder(
+            input_images=pixel_values,
+            deterministic=True,
+        )
+        batch_size = image_embeddings.shape[0]
+        embeds.extend([image_embeddings[i].reshape(-1, image_embeddings.shape[-1]) for i in range(batch_size)])
 
-    with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
-      image_embeddings, _ = self.model.vision_encoder(
-          input_images=pixel_values,
-          deterministic=True,
-      )
-      batch_size = image_embeddings.shape[0]
-      return [image_embeddings[i : i + 1, ...] for i in range(batch_size)]
+    input_audio_features = self._parse_and_validate_audio_input(**kwargs)
+    if input_audio_features is not None:
+      if not isinstance(self.model, nnx.Module):
+        raise ValueError("Model is not initialized.")
 
-  def __call__(
-      self,
-      kv_caches: list[jax.Array],
-      input_ids: jax.Array,
-      attention_metadata: AttentionMetadata,
-      *args,
-      **kwargs,
-  ) -> tuple[list[jax.Array], jax.Array, list[jax.Array], list[jax.Array] | None]:
-    multimodal_embeddings = getattr(attention_metadata, "multimodal_embeddings", None)
-    if multimodal_embeddings is not None and len(multimodal_embeddings) > 0:
-      if isinstance(multimodal_embeddings, list):
-        multimodal_embeddings = jnp.concatenate(multimodal_embeddings, axis=0)
-      kwargs["precomputed_multimodal_embeddings"] = multimodal_embeddings
+      with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
+        audio_embeddings = self.model.audio_encoder(
+            input_audio=input_audio_features,
+            deterministic=True,
+        )
+        batch_size = audio_embeddings.shape[0]
+        embeds.extend([audio_embeddings[i].reshape(-1, audio_embeddings.shape[-1]) for i in range(batch_size)])
 
-    return super().__call__(
-        kv_caches=kv_caches,
-        input_ids=input_ids,
-        attention_metadata=attention_metadata,
-        *args,
+    return embeds
+
+  def __call__(self, *args, **kwargs):
+    from maxtext.utils import max_logging
+    max_logging.log(f"__call__ received {len(args)} positional args: {[type(x).__name__ for x in args]}")
+    
+    kv_caches = args[0]
+    attention_metadata = kwargs.get("attention_metadata")
+    real_input_ids = None
+    
+    for arg in args[1:]:
+      if hasattr(arg, "multimodal_embeddings") or type(arg).__name__ == "AttentionMetadata":
+        attention_metadata = arg
+      elif real_input_ids is None and (hasattr(arg, "ndim") or type(arg).__name__ in ("DynamicJaxprTracer", "ArrayImpl")):
+        real_input_ids = arg
+          
+    if attention_metadata is not None:
+      multimodal_embeddings = getattr(attention_metadata, "multimodal_embeddings", None)
+      if multimodal_embeddings is not None and len(multimodal_embeddings) > 0:
+        if self.maxtext_config.model_name.startswith("qwen3-omni"):
+          image_embeds = []
+          audio_embeds = []
+          for emb in multimodal_embeddings:
+            if emb.shape[0] == 576:
+              image_embeds.append(emb)
+            else:
+              audio_embeds.append(emb)
+              
+          if image_embeds:
+            kwargs["precomputed_multimodal_embeddings"] = jnp.concatenate(image_embeds, axis=0)
+          if audio_embeds:
+            kwargs["precomputed_audio_embeddings"] = jnp.concatenate(audio_embeds, axis=0)
+        else:
+          if isinstance(multimodal_embeddings, list):
+            multimodal_embeddings = jnp.concatenate(multimodal_embeddings, axis=0)
+          kwargs["precomputed_multimodal_embeddings"] = multimodal_embeddings
+
+    res = super().__call__(
+        kv_caches,
+        real_input_ids,
+        attention_metadata,
         **kwargs,
     )
+    if isinstance(res, tuple) and len(res) == 4:
+      return res[:3]
+    return res

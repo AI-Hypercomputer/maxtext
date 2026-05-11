@@ -226,8 +226,12 @@ class MaxTextForCausalLM(nnx.Module):
       raise ValueError("Model must be an instance of type nnx.Module.")
 
     # Ensure inputs are at least 2D with a batch dimension
-    input_ids = jnp.expand_dims(input_ids, axis=1)
-    input_positions = jnp.expand_dims(attention_metadata.input_positions, axis=1)
+    if input_ids.ndim == 1:
+      input_ids = jnp.expand_dims(input_ids, axis=1)
+    if attention_metadata.input_positions.ndim == 1:
+      input_positions = jnp.expand_dims(attention_metadata.input_positions, axis=1)
+    else:
+      input_positions = attention_metadata.input_positions
 
     with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
       aux_hidden_states = []
@@ -270,7 +274,7 @@ class MaxTextForCausalLM(nnx.Module):
     with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
       return self.model.token_embedder.embedding
 
-  def embed_input_ids(self, input_ids: jax.Array) -> jax.Array:
+  def embed_input_ids(self, input_ids: jax.Array, *args, **kwargs) -> jax.Array:
     """Embeds the input token IDs using the model's token embedder.
 
     Args:

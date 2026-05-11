@@ -69,6 +69,9 @@ def decode_with_vllm(config: Config) -> None:
   Args:
     config: MaxText config.
   """
+  if config.hf_access_token:
+    os.environ["HF_TOKEN"] = config.hf_access_token
+
   # Prepare vLLM Arguments
   vllm_args = {
       "model": config.tokenizer_path,
@@ -87,6 +90,13 @@ def decode_with_vllm(config: Config) -> None:
               "debug_sharding": config.debug_sharding,
               "prefuse_moe_weights": config.prefuse_moe_weights,
               "scan_layers": config.scan_layers,
+              "use_multimodal": config.use_multimodal,
+              "max_prefill_predict_length": config.max_prefill_predict_length,
+              "max_target_length": config.max_target_length,
+              "wi_tile_fwd_embed_dim": getattr(config, "wi_tile_fwd_embed_dim", -1),
+              "wi_tile_fwd_mlp_dim": getattr(config, "wi_tile_fwd_mlp_dim", -1),
+              "wo_tile_fwd_embed_dim": getattr(config, "wo_tile_fwd_embed_dim", -1),
+              "wo_tile_fwd_mlp_dim": getattr(config, "wo_tile_fwd_mlp_dim", -1),
           },
           "sharding": {
               "sharding_strategy": {
@@ -138,7 +148,36 @@ def decode_with_vllm(config: Config) -> None:
     )
     prompts = [input_with_chat_template]
 
-  max_prompt_length = max(len(tokenizer.encode(p)) for p in prompts)
+  if config.use_multimodal:
+    mm_data = {}
+    if config.image_path:
+      from PIL import Image
+      images = [Image.open(p).convert("RGB") for p in config.image_path.split(",")]
+      if len(images) == 1:
+        images = images[0]
+      mm_data["image"] = images
+      
+    if mm_data:
+      if config.model_name.startswith("gemma3"):
+        perfect_tokens = [2, 82858, 2471, 108, 255999] + [262144] * 256 + [256000, 108]
+        prompts = [{"prompt_token_ids": perfect_tokens, "multi_modal_data": mm_data}]
+        prompt_strs = ["Describe image <image>"]
+        encoded_prompt_tokens = perfect_tokens
+      else:
+        prompts = [{"prompt": prompts[0], "multi_modal_data": mm_data}]
+        prompt_strs = [p["prompt"] if isinstance(p, dict) else p for p in prompts]
+        encoded_prompt_tokens = tokenizer.encode(prompt_strs[0])
+    else:
+      prompt_strs = [p["prompt"] if isinstance(p, dict) else p for p in prompts]
+      encoded_prompt_tokens = tokenizer.encode(prompt_strs[0])
+
+  max_logging.log(f"Encoded prompt tokens len: {len(encoded_prompt_tokens)}, first 10: {encoded_prompt_tokens[:10]}")
+  max_prompt_length = len(encoded_prompt_tokens)
+  
+  if config.use_multimodal and config.image_path:
+    num_imgs = len(config.image_path.split(","))
+    max_prompt_length += 300 * num_imgs
+
   max_tokens_to_generate = config.max_target_length - max_prompt_length
   if max_tokens_to_generate <= 0:
     raise ValueError(

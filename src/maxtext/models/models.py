@@ -444,6 +444,7 @@ class Transformer(nnx.Module):
       kv_caches: list[jax.Array] | None = None,
       attention_metadata: dict[str, Any] | None = None,
       precomputed_multimodal_embeddings: jax.Array | None = None,
+      precomputed_audio_embeddings: jax.Array | None = None,
   ):
     """Applies the Zero-1 FSDP wrapped Transformer model.
 
@@ -489,7 +490,9 @@ class Transformer(nnx.Module):
       bidirectional_mask = mm_processor.get_bidirectional_mask_vision(self.config, decoder_input_tokens)
 
     audio_embeddings = None
-    if self.config.use_multimodal and encoder_audios is not None and self.audio_encoder is not None:
+    if precomputed_audio_embeddings is not None:
+      audio_embeddings = precomputed_audio_embeddings
+    elif self.config.use_multimodal and encoder_audios is not None and self.audio_encoder is not None:
       audio_embeddings = self.audio_encoder(input_audio=encoder_audios, deterministic=not enable_dropout)
 
     # Create audio mask for placeholder tokens (qwen3-omni models)

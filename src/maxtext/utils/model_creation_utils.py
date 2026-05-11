@@ -890,7 +890,11 @@ def from_pretrained(
           restore_args = {"base": restore_args} if has_base_key else restore_args
 
         # Free memory used by initial sharded_state before restore, to make room for the incoming checkpoint arrays.
-        def _free_device_memory(node):
+        def _free_device_memory(path, node):
+          path_str = ".".join(str(getattr(k, "key", getattr(k, "attr", k))) for k in path)
+          if "vision_encoder" in path_str or "audio_encoder" in path_str:
+            return node
+            
           if isinstance(node, nnx.Variable) and not isinstance(node, nnx.RngState):
             val = node.value
           else:
@@ -901,7 +905,7 @@ def from_pretrained(
 
           return node
 
-        jax.tree_util.tree_map(_free_device_memory, sharded_state, is_leaf=lambda n: isinstance(n, nnx.Variable))
+        jax.tree_util.tree_map_with_path(_free_device_memory, sharded_state, is_leaf=lambda n: isinstance(n, nnx.Variable))
 
         restored = ckptr.restore(
             epath.Path(config.load_parameters_path),
