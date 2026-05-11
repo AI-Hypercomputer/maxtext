@@ -24,6 +24,7 @@ import evaluate
 
 import numpy as np
 
+import os
 import pandas as pd
 
 
@@ -39,7 +40,19 @@ def get_args():
 
 
 def get_groundtruth(processed_dataset_file):
-  data = pd.read_pickle(processed_dataset_file)
+  """Load the ground truth labels from the processed dataset file securely."""
+  ext = os.path.splitext(processed_dataset_file)[1].lower()
+  if ext == ".parquet":
+    data = pd.read_parquet(processed_dataset_file)
+  elif ext == ".csv":
+    data = pd.read_csv(processed_dataset_file)
+  elif ext in (".json", ".jsonl"):
+    data = pd.read_json(processed_dataset_file)
+  else:
+    raise ValueError(
+        f"Unsupported dataset file format: {processed_dataset_file}. "
+        "Please use safe formats like Parquet (.parquet), CSV (.csv), or JSON/JSONL (.json/.jsonl)."
+    )
   ground_truths = data["output"]
   return ground_truths
 

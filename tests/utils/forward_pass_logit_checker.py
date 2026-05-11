@@ -276,14 +276,8 @@ def main(config, test_args):  # pylint: disable=W0621
 
       with jsonlines.open(input_golden_data_path, "r") as f:
         golden_data = list(f)
-    elif input_golden_data_path.suffix in [".pickle", ".pkl"]:
-      max_logging.log("loading hf goldens from pickle file")
-      import pickle  # pylint: disable=import-outside-toplevel
-
-      with open(input_golden_data_path, "rb") as f:
-        golden_data = pickle.load(f)
     else:
-      raise ValueError("golden_logits_path must end with .jsonl or .pickle/.pkl")
+      raise ValueError("golden_logits_path must end with .jsonl")
     max_logging.log(f"loaded {len(golden_data)} golden data points")
     all_data_to_save = []
     for golden_data_index, golden_data_point in enumerate(golden_data):

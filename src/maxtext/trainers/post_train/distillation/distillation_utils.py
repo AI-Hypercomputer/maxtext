@@ -19,7 +19,7 @@ model structures with Tunix's training interfaces.
 """
 
 import abc
-import pickle
+import safetensors.numpy
 from typing import Any, Callable, Iterator, List, Literal, Optional, Sequence
 
 import flax
@@ -110,7 +110,7 @@ class OfflineArrayRecordIterator:
 
     record = self.reader.read()
     self.record_index += 1
-    data = pickle.loads(record)
+    data = safetensors.numpy.load(record)
 
     # Map the arrays to match MaxText's expected dictionary
     batch = {

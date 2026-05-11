@@ -23,7 +23,6 @@ as you would on the target hardware.
 
 import functools
 import os
-import pickle
 from typing import Sequence
 
 from absl import app
@@ -181,7 +180,7 @@ def save_compiled(compiled, save_name):
   """Serialize and save the compiled function."""
   serialized, _, _ = serialize(compiled)
   with open(save_name, "wb") as f:
-    pickle.dump(serialized, f)
+    f.write(serialized)
 
 
 def is_oom(argv: Sequence[str]) -> bool:
