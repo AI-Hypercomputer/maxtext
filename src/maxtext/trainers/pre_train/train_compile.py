@@ -205,6 +205,16 @@ def is_oom(argv: Sequence[str]) -> bool:
       model,
   ) = get_shaped_inputs(topology_mesh, config)
 
+  # Update params_shardings when shard_optimizer_over_data is enabled (Zero-1)
+  params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
+
+  # When ZeRO-1 is enabled, we need to use the original params_shardings for input shardings
+  # but keep the updated state_mesh_shardings for the optimizer state
+  if config.shard_optimizer_over_data:
+    input_state_mesh_shardings = state_mesh_shardings.replace(params=params_shardings)
+  else:
+    input_state_mesh_shardings = state_mesh_shardings
+
   # Get data sharding
   data_sharding = sharding.get_input_data_sharding(config, topology_mesh)
 
@@ -216,7 +226,7 @@ def is_oom(argv: Sequence[str]) -> bool:
       static_argnums,
       donate_argnums,
   ) = maxtext_utils.get_functional_train_with_signature(
-      train.train_step, data_sharding, state_mesh_shardings, model, config
+      train.train_step, data_sharding, input_state_mesh_shardings, model, config, params_shardings
   )
 
   try:
@@ -271,6 +281,16 @@ def main(argv: Sequence[str]) -> None:
       model,
   ) = get_shaped_inputs(topology_mesh, config)
 
+  # Update params_shardings when shard_optimizer_over_data is enabled (Zero-1)
+  params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
+
+  # When ZeRO-1 is enabled, we need to use the original params_shardings for input shardings
+  # but keep the updated state_mesh_shardings for the optimizer state
+  if config.shard_optimizer_over_data:
+    input_state_mesh_shardings = state_mesh_shardings.replace(params=params_shardings)
+  else:
+    input_state_mesh_shardings = state_mesh_shardings
+
   # Get data sharding
   data_sharding = sharding.get_input_data_sharding(config, topology_mesh)
   if config.enable_diloco:
@@ -282,7 +302,7 @@ def main(argv: Sequence[str]) -> None:
     shaped_train_args = (diloco_state, shaped_train_args[1], shaped_train_args[2])
 
     # Wrap train_step with diloco
-    train_step_partial = functools.partial(train.train_step, model, config, inner_state_shardings, None)
+    train_step_partial = functools.partial(train.train_step, model, config, inner_state_shardings, params_shardings)
     train_step_fn = diloco.build_diloco_train_step(config, train_step_partial)
 
     # For DiLoCo, the train_step_fn is already fully wrapped and takes (state, batch, prng)
@@ -301,7 +321,7 @@ def main(argv: Sequence[str]) -> None:
         static_argnums,
         donate_argnums,
     ) = maxtext_utils.get_functional_train_with_signature(
-        train.train_step, data_sharding, state_mesh_shardings, model, config
+        train.train_step, data_sharding, input_state_mesh_shardings, model, config, params_shardings
     )
 
   # print weights sharding info under debug sharding mode
