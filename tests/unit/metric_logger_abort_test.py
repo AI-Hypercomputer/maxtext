@@ -25,6 +25,7 @@ from maxtext.common.metric_logger import MetricLogger, MetadataKey
 class MetricLoggerAbortTest(unittest.TestCase):
 
   def _make_logger(self, abort_on_nan_loss, abort_on_inf_loss):
+    """Helper to create a MetricLogger with mocked config."""
     logger = MetricLogger.__new__(MetricLogger)  # skip __init__
     logger.config = SimpleNamespace(
         abort_on_nan_loss=abort_on_nan_loss,
@@ -105,12 +106,10 @@ class MetricLoggerMetadataTest(unittest.TestCase):
     logger.metadata = {}
 
     with (
-        mock.patch("maxtext.src.maxtext.utils.max_utils.calculate_num_params_from_pytree", return_value=1e9),
-        mock.patch(
-            "maxtext.src.maxtext.utils.maxtext_utils.calculate_tflops_training_per_device", return_value=(100.0, 0, 0)
-        ),
-        mock.patch("maxtext.src.maxtext.utils.maxtext_utils.calculate_tokens_training_per_device", return_value=1000.0),
-        mock.patch("maxtext.src.maxtext.utils.max_logging.log"),
+        mock.patch("maxtext.utils.max_utils.calculate_num_params_from_pytree", return_value=1e9),
+        mock.patch("maxtext.utils.maxtext_utils.calculate_tflops_training_per_device", return_value=(100.0, 0, 0)),
+        mock.patch("maxtext.utils.maxtext_utils.calculate_tokens_training_per_device", return_value=1000.0),
+        mock.patch("maxtext.utils.max_logging.log"),
     ):
       logger.write_setup_info_to_tensorboard({})
 
