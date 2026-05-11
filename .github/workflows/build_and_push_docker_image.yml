@@ -38,6 +38,9 @@ on:
         required: false
         type: string
         default: 'pre-training'
+      docker_image_prefix:
+        required: true
+        type: string
       version_name:
         required: false
         type: string
@@ -148,7 +151,7 @@ jobs:
           push: true
           context: .
           file: .venv/lib/python3.12/site-packages/dependencies/dockerfiles/${{ inputs.dockerfile }}
-          tags: gcr.io/${{ vars.PROJECT_NAME }}/${{ inputs.image_name }}:${{ github.run_id }}
+          tags: ${{ inputs.docker_image_prefix }}/${{ inputs.image_name }}:${{ github.run_id }}
           cache-from: type=gha
           outputs: type=image,compression=zstd,force-compression=true
           build-args: |
@@ -161,7 +164,7 @@ jobs:
       - name: Add tags to Docker image
         shell: bash
         run: |
-          SOURCE_IMAGE="gcr.io/${{ vars.PROJECT_NAME }}/${INPUTS_IMAGE_NAME}"
+          SOURCE_IMAGE="${{ inputs.docker_image_prefix }}/${{ inputs.image_name }}"
           TEMP_IMG="${SOURCE_IMAGE}:${{ github.run_id }}"
 
           if [[ $INPUTS_VERSION_NAME ]]; then

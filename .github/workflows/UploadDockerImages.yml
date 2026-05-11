@@ -84,6 +84,7 @@ jobs:
     uses: ./.github/workflows/build_and_push_docker_image.yml
     with:
       image_name: ${{ inputs.image_suffix != '' && format('{0}_{1}', matrix.image_name, inputs.image_suffix) || matrix.image_name }}
+      docker_image_prefix: gcr.io/${{ vars.PROJECT_NAME }}
       device: ${{ matrix.device }}
       build_mode: ${{ matrix.build_mode }}
       workflow: ${{ matrix.workflow }}
