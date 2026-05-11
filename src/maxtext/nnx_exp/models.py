@@ -66,11 +66,12 @@ class Attention(nnx.Module):
       kernel_init=self.sharding_hook(kernel_init, "o_proj_kernel_init"),
     )
 
-  def __call__(self, x, positions, mask=None):
+  def __call__(self, x, positions, mask=None, qkv_kernel=None):
     hook = self.sharding_hook
     
-    qkv_kernel = self.qkv_proj.kernel[...]
-    qkv_kernel = hook(qkv_kernel, "qkv_proj_kernel")
+    if qkv_kernel is None:
+      qkv_kernel = self.qkv_proj.kernel[...]
+      qkv_kernel = hook(qkv_kernel, "qkv_proj_kernel")
       
     qkv = hook(jnp.tensordot(x, qkv_kernel, axes=((-1,), (0,))), "qkv")
     q, k, v = jnp.split(qkv, (self.num_heads, self.num_heads + self.num_kv_heads), axis=-2)
@@ -159,8 +160,10 @@ class DecoderLayer(nnx.Module):
 
   def __call__(self, x, positions, mask=None):
     hook = self.sharding_hook
+    qkv_kernel = self.attn.sharding_hook(self.attn.qkv_proj.kernel[...], "qkv_proj_kernel")
+    
     attn_in = hook(self.attn_norm(x), "attn_input")
-    x = hook(x + self.attn(attn_in, positions, mask), "post_attn")
+    x = hook(x + self.attn(attn_in, positions, mask, qkv_kernel=qkv_kernel), "post_attn")
     mlp_in = hook(self.mlp_norm(x), "mlp_input")
     x = hook(x + self.mlp(mlp_in), "post_mlp")
     return x
