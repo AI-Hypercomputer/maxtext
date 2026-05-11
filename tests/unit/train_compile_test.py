@@ -1102,3 +1102,24 @@ class TrainCompile(parameterized.TestCase):
       # and did NOT unpickle them into JAX serialization bytes.
       assert loaded_legacy.startswith(b"\x80")
       assert loaded_legacy != serialized
+
+  @pytest.mark.cpu_only
+  def test_zero1_optimizer_sharding(self):
+    """AOT test for Zero-1 optimizer sharding (shard_optimizer_over_data)"""
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_zero1_optimizer_sharding.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-8",
+            "compile_topology_num_slices=1",
+            "base_emb_dim=256",
+            "base_mlp_dim=256",
+            "base_num_decoder_layers=2",
+            "ici_data_parallelism=4",
+            "shard_optimizer_over_data=true",
+            "shard_mode=explicit",
+        )
+    )
