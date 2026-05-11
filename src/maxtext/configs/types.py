@@ -1838,6 +1838,14 @@ class RLHardware(BaseModel):
       description="Z-coordinate indices of devices to assign to the trainer (e.g. 'top', 'bottom', '3', or '2,3'). "
       "Must be consistent with trainer_devices_fraction and sampler_devices_fraction.",
   )
+
+  @field_validator("trainer_z_index", mode="before")
+  @classmethod
+  def coerce_trainer_z_index_to_str(cls, v):
+    if v is None:
+      return v
+    return str(v)
+
   rollout_data_parallelism: int = Field(
       -1,
       description="Total model replicas for rollout. It should only be specified when you would like to use more "
