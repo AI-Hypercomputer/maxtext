@@ -20,10 +20,12 @@ for different hardware topologies.
 """
 
 from absl.testing import parameterized
+import jax
+from jax.experimental.serialize_executable import serialize
 import os.path
-from tempfile import gettempdir
-
+import pickle
 import pytest
+from tempfile import gettempdir, NamedTemporaryFile
 import transformers
 
 
@@ -1053,3 +1055,41 @@ class TrainCompile(parameterized.TestCase):
             "use_tokamax_splash=True",
         )
     )
+
+  @pytest.mark.cpu_only
+  def test_serialization_and_deserialization_formats(self):
+    """Tests that our custom binary save/load functions work securely and legacy fallback triggers warning."""
+
+    def load_serialized_compiled_test(save_name):
+      with open(save_name, "rb") as f:
+        return f.read()
+
+    @jax.jit
+    def add_one(x):
+      return x + 1
+
+    # Compile simply on CPU
+    compiled = add_one.lower(1).compile()
+    serialized, _, _ = serialize(compiled)
+
+    # 1. Save and load JAX compiled step using secure raw binary format
+    with NamedTemporaryFile() as f_secure:
+      with open(f_secure.name, "wb") as f:
+        f.write(serialized)
+
+      loaded_compiled = load_serialized_compiled_test(f_secure.name)
+
+      # Ensure it loaded the correct JAX serialization bytes
+      assert loaded_compiled == serialized
+
+    # 2. Save and load JAX compiled step using legacy pickle format
+    with NamedTemporaryFile() as f_legacy:
+      with open(f_legacy.name, "wb") as f:
+        pickle.dump(serialized, f)
+
+      loaded_legacy = load_serialized_compiled_test(f_legacy.name)
+
+      # Ensure it loaded raw pickled bytes (starting with pickle protocol marker)
+      # and did NOT unpickle them into JAX serialization bytes.
+      assert loaded_legacy.startswith(b"\x80")
+      assert loaded_legacy != serialized

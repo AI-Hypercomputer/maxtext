@@ -34,7 +34,7 @@ pytest.importorskip("tunix")
 pytestmark = [pytest.mark.cpu_only, pytest.mark.post_training]
 
 import os
-import pickle
+import safetensors.numpy
 import tempfile
 import unittest
 from typing import List, Optional
@@ -233,7 +233,7 @@ class DistillationMetricsTest(unittest.TestCase):
     with tempfile.TemporaryDirectory() as tmpdir:
       path = os.path.join(tmpdir, "test.array_record")
       writer = array_record_module.ArrayRecordWriter(path, "group_size:1")
-      writer.write(pickle.dumps(record))
+      writer.write(safetensors.numpy.save(record))
       writer.close()
 
       it = distillation_utils.OfflineArrayRecordIterator(path, epochs=1)

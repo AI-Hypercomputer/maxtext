@@ -25,7 +25,7 @@ import functools
 import sys
 
 import argparse
-import pickle
+import safetensors.numpy
 from absl import app
 import tensorflow as tf
 from array_record.python import array_record_module
@@ -57,7 +57,7 @@ def verify_array_records(output_dir, expected_steps, expected_k, expected_keys):
 
     for record_idx in range(num_records_in_file):
       record = reader.read()
-      data = pickle.loads(record)
+      data = safetensors.numpy.load(record)
 
       # Verify all required keys are present
       required_keys = ["tokens", "top_k_logits", "top_k_indices"]
