@@ -1270,6 +1270,14 @@ class Distillation(BaseModel):
       default_factory=dict,
       description="Experimental weight sharing map inside the student model for learn-to-init phase",
   )
+
+  attn_module_name: Optional[str] = Field(
+      None, description="Attention nnx module attribute name to augment with LTI logic"
+  )
+
+  lti_layer_indices: Optional[list[int]] = Field(
+      None, description="List of layer indices to apply LTI modifications. If None, applied to all layers."
+  )
   # ---------------------------------------
 
   # --- Distillation freezing filter --

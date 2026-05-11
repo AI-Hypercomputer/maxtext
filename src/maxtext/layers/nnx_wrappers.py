@@ -414,6 +414,9 @@ class ToLinen(linen.Module):
   skip_rng: bool = False
   metadata_fn: tp.Callable[[variablelib.Variable], tp.Any] | None = to_linen_var
 
+  # generic function to augment original nnx module (i.e for learn-to-init distillation)
+  nnx_module_augment_fn: tp.Callable[[Module, str | None], Module] | None = None
+
   @linen.compact
   def __call__(self, *args, nnx_method: tp.Callable[..., Any] | str | None = None, **kwargs):
     def _module_kwargs():
@@ -426,6 +429,10 @@ class ToLinen(linen.Module):
     # init codepath
     if self.is_initializing():
       module = self.nnx_class(*self.args, **_module_kwargs())
+
+      if self.nnx_module_augment_fn is not None:
+        module = self.nnx_module_augment_fn(module, self.name)
+
       # TODO: add lazy_init here in case there's an `ToNNX` submodule under `module`.
       # update linen variables before call module to save initial state
       self._update_variables(module)
@@ -436,6 +443,11 @@ class ToLinen(linen.Module):
 
     # create the nnx module
     module = self.nnx_class(*self.args, **_module_kwargs())
+
+    # Modify the nnx structure BEFORE loading the state
+    # This ensures the tree structure matches the state we are about to inject
+    if self.nnx_module_augment_fn is not None:
+      module = self.nnx_module_augment_fn(module, self.name)
 
     # update nnx module from linen variables
     def maybe_unbox(x):
@@ -550,6 +562,7 @@ def to_linen_class(
     base_nnx_class: type[M],
     base_metadata_fn: tp.Callable[[variablelib.Variable], tp.Any] | None = to_linen_var,
     base_skip_rng: bool = False,
+    nnx_module_augment_fn: tp.Callable[[Module, str | None], Module] | None = None,
     **partial_kwargs: tp.Any,
 ) -> type[ToLinen]:
   """A dynamically created Linen Module that wraps a specific NNX Module.
@@ -592,6 +605,7 @@ def to_linen_class(
       metadata_fn=None,
       name=_MISSING,
       parent=_MISSING,
+      nnx_module_augment_fn=nnx_module_augment_fn,
       **other_kwargs,
   ):
     linen_kwargs = {}
@@ -606,6 +620,7 @@ def to_linen_class(
         metadata_fn=metadata_fn or base_metadata_fn,
         skip_rng=skip_rng or base_skip_rng,
         kwargs=FrozenDict({**partial_kwargs, **(kwargs or {}), **other_kwargs}),
+        nnx_module_augment_fn=nnx_module_augment_fn,
         **linen_kwargs,
     )
 

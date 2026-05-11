@@ -1069,6 +1069,7 @@ class TrainDistillTest(unittest.TestCase):
     mock_student_cfg.distill_weights_copy_map = {}
     mock_student_cfg.distill_student_weights_share_map = {}
     mock_student_cfg.get_keys.return_value = {}
+    mock_student_cfg.student_params_to_update = []
 
     # Add scheduling attributes
     mock_student_cfg.distill_alpha_end = None
@@ -1176,6 +1177,7 @@ class TrainDistillTest(unittest.TestCase):
     mock_student_cfg.distill_weights_copy_map = {}
     mock_student_cfg.distill_student_weights_share_map = {}
     mock_student_cfg.get_keys.return_value = {}
+    mock_student_cfg.student_params_to_update = []
 
     # Add scheduling attributes
     mock_student_cfg.distill_alpha_end = None
