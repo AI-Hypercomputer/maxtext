@@ -19,8 +19,8 @@ def cross_entropy_loss(logits, targets):
   from jax.sharding import NamedSharding, PartitionSpec as P, reshard
   mesh = jax.sharding.get_abstract_mesh()
   if mesh is not None:
-    logits = reshard(logits, NamedSharding(mesh, P(("dp", "pp"), None, None)))
-    targets = reshard(targets, NamedSharding(mesh, P(("dp", "pp"), None)))
+    logits = reshard(logits, NamedSharding(mesh, P(("dp", "fsdp", "pp"), None, None)))
+    targets = reshard(targets, NamedSharding(mesh, P(("dp", "fsdp", "pp"), None)))
   loss = optax.softmax_cross_entropy_with_integer_labels(logits.astype(jnp.float32), targets)
   return jnp.mean(loss)
 
@@ -56,8 +56,8 @@ def main():
     rngs = nnx.Rngs(42)
     
     # Generate mock data (needed for quantization tracing)
-    batch_size = 2
-    seq_len = 4096
+    batch_size = 24
+    seq_len = 2048
     
     tokens = jnp.zeros((batch_size, seq_len), dtype=jnp.int32)
     targets = jnp.zeros((batch_size, seq_len), dtype=jnp.int32)
@@ -74,6 +74,7 @@ def main():
     
     # 1. Apply Rematerialization
     print("Applying rematerialization...")
+    #apply_remat(model, policy={"save": ["query_proj", "key_proj", "value_proj", "attention_out", "mlpwi"]})
     apply_remat(model, policy="full")
     
     # 2. Apply Quantization (INT8)

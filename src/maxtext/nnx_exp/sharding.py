@@ -195,9 +195,9 @@ class LlamaSharding(Sharding):
 
   def map_axis(self, axis: str, tensor_name: str, tensor_type: TensorType) -> MeshAxisMapping:
     match axis, tensor_name, tensor_type:
-      case "batch",                            _,                  _:             return "dp"
-      case "embed_and_logits_batch",           _,                  _:             return ("dp", "pp")
-      case "norm",                             _,                  _:             return ("fsdp", "fsdp_t")
+      case "batch",                            _,                  _:             return ("dp", "fsdp")
+      case "embed_and_logits_batch",           _,                  _:             return ("dp", "fsdp", "pp")
+      case "norm",                             _,                  _:             return ("fsdp_t")
       case "embed",                            _,                  TensorType.Weight: return ("fsdp", "fsdp_t")
       case "embed",                            _,                  _:                 return None
       case "vocab",                            _,                  _:             return ("tp", "tp_s")
