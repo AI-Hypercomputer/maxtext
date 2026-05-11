@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""JAX implementation of the Multi Token Prediction https://arxiv.org/pdf/2412.19437 """
+"""JAX implementation of the Multi Token Prediction https://arxiv.org/pdf/2412.19437"""
 
 from typing import Type
 
@@ -21,16 +21,17 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from maxtext.common.common_types import Config, MODEL_MODE_TRAIN
-from maxtext.layers.nnx_decoders import NNXDecoderLayer
-from maxtext.utils.globals import EPS
+from maxtext.common.common_types import Config, DecoderBlockType, MODEL_MODE_TRAIN, ShardMode
 from maxtext.layers.decoders import DecoderLayer
 from maxtext.layers.initializers import variable_to_logically_partitioned
 from maxtext.layers.linears import DenseGeneral
+from maxtext.layers.nnx_decoders import NNXDecoderLayer
 from maxtext.layers.normalizations import RMSNorm
+from maxtext.models import deepseek_batchsplit
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import sharding
+from maxtext.utils.globals import EPS
 
 
 # Custom Variable types for MTP intermediate outputs
@@ -62,7 +63,8 @@ def roll_and_mask(x: jnp.ndarray, shift: int = -1) -> jnp.ndarray:
 class MultiTokenPredictionLayer(nnx.Module):
   """Multi-Token Prediction layer: normalize, concatenate, project, and transform.
 
-  Implements: h_next = TransformerLayer(W_p(concat(RMSNorm(h_prev), RMSNorm(e_target))))
+  Implements: h_next = TransformerLayer(W_p(concat(RMSNorm(h_prev),
+  RMSNorm(e_target))))
   """
 
   def __init__(
@@ -103,7 +105,7 @@ class MultiTokenPredictionLayer(nnx.Module):
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         use_bias=False,
-        kernel_axes=("concat_embed", "embed"),
+        kernel_axes=("embed", None) if cfg.use_batch_split_schedule else ("concat_embed", "embed"),
         rngs=rngs,
     )
     # Use MODEL_MODE_TRAIN for initialization; runtime model_mode is passed dynamically.
@@ -160,7 +162,8 @@ class MultiTokenPredictionLayer(nnx.Module):
 
     Args:
         prev_hidden_state: Shape [batch, seq_len, hidden_size].
-        target_token_embedding: Embedding for token t+k. Shape [batch, seq_len, embed_dim].
+        target_token_embedding: Embedding for token t+k. Shape [batch, seq_len,
+          embed_dim].
         position_ids: Shape [batch, seq_len].
         decoder_segment_ids: Shape [batch, seq_len] or None.
         deterministic: Whether to disable dropout.
@@ -179,16 +182,43 @@ class MultiTokenPredictionLayer(nnx.Module):
 
     embedding_norm = self.embedding_norm(target_token_embedding)
     hidden_state_norm = self.hidden_state_norm(prev_hidden_state)
+    if self.config.shard_mode == ShardMode.EXPLICIT:
+      # Ensure that the embedding norm has the same sharding as the hidden state
+      # norm.
+      hidden_state_pspec = jax.sharding.NamedSharding(self.mesh, jax.typeof(hidden_state_norm).sharding.spec)
+      embedding_norm = jax.reshard(embedding_norm, hidden_state_pspec)
+
     concatenated_features = jnp.concatenate([embedding_norm, hidden_state_norm], axis=-1)
     projected_features = self.projection_layer(concatenated_features)
 
-    output = self.transformer_layer(
-        inputs=projected_features,
-        decoder_segment_ids=decoder_segment_ids,
-        decoder_positions=position_ids,
-        deterministic=deterministic,
-        model_mode=model_mode,
-    )
+    if self.config.decoder_block == DecoderBlockType.DEEPSEEK and self.config.use_batch_split_schedule:
+
+      def extract_fn(x):
+        if isinstance(x, nnx.variablelib.Variable):
+          return sharding.maybe_shard_with_logical(
+              x.value,
+              x.sharding_names,
+              self.mesh,
+              shard_mode=self.config.shard_mode,
+              rules=self.config.logical_axis_rules,
+          )
+        return x
+
+      output = deepseek_batchsplit.batch_split_layer(
+          inputs=projected_features,
+          positions=position_ids,
+          params=nnx.to_pure_dict(nnx.state(self, nnx.Param), extract_fn)[f"mtp_{self.layer_number}_transformer_layer"],
+          mesh=self.mesh,
+          cfg=self.config,
+      )
+    else:
+      output = self.transformer_layer(
+          inputs=projected_features,
+          decoder_segment_ids=decoder_segment_ids,
+          decoder_positions=position_ids,
+          deterministic=deterministic,
+          model_mode=model_mode,
+      )
 
     return output[0] if isinstance(output, tuple) else output
 
