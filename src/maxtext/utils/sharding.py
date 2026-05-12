@@ -192,7 +192,7 @@ def logical_to_mesh(tree, mesh, rules=None):
   return jax.tree.map(
       lambda x: logical_to_mesh_axes(x, mesh, rules=rules),
       tree,
-      is_leaf=lambda x: isinstance(x, P),
+      is_leaf=lambda x: isinstance(x, (P, tuple, list)),
   )
 
 
@@ -203,7 +203,7 @@ def logical_to_mesh_sharding(tree, mesh, rules=None):
   return jax.tree.map(
       lambda x: NamedSharding(mesh, x),
       logical_to_mesh(tree, mesh, rules=rules),
-      is_leaf=lambda x: isinstance(x, P),
+      is_leaf=lambda x: isinstance(x, (P, tuple, list, jax.sharding.NamedSharding)),
   )
 
 
