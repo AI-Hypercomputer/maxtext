@@ -1407,6 +1407,14 @@ class ManifoldConstrainedHyperConnections(BaseModel):
 
   mhc_expansion_rate: PositiveInt = Field(1, description="The number of parallel streams in Hyper Connection.")
   sinkhorn_iterations: PositiveInt = Field(20, description="The number of iterations for the Sinkhorn-Knopp algorithm.")
+  enable_mhc_lite: bool = Field(
+      False,
+      description=(
+          "Whether to generate the MHC doubly stochastic matrix via "
+          "permutation-based convex combination rather than Sinkhorn-Knopp. "
+          "Practical only for a small mhc_expansion_rate (e.g., k=4)."
+      ),
+  )
 
 
 class DilocoParams(BaseModel):

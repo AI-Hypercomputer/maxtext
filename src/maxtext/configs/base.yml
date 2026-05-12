@@ -1224,6 +1224,12 @@ force_q_layout: false
 mhc_expansion_rate: 1
 # The number of iterations for the Sinkhorn-Knopp algorithm.
 sinkhorn_iterations: 20
+# mHC-lite: https://openreview.net/pdf?id=5IJX6kvOif
+# - Controls whether to generate the MHC doubly stochastic matrix via
+#   permutation-based convex combination rather than Sinkhorn-Knopp.
+# - Practical only for a small mhc_expansion_rate (e.g., k=4), as the number 
+#   of permutation matrices scales factorially (k!).
+enable_mhc_lite: False
 
 ################################## DeepSeek Engram ##################################
 # Indices of transformer layers where Engram are integrated; leave empty [] to disable.
