@@ -1476,46 +1476,86 @@ class NNXCircularPipeline(NNXPipelineBase):
     #     are invisible to outer scope) causing full recompute = 17% throughput cost
     #   - jax.linear_transpose enables XLA to overlap reduce-scatter with compute
     num_microbatches = self.config.num_pipeline_microbatches
-    remat_policy = self.get_pipeline_remat_policy()
 
-    # ---- Inner scan body (plain checkpoint, no L1/L2 custom_vjp) ----
+    # ---- Level 1: per-microbatch remat + vjp ----
     #
-    # L3-only architecture: only custom_vjp at the repeat level for
-    # jax.linear_transpose (reduce-scatter overlap). Inner scan uses plain
-    # jax.checkpoint — JAX's standard autodiff handles gradient flow.
-    # This avoids L1/L2 VJP closure residuals that add ~3.7 GB temp.
+    # L1/L2 custom_vjp provide essential residual control. L1 saves lightweight
+    # remat'd vjp closures per microbatch, L2 wraps the scan with d+g gradient
+    # accumulation. Without them, jax.vjp captures the entire scan trace per
+    # repeat → 32+ GB memory. With them: ~17 GB (no outer checkpoint needed).
 
-    def _run_one_mb(lightweight_state, bsw_arg):
-      loop_st, layer_mut = lightweight_state
-      iteration = loop_st["loop_iteration"]
-      advanced_mut = _advance_rng_state(layer_mut, iteration)
-      new_loop_st, new_layer_state = self.run_one_iteration(
-          loop_st,
-          bsw_arg,
-          layers_graph,
-          layers_metrics,
-          advanced_mut,
-          positions,
-          segment_ids,
-          deterministic,
-          model_mode,
-          logical_partition_spec_stripped,
+    @jax.custom_vjp
+    def run_single_microbatch(lightweight_state, bsw):
+      return _single_mb_fwd(lightweight_state, bsw)[0]
+
+    def _single_mb_fwd(lightweight_state, bsw):
+      def _forward(state, weights):
+        loop_st, layer_mut = state
+        iteration = loop_st["loop_iteration"]
+        advanced_mut = _advance_rng_state(layer_mut, iteration)
+        new_loop_st, new_layer_state = self.run_one_iteration(
+            loop_st,
+            weights,
+            layers_graph,
+            layers_metrics,
+            advanced_mut,
+            positions,
+            segment_ids,
+            deterministic,
+            model_mode,
+            logical_partition_spec_stripped,
+        )
+        _, _, _, new_mut = nnx.split(new_layer_state, _is_static_param, nnx.Intermediate, ...)
+        return (new_loop_st, new_mut)
+
+      forward_remat = jax.remat(_forward, policy=self.get_pipeline_remat_policy())
+      output, vjp_fn = jax.vjp(forward_remat, lightweight_state, bsw)
+      return output, vjp_fn
+
+    def _single_mb_bwd(vjp_fn, g_output):
+      d_state, d_bsw = vjp_fn(g_output)
+      return d_state, d_bsw
+
+    run_single_microbatch.defvjp(_single_mb_fwd, _single_mb_bwd)
+
+    # ---- Level 2: gradient accumulation scan ----
+
+    @jax.custom_vjp
+    def run_pipeline_microbatches(lightweight_state, bsw):
+      return _microbatches_fwd(lightweight_state, bsw)[0]
+
+    def _microbatches_fwd(lightweight_state, bsw):
+      final_state, scan_vjp_fn = jax.vjp(
+          lambda state, weights: jax.lax.scan(
+              lambda carry, _: (run_single_microbatch(carry, weights), None),
+              state,
+              None,
+              length=num_microbatches,
+          )[0],
+          lightweight_state,
+          bsw,
       )
-      _, _, _, new_mut = nnx.split(new_layer_state, _is_static_param, nnx.Intermediate, ...)
-      return (new_loop_st, new_mut)
+      return (final_state, bsw), scan_vjp_fn
 
-    def run_inner_scan(lightweight_state, bsw_arg):
-      def body(carry, _):
-        return _run_one_mb(carry, bsw_arg), None
+    def _microbatches_bwd(scan_vjp_fn, g_final):
+      g_state, g_bsw = g_final
+      d_state, d_bsw = scan_vjp_fn(g_state)
+      d_bsw = jax.tree.map(
+          lambda d, g: d + g if hasattr(d, "shape") else d,
+          d_bsw,
+          g_bsw,
+      )
+      return d_state, d_bsw
 
-      body_ckpt = jax.checkpoint(body, policy=remat_policy)
-      final, _ = jax.lax.scan(body_ckpt, lightweight_state, None, length=num_microbatches)
-      return final
+    run_pipeline_microbatches.defvjp(_microbatches_fwd, _microbatches_bwd)
 
     # ---- Level 3: BSW creation + linear_transpose ----
     #
-    # L3-only: w_curr carried in outer scan, single linear_transpose for
-    # reduce-scatter. No L1/L2 custom_vjp overhead.
+    # Matches Linen's create_pipeline_stage pattern:
+    #   - w_curr carried in outer scan (not created inside L3)
+    #   - Only w_next created via weight_prefetching (1 all-gather, not 2)
+    #   - Single jax.linear_transpose (reduce-scatter for w_next gradient)
+    #   - w_curr gradient flows back through scan carry naturally
 
     @jax.custom_vjp
     def execute_pipeline_repeat(lightweight_state, w_curr, pipeline_params):
@@ -1537,24 +1577,20 @@ class NNXCircularPipeline(NNXPipelineBase):
           pipeline_params,
       )
 
-      final_state, scan_vjp_fn = jax.vjp(run_inner_scan, lightweight_state, bsw)
+      (final_state, _), scan_vjp_fn = jax.vjp(
+          run_pipeline_microbatches,
+          lightweight_state,
+          bsw,
+      )
       return (final_state, w_next), (scan_vjp_fn, weight_prefetching_t)
 
     def _repeat_bwd(residuals, g_output):
       scan_vjp_fn, weight_prefetching_t = residuals
       g_state, g_w_next = g_output
       g_w_curr = jax.tree.map(jnp.zeros_like, g_w_next)
-      d_state, (d_w_curr, d_w_next) = scan_vjp_fn(g_state)
-      d_w_next = jax.tree.map(
-          lambda d, g: d + g if hasattr(d, "shape") else d,
-          d_w_next,
-          g_w_next,
-      )
-      d_w_curr = jax.tree.map(
-          lambda d, g: d + g if hasattr(d, "shape") else d,
-          d_w_curr,
-          g_w_curr,
-      )
+      g_bsw = (g_w_curr, g_w_next)
+      d_state, d_bsw = scan_vjp_fn((g_state, g_bsw))
+      d_w_curr, d_w_next = d_bsw
       (d_pipeline_params,) = weight_prefetching_t(d_w_next)
       return d_state, d_w_curr, d_pipeline_params
 
