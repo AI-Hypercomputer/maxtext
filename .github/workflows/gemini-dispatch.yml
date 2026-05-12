@@ -9,6 +9,10 @@ on:
   pull_request_review:
     types: ['submitted']
 
+  # Trigger when a comment is added to the main conversation of a PR/Issue
+  issue_comment:
+    types: ['created']
+
   # Trigger when any label is attached to the PR
   pull_request:
     types: ['labeled']
@@ -61,6 +65,7 @@ jobs:
       command: '${{ steps.extract_command.outputs.command }}'
       request: '${{ steps.extract_command.outputs.request }}'
       additional_context: '${{ steps.extract_command.outputs.additional_context }}'
+      failed_run_id: '${{ steps.extract_command.outputs.failed_run_id }}'
       issue_number: '${{ github.event.pull_request.number || github.event.issue.number }}'
     steps:
       - name: 'Mint identity token'
@@ -92,8 +97,13 @@ jobs:
               core.setOutput('command', 'review');
             } else if (request.startsWith("@gemini-cli /review")) {
               core.setOutput('command', 'review');
-              const additionalContext = request.replace(/^@gemini-cli \/review/, '').trim();
-              core.setOutput('additional_context', additionalContext);
+              core.setOutput('additional_context', '');
+            } else if (request.startsWith("@gemini-cli /investigate")) {
+              core.setOutput('command', 'investigate');
+              const parts = request.split(/\s+/);
+              const failedRunId = parts.length > 2 ? parts[2] : '';
+              core.setOutput('failed_run_id', failedRunId);
+              core.setOutput('additional_context', '');
             } else if (request.startsWith("@gemini-cli")) {
               const additionalContext = request.replace(/^@gemini-cli/, '').trim();
               core.setOutput('command', 'invoke');
@@ -142,11 +152,28 @@ jobs:
       additional_context: '${{ needs.dispatch.outputs.additional_context }}'
     secrets: 'inherit'
 
+  investigate:
+    needs: 'dispatch'
+    if: |-
+      ${{ needs.dispatch.outputs.command == 'investigate' }}
+    uses: './.github/workflows/gemini-investigate.yml'
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+      issues: 'write'
+      pull-requests: 'write'
+      actions: 'read'
+    with:
+      additional_context: '${{ needs.dispatch.outputs.additional_context }}'
+      failed_run_id: '${{ needs.dispatch.outputs.failed_run_id }}'
+    secrets: 'inherit'
+
   fallthrough:
     needs:
       - 'dispatch'
       - 'review'
       - 'invoke'
+      - 'investigate'
     if: |-
       ${{ always() && !cancelled() && (failure() || needs.dispatch.outputs.command == 'fallthrough') }}
     runs-on: 'ubuntu-latest'
