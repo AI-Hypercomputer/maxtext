@@ -34,6 +34,18 @@ from maxtext.utils.sharding import logical_to_mesh_axes, create_sharding
 _MAX_WAVELENGTH = 10_000
 
 
+def debug_sharding(array, prefix=""):
+  global_shape = array.shape
+  jax.debug.inspect_array_sharding(
+      array,
+      callback=lambda sharding_obj: print(
+          prefix + f"\tGlobal Shape: {global_shape}\n"
+          f"\tLocal Shape: {sharding_obj.shard_shape(global_shape)}\n"
+          f"\tSharding Object: {sharding_obj}\n"
+      ),
+  )
+
+
 def _maybe_move_embedding_to_device(embedding_table: Array, config: Config) -> Array:
   """Moves embedding table to device if parameter offloading is enabled."""
   if config.parameter_memory_host_offload:
@@ -966,8 +978,10 @@ class YarnRotaryEmbedding(nnx.Module):
       # Convert the last dimension into a complex representation.
       # First reshape so that each pair of numbers represents the real and imaginary parts.
       B, S, N, H = inputs.shape
+      debug_sharding(inputs, "DEBUG: inputs")
       half_dim = H // 2
       inputs_reshaped = inputs.reshape(B, S, N, half_dim, 2)
+      debug_sharding(inputs_reshaped, "DEBUG: inputs_reshaped")
       first_half, second_half = inputs_reshaped[..., 0], inputs_reshaped[..., 1]
     else:
       # Inputs with concatenated format [real1, real2, ..., img1, img2, ...] at last dimension
