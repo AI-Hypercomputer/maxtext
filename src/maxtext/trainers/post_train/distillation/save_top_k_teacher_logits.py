@@ -24,7 +24,7 @@ python3 src/maxtext/trainers/post_train/distillation/save_top_k_teacher_logits.p
 """
 
 import os
-import pickle
+import safetensors.numpy
 from typing import Sequence
 import argparse
 import time
@@ -165,7 +165,7 @@ def generate_and_save_data(config, local_args):
         if key in batch:
           record_dict[key] = jax.device_get(batch[key])
 
-      writer.write(pickle.dumps(record_dict))
+      writer.write(safetensors.numpy.save(record_dict))
 
       if step % 50 == 0:
         max_logging.log(f"Successfully processed step {step} in {time.time() - step_start:.4f}s")

@@ -24,17 +24,29 @@ python3 -m tools.weight_inspector.weight_inspector --lhs left_hand.pkl --rhs rig
 import argparse
 import pickle
 import numpy as np
+from safetensors.torch import load_file
 import torch
+import warnings
 from maxtext.utils import max_logging
 
 
 def inspect_weights(left_path, right_path):
-  """Load the pickle files and compare contents."""
-  with open(left_path, "rb") as file:
-    left_weights = pickle.load(file)
+  """Load the weight files and compare contents."""
 
-  with open(right_path, "rb") as file:
-    right_weights = pickle.load(file)
+  def load_weights_safely(path):
+    if path.endswith(".safetensors"):
+      return load_file(path)
+    else:
+      warnings.warn(
+          f"Loading pickled weights from {path} is insecure and can lead to Remote Code Execution (RCE). "
+          "Please migrate your weights to safe formats like Safetensors (.safetensors).",
+          UserWarning,
+      )
+      with open(path, "rb") as file:
+        return pickle.load(file)
+
+  left_weights = load_weights_safely(left_path)
+  right_weights = load_weights_safely(right_path)
   assert sorted(left_weights.keys()) == sorted(
       right_weights.keys()
   ), f"Weights structure does not match! {list(set(left_weights.keys()).symmetric_difference(right_weights.keys()))}"

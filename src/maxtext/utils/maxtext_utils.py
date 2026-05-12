@@ -16,7 +16,6 @@
 """Utils that are only interesting to MaxText."""
 
 import functools
-import pickle
 import os
 from typing import Sequence
 
@@ -216,8 +215,7 @@ def load_compiled(config, partial_train, state, execution_devices):
   # Parker is working on a serializing these
   def load_serialized_compiled(save_name):
     with open(save_name, "rb") as f:
-      serialized_compiled = pickle.load(f)
-    return serialized_compiled
+      return f.read()
 
   def get_train_input_output_trees(func, input_args, input_kwargs):
     _, in_tree_recreated = jax.tree_util.tree_flatten((input_args, input_kwargs))
