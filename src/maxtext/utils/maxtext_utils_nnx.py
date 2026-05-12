@@ -207,7 +207,9 @@ def nnx_update_sharding_meta(variable, transform_fn):
       transformed = transform_fn(new_list)
       updates[key] = P(*transformed) if isinstance(val, P) else tuple(transformed)
 
-  return variable.replace(**updates) if updates else variable
+  if updates:
+    return variable.replace(**updates)
+  return variable
 
 def nnx_sync_moveaxis(tree, from_axis, to_axis):
   """Moves an axis in both values and sharding metadata of nnx.Variables."""
@@ -216,8 +218,8 @@ def nnx_sync_moveaxis(tree, from_axis, to_axis):
 
   import jax.numpy as jnp
   def _op(x):
-    is_var = hasattr(x, "value") and hasattr(x, "get_metadata")
-    val = x.value if is_var else x
+    is_var = isinstance(x, nnx.Variable)
+    val = x.get_value() if is_var else x
     if not hasattr(val, "shape"):
       return x
 
@@ -232,40 +234,40 @@ def nnx_sync_moveaxis(tree, from_axis, to_axis):
 
     return nnx_update_sharding_meta(x.replace(value=new_val), move_fn)
 
-  return jax.tree.map(_op, tree, is_leaf=lambda x: hasattr(x, "value") or hasattr(x, "shape"))
+  return jax.tree.map(_op, tree, is_leaf=lambda x: isinstance(x, nnx.Variable) or hasattr(x, "shape"))
 
 def nnx_remove_scan_axis(tree, name="layers"):
   """Removes the given scan axis from the PartitionSpec."""
 
   def _op(x):
-    if not (hasattr(x, "value") and hasattr(x, "get_metadata")):
+    if not isinstance(x, nnx.Variable):
       return x
 
     def remove_fn(l):
       if name in l:
         l.remove(name)
-      while len(l) > x.value.ndim:
+      while len(l) > x.get_value().ndim:
         l.pop(0)
       return l
 
     return nnx_update_sharding_meta(x, remove_fn)
 
-  return jax.tree.map(_op, tree, is_leaf=lambda x: hasattr(x, "get_metadata"))
+  return jax.tree.map(_op, tree, is_leaf=lambda x: isinstance(x, nnx.Variable))
 
 def nnx_add_scan_axis(tree, name="layers", pos=0):
   """Adds the given scan axis to the PartitionSpec at the specified position."""
 
   def _op(x):
-    if not (hasattr(x, "value") and hasattr(x, "get_metadata")):
+    if not isinstance(x, nnx.Variable):
       return x
 
     def add_fn(l):
       if name not in l:
         l.insert(pos, name)
-      while len(l) < x.value.ndim:
+      while len(l) < x.get_value().ndim:
         l.insert(pos, None)
       return l
 
     return nnx_update_sharding_meta(x, add_fn)
 
-  return jax.tree.map(_op, tree, is_leaf=lambda x: hasattr(x, "get_metadata"))
+  return jax.tree.map(_op, tree, is_leaf=lambda x: isinstance(x, nnx.Variable))
