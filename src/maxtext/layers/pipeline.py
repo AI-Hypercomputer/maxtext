@@ -1022,6 +1022,28 @@ class NNXCircularPipeline(NNXPipelineBase):
   all-gathers from total_iterations to num_repeats+1.
   """
 
+  def get_main_vmap_func_for_iterations(self):
+    """Override: return ONLY forward output from vmap.
+
+    Base class returns (out, nnx.state(module)) = ALL state including params.
+    For circular pipeline, params are handled by AD through BSW, metrics are
+    write-only (nnx.Intermediate), and RNG is derived from closure. Returning
+    full state adds ~960 output arrays to the jaxpr per vmap call. Linen's
+    body_instance.apply(weights) returns only the forward output.
+    """
+
+    def func_to_vmap(graph, state, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode):
+      module = nnx.merge(graph, state)
+      out = module(stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
+      return out
+
+    return nnx.vmap(
+        func_to_vmap,
+        in_axes=(None, 0, 0, 0, 0, None, None),
+        out_axes=0,
+        spmd_axis_name=self.spmd_axis_name,
+    )
+
   def gather_microbatch_inputs_vmap(self, xs, ids, ids_dim):
     """Slices out the specific sequence inputs (e.g., positions, segments) for the current microbatch."""
     if xs is None:
@@ -1302,25 +1324,24 @@ class NNXCircularPipeline(NNXPipelineBase):
         physical_partition_spec=physical_partition_spec,
     )
 
-    # 2. Gather non-params (metrics, mutables) for current repeat directly
+    # 2. Non-param state for nnx.merge: metrics are write-only (nnx.Intermediate),
+    #    mutables (RNG) derived from closure. Use zeros for metrics to avoid
+    #    per-repeat gather (~20 dynamic_slice ops) and trace-level stamping.
+    #    Linen's nn.scan handles this via variable_axes auto-stacking.
     _, repeat_ids = self.get_microbatch_and_repeat_ids(loop_iteration)
     if self.config.num_pipeline_repeats > 1:
-      stage_metrics = self.gather_weights_across_stages_vmap(
-          layers_metrics, repeat_ids=repeat_ids, repeat_dim_in_weights=0, stages_dim_in_weights=1
-      )
       stage_mutables = self.gather_weights_across_stages_vmap(
           current_layer_mutables, repeat_ids=repeat_ids, repeat_dim_in_weights=0, stages_dim_in_weights=1
       )
+      stage_metrics = jax.tree.map(lambda x: jnp.zeros_like(x[0]), layers_metrics)
     else:
-      # Stamp at current trace level to avoid nnx.merge trace-level mismatch
-      # (layers_metrics is closed over from outer scope in scan).
-      stage_metrics = self._stamp_at_current_trace(layers_metrics)
-      stage_mutables = current_layer_mutables  # already at scan trace level (from carry)
+      stage_mutables = current_layer_mutables
+      stage_metrics = jax.tree.map(jnp.zeros_like, layers_metrics)
 
     # 3. Merge into full state for forward pass
     stage_weights_state = nnx.State.merge(stage_params, stage_metrics, stage_mutables)
 
-    stages_output, updated_stage_weights_state = vmap_func(
+    stages_output = vmap_func(
         pipeline_weights_graph,
         stage_weights_state,
         stages_inputs,
@@ -1333,34 +1354,10 @@ class NNXCircularPipeline(NNXPipelineBase):
     if self.config.scan_layers:
       stages_output = stages_output[0]
 
-    # Scatter-back: only update non-params (params are handled by AD/gradient, not carried in scan)
-    if self.config.num_pipeline_repeats > 1:
-
-      def _scatter_update(fw, uw):
-        if fw is None or uw is None:
-          return fw
-
-        def _update_one_stage(f_s, u_s, r_id):
-          return jax.lax.dynamic_update_slice_in_dim(f_s, jnp.expand_dims(u_s, 0), r_id, axis=0)
-
-        r_ids = self.shard_dim_by_stages(repeat_ids, 0, physical_partition_spec=None)
-        updated_fw = jax.vmap(_update_one_stage, in_axes=(1, 0, 0), out_axes=1)(fw, uw, r_ids)
-        return self.shard_dim_by_stages(updated_fw, 1, physical_partition_spec=None, is_stage_weight=False)
-
-      # Extract non-params from updated stage state
-      _, _, updated_stage_metrics, updated_stage_mutables = nnx.split(
-          updated_stage_weights_state, _is_static_param, nnx.Intermediate, ...
-      )
-      updated_stage_non_params = nnx.State.merge(updated_stage_metrics, updated_stage_mutables)
-      current_non_params = nnx.State.merge(layers_metrics, current_layer_mutables)
-      new_layer_state = jax.tree.map(_scatter_update, current_non_params, updated_stage_non_params)
-    else:
-      # Filter to non-params for consistency with num_pipeline_repeats > 1 path
-      _, _, else_metrics, else_mutables = nnx.split(updated_stage_weights_state, _is_static_param, nnx.Intermediate, ...)
-      new_layer_state = nnx.State.merge(else_metrics, else_mutables)
-
+    # No scatter-update: metrics are write-only, mutables derived from closure.
+    # Linen never scatter-updates non-params — nn.scan handles it via variable_axes.
     new_state = self.get_new_loop_state(stages_output, loop_state)
-    return new_state, new_layer_state
+    return new_state
 
   def __call__(
       self,
@@ -1492,10 +1489,8 @@ class NNXCircularPipeline(NNXPipelineBase):
       def _forward(state, weights):
         loop_st = state
         iteration = loop_st["loop_iteration"]
-        # Derive RNG from base state + iteration (closure capture, not carry).
-        # Equivalent to Linen's nn.scan(split_rngs={"random": True}).
         derived_mut = _advance_rng_state(layers_mutables, iteration)
-        new_loop_st, _ = self.run_one_iteration(
+        new_loop_st = self.run_one_iteration(
             loop_st,
             weights,
             layers_graph,
@@ -1640,7 +1635,7 @@ class NNXCircularPipeline(NNXPipelineBase):
       current_loop_state = carry
       iteration = current_loop_state["loop_iteration"]
       derived_mutables = _advance_rng_state(layers_mutables, iteration)
-      new_loop_state, _ = self.run_one_iteration(
+      new_loop_state = self.run_one_iteration(
           current_loop_state,
           bsw_ref[0],
           layers_graph,
