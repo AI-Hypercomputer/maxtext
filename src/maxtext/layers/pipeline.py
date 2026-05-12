@@ -1490,23 +1490,24 @@ class NNXCircularPipeline(NNXPipelineBase):
 
     def _single_mb_fwd(lightweight_state, bsw):
       def _forward(state, weights):
-        loop_st, layer_mut = state
+        loop_st = state
         iteration = loop_st["loop_iteration"]
-        advanced_mut = _advance_rng_state(layer_mut, iteration)
-        new_loop_st, new_layer_state = self.run_one_iteration(
+        # Derive RNG from base state + iteration (closure capture, not carry).
+        # Equivalent to Linen's nn.scan(split_rngs={"random": True}).
+        derived_mut = _advance_rng_state(layers_mutables, iteration)
+        new_loop_st, _ = self.run_one_iteration(
             loop_st,
             weights,
             layers_graph,
             layers_metrics,
-            advanced_mut,
+            derived_mut,
             positions,
             segment_ids,
             deterministic,
             model_mode,
             logical_partition_spec_stripped,
         )
-        _, _, _, new_mut = nnx.split(new_layer_state, _is_static_param, nnx.Intermediate, ...)
-        return (new_loop_st, new_mut)
+        return new_loop_st
 
       forward_remat = jax.remat(_forward, policy=self.get_pipeline_remat_policy())
       output, vjp_fn = jax.vjp(forward_remat, lightweight_state, bsw)
@@ -1564,11 +1565,10 @@ class NNXCircularPipeline(NNXPipelineBase):
     #   - w_curr gradient flows back through scan carry naturally
 
     @jax.custom_vjp
-    def execute_pipeline_repeat(lightweight_state, w_curr, pipeline_params):
-      return _repeat_fwd(lightweight_state, w_curr, pipeline_params)[0]
+    def execute_pipeline_repeat(loop_st, w_curr, pipeline_params):
+      return _repeat_fwd(loop_st, w_curr, pipeline_params)[0]
 
-    def _repeat_fwd(lightweight_state, w_curr, pipeline_params):
-      loop_st, _ = lightweight_state
+    def _repeat_fwd(loop_st, w_curr, pipeline_params):
       iteration = loop_st["loop_iteration"]
 
       w_next = self.weight_prefetching(pipeline_params, physical_partition_spec_full, iteration)
@@ -1583,12 +1583,12 @@ class NNXCircularPipeline(NNXPipelineBase):
           pipeline_params,
       )
 
-      (final_state, _), scan_vjp_fn = jax.vjp(
+      (final_loop_st, _), scan_vjp_fn = jax.vjp(
           run_pipeline_microbatches,
-          lightweight_state,
+          loop_st,
           bsw,
       )
-      return (final_state, w_next), (scan_vjp_fn, weight_prefetching_t)
+      return (final_loop_st, w_next), (scan_vjp_fn, weight_prefetching_t)
 
     def _repeat_bwd(residuals, g_output):
       scan_vjp_fn, weight_prefetching_t = residuals
@@ -1610,10 +1610,11 @@ class NNXCircularPipeline(NNXPipelineBase):
     initial_w_curr = jax.tree.map(lambda x: jnp.zeros(x.shape[1:], dtype=x.dtype), layers_params)
 
     def outer_body(carry, _):
-      loop_st, layer_mut, w_curr = carry
-      lightweight_state = (loop_st, layer_mut)
-      (new_loop_st, new_mut), w_next = execute_pipeline_repeat(lightweight_state, w_curr, layers_params)
-      return (new_loop_st, new_mut, w_next), None
+      loop_st, w_curr = carry
+      # layers_mutables NOT in carry — derived from closure via _advance_rng_state
+      # inside L1 _forward. Removes RNG arrays from scan carry → simpler jaxpr.
+      new_loop_st, w_next = execute_pipeline_repeat(loop_st, w_curr, layers_params)
+      return (new_loop_st, w_next), None
 
     # Outer checkpoint trade-off depends on sequence length:
     #   - Long sequences (1024+): without outer ckpt = 17 GB (L1/L2 remat sufficient)
@@ -1623,14 +1624,12 @@ class NNXCircularPipeline(NNXPipelineBase):
       outer_body = jax.checkpoint(outer_body, policy=self.get_pipeline_remat_policy())
 
     if self.config.scan_pipeline_iterations:
-      (loop_state, final_layer_mutables, final_w_curr), _ = jax.lax.scan(
-          outer_body, (loop_state, layers_mutables, initial_w_curr), None, length=num_repeats
-      )
+      (loop_state, final_w_curr), _ = jax.lax.scan(outer_body, (loop_state, initial_w_curr), None, length=num_repeats)
     else:
-      outer_carry = (loop_state, layers_mutables, initial_w_curr)
+      outer_carry = (loop_state, initial_w_curr)
       for _ in range(num_repeats):
         outer_carry, _ = outer_body(outer_carry, None)
-      loop_state, final_layer_mutables, final_w_curr = outer_carry
+      loop_state, final_w_curr = outer_carry
 
     # ---- Bubble iterations (pipeline drain) ----
     # Bubbles use simple inner_body (no custom_vjp needed — few iterations,
@@ -1638,23 +1637,22 @@ class NNXCircularPipeline(NNXPipelineBase):
     bsw_ref = [None]
 
     def bubble_inner_body(carry, _):
-      current_loop_state, current_layer_mutables = carry
+      current_loop_state = carry
       iteration = current_loop_state["loop_iteration"]
-      advanced_mutables = _advance_rng_state(current_layer_mutables, iteration)
-      new_loop_state, new_layer_state = self.run_one_iteration(
+      derived_mutables = _advance_rng_state(layers_mutables, iteration)
+      new_loop_state, _ = self.run_one_iteration(
           current_loop_state,
           bsw_ref[0],
           layers_graph,
           layers_metrics,
-          advanced_mutables,
+          derived_mutables,
           positions,
           segment_ids,
           deterministic,
           model_mode,
           logical_partition_spec_stripped,
       )
-      _, _, _, new_layer_mutables = nnx.split(new_layer_state, _is_static_param, nnx.Intermediate, ...)
-      return (new_loop_state, new_layer_mutables), None
+      return new_loop_state, None
 
     if self.config.set_remat_policy_on_pipeline_iterations:
       bubble_inner_body = jax.checkpoint(
@@ -1666,18 +1664,15 @@ class NNXCircularPipeline(NNXPipelineBase):
     if bubble_iterations > 0:
       bsw_ref[0] = (final_w_curr, final_w_curr)
       if self.config.scan_pipeline_iterations:
-        (loop_state, final_layer_mutables), _ = jax.lax.scan(
-            bubble_inner_body, (loop_state, final_layer_mutables), None, length=bubble_iterations
-        )
+        loop_state, _ = jax.lax.scan(bubble_inner_body, loop_state, None, length=bubble_iterations)
       else:
-        bubble_carry = (loop_state, final_layer_mutables)
         for _ in range(bubble_iterations):
-          bubble_carry, _ = bubble_inner_body(bubble_carry, None)
-        loop_state, final_layer_mutables = bubble_carry
+          loop_state, _ = bubble_inner_body(loop_state, None)
 
     # Metrics are not propagated through custom_vjp (they're intermediates,
     # no gradients needed). Use initial layers_metrics for state merge.
-    final_layer_state = nnx.State.merge(layers_params, layers_metrics, final_layer_mutables)
+    # layers_mutables (RNG) derived from closure — use base state for final merge.
+    final_layer_state = nnx.State.merge(layers_params, layers_metrics, layers_mutables)
     nnx.update(self.layers, final_layer_state)
 
     final_output = self.realign_output_microbatches(loop_state["state_io"])
