@@ -506,7 +506,10 @@ class ModelArchitecture(BaseModel):
       True,
       description="Whether to apply scale on query and key normalizations (default True).",
   )
-  v_norm_with_scale: bool = Field(True, description="Whether to apply scale on value normalization (default True).")
+  v_norm_with_scale: bool = Field(
+      True,
+      description="Whether to apply scale on value normalization (default True).",
+  )
 
 
 class MTP(BaseModel):
@@ -685,14 +688,18 @@ class MoEGeneral(BaseModel):
   num_experts: PositiveInt = Field(1, description="The total number of experts in each MoE layer.")
   num_experts_per_tok: PositiveInt = Field(1, description="The number of experts to route each token to.")
   capacity_factor: float = Field(-1.0, description="Expert capacity factor. If < 0, no token dropping.")
-  ragged_buffer_factor: float = Field(-1.0, description="Ragged buffer factor. If < 0, ragged buffer is worst case size.")
+  ragged_buffer_factor: float = Field(
+      -1.0,
+      description="Ragged buffer factor. If < 0, ragged buffer is worst case size.",
+  )
   moe_expert_input_dim: int = Field(
       -1,
       description="Dimension of tokens entering the MoE layer. If < 0, defaults to emb_dim.",
   )
   base_moe_mlp_dim: int = Field(-1, description="Intermediate dimension at MoE layer.")
   padded_base_moe_mlp_dim: Optional[int] = Field(
-      None, description="Padded intermediate dimension at MoE layer for efficient GMM_v2 kernel execution."
+      None,
+      description="Padded intermediate dimension at MoE layer for efficient GMM_v2 kernel execution.",
   )
   load_balance_loss_weight: NonNegativeFloat = Field(0.0, description="Weight for the load balancing auxiliary loss.")
   use_custom_sort_vjp: bool = Field(
@@ -873,7 +880,8 @@ class HardwareAndMesh(BaseModel):
   )
   custom_mesh: str = Field("", description="Available options: ['hybrid_ring_64x4', 'hybrid_ring_32x8']")
   custom_mesh_and_rule: CustomRule = Field(
-      CustomRule.DEFAULT, description="Customized mesh and logical rules for granularity."
+      CustomRule.DEFAULT,
+      description="Customized mesh and logical rules for granularity.",
   )
   allow_split_physical_axes: bool = Field(False, description="Allow splitting physical axes for device mesh creation.")
   enable_nnx: bool = Field(False, description="Whether to use NNX for model definition.")
@@ -882,7 +890,8 @@ class HardwareAndMesh(BaseModel):
   pure_nnx_decoder: bool = Field(False, description="Whether to enable pure NNX decoder.")
   pure_nnx: bool = Field(False, description="Whether to enable pure NNX mode.")
   remove_size_one_mesh_axis_from_type: bool = Field(
-      True, description="Whether to remove size one mesh axis from type through jax.config."
+      True,
+      description="Whether to remove size one mesh axis from type through jax.config.",
   )
 
 
@@ -903,7 +912,10 @@ class LayoutAndSharding(BaseModel):
       description="Allowed percentage of non-sharded parameters.",
   )
   shard_optimizer_over_data: bool = Field(False, description="Enable ZeRO-1 optimizer sharding over the data axis.")
-  internal_compile: bool = Field(False, description="Use internal_compile to bypass open-source topology mappings.")
+  internal_compile: bool = Field(
+      False,
+      description="Use internal_compile to bypass open-source topology mappings.",
+  )
   internal_compile_num_devices: int = Field(-1, description="Number of devices when using internal_compile.")
   compile_xla_flags: str = Field("", description="Compiler options for compilation only.")
 
@@ -950,7 +962,8 @@ class PipelineParallelism(BaseModel):
   """Configuration for pipeline parallelism."""
 
   pipeline_fsdp_ag_per_repeat: bool = Field(
-      False, description="Enable weight prefetching for circular pipeline parallelism."
+      False,
+      description="Enable weight prefetching for circular pipeline parallelism.",
   )
   num_layers_per_pipeline_stage: int = Field(1, description="Number of layers to place on each pipeline stage.")
   num_pipeline_repeats: int = Field(
@@ -1194,7 +1207,10 @@ class OlmoGrainDataset(BaseModel):
   ``data_shuffle_seed``); only OLMo-specific fields are listed here.
   """
 
-  olmo_index_path: PathStr = Field("", description="Path or gs:// URI to the JSON index from build_olmo_npy_index.py.")
+  olmo_index_path: PathStr = Field(
+      "",
+      description="Path or gs:// URI to the JSON index from build_olmo_npy_index.py.",
+  )
   olmo_path_remap_from: PathStr = Field(
       "",
       description="If set, rewrite index file paths starting with this prefix to olmo_path_remap_to.",
@@ -1279,19 +1295,24 @@ class Distillation(BaseModel):
   distill_layer_indices: None | list = Field(None, description="Feature indices for feature loss.")
   distill_alpha_end: Optional[float] = Field(None, description="Target alpha at end of training. None keeps alpha fixed.")
   distill_alpha_schedule: Literal["constant", "linear", "cosine"] = Field(
-      "constant", description="Schedule type for alpha annealing ('constant', 'linear', or 'cosine')."
+      "constant",
+      description="Schedule type for alpha annealing ('constant', 'linear', or 'cosine').",
   )
   distill_temperature_end: Optional[float] = Field(
-      None, description="Target temperature at end of training. None keeps temperature fixed."
+      None,
+      description="Target temperature at end of training. None keeps temperature fixed.",
   )
   distill_temperature_schedule: Literal["constant", "linear", "cosine"] = Field(
-      "constant", description="Schedule type for temperature annealing ('constant', 'linear', or 'cosine')."
+      "constant",
+      description="Schedule type for temperature annealing ('constant', 'linear', or 'cosine').",
   )
   distill_beta_end: Optional[float] = Field(
-      None, description="Target beta_feature at end of training. None keeps beta fixed."
+      None,
+      description="Target beta_feature at end of training. None keeps beta fixed.",
   )
   distill_beta_schedule: Literal["constant", "linear", "cosine"] = Field(
-      "constant", description="Schedule type for beta annealing ('constant', 'linear', or 'cosine')."
+      "constant",
+      description="Schedule type for beta annealing ('constant', 'linear', or 'cosine').",
   )
 
   # --- Learn to init related parameters --
@@ -1314,11 +1335,13 @@ class Distillation(BaseModel):
   )
 
   attn_module_name: Optional[str] = Field(
-      None, description="Attention nnx module attribute name to augment with LTI logic"
+      None,
+      description="Attention nnx module attribute name to augment with LTI logic",
   )
 
   lti_layer_indices: Optional[list[int]] = Field(
-      None, description="List of layer indices to apply LTI modifications. If None, applied to all layers."
+      None,
+      description="List of layer indices to apply LTI modifications. If None, applied to all layers.",
   )
   # ---------------------------------------
 
@@ -1365,6 +1388,10 @@ class ManifoldConstrainedHyperConnections(BaseModel):
 
   mhc_expansion_rate: PositiveInt = Field(1, description="The number of parallel streams in Hyper Connection.")
   sinkhorn_iterations: PositiveInt = Field(20, description="The number of iterations for the Sinkhorn-Knopp algorithm.")
+  enable_mhc_k4_shortcut: bool = Field(
+      True,
+      description="Whether to enable the permutation-based convex combination shortcut when mhc_expansion_rate is 4.",
+  )
 
 
 class DilocoParams(BaseModel):
@@ -1655,7 +1682,8 @@ class Profiling(BaseModel):
   tpu_num_chips_to_profile_per_task: int = Field(1, description="Specifies the number of TPU chips to profile per task.")
   tpu_num_sparse_cores_to_trace: int = Field(2, description="Specifies the number of TPU chips to profile per task.")
   tpu_num_sparse_core_tiles_to_trace: int = Field(
-      1, description="Specifies the number of tiles within each sparse core to trace on the TPU."
+      1,
+      description="Specifies the number of tiles within each sparse core to trace on the TPU.",
   )
   xprof_tpu_power_trace_level: XProfTPUPowerTraceMode = Field(
       XProfTPUPowerTraceMode.POWER_TRACE_NONE,
@@ -2491,7 +2519,11 @@ class MaxTextConfig(
       )
     for param_name, schedule, end_value in [
         ("distill_alpha", self.distill_alpha_schedule, self.distill_alpha_end),
-        ("distill_temperature", self.distill_temperature_schedule, self.distill_temperature_end),
+        (
+            "distill_temperature",
+            self.distill_temperature_schedule,
+            self.distill_temperature_end,
+        ),
         ("distill_beta", self.distill_beta_schedule, self.distill_beta_end),
     ]:
       if schedule != "constant" and end_value is None:
@@ -3004,7 +3036,7 @@ class MaxTextConfig(
       self.use_grpo = False
 
     if self.use_batch_split_schedule:
-      if self.quantization and not self.quantization == "fp8_full":
+      if self.quantization and self.quantization != "fp8_full":
         raise ValueError("Batch split quantization only supports `quantization=fp8_full`")
 
     if self.opt_type == "muon" and self.decoder_block not in [

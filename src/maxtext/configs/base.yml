@@ -1217,6 +1217,8 @@ force_q_layout: false
 mhc_expansion_rate: 1
 # The number of iterations for the Sinkhorn-Knopp algorithm.
 sinkhorn_iterations: 20
+# Whether to enable the permutation-based convex combination shortcut when mhc_expansion_rate is 4.
+enable_mhc_k4_shortcut: True
 
 ################################## DeepSeek Engram ##################################
 # Indices of transformer layers where Engram are integrated; leave empty [] to disable.
