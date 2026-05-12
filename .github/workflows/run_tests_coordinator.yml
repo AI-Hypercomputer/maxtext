@@ -66,7 +66,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        worker_group: ${{ fromJSON(contains(inputs.flavor, 'cpu-unit') && '[1, 2]' || '[1]') }}
+        worker_group: ${{ fromJSON(contains(inputs.flavor, 'cpu-unit') && '[1, 2, 3, 4]' || '[1]') }}
 
     uses: ./.github/workflows/run_tests_against_package.yml
     with:
@@ -158,6 +158,6 @@ jobs:
       is_scheduled_run: ${{ inputs.is_scheduled_run }}
       maxtext_installed: ${{ inputs.maxtext_installed }}
       worker_group: ${{ matrix.worker_group }}
-      total_workers: ${{ contains(inputs.flavor, 'cpu-unit') && 2 || 1 }}
+      total_workers: ${{ contains(inputs.flavor, 'cpu-unit') && 4 || 1 }}
       maxtext_sha: ${{ inputs.maxtext_sha }}
       is_update_hlo: ${{ inputs.is_update_hlo }}
