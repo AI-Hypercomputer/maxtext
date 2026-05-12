@@ -110,9 +110,13 @@ class AotHloIdenticalTest(AotBaseTest):
         "steps=1",
         "enable_checkpointing=False",
         "base_num_decoder_layers=1",
-        "max_target_length=512",
-        "base_emb_dim=256",
-        "base_mlp_dim=256",
+        "max_target_length=32",
+        "base_emb_dim=64",
+        "base_mlp_dim=64",
+        "base_num_query_heads=2",
+        "base_num_kv_heads=2",
+        "head_dim=16",
+        "vocab_size=128",
     ] + hlo_dump_args
     if extra_args:
       shared_args.extend(extra_args)
@@ -179,6 +183,14 @@ class AotJaxprIdenticalTest(AotBaseTest):
         "enable_checkpointing=False",
         "dump_jaxpr=True",
         "dump_jaxpr_delete_local_after=False",
+        "base_num_decoder_layers=1",
+        "max_target_length=32",
+        "base_emb_dim=64",
+        "base_mlp_dim=64",
+        "base_num_query_heads=2",
+        "base_num_kv_heads=2",
+        "head_dim=16",
+        "vocab_size=128",
     ]
     if extra_args:
       shared_args.extend(extra_args)
@@ -218,5 +230,15 @@ class AotJaxprIdenticalTest(AotBaseTest):
     )
 
   @pytest.mark.tpu_only
-  def test_default_jaxpr_match(self):
-    self.assert_compile_and_real_match_jaxpr("default_run")
+  def test_default_jaxpr_match_mcjax(self):
+    if os.getenv("JAX_PLATFORMS") == "proxy":
+      pytest.skip("This is a McJAX test, skipping in Pathways environment.")
+    self.assert_compile_and_real_match_jaxpr("default_run_mcjax")
+
+  @pytest.mark.tpu_only
+  @pytest.mark.scheduled_only
+  def test_default_jaxpr_match_pathways(self):
+    # Currently this test is extremely slow (b/512065615).
+    if os.getenv("JAX_PLATFORMS") != "proxy":
+      pytest.skip("This is a Pathways test, skipping in McJAX environment.")
+    self.assert_compile_and_real_match_jaxpr("default_run_pathways", "enable_single_controller=True")

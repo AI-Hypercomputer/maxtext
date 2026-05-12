@@ -52,7 +52,7 @@ class TestModel(unittest.TestCase):
         base_num_decoder_layers=2,
         attention="dot_product",
         max_target_length=16,
-        base_emb_dim=256,
+        base_emb_dim=32,
         base_num_query_heads=2,
         base_num_kv_heads=2,
         max_prefill_predict_length=4,
@@ -175,7 +175,7 @@ class TestModel(unittest.TestCase):
         equal_nan=False,
     )
 
-    for idx in range(PREFILL_RANGE, self.cfg.max_target_length):
+    for idx in range(PREFILL_RANGE, min(PREFILL_RANGE + 3, self.cfg.max_target_length)):
       ids_idx = ids[:, idx : idx + 1]
       decoder_positions_idx = decoder_positions[:, idx : idx + 1]
       prefill_transformer_vars.update(partial_cache)

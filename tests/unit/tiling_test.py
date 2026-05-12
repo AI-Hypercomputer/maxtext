@@ -67,7 +67,12 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
     """
     Set up common configurations and dummy data for the tests.
     """
-    self.base_config = [None, get_test_config_path()]
+    self.base_config = [
+        None,
+        get_test_config_path(),
+        "base_emb_dim=32",
+        "vocab_size=128",
+    ]
     self.rng = jax.random.PRNGKey(1234)
     self.batch_size = 1
     self.seq_len = 64

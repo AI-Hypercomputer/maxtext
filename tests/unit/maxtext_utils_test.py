@@ -18,6 +18,7 @@ import functools
 from collections.abc import Callable
 from typing import Any, Sequence
 import unittest
+import pytest
 from unittest.mock import MagicMock, Mock, patch
 from dataclasses import dataclass, field
 import numpy as np
@@ -1429,6 +1430,40 @@ class TestMaybeDumpJaxpr(unittest.TestCase):
     cfg.dump_jaxpr = False
     # Should return immediately without calling any JAX tracing (no exception raised)
     maxtext_utils.maybe_dump_jaxpr(cfg, p_train_step=None, train_step_inputs=None)
+
+  @pytest.mark.tpu_only
+  def test_traces_with_abstract_inputs_and_unwrapped_function(self):
+    cfg = MagicMock()
+    cfg.dump_jaxpr = True
+    cfg.dump_jaxpr_local_dir = "/tmp/nonexistent_jaxpr_test_dir"
+    cfg.dump_jaxpr_gcs_dir = ""
+
+    @jax.jit
+    def dummy_func(x):
+      return x * 2
+
+    with (
+        unittest.mock.patch("builtins.open", unittest.mock.mock_open()),
+        unittest.mock.patch("os.makedirs"),
+        unittest.mock.patch("jax.make_jaxpr") as mock_make_jaxpr,
+    ):
+
+      mock_tracer = MagicMock()
+      mock_make_jaxpr.return_value = mock_tracer
+      mock_tracer.return_value = MagicMock()
+
+      input_array = jnp.ones((4, 5), dtype=jnp.float32)
+      maxtext_utils.maybe_dump_jaxpr(cfg, dummy_func, (input_array,))
+
+      # 1. Verify make_jaxpr was called with the underlying unwrapped function
+      mock_make_jaxpr.assert_called_once_with(dummy_func.__wrapped__)
+
+      # 2. Verify the input arguments passed to the tracer were mapped to abstract ShapeDtypeStruct
+      called_args, _ = mock_tracer.call_args
+      self.assertEqual(len(called_args), 1)
+      self.assertIsInstance(called_args[0], jax.ShapeDtypeStruct)
+      self.assertEqual(called_args[0].shape, (4, 5))
+      self.assertEqual(called_args[0].dtype, jnp.float32)
 
 
 class TestPrintShardingsParams(unittest.TestCase):

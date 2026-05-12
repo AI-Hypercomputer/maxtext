@@ -1934,8 +1934,19 @@ def maybe_dump_jaxpr(config, p_train_step, train_step_inputs):
     return
   max_logging.log("Tracing train_step to jaxpr...")
 
-  # We use the p_train_step (the JIT-decorated function)
-  p_train_jaxpr = jax.make_jaxpr(p_train_step)(*train_step_inputs)
+  # Trace the underlying un-jitted function via __wrapped__ to avoid heavy remote
+  # compilation/gRPC round-trips to the Pathways controller.
+  unwrapped_step = getattr(p_train_step, "__wrapped__", p_train_step)
+
+  def to_abstract(x):
+    if hasattr(x, "shape") and hasattr(x, "dtype"):
+      return jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype)
+    return x
+
+  # Convert all input arguments recursively to purely local abstract ShapeDtypeStruct objects
+  # to completely bypass remote Array objects and proxy tracing overhead.
+  abstract_inputs = jax.tree.map(to_abstract, train_step_inputs)
+  p_train_jaxpr = jax.make_jaxpr(unwrapped_step)(*abstract_inputs)
 
   local_filename = "train_step.jaxpr"
   local_path = os.path.join(config.dump_jaxpr_local_dir, local_filename)

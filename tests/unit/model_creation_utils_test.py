@@ -85,7 +85,7 @@ def _make_config(**kwargs):
       "base_num_decoder_layers": 2,
       "attention": "dot_product",
       "max_target_length": 16,
-      "base_emb_dim": 256,
+      "base_emb_dim": 32,
       "base_num_query_heads": 2,
       "base_num_kv_heads": 2,
       "max_prefill_predict_length": 4,

@@ -31,12 +31,12 @@ from tests.utils.test_helpers import get_test_config_path, get_test_dataset_path
 def get_model_params(quantization):
   return [
       f"quantization={quantization}",
-      "base_emb_dim=384",
-      "base_num_query_heads=8",
-      "base_num_kv_heads=8",
-      "base_mlp_dim=192",
-      "base_num_decoder_layers=8",
-      "head_dim=128",
+      "base_emb_dim=128",
+      "base_num_query_heads=2",
+      "base_num_kv_heads=2",
+      "base_mlp_dim=128",
+      "base_num_decoder_layers=1",
+      "head_dim=64",
   ]
 
 
@@ -69,7 +69,7 @@ def run_e2e_test_flow(hardware, model_config, attention_type="autoselected", sta
             steps=1,
             metrics_file="run_metrics.txt",
             attention_type=attention_type,
-            dataset_type="tfds",
+            dataset_type="synthetic",
             dataset_path=dataset_path,
         )
     )

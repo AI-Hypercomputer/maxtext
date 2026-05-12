@@ -47,6 +47,19 @@ class TrainTests(unittest.TestCase):
     elif dev_count < 4:
       _fsdp_tp4_override = get_decoupled_parallelism_overrides(fsdp_parallelism=dev_count, as_argv=True)
 
+  _small_model_overrides = [
+      "base_emb_dim=28",
+      "base_num_query_heads=4",
+      "base_num_kv_heads=4",
+      "base_mlp_dim=32",
+      "base_num_decoder_layers=2",
+      "head_dim=128",
+      "max_target_length=128",
+      "vocab_size=32",
+      # Allow higher unsharded percentage because downscaled models make fixed-size FP8 history tensors relatively larger.
+      "sharding_tolerance=0.1",
+  ]
+
   CONFIGS = {
       "base": [  # short test for train.py with TFDS c4
           None,
@@ -54,11 +67,13 @@ class TrainTests(unittest.TestCase):
           f"base_output_directory={_base_output_directory}",
           "run_name=runner_test",
           f"dataset_path={dataset_path}",
+          "max_target_length=128",
           "steps=2",
           "enable_checkpointing=False",
           "enable_goodput_recording=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
+      + _small_model_overrides
       + get_decoupled_parallelism_overrides(fsdp_parallelism=dev_count, as_argv=True),
       "synthetic": [  # tests base config with synthetic dataset
           None,
@@ -71,6 +86,7 @@ class TrainTests(unittest.TestCase):
           "dataset_type=synthetic",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
+      + _small_model_overrides
       + get_decoupled_parallelism_overrides(fsdp_parallelism=dev_count, as_argv=True),
       "pdb_lt_1": [  # tests base config with per_device_batch_size < 1
           None,
@@ -85,6 +101,7 @@ class TrainTests(unittest.TestCase):
           "ici_tensor_parallelism=4",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
+      + _small_model_overrides
       + get_decoupled_parallelism_overrides(fsdp_parallelism=dev_count, as_argv=True),
       "tp_transpose": [  # tests base config with ici_tensor_transpose_parallelism=4
           None,
@@ -97,6 +114,7 @@ class TrainTests(unittest.TestCase):
           "enable_goodput_recording=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
+      + _small_model_overrides
       + get_decoupled_parallelism_overrides(fsdp_parallelism=dev_count, as_argv=True),
       "int8": [  # tests base config with int8
           None,
@@ -110,6 +128,7 @@ class TrainTests(unittest.TestCase):
           "enable_goodput_recording=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
+      + _small_model_overrides
       + get_decoupled_parallelism_overrides(fsdp_parallelism=dev_count, as_argv=True),
       "fp8": [  # tests base config with fp8
           None,
@@ -123,6 +142,7 @@ class TrainTests(unittest.TestCase):
           "enable_goodput_recording=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
+      + _small_model_overrides
       + get_decoupled_parallelism_overrides(fsdp_parallelism=dev_count, as_argv=True),
       "nanoo_fp8": [  # tests base config with nanoo_fp8
           None,
@@ -136,6 +156,7 @@ class TrainTests(unittest.TestCase):
           "enable_goodput_recording=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
+      + _small_model_overrides
       + get_decoupled_parallelism_overrides(fsdp_parallelism=dev_count, as_argv=True),
       "te_fp8_delayedscaling": [  # tests base config with te_fp8_delayedscaling
           None,
@@ -149,6 +170,7 @@ class TrainTests(unittest.TestCase):
           "enable_goodput_recording=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
+      + _small_model_overrides
       + get_decoupled_parallelism_overrides(fsdp_parallelism=dev_count, as_argv=True),
       "te_fp8_currentscaling": [  # tests base config with te_fp8_currentscaling
           None,
@@ -162,6 +184,7 @@ class TrainTests(unittest.TestCase):
           "enable_goodput_recording=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
+      + _small_model_overrides
       + get_decoupled_parallelism_overrides(fsdp_parallelism=dev_count, as_argv=True),
       "te_mxfp8": [  # tests base config with te_mxfp8
           None,
@@ -175,6 +198,7 @@ class TrainTests(unittest.TestCase):
           "enable_goodput_recording=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
+      + _small_model_overrides
       + get_decoupled_parallelism_overrides(fsdp_parallelism=dev_count, as_argv=True),
       "dropout": [  # tests base config with dropout
           None,
@@ -190,6 +214,7 @@ class TrainTests(unittest.TestCase):
           "dropout_rate=0.02",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
+      + _small_model_overrides
       + get_decoupled_parallelism_overrides(fsdp_parallelism=dev_count, as_argv=True),
       "hf_input_pipeline": [  # test for train.py with TFDS c4, using HF input pipeline
           None,
@@ -204,6 +229,7 @@ class TrainTests(unittest.TestCase):
           f"hf_train_files={dataset_path}/hf/c4/c4-train-00000-of-01637.parquet",
           "tokenizer_path=google-t5/t5-large",
       ]
+      + _small_model_overrides
       + get_decoupled_parallelism_overrides(fsdp_parallelism=dev_count, as_argv=True),
   }
 
@@ -486,15 +512,15 @@ class TrainTests(unittest.TestCase):
     zero1_ga = [  # tests Zero-1 optimizer sharding with gradient accumulation
         None,
         get_test_config_path(),
-        "base_output_directory=gs://runner-maxtext-logs",
+        f"base_output_directory={self._base_output_directory}",
         "run_name=runner_test",
-        "dataset_path=gs://maxtext-dataset",
-        "steps=10",
+        f"dataset_path={self.dataset_path}",
+        "steps=3",
         "enable_checkpointing=False",
         "enable_goodput_recording=False",
         "dataset_type=synthetic",
         "remat_policy=minimal",
-        "max_target_length=8192",
+        "max_target_length=512",
         "per_device_batch_size=2",
         "ici_data_parallelism=-1",
         "dcn_data_parallelism=1",
