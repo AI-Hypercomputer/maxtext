@@ -127,8 +127,8 @@ Supervised Fine-Tuning (SFT) of multimodal LLMs in MaxText focuses specifically 
 Here, we use [ChartQA](https://huggingface.co/datasets/HuggingFaceM4/ChartQA) as an example to demonstrate SFT functionality:
 
 ```shell
-export MAXTEXT_CKPT_PATH=...  # either set to an already available MaxText ckpt or to the one we just converted in the previous step
-export BASE_OUTPUT_DIRECTORY=gs://...
+export MAXTEXT_CKPT_PATH=<your-checkpoints-path>  # either set to an already available MaxText ckpt or to the one we just converted in the previous step
+export BASE_OUTPUT_DIRECTORY=gs://<GCS_BUCKET>
 export STEPS=1000
 python -m maxtext.trainers.post_train.sft.train_sft_deprecated \
     src/maxtext/configs/post_train/sft-vision-chartqa.yml \
