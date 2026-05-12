@@ -1241,6 +1241,14 @@ class LoRA(BaseModel):
           "Regex identifying target modules for LoRA, e.g." " '.*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj'."
       ),
   )
+  lora_weight_qtype: str | None = Field(
+      None,
+      description=("Optional quantization type for QLoRA (e.g., 'nf4'). If set, QLoRA is applied."),
+  )
+  lora_tile_size: NonNegativeInt | None = Field(
+      None,
+      description=("Tile size for block-wise quantization. Typically 32 or 64."),
+  )
   lora_restore_path: PathStr = Field(
       "",
       description=("Optional path to LoRA weights to load before training. Ignored if the current run is resumed."),
