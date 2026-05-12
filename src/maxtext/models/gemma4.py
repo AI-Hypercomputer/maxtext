@@ -119,6 +119,7 @@ class Gemma4MoE(nnx.Module):
       original_inputs: jax.Array | None = None,
       intermediate_sharding: jax.sharding.NamedSharding | None = None,
       out_sharding: jax.sharding.NamedSharding | None = None,
+      forced_routed_experts: jax.Array | None = None,
   ) -> tuple[jax.Array, Optional[jax.Array], Optional[jax.Array]]:
     shared_experts = self.moe_block.shared_experts(
         inputs, intermediate_sharding=intermediate_sharding, out_sharding=out_sharding
@@ -138,7 +139,7 @@ class Gemma4MoE(nnx.Module):
 
     # 3. Pass both to routed_moe
     routed_experts, load_balance_loss, moe_bias_updates = self.moe_block.routed_moe(
-        routed_inputs, gate_inputs=gate_inputs, out_sharding=out_sharding
+        routed_inputs, gate_inputs=gate_inputs, out_sharding=out_sharding, forced_routed_experts=forced_routed_experts
     )
     routed_experts = self.post_feedforward_layernorm_2(routed_experts)
 
@@ -319,6 +320,7 @@ class Gemma4DecoderLayer(nnx.Module):
       bidirectional_mask=None,
       kv_cache=None,
       attention_metadata=None,
+      forced_routed_experts: jnp.ndarray | None = None,
   ):
     cfg = self.config
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
@@ -363,7 +365,9 @@ class Gemma4DecoderLayer(nnx.Module):
 
     # MLP block.
     if getattr(self.config, "num_experts", 1) > 1:
-      mlp_lnx, load_balance_loss, _ = self.mlp(attn_output, original_inputs=attention_lnx)
+      mlp_lnx, load_balance_loss, _ = self.mlp(
+          attn_output, original_inputs=attention_lnx, forced_routed_experts=forced_routed_experts
+      )
       if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
         self.sow("intermediates", "moe_lb_loss", load_balance_loss)
     else:
