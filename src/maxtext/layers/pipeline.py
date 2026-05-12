@@ -1022,30 +1022,6 @@ class NNXCircularPipeline(NNXPipelineBase):
   all-gathers from total_iterations to num_repeats+1.
   """
 
-  def get_main_vmap_func_for_iterations(self):
-    """Override: return only non-params from vmap.
-
-    The base class returns nnx.state(module) which includes ALL state
-    (params + metrics + mutables). For circular pipeline, params are
-    handled by AD through BSW/custom_vjp — returning them from vmap
-    creates param-sized intermediates per scan iteration that XLA may
-    not eliminate, adding to checkpoint residuals.
-    """
-
-    def func_to_vmap(graph, state, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode):
-      module = nnx.merge(graph, state)
-      out = module(stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
-      full_state = nnx.state(module)
-      _, _, non_param_state = nnx.split(full_state, _is_static_param, ...)
-      return out, non_param_state
-
-    return nnx.vmap(
-        func_to_vmap,
-        in_axes=(None, 0, 0, 0, 0, None, None),
-        out_axes=(0, 0),
-        spmd_axis_name=self.spmd_axis_name,
-    )
-
   def gather_microbatch_inputs_vmap(self, xs, ids, ids_dim):
     """Slices out the specific sequence inputs (e.g., positions, segments) for the current microbatch."""
     if xs is None:
