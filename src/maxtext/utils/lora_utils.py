@@ -19,7 +19,7 @@ import os
 import re
 from typing import Any, Optional
 
-from flax import nnx
+from flax import nnx, linen as nn
 from flax.linen import partitioning as nn_partitioning
 from flax.training import train_state
 import jax
@@ -513,7 +513,7 @@ def apply_lora_to_model(
 
       # Use logical_to_mesh_sharding to correctly map logical axes like 'embed'
       # to physical mesh axes.
-      dst_shardings = nn_partitioning.logical_to_mesh_sharding(
+      dst_shardings = nn.logical_to_mesh_sharding(
           nnx.get_partition_spec(state), mesh, mt_config.logical_axis_rules
       )
 
