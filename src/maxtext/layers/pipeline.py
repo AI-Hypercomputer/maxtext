@@ -1516,7 +1516,10 @@ class NNXCircularPipeline(NNXPipelineBase):
       d_state, d_bsw = vjp_fn(g_output)
       return d_state, d_bsw
 
-    run_single_microbatch.defvjp(_single_mb_fwd, _single_mb_bwd, optimize_remat=True)
+    run_single_microbatch.defvjp(
+        _single_mb_fwd,
+        _single_mb_bwd,
+    )
 
     # ---- Level 2: gradient accumulation scan ----
 
@@ -1547,7 +1550,10 @@ class NNXCircularPipeline(NNXPipelineBase):
       )
       return d_state, d_bsw
 
-    run_pipeline_microbatches.defvjp(_microbatches_fwd, _microbatches_bwd, optimize_remat=True)
+    run_pipeline_microbatches.defvjp(
+        _microbatches_fwd,
+        _microbatches_bwd,
+    )
 
     # ---- Level 3: BSW creation + linear_transpose ----
     #
@@ -1577,24 +1583,29 @@ class NNXCircularPipeline(NNXPipelineBase):
           pipeline_params,
       )
 
-      (final_state, _), scan_vjp_fn = jax.vjp(
+      (final_state, _), _ = jax.vjp(
           run_pipeline_microbatches,
           lightweight_state,
           bsw,
       )
-      return (final_state, w_next), (scan_vjp_fn, weight_prefetching_t)
+      # Save only lightweight inputs + transpose closure — NOT the heavy
+      # scan_vjp_fn closure. During backward, recompute the vjp from saved
+      # inputs. L1 already remats each microbatch, so recompute cost is small.
+      return (final_state, w_next), (lightweight_state, bsw, weight_prefetching_t)
 
     def _repeat_bwd(residuals, g_output):
-      scan_vjp_fn, weight_prefetching_t = residuals
+      init_state, bsw, weight_prefetching_t = residuals
       g_state, g_w_next = g_output
       g_w_curr = jax.tree.map(jnp.zeros_like, g_w_next)
       g_bsw = (g_w_curr, g_w_next)
+      # Recompute the inner scan vjp from saved initial state
+      _, scan_vjp_fn = jax.vjp(run_pipeline_microbatches, init_state, bsw)
       d_state, d_bsw = scan_vjp_fn((g_state, g_bsw))
       d_w_curr, d_w_next = d_bsw
       (d_pipeline_params,) = weight_prefetching_t(d_w_next)
       return d_state, d_w_curr, d_pipeline_params
 
-    execute_pipeline_repeat.defvjp(_repeat_fwd, _repeat_bwd, optimize_remat=True)
+    execute_pipeline_repeat.defvjp(_repeat_fwd, _repeat_bwd)
 
     # ---- Outer scan over repeats ----
     num_repeats = self.config.num_pipeline_repeats
