@@ -1583,23 +1583,18 @@ class NNXCircularPipeline(NNXPipelineBase):
           pipeline_params,
       )
 
-      (final_state, _), _ = jax.vjp(
+      (final_state, _), scan_vjp_fn = jax.vjp(
           run_pipeline_microbatches,
           lightweight_state,
           bsw,
       )
-      # Save only lightweight inputs + transpose closure — NOT the heavy
-      # scan_vjp_fn closure. During backward, recompute the vjp from saved
-      # inputs. L1 already remats each microbatch, so recompute cost is small.
-      return (final_state, w_next), (lightweight_state, bsw, weight_prefetching_t)
+      return (final_state, w_next), (scan_vjp_fn, weight_prefetching_t)
 
     def _repeat_bwd(residuals, g_output):
-      init_state, bsw, weight_prefetching_t = residuals
+      scan_vjp_fn, weight_prefetching_t = residuals
       g_state, g_w_next = g_output
       g_w_curr = jax.tree.map(jnp.zeros_like, g_w_next)
       g_bsw = (g_w_curr, g_w_next)
-      # Recompute the inner scan vjp from saved initial state
-      _, scan_vjp_fn = jax.vjp(run_pipeline_microbatches, init_state, bsw)
       d_state, d_bsw = scan_vjp_fn((g_state, g_bsw))
       d_w_curr, d_w_next = d_bsw
       (d_pipeline_params,) = weight_prefetching_t(d_w_next)
