@@ -1638,12 +1638,21 @@ def create_device_mesh(config, devices=None):
         mesh = max_utils.reshape_mesh_to_rings(mesh, config.custom_mesh)
         mesh = np.reshape(mesh, ici_parallelism)
       else:
-        mesh = mesh_utils.create_device_mesh(
-            ici_parallelism,
-            devices,
-            contiguous_submeshes=False,
-            allow_split_physical_axes=allow_split_physical_axes,
-        )
+        try:
+          mesh = mesh_utils.create_device_mesh(
+              ici_parallelism,
+              devices,
+              contiguous_submeshes=False,
+              allow_split_physical_axes=allow_split_physical_axes,
+          )
+        except AssertionError:
+          # Devices have non-contiguous physical coordinates (e.g. after z-index based
+          # trainer/sampler split). Fall back to a logical reshape without topology inference.
+          max_logging.log(
+              "create_device_mesh: physical topology inference failed for non-contiguous devices,"
+              " falling back to logical reshape."
+          )
+          mesh = np.array(devices).reshape(ici_parallelism)
     else:
       mesh = mesh_utils.create_device_mesh(
           ici_parallelism,
