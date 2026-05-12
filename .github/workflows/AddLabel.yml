@@ -112,7 +112,7 @@ jobs:
               // Ignore the current running workflow
               if (checkRun.name.endsWith(context.job)) continue
 
-              if (checkRun.status !== 'completed' || checkRun.conclusion !== 'success') {
+              if (checkRun.status !== 'completed' || !['success', 'skipped'].includes(checkRun.conclusion)) {
                 core.info(`Waiting for check: ${checkRun.name} (Status: ${checkRun.status}, Conclusion: ${checkRun.conclusion})`);
                 return; // Exit without failing
               }
