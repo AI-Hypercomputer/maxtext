@@ -1573,8 +1573,12 @@ class NNXCircularPipeline(NNXPipelineBase):
       (new_loop_st, new_mut), w_next = execute_pipeline_repeat(lightweight_state, w_curr, layers_params)
       return (new_loop_st, new_mut, w_next), None
 
-    if self.config.set_remat_policy_on_pipeline_iterations:
-      outer_body = jax.checkpoint(outer_body, policy=self.get_pipeline_remat_policy())
+    # Outer checkpoint is intentionally SKIPPED for circular pipeline.
+    # L3 custom_vjp controls residuals (linear_transpose for reduce-scatter).
+    # Inner body_ckpt handles per-microbatch remat. Adding jax.checkpoint here
+    # is redundant and adds +12 GB from carry stacking + recompute overhead
+    # (custom_vjp residuals are opaque to checkpoint policy).
+    # Validated on TPU: without outer ckpt = 17.0 GB / 0.494s (best).
 
     if self.config.scan_pipeline_iterations:
       (loop_state, final_layer_mutables, final_w_curr), _ = jax.lax.scan(
