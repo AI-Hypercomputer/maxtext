@@ -56,11 +56,11 @@ For more information on using Orbax, please refer to https://github.com/google/o
 
 1. **Deterministic by Design**: Grain allows storing data loader states, provides strong guarantees about data ordering and sharding even with preemptions, which is critical for reproducibility.
 2. **Global Shuffle**: Prevents local overfitting.
-3. **Built for Multi-Host Training**: The using random access file format streamlines [data loading in the multi-host environments](https://maxtext.readthedocs.io/en/maxtext-v0.2.1/guides/data_input_pipeline.html#multihost-dataloading-best-practice).
+3. **Built for Multi-Host Training**: The using random access file format streamlines [data loading in the multi-host environments](multihost-dataloading-best-practice).
 
 Its APIs are explicitly designed for the multi-host paradigm, simplifying the process of ensuring that each host loads a unique shard of the global batch.
 
-For more information on using Grain, please refer to https://github.com/google/grain and the grain guide in maxtext located at https://maxtext.readthedocs.io/en/latest/guides/data_input_pipeline/data_input_grain.html
+For more information on using Grain, please refer to https://github.com/google/grain and the [Grain guide in MaxText](grain-pipeline).
 
 ## Qwix: For native JAX quantization
 

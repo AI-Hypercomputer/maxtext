@@ -1,3 +1,5 @@
+(supported-models)=
+
 # Supported models list
 
 > **Purpose**: This page provides detailed, reference-style information about model families supported in MaxText. This page is a technical dictionary for quick lookup, reproducibility, and customization.
@@ -10,11 +12,13 @@ MaxText is an open-source, high-performance LLM framework written in Python/JAX.
 
 - **Supported Precisions**: FP32, BF16, INT8, and FP8.
 - **Ahead-of-Time Compilation (AOT)**: For faster model development/prototyping and earlier OOM detection.
-- **Quantization**: Via **Qwix** (recommended) and AQT. See Quantization [Guide](https://maxtext.readthedocs.io/en/maxtext-v0.2.1/reference/core_concepts/quantization.html).
+- **Quantization**: Via **Qwix** (recommended) and AQT. See the [Quantization guide](quantization-doc).
 - **Diagnostics**: Structured error context via **`cloud_tpu_diagnostics`** (filters stack traces to user code), simple logging via `max_logging`, profiling in **XProf**, and visualization in **TensorBoard**.
 - **Multi-Token Prediction (MTP)**: Enables token efficient training with multi-token prediction.
 - **Elastic Training**: Fault-tolerant and dynamic scale-up/scale-down on Cloud TPUs with Pathways.
 - **Flexible Remat Policy**: Provides fine-grained control over memory-compute trade-offs. Users can select pre-defined policies (like 'full' or 'minimal') or set the policy to **'custom'**.
+
+(supported-model-families)=
 
 ## Supported model families
 

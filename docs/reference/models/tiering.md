@@ -40,4 +40,4 @@ For each of the TPU platforms listed below, we present a list of optimized model
 
 \[1\]: Performance results are subject to variations based on system configuration, software versions, and other factors. These benchmarks represent point-in-time measurements under specific conditions.
 
-\[2\]: Some older TFLOPS/s results are impacted by an updated calculation for causal attention ([PR #1988](https://github.com/AI-Hypercomputer/maxtext/pull/1988)), which halves the attention FLOPs. This change particularly affects configurations with large sequence lengths. For more details, please refer to the [performance metrics guide](https://maxtext.readthedocs.io/en/latest/reference/performance_metrics.html).
+\[2\]: Some older TFLOPS/s results are impacted by an updated calculation for causal attention ([PR #1988](https://github.com/AI-Hypercomputer/maxtext/pull/1988)), which halves the attention FLOPs. This change particularly affects configurations with large sequence lengths. For more details, please refer to the [performance metrics guide](performance-metrics).

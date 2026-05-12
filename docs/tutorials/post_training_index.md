@@ -14,7 +14,7 @@ We’re investing in performance, scale, algorithms, models, reliability, and ea
 
 MaxText was co-designed with key Google led innovations to provide a unified post training experience:
 
-- [MaxText model library](https://maxtext.readthedocs.io/en/latest/reference/models/supported_models_and_architectures.html#supported-model-families) for JAX LLMs highly optimized for TPUs
+- [MaxText model library](supported-model-families) for JAX LLMs highly optimized for TPUs
 - [Tunix](https://github.com/google/tunix) for the latest algorithms and post-training techniques
 - [vLLM on TPU](https://github.com/vllm-project/tpu-inference) for high performance sampling (inference) for Reinforcement Learning (RL)
 - [Pathways](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/pathways-intro) for multi-host inference (sampling) and highly efficient weight transfer
@@ -24,13 +24,13 @@ MaxText was co-designed with key Google led innovations to provide a unified pos
 ## Supported techniques & models
 
 - **SFT (Supervised Fine-Tuning)**
-  - [SFT on Single-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/sft.html)
-  - [SFT on Multi-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/sft_on_multi_host.html)
+  - [SFT on Single-Host TPUs](./posttraining/sft)
+  - [SFT on Multi-Host TPUs](./posttraining/sft_on_multi_host)
 - **Multimodal SFT**
-  - [Multimodal Support](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/multimodal.html)
+  - [Multimodal Support](./posttraining/multimodal)
 - **Reinforcement Learning (RL)**
-  - [RL on Single-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/rl.html)
-  - [RL on Multi-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/rl_on_multi_host.html)
+  - [RL on Single-Host TPUs](./posttraining/rl)
+  - [RL on Multi-Host TPUs](./posttraining/rl_on_multi_host)
 
 ## Step by step RL
 
@@ -55,7 +55,7 @@ Pathways supercharges RL with:
 
 ## Getting started
 
-Start your Post-Training journey through quick experimentation with [Python Notebooks](https://maxtext.readthedocs.io/en/latest/guides/run_python_notebook.html) or our Production level tutorials for [SFT](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/sft_on_multi_host.html) and [RL](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/rl_on_multi_host.html).
+Start your Post-Training journey through quick experimentation with [Python Notebooks](../guides/run_python_notebook) or our Production level tutorials for [SFT](./posttraining/sft_on_multi_host) and [RL](./posttraining/rl_on_multi_host).
 
 ## More tutorials
 

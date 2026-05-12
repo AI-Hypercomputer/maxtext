@@ -74,7 +74,7 @@ This is the easiest way to get started with the latest stable version.
      access to the `build_maxtext_docker_image`, `upload_maxtext_docker_image`,
      and `xpk` commands. For more details on building and uploading Docker
      images, see the
-     [Build MaxText Docker Image](https://maxtext.readthedocs.io/en/latest/build_maxtext.html)
+     [Build MaxText Docker Image](./build_maxtext)
      guide.
 
      ```bash

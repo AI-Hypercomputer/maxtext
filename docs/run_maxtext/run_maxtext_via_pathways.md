@@ -35,7 +35,7 @@ Before you can run a MaxText workload, you must complete the following setup ste
 
 2. **Create a GKE cluster** configured for Pathways.
 
-3. **Build and upload a MaxText Docker image** to your project's Artifact Registry. For instructions on building and uploading the MaxText Docker image, please refer to the [official documentation](https://maxtext.readthedocs.io/en/latest/build_maxtext.html).
+3. **Build and upload a MaxText Docker image** to your project's Artifact Registry. For instructions on building and uploading the MaxText Docker image, please refer to the [official documentation](../../build_maxtext).
 
 ## 2. Environment configuration
 

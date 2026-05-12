@@ -62,7 +62,7 @@ https://stackoverflow.com/questions/72932940/failed-to-initialize-nvml-unknown-e
 
 ## Build MaxText Docker image
 
-For instructions on building the MaxText Docker image, please refer to the [official documentation](https://maxtext.readthedocs.io/en/latest/build_maxtext.html).
+For instructions on building the MaxText Docker image, please refer to the [official documentation](../../build_maxtext).
 
 ## Test
 

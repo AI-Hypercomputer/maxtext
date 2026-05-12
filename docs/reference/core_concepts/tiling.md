@@ -80,4 +80,4 @@ Tiling is also crucial for managing data movement across the memory hierarchy (H
 
 **Tiling** and **sharding** are independent concepts that do not conflict; in fact, they are often used together. Sharding distributes a tensor across multiple devices, while tiling processes a tensor in chunks on the same device.
 
-To learn more about sharding in MaxText, please refer to the [sharding documentation](https://maxtext.readthedocs.io/en/maxtext-v0.2.1/guides/optimization/sharding.html).
+To learn more about sharding in MaxText, please refer to the [sharding documentation](sharding_on_TPUs).

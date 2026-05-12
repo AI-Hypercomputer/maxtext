@@ -64,7 +64,7 @@ Before starting, ensure you have:
 
 ## Build and upload MaxText Docker image
 
-For instructions on building and uploading the MaxText Docker image with post-training dependencies, please refer to the [official documentation](https://maxtext.readthedocs.io/en/latest/build_maxtext.html).
+For instructions on building and uploading the MaxText Docker image with post-training dependencies, please refer to the [official documentation](../../build_maxtext).
 
 ## Setup Environment Variables
 

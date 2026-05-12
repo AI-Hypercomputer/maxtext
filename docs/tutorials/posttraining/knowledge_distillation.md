@@ -49,7 +49,7 @@ export RUN_NAME=<your-run-name> # e.g., distill-20260115
 
 To install MaxText and its dependencies for post-training (including vLLM for the teacher), run the following:
 
-1. Follow the [MaxText installation instructions](https://maxtext.readthedocs.io/en/latest/install_maxtext.html#install-maxtext).
+1. Follow the [MaxText installation instructions](../../install_maxtext).
 
 2. Install the additional dependencies for post-training:
 

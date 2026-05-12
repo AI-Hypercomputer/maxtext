@@ -34,11 +34,11 @@ You can set `per_device_batch_size` and `gradient_accumulation_steps` in `config
 
 `global_batch_to_load` = `global_batch_size_to_train_on x expansion_factor_real_data`
 
-When `expansion_factor_real_data > 1`, only a subset of hosts read data from the source (e.g., a GCS bucket). These "loading hosts" read more data than they need for their own devices and distribute the surplus to other "non-loading" hosts. This reduces the number of concurrent connections to the data source, which can significantly improve I/O throughput. When set to between 0 and 1, it's for grain pipeline to use a smaller chip count to read checkpoint from a larger chip count job. Details in https://maxtext.readthedocs.io/en/maxtext-v0.2.1/guides/data_input_pipeline/data_input_grain.html#using-grain.
+When `expansion_factor_real_data > 1`, only a subset of hosts read data from the source (e.g., a GCS bucket). These "loading hosts" read more data than they need for their own devices and distribute the surplus to other "non-loading" hosts. This reduces the number of concurrent connections to the data source, which can significantly improve I/O throughput. When set to between 0 and 1, it's for grain pipeline to use a smaller chip count to read checkpoint from a larger chip count job. Details in [](using-grain).
 
 ## Gradient Accumulation Steps
 
-`gradient_accumulation_steps` defines how many forward/backward passes are performed before the optimizer updates the model weights. The gradients from each pass are accumulated (summed). It is discussed in more detail [here](https://maxtext.readthedocs.io/en/latest/reference/core_concepts/tiling.html#gradient-accumulation).
+`gradient_accumulation_steps` defines how many forward/backward passes are performed before the optimizer updates the model weights. The gradients from each pass are accumulated (summed). It is discussed in more detail [here](./tiling.md#gradient-accumulation).
 
 For example, if `gradient_accumulation_steps` is set to `4`, the model will execute four forward and backward passes, sum the gradients, and then apply a single optimizer step. This achieves the same effective global batch size as quadrupling the `per_device_batch_size` with significantly less memory, but can potentially lead to lower MFU.
 

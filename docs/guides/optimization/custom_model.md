@@ -254,7 +254,7 @@ Ironwood over ICI:
 - `3 * M * 8 / 2 > 12800`
 - `M > 1100`
 
-It is important to emphasize that this is a theoretical roofline analysis. Real-world performance will depend on the efficiency of the implementation and XLA compilation on the TPU. Refer to the [link](https://maxtext.readthedocs.io/en/maxtext-v0.2.1/guides/optimization/sharding.html) for specific challenges regarding PP + FSDP/DP.
+It is important to emphasize that this is a theoretical roofline analysis. Real-world performance will depend on the efficiency of the implementation and XLA compilation on the TPU. Refer to the [link](sharding_on_TPUs) for specific challenges regarding PP + FSDP/DP.
 
 ## Step 4. Analyze experiments
 

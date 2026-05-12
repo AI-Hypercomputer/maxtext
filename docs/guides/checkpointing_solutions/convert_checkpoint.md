@@ -1,3 +1,5 @@
+(checkpoint-conversion)=
+
 # Checkpoint Conversion Utilities
 
 This guide provides instructions to use [checkpoint conversion scripts](https://github.com/AI-Hypercomputer/maxtext/tree/main/src/maxtext/checkpoint_conversion) to convert model checkpoints bidirectionally between Hugging Face and MaxText formats.
@@ -23,9 +25,11 @@ The following models are supported:
 
 ## Prerequisites
 
-- MaxText must be installed in a Python virtual environment using the `maxtext[tpu]` option. For instructions on installing MaxText on your VM, please refer to the official [installation documentation](https://maxtext.readthedocs.io/en/maxtext-v0.2.1/install_maxtext.html).
+- MaxText must be installed in a Python virtual environment using the `maxtext[tpu]` option. For instructions on installing MaxText on your VM, please refer to the official [installation documentation](install-from-source).
 - Hugging Face model checkpoints are cached locally at `$HOME/.cache/huggingface/hub` before conversion. Ensure you have sufficient disk space.
 - Authenticate via the [Hugging Face CLI](https://huggingface.co/docs/huggingface_hub/v0.21.2/guides/cli) if using private or gated models.
+
+(hf-to-maxtext)=
 
 ## Hugging Face to MaxText
 
@@ -71,7 +75,7 @@ You can find your converted checkpoint files under `${BASE_OUTPUT_DIRECTORY}/0/i
 ### Key Parameters
 
 - `model_name`: The specific model identifier. It must match a supported entry in the MaxText [globals.py](https://github.com/AI-Hypercomputer/maxtext/blob/16b684840db9b96b19e24e84ac49f06af7204ae3/src/maxtext/utils/globals.py#L46C1-L46C7).
-- `scan_layers`: Controls whether the output uses a scanned (`scan_layers=true`) or unscanned (`scan_layers=false`) checkpoint format. Refer [here](https://maxtext.readthedocs.io/en/maxtext-v0.2.1/reference/core_concepts/checkpoints.html) for more information.
+- `scan_layers`: Controls whether the output uses a scanned (`scan_layers=true`) or unscanned (`scan_layers=false`) checkpoint format. Refer [to the Checkpoints guide](checkpoints) for more information.
 - `use_multimodal`: Indicates if multimodality is used, important for Gemma3.
 - `base_output_directory`: The path where the converted Orbax checkpoint will be stored; it can be Google Cloud Storage (GCS) or local.
 - `hardware=cpu`: The conversion script runs on a CPU machine.
@@ -118,7 +122,7 @@ python3 -m maxtext.checkpoint_conversion.to_huggingface \
 
 - `model_name`: The specific model identifier. It must match a supported entry in the MaxText [globals.py](https://github.com/AI-Hypercomputer/maxtext/blob/16b684840db9b96b19e24e84ac49f06af7204ae3/src/maxtext/utils/globals.py#L46C1-L46C7).
 - `load_parameters_path`: The path to the MaxText Orbax checkpoint.
-- `scan_layers`: Controls whether the output uses a scanned (`scan_layers=true`) or unscanned (`scan_layers=false`) checkpoint format. Refer [here](https://maxtext.readthedocs.io/en/maxtext-v0.2.1/reference/core_concepts/checkpoints.html) for more information.
+- `scan_layers`: Controls whether the output uses a scanned (`scan_layers=true`) or unscanned (`scan_layers=false`) checkpoint format. Refer [to the Checkpoints guide](checkpoints) for more information.
 - `use_multimodal`: Indicates if multimodality is used, important for Gemma3.
 - `hardware=cpu`: The conversion script runs on a CPU machine.
 - `base_output_directory`: The path where the converted checkpoint will be stored; it can be Google Cloud Storage (GCS), Hugging Face Hub or local.
@@ -128,7 +132,7 @@ python3 -m maxtext.checkpoint_conversion.to_huggingface \
 
 To ensure the conversion was successful, you can use the [test script](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/utils/forward_pass_logit_checker.py). It runs a forward pass on both the original and converted models and compares the output logits to verify conversion. It is used to verify the bidirectional conversion.
 
-> **Note:** This correctness test will only work when MaxText is installed from source by following the installation instructions [here](https://maxtext.readthedocs.io/en/maxtext-v0.2.1/install_maxtext.html#from-source).
+> **Note:** This correctness test will only work when MaxText is installed from source by following the installation instructions [here](install-from-source).
 
 ### Setup Environment
 
@@ -159,7 +163,7 @@ python3 -m tests.utils.forward_pass_logit_checker src/maxtext/configs/base.yml \
 
 - `load_parameters_path`: The path to the MaxText Orbax checkpoint (e.g., `gs://your-bucket/maxtext-checkpoint/0/items`).
 - `model_name`: The corresponding model name in the MaxText configuration (e.g., `qwen3-4b`).
-- `scan_layers`: Controls whether the output uses a scanned (`scan_layers=true`) or unscanned (`scan_layers=false`) checkpoint format. Refer [here](https://maxtext.readthedocs.io/en/maxtext-v0.2.1/reference/core_concepts/checkpoints.html) for more information.
+- `scan_layers`: Controls whether the output uses a scanned (`scan_layers=true`) or unscanned (`scan_layers=false`) checkpoint format. Refer [to the Checkpoints guide](checkpoints) for more information.
 - `use_multimodal`: Indicates if multimodality is used.
 - `--run_hf_model` (Optional): Indicates if loading Hugging Face model from the hf_model_path. If not set, it will compare the maxtext logits with pre-saved golden logits.
 - `--hf_model_path` (Optional): The path to the Hugging Face checkpoint (if `--run_hf_model=True`).

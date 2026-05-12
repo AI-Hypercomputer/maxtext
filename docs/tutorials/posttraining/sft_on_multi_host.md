@@ -37,7 +37,7 @@ Before starting, ensure you have:
 
 ## Build and upload MaxText Docker image
 
-For instructions on building and uploading the MaxText Docker image with post-training dependencies, please refer to the [official documentation](https://maxtext.readthedocs.io/en/latest/build_maxtext.html).
+For instructions on building and uploading the MaxText Docker image with post-training dependencies, please refer to the [official documentation](../../build_maxtext).
 
 ## Create GKE cluster
 
@@ -129,7 +129,7 @@ checkpoint_storage_use_ocdbt=$((1 - USE_PATHWAYS))
 
 ### Option 2: Converting a Hugging Face checkpoint
 
-Refer the steps in [Hugging Face to MaxText](https://maxtext.readthedocs.io/en/maxtext-v0.2.1/guides/checkpointing_solutions/convert_checkpoint.html#hugging-face-to-maxtext) to convert a hugging face checkpoint to MaxText. Make sure you have correct checkpoint files converted and saved. Similar as Option 1, you can set the following environment and move on.
+Refer the steps in [Hugging Face to MaxText](hf-to-maxtext) to convert a hugging face checkpoint to MaxText. Make sure you have correct checkpoint files converted and saved. Similar as Option 1, you can set the following environment and move on.
 
 ```bash
 export MAXTEXT_CKPT_PATH=<CKPT_PATH> # gs://my-bucket/my-checkpoint-directory/0/items

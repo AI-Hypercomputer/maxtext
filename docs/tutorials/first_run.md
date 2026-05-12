@@ -36,7 +36,7 @@ Local development is a convenient way to run MaxText on a single host. It doesn'
 multiple hosts but is a good way to learn about MaxText.
 
 1. [Create and SSH to the single host VM of your choice](https://cloud.google.com/tpu/docs/managing-tpus-tpu-vm). You can use any available single host TPU, such as `v5litepod-8`, `v5p-8`, or `v4-8`.
-2. For instructions on installing MaxText on your VM, please refer to the [official documentation](https://maxtext.readthedocs.io/en/latest/install_maxtext.html). For this tutorial on TPUs, install `maxtext[tpu]`.
+2. For instructions on installing MaxText on your VM, please refer to the [official documentation](../install_maxtext). For this tutorial on TPUs, install `maxtext[tpu]`.
 3. After installation completes, run training on synthetic data with the following command:
 
 ```sh
@@ -70,7 +70,7 @@ You can use [demo_decoding.ipynb](https://github.com/AI-Hypercomputer/maxtext/bl
 
 ### Run MaxText on NVIDIA GPUs
 
-1. For instructions on installing MaxText on your VM, please refer to the [official documentation](https://maxtext.readthedocs.io/en/latest/install_maxtext.html). For this tutorial on GPUs, install `maxtext[cuda12]`.
+1. For instructions on installing MaxText on your VM, please refer to the [official documentation](../install_maxtext). For this tutorial on GPUs, install `maxtext[cuda12]`.
 2. After installation is complete, run training with the following command on synthetic data:
 
 ```sh
@@ -102,4 +102,4 @@ Google Kubernetes Engine (GKE) is the recommended way to run MaxText on multiple
 
 ## Next steps: preflight optimizations
 
-After you get workloads running, there are optimizations you can apply to improve performance. For more information, see [PREFLIGHT.md](https://github.com/google/maxtext/blob/main/PREFLIGHT.md).
+After you get workloads running, there are optimizations you can apply to improve performance. For more information, see [PREFLIGHT.md](https://github.com/AI-Hypercomputer/maxtext/blob/main/PREFLIGHT.md).
