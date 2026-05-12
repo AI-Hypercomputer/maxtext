@@ -889,6 +889,11 @@ class LayoutAndSharding(BaseModel):
       le=1.0,
       description="Allowed percentage of non-sharded parameters.",
   )
+  check_vma: bool = Field(
+      False,
+      description="Enable VMA checking in shard_map calls. Recommended for improved performance but only supported "
+      "with auto sharding + EP / FSDP parallelisms.",
+  )
   shard_optimizer_over_data: bool = Field(False, description="Enable ZeRO-1 optimizer sharding over the data axis.")
   internal_compile: bool = Field(False, description="Use internal_compile to bypass open-source topology mappings.")
   internal_compile_num_devices: int = Field(-1, description="Number of devices when using internal_compile.")

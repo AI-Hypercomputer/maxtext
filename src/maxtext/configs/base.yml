@@ -607,6 +607,9 @@ ici_autoregressive_parallelism: 1
 ici_pipeline_parallelism: 1
 ici_expert_parallelism: 1
 
+# Enabling check_vma is recommended for improved performance, but only supported for megablox kernel and EP / FSDP parallelisms.
+check_vma: False
+
 # Enable ZeRO-1 optimizer sharding over data axis
 shard_optimizer_over_data: False
 
