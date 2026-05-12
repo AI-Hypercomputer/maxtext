@@ -100,27 +100,29 @@ class MaxTextVllmSampler(VllmSampler):
     logging.info("MaxTextVllmSampler.update_params: converter.convert() done, %d weights to assign", len(vllm_state))
     model_runner_state = self.transformer_state
 
-    logging.info("Weight sync: using tunix chunked resharding (_reshard_in_chunks)")
-    # Convert string keys to tuple keys for flax traverse_util compatibility inside _reshard_in_chunks
-    src_flat = {tuple(k.split(".")): (v.value if hasattr(v, "value") else v) for k, v in vllm_state.items()}
-    spec_flat = {
-        tuple(k.split(".")): model_runner_state[k] for k in vllm_state.keys()
-    }
-
-    chunk_size = self.config.reshard_chunk_size or 4
+    chunk_size = self.config.reshard_chunk_size
     start_time = time.time()
-    resharded_flat_tuples = _reshard_in_chunks(
-        src_flat=src_flat,
-        spec_flat=spec_flat,
-        reshard_fn=reshard_pytree,
-        chunk_size=chunk_size,
-        delete_spec_buffers=True,
-    )
-
-    # Re-assign resharded weights to the model_runner_state
-    for k_tuple, resharded_weight in resharded_flat_tuples.items():
-      key = ".".join(k_tuple)
-      model_runner_state[key] = resharded_weight
+    if chunk_size:
+      logging.info("Weight sync: using tunix chunked resharding (_reshard_in_chunks, chunk_size=%d)", chunk_size)
+      src_flat = {tuple(k.split(".")): (v.value if hasattr(v, "value") else v) for k, v in vllm_state.items()}
+      spec_flat = {tuple(k.split(".")): model_runner_state[k] for k in vllm_state.keys()}
+      resharded_flat_tuples = _reshard_in_chunks(
+          src_flat=src_flat,
+          spec_flat=spec_flat,
+          reshard_fn=reshard_pytree,
+          chunk_size=chunk_size,
+          delete_spec_buffers=True,
+      )
+      for k_tuple, resharded_weight in resharded_flat_tuples.items():
+        model_runner_state[".".join(k_tuple)] = resharded_weight
+    else:
+      logging.info("Weight sync: resharding full pytree via reshard_pytree")
+      src = {k: (v.value if hasattr(v, "value") else v) for k, v in vllm_state.items()}
+      dst_shardings = {k: model_runner_state[k] for k in vllm_state.keys()}
+      resharded = reshard_pytree(source=src, target=dst_shardings)
+      jax.block_until_ready(resharded)
+      for k, v in resharded.items():
+        model_runner_state[k] = v
 
     gc.collect()
     end_time = time.time()
