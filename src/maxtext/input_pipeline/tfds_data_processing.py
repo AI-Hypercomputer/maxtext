@@ -102,6 +102,19 @@ def preprocessing_pipeline(
         "Please set train_data_columns or eval_data_columns accordingly."
     )
 
+  for col in data_column_names:
+    col_dtype = dataset.element_spec[col].dtype
+    if tokenize and col_dtype != tf.string:
+      raise ValueError(
+          f"tokenize_data=True but column '{col}' has dtype {col_dtype} (expected tf.string). "
+          "Set tokenize_train_data or tokenize_eval_data to False if your dataset is already tokenized."
+      )
+    if not tokenize and col_dtype == tf.string:
+      raise ValueError(
+          f"tokenize_data=False but column '{col}' has dtype tf.string (expected integer). "
+          "Set tokenize_train_data or tokenize_eval_data to True if your dataset needs tokenization."
+      )
+
   if not use_dpo:
     assert len(data_column_names) == 1
     dataset = dataset.map(

@@ -435,6 +435,38 @@ class GrainTFRecordProcessingTest(GrainBaseProcessingTest, unittest.TestCase):
     )
 
 
+class GrainTFRecordPreTokenizedProcessingTest(GrainTFRecordProcessingTest):
+  """Test grain data processing with a pre-tokenized TFRecord dataset (tokenize_train_data=False).
+
+  Uses c4/en/3.0.5 validation_tokenized_5662seqs split, which stores token IDs
+  in an 'ids' int64 column rather than raw text.
+  """
+
+  def setUp(self):
+    super().setUp()
+    base = get_test_dataset_path() if is_decoupled() else os.path.join(tempfile.gettempdir(), "gcsfuse")
+    grain_train_file = os.path.join(base, "c4", "en", "3.0.5", "c4-validation_tokenized_5662seqs.tfrecord-00000-of-00001")
+    self.config = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        per_device_batch_size=1,
+        run_name="test",
+        mesh_axes=["data"],
+        logical_axis_rules=[["batch", "data"]],
+        data_sharding=["data"],
+        base_output_directory=self.config.base_output_directory,
+        dataset_type="grain",
+        grain_file_type="tfrecord",
+        grain_train_files=grain_train_file,
+        grain_worker_count=1,
+        grain_per_worker_buffer_size=1,
+        tokenize_train_data=False,
+        train_data_columns=["ids"],
+        tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.default"),
+        enable_checkpointing=False,
+    )
+    self.train_iter = grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
+
+
 @pytest.mark.external_training
 class GrainSFTParquetProcessingTest(unittest.TestCase):
   """Tests the SFT pipeline end-to-end using the real ultrachat_200k parquet dataset."""
