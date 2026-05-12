@@ -696,6 +696,8 @@ def from_pretrained(
         conversion_env = os.environ.copy()
         conversion_env["JAX_PLATFORMS"] = "cpu"
         # conversion_env["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={simulated_cpu_devices_count}"
+        if config.hf_access_token:
+          conversion_env["HF_TOKEN"] = config.hf_access_token
 
         to_maxtext_cmd = [
             sys.executable,
@@ -705,7 +707,6 @@ def from_pretrained(
             f"model_name={config.model_name}",
             f"base_output_directory={config.base_output_directory}",
             f"scan_layers={config.scan_layers}",
-            f"hf_access_token={config.hf_access_token}",
             "use_multimodal=false",
             "skip_jax_distributed_system=True",
             "--lazy_load_tensors=True",

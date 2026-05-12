@@ -28,7 +28,7 @@ class MappingAgent(BaseAgent):
   An agent that generates and verifies mapping functions for model conversion.
   """
 
-  def __init__(self, api_key, dir_path, target_model="gemma3-4b", max_retries=3):
+  def __init__(self, dir_path, target_model="gemma3-4b", max_retries=3):
     """
     Initializes the MappingAgent.
 
@@ -36,7 +36,7 @@ class MappingAgent(BaseAgent):
         target_model (str): The target model for conversion.
         max_retries (int): The maximum number of retries for generation.
     """
-    super().__init__(api_key)
+    super().__init__()
 
     self.target_model = target_model
     self.max_retries = max_retries
@@ -171,9 +171,8 @@ if __name__ == "__main__":
   parser.add_argument(
       "--dir_path", type=str, required=True, help='The file path to the context directory (e.g., "context/gemma3").'
   )
-  parser.add_argument("--api_key", type=str, help="Optional API key for external services.")
   args = parser.parse_args()
-  agent = MappingAgent(api_key=args.api_key, dir_path=args.dir_path, target_model=TARGET_MODEL)
+  agent = MappingAgent(dir_path=args.dir_path, target_model=TARGET_MODEL)
   try:
     param_mapping_code = agent.generate_param_mapping()
     shape_mapping_code = agent.generate_shape_mapping()
