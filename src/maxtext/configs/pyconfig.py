@@ -324,6 +324,11 @@ def initialize_pydantic(argv: list[str] | None = None, **kwargs) -> MaxTextConfi
 
   # 2. Get overrides from CLI and kwargs
   cli_cfg = omegaconf.OmegaConf.from_cli(cli_args)
+  if "hf_access_token" in cli_cfg:
+    logger.warning(
+        "WARNING: Passing 'hf_access_token' via command-line arguments is deprecated and insecure because it makes "
+        "your token visible in 'ps' and shell history. Please set the 'HF_TOKEN' environment variable instead."
+    )
   kwargs_cfg = omegaconf.OmegaConf.create(kwargs)
   overrides_cfg = omegaconf.OmegaConf.merge(cli_cfg, kwargs_cfg)
 

@@ -29,21 +29,19 @@ if __name__ == "__main__":
   parser.add_argument(
       "--dir_path", type=str, required=True, help='The file path to the context directory (e.g., "context/gemma3").'
   )
-  parser.add_argument("--api_key", type=str, help="Optional API key for external services.")
   args = parser.parse_args()
 
   TARGET_MODEL = args.target_model
   dir_path = args.dir_path
-  api_key = args.api_key
 
   # Before proceed, check outputs/proposed_dsl.txt to consider if new ops are needed
 
-  planAgent = PlanAgent(api_key=api_key, dir_path=dir_path, target_model=TARGET_MODEL)
+  planAgent = PlanAgent(dir_path=dir_path, target_model=TARGET_MODEL)
   planAgent.plan_conversion()
 
-  mappingAgent = MappingAgent(api_key=api_key, dir_path=dir_path, target_model=TARGET_MODEL)
+  mappingAgent = MappingAgent(dir_path=dir_path, target_model=TARGET_MODEL)
   param_mapping_code = mappingAgent.generate_param_mapping()
   mappingAgent.generate_shape_mapping()
 
-  transformationAgent = TransformationAgent(api_key=api_key, dir_path=dir_path, target_model=TARGET_MODEL)
+  transformationAgent = TransformationAgent(dir_path=dir_path, target_model=TARGET_MODEL)
   transformationAgent.generate_hook_functions()

@@ -66,12 +66,11 @@ def main():
       description="Gemini evaluate the agent code implementation against human-written ground truth code"
   )
   parser.add_argument("--files", nargs=2, help="Paths to code files to analyze.")
-  parser.add_argument("--api_key", type=str, help="API key.")
   parser.add_argument("--dir_path", type=str, help="Directory path.")
 
   args = parser.parse_args()
 
-  baseAgent = BaseAgent(api_key=args.api_key)
+  baseAgent = BaseAgent()
   dir_path = args.dir_path
 
   prompt_templates = {

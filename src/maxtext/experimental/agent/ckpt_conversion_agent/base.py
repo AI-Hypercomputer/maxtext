@@ -16,6 +16,8 @@
 A base class for other agents
 """
 
+import os
+
 from google import genai
 from google.genai.types import GenerateContentConfig
 
@@ -25,16 +27,14 @@ MODEL_ID = "gemini-2.5-pro"
 class BaseAgent:
   """A base class for agents that provides text generation capabilities."""
 
-  def __init__(self, api_key, model_id=MODEL_ID):
+  def __init__(self, model_id=MODEL_ID):
     """
     Initializes the BaseAgent with a genai client.
-
-    Args:
-        client: An initialized genai.Client object.
     """
-    if not api_key:
-      raise ValueError("A valid api_key must be provided.")
-    client = genai.Client(api_key=api_key)
+    resolved_api_key = os.environ.get("GEMINI_API_KEY")
+    if not resolved_api_key:
+      raise ValueError("GEMINI_API_KEY environment variable is not set.")
+    client = genai.Client(api_key=resolved_api_key)
     self.client = client
     self.model_id = model_id
 

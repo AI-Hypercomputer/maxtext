@@ -4,8 +4,11 @@ The agent is used to automate the model-specific mappings of checkpoint conversi
 ## Quick starts
 To begin, you'll need:
 
-1. A Google atccount.
-2. An API key (create one in [Google AI Studio](https://aistudio.google.com/app/apikey)).
+1. A Google account.
+2. An API key (create one in [Google AI Studio](https://aistudio.google.com/app/apikey)), and set it as an environment variable:
+```bash
+export GEMINI_API_KEY="<Your-API-KEY>"
+```
 3. Install the Google Generative AI Python library:
 ```
 pip install -q -U "google-genai>=1.0.0"
@@ -30,7 +33,7 @@ After it, you can get two `*.json` files in `config.base_output_directory` folde
 
 ```bash
 python3 -m maxtext.experimental.agent.ckpt_conversion_agent.step1 --target_model=<model_name> \
-  --dir_path=src/maxtext/experimental/agent/ckpt_conversion_agent --api_key=<Your-API-KEY>
+  --dir_path=src/maxtext/experimental/agent/ckpt_conversion_agent
 ```
 
 Our engineer should check the `src/maxtext/experimental/agent/ckpt_conversion_agent/outputs/proposed_dsl.txt` for potential new DSL and assess if it's needed. Then we need to add this ops into `src/maxtext/experimental/agent/ckpt_conversion_agent/context/dsl.txt`.
@@ -39,7 +42,7 @@ Our engineer should check the `src/maxtext/experimental/agent/ckpt_conversion_ag
 
 ```bash
 python3 -m maxtext.experimental.agent.ckpt_conversion_agent.step2 --target_model=<model_name> \
-  --dir_path=src/maxtext/experimental/agent/ckpt_conversion_agent --api_key=<Your-API-KEY>
+  --dir_path=src/maxtext/experimental/agent/ckpt_conversion_agent
 ```
 
 ## Evaluation and Debugging
@@ -53,7 +56,7 @@ You can automatically verify the output by comparing the generated code against 
 
 ```bash
 python3 -m maxtext.experimental.agent.ckpt_conversion_agent.evaluation --files ground_truth/<model>.py \
-  outputs/hook_fn.py --api_key=<Your-API-KEY> --dir_path=src/maxtext/experimental/agent/ckpt_conversion_agent
+  outputs/hook_fn.py --dir_path=src/maxtext/experimental/agent/ckpt_conversion_agent
 ```
 
 ### Manual Debugging (No Ground-Truth Code)
@@ -121,5 +124,5 @@ Run the [One-shot agent Jyputer notebook](./baselines/one-shot-agent.ipynb)
 ### Prompt-chain Agent:
 ```bash
 python3 -m maxtext.experimental.agent.ckpt_conversion_agent.prompt_chain --target_model=<model_name> \
-  --dir_path=src/maxtext/experimental/agent/ckpt_conversion_agent --api_key=<Your-API-KEY>
+  --dir_path=src/maxtext/experimental/agent/ckpt_conversion_agent
 ```
