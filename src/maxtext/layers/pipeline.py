@@ -1516,7 +1516,7 @@ class NNXCircularPipeline(NNXPipelineBase):
       d_state, d_bsw = vjp_fn(g_output)
       return d_state, d_bsw
 
-    run_single_microbatch.defvjp(_single_mb_fwd, _single_mb_bwd)
+    run_single_microbatch.defvjp(_single_mb_fwd, _single_mb_bwd, optimize_remat=True)
 
     # ---- Level 2: gradient accumulation scan ----
 
@@ -1547,7 +1547,7 @@ class NNXCircularPipeline(NNXPipelineBase):
       )
       return d_state, d_bsw
 
-    run_pipeline_microbatches.defvjp(_microbatches_fwd, _microbatches_bwd)
+    run_pipeline_microbatches.defvjp(_microbatches_fwd, _microbatches_bwd, optimize_remat=True)
 
     # ---- Level 3: BSW creation + linear_transpose ----
     #
@@ -1594,7 +1594,7 @@ class NNXCircularPipeline(NNXPipelineBase):
       (d_pipeline_params,) = weight_prefetching_t(d_w_next)
       return d_state, d_w_curr, d_pipeline_params
 
-    execute_pipeline_repeat.defvjp(_repeat_fwd, _repeat_bwd)
+    execute_pipeline_repeat.defvjp(_repeat_fwd, _repeat_bwd, optimize_remat=True)
 
     # ---- Outer scan over repeats ----
     num_repeats = self.config.num_pipeline_repeats
