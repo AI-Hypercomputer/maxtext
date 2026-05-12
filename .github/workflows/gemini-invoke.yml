@@ -43,6 +43,7 @@ jobs:
         id: 'run_gemini'
         uses: 'google-github-actions/run-gemini-cli@main'
         env:
+          GEMINI_CLI_TRUST_WORKSPACE: 'true'
           TITLE: '${{ github.event.pull_request.title || github.event.issue.title }}'
           DESCRIPTION: '${{ github.event.pull_request.body || github.event.issue.body }}'
           EVENT_NAME: '${{ github.event_name }}'
