@@ -69,6 +69,7 @@ jobs:
       - name: 'Run Gemini Failure Investigator'
         uses: 'google-github-actions/run-gemini-cli@v0'
         env:
+          GEMINI_CLI_TRUST_WORKSPACE: 'true'
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPOSITORY: ${{ github.repository }}
           PULL_REQUEST_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number || github.event.pull_request.number || github.event.issue.number }}
