@@ -221,7 +221,6 @@ ModelName = Literal[
     "deepseek2-16b",
     "deepseek2-236b",
     "deepseek3-671b",
-    "deepseek3-671b-2dfsdp",
     "deepseek3-671b-batchsplit",
     "deepseek3-test",
     "deepseek3-tiny",
@@ -704,10 +703,6 @@ class MoEGeneral(BaseModel):
       False,
       description="Shard the expert dimension of the MLP weights on the FSDP axis, "
       "and recommended only when num_experts is a multiple of fsdp_parallelism",
-  )
-  use_2d_fsdp_sharding: bool = Field(
-      False,
-      description="Use `fsdp` and `fsdp_transpose` axes for 2D FSDP sharding.",
   )
   norm_topk_prob: bool = Field(
       False,

@@ -358,9 +358,6 @@ class RoutedMoE(nnx.Module):
       # special sharding for dsv3
       self.wi_kernel_axes = ("embed_moe", None, "mlp_moe")
       self.wo_kernel_axes = ("embed_moe", "mlp_moe", None)
-    elif self.config.use_2d_fsdp_sharding:
-      self.wi_kernel_axes = ("embed_moe", "mlp_moe", None)
-      self.wo_kernel_axes = ("embed_moe", "mlp_moe", None)
     elif self.config.use_batch_split_schedule:
       self.wi_kernel_axes, self.wo_kernel_axes = get_batchsplit_init_kernel_axes()
     else:
@@ -1217,10 +1214,6 @@ class RoutedMoE(nnx.Module):
           w0_pspec = self._logical_to_mesh_axes(("embed_tensor_transpose", None, "mlp_no_fsdp"))
           w1_pspec = self._logical_to_mesh_axes(("embed_tensor_transpose", None, "mlp_no_fsdp"))
           wo_pspec = self._logical_to_mesh_axes(("embed_tensor_transpose", "mlp_no_fsdp", None))
-      elif self.config.use_2d_fsdp_sharding:
-        w0_pspec = self._logical_to_mesh_axes(("embed_tensor_transpose", "mlp_no_fsdp", None))
-        w1_pspec = self._logical_to_mesh_axes(("embed_tensor_transpose", "mlp_no_fsdp", None))
-        wo_pspec = self._logical_to_mesh_axes(("embed_tensor_transpose", "mlp_no_fsdp", None))
       else:
         # These are the main shardings used by default - they use funky rules to AG over FSDP.
         w0_pspec = self._logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
