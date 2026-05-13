@@ -1573,6 +1573,8 @@ class InferenceServer(BaseModel):
   inference_server: str = Field("MaxtextInterleavedServer", description="Inference server to start.")
   prefill_slice: str = Field("v5e-16", description="Slice to use for prefill in disaggregation mode.")
   generate_slice: str = Field("v5e-16", description="Slice to use for generatation in disaggregation mode.")
+  grpc_tls_certificate_path: str = Field("", description="Path to the TLS certificate file for gRPC server.")
+  grpc_tls_private_key_path: str = Field("", description="Path to the TLS private key file for gRPC server.")
 
 
 class InferenceBenchmark(BaseModel):

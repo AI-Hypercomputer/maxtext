@@ -976,6 +976,8 @@ inference_metadata_file: "" # path to a json file
 inference_server: "MaxtextInterleavedServer"  # inference server to start
 prefill_slice: "v5e-16" # slice to use for prefill in disaggregation mode
 generate_slice: "v5e-16" # slice to use for generatation in disaggregation mode
+grpc_tls_certificate_path: "" # Path to the TLS certificate file for gRPC server
+grpc_tls_private_key_path: "" # Path to the TLS private key file for gRPC server
 inference_benchmark_test: False
 enable_model_warmup: False
 enable_llm_inference_pool: False          # Bool to launch inference server for llm_inference_gateway with their specified APIs
