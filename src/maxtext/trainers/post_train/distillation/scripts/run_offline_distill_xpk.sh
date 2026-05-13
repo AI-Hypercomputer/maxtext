@@ -679,6 +679,45 @@ submit_workload() {
   fi
   echo "Image flag:  $image_flag=$XPK_BASE_IMAGE"
 
+  # XLA Flags
+  # XLA_FLAGS=" \
+  #   --xla_tpu_scoped_vmem_limit_kib=61440 \
+  #   --xla_tpu_enable_sparse_core_collective_offload_all_gather=false \
+  #   --xla_tpu_enable_sparse_core_collective_offload_all_reduce=false \
+  #   --xla_tpu_use_single_sparse_core_for_all_gather_offload=false \
+  #   --xla_tpu_enable_all_experimental_scheduler_features=true \
+  #   --xla_tpu_enable_scheduler_memory_pressure_tracking=true \
+  #   --xla_tpu_host_transfer_overlap_limit=24 \
+  #   --xla_tpu_aggressive_opt_barrier_removal=ENABLED \
+  #   --xla_lhs_prioritize_async_depth_over_stall=ENABLED \
+  #   --xla_tpu_enable_ag_backward_pipelining=true \
+  #   --xla_should_allow_loop_variant_parameter_in_chain=ENABLED \
+  #   --xla_should_add_loop_invariant_op_in_chain=ENABLED \
+  #   --xla_max_concurrent_host_send_recv=100 \
+  #   --xla_tpu_scheduler_percent_shared_memory_limit=100 \
+  #   --xla_latency_hiding_scheduler_rerun=2"
+  # XLA Flags to disable SparseCore offloading
+  XLA_FLAGS=" \
+    --xla_tpu_bf16_emission_mode=NATIVE_EMISSION \
+    --xla_tpu_enable_sparse_core_reduce_scatter_v2=false \
+    --xla_tpu_use_single_sparse_core_for_all_gather_offload=true \
+    --xla_tpu_enable_sparse_core_collective_offload_all_gather=false \
+    --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=false \
+    --xla_tpu_enable_sparse_core_collective_offload_3d_all_gather=false \
+    --xla_tpu_enable_all_gather_offload_tracing=true \
+    --xla_tpu_use_tc_device_shape_on_sc=true \
+    --xla_sc_disable_megacore_partitioning=true \
+    --xla_tpu_enable_async_collective_fusion_fuse_all_gather=false \
+    --xla_enable_async_all_gather=true \
+    --xla_tpu_prefer_async_allgather_to_allreduce=true \
+    --xla_tpu_enable_sparse_core_collective_offload_all_reduce=false \
+    --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=false \
+    --xla_tpu_scoped_vmem_limit_kib=65536 \
+    --xla_tpu_enable_sparse_core_offload_queuing_in_lhs=true \
+    --xla_tpu_enable_ici_ar_pipelining=true \
+    --xla_tpu_enable_offloading_copy_to_sparsecore=false \
+    --xla_tpu_enable_sparse_core_collective_offload_nd_reduce_scatter=false"
+
   xpk workload create \
     --cluster "$XPK_CLUSTER" \
     --workload "$XPK_WORKLOAD" \
@@ -690,17 +729,24 @@ submit_workload() {
     "$image_flag=$XPK_BASE_IMAGE" \
     --command "export PYTHONPATH=/deps/src; \
 export BASE_OUTPUT_DIRECTORY=${OUTPUT_DIR}; \
+export LIBTPU_INIT_ARGS='${XLA_FLAGS}' && \
+export JAX_PLATFORMS='tpu,cpu' && export ENABLE_PJRT_COMPATIBILITY='true' && \
 ${gcsfuse_prelude} \
 python3 src/maxtext/trainers/post_train/distillation/train_distill.py ${XPK_DISTILL_CONFIG} \
   run_name=${XPK_RUN_NAME} \
   base_output_directory=\$BASE_OUTPUT_DIRECTORY \
-  offline_data_dir=${XPK_OFFLINE_DATA_DIR:-"gs://ajkv-distillation/teacher-logits-run/qwen3-235b-a22b/d-ajkv-13221/logits/*.array_record"} \
+  offline_data_dir=${XPK_OFFLINE_DATA_DIR:-\"gs://ajkv-distillation/teacher-logits-run/qwen3-235b-a22b/d-ajkv-13221/logits/*.array_record\"} \
   ${grain_files_override} \
   ${extra_cli}"
 
   echo "$XPK_WORKLOAD" > "$LAST_WORKLOAD_FILE"
 }
 
+#Qwen235B
+# offline_data_dir=${XPK_OFFLINE_DATA_DIR:-\"gs://ajkv-distillation/teacher-logits-run/qwen3-235b-a22b/d-ajkv-13221/logits/*.array_record\"} \
+
+# qwen30b
+# offline_data_dir=${XPK_OFFLINE_DATA_DIR:-\"gs://ajkv-distillation/teacher-logits-run/d-ajkv-4098/logits/*.array_record\"} \
 # -------------------------- monitor --------------------------
 # Streams kubectl logs for the most recently submitted workload (or pass
 # the workload name as the second arg).
