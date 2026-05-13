@@ -1552,10 +1552,29 @@ class NNXCircularPipeline(NNXPipelineBase):
     def outer_body(carry, _):
       current_loop_state, current_layer_mutables = carry
       iteration = current_loop_state["loop_iteration"]
+
+      # Build a proper dual-buffer BSW so that get_current_weights_from_bsw
+      # can select the correct repeat for each stage at every inner iteration.
+      #
+      # At the start of outer repeat R, stage 0 begins repeat R while
+      # trailing stages (stage 1, ...) may still be finishing repeat R-1.
+      # - nxt_bsw: weights gathered for iteration+1 (where all stages agree
+      #   on the *new* repeat). This is the "current" repeat's weights.
+      # - cur_bsw: weights gathered for the current iteration (where
+      #   trailing stages are on the previous repeat). This is the
+      #   "previous" repeat's weights for trailing stages.
+      #
+      # get_current_weights_from_bsw selects nxt_bsw (bsw[1]) for stages
+      # whose repeat_id == stage0_repeat_id, and cur_bsw (bsw[0]) otherwise.
+      # This matches the Linen pipeline's (w_curr, w_next) dual-buffer.
       cur_repeat_weights = self.from_all_variables_to_repeat_weights(layers_params, iteration)
       cur_bsw = self.from_repeat_weights_to_bsw(cur_repeat_weights, physical_partition_spec_full)
-      cur_bsw = jax.ad_checkpoint.checkpoint_name(cur_bsw, "bsw_weights")
-      bsw_ref[0] = (cur_bsw, cur_bsw)
+      cur_bsw = jax.ad_checkpoint.checkpoint_name(cur_bsw, "bsw_weights_prev")
+
+      nxt_repeat_weights = self.from_all_variables_to_repeat_weights(layers_params, iteration + 1)
+      nxt_bsw = self.from_repeat_weights_to_bsw(nxt_repeat_weights, physical_partition_spec_full)
+      nxt_bsw = jax.ad_checkpoint.checkpoint_name(nxt_bsw, "bsw_weights")
+      bsw_ref[0] = (cur_bsw, nxt_bsw)
 
       if self.config.scan_pipeline_iterations:
         (new_loop_state, new_layer_mutables), inner_metrics = jax.lax.scan(
@@ -1621,12 +1640,17 @@ class NNXCircularPipeline(NNXPipelineBase):
       )
 
     # ---- Bubble iterations (pipeline drain) ----
+    # During bubbles, all stages drain on the last repeat. Use same
+    # dual-buffer pattern for consistency — cur from last repeat's
+    # iteration, nxt from iteration+1 (wraps to same repeat weights).
     if bubble_iterations > 0:
       if self.config.scan_pipeline_iterations:
         bubble_iter = loop_state["loop_iteration"]
-        bubble_weights = self.from_all_variables_to_repeat_weights(layers_params, bubble_iter)
-        bubble_bsw = self.from_repeat_weights_to_bsw(bubble_weights, physical_partition_spec_full)
-        bsw_ref[0] = (bubble_bsw, bubble_bsw)
+        bubble_cur = self.from_all_variables_to_repeat_weights(layers_params, bubble_iter)
+        bubble_cur_bsw = self.from_repeat_weights_to_bsw(bubble_cur, physical_partition_spec_full)
+        bubble_nxt = self.from_all_variables_to_repeat_weights(layers_params, bubble_iter + 1)
+        bubble_nxt_bsw = self.from_repeat_weights_to_bsw(bubble_nxt, physical_partition_spec_full)
+        bsw_ref[0] = (bubble_cur_bsw, bubble_nxt_bsw)
         (loop_state, final_layer_mutables), bubble_metrics = jax.lax.scan(
             inner_body, (loop_state, final_layer_mutables), None, length=bubble_iterations
         )
