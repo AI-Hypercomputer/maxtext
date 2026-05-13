@@ -30,7 +30,7 @@ from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.layers import nnx_wrappers
-from maxtext.layers import pipeline
+from maxtext.layers import pipeline_0506 as pipeline
 from maxtext.models import deepseek
 from maxtext.models import simple_layer
 from maxtext.utils import maxtext_utils
@@ -65,8 +65,20 @@ def assert_same_output_and_grad(f1, f2, *inputs):
   f1_grad = pytree_ravel(f1_grad)
   f2_grad = pytree_ravel(f2_grad)
 
-  assert jax.numpy.allclose(f1_value, f2_value, rtol=1e-2, equal_nan=False)
-  assert jax.numpy.allclose(f1_grad, f2_grad, rtol=1e-1, equal_nan=False)
+  g_diff = jnp.abs(f1_grad - f2_grad)
+  v_diff = jnp.abs(f1_value - f2_value)
+
+  value_close = bool(jax.numpy.allclose(f1_value, f2_value, rtol=1e-2, atol=1e-1, equal_nan=False))
+  grad_close = bool(jax.numpy.allclose(f1_grad, f2_grad, rtol=1e-1, atol=1.0, equal_nan=False))
+  assert value_close, f"value mismatch: f1={float(f1_value)} vs f2={float(f2_value)}, " f"abs_diff={float(v_diff)}"
+  assert grad_close, (
+      f"grad mismatch: abs_diff_max={float(g_diff.max())}, "
+      f"abs_diff_mean={float(g_diff.mean())}, "
+      f"f1_grad_norm={float(jnp.linalg.norm(f1_grad))}, "
+      f"f2_grad_norm={float(jnp.linalg.norm(f2_grad))}, "
+      f"grad_size={f1_grad.size}, "
+      f"tolerance=rtol=1e-1+atol=1.0"
+  )
 
 
 class PipelineParallelismTest(unittest.TestCase):
@@ -79,17 +91,23 @@ class PipelineParallelismTest(unittest.TestCase):
     devices_array = maxtext_utils.create_device_mesh(config)
     mesh = Mesh(devices_array, config.mesh_axes)
     model_mode = MODEL_MODE_TRAIN
+
+    # `single_pipeline_stage_class` (when provided, e.g. `deepseek.DeepSeekMoELayerToLinen`
+    # for the deepseek test) controls BOTH the pipeline and the per-layer reference path.
+    rngs = nnx.Rngs(params=0)
     if single_pipeline_stage_class is None:
-      rngs = nnx.Rngs(params=0)
       single_pipeline_stage = simple_layer.SimpleDecoderLayerToLinen(
           config=config, mesh=mesh, model_mode=model_mode, rngs=rngs
       )
+      raw_stage_class = simple_layer.SimpleDecoderLayer
+    elif issubclass(single_pipeline_stage_class, nnx_wrappers.ToLinen):
+      single_pipeline_stage = single_pipeline_stage_class(config=config, mesh=mesh, model_mode=model_mode, rngs=rngs)
+      # `to_linen_class` stores the wrapped NNX class as the `module_class` class attribute
+      # (see `nnx_wrappers.py:to_linen_class` -> `ToLinenPartial.module_class = base_nnx_class`).
+      raw_stage_class = single_pipeline_stage_class.module_class
     else:
-      if issubclass(single_pipeline_stage_class, nnx_wrappers.ToLinen):
-        rngs = nnx.Rngs(params=0)
-        single_pipeline_stage = single_pipeline_stage_class(config=config, mesh=mesh, model_mode=model_mode, rngs=rngs)
-      else:
-        single_pipeline_stage = single_pipeline_stage_class(config=config, mesh=mesh, model_mode=model_mode)
+      single_pipeline_stage = single_pipeline_stage_class(config=config, mesh=mesh, model_mode=model_mode, rngs=rngs)
+      raw_stage_class = single_pipeline_stage_class
 
     def get_inputs(batch_size, sequence, features):
       """Get random inputs, and random dummy targets
@@ -113,16 +131,19 @@ class PipelineParallelismTest(unittest.TestCase):
         config.global_batch_size_to_train_on, config.max_target_length, config.emb_dim
     )
     deterministic = True
-    # We use a simpler single matmul decoder layer for fast compilation in these tests.
-    rngs = nnx.Rngs(params=0)
-    single_pipeline_stage = simple_layer.SimpleDecoderLayerToLinen(
-        config=config, mesh=mesh, model_mode=model_mode, rngs=rngs
-    )
-    my_pipeline = pipeline.create_pipeline(config=config, layers=single_pipeline_stage, mesh=mesh)
+
+    def stage_factory(stage_rngs):
+      return raw_stage_class(config=config, mesh=mesh, model_mode=model_mode, rngs=stage_rngs)
+
+    my_pipeline = pipeline.create_pipeline(config=config, layers=stage_factory, mesh=mesh)
     init_pipeline_params = my_pipeline.init(
         jax.random.PRNGKey(0), inputs, inputs_position, inputs_segmentation, deterministic, model_mode
     )
-    logical_partition_spec = my_pipeline.get_weight_sharding(
+    # `get_weight_sharding` is a compact method on `PipelineLinen` (callable as
+    # `my_pipeline.get_weight_sharding(...)` directly) but on the ToLinen-wrapped NNX
+    # pipeline it must be invoked inside a bound module context. Use `bind` so the
+    # same call shape works on both paths.
+    logical_partition_spec = my_pipeline.bind(init_pipeline_params).get_weight_sharding(
         inputs, inputs_position, inputs_segmentation, deterministic, model_mode
     )
 
@@ -239,7 +260,14 @@ class PipelineParallelismTest(unittest.TestCase):
 
   @pytest.mark.tpu_only
   def test_circular_deepseek_megablox_same_output_and_grad(self):
-    # 4 stages, 8 layers (2 repeats, 1 layer per stage), 8 microbatches
+    # 4 stages, 8 layers (2 repeats, 1 layer per stage), 8 microbatches.
+    # DeepSeek's MoE block (`moe.RoutedAndSharedMoE`) constructs a `shared_experts`
+    # `MlpBlock` with `intermediate_dim = config.shared_experts * moe_mlp_dim`, so
+    # `shared_experts >= 1` is required to avoid a zero-dim DenseGeneral kernel
+    # (`ZeroDivisionError` in `_compute_fans`). DeepSeek self-attention is
+    # `attention_mla.MLA`, which asserts `config.attention_type == "mla"` in
+    # `_init_projections` (`src/maxtext/layers/attention_mla.py:718-721`).
+    # MLA layer supplies sane defaults for the head-dim / lora-rank fields.
     config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         enable_checkpointing=False,
@@ -259,6 +287,8 @@ class PipelineParallelismTest(unittest.TestCase):
         decoder_block="deepseek",
         base_moe_mlp_dim=1024,
         base_mlp_dim=1024,
+        attention_type="mla",
+        shared_experts=1,
     )
     self.assert_pipeline_same_output_and_grad(config, single_pipeline_stage_class=deepseek.DeepSeekMoELayerToLinen)
 

@@ -167,6 +167,22 @@ def current_linen_module() -> linen.Module | None:
   return None
 
 
+def is_linen_initializing() -> bool:
+  """Check if the current execution context is inside a Linen init() call.
+
+  Returns True when called from within a ``to_linen_class`` wrapper's
+  ``init()`` path. Uses :func:`current_linen_module` to access the Linen
+  module stack (private API already used by this module).
+
+  This is used by NNX pipeline modules to short-circuit the full scan
+  during Linen init, where only the output shape/dtype is needed.
+  """
+  module = current_linen_module()
+  if module is not None and hasattr(module, "is_initializing") and callable(module.is_initializing):
+    return module.is_initializing()
+  return False
+
+
 class ToNNX(Module):
   """A wrapper to turn any Linen module into an NNX module.
 
@@ -342,6 +358,8 @@ def _fix_for_qwix_quantization(module: Module):
       if not linen.module._context.module_stack:  # pylint: disable=W0212
         return call_fn(*args, **kwargs)
       nn_module = linen.module._context.module_stack[-1]  # pylint: disable=W0212
+      if nn_module is None or nn_module.scope is None:
+        return call_fn(*args, **kwargs)
       old_path = nn_module.path
       # We modify the path of the current nn module in place. This is a little
       # bit hacky but should be good as a temporary solution.
