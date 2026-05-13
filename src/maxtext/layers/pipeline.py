@@ -1570,34 +1570,30 @@ class NNXCircularPipeline(NNXPipelineBase):
       saved_loop_st, saved_mut, saved_w_curr, saved_params = residuals
       g_loop_st, g_mut, g_w_curr = g_output
 
-      bsw_ref = [None]
+      # Backward recompute: pass BSW through carry to avoid tracer leak
+      # from bsw_ref side effect inside jax.lax.scan.
+      def inner_body_remat_with_bsw(carry, _):
+        loop_st, layer_mut, bsw = carry
+        new_loop_st, new_mut = _run_iteration_pure(loop_st, layer_mut, bsw)
+        return (new_loop_st, new_mut, bsw), None
 
-      def inner_body_remat(carry, _):
-        loop_st, layer_mut = carry
-        new_loop_st, new_mut = _run_iteration_pure(
-            loop_st, layer_mut, bsw_ref[0]
-        )
-        return (new_loop_st, new_mut), None
-
-      # First: recompute forward to get per-repeat intermediate states.
-      # We scan forward saving (loop_st, layer_mut, w_curr) per repeat.
       def fwd_outer_body(carry, _):
         loop_st, layer_mut, w_curr = carry
         iteration = loop_st["loop_iteration"]
         w_next = self.weight_prefetching(
             saved_params, physical_partition_spec_full, iteration
         )
-        bsw_ref[0] = (w_curr, w_next)
+        bsw = (w_curr, w_next)
         if self.config.scan_pipeline_iterations:
-          (new_loop_st, new_mut), _ = jax.lax.scan(
-              inner_body_remat, (loop_st, layer_mut), None,
+          (new_loop_st, new_mut, _), _ = jax.lax.scan(
+              inner_body_remat_with_bsw, (loop_st, layer_mut, bsw), None,
               length=num_microbatches,
           )
         else:
-          inner = (loop_st, layer_mut)
+          inner = (loop_st, layer_mut, bsw)
           for _ in range(num_microbatches):
-            inner, _ = inner_body_remat(inner, None)
-          new_loop_st, new_mut = inner
+            inner, _ = inner_body_remat_with_bsw(inner, None)
+          new_loop_st, new_mut, _ = inner
         return (new_loop_st, new_mut, w_next), (loop_st, layer_mut, w_curr)
 
       max_logging.log(
@@ -1632,18 +1628,17 @@ class NNXCircularPipeline(NNXPipelineBase):
 
         # Recompute inner scan + vjp for this repeat
         def _inner_fwd(state, bsw):
-          bsw_ref[0] = bsw
           if self.config.scan_pipeline_iterations:
-            result, _ = jax.lax.scan(
-                inner_body_remat, state, None,
+            (result_st, result_mut, _), _ = jax.lax.scan(
+                inner_body_remat_with_bsw, (*state, bsw), None,
                 length=num_microbatches,
             )
           else:
-            c = state
+            c = (*state, bsw)
             for _ in range(num_microbatches):
-              c, _ = inner_body_remat(c, None)
-            result = c
-          return result
+              c, _ = inner_body_remat_with_bsw(c, None)
+            result_st, result_mut, _ = c
+          return (result_st, result_mut)
 
         _inner_fwd_remat = jax.remat(
             _inner_fwd, policy=self.get_pipeline_remat_policy()
