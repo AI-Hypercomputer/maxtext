@@ -25,7 +25,7 @@ We support inference of MaxText models on vLLM via an [out-of-tree](https://gith
 
 # Installation
 
-Follow the instructions in [install maxtext](https://maxtext.readthedocs.io/en/latest/install_maxtext.html) to install MaxText. For this inference tutorial on TPU (which uses vLLM), you must install `maxtext[tpu-post-train]`, as it includes the required adapter plugin. We recommend installing from PyPI to ensure you have the latest stable version of dependencies.
+Follow the instructions in [install maxtext](../install_maxtext.md) to install MaxText. For this inference tutorial on TPU (which uses vLLM), you must install `maxtext[tpu-post-train]`, as it includes the required adapter plugin. We recommend installing from PyPI to ensure you have the latest stable version of dependencies.
 
 After finishing the installation, ensure that the MaxText on vLLM adapter plugin has been installed. To do so, run the following command:
 

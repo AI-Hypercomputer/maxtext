@@ -10,7 +10,7 @@ MaxText is an open-source, high-performance LLM framework written in Python/JAX.
 
 - **Supported Precisions**: FP32, BF16, INT8, and FP8.
 - **Ahead-of-Time Compilation (AOT)**: For faster model development/prototyping and earlier OOM detection.
-- **Quantization**: Via **Qwix** (recommended) and AQT. See Quantization [Guide](https://maxtext.readthedocs.io/en/maxtext-v0.2.1/reference/core_concepts/quantization.html).
+- **Quantization**: Via **Qwix** (recommended) and AQT. See Quantization [Guide](../reference/core_concepts/quantization.md).
 - **Diagnostics**: Structured error context via **`cloud_tpu_diagnostics`** (filters stack traces to user code), simple logging via `max_logging`, profiling in **XProf**, and visualization in **TensorBoard**.
 - **Multi-Token Prediction (MTP)**: Enables token efficient training with multi-token prediction.
 - **Elastic Training**: Fault-tolerant and dynamic scale-up/scale-down on Cloud TPUs with Pathways.

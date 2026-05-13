@@ -1,5 +1,5 @@
 <!--
- Copyright 2023-2025 Google LLC
+ Copyright 2023-2026 Google LLC
 
  Licensed under the Apache License, Version 2.0 (the "License");
  you may not use this file except in compliance with the License.
@@ -51,14 +51,14 @@ This is the easiest way to get started with the latest stable version.
      TPUs.
 
      ```bash
-     uv pip install maxtext[tpu]==0.2.1 --resolution=lowest
+     uv pip install maxtext[tpu]=={{version}} --resolution=lowest
      ```
 
    - **Option 2:** Install `maxtext[cuda12]`, used for pre-training and decoding
      on GPUs.
 
      ```bash
-     uv pip install maxtext[cuda12]==0.2.1 --resolution=lowest
+     uv pip install maxtext[cuda12]=={{version}} --resolution=lowest
      ```
 
    - **Option 3:** Install `maxtext[tpu-post-train]`, used for post-training on
@@ -66,7 +66,7 @@ This is the easiest way to get started with the latest stable version.
      on TPUs.
 
      ```bash
-     uv pip install maxtext[tpu-post-train]==0.2.1 --resolution=lowest
+     uv pip install maxtext[tpu-post-train]=={{version}} --resolution=lowest
      ```
 
    - **Option 4:** Install `maxtext[runner]`, used for building MaxText's Docker
@@ -78,7 +78,7 @@ This is the easiest way to get started with the latest stable version.
      guide.
 
      ```bash
-     uv pip install maxtext[runner]==0.2.1 --resolution=lowest
+     uv pip install maxtext[runner]=={{version}} --resolution=lowest
      ```
 
 ```{note}
@@ -111,22 +111,6 @@ environment to avoid dependency conflicts.
    git clone https://github.com/AI-Hypercomputer/maxtext.git
    cd maxtext
    ```
-
-:::\{only} is_not_latest
-
-By default, cloning the repository provides the latest version (**HEAD**).
-If you wish to use the latest features, please follow the [latest guide](https://maxtext.readthedocs.io/en/latest/install_maxtext.html).
-If you want to ensure compatibility with the specific version of the documentation
-you are currently viewing, you must checkout the corresponding tag for that version
-before proceeding with the installation.
-
-```{eval-rst}
-.. parsed-literal::
-
-  git checkout |version|
-```
-
-:::
 
 2. Create virtual environment:
 

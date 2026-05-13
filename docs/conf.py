@@ -27,6 +27,7 @@ https://www.sphinx-doc.org/en/master/usage/configuration.html
 
 import os
 import os.path
+import re
 import sys
 import logging
 from sphinx.util import logging as sphinx_logging
@@ -42,7 +43,15 @@ project = "MaxText"
 # pylint: disable=redefined-builtin
 copyright = "2023–2026, Google LLC"
 author = "MaxText developers"
-version = os.environ.get("READTHEDOCS_VERSION", "latest")
+
+# Get version from the __init__.py file
+init_path = os.path.abspath(os.path.join(MAXTEXT_REPO_ROOT, "src", "maxtext", "__init__.py"))
+with open(init_path, "r", encoding="utf-8") as f:
+  match = re.search(r"^__version__ = ['\"]([^'\"]*)['\"]", f.read(), re.MULTILINE)
+  if match:
+    version = match.group(1)
+  else:
+    raise RuntimeError("Unable to find version string.")
 
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
@@ -247,6 +256,12 @@ class FilterSphinxWarnings(logging.Filter):
     return not msg.strip().startswith(filter_out)
 
 
+def substitute_placeholders(app, docname, source):
+  result = source[0]
+  result = result.replace("{{version}}", version)
+  source[0] = result
+
+
 def setup(app):
   """Set up the Sphinx application with custom behavior."""
 
@@ -259,5 +274,4 @@ def setup(app):
   warning_handler, *_ = [h for h in logger.handlers if isinstance(h, sphinx_logging.WarningStreamHandler)]
   warning_handler.filters.insert(0, FilterSphinxWarnings(app))
 
-  if version != "latest":
-    app.tags.add("is_not_latest")
+  app.connect("source-read", substitute_placeholders)
