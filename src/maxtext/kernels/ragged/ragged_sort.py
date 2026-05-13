@@ -303,6 +303,8 @@ def ring_ragged_unsort(
           valid_rows_mask=valid_rows_mask,
           reduce_group_size=topk,
           enforce_fallback=enforce_gather_reduce_fallback,
+          flops_override=gather_reduce_flops_override,
+          bytes_accessed_override=gather_reduce_bytes_accessed_override,
       )
     else:
       # Shift indices so they map to the packed local buffer [0, local_num_tokens).
@@ -319,6 +321,8 @@ def ring_ragged_unsort(
           valid_rows_mask=valid_rows_mask,
           reduce_group_size=topk,
           enforce_fallback=enforce_gather_reduce_fallback,
+          flops_override=gather_reduce_flops_override,
+          bytes_accessed_override=gather_reduce_bytes_accessed_override,
       )
 
     res = (
@@ -375,6 +379,8 @@ def ring_ragged_unsort(
           weights=weight_for_sorted,
           has_weights=True,
           enforce_fallback=enforce_gather_fallback,
+          flops_override=gather_flops_override,
+          bytes_accessed_override=gather_bytes_accessed_override,
       )
     else:
       # Slice the inverse permutation to match the packed local buffer.
@@ -392,6 +398,8 @@ def ring_ragged_unsort(
           weights=sliced_weights,
           has_weights=True,
           enforce_fallback=enforce_gather_fallback,
+          flops_override=gather_flops_override,
+          bytes_accessed_override=gather_bytes_accessed_override,
       )
     return grad_sorted_tokens, None, None, None
 

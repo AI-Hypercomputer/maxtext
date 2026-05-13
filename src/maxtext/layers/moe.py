@@ -918,7 +918,6 @@ class RoutedMoE(nnx.Module):
           repeats=group_size,
           total_repeat_length=math.prod(selected_experts.shape),
       )
-
     return (
         sorted_inputs,
         sorted_selected_experts,
