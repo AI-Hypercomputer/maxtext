@@ -279,13 +279,20 @@ def _collect_batched_requests():
   """Waits for and collects a batch of requests from the queue."""
   batched_items = []
   start_time = time.time()
-  while len(batched_items) < LLM.batch_size and (time.time() - start_time) < BATCH_TIMEOUT_S:
+
+  while len(batched_items) < LLM.batch_size:
+    elapsed = time.time() - start_time
+    remaining = BATCH_TIMEOUT_S - elapsed
+
+    if remaining <= 0:
+      break
+
     try:
-      item = request_queue.get(timeout=0.01)
+      item = request_queue.get(timeout=remaining)
       batched_items.append(item)
     except queue.Empty:
-      if batched_items:
-        break  # Process what we have if timeout is reached
+      break  # We hit the full BATCH_TIMEOUT_S
+
   return batched_items
 
 

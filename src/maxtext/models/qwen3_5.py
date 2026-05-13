@@ -29,7 +29,7 @@ from maxtext.layers import initializers as max_initializers
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.normalizations import Qwen3NextRMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
-
+from maxtext.utils import max_utils
 
 from maxtext.models.qwen3 import (
     Qwen3NextGatedDeltaNet,
@@ -156,7 +156,11 @@ class Qwen3_5DecoderLayer(nnx.Module):
           rngs=rngs,
       )
     else:
-      self.attention = Qwen3_5GatedDeltaNet(config=cfg, dtype=cfg.dtype, model_mode=model_mode, rngs=rngs)
+      batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config, model_mode)
+      dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
+      self.attention = Qwen3_5GatedDeltaNet(
+          config=cfg, inputs_shape=dummy_inputs_shape, dtype=cfg.dtype, model_mode=model_mode, rngs=rngs
+      )
 
     # Second LayerNorm, applied before the MoE block.
     self.post_attention_layernorm = Qwen3NextRMSNorm(
@@ -203,13 +207,12 @@ class Qwen3_5DecoderLayer(nnx.Module):
           attention_metadata=attention_metadata,
       )
     else:
-      attention_output = cast(Qwen3_5GatedDeltaNet, self.attention)(
+      attention_output, new_kv_cache = cast(Qwen3_5GatedDeltaNet, self.attention)(
           hidden_states,
           model_mode=model_mode,
-          kv_cache=None,
+          kv_cache=kv_cache,
           decoder_segment_ids=decoder_segment_ids,
       )
-      new_kv_cache = None
 
     # First residual connection after attention
     hidden_states = residual + attention_output
