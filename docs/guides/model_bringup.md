@@ -76,6 +76,16 @@ Core Strategy:
 - **Forward Pass**: Run the input through both layers. Remember to set the PyTorch model to evaluation mode (`model_pt.eval()`) to disable dropout etc.
 - **Compare Outputs**: Convert the PyTorch output to a JAX array (or NumPy array) and use `numpy.testing.assert_allclose` to check if the outputs are numerically close within a specified tolerance (atol, rtol).
 
+Unit Tests Best Practices (performance perspective):
+
+As unit tests are part of CI/CD workflow, it is critical to keep the test running fast without impacting necessary code coverage. It is recommended to follow below best practices:
+
+- **Prioritize Synthetic Data (`dataset_type=synthetic`)**: Use a synthetic dataset whenever possible. This is significantly faster than using other dataset types that require loading from network storage. Only use a specific dataset type when the test's focus strictly requires it.
+- **Minimize Training Steps**: Keep the number of training steps to the minimum necessary to cover the intended code logic.
+- **Select Smallest Viable Model**: Utilize the smallest model size in unit tests that still provides adequate code coverage.
+- **Prioritize CPU-Only Testing**: To reduce TPU consumption for train compile-related tests, favor using `cpu_only` with a `tpu_backend` over `tpu_only` configurations.
+- **Move Non-Critical Tests to Scheduled-Only**: As a last resort, if the test cannot be sped up using the methods above and is not critical enough to block a Pull Request (PR), move it to run only on a schedule (`scheduled_only`). This is a compromise to improve overall CI performance.
+
 ## 5. End-to-end correctness
 
 This verification process can vary in duration. If you're working with a small model, you're fortunate as it allows for rapid iteration on your development machine. To verify a model's correctness, we could leverage two strategies below - comparing logits and evaluation.
