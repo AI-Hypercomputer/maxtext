@@ -1,4 +1,7 @@
 flax==0.12.4
 google-metrax>=0.2.3
-libtpu>=0.0.39
 optax==0.2.6
+transformers>=5.5.0
+datasets>=4.8.5
+fsspec==2026.2.0
+gcsfs==2026.2.0
