@@ -65,6 +65,7 @@ from maxtext.models import (
 )
 from maxtext.multimodal import utils as mm_utils
 from maxtext.utils import max_logging, max_utils, maxtext_utils, sharding
+from maxtext.utils.maxtext_utils_nnx import nnx_ensure_scan_leading_axis
 from maxtext.utils.sharding import create_sharding
 
 # ------------------------------------------------------------------------------
@@ -382,7 +383,7 @@ class NNXDecoder(nnx.Module):
         RemattedGemma4Block = gemma4.Gemma4ScannableBlock
 
         if scan_length > 0:
-          self.layers = self._create_scanned_layers(
+          self.scanned_blocks = self._create_scanned_layers(
               RemattedGemma4Block, length=scan_length, metadata_axis_name="layers", rngs=rngs, **layer_kwargs
           )
         self.layers_remainder = RemattedGemma4Block(
@@ -495,7 +496,7 @@ class NNXDecoder(nnx.Module):
     _, (stacked_params, stacked_rest) = jax.lax.scan(scan_body, None, rngs_state)
 
     if scan_axis != 0:
-      stacked_params = jax.tree.map(lambda x: jnp.moveaxis(x, 0, scan_axis), stacked_params)
+      stacked_params = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0), stacked_params)
 
     def _add_scan_metadata(state, axis):
       def _update_leaf(leaf):
@@ -588,9 +589,13 @@ class NNXDecoder(nnx.Module):
         return {k: _extract_matching_state(v, full[k]) for k, v in template.items()}
       return full
 
+    dynamic_graph_init = bool(getattr(self, "disable_quant_stats_update", False))
+    updated_graphdef = [graphdef]
+
     use_kv = kv_caches_stacked is not None
 
     def layer_fn(carry, scanned_vars):
+
       # Unpack the sliced variables for THIS layer
       if use_kv:
         current_params, current_state, kv_cache_layer = scanned_vars
@@ -618,13 +623,19 @@ class NNXDecoder(nnx.Module):
         updated_kv = None
 
       # Extract the updated state to return it
-      new_current_state = nnx.state(layer)
+      if dynamic_graph_init:
+        new_graphdef, updated_params, updated_state = nnx.split(layer, nnx.Param, ...)
+        updated_graphdef[0] = new_graphdef
+        returned_params = updated_params
+        new_current_state = nnx.State.merge(returned_params, updated_state)
+      else:
+        new_current_state = nnx.state(layer)
 
       if use_kv:
         return new_carry, (new_current_state, updated_kv)
       return new_carry, new_current_state
 
-    layer_fn = jax.checkpoint(layer_fn, policy=policy, prevent_cse=prevent_cse)
+    layer_fn_wrapped = jax.checkpoint(layer_fn, policy=policy, prevent_cse=prevent_cse)
 
     if use_kv:
       # If kv_caches is provided (e.g., from vLLM), we CANNOT use jax.lax.scan
@@ -634,7 +645,6 @@ class NNXDecoder(nnx.Module):
 
       # kv_caches_stacked is actually the original kv_caches list in this new flow
       kv_caches_list = kv_caches_stacked
-
       current_carry = x_in
 
       for i in range(length):
@@ -643,7 +653,9 @@ class NNXDecoder(nnx.Module):
         current_state = jax.tree.map(lambda x, i=i: x[i], state)
 
         # Call the layer
-        current_carry, (_, updated_kv) = layer_fn(current_carry, (current_params, current_state, kv_caches_list[i]))
+        current_carry, (_, updated_kv) = layer_fn_wrapped(
+            current_carry, (current_params, current_state, kv_caches_list[i])
+        )
 
         # Update the list in-place (mutates the list passed by reference)
         kv_caches_list[i] = updated_kv
@@ -652,16 +664,27 @@ class NNXDecoder(nnx.Module):
       # inference with vLLM, parameters do not change and we don't need intermediates.
       return current_carry, layers, None
     else:
-      final_carry, scanned_state = jax.lax.scan(layer_fn, x_in, (params, state))
+      params = nnx_ensure_scan_leading_axis(params, length)
+      state = nnx_ensure_scan_leading_axis(state, length)
+
+      final_carry, scanned_state = jax.lax.scan(layer_fn_wrapped, x_in, (params, state))
       returned_kv_stacked = None
 
     if scan_axis != 0:
       new_params, new_rest = scanned_state.split(nnx.Param, ...)
-      new_params = jax.tree.map(lambda x: jnp.moveaxis(x, 0, scan_axis), new_params)
+      new_params = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0), new_params)
       scanned_state = nnx.merge_state(new_params, new_rest)
 
-    nnx.update(layers, scanned_state)
-    return final_carry, layers, returned_kv_stacked if use_kv else None
+    if dynamic_graph_init:
+      # If graph changed, we need to merge with the new graphdef.
+      # Note: scanned_state here is the full state (Params + rest).
+      new_params, new_rest = scanned_state.split(nnx.Param, ...)
+      out_layers = nnx.merge(updated_graphdef[0], new_params, new_rest)
+    else:
+      nnx.update(layers, scanned_state)
+      out_layers = layers
+
+    return final_carry, out_layers, returned_kv_stacked if use_kv else None
 
   def get_decoder_layers(self):
     """Retrieves decoder layer classes based on config using a dictionary lookup."""
@@ -671,6 +694,8 @@ class NNXDecoder(nnx.Module):
       return [scannable_cls] if cfg.scan_layers else [normal_cls]
 
     def get_deepseek():
+      if cfg.use_batch_split_schedule:
+        return [deepseek_batchsplit.DeepSeekDenseLayer, deepseek_batchsplit.DeepSeekMoELayer]
       return [deepseek.DeepSeekDenseLayer, deepseek.DeepSeekMoELayer]
 
     layer_map = {
@@ -1351,7 +1376,9 @@ class NNXDecoder(nnx.Module):
 
     # Apply the main scan over the full blocks
     if scan_length > 0:
-      y, self.layers, _ = self._apply_layers_sequentially(self.layers, y, *layer_args, length=scan_length, **layer_kwargs)
+      y, self.scanned_blocks, _ = self._apply_layers_sequentially(
+          self.scanned_blocks, y, *layer_args, length=scan_length, **layer_kwargs
+      )
 
     # Apply any remaining layers that did not fit into a full scanned block
     num_remaining_layers = cfg.num_decoder_layers % attention_pattern_length

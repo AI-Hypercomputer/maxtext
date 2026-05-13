@@ -308,6 +308,13 @@ class Checkpointing(BaseModel):
 
   load_parameters_path: PathStr = Field("", description="Loads only model parameters from a specific checkpoint path.")
   lora_input_adapters_path: PathStr = Field("", description="Input GCS path for LoRA adapters.")
+  hf_lora_adapter_path: PathStr = Field(
+      "",
+      description=(
+          "HuggingFace LoRA adapter repo ID (e.g., 'username/adapter-repo') or local "
+          "path to directory containing adapter_model.safetensors."
+      ),
+  )
   load_full_state_path: PathStr = Field("", description="Loads the complete training state from a checkpoint path.")
   enable_checkpointing: bool = Field(True, description="If True, enables saving checkpoints during training.")
   load_checkpoint_only_once: bool = Field(False, description="If True, deep copy the reference model to the actor model.")
@@ -345,7 +352,8 @@ class Checkpointing(BaseModel):
       description="If True, enables checkpointing from remote TPU VMs instead of head node on pathways.",
   )
   enable_autocheckpoint: bool = Field(
-      False, description="If True, enables autocheckpoint or preemption induced checkpointing."
+      False,
+      description="If True, enables autocheckpoint or preemption induced checkpointing.",
   )
 
 
@@ -495,7 +503,8 @@ class ModelArchitecture(BaseModel):
   )
   fused_mlp: bool = Field(False, description="If supported, fuse the MLP layers.")
   qk_norm_with_scale: bool = Field(
-      True, description="Whether to apply scale on query and key normalizations (default True)."
+      True,
+      description="Whether to apply scale on query and key normalizations (default True).",
   )
   v_norm_with_scale: bool = Field(True, description="Whether to apply scale on value normalization (default True).")
 
@@ -542,9 +551,13 @@ class Attention(BaseModel):
       "global", description="The variant of attention to use."
   )
   share_kv_projections: bool = Field(
-      False, description="If True, for global attention, Key and Value projections share the same weights."
+      False,
+      description="If True, for global attention, Key and Value projections share the same weights.",
   )
-  global_num_kv_heads: int = Field(0, description="If greater than 0, sets the number of KV heads for global attention.")
+  global_num_kv_heads: int = Field(
+      0,
+      description="If greater than 0, sets the number of KV heads for global attention.",
+  )
   attention_sink: bool = Field(False, description="If True, enables attention sinks.")
   float32_qk_product: bool = Field(False, description="In dot-product attention, cast query-key product to fp32.")
   float32_logits: bool = Field(
@@ -1046,7 +1059,8 @@ class Tokenizer(BaseModel):
   use_chat_template: bool = Field(False, description="Whether to use the chat template for tokenization.")
   chat_template_path: str = Field("", description="Path to chat template json file.")
   chat_template: str = Field(
-      "", description="Chat template to use with HF tokenizers. It should be a valid Jinja2-formatted template."
+      "",
+      description="Chat template to use with HF tokenizers. It should be a valid Jinja2-formatted template.",
   )
   tokenize_train_data: bool = Field(True, description="If False, assumes the training dataset is pre-tokenized.")
   tokenize_eval_data: bool = Field(True, description="If False, assumes the evaluation dataset is pre-tokenized.")
@@ -1138,7 +1152,8 @@ class GrainDataset(BaseModel):
       description="Path to a JSON file specifying the mixture weights for Grain training data.",
   )
   grain_file_type: str = Field(
-      "arrayrecord", description="File type for Grain data. Supported: arrayrecord, tfrecord, parquet."
+      "arrayrecord",
+      description="File type for Grain data. Supported: arrayrecord, tfrecord, parquet.",
   )
   grain_use_elastic_iterator: bool = Field(
       False,
@@ -1212,6 +1227,26 @@ class FineTuning(BaseModel):
   use_grpo: None | bool = Field(None, description="If True, enables Group Relative Policy Optimization.")
 
 
+class LoRA(BaseModel):
+  """Configuration for LoRA / QLoRA adapters."""
+
+  model_config = ConfigDict(extra="forbid")
+
+  enable_lora: bool = Field(False, description="If True, enables LoRA/QLoRA during fine-tuning.")
+  lora_rank: NonNegativeInt = Field(0, description="LoRA rank. Set >0 when LoRA is enabled.")
+  lora_alpha: NonNegativeFloat = Field(0.0, description="LoRA alpha scaling factor.")
+  lora_module_path: str = Field(
+      "",
+      description=(
+          "Regex identifying target modules for LoRA, e.g." " '.*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj'."
+      ),
+  )
+  lora_restore_path: PathStr = Field(
+      "",
+      description=("Optional path to LoRA weights to load before training. Ignored if the current run is resumed."),
+  )
+
+
 class Distillation(BaseModel):
   """Configuration for Knowledge Distillation."""
 
@@ -1229,7 +1264,8 @@ class Distillation(BaseModel):
 
   # --- Offline Distillation Field ---
   offline_data_dir: Optional[str] = Field(
-      None, description="GCS or local path to the pre-generated ArrayRecord teacher data."
+      None,
+      description="GCS or local path to the pre-generated ArrayRecord teacher data.",
   )
 
   # --- Loss Params ---
@@ -1237,7 +1273,8 @@ class Distillation(BaseModel):
   distill_temperature: float = Field(1.0, description="Temperature for distillation softening.")
   distill_beta: float = Field(0.0, description="Weight for the feature loss component. Use 0.0 to disable")
   distill_feature_loss_type: Literal["cosine", "l2"] = Field(
-      "cosine", description="The type of loss to use for feature distillation ('cosine' or 'l2')."
+      "cosine",
+      description="The type of loss to use for feature distillation ('cosine' or 'l2').",
   )
   distill_layer_indices: None | list = Field(None, description="Feature indices for feature loss.")
   distill_alpha_end: Optional[float] = Field(None, description="Target alpha at end of training. None keeps alpha fixed.")
@@ -1344,10 +1381,12 @@ class Optimizer(BaseModel):
 
   opt_type: OptimizerType = Field(OptimizerType.ADAMW, description="The type of optimizer to use.")
   skip_step_on_spikes: bool = Field(
-      False, description="If True, skip the training step when loss or gradient spike is detected."
+      False,
+      description="If True, skip the training step when loss or gradient spike is detected.",
   )
   skip_step_interval: PositiveInt = Field(
-      128, description="The rolling interval to calculate the mean and standard deviation."
+      128,
+      description="The rolling interval to calculate the mean and standard deviation.",
   )
   skip_step_scaling_factor: float = Field(6.0, description="The scaling factor to determine if a spike occurred.")
   gradient_accumulation_steps: PositiveInt = Field(
@@ -1796,7 +1835,10 @@ class VisionTower(BaseModel):
   temporal_patch_size_for_vit: int = Field(2, description="Temporal patch size for video inputs.")
   num_position_embeddings_for_vit: int = Field(1024, description="Number of position embeddings for ViT.")
   deepstack_visual_indexes_for_vit: list[int] = Field([], description="Layer indices to extract deep visual features.")
-  vision_output_length: int = Field(-1, description="The output length (number of soft tokens) from the vision encoder.")
+  vision_output_length: int = Field(
+      -1,
+      description="The output length (number of soft tokens) from the vision encoder.",
+  )
 
 
 class VisionProjector(BaseModel):
@@ -1900,18 +1942,28 @@ class RL(BaseModel):
   grpo_epsilon: float = Field(0.2, description="Epsilon value for clipping in the GRPO loss.")
   loss_algo: Literal["grpo", "gspo-token"] = Field("grpo", description="Loss algorithm, i.e., 'grpo' or 'gspo-token'.")
   use_agentic_rollout: bool = Field(
-      False, description="If True, uses the asynchronous AgenticGRPOLearner for online vLLM rollouts."
+      False,
+      description="If True, uses the asynchronous AgenticGRPOLearner for online vLLM rollouts.",
   )
-  max_concurrency: int = Field(256, description="Maximum number of concurrent rollout requests (agentic rollout only).")
+  max_concurrency: int = Field(
+      256,
+      description="Maximum number of concurrent rollout requests (agentic rollout only).",
+  )
   off_policy_steps: int = Field(
-      0, description="Number of off-policy steps tolerated before requiring a policy update (agentic only)."
+      0,
+      description="Number of off-policy steps tolerated before requiring a policy update (agentic only).",
   )
-  system_prompt: str = Field("", description="System prompt injected into the agent at rollout time (agentic only).")
+  system_prompt: str = Field(
+      "",
+      description="System prompt injected into the agent at rollout time (agentic only).",
+  )
   degenerate_group_masking: bool = Field(
-      True, description="Mask degenerate groups (all-zero advantages) from contributing to loss (agentic only)."
+      True,
+      description="Mask degenerate groups (all-zero advantages) from contributing to loss (agentic only).",
   )
   epsilon_high: Optional[float] = Field(
-      None, description="Upper-bound clipping epsilon for GRPO loss. Defaults to epsilon when None (agentic only)."
+      None,
+      description="Upper-bound clipping epsilon for GRPO loss. Defaults to epsilon when None (agentic only).",
   )
   reshard_chunk_size: Optional[int] = Field(
       None,
@@ -2254,6 +2306,10 @@ class MaxTextConfig(
   rl: RL = Field(
       default_factory=RL,
       description="Configuration for RL algorithms like Group Relative Policy Optimization (GRPO).",
+  )
+  lora: LoRA = Field(
+      default_factory=LoRA,
+      description="Configuration for LoRA / QLoRA adapters.",
   )
   model_config = ConfigDict(extra="forbid", protected_namespaces=())
 
