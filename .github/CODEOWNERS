@@ -17,6 +17,10 @@ src/maxtext/layers/moe.py @RissyRan @michelle-yooh @gagika @richjames0 @shralex 
 src/maxtext/layers/multi_token_prediction.py @parambole @RissyRan @gagika @richjames0 @shralex
 src/maxtext/layers/quantizations.py @khatwanimohit @jshin1394 @liudangyi @richjames0 @shralex
 
+# vLLM eval framework
+src/maxtext/eval/ @dipannita08 @NicoGrande @hengtaoguo
+tests/unit/eval/ @dipannita08 @NicoGrande @hengtaoguo
+
 # Inference
 tests/inference/ @vipannalla @mitalisi @gpolovets1 @mailvijayasingh @jrplatin @patemotter @lumosis @richjames0
 src/maxtext/inference @vipannalla @mitalisi @gpolovets1 @mailvijayasingh @jrplatin @patemotter @lumosis @richjames0
