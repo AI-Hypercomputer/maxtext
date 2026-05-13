@@ -1360,14 +1360,6 @@ class NNXCircularPipeline(NNXPipelineBase):
       new_layer_state = nnx.State.merge(else_metrics, else_mutables)
 
     new_state = self.get_new_loop_state(stages_output, loop_state)
-    from maxtext.utils import max_logging as _ml
-    nls_leaves = jax.tree.leaves(new_layer_state)
-    _ml.log(
-        f"[PIPELINE-DIAG] run_one_iteration: "
-        f"output={stages_output.shape}, "
-        f"new_layer_state={len(nls_leaves)} leaves "
-        f"(metrics+mutables after scatter-back)"
-    )
     return new_state, new_layer_state
 
   def __call__(
@@ -1441,40 +1433,6 @@ class NNXCircularPipeline(NNXPipelineBase):
 
     _, layers_params, layers_metrics, layers_mutables = nnx.split(layers_state, _is_static_param, nnx.Intermediate, ...)
 
-    from maxtext.utils import max_logging
-    p_leaves = jax.tree.leaves(layers_params)
-    m_leaves = jax.tree.leaves(layers_metrics)
-    mut_leaves = jax.tree.leaves(layers_mutables)
-    max_logging.log(
-        f"[PIPELINE-DIAG] NNXCircularPipeline.__call__: "
-        f"inputs={inputs.shape}, "
-        f"bubble_iterations={bubble_iterations}, "
-        f"num_repeats={self.config.num_pipeline_repeats}, "
-        f"num_microbatches={self.config.num_pipeline_microbatches}"
-    )
-    max_logging.log(
-        f"[PIPELINE-DIAG]   layers_params: {len(p_leaves)} leaves, "
-        f"{sum(getattr(l, 'nbytes', 0) for l in p_leaves) / 1e9:.3f} GB"
-    )
-    max_logging.log(
-        f"[PIPELINE-DIAG]   layers_metrics: {len(m_leaves)} leaves "
-        f"(flow as L2 scan ys for XLA fission)"
-    )
-    if m_leaves:
-      max_logging.log(
-          f"[PIPELINE-DIAG]   metrics shapes: "
-          f"{[l.shape for l in m_leaves[:5]]}"
-      )
-    else:
-      max_logging.log(
-          "[PIPELINE-DIAG]   WARNING: 0 metrics leaves — "
-          "no independent dataflow for XLA fission"
-      )
-    max_logging.log(
-        f"[PIPELINE-DIAG]   layers_mutables: {len(mut_leaves)} leaves "
-        f"(in carry as lightweight_state)"
-    )
-
     # layers_mutables catch-all should contain ONLY RngState variables (RngKey/RngCount).
     # If non_trainable state (e.g. BatchStat) appears here,
     # it is being carried through scan instead of broadcast.
@@ -1489,285 +1447,278 @@ class NNXCircularPipeline(NNXPipelineBase):
         "Only RngState variables (RngKey/RngCount) should be present."
     )
 
-    # ---- 3-level custom VJP scan (mirrors Linen pipeline_utils.py) ----
+    # ---- Explicit fwd/bwd custom_vjp (deepseek_batchsplit pattern) ----
     #
-    # Architecture (same as Linen's create_gradient_accumulation_scan +
-    # create_pipeline_stage, adapted for NNX with closures instead of
-    # nondiff_argnums):
+    # Instead of nested L1/L2/L3 custom_vjp with opaque vjp closure residuals,
+    # use a SINGLE custom_vjp with:
+    #   - Forward: scan over repeats × microbatches, save explicit tensor residuals
+    #   - Backward: scan in reverse, recompute per-iteration, accumulate gradients
     #
-    #   Level 1 — run_single_microbatch:
-    #     Per-microbatch jax.remat + jax.vjp. Separates lightweight_state
-    #     (loop_state + mutables) from BSW. Residual = vjp closure.
-    #
-    #   Level 2 — run_pipeline_microbatches:
-    #     Wraps inner scan in jax.vjp. Residual = scan_vjp closure.
-    #     Backward does d+g gradient accumulation for BSW.
-    #
-    #   Level 3 — execute_pipeline_repeat:
-    #     Creates dual-buffer BSW, computes jax.linear_transpose for
-    #     weight_prefetching backward (reduce-scatter). Residual =
-    #     (scan_vjp, prefetch_transpose, bsw).
-    #
-    # Non-diff args (layers_graph, layers_metrics, positions, segment_ids,
-    # deterministic, model_mode, logical_partition_spec) captured via closure.
-    # NOT via nondiff_argnums — that crashed with NNX traced Variables.
-    #
-    # Why custom_vjp over plain jax.checkpoint:
-    #   - Controls exactly what residuals are saved (VJP closures, not raw tensors)
-    #   - Outer checkpoint policy was a no-op (names tagged inside inner scope
-    #     are invisible to outer scope) causing full recompute = 17% throughput cost
-    #   - jax.linear_transpose enables XLA to overlap reduce-scatter with compute
+    # This follows deepseek_batchsplit.py's architecture which achieves optimal
+    # XLA fission without nn.scan or nn.remat.
+
+    from maxtext.utils import max_logging
     num_microbatches = self.config.num_pipeline_microbatches
-
-    # ---- Level 1: per-microbatch remat + vjp ----
-    #
-    # L1/L2 custom_vjp provide essential residual control. L1 saves lightweight
-    # remat'd vjp closures per microbatch, L2 wraps the scan with d+g gradient
-    # accumulation. Without them, jax.vjp captures the entire scan trace per
-    # repeat → 32+ GB memory. With them: ~17 GB (no outer checkpoint needed).
-
-    @jax.custom_vjp
-    def run_single_microbatch(lightweight_state, bsw):
-      return _single_mb_fwd(lightweight_state, bsw)[0]
-
-    def _single_mb_fwd(lightweight_state, bsw):
-      def _forward(state, weights):
-        loop_st, layer_mut = state
-        iteration = loop_st["loop_iteration"]
-        advanced_mut = _advance_rng_state(layer_mut, iteration)
-        # Insert optimization barriers on inputs to prevent XLA from
-        # fusing this computation with surrounding scan body ops.
-        # This matches nn.remat's prevent_cse=True behavior which
-        # inserts OptimizationBarrierOp, enabling XLA loop fission.
-        (loop_st, weights) = jax.lax.optimization_barrier((loop_st, weights))
-        new_loop_st, new_layer_state = self.run_one_iteration(
-            loop_st,
-            weights,
-            layers_graph,
-            layers_metrics,
-            advanced_mut,
-            positions,
-            segment_ids,
-            deterministic,
-            model_mode,
-            logical_partition_spec_stripped,
-        )
-        _, _, new_metrics, new_mut = nnx.split(
-            new_layer_state, _is_static_param, nnx.Intermediate, ...
-        )
-        result = (new_loop_st, new_mut), new_metrics
-        result = jax.lax.optimization_barrier(result)
-        return result
-
-      forward_remat = jax.remat(
-          _forward, policy=self.get_pipeline_remat_policy(),
-      )
-      output, vjp_fn = jax.vjp(forward_remat, lightweight_state, bsw)
-      (carry_out, metrics_out) = output
-      max_logging.log(
-          f"[PIPELINE-DIAG] L1 fwd: "
-          f"carry_leaves={len(jax.tree.leaves(carry_out))}, "
-          f"metrics_leaves={len(jax.tree.leaves(metrics_out))} "
-          f"(scan ys for fission)"
-      )
-      return output, vjp_fn
-
-    def _single_mb_bwd(vjp_fn, g_output):
-      d_state, d_bsw = vjp_fn(g_output)
-      return d_state, d_bsw
-
-    run_single_microbatch.defvjp(_single_mb_fwd, _single_mb_bwd)
-
-    # ---- Level 2: gradient accumulation scan ----
-    # Collect metrics as scan ys (not None) to create independent
-    # dataflow subgraphs in the while-loop body. This matches Linen's
-    # nn.scan(variable_axes={summaries:0, intermediates:0, ...}) pattern
-    # which triggers XLA memory_bound_loop_optimizer to split loops.
-
-    @jax.custom_vjp
-    def run_pipeline_microbatches(lightweight_state, bsw):
-      return _microbatches_fwd(lightweight_state, bsw)[0]
-
-    def _microbatches_fwd(lightweight_state, bsw):
-      final_state, scan_vjp_fn = jax.vjp(
-          lambda state, weights: jax.lax.scan(
-              lambda carry, _: run_single_microbatch(carry, weights),
-              state,
-              None,
-              length=num_microbatches,
-          ),
-          lightweight_state,
-          bsw,
-      )
-      final_carry, stacked_ys = final_state
-      max_logging.log(
-          f"[PIPELINE-DIAG] L2 fwd: "
-          f"carry_leaves={len(jax.tree.leaves(final_carry))}, "
-          f"stacked_ys_leaves={len(jax.tree.leaves(stacked_ys))}, "
-          f"bsw_leaves={len(jax.tree.leaves(bsw))}, "
-          f"scan_length={num_microbatches}"
-      )
-      if jax.tree.leaves(stacked_ys):
-        ys_shapes = [l.shape for l in jax.tree.leaves(stacked_ys)[:3]]
-        max_logging.log(
-            f"[PIPELINE-DIAG]   stacked_ys shapes (first 3): {ys_shapes}"
-        )
-      return (final_state, bsw), scan_vjp_fn
-
-    def _microbatches_bwd(scan_vjp_fn, g_final):
-      g_state, g_bsw = g_final
-      d_state, d_bsw = scan_vjp_fn(g_state)
-      d_bsw = jax.tree.map(
-          lambda d, g: d + g if hasattr(d, "shape") else d,
-          d_bsw,
-          g_bsw,
-      )
-      return d_state, d_bsw
-
-    run_pipeline_microbatches.defvjp(_microbatches_fwd, _microbatches_bwd)
-
-    # ---- Level 3: BSW creation + linear_transpose ----
-    #
-    # Matches Linen's create_pipeline_stage pattern:
-    #   - w_curr carried in outer scan (not created inside L3)
-    #   - Only w_next created via weight_prefetching (1 all-gather, not 2)
-    #   - Single jax.linear_transpose (reduce-scatter for w_next gradient)
-    #   - w_curr gradient flows back through scan carry naturally
-
-    @jax.custom_vjp
-    def execute_pipeline_repeat(lightweight_state, w_curr, pipeline_params):
-      return _repeat_fwd(lightweight_state, w_curr, pipeline_params)[0]
-
-    def _repeat_fwd(lightweight_state, w_curr, pipeline_params):
-      loop_st, _ = lightweight_state
-      iteration = loop_st["loop_iteration"]
-
-      w_next = self.weight_prefetching(pipeline_params, physical_partition_spec_full, iteration)
-      bsw = (w_curr, w_next)
-
-      weight_prefetching_t = jax.linear_transpose(
-          functools.partial(
-              self.weight_prefetching,
-              physical_partition_spec=physical_partition_spec_full,
-              loop_iteration=iteration,
-          ),
-          pipeline_params,
-      )
-
-      ((final_carry, _stacked_metrics), _), scan_vjp_fn = jax.vjp(
-          run_pipeline_microbatches,
-          lightweight_state,
-          bsw,
-      )
-      max_logging.log(
-          f"[PIPELINE-DIAG] L3 fwd: "
-          f"carry_leaves={len(jax.tree.leaves(final_carry))}, "
-          f"w_next_leaves={len(jax.tree.leaves(w_next))}, "
-          f"residuals=(scan_vjp_fn, weight_prefetching_t), "
-          f"prevent_cse=True (barriers for XLA fission)"
-      )
-      return (final_carry, w_next), (scan_vjp_fn, weight_prefetching_t)
-
-    def _repeat_bwd(residuals, g_output):
-      scan_vjp_fn, weight_prefetching_t = residuals
-      g_state, g_w_next = g_output
-      g_w_curr = jax.tree.map(jnp.zeros_like, g_w_next)
-      g_bsw = (g_w_curr, g_w_next)
-      # L2 vjp expects gradient for ((final_carry, stacked_metrics), bsw).
-      # Metrics are intermediates (nnx.Intermediate) — zero gradients.
-      # Create zeros matching stacked metrics shape: [num_microbatches, ...]
-      g_metrics = jax.tree.map(
-          lambda x: jnp.zeros((num_microbatches,) + x.shape, dtype=x.dtype),
-          layers_metrics,
-      )
-      d_state, d_bsw = scan_vjp_fn(((g_state, g_metrics), g_bsw))
-      d_w_curr, d_w_next = d_bsw
-      (d_pipeline_params,) = weight_prefetching_t(d_w_next)
-      return d_state, d_w_curr, d_pipeline_params
-
-    execute_pipeline_repeat.defvjp(_repeat_fwd, _repeat_bwd)
-
-    # ---- Outer scan over repeats ----
     num_repeats = self.config.num_pipeline_repeats
-
-    # Initial w_curr: zeros matching BSW structure (same as Linen's init_empty_bsw_buffers).
-    # At iteration 0, get_current_weights_from_bsw selects from w_next, not w_curr.
+    total_iterations = num_microbatches * num_repeats
     initial_w_curr = jax.tree.map(lambda x: jnp.zeros(x.shape[1:], dtype=x.dtype), layers_params)
 
-    outer_carry_init = (loop_state, layers_mutables, initial_w_curr)
-    oc_leaves = jax.tree.leaves(outer_carry_init)
-    oc_bytes = sum(getattr(l, "nbytes", 0) for l in oc_leaves if hasattr(l, "shape"))
     max_logging.log(
-        f"[PIPELINE-DIAG] === OUTER SCAN ===\n"
-        f"[PIPELINE-DIAG]   carry=(loop_state, layer_mut, w_curr), "
-        f"{len(oc_leaves)} leaves, {oc_bytes / 1e9:.3f} GB\n"
-        f"[PIPELINE-DIAG]   closure: layers_params "
-        f"({len(jax.tree.leaves(layers_params))} leaves, "
-        f"{sum(getattr(l, 'nbytes', 0) for l in jax.tree.leaves(layers_params) if hasattr(l, 'shape')) / 1e9:.3f} GB)\n"
-        f"[PIPELINE-DIAG]   scan_pipeline_iterations="
-        f"{self.config.scan_pipeline_iterations}, "
-        f"num_repeats={num_repeats}"
+        f"[PIPELINE-DIAG] === EXPLICIT FWD/BWD (deepseek pattern) ===\n"
+        f"[PIPELINE-DIAG]   num_repeats={num_repeats}, "
+        f"num_microbatches={num_microbatches}, "
+        f"total_iterations={total_iterations}, "
+        f"bubble_iterations={bubble_iterations}"
     )
 
-    def outer_body(carry, _):
-      loop_st, layer_mut, w_curr = carry
-      lightweight_state = (loop_st, layer_mut)
-      (new_loop_st, new_mut), w_next = execute_pipeline_repeat(lightweight_state, w_curr, layers_params)
-      return (new_loop_st, new_mut, w_next), None
-
-    # Outer checkpoint is intentionally SKIPPED for circular pipeline.
-    # L3 custom_vjp controls residuals (linear_transpose for reduce-scatter).
-    # Inner body_ckpt handles per-microbatch remat. Adding jax.checkpoint here
-    # is redundant and adds +12 GB from carry stacking + recompute overhead
-    # (custom_vjp residuals are opaque to checkpoint policy).
-    # Validated on TPU: without outer ckpt = 17.0 GB / 0.494s (best).
-
-    if self.config.scan_pipeline_iterations:
-      (loop_state, final_layer_mutables, final_w_curr), _ = jax.lax.scan(
-          outer_body, (loop_state, layers_mutables, initial_w_curr), None, length=num_repeats
+    def _run_iteration_pure(loop_st, layer_mut, bsw):
+      """Pure forward for one microbatch iteration."""
+      iteration = loop_st["loop_iteration"]
+      advanced_mut = _advance_rng_state(layer_mut, iteration)
+      new_loop_st, new_layer_state = self.run_one_iteration(
+          loop_st, bsw, layers_graph, layers_metrics, advanced_mut,
+          positions, segment_ids, deterministic, model_mode,
+          logical_partition_spec_stripped,
       )
-    else:
-      outer_carry = (loop_state, layers_mutables, initial_w_curr)
-      for _ in range(num_repeats):
-        outer_carry, _ = outer_body(outer_carry, None)
-      loop_state, final_layer_mutables, final_w_curr = outer_carry
+      _, _, _, new_mut = nnx.split(
+          new_layer_state, _is_static_param, nnx.Intermediate, ...
+      )
+      return new_loop_st, new_mut
+
+    @jax.custom_vjp
+    def run_all_repeats(loop_state_init, layers_mutables_init, w_curr_init, pipeline_params):
+      return _all_repeats_fwd(loop_state_init, layers_mutables_init, w_curr_init, pipeline_params)[0]
+
+    def _all_repeats_fwd(loop_state_init, layers_mutables_init, w_curr_init, pipeline_params):
+      max_logging.log("[PIPELINE-DIAG] _all_repeats_fwd: entering")
+
+      bsw_ref = [None]
+
+      def inner_body(carry, _):
+        """One microbatch iteration inside a repeat."""
+        loop_st, layer_mut = carry
+        new_loop_st, new_mut = _run_iteration_pure(loop_st, layer_mut, bsw_ref[0])
+        return (new_loop_st, new_mut), None
+
+      if self.config.set_remat_policy_on_pipeline_iterations:
+        inner_body = jax.checkpoint(
+            inner_body, policy=self.get_pipeline_remat_policy(),
+            prevent_cse=True,
+        )
+
+      def outer_body(carry, _):
+        """One repeat: prefetch weights, run microbatches."""
+        loop_st, layer_mut, w_curr = carry
+        iteration = loop_st["loop_iteration"]
+
+        w_next = self.weight_prefetching(
+            pipeline_params, physical_partition_spec_full, iteration
+        )
+        bsw_ref[0] = (w_curr, w_next)
+
+        max_logging.log(
+            f"[PIPELINE-DIAG] outer_body fwd: w_curr_leaves="
+            f"{len(jax.tree.leaves(w_curr))}, "
+            f"w_next_leaves={len(jax.tree.leaves(w_next))}"
+        )
+
+        if self.config.scan_pipeline_iterations:
+          (new_loop_st, new_mut), _ = jax.lax.scan(
+              inner_body, (loop_st, layer_mut), None,
+              length=num_microbatches,
+          )
+        else:
+          inner_carry = (loop_st, layer_mut)
+          for _ in range(num_microbatches):
+            inner_carry, _ = inner_body(inner_carry, None)
+          new_loop_st, new_mut = inner_carry
+
+        return (new_loop_st, new_mut, w_next), None
+
+      max_logging.log(
+          f"[PIPELINE-DIAG] outer scan fwd: "
+          f"scan_pipeline_iterations={self.config.scan_pipeline_iterations}, "
+          f"length={num_repeats}"
+      )
+
+      if self.config.scan_pipeline_iterations:
+        (final_loop_st, final_mut, final_w_curr), _ = jax.lax.scan(
+            outer_body,
+            (loop_state_init, layers_mutables_init, w_curr_init),
+            None, length=num_repeats,
+        )
+      else:
+        carry = (loop_state_init, layers_mutables_init, w_curr_init)
+        for _ in range(num_repeats):
+          carry, _ = outer_body(carry, None)
+        final_loop_st, final_mut, final_w_curr = carry
+
+      max_logging.log("[PIPELINE-DIAG] _all_repeats_fwd: done")
+      return (
+          (final_loop_st, final_mut, final_w_curr),
+          (loop_state_init, layers_mutables_init, w_curr_init, pipeline_params),
+      )
+
+    def _all_repeats_bwd(residuals, g_output):
+      """Backward: recompute forward per repeat via scan, accumulate grads.
+
+      Following deepseek_batchsplit.py pattern: uses jax.lax.scan(reverse=True)
+      for the outer repeat loop backward, with per-repeat recomputation via
+      jax.remat + jax.vjp.
+      """
+      max_logging.log("[PIPELINE-DIAG] _all_repeats_bwd: entering")
+      saved_loop_st, saved_mut, saved_w_curr, saved_params = residuals
+      g_loop_st, g_mut, g_w_curr = g_output
+
+      bsw_ref = [None]
+
+      def inner_body_remat(carry, _):
+        loop_st, layer_mut = carry
+        new_loop_st, new_mut = _run_iteration_pure(
+            loop_st, layer_mut, bsw_ref[0]
+        )
+        return (new_loop_st, new_mut), None
+
+      # First: recompute forward to get per-repeat intermediate states.
+      # We scan forward saving (loop_st, layer_mut, w_curr) per repeat.
+      def fwd_outer_body(carry, _):
+        loop_st, layer_mut, w_curr = carry
+        iteration = loop_st["loop_iteration"]
+        w_next = self.weight_prefetching(
+            saved_params, physical_partition_spec_full, iteration
+        )
+        bsw_ref[0] = (w_curr, w_next)
+        if self.config.scan_pipeline_iterations:
+          (new_loop_st, new_mut), _ = jax.lax.scan(
+              inner_body_remat, (loop_st, layer_mut), None,
+              length=num_microbatches,
+          )
+        else:
+          inner = (loop_st, layer_mut)
+          for _ in range(num_microbatches):
+            inner, _ = inner_body_remat(inner, None)
+          new_loop_st, new_mut = inner
+        return (new_loop_st, new_mut, w_next), (loop_st, layer_mut, w_curr)
+
+      max_logging.log(
+          "[PIPELINE-DIAG] bwd: recomputing forward to save per-repeat states"
+      )
+      _, per_repeat_states = jax.lax.scan(
+          fwd_outer_body,
+          (saved_loop_st, saved_mut, saved_w_curr),
+          None, length=num_repeats,
+      )
+      # per_repeat_states: (loop_st, layer_mut, w_curr) stacked [num_repeats, ...]
+
+      # Backward scan over repeats in reverse.
+      def bwd_outer_body(carry, per_repeat_xs):
+        g_loop_st_c, g_mut_c, g_w_curr_c, d_params_c = carry
+        loop_st_r, mut_r, w_curr_r = per_repeat_xs
+        iteration_r = loop_st_r["loop_iteration"]
+
+        w_next_r = self.weight_prefetching(
+            saved_params, physical_partition_spec_full, iteration_r
+        )
+        bsw_r = (w_curr_r, w_next_r)
+
+        weight_prefetching_t = jax.linear_transpose(
+            functools.partial(
+                self.weight_prefetching,
+                physical_partition_spec=physical_partition_spec_full,
+                loop_iteration=iteration_r,
+            ),
+            saved_params,
+        )
+
+        # Recompute inner scan + vjp for this repeat
+        def _inner_fwd(state, bsw):
+          bsw_ref[0] = bsw
+          if self.config.scan_pipeline_iterations:
+            result, _ = jax.lax.scan(
+                inner_body_remat, state, None,
+                length=num_microbatches,
+            )
+          else:
+            c = state
+            for _ in range(num_microbatches):
+              c, _ = inner_body_remat(c, None)
+            result = c
+          return result
+
+        _inner_fwd_remat = jax.remat(
+            _inner_fwd, policy=self.get_pipeline_remat_policy()
+        )
+        _, inner_vjp = jax.vjp(
+            _inner_fwd_remat, (loop_st_r, mut_r), bsw_r
+        )
+
+        # Backward through inner scan
+        d_state, d_bsw = inner_vjp((g_loop_st_c, g_mut_c))
+        d_w_curr_inner, d_w_next = d_bsw
+
+        # Reduce-scatter w_next gradient → param gradient
+        (d_params_repeat,) = weight_prefetching_t(d_w_next)
+        new_d_params = jax.tree.map(
+            lambda a, b: a + b, d_params_c, d_params_repeat
+        )
+
+        g_loop_st_new, g_mut_new = d_state
+        return (g_loop_st_new, g_mut_new, d_w_curr_inner, new_d_params), None
+
+      max_logging.log("[PIPELINE-DIAG] bwd: reverse scan over repeats")
+      initial_d_params = jax.tree.map(jnp.zeros_like, saved_params)
+      (g_loop_st_final, g_mut_final, g_w_curr_final, d_params_final), _ = jax.lax.scan(
+          bwd_outer_body,
+          (g_loop_st, g_mut, g_w_curr, initial_d_params),
+          per_repeat_states,
+          reverse=True,
+      )
+
+      max_logging.log("[PIPELINE-DIAG] _all_repeats_bwd: done")
+      return g_loop_st_final, g_mut_final, g_w_curr_final, d_params_final
+
+    run_all_repeats.defvjp(_all_repeats_fwd, _all_repeats_bwd)
+
+    # ---- Execute ----
+    final_loop_st, final_mut, final_w_curr = run_all_repeats(
+        loop_state, layers_mutables, initial_w_curr, layers_params
+    )
+    loop_state = final_loop_st
+    final_layer_mutables = final_mut
+
+    max_logging.log(
+        f"[PIPELINE-DIAG] post-repeats: "
+        f"loop_state keys={list(loop_state.keys())}, "
+        f"final_mut_leaves={len(jax.tree.leaves(final_layer_mutables))}"
+    )
 
     # ---- Bubble iterations (pipeline drain) ----
-    # Bubbles use simple inner_body (no custom_vjp needed — few iterations,
-    # not performance-critical, and BSW is single-buffer for bubbles).
-    bsw_ref = [None]
+    bsw_ref_bubble = [None]
 
     def bubble_inner_body(carry, _):
       current_loop_state, current_layer_mutables = carry
-      iteration = current_loop_state["loop_iteration"]
-      advanced_mutables = _advance_rng_state(current_layer_mutables, iteration)
-      new_loop_state, new_layer_state = self.run_one_iteration(
-          current_loop_state,
-          bsw_ref[0],
-          layers_graph,
-          layers_metrics,
-          advanced_mutables,
-          positions,
-          segment_ids,
-          deterministic,
-          model_mode,
-          logical_partition_spec_stripped,
+      new_loop_st, new_mut = _run_iteration_pure(
+          current_loop_state, current_layer_mutables, bsw_ref_bubble[0]
       )
-      _, _, _, new_layer_mutables = nnx.split(new_layer_state, _is_static_param, nnx.Intermediate, ...)
-      return (new_loop_state, new_layer_mutables), None
+      return (new_loop_st, new_mut), None
 
     if self.config.set_remat_policy_on_pipeline_iterations:
       bubble_inner_body = jax.checkpoint(
           bubble_inner_body,
           policy=self.get_pipeline_remat_policy(),
-          prevent_cse=not self.config.scan_pipeline_iterations,
+          prevent_cse=True,
       )
 
     if bubble_iterations > 0:
-      bsw_ref[0] = (final_w_curr, final_w_curr)
+      bsw_ref_bubble[0] = (final_w_curr, final_w_curr)
+      max_logging.log(
+          f"[PIPELINE-DIAG] bubble: iterations={bubble_iterations}, "
+          f"bsw=(final_w_curr, final_w_curr)"
+      )
       if self.config.scan_pipeline_iterations:
         (loop_state, final_layer_mutables), _ = jax.lax.scan(
-            bubble_inner_body, (loop_state, final_layer_mutables), None, length=bubble_iterations
+            bubble_inner_body, (loop_state, final_layer_mutables),
+            None, length=bubble_iterations,
         )
       else:
         bubble_carry = (loop_state, final_layer_mutables)
@@ -1775,12 +1726,11 @@ class NNXCircularPipeline(NNXPipelineBase):
           bubble_carry, _ = bubble_inner_body(bubble_carry, None)
         loop_state, final_layer_mutables = bubble_carry
 
-    # Metrics are not propagated through custom_vjp (they're intermediates,
-    # no gradients needed). Use initial layers_metrics for state merge.
     final_layer_state = nnx.State.merge(layers_params, layers_metrics, final_layer_mutables)
     nnx.update(self.layers, final_layer_state)
 
     final_output = self.realign_output_microbatches(loop_state["state_io"])
+    max_logging.log(f"[PIPELINE-DIAG] final output: {final_output.shape}")
     return jnp.reshape(
         final_output,
         (self.config.micro_batch_size_to_train_on, self.config.max_target_length, self.config.emb_dim),
