@@ -358,6 +358,8 @@ def _fix_for_qwix_quantization(module: Module):
       if not linen.module._context.module_stack:  # pylint: disable=W0212
         return call_fn(*args, **kwargs)
       nn_module = linen.module._context.module_stack[-1]  # pylint: disable=W0212
+      if nn_module is None or nn_module.scope is None:
+        return call_fn(*args, **kwargs)
       old_path = nn_module.path
       # We modify the path of the current nn module in place. This is a little
       # bit hacky but should be good as a temporary solution.
