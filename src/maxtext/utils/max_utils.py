@@ -53,6 +53,7 @@ HYBRID_RING_32X8 = "hybrid_ring_32x8"
 
 
 elastic_manager: manager.Manager | None = None
+_pending_reinit_recorder = None
 
 
 # pylint: disable=too-many-positional-arguments
