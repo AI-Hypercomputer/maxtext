@@ -1550,39 +1550,26 @@ class NNXCircularPipeline(NNXPipelineBase):
       )
 
     def outer_body(carry, _):
-      current_loop_state, current_layer_mutables = carry
+      current_loop_state, current_layer_mutables, w_curr = carry
       iteration = current_loop_state["loop_iteration"]
 
-      # Build a proper dual-buffer BSW so that get_current_weights_from_bsw
-      # can select the correct repeat for each stage at every inner iteration.
-      #
-      # At the start of outer repeat R, stage 0 begins repeat R while
-      # trailing stages (stage 1, ...) may still be finishing repeat R-1.
-      # - nxt_bsw: weights gathered for iteration+1 (where all stages agree
-      #   on the *new* repeat). This is the "current" repeat's weights.
-      # - cur_bsw: weights gathered for the current iteration (where
-      #   trailing stages are on the previous repeat). This is the
-      #   "previous" repeat's weights for trailing stages.
-      #
-      # get_current_weights_from_bsw selects nxt_bsw (bsw[1]) for stages
-      # whose repeat_id == stage0_repeat_id, and cur_bsw (bsw[0]) otherwise.
-      # This matches the Linen pipeline's (w_curr, w_next) dual-buffer.
-      # Dual-buffer BSW: trailing stages may be on a different repeat
-      # than stage 0 at repeat boundaries. get_current_weights_from_bsw
-      # selects bsw[1] for stages on the current repeat (repeat_id ==
-      # stage0_repeat_id), bsw[0] for trailing stages.
-      cur_repeat_weights = self.from_all_variables_to_repeat_weights(layers_params, iteration)
-      cur_bsw = self.from_repeat_weights_to_bsw(cur_repeat_weights, physical_partition_spec_full)
-
-      nxt_repeat_weights = self.from_all_variables_to_repeat_weights(layers_params, iteration + 1)
-      nxt_bsw = self.from_repeat_weights_to_bsw(nxt_repeat_weights, physical_partition_spec_full)
-
-      bsw_ref[0] = (cur_bsw, nxt_bsw)
-      bsw_ref[0] = jax.ad_checkpoint.checkpoint_name(bsw_ref[0], "bsw_weights")
+      # Single all-gather per repeat (matching Linen's weight_prefetching):
+      # w_curr comes from previous repeat's w_next (carried in scan).
+      # w_next is freshly gathered for iteration+1.
+      # BSW = (w_curr, w_next): get_current_weights_from_bsw selects
+      # w_next for stages on current repeat, w_curr for trailing stages.
+      w_next = self.weight_prefetching(
+          layers_params, physical_partition_spec_full, iteration
+      )
+      bsw_ref[0] = (w_curr, w_next)
+      bsw_ref[0] = jax.ad_checkpoint.checkpoint_name(
+          bsw_ref[0], "bsw_weights"
+      )
 
       if self.config.scan_pipeline_iterations:
         (new_loop_state, new_layer_mutables), inner_metrics = jax.lax.scan(
-            inner_body, (current_loop_state, current_layer_mutables), None, length=num_microbatches
+            inner_body, (current_loop_state, current_layer_mutables),
+            None, length=num_microbatches,
         )
       else:
         inner_carry = (current_loop_state, current_layer_mutables)
@@ -1595,15 +1582,20 @@ class NNXCircularPipeline(NNXPipelineBase):
             jax.tree.map(lambda *xs: jnp.stack(xs), *inner_metrics_list)
             if inner_metrics_list else layers_metrics
         )
-      return (new_loop_state, new_layer_mutables), inner_metrics
+      return (new_loop_state, new_layer_mutables, w_next), inner_metrics
 
     num_repeats = self.config.num_pipeline_repeats
 
-    max_logging.log("[PIPELINE-DIAG] === OUTER SCAN (0506 nested architecture) ===")
+    # w_curr initialized to zeros — at iteration 0,
+    # get_current_weights_from_bsw selects w_next for stage 0.
+    initial_w_curr = jax.tree.map(
+        lambda x: jnp.zeros(x.shape[1:], dtype=x.dtype), layers_params
+    )
+
+    max_logging.log("[PIPELINE-DIAG] === OUTER SCAN (0506 + w_curr carry) ===")
     max_logging.log(
-        f"[PIPELINE-DIAG] carry = (loop_state, layer_mutables), "
-        f"scan_pipeline_iterations={self.config.scan_pipeline_iterations}, "
-        f"scan_pipeline_repeats={self.config.scan_pipeline_repeats}"
+        f"[PIPELINE-DIAG] carry = (loop_state, layer_mutables, w_curr), "
+        f"scan_pipeline_iterations={self.config.scan_pipeline_iterations}"
     )
     _log_scan_carry("loop_state", loop_state, prefix="  ")
     _log_pytree_summary("layers_mutables (in carry)", layers_mutables, prefix="  ")
@@ -1617,8 +1609,8 @@ class NNXCircularPipeline(NNXPipelineBase):
       max_logging.log(
           f"[PIPELINE-DIAG] outer scan: jax.lax.scan(length={num_repeats})"
       )
-      (loop_state, final_layer_mutables), repeat_metrics = jax.lax.scan(
-          outer_body, (loop_state, layers_mutables), None,
+      (loop_state, final_layer_mutables, final_w_curr), repeat_metrics = jax.lax.scan(
+          outer_body, (loop_state, layers_mutables, initial_w_curr), None,
           length=num_repeats,
       )
       repeat_metrics = jax.tree.map(
@@ -1626,26 +1618,23 @@ class NNXCircularPipeline(NNXPipelineBase):
           repeat_metrics,
       )
     else:
-      outer_carry = (loop_state, layers_mutables)
+      outer_carry = (loop_state, layers_mutables, initial_w_curr)
       repeat_metrics_list = []
       for _ in range(num_repeats):
         outer_carry, rep_metrics = outer_body(outer_carry, None)
         repeat_metrics_list.append(rep_metrics)
-      loop_state, final_layer_mutables = outer_carry
+      loop_state, final_layer_mutables, final_w_curr = outer_carry
       repeat_metrics = (
           jax.tree.map(lambda *xs: jnp.concatenate(xs, axis=0), *repeat_metrics_list)
           if repeat_metrics_list else layers_metrics
       )
 
     # ---- Bubble iterations (pipeline drain) ----
+    # Use final_w_curr from last repeat as both BSW slots (all stages
+    # on same repeat during drain).
     if bubble_iterations > 0:
+      bsw_ref[0] = (final_w_curr, final_w_curr)
       if self.config.scan_pipeline_iterations:
-        bubble_iter = loop_state["loop_iteration"]
-        bubble_cur = self.from_all_variables_to_repeat_weights(layers_params, bubble_iter)
-        bubble_cur_bsw = self.from_repeat_weights_to_bsw(bubble_cur, physical_partition_spec_full)
-        bubble_nxt = self.from_all_variables_to_repeat_weights(layers_params, bubble_iter + 1)
-        bubble_nxt_bsw = self.from_repeat_weights_to_bsw(bubble_nxt, physical_partition_spec_full)
-        bsw_ref[0] = (bubble_cur_bsw, bubble_nxt_bsw)
         (loop_state, final_layer_mutables), bubble_metrics = jax.lax.scan(
             inner_body, (loop_state, final_layer_mutables), None, length=bubble_iterations
         )
