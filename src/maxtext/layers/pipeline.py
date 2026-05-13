@@ -1535,6 +1535,11 @@ class NNXCircularPipeline(NNXPipelineBase):
         loop_st, layer_mut = state
         iteration = loop_st["loop_iteration"]
         advanced_mut = _advance_rng_state(layer_mut, iteration)
+        # Insert optimization barriers on inputs to prevent XLA from
+        # fusing this computation with surrounding scan body ops.
+        # This matches nn.remat's prevent_cse=True behavior which
+        # inserts OptimizationBarrierOp, enabling XLA loop fission.
+        (loop_st, weights) = jax.lax.optimization_barrier((loop_st, weights))
         new_loop_st, new_layer_state = self.run_one_iteration(
             loop_st,
             weights,
@@ -1550,11 +1555,12 @@ class NNXCircularPipeline(NNXPipelineBase):
         _, _, new_metrics, new_mut = nnx.split(
             new_layer_state, _is_static_param, nnx.Intermediate, ...
         )
-        return (new_loop_st, new_mut), new_metrics
+        result = (new_loop_st, new_mut), new_metrics
+        result = jax.lax.optimization_barrier(result)
+        return result
 
       forward_remat = jax.remat(
           _forward, policy=self.get_pipeline_remat_policy(),
-          prevent_cse=True,
       )
       output, vjp_fn = jax.vjp(forward_remat, lightweight_state, bsw)
       (carry_out, metrics_out) = output
