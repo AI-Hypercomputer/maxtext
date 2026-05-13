@@ -39,6 +39,52 @@ from maxtext.utils.sharding import (
     logical_to_mesh,
 )
 from maxtext.utils import pipeline_utils
+from maxtext.utils import max_logging
+
+
+def _log_pytree_summary(name, tree, prefix=""):
+  """Log shape/dtype summary of a pytree for memory diagnostics."""
+  leaves = jax.tree.leaves(tree)
+  num_leaves = len(leaves)
+  total_bytes = sum(
+      getattr(l, "nbytes", 0) if hasattr(l, "shape") else 0
+      for l in leaves
+  )
+  shapes = [
+      f"{l.shape}/{l.dtype}" for l in leaves[:5] if hasattr(l, "shape")
+  ]
+  extra = f" ... +{num_leaves - 5} more" if num_leaves > 5 else ""
+  max_logging.log(
+      f"[PIPELINE-DIAG] {prefix}{name}: "
+      f"{num_leaves} leaves, {total_bytes / 1e9:.4f} GB, "
+      f"first5={shapes}{extra}"
+  )
+
+
+def _log_scan_carry(name, carry, prefix=""):
+  """Log scan carry structure for comparison."""
+  if isinstance(carry, tuple):
+    max_logging.log(
+        f"[PIPELINE-DIAG] {prefix}{name}: "
+        f"tuple of {len(carry)} elements"
+    )
+    for i, elem in enumerate(carry):
+      _log_pytree_summary(
+          f"{name}[{i}]", elem, prefix=prefix + "  "
+      )
+  elif isinstance(carry, dict):
+    max_logging.log(
+        f"[PIPELINE-DIAG] {prefix}{name}: "
+        f"dict with keys={list(carry.keys())}"
+    )
+    for k, v in carry.items():
+      if hasattr(v, "shape"):
+        max_logging.log(
+            f"[PIPELINE-DIAG] {prefix}  "
+            f"{name}[{k}]: {v.shape}/{v.dtype}"
+        )
+  else:
+    _log_pytree_summary(name, carry, prefix=prefix)
 
 
 def _is_static_param(path, v):
@@ -110,6 +156,26 @@ class NNXPipelineBase(nnx.Module):
     self.pipeline_microbatch_size = self.config.micro_batch_size_to_train_on // self.config.num_pipeline_microbatches
     self.microbatches_per_stage = self.config.num_pipeline_microbatches // self.num_stages
     self.use_circ_storage = self.need_circ_storage()
+    max_logging.log(
+        f"[PIPELINE-DIAG] setup: class={self.__class__.__name__}, "
+        f"num_stages={self.num_stages}, "
+        f"microbatches_per_stage={self.microbatches_per_stage}, "
+        f"forwarding_delay={self.forwarding_delay}, "
+        f"use_circ_storage={self.use_circ_storage}, "
+        f"pipeline_microbatch_size={self.pipeline_microbatch_size}, "
+        f"scan_pipeline_iterations="
+        f"{self.config.scan_pipeline_iterations}, "
+        f"scan_pipeline_repeats="
+        f"{self.config.scan_pipeline_repeats}, "
+        f"set_remat_policy_on_pipeline_iterations="
+        f"{self.config.set_remat_policy_on_pipeline_iterations}, "
+        f"num_pipeline_repeats="
+        f"{self.config.num_pipeline_repeats}, "
+        f"num_pipeline_microbatches="
+        f"{self.config.num_pipeline_microbatches}, "
+        f"pipeline_fsdp_ag_per_repeat="
+        f"{self.config.pipeline_fsdp_ag_per_repeat}"
+    )
 
     self.batch_axis_name = "activation_batch"
     self.seq_len_axis_name = "activation_length"
@@ -332,7 +398,7 @@ class NNXPipelineBase(nnx.Module):
       circ_storage = None
       circ_storage_mover = None
 
-    return {
+    init_loop_state = {
         "state_io": state_io,
         "shift": shift,
         "circ_storage": circ_storage,
@@ -340,6 +406,14 @@ class NNXPipelineBase(nnx.Module):
         "loop_iteration": 0,
         "prev_outputs": prev_outputs,
     }
+    max_logging.log(
+        f"[PIPELINE-DIAG] init_states: "
+        f"state_io={state_io.shape}, shift={shift.shape}"
+    )
+    _log_pytree_summary(
+        "init_loop_state", init_loop_state, prefix="  "
+    )
+    return init_loop_state
 
   def shard_dim_by_stages(self, x, dim: int, physical_partition_spec: P | None, is_stage_weight: bool = False):
     """Shards x using the provided partition_spec, but adds the "stage" mesh axis to the existing sharding at
@@ -604,9 +678,29 @@ class NNXPipelineBase(nnx.Module):
     return jax.tree.map(get_spec, state, is_leaf=lambda x: isinstance(x, nnx.Variable))
 
   def get_main_vmap_func_for_iterations(self):
-    def func_to_vmap(graph, state, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode):
+    max_logging.log(
+        "[PIPELINE-DIAG] get_main_vmap_func (NNX): "
+        "nnx.vmap returns (out, nnx.state(module)) = "
+        "fwd output + ALL state"
+    )
+
+    def func_to_vmap(
+        graph,
+        state,
+        stages_inputs,
+        stages_segment_ids,
+        stages_positions,
+        deterministic,
+        model_mode,
+    ):
       module = nnx.merge(graph, state)
-      out = module(stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
+      out = module(
+          stages_inputs,
+          stages_segment_ids,
+          stages_positions,
+          deterministic,
+          model_mode,
+      )
       return out, nnx.state(module)
 
     return nnx.vmap(
@@ -1023,18 +1117,29 @@ class NNXCircularPipeline(NNXPipelineBase):
   """
 
   def get_main_vmap_func_for_iterations(self):
-    """Override: return ONLY forward output from vmap.
+    """Override: return ONLY forward output from vmap."""
+    max_logging.log(
+        "[PIPELINE-DIAG] get_main_vmap_func (NNX Circular): "
+        "returns ONLY fwd output (matching Linen behavior)"
+    )
 
-    Base class returns (out, nnx.state(module)) = ALL state including params.
-    For circular pipeline, params are handled by AD through BSW, metrics are
-    write-only (nnx.Intermediate), and RNG is derived from closure. Returning
-    full state adds ~960 output arrays to the jaxpr per vmap call. Linen's
-    body_instance.apply(weights) returns only the forward output.
-    """
-
-    def func_to_vmap(graph, state, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode):
+    def func_to_vmap(
+        graph,
+        state,
+        stages_inputs,
+        stages_segment_ids,
+        stages_positions,
+        deterministic,
+        model_mode,
+    ):
       module = nnx.merge(graph, state)
-      out = module(stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
+      out = module(
+          stages_inputs,
+          stages_segment_ids,
+          stages_positions,
+          deterministic,
+          model_mode,
+      )
       return out
 
     return nnx.vmap(
@@ -1339,7 +1444,23 @@ class NNXCircularPipeline(NNXPipelineBase):
       stage_metrics = jax.tree.map(jnp.zeros_like, layers_metrics)
 
     # 3. Merge into full state for forward pass
-    stage_weights_state = nnx.State.merge(stage_params, stage_metrics, stage_mutables)
+    stage_weights_state = nnx.State.merge(
+        stage_params, stage_metrics, stage_mutables
+    )
+
+    max_logging.log(
+        "[PIPELINE-DIAG] NNXCircularPipeline.run_one_iteration: "
+        f"stages_inputs={stages_inputs.shape}"
+    )
+    _log_pytree_summary(
+        "stage_params (from BSW)", stage_params, prefix="  "
+    )
+    _log_pytree_summary(
+        "stage_metrics (zeros)", stage_metrics, prefix="  "
+    )
+    _log_pytree_summary(
+        "stage_mutables", stage_mutables, prefix="  "
+    )
 
     stages_output = vmap_func(
         pipeline_weights_graph,
@@ -1354,8 +1475,10 @@ class NNXCircularPipeline(NNXPipelineBase):
     if self.config.scan_layers:
       stages_output = stages_output[0]
 
-    # No scatter-update: metrics are write-only, mutables derived from closure.
-    # Linen never scatter-updates non-params — nn.scan handles it via variable_axes.
+    max_logging.log(
+        f"[PIPELINE-DIAG]   stages_output shape={stages_output.shape}"
+    )
+
     new_state = self.get_new_loop_state(stages_output, loop_state)
     return new_state
 
@@ -1428,7 +1551,26 @@ class NNXCircularPipeline(NNXPipelineBase):
 
     layers_state = jax.tree.map(unbox_val, layers_state, is_leaf=is_lp)
 
-    _, layers_params, layers_metrics, layers_mutables = nnx.split(layers_state, _is_static_param, nnx.Intermediate, ...)
+    _, layers_params, layers_metrics, layers_mutables = nnx.split(
+        layers_state, _is_static_param, nnx.Intermediate, ...
+    )
+    max_logging.log(
+        f"[PIPELINE-DIAG] NNXCircularPipeline.__call__: "
+        f"inputs={inputs.shape}, "
+        f"bubble_iterations={bubble_iterations}, "
+        f"num_repeats={self.config.num_pipeline_repeats}, "
+        f"num_microbatches="
+        f"{self.config.num_pipeline_microbatches}"
+    )
+    _log_pytree_summary(
+        "layers_params", layers_params, prefix="  "
+    )
+    _log_pytree_summary(
+        "layers_metrics", layers_metrics, prefix="  "
+    )
+    _log_pytree_summary(
+        "layers_mutables", layers_mutables, prefix="  "
+    )
 
     # layers_mutables catch-all should contain ONLY RngState variables (RngKey/RngCount).
     # If non_trainable state (e.g. BatchStat) appears here,
@@ -1504,8 +1646,18 @@ class NNXCircularPipeline(NNXPipelineBase):
         )
         return new_loop_st
 
-      forward_remat = jax.remat(_forward, policy=self.get_pipeline_remat_policy())
-      output, vjp_fn = jax.vjp(forward_remat, lightweight_state, bsw)
+      forward_remat = jax.remat(
+          _forward, policy=self.get_pipeline_remat_policy()
+      )
+      output, vjp_fn = jax.vjp(
+          forward_remat, lightweight_state, bsw
+      )
+      max_logging.log(
+          "[PIPELINE-DIAG] L1 fwd (NNX): residual=vjp_fn, "
+          f"state_leaves="
+          f"{len(jax.tree.leaves(lightweight_state))}, "
+          f"bsw_leaves={len(jax.tree.leaves(bsw))}"
+      )
       return output, vjp_fn
 
     def _single_mb_bwd(vjp_fn, g_output):
@@ -1533,6 +1685,14 @@ class NNXCircularPipeline(NNXPipelineBase):
           )[0],
           lightweight_state,
           bsw,
+      )
+      max_logging.log(
+          "[PIPELINE-DIAG] L2 fwd (NNX): "
+          f"residual=scan_vjp_fn over "
+          f"{num_microbatches}-step scan, "
+          f"state_leaves="
+          f"{len(jax.tree.leaves(lightweight_state))}, "
+          f"bsw_leaves={len(jax.tree.leaves(bsw))}"
       )
       return (final_state, bsw), scan_vjp_fn
 
@@ -1583,6 +1743,14 @@ class NNXCircularPipeline(NNXPipelineBase):
           loop_st,
           bsw,
       )
+      max_logging.log(
+          "[PIPELINE-DIAG] L3 fwd (NNX): "
+          f"residuals=(scan_vjp_fn, weight_prefetching_t), "
+          f"w_curr_leaves={len(jax.tree.leaves(w_curr))}, "
+          f"pipeline_params_leaves="
+          f"{len(jax.tree.leaves(pipeline_params))}, "
+          f"w_next_leaves={len(jax.tree.leaves(w_next))}"
+      )
       return (final_loop_st, w_next), (scan_vjp_fn, weight_prefetching_t)
 
     def _repeat_bwd(residuals, g_output):
@@ -1602,21 +1770,93 @@ class NNXCircularPipeline(NNXPipelineBase):
 
     # Initial w_curr: zeros matching BSW structure (same as Linen's init_empty_bsw_buffers).
     # At iteration 0, get_current_weights_from_bsw selects from w_next, not w_curr.
-    initial_w_curr = jax.tree.map(lambda x: jnp.zeros(x.shape[1:], dtype=x.dtype), layers_params)
+    initial_w_curr = jax.tree.map(
+        lambda x: jnp.zeros(x.shape[1:], dtype=x.dtype),
+        layers_params,
+    )
+    max_logging.log(
+        "[PIPELINE-DIAG] === OUTER SCAN CARRY STRUCTURE (NNX) ==="
+    )
+    max_logging.log(
+        "[PIPELINE-DIAG] carry = (loop_state, w_curr)"
+    )
+    max_logging.log(
+        "[PIPELINE-DIAG] carry has 2 elements"
+    )
+    _log_scan_carry("loop_state", loop_state, prefix="  ")
+    _log_pytree_summary(
+        "w_curr (initial zeros)", initial_w_curr, prefix="  "
+    )
+    max_logging.log(
+        "[PIPELINE-DIAG] NNX closure-captured (NOT in carry): "
+        "layers_params, layers_mutables, layers_metrics, "
+        "layers_graph"
+    )
+    _log_pytree_summary(
+        "layers_params (closure)", layers_params, prefix="  "
+    )
+    _log_pytree_summary(
+        "layers_mutables (closure)", layers_mutables, prefix="  "
+    )
+    max_logging.log(
+        "[PIPELINE-DIAG] NNX custom_vjp: L1=per-MB remat+vjp, "
+        "L2=gradient accumulation scan, "
+        "L3=BSW+linear_transpose, "
+        "scan_vjp_fn+weight_prefetching_t as residuals"
+    )
+    max_logging.log(
+        "[PIPELINE-DIAG] NNX uses jax.lax.scan (no nn.scan), "
+        "no variable_broadcast, no split_rngs"
+    )
+    # C-1 gap: total carry leaf count
+    initial_carry = (loop_state, initial_w_curr)
+    total_carry_leaves = len(jax.tree.leaves(initial_carry))
+    total_carry_bytes = sum(
+        getattr(l, "nbytes", 0)
+        for l in jax.tree.leaves(initial_carry)
+        if hasattr(l, "shape")
+    )
+    max_logging.log(
+        f"[PIPELINE-DIAG] TOTAL carry leaves: "
+        f"{total_carry_leaves}, "
+        f"TOTAL carry GB: {total_carry_bytes / 1e9:.4f}"
+    )
+    # C-1 gap: total closure-captured leaf count
+    closure_items = (
+        layers_params, layers_mutables, layers_metrics
+    )
+    total_closure_leaves = len(jax.tree.leaves(closure_items))
+    total_closure_bytes = sum(
+        getattr(l, "nbytes", 0)
+        for l in jax.tree.leaves(closure_items)
+        if hasattr(l, "shape")
+    )
+    max_logging.log(
+        f"[PIPELINE-DIAG] TOTAL closure leaves: "
+        f"{total_closure_leaves}, "
+        f"TOTAL closure GB: {total_closure_bytes / 1e9:.4f}"
+    )
+    # C-3 gap: scatter-update flag
+    max_logging.log(
+        "[PIPELINE-DIAG] scatter_update_non_params: False "
+        "(metrics zeroed, mutables from closure)"
+    )
 
     def outer_body(carry, _):
       loop_st, w_curr = carry
-      # layers_mutables NOT in carry — derived from closure via _advance_rng_state
-      # inside L1 _forward. Removes RNG arrays from scan carry → simpler jaxpr.
-      new_loop_st, w_next = execute_pipeline_repeat(loop_st, w_curr, layers_params)
+      new_loop_st, w_next = execute_pipeline_repeat(
+          loop_st, w_curr, layers_params
+      )
       return (new_loop_st, w_next), None
 
-    # Outer checkpoint trade-off depends on sequence length:
-    #   - Long sequences (1024+): without outer ckpt = 17 GB (L1/L2 remat sufficient)
-    #   - Short sequences (32): without outer ckpt = 32.5 GB (VJP closures dominate)
-    # set_remat_policy_on_pipeline_iterations controls this via config.
+    # C-3 gap: checkpoint policy at use site
     if self.config.set_remat_policy_on_pipeline_iterations:
-      outer_body = jax.checkpoint(outer_body, policy=self.get_pipeline_remat_policy())
+      policy = self.get_pipeline_remat_policy()
+      max_logging.log(
+          f"[PIPELINE-DIAG] outer_body: "
+          f"jax.checkpoint applied, policy={policy}"
+      )
+      outer_body = jax.checkpoint(outer_body, policy=policy)
 
     if self.config.scan_pipeline_iterations:
       (loop_state, final_w_curr), _ = jax.lax.scan(outer_body, (loop_state, initial_w_curr), None, length=num_repeats)
@@ -1714,5 +1954,18 @@ def create_pipeline(
     remat_policy: Optional rematerialization policy.
   """
   if config.pipeline_fsdp_ag_per_repeat:
-    return CircularPipeline(config=config, stage_factory=layers, mesh=mesh, remat_policy=remat_policy)
-  return Pipeline(config=config, stage_factory=layers, mesh=mesh, remat_policy=remat_policy)
+    cls = CircularPipeline
+    nnx_cls = NNXCircularPipeline
+  else:
+    cls = Pipeline
+    nnx_cls = NNXPipeline
+  max_logging.log(
+      f"[PIPELINE-DIAG] create_pipeline: "
+      f"wrapper={cls.__name__} "
+      f"(to_linen_class({nnx_cls.__name__})), "
+      f"stage_factory={type(layers).__name__}"
+  )
+  return cls(
+      config=config, stage_factory=layers,
+      mesh=mesh, remat_policy=remat_policy,
+  )

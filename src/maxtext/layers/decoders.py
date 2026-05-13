@@ -311,6 +311,17 @@ class Decoder(nn.Module):
     if self.config.using_pipeline_parallelism:
       remat_policy = self.get_remat_policy()
       nnx_blocks = self._get_nnx_decoder_block_classes()
+      max_logging.log(
+          f"[DECODER-DIAG] setup: creating NNX pipeline "
+          f"(to_linen_class wrapper), "
+          f"remat_policy={self.config.remat_policy}, "
+          f"pipeline_parallel_layers="
+          f"{self.config.pipeline_parallel_layers}, "
+          f"num_decoder_layers="
+          f"{self.config.num_decoder_layers}, "
+          f"scan_layers={self.config.scan_layers}, "
+          f"stage_pattern=stage_factory(rngs) closure"
+      )
 
       def stage_factory(rngs):
         return self._build_nnx_pipeline_stage(nnx_blocks, rngs)
@@ -871,6 +882,14 @@ class Decoder(nn.Module):
           self.pipeline_module.get_weight_sharding(y, decoder_segment_ids, decoder_positions, deterministic, model_mode)
           if cfg.pipeline_fsdp_ag_once or cfg.pipeline_fsdp_ag_per_repeat
           else None
+      )
+      max_logging.log(
+          f"[DECODER-DIAG] __call__: invoking pipeline, "
+          f"input y={y.shape}/{y.dtype}, "
+          f"pipeline_class="
+          f"{self.pipeline_module.__class__.__name__}, "
+          f"has_logical_partition_spec="
+          f"{logical_partition_spec is not None}"
       )
       if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
         assert len(RemattedBlockLayers) == 2, "Scanned layers must have a length of 2 using deepseek."
