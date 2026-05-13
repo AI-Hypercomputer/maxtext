@@ -30,7 +30,7 @@ from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.layers import nnx_wrappers
-from maxtext.layers import pipeline
+from maxtext.layers import pipeline_0506 as pipeline
 from maxtext.models import deepseek
 from maxtext.models import simple_layer
 from maxtext.utils import maxtext_utils

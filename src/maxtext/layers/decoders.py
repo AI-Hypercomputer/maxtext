@@ -33,7 +33,7 @@ from maxtext.inference import page_manager
 from maxtext.layers import linears
 from maxtext.layers import mhc
 from maxtext.layers import normalizations
-from maxtext.layers import pipeline
+from maxtext.layers import pipeline_0506 as pipeline
 from maxtext.layers.nnx_decoders import NNXDecoderLayer, NNXSequentialPipelineStage, NNXScannedPipelineStage
 from maxtext.layers import quantizations
 from maxtext.layers.attentions import attention_as_linen
