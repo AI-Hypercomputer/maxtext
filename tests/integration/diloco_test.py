@@ -295,7 +295,8 @@ class DiLoCoTest(unittest.TestCase):
         )
     )
 
-  @pytest.mark.tpu_only
+  @pytest.mark.cpu_only
+  @pytest.mark.tpu_backend
   def test_diloco_two_slices(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_compiled_diloco.pickle")
