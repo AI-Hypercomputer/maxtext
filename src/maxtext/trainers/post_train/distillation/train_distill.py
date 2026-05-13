@@ -777,14 +777,10 @@ def train_distill(
         return inputs_dict
 
       # Scatter the offline arrays into a dense tensor of -10000s
-      # dense_shape = batch.input_tokens.shape + (student_config.vocab_size,)
-      # dense_logits = jnp.full(dense_shape, -10000.0, dtype=jnp.float32)
-      # dense_logits = jnp.put_along_axis(dense_logits, batch.top_k_indices, batch.top_k_logits, axis=-1, inplace=False)
+      dense_shape = batch.input_tokens.shape + (student_config.vocab_size,)
+      dense_logits = jnp.full(dense_shape, -10000.0, dtype=jnp.float32)
+      dense_logits = jnp.put_along_axis(dense_logits, batch.top_k_indices, batch.top_k_logits, axis=-1, inplace=False)
 
-      # # Inject it as teacher_output so the trainer skips the teacher forward pass
-      # inputs_dict["teacher_output"] = distillation_utils.DistillationForwardOutput(
-      #     logits=dense_logits, out_projection_activations=None
-      # )
       inputs_dict["teacher_output"] = distillation_utils.DistillationForwardOutput(
           logits=batch.top_k_logits, 
           out_projection_activations=None,

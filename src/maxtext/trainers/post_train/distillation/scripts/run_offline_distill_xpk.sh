@@ -679,23 +679,6 @@ submit_workload() {
   fi
   echo "Image flag:  $image_flag=$XPK_BASE_IMAGE"
 
-  # XLA Flags
-  # XLA_FLAGS=" \
-  #   --xla_tpu_scoped_vmem_limit_kib=61440 \
-  #   --xla_tpu_enable_sparse_core_collective_offload_all_gather=false \
-  #   --xla_tpu_enable_sparse_core_collective_offload_all_reduce=false \
-  #   --xla_tpu_use_single_sparse_core_for_all_gather_offload=false \
-  #   --xla_tpu_enable_all_experimental_scheduler_features=true \
-  #   --xla_tpu_enable_scheduler_memory_pressure_tracking=true \
-  #   --xla_tpu_host_transfer_overlap_limit=24 \
-  #   --xla_tpu_aggressive_opt_barrier_removal=ENABLED \
-  #   --xla_lhs_prioritize_async_depth_over_stall=ENABLED \
-  #   --xla_tpu_enable_ag_backward_pipelining=true \
-  #   --xla_should_allow_loop_variant_parameter_in_chain=ENABLED \
-  #   --xla_should_add_loop_invariant_op_in_chain=ENABLED \
-  #   --xla_max_concurrent_host_send_recv=100 \
-  #   --xla_tpu_scheduler_percent_shared_memory_limit=100 \
-  #   --xla_latency_hiding_scheduler_rerun=2"
   # XLA Flags to disable SparseCore offloading
   XLA_FLAGS=" \
     --xla_tpu_bf16_emission_mode=NATIVE_EMISSION \

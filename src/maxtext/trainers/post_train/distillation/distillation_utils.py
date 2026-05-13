@@ -692,31 +692,6 @@ class CombinedDistillationStrategy(DistillationStrategy):
     mask = jnp.any(labels != 0, axis=-1).astype(jnp.float32)  # [B, T]
     valid_count = jnp.sum(mask)
     safe_count = jnp.maximum(valid_count, 1.0)
-
-    # # --- Soft loss: KL on temperature-softened distributions ---
-    # log_s_T = jax.nn.log_softmax(s_logits / temperature, axis=-1)
-    # t_p_T = jax.nn.softmax(t_logits / temperature, axis=-1)
-    # # KL(teacher || student) per position. optax.kl_divergence(log_pred, target) = KL(target || pred).
-    # kl_softened_per_pos = optax.kl_divergence(log_s_T, t_p_T)  # [B, T]
-    # kl_softened_sum = jnp.sum(kl_softened_per_pos * mask)
-    # # Scale by T^2 (Hinton). Apply once at the loss; logged metric is the scaled sum too.
-    # soft_loss_sum_scaled = kl_softened_sum * (temperature**2)
-    # soft_loss_mean = soft_loss_sum_scaled / safe_count
-
-    # # --- Hard loss: student CE against ground-truth ---
-    # ce_student_per_pos = optax.softmax_cross_entropy(logits=s_logits, labels=labels)
-    # ce_student_sum = jnp.sum(ce_student_per_pos * mask)
-    # hard_loss_mean = ce_student_sum / safe_count
-
-    # # --- Teacher CE (verification metric) ---
-    # ce_teacher_per_pos = optax.softmax_cross_entropy(logits=t_logits, labels=labels)
-    # ce_teacher_sum = jnp.sum(ce_teacher_per_pos * mask)
-
-    # # --- Always-T=1 KL for cross-run / cross-anneal comparability ---
-    # log_s_1 = jax.nn.log_softmax(s_logits, axis=-1)
-    # t_p_1 = jax.nn.softmax(t_logits, axis=-1)
-    # kl_t1_per_pos = optax.kl_divergence(log_s_1, t_p_1)
-    # kl_t1_sum = jnp.sum(kl_t1_per_pos * mask)
     
     # --- Soft loss: KL on temperature-softened distributions ---
     if getattr(teacher_output, "top_k_indices", None) is not None:
