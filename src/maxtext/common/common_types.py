@@ -146,3 +146,4 @@ class CustomRule(enum.Enum):
   CP_AS_EP = "cp-as-ep"  # Support CP and EP together
   EP_AS_CP = "ep-as-cp"  # Support EP only
   PIPELINE_LARGE_MOE = "pipeline-large-moe"
+  FSDP_2D = "2d-fsdp"

@@ -62,6 +62,13 @@ TEST_CASES = [
         "cp-as-ep",
         ("ici_fsdp_parallelism=-1", "ici_context_parallelism=2", "ici_expert_parallelism=2"),
     ),
+    (
+        "deepseek2-16b",
+        "tpu7x-8",
+        1,
+        "2d-fsdp",
+        ("ici_fsdp_parallelism=-1", "ici_fsdp_transpose_parallelism=2"),
+    ),
     ("qwen3-0.6b", "tpu7x-16", 1, "", ()),
     ("gpt-oss-20b", "tpu7x-16", 1, "", ()),
     ("gpt-oss-20b", "tpu7x-16", 1, "", ("ici_fsdp_parallelism=-1", "ici_expert_parallelism=2")),
@@ -168,7 +175,14 @@ def main(argv: Sequence[str]) -> None:
   validate_config(config)
   print(f"Sharding debug: {config.debug_sharding}")
 
-  rule_name = f"rule_{config.custom_mesh_and_rule}" if config.custom_mesh_and_rule else "rule_default"
+  # Extract custom_mesh_and_rule directly from argv test case string
+  custom_mesh_and_rule = ""
+  for arg in argv:
+    if arg.startswith("custom_mesh_and_rule="):
+      custom_mesh_and_rule = arg.split("=", 1)[1]
+      break
+
+  rule_name = f"rule_{custom_mesh_and_rule}" if custom_mesh_and_rule else "rule_default"
   # Find overrides from argv to append to rule_name
   overrides = []
   for arg in argv:
