@@ -1590,30 +1590,21 @@ class NNXCircularPipeline(NNXPipelineBase):
           for _ in range(num_microbatches):
             inner, _ = inner_body_remat_with_bsw(inner, None)
           new_loop_st, new_mut, _ = inner
-        return (new_loop_st, new_mut, w_next), (loop_st, layer_mut)
+        return (new_loop_st, new_mut, w_next), (loop_st, layer_mut, w_curr)
 
-      max_logging.log("[PIPELINE-DIAG] bwd: recomputing forward for per-repeat states")
+      max_logging.log("[PIPELINE-DIAG] bwd: recomputing forward for per-repeat states (w_curr included)")
       _, per_repeat_states = jax.lax.scan(
           fwd_outer_body,
           (saved_loop_st, saved_mut, saved_w_curr),
           None, length=num_repeats,
       )
 
-      initial_iteration = saved_loop_st["loop_iteration"]
-
       # Backward scan over repeats in reverse.
       def bwd_outer_body(carry, per_repeat_xs):
         g_loop_st_c, g_mut_c, g_w_curr_c, d_params_c = carry
-        loop_st_r, mut_r = per_repeat_xs
+        loop_st_r, mut_r, w_curr_r = per_repeat_xs
         iteration_r = loop_st_r["loop_iteration"]
-        w_curr_r = jax.lax.cond(
-            iteration_r == initial_iteration,
-            lambda: saved_w_curr,
-            lambda: self.weight_prefetching(
-                saved_params, physical_partition_spec_full,
-                iteration_r - num_microbatches,
-            ),
-        )
+
         w_next_r = self.weight_prefetching(
             saved_params, physical_partition_spec_full, iteration_r
         )
@@ -1628,7 +1619,6 @@ class NNXCircularPipeline(NNXPipelineBase):
             saved_params,
         )
 
-        # Recompute inner scan + vjp for this repeat
         def _inner_fwd(state, bsw):
           if self.config.scan_pipeline_iterations:
             (result_st, result_mut, _), _ = jax.lax.scan(
@@ -1649,46 +1639,12 @@ class NNXCircularPipeline(NNXPipelineBase):
             _inner_fwd_remat, (loop_st_r, mut_r), bsw_r
         )
 
-        # Backward through inner scan
         d_state, d_bsw = inner_vjp((g_loop_st_c, g_mut_c))
         d_w_curr_inner, d_w_next = d_bsw
 
-        # Reduce-scatter w_next gradient → param gradient
         (d_params_repeat,) = weight_prefetching_t(d_w_next)
         new_d_params = jax.tree.map(
             lambda a, b: a + b, d_params_c, d_params_repeat
-        )
-
-        # g_w_curr_c is the gradient flowing from repeat r+1 through the
-        # w_next_r -> w_curr_{r+1} link. Since w_curr is now recomputed via
-        # weight_prefetching, we must transpose g_w_curr_c back to params.
-        # For repeat num_repeats-1 (first in reverse), g_w_curr_c comes from
-        # the output gradient and is typically zero, so this is a no-op there.
-        # For repeat 0, w_curr was zeros (not from weight_prefetching), so
-        # we skip the transpose to avoid incorrect gradient accumulation.
-        def _transpose_w_curr_grad(g_w_curr_val):
-          w_curr_prefetch_t = jax.linear_transpose(
-              functools.partial(
-                  self.weight_prefetching,
-                  physical_partition_spec=physical_partition_spec_full,
-                  loop_iteration=iteration_r - num_microbatches,
-              ),
-              saved_params,
-          )
-          (d_params_from_wcurr,) = w_curr_prefetch_t(g_w_curr_val)
-          return d_params_from_wcurr
-
-        def _zero_params(_):
-          return jax.tree.map(jnp.zeros_like, saved_params)
-
-        d_params_from_w_curr = jax.lax.cond(
-            iteration_r == initial_iteration,
-            _zero_params,
-            _transpose_w_curr_grad,
-            g_w_curr_c,
-        )
-        new_d_params = jax.tree.map(
-            lambda a, b: a + b, new_d_params, d_params_from_w_curr
         )
 
         g_loop_st_new, g_mut_new = d_state
