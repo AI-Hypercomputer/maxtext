@@ -9,6 +9,7 @@ src/maxtext/models @parambole @shuningjin @RissyRan @suexu1025 @jiangjy1982 @gob
 
 # Features
 src/maxtext/experimental/rl @A9isha @khatwanimohit @xuefgu @gagika @richjames0 @shralex @NicoGrande
+src/maxtext/experimental/skills/ @dipannita08 @Obliviour @wuhao5 @lukebaumann
 src/maxtext/input_pipeline @aireenmei @SurbhiJainUSC @richjames0 @shralex @NicoGrande
 src/maxtext/kernels/megablox @RissyRan @michelle-yooh @gagika @richjames0 @shralex @suexu1025 @jesselu-google
 src/maxtext/kernels/ragged_attention.py @patemotter @vipannalla @richjames0 @shralex
