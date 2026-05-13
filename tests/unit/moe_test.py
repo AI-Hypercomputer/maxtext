@@ -68,42 +68,38 @@ class TokenDroppingTest(unittest.TestCase):
   def test_generate_masks(self):
     # expert_capacity = (tokens_per_batch / num_experts) * capacity_factor
     # expert_capacity_in_batch = (4 * 2 / 8) * 2 = 2
-    top_k_indices = jnp.array(
+    top_k_indices = jnp.array([
+        [[0, 5], [0, 4], [1, 0], [3, 5]],
+        [[1, 2], [4, 1], [5, 0], [7, 1]],
+        [[6, 2], [2, 3], [4, 2], [1, 2]],
+        [[4, 1], [0, 7], [5, 0], [4, 7]],
+    ])
+    softmax_probs = jnp.array([
         [
-            [[0, 5], [0, 4], [1, 0], [3, 5]],
-            [[1, 2], [4, 1], [5, 0], [7, 1]],
-            [[6, 2], [2, 3], [4, 2], [1, 2]],
-            [[4, 1], [0, 7], [5, 0], [4, 7]],
-        ]
-    )
-    softmax_probs = jnp.array(
+            [0.20, 0, 0, 0, 0, 0.80, 0, 0],
+            [0.68, 0, 0, 0, 0.32, 0, 0, 0],
+            [0.22, 0.78, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0.32, 0, 0.68, 0, 0],
+        ],
         [
-            [
-                [0.20, 0, 0, 0, 0, 0.80, 0, 0],
-                [0.68, 0, 0, 0, 0.32, 0, 0, 0],
-                [0.22, 0.78, 0, 0, 0, 0, 0, 0],
-                [0, 0, 0, 0.32, 0, 0.68, 0, 0],
-            ],
-            [
-                [0, 0.26, 0.74, 0, 0, 0, 0, 0],
-                [0, 0.79, 0, 0, 0.21, 0, 0, 0],
-                [0.89, 0, 0, 0, 0, 0.11, 0, 0],
-                [0, 0.11, 0, 0, 0, 0, 0, 0.89],
-            ],
-            [
-                [0, 0, 0.26, 0, 0, 0, 0.74, 0],
-                [0, 0, 0.88, 0.12, 0, 0, 0, 0],
-                [0, 0, 0.17, 0, 0.83, 0, 0, 0],
-                [0, 0.35, 0.65, 0, 0, 0, 0, 0],
-            ],
-            [
-                [0, 0.47, 0, 0, 0.53, 0, 0, 0],
-                [0.36, 0, 0, 0, 0, 0, 0, 0.64],
-                [0.15, 0, 0, 0, 0, 0.85, 0, 0],
-                [0, 0, 0, 0, 0.18, 0, 0, 0.82],
-            ],
-        ]
-    )
+            [0, 0.26, 0.74, 0, 0, 0, 0, 0],
+            [0, 0.79, 0, 0, 0.21, 0, 0, 0],
+            [0.89, 0, 0, 0, 0, 0.11, 0, 0],
+            [0, 0.11, 0, 0, 0, 0, 0, 0.89],
+        ],
+        [
+            [0, 0, 0.26, 0, 0, 0, 0.74, 0],
+            [0, 0, 0.88, 0.12, 0, 0, 0, 0],
+            [0, 0, 0.17, 0, 0.83, 0, 0, 0],
+            [0, 0.35, 0.65, 0, 0, 0, 0, 0],
+        ],
+        [
+            [0, 0.47, 0, 0, 0.53, 0, 0, 0],
+            [0.36, 0, 0, 0, 0, 0, 0, 0.64],
+            [0.15, 0, 0, 0, 0, 0.85, 0, 0],
+            [0, 0, 0, 0, 0.18, 0, 0, 0.82],
+        ],
+    ])
 
     # As expert_capacity_in_batch=2, so updated softmax_probs become (4 tokens were dropped):
     # softmax_probs = jnp.array([[[0.20, 0, 0, 0, 0, 0.80, 0, 0],
@@ -238,14 +234,10 @@ class DeepSeekRoutingTest(unittest.TestCase):
 
   def test_deepseek_routing(self):
     # shape as [batch, sequence, num_experts] = [1,2,16]
-    gate_logits = jnp.array(
-        [
-            [
-                [0.20, 0.10, 0.05, 0.10, 0.10, 0.60, 0.30, 0.10, 0.80, 0.01, 0.01, 0.01, 0.05, 0.80, 0.20, 0.10],
-                [0.68, 0.20, 0.06, 0.03, 0.32, 0.10, 0.05, 0.02, 0.65, 0.20, 0.04, 0.01, 0.32, 0.10, 0.05, 0.02],
-            ]
-        ]
-    )
+    gate_logits = jnp.array([[
+        [0.20, 0.10, 0.05, 0.10, 0.10, 0.60, 0.30, 0.10, 0.80, 0.01, 0.01, 0.01, 0.05, 0.80, 0.20, 0.10],
+        [0.68, 0.20, 0.06, 0.03, 0.32, 0.10, 0.05, 0.02, 0.65, 0.20, 0.04, 0.01, 0.32, 0.10, 0.05, 0.02],
+    ]])
     pre_bias_logits = gate_logits - 0.5
 
     # 4 groups of 1st token:
@@ -1400,6 +1392,74 @@ class FusedMoeTPUTest(unittest.TestCase):
     )
     self.assertIsNone(lb_loss)
     self.assertIsNone(bias_updates)
+
+
+@pytest.mark.tpu_only
+class FusedMlpMoETest(unittest.TestCase):
+  """Tests that prefuse_moe_weights=True and prefuse_moe_weights=False produce identical outputs for MoE."""
+
+  def __init__(self, *args, **kwargs):
+    super().__init__(*args, **kwargs)
+    self._B = 1
+    self._S = 16
+
+  def setUp(self):
+    super().setUp()
+    self.rng = jax.random.PRNGKey(0)
+    extra_args = get_decoupled_parallelism_overrides()
+    self.ref_cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="fused_mlp_moe_ref",
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        dtype="bfloat16",
+        sparse_matmul=True,
+        megablox=True,
+        prefuse_moe_weights=False,
+        ici_expert_parallelism=jax.device_count(),
+        max_target_length=self._S,
+        per_device_batch_size=self._B,
+        **extra_args,
+    )
+    ref_devices = maxtext_utils.create_device_mesh(self.ref_cfg)
+    self.ref_mesh = Mesh(ref_devices, self.ref_cfg.mesh_axes)
+    self.ref_model = make_moe(self.ref_cfg, self.ref_mesh)
+
+  def _inputs(self):
+    return jax.random.normal(self.rng, (self._B, self._S, self.ref_cfg.base_emb_dim), dtype=jnp.bfloat16)
+
+  def test_prefuse_moe_weights_matches_unfused(self):
+    """prefuse_moe_weights=True output matches prefuse_moe_weights=False with sparse_matmul (Megablox)."""
+    extra_args = get_decoupled_parallelism_overrides()
+    fused_cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="fused_mlp_moe_fused",
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        dtype="bfloat16",
+        sparse_matmul=True,
+        megablox=True,
+        prefuse_moe_weights=True,
+        ici_expert_parallelism=jax.device_count(),
+        max_target_length=self._S,
+        per_device_batch_size=self._B,
+        **extra_args,
+    )
+    fused_devices = maxtext_utils.create_device_mesh(fused_cfg)
+    fused_mesh = Mesh(fused_devices, fused_cfg.mesh_axes)
+    fused_model = make_moe(fused_cfg, fused_mesh)
+    copy_weights_prefused(self.ref_model, fused_model)
+
+    inputs = self._inputs()
+    ref_out, _, _ = self.ref_model(inputs)
+    fused_out, _, _ = fused_model(inputs)
+
+    np.testing.assert_allclose(
+        np.array(ref_out, dtype=np.float32),
+        np.array(fused_out, dtype=np.float32),
+        rtol=1e-2,
+        atol=1e-2,
+    )
 
 
 if __name__ == "__main__":
