@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,21 +13,28 @@
 # limitations under the License.
 
 """ Common LoRA utils needed to support LoRA adapters."""
-
 from functools import partial
 import json
+import os
+import re
+from typing import Any, Optional
 
+from flax import nnx
+from flax.linen import partitioning as nn_partitioning
+from flax.training import train_state
 import jax
 import jax.numpy as jnp
-
-from flax.training import train_state
-from flax.linen import partitioning as nn_partitioning
+from orbax import checkpoint as ocp
+import qwix
 
 from maxtext.common import checkpointing
+from maxtext.configs import pyconfig
 from maxtext.utils import gcs_utils
+from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
-from maxtext.utils import max_logging
+from maxtext.utils import sharding
+from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
 
 
 def apply_lora_on_base_params(base_params, lora_params, lora_scale_factor=1.0):
@@ -243,7 +250,11 @@ def get_lora_abstract_state(base_abstract_params, lora_config):
           f"Encountered unexpected shape={base_array_shape} of array in base params. Array dimensions > 4 not supported."
       )
 
-    if lora_module in ["self_attention.query", "self_attention.key", "self_attention.value"]:
+    if lora_module in [
+        "self_attention.query",
+        "self_attention.key",
+        "self_attention.value",
+    ]:
       lora_a_shape = base_array_shape[:-2] + (lora_rank,)
       lora_b_shape = (lora_rank,) + base_array_shape[1:]
     elif lora_module in ["self_attention.out"]:
@@ -270,7 +281,11 @@ def get_lora_abstract_state(base_abstract_params, lora_config):
     base_memory_kind = base_param_sharding.memory_kind
     base_pspec = base_param_sharding.spec
 
-    if lora_module in ["self_attention.query", "self_attention.key", "self_attention.value"]:
+    if lora_module in [
+        "self_attention.query",
+        "self_attention.key",
+        "self_attention.value",
+    ]:
       lora_a_pspec_tuple = base_pspec[:-2] + ((),)
       lora_a_pspec = jax.sharding.PartitionSpec(*lora_a_pspec_tuple)
 
@@ -311,7 +326,13 @@ def get_lora_abstract_state(base_abstract_params, lora_config):
     for name, param in base_params.items():
       if isinstance(param, dict):
         lora_params[name] = {}
-        add_lora_params(lora_params[name], f"{module_name}.{name}", param, lora_rank, lora_target_modules)
+        add_lora_params(
+            lora_params[name],
+            f"{module_name}.{name}",
+            param,
+            lora_rank,
+            lora_target_modules,
+        )
       else:
         if name not in ["kernel", "scale", "embedding"]:
           raise ValueError(f"Unexpected key={name} exists in the abstract params of base model.")
@@ -349,3 +370,238 @@ def get_lora_abstract_state(base_abstract_params, lora_config):
   )
 
   return unboxed_abstract_lora_state, lora_state_mesh_annotations
+
+
+# --- Qwix LoRA Utils ---
+
+
+def _get_lora_module_path(mt_config: pyconfig.HyperParameters) -> str:
+  """Gets the regex for modules to apply LoRA on from config, architecture map, or fallback."""
+  if mt_config.lora.lora_module_path:
+    return mt_config.lora.lora_module_path
+
+  config_path = os.path.join(MAXTEXT_CONFIGS_DIR, "post_train", "lora_module_path.yml")
+  lora_configs = pyconfig._load_config(config_path)  # pylint: disable=protected-access
+  model_name = mt_config.model_name.lower()
+
+  # Find the first matching architecture prefix or use 'default'
+  matched_key = next((k for k in lora_configs if k != "default" and model_name.startswith(k)), "default")
+
+  if matched_key == "default":
+    max_logging.log(f"Warning: Model '{model_name}' is unverified; falling back to default LoRA path.")
+  else:
+    max_logging.log(f"Auto-detected lora_module_path for model '{model_name}' (matched: '{matched_key}')")
+
+  raw_path = lora_configs.get(matched_key, "decoder/layers/.*(self_attention/(query|key|value|out)|mlp/(wi_0|wi_1|wo))")
+
+  # This regex makes the layer index optional, matching both scanned and unscanned layer paths
+  # (e.g. 'layers/0/mlp/...' vs 'layers/mlp/...').
+  optional_layer_index = "(?:[0-9]+/)?"
+  final_path = str(raw_path).replace("layers/", f"layers/{optional_layer_index}")
+
+  max_logging.log(f"Using lora_module_path: {final_path}")
+  return final_path
+
+
+def _build_lora_provider(mt_config: pyconfig.HyperParameters) -> qwix.LoraProvider:
+  """Builds a Qwix LoRA provider from MaxText LoRA settings."""
+  lora_module_path = _get_lora_module_path(mt_config)
+  lora_kwargs = {
+      "module_path": lora_module_path,
+      "rank": mt_config.lora.lora_rank,
+      "alpha": mt_config.lora.lora_alpha,
+      "dropout": 0.0,
+  }
+  max_logging.log(
+      f"LoRA configured: module_path={lora_module_path} "
+      f"rank={mt_config.lora.lora_rank} alpha={mt_config.lora.lora_alpha}"
+  )
+  return qwix.LoraProvider(**lora_kwargs)
+
+
+def _prepare_dummy_inputs() -> tuple[jnp.ndarray, jnp.ndarray]:
+  """Builds dummy decoder inputs used to materialize LoRA parameters."""
+  # Keep LoRA warmup as small as possible to minimize compile/memory overhead.
+  dummy_bs = 1
+  seq_len = 1
+  decoder_input_tokens = jnp.zeros((dummy_bs, seq_len), dtype=jnp.int32)
+  decoder_positions = jnp.zeros((dummy_bs, seq_len), dtype=jnp.int32)
+  return decoder_input_tokens, decoder_positions
+
+
+def is_lora_enabled(model: nnx.Module) -> bool:
+  """Checks if the model has LoRA parameters."""
+  for _, value in nnx.iter_graph(model):
+    if isinstance(value, nnx.LoRAParam):
+      return True
+  return False
+
+
+def _verify_lora_parameters(lora_model: nnx.Module, mt_config: pyconfig.HyperParameters):
+  """Validates that LoRA is active or that target modules were matched."""
+
+  if is_lora_enabled(lora_model):
+    return
+
+  lora_module_path = _get_lora_module_path(mt_config)
+  compiled_module_path = re.compile(lora_module_path)
+  matched_module_paths = []
+  sample_module_paths = []
+
+  for path, _ in nnx.iter_modules(lora_model):
+    module_path = "/".join(str(p) for p in path)
+    if len(sample_module_paths) < 100:
+      sample_module_paths.append(module_path)
+    if compiled_module_path.search(module_path):
+      matched_module_paths.append(module_path)
+
+  if not matched_module_paths:
+    max_logging.log(
+        f"LoRA module_path='{lora_module_path}' did not match any weights. " f"Sample module paths: {sample_module_paths}"
+    )
+    raise ValueError("LoRA enabled but no LoRA parameters found in decoder/model state.")
+
+  raise ValueError(
+      "LoRA module path matched target modules, but nnx.LoRAParam is still "
+      "missing. For Tunix PeftTrainer, LoRA params must be materialized before "
+      "trainer initialization, otherwise it falls back to full-model training. "
+      f"Sample matches: {matched_module_paths[:10]}"
+  )
+
+
+def apply_lora_to_model(
+    model: nnx.Module,
+    mesh: Optional[jax.sharding.Mesh],
+    mt_config: pyconfig.HyperParameters,
+) -> nnx.Module:
+  """Optionally applies LoRA/QLoRA to a MaxText model using Qwix."""
+  # Skip Qwix LoRA if MaxText LoRA adapters are loaded
+  if mt_config.lora_input_adapters_path:
+    max_logging.log("MaxText LoRA adapters loaded, skipping Qwix LoRA application")
+    return model
+
+  if not mt_config.lora.enable_lora:
+    return model
+
+  # Dynamically detect and set LoRA rank before model creation if restoring
+
+  lora_provider = _build_lora_provider(mt_config)
+
+  model_rngs = getattr(model.decoder, "rngs", None)
+  decoder_input_tokens, decoder_positions = _prepare_dummy_inputs()
+
+  lora_model = qwix.apply_lora_to_model(
+      model,
+      lora_provider,
+      decoder_input_tokens=decoder_input_tokens,
+      decoder_positions=decoder_positions,
+      rngs=model_rngs,
+  )
+
+  if mesh is not None:
+    with mesh, nn_partitioning.axis_rules(mt_config.logical_axis_rules):
+      graph_def, state = nnx.split(lora_model)
+
+      # We handle explicit replication for LoRA to ensure safety and efficiency.
+      state = jax.tree_util.tree_map(
+          lambda x: x.replace(sharding=jax.sharding.PartitionSpec(), out_sharding=None, sharding_names=None)
+          if isinstance(x, nnx.LoRAParam)
+          else x,
+          state,
+          is_leaf=lambda x: isinstance(x, nnx.Variable),
+      )
+
+      # Use logical_to_mesh_sharding to correctly map logical axes like 'embed'
+      # to physical mesh axes.
+      dst_shardings = sharding.logical_to_mesh_sharding(
+          nnx.get_partition_spec(state), mesh, rules=mt_config.logical_axis_rules
+      )
+
+      from tunix.rl import reshard  # pylint: disable=import-outside-toplevel
+
+      state = reshard.reshard_pytree(state, dst_shardings)
+      lora_model = nnx.merge(graph_def, state)
+
+  _verify_lora_parameters(lora_model, mt_config)
+
+  return lora_model
+
+
+def restore_lora_from_path(trainer: Any, mt_config: pyconfig.HyperParameters) -> Any:
+  """Restores LoRA parameter weights from an external Orbax checkpoint for a fresh run."""
+  lora_restore_path = mt_config.lora.lora_restore_path
+
+  train_steps = getattr(trainer, "train_steps", 0)
+  if train_steps > 0:
+    max_logging.log(
+        f"PeftTrainer restored current run at step {train_steps}; " f"ignoring lora_restore_path '{lora_restore_path}'."
+    )
+    return trainer
+
+  if not is_lora_enabled(trainer.model):
+    lora_module_path = _get_lora_module_path(mt_config)
+    if not mt_config.lora.enable_lora:
+      raise ValueError(
+          "lora_restore_path is set but LoRA is not enabled on the model. "
+          f"Set lora.enable_lora=True and verify lora_module_path ('{lora_module_path}') matches model modules."
+      )
+
+  abstract_lora_params = nnx.state(trainer.model, nnx.LoRAParam)
+
+  target_for_restore = jax.tree.map(
+      lambda v: {"value": v.value},
+      abstract_lora_params,
+      is_leaf=lambda n: isinstance(n, nnx.Variable),
+  )
+
+  sharding_tree = jax.tree.map(lambda x: x.sharding if hasattr(x, "sharding") else None, target_for_restore)
+  restore_args_tree = ocp.checkpoint_utils.construct_restore_args(target_for_restore, sharding_tree)
+
+  try:
+    restore_args = ocp.args.PyTreeRestore(
+        item=target_for_restore,
+        restore_args=restore_args_tree,
+        partial_restore=True,
+    )
+    restored_lora_params = ocp.PyTreeCheckpointer().restore(
+        lora_restore_path,
+        args=restore_args,
+    )
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    max_logging.log(f"Guided restore failed: {e}. Falling back to basic restore.")
+    restored_lora_params = ocp.PyTreeCheckpointer().restore(lora_restore_path)
+
+  # Post processing
+  def _map_to_state(path, variable):
+    if not isinstance(variable, nnx.Variable):
+      return
+
+    str_path = [str(k.key if hasattr(k, "key") else (k.name if hasattr(k, "name") else k)) for k in path]
+
+    curr = restored_lora_params
+    for p in str_path:
+      if isinstance(curr, dict) and p in curr:
+        curr = curr[p]
+      elif hasattr(curr, p):
+        curr = getattr(curr, p)
+      else:
+        return
+
+    if isinstance(curr, dict) and "value" in curr:
+      matched_val = curr["value"]
+    elif hasattr(curr, "value"):
+      matched_val = getattr(curr, "value")
+    else:
+      matched_val = curr
+
+    variable.value = matched_val
+
+  jax.tree_util.tree_map_with_path(
+      _map_to_state,
+      abstract_lora_params,
+      is_leaf=lambda n: isinstance(n, nnx.Variable),
+  )
+
+  nnx.update(trainer.model, abstract_lora_params)
+  max_logging.log(f"LoRA restore complete from '{lora_restore_path}'.")
+  return trainer

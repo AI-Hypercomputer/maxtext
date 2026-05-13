@@ -86,7 +86,7 @@ myst_linkify_fuzzy_links = False
 # -- Options for autodoc ----------------------------------------------------
 autodoc_member_order = "bysource"
 autodoc_typehints = "description"
-autodoc_mock_imports = [
+packages_to_mock = [
     "safetensors",
     "tensorflow_datasets",
     "torch",
@@ -96,6 +96,12 @@ autodoc_mock_imports = [
     "librosa",
     "sentencepiece",
 ]
+autodoc_mock_imports = []
+for pkg in packages_to_mock:
+  try:
+    __import__(pkg)
+  except ImportError:
+    autodoc_mock_imports.append(pkg)
 autosummary_generate = True
 
 # Theme-specific options
@@ -122,7 +128,7 @@ exclude_patterns = [
     os.path.join("run_maxtext", "run_maxtext_via_multihost_runner.md"),
     os.path.join("reference", "core_concepts", "llm_calculator.ipynb"),
     os.path.join("reference", "api.rst"),
-    os.path.join("reference", "api_generated", "MaxText*.rst"),
+    os.path.join("reference", "api_generated", "maxtext*.rst"),
     os.path.join("reference", "api_generated", "modules.rst"),
     os.path.join("reference", "api_generated", "dependencies.github_deps.rst"),
     os.path.join("reference", "api_generated", "dependencies.github_deps.install_pre_train_deps.rst"),
@@ -167,7 +173,7 @@ linkcheck_ignore = [
     r"https://huggingface\.co/settings/tokens",
     # Ignore GitHub PRs and blobs that trigger rate limiting
     r"https://github\.com/AI-Hypercomputer/maxtext/pull/.*",
-    r"https://github\.com/google/maxtext/blob/.*",
+    r"https://github\.com/AI-Hypercomputer/maxtext/blob/.*",
 ]
 
 
@@ -209,12 +215,10 @@ def run_apidoc(_):
       os.path.join(MAXTEXT_REPO_ROOT, "src"),
       # Paths to exclude
       os.path.join(MAXTEXT_REPO_ROOT, "tests"),
-      os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "experimental"),
+      os.path.join(MAXTEXT_REPO_ROOT, "src", "maxtext", "experimental"),
       os.path.join(MAXTEXT_REPO_ROOT, "src", "maxtext", "inference"),
       os.path.join(MAXTEXT_REPO_ROOT, "src", "maxtext", "scratch_code"),
-      os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "utils", "ckpt_conversion"),
-      os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "rl"),
-      os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "multimodal_utils.py"),
+      os.path.join(MAXTEXT_REPO_ROOT, "src", "maxtext", "checkpoint_conversion"),
   ]
 
   # Run the command and check for errors

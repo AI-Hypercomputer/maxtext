@@ -17,6 +17,7 @@ import unittest
 from dataclasses import dataclass
 from typing import Any
 import jax
+import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 from jax.experimental import mesh_utils
@@ -177,6 +178,28 @@ class TestMaxTextUtilsNNX(unittest.TestCase):
     self.assertEqual(spec["linear"]["kernel"], expected_spec_k)
     self.assertEqual(spec["linear"]["bias"], expected_spec_b)
     self.assertNotIsInstance(spec["linear"]["kernel"], NamedSharding)
+
+  def test_nnx_ensure_scan_leading_axis_mixed(self):
+    """Test broadcasting on a mixed state of scalars and arrays."""
+    length = 8
+    state = nnx.State(
+        {
+            "scalar": nnx.Param(jnp.array(1.0)),
+            "array": nnx.Param(jnp.zeros((16,))),
+            "raw_scalar": jnp.array(2.0),
+            "raw_array": jnp.zeros((10,)),
+        }
+    )
+
+    broadcast_state = maxtext_utils_nnx.nnx_ensure_scan_leading_axis(state, length)
+
+    # NNX Variables
+    self.assertEqual(broadcast_state["scalar"].get_value().shape, (length,))
+    self.assertEqual(broadcast_state["array"].get_value().shape, (16,))
+
+    # Raw JAX types
+    self.assertEqual(broadcast_state["raw_scalar"].shape, (length,))
+    self.assertEqual(broadcast_state["raw_array"].shape, (10,))
 
 
 if __name__ == "__main__":

@@ -790,13 +790,13 @@ class MemoryMonitorTqdm(tqdm):
 
 
 def load_orbax_checkpoint(config) -> dict:
-  """Loads a full Orbax checkpoint from disk with unsharded arrays.
+  """Loads Orbax checkpoints from Base and/or LoRA paths in config.
 
   Args:
     config: MaxText config containing checkpoint storage settings
 
   Returns:
-    Dictionary containing the full checkpoint structure
+    Dictionary containing all weights merged into a single structure.
   """
   # Create Orbax checkpointer
   ckptr = ocp.Checkpointer(
@@ -806,10 +806,6 @@ def load_orbax_checkpoint(config) -> dict:
           use_zarr3=config.checkpoint_storage_use_zarr3,
       )
   )
-
-  # Get checkpoint metadata
-  checkpoint_path = epath.Path(config.load_parameters_path)
-  metadata = ckptr.metadata(checkpoint_path)
 
   # Create a mesh with all devices for unsharded restoration
   devices = np.array(jax.devices()).reshape((-1,))
@@ -824,14 +820,44 @@ def load_orbax_checkpoint(config) -> dict:
     else:
       return None
 
-  restore_args = jax.tree_util.tree_map(
-      lambda x: create_restore_args(x) if hasattr(x, "shape") else None,
-      metadata.item_metadata.tree,
-      is_leaf=lambda x: hasattr(x, "shape"),
-  )
+  lora_path = config.lora.lora_restore_path
+  paths = [p for p in [config.load_parameters_path, lora_path] if p]
 
-  # Restore the entire checkpoint
-  return ckptr.restore(checkpoint_path, restore_args=restore_args)
+  merged_dict = {}
+  for path in paths:
+    checkpoint_path = epath.Path(path)
+    metadata = ckptr.metadata(checkpoint_path)
+    restore_args = jax.tree_util.tree_map(
+        lambda x: create_restore_args(x) if hasattr(x, "shape") else None,
+        metadata.item_metadata.tree,
+        is_leaf=lambda x: hasattr(x, "shape"),
+    )
+    merged_dict.update(ckptr.restore(checkpoint_path, restore_args=restore_args))
+
+  return merged_dict
+
+
+def save_adapter_files(output_dir, weights, config, found_modules, model_id):
+  """Saves HF LoRA adapter weights and config."""
+  os.makedirs(output_dir, exist_ok=True)
+  adapter_file = os.path.join(output_dir, "adapter_model.safetensors")
+  numpy_save_file(weights, adapter_file)
+
+  # Create PEFT adapter_config.json
+  adapter_config = {
+      "base_model_name_or_path": model_id,
+      "peft_type": "LORA",
+      "task_type": "CAUSAL_LM",
+      "r": config.lora.lora_rank,
+      "lora_alpha": config.lora.lora_alpha,
+      "target_modules": list(found_modules),
+      "lora_dropout": 0.0,
+      "bias": "none",
+      "inference_mode": True,
+  }
+  config_file = os.path.join(output_dir, "adapter_config.json")
+  with open(config_file, "w", encoding="utf-8") as f:
+    json.dump(adapter_config, f, indent=4)
 
 
 def extract_nnx_weights(weights_dict: dict) -> dict[str, np.ndarray]:
