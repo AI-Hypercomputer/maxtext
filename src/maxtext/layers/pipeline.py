@@ -1533,54 +1533,37 @@ class NNXCircularPipeline(NNXPipelineBase):
             inner_carry, _ = inner_body(inner_carry, None)
           new_loop_st, new_mut = inner_carry
 
-        # Save (loop_st, layer_mut) at repeat entry as scan ys.
-        # Used by bwd_outer_body — eliminates double forward recompute.
-        # w_curr NOT saved here (FIX-A: recomputed in bwd via weight_prefetching).
-        return (new_loop_st, new_mut, w_next), (loop_st, layer_mut)
+        return (new_loop_st, new_mut, w_next), None
 
       max_logging.log(
           f"[PIPELINE-DIAG] outer scan fwd: "
           f"scan_pipeline_iterations={self.config.scan_pipeline_iterations}, "
-          f"length={num_repeats}, saving per-repeat states as ys (FIX-B)"
+          f"length={num_repeats}"
       )
 
       if self.config.scan_pipeline_iterations:
-        (final_loop_st, final_mut, final_w_curr), per_repeat_init = jax.lax.scan(
+        (final_loop_st, final_mut, final_w_curr), _ = jax.lax.scan(
             outer_body,
             (loop_state_init, layers_mutables_init, w_curr_init),
             None, length=num_repeats,
         )
       else:
         carry = (loop_state_init, layers_mutables_init, w_curr_init)
-        per_repeat_list = []
         for _ in range(num_repeats):
-          carry, per_rep = outer_body(carry, None)
-          per_repeat_list.append(per_rep)
+          carry, _ = outer_body(carry, None)
         final_loop_st, final_mut, final_w_curr = carry
-        per_repeat_init = jax.tree.map(lambda *xs: jnp.stack(xs), *per_repeat_list)
 
-      max_logging.log(
-          f"[PIPELINE-DIAG] _all_repeats_fwd: done, "
-          f"per_repeat_init leaves={len(jax.tree.leaves(per_repeat_init))}"
-      )
+      max_logging.log("[PIPELINE-DIAG] _all_repeats_fwd: done")
       return (
           (final_loop_st, final_mut, final_w_curr),
-          (per_repeat_init, w_curr_init, pipeline_params),
+          (loop_state_init, layers_mutables_init, w_curr_init, pipeline_params),
       )
 
     def _all_repeats_bwd(residuals, g_output):
-      """Backward: reverse scan using saved per-repeat states from fwd.
-
-      FIX-B: per_repeat_init saved from forward scan ys — no double
-      recompute. FIX-A: w_curr recomputed via weight_prefetching.
-      """
-      max_logging.log("[PIPELINE-DIAG] _all_repeats_bwd: entering (FIX-B, no fwd recompute)")
-      per_repeat_init, saved_w_curr, saved_params = residuals
+      """Backward: FIX-A only (recompute w_curr, keep fwd recompute scan)."""
+      max_logging.log("[PIPELINE-DIAG] _all_repeats_bwd: entering (FIX-A only)")
+      saved_loop_st, saved_mut, saved_w_curr, saved_params = residuals
       g_loop_st, g_mut, g_w_curr = g_output
-
-      # per_repeat_init: (loop_st, layer_mut) stacked [num_repeats, ...]
-      # Saved directly from forward scan ys — no fwd_outer_body needed.
-      per_repeat_states = per_repeat_init
 
       # Inner body for backward recompute: BSW passed through carry
       # to avoid tracer leak from bsw_ref side effect.
@@ -1589,9 +1572,34 @@ class NNXCircularPipeline(NNXPipelineBase):
         new_loop_st, new_mut = _run_iteration_pure(loop_st, layer_mut, bsw)
         return (new_loop_st, new_mut, bsw), None
 
-      # Get initial_iteration from first repeat's saved state
-      first_repeat_loop_st = jax.tree.map(lambda x: x[0], per_repeat_states[0])
-      initial_iteration = first_repeat_loop_st["loop_iteration"]
+      # Recompute forward to get per-repeat states (FIX-A: w_curr excluded)
+      def fwd_outer_body(carry, _):
+        loop_st, layer_mut, w_curr = carry
+        iteration = loop_st["loop_iteration"]
+        w_next = self.weight_prefetching(
+            saved_params, physical_partition_spec_full, iteration
+        )
+        bsw = (w_curr, w_next)
+        if self.config.scan_pipeline_iterations:
+          (new_loop_st, new_mut, _), _ = jax.lax.scan(
+              inner_body_remat_with_bsw, (loop_st, layer_mut, bsw), None,
+              length=num_microbatches,
+          )
+        else:
+          inner = (loop_st, layer_mut, bsw)
+          for _ in range(num_microbatches):
+            inner, _ = inner_body_remat_with_bsw(inner, None)
+          new_loop_st, new_mut, _ = inner
+        return (new_loop_st, new_mut, w_next), (loop_st, layer_mut)
+
+      max_logging.log("[PIPELINE-DIAG] bwd: recomputing forward for per-repeat states")
+      _, per_repeat_states = jax.lax.scan(
+          fwd_outer_body,
+          (saved_loop_st, saved_mut, saved_w_curr),
+          None, length=num_repeats,
+      )
+
+      initial_iteration = saved_loop_st["loop_iteration"]
 
       # Backward scan over repeats in reverse.
       def bwd_outer_body(carry, per_repeat_xs):
