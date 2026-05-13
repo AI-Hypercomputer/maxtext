@@ -55,6 +55,8 @@ class DistillationForwardOutput:
   out_projection_activations: jax.Array | None = None
   #: moe load balance loss
   moe_lb_loss: jax.Array | None = None
+  #: NEW: Top-K indices for sparse offline distillation
+  top_k_indices: jax.Array | None = None
 
 
 @flax.struct.dataclass(frozen=True)
@@ -81,10 +83,60 @@ class MaxTextTrainingInput(peft_trainer.TrainingInput):
 # -----------------------------------------------------------------------------
 
 
-class OfflineArrayRecordIterator:
-  """Reads the pre-generated global top-k logits files."""
+# class OfflineArrayRecordIterator:
+#   """Reads the pre-generated global top-k logits files."""
 
-  def __init__(self, data_dir: str, epochs: int = 100):
+#   def __init__(self, data_dir: str, epochs: int = 100):
+#     self.pattern = data_dir
+#     self.filepaths = sorted(tf.io.gfile.glob(self.pattern))
+
+#     if not self.filepaths:
+#       raise FileNotFoundError(f"Offline distillation files not found for pattern: {self.pattern}")
+
+#     self.epochs = epochs
+#     self.current_epoch = 0
+#     self.file_index = 0
+#     self._open_current_file()
+
+#   def _open_current_file(self):
+#     self.reader = array_record_module.ArrayRecordReader(self.filepaths[self.file_index])
+#     self.num_records = self.reader.num_records()
+#     self.record_index = 0
+
+#   def __iter__(self):
+#     return self
+
+#   def __next__(self):
+#     while self.record_index >= self.num_records:
+#       self.file_index += 1
+#       if self.file_index >= len(self.filepaths):
+#         self.current_epoch += 1
+#         if self.current_epoch >= self.epochs:
+#           raise StopIteration
+#         self.file_index = 0
+      
+#       self._open_current_file()
+
+#     record = self.reader.read()
+#     self.record_index += 1
+#     data = pickle.loads(record)
+
+#     # Map the arrays to match MaxText's expected dictionary
+#     batch = {
+#         "inputs": data["tokens"],
+#         "top_k_logits": data["top_k_logits"],
+#         "top_k_indices": data["top_k_indices"],
+#     }
+#     for key in ["inputs_position", "inputs_segmentation", "targets_segmentation", "targets"]:
+#       if key in data:
+#         batch[key] = data[key]
+
+#     return batch
+
+class OfflineArrayRecordIterator:
+  """Reads the pre-generated global top-k logits files and chunks them to the correct batch size."""
+
+  def __init__(self, data_dir: str, global_batch_size: int, mesh: jax.sharding.Mesh, data_sharding: list, epochs: int = 100):
     self.pattern = data_dir
     self.filepaths = sorted(tf.io.gfile.glob(self.pattern))
 
@@ -94,7 +146,17 @@ class OfflineArrayRecordIterator:
     self.epochs = epochs
     self.current_epoch = 0
     self.file_index = 0
+    self.global_batch_size = global_batch_size
     self._open_current_file()
+    
+    self.buffer = None
+    self.buffer_idx = 0
+
+    # Define standard JAX sharding layouts using MaxText's axes mesh
+    # Fixed the variable names so they don't start with numbers!
+    batch_axis_names = tuple(data_sharding[0])
+    self.sharding_2d = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(batch_axis_names, None))
+    self.sharding_3d = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(batch_axis_names, None, None))
 
   def _open_current_file(self):
     self.reader = array_record_module.ArrayRecordReader(self.filepaths[self.file_index])
@@ -105,14 +167,55 @@ class OfflineArrayRecordIterator:
     return self
 
   def __next__(self):
-    while self.record_index >= self.num_records:
-      self.file_index += 1
-      if self.file_index >= len(self.filepaths):
-        self.current_epoch += 1
-        if self.current_epoch >= self.epochs:
-          raise StopIteration
-        self.file_index = 0
+    while True:
+      if self.buffer is not None:
+        batch_size_in_buffer = self.buffer["inputs"].shape[0]
+        if self.buffer_idx < batch_size_in_buffer:
+          end_idx = min(self.buffer_idx + self.global_batch_size, batch_size_in_buffer)
+          actual_size = end_idx - self.buffer_idx
+          
+          if actual_size == self.global_batch_size:
+            sliced_batch = {}
+            for k, v in self.buffer.items():
+              slice_arr = v[self.buffer_idx:end_idx]
+              # Explicitly shard the arrays before returning them to JAX
+              if slice_arr.ndim == 2:
+                sliced_batch[k] = jax.device_put(slice_arr, self.sharding_2d)
+              elif slice_arr.ndim == 3:
+                sliced_batch[k] = jax.device_put(slice_arr, self.sharding_3d)
+              else:
+                sliced_batch[k] = slice_arr
+                
+            self.buffer_idx = end_idx
+            return sliced_batch
+          else:
+            self.buffer = None
+            self.buffer_idx = 0
+
+      while self.record_index >= self.num_records:
+        self.file_index += 1
+        if self.file_index >= len(self.filepaths):
+          self.current_epoch += 1
+          if self.current_epoch >= self.epochs:
+            raise StopIteration
+          self.file_index = 0
+        self._open_current_file()
+
+      record = self.reader.read()
+      self.record_index += 1
+      data = pickle.loads(record)
+
+      self.buffer = {
+          "inputs": data["tokens"],
+          "top_k_logits": data["top_k_logits"],
+          "top_k_indices": data["top_k_indices"],
+      }
+      for key in ["inputs_position", "inputs_segmentation", "targets_segmentation", "targets"]:
+        if key in data:
+          self.buffer[key] = data[key]
+      self.buffer_idx = 0
       
+<<<<<<< HEAD
       self._open_current_file()
 
     record = self.reader.read()
@@ -124,12 +227,56 @@ class OfflineArrayRecordIterator:
         "inputs": data["tokens"],
         "top_k_logits": data["top_k_logits"],
         "top_k_indices": data["top_k_indices"],
+=======
+  def get_state(self):
+    """Returns the state of the iterator for checkpointing."""
+    import json
+    state_dict = {
+        "file_index": self.file_index,
+        "record_index": self.record_index,
+        "current_epoch": self.current_epoch,
+        "buffer_idx": self.buffer_idx
+>>>>>>> 10a1e66f4 (fixed sparsecore offloading issue by updating the offline arrayrecord)
     }
-    for key in ["inputs_position", "inputs_segmentation", "targets_segmentation", "targets"]:
-      if key in data:
-        batch[key] = data[key]
+    return json.dumps(state_dict).encode("utf-8")
 
-    return batch
+  def set_state(self, state_bytes):
+    """Restores the state of the iterator from a checkpoint."""
+    import json
+    import pickle
+    state_dict = json.loads(state_bytes.decode("utf-8"))
+    self.file_index = state_dict["file_index"]
+    self.current_epoch = state_dict["current_epoch"]
+    self.buffer_idx = state_dict.get("buffer_idx", 0)
+    target_record_index = state_dict["record_index"]
+
+    self._open_current_file()
+
+    # Fast forward up to the record that populated the buffer (if any)
+    records_to_skip = target_record_index - 1 if self.buffer_idx > 0 else target_record_index
+    for _ in range(max(0, records_to_skip)):
+      self.reader.read()
+      self.record_index += 1
+
+    # Repopulate the buffer if we were in the middle of a sliced record
+    if self.buffer_idx > 0 and target_record_index > 0:
+      record = self.reader.read()
+      self.record_index += 1
+      data = pickle.loads(record)
+      self.buffer = {
+          "inputs": data["tokens"],
+          "top_k_logits": data["top_k_logits"],
+          "top_k_indices": data["top_k_indices"],
+      }
+      for key in ["inputs_position", "inputs_segmentation", "targets_segmentation", "targets"]:
+        if key in data:
+          self.buffer[key] = data[key]
+    else:
+      self.buffer = None
+      # Ensure reader is exactly at the target index
+      while self.record_index < target_record_index:
+        self.reader.read()
+        self.record_index += 1
 
 
 class MaxTextToTunixIterator:
@@ -546,13 +693,67 @@ class CombinedDistillationStrategy(DistillationStrategy):
     valid_count = jnp.sum(mask)
     safe_count = jnp.maximum(valid_count, 1.0)
 
+    # # --- Soft loss: KL on temperature-softened distributions ---
+    # log_s_T = jax.nn.log_softmax(s_logits / temperature, axis=-1)
+    # t_p_T = jax.nn.softmax(t_logits / temperature, axis=-1)
+    # # KL(teacher || student) per position. optax.kl_divergence(log_pred, target) = KL(target || pred).
+    # kl_softened_per_pos = optax.kl_divergence(log_s_T, t_p_T)  # [B, T]
+    # kl_softened_sum = jnp.sum(kl_softened_per_pos * mask)
+    # # Scale by T^2 (Hinton). Apply once at the loss; logged metric is the scaled sum too.
+    # soft_loss_sum_scaled = kl_softened_sum * (temperature**2)
+    # soft_loss_mean = soft_loss_sum_scaled / safe_count
+
+    # # --- Hard loss: student CE against ground-truth ---
+    # ce_student_per_pos = optax.softmax_cross_entropy(logits=s_logits, labels=labels)
+    # ce_student_sum = jnp.sum(ce_student_per_pos * mask)
+    # hard_loss_mean = ce_student_sum / safe_count
+
+    # # --- Teacher CE (verification metric) ---
+    # ce_teacher_per_pos = optax.softmax_cross_entropy(logits=t_logits, labels=labels)
+    # ce_teacher_sum = jnp.sum(ce_teacher_per_pos * mask)
+
+    # # --- Always-T=1 KL for cross-run / cross-anneal comparability ---
+    # log_s_1 = jax.nn.log_softmax(s_logits, axis=-1)
+    # t_p_1 = jax.nn.softmax(t_logits, axis=-1)
+    # kl_t1_per_pos = optax.kl_divergence(log_s_1, t_p_1)
+    # kl_t1_sum = jnp.sum(kl_t1_per_pos * mask)
+    
     # --- Soft loss: KL on temperature-softened distributions ---
-    log_s_T = jax.nn.log_softmax(s_logits / temperature, axis=-1)
-    t_p_T = jax.nn.softmax(t_logits / temperature, axis=-1)
-    # KL(teacher || student) per position. optax.kl_divergence(log_pred, target) = KL(target || pred).
-    kl_softened_per_pos = optax.kl_divergence(log_s_T, t_p_T)  # [B, T]
+    if getattr(teacher_output, "top_k_indices", None) is not None:
+      # --- SPARSE KL DIVERGENCE (Offline Mode) ---
+      # 1. Normalize teacher probabilities ONLY over the saved Top-K subset
+      t_p_T_sparse = jax.nn.softmax(t_logits / temperature, axis=-1)
+      log_t_p_T_sparse = jax.nn.log_softmax(t_logits / temperature, axis=-1)
+
+      # 2. Student log-probs must be computed over the FULL vocabulary to be mathematically valid
+      log_s_T_full = jax.nn.log_softmax(s_logits / temperature, axis=-1)
+      
+      # 3. Gather Student log-probs at the Teacher's exact Top-K indices
+      log_s_T_sparse = jnp.take_along_axis(log_s_T_full, teacher_output.top_k_indices, axis=-1)
+      
+      # 4. KL(T || S) = Sum_over_TopK( P_T * (log_P_T - log_P_S) )
+      kl_softened_per_pos = jnp.sum(t_p_T_sparse * (log_t_p_T_sparse - log_s_T_sparse), axis=-1)
+      
+      # We don't have the full teacher logits to compute exact cross-entropy, so we zero it out
+      ce_teacher_per_pos = jnp.zeros_like(kl_softened_per_pos)
+      kl_t1_sum = jnp.array(0.0) 
+      
+    else:
+      # --- DENSE KL DIVERGENCE (Online Mode) ---
+      log_s_T = jax.nn.log_softmax(s_logits / temperature, axis=-1)
+      t_p_T = jax.nn.softmax(t_logits / temperature, axis=-1)
+      kl_softened_per_pos = optax.kl_divergence(log_s_T, t_p_T)  # [B, T]
+      
+      # --- Teacher CE (verification metric) ---
+      ce_teacher_per_pos = optax.softmax_cross_entropy(logits=t_logits, labels=labels)
+      
+      # --- Always-T=1 KL ---
+      log_s_1 = jax.nn.log_softmax(s_logits, axis=-1)
+      t_p_1 = jax.nn.softmax(t_logits, axis=-1)
+      kl_t1_per_pos = optax.kl_divergence(log_s_1, t_p_1)
+      kl_t1_sum = jnp.sum(kl_t1_per_pos * mask)
+
     kl_softened_sum = jnp.sum(kl_softened_per_pos * mask)
-    # Scale by T^2 (Hinton). Apply once at the loss; logged metric is the scaled sum too.
     soft_loss_sum_scaled = kl_softened_sum * (temperature**2)
     soft_loss_mean = soft_loss_sum_scaled / safe_count
 
@@ -560,16 +761,8 @@ class CombinedDistillationStrategy(DistillationStrategy):
     ce_student_per_pos = optax.softmax_cross_entropy(logits=s_logits, labels=labels)
     ce_student_sum = jnp.sum(ce_student_per_pos * mask)
     hard_loss_mean = ce_student_sum / safe_count
-
-    # --- Teacher CE (verification metric) ---
-    ce_teacher_per_pos = optax.softmax_cross_entropy(logits=t_logits, labels=labels)
+    
     ce_teacher_sum = jnp.sum(ce_teacher_per_pos * mask)
-
-    # --- Always-T=1 KL for cross-run / cross-anneal comparability ---
-    log_s_1 = jax.nn.log_softmax(s_logits, axis=-1)
-    t_p_1 = jax.nn.softmax(t_logits, axis=-1)
-    kl_t1_per_pos = optax.kl_divergence(log_s_1, t_p_1)
-    kl_t1_sum = jnp.sum(kl_t1_per_pos * mask)
 
     base_logit_loss = (alpha * soft_loss_mean) + ((1.0 - alpha) * hard_loss_mean)
 

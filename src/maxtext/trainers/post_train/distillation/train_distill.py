@@ -738,7 +738,15 @@ def train_distill(
     # We use MaxText's native create_data_iterator which creates both train and eval iterators
     if is_offline:
       max_logging.log(f"Loading Offline Dataset from {offline_data_dir}...")
-      raw_train_iter = distillation_utils.OfflineArrayRecordIterator(offline_data_dir)
+      
+      target_global_batch_size = student_config.per_device_batch_size * jax.device_count()
+      
+      raw_train_iter = distillation_utils.OfflineArrayRecordIterator(
+          offline_data_dir, 
+          global_batch_size=target_global_batch_size,
+          mesh=mesh,
+          data_sharding=student_config.data_sharding
+      )
       raw_eval_iter = None
     else:
       max_logging.log("Initializing Data Iterators via MaxText pipeline...")
@@ -769,13 +777,18 @@ def train_distill(
         return inputs_dict
 
       # Scatter the offline arrays into a dense tensor of -10000s
-      dense_shape = batch.input_tokens.shape + (student_config.vocab_size,)
-      dense_logits = jnp.full(dense_shape, -10000.0, dtype=jnp.float32)
-      dense_logits = jnp.put_along_axis(dense_logits, batch.top_k_indices, batch.top_k_logits, axis=-1, inplace=False)
+      # dense_shape = batch.input_tokens.shape + (student_config.vocab_size,)
+      # dense_logits = jnp.full(dense_shape, -10000.0, dtype=jnp.float32)
+      # dense_logits = jnp.put_along_axis(dense_logits, batch.top_k_indices, batch.top_k_logits, axis=-1, inplace=False)
 
-      # Inject it as teacher_output so the trainer skips the teacher forward pass
+      # # Inject it as teacher_output so the trainer skips the teacher forward pass
+      # inputs_dict["teacher_output"] = distillation_utils.DistillationForwardOutput(
+      #     logits=dense_logits, out_projection_activations=None
+      # )
       inputs_dict["teacher_output"] = distillation_utils.DistillationForwardOutput(
-          logits=dense_logits, out_projection_activations=None
+          logits=batch.top_k_logits, 
+          out_projection_activations=None,
+          top_k_indices=batch.top_k_indices
       )
       return inputs_dict
 
