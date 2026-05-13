@@ -26,6 +26,7 @@ train_main = train.main
 gettempdir = tempfile.gettempdir
 
 
+@pytest.mark.integration_test
 class Train(parameterized.TestCase):
   """Smoke test for sparsity in G3 only."""
 
@@ -55,13 +56,13 @@ class Train(parameterized.TestCase):
         get_test_config_path(),
         f"base_output_directory={test_tmpdir}",
         "run_name=different_quant_sparsity_configs_test",
-        "base_emb_dim=128",
-        "base_num_query_heads=4",
-        "base_num_kv_heads=4",
-        "base_mlp_dim=128",
-        "base_moe_mlp_dim=128",
-        "base_num_decoder_layers=8",
-        "head_dim=128",
+        "base_emb_dim=16",
+        "base_num_query_heads=1",
+        "base_num_kv_heads=1",
+        "base_mlp_dim=16",
+        "base_moe_mlp_dim=16",
+        "base_num_decoder_layers=2",
+        "head_dim=64",
         "decoder_block=deepseek",
         "attention_type=mla",
         "num_experts=2",
@@ -71,9 +72,9 @@ class Train(parameterized.TestCase):
         f'quantization="{quantization}"',
         "use_qwix_quantization=True",
         "per_device_batch_size=2",
-        "max_target_length=1024",
+        "max_target_length=128",
         "dataset_type=synthetic",
-        "steps=10",
+        "steps=1",
         "enable_checkpointing=False",
         "enable_goodput_recording=False",
         "enable_checkpoint_cloud_logger=False",

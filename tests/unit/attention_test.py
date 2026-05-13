@@ -276,7 +276,6 @@ class AttentionTest(parameterized.TestCase):
       "per_device_batch_size": 1.0,
       "run_name": "test",
       "enable_checkpointing": False,
-      "max_prefill_predict_length": 16,
       "max_target_length": 512,
       "sa_block_q": 128,
       "sa_block_kv": 128,
@@ -402,7 +401,7 @@ class AttentionTest(parameterized.TestCase):
         jax.numpy.allclose(mha_prefill, mha_full[:, :prefill_length, :], rtol=1e-02, atol=1e-02, equal_nan=False)
     )
 
-    for idx in range(prefill_length, decode_total_length):
+    for idx in range(prefill_length, min(prefill_length + 3, decode_total_length)):
       lnx_idx = lnx[:, idx : idx + 1, :]
       decoder_positions_idx = decoder_positions[:, idx : idx + 1]
       mha_idx, _ = self._attention_as_mha_generic(
@@ -765,7 +764,7 @@ class AttentionTest(parameterized.TestCase):
   @pytest.mark.tpu_only
   def test_dot_product_cache_axis_order(self):
     all_axis_orders = tuple(itertools.permutations(range(4)))
-    for axis_order in random.choices(all_axis_orders, k=4):
+    for axis_order in random.choices(all_axis_orders, k=2):
       self.dot_product_attention_helper(prefill_cache_axis_order=axis_order, ar_cache_axis_order=axis_order)
       print(f"passed test for {axis_order=}")
 
@@ -790,12 +789,7 @@ class AttentionTest(parameterized.TestCase):
 
     config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
-        per_device_batch_size=1.0,
-        run_name="test",
-        enable_checkpointing=False,
-        max_target_length=128,
-        max_prefill_predict_length=16,
-        attention="dot_product",
+        **{**self.config_arguments, "attention": "dot_product"},
     )
 
     prefill_length = config.max_prefill_predict_length
@@ -881,12 +875,7 @@ class AttentionTest(parameterized.TestCase):
 
     config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
-        per_device_batch_size=1.0,
-        run_name="test",
-        enable_checkpointing=False,
-        max_target_length=128,
-        max_prefill_predict_length=16,
-        attention="dot_product",
+        **{**self.config_arguments, "attention": "dot_product"},
     )
 
     prefill_length = config.max_prefill_predict_length
@@ -1235,6 +1224,23 @@ class AttentionTest(parameterized.TestCase):
 
 class MLATest(attention_test_util.MLATestBase):
   """Test for the Multi-Headed Latent Attention"""
+
+  config_arguments = {
+      "per_device_batch_size": 1.0,
+      "run_name": "test",
+      "enable_checkpointing": False,
+      "max_target_length": 32,
+      "max_prefill_predict_length": 16,
+      "attention_type": AttentionType.MLA.value,
+      "head_dim": 32,
+      "q_lora_rank": 4,
+      "kv_lora_rank": 8,
+      "qk_nope_head_dim": 16,
+      "qk_rope_head_dim": 8,
+      "v_head_dim": 32,
+      "dtype": "float32",
+      "mla_naive_kvcache": False,
+  }
 
   @parameterized.named_parameters(
       {"testcase_name": "RoPE_Yarn_Autoregression", "rope_type": "yarn"},

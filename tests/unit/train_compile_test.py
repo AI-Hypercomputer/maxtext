@@ -22,8 +22,10 @@ for different hardware topologies.
 from absl.testing import parameterized
 import jax
 from jax.experimental.serialize_executable import serialize
+import os
 import os.path
 import pickle
+from jax.experimental.compilation_cache import compilation_cache
 import pytest
 from tempfile import gettempdir, NamedTemporaryFile
 import transformers
@@ -33,6 +35,13 @@ from maxtext.checkpoint_conversion.utils.hf_model_configs import DeepseekV32Conf
 from maxtext.configs import pyconfig
 from maxtext.trainers.pre_train.train_compile import main as train_compile_main
 from tests.utils.test_helpers import get_test_config_path
+
+# Enable JAX compilation cache for testing to speed up AOT compilation
+try:
+  if os.getenv("JAX_PLATFORMS") != "proxy":
+    compilation_cache.set_cache_dir(os.path.join(gettempdir(), "jax_compile_test_cache"))
+except Exception:  # pylint: disable=broad-exception-caught
+  pass
 
 
 @pytest.mark.tpu_backend
@@ -944,11 +953,11 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   @parameterized.named_parameters(
       {"testcase_name": "dot_product", "attention": "dot_product"},
       {"testcase_name": "tokamax_splash", "attention": "flash"},
   )
+  @pytest.mark.cpu_only
   def test_qk_clip(self, attention):
     """AOT test for AdamW optimizer with QK clip for DeepSeek3 Tiny model"""
     compiled_trainstep_file = "/tmp/test_qk_clip.pickle"
@@ -977,11 +986,11 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   @parameterized.named_parameters(
       {"testcase_name": "consistent_rms_scaling", "muon_consistent_rms": 0.2},
       {"testcase_name": "width_scaling", "muon_consistent_rms": None},
   )
+  @pytest.mark.cpu_only
   def test_muon(self, muon_consistent_rms):
     """AOT test for Muon optimizer for DeepSeek3 Tiny model"""
     compiled_trainstep_file = "/tmp/test_muon.pickle"

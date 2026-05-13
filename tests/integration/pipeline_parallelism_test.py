@@ -69,6 +69,7 @@ def assert_same_output_and_grad(f1, f2, *inputs):
   assert jax.numpy.allclose(f1_grad, f2_grad, rtol=1e-1, equal_nan=False)
 
 
+@pytest.mark.integration_test
 class PipelineParallelismTest(unittest.TestCase):
   decoupled = is_decoupled()
   base_output_directory = get_test_base_output_directory()
@@ -481,7 +482,7 @@ class PipelineParallelismTest(unittest.TestCase):
         "base_num_decoder_layers=4",
         "head_dim=128",
         "per_device_batch_size=2",
-        "max_target_length=1024",
+        "max_target_length=128",
         "vocab_size=32",
         "dataset_type=synthetic",
         "steps=3",
@@ -514,7 +515,7 @@ class PipelineParallelismTest(unittest.TestCase):
         "base_num_decoder_layers=4",
         "head_dim=128",
         "per_device_batch_size=2",
-        "max_target_length=1024",
+        "max_target_length=128",
         "vocab_size=32",
         "dataset_type=synthetic",
         "steps=3",

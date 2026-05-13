@@ -47,6 +47,13 @@ class MultiTokenPredictionLayerTest(unittest.TestCase):
         run_name="multi_token_prediction_layer_test",
         skip_jax_distributed_system=True,
         per_device_batch_size=8,
+        base_emb_dim=16,
+        base_mlp_dim=32,
+        base_num_query_heads=4,
+        base_num_kv_heads=4,
+        head_dim=8,
+        max_target_length=128,
+        vocab_size=128,
         **extra_args,
     )
     self.rng = jax.random.PRNGKey(42)  # Base RNG for setup
@@ -205,6 +212,12 @@ class MultiTokenPredictionBlockTest(unittest.TestCase):
         skip_jax_distributed_system=True,
         mtp_num_layers=2,
         base_emb_dim=16,
+        base_mlp_dim=32,
+        base_num_query_heads=4,
+        base_num_kv_heads=4,
+        head_dim=8,
+        max_target_length=128,
+        vocab_size=128,
         **extra_args,
     )
     self.nnx_rngs = nnx.Rngs(params=0)
