@@ -1604,7 +1604,7 @@ class MaxEngine(_BaseEngine):
       )
       dummy_image = jnp.ones(
           mm_processor.get_dummy_image_shape_for_init(
-              model_name=self.config.model_name, batch_size=self.config.per_device_batch_size
+              model_name=self.config.model_name, batch_size=int(self.config.per_device_batch_size * self.mesh.size)
           ),
           dtype=jnp.int32,
       )

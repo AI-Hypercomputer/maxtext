@@ -43,7 +43,7 @@ from maxtext.layers.linears import DenseGeneral, MlpBlock
 from maxtext.layers.moe import RoutedMoE
 from maxtext.layers.initializers import nd_dense_init, variable_to_logically_partitioned
 
-from maxtext.utils import max_utils
+from maxtext.utils import max_utils, max_logging
 from maxtext.inference import page_manager, kvcache
 
 
@@ -381,7 +381,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
   2. output = Linear_out(y)
   """
 
-  def __init__(self, config: Config, dtype: DType = jnp.float32, model_mode: str = MODEL_MODE_TRAIN, *, rngs: nnx.Rngs):
+  def __init__(self, config: Config, inputs_shape: tuple, dtype: DType = jnp.float32, model_mode: str = MODEL_MODE_TRAIN, *, rngs: nnx.Rngs):
     """
     Args:
       config: MaxText configuration object.
@@ -402,15 +402,29 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     self.v_heads_per_k_head = self.num_v_heads // self.num_k_heads
 
     if model_mode != MODEL_MODE_TRAIN:
-      self.cache = kvcache.GatedDeltaNetCache(
-          batch=config.per_device_batch_size,
-          num_heads=self.num_v_heads,
-          k_head_dim=self.head_k_dim,
-          v_head_dim=self.head_v_dim,
-          conv_kernel_size=self.config.gdn_conv_kernel_dim,
-          conv_dim=conv_dim,
+      runtime_batch_size = 16
+
+      print(f"[DEBUG GDN] Initializing KVCache with batch={runtime_batch_size}", flush=True)
+
+      self.cache = kvcache.KVCache(
+          max_prefill_length=cfg.max_prefill_predict_length,
+          max_target_length=cfg.max_target_length,
+          batch=runtime_batch_size,
+          key_seq_len=1,
+          value_seq_len=1,
+          key_heads=self.num_v_heads,
+          value_heads=self.num_v_heads,
+          key_head_size=self.head_k_dim,
+          value_head_size=self.head_v_dim,
           dtype=dtype,
+          is_gdn=True,
+          conv_kernel_size=conv_kernel_size,
+          conv_dim=conv_dim,
+          model_mode=model_mode,
+          rngs=rngs,
       )
+    else:
+      self.cache = None
 
     # Submodule instantiations
     self.in_proj_qkvz = DenseGeneral(
@@ -483,6 +497,8 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     cfg = self.config
     batch, seq_len, _ = hidden_states.shape
 
+    active_cache = kv_cache if kv_cache is not None else self.cache
+
     # =========================================================================
     # STEP A: Input Projections
     # =========================================================================
@@ -554,33 +570,51 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     conv_kernel_size = self.config.gdn_conv_kernel_dim
 
     conv_state = None
-    if model_mode != MODEL_MODE_TRAIN:
-      # Retrieve state from self.cache
-      conv_state = self.cache.conv_state[...]
+    recurrent_state = None
+    next_conv_state = None
+    if model_mode != MODEL_MODE_TRAIN and active_cache is not None:
+      recurrent_state, conv_state = active_cache.get_gdn_states()
+      orig_cache_batch = conv_state.shape[0]
+
+      # 1. Safely shrink/expand conv_state to match incoming qkv (e.g. 16 -> 1)
       if conv_state.shape[0] != batch:
-        # Assumes zero-initialized state for testing
         if conv_state.shape[0] == 1:
           conv_state = jnp.broadcast_to(conv_state, (batch,) + conv_state.shape[1:])
+        elif conv_state.shape[0] < batch:
+          pad_amt = batch - conv_state.shape[0]
+          conv_state = jnp.pad(conv_state, ((0, pad_amt), (0, 0), (0, 0)))
         else:
           conv_state = conv_state[:batch]
 
-      # Concatenate previous state with new input
+      # 2. Safely shrink/expand recurrent_state to match incoming qkv
+      if recurrent_state.shape[0] != batch:
+        if recurrent_state.shape[0] == 1:
+          recurrent_state = jnp.broadcast_to(recurrent_state, (batch,) + recurrent_state.shape[1:])
+        elif recurrent_state.shape[0] < batch:
+          pad_amt = batch - recurrent_state.shape[0]
+          recurrent_state = jnp.pad(recurrent_state, ((0, pad_amt), (0, 0), (0, 0), (0, 0)))
+        else:
+          recurrent_state = recurrent_state[:batch]
+
+      # ---> ADD THESE DEBUG LOGS <---
+      print(f"\n[DEBUG CALL] Executing __call__ in mode: {model_mode}", flush=True)
+      print(f"[DEBUG CALL] Incoming hidden_states shape: {hidden_states.shape}", flush=True)
+      print(f"[DEBUG CALL] Incoming qkv shape: {qkv.shape}", flush=True)
+      print(f"[DEBUG CALL] Retrieved conv_state shape: {conv_state.shape}", flush=True)
+      print(f"[DEBUG CALL] Retrieved recurrent_state shape: {recurrent_state.shape}\n", flush=True)
+
       conv_input = jnp.concatenate([conv_state, qkv], axis=1)
 
       if decoder_segment_ids is not None:
-        valid_lens = jnp.sum(decoder_segment_ids != 0, axis=1)  # Shape: (B,)
+        valid_lens = jnp.sum(decoder_segment_ids != 0, axis=1)
 
         def extract_state(c_in, v_len):
           return jax.lax.dynamic_slice_in_dim(c_in, v_len, conv_kernel_size - 1, axis=0)
 
-        new_conv_state = jax.vmap(extract_state)(conv_input, valid_lens)
+        next_conv_state = jax.vmap(extract_state)(conv_input, valid_lens)
       else:
-        new_conv_state = conv_input[:, -(conv_kernel_size - 1) :, :]
-
-      # Update self.cache in place
-      self.cache.conv_state.set_value(new_conv_state)
+        next_conv_state = conv_input[:, -(conv_kernel_size - 1) :, :]
     else:
-      # Train: pad with zeros
       conv_input = jnp.pad(qkv, ((0, 0), (conv_kernel_size - 1, 0), (0, 0)))
 
     # Perform the convolution.
@@ -592,7 +626,6 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     q_conv, k_conv, v_conv = jnp.split(qkv_conv, [self.key_dim, 2 * self.key_dim], axis=-1)
 
     # Reshape for multi-head processing
-    batch, seq_len, _ = hidden_states.shape
     # query shape: (B, S, H_k, D_k)
     query = q_conv.reshape(batch, seq_len, self.num_k_heads, self.head_k_dim)
     # key shape: (B, S, H_k, D_k)
@@ -623,21 +656,8 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       query = jnp.repeat(query, repeats, axis=2)
       # key shape after repeat: (B, S, H_v, D_k)
       key = jnp.repeat(key, repeats, axis=2)
-    elif self.num_k_heads > self.num_v_heads and self.num_k_heads % self.num_v_heads == 0:
-      pass
 
-    recurrent_state = None
-    if model_mode != MODEL_MODE_TRAIN:
-      # Retrieve state from self.cache
-      recurrent_state = self.cache.recurrent_state[...]
-
-      if recurrent_state.shape[0] != batch:
-        if recurrent_state.shape[0] == 1:
-          recurrent_state = jnp.broadcast_to(recurrent_state, (batch,) + recurrent_state.shape[1:])
-        else:
-          recurrent_state = recurrent_state[:batch]
-
-    core_attn_out, recurrent_state_out = jax_chunk_gated_delta_rule(
+    core_attn_out, next_recurrent_state = jax_chunk_gated_delta_rule(
         query,
         key,
         value,
@@ -649,9 +669,21 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         compute_dtype=cfg.dtype,
     )
 
-    if model_mode != MODEL_MODE_TRAIN:
-      # Update self.cache in place for both prefill and decode
-      self.cache.recurrent_state.set_value(recurrent_state_out)
+    if model_mode != MODEL_MODE_TRAIN and active_cache is not None:
+      if next_conv_state.shape[0] != orig_cache_batch:
+        if next_conv_state.shape[0] == 1:
+          next_conv_state = jnp.broadcast_to(next_conv_state, (orig_cache_batch,) + next_conv_state.shape[1:])
+          next_recurrent_state = jnp.broadcast_to(next_recurrent_state, (orig_cache_batch,) + next_recurrent_state.shape[1:])
+        elif next_conv_state.shape[0] < orig_cache_batch:
+          pad_amt = orig_cache_batch - next_conv_state.shape[0]
+          next_conv_state = jnp.pad(next_conv_state, ((0, pad_amt), (0, 0), (0, 0)))
+          next_recurrent_state = jnp.pad(next_recurrent_state, ((0, pad_amt), (0, 0), (0, 0), (0, 0)))
+        else:
+          next_conv_state = next_conv_state[:orig_cache_batch]
+          next_recurrent_state = next_recurrent_state[:orig_cache_batch]
+
+    if model_mode != MODEL_MODE_TRAIN and active_cache is not None:
+      active_cache.update_gdn_states(next_recurrent_state, next_conv_state)
 
     # =========================================================================
     # STEP D: Final Output Stage
@@ -669,7 +701,31 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # Final output shape: (B, S, E)
     output = self.out_proj(gated_output)
 
-    return output
+    return output, active_cache
+
+  def init_kv_caches(self, batch_size: int):
+    """Initializes KVCache dynamically using the traced runtime batch size."""
+    cfg = self.config
+    conv_dim = self.key_dim * 2 + self.value_dim
+    conv_kernel_size = cfg.gdn_conv_kernel_dim
+
+    return kvcache.KVCache(
+        max_prefill_length=cfg.max_prefill_predict_length,
+        max_target_length=cfg.max_target_length,
+        batch=batch_size,  # Injected directly from the JAX tracer
+        key_seq_len=1,
+        value_seq_len=1,
+        key_heads=self.num_v_heads,
+        value_heads=self.num_v_heads,
+        key_head_size=self.head_k_dim,
+        value_head_size=self.head_v_dim,
+        dtype=self.dtype,
+        is_gdn=True,
+        conv_kernel_size=conv_kernel_size,
+        conv_dim=conv_dim,
+        model_mode=self.model_mode,
+        rngs=self.rngs,
+    )
 
 
 class Qwen3NextFullAttention(nnx.Module):
@@ -986,7 +1042,19 @@ class Qwen3NextDecoderLayer(nnx.Module):
           rngs=rngs,
       )
     else:
-      self.attention = Qwen3NextGatedDeltaNet(config=cfg, dtype=cfg.dtype, model_mode=model_mode, rngs=rngs)
+      batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config, model_mode)
+      dummy_inputs_shape = (
+          batch_size,
+          seq_len,
+          config.emb_dim
+      )
+      self.attention = Qwen3NextGatedDeltaNet(
+          config=cfg,
+          inputs_shape=dummy_inputs_shape,
+          dtype=cfg.dtype,
+          model_mode=model_mode,
+          rngs=rngs
+      )
 
     # Second LayerNorm, applied before the MoE block.
     self.post_attention_layernorm = Qwen3NextRMSNorm(
@@ -1034,13 +1102,12 @@ class Qwen3NextDecoderLayer(nnx.Module):
           attention_metadata=attention_metadata,
       )
     else:
-      attention_output = cast(Qwen3NextGatedDeltaNet, self.attention)(
+      attention_output, new_kv_cache = cast(Qwen3NextGatedDeltaNet, self.attention)(
           hidden_states,
           model_mode=model_mode,
-          kv_cache=None,
+          kv_cache=kv_cache,
           decoder_segment_ids=decoder_segment_ids,
       )
-      new_kv_cache = None
 
     # First residual connection after attention
     hidden_states = residual + attention_output
