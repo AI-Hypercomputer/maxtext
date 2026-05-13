@@ -1805,8 +1805,9 @@ class NNXCircularPipeline(NNXPipelineBase):
         "scan_vjp_fn+weight_prefetching_t as residuals"
     )
     max_logging.log(
-        "[PIPELINE-DIAG] NNX uses jax.lax.scan (no nn.scan), "
-        "no variable_broadcast, no split_rngs"
+        "[PIPELINE-DIAG] NNX outer repeat scan: "
+        f"scan_pipeline_repeats={self.config.scan_pipeline_repeats} "
+        f"(False=unrolled for-loop matching Linen)"
     )
     # C-1 gap: total carry leaf count
     initial_carry = (loop_state, initial_w_curr)
@@ -1867,7 +1868,13 @@ class NNXCircularPipeline(NNXPipelineBase):
       )
       return (new_loop_st, w_next), None
 
-    if self.config.scan_pipeline_iterations:
+    # FIX: Use scan_pipeline_repeats (not scan_pipeline_iterations) to
+    # control the outer repeat scan — matching Linen's
+    # create_flax_pipeline_scan(use_scan=config.scan_pipeline_repeats).
+    # With scan_pipeline_repeats=False, the outer loop is fully unrolled
+    # (Python for-loop), which lets XLA see each repeat as a separate
+    # closed_call and split inner while-loops for buffer reuse.
+    if self.config.scan_pipeline_repeats:
       (loop_state, final_w_curr), _ = jax.lax.scan(
           outer_body,
           (loop_state, initial_w_curr),
@@ -1913,7 +1920,7 @@ class NNXCircularPipeline(NNXPipelineBase):
 
     if bubble_iterations > 0:
       bsw_ref[0] = (final_w_curr, final_w_curr)
-      if self.config.scan_pipeline_iterations:
+      if self.config.scan_pipeline_repeats:
         loop_state, _ = jax.lax.scan(bubble_inner_body, loop_state, None, length=bubble_iterations)
       else:
         for _ in range(bubble_iterations):
