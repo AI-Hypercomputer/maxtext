@@ -872,6 +872,13 @@ class Decoder(nn.Module):
           if cfg.pipeline_fsdp_ag_once or cfg.pipeline_fsdp_ag_per_repeat
           else None
       )
+      max_logging.log(
+          f"[DECODER-DIAG] invoking pipeline: "
+          f"y={y.shape}/{y.dtype}, "
+          f"class={self.pipeline_module.__class__.__name__}, "
+          f"ag_per_repeat={cfg.pipeline_fsdp_ag_per_repeat}, "
+          f"has_lps={logical_partition_spec is not None}"
+      )
       if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
         assert len(RemattedBlockLayers) == 2, "Scanned layers must have a length of 2 using deepseek."
         dense_layer = RemattedBlockLayers[0]

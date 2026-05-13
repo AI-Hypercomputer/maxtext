@@ -1360,6 +1360,14 @@ class NNXCircularPipeline(NNXPipelineBase):
       new_layer_state = nnx.State.merge(else_metrics, else_mutables)
 
     new_state = self.get_new_loop_state(stages_output, loop_state)
+    from maxtext.utils import max_logging as _ml
+    nls_leaves = jax.tree.leaves(new_layer_state)
+    _ml.log(
+        f"[PIPELINE-DIAG] run_one_iteration: "
+        f"output={stages_output.shape}, "
+        f"new_layer_state={len(nls_leaves)} leaves "
+        f"(metrics+mutables after scatter-back)"
+    )
     return new_state, new_layer_state
 
   def __call__(
@@ -1433,6 +1441,40 @@ class NNXCircularPipeline(NNXPipelineBase):
 
     _, layers_params, layers_metrics, layers_mutables = nnx.split(layers_state, _is_static_param, nnx.Intermediate, ...)
 
+    from maxtext.utils import max_logging
+    p_leaves = jax.tree.leaves(layers_params)
+    m_leaves = jax.tree.leaves(layers_metrics)
+    mut_leaves = jax.tree.leaves(layers_mutables)
+    max_logging.log(
+        f"[PIPELINE-DIAG] NNXCircularPipeline.__call__: "
+        f"inputs={inputs.shape}, "
+        f"bubble_iterations={bubble_iterations}, "
+        f"num_repeats={self.config.num_pipeline_repeats}, "
+        f"num_microbatches={self.config.num_pipeline_microbatches}"
+    )
+    max_logging.log(
+        f"[PIPELINE-DIAG]   layers_params: {len(p_leaves)} leaves, "
+        f"{sum(getattr(l, 'nbytes', 0) for l in p_leaves) / 1e9:.3f} GB"
+    )
+    max_logging.log(
+        f"[PIPELINE-DIAG]   layers_metrics: {len(m_leaves)} leaves "
+        f"(flow as L2 scan ys for XLA fission)"
+    )
+    if m_leaves:
+      max_logging.log(
+          f"[PIPELINE-DIAG]   metrics shapes: "
+          f"{[l.shape for l in m_leaves[:5]]}"
+      )
+    else:
+      max_logging.log(
+          "[PIPELINE-DIAG]   WARNING: 0 metrics leaves — "
+          "no independent dataflow for XLA fission"
+      )
+    max_logging.log(
+        f"[PIPELINE-DIAG]   layers_mutables: {len(mut_leaves)} leaves "
+        f"(in carry as lightweight_state)"
+    )
+
     # layers_mutables catch-all should contain ONLY RngState variables (RngKey/RngCount).
     # If non_trainable state (e.g. BatchStat) appears here,
     # it is being carried through scan instead of broadcast.
@@ -1505,11 +1547,20 @@ class NNXCircularPipeline(NNXPipelineBase):
             model_mode,
             logical_partition_spec_stripped,
         )
-        _, _, _, new_mut = nnx.split(new_layer_state, _is_static_param, nnx.Intermediate, ...)
-        return (new_loop_st, new_mut)
+        _, _, new_metrics, new_mut = nnx.split(
+            new_layer_state, _is_static_param, nnx.Intermediate, ...
+        )
+        return (new_loop_st, new_mut), new_metrics
 
       forward_remat = jax.remat(_forward, policy=self.get_pipeline_remat_policy())
       output, vjp_fn = jax.vjp(forward_remat, lightweight_state, bsw)
+      (carry_out, metrics_out) = output
+      max_logging.log(
+          f"[PIPELINE-DIAG] L1 fwd: "
+          f"carry_leaves={len(jax.tree.leaves(carry_out))}, "
+          f"metrics_leaves={len(jax.tree.leaves(metrics_out))} "
+          f"(scan ys for fission)"
+      )
       return output, vjp_fn
 
     def _single_mb_bwd(vjp_fn, g_output):
@@ -1519,6 +1570,10 @@ class NNXCircularPipeline(NNXPipelineBase):
     run_single_microbatch.defvjp(_single_mb_fwd, _single_mb_bwd)
 
     # ---- Level 2: gradient accumulation scan ----
+    # Collect metrics as scan ys (not None) to create independent
+    # dataflow subgraphs in the while-loop body. This matches Linen's
+    # nn.scan(variable_axes={summaries:0, intermediates:0, ...}) pattern
+    # which triggers XLA memory_bound_loop_optimizer to split loops.
 
     @jax.custom_vjp
     def run_pipeline_microbatches(lightweight_state, bsw):
@@ -1527,14 +1582,27 @@ class NNXCircularPipeline(NNXPipelineBase):
     def _microbatches_fwd(lightweight_state, bsw):
       final_state, scan_vjp_fn = jax.vjp(
           lambda state, weights: jax.lax.scan(
-              lambda carry, _: (run_single_microbatch(carry, weights), None),
+              lambda carry, _: run_single_microbatch(carry, weights),
               state,
               None,
               length=num_microbatches,
-          )[0],
+          ),
           lightweight_state,
           bsw,
       )
+      final_carry, stacked_ys = final_state
+      max_logging.log(
+          f"[PIPELINE-DIAG] L2 fwd: "
+          f"carry_leaves={len(jax.tree.leaves(final_carry))}, "
+          f"stacked_ys_leaves={len(jax.tree.leaves(stacked_ys))}, "
+          f"bsw_leaves={len(jax.tree.leaves(bsw))}, "
+          f"scan_length={num_microbatches}"
+      )
+      if jax.tree.leaves(stacked_ys):
+        ys_shapes = [l.shape for l in jax.tree.leaves(stacked_ys)[:3]]
+        max_logging.log(
+            f"[PIPELINE-DIAG]   stacked_ys shapes (first 3): {ys_shapes}"
+        )
       return (final_state, bsw), scan_vjp_fn
 
     def _microbatches_bwd(scan_vjp_fn, g_final):
@@ -1577,19 +1645,34 @@ class NNXCircularPipeline(NNXPipelineBase):
           pipeline_params,
       )
 
-      (final_state, _), scan_vjp_fn = jax.vjp(
+      # L2 returns ((final_carry, stacked_metrics), bsw) from _microbatches_fwd.
+      # The vjp output matches the lambda return: (final_carry, stacked_metrics).
+      ((final_carry, _stacked_metrics), _), scan_vjp_fn = jax.vjp(
           run_pipeline_microbatches,
           lightweight_state,
           bsw,
       )
-      return (final_state, w_next), (scan_vjp_fn, weight_prefetching_t)
+      max_logging.log(
+          f"[PIPELINE-DIAG] L3 fwd: "
+          f"carry_leaves={len(jax.tree.leaves(final_carry))}, "
+          f"w_next_leaves={len(jax.tree.leaves(w_next))}, "
+          f"residuals=(scan_vjp_fn, weight_prefetching_t)"
+      )
+      return (final_carry, w_next), (scan_vjp_fn, weight_prefetching_t)
 
     def _repeat_bwd(residuals, g_output):
       scan_vjp_fn, weight_prefetching_t = residuals
       g_state, g_w_next = g_output
       g_w_curr = jax.tree.map(jnp.zeros_like, g_w_next)
       g_bsw = (g_w_curr, g_w_next)
-      d_state, d_bsw = scan_vjp_fn((g_state, g_bsw))
+      # L2 vjp expects gradient for ((final_carry, stacked_metrics), bsw).
+      # Metrics are intermediates (nnx.Intermediate) — zero gradients.
+      # Create zeros matching stacked metrics shape: [num_microbatches, ...]
+      g_metrics = jax.tree.map(
+          lambda x: jnp.zeros((num_microbatches,) + x.shape, dtype=x.dtype),
+          layers_metrics,
+      )
+      d_state, d_bsw = scan_vjp_fn(((g_state, g_metrics), g_bsw))
       d_w_curr, d_w_next = d_bsw
       (d_pipeline_params,) = weight_prefetching_t(d_w_next)
       return d_state, d_w_curr, d_pipeline_params
@@ -1602,6 +1685,21 @@ class NNXCircularPipeline(NNXPipelineBase):
     # Initial w_curr: zeros matching BSW structure (same as Linen's init_empty_bsw_buffers).
     # At iteration 0, get_current_weights_from_bsw selects from w_next, not w_curr.
     initial_w_curr = jax.tree.map(lambda x: jnp.zeros(x.shape[1:], dtype=x.dtype), layers_params)
+
+    outer_carry_init = (loop_state, layers_mutables, initial_w_curr)
+    oc_leaves = jax.tree.leaves(outer_carry_init)
+    oc_bytes = sum(getattr(l, "nbytes", 0) for l in oc_leaves if hasattr(l, "shape"))
+    max_logging.log(
+        f"[PIPELINE-DIAG] === OUTER SCAN ===\n"
+        f"[PIPELINE-DIAG]   carry=(loop_state, layer_mut, w_curr), "
+        f"{len(oc_leaves)} leaves, {oc_bytes / 1e9:.3f} GB\n"
+        f"[PIPELINE-DIAG]   closure: layers_params "
+        f"({len(jax.tree.leaves(layers_params))} leaves, "
+        f"{sum(getattr(l, 'nbytes', 0) for l in jax.tree.leaves(layers_params) if hasattr(l, 'shape')) / 1e9:.3f} GB)\n"
+        f"[PIPELINE-DIAG]   scan_pipeline_iterations="
+        f"{self.config.scan_pipeline_iterations}, "
+        f"num_repeats={num_repeats}"
+    )
 
     def outer_body(carry, _):
       loop_st, layer_mut, w_curr = carry
