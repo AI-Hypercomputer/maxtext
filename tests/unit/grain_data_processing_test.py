@@ -464,7 +464,6 @@ class GrainTFRecordPreTokenizedProcessingTest(GrainTFRecordProcessingTest):
         tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.default"),
         enable_checkpointing=False,
     )
-    self.train_iter = grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
 
 
 @pytest.mark.external_training
