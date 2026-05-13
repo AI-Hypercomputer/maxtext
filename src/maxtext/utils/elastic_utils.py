@@ -24,6 +24,40 @@ import pathwaysutils
 from pathwaysutils.elastic import manager
 
 elastic_manager: manager.Manager | None = None
+pending_reinit_recorder = None
+pending_elastic_event_type = None
+
+
+def record_elastic_event_start(recorder, config) -> None:
+  """Records start of an elastic scale up event."""
+  global pending_elastic_event_type
+  event_type = 'elastic_scale_up' if is_scale_up_event(config) else 'elastic_slice_down'
+  pending_elastic_event_type = event_type
+  if recorder:
+    recorder.record_custom_badput_event_start_time(custom_badput_event_type=event_type)
+
+
+def record_elastic_wait_end_and_reinit_start(recorder) -> None:
+  """Records end of elastic slice event and start of reinitialization event."""
+  global pending_reinit_recorder, pending_elastic_event_type
+  if pending_elastic_event_type is None:
+    return
+  event_type = pending_elastic_event_type
+  pending_elastic_event_type = None
+  if recorder:
+    recorder.record_custom_badput_event_end_time(custom_badput_event_type=event_type)
+    recorder.record_custom_badput_event_start_time(custom_badput_event_type='elastic_reinitialization')
+  pending_reinit_recorder = recorder
+
+
+def record_elastic_reinit_end() -> None:
+  """Records end of elastic reinitialization event."""
+  global pending_reinit_recorder
+  if pending_reinit_recorder is not None:
+    pending_reinit_recorder.record_custom_badput_event_end_time(
+        custom_badput_event_type='elastic_reinitialization'
+    )
+    pending_reinit_recorder = None
 
 
 def elastic_enabled(config) -> bool:
@@ -121,7 +155,7 @@ def chain_callbacks(*funcs):
   return wrapper
 
 
-def elastic_retry(config, callback_fn=None):
+def elastic_retry(config, callback_fn=None, pre_callback_fn=None):
   """Decorator for elastic retry.
 
   If an elastic event occurs, the decorator will retry the decorated function
@@ -163,6 +197,7 @@ def elastic_retry(config, callback_fn=None):
       max_retries=config.elastic_max_retries,
       timeout=config.elastic_timeout_seconds,
       minimum_slice_count=None if config.elastic_min_slice_count == -1 else config.elastic_min_slice_count,
+      pre_callback=pre_callback_fn,
       on_elastic_event_callback=effective_callback,
   )
 
