@@ -1842,24 +1842,38 @@ class NNXCircularPipeline(NNXPipelineBase):
         "(metrics zeroed, mutables from closure)"
     )
 
-    def outer_body(carry, _):
-      loop_st, w_curr = carry
-      new_loop_st, w_next = execute_pipeline_repeat(
-          loop_st, w_curr, layers_params
-      )
-      return (new_loop_st, w_next), None
-
-    # C-3 gap: checkpoint policy at use site
+    # FIX: Move jax.checkpoint INSIDE scan body to match Linen's
+    # nn.scan(nn.remat(stage_fn)) pattern. This creates a closed_call
+    # boundary per iteration, enabling XLA to unroll trip-1 wrappers,
+    # inline the closed_call, and clone inner while-loops — producing
+    # many small loops with small carries instead of few monolithic ones.
     if self.config.set_remat_policy_on_pipeline_iterations:
       policy = self.get_pipeline_remat_policy()
       max_logging.log(
           f"[PIPELINE-DIAG] outer_body: "
-          f"jax.checkpoint applied, policy={policy}"
+          f"jax.checkpoint INSIDE scan body (matching Linen "
+          f"nn.scan(nn.remat(...))), policy={policy}"
       )
-      outer_body = jax.checkpoint(outer_body, policy=policy)
+      checkpointed_repeat = jax.checkpoint(
+          execute_pipeline_repeat, policy=policy
+      )
+    else:
+      checkpointed_repeat = execute_pipeline_repeat
+
+    def outer_body(carry, _):
+      loop_st, w_curr = carry
+      new_loop_st, w_next = checkpointed_repeat(
+          loop_st, w_curr, layers_params
+      )
+      return (new_loop_st, w_next), None
 
     if self.config.scan_pipeline_iterations:
-      (loop_state, final_w_curr), _ = jax.lax.scan(outer_body, (loop_state, initial_w_curr), None, length=num_repeats)
+      (loop_state, final_w_curr), _ = jax.lax.scan(
+          outer_body,
+          (loop_state, initial_w_curr),
+          None,
+          length=num_repeats,
+      )
     else:
       outer_carry = (loop_state, initial_w_curr)
       for _ in range(num_repeats):
@@ -1871,11 +1885,10 @@ class NNXCircularPipeline(NNXPipelineBase):
     # not performance-critical, and BSW is single-buffer for bubbles).
     bsw_ref = [None]
 
-    def bubble_inner_body(carry, _):
-      current_loop_state = carry
+    def _bubble_iteration(current_loop_state):
       iteration = current_loop_state["loop_iteration"]
       derived_mutables = _advance_rng_state(layers_mutables, iteration)
-      new_loop_state = self.run_one_iteration(
+      return self.run_one_iteration(
           current_loop_state,
           bsw_ref[0],
           layers_graph,
@@ -1887,14 +1900,16 @@ class NNXCircularPipeline(NNXPipelineBase):
           model_mode,
           logical_partition_spec_stripped,
       )
-      return new_loop_state, None
 
     if self.config.set_remat_policy_on_pipeline_iterations:
-      bubble_inner_body = jax.checkpoint(
-          bubble_inner_body,
+      _bubble_iteration = jax.checkpoint(
+          _bubble_iteration,
           policy=self.get_pipeline_remat_policy(),
           prevent_cse=not self.config.scan_pipeline_iterations,
       )
+
+    def bubble_inner_body(carry, _):
+      return _bubble_iteration(carry), None
 
     if bubble_iterations > 0:
       bsw_ref[0] = (final_w_curr, final_w_curr)
