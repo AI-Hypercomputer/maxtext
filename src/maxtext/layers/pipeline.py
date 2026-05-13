@@ -1642,7 +1642,16 @@ class NNXCircularPipeline(NNXPipelineBase):
         d_state, d_bsw = inner_vjp((g_loop_st_c, g_mut_c))
         d_w_curr_inner, d_w_next = d_bsw
 
-        (d_params_repeat,) = weight_prefetching_t(d_w_next)
+        # g_w_curr_c is the gradient of w_curr at repeat r+1, which
+        # equals w_next at repeat r. Add it to d_w_next before
+        # transposing to params:
+        #   w_next_r = prefetch(params, iter_r)
+        #   w_curr_{r+1} = w_next_r
+        #   so d_loss/d_w_next_r = d_w_next (from microbatches) + g_w_curr_c (from next repeat)
+        d_w_next_total = jax.tree.map(
+            lambda a, b: a + b, d_w_next, g_w_curr_c
+        )
+        (d_params_repeat,) = weight_prefetching_t(d_w_next_total)
         new_d_params = jax.tree.map(
             lambda a, b: a + b, d_params_c, d_params_repeat
         )
