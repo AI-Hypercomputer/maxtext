@@ -1159,7 +1159,8 @@ class Decoder(nn.Module):
 
     # When initializing with vLLM RPA attention, we need to run the output head to
     # initialize any parameters associated with it.
-    if self.is_initializing() and cfg.attention == "vllm_rpa":
+    # Same case applicable to vocab tiling
+    if self.is_initializing() and (cfg.num_vocab_tiling > 1 or cfg.attention == "vllm_rpa"):
       _ = self.apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)
 
     # When invoking from vLLM with RPA attention, logit computation is deferred to a later stage.
