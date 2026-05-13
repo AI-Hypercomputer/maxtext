@@ -1552,7 +1552,10 @@ class NNXCircularPipeline(NNXPipelineBase):
         )
         return (new_loop_st, new_mut), new_metrics
 
-      forward_remat = jax.remat(_forward, policy=self.get_pipeline_remat_policy())
+      forward_remat = jax.remat(
+          _forward, policy=self.get_pipeline_remat_policy(),
+          prevent_cse=True,
+      )
       output, vjp_fn = jax.vjp(forward_remat, lightweight_state, bsw)
       (carry_out, metrics_out) = output
       max_logging.log(
@@ -1645,8 +1648,6 @@ class NNXCircularPipeline(NNXPipelineBase):
           pipeline_params,
       )
 
-      # L2 returns ((final_carry, stacked_metrics), bsw) from _microbatches_fwd.
-      # The vjp output matches the lambda return: (final_carry, stacked_metrics).
       ((final_carry, _stacked_metrics), _), scan_vjp_fn = jax.vjp(
           run_pipeline_microbatches,
           lightweight_state,
@@ -1656,7 +1657,8 @@ class NNXCircularPipeline(NNXPipelineBase):
           f"[PIPELINE-DIAG] L3 fwd: "
           f"carry_leaves={len(jax.tree.leaves(final_carry))}, "
           f"w_next_leaves={len(jax.tree.leaves(w_next))}, "
-          f"residuals=(scan_vjp_fn, weight_prefetching_t)"
+          f"residuals=(scan_vjp_fn, weight_prefetching_t), "
+          f"prevent_cse=True (barriers for XLA fission)"
       )
       return (final_carry, w_next), (scan_vjp_fn, weight_prefetching_t)
 
