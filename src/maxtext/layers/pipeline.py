@@ -1567,14 +1567,18 @@ class NNXCircularPipeline(NNXPipelineBase):
       # get_current_weights_from_bsw selects nxt_bsw (bsw[1]) for stages
       # whose repeat_id == stage0_repeat_id, and cur_bsw (bsw[0]) otherwise.
       # This matches the Linen pipeline's (w_curr, w_next) dual-buffer.
+      # Dual-buffer BSW: trailing stages may be on a different repeat
+      # than stage 0 at repeat boundaries. get_current_weights_from_bsw
+      # selects bsw[1] for stages on the current repeat (repeat_id ==
+      # stage0_repeat_id), bsw[0] for trailing stages.
       cur_repeat_weights = self.from_all_variables_to_repeat_weights(layers_params, iteration)
       cur_bsw = self.from_repeat_weights_to_bsw(cur_repeat_weights, physical_partition_spec_full)
-      cur_bsw = jax.ad_checkpoint.checkpoint_name(cur_bsw, "bsw_weights_prev")
 
       nxt_repeat_weights = self.from_all_variables_to_repeat_weights(layers_params, iteration + 1)
       nxt_bsw = self.from_repeat_weights_to_bsw(nxt_repeat_weights, physical_partition_spec_full)
-      nxt_bsw = jax.ad_checkpoint.checkpoint_name(nxt_bsw, "bsw_weights")
+
       bsw_ref[0] = (cur_bsw, nxt_bsw)
+      bsw_ref[0] = jax.ad_checkpoint.checkpoint_name(bsw_ref[0], "bsw_weights")
 
       if self.config.scan_pipeline_iterations:
         (new_loop_state, new_layer_mutables), inner_metrics = jax.lax.scan(
@@ -1609,19 +1613,13 @@ class NNXCircularPipeline(NNXPipelineBase):
         "(0506 architecture with vmap returning state)"
     )
 
-    # Outer scan over repeats with jax.lax.scan(unroll=N).
-    # unroll=N tells XLA to unroll at the XLA level (NOT Python level),
-    # enabling buffer sharing between unrolled iterations — unlike Python
-    # for-loop which creates independent computations.
     if self.config.scan_pipeline_iterations:
-      unroll_repeats = num_repeats if not self.config.scan_pipeline_repeats else 1
       max_logging.log(
-          f"[PIPELINE-DIAG] outer scan: jax.lax.scan(length={num_repeats}, "
-          f"unroll={unroll_repeats})"
+          f"[PIPELINE-DIAG] outer scan: jax.lax.scan(length={num_repeats})"
       )
       (loop_state, final_layer_mutables), repeat_metrics = jax.lax.scan(
           outer_body, (loop_state, layers_mutables), None,
-          length=num_repeats, unroll=unroll_repeats,
+          length=num_repeats,
       )
       repeat_metrics = jax.tree.map(
           lambda x: x.reshape((num_repeats * num_microbatches,) + x.shape[2:]),
@@ -1640,9 +1638,6 @@ class NNXCircularPipeline(NNXPipelineBase):
       )
 
     # ---- Bubble iterations (pipeline drain) ----
-    # During bubbles, all stages drain on the last repeat. Use same
-    # dual-buffer pattern for consistency — cur from last repeat's
-    # iteration, nxt from iteration+1 (wraps to same repeat weights).
     if bubble_iterations > 0:
       if self.config.scan_pipeline_iterations:
         bubble_iter = loop_state["loop_iteration"]
