@@ -16,23 +16,25 @@
 """Utils that are only interesting to MaxText."""
 
 import functools
+import pickle
 import os
 from typing import Sequence
 
-from flax import nnx, linen as nn
-from flax.core.spmd import composite_rules, from_sharding_rules, get_logical_axis_rules
+from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
-from flax.training.train_state import TrainState
+from flax.training import train_state
 
 import numpy as np
 
-import jax
-import jax.numpy as jnp
-from jax.sharding import AxisType, Mesh, NamedSharding, PartitionSpec
 from jax.experimental import mesh_utils
 from jax.experimental.serialize_executable import deserialize_and_load
+from jax.sharding import AxisType, Mesh
+
+import jax
+import jax.numpy as jnp
 
 import optax
+
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
 import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
 
@@ -53,7 +55,6 @@ from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import sharding
 from maxtext.utils import elastic_utils
-from maxtext.utils import maxtext_utils_nnx
 
 OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
 
@@ -101,10 +102,7 @@ def get_functional_train_with_signature(
   """Get the shardings (both state and data) for `train_step`."""
   functional_train = functools.partial(train_step, model, config, state_mesh_shardings, params_shardings)
   functional_train.__name__ = "train_step"
-  if config.pure_nnx:
-    in_shardings = (state_mesh_shardings, data_sharding)  # State, batch
-  else:
-    in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
+  in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
   out_shardings = (state_mesh_shardings, None)  # State, metrics
   static_argnums = ()  # We partial out the static argnums of model and config
   donate_argnums = 0  # This is the index of the state - we allow the compiler to make use of this memory.
@@ -115,10 +113,7 @@ def get_functional_eval_with_signature(eval_step, data_sharding, state_mesh_shar
   """Get the shardings (both state and data) for `eval_step`."""
   functional_eval = functools.partial(eval_step, model, config)
   functional_eval.__name__ = "eval_step"
-  if config.pure_nnx:
-    in_shardings = (state_mesh_shardings, data_sharding)  # State, batch (NNX: no rng)
-  else:
-    in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
+  in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
   out_shardings = None  # metrics
   static_argnums = ()  # We partial out the static argnums of model, config
   donate_argnums = ()  # state will be kept instead of being donated in eval_step
@@ -215,7 +210,8 @@ def load_compiled(config, partial_train, state, execution_devices):
   # Parker is working on a serializing these
   def load_serialized_compiled(save_name):
     with open(save_name, "rb") as f:
-      return f.read()
+      serialized_compiled = pickle.load(f)
+    return serialized_compiled
 
   def get_train_input_output_trees(func, input_args, input_kwargs):
     _, in_tree_recreated = jax.tree_util.tree_flatten((input_args, input_kwargs))
@@ -1069,11 +1065,13 @@ def calculate_tflops_training_per_device(config, log=True):
   learnable_weight_tflops = learnable_weight_tflops * config.gradient_accumulation_steps
   attention_tflops = attention_tflops * config.gradient_accumulation_steps
 
-  # DPO includes one additional forward pass per gradient accumulation step
+  # DPO includes one additional forward pass with the reference model per gradient accumulation step
+  # ORPO does not need the extra forward pass.
   if config.use_dpo:
+    # Typically flops = ForwardFlops + BackwardFlops. Backward is ~2x of ForwardFlops.
+    # The reference model only runs forward.
     reference_model_tflops = learnable_weight_tflops / 3  # additional forward pass
-    reference_model_attention_tflops = attention_tflops / 3
-    attention_tflops = attention_tflops + reference_model_attention_tflops
+    attention_tflops += attention_tflops / 3
   else:
     reference_model_tflops = 0
 
@@ -1240,15 +1238,15 @@ def update_state_param(state, target_path, value):
   return state.replace(params=new_params)
 
 
-def init_decode_state(apply_fn, params) -> TrainState:
+def init_decode_state(apply_fn, params) -> train_state.TrainState:
   """Init train state with null opt state for decode."""
-  state = TrainState(step=0, apply_fn=apply_fn, params=params, tx=None, opt_state={})  # type: ignore
+  state = train_state.TrainState(step=0, apply_fn=apply_fn, params=params, tx=None, opt_state={})  # type: ignore
   return state
 
 
 def init_training_state(apply_fn, params, tx):
   """Init train state with null opt state for decode."""
-  state = TrainState.create(apply_fn=apply_fn, params=params, tx=tx)
+  state = train_state.TrainState.create(apply_fn=apply_fn, params=params, tx=tx)
   return state
 
 
@@ -1376,7 +1374,7 @@ def setup_initial_state(
     is_training: True to initialize training state, False for decode state
 
   Returns:
-    train_state: the initialized train state. For NNX, this is a TrainStateNNX instance
+    state: the initialized train state
     state_mesh_annotations: the mesh annotations for the train state
   """
 
@@ -1415,48 +1413,29 @@ def setup_initial_state(
       else:
         # The update of data_iterator state happens in place, no need to assign explicitly
         state = restored["items"]
-
-      # For NNX, convert the pure dict to nnx.State using the abstract state as template
-      if config.pure_nnx:
-        nnx.replace_by_pure_dict(unboxed_abstract_state, state)
-        state = unboxed_abstract_state
     else:
       init_state_partial = init_state_fn
       init_state_partial.__name__ = "initialize_state"
-      if config.pure_nnx:
-        state = jax.jit(
-            lambda: nnx.state(init_state_partial()),  # Get state only, mapping to out_sharding structure
-            in_shardings=None,
-            out_shardings=state_mesh_shardings,
-        )()
-      else:
-        # pylint: disable=not-callable
-        state = jax.jit(
-            init_state_partial,
-            in_shardings=None,
-            out_shardings=state_mesh_shardings,
-        )()
-      if raw_params:  # If we loaded a partial state, we need to merge it.
-        if config.pure_nnx:
-          # raw_params should have the same sharding info as in the model
-          nnx.update(state.model, raw_params)
-        else:
-          sparsity_enabled = config.weight_sparsity_n and config.weight_sparsity_m
-          if sparsity_enabled:
-            # Sparsity-init keeps freshly initialized params for any leaf still
-            # represented as an abstract ShapeDtypeStruct in raw_params (i.e. not
-            # actually restored), and uses the restored value otherwise.
-            def _merge_params(p_raw, p_init):
-              if isinstance(p_raw, jax.ShapeDtypeStruct):
-                return p_init
-              return p_raw
+      # pylint: disable=not-callable
+      state = jax.jit(
+          init_state_partial,
+          in_shardings=None,
+          out_shardings=state_mesh_shardings,
+      )()
+      sparsity_enabled = config.weight_sparsity_n and config.weight_sparsity_m
+      if sparsity_enabled and raw_params:  # If we loaded a partial state, we need to merge it.
 
-            merged_params = jax.tree_util.tree_map(_merge_params, raw_params, state.params)
-            state = state.replace(params=merged_params)
-          else:
-            state = state.replace(params=raw_params)
-  if not config.pure_nnx:
-    state = max_utils.unbox_logicallypartioned(state)
+        def _merge_params(p_raw, p_init):
+          if isinstance(p_raw, jax.ShapeDtypeStruct):
+            return p_init
+          return p_raw
+
+        merged_params = jax.tree_util.tree_map(_merge_params, raw_params, state.params)
+        state = state.replace(params=merged_params)
+      elif raw_params:
+        state = state.replace(params=raw_params)
+
+  state = max_utils.unbox_logicallypartioned(state)
   return state, state_mesh_annotations, state_mesh_shardings, data_iterator
 
 
@@ -1471,9 +1450,6 @@ def get_logical_annotations(config, mesh, init_state_fn):
 
 def get_abstract_state(config, mesh, init_state_fn, is_training=True):
   """Get a shaped abstraction of the state (including optimizer)"""
-  if config.pure_nnx:
-    return get_abstract_state_nnx(config, mesh, init_state_fn, is_training)
-
   init_state_partial = init_state_fn
 
   with nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -1512,148 +1488,6 @@ def get_abstract_state(config, mesh, init_state_fn, is_training=True):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
   return (
       unboxed_abstract_sharded_state,
-      state_mesh_annotations,
-      state_mesh_shardings,
-  )
-
-
-def get_nnx_named_sharding_with_scan_axis(abs_var_state: nnx.State, mesh) -> nnx.State:
-  """Compute NamedSharding for each NNX variable, correctly handling the scan (stacked layers) axis.
-
-  Unlike flax.nnx.spmd.get_var_pspec (used inside nnx.get_abstract_model), this function also
-  inserts the partition_name axis at the correct scan_axis position for parameters created by
-  _create_scanned_layers. Without this, scanned parameters get a 2D partition spec applied to a
-  3D tensor, placing sharding on the stacked-layers dimension instead of the embedding dimension.
-
-  Args:
-    abs_var_state: NNX abstract variable state from nnx.split(nnx.eval_shape(...)).
-    mesh: JAX physical mesh.
-
-  Returns:
-    Same tree structure as abs_var_state but each Variable's value replaced with NamedSharding.
-  """
-
-  def _make_named_sharding(v):
-    val = v.get_value()
-    if not hasattr(val, "shape"):
-      # Non-tensor value (e.g., optax MaskedNode for non-trainable params). Preserve
-      # as-is so the treedef matches abs_var_state in the downstream jax.tree.map.
-      return v
-    metadata = v.get_metadata()
-    out_sharding = metadata.get("out_sharding") or metadata.get("sharding_names") or metadata.get("sharding")
-    if not out_sharding:
-      pspec = PartitionSpec()
-    else:
-      # Insert the scan axis for parameters created by _create_scanned_layers.
-      # _add_scan_metadata stores the axis name in nnx.PARTITION_NAME and the
-      # axis index in "param_scan_axis". flax.nnx.spmd.get_var_pspec ignores these.
-      if nnx.PARTITION_NAME in metadata:
-        partition_name = metadata[nnx.PARTITION_NAME]
-        # Always use param_scan_axis from metadata. OptVariable (optimizer state) inherits
-        # param_scan_axis=1 from the model Param via to_opt_state(), so we must not hardcode
-        # scan_axis=0 for non-Param types. stacked_rest non-Param variables have
-        # param_scan_axis=0 set explicitly by _add_scan_metadata, so this is always correct.
-        scan_axis = metadata.get("param_scan_axis", 0)
-        out_sharding = [out_sharding] if isinstance(out_sharding, str) else list(out_sharding)
-        # Guard against double-insertion: Flax 0.12.6 _remap_sharding_metadata renames
-        # 'sharding' -> 'out_sharding', so _add_scan_metadata may have already inserted
-        # the scan axis. Only insert if not already present.
-        if partition_name not in out_sharding:
-          out_sharding.insert(scan_axis, partition_name)
-        out_sharding = tuple(out_sharding)
-      # Convert logical axis names to physical mesh axes using current context rules.
-      context_rules = get_logical_axis_rules()
-      local_rules = metadata.get("sharding_rules", ())
-      if context_rules or local_rules:
-        rules = composite_rules(context_rules, local_rules)
-        pspec = PartitionSpec(*from_sharding_rules(out_sharding, rules))
-      else:
-        pspec = PartitionSpec(*out_sharding)
-    return v.replace(NamedSharding(mesh, pspec))
-
-  return jax.tree.map(_make_named_sharding, abs_var_state, is_leaf=lambda x: isinstance(x, nnx.Variable))
-
-
-def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=True):
-  """Calculates the abstract sharded state and memory placement for an NNX TrainState.
-
-  This function performs an abstract trace of the NNX model and optimizer using
-  `nnx.get_abstract_model`. It resolves logical sharding annotations into physical
-  JAX shardings and applies memory placement optimizations such as optimizer
-  sharding and host memory offloading (pinning to CPU RAM).
-
-  Args:
-    config: Configuration object containing sharding and offloading hyperparameters
-      (e.g., shard_optimizer_over_data, optimizer_memory_host_offload).
-    mesh: JAX physical mesh used to resolve logical axis names to physical devices.
-    nnx_init_trainstate_fn: A zero-argument factory function that produces a
-      TrainStateNNX instance during the abstract trace.
-    is_training: Boolean indicating if the state is for training. If True,
-      optimizer state is processed and memory offloading strategies are applied.
-
-  Returns:
-    A tuple containing (abstract_sharded_state, None, state_mesh_shardings):
-      abstract_sharded_state: An nnx.State containing ShapeDtypeStructs with
-        fully resolved physical sharding and memory_kind metadata.
-      state_mesh_annotations: An nnx.State tree consisting of the raw PartitionSpec
-        objects corresponding to each parameter/variable.
-      state_mesh_shardings: An nnx.State tree consisting of the raw JAX
-        Sharding objects corresponding to each parameter/variable.
-  """
-  assert nnx_init_trainstate_fn is not None, "get_abstract_state_nnx: init function must be given."
-
-  with nn_partitioning.axis_rules(config.logical_axis_rules):
-    # Use nnx.eval_shape + nnx.split instead of nnx.get_abstract_model, so we can apply
-    # get_nnx_named_sharding_with_scan_axis which correctly inserts the stacked-layers
-    # axis into the partition spec. nnx.get_abstract_model uses get_var_pspec internally
-    # which ignores nnx.PARTITION_NAME / param_scan_axis metadata set by _create_scanned_layers,
-    # causing the 2D partition spec to be misapplied to the 3D stacked parameter tensor.
-    # Do NOT wrap nnx.eval_shape in jax.set_mesh: Flax 0.12.6's _to_variable calls
-    # var.shape for every variable when a global mesh is active, but masked optimizer
-    # state variables (e.g. from trainable_parameters_mask) have value=MaskedNode()
-    # which has no .shape and would raise AttributeError.  We handle sharding
-    # ourselves via get_nnx_named_sharding_with_scan_axis, so auto-assignment is not
-    # needed here.
-    abs_model = nnx.eval_shape(nnx_init_trainstate_fn)
-    _, abs_var_state = nnx.split(abs_model)
-    named_sharding_state = get_nnx_named_sharding_with_scan_axis(abs_var_state, mesh)
-    abstract_state = jax.tree.map(
-        lambda a, s: jax.ShapeDtypeStruct(a.shape, a.dtype, sharding=s),
-        abs_var_state,
-        named_sharding_state,
-    )
-
-  state_mesh_shardings = maxtext_utils_nnx.get_named_sharding_nnx(abstract_state)
-
-  if is_training and config.shard_optimizer_over_data:
-    # Add data to sharding for optimizer state
-    optimizer_sharding = jax.tree_util.tree_map_with_path(
-        functools.partial(sharding.add_data_to_sharding, mesh),
-        abstract_state.optimizer,
-        state_mesh_shardings.optimizer,
-    )
-    state_mesh_shardings.optimizer = optimizer_sharding
-  if is_training and config.optimizer_memory_host_offload:
-    optimizer_sharding = jax.tree_util.tree_map_with_path(
-        maxtext_utils_nnx.move_memory_to_host,
-        state_mesh_shardings.optimizer,
-        is_leaf=lambda x: isinstance(x, NamedSharding),
-    )
-    state_mesh_shardings.optimizer = optimizer_sharding
-  if is_training and config.parameter_memory_host_offload:
-    assert config.param_scan_axis == 0, "You must set the scan axis 0 to enable parameter offloading."
-    _, state_params, _ = nnx.split(state_mesh_shardings, nnx.Param, ...)
-    state_params = jax.tree_util.tree_map_with_path(
-        maxtext_utils_nnx.move_memory_to_host,
-        state_params,
-        is_leaf=lambda x: isinstance(x, NamedSharding),
-    )
-    nnx.update(state_mesh_shardings, state_params)
-
-  abstract_sharded_state = maxtext_utils_nnx.set_named_sharding_nnx(abstract_state, state_mesh_shardings)
-  state_mesh_annotations = maxtext_utils_nnx.get_partition_spec_nnx(state_mesh_shardings)
-  return (
-      abstract_sharded_state,
       state_mesh_annotations,
       state_mesh_shardings,
   )
@@ -1741,13 +1575,7 @@ def save_quantized_checkpoint_if_configured(config, params):
 def add_config_to_summary_writer(config, summary_writer):
   """Writes config params to tensorboard"""
   if jax.process_index() == 0:
-    if hasattr(config, "get_keys"):
-      config_dict = config.get_keys()
-    elif hasattr(config, "model_dump"):
-      config_dict = config.model_dump()
-    else:
-      config_dict = dict(config)
-    for key, value in config_dict.items():
+    for key, value in config.get_keys().items():
       max_utils.add_text_to_summary_writer(key, str(value), summary_writer)
 
 
@@ -1910,41 +1738,26 @@ def print_shardings_params(params, params_sharding, mesh, logical_annotations=No
   """
   Print state shardings comparing Logical Definition vs Physical Result.
   """
-  if not isinstance(params, nnx.State):
-    if not hasattr(params, "params"):
-      params = {"params": params}
-    if not hasattr(params_sharding, "params"):
-      params_sharding = {"params": params_sharding}
-    if logical_annotations and not hasattr(logical_annotations, "params"):
-      logical_annotations = {"params": logical_annotations}
+  if not hasattr(params, "params"):
+    params = {"params": params}
+  if not hasattr(params_sharding, "params"):
+    params_sharding = {"params": params_sharding}
+  if logical_annotations and not hasattr(logical_annotations, "params"):
+    logical_annotations = {"params": logical_annotations}
 
   leaves_params, _ = jax.tree_util.tree_flatten_with_path(params)
   leaves_sharding, _ = jax.tree_util.tree_flatten_with_path(params_sharding)
+  leaves_logical, _ = jax.tree_util.tree_flatten_with_path(logical_annotations)
 
-  if logical_annotations is not None:
-    leaves_logical, _ = jax.tree_util.tree_flatten_with_path(logical_annotations)
-    for (path, leaf_val), (_, leaf_sharding), (_, leaf_logical_val) in zip(
-        leaves_params, leaves_sharding, leaves_logical
-    ):
-      path_str = "/".join(str(p.key if hasattr(p, "key") else p.name) for p in path)
-      shape = jax.typeof(leaf_val)
-      pspec = sharding.remove_size_one_mesh_axis(leaf_sharding.spec, mesh)
-      pspec_str = str(tuple(pspec))
-      logical_str = str(leaf_logical_val)
+  for (path, leaf_val), (_, leaf_sharding), (_, leaf_logical_val) in zip(leaves_params, leaves_sharding, leaves_logical):
+    path_str = "/".join(str(p.key if hasattr(p, "key") else p.name) for p in path)
+    shape = jax.typeof(leaf_val)
+    pspec = sharding.remove_size_one_mesh_axis(leaf_sharding.spec, mesh)
+    pspec_str = str(tuple(pspec))
+    logical_str = str(leaf_logical_val)
 
-      message = (
-          f" {path_str}\n" f"    Shape:     {shape}\n" f"    Logical:   {logical_str}\n" f"    Physical:  {pspec_str}"
-      )
-      max_logging.info(message)
-  else:
-    for (path, leaf_val), (_, leaf_sharding) in zip(leaves_params, leaves_sharding):
-      path_str = "/".join(str(p.key if hasattr(p, "key") else p.name) for p in path)
-      shape = jax.typeof(leaf_val)
-      pspec = sharding.remove_size_one_mesh_axis(leaf_sharding.spec, mesh)
-      pspec_str = str(tuple(pspec))
-
-      message = f" {path_str}\n" f"    Shape:     {shape}\n" f"    Physical:  {pspec_str}"
-      max_logging.info(message)
+    message = f" {path_str}\n" f"    Shape:     {shape}\n" f"    Logical:   {logical_str}\n" f"    Physical:  {pspec_str}"
+    max_logging.info(message)
 
   print(flush=True)
 
@@ -1955,19 +1768,8 @@ def maybe_dump_jaxpr(config, p_train_step, train_step_inputs):
     return
   max_logging.log("Tracing train_step to jaxpr...")
 
-  # Trace the underlying un-jitted function via __wrapped__ to avoid heavy remote
-  # compilation/gRPC round-trips to the Pathways controller.
-  unwrapped_step = getattr(p_train_step, "__wrapped__", p_train_step)
-
-  def to_abstract(x):
-    if hasattr(x, "shape") and hasattr(x, "dtype"):
-      return jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype)
-    return x
-
-  # Convert all input arguments recursively to purely local abstract ShapeDtypeStruct objects
-  # to completely bypass remote Array objects and proxy tracing overhead.
-  abstract_inputs = jax.tree.map(to_abstract, train_step_inputs)
-  p_train_jaxpr = jax.make_jaxpr(unwrapped_step)(*abstract_inputs)
+  # We use the p_train_step (the JIT-decorated function)
+  p_train_jaxpr = jax.make_jaxpr(p_train_step)(*train_step_inputs)
 
   local_filename = "train_step.jaxpr"
   local_path = os.path.join(config.dump_jaxpr_local_dir, local_filename)

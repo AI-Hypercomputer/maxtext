@@ -52,6 +52,7 @@ _CONFIG_FILE_MAPPING: dict[str, str] = {
     "maxtext.trainers.pre_train.train": "base.yml",
     "maxtext.trainers.pre_train.train_compile": "base.yml",
     "maxtext.trainers.post_train.distillation.train_distill": "post_train/distillation.yml",
+    "maxtext.trainers.post_train.dpo.train_dpo": "post_train/dpo.yml",
     "maxtext.trainers.post_train.rl.train_rl": "post_train/rl.yml",
     "maxtext.trainers.post_train.sft.train_sft": "post_train/sft.yml",
     "maxtext.trainers.post_train.sft.train_sft_deprecated": "post_train/sft.yml",
@@ -324,11 +325,6 @@ def initialize_pydantic(argv: list[str] | None = None, **kwargs) -> MaxTextConfi
 
   # 2. Get overrides from CLI and kwargs
   cli_cfg = omegaconf.OmegaConf.from_cli(cli_args)
-  if "hf_access_token" in cli_cfg:
-    logger.warning(
-        "WARNING: Passing 'hf_access_token' via command-line arguments is deprecated and insecure because it makes "
-        "your token visible in 'ps' and shell history. Please set the 'HF_TOKEN' environment variable instead."
-    )
   kwargs_cfg = omegaconf.OmegaConf.create(kwargs)
   overrides_cfg = omegaconf.OmegaConf.merge(cli_cfg, kwargs_cfg)
 
