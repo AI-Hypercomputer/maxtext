@@ -268,6 +268,7 @@ topk_routing_group: -1 # number of top groups to route inputs. For EP,
 # all-to-all communication with compute. Currently only implemented with DeepSeek sparse layers.
 use_batch_split_schedule: False # a flag if splitting batch into micro-batches to hide communications that yields performance benefits.
 batch_split_factor: 1 # the factor by which to split the batch. Only used if use_batch_split_schedule is True.
+num_hash_layers: 3 # Number of initial MoE layers to apply static Hash Routing.
 
 # For complex architectures like llama4 there are repeated sets of
 # inhomogeneous layers. E.g. maverick uses [dense+rope, moe+rope, dense+rope, moe+nope]
@@ -1227,6 +1228,7 @@ force_q_layout: false
 mhc_expansion_rate: 1
 # The number of iterations for the Sinkhorn-Knopp algorithm.
 sinkhorn_iterations: 20
+hc_eps: 1.0e-6
 
 ################################## DeepSeek Engram ##################################
 # Indices of transformer layers where Engram are integrated; leave empty [] to disable.

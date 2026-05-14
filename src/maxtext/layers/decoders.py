@@ -22,6 +22,8 @@ import warnings
 
 from flax import linen as nn
 from flax import nnx
+from maxtext.layers import nnx_wrappers
+from maxtext.models.deepseek_v4 import DeepSeekV4HyperHead
 from flax.linen.partitioning import ScanIn
 import jax
 from jax.ad_checkpoint import checkpoint_name
@@ -43,6 +45,7 @@ from maxtext.models import (
     deepseek,
     deepseek_batchsplit,
     deepseek_batchsplit_fp8,
+    deepseek_v4,
     gemma,
     gemma2,
     gemma3,
@@ -460,6 +463,12 @@ class Decoder(nn.Module):
             deepseek.DeepSeekDenseLayerToLinen,
             deepseek.DeepSeekMoELayerToLinen,
         ]
+      case DecoderBlockType.DEEPSEEK_V4:
+        return (
+            [deepseek_v4.DeepSeekV4ScannableBlockToLinen]
+            if self.config.scan_layers
+            else [deepseek_v4.DeepSeekV4DecoderLayerToLinen]
+        )
       case DecoderBlockType.GEMMA:
         return [gemma.GemmaDecoderLayerToLinen]
       case DecoderBlockType.GEMMA2:
@@ -983,6 +992,20 @@ class Decoder(nn.Module):
               page_state,
               slot,
           )
+        elif cfg.decoder_block == DecoderBlockType.DEEPSEEK_V4:
+          bidirectional_mask_value = multimodal_input.bidirectional_mask if multimodal_input is not None else None
+          y = self._apply_deepseek_v4_scanned_blocks(
+              y,
+              decoder_segment_ids,
+              decoder_positions,
+              deterministic,
+              model_mode,
+              previous_chunk,
+              page_state,
+              slot,
+              bidirectional_mask=bidirectional_mask_value,
+              decoder_input_tokens=decoder_input_tokens,
+          )
         else:
           RemattedBlockLayer = RemattedBlockLayers[0]
           scan_length = int(cfg.num_decoder_layers / cfg.inhomogeneous_layer_cycle_interval)
@@ -1089,6 +1112,16 @@ class Decoder(nn.Module):
             RemattedBlockLayer = RemattedBlockLayers[0]
             layer_kwargs = {}
             layer_call_kwargs = {}
+            if cfg.decoder_block == DecoderBlockType.DEEPSEEK_V4:
+              # Retrieve layer-specific compression ratio from configuration to support sliding window attention
+              # at boundary layers and alternating compressed sparse/heavily compressed attention.
+              compress_ratio = self.config.compress_ratios[lyr]
+              bidirectional_mask_value = multimodal_input.bidirectional_mask if multimodal_input is not None else None
+              layer_kwargs = {"compress_ratio": compress_ratio, "layer_idx": lyr}
+              layer_call_kwargs = {
+                  "decoder_input_tokens": decoder_input_tokens,
+                  "bidirectional_mask": bidirectional_mask_value,
+              }
             if cfg.decoder_block == DecoderBlockType.GEMMA3:
               # Gemma3 uses both global and sliding window attention depending on the layer index.
               bidirectional_mask_value = multimodal_input.bidirectional_mask if multimodal_input is not None else None
@@ -1151,7 +1184,11 @@ class Decoder(nn.Module):
     assert isinstance(y, jax.Array)
 
     # After the final transformer layer, `y` holds the raw, un-normalized hidden state.
-    if cfg.mhc_expansion_rate > 1:
+    if cfg.decoder_block == DecoderBlockType.DEEPSEEK_V4:
+      # Collapse final streams using learnable collapse weights [B, S, k, D] -> [B, S, D]
+      hc_head = nnx_wrappers.to_linen_class(DeepSeekV4HyperHead, name="hc_head")(config=cfg)
+      hidden_state = hc_head(y)
+    elif cfg.mhc_expansion_rate > 1:
       # (batch, length, mhc_expansion_rate, emb_dim) --> (batch, length, emb_dim)
       hidden_state = mhc_reduce(y)
     else:
@@ -1333,6 +1370,75 @@ class Decoder(nn.Module):
       if cfg.scan_layers:
         y = y[0]
 
+    return y
+
+  def _apply_deepseek_v4_scanned_blocks(
+      self,
+      y,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      previous_chunk,
+      page_state,
+      slot,
+      bidirectional_mask=None,
+      decoder_input_tokens=None,
+  ):
+    """Applies DeepSeek-V4 scanned decoder blocks under Flax Linen, handling main scan and remainders."""
+    cfg = self.config
+    mesh = self.mesh
+
+    # Define the repeating pattern length (2 for cyclical DeepSeek-V4 layers)
+    scan_length = cfg.num_decoder_layers // 2
+
+    policy = self.get_remat_policy()
+    RemattedDSV4Block = self.set_remat_policy([deepseek_v4.DeepSeekV4ScannableBlockToLinen], policy)[0]
+
+    layer_call_kwargs = {
+        "decoder_input_tokens": decoder_input_tokens,
+        "bidirectional_mask": bidirectional_mask,
+    }
+    layer_kwargs = {"num_of_layers": 2}
+
+    # Apply the main scan over the full blocks
+    if scan_length > 0:
+      broadcast_args = (
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+      )
+      # inputs: y shape [B, S, k, D] -> [B, S, k, D]
+      y, _ = self.scan_decoder_layers(
+          cfg,
+          RemattedDSV4Block,
+          scan_length,
+          "layers",
+          mesh,
+          in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+          model_mode=self.model_mode,
+          **layer_kwargs,
+      )(y, *broadcast_args, **layer_call_kwargs)
+
+    # Apply any remaining layers that did not fit into a full scanned block
+    num_remaining_layers = cfg.num_decoder_layers % 2
+    if num_remaining_layers > 0:
+      rem_layer_kwargs = {"num_of_layers": num_remaining_layers}
+      layer = RemattedDSV4Block(
+          config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode, name="layers_remainder", **rem_layer_kwargs
+      )
+      y, _ = layer(
+          y,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+          previous_chunk=previous_chunk,
+          page_state=page_state,
+          slot=slot,
+          **layer_call_kwargs,
+      )
     return y
 
   # TODO(b/490118813): Relocate the following functions to their designated directories

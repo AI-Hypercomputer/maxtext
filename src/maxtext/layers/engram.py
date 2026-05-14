@@ -335,6 +335,15 @@ class StaticWrapper:
   def __init__(self, val):
     self.val = val
 
+  def __getitem__(self, key):
+    return self.val[key]
+
+  def __setitem__(self, key, value):
+    if key is Ellipsis:
+      self.val = value
+    else:
+      self.val = self.val.at[key].set(value)
+
 
 class MultiHeadEmbedding(nnx.Module):
   """

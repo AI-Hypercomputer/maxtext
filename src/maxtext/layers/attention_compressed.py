@@ -105,7 +105,7 @@ class HCACompressor(nnx.Module):
     # Interleaved rotary embeddings applied to the trailing slice
     self.rotary_emb = DeepSeekV4RotaryEmbedding(
         head_dim=head_dim,
-        partial_rotary_factor=64.0 / 512.0,
+        partial_rotary_factor=config.qk_rope_head_dim / config.head_dim,
         rope_theta=rope_theta,
     )
 
@@ -328,7 +328,7 @@ class DeepSeekV4Indexer(nnx.Module):
     # Interleaved rotary embedding aligning query/key pos representations
     self.rotary_emb = DeepSeekV4RotaryEmbedding(
         head_dim=self.head_dim,
-        partial_rotary_factor=(config.head_dim * (64.0 / 512.0)) / self.head_dim,
+        partial_rotary_factor=config.qk_rope_head_dim / self.head_dim,
         rope_theta=rope_theta,
     )
 
@@ -582,7 +582,7 @@ class CSACompressor(nnx.Module):
     # Interleaved rotary embeddings for compressed sequences
     self.rotary_emb = DeepSeekV4RotaryEmbedding(
         head_dim=head_dim,
-        partial_rotary_factor=64.0 / 512.0,
+        partial_rotary_factor=config.qk_rope_head_dim / config.head_dim,
         rope_theta=rope_theta,
     )
 
@@ -764,6 +764,7 @@ class DeepSeekV4Attention(nnx.Module):
       eps: float = 1e-6,
       weight_dtype: Any = jnp.float32,
       dtype: Any = jnp.float32,
+      attention_type: str = "compressed_sparse_attention",
       *,
       rngs: nnx.Rngs,
   ):
@@ -779,12 +780,13 @@ class DeepSeekV4Attention(nnx.Module):
       eps: Tiny additive variance limit for RMS normalization stability.
       weight_dtype: The parameter weights numerical data type.
       dtype: The mathematical execution numerical data type.
+      attention_type: The type of compressed attention being instantiated.
       rngs: The Flax NNX random number generator collection.
     """
     super().__init__()
     self.config = config
     self.layer_idx = layer_idx
-    self.layer_type = config.layer_types[layer_idx]
+    self.attention_type = attention_type
     self.num_heads = num_heads
     self.head_dim = head_dim
     self.sliding_window = config.sliding_window
@@ -858,7 +860,7 @@ class DeepSeekV4Attention(nnx.Module):
     self.sinks = nnx.Param(jax.nn.initializers.zeros(rngs.params(), (num_heads,), weight_dtype))
 
     # Layer specific compressor allocation
-    if self.layer_type == "heavily_compressed_attention":
+    if self.attention_type == "heavily_compressed_attention":
       self.compressor = HCACompressor(
           hidden_size=hidden_size,
           head_dim=head_dim,
@@ -869,7 +871,7 @@ class DeepSeekV4Attention(nnx.Module):
           dtype=dtype,
           rngs=rngs,
       )
-    elif self.layer_type == "compressed_sparse_attention":
+    elif self.attention_type == "compressed_sparse_attention":
       self.compressor = CSACompressor(
           hidden_size=hidden_size,
           q_lora_rank=q_lora_rank,
@@ -884,14 +886,33 @@ class DeepSeekV4Attention(nnx.Module):
     else:
       self.compressor = None
 
+    # Compute partial rotary factor dynamically from config to prevent dimension mismatches.
+    # DeepSeek-V4 pairs consecutive channels to apply partial RoPE on qk_rope_head_dim channels,
+    # requiring dynamic scaling: partial_rotary_factor = qk_rope_head_dim / head_dim.
+    self.partial_rotary_factor = self.config.qk_rope_head_dim / self.config.head_dim
+
+    self.rope_theta = (
+        self.config.rope_max_timescale if self.attention_type == "sliding_attention" else self.config.compress_rope_theta
+    )
+
+    # Local rotary embedding block matching standard MaxText (Gemma/Llama2) paradigms.
+    self.rotary_embedding = DeepSeekV4RotaryEmbedding(
+        head_dim=self.head_dim,
+        partial_rotary_factor=self.partial_rotary_factor,
+        rope_theta=self.rope_theta,
+    )
+
   def __call__(
       self,
-      hidden_states: jnp.ndarray,
-      cos: jnp.ndarray,
-      sin: jnp.ndarray,
-      position_ids: jnp.ndarray,
+      hidden_states: jnp.ndarray | None = None,
+      position_ids: jnp.ndarray | None = None,
       attention_mask: jnp.ndarray | None = None,
+      inputs_q: jnp.ndarray | None = None,
+      inputs_kv: jnp.ndarray | None = None,
+      **kwargs,
   ) -> tuple[jnp.ndarray, jnp.ndarray]:
+    if hidden_states is None:
+      hidden_states = inputs_q
     """Executes DeepSeek-V4 compressed multi-head attention.
 
     This method projects input states to query representations, applies low-rank
@@ -903,8 +924,6 @@ class DeepSeekV4Attention(nnx.Module):
 
     Args:
       hidden_states: The input hidden representation sequence of shape [B, S, D_model].
-      cos: Positional RoPE cosine frequencies array of shape [B, S, D_rope].
-      sin: Positional RoPE sine frequencies array of shape [B, S, D_rope].
       position_ids: Absolute sequence position identifiers of shape [B, S].
       attention_mask: Optional attention mask of shape [B, 1, S, S_kv].
 
@@ -914,10 +933,16 @@ class DeepSeekV4Attention(nnx.Module):
         - The final multi-head attention weights of shape [B, H, S, S_kv].
     """
     # hidden_states shape: [B, S, D_model]
-    # cos, sin shape: [B, S, D_rope]
     # position_ids shape: [B, S]
     # attention_mask shape: [B, 1, S_q, S_kv]
     batch, seq_len, _ = hidden_states.shape
+    # Unconditionally compute RoPE positional frequency embeddings locally from position IDs.
+    if position_ids is None:
+      # [B, S] position sequence index grid broadcast
+      position_ids = jnp.broadcast_to(jnp.arange(seq_len, dtype=jnp.int32)[None], (batch, seq_len))
+    # cos/sin shape: [B, S, qk_rope_head_dim / 2]
+    cos, sin = self.rotary_embedding(hidden_states, position_ids)
+
     h_shape = (batch, seq_len, self.num_heads, self.head_dim)
 
     # Project inputs to query representations

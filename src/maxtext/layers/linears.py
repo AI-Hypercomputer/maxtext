@@ -603,7 +603,7 @@ class DeepSeekGroupedLinear(nnx.Module):
     # Grouped block-diagonal projection kernel parameters
     # Kernels are stored as a 3D tensor: [n_groups, in_features_per_group, out_features_per_group]
     kernel_shape = (n_groups, in_features_per_group, self.out_features_per_group)
-    self.weight = nnx.Param(
+    self.kernel = nnx.Param(
         kernel_init(
             rngs.params(),
             kernel_shape,
@@ -623,10 +623,10 @@ class DeepSeekGroupedLinear(nnx.Module):
       Projected tensor of shape [..., n_groups, out_features_per_group]
     """
     x = jnp.asarray(x, self.dtype)
-    weight = jnp.asarray(self.weight[...], self.dtype)
+    kernel = jnp.asarray(self.kernel[...], self.dtype)
 
     # Execute parallel group projection via optimized einsum broadcasting.
     # x: [..., g, i]
-    # weight: [g, i, o]
+    # kernel: [g, i, o]
     # output: [..., g, o]
-    return jnp.einsum("...gi,gio->...go", x, weight)
+    return jnp.einsum("...gi,gio->...go", x, kernel)
