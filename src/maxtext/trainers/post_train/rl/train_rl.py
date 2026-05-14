@@ -44,12 +44,14 @@ python3 -m maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_trai
 """
 
 from __future__ import annotations
+import contextlib
 from functools import wraps
 from typing import Any, Optional, Sequence
 
 import datasets
 import grain
 import jax
+import jax.numpy as jnp
 import json
 import logging
 import os
@@ -67,6 +69,48 @@ from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.rollout import base_rollout
 from tunix.rl.grpo.grpo_learner import GrpoConfig, GrpoLearner
 from tunix.sft import metrics_logger, profiler
+import tunix.generate.utils as tunix_utils
+
+
+@contextlib.contextmanager
+def _tpu_inference_compat_patches():
+  """Tactical compat shims for tpu_inference.
+
+  tpu_inference has two call-site assumptions that no longer hold:
+    1. jax.lax.with_sharding_constraint: assumes silent reshard on mismatch,
+       but current jax asserts when all mesh axes are Explicit. Fall back to
+       jax.sharding.reshard on the AssertionError.
+    2. tunix._apply_dtype_cast: tpu_inference JaxEinsum defaults
+       param_dtype=float32 so its weights initialize as float32, but model
+       dtype is bfloat16; the cast upgraded synced bfloat16 weights to float32,
+       which then mismatched in the ragged paged attention kernel. Skip the
+       bf16->f32 upcast so synced weights stay bfloat16.
+
+  Scoped to rl_train() so the patches don't leak into other importers of this
+  module. Drop both once tpu_inference is updated upstream.
+  """
+  orig_wsc = jax.lax.with_sharding_constraint
+  orig_apply_dtype_cast = tunix_utils._apply_dtype_cast  # pylint: disable=protected-access
+
+  def _compat_wsc(x, shardings):
+    try:
+      return orig_wsc(x, shardings)
+    except AssertionError:
+      return jax.sharding.reshard(x, shardings)
+
+  def _no_bf16_to_f32_cast(val, tgt_dtype, src_key):
+    if hasattr(val, "dtype") and val.dtype == jnp.bfloat16 and tgt_dtype == jnp.float32:
+      return val
+    return orig_apply_dtype_cast(val, tgt_dtype, src_key)
+
+  jax.lax.with_sharding_constraint = _compat_wsc
+  tunix_utils._apply_dtype_cast = _no_bf16_to_f32_cast  # pylint: disable=protected-access
+  try:
+    yield
+  finally:
+    jax.lax.with_sharding_constraint = orig_wsc
+    tunix_utils._apply_dtype_cast = orig_apply_dtype_cast  # pylint: disable=protected-access
+
 
 os.environ["TOKENIZERS_PARALLELISM"] = "0"
 
@@ -418,6 +462,8 @@ def create_rl_components(
               "hf_overrides": trainer_config.vllm_hf_overrides,
               "enable_expert_parallel": sampler_config.enable_expert_parallel,
               "enable_prefix_caching": True,  # Enable prefix caching to speed up generation for long prompts
+              # Ensures vLLM model initializes with correct dtype (not float32 default)
+              "dtype": trainer_config.weight_dtype,
           },
           rollout_vllm_sampling_kwargs={
               "stop": trainer_config.stop_strings,
@@ -539,6 +585,12 @@ def rl_train(argv: Sequence[str], kwargs: dict):
     trainer_devices: JAX devices for the trainer.
     sampler_devices: JAX devices for the sampler.
   """
+  with _tpu_inference_compat_patches():
+    _rl_train_impl(argv, kwargs)
+
+
+def _rl_train_impl(argv: Sequence[str], kwargs: dict):
+  """rl_train body — kept separate so _tpu_inference_compat_patches wraps it cleanly."""
   trainer_config, sampler_config, trainer_devices, sampler_devices = model_creation_utils.setup_configs_and_devices(
       argv, kwargs
   )
@@ -563,7 +615,10 @@ def rl_train(argv: Sequence[str], kwargs: dict):
   max_train_steps = get_max_train_steps(trainer_config)
 
   # Create model tokenizer
-  model_tokenizer = AutoTokenizer.from_pretrained(trainer_config.tokenizer_path)
+  model_tokenizer = AutoTokenizer.from_pretrained(
+      trainer_config.tokenizer_path,
+      token=trainer_config.hf_access_token or None,
+  )
 
   train_dataset, test_dataset = prepare_datasets(trainer_config, model_tokenizer)
 
