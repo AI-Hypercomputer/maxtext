@@ -531,6 +531,9 @@ logical_axis_rules: [
                       ['activation_stage', 'stage'],
                       # General Weights
                       ['mlp', ['fsdp_transpose', 'tensor', 'tensor_sequence', 'autoregressive']],
+                      # GDN (linear-attention) projections shard like 'mlp' during training; the
+                      # vLLM serving config overrides this to match tpu-inference's ATTN_HEAD order.
+                      ['gdn_head', ['fsdp_transpose', 'tensor', 'tensor_sequence', 'autoregressive']],
                       ['embed', ['fsdp', 'fsdp_transpose', 'tensor_transpose', 'context', 'expert']],
                       ['embed', ['fsdp', 'tensor_transpose', 'context', 'expert']],
                       ['embed', ['fsdp', 'fsdp_transpose', 'context', 'expert']],

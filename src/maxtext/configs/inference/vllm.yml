@@ -37,7 +37,7 @@ logical_axis_rules: [
                       # Vocab Activations
                       ['activation_embed_and_logits_batch', ['data', 'attn_dp', 'attn_dp_expert']],
                       ['activation_embed_and_logits_batch_sequence', ['data', 'attn_dp', 'attn_dp_expert']],
-                      ['activation_vocab', ['expert', 'model']],
+                      ['activation_vocab', ['model', 'expert']],
                       # Vocab Weights
                       ['vocab', []],
                       ['embed_vocab', []],
@@ -46,16 +46,17 @@ logical_axis_rules: [
                       # ==========================================
                       # Attention Activations
                       ['activation_batch_attn', ['data', 'attn_dp', 'attn_dp_expert']],
-                      ['activation_heads', ['expert', 'model']],
-                      ['activation_kv_heads', ['expert', 'model']],
+                      ['activation_heads', ['model', 'expert']],
+                      ['activation_kv_heads', ['model', 'expert']],
                       ['activation_embed_attn', []],
                       ['activation_kv', []],
                       ['activation_kv_batch', ['data', 'attn_dp', 'attn_dp_expert']],
                       ['activation_kv_head_dim', []],
                       # Attention Weights
-                      ['heads', ['expert', 'model']],
-                      ['q_heads', ['expert', 'model']],
-                      ['kv_heads', ['expert', 'model']],
+                      ['heads', ['model', 'expert']],
+                      ['gdn_head', ['model', 'expert']],
+                      ['q_heads', ['model', 'expert']],
+                      ['kv_heads', ['model', 'expert']],
                       ['qkv', []],
                       ['kv', []],
                       ['kv_head_dim', []],
