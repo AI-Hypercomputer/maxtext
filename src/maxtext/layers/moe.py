@@ -306,6 +306,181 @@ class GateLogit(nnx.Module):
     return output, pre_bias_logits
 
 
+def _sqrtsoftplus(x: jax.Array) -> jax.Array:
+  """Computes sqrtsoftplus activation: sqrt(softplus(x))."""
+  # [Any] -> [Any]
+  return jnp.sqrt(jax.nn.softplus(x))
+
+
+class DeepSeekV4TopKRouter(nnx.Module):
+  """Top-K Router for DeepSeek-V4 MoE routing.
+
+  Computes logits, normalized routing weights, and expert indices.
+  """
+
+  def __init__(
+      self,
+      config: ctypes.Config,
+      mesh: jax.sharding.Mesh,
+      rngs: nnx.Rngs,
+      kernel_axes: Tuple[Optional[str], ...] = (),
+  ):
+    super().__init__()
+    self.config = config
+    self.top_k = config.num_experts_per_tok
+    self.num_experts = config.num_experts
+    self.hidden_dim = config.emb_dim if config.moe_expert_input_dim <= 0 else config.moe_expert_input_dim
+    self.routed_scaling_factor = config.routed_scaling_factor
+
+    # Initialize gate weight matrix.
+    # Shape: [hidden_dim, num_experts]
+    kernel_init = nd_dense_init(1.0, "fan_in", "truncated_normal")
+    kernel_shape = (self.hidden_dim, self.num_experts)
+    kernel_in_axis = np.arange(1)
+    kernel_out_axis = np.arange(1, 2)
+
+    self.kernel = nnx.Param(
+        kernel_init(
+            rngs.params(),
+            kernel_shape,
+            config.weight_dtype,
+            kernel_in_axis,
+            kernel_out_axis,
+        ),
+        out_sharding=kernel_axes,
+    )
+
+    # Load-balancing expert score correction bias.
+    # Shape: [num_experts]
+    self.e_score_correction_bias = nnx.Param(
+        jnp.zeros((self.num_experts,), dtype=jnp.float32),
+        out_sharding=(kernel_axes[-1] if kernel_axes else None,),
+    )
+
+  def __call__(self, hidden_states: jax.Array) -> Tuple[jax.Array, jax.Array, jax.Array]:
+    # input hidden_states shape: [batch, seq_len, hidden_dim] or [tokens, hidden_dim]
+    inputs = jnp.asarray(hidden_states, dtype=self.config.dtype)
+    # [batch, seq_len, hidden_dim] -> [tokens, hidden_dim]
+    flat = inputs.reshape(-1, self.hidden_dim)
+
+    # Compute raw logits in float32.
+    # [tokens, hidden_dim] x [hidden_dim, num_experts] -> [tokens, num_experts]
+    kernel_f32 = jnp.asarray(self.kernel[...], dtype=jnp.float32)
+    logits = jnp.matmul(flat.astype(jnp.float32), kernel_f32)
+
+    # Apply custom scoring function (sqrtsoftplus).
+    # [tokens, num_experts] -> [tokens, num_experts]
+    scores = _sqrtsoftplus(logits)
+
+    # Add expert score correction bias and select top-k indices.
+    # [tokens, num_experts] + [num_experts] -> [tokens, num_experts]
+    scores_biased = scores + jnp.asarray(self.e_score_correction_bias[...], dtype=jnp.float32)
+    # [tokens, num_experts] -> [tokens, top_k]
+    _, indices = jax.lax.top_k(scores_biased, self.top_k)
+
+    # Gather corresponding scores for the selected top-k indices.
+    # [tokens, num_experts] gathered with [tokens, top_k] -> [tokens, top_k]
+    weights = jnp.take_along_axis(scores, indices, axis=-1)
+
+    # Normalize weights to sum to 1.0 per token.
+    # [tokens, top_k] -> [tokens, top_k]
+    weights = weights / (weights.sum(axis=-1, keepdims=True) + 1e-20)
+
+    # Scale weights by routed scaling factor.
+    # [tokens, top_k] -> [tokens, top_k]
+    scaled_weights = weights * self.routed_scaling_factor
+
+    return (
+        logits.astype(self.config.dtype),
+        scaled_weights.astype(self.config.dtype),
+        indices,
+    )
+
+
+class DeepSeekV4HashRouter(nnx.Module):
+  """Hash Router for DeepSeek-V4 MoE routing.
+
+  Computes logits, static routing weights based on token IDs, and expert indices.
+  """
+
+  def __init__(
+      self,
+      config: ctypes.Config,
+      mesh: jax.sharding.Mesh,
+      rngs: nnx.Rngs,
+      kernel_axes: Tuple[Optional[str], ...] = (),
+  ):
+    super().__init__()
+    self.config = config
+    self.top_k = config.num_experts_per_tok
+    self.num_experts = config.num_experts
+    self.hidden_dim = config.emb_dim if config.moe_expert_input_dim <= 0 else config.moe_expert_input_dim
+    self.routed_scaling_factor = config.routed_scaling_factor
+
+    # Initialize gate weight matrix.
+    # Shape: [hidden_dim, num_experts]
+    kernel_init = nd_dense_init(1.0, "fan_in", "truncated_normal")
+    kernel_shape = (self.hidden_dim, self.num_experts)
+    kernel_in_axis = np.arange(1)
+    kernel_out_axis = np.arange(1, 2)
+
+    self.kernel = nnx.Param(
+        kernel_init(
+            rngs.params(),
+            kernel_shape,
+            config.weight_dtype,
+            kernel_in_axis,
+            kernel_out_axis,
+        ),
+        out_sharding=kernel_axes,
+    )
+
+    # Static token-to-expert mapping table.
+    # Shape: [vocab_size, top_k]
+    self.tid2eid = nnx.Param(
+        jnp.zeros((config.vocab_size, self.top_k), dtype=jnp.int32),
+    )
+
+  def __call__(self, hidden_states: jax.Array, input_ids: jax.Array) -> Tuple[jax.Array, jax.Array, jax.Array]:
+    # input hidden_states shape: [batch, seq_len, hidden_dim] or [tokens, hidden_dim]
+    inputs = jnp.asarray(hidden_states, dtype=self.config.dtype)
+    # [batch, seq_len, hidden_dim] -> [tokens, hidden_dim]
+    flat = inputs.reshape(-1, self.hidden_dim)
+
+    # Compute raw logits in float32.
+    # [tokens, hidden_dim] x [hidden_dim, num_experts] -> [tokens, num_experts]
+    kernel_f32 = jnp.asarray(self.kernel[...], dtype=jnp.float32)
+    logits = jnp.matmul(flat.astype(jnp.float32), kernel_f32)
+
+    # Apply custom scoring function (sqrtsoftplus).
+    # [tokens, num_experts] -> [tokens, num_experts]
+    scores = _sqrtsoftplus(logits)
+
+    # Look up frozen expert routing indices from input_ids.
+    # [batch, seq_len] -> [tokens]
+    flat_input_ids = input_ids.reshape(-1)
+    # [vocab_size, top_k] sliced at [tokens] -> [tokens, top_k]
+    indices = self.tid2eid[...][flat_input_ids]
+
+    # Gather corresponding scores for the statically selected expert indices.
+    # [tokens, num_experts] gathered with [tokens, top_k] -> [tokens, top_k]
+    weights = jnp.take_along_axis(scores, indices, axis=-1)
+
+    # Normalize weights to sum to 1.0 per token.
+    # [tokens, top_k] -> [tokens, top_k]
+    weights = weights / (weights.sum(axis=-1, keepdims=True) + 1e-20)
+
+    # Scale weights by routed scaling factor.
+    # [tokens, top_k] -> [tokens, top_k]
+    scaled_weights = weights * self.routed_scaling_factor
+
+    return (
+        logits.astype(self.config.dtype),
+        scaled_weights.astype(self.config.dtype),
+        indices,
+    )
+
+
 class RoutedMoE(nnx.Module):
   """Implements a routed MoE block."""
 
@@ -322,6 +497,7 @@ class RoutedMoE(nnx.Module):
       weight_dtype: ctypes.DType = jnp.float32,
       dtype: ctypes.DType = jnp.float32,
       quant: Optional[quantizations.AqtQuantization] = None,
+      layer_idx: int = 0,
   ):
     """Initializes the RoutedMoE module.
 
@@ -349,6 +525,7 @@ class RoutedMoE(nnx.Module):
     self.dtype = dtype
     self.quant = quant
     self.rngs = rngs
+    self.layer_idx = layer_idx
 
     self.moe_expert_input_dim = (
         self.config.emb_dim if self.config.moe_expert_input_dim <= 0 else self.config.moe_expert_input_dim
@@ -381,25 +558,33 @@ class RoutedMoE(nnx.Module):
     else:
       self._expert_parallelism_name = "expert"
 
-    self.gate = GateLogit(
-        in_features_shape=self.moe_expert_input_dim,
-        out_features_shape=self.num_experts,
-        mesh=self.mesh,
-        model_name=self.config.model_name,
-        dtype=jnp.float32 if self.config.float32_gate_logits else self.dtype,
-        weight_dtype=self.weight_dtype,
-        quant=self.quant,
-        kernel_init=self.kernel_init,
-        kernel_axes=self.kernel_axes,
-        use_bias=self.config.routed_bias,
-        # tpu-inference applies the score function in the fused_moe_gmm kernel,
-        # so we don't apply it here to avoid redundant computation.
-        # See https://github.com/vllm-project/tpu-inference/blob/main/tpu_inference/layers/common/fused_moe_gmm.py#L58.
-        score_func="" if self.config.attention == "vllm_rpa" else self.config.routed_score_func,
-        matmul_precision=self.config.matmul_precision,
-        shard_mode=config.shard_mode,
-        rngs=self.rngs,
+    self.is_hash = self.config.decoder_block == ctypes.DecoderBlockType.DEEPSEEK_V4 and 0 <= layer_idx < getattr(
+        config, "num_hash_layers", 3
     )
+    if self.is_hash:
+      self.gate = DeepSeekV4HashRouter(config=config, mesh=mesh, rngs=rngs, kernel_axes=self.kernel_axes)
+    elif self.config.decoder_block == ctypes.DecoderBlockType.DEEPSEEK_V4:
+      self.gate = DeepSeekV4TopKRouter(config=config, mesh=mesh, rngs=rngs, kernel_axes=self.kernel_axes)
+    else:
+      self.gate = GateLogit(
+          in_features_shape=self.moe_expert_input_dim,
+          out_features_shape=self.num_experts,
+          mesh=self.mesh,
+          model_name=self.config.model_name,
+          dtype=jnp.float32 if self.config.float32_gate_logits else self.dtype,
+          weight_dtype=self.weight_dtype,
+          quant=self.quant,
+          kernel_init=self.kernel_init,
+          kernel_axes=self.kernel_axes,
+          use_bias=self.config.routed_bias,
+          # tpu-inference applies the score function in the fused_moe_gmm kernel,
+          # so we don't apply it here to avoid redundant computation.
+          # See https://github.com/vllm-project/tpu-inference/blob/main/tpu_inference/layers/common/fused_moe_gmm.py#L58.
+          score_func="" if self.config.attention == "vllm_rpa" else self.config.routed_score_func,
+          matmul_precision=self.config.matmul_precision,
+          shard_mode=config.shard_mode,
+          rngs=self.rngs,
+      )
     rule = qpl.get_current_rule("gmm")
     sparsity_rule = None
     if rule is not None:
@@ -704,7 +889,13 @@ class RoutedMoE(nnx.Module):
   def apply_ffn_activation(self, layer_w0, layer_w1):
     """Applies FFN activation function."""
     with jax.named_scope("ffn_act"):
-      if self.config.decoder_block == ctypes.DecoderBlockType.GPT_OSS:
+      if self.config.decoder_block == ctypes.DecoderBlockType.DEEPSEEK_V4:
+        limit = getattr(self.config, "swiglu_limit", 1.0)
+        layer_w0 = jnp.clip(layer_w0, max=limit)
+        layer_w1 = jnp.clip(layer_w1, min=-limit, max=limit)
+        layer_act = self.activation_fn(layer_w0)
+        intermediate_layer = jnp.multiply(layer_act, layer_w1)
+      elif self.config.decoder_block == ctypes.DecoderBlockType.GPT_OSS:
         layer_w0 = jnp.clip(layer_w0, min=None, max=self.config.mlp_activations_limit)
         layer_w1 = jnp.clip(layer_w1, min=-self.config.mlp_activations_limit, max=self.config.mlp_activations_limit)
         layer_act = self.activation_fn(layer_w0 * 1.702)
@@ -715,13 +906,26 @@ class RoutedMoE(nnx.Module):
         intermediate_layer = jnp.multiply(layer_act, layer_w1)
       return intermediate_layer.astype(self.dtype)
 
-  def permute(self, inputs, gate_logits, pre_bias_logits, use_custom_sort_vjp=True, rngs=None, roll_to_expert_id=None):
+  def permute(
+      self,
+      inputs,
+      gate_logits,
+      pre_bias_logits,
+      use_custom_sort_vjp=True,
+      rngs=None,
+      roll_to_expert_id=None,
+      gate_weights=None,
+      gate_indices=None,
+  ):
     """Permute tokens to group by expert to fit gmm call."""
     # reshape inputs (batch, sequence, emb) to (batch * sequence, emb)
     inputs_shape = inputs.shape
     bsz_times_seq_len = inputs_shape[0] * inputs_shape[1]
     inputs_2d = jnp.reshape(inputs, (bsz_times_seq_len, inputs_shape[2]))
-    weights, selected_experts = self.get_topk(gate_logits, pre_bias_logits, rngs)
+    if gate_weights is not None and gate_indices is not None:
+      weights, selected_experts = gate_weights, gate_indices
+    else:
+      weights, selected_experts = self.get_topk(gate_logits, pre_bias_logits, rngs)
 
     lb_loss = None
     if self.config.load_balance_loss_weight > 0.0:
@@ -794,7 +998,7 @@ class RoutedMoE(nnx.Module):
       if self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4:
         # For Llama4, combine using weights of 1 for selected experts
         reshaped_weights = jnp.ones_like(reshaped_weights)
-      if self.config.float32_weight_sum:
+      if self.config.float32_weight_sum or self.config.decoder_block == ctypes.DecoderBlockType.DEEPSEEK_V4:
         reshaped_intermediate = reshaped_intermediate.astype(jnp.float32)
         reshaped_weights = reshaped_weights.astype(jnp.float32)
       output = jnp.einsum(
@@ -1033,6 +1237,8 @@ class RoutedMoE(nnx.Module):
       w0_bias,
       w1_bias,
       wo_bias,
+      gate_weights=None,
+      gate_indices=None,
   ):
     """Perform sparse matrix multiplication of inputs and Experts."""
 
@@ -1255,6 +1461,16 @@ class RoutedMoE(nnx.Module):
     ) = get_routed_moe_shardings(is_batch_sharded_by_expert)
     w0_pspec, w1_pspec, wo_pspec = maybe_aqt_partition(w0_kernel, w0_pspec, w1_kernel, w1_pspec, wo_kernel, wo_pspec)
 
+    if gate_weights is not None:
+      gate_weights_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
+    else:
+      gate_weights_pspec = None
+
+    if gate_indices is not None:
+      gate_indices_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
+    else:
+      gate_indices_pspec = None
+
     @functools.partial(
         jax.shard_map,
         mesh=self.mesh,
@@ -1269,6 +1485,8 @@ class RoutedMoE(nnx.Module):
             w1_bias_pspec,
             wo_bias_pspec,
             P(),  # Replicate the input key
+            gate_weights_pspec,
+            gate_indices_pspec,
         ),
         out_specs=(
             self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", "activation_embed")),
@@ -1277,7 +1495,7 @@ class RoutedMoE(nnx.Module):
         ),
         check_vma=False,
     )
-    def wrapper(x, logits, pre_bias_logits, w0, w1, wo, w0_bias, w1_bias, wo_bias, rngs):
+    def wrapper(x, logits, pre_bias_logits, w0, w1, wo, w0_bias, w1_bias, wo_bias, rngs, g_weights, g_indices):
       batch_size, sequence_length, _ = x.shape
       num_expert_parallelism = self.get_expert_parallelism_size()
       if num_expert_parallelism > 1:
@@ -1304,6 +1522,8 @@ class RoutedMoE(nnx.Module):
             self.config.use_custom_sort_vjp,
             roll_to_expert_id=num_experts_per_shard * expert_shard_id,
             rngs=rngs,
+            gate_weights=g_weights,
+            gate_indices=g_indices,
         )
 
         # Filter down to the group sizes that apply to only the experts in the
@@ -1313,7 +1533,13 @@ class RoutedMoE(nnx.Module):
         x = jnp.where(mask[:, None], x, 0)
       else:
         x, sorted_selected_experts, weights, group_sizes, selected_experts, lb_loss, bias_updates = self.permute(
-            x, logits, pre_bias_logits, self.config.use_custom_sort_vjp, rngs
+            x,
+            logits,
+            pre_bias_logits,
+            self.config.use_custom_sort_vjp,
+            rngs,
+            gate_weights=g_weights,
+            gate_indices=g_indices,
         )
 
         if num_expert_parallelism > 1:
@@ -1590,8 +1816,24 @@ class RoutedMoE(nnx.Module):
     if wo_bias is not None:
       wo_bias = self._maybe_shard_with_pspec(wo_bias, wo_bias_pspec)
 
+    if gate_weights is not None:
+      gate_weights = self._maybe_shard_with_logical(gate_weights, gate_logits_axes)
+    if gate_indices is not None:
+      gate_indices = self._maybe_shard_with_logical(gate_indices, gate_logits_axes)
+
     return wrapper(
-        inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias, self.rngs
+        inputs,
+        gate_logits,
+        pre_bias_logits,
+        w0_kernel,
+        w1_kernel,
+        wo_kernel,
+        w0_bias,
+        w1_bias,
+        wo_bias,
+        self.rngs,
+        gate_weights,
+        gate_indices,
     )
 
   def reshape_and_update_weights(self, weights, indices):
@@ -1851,6 +2093,8 @@ class RoutedMoE(nnx.Module):
       w0_bias,
       w1_bias,
       wo_bias,
+      gate_weights=None,
+      gate_indices=None,
   ) -> tuple[jax.Array, Optional[jax.Array], Optional[jax.Array]]:
     """Dense matrix multiplication."""
     # gate_logits: batch, length, expert
@@ -1860,7 +2104,10 @@ class RoutedMoE(nnx.Module):
       pre_bias_logits = self._maybe_shard_with_logical(
           pre_bias_logits, ("activation_batch_moe", "activation_length_moe", None)
       )
-    top_k_weights, top_k_indices = self.get_topk(gate_logits, pre_bias_logits, self.rngs)
+    if gate_weights is not None and gate_indices is not None:
+      top_k_weights, top_k_indices = gate_weights, gate_indices
+    else:
+      top_k_weights, top_k_indices = self.get_topk(gate_logits, pre_bias_logits, self.rngs)
     is_llama4_decoder_layer = self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4
     if is_llama4_decoder_layer:
       router_scores = jax.nn.sigmoid(top_k_weights.astype(jnp.float32)).astype(self.dtype)
@@ -2231,13 +2478,31 @@ class RoutedMoE(nnx.Module):
     return w0_kernel, w1_kernel, wo_kernel
 
   def __call__(
-      self, inputs: jax.Array, gate_inputs: jax.Array | None = None, out_sharding: NamedSharding | None = None
+      self,
+      inputs: jax.Array,
+      gate_inputs: jax.Array | None = None,
+      out_sharding: NamedSharding | None = None,
+      input_ids: jax.Array | None = None,
+      gate_weights: jax.Array | None = None,
+      gate_indices: jax.Array | None = None,
   ) -> tuple[jax.Array, Optional[jax.Array], Optional[jax.Array]]:
     cfg = self.config
     inputs = inputs.astype(cfg.dtype)
     gate_dtype = jnp.float32 if cfg.float32_gate_logits else cfg.dtype
     routing_inputs = inputs if gate_inputs is None else gate_inputs.astype(gate_dtype)
-    gate_logits, pre_bias_logits = self.gate(routing_inputs)
+
+    if self.config.decoder_block == ctypes.DecoderBlockType.DEEPSEEK_V4:
+      batch_size, seq_len = inputs.shape[0], inputs.shape[1]
+      if self.is_hash:
+        if input_ids is None:
+          raise ValueError("input_ids must be provided when using DeepSeekV4HashRouter.")
+        gate_logits, pre_bias_logits, _ = self.gate(routing_inputs, input_ids)
+      else:
+        gate_logits, pre_bias_logits, _ = self.gate(routing_inputs)
+      gate_logits = gate_logits.reshape(batch_size, seq_len, -1)
+      pre_bias_logits = pre_bias_logits.reshape(batch_size, seq_len, -1)
+    else:
+      gate_logits, pre_bias_logits = self.gate(routing_inputs)
 
     wo_kernel = jnp.asarray(self.wo[...], self.dtype)
 
@@ -2284,11 +2549,31 @@ class RoutedMoE(nnx.Module):
             wo_bias,
         )
       output, lb_loss, bias_updates = self.sparse_matmul(
-          inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias
+          inputs,
+          gate_logits,
+          pre_bias_logits,
+          w0_kernel,
+          w1_kernel,
+          wo_kernel,
+          w0_bias,
+          w1_bias,
+          wo_bias,
+          gate_weights=gate_weights,
+          gate_indices=gate_indices,
       )
     else:
       output, lb_loss, bias_updates = self.dense_matmul(
-          inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias
+          inputs,
+          gate_logits,
+          pre_bias_logits,
+          w0_kernel,
+          w1_kernel,
+          wo_kernel,
+          w0_bias,
+          w1_bias,
+          wo_bias,
+          gate_weights=gate_weights,
+          gate_indices=gate_indices,
       )
     return output, lb_loss, bias_updates
 
@@ -2306,6 +2591,7 @@ class RoutedAndSharedMoE(nnx.Module):
       weight_dtype: ctypes.DType = jnp.float32,
       dtype: ctypes.DType = jnp.float32,
       quant: Optional[quantizations.AqtQuantization] = None,
+      layer_idx: int = 0,
   ):
     """Initializes the RoutedAndSharedMoE module.
 
@@ -2345,6 +2631,7 @@ class RoutedAndSharedMoE(nnx.Module):
         weight_dtype=self.config.weight_dtype,
         quant=self.quant,
         rngs=self.rngs,
+        layer_idx=layer_idx,
     )
 
     shared_expert_mlp_dim = (
@@ -2375,12 +2662,24 @@ class RoutedAndSharedMoE(nnx.Module):
       gate_inputs: jax.Array | None = None,
       intermediate_sharding: NamedSharding | None = None,
       out_sharding: NamedSharding | None = None,
+      input_ids: jax.Array | None = None,
+      gate_weights: jax.Array | None = None,
+      gate_indices: jax.Array | None = None,
   ) -> tuple[jax.Array, Optional[jax.Array], Optional[jax.Array]]:
     routed_experts, load_balance_loss, moe_bias_updates = self.routed_moe(
-        inputs, gate_inputs=gate_inputs, out_sharding=out_sharding
+        inputs,
+        gate_inputs=gate_inputs,
+        out_sharding=out_sharding,
+        input_ids=input_ids,
+        gate_weights=gate_weights,
+        gate_indices=gate_indices,
     )
     shared_experts = self.shared_experts(inputs, intermediate_sharding=intermediate_sharding, out_sharding=out_sharding)
-    return routed_experts + shared_experts, load_balance_loss, moe_bias_updates
+    if self.config.decoder_block == ctypes.DecoderBlockType.DEEPSEEK_V4:
+      combined = (routed_experts.astype(jnp.float32) + shared_experts.astype(jnp.float32)).astype(self.dtype)
+    else:
+      combined = routed_experts + shared_experts
+    return combined, load_balance_loss, moe_bias_updates
 
 
 def get_gate_logit(
