@@ -108,6 +108,7 @@ def setup_sft_trainer(data, hf_model, tokenizer, max_target_length):
   training_args = TrainingArguments(
       per_device_train_batch_size=1,
       bf16=True,
+      use_cpu=True,
   )
   return SFTTrainer(
       model=hf_model,
