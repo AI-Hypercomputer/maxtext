@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Google LLC
+# Copyright 2023–2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -25,6 +25,34 @@ from maxtext.trainers.post_train.hooks import BaseTrainingHooks, BaseDataHooks
 
 class DPOTrainingHooks(BaseTrainingHooks):
   """Training hooks for DPO."""
+
+  @override
+  def get_metrics_to_pull(self, is_eval: bool = False) -> list[tuple[str, str]]:
+    metrics = super().get_metrics_to_pull(is_eval)
+    if self.config.use_dpo:
+      if not is_eval:
+        metrics.extend([
+            ("learning/reward_accuracy", "rewards/accuracy"),
+            ("learning/reward_margin", "rewards/margin"),
+        ])
+      else:
+        metrics.extend([
+            ("evaluation/dpo_reward_accuracy", "rewards/accuracy"),
+            ("evaluation/dpo_reward_margin", "rewards/margin"),
+        ])
+    else:
+      # ORPO specific metrics
+      if not is_eval:
+        metrics.extend([
+            ("learning/lm_loss", "sft_loss"),
+            ("learning/dpo_loss", "or_loss"),
+        ])
+      else:
+        metrics.extend([
+            ("eval/avg_sft_loss", "sft_loss"),
+            ("eval/avg_or_loss", "or_loss"),
+        ])
+    return metrics
 
   @override
   def get_total_weights(self, batch) -> jax.Array:

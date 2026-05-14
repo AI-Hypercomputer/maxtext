@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Google LLC
+# Copyright 2023–2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -131,17 +131,13 @@ class BaseTrainingHooks(TrainingHooks, abc.ABC):
     }
 
     # Attempt to pull additional metrics from Tunix metrics_logger
-    for mt_key, tunix_key in [
-        ("learning/perplexity", "perplexity"),
-        ("learning/lm_loss", "sft_loss"),
-        ("learning/dpo_loss", "or_loss"),
-        ("learning/grad_norm", "grad_norm"),
-        ("learning/reward_accuracy", "rewards/accuracy"),
-        ("learning/reward_margin", "rewards/margin"),
-    ]:
+    import math
+    for mt_key, tunix_key in self.get_metrics_to_pull(is_eval=False):
       try:
         val = train_ctx.metrics_logger.get_metric(train_ctx.metrics_prefix, tunix_key, "train")
-        metrics["scalar"][mt_key] = float(val)
+        f_val = float(val)
+        if not (math.isnan(f_val) or math.isinf(f_val)):
+          metrics["scalar"][mt_key] = f_val
       except:  # pylint: disable=bare-except
         pass
 
@@ -172,16 +168,13 @@ class BaseTrainingHooks(TrainingHooks, abc.ABC):
     }
 
     # Attempt to pull additional eval metrics from Tunix metrics_logger
-    for mt_key, tunix_key in [
-        ("eval/avg_perplexity", "perplexity"),
-        ("eval/avg_sft_loss", "sft_loss"),
-        ("eval/avg_or_loss", "or_loss"),
-        ("evaluation/dpo_reward_accuracy", "rewards/accuracy"),
-        ("evaluation/dpo_reward_margin", "rewards/margin"),
-    ]:
+    import math
+    for mt_key, tunix_key in self.get_metrics_to_pull(is_eval=True):
       try:
         val = train_ctx.metrics_logger.get_metric(train_ctx.metrics_prefix, tunix_key, "eval")
-        metrics["scalar"][mt_key] = float(val)
+        f_val = float(val)
+        if not (math.isnan(f_val) or math.isinf(f_val)):
+          metrics["scalar"][mt_key] = f_val
       except:  # pylint: disable=bare-except
         pass
 
@@ -194,6 +187,15 @@ class BaseTrainingHooks(TrainingHooks, abc.ABC):
 
     if avg_loss <= self.config.target_eval_loss:
       raise exceptions.StopTraining(f"Target loss {self.config.target_eval_loss=} is achieved.")
+
+  def get_metrics_to_pull(self, is_eval: bool = False) -> list[tuple[str, str]]:
+    """Returns a list of (maxtext_key, tunix_key) metrics relevant to pull from Tunix."""
+    prefix = "avg_" if is_eval else ""
+    base = "eval" if is_eval else "learning"
+    return [
+        (f"{base}/{prefix}perplexity", "perplexity"),
+        (f"{base}/{prefix}grad_norm", "grad_norm"),
+    ]
 
   @abc.abstractmethod
   def get_total_weights(self, batch) -> jax.Array:

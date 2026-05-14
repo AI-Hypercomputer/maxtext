@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Google LLC
+# Copyright 2023–2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -25,6 +25,15 @@ from maxtext.trainers.post_train.hooks import BaseTrainingHooks, BaseDataHooks
 
 class SFTTrainingHooks(BaseTrainingHooks):
   """Training hooks for SFT."""
+
+  @override
+  def get_metrics_to_pull(self, is_eval: bool = False) -> list[tuple[str, str]]:
+    metrics = super().get_metrics_to_pull(is_eval)
+    if not is_eval:
+      metrics.append(("learning/lm_loss", "sft_loss"))
+    else:
+      metrics.append(("eval/avg_sft_loss", "sft_loss"))
+    return metrics
 
   @override
   def get_total_weights(self, batch) -> jax.Array:
