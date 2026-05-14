@@ -943,9 +943,11 @@ def load_state_if_possible(
       )
       _assert_no_shaped_dtype_struct(restored_state)
     return {"items": restored_state}, None
+  if checkpoint_manager is None:
+    max_logging.log("Checkpoint manager is None, skipping checkpoint restoration.")
   else:
     max_logging.log("No existing checkpoints found, not restoring checkpoint.")
-    return None, None
+  return None, None
 
 
 def setup_checkpoint_logger(config) -> Any | None:  # pytype: disable=attribute-error
