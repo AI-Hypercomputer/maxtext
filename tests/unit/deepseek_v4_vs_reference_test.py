@@ -27,6 +27,7 @@ from flax import nnx
 import maxtext.layers.normalizations as jax_norm_module
 import maxtext.layers.embeddings as jax_emb_module
 import maxtext.layers.linears as jax_linear_module
+from maxtext.layers.moe import DeepSeekV4TopKRouter, DeepSeekV4HashRouter
 
 
 # ==============================================================================
@@ -904,6 +905,70 @@ class DeepseekV4Attention_PT(nn.Module):
     return output, attn_weights
 
 
+# ==============================================================================
+# 3. PYTORCH ROUTER REFERENCE CLASSES (SOURCE OF TRUTH - READ ONLY)
+# ==============================================================================
+
+ACT2FN = {
+    "sqrtsoftplus": lambda x: torch.sqrt(F.softplus(x)),
+    "softmax": lambda x: F.softmax(x, dim=-1),
+    "sigmoid": lambda x: torch.sigmoid(x),
+}
+
+
+class DeepseekV4TopKRouter_PT(nn.Module):
+
+  def __init__(self, config: DeepseekV4Config):
+    super().__init__()
+    self.top_k = config.num_experts_per_tok
+    self.num_experts = config.num_local_experts
+    self.hidden_dim = config.hidden_size
+    self.weight = nn.Parameter(torch.empty(self.num_experts, self.hidden_dim))
+    self.score_fn = ACT2FN[config.scoring_func]
+    self.routed_scaling_factor = config.routed_scaling_factor
+    self.register_buffer("e_score_correction_bias", torch.zeros(self.num_experts), persistent=True)
+
+  def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    flat = hidden_states.reshape(-1, self.hidden_dim)
+    logits = F.linear(flat, self.weight)
+    scores = self.score_fn(logits)
+    indices = torch.topk(scores + self.e_score_correction_bias, self.top_k, dim=-1, sorted=False).indices
+    weights = scores.gather(1, indices)
+    weights = weights / (weights.sum(dim=-1, keepdim=True) + 1e-20)
+    return logits, weights * self.routed_scaling_factor, indices
+
+
+class DeepseekV4HashRouter_PT(nn.Module):
+  r"""
+  Hash routing for the first `mlp_layer_types == "hash_moe"` MoE layers (paper
+  §2.1). Expert selection is determined by a fixed `tid2eid[input_ids]` lookup —
+  a frozen token-id → expert-id table — instead of a learned argmax. The learned
+  gate `weight` still produces the per-expert scores that weight the selected
+  experts' activations; only the *which-experts* selection is static.
+  """
+
+  def __init__(self, config: DeepseekV4Config):
+    super().__init__()
+    self.top_k = config.num_experts_per_tok
+    self.num_experts = config.num_local_experts
+    self.hidden_dim = config.hidden_size
+    self.weight = nn.Parameter(torch.empty(self.num_experts, self.hidden_dim))
+    self.score_fn = ACT2FN[config.scoring_func]
+    self.routed_scaling_factor = config.routed_scaling_factor
+    self.register_buffer("tid2eid", torch.zeros(config.vocab_size, self.top_k, dtype=torch.long), persistent=True)
+
+  def forward(
+      self, hidden_states: torch.Tensor, input_ids: torch.Tensor
+  ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    flat = hidden_states.reshape(-1, self.hidden_dim)
+    logits = F.linear(flat, self.weight)
+    scores = self.score_fn(logits)
+    indices = self.tid2eid[input_ids.reshape(-1)].long()
+    weights = scores.gather(1, indices)
+    weights = weights / (weights.sum(dim=-1, keepdim=True) + 1e-20)
+    return logits, weights * self.routed_scaling_factor, indices
+
+
 import unittest
 
 
@@ -1040,6 +1105,148 @@ class DeepSeekV4ParityTest(unittest.TestCase):
 
     # Verify numerical output parity between frameworks
     np.testing.assert_allclose(out_torch, out_jax, atol=1e-5, rtol=1e-5)
+
+  def test_topk_router_parity(self):
+    # Generate deterministic random inputs for the router comparison.
+    np.random.seed(42)
+    B, S, D = 4, 16, 64
+    num_experts = 8
+    top_k = 4
+    routed_scaling_factor = 1.5
+
+    hidden_states_np = np.random.randn(B, S, D).astype(np.float32)
+    # Proactively initialize routing weights with a normal distribution to prevent TPU VM NaN bits.
+    weight_np = np.random.randn(num_experts, D).astype(np.float32)
+    bias_np = np.random.randn(num_experts).astype(np.float32)
+
+    # 1. Setup PyTorch Reference Top-K Router
+    config_pt = DeepseekV4Config()
+    config_pt.num_experts_per_tok = top_k
+    config_pt.num_local_experts = num_experts
+    config_pt.hidden_size = D
+    config_pt.scoring_func = "sqrtsoftplus"
+    config_pt.routed_scaling_factor = routed_scaling_factor
+
+    py_router = DeepseekV4TopKRouter_PT(config_pt)
+    py_router.weight.data.copy_(torch.tensor(weight_np))
+    py_router.e_score_correction_bias.copy_(torch.tensor(bias_np))
+
+    # Run forward on PyTorch reference router
+    # [B, S, D] -> [B * S, D] -> F.linear() -> logits [B * S, num_experts] -> top_k -> [B * S, top_k]
+    hidden_states_torch = torch.tensor(hidden_states_np)
+    py_logits, py_weights, py_indices = py_router(hidden_states_torch)
+
+    # 2. Setup JAX/Flax NNX Equivalent Router
+    class MockJaxConfig:
+
+      def __init__(self):
+        self.num_experts_per_tok = top_k
+        self.num_experts = num_experts
+        self.emb_dim = D
+        self.moe_expert_input_dim = D
+        self.routed_scaling_factor = routed_scaling_factor
+        self.routed_score_func = "sqrtsoftplus"
+        self.dtype = jnp.float32
+        self.weight_dtype = jnp.float32
+
+    config_jax = MockJaxConfig()
+    rngs = nnx.Rngs(42)
+    # JAX/Flax NNX target initialization
+    jax_router = DeepSeekV4TopKRouter(config=config_jax, mesh=None, rngs=rngs)
+    # Copy weights from PyTorch to JAX (transpose because shape is [D, num_experts] in JAX)
+    # PyTorch weight: [num_experts, D] -> JAX kernel: [D, num_experts]
+    jax_router.kernel.value = jnp.array(weight_np.T)
+    jax_router.e_score_correction_bias.value = jnp.array(bias_np)
+
+    # Run forward on JAX router
+    # [B, S, D] -> flat [B * S, D] -> matmul -> logits [B * S, num_experts] -> top_k -> [B * S, top_k]
+    hidden_states_jax = jnp.array(hidden_states_np)
+    jax_logits, jax_weights, jax_indices = jax_router(hidden_states_jax)
+
+    # 3. Parity assertions
+    # Compare raw logits output parity
+    np.testing.assert_allclose(py_logits.detach().numpy(), jax_logits, atol=1e-5, rtol=1e-5)
+
+    # Sort indices and corresponding weights to ensure order-agnostic parity,
+    # avoiding differences caused by implementation sorting quirks under sorted=False in PyTorch.
+    py_sort_idx = np.argsort(py_indices.numpy(), axis=-1)
+    jax_sort_idx = np.argsort(np.array(jax_indices), axis=-1)
+
+    py_indices_sorted = np.take_along_axis(py_indices.numpy(), py_sort_idx, axis=-1)
+    jax_indices_sorted = np.take_along_axis(np.array(jax_indices), jax_sort_idx, axis=-1)
+
+    py_weights_sorted = np.take_along_axis(py_weights.detach().numpy(), py_sort_idx, axis=-1)
+    jax_weights_sorted = np.take_along_axis(np.array(jax_weights), jax_sort_idx, axis=-1)
+
+    np.testing.assert_array_equal(jax_indices_sorted, py_indices_sorted)
+    np.testing.assert_allclose(jax_weights_sorted, py_weights_sorted, atol=1e-5, rtol=1e-5)
+
+  def test_hash_router_parity(self):
+    # Generate deterministic random inputs for Hash Router comparison.
+    np.random.seed(42)
+    B, S, D = 4, 16, 64
+    num_experts = 8
+    top_k = 4
+    routed_scaling_factor = 1.5
+    vocab_size = 128
+
+    hidden_states_np = np.random.randn(B, S, D).astype(np.float32)
+    # Generate input token IDs to lookup static hash routing indices.
+    input_ids_np = np.random.randint(0, vocab_size, size=(B, S)).astype(np.int64)
+
+    weight_np = np.random.randn(num_experts, D).astype(np.float32)
+    # Setup static routing table
+    tid2eid_np = np.random.randint(0, num_experts, size=(vocab_size, top_k)).astype(np.int64)
+
+    # 1. Setup PyTorch Reference Hash Router
+    config_pt = DeepseekV4Config()
+    config_pt.num_experts_per_tok = top_k
+    config_pt.num_local_experts = num_experts
+    config_pt.hidden_size = D
+    config_pt.scoring_func = "sqrtsoftplus"
+    config_pt.routed_scaling_factor = routed_scaling_factor
+    config_pt.vocab_size = vocab_size
+
+    py_router = DeepseekV4HashRouter_PT(config_pt)
+    py_router.weight.data.copy_(torch.tensor(weight_np))
+    py_router.tid2eid.copy_(torch.tensor(tid2eid_np))
+
+    # Run forward on PyTorch reference router
+    hidden_states_torch = torch.tensor(hidden_states_np)
+    input_ids_torch = torch.tensor(input_ids_np)
+    py_logits, py_weights, py_indices = py_router(hidden_states_torch, input_ids_torch)
+
+    # 2. Setup JAX/Flax NNX Equivalent Router
+    class MockJaxConfig:
+
+      def __init__(self):
+        self.num_experts_per_tok = top_k
+        self.num_experts = num_experts
+        self.emb_dim = D
+        self.moe_expert_input_dim = D
+        self.routed_scaling_factor = routed_scaling_factor
+        self.routed_score_func = "sqrtsoftplus"
+        self.vocab_size = vocab_size
+        self.dtype = jnp.float32
+        self.weight_dtype = jnp.float32
+
+    config_jax = MockJaxConfig()
+    rngs = nnx.Rngs(42)
+    jax_router = DeepSeekV4HashRouter(config=config_jax, mesh=None, rngs=rngs)
+    # Copy weight and lookup table parameter states.
+    jax_router.kernel.value = jnp.array(weight_np.T)
+    jax_router.tid2eid.value = jnp.array(tid2eid_np, dtype=jnp.int32)
+
+    # Run forward on JAX router
+    hidden_states_jax = jnp.array(hidden_states_np)
+    input_ids_jax = jnp.array(input_ids_np)
+    jax_logits, jax_weights, jax_indices = jax_router(hidden_states_jax, input_ids_jax)
+
+    # 3. Parity assertions
+    # Logits, weights, and selected index array checks.
+    np.testing.assert_allclose(py_logits.detach().numpy(), jax_logits, atol=1e-5, rtol=1e-5)
+    np.testing.assert_array_equal(jax_indices, py_indices.numpy())
+    np.testing.assert_allclose(py_weights.detach().numpy(), jax_weights, atol=1e-5, rtol=1e-5)
 
 
 if __name__ == "__main__":
