@@ -53,7 +53,7 @@ def main_kernel(
     core_axis_name: str,
     subcore_axis_name: str,
 ):
-  """Core ragger gather operation"""
+  """Core ragged gather operation"""
   tpu_info = pltpu.get_tpu_info()
   sc_info = tpu_info.sparse_core
   assert sc_info is not None
@@ -273,7 +273,7 @@ def ragged_gather(x: jax.Array, indices: jax.Array, start: jax.Array, end: jax.A
       core_axis_name="core",
       subcore_axis_name="subcore",
   )
-  return pl.kernel(
+  return pl.kernel(  # pytype: disable=wrong-keyword-args
       functools.partial(
           main_kernel,
           core_axis_name=vector_mesh.core_axis_name,
