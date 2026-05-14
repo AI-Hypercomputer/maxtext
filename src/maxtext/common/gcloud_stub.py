@@ -227,7 +227,119 @@ def jetstream():
         raise ModuleNotFoundError(mod)
     from jetstream.core import config_lib  # type: ignore  # pylint: disable=import-outside-toplevel
     from jetstream.engine import engine_api, token_utils, tokenizer_api  # type: ignore  # pylint: disable=import-outside-toplevel
-    from jetstream.engine.tokenizer_pb2 import TokenizerParameters, TokenizerType  # type: ignore  # pylint: disable=import-outside-toplevel
+
+    # Monkey-patch ResultTokens to support the legacy log_prob field
+    if not hasattr(engine_api.ResultTokens, "log_prob"):
+      _RESULT_REGISTRY = {}
+      original_result_init = engine_api.ResultTokens.__init__
+
+      def patched_result_init(self, *args, **kwargs):
+        log_prob = kwargs.pop("log_prob", None)
+        original_result_init(self, *args, **kwargs)
+        _RESULT_REGISTRY[id(self)] = log_prob
+
+      engine_api.ResultTokens.__init__ = patched_result_init
+      engine_api.ResultTokens.log_prob = property(lambda self: _RESULT_REGISTRY.get(id(self)))
+
+      original_convert = engine_api.ResultTokens.convert_to_numpy
+      def patched_convert(self):
+        new_instance = original_convert(self)
+        if id(self) in _RESULT_REGISTRY:
+          _RESULT_REGISTRY[id(new_instance)] = _RESULT_REGISTRY[id(self)]
+        return new_instance
+      engine_api.ResultTokens.convert_to_numpy = patched_convert
+
+    # Check and inject HuggingFaceTokenizer dynamically if missing from token_utils
+    if not hasattr(token_utils, "HuggingFaceTokenizer"):
+      import numpy as np
+      import jax
+      from typing import Tuple, Union
+
+      class HuggingFaceTokenizer:
+        def __init__(self, metadata):
+          from transformers import AutoTokenizer
+          self.tokenizer = AutoTokenizer.from_pretrained(metadata.path, trust_remote_code=True)
+          if getattr(self.tokenizer, "pad_token_id", None) is None:
+            if getattr(self.tokenizer, "unk_token_id", None) is not None:
+              self.tokenizer.pad_token_id = self.tokenizer.unk_token_id
+            else:
+              self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+
+        def encode(self, s: str, **kwargs) -> Tuple[np.ndarray, int]:
+          is_bos = kwargs.pop("is_bos", True)
+          prefill_lengths = kwargs.pop("prefill_lengths", None)
+          max_prefill_length = kwargs.pop("max_prefill_length", None)
+          jax_padding = kwargs.pop("jax_padding", True)
+
+          tokens = np.array(self.tokenizer.encode(s, add_special_tokens=False))
+          from jetstream.engine.token_utils import pad_tokens
+          tokens, true_length = pad_tokens(
+              tokens,
+              self.bos_id,
+              self.pad_id,
+              is_bos=is_bos,
+              prefill_lengths=prefill_lengths,
+              max_prefill_length=max_prefill_length,
+              jax_padding=jax_padding,
+          )
+          return tokens, true_length
+
+        def decode(self, token_ids: list[int], **kwargs) -> str:
+          return self.tokenizer.decode(token_ids, skip_special_tokens=True)
+
+        @property
+        def pad_id(self) -> int:
+          return self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else 0
+
+        @property
+        def eos_id(self) -> int:
+          return self.tokenizer.eos_token_id if self.tokenizer.eos_token_id is not None else 0
+
+        @property
+        def bos_id(self) -> int:
+          return self.tokenizer.bos_token_id if self.tokenizer.bos_token_id is not None else self.eos_id
+
+      token_utils.HuggingFaceTokenizer = HuggingFaceTokenizer
+
+    try:
+      from jetstream.engine.tokenizer_pb2 import TokenizerParameters, TokenizerType  # type: ignore  # pylint: disable=import-outside-toplevel
+    except ImportError:
+      # Jetstream upgraded and removed TokenizerType
+      from jetstream.engine.tokenizer_pb2 import TokenizerParameters  # type: ignore  # pylint: disable=import-outside-toplevel
+      from types import SimpleNamespace
+
+      # Emulate TokenizerType enum for backward compatibility in maxengine.py
+      class TokenizerType:
+        tiktoken = 1
+        sentencepiece = 2
+        huggingface = 3
+        DESCRIPTOR = SimpleNamespace(
+            values_by_name={
+                "tiktoken": SimpleNamespace(number=1),
+                "sentencepiece": SimpleNamespace(number=2),
+                "huggingface": SimpleNamespace(number=3),
+            }
+        )
+
+      # Monkey-patch TokenizerParameters to support legacy fields
+      _REGISTRY = {}
+      original_init = TokenizerParameters.__init__
+      def patched_init(self, *args, **kwargs):
+        tokenizer_type_val = kwargs.pop("tokenizer_type", 3)
+        access_token = kwargs.pop("access_token", None)
+        use_chat_template = kwargs.pop("use_chat_template", None)
+
+        original_init(self, *args, **kwargs)
+
+        _REGISTRY[id(self)] = {
+            "tokenizer_type": tokenizer_type_val,
+            "access_token": access_token,
+            "use_chat_template": use_chat_template,
+        }
+
+      TokenizerParameters.__init__ = patched_init
+      TokenizerParameters.tokenizer_type = property(lambda self: _REGISTRY.get(id(self), {}).get("tokenizer_type", 3))
+
     # Mark real modules as not stubs so consumers can detect the difference.
     try:
       setattr(config_lib, "_IS_STUB", False)

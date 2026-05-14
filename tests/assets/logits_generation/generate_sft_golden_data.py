@@ -40,7 +40,7 @@ from trl import SFTConfig, SFTTrainer
 
 from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_PKG_DIR, MAXTEXT_TEST_ASSETS_ROOT, MAXTEXT_ASSETS_ROOT
-from tests.integration.sft_trainer_correctness_test import get_maxtext_logits, get_token_log_probs, prepare_maxtext_inputs
+from tests.post_training.integration.sft_trainer_correctness_test import get_maxtext_logits, get_token_log_probs, prepare_maxtext_inputs
 
 
 DATA = {
@@ -108,6 +108,7 @@ def setup_sft_trainer(data, hf_model, tokenizer, max_target_length):
   training_args = TrainingArguments(
       per_device_train_batch_size=1,
       bf16=True,
+      use_cpu=True,
   )
   return SFTTrainer(
       model=hf_model,

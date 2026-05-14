@@ -76,6 +76,12 @@ _PROMPT_TEMPLATE = flags.DEFINE_string(
     help="prompt template",
 )
 
+_MAX_EXAMPLES = flags.DEFINE_integer(
+    "max_examples",
+    default=None,
+    help="Maximum number of examples to evaluate",
+)
+
 
 def construct_prompt(subject, question, choices):
   subject = subject.replace("_", " ")
@@ -110,6 +116,8 @@ def main(config):
 
   mmlu_test_ds = datasets.load_dataset("lighteval/mmlu", "all", split="test")
   for idx, example in enumerate(tqdm(mmlu_test_ds, desc="Evaluating MMLU dataset")):
+    if _MAX_EXAMPLES.value is not None and idx >= _MAX_EXAMPLES.value:
+      break
     subject = example["subject"]
     question = example["question"]
     choices = example["choices"]
@@ -117,7 +125,8 @@ def main(config):
     prompt = construct_prompt(subject, question, choices)
 
     # Tokenize the input
-    tokens, true_length = tokenizer.encode(prompt, is_bos=True, prefill_lengths=[max_prefill_predict_length])
+    print(f"DEBUG: config.add_bos={config.add_bos}")
+    tokens, true_length = tokenizer.encode(prompt, is_bos=False, prefill_lengths=[max_prefill_predict_length])
     if true_length > max_prefill_predict_length:
       max_logging.log(
           f"Warning: Prompt length {true_length} exceeds max prefill length" f" {max_prefill_predict_length}. Truncating."
@@ -229,9 +238,12 @@ def validate_config(config):
 
 
 if __name__ == "__main__":
+  import absl.logging
+  absl.logging.set_verbosity(absl.logging.INFO)
+  absl.logging.set_stderrthreshold(absl.logging.INFO)
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
-  flags.FLAGS(sys.argv)
-  cfg = pyconfig.initialize(sys.argv)
+  remaining_args = flags.FLAGS(sys.argv)
+  cfg = pyconfig.initialize(remaining_args)
   validate_config(cfg)
   max_utils.print_system_information()
   main(cfg)
