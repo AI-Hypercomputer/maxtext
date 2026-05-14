@@ -34,6 +34,8 @@ from maxtext.common.common_types import ShardMode
 from maxtext.kernels import megablox as mblx
 from maxtext.layers import attentions, linears, nnx_wrappers, quantizations
 from maxtext.layers.initializers import NdInitializer, default_bias_init, nd_dense_init, variable_to_logically_partitioned
+from maxtext.kernels.ragged.ragged_sort import gather_tokens_locally
+from maxtext.kernels.ragged.ragged_sort import scatter_tokens_locally
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils.sharding import create_sharding, maybe_shard_with_logical, maybe_shard_with_pspec
@@ -722,7 +724,6 @@ class RoutedMoE(nnx.Module):
     bsz_times_seq_len = inputs_shape[0] * inputs_shape[1]
     inputs_2d = jnp.reshape(inputs, (bsz_times_seq_len, inputs_shape[2]))
     weights, selected_experts = self.get_topk(gate_logits, pre_bias_logits, rngs)
-
     lb_loss = None
     if self.config.load_balance_loss_weight > 0.0:
       softmax_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
@@ -741,22 +742,35 @@ class RoutedMoE(nnx.Module):
       # Squeeze router_scores to (batch_size * seq_len, num_experts_per_tok)
       inputs_2d = inputs_2d * router_scores.reshape(bsz_times_seq_len, -1)
 
-    flatten_selected_experts = jnp.ravel(selected_experts)
-    if roll_to_expert_id is not None:
-      flatten_selected_experts = (flatten_selected_experts - roll_to_expert_id) % self.num_experts
-    sorted_selected_experts = jnp.argsort(flatten_selected_experts)
-    # sort inputs for number of selected experts
-    replicated_inputs_2d = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
-    sorted_inputs = _sort_activations(replicated_inputs_2d, sorted_selected_experts, use_custom_sort_vjp).astype(
-        self.dtype
-    )
-    group_size = jnp.bincount(flatten_selected_experts, length=self.num_experts)
-    # Return the experts for each sorted input.
+    num_expert_parallelism = self.get_expert_parallelism_size()
+    if self.config.use_ragged_sort:
+      topk_indices_2d = jnp.reshape(selected_experts, (bsz_times_seq_len, selected_experts.shape[2]))
+      sorted_inputs, group_size, sorted_selected_experts = gather_tokens_locally(
+          inputs_2d,
+          topk_indices_2d,
+          self.config.num_experts,
+          self.num_experts_per_tok,
+          self._expert_parallelism_name,
+          num_expert_parallelism,
+      )
+    else:
+      flatten_selected_experts = jnp.ravel(selected_experts)
+
+      if roll_to_expert_id is not None:
+        flatten_selected_experts = (flatten_selected_experts - roll_to_expert_id) % self.num_experts
+      sorted_selected_experts = jnp.argsort(flatten_selected_experts)
+      # sort inputs for number of selected experts
+      replicated_inputs_2d = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
+      sorted_inputs = _sort_activations(replicated_inputs_2d, sorted_selected_experts, use_custom_sort_vjp).astype(
+          self.dtype
+      )
+      group_size = jnp.bincount(flatten_selected_experts, length=self.num_experts)
+      # Return the experts for each sorted input.
     expert_indices = jnp.arange(self.num_experts)
     sorted_experts = jnp.repeat(
         expert_indices,
         repeats=group_size,
-        total_repeat_length=flatten_selected_experts.shape[0],
+        total_repeat_length=math.prod(selected_experts.shape),
     )
     return (
         sorted_inputs,
@@ -776,14 +790,25 @@ class RoutedMoE(nnx.Module):
       batch_size,
       sequence_length,
       use_custom_sort_vjp=True,
+      group_sizes=None,
   ):
     """Unpermute tokens to original order and combine weights."""
 
-    unsort_intermediate = _sort_activations(
-        intermediate,
-        jnp.argsort(sorted_selected_experts),
-        use_custom_sort_vjp,
-    )
+    if self.config.use_ragged_sort:
+      local_num_experts = self.config.num_experts // self.get_expert_parallelism_size()
+      unsort_intermediate = scatter_tokens_locally(
+          intermediate,
+          group_sizes,
+          sorted_selected_experts,
+          local_num_experts,
+          self._expert_parallelism_name,
+      )
+    else:
+      unsort_intermediate = _sort_activations(
+          intermediate,
+          jnp.argsort(sorted_selected_experts),
+          use_custom_sort_vjp,
+      )
     reshaped_weights = jnp.reshape(weights, (-1, self.num_experts_per_tok))
     reshaped_intermediate = jnp.reshape(
         unsort_intermediate,
@@ -1285,6 +1310,7 @@ class RoutedMoE(nnx.Module):
       else:
         expert_shard_id = 0
       num_expert_parallelism = self.get_expert_parallelism_size()
+      global_group_sizes = None
       if self.config.use_ring_of_experts:
         # The ring-of-experts strategy first duplicates the inputs to all
         # expert shards, and then routes within each shard.
@@ -1472,6 +1498,7 @@ class RoutedMoE(nnx.Module):
             batch_size=batch_size,
             sequence_length=sequence_length,
             use_custom_sort_vjp=self.config.use_custom_sort_vjp,
+            group_sizes=group_sizes,
         )
 
         # Sum up the partial outputs across the expert shards.
@@ -1542,6 +1569,7 @@ class RoutedMoE(nnx.Module):
             batch_size=batch_size,
             sequence_length=sequence_length,
             use_custom_sort_vjp=self.config.use_custom_sort_vjp,
+            group_sizes=group_sizes,
         )
 
       return output, lb_loss, bias_updates
