@@ -618,13 +618,16 @@ class RoutedMoeTest(unittest.TestCase):
           run_name=(f"moe_block_use_ragged_sort_{use_ragged_sort}" f"_ring_{use_ring_of_experts}_test"),
           enable_checkpointing=False,
           model_name="mixtral-8x7b",
+          override_model_config=True,
+          base_emb_dim=256,
+          base_mlp_dim=256,
+          base_moe_mlp_dim=256,
           dtype="bfloat16",
           megablox=True,
           sparse_matmul=True,
           per_device_batch_size=4,  # TODO(b/450900273): sharding error if pdbs=1
           ici_expert_parallelism=2,
           use_ring_of_experts=use_ring_of_experts,
-          ici_tensor_parallelism=2,
           max_target_length=128,
           use_ragged_sort=use_ragged_sort,
       )
@@ -666,7 +669,7 @@ class RoutedMoeTest(unittest.TestCase):
     devices_array_ref = maxtext_utils.create_device_mesh(cfg_ref)
     mesh_ref = Mesh(devices_array_ref, cfg_ref.mesh_axes)
     model_ref = _build_model(cfg_ref, mesh_ref)
-    with nn_partitioning.axis_rules(cfg_ref.logical_axis_rules):
+    with jax.set_mesh(mesh_ref), nn_partitioning.axis_rules(cfg_ref.logical_axis_rules):
       variables = model_ref.init({"params": rng_model, "dropout": rng_model}, hidden_states)
       loss_ref, (grads_ref, x_grad_ref) = _loss_and_grad(model_ref, variables, hidden_states)
 
@@ -675,7 +678,7 @@ class RoutedMoeTest(unittest.TestCase):
     devices_array_rs = maxtext_utils.create_device_mesh(cfg_rs)
     mesh_rs = Mesh(devices_array_rs, cfg_rs.mesh_axes)
     model_rs = _build_model(cfg_rs, mesh_rs)
-    with nn_partitioning.axis_rules(cfg_rs.logical_axis_rules):
+    with jax.set_mesh(mesh_rs), nn_partitioning.axis_rules(cfg_rs.logical_axis_rules):
       loss_rs, (grads_rs, x_grad_rs) = _loss_and_grad(model_rs, variables, hidden_states)
 
     # Loss correctness.
@@ -685,7 +688,7 @@ class RoutedMoeTest(unittest.TestCase):
     )
 
     # Hidden-state gradient correctness. This is the cotangent that flows
-    # through `gather_tokens_locally`'s custom_vjp backward (the kernel under
+    # through `ring_ragged_sort`'s custom_vjp backward (the kernel under
     # test). Without checking this, DCE removes the bwd entirely.
     self.assertEqual(x_grad_ref.shape, x_grad_rs.shape, "Hidden-state grad shape mismatch")
     self.assertTrue(
@@ -711,12 +714,10 @@ class RoutedMoeTest(unittest.TestCase):
       )
 
   @pytest.mark.tpu_only
-  @pytest.mark.skip(reason="Ragged sort requires JAX>=0.10.0.")
   def test_ragged_sort_loss_and_grad_ring_of_experts(self):
     self._run_ragged_sort_loss_and_grad(use_ring_of_experts=True)
 
   @pytest.mark.tpu_only
-  @pytest.mark.skip(reason="Ragged sort currently only supports use ring of experts.")
   def test_ragged_sort_loss_and_grad_no_ring_of_experts(self):
     self._run_ragged_sort_loss_and_grad(use_ring_of_experts=False)
 

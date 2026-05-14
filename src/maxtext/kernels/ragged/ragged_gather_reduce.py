@@ -13,7 +13,7 @@
 # limitations under the License.
 
 """Ragged gather reduce kernel implementation from tpu-inference."""
-# Source from google3/experimental/users/kyuyeunk/vllm/kernels/sparse_core/ragged_gather_reduce.py
+# Source from experimental/users/kyuyeunk/vllm/kernels/sparse_core/ragged_gather_reduce.py
 
 import functools
 import math
@@ -50,7 +50,7 @@ def _fallback_implementation(
   out = x[indices] * topk_weights[:, None].astype(jnp.float32)
   out = jnp.where(valid_rows_mask[:, None], out, 0)
   out = out.reshape(-1, reduce_group_size, out.shape[-1])
-  out = jnp.sum(out, axis=1).astype(jnp.bfloat16)
+  out = jnp.sum(out, axis=1).astype(x.dtype)
   return out
 
 
@@ -77,7 +77,7 @@ def main_kernel(
     num_row_partitions: int,
     num_column_partitions: int,
 ):
-  """Main kernel"""
+  """Main Pallas kernel for ragged gather and reduction on SparseCore."""
   tpu_info = pltpu.get_tpu_info()
   sc_info = tpu_info.sparse_core
   assert sc_info is not None
@@ -212,7 +212,9 @@ def main_kernel(
             elif in_dtype == jnp.float32:
               data = jax.lax.bitcast_convert_type(data, jnp.float32)
             else:
-              raise ValueError("Not yet support extracting data from dtype: ", in_dtype)
+              raise ValueError(
+                  f"Dtype {in_dtype} is not yet supported for ragged data extraction. Supported dtypes: bfloat16, float32."
+              )
             # Accumulate at float32 precision
             data = data * topk_weights[row_src]
 
@@ -478,7 +480,7 @@ def ragged_gather_reduce(
   )
   # Each output row from `main_kernel` will be of type float32, and then casted
   # to the input dtype when doing the filter operation.
-  out = pl.kernel(
+  out = pl.kernel(  # pytype: disable=wrong-keyword-args
       functools.partial(
           main_kernel,
           core_axis_name=vector_mesh.core_axis_name,
