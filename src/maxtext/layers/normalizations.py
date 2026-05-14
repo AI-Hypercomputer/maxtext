@@ -243,7 +243,7 @@ Qwen3NextRMSNormLinen = nnx_wrappers.to_linen_class(
 
 
 class DeepSeekV4RMSNorm(nnx.Module):
-  """RMS normalization for DeepSeek-V4 (equivalent to T5LayerNorm)."""
+  """RMS normalization for DeepSeek-V4."""
 
   def __init__(
       self,
@@ -257,8 +257,9 @@ class DeepSeekV4RMSNorm(nnx.Module):
     self.dtype = dtype
     self.weight_dtype = weight_dtype
 
-    # Initialize learnable scale weight to ones matching T5LayerNorm behavior
+    # Initialize learnable scale weight to ones
     self.weight = nnx.Param(jnp.ones((hidden_size,), dtype=weight_dtype))
+    self.scale = self.weight
 
   def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
     # [B, S, D] where D = hidden_size
@@ -296,6 +297,7 @@ class DeepSeekV4UnweightedRMSNorm(nnx.Module):
     # Calculate variance across features axis
     variance = jnp.mean(lax.square(x_f32), axis=-1, keepdims=True)  # [..., 1]
 
-    # Apply reciprocal square root and cast back to active precision
-    normalized = x_f32 * lax.rsqrt(variance + self.eps)  # [..., D]
-    return jnp.asarray(normalized, self.dtype)  # [..., D]
+    # Apply reciprocal square root, cast to active precision, and multiply
+    inv_norm = jnp.asarray(lax.rsqrt(variance + self.eps), self.dtype)  # [..., 1]
+    x_active = jnp.asarray(x, self.dtype)  # [..., D]
+    return x_active * inv_norm  # [..., D]

@@ -15,6 +15,8 @@
 
 """Tests for DeepSeek-V4 Attention and Compressor parity."""
 
+import sys
+import unittest
 from collections.abc import Callable
 from typing import Optional
 import numpy as np
@@ -23,15 +25,18 @@ import torch.nn.functional as F
 from torch import nn
 import jax
 import jax.numpy as jnp
+from jax.sharding import Mesh
 from flax import nnx
-import maxtext.layers.normalizations as jax_norm_module
-import maxtext.layers.embeddings as jax_emb_module
-import maxtext.layers.linears as jax_linear_module
+from maxtext.configs import pyconfig
 from maxtext.layers.moe import DeepSeekV4TopKRouter, DeepSeekV4HashRouter
-from maxtext.layers import attention_compressed
-from maxtext.layers.embeddings import DeepSeekV4RotaryEmbedding, apply_rotary_pos_emb
+from maxtext.layers import attention_compressed, mhc
+from maxtext.models.deepseek_v4 import DeepSeekV4DecoderLayer, DeepSeekV4ScannableBlock, DeepSeekV4HyperHead
+from maxtext.layers.embeddings import DeepSeekV4RotaryEmbedding, apply_rotary_pos_emb, Embed
 from maxtext.layers.normalizations import DeepSeekV4RMSNorm, DeepSeekV4UnweightedRMSNorm
 from maxtext.layers.linears import DeepSeekGroupedLinear
+from maxtext.layers.nnx_decoders import NNXDecoder
+import maxtext.common.common_types as ctypes
+from tests.utils.test_helpers import get_test_config_path, get_decoupled_parallelism_overrides
 
 
 # ==============================================================================
@@ -63,6 +68,7 @@ class DeepseekV4Config(PreTrainedConfig):
     self.head_dim = 512
     self.q_lora_rank = 1024
     self.partial_rotary_factor = 64 / 512
+    self.qk_rope_head_dim = 64
     self.max_position_embeddings = 1048576
     self.rope_theta = 10000.0
     self.compress_rope_theta = 160000.0
@@ -81,6 +87,22 @@ class DeepseekV4Config(PreTrainedConfig):
     self.attention_dropout = 0.0
     self._attn_implementation = "eager"
     self.matmul_precision = "default"
+    self.layer_types = ["compressed_sparse_attention"] * 43
+    self.mlp_layer_types = ["hash_moe"] * 43
+    self.num_experts_per_tok = 6
+    self.n_routed_experts = 256
+    self.num_local_experts = 256
+    self.n_shared_experts = 1
+    self.scoring_func = "sqrtsoftplus"
+    self.routed_scaling_factor = 1.5
+    self.intermediate_size = 2048
+    self.hidden_act = "silu"
+    self.swiglu_limit = 10.0
+    self.mlp_bias = False
+    self.attention_bias = False
+    self.hc_mult = 4
+    self.hc_sinkhorn_iters = 20
+    self.hc_eps = 1e-6
 
     # Setup default rope parameters
     dim = int(self.head_dim * self.partial_rotary_factor)
@@ -155,6 +177,19 @@ ALL_ATTENTION_FUNCTIONS = AllAttentionFunctionsStub()
 ROPE_INIT_FUNCTIONS = {}
 dynamic_rope_update = lambda fn: fn
 maybe_autocast = lambda device_type, enabled: torch.enable_grad()  # No-op context
+
+use_experts_implementation = lambda cls: cls
+
+
+class TransformersKwargs(dict):
+  pass
+
+
+ACT2FN = {
+    "silu": F.silu,
+    "sigmoid": torch.sigmoid,
+    "sqrtsoftplus": lambda x: torch.sqrt(F.softplus(x)),
+}
 
 # ==============================================================================
 # 2. EXACT COPY OF PYTORCH REFERENCE CLASSES (SOURCE OF TRUTH - READ ONLY)
@@ -972,14 +1007,165 @@ class DeepseekV4Attention_PT(nn.Module):
 
 
 # ==============================================================================
-# 3. PYTORCH ROUTER REFERENCE CLASSES (SOURCE OF TRUTH - READ ONLY)
+# 2.2 PyTorch Decoder Reference Blocks
 # ==============================================================================
 
-ACT2FN = {
-    "sqrtsoftplus": lambda x: torch.sqrt(F.softplus(x)),
-    "softmax": lambda x: F.softmax(x, dim=-1),
-    "sigmoid": lambda x: torch.sigmoid(x),
-}
+
+class GradientCheckpointingLayer_PT(nn.Module):
+  pass
+
+
+class DeepseekV4HyperConnection_PT(nn.Module):
+  r"""
+  Manifold-Constrained Hyper-Connections
+  (mHC) (Xie et al., 2026) to strengthen the conventional residual connections between adjacent
+  Transformer blocks
+
+  Owns the learned (`fn`, `base`, `scale`)
+  parameters that turn the incoming `hc_mult` residual streams into collapse / expand
+  weights. The decoder layer instantiates two of these (one for the attention site,
+  one for the mlp site).
+
+  ASCII shape guide — `B` = batch, `S` = seq, `H` = hc_mult, `D` = hidden_size::
+
+            hidden_streams        flatten(2)        RMSNorm-rescale + F.linear(fn)
+       [B, S, H, D]  ──────────►  [B, S, H*D]  ─────────────────────────────────►
+                                                           mix-logits
+                                                           [B, S, (2+H)*H]
+                                                                  │
+                          ┌───────────────────────────────────────┴──────────────────────────────┐
+                          ▼                          ▼                                           ▼
+                      pre logits                post logits                               comb logits
+                      [B, S, H]                 [B, S, H]                                 [B, S, H, H]
+                      × scale[0]                × scale[1]                                × scale[2]
+                      + base[:H]                + base[H:2H]                              + base[2H:]
+                      σ() + eps                 σ() + eps                                 σ() + eps
+                      │                         │                                         │
+                      pre                        post                                     Sinkhorn(iters)
+                      (stream collapse weights)  (block-output placement)                 row/col normalise
+                                                                                          │
+                                                                                          comb
+                                                                                          (stream mixer)
+  """
+
+  def __init__(self, config: DeepseekV4Config):
+    super().__init__()
+    self.hc_mult = config.hc_mult
+    self.hc_sinkhorn_iters = config.hc_sinkhorn_iters
+    self.hc_eps = config.hc_eps
+    self.input_norm = DeepseekV4UnweightedRMSNorm_PT(eps=config.rms_norm_eps)
+    mix = (2 + self.hc_mult) * self.hc_mult
+    self.fn = nn.Parameter(torch.empty(mix, self.hc_mult * config.hidden_size))
+    self.base = nn.Parameter(torch.empty(mix))
+    # 3 = number of outputs from the mHC mapping: `pre` (input projection
+    # weights), `post` (sublayer output projection weights), `comb` (the
+    # H×H residual combine matrix that gets Sinkhorn-projected onto the
+    # doubly-stochastic manifold). Each output gets its own learned scale.
+    self.scale = nn.Parameter(torch.empty(3))
+
+  def forward(self, hidden_streams: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    r"""
+    Compute `pre`, `post`, `comb` from the mHC mapping (paper §2.2 eq. 8).
+    `comb` is projected onto the doubly-stochastic manifold via Sinkhorn-
+    Knopp: starting from the sigmoid-positive matrix, alternate row and
+    column normalisation for `hc_sinkhorn_iters` steps. `pre` then collapses
+    the `hc_mult` parallel streams into a single sequence (input projection
+    into the sublayer); `post` and `comb` are returned for the caller to
+    apply on the sublayer output.
+    """
+    hc = self.hc_mult
+    flat = self.input_norm(hidden_streams.flatten(start_dim=2).float())
+    pre_w, post_w, comb_w = F.linear(flat, self.fn.float()).split([hc, hc, hc * hc], dim=-1)
+    pre_b, post_b, comb_b = self.base.split([hc, hc, hc * hc])
+    pre_scale, post_scale, comb_scale = self.scale.unbind(0)
+
+    pre = torch.sigmoid(pre_w * pre_scale + pre_b) + self.hc_eps
+    post = 2 * torch.sigmoid(post_w * post_scale + post_b)
+    comb_logits = comb_w.view(*comb_w.shape[:-1], hc, hc) * comb_scale + comb_b.view(hc, hc)
+    comb = torch.softmax(comb_logits, dim=-1) + self.hc_eps
+    comb = comb / (comb.sum(dim=-2, keepdim=True) + self.hc_eps)
+    for _ in range(self.hc_sinkhorn_iters - 1):
+      comb = comb / (comb.sum(dim=-1, keepdim=True) + self.hc_eps)
+      comb = comb / (comb.sum(dim=-2, keepdim=True) + self.hc_eps)
+    # Collapse the `hc_mult` parallel streams down to a single sequence using
+    # the `pre` weights: one weighted sum across the stream axis, ready for
+    # the sublayer (attn / MLP).
+    collapsed = (pre.unsqueeze(-1) * hidden_streams).sum(dim=2).to(hidden_streams.dtype)
+    return post, comb, collapsed
+
+
+DeepseekV4UnweightedRMSNorm = DeepseekV4UnweightedRMSNorm_PT
+
+
+class DeepseekV4HyperHead_PT(nn.Module):
+
+  def __init__(self, config: DeepseekV4Config):
+    super().__init__()
+    self.hc_mult = config.hc_mult
+    self.input_norm = DeepseekV4UnweightedRMSNorm(eps=config.rms_norm_eps)
+    self.eps = config.hc_eps
+    self.hc_fn = nn.Parameter(torch.empty(self.hc_mult, self.hc_mult * config.hidden_size))
+    self.hc_base = nn.Parameter(torch.empty(self.hc_mult))
+    self.hc_scale = nn.Parameter(torch.empty(1))
+
+  def forward(self, x: torch.Tensor) -> torch.Tensor:
+    flat = self.input_norm(x.flatten(2).float())
+    mixes = F.linear(flat, self.hc_fn.float())
+    pre = torch.sigmoid(mixes * self.hc_scale.float() + self.hc_base.float()) + self.eps
+    return (pre.unsqueeze(-1) * x).sum(dim=2).to(x.dtype)
+
+
+class DeepseekV4MLP_PT(nn.Module):
+
+  def __init__(self, config):
+    super().__init__()
+    self.config = config
+    self.hidden_size = config.hidden_size
+    self.intermediate_size = config.intermediate_size
+    self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=config.mlp_bias)
+    self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=config.mlp_bias)
+    self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=config.mlp_bias)
+    self.act_fn = ACT2FN[config.hidden_act]
+
+  def forward(self, x):
+    down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+    return down_proj
+
+
+@use_experts_implementation
+class DeepseekV4Experts_PT(nn.Module):
+  """Collection of expert weights stored as 3D tensors."""
+
+  def __init__(self, config: DeepseekV4Config):
+    super().__init__()
+    self.num_experts = config.num_local_experts
+    self.hidden_dim = config.hidden_size
+    self.intermediate_dim = config.intermediate_size
+    self.gate_up_proj = nn.Parameter(torch.empty(self.num_experts, 2 * self.intermediate_dim, self.hidden_dim))
+    self.down_proj = nn.Parameter(torch.empty(self.num_experts, self.hidden_dim, self.intermediate_dim))
+    self.act_fn = ACT2FN[config.hidden_act]
+    self.limit = config.swiglu_limit
+
+  def forward(self, hidden_states: torch.Tensor, top_k_index: torch.Tensor, top_k_weights: torch.Tensor) -> torch.Tensor:
+    final = torch.zeros_like(hidden_states)
+    with torch.no_grad():
+      mask = F.one_hot(top_k_index, num_classes=self.num_experts).permute(2, 1, 0)
+      hit = torch.greater(mask.sum(dim=(-1, -2)), 0).nonzero()
+    for expert_idx in hit:
+      expert_idx = expert_idx[0]
+      if expert_idx == self.num_experts:
+        continue
+      top_k_pos, token_idx = torch.where(mask[expert_idx])
+      current = self._apply_gate(F.linear(hidden_states[token_idx], self.gate_up_proj[expert_idx]))
+      current = F.linear(current, self.down_proj[expert_idx]) * top_k_weights[token_idx, top_k_pos, None]
+      final.index_add_(0, token_idx, current.to(final.dtype))
+    return final
+
+  def _apply_gate(self, gate_up: torch.Tensor) -> torch.Tensor:
+    gate, up = gate_up.chunk(2, dim=-1)
+    gate = gate.clamp(max=self.limit)
+    up = up.clamp(min=-self.limit, max=self.limit)
+    return self.act_fn(gate) * up
 
 
 class DeepseekV4TopKRouter_PT(nn.Module):
@@ -1035,7 +1221,152 @@ class DeepseekV4HashRouter_PT(nn.Module):
     return logits, weights * self.routed_scaling_factor, indices
 
 
-import unittest
+class DeepseekV4SparseMoeBlock_PT(nn.Module):
+
+  def __init__(self, config: DeepseekV4Config, layer_idx: int):
+    super().__init__()
+    self.is_hash = config.mlp_layer_types[layer_idx] == "hash_moe"
+    self.gate = DeepseekV4HashRouter_PT(config) if self.is_hash else DeepseekV4TopKRouter_PT(config)
+    self.experts = DeepseekV4Experts_PT(config)
+    self.shared_experts = DeepseekV4MLP_PT(config)
+
+  def forward(self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None = None) -> torch.Tensor:
+    batch, seq_len, hidden_dim = hidden_states.shape
+    residual = hidden_states
+    flat = hidden_states.view(-1, hidden_dim)
+    if self.is_hash:
+      _, weights, indices = self.gate(hidden_states, input_ids)
+    else:
+      _, weights, indices = self.gate(hidden_states)
+    routed = self.experts(flat, indices, weights).view(batch, seq_len, hidden_dim)
+    return routed + self.shared_experts(residual)
+
+
+class DeepseekV4DecoderLayer_PT(GradientCheckpointingLayer_PT):
+  r"""DeepSeek-V4 decoder block (paper §2). Differs from a classic residual block in
+  two places:
+
+  The residual is a stack of `hc_mult` parallel streams kept in shape
+  `[B, S, hc_mult, D]` throughout the block, mixed in and out via two
+  :class:`DeepseekV4HyperConnection` modules (Manifold-Constrained Hyper-
+  Connections / mHC, paper §2.2; Xie et al., 2026). The mHC mappings constrain
+  the residual transform to the manifold of doubly-stochastic matrices via the
+  Sinkhorn-Knopp projection — making signal propagation non-expansive across
+  deep stacks.
+
+  """
+
+  def __init__(self, config: DeepseekV4Config, layer_idx: int):
+    super().__init__()
+    self.layer_idx = layer_idx
+    self.self_attn = DeepseekV4Attention_PT(config, layer_idx)
+    self.mlp = DeepseekV4SparseMoeBlock_PT(config, layer_idx)
+    self.input_layernorm = DeepseekV4RMSNorm_PT(config.hidden_size, eps=config.rms_norm_eps)
+    self.post_attention_layernorm = DeepseekV4RMSNorm_PT(config.hidden_size, eps=config.rms_norm_eps)
+    self.attn_hc = DeepseekV4HyperConnection_PT(config)
+    self.ffn_hc = DeepseekV4HyperConnection_PT(config)
+
+  def forward(
+      self,
+      hidden_states: torch.Tensor,
+      input_ids: torch.Tensor | None = None,
+      **kwargs,
+  ) -> torch.Tensor:
+    # hidden_states throughout: [B, S, hc_mult, hidden].
+    # `post` / `comb` come out of the HC modules in fp32 (Sinkhorn projection runs
+    # in float); the .to(dtype) puts everything back to the input dtype before mixing
+    # so both sites stay consistent with `hidden_states`'s entry dtype.
+    # comb is consumed transposed: indexed as sum_j comb[j, k] * residual[j, d]
+    # (sum over the FIRST hc axis), equivalent to comb.T @ residual. Sinkhorn
+    # produces a doubly-stochastic but non-symmetric matrix, so the direction matters.
+    dtype = hidden_states.dtype
+    post, comb, collapsed = self.attn_hc(hidden_states)
+    attn_output, _ = self.self_attn(self.input_layernorm(collapsed), **kwargs)
+    hidden_states = post.to(dtype).unsqueeze(-1) * attn_output.unsqueeze(-2) + torch.matmul(
+        comb.to(dtype).transpose(-1, -2), hidden_states
+    )
+
+    post, comb, collapsed = self.ffn_hc(hidden_states)
+    mlp_output = self.mlp(self.post_attention_layernorm(collapsed), input_ids=input_ids)
+    return post.to(dtype).unsqueeze(-1) * mlp_output.unsqueeze(-2) + torch.matmul(
+        comb.to(dtype).transpose(-1, -2), hidden_states
+    )
+
+
+def _make_config(config_pt, B, S, D, **kwargs):
+  """Return a pyconfig Config object suitable for unit tests."""
+  kwargs.pop("layer_types", None)
+  kwargs.pop("attention_type", None)
+  num_heads = kwargs.pop("num_attention_heads", config_pt.num_attention_heads)
+  overrides = {
+      "run_name": "test_run",
+      "enable_checkpointing": False,
+      "model_name": "deepseek_v4-tiny",
+      "decoder_block": "deepseek_v4",
+      "dtype": "float32",
+      "weight_dtype": "float32",
+      "matmul_precision": "highest",
+      "per_device_batch_size": B,
+      "max_target_length": S,
+      "max_prefill_predict_length": S,
+      "emb_dim": D,
+      "mhc_expansion_rate": getattr(config_pt, "hc_mult", 4),
+      "hc_eps": getattr(config_pt, "hc_eps", 1e-6),
+      "sinkhorn_iterations": getattr(config_pt, "hc_sinkhorn_iters", 20),
+      "normalization_layer_epsilon": 1e-6,
+      "head_dim": config_pt.head_dim,
+      "dropout_rate": 0.0,
+      "o_groups": config_pt.o_groups,
+      "o_lora_rank": config_pt.o_lora_rank,
+      "compress_ratios": [4] * 43,
+      "compress_rope_theta": 160000.0,
+      "sliding_window": config_pt.sliding_window,
+      "index_n_heads": config_pt.index_n_heads,
+      "index_head_dim": config_pt.index_head_dim,
+      "index_topk": config_pt.index_topk,
+      "base_num_query_heads": num_heads,
+      "q_lora_rank": config_pt.q_lora_rank,
+      "qk_rope_head_dim": getattr(config_pt, "qk_rope_head_dim", 64),
+      "routed_score_func": getattr(config_pt, "scoring_func", "sqrtsoftplus"),
+      "num_hash_layers": 43,
+      "rope_max_timescale": config_pt.rope_theta,
+      "rope_type": "default",
+      "max_position_embeddings": config_pt.max_position_embeddings,
+      "shard_mode": "auto",
+      "debug_sharding": False,
+      "scan_layers": False,
+      "remat_policy": "full",
+      "num_vocab_tiling": 1,
+      "base_mlp_dim": config_pt.moe_intermediate_size,
+      "mlp_activations": ["silu"],
+      "fused_mlp": False,
+      "megablox": False,
+      "sparse_matmul": False,
+      "use_gather_mosaic_kernel": False,
+      "load_balance_loss_weight": 0.0,
+      "routed_bias": False,
+      "dense_init_scale": 1.0,
+      "moe_expert_input_dim": -1,
+      "num_experts": 16,
+      "num_experts_per_tok": 1,
+      "mlp_bias": False,
+      "float32_gate_logits": False,
+      "use_random_routing": False,
+      "routed_scaling_factor": 1.0,
+      "attention": "dot_product",
+      "shared_experts": 1,
+      "base_moe_mlp_dim": config_pt.moe_intermediate_size,
+      "vocab_size": getattr(config_pt, "vocab_size", 128),
+      **kwargs,
+  }
+  extra_args = get_decoupled_parallelism_overrides()
+  merged = {**overrides, **extra_args}
+  cfg = pyconfig.initialize([sys.argv[0], get_test_config_path()], override_model_config=True, **merged)
+  if not hasattr(cfg, "trainable_position_size"):
+    cfg.trainable_position_size = 0
+  if not hasattr(cfg, "original_max_position_embeddings"):
+    cfg.original_max_position_embeddings = cfg.max_position_embeddings
+  return cfg
 
 
 class DeepSeekV4ParityTest(unittest.TestCase):
@@ -1166,153 +1497,11 @@ class DeepSeekV4ParityTest(unittest.TestCase):
 
     # Copy the reshaped and transposed weight matrix matching PyTorch's view mapping
     # [o, i] -> [g, o_g, i] -> [g, i, o_g]
-    jax_model.weight.value = jnp.array(weight_np.reshape(g, out_features_per_group, i).transpose(0, 2, 1))
+    jax_model.kernel.value = jnp.array(weight_np.reshape(g, out_features_per_group, i).transpose(0, 2, 1))
     out_jax = jax_model(x_jax)
 
     # Verify numerical output parity between frameworks
     np.testing.assert_allclose(out_torch, out_jax, atol=1e-5, rtol=1e-5)
-
-  def test_topk_router_parity(self):
-    # Generate deterministic random inputs for the router comparison.
-    np.random.seed(42)
-    B, S, D = 4, 16, 64
-    num_experts = 8
-    top_k = 4
-    routed_scaling_factor = 1.5
-
-    hidden_states_np = np.random.randn(B, S, D).astype(np.float32)
-    # Proactively initialize routing weights with a normal distribution to prevent TPU VM NaN bits.
-    weight_np = np.random.randn(num_experts, D).astype(np.float32)
-    bias_np = np.random.randn(num_experts).astype(np.float32)
-
-    # 1. Setup PyTorch Reference Top-K Router
-    config_pt = DeepseekV4Config()
-    config_pt.num_experts_per_tok = top_k
-    config_pt.num_local_experts = num_experts
-    config_pt.hidden_size = D
-    config_pt.scoring_func = "sqrtsoftplus"
-    config_pt.routed_scaling_factor = routed_scaling_factor
-
-    py_router = DeepseekV4TopKRouter_PT(config_pt)
-    py_router.weight.data.copy_(torch.tensor(weight_np))
-    py_router.e_score_correction_bias.copy_(torch.tensor(bias_np))
-
-    # Run forward on PyTorch reference router
-    # [B, S, D] -> [B * S, D] -> F.linear() -> logits [B * S, num_experts] -> top_k -> [B * S, top_k]
-    hidden_states_torch = torch.tensor(hidden_states_np)
-    py_logits, py_weights, py_indices = py_router(hidden_states_torch)
-
-    # 2. Setup JAX/Flax NNX Equivalent Router
-    class MockJaxConfig:
-
-      def __init__(self):
-        self.num_experts_per_tok = top_k
-        self.num_experts = num_experts
-        self.emb_dim = D
-        self.moe_expert_input_dim = D
-        self.routed_scaling_factor = routed_scaling_factor
-        self.routed_score_func = "sqrtsoftplus"
-        self.dtype = jnp.float32
-        self.weight_dtype = jnp.float32
-
-    config_jax = MockJaxConfig()
-    rngs = nnx.Rngs(42)
-    # JAX/Flax NNX target initialization
-    jax_router = DeepSeekV4TopKRouter(config=config_jax, mesh=None, rngs=rngs)
-    # Copy weights from PyTorch to JAX (transpose because shape is [D, num_experts] in JAX)
-    # PyTorch weight: [num_experts, D] -> JAX kernel: [D, num_experts]
-    jax_router.kernel.value = jnp.array(weight_np.T)
-    jax_router.e_score_correction_bias.value = jnp.array(bias_np)
-
-    # Run forward on JAX router
-    # [B, S, D] -> flat [B * S, D] -> matmul -> logits [B * S, num_experts] -> top_k -> [B * S, top_k]
-    hidden_states_jax = jnp.array(hidden_states_np)
-    jax_logits, jax_weights, jax_indices = jax_router(hidden_states_jax)
-
-    # 3. Parity assertions
-    # Compare raw logits output parity
-    np.testing.assert_allclose(py_logits.detach().numpy(), jax_logits, atol=1e-5, rtol=1e-5)
-
-    # Sort indices and corresponding weights to ensure order-agnostic parity,
-    # avoiding differences caused by implementation sorting quirks under sorted=False in PyTorch.
-    py_sort_idx = np.argsort(py_indices.numpy(), axis=-1)
-    jax_sort_idx = np.argsort(np.array(jax_indices), axis=-1)
-
-    py_indices_sorted = np.take_along_axis(py_indices.numpy(), py_sort_idx, axis=-1)
-    jax_indices_sorted = np.take_along_axis(np.array(jax_indices), jax_sort_idx, axis=-1)
-
-    py_weights_sorted = np.take_along_axis(py_weights.detach().numpy(), py_sort_idx, axis=-1)
-    jax_weights_sorted = np.take_along_axis(np.array(jax_weights), jax_sort_idx, axis=-1)
-
-    np.testing.assert_array_equal(jax_indices_sorted, py_indices_sorted)
-    np.testing.assert_allclose(jax_weights_sorted, py_weights_sorted, atol=1e-5, rtol=1e-5)
-
-  def test_hash_router_parity(self):
-    # Generate deterministic random inputs for Hash Router comparison.
-    np.random.seed(42)
-    B, S, D = 4, 16, 64
-    num_experts = 8
-    top_k = 4
-    routed_scaling_factor = 1.5
-    vocab_size = 128
-
-    hidden_states_np = np.random.randn(B, S, D).astype(np.float32)
-    # Generate input token IDs to lookup static hash routing indices.
-    input_ids_np = np.random.randint(0, vocab_size, size=(B, S)).astype(np.int64)
-
-    weight_np = np.random.randn(num_experts, D).astype(np.float32)
-    # Setup static routing table
-    tid2eid_np = np.random.randint(0, num_experts, size=(vocab_size, top_k)).astype(np.int64)
-
-    # 1. Setup PyTorch Reference Hash Router
-    config_pt = DeepseekV4Config()
-    config_pt.num_experts_per_tok = top_k
-    config_pt.num_local_experts = num_experts
-    config_pt.hidden_size = D
-    config_pt.scoring_func = "sqrtsoftplus"
-    config_pt.routed_scaling_factor = routed_scaling_factor
-    config_pt.vocab_size = vocab_size
-
-    py_router = DeepseekV4HashRouter_PT(config_pt)
-    py_router.weight.data.copy_(torch.tensor(weight_np))
-    py_router.tid2eid.copy_(torch.tensor(tid2eid_np))
-
-    # Run forward on PyTorch reference router
-    hidden_states_torch = torch.tensor(hidden_states_np)
-    input_ids_torch = torch.tensor(input_ids_np)
-    py_logits, py_weights, py_indices = py_router(hidden_states_torch, input_ids_torch)
-
-    # 2. Setup JAX/Flax NNX Equivalent Router
-    class MockJaxConfig:
-
-      def __init__(self):
-        self.num_experts_per_tok = top_k
-        self.num_experts = num_experts
-        self.emb_dim = D
-        self.moe_expert_input_dim = D
-        self.routed_scaling_factor = routed_scaling_factor
-        self.routed_score_func = "sqrtsoftplus"
-        self.vocab_size = vocab_size
-        self.dtype = jnp.float32
-        self.weight_dtype = jnp.float32
-
-    config_jax = MockJaxConfig()
-    rngs = nnx.Rngs(42)
-    jax_router = DeepSeekV4HashRouter(config=config_jax, mesh=None, rngs=rngs)
-    # Copy weight and lookup table parameter states.
-    jax_router.kernel.value = jnp.array(weight_np.T)
-    jax_router.tid2eid.value = jnp.array(tid2eid_np, dtype=jnp.int32)
-
-    # Run forward on JAX router
-    hidden_states_jax = jnp.array(hidden_states_np)
-    input_ids_jax = jnp.array(input_ids_np)
-    jax_logits, jax_weights, jax_indices = jax_router(hidden_states_jax, input_ids_jax)
-
-    # 3. Parity assertions
-    # Logits, weights, and selected index array checks.
-    np.testing.assert_allclose(py_logits.detach().numpy(), jax_logits, atol=1e-5, rtol=1e-5)
-    np.testing.assert_array_equal(jax_indices, py_indices.numpy())
-    np.testing.assert_allclose(py_weights.detach().numpy(), jax_weights, atol=1e-5, rtol=1e-5)
 
   def test_hca_compressor_parity(self):
     # Configure deterministic seeds for parity reproducibility
@@ -1333,6 +1522,7 @@ class DeepSeekV4ParityTest(unittest.TestCase):
     config = DeepseekV4Config()
     config.hidden_size = D
     config.head_dim = D_head
+    config.qk_rope_head_dim = int(D_head * (64 / 512))
     config.compress_rates["heavily_compressed_attention"] = compress_rate
     config.rms_norm_eps = 1e-6
 
@@ -1341,9 +1531,7 @@ class DeepSeekV4ParityTest(unittest.TestCase):
     torch.nn.init.normal_(torch_model.position_bias, std=0.02)
 
     # Map JAX layer using matching parameters
-    jax_config = DeepseekV4Config()
-    jax_config.compress_ratios = [compress_rate] * 43
-    jax_config.compress_rope_theta = 160000.0
+    jax_config = _make_config(config, B, S, D, compress_ratios=[compress_rate] * 43)
 
     rngs = nnx.Rngs(42)
     jax_model = attention_compressed.HCACompressor(
@@ -1423,12 +1611,16 @@ class DeepSeekV4ParityTest(unittest.TestCase):
     torch.nn.init.normal_(torch_model.position_bias, std=0.02)
 
     # Map JAX equivalent Indexer module
-    jax_config = DeepseekV4Config()
-    jax_config.index_n_heads = num_heads
-    jax_config.index_head_dim = index_head_dim
-    jax_config.index_topk = index_topk
-    jax_config.compress_ratios = [compress_rate] * 43
-    jax_config.compress_rope_theta = 160000.0
+    jax_config = _make_config(
+        config,
+        B,
+        S,
+        D,
+        index_n_heads=num_heads,
+        index_head_dim=index_head_dim,
+        index_topk=index_topk,
+        compress_ratios=[compress_rate] * 43,
+    )
 
     rngs = nnx.Rngs(42)
     jax_model = attention_compressed.DeepSeekV4Indexer(
@@ -1494,6 +1686,7 @@ class DeepSeekV4ParityTest(unittest.TestCase):
     config.hidden_size = D
     config.q_lora_rank = D_rank
     config.head_dim = D_head
+    config.qk_rope_head_dim = int(D_head * (64 / 512))
     config.index_n_heads = num_heads
     config.index_head_dim = index_head_dim
     config.index_topk = index_topk
@@ -1504,14 +1697,16 @@ class DeepSeekV4ParityTest(unittest.TestCase):
     torch.nn.init.normal_(torch_model.position_bias, std=0.02)
     torch.nn.init.normal_(torch_model.indexer.position_bias, std=0.02)
 
-    # JAX CSA Compressor
-    jax_config = DeepseekV4Config()
-    jax_config.head_dim = D_head
-    jax_config.index_n_heads = num_heads
-    jax_config.index_head_dim = index_head_dim
-    jax_config.index_topk = index_topk
-    jax_config.compress_ratios = [compress_rate] * 43
-    jax_config.compress_rope_theta = 160000.0
+    jax_config = _make_config(
+        config,
+        B,
+        S,
+        D,
+        index_n_heads=num_heads,
+        index_head_dim=index_head_dim,
+        index_topk=index_topk,
+        compress_ratios=[compress_rate] * 43,
+    )
 
     rngs = nnx.Rngs(42)
     jax_model = attention_compressed.CSACompressor(
@@ -1579,8 +1774,6 @@ class DeepSeekV4ParityTest(unittest.TestCase):
     )
     topk_jax_np = np.array(topk_jax)
 
-    print("topk_torch:", topk_torch)
-    print("topk_jax:", topk_jax_np)
     np.testing.assert_allclose(topk_torch, topk_jax_np, atol=1e-5, rtol=1e-5)
 
     # Check complete parity of gathered/indexed keys
@@ -1608,6 +1801,7 @@ class DeepSeekV4ParityTest(unittest.TestCase):
     config.hidden_size = D
     config.q_lora_rank = D_rank
     config.head_dim = D_head
+    config.qk_rope_head_dim = int(D_head * (64 / 512))
     config.num_attention_heads = num_heads
     config.num_key_value_heads = 1
     config.compress_rates["heavily_compressed_attention"] = compress_rate
@@ -1616,7 +1810,7 @@ class DeepSeekV4ParityTest(unittest.TestCase):
 
     # Generate reference position embeddings (cos, sin)
     torch_emb = DeepseekV4RotaryEmbedding_PT(config)
-    cos_torch, sin_torch = torch_emb(x_torch, position_ids_torch, layer_type="main")
+    cos_torch, sin_torch = torch_emb(x_torch, position_ids_torch, layer_type="compress")
 
     cos_jax = jnp.array(cos_torch.detach().numpy())
     sin_jax = jnp.array(sin_torch.detach().numpy())
@@ -1627,16 +1821,17 @@ class DeepSeekV4ParityTest(unittest.TestCase):
     if torch_model.compressor is not None:
       torch.nn.init.normal_(torch_model.compressor.position_bias, std=0.02)
 
-    jax_config = DeepseekV4Config()
-    jax_config.hidden_size = D
-    jax_config.q_lora_rank = D_rank
-    jax_config.head_dim = D_head
-    jax_config.num_attention_heads = num_heads
-    jax_config.compress_ratios = [compress_rate] * 10
-    jax_config.compress_rope_theta = 160000.0
-    jax_config.layer_types = ["heavily_compressed_attention"] * 10
-    jax_config.o_groups = config.o_groups
-    jax_config.o_lora_rank = config.o_lora_rank
+    jax_config = _make_config(
+        config,
+        B,
+        S,
+        D,
+        num_attention_heads=num_heads,
+        compress_ratios=[compress_rate] * 10,
+        layer_types=["heavily_compressed_attention"] * 10,
+        o_groups=config.o_groups,
+        o_lora_rank=config.o_lora_rank,
+    )
 
     rngs = nnx.Rngs(42)
     jax_model = attention_compressed.DeepSeekV4Attention(
@@ -1647,6 +1842,7 @@ class DeepSeekV4ParityTest(unittest.TestCase):
         config=jax_config,
         layer_idx=0,
         eps=1e-6,
+        attention_type="heavily_compressed_attention",
         rngs=rngs,
     )
 
@@ -1662,7 +1858,7 @@ class DeepSeekV4ParityTest(unittest.TestCase):
     w_o_a_np = torch_model.o_a_proj.weight.detach().numpy()
     in_features_per_group = num_heads * D_head // config.o_groups
     w_o_a_np = w_o_a_np.reshape(config.o_groups, -1, in_features_per_group).transpose(0, 2, 1)
-    jax_model.o_a_proj.weight[...] = jnp.array(w_o_a_np)
+    jax_model.o_a_proj.kernel[...] = jnp.array(w_o_a_np)
 
     jax_model.o_b_proj.kernel[...] = jnp.array(torch_model.o_b_proj.weight.detach().numpy().T)
     jax_model.sinks[...] = jnp.array(torch_model.sinks.detach().numpy())
@@ -1695,6 +1891,567 @@ class DeepSeekV4ParityTest(unittest.TestCase):
 
     # Check complete numerical parity of coordination attention layers
     np.testing.assert_allclose(out_torch_np, out_jax_np, atol=1e-5, rtol=1e-5)
+
+  def test_topk_router_parity(self):
+    # Generate deterministic random inputs for the router comparison.
+    np.random.seed(42)
+    B, S, D = 2, 8, 64
+    num_experts = 16
+    top_k = 6
+    routed_scaling_factor = 1.5
+
+    hidden_states_np = np.random.randn(B, S, D).astype(np.float32)
+    weight_np = np.random.randn(num_experts, D).astype(np.float32)
+    e_score_correction_bias_np = np.random.randn(num_experts).astype(np.float32)
+
+    # 1. Setup PyTorch Reference Router
+    config_pt = DeepseekV4Config(
+        num_experts_per_tok=top_k,
+        num_local_experts=num_experts,
+        hidden_size=D,
+        routed_scaling_factor=routed_scaling_factor,
+        scoring_func="sqrtsoftplus",
+    )
+    py_router = DeepseekV4TopKRouter_PT(config_pt)
+    py_router.weight.data = torch.tensor(weight_np)
+    py_router.e_score_correction_bias.data = torch.tensor(e_score_correction_bias_np)
+
+    # Run forward on PyTorch router
+    hidden_states_torch = torch.tensor(hidden_states_np)
+    py_logits, py_weights, py_indices = py_router(hidden_states_torch)
+
+    # 2. Setup JAX/Flax NNX Equivalent Router
+    class MockJaxConfig:
+
+      def __init__(self):
+        self.num_experts_per_tok = top_k
+        self.num_experts = num_experts
+        self.emb_dim = D
+        self.moe_expert_input_dim = D
+        self.routed_scaling_factor = routed_scaling_factor
+        self.routed_score_func = "sqrtsoftplus"
+        self.dtype = jnp.float32
+        self.weight_dtype = jnp.float32
+
+    config_jax = MockJaxConfig()
+    rngs = nnx.Rngs(42)
+    jax_router = DeepSeekV4TopKRouter(config=config_jax, mesh=None, rngs=rngs)
+
+    # Copy weight and correction bias parameters using Flax NNX attribute variable assignments.
+    jax_router.kernel[...] = jnp.array(weight_np.T)
+    jax_router.e_score_correction_bias[...] = jnp.array(e_score_correction_bias_np)
+
+    # Run forward on JAX router
+    hidden_states_jax = jnp.array(hidden_states_np)
+    jax_logits, jax_weights, jax_indices = jax_router(hidden_states_jax)
+
+    # 3. Parity assertions
+    # Compare raw logits directly.
+    np.testing.assert_allclose(py_logits.detach().numpy(), jax_logits, atol=1e-5, rtol=1e-5)
+
+    # Symmetrically, the order of the chosen top-k experts can differ (unsorted vs JAX sort).
+    # Sort both index selections and weight selections row-by-row (token-by-token) before comparison.
+    py_ind_np = py_indices.numpy()
+    py_w_np = py_weights.detach().numpy()
+    jax_ind_np = np.array(jax_indices)
+    jax_w_np = np.array(jax_weights)
+
+    # Sort index arrays row-by-row, and order the corresponding weights array matching the index sort order.
+    for i in range(py_ind_np.shape[0]):
+      py_sort_order = np.argsort(py_ind_np[i])
+      py_ind_np[i] = py_ind_np[i][py_sort_order]
+      py_w_np[i] = py_w_np[i][py_sort_order]
+
+      jax_sort_order = np.argsort(jax_ind_np[i])
+      jax_ind_np[i] = jax_ind_np[i][jax_sort_order]
+      jax_w_np[i] = jax_w_np[i][jax_sort_order]
+
+    # Assert sorted indices and weights are mathematically identical!
+    np.testing.assert_array_equal(jax_ind_np, py_ind_np)
+    np.testing.assert_allclose(py_w_np, jax_w_np, atol=1e-5, rtol=1e-5)
+
+  def test_hash_router_parity(self):
+    # Generate deterministic random inputs for static hash router comparison.
+    np.random.seed(42)
+    B, S, D = 2, 8, 64
+    num_experts = 16
+    top_k = 6
+    routed_scaling_factor = 1.5
+    vocab_size = 32
+
+    hidden_states_np = np.random.randn(B, S, D).astype(np.float32)
+    input_ids_np = np.random.randint(0, vocab_size, size=(B, S)).astype(np.int32)
+    weight_np = np.random.randn(num_experts, D).astype(np.float32)
+    tid2eid_np = np.random.randint(0, num_experts, size=(vocab_size, top_k)).astype(np.int32)
+
+    # 1. Setup PyTorch Reference Router
+    config_pt = DeepseekV4Config(
+        num_experts_per_tok=top_k,
+        num_local_experts=num_experts,
+        hidden_size=D,
+        routed_scaling_factor=routed_scaling_factor,
+        vocab_size=vocab_size,
+        scoring_func="sqrtsoftplus",
+    )
+    py_router = DeepseekV4HashRouter_PT(config_pt)
+    py_router.weight.data = torch.tensor(weight_np)
+    py_router.tid2eid.data = torch.tensor(tid2eid_np).long()
+
+    # Run forward on PyTorch router
+    hidden_states_torch = torch.tensor(hidden_states_np)
+    input_ids_torch = torch.tensor(input_ids_np)
+    py_logits, py_weights, py_indices = py_router(hidden_states_torch, input_ids_torch)
+
+    # 2. Setup JAX/Flax NNX Equivalent Router
+    class MockJaxConfig:
+
+      def __init__(self):
+        self.num_experts_per_tok = top_k
+        self.num_experts = num_experts
+        self.emb_dim = D
+        self.moe_expert_input_dim = D
+        self.routed_scaling_factor = routed_scaling_factor
+        self.routed_score_func = "sqrtsoftplus"
+        self.vocab_size = vocab_size
+        self.dtype = jnp.float32
+        self.weight_dtype = jnp.float32
+
+    config_jax = MockJaxConfig()
+    rngs = nnx.Rngs(42)
+    jax_router = DeepSeekV4HashRouter(config=config_jax, mesh=None, rngs=rngs)
+
+    # Copy weight and lookup table parameter states using clean Flax NNX assignments.
+    jax_router.kernel[...] = jnp.array(weight_np.T)
+    jax_router.tid2eid[...] = jnp.array(tid2eid_np, dtype=jnp.int32)
+
+    # Run forward on JAX router
+    hidden_states_jax = jnp.array(hidden_states_np)
+    input_ids_jax = jnp.array(input_ids_np)
+    jax_logits, jax_weights, jax_indices = jax_router(hidden_states_jax, input_ids_jax)
+
+    # 3. Parity assertions
+    # Logits, weights, and selected index array checks.
+    np.testing.assert_allclose(py_logits.detach().numpy(), jax_logits, atol=1e-5, rtol=1e-5)
+    np.testing.assert_array_equal(jax_indices, py_indices.numpy())
+    np.testing.assert_allclose(py_weights.detach().numpy(), jax_weights, atol=1e-5, rtol=1e-5)
+
+  def test_hyperhead_parity(self):
+    # Verify isolated parametric collapse HyperHead parity E2E!
+    np.random.seed(42)
+    B, S, k, D = 2, 4, 4, 128
+    x_np = np.random.randn(B, S, k, D).astype(np.float32)
+    hc_fn_np = np.random.randn(k, k * D).astype(np.float32)
+    hc_base_np = np.random.randn(k).astype(np.float32)
+    hc_scale_np = np.random.randn(1).astype(np.float32)
+
+    config_pt = DeepseekV4Config(
+        hc_mult=k,
+        hidden_size=D,
+        rms_norm_eps=1e-6,
+        hc_eps=1e-6,
+    )
+    py_head = DeepseekV4HyperHead_PT(config_pt)
+    py_head.hc_fn.data = torch.tensor(hc_fn_np)
+    py_head.hc_base.data = torch.tensor(hc_base_np)
+    py_head.hc_scale.data = torch.tensor(hc_scale_np)
+
+    # Run forward on PyTorch reference
+    x_torch = torch.tensor(x_np)
+    out_torch = py_head(x_torch)
+
+    # Setup JAX DeepSeekV4HyperHead equivalent NNX module
+    class MockJaxConfig:
+
+      def __init__(self):
+        self.emb_dim = D
+        self.mhc_expansion_rate = k
+        self.hc_eps = 1e-6
+        self.normalization_layer_epsilon = 1e-6
+        self.dtype = jnp.float32
+        self.weight_dtype = jnp.float32
+        self.matmul_precision = "default"
+
+    config_jax = MockJaxConfig()
+    rngs = nnx.Rngs(42)
+    jax_head = DeepSeekV4HyperHead(config=config_jax, rngs=rngs)
+
+    # Copy weight matrices and parameter states cleanly
+    # Shape mappings:
+    # PyTorch: hc_fn has shape [k, k * D], mixes = F.linear(flat, hc_fn) -> flat @ hc_fn.T
+    # JAX: hc_fn has shape [k * D, k], mixes = flat @ hc_fn
+    # Therefore, JAX weight = PyTorch weight.T
+    jax_head.hc_fn[...] = jnp.array(hc_fn_np.T)
+    jax_head.hc_base[...] = jnp.array(hc_base_np)
+    jax_head.hc_scale[...] = jnp.array(hc_scale_np)
+
+    # Run forward passes on identical random batch stream inputs [B, S, k, D]
+    x_jax = jnp.array(x_np)
+    out_jax = jax_head(x_jax)
+
+    # Assert bit-accurate numerical parity down to atol=1e-5 E2E!
+    np.testing.assert_allclose(out_torch.detach().numpy(), np.array(out_jax), atol=1e-5, rtol=1e-5)
+
+  def test_full_model_stack_parity(self):
+    """Verifies complete, scannable multi-layer decoder stack E2E logits parity.
+
+    This E2E test validates that:
+      1. Parallel stream transformations [B, S, hc_mult, D] sequence correctly.
+      2. Manifold-Constrained Hyper-Connections (mHC) perform identical Sinkhorn
+         projections across frameworks.
+      3. The JAX scanned compiler (scan_layers = True) constructs and executes
+         identical stacked loop parameters compared to unrolled modes (scan_layers = False).
+    """
+    np.random.seed(42)
+    B, S, D, H_mult, vocab_size, num_layers = 2, 8, 128, 4, 32, 3
+
+    # Generate identical input token IDs across frameworks
+    input_ids_np = np.random.randint(0, vocab_size, size=(B, S)).astype(np.int32)
+    position_ids_np = np.broadcast_to(np.arange(S)[np.newaxis, :], (B, S)).astype(np.int32)
+    input_ids_torch = torch.tensor(input_ids_np).long()
+    position_ids_torch = torch.tensor(position_ids_np).long()
+    input_ids_jax = jnp.array(input_ids_np)
+
+    # 1. Build identical configuration configurations
+    config_pt = DeepseekV4Config()
+    config_pt.hidden_size = D
+    config_pt.intermediate_size = 64
+    config_pt.moe_intermediate_size = 64
+    config_pt.hc_mult = H_mult
+    config_pt.hc_sinkhorn_iters = 8
+    config_pt.rms_norm_eps = 1e-6
+    config_pt.vocab_size = vocab_size
+    config_pt.num_hash_layers = 2
+    config_pt.num_local_experts = 4
+    config_pt.num_experts_per_tok = 2
+    config_pt.num_attention_heads = 4
+    config_pt.num_key_value_heads = 1
+    config_pt.head_dim = 32
+    config_pt.qk_rope_head_dim = 32
+    config_pt.rope_parameters["main"]["partial_rotary_factor"] = 1.0
+    config_pt.rope_parameters["compress"]["partial_rotary_factor"] = 1.0
+    config_pt.q_lora_rank = 64
+    config_pt.o_groups = 2
+    config_pt.o_lora_rank = 64
+    config_pt.index_n_heads = 4
+    config_pt.index_head_dim = 32
+    config_pt.index_topk = 2
+    config_pt.layer_types = ["compressed_sparse_attention", "heavily_compressed_attention", "compressed_sparse_attention"]
+    config_pt.mlp_layer_types = ["hash_moe", "hash_moe", "topk_moe"]
+
+    class DeepseekV4DecoderStack_PT(nn.Module):
+
+      def __init__(self, config: DeepseekV4Config, num_layers: int):
+        super().__init__()
+        self.layers = nn.ModuleList([DeepseekV4DecoderLayer_PT(config, lyr) for lyr in range(num_layers)])
+        self.hc_head = DeepseekV4HyperHead_PT(config)
+        self.norm = DeepseekV4RMSNorm_PT(config.hidden_size, eps=config.rms_norm_eps)
+        self.embeddings = nn.Embedding(config.vocab_size, config.hidden_size)
+        self.logits_dense = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.rotary_emb = DeepseekV4RotaryEmbedding_PT(config)
+
+      def forward(self, input_ids: torch.Tensor, position_ids: torch.Tensor) -> torch.Tensor:
+        y = self.embeddings(input_ids)
+        y = y.unsqueeze(2).expand(-1, -1, 4, -1)
+        cos, sin = self.rotary_emb(y[:, :, 0, :], position_ids, layer_type="compress")
+        for layer in self.layers:
+          y = layer(
+              y, input_ids=input_ids, position_embeddings=(cos, sin), position_ids=position_ids, attention_mask=None
+          )
+        collapsed = self.hc_head(y)
+        normed = self.norm(collapsed)
+        logits = self.logits_dense(normed)
+        return logits
+
+    decoder_pt = DeepseekV4DecoderStack_PT(config_pt, num_layers)
+
+    torch.nn.init.normal_(decoder_pt.embeddings.weight, std=0.02)
+    torch.nn.init.normal_(decoder_pt.norm.weight, std=0.02)
+    torch.nn.init.normal_(decoder_pt.logits_dense.weight, std=0.02)
+    torch.nn.init.normal_(decoder_pt.hc_head.hc_fn, std=0.02)
+    torch.nn.init.normal_(decoder_pt.hc_head.hc_base, std=0.02)
+    torch.nn.init.normal_(decoder_pt.hc_head.hc_scale, std=0.02)
+
+    for layer_pt in decoder_pt.layers:
+      for param in [
+          layer_pt.attn_hc.fn,
+          layer_pt.attn_hc.base,
+          layer_pt.attn_hc.scale,
+          layer_pt.ffn_hc.fn,
+          layer_pt.ffn_hc.base,
+          layer_pt.ffn_hc.scale,
+          layer_pt.self_attn.q_a_proj.weight,
+          layer_pt.self_attn.q_a_norm.weight,
+          layer_pt.self_attn.q_b_proj.weight,
+          layer_pt.self_attn.kv_proj.weight,
+          layer_pt.self_attn.kv_norm.weight,
+          layer_pt.self_attn.o_a_proj.weight,
+          layer_pt.self_attn.o_b_proj.weight,
+          layer_pt.self_attn.sinks,
+          layer_pt.mlp.gate.weight,
+          layer_pt.mlp.experts.gate_up_proj,
+          layer_pt.mlp.experts.down_proj,
+          layer_pt.mlp.shared_experts.gate_proj.weight,
+          layer_pt.mlp.shared_experts.up_proj.weight,
+          layer_pt.mlp.shared_experts.down_proj.weight,
+          layer_pt.input_layernorm.weight,
+          layer_pt.post_attention_layernorm.weight,
+      ]:
+        torch.nn.init.normal_(param, std=0.02)
+      if layer_pt.self_attn.compressor is not None:
+        comp_pt = layer_pt.self_attn.compressor
+        for param in [comp_pt.kv_proj.weight, comp_pt.gate_proj.weight, comp_pt.position_bias, comp_pt.kv_norm.weight]:
+          torch.nn.init.normal_(param, std=0.02)
+        if hasattr(comp_pt, "indexer"):
+          for param in [
+              comp_pt.indexer.kv_proj.weight,
+              comp_pt.indexer.gate_proj.weight,
+              comp_pt.indexer.position_bias,
+              comp_pt.indexer.kv_norm.weight,
+              comp_pt.indexer.q_b_proj.weight,
+              comp_pt.indexer.weights_proj.weight,
+          ]:
+            torch.nn.init.normal_(param, std=0.02)
+
+    logits_torch = decoder_pt(input_ids_torch, position_ids_torch).detach().numpy()
+
+    devices = jax.devices()
+    mesh = Mesh(np.array(devices), ("data",))
+
+    for scan_mode in [False, True]:
+      jax_config = _make_config(
+          config_pt,
+          B,
+          S,
+          D,
+          base_num_decoder_layers=num_layers,
+          logits_via_embedding=False,
+          logits_dot_in_fp32=True,
+          parameter_memory_host_offload=False,
+          param_scan_axis=0,
+          use_iota_embed=False,
+          num_experts=config_pt.num_local_experts,
+          num_experts_per_tok=config_pt.num_experts_per_tok,
+          num_hash_layers=config_pt.num_hash_layers,
+          gradient_accumulation_steps=1,
+          hardware="cpu",
+          megablox=False,
+          sparse_matmul=False,
+          use_gather_mosaic_kernel=False,
+          num_vocab_tiling=1,
+          compress_ratios=[4, 128, 4] * 15,
+          mlp_dim=config_pt.intermediate_size,
+          num_attention_heads=config_pt.num_attention_heads,
+          q_lora_rank=config_pt.q_lora_rank,
+          head_dim=config_pt.head_dim,
+          o_groups=config_pt.o_groups,
+          o_lora_rank=config_pt.o_lora_rank,
+          index_n_heads=config_pt.index_n_heads,
+          index_head_dim=config_pt.index_head_dim,
+          index_topk=config_pt.index_topk,
+          mlp_activations=["silu", "linear"],
+          scan_layers=scan_mode,
+      )
+      decoder_jax = NNXDecoder(config=jax_config, mesh=mesh, rngs=nnx.Rngs(0))
+
+      def get_jax_layer(decoder, lyr):
+        if not scan_mode:
+          return decoder.layers[lyr]
+        return (
+            getattr(decoder.layers, f"layers_{lyr}")
+            if lyr < 2
+            else getattr(decoder.layers_remainder, f"layers_{lyr - 2}")
+        )
+
+      shared_embedding = Embed(vocab_size, D, config=jax_config, mesh=mesh, rngs=nnx.Rngs(0))
+      shared_embedding.embedding[...] = jnp.array(decoder_pt.embeddings.weight.detach().numpy())
+      decoder_jax.decoder_norm.scale[...] = jnp.array(decoder_pt.norm.weight.detach().numpy())
+      decoder_jax.logits_dense.kernel[...] = jnp.array(decoder_pt.logits_dense.weight.detach().numpy().T)
+      decoder_jax.hc_head.hc_fn[...] = jnp.array(decoder_pt.hc_head.hc_fn.detach().numpy().T)
+      decoder_jax.hc_head.hc_base[...] = jnp.array(decoder_pt.hc_head.hc_base.detach().numpy())
+      decoder_jax.hc_head.hc_scale[...] = jnp.array(decoder_pt.hc_head.hc_scale.detach().numpy())
+
+      def assign_param(jax_param, pt_value, lyr):
+        if hasattr(jax_param, "val"):
+          jax_param[...] = pt_value
+        else:
+          jax_param[...] = jnp.expand_dims(pt_value, axis=0) if (scan_mode and lyr < 2) else pt_value
+
+      hc = H_mult
+      for lyr in range(num_layers):
+        layer_jax, layer_pt = get_jax_layer(decoder_jax, lyr), decoder_pt.layers[lyr]
+        assign_param(
+            layer_jax.pre_self_attention_layer_norm.scale,
+            jnp.array(layer_pt.input_layernorm.weight.detach().numpy()),
+            lyr,
+        )
+        assign_param(
+            layer_jax.post_self_attention_layer_norm.scale,
+            jnp.array(layer_pt.post_attention_layernorm.weight.detach().numpy()),
+            lyr,
+        )
+
+        assign_param(
+            layer_jax.self_attention.q_a_proj.kernel,
+            jnp.array(layer_pt.self_attn.q_a_proj.weight.detach().numpy().T),
+            lyr,
+        )
+        assign_param(
+            layer_jax.self_attention.q_a_norm.weight, jnp.array(layer_pt.self_attn.q_a_norm.weight.detach().numpy()), lyr
+        )
+        assign_param(
+            layer_jax.self_attention.q_b_proj.kernel,
+            jnp.array(layer_pt.self_attn.q_b_proj.weight.detach().numpy().T),
+            lyr,
+        )
+        assign_param(
+            layer_jax.self_attention.kv_proj.kernel, jnp.array(layer_pt.self_attn.kv_proj.weight.detach().numpy().T), lyr
+        )
+        assign_param(
+            layer_jax.self_attention.kv_norm.weight, jnp.array(layer_pt.self_attn.kv_norm.weight.detach().numpy()), lyr
+        )
+
+        w_o_a_np = layer_pt.self_attn.o_a_proj.weight.detach().numpy()
+        in_features_per_group = config_pt.num_attention_heads * config_pt.head_dim // config_pt.o_groups
+        w_o_a_np = w_o_a_np.reshape(config_pt.o_groups, -1, in_features_per_group).transpose(0, 2, 1)
+        assign_param(layer_jax.self_attention.o_a_proj.kernel, jnp.array(w_o_a_np), lyr)
+
+        assign_param(
+            layer_jax.self_attention.o_b_proj.kernel,
+            jnp.array(layer_pt.self_attn.o_b_proj.weight.detach().numpy().T),
+            lyr,
+        )
+        assign_param(layer_jax.self_attention.sinks, jnp.array(layer_pt.self_attn.sinks.detach().numpy()), lyr)
+
+        if layer_pt.self_attn.compressor is not None:
+          comp_pt = layer_pt.self_attn.compressor
+          comp_jax = layer_jax.self_attention.compressor
+          assign_param(comp_jax.kv_proj.kernel, jnp.array(comp_pt.kv_proj.weight.detach().numpy().T), lyr)
+          assign_param(comp_jax.gate_proj.kernel, jnp.array(comp_pt.gate_proj.weight.detach().numpy().T), lyr)
+          assign_param(comp_jax.position_bias, jnp.array(comp_pt.position_bias.detach().numpy()), lyr)
+          assign_param(comp_jax.kv_norm.weight, jnp.array(comp_pt.kv_norm.weight.detach().numpy()), lyr)
+          if hasattr(comp_pt, "indexer"):
+            assign_param(
+                comp_jax.indexer.kv_proj.kernel, jnp.array(comp_pt.indexer.kv_proj.weight.detach().numpy().T), lyr
+            )
+            assign_param(
+                comp_jax.indexer.gate_proj.kernel, jnp.array(comp_pt.indexer.gate_proj.weight.detach().numpy().T), lyr
+            )
+            assign_param(comp_jax.indexer.position_bias, jnp.array(comp_pt.indexer.position_bias.detach().numpy()), lyr)
+            assign_param(comp_jax.indexer.kv_norm.weight, jnp.array(comp_pt.indexer.kv_norm.weight.detach().numpy()), lyr)
+            assign_param(
+                comp_jax.indexer.q_b_proj.kernel, jnp.array(comp_pt.indexer.q_b_proj.weight.detach().numpy().T), lyr
+            )
+            assign_param(
+                comp_jax.indexer.weights_proj.kernel,
+                jnp.array(comp_pt.indexer.weights_proj.weight.detach().numpy().T),
+                lyr,
+            )
+
+        moe_pt = layer_pt.mlp
+        moe_jax = layer_jax.mlp
+        assign_param(moe_jax.MoeBlock_0.gate.kernel, jnp.array(moe_pt.gate.weight.detach().numpy().T), lyr)
+        if moe_pt.is_hash:
+          assign_param(
+              moe_jax.MoeBlock_0.gate.tid2eid, jnp.array(moe_pt.gate.tid2eid.detach().numpy(), dtype=jnp.int32), lyr
+          )
+        else:
+          assign_param(
+              moe_jax.MoeBlock_0.gate.e_score_correction_bias,
+              jnp.array(moe_pt.gate.e_score_correction_bias.detach().numpy()),
+              lyr,
+          )
+
+        gate_up_np = moe_pt.experts.gate_up_proj.detach().numpy()
+        intermediate_dim = config_pt.intermediate_size
+        wi_0_np = gate_up_np[:, :intermediate_dim, :].transpose(0, 2, 1)
+        wi_1_np = gate_up_np[:, intermediate_dim:, :].transpose(0, 2, 1)
+        wo_np = moe_pt.experts.down_proj.detach().numpy().transpose(0, 2, 1)
+
+        assign_param(moe_jax.MoeBlock_0.wi_0, jnp.array(wi_0_np), lyr)
+        assign_param(moe_jax.MoeBlock_0.wi_1, jnp.array(wi_1_np), lyr)
+        assign_param(moe_jax.MoeBlock_0.wo, jnp.array(wo_np), lyr)
+
+        assign_param(
+            moe_jax.shared_experts.wi_0.kernel, jnp.array(moe_pt.shared_experts.gate_proj.weight.detach().numpy().T), lyr
+        )
+        assign_param(
+            moe_jax.shared_experts.wi_1.kernel, jnp.array(moe_pt.shared_experts.up_proj.weight.detach().numpy().T), lyr
+        )
+        assign_param(
+            moe_jax.shared_experts.wo.kernel, jnp.array(moe_pt.shared_experts.down_proj.weight.detach().numpy().T), lyr
+        )
+
+        assign_param(layer_jax.mhc_attention.pre_alpha, jnp.array(layer_pt.attn_hc.fn.detach().numpy()[:hc].T), lyr)
+        assign_param(
+            layer_jax.mhc_attention.post_alpha, jnp.array(layer_pt.attn_hc.fn.detach().numpy()[hc : 2 * hc].T), lyr
+        )
+        assign_param(layer_jax.mhc_attention.res_alpha, jnp.array(layer_pt.attn_hc.fn.detach().numpy()[2 * hc :].T), lyr)
+        assign_param(layer_jax.mhc_attention.pre_beta, jnp.array(layer_pt.attn_hc.base.detach().numpy()[:hc]), lyr)
+        assign_param(
+            layer_jax.mhc_attention.post_beta, jnp.array(layer_pt.attn_hc.base.detach().numpy()[hc : 2 * hc]), lyr
+        )
+        assign_param(
+            layer_jax.mhc_attention.res_beta,
+            jnp.array(layer_pt.attn_hc.base.detach().numpy()[2 * hc :].reshape(hc, hc)),
+            lyr,
+        )
+        assign_param(layer_jax.mhc_attention.pre_alpha_scale, jnp.array([layer_pt.attn_hc.scale[0].item()]), lyr)
+        assign_param(layer_jax.mhc_attention.post_alpha_scale, jnp.array([layer_pt.attn_hc.scale[1].item()]), lyr)
+        assign_param(layer_jax.mhc_attention.res_alpha_scale, jnp.array([layer_pt.attn_hc.scale[2].item()]), lyr)
+
+        assign_param(layer_jax.mhc_mlp.pre_alpha, jnp.array(layer_pt.ffn_hc.fn.detach().numpy()[:hc].T), lyr)
+        assign_param(layer_jax.mhc_mlp.post_alpha, jnp.array(layer_pt.ffn_hc.fn.detach().numpy()[hc : 2 * hc].T), lyr)
+        assign_param(layer_jax.mhc_mlp.res_alpha, jnp.array(layer_pt.ffn_hc.fn.detach().numpy()[2 * hc :].T), lyr)
+        assign_param(layer_jax.mhc_mlp.pre_beta, jnp.array(layer_pt.ffn_hc.base.detach().numpy()[:hc]), lyr)
+        assign_param(layer_jax.mhc_mlp.post_beta, jnp.array(layer_pt.ffn_hc.base.detach().numpy()[hc : 2 * hc]), lyr)
+        assign_param(
+            layer_jax.mhc_mlp.res_beta, jnp.array(layer_pt.ffn_hc.base.detach().numpy()[2 * hc :].reshape(hc, hc)), lyr
+        )
+        assign_param(layer_jax.mhc_mlp.pre_alpha_scale, jnp.array([layer_pt.ffn_hc.scale[0].item()]), lyr)
+        assign_param(layer_jax.mhc_mlp.post_alpha_scale, jnp.array([layer_pt.ffn_hc.scale[1].item()]), lyr)
+        assign_param(layer_jax.mhc_mlp.res_alpha_scale, jnp.array([layer_pt.ffn_hc.scale[2].item()]), lyr)
+
+      if not scan_mode:
+        y_pt = decoder_pt.embeddings(input_ids_torch)
+        y_pt = y_pt.unsqueeze(2).expand(-1, -1, 4, -1)
+        cos_pt, sin_pt = decoder_pt.rotary_emb(y_pt[:, :, 0, :], position_ids_torch, layer_type="compress")
+
+        y_jax = shared_embedding(input_ids_jax.astype("int32"), model_mode="train")
+        y_jax = jnp.repeat(jnp.expand_dims(y_jax, axis=2), 4, axis=2).astype(y_jax.dtype)
+
+        np.testing.assert_allclose(
+            y_pt.detach().numpy(), np.array(y_jax), atol=1e-5, rtol=1e-5, err_msg="Embedding mismatch"
+        )
+
+        for lyr in range(num_layers):
+          layer_pt = decoder_pt.layers[lyr]
+          layer_jax = decoder_jax.layers[lyr]
+
+          y_pt = layer_pt(
+              y_pt,
+              input_ids=input_ids_torch,
+              position_embeddings=(cos_pt, sin_pt),
+              position_ids=position_ids_torch,
+              attention_mask=None,
+          )
+          y_jax, _ = layer_jax(
+              y_jax,
+              decoder_segment_ids=jnp.zeros((B, S), dtype=jnp.int32),
+              decoder_positions=jnp.array(position_ids_np, dtype=jnp.int32),
+              deterministic=True,
+              model_mode="train",
+              decoder_input_tokens=input_ids_jax,
+          )
+
+      logits_jax, _, _ = decoder_jax(
+          shared_embedding=shared_embedding,
+          decoder_input_tokens=input_ids_jax,
+          decoder_positions=jnp.array(position_ids_np, dtype=jnp.int32),
+          decoder_segment_ids=jnp.zeros((B, S), dtype=jnp.int32),
+          deterministic=True,
+      )
+
+      np.testing.assert_allclose(logits_torch, np.array(logits_jax), atol=1e-5, rtol=1e-5)
 
 
 if __name__ == "__main__":

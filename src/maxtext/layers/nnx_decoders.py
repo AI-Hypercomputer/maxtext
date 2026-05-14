@@ -19,7 +19,7 @@
 import functools
 import inspect
 import warnings
-from typing import Any
+from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
@@ -48,6 +48,7 @@ from maxtext.models import (
     deepseek,
     deepseek_batchsplit,
     deepseek_batchsplit_fp8,
+    deepseek_v4,
     gemma,
     gemma2,
     gemma3,
@@ -63,6 +64,7 @@ from maxtext.models import (
     qwen3_5,
     simple_layer,
 )
+from maxtext.models.deepseek_v4 import DeepSeekV4HyperHead
 from maxtext.multimodal import utils as mm_utils
 from maxtext.utils import max_logging, max_utils, maxtext_utils, sharding
 from maxtext.utils.maxtext_utils_nnx import nnx_ensure_scan_leading_axis
@@ -299,8 +301,12 @@ class NNXDecoder(nnx.Module):
 
     self.scanned_layers = None
     self.is_deepseek = self.config.decoder_block == DecoderBlockType.DEEPSEEK
+    self.is_deepseek_v4 = self.config.decoder_block == DecoderBlockType.DEEPSEEK_V4
     self.is_gemma3 = self.config.decoder_block == DecoderBlockType.GEMMA3
     self.is_gemma4 = self.config.decoder_block == DecoderBlockType.GEMMA4
+
+    if self.is_deepseek_v4:
+      self.hc_head = DeepSeekV4HyperHead(config, rngs=rngs)
 
     if self.config.scan_layers:
       if self.is_deepseek:
@@ -389,6 +395,23 @@ class NNXDecoder(nnx.Module):
         self.layers_remainder = RemattedGemma4Block(
             config=self.config, mesh=mesh, quant=self.quant, model_mode=self.model_mode, **rem_layer_kwargs, rngs=rngs
         )
+      elif self.is_deepseek_v4:
+        scan_length = config.num_decoder_layers // 2
+        num_remaining_layers = config.num_decoder_layers % 2
+        layer_kwargs = {"num_of_layers": 2}
+
+        rem_layer_kwargs = {"num_of_layers": num_remaining_layers, "layer_offset": scan_length * 2}
+
+        RemattedDeepSeekV4Block = deepseek_v4.DeepSeekV4ScannableBlock
+
+        if scan_length > 0:
+          self.layers = self._create_scanned_layers(
+              RemattedDeepSeekV4Block, length=scan_length, metadata_axis_name="layers", rngs=rngs, **layer_kwargs
+          )
+        if num_remaining_layers > 0:
+          self.layers_remainder = RemattedDeepSeekV4Block(
+              config=self.config, mesh=mesh, quant=self.quant, model_mode=self.model_mode, **rem_layer_kwargs, rngs=rngs
+          )
       else:
         layer_cls = decoder_block_classes[0]
         num_layers = int(config.num_decoder_layers / config.inhomogeneous_layer_cycle_interval)
@@ -435,6 +458,11 @@ class NNXDecoder(nnx.Module):
             layer_kwargs = {"attention_type": gpt_oss.get_attention_type(layer_id=lyr)}
           elif config.decoder_block == DecoderBlockType.OLMO3:
             layer_kwargs = {"attention_type": olmo3.get_attention_type(layer_id=lyr)}
+          elif config.decoder_block == DecoderBlockType.DEEPSEEK_V4:
+            # Retrieve layer-specific compression ratio from configuration to support sliding window attention
+            # at boundary layers and alternating compressed sparse/heavily compressed attention.
+            compress_ratio = self.config.compress_ratios[lyr]
+            layer_kwargs = {"compress_ratio": compress_ratio, "layer_idx": lyr}
 
           self._create_and_register_layer(layer_cls, rngs, "layers", lyr, **layer_kwargs)
 
@@ -713,6 +741,9 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.SIMPLE: [simple_layer.SimpleDecoderLayer],
         DecoderBlockType.SIMPLE_MLP: [simple_layer.SimpleMlpDecoderLayer],
         DecoderBlockType.DEEPSEEK: get_deepseek(),
+        DecoderBlockType.DEEPSEEK_V4: get_scannable(
+            deepseek_v4.DeepSeekV4DecoderLayer, deepseek_v4.DeepSeekV4ScannableBlock
+        ),
         DecoderBlockType.GPT_OSS: get_scannable(gpt_oss.GptOssDecoderLayer, gpt_oss.GptOssScannableBlock),
         DecoderBlockType.QWEN3_NEXT: get_scannable(qwen3.Qwen3NextDecoderLayer, qwen3.Qwen3NextScannableBlock),
         DecoderBlockType.QWEN3_5: get_scannable(qwen3_5.Qwen3_5DecoderLayer, qwen3_5.Qwen3_5ScannableBlock),
@@ -863,6 +894,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.SIMPLE_MLP,
         DecoderBlockType.LLAMA4,
         DecoderBlockType.OLMO3,
+        DecoderBlockType.DEEPSEEK_V4,
     ):
       return functools.partial(RMSNorm, num_features=num_features, shard_mode=self.config.shard_mode, rngs=rngs)
     elif self.config.decoder_block == DecoderBlockType.GPT3:
@@ -1118,7 +1150,7 @@ class NNXDecoder(nnx.Module):
     # Extract the bidirectional mask locally for layer configurations
     bidirectional_mask = multimodal_input.bidirectional_mask if multimodal_input is not None else None
 
-    if cfg.decoder_block in (DecoderBlockType.GEMMA3, DecoderBlockType.GEMMA4):
+    if cfg.decoder_block in (DecoderBlockType.GEMMA3, DecoderBlockType.GEMMA4, DecoderBlockType.DEEPSEEK_V4):
       layer_kwargs["bidirectional_mask"] = bidirectional_mask
 
     if attention_metadata is not None:
@@ -1212,6 +1244,19 @@ class NNXDecoder(nnx.Module):
             page_state,
             slot,
         )
+      elif self.is_deepseek_v4:
+        y = self._apply_deepseek_v4_scanned_blocks(
+            y,
+            decoder_segment_ids,
+            decoder_positions,
+            deterministic,
+            model_mode,
+            previous_chunk,
+            page_state,
+            slot,
+            bidirectional_mask=bidirectional_mask,
+            decoder_input_tokens=decoder_input_tokens,
+        )
       else:
         scan_length = int(cfg.num_decoder_layers / cfg.inhomogeneous_layer_cycle_interval)
         if kv_caches is not None:
@@ -1230,13 +1275,16 @@ class NNXDecoder(nnx.Module):
       prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg)
 
       # Hoisted function to preserve XLA cache ID
-      def pure_layer_fn(graphdef, state_in, y_in, kv_in):
+      def pure_layer_fn(graphdef, state_in, y_in, kv_in, decoder_input_tokens_in=None):
 
         if cfg.parameter_memory_host_offload:
           state_in = jax.tree.map(lambda x: jax.device_put(x, max_utils.device_space()), state_in)
 
         merged_layer = nnx.merge(graphdef, state_in)
-        out_y, out_kv = merged_layer(y_in, *layer_args, kv_cache=kv_in, **layer_kwargs)
+        call_kwargs = dict(layer_kwargs)
+        if decoder_input_tokens_in is not None:
+          call_kwargs["decoder_input_tokens"] = decoder_input_tokens_in
+        out_y, out_kv = merged_layer(y_in, *layer_args, kv_cache=kv_in, **call_kwargs)
         return out_y, out_kv, nnx.state(merged_layer)
 
       checkpointed_fn = jax.checkpoint(pure_layer_fn, policy=policy, prevent_cse=prevent_cse)
@@ -1254,11 +1302,11 @@ class NNXDecoder(nnx.Module):
         else:
           kv_cache = None
 
-        input_tokens = decoder_input_tokens if cfg.engram_layers else None
-        if input_tokens is not None:
-          layer_kwargs["decoder_input_tokens"] = input_tokens
-
-        y, kv_cache, new_state = checkpointed_fn(graphdef, state, y, kv_cache)
+        input_tokens = (
+            decoder_input_tokens if (cfg.engram_layers or cfg.decoder_block == DecoderBlockType.DEEPSEEK_V4) else None
+        )
+        # Propagation of decoder_input_tokens of shape [B, S] alongside hidden state y of shape [B, S, k, D]
+        y, kv_cache, new_state = checkpointed_fn(graphdef, state, y, kv_cache, input_tokens)
         nnx.update(layer, new_state)
 
         if kv_caches is not None and kv_cache is not None:
@@ -1277,7 +1325,10 @@ class NNXDecoder(nnx.Module):
     assert isinstance(y, jax.Array)
 
     # After the final transformer layer, `y` holds the raw, un-normalized hidden state.
-    if cfg.mhc_expansion_rate > 1:
+    if self.is_deepseek_v4:
+      # collapsed shape: [B, S, k, D] -> [B, S, D] via learnable collapse weights
+      hidden_state = self.hc_head(y)
+    elif cfg.mhc_expansion_rate > 1:
       # (batch, length, mhc_expansion_rate, emb_dim) --> (batch, length, emb_dim)
       hidden_state = mhc_reduce(y)
     else:
@@ -1397,6 +1448,54 @@ class NNXDecoder(nnx.Module):
 
       graphdef, state = nnx.split(self.layers_remainder)
       y, new_state = checkpointed_gemma_fn(graphdef, state, y)
+      nnx.update(self.layers_remainder, new_state)
+
+    return y
+
+  def _apply_deepseek_v4_scanned_blocks(
+      self,
+      y,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      previous_chunk,
+      page_state,
+      slot,
+      bidirectional_mask: Optional[jax.Array] = None,
+      decoder_input_tokens: Optional[jax.Array] = None,
+  ):
+    """Applies DeepSeek-V4 scanned decoder blocks, handling main scan and remainders."""
+    cfg = self.config
+    scan_length = cfg.num_decoder_layers // 2
+
+    layer_args = (decoder_segment_ids, decoder_positions, deterministic, model_mode)
+    layer_kwargs = {
+        "decoder_input_tokens": decoder_input_tokens,
+        "bidirectional_mask": bidirectional_mask,
+    }
+
+    # Apply the main scan over the full blocks
+    if scan_length > 0:
+      y, self.layers, _ = self._apply_layers_sequentially(self.layers, y, *layer_args, length=scan_length, **layer_kwargs)
+
+    # Apply any remaining layers that did not fit into a full scanned block
+    num_remaining_layers = cfg.num_decoder_layers % 2
+    if num_remaining_layers > 0:
+      policy = self.get_remat_policy()
+      prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg)
+
+      def pure_deepseek_fn(graphdef, state_in, y_in):
+        merged_layer = nnx.merge(graphdef, state_in)
+        out_y, _ = merged_layer(
+            y_in, *layer_args, previous_chunk=previous_chunk, page_state=page_state, slot=slot, **layer_kwargs
+        )
+        return out_y, nnx.state(merged_layer)
+
+      checkpointed_deepseek_fn = jax.checkpoint(pure_deepseek_fn, policy=policy, prevent_cse=prevent_cse)
+
+      graphdef, state = nnx.split(self.layers_remainder)
+      y, new_state = checkpointed_deepseek_fn(graphdef, state, y)
       nnx.update(self.layers_remainder, new_state)
 
     return y
