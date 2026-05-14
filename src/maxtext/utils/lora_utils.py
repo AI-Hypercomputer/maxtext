@@ -469,6 +469,73 @@ def _verify_lora_parameters(lora_model: nnx.Module, mt_config: pyconfig.HyperPar
   )
 
 
+def _reshard_variable(var: nnx.Variable, sharding: Optional[jax.sharding.Sharding]) -> nnx.Variable:
+  """Safely reshards a single NNX Variable, handling local-to-global transitions."""
+  if isinstance(sharding, nnx.Variable):
+    sharding = sharding.value
+
+  if sharding is None:
+    return var
+
+  val = var.value
+  if not isinstance(val, jax.Array):
+    val = jnp.asarray(val)
+
+  # Check if we actually need to reshard
+  if val.sharding != sharding:
+    # If the target is global replicated and the current value is local (fully addressable)
+    # or not yet a global array, we use make_array_from_callback to avoid device_put errors
+    # on multi-host.
+    is_replicated = (
+        isinstance(sharding, jax.sharding.NamedSharding)
+        and sharding.spec == jax.sharding.PartitionSpec()
+    )
+
+    is_local = val.sharding.is_fully_addressable
+
+    if is_replicated and is_local:
+      # Safe transition for replicated arrays on multi-host
+      def cb(index):
+        return val
+      new_val = jax.make_array_from_callback(val.shape, sharding, cb)
+    else:
+      try:
+        new_val = jax.device_put(val, sharding)
+      except ValueError as e:
+        # Fallback or re-raise if we can't handle it
+        if is_replicated:
+          def cb(index):
+            return val
+          new_val = jax.make_array_from_callback(val.shape, sharding, cb)
+        else:
+          raise ValueError(
+              f"Failed to reshard variable to {sharding}. "
+              f"Value sharding: {val.sharding}. "
+              f"Error: {e}"
+          ) from e
+  else:
+    new_val = val
+
+  var.value = new_val
+  return var
+
+
+def _reshard_state(state: nnx.State, dst_shardings: Any) -> nnx.State:
+  """Reshards only LoRAParam variables in NNX State PyTree to the target shardings."""
+  def reshard_leaf(var, sharding):
+    if isinstance(var, nnx.LoRAParam):
+      return _reshard_variable(var, sharding)
+    else:
+      return var
+
+  return jax.tree_util.tree_map(
+      reshard_leaf,
+      state,
+      dst_shardings,
+      is_leaf=lambda x: isinstance(x, nnx.Variable),
+  )
+
+
 def apply_lora_to_model(
     model: nnx.Module,
     mesh: Optional[jax.sharding.Mesh],
@@ -516,10 +583,7 @@ def apply_lora_to_model(
       dst_shardings = nn.logical_to_mesh_sharding(
           nnx.get_partition_spec(state), mesh, mt_config.logical_axis_rules
       )
-
-      from tunix.rl import reshard  # pylint: disable=import-outside-toplevel
-
-      state = reshard.reshard_pytree(state, dst_shardings)
+      state = _reshard_state(state, dst_shardings)
       lora_model = nnx.merge(graph_def, state)
 
   _verify_lora_parameters(lora_model, mt_config)
