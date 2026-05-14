@@ -50,6 +50,7 @@ import gc
 import io
 import logging
 import os
+import tempfile
 from typing import Sequence
 
 from absl import app
@@ -73,7 +74,7 @@ from maxtext.utils import model_creation_utils
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 
-_JAX_COMPILATION_CACHE_DIR = "/tmp/jax_cache"
+_JAX_COMPILATION_CACHE_DIR = tempfile.mkdtemp()
 
 vllm_model_name_mapping = {
     "qwen3-30b-a3b": "Qwen/Qwen3-30B-A3B",

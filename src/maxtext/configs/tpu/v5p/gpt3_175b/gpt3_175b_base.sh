@@ -17,7 +17,8 @@ bash src/dependencies/scripts/preflight.sh PLATFORM=gke
 # flags set as default
 
 # hlo dump
-export XLA_FLAGS="--xla_dump_to=/tmp/xla_dump_file"
+XLA_DUMP_DIR=$(mktemp -d)
+export XLA_FLAGS="--xla_dump_to=${XLA_DUMP_DIR}"
 
 # debug
 export TPU_STDERR_LOG_LEVEL=0
