@@ -187,7 +187,7 @@ def jit_train_and_eval_step(
   return p_train_step, p_eval_step
 
 
-def setup_train_loop(config, recorder, devices=None):
+def setup_train_loop(config, recorder, devices=None, restore_checkpoint=True):
   """Set up prerequisites for the training loop -
 
       checkpoint_manager, PRNG keys, Mesh, Model and optimizer.
@@ -212,8 +212,12 @@ def setup_train_loop(config, recorder, devices=None):
 
   with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
     is_training = True
-    init_rng = jax.random.PRNGKey(config.init_weights_seed)
     mesh = maxtext_utils.get_mesh_from_config(config, devices)
+    with jax.set_mesh(mesh):
+      init_rng = jax.random.PRNGKey(config.init_weights_seed)
+      init_rng = jax.device_put(
+          init_rng, jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+      )
     if config.pure_nnx:
       # Create abstract NNX model.
       _create_model_partial, model = model_creation_utils.create_nnx_abstract_model(config, mesh, devices)
@@ -273,8 +277,14 @@ def setup_train_loop(config, recorder, devices=None):
     # Create data_loader AFTER reordering wrapper is applied
     data_loader = create_dataloader(config, mesh, data_iterator, recorder, rampup_manager)
 
-    state, _, state_mesh_shardings, data_iterator = maxtext_utils.setup_training_state(
-        data_iterator, config, mesh, checkpoint_manager, init_state_fn
+    state, _, state_mesh_shardings, data_iterator = (
+        maxtext_utils.setup_training_state(
+            data_iterator,
+            config,
+            mesh,
+            checkpoint_manager if restore_checkpoint else None,
+            init_state_fn,
+        )
     )
     if config.pure_nnx:
       with nn_partitioning.axis_rules(config.logical_axis_rules):
