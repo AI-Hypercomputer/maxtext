@@ -22,6 +22,7 @@ from typing import Any, Sequence
 import contextlib
 import datetime
 import functools
+import logging
 import os
 import threading
 
@@ -77,6 +78,8 @@ from maxtext.utils.vocabulary_tiling import vocab_tiling_linen_loss
 _diag_modules = _cloud_diag()
 diagnostic, debug_configuration, diagnostic_configuration, stack_trace_configuration = _diag_modules
 VertexTensorboardManager, _vertex_tb_is_stub = vertex_tensorboard_modules()
+
+_logger = logging.getLogger(__name__)
 
 
 def get_first_step(model, state):
@@ -682,6 +685,14 @@ def train_loop(config, recorder, state=None):
           max_utils.print_mem_stats("After params initialized")
 
         metric_logger_instance.buffer_and_write_train_metrics(metrics, step, step_time_delta)
+        # Custom log for resiliency driver parsing
+        _logger.info(
+            "Step %d | Active Slices: %d | Loss: %.4f | Step Time: %.4fs",
+            step,
+            elastic_manager.num_active_slices if elastic_manager else config.num_slices,
+            float(metrics["scalar"].get("learning/loss", 0.0)),
+            step_time_delta.total_seconds(),
+        )
 
     if config.save_checkpoint_on_completion:
       state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
