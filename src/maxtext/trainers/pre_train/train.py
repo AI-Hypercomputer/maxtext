@@ -782,6 +782,10 @@ def recover(
         opt_state=restored_dict["opt_state"],
     )
     restored_step = int(restored_state.step)
+    _logger.info(
+        "Resharding complete. Retrying. Slices used: %s",
+        elastic_manager.active_slice_indices,
+    )
   else:
     restored_step = snapshot_mgr.latest.step
     abstract_dict = {
