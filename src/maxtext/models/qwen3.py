@@ -381,13 +381,25 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
   2. output = Linear_out(y)
   """
 
-  def __init__(self, config: Config, dtype: DType = jnp.float32, model_mode: str = MODEL_MODE_TRAIN, *, rngs: nnx.Rngs):
+  def __init__(
+      self,
+      config: Config,
+      dtype: DType = jnp.float32,
+      model_mode: str = MODEL_MODE_TRAIN,
+      mesh: Mesh | None = None,
+      *,
+      rngs: nnx.Rngs,
+  ):
     """
     Args:
       config: MaxText configuration object.
+      mesh: Optional device mesh. Required only when serving via tpu-inference
+        (``config.attention == "vllm_rpa"``); the tpu-inference GDN kernel uses
+        it for ``jax.shard_map``.
       rngs: The random number generators for initialization, passed by the nnx.to_linen wrapper.
     """
     self.config = config
+    self.mesh = mesh
     cfg = self.config
 
     in_features = cfg.emb_dim
@@ -401,7 +413,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     conv_kernel_size = cfg.gdn_conv_kernel_dim
     self.v_heads_per_k_head = self.num_v_heads // self.num_k_heads
 
-    if model_mode != MODEL_MODE_TRAIN:
+    if model_mode != MODEL_MODE_TRAIN and cfg.attention != "vllm_rpa":
       self.cache = kvcache.GatedDeltaNetCache(
           batch=config.per_device_batch_size,
           num_heads=self.num_v_heads,
@@ -477,10 +489,17 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       model_mode: str = MODEL_MODE_TRAIN,
       kv_cache=None,
       decoder_segment_ids: None | Array = None,
+      attention_metadata: None | Any = None,
       **kwargs,
-  ) -> Array:
+  ) -> tuple[Array, tuple[Array, Array] | None]:
     # hidden_states: (B, S, E)
     cfg = self.config
+
+    # vLLM/tpu-inference serving path: cache is externally managed and the
+    # tpu-inference GDN kernel consumes ragged scheduling metadata.
+    if cfg.attention == "vllm_rpa" and attention_metadata is not None and model_mode != MODEL_MODE_TRAIN:
+      return self._forward_serve_vllm(hidden_states, kv_cache, attention_metadata)
+
     batch, seq_len, _ = hidden_states.shape
 
     # =========================================================================
@@ -669,7 +688,136 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # Final output shape: (B, S, E)
     output = self.out_proj(gated_output)
 
-    return output
+    return output, None
+
+  def _forward_serve_vllm(
+      self,
+      hidden_states: Array,
+      kv_cache: tuple[Array, Array],
+      attention_metadata: Any,
+  ) -> tuple[Array, tuple[Array, Array]]:
+    """vLLM/tpu-inference GDN path.
+
+    Externally-managed ``(conv_state, recurrent_state)`` cache flows in via
+    ``kv_cache`` and back out via the return value. Inputs are flattened to
+    the ragged ``(num_tokens, dim)`` layout expected by tpu-inference, and
+    weights are reordered from ``[Q|K|V]`` to the per-shard interleaved
+    layout the kernel requires (see the pytorch reference in
+    ``tpu_inference.layers.common.gdn_attention``).
+    """
+    try:
+      # pylint: disable=import-outside-toplevel
+      # pytype: disable=import-error
+      from tpu_inference.layers.common.gdn_attention import GdnAttentionConfig, run_jax_gdn_attention
+      from tpu_inference.layers.common.sharding import ShardingAxisName
+      from tpu_inference.layers.common.utils import reorder_concatenated_tensor_for_sharding
+      from tpu_inference.utils import get_mesh_shape_product
+    except ImportError as e:
+      raise ImportError(
+          "GDN vLLM serving requires the tpu-inference package. Install it with `pip install vllm-tpu`."
+      ) from e
+
+    cfg = self.config
+    batch, seq_len, _ = hidden_states.shape
+    num_tokens = batch * seq_len
+
+    # =========================================================================
+    # STEP A: Input projections (same as training path, but ragged-flattened).
+    # =========================================================================
+    qkvz = self.in_proj_qkvz(hidden_states)
+    ba = self.in_proj_ba(hidden_states)
+
+    new_shape_qkvz = (
+        batch,
+        seq_len,
+        self.num_k_heads,
+        2 * self.head_k_dim + 2 * self.head_v_dim * self.v_heads_per_k_head,
+    )
+    mixed_qkvz = qkvz.reshape(new_shape_qkvz)
+    split_indices_qkvz = [
+        self.head_k_dim,
+        2 * self.head_k_dim,
+        2 * self.head_k_dim + self.v_heads_per_k_head * self.head_v_dim,
+    ]
+    query, key, value_raw, z_raw = jnp.split(mixed_qkvz, split_indices_qkvz, axis=3)
+    # z: (B, S, H_v, D_v) — kept multi-head for the post-kernel gated norm.
+    z = z_raw.reshape(batch, seq_len, self.num_v_heads, self.head_v_dim)
+
+    mixed_ba = ba.reshape(batch, seq_len, self.num_k_heads, 2 * self.v_heads_per_k_head)
+    b_raw, a_raw = jnp.split(mixed_ba, [self.v_heads_per_k_head], axis=3)
+    # b, a: (num_tokens, H_v)
+    b = b_raw.reshape(num_tokens, self.num_v_heads)
+    a = a_raw.reshape(num_tokens, self.num_v_heads)
+
+    # Flat [Q | K | V] mixed_qkv: (num_tokens, 2*key_dim + value_dim)
+    q_flat = query.reshape(num_tokens, self.key_dim)
+    k_flat = key.reshape(num_tokens, self.key_dim)
+    v_flat = value_raw.reshape(num_tokens, self.value_dim)
+    mixed_qkv = jnp.concatenate([q_flat, k_flat, v_flat], axis=-1)
+
+    # =========================================================================
+    # STEP B: Reorder mixed_qkv and conv weights for per-shard interleaved
+    # layout, then call tpu-inference's fused conv + ragged delta-rule kernel.
+    # =========================================================================
+    tp_size = get_mesh_shape_product(self.mesh, ShardingAxisName.ATTN_HEAD)
+
+    mixed_qkv = reorder_concatenated_tensor_for_sharding(
+        mixed_qkv, [self.key_dim, self.key_dim, self.value_dim], tp_size, -1
+    )
+
+    # nnx.Conv kernel layout is (kernel_size, in_features // groups, out_features).
+    # With feature_group_count == conv_dim this is (kernel_size, 1, conv_dim).
+    # tpu-inference expects (conv_dim, 1, kernel_size).
+    conv_weight = jnp.transpose(self.conv1d.kernel.value, (2, 1, 0))
+    conv_weight = reorder_concatenated_tensor_for_sharding(
+        conv_weight, [self.key_dim, self.key_dim, self.value_dim], tp_size, 0
+    )
+
+    conv_state, recurrent_state = kv_cache
+
+    # tpu-inference's JAX AttentionMetadata carries the full (max_num_seqs,)
+    # tensors. Padded slots are masked by the kernel via request_distribution
+    # and zero-seq-len entries — no manual ``padded_num_reqs`` slicing needed
+    # here (that field only exists on the torch path's wrapper metadata).
+    # Same shape contract as ``attentions.forward_serve_vllm`` passing into
+    # ``rpa_ops`` for full attention.
+    state_indices = attention_metadata.mamba_state_indices.astype(jnp.int32)
+    query_start_loc = attention_metadata.query_start_loc
+    seq_lens = attention_metadata.seq_lens
+
+    (new_conv_state, new_recurrent_state), output = run_jax_gdn_attention(
+        mixed_qkv,
+        b,
+        a,
+        conv_state,
+        recurrent_state,
+        conv_weight,
+        None,  # conv_bias: MaxText conv1d uses use_bias=False.
+        self.A_log.value,
+        self.dt_bias.value,
+        state_indices,
+        query_start_loc,
+        attention_metadata.request_distribution,
+        seq_lens,
+        self.num_k_heads,
+        self.num_v_heads,
+        self.head_k_dim,
+        self.head_v_dim,
+        cfg.gdn_conv_kernel_dim,
+        mesh=self.mesh,
+        config=GdnAttentionConfig(),
+    )
+
+    # =========================================================================
+    # STEP C: Reshape kernel output, apply gated norm with z, project out.
+    # =========================================================================
+    # output: (num_tokens, n_v * d_v) -> (B, S, H_v, D_v)
+    output = output.reshape(batch, seq_len, self.num_v_heads, self.head_v_dim)
+    gated_output = self.norm(output, z)
+    gated_output = gated_output.reshape(batch, seq_len, -1)
+    output = self.out_proj(gated_output)
+
+    return output, (new_conv_state, new_recurrent_state)
 
 
 class Qwen3NextFullAttention(nnx.Module):
@@ -986,7 +1134,9 @@ class Qwen3NextDecoderLayer(nnx.Module):
           rngs=rngs,
       )
     else:
-      self.attention = Qwen3NextGatedDeltaNet(config=cfg, dtype=cfg.dtype, model_mode=model_mode, rngs=rngs)
+      self.attention = Qwen3NextGatedDeltaNet(
+          config=cfg, dtype=cfg.dtype, model_mode=model_mode, mesh=self.mesh, rngs=rngs
+      )
 
     # Second LayerNorm, applied before the MoE block.
     self.post_attention_layernorm = Qwen3NextRMSNorm(
@@ -1034,13 +1184,13 @@ class Qwen3NextDecoderLayer(nnx.Module):
           attention_metadata=attention_metadata,
       )
     else:
-      attention_output = cast(Qwen3NextGatedDeltaNet, self.attention)(
+      attention_output, new_kv_cache = cast(Qwen3NextGatedDeltaNet, self.attention)(
           hidden_states,
           model_mode=model_mode,
-          kv_cache=None,
+          kv_cache=kv_cache,
           decoder_segment_ids=decoder_segment_ids,
+          attention_metadata=attention_metadata,
       )
-      new_kv_cache = None
 
     # First residual connection after attention
     hidden_states = residual + attention_output

@@ -1042,7 +1042,8 @@ class TestQwen3Next(unittest.TestCase):
     @jax.jit
     def run_jax(hidden_states):
       """Runs the JAX GatedDeltaNet model."""
-      return jax_model(hidden_states)
+      output, _ = jax_model(hidden_states)
+      return output
 
     output_jax = run_jax(hidden_states_jax)
 
@@ -1283,7 +1284,8 @@ class TestQwen3Next(unittest.TestCase):
     @jax.jit
     def run_jax(x):
       """Runs the JAX GatedDeltaNet model."""
-      return jax_model(x)
+      output, _ = jax_model(x)
+      return output
 
     actual_output = run_jax(hidden_states_jax)
 
