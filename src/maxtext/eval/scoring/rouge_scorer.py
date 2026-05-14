@@ -43,9 +43,7 @@ def score_batch(
     ValueError: If responses and references have different lengths.
   """
   if len(responses) != len(references):
-    raise ValueError(
-        f"Length mismatch: {len(responses)} responses vs {len(references)} references."
-    )
+    raise ValueError(f"Length mismatch: {len(responses)} responses vs {len(references)} references.")
 
   import evaluate  # pylint: disable=import-outside-toplevel
 

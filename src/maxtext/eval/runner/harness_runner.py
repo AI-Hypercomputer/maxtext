@@ -112,11 +112,9 @@ def run_harness(cfg: dict, hf_token: str | None = None) -> dict:
   backend = cfg.get("backend", "lm_eval")
   if backend == "evalchemy":
     try:
-      import evalchemy as _evalchemy  # noqa: F401  registers custom tasks with lm_eval
+      import evalchemy as _evalchemy  # pylint: disable=unused-import  # registers custom tasks with lm_eval
     except ImportError as exc:
-      raise ImportError(
-          "Install evalchemy."
-      ) from exc
+      raise ImportError("Install evalchemy.") from exc
 
   model_name = cfg["model_name"]
   hf_path = cfg["hf_path"]
@@ -128,18 +126,18 @@ def run_harness(cfg: dict, hf_token: str | None = None) -> dict:
   token = resolve_token(cfg, hf_token)
 
   lm_model_type = "local-chat-completions" if backend == "evalchemy" else "local-completions"
+  raw_results: dict = {}
 
   with build_server_manager(cfg, token) as server:
     import jax as _jax
     from jax.experimental import multihost_utils as _multihost_utils
+
     is_rank0 = _jax.process_index() == 0
 
     if is_rank0:
       warmup_server(base_url=server.base_url, model=model_name)
 
-      completions_path = (
-          "/v1/chat/completions" if backend == "evalchemy" else "/v1/completions"
-      )
+      completions_path = "/v1/chat/completions" if backend == "evalchemy" else "/v1/completions"
       model_args_parts = [
           f"model={model_name}",
           f"base_url={server.base_url}{completions_path}",
@@ -195,6 +193,7 @@ def run_harness(cfg: dict, hf_token: str | None = None) -> dict:
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
+  """Build argument parser."""
   parser = argparse.ArgumentParser(
       description="MaxText lm-eval / evalchemy runner.",
       formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -219,22 +218,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
           "Any task registered in lm-eval or evalchemy is accepted (e.g. gsm8k, mmlu, gpqa_diamond, ifeval, math_500)."
       ),
   )
-  parser.add_argument(
-      "--num_fewshot", type=int, default=0, help="Few-shot examples per task."
-  )
-  parser.add_argument(
-      "--num_samples", type=int, help="Limit samples per task (None = full dataset)."
-  )
+  parser.add_argument("--num_fewshot", type=int, default=0, help="Few-shot examples per task.")
+  parser.add_argument("--num_samples", type=int, help="Limit samples per task (None = full dataset).")
   return parser
 
 
 def main() -> None:
-  import logging as _logging  # pylint: disable=import-outside-toplevel
   parser = _build_arg_parser()
   args = parser.parse_args()
 
-  _logging.basicConfig(
-      level=getattr(_logging, args.log_level),
+  logging.basicConfig(
+      level=getattr(logging, args.log_level),
       format="%(asctime)s %(levelname)s %(name)s: %(message)s",
   )
 

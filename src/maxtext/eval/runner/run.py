@@ -86,14 +86,17 @@ def main() -> None:
 
   if pre_args.runner == "eval":
     from maxtext.eval.runner.eval_runner import main as _main  # pylint: disable=import-outside-toplevel
+
     _main()
   elif pre_args.runner == "lm_eval":
     from maxtext.eval.runner.harness_runner import main as _main  # pylint: disable=import-outside-toplevel
+
     _main()
   else:  # evalchemy
     if "--backend" not in remaining:
       sys.argv += ["--backend", "evalchemy"]
     from maxtext.eval.runner.harness_runner import main as _main  # pylint: disable=import-outside-toplevel
+
     _main()
 
 

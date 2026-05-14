@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# This rule only uses FSDP. Pure FSDP is the go-to sharding strategy 
+# This rule only uses FSDP. Pure FSDP is the go-to sharding strategy
 # for small-scale training and this rule simplifies the overall configuration.
 mesh_axes: ['fsdp']
 data_sharding: [['fsdp']]

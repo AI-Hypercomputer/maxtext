@@ -131,8 +131,8 @@ class GCPWorkloadMonitor:
       # Send data to Google Cloud Monitoring
       if self.client is not None:
         self.client.create_time_series(
-          request={"name": f"projects/{self.project_id}", "time_series": [series]},
-          timeout=30,
+            request={"name": f"projects/{self.project_id}", "time_series": [series]},
+            timeout=30,
         )
         max_logging.log("Heartbeat metric successfully sent to GCP.")
     except GoogleAPIError as e:
@@ -174,8 +174,8 @@ class GCPWorkloadMonitor:
       # Send data to Google Cloud Monitoring
       if self.client is not None:
         self.client.create_time_series(
-          request={"name": f"projects/{self.project_id}", "time_series": [series]},
-          timeout=30,
+            request={"name": f"projects/{self.project_id}", "time_series": [series]},
+            timeout=30,
         )
         max_logging.log("Performance metric successfully sent to GCP.")
     except GoogleAPIError as e:

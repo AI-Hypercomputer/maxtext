@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 
 def _load_config(config_path: str) -> dict:
-  with open(config_path) as f:
+  with open(config_path, encoding="utf-8") as f:
     return yaml.safe_load(f) or {}
 
 
@@ -44,6 +44,7 @@ def _merge_config(base: dict, overrides: dict) -> dict:
 
 
 def _derive_from_maxtext_config(maxtext_config_path: str) -> dict:
+  """Derive config settings from a MaxText config."""
   raw = _load_config(maxtext_config_path)
   prefill_len = raw.get("max_prefill_predict_length")
   target_len = raw.get("max_target_length")
@@ -71,11 +72,8 @@ def _build_results_path(cfg: dict) -> str:
   base_output_directory = cfg.get("base_output_directory", "").rstrip("/")
   run_name = cfg.get("run_name", "")
   if not base_output_directory or not run_name:
-    raise ValueError(
-        "Cannot build eval results_path."
-    )
+    raise ValueError("Cannot build eval results_path.")
   return f"{base_output_directory}/{run_name}/eval_results"
-
 
 
 def run_eval(cfg: dict, hf_token: str | None = None) -> dict:
@@ -127,6 +125,7 @@ def run_eval(cfg: dict, hf_token: str | None = None) -> dict:
   with build_server_manager(cfg, token) as server:
     import jax as _jax  # pylint: disable=import-outside-toplevel
     from jax.experimental import multihost_utils as _multihost_utils  # pylint: disable=import-outside-toplevel
+
     is_rank0 = _jax.process_index() == 0
 
     if is_rank0:
@@ -192,6 +191,7 @@ def run_eval(cfg: dict, hf_token: str | None = None) -> dict:
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
+  """Build argument parser."""
   parser = argparse.ArgumentParser(
       description="MaxText model evaluation runner.",
       formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -251,10 +251,7 @@ def main() -> None:
       if k not in base_cfg:
         base_cfg[k] = v
 
-  cli_overrides = {
-      k: v for k, v in vars(args).items()
-      if k not in ("config", "base_config", "log_level", "hf_token")
-  }
+  cli_overrides = {k: v for k, v in vars(args).items() if k not in ("config", "base_config", "log_level", "hf_token")}
   cfg = _merge_config(base_cfg, cli_overrides)
 
   if "max_tokens" not in cfg and "max_tokens_default" in cfg:

@@ -28,7 +28,7 @@ inference_devices_per_replica: 4
 inference_replicas: 1
 use_pathways_reshard: True
 
-return_log_prob: True 
+return_log_prob: True
 
 add_bos: False
 add_eos: False

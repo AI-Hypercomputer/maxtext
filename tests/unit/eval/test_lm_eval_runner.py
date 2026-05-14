@@ -78,7 +78,6 @@ class TestMapResults(unittest.TestCase):
     self.assertAlmostEqual(scores["mmlu_accuracy"], 80.0, places=1)
     self.assertAlmostEqual(scores["gpqa_diamond_accuracy"], 35.0, places=1)
 
-
   def test_missing_task_returns_nothing(self):
     raw = {"results": {}}
     scores = _map_results(raw, ["mmlu"])

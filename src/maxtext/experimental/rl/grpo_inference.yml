@@ -1,4 +1,4 @@
-# This config is used for loading the inference model for GRPO. Note that base_config is set to "rl.yml" 
+# This config is used for loading the inference model for GRPO. Note that base_config is set to "rl.yml"
 # to inherit the necessary sharding rules for GRPO inference.
 base_config: "rl_mt_jt.yml"
 

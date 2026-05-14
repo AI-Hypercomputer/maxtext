@@ -1,5 +1,5 @@
 # Decoupled base test config: used when DECOUPLE_GCLOUD=TRUE for tests that previously relied on base.yml.
-# Inherit all model defaults (PyDantic already does this) but override any cloud-coupled paths and disable 
+# Inherit all model defaults (PyDantic already does this) but override any cloud-coupled paths and disable
 # optional cloud features.
 
 # Output goes to a local relative directory so tests do not require GCS.

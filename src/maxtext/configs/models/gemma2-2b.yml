@@ -18,7 +18,7 @@ base_emb_dim: 2304
 base_num_query_heads: 8
 base_num_kv_heads: 4
 base_mlp_dim: 9216
-base_num_decoder_layers: 13 # half of the real number of layers because we merge [local_attention, global_attention] into one layer 
+base_num_decoder_layers: 13 # half of the real number of layers because we merge [local_attention, global_attention] into one layer
 head_dim: 256
 mlp_activations: ["gelu","linear"]
 vocab_size: 256128
