@@ -88,6 +88,7 @@ def maybe_upload_to_gcs(output: dict, gcs_results_path: str | None) -> None:
   """Upload the results JSON to GCS if gcs_results_path is provided."""
   if gcs_results_path:
     from maxtext.eval.reporting.gcs_reporter import upload_results  # pylint: disable=import-outside-toplevel
+
     upload_results(output["local_path"], gcs_results_path)
 
 
@@ -103,23 +104,17 @@ def add_server_args(parser: argparse.ArgumentParser) -> None:
   )
   parser.add_argument("--run_name", required=True, help="Run name/identifier.")
   parser.add_argument("--max_model_len", type=int, required=True, help="vLLM max context length.")
-  parser.add_argument(
-      "--tensor_parallel_size", type=int, default=4, help="vLLM tensor parallelism."
-  )
+  parser.add_argument("--tensor_parallel_size", type=int, default=4, help="vLLM tensor parallelism.")
   parser.add_argument("--server_host", default="localhost", help="vLLM server bind host.")
   parser.add_argument("--server_port", type=int, default=8000, help="vLLM server port.")
-  parser.add_argument(
-      "--max_num_batched_tokens", type=int, help="vLLM tokens per scheduler step."
-  )
+  parser.add_argument("--max_num_batched_tokens", type=int, help="vLLM tokens per scheduler step.")
   parser.add_argument("--max_num_seqs", type=int, help="vLLM max concurrent sequences.")
   parser.add_argument("--hf_mode", action="store_true", help="HF safetensors mode.")
   parser.add_argument(
       "--expert_parallel_size",
       type=int,
       default=0,
-      help=(
-          "Chips allocated to the expert mesh axis (EP). "
-      ),
+      help=("Chips allocated to the expert mesh axis (EP). "),
   )
   parser.add_argument(
       "--data_parallel_size",
@@ -131,14 +126,10 @@ def add_server_args(parser: argparse.ArgumentParser) -> None:
       "--hbm_memory_utilization",
       type=float,
       default=0.3,
-      help=(
-          "Fraction of HBM reserved for KV cache."
-      ),
+      help=("Fraction of HBM reserved for KV cache."),
   )
   parser.add_argument("--hf_token", help="HuggingFace token for gated models.")
-  parser.add_argument(
-      "--gcs_results_path", help="Optional secondary GCS path to upload the results JSON."
-  )
+  parser.add_argument("--gcs_results_path", help="Optional secondary GCS path to upload the results JSON.")
   parser.add_argument(
       "--log_level",
       default="INFO",

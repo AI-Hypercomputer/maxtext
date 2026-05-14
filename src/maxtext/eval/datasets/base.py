@@ -40,6 +40,7 @@ class SampleRequest(NamedTuple):
 
 class BenchmarkDataset(abc.ABC):
   """Abstract base class for benchmark datasets."""
+
   name: str
 
   @abc.abstractmethod

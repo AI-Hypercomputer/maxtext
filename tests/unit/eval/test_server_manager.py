@@ -22,28 +22,31 @@ from maxtext.eval.runner.server_manager import VllmServerManager
 
 
 def _make_manager(**kwargs) -> VllmServerManager:
-  defaults = dict(
-      model_path="/fake/model",
-      host="localhost",
-      port=8000,
-      tensor_parallel_size=4,
-      max_model_len=4096,
-  )
+  defaults = {
+      "model_path": "/fake/model",
+      "host": "localhost",
+      "port": 8000,
+      "tensor_parallel_size": 4,
+      "max_model_len": 4096,
+  }
   defaults.update(kwargs)
   return VllmServerManager(**defaults)
 
 
 def _start_capturing_llm_kwargs(mgr: VllmServerManager, rank: int = 0) -> dict:
+  """Start manager and capture LLM kwargs."""
   mock_llm_cls = mock.MagicMock()
   mock_vllm = mock.MagicMock()
   mock_vllm.LLM = mock_llm_cls
   mock_uvicorn = mock.MagicMock()
 
-  with mock.patch.dict("sys.modules", {"vllm": mock_vllm, "uvicorn": mock_uvicorn}), \
-       mock.patch("jax.process_index", return_value=rank), \
-       mock.patch("threading.Thread", return_value=mock.MagicMock()), \
-       mock.patch("maxtext.eval.runner.server_manager._build_app", return_value=mock.MagicMock()), \
-       mock.patch.object(mgr, "_wait_until_healthy"):
+  with (
+      mock.patch.dict("sys.modules", {"vllm": mock_vllm, "uvicorn": mock_uvicorn}),
+      mock.patch("jax.process_index", return_value=rank),
+      mock.patch("threading.Thread", return_value=mock.MagicMock()),
+      mock.patch("maxtext.eval.runner.server_manager._build_app", return_value=mock.MagicMock()),
+      mock.patch.object(mgr, "_wait_until_healthy"),
+  ):
     mgr.start()
 
   return mock_llm_cls.call_args.kwargs
@@ -132,12 +135,14 @@ class TestVllmServerManagerConfig(unittest.TestCase):
     mock_vllm = mock.MagicMock()
     mock_vllm.LLM = mock_llm_cls
 
-    with mock.patch.dict("sys.modules", {"vllm": mock_vllm, "uvicorn": mock.MagicMock()}), \
-         mock.patch("jax.process_index", return_value=0), \
-         mock.patch("threading.Thread", return_value=mock.MagicMock()), \
-         mock.patch("maxtext.eval.runner.server_manager._build_app", return_value=mock.MagicMock()), \
-         mock.patch.object(mgr, "_wait_until_healthy"), \
-         mock.patch.dict("os.environ", {}, clear=False):
+    with (
+        mock.patch.dict("sys.modules", {"vllm": mock_vllm, "uvicorn": mock.MagicMock()}),
+        mock.patch("jax.process_index", return_value=0),
+        mock.patch("threading.Thread", return_value=mock.MagicMock()),
+        mock.patch("maxtext.eval.runner.server_manager._build_app", return_value=mock.MagicMock()),
+        mock.patch.object(mgr, "_wait_until_healthy"),
+        mock.patch.dict("os.environ", {}, clear=False),
+    ):
       mgr.start()
 
     self.assertEqual(env_at_init.get("_TEST_EVAL_TOKEN"), "abc123")
@@ -151,16 +156,19 @@ class TestVllmServerManagerHttp(unittest.TestCase):
   """Tests that the HTTP server is started only on rank-0."""
 
   def _start_capturing_thread_calls(self, mgr, rank):
+    """Start manager and capture thread calls."""
     mock_llm_cls = mock.MagicMock()
     mock_vllm = mock.MagicMock()
     mock_vllm.LLM = mock_llm_cls
     mock_thread_cls = mock.MagicMock(return_value=mock.MagicMock())
 
-    with mock.patch.dict("sys.modules", {"vllm": mock_vllm, "uvicorn": mock.MagicMock()}), \
-         mock.patch("jax.process_index", return_value=rank), \
-         mock.patch("threading.Thread", mock_thread_cls), \
-         mock.patch("maxtext.eval.runner.server_manager._build_app", return_value=mock.MagicMock()), \
-         mock.patch.object(mgr, "_wait_until_healthy"):
+    with (
+        mock.patch.dict("sys.modules", {"vllm": mock_vllm, "uvicorn": mock.MagicMock()}),
+        mock.patch("jax.process_index", return_value=rank),
+        mock.patch("threading.Thread", mock_thread_cls),
+        mock.patch("maxtext.eval.runner.server_manager._build_app", return_value=mock.MagicMock()),
+        mock.patch.object(mgr, "_wait_until_healthy"),
+    ):
       mgr.start()
 
     return mock_thread_cls
@@ -179,6 +187,9 @@ class TestVllmServerManagerHttp(unittest.TestCase):
 
 
 class TestVllmServerManagerLifecycle(unittest.TestCase):
+  """Tests for VllmServerManager lifecycle."""
+
+  # pylint: disable=protected-access
 
   def test_stop_signals_uvicorn_should_exit(self):
     mgr = _make_manager()

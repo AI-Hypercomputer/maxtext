@@ -18,9 +18,7 @@ from __future__ import annotations
 
 from maxtext.eval.datasets.base import BenchmarkDataset, SampleRequest
 
-_SYSTEM_PROMPT = (
-    "You are a helpful assistant. Summarize the following conversation."
-)
+_SYSTEM_PROMPT = "You are a helpful assistant. Summarize the following conversation."
 
 
 class MlperfOpenOrcaDataset(BenchmarkDataset):
