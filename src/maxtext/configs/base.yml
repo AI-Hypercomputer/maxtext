@@ -43,6 +43,7 @@ load_parameters_path: ""
 
 # LoRA adapter support configs
 lora_input_adapters_path: ""    # Input GCS path for a parent directory which has all the LoRA adapters (lora_id as subdir)
+hf_lora_adapter_path: ""        # Input HF repo ID or local path for HF LoRA adapter
 
 # Loads a full checkpoint including optimizer state and step count from a specific directory
 # e.g. gs://my-base-output-directory/my-previous-run-name/checkpoints/items/NUMBER or NUMBER/items
@@ -250,8 +251,6 @@ moe_fsdp_use_two_stage_all_gather: false
 # Shard the expert dimension of the MLP weights on the FSDP axis.
 # This configuration is recommended only when num_experts is a multiple of fsdp_parallelism
 shard_exp_on_fsdp: False
-# use fsdp and fsdp_transpose axes for sharding the moe weights
-use_2d_fsdp_sharding: False
 
 # deepseek moe
 first_num_dense_layers: 0 # number of initial dense layers in the model
@@ -691,8 +690,8 @@ sft_train_on_completion_only: False
 dataset_type: tfds
 # for TFDS input pipeline (dataset_type=tfds)
 dataset_path: "" # your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
-dataset_name: 'c4/en:3.0.1'
-eval_dataset_name: 'c4/en:3.0.1'
+dataset_name: 'c4/en:3.1.0'
+eval_dataset_name: 'c4/en:3.1.0'
 train_split: 'train'
 eval_split: 'validation'
 # for HuggingFace input pipeline (dataset_type=hf)
@@ -733,6 +732,14 @@ grain_shuffle_buffer_size: 100 # shuffle buffer when using sequential access for
 grain_use_elastic_iterator: False # For elastic training, set to this true and packing=False
 # for using pathways
 colocated_python_data_input: False  # experimental feature, under testing
+
+# OLMo numpy pipeline (dataset_type=olmo_grain). Worker count, buffer size,
+# and shuffle seed reuse grain_worker_count / grain_per_worker_buffer_size /
+# data_shuffle_seed.
+olmo_index_path: '' # JSON from tools/data_generation/build_olmo_npy_index.py
+olmo_path_remap_from: '' # rewrite index paths starting with this prefix...
+olmo_path_remap_to: ''   # ...to this one (e.g. gs://bucket/ -> /mnt/.../ for gcsfuse).
+olmo_apply_ngram_filter: True # mask instances with repetitive n-grams (OLMo-core filter)
 
 # Training loop
 steps: 150_001 # If set to -1 then will inherit value from learning_rate_schedule_steps
@@ -794,6 +801,10 @@ hide_profiler_step_metric: False
 profile_cleanly: True # If set to true, adds a block_until_ready on train state which aligns the profile for each step.
 profile_periodically_period: -1 # If set to a positive integer, profile every profile_periodically_period steps.
 # This is useful to debug scenarios where performance is changing.
+enable_tpu_profiling_options: False
+tpu_num_chips_to_profile_per_task: 1
+tpu_num_sparse_core_tiles_to_trace: 1
+tpu_num_sparse_cores_to_trace: 2
 
 # Managed ML diagnostics settings. If the feature is enabled, it will
 # - create a managed ML diagnostics run with all the MaxText configs

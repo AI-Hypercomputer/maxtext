@@ -44,6 +44,7 @@ from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
 import optax
+import re
 from orbax import checkpoint
 
 # MaxText Imports
@@ -273,30 +274,27 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
   # Inherits _shard_optimizer from PeftTrainer.
 
   def _train_step(self, model, optimizer, inputs):
-    """Overrides the main JIT block to natively handle ModelBundle module."""
+    """Overrides the main JIT block to natively handle ModelBundle module.
 
+    Uses jax.value_and_grad with explicit split/merge to avoid nesting
+    nnx.value_and_grad inside nnx.jit, which causes Flax NNX to assign
+    conflicting outer_index values and raises:
+      ValueError: The graph structure of a node added to cached_partial was
+      mutated inside the transformation.
+    """
     batch = self.gen_model_input_fn(inputs)
+    student = model.student_model
+    teacher = model.teacher_model
     current_step = model.training_step[...]
 
-    def loss_wrapper(student, teacher, batch):
-      if "teacher_output" in batch:
-        teacher_output = batch["teacher_output"]
-      else:
-        teacher_output = self.strategy.teacher_forward_fn(
-            model=teacher,
-            input_tokens=batch["input_tokens"],
-            positions=batch["positions"],
-            attention_mask=batch.get("attention_mask"),
-            decoder_segment_ids=batch.get("decoder_segment_ids"),
-            decoder_target_tokens=batch.get("targets", None),
-            decoder_target_mask=batch.get("targets_segmentation", None),
-            cache=None,
-        )
-
-      teacher_output = jax.tree.map(jax.lax.stop_gradient, teacher_output)
-
-      student_output = self.strategy.student_forward_fn(
-          model=student,
+    # Run teacher inference outside of value_and_grad.
+    # The teacher is frozen (stop_gradient), so its output is a constant
+    # from the perspective of the student gradient computation.
+    if "teacher_output" in batch:
+      teacher_output = batch["teacher_output"]
+    else:
+      teacher_output = self.strategy.teacher_forward_fn(
+          model=teacher,
           input_tokens=batch["input_tokens"],
           positions=batch["positions"],
           attention_mask=batch.get("attention_mask"),
@@ -305,29 +303,44 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
           decoder_target_mask=batch.get("targets_segmentation", None),
           cache=None,
       )
-      # we should apply a mask for labels to disable segment-separator tokens
+    teacher_output = jax.tree.map(jax.lax.stop_gradient, teacher_output)
+
+    # Split student into differentiable params and non-differentiable rest.
+    # Capture graphdef outside of jax.value_and_grad for stable graph tracking.
+    student_graphdef, diff_params, rest = nnx.split(student, self.wrt_filter, ...)
+
+    def loss_wrapper_pure(diff_params, rest):
+      local_student = nnx.merge(student_graphdef, diff_params, rest, copy=True)
+      student_output = self.strategy.student_forward_fn(
+          model=local_student,
+          input_tokens=batch["input_tokens"],
+          positions=batch["positions"],
+          attention_mask=batch.get("attention_mask"),
+          decoder_segment_ids=batch.get("decoder_segment_ids"),
+          decoder_target_tokens=batch.get("targets", None),
+          decoder_target_mask=batch.get("targets_segmentation", None),
+          cache=None,
+      )
       labels = self.strategy.create_labels(batch["targets"], targets_segmentation=batch.get("targets_segmentation", None))
-      return self.strategy.compute_loss(student_output, teacher_output, labels, step=current_step)
+      loss, aux = self.strategy.compute_loss(student_output, teacher_output, labels, step=current_step)
+      # Capture updated non-param state (e.g. RNG counters) from local_student.
+      _, _, new_rest = nnx.split(local_student, self.wrt_filter, ...)
+      return loss, (aux, new_rest)
 
-    # Because student is the 0th argument, argnums=0 guarantees
-    # we only compute gradients for the student.
-    grad_fn = nnx.value_and_grad(
-        loss_wrapper,
-        argnums=nnx.DiffState(0, self.wrt_filter),
-        has_aux=True,
-    )
+    grad_fn = jax.value_and_grad(loss_wrapper_pure, argnums=0, has_aux=True)
+    (loss, (aux, new_rest)), grads = grad_fn(diff_params, rest)
 
-    out, grads = grad_fn(model.student_model, model.teacher_model, batch)
+    # Propagate updated non-param state back to student.
+    nnx.update(student, new_rest)
+
+    optimizer.update(student, grads)
 
     model.training_step.set_value(current_step + 1)
 
     tunix_expects_grad_norm = getattr(self, "_tunix_expects_grad_norm", True)
-
-    optimizer.update(model.student_model, grads)
-
     if tunix_expects_grad_norm:
-      return out[0], out[1], optax.global_norm(grads)
-    return out[0], out[1]
+      return loss, aux, optax.global_norm(grads)
+    return loss, aux
 
   def _eval_step(self, model, inputs):
     """Evaluation only needs the student."""
@@ -688,11 +701,12 @@ def train_distill(
     max_logging.log(f"Loading Student from {student_config.load_parameters_path}...")
     _log_config_details(student_config, "Student")
     student_model = get_maxtext_model(student_config, mesh)
-    student_params_to_update = getattr(student_config, "student_params_to_update", [])
+    student_params_to_update = getattr(student_config, "student_params_to_update", []) or []
+    student_param_update_templates = [re.compile(t) for t in student_params_to_update]
 
     def student_freeze_param_fn(path) -> bool:
       path_str = "/".join(str(p) for p in path)
-      return not any(template in path_str for template in student_params_to_update)
+      return not any(regex.search(path_str) for regex in student_param_update_templates)
 
     # Inject the teacher's frozen weights into the student model
     if teacher_model:

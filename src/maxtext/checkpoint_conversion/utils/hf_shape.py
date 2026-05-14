@@ -716,7 +716,7 @@ def QWEN_HF_WEIGHTS_TO_SHAPE(config):
   }
 
   # Determine if the model is MoE based on config keys
-  num_experts = config.get("num_experts", 0)
+  num_experts = config.get("num_experts", config.get("num_local_experts", 0))
 
   for layer_idx in range(num_hidden_layers):
     layer_prefix = f"model.layers.{layer_idx}"
@@ -930,6 +930,7 @@ HF_SHAPE = {
     "qwen3-14b": QWEN_HF_WEIGHTS_TO_SHAPE,
     "qwen3-32b": QWEN_HF_WEIGHTS_TO_SHAPE,
     "llama3.1-8b": LLAMA31_HF_WEIGHTS_TO_SHAPE,
+    "llama3.1-8b-Instruct": LLAMA31_HF_WEIGHTS_TO_SHAPE,
     "llama3.1-70b": LLAMA31_HF_WEIGHTS_TO_SHAPE,
     "llama3.1-405b": LLAMA31_HF_WEIGHTS_TO_SHAPE,
     "qwen3-30b-a3b": QWEN_HF_WEIGHTS_TO_SHAPE,

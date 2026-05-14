@@ -48,7 +48,6 @@ import ml_dtypes
 import psutil
 
 from tqdm import tqdm
-import time
 
 import numpy as np
 
@@ -56,13 +55,8 @@ os.environ["JAX_PLATFORMS"] = "cpu"
 
 import torch
 
-import jax
-from jax import tree
-
-from flax.training import train_state
-
+from maxtext.checkpoint_conversion.utils.utils import save_weights_to_checkpoint
 from maxtext.inference.inference_utils import str2bool
-from maxtext.common import checkpointing
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
@@ -428,7 +422,7 @@ def convert_lora_weights_to_jax_weights(lora_config: dict, model_size: str):
 
   max_logging.log(f"Loading the lora  model from {lora_config['lora_model_path']}")
   # Load LoRA model weights
-  lora_chkpt_vars = torch.load(lora_config["lora_model_path"])
+  lora_chkpt_vars = torch.load(lora_config["lora_model_path"], weights_only=True)
   lora_chkpt_vars = _NamespaceMapper(lora_chkpt_vars)
 
   jax_weights_lora = {
@@ -1112,9 +1106,8 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
   for i, ckpt_path in enumerate(ckpt_paths):
     max_logging.log(f"Loading checkpoint {i+1} of {len(ckpt_paths)} ...")
     # NOTE: starting in PT2.6, `weights_only` was switched from the default of `False` to `True`
-    # thus we need to specify this or else loading will fail
     chkpt_vars[int(ckpt_path.name.split(".", maxsplit=2)[1])] = torch.load(
-        ckpt_path, map_location="cpu", weights_only=False
+        ckpt_path, map_location="cpu", weights_only=True
     )
   chkpt_vars = [chkpt_vars[i] for i in sorted(list(chkpt_vars.keys()))]
   # map weight names if they use HuggingFace instead of PyTorch convention
@@ -1630,150 +1623,6 @@ def convert_to_jax_weights(base_model_path: str, model_size: str, huggingface_ck
     return _convert_huggingface_to_jax_weights(base_model_path, model_size, model_params, mem_info)
 
   return _convert_pytorch_to_jax_weights(base_model_path, model_size, model_params, mem_info)
-
-
-def shard_checkpoint(jax_weights, device_count, mem_info):
-  """Shards the checkpoint weights across the simulated devices.
-
-  Args:
-    jax_weights: Pytree of model weights (numpy arrays).
-    device_count: The number of simulated devices.
-    mem_info: Process object to track memory usage.
-
-  Returns:
-    Pytree of sharded JAX arrays.
-  """
-  # Setup mesh & sharding specs
-  if len(jax.devices()) != device_count:
-    max_logging.log(
-        "WARNING: hardware/simulated device mismatch. "
-        f"Actual JAX devices: {len(jax.devices())}, Requested count: {device_count}."
-    )
-  max_logging.log(f"Shard weights across {len(jax.devices())} devices")
-  max_logging.log("Note: Axis 0 sharding is the default and will not be logged individually.")
-  # Pre-define sharding specs
-  mesh = jax.sharding.Mesh(jax.devices(), "checkpoint_sharding_axis")
-  # No sharding (replicated specifically for 0D scalars)
-  s0 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
-  # Sharding along axis 0
-  s1 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("checkpoint_sharding_axis"))
-  # Sharding along axis 1
-  s2 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, "checkpoint_sharding_axis"))
-  # No sharding (replicated)
-  s3 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None))
-
-  def checkpoint_device_put(arr):
-    """Determines correct sharding spec based on shape and shards the input array.
-
-    Args:
-      arr: A numpy array (or jax array).
-
-    Returns:
-      A sharded jax array.
-    """
-    if not isinstance(arr, (np.ndarray, jax.Array)):
-      # materialize lazy tensor
-      arr = np.array(arr)
-
-    if len(arr.shape) == 0:
-      max_logging.log("0D scalar detected, replicating")
-      return jax.device_put(arr, device=s0)
-    elif arr.shape[0] % device_count == 0:
-      # Sharding axis 0: Omit log for brevity per the summary log above.
-      return jax.device_put(arr, device=s1)
-    elif len(arr.shape) > 1 and arr.shape[1] % device_count == 0:
-      max_logging.log(f"Sharding axis 1. Tensor shape {arr.shape}")
-      return jax.device_put(arr, device=s2)
-    else:
-      max_logging.log(f"Not sharding. Tensor shape {arr.shape}")
-      return jax.device_put(arr, device=s3)
-
-  # Weight sharding
-  start = time.time()
-  # convert all weights to jax.numpy with sharding if applicable
-  jax_weights_flat, jax_weights_struct = tree.flatten(jax_weights)
-  del jax_weights
-  gc.collect()
-
-  jax_weights_new = []
-  jax_weights_flat.reverse()
-  num_weights = len(jax_weights_flat)
-  for _ in tqdm(range(num_weights)):
-    jax_weight = jax_weights_flat.pop()
-    jax_weights_new.append(checkpoint_device_put(jax_weight))
-    del jax_weight
-    gc.collect()
-    logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
-
-  jax_weights = tree.unflatten(jax_weights_struct, jax_weights_new)
-  max_logging.log(f"Elapse for checkpoint sharding: {(time.time() - start) / 60:.2f} min")
-
-  return jax_weights
-
-
-def save_weights_to_checkpoint(
-    maxtext_model_path: str,
-    jax_weights: dict,
-    device_count: int,
-    use_ocdbt: bool,
-    use_zarr3: bool,
-):
-  """Saves model weights to a MaxText-compatible checkpoint with optional sharding.
-
-  This function handles the conversion of NumPy weights into sharded JAX arrays
-  across a specified number of simulated devices. If the device count is 1,
-  the sharding and JAX conversion steps are skipped.
-
-  Args:
-      maxtext_model_path: The destination directory or URI for the MaxText checkpoint.
-      jax_weights: A dictionary mapping parameter names to weight arrays (typically NumPy).
-      device_count: The number of simulated devices to shard across. If 1, weights
-          are saved in their original format.
-      use_ocdbt: If True, enables the Optimized Checkpoint Database with Transactions
-          (OCDBT) format for improved metadata handling.
-      use_zarr3: If True, uses the Zarr3 storage format for the underlying array data.
-  """
-  mem_info = psutil.Process()
-  logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
-  gc.collect()
-
-  # Weight sharding
-  if device_count > 1:
-    jax_weights = shard_checkpoint(jax_weights, device_count, mem_info)
-  else:
-    # If number of simulated devices is 1, SKIP sharding and SKIP jax conversion.
-    max_logging.log("Single device: Skip sharding")
-
-  # Save checkpoint
-  start = time.time()
-  # dummy configs for the checkpoint_manager
-  step_number_to_save_new_ckpt = 0
-  enable_checkpointing = True
-  async_checkpointing = False
-  save_interval_steps = 1
-
-  checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
-      maxtext_model_path,
-      enable_checkpointing,
-      async_checkpointing,
-      save_interval_steps,
-      use_ocdbt=use_ocdbt,
-      use_zarr3=use_zarr3,
-  )
-  if checkpoint_manager is None:
-    raise RuntimeError("Failed to create Orbax checkpoint manager.")
-
-  state_new = train_state.TrainState(
-      step=step_number_to_save_new_ckpt, apply_fn=None, params={"params": jax_weights}, tx=None, opt_state={}  # type: ignore
-  )
-
-  logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
-  if checkpointing.save_checkpoint(checkpoint_manager, step_number_to_save_new_ckpt, state_new):
-    max_logging.log(f"saved a checkpoint at step {step_number_to_save_new_ckpt}")
-  # Upon preemption, exit when and only when all ongoing saves are complete.
-  checkpoint_manager.wait_until_finished()
-
-  max_logging.log(f"Elapse for checkpoint save: {(time.time() - start) / 60:.2f} min")
 
 
 def list_folders_pathlib(directory: str):

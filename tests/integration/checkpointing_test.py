@@ -59,12 +59,12 @@ def get_checkpointing_command(run_date, hardware, steps, metrics_file, attention
   """
   base_output_directory = get_test_base_output_directory()
   model_params = [
-      "base_emb_dim=384",
-      "base_num_query_heads=8",
-      "base_num_kv_heads=8",
-      "base_mlp_dim=192",
-      "base_num_decoder_layers=8",
-      "head_dim=128",
+      "base_emb_dim=128",
+      "base_num_query_heads=2",
+      "base_num_kv_heads=2",
+      "base_mlp_dim=128",
+      "base_num_decoder_layers=1",
+      "head_dim=64",
   ]
   pathways_command = []
   if os.getenv("JAX_PLATFORMS") == "proxy":

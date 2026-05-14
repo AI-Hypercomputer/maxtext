@@ -51,13 +51,29 @@ class Profiler:
       ManagedMLDiagnostics(config)  # Initialize the MLRun instance.
 
     self.profiling_options = jax.profiler.ProfileOptions()
+    advanced_config = {}
+
     if self.mode == "xplane" and not self.managed_mldiagnostics and config.profile_power_events:
-      self.profiling_options.advanced_configuration = {
-          "tpu_power_trace_level": config.xprof_tpu_power_trace_level,
-          "e2e_enable_fw_throttle_event": config.xprof_e2e_enable_fw_throttle_event,
-          "e2e_enable_fw_power_level_event": config.xprof_e2e_enable_fw_power_level_event,
-          "e2e_enable_fw_thermal_event": config.xprof_e2e_enable_fw_thermal_event,
-      }
+      advanced_config.update(
+          {
+              "tpu_power_trace_level": config.xprof_tpu_power_trace_level,
+              "e2e_enable_fw_throttle_event": config.xprof_e2e_enable_fw_throttle_event,
+              "e2e_enable_fw_power_level_event": config.xprof_e2e_enable_fw_power_level_event,
+              "e2e_enable_fw_thermal_event": config.xprof_e2e_enable_fw_thermal_event,
+          }
+      )
+
+    if self.mode == "xplane" and config.enable_tpu_profiling_options:
+      advanced_config.update(
+          {
+              "tpu_num_chips_to_profile_per_task": config.tpu_num_chips_to_profile_per_task,
+              "tpu_num_sparse_core_tiles_to_trace": config.tpu_num_sparse_core_tiles_to_trace,
+              "tpu_num_sparse_cores_to_trace": config.tpu_num_sparse_cores_to_trace,
+          }
+      )
+
+    if advanced_config:
+      self.profiling_options.advanced_configuration = advanced_config
 
   def maybe_activate_profiler(self, step, state):
     """Conditionally activates the profiler based on the current step.

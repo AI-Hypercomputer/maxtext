@@ -26,6 +26,8 @@ MaxText was co-designed with key Google led innovations to provide a unified pos
 - **SFT (Supervised Fine-Tuning)**
   - [SFT on Single-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/sft.html)
   - [SFT on Multi-Host TPUs](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/sft_on_multi_host.html)
+- **LoRA (Low-Rank Adaptation)**
+  - [LoRA on Single-Host TPUs](posttraining/lora.md)
 - **Multimodal SFT**
   - [Multimodal Support](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/multimodal.html)
 - **Reinforcement Learning (RL)**
@@ -68,6 +70,7 @@ posttraining/sft_on_multi_host.md
 posttraining/rl.md
 posttraining/rl_on_multi_host.md
 posttraining/knowledge_distillation.md
+posttraining/lora.md
 posttraining/multimodal.md
 posttraining/full_finetuning.md
 posttraining/gepa_optimization.md

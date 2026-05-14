@@ -26,7 +26,7 @@ import unittest
 import pytest
 
 from maxtext.trainers.pre_train.train import main as train_main
-from tests.utils.test_helpers import get_test_config_path
+from tests.utils.test_helpers import get_test_config_path, get_test_base_output_directory, get_test_dataset_path
 
 pytestmark = pytest.mark.integration_test
 
@@ -52,13 +52,17 @@ class DeterminismTests(unittest.TestCase):
     common_config = [
         None,
         get_test_config_path(),
-        "steps=5",
+        "steps=2",
         "enable_checkpointing=False",
         "enable_data_shuffling=True",
         "enable_dropout=False",
-        "base_output_directory=gs://runner-maxtext-logs",
-        "dataset_path=gs://maxtext-dataset",
+        f"base_output_directory={get_test_base_output_directory()}",
+        f"dataset_path={get_test_dataset_path()}",
         "skip_jax_distributed_system=True",
+        "base_emb_dim=128",
+        "base_mlp_dim=128",
+        "base_num_decoder_layers=1",
+        "head_dim=64",
     ]
     train_1_config = common_config + [
         f"run_name={run_name}_1",

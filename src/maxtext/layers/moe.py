@@ -358,9 +358,6 @@ class RoutedMoE(nnx.Module):
       # special sharding for dsv3
       self.wi_kernel_axes = ("embed_moe", None, "mlp_moe")
       self.wo_kernel_axes = ("embed_moe", "mlp_moe", None)
-    elif self.config.use_2d_fsdp_sharding:
-      self.wi_kernel_axes = ("embed_moe", "mlp_moe", None)
-      self.wo_kernel_axes = ("embed_moe", "mlp_moe", None)
     elif self.config.use_batch_split_schedule:
       self.wi_kernel_axes, self.wo_kernel_axes = get_batchsplit_init_kernel_axes()
     else:
@@ -538,6 +535,14 @@ class RoutedMoE(nnx.Module):
       )
     else:
       self.per_expert_scale = None
+
+    # Scale the output projection ahead of time during inference for higher generation throughput.
+    if (
+        self.per_expert_scale is not None
+        and self.config.model_call_mode == "inference"
+        and self.config.fuse_expert_scales
+    ):
+      self.wo.value = self.wo.value * self.per_expert_scale.value[:, None, None]
 
   def _maybe_shard_with_logical(self, inputs, logical_name):
     return maybe_shard_with_logical(
@@ -1209,10 +1214,6 @@ class RoutedMoE(nnx.Module):
           w0_pspec = self._logical_to_mesh_axes(("embed_tensor_transpose", None, "mlp_no_fsdp"))
           w1_pspec = self._logical_to_mesh_axes(("embed_tensor_transpose", None, "mlp_no_fsdp"))
           wo_pspec = self._logical_to_mesh_axes(("embed_tensor_transpose", "mlp_no_fsdp", None))
-      elif self.config.use_2d_fsdp_sharding:
-        w0_pspec = self._logical_to_mesh_axes(("embed_tensor_transpose", "mlp_no_fsdp", None))
-        w1_pspec = self._logical_to_mesh_axes(("embed_tensor_transpose", "mlp_no_fsdp", None))
-        wo_pspec = self._logical_to_mesh_axes(("embed_tensor_transpose", "mlp_no_fsdp", None))
       else:
         # These are the main shardings used by default - they use funky rules to AG over FSDP.
         w0_pspec = self._logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
@@ -2242,7 +2243,8 @@ class RoutedMoE(nnx.Module):
       w0_kernel = jnp.asarray(self.wi_0[...], self.dtype)
       w1_kernel = jnp.asarray(self.wi_1[...], self.dtype)
 
-    if self.per_expert_scale is not None:
+    # Only apply per expert scales if we have not fused with the out-projections at init time.
+    if self.per_expert_scale is not None and cfg.model_call_mode != "inference" and not cfg.fuse_expert_scales:
       wo_kernel = wo_kernel * jnp.asarray(self.per_expert_scale[...], self.dtype)[:, None, None]
 
     if self.wi_0_sparsity_module is not None:

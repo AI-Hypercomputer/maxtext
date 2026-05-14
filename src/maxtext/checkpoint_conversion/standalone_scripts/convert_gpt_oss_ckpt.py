@@ -37,9 +37,8 @@ import psutil
 from safetensors import safe_open
 from tqdm import tqdm
 
-from maxtext.checkpoint_conversion.standalone_scripts.llama_or_mistral_ckpt import save_weights_to_checkpoint
 from maxtext.checkpoint_conversion.standalone_scripts.convert_gpt_oss_unscanned_ckpt import MODEL_PARAMS_DICT, _hf_to_maxtext_mapping, _pt_to_np
-from maxtext.checkpoint_conversion.utils.utils import MemoryMonitorTqdm, print_peak_memory
+from maxtext.checkpoint_conversion.utils.utils import MemoryMonitorTqdm, print_peak_memory, save_weights_to_checkpoint
 from maxtext.inference.inference_utils import str2bool
 from maxtext.utils import max_logging
 

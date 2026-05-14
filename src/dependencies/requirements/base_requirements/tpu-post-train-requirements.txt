@@ -17,10 +17,12 @@ llguidance
 loguru
 lxml
 mistral_common
+model-hosting-container-standards
 openai
 openai-harmony
 papermill
 partial-json-parser
+peft
 perfetto
 prometheus-fastapi-instrumentator
 py-cpuinfo
@@ -35,6 +37,7 @@ sortedcontainers
 torchax
 torchvision
 tpu-info
+watchfiles
 xgrammar
 xprof
 yapf

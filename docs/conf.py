@@ -27,6 +27,7 @@ https://www.sphinx-doc.org/en/master/usage/configuration.html
 
 import os
 import os.path
+import re
 import sys
 import logging
 from sphinx.util import logging as sphinx_logging
@@ -42,7 +43,15 @@ project = "MaxText"
 # pylint: disable=redefined-builtin
 copyright = "2023–2026, Google LLC"
 author = "MaxText developers"
-version = os.environ.get("READTHEDOCS_VERSION", "latest")
+
+# Get version from the __init__.py file
+init_path = os.path.abspath(os.path.join(MAXTEXT_REPO_ROOT, "src", "maxtext", "__init__.py"))
+with open(init_path, "r", encoding="utf-8") as f:
+  match = re.search(r"^__version__ = ['\"]([^'\"]*)['\"]", f.read(), re.MULTILINE)
+  if match:
+    version = match.group(1)
+  else:
+    raise RuntimeError("Unable to find version string.")
 
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
@@ -86,7 +95,7 @@ myst_linkify_fuzzy_links = False
 # -- Options for autodoc ----------------------------------------------------
 autodoc_member_order = "bysource"
 autodoc_typehints = "description"
-autodoc_mock_imports = [
+packages_to_mock = [
     "safetensors",
     "tensorflow_datasets",
     "torch",
@@ -96,6 +105,12 @@ autodoc_mock_imports = [
     "librosa",
     "sentencepiece",
 ]
+autodoc_mock_imports = []
+for pkg in packages_to_mock:
+  try:
+    __import__(pkg)
+  except ImportError:
+    autodoc_mock_imports.append(pkg)
 autosummary_generate = True
 
 # Theme-specific options
@@ -122,7 +137,7 @@ exclude_patterns = [
     os.path.join("run_maxtext", "run_maxtext_via_multihost_runner.md"),
     os.path.join("reference", "core_concepts", "llm_calculator.ipynb"),
     os.path.join("reference", "api.rst"),
-    os.path.join("reference", "api_generated", "MaxText*.rst"),
+    os.path.join("reference", "api_generated", "maxtext*.rst"),
     os.path.join("reference", "api_generated", "modules.rst"),
     os.path.join("reference", "api_generated", "dependencies.github_deps.rst"),
     os.path.join("reference", "api_generated", "dependencies.github_deps.install_pre_train_deps.rst"),
@@ -167,7 +182,7 @@ linkcheck_ignore = [
     r"https://huggingface\.co/settings/tokens",
     # Ignore GitHub PRs and blobs that trigger rate limiting
     r"https://github\.com/AI-Hypercomputer/maxtext/pull/.*",
-    r"https://github\.com/google/maxtext/blob/.*",
+    r"https://github\.com/AI-Hypercomputer/maxtext/blob/.*",
 ]
 
 
@@ -209,12 +224,10 @@ def run_apidoc(_):
       os.path.join(MAXTEXT_REPO_ROOT, "src"),
       # Paths to exclude
       os.path.join(MAXTEXT_REPO_ROOT, "tests"),
-      os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "experimental"),
+      os.path.join(MAXTEXT_REPO_ROOT, "src", "maxtext", "experimental"),
       os.path.join(MAXTEXT_REPO_ROOT, "src", "maxtext", "inference"),
       os.path.join(MAXTEXT_REPO_ROOT, "src", "maxtext", "scratch_code"),
-      os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "utils", "ckpt_conversion"),
-      os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "rl"),
-      os.path.join(MAXTEXT_REPO_ROOT, "src", "MaxText", "multimodal_utils.py"),
+      os.path.join(MAXTEXT_REPO_ROOT, "src", "maxtext", "checkpoint_conversion"),
   ]
 
   # Run the command and check for errors
@@ -243,6 +256,12 @@ class FilterSphinxWarnings(logging.Filter):
     return not msg.strip().startswith(filter_out)
 
 
+def substitute_placeholders(app, docname, source):
+  result = source[0]
+  result = result.replace("{{version}}", version)
+  source[0] = result
+
+
 def setup(app):
   """Set up the Sphinx application with custom behavior."""
 
@@ -255,5 +274,4 @@ def setup(app):
   warning_handler, *_ = [h for h in logger.handlers if isinstance(h, sphinx_logging.WarningStreamHandler)]
   warning_handler.filters.insert(0, FilterSphinxWarnings(app))
 
-  if version != "latest":
-    app.tags.add("is_not_latest")
+  app.connect("source-read", substitute_placeholders)

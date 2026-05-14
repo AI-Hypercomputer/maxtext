@@ -279,7 +279,8 @@ def split_to_tiles(images: np.ndarray, num_tiles_height: int, num_tiles_width: i
 def preprocess_mm_data_llama4(images):
   """
   Pre-process image for Llama4 model. Find best resolution and split into tiles with an additional global tile.
-  Original implementation from image_processing_llama4.py: http://shortn/_VXLgQ1lmkz
+  Original implementation from image_processing_llama4.py:
+  https://github.com/huggingface/transformers/blob/28d3148b079fa50b82f4888dfcc3cd3de953f956/src/transformers/models/llama4/image_processing_llama4_fast.py
   Args:
     images: The np.array image [H, W, C] or images [N, H, W, C] to pre-process.
   Returns:

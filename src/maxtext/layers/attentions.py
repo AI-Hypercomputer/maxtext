@@ -424,7 +424,7 @@ class Attention(nnx.Module):
     self.partial_rotary_factor = partial_rotary_factor
 
     self.is_qwen2 = self.config.decoder_block == DecoderBlockType.QWEN2
-    self.is_qwen3_next = self.config.decoder_block == DecoderBlockType.QWEN3_NEXT
+    self.is_qwen3_hybrid = self.config.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5)
 
     # Module attribute names must match names previously passed to Linen for checkpointing
     self.KVCache_0 = (
@@ -522,7 +522,7 @@ class Attention(nnx.Module):
           with_scale=with_scale,
           rngs=self.rngs,
       )
-    elif self.is_qwen3_next:
+    elif self.is_qwen3_hybrid:
       self.query_norm = Qwen3NextRMSNorm(
           num_features=self.config.head_dim,
           eps=self.config.normalization_layer_epsilon,
@@ -597,7 +597,7 @@ class Attention(nnx.Module):
     in_features = self.convert_dense_general_inputs_shape(inputs_q_shape)
     out_features = (self.num_query_heads, self.head_dim)
 
-    if self.is_qwen3_next:
+    if self.is_qwen3_hybrid:
       out_features = (self.num_query_heads, self.head_dim * 2)
 
     return DenseGeneral(
@@ -715,7 +715,7 @@ class Attention(nnx.Module):
     )
     axis = (-2, -1)
 
-    if self.is_qwen3_next:
+    if self.is_qwen3_hybrid:
       in_features = self.num_query_heads * self.out_head_dim
       out_kernel_axis = ("mlp", "embed")
       axis = (-1,)
@@ -824,7 +824,7 @@ class Attention(nnx.Module):
           shard_mode=self.config.shard_mode,
           rngs=self.rngs,
       )
-    elif self.is_qwen3_next:
+    elif self.is_qwen3_hybrid:
       rotary_embedding = PartialRotaryEmbedding(
           min_timescale=self.config.rope_min_timescale,
           max_timescale=self.rope_max_timescale,
@@ -1102,7 +1102,7 @@ class Attention(nnx.Module):
         value = self.kv_projection(inputs_kv, proj_name="value", out_sharding=qkv_sharding)
 
     gate = None
-    if self.is_qwen3_next:
+    if self.is_qwen3_hybrid:
       # Split query into query & gate.
       query, gate = jnp.split(query, 2, axis=-1)
       batch_size, seq_len, _, _ = gate.shape
@@ -1111,7 +1111,7 @@ class Attention(nnx.Module):
     is_llama4_decoder_block = self.config.decoder_block == DecoderBlockType.LLAMA4
     # NOTE: llama 4 does L2 normalization after RoPE
     # Apply Qwen3Next specific RMS Norm
-    if (self.use_qk_norm and not is_llama4_decoder_block) or self.is_qwen3_next:
+    if (self.use_qk_norm and not is_llama4_decoder_block) or self.is_qwen3_hybrid:
       query = self.query_norm(query)
       key = self.key_norm(key)
 
@@ -1199,7 +1199,7 @@ class Attention(nnx.Module):
       out = self._maybe_shard_with_logical(out, self.out_axis_names)
     else:
       out = self._maybe_shard_with_logical(out, self.decode_out_axis_names)
-    if self.is_qwen3_next:
+    if self.is_qwen3_hybrid:
       out = out.reshape(batch_size, seq_len, self.config.num_query_heads * self.config.head_dim)
       out = out * jax.nn.sigmoid(gate)
     out = self.out_projection(out, out_sharding=out_sharding)

@@ -67,7 +67,7 @@ python3 -m maxtext.checkpoint_conversion.standalone_scripts.convert_deepseek_fam
 ```
 Use `convert_deepseek_family_unscanned_ckpt.py` with the same `--model_size` for the unscanned (decoding) layout.
 
-> **Note:** Pre-training / fine-tuning / decoding flows below currently reference `model_name=kimi-k2-1t`. To run those for the new variants, a parallel `src/maxtext/configs/models/<variant>.yml` must be added; the converter changes here only cover the checkpoint side.
+> **Note:** The Pre-training / fine-tuning / decoding flows below use `model_name=kimi-k2-1t`. K2-Thinking / K2.5 / K2.6 text branches share K2's architecture, so the same config works — just point `tokenizer_path` at the variant-specific HF tokenizer (e.g. `moonshotai/Kimi-K2.5`) and `load_parameters_path` at the converted checkpoint.
 
 ## Pre-training
 You can train from scratch to generate a new checkpoint. One example command to run pre-training with Kimi K2 on tpu7x-512 with 256 chips. To use **MuonClip optimizer**, you need `optax>=0.2.7` and `tokamax>=0.0.11`.

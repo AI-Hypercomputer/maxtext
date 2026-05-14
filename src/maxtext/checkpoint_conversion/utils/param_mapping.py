@@ -607,7 +607,7 @@ def QWEN_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
       or scanned with expert stacking (nested list of strings).
   """
   n_layers = config["num_hidden_layers"]
-  num_experts = config.get("num_experts", 0)
+  num_experts = config.get("num_experts", config.get("num_local_experts", 0))
 
   mapping = {
       "params-token_embedder-embedding": "model.embed_tokens.weight",
@@ -753,7 +753,7 @@ def QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, 
       transformation functions.
   """
   n_layers = config["num_hidden_layers"]
-  num_experts = config.get("num_experts", 0)
+  num_experts = config.get("num_experts", config.get("num_local_experts", 0))
 
   def pad_embedding_layer(input_tensor, target_shape):
     """Pads or truncates embedding layer to match target vocab size."""
@@ -2930,6 +2930,7 @@ PARAM_MAPPING = {
     "qwen3-14b-base": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-32b": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
     "llama3.1-8b": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "llama3.1-8b-Instruct": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
     "llama3.1-70b": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
     "llama3.1-405b": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-30b-a3b": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -2975,6 +2976,7 @@ HOOK_FNS = {
     "qwen3-14b-base": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-32b": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "llama3.1-8b": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "llama3.1-8b-Instruct": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "llama3.1-70b": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "llama3.1-405b": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-30b-a3b": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,

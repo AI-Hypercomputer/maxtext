@@ -20,10 +20,14 @@ for different hardware topologies.
 """
 
 from absl.testing import parameterized
+import jax
+from jax.experimental.serialize_executable import serialize
+import os
 import os.path
-from tempfile import gettempdir
-
+import pickle
+from jax.experimental.compilation_cache import compilation_cache
 import pytest
+from tempfile import gettempdir, NamedTemporaryFile
 import transformers
 
 
@@ -31,6 +35,13 @@ from maxtext.checkpoint_conversion.utils.hf_model_configs import DeepseekV32Conf
 from maxtext.configs import pyconfig
 from maxtext.trainers.pre_train.train_compile import main as train_compile_main
 from tests.utils.test_helpers import get_test_config_path
+
+# Enable JAX compilation cache for testing to speed up AOT compilation
+try:
+  if os.getenv("JAX_PLATFORMS") != "proxy":
+    compilation_cache.set_cache_dir(os.path.join(gettempdir(), "jax_compile_test_cache"))
+except Exception:  # pylint: disable=broad-exception-caught
+  pass
 
 
 @pytest.mark.tpu_backend
@@ -942,11 +953,11 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   @parameterized.named_parameters(
       {"testcase_name": "dot_product", "attention": "dot_product"},
       {"testcase_name": "tokamax_splash", "attention": "flash"},
   )
+  @pytest.mark.cpu_only
   def test_qk_clip(self, attention):
     """AOT test for AdamW optimizer with QK clip for DeepSeek3 Tiny model"""
     compiled_trainstep_file = "/tmp/test_qk_clip.pickle"
@@ -975,11 +986,11 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.cpu_only
   @parameterized.named_parameters(
       {"testcase_name": "consistent_rms_scaling", "muon_consistent_rms": 0.2},
       {"testcase_name": "width_scaling", "muon_consistent_rms": None},
   )
+  @pytest.mark.cpu_only
   def test_muon(self, muon_consistent_rms):
     """AOT test for Muon optimizer for DeepSeek3 Tiny model"""
     compiled_trainstep_file = "/tmp/test_muon.pickle"
@@ -1030,5 +1041,85 @@ class TrainCompile(parameterized.TestCase):
             "max_target_length=1024",
             "num_vocab_tiling=4",
             "weight_dtype=bfloat16",
+        )
+    )
+
+  @pytest.mark.cpu_only
+  def test_qwen3_5(self):
+    """AOT test for qwen3-5"""
+    compiled_trainstep_file = "/tmp/test_qwen3_5"
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-512",
+            "compile_topology_num_slices=1",
+            "model_name=qwen3.5-397b-a17b",
+            "per_device_batch_size=1.0",
+            "max_target_length=1024",
+            "sparse_matmul=True",
+            "megablox=True",
+            "attention=flash",
+            "use_tokamax_splash=True",
+        )
+    )
+
+  @pytest.mark.cpu_only
+  def test_serialization_and_deserialization_formats(self):
+    """Tests that our custom binary save/load functions work securely and legacy fallback triggers warning."""
+
+    def load_serialized_compiled_test(save_name):
+      with open(save_name, "rb") as f:
+        return f.read()
+
+    @jax.jit
+    def add_one(x):
+      return x + 1
+
+    # Compile simply on CPU
+    compiled = add_one.lower(1).compile()
+    serialized, _, _ = serialize(compiled)
+
+    # 1. Save and load JAX compiled step using secure raw binary format
+    with NamedTemporaryFile() as f_secure:
+      with open(f_secure.name, "wb") as f:
+        f.write(serialized)
+
+      loaded_compiled = load_serialized_compiled_test(f_secure.name)
+
+      # Ensure it loaded the correct JAX serialization bytes
+      assert loaded_compiled == serialized
+
+    # 2. Save and load JAX compiled step using legacy pickle format
+    with NamedTemporaryFile() as f_legacy:
+      with open(f_legacy.name, "wb") as f:
+        pickle.dump(serialized, f)
+
+      loaded_legacy = load_serialized_compiled_test(f_legacy.name)
+
+      # Ensure it loaded raw pickled bytes (starting with pickle protocol marker)
+      # and did NOT unpickle them into JAX serialization bytes.
+      assert loaded_legacy.startswith(b"\x80")
+      assert loaded_legacy != serialized
+
+  @pytest.mark.cpu_only
+  def test_zero1_optimizer_sharding(self):
+    """AOT test for Zero-1 optimizer sharding (shard_optimizer_over_data)"""
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_zero1_optimizer_sharding.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-8",
+            "compile_topology_num_slices=1",
+            "base_emb_dim=256",
+            "base_mlp_dim=256",
+            "base_num_decoder_layers=2",
+            "ici_data_parallelism=4",
+            "shard_optimizer_over_data=true",
+            "shard_mode=explicit",
         )
     )
