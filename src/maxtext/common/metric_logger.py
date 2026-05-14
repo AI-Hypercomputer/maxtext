@@ -190,9 +190,10 @@ class MetricLogger:
             f"perplexity: {perplexity:.3f}",
         ]
     )
-    if self.config.use_dpo:
-      dpo_loss = scalars.get("learning/dpo_loss", 0.0)
-      log_parts.append(f"dpo_loss: {dpo_loss:.3f}")
+    if "learning/dpo_loss" in scalars:
+      log_parts.append(f"dpo_loss: {scalars['learning/dpo_loss']:.3f}")
+    if "learning/reward_accuracy" in scalars:
+      log_parts.append(f"reward_accuracy: {scalars['learning/reward_accuracy']:.3f}")
 
     if self.config.num_experts > 1:
       moe_lb_loss = scalars.get("learning/moe_lb_loss", 0.0)
