@@ -1377,7 +1377,7 @@ def setup_initial_state(
   )
 
   # Initialization
-  with nn_partitioning.axis_rules(config.logical_axis_rules):
+  with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
     restored, raw_params = checkpointing.load_state_if_possible(
         checkpoint_manager,
         data_iterator,

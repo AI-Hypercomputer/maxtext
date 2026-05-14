@@ -1662,6 +1662,9 @@ class ElasticTraining(BaseModel):
   """
 
   elastic_enabled: bool = Field(False, description="Whether to enable elastic training.")
+  elastic_backup_kind: str = Field("snapshot", description="The kind of backup to use for elastic training: 'checkpoint' or 'snapshot'.")
+  elastic_snapshot_interval: int = Field(10, description="The interval in steps to save snapshots to host memory.")
+  elastic_new_slice_check_period: int = Field(10, description="The interval in seconds to poll for newly joined active slices.")
   elastic_timeout_seconds: int = Field(
       300,
       description=(

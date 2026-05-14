@@ -1243,6 +1243,9 @@ distill_beta_schedule: "constant"
 ##### Elastic training parameters
 # Elastic training is Pathways-specific and does not work on McJAX.
 elastic_enabled: false
+elastic_backup_kind: "snapshot"
+elastic_snapshot_interval: 10
+elastic_new_slice_check_period: 10
 elastic_timeout_seconds: 300
 elastic_max_retries: 10
 elastic_min_slice_count: -1

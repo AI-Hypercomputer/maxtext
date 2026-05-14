@@ -81,6 +81,15 @@ def record_activation_metrics(output_metrics, intermediate_outputs, config):
       output_metrics["scalar"][f"activ_stdev/layer_{layer_num:03d}"] = layer["activation_stdev"][0]
 
 
+def _pin_metrics_to_host(metrics):
+  """Pins metrics arrays to host memory."""
+  def _to_pinned_host(x):
+    if hasattr(x, "sharding"):
+      return jax.device_put(x, x.sharding.with_memory_kind("pinned_host"))
+    return x
+  return jax.tree.map(_to_pinned_host, metrics)
+
+
 class MetadataKey(enum.Enum):
   PER_DEVICE_TFLOPS = "per_device_tflops"
   PER_DEVICE_TOKENS = "per_device_tokens"
@@ -336,7 +345,33 @@ class MetricLogger:
       self.write_metrics(metrics_to_write, step_to_write)
 
     self.record_train_metrics(metrics, step, step_time_delta.total_seconds())
-    self.buffered_train_metrics = (step, metrics)
+    # Pinned host memory transfer to allow recovery from host safely without default device bindings
+    metrics_pinned = _pin_metrics_to_host(metrics)
+    self.buffered_train_metrics = (step, metrics_pinned)
+
+  def recover_metrics(self):
+    """Flushes and prints buffered metrics safely during recovery, then clears the buffer."""
+    if self.buffered_train_metrics is not None:
+      (step_to_write, metrics_to_write) = self.buffered_train_metrics
+      try:
+        # Pull loss/perplexity to print safely
+        scalars = metrics_to_write["scalar"]
+        loss = float(scalars["learning/loss"])
+        step_time = float(scalars.get("perf/step_time_seconds", 0.0))
+        max_logging.log(
+            f"[METRIC RECOVERY] Successfully recovered metrics for step {step_to_write} | Loss: {loss:.3f} | Step Time: {step_time:.3f}s"
+        )
+        # Try to write them to local/tensorboard if possible, but catch to avoid block
+        try:
+          self.write_metrics(metrics_to_write, step_to_write)
+        except Exception as e:
+          max_logging.log(f"[METRIC RECOVERY] Skipped standard flush: {e}")
+      except Exception as e:
+        max_logging.log(f"[METRIC RECOVERY] Failed to read buffered metrics: {e}")
+      
+      # Cleanly clear the buffer to prevent dead device reference errors downstream
+      self.buffered_train_metrics = None
+
 
   def record_train_metrics(self, metrics, step, step_time):
     """Records training metrics for the current step."""

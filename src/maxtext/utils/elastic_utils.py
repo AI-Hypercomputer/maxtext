@@ -84,9 +84,10 @@ def live_devices(config=None):
     ensure_elastic_manager_initialized(config)
     assert elastic_manager is not None
     # Filter devices that are in active slices
-    return [
+    active_devices = [
         d for d in jax.devices() if d is not None and getattr(d, "slice_index", 0) in elastic_manager.active_slice_indices
     ]
+    return sorted(active_devices, key=lambda d: (getattr(d, "slice_index", 0), getattr(d, "coords", ())))
   return jax.devices()
 
 
