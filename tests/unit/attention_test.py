@@ -17,6 +17,7 @@
 import itertools
 import random
 import sys
+import types
 import unittest
 from unittest import mock
 
@@ -37,7 +38,13 @@ from maxtext.common.common_types import (
     DEFAULT_MASK_VALUE,
 )
 from maxtext.layers.attention_mla import MLA
-from maxtext.layers.attention_op import ChunkedCausalMask, _generate_chunk_attention_mask, _make_bidirectional_block_mask
+from maxtext.layers import attention_op
+from maxtext.layers.attention_op import (
+    AttentionOp,
+    ChunkedCausalMask,
+    _generate_chunk_attention_mask,
+    _make_bidirectional_block_mask,
+)
 from maxtext.layers.attentions import Attention
 from maxtext.layers import embeddings
 from maxtext.configs import pyconfig
@@ -264,6 +271,106 @@ class ChunkedCausalMaskTest(unittest.TestCase):
     with self.assertRaises(ValueError):
       # pylint: disable=protected-access
       _generate_chunk_attention_mask(mask_shape=(4, 4), chunk_size=0)
+
+
+class CudnnTePackedSequenceDescriptorTest(unittest.TestCase):
+  """Tests packed Transformer Engine attention metadata handling."""
+
+  def _call_packed_attention(self, sequence_descriptor):
+    """Runs packed TE attention with fake Transformer Engine modules."""
+    sequence_descriptor.calls = []
+
+    class FakeWrappedAttention:
+
+      def lazy_init(self, *args, **kwargs):  # pylint: disable=unused-argument
+        return self
+
+      def __call__(self, *args, **kwargs):
+        del args
+        return kwargs["sequence_descriptor"]
+
+    def fake_to_nnx(*args, **kwargs):  # pylint: disable=unused-argument
+      return FakeWrappedAttention()
+
+    transformer_module = types.ModuleType("transformer_engine.jax.flax.transformer")
+    transformer_module.DotProductAttention = mock.Mock()
+    attention_module = types.ModuleType("transformer_engine.jax.attention")
+    attention_module.SequenceDescriptor = sequence_descriptor
+    fake_modules = {
+        "transformer_engine": types.ModuleType("transformer_engine"),
+        "transformer_engine.jax": types.ModuleType("transformer_engine.jax"),
+        "transformer_engine.jax.flax": types.ModuleType("transformer_engine.jax.flax"),
+        "transformer_engine.jax.flax.transformer": transformer_module,
+        "transformer_engine.jax.attention": attention_module,
+    }
+
+    config = types.SimpleNamespace(
+        context_sharding="context",
+        context_parallel_strategy="ring",
+        context_parallel_load_balance=False,
+        packing=True,
+        dataset_type="tfds",
+        max_segments_per_seq=4,
+        head_dim=2,
+        attention_kernel="cudnn_flash_te",
+    )
+    mesh = types.SimpleNamespace(shape={"context": 1})
+    attention = AttentionOp(
+        config=config,
+        mesh=mesh,
+        attention_kernel="cudnn_flash_te",
+        max_target_length=4,
+        num_query_heads=2,
+        num_kv_heads=2,
+        dtype=jnp.float32,
+    )
+    query = jnp.zeros((1, 4, 2, 2), dtype=jnp.float32)
+    key = jnp.zeros((1, 4, 2, 2), dtype=jnp.float32)
+    value = jnp.zeros((1, 4, 2, 2), dtype=jnp.float32)
+    segment_positions = jnp.arange(4, dtype=jnp.int32)[None, :]
+
+    with (
+        mock.patch.dict(sys.modules, fake_modules),
+        mock.patch.object(attention_op.nnx_wrappers, "ToNNX", side_effect=fake_to_nnx),
+    ):
+      output = attention.cudnn_flash_attention(
+          query=query,
+          key=key,
+          value=value,
+          decoder_segment_ids=None,
+          segment_positions=segment_positions,
+      )
+
+    return output, sequence_descriptor.calls
+
+  def test_packed_attention_sequence_descriptor_uses_thd_metadata_with_legacy_fallback(self):
+    class SequenceDescriptor:
+      calls = []
+      reject_thd_kwargs = False
+
+      @classmethod
+      def from_segment_ids_and_pos(cls, **kwargs):
+        cls.calls.append(kwargs)
+        if cls.reject_thd_kwargs and "is_thd" in kwargs:
+          raise TypeError("older Transformer Engine does not accept THD metadata")
+        return kwargs
+
+    output, descriptor_calls = self._call_packed_attention(SequenceDescriptor)
+
+    self.assertEqual(len(descriptor_calls), 2)
+    for call in descriptor_calls:
+      self.assertTrue(call["is_thd"])
+      self.assertFalse(call["is_segment_ids_reordered"])
+    self.assertIs(output, descriptor_calls[0])
+
+    SequenceDescriptor.reject_thd_kwargs = True
+    output, descriptor_calls = self._call_packed_attention(SequenceDescriptor)
+    self.assertEqual(len(descriptor_calls), 4)
+    self.assertIn("is_thd", descriptor_calls[0])
+    self.assertNotIn("is_thd", descriptor_calls[1])
+    self.assertIn("is_thd", descriptor_calls[2])
+    self.assertNotIn("is_thd", descriptor_calls[3])
+    self.assertIs(output, descriptor_calls[1])
 
 
 class AttentionTest(parameterized.TestCase):
