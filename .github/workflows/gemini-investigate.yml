@@ -33,11 +33,19 @@ jobs:
           REPO: ${{ github.repository }}
           BRANCH: ${{ github.event.pull_request.head.ref }}
           SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number || github.event.pull_request.number || github.event.issue.number }}
         run: |
           mkdir -p .gemini
           
           # Determine target run ID
           if [ -z "$RUN_ID" ]; then
+            # If SHA/BRANCH are missing (e.g. on issue_comment event), fetch them from PR
+            if [ -z "$SHA" ] && [ -n "$PR_NUMBER" ]; then
+              echo "Retrieving SHA and BRANCH for PR #$PR_NUMBER"
+              SHA=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq '.headRefOid' 2>/dev/null || true)
+              BRANCH=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefName --jq '.headRefName' 2>/dev/null || true)
+            fi
+            
             # Fallback to finding the latest failed run for this PR's specific commit
             if [ -n "$SHA" ]; then
               echo "Searching for failed runs for commit: $SHA"
@@ -48,12 +56,6 @@ jobs:
             if [ -z "$RUN_ID" ] && [ -n "$BRANCH" ]; then
               echo "Searching for failed runs on branch: $BRANCH"
               RUN_ID=$(gh run list --workflow "MaxText Package Tests" --status failure --branch "$BRANCH" --limit 1 --json databaseId --jq '.[0].databaseId' --repo "$REPO")
-            fi
-            
-            # Global fallback
-            if [ -z "$RUN_ID" ]; then
-              echo "Searching for latest failed run across the repository"
-              RUN_ID=$(gh run list --workflow "MaxText Package Tests" --status failure --limit 1 --json databaseId --jq '.[0].databaseId' --repo "$REPO")
             fi
           fi
           
