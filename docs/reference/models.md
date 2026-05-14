@@ -1,16 +1,16 @@
 # Models
 
-::::\{grid} 1 2 2 2
+::::{grid} 1 2 2 2
 :gutter: 2
 
-:::\{grid-item-card} 🥇 Tiering
+:::{grid-item-card} 🥇 Tiering
 :link: models/tiering
 :link-type: doc
 
 Optimized model tiers (Gold, Silver) for various TPU generations.
 :::
 
-:::\{grid-item-card} 🏗️ Supported Models
+:::{grid-item-card} 🏗️ Supported Models
 :link: models/supported_models_and_architectures
 :link-type: doc
 
