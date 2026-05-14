@@ -85,6 +85,12 @@ def copy_layernorm_weights(torch_ln, jax_ln):
   jax_ln.bias.value = jnp.array(torch_ln.bias.detach().cpu().numpy())
 
 
+def copy_rmsnorm_weights(torch_norm, jax_norm):
+  """Copy weights from PyTorch Gemma4RMSNorm to JAX RMSNorm."""
+  if hasattr(torch_norm, "weight") and hasattr(jax_norm, "scale"):
+    jax_norm.scale.value = jnp.array(torch_norm.weight.detach().cpu().numpy())
+
+
 def copy_conv2d_weights(torch_conv, jax_conv):
   """Copy weights from PyTorch Conv2d to JAX nnx.Conv."""
   # PyTorch: (out_channels, in_channels, kH, kW)
