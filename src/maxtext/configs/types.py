@@ -221,7 +221,6 @@ ModelName = Literal[
     "deepseek2-16b",
     "deepseek2-236b",
     "deepseek3-671b",
-    "deepseek3-671b-2dfsdp",
     "deepseek3-671b-batchsplit",
     "deepseek3-test",
     "deepseek3-tiny",
@@ -717,10 +716,6 @@ class MoEGeneral(BaseModel):
       False,
       description="Shard the expert dimension of the MLP weights on the FSDP axis, "
       "and recommended only when num_experts is a multiple of fsdp_parallelism",
-  )
-  use_2d_fsdp_sharding: bool = Field(
-      False,
-      description="Use `fsdp` and `fsdp_transpose` axes for 2D FSDP sharding.",
   )
   norm_topk_prob: bool = Field(
       False,
@@ -3050,13 +3045,9 @@ class MaxTextConfig(
         "tensor": self.ici_tensor_parallelism,
         "tensor_transpose": self.ici_tensor_transpose_parallelism,
         "tensor_sequence": self.ici_tensor_sequence_parallelism,
-        "model": self.ici_tensor_parallelism,
         "expert": self.ici_expert_parallelism,
         "autoregressive": self.ici_autoregressive_parallelism,
-        "attn_dp": 1,  # initialized to 1, vLLM will auto calculate this value based on TP and num_kv_heads
-        "attn_dp_expert": 1,  # initialized to 1, vLLM will auto calculate this value based on EP
     }
-    self.ici_parallelism = [ici_map[axis] for axis in self.mesh_axes]
 
     dcn_map = {
         "diloco": self.dcn_diloco_parallelism,
@@ -3070,12 +3061,37 @@ class MaxTextConfig(
         "tensor": self.dcn_tensor_parallelism,
         "tensor_transpose": self.dcn_tensor_transpose_parallelism,
         "tensor_sequence": self.dcn_tensor_sequence_parallelism,
-        "model": self.dcn_tensor_parallelism,
         "expert": self.dcn_expert_parallelism,
         "autoregressive": self.dcn_autoregressive_parallelism,
-        "attn_dp": 1,  # initialized to 1, vLLM will auto calculate this value based on TP and num_kv_heads
-        "attn_dp_expert": 1,  # initialized to 1, vLLM will auto calculate this value based on EP
     }
+
+    # Conditionally include vLLM RPA specific axes
+    if self.attention == "vllm_rpa":
+      ici_map.update(
+          {
+              "model": self.ici_tensor_parallelism,
+              "attn_dp": 1,
+              "attn_dp_expert": 1,
+          }
+      )
+      dcn_map.update(
+          {
+              "model": self.dcn_tensor_parallelism,
+              "attn_dp": 1,
+              "attn_dp_expert": 1,
+          }
+      )
+
+    # Validate that any axis with configured parallelism > 1 is present in mesh_axes
+    for axis, ici_size in ici_map.items():
+      if axis not in self.mesh_axes:
+        if ici_size > 1 or dcn_map[axis] > 1:
+          raise ValueError(
+              f"Mesh axis '{axis}' has configured parallelism > 1 "
+              f"(ici: {ici_size}, dcn: {dcn_map[axis]}) "
+              f"but is not included in self.mesh_axes: {self.mesh_axes}"
+          )
+    self.ici_parallelism = [ici_map[axis] for axis in self.mesh_axes]
     self.dcn_parallelism = [dcn_map[axis] for axis in self.mesh_axes]
 
     # Diloco params
