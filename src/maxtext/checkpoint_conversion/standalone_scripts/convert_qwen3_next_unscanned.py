@@ -38,8 +38,8 @@ import torch
 from tqdm import tqdm
 from typing import Any, Dict
 
-from maxtext.checkpoint_conversion.standalone_scripts.llama_or_mistral_ckpt import save_weights_to_checkpoint
 from maxtext.checkpoint_conversion.standalone_scripts.convert_qwen3_next_scanned import MODEL_PARAMS_DICT
+from maxtext.checkpoint_conversion.utils.utils import save_weights_to_checkpoint
 from maxtext.inference.inference_utils import str2bool
 from maxtext.utils import max_logging
 
