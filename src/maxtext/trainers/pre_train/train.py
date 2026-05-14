@@ -420,6 +420,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   z_loss = aux.get("z_loss", 0.0)
   moe_bias_updates = aux.get("moe_bias_updates")
   mtp_loss = aux.get("mtp_loss", 0.0)
+  new_opt_state = None
 
   if isinstance(model, nn.Module):
     if config.gradient_clipping_threshold > 0:
@@ -535,6 +536,13 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     else:
       model_params = nnx.state(new_state.model, nnx.Param)
       scalar_metrics["learning/param_norm"] = max_utils.l2norm_pytree(model_params)
+
+  # Surface skip-step rejections as a TB metric. Linen path only — the NNX
+  # branch doesn't apply skip-step, so new_opt_state stays None.
+  if config.skip_step_on_spikes:
+    is_skipped = new_opt_state.get("is_skipped") if isinstance(new_opt_state, dict) else None
+    if is_skipped is not None:
+      scalar_metrics["optim/step_skipped"] = is_skipped.astype(jnp.float32)
   if config.use_dpo:
     scalar_metrics["learning/dpo_loss"] = aux["dpo_loss"]
     scalar_metrics["learning/dpo_reward_accuracy"] = aux["reward_accuracy"]
