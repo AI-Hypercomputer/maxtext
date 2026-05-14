@@ -42,6 +42,7 @@ from maxtext.utils import model_creation_utils
 from maxtext.utils import max_logging
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
 from maxtext.common.common_types import Config
+from maxtext.common import profiler as profiler_lib
 from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from tunix.rl.rollout import base_rollout
 from tunix.rl.rollout.vllm_rollout import VllmRollout
@@ -156,7 +157,12 @@ def decode_with_vllm(config: Config) -> None:
       top_p=top_p,
   )
 
+  prof = profiler_lib.Profiler(config)
+  if config.profiler:
+    prof.activate()
   outputs = llm.generate(prompts, sampling_params)
+  if config.profiler:
+    prof.deactivate()
 
   # max_logging.log Outputs
   for output in outputs:

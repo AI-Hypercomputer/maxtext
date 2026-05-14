@@ -263,6 +263,7 @@ ModelName = Literal[
     "qwen3-omni-30b-a3b",
     "qwen3-custom-30b-a3b",
     "qwen3.5-397b-a17b",
+    "qwen3.5-35b-a3b",
     "gpt3-175b",
     "gpt3-22b",
     "gpt3-6b",
@@ -3137,6 +3138,7 @@ class MaxTextConfig(
       ici_map.update(
           {
               "model": self.ici_tensor_parallelism,
+              "tensor": 1,
               "attn_dp": 1,
               "attn_dp_expert": 1,
           }
@@ -3144,6 +3146,7 @@ class MaxTextConfig(
       dcn_map.update(
           {
               "model": self.dcn_tensor_parallelism,
+              "tensor": 1,
               "attn_dp": 1,
               "attn_dp_expert": 1,
           }
