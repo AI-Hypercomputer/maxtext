@@ -28,6 +28,10 @@ import maxtext.layers.normalizations as jax_norm_module
 import maxtext.layers.embeddings as jax_emb_module
 import maxtext.layers.linears as jax_linear_module
 from maxtext.layers.moe import DeepSeekV4TopKRouter, DeepSeekV4HashRouter
+from maxtext.layers import attention_compressed
+from maxtext.layers.embeddings import DeepSeekV4RotaryEmbedding, apply_rotary_pos_emb
+from maxtext.layers.normalizations import DeepSeekV4RMSNorm, DeepSeekV4UnweightedRMSNorm
+from maxtext.layers.linears import DeepSeekGroupedLinear
 
 
 # ==============================================================================
@@ -66,6 +70,7 @@ class DeepseekV4Config(PreTrainedConfig):
         "compressed_sparse_attention": 4,
         "heavily_compressed_attention": 128,
     }
+    self.compress_ratios = [128] * 43
     self.sliding_window = 128
     self.o_groups = 8
     self.o_lora_rank = 1024
@@ -74,7 +79,8 @@ class DeepseekV4Config(PreTrainedConfig):
     self.index_topk = 512
     self.rms_norm_eps = 1.0e-6
     self.attention_dropout = 0.0
-    self.layer_types = ["heavily_compressed_attention"] * 43
+    self._attn_implementation = "eager"
+    self.matmul_precision = "default"
 
     # Setup default rope parameters
     dim = int(self.head_dim * self.partial_rotary_factor)
@@ -510,7 +516,7 @@ class DeepseekV4HCACompressor_PT(nn.Module):
       position_ids: torch.Tensor,
       past_key_values: Cache | None,
       layer_idx: int,
-  ) -> torch.Tensor:
+  ) -> tuple[torch.Tensor, torch.Tensor]:
     batch, _, _ = hidden_states.shape
     cache_layer: DeepseekV4HCACache = past_key_values.layers[layer_idx] if past_key_values is not None else None
     kv = self.kv_proj(hidden_states)
@@ -535,7 +541,22 @@ class DeepseekV4HCACompressor_PT(nn.Module):
 
     if cache_layer is not None:
       compressed = cache_layer.update_compressor_states("compressor", compressed)
-    return compressed.unsqueeze(1)
+    compressed_kv = compressed.unsqueeze(1)
+
+    compressed_len = compressed_kv.shape[2]
+    seq_len = position_ids.shape[1]
+    if seq_len == 1 or compressed_len == 0:
+      return compressed_kv, None
+
+    # query `t` may only see cache entries at pos `w` t > w * compress_rate (ex: t=7, w=2 t does not attend to it).
+    entry_indices = torch.arange(compressed_len, device=compressed_kv.device)
+    causal_threshold = (position_ids + 1) // self.compress_rate  # [B, S]
+    block_bias = compressed_kv.new_zeros((batch, 1, seq_len, compressed_len))
+    block_bias = block_bias.masked_fill(
+        entry_indices.view(1, 1, 1, -1) >= causal_threshold.unsqueeze(1).unsqueeze(-1),
+        float("-inf"),
+    )
+    return compressed_kv, block_bias
 
 
 class DeepseekV4Indexer_PT(nn.Module):
@@ -644,8 +665,25 @@ class DeepseekV4Indexer_PT(nn.Module):
     scores = F.relu(scores) * self.softmax_scale
     weights = self.weights_proj(hidden_states).float() * self.weights_scaling  # [B, S, H]
     index_scores = (scores * weights.unsqueeze(-1)).sum(dim=2)  # [B, S, T]
-    topk = min(self.index_topk, compressed_kv.shape[1])
-    return index_scores.topk(topk, dim=-1).indices
+    compressed_len = compressed_kv.shape[1]
+    top_k = min(self.index_topk, compressed_len)
+
+    # not all queries can attend to the compressed entries. If a query's position
+    # is small than the relative position of the key (say m=4, query 2 cannot attend
+    # to compressed key at position 4, because it compressed info for states at position
+    # 12 to 16. Thus we need to make sure that top_k does not land in that range.
+    # Picks that still point past `causal_threshold` (early queries with too few ready
+    # blocks) are replaced with a `-1` sentinel that the compressor treats as invalid.
+    if compressed_len > 0:
+      causal_threshold = (position_ids + 1) // self.compress_rate  # [B, S]
+      entry_indices = torch.arange(compressed_len, device=index_scores.device)
+      future_mask = entry_indices.view(1, 1, -1) >= causal_threshold.unsqueeze(-1)  # [B, S, T]
+      index_scores = index_scores.masked_fill(future_mask, float("-inf"))
+      top_k_indices = index_scores.topk(top_k, dim=-1).indices  # [B, S, k]
+      invalid = top_k_indices >= causal_threshold.unsqueeze(-1)
+      return torch.where(invalid, torch.full_like(top_k_indices, -1), top_k_indices)
+
+    return index_scores.topk(top_k, dim=-1).indices
 
 
 class DeepseekV4CSACompressor_PT(nn.Module):
@@ -689,7 +727,7 @@ class DeepseekV4CSACompressor_PT(nn.Module):
       position_ids: torch.Tensor,
       past_key_values: Cache | None,
       layer_idx: int,
-  ) -> torch.Tensor:
+  ) -> tuple[torch.Tensor, torch.Tensor]:
     batch, seq_len, _ = hidden_states.shape
     cache_layer: DeepseekV4CSACache = past_key_values.layers[layer_idx] if past_key_values is not None else None
     kv = self.kv_proj(hidden_states)
@@ -742,10 +780,31 @@ class DeepseekV4CSACompressor_PT(nn.Module):
     compressed_kv = compressed.unsqueeze(1)
 
     # Lightning Indexer: gather top-`index_topk` compressed entries per query.
-    topk = self.indexer(hidden_states, q_residual, position_ids, past_key_values, layer_idx)  # [B, S, k]
-    expanded = compressed_kv.unsqueeze(2).expand(-1, -1, seq_len, -1, -1)
-    idx = topk.unsqueeze(1).unsqueeze(-1).expand(-1, 1, -1, -1, self.head_dim)
-    return torch.gather(expanded, 3, idx).reshape(batch, 1, -1, self.head_dim)
+    # in some cases, the output index can return top-k positions that should not be attended to.
+    # Ex: for query at index 5, m=4, and `index_topk=1024`, 1024 index are return but only 2 should be
+    # attended to. The indexer marks the rest with `-1`; we clamp before the gather and keep the `valid`
+    # to drop them from the per-query block mask afterwards.
+    top_k_indices = self.indexer(hidden_states, q_residual, position_ids, past_key_values, layer_idx)  # [B, S, k]
+    top_k = top_k_indices.shape[-1]
+    compressed_len = compressed_kv.shape[2]
+    valid = top_k_indices >= 0  # [B, S, k]
+    # Flatten (B, T) into one row axis and shift picks by `b * T`, then index_select once.
+    # Same kernel as an embedding lookup — cheaper than `gather` over an expanded view.
+    safe_indices = top_k_indices.clamp(min=0)
+    batch_offsets = (torch.arange(batch, device=compressed_kv.device) * compressed_len).view(batch, 1, 1)
+    flat_indices = (safe_indices + batch_offsets).view(-1)  # [B*S*k]
+    flat_kv = compressed_kv.reshape(batch * compressed_len, self.head_dim)
+    gathered = flat_kv.index_select(0, flat_indices).view(batch, 1, -1, self.head_dim)  # [B, 1, S*k, D]
+
+    # Per-query block bias: query `t` may only see the cache entries that are <= `seq_len // m`
+    # and in these, only the ones marked valid by the indexer. Everything else is `-inf`.
+    # While the above negated the indexer, here we apply the "causal" masking.
+    block_bias = gathered.new_full((batch, 1, seq_len, seq_len, top_k), float("-inf"))
+    allowed = torch.where(valid, gathered.new_zeros(()), gathered.new_full((), float("-inf")))  # [B, S, k]
+    query_indices = torch.arange(seq_len, device=gathered.device)
+    block_bias[:, 0, query_indices, query_indices, :] = allowed  # diagonal: q_idx == block_idx
+    block_bias = block_bias.view(batch, 1, seq_len, seq_len * top_k)
+    return gathered, block_bias
 
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -808,9 +867,9 @@ class DeepseekV4Attention_PT(nn.Module):
     Positional Embedding"). RoPE is also applied with position `-i` to the
     attention output's rope slice, so the contribution of each KV entry stays a
     function of the *relative* distance to the query.
-  * Per-head learnable attention sink like gpt OSS.
-  * Grouped low-rank output projection for perfs.
-  * 3 different cache mechanisms, sliding, sliding+CSA, sliding+HCA.
+    * Per-head learnable attention sink like gpt OSS.
+    * Grouped low-rank output projection for perfs.
+    * 3 different cache mechanisms, sliding, sliding+CSA, sliding+HCA.
   """
 
   def __init__(self, config: DeepseekV4Config, layer_idx: int):
@@ -818,6 +877,9 @@ class DeepseekV4Attention_PT(nn.Module):
     self.config = config
     self.layer_idx = layer_idx
     self.layer_type = config.layer_types[layer_idx]
+    # Sliding-only layers use the "main" (plain θ=10000) rope; CSA/HCA layers
+    # share the same yarn-scaled "compress" rope as their compressor.
+    self.rope_layer_type = "main" if self.layer_type == "sliding_attention" else "compress"
     self.num_heads = config.num_attention_heads
     self.num_key_value_groups = config.num_attention_heads  # single KV head, broadcast to all
     self.head_dim = config.head_dim
@@ -863,17 +925,21 @@ class DeepseekV4Attention_PT(nn.Module):
     if past_key_values is not None:  # sliding where K==V
       kv = past_key_values.update(kv, kv, self.layer_idx)[0]
 
+    block_bias = None
     if self.compressor is not None:  # Compressed KV (CSA or HCA)
-      compressed_kv = self.compressor(hidden_states, q_residual, position_ids, past_key_values, self.layer_idx)
+      compressed_kv, block_bias = self.compressor(
+          hidden_states, q_residual, position_ids, past_key_values, self.layer_idx
+      )
       kv = torch.cat([kv, compressed_kv], dim=2)
 
-    # The compressor path concatenates extra entries onto the KV axis after the
-    # standard sliding-window cache update, so a tensor `attention_mask` (built
-    # for the pre-concat KV length) needs to be right-padded to cover them.
-    # Flex-attention passes a `BlockMask` whose KV-length axis comes from its
-    # own `mask_mod`, not from a dense tensor — skip the pad in that case.
-    if isinstance(attention_mask, torch.Tensor) and kv.shape[2] > attention_mask.shape[-1]:
-      attention_mask = F.pad(attention_mask, (0, kv.shape[2] - attention_mask.shape[-1]), value=0.0)
+    # compressor returns a `block_bias` carrying per-query causality + indexer
+    # selections, which needs to be concatenated to the right of `attention_mask`.
+    # Eager/flash interfaces consume the combined mask directly.
+    if isinstance(attention_mask, torch.Tensor):
+      if block_bias is not None:
+        attention_mask = torch.cat([attention_mask, block_bias.to(attention_mask.dtype)], dim=-1)
+      elif kv.shape[2] > attention_mask.shape[-1]:
+        attention_mask = F.pad(attention_mask, (0, kv.shape[2] - attention_mask.shape[-1]), value=0.0)
 
     attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(
         self.config._attn_implementation, eager_attention_forward
@@ -990,7 +1056,7 @@ class DeepSeekV4ParityTest(unittest.TestCase):
 
     # Execute JAX equivalent target unweighted RMS normalization.
     # Target module instantiated from top-level imports to optimize namespace lookup.
-    jax_model = jax_norm_module.DeepSeekV4UnweightedRMSNorm(eps=1e-6)
+    jax_model = DeepSeekV4UnweightedRMSNorm(eps=1e-6)
     out_jax = jax_model(x_jax)
 
     # Compare outputs within numerical precision tolerance limits.
@@ -1014,7 +1080,7 @@ class DeepSeekV4ParityTest(unittest.TestCase):
 
     # Execute JAX equivalent target RMS normalization.
     # JAX model state parameters are explicitly updated to match the generated weights.
-    jax_model = jax_norm_module.DeepSeekV4RMSNorm(hidden_size=512, eps=1e-6)
+    jax_model = DeepSeekV4RMSNorm(hidden_size=512, eps=1e-6)
     jax_model.weight.value = jnp.array(weight_np)
     out_jax = jax_model(x_jax)
 
@@ -1051,11 +1117,11 @@ class DeepSeekV4ParityTest(unittest.TestCase):
     # Execute JAX equivalent target rotary embeddings.
     # The target JAX layer operates natively on [B, S, H, D] layouts, applying
     # dimensional unsqueezing at axis 2 to broadcast across heads.
-    jax_emb = jax_emb_module.DeepSeekV4RotaryEmbedding(head_dim=D, partial_rotary_factor=64.0 / 512.0, rope_theta=10000.0)
+    jax_emb = DeepSeekV4RotaryEmbedding(head_dim=D, partial_rotary_factor=64.0 / 512.0, rope_theta=10000.0)
     cos_jax, sin_jax = jax_emb(x_jax, position_ids_jax)
 
     # Execute JAX target application.
-    out_jax = jax_emb_module.apply_rotary_pos_emb(x_jax, cos_jax, sin_jax, unsqueeze_dim=2)
+    out_jax = apply_rotary_pos_emb(x_jax, cos_jax, sin_jax, unsqueeze_dim=2)
     out_jax_np = np.array(out_jax)
 
     # Compare both the intermediate cos/sin sinusoids and the final rotated values.
@@ -1091,7 +1157,7 @@ class DeepSeekV4ParityTest(unittest.TestCase):
     # Execute JAX equivalent target grouped linear block projection.
     # JAX weights are initialized using the deterministic key context.
     rngs = nnx.Rngs(42)
-    jax_model = jax_linear_module.DeepSeekGroupedLinear(
+    jax_model = DeepSeekGroupedLinear(
         in_features_per_group=i,
         out_features=o,
         n_groups=g,
@@ -1247,6 +1313,388 @@ class DeepSeekV4ParityTest(unittest.TestCase):
     np.testing.assert_allclose(py_logits.detach().numpy(), jax_logits, atol=1e-5, rtol=1e-5)
     np.testing.assert_array_equal(jax_indices, py_indices.numpy())
     np.testing.assert_allclose(py_weights.detach().numpy(), jax_weights, atol=1e-5, rtol=1e-5)
+
+  def test_hca_compressor_parity(self):
+    # Configure deterministic seeds for parity reproducibility
+    np.random.seed(42)
+    B, S, D, D_head, compress_rate = 2, 128, 512, 256, 32
+
+    # hidden_states: [B, S, D]
+    x_np = np.random.randn(B, S, D).astype(np.float32)
+    positions_np = np.broadcast_to(np.arange(S)[np.newaxis, :], (B, S)).astype(np.int32)
+
+    x_torch = torch.tensor(x_np)
+    positions_torch = torch.tensor(positions_np, dtype=torch.long)
+
+    x_jax = jnp.array(x_np)
+    positions_jax = jnp.array(positions_np)
+
+    # Initialize PyTorch configurations matching parameter spaces
+    config = DeepseekV4Config()
+    config.hidden_size = D
+    config.head_dim = D_head
+    config.compress_rates["heavily_compressed_attention"] = compress_rate
+    config.rms_norm_eps = 1e-6
+
+    # Initialize PyTorch HCA Compressor model
+    torch_model = DeepseekV4HCACompressor_PT(config)
+    torch.nn.init.normal_(torch_model.position_bias, std=0.02)
+
+    # Map JAX layer using matching parameters
+    jax_config = DeepseekV4Config()
+    jax_config.compress_ratios = [compress_rate] * 43
+    jax_config.compress_rope_theta = 160000.0
+
+    rngs = nnx.Rngs(42)
+    jax_model = attention_compressed.HCACompressor(
+        hidden_size=D,
+        head_dim=D_head,
+        config=jax_config,
+        layer_idx=0,
+        eps=1e-6,
+        rngs=rngs,
+    )
+
+    # Set JAX parameters identical to PyTorch states to guarantee numerical parity
+    jax_model.kv_proj.kernel[...] = jnp.array(torch_model.kv_proj.weight.detach().numpy().T)
+    jax_model.gate_proj.kernel[...] = jnp.array(torch_model.gate_proj.weight.detach().numpy().T)
+    jax_model.position_bias[...] = jnp.array(torch_model.position_bias.detach().numpy())
+    jax_model.kv_norm.weight[...] = jnp.array(torch_model.kv_norm.weight.detach().numpy())
+
+    # Execute PyTorch stateless compressor path
+    # Shape out_torch: [B, 1, W, D_head] where W = S // compress_rate = 4
+    out_torch, block_bias_torch = torch_model(
+        hidden_states=x_torch,
+        q_residual=None,
+        position_ids=positions_torch,
+        past_key_values=None,
+        layer_idx=0,
+    )
+    out_torch = out_torch.detach().numpy()
+    if block_bias_torch is not None:
+      block_bias_torch = block_bias_torch.detach().numpy()
+
+    # Execute JAX equivalent stateless compressor path
+    # Shape out_jax: [B, 1, W, D_head]
+    out_jax, block_bias_jax = jax_model(
+        hidden_states=x_jax,
+        position_ids=positions_jax,
+    )
+    out_jax_np = np.array(out_jax)
+    if block_bias_jax is not None:
+      block_bias_jax = np.array(block_bias_jax)
+
+    # Validate bit-accurate state outputs matching numerical tolerance thresholds
+    np.testing.assert_allclose(out_torch, out_jax_np, atol=1e-5, rtol=1e-5)
+    if block_bias_torch is not None or block_bias_jax is not None:
+      np.testing.assert_allclose(block_bias_torch, block_bias_jax, atol=1e-5, rtol=1e-5)
+
+  def test_indexer_parity(self):
+    np.random.seed(42)
+    B, S, D, D_rank = 2, 128, 512, 1024
+    num_heads, index_head_dim, index_topk, compress_rate = 64, 128, 8, 4
+
+    # hidden_states: [B, S, D]
+    x_np = np.random.randn(B, S, D).astype(np.float32)
+    # q_residual: [B, S, D_rank]
+    q_res_np = np.random.randn(B, S, D_rank).astype(np.float32)
+    # position_ids: [B, S]
+    positions_np = np.broadcast_to(np.arange(S)[np.newaxis, :], (B, S)).astype(np.int32)
+
+    x_torch = torch.tensor(x_np)
+    q_res_torch = torch.tensor(q_res_np)
+    positions_torch = torch.tensor(positions_np, dtype=torch.long)
+
+    x_jax = jnp.array(x_np)
+    q_res_jax = jnp.array(q_res_np)
+    positions_jax = jnp.array(positions_np)
+
+    # Initialize PyTorch indexer configurations
+    config = DeepseekV4Config()
+    config.hidden_size = D
+    config.q_lora_rank = D_rank
+    config.index_n_heads = num_heads
+    config.index_head_dim = index_head_dim
+    config.index_topk = index_topk
+    config.compress_rates["compressed_sparse_attention"] = compress_rate
+    config.rms_norm_eps = 1e-6
+
+    torch_model = DeepseekV4Indexer_PT(config)
+    torch.nn.init.normal_(torch_model.position_bias, std=0.02)
+
+    # Map JAX equivalent Indexer module
+    jax_config = DeepseekV4Config()
+    jax_config.index_n_heads = num_heads
+    jax_config.index_head_dim = index_head_dim
+    jax_config.index_topk = index_topk
+    jax_config.compress_ratios = [compress_rate] * 43
+    jax_config.compress_rope_theta = 160000.0
+
+    rngs = nnx.Rngs(42)
+    jax_model = attention_compressed.DeepSeekV4Indexer(
+        hidden_size=D,
+        q_lora_rank=D_rank,
+        config=jax_config,
+        layer_idx=0,
+        eps=1e-6,
+        rngs=rngs,
+    )
+
+    # Synchronize parameter values
+    jax_model.kv_proj.kernel[...] = jnp.array(torch_model.kv_proj.weight.detach().numpy().T)
+    jax_model.gate_proj.kernel[...] = jnp.array(torch_model.gate_proj.weight.detach().numpy().T)
+    jax_model.position_bias[...] = jnp.array(torch_model.position_bias.detach().numpy())
+    jax_model.kv_norm.weight[...] = jnp.array(torch_model.kv_norm.weight.detach().numpy())
+    jax_model.q_b_proj.kernel[...] = jnp.array(torch_model.q_b_proj.weight.detach().numpy().T)
+    jax_model.weights_proj.kernel[...] = jnp.array(torch_model.weights_proj.weight.detach().numpy().T)
+
+    # Execute models
+    out_torch = (
+        torch_model(
+            hidden_states=x_torch,
+            q_residual=q_res_torch,
+            position_ids=positions_torch,
+            past_key_values=None,
+            layer_idx=0,
+        )
+        .detach()
+        .numpy()
+    )
+
+    out_jax = jax_model(
+        hidden_states=x_jax,
+        q_residual=q_res_jax,
+        position_ids=positions_jax,
+    )
+    out_jax_np = np.array(out_jax)
+
+    # Check mathematical equivalence of top-k selection indices
+    np.testing.assert_allclose(out_torch, out_jax_np, atol=1e-5, rtol=1e-5)
+
+  def test_csa_compressor_parity(self):
+    np.random.seed(42)
+    B, S, D, D_rank, D_head = 2, 128, 512, 1024, 256
+    num_heads, index_head_dim, index_topk, compress_rate = 64, 128, 8, 4
+
+    # Inputs
+    x_np = np.random.randn(B, S, D).astype(np.float32)
+    q_res_np = np.random.randn(B, S, D_rank).astype(np.float32)
+    positions_np = np.broadcast_to(np.arange(S)[np.newaxis, :], (B, S)).astype(np.int32)
+
+    x_torch = torch.tensor(x_np)
+    q_res_torch = torch.tensor(q_res_np)
+    positions_torch = torch.tensor(positions_np, dtype=torch.long)
+
+    x_jax = jnp.array(x_np)
+    q_res_jax = jnp.array(q_res_np)
+    positions_jax = jnp.array(positions_np)
+
+    # Configurations
+    config = DeepseekV4Config()
+    config.hidden_size = D
+    config.q_lora_rank = D_rank
+    config.head_dim = D_head
+    config.index_n_heads = num_heads
+    config.index_head_dim = index_head_dim
+    config.index_topk = index_topk
+    config.compress_rates["compressed_sparse_attention"] = compress_rate
+    config.rms_norm_eps = 1e-6
+
+    torch_model = DeepseekV4CSACompressor_PT(config)
+    torch.nn.init.normal_(torch_model.position_bias, std=0.02)
+    torch.nn.init.normal_(torch_model.indexer.position_bias, std=0.02)
+
+    # JAX CSA Compressor
+    jax_config = DeepseekV4Config()
+    jax_config.head_dim = D_head
+    jax_config.index_n_heads = num_heads
+    jax_config.index_head_dim = index_head_dim
+    jax_config.index_topk = index_topk
+    jax_config.compress_ratios = [compress_rate] * 43
+    jax_config.compress_rope_theta = 160000.0
+
+    rngs = nnx.Rngs(42)
+    jax_model = attention_compressed.CSACompressor(
+        hidden_size=D,
+        q_lora_rank=D_rank,
+        head_dim=D_head,
+        config=jax_config,
+        layer_idx=0,
+        eps=1e-6,
+        rngs=rngs,
+    )
+
+    # Synchronize outer compressor states
+    jax_model.kv_proj.kernel[...] = jnp.array(torch_model.kv_proj.weight.detach().numpy().T)
+    jax_model.gate_proj.kernel[...] = jnp.array(torch_model.gate_proj.weight.detach().numpy().T)
+    jax_model.position_bias[...] = jnp.array(torch_model.position_bias.detach().numpy())
+    jax_model.kv_norm.weight[...] = jnp.array(torch_model.kv_norm.weight.detach().numpy())
+
+    # Synchronize inner indexer states
+    jax_model.indexer.kv_proj.kernel[...] = jnp.array(torch_model.indexer.kv_proj.weight.detach().numpy().T)
+    jax_model.indexer.gate_proj.kernel[...] = jnp.array(torch_model.indexer.gate_proj.weight.detach().numpy().T)
+    jax_model.indexer.position_bias[...] = jnp.array(torch_model.indexer.position_bias.detach().numpy())
+    jax_model.indexer.kv_norm.weight[...] = jnp.array(torch_model.indexer.kv_norm.weight.detach().numpy())
+    jax_model.indexer.q_b_proj.kernel[...] = jnp.array(torch_model.indexer.q_b_proj.weight.detach().numpy().T)
+    jax_model.indexer.weights_proj.kernel[...] = jnp.array(torch_model.indexer.weights_proj.weight.detach().numpy().T)
+
+    # Execute
+    out_torch, block_bias_torch = torch_model(
+        hidden_states=x_torch,
+        q_residual=q_res_torch,
+        position_ids=positions_torch,
+        past_key_values=None,
+        layer_idx=0,
+    )
+    out_torch = out_torch.detach().numpy()
+    if block_bias_torch is not None:
+      block_bias_torch = block_bias_torch.detach().numpy()
+
+    out_jax, block_bias_jax = jax_model(
+        hidden_states=x_jax,
+        q_residual=q_res_jax,
+        position_ids=positions_jax,
+    )
+    out_jax_np = np.array(out_jax)
+    if block_bias_jax is not None:
+      block_bias_jax = np.array(block_bias_jax)
+
+    # Diagnose indexer parity
+    topk_torch = (
+        torch_model.indexer(
+            hidden_states=x_torch,
+            q_residual=q_res_torch,
+            position_ids=positions_torch,
+            past_key_values=None,
+            layer_idx=0,
+        )
+        .detach()
+        .numpy()
+    )
+
+    topk_jax = jax_model.indexer(
+        hidden_states=x_jax,
+        q_residual=q_res_jax,
+        position_ids=positions_jax,
+    )
+    topk_jax_np = np.array(topk_jax)
+
+    print("topk_torch:", topk_torch)
+    print("topk_jax:", topk_jax_np)
+    np.testing.assert_allclose(topk_torch, topk_jax_np, atol=1e-5, rtol=1e-5)
+
+    # Check complete parity of gathered/indexed keys
+    np.testing.assert_allclose(out_torch, out_jax_np, atol=1e-5, rtol=1e-5)
+    if block_bias_torch is not None or block_bias_jax is not None:
+      np.testing.assert_allclose(block_bias_torch, block_bias_jax, atol=1e-5, rtol=1e-5)
+
+  def test_attention_layer_parity(self):
+    np.random.seed(42)
+    B, S, D, D_rank, D_head, num_heads = 2, 128, 512, 1024, 256, 16
+    compress_rate = 32
+
+    # Inputs
+    x_np = np.random.randn(B, S, D).astype(np.float32)
+    position_ids_np = np.broadcast_to(np.arange(S)[np.newaxis, :], (B, S)).astype(np.int32)
+
+    x_torch = torch.tensor(x_np)
+    position_ids_torch = torch.tensor(position_ids_np, dtype=torch.long)
+
+    x_jax = jnp.array(x_np)
+    position_ids_jax = jnp.array(position_ids_np)
+
+    # Configurations
+    config = DeepseekV4Config()
+    config.hidden_size = D
+    config.q_lora_rank = D_rank
+    config.head_dim = D_head
+    config.num_attention_heads = num_heads
+    config.num_key_value_heads = 1
+    config.compress_rates["heavily_compressed_attention"] = compress_rate
+    config.rms_norm_eps = 1e-6
+    config.layer_types = ["heavily_compressed_attention"] * 10
+
+    # Generate reference position embeddings (cos, sin)
+    torch_emb = DeepseekV4RotaryEmbedding_PT(config)
+    cos_torch, sin_torch = torch_emb(x_torch, position_ids_torch, layer_type="main")
+
+    cos_jax = jnp.array(cos_torch.detach().numpy())
+    sin_jax = jnp.array(sin_torch.detach().numpy())
+
+    # Initialize PyTorch and JAX coordinate attention layers
+    torch_model = DeepseekV4Attention_PT(config, layer_idx=0)
+    torch.nn.init.normal_(torch_model.sinks, std=0.02)
+    if torch_model.compressor is not None:
+      torch.nn.init.normal_(torch_model.compressor.position_bias, std=0.02)
+
+    jax_config = DeepseekV4Config()
+    jax_config.hidden_size = D
+    jax_config.q_lora_rank = D_rank
+    jax_config.head_dim = D_head
+    jax_config.num_attention_heads = num_heads
+    jax_config.compress_ratios = [compress_rate] * 10
+    jax_config.compress_rope_theta = 160000.0
+    jax_config.layer_types = ["heavily_compressed_attention"] * 10
+    jax_config.o_groups = config.o_groups
+    jax_config.o_lora_rank = config.o_lora_rank
+
+    rngs = nnx.Rngs(42)
+    jax_model = attention_compressed.DeepSeekV4Attention(
+        hidden_size=D,
+        q_lora_rank=D_rank,
+        head_dim=D_head,
+        num_heads=num_heads,
+        config=jax_config,
+        layer_idx=0,
+        eps=1e-6,
+        rngs=rngs,
+    )
+
+    # Copy projections and normalize weights from PyTorch to JAX
+    jax_model.q_a_proj.kernel[...] = jnp.array(torch_model.q_a_proj.weight.detach().numpy().T)
+    jax_model.q_a_norm.weight[...] = jnp.array(torch_model.q_a_norm.weight.detach().numpy())
+    jax_model.q_b_proj.kernel[...] = jnp.array(torch_model.q_b_proj.weight.detach().numpy().T)
+
+    jax_model.kv_proj.kernel[...] = jnp.array(torch_model.kv_proj.weight.detach().numpy().T)
+    jax_model.kv_norm.weight[...] = jnp.array(torch_model.kv_norm.weight.detach().numpy())
+
+    # Handle Grouped Output Projection mapping
+    w_o_a_np = torch_model.o_a_proj.weight.detach().numpy()
+    in_features_per_group = num_heads * D_head // config.o_groups
+    w_o_a_np = w_o_a_np.reshape(config.o_groups, -1, in_features_per_group).transpose(0, 2, 1)
+    jax_model.o_a_proj.weight[...] = jnp.array(w_o_a_np)
+
+    jax_model.o_b_proj.kernel[...] = jnp.array(torch_model.o_b_proj.weight.detach().numpy().T)
+    jax_model.sinks[...] = jnp.array(torch_model.sinks.detach().numpy())
+
+    # Copy Compressor weights if present
+    if torch_model.compressor is not None:
+      jax_model.compressor.kv_proj.kernel[...] = jnp.array(torch_model.compressor.kv_proj.weight.detach().numpy().T)
+      jax_model.compressor.gate_proj.kernel[...] = jnp.array(torch_model.compressor.gate_proj.weight.detach().numpy().T)
+      jax_model.compressor.position_bias[...] = jnp.array(torch_model.compressor.position_bias.detach().numpy())
+      jax_model.compressor.kv_norm.weight[...] = jnp.array(torch_model.compressor.kv_norm.weight.detach().numpy())
+
+    # Execute PyTorch attention layer
+    out_torch, _ = torch_model(
+        hidden_states=x_torch,
+        position_embeddings=(cos_torch, sin_torch),
+        position_ids=position_ids_torch,
+        attention_mask=None,
+    )
+    out_torch_np = out_torch.detach().numpy()
+
+    # Execute JAX attention layer
+    out_jax, _ = jax_model(
+        hidden_states=x_jax,
+        cos=cos_jax,
+        sin=sin_jax,
+        position_ids=position_ids_jax,
+        attention_mask=None,
+    )
+    out_jax_np = np.array(out_jax)
+
+    # Check complete numerical parity of coordination attention layers
+    np.testing.assert_allclose(out_torch_np, out_jax_np, atol=1e-5, rtol=1e-5)
 
 
 if __name__ == "__main__":

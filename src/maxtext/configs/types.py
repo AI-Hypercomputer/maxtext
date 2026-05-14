@@ -618,6 +618,22 @@ class AttentionIndexer(BaseModel):
   indexer_loss_scaling_factor: float = Field(0.0, description="Multiplier for the indexer KL divergence loss.")
 
 
+class DeepSeekV4AttentionConfig(BaseModel):
+  """Configuration specific to DeepSeek-V4 stateless compressed attention layers."""
+
+  compress_rope_theta: float = Field(160000.0, description="Theta base frequency for long-range compressor layers.")
+  compress_ratios: list[int] = Field(
+      default_factory=list,
+      description="Layer-by-layer compressor rates (0: standard, 4: CSA, 128: HCA).",
+  )
+  index_head_dim: int = Field(128, description="Head dim for indexer query and key.")
+  index_n_heads: int = Field(64, description="Number of query heads in indexer.")
+  index_topk: int = Field(512, description="Number of tokens selected by indexer.")
+  o_groups: int = Field(8, description="Number of group partitions for grouped linear output projection.")
+  o_lora_rank: int = Field(1024, description="Low-rank output dimension prior to grouped mix projection.")
+  sliding_window: int = Field(128, description="Sliding window size for attention.")
+
+
 class Llama4Attention(BaseModel):
   """Configuration specific to Llama4-style models."""
 
@@ -2224,6 +2240,7 @@ class MaxTextConfig(
     MlaAttention,
     MoBa,
     AttentionIndexer,
+    DeepSeekV4AttentionConfig,
     Llama4Attention,
     SplashAttention,
     PagedAttention,
