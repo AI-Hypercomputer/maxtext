@@ -17,10 +17,13 @@
 from typing import Any
 import jax
 import jax.numpy as jnp
+from jax.sharding import Mesh
 from flax import nnx
 from maxtext.layers.embeddings import DeepSeekV4RotaryEmbedding, apply_rotary_pos_emb
 from maxtext.layers.normalizations import DeepSeekV4RMSNorm, DeepSeekV4UnweightedRMSNorm
 from maxtext.layers.linears import DeepSeekGroupedLinear
+from maxtext.layers.attention_op import AttentionOp
+from maxtext.common.common_types import MODEL_MODE_TRAIN, AttentionType
 
 
 class HCACompressor(nnx.Module):
@@ -761,6 +764,7 @@ class DeepSeekV4Attention(nnx.Module):
       num_heads: int,
       config: Any,
       layer_idx: int,
+      mesh: Mesh | None = None,
       eps: float = 1e-6,
       weight_dtype: Any = jnp.float32,
       dtype: Any = jnp.float32,
@@ -902,6 +906,23 @@ class DeepSeekV4Attention(nnx.Module):
         rope_theta=self.rope_theta,
     )
 
+    # Scaling factor applied to query representations to match standard MaxText attention scaling.
+    # MaxText's AttentionOp core expects queries to be pre-scaled by 1 / sqrt(head_dim).
+    self.scaling = self.head_dim**-0.5
+
+    self.attention_op = AttentionOp(
+        config=self.config,
+        mesh=mesh,
+        attention_kernel=self.config.attention,
+        max_target_length=self.config.max_target_length,
+        num_query_heads=self.num_heads,
+        num_kv_heads=1,
+        dtype=self.dtype,
+        compute_axis_order=(0, 1, 2, 3),
+        attention_type=AttentionType.FULL,
+        rngs=rngs,
+    )
+
   def __call__(
       self,
       hidden_states: jnp.ndarray | None = None,
@@ -911,115 +932,137 @@ class DeepSeekV4Attention(nnx.Module):
       inputs_kv: jnp.ndarray | None = None,
       **kwargs,
   ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    if hidden_states is None:
-      hidden_states = inputs_q
-    """Executes DeepSeek-V4 compressed multi-head attention.
+    """Executes the main coordination attention pass over sequence inputs.
 
-    This method projects input states to query representations, applies low-rank
-    LoRA, normalizes and applies positional RoPE, creates shared multi-query key-value
-    configurations, expands local context windows using structural compressors (if present),
-    calculates multi-head attention logits, applies structural masks and learnable
-    sinks, computes stable attention probabilities, and mixes final attention outputs
-    using parallel block-diagonal grouped projections.
+    This method coordinates multi-head attention augmented with query-compression LoRA
+    projections, unweighted key/value normalizations, long-range context compressor
+    integrations, learnable attention sinks, and parallelized grouped output mixing.
 
     Args:
-      hidden_states: The input hidden representation sequence of shape [B, S, D_model].
-      position_ids: Absolute sequence position identifiers of shape [B, S].
-      attention_mask: Optional attention mask of shape [B, 1, S, S_kv].
+      hidden_states: Input sequence representations of shape [B, S, D_model].
+      position_ids: Sequence absolute position identifiers of shape [B, S].
+      attention_mask: Optional attention mask preventing invalid token attendance.
+      inputs_q: Optional query input override for decoupled execution.
+      inputs_kv: Optional key/value input override for decoupled execution.
+      **kwargs: Additional runtime execution configurations (e.g., decoder_segment_ids).
 
     Returns:
-      A tuple containing:
-        - The projected mixed output sequence tensor of shape [B, S, D_model].
-        - The final multi-head attention weights of shape [B, H, S, S_kv].
+      Tuple containing the projected output representations of shape [B, S, D_model]
+      and an empty caching intermediate placeholder.
     """
-    # hidden_states shape: [B, S, D_model]
-    # position_ids shape: [B, S]
-    # attention_mask shape: [B, 1, S_q, S_kv]
+    # Resolve input representations from standard hidden states or override inputs.
+    # hidden_states: [B, S, D_model]
+    if hidden_states is None:
+      hidden_states = inputs_q
     batch, seq_len, _ = hidden_states.shape
-    # Unconditionally compute RoPE positional frequency embeddings locally from position IDs.
+
+    # Generate absolute position identifiers if not provided at runtime.
+    # position_ids: [B, S]
     if position_ids is None:
-      # [B, S] position sequence index grid broadcast
       position_ids = jnp.broadcast_to(jnp.arange(seq_len, dtype=jnp.int32)[None], (batch, seq_len))
-    # cos/sin shape: [B, S, qk_rope_head_dim / 2]
-    cos, sin = self.rotary_embedding(hidden_states, position_ids)
 
-    h_shape = (batch, seq_len, self.num_heads, self.head_dim)
+    # Resolve rotary position embedding sinusoids from runtime keyword arguments or compute local sinusoids.
+    # Utilizing pre-computed sinusoids avoids redundant computation across decoder layers during forward passes.
+    # cos: [B, S, D_rope/2]
+    # sin: [B, S, D_rope/2]
+    cos = kwargs.get("cos", None)
+    sin = kwargs.get("sin", None)
+    if cos is None or sin is None:
+      cos, sin = self.rotary_embedding(hidden_states, position_ids)
 
-    # Project inputs to query representations
-    # q_residual: [B, S, D_rank]
+    # Project input features to low-rank query residuals and apply RMS normalization.
+    # # [B, S, D_model] -> [B, S, D_rank]
     q_residual = self.q_a_norm(self.q_a_proj(hidden_states))
-    # q: [B, H, S, D_head]
-    q = self.q_b_proj(q_residual).reshape(h_shape).transpose(0, 2, 1, 3)
-    q = self.q_b_norm(q)
-    # q: [B, H, S, D_head]
-    q = apply_rotary_pos_emb(q, cos, sin, unsqueeze_dim=1)
 
-    # Project inputs to key/value representation
-    # kv: [B, 1, S, D_head]
-    kv = self.kv_norm(self.kv_proj(hidden_states)).reshape(batch, seq_len, 1, self.head_dim).transpose(0, 2, 1, 3)
-    # kv: [B, 1, S, D_head]
-    kv = apply_rotary_pos_emb(kv, cos, sin, unsqueeze_dim=1)
+    # Project low-rank residuals to multi-head query dimensions and reshape.
+    # # [B, S, D_rank] -> [B, S, H, D_head]
+    q = self.q_b_proj(q_residual).reshape(batch, seq_len, self.num_heads, self.head_dim)
 
+    # Apply scale-free unweighted RMS normalization across multi-head queries and scale by attention scaling factor.
+    # Unweighted normalization stabilizes query variance without introducing learnable scaling parameters.
+    # MaxText's AttentionOp core assumes pre-scaled query tensors, requiring explicit scaling here.
+    # # [B, S, H, D_head] -> [B, S, H, D_head]
+    q = self.q_b_norm(q) * self.scaling
+
+    # Apply Rotary Position Embedding (RoPE) to query representations.
+    # # [B, S, H, D_head] -> [B, S, H, D_head]
+    q = apply_rotary_pos_emb(q, cos, sin, unsqueeze_dim=2)
+
+    # Project input representations to shared key/value features and apply RMS normalization.
+    # # [B, S, D_model] -> [B, S, 1, D_head]
+    kv = self.kv_norm(self.kv_proj(hidden_states)).reshape(batch, seq_len, 1, self.head_dim)
+
+    # Apply Rotary Position Embedding (RoPE) to shared key/value representations.
+    # # [B, S, 1, D_head] -> [B, S, 1, D_head]
+    kv = apply_rotary_pos_emb(kv, cos, sin, unsqueeze_dim=2)
+
+    # Integrate long-range context compressor representations if configured.
     block_bias = None
-    # Apply compressed attention key-value generation path
     if self.compressor is not None:
-      # compressed_kv: [B, 1, W, D_head] or [B, 1, S*k, D_head]
-      # block_bias: [B, 1, S, W] or [B, 1, S, S*k]
+      # Execute compressor pass to extract compressed key/value blocks and structural block bias masks.
+      # compressed_kv: [B, 1, W, D_head] or [B, W, 1, D_head]
+      # block_bias: [B, 1, S, W] or [B, S, W]
       compressed_kv, block_bias = self.compressor(hidden_states, q_residual, position_ids)
-      # kv: [B, 1, S + W, D_head] or [B, 1, S + S*k, D_head]
-      kv = jnp.concatenate([kv, compressed_kv], axis=2)
 
-    # Broadcast key/value configurations to all heads
-    # k: [B, H, S_kv, D_head]
-    k = jnp.repeat(kv, self.num_heads, axis=1)
-    # v: [B, H, S_kv, D_head]
-    v = jnp.repeat(kv, self.num_heads, axis=1)
+      # Standardize compressed key/value layout to match multi-head sequence formats.
+      # # [B, 1, W, D_head] -> [B, W, 1, D_head]
+      if compressed_kv.shape[1] == 1:
+        compressed_kv = compressed_kv.transpose(0, 2, 1, 3)
 
-    # Compute attention logits
-    # logits: [B, H, S, S_kv]
-    logits = jnp.einsum("bhsd, bhkd -> bhsk", q, k, precision=self.config.matmul_precision) * self.scaling
+      # Concatenate local sequence keys with compressed long-range cache blocks along sequence dimension.
+      # # [B, S, 1, D_head] + [B, W, 1, D_head] -> [B, S + W, 1, D_head]
+      kv = jnp.concatenate([kv, compressed_kv], axis=1)
 
-    # Apply attention mask addition and block bias concatenation
+    # Reconcile structural block bias masks with runtime attention masks.
     if attention_mask is not None:
       if block_bias is not None:
+        # Concatenate block bias mask to attention mask along trailing sequence dimension.
+        # # [B, 1, S, S] + [B, 1, S, W] -> [B, 1, S, S + W]
         attention_mask = jnp.concatenate([attention_mask, block_bias.astype(attention_mask.dtype)], axis=-1)
-      elif kv.shape[2] > attention_mask.shape[-1]:
-        pad_width = kv.shape[2] - attention_mask.shape[-1]
+      elif kv.shape[1] > attention_mask.shape[-1]:
+        # Pad attention mask with zero-value allowed elements to match extended key/value sequence length.
+        # # [B, 1, S, S] -> [B, 1, S, S + W]
+        pad_width = kv.shape[1] - attention_mask.shape[-1]
         attention_mask = jnp.pad(attention_mask, ((0, 0), (0, 0), (0, 0), (0, pad_width)), constant_values=0.0)
-      logits = logits + attention_mask
 
-    # Concatenate learnable attention sinks
-    # sinks: [1, H, 1, 1] -> [B, H, S, 1]
-    sinks = self.sinks.value.reshape(1, -1, 1, 1)
-    sinks = jnp.broadcast_to(sinks, (batch, self.num_heads, seq_len, 1))
-    # combined_logits: [B, H, S, S_kv + 1]
-    combined_logits = jnp.concatenate([logits, sinks], axis=-1)
+    # Squeeze redundant head dimension from 4D attention masks to ensure compatibility with AttentionOp core.
+    # # [B, 1, S, S + W] -> [B, S, S + W]
+    unified_mask = (
+        jnp.squeeze(attention_mask, axis=1) if attention_mask is not None and attention_mask.ndim == 4 else attention_mask
+    )
 
-    # Stable Softmax projection
-    combined_logits = combined_logits - jnp.max(combined_logits, axis=-1, keepdims=True)
-    probs = jax.nn.softmax(combined_logits, axis=-1)
-    # Drop sinks representation column
-    # attn_weights: [B, H, S, S_kv]
-    attn_weights = probs[..., :-1]
+    # Execute core attention operator pass over query and concatenated key/value sequences.
+    # # q: [B, S, H, D_head], kv: [B, S + W, 1, D_head] -> [B, S, H, D_head]
+    attn_output = self.attention_op(
+        query=q,
+        key=kv,
+        value=kv,
+        decoder_segment_ids=kwargs.get("decoder_segment_ids", None),
+        inputs_positions=position_ids,
+        model_mode=kwargs.get("model_mode", MODEL_MODE_TRAIN),
+        indexer_mask=unified_mask,
+        sinks=self.sinks,
+    )
 
-    # Project attention weights onto values
-    # attn_output: [B, H, S, D_head]
-    attn_output = jnp.einsum("bhsk, bhkd -> bhsd", attn_weights, v, precision=self.config.matmul_precision)
+    # Apply conjugate RoPE rotation (-sin) to attention outputs to un-rotate representations.
+    # Un-rotating aligns output feature spaces prior to multi-head mixing projections.
+    # # [B, S, H, D_head] -> [B, S, H, D_head]
+    attn_output = apply_rotary_pos_emb(attn_output, cos, -sin, unsqueeze_dim=2)
 
-    # Apply conjugate RoPE transformation to restore position invariants
-    attn_output = apply_rotary_pos_emb(attn_output, cos, -sin, unsqueeze_dim=1)
+    # Reshape attention outputs into block-diagonal output groups.
+    # # [B, S, H, D_head] -> [B, S, o_groups, H * D_head / o_groups]
+    grouped = attn_output.reshape(batch, seq_len, self.config.o_groups, -1)
 
-    # Map outputs to grouped linear configuration
-    # grouped: [B, S, o_groups, (H / o_groups) * D_head]
-    grouped = attn_output.transpose(0, 2, 1, 3).reshape(batch, seq_len, self.config.o_groups, -1)
-    # grouped: [B, S, o_groups, o_lora_rank]
+    # Apply block-diagonal grouped linear projections to mix intra-group features.
+    # # [B, S, o_groups, H * D_head / o_groups] -> [B, S, o_groups, o_lora_rank]
     grouped = self.o_a_proj(grouped)
-    # Flatten back to grouped rank representations
-    # grouped_flat: [B, S, o_groups * o_lora_rank]
+
+    # Flatten grouped representations into a unified feature vector per sequence position.
+    # # [B, S, o_groups, o_lora_rank] -> [B, S, o_groups * o_lora_rank]
     grouped_flat = grouped.reshape(batch, seq_len, -1)
 
-    # Final linear projection to hidden dimension space
-    # output: [B, S, D_model]
+    # Project mixed representations back to global model hidden dimension.
+    # # [B, S, o_groups * o_lora_rank] -> [B, S, D_model]
     output = self.o_b_proj(grouped_flat)
 
-    return output, attn_weights
+    return output, None

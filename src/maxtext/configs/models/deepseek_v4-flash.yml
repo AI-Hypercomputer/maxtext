@@ -40,6 +40,8 @@ norm_topk_prob: True
 decoder_block: "deepseek_v4"
 pure_nnx_decoder: True
 enable_nnx: True
+use_tokamax_splash: True
+remat_policy: minimal_offloaded
 
 # Manifold-Constrained Hyper-Connection configurations
 mhc_expansion_rate: 4

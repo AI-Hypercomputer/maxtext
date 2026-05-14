@@ -1833,6 +1833,8 @@ class DeepSeekV4ParityTest(unittest.TestCase):
         o_lora_rank=config.o_lora_rank,
     )
 
+    devices = jax.devices()
+    mesh = Mesh(np.array(devices), ("data",))
     rngs = nnx.Rngs(42)
     jax_model = attention_compressed.DeepSeekV4Attention(
         hidden_size=D,
@@ -1841,6 +1843,7 @@ class DeepSeekV4ParityTest(unittest.TestCase):
         num_heads=num_heads,
         config=jax_config,
         layer_idx=0,
+        mesh=mesh,
         eps=1e-6,
         attention_type="heavily_compressed_attention",
         rngs=rngs,

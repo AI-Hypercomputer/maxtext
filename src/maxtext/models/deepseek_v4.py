@@ -150,6 +150,7 @@ class DeepSeekV4DecoderLayer(nnx.Module):
         num_heads=num_heads,
         config=config,
         layer_idx=layer_idx,
+        mesh=self.mesh,
         eps=self.config.normalization_layer_epsilon,
         weight_dtype=self.config.weight_dtype,
         dtype=self.config.dtype,
