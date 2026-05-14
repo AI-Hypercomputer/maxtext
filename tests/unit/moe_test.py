@@ -29,6 +29,7 @@ from maxtext.layers import moe
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.initializers import NdInitializer, nd_dense_init, variable_to_logically_partitioned
 from maxtext.layers.quantizations import Fp8Quantization
+from maxtext.models import deepseek_batchsplit
 from maxtext.utils import maxtext_utils
 from tests.utils.test_helpers import get_test_config_path, get_decoupled_parallelism_overrides
 import pytest
@@ -603,8 +604,125 @@ class RoutedMoeTest(unittest.TestCase):
       actual_output, _, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
       self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
 
+  def _run_ragged_sort_loss_and_grad(self, use_ring_of_experts: bool):
+    """Loss and gradient correctness for the use_ragged_sort flag.
+
+    Compares an EP run with use_ragged_sort=True against the same
+    configuration with use_ragged_sort=False, sharing the same model variables
+    and inputs. Both the scalar loss and the full pytree of parameter
+    gradients must match within bf16 tolerance.
+    """
+
+    def _build_cfg(use_ragged_sort: bool):
+      return pyconfig.initialize(
+          [None, get_test_config_path()],
+          run_name=(f"moe_block_use_ragged_sort_{use_ragged_sort}" f"_ring_{use_ring_of_experts}_test"),
+          enable_checkpointing=False,
+          model_name="mixtral-8x7b",
+          dtype="bfloat16",
+          megablox=True,
+          sparse_matmul=True,
+          per_device_batch_size=4,  # TODO(b/450900273): sharding error if pdbs=1
+          ici_expert_parallelism=2,
+          use_ring_of_experts=use_ring_of_experts,
+          ici_tensor_parallelism=2,
+          max_target_length=128,
+          use_ragged_sort=use_ragged_sort,
+      )
+
+    def _build_model(cfg, mesh):
+      return moe.get_routed_moe(
+          name="MoeBlock",
+          config=cfg,
+          num_experts=cfg.num_experts,
+          num_experts_per_tok=cfg.num_experts_per_tok,
+          mesh=mesh,
+          kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+          kernel_axes=("embed", "mlp"),
+          intermediate_dim=cfg.mlp_dim,
+          dtype=cfg.dtype,
+      )
+
+    def _loss_and_grad(model, variables, hidden_states):
+      def loss_fn(params, x):
+        out, lb_loss, _ = model.apply({"params": params}, x)
+        loss = jnp.mean(out.astype(jnp.float32) ** 2)
+        if lb_loss is not None:
+          loss = loss + lb_loss.astype(jnp.float32)
+        return loss
+
+      return jax.jit(jax.value_and_grad(loss_fn, argnums=(0, 1)))(variables["params"], hidden_states)
+
+    rng = jax.random.PRNGKey(2345)
+    rng_model, rng_hidden_states = jax.random.split(rng)
+    device_count = jax.device_count()
+
+    # Reference run: use_ragged_sort=False.
+    cfg_ref = _build_cfg(use_ragged_sort=False)
+    hidden_states = jax.random.uniform(
+        rng_hidden_states,
+        (int(cfg_ref.per_device_batch_size) * device_count, cfg_ref.max_target_length, cfg_ref.base_emb_dim),
+        dtype=cfg_ref.dtype,
+    )
+    devices_array_ref = maxtext_utils.create_device_mesh(cfg_ref)
+    mesh_ref = Mesh(devices_array_ref, cfg_ref.mesh_axes)
+    model_ref = _build_model(cfg_ref, mesh_ref)
+    with nn_partitioning.axis_rules(cfg_ref.logical_axis_rules):
+      variables = model_ref.init({"params": rng_model, "dropout": rng_model}, hidden_states)
+      loss_ref, (grads_ref, x_grad_ref) = _loss_and_grad(model_ref, variables, hidden_states)
+
+    # Target run: use_ragged_sort=True, sharing variables with the reference.
+    cfg_rs = _build_cfg(use_ragged_sort=True)
+    devices_array_rs = maxtext_utils.create_device_mesh(cfg_rs)
+    mesh_rs = Mesh(devices_array_rs, cfg_rs.mesh_axes)
+    model_rs = _build_model(cfg_rs, mesh_rs)
+    with nn_partitioning.axis_rules(cfg_rs.logical_axis_rules):
+      loss_rs, (grads_rs, x_grad_rs) = _loss_and_grad(model_rs, variables, hidden_states)
+
+    # Loss correctness.
+    self.assertTrue(
+        jnp.allclose(loss_rs, loss_ref, rtol=1e-2, atol=1e-2),
+        msg=f"Loss mismatch: ragged={loss_rs} ref={loss_ref}",
+    )
+
+    # Hidden-state gradient correctness. This is the cotangent that flows
+    # through `gather_tokens_locally`'s custom_vjp backward (the kernel under
+    # test). Without checking this, DCE removes the bwd entirely.
+    self.assertEqual(x_grad_ref.shape, x_grad_rs.shape, "Hidden-state grad shape mismatch")
+    self.assertTrue(
+        jnp.allclose(x_grad_rs.astype(jnp.float32), x_grad_ref.astype(jnp.float32), rtol=1e-2, atol=1e-2),
+        msg=(
+            "Hidden-state gradient mismatch: max abs diff="
+            f"{jnp.max(jnp.abs(x_grad_rs.astype(jnp.float32) - x_grad_ref.astype(jnp.float32)))}"
+        ),
+    )
+
+    # Gradient correctness across the full pytree.
+    leaves_ref, treedef_ref = jax.tree_util.tree_flatten(grads_ref)
+    leaves_rs, treedef_rs = jax.tree_util.tree_flatten(grads_rs)
+    self.assertEqual(treedef_ref, treedef_rs, "Gradient pytree structures differ")
+    for i, (g_ref, g_rs) in enumerate(zip(leaves_ref, leaves_rs)):
+      self.assertEqual(g_ref.shape, g_rs.shape, f"Grad shape mismatch at leaf {i}")
+      self.assertTrue(
+          jnp.allclose(g_rs.astype(jnp.float32), g_ref.astype(jnp.float32), rtol=1e-2, atol=1e-2),
+          msg=(
+              f"Gradient mismatch at leaf {i} (shape={g_ref.shape}): "
+              f"max abs diff={jnp.max(jnp.abs(g_rs.astype(jnp.float32) - g_ref.astype(jnp.float32)))}"
+          ),
+      )
+
+  @pytest.mark.tpu_only
+  def test_ragged_sort_loss_and_grad_ring_of_experts(self):
+    self._run_ragged_sort_loss_and_grad(use_ring_of_experts=True)
+
+  @pytest.mark.tpu_only
+  @pytest.mark.skip(reason="Ragged sort currently only supports use ring of experts.")
+  def test_ragged_sort_loss_and_grad_no_ring_of_experts(self):
+    self._run_ragged_sort_loss_and_grad(use_ring_of_experts=False)
+
   @pytest.mark.tpu_only
   def test_moe_fsdp_two_stage_parallelism_tpu_only(self):
+
     cfg = pyconfig.initialize(
         [None, get_test_config_path()],
         run_name="moe_block_megablox_ep_test",
@@ -1400,6 +1518,70 @@ class FusedMoeTPUTest(unittest.TestCase):
     )
     self.assertIsNone(lb_loss)
     self.assertIsNone(bias_updates)
+
+
+class DeepSeekBatchSplitRaggedSortTest(unittest.TestCase):
+  """Tests `use_ragged_sort` plumbing in `deepseek_batchsplit`.
+
+  The `unroute_ubatch_shard_mapped` / `unroute_ubatch_remat_and_bwd_shard_mapped`
+  wrappers are the call sites where a missing `use_ragged_sort` kwarg blew up
+  at runtime. These tests pin the kwarg in place and verify numerical
+  equivalence between the dense (`use_ragged_sort=False`) and ragged
+  (`use_ragged_sort=True`) paths through `route` / `unroute` in
+  `deepseek_batchsplit`. The ragged kernels fall back to JAX when SparseCore is
+  unavailable, so this is CPU-friendly.
+  """
+
+  def _make_inputs(self, num_tokens=8, topk=4, hidden=16, num_experts=8, seed=0):
+    rng = np.random.RandomState(seed)
+    tokens = rng.normal(size=(num_tokens * topk, hidden)).astype(np.float32)
+    selected = np.stack(
+        [rng.choice(num_experts, size=topk, replace=False) for _ in range(num_tokens)],
+        axis=0,
+    ).astype(np.int32)
+    return jnp.asarray(tokens), jnp.asarray(selected)
+
+  def test_unroute_ubatch_fn_kwargs_and_match(self):
+    """Direct call: `unroute_ubatch_fn` must accept `use_ragged_sort=` and
+    produce the same result as the dense path under a single-device mesh.
+    """
+
+    num_tokens, topk, hidden, num_experts, target_len = 8, 4, 16, 8, 4
+    tokens, selected = self._make_inputs(num_tokens, topk, hidden, num_experts)
+    # `unroute_ubatch_fn` expects `routed_expert_out` of shape (n_tokens*topk, hidden)
+    # and `shared_expert_out` / `moe_inputs` of shape (batch, target_len, hidden)
+    # where batch * target_len = n_tokens.
+    batch = num_tokens // target_len
+    moe_inputs = jnp.asarray(np.random.RandomState(1).normal(size=(batch, target_len, hidden)).astype(np.float32))
+    shared = jnp.asarray(np.random.RandomState(2).normal(size=(batch, target_len, hidden)).astype(np.float32))
+
+    # Build a single-device mesh so `route`/`unroute` (which use psum_scatter /
+    # all_gather across `expert`) reduce to identity.
+    mesh = Mesh(np.array(jax.devices()[:1]).reshape(1, 1, 1), ("data", "fsdp", "expert"))  # pylint: disable=too-many-function-args
+
+    def run(use_ragged_sort):
+      with mesh:
+        out, res = deepseek_batchsplit.unroute_ubatch_shard_mapped(
+            moe_inputs,
+            tokens,
+            shared,
+            selected,
+            expert_axis_name="expert",
+            use_gather_mosaic_kernel=False,
+            use_ragged_sort=use_ragged_sort,
+            target_length=target_len,
+            mesh=mesh,
+            activation_pspec=jax.sharding.PartitionSpec(("data", "fsdp", "expert"), None, None),
+        )
+      # The residual structure should be the same regardless of which kernel was used.
+      self.assertIn("selected_experts", res)
+      return np.asarray(out)
+
+    out_dense = run(use_ragged_sort=False)
+    out_ragged = run(use_ragged_sort=True)
+    # Ragged kernels reorder the summation, so the result agrees with the
+    # dense path only up to numeric ordering noise.
+    np.testing.assert_allclose(out_ragged.astype(np.float32), out_dense.astype(np.float32), atol=2e-2, rtol=2e-2)
 
 
 if __name__ == "__main__":

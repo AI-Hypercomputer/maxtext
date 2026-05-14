@@ -559,6 +559,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
           selected_experts,
           expert_axis_name="expert",
           use_gather_mosaic_kernel=False,
+          use_ragged_sort=self.config.use_ragged_sort,
           target_length=self.config.max_target_length,
           mesh=self.mesh,
           activation_pspec=activation_pspec,

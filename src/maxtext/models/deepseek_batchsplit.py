@@ -820,6 +820,7 @@ def scan_batch_split_layers(
           selected_experts,
           expert_axis_name="expert",
           use_gather_mosaic_kernel=cfg.use_gather_mosaic_kernel,
+          use_ragged_sort=cfg.use_ragged_sort,
           target_length=cfg.max_target_length,
           mesh=mesh,
           activation_pspec=activation_pspec,
@@ -881,6 +882,7 @@ def scan_batch_split_layers(
         selected_experts,
         expert_axis_name="expert",
         use_gather_mosaic_kernel=cfg.use_gather_mosaic_kernel,
+        use_ragged_sort=cfg.use_ragged_sort,
         target_length=cfg.max_target_length,
         mesh=mesh,
         activation_pspec=activation_pspec,
@@ -903,6 +905,7 @@ def scan_batch_split_layers(
         selected_experts,
         expert_axis_name="expert",
         use_gather_mosaic_kernel=cfg.use_gather_mosaic_kernel,
+        use_ragged_sort=cfg.use_ragged_sort,
         target_length=cfg.max_target_length,
         mesh=mesh,
         activation_pspec=activation_pspec,
@@ -973,6 +976,7 @@ def scan_batch_split_layers(
           g[1],
           expert_axis_name="expert",
           use_gather_mosaic_kernel=cfg.use_gather_mosaic_kernel,
+          use_ragged_sort=cfg.use_ragged_sort,
           mesh=mesh,
           activation_pspec=activation_pspec,
       )
@@ -986,6 +990,7 @@ def scan_batch_split_layers(
         g[1],
         expert_axis_name="expert",
         use_gather_mosaic_kernel=cfg.use_gather_mosaic_kernel,
+        use_ragged_sort=cfg.use_ragged_sort,
         mesh=mesh,
         activation_pspec=activation_pspec,
     )
@@ -1005,6 +1010,7 @@ def scan_batch_split_layers(
         g[1],
         expert_axis_name="expert",
         use_gather_mosaic_kernel=cfg.use_gather_mosaic_kernel,
+        use_ragged_sort=cfg.use_ragged_sort,
         mesh=mesh,
         activation_pspec=activation_pspec,
     )
@@ -1032,6 +1038,7 @@ def scan_batch_split_layers(
         g[1],
         expert_axis_name="expert",
         use_gather_mosaic_kernel=cfg.use_gather_mosaic_kernel,
+        use_ragged_sort=cfg.use_ragged_sort,
         mesh=mesh,
         activation_pspec=activation_pspec,
     )
@@ -1140,6 +1147,7 @@ def batch_split_schedule(
       top_k_in_group=2,
       expert_axis_name="expert",
       use_gather_mosaic_kernel=cfg.use_gather_mosaic_kernel,
+      use_ragged_sort=cfg.use_ragged_sort,
       config=cfg,
       normalization_layer_epsilon=cfg.normalization_layer_epsilon,
       dtype=cfg.dtype,
@@ -1196,6 +1204,7 @@ def batch_split_schedule_bwd(
       top_k_in_group=2,
       expert_axis_name="expert",
       use_gather_mosaic_kernel=cfg.use_gather_mosaic_kernel,
+      use_ragged_sort=cfg.use_ragged_sort,
       config=cfg,
       normalization_layer_epsilon=cfg.normalization_layer_epsilon,
       dtype=cfg.dtype,
@@ -1788,6 +1797,7 @@ def shared_expert_and_route(
     top_k_in_group,
     expert_axis_name,
     use_gather_mosaic_kernel,
+    use_ragged_sort,
     config,
     normalization_layer_epsilon,
     dtype,
@@ -1820,6 +1830,7 @@ def shared_expert_and_route(
       group_sizes,
       expert_axis_name=expert_axis_name,
       use_gather_mosaic_kernel=use_gather_mosaic_kernel,
+      use_ragged_sort=use_ragged_sort,
   )
   return x, y, selected_experts, weights, group_sizes
 
@@ -1922,6 +1933,7 @@ def route(
     *,
     expert_axis_name,
     use_gather_mosaic_kernel,
+    use_ragged_sort,
 ):
   """All-gather tokens and then perform local routing."""
   # Communicate local results across the expert axis.
@@ -1931,7 +1943,11 @@ def route(
   group_sizes = jax.lax.psum(group_sizes, axis_name=expert_axis_name)
 
   x = route_impl(
-      x, selected_experts, expert_axis_name=expert_axis_name, use_gather_mosaic_kernel=use_gather_mosaic_kernel
+      x,
+      selected_experts,
+      expert_axis_name=expert_axis_name,
+      use_gather_mosaic_kernel=use_gather_mosaic_kernel,
+      use_ragged_sort=use_ragged_sort,
   )
   return x, selected_experts, weights, group_sizes
 
@@ -1942,21 +1958,30 @@ def unroute(
     *,
     expert_axis_name,
     use_gather_mosaic_kernel,
+    use_ragged_sort,
 ):
   """Undo `route()`."""
   return unroute_impl(
-      x, selected_experts, expert_axis_name=expert_axis_name, use_gather_mosaic_kernel=use_gather_mosaic_kernel
+      x,
+      selected_experts,
+      expert_axis_name=expert_axis_name,
+      use_gather_mosaic_kernel=use_gather_mosaic_kernel,
+      use_ragged_sort=use_ragged_sort,
   )
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(2, 3))
-def route_impl(x, selected_experts, expert_axis_name, use_gather_mosaic_kernel):
+@functools.partial(jax.custom_vjp, nondiff_argnums=(2, 3, 4))
+def route_impl(x, selected_experts, expert_axis_name, use_gather_mosaic_kernel, use_ragged_sort):
   return route_impl_fwd(
-      x, selected_experts, expert_axis_name=expert_axis_name, use_gather_mosaic_kernel=use_gather_mosaic_kernel
+      x,
+      selected_experts,
+      expert_axis_name=expert_axis_name,
+      use_gather_mosaic_kernel=use_gather_mosaic_kernel,
+      use_ragged_sort=use_ragged_sort,
   )[0]
 
 
-def route_impl_fwd(x, selected_experts, expert_axis_name, use_gather_mosaic_kernel):
+def route_impl_fwd(x, selected_experts, expert_axis_name, use_gather_mosaic_kernel, use_ragged_sort):
   """Routes the activations and all-gathers across the expert axis."""
   x, selected_experts = jax.lax.optimization_barrier((x, selected_experts))
   x = jax.lax.all_gather(x, axis_name=expert_axis_name, tiled=True)
@@ -1964,35 +1989,45 @@ def route_impl_fwd(x, selected_experts, expert_axis_name, use_gather_mosaic_kern
       x,
       selected_experts,
       use_gather_mosaic_kernel=use_gather_mosaic_kernel,
+      use_ragged_sort=use_ragged_sort,
   )
   x = jax.lax.optimization_barrier(x)
   return x, selected_experts
 
 
-def route_impl_bwd(expert_axis_name, use_gather_mosaic_kernel, res, grad):
+def route_impl_bwd(expert_axis_name, use_gather_mosaic_kernel, use_ragged_sort, res, grad):
   selected_experts = res
   return (
       unroute_impl_fwd(
-          grad, selected_experts, expert_axis_name=expert_axis_name, use_gather_mosaic_kernel=use_gather_mosaic_kernel
+          grad,
+          selected_experts,
+          expert_axis_name=expert_axis_name,
+          use_gather_mosaic_kernel=use_gather_mosaic_kernel,
+          use_ragged_sort=use_ragged_sort,
       )[0],
       None,
   )
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(2, 3))
-def unroute_impl(x, selected_experts, expert_axis_name, use_gather_mosaic_kernel):
+@functools.partial(jax.custom_vjp, nondiff_argnums=(2, 3, 4))
+def unroute_impl(x, selected_experts, expert_axis_name, use_gather_mosaic_kernel, use_ragged_sort):
   return unroute_impl_fwd(
-      x, selected_experts, expert_axis_name=expert_axis_name, use_gather_mosaic_kernel=use_gather_mosaic_kernel
+      x,
+      selected_experts,
+      expert_axis_name=expert_axis_name,
+      use_gather_mosaic_kernel=use_gather_mosaic_kernel,
+      use_ragged_sort=use_ragged_sort,
   )[0]
 
 
-def unroute_impl_fwd(x, selected_experts, expert_axis_name, use_gather_mosaic_kernel):
+def unroute_impl_fwd(x, selected_experts, expert_axis_name, use_gather_mosaic_kernel, use_ragged_sort):
   """Unroutes the activations and reduce-scatters across the expert axis."""
   x, selected_experts = jax.lax.optimization_barrier((x, selected_experts))
   x = sort_activations.unroute(
       x,
       selected_experts,
       use_gather_mosaic_kernel=use_gather_mosaic_kernel,
+      use_ragged_sort=use_ragged_sort,
   )
 
   # Sum across expert shards.
@@ -2001,11 +2036,15 @@ def unroute_impl_fwd(x, selected_experts, expert_axis_name, use_gather_mosaic_ke
   return x, selected_experts
 
 
-def unroute_impl_bwd(expert_axis_name, use_gather_mosaic_kernel, res, grad):
+def unroute_impl_bwd(expert_axis_name, use_gather_mosaic_kernel, use_ragged_sort, res, grad):
   selected_experts = res
   return (
       route_impl_fwd(
-          grad, selected_experts, expert_axis_name=expert_axis_name, use_gather_mosaic_kernel=use_gather_mosaic_kernel
+          grad,
+          selected_experts,
+          expert_axis_name=expert_axis_name,
+          use_gather_mosaic_kernel=use_gather_mosaic_kernel,
+          use_ragged_sort=use_ragged_sort,
       )[0],
       None,
   )
@@ -2108,6 +2147,7 @@ def route_compute_unroute(
     top_k_in_group,
     expert_axis_name,
     use_gather_mosaic_kernel,
+    use_ragged_sort,
     normalization_layer_epsilon,
     dtype,
     config,
@@ -2138,6 +2178,7 @@ def route_compute_unroute(
         routed_scaling_factor=routed_scaling_factor,
         expert_axis_name=expert_axis_name,
         use_gather_mosaic_kernel=use_gather_mosaic_kernel,
+        use_ragged_sort=use_ragged_sort,
         config=config,
         normalization_layer_epsilon=normalization_layer_epsilon,
         dtype=dtype,
@@ -2184,6 +2225,7 @@ def route_compute_unroute(
         selected_experts,
         expert_axis_name=expert_axis_name,
         use_gather_mosaic_kernel=use_gather_mosaic_kernel,
+        use_ragged_sort=use_ragged_sort,
         target_length=target_length,
     )
 
@@ -2202,6 +2244,7 @@ def unroute_ubatch_shard_mapped(
     *,
     expert_axis_name,
     use_gather_mosaic_kernel,
+    use_ragged_sort,
     target_length,
     mesh,
     activation_pspec,
@@ -2212,6 +2255,7 @@ def unroute_ubatch_shard_mapped(
           unroute_ubatch_fn,
           expert_axis_name=expert_axis_name,
           use_gather_mosaic_kernel=use_gather_mosaic_kernel,
+          use_ragged_sort=use_ragged_sort,
           target_length=target_length,
       ),
       mesh=mesh,
@@ -2244,6 +2288,7 @@ def unroute_ubatch_fn(
     *,
     expert_axis_name,
     use_gather_mosaic_kernel,
+    use_ragged_sort,
     target_length,
 ):
   """Performs the unroute operation for a single microbatch."""
@@ -2252,6 +2297,7 @@ def unroute_ubatch_fn(
       selected_experts,
       expert_axis_name=expert_axis_name,
       use_gather_mosaic_kernel=use_gather_mosaic_kernel,
+      use_ragged_sort=use_ragged_sort,
   )
   expert_out = jnp.reshape(routed_expert_out, (-1, target_length, routed_expert_out.shape[-1])) + shared_expert_out
   return moe_inputs + expert_out, {"selected_experts": selected_experts}
@@ -2263,6 +2309,7 @@ def unroute_ubatch_remat_and_bwd_shard_mapped(
     *,
     expert_axis_name,
     use_gather_mosaic_kernel,
+    use_ragged_sort,
     mesh,
     activation_pspec,
 ):
@@ -2274,11 +2321,13 @@ def unroute_ubatch_remat_and_bwd_shard_mapped(
       *,
       expert_axis_name,
       use_gather_mosaic_kernel,
+      use_ragged_sort,
   ):
     unroute_bwd = unroute_ubatch_fn_remat(
         selected_experts,
         expert_axis_name=expert_axis_name,
         use_gather_mosaic_kernel=use_gather_mosaic_kernel,
+        use_ragged_sort=use_ragged_sort,
     )
     return unroute_ubatch_fn_bwd(outputs_grad, unroute_bwd)
 
@@ -2287,6 +2336,7 @@ def unroute_ubatch_remat_and_bwd_shard_mapped(
           unroute_ubatch_remat_and_bwd_fn,
           expert_axis_name=expert_axis_name,
           use_gather_mosaic_kernel=use_gather_mosaic_kernel,
+          use_ragged_sort=use_ragged_sort,
       ),
       mesh=mesh,
       in_specs=(
@@ -2311,6 +2361,7 @@ def unroute_ubatch_fn_remat(
     *,
     expert_axis_name,
     use_gather_mosaic_kernel,
+    use_ragged_sort,
 ):
   # Since we never need the outputs of unroute in the backward pass, we can just the backward function of unroute directly.
   return functools.partial(
@@ -2318,6 +2369,7 @@ def unroute_ubatch_fn_remat(
       selected_experts=selected_experts,
       expert_axis_name=expert_axis_name,
       use_gather_mosaic_kernel=use_gather_mosaic_kernel,
+      use_ragged_sort=use_ragged_sort,
   )
 
 
@@ -2349,6 +2401,7 @@ def route_compute_unroute_bwd(
     top_k_in_group,
     expert_axis_name,
     use_gather_mosaic_kernel,
+    use_ragged_sort,
     normalization_layer_epsilon,
     dtype,
     config,
@@ -2374,6 +2427,7 @@ def route_compute_unroute_bwd(
             top_k_in_group=top_k_in_group,
             expert_axis_name=expert_axis_name,
             use_gather_mosaic_kernel=use_gather_mosaic_kernel,
+            use_ragged_sort=use_ragged_sort,
             config=config,
             normalization_layer_epsilon=normalization_layer_epsilon,
             dtype=dtype,
@@ -2468,6 +2522,7 @@ def route_compute_unroute_bwd(
         selected_experts,
         expert_axis_name=expert_axis_name,
         use_gather_mosaic_kernel=use_gather_mosaic_kernel,
+        use_ragged_sort=use_ragged_sort,
     )
 
   def unroute_fn_bwd(inputs):
@@ -2517,6 +2572,7 @@ def moe(
     top_k_in_group,
     expert_axis_name,
     use_gather_mosaic_kernel,
+    use_ragged_sort,
     config,
     normalization_layer_epsilon,
     dtype,
@@ -2534,6 +2590,7 @@ def moe(
           top_k_in_group=top_k_in_group,
           expert_axis_name=expert_axis_name,
           use_gather_mosaic_kernel=use_gather_mosaic_kernel,
+          use_ragged_sort=use_ragged_sort,
           normalization_layer_epsilon=normalization_layer_epsilon,
           dtype=dtype,
           config=config,
@@ -2592,6 +2649,7 @@ def moe_bwd(
     top_k_in_group,
     expert_axis_name,
     use_gather_mosaic_kernel,
+    use_ragged_sort,
     config,
     normalization_layer_epsilon,
     dtype,
@@ -2609,6 +2667,7 @@ def moe_bwd(
           top_k_in_group=top_k_in_group,
           expert_axis_name=expert_axis_name,
           use_gather_mosaic_kernel=use_gather_mosaic_kernel,
+          use_ragged_sort=use_ragged_sort,
           normalization_layer_epsilon=normalization_layer_epsilon,
           dtype=dtype,
           config=config,
