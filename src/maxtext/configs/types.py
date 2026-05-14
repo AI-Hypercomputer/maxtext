@@ -1124,8 +1124,8 @@ class TfdsDataset(BaseModel):
   """Configuration specific to TFDS datasets."""
 
   dataset_path: PathStr = Field("", description="Path to the TFDS dataset.")
-  dataset_name: str = Field("c4/en:3.0.1", description="Name of the TFDS dataset.")
-  eval_dataset_name: str = Field("c4/en:3.0.1", description="Name of the TFDS eval dataset.")
+  dataset_name: str = Field("c4/en:3.1.0", description="Name of the TFDS dataset.")
+  eval_dataset_name: str = Field("c4/en:3.1.0", description="Name of the TFDS eval dataset.")
   train_split: str = Field("train", description="Dataset split for training.")
   eval_split: str = Field("validation", description="Dataset split for evaluation.")
 

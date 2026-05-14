@@ -28,21 +28,15 @@ from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from maxtext.input_pipeline import tfds_data_processing
 from maxtext.input_pipeline import input_pipeline_interface
-from maxtext.common.gcloud_stub import is_decoupled
-from tests.utils.test_helpers import get_test_config_path, get_test_dataset_path, get_test_base_output_directory
+from tests.utils.test_helpers import get_test_config_path, get_test_base_output_directory
 
 
 class TfdsDataProcessingTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
-    decoupled = is_decoupled()
-    if decoupled:
-      local_dataset_name = "c4/en:3.1.0"
-    else:
-      local_dataset_name = None
 
-    _dataset_path = get_test_dataset_path()
+    _dataset_path = os.path.join("tests", "assets", "local_datasets", "c4_en_dataset_minimal")
     _base_output_directory = get_test_base_output_directory(cloud_path="gs://max-experiments/")
     config_kwargs = {
         "per_device_batch_size": 1,
@@ -58,8 +52,6 @@ class TfdsDataProcessingTest(unittest.TestCase):
         "max_target_length": 128,
     }
 
-    if decoupled and local_dataset_name:
-      config_kwargs["dataset_name"] = local_dataset_name
     config = pyconfig.initialize([sys.argv[0], get_test_config_path()], **config_kwargs)
     os.environ["TFDS_DATA_DIR"] = config.dataset_path
     self.config = config
@@ -103,7 +95,7 @@ class TfdsDataProcessingTest(unittest.TestCase):
     return self.__class__._cached_eval_iter
 
   def _get_datasets(self):
-    ds_builder = tfds.builder(self.config.dataset_name)
+    ds_builder = tfds.builder(self.config.dataset_name, data_dir=self.config.dataset_path)
     self.read_config.input_context = tf.distribute.InputContext(
         input_pipeline_id=jax.process_index(),
         num_input_pipelines=jax.process_count(),
