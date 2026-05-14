@@ -127,6 +127,9 @@ model = qwix.quantize_model(model, qwix.QtProvider(rule))
 
 ### AQT Quantization
 
+> [!WARNING]
+> **DEPRECATION NOTICE**: AQT quantization is deprecated and will be removed in a future release. Please migrate to Qwix by setting `use_qwix_quantization=True`.
+
 If `use_qwix_quantization` is `False` or not set, you can still apply quantization using the AQT library by setting the `quantization` flag. You can read more about AQT on this [Google Cloud blog](https://cloud.google.com/blog/products/compute/accurate-quantized-training-aqt-for-tpu-v5e).
 
 #### `quantization` values for AQT
