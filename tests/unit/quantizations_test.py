@@ -149,6 +149,7 @@ class QuantizationTest(unittest.TestCase):
       quant = _configure_quantization(quant_str="int8", mode_str=quant_mode, replicate_scale=True)
       self.assertEqual(quant.replicate_scale, True)
 
+  @pytest.mark.cpu_only
   def test_configure_quantization_is_int8(self):
     for quant_mode in ["train", "serve", "convert"]:
       quant = _configure_quantization(quant_str="int8", mode_str=quant_mode)
