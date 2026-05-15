@@ -1094,8 +1094,14 @@ def train_loop(config, recorder, state=None):
           )
           # Start snapshot save immediately on the new mesh
           snapshot_mgr = python_vars["snapshot"]
+          state = jax_device_state["state"]
+          state_dict = {
+              "step": state.step,
+              "params": state.params,
+              "opt_state": state.opt_state,
+          }
           snapshot_mgr.save_pytree(
-              python_vars["step"], jax_device_state["state"]
+              python_vars["step"], state_dict
           )
 
         training_loop_iteration(jax_device_state, python_vars, immutable_data)
