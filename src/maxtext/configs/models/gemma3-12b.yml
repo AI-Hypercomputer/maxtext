@@ -24,7 +24,7 @@ mlp_activations: ["gelu","linear"]
 vocab_size: 262_144
 decoder_block: "gemma3"
 normalization_layer_epsilon: 1e-6
-logits_via_embedding: True
+logits_via_embedding: true
 sliding_window_size: 1024
 use_post_attn_norm: true
 use_post_ffw_norm: true

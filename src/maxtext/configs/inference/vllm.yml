@@ -17,15 +17,15 @@ attention: "vllm_rpa"
 model_call_mode: "inference"
 
 # NNX required for vLLM integration
-enable_nnx: True
+enable_nnx: true
 # Avoid re-initializing JAX distributed system when using vLLM
-skip_jax_distributed_system: True
+skip_jax_distributed_system: true
 # Scanned layers are not supported with vLLM integration
-scan_layers: False
+scan_layers: false
 # Set weight dtype to bfloat16 as is done in vLLM
 weight_dtype: bfloat16
 # Allow model config to be overridden by CLI kwargs
-override_model_config: True
+override_model_config: true
 
 
 # -------------- Logical Axis Rules --------------

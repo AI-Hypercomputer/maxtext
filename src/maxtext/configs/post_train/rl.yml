@@ -55,17 +55,17 @@ rl:
   loss_algo: 'grpo' # grpo or gspo-token
 
   # ====== Agentic Rollout ======
-  # If True, uses the async AgenticGRPOLearner, which overlaps rollout generation
+  # If true, uses the async AgenticGRPOLearner, which overlaps rollout generation
   # with training for faster throughput via online vLLM inference.
-  use_agentic_rollout: False
+  use_agentic_rollout: false
   # Max concurrent rollout requests when using agentic rollout.
   max_concurrency: 256
   # Number of off-policy steps tolerated before requiring a policy update.
   off_policy_steps: 0
   # System prompt injected into the agent at rollout time.
   system_prompt: ''
-  # If True, mask degenerate groups (all-zero advantages) from contributing to the loss.
-  degenerate_group_masking: True
+  # If true, mask degenerate groups (all-zero advantages) from contributing to the loss.
+  degenerate_group_masking: true
   # Upper-bound clipping epsilon for GRPO loss; defaults to grpo_epsilon when null.
   epsilon_high: null
   # Number of model keys to chunk for resharding tensors between trainer and rollout devices.
@@ -95,18 +95,18 @@ decoder_layer_input: 'offload'
 query_proj: 'offload'
 key_proj: 'offload'
 value_proj: 'offload'
-checkpoint_storage_use_ocdbt: False # For Pathways
-checkpoint_storage_use_zarr3: False # For Pathways
-use_pathways: True
+checkpoint_storage_use_ocdbt: false # For Pathways
+checkpoint_storage_use_zarr3: false # For Pathways
+use_pathways: true
 log_period: 20
-convert_checkpoint_if_possible: True
+convert_checkpoint_if_possible: true
 
 # ====== Debugging ======
 debug:
-  rl: True
-# If True, Tunix-managed metrics measurement will be enabled. The metrics will be
+  rl: true
+# If true, Tunix-managed metrics measurement will be enabled. The metrics will be
 # uploaded to tensorboard.
-enable_tunix_perf_metrics: False
+enable_tunix_perf_metrics: false
 
 # ====== Training ======
 batch_size: 1
@@ -149,8 +149,8 @@ generation_configs:
     eval_top_p: 1.0
 
 num_eval_passes: 1 # Number of generation passes during evaluation
-eval_corr_lst: False # If True, only include correct responses in the list during evaluation
-eval_make_lst: False # If True, return a list of (question, answer, responses) during evaluation
+eval_corr_lst: false # If true, only include correct responses in the list during evaluation
+eval_make_lst: false # If true, return a list of (question, answer, responses) during evaluation
 eval_mode: "pass" # Evaluation mode ("pass" for pass@K, "maj" for majority voting maj@K, "pass_at_1" for pass@1 estimation)
 
 # ====== Inference ======
@@ -168,18 +168,18 @@ decode_sampling_temperature: 0.9
 decode_sampling_top_k: 50
 decode_sampling_nucleus_p: 1.0
 # Optional sharding configuration for samplers
-enable_dp_attention: False
+enable_dp_attention: false
 # Performance tuning for samplers
 max_num_batched_tokens: null
 max_num_seqs: null
-# If True, enables asynchronous scheduling in vLLM for faster generation
-async_scheduling: True
+# If true, enables asynchronous scheduling in vLLM for faster generation
+async_scheduling: true
 # stop generation when any of these strings is generated
 stop_strings: null
 
 # ====== Checkpoint Configuration ======
-enable_checkpointing: True
-async_checkpointing: False
+enable_checkpointing: true
+async_checkpointing: false
 checkpoint_period: 50
 max_num_checkpoints_to_keep: 10
 
@@ -206,7 +206,7 @@ reasoning_end_token: '</reasoning>'
 solution_start_token: '<answer>'
 solution_end_token: '</answer>'
 chat_template_path: 'maxtext/examples/chat_templates/gsm8k_rl.json'
-skip_jax_distributed_system: True
+skip_jax_distributed_system: true
 
 # ====== Dataset Configuration ======
 # Supported values for dataset_name:
@@ -231,5 +231,5 @@ tokenizer_type: 'huggingface'
 
 ##### MaxText to VLLM Converter validation parameters
 vllm_load_format: dummy # Format to load the model for conversion. Options are "auto", "dummy"
-debug_converter: False # If True, run key coverage check, weight stats, and GCS upload then exit without generation.
-gcs_debug_path: "" # If set and debug_converter=True, upload converted layer-0 and global tensors as .npy to this GCS prefix.
+debug_converter: false # If true, run key coverage check, weight stats, and GCS upload then exit without generation.
+gcs_debug_path: "" # If set and debug_converter=true, upload converted layer-0 and global tensors as .npy to this GCS prefix.

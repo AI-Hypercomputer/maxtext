@@ -24,7 +24,7 @@ defaults:
 jobs:
   debugger:
     # Debug mode: with a repository variable called DEBUG to true
-    if: |- 
+    if: |-
      ${{ fromJSON(vars.DEBUG || vars.ACTIONS_STEP_DEBUG || false) }}
     runs-on: 'ubuntu-latest'
     permissions:
@@ -39,7 +39,7 @@ jobs:
           DEBUG_event__pull_request__author_association: '${{ github.event.pull_request.author_association }}'
           DEBUG_event__review__author_association: '${{ github.event.review.author_association }}'
           DEBUG_event: '${{ toJSON(github.event) }}'
-        run: |- 
+        run: |-
           env | grep '^DEBUG_'
 
   dispatch:

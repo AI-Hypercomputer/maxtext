@@ -24,4 +24,4 @@ mlp_activations: ["gelu","linear"]
 vocab_size: 256128
 decoder_block: "gemma"
 normalization_layer_epsilon: 1.e-06
-logits_via_embedding: True
+logits_via_embedding: true

@@ -119,7 +119,7 @@ jobs:
     needs: analyze_code_changes
     # Run if either tests or notebooks need to run
     if: |
-      needs.analyze_code_changes.outputs.run_tests == 'true' || 
+      needs.analyze_code_changes.outputs.run_tests == 'true' ||
       needs.analyze_code_changes.outputs.run_notebooks == 'true'
     uses: ./.github/workflows/build_package.yml
     with:

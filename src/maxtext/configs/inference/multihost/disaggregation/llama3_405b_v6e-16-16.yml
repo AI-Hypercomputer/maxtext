@@ -3,10 +3,10 @@ base_config: "inference/inference_jetstream.yml"
 model_name: "llama3.1-405b"
 sharding_strategy: "experimental"
 attention: 'dot_product'
-allow_split_physical_axes: True
+allow_split_physical_axes: true
 tokenizer_path: "assets/tokenizer_llama3.tiktoken"
 # Used to replicate the quantization scale to avoid the inefficient XLA fusion.
-replicate_quant_scale: True
+replicate_quant_scale: true
 
 inference_server: "ExperimentalMaxtextDisaggregatedServer"
 

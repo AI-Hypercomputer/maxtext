@@ -14,16 +14,16 @@
 
 base_config: "base.yml"
 
-use_sft: True
-use_tunix_gradient_accumulation: True
-# sft_train_on_completion_only=False trains on both prompt and completion tokens; trains only on completion tokens otherwise
-sft_train_on_completion_only: True
-packing: True
+use_sft: true
+use_tunix_gradient_accumulation: true
+# sft_train_on_completion_only=false trains on both prompt and completion tokens; trains only on completion tokens otherwise
+sft_train_on_completion_only: true
+packing: true
 learning_rate: 2.e-5
 
 # -------------- LoRA / QLoRA --------------
 lora:
-  enable_lora: False
+  enable_lora: false
   lora_rank: 0
   lora_alpha: 0.0
   lora_module_path: ""

@@ -17,8 +17,8 @@
 # Inherit MaxText defaults
 base_config: "post_train/distillation.yml"
 
-use_sft: True
-sft_train_on_completion_only: True
+use_sft: true
+sft_train_on_completion_only: true
 
 # --- Dataset & Tokenizer ---
 hf_path: "HuggingFaceH4/ultrachat_200k"
