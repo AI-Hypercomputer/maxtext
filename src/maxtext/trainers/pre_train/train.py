@@ -682,6 +682,8 @@ def train_loop(config, recorder, state=None):
     _, setup_params, _ = nnx.split(state.model, nnx.Param, ...)
   metric_logger_instance.write_setup_info_to_tensorboard(setup_params)
 
+  elastic_utils.record_elastic_reinit_end()
+
   _job_completed_gracefully = False
   try:
     last_step_completion = datetime.datetime.now()
@@ -830,6 +832,12 @@ def get_train_func(config, recorder, diagnostic_config, argv):
   if config.elastic_enabled:
     max_logging.log("Elastic utils: Elastic training enabled.")
 
+    def on_elastic_event():
+      elastic_utils.record_elastic_event_start(recorder, config)
+
+    def on_slices_ready():
+      elastic_utils.record_elastic_wait_end_and_reinit_start(recorder)
+
     def elastic_train_wrapper(argv: Sequence[str]) -> None:
       """Wrapper for elastic training initializes variables and runs the train loop."""
       elastic_config, elastic_recorder, elastic_diagnostic_config = initialize(argv)
@@ -839,7 +847,11 @@ def get_train_func(config, recorder, diagnostic_config, argv):
           elastic_diagnostic_config,
       )
 
-    train_func = elastic_utils.elastic_retry(config)(functools.partial(elastic_train_wrapper, argv=argv))
+    train_func = elastic_utils.elastic_retry(
+        config,
+        callback_fn=on_elastic_event,
+        pre_callback_fn=on_slices_ready,
+    )(functools.partial(elastic_train_wrapper, argv=argv))
   else:
     # Use the already initialized variables
     def train_func():
