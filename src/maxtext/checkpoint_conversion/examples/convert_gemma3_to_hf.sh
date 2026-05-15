@@ -9,7 +9,7 @@ DATE=$(date +%Y-%m-%d)
 # Define variables for paths and arguments
 HF_CHECKPOINT_GCS_PATH="gs://maxtext-model-checkpoints/HuggingFace/gemma3-4b/${DATE}" # (optional)GCS path for HF model
 MAXTEXT_CHECKPOINT_DIR="gs://maxtext-model-checkpoints/gemma3-4b/2025-03-18-19-03/unscanned/checkpoints/0/items"
-LOCAL_HF_CHECKPOINT_DIR="/tmp/hf_gemma3-4b_output" # HF requires a local dir
+LOCAL_HF_CHECKPOINT_DIR=$(mktemp -d) # HF requires a local dir
 TOKENIZER_PATH="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/assets/tokenizers}}/tokenizer.gemma3"
 MODEL_NAME="gemma3-4b"
 PER_DEVICE_BATCH_SIZE=1

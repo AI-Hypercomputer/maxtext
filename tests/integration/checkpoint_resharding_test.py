@@ -35,12 +35,12 @@ from tests.utils.test_helpers import (
 def get_resharding_command(run_date, steps, metrics_file, base_output_directory, dataset_path, parallelism_args):
   """Generates a command list for the resharding test run."""
   model_params = [
-      "base_emb_dim=384",
-      "base_num_query_heads=8",
-      "base_num_kv_heads=8",
-      "base_mlp_dim=192",
-      "base_num_decoder_layers=8",
-      "head_dim=128",
+      "base_emb_dim=128",
+      "base_num_query_heads=2",
+      "base_num_kv_heads=2",
+      "base_mlp_dim=128",
+      "base_num_decoder_layers=2",
+      "head_dim=64",
   ]
 
   return (

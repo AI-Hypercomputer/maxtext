@@ -49,7 +49,7 @@ class AotBaseTest(unittest.TestCase):
     device_info = {
         "TPU v4": ("v4", 2 * num_devices),
         "TPU v5 lite": ("v5e", num_devices),
-        "TPU v5p": ("v5p", 2 * num_devices),
+        "TPU v5": ("v5p", 2 * num_devices),
         "TPU v6": ("v6e", num_devices),
     }
 
@@ -65,7 +65,119 @@ class AotBaseTest(unittest.TestCase):
       if os.path.exists(directory):
         shutil.rmtree(directory)
 
-  def check_large_files_equal(self, file_path1, file_path2):
+
+class AotHloIdenticalTest(AotBaseTest):
+  """Tests for Ahead of Time Compilation HLO Graph Verification."""
+
+  def find_HLO_files(self, compile_dump_dir, real_dump_dir):
+    """Locates the optimized HLO text files in the dump directories."""
+    pattern = re.compile(r"^.*\.jit_train_step\..*\.after_optimizations_after_buffer_assignment\.txt$")
+    compile_hlo = next((f for f in os.listdir(compile_dump_dir) if pattern.search(f)), None)
+    real_hlo = next((f for f in os.listdir(real_dump_dir) if pattern.search(f)), None)
+    return compile_hlo, real_hlo
+
+  def check_large_files_equal_clean(self, raw_path1, raw_path2, clean_path1, clean_path2):
+    """
+    Cleans metadata from two HLO files, writes the clean versions to disk,
+    and asserts they have identical content via SHA256 hashing.
+    """
+    h1, h2 = hashlib.sha256(), hashlib.sha256()
+
+    # Pre-compile regex patterns for performance
+    file_map_pattern = re.compile(r'^\s*\d+\s+".*"\s*$')
+    location_map_pattern = re.compile(r"^\s*\d+\s+\{file_name_id=[^}]*\}\s*$")
+    metadata_pattern = re.compile(r"metadata=\{[^}]*\}")
+
+    def hash_cleaned_file(raw_file, hasher, clean_file):
+      with open(raw_file, "r", encoding="utf-8") as f_in, open(clean_file, "w", encoding="utf-8") as f_out:
+        for line in f_in:
+          # Skip both blocks of header mappings
+          if file_map_pattern.match(line) or location_map_pattern.match(line):
+            continue
+
+          # Strip inline metadata tags from the ops
+          cleaned_line = metadata_pattern.sub("", line)
+
+          # Write to disk for manual inspection on failure
+          f_out.write(cleaned_line)
+
+          # Hash the cleaned line
+          hasher.update(cleaned_line.encode("utf-8"))
+
+    hash_cleaned_file(raw_path1, h1, clean_path1)
+    hash_cleaned_file(raw_path2, h2, clean_path2)
+
+    return h1.hexdigest() == h2.hexdigest()
+
+  def _build_shared_args(self, dump_dir, extra_args):
+    """Builds the list of config overrides, directing XLA's HLO dump to `dump_dir`."""
+    xla_flags = f"--xla_dump_to={dump_dir} --xla_dump_hlo_module_re=jit_train_step"
+    return [
+        "base_output_directory=gs://runner-maxtext-logs",
+        "dataset_type=synthetic",
+        "enable_checkpointing=False",
+        "base_num_decoder_layers=1",
+        "max_target_length=32",
+        "base_emb_dim=64",
+        "base_mlp_dim=64",
+        "base_num_query_heads=2",
+        "base_num_kv_heads=2",
+        "head_dim=16",
+        "vocab_size=128",
+        "steps=1",
+        f"compile_xla_flags={xla_flags}",
+        *extra_args,
+    ]
+
+  def assert_compile_and_real_match_hlo(self, test_name, *extra_args):
+    """Assert real train and compile HLO are identical."""
+    base_dir = os.path.join(tempfile.gettempdir(), "hlo_test_results", test_name)
+    train_dump_dir = os.path.join(base_dir, "real")
+    compile_dump_dir = os.path.join(base_dir, "aot")
+    self.delete_dir(train_dump_dir, compile_dump_dir)
+
+    config_path = get_test_config_path()
+
+    # Generate train.py HLO directly into train_dump_dir.
+    train.main((None, config_path, *self._build_shared_args(train_dump_dir, extra_args)))
+    jax.clear_caches()
+
+    # Generate train_compile.py HLO directly into compile_dump_dir.
+    topology = self.get_device_user_facing_name()
+    aot_args = (f"compile_topology={topology}", "compile_topology_num_slices=1")
+    train_compile.main((None, config_path, *self._build_shared_args(compile_dump_dir, extra_args), *aot_args))
+    jax.clear_caches()
+
+    # Compare
+    compile_hlo_filename, real_hlo_filename = self.find_HLO_files(compile_dump_dir, train_dump_dir)
+    self.assertTrue(compile_hlo_filename and real_hlo_filename, "Optimized HLO files were not found!")
+    # Resolve full file paths for the raw dumps
+    raw_compile_path = os.path.join(compile_dump_dir, compile_hlo_filename)
+    raw_real_path = os.path.join(train_dump_dir, real_hlo_filename)
+
+    # Define paths for the sanitized outputs so you can diff them if it fails
+    clean_compile_path = os.path.join(compile_dump_dir, "cleaned_aot.txt")
+    clean_real_path = os.path.join(train_dump_dir, "cleaned_real.txt")
+
+    self.assertTrue(
+        self.check_large_files_equal_clean(raw_compile_path, raw_real_path, clean_compile_path, clean_real_path),
+        f"HLO file is not identical for test {test_name}! Run `diff {clean_compile_path} {clean_real_path}` to investigate.",
+    )
+
+  @pytest.mark.tpu_only
+  def test_default_hlo_match(self):
+    self.assert_compile_and_real_match_hlo("default_run")
+
+
+class AotJaxprIdenticalTest(AotBaseTest):
+  """Tests for Ahead of Time Compilation Jaxpr Verification."""
+
+  def find_jaxpr_file(self, dump_dir):
+    """Locates the dumped jaxpr file."""
+    jaxpr_path = os.path.join(dump_dir, "train_step.jaxpr")
+    return jaxpr_path if os.path.exists(jaxpr_path) else None
+
+  def check_large_files_equal_simple(self, file_path1, file_path2):
     """Asserts that two text files have identical content via SHA256 hashing."""
     h1, h2 = hashlib.sha256(), hashlib.sha256()
 
@@ -78,93 +190,6 @@ class AotBaseTest(unittest.TestCase):
         h2.update(chunk)
 
     return h1.hexdigest() == h2.hexdigest()
-
-
-class AotHloIdenticalTest(AotBaseTest):
-  """Tests for Ahead of Time Compilation HLO Graph Verification."""
-
-  def find_HLO_files(self, compile_dump_dir, real_dump_dir):
-    """Locates the optimized HLO text files in the dump directories."""
-    pattern = re.compile(r"^.*\.jit_train_step\..*\.after_optimizations_after_buffer_assignment\.txt$")
-    compile_hlo = next((f for f in os.listdir(compile_dump_dir) if pattern.search(f)), None)
-    real_hlo = next((f for f in os.listdir(real_dump_dir) if pattern.search(f)), None)
-    return compile_hlo, real_hlo
-
-  def assert_compile_and_real_match_hlo(self, test_name, *extra_args):
-    """Assert real train and compile HLO are identical."""
-    temp_dir = tempfile.gettempdir()
-    train_dump_dir = os.path.join(temp_dir, "hlo_test_results", test_name, "real")
-    compile_dump_dir = os.path.join(temp_dir, "hlo_test_results", test_name, "aot")
-    # landing folder for MaxText's internal dump mechanism
-    local_landing_dir = os.path.join(temp_dir, "hlo_aot_dump")
-
-    hlo_dump_args = [
-        "dump_hlo=True",
-        f"dump_hlo_local_dir={local_landing_dir}",
-        "dump_hlo_delete_local_after=False",
-    ]
-
-    shared_args = [
-        "base_output_directory=gs://runner-maxtext-logs",
-        "dataset_type=synthetic",
-        "steps=1",
-        "enable_checkpointing=False",
-        "base_num_decoder_layers=1",
-        "max_target_length=512",
-        "base_emb_dim=256",
-        "base_mlp_dim=256",
-    ] + hlo_dump_args
-    if extra_args:
-      shared_args.extend(extra_args)
-
-    self.delete_dir(local_landing_dir, compile_dump_dir, train_dump_dir)
-
-    # Generate train.py HLO
-    # xla flag only sets once for train.main
-    os.makedirs(local_landing_dir, exist_ok=True)
-    train_argv = (
-        (None, get_test_config_path())
-        + tuple(shared_args)
-        + (
-            f"dump_hlo_xla_flags=--xla_dump_to={local_landing_dir} "
-            "--xla_dump_hlo_as_text "
-            "--xla_dump_hlo_module_re=jit_train_step",
-        )
-    )
-    train.main(train_argv)
-    shutil.move(local_landing_dir, train_dump_dir)
-    jax.clear_caches()
-
-    # Generate train_compile.py HLO
-    os.makedirs(local_landing_dir, exist_ok=True)
-    topology = self.get_device_user_facing_name()
-    aot_args = [f"compile_topology={topology}", "compile_topology_num_slices=1"]
-    compile_argv = (None, get_test_config_path()) + tuple(shared_args) + tuple(aot_args)
-    train_compile.main(compile_argv)
-    shutil.move(local_landing_dir, compile_dump_dir)
-    jax.clear_caches()
-
-    # Compare
-    compile_hlo, real_hlo = self.find_HLO_files(compile_dump_dir, train_dump_dir)
-    self.assertTrue(compile_hlo and real_hlo, "Optimized HLO files were not found!")
-    self.assertTrue(
-        self.check_large_files_equal(os.path.join(compile_dump_dir, compile_hlo), os.path.join(train_dump_dir, real_hlo)),
-        f"HLO file is not identical for test {test_name}!",
-    )
-
-  @pytest.mark.tpu_only
-  @pytest.mark.skip(reason="Optimized HLO files were not found! Skipped until fixing b/463839714.")
-  def test_default_hlo_match(self):
-    self.assert_compile_and_real_match_hlo("default_run")
-
-
-class AotJaxprIdenticalTest(AotBaseTest):
-  """Tests for Ahead of Time Compilation Jaxpr Verification."""
-
-  def find_jaxpr_file(self, dump_dir):
-    """Locates the dumped jaxpr file."""
-    jaxpr_path = os.path.join(dump_dir, "train_step.jaxpr")
-    return jaxpr_path if os.path.exists(jaxpr_path) else None
 
   def assert_compile_and_real_match_jaxpr(self, test_name, *extra_args):
     """Assert real train and compile jaxpr are identical."""
@@ -179,6 +204,14 @@ class AotJaxprIdenticalTest(AotBaseTest):
         "enable_checkpointing=False",
         "dump_jaxpr=True",
         "dump_jaxpr_delete_local_after=False",
+        "base_num_decoder_layers=1",
+        "max_target_length=32",
+        "base_emb_dim=64",
+        "base_mlp_dim=64",
+        "base_num_query_heads=2",
+        "base_num_kv_heads=2",
+        "head_dim=16",
+        "vocab_size=128",
     ]
     if extra_args:
       shared_args.extend(extra_args)
@@ -214,9 +247,20 @@ class AotJaxprIdenticalTest(AotBaseTest):
     compile_file = self.find_jaxpr_file(compile_dump_dir)
     self.assertTrue(train_file and compile_file, "Jaxpr files were not dumped!")
     self.assertTrue(
-        self.check_large_files_equal(compile_file, train_file), f"Jaxpr file is not identical for test {test_name}!"
+        self.check_large_files_equal_simple(compile_file, train_file),
+        f"Jaxpr file is not identical for test {test_name}!",
     )
 
   @pytest.mark.tpu_only
-  def test_default_jaxpr_match(self):
-    self.assert_compile_and_real_match_jaxpr("default_run")
+  def test_default_jaxpr_match_mcjax(self):
+    if os.getenv("JAX_PLATFORMS") == "proxy":
+      pytest.skip("This is a McJAX test, skipping in Pathways environment.")
+    self.assert_compile_and_real_match_jaxpr("default_run_mcjax")
+
+  @pytest.mark.tpu_only
+  @pytest.mark.scheduled_only
+  def test_default_jaxpr_match_pathways(self):
+    # Currently this test is extremely slow (b/512065615).
+    if os.getenv("JAX_PLATFORMS") != "proxy":
+      pytest.skip("This is a Pathways test, skipping in McJAX environment.")
+    self.assert_compile_and_real_match_jaxpr("default_run_pathways", "enable_single_controller=True")

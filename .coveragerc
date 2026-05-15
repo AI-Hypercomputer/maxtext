@@ -9,9 +9,7 @@ omit =
 
 [paths]
 source =
-    src/MaxText
     src/maxtext
-    */site-packages/MaxText
     */site-packages/maxtext
 
 [report]

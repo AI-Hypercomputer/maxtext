@@ -1,0 +1,6 @@
+datasets>=4.8.5
+flax==0.12.4
+fsspec==2026.2.0
+gcsfs==2026.2.0
+google-metrax>=0.2.3
+optax==0.2.6

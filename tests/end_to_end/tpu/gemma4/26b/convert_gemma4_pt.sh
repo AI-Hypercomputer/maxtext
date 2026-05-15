@@ -4,7 +4,7 @@ set -ex
 idx=$(date +%Y-%m-%d-%H-%M)
 
 MODEL_NAME='gemma4-26b'
-export MODEL_VARIATION='26b'
+export MODEL_VARIATION='26b-pt'
 TOKENIZER_PATH='google/gemma-4-26b-a4b'
 # To convert the multimodal model, make sure the use_multimodal is set to be true
 USE_MULTIMODAL=false
@@ -29,7 +29,9 @@ python3 -m maxtext.checkpoint_conversion.to_maxtext "${MAXTEXT_CONFIGS_DIR:-${MA
 
 export MAXTEXT_CKPT_PATH=${MODEL_BUCKET}/${MODEL_VARIATION}/converted/${idx}/0/items
 
-
+# Run forward pass logit checker to validate the converted checkpoint.
+# The *_tile_fwd_*_dim flags are for reducing vmem usage to fit into v5p chips,
+# not for performance purpose.
 if [ ${USE_MULTIMODAL} == true ]; then
     # Set the shared multimodal prompt and image
     TEST_PROMPT='Describe image <|image|>'
@@ -54,13 +56,17 @@ if [ ${USE_MULTIMODAL} == true ]; then
         dtype=float32 \
         matmul_precision=highest \
         per_device_batch_size=1 \
-        vision_output_length=280 \
         attention=dot_product \
+        wi_tile_fwd_embed_dim=512 \
+        wi_tile_fwd_mlp_dim=512 \
+        wo_tile_fwd_embed_dim=512 \
+        wo_tile_fwd_mlp_dim=512 \
         prompt="${TEST_PROMPT}" \
         image_path=${TEST_IMAGE} \
         --max_kl_div=0.03 \
         --golden_logits_path=${GOLDEN_LOGITS_PATH}
 else
+    echo "=== Running MaxText Forward Pass Logit Checker ==="
     python3 -m tests.utils.forward_pass_logit_checker "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"/base.yml \
         tokenizer_path=${TOKENIZER_PATH}  \
         load_parameters_path=${MAXTEXT_CKPT_PATH} \
@@ -69,6 +75,10 @@ else
         scan_layers=${USE_SCAN_LAYERS} \
         per_device_batch_size=1 \
         dtype=float32 \
+        wi_tile_fwd_embed_dim=512 \
+        wi_tile_fwd_mlp_dim=512 \
+        wo_tile_fwd_embed_dim=512 \
+        wo_tile_fwd_mlp_dim=512 \
         --max_kl_div=0.03 \
         --run_hf_model=true \
         --hf_model_path=${HF_MODEL}

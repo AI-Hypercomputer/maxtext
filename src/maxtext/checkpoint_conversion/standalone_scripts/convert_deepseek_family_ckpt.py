@@ -41,7 +41,7 @@ from tqdm import tqdm
 
 from safetensors import safe_open
 
-from maxtext.checkpoint_conversion.standalone_scripts import llama_or_mistral_ckpt
+from maxtext.checkpoint_conversion.utils.utils import save_weights_to_checkpoint
 from maxtext.inference.inference_utils import str2bool
 from maxtext.utils import max_logging
 
@@ -873,7 +873,7 @@ def main() -> None:
   os.environ["JAX_PLATFORMS"] = "cpu"
   os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={args.simulated_cpu_devices_count}"
   mem_info = psutil.Process()
-  llama_or_mistral_ckpt.save_weights_to_checkpoint(
+  save_weights_to_checkpoint(
       args.maxtext_model_path,
       _convert_to_jax_weights(args.base_model_path, args.model_size, mem_info, args.enable_mtp),
       args.simulated_cpu_devices_count,

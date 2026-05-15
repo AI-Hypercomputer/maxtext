@@ -30,7 +30,7 @@
 
 set -euo pipefail
 
-SEED_ENV="$HOME/.local/bin/seed-env"
+SEED_ENV="seed-env"
 
 # Defaults
 HARDWARE="tpu"

@@ -42,6 +42,17 @@ class GrainBaseProcessingTest:
   from unittest.TestCase (or a subclass thereof).
   """
 
+  @property
+  def train_iter(self):
+    cache_key = f"_cached_train_iter_{self.__class__.__name__}"
+    if not hasattr(self.__class__, cache_key):
+      setattr(
+          self.__class__,
+          cache_key,
+          grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices),
+      )
+    return getattr(self.__class__, cache_key)
+
   def test_train_ds(self):
     expected_shape = [jax.device_count(), self.config.max_target_length]
     # For training we pack multiple short examples in one example.
@@ -133,6 +144,7 @@ class GrainArrayRecordProcessingTest(GrainBaseProcessingTest, unittest.TestCase)
         grain_train_files=grain_train_files,
         tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.default"),
         enable_checkpointing=False,
+        max_target_length=128,
     )
     self.mesh_shape_1d = (len(jax.devices()),)
     self.mesh = Mesh(mesh_utils.create_device_mesh(self.mesh_shape_1d), self.config.mesh_axes)
@@ -143,7 +155,6 @@ class GrainArrayRecordProcessingTest(GrainBaseProcessingTest, unittest.TestCase)
         self.config.max_target_length,
         self.mesh,
     )
-    self.train_iter = grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
 
   def _make_config(self, **overrides):
     """Re-initialize config with base params, applying any overrides."""
@@ -158,6 +169,7 @@ class GrainArrayRecordProcessingTest(GrainBaseProcessingTest, unittest.TestCase)
         "grain_train_files": self.config.grain_train_files,
         "tokenizer_path": os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.default"),
         "enable_checkpointing": False,
+        "max_target_length": 128,
         **overrides,
     }
     return pyconfig.initialize([sys.argv[0], get_test_config_path()], **kwargs)
@@ -173,7 +185,6 @@ class GrainArrayRecordProcessingWithMultiSourceBlendingTest(GrainArrayRecordProc
     super().setUp()
     train_files_weighted = ";".join([f"{self.config.grain_train_files},0.3", f"{self.config.grain_train_files},0.7"])
     self.config = self._make_config(grain_train_files=train_files_weighted)
-    self.train_iter = grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
 
 
 class GrainArrayRecordProcessingWithMixtureConfigTest(GrainArrayRecordProcessingTest):
@@ -223,7 +234,6 @@ class GrainArrayRecordProcessingWithMixtureConfigTest(GrainArrayRecordProcessing
       json.dump(mixture_config, f)
 
     self.config = self._make_config(grain_train_mixture_config_path=self.mixture_config_path)
-    self.train_iter = grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
 
 
 # TODO(aireenmei): Migrate this test to XLML
@@ -234,7 +244,6 @@ class GrainArrayRecordAutoTuneTest(GrainArrayRecordProcessingTest):
   def setUp(self):
     super().setUp()
     self.config = self._make_config(grain_ram_budget_mb=512, grain_worker_count=-1)  # Enable auto-tuning
-    self.train_iter = grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
 
   @pytest.mark.skip(
       reason=(
@@ -259,7 +268,6 @@ class GrainArrayRecordTiktokenTest(GrainArrayRecordProcessingTest):
         tokenizer_type="tiktoken",
         tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer_llama3.tiktoken"),
     )
-    self.train_iter = grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
 
   # Only runs test_train_ds from parent class, skip other tests
   @pytest.mark.skip(reason="skip for tokenizer testing")
@@ -276,8 +284,10 @@ class GrainArrayRecordHFTokenizerTest(GrainArrayRecordProcessingTest):
 
   def setUp(self):
     super().setUp()
-    self.config = self._make_config(tokenizer_type="huggingface", tokenizer_path="deepseek-ai/DeepSeek-V3")
-    self.train_iter = grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
+    self.config = self._make_config(
+        tokenizer_type="huggingface",
+        tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "qwen3-tokenizer"),
+    )
 
   # Only runs test_train_ds from parent class, skip other tests
   @pytest.mark.skip(reason="skip for tokenizer testing")
@@ -295,7 +305,6 @@ class GrainArrayRecordBestFitPackingTest(GrainArrayRecordProcessingTest):
   def setUp(self):
     super().setUp()
     self.config = self._make_config(grain_packing_type="best_fit")
-    self.train_iter = grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
 
 
 class GrainParquetProcessingTest(GrainBaseProcessingTest, unittest.TestCase):
@@ -348,6 +357,7 @@ class GrainParquetProcessingTest(GrainBaseProcessingTest, unittest.TestCase):
         grain_per_worker_buffer_size=1,
         tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.default"),
         enable_checkpointing=False,
+        max_target_length=128,
     )
     self.mesh_shape_1d = (len(jax.devices()),)
     self.mesh = Mesh(mesh_utils.create_device_mesh(self.mesh_shape_1d), self.config.mesh_axes)
@@ -358,7 +368,6 @@ class GrainParquetProcessingTest(GrainBaseProcessingTest, unittest.TestCase):
         self.config.max_target_length,
         self.mesh,
     )
-    self.train_iter = grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
 
 
 class GrainTFRecordProcessingTest(GrainBaseProcessingTest, unittest.TestCase):
@@ -413,6 +422,7 @@ class GrainTFRecordProcessingTest(GrainBaseProcessingTest, unittest.TestCase):
         grain_per_worker_buffer_size=1,
         tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.default"),
         enable_checkpointing=False,
+        max_target_length=128,
     )
     self.mesh_shape_1d = (len(jax.devices()),)
     self.mesh = Mesh(mesh_utils.create_device_mesh(self.mesh_shape_1d), self.config.mesh_axes)
@@ -423,7 +433,37 @@ class GrainTFRecordProcessingTest(GrainBaseProcessingTest, unittest.TestCase):
         self.config.max_target_length,
         self.mesh,
     )
-    self.train_iter = grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
+
+
+class GrainTFRecordPreTokenizedProcessingTest(GrainTFRecordProcessingTest):
+  """Test grain data processing with a pre-tokenized TFRecord dataset (tokenize_train_data=False).
+
+  Uses c4/en/3.0.5 validation_tokenized_5662seqs split, which stores token IDs
+  in an 'ids' int64 column rather than raw text.
+  """
+
+  def setUp(self):
+    super().setUp()
+    base = get_test_dataset_path() if is_decoupled() else os.path.join(tempfile.gettempdir(), "gcsfuse")
+    grain_train_file = os.path.join(base, "c4", "en", "3.0.5", "c4-validation_tokenized_5662seqs.tfrecord-00000-of-00001")
+    self.config = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        per_device_batch_size=1,
+        run_name="test",
+        mesh_axes=["data"],
+        logical_axis_rules=[["batch", "data"]],
+        data_sharding=["data"],
+        base_output_directory=self.config.base_output_directory,
+        dataset_type="grain",
+        grain_file_type="tfrecord",
+        grain_train_files=grain_train_file,
+        grain_worker_count=1,
+        grain_per_worker_buffer_size=1,
+        tokenize_train_data=False,
+        train_data_columns=["ids"],
+        tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.default"),
+        enable_checkpointing=False,
+    )
 
 
 @pytest.mark.external_training
@@ -452,7 +492,7 @@ class GrainSFTParquetProcessingTest(unittest.TestCase):
         sft_train_on_completion_only=True,
         train_data_columns=["messages"],
         tokenizer_type="huggingface",
-        tokenizer_path="HuggingFaceH4/zephyr-7b-beta",  # The ungated tokenizer
+        tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "qwen3-tokenizer"),
         max_target_length=128,
         packing=True,
         grain_worker_count=1,

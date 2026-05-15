@@ -27,14 +27,14 @@ class TransformationAgent(BaseAgent):
   An agent that generates transformation hook functions for model conversion.
   """
 
-  def __init__(self, api_key, dir_path, target_model="gemma3"):
+  def __init__(self, dir_path, target_model="gemma3"):
     """
     Initializes the TransformationAgent.
 
     Args:
         target_model (str): The target model for conversion.
     """
-    super().__init__(api_key)
+    super().__init__()
     self.target_model = target_model
     self.dir_path = dir_path
     self.dsl = load_text_file(f"{self.dir_path}/context/dsl.txt")
@@ -93,7 +93,6 @@ if __name__ == "__main__":
   parser.add_argument(
       "--dir_path", type=str, required=True, help='The file path to the context directory (e.g., "context/gemma3").'
   )
-  parser.add_argument("--api_key", type=str, help="Optional API key for external services.")
   args = parser.parse_args()
-  agent = TransformationAgent(api_key=args.api_key, dir_path=args.dir_path, target_model=TARGET_MODEL)
+  agent = TransformationAgent(dir_path=args.dir_path, target_model=TARGET_MODEL)
   global_hook_fn_code = agent.generate_hook_functions()

@@ -51,6 +51,7 @@ class SimpleNNXModel(nnx.Module):
     return self.dense(x)
 
 
+@pytest.mark.integration_test
 class DiLoCoTest(unittest.TestCase):
 
   @pytest.mark.tpu_only
@@ -284,10 +285,18 @@ class DiLoCoTest(unittest.TestCase):
             "dcn_diloco_parallelism=2",
             "enable_diloco=true",
             "model_name=qwen3-30b-a3b",
+            "override_model_config=True",
+            "base_emb_dim=32",
+            "base_num_decoder_layers=1",
+            "base_mlp_dim=64",
+            "base_num_query_heads=4",
+            "base_num_kv_heads=4",
+            "head_dim=8",
         )
     )
 
-  @pytest.mark.tpu_only
+  @pytest.mark.cpu_only
+  @pytest.mark.tpu_backend
   def test_diloco_two_slices(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_compiled_diloco.pickle")
@@ -302,5 +311,12 @@ class DiLoCoTest(unittest.TestCase):
             "dcn_diloco_parallelism=2",
             "enable_diloco=true",
             "model_name=gemma2-2b",
+            "override_model_config=True",
+            "base_emb_dim=32",
+            "base_num_decoder_layers=1",
+            "base_mlp_dim=64",
+            "base_num_query_heads=1",
+            "base_num_kv_heads=1",
+            "head_dim=4",
         )
     )

@@ -162,7 +162,6 @@ The examples below run on a single TPU slice (`--num-slices=1`) or a small numbe
 For instance, to run a job across **four TPU slices**, you would change `export NUM_SLICES=1` to `export NUM_SLICES=4`. This tells XPK to allocate four `v5litepod-256` slices and orchestrate the training job across all of them as a single workload. Similarly, for GPUs, you would increase the value.
 
 3. **Create the workload (run the job)**
-
    - **On your TPU cluster:**
 
      ```bash
@@ -189,17 +188,80 @@ For instance, to run a job across **four TPU slices**, you would change `export 
 
 ______________________________________________________________________
 
-## 5. Managing and monitoring your job
+## 6. Running with Ahead-of-Time (AOT) Compilation
+
+Ahead-of-Time (AOT) compilation can significantly reduce the startup time of your training job by pre-compiling the JAX training step for a specific hardware topology. The workflow involves generating a compiled artifact, including it in your Docker image, and then telling MaxText to use it at runtime.
+
+### Step 1: Generate the AOT artifact
+
+First, run `train_compile.py` script to create the compiled artifact for the specified TPU topology.
+
+```bash
+export WORKLOAD_NAME="${USER}-aot-job"
+export TPU_TYPE="your-tpu-type" # e.g. "v5p-32"
+export NUM_SLICES=your-num-slices # e.g. 1
+export PER_DEVICE_BATCH_SIZE=your-batch-size # e.g. 1
+export USER=your-username
+
+python3 -m maxtext.trainers.pre_train.train_compile \
+  compile_topology=${TPU_TYPE} \
+  compile_topology_num_slices=${NUM_SLICES} \
+  compiled_trainstep_file=maxtext_${TPU_TYPE}_aot.pickle \
+  per_device_batch_size=${PER_DEVICE_BATCH_SIZE}
+```
+
+This will create a file named `maxtext_${TPU_TYPE}_aot.pickle` in your MaxText root directory.
+
+### Step 2: Re-build and upload your Docker image
+
+The AOT artifact must be included in your Docker image. The `docker_upload_runner.sh` script automatically copies the contents of your MaxText directory into the image:
+
+```bash
+export CLOUD_IMAGE_NAME="${USER}-maxtext-aot-runner"
+
+bash src/dependencies/scripts/docker_upload_runner.sh CLOUD_IMAGE_NAME=${CLOUD_IMAGE_NAME}
+```
+
+### Step 3: Create the XPK workload with the AOT artifact
+
+Now, submit the workload as before, but add the `compiled_trainstep_file` argument to the command and use the custom Docker Image we built in step 2. This tells MaxText to load the pre-compiled step instead of compiling it at runtime.
+
+```bash
+export BASE_OUTPUT_DIR=your-output-dir # e.g. gs://your-output-bucket/
+export DATASET_PATH=your-dataset-path # e.g. gs://your-dataset-bucket/
+export CLUSTER_NAME=your-cluster-name
+export PROJECT_ID=your-project-id
+
+xpk workload create \
+  --cluster ${CLUSTER_NAME} \
+  --workload ${WORKLOAD_NAME} \
+  --docker-image "gcr.io/${PROJECT_ID}/${CLOUD_IMAGE_NAME}" \
+  --tpu-type ${TPU_TYPE} \
+  --num-slices ${NUM_SLICES} \
+  --command "python3 -m maxtext.trainers.pre_train.train \
+    run_name=${WORKLOAD_NAME} \
+    base_output_directory=${BASE_OUTPUT_DIR} \
+    dataset_path=${DATASET_PATH} \
+    steps=100 \
+    per_device_batch_size=${PER_DEVICE_BATCH_SIZE} \
+    compiled_trainstep_file=/deps/maxtext_${TPU_TYPE}_aot.pickle"
+```
+
+Your job will now start faster by skipping the JAX compilation step on the cluster.
+
+______________________________________________________________________
+
+## 7. Managing and monitoring your job
 
 - **View logs in real-time:** The easiest way to see the output of your training job is through the Google Cloud Console.
 
-  1. Navigate to the **Kubernetes Engine** section.
+- 1. Navigate to the **Kubernetes Engine** section.
 
-  2. Go to **Workloads**.
+- 2. Go to **Workloads**.
 
   3. Find your workload (e.g., `${RUN_NAME?}`) and click on it.
 
-  4. Select the **Logs** tab to view the container logs.
+- 4. Select the **Logs** tab to view the container logs.
 
 - **List your jobs:**
 

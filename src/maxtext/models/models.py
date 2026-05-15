@@ -33,7 +33,7 @@ from maxtext.layers import nnx_wrappers
 from maxtext.layers.decoders import Decoder
 from maxtext.layers.embeddings import Embed, embed_as_linen
 from maxtext.layers.encoders import AudioEncoder, VisionEncoder, audio_encoder_as_linen, vision_encoder_as_linen
-from maxtext.layers.multi_token_prediction import multi_token_prediction_block_as_linen
+from maxtext.layers.multi_token_prediction import MultiTokenPredictionBlock, multi_token_prediction_block_as_linen
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.multimodal import processor as mm_processor
 from maxtext.utils import max_utils
@@ -386,25 +386,12 @@ class Transformer(nnx.Module):
       # For MTP, we use the DecoderLayer blueprint to ensure architectural consistency.
       # By convention, this is the last layer in the list.
       mtp_layer = layer_types[-1]
-      mtp_block_linen = multi_token_prediction_block_as_linen(
+      self.mtp_block = MultiTokenPredictionBlock(
           config=self.config,
           mesh=self.mesh,
           transformer_layer_module=mtp_layer,
           decoder=self.decoder,
           rngs=rngs,
-          name="mtp_block",
-      )
-      self.mtp_block = nnx_wrappers.ToNNX(mtp_block_linen, rngs=rngs)
-
-      self.mtp_block.lazy_init(
-          shared_embedding=self.token_embedder,
-          main_hidden_state=jnp.ones((1, 1, self.config.emb_dim), dtype=self.config.dtype),
-          input_ids=jnp.ones((1, 1), dtype=jnp.int32),
-          target_ids=jnp.ones((1, 1), dtype=jnp.int32),
-          target_mask=jnp.ones((1, 1), dtype=jnp.int32),
-          position_ids=jnp.ones((1, 1), dtype=jnp.int32),
-          decoder_segment_ids=jnp.ones((1, 1), dtype=jnp.int32),
-          deterministic=True,
       )
 
   def no_op(self, *args, **kwargs):

@@ -24,7 +24,7 @@ In this tutorial we use a single host TPU VM such as `v6e-8/v5p-8`. Let's get st
 
 ## Install dependencies
 
-For instructions on installing MaxText on your VM, please refer to the [official documentation](https://maxtext.readthedocs.io/en/maxtext-v0.2.1/install_maxtext.html) and use the `maxtext[tpu]` installation path to include all necessary dependencies.
+For instructions on installing MaxText on your VM, please refer to the [official documentation](../../install_maxtext.md) and use the `maxtext[tpu]` installation path to include all necessary dependencies.
 
 ## Setup environment variables
 
@@ -70,7 +70,7 @@ export MAXTEXT_CKPT_PATH=<CKPT_PATH> # e.g., gs://my-bucket/my-model-checkpoint/
 
 ### Option 2: Converting a Hugging Face checkpoint
 
-Refer the steps in [Hugging Face to MaxText](https://maxtext.readthedocs.io/en/maxtext-v0.2.1/guides/checkpointing_solutions/convert_checkpoint.html#hugging-face-to-maxtext) to convert a hugging face checkpoint to MaxText. Make sure you have correct checkpoint files converted and saved. Similar as Option 1, you can set the following environment and move on.
+Refer the steps in [Hugging Face to MaxText](../../guides/checkpointing_solutions/convert_checkpoint.md#hugging-face-to-maxtext) to convert a hugging face checkpoint to MaxText. Make sure you have correct checkpoint files converted and saved. Similar as Option 1, you can set the following environment and move on.
 
 ```bash
 export MAXTEXT_CKPT_PATH=<CKPT_PATH> # gs://my-bucket/my-checkpoint-directory/0/items

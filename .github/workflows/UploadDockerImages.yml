@@ -106,3 +106,4 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           title-template: "MaxText Docker Image Build Failure"
+          label-name: "docker-image-build-failure"

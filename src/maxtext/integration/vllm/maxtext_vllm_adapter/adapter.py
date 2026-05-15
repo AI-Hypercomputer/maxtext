@@ -103,36 +103,50 @@ def generate_maxtext_config(vllm_config: VllmConfig, mesh: Mesh) -> pyconfig.Hyp
 
   # Gather information on the hidden size of MoE models to determine if padding is needed
   # to meet MLP MoE requirements for tpu-inference GMM_v2 kernel.
-  hidden_size = getattr(vllm_config.model_config.hf_config, "moe_intermediate_size", None)
-  padded_hidden_size = hidden_size
+  hf_config = (
+      vllm_config.model_config.hf_config.text_config
+      if hasattr(vllm_config.model_config.hf_config, "text_config")
+      else vllm_config.model_config.hf_config
+  )
+  hidden_size = getattr(hf_config, "moe_intermediate_size", None)
   num_lanes = pltpu.get_tpu_info().num_lanes
+  use_global_kv_heads = hasattr(hf_config, "num_global_key_value_heads")
+  num_kv_heads = hf_config.num_key_value_heads
+
+  # Get the number KV heads used in global attention layers if specified.
+  num_global_kv_heads = hf_config.num_global_key_value_heads if use_global_kv_heads else None
 
   max_logging.log(
-      f"vLLM sharding config: hidden_size={hidden_size}, tp={tp}, "
-      f"attn_dp={attn_dp}, ep={ep}, moe_mlp_tp_size={moe_mlp_tp_size}"
+      f"vLLM sharding config: hidden_size={hidden_size}, kv_heads={num_kv_heads}, global_kv_heads={num_global_kv_heads}, "
+      f"num_lanes={num_lanes}, tp={tp}, attn_dp={attn_dp}, ep={ep}, moe_mlp_tp_size={moe_mlp_tp_size}"
   )
 
   # Replicate the number of KV heads if its less than the total degree of model parallelism
-  if (
-      kv_tp_size % vllm_config.model_config.get_total_num_kv_heads() == 0
-      and vllm_config.model_config.get_total_num_kv_heads() < kv_tp_size
-  ):
+  if kv_tp_size % num_kv_heads == 0 and num_kv_heads < kv_tp_size:
     max_logging.log(
-        f"Padding num_kv_heads from {vllm_config.model_config.get_total_num_kv_heads()} "
-        f"to {kv_tp_size} to match the degree of tensor parallelism."
+        f"Padding num_kv_heads from {num_kv_heads} to {kv_tp_size} to match the degree of tensor parallelism."
     )
     overrides["base_num_kv_heads"] = kv_tp_size
+
+  # Replicate the number of global KV heads if its less than the total degree of model parallelism
+  if use_global_kv_heads and kv_tp_size % num_global_kv_heads == 0 and num_global_kv_heads < kv_tp_size:
+    max_logging.log(
+        f"Padding num_global_kv_heads from {num_global_kv_heads} "
+        f"to {kv_tp_size} to match the degree of tensor parallelism."
+    )
+    overrides["global_num_kv_heads"] = kv_tp_size
 
   # Pad the hidden size of MoE models if the MLP dimension is less than expected by the GMM_v2 kernel in tpu-inference.
   # The GMM_v2 kernel requires the MLP dimension per expert to be at least 2x the number of TPU lanes
   # to ensure efficient execution. See the validate_inputs() method in the following file for more details:
   # https://github.com/vllm-project/tpu-inference/blob/main/tpu_inference/kernels/megablox/gmm_v2.py
-  if hidden_size is not None and tp > 1 and (hidden_size // moe_mlp_tp_size) % (2 * num_lanes) != 0:
+  if hidden_size is not None and (hidden_size // moe_mlp_tp_size) % (2 * num_lanes) != 0:
+    padded_hidden_size = next_power_of_two(hidden_size)
     while (padded_hidden_size // moe_mlp_tp_size) < (2 * num_lanes):
-      padded_hidden_size = next_power_of_two(padded_hidden_size)
+      padded_hidden_size = next_power_of_two(padded_hidden_size + 1)
 
     max_logging.log(
-        f"Padding moe_intermediate_size from {hidden_size} " f"to {padded_hidden_size} to match MLP MoE requirements."
+        f"Padding moe_intermediate_size from {hidden_size} to {padded_hidden_size} to match MLP MoE requirements."
     )
     overrides["padded_base_moe_mlp_dim"] = padded_hidden_size
 
@@ -191,7 +205,7 @@ class MaxTextForCausalLM(nnx.Module):
       attention_metadata: AttentionMetadata,
       *args,
       **kwargs,
-  ) -> tuple[list[jax.Array], jax.Array, list[jax.Array]]:
+  ) -> tuple[list[jax.Array], jax.Array, list[jax.Array], list[jax.Array] | None]:
     """Performs a forward pass through the causal language model.
 
     Args:
@@ -206,6 +220,7 @@ class MaxTextForCausalLM(nnx.Module):
         - updated_kv_caches: A list of updated KV caches.
         - hidden: The hidden states.
         - aux_hidden_states: A list of auxiliary hidden states.
+        - expert_indices: A list of expert indices or None.
 
     Raises:
       ValueError: If the model is not an instance of `nnx.Module`.
@@ -219,6 +234,7 @@ class MaxTextForCausalLM(nnx.Module):
 
     with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
       aux_hidden_states = []
+      expert_indices = None
       hidden, kv_caches = self.model(
           decoder_input_tokens=input_ids,
           decoder_positions=input_positions,
@@ -231,7 +247,7 @@ class MaxTextForCausalLM(nnx.Module):
       # To be compatible with vLLM, we reshape to (batch * seq, dim).
       hidden = hidden.reshape((-1, hidden.shape[-1]))
 
-    return kv_caches, hidden, aux_hidden_states
+    return kv_caches, hidden, aux_hidden_states, expert_indices
 
   def forward(self, *args, **kwargs):
     """Alias for __call__ for compatibility.

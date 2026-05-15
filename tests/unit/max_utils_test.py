@@ -344,5 +344,128 @@ class TestMaybePad(unittest.TestCase):
     self.assertEqual(padding_amount, target_padding_amount)
 
 
+class TestMaybeInitializeJaxDistributedSystem(unittest.TestCase):
+  """Tests for maybe_initialize_jax_distributed_system.
+
+  Note: jax.distributed.initialize is mocked in these tests.
+  We intentionally avoid actually calling jax.distributed.initialize
+  because doing so within pytest can lead to unpredictable
+  interactions with the test runner.
+  """
+
+  def setUp(self):
+    patcher = mock.patch("jax.distributed.is_initialized", return_value=False)
+    self.mock_is_initialized = patcher.start()
+    self.addCleanup(patcher.stop)
+
+  def _base_keys(self, **overrides):
+    """Return a minimal raw_keys dict with all required fields, accepting per-test overrides."""
+    keys = {
+        "skip_jax_distributed_system": False,
+        "enable_single_controller": False,
+        "inference_benchmark_test": False,
+        "compile_topology": False,
+        "hardware": "tpu",
+        "enable_emergency_checkpoint": False,
+        "jax_distributed_initialization_timeout": 300,
+        "enable_multi_tier_checkpointing": False,
+        "local_checkpoint_directory": "/tmp/ckpt",
+        "multi_tier_checkpointing_backup_interval_minutes": 5,
+        "run_name": "test_run",
+        "mtc_data_parallelism": 1,
+        "enable_checkpointing": True,
+        "compile_topology_num_slices": -1,
+    }
+    keys.update(overrides)
+    return keys
+
+  @mock.patch("jax.distributed.initialize")
+  def test_skip_flag_exits_early(self, mock_init):
+    max_utils.maybe_initialize_jax_distributed_system(self._base_keys(skip_jax_distributed_system=True))
+    mock_init.assert_not_called()
+
+  @mock.patch("jax.distributed.initialize")
+  def test_single_controller_exits_early(self, mock_init):
+    max_utils.maybe_initialize_jax_distributed_system(self._base_keys(enable_single_controller=True))
+    mock_init.assert_not_called()
+
+  @mock.patch("jax.distributed.is_initialized", return_value=True)
+  @mock.patch("jax.distributed.initialize")
+  def test_already_initialized_exits_early(self, mock_init, _is_init):
+    max_utils.maybe_initialize_jax_distributed_system(self._base_keys())
+    mock_init.assert_not_called()
+
+  @mock.patch("jax.distributed.initialize")
+  def test_inference_benchmark_exits_early(self, mock_init):
+    max_utils.maybe_initialize_jax_distributed_system(self._base_keys(inference_benchmark_test=True))
+    mock_init.assert_not_called()
+
+  @mock.patch("jax.distributed.initialize")
+  def test_compile_topology_exits_early(self, mock_init):
+    max_utils.maybe_initialize_jax_distributed_system(self._base_keys(compile_topology=True))
+    mock_init.assert_not_called()
+
+  @mock.patch("maxtext.utils.max_utils.initialize_jax_for_gpu")
+  def test_gpu_backend_calls_initialize_jax_for_gpu(self, mock_gpu_init):
+    raw_keys = self._base_keys(hardware="gpu")
+    max_utils.maybe_initialize_jax_distributed_system(raw_keys)
+    mock_gpu_init.assert_called_once_with(raw_keys)
+
+  @mock.patch("maxtext.utils.max_utils.initialize_jax_for_cpu")
+  def test_cpu_backend_calls_initialize_jax_for_cpu(self, mock_cpu_init):
+    raw_keys = self._base_keys(hardware="cpu")
+    max_utils.maybe_initialize_jax_distributed_system(raw_keys)
+    mock_cpu_init.assert_called_once_with(raw_keys)
+
+  @mock.patch("jax.distributed.initialize")
+  def test_gpu_multiprocess_no_emergency_calls_jax_init(self, mock_init):
+    raw_keys = self._base_keys(hardware="gpu_multiprocess")
+    max_utils.maybe_initialize_jax_distributed_system(raw_keys)
+    mock_init.assert_called_once_with(initialization_timeout=self._base_keys()["jax_distributed_initialization_timeout"])
+
+  # create=True: initialize_distributed_to_device_ids only exists in multi-host orbax builds, not single-host.
+  @mock.patch("orbax.checkpoint.multihost.initialize_distributed_to_device_ids", create=True)
+  @mock.patch("orbax.checkpoint.multihost.initialize_runtime_to_distributed_ids")
+  @mock.patch("jax.distributed.initialize")
+  def test_gpu_multiprocess_with_emergency_calls_ocp_multihost(self, mock_init, mock_runtime, mock_device):
+    raw_keys = self._base_keys(hardware="gpu_multiprocess", enable_emergency_checkpoint=True)
+    max_utils.maybe_initialize_jax_distributed_system(raw_keys)
+    mock_init.assert_called_once_with(initialization_timeout=self._base_keys()["jax_distributed_initialization_timeout"])
+    mock_runtime.assert_called_once()
+    mock_device.assert_called_once()
+
+  @mock.patch("maxtext.utils.max_utils.initialize_multi_tier_checkpointing")
+  def test_tpu_multi_tier_checkpointing(self, mock_mtc):
+    raw_keys = self._base_keys(enable_multi_tier_checkpointing=True)
+    max_utils.maybe_initialize_jax_distributed_system(raw_keys)
+    mock_mtc.assert_called_once_with(
+        local_checkpoint_directory=self._base_keys()["local_checkpoint_directory"],
+        backup_interval_minutes=self._base_keys()["multi_tier_checkpointing_backup_interval_minutes"],
+        run_name=self._base_keys()["run_name"],
+        jax_initialization_timeout_seconds=self._base_keys()["jax_distributed_initialization_timeout"],
+        data_parallelism=self._base_keys()["mtc_data_parallelism"],
+    )
+
+  @mock.patch("jax.distributed.initialize")
+  def test_tpu_checkpointing_no_emergency_calls_jax_init(self, mock_init):
+    raw_keys = self._base_keys(enable_checkpointing=True, compile_topology_num_slices=-1)
+    max_utils.maybe_initialize_jax_distributed_system(raw_keys)
+    mock_init.assert_called_once_with(initialization_timeout=self._base_keys()["jax_distributed_initialization_timeout"])
+
+  @mock.patch("maxtext.utils.max_utils.initialize_jax_for_tpu_with_emergency_checkpointing")
+  def test_tpu_checkpointing_with_emergency(self, mock_tpu_emergency):
+    raw_keys = self._base_keys(
+        enable_checkpointing=True, compile_topology_num_slices=-1, enable_emergency_checkpoint=True
+    )
+    max_utils.maybe_initialize_jax_distributed_system(raw_keys)
+    mock_tpu_emergency.assert_called_once_with(raw_keys)
+
+  @mock.patch("jax.distributed.initialize")
+  def test_tpu_no_checkpointing_does_not_call_jax_init(self, mock_init):
+    raw_keys = self._base_keys(enable_checkpointing=False, enable_multi_tier_checkpointing=False)
+    max_utils.maybe_initialize_jax_distributed_system(raw_keys)
+    mock_init.assert_not_called()
+
+
 if __name__ == "__main__":
   unittest.main()

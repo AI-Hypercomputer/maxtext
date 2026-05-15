@@ -15,7 +15,9 @@
 """Checkpoint conversion utility functions."""
 
 import contextlib
+import gc
 import io
+import logging
 import os
 import tempfile
 import time
@@ -30,6 +32,7 @@ import pathlib
 from etils import epath
 
 import jax
+from jax import tree
 from jax.experimental import multihost_utils
 from jaxtyping import Array
 
@@ -45,6 +48,8 @@ from huggingface_hub import HfApi, repo_exists, snapshot_download
 from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
 from transformers import AutoModelForCausalLM
 
+from flax.training import train_state
+from maxtext.common import checkpointing
 from maxtext.utils import max_logging
 import orbax.checkpoint as ocp
 
@@ -99,11 +104,19 @@ def validate_and_filter_param_map_keys(param_map_keys, maxtext_state_keys):
   # 1 Validate: every maxtext state key must be covered by param map
   missing_keys = maxtext_state_keys - flattened_map_keys
   if missing_keys:
+    hint = ""
+    ckpt_has_scanned = any("scanned_blocks" in k for k in missing_keys)
+    map_has_scanned = any("scanned_blocks" in k for k in flattened_map_keys)
+    if ckpt_has_scanned and not map_has_scanned:
+      hint = "\nHint: checkpoint keys contain 'scanned_blocks' but param_map does not — try scan_layers=True."
+    elif map_has_scanned and not ckpt_has_scanned:
+      hint = "\nHint: param_map contains 'scanned_blocks' keys but checkpoint does not — try scan_layers=False."
     raise ValueError(
         "maxtext_state_dict must be a subset of flattened param_map"
         + f"\nparam map\n{param_map_keys}"
         + f"\nmaxtext:\n{maxtext_state_keys}"
         + f"\nmissing keys:\n{missing_keys}"
+        + hint
     )
 
   # 2 Filter: param map may have extra keys
@@ -172,9 +185,7 @@ def _process(hf_path, processed_slice, output_weights, current_hook_fns, hf_shap
   # If hook is unsepecified, use identity
   if current_hook_fns:
     processed_slice = apply_hook_fns(processed_slice, target_hf_shape, current_hook_fns)
-  numpy_slice = convert_jax_weight_to_numpy(processed_slice, save_dtype).squeeze()
-  if numpy_slice.shape != tuple(target_hf_shape):
-    raise ValueError(f"Shape mismatch for {hf_path}: Expect {target_hf_shape}, got {numpy_slice.shape}")
+  numpy_slice = convert_jax_weight_to_numpy(processed_slice, save_dtype).reshape(target_hf_shape)
   output_weights.append((hf_path, numpy_slice))
 
 
@@ -784,13 +795,13 @@ class MemoryMonitorTqdm(tqdm):
 
 
 def load_orbax_checkpoint(config) -> dict:
-  """Loads a full Orbax checkpoint from disk with unsharded arrays.
+  """Loads Orbax checkpoints from Base and/or LoRA paths in config.
 
   Args:
     config: MaxText config containing checkpoint storage settings
 
   Returns:
-    Dictionary containing the full checkpoint structure
+    Dictionary containing all weights merged into a single structure.
   """
   # Create Orbax checkpointer
   ckptr = ocp.Checkpointer(
@@ -800,10 +811,6 @@ def load_orbax_checkpoint(config) -> dict:
           use_zarr3=config.checkpoint_storage_use_zarr3,
       )
   )
-
-  # Get checkpoint metadata
-  checkpoint_path = epath.Path(config.load_parameters_path)
-  metadata = ckptr.metadata(checkpoint_path)
 
   # Create a mesh with all devices for unsharded restoration
   devices = np.array(jax.devices()).reshape((-1,))
@@ -818,14 +825,44 @@ def load_orbax_checkpoint(config) -> dict:
     else:
       return None
 
-  restore_args = jax.tree_util.tree_map(
-      lambda x: create_restore_args(x) if hasattr(x, "shape") else None,
-      metadata.item_metadata.tree,
-      is_leaf=lambda x: hasattr(x, "shape"),
-  )
+  lora_path = config.lora.lora_restore_path
+  paths = [p for p in [config.load_parameters_path, lora_path] if p]
 
-  # Restore the entire checkpoint
-  return ckptr.restore(checkpoint_path, restore_args=restore_args)
+  merged_dict = {}
+  for path in paths:
+    checkpoint_path = epath.Path(path)
+    metadata = ckptr.metadata(checkpoint_path)
+    restore_args = jax.tree_util.tree_map(
+        lambda x: create_restore_args(x) if hasattr(x, "shape") else None,
+        metadata.item_metadata.tree,
+        is_leaf=lambda x: hasattr(x, "shape"),
+    )
+    merged_dict.update(ckptr.restore(checkpoint_path, restore_args=restore_args))
+
+  return merged_dict
+
+
+def save_adapter_files(output_dir, weights, config, found_modules, model_id):
+  """Saves HF LoRA adapter weights and config."""
+  os.makedirs(output_dir, exist_ok=True)
+  adapter_file = os.path.join(output_dir, "adapter_model.safetensors")
+  numpy_save_file(weights, adapter_file)
+
+  # Create PEFT adapter_config.json
+  adapter_config = {
+      "base_model_name_or_path": model_id,
+      "peft_type": "LORA",
+      "task_type": "CAUSAL_LM",
+      "r": config.lora.lora_rank,
+      "lora_alpha": config.lora.lora_alpha,
+      "target_modules": list(found_modules),
+      "lora_dropout": 0.0,
+      "bias": "none",
+      "inference_mode": True,
+  }
+  config_file = os.path.join(output_dir, "adapter_config.json")
+  with open(config_file, "w", encoding="utf-8") as f:
+    json.dump(adapter_config, f, indent=4)
 
 
 def extract_nnx_weights(weights_dict: dict) -> dict[str, np.ndarray]:
@@ -984,3 +1021,147 @@ def load_hf_dict_from_safetensors(model_id_or_path, token, revision, framework="
       for key in f.keys():
         hf_state_dict[key] = f.get_tensor(key)
   return hf_state_dict
+
+
+def shard_jax_weights(jax_weights, device_count, mem_info):
+  """Shards the checkpoint weights across the simulated devices.
+
+  Args:
+    jax_weights: Pytree of model weights (numpy arrays).
+    device_count: The number of simulated devices.
+    mem_info: Process object to track memory usage.
+
+  Returns:
+    Pytree of sharded JAX arrays.
+  """
+  # Setup mesh & sharding specs
+  if len(jax.devices()) != device_count:
+    max_logging.log(
+        "WARNING: hardware/simulated device mismatch. "
+        f"Actual JAX devices: {len(jax.devices())}, Requested count: {device_count}."
+    )
+  max_logging.log(f"Shard weights across {len(jax.devices())} devices")
+  max_logging.log("Note: Axis 0 sharding is the default and will not be logged individually.")
+  # Pre-define sharding specs
+  mesh = jax.sharding.Mesh(jax.devices(), "checkpoint_sharding_axis")
+  # No sharding (replicated specifically for 0D scalars)
+  s0 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+  # Sharding along axis 0
+  s1 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("checkpoint_sharding_axis"))
+  # Sharding along axis 1
+  s2 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, "checkpoint_sharding_axis"))
+  # No sharding (replicated)
+  s3 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None))
+
+  def checkpoint_device_put(arr):
+    """Determines correct sharding spec based on shape and shards the input array.
+
+    Args:
+      arr: A numpy array (or jax array).
+
+    Returns:
+      A sharded jax array.
+    """
+    if not isinstance(arr, (np.ndarray, jax.Array)):
+      # materialize lazy tensor
+      arr = np.array(arr)
+
+    if len(arr.shape) == 0:
+      max_logging.log("0D scalar detected, replicating")
+      return jax.device_put(arr, device=s0)
+    elif arr.shape[0] % device_count == 0:
+      # Sharding axis 0: Omit log for brevity per the summary log above.
+      return jax.device_put(arr, device=s1)
+    elif len(arr.shape) > 1 and arr.shape[1] % device_count == 0:
+      max_logging.log(f"Sharding axis 1. Tensor shape {arr.shape}")
+      return jax.device_put(arr, device=s2)
+    else:
+      max_logging.log(f"Not sharding. Tensor shape {arr.shape}")
+      return jax.device_put(arr, device=s3)
+
+  # Weight sharding
+  start = time.time()
+  # convert all weights to jax.numpy with sharding if applicable
+  jax_weights_flat, jax_weights_struct = tree.flatten(jax_weights)
+  del jax_weights
+  gc.collect()
+
+  jax_weights_new = []
+  jax_weights_flat.reverse()
+  num_weights = len(jax_weights_flat)
+  for _ in tqdm(range(num_weights)):
+    jax_weight = jax_weights_flat.pop()
+    jax_weights_new.append(checkpoint_device_put(jax_weight))
+    del jax_weight
+    gc.collect()
+    logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
+
+  jax_weights = tree.unflatten(jax_weights_struct, jax_weights_new)
+  max_logging.log(f"Elapse for checkpoint sharding: {(time.time() - start) / 60:.2f} min")
+
+  return jax_weights
+
+
+def save_weights_to_checkpoint(
+    maxtext_model_path: str,
+    jax_weights: dict,
+    device_count: int,
+    use_ocdbt: bool,
+    use_zarr3: bool,
+):
+  """Saves model weights to a MaxText-compatible checkpoint with optional sharding.
+
+  This function handles the conversion of NumPy weights into sharded JAX arrays
+  across a specified number of simulated devices. If the device count is 1,
+  the sharding and JAX conversion steps are skipped.
+
+  Args:
+      maxtext_model_path: The destination directory or URI for the MaxText checkpoint.
+      jax_weights: A dictionary mapping parameter names to weight arrays (typically NumPy).
+      device_count: The number of simulated devices to shard across. If 1, weights
+          are saved in their original format.
+      use_ocdbt: If True, enables the Optimized Checkpoint Database with Transactions
+          (OCDBT) format for improved metadata handling.
+      use_zarr3: If True, uses the Zarr3 storage format for the underlying array data.
+  """
+  mem_info = psutil.Process()
+  logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
+  gc.collect()
+
+  # Weight sharding
+  if device_count > 1:
+    jax_weights = shard_jax_weights(jax_weights, device_count, mem_info)
+  else:
+    # If number of simulated devices is 1, SKIP sharding and SKIP jax conversion.
+    max_logging.log("Single device: Skip sharding")
+
+  # Save checkpoint
+  start = time.time()
+  # dummy configs for the checkpoint_manager
+  step_number_to_save_new_ckpt = 0
+  enable_checkpointing = True
+  async_checkpointing = False
+  save_interval_steps = 1
+
+  checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
+      maxtext_model_path,
+      enable_checkpointing,
+      async_checkpointing,
+      save_interval_steps,
+      use_ocdbt=use_ocdbt,
+      use_zarr3=use_zarr3,
+  )
+  if checkpoint_manager is None:
+    raise RuntimeError("Failed to create Orbax checkpoint manager.")
+
+  state_new = train_state.TrainState(
+      step=step_number_to_save_new_ckpt, apply_fn=None, params={"params": jax_weights}, tx=None, opt_state={}  # type: ignore
+  )
+
+  logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
+  if checkpointing.save_checkpoint(checkpoint_manager, step_number_to_save_new_ckpt, state_new):
+    max_logging.log(f"saved a checkpoint at step {step_number_to_save_new_ckpt}")
+  # Upon preemption, exit when and only when all ongoing saves are complete.
+  checkpoint_manager.wait_until_finished()
+
+  max_logging.log(f"Elapse for checkpoint save: {(time.time() - start) / 60:.2f} min")

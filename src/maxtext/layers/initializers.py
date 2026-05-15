@@ -95,6 +95,16 @@ def variable_to_logically_partitioned(variable: nnx.Variable):
     out_sharding = metadata["sharding"]
 
   if out_sharding is not None:
+    if nnx.PARTITION_NAME in metadata:
+      partition_name = metadata[nnx.PARTITION_NAME]
+      scan_axis = metadata.get("param_scan_axis", 0) if variable.type == nnx.Param else 0
+
+      sharding_list = [out_sharding] if isinstance(out_sharding, str) else list(out_sharding)
+      if partition_name not in sharding_list:
+        sharding_list.insert(scan_axis, partition_name)
+
+      out_sharding = tuple(sharding_list)
+
     return nn.LogicallyPartitioned(  # type: ignore[wrong-keyword-args]
         val,
         out_sharding,  # type: ignore[arg-type]

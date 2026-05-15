@@ -29,6 +29,7 @@
 #
 # Usage:
 #   bash src/maxtext/trainers/post_train/distillation/scripts/run_distill_xpk.sh prep_image          # one-time image layering
+#   bash src/maxtext/trainers/post_train/distillation/scripts/run_distill_xpk.sh upload_runner       # bake workspace + push to GCR
 #   bash src/maxtext/trainers/post_train/distillation/scripts/run_distill_xpk.sh submit             # fire-and-forget; returns in ~60s
 #   bash src/maxtext/trainers/post_train/distillation/scripts/run_distill_xpk.sh monitor            # stream logs for the last submit
 #   bash src/maxtext/trainers/post_train/distillation/scripts/run_distill_xpk.sh resume_until_done  # auto-retry loop for long jobs
@@ -102,9 +103,18 @@
 #                 default: git+https://github.com/google/tunix@110932a8395086511228483312131841521695c1
 #                 Use "google-tunix==<ver>" once a pypi release ships with the
 #                 multi-host shard_input fix.
-#   JAX_PIN       default: 0.9.2  — version to pin back after tunix deps resolve.
-#   JAXLIB_PIN    default: 0.9.2
-#   LIBTPU_PIN    default: 0.0.37
+#   JAX_PIN       default: 0.10.0  — version to pin back after tunix deps resolve.
+#                 Must be ≥ 0.10.0 (tunix's flax dep imports jax.extend.core.Effect).
+#   JAXLIB_PIN    default: 0.10.0
+#   LIBTPU_PIN    default: 0.0.39
+#
+# upload_runner env vars:
+#   XPK_RUNNER_IMAGE_NAME  default: maxtext_base_image — GCR short name.
+#   XPK_RUNNER_IMAGE_TAG   default: ${USER}-distill — per-user tag avoids
+#                          clobbering shared :latest. Override (or set USER) if
+#                          your shell $USER produces an awkward tag, e.g.
+#                          XPK_RUNNER_IMAGE_TAG=agagik-distill. Pushes to
+#                          gcr.io/$XPK_PROJECT/$XPK_RUNNER_IMAGE_NAME:$XPK_RUNNER_IMAGE_TAG.
 #
 # Resume on failure:
 #   `resume_until_done` reuses the same XPK_BASE_OUTPUT_DIR/XPK_WORKLOAD across
@@ -149,9 +159,9 @@ require_env() {
 
 # Image pinning (used by prep_image).
 : "${TUNIX_SOURCE:=git+https://github.com/google/tunix@110932a8395086511228483312131841521695c1}"
-: "${JAX_PIN:=0.9.2}"
-: "${JAXLIB_PIN:=0.9.2}"
-: "${LIBTPU_PIN:=0.0.37}"
+: "${JAX_PIN:=0.10.0}"
+: "${JAXLIB_PIN:=0.10.0}"
+: "${LIBTPU_PIN:=0.0.39}"
 
 # Computed at top-level so both submit_workload and resume_until_done can read it.
 # `${:-}` keeps `set -u` happy for `prep_image`, which doesn't need XPK_BASE_OUTPUT_DIR.
@@ -225,6 +235,31 @@ print(f'tunix {tunix.__version__}: shard_input fix present.')
 "
 }
 
+# -------------------------- upload_runner --------------------------
+# Bakes ./src into the layered image and pushes to
+# gcr.io/$XPK_PROJECT/$XPK_RUNNER_IMAGE_NAME:$XPK_RUNNER_IMAGE_TAG.
+# Does the build/tag/push inline rather than calling docker_upload_runner.sh,
+# because that script hardcodes :latest and would clobber the shared tag.
+upload_runner() {
+  : "${XPK_RUNNER_IMAGE_NAME:=maxtext_base_image}"
+  : "${XPK_RUNNER_IMAGE_TAG:=${USER}-distill}"
+  local target="gcr.io/${XPK_PROJECT}/${XPK_RUNNER_IMAGE_NAME}:${XPK_RUNNER_IMAGE_TAG}"
+  echo "== upload_runner -> ${target} =="
+  if ! sudo docker image inspect "$XPK_BASE_IMAGE" >/dev/null 2>&1; then
+    echo "ERROR: base image $XPK_BASE_IMAGE not found locally. Run prep_image first." >&2
+    exit 1
+  fi
+  local runner_local="${XPK_BASE_IMAGE}__runner"
+  sudo docker build --no-cache \
+    --build-arg "BASEIMAGE=${XPK_BASE_IMAGE}" \
+    --build-arg "PACKAGE_DIR=src" \
+    -f src/dependencies/dockerfiles/maxtext_runner.Dockerfile \
+    -t "$runner_local" .
+  sudo docker tag "$runner_local" "$target"
+  sudo docker push "$target"
+  echo "Pushed: $target"
+}
+
 # -------------------------- submit --------------------------
 submit_workload() {
   echo "Workload:    $XPK_WORKLOAD"
@@ -243,6 +278,7 @@ submit_workload() {
   fi
   echo "Image flag:  $image_flag=$XPK_BASE_IMAGE"
 
+  # PYTHONPATH covers both image flows: /deps/src (upload_runner-baked) and /app/src (xpk crane overlay).
   xpk workload create \
     --cluster "$XPK_CLUSTER" \
     --workload "$XPK_WORKLOAD" \
@@ -252,7 +288,7 @@ submit_workload() {
     --project="$XPK_PROJECT" \
     --zone="$XPK_ZONE" \
     "$image_flag=$XPK_BASE_IMAGE" \
-    --command "export PYTHONPATH=/app/src; \
+    --command "export PYTHONPATH=/deps/src:/app/src; \
 export BASE_OUTPUT_DIRECTORY=${OUTPUT_DIR}; \
 ${gcsfuse_prelude} \
 python3 -m maxtext.trainers.post_train.distillation.train_distill ${XPK_DISTILL_CONFIG} \
@@ -361,6 +397,10 @@ case "$MODE" in
   prep_image)
     prep_image
     ;;
+  upload_runner)
+    require_env XPK_PROJECT  # GCR target; default gcloud project is usually wrong here.
+    upload_runner
+    ;;
   submit|monitor|resume_until_done)
     require_env XPK_CLUSTER XPK_PROJECT XPK_ZONE XPK_DEVICE_TYPE XPK_BASE_OUTPUT_DIR
     case "$MODE" in
@@ -370,7 +410,7 @@ case "$MODE" in
     esac
     ;;
   *)
-    echo "Unknown mode: $MODE (use prep_image|submit|monitor|resume_until_done)" >&2
+    echo "Unknown mode: $MODE (use prep_image|upload_runner|submit|monitor|resume_until_done)" >&2
     exit 1
     ;;
 esac

@@ -49,7 +49,7 @@ export RUN_NAME=<your-run-name> # e.g., distill-20260115
 
 To install MaxText and its dependencies for post-training (including vLLM for the teacher), run the following:
 
-1. Follow the [MaxText installation instructions](https://maxtext.readthedocs.io/en/latest/install_maxtext.html#install-maxtext).
+1. Follow the [MaxText installation instructions](../../install_maxtext.md).
 
 2. Install the additional dependencies for post-training:
 
@@ -380,6 +380,9 @@ Then:
 ```bash
 # One-time: layer Tunix on top of the MaxText base image
 bash src/maxtext/trainers/post_train/distillation/scripts/run_distill_xpk.sh prep_image
+
+# Bake ./src into a runner image and push to gcr.io/$XPK_PROJECT/...:${USER}-distill
+bash src/maxtext/trainers/post_train/distillation/scripts/run_distill_xpk.sh upload_runner
 
 # Submit a workload
 bash src/maxtext/trainers/post_train/distillation/scripts/run_distill_xpk.sh submit

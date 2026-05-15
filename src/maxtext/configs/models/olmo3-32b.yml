@@ -15,7 +15,6 @@
 # AllenAI OLMo 3 32B Configuration
 # https://huggingface.co/allenai/Olmo-3.1-32B-Instruct/blob/main/config.json
 
-model_name: "olmo3_32b"
 decoder_block: "olmo3"
 
 # Model Dimensions
@@ -47,7 +46,7 @@ beta_fast: 32.0
 beta_slow: 1.0
 max_position_embeddings: 65536
 rope_attention_scaling: True
-rope_truncate: False
+rope_truncate: True  # HF transformers defaults truncate=True for YaRN; matches HF correction-range floor/ceil
 
 # Embeddings
 vocab_size: 100278

@@ -55,7 +55,8 @@ from safetensors import safe_open
 import torch
 from tqdm import tqdm
 
-from maxtext.checkpoint_conversion.standalone_scripts.llama_or_mistral_ckpt import save_weights_to_checkpoint, MODEL_PARAMS_DICT
+from maxtext.checkpoint_conversion.standalone_scripts.llama_or_mistral_ckpt import MODEL_PARAMS_DICT
+from maxtext.checkpoint_conversion.utils.utils import save_weights_to_checkpoint
 from maxtext.inference.inference_utils import str2bool
 from maxtext.utils import max_logging
 
@@ -600,9 +601,8 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
   for i, ckpt_path in enumerate(ckpt_paths):
     max_logging.log(f"Loading checkpoint {i+1} of {len(ckpt_paths)} ...")
     # NOTE: starting in PT2.6, `weights_only` was switched from the default of `False` to `True`
-    # thus we need to specify this or else loading will fail
     chkpt_vars[int(ckpt_path.name.split(".", maxsplit=2)[1])] = torch.load(
-        ckpt_path, map_location="cpu", weights_only=False
+        ckpt_path, map_location="cpu", weights_only=True
     )
   chkpt_vars = [chkpt_vars[i] for i in sorted(list(chkpt_vars.keys()))]
   # map weight names if they use HuggingFace instead of PyTorch convention

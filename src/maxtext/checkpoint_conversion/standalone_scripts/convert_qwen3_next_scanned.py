@@ -35,7 +35,7 @@ from safetensors import safe_open
 from functools import partial
 from tqdm import tqdm
 
-from maxtext.checkpoint_conversion.standalone_scripts import llama_or_mistral_ckpt
+from maxtext.checkpoint_conversion.utils.utils import save_weights_to_checkpoint
 from maxtext.inference.inference_utils import str2bool
 from maxtext.utils import max_logging
 
@@ -407,7 +407,7 @@ def main(args):
   jax_weights = convert_hf_to_maxtext(args.base_model_path, model_params, args)
   max_logging.log(f"Conversion complete. Saving MaxText checkpoint to {args.maxtext_model_path}")
 
-  llama_or_mistral_ckpt.save_weights_to_checkpoint(
+  save_weights_to_checkpoint(
       args.maxtext_model_path, jax_weights, args.simulated_cpu_devices_count, args.use_ocdbt, args.use_zarr3
   )
   max_logging.log("Checkpoint saved successfully.")

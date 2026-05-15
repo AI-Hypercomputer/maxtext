@@ -177,6 +177,7 @@ class DatasetType(str, Enum):
   GRAIN = "grain"
   TFDS = "tfds"
   C4MLPERF = "c4_mlperf"
+  OLMO_GRAIN = "olmo_grain"
 
 
 class SamplingStrategy(str, Enum):
@@ -220,7 +221,6 @@ ModelName = Literal[
     "deepseek2-16b",
     "deepseek2-236b",
     "deepseek3-671b",
-    "deepseek3-671b-2dfsdp",
     "deepseek3-671b-batchsplit",
     "deepseek3-test",
     "deepseek3-tiny",
@@ -258,6 +258,7 @@ ModelName = Literal[
     "qwen3-next-80b-a3b",
     "qwen3-omni-30b-a3b",
     "qwen3-custom-30b-a3b",
+    "qwen3.5-397b-a17b",
     "gpt3-175b",
     "gpt3-22b",
     "gpt3-6b",
@@ -306,6 +307,13 @@ class Checkpointing(BaseModel):
 
   load_parameters_path: PathStr = Field("", description="Loads only model parameters from a specific checkpoint path.")
   lora_input_adapters_path: PathStr = Field("", description="Input GCS path for LoRA adapters.")
+  hf_lora_adapter_path: PathStr = Field(
+      "",
+      description=(
+          "HuggingFace LoRA adapter repo ID (e.g., 'username/adapter-repo') or local "
+          "path to directory containing adapter_model.safetensors."
+      ),
+  )
   load_full_state_path: PathStr = Field("", description="Loads the complete training state from a checkpoint path.")
   enable_checkpointing: bool = Field(True, description="If True, enables saving checkpoints during training.")
   load_checkpoint_only_once: bool = Field(False, description="If True, deep copy the reference model to the actor model.")
@@ -343,7 +351,8 @@ class Checkpointing(BaseModel):
       description="If True, enables checkpointing from remote TPU VMs instead of head node on pathways.",
   )
   enable_autocheckpoint: bool = Field(
-      False, description="If True, enables autocheckpoint or preemption induced checkpointing."
+      False,
+      description="If True, enables autocheckpoint or preemption induced checkpointing.",
   )
 
 
@@ -493,7 +502,8 @@ class ModelArchitecture(BaseModel):
   )
   fused_mlp: bool = Field(False, description="If supported, fuse the MLP layers.")
   qk_norm_with_scale: bool = Field(
-      True, description="Whether to apply scale on query and key normalizations (default True)."
+      True,
+      description="Whether to apply scale on query and key normalizations (default True).",
   )
   v_norm_with_scale: bool = Field(True, description="Whether to apply scale on value normalization (default True).")
 
@@ -540,9 +550,13 @@ class Attention(BaseModel):
       "global", description="The variant of attention to use."
   )
   share_kv_projections: bool = Field(
-      False, description="If True, for global attention, Key and Value projections share the same weights."
+      False,
+      description="If True, for global attention, Key and Value projections share the same weights.",
   )
-  global_num_kv_heads: int = Field(0, description="If greater than 0, sets the number of KV heads for global attention.")
+  global_num_kv_heads: int = Field(
+      0,
+      description="If greater than 0, sets the number of KV heads for global attention.",
+  )
   attention_sink: bool = Field(False, description="If True, enables attention sinks.")
   float32_qk_product: bool = Field(False, description="In dot-product attention, cast query-key product to fp32.")
   float32_logits: bool = Field(
@@ -688,6 +702,9 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to use Ring of Experts for sparse matmul expert parallelism.",
   )
+  use_ragged_sort: bool = Field(
+      False, description="Whether to use ragged kernel for sorting, improve performance when EP is enabled."
+  )
   use_gather_mosaic_kernel: bool = Field(
       False,
       description="Whether to use a custom mosaic kernel for token gather ops.",
@@ -702,10 +719,6 @@ class MoEGeneral(BaseModel):
       False,
       description="Shard the expert dimension of the MLP weights on the FSDP axis, "
       "and recommended only when num_experts is a multiple of fsdp_parallelism",
-  )
-  use_2d_fsdp_sharding: bool = Field(
-      False,
-      description="Use `fsdp` and `fsdp_transpose` axes for 2D FSDP sharding.",
   )
   norm_topk_prob: bool = Field(
       False,
@@ -723,6 +736,11 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to pre-fuse MoE weights (w0 and w1) during initialization. "
       "This is useful for inference performance in vllm_rpa mode.",
+  )
+  fuse_expert_scales: bool = Field(
+      False,
+      description="Whether to fuse the expert scaling factors into the expert weights. "
+      "This can improve inference performance.",
   )
 
 
@@ -1039,7 +1057,8 @@ class Tokenizer(BaseModel):
   use_chat_template: bool = Field(False, description="Whether to use the chat template for tokenization.")
   chat_template_path: str = Field("", description="Path to chat template json file.")
   chat_template: str = Field(
-      "", description="Chat template to use with HF tokenizers. It should be a valid Jinja2-formatted template."
+      "",
+      description="Chat template to use with HF tokenizers. It should be a valid Jinja2-formatted template.",
   )
   tokenize_train_data: bool = Field(True, description="If False, assumes the training dataset is pre-tokenized.")
   tokenize_eval_data: bool = Field(True, description="If False, assumes the evaluation dataset is pre-tokenized.")
@@ -1103,8 +1122,8 @@ class TfdsDataset(BaseModel):
   """Configuration specific to TFDS datasets."""
 
   dataset_path: PathStr = Field("", description="Path to the TFDS dataset.")
-  dataset_name: str = Field("c4/en:3.0.1", description="Name of the TFDS dataset.")
-  eval_dataset_name: str = Field("c4/en:3.0.1", description="Name of the TFDS eval dataset.")
+  dataset_name: str = Field("c4/en:3.1.0", description="Name of the TFDS dataset.")
+  eval_dataset_name: str = Field("c4/en:3.1.0", description="Name of the TFDS eval dataset.")
   train_split: str = Field("train", description="Dataset split for training.")
   eval_split: str = Field("validation", description="Dataset split for evaluation.")
 
@@ -1131,7 +1150,8 @@ class GrainDataset(BaseModel):
       description="Path to a JSON file specifying the mixture weights for Grain training data.",
   )
   grain_file_type: str = Field(
-      "arrayrecord", description="File type for Grain data. Supported: arrayrecord, tfrecord, parquet."
+      "arrayrecord",
+      description="File type for Grain data. Supported: arrayrecord, tfrecord, parquet.",
   )
   grain_use_elastic_iterator: bool = Field(
       False,
@@ -1158,6 +1178,32 @@ class GrainDataset(BaseModel):
   grain_shuffle_buffer_size: int = Field(100, description="Shuffle buffer size when using Parquet or TFRecord.")
 
 
+class OlmoGrainDataset(BaseModel):
+  """Configuration for the OLMo numpy fixed-seq-length input pipeline (dataset_type=olmo_grain).
+
+  Separate from the standard grain config because this pipeline reads
+  pre-tokenized fixed-length sequences from raw npy files (one ``int32``
+  token per element, ``sequence_length`` from an index JSON), not
+  arrayrecord/tfds shards — so flags like ``grain_train_files`` /
+  ``packing`` don't apply.
+
+  Worker count, per-worker buffer size, and shuffle seed reuse the standard
+  grain flags (``grain_worker_count``, ``grain_per_worker_buffer_size``,
+  ``data_shuffle_seed``); only OLMo-specific fields are listed here.
+  """
+
+  olmo_index_path: PathStr = Field("", description="Path or gs:// URI to the JSON index from build_olmo_npy_index.py.")
+  olmo_path_remap_from: PathStr = Field(
+      "",
+      description="If set, rewrite index file paths starting with this prefix to olmo_path_remap_to.",
+  )
+  olmo_path_remap_to: PathStr = Field(
+      "",
+      description="Replacement prefix used together with olmo_path_remap_from (e.g. /mnt/disks/.../).",
+  )
+  olmo_apply_ngram_filter: bool = Field(True, description="Mask repetitive instances per OLMo-core's repetition filter.")
+
+
 class FineTuning(BaseModel):
   """Configuration for fine-tuning methods like DPO, SFT, and GRPO."""
 
@@ -1179,6 +1225,26 @@ class FineTuning(BaseModel):
   use_grpo: None | bool = Field(None, description="If True, enables Group Relative Policy Optimization.")
 
 
+class LoRA(BaseModel):
+  """Configuration for LoRA / QLoRA adapters."""
+
+  model_config = ConfigDict(extra="forbid")
+
+  enable_lora: bool = Field(False, description="If True, enables LoRA/QLoRA during fine-tuning.")
+  lora_rank: NonNegativeInt = Field(0, description="LoRA rank. Set >0 when LoRA is enabled.")
+  lora_alpha: NonNegativeFloat = Field(0.0, description="LoRA alpha scaling factor.")
+  lora_module_path: str = Field(
+      "",
+      description=(
+          "Regex identifying target modules for LoRA, e.g." " '.*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj'."
+      ),
+  )
+  lora_restore_path: PathStr = Field(
+      "",
+      description=("Optional path to LoRA weights to load before training. Ignored if the current run is resumed."),
+  )
+
+
 class Distillation(BaseModel):
   """Configuration for Knowledge Distillation."""
 
@@ -1196,7 +1262,8 @@ class Distillation(BaseModel):
 
   # --- Offline Distillation Field ---
   offline_data_dir: Optional[str] = Field(
-      None, description="GCS or local path to the pre-generated ArrayRecord teacher data."
+      None,
+      description="GCS or local path to the pre-generated ArrayRecord teacher data.",
   )
 
   # --- Loss Params ---
@@ -1204,7 +1271,8 @@ class Distillation(BaseModel):
   distill_temperature: float = Field(1.0, description="Temperature for distillation softening.")
   distill_beta: float = Field(0.0, description="Weight for the feature loss component. Use 0.0 to disable")
   distill_feature_loss_type: Literal["cosine", "l2"] = Field(
-      "cosine", description="The type of loss to use for feature distillation ('cosine' or 'l2')."
+      "cosine",
+      description="The type of loss to use for feature distillation ('cosine' or 'l2').",
   )
   distill_layer_indices: None | list = Field(None, description="Feature indices for feature loss.")
   distill_alpha_end: Optional[float] = Field(None, description="Target alpha at end of training. None keeps alpha fixed.")
@@ -1241,6 +1309,14 @@ class Distillation(BaseModel):
   distill_student_weights_share_map: dict[str, Any] = Field(
       default_factory=dict,
       description="Experimental weight sharing map inside the student model for learn-to-init phase",
+  )
+
+  attn_module_name: Optional[str] = Field(
+      None, description="Attention nnx module attribute name to augment with LTI logic"
+  )
+
+  lti_layer_indices: Optional[list[int]] = Field(
+      None, description="List of layer indices to apply LTI modifications. If None, applied to all layers."
   )
   # ---------------------------------------
 
@@ -1303,10 +1379,12 @@ class Optimizer(BaseModel):
 
   opt_type: OptimizerType = Field(OptimizerType.ADAMW, description="The type of optimizer to use.")
   skip_step_on_spikes: bool = Field(
-      False, description="If True, skip the training step when loss or gradient spike is detected."
+      False,
+      description="If True, skip the training step when loss or gradient spike is detected.",
   )
   skip_step_interval: PositiveInt = Field(
-      128, description="The rolling interval to calculate the mean and standard deviation."
+      128,
+      description="The rolling interval to calculate the mean and standard deviation.",
   )
   skip_step_scaling_factor: float = Field(6.0, description="The scaling factor to determine if a spike occurred.")
   gradient_accumulation_steps: PositiveInt = Field(
@@ -1571,6 +1649,12 @@ class Profiling(BaseModel):
   hide_profiler_step_metric: bool = Field(False, description="Whether to enable profiler step metric.")
   enable_jax_profiler: bool = Field(False, description="Enable the JAX live profiler.")
   jax_profiler_port: int = Field(9999, description="Port for the JAX profiler.")
+  enable_tpu_profiling_options: bool = Field(False, description="Enable TPU advanced profiling options.")
+  tpu_num_chips_to_profile_per_task: int = Field(1, description="Specifies the number of TPU chips to profile per task.")
+  tpu_num_sparse_cores_to_trace: int = Field(2, description="Specifies the number of TPU chips to profile per task.")
+  tpu_num_sparse_core_tiles_to_trace: int = Field(
+      1, description="Specifies the number of tiles within each sparse core to trace on the TPU."
+  )
   xprof_tpu_power_trace_level: XProfTPUPowerTraceMode = Field(
       XProfTPUPowerTraceMode.POWER_TRACE_NONE,
       description=(
@@ -1749,7 +1833,10 @@ class VisionTower(BaseModel):
   temporal_patch_size_for_vit: int = Field(2, description="Temporal patch size for video inputs.")
   num_position_embeddings_for_vit: int = Field(1024, description="Number of position embeddings for ViT.")
   deepstack_visual_indexes_for_vit: list[int] = Field([], description="Layer indices to extract deep visual features.")
-  vision_output_length: int = Field(-1, description="The output length (number of soft tokens) from the vision encoder.")
+  vision_output_length: int = Field(
+      -1,
+      description="The output length (number of soft tokens) from the vision encoder.",
+  )
 
 
 class VisionProjector(BaseModel):
@@ -1830,6 +1917,18 @@ class VLLM(BaseModel):
   )
   vllm_hf_config_path: str = Field("", description="Path to HuggingFace model config for MaxText model.")
   use_standalone_converter: bool = Field(False, description="Use the standalone MaxText->torchax vLLM converter")
+  vllm_load_format: str = Field(
+      "dummy",
+      description="Weight load format for vLLM in converter validation. Options:'auto', 'dummy'.",
+  )
+  debug_converter: bool = Field(
+      False,
+      description="If True, run key coverage check, weight stats, and GCS upload.",
+  )
+  gcs_debug_path: str = Field(
+      "",
+      description="If set and debug_converter=True, upload converted layer-0 and global tensors as .npy files to GCS",
+  )
 
 
 class RL(BaseModel):
@@ -1841,18 +1940,28 @@ class RL(BaseModel):
   grpo_epsilon: float = Field(0.2, description="Epsilon value for clipping in the GRPO loss.")
   loss_algo: Literal["grpo", "gspo-token"] = Field("grpo", description="Loss algorithm, i.e., 'grpo' or 'gspo-token'.")
   use_agentic_rollout: bool = Field(
-      False, description="If True, uses the asynchronous AgenticGRPOLearner for online vLLM rollouts."
+      False,
+      description="If True, uses the asynchronous AgenticGRPOLearner for online vLLM rollouts.",
   )
-  max_concurrency: int = Field(256, description="Maximum number of concurrent rollout requests (agentic rollout only).")
+  max_concurrency: int = Field(
+      256,
+      description="Maximum number of concurrent rollout requests (agentic rollout only).",
+  )
   off_policy_steps: int = Field(
-      0, description="Number of off-policy steps tolerated before requiring a policy update (agentic only)."
+      0,
+      description="Number of off-policy steps tolerated before requiring a policy update (agentic only).",
   )
-  system_prompt: str = Field("", description="System prompt injected into the agent at rollout time (agentic only).")
+  system_prompt: str = Field(
+      "",
+      description="System prompt injected into the agent at rollout time (agentic only).",
+  )
   degenerate_group_masking: bool = Field(
-      True, description="Mask degenerate groups (all-zero advantages) from contributing to loss (agentic only)."
+      True,
+      description="Mask degenerate groups (all-zero advantages) from contributing to loss (agentic only).",
   )
   epsilon_high: Optional[float] = Field(
-      None, description="Upper-bound clipping epsilon for GRPO loss. Defaults to epsilon when None (agentic only)."
+      None,
+      description="Upper-bound clipping epsilon for GRPO loss. Defaults to epsilon when None (agentic only).",
   )
   reshard_chunk_size: Optional[int] = Field(
       None,
@@ -2154,6 +2263,7 @@ class MaxTextConfig(
     TfdsDataset,
     HfDataset,
     GrainDataset,
+    OlmoGrainDataset,
     Tokenizer,
     # Inference
     InferenceGeneral,
@@ -2194,6 +2304,10 @@ class MaxTextConfig(
   rl: RL = Field(
       default_factory=RL,
       description="Configuration for RL algorithms like Group Relative Policy Optimization (GRPO).",
+  )
+  lora: LoRA = Field(
+      default_factory=LoRA,
+      description="Configuration for LoRA / QLoRA adapters.",
   )
   model_config = ConfigDict(extra="forbid", protected_namespaces=())
 
@@ -2754,6 +2868,7 @@ class MaxTextConfig(
       if self.routed_bias and self.routed_bias_update_rate > 0.0 and self.decoder_block != DecoderBlockType.DEEPSEEK:
         raise ValueError("Loss-free load balancing is only supported for the DeepSeek decoder block.")
       self.validate_ragged_buffer_factor()
+
     if self.use_multimodal:
       valid_mm_models = (
           "gemma3-4b",
@@ -2837,7 +2952,10 @@ class MaxTextConfig(
             f"The number of decoder layers ({self.base_num_decoder_layers}) must be divisible by interleave moe layer step "
             f"({self.interleave_moe_layer_step})"
         )
-    if self.decoder_block == DecoderBlockType.QWEN3_NEXT:
+    if self.decoder_block in (
+        DecoderBlockType.QWEN3_NEXT,
+        DecoderBlockType.QWEN3_5,
+    ):
       if int(self.gdn_num_value_heads) % int(self.gdn_num_key_heads) != 0:
         raise ValueError("gdn_num_value_heads must be divisible by gdn_num_key_heads")
       rotary_dim = int(self.head_dim * self.partial_rotary_factor)
@@ -2931,13 +3049,9 @@ class MaxTextConfig(
         "tensor": self.ici_tensor_parallelism,
         "tensor_transpose": self.ici_tensor_transpose_parallelism,
         "tensor_sequence": self.ici_tensor_sequence_parallelism,
-        "model": self.ici_tensor_parallelism,
         "expert": self.ici_expert_parallelism,
         "autoregressive": self.ici_autoregressive_parallelism,
-        "attn_dp": 1,  # initialized to 1, vLLM will auto calculate this value based on TP and num_kv_heads
-        "attn_dp_expert": 1,  # initialized to 1, vLLM will auto calculate this value based on EP
     }
-    self.ici_parallelism = [ici_map[axis] for axis in self.mesh_axes]
 
     dcn_map = {
         "diloco": self.dcn_diloco_parallelism,
@@ -2951,12 +3065,37 @@ class MaxTextConfig(
         "tensor": self.dcn_tensor_parallelism,
         "tensor_transpose": self.dcn_tensor_transpose_parallelism,
         "tensor_sequence": self.dcn_tensor_sequence_parallelism,
-        "model": self.dcn_tensor_parallelism,
         "expert": self.dcn_expert_parallelism,
         "autoregressive": self.dcn_autoregressive_parallelism,
-        "attn_dp": 1,  # initialized to 1, vLLM will auto calculate this value based on TP and num_kv_heads
-        "attn_dp_expert": 1,  # initialized to 1, vLLM will auto calculate this value based on EP
     }
+
+    # Conditionally include vLLM RPA specific axes
+    if self.attention == "vllm_rpa":
+      ici_map.update(
+          {
+              "model": self.ici_tensor_parallelism,
+              "attn_dp": 1,
+              "attn_dp_expert": 1,
+          }
+      )
+      dcn_map.update(
+          {
+              "model": self.dcn_tensor_parallelism,
+              "attn_dp": 1,
+              "attn_dp_expert": 1,
+          }
+      )
+
+    # Validate that any axis with configured parallelism > 1 is present in mesh_axes
+    for axis, ici_size in ici_map.items():
+      if axis not in self.mesh_axes:
+        if ici_size > 1 or dcn_map[axis] > 1:
+          raise ValueError(
+              f"Mesh axis '{axis}' has configured parallelism > 1 "
+              f"(ici: {ici_size}, dcn: {dcn_map[axis]}) "
+              f"but is not included in self.mesh_axes: {self.mesh_axes}"
+          )
+    self.ici_parallelism = [ici_map[axis] for axis in self.mesh_axes]
     self.dcn_parallelism = [dcn_map[axis] for axis in self.mesh_axes]
 
     # Diloco params

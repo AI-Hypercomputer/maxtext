@@ -24,6 +24,48 @@ import pytest
 import jax
 import importlib.util
 
+# --- Monkeypatch for absl.testing.parameterized ---
+# Context: Decorating a test method with @parameterized.named_parameters returns a custom
+# iterable container (_ParameterizedTestIter) instead of a standard function object.
+# Problem: When pytest markers are applied above @parameterized in the decorator stack:
+#
+#   @pytest.mark.cpu_only
+#   @parameterized.named_parameters(...)
+#   def test_foo(self, ...):
+#
+# pytest attaches the marker attributes exclusively to the outer iterable container object.
+# During class initialization, the test metaclass unwraps the base function to generate
+# individual test methods, omitting the outer container entirely. Consequently, marker
+# attributes attached to the outer container are dropped and lost before pytest collection.
+# Solution: Intercept _ParameterizedTestIter.__iter__ to dynamically propagate any discovered
+# pytestmark attributes from the outer container object down to all generated test methods.
+from absl.testing import parameterized
+
+try:
+  # pylint: disable=protected-access
+  _orig_iter = parameterized._ParameterizedTestIter.__iter__
+
+  def _custom_iter(self):
+    """Custom iterator propagating outer pytestmark attributes to generated test methods."""
+    outer_marks = getattr(self, "pytestmark", None)
+    if outer_marks is None:
+      yield from _orig_iter(self)
+    else:
+      if not isinstance(outer_marks, list):
+        outer_marks = [outer_marks]
+
+      for func in _orig_iter(self):
+        existing_marks = getattr(func, "pytestmark", [])
+        if not isinstance(existing_marks, list):
+          existing_marks = [existing_marks]
+        func.pytestmark = existing_marks + outer_marks
+        yield func
+
+  parameterized._ParameterizedTestIter.__iter__ = _custom_iter
+  # pylint: enable=protected-access
+except AttributeError:
+  pass
+
 try:
   _HAS_TPU = any(d.platform == "tpu" for d in jax.devices())
 except Exception:  # pragma: no cover  pylint: disable=broad-exception-caught

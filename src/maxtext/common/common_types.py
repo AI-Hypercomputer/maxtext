@@ -102,14 +102,13 @@ class DecoderBlockType(enum.Enum):
   QWEN3_MOE = "qwen3_moe"
   QWEN3_CUSTOM_MOE = "qwen3_custom_moe"
   QWEN3_NEXT = "qwen3_next"
+  QWEN3_5 = "qwen3_5"
   GPT3 = "gpt3"
   GPT_OSS = "gpt_oss"
   SIMPLE = "simple"
   SIMPLE_MLP = "simple_mlp"
   LLAMA4 = "llama4"
   OLMO3 = "olmo3"
-
-  LLAMA2LTI = "llama2_learn_to_init"
 
 
 class AttentionType(enum.Enum):
@@ -147,3 +146,4 @@ class CustomRule(enum.Enum):
   CP_AS_EP = "cp-as-ep"  # Support CP and EP together
   EP_AS_CP = "ep-as-cp"  # Support EP only
   PIPELINE_LARGE_MOE = "pipeline-large-moe"
+  FSDP_2D = "2d-fsdp"

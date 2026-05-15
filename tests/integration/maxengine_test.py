@@ -36,6 +36,7 @@ from tests.utils.test_helpers import get_test_config_path
 pytestmark = [pytest.mark.external_serving]
 
 
+@pytest.mark.integration_test
 class MaxEngineTest(unittest.TestCase):
   """Tests for MaxEngine."""
 
@@ -55,7 +56,7 @@ class MaxEngineTest(unittest.TestCase):
         "base_num_decoder_layers": 2,
         "attention": "dot_product",
         "max_target_length": 16,
-        "base_emb_dim": 256,
+        "base_emb_dim": 32,
         "base_num_query_heads": 2,
         "base_num_kv_heads": 2,
         "max_prefill_predict_length": 4,

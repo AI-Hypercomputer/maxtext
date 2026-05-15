@@ -12,8 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# AllenAI OLMo 3 7B Configuration for pretraining.
-# It uses default RoPE for both global and sliding window attention.
+# AllenAI OLMo 3 7B configuration for stage 1 / stage 2 pretraining revisions
+# of allenai/Olmo-3-1025-7B (e.g. `stage1-step1413814`, `stage2-step*`). At
+# these revisions the HF config has rope_scaling=null and
+# max_position_embeddings=8192, so default RoPE is used for both global and
+# sliding-window attention. YaRN scaling at 65k is introduced at stage 3 of
+# pretraining; for stage-3 / post-trained checkpoints use olmo3-7b.yml instead.
 # https://huggingface.co/allenai/Olmo-3-1025-7B/tree/stage1-step1413814
 
 decoder_block: "olmo3"

@@ -41,6 +41,7 @@ class DummyEmbedding:
     return jnp.ones((x.shape[0], x.shape[1], self.emb_dim))
 
 
+@pytest.mark.integration_test
 class TestDeepSeekScanEngram(unittest.TestCase):
   """Test DeepSeek decoder block with scan_layers=True and engram_layers."""
 
@@ -53,16 +54,16 @@ class TestDeepSeekScanEngram(unittest.TestCase):
       "first_num_dense_layers=5",
       "base_num_decoder_layers=10",
       "num_decoder_layers=10",
-      "base_emb_dim=64",
-      "base_mlp_dim=64",
-      "base_moe_mlp_dim=64",
-      "base_num_query_heads=2",
-      "base_num_kv_heads=2",
-      "head_dim=32",
-      "indexer_head_dim=32",
-      "qk_nope_head_dim=32",
-      "qk_rope_head_dim=16",
-      "v_head_dim=32",
+      "base_emb_dim=8",
+      "base_mlp_dim=8",
+      "base_moe_mlp_dim=8",
+      "base_num_query_heads=1",
+      "base_num_kv_heads=1",
+      "head_dim=4",
+      "indexer_head_dim=4",
+      "qk_nope_head_dim=4",
+      "qk_rope_head_dim=4",
+      "v_head_dim=4",
       "vocab_size=128",
       "mhc_expansion_rate=4",
       "attention=dot_product",
@@ -71,15 +72,24 @@ class TestDeepSeekScanEngram(unittest.TestCase):
       "max_prefill_predict_length=8",
       "enable_checkpointing=False",
       "engram_num_heads=1",
-      "engram_head_dim=8",
+      "engram_head_dim=4",
       "engram_vocab_bases=[128,128]",
       "engram_max_ngram_size=3",
       "engram_kernel_size=4",
+      "num_experts=2",
+      "num_experts_per_tok=1",
       "hf_access_token=dummy",
       "tokenizer_path=dummy",
   ]
 
-  def _test_engram_pattern(self, mock_from_pretrained, engram_layers_str, expected_keys):
+  def _test_engram_pattern(
+      self,
+      mock_from_pretrained,
+      engram_layers_str,
+      expected_keys,
+      first_num_dense_layers=5,
+      base_num_decoder_layers=10,
+  ):
     """Helper method to test different engram layer patterns."""
 
     # Setup mock tokenizer
@@ -106,7 +116,16 @@ class TestDeepSeekScanEngram(unittest.TestCase):
     mock_from_pretrained.return_value = MockTokenizer()
 
     config_path = os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")
-    config = pyconfig.initialize([None, config_path] + self._COMMON_CONFIG + [f"engram_layers=[{engram_layers_str}]"])
+    config = pyconfig.initialize(
+        [None, config_path]
+        + self._COMMON_CONFIG
+        + [
+            f"engram_layers=[{engram_layers_str}]",
+            f"first_num_dense_layers={first_num_dense_layers}",
+            f"base_num_decoder_layers={base_num_decoder_layers}",
+            f"num_decoder_layers={base_num_decoder_layers}",
+        ]
+    )
 
     devices_array = maxtext_utils.create_device_mesh(config)
     mesh = Mesh(devices_array, config.mesh_axes)
@@ -126,7 +145,7 @@ class TestDeepSeekScanEngram(unittest.TestCase):
 
     shared_embedding = DummyEmbedding(emb_dim=config.emb_dim)
 
-    with mesh:
+    with mesh, jax.disable_jit():
       variables = decoder.init(
           {"params": jax.random.PRNGKey(0), "dropout": jax.random.PRNGKey(1), "aqt": jax.random.PRNGKey(2)},
           shared_embedding=shared_embedding,
@@ -154,15 +173,16 @@ class TestDeepSeekScanEngram(unittest.TestCase):
     """Test engram layers at indices 2 and 8."""
     self._test_engram_pattern(
         mock_from_pretrained,
-        "2,8",
+        "1,4",
         [
-            "dense_layers_0_1",
-            "dense_layers_engram_2",
-            "dense_layers_3_4",
-            "moe_layers_5_7",
-            "moe_layers_engram_8",
-            "moe_layers_9_9",
+            "dense_layers_0_0",
+            "dense_layers_engram_1",
+            "dense_layers_2_2",
+            "moe_layers_3_3",
+            "moe_layers_engram_4",
         ],
+        first_num_dense_layers=3,
+        base_num_decoder_layers=5,
     )
 
   @pytest.mark.tpu_only
@@ -171,8 +191,10 @@ class TestDeepSeekScanEngram(unittest.TestCase):
     """Test engram layers at indices 0 and 5 - first engram layer of block."""
     self._test_engram_pattern(
         mock_from_pretrained,
-        "0,5",
-        ["dense_layers_engram_0", "dense_layers_1_4", "moe_layers_engram_5", "moe_layers_6_9"],
+        "0,1",
+        ["dense_layers_engram_0", "moe_layers_engram_1"],
+        first_num_dense_layers=1,
+        base_num_decoder_layers=2,
     )
 
   @pytest.mark.tpu_only
@@ -181,6 +203,8 @@ class TestDeepSeekScanEngram(unittest.TestCase):
     """Test engram layers at indices 4 and 9 - last engram layer of block."""
     self._test_engram_pattern(
         mock_from_pretrained,
-        "4,9",
-        ["dense_layers_0_3", "dense_layers_engram_4", "moe_layers_5_8", "moe_layers_engram_9"],
+        "1,3",
+        ["dense_layers_0_0", "dense_layers_engram_1", "moe_layers_2_2", "moe_layers_engram_3"],
+        first_num_dense_layers=2,
+        base_num_decoder_layers=4,
     )

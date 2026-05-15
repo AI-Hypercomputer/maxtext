@@ -544,7 +544,12 @@ def make_tfrecord_iter_dataset(path: str):
 
 @dataclasses.dataclass
 class ParseFeatures(grain.MapTransform):
-  """Parse serialized example"""
+  """Parse serialized tf.train.Example protos for arrayrecord/tfrecord datasets.
+
+  Also validates that the stored field type matches `tokenize`: raises
+  ValueError if `tokenize=True` but the column contains integers (pre-tokenized)
+  or if `tokenize=False` but the column contains bytes (raw text).
+  """
 
   def __init__(self, data_columns, tokenize):
     self.data_columns = data_columns
@@ -556,14 +561,30 @@ class ParseFeatures(grain.MapTransform):
     example.ParseFromString(element)
     features = example.features.feature
 
+    missing = [c for c in self.data_columns if c not in features]
+    if missing:
+      raise ValueError(
+          f"Column {missing} not found in dataset. Available columns: {sorted(features.keys())}. "
+          "Please set train_data_columns or eval_data_columns accordingly."
+      )
+
     parsed = {}
     for col in self.data_columns:
-      if col in features:
-        f = features[col]
-        if self.tokenize:
-          parsed[col] = np.array(f.bytes_list.value, dtype=object)
-        else:
-          parsed[col] = np.array(f.int64_list.value, dtype=np.int32)
+      f = features[col]
+      if self.tokenize:
+        if not f.bytes_list.value:
+          raise ValueError(
+              f"tokenize_data=True but column '{col}' has no text (bytes) data. "
+              "Set tokenize_train_data or tokenize_eval_data to False if your dataset is already tokenized."
+          )
+        parsed[col] = np.array(f.bytes_list.value, dtype=object)
+      else:
+        if not f.int64_list.value:
+          raise ValueError(
+              f"tokenize_data=False but column '{col}' has no integer token data. "
+              "Set tokenize_train_data or tokenize_eval_data to True if your dataset needs tokenization."
+          )
+        parsed[col] = np.array(f.int64_list.value, dtype=np.int32)
     return parsed
 
 
@@ -584,24 +605,46 @@ class NormalizeFeatures(grain.MapTransform):
 
 @dataclasses.dataclass
 class KeepFeatures(grain.MapTransform):
-  """Keep only specified features in the dataset element.
+  """Filter dataset elements to specified features for parquet and other non-proto formats.
 
-  This transform filters the input dictionary, retaining only the keys
-  that are present in `feature_names`.
+  Retains only the keys present in `feature_names`. Validates the stored value
+  type against `tokenize`: raises ValueError if `tokenize=True` but a column
+  contains integer data (pre-tokenized), or if `tokenize=False` but a column
+  contains string/bytes data (raw text).
   """
 
-  def __init__(self, feature_names: list[str]):
-    """Initializes the KeepFeatures transform.
-
-    Args:
-      feature_names: A list of strings, where each string is the name of a
-        feature to be kept in the dataset element.
-    """
+  def __init__(self, feature_names: list[str], tokenize: bool = True):
     self.feature_names = feature_names
+    self.tokenize = tokenize
 
   def map(self, element: dict[str, Any]) -> dict[str, Any]:
     """Applies the feature filtering to the input element."""
-    return {k: v for k, v in element.items() if k in self.feature_names}
+    missing = [n for n in self.feature_names if n not in element]
+    if missing:
+      raise ValueError(
+          f"Column {missing} not found in dataset. Available columns: {sorted(element.keys())}. "
+          "Please set train_data_columns or eval_data_columns accordingly."
+      )
+    filtered = {k: v for k, v in element.items() if k in self.feature_names}
+    for col, val in filtered.items():
+      if self.tokenize:
+        if isinstance(val, np.ndarray) and np.issubdtype(val.dtype, np.integer):
+          raise ValueError(
+              f"tokenize_data=True but column '{col}' contains integer (pre-tokenized) data. "
+              "Set tokenize_train_data or tokenize_eval_data to False if your dataset is already tokenized."
+          )
+        if isinstance(val, (list, tuple)) and val and isinstance(val[0], (int, np.integer)):
+          raise ValueError(
+              f"tokenize_data=True but column '{col}' contains integer (pre-tokenized) data. "
+              "Set tokenize_train_data or tokenize_eval_data to False if your dataset is already tokenized."
+          )
+      else:
+        if isinstance(val, (str, bytes)):
+          raise ValueError(
+              f"tokenize_data=False but column '{col}' contains text data. "
+              "Set tokenize_train_data or tokenize_eval_data to True if your dataset needs tokenization."
+          )
+    return filtered
 
 
 @dataclasses.dataclass
