@@ -86,7 +86,7 @@ checkpoint_conversion_fn: none
 # optional checkpoint context to use for loading. options: "orbax", "safetensors"
 source_checkpoint_layout: "orbax"
 
-# Only applicable to Single Controller/Pathways on Cloud. Experimental feature, under testing 
+# Only applicable to Single Controller/Pathways on Cloud. Experimental feature, under testing
 colocated_python_checkpointing: False
 
 # enables autocheckpoint, which saves a checkpoint at the preemption step.
@@ -451,7 +451,7 @@ hardware: 'tpu' # Supported hardware types are 'tpu', 'gpu', 'gpu_multiprocess' 
 # internal_compile allows bypassing open-source topology name mappings when using internal topologies directly via get_topology_desc.
 internal_compile: False
 internal_compile_num_devices: -1 # You must specify the number of devices when using internal_compile.
-compile_xla_flags: "" # Compiler options e.g. compile_xla_flags="--xla_tpu_num_sparse_cores_for_gather_offloading=1 --xla_tpu_scoped_vmem_limit_kib=65536" 
+compile_xla_flags: "" # Compiler options e.g. compile_xla_flags="--xla_tpu_num_sparse_cores_for_gather_offloading=1 --xla_tpu_scoped_vmem_limit_kib=65536"
 
 # Parallelism
 shard_mode: "auto" # can be either auto or explicit
@@ -564,8 +564,8 @@ logical_axis_rules: [
                       # ==========================================
                       # Deprecated / Scheduled for Removal
                       # ==========================================
-                      ['mlp_no_fsdp', ['tensor', 'tensor_sequence', 'autoregressive']], 
-                      ['embed_tensor_transpose', ['tensor_transpose']],                 
+                      ['mlp_no_fsdp', ['tensor', 'tensor_sequence', 'autoregressive']],
+                      ['embed_tensor_transpose', ['tensor_transpose']],
                       ['exp_with_fsdp', 'fsdp'],
                   ]
 # Axes used for DCN must be earlier in this list than ICI, see (b/339009148) for details
@@ -680,8 +680,6 @@ global_rampup_samples: 500
 
 # direct preference optimization (DPO)
 use_dpo: False
-dpo_label_smoothing: 0.0
-dpo_beta: 0.1
 
 # Supervised Fine-Tuning (SFT)
 use_sft: False
@@ -1206,7 +1204,7 @@ use_jax_splash: false
 # Path to the HuggingFace-style config directory for the adapter (e.g. src/maxtext/integration/vllm/maxtext_vllm_adapter)
 vllm_hf_config_path: ""
 # A JSON string of overrides to apply to the HuggingFace-style config for the vLLM adapter.
-# This can be used to override specific settings without modifying the original config file. 
+# This can be used to override specific settings without modifying the original config file.
 vllm_hf_overrides: {}
 # JSON string containing additional configuration for the vLLM model (e.g. '{"maxtext_config": {...}}')
 vllm_additional_config: {}
@@ -1221,7 +1219,7 @@ sinkhorn_iterations: 20
 
 ################################## DeepSeek Engram ##################################
 # Indices of transformer layers where Engram are integrated; leave empty [] to disable.
-# Example: [1, 4] attaches to the 2nd and 5th layer. 
+# Example: [1, 4] attaches to the 2nd and 5th layer.
 engram_layers: []
 # The max 'n' in N-gram. Example: n=3 means it covers both 2-grams and 3-grams.
 engram_max_ngram_size: 3

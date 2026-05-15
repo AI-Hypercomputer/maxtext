@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -24,9 +24,8 @@ import transformers
 
 import grain.python as grain
 
-import numpy as np
-
 from maxtext.input_pipeline import data_processing_utils
+from maxtext.input_pipeline import dpo_utils
 from maxtext.input_pipeline import input_pipeline_utils
 from maxtext.input_pipeline import instruction_data_processing
 from maxtext.input_pipeline import multihost_dataloading
@@ -214,7 +213,7 @@ def preprocessing_pipeline(
     num_threads=1,
     drop_remainder=True,
     generate_padding_batch=False,
-    use_dpo=None,
+    use_dpo=False,
     use_sft=None,
     use_tunix_gradient_accumulation=False,
     num_microbatches=1,
@@ -330,19 +329,12 @@ def preprocessing_pipeline(
         )
     )
     data_column_names = ("inputs", "targets")
-  elif use_dpo:
-
-    def lists2array(x):
-      """Convert lists/tuples to array"""
-      return jax.tree.map(np.asarray, x, is_leaf=lambda y: isinstance(y, (list, tuple)))
-
-    operations.append(grain.MapOperation(lists2array))
-  else:
+  elif not use_dpo:
     assert len(data_column_names) == 1
     operations.append(input_pipeline_utils.HFNormalizeFeatures(data_column_names[0]))
     data_column_names = ("inputs", "targets")
 
-  if packing and not use_dpo:
+  if packing:
     length_struct = {col: max_target_length for col in data_column_names}
     max_segments = max_segments_per_seq
     if max_segments is not None and max_segments <= 0:
@@ -356,7 +348,12 @@ def preprocessing_pipeline(
     )
     operations.append(input_pipeline_utils.ReformatPacking(data_column_names))
   else:
-    operations.append(input_pipeline_utils.PadOrTrimToMaxLength(max_target_length, pad_id))
+    if use_dpo:
+      # Renames arbitrary DPO columns and performs DPO-aware padding.
+      max_prompt_length = config.dpo.max_prompt_length
+      operations.append(dpo_utils.DPODataFormatting(pad_id, max_target_length, data_column_names, max_prompt_length))
+    else:
+      operations.append(input_pipeline_utils.PadOrTrimToMaxLength(max_target_length, pad_id))
     operations.append(grain.Batch(batch_size=batch_size, drop_remainder=drop_remainder))
 
   if shift and not use_dpo:

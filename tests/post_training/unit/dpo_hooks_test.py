@@ -39,7 +39,7 @@ class DPOHooksTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     self.test_dir = tempfile.mkdtemp()
-    self.config = pyconfig.initialize(
+    self.config = pyconfig.initialize_pydantic(
         ["", os.path.join(MAXTEXT_CONFIGS_DIR, "post_train", "dpo.yml")],
         per_device_batch_size=1,
         run_name="test",
