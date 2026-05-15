@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Tests for the maxengine """
+"""Tests for the maxengine"""
 
 import functools
 import sys
@@ -23,6 +23,8 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 import numpy as np
 import pytest
+from flax import nnx
+from flax.linen import partitioning as nn_partitioning
 from maxtext.configs import pyconfig
 from maxtext.common.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_PREFILL
 from maxtext.layers import quantizations
@@ -31,6 +33,7 @@ pytest.importorskip("jetstream", reason="jetstream not installed")
 from maxtext.inference.maxengine import maxengine
 from maxtext.models import models
 from maxtext.utils import maxtext_utils
+from maxtext.utils import model_creation_utils
 from tests.utils.test_helpers import get_test_config_path
 
 pytestmark = [pytest.mark.external_serving]
@@ -162,6 +165,97 @@ class MaxEngineTest(unittest.TestCase):
     self.assertEqual(result_token.log_prob.shape[1], 1)
     self.assertEqual(result_token.data.ndim, 2)
     self.assertEqual(result_token.data.shape[1], 3)
+
+  def _init_nnx_pyconfig(self, **kwargs):
+    """init_pyconfig with NNX flags on."""
+    return self.init_pyconfig(pure_nnx=True, enable_nnx=True, pure_nnx_decoder=True, **kwargs)
+
+  def _build_nnx_params(self, cfg, mesh):
+    """Materialize an NNX Transformer and return its nnx.Param state."""
+    _create_model = model_creation_utils.get_nnx_create_model_fn(cfg, mesh=mesh, model_mode=MODEL_MODE_PREFILL)
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      model = _create_model()
+    _, params_state, _ = nnx.split(model, nnx.Param, ...)
+    return params_state
+
+  def test_init_nnx(self):
+    """NNX engine init exposes graphdef + abstract Transformer."""
+    cfg = self._init_nnx_pyconfig()
+    engine = maxengine.MaxEngine(cfg, jax.devices())
+    self.assertIsNotNone(engine.graphdef)
+    self.assertIsNotNone(engine.model)
+    self.assertEqual(type(engine.model).__name__, "Transformer")
+
+  def test_basic_prefill_nnx(self):
+    """NNX prefill returns a Linen-shape result dict with finite values."""
+    cfg = self._init_nnx_pyconfig()
+    devices_array = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices_array, cfg.mesh_axes)
+    params_state = self._build_nnx_params(cfg, mesh)
+
+    input_tokens = jnp.array([1, 306, 5360, 304, 0, 0, 0, 0])
+    true_length = 4
+    engine = maxengine.MaxEngine(cfg, jax.devices())
+    params = engine.load_params(params=params_state)
+    prefill_result, first_token = engine.prefill(params=params, padded_tokens=input_tokens, true_length=true_length)
+
+    self.assertEqual(prefill_result["generated_tokens"], jnp.array([0]))
+    self.assertEqual(prefill_result["tokens"].size, 1)
+    self.assertTrue(jnp.array_equal(first_token.data.size, 3))
+    self.assertEqual(first_token.log_prob.shape, (1, 1))
+    self.assertIn("cache", prefill_result)
+    self.assertIsInstance(prefill_result["cache"], dict)
+    # Catch silent NaN/inf from a bad nnx.merge or cache round-trip.
+    self.assertTrue(jnp.all(jnp.isfinite(prefill_result["logits"])))
+    cache_leaves, _ = jax.tree.flatten(prefill_result["cache"])
+    for leaf in cache_leaves:
+      self.assertTrue(jnp.all(jnp.isfinite(leaf)), msg=f"non-finite cache leaf, shape={leaf.shape}")
+    # scan_layers=True (default in test config) ⇒ leading axis is num_decoder_layers.
+    for leaf in cache_leaves:
+      self.assertEqual(leaf.shape[0], cfg.num_decoder_layers, msg=f"layer-axis mismatch, got shape={leaf.shape}")
+
+  def test_basic_decode_nnx(self):
+    """NNX prefill → insert → 4 generate steps. Verifies next_pos advances and logits stay finite."""
+    cfg = self._init_nnx_pyconfig()
+    devices_array = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices_array, cfg.mesh_axes)
+    params_state = self._build_nnx_params(cfg, mesh)
+
+    input_tokens = jnp.array([1, 306, 5360, 304])
+    engine = maxengine.MaxEngine(cfg, jax.devices())
+    params = engine.load_params(params=params_state)
+    decode_state = engine.init_decode_state()
+    prefill_result, _ = engine.prefill(params=params, padded_tokens=input_tokens, true_length=4)
+    decode_state = engine.insert(prefill_result, decode_state, slot=0)
+
+    # 4 steps is enough to catch off-by-one cache pointer bugs.
+    initial_next_pos = int(decode_state["next_pos"][0, 0])
+    for step in range(4):
+      decode_state, result_token = engine.generate(params=params, decode_state=decode_state)
+      self.assertEqual(result_token.log_prob.ndim, 2)
+      self.assertEqual(result_token.log_prob.shape[1], 1)
+      self.assertEqual(result_token.data.ndim, 2)
+      self.assertEqual(result_token.data.shape[1], 3)
+      self.assertTrue(jnp.all(jnp.isfinite(decode_state["logits"])))
+      self.assertEqual(
+          int(decode_state["next_pos"][0, 0]),
+          initial_next_pos + step + 1,
+          msg=f"next_pos didn't advance at step {step}",
+      )
+
+  def test_quantize_raises_for_nnx(self):
+    """pure_nnx + quantization raises NotImplementedError."""
+    cfg = self._init_nnx_pyconfig(quantization="int8")
+    engine = maxengine.MaxEngine(cfg, jax.devices())
+    with self.assertRaises(NotImplementedError):
+      engine.load_params(rng=self.rng)
+
+  def test_lora_raises_for_nnx(self):
+    """pure_nnx + LoRA raises NotImplementedError."""
+    cfg = self._init_nnx_pyconfig()
+    engine = maxengine.MaxEngine(cfg, jax.devices())
+    with self.assertRaises(NotImplementedError):
+      engine.load_single_adapter("/nonexistent/adapter/path")
 
   @pytest.mark.skip(reason="Can only pass on CPU.")
   def test_chunked_prefill(self):
