@@ -348,7 +348,7 @@ python3 -m maxtext.trainers.post_train.distillation.train_distill \
   profiler=xplane
 ```
 
-The schedule values above are a strong default for same-size pruning recovery. See [α and β schedule guide](../../guides/distillation.md#alpha-schedule-guide) for other scenarios (large teacher → small student, logit-only, aggressive recovery, etc.).
+The schedule values above are a strong default for same-size pruning recovery. See [α and β schedule guide](../../guides/distillation.md#%CE%B1-alpha-schedule-guide) for other scenarios (large teacher → small student, logit-only, aggressive recovery, etc.).
 
 > **Note:** `distill_layer_indices` is applied to **both** student and teacher activations identically. When the two have different depths (Pattern A or a depth-pruned Pattern B), every index must be valid on the *smaller* side, and same-numbered layers are aligned across the two models. The trainer cannot map student layer *i* to teacher layer *f(i)* for arbitrary *f*. If the depths differ significantly, prefer logit-only distillation (`distill_beta=0`).
 
