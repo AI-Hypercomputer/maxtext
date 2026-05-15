@@ -51,6 +51,7 @@ Example Usage:
 
 import argparse
 from functools import partial
+import importlib.util
 import json
 import os
 import sys
@@ -59,7 +60,6 @@ import time
 from typing import Any, Callable, List, Sequence
 import absl
 import ml_dtypes
-import torch
 import flax.linen as nn
 from huggingface_hub import hf_hub_download, list_repo_files
 import jax
@@ -77,6 +77,21 @@ from maxtext.utils.globals import HF_IDS
 import numpy as np
 from orbax.checkpoint import type_handlers
 from safetensors import safe_open
+
+
+def _lazy_import(name: str):
+  spec = importlib.util.find_spec(name)
+  if spec is None:
+    return None
+  loader = importlib.util.LazyLoader(spec.loader)
+  spec.loader = loader
+  module = importlib.util.module_from_spec(spec)
+  sys.modules[name] = module
+  loader.exec_module(module)
+  return module
+
+
+torch = _lazy_import("torch")
 
 
 absl.logging.set_verbosity(absl.logging.INFO)  # for max_logging.log
@@ -807,7 +822,7 @@ def _setup_merge_mode_getter(tensor_getter, config, hf_lora_adapter_path, revisi
 def main(
     args: Sequence[str],
     lazy_load_tensors: bool = False,
-    eager_load_method: str = "transformers",
+    eager_load_method: str = "safetensors",
     hf_model_path: str | None = None,
     revision: str | None = None,
     save_dtype: str = "bfloat16",
@@ -894,9 +909,9 @@ def main(
       #      (e.g., Multi-Token Prediction weights (`layers.61`) in DeepSeek-V3).
       #
       # Recommendation:
-      # - Use 'transformers' as the default for backward compatibility of mapping.
-      # - 'safetensors' is an interchangeable and valid alternative for most models,
-      #   and is strictly required if the model or specific weights lack Transformers support.
+      # - Use 'safetensors' as the default. Since transformers 5.8.0, model initialization
+      #   changed and the 'transformers' method may produce different key structures.
+      # - Use 'transformers' only if explicitly needed for backward-compatible key mapping.
       if eager_load_method == "transformers":
         max_logging.log("Eager load with Transformers backend, from_pretrained with auto dtype")
         # For auto mode, loaded dtype is the same as `dtype` specified in config.json (or `torch_dtype` for older version)
