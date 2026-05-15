@@ -775,10 +775,14 @@ class Decoder(nn.Module):
       kv_caches: list[jax.Array] | None = None,
       attention_metadata=None,
       deepstack_visual_embeds: None | list[jnp.ndarray] = None,
+      forced_routed_experts: jnp.ndarray | None = None,
   ):
     cfg = self.config
     mesh = self.mesh
     assert decoder_input_tokens.ndim == 2  # [batch, len]
+
+    if cfg.scan_layers and forced_routed_experts is not None:
+      raise NotImplementedError("Forced routing with scanned layers is not supported yet.")
 
     # [batch, length] -> [batch, length, emb_dim]
     y = self._apply_embedding(
@@ -1061,6 +1065,10 @@ class Decoder(nn.Module):
               global_layer_idx = global_layer_idx_offset + index
               kv_cache = kv_caches[index] if kv_caches is not None else None
               input_tokens = decoder_input_tokens if cfg.engram_layers else None
+              current_forced_routed_experts = None
+              if forced_routed_experts is not None and layer_prefix == "moe_layers":
+                current_forced_routed_experts = forced_routed_experts[:, :, index, :]
+
               y, kv_cache = layer(
                   config=cfg,
                   mesh=mesh,
@@ -1080,11 +1088,13 @@ class Decoder(nn.Module):
                   kv_cache=kv_cache,
                   attention_metadata=attention_metadata,
                   decoder_input_tokens=input_tokens,
+                  forced_routed_experts=current_forced_routed_experts,
               )
               if kv_caches is not None and kv_cache is not None:
                 kv_caches[index] = kv_cache
             global_layer_idx_offset += num_layers
         else:
+          moe_lyr_idx = 0
           for lyr in range(cfg.num_decoder_layers):
             RemattedBlockLayer = RemattedBlockLayers[0]
             layer_kwargs = {}
@@ -1121,19 +1131,38 @@ class Decoder(nn.Module):
             layer = RemattedBlockLayer(
                 config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant, model_mode=self.model_mode, **layer_kwargs
             )
-            y, returned_cache = layer(
-                y,
-                decoder_segment_ids,
-                decoder_positions,
-                deterministic,
-                model_mode,
-                previous_chunk=previous_chunk,
-                page_state=page_state,
-                slot=slot,
-                kv_cache=kv_cache,
-                attention_metadata=attention_metadata,
-                **layer_call_kwargs,
-            )
+            current_forced_routed_experts = None
+            is_moe = False
+            if cfg.decoder_block in (
+                DecoderBlockType.MIXTRAL,
+                DecoderBlockType.QWEN3_MOE,
+                DecoderBlockType.QWEN3_NEXT,
+                DecoderBlockType.QWEN3_5,
+                DecoderBlockType.QWEN3_CUSTOM_MOE,
+            ):
+              is_moe = True
+            elif cfg.decoder_block == DecoderBlockType.LLAMA4:
+              is_moe = llama4.determine_is_moe_layer(lyr, self.config.interleave_moe_layer_step)
+
+            if is_moe and forced_routed_experts is not None:
+              current_forced_routed_experts = forced_routed_experts[:, :, moe_lyr_idx, :]
+              moe_lyr_idx += 1
+            elif is_moe:
+              moe_lyr_idx += 1
+
+            call_kwargs = {
+                "previous_chunk": previous_chunk,
+                "page_state": page_state,
+                "slot": slot,
+                "kv_cache": kv_cache,
+                "attention_metadata": attention_metadata,
+            }
+            call_kwargs.update(layer_call_kwargs)
+
+            if is_moe and current_forced_routed_experts is not None:
+              call_kwargs["forced_routed_experts"] = current_forced_routed_experts
+
+            y, returned_cache = layer(y, decoder_segment_ids, decoder_positions, deterministic, model_mode, **call_kwargs)
             if kv_caches is not None and returned_cache is not None:
               if cfg.decoder_block not in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
                 kv_caches[lyr] = returned_cache

@@ -140,6 +140,7 @@ class TransformerLinenPure(nn.Module):
       nnx_method=None,
       kv_caches: list[jax.Array] | None = None,
       attention_metadata: dict[str, Any] | None = None,
+      forced_routed_experts: jnp.ndarray | None = None,
   ):
     """Applies Transformer decoder-branch on encoded-input and target.
 
@@ -199,6 +200,7 @@ class TransformerLinenPure(nn.Module):
         kv_caches=kv_caches,
         attention_metadata=attention_metadata,
         deepstack_visual_embeds=deepstack_visual_embeds,
+        forced_routed_experts=forced_routed_experts,
     )  # pytype: disable=wrong-keyword-args
 
     # If we are initializing the model AND MTP is enabled, we must create
@@ -430,6 +432,7 @@ class Transformer(nnx.Module):
       decoder_target_mask: jax.Array | None = None,
       kv_caches: list[jax.Array] | None = None,
       attention_metadata: dict[str, Any] | None = None,
+      forced_routed_experts: jnp.ndarray | None = None,
   ):
     """Applies the Zero-1 FSDP wrapped Transformer model.
 
@@ -456,6 +459,7 @@ class Transformer(nnx.Module):
     Returns:
       Logits from the Transformer model. Logits, hidden_state, kv_caches if called by vLLM.
     """
+
     if decoder_segment_ids is not None and model_mode == MODEL_MODE_AUTOREGRESSIVE:
       raise ValueError(
           f"During autoregressive decoding we assume the tokens are in the active sequence"
@@ -513,6 +517,7 @@ class Transformer(nnx.Module):
           kv_caches=kv_caches,
           attention_metadata=attention_metadata,
           deepstack_visual_embeds=deepstack_visual_embeds,
+          forced_routed_experts=forced_routed_experts,
       )  # pytype: disable=wrong-keyword-args
     else:
       logits, hidden_state, kv_caches = self.decoder(
@@ -529,6 +534,7 @@ class Transformer(nnx.Module):
           kv_caches=kv_caches,
           attention_metadata=attention_metadata,
           deepstack_visual_embeds=deepstack_visual_embeds,
+          forced_routed_experts=forced_routed_experts,
           mutable=mutable_collections,
       )  # pytype: disable=wrong-keyword-args
 

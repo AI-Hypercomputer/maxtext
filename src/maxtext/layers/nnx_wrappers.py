@@ -34,6 +34,7 @@ from flax.nnx.rnglib import Rngs
 import jax
 from jax import tree_util as jtu
 import qwix
+import inspect
 
 M = tp.TypeVar("M", bound=Module)
 
@@ -417,8 +418,27 @@ class ToLinen(linen.Module):
   # generic function to augment original nnx module (i.e for learn-to-init distillation)
   nnx_module_augment_fn: tp.Callable[[Module, str | None], Module] | None = None
 
+  def __post_init__(self):
+    super().__post_init__()
+
+    clashing_params = {}
+    _call_fn = getattr(self.nnx_class, "__call__", None)
+    if _call_fn and callable(_call_fn):
+      sig = inspect.signature(_call_fn)
+      params = list(sig.parameters.keys())
+      for name in ("previous_chunk", "page_state", "slot"):
+        if name in params:
+          clashing_params[name] = params.index(name) - 1
+    object.__setattr__(self, "_clashing_params", clashing_params)
+
   @linen.compact
   def __call__(self, *args, nnx_method: tp.Callable[..., Any] | str | None = None, **kwargs):
+    # Pop pre-partialled keyword arguments from kwargs if they are also passed positionally in args
+    # to avoid Python's multiple values clashing (e.g., in Linen scanned loops).
+    for param_name, positional_idx in getattr(self, "_clashing_params", {}).items():
+      if len(args) > positional_idx:
+        kwargs.pop(param_name, None)
+
     def _module_kwargs():
       maybe_add_default = not self.is_initializing()
       module_kwargs = dict(self.kwargs)

@@ -1091,9 +1091,13 @@ class NNXDecoder(nnx.Module):
       attention_metadata=None,
       deepstack_visual_embeds: None | list[jnp.ndarray] = None,
       multimodal_input: None | MultimodalInput = None,
+      forced_routed_experts: jnp.ndarray | None = None,
   ):
     cfg = self.config
     assert decoder_input_tokens.ndim == 2  # [batch, len]
+
+    if cfg.scan_layers and forced_routed_experts is not None:
+      raise NotImplementedError("Forced routing with scanned layers is not supported yet.")
 
     policy = self.get_remat_policy()
 
@@ -1123,6 +1127,9 @@ class NNXDecoder(nnx.Module):
 
     if attention_metadata is not None:
       layer_kwargs["attention_metadata"] = attention_metadata
+
+    if forced_routed_experts is not None:
+      layer_kwargs["forced_routed_experts"] = forced_routed_experts
 
     if cfg.scan_layers:
       if self.is_deepseek:
@@ -1230,17 +1237,17 @@ class NNXDecoder(nnx.Module):
       prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg)
 
       # Hoisted function to preserve XLA cache ID
-      def pure_layer_fn(graphdef, state_in, y_in, kv_in):
+      def pure_layer_fn(graphdef, state_in, y_in, kv_in, valid_kwargs):
 
         if cfg.parameter_memory_host_offload:
           state_in = jax.tree.map(lambda x: jax.device_put(x, max_utils.device_space()), state_in)
 
         merged_layer = nnx.merge(graphdef, state_in)
-        out_y, out_kv = merged_layer(y_in, *layer_args, kv_cache=kv_in, **layer_kwargs)
+        out_y, out_kv = merged_layer(y_in, *layer_args, kv_cache=kv_in, **valid_kwargs)
         return out_y, out_kv, nnx.state(merged_layer)
 
       checkpointed_fn = jax.checkpoint(pure_layer_fn, policy=policy, prevent_cse=prevent_cse)
-
+      moe_lyr_idx = 0
       for lyr, layer in enumerate(self.layers):
         graphdef, state = nnx.split(layer)
         if kv_caches is not None:
@@ -1258,7 +1265,33 @@ class NNXDecoder(nnx.Module):
         if input_tokens is not None:
           layer_kwargs["decoder_input_tokens"] = input_tokens
 
-        y, kv_cache, new_state = checkpointed_fn(graphdef, state, y, kv_cache)
+        # Slice forced_routed_experts for this specific layer index!
+        current_kwargs = dict(layer_kwargs)
+
+        is_moe = False
+        if cfg.decoder_block in (
+            DecoderBlockType.MIXTRAL,
+            DecoderBlockType.QWEN3_MOE,
+            DecoderBlockType.QWEN3_NEXT,
+            DecoderBlockType.QWEN3_5,
+            DecoderBlockType.QWEN3_CUSTOM_MOE,
+        ):
+          is_moe = True
+        elif cfg.decoder_block == DecoderBlockType.DEEPSEEK:
+          is_moe = lyr >= cfg.first_num_dense_layers
+        elif cfg.decoder_block == DecoderBlockType.LLAMA4:
+          is_moe = llama4.determine_is_moe_layer(lyr, self.config.interleave_moe_layer_step)
+
+        if is_moe and "forced_routed_experts" in current_kwargs and current_kwargs["forced_routed_experts"] is not None:
+          routed_experts = current_kwargs["forced_routed_experts"]
+          current_kwargs["forced_routed_experts"] = routed_experts[:, :, moe_lyr_idx, :]
+          moe_lyr_idx += 1
+        else:
+          current_kwargs.pop("forced_routed_experts", None)
+          if is_moe:
+            moe_lyr_idx += 1  # Still increment counter if it is an MoE layer but data is missing!
+
+        y, kv_cache, new_state = checkpointed_fn(graphdef, state, y, kv_cache, current_kwargs)
         nnx.update(layer, new_state)
 
         if kv_caches is not None and kv_cache is not None:
