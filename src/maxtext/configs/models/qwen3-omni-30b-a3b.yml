@@ -25,7 +25,7 @@ head_dim: 128
 mlp_activations: ["silu", "linear"]
 vocab_size: 152064
 normalization_layer_epsilon: 1.0e-6
-use_qk_norm: True
+use_qk_norm: true
 
 # MoE Specific Parameters
 num_experts: 128
@@ -38,8 +38,8 @@ rope_max_timescale: 1_000_000
 max_position_embeddings: 65536
 
 # General Model Settings
-enable_dropout: False
-scan_layers: False  # deepstack does not support scan_layers
+enable_dropout: false
+scan_layers: false  # deepstack does not support scan_layers
 
 # Vision Encoder Configuration
 # Based on https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_omni_moe/configuration_qwen3_omni_moe.py
