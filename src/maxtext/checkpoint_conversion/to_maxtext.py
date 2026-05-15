@@ -911,7 +911,7 @@ def main(
       # Recommendation:
       # - Use 'safetensors' as the default. Since transformers 5.8.0, model initialization
       #   changed and the 'transformers' method may produce different key structures.
-      # - Use 'transformers' only if explicitly needed for backward-compatible key mapping.
+      # - Use 'transformers' only if explicitly needed for backward-compatible key mapping (e.g. Gemma3).
       if eager_load_method == "transformers":
         max_logging.log("Eager load with Transformers backend, from_pretrained with auto dtype")
         # For auto mode, loaded dtype is the same as `dtype` specified in config.json (or `torch_dtype` for older version)
