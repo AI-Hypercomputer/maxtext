@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Common LoRA utils needed to support LoRA adapters."""
+"""Common LoRA utils needed to support LoRA adapters."""
+
+
 from functools import partial
 import json
 import os
@@ -174,11 +176,14 @@ def setup_initial_lora_state(model, data_iterator, tx, config, rng, mesh, checkp
 
   if lora_adapter_path:
     max_logging.log(f"Setting initial state of LoRA with lora_adapter_path = {lora_adapter_path}")
+    # LoRA adapters on disk are Linen-format and downstream expects Linen TrainState.
+    # Route to Linen regardless of pure_nnx; native NNX LoRA is a separate effort.
     if config.pure_nnx:
-      # NNX has a different function to init the training state.
-      raise NotImplementedError("Pure NNX support has not been implemented yet.")
-    else:
-      init_state_fn = partial(maxtext_utils.init_initial_state, model, tx, config, True, rng)
+      max_logging.log(
+          "WARNING: LoRA does not yet support pure_nnx natively; "
+          "running on the Linen path. NNX-format checkpoints will not load correctly here."
+      )
+    init_state_fn = partial(maxtext_utils.init_initial_state, model, tx, config, True, rng)
     unboxed_abstract_state, _, _ = maxtext_utils.get_abstract_state(config, mesh, init_state_fn, True)
 
     lora_config_path = lora_adapter_path + "adapter_config.json"

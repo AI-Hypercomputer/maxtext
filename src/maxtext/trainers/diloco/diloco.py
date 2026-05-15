@@ -26,6 +26,7 @@ from collections.abc import Sequence
 from typing import Any, Callable
 
 import drjax
+from flax import nnx
 from flax import struct
 from flax.training import train_state
 import jax
@@ -153,7 +154,15 @@ def build_abstract_diloco_state(
       momentum=config.diloco_outer_momentum,
       nesterov=True,
   )
-  outer_opt_state = jax.eval_shape(outer_optimizer.init, abstract_state.params)
+  # For NNX, model params (Param variables only) live under abstract_state.model;
+  # for Linen under abstract_state.params.
+  if config.pure_nnx:
+    model_params = abstract_state.model.filter(nnx.Param)
+    model_params_sharding = state_mesh_shardings.model.filter(nnx.Param)
+  else:
+    model_params = abstract_state.params
+    model_params_sharding = state_mesh_shardings.params
+  outer_opt_state = jax.eval_shape(outer_optimizer.init, model_params)
 
   # Create abstract step
   abstract_step = jax.ShapeDtypeStruct((), jnp.int32)
@@ -161,7 +170,7 @@ def build_abstract_diloco_state(
   # Build abstract DiLoCo state
   diloco_state = DiLoCoTrainState(
       inner_state=inner_state,
-      params=abstract_state.params,
+      params=model_params,
       outer_opt_state=outer_opt_state,
       step=abstract_step,
   )
@@ -171,12 +180,12 @@ def build_abstract_diloco_state(
   # Sharding for outer_opt_state. For SGD with momentum, it is (TraceState(trace=...), EmptyState())
   # We shard the momentum trace the same way as the parameters.
   outer_opt_state_sharding = (
-      optax.TraceState(trace=state_mesh_shardings.params),
+      optax.TraceState(trace=model_params_sharding),
       optax.EmptyState(),
   )
   diloco_state_shardings = DiLoCoTrainState(
       inner_state=inner_state_shardings,
-      params=state_mesh_shardings.params,
+      params=model_params_sharding,
       outer_opt_state=outer_opt_state_sharding,
       step=None,
   )
@@ -205,11 +214,15 @@ def build_diloco_state(
     # mesh automatically when jax.set_mesh is used.
     inner_state = drjax.broadcast(state, mesh=mesh)
     # Outer state retains a single copy of the model parameters and optimizer state.
-    outer_params = state.params
+    # For NNX, model params (Param variables only) live under state.model;
+    # for Linen under state.params.
+    outer_params = state.model.filter(nnx.Param) if config.pure_nnx else state.params
     outer_opt_state = outer_optimizer.init(outer_params)
     outer_opt_state_sharding = jax.tree_util.tree_map(lambda x: x.sharding, outer_opt_state)
+    # For NNX, the step counter lives at state.optimizer.step; for Linen at state.step.
+    step = state.optimizer.step if config.pure_nnx else state.step
     return (
-        DiLoCoTrainState(inner_state=inner_state, params=outer_params, outer_opt_state=outer_opt_state, step=state.step),
+        DiLoCoTrainState(inner_state=inner_state, params=outer_params, outer_opt_state=outer_opt_state, step=step),
         outer_opt_state_sharding,
     )
 
@@ -244,7 +257,11 @@ def build_diloco_train_step(
     # Calculate the delta between the current replica's state and the global
     # state (since last synchronization).
     broadcast_outer_params = drjax.broadcast(state.params, mesh=mesh)
-    model_delta = jax.tree.map(lambda x, y: y - x, state.inner_state.params, broadcast_outer_params)
+    # For NNX, model Param vars live under inner_state.model; for Linen under inner_state.params.
+    inner_model_params = (
+        nnx.filter_state(state.inner_state.model, nnx.Param) if config.pure_nnx else state.inner_state.params
+    )
+    model_delta = jax.tree.map(lambda x, y: y - x, inner_model_params, broadcast_outer_params)
     # Treat the average delta as the outer optimizer's gradient and apply to
     # the global (outer) model params.
     averaged_pseudo_grad = drjax.reduce_mean(model_delta)
@@ -253,7 +270,27 @@ def build_diloco_train_step(
     # Replace inner model params with the new global model params.
     # NOTE: inner optimizer state is retained despite the change in parameters,
     # see section 6.1 in https://arxiv.org/pdf/2311.08105.
-    new_inner_state = drjax.map_fn(lambda state: state.replace(params=new_outer_params), state.inner_state, mesh=mesh)
+    if config.pure_nnx:
+      # For NNX: merge new Param vars back with the non-Param model vars (e.g. RNG state).
+      def replace_nnx_model_params(s, new_params):
+        non_param_model = nnx.filter_state(s.model, nnx.Not(nnx.Param))
+        new_model = nnx.merge_state(non_param_model, new_params)
+        # Build result via __setitem__ so nested States are stored as plain dicts
+        # internally, matching the pytree structure produced by nnx.state().
+        # (Passing State objects via the constructor dict literal stores them
+        # as-is, causing jax.lax.cond to see mismatched pytree structures.)
+        result = type(s)({})
+        result["model"] = new_model
+        result["optimizer"] = s["optimizer"]
+        return result
+
+      new_inner_state = drjax.map_fn(
+          lambda s: replace_nnx_model_params(s, new_outer_params),
+          state.inner_state,
+          mesh=mesh,
+      )
+    else:
+      new_inner_state = drjax.map_fn(lambda s: s.replace(params=new_outer_params), state.inner_state, mesh=mesh)
     return state.replace(
         params=new_outer_params,
         outer_opt_state=new_opt_state,
@@ -271,14 +308,16 @@ def build_diloco_train_step(
     broadcast_rng = drjax.broadcast(prng, mesh=mesh)
     inner_state, metrics = drjax.map_fn(train_step, (state.inner_state, batch, broadcast_rng), mesh=mesh)
     avg_metrics = typed_reduce_mean(metrics)
+    # For NNX, the step counter lives at inner_state.optimizer.step; for Linen at inner_state.step.
+    new_step = inner_state.optimizer.step[0] if config.pure_nnx else inner_state.step[0]
     state = state.replace(
         inner_state=inner_state,
-        step=inner_state.step[0],
+        step=new_step,
     )
     # Either synchronize the model, or no-op, depending on whether the current
     # step falls on the synchronization period.
     state = jax.lax.cond(
-        inner_state.step[0] % config.diloco_sync_period == 0,
+        new_step % config.diloco_sync_period == 0,
         synchronize,
         lambda x: x,  # no-op
         state,
