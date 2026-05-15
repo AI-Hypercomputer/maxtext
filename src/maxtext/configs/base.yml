@@ -186,7 +186,7 @@ logits_dot_in_fp32: false  # whether to use fp32 in logits_dense or shared_embed
 cast_logits_to_fp32: true # whether to cast the logits to fp32. the higher precision is generally beneficial, but it can vary slightly.
 float32_qk_product: false # in dot_product attention, whether to cast to fp32 the inputs to qk product
 float32_logits: false # in dot_product attention, whether to cast to fp32 the inputs to softmax
-float32_weight_sum: true # whether to use full fp32 precision to sum expert weights for numerical stability
+float32_weight_sum: false # whether to use fp32 for MoE expert weight summation; true adds ~2 GB f32 temp per device
 float32_gate_logits: false # whether to cast inputs to fp32 to compute MoE gate logits for numerical stability
 
 # multi-token prediction configs

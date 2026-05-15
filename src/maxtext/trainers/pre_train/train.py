@@ -37,6 +37,12 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import NamedSharding
 
+
+import flax
+try:
+  flax.config.update("flax_always_shard_variable", False)
+except LookupError:
+  pass
 from flax import linen as nn, nnx
 from flax.linen import partitioning as nn_partitioning
 
@@ -401,10 +407,11 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       (loss, (aux, new_rest)), raw_grads = grad_func(curr_params, rest, config, data)
       nnx.update(state.model, new_rest)
 
-  raw_grads = jax.tree_util.tree_map(
-      lambda x: x.astype(config.grad_dtype) if x.dtype == jnp.float32 else x,
-      raw_grads,
-  )
+  if config.grad_dtype != jnp.float32:
+    raw_grads = jax.tree_util.tree_map(
+        lambda x: x.astype(config.grad_dtype) if x.dtype == jnp.float32 else x,
+        raw_grads,
+    )
   if config.parameter_memory_host_offload:
     raw_grads = jax.device_put(
         raw_grads,
