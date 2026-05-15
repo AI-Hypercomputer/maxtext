@@ -8,7 +8,7 @@ max_prefill_predict_length: 16
 dataset_type: "synthetic"
 dtype: "float32"
 matmul_precision: "high"
-logits_dot_in_fp32: True
+logits_dot_in_fp32: true
 prompt: "Hello world this is a test"
 init_weights_seed: 42
-enable_dropout: False
+enable_dropout: false

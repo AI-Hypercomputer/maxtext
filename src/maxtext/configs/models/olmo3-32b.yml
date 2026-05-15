@@ -28,7 +28,7 @@ head_dim: 128
 # Activations & Normalization
 mlp_activations: ["silu", "linear"]
 normalization_layer_epsilon: 1.e-6
-use_qk_norm: True
+use_qk_norm: true
 
 # Attention
 # Layers 0,1,2 use sliding window 4096. Layer 3 uses global. Repeats.
@@ -38,17 +38,17 @@ inhomogeneous_layer_cycle_interval: 4
 # RoPE
 # Yarn RoPE for global attention, default RoPE for sliding window attention (set from olmo3.py)
 rope_type: "yarn"
-rope_interleave: False
+rope_interleave: false
 rope_max_timescale: 500000 # rope_theta
 rope_factor: 8.0 # factor so 0.1 * ln(rope_factor) + 1.0 = 1.2079441541679836
 original_max_position_embeddings: 8192
 beta_fast: 32.0
 beta_slow: 1.0
 max_position_embeddings: 65536
-rope_attention_scaling: True
-rope_truncate: True  # HF transformers defaults truncate=True for YaRN; matches HF correction-range floor/ceil
+rope_attention_scaling: true
+rope_truncate: true  # HF transformers defaults truncate=true for YaRN; matches HF correction-range floor/ceil
 
 # Embeddings
 vocab_size: 100278
-logits_via_embedding: False
-normalize_embedding_logits: False
+logits_via_embedding: false
+normalize_embedding_logits: false

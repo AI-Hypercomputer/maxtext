@@ -60,7 +60,7 @@ jobs:
           ADDITIONAL_CONTEXT: '${{ inputs.additional_context }}'
 
       - name: 'Run Gemini pull request review'
-        # reviews code with detailed set of instructions for the Gemini 
+        # reviews code with detailed set of instructions for the Gemini
         uses: 'google-github-actions/run-gemini-cli@v0'
         id: 'gemini_pr_review'
         env:
@@ -71,7 +71,7 @@ jobs:
           PULL_REQUEST_NUMBER: '${{ github.event.pull_request.number || github.event.issue.number }}'
           REPOSITORY: '${{ github.repository }}'
           ADDITIONAL_CONTEXT: '${{ inputs.additional_context }}'
-        with:          
+        with:
           gcp_location: '${{ vars.GOOGLE_CLOUD_LOCATION }}'
           gcp_project_id: '${{ vars.GOOGLE_CLOUD_PROJECT }}'
           gcp_service_account: '${{ vars.SERVICE_ACCOUNT_EMAIL }}'
