@@ -336,25 +336,22 @@ class QuantTest(unittest.TestCase):
 
   def init_pyconfig(self, **kwargs):
     """Initialize MaxText pyconfig."""
-    init_kwargs = (
-        {
-            "run_name": "test",
-            "dataset_type": "synthetic",
-            "enable_checkpointing": False,
-            "enable_goodput_recording": False,
-            "steps": 1,
-            "per_device_batch_size": 1,
-            "use_qwix_quantization": True,
-            "skip_jax_distributed_system": True,
-            "base_emb_dim": 16,
-            "base_num_query_heads": 1,
-            "base_num_kv_heads": 1,
-            "base_mlp_dim": 16,
-            "base_num_decoder_layers": 1,
-            "max_target_length": 16,
-        }
-        | kwargs
-    )
+    init_kwargs = {
+        "run_name": "test",
+        "dataset_type": "synthetic",
+        "enable_checkpointing": False,
+        "enable_goodput_recording": False,
+        "steps": 1,
+        "per_device_batch_size": 1,
+        "use_qwix_quantization": True,
+        "skip_jax_distributed_system": True,
+        "base_emb_dim": 16,
+        "base_num_query_heads": 1,
+        "base_num_kv_heads": 1,
+        "base_mlp_dim": 16,
+        "base_num_decoder_layers": 1,
+        "max_target_length": 16,
+    } | kwargs
     config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         **init_kwargs,
