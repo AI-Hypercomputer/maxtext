@@ -687,9 +687,16 @@ def recover(
   if metric_logger is not None:
     metric_logger.recover_metrics()
 
-  # 1. Find currently active slices
-  all_active_slices = elastic.get_active_slice_indices(
-      elastic_manager.slice_to_devices
+  # 1. Find currently active slices (wait if none are active)
+  min_slices = config.elastic_min_slice_count
+  if min_slices == -1:
+    min_slices = config.num_slices
+
+  _logger.info("Waiting for at least %d slices to be active for recovery...", min_slices)
+  all_active_slices = elastic.wait_for_slices(
+      slice_count=min_slices,
+      slice_to_devices=elastic_manager.slice_to_devices,
+      timeout=config.elastic_timeout_seconds,
   )
   elastic_manager.active_slice_indices = all_active_slices
   _logger.info(
@@ -857,6 +864,8 @@ def recover(
         elastic_manager.active_slice_indices,
     )
   else:
+    if snapshot_mgr.latest is None:
+      raise RuntimeError("No snapshots available to restore from. Cannot recover.")
     restored_step = snapshot_mgr.latest.step
     abstract_dict = {
         "step": state.step,
