@@ -30,6 +30,13 @@ from tests.utils.test_helpers import (
 )
 
 
+def _small_model_base_emb_dim(decoupled, device_count):
+  """Return a tiny embedding dim divisible by local decoupled devices."""
+  if not decoupled:
+    return 28
+  return ((28 + device_count - 1) // device_count) * device_count
+
+
 class TrainTests(unittest.TestCase):
   """Tests train.py with various configs"""
 
@@ -39,7 +46,7 @@ class TrainTests(unittest.TestCase):
   dataset_path = get_test_dataset_path()
 
   _small_model_overrides = [
-      "base_emb_dim=28",
+      f"base_emb_dim={_small_model_base_emb_dim(decoupled, dev_count)}",
       "base_num_query_heads=4",
       "base_num_kv_heads=4",
       "base_mlp_dim=32",

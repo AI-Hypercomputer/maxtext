@@ -52,7 +52,6 @@ class MultiTokenPredictionLayerTest(unittest.TestCase):
         head_dim=8,
         max_target_length=128,
         vocab_size=128,
-        **extra_args,
     )
     self.rng = jax.random.PRNGKey(42)  # Base RNG for setup
     self.rngs = nnx.Rngs(params=self.rng, dropout=self.rng)
@@ -214,7 +213,6 @@ class MultiTokenPredictionBlockTest(unittest.TestCase):
         head_dim=8,
         max_target_length=128,
         vocab_size=128,
-        **extra_args,
     )
     self.nnx_rngs = nnx.Rngs(params=0)
     self.rng = jax.random.PRNGKey(43)
