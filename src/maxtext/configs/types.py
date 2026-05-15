@@ -1201,12 +1201,24 @@ class OlmoGrainDataset(BaseModel):
   olmo_apply_ngram_filter: bool = Field(True, description="Mask repetitive instances per OLMo-core's repetition filter.")
 
 
+class DPO(BaseModel):
+  """Configuration for DPO and ORPO preference optimization algorithms."""
+
+  algo: Literal["dpo", "orpo"] = Field("dpo", description="Alignment algorithm to use.")
+  dpo_beta: float = Field(0.1, description="Beta parameter for DPO.")
+  orpo_lambda: float = Field(0.1, description="Weight for preference loss in ORPO.")
+  dpo_label_smoothing: float = Field(0.0, ge=0.0, le=1.0, description="Label smoothing for DPO.")
+  max_prompt_length: int | None = Field(
+      None,
+      gt=0,
+      description="Maximum length for prompt. If None, defaults to half of max_target_length.",
+  )
+
+
 class FineTuning(BaseModel):
   """Configuration for fine-tuning methods like DPO, SFT, and GRPO."""
 
   use_dpo: bool = Field(False, description="If True, enables Direct Preference Optimization training.")
-  dpo_label_smoothing: float = Field(0.0, ge=0.0, le=1.0, description="Label smoothing for DPO.")
-  dpo_beta: float = Field(0.1, description="Beta parameter for DPO.")
   use_sft: bool = Field(False, description="If True, enables Supervised Fine-Tuning.")
   sft_train_on_completion_only: bool = Field(
       False, description="If True, trains only on the completion part of the text."
@@ -2298,6 +2310,10 @@ class MaxTextConfig(
   """
 
   debug: Debug = Field(default_factory=Debug, description="Configuration for debugging options.")
+  dpo: DPO = Field(
+      default_factory=DPO,
+      description="Configuration for DPO and ORPO alignment algorithms.",
+  )
   rl: RL = Field(
       default_factory=RL,
       description="Configuration for RL algorithms like Group Relative Policy Optimization (GRPO).",
@@ -2883,6 +2899,16 @@ class MaxTextConfig(
           raise ValueError("For multimodal SFT, `sft_train_on_completion_only` must be True.")
         if self.packing:
           raise ValueError("For multimodal SFT, `packing` is not yet supported.")
+    if self.use_dpo:
+      if self.packing:
+        raise ValueError("For DPO/ORPO, `packing` is not supported.")
+      if self.dpo.max_prompt_length is not None and self.dpo.max_prompt_length > self.max_target_length:
+        raise ValueError(
+            f"`max_prompt_length` ({self.dpo.max_prompt_length}) cannot be "
+            f"greater than `max_target_length` ({self.max_target_length})."
+        )
+    if self.use_sft and self.use_dpo:
+      raise ValueError("Only one of `use_sft` or `use_dpo` can be True.")
     if self.shard_mode == ShardMode.EXPLICIT:
       supported_decoders = {"simple", "simple_mlp", "llama2", "deepseek"}
       if self.decoder_block.value not in supported_decoders:
