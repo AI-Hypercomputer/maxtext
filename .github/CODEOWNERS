@@ -1,4 +1,4 @@
-* @abhinavclemson @gobbleturk @khatwanimohit @bvandermoon @vipannalla @RissyRan @richjames0 @gagika @shralex @SurbhiJainUSC @hengtaoguo @A9isha @aireenmei @NuojCheng @jiangjy1982 @suexu1025 @NicoGrande @jesselu-google @dipannita08 @igorts-git
+* @abhinavclemson @gobbleturk @khatwanimohit @bvandermoon @vipannalla @RissyRan @richjames0 @gagika @shralex @SurbhiJainUSC @hengtaoguo @A9isha @aireenmei @NuojCheng @jiangjy1982 @suexu1025 @NicoGrande @jesselu-google @dipannita08 @igorts-git @darisoy
 
 # Model bring-up
 src/maxtext/assets @parambole @shuningjin @RissyRan @suexu1025 @jiangjy1982 @gobbleturk @bvandermoon @gagika @shralex @richjames0 @NicoGrande
@@ -8,14 +8,14 @@ src/maxtext/layers @parambole @shuningjin @RissyRan @suexu1025 @jiangjy1982 @gob
 src/maxtext/models @parambole @shuningjin @RissyRan @suexu1025 @jiangjy1982 @gobbleturk @bvandermoon @gagika @shralex @richjames0 @NicoGrande @jesselu-google @NuojCheng
 
 # Features
-src/maxtext/experimental/rl @A9isha @khatwanimohit @xuefgu @gagika @richjames0 @shralex @NicoGrande
-src/maxtext/input_pipeline @aireenmei @SurbhiJainUSC @richjames0 @shralex @NicoGrande
-src/maxtext/kernels/megablox @RissyRan @michelle-yooh @gagika @richjames0 @shralex @suexu1025 @jesselu-google
-src/maxtext/kernels/ragged_attention.py @patemotter @vipannalla @richjames0 @shralex
-src/maxtext/layers/pipeline.py @gobbleturk @richjames0 @shralex @NuojCheng
-src/maxtext/layers/moe.py @RissyRan @michelle-yooh @gagika @richjames0 @shralex @suexu1025 @jesselu-google
-src/maxtext/layers/multi_token_prediction.py @parambole @RissyRan @gagika @richjames0 @shralex
-src/maxtext/layers/quantizations.py @khatwanimohit @jshin1394 @liudangyi @richjames0 @shralex
+src/maxtext/experimental/rl @A9isha @khatwanimohit @xuefgu @gagika @richjames0 @shralex @NicoGrande @darisoy
+src/maxtext/input_pipeline @aireenmei @SurbhiJainUSC @richjames0 @shralex @NicoGrande @darisoy
+src/maxtext/kernels/megablox @RissyRan @michelle-yooh @gagika @richjames0 @shralex @suexu1025 @jesselu-google @darisoy
+src/maxtext/kernels/ragged_attention.py @patemotter @vipannalla @richjames0 @shralex @darisoy
+src/maxtext/layers/pipeline.py @gobbleturk @richjames0 @shralex @NuojCheng @darisoy
+src/maxtext/layers/moe.py @RissyRan @michelle-yooh @gagika @richjames0 @shralex @suexu1025 @jesselu-google @darisoy
+src/maxtext/layers/multi_token_prediction.py @parambole @RissyRan @gagika @richjames0 @shralex @darisoy
+src/maxtext/layers/quantizations.py @khatwanimohit @jshin1394 @liudangyi @richjames0 @shralex @darisoy
 
 # vLLM eval framework
 src/maxtext/eval/ @dipannita08 @NicoGrande @hengtaoguo
@@ -26,13 +26,13 @@ tests/inference/ @vipannalla @mitalisi @gpolovets1 @mailvijayasingh @jrplatin @p
 src/maxtext/inference @vipannalla @mitalisi @gpolovets1 @mailvijayasingh @jrplatin @patemotter @lumosis @richjames0
 
 # Dockerfiles and dependencies
-src/dependencies/ @bvandermoon @SurbhiJainUSC @parambole @richjames0 @shralex
+src/dependencies/ @bvandermoon @SurbhiJainUSC @parambole @richjames0 @shralex @darisoy
 
 # Docs
-docs/ @jacoguzo @bvandermoon @SurbhiJainUSC @richjames0 @shralex @gobbleturk @RissyRan @gagika @A9isha @jiangjy1982 @vipannalla
+docs/ @jacoguzo @bvandermoon @SurbhiJainUSC @richjames0 @shralex @gobbleturk @RissyRan @gagika @A9isha @jiangjy1982 @vipannalla @darisoy
 
 # Workflow files
-.github/workflows/ @gobbleturk @khatwanimohit @shralex @parambole @bvandermoon @richjames0
+.github/workflows/ @gobbleturk @khatwanimohit @shralex @parambole @bvandermoon @richjames0 @darisoy
 
 # Benchmarking/Recipes
-benchmarks/ @SujeethJinesh @bvandermoon @richjames0 @shralex @vipannalla @mitalisi @RissyRan @shauryagup @NuojCheng @gobbleturk @khatwanimohit @Obliviour @notabee @suexu1025
+benchmarks/ @SujeethJinesh @bvandermoon @richjames0 @shralex @vipannalla @mitalisi @RissyRan @shauryagup @NuojCheng @gobbleturk @khatwanimohit @Obliviour @notabee @suexu1025 @darisoy
