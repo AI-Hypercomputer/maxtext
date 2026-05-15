@@ -55,7 +55,8 @@ _F32 = VectorTypeHelper(ir.F32Type.get)
 _BF16 = VectorTypeHelper(ir.BF16Type.get)
 
 
-@jax.jit(
+@functools.partial(
+    jax.jit,
     static_argnames=[
         "reduce_group_size",
         "single_sc",
