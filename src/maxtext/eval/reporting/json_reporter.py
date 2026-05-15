@@ -66,9 +66,10 @@ def write_results(
 
   if results_path.startswith("gs://"):
     from maxtext.utils.gcs_utils import upload_blob  # pylint: disable=import-outside-toplevel
+
     tmp_dir = tempfile.mkdtemp(prefix="eval_results_")
     local_path = os.path.join(tmp_dir, filename)
-    with open(local_path, "w") as f:
+    with open(local_path, "w", encoding="utf-8") as f:
       json.dump(results, f, indent=2)
     gcs_dest = f"{results_path.rstrip('/')}/{filename}"
     upload_blob(gcs_dest, local_path)
@@ -76,7 +77,7 @@ def write_results(
   else:
     os.makedirs(results_path, exist_ok=True)
     local_path = os.path.join(results_path, filename)
-    with open(local_path, "w") as f:
+    with open(local_path, "w", encoding="utf-8") as f:
       json.dump(results, f, indent=2)
     logger.info("Results written to %s", local_path)
 

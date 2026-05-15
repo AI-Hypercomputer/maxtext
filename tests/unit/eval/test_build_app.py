@@ -77,8 +77,8 @@ class TestBuildApp(unittest.TestCase):
     self._vllm_patcher.start()
     self._sp_patcher.start()
 
-    from maxtext.eval.runner.server_manager import _build_app
-    from starlette.testclient import TestClient
+    from maxtext.eval.runner.server_manager import _build_app  # pylint: disable=import-outside-toplevel
+    from starlette.testclient import TestClient  # pylint: disable=import-outside-toplevel
 
     self.app = _build_app(self.mock_llm)
     self.client = TestClient(self.app)
@@ -111,8 +111,8 @@ class TestBuildApp(unittest.TestCase):
     ]
     mock_llm.get_tokenizer.return_value = self.mock_llm.get_tokenizer()
 
-    from maxtext.eval.runner.server_manager import _build_app
-    from starlette.testclient import TestClient
+    from maxtext.eval.runner.server_manager import _build_app  # pylint: disable=import-outside-toplevel
+    from starlette.testclient import TestClient  # pylint: disable=import-outside-toplevel
 
     app = _build_app(mock_llm)
     client = TestClient(app)

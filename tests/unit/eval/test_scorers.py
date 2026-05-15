@@ -36,9 +36,9 @@ class TestRougeScorer(unittest.TestCase):
 
   def _run_score_batch(self, responses, references, mock_metric):
     """Import score_batch with evaluate and nltk.sent_tokenize patched, return result dict."""
-    with patch("evaluate.load", return_value=mock_metric), \
-         patch("nltk.sent_tokenize", side_effect=lambda s: [s]):
-      from maxtext.eval.scoring.rouge_scorer import score_batch
+    with patch("evaluate.load", return_value=mock_metric), patch("nltk.sent_tokenize", side_effect=lambda s: [s]):
+      from maxtext.eval.scoring.rouge_scorer import score_batch  # pylint: disable=import-outside-toplevel
+
       return score_batch(responses, references)
 
   def test_perfect_match(self):
@@ -64,11 +64,7 @@ class TestRougeScorer(unittest.TestCase):
     mock_metric = self._make_mock_rouge_metric()
     result = self._run_score_batch(["hello"], ["hello"], mock_metric)
     self.assertIn("gen_num", result)
-    has_rouge_keys = (
-        "rouge1" in result
-        and "rouge2" in result
-        and ("rougeL" in result or "rougeLsum" in result)
-    )
+    has_rouge_keys = "rouge1" in result and "rouge2" in result and ("rougeL" in result or "rougeLsum" in result)
     self.assertTrue(has_rouge_keys)
 
   def test_partial_overlap(self):

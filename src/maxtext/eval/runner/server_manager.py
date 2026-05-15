@@ -29,10 +29,12 @@ logger = logging.getLogger(__name__)
 
 _HEALTH_ENDPOINT = "/health"
 
+
 def _build_app(llm: Any) -> Any:
   """Return a FastAPI app that wraps an in-process vLLM LLM instance."""
   import fastapi  # pylint: disable=import-outside-toplevel
   from vllm.sampling_params import SamplingParams  # pylint: disable=import-outside-toplevel
+
   globals()["fastapi"] = fastapi
 
   app = fastapi.FastAPI()
@@ -110,12 +112,14 @@ def _build_app(llm: Any) -> Any:
         }
 
       text_out = (prompts[idx] + gen.text) if echo else gen.text
-      choices.append({
-          "text": text_out,
-          "index": idx,
-          "logprobs": logprobs_payload,
-          "finish_reason": gen.finish_reason or "stop",
-      })
+      choices.append(
+          {
+              "text": text_out,
+              "index": idx,
+              "logprobs": logprobs_payload,
+              "finish_reason": gen.finish_reason or "stop",
+          }
+      )
 
     return {
         "id": f"cmpl-{uuid.uuid4().hex}",
@@ -164,12 +168,14 @@ def _build_app(llm: Any) -> Any:
         "object": "chat.completion",
         "created": int(time.time()),
         "model": model_name,
-        "choices": [{
-            "index": 0,
-            "message": {"role": "assistant", "content": gen.text},
-            "finish_reason": gen.finish_reason or "stop",
-            "logprobs": None,
-        }],
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": gen.text},
+                "finish_reason": gen.finish_reason or "stop",
+                "logprobs": None,
+            }
+        ],
         "usage": {
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
@@ -261,6 +267,7 @@ class VllmServerManager:
     os.environ.setdefault("NEW_MODEL_DESIGN", "1")
     os.environ.setdefault("SKIP_JAX_PRECOMPILE", "1")
     from vllm import LLM  # pylint: disable=import-outside-toplevel
+
     if self.env:
       os.environ.update(self.env)
 
@@ -301,15 +308,9 @@ class VllmServerManager:
 
     if self.additional_vllm_kwargs:
       for _k, _v in self.additional_vllm_kwargs.items():
-        if (
-            _k == "additional_config"
-            and isinstance(_v, dict)
-            and isinstance(vllm_kwargs.get("additional_config"), dict)
-        ):
+        if _k == "additional_config" and isinstance(_v, dict) and isinstance(vllm_kwargs.get("additional_config"), dict):
           for _sub_k, _sub_v in _v.items():
-            if isinstance(_sub_v, dict) and isinstance(
-                vllm_kwargs["additional_config"].get(_sub_k), dict
-            ):
+            if isinstance(_sub_v, dict) and isinstance(vllm_kwargs["additional_config"].get(_sub_k), dict):
               vllm_kwargs["additional_config"][_sub_k].update(_sub_v)
             else:
               vllm_kwargs["additional_config"][_sub_k] = _sub_v
@@ -326,6 +327,7 @@ class VllmServerManager:
     self._llm = LLM(**vllm_kwargs)
 
     import jax as _jax  # pylint: disable=import-outside-toplevel
+
     logger.info("Rank %d: vLLM LLM ready.", _jax.process_index())
 
     if _jax.process_index() == 0:
@@ -349,6 +351,7 @@ class VllmServerManager:
       self._wait_until_healthy()
 
   def _wait_until_healthy(self) -> None:
+    """Wait until the HTTP server returns 200 OK on /health."""
     deadline = time.time() + self.startup_timeout
     health_url = f"{self.base_url}{_HEALTH_ENDPOINT}"
     while time.time() < deadline:
@@ -362,9 +365,7 @@ class VllmServerManager:
       if self._server_thread is not None and not self._server_thread.is_alive():
         raise RuntimeError("vLLM HTTP server thread died before becoming healthy.")
       time.sleep(2)
-    raise TimeoutError(
-        f"vLLM HTTP server did not become healthy within {self.startup_timeout}s."
-    )
+    raise TimeoutError(f"vLLM HTTP server did not become healthy within {self.startup_timeout}s.")
 
   def stop(self) -> None:
     """Stop the HTTP server and release the LLM."""
