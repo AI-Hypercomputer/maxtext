@@ -295,7 +295,10 @@ class HyperParameters:
     # This is necessary for proper pickling/unpickling support
     flat_config = object.__getattribute__(self, "_flat_config")
     if attr in flat_config:
-      return flat_config[attr]
+      val = flat_config[attr]
+      if isinstance(val, dict) and attr in ("debug", "rl", "lora"):
+        return getattr(object.__getattribute__(self, "_pydantic_config"), attr)
+      return val
     raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{attr}'")
 
   def __setattr__(self, attr: str, value: Any) -> None:
