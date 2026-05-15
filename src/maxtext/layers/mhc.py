@@ -14,15 +14,27 @@
 
 """DeepSeek Manifold-Constrained Hyper Connections (mHC) Layer."""
 
+import itertools
 from typing import Callable
+
 from flax import nnx
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.common.common_types import Array, Config
 from maxtext.common.common_types import HyperConnectionType
-from maxtext.layers.initializers import default_bias_init, default_scalar_init, nd_dense_init
+from maxtext.layers.initializers import (
+    default_bias_init,
+    default_scalar_init,
+    nd_dense_init,
+)
 from maxtext.layers.normalizations import RMSNorm
+
+
+def get_4x4_permutation_matrices():
+  perms = list(itertools.permutations(range(4)))
+  perms_array = jnp.array(perms)
+  return jnp.eye(4)[perms_array]
 
 
 def get_functions(expansion_rate: int):
@@ -118,6 +130,15 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
         out_sharding=(None,),
     )
 
+    if self.k == 4 and self.config.enable_mhc_k4_shortcut:
+      res_out_dim = 24
+      res_beta_shape = (24,)
+      res_beta_sharding = (None,)
+    else:
+      res_out_dim = self.k * self.k
+      res_beta_shape = (self.k, self.k)
+      res_beta_sharding = (None, None)
+
     # Weight matrices
     scale_init = nd_dense_init(1.0, "fan_in", "normal")
     in_axis = 0
@@ -126,7 +147,7 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     self.res_alpha = nnx.Param(
         scale_init(
             self.rngs.params(),
-            (self.k * self.dim, self.k * self.k),
+            (self.k * self.dim, res_out_dim),
             self.weight_dtype,
             in_axis=in_axis,
             out_axis=out_axis,
@@ -156,8 +177,8 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
 
     # Biases
     self.res_beta = nnx.Param(
-        default_bias_init(self.rngs.params(), (self.k, self.k), self.weight_dtype),
-        out_sharding=(None, None),
+        default_bias_init(self.rngs.params(), res_beta_shape, self.weight_dtype),
+        out_sharding=res_beta_sharding,
     )
     self.pre_beta = nnx.Param(
         default_bias_init(self.rngs.params(), (self.k,), self.weight_dtype),
@@ -174,13 +195,30 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     res_alpha = jnp.asarray(self.res_alpha[...], self.dtype)
     res_beta = jnp.asarray(self.res_beta[...], self.dtype)
     res_alpha_scale = jnp.asarray(self.res_alpha_scale[...], self.dtype)
-    # Apply projection: (b, s, k*d) @ (k*d, k*k) -> (b, s, k*k)
-    h_res = jnp.einsum("bsm,mn -> bsn", x, res_alpha, precision=self.matmul_precision)
-    b, s, _ = h_res.shape
-    h_res = jnp.reshape(h_res, (b, s, self.k, self.k))
-    intermediate = res_alpha_scale * h_res + res_beta[None, None, :, :]
-    output = sinkhorn(intermediate, self.sinkhorn_iterations)
-    return output
+
+    if self.k == 4 and self.config.enable_mhc_k4_shortcut:
+      # Apply projection: (b, s, k*d) @ (k*d, 24) -> (b, s, 24)
+      h_res = jnp.einsum("bsm,mn -> bsn", x, res_alpha, precision=self.matmul_precision)
+      intermediate = res_alpha_scale * h_res + res_beta[None, None, :]
+      # Use float32 for numerical stability during softmax
+      weights = jax.nn.softmax(intermediate.astype(jnp.float32), axis=-1).astype(self.dtype)
+      # Sum the 24 permutation matrices with the weights
+      permutation_matrices_4x4 = get_4x4_permutation_matrices().astype(self.dtype)
+      output = jnp.einsum(
+          "bsn,nkm -> bskm",
+          weights,
+          permutation_matrices_4x4,
+          precision=self.matmul_precision,
+      )
+      return output
+    else:
+      # Apply projection: (b, s, k*d) @ (k*d, k*k) -> (b, s, k*k)
+      h_res = jnp.einsum("bsm,mn -> bsn", x, res_alpha, precision=self.matmul_precision)
+      b, s, _ = h_res.shape
+      h_res = jnp.reshape(h_res, (b, s, self.k, self.k))
+      intermediate = res_alpha_scale * h_res + res_beta[None, None, :, :]
+      output = sinkhorn(intermediate, self.sinkhorn_iterations)
+      return output
 
   def mapping(self, x: Array, alpha_scale: Array, alpha: Array, beta: Array, scale: int):
     """Helper function for both pre and post mappings."""
