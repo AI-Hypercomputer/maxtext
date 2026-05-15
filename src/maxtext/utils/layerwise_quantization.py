@@ -173,19 +173,13 @@ class LayerwiseQuantization:
     devices_array = maxtext_utils.create_device_mesh(config=config)
     self._mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
 
-    # Model and quantization config
+    # Input and output are both Linen-format (uses DeepSeek*ToLinen layers below).
+    # Route to Linen regardless of pure_nnx.
     self.quant = quantizations.configure_quantization(config)
-    if self.config.pure_nnx:
-      raise NotImplementedError("Pure NNX support has not been implemented yet.")
-    else:
-      model = models.transformer_as_linen(
-          config, mesh=self._mesh, quant=self.quant, model_mode=common_types.MODEL_MODE_TRAIN
-      )
-    if self.config.pure_nnx:
-      # NNX has a different function to init the training state.
-      raise NotImplementedError("Pure NNX support has not been implemented yet.")
-    else:
-      init_state_fn = functools.partial(maxtext_utils.init_initial_state, model, None, self.config, False, self.rng)
+    model = models.transformer_as_linen(
+        config, mesh=self._mesh, quant=self.quant, model_mode=common_types.MODEL_MODE_TRAIN
+    )
+    init_state_fn = functools.partial(maxtext_utils.init_initial_state, model, None, self.config, False, self.rng)
 
     self.unboxed_abstract_state, _, _ = maxtext_utils.get_abstract_state(self.config, self._mesh, init_state_fn, False)
 

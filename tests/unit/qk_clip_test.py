@@ -27,7 +27,7 @@ from jax.sharding import Mesh
 from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.layers import attention_mla
 from maxtext.utils import maxtext_utils
-from maxtext.utils.qk_clip_utils import apply_qk_clip, calculate_max_logit_metric
+from maxtext.utils.qk_clip_utils import apply_qk_clip, apply_qk_clip_nnx, calculate_max_logit_metric
 
 from maxtext.configs import pyconfig
 from tests.utils.test_helpers import get_test_config_path, get_decoupled_parallelism_overrides
@@ -501,6 +501,180 @@ class QKClipMLATest(unittest.TestCase):
         atol=1e-3,
         err_msg="Clipped weights differ! QK Clip logic inconsistent between kernels.",
     )
+
+
+class _MockAttentionOp(nnx.Module):
+  """Holds the sowed `max_logits` intermediate at the same tree depth as production."""
+
+  def __init__(self, max_logits=None):
+    if max_logits is not None:
+      self.max_logits = nnx.Intermediate(max_logits)
+
+
+class _MockMLAAttention(nnx.Module):
+  """`wq_b.kernel` + `wkv_b.kernel` as `nnx.Param`, plus an `attention_op` child."""
+
+  def __init__(self, wq_b_kernel, wkv_b_kernel, max_logits=None):
+    self.wq_b = nnx.Module()
+    self.wq_b.kernel = nnx.Param(wq_b_kernel)
+    self.wkv_b = nnx.Module()
+    self.wkv_b.kernel = nnx.Param(wkv_b_kernel)
+    self.attention_op = _MockAttentionOp(max_logits)
+
+
+class _MockLayer(nnx.Module):
+
+  def __init__(self, attn):
+    self.self_attention = attn
+
+
+class _MockDecoder(nnx.Module):
+
+  def __init__(self, layer):
+    self.layers_0 = layer
+
+
+class _MockTransformer(nnx.Module):
+
+  def __init__(self, decoder):
+    self.decoder = decoder
+
+
+class _MockState:
+  """Stand-in for `TrainStateNNX`: only `apply_qk_clip_nnx` accesses `.model`."""
+
+  def __init__(self, model):
+    self.model = model
+
+
+def _build_mock_nnx_state(wq_b, wkv_b, max_logits=None):
+  attn = _MockMLAAttention(wq_b, wkv_b, max_logits)
+  return _MockState(_MockTransformer(_MockDecoder(_MockLayer(attn))))
+
+
+def _read_kernels(state):
+  attn = state.model.decoder.layers_0.self_attention
+  return attn.wq_b.kernel.value, attn.wkv_b.kernel.value
+
+
+class QKClipNNXTest(unittest.TestCase):
+  """Mirrors `QKClipTest` against the NNX path."""
+
+  def _make_config(self, threshold, nope_dim, attention_type="mla"):
+    Config = namedtuple("Config", ["qk_clip_threshold", "qk_nope_head_dim", "attention_type"])
+    return Config(qk_clip_threshold=threshold, qk_nope_head_dim=nope_dim, attention_type=attention_type)
+
+  def test_raises_error_for_non_mla(self):
+    state = _build_mock_nnx_state(jnp.zeros((1, 1, 2)), jnp.zeros((1, 1, 2)))
+    config = self._make_config(threshold=10.0, nope_dim=4, attention_type="dot_product")
+    with self.assertRaisesRegex(ValueError, "QK-Clip is only supported for MLA attention"):
+      apply_qk_clip_nnx(state, {}, config)
+
+  def test_apply_qk_clip_logic(self):
+    rng = jax.random.PRNGKey(0)
+    rng_q, rng_kv = jax.random.split(rng)
+    wq_b = jax.random.normal(rng_q, (2, 2, 6))
+    wkv_b = jax.random.normal(rng_kv, (2, 2, 6))
+    state = _build_mock_nnx_state(wq_b, wkv_b)
+    config = self._make_config(threshold=10.0, nope_dim=4)
+
+    # Head 0 logit 20.0 (>tau, scale=0.5); head 1 logit 5.0 (<tau, no change).
+    max_logits = jnp.array([[20.0, 5.0]])
+    intermediates = {"decoder": {"layers_0": {"self_attention": {"attention_op": {"max_logits": max_logits}}}}}
+
+    new_state = apply_qk_clip_nnx(state, intermediates, config)
+    new_wq, new_wkv = _read_kernels(new_state)
+
+    self.assertTrue(jnp.allclose(new_wq[:, 0, :4], wq_b[:, 0, :4] * jnp.sqrt(0.5)))
+    self.assertTrue(jnp.allclose(new_wq[:, 0, 4:], wq_b[:, 0, 4:] * 0.5))
+    self.assertTrue(jnp.allclose(new_wkv[:, 0, :4], wkv_b[:, 0, :4] * jnp.sqrt(0.5)))
+    self.assertTrue(jnp.allclose(new_wkv[:, 0, 4:], wkv_b[:, 0, 4:]))  # V slice untouched
+
+    self.assertTrue(jnp.allclose(new_wq[:, 1, :], wq_b[:, 1, :]))
+    self.assertTrue(jnp.allclose(new_wkv[:, 1, :], wkv_b[:, 1, :]))
+
+  def test_max_logits_directly_under_self_attention(self):
+    """The function must also accept the flat layout (no `attention_op` parent)."""
+    rng = jax.random.PRNGKey(1)
+    wq_b = jax.random.normal(rng, (1, 2, 6))
+    wkv_b = jnp.zeros((1, 2, 6))
+    state = _build_mock_nnx_state(wq_b, wkv_b)
+    config = self._make_config(threshold=10.0, nope_dim=4)
+
+    max_logits = jnp.array([[100.0, 1.0]])
+    intermediates = {"decoder": {"layers_0": {"self_attention": {"max_logits": max_logits}}}}
+
+    new_state = apply_qk_clip_nnx(state, intermediates, config)
+    new_wq, _ = _read_kernels(new_state)
+    # Head 0 was clipped, head 1 untouched.
+    self.assertTrue(jnp.allclose(new_wq[:, 1, :], wq_b[:, 1, :]))
+    self.assertFalse(jnp.allclose(new_wq[:, 0, :], wq_b[:, 0, :]))
+
+  def test_no_clipping_when_below_threshold(self):
+    rng = jax.random.PRNGKey(2)
+    wq_b = jax.random.normal(rng, (2, 1, 6))
+    wkv_b = jax.random.normal(rng, (2, 1, 6))
+    state = _build_mock_nnx_state(wq_b, wkv_b)
+    config = self._make_config(threshold=100.0, nope_dim=4)
+
+    intermediates = {"decoder": {"layers_0": {"self_attention": {"attention_op": {"max_logits": jnp.array([[50.0]])}}}}}
+
+    new_state = apply_qk_clip_nnx(state, intermediates, config)
+    new_wq, new_wkv = _read_kernels(new_state)
+    self.assertTrue(jnp.array_equal(new_wq, wq_b))
+    self.assertTrue(jnp.array_equal(new_wkv, wkv_b))
+
+  def test_resilience_to_missing_stats(self):
+    rng = jax.random.PRNGKey(3)
+    wq_b = jax.random.normal(rng, (2, 1, 6))
+    wkv_b = jax.random.normal(rng, (2, 1, 6))
+    state = _build_mock_nnx_state(wq_b, wkv_b)
+    config = self._make_config(threshold=10.0, nope_dim=4)
+
+    new_state = apply_qk_clip_nnx(state, {}, config)
+    new_wq, new_wkv = _read_kernels(new_state)
+    self.assertTrue(jnp.array_equal(new_wq, wq_b))
+    self.assertTrue(jnp.array_equal(new_wkv, wkv_b))
+
+  def test_linen_nnx_parity(self):
+    """Same weights + max_logits should produce the same clipped kernels on both paths."""
+    rng = jax.random.PRNGKey(7)
+    rng_q, rng_kv = jax.random.split(rng)
+    wq_b = jax.random.normal(rng_q, (2, 2, 6))
+    wkv_b = jax.random.normal(rng_kv, (2, 2, 6))
+    config = self._make_config(threshold=10.0, nope_dim=4)
+    max_logits = jnp.array([[40.0, 9.0]])
+
+    # Linen
+    linen_params = {"decoder": {"layers_0": {"self_attention": {"wq_b": {"kernel": wq_b}, "wkv_b": {"kernel": wkv_b}}}}}
+    LinenState = namedtuple("LinenState", ["params", "replace"])
+    linen_state = LinenState(params=linen_params, replace=lambda params: LinenState(params, None))
+    linen_intermediates = {"decoder": {"layers_0": {"self_attention": {"max_logits": (max_logits,)}}}}
+    new_linen = apply_qk_clip(linen_state, linen_intermediates, config)
+    linen_wq = new_linen.params["decoder"]["layers_0"]["self_attention"]["wq_b"]["kernel"]
+    linen_wkv = new_linen.params["decoder"]["layers_0"]["self_attention"]["wkv_b"]["kernel"]
+
+    # NNX
+    nnx_state = _build_mock_nnx_state(wq_b, wkv_b)
+    nnx_intermediates = {"decoder": {"layers_0": {"self_attention": {"attention_op": {"max_logits": max_logits}}}}}
+    new_nnx = apply_qk_clip_nnx(nnx_state, nnx_intermediates, config)
+    nnx_wq, nnx_wkv = _read_kernels(new_nnx)
+
+    np.testing.assert_allclose(linen_wq, nnx_wq, rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(linen_wkv, nnx_wkv, rtol=1e-6, atol=1e-6)
+
+
+class CalculateMaxLogitNNXTest(unittest.TestCase):
+  """`calculate_max_logit_metric` should accept the bare-array NNX shape."""
+
+  def test_nnx_shape(self):
+    intermediates = {
+        "decoder": {
+            "layers_0": {"self_attention": {"attention_op": {"max_logits": jnp.array([[10.0, 20.0]])}}},
+            "layers_1": {"self_attention": {"attention_op": {"max_logits": jnp.array([[5.0, 50.0]])}}},
+        }
+    }
+    self.assertEqual(calculate_max_logit_metric(intermediates), 50.0)
 
 
 if __name__ == "__main__":

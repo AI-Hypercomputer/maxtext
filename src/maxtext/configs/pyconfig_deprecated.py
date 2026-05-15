@@ -195,10 +195,9 @@ def validate_expert_shard_attention_option(expert_shard_attention_option: str) -
 
 
 def validate_vocab_tiling(num_vocab_tiling: int, per_device_batch_size: int, max_target_length: int, enable_nnx: bool):
+  del enable_nnx  # NNX vocab tiling supported via vocab_tiling_nnx_loss in vocabulary_tiling.py
   if (per_device_batch_size * max_target_length) % num_vocab_tiling != 0:
     raise ValueError("Per device batch size times sequence length should be divisible by the number of vocab tiles.")
-  if num_vocab_tiling > 1 and enable_nnx:  # TODO (chengnuojin) enable vocab tiling on NNX after NNX migration
-    raise ValueError("We currently don't support vocab tiling on NNX module.")
 
 
 def validate_rampup_batch_size(batch_size_start, batch_size_end, batch_size_increment, global_rampup_samples):
