@@ -22,6 +22,7 @@ from jax import lax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 
+from flax import linen as nn
 from flax import nnx
 
 from maxtext.common.common_types import ShardMode, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, Array, Config, DType
@@ -156,30 +157,34 @@ class Embed(nnx.Module):
         self.dtype,
     )
 
-    output_axis_names = (
-        (
-            "activation_embed_and_logits_batch",
-            "prefill_activation_length",
-            "activation_embed",
-        )
-        if model_mode == MODEL_MODE_PREFILL
-        else (
-            "activation_embed_and_logits_batch",
-            "activation_length",
-            "activation_embed",
-        )
-    )
-    out_pspec = logical_to_mesh_axes(output_axis_names, self.mesh, rules=getattr(self.config, "logical_axis_rules", None))
+    output_prefill_axis_names = ("activation_embed_and_logits_batch", "prefill_activation_length", "activation_embed")
+    output_default_axis_names = ("activation_embed_and_logits_batch", "activation_length", "activation_embed")
 
-    out_sharding = NamedSharding(self.mesh, out_pspec) if self.config.shard_mode == ShardMode.EXPLICIT else None
+    if self.config.shard_mode == ShardMode.EXPLICIT:
+      output_axis_names = output_prefill_axis_names if model_mode == MODEL_MODE_PREFILL else output_default_axis_names
+      out_pspec = logical_to_mesh_axes(output_axis_names, self.mesh, rules=getattr(self.config, "logical_axis_rules", None))
+      out_sharding = NamedSharding(self.mesh, out_pspec)
+    else:
+      out_sharding = None
 
-    if cfg.use_iota_embed:
+    one_hot_elements = 1
+    for d in inputs.shape:
+      one_hot_elements *= d
+    one_hot_elements *= self.num_embeddings
+    one_hot_bytes = one_hot_elements * jnp.dtype(self.dtype).itemsize
+    use_iota = cfg.use_iota_embed and one_hot_bytes <= 2 * 1024**3
+
+    if use_iota:
       iota = lax.iota(jnp.int32, self.num_embeddings)
       one_hot = jnp.array(inputs[..., jnp.newaxis] == iota, dtype=self.dtype)
       output = jnp.dot(one_hot, embedding, out_sharding=out_sharding)
     else:
       output = embedding.at[inputs].get(out_sharding=out_sharding)
 
+    if model_mode == MODEL_MODE_PREFILL:
+      output = nn.with_logical_constraint(output, output_prefill_axis_names)
+    else:
+      output = nn.with_logical_constraint(output, output_default_axis_names)
     return output
 
   def attend(self, query: Array, out_sharding: NamedSharding | None = None) -> Array:

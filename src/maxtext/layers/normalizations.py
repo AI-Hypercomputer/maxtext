@@ -88,8 +88,11 @@ class RMSNorm(nnx.Module):
       scale = jax.device_put(scale, max_utils.device_space())
 
     scale = jnp.asarray(scale, self.dtype)
-    effective_scale = scale + self.scale_offset
-    return jnp.einsum("...k,k->...k", y, effective_scale, out_sharding=out_sharding)
+    effective_scale = scale + self.scale_offset if self.scale_offset != 0.0 else scale
+    y = y * effective_scale
+    if out_sharding is not None:
+      y = jax.lax.with_sharding_constraint(y, out_sharding)
+    return y
 
 
 class GlobalRMSNorm(RMSNorm):
