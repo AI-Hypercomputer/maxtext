@@ -26,6 +26,7 @@ from flax import nnx
 from flax.core import FrozenDict
 from flax.core import meta
 from flax.nnx import graph
+from flax.nnx import tracers as nnx_tracers
 from flax.nnx import variablelib
 from flax.nnx.bridge import module as bdg_module
 from flax.nnx.module import Module
@@ -165,6 +166,31 @@ def current_linen_module() -> linen.Module | None:
   if linen.module._context.module_stack:  # pylint: disable=W0212
     return linen.module._context.module_stack[-1]  # pylint: disable=W0212
   return None
+
+
+def is_linen_initializing() -> bool:
+  """Returns True if currently inside a Linen ``init()`` call.
+
+  Used by NNX pipeline modules to short-circuit the scan during init,
+  where only the output shape/dtype is needed.
+  """
+  module = current_linen_module()
+  if module is not None and hasattr(module, "is_initializing") and callable(module.is_initializing):
+    return module.is_initializing()
+  return False
+
+
+def _refresh_variable_trace_state(module: Module) -> None:
+  """Resets stale ``_trace_state`` on Variables to unblock downstream ``nnx.split``.
+
+  ``nnx.update`` called with JAX tracer values uses ``_unsafe_bypass_check=True``,
+  which leaves Variables with a stale ``_trace_state`` from the outer Python
+  context and breaks ``nnx.split`` with "Cannot extract graph node from different
+  trace level". Resets ``_trace_state`` on any Variable whose ``_can_update`` is False.
+  """
+  for _, v in nnx.graph.iter_graph(module):
+    if isinstance(v, variablelib.Variable) and not v._can_update:  # pylint: disable=protected-access
+      object.__setattr__(v, "_trace_state", nnx_tracers.TraceState())
 
 
 class ToNNX(Module):
@@ -476,6 +502,7 @@ class ToLinen(linen.Module):
       warnings.warn(f"Found unknown module paths in incoming state:{paths_str}")
 
     nnx.update(module, new_state)
+    _refresh_variable_trace_state(module)
 
     _fix_for_qwix_quantization(module)
     method_fn = _get_module_method(module, nnx_method)

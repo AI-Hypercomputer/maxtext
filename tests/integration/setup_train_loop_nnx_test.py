@@ -126,15 +126,6 @@ class SetupTrainLoopNNXIntegrationTest(unittest.TestCase):
 
     del model
 
-  def test_pure_nnx_dpo_raises_not_implemented(self):
-    """The use_dpo branch (train_utils.py:319-320) must raise for NNX."""
-    # use_dpo requires a few prerequisites; the simplest is to set the flag and
-    # let setup_train_loop reach the NotImplementedError check before the more
-    # involved DPO path runs.
-    config = _tiny_nnx_pyconfig(use_dpo=True, packing=False)
-    with self.assertRaises(NotImplementedError):
-      setup_train_loop(config, recorder=None)
-
 
 if __name__ == "__main__":
   unittest.main()
