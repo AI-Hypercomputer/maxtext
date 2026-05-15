@@ -653,7 +653,10 @@ def configure_quantization(config: Config, quant_mode_str: str = "train"):
       return TransformerEngineQuantization(config)
     quant_mode = get_quant_mode(quant_mode_str)
     replicate_scale = config.replicate_quant_scale if config.replicate_quant_scale else False
-    max_logging.log("WARNING: AQT quantization is deprecated and will be removed in a future release. Please migrate to Qwix by setting use_qwix_quantization=True.")
+    max_logging.log(
+        "WARNING: AQT quantization is deprecated and will be removed in a future release. "
+        "Please migrate to Qwix by setting use_qwix_quantization=True."
+    )
     return AqtQuantization(quant_dg=quant_cfg, quant_mode=quant_mode, replicate_scale=replicate_scale)
   return None
 
