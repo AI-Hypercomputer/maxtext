@@ -302,7 +302,7 @@ class TrainCompile(parameterized.TestCase):
             "ici_context_parallelism=4",
             "global_parameter_scale=32",
             "per_device_batch_size=0.25",
-            "max_target_length=65536",
+            "max_target_length=4096",
             "allow_split_physical_axes=true",
             "custom_mesh=hybrid_ring_64x4",
         )

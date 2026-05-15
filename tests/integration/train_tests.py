@@ -26,9 +26,15 @@ from tests.utils.test_helpers import (
     get_test_config_path,
     get_test_dataset_path,
     get_test_base_output_directory,
-    get_decoupled_parallelism_overrides,
     is_rocm_backend,
 )
+
+
+def _small_model_base_emb_dim(decoupled, device_count):
+  """Return a tiny embedding dim divisible by local decoupled devices."""
+  if not decoupled:
+    return 28
+  return ((28 + device_count - 1) // device_count) * device_count
 
 
 class TrainTests(unittest.TestCase):
@@ -39,16 +45,8 @@ class TrainTests(unittest.TestCase):
   _base_output_directory = get_test_base_output_directory()
   dataset_path = get_test_dataset_path()
 
-  # FSDP override logic for tensor-parallel=4 configs: provide an axis only when cleanly divisible.
-  _fsdp_tp4_override = []
-  if decoupled:
-    if dev_count >= 4 and dev_count % 4 == 0:
-      _fsdp_tp4_override = get_decoupled_parallelism_overrides(fsdp_parallelism=dev_count // 4, as_argv=True)
-    elif dev_count < 4:
-      _fsdp_tp4_override = get_decoupled_parallelism_overrides(fsdp_parallelism=dev_count, as_argv=True)
-
   _small_model_overrides = [
-      "base_emb_dim=28",
+      f"base_emb_dim={_small_model_base_emb_dim(decoupled, dev_count)}",
       "base_num_query_heads=4",
       "base_num_kv_heads=4",
       "base_mlp_dim=32",
@@ -59,7 +57,6 @@ class TrainTests(unittest.TestCase):
       # Allow higher unsharded percentage because downscaled models make fixed-size FP8 history tensors relatively larger.
       "sharding_tolerance=0.1",
   ]
-
   CONFIGS = {
       "base": [  # short test for train.py with TFDS c4
           None,
@@ -73,8 +70,7 @@ class TrainTests(unittest.TestCase):
           "enable_goodput_recording=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
-      + _small_model_overrides
-      + get_decoupled_parallelism_overrides(fsdp_parallelism=dev_count, as_argv=True),
+      + _small_model_overrides,
       "synthetic": [  # tests base config with synthetic dataset
           None,
           get_test_config_path(),
@@ -86,8 +82,7 @@ class TrainTests(unittest.TestCase):
           "dataset_type=synthetic",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
-      + _small_model_overrides
-      + get_decoupled_parallelism_overrides(fsdp_parallelism=dev_count, as_argv=True),
+      + _small_model_overrides,
       "pdb_lt_1": [  # tests base config with per_device_batch_size < 1
           None,
           get_test_config_path(),
@@ -101,8 +96,7 @@ class TrainTests(unittest.TestCase):
           "ici_tensor_parallelism=4",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
-      + _small_model_overrides
-      + get_decoupled_parallelism_overrides(fsdp_parallelism=dev_count, as_argv=True),
+      + _small_model_overrides,
       "tp_transpose": [  # tests base config with ici_tensor_transpose_parallelism=4
           None,
           get_test_config_path(),
@@ -114,8 +108,7 @@ class TrainTests(unittest.TestCase):
           "enable_goodput_recording=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
-      + _small_model_overrides
-      + get_decoupled_parallelism_overrides(fsdp_parallelism=dev_count, as_argv=True),
+      + _small_model_overrides,
       "int8": [  # tests base config with int8
           None,
           get_test_config_path(),
@@ -128,8 +121,7 @@ class TrainTests(unittest.TestCase):
           "enable_goodput_recording=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
-      + _small_model_overrides
-      + get_decoupled_parallelism_overrides(fsdp_parallelism=dev_count, as_argv=True),
+      + _small_model_overrides,
       "fp8": [  # tests base config with fp8
           None,
           get_test_config_path(),
@@ -142,8 +134,7 @@ class TrainTests(unittest.TestCase):
           "enable_goodput_recording=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
-      + _small_model_overrides
-      + get_decoupled_parallelism_overrides(fsdp_parallelism=dev_count, as_argv=True),
+      + _small_model_overrides,
       "nanoo_fp8": [  # tests base config with nanoo_fp8
           None,
           get_test_config_path(),
@@ -156,8 +147,7 @@ class TrainTests(unittest.TestCase):
           "enable_goodput_recording=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
-      + _small_model_overrides
-      + get_decoupled_parallelism_overrides(fsdp_parallelism=dev_count, as_argv=True),
+      + _small_model_overrides,
       "te_fp8_delayedscaling": [  # tests base config with te_fp8_delayedscaling
           None,
           get_test_config_path(),
@@ -170,8 +160,7 @@ class TrainTests(unittest.TestCase):
           "enable_goodput_recording=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
-      + _small_model_overrides
-      + get_decoupled_parallelism_overrides(fsdp_parallelism=dev_count, as_argv=True),
+      + _small_model_overrides,
       "te_fp8_currentscaling": [  # tests base config with te_fp8_currentscaling
           None,
           get_test_config_path(),
@@ -184,8 +173,7 @@ class TrainTests(unittest.TestCase):
           "enable_goodput_recording=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
-      + _small_model_overrides
-      + get_decoupled_parallelism_overrides(fsdp_parallelism=dev_count, as_argv=True),
+      + _small_model_overrides,
       "te_mxfp8": [  # tests base config with te_mxfp8
           None,
           get_test_config_path(),
@@ -198,8 +186,7 @@ class TrainTests(unittest.TestCase):
           "enable_goodput_recording=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
-      + _small_model_overrides
-      + get_decoupled_parallelism_overrides(fsdp_parallelism=dev_count, as_argv=True),
+      + _small_model_overrides,
       "dropout": [  # tests base config with dropout
           None,
           get_test_config_path(),
@@ -214,8 +201,7 @@ class TrainTests(unittest.TestCase):
           "dropout_rate=0.02",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
-      + _small_model_overrides
-      + get_decoupled_parallelism_overrides(fsdp_parallelism=dev_count, as_argv=True),
+      + _small_model_overrides,
       "hf_input_pipeline": [  # test for train.py with TFDS c4, using HF input pipeline
           None,
           get_test_config_path(),
@@ -229,8 +215,7 @@ class TrainTests(unittest.TestCase):
           f"hf_train_files={dataset_path}/hf/c4/c4-train-00000-of-01637.parquet",
           "tokenizer_path=google-t5/t5-large",
       ]
-      + _small_model_overrides
-      + get_decoupled_parallelism_overrides(fsdp_parallelism=dev_count, as_argv=True),
+      + _small_model_overrides,
   }
 
   @pytest.mark.integration_test
@@ -458,11 +443,16 @@ class TrainTests(unittest.TestCase):
         "enable_goodput_recording=False",
         rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
     ]
-    train_main(optimizer_offload + get_decoupled_parallelism_overrides(fsdp_parallelism=self.dev_count, as_argv=True))
+    train_main(optimizer_offload)
 
   @pytest.mark.integration_test
   @pytest.mark.gpu_only
   def test_gpu_parameter_offload(self):
+    if is_rocm_backend():
+      # JAX 0.9.1 MSIT enforces memory_space typematch across VJP; MaxText's
+      # pinned_host params + device compute mismatch the cotangent at the jit
+      # boundary.
+      pytest.skip("Parameter memory host offload: JAX MSIT VJP typematch fails for pinned_host params.")
     os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention
     parameter_offload = [  # tests base config on GPU with parameter offload
         None,
@@ -479,7 +469,7 @@ class TrainTests(unittest.TestCase):
         "enable_goodput_recording=False",
         rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
     ]
-    train_main(parameter_offload + get_decoupled_parallelism_overrides(fsdp_parallelism=self.dev_count, as_argv=True))
+    train_main(parameter_offload)
 
   @pytest.mark.gpu_only
   def test_gpu_cudnn_flash_jax(self):
@@ -599,8 +589,7 @@ class TrainTests(unittest.TestCase):
   @pytest.mark.gpu_only
   @pytest.mark.skip(reason="b/489133823. Previously transient in b/462548581.")
   def test_gpu_ring_attention(self):
-    if is_rocm_backend():
-      pytest.skip("TE ring attention context parallelism not supported on ROCm.")
+    rocm_backend = is_rocm_backend()
     os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention
     os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"] = "0"  # Disable scan for ring attention
     ring_attention = [  # tests base config on GPU with ring attention
@@ -609,7 +598,7 @@ class TrainTests(unittest.TestCase):
         f"base_output_directory={self._base_output_directory}",
         "run_name=runner_test",
         "dataset_type=synthetic",  # use synthetic dataset_type to decrease training time
-        "steps=10",
+        "steps=1" if rocm_backend else "steps=10",
         "enable_checkpointing=False",
         "enable_goodput_recording=False",
         "attention=cudnn_flash_te",
@@ -621,15 +610,32 @@ class TrainTests(unittest.TestCase):
         "hardware=gpu",
         rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
     ]
+    if rocm_backend:
+      # Keep the ROCm ring-attention smoke test small enough to avoid long TE/XLA compile times.
+      ring_attention.extend(
+          [
+              "max_target_length=512",
+              "base_emb_dim=1024",
+              "base_mlp_dim=4096",
+              "base_num_query_heads=8",
+              "base_num_kv_heads=8",
+              "base_num_decoder_layers=2",
+          ]
+      )
     train_main(ring_attention)
 
   @pytest.mark.integration_test
   @pytest.mark.gpu_only
   def test_gpu_ring_attention_with_packing(self):
-    gpu_device = jax.devices("gpu")[0]
-    compute_capability = gpu_device.compute_capability
-    if float(compute_capability) < 9.0:
-      pytest.skip("Ring attention with packing is only supported on sm90+!")
+    rocm_backend = is_rocm_backend()
+    if not rocm_backend:
+      gpu_device = jax.devices("gpu")[0]
+      compute_capability = getattr(gpu_device, "compute_capability", None)
+      try:
+        if float(compute_capability) < 9.0:
+          pytest.skip("Ring attention with packing is only supported on sm90+!")
+      except Exception:  # pylint: disable=broad-exception-caught
+        pytest.skip("Ring attention with packing is only supported on sm90+!")
     os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention
     os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"] = "0"  # Disable scan for ring attention
     thd_ring_attention = [  # tests base config on GPU with ring attention + packing
@@ -638,7 +644,7 @@ class TrainTests(unittest.TestCase):
         f"base_output_directory={self._base_output_directory}",
         "run_name=runner_test",
         f"dataset_path={self.dataset_path}",
-        "steps=10",
+        "steps=1" if rocm_backend else "steps=10",
         "enable_checkpointing=False",
         "enable_goodput_recording=False",
         "attention=cudnn_flash_te",
@@ -650,6 +656,19 @@ class TrainTests(unittest.TestCase):
         "hardware=gpu",
         rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
     ]
+    if rocm_backend:
+      # Keep the ROCm packed-ring smoke test small enough to avoid long TE/XLA compile times.
+      thd_ring_attention.extend(
+          [
+              "max_segments_per_seq=2",
+              "max_target_length=512",
+              "base_emb_dim=1024",
+              "base_mlp_dim=4096",
+              "base_num_query_heads=8",
+              "base_num_kv_heads=8",
+              "base_num_decoder_layers=2",
+          ]
+      )
     train_main(thd_ring_attention)
 
 

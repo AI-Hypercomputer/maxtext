@@ -29,7 +29,7 @@ from tunix.sft import peft_trainer
 from maxtext.utils import lora_utils
 from maxtext.utils import model_creation_utils
 from maxtext.configs import pyconfig
-from tests.utils.test_helpers import get_decoupled_parallelism_overrides, get_test_config_path  # pylint: disable=no-name-in-module
+from tests.utils.test_helpers import get_test_config_path  # pylint: disable=no-name-in-module
 
 # ---------------------------------------------------------------------------
 # Shared minimal config overrides
@@ -56,12 +56,10 @@ _BASE_CONFIG = {
 
 def _make_config(**overrides):
   """Return a MaxTextConfig object suitable for unit tests."""
-  extra_args = get_decoupled_parallelism_overrides()
   # Use initialize_pydantic to get nested models as objects (attribute access)
   return pyconfig.initialize_pydantic(
       [sys.argv[0], get_test_config_path()],
       **_BASE_CONFIG,
-      **extra_args,
       **overrides,
   )
 

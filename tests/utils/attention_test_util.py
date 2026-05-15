@@ -27,8 +27,8 @@ from maxtext.common.common_types import AttentionType, DECODING_ACTIVE_SEQUENCE_
 from maxtext.layers.attention_mla import MLA
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
-from maxtext.utils.sharding import maybe_shard_with_name
-from tests.utils.test_helpers import get_test_config_path, get_decoupled_parallelism_overrides
+from maxtext.utils.sharding import maybe_shard_with_name, create_sharding
+from tests.utils.test_helpers import get_test_config_path
 
 
 class MLATestBase(parameterized.TestCase):
@@ -61,9 +61,6 @@ class MLATestBase(parameterized.TestCase):
         jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
       except AttributeError:
         pass
-      # In decoupled mode, adapt mesh/ICI parallelism to local devices so
-      # fill_unspecified_mesh_axes matches the available device count.
-      config_args.update(get_decoupled_parallelism_overrides(include_mesh_defaults=True))
     else:
       jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
 
@@ -210,13 +207,12 @@ def forward_with_context_expert_parallelism(
   with mesh_cp, nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
     batch_axis = "activation_batch"
     length_axis = "activation_length"
-    lnx_spec = nn_partitioning.logical_to_mesh_axes(
+    lnx_sharding = create_sharding(
+        mesh_cp,
         (batch_axis, length_axis, "activation_embed"),
-        nn_partitioning.get_axis_rules(),
+        rules=cfg_cp.logical_axis_rules,
     )
-    pos_spec = nn_partitioning.logical_to_mesh_axes((batch_axis, length_axis), nn_partitioning.get_axis_rules())
-    lnx_sharding = NamedSharding(mesh_cp, lnx_spec)
-    pos_sharding = NamedSharding(mesh_cp, pos_spec)
+    pos_sharding = create_sharding(mesh_cp, (batch_axis, length_axis), rules=cfg_cp.logical_axis_rules)
 
     lnx = jax.device_put(lnx, lnx_sharding)
     decoder_segment_ids = jax.device_put(decoder_segment_ids, pos_sharding)
