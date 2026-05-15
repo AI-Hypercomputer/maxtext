@@ -879,6 +879,7 @@ class HardwareAndMesh(BaseModel):
   shard_mode: ShardMode = Field("auto", description="can be either auto or explicit")
   inhomogeneous_layer_cycle_interval: int = Field(1, description="The interval of repeated inhomogeneous layer patterns.")
   scan_layers: bool = Field(True, description="Whether to use jax.lax.scan over layers.")
+  prefetch_fsdp_weights: bool = Field(False, description="Enable BSW dual-buffer Windowed Scan prefetching for pure FSDP.")
   param_scan_axis: int = Field(1, description="Axis to scan over for parameters.")
   context_parallel_load_balance: bool = Field(True, description="Whether to use load balancing for context parallelism.")
   context_parallel_strategy: str = Field(
@@ -2718,6 +2719,10 @@ class MaxTextConfig(
         ), "Pipeline weight prefetching does not support pipeline delay."
         assert not self.quantization, "Quantization is currently not supported for pipeline prefetching."
         assert not self.scan_layers_per_stage, "Pipeline weight prefetching currently does not support scan."
+
+      if self.prefetch_fsdp_weights:
+        assert self.scan_layers, "FSDP weight prefetching requires scan_layers=True."
+        assert not self.quantization, "Quantization is currently not supported for FSDP prefetching."
 
       assert (num_stages * self.num_pipeline_repeats * self.num_layers_per_pipeline_stage) == (
           self.pipeline_parallel_layers
