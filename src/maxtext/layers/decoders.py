@@ -294,6 +294,118 @@ def deepstack_process(hidden_states, bidirectional_mask, visual_embeds):
   hidden_states = hidden_states + visual_embeds_scattered * mask_expanded
   return hidden_states
 
+# TODO: write in NNX
+class WindowedFsdpDecoderStep(nn.Module):
+  """Single step of Windowed Scan dual-buffer FSDP weight prefetching."""
+  decoder_layer: Any
+  num_layers: int
+  config: Config
+  mesh: Mesh
+  quant: Quant
+  model_mode: str
+  metadata_axis_name: str
+
+  @nn.compact
+  def __call__(self, carry, loop_iteration, *broadcast_args, **kwargs):
+    y, w_curr = carry
+    layer_instance = self.decoder_layer(
+        config=self.config, mesh=self.mesh, quant=self.quant, model_mode=self.model_mode
+    )
+    if self.is_initializing():
+      out = layer_instance(y, *broadcast_args, **kwargs)
+      return (out[0], None), out[1]
+
+    full_params = list(self.scope.variables()['params'].values())[0]
+
+    def _slice_params(params_tree, idx):
+      scan_axis = self.config.param_scan_axis
+      return jax.tree.map(
+          lambda x: jnp.squeeze(jax.lax.dynamic_index_in_dim(x, idx, axis=scan_axis), axis=scan_axis),
+          params_tree,
+      )
+
+    def _apply_sharding_hint(w):
+      w_sharding = getattr(jax.typeof(w), 'sharding', None) or getattr(w, 'sharding', None)
+      return sharding.maybe_shard_with_name(w, w_sharding, shard_mode=self.config.shard_mode)
+
+    nxt_params = _slice_params(full_params, (loop_iteration + 1) % self.num_layers)
+    w_next = jax.tree.map(_apply_sharding_hint, nxt_params)
+
+    bsw = jax.ad_checkpoint.checkpoint_name((w_curr, w_next), "fsdp_bsw")
+    active_params, carried_next = bsw[0], bsw[1]
+
+    out = layer_instance.apply({'params': active_params}, y, *broadcast_args, **kwargs)
+    return (out[0], carried_next), out[1]
+
+
+class ScannedWindowedFsdpStack(nn.Module):
+  """Parent module that wraps WindowedFsdpDecoderStep with nn.scan and passes loop_iteration."""
+  decoder_layer: Any
+  num_layers: int
+  config: Config
+  mesh: Mesh
+  quant: Quant
+  model_mode: str
+  metadata_axis_name: str
+  in_axes_tuple: Any
+  kwargs: dict
+
+  @nn.compact
+  def __call__(self, y, *broadcast_args):
+    initializing = self.is_mutable_collection("params")
+    variable_axes = {
+        "cache": 0,
+        "intermediates": 0,
+        "aqt": 0,
+    }
+    if initializing:
+      variable_axes["params"] = self.config.param_scan_axis
+      variable_broadcast = ["_overwrite_with_gradient"]
+    else:
+      variable_broadcast = ["params", "_overwrite_with_gradient"]
+
+    scan_fn = nn.scan(
+        WindowedFsdpDecoderStep,
+        variable_axes=variable_axes,
+        variable_broadcast=variable_broadcast,
+        split_rngs={"params": True, "dropout": self.config.enable_dropout},
+        in_axes=(0,) + self.in_axes_tuple,
+        length=self.num_layers,
+        metadata_params={nn.PARTITION_NAME: self.metadata_axis_name},
+    )
+    scanned_instance = scan_fn(
+        decoder_layer=self.decoder_layer,
+        num_layers=self.num_layers,
+        config=self.config,
+        mesh=self.mesh,
+        quant=self.quant,
+        model_mode=self.model_mode,
+        metadata_axis_name=self.metadata_axis_name,
+        name=self.metadata_axis_name,
+    )
+    loop_iterations = jnp.arange(self.num_layers)
+
+    if initializing:
+      w_curr_0 = None
+    else:
+      step_params = list(self.scope.variables()['params'].values())[0]
+      full_params = list(step_params.values())[0]
+      def _slice_params(params_tree, idx):
+        scan_axis = self.config.param_scan_axis
+        return jax.tree.map(
+            lambda x: jnp.squeeze(jax.lax.dynamic_index_in_dim(x, idx, axis=scan_axis), axis=scan_axis),
+            params_tree,
+        )
+      def _apply_sharding_hint(w):
+        w_sharding = getattr(jax.typeof(w), 'sharding', None) or getattr(w, 'sharding', None)
+        return sharding.maybe_shard_with_name(w, w_sharding, shard_mode=self.config.shard_mode)
+
+      w_curr_0 = jax.tree.map(_apply_sharding_hint, _slice_params(full_params, 0))
+
+    initial_carry = (y, w_curr_0)
+    (final_y, final_w), stacked_ys = scanned_instance(initial_carry, loop_iterations, *broadcast_args)
+    return (final_y, stacked_ys)
+
 
 class Decoder(nn.Module):
   """A stack of decoder layers as a part of an encoder-decoder architecture."""
@@ -559,6 +671,19 @@ class Decoder(nn.Module):
 
   def scan_decoder_layers(self, cfg, decoder_layer, length, metadata_axis_name, mesh, in_axes_tuple, **kwargs):
     """scan decoder layers, calls `flax.linen.transforms.scan`"""
+    if cfg.prefetch_fsdp_weights:
+      return ScannedWindowedFsdpStack(
+          decoder_layer=decoder_layer,
+          num_layers=length,
+          config=cfg,
+          mesh=mesh,
+          quant=self.quant,
+          model_mode=self.model_mode,
+          metadata_axis_name=metadata_axis_name,
+          in_axes_tuple=in_axes_tuple,
+          kwargs=kwargs,
+      )
+
     initializing = self.is_mutable_collection("params")
     params_spec = cfg.param_scan_axis if initializing else ScanIn(cfg.param_scan_axis)
     cache_spec = 0
