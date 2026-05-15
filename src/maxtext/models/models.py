@@ -347,7 +347,6 @@ class Transformer(nnx.Module):
     else:
       decoder_linen = Decoder(config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode)
       self.decoder = nnx_wrappers.ToNNX(decoder_linen, rngs=rngs)
-    self.hidden_states = None
 
     batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config=cfg, model_mode=model_mode)
     dummy_decoder_input_tokens = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
@@ -397,6 +396,15 @@ class Transformer(nnx.Module):
   def no_op(self, *args, **kwargs):
     """A no-op method to allow the model to be used in a lazy context."""
     return
+
+  def logits_from_hidden_states(self, hidden_states, deterministic, model_mode):
+    """Computes logits from hidden states; used by vocabulary tiling."""
+    return self.decoder.apply_output_head(
+        shared_embedding=self.token_embedder,
+        y=hidden_states,
+        deterministic=deterministic,
+        model_mode=model_mode,
+    )
 
   def init_cache(self, cache_size: int, batch_size: int, dtype=jnp.float32):
     """Initializes the KV cache for the Transformer.
@@ -531,10 +539,6 @@ class Transformer(nnx.Module):
           deepstack_visual_embeds=deepstack_visual_embeds,
           mutable=mutable_collections,
       )  # pytype: disable=wrong-keyword-args
-
-    # Materialize hidden state when vocab tiling is enabled
-    if self.config.num_vocab_tiling > 1:
-      self.hidden_states = hidden_state
 
     # If we are initializing the model AND MTP is enabled, we must create
     # dummy target tensors. This allows Flax to trace the MTPBlock and create

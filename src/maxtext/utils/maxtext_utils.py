@@ -1536,8 +1536,17 @@ def get_nnx_named_sharding_with_scan_axis(abs_var_state: nnx.State, mesh) -> nnx
   def _make_named_sharding(v):
     val = v.get_value()
     if not hasattr(val, "shape"):
-      # Non-tensor value (e.g., optax MaskedNode for non-trainable params). Preserve
-      # as-is so the treedef matches abs_var_state in the downstream jax.tree.map.
+      # `val` is either truly leafless (e.g. optax MaskedNode) or a composite
+      # pytree of tensors (e.g. AQT QTensor on serve-mode quantized variables —
+      # a `qvalue` int8 array + a list of `scale` bf16 arrays). For the latter
+      # we must emit a parallel tree of NamedSharding leaves so the downstream
+      # `jax.tree.map(lambda a, s: ShapeDtypeStruct(..., sharding=s), abs, names)`
+      # finds a real Sharding at every position. Replicated sharding is a safe
+      # default — AQT serve-mode QTensors are normally small (per-channel scale
+      # factors and packed int8 weights) and don't need axis-aware sharding.
+      if jax.tree_util.tree_leaves(val):
+        replicated = NamedSharding(mesh, PartitionSpec())
+        return v.replace(jax.tree.map(lambda _: replicated, val))
       return v
     metadata = v.get_metadata()
     out_sharding = metadata.get("out_sharding") or metadata.get("sharding_names") or metadata.get("sharding")
@@ -1722,6 +1731,30 @@ def get_kv_cache_annotations(model, config, rng, mesh, page_state: None | PageSt
   with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
   return state_mesh_annotations
+
+
+def _nnx_cache_partition_specs(abstract_model, config, mesh):
+  """Per-leaf PartitionSpec tree for the abstract model's nnx.Cache vars.
+
+  Returned as a pure dict so the engine can wrap it in NamedSharding the same
+  way it does for the Linen helpers below.
+  """
+  _, cache_state, _ = nnx.split(abstract_model, nnx.Cache, ...)
+  # get_nnx_named_sharding_with_scan_axis reads logical axis rules from the
+  # active flax partitioning context, so wrap.
+  with nn_partitioning.axis_rules(config.logical_axis_rules):
+    named_state = get_nnx_named_sharding_with_scan_axis(cache_state, mesh)
+  return jax.tree.map(lambda s: s.spec, named_state.to_pure_dict())
+
+
+def get_prefill_kv_cache_annotations_nnx(abstract_model, config, mesh):
+  """NNX equivalent of get_prefill_kv_cache_annotations."""
+  return _nnx_cache_partition_specs(abstract_model, config, mesh)
+
+
+def get_kv_cache_annotations_nnx(abstract_model, config, mesh):
+  """NNX equivalent of get_kv_cache_annotations."""
+  return _nnx_cache_partition_specs(abstract_model, config, mesh)
 
 
 def save_quantized_checkpoint_if_configured(config, params):

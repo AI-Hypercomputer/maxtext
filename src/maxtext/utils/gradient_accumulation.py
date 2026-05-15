@@ -71,10 +71,16 @@ def gradient_accumulation_loss_and_grad(
 
   is_nnx = isinstance(model, nnx.Module)
 
-  # For more efficient DP/ZeRO-1 + GA
-  if config.shard_mode == ShardMode.EXPLICIT and config.ici_data_parallelism > 1:
-    ga_params_shardings = jax.tree.map(update_sharding_for_reduced, params_shardings)
-    grad_shardings = jax.tree.map(update_sharding_for_unreduced, params_shardings)
+  # For more efficient DP/ZeRO-1 + GA.
+  # config.ici_data_parallelism may be -1 (auto-fill: resolved at mesh creation time, but
+  # the config field remains -1). Treat any value != 1 as "data parallelism is active".
+  if config.shard_mode == ShardMode.EXPLICIT and config.ici_data_parallelism != 1:
+    # jax.lax.scan traces its body with an AbstractMesh where all axis types are Auto,
+    # which rejects reduced/unreduced PartitionSpec in scan carry tensors (raises ValueError).
+    # Use plain params_shardings for ga_params and init_grad in the carry.
+    # The all-reduce for data parallelism is applied to raw_grads after the scan instead.
+    ga_params_shardings = params_shardings
+    grad_shardings = params_shardings
   else:
     ga_params_shardings = grad_shardings = params_shardings
 
@@ -105,7 +111,7 @@ def gradient_accumulation_loss_and_grad(
     if is_nnx:
       # Reconstruct the model using the fixed parameters (ga_params)
       # and the advancing non-parameter state (RNGs) from the carry.
-      local_model = nnx.merge(graphdef, ga_params, acc_grad_and_loss["rest_state"])
+      local_model = nnx.merge(graphdef, ga_params, acc_grad_and_loss["rest_state"], copy=True)
       (_, aux), cur_batch_gradient = grad_func(local_model, config, data, None, None, *extra_dpo_args, is_train=True)
       _, _, next_rest_state = nnx.split(local_model, nnx.Param, ...)
       acc_grad_and_loss["rest_state"] = next_rest_state
@@ -156,6 +162,11 @@ def gradient_accumulation_loss_and_grad(
       + grad_and_loss["mtp_loss"] / config.gradient_accumulation_steps
   )
   raw_grads = grad_and_loss["grad"]
+  if config.shard_mode == ShardMode.EXPLICIT and config.ici_data_parallelism != 1:
+    # Apply unreduced annotation after the scan to trigger all-reduce across data-parallel
+    # devices (reduced/unreduced cannot be used inside jax.lax.scan carry tensors).
+    unreduced_shardings = jax.tree.map(update_sharding_for_unreduced, params_shardings)
+    raw_grads = jax.tree.map(_maybe_shard_with_name, raw_grads, unreduced_shardings)
   raw_grads = jax.tree.map(_maybe_shard_with_name, raw_grads, params_shardings)
   raw_grads = jax.tree_util.tree_map(lambda arr: arr / grad_and_loss["total_weights"], raw_grads)
   aux = jax.tree.map(lambda x: jnp.sum(x, axis=0), aux)  # pytype: disable=module-attr
