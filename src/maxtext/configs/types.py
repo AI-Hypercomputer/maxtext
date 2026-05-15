@@ -702,6 +702,9 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to use Ring of Experts for sparse matmul expert parallelism.",
   )
+  use_ragged_sort: bool = Field(
+      False, description="Whether to use ragged kernel for sorting, improve performance when EP is enabled."
+  )
   use_gather_mosaic_kernel: bool = Field(
       False,
       description="Whether to use a custom mosaic kernel for token gather ops.",
@@ -2865,6 +2868,7 @@ class MaxTextConfig(
       if self.routed_bias and self.routed_bias_update_rate > 0.0 and self.decoder_block != DecoderBlockType.DEEPSEEK:
         raise ValueError("Loss-free load balancing is only supported for the DeepSeek decoder block.")
       self.validate_ragged_buffer_factor()
+
     if self.use_multimodal:
       valid_mm_models = (
           "gemma3-4b",
