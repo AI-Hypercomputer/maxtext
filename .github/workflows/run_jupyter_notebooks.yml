@@ -82,6 +82,7 @@ jobs:
           MAXTEXT_INSTALLED: ${{ inputs.maxtext_installed }}
           # TODO: Fix evaluation in sft_qwen3_demo.ipynb and remove this env variable
           RUN_EVALUATION: "False"
+          CI_STEPS: "2"
         run: |
           if [ "${MAXTEXT_INSTALLED}" == "true" ]; then
             # Move to the directory where code is baked into the image. See the Dockerfile.

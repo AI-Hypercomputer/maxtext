@@ -1,0 +1,76 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: PR Comment Commands
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  actions: write
+  pull-requests: write
+  issues: write
+  contents: read
+
+jobs:
+  trigger_workflows:
+    name: Trigger Workflows via Comment
+    # Only run if it's a pull request comment, and the author is a collaborator/member/owner
+    if: |
+      github.event.issue.pull_request != null &&
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Parse and Dispatch Comment Command
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Normalize comment body (lowercase, trim whitespace)
+          COMMENT=$(echo "$COMMENT_BODY" | tr '[:upper:]' '[:lower:]' | xargs)
+          
+          echo "Processing comment: '$COMMENT'"
+          
+          # Get PR branch name using gh CLI
+          PR_BRANCH=$(gh pr view "$ISSUE_NUMBER" --json headRefName --jq '.headRefName' --repo "$REPO")
+          echo "PR branch ref is '$PR_BRANCH'"
+          
+          MATCHED=false
+          WORKFLOW_NAME=""
+          PARAMS=()
+
+          # 1. Match "test this please" / "test this pr" / "run tests"
+          if [[ "$COMMENT" =~ ^(test this please|test this pr|run tests)$ ]]; then
+            MATCHED=true
+            WORKFLOW_NAME="build_and_test_maxtext.yml"
+            PARAMS=(-f force_scheduled_run=false)
+          
+          # 2. Match "run scheduled tests"
+          elif [[ "$COMMENT" == "run scheduled tests" ]]; then
+            MATCHED=true
+            WORKFLOW_NAME="build_and_test_maxtext.yml"
+            PARAMS=(-f force_scheduled_run=true)
+          fi
+
+          if [ "$MATCHED" = "true" ]; then
+            echo "Dispatching workflow $WORKFLOW_NAME with parameters: ${PARAMS[*]}"
+            
+            # Dispatch the workflow
+            gh workflow run "$WORKFLOW_NAME" --ref "$PR_BRANCH" "${PARAMS[@]}" --repo "$REPO"
+          else
+            echo "No matching command found in comment."
+          fi

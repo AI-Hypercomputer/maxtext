@@ -20,6 +20,10 @@ on:
   pull_request:
   workflow_call:
   workflow_dispatch:
+    inputs:
+      force_scheduled_run:
+        type: boolean
+        default: false
   schedule:
     # Run the job every 4 hours
     - cron:  '0 */4 * * *'
@@ -154,7 +158,7 @@ jobs:
     with:
       flavor: ${{ matrix.flavor }}
       base_image: maxtext-unit-test-tpu:py312
-      is_scheduled_run: ${{ github.event_name == 'schedule' }}
+      is_scheduled_run: ${{ github.event_name == 'schedule' || github.event.inputs.force_scheduled_run == 'true' }}
       maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
 
   gpu-tests:
@@ -169,7 +173,7 @@ jobs:
     with:
       flavor: ${{ matrix.flavor }}
       base_image: maxtext-unit-test-cuda12:py312
-      is_scheduled_run: ${{ github.event_name == 'schedule' }}
+      is_scheduled_run: ${{ github.event_name == 'schedule' || github.event.inputs.force_scheduled_run == 'true' }}
       maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
 
   cpu-tests:
@@ -184,7 +188,7 @@ jobs:
     with:
       flavor: ${{ matrix.flavor }}
       base_image: maxtext-unit-test-tpu:py312
-      is_scheduled_run: ${{ github.event_name == 'schedule' }}
+      is_scheduled_run: ${{ github.event_name == 'schedule' || github.event.inputs.force_scheduled_run == 'true' }}
       maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
 
   maxtext_tpu_pathways_unit_tests:
@@ -203,7 +207,7 @@ jobs:
       xla_python_client_mem_fraction: 0.75
       tf_force_gpu_allow_growth: false
       container_resource_option: "--privileged"
-      is_scheduled_run: ${{ github.event_name == 'schedule' }}
+      is_scheduled_run: ${{ github.event_name == 'schedule' || github.event.inputs.force_scheduled_run == 'true' }}
       maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
 
   maxtext_tpu_pathways_integration_tests:
@@ -222,7 +226,7 @@ jobs:
       xla_python_client_mem_fraction: 0.75
       tf_force_gpu_allow_growth: false
       container_resource_option: "--privileged"
-      is_scheduled_run: ${{ github.event_name == 'schedule' }}
+      is_scheduled_run: ${{ github.event_name == 'schedule' || github.event.inputs.force_scheduled_run == 'true' }}
       maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
 
   all_tests_passed:
