@@ -218,13 +218,36 @@ Max KL divergence for a single token in the set: 0.003497
 
 ______________________________________________________________________
 
-## Troubleshooting and Development
+## Development and Troubleshooting
+
+### Inspection tool
+
+We first introduce some auxiliary tools useful for both development and troubleshoot.
+
+Tool1: To see the HuggingFace checkpoint structure: You can print out the keys and shapes of your original `.safetensors` or `.pth` files.
+```
+python src/MaxText/utils/ckpt_conversion/inspect_checkpoint.py hf --path <local_hf_path> --format <safetensors | pth>
+```
+
+Tool2: To see the MaxText model structure:
+```
+python src/MaxText/utils/ckpt_conversion/inspect_checkpoint.py maxtext --model_name <maxtext_model_name> --scan_layers <True | False>
+```
+
+Tool3: To inspect the checkpoint
+```
+python src/MaxText/utils/ckpt_conversion/inspect_checkpoint.py orbax --path <local_orbax_path | gcs_orbax_path>
+```
 
 ### Adding New Models
 
 To extend conversion support to a new model architecture, you must define its specific parameter and configuration mappings. The conversion logic is decoupled, so you only need to modify the mapping files.
 
 1. **Add parameter mappings**:
+
+To see the HuggingFace checkpoint structure use Tool1. 
+
+To see the MaxText model structure, use Tool2.
 
 - In [`utils/param_mapping.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/utils/param_mapping.py), add the parameter name mappings(`def {MODEL}_MAXTEXT_TO_HF_PARAM_MAPPING`). This is the 1-to-1 mappings of parameters names per layer.
 
@@ -240,7 +263,13 @@ Here is an example [PR to add support for gemma3 multi-modal model](https://gith
 
 ### Common Errors
 
-- "Type ShapeDtypeStruct is not a valid JAX type": Usually caused by a mismatch in the `scan_layers` flag.
+- When loading converted checkpoint, if you see "Type ShapeDtypeStruct is not a valid JAX type", this is usually caused by a structure mismatch between the converted checkpoint and MaxText model.
+
+
+To see the MaxText model structure use Tool2. 
+
+To inspect the checkpoint use Tool3.
+
 
 - If the converted checkpoint loads without errors but produces nonsensical output, likely an error in the Q/K/V weight reshaping logic during conversion.
 
