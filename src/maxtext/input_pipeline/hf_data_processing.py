@@ -14,6 +14,7 @@
 
 """Input pipeline using Huggingface datasets."""
 
+import json
 from typing import Optional
 
 import ml_collections
@@ -266,6 +267,11 @@ def preprocessing_pipeline(
 
     data_processing_utils.validate_and_configure_sft_columns(data_column_names, tokenizer, chat_template)
 
+    # Separate auxiliary "tools" column from primary data columns
+    tools_column_name = data_processing_utils.TOOLS_COLUMN if data_processing_utils.TOOLS_COLUMN in data_column_names else None
+    if tools_column_name:
+      data_column_names = [c for c in data_column_names if c != tools_column_name]
+
     # convert instruction dataset to conversational format
     dataset, data_column_names = instruction_data_processing.convert_to_conversational_format(
         dataset=dataset,
@@ -273,10 +279,17 @@ def preprocessing_pipeline(
         formatting_func_path=formatting_func_path,
         formatting_func_kwargs=formatting_func_kwargs,
     )
+    # Deserialize JSON string columns if needed
+    _json_deserialized = False
+    for col in data_column_names:
+      if isinstance(dataset.features.get(col), datasets.Value) and dataset.features[col].dtype == "string":
+        dataset = dataset.map(lambda x, c=col: {c: json.loads(x[c]) if isinstance(x[c], str) else x[c]})
+        _json_deserialized = True
 
-    assert input_pipeline_utils.is_conversational(
-        dataset.features, data_column_names
-    ), "Dataset is not in conversational format."
+    if not _json_deserialized:
+      assert input_pipeline_utils.is_conversational(
+          dataset.features, data_column_names
+      ), "Dataset is not in conversational format."
 
     if len(data_column_names) > 1:
       combined_column_name = "messages"
@@ -289,12 +302,18 @@ def preprocessing_pipeline(
           remove_columns=data_column_names,
           features=dataset_features,
       )
+      data_column_names = [combined_column_name]
 
-    data_column_names = list(dataset.features.keys())
     dataset = dataset.map(
         input_pipeline_utils.apply_chat_template,
-        fn_kwargs={"tokenizer_model": tokenizer, "data_column_name": data_column_names[0]},
+        fn_kwargs={
+            "tokenizer_model": tokenizer,
+            "data_column_name": data_column_names[0],
+            "tools_column_name": tools_column_name,
+        },
     )
+    if tools_column_name:
+      dataset = dataset.remove_columns([tools_column_name])
 
   pad_id = _get_pad_id(tokenizer)
 
