@@ -21,10 +21,10 @@
 run_name: ""
 
 model_name: "default" # override config settings to match a specific model. other than the override, nothing should use this!
-override_model_config: False # When set to true allows overriding model parameters via CLI (or kwargs or env vars) for the purpose of debugging/testing.
-override_logical_axis_rules: False # When set overrides logical axis rules instead of merging them.
+override_model_config: false # When set to true allows overriding model parameters via CLI (or kwargs or env vars) for the purpose of debugging/testing.
+override_logical_axis_rules: false # When set overrides logical axis rules instead of merging them.
 debug:
-  rl: False # RL-specific debugging
+  rl: false # RL-specific debugging
 
 normalization_layer_epsilon: 1.e-05 # epsilon value for rmsnorm, layernorm.
 
@@ -52,20 +52,20 @@ load_full_state_path: ""
 # If enable_checkpointing is true, an asynchronous checkpointer will be used if
 # async_checkpointing is true, else a synchronous one is used. If you have
 # problems with the checkpointer we recommend trying the synchronous one.
-enable_checkpointing: True
-save_checkpoint_on_completion: True
-async_checkpointing: True
+enable_checkpointing: true
+save_checkpoint_on_completion: true
+async_checkpointing: true
 checkpoint_period: 10_000
 max_num_checkpoints_to_keep: None
-enable_continuous_checkpointing: False
+enable_continuous_checkpointing: false
 # enables one replica to read the ckpt then broadcast to the rest
-enable_single_replica_ckpt_restoring: False
+enable_single_replica_ckpt_restoring: false
 # Subdirectory to move checkpoints to before deletion. For example: ".todelete" (Ignored if directory is prefixed with gs://)
 checkpoint_todelete_subdir: None
 # Full path to move checkpoints to before deletion.
 checkpoint_todelete_full_path: None
 
-force_unroll: False # during generate_param_only_checkpoint should we unroll the loop?
+force_unroll: false # during generate_param_only_checkpoint should we unroll the loop?
 
 # checkpointing using orbax has two important parameters: array driver
 # and its underlying storage - the kvstore (preferably ocdbt)
@@ -73,24 +73,24 @@ force_unroll: False # during generate_param_only_checkpoint should we unroll the
 # large arrays into small physical files (<2GB) can speed up distributed and over
 # the network loading enormously
 checkpoint_storage_target_data_file_size_bytes: 2147483648
-checkpoint_storage_use_ocdbt: True
-checkpoint_storage_use_zarr3: True
+checkpoint_storage_use_ocdbt: true
+checkpoint_storage_use_zarr3: true
 # larger models requires higher concurrent GB for I/O
 # default concurrent gb for PytreeCheckpointHandler is 96GB
 checkpoint_storage_concurrent_gb: 96
 
 # Bool flag for enabling Orbax v1.
-enable_orbax_v1: False
+enable_orbax_v1: false
 # function for processing loaded checkpoint dict into a format maxtext can understand. (for other formats, i.e. safetensors)
 checkpoint_conversion_fn: none
 # optional checkpoint context to use for loading. options: "orbax", "safetensors"
 source_checkpoint_layout: "orbax"
 
-# Only applicable to Single Controller/Pathways on Cloud. Experimental feature, under testing 
-colocated_python_checkpointing: False
+# Only applicable to Single Controller/Pathways on Cloud. Experimental feature, under testing
+colocated_python_checkpointing: false
 
 # enables autocheckpoint, which saves a checkpoint at the preemption step.
-enable_autocheckpoint: False
+enable_autocheckpoint: false
 ############################### end checkpointing ##################################
 
 
@@ -144,7 +144,7 @@ save_quantized_params_path: ""
 # accepted values are "inference"
 model_call_mode: ""
 use_qwix_quantization: false # whether to use qwix for quantization. if set to true, the model will be quantized using qwix.
-use_manual_quantization: false # a flag if to use manual quantization for batch split. Only used if use_batch_split_schedule is True.
+use_manual_quantization: false # a flag if to use manual quantization for batch split. Only used if use_batch_split_schedule is true.
 # quantization calibration method used for weights and activations. supported methods can be found in https://github.com/google/qwix/blob/dc2a0770351c740e5ab3cce7c0efe9f7beacce9e/qwix/qconfig.py#l70-l80
 weight_quantization_calibration_method: "absmax"
 act_quantization_calibration_method: "absmax"
@@ -245,7 +245,7 @@ wo_tile_drhs_batch_seq: 512
 wo_tile_drhs_embed_dim: 1024
 wo_tile_drhs_mlp_dim: 1024
 
-merge_gating_gmm: False
+merge_gating_gmm: false
 
 norm_topk_prob: false # boolean to enable the top-k probability normalization. qwen3-specific normalization of router weights.
 
@@ -253,22 +253,22 @@ norm_topk_prob: false # boolean to enable the top-k probability normalization. q
 moe_fsdp_use_two_stage_all_gather: false
 # Shard the expert dimension of the MLP weights on the FSDP axis.
 # This configuration is recommended only when num_experts is a multiple of fsdp_parallelism
-shard_exp_on_fsdp: False
+shard_exp_on_fsdp: false
 
 # deepseek moe
 first_num_dense_layers: 0 # number of initial dense layers in the model
 shared_experts: 0
 routed_scaling_factor: 1.0 # scaling factor for routing scores
 routed_score_func: "" # scoring function for routing
-routed_bias: False # a flag if a learnable bias is added for routing
+routed_bias: false # a flag if a learnable bias is added for routing
 routed_bias_update_rate: 0.0 # a flag indicate the update rate applied to the router bias term
-mlp_bias: False # a flag if a learnable bias is added for MLP matmul, and originally implemented to support the GPT-OSS model architecture.
+mlp_bias: false # a flag if a learnable bias is added for MLP matmul, and originally implemented to support the GPT-OSS model architecture.
 n_routing_groups: -1 # number of groups for routing, disabled by default
 topk_routing_group: -1 # number of top groups to route inputs. For EP,
 # Splits the batch to allow for better scheduling when using expert parallelism by overlapping the
 # all-to-all communication with compute. Currently only implemented with DeepSeek sparse layers.
-use_batch_split_schedule: False # a flag if splitting batch into micro-batches to hide communications that yields performance benefits.
-batch_split_factor: 1 # the factor by which to split the batch. Only used if use_batch_split_schedule is True.
+use_batch_split_schedule: false # a flag if splitting batch into micro-batches to hide communications that yields performance benefits.
+batch_split_factor: 1 # the factor by which to split the batch. Only used if use_batch_split_schedule is true.
 
 # For complex architectures like llama4 there are repeated sets of
 # inhomogeneous layers. E.g. maverick uses [dense+rope, moe+rope, dense+rope, moe+nope]
@@ -294,16 +294,16 @@ pipeline_parallel_layers: -1 # Pipeline only this number of layers - for the rem
 # num_pipeline_microbatches must be a multiple of the number of pipeline stages. By default it is set to the number of stages.
 # Note the microbatch_size is given by global_batch_size / num_pipeline_microbatches, where global_batch_size = per_device_batch_size * num_devices
 num_pipeline_microbatches: -1
-pipeline_delay_activation_forwarding: False # This delays the activation forwarding one loop iteration simplifying XLA's task of overlapping since
+pipeline_delay_activation_forwarding: false # This delays the activation forwarding one loop iteration simplifying XLA's task of overlapping since
 # the communication and compute in each iteration are now independent. However this comes at the cost of doubling the pipeline bubble,
 # and you must set the number of microbatches to at least 2 * num_stages (the minimum 2 * num_stages is set by default with this delay).
 
-pipeline_fsdp_ag_once: False # If set to true then all gather all of the weights over FSDP before the first pipeline iteration.
+pipeline_fsdp_ag_once: false # If set to true then all gather all of the weights over FSDP before the first pipeline iteration.
 # This is a memory/time tradeoff - we now have to store the FSDP gathered weights and gradients (typically in bf16), as opposed
 # to only one stage's worth, however we only execute one all-gather and reduce across per repeat, as opposed
 # to every microbatch. This is similar to zero-1 sharding, since we also don't need to all gather the FSDP weights in the backward pass.
 # An alternative to setting this to true may be to replace any FSDP with DP and use optimizer offloading if necessary.
-pipeline_fsdp_ag_per_repeat: False
+pipeline_fsdp_ag_per_repeat: false
 # Pipeline weight prefetching per repeat is an advanced SPMD pipeline parallelism improvement technique
 # When enabled, it prefetches necessary weight gathering ahead of microbatched computation, therefore reducing collectives
 
@@ -314,11 +314,11 @@ pipeline_fsdp_ag_per_repeat: False
 # settings below of scanning and setting a remat policy only over the pipeline iterations.
 # It may be useful to do the reverse when the layers_per_stage is very large.
 # The below settings only have effect when using pipeline parallelism.
-scan_pipeline_iterations: True
-scan_pipeline_repeats: False
-scan_layers_per_stage: False
-set_remat_policy_on_pipeline_iterations: True
-set_remat_policy_on_layers_per_stage: False
+scan_pipeline_iterations: true
+scan_pipeline_repeats: false
+scan_layers_per_stage: false
+set_remat_policy_on_pipeline_iterations: true
+set_remat_policy_on_layers_per_stage: false
 
 
 # Choose 'remat_policy' between 'minimal_with_context', 'minimal', 'save_dot_with_context_except_mlp', 'save_dot_except_mlpwi', 'save_dot_except_mlp',
@@ -348,46 +348,46 @@ mla_kv: 'remat'
 attention_out: 'remat'
 engram: 'remat'
 
-optimizer_memory_host_offload: False
-parameter_memory_host_offload: False
-scan_layers: True # We recommend setting this to false when using pipeline parallelism, instead scanning the PP iterations.
+optimizer_memory_host_offload: false
+parameter_memory_host_offload: false
+scan_layers: true # We recommend setting this to false when using pipeline parallelism, instead scanning the PP iterations.
 param_scan_axis: 1
 
 # The attention parameter dictates the specific algorithm/methodology used to compute the attention scores
 # The attention_type parameter determines the variants of attention, e.g. global or local_sliding
 attention: 'autoselected' # Supported attention: autoselected, dot_product, flash, cudnn_flash_te
 attention_type: 'global' # Supported attention_type: global, local_sliding, chunk, mla
-share_kv_projections: False # Note: Not compatible with attention_type='mla'
-attention_bias: False # If True, adds a learnable bias to the query, key, and value projections
-attention_sink: False
+share_kv_projections: false # Note: Not compatible with attention_type='mla'
+attention_bias: false # If true, adds a learnable bias to the query, key, and value projections
+attention_sink: false
 sliding_window_size: 0
 chunk_attn_window_size: 0
 attn_logits_soft_cap: 0.0
 final_logits_soft_cap: 0.0
 z_loss_multiplier: 0.0
-use_post_attn_norm: False
-use_post_ffw_norm: False
-v_norm_with_scale: True
-qk_norm_with_scale: True
-mla_naive_kvcache: True
+use_post_attn_norm: false
+use_post_ffw_norm: false
+v_norm_with_scale: true
+qk_norm_with_scale: true
+mla_naive_kvcache: true
 
 
 # Adding Mixture of Block Attention Support (MoBA): https://github.com/MoonshotAI/MoBA/blob/master/MoBA_Tech_Report.pdf
-moba: False
+moba: false
 moba_chunk_size: 1024
 moba_topk: 8
 
 # DeepSeek Sparse Attention (DSA)
 # deepseek3.2 introduces indexer in MLA
-use_indexer: False
+use_indexer: false
 indexer_head_dim: 128
 indexer_n_heads: 64
 indexer_topk: 2048
 # Determines the training strategy for the indexer:
-# - False (Dense Warm-up): Computes indexer loss over all tokens. Used with `trainable_parameters_mask` to freeze other model parameters.
-# - True (Sparse Training): Computes indexer loss over top-k tokens only and detaches the indexer input for independent optimization.
+# - false (Dense Warm-up): Computes indexer loss over all tokens. Used with `trainable_parameters_mask` to freeze other model parameters.
+# - true (Sparse Training): Computes indexer loss over top-k tokens only and detaches the indexer input for independent optimization.
 # Note: This is only active when `indexer_loss_scaling_factor` > 0.
-indexer_sparse_training: False
+indexer_sparse_training: false
 # Multiplier for the indexer KL divergence loss
 indexer_loss_scaling_factor: 0.0
 
@@ -399,12 +399,12 @@ qk_rope_head_dim: 64
 v_head_dim: 128
 
 # QK-Clip (Muon Clip) Configuration
-use_qk_clip: False  # Enable QK-Clip (supported in MLA with DotProduct or Tokamax Splash)
+use_qk_clip: false  # Enable QK-Clip (supported in MLA with DotProduct or Tokamax Splash)
 qk_clip_threshold: 100.0  # Threshold for clipping (tau in the paper)
 
 # Combine matmuls for QKV and MLP
-fused_qkv: False
-fused_mlp: False
+fused_qkv: false
+fused_mlp: false
 
 record_internal_nn_metrics: 0
 
@@ -418,8 +418,8 @@ base_output_directory: ""
 # During restore, if a local copy is available in any slice, it will be broadcast to other slices without having to fetch from persistent storage.
 # See more details on https://github.com/google/orbax/tree/main/checkpoint/orbax/checkpoint/experimental/emergency/multi_tier_checkpointing.
 # Example for enabling multi-tier checkpointing
-# enable_multi_tier_checkpointing=True local_checkpoint_directory="/local" local_checkpoint_period=20 multi_tier_checkpointing_backup_interval_minutes=20
-enable_multi_tier_checkpointing: False
+# enable_multi_tier_checkpointing=true local_checkpoint_directory="/local" local_checkpoint_period=20 multi_tier_checkpointing_backup_interval_minutes=20
+enable_multi_tier_checkpointing: false
 
 # The interval to backup local checkpoints to the persistent storage(GCS bucket) in minutes.
 # It should be a positive number when enabling multi-tier checkpointing.
@@ -430,16 +430,16 @@ multi_tier_checkpointing_backup_interval_minutes: 0
 mtc_data_parallelism: 0
 
 
-# Whether to enable emergency checkpoint. If True, `local_checkpoint_directory` and a non-zero `local_checkpoint_period` must also be specified.
+# Whether to enable emergency checkpoint. If true, `local_checkpoint_directory` and a non-zero `local_checkpoint_period` must also be specified.
 # Emergency checkpoint is an experimental Orbax feature that: periodically saves to persistent storage and, with a larger invertal, saves to a local directory.
 # During restore, if a local copy is available in any slice, it will be broadcast to other slices without having to fetch from persistent storage.
 # See more details on https://github.com/google/orbax/tree/main/checkpoint/orbax/checkpoint/experimental/emergency.
-enable_emergency_checkpoint: False
+enable_emergency_checkpoint: false
 
-# It should be specified when and only when `enable_emergency_checkpoint` is True. Or when `enable_multi_tier_checkpointing` is True.
+# It should be specified when and only when `enable_emergency_checkpoint` is true. Or when `enable_multi_tier_checkpointing` is true.
 local_checkpoint_directory: ""
 
-# It should be a positive number when and only when `enable_emergency_checkpoint` or `enable_multi_tier_checkpointing` is True.
+# It should be a positive number when and only when `enable_emergency_checkpoint` or `enable_multi_tier_checkpointing` is true.
 local_checkpoint_period: 0
 
 # Jax cache directory
@@ -449,9 +449,9 @@ jax_cache_dir: "~/jax_cache"
 hardware: 'tpu' # Supported hardware types are 'tpu', 'gpu', 'gpu_multiprocess' and 'cpu'
 
 # internal_compile allows bypassing open-source topology name mappings when using internal topologies directly via get_topology_desc.
-internal_compile: False
+internal_compile: false
 internal_compile_num_devices: -1 # You must specify the number of devices when using internal_compile.
-compile_xla_flags: "" # Compiler options e.g. compile_xla_flags="--xla_tpu_num_sparse_cores_for_gather_offloading=1 --xla_tpu_scoped_vmem_limit_kib=65536" 
+compile_xla_flags: "" # Compiler options e.g. compile_xla_flags="--xla_tpu_num_sparse_cores_for_gather_offloading=1 --xla_tpu_scoped_vmem_limit_kib=65536"
 
 # Parallelism
 shard_mode: "auto" # can be either auto or explicit
@@ -564,8 +564,8 @@ logical_axis_rules: [
                       # ==========================================
                       # Deprecated / Scheduled for Removal
                       # ==========================================
-                      ['mlp_no_fsdp', ['tensor', 'tensor_sequence', 'autoregressive']], 
-                      ['embed_tensor_transpose', ['tensor_transpose']],                 
+                      ['mlp_no_fsdp', ['tensor', 'tensor_sequence', 'autoregressive']],
+                      ['embed_tensor_transpose', ['tensor_transpose']],
                       ['exp_with_fsdp', 'fsdp'],
                   ]
 # Axes used for DCN must be earlier in this list than ICI, see (b/339009148) for details
@@ -610,7 +610,7 @@ ici_pipeline_parallelism: 1
 ici_expert_parallelism: 1
 
 # Enable ZeRO-1 optimizer sharding over data axis
-shard_optimizer_over_data: False
+shard_optimizer_over_data: false
 
 # Unless explicitly specified, the number of TPU slices is automatically determined. It should only be set for
 # disaggregated reinforcement learning workloads using multiple slices. For ahead of time compilation,
@@ -630,17 +630,17 @@ tokenizer_path: ""
 # grain and tfds pipeline supports tokenizer_type: sentencepiece, huggingface, tiktoken
 # hf pipeline only supports huggingface type, and will ignore tokenizer_type flag
 tokenizer_type: "sentencepiece" # Currently supporting: "tiktoken", "sentencepiece", "huggingface"
-use_chat_template: False
+use_chat_template: false
 chat_template_path: "" # path to chat template json file
-tokenize_train_data: True  # False if the dataset is pre-tokenized
-tokenize_eval_data: True  # False if the dataset is pre-tokenized
-add_bos: True
-add_eos: True
-# If False, use chunking for long sequences instead of truncation.
-# Note: use_truncation=False is only available in grain's pretrain preprocessing pipeline.
+tokenize_train_data: true  # false if the dataset is pre-tokenized
+tokenize_eval_data: true  # false if the dataset is pre-tokenized
+add_bos: true
+add_eos: true
+# If false, use chunking for long sequences instead of truncation.
+# Note: use_truncation=false is only available in grain's pretrain preprocessing pipeline.
 # See the TokenizeAndTrim and TokenizeAndChunk classes in
 # `src/maxtext/input_pipeline/_grain_tokenizer.py` for implementation details.
-use_truncation: True
+use_truncation: true
 
 # Dataset
 per_device_batch_size: 12.0
@@ -655,10 +655,10 @@ train_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected
 train_image_column: 'image'
 eval_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected"
 eval_image_column: 'image'
-packing: True
+packing: true
 num_epoch: 1
-generate_padding_batch_train: False
-generate_padding_batch_eval: False
+generate_padding_batch_train: false
+generate_padding_batch_eval: false
 # Maximum number of segments that can be packed into a single sequence
 # This needs to be passed to TransformerEngine's DotProductAttention layer for packing
 # This also affects packing for grain, since TransformerEngine may crash or cause
@@ -671,7 +671,7 @@ max_segments_per_seq: -1
 # the final `per_device_batch_size`. For a clean ramp-up, the total range
 # (`per_device_batch_size` - `per_device_batch_size_start`)
 # should be evenly divisible by batch size increment.
-enable_rampup_batch_size: False
+enable_rampup_batch_size: false
 per_device_batch_size_start: 4.0
 per_device_batch_size_increment: 2.0
 # The target number of training samples to process during the ramp-up phase.
@@ -679,14 +679,14 @@ per_device_batch_size_increment: 2.0
 global_rampup_samples: 500
 
 # direct preference optimization (DPO)
-use_dpo: False
+use_dpo: false
 dpo_label_smoothing: 0.0
 dpo_beta: 0.1
 
 # Supervised Fine-Tuning (SFT)
-use_sft: False
-# sft_train_on_completion_only=False trains on both prompt and completion tokens; trains only on completion tokens otherwise
-sft_train_on_completion_only: False
+use_sft: false
+# sft_train_on_completion_only=false trains on both prompt and completion tokens; trains only on completion tokens otherwise
+sft_train_on_completion_only: false
 
 # dataset_type must be synthetic, hf, grain, tfds
 # details in: https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/data_input_pipeline.md
@@ -732,9 +732,9 @@ grain_num_threads_eval: 16
 grain_prefetch_buffer_size_eval: 500
 grain_data_source_max_workers: 16  # Max workers for ThreadPoolExecutor when mixing multiple Grain data sources.
 grain_shuffle_buffer_size: 100 # shuffle buffer when using sequential access formats such as Parquet, TFRecord.
-grain_use_elastic_iterator: False # For elastic training, set to this true and packing=False
+grain_use_elastic_iterator: false # For elastic training, set to this true and packing=false
 # for using pathways
-colocated_python_data_input: False  # experimental feature, under testing
+colocated_python_data_input: false  # experimental feature, under testing
 
 # OLMo numpy pipeline (dataset_type=olmo_grain). Worker count, buffer size,
 # and shuffle seed reuse grain_worker_count / grain_per_worker_buffer_size /
@@ -742,7 +742,7 @@ colocated_python_data_input: False  # experimental feature, under testing
 olmo_index_path: '' # JSON from tools/data_generation/build_olmo_npy_index.py
 olmo_path_remap_from: '' # rewrite index paths starting with this prefix...
 olmo_path_remap_to: ''   # ...to this one (e.g. gs://bucket/ -> /mnt/.../ for gcsfuse).
-olmo_apply_ngram_filter: True # mask instances with repetitive n-grams (OLMo-core filter)
+olmo_apply_ngram_filter: true # mask instances with repetitive n-grams (OLMo-core filter)
 
 # Training loop
 steps: 150_001 # If set to -1 then will inherit value from learning_rate_schedule_steps
@@ -752,10 +752,10 @@ jax_distributed_initialization_timeout: 300 # This is the default timeout in htt
 # Note there are two separate initializations - the jax coordination service (aka jax.distributed.initialize) and the backend (e.g. PjRT), the timeout above refers
 # only to the jax coordination service.
 jax_debug_log_modules: "" # Set this to "jax" to enable jax verbose logging such as for the jax coordination service initialization.
-skip_jax_distributed_system: False # If True we will not initialize the jax distributed system.
+skip_jax_distributed_system: false # If true we will not initialize the jax distributed system.
 # Currently the jax distributed is needed on cloud TPUs for async checkpointing.
 # However when run on google internal TPUs the coordination service is started automatically
-# and we should set this to True so we won't try to initialize a second time manually.
+# and we should set this to true so we won't try to initialize a second time manually.
 
 # Learning rate schedule structure depends on lr_schedule_type:
 #
@@ -786,7 +786,7 @@ learning_rate_schedule_steps: -1 # By default the length of the schedule is set 
 max_target_length: 2048 # Maximum sequence length
 max_prefill_predict_length: 64 # Maximum length for the prefill when doing autoregression
 prompt: "I love to" # Prompt for language model sampling.
-load_from_prefill_dir: False # If true, decode.py doesn't "prefill" but just reads from directory
+load_from_prefill_dir: false # If true, decode.py doesn't "prefill" but just reads from directory
 prefill_cache_dir: "" # If set and load_from_prefill_dir, decode.py reads from directory. If set, decode.py writes to directory
 autoregressive_decode_assert: ""
 
@@ -794,17 +794,17 @@ autoregressive_decode_assert: ""
 # e.g. nsys profile -s none --force-overwrite true --capture-range=cudaProfilerApi --capture-range-end=stop {training command}
 profiler: "" # Supported profiler: '', xplane, nsys
 # If set to true, upload all profiler results from all hosts. Otherwise, only upload the profiler result from the first host.
-upload_all_profiler_results: False
+upload_all_profiler_results: false
 # Skip first n steps for profiling, to omit things like compilation and to give
 # the iteration time a chance to stabilize.
 skip_first_n_steps_for_profiler: 1
 # Profile for a small number of steps to avoid a large profile file size.
 profiler_steps: 5
-hide_profiler_step_metric: False
-profile_cleanly: True # If set to true, adds a block_until_ready on train state which aligns the profile for each step.
+hide_profiler_step_metric: false
+profile_cleanly: true # If set to true, adds a block_until_ready on train state which aligns the profile for each step.
 profile_periodically_period: -1 # If set to a positive integer, profile every profile_periodically_period steps.
 # This is useful to debug scenarios where performance is changing.
-enable_tpu_profiling_options: False
+enable_tpu_profiling_options: false
 tpu_num_chips_to_profile_per_task: 1
 tpu_num_sparse_core_tiles_to_trace: 1
 tpu_num_sparse_cores_to_trace: 2
@@ -813,35 +813,35 @@ tpu_num_sparse_cores_to_trace: 2
 # - create a managed ML diagnostics run with all the MaxText configs
 # - upload xplane profiling, if it is enabled.
 # - upload training metrics, at the defined log_period interval.
-managed_mldiagnostics: False # Whether to enable the managed diagnostics
+managed_mldiagnostics: false # Whether to enable the managed diagnostics
 managed_mldiagnostics_run_group: ""  # Optional. Used to group multiple runs.
 
 # Dump HLO and jaxpr options
-dump_hlo: False
+dump_hlo: false
 dump_step: -1 # Dump modules at the given step if set to a positive integer.
 dump_hlo_local_dir: "/tmp/xla_dump/"
-dump_hlo_delete_local_after: True # Cleans local directory after its uploaded
+dump_hlo_delete_local_after: true # Cleans local directory after its uploaded
 dump_hlo_gcs_dir: "" # Defaults to {base_output_directory}/{run_name}/xla_dump
 dump_hlo_local_module_name: "jit_train_step" # Filter saving modules locally by this string. Set to empty string to remove any filter.
 dump_hlo_module_name: "jit_train_step" # Filter uploading modules by this string. Set to empty string to remove any filter.
 dump_hlo_xla_flags: "" # Defaults to "--xla_dump_to={dump_hlo_local_dir} --xla_dump_hlo_module_re={dump_hlo_local_module_name} --xla_dump_large_constants"
-dump_hlo_upload_all: False # If true all hosts dump HLO, false only jax.process_index()==0
+dump_hlo_upload_all: false # If true all hosts dump HLO, false only jax.process_index()==0
 # All hosts should have identical HLO for SPMD programs, however we have encountered some bugs
 # where this is not the case and it is helpful to compare HLO across hosts.
-dump_jaxpr: False
+dump_jaxpr: false
 dump_jaxpr_local_dir: "/tmp/jaxpr_dump/"
-dump_jaxpr_delete_local_after: True
+dump_jaxpr_delete_local_after: true
 dump_jaxpr_gcs_dir: "" # Defaults to {base_output_directory}/{run_name}/jaxpr_dump
 
 # When dropout is false the model is a deterministic function of the
 # data_shuffle_seed and init_weights_seed (i.e. reproducible losses)
-enable_dropout: True
-enable_data_shuffling: True
+enable_dropout: true
+enable_data_shuffling: true
 data_shuffle_seed: 0
 init_weights_seed: 0
 
 # DiLoCo params.
-enable_diloco: False
+enable_diloco: false
 diloco_sync_period: 36
 diloco_outer_lr: 0.3
 diloco_outer_momentum: 0.9
@@ -855,9 +855,9 @@ gradient_accumulation_steps: 1
 
 opt_type: "adamw"  # one of "adamw", "adam_pax", "sgd", or "muon"
 
-# If True, skip the training step when loss or gradient spike is detected
+# If true, skip the training step when loss or gradient spike is detected
 # No updates for both weights and momentums (if applies)
-skip_step_on_spikes: False
+skip_step_on_spikes: false
 # The rolling interval to calculate the mean and standard deviation
 skip_step_interval: 128
 # The scaling factor to determine if a spike occurred
@@ -889,19 +889,19 @@ muon_weight_decay: 0 # Strength of the weight decay regularization. This is mult
 muon_consistent_rms: None # If None, apply width scaling to updates. If float, apply consistent rms scaling (recommend 0.2).
 
 # Stack trace parameters
-collect_stack_trace: False
-stack_trace_to_cloud: False  # Uploads to cloud logging if True, else to the console if False.
+collect_stack_trace: false
+stack_trace_to_cloud: false  # Uploads to cloud logging if true, else to the console if false.
 stack_trace_interval_seconds: 600  # Stack trace collection frequency in seconds.
 
 # Use iota operator in Embed
-use_iota_embed: False
+use_iota_embed: false
 # use positional embedding
-use_untrainable_positional_embedding: False
+use_untrainable_positional_embedding: false
 trainable_position_size: -1  # enable gpt3 position embedding with a positive trainable_position_size
 # RoPE parameters
 rope_type: "default" # one of "default", "llama3.1" or "yarn"
 rope_linear_scaling_factor: 1.0 # linear scaling factor for "default" RoPE (see class `RotaryEmbedding` for more)
-rope_use_scale: True # apply rope scaling for llama3.1 (see class `LLaMARotaryEmbedding` for more)
+rope_use_scale: true # apply rope scaling for llama3.1 (see class `LLaMARotaryEmbedding` for more)
 rope_min_timescale: 1
 rope_max_timescale: 10_000 # Timescale For global Attention
 local_rope_max_timescale: -1 # If positive used for local window Attention, otherwise `rope_max_timescale` is used for both local and global
@@ -916,9 +916,9 @@ rope_factor: 40
 beta_fast: 32
 beta_slow: 1
 mscale: 1.0
-rope_interleave: True # RoPE with sin/cos interleaved vs concatenated
-rope_truncate: True # Floor lower bound and ceil upper bound for correction range
-rope_attention_scaling: False # Scale the rotary embedding output
+rope_interleave: true # RoPE with sin/cos interleaved vs concatenated
+rope_truncate: true # Floor lower bound and ceil upper bound for correction range
+rope_attention_scaling: false # Scale the rotary embedding output
 
 # Ahead of time Compilation (aka AOT)
 # Only set these arguments if you are running train_compile or loading a compiled train step.
@@ -934,29 +934,29 @@ decode_sampling_temperature: 1.
 eval_interval: -1  # the specific number of train step between eval_step
 eval_steps: -1  # run this number of steps for eval, recommend setting this to prevent error due to running out of evel data
 target_eval_loss: 0.  # early stop once reaching target eval_loss
-abort_on_nan_loss: True # Check for NaN and abort if found in training loss
-abort_on_inf_loss: True # Check for Inf and abort if found in training loss
+abort_on_nan_loss: true # Check for NaN and abort if found in training loss
+abort_on_inf_loss: true # Check for Inf and abort if found in training loss
 
 # Goodput parameters
-enable_goodput_recording: False
-monitor_goodput: False
+enable_goodput_recording: false
+monitor_goodput: false
 goodput_upload_interval_seconds: 30
-enable_pathways_goodput: False
-monitor_step_time_deviation: True
+enable_pathways_goodput: false
+monitor_step_time_deviation: true
 step_deviation_interval_seconds: 30
-enable_gcp_goodput_metrics: True
-enable_gcp_step_deviation_metrics: True
+enable_gcp_goodput_metrics: true
+enable_gcp_step_deviation_metrics: true
 
 # GCP workload monitoring
-report_heartbeat_metric_for_gcp_monitoring: False
+report_heartbeat_metric_for_gcp_monitoring: false
 heartbeat_reporting_interval_in_seconds: 5
-report_performance_metric_for_gcp_monitoring: False
+report_performance_metric_for_gcp_monitoring: false
 
-enable_tensorboard: True
+enable_tensorboard: true
 
 # Vertex AI Tensorboard Configurations - https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/use_vertex_ai_tensorboard.md
-# Set to True for GCE, False if running via XPK
-use_vertex_tensorboard: False
+# Set to true for GCE, false if running via XPK
+use_vertex_tensorboard: false
 # Project to create Vertex AI Tensorboard in for GCE, blank if project is set using 'gcloud config set project'
 # Set this to blank if running via XPK
 vertex_tensorboard_project: ""
@@ -964,8 +964,8 @@ vertex_tensorboard_project: ""
 # Vertex AI supported regions: https://cloud.google.com/vertex-ai/docs/general/locations#available-regions
 vertex_tensorboard_region: ""
 
-# If set to True, MaxText will perform extra checks using jax.checkify. Note that this will effect performance.
-max_checkify: False
+# If set to true, MaxText will perform extra checks using jax.checkify. Note that this will effect performance.
+max_checkify: false
 
 # Inference
 inference_microbenchmark_prefill_lengths: "64,128,256,512,1024"
@@ -977,15 +977,15 @@ inference_metadata_file: "" # path to a json file
 inference_server: "MaxtextInterleavedServer"  # inference server to start
 prefill_slice: "v5e-16" # slice to use for prefill in disaggregation mode
 generate_slice: "v5e-16" # slice to use for generatation in disaggregation mode
-inference_benchmark_test: False
-enable_model_warmup: False
-enable_llm_inference_pool: False          # Bool to launch inference server for llm_inference_gateway with their specified APIs
-multi_sampling: False
-return_log_prob: False
+inference_benchmark_test: false
+enable_model_warmup: false
+enable_llm_inference_pool: false          # Bool to launch inference server for llm_inference_gateway with their specified APIs
+multi_sampling: false
+return_log_prob: false
 
 # Stack prefill cache across the layer to reduce the
 # Python layer latency.
-stack_prefill_result_cache: False
+stack_prefill_result_cache: false
 
 # KV Cache layout control
 # Logical layout: 0,1,2,3 ; CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV
@@ -998,42 +998,42 @@ ar_cache_axis_order: "1,2,0,3"
 # Currently only support compute layout: 0,1,2,3 and 0,2,1,3
 compute_axis_order: "0,1,2,3"
 
-reshape_q: False
+reshape_q: false
 
 # Maxengine Metrics
 prometheus_port: 0
 
 # Maxengine server
-enable_jax_profiler: False
+enable_jax_profiler: false
 jax_profiler_port: 9999
 
 # TPU power trace level for xprof. 0:POWER_TRACE_NONE, 1:POWER_TRACE_NORMAL, or 2:POWER_TRACE_SPI
 xprof_tpu_power_trace_level: 0
-xprof_e2e_enable_fw_throttle_event: False
-xprof_e2e_enable_fw_power_level_event: False
-xprof_e2e_enable_fw_thermal_event: False
-profile_power_events: False # Set to True to enable TPU-specific power/thermal profiling events. Defaults to False to avoid breaking GPU xplane tracing.
+xprof_e2e_enable_fw_throttle_event: false
+xprof_e2e_enable_fw_power_level_event: false
+xprof_e2e_enable_fw_thermal_event: false
+profile_power_events: false # Set to true to enable TPU-specific power/thermal profiling events. Defaults to false to avoid breaking GPU xplane tracing.
 
-log_config: True # Prints the config (after defaults have been set by pyconfig logic)
-debug_sharding: False # Prints model weights sharding info
+log_config: true # Prints the config (after defaults have been set by pyconfig logic)
+debug_sharding: false # Prints model weights sharding info
 
 # Checkpoint Structured logging
-enable_checkpoint_cloud_logger: False
+enable_checkpoint_cloud_logger: false
 
 # Single-controller
-enable_single_controller: False
+enable_single_controller: false
 
 custom_mesh: "" # Available options: ['hybrid_ring_64x4', 'hybrid_ring_32x8']
 # Split physical axes for https://jax.readthedocs.io/en/latest/_autosummary/jax.experimental.mesh_utils.create_device_mesh.html
-allow_split_physical_axes: False
+allow_split_physical_axes: false
 # Apply transformations to the mesh to optimize for TPU v6e
-optimize_mesh_for_tpu_v6e: False
+optimize_mesh_for_tpu_v6e: false
 
-shardy: True # Whether to use shardy XLA backend (default in Jax starting 0.7.0), or GSPMD (to be fully deprecated ~2026)
+shardy: true # Whether to use shardy XLA backend (default in Jax starting 0.7.0), or GSPMD (to be fully deprecated ~2026)
 
-remove_size_one_mesh_axis_from_type: True # Whether to remove size one mesh axis from type through jax.config.
+remove_size_one_mesh_axis_from_type: true # Whether to remove size one mesh axis from type through jax.config.
 
-use_ragged_attention: False
+use_ragged_attention: false
 ragged_block_size: 256
 
 ### Splash attention block sizes
@@ -1047,7 +1047,7 @@ sa_block_kv_dkv: 512
 sa_block_kv_dkv_compute: 512
 sa_block_q_dq: 512
 sa_block_kv_dq: 512
-sa_use_fused_bwd_kernel: False
+sa_use_fused_bwd_kernel: false
 sa_q_layout: "HEAD_DIM_MINOR"
 sa_k_layout: "HEAD_DIM_MINOR"
 sa_v_layout: "HEAD_DIM_MINOR"
@@ -1055,9 +1055,9 @@ use_max_logit_estimate: -1 # -1 means no estimate, any > 0 value will be used as
 cost_estimate_flops_fwd: -1 # -1 means using splash default cost estmiation, any >= 0 value will be used as cost estmiation for splash to overlap for communication (forward)
 cost_estimate_flops_bwd: -1 # -1 means using splash default cost estmiation, any >= 0 value will be used as cost estmiation for splash to overlap for communication (backward)
 dq_reduction_steps: 0 #the number of reduction steps. For now, only 3 or all the kv steps are supported.
-use_splash_scheduler: False # to use tokamax splash attention scheduler.
+use_splash_scheduler: false # to use tokamax splash attention scheduler.
 ### Determine if we want to use load balance for context parallelism
-context_parallel_load_balance: True
+context_parallel_load_balance: true
 context_parallel_strategy: "all_gather" # "all_gather" or "ring"
 context_parallel_reorder_strategy: "auto" # "auto", "dual_chunk_swap", or "striped"
 
@@ -1076,21 +1076,21 @@ pagedattn_head_dim_alignment: 128
 
 # Chunked Prefill Parameters
 prefill_chunk_size: 256
-use_chunked_prefill: False
+use_chunked_prefill: false
 
 # Prefix Caching parameters in jetstream
-enable_prefix_caching: False
+enable_prefix_caching: false
 prefix_caching_hbm_byte: 10_000_000_000 # 10 GB
 prefix_caching_dram_byte: 100_000_000_000 # 100 GB
 
 # This is a temporary flag that will be removed soon after the fix lands in TE
-enable_padding_causal_mask: True
+enable_padding_causal_mask: true
 
 # Llama4-specific
 # Whether to apply Query/Key normalization.
 # NOTE: non-Llama4 models use RMSNorm before RoPE
 # whereas Llama4 models use L2Norm after RoPE
-use_qk_norm: False
+use_qk_norm: false
 # Every `X` layers will NOT use RoPE
 nope_layer_interval: -1
 # Every `X` layers is MoE layer
@@ -1098,13 +1098,13 @@ interleave_moe_layer_step: 1
 # dynamically scale the attention temperature for each query token based on sequence length
 # Recommended for long sequences (e.g., >32k tokens) to maintain stable output results
 # See (https://arxiv.org/abs/2501.19399) for more details
-temperature_tuning: False
+temperature_tuning: false
 
 # Multimodal flags
-use_multimodal: False
-use_audio: False
-freeze_vision_encoder_params: True
-freeze_audio_encoder_params: True
+use_multimodal: false
+use_audio: false
+freeze_vision_encoder_params: true
+freeze_audio_encoder_params: true
 dtype_mm: "float32"  # Data type for multimodal model's vision encoder
 remat_policy_for_vit: "minimal"  # Remat policy for multimodal model's vision encoder. Check `remat_policy` for options.
 image_size_for_vit: 896 # Default for Gemma3, and should be overwritten by model's config
@@ -1114,7 +1114,7 @@ audio_path: "" # Local audio path used for decoding, can be multiple paths separ
 image_placeholder: "<|image|>"
 video_placeholder: "<|video|>"
 audio_placeholder: "<|audio|>"
-use_audio_in_video: False
+use_audio_in_video: false
 posemb_type_for_vit: "learn"
 # max_num_images_per_example only applies for training when your image column is a list of images.
 # -1 means no limit, and will pad to the max possible number of images determined by sequence length.
@@ -1155,7 +1155,7 @@ activation_dropout_for_audio: 0.0
 activation_function_for_audio: "gelu"
 num_mel_bins_for_audio: 128
 max_source_positions_for_audio: 1500
-scale_embedding_for_audio: True
+scale_embedding_for_audio: true
 n_window_for_audio: 50
 n_window_infer_for_audio: 800
 conv_chunksize_for_audio: 500
@@ -1174,9 +1174,9 @@ position_id_per_seconds: 25
 subslice_shape: ""
 
 # NNX
-enable_nnx: False
-pure_nnx_decoder: False
-pure_nnx: False
+enable_nnx: false
+pure_nnx_decoder: false
+pure_nnx: false
 
 ################################## Qwen3-Next Specific Configs ##################################
 # Kernel size for the 1D convolution in the Gated Delta Net
@@ -1192,7 +1192,7 @@ gdn_num_value_heads: 32
 # Chunk size for the parallel scan algorithm in the Gated Delta Net.
 gdn_chunk_size: 64
 # Whether to apply L2 normalization to query and key tensors inside the Gated Delta Rule kernel.
-use_qk_norm_in_gdn: True
+use_qk_norm_in_gdn: true
 # The ratio of dimension to apply ROPE on
 partial_rotary_factor: 1.0
 
@@ -1206,11 +1206,11 @@ use_jax_splash: false
 # Path to the HuggingFace-style config directory for the adapter (e.g. src/maxtext/integration/vllm/maxtext_vllm_adapter)
 vllm_hf_config_path: ""
 # A JSON string of overrides to apply to the HuggingFace-style config for the vLLM adapter.
-# This can be used to override specific settings without modifying the original config file. 
+# This can be used to override specific settings without modifying the original config file.
 vllm_hf_overrides: {}
 # JSON string containing additional configuration for the vLLM model (e.g. '{"maxtext_config": {...}}')
 vllm_additional_config: {}
-# When use_jax_splash=True, force the layout of the query tensor to be [..., NUM_HEADS, HEAD_DIM, SEQ_LENGTH]
+# When use_jax_splash=true, force the layout of the query tensor to be [..., NUM_HEADS, HEAD_DIM, SEQ_LENGTH]
 force_q_layout: false
 
 ################################## DeepSeek Manifold-Constrained Hyper Connections (mHC) ##################################
@@ -1221,7 +1221,7 @@ sinkhorn_iterations: 20
 
 ################################## DeepSeek Engram ##################################
 # Indices of transformer layers where Engram are integrated; leave empty [] to disable.
-# Example: [1, 4] attaches to the 2nd and 5th layer. 
+# Example: [1, 4] attaches to the 2nd and 5th layer.
 engram_layers: []
 # The max 'n' in N-gram. Example: n=3 means it covers both 2-grams and 3-grams.
 engram_max_ngram_size: 3

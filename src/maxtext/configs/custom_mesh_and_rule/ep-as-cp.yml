@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# This rule uses data, stage, FSDP, and expert. Expert axis acts as context parallelism in  
+# This rule uses data, stage, FSDP, and expert. Expert axis acts as context parallelism in
 # components except core dMoE part (between EP all2all).
 mesh_axes: ['data', 'stage', 'fsdp', 'expert']
 data_sharding: [['data', 'stage', 'fsdp', 'expert']]

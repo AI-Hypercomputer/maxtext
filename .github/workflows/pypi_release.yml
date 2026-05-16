@@ -42,7 +42,7 @@ jobs:
     needs: [release_approval]
     uses: ./.github/workflows/build_and_test_maxtext.yml
     secrets: inherit
-      
+
   publish_maxtext_package_to_pypi:
     name: Publish MaxText package to PyPI
     needs: [build_and_test_maxtext_package]

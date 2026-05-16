@@ -38,13 +38,13 @@ tokenizer_path: "meta-llama/Llama-3.1-8B"
 tokenizer_type: "huggingface"
 
 max_target_length: 2048
-packing: True
+packing: true
 
 # --- Training Loop ---
 steps: 200000
 checkpoint_period: 2000
 log_period: 10
-save_checkpoint_on_completion: True
+save_checkpoint_on_completion: true
 
 # --- Batch Size Strategy ---
 # Global Batch Size = per_device_batch_size * num_devices * gradient_accumulation_steps
