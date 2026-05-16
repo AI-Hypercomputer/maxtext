@@ -19,6 +19,7 @@ import enum
 import functools
 import math
 import random
+import os
 from typing import Iterable, Optional, Tuple, Union
 
 from aqt.jax.v2 import aqt_tensor as aqt
@@ -47,6 +48,14 @@ import qwix
 from qwix.contrib.sparsity import sparsity_module
 import qwix.pallas as qpl
 import tokamax
+from tokamax import config as tokamax_config
+from tokamax._src.ops.ragged_dot.pallas_mosaic_tpu import PallasMosaicTpuRaggedDot, Config
+from tokamax._src.autotuning.autotuner import AutotuningData
+from tokamax._src.benchmarking import BenchmarkData
+from tokamax._src.autotuning.api import AutotuningResult
+import immutabledict
+from tokamax._src.ops.ragged_dot import base
+import functools
 
 set_xla_metadata = xla_metadata.set_xla_metadata
 
@@ -1136,9 +1145,10 @@ class RoutedMoE(nnx.Module):
       elif self.config.attention == "vllm_rpa":
         return group_sizes
       else:
+        ep = self.get_expert_parallelism_size()
         return tokamax.RaggedDotGroupSizes(
             group_sizes,
-            (inputs.shape[0] // kernel.shape[0],) * kernel.shape[0],
+            (inputs.shape[0] // kernel.shape[0] // ep,) * kernel.shape[0],
         )
 
     def get_quantization_dtypes():
@@ -1177,14 +1187,47 @@ class RoutedMoE(nnx.Module):
               weight_gather_axes=weight_gather_axes,
           )
         else:  # tokamax (unquantized)
-          output = tokamax.ragged_dot(
-              lhs=inputs,
-              rhs=kernel,
-              group_sizes=tokamax_group_sizes,
-              precision=jax.lax.Precision.DEFAULT,
-              preferred_element_type=self.dtype,
-              implementation="mosaic",
-          )
+          if self.config.tokamax_gmm_autotune:
+            # 1. Create configs from flags for backward pass
+            dlhs_config = Config(
+                tile_m=tiling[3],
+                tile_k=tiling[4],
+                tile_n=tiling[5],
+            )
+            drhs_config = Config(
+                tile_m=tiling[6],
+                tile_k=tiling[7],
+                tile_n=tiling[8],
+            )
+
+            # 2. Create custom ops for backward pass
+            dlhs_op = PallasMosaicTpuRaggedDot(config=dlhs_config)
+            drhs_op = PallasMosaicTpuRaggedDot(config=drhs_config)
+
+            # 3. Create custom vjp function
+            custom_vjp = functools.partial(base.vjp, dlhs_ragged_dot=dlhs_op, drhs_ragged_dot=drhs_op)
+
+            # 4. Create forward op with custom vjp and tiling from flags
+            fwd_config = Config(tile_m=tiling[0], tile_k=tiling[1], tile_n=tiling[2])
+            fwd_op = PallasMosaicTpuRaggedDot(config=fwd_config, vjp=custom_vjp)
+
+            output = tokamax.ragged_dot(
+                lhs=inputs,
+                rhs=kernel,
+                group_sizes=tokamax_group_sizes,
+                precision=jax.lax.Precision.DEFAULT,
+                preferred_element_type=self.dtype,
+                implementation=(fwd_op,),  # Pass the configured op directly!
+            )
+          else:
+            output = tokamax.ragged_dot(
+                lhs=inputs,
+                rhs=kernel,
+                group_sizes=tokamax_group_sizes,
+                precision=jax.lax.Precision.DEFAULT,
+                preferred_element_type=self.dtype,
+                implementation="mosaic",
+            )
       elif self.config.megablox:  # Older forked megablox
         output = mblx.gmm(
             lhs=inputs,

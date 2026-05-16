@@ -29,6 +29,8 @@ from maxtext.layers import moe as moe_lib
 from maxtext.layers import quantizations
 import qwix.pallas as qpl
 import tokamax
+from tokamax import config as tokamax_config
+from tokamax._src.ops.ragged_dot.pallas_mosaic_tpu import PallasMosaicTpuRaggedDot, Config
 
 
 @functools.partial(
@@ -962,14 +964,25 @@ def compute(x, w0, w1, wo, group_sizes, weights, *, config, mesh):
           qwix_rule=quantizations.get_fp8_full_qwix_rule_w_sparsity(config)[0],
       )
     else:
-      output = tokamax.ragged_dot(
-          lhs=inputs,
-          rhs=kernel,
-          group_sizes=tokamax.RaggedDotGroupSizes(group_sizes, len(inputs)),
-          precision=jax.lax.Precision.DEFAULT,
-          preferred_element_type=preferred_element_type,
-          implementation="mosaic",
-      )
+      if config.tokamax_gmm_autotune:
+        with tokamax_config.autotuning_cache_miss_fallback("autotune"):
+          output = tokamax.ragged_dot(
+              lhs=inputs,
+              rhs=kernel,
+              group_sizes=tokamax.RaggedDotGroupSizes(group_sizes, len(inputs)),
+              precision=jax.lax.Precision.DEFAULT,
+              preferred_element_type=preferred_element_type,
+              implementation="mosaic",
+          )
+      else:
+        output = tokamax.ragged_dot(
+            lhs=inputs,
+            rhs=kernel,
+            group_sizes=tokamax.RaggedDotGroupSizes(group_sizes, len(inputs)),
+            precision=jax.lax.Precision.DEFAULT,
+            preferred_element_type=preferred_element_type,
+            implementation="mosaic",
+        )
     return output
 
   gmm_fn = functools.partial(gmm, group_sizes=group_sizes, preferred_element_type=config.dtype)
