@@ -1,6 +1,12 @@
 base_config: "base.yml"
 
 use_dpo: true
+dpo:
+  algo: 'dpo'
+  orpo_lambda: 0.1
+  dpo_label_smoothing: 0.0
+  dpo_beta: 0.1
+  max_prompt_length: null
 packing: false
 train_data_columns: ['chosen', 'rejected']
 eval_data_columns: ['chosen', 'rejected']
@@ -24,8 +30,6 @@ hf_eval_split: 'test'
 
 gradient_clipping_threshold: 10.0
 learning_rate: 5.0e-7
-dpo_label_smoothing: 0.0
-dpo_beta: 0.1
 
 enable_goodput_recording: false
 monitor_goodput: false

@@ -680,8 +680,12 @@ global_rampup_samples: 500
 
 # direct preference optimization (DPO)
 use_dpo: False
-dpo_label_smoothing: 0.0
-dpo_beta: 0.1
+dpo:
+  algo: 'dpo'
+  orpo_lambda: 0.1
+  dpo_label_smoothing: 0.0
+  dpo_beta: 0.1
+  max_prompt_length: null
 
 # Supervised Fine-Tuning (SFT)
 use_sft: False
