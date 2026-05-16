@@ -29,7 +29,7 @@ from maxtext.layers.nnx_decoders import NNXDecoderLayer
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils
 
-from tests.utils.test_helpers import get_test_config_path, get_decoupled_parallelism_overrides
+from tests.utils.test_helpers import get_test_config_path
 
 
 TEST_LAYER_NUM = 1
@@ -40,8 +40,6 @@ class MultiTokenPredictionLayerTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
-    # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
-    extra_args = get_decoupled_parallelism_overrides()
     self.cfg = pyconfig.initialize(
         [None, get_test_config_path()],
         run_name="multi_token_prediction_layer_test",
@@ -54,7 +52,6 @@ class MultiTokenPredictionLayerTest(unittest.TestCase):
         head_dim=8,
         max_target_length=128,
         vocab_size=128,
-        **extra_args,
     )
     self.rng = jax.random.PRNGKey(42)  # Base RNG for setup
     self.rngs = nnx.Rngs(params=self.rng, dropout=self.rng)
@@ -203,9 +200,7 @@ class MultiTokenPredictionBlockTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
-    # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
     num_devices = jax.device_count()
-    extra_args = get_decoupled_parallelism_overrides()
     self.cfg = pyconfig.initialize(
         [None, get_test_config_path()],
         run_name="mtp_block_test",
@@ -218,7 +213,6 @@ class MultiTokenPredictionBlockTest(unittest.TestCase):
         head_dim=8,
         max_target_length=128,
         vocab_size=128,
-        **extra_args,
     )
     self.nnx_rngs = nnx.Rngs(params=0)
     self.rng = jax.random.PRNGKey(43)

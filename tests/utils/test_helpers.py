@@ -36,40 +36,6 @@ def get_test_config_path(relative_path: str = "base.yml"):
   return os.path.join(MAXTEXT_CONFIGS_DIR, relative_path)
 
 
-def get_decoupled_parallelism_overrides(
-    *,
-    fsdp_parallelism=None,
-    include_mesh_defaults: bool = False,
-    as_argv: bool = False,
-):
-  """Return decoupled-only overrides for ICI parallelism (kwargs or argv).
-
-  - **kwargs mode** (`as_argv=False`): returns a dict suitable for `pyconfig.initialize(..., **overrides)`.
-  - **argv mode** (`as_argv=True`): returns a list like `["ici_fsdp_parallelism=8"]` to append to argv.
-
-  Args:
-    fsdp_parallelism: If None, uses `jax.device_count()`; otherwise coerces to int.
-    include_mesh_defaults: When True, also sets `mesh_axes=["data"]` and `ici_data_parallelism=-1`.
-    as_argv: When True, return argv strings; otherwise return kwargs dict.
-  """
-  if not is_decoupled():
-    return [] if as_argv else {}
-
-  try:
-    import jax  # pylint: disable=import-outside-toplevel
-
-    overrides = {"ici_fsdp_parallelism": jax.device_count() if fsdp_parallelism is None else int(fsdp_parallelism)}
-    if include_mesh_defaults:
-      overrides.setdefault("mesh_axes", ["data"])
-      overrides.setdefault("ici_data_parallelism", -1)
-
-    if as_argv:
-      return [f"{k}={v}" for k, v in overrides.items()]
-    return overrides
-  except (ImportError, ValueError, TypeError):  # pragma: no cover - defensive
-    return [] if as_argv else {}
-
-
 def is_rocm_backend() -> bool:
   """Best-effort ROCm detection without internal JAX APIs."""
   try:
@@ -116,15 +82,16 @@ def get_test_base_output_directory(cloud_path=None):
   Returns:
     Local test logs directory when decoupled, otherwise returns
     the specified cloud path or default GCS runner-maxtext-logs bucket.
+    The local path is absolute so Orbax (which rejects relative
+    checkpoint paths) can write checkpoints into it.
   """
   if is_decoupled():
-    return os.path.join("maxtext_local_output", "gcloud_decoupled_test_logs")
+    return os.path.abspath(os.path.join("maxtext_local_output", "gcloud_decoupled_test_logs"))
   return cloud_path or "gs://runner-maxtext-logs"
 
 
 __all__ = [
     "get_test_base_output_directory",
-    "get_decoupled_parallelism_overrides",
     "is_rocm_backend",
     "get_test_config_path",
     "get_post_train_test_config_path",

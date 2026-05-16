@@ -24,7 +24,7 @@ from maxtext.common.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODE
 from maxtext.layers import quantizations
 from maxtext.models import models
 from maxtext.utils import maxtext_utils
-from tests.utils.test_helpers import get_test_config_path, get_decoupled_parallelism_overrides
+from tests.utils.test_helpers import get_test_config_path
 import numpy as np
 import pytest
 
@@ -42,8 +42,6 @@ class TestModel(unittest.TestCase):
 
   def init_pyconfig(self, **kwargs):
     """Init pyconfig."""
-    # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
-    extra_args = get_decoupled_parallelism_overrides()
     config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         per_device_batch_size=1.0,
@@ -57,7 +55,6 @@ class TestModel(unittest.TestCase):
         base_num_kv_heads=2,
         max_prefill_predict_length=4,
         **kwargs,
-        **extra_args,
     )
     return config
 

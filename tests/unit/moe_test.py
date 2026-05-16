@@ -30,7 +30,7 @@ from maxtext.layers import nnx_wrappers
 from maxtext.layers.initializers import NdInitializer, nd_dense_init, variable_to_logically_partitioned
 from maxtext.layers.quantizations import Fp8Quantization
 from maxtext.utils import maxtext_utils
-from tests.utils.test_helpers import get_test_config_path, get_decoupled_parallelism_overrides
+from tests.utils.test_helpers import get_test_config_path
 import pytest
 
 
@@ -38,7 +38,6 @@ class TokenDroppingTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
-    extra_args = get_decoupled_parallelism_overrides()
     self.cfg = pyconfig.initialize(
         [None, get_test_config_path()],
         run_name="token_dropping_test",
@@ -50,7 +49,6 @@ class TokenDroppingTest(unittest.TestCase):
         max_target_length=80,
         per_device_batch_size=1,
         capacity_factor=2,
-        **extra_args,
     )
     self.rngs = nnx.Rngs(params=0)
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
@@ -203,8 +201,6 @@ class DeepSeekRoutingTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
-    # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
-    extra_args = get_decoupled_parallelism_overrides()
     self.cfg = pyconfig.initialize(
         [None, get_test_config_path()],
         run_name="deepseek_routing_test",
@@ -221,7 +217,6 @@ class DeepSeekRoutingTest(unittest.TestCase):
         sparse_matmul=True,
         base_moe_mlp_dim=1024,
         base_mlp_dim=1024,
-        **extra_args,
     )
     self.rngs = nnx.Rngs(params=0)
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
@@ -1285,7 +1280,6 @@ class FusedMoeTPUTest(unittest.TestCase):
     self.rng = jax.random.PRNGKey(42)
 
     # Dense reference config (no vllm, einsum-based)
-    extra_args = get_decoupled_parallelism_overrides()
     self.dense_cfg = pyconfig.initialize(
         [None, get_test_config_path()],
         run_name="fused_moe_dense_ref",
@@ -1298,7 +1292,6 @@ class FusedMoeTPUTest(unittest.TestCase):
         log_config=False,
         max_target_length=self._S,
         per_device_batch_size=self._B,
-        **extra_args,
     )
     dense_devices = maxtext_utils.create_device_mesh(self.dense_cfg)
     self.dense_mesh = Mesh(dense_devices, self.dense_cfg.mesh_axes)
@@ -1342,7 +1335,6 @@ class FusedMoeTPUTest(unittest.TestCase):
 
   def test_fused_vs_sparse_softmax(self):
     """fused_moe_matmul agrees with sparse_matmul (Megablox) under softmax routing."""
-    extra_args = get_decoupled_parallelism_overrides()
     sparse_cfg = pyconfig.initialize(
         [None, get_test_config_path()],
         run_name="fused_moe_sparse_ref",
@@ -1355,7 +1347,6 @@ class FusedMoeTPUTest(unittest.TestCase):
         log_config=False,
         max_target_length=self._S,
         per_device_batch_size=self._B,
-        **extra_args,
     )
     sparse_devices = maxtext_utils.create_device_mesh(sparse_cfg)
     sparse_mesh = Mesh(sparse_devices, sparse_cfg.mesh_axes)
@@ -1388,7 +1379,6 @@ class FusedMoeTPUTest(unittest.TestCase):
 
   def test_fused_vs_dense_renormalize(self):
     """fused_moe_matmul agrees with dense_matmul when norm_topk_prob=True."""
-    extra_args = get_decoupled_parallelism_overrides()
     dense_renorm_cfg = pyconfig.initialize(
         [None, get_test_config_path()],
         run_name="fused_moe_dense_renorm",
@@ -1402,7 +1392,6 @@ class FusedMoeTPUTest(unittest.TestCase):
         norm_topk_prob=True,
         max_target_length=self._S,
         per_device_batch_size=self._B,
-        **extra_args,
     )
     dense_renorm_devices = maxtext_utils.create_device_mesh(dense_renorm_cfg)
     dense_renorm_mesh = Mesh(dense_renorm_devices, dense_renorm_cfg.mesh_axes)
@@ -1472,7 +1461,6 @@ class FusedMoeTPUTest(unittest.TestCase):
 
   def test_prefused_vs_sparse_softmax(self):
     """prefuse_moe_weights=True agrees with sparse_matmul (Megablox) under softmax routing."""
-    extra_args = get_decoupled_parallelism_overrides()
     sparse_cfg = pyconfig.initialize(
         [None, get_test_config_path()],
         run_name="fused_moe_sparse_ref2",
@@ -1484,7 +1472,6 @@ class FusedMoeTPUTest(unittest.TestCase):
         ici_expert_parallelism=jax.device_count(),
         max_target_length=self._S,
         per_device_batch_size=self._B,
-        **extra_args,
     )
     sparse_devices = maxtext_utils.create_device_mesh(sparse_cfg)
     sparse_mesh = Mesh(sparse_devices, sparse_cfg.mesh_axes)

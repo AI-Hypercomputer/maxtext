@@ -33,7 +33,7 @@ from maxtext.kernels.megablox import gmm
 from maxtext.layers import nnx_wrappers, quantizations
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
-from tests.utils.test_helpers import get_test_config_path, get_decoupled_parallelism_overrides
+from tests.utils.test_helpers import get_test_config_path
 import numpy as np
 import pytest
 
@@ -336,28 +336,22 @@ class QuantTest(unittest.TestCase):
 
   def init_pyconfig(self, **kwargs):
     """Initialize MaxText pyconfig."""
-    # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
-    extra_args = get_decoupled_parallelism_overrides()
-    init_kwargs = (
-        {
-            "run_name": "test",
-            "dataset_type": "synthetic",
-            "enable_checkpointing": False,
-            "enable_goodput_recording": False,
-            "steps": 1,
-            "per_device_batch_size": 1,
-            "use_qwix_quantization": True,
-            "skip_jax_distributed_system": True,
-            "base_emb_dim": 16,
-            "base_num_query_heads": 1,
-            "base_num_kv_heads": 1,
-            "base_mlp_dim": 16,
-            "base_num_decoder_layers": 1,
-            "max_target_length": 16,
-        }
-        | kwargs
-        | extra_args
-    )
+    init_kwargs = {
+        "run_name": "test",
+        "dataset_type": "synthetic",
+        "enable_checkpointing": False,
+        "enable_goodput_recording": False,
+        "steps": 1,
+        "per_device_batch_size": 1,
+        "use_qwix_quantization": True,
+        "skip_jax_distributed_system": True,
+        "base_emb_dim": 16,
+        "base_num_query_heads": 1,
+        "base_num_kv_heads": 1,
+        "base_mlp_dim": 16,
+        "base_num_decoder_layers": 1,
+        "max_target_length": 16,
+    } | kwargs
     config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         **init_kwargs,

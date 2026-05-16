@@ -269,12 +269,12 @@ def make_tfds_eval_iterator(
   if not config.colocated_python_data_input:
     eval_ds = get_datasets(
         dataset_name=config.eval_dataset_name,
+        dataset_path=config.dataset_path,
         data_split=config.eval_split,
         shuffle_files=False,
         shuffle_seed=config.data_shuffle_seed,
         dataloading_host_index=process_indices_eval.index(jax.process_index()),
         dataloading_host_count=len(process_indices_eval),
-        dataset_path=config.dataset_path,
     )
     eval_dataloader = preprocessing_pipeline(
         dataset=eval_ds,
@@ -299,6 +299,7 @@ def make_tfds_eval_iterator(
     get_ds_fn = functools.partial(
         get_datasets,
         dataset_name=config.eval_dataset_name,
+        dataset_path=config.dataset_path,
         data_split=config.eval_split,
         shuffle_files=False,
         shuffle_seed=config.data_shuffle_seed,

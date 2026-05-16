@@ -34,11 +34,10 @@ import pytest
 
 from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.trainers.pre_train.train import main as train_main
-from maxtext.utils.globals import MAXTEXT_PKG_DIR
+from maxtext.utils.globals import MAXTEXT_TEST_ASSETS_ROOT
 from tests.utils.test_helpers import (
     get_test_config_path,
     get_test_base_output_directory,
-    get_decoupled_parallelism_overrides,
 )
 
 
@@ -73,10 +72,6 @@ def get_checkpointing_command(run_date, hardware, steps, metrics_file, attention
         "checkpoint_storage_use_zarr3=False",
     ]
 
-  extra_parallelism = []
-  if is_decoupled():  # Match device topology in decoupled/local mode
-    extra_parallelism.extend(get_decoupled_parallelism_overrides(as_argv=True))
-
   return (
       [
           None,
@@ -87,6 +82,7 @@ def get_checkpointing_command(run_date, hardware, steps, metrics_file, attention
           "max_target_length=128",
           "per_device_batch_size=1",
           f"metrics_file={metrics_file}",
+          "enable_checkpointing=True",
           "checkpoint_period=3",
           f"base_output_directory={base_output_directory}",
           f"dataset_path={dataset_path}",
@@ -96,7 +92,6 @@ def get_checkpointing_command(run_date, hardware, steps, metrics_file, attention
       ]
       + model_params
       + pathways_command
-      + extra_parallelism
   )
 
 
@@ -135,7 +130,7 @@ def run_checkpointing(hardware, attention_type):
   # Determine dataset path/pattern depending on decoupled mode.
   gcsfuse_pattern = "/tmp/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record*"
   local_decoupled_root = os.path.join(
-      MAXTEXT_PKG_DIR, "..", "tests", "assets", "local_datasets", "c4_en_dataset_minimal", "c4", "en", "3.0.1"
+      MAXTEXT_TEST_ASSETS_ROOT, "local_datasets", "c4_en_dataset_minimal", "c4", "en", "3.0.1"
   )
   local_pattern = os.path.join(local_decoupled_root, "c4-train.array_record*")
   selected_pattern = gcsfuse_pattern
@@ -145,7 +140,7 @@ def run_checkpointing(hardware, attention_type):
     # Prefer local minimal dataset if gcsfuse data absent
     if not glob.glob(gcsfuse_pattern) and glob.glob(local_pattern):
       selected_pattern = local_pattern
-      dataset_path = os.path.join(MAXTEXT_PKG_DIR, "..", "tests", "assets", "local_datasets")
+      dataset_path = os.path.join(MAXTEXT_TEST_ASSETS_ROOT, "local_datasets")
     elif not glob.glob(gcsfuse_pattern) and not glob.glob(local_pattern):
       pytest.skip("No grain ArrayRecord shards found for checkpointing test in decoupled mode.")
 
