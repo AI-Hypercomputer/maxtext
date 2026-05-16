@@ -767,8 +767,12 @@ def train_loop(config, recorder, state=None):
   return state
 
 
-def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]:
-  """Initialization of hyperparameters and utilities"""
+def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any, Any]:
+  """Initialization of hyperparameters and utilities.
+
+  Returns ``vertex_tensorboard_manager`` so the caller can keep it alive for
+  the full training lifetime (its uploader thread is stopped on GC).
+  """
   pathwaysutils.initialize()
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   # TF allocates extraneous GPU memory when using TFDS data
@@ -802,7 +806,7 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]
       )
   )
   diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
-  return config, recorder, diagnostic_config
+  return config, recorder, diagnostic_config, vertex_tensorboard_manager
 
 
 def run(config, recorder, diagnostic_config):
@@ -840,7 +844,8 @@ def get_train_func(config, recorder, diagnostic_config, argv):
 
     def elastic_train_wrapper(argv: Sequence[str]) -> None:
       """Wrapper for elastic training initializes variables and runs the train loop."""
-      elastic_config, elastic_recorder, elastic_diagnostic_config = initialize(argv)
+      # Hold the manager so its uploader thread is stopped on scope exit.
+      elastic_config, elastic_recorder, elastic_diagnostic_config, unused_vertex_tensorboard_manager = initialize(argv)
       run(
           elastic_config,
           elastic_recorder,
@@ -861,7 +866,8 @@ def get_train_func(config, recorder, diagnostic_config, argv):
 
 
 def main(argv: Sequence[str]) -> None:
-  config, recorder, diagnostic_config = initialize(argv)
+  # Hold the manager so its uploader thread is stopped on scope exit.
+  config, recorder, diagnostic_config, unused_vertex_tensorboard_manager = initialize(argv)
   record_goodput(recorder, RECORD_JOB_START_TIME)
   train_func = get_train_func(config, recorder, diagnostic_config, argv)
   with maybe_monitor_goodput(config):
