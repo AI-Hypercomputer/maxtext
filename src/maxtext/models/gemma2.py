@@ -235,6 +235,19 @@ class Gemma2DecoderLayer(nnx.Module):
     lnx = self.pre_self_attention_norm_local(inputs)
     lnx = nn.with_logical_constraint(lnx, self.activation_axis_names)
 
+    local_kv_cache = None
+    global_kv_cache = None
+    if isinstance(kv_cache, (list, tuple)):
+      if len(kv_cache) == 2:
+        local_kv_cache = kv_cache[0]
+        global_kv_cache = kv_cache[1]
+      else:
+        local_kv_cache = kv_cache[0]
+        global_kv_cache = kv_cache[0]
+    else:
+      local_kv_cache = kv_cache
+      global_kv_cache = kv_cache
+    
     attention_lnx, kv_cache = self.self_attention_local(
         lnx,
         lnx,
@@ -282,6 +295,8 @@ class Gemma2DecoderLayer(nnx.Module):
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
         model_mode=model_mode,
+        kv_cache=global_kv_cache,
+        attention_metadata=attention_metadata,
     )
     if self.config.use_post_attn_norm:
       attention_lnx = self.post_self_attention_norm_global(attention_lnx)
@@ -314,6 +329,11 @@ class Gemma2DecoderLayer(nnx.Module):
           "activation_fraction_zero",
           jnp.sum(layer_output == 0) / jnp.size(layer_output),
       )
+
+    if isinstance(kv_cache, (list, tuple)) and len(kv_cache) == 2:
+      returned_cache = [kv_cache_local, kv_cache_global]
+    else:
+      returned_cache = kv_cache_local
 
     if self.config.scan_layers:
       return layer_output, None
