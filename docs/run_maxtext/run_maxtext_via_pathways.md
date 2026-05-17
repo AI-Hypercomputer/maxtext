@@ -31,7 +31,7 @@ We will cover two primary modes of operation:
 
 Before you can run a MaxText workload, you must complete the following setup steps.
 
-1. **Install XPK and its dependencies**. Ensure that the `xpk` command-line tool is installed.
+1. **Install XPK and its dependencies**. Ensure that the `xpk` command-line tool is installed. For details on installing and configuring XPK with MaxText, see [Running MaxText with XPK](run_maxtext_via_xpk.md).
 
 2. **Create a GKE cluster** configured for Pathways.
 
@@ -78,6 +78,10 @@ export BASE_OUTPUT_DIRECTORY=<gcs bucket path> # e.g., gs://my-bucket/maxtext-ru
 # The Docker image you pushed in the prerequisite step
 export CLOUD_IMAGE_NAME=<image name>
 export DOCKER_IMAGE="gcr.io/${PROJECT_ID?}/${CLOUD_IMAGE_NAME?}"
+```
+
+```{note}
+If you installed `xpk` inside a Python virtual environment (`venv`), make sure to reactivate your virtual environment (e.g., `source <VENV_NAME>/bin/activate`) in any new terminal sessions before running `xpk` commands. Otherwise, you will encounter a `Command xpk not found` error.
 ```
 
 ## 3. Running a batch workload
