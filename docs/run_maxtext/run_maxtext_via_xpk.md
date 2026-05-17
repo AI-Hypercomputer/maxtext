@@ -161,6 +161,10 @@ The examples below run on a single TPU slice (`--num-slices=1`) or a small numbe
 
 For instance, to run a job across **four TPU slices**, you would change `export NUM_SLICES=1` to `export NUM_SLICES=4`. This tells XPK to allocate four `v5litepod-256` slices and orchestrate the training job across all of them as a single workload. Similarly, for GPUs, you would increase the value.
 
+```{note}
+If you installed `xpk` inside a Python virtual environment (`venv`), make sure to reactivate your virtual environment (e.g., `source <VENV_NAME>/bin/activate`) in any new terminal sessions before running `xpk` commands. Otherwise, you will encounter a `Command xpk not found` error.
+```
+
 3. **Create the workload (run the job)**
    - **On your TPU cluster:**
 
