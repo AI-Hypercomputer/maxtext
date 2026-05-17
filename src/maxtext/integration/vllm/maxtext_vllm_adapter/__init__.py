@@ -30,4 +30,6 @@ def register():
   """
   logger.info("Registering MaxTextForCausalLM model with tpu_inference and vllm.")
   register_model("MaxTextForCausalLM", MaxTextForCausalLM)
-  logger.info("Successfully registered MaxTextForCausalLM model.")
+  register_model("GemmaForCausalLM", MaxTextForCausalLM)
+  register_model("Gemma2ForCausalLM", MaxTextForCausalLM)
+  logger.info("Successfully registered MaxTextForCausalLM, Gemma2ForCausalLM, and GemmaForCausalLM model.")
