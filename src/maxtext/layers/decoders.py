@@ -436,7 +436,7 @@ class Decoder(nn.Module):
         )
       else:
         assert cfg.remat_policy == "full", "Remat policy needs to be on list of remat policies"
-        policy = None
+        policy = jax.checkpoint_policies.nothing_saveable
     return policy
 
   def get_decoder_layers(self):
