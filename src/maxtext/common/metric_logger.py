@@ -180,9 +180,10 @@ class MetricLogger:
             f"perplexity: {perplexity:.3f}",
         ]
     )
-    if self.config.use_dpo:
-      dpo_loss = scalars.get("learning/dpo_loss", 0.0)
-      log_parts.append(f"dpo_loss: {dpo_loss:.3f}")
+    if "learning/dpo_loss" in scalars:
+      log_parts.append(f"dpo_loss: {scalars['learning/dpo_loss']:.3f}")
+    if "learning/reward_accuracy" in scalars:
+      log_parts.append(f"reward_accuracy: {scalars['learning/reward_accuracy']:.3f}")
 
     if self.config.num_experts > 1:
       moe_lb_loss = scalars.get("learning/moe_lb_loss", 0.0)
@@ -295,12 +296,12 @@ class MetricLogger:
 
   def write_setup_info_to_tensorboard(self, params):
     """Writes setup information like train config params, num model params, and XLA flags to TensorBoard."""
+    if not self.config.enable_tensorboard:
+      return
     num_model_parameters = max_utils.calculate_num_params_from_pytree(params)
     self.metadata[MetadataKey.PER_DEVICE_TFLOPS], _, _ = maxtext_utils.calculate_tflops_training_per_device(self.config)
     self.metadata[MetadataKey.PER_DEVICE_TOKENS] = maxtext_utils.calculate_tokens_training_per_device(self.config)
     max_logging.log(f"number parameters: {num_model_parameters/1e9:.3f} billion")
-    if not self.config.enable_tensorboard:
-      return
     max_utils.add_text_to_summary_writer("num_model_parameters", str(num_model_parameters), self.writer)
     max_utils.add_text_to_summary_writer("libtpu_init_args", os.getenv("LIBTPU_INIT_ARGS", ""), self.writer)
     maxtext_utils.add_config_to_summary_writer(self.config, self.writer)
@@ -374,9 +375,9 @@ class MetricLogger:
           metrics["scalar"].get("evaluation/mtp_acceptance_rate_percent", 0.0)
       )
       self.cumulative_eval_metrics["scalar"]["eval/z_loss"] += float(metrics["scalar"].get("evaluation/z_loss", 0.0))
-      if self.config.use_dpo:
+      if "evaluation/dpo_reward_accuracy" in metrics["scalar"]:
         self.cumulative_eval_metrics["scalar"]["eval/dpo_reward_accuracy"] += float(
-            metrics["scalar"].get("evaluation/dpo_reward_accuracy", 0.0)
+            metrics["scalar"]["evaluation/dpo_reward_accuracy"]
         )
 
     if eval_step_count:
@@ -400,10 +401,8 @@ class MetricLogger:
       self.cumulative_eval_metrics["scalar"]["eval/avg_z_loss"] = (
           self.cumulative_eval_metrics["scalar"]["eval/z_loss"] / eval_step_count
       )
-      if self.config.use_dpo:
-        self.cumulative_eval_metrics["scalar"]["eval/dpo_reward_accuracy"] = (
-            self.cumulative_eval_metrics["scalar"]["eval/dpo_reward_accuracy"] / eval_step_count
-        )
+      if "eval/dpo_reward_accuracy" in self.cumulative_eval_metrics["scalar"]:
+        self.cumulative_eval_metrics["scalar"]["eval/dpo_reward_accuracy"] /= eval_step_count
 
       self.write_metrics(self.cumulative_eval_metrics, step, is_training=False)
 
