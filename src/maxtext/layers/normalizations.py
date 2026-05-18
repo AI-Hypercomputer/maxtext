@@ -240,3 +240,62 @@ Qwen3NextRMSNormLinen = nnx_wrappers.to_linen_class(
     scale_init=linen_initializers.zeros,
     scale_offset=1.0,
 )
+
+
+class DeepSeekV4RMSNorm(nnx.Module):
+  """RMS normalization for DeepSeek-V4 (equivalent to T5LayerNorm)."""
+
+  def __init__(
+      self,
+      hidden_size: int,
+      eps: float = 1e-6,
+      dtype: Any = jnp.float32,
+      weight_dtype: Any = jnp.float32,
+  ):
+    self.hidden_size = hidden_size
+    self.eps = eps
+    self.dtype = dtype
+    self.weight_dtype = weight_dtype
+
+    # Initialize learnable scale weight to ones matching T5LayerNorm behavior
+    self.weight = nnx.Param(jnp.ones((hidden_size,), dtype=weight_dtype))
+
+  def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+    # [B, S, D] where D = hidden_size
+    # Convert inputs to float32 for numerical stability during variance pooling
+    x_f32 = jnp.asarray(x, jnp.float32)  # [B, S, D] in float32
+
+    # Calculate variance across features axis
+    variance = jnp.mean(lax.square(x_f32), axis=-1, keepdims=True)  # [B, S, 1]
+
+    # Apply reciprocal square root with epsilon offset
+    normalized = x_f32 * lax.rsqrt(variance + self.eps)  # [B, S, D]
+
+    # Cast back to active precision and apply scaling weight
+    y = jnp.asarray(normalized, self.dtype)  # [B, S, D]
+    weight = jnp.asarray(self.weight.get_value(), self.dtype)  # [D]
+    return y * weight  # [B, S, D]
+
+
+class DeepSeekV4UnweightedRMSNorm(nnx.Module):
+  """Unweighted RMS normalization for DeepSeek-V4."""
+
+  def __init__(
+      self,
+      eps: float = 1e-6,
+      dtype: Any = jnp.float32,
+  ):
+    self.eps = eps
+    self.dtype = dtype
+
+  def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+    # [..., D] where D is feature dimension
+    # Convert inputs to float32 for numerical stability during variance pooling
+    x_f32 = jnp.asarray(x, jnp.float32)  # [..., D] in float32
+
+    # Calculate variance across features axis
+    variance = jnp.mean(lax.square(x_f32), axis=-1, keepdims=True)  # [..., 1]
+
+    # Apply reciprocal square root and cast back to active precision
+    normalized = x_f32 * lax.rsqrt(variance + self.eps)  # [..., D]
+    return jnp.asarray(normalized, self.dtype)  # [..., D]

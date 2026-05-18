@@ -16,6 +16,7 @@
 
 import dataclasses
 import math
+from typing import Any
 
 import jax
 from jax import lax
@@ -1800,3 +1801,115 @@ def qwen3_omni_mrope_embedding_as_linen(
       metadata_fn=variable_to_logically_partitioned,
       name=name,
   )
+
+
+class DeepSeekV4RotaryEmbedding(nnx.Module):
+  """DeepSeek-V4 partial rotary embedding with interleaved frequencies.
+
+  DeepSeek-V4 uses an interleaved positional encoding where consecutive channels
+  are paired together. Unlike standard rotary models that split dimensions globally
+  into first and second halves, this implementation pairs each even channel 2i
+  with the corresponding odd channel 2i + 1.
+
+  This results in two specific mathematical properties:
+  1. Inverse frequencies are computed for (dim // 2) unique theta angles.
+  2. Sinusoidal components are expanded consecutively (e.g., [f0, f0, f1, f1])
+     prior to application.
+  """
+
+  def __init__(
+      self,
+      head_dim: int,
+      partial_rotary_factor: float = 64.0 / 512.0,
+      rope_theta: float = 10000.0,
+      dtype: Any = jnp.float32,
+  ):
+    self.head_dim = head_dim
+    self.partial_rotary_factor = partial_rotary_factor
+    self.rope_theta = rope_theta
+    self.dtype = dtype
+
+    # Compute the partial rotary dimension (rope_head_dim)
+    # e.g., 512 * (64 / 512) = 64 channels
+    self.dim = int(head_dim * partial_rotary_factor)
+
+    # Compute base inverse frequencies for half of self.dim (dim // 2 unique theta angles).
+    # Adjacent channels share the same base frequency, matching the reference sequence.
+    half_dim = self.dim // 2
+    fraction = 2 * jnp.arange(0, half_dim, dtype=jnp.float32) / self.dim
+    self.inv_freq = 1.0 / (self.rope_theta**fraction)
+
+  def __call__(self, x: jnp.ndarray, position_ids: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
+    # position_ids: [B, S]
+    # Expand inverse frequencies for broadcasting: [1, 1, dim/2]
+    inv_freq_expanded = self.inv_freq[jnp.newaxis, jnp.newaxis, :]
+
+    # Expand position IDs: [B, S, 1]
+    position_ids_expanded = position_ids[:, :, jnp.newaxis].astype(jnp.float32)
+
+    # Compute outer product of positions and frequencies: [B, S, dim/2]
+    freqs = position_ids_expanded * inv_freq_expanded
+
+    cos = jnp.cos(freqs).astype(x.dtype)  # [B, S, dim/2]
+    sin = jnp.sin(freqs).astype(x.dtype)  # [B, S, dim/2]
+
+    return cos, sin
+
+
+def _rotate_half(x: jax.Array) -> jax.Array:
+  """Performs consecutive half-rotation to match DeepSeek-V4 interleaved layout.
+
+  Pairs adjacent elements: [x0, x1, x2, x3] -> [-x1, x0, -x3, x2].
+
+  Operations:
+  1. Slice even indices: x1 = x[..., 0::2]
+  2. Slice odd indices: x2 = x[..., 1::2]
+  3. Stack (-x2, x1) along a new trailing dimension: [..., D/2, 2]
+  4. Reshape back to the original dimension: [..., D]
+  """
+  x1 = x[..., 0::2]  # [B, S, H, D_rope/2]
+  x2 = x[..., 1::2]  # [B, S, H, D_rope/2]
+
+  # Interleave consecutive components: [-x2_0, x1_0, -x2_1, x1_1, ...]
+  stacked = jnp.stack((-x2, x1), axis=-1)  # [B, S, H, D_rope/2, 2]
+  return stacked.reshape(x.shape)  # [B, S, H, D_rope]
+
+
+def apply_rotary_pos_emb(
+    x: jax.Array,
+    cos: jax.Array,
+    sin: jax.Array,
+    unsqueeze_dim: int = 2,
+) -> jax.Array:
+  """Applies DeepSeek-V4 interleaved RoPE to the trailing rotary slice of x.
+
+  1. Duplicates inverse frequencies consecutively using jnp.repeat along the
+     last dimension to match the full rotary dimension size.
+  2. Extracts the trailing 'rope_dim' channels of x to apply rotation, leaving
+     the leading 'nope' channels unmodified.
+  3. Computes the rotation using float32 precision for numerical stability,
+     casting the final rotated tensor back to the input data type.
+  """
+  # cos/sin shape: [B, S, D_rope/2]
+  # Duplicate frequencies consecutively to build full D_rope dimension
+  cos = jnp.repeat(cos, 2, axis=-1)  # [B, S, D_rope]
+  sin = jnp.repeat(sin, 2, axis=-1)  # [B, S, D_rope]
+
+  # Expand dimensions for head broadcasting: [B, S, 1, D_rope]
+  cos = jnp.expand_dims(cos, axis=unsqueeze_dim)
+  sin = jnp.expand_dims(sin, axis=unsqueeze_dim)
+
+  rope_dim = cos.shape[-1]
+
+  # Separate features into unrotated (nope) and rotated (rope) slices
+  # x: [B, S, H, D] where D is the head dimension
+  nope = x[..., :-rope_dim]  # [B, S, H, D - D_rope]
+  rope = x[..., -rope_dim:]  # [B, S, H, D_rope]
+
+  # Cast to float32, compute rotation, and cast back to original data type
+  rope_f32 = rope.astype(jnp.float32)
+  rotated = (rope_f32 * cos) + (_rotate_half(rope_f32) * sin)
+  rotated = rotated.astype(x.dtype)
+
+  # Concatenate unrotated and rotated channels
+  return jnp.concatenate([nope, rotated], axis=-1)  # [B, S, H, D]

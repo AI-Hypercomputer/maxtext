@@ -567,3 +567,66 @@ def mlp_block(
       abstract_init=False,
   )
   return module
+
+
+class DeepSeekGroupedLinear(nnx.Module):
+  """Block-diagonal grouped linear projection layer.
+
+  This layer segments the trailing dimension of the input tensor into a specified
+  number of groups, and projects each group independently using a distinct weight
+  matrix block. It minimizes parameter counts and compute overhead in the
+  attention output projection.
+  """
+
+  def __init__(
+      self,
+      in_features_per_group: int,
+      out_features: int,
+      n_groups: int,
+      weight_dtype: DType = jnp.float32,
+      dtype: DType = jnp.float32,
+      kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal"),
+      *,
+      rngs: nnx.Rngs,
+  ):
+    self.in_features_per_group = in_features_per_group
+    self.out_features = out_features
+    self.n_groups = n_groups
+    self.weight_dtype = weight_dtype
+    self.dtype = dtype
+
+    # Validate divisibility of target output features by group count
+    if out_features % n_groups != 0:
+      raise ValueError(f"Output features ({out_features}) must be divisible by n_groups ({n_groups}).")
+    self.out_features_per_group = out_features // n_groups
+
+    # Grouped block-diagonal projection kernel parameters
+    # Kernels are stored as a 3D tensor: [n_groups, in_features_per_group, out_features_per_group]
+    kernel_shape = (n_groups, in_features_per_group, self.out_features_per_group)
+    self.weight = nnx.Param(
+        kernel_init(
+            rngs.params(),
+            kernel_shape,
+            self.weight_dtype,
+            in_axis=1,
+            out_axis=2,
+        )
+    )
+
+  def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+    """Projects segmented groups from the input tensor using block weight matrices.
+
+    Args:
+      x: Input tensor of shape [..., n_groups, in_features_per_group]
+
+    Returns:
+      Projected tensor of shape [..., n_groups, out_features_per_group]
+    """
+    x = jnp.asarray(x, self.dtype)
+    weight = jnp.asarray(self.weight[...], self.dtype)
+
+    # Execute parallel group projection via optimized einsum broadcasting.
+    # x: [..., g, i]
+    # weight: [g, i, o]
+    # output: [..., g, o]
+    return jnp.einsum("...gi,gio->...go", x, weight)
