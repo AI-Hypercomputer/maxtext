@@ -1,0 +1,110 @@
+name: MaxText E2E Airflow Tests
+
+on:
+  workflow_call:
+    inputs:
+      dag_id:
+        description: 'The ID of the Airflow DAG to trigger for E2E tests'
+        required: true
+        type: string
+      candidate_image:
+        description: 'The Docker image URI of the release candidate to test'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  e2e_airflow_tests:
+    name: E2E Airflow Tests - ${{ inputs.dag_id }}
+    runs-on: linux-x86-n2-16-buildkit
+    container: google/cloud-sdk:524.0.0
+    steps:
+      - name: Get Airflow URI
+        id: info
+        run: |
+          AIRFLOW_URI=$(gcloud composer environments describe ml-automation-solutions \
+            --location us-central1 \
+            --project cloud-ml-auto-solutions \
+            --format "value(config.airflowUri)")
+          echo "airflow_uri=${AIRFLOW_URI}" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger DAG
+        id: trigger
+        run: |
+          IAP_TOKEN=$(gcloud auth print-access-token)
+
+          CANDIDATE_IMAGE="${{ inputs.candidate_image }}"
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+            "${{ steps.info.outputs.airflow_uri }}/api/v1/dags/${{ inputs.dag_id }}/dagRuns" \
+            -H "Authorization: Bearer ${IAP_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"conf\": {
+                \"release_candidate_image\": \"${CANDIDATE_IMAGE}\",
+                \"maxtext_sha\": \"${{ github.sha }}\",
+                \"github_run_id\": \"${{ github.run_id }}\"
+              }
+            }")
+
+          HTTP_STATUS=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          echo "HTTP status: ${HTTP_STATUS}"
+          echo "Response body: ${BODY}"
+
+          if [ "${HTTP_STATUS}" -lt 200 ] || [ "${HTTP_STATUS}" -ge 300 ]; then
+            echo "Error: Airflow API returned HTTP ${HTTP_STATUS}"
+            exit 1
+          fi
+
+          DAG_RUN_ID=$(echo "$BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('dag_run_id',''))")
+          if [ -z "${DAG_RUN_ID}" ] || [ "${DAG_RUN_ID}" = "null" ]; then
+            echo "Error: could not parse dag_run_id from response"
+            exit 1
+          fi
+          echo "dag_run_id=${DAG_RUN_ID}" >> "$GITHUB_OUTPUT"
+
+      - name: Poll DAG run status
+        run: |
+          AIRFLOW_URI="${{ steps.info.outputs.airflow_uri }}"
+          DAG_RUN_ID="${{ steps.trigger.outputs.dag_run_id }}"
+          MAX_WAIT=14400
+          POLL_INTERVAL=300
+          ELAPSED=0
+
+          while [ $ELAPSED -lt $MAX_WAIT ]; do
+            IAP_TOKEN=$(gcloud auth print-access-token)
+
+            RESPONSE=$(curl -s -w "\n%{http_code}" \
+              "${AIRFLOW_URI}/api/v1/dags/${{ inputs.dag_id }}/dagRuns/${DAG_RUN_ID}" \
+              -H "Authorization: Bearer ${IAP_TOKEN}")
+            HTTP_STATUS=$(echo "$RESPONSE" | tail -1)
+            BODY=$(echo "$RESPONSE" | sed '$d')
+
+            if [ "${HTTP_STATUS}" -lt 200 ] || [ "${HTTP_STATUS}" -ge 300 ]; then
+              echo "Warning: Airflow API returned HTTP ${HTTP_STATUS}, will retry. Body: ${BODY}"
+              sleep $POLL_INTERVAL
+              ELAPSED=$((ELAPSED + POLL_INTERVAL))
+              continue
+            fi
+
+            STATE=$(echo "$BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('state',''))" 2>/dev/null || echo "unknown")
+
+            if [ "${STATE}" = "unknown" ]; then
+              echo "Warning: could not parse state from response body: ${BODY}"
+            fi
+
+            echo "DAG run state: ${STATE} (elapsed: ${ELAPSED}s)"
+
+            case "$STATE" in
+              success) echo "E2E tests passed."; exit 0 ;;
+              failed|upstream_failed) echo "E2E tests FAILED."; exit 1 ;;
+            esac
+
+            sleep $POLL_INTERVAL
+            ELAPSED=$((ELAPSED + POLL_INTERVAL))
+          done
+
+          echo "Timeout: E2E tests did not complete within 4 hours."
+          exit 1
