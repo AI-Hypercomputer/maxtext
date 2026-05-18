@@ -21,11 +21,19 @@ import tempfile
 import unittest
 import pytest
 
+from maxtext.checkpoint_conversion import to_maxtext
+
 pytestmark = [pytest.mark.integration_test]
 
 
 class Qwen3CheckpointConversionTest(unittest.TestCase):
   """Tests HuggingFace to Orbax checkpoint conversion."""
+
+  @pytest.mark.cpu_only
+  def test_import_to_maxtext(self):
+    # This test validates that to_maxtext can be imported without errors,
+    # and ensures its top-level statements are covered by Codecov.
+    self.assertIsNotNone(to_maxtext)
 
   @pytest.mark.cpu_only
   def test_qwen3_30b_a3b_roundtrip_conversion(self):
