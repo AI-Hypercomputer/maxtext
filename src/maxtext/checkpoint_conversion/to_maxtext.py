@@ -51,7 +51,6 @@ Example Usage:
 
 import argparse
 from functools import partial
-import importlib.util
 import json
 import os
 import sys
@@ -78,20 +77,10 @@ import numpy as np
 from orbax.checkpoint import type_handlers
 from safetensors import safe_open
 
-
-def _lazy_import(name: str):
-  spec = importlib.util.find_spec(name)
-  if spec is None:
-    return None
-  loader = importlib.util.LazyLoader(spec.loader)
-  spec.loader = loader
-  module = importlib.util.module_from_spec(spec)
-  sys.modules[name] = module
-  loader.exec_module(module)
-  return module
-
-
-torch = _lazy_import("torch")
+try:
+  import torch
+except ImportError:
+  torch = None
 
 
 absl.logging.set_verbosity(absl.logging.INFO)  # for max_logging.log
