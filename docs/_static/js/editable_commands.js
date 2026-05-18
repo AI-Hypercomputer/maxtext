@@ -88,10 +88,25 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     });
 
-    // If the user deletes everything and clicks away, restore the original placeholder
+    // Synchronize changes to other spans with the same placeholder
+    span.addEventListener('input', function () {
+      const placeholder = this.getAttribute('data-placeholder');
+      const newValue = this.textContent;
+
+      document.querySelectorAll(`.inline-input[data-placeholder="${placeholder}"]`).forEach(otherSpan => {
+        if (otherSpan !== this) {
+          otherSpan.textContent = newValue;
+        }
+      });
+    });
+
+    // If the user deletes everything and clicks away, restore the original placeholder for all matching spans
     span.addEventListener('blur', function () {
       if (this.textContent.trim() === '') {
-        this.textContent = this.getAttribute('data-placeholder');
+        const placeholder = this.getAttribute('data-placeholder');
+        document.querySelectorAll(`.inline-input[data-placeholder="${placeholder}"]`).forEach(otherSpan => {
+          otherSpan.textContent = placeholder;
+        });
       }
     });
 
