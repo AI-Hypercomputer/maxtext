@@ -155,3 +155,6 @@ gha-creds-*.json
 
 # vscode workspace
 maxtext.code-workspace
+
+maxtext_output
+dsv4_param_names.txt
