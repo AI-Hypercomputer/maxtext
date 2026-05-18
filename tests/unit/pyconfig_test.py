@@ -162,6 +162,17 @@ class PyconfigTest(unittest.TestCase):
     config = pyconfig.initialize_pydantic(["/custom_rl/module.py", "run_name=test", "skip_jax_distributed_system=True"])
     self.assertEqual(config.run_name, "test")
 
+  def test_identical_override_allowed(self):
+    """Test that overriding a model config key with an identical value is allowed."""
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        model_name="qwen3-8b",
+        override_model_config=False,
+        tokenizer_type="huggingface",  # Defined as huggingface in qwen3-8b
+    )
+    self.assertEqual(config.tokenizer_type, "huggingface")
+
 
 if __name__ == "__main__":
   unittest.main()
