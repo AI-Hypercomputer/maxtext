@@ -37,6 +37,8 @@ import contextlib
 from typing import Sequence
 from absl import app
 import time
+
+os.environ["JAX_PLATFORMS"] = "cpu"
 import jax
 
 from maxtext.configs import pyconfig
@@ -218,6 +220,8 @@ def is_oom(base_argv, policy: dict, pdb: int) -> bool:
   """
   compile_argv = build_argv(base_argv, policy, pdb)
   print(f"Checking whether batch_size={pdb} and policy={policy} is OOM")
+  sys.stdout.flush()
+  sys.stderr.flush()
 
   # Save the original file descriptors for stdout (1) and stderr (2)
   orig_stdout_fd = os.dup(sys.stdout.fileno())
@@ -236,6 +240,8 @@ def is_oom(base_argv, policy: dict, pdb: int) -> bool:
       result = train_compile.is_oom(compile_argv)
 
   finally:
+    sys.stdout.flush()
+    sys.stderr.flush()
     # This happens even if the 'try' block fails
     os.dup2(orig_stdout_fd, sys.stdout.fileno())
     os.dup2(orig_stderr_fd, sys.stderr.fileno())
@@ -312,7 +318,7 @@ def search(
   policy = build_full_device_policy(tensor_names) if init_policy is None else init_policy
   pdb = 1
   while policy is not None:
-    pdb = largest_batch_size(base_argv, policy, min_pdb=pdb, max_pdb=max_pdb)
+    pdb = largest_batch_size(base_argv, policy, min_pdb=max(1, pdb), max_pdb=max_pdb)
     if pdb > 0:
       output_lst.append((pdb, policy))
     policy = next_policy(policy)
@@ -456,6 +462,10 @@ def main(argv_list: Sequence[str]) -> None:
     print("No batch size provided. Searching for max batch size and policies...")
     # First, find the absolute max batch size that fits *even with full remat*
     max_pdb = largest_batch_size(base_argv, full_remat_policy, min_pdb=1)
+
+    if max_pdb < 1:
+      print("Report OOM: The model OOMs even with full remat at batch size 1.")
+      sys.exit(1)
 
     # Now, search for combinations, starting from no-remat up to max_pdb
     suggested_list = search(tensor_names, base_argv, init_policy=full_device_policy, max_pdb=max_pdb)

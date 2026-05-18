@@ -387,6 +387,7 @@ def goodput_modules():
       _goodput_stubs,
       label="ml_goodput_measurement",
       stub_if_decoupled=False,
+      stub_on_error_when_not_decoupled=True,
   )
 
 
