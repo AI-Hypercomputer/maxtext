@@ -34,6 +34,21 @@ default_bias_init = jax.nn.initializers.constant(0.0)
 default_scalar_init = jax.nn.initializers.constant(0.01)
 
 
+def nd_normal_const_std(std: float):
+  """Creates a constant-std normal initializer with the NdInitializer signature.
+
+  Returns an initializer that produces N(0, std) regardless of fan_in/fan_out;
+  useful when a layer needs a fixed-stddev init independent of input shape
+  (e.g. scaled init for residual output projections).
+  """
+
+  def init_fn(key, shape, dtype, in_axis, out_axis):
+    del in_axis, out_axis
+    return jax.random.normal(key, shape, dtype=dtype) * std
+
+  return init_fn
+
+
 def nd_dense_init(scale, mode, distribution):
   """Creates a variance-scaling initializer with dynamic in/out axes.
 

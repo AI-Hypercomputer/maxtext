@@ -65,7 +65,7 @@ from maxtext.common.common_types import (
 
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.attentions import Attention
-from maxtext.layers.initializers import nd_dense_init, NdInitializer, variable_to_logically_partitioned
+from maxtext.layers.initializers import nd_dense_init, nd_normal_const_std, NdInitializer, variable_to_logically_partitioned
 from maxtext.layers.linears import DenseGeneral
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
@@ -726,6 +726,9 @@ class MLA(Attention):
     assert self.num_query_heads == self.num_kv_heads, "MLA requires equal number of query and kv heads"
     assert not self.config.fused_qkv, "Fused QKV is not supported for MLA"
 
+    # Constant-std init for MLA projections; output proj rescaled below.
+    if self.config.mla_init_std > 0.0:
+      self.kernel_init = nd_normal_const_std(self.config.mla_init_std)
     if self.q_lora_rank == 0:
       # Standard Q projection (without LoRA).
       self.query = DenseGeneral(
@@ -822,6 +825,12 @@ class MLA(Attention):
     if self.max_position_embeddings > self.original_max_position_embeddings:
       mscale = 0.1 * self.mscale * math.log(self.rope_factor) + 1.0
       self.softmax_scale = self.softmax_scale * mscale * mscale
+
+    # Output-proj residual scaling: std / sqrt(2 * num_decoder_layers).
+    if self.config.mla_init_std > 0.0:
+      self.kernel_init = nd_normal_const_std(
+          self.config.mla_init_std / math.sqrt(2.0 * max(1, self.config.num_decoder_layers))
+      )
 
     self.out = self.init_out_w(output_dim=inputs_q_shape[-1])
 

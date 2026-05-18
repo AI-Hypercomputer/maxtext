@@ -40,6 +40,7 @@ from maxtext.layers.engram import NgramHashMapping
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.models import deepseek_batchsplit
 from maxtext.models import deepseek_batchsplit_fp8
+from maxtext.utils import grad_mask_utils
 from maxtext.utils import max_utils
 from maxtext.utils.sharding import create_sharding
 from maxtext.utils.sharding import maybe_shard_with_logical
@@ -259,6 +260,8 @@ class DeepSeekGenericLayer(nnx.Module):
           "activation_fraction_zero",
           jnp.sum(layer_output == 0) / jnp.size(layer_output),
       )
+
+    layer_output = grad_mask_utils.maybe_grad_mask(layer_output, self.config)
 
     if self.config.scan_layers:
       return layer_output, None
