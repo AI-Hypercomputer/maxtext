@@ -60,7 +60,7 @@ export DATASET_NAME=<DATASET_NAME> # e.g., openai/gsm8k
 export TRAIN_SPLIT=<TRAIN_SPLIT> # e.g., train
 export HF_DATA_DIR=<DATASET_PATH> # e.g., main
 export TRAIN_DATA_COLUMNS=<DATA_COLUMNS> # e.g., ['question','answer']
-export CHAT_TEMPLATE_PATH=<TEMPLATE_PATH> # e.g., maxtext/examples/chat_templates/math_qa.json
+export CHAT_TEMPLATE_PATH=<TEMPLATE_PATH> # e.g., src/maxtext/examples/chat_templates/math_qa.json (use gemma4_math_qa.json for Gemma 4 models)
 
 # -- LoRA Conversion configuration (Optional) --
 export HF_LORA_ADAPTER_PATH=<HF_LORA_ADAPTER_PATH> # e.g., 'username/adapter-name'

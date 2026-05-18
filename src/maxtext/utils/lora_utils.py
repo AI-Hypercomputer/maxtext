@@ -19,7 +19,7 @@ import os
 import re
 from typing import Any, Optional
 
-from flax import nnx
+from flax import nnx, linen as nn
 from flax.linen import partitioning as nn_partitioning
 from flax.training import train_state
 import jax
@@ -411,11 +411,22 @@ def _build_lora_provider(mt_config: pyconfig.HyperParameters) -> qwix.LoraProvid
       "rank": mt_config.lora.lora_rank,
       "alpha": mt_config.lora.lora_alpha,
       "dropout": 0.0,
+      "weight_qtype": mt_config.lora.lora_weight_qtype,
+      "tile_size": mt_config.lora.lora_tile_size,
   }
-  max_logging.log(
-      f"LoRA configured: module_path={lora_module_path} "
-      f"rank={mt_config.lora.lora_rank} alpha={mt_config.lora.lora_alpha}"
-  )
+  # Distinguish between standard LoRA and QLoRA in logs
+  if mt_config.lora.lora_weight_qtype:
+    max_logging.log(
+        f"QLoRA configured: rank={mt_config.lora.lora_rank} alpha={mt_config.lora.lora_alpha} "
+        f"qtype={mt_config.lora.lora_weight_qtype} tile_size={mt_config.lora.lora_tile_size}"
+    )
+  else:
+    max_logging.log(
+        f"LoRA configured: rank={mt_config.lora.lora_rank} alpha={mt_config.lora.lora_alpha} "
+        f"qtype=None tile_size=None"
+    )
+
+  max_logging.log(f"Using lora_module_path: {lora_module_path}")
   return qwix.LoraProvider(**lora_kwargs)
 
 
@@ -513,8 +524,8 @@ def apply_lora_to_model(
 
       # Use logical_to_mesh_sharding to correctly map logical axes like 'embed'
       # to physical mesh axes.
-      dst_shardings = sharding.logical_to_mesh_sharding(
-          nnx.get_partition_spec(state), mesh, rules=mt_config.logical_axis_rules
+      dst_shardings = nn.logical_to_mesh_sharding(
+          nnx.get_partition_spec(state), mesh, mt_config.logical_axis_rules
       )
 
       from tunix.rl import reshard  # pylint: disable=import-outside-toplevel

@@ -186,13 +186,17 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
 
   return trainer, mesh
 
-
 def train_model(mt_config, trainer, mesh):
   """Runs the SFT training loop in Tunix."""
   with mesh, nn_partitioning.axis_rules(mt_config.logical_axis_rules):
+    # Disable NNX graph caching for MoE models (where experts > 1) to allow
+    # necessary dynamic metadata synchronization during forward passes (e.g., in jax.lax.scan).
+    enable_nnx_cache = getattr(mt_config, "num_experts", 1) <= 1
+    
     trainer.train(
         trainer.data_hooks.train_data_iterator,
         trainer.data_hooks.eval_data_iterator,
+        cache_nnx_graph=enable_nnx_cache,
     )
   return trainer
 
