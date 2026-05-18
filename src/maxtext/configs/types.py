@@ -1698,14 +1698,6 @@ class HloDump(BaseModel):
   dump_jaxpr_gcs_dir: PathStr = Field("", description="GCS directory to upload jaxpr dumps.")
 
 
-class StackTrace(BaseModel):
-  """Configuration for collecting and logging stack traces."""
-
-  collect_stack_trace: bool = Field(False, description="Enable periodic stack trace collection.")
-  stack_trace_to_cloud: bool = Field(False, description="Upload stack traces to cloud logging instead of console.")
-  stack_trace_interval_seconds: int = Field(600, description="Frequency of stack trace collection in seconds.")
-
-
 class Metrics(BaseModel):
   """General configuration for metrics and monitoring."""
 
@@ -2279,7 +2271,6 @@ class MaxTextConfig(
     DevelopmentAndDebugging,
     Profiling,
     HloDump,
-    StackTrace,
     # Metrics and Monitoring
     Metrics,
     Goodput,

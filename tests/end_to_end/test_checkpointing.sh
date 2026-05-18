@@ -14,13 +14,12 @@ fi
 RUN_NAME=${1}-${4}
 OUTPUT_PATH=${2}
 DATASET_PATH=${3}
-COLLECT_STACK_TRACE=${4}
-DATASET_TYPE=${5}
-ATTENTION=${6}
-if [ -z "${6}" ]; then
+DATASET_TYPE=${4}
+ATTENTION=${5}
+if [ -z "${5}" ]; then
     ATTENTION='autoselected'
 fi
-ASYNC_CHECKPOINTING=${7:-true}
+ASYNC_CHECKPOINTING=${6:-true}
 eval_metrics=checkpoint_save_restore
 model_params=" base_emb_dim=384 base_num_query_heads=8 base_num_kv_heads=8 base_mlp_dim=192 base_num_decoder_layers=8 head_dim=128"
 CMD_DATA=""
@@ -38,7 +37,7 @@ fi
 # This command runs training for some steps and saves a checkpoint.
 CMD1="python3 -m maxtext.trainers.pre_train.train ${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}/base.yml run_name=$RUN_NAME steps=5 max_target_length=128 per_device_batch_size=1\
     metrics_file=saved_metrics.txt checkpoint_period=3 base_output_directory=$OUTPUT_PATH dataset_path=$DATASET_PATH\
-    async_checkpointing=$ASYNC_CHECKPOINTING collect_stack_trace=$COLLECT_STACK_TRACE attention=$ATTENTION"
+    async_checkpointing=$ASYNC_CHECKPOINTING attention=$ATTENTION"
 CMD1+=$model_params
 CMD1+=$CMD_DATA
 
@@ -46,7 +45,7 @@ CMD1+=$CMD_DATA
 # This ensures actual new training steps are executed after restoring checkpoint from the above training run.
 CMD2="python3 -m maxtext.trainers.pre_train.train ${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}/base.yml run_name=$RUN_NAME steps=10 max_target_length=128 per_device_batch_size=1\
     metrics_file=restored_metrics.txt base_output_directory=$OUTPUT_PATH dataset_path=$DATASET_PATH\
-    async_checkpointing=$ASYNC_CHECKPOINTING collect_stack_trace=$COLLECT_STACK_TRACE attention=$ATTENTION"
+    async_checkpointing=$ASYNC_CHECKPOINTING attention=$ATTENTION"
 CMD2+=$model_params
 CMD2+=$CMD_DATA
 
