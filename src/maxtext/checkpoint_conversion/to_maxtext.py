@@ -379,7 +379,11 @@ def _build_multi_axis_stacked_tensor(
     layer_tensors_for_expert = []
     # Inner loop iterates through layers for the current expert
     for hf_key_single in layer_keys_for_expert:
-      hf_tensor_numpy = tensor_getter_fn(hf_key_single)
+      # hf_tensor_numpy = tensor_getter_fn(hf_key_single)
+      if isinstance(hf_key_single, (list, tuple)):
+        hf_tensor_numpy = tuple(tensor_getter_fn(k) for k in hf_key_single)
+      else:
+        hf_tensor_numpy = tensor_getter_fn(hf_key_single)
       processed_hf_tensor = apply_hook_fns(hf_tensor_numpy, mt_slice_shape, hook_fns)
       layer_tensors_for_expert.append(processed_hf_tensor)
     all_expert_tensors.append(np.stack(layer_tensors_for_expert, axis=0))
@@ -424,7 +428,11 @@ def _build_single_axis_stacked_tensor(
   mt_slice_shape = tuple(mt_slice_shape_list)
 
   for hf_key_single in hf_source_keys:
-    hf_tensor_numpy = tensor_getter_fn(hf_key_single)
+    # hf_tensor_numpy = tensor_getter_fn(hf_key_single)
+    if isinstance(hf_key_single, (list, tuple)): 
+      hf_tensor_numpy = tuple(tensor_getter_fn(k) for k in hf_key_single)
+    else:
+      hf_tensor_numpy = tensor_getter_fn(hf_key_single) 
     processed_hf_tensor = apply_hook_fns(hf_tensor_numpy, mt_slice_shape, hook_fns)
     tensors_to_stack.append(processed_hf_tensor)
 
@@ -444,6 +452,9 @@ def _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_t
   if not isinstance(hf_source_keys_or_key, list):
     # Case 1: Single hf key (str)
     def _loader(getter, key, shape, hook):
+      if isinstance(key, (list, tuple)):
+        tensors = tuple(getter(k) for k in key)
+        return apply_hook_fns(tensors, shape, hook)
       return apply_hook_fns(getter(key), shape, hook)
 
     load_fn = partial(
