@@ -582,6 +582,7 @@ def load_state_if_possible(
     checkpoint_conversion_fn=None,
     source_checkpoint_layout="orbax",
     expansion_factor_real_data: int = -1,
+    maxtext_config: Any | None = None,
 ):
   """Loads TrainState as possible from the inputs.
 
@@ -684,7 +685,82 @@ def load_state_if_possible(
         case _:
           return (checkpoint_manager.restore(step, args=Composite(items=checkpoint_args)), None)
 
-  if load_parameters_from_path != "":
+  if source_checkpoint_layout == "safetensors_dynamic":
+    path = load_parameters_from_path or load_full_state_from_path
+    max_logging.log(f"Dynamic On-the-Fly Formatting: Loading SafeTensors from {path}")
+    if maxtext_config is None:
+      raise ValueError("maxtext_config must be provided for safetensors_dynamic loading.")
+
+    from maxtext.checkpoint_conversion.utils.tensor_handling import _get_hf_loading_function
+    from maxtext.checkpoint_conversion.utils import param_mapping
+    from maxtext.checkpoint_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS
+
+    model_key = maxtext_config.model_name
+    if "-Instruct" in model_key:
+      model_key = model_key.replace("-Instruct", "")
+    hf_config_obj = HF_MODEL_CONFIGS[model_key]
+    hf_config_dict = hf_config_obj.to_dict()
+
+    param_map_mt_to_hf = param_mapping.PARAM_MAPPING[model_key](hf_config_dict, maxtext_config, scan_layers=False)
+    hook_fn_map_mt = param_mapping.HOOK_FNS[model_key](hf_config_dict, maxtext_config, scan_layers=False, saving_to_hf=False)
+
+    target_tree = (
+        abstract_unboxed_pre_state.to_pure_dict()
+        if isinstance(abstract_unboxed_pre_state, nnx.State)
+        else abstract_unboxed_pre_state.params
+    )
+
+    def get_target_shape(tree, mt_name):
+      curr = tree
+      for part in mt_name.split("."):
+        if isinstance(curr, dict) and part in curr:
+          curr = curr[part]
+        elif hasattr(curr, part):
+          curr = getattr(curr, part)
+        else:
+          return None
+      return curr.shape if hasattr(curr, "shape") else None
+
+    state_holder: list[Any] = [None]
+    def tensor_getter(key):
+      return state_holder[0][key]
+
+    transformations = {}
+    for mt_key, hf_source in param_map_mt_to_hf.items():
+      mt_name = mt_key.replace("params-", "").replace("-", ".")
+      target_shape = get_target_shape(target_tree, mt_name)
+      if target_shape is None:
+        continue
+      hook_fn = hook_fn_map_mt.get(mt_key)
+
+      load_fn = _get_hf_loading_function(
+          hf_source,
+          tensor_getter,
+          hook_fn,
+          target_shape,
+          maxtext_config,
+      )
+
+      def make_value_fn(loader):
+        def value_fn(hf_state):
+          state_holder[0] = hf_state
+          return loader()
+        return value_fn
+
+      transformations[mt_name] = ocp.Transform(value_fn=make_value_fn(load_fn))
+
+    checkpointer = ocp.PyTreeCheckpointer()
+    context = ocp_v1.Context(checkpoint_layout=ocp_v1.options.CheckpointLayout.SAFETENSORS)
+    with context:
+      restored_params = checkpointer.restore(
+          path,
+          args=ocp.args.PyTreeRestore(
+              item=target_tree,
+              transforms=transformations,
+          )
+      )
+    return None, restored_params
+  elif load_parameters_from_path != "":
     if isinstance(abstract_unboxed_pre_state, nnx.State):
       _, params, _ = nnx.split(abstract_unboxed_pre_state.model, nnx.Param, ...)
     else:
