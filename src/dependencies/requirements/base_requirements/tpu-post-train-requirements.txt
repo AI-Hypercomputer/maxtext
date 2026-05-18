@@ -36,7 +36,7 @@ setuptools<81.0.0
 sortedcontainers
 torch==2.11.0
 torchax==0.0.11
-torchvision==0.25.0
+torchvision==0.26.0
 tpu-info
 watchfiles
 xgrammar

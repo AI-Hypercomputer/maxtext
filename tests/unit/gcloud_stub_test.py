@@ -14,7 +14,7 @@
 
 """Decoupling unit tests for MaxText GCloud stubs.
 
-These tests are written to pass whether optional deps (JetStream, cloud_tpu_diagnostics)
+These tests are written to pass whether optional deps (JetStream)
 are installed or not, and they focus only on decoupling behavior.
 """
 
@@ -80,27 +80,6 @@ class GCloudStubTest(unittest.TestCase):
 
         self.assertTrue(hasattr(engine_api, "Engine"))
         self.assertTrue(hasattr(engine_api, "ResultTokens"))
-
-  def test_cloud_diagnostics_contract_in_decoupled_mode(self):
-    """cloud_diagnostics() returns 4-tuple; content can be real or stub."""
-    with mock.patch.dict(os.environ, {"DECOUPLE_GCLOUD": "TRUE"}):
-      diag, debug_cfg, diag_cfg, stack_cfg = gcloud_stub.cloud_diagnostics()
-      self.assertIsNotNone(diag)
-      self.assertIsNotNone(debug_cfg)
-      self.assertIsNotNone(diag_cfg)
-      self.assertIsNotNone(stack_cfg)
-
-  def test_cloud_diagnostics_returns_stub_object_when_missing_and_decoupled(self):
-    """Force stub branch -> diag is stub object with .run()."""
-    with mock.patch.dict(os.environ, {"DECOUPLE_GCLOUD": "TRUE"}):
-      with mock.patch("maxtext.common.gcloud_stub._import_or_stub") as _ios:
-        _ios.side_effect = lambda import_fn, stub_fn, **kwargs: stub_fn()
-        diag, debug_cfg, diag_cfg, stack_cfg = gcloud_stub.cloud_diagnostics()
-
-      self.assertTrue(hasattr(diag, "run"))
-      self.assertIsNotNone(debug_cfg)
-      self.assertIsNotNone(diag_cfg)
-      self.assertIsNotNone(stack_cfg)
 
   def test_monitoring_modules_returns_stub_tuple_when_decoupled_and_missing(self):
     # Force stub path regardless of installed deps.
