@@ -125,11 +125,27 @@ def yaml_key_to_env_key(s: str) -> str:
   return _MAX_PREFIX + s.upper()
 
 
-def validate_no_keys_overridden_twice(keys1: list[str], keys2: list[str]):
-  overridden_keys = [k for k in keys1 if k in keys2]
-  if overridden_keys:
+def validate_no_keys_overridden_twice(model_loaded_cfg: omegaconf.DictConfig, overrides_cfg: omegaconf.DictConfig):
+  """Validates that no keys are overridden by both model config and overrides with different values."""
+  overridden_keys = [k for k in model_loaded_cfg.keys() if k in overrides_cfg.keys()]
+  really_overridden_keys = []
+  for k in overridden_keys:
+    try:
+      model_val = omegaconf.OmegaConf.to_container(omegaconf.OmegaConf.create({k: model_loaded_cfg[k]}), resolve=True)[k]
+    except Exception:  # pylint: disable=broad-exception-caught
+      model_val = model_loaded_cfg[k]
+
+    try:
+      override_val = omegaconf.OmegaConf.to_container(omegaconf.OmegaConf.create({k: overrides_cfg[k]}), resolve=True)[k]
+    except Exception:  # pylint: disable=broad-exception-caught
+      override_val = overrides_cfg[k]
+
+    if model_val != override_val:
+      really_overridden_keys.append(k)
+
+  if really_overridden_keys:
     raise ValueError(
-        f"Keys {overridden_keys} are overridden by both model config and CLI/kwargs."
+        f"Keys {really_overridden_keys} are overridden by both model config and CLI/kwargs with different values."
         "This is not allowed, unless setting `override_model_config=True`."
     )
 
@@ -310,14 +326,58 @@ class HyperParameters:
     return self._flat_config
 
 
+def _handle_config_exception(e: Exception):
+  """Handles configuration exceptions, prints to stderr, writes log, and exits or raises."""
+  # Format a clear and concise error message
+  err_msg = f"MAXTEXT CONFIG ERROR: {str(e)}"
+
+  # Log in highly visible format
+  max_logging.error("=" * 80)
+  max_logging.error(err_msg)
+  max_logging.error("=" * 80)
+
+  # Try writing to /dev/termination-log for Kubernetes
+  try:
+    with open("/dev/termination-log", "w", encoding="utf-8") as f:
+      f.write(err_msg)
+  except Exception:  # pylint: disable=broad-exception-caught
+    pass
+
+  # Exit with code 2 if not running in a test framework
+  if "pytest" not in sys.modules and "unittest" not in sys.modules:
+    sys.exit(2)
+  else:
+    raise e
+
+
 def initialize(argv: list[str] | None = None, **kwargs) -> HyperParameters:
   """Initializes the configuration by loading YAML files, and applying CLI, env, and kwarg overrides."""
-  pydantic_config = initialize_pydantic(argv, **kwargs)
-  config = HyperParameters(pydantic_config)
-  return config
+  try:
+    pydantic_config = _initialize_pydantic(argv, **kwargs)
+    config = HyperParameters(pydantic_config)
+    return config
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    if isinstance(e, (SystemExit, KeyboardInterrupt)):
+      raise e
+    _handle_config_exception(e)
+    raise e
 
 
 def initialize_pydantic(argv: list[str] | None = None, **kwargs) -> MaxTextConfig:
+  """Initializes the configuration by loading YAML files, and applying CLI, env, and overrides.
+
+  Returns the pydantic MaxTextConfig class.
+  """
+  try:
+    return _initialize_pydantic(argv, **kwargs)
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    if isinstance(e, (SystemExit, KeyboardInterrupt)):
+      raise e
+    _handle_config_exception(e)
+    raise e
+
+
+def _initialize_pydantic(argv: list[str] | None = None, **kwargs) -> MaxTextConfig:
   """Initializes the configuration by loading YAML files, and applying CLI, env, and kwarg overrides.
   Returns pydantic MaxTextConfig class whereas `initialize` returns the og `HyperParameters`
   """
@@ -373,7 +433,7 @@ def initialize_pydantic(argv: list[str] | None = None, **kwargs) -> MaxTextConfi
       else:
         model_cfg = model_loaded_cfg
         # Validate that no keys are overridden by both model config and CLI/kwargs
-        validate_no_keys_overridden_twice(model_loaded_cfg.keys(), overrides_cfg.keys())
+        validate_no_keys_overridden_twice(model_loaded_cfg, overrides_cfg)
     else:
       logger.warning("Model config for '%s' not found at %s", model_name, model_config_path)
 
