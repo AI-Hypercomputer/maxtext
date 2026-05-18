@@ -14,6 +14,7 @@
 
 """Input pipeline using Grain."""
 
+import warnings
 import glob
 from pathlib import Path
 import functools
@@ -134,7 +135,7 @@ def get_datasets(
       weights_dict = {name: weight / total_weight for name, weight in zip(mixture_config.keys(), weights)}
 
       dataset = grain.IterDataset.mix(datasets_dict, weights_dict)
-      return dataset
+      return dataset, grain_worker_count
     elif ";" in data_file_pattern:
       data_file_patterns, weights = zip(*[pattern.split(",") for pattern in data_file_pattern.split(";")])
       assert len(data_file_patterns) == len(weights), "Number of data file patterns and weights must match"
@@ -162,7 +163,7 @@ def get_datasets(
       # Use IterDataset.mix instead of MapDataset.mix in order to have per-mixture component checkpoints
       # for supporting changing the mixture after checkpointing
       dataset = grain.IterDataset.mix(dataset_list, weights)
-      return dataset
+      return dataset, grain_worker_count
     else:
       # Single pattern case - no need for parallelization
       dataset = create_dataset_from_pattern(data_file_pattern)
@@ -177,39 +178,42 @@ def get_datasets(
           grain_prefetch_buffer_size,
           elastic=elastic,
       )
-      return dataset
-  elif data_file_type == "tfrecord":
+      return dataset, grain_worker_count
+  elif data_file_type in ("tfrecord", "parquet"):
     data_files = find_data_files(data_file_pattern)
+    file_slice, files_per_host, row_shard = input_pipeline_utils.compute_file_sharding(
+        len(data_files), dataloading_host_index, dataloading_host_count
+    )
+    effective_worker_count = min(grain_worker_count, files_per_host)
+    if len(data_files) < dataloading_host_count:
+      warnings.warn(
+          f"Data shard count ({len(data_files)}) < host count ({dataloading_host_count}). "
+          f"Each data shard Will be read by at most {math.ceil(dataloading_host_count / len(data_files))} hosts"
+          f"Concurrent reading by multiple hosts may cause slow down."
+      )      
+    if effective_worker_count < grain_worker_count:
+      warnings.warn(
+          f"Capping grain_worker_count from {grain_worker_count} to {effective_worker_count} "
+          f"({files_per_host} {data_file_type} files visible per host)."
+      )
     dataset = grain.MapDataset.source(data_files)
     if shuffle:
       dataset = dataset.shuffle(seed=shuffle_seed)
     dataset = dataset.repeat(num_epoch)
-    dataset = dataset[dataloading_host_index::dataloading_host_count]  # sharding
-    dataset = dataset.map(input_pipeline_utils.make_tfrecord_iter_dataset)
-    files_per_host = max(len(data_files) // dataloading_host_count, 1)
+    dataset = dataset[file_slice]
+    if data_file_type == "tfrecord":
+      dataset = dataset.map(input_pipeline_utils.make_tfrecord_iter_dataset)
+    else:
+      dataset = dataset.map(grain.experimental.ParquetIterDataset)
     cycle_length = min(files_per_host, grain_num_threads)
     dataset = grain.experimental.InterleaveIterDataset(dataset, cycle_length=cycle_length)
+    if row_shard is not None:
+      dataset = input_pipeline_utils.IndexShardIterDataset(
+          dataset, host_index=row_shard[0], host_count=row_shard[1]
+      )
     if shuffle:
       dataset = grain.experimental.WindowShuffleIterDataset(dataset, window_size=shuffle_buffer_size, seed=shuffle_seed)
-    return dataset
-  elif data_file_type == "parquet":
-    data_files = find_data_files(data_file_pattern)
-    dataset = grain.MapDataset.source(data_files)
-    if shuffle:
-      dataset = dataset.shuffle(seed=shuffle_seed)
-    dataset = dataset.repeat(num_epoch)
-    dataset = dataset[dataloading_host_index::dataloading_host_count]  # sharding
-    assert grain_worker_count <= len(dataset), (
-        f"grain worker count is currently {grain_worker_count}, exceeding the max allowable value {len(dataset)} "
-        f"(file shard count of a data loading host) for your dataset. "
-        f"Please lower grain_worker_count or increase file shard count."
-    )
-    dataset = dataset.map(grain.experimental.ParquetIterDataset)
-    cycle_length = min(len(dataset) // num_epoch, grain_num_threads)
-    dataset = grain.experimental.InterleaveIterDataset(dataset, cycle_length=cycle_length)
-    if shuffle:
-      dataset = grain.experimental.WindowShuffleIterDataset(dataset, window_size=shuffle_buffer_size, seed=shuffle_seed)
-    return dataset
+    return dataset, effective_worker_count
   else:
     raise ValueError(
         f"grain pipeline supports (arrayrecord, tfrecord, parquet) as grain_file_type, but got {data_file_type}"
@@ -375,12 +379,21 @@ def _get_pipeline_fn(config):
   return pretrain_preprocessing_pipeline
 
 
-def _make_elastic_iterator(dataset, config, preprocessing_fn, shard_index=None, shard_count=None, mp_opts=None):
+def _make_elastic_iterator(
+    dataset, config, preprocessing_fn, shard_index=None, shard_count=None, mp_opts=None, grain_worker_count=None
+):
   """Applies preprocessing_fn then wraps the result with ElasticIterator.
 
   When shard_index/shard_count are None, defaults to jax.process_index()/jax.process_count().
+  When `mp_opts` is None and `grain_worker_count` is provided (>0), build mp_opts from it; this
+  lets the colocated+elastic path forward the capped worker count from `get_datasets`.
   """
   ds = preprocessing_fn(dataset=dataset)
+  if mp_opts is None and grain_worker_count is not None and grain_worker_count > 0:
+    mp_opts = grain.MultiprocessingOptions(
+        num_workers=grain_worker_count,
+        per_worker_buffer_size=config.grain_per_worker_buffer_size,
+    )
   return ElasticIterator(
       ds,
       global_batch_size=config.global_batch_size_to_load,
@@ -459,35 +472,37 @@ def make_grain_train_iterator(
     dataloading_host_count = len(process_indices) * num_dataloader_to_restore
     for i in range(num_dataloader_to_restore):
       dataloading_host_index = len(process_indices) * i + process_indices.index(jax.process_index())
-      train_ds = get_ds_fn(dataloading_host_index=dataloading_host_index, dataloading_host_count=dataloading_host_count)
-      train_dataloader = preprocessing_fn(dataset=train_ds)
+      train_ds, effective_worker_count = get_ds_fn(
+          dataloading_host_index=dataloading_host_index, dataloading_host_count=dataloading_host_count
+      )
+      train_dataloader = preprocessing_fn(dataset=train_ds, grain_worker_count=effective_worker_count)
       train_dataloader_list.append(train_dataloader)
     return [
         multihost_dataloading.MultiHostDataLoadIterator(x, global_mesh, config.generate_padding_batch_train)
         for x in train_dataloader_list
     ]
 
-  # Default non-colocated, non-expansion path
+  # Default non-colocated, expansion_factor_real_data >=1 path
   shard_index = process_indices.index(jax.process_index())
   shard_count = len(process_indices)
-  train_ds = get_ds_fn(
+  train_ds, effective_worker_count = get_ds_fn(
       dataloading_host_index=shard_index,
       dataloading_host_count=shard_count,
   )
   if config.grain_use_elastic_iterator:
     mp_options = (
         grain.MultiprocessingOptions(
-            num_workers=config.grain_worker_count,
+            num_workers=effective_worker_count,
             per_worker_buffer_size=config.grain_per_worker_buffer_size,
         )
-        if config.grain_worker_count > 0
+        if effective_worker_count > 0
         else None
     )
     train_dataloader = _make_elastic_iterator(
         train_ds, config, preprocessing_fn, shard_index=shard_index, shard_count=shard_count, mp_opts=mp_options
     )
   else:
-    train_dataloader = preprocessing_fn(dataset=train_ds)
+    train_dataloader = preprocessing_fn(dataset=train_ds, grain_worker_count=effective_worker_count)
 
   return multihost_dataloading.MultiHostDataLoadIterator(
       train_dataloader,
@@ -533,11 +548,11 @@ def make_grain_eval_iterator(
   )
 
   if not config.colocated_python_data_input:
-    eval_ds = get_ds_fn(
+    eval_ds, effective_worker_count = get_ds_fn(
         dataloading_host_index=process_indices.index(jax.process_index()),
         dataloading_host_count=len(process_indices),
     )
-    eval_dataloader = preprocessing_fn(dataset=eval_ds)
+    eval_dataloader = preprocessing_fn(dataset=eval_ds, grain_worker_count=effective_worker_count)
     return multihost_dataloading.MultiHostDataLoadIterator(
         eval_dataloader, global_mesh, config.generate_padding_batch_eval
     )
