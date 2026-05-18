@@ -263,10 +263,15 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
 
 def train_model(mt_config, trainer, mesh):
   """Runs the SFT training loop in Tunix."""
+  # MoE models in MaxText dynamically register state (e.g. lb_loss) during the first pass,
+  # which triggers NNX graph mutation errors if caching is enabled.
+  cache_nnx_graph = mt_config.num_experts <= 1
+
   with mesh, nn_partitioning.axis_rules(mt_config.logical_axis_rules):
     trainer.train(
         trainer.data_hooks.train_data_iterator,
         trainer.data_hooks.eval_data_iterator,
+        cache_nnx_graph=cache_nnx_graph,
     )
   return trainer
 
