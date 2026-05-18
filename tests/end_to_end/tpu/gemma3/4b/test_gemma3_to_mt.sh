@@ -1,12 +1,11 @@
 #!/bin/bash
 
-# This script is both an end-to-end test that runs once a day on a v4-8 and documentation for how to get started with Gemma3-4B.
+# Converts Gemma3-4B HuggingFace checkpoint to MaxText format and validates logit correctness.
 
 # The flow of this script is as follows:
-# 1. Convert the checkpoint downloaded from Hugging Face to make it compatible with MaxText.
-# 2. Run a forward pass logits check to compare with the original HF golden model.
-# 3. Run decoding, finetuning of Gemma3-4B. with the converted checkpoint.
-# 4. Run decoding from the finetuned checkpoint from step 3.
+# 1. Install PyTorch (CPU) required for checkpoint conversion.
+# 2. Convert the HuggingFace checkpoint to MaxText format in both unscanned and scanned formats.
+# 3. Run a forward pass logits check to verify the converted checkpoint matches the original HF model.
 
 # Pre-requisites:
 # 1. Set HF_TOKEN environment variable to your Hugging Face access token with read permissions
@@ -14,76 +13,57 @@
 
 
 set -ex
-idx=$(date +%Y-%m-%d-%H-%M)
+
+run_id=${1:-$(date +%Y-%m-%d-%H-%M)}
 MODEL_NAME='gemma3-4b'
-export MODEL_VARIATION='4b'
 HF_GOLDEN_MODEL='google/gemma-3-4b-it'
-TOKENIZER_PATH="${MAXTEXT_ASSETS_ROOT:-${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/assets/tokenizers}}"'/tokenizer.gemma3'
+
 # To convert the multimodal model, make sure the use_multimodal is set to be true
 USE_MULTIMODAL=false
 
-# Installing torch for deps in forward_pass_logit_checker.py
+# Non-Googlers please remember to point `BASE_OUTPUT_DIRECTORY` to the GCS paths where you want to store scanned and unscanned checkpoints
+BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs/${MODEL_NAME}/to_maxtext
+
+# Step 1: Install torch
 python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
-# After downloading checkpoints, copy them to GCS bucket at $CHKPT_BUCKET \
-# Non-Googlers please remember to use separate GCS paths for uploading model weights from kaggle ($CHKPT_BUCKET) and MaxText compatible weights ($MODEL_BUCKET).
-# Non-Googlers please remember to point these variables to GCS buckets that you own, this script uses internal buckets for testing.
-export MODEL_BUCKET=gs://maxtext-gemma/unified/gemma3
+# Step 2: Convert the checkpoint from Hugging Face to make it compatible with MaxText
 
-# To get unscanned ckpt:
-python3 -m maxtext.checkpoint_conversion.to_maxtext "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
+# Step 2.a: Convert to unscanned checkpoint (for inference)
+python3 -m maxtext.checkpoint_conversion.to_maxtext \
     model_name=${MODEL_NAME} \
-    hf_access_token=${HF_TOKEN} \
-    base_output_directory=${MODEL_BUCKET}/${MODEL_VARIATION}/unscanned/${idx} \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY}/unscanned/${run_id} \
     use_multimodal=${USE_MULTIMODAL} \
-    scan_layers=false
+    scan_layers=false \
+    hardware=cpu skip_jax_distributed_system=True \
+    checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False \
+    --eager_load_method='transformers'
 
-export UNSCANNED_CKPT_PATH=${MODEL_BUCKET}/${MODEL_VARIATION}/unscanned/${idx}/0/items
+UNSCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/unscanned/${run_id}/0/items
+echo "Unscanned checkpoint path: ${UNSCANNED_CKPT_PATH}"
 
-# To get scanned ckpt, flip the scan_layers.
-python3 -m maxtext.checkpoint_conversion.to_maxtext "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
+# Step 2.b: Convert to scanned checkpoint (for training)
+python3 -m maxtext.checkpoint_conversion.to_maxtext \
     model_name=${MODEL_NAME} \
-    hf_access_token=${HF_TOKEN} \
-    base_output_directory=${MODEL_BUCKET}/${MODEL_VARIATION}/scanned/${idx} \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY}/scanned/${run_id} \
     use_multimodal=${USE_MULTIMODAL} \
-    scan_layers=true
+    scan_layers=true \
+    hardware=cpu skip_jax_distributed_system=True \
+    checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False \
+    --eager_load_method='transformers'
 
-export SCANNED_CKPT_PATH=${MODEL_BUCKET}/${MODEL_VARIATION}/scanned/${idx}/0/items
+SCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/scanned/${run_id}/0/items
+echo "Scanned checkpoint path: ${SCANNED_CKPT_PATH}"
 
-# We also test whether the forward pass logits match the original HF model
+# Step 3: Test whether the forward pass logits match the original HF model
 # to get higher precision (eg. float32) run on CPU with `JAX_PLATFORMS=cpu`
-
 # ToDo: improve forward_pass_logit_checker to test multi-modal prompt
-python3 -m tests.utils.forward_pass_logit_checker "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
-    tokenizer_path=${TOKENIZER_PATH}  \
+python3 -m tests.utils.forward_pass_logit_checker \
     load_parameters_path=${UNSCANNED_CKPT_PATH} \
     model_name=${MODEL_NAME} \
     use_multimodal=${USE_MULTIMODAL} \
     scan_layers=false \
     --hf_model_path=${HF_GOLDEN_MODEL} \
     --max_kl_div=0.03 \
-    --run_hf_model=true
-
-# We can run decoding for unscanned checkpoints.
-if [ ${USE_MULTIMODAL} == true ]; then
-    python3 -m maxtext.inference.decode "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml model_name=${MODEL_NAME} tokenizer_path=${TOKENIZER_PATH} load_parameters_path=${UNSCANNED_CKPT_PATH} per_device_batch_size=1 run_name=ht_test max_prefill_predict_length=272 max_target_length=300 steps=1 async_checkpointing=false scan_layers=false use_multimodal=${USE_MULTIMODAL} prompt=\'Describe\ image\ \<start_of_image\>\' image_path=\'tests/assets/test_image.jpg\' attention=\'dot_product\'
-else
-    python3 -m maxtext.inference.decode "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml model_name=${MODEL_NAME} tokenizer_path=${TOKENIZER_PATH} load_parameters_path=${UNSCANNED_CKPT_PATH} per_device_batch_size=1 run_name=ht_test max_prefill_predict_length=8 max_target_length=16 steps=1 async_checkpointing=false scan_layers=false prompt='I love to' attention=\'dot_product\'
-fi
-
-# Non-Googlers please remember to point `DATASET_PATH` to the GCS bucket where you have your training data
-export DATASET_PATH=gs://maxtext-dataset
-# Non-Googlers please remember to point `BASE_OUTPUT_DIRECTORY` to a GCS bucket that you own, this bucket will store all the files generated by MaxText during a run
-export BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs/gemma3-4b
-
-# We can also run finetuning by using the scanned converted checkpoint.
-# Note that scanned checkpoint helps with efficient finetuning
-export FINETUNE_RUN_NAME=runner_finetune_${idx}
-python3 -m maxtext.trainers.pre_train.train "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml base_output_directory=${BASE_OUTPUT_DIRECTORY} dataset_path=${DATASET_PATH} tokenizer_path=${TOKENIZER_PATH}  load_parameters_path=${UNSCANNED_CKPT_PATH} per_device_batch_size=1 run_name=${FINETUNE_RUN_NAME} max_target_length=8192 steps=10 async_checkpointing=false model_name=${MODEL_NAME} checkpoint_period=5 scan_layers=false
-
-# Now, run decoding on the checkpoint generated from our finetune run.
-if [ ${USE_MULTIMODAL} == true ]; then
-    python3 -m maxtext.inference.decode "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml model_name=${MODEL_NAME} tokenizer_path=${TOKENIZER_PATH} load_parameters_path=${BASE_OUTPUT_DIRECTORY}/${FINETUNE_RUN_NAME}/checkpoints/0/items per_device_batch_size=1 run_name=ht_test max_prefill_predict_length=272 max_target_length=300 steps=1 async_checkpointing=false scan_layers=false use_multimodal=${USE_MULTIMODAL} prompt=\'Describe\ image\ \<start_of_image\>\' image_path=\'tests/assets/test_image.jpg\' attention=\'dot_product\'
-else
-    python3 -m maxtext.inference.decode "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml model_name=${MODEL_NAME} tokenizer_path=${TOKENIZER_PATH} load_parameters_path=${BASE_OUTPUT_DIRECTORY}/${FINETUNE_RUN_NAME}/checkpoints/0/items per_device_batch_size=1 run_name=ht_test max_prefill_predict_length=8 max_target_length=16 steps=1 async_checkpointing=false scan_layers=false prompt='I love to' attention=\'dot_product\'
-fi
+    --run_hf_model=true \
+    hardware=cpu skip_jax_distributed_system=True
