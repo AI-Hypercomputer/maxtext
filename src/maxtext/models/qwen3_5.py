@@ -159,7 +159,9 @@ class Qwen3_5DecoderLayer(nnx.Module):
           rngs=rngs,
       )
     else:
-      self.attention = Qwen3_5GatedDeltaNet(config=cfg, dtype=cfg.dtype, model_mode=model_mode, rngs=rngs)
+      self.attention = Qwen3_5GatedDeltaNet(
+          config=cfg, dtype=cfg.dtype, model_mode=model_mode, mesh=self.mesh, rngs=rngs
+      )
 
     # Second LayerNorm, applied before the MoE block.
     self.post_attention_layernorm = Qwen3NextRMSNorm(
@@ -207,13 +209,13 @@ class Qwen3_5DecoderLayer(nnx.Module):
           attention_metadata=attention_metadata,
       )
     else:
-      attention_output = cast(Qwen3_5GatedDeltaNet, self.attention)(
+      attention_output, new_kv_cache = cast(Qwen3_5GatedDeltaNet, self.attention)(
           hidden_states,
           model_mode=model_mode,
-          kv_cache=None,
+          kv_cache=kv_cache,
           decoder_segment_ids=decoder_segment_ids,
+          attention_metadata=attention_metadata,
       )
-      new_kv_cache = None
 
     # First residual connection after attention
     hidden_states = residual + attention_output

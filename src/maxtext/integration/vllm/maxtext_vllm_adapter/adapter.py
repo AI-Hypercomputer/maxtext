@@ -39,6 +39,11 @@ except ImportError:
 
 
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateCopyFuncCalculator,
+    MambaStateDtypeCalculator,
+    MambaStateShapeCalculator,
+)
 
 
 def next_power_of_two(x: int) -> int:
@@ -161,12 +166,69 @@ class MaxTextForCausalLM(nnx.Module):
   into the vLLM serving framework, specifically for causal language modeling
   tasks. It handles configuration generation, model initialization, and execution
   of the decoding step.
+
+  Advertises ``is_hybrid = True`` and ``has_inner_state = True`` (vLLM's
+  ``IsHybrid`` / ``HasInnerState`` are runtime_checkable Protocols probed via
+  ``getattr(model, 'is_hybrid', False)`` — so plain class attributes suffice
+  and we avoid the metaclass conflict that explicit Protocol inheritance has
+  with ``nnx.Module``). Together with the three ``get_mamba_state_*``
+  classmethods, this lets tpu-inference treat models with mixed full-attention
+  + linear-attention (GDN) blocks — Qwen3-Next / Qwen3.5 — as hybrid and
+  allocate MambaSpec slots for the GDN layers. The classmethods mirror
+  upstream vLLM's ``Qwen3NextForCausalLM`` and read ``linear_*`` fields from
+  the HF text config; they're a no-op for non-hybrid configs since
+  tpu-inference only consults them when ``layer_types`` is present.
   """
+
+  # IsHybrid / HasInnerState Protocol markers (duck-typed via getattr upstream).
+  is_hybrid: bool = True
+  has_inner_state: bool = True
 
   # Signal to tpu-inference model_loader that this class manages its own
   # JIT-sharded initialization (via create_nnx_model with out_shardings).
   # When True, model_loader skips wrapping __init__ in an outer bare @jax.jit,
   _self_manages_sharding: bool = True
+
+  # IsHybrid / HasInnerState protocol markers. Bodies of the classmethods
+  # below mirror upstream vLLM's Qwen3NextForCausalLM — they consult
+  # ``hf_text_config.linear_*`` so they're only meaningful for configs that
+  # actually carry those fields (Qwen3-Next / Qwen3.5). Non-hybrid configs
+  # never reach these methods because tpu-inference's spec patch only invokes
+  # them on layers whose ``layer_types`` entry is ``"linear_attention"``.
+
+  @classmethod
+  def get_mamba_state_shape_from_config(cls, vllm_config: VllmConfig):
+    """Conv and recurrent state shapes for the GDN layers of a hybrid model."""
+    hf = vllm_config.model_config.hf_text_config
+    tp = vllm_config.parallel_config.tensor_parallel_size
+    num_spec = (
+        vllm_config.speculative_config.num_speculative_tokens
+        if vllm_config.speculative_config
+        else 0
+    )
+    return MambaStateShapeCalculator.gated_delta_net_state_shape(
+        tp,
+        hf.linear_num_key_heads,
+        hf.linear_num_value_heads,
+        hf.linear_key_head_dim,
+        hf.linear_value_head_dim,
+        hf.linear_conv_kernel_dim,
+        num_spec,
+    )
+
+  @classmethod
+  def get_mamba_state_dtype_from_config(cls, vllm_config: VllmConfig):
+    """Conv and recurrent state dtypes for the GDN layers of a hybrid model."""
+    return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
+        vllm_config.model_config.dtype,
+        vllm_config.cache_config.mamba_cache_dtype,
+        vllm_config.cache_config.mamba_ssm_cache_dtype,
+    )
+
+  @classmethod
+  def get_mamba_state_copy_func(cls):
+    """Per-state copy callables used by MambaPrefixCachingManager."""
+    return MambaStateCopyFuncCalculator.gated_delta_net_state_copy_func()
 
   def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array, mesh: Mesh):
     """Initializes the MaxTextForCausalLM model.
@@ -227,6 +289,31 @@ class MaxTextForCausalLM(nnx.Module):
     """
     if not isinstance(self.model, nnx.Module):
       raise ValueError("Model must be an instance of type nnx.Module.")
+
+    # Hybrid models (Qwen3-Next / Qwen3.5) get ``attention_metadata`` as a
+    # ``dict[layer_name, AttentionMetadata]`` so each layer can pick the
+    # ``block_tables`` for its own kv_cache_group. Every value shares the
+    # other fields (input_positions, seq_lens, query_start_loc,
+    # mamba_state_indices, request_distribution). For the in-model dispatch
+    # below, GDN layers don't touch block_tables — they index via
+    # ``mamba_state_indices`` — and all full-attn layers belong to the same
+    # kv_cache_group so they share one block_tables. Pick a metadata from a
+    # full-attn (non-linear_attention) layer when possible; otherwise any
+    # value works.
+    if isinstance(attention_metadata, dict):
+      hf_text_config = getattr(
+          self.cfg, "hf_text_config", getattr(self.cfg, "hf_config", None)
+      )
+      layer_types = getattr(hf_text_config, "layer_types", None) or []
+      attention_metadata_picked = None
+      for i, lt in enumerate(layer_types):
+        if lt != "linear_attention":
+          attention_metadata_picked = attention_metadata.get(f"layer.{i}")
+          if attention_metadata_picked is not None:
+            break
+      if attention_metadata_picked is None:
+        attention_metadata_picked = next(iter(attention_metadata.values()))
+      attention_metadata = attention_metadata_picked
 
     # Ensure inputs are at least 2D with a batch dimension
     input_ids = jnp.expand_dims(input_ids, axis=1)
