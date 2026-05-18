@@ -28,3 +28,15 @@ filegroup(
     srcs = ["hf_model_configs.py"],
     visibility = ["//third_party/py/maxtext:__pkg__"],
 )
+
+filegroup(
+    name = "utils_file",
+    srcs = ["utils.py"],
+    visibility = ["//third_party/py/maxtext:__pkg__"],
+)
+
+filegroup(
+    name = "tensor_handling_file",
+    srcs = ["tensor_handling.py"],
+    visibility = ["//third_party/py/maxtext:__pkg__"],
+)

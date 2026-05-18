@@ -338,6 +338,7 @@ def setup_train_loop(config, recorder, devices=None):
             enable_orbax_v1=config.enable_orbax_v1,
             checkpoint_conversion_fn=config.checkpoint_conversion_fn,
             source_checkpoint_layout=config.source_checkpoint_layout,
+            maxtext_config=config,
         )
       except FileNotFoundError:
         step0_restored = None
