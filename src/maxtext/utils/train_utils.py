@@ -321,6 +321,48 @@ def setup_train_loop(config, recorder, devices=None):
       max_utils.print_non_trivial_mesh_axis(model.mesh)
       maxtext_utils.print_shardings_params(state_params, state_mesh_shardings_params, mesh, logical_annotations_params)
 
+    if config.use_dpo:
+      abstract_state, _, _ = maxtext_utils.get_abstract_state(config, mesh, init_state_fn, is_training)
+      max_logging.log(
+          "Restoring reference parameters for DPO from" f" '{os.path.join(str(config.checkpoint_dir), str(0))}'"
+      )
+      try:
+        step0_restored, _ = checkpointing.load_state_if_possible(
+            checkpoint_manager,
+            data_iterator,
+            load_parameters_from_path="",
+            load_full_state_from_path="",
+            checkpoint_storage_concurrent_gb=config.checkpoint_storage_concurrent_gb,
+            abstract_unboxed_pre_state=abstract_state,
+            enable_single_replica_ckpt_restoring=False,
+            dataset_type=config.dataset_type,
+            step=0,
+            use_ocdbt=config.checkpoint_storage_use_ocdbt,
+            use_zarr3=config.checkpoint_storage_use_zarr3,
+            enable_orbax_v1=config.enable_orbax_v1,
+            checkpoint_conversion_fn=config.checkpoint_conversion_fn,
+            source_checkpoint_layout=config.source_checkpoint_layout,
+            maxtext_config=config,
+        )
+      except FileNotFoundError:
+        step0_restored = None
+      if step0_restored is not None:
+        if config.pure_nnx:
+          # step0_restored["items"] is the flat nnx.State of the step-0 TrainStateNNX
+          # (typically from a non-DPO pre-training run, so its top-level fields are
+          # `model` and `optimizer` — no `reference_model`). Copy its `model` substate
+          # into our current state's `reference_model` slot.
+          step0_state = step0_restored["items"]
+          step0_model_substate = step0_state["model"] if "model" in step0_state else step0_state
+          if isinstance(state, nnx.State):
+            state["reference_model"] = step0_model_substate
+        else:
+          reference_params = step0_restored["items"].params["params"]
+          state = _merge_dpo_state(state, reference_params)
+      else:
+        max_logging.log(
+            "Could not restore reference parameters for DPO from" f" '{os.path.join(str(config.checkpoint_dir), str(0))}'"
+        )
   if config.pure_nnx:
     train_state = nnx.merge(state_graphdef, state)
     model = train_state.model
