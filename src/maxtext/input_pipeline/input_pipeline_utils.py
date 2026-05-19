@@ -267,6 +267,16 @@ def verify_chat_template_generation_prompt_logic(tokenizer_model):
   actual_prefix_in_full_turn = full_turn_ids[len(prompt_wo_gen_ids) : len(prompt_wo_gen_ids) + len(assistant_prefix)]
 
   if actual_prefix_in_full_turn != assistant_prefix:
+    # Allow the generation prompt to include a thought channel block (e.g., for Gemma 4).
+    thought_channel = "<|channel>thought\n<channel|>"
+    thought_ids = extract_token_ids(tokenizer_model.encode(thought_channel, add_special_tokens=False))
+    if len(assistant_prefix) >= len(thought_ids) and assistant_prefix[-len(thought_ids):] == thought_ids:
+      true_prefix_ids = assistant_prefix[:-len(thought_ids)]
+      actual_prefix = full_turn_ids[len(prompt_wo_gen_ids) : len(prompt_wo_gen_ids) + len(true_prefix_ids)]
+      if actual_prefix == true_prefix_ids:
+        max_logging.info("Chat template generation prompt mismatch resolved via thought channel bypass.")
+        return
+
     expected_str = tokenizer_model.decode(assistant_prefix)
     actual_str = tokenizer_model.decode(actual_prefix_in_full_turn)
     raise ValueError(
@@ -297,6 +307,12 @@ def _get_completion_in_chat_template(tokenizer_model, round_msgs):
 
   prompt_completion_ids = extract_token_ids(prompt_completion_tokens)
   prompt_ids = extract_token_ids(prompt_tokens)
+
+  # Bypass for Gemma 4's thought channel block which is included in generation prompt but not in normal assistant turns
+  thought_channel = "<|channel>thought\n<channel|>"
+  thought_ids = extract_token_ids(tokenizer_model.encode(thought_channel, add_special_tokens=False))
+  if len(prompt_ids) >= len(thought_ids) and prompt_ids[-len(thought_ids):] == thought_ids:
+    prompt_ids = prompt_ids[:-len(thought_ids)]
 
   completion_tokens = prompt_completion_ids[len(prompt_ids) :]
   completion_in_chat_template = tokenizer_model.decode(completion_tokens, skip_special_tokens=False)

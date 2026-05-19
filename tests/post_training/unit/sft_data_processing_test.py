@@ -512,12 +512,16 @@ class SFTChatTemplateLogicTest(unittest.TestCase):
     super().setUp()
     self.qwen3_tokenizer = transformers.AutoTokenizer.from_pretrained("Qwen/Qwen3-4B")
     self.llama2_tokenizer = transformers.AutoTokenizer.from_pretrained(self.LLAMA_TOKENIZER_PATH)
+    self.gemma4_tokenizer = transformers.AutoTokenizer.from_pretrained("google/gemma-4-26b-a4b-it")
 
   def test_tokenizer_w_generation_prompt(self):
     verify_chat_template_generation_prompt_logic(self.qwen3_tokenizer)
 
   def test_tokenizer_wo_generation_prompt(self):
     verify_chat_template_generation_prompt_logic(self.llama2_tokenizer)
+
+  def test_tokenizer_gemma4_thought_channel_bypass(self):
+    verify_chat_template_generation_prompt_logic(self.gemma4_tokenizer)
 
   def test_failure_path_with_modified_template(self):
     """Verifies the function correctly raises a ValueError on a bad template."""
