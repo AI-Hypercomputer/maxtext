@@ -35,6 +35,7 @@ from maxtext.layers import linears
 from maxtext.layers.attentions import AttentionOp, KVQuant
 from maxtext.layers.initializers import Initializer, NdInitializer, nd_dense_init
 from maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.inference import kvcache
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 
@@ -236,6 +237,11 @@ class Gpt3MultiHeadAttention(nnx.Module):
     self.value_axis_names = value_axis_names
     self.out_axis_names = out_axis_names
     self.rngs = rngs
+    self.model_mode = model_mode
+    self.prefill_cache_axis_order = (1, 2, 0, 3)
+    self.ar_cache_axis_order = (1, 2, 0, 3)
+    self.use_ragged_attention = False
+    self.KVCache_0 = self.init_kv_caches(inputs_kv_shape=feature_dim) if self.model_mode != MODEL_MODE_TRAIN else None
     if self.fused_qkv:
       self.qkv_proj = self.create_projection_layer(
           feature_dim, (3, self.num_heads, self.head_dim), ("embed", "qkv", "heads", "kv")
@@ -299,6 +305,40 @@ class Gpt3MultiHeadAttention(nnx.Module):
     proj = projection_layer(inputs)
     return proj
 
+  def init_kv_caches(self, inputs_kv_shape: tuple[int, ...]):
+    batch_size, _, _ = inputs_kv_shape
+    placeholder_seq_len = 1
+
+    return kvcache.KVCache(
+        max_prefill_length=self.max_prefill_predict_length,
+        max_target_length=self.max_target_length,
+        batch=batch_size,
+        key_seq_len=placeholder_seq_len,
+        value_seq_len=placeholder_seq_len,
+        key_heads=self.num_heads,
+        value_heads=self.num_heads,
+        key_head_size=self.head_dim,
+        value_head_size=self.head_dim,
+        dtype=self.dtype,
+        kv_quant=self.kv_quant,
+        prefill_cache_axis_order=self.prefill_cache_axis_order,
+        ar_cache_axis_order=self.ar_cache_axis_order,
+        use_chunked_prefill=self.config.use_chunked_prefill,
+        model_mode=self.model_mode,
+        rngs=self.rngs,
+    )
+
+  def update_kv_caches(self, key, value, decoder_segment_ids, model_mode, previous_chunk):
+    prefill_kv_cache, ar_kv_cache = self.KVCache_0(
+        key=key,
+        value=value,
+        decoder_segment_ids=decoder_segment_ids,
+        model_mode=model_mode,
+        use_ragged_attention=self.use_ragged_attention,
+        previous_chunk=previous_chunk,
+    )
+    return [prefill_kv_cache, ar_kv_cache]
+
   def __call__(
       self,
       inputs_q: Array,
@@ -306,6 +346,7 @@ class Gpt3MultiHeadAttention(nnx.Module):
       *,
       deterministic: bool = False,
       model_mode: str = MODEL_MODE_TRAIN,
+      previous_chunk: Any = None,
       kv_cache: Array | None = None,
       attention_metadata: dict[str, Any] | None = None,
   ):
@@ -328,7 +369,11 @@ class Gpt3MultiHeadAttention(nnx.Module):
     value = nn.with_logical_constraint(value, self.value_axis_names)
     value = checkpoint_name(value, "value_proj")
 
-    out = self.attention_op(query, key, value, decoder_segment_ids, None, model_mode)
+    cached_values = [None, None]
+    if model_mode != MODEL_MODE_TRAIN:
+      cached_values = self.update_kv_caches(key, value, decoder_segment_ids, model_mode, previous_chunk)
+
+    out = self.attention_op(query, key, value, decoder_segment_ids, None, model_mode, cached_values)
 
     out = nn.with_logical_constraint(out, self.out_axis_names)
 
@@ -448,6 +493,7 @@ class Gpt3DecoderLayer(nnx.Module):
         decoder_segment_ids=decoder_segment_ids,
         model_mode=model_mode,
         deterministic=deterministic,
+        previous_chunk=previous_chunk,
         kv_cache=kv_cache,
         attention_metadata=attention_metadata,
     )
