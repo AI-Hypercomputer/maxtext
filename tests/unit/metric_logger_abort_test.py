@@ -21,6 +21,8 @@ import numpy as np
 
 from maxtext.common.metric_logger import MetricLogger, MetadataKey
 
+# pylint: disable=missing-function-docstring
+
 
 class MetricLoggerAbortTest(unittest.TestCase):
 
@@ -52,7 +54,7 @@ class MetricLoggerAbortTest(unittest.TestCase):
         mock.patch.object(logger, "write_metrics_to_managed_mldiagnostics") as mldiag,
     ):
       with self.assertRaises(SystemExit) as cm:
-        logger.write_metrics(self._metrics(np.nan), step=1, is_training=True)
+        logger.write_metrics(self._metrics(np.nan), step=1, metric_type="train")
 
     self.assertEqual(cm.exception.code, 1)
     log_metrics.assert_called_once()
@@ -72,7 +74,7 @@ class MetricLoggerAbortTest(unittest.TestCase):
         mock.patch.object(logger, "write_metrics_to_managed_mldiagnostics"),
     ):
       with self.assertRaises(SystemExit):
-        logger.write_metrics(self._metrics(np.inf), step=1, is_training=True)
+        logger.write_metrics(self._metrics(np.inf), step=1, metric_type="train")
 
   def test_finite_loss_does_not_exit(self):
     logger = self._make_logger(True, True)
@@ -83,7 +85,7 @@ class MetricLoggerAbortTest(unittest.TestCase):
         mock.patch.object(logger, "write_metrics_to_managed_mldiagnostics"),
         mock.patch("jax.process_index", return_value=1),
     ):  # skip gcs branch
-      logger.write_metrics(self._metrics(1.23), step=1, is_training=True)
+      logger.write_metrics(self._metrics(1.23), step=1, metric_type="train")
 
   def test_abort_flags_disabled_does_not_exit(self):
     logger = self._make_logger(False, False)
@@ -94,7 +96,7 @@ class MetricLoggerAbortTest(unittest.TestCase):
         mock.patch.object(logger, "write_metrics_to_managed_mldiagnostics"),
         mock.patch("jax.process_index", return_value=1),
     ):
-      logger.write_metrics(self._metrics(np.nan), step=1, is_training=True)
+      logger.write_metrics(self._metrics(np.nan), step=1, metric_type="train")
 
 
 class MetricLoggerMetadataTest(unittest.TestCase):

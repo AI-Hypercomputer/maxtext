@@ -108,7 +108,6 @@ def train_loop(config, recorder, state=None):
             state, metrics = p_train_step(state, example_batch, nextrng)
 
       step_time_delta = datetime.datetime.now() - last_step_completion
-      last_step_completion = datetime.datetime.now()
 
       checkpointing.maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step)
 
@@ -124,27 +123,33 @@ def train_loop(config, recorder, state=None):
 
       if config.eval_interval > 0 and step > start_step and (step + 1) % config.eval_interval == 0:
         assert eval_data_iterator
+        # Explicitly reset the eval iterator and counters before starting the eval loop
+        eval_data_iterator.reset()
+        metric_logger.reset_eval_metrics()
+        max_logging.log(f"Starting eval after train step {step}")
         eval_step_count = 0
+        last_eval_step_completion = datetime.datetime.now()
         # pylint: disable=not-callable
         for eval_batch in eval_data_iterator:
           if config.eval_steps > 0 and eval_step_count >= config.eval_steps:
             break
           with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
             eval_metrics = p_eval_step(state, eval_batch, nextrng)
-          metric_logger.record_eval_metrics(step, metrics=eval_metrics)
+          eval_step_time_delta = datetime.datetime.now() - last_eval_step_completion
+          last_eval_step_completion = datetime.datetime.now()
+          metric_logger.buffer_and_write_metrics(
+              eval_metrics, eval_step_count, step_time_delta=eval_step_time_delta, is_training=False
+          )
           max_logging.log(f"Completed eval step {eval_step_count}")
           eval_step_count += 1
-        metric_logger.record_eval_metrics(step, eval_step_count=eval_step_count)
-        if metric_logger.cumulative_eval_metrics["scalar"]["eval/avg_loss"] <= config.target_eval_loss:
-          prof.deactivate()
-          raise exceptions.StopTraining(f"Target loss {config.target_eval_loss=} is achieved.")
 
       prof.maybe_deactivate_profiler(step, state)
 
       if step == start_step:
         max_utils.print_mem_stats("After params initialized")
 
-      metric_logger.buffer_and_write_train_metrics(metrics, step, step_time_delta)
+      last_step_completion = datetime.datetime.now()
+      metric_logger.buffer_and_write_metrics(metrics, step, step_time_delta)
 
     if config.save_checkpoint_on_completion:
       checkpointing.maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator)
@@ -153,6 +158,7 @@ def train_loop(config, recorder, state=None):
       checkpoint_manager.wait_until_finished()
     _job_completed_gracefully = True
   except exceptions.StopTraining as e:
+    prof.deactivate()
     max_logging.log(f"Training stopped: {str(e)}")
     _job_completed_gracefully = True
   finally:
