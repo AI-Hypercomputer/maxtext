@@ -33,12 +33,62 @@ LTI_MODIFIED_ATTENTION_PARAM_NAMES = ["query", "key", "value", "out"]
 LTI_ORIGINAL_ATTENTION_PARAMS_NAME = "kernel"
 LTI_LAYER_PATH_PREFIXES = ("layers_", "dense_layers_", "moe_layers_")
 
+# Fallback teacher config for the LTI augment hook. The `_flat_config` dict
+# injection in train_distill is lost when HyperParameters is deep-copied during
+# nnx lazy_init, so the trainer also stashes the teacher config here.
+_TEACHER_CONFIG: Config | None = None
+
+
+def set_teacher_config_for_lti(teacher_config: Config | None) -> None:
+  """Stashes the teacher config for `apply_lti_modification` to read."""
+  global _TEACHER_CONFIG
+  _TEACHER_CONFIG = teacher_config
+
+
+# Small noise on the structured warm-start so gradients can flow into the
+# off-structure entries.
+LTI_BRIDGE_NOISE_SCALE = 0.01
+
+
+def _warmstart_head_bridge(shape, dtype, rng_key, noise_scale=LTI_BRIDGE_NOISE_SCALE):
+  """Initializes a head-axis bridge of shape `(teacher_heads, student_heads)`.
+
+  Group-mean when teacher_heads is divisible by student_heads; otherwise
+  identity-prefix. A small Gaussian noise is added.
+  """
+  x, u = shape
+  if x >= u and x % u == 0:
+    g = x // u
+    base = jnp.zeros((x, u), dtype=dtype)
+    rows = jnp.arange(x)
+    cols = rows // g
+    base = base.at[rows, cols].set(jnp.asarray(1.0 / g, dtype=dtype))
+  else:
+    base = jnp.eye(x, u, dtype=dtype)
+  noise = nnx.initializers.lecun_normal()(rng_key, shape, dtype) * noise_scale
+  return base + noise
+
+
+def _warmstart_dim_bridge(shape, dtype, rng_key, noise_scale=LTI_BRIDGE_NOISE_SCALE):
+  """Initializes a head_dim-axis bridge of shape `(in_dim, out_dim)`.
+
+  Identity-prefix on the overlap region, `lecun_normal` random elsewhere.
+  This keeps teacher signal flowing through matching components while
+  preserving gradient through the expansion/reduction region.
+  """
+  in_dim, out_dim = shape
+  random_full = nnx.initializers.lecun_normal()(rng_key, shape, dtype)
+  overlap = min(in_dim, out_dim)
+  identity = jnp.eye(in_dim, out_dim, dtype=dtype)
+  if out_dim > in_dim:
+    out = random_full.at[:, :overlap].set(identity[:, :overlap] + random_full[:, :overlap] * noise_scale)
+  else:
+    out = random_full.at[:overlap, :].set(identity[:overlap, :] + random_full[:overlap, :] * noise_scale)
+  return out
+
 
 def apply_lti_modification(module: nnx.Module, module_name: str | None = None):
-  """
-  Applies Learn-To-Init structural modifications to an instantiated NNX module.
-  Checks the config to determine if LTI is enabled.
-  """
+  """Applies LTI structural modifications to an instantiated NNX module if enabled in the config."""
 
   config = getattr(module, "config", None)
   if not config or not getattr(config, "learn_to_init_mode", False):
@@ -84,7 +134,12 @@ def _customize_attention_modules(config: Config, attn_module_name: str, module: 
   target_names = LTI_MODIFIED_ATTENTION_PARAM_NAMES
 
   use_general_linear_map = config.lti_use_general_linear_map
-  teacher_config = config.teacher_config
+  teacher_config = getattr(config, "teacher_config", None) or _TEACHER_CONFIG
+  if teacher_config is None:
+    raise ValueError(
+        "LTI: teacher_config not set. Call set_teacher_config_for_lti(...) "
+        "from the trainer before building the student model."
+    )
 
   for name in target_names:
     child = getattr(attention_module, name, None)
@@ -193,17 +248,18 @@ class LearnToInitDense(nnx.Module):
       x, y, b_t = self.C.value.shape
       assert b_s == b_t, f"Embedding dimension mismatch for output projection: {b_s} != {b_t}"
       if self.use_general_linear_map:
+        # General-map mode has no structured warm-start; prefer A/B mode for that.
         self.W = nnx.Param(
             nnx.initializers.lecun_normal()(rngs.params(), (x, y, u, v), self.weight_dtype),
             sharding=(None, None, None, None),
         )
       else:
         self.A = nnx.Param(
-            nnx.initializers.lecun_normal()(rngs.params(), (x, u), self.weight_dtype),
+            _warmstart_head_bridge((x, u), self.weight_dtype, rngs.params()),
             sharding=(None, None),
         )
         self.B = nnx.Param(
-            nnx.initializers.lecun_normal()(rngs.params(), (v, y), self.weight_dtype),
+            _warmstart_dim_bridge((v, y), self.weight_dtype, rngs.params()),
             sharding=(None, None),
         )
     else:
@@ -219,11 +275,11 @@ class LearnToInitDense(nnx.Module):
         )
       else:
         self.A = nnx.Param(
-            nnx.initializers.lecun_normal()(rngs.params(), (x, u), self.weight_dtype),
+            _warmstart_head_bridge((x, u), self.weight_dtype, rngs.params()),
             sharding=(None, None),
         )
         self.B = nnx.Param(
-            nnx.initializers.lecun_normal()(rngs.params(), (y, v), self.weight_dtype),
+            _warmstart_dim_bridge((y, v), self.weight_dtype, rngs.params()),
             sharding=(None, None),
         )
 

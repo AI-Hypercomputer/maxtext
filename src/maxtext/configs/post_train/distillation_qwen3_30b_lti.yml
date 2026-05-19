@@ -1,0 +1,104 @@
+base_config: "base.yml"
+
+# --- Student Specifics ---
+student_overrides:
+  model_name: "qwen3-30b-a3b-base"
+  override_model_config: True
+  base_num_query_heads: 16
+  head_dim: 256
+  base_num_kv_heads: 2
+
+# --- Teacher Specifics ---
+# learn_to_init_mode: False so the teacher keeps its original attention
+# (LTI bridges only wrap the student).
+teacher_overrides:
+  model_name: "qwen3-30b-a3b-base"
+  load_parameters_path: ""    # path to the converted Qwen3-30B-A3B-base MaxText checkpoint
+  learn_to_init_mode: False
+
+# --- Distillation Loss ---
+distill_alpha: 1.0
+distill_temperature: 1.0
+distill_beta: 0.0
+
+# --- Learn-to-Init ---
+learn_to_init_mode: True
+attn_module_name: "self_attention"
+lti_use_general_linear_map: False
+
+# Copy teacher non-attention weights directly; copy teacher attention kernels
+# into the student's frozen C buffer (LTI bridges learn A,B around it).
+distill_weights_copy_map:
+  "token_embedder/embedding": "token_embedder/embedding"
+  "decoder/decoder_norm/scale": "decoder/decoder_norm/scale"
+  "decoder/logits_dense/kernel": "decoder/logits_dense/kernel"
+  "decoder/layers/pre_self_attention_layer_norm/scale": "decoder/layers/pre_self_attention_layer_norm/scale"
+  "decoder/layers/post_self_attention_layer_norm/scale": "decoder/layers/post_self_attention_layer_norm/scale"
+  "decoder/layers/moe_block/gate/kernel": "decoder/layers/moe_block/gate/kernel"
+  "decoder/layers/moe_block/wi_0": "decoder/layers/moe_block/wi_0"
+  "decoder/layers/moe_block/wi_1": "decoder/layers/moe_block/wi_1"
+  "decoder/layers/moe_block/wo": "decoder/layers/moe_block/wo"
+  "decoder/layers/self_attention/query/kernel": "decoder/layers/self_attention/query/C"
+  "decoder/layers/self_attention/key/kernel":   "decoder/layers/self_attention/key/C"
+  "decoder/layers/self_attention/value/kernel": "decoder/layers/self_attention/value/C"
+  "decoder/layers/self_attention/out/kernel":   "decoder/layers/self_attention/out/C"
+
+# Freeze everything except LTI bridges A,B (~10M of ~30B params train).
+student_params_to_update:
+  - "self_attention/(query|key|value|out)/(A|B)$"
+
+# --- MoE ---
+# Qwen3-30B-A3B (128 experts, top-8) needs MoE LB loss > 0 to avoid router
+# collapse. 0.001 matches HF router_aux_loss_coef.
+load_balance_loss_weight: 0.001
+
+# --- Dataset & Tokenizer ---
+dataset_type: "grain"
+grain_file_type: "arrayrecord"
+grain_train_files: "gs://maxtext-dataset/array-record/climbmix/*.arrayrecord"
+grain_worker_count: 16
+grain_ram_budget_mb: 4096
+grain_per_worker_buffer_size: 8
+grain_prefetch_buffer_size: 64
+num_epoch: 10
+
+tokenizer_path: "src/maxtext/assets/tokenizers/qwen3-tokenizer"
+tokenizer_type: "huggingface"
+
+# Batch-shape fields must be at YAML top level (trainer rebuilds teacher
+# config from YAML only, ignoring CLI overrides).
+max_target_length: 4096
+
+# --- Training Loop ---
+# Front-loaded schedule: warmup + cosine decay over the first 3200 steps,
+# then constant min_lr.
+steps: 64000
+learning_rate_schedule_steps: 3200
+checkpoint_period: 2000
+log_period: 10
+save_checkpoint_on_completion: True
+
+# --- Batch Size Strategy ---
+# Global Batch Size = per_device_batch_size * num_devices * gradient_accumulation_steps
+# per_device=1 keeps Adam state + teacher params in 96 GB HBM.
+per_device_batch_size: 1
+gradient_accumulation_steps: 1
+
+# --- Learning Rate Schedule ---
+# 200-step warmup is sufficient for LTI-only training (~10M trainable params,
+# smooth loss surface).
+learning_rate: 3.0e-5
+learning_rate_final_fraction: 0.0333    # = 1e-6 / 3e-5
+warmup_steps_fraction: 0.0625           # = 200 / 3200
+
+# --- Optimizer ---
+adam_b1: 0.9
+adam_b2: 0.95
+adam_eps: 1.e-5
+adam_weight_decay: 0.01
+adamw_mask: []                          # uniform WD across all params
+
+# --- Numerics ---
+# fp32 logits: KL is precision-sensitive (vocab=151k) and fits at per_device=1.
+z_loss_multiplier: 1.0e-5
+float32_logits: True

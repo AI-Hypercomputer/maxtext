@@ -51,7 +51,7 @@ from orbax import checkpoint
 from maxtext.configs import pyconfig
 from maxtext.input_pipeline import tokenizer
 from maxtext.input_pipeline import input_pipeline_interface
-from maxtext.layers.learn_to_init_layer import apply_lti_model_update
+from maxtext.layers.learn_to_init_layer import apply_lti_model_update, set_teacher_config_for_lti
 from maxtext.optimizers import optimizers
 from maxtext.trainers.post_train.distillation import distillation_utils, lti_utils
 from maxtext.utils import max_logging
@@ -695,8 +695,11 @@ def train_distill(
       teacher_model = get_maxtext_model(teacher_config, mesh)
       teacher_model.eval()
 
-    # LTI phase needs the student initialization step to know about the teacher configuration
+    # LTI needs the teacher config at student lazy_init time. The dict
+    # injection is lost when HyperParameters is deep-copied, so also stash it
+    # on the LTI module-level fallback.
     student_config.get_keys()["teacher_config"] = teacher_config
+    set_teacher_config_for_lti(teacher_config)
 
     max_logging.log(f"Loading Student from {student_config.load_parameters_path}...")
     _log_config_details(student_config, "Student")
