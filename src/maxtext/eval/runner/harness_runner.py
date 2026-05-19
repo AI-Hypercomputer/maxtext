@@ -135,7 +135,8 @@ def run_harness(cfg: dict, hf_token: str | None = None) -> dict:
     is_rank0 = _jax.process_index() == 0
 
     if is_rank0:
-      warmup_server(base_url=server.base_url, model=model_name)
+      if not cfg.get("skip_warmup"):
+        warmup_server(base_url=server.base_url, model=model_name)
 
       completions_path = "/v1/chat/completions" if backend == "evalchemy" else "/v1/completions"
       model_args_parts = [
