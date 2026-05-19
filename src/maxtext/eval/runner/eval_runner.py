@@ -132,7 +132,8 @@ def run_eval(cfg: dict, hf_token: str | None = None) -> dict:
       base_url = server.base_url
 
       # Warmup server.
-      warmup_server(base_url=base_url, model=model_name, sample_requests=requests)
+      if not cfg.get("skip_warmup"):
+        warmup_server(base_url=base_url, model=model_name, sample_requests=requests)
 
       # Generate responses.
       logger.info("Generating responses for %d prompts.", len(prompts))
@@ -214,6 +215,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
   parser.add_argument("--server_host", help="vLLM server host.")
   parser.add_argument("--server_port", type=int, help="vLLM server port.")
   parser.add_argument("--hf_mode", action="store_true", help="Use HF safetensors mode.")
+  parser.add_argument("--skip_warmup", action="store_true", help="Skip the server warmup phase.")
   parser.add_argument(
       "--enable_expert_parallel",
       action="store_true",

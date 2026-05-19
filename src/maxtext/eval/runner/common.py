@@ -129,6 +129,7 @@ def add_server_args(parser: argparse.ArgumentParser) -> None:
       help=("Fraction of HBM reserved for KV cache."),
   )
   parser.add_argument("--hf_token", help="HuggingFace token for gated models.")
+  parser.add_argument("--skip_warmup", action="store_true", help="Skip the server warmup phase.")
   parser.add_argument("--gcs_results_path", help="Optional secondary GCS path to upload the results JSON.")
   parser.add_argument(
       "--log_level",
