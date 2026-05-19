@@ -697,6 +697,10 @@ def train_distill(
 
     # LTI phase needs the student initialization step to know about the teacher configuration
     student_config.get_keys()["teacher_config"] = teacher_config
+    # Also stash on the module-level fallback because the _flat_config injection
+    # above doesn't survive HyperParameters.__deepcopy__ during lazy_init.
+    from maxtext.layers.learn_to_init_layer import set_teacher_config_for_lti
+    set_teacher_config_for_lti(teacher_config)
 
     max_logging.log(f"Loading Student from {student_config.load_parameters_path}...")
     _log_config_details(student_config, "Student")

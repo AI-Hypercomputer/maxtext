@@ -35,6 +35,7 @@ from maxtext.layers import initializers as max_initializers
 from maxtext.layers import moe
 from maxtext.layers import nnx_wrappers
 from maxtext.layers import quantizations
+from maxtext.layers.learn_to_init_layer import apply_lti_modification
 from maxtext.layers.embeddings import Qwen3OmniMoeVisionPosEmbedInterpolate, PositionalEmbedding
 from maxtext.layers.normalizations import RMSNorm, l2norm, Qwen3NextRMSNorm, Qwen3NextRMSNormGated
 from maxtext.layers.quantizations import AqtQuantization as Quant
@@ -2251,6 +2252,7 @@ Qwen3DecoderLayerToLinen = nnx_wrappers.to_linen_class(
 Qwen3MoeDecoderLayerToLinen = nnx_wrappers.to_linen_class(
     Qwen3MoeDecoderLayer,
     base_metadata_fn=max_initializers.variable_to_logically_partitioned,
+    nnx_module_augment_fn=apply_lti_modification,
 )
 
 Qwen3NextDecoderLayerToLinen = nnx_wrappers.to_linen_class(

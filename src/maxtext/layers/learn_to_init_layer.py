@@ -33,6 +33,111 @@ LTI_MODIFIED_ATTENTION_PARAM_NAMES = ["query", "key", "value", "out"]
 LTI_ORIGINAL_ATTENTION_PARAMS_NAME = "kernel"
 LTI_LAYER_PATH_PREFIXES = ("layers_", "dense_layers_", "moe_layers_")
 
+# Module-level fallback so the LTI hook can find the teacher config even when
+# it isn't reachable via `module.config.teacher_config` -- e.g., when nnx/scan
+# deep-copies HyperParameters during lazy_init (the `_flat_config` dict-based
+# teacher_config injection at train_distill.py:777 doesn't survive that copy).
+# Set this from the trainer right before student model construction.
+_TEACHER_CONFIG: Config | None = None
+
+
+def set_teacher_config_for_lti(teacher_config: Config | None) -> None:
+  """Stash the teacher config so `apply_lti_modification` can find it.
+
+  Call this in the trainer immediately before the student model is built
+  (and the augment hook fires during decoder lazy_init).
+  """
+  global _TEACHER_CONFIG
+  _TEACHER_CONFIG = teacher_config
+
+# Small noise added on top of structured warm-start bridges so they can still
+# learn (pure identity would have zero gradient flow through the non-identity
+# components and never adapt the head-grouping or dim-padding). 0.01 is small
+# enough that step-1 student PPL is dominated by the warm-start, not noise.
+LTI_BRIDGE_NOISE_SCALE = 0.01
+
+
+def _warmstart_head_bridge(shape, dtype, rng_key, noise_scale=LTI_BRIDGE_NOISE_SCALE):
+  """Bridge that maps teacher heads -> student heads. Shape: (x, u).
+
+  - Reduction (x >= u, x divisible by u): group-mean. Each student head j
+    averages teacher heads [j*g, j*g+1, ..., (j+1)*g-1] where g = x/u.
+  - Expansion (u > x, u divisible by x): each teacher head fans out to r=u/x
+    student heads, scaled by 1/sqrt(r) so output norm is preserved.
+  - Non-divisible: fall back to jnp.eye (identity-prefix). The bridge still
+    works, just with less structured initial behavior.
+
+  A small Gaussian noise (`noise_scale * lecun_normal`) is added so gradients
+  can flow into the off-structure entries and the bridge can adapt.
+  """
+  x, u = shape
+  if x >= u and x % u == 0:
+    g = x // u
+    base = jnp.zeros((x, u), dtype=dtype)
+    rows = jnp.arange(x)
+    cols = rows // g
+    base = base.at[rows, cols].set(jnp.asarray(1.0 / g, dtype=dtype))
+  elif u > x and u % x == 0:
+    r = u // x
+    base = jnp.zeros((x, u), dtype=dtype)
+    rows = jnp.arange(x)
+    scale = jnp.asarray(1.0 / jnp.sqrt(r), dtype=dtype)
+    for k in range(r):
+      base = base.at[rows, rows * r + k].set(scale)
+  else:
+    base = jnp.eye(x, u, dtype=dtype)
+  noise = nnx.initializers.lecun_normal()(rng_key, shape, dtype) * noise_scale
+  return base + noise
+
+
+def _warmstart_dim_bridge(shape, dtype, rng_key, noise_scale=LTI_BRIDGE_NOISE_SCALE,
+                          init_zero=False):
+  """Bridge that maps a head_dim axis. Shape: (in_dim, out_dim).
+
+  HYBRID init -- identity-prefix on the overlap, lecun_normal random on the
+  expansion/reduction region:
+
+  - Expansion (out > in), e.g. teacher head_dim=128 -> student head_dim=256
+    so shape=(128, 256):
+      * first `in` columns (0..127): jnp.eye -> teacher signal flows through
+      * last (out - in) columns (128..255): lecun_normal -> random projection
+    Earlier version zero-padded the last columns; that made student v>=128
+    permanently zero in forward, so gradient through B[:, 128:] was
+    identically zero and the back half of head_dim was DEAD. Hybrid breaks
+    that symmetry while preserving the warm-start head-start on the front
+    half.
+
+  - Reduction (out < in), e.g. student v=256 -> teacher y=128, shape=(256, 128):
+      * first `out` rows (0..127): jnp.eye -> teacher signal flows through
+      * last (in - out) rows (128..255): lecun_normal -> random reads from
+        student components 128..255 (which now have nonzero values from QKV's
+        random tail), bringing them into the loss/gradient.
+
+  Plus a small Gaussian noise on the identity portion so off-diagonal
+  entries can also adapt.
+
+  When `init_zero` is True, returns all zeros -- used historically for a
+  "skip-init" OUT projection. Kept for experimentation; not the default.
+  """
+  if init_zero:
+    return jnp.zeros(shape, dtype=dtype)
+  in_dim, out_dim = shape
+  # Random base, scaled to lecun_normal standard.
+  random_full = nnx.initializers.lecun_normal()(rng_key, shape, dtype)
+  # Identity-prefix on the overlap region.
+  overlap = min(in_dim, out_dim)
+  identity = jnp.eye(in_dim, out_dim, dtype=dtype)  # nonzero only in overlap
+
+  # Combine: identity portion gets identity + small noise; remainder stays at
+  # full lecun_normal (random).
+  if out_dim > in_dim:  # expansion: last (out-in) columns stay full random
+    out = random_full.at[:, :overlap].set(
+        identity[:, :overlap] + random_full[:, :overlap] * noise_scale)
+  else:  # reduction (or equal): last (in-out) rows stay full random
+    out = random_full.at[:overlap, :].set(
+        identity[:overlap, :] + random_full[:overlap, :] * noise_scale)
+  return out
+
 
 def apply_lti_modification(module: nnx.Module, module_name: str | None = None):
   """
@@ -84,7 +189,12 @@ def _customize_attention_modules(config: Config, attn_module_name: str, module: 
   target_names = LTI_MODIFIED_ATTENTION_PARAM_NAMES
 
   use_general_linear_map = config.lti_use_general_linear_map
-  teacher_config = config.teacher_config
+  teacher_config = getattr(config, "teacher_config", None) or _TEACHER_CONFIG
+  if teacher_config is None:
+    raise ValueError(
+        "LTI: teacher_config not set. Call set_teacher_config_for_lti(...) "
+        "from the trainer before building the student model."
+    )
 
   for name in target_names:
     child = getattr(attention_module, name, None)
@@ -193,17 +303,28 @@ class LearnToInitDense(nnx.Module):
       x, y, b_t = self.C.value.shape
       assert b_s == b_t, f"Embedding dimension mismatch for output projection: {b_s} != {b_t}"
       if self.use_general_linear_map:
+        # General-map case: no clean structured warm-start since the bridge
+        # is a single 4D tensor. Keep lecun_normal; user should prefer the
+        # factored A/B mode (default) for warm-start behavior.
         self.W = nnx.Param(
             nnx.initializers.lecun_normal()(rngs.params(), (x, y, u, v), self.weight_dtype),
             sharding=(None, None, None, None),
         )
       else:
+        # OUT bridge B has shape (v, y) -- different axis order than QKV.
+        # Earlier tried skip-init (B=0) thinking it would give "teacher
+        # backbone with attention bypassed" -> low step-1 loss. But for
+        # autoregressive LM, bypassing attention = no in-context modeling
+        # = essentially random predictions (loss ~= log(vocab) ~= 12).
+        # Reverted to identity-prefix warm-start: attention contributes
+        # near-teacher signal from step 1, leveraging the warm-started
+        # Q/K/V bridges.
         self.A = nnx.Param(
-            nnx.initializers.lecun_normal()(rngs.params(), (x, u), self.weight_dtype),
+            _warmstart_head_bridge((x, u), self.weight_dtype, rngs.params()),
             sharding=(None, None),
         )
         self.B = nnx.Param(
-            nnx.initializers.lecun_normal()(rngs.params(), (v, y), self.weight_dtype),
+            _warmstart_dim_bridge((v, y), self.weight_dtype, rngs.params()),
             sharding=(None, None),
         )
     else:
@@ -219,11 +340,11 @@ class LearnToInitDense(nnx.Module):
         )
       else:
         self.A = nnx.Param(
-            nnx.initializers.lecun_normal()(rngs.params(), (x, u), self.weight_dtype),
+            _warmstart_head_bridge((x, u), self.weight_dtype, rngs.params()),
             sharding=(None, None),
         )
         self.B = nnx.Param(
-            nnx.initializers.lecun_normal()(rngs.params(), (y, v), self.weight_dtype),
+            _warmstart_dim_bridge((y, v), self.weight_dtype, rngs.params()),
             sharding=(None, None),
         )
 
