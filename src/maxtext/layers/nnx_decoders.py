@@ -64,8 +64,7 @@ from maxtext.models import (
     simple_layer,
 )
 from maxtext.multimodal import utils as mm_utils
-from maxtext.utils import max_logging, max_utils, maxtext_utils, sharding
-from maxtext.utils.maxtext_utils_nnx import nnx_ensure_scan_leading_axis
+from maxtext.utils import max_logging, max_utils, maxtext_utils, maxtext_utils_nnx, sharding
 from maxtext.utils.sharding import create_sharding
 
 # ------------------------------------------------------------------------------
@@ -595,6 +594,8 @@ class NNXDecoder(nnx.Module):
     use_kv = kv_caches_stacked is not None
 
     def layer_fn(carry, scanned_vars):
+      # Ensure metadata rank matches the sliced values
+      scanned_vars = maxtext_utils_nnx.nnx_remove_scan_axis(scanned_vars, "layers")
 
       # Unpack the sliced variables for THIS layer
       if use_kv:
@@ -664,16 +665,20 @@ class NNXDecoder(nnx.Module):
       # inference with vLLM, parameters do not change and we don't need intermediates.
       return current_carry, layers, None
     else:
-      params = nnx_ensure_scan_leading_axis(params, length)
-      state = nnx_ensure_scan_leading_axis(state, length)
+      params = maxtext_utils_nnx.nnx_ensure_scan_leading_axis(params, length)
+      state = maxtext_utils_nnx.nnx_ensure_scan_leading_axis(state, length)
 
       final_carry, scanned_state = jax.lax.scan(layer_fn_wrapped, x_in, (params, state))
-      returned_kv_stacked = None
 
-    if scan_axis != 0:
-      new_params, new_rest = scanned_state.split(nnx.Param, ...)
-      new_params = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0), new_params)
-      scanned_state = nnx.merge_state(new_params, new_rest)
+      # Ensure metadata rank matches the stacked values
+      scanned_state = maxtext_utils_nnx.nnx_add_scan_axis(scanned_state, "layers", 0)
+
+      if scan_axis != 0:
+        new_params, new_rest = scanned_state.split(nnx.Param, ...)
+        new_params = maxtext_utils_nnx.nnx_sync_moveaxis(new_params, 0, scan_axis)
+        scanned_state = nnx.merge_state(new_params, new_rest)
+
+      returned_kv_stacked = None
 
     if dynamic_graph_init:
       # If graph changed, we need to merge with the new graphdef.

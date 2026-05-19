@@ -1236,8 +1236,18 @@ class LoRA(BaseModel):
   lora_module_path: str = Field(
       "",
       description=(
-          "Regex identifying target modules for LoRA, e.g." " '.*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj'."
+          "Regex identifying target NNX modules for LoRA. "
+          "Example for standard models: 'decoder/layers/.*(self_attention/(query|out)|mlp/(wi_0|wo))'. "
+          "Example for MoE: 'decoder/scanned_blocks/layers.*/.*(MoeBlock_0|shared_experts)/(wi_0|wo)'."
       ),
+  )
+  lora_weight_qtype: str | None = Field(
+      None,
+      description=("Optional quantization type for QLoRA (e.g., 'nf4'). If set, QLoRA is applied."),
+  )
+  lora_tile_size: NonNegativeInt | None = Field(
+      None,
+      description=("Tile size for block-wise quantization. Typically 32 or 64."),
   )
   lora_restore_path: PathStr = Field(
       "",

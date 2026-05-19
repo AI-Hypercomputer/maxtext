@@ -29,6 +29,8 @@ from tunix.sft import peft_trainer
 from maxtext.utils import lora_utils
 from maxtext.utils import model_creation_utils
 from maxtext.configs import pyconfig
+from maxtext.utils import maxtext_utils
+from jax.sharding import Mesh
 from tests.utils.test_helpers import get_test_config_path
 
 # ---------------------------------------------------------------------------
@@ -104,10 +106,14 @@ class LoraUtilsTest(unittest.TestCase):
     mock_config.lora.lora_module_path = "custom/path"
     mock_config.lora.lora_rank = 8
     mock_config.lora.lora_alpha = 16.0
+    mock_config.lora.lora_weight_qtype = "int8"
+    mock_config.lora.lora_tile_size = 32
 
     with mock.patch("qwix.LoraProvider") as mock_provider:
       lora_utils._build_lora_provider(mock_config)
-      mock_provider.assert_called_once_with(module_path="custom/path", rank=8, alpha=16.0, dropout=0.0)
+      mock_provider.assert_called_once_with(
+          module_path="custom/path", rank=8, alpha=16.0, dropout=0.0, weight_qtype="int8", tile_size=32
+      )
 
   def test_prepare_dummy_inputs(self):
     """Test preparation of dummy inputs for LoRA verification."""
@@ -158,8 +164,8 @@ class LoraUtilsTest(unittest.TestCase):
     # If we skip Qwix, it should stay False.
     self.assertFalse(lora_utils.is_lora_enabled(result))
 
-  def _run_apply_lora_test(self, scan_layers: bool):
-    """Helper to run LoRA application test with/without scanned layers."""
+  def _run_apply_lora_test(self, scan_layers: bool, weight_qtype=None, tile_size=None, mock_multihost: bool = False):
+    """Helper to run LoRA application test with/without scanned layers and optional QLoRA."""
     # Passing nested dict as 'lora' kwarg to _make_config
     cfg = _make_config(
         lora={
@@ -167,18 +173,27 @@ class LoraUtilsTest(unittest.TestCase):
             "lora_rank": 4,
             "lora_alpha": 8.0,
             "lora_module_path": ".*mlp/wi_.*",
+            "lora_weight_qtype": weight_qtype,
+            "lora_tile_size": tile_size,
         },
         scan_layers=scan_layers,
     )
 
     # Create a real small model using standard creation utils
-    model, _ = model_creation_utils.from_pretrained(cfg, mesh=None, model_mode=model_creation_utils.MODEL_MODE_TRAIN)
+    model, mesh = model_creation_utils.from_pretrained(cfg, mesh=None, model_mode=model_creation_utils.MODEL_MODE_TRAIN)
 
     # Verify model is NOT lora enabled initially
     self.assertFalse(lora_utils.is_lora_enabled(model))
 
-    # Apply LoRA
-    lora_model = lora_utils.apply_lora_to_model(model, model.mesh, cfg)
+    if mock_multihost:
+      devices_array = maxtext_utils.create_device_mesh(cfg)
+      dummy_mesh = Mesh(devices_array, cfg.mesh_axes)
+
+      # Just verify that apply_lora_to_model runs successfully with the dummy mesh
+      lora_model = lora_utils.apply_lora_to_model(model, dummy_mesh, cfg)
+    else:
+      # Apply LoRA
+      lora_model = lora_utils.apply_lora_to_model(model, mesh, cfg)
 
     # Verify we can find LoRAParam in the state
     _, state = nnx.split(lora_model)
@@ -200,12 +215,26 @@ class LoraUtilsTest(unittest.TestCase):
     self.assertGreater(len(jax.tree_util.tree_leaves(opt_state)), 0)
 
   def test_apply_lora_to_model_scan_layers_false(self):
-    """Test applying LoRA to model with scan_layers=False."""
+    """Test applying standard LoRA to model with scan_layers=False."""
     self._run_apply_lora_test(scan_layers=False)
 
   def test_apply_lora_to_model_scan_layers_true(self):
-    """Test applying LoRA to model with scan_layers=True."""
+    """Test applying standard LoRA to model with scan_layers=True."""
     self._run_apply_lora_test(scan_layers=True)
+
+  @unittest.skip("Awaiting qwix fix for QLoRA params materialization")
+  def test_apply_qlora_to_model_scan_layers_false(self):
+    """Test applying QLoRA to model with scan_layers=False."""
+    self._run_apply_lora_test(scan_layers=False, weight_qtype="int8", tile_size=32)
+
+  @unittest.skip("Awaiting qwix fix for QLoRA params materialization")
+  def test_apply_qlora_to_model_scan_layers_true(self):
+    """Test applying QLoRA to model with scan_layers=True."""
+    self._run_apply_lora_test(scan_layers=True, weight_qtype="int8", tile_size=32)
+
+  def test_apply_lora_multihost_mock(self):
+    """Test applying LoRA with a dummy mesh to trigger the multi-host reshard callback."""
+    self._run_apply_lora_test(scan_layers=False, mock_multihost=True)
 
   def test_restore_lora_from_path(self):
     """Test restoration of LoRA parameters from a path."""

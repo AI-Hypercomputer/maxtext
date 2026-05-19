@@ -19,7 +19,7 @@ import os
 import re
 from typing import Any, Optional
 
-from flax import nnx
+from flax import nnx, linen as nn
 from flax.linen import partitioning as nn_partitioning
 from flax.training import train_state
 import jax
@@ -33,7 +33,6 @@ from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
-from maxtext.utils import sharding
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
 
 
@@ -411,11 +410,18 @@ def _build_lora_provider(mt_config: pyconfig.HyperParameters) -> qwix.LoraProvid
       "rank": mt_config.lora.lora_rank,
       "alpha": mt_config.lora.lora_alpha,
       "dropout": 0.0,
+      "weight_qtype": mt_config.lora.lora_weight_qtype,
+      "tile_size": mt_config.lora.lora_tile_size,
   }
+  # Distinguish between standard LoRA and QLoRA in logs
+  lora_type = "QLoRA" if mt_config.lora.lora_weight_qtype else "LoRA"
+
   max_logging.log(
-      f"LoRA configured: module_path={lora_module_path} "
-      f"rank={mt_config.lora.lora_rank} alpha={mt_config.lora.lora_alpha}"
+      f"{lora_type} configured: rank={mt_config.lora.lora_rank} alpha={mt_config.lora.lora_alpha} "
+      f"qtype={mt_config.lora.lora_weight_qtype} tile_size={mt_config.lora.lora_tile_size}"
   )
+
+  max_logging.log(f"Using lora_module_path: {lora_module_path}")
   return qwix.LoraProvider(**lora_kwargs)
 
 
@@ -513,13 +519,22 @@ def apply_lora_to_model(
 
       # Use logical_to_mesh_sharding to correctly map logical axes like 'embed'
       # to physical mesh axes.
-      dst_shardings = sharding.logical_to_mesh_sharding(
-          nnx.get_partition_spec(state), mesh, rules=mt_config.logical_axis_rules
-      )
+      dst_shardings = nn.logical_to_mesh_sharding(nnx.get_partition_spec(state), mesh, mt_config.logical_axis_rules)
 
-      from tunix.rl import reshard  # pylint: disable=import-outside-toplevel
+      def _safe_reshard(var, sharding_spec):
+        if not isinstance(var, nnx.Variable) or not isinstance(sharding_spec, jax.sharding.Sharding):
+          return var
+        val = var.get_value()
+        if not isinstance(val, jax.Array):
+          return var
+        # make_array_from_callback natively constructs a globally sharded array
+        # from the local host arrays, bypassing backend-specific device_put issues
+        # on both Pathways and McJAX.
+        resharded_val = jax.make_array_from_callback(val.shape, sharding_spec, lambda idx: val[idx])
+        return var.replace(value=resharded_val)
 
-      state = reshard.reshard_pytree(state, dst_shardings)
+      state = jax.tree_util.tree_map(_safe_reshard, state, dst_shardings, is_leaf=lambda x: isinstance(x, nnx.Variable))
+
       lora_model = nnx.merge(graph_def, state)
 
   _verify_lora_parameters(lora_model, mt_config)
