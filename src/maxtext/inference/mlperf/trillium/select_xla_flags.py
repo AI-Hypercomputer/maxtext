@@ -50,7 +50,6 @@ xla_flags_autotuned = {
     "xla_tpu_alternate_memory_benefit_scaling_factor_for_large_buffers": "SQRT",
     "xla_tpu_memory_bound_loop_optimizer_options": "enabled:true",
     "xla_tpu_enable_copy_fusion": "true",
-    "xla_tpu_enable_cross_program_prefetch_freeing": "false",
     "xla_tpu_enable_dot_strength_reduction": "true",
     "xla_tpu_layout_use_dot_grouping": "false",
     "xla_tpu_msa_inefficient_use_to_copy_ratio": "0.5",
