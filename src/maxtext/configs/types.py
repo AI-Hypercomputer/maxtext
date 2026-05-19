@@ -87,6 +87,8 @@ class QuantizationType(str, Enum):
   INT4 = "int4"
   INT8 = "int8"
   INTMP = "intmp"
+  FP8_E5M2 = "fp8_e5m2"
+  FP8_E4M3 = "fp8_e4m3"
   FP8 = "fp8"
   NANOO_FP8 = "nanoo_fp8"
   FP8_NANO_V2 = "fp8_nanoo"
