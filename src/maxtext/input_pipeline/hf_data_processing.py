@@ -117,6 +117,7 @@ def vision_sft_preprocessing_pipeline(
       add_eos_token=False,
       legacy=False,
       token=config.hf_access_token,
+      extra_special_tokens={},
   )
   pad_id = _get_pad_id(tokenizer)
 
@@ -255,6 +256,7 @@ def preprocessing_pipeline(
       add_eos_token=add_eos if not use_sft else False,
       legacy=False,
       token=hf_access_token,
+      extra_special_tokens={},
   )
 
   dataset = dataset.select_columns(data_column_names)

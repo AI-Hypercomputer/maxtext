@@ -150,6 +150,13 @@ def construct_prompt(
         question=parsed_dataset_example.question,
         choices=choices_text if choices_text else "N/A",
     )
+    if config.use_multimodal and "qwen3-omni" in config.model_name:
+      prompt = mm_processor.reformat_prompt(
+          prompt,
+          image_placeholder,
+          config.model_name,
+          num_images=1,
+      )
   elif local_args.ckpt_type == "sft":
     prompt = mm_processor.reformat_prompt(
         parsed_dataset_example.question,
@@ -200,11 +207,31 @@ def main(config, local_args):
     print("\n" + "*" * 50)
 
     # Tokenize the input
-    tokens, true_length = tokenizer.encode(prompt, is_bos=True, prefill_lengths=[prefill_length])
+    is_bos = config.add_bos and getattr(tokenizer, "bos_id", None) is not None
+    tokens, true_length = tokenizer.encode(prompt, is_bos=is_bos, prefill_lengths=[prefill_length])
+    position_ids = None
+    mrope_position_deltas = None
+
     if config.use_multimodal:
       tokens = mm_processor.prepare_text_for_image_fusion(tokens=tokens, config=config, processor_output=processor_output)
       image_offsets = mm_processor.get_image_offsets(config=config, processor_output=processor_output)
       true_length += image_offsets
+
+      if config.use_mrope:
+        from maxtext.multimodal import processor_qwen3_omni  # pylint: disable=import-outside-toplevel
+
+        position_ids, mrope_position_deltas = processor_qwen3_omni.get_rope_index(
+            input_ids=tokens[np.newaxis, :],  # Add batch dimension for processing
+            image_grid_thw=processor_output.pixel_grid_thw,  # pytype: disable=attribute-error
+            video_grid_thw=processor_output.video_grid_thw,  # pytype: disable=attribute-error
+            attention_mask=np.ones_like(tokens)[np.newaxis, :],
+            use_audio_in_video=config.use_audio and getattr(processor_output, "num_videos", 0) > 0,
+            audio_lengths=processor_output.audio_lengths,  # pytype: disable=attribute-error
+            second_per_grids=processor_output.video_second_per_grid,  # pytype: disable=attribute-error
+            spatial_merge_size=config.spatial_merge_size_for_vit,  # pytype: disable=attribute-error
+            position_id_per_seconds=config.position_id_per_seconds,
+        )
+
     if true_length > max_prefill_predict_length:
       max_logging.log(
           f"Warning: Prompt length {true_length} exceeds max prefill length" f" {max_prefill_predict_length}. Truncating."
@@ -216,7 +243,18 @@ def main(config, local_args):
 
     # Perform prefill
     prefill_result, first_token = engine.prefill(
-        params=params, padded_tokens=tokens, images=processor_output.pixel_values, true_length=true_length
+        params=params,
+        padded_tokens=tokens,
+        positions=position_ids,
+        mrope_deltas=mrope_position_deltas,
+        images=processor_output.pixel_values if config.use_multimodal else None,
+        image_masks=getattr(processor_output, "pixel_mask", None)
+        if config.use_multimodal and "llama4" in config.model_name
+        else None,
+        audio_values=getattr(processor_output, "audio_values", None) if config.use_audio else None,
+        audio_masks=getattr(processor_output, "audio_mask", None) if config.use_audio else None,
+        true_length=true_length,
+        slot=0,
     )
     slot = 0
 
@@ -243,8 +281,9 @@ def main(config, local_args):
         break
 
     correct_answer = parsed_dataset_example.answer
+    # If fails to parse answer, use the raw output as the predicted answer for correctness checking
     if predicted_answer == utils_rl.FALLBACK_ANSWER:
-      predicted_answer = utils_rl.extract_answer(output, tmvp_config)
+      predicted_answer = output
 
     exact_correct, _ = utils_rl.check_correctness(predicted_answer, [correct_answer], tmvp_config)
     is_correct = exact_correct
