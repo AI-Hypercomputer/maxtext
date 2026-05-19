@@ -880,7 +880,17 @@ def extract_nnx_weights(weights_dict: dict) -> dict[str, np.ndarray]:
   result = {}
   leaves_with_paths = jax.tree_util.tree_leaves_with_path(weights_dict)
   for path_tuple, leaf_value in leaves_with_paths:
-    path_keys = [k.key for k in path_tuple]
+    path_keys = []
+    for k in path_tuple:
+      val = getattr(k, "key", getattr(k, "idx", None))
+      if val is None:
+        val = str(k)
+      val_str = str(val)
+      if (isinstance(val, int) or val_str.isdigit()) and path_keys:
+        path_keys[-1] = f"{path_keys[-1]}_{val_str}"
+      else:
+        path_keys.append(val_str)
+
     # Skip NNX RNG state variables (not model weights)
     if "to_nnx__rngs" in path_keys or any(k.endswith("_rngs") for k in path_keys):
       continue
@@ -909,7 +919,17 @@ def extract_linen_weights(weights_dict: dict) -> dict[str, np.ndarray]:
   result = {}
   leaves_with_paths = jax.tree_util.tree_leaves_with_path(weights_dict)
   for path_tuple, leaf_value in leaves_with_paths:
-    path_keys = [k.key for k in path_tuple]
+    path_keys = []
+    for k in path_tuple:
+      val = getattr(k, "key", getattr(k, "idx", None))
+      if val is None:
+        val = str(k)
+      val_str = str(val)
+      if (isinstance(val, int) or val_str.isdigit()) and path_keys:
+        path_keys[-1] = f"{path_keys[-1]}_{val_str}"
+      else:
+        path_keys.append(val_str)
+
     # Construct maxtext_param_key from path_tuple
     maxtext_param_key = "params-" + "-".join(path_keys)
     if not isinstance(leaf_value, (jax.Array, np.ndarray)):
