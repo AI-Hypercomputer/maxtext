@@ -85,7 +85,7 @@ class AotHloIdenticalTest(AotBaseTest):
 
     # Pre-compile regex patterns for performance
     file_map_pattern = re.compile(r'^\s*\d+\s+".*"\s*$')
-    location_map_pattern = re.compile(r"^\s*\d+\s+\{file_name_id=[^}]*\}\s*$")
+    location_map_pattern = re.compile(r"^\s*\d+\s+\{(file_name_id|file_location_id)=[^}]*\}\s*$")
     metadata_pattern = re.compile(r"metadata=\{[^}]*\}")
 
     def hash_cleaned_file(raw_file, hasher, clean_file):
