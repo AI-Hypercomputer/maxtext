@@ -28,6 +28,7 @@ from flax import linen as nn
 from flax import nnx
 
 from maxtext.common.common_types import Config, DType, AxisNames, BATCH, LENGTH, EMBED, HEAD, D_KV, Array, MODEL_MODE_TRAIN
+from maxtext.inference import kvcache
 from maxtext.layers import initializers, nnx_wrappers
 from maxtext.layers.linears import DenseGeneral, MlpBlock, canonicalize_tuple, normalize_axes
 from maxtext.layers import quantizations
@@ -235,6 +236,7 @@ class Gpt3MultiHeadAttention(nnx.Module):
     self.key_axis_names = key_axis_names
     self.value_axis_names = value_axis_names
     self.out_axis_names = out_axis_names
+    self.model_mode = model_mode
     self.rngs = rngs
     if self.fused_qkv:
       self.qkv_proj = self.create_projection_layer(
@@ -252,6 +254,7 @@ class Gpt3MultiHeadAttention(nnx.Module):
         mesh=self.mesh,
         attention_kernel=self.attention_kernel,
         max_target_length=self.max_target_length,
+        max_prefill_predict_length=self.max_prefill_predict_length,
         float32_qk_product=self.float32_qk_product,
         float32_logits=self.float32_logits,
         quant=self.quant,
@@ -259,6 +262,30 @@ class Gpt3MultiHeadAttention(nnx.Module):
         num_query_heads=self.num_heads,
         num_kv_heads=self.num_heads,
         dtype=self.dtype,
+    )
+    # KV cache only matters in non-TRAIN modes. Mirrors Attention.__init__ in
+    # attentions.py so prefill / autoregressive get a real KVCache_0 module
+    # whose update_kv_caches() builds the cached_values tuple that
+    # AttentionOp.__call__ requires.
+    batch_size, _ = max_utils.get_batch_seq_len_for_mode(config, model_mode)
+    self.KVCache_0 = (
+        kvcache.KVCache(
+            max_prefill_length=self.max_prefill_predict_length,
+            max_target_length=self.max_target_length,
+            batch=batch_size,
+            key_seq_len=1,
+            value_seq_len=1,
+            key_heads=self.num_heads,
+            value_heads=self.num_heads,
+            key_head_size=self.head_dim,
+            value_head_size=self.head_dim,
+            dtype=self.dtype,
+            kv_quant=self.kv_quant,
+            model_mode=model_mode,
+            rngs=self.rngs,
+        )
+        if model_mode != MODEL_MODE_TRAIN
+        else None
     )
 
   def create_projection_layer(
@@ -328,7 +355,18 @@ class Gpt3MultiHeadAttention(nnx.Module):
     value = nn.with_logical_constraint(value, self.value_axis_names)
     value = checkpoint_name(value, "value_proj")
 
-    out = self.attention_op(query, key, value, decoder_segment_ids, None, model_mode)
+    cached_values = [None, None]
+    if model_mode != MODEL_MODE_TRAIN and self.KVCache_0 is not None:
+      prefill_kv_cache, ar_kv_cache = self.KVCache_0(
+          key=key,
+          value=value,
+          decoder_segment_ids=decoder_segment_ids,
+          model_mode=model_mode,
+          use_ragged_attention=False,
+          previous_chunk=None,
+      )
+      cached_values = [prefill_kv_cache, ar_kv_cache]
+    out = self.attention_op(query, key, value, decoder_segment_ids, None, model_mode, cached_values)
 
     out = nn.with_logical_constraint(out, self.out_axis_names)
 

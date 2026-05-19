@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Common LoRA utils needed to support LoRA adapters."""
+"""Common LoRA utils needed to support LoRA adapters."""
+
+from collections.abc import Mapping
 from functools import partial
 import json
 import os
@@ -35,6 +37,10 @@ from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import sharding
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
+
+# NNX-only imports (`flax.nnx`, `train_state_nnx`, `model_creation_utils`) are
+# loaded lazily inside the NNX dispatch branches so the Linen-only flow doesn't
+# pull them in.
 
 
 def apply_lora_on_base_params(base_params, lora_params, lora_scale_factor=1.0):
@@ -116,8 +122,10 @@ def unapply_lora_from_base_params(base_params, lora_params, lora_scale_factor=1.
 
 
 def load_adapter(config, base_abstract_state_params, adapter_config_path, adapter_weights_path):
-  """
-  Load the LoRA weights into a PyTree and return it.
+  """Load LoRA weights into a PyTree and return it.
+
+  On the NNX path, `base_abstract_state_params` and the returned `lora_params`
+  are `nnx.State`-shaped (no outer `{"params": ...}` wrap).
   """
   # Load LoRA weights
   lora_params = None
@@ -135,7 +143,10 @@ def load_adapter(config, base_abstract_state_params, adapter_config_path, adapte
     if not gcs_utils.gcs_path_exists(f"{adapter_weights_path}/commit_success.txt"):
       raise FileNotFoundError(f"Failed to read lora_weights from {adapter_weights_path}.")
 
-    lora_state, _ = get_lora_abstract_state(base_abstract_state_params, lora_config)
+    if config.pure_nnx:
+      lora_state, _ = get_lora_abstract_state_nnx(base_abstract_state_params, lora_config)
+    else:
+      lora_state, _ = get_lora_abstract_state(base_abstract_state_params, lora_config)
 
     with nn_partitioning.axis_rules(config.logical_axis_rules):
       lora_params = checkpointing.load_params_from_path(
@@ -150,22 +161,12 @@ def load_adapter(config, base_abstract_state_params, adapter_config_path, adapte
 
 
 def setup_initial_lora_state(model, data_iterator, tx, config, rng, mesh, checkpoint_manager, lora_adapter_path):
-  """We initialize the model and optimizer state, and optionally load from a
-  checkpoint as necessary.
+  """Initialize the LoRA train state and optionally load weights from disk.
 
-  Args:
-    model: the flax model to initialize
-    tx: the optax.GradientTransformation
-    config: config object
-    rng: jax.prng key
-    mesh: jax.devices() mesh
-    checkpoint_manager: an Orbax checkpointing.CheckpointManager object
-    lora_adapter_path: Path of the LoRA adapter which is expected to have
-        `adapter_config.json` and adapter weights
-
-  Returns:
-    state: the initialized train state
-    state_mesh_annotations: the mesh annotations for the train state
+  Returns `(lora_config, lora_state, lora_state_annotations)`. On the NNX path
+  `model` is unused (the NNX abstract state is built via
+  `model_creation_utils.create_nnx_abstract_model`) and `lora_state.params`
+  is `nnx.State`-shaped; on Linen it is the original `{"params": ...}` tree.
   """
 
   lora_state = None
@@ -175,8 +176,18 @@ def setup_initial_lora_state(model, data_iterator, tx, config, rng, mesh, checkp
   if lora_adapter_path:
     max_logging.log(f"Setting initial state of LoRA with lora_adapter_path = {lora_adapter_path}")
     if config.pure_nnx:
-      # NNX has a different function to init the training state.
-      raise NotImplementedError("Pure NNX support has not been implemented yet.")
+      # pylint: disable=import-outside-toplevel
+      from maxtext.layers import train_state_nnx
+      from maxtext.utils import model_creation_utils
+
+      _create_model_partial, _ = model_creation_utils.create_nnx_abstract_model(config, mesh)
+
+      def create_train_state_fn():
+        nnx_model = _create_model_partial()
+        optimizer = nnx.Optimizer(nnx_model, tx, wrt=nnx.Param)
+        return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
+
+      init_state_fn = create_train_state_fn
     else:
       init_state_fn = partial(maxtext_utils.init_initial_state, model, tx, config, True, rng)
     unboxed_abstract_state, _, _ = maxtext_utils.get_abstract_state(config, mesh, init_state_fn, True)
@@ -185,7 +196,11 @@ def setup_initial_lora_state(model, data_iterator, tx, config, rng, mesh, checkp
 
     lora_config = gcs_utils.read_json_from_gcs(lora_config_path)
 
-    lora_state, lora_state_annotations = get_lora_abstract_state(unboxed_abstract_state.params, lora_config)
+    if config.pure_nnx:
+      base_abstract_params = _nnx_param_subtree(unboxed_abstract_state)
+      lora_state, lora_state_annotations = get_lora_abstract_state_nnx(base_abstract_params, lora_config)
+    else:
+      lora_state, lora_state_annotations = get_lora_abstract_state(unboxed_abstract_state.params, lora_config)
 
     lora_weights_path = f"{lora_adapter_path}/0/items"
 
@@ -605,3 +620,165 @@ def restore_lora_from_path(trainer: Any, mt_config: pyconfig.HyperParameters) ->
   nnx.update(trainer.model, abstract_lora_params)
   max_logging.log(f"LoRA restore complete from '{lora_restore_path}'.")
   return trainer
+
+
+# NNX-shaped LoRA helpers. The Linen walkers above key on `isinstance(x, dict)`
+# and bare leaves; NNX trees use `nnx.State` (Mapping but not dict) and
+# Variable-wrapped leaves, so we need separate mirrors. The math (W += B @ A * s)
+# is identical.
+
+
+def _is_nnx_branch(x):
+  return isinstance(x, Mapping)
+
+
+def _nnx_param_subtree(unboxed_abstract_state):
+  """Drop the outer TrainStateNNX wrapping and return the model substate."""
+  return unboxed_abstract_state["model"] if "model" in unboxed_abstract_state else unboxed_abstract_state
+
+
+def apply_lora_on_base_params_nnx(base_params, lora_params, lora_scale_factor=1.0):
+  """NNX variant of `apply_lora_on_base_params`. Mutates `base_params` in place."""
+
+  def lora_update_or_base(base_weight, lora_a, lora_b):
+    if lora_a is not None and lora_b is not None:
+      return base_weight + jnp.einsum("br,rnd->bnd", lora_b, lora_a) * lora_scale_factor
+    return base_weight
+
+  def recurse(base_node, lora_node, path):
+    for name, lora_child in lora_node.items():
+      if _is_nnx_branch(lora_child):
+        recurse(base_node[name], lora_child, f"{path}.{name}")
+      elif lora_child is not None:
+        if name not in ("lora_a.kernel", "lora_b.kernel"):
+          raise ValueError(f"Unexpected non-lora key ({path}.{name}) in lora_params")
+        lora_b = lora_node["lora_a.kernel"]
+        lora_a = lora_node["lora_b.kernel"]
+        base_node["kernel"] = lora_update_or_base(base_node["kernel"], lora_a, lora_b)
+        return
+
+  recurse(base_params, lora_params, "")
+
+
+def unapply_lora_from_base_params_nnx(base_params, lora_params, lora_scale_factor=1.0):
+  """NNX-shaped variant of `unapply_lora_from_base_params`. Mutates `base_params`."""
+
+  def lora_update_or_base(base_weight, lora_a, lora_b):
+    if lora_a is not None and lora_b is not None:
+      return base_weight - jnp.einsum("br,rnd->bnd", lora_b, lora_a) * lora_scale_factor
+    return base_weight
+
+  def recurse(base_node, lora_node, path):
+    for name, lora_child in lora_node.items():
+      if _is_nnx_branch(lora_child):
+        recurse(base_node[name], lora_child, f"{path}.{name}")
+      elif lora_child is not None:
+        if name not in ("lora_a.kernel", "lora_b.kernel"):
+          raise ValueError(f"Unexpected non-lora key ({path}.{name}) in lora_params")
+        lora_b = lora_node["lora_a.kernel"]
+        lora_a = lora_node["lora_b.kernel"]
+        base_node["kernel"] = lora_update_or_base(base_node["kernel"], lora_a, lora_b)
+        return
+
+  recurse(base_params, lora_params, "")
+
+
+def get_lora_abstract_state_nnx(base_abstract_params, lora_config):
+  """`get_lora_abstract_state` for the NNX path.
+
+  Walks the abstract `state.model` substate and emits a parallel tree with
+  `lora_a.kernel` / `lora_b.kernel` leaves at target attention paths and
+  `None` elsewhere.
+  """
+  other_lora_format_to_jax_format = {
+      "q_proj": "self_attention.query",
+      "k_proj": "self_attention.key",
+      "v_proj": "self_attention.value",
+      "o_proj": "self_attention.out",
+  }
+
+  lora_target_modules = [other_lora_format_to_jax_format.get(s, s) for s in lora_config["target_modules"]]
+  lora_rank = int(lora_config["r"])
+
+  def get_lora_param_shape(base_array_shape, lora_module):
+    if len(base_array_shape) > 4:
+      raise ValueError(f"Unsupported base array shape {base_array_shape} (>4D)")
+    if lora_module in ("self_attention.query", "self_attention.key", "self_attention.value"):
+      lora_a_shape = base_array_shape[:-2] + (lora_rank,)
+      lora_b_shape = (lora_rank,) + base_array_shape[1:]
+    elif lora_module == "self_attention.out":
+      lora_a_shape = base_array_shape[:-1] + (lora_rank,)
+      if len(base_array_shape) == 4:
+        lora_b_shape = (lora_rank, base_array_shape[1], base_array_shape[-1])
+      else:
+        lora_b_shape = (lora_rank, base_array_shape[-1])
+    else:
+      raise ValueError(f"Unsupported lora_module={lora_module}")
+    return lora_a_shape, lora_b_shape
+
+  def get_lora_param_sharding(base_param_sharding, lora_module):
+    if base_param_sharding is None:
+      return None, None
+    base_pspec = base_param_sharding.spec
+    if len(base_pspec) > 4:
+      raise ValueError("PartitionSpec size > 4 not supported")
+    if lora_module in ("self_attention.query", "self_attention.key", "self_attention.value"):
+      lora_a_pspec = jax.sharding.PartitionSpec(*(base_pspec[:-2] + ((),)))
+      lora_b_pspec = jax.sharding.PartitionSpec(*(((),) + base_pspec[1:]))
+    elif lora_module == "self_attention.out":
+      lora_a_pspec = jax.sharding.PartitionSpec(*(base_pspec[:-1] + ((),)))
+      if len(base_pspec) == 4:
+        lora_b_pspec = jax.sharding.PartitionSpec((), base_pspec[1], base_pspec[-1])
+      else:
+        lora_b_pspec = jax.sharding.PartitionSpec((), base_pspec[-1])
+    else:
+      raise ValueError(f"Unsupported lora_module={lora_module}")
+    mesh = base_param_sharding.mesh
+    mem_kind = base_param_sharding.memory_kind
+    return (
+        jax.sharding.NamedSharding(mesh=mesh, spec=lora_a_pspec, memory_kind=mem_kind),
+        jax.sharding.NamedSharding(mesh=mesh, spec=lora_b_pspec, memory_kind=mem_kind),
+    )
+
+  def module_is_target(module_path):
+    for tgt in lora_target_modules:
+      if tgt in module_path:
+        return tgt
+    return None
+
+  def add_lora(out_node, base_node, path):
+    for name, child in base_node.items():
+      if _is_nnx_branch(child):
+        out_node[name] = {}
+        add_lora(out_node[name], child, f"{path}.{name}")
+      else:
+        if name not in ("kernel", "scale", "embedding"):
+          raise ValueError(f"Unexpected key={name} in base abstract params at {path}")
+        if not isinstance(child, jax.ShapeDtypeStruct):
+          raise ValueError(f"Unexpected leaf type {type(child).__name__} at {path}.{name}")
+        target_module = module_is_target(path)
+        if target_module is not None:
+          a_shape, b_shape = get_lora_param_shape(child.shape, target_module)
+          a_sharding, b_sharding = get_lora_param_sharding(child.sharding, target_module)
+          out_node["lora_a.kernel"] = jax.ShapeDtypeStruct(shape=a_shape, dtype=child.dtype, sharding=a_sharding)
+          out_node["lora_b.kernel"] = jax.ShapeDtypeStruct(shape=b_shape, dtype=child.dtype, sharding=b_sharding)
+        else:
+          out_node[name] = None
+
+  lora_abstract_params = {}
+  add_lora(lora_abstract_params, base_abstract_params, "")
+
+  unboxed_abstract_lora_state = train_state.TrainState(
+      step=0, apply_fn=None, params=lora_abstract_params, tx=None, opt_state={}  # type: ignore
+  )
+  lora_state_mesh_annotations = train_state.TrainState(
+      step=0,
+      apply_fn=None,
+      params=jax.tree_util.tree_map(
+          lambda x: x.sharding.spec if x.sharding is not None else None,
+          lora_abstract_params,
+      ),
+      tx=None,  # type: ignore
+      opt_state={},
+  )
+  return unboxed_abstract_lora_state, lora_state_mesh_annotations

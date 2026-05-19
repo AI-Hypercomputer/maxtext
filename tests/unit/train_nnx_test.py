@@ -154,13 +154,6 @@ class TestLossFnNNX(unittest.TestCase):
     self.assertEqual(float(aux["xent_sum"]), 0.0)
     self.assertEqual(float(loss), 0.0)
 
-  def test_vocab_tiling_raises_not_implemented(self):
-    cfg, ts = _build_state()
-    cfg.num_vocab_tiling = 4
-    data = _make_data(batch=cfg.micro_batch_size_to_train_on, vocab=cfg.vocab_size)
-    with self.assertRaises(NotImplementedError):
-      pre_train.loss_fn(ts.model, cfg, data, None, None, is_train=True)
-
 
 class TestTrainStepNNX(unittest.TestCase):
   """Cover the NNX branch of train_step (the diff_wrapper / nnx.update path)."""
@@ -180,16 +173,6 @@ class TestTrainStepNNX(unittest.TestCase):
     self.assertIn("learning/grad_norm", metrics["scalar"])
     self.assertIn("learning/param_norm", metrics["scalar"])
     self.assertTrue(jnp.isfinite(metrics["scalar"]["learning/loss"]))
-
-  def test_train_step_dpo_raises_for_nnx(self):
-    cfg, ts = _build_state()
-    cfg.use_dpo = True
-    state_graphdef, state_pure = nnx.split(ts)
-    data = _make_data(batch=cfg.micro_batch_size_to_train_on, vocab=cfg.vocab_size)
-    with self.assertRaises(NotImplementedError):
-      pre_train.train_step(
-          state_graphdef, cfg, state_mesh_shardings=None, params_shardings=None, state=state_pure, data=data
-      )
 
   def test_train_step_increments_optimizer_step(self):
     cfg, ts = _build_state()

@@ -61,7 +61,7 @@ from maxtext.common.gcloud_stub import cloud_diagnostics as _cloud_diag, is_deco
 from maxtext.common.gcloud_stub import vertex_tensorboard_modules
 from maxtext.common import metric_logger
 from maxtext.common.metric_logger import record_activation_metrics
-from maxtext.trainers.post_train.dpo.dpo_utils import _merge_dpo_state, _split_dpo_state, dpo_loss_fn
+from maxtext.trainers.post_train.dpo.dpo_utils import _merge_dpo_state, _split_dpo_state, dpo_loss_fn, dpo_loss_fn_nnx
 from maxtext.utils import exceptions
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
@@ -72,7 +72,7 @@ from maxtext.utils import sharding
 from maxtext.utils import maxtext_utils_nnx
 from maxtext.utils import train_utils
 from maxtext.utils.gradient_accumulation import gradient_accumulation_loss_and_grad
-from maxtext.utils.vocabulary_tiling import vocab_tiling_linen_loss
+from maxtext.utils.vocabulary_tiling import vocab_tiling_linen_loss, vocab_tiling_nnx_loss
 
 _diag_modules = _cloud_diag()
 diagnostic, debug_configuration, diagnostic_configuration, stack_trace_configuration = _diag_modules
@@ -203,9 +203,10 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
     intermediate_outputs = intermediates.to_pure_dict()
 
     if config.num_vocab_tiling > 1:
-      raise NotImplementedError("Vocab tiling for NNX modules has not been implemented.")
-
-    if (config.use_indexer and not config.indexer_sparse_training) and is_train:
+      hidden_state_key = ("decoder", "hidden_states")
+      hidden_states = maxtext_utils.get_nested_value(intermediate_outputs, hidden_state_key)[0]
+      xent_sum, total_z_loss = vocab_tiling_nnx_loss(model, hidden_states, data, config, is_train)
+    elif (config.use_indexer and not config.indexer_sparse_training) and is_train:
       # In Dense Warm-up stage, we skip main model loss calculation for efficiency.
       # The main model parameters are frozen and only the indexer is trained via KL divergence.
       xent_sum = 0.0
@@ -322,10 +323,15 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     params = state.params
     ga_fn, ga_model, ga_params, ga_rng, ga_dpo = _loss_fn, model, params, dropout_rng, extra_dpo_args
   else:
-    if config.use_dpo:
-      raise NotImplementedError("DPO for NNX modules has not been implemented.")
     state = nnx.merge(model, state)  # reconstruct TrainStateNNX
-    ga_fn, ga_model, ga_params, ga_rng, ga_dpo = loss_fn, state.model, None, None, []
+    if config.use_dpo:
+      # NNX DPO: reference_model is a sibling field on TrainStateNNX (set up by
+      # init_initial_state when config.use_dpo=True). dpo_loss_fn_nnx mirrors
+      # the Linen dpo_loss_fn signature, so it slots into the same dispatcher
+      # with reference_model passed as the single extra_dpo_args entry.
+      ga_fn, ga_model, ga_params, ga_rng, ga_dpo = (dpo_loss_fn_nnx, state.model, None, None, [state.reference_model])
+    else:
+      ga_fn, ga_model, ga_params, ga_rng, ga_dpo = loss_fn, state.model, None, None, []
 
   # --- Gradient computation ---
   if config.gradient_accumulation_steps > 1:
@@ -391,9 +397,14 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
         )
         nnx.update(state.model, curr_params)
 
+      # `ga_fn` and `ga_dpo` were set up earlier (loss_fn vs dpo_loss_fn_nnx;
+      # ga_dpo carries the frozen reference_model when use_dpo, else empty).
+      _nnx_loss_fn = ga_fn
+      _nnx_extra_dpo_args = ga_dpo
+
       def diff_wrapper(param, rest, config, data):
         local_model = nnx.merge(model_graphdef, param, rest, copy=True)
-        loss, aux = loss_fn(local_model, config, data, None, None, is_train=True)
+        loss, aux = _nnx_loss_fn(local_model, config, data, None, None, *_nnx_extra_dpo_args, is_train=True)
         _, _, new_rest = nnx.split(local_model, nnx.Param, ...)
         return loss, (aux, new_rest)
 
@@ -519,11 +530,11 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       "learning/total_weights": total_weights,
   }
   if config.use_qk_clip:
-    # Apply QK-Clip (Linen path only; NNX uses different state layout — TODO: implement for NNX)
     if isinstance(model, nn.Module):
       new_state = qk_clip_utils.apply_qk_clip(new_state, intermediate_outputs, config)
+    else:
+      new_state = qk_clip_utils.apply_qk_clip_nnx(new_state, intermediate_outputs, config)
 
-    # Report max_logits metric
     global_max_logit = qk_clip_utils.calculate_max_logit_metric(intermediate_outputs)
     if global_max_logit is not None:
       scalar_metrics["learning/max_logits"] = global_max_logit
@@ -557,7 +568,9 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     if config.use_dpo:
       new_state = _merge_dpo_state(new_state, reference_params)
     return new_state, metrics
-  return nnx.state(new_state), metrics
+  # Drop Intermediates (e.g. sowed max_logits for QK-Clip) before returning;
+  # they're absent from state_mesh_shardings and would cause a leaf-count mismatch.
+  return nnx.state(new_state, nnx.Not(nnx.Intermediate)), metrics
 
 
 def eval_step(model, config, state, data, dropout_rng=None):
@@ -577,7 +590,10 @@ def eval_step(model, config, state, data, dropout_rng=None):
     loss, aux = eval_loss_fn(pure_params, *extra_dpo_args, sparsity_state=batch_stats)
   else:
     state = nnx.merge(model, state)  # reconstruct TrainStateNNX
-    loss, aux = loss_fn(state.model, config, data, None, None, is_train=False)
+    if config.use_dpo:
+      loss, aux = dpo_loss_fn_nnx(state.model, config, data, None, None, state.reference_model, is_train=False)
+    else:
+      loss, aux = loss_fn(state.model, config, data, None, None, is_train=False)
 
   mtp_acceptance_rate = 0.0
   if config.mtp_eval_target_module > 0:
@@ -706,7 +722,7 @@ def train_loop(config, recorder, state=None):
         step_time_delta = datetime.datetime.now() - last_step_completion
         last_step_completion = datetime.datetime.now()
 
-        state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
+        state_to_save = state if not (config.use_dpo and not config.pure_nnx) else _split_dpo_state(state)[0]
         checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator, step)
 
         if config.dump_hlo and step == (config.dump_step if config.dump_step >= 0 else start_step):
@@ -750,7 +766,7 @@ def train_loop(config, recorder, state=None):
         metric_logger_instance.buffer_and_write_train_metrics(metrics, step, step_time_delta)
 
     if config.save_checkpoint_on_completion:
-      state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
+      state_to_save = state if not (config.use_dpo and not config.pure_nnx) else _split_dpo_state(state)[0]
       checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator)
     if checkpoint_manager is not None:
       # in case the last checkpoint_period checkpoint is still in progress

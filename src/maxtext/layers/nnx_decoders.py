@@ -545,8 +545,14 @@ class NNXDecoder(nnx.Module):
       out = merged_layer(y_in, **kwargs)
       return out, nnx.state(merged_layer)
 
-    checkpointed_fn = jax.checkpoint(pure_layer_fn, policy=policy, prevent_cse=prevent_cse)
-    out, new_state = checkpointed_fn(state, y)
+    # Linen FP8 ops keep amax_history in mutable Linen scope; jax.checkpoint
+    # re-traces and hits UnexpectedTracerError. Skip remat for FP8.
+    uses_linen_fp8_mutable_state = self.config.quantization in ("fp8_nanoo", "fp8_gpu")
+    if uses_linen_fp8_mutable_state:
+      out, new_state = pure_layer_fn(state, y)
+    else:
+      checkpointed_fn = jax.checkpoint(pure_layer_fn, policy=policy, prevent_cse=prevent_cse)
+      out, new_state = checkpointed_fn(state, y)
     nnx.update(layer, new_state)
 
     return out
@@ -667,7 +673,22 @@ class NNXDecoder(nnx.Module):
       params = nnx_ensure_scan_leading_axis(params, length)
       state = nnx_ensure_scan_leading_axis(state, length)
 
-      final_carry, scanned_state = jax.lax.scan(layer_fn_wrapped, x_in, (params, state))
+      # Linen FP8 ops keep amax_history in mutable Linen scope; jax.lax.scan
+      # leaks the tracer and hits UnexpectedTracerError. Use a Python for-loop
+      # for FP8 instead.
+      uses_linen_fp8_mutable_state = self.config.quantization in ("fp8_nanoo", "fp8_gpu")
+      if uses_linen_fp8_mutable_state:
+        carry = x_in
+        per_layer_states = []
+        for i in range(length):
+          current_params = jax.tree.map(lambda x, i=i: x[i], params)
+          current_state = jax.tree.map(lambda x, i=i: x[i], state)
+          carry, new_state_i = layer_fn(carry, (current_params, current_state))
+          per_layer_states.append(new_state_i)
+        final_carry = carry
+        scanned_state = jax.tree.map(lambda *xs: jnp.stack(list(xs)), *per_layer_states)
+      else:
+        final_carry, scanned_state = jax.lax.scan(layer_fn_wrapped, x_in, (params, state))
       returned_kv_stacked = None
 
     if scan_axis != 0:
@@ -963,7 +984,10 @@ class NNXDecoder(nnx.Module):
     if cfg.logits_via_embedding:
       # Use the transpose of embedding matrix for logit transform.
       if isinstance(shared_embedding, nnx.Module):
-        embedding_table = shared_embedding.embedding.value
+        # Modern NNX API; the deprecated `.value` shim registers the access in NNX's
+        # mutation tracking, which JAX detects as a tracer leak when the embedding is
+        # closure-captured across a custom_vjp boundary (e.g. vocab_tiling_nnx_loss).
+        embedding_table = shared_embedding.embedding[...]
       else:
         embedding_table = shared_embedding.variables["params"]["embedding"]
       if isinstance(embedding_table, nn.spmd.LogicallyPartitioned):
