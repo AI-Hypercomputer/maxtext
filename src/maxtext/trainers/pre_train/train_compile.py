@@ -241,11 +241,24 @@ def is_oom(argv: Sequence[str]) -> bool:
   # When ZeRO-1 is enabled, we need to use the original params_shardings for input shardings
   # but keep the updated state_mesh_shardings for the optimizer state
   if config.shard_optimizer_over_data:
-    input_state_mesh_shardings = state_mesh_shardings.replace(params=params_shardings)
-  else:
-    input_state_mesh_shardings = state_mesh_shardings
+    if hasattr(state_mesh_shardings, "replace"):
+      input_state_mesh_shardings = state_mesh_shardings.replace(params=params_shardings)
+    else:
+      # For NNX State or pure dicts, which do not have a .replace method
+      input_state_mesh_shardings = jax.tree_util.tree_map(
+          lambda x: x,
+          state_mesh_shardings,
+          is_leaf=lambda x: hasattr(x, "value") or getattr(x, "__class__", None).__name__ == "NamedSharding",
+      )
 
-  # Get data sharding
+      # Use nnx.update to preserve the exact PyTree structure of nested States
+
+      if hasattr(input_state_mesh_shardings, "model") or "model" in input_state_mesh_shardings:
+        nnx.update(input_state_mesh_shardings, {"model": params_shardings})
+      elif hasattr(input_state_mesh_shardings, "params") or "params" in input_state_mesh_shardings:
+        nnx.update(input_state_mesh_shardings, {"params": params_shardings})
+  else:
+    input_state_mesh_shardings = state_mesh_shardings  # Get data sharding
   data_sharding = sharding.get_input_data_sharding(config, topology_mesh)
 
   # Get function to compile and shardings
@@ -317,11 +330,24 @@ def main(argv: Sequence[str]) -> None:
   # When ZeRO-1 is enabled, we need to use the original params_shardings for input shardings
   # but keep the updated state_mesh_shardings for the optimizer state
   if config.shard_optimizer_over_data:
-    input_state_mesh_shardings = state_mesh_shardings.replace(params=params_shardings)
-  else:
-    input_state_mesh_shardings = state_mesh_shardings
+    if hasattr(state_mesh_shardings, "replace"):
+      input_state_mesh_shardings = state_mesh_shardings.replace(params=params_shardings)
+    else:
+      # For NNX State or pure dicts, which do not have a .replace method
+      input_state_mesh_shardings = jax.tree_util.tree_map(
+          lambda x: x,
+          state_mesh_shardings,
+          is_leaf=lambda x: hasattr(x, "value") or getattr(x, "__class__", None).__name__ == "NamedSharding",
+      )
 
-  # Get data sharding
+      # Use nnx.update to preserve the exact PyTree structure of nested States
+
+      if hasattr(input_state_mesh_shardings, "model") or "model" in input_state_mesh_shardings:
+        nnx.update(input_state_mesh_shardings, {"model": params_shardings})
+      elif hasattr(input_state_mesh_shardings, "params") or "params" in input_state_mesh_shardings:
+        nnx.update(input_state_mesh_shardings, {"params": params_shardings})
+  else:
+    input_state_mesh_shardings = state_mesh_shardings  # Get data sharding
   data_sharding = sharding.get_input_data_sharding(config, topology_mesh)
   if config.enable_diloco:
     # Build abstract DiLoCo state and shardings for AOT compilation

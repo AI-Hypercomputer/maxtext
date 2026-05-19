@@ -114,9 +114,13 @@ def get_muon_weight_dimension_numbers(model, config, verbose=False):
       path_strings = tuple(p.key for p in path if isinstance(p, jax.tree_util.DictKey))
       return transform_logic(path_strings)
 
-    # tree_map_with_path handles NNX's nested State (vs the Linen dict tree of
-    # nn.LogicallyPartitioned leaves). The result is an nnx.State whose Param values hold the mdn result.
-    muon_weight_dimension_numbers = jax.tree_util.tree_map_with_path(apply_transform_nnx, abstract_param)
+    # Use jax.tree_util.tree_map_with_path for NNX's potentially complex PyTree structure.
+    # This is different with linen where abstract_param is a dict-based tree with nn.LogicallyPartitioned leaves.
+    # The result is an nnx.State with the same structure, where each Param's value holds the mdn result.
+    muon_weight_dimension_numbers = jax.tree_util.tree_map_with_path(
+        apply_transform_nnx, nnx.to_pure_dict(abstract_param)
+    )
+    muon_weight_dimension_numbers = nnx.State(muon_weight_dimension_numbers)
 
   else:  # Linen
     # quickly get param structure without materialization
