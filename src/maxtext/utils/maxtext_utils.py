@@ -1578,7 +1578,7 @@ def get_nnx_named_sharding_with_scan_axis(abs_var_state: nnx.State, mesh) -> nnx
         raw_sharding = from_sharding_rules(out_sharding, rules)
         mesh_axis_names = mesh.axis_names if mesh is not None else ()
         sanitized_sharding = [
-            x if (x is None or (isinstance(x, str) and x in mesh_axis_names) or isinstance(x, tuple)) else None 
+            x if (x is None or (isinstance(x, str) and x in mesh_axis_names) or isinstance(x, tuple)) else None
             for x in raw_sharding
         ]
         pspec = PartitionSpec(*sanitized_sharding)
