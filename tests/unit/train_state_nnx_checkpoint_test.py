@@ -29,6 +29,8 @@ from flax.training import train_state
 import optax
 import orbax.checkpoint as ocp
 
+import pytest
+
 from maxtext.common import checkpointing
 from maxtext.layers import train_state_nnx
 
@@ -65,6 +67,7 @@ def _replicate_for_orbax(pytree):
   return jax.tree.map(lambda x: jax.device_put(x, sharding) if isinstance(x, jax.Array) else x, pytree)
 
 
+@pytest.mark.cpu_only
 class TestTrainStateNNXCheckpoint(unittest.TestCase):
   """Class to test NNX checkpoint."""
 
@@ -303,6 +306,7 @@ class TestTrainStateNNXCheckpoint(unittest.TestCase):
       shutil.rmtree(temp_dir)
 
 
+@pytest.mark.cpu_only
 class TestMaybeSaveCheckpointStepAlignment(unittest.TestCase):
   """Verify maybe_save_checkpoint's fallback step matches the last completed step.
 
@@ -406,6 +410,45 @@ class TestMaybeSaveCheckpointStepAlignment(unittest.TestCase):
     captured = self._invoke_maybe_save(state, pure_nnx=False)
     # Linen path must not invoke to_pure_dict(); state is forwarded as-is.
     self.assertIs(captured["state"], state)
+
+  def test_maybe_save_checkpoint_skips_if_already_saved(self):
+    """Verify maybe_save_checkpoint skips saving if latest_step matches actual_step."""
+    state = self._build_nnx_state(self.N_STEPS)
+    actual_step = self.N_STEPS - 1
+
+    config = SimpleNamespace(pure_nnx=True, checkpoint_period=1, async_checkpointing=False)
+    mgr = mock.MagicMock()
+    mgr.reached_preemption.return_value = False
+    # Mock latest_step to return the same actual_step
+    mgr.latest_step.return_value = actual_step
+
+    save_checkpoint_mock = mock.MagicMock()
+
+    with mock.patch.object(checkpointing, "save_checkpoint", save_checkpoint_mock):
+      checkpointing.maybe_save_checkpoint(mgr, state, config, data_iterator=None, step=None)
+
+    # Assert that save_checkpoint was NOT called!
+    save_checkpoint_mock.assert_not_called()
+
+  def test_maybe_save_checkpoint_saves_if_not_already_saved(self):
+    """Verify maybe_save_checkpoint saves if latest_step does not match actual_step."""
+    state = self._build_nnx_state(self.N_STEPS)
+    actual_step = self.N_STEPS - 1
+
+    config = SimpleNamespace(pure_nnx=True, checkpoint_period=1, async_checkpointing=False)
+    mgr = mock.MagicMock()
+    mgr.reached_preemption.return_value = False
+    # Mock latest_step to return a different step (or None)
+    mgr.latest_step.return_value = actual_step - 1
+
+    save_checkpoint_mock = mock.MagicMock()
+    save_checkpoint_mock.return_value = False
+
+    with mock.patch.object(checkpointing, "save_checkpoint", save_checkpoint_mock):
+      checkpointing.maybe_save_checkpoint(mgr, state, config, data_iterator=None, step=None)
+
+    # Assert that save_checkpoint WAS called!
+    save_checkpoint_mock.assert_called_once()
 
 
 if __name__ == "__main__":
