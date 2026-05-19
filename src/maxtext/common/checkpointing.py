@@ -793,6 +793,10 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
       # Linen TrainState has .step attribute
       actual_step = int(state.step) - 1
 
+  if checkpoint_manager.latest_step() == actual_step:
+    max_logging.log(f"Checkpoint for step {actual_step} already exists, skipping save.")
+    return
+
   if config.pure_nnx:
     # Convert nnx.State to dict.
     state = state.to_pure_dict()
