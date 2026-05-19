@@ -56,6 +56,17 @@ MODEL_PARAMS_DICT = {
         "num_experts": 128,
         "moe_intermediate_size": 768,
     },
+    # Pruned variant matching auto-prune team's 034 LiGO-merged checkpoint:
+    # half the q/kv heads, doubled head_dim. Same depth, embed, and MoE shape.
+    "qwen3-30b-a3b-pruned": {
+        "num_hidden_layers": 48,
+        "num_attention_heads": 16,
+        "num_key_value_heads": 2,
+        "hidden_size": 2048,
+        "head_dim": 256,
+        "num_experts": 128,
+        "moe_intermediate_size": 768,
+    },
     "qwen3-480b-a35b": {
         "num_hidden_layers": 62,
         "num_attention_heads": 96,
