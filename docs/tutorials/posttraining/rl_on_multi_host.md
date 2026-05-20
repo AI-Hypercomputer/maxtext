@@ -226,5 +226,5 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
     resuming.
 
 For more detailed troubleshooting, refer to the
-[MaxText documentation](https://maxtext.readthedocs.io) and
+[MaxText documentation](../../index.md) and
 [XPK documentation](https://github.com/AI-Hypercomputer/xpk).
