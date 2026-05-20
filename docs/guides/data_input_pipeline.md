@@ -37,7 +37,8 @@ Training in a multi-host environment presents unique challenges for data input p
 
 ### Random access dataset (Recommended)
 
-Random-access formats are highly recommended for multi-host training because they allow any part of the file to be read directly by its index.<br>
+Random-access formats are highly recommended for multi-host training because they allow any part of the file to be read directly by its index.
+
 In MaxText, this is best supported by the ArrayRecord format using the Grain input pipeline. This approach gracefully handles the key challenges:
 
 - **Concurrent access and uniqueness**: Grain assigns a unique set of indices to each host. ArrayRecord allows different hosts to read from different indices in the same file.

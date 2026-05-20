@@ -18,58 +18,59 @@
 
 Explore our how-to guides for optimizing, debugging, and managing your MaxText workloads.
 
-::::{grid} 1 2 2 2
-:gutter: 2
-
-:::{grid-item-card} ⚡ Optimization
+````{grid} 1 2 2 2
+---
+gutter: 2
+---
+```{grid-item-card} ⚡ Optimization
 :link: guides/optimization
 :link-type: doc
 
 Techniques for maximizing performance, including sharding strategies, Pallas kernels, and benchmarking.
-:::
+```
 
-:::{grid-item-card} 💾 Data Pipelines
+```{grid-item-card} 💾 Data Pipelines
 :link: guides/data_input_pipeline
 :link-type: doc
 
 Configure input pipelines using **Grain** (recommended for determinism), **HuggingFace**, or **TFDS**.
-:::
+```
 
-:::{grid-item-card} 🔄 Checkpointing
+```{grid-item-card} 🔄 Checkpointing
 :link: guides/checkpointing_solutions
 :link-type: doc
 
 Manage GCS checkpoints, handle preemption with emergency checkpointing, and configure multi-tier storage.
-:::
+```
 
-:::{grid-item-card} 🔍 Monitoring & Debugging
+```{grid-item-card} 🔍 Monitoring & Debugging
 :link: guides/monitoring_and_debugging
 :link-type: doc
 
 Tools for observability: goodput monitoring, hung job debugging, and Vertex AI TensorBoard integration.
-:::
+```
 
-:::{grid-item-card} 🐍 Python Notebooks
+```{grid-item-card} 🐍 Python Notebooks
 :link: guides/run_python_notebook
 :link-type: doc
 
 Interactive development guides for running MaxText on Google Colab or local JupyterLab environments.
-:::
+```
 
-:::{grid-item-card} 🌱 Model Bringup
+```{grid-item-card} 🌱 Model Bringup
 :link: guides/model_bringup
 :link-type: doc
 
 A step-by-step guide for the community to help expand MaxText's model library.
-:::
+```
 
-:::{grid-item-card} 🎓 Distillation
+```{grid-item-card} 🎓 Distillation
 :link: guides/distillation
 :link-type: doc
 
 How online distillation works in MaxText: loss anatomy, α / β / temperature schedule tuning, layer indices, monitoring metrics, and troubleshooting.
-:::
-::::
+```
+````
 
 ```{toctree}
 ---
