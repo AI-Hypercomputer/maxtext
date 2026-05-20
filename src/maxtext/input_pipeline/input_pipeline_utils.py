@@ -745,6 +745,9 @@ class PadOrTrimToMaxLength(grain.MapTransform):
     if preprocessed_image.pixel_values is None:
       raise ValueError("Input preprocessed_image must have pixel_values to pad images.")
 
+    if self.config.model_name and self.config.model_name.startswith("qwen3-omni"):
+      return preprocessed_image
+
     # Determine the maximum number of images/masks allowed.
     image_offsets = mm_processor.get_image_offsets(self.config, preprocessed_image)
     single_image_offset = image_offsets // preprocessed_image.pixel_values.shape[0]

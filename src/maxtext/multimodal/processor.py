@@ -68,6 +68,10 @@ def preprocess_image_for_training(image, model_name):
     from maxtext.multimodal.processor_llama4 import preprocess_mm_data_llama4  # pylint: disable=import-outside-toplevel
 
     return preprocess_mm_data_llama4(image)
+  elif model_name in ["qwen3-omni-30b-a3b"]:
+    from maxtext.multimodal.processor_qwen3_omni import preprocess_mm_data_qwen3_omni_for_training  # pylint: disable=import-outside-toplevel
+
+    return preprocess_mm_data_qwen3_omni_for_training(image)
   else:
     raise ValueError(f"Model {model_name} not supported for image preprocessing.")
 
