@@ -225,7 +225,10 @@ class DenseGeneral(nnx.Module):
       if self.parameter_memory_host_offload:
         max_logging.log("linear.py: Moving parameter logits_dense kernel to device")
         kernel = jax.device_put(kernel, max_utils.device_space())
-      kernel = jnp.asarray(kernel, self.dtype)
+      try:
+        kernel = jnp.asarray(kernel, self.dtype)
+      except TypeError:
+        pass
 
     # out_sharding should be None for auto mesh axis
     if self.shard_mode != ShardMode.EXPLICIT:
