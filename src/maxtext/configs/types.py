@@ -2935,7 +2935,9 @@ class MaxTextConfig(
     if self.use_dpo:
       if self.packing:
         raise ValueError("For DPO/ORPO, `packing` is not supported.")
-      if self.dpo.max_prompt_length is not None and self.dpo.max_prompt_length >= self.max_target_length:
+      if self.dpo.max_prompt_length is None:
+        self.dpo.max_prompt_length = self.max_target_length // 2
+      if self.dpo.max_prompt_length >= self.max_target_length:
         raise ValueError(
             f"dpo.max_prompt_length ({self.dpo.max_prompt_length}) must be less than max_target_length"
             f" ({self.max_target_length})."
@@ -3043,6 +3045,12 @@ class MaxTextConfig(
       logger.warning(
           "tfds pipeline is deprecated. Use dataset_type=grain, grain_file_type=tfrecord, and provide grain_train_files."
       )
+      if self.use_dpo:
+        raise ValueError(
+            "TFDS dataset_type=tfds is not supported for DPO training"
+            " (config.use_dpo=True). Please use dataset_type=grain or"
+            " dataset_type=hf instead."
+        )
       if not self.dataset_name:
         raise ValueError("dataset_name can't be empty when dataset_type=tfds")
       if self.eval_interval > 0 and not self.eval_split:
