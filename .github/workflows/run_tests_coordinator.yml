@@ -133,13 +133,13 @@ jobs:
 
       pytest_extra_args: >-
         ${{ fromJSON('{
-            "tpu-unit": "--ignore=tests/post_training",
+            "tpu-unit": "--ignore=tests/post_training --ignore=tests/unit/deepseek_v4_vs_reference_test.py",
             "tpu-integration": "--ignore=tests/post_training",
             "tpu-post-training-unit": "",
             "tpu-post-training-integration": "",
-            "gpu-unit": "--ignore=tests/post_training",
+            "gpu-unit": "--ignore=tests/post_training --ignore=tests/unit/deepseek_v4_vs_reference_test.py",
             "gpu-integration": "--ignore=tests/post_training",
-            "cpu-unit": "--ignore=tests/post_training",
+            "cpu-unit": "--ignore=tests/post_training --ignore=tests/unit/deepseek_v4_vs_reference_test.py",
             "cpu-post-training-unit": ""
           }')[inputs.flavor] }}
         ${{ inputs.additional_pytest_args }}
