@@ -65,6 +65,35 @@ def _replicate_for_orbax(pytree):
   return jax.tree.map(lambda x: jax.device_put(x, sharding) if isinstance(x, jax.Array) else x, pytree)
 
 
+class TestEmergencyReplicatorCheckpointManager(unittest.TestCase):
+  """Tests for emergency replicator checkpoint manager construction."""
+
+  def test_colocated_python_option_is_forwarded(self):
+    checkpoint_manager = object()
+    mesh = object()
+
+    with mock.patch.object(
+        checkpointing,
+        "EmergencyReplicatorCheckpointManager",
+        return_value=checkpoint_manager,
+    ) as manager_cls:
+      result = checkpointing.create_orbax_emergency_replicator_checkpoint_manager(
+          "/tmp/mtc",
+          save_interval_steps=10,
+          global_mesh=mesh,
+          colocated_python_checkpointing=True,
+      )
+
+    self.assertIs(result, checkpoint_manager)
+    manager_cls.assert_called_once()
+    args, kwargs = manager_cls.call_args
+    self.assertEqual(str(args[0]), "/tmp/mtc")
+    options = kwargs["options"]
+    self.assertEqual(options.save_interval_steps, 10)
+    self.assertTrue(options.use_colocated_python)
+    self.assertIs(kwargs["global_mesh"], mesh)
+
+
 @pytest.mark.cpu_only
 class TestTrainStateNNXCheckpoint(unittest.TestCase):
   """Class to test NNX checkpoint."""
@@ -460,9 +489,7 @@ class TestLinenCheckpointFormatConverters(unittest.TestCase):
     return {
         "model": {
             "decoder": {"norm": {"scale": jnp.ones((3,))}},
-            "dropout": {
-                "rngs": {"default": {"key": jnp.ones((2,), dtype=jnp.uint32)}}
-            },  # NNX-only
+            "dropout": {"rngs": {"default": {"key": jnp.ones((2,), dtype=jnp.uint32)}}},  # NNX-only
         },
         "optimizer": {
             "step": jnp.asarray(7, dtype=jnp.uint32),
@@ -481,9 +508,7 @@ class TestLinenCheckpointFormatConverters(unittest.TestCase):
     linen = train_state_nnx.to_linen_checkpoint_dict(self._nnx_pure())
     self.assertEqual(set(linen.keys()), {"params", "step", "opt_state"})
     self.assertIn("params", linen["params"])  # params/params/ collection wrap
-    self.assertNotIn(
-        "dropout", linen["params"]["params"]
-    )  # NNX-only rngs/dropout stripped
+    self.assertNotIn("dropout", linen["params"]["params"])  # NNX-only rngs/dropout stripped
     self.assertEqual(linen["step"].dtype, jnp.int32)  # Linen step is int32
     # opt_state is a list with None for the EmptyState slot, mu/nu wrapped under params.
     self.assertIsInstance(linen["opt_state"], list)
@@ -493,19 +518,11 @@ class TestLinenCheckpointFormatConverters(unittest.TestCase):
 
   def test_round_trip_preserves_values(self):
     nnx_pure = self._nnx_pure()
-    back = train_state_nnx.from_linen_checkpoint_dict(
-        train_state_nnx.to_linen_checkpoint_dict(nnx_pure)
-    )
+    back = train_state_nnx.from_linen_checkpoint_dict(train_state_nnx.to_linen_checkpoint_dict(nnx_pure))
     self.assertEqual(set(back.keys()), {"model", "optimizer"})
-    self.assertEqual(
-        back["optimizer"]["step"].dtype, jnp.uint32
-    )  # NNX step back to uint32
-    self.assertEqual(
-        set(back["optimizer"]["opt_state"].keys()), {0, 2}
-    )  # int-keyed dict, EmptyState dropped
-    self.assertNotIn(
-        "params", back["optimizer"]["opt_state"][0]["mu"]
-    )  # mu/nu unwrapped
+    self.assertEqual(back["optimizer"]["step"].dtype, jnp.uint32)  # NNX step back to uint32
+    self.assertEqual(set(back["optimizer"]["opt_state"].keys()), {0, 2})  # int-keyed dict, EmptyState dropped
+    self.assertNotIn("params", back["optimizer"]["opt_state"][0]["mu"])  # mu/nu unwrapped
     self.assertTrue(
         jnp.array_equal(
             nnx_pure["model"]["decoder"]["norm"]["scale"],

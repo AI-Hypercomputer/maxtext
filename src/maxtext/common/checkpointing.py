@@ -443,17 +443,6 @@ def create_orbax_checkpoint_manager(
       logger=orbax_logger,
   )
 
-  # Use Colocated Python checkpointing optimization (Single Controller only).
-  if enable_single_controller and colocated_python_checkpointing:
-    max_logging.log("Registering colocated python array handler")
-    checkpointing_impl = ocp.pathways.CheckpointingImpl.from_options(
-        use_colocated_python=True,
-    )
-    ocp.pathways.register_type_handlers(
-        use_single_replica_array_handler=enable_single_replica_ckpt_restoring,
-        checkpointing_impl=checkpointing_impl,
-    )
-
   max_logging.log("Checkpoint manager created!")
   return manager
 
@@ -500,6 +489,7 @@ def create_orbax_emergency_replicator_checkpoint_manager(
     local_checkpoint_dir: str,
     save_interval_steps: int,
     global_mesh: jax.sharding.Mesh,
+    colocated_python_checkpointing: bool = False,
 ):
   """Returns an emergency replicator checkpoint manager."""
   flags.FLAGS.experimental_orbax_use_distributed_process_id = True
@@ -509,6 +499,7 @@ def create_orbax_emergency_replicator_checkpoint_manager(
       epath.Path(local_checkpoint_dir),
       options=emergency_replicator_checkpoint_manager.ReplicatorCheckpointManagerOptions(
           save_interval_steps=save_interval_steps,
+          use_colocated_python=colocated_python_checkpointing,
       ),
       global_mesh=global_mesh,
   )
@@ -838,9 +829,7 @@ def load_state_if_possible(
           (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager),
       ):
         checkpoint_path = str(checkpoint_manager.directory / str(step) / "items")
-        with handle_checkpoint_mismatch(
-            "restore NNX checkpoint", checkpoint_path
-        ):
+        with handle_checkpoint_mismatch("restore NNX checkpoint", checkpoint_path):
           restored_nnx = _load_linen_checkpoint_into_nnx(
               checkpoint_path,
               abstract_unboxed_pre_state,
@@ -876,9 +865,7 @@ def load_state_if_possible(
                   EmergencyReplicatorCheckpointManager,
               ),
           ):
-            restored = checkpoint_manager.restore(
-                step, args=Composite(state=checkpoint_args)
-            ).state
+            restored = checkpoint_manager.restore(step, args=Composite(state=checkpoint_args)).state
             _assert_no_shaped_dtype_struct(restored)
             return (
                 restored,
@@ -906,9 +893,7 @@ def load_state_if_possible(
           # Case 3: Default/Fallback case.
           # This case acts as a wildcard ('_') and matches if none of the preceding cases were met.
           case _:
-            restored = checkpoint_manager.restore(
-                step, args=Composite(items=checkpoint_args)
-            )
+            restored = checkpoint_manager.restore(step, args=Composite(items=checkpoint_args))
             _assert_no_shaped_dtype_struct(restored)
             return (restored, None)
 
@@ -918,9 +903,7 @@ def load_state_if_possible(
     else:
       params = abstract_unboxed_pre_state.params
 
-    with handle_checkpoint_mismatch(
-        "load parameters", load_parameters_from_path
-    ):
+    with handle_checkpoint_mismatch("load parameters", load_parameters_from_path):
       restored_params = load_params_from_path(
           load_parameters_from_path,
           params,
@@ -932,9 +915,7 @@ def load_state_if_possible(
     return None, restored_params
   elif load_full_state_from_path != "":
     max_logging.log(f"Loading full state from path: {load_full_state_from_path}")
-    with handle_checkpoint_mismatch(
-        "load full state", load_full_state_from_path
-    ):
+    with handle_checkpoint_mismatch("load full state", load_full_state_from_path):
       restored_state = _load_full_state_from_path(
           path=load_full_state_from_path,
           abstract_unboxed_pre_state=abstract_unboxed_pre_state,
