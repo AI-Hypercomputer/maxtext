@@ -170,6 +170,7 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
   load_parameters_path=${MAXTEXT_CKPT_PATH?} \
   run_name=${RUN_NAME?} \
   base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+  rollout_tensor_parallelism=8 \
   hf_access_token=${HF_TOKEN?}"
 ```
 
@@ -187,6 +188,7 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
   load_parameters_path=${MAXTEXT_CKPT_PATH?} \
   run_name=${RUN_NAME?} \
   base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+  rollout_tensor_parallelism=8 \
   hf_access_token=${HF_TOKEN?} \
   loss_algo=gspo-token"
 ```
@@ -214,6 +216,8 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
   installed and authentication is configured.
 - **Workload Failures**: Review the logs for specific error messages and
   ensure all environment variables are properly set.
+- **Parallelism ValueError (At most one can be -1)**: If you see `ValueError: At most one of rollout_tensor_parallelism, ... can be -1 (auto-derived)`, it means you have not explicitly defined the rollout parallelism parameters.
+  - **Solution**: Explicitly pass at least one of them in your training command (e.g., `rollout_tensor_parallelism=8` as shown in the example commands above).
 - **Workload retry / resume**:
   - **Retry (fresh run)**: Use a unique run name to avoid overwriting
     outputs: `export RUN_NAME=${RUN_NAME?}-retry1 export MAXTEXT_CKPT_PATH=${BASE_OUTPUT_DIRECTORY?}/${RUN_NAME?}/0/items`. Then

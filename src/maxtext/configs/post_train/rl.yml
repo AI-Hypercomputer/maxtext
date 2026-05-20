@@ -26,7 +26,7 @@ num_samplers_slices: -1
 # Only specify rollout_data_parallelism when you would like to use more than one model
 # replicas in rollout. If not specified, rollout_tensor_parallelism will be auto-determined.
 rollout_data_parallelism: -1
-rollout_tensor_parallelism: -1
+rollout_tensor_parallelism: 1
 rollout_expert_parallelism: 1
 
 # ====== Reproducibility ======
