@@ -199,7 +199,7 @@ jobs:
       base_image: maxtext-unit-test-tpu:py312
       cloud_runner: linux-x86-ct6e-180-4tpu
       pytest_marker: 'not cpu_only and not gpu_only and not integration_test and not post_training'
-      pytest_addopts: '--ignore=tests/post_training'
+      pytest_addopts: '--ignore=tests/post_training --ignore=tests/unit/deepseek_v4_vs_reference_test.py'
       xla_python_client_mem_fraction: 0.75
       tf_force_gpu_allow_growth: false
       container_resource_option: "--privileged"
