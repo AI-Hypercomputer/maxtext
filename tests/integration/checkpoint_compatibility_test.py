@@ -26,10 +26,16 @@ before running tests locally.
 """
 
 from datetime import datetime
+import importlib.util
 import json
 import os
 import pytest
 from maxtext.trainers.pre_train.train import main as train_main
+
+pytestmark = pytest.mark.skipif(
+    importlib.util.find_spec("tensorflow") is None,
+    reason="tensorflow not installed; skip testing checkpoint compatibility between tfds and grain",
+)
 from maxtext.utils.globals import MAXTEXT_REPO_ROOT
 from tests.integration.checkpointing_test import get_checkpointing_command
 

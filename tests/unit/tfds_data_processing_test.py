@@ -17,12 +17,14 @@ import os
 import sys
 import unittest
 
+import pytest
+
 import jax
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 
-import tensorflow as tf
-import tensorflow_datasets as tfds
+tf = pytest.importorskip("tensorflow")
+tfds = pytest.importorskip("tensorflow_datasets")
 
 from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT

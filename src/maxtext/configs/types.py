@@ -3031,6 +3031,9 @@ class MaxTextConfig(
       if self.eval_interval > 0 and not self.grain_eval_files:
         raise ValueError("Please specify grain_eval_files or set eval_interval to <=0.")
     elif self.dataset_type == DatasetType.TFDS:
+      logger.warning(
+          "tfds pipeline is deprecated. Use dataset_type=grain, grain_file_type=tfrecord, and provide grain_train_files."
+      )
       if not self.dataset_name:
         raise ValueError("dataset_name can't be empty when dataset_type=tfds")
       if self.eval_interval > 0 and not self.eval_split:

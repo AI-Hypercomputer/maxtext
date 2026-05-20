@@ -309,7 +309,7 @@ class CudnnTePackedSequenceDescriptorTest(unittest.TestCase):
         context_parallel_strategy="ring",
         context_parallel_load_balance=False,
         packing=True,
-        dataset_type="tfds",
+        dataset_type="grain",
         max_segments_per_seq=4,
         head_dim=2,
         attention_kernel="cudnn_flash_te",
