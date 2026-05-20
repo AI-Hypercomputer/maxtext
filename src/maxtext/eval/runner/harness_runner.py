@@ -47,8 +47,9 @@ def _map_results(raw_results: dict, tasks: list[str]) -> dict:
   """Extract per-task accuracy metrics from lm-eval / evalchemy output."""
   scores: dict[str, float] = {}
   results_section = raw_results.get("results", {})
+  groups_section = raw_results.get("groups", {})
   for task in tasks:
-    task_r = results_section.get(task, {})
+    task_r = results_section.get(task) or groups_section.get(task, {})
 
     acc = None
     for key in (
@@ -123,6 +124,7 @@ def run_harness(cfg: dict, hf_token: str | None = None) -> dict:
   num_fewshot = cfg.get("num_fewshot", 0)
   num_samples = cfg.get("num_samples")
   gcs_results_path = cfg.get("gcs_results_path")
+  post_training = cfg.get("post_training", False)
   token = resolve_token(cfg, hf_token)
 
   lm_model_type = "local-chat-completions" if backend == "evalchemy" else "local-completions"
@@ -156,6 +158,10 @@ def run_harness(cfg: dict, hf_token: str | None = None) -> dict:
           lm_model_type,
           server.base_url,
       )
+      extra_kwargs: dict = {}
+      if post_training and backend == "lm_eval":
+        extra_kwargs["apply_chat_template"] = True
+
       raw_results = lm_eval_lib.simple_evaluate(
           model=lm_model_type,
           model_args=model_args,
@@ -163,6 +169,7 @@ def run_harness(cfg: dict, hf_token: str | None = None) -> dict:
           num_fewshot=num_fewshot,
           limit=num_samples,
           log_samples=False,
+          **extra_kwargs,
       )
 
     # All ranks block here until rank-0 finishes evaluation. Non-rank-0 hosts
@@ -221,6 +228,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
   )
   parser.add_argument("--num_fewshot", type=int, default=0, help="Few-shot examples per task.")
   parser.add_argument("--num_samples", type=int, help="Limit samples per task (None = full dataset).")
+  parser.add_argument(
+      "--post_training",
+      action="store_true",
+      help=(
+          "Set for distillation/RL checkpoints."
+      ),
+  )
   return parser
 
 
