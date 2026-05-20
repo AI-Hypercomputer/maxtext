@@ -216,7 +216,11 @@ def build_diloco_state(
     # Outer state retains a single copy of the model parameters and optimizer state.
     # For NNX, model params (Param variables only) live under state.model;
     # for Linen under state.params.
-    outer_params = state.model.filter(nnx.Param) if config.pure_nnx else state.params
+    if config.pure_nnx:
+      _, outer_params, _ = nnx.split(state.model, nnx.Param, ...)
+      outer_params = outer_params.to_pure_dict()
+    else:
+      outer_params = state.params
     outer_opt_state = outer_optimizer.init(outer_params)
     outer_opt_state_sharding = jax.tree_util.tree_map(lambda x: x.sharding, outer_opt_state)
     # For NNX, the step counter lives at state.optimizer.step; for Linen at state.step.
