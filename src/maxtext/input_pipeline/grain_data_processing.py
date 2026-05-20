@@ -29,6 +29,7 @@ from grain.experimental import ElasticIterator
 from maxtext.input_pipeline import data_processing_utils
 from maxtext.input_pipeline import input_pipeline_utils
 from maxtext.input_pipeline import grain_tokenizer
+from maxtext.input_pipeline import dpo_utils
 from maxtext.input_pipeline import multihost_dataloading
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
@@ -255,6 +256,46 @@ def pretrain_preprocessing_pipeline(
   return dataset
 
 
+def dpo_preprocessing_pipeline(
+    dataset,
+    config,
+    data_columns,
+    tokenize,
+    grain_worker_count,
+    grain_per_worker_buffer_size,
+):
+  """Use grain to pre-process the dataset and return iterators for dpo fine-tuning"""
+  dataset = data_processing_utils.parse_and_keep_features(dataset, config, data_columns, tokenize)
+  tokenizer_model, pad_id = data_processing_utils.get_tokenizer_and_pad_id(config)
+
+  if tokenize:
+    dataset = dataset.map(grain_tokenizer.TokenizeAndTrim(data_columns, config.max_target_length, tokenizer_model))
+
+  # Renames arbitrary DPO columns and performs DPO-aware padding.
+  max_prompt_length = config.dpo.max_prompt_length
+  dataset = dataset.map(
+      dpo_utils.DPODataFormatting(
+          pad_id=pad_id,
+          max_target_length=config.max_target_length,
+          data_column_names=data_columns,
+          max_prompt_length=max_prompt_length,
+      )
+  )
+
+  batch_size = config.global_batch_size_to_load // jax.process_count()
+  if config.grain_use_elastic_iterator:
+    # ElasticIterator batches internally, so return the pre-batch dataset.
+    pass
+  else:
+    batch_fn = functools.partial(grain.experimental.batch_and_pad, batch_size=batch_size, pad_value=pad_id)
+    dataset = dataset.batch(batch_size, batch_fn=batch_fn)
+
+  dataset = data_processing_utils.apply_multiprocessing_and_prefetch(
+      dataset, config, grain_worker_count, grain_per_worker_buffer_size
+  )
+  return dataset
+
+
 def _format_chat_template_grain(element, data_columns, tokenizer_model):
   """Grain-compatible mapping function to format raw columns into conversational messages."""
   # Convert raw columns to conversational messages
@@ -342,6 +383,8 @@ def sft_preprocessing_pipeline(
 
 def _get_pipeline_fn(config):
   """Returns the appropriate preprocessing pipeline function based on config."""
+  if config.use_dpo:
+    return dpo_preprocessing_pipeline
   if config.use_sft:
     return sft_preprocessing_pipeline
   return pretrain_preprocessing_pipeline

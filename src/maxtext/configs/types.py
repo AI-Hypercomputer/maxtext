@@ -3031,6 +3031,12 @@ class MaxTextConfig(
       if self.eval_interval > 0 and not self.grain_eval_files:
         raise ValueError("Please specify grain_eval_files or set eval_interval to <=0.")
     elif self.dataset_type == DatasetType.TFDS:
+      if self.use_dpo:
+        raise ValueError(
+            "TFDS dataset_type=tfds is not supported for DPO training"
+            " (config.use_dpo=True). Please use dataset_type=grain or"
+            " dataset_type=hf instead."
+        )
       if not self.dataset_name:
         raise ValueError("dataset_name can't be empty when dataset_type=tfds")
       if self.eval_interval > 0 and not self.eval_split:
