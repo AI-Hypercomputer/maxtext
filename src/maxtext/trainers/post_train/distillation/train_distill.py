@@ -736,21 +736,55 @@ def train_distill(
 
     # 4. Data Iterators (Init BEFORE Trainer pipeline setup)
     # We use MaxText's native create_data_iterator which creates both train and eval iterators
+    # if is_offline:
+    #   max_logging.log(f"Loading Offline Dataset from {offline_data_dir}...")
+      
+    #   target_global_batch_size = student_config.per_device_batch_size * jax.device_count()
+      
+    #   raw_train_iter = distillation_utils.OfflineArrayRecordIterator(
+    #       offline_data_dir, 
+    #       global_batch_size=target_global_batch_size,
+    #       mesh=mesh,
+    #       data_sharding=student_config.data_sharding
+    #   )
+    #   raw_eval_iter = None
+    # else:
+    #   max_logging.log("Initializing Data Iterators via MaxText pipeline...")
+    #   raw_train_iter, raw_eval_iter = input_pipeline_interface.create_data_iterator(student_config, mesh)
+    
+    # if is_offline:
+    #   max_logging.log(f"Initializing Data Iterators via MaxText pipeline...")
+      
+    #   # 1. Point Grain to your offline files instead of the raw text dataset
+    #   if not offline_data_dir.endswith(".array_record"):
+    #       student_config.grain_train_files = os.path.join(offline_data_dir, "*.array_record")
+    #   else:
+    #       student_config.grain_train_files = offline_data_dir
+          
+    #   # 2. Tell the trainer not to look for an offline eval set
+    #   student_config.eval_interval = 0
+      
+    #   # 3. Tell the Grain parser to keep our custom top_k keys
+    #   student_config.get_keys()["is_offline_distillation"] = True 
+    
     if is_offline:
-      max_logging.log(f"Loading Offline Dataset from {offline_data_dir}...")
+      max_logging.log(f"Initializing Data Iterators via MaxText pipeline...")
       
-      target_global_batch_size = student_config.per_device_batch_size * jax.device_count()
+      # 1. Point Grain to your offline files instead of the raw text dataset
+      if not offline_data_dir.endswith(".array_record"):
+          student_config.get_keys()["grain_train_files"] = os.path.join(offline_data_dir, "*.array_record")
+      else:
+          student_config.get_keys()["grain_train_files"] = offline_data_dir
+          
+      # 2. Tell the trainer not to look for an offline eval set
+      student_config.get_keys()["eval_interval"] = 0
       
-      raw_train_iter = distillation_utils.OfflineArrayRecordIterator(
-          offline_data_dir, 
-          global_batch_size=target_global_batch_size,
-          mesh=mesh,
-          data_sharding=student_config.data_sharding
-      )
-      raw_eval_iter = None
-    else:
-      max_logging.log("Initializing Data Iterators via MaxText pipeline...")
-      raw_train_iter, raw_eval_iter = input_pipeline_interface.create_data_iterator(student_config, mesh)
+      # 3. Tell the Grain parser to keep our custom top_k keys
+      student_config.get_keys()["is_offline_distillation"] = True 
+
+
+    # Now, whether online or offline, MaxText natively handles the multi-threading!
+    raw_train_iter, raw_eval_iter = input_pipeline_interface.create_data_iterator(student_config, mesh)
 
     # 5. Input Pipeline Checkpointing & Restoration
     # Replace the default CheckpointManager with a Grain-aware one, which enables iterator checkpointing for grain datasets.
@@ -776,10 +810,10 @@ def train_distill(
       if getattr(batch, "top_k_logits", None) is None:
         return inputs_dict
 
-      # Scatter the offline arrays into a dense tensor of -10000s
-      dense_shape = batch.input_tokens.shape + (student_config.vocab_size,)
-      dense_logits = jnp.full(dense_shape, -10000.0, dtype=jnp.float32)
-      dense_logits = jnp.put_along_axis(dense_logits, batch.top_k_indices, batch.top_k_logits, axis=-1, inplace=False)
+      # # Scatter the offline arrays into a dense tensor of -10000s
+      # dense_shape = batch.input_tokens.shape + (student_config.vocab_size,)
+      # dense_logits = jnp.full(dense_shape, -10000.0, dtype=jnp.float32)
+      # dense_logits = jnp.put_along_axis(dense_logits, batch.top_k_indices, batch.top_k_logits, axis=-1, inplace=False)
 
       inputs_dict["teacher_output"] = distillation_utils.DistillationForwardOutput(
           logits=batch.top_k_logits, 

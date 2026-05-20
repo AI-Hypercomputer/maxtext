@@ -216,6 +216,41 @@ def get_datasets(
     )
 
 
+# def pretrain_preprocessing_pipeline(
+#     dataset,
+#     config,
+#     data_columns,
+#     tokenize,
+#     grain_worker_count,
+#     grain_per_worker_buffer_size,
+# ):
+#   """Use grain pipeline to pre-process the dataset and return iterators for pretrain"""
+#   dataset = data_processing_utils.parse_and_keep_features(dataset, config, data_columns, tokenize)
+
+#   assert len(data_columns) == 1
+#   text_column = data_columns[0]
+
+#   tokenizer_model, pad_id = data_processing_utils.get_tokenizer_and_pad_id(config)
+
+#   if tokenize:
+#     if config.use_truncation:
+#       dataset = dataset.map(grain_tokenizer.TokenizeAndTrim(text_column, config.max_target_length, tokenizer_model))
+#     else:
+#       dataset = dataset.apply(grain_tokenizer.TokenizeAndChunk(text_column, config.max_target_length, tokenizer_model))
+
+#   data_columns = ("inputs", "targets")
+#   rekey_dict = {col: text_column for col in data_columns}
+#   dataset = dataset.map(input_pipeline_utils.Rekey(rekey_dict))
+
+#   batch_size = data_processing_utils.get_local_batch_size(config)
+#   dataset = data_processing_utils.format_and_batch(dataset, config, batch_size, pad_id, data_columns, tokenizer_model)
+
+#   dataset = data_processing_utils.shift_dataset(dataset, pad_id)
+#   dataset = data_processing_utils.apply_multiprocessing_and_prefetch(
+#       dataset, config, grain_worker_count, grain_per_worker_buffer_size
+#   )
+#   return dataset
+
 def pretrain_preprocessing_pipeline(
     dataset,
     config,
@@ -224,6 +259,7 @@ def pretrain_preprocessing_pipeline(
     grain_worker_count,
     grain_per_worker_buffer_size,
 ):
+<<<<<<< HEAD
   """Use grain pipeline to pre-process the dataset and return iterators for pretrain.
 
   When `config.grain_use_elastic_iterator` is True, the pipeline stops before batching
@@ -231,6 +267,17 @@ def pretrain_preprocessing_pipeline(
   shift pre-batch on axis 0 rather than post-batch on axis 1.
   """
   dataset = data_processing_utils.parse_and_keep_features(dataset, config, data_columns, tokenize)
+=======
+  """Use grain pipeline to pre-process the dataset and return iterators for pretrain"""
+  is_offline = getattr(config, "is_offline_distillation", False)
+  
+  # CRITICAL FIX: Tell the very first step of the pipeline to keep our keys!
+  columns_to_parse = list(data_columns)
+  if is_offline:
+      columns_to_parse.extend(["top_k_logits", "top_k_indices"])
+      
+  dataset = data_processing_utils.parse_and_keep_features(dataset, config, columns_to_parse, tokenize)
+>>>>>>> 6b5d9598c (Speed up offline distillation and saving top-k teacher logits)
 
   assert len(data_columns) == 1
   text_column = data_columns[0]
@@ -242,13 +289,23 @@ def pretrain_preprocessing_pipeline(
       dataset = dataset.map(grain_tokenizer.TokenizeAndTrim(text_column, config.max_target_length, tokenizer_model))
     else:
       dataset = dataset.apply(grain_tokenizer.TokenizeAndChunk(text_column, config.max_target_length, tokenizer_model))
+      
+  pipeline_columns = ["inputs", "targets"]
+  rekey_dict = {col: text_column for col in pipeline_columns}
+  
+  dataset = dataset.map(input_pipeline_utils.Rekey(rekey_dict, keep_old_keys=is_offline))
 
-  data_columns = ("inputs", "targets")
-  rekey_dict = {col: text_column for col in data_columns}
-  dataset = dataset.map(input_pipeline_utils.Rekey(rekey_dict))
+  if is_offline:
+    pipeline_columns.extend(["top_k_logits", "top_k_indices"])
 
   batch_size = data_processing_utils.get_local_batch_size(config)
+<<<<<<< HEAD
   dataset = data_processing_utils.format_and_batch(dataset, config, batch_size, pad_id, data_columns, tokenizer_model)
+=======
+  dataset = data_processing_utils.format_and_batch(dataset, config, batch_size, pad_id, tuple(pipeline_columns), tokenizer_model)
+
+  dataset = data_processing_utils.shift_dataset(dataset, pad_id)
+>>>>>>> 6b5d9598c (Speed up offline distillation and saving top-k teacher logits)
   dataset = data_processing_utils.apply_multiprocessing_and_prefetch(
       dataset, config, grain_worker_count, grain_per_worker_buffer_size
   )

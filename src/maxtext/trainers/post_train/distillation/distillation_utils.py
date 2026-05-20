@@ -32,6 +32,10 @@ import tensorflow as tf
 from array_record.python import array_record_module
 from orbax import checkpoint
 
+import json
+import tensorflow as tf
+import grain.python as grain
+
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils
 # Reuse MaxText's native checkpointing logic
@@ -82,57 +86,6 @@ class MaxTextTrainingInput(peft_trainer.TrainingInput):
 # Data Loading Adapter
 # -----------------------------------------------------------------------------
 
-
-# class OfflineArrayRecordIterator:
-#   """Reads the pre-generated global top-k logits files."""
-
-#   def __init__(self, data_dir: str, epochs: int = 100):
-#     self.pattern = data_dir
-#     self.filepaths = sorted(tf.io.gfile.glob(self.pattern))
-
-#     if not self.filepaths:
-#       raise FileNotFoundError(f"Offline distillation files not found for pattern: {self.pattern}")
-
-#     self.epochs = epochs
-#     self.current_epoch = 0
-#     self.file_index = 0
-#     self._open_current_file()
-
-#   def _open_current_file(self):
-#     self.reader = array_record_module.ArrayRecordReader(self.filepaths[self.file_index])
-#     self.num_records = self.reader.num_records()
-#     self.record_index = 0
-
-#   def __iter__(self):
-#     return self
-
-#   def __next__(self):
-#     while self.record_index >= self.num_records:
-#       self.file_index += 1
-#       if self.file_index >= len(self.filepaths):
-#         self.current_epoch += 1
-#         if self.current_epoch >= self.epochs:
-#           raise StopIteration
-#         self.file_index = 0
-      
-#       self._open_current_file()
-
-#     record = self.reader.read()
-#     self.record_index += 1
-#     data = pickle.loads(record)
-
-#     # Map the arrays to match MaxText's expected dictionary
-#     batch = {
-#         "inputs": data["tokens"],
-#         "top_k_logits": data["top_k_logits"],
-#         "top_k_indices": data["top_k_indices"],
-#     }
-#     for key in ["inputs_position", "inputs_segmentation", "targets_segmentation", "targets"]:
-#       if key in data:
-#         batch[key] = data[key]
-
-#     return batch
-
 class OfflineArrayRecordIterator:
   """Reads the pre-generated global top-k logits files and chunks them to the correct batch size."""
 
@@ -159,7 +112,9 @@ class OfflineArrayRecordIterator:
     self.sharding_3d = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(batch_axis_names, None, None))
 
   def _open_current_file(self):
-    self.reader = array_record_module.ArrayRecordReader(self.filepaths[self.file_index])
+    self.reader = array_record_module.ArrayRecordReader(
+        self.filepaths[self.file_index], options="readahead_buffer_size:8192"
+    )
     self.num_records = self.reader.num_records()
     self.record_index = 0
 
@@ -173,16 +128,20 @@ class OfflineArrayRecordIterator:
         if self.buffer_idx < batch_size_in_buffer:
           end_idx = min(self.buffer_idx + self.global_batch_size, batch_size_in_buffer)
           actual_size = end_idx - self.buffer_idx
-          
           if actual_size == self.global_batch_size:
             sliced_batch = {}
             for k, v in self.buffer.items():
               slice_arr = v[self.buffer_idx:end_idx]
-              # Explicitly shard the arrays before returning them to JAX
+              
+              # Construct sharded jax.Arrays directly to bypass collective multi-host validation
               if slice_arr.ndim == 2:
-                sliced_batch[k] = jax.device_put(slice_arr, self.sharding_2d)
+                sliced_batch[k] = jax.make_array_from_callback(
+                    slice_arr.shape, self.sharding_2d, lambda idx: slice_arr[idx]
+                )
               elif slice_arr.ndim == 3:
-                sliced_batch[k] = jax.device_put(slice_arr, self.sharding_3d)
+                sliced_batch[k] = jax.make_array_from_callback(
+                    slice_arr.shape, self.sharding_3d, lambda idx: slice_arr[idx]
+                )
               else:
                 sliced_batch[k] = slice_arr
                 
@@ -277,7 +236,6 @@ class OfflineArrayRecordIterator:
       while self.record_index < target_record_index:
         self.reader.read()
         self.record_index += 1
-
 
 class MaxTextToTunixIterator:
   """Adapts the raw dictionary output of MaxText's data loader to Tunix objects.
