@@ -68,6 +68,7 @@ jobs:
         IFRT_PROXY_USE_INSECURE_GRPC_CREDENTIALS: true
         JAX_PLATFORMS: "proxy"
         JAX_BACKEND_TARGET: "grpc://localhost:29000"
+        TPU_VISIBLE_DEVICES: ""
       options: ${{ inputs.container_resource_option }}
     steps:
       - name: Checkout MaxText
@@ -85,7 +86,6 @@ jobs:
           source .venv/bin/activate
           maxtext_wheel=$(ls maxtext-*-py3-none-any.whl 2>/dev/null)
           uv pip install ${maxtext_wheel}[tpu] --resolution=lowest
-          uv pip uninstall libtpu
           install_tpu_pre_train_extra_deps
           python3 --version
           python3 -m pip freeze
