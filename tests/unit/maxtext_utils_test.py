@@ -41,6 +41,8 @@ from maxtext.models import models
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import maxtext_utils_nnx
+from maxtext.utils import model_creation_utils
+from maxtext.layers import train_state_nnx
 from maxtext.utils import sharding
 from maxtext.utils.sharding import assert_params_sufficiently_sharded, get_formatted_sharding_annotations
 from tests.utils.test_helpers import get_test_config_path
@@ -351,32 +353,47 @@ class MaxUtilsInitTransformerState(unittest.TestCase):
     self.mesh = Mesh(devices_array, self.config.mesh_axes)
     quant = quantizations.configure_quantization(self.config)
     if self.config.pure_nnx:
-      raise NotImplementedError("Pure NNX support has not been implemented yet.")
+      self._create_model_partial, self.model = model_creation_utils.create_nnx_abstract_model(self.config, self.mesh)
     else:
       self.model = models.transformer_as_linen(self.config, mesh=self.mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
 
   def test_setup_decode_state(self):
     rng = random.PRNGKey(0)
     if self.config.pure_nnx:
-      # NNX has a different function to init the training state.
-      raise NotImplementedError("Pure NNX support has not been implemented yet.")
+
+      def create_train_state_fn():
+        nnx_model = self._create_model_partial()
+        return train_state_nnx.TrainStateNNX(nnx_model, None)
+
+      init_state_fn = create_train_state_fn
     else:
       init_state_fn = functools.partial(maxtext_utils.init_initial_state, self.model, None, self.config, False, rng)
     state, _ = maxtext_utils.setup_decode_state(self.config, self.mesh, None, init_state_fn)
-    self.assertEqual(state.tx, None)
-    self.assertEqual(state.opt_state, {})
+    if self.config.pure_nnx:
+      self.assertNotIn("optimizer", state)
+    else:
+      self.assertEqual(state.tx, None)
+      self.assertEqual(state.opt_state, {})
 
   def test_setup_initial_state(self):
     rng = random.PRNGKey(0)
     tx = optax.adam(learning_rate=0.001)
     if self.config.pure_nnx:
-      # NNX has a different function to init the training state.
-      raise NotImplementedError("Pure NNX support has not been implemented yet.")
+
+      def create_train_state_fn():
+        nnx_model = self._create_model_partial()
+        optimizer = nnx.Optimizer(nnx_model, tx, wrt=nnx.Param)
+        return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
+
+      init_state_fn = create_train_state_fn
     else:
       init_state_fn = functools.partial(maxtext_utils.init_initial_state, self.model, tx, self.config, True, rng)
     state, _, _, _ = maxtext_utils.setup_initial_state(None, self.config, self.mesh, None, init_state_fn)
-    self.assertEqual(state.tx, tx)
-    self.assertNotEqual(state.opt_state, {})
+    if self.config.pure_nnx:
+      self.assertIsNotNone(state.optimizer)
+    else:
+      self.assertEqual(state.tx, tx)
+      self.assertNotEqual(state.opt_state, {})
 
 
 class MaxUtilsPpAsDp(unittest.TestCase):
@@ -1339,16 +1356,29 @@ class TestSetupTrainingState(unittest.TestCase):
     self.mesh = Mesh(devices_array, self.config.mesh_axes)
     quant = quantizations.configure_quantization(self.config)
     if self.config.pure_nnx:
-      raise NotImplementedError("Pure NNX path not covered by this test.")
-    self.model = Transformer(self.config, mesh=self.mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+      self._create_model_partial, self.model = model_creation_utils.create_nnx_abstract_model(self.config, self.mesh)
+    else:
+      self.model = Transformer(self.config, mesh=self.mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
 
   def test_setup_training_state_returns_train_state(self):
     rng = jax.random.PRNGKey(0)
     tx = optax.adam(learning_rate=0.001)
-    init_state_fn = functools.partial(maxtext_utils.init_initial_state, self.model, tx, self.config, True, rng)
+    if self.config.pure_nnx:
+
+      def create_train_state_fn():
+        nnx_model = self._create_model_partial()
+        optimizer = nnx.Optimizer(nnx_model, tx, wrt=nnx.Param)
+        return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
+
+      init_state_fn = create_train_state_fn
+    else:
+      init_state_fn = functools.partial(maxtext_utils.init_initial_state, self.model, tx, self.config, True, rng)
     state, _, _, _ = maxtext_utils.setup_training_state(None, self.config, self.mesh, None, init_state_fn)
-    self.assertEqual(state.tx, tx)
-    self.assertNotEqual(state.opt_state, {})
+    if self.config.pure_nnx:
+      self.assertIsNotNone(state.optimizer)
+    else:
+      self.assertEqual(state.tx, tx)
+      self.assertNotEqual(state.opt_state, {})
 
 
 class TestGetLogicalAnnotations(unittest.TestCase):
@@ -1360,14 +1390,29 @@ class TestGetLogicalAnnotations(unittest.TestCase):
     self.mesh = Mesh(devices_array, self.config.mesh_axes)
     quant = quantizations.configure_quantization(self.config)
     if self.config.pure_nnx:
-      raise NotImplementedError("Pure NNX path not covered by this test.")
-    self.model = Transformer(self.config, mesh=self.mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+      self._create_model_partial, self.model = model_creation_utils.create_nnx_abstract_model(self.config, self.mesh)
+    else:
+      self.model = Transformer(self.config, mesh=self.mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
     self.rng = jax.random.PRNGKey(0)
     self.tx = optax.adam(learning_rate=0.001)
 
   def test_returns_partition_spec_tree(self):
-    init_state_fn = functools.partial(maxtext_utils.init_initial_state, self.model, self.tx, self.config, True, self.rng)
-    annotations = maxtext_utils.get_logical_annotations(self.config, self.mesh, init_state_fn)
+    if self.config.pure_nnx:
+
+      def create_train_state_fn():
+        nnx_model = self._create_model_partial()
+        optimizer = nnx.Optimizer(nnx_model, self.tx, wrt=nnx.Param)
+        return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
+
+      init_state_fn = create_train_state_fn
+      annotations = maxtext_utils_nnx.get_partition_spec_nnx(
+          maxtext_utils.get_abstract_state(self.config, self.mesh, init_state_fn, True)[2]
+      )
+    else:
+      init_state_fn = functools.partial(
+          maxtext_utils.init_initial_state, self.model, self.tx, self.config, True, self.rng
+      )
+      annotations = maxtext_utils.get_logical_annotations(self.config, self.mesh, init_state_fn)
     # Result should be a pytree with PartitionSpec leaves
     leaves = jax.tree_util.tree_leaves(annotations)
     self.assertGreater(len(leaves), 0)
