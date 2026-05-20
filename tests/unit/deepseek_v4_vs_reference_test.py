@@ -1831,6 +1831,12 @@ class DeepSeekV4ParityTest(unittest.TestCase):
         layer_types=["heavily_compressed_attention"] * 10,
         o_groups=config.o_groups,
         o_lora_rank=config.o_lora_rank,
+        # Disabling hardware MXU grid alignment padding (sa_block_kv=0).
+        # By default, AttentionOp enforces sa_block_kv=512 grid bounds, automatically padding trailing sequence length
+        # (S=128 + W=32 = 160) to 512 with zero vectors. Under dot-product attention without explicit causal padding masks
+        # (attention_mask=None), Softmax evaluates unmasked zero vectors to positive probability weightings (e^{0.0} = 1.0),
+        # artificially inflating the local exponential normalizer sum denominator and distorting numerical parity bounds.
+        sa_block_kv=0,
     )
 
     devices = jax.devices()
@@ -2253,6 +2259,9 @@ class DeepSeekV4ParityTest(unittest.TestCase):
           index_topk=config_pt.index_topk,
           mlp_activations=["silu", "linear"],
           scan_layers=scan_mode,
+          # Explicitly disable hardware MXU grid sequence padding (sa_block_kv=0) to ensure dot-product Softmax
+          # normalization sums match unpadded PyTorch reference bounds precisely without exponential denominator drift.
+          sa_block_kv=0,
       )
       decoder_jax = NNXDecoder(config=jax_config, mesh=mesh, rngs=nnx.Rngs(0))
 
