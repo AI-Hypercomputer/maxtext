@@ -85,37 +85,72 @@ class DiLoCoTest(unittest.TestCase):
       model = SimpleNNXModel(rngs=rngs)
       graphdef, params = nnx.split(model)
 
-      def nnx_apply_fn(params, inputs):
-        model_replica = nnx.merge(graphdef, params)
-        return model_replica(inputs)
+      if test_config.pure_nnx:
+        from maxtext.layers.train_state_nnx import TrainStateNNX
+        optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
+        
+        # We must split the state so drjax can broadcast it (drjax needs pure dicts/pytrees)
+        _, initial_test_state_dict = nnx.split(TrainStateNNX(model, optimizer))
+        # But wait, diloco_test_state expects a TrainStateNNX instance if pure_nnx is True!
+        initial_test_state = TrainStateNNX(model, optimizer)
 
-      # 2. Vmap this new wrapper function
-      vmapped_apply = jax.vmap(nnx_apply_fn, in_axes=(None, 0))
+        # For NNX, train_step needs to take the TrainStateNNX and mutate it
+        def _test_train_step(state, batch, prng_key: diloco.PRNGKey):
+          del prng_key
+          def loss_fn(model, batch):
+            inputs, labels = batch
+            logits = jax.vmap(model)(inputs)
+            residual = logits - labels
+            return jnp.mean(jnp.square(residual))
+          
+          loss, grads = nnx.value_and_grad(loss_fn)(state.model, batch)
+          state.optimizer.update(state.model, grads)
+          state.optimizer.step.value += 1
+          return state, loss
 
-      def _test_train_step(state: train_state.TrainState, batch, prng_key: diloco.PRNGKey):
-        """A simple MSE loss train step to enable numerics testing."""
-        del prng_key
-
-        def loss_fn(params, batch):
-          inputs, labels = batch
-          logits = vmapped_apply(params, inputs)
-          residual = logits - labels
-          sq_residual = jnp.square(residual)
-          msq_residual = jnp.mean(sq_residual)
-          return msq_residual
-
-        loss, grad = jax.value_and_grad(loss_fn)(state.params, batch)
-        return state.apply_gradients(grads=grad), loss
-
-      initial_test_state = train_state.TrainState.create(
-          apply_fn=vmapped_apply,
-          params=params,
-          tx=tx,
-      )
+      else:
+        def nnx_apply_fn(params, inputs):
+          model_replica = nnx.merge(graphdef, params)
+          return model_replica(inputs)
+  
+        # 2. Vmap this new wrapper function
+        vmapped_apply = jax.vmap(nnx_apply_fn, in_axes=(None, 0))
+  
+        def _test_train_step(state: train_state.TrainState, batch, prng_key: diloco.PRNGKey):
+          """A simple MSE loss train step to enable numerics testing."""
+          del prng_key
+  
+          def loss_fn(params, batch):
+            inputs, labels = batch
+            logits = vmapped_apply(params, inputs)
+            residual = logits - labels
+            sq_residual = jnp.square(residual)
+            msq_residual = jnp.mean(sq_residual)
+            return msq_residual
+  
+          loss, grad = jax.value_and_grad(loss_fn)(state.params, batch)
+          return state.apply_gradients(grads=grad), loss
+  
+        initial_test_state = train_state.TrainState.create(
+            apply_fn=vmapped_apply,
+            params=params,
+            tx=tx,
+        )
 
       diloco_test_state, _ = diloco.build_diloco_state(test_config, lambda: initial_test_state)
       chex.assert_equal(diloco_test_state.step, 0)
-      chex.assert_trees_all_equal(diloco_test_state.params, initial_test_state.params)
+      if test_config.pure_nnx:
+        _, params_pure, _ = nnx.split(initial_test_state.model, nnx.Param, ...)
+        
+        # diloco_test_state.params might contain nnx.Variables instead of pure arrays.
+        # We need to unwrap them if they do.
+        diloco_params_pure = jax.tree_util.tree_map(
+            lambda x: x.value if hasattr(x, 'value') else x,
+            diloco_test_state.params
+        )
+        chex.assert_trees_all_equal(diloco_params_pure, params_pure.to_pure_dict())
+      else:
+        chex.assert_trees_all_equal(diloco_test_state.params, initial_test_state.params)
 
       diloco_train_step = diloco.build_diloco_train_step(test_config, _test_train_step)
       inputs = jnp.array(
@@ -163,7 +198,18 @@ class DiLoCoTest(unittest.TestCase):
       chex.assert_equal(diloco_test_state.step, 1.0)
       chex.assert_equal(loss, 1.0)
       # Assert no updates to the global model yet (no synchronization)
-      chex.assert_trees_all_equal(diloco_test_state.params, initial_test_state.params)
+      if test_config.pure_nnx:
+        _, params_pure, _ = nnx.split(initial_test_state.model, nnx.Param, ...)
+        
+        # diloco_test_state.params might contain nnx.Variables instead of pure arrays.
+        # We need to unwrap them if they do.
+        diloco_params_pure = jax.tree_util.tree_map(
+            lambda x: x.value if hasattr(x, 'value') else x,
+            diloco_test_state.params
+        )
+        chex.assert_trees_all_equal(diloco_params_pure, params_pure.to_pure_dict())
+      else:
+        chex.assert_trees_all_equal(diloco_test_state.params, initial_test_state.params)
 
       # Run the second step (no synchronization).
       # Replica 0:
@@ -193,7 +239,18 @@ class DiLoCoTest(unittest.TestCase):
       chex.assert_equal(diloco_test_state.step, 2.0)
       chex.assert_trees_all_close(loss, 0.65)
       # Assert no updates to the global model yet (no synchronization)
-      chex.assert_trees_all_equal(diloco_test_state.params, initial_test_state.params)
+      if test_config.pure_nnx:
+        _, params_pure, _ = nnx.split(initial_test_state.model, nnx.Param, ...)
+        
+        # diloco_test_state.params might contain nnx.Variables instead of pure arrays.
+        # We need to unwrap them if they do.
+        diloco_params_pure = jax.tree_util.tree_map(
+            lambda x: x.value if hasattr(x, 'value') else x,
+            diloco_test_state.params
+        )
+        chex.assert_trees_all_equal(diloco_params_pure, params_pure.to_pure_dict())
+      else:
+        chex.assert_trees_all_equal(diloco_test_state.params, initial_test_state.params)
 
       # Run the third step, which synchronizes afterwards.
       # Replica 0:
