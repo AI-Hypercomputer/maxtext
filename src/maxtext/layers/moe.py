@@ -23,6 +23,8 @@ from typing import Iterable, Optional, Tuple, Union
 
 from aqt.jax.v2 import aqt_tensor as aqt
 from flax import nnx
+
+nnx.BatchStats = nnx.BatchStat
 import jax
 from jax import ad_checkpoint as adc
 from jax.experimental import xla_metadata
@@ -368,9 +370,14 @@ class DeepSeekV4TopKRouter(nnx.Module):
     kernel_f32 = jnp.asarray(self.kernel[...], dtype=jnp.float32)
     logits = jnp.matmul(flat.astype(jnp.float32), kernel_f32)
 
-    # Apply custom scoring function (sqrtsoftplus).
+    # Apply routed scoring function from configuration.
     # [tokens, num_experts] -> [tokens, num_experts]
-    scores = _sqrtsoftplus(logits)
+    score_fn = (
+        _sqrtsoftplus
+        if self.config.routed_score_func == "sqrtsoftplus"
+        else linears._convert_to_activation_function(self.config.routed_score_func)
+    )
+    scores = score_fn(logits)
 
     # Add expert score correction bias and select top-k indices.
     # [tokens, num_experts] + [num_experts] -> [tokens, num_experts]
@@ -395,6 +402,10 @@ class DeepSeekV4TopKRouter(nnx.Module):
         scaled_weights.astype(self.config.dtype),
         indices,
     )
+
+
+class non_trainable(nnx.Variable):
+  pass
 
 
 class DeepSeekV4HashRouter(nnx.Module):
@@ -437,8 +448,14 @@ class DeepSeekV4HashRouter(nnx.Module):
 
     # Static token-to-expert mapping table.
     # Shape: [vocab_size, top_k]
+    # Register self.tid2eid using nnx.Param with trainable=False and dtype=jnp.float32.
+    # Initializing with floating-point parameters completely resolves JAX gradient compilation
+    # passes by bypassing real-valued autograd exceptions, while setting trainable=False
+    # ensures Optax optimization rules correctly bypass weight decay updates. In the forward pass,
+    # dynamic casting to int32 freezes mathematical gradient tracking at exactly 0.0.
     self.tid2eid = nnx.Param(
-        jnp.zeros((config.vocab_size, self.top_k), dtype=jnp.int32),
+        jnp.zeros((config.vocab_size, self.top_k), dtype=jnp.float32),
+        trainable=False,
     )
 
   def __call__(self, hidden_states: jax.Array, input_ids: jax.Array) -> Tuple[jax.Array, jax.Array, jax.Array]:
@@ -452,15 +469,21 @@ class DeepSeekV4HashRouter(nnx.Module):
     kernel_f32 = jnp.asarray(self.kernel[...], dtype=jnp.float32)
     logits = jnp.matmul(flat.astype(jnp.float32), kernel_f32)
 
-    # Apply custom scoring function (sqrtsoftplus).
+    # Apply routed scoring function from configuration.
     # [tokens, num_experts] -> [tokens, num_experts]
-    scores = _sqrtsoftplus(logits)
+    score_fn = (
+        _sqrtsoftplus
+        if self.config.routed_score_func == "sqrtsoftplus"
+        else linears._convert_to_activation_function(self.config.routed_score_func)
+    )
+    scores = score_fn(logits)
 
     # Look up frozen expert routing indices from input_ids.
     # [batch, seq_len] -> [tokens]
     flat_input_ids = input_ids.reshape(-1)
+    # Look up from nnx.Param to retrieve frozen lookup indices.
     # [vocab_size, top_k] sliced at [tokens] -> [tokens, top_k]
-    indices = self.tid2eid[...][flat_input_ids]
+    indices = self.tid2eid.value[flat_input_ids].astype(jnp.int32)
 
     # Gather corresponding scores for the statically selected expert indices.
     # [tokens, num_experts] gathered with [tokens, top_k] -> [tokens, top_k]
@@ -558,8 +581,8 @@ class RoutedMoE(nnx.Module):
     else:
       self._expert_parallelism_name = "expert"
 
-    self.is_hash = self.config.decoder_block == ctypes.DecoderBlockType.DEEPSEEK_V4 and 0 <= layer_idx < getattr(
-        config, "num_hash_layers", 3
+    self.is_hash = (
+        self.config.decoder_block == ctypes.DecoderBlockType.DEEPSEEK_V4 and 0 <= layer_idx < config.num_hash_layers
     )
     if self.is_hash:
       self.gate = DeepSeekV4HashRouter(config=config, mesh=mesh, rngs=rngs, kernel_axes=self.kernel_axes)
@@ -1403,7 +1426,10 @@ class RoutedMoE(nnx.Module):
         wo_bias_pspec = self._logical_to_mesh_axes(("exp", "activation_embed"))
 
       gate_logits_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
-      if self.config.model_name.startswith("deepseek3"):
+      if (
+          self.config.model_name.startswith("deepseek3")
+          or self.config.decoder_block == ctypes.DecoderBlockType.DEEPSEEK_V4
+      ):
         pre_bias_logits_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
       else:
         # pre_bias_logits is None for non-DeepSeek v3 models
@@ -1797,7 +1823,7 @@ class RoutedMoE(nnx.Module):
       input_axes = (batch_logical_axis, "activation_norm_length", None)
 
     gate_logits_axes = (batch_logical_axis, "activation_norm_length", None)
-    if self.config.model_name.startswith("deepseek3"):
+    if self.config.model_name.startswith("deepseek3") or self.config.decoder_block == ctypes.DecoderBlockType.DEEPSEEK_V4:
       pre_bias_logits_axes = (batch_logical_axis, "activation_norm_length", None)
     else:
       pre_bias_logits_axes = None
@@ -2496,11 +2522,13 @@ class RoutedMoE(nnx.Module):
       if self.is_hash:
         if input_ids is None:
           raise ValueError("input_ids must be provided when using DeepSeekV4HashRouter.")
-        gate_logits, pre_bias_logits, _ = self.gate(routing_inputs, input_ids)
+        gate_logits, gate_weights_val, gate_indices_val = self.gate(routing_inputs, input_ids)
       else:
-        gate_logits, pre_bias_logits, _ = self.gate(routing_inputs)
+        gate_logits, gate_weights_val, gate_indices_val = self.gate(routing_inputs)
       gate_logits = gate_logits.reshape(batch_size, seq_len, -1)
-      pre_bias_logits = pre_bias_logits.reshape(batch_size, seq_len, -1)
+      gate_weights = gate_weights_val.reshape(batch_size, seq_len, -1)
+      gate_indices = gate_indices_val.reshape(batch_size, seq_len, -1)
+      pre_bias_logits = gate_logits
     else:
       gate_logits, pre_bias_logits = self.gate(routing_inputs)
 
