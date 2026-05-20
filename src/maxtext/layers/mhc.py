@@ -19,10 +19,10 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from maxtext.common.common_types import Array, Config
+from maxtext.common.common_types import Array, Config, DecoderBlockType
 from maxtext.common.common_types import HyperConnectionType
 from maxtext.layers.initializers import default_bias_init, default_scalar_init, nd_dense_init
-from maxtext.layers.normalizations import RMSNorm
+from maxtext.layers.normalizations import DeepSeekV4UnweightedRMSNorm, RMSNorm
 
 
 def get_functions(expansion_rate: int):
@@ -42,26 +42,26 @@ def get_functions(expansion_rate: int):
   return expand, reduce
 
 
-def sinkhorn(t, iters=20):
+def sinkhorn(t, iters=20, eps=1e-12):
   """Computes the Sinkhorn normalization of a matrix (rows and columns sum to 1)."""
-  # Use float32 precision for numerical stability during normalization
+  # Use float32 precision for numerical stability during alternating L1 row/column normalizations.
+  # val: [B, S, H, H]
   initial_dtype = t.dtype
   t = t.astype(jnp.float32)
 
-  # Column-wise normalization (axis=-2) - positive and sum up to 1 across columns
-  # Equivalent to t = exp(t) / jnp.sum(jnp.exp(t), axis=-2)
-  t = jax.nn.softmax(t, axis=-2)
+  # Column normalization first (sum along axis -2) matching Xie et al. Equation 8 initialization.
+  t = t / (jnp.sum(t, axis=-2, keepdims=True) + eps)
 
   def body_fun(i, val):
-    # L1 Normalization: val / sum(val) with clipping of denominator
+    # L1 Normalization: val / (sum(val) + eps) matching the exact denominator addition.
     # Normalize rows (axis -1)
-    val = val / jnp.clip(jnp.sum(val, axis=-1, keepdims=True), min=1e-12)
+    val = val / (jnp.sum(val, axis=-1, keepdims=True) + eps)
     # Normalize columns (axis -2)
-    val = val / jnp.clip(jnp.sum(val, axis=-2, keepdims=True), min=1e-12)
+    val = val / (jnp.sum(val, axis=-2, keepdims=True) + eps)
     return val
 
-  # Use lax.fori_loop for an efficient, JIT-friendly loop
-  t = jax.lax.fori_loop(0, iters, body_fun, t)
+  # Use lax.fori_loop for an efficient, JIT-friendly loop over exactly iters - 1 steps.
+  t = jax.lax.fori_loop(0, iters - 1, body_fun, t)
   return t.astype(initial_dtype)
 
 
@@ -95,14 +95,20 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     self.matmul_precision = jax.lax.Precision(self.config.matmul_precision)
 
     # Norm layer
-    self.mhc_norm = RMSNorm(
-        num_features=self.k * self.dim,
-        dtype=self.config.dtype,
-        weight_dtype=self.weight_dtype,
-        kernel_axes=("norm",),
-        epsilon=self.config.normalization_layer_epsilon,
-        rngs=self.rngs,
-    )
+    if getattr(self.config, "decoder_block", None) == DecoderBlockType.DEEPSEEK_V4:
+      self.mhc_norm = DeepSeekV4UnweightedRMSNorm(
+          eps=self.config.normalization_layer_epsilon,
+          dtype=self.config.dtype,
+      )
+    else:
+      self.mhc_norm = RMSNorm(
+          num_features=self.k * self.dim,
+          dtype=self.config.dtype,
+          weight_dtype=self.weight_dtype,
+          kernel_axes=("norm",),
+          epsilon=self.config.normalization_layer_epsilon,
+          rngs=self.rngs,
+      )
 
     # Scalars
     self.res_alpha_scale = nnx.Param(
@@ -170,28 +176,33 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
 
   def res_mapping(self, x: Array):
     """Helper function for residual mapping."""
-    # In MaxText, we match weight precision to activations before Matmul
+    # In MaxText, we match weight precision to activations before Matmul.
+    # x: [B, S, H * D] representing sequence token features.
+    # res_alpha: [H * D, H * H]
+    # res_beta: [H, H]
     res_alpha = jnp.asarray(self.res_alpha[...], self.dtype)
     res_beta = jnp.asarray(self.res_beta[...], self.dtype)
     res_alpha_scale = jnp.asarray(self.res_alpha_scale[...], self.dtype)
-    # Apply projection: (b, s, k*d) @ (k*d, k*k) -> (b, s, k*k)
     h_res = jnp.einsum("bsm,mn -> bsn", x, res_alpha, precision=self.matmul_precision)
     b, s, _ = h_res.shape
     h_res = jnp.reshape(h_res, (b, s, self.k, self.k))
     intermediate = res_alpha_scale * h_res + res_beta[None, None, :, :]
-    output = sinkhorn(intermediate, self.sinkhorn_iterations)
+    # Apply softmax pre-normalization along the trailing axis matching the exact initialization.
+    # intermediate: [B, S, H, H]
+    intermediate = jax.nn.softmax(intermediate, axis=-1) + self.config.hc_eps
+    output = sinkhorn(intermediate, self.sinkhorn_iterations, eps=self.config.hc_eps)
     return output
 
-  def mapping(self, x: Array, alpha_scale: Array, alpha: Array, beta: Array, scale: int):
+  def mapping(self, x: Array, alpha_scale: Array, alpha: Array, beta: Array, scale: float, eps: float = 0.0):
     """Helper function for both pre and post mappings."""
     # In MaxText, we match weight precision to activations before Matmul
     alpha = jnp.asarray(alpha, self.dtype)
     beta = jnp.asarray(beta, self.dtype)
     alpha_scale = jnp.asarray(alpha_scale, self.dtype)
-    # Apply projection: (b, s, k*d) @ (k*d, k) -> (b, s, k)
-    h = jnp.einsum("bsm,mk -> bsk", x, alpha, precision=self.matmul_precision)
+    # Apply projection: (b, s, e*d) @ (e*d, e) -> (b, s, e)
+    h = jnp.einsum("bsm,me -> bse", x, alpha, precision=self.matmul_precision)
     intermediate = alpha_scale * h + beta[None, None, :]
-    output = scale * jax.nn.sigmoid(intermediate)
+    output = scale * jax.nn.sigmoid(intermediate) + eps
     return output
 
   def __call__(
@@ -227,8 +238,12 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
         self.pre_alpha[...],
         self.pre_beta[...],
         1.0,
+        self.config.hc_eps,
     )
-    layer_input = jnp.einsum("bskd,bsk -> bsd", x, pre_mapping, precision=self.matmul_precision)
+    layer_input = jnp.einsum(
+        "bsed,bse -> bsd", x.astype(jnp.float32), pre_mapping.astype(jnp.float32), precision=self.matmul_precision
+    )
+    layer_input = layer_input.astype(self.dtype)
 
     # 3. Pre-norm
     layer_input = norm_fn(layer_input)
@@ -246,22 +261,31 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     else:
       raise ValueError(f"Unsupported type: {mhc_type}")
 
-    # 5. Post mapping
+    # 5. Post mapping (multiplied by 2.0 matching post_scale)
     post_mapping = self.mapping(
         norm_x,
         self.post_alpha_scale[...],
         self.post_alpha[...],
         self.post_beta[...],
         2.0,
+        0.0,
     )
     post_out = jnp.einsum(
-        "bsd,bsk -> bskd",
-        layer_out,
-        post_mapping,
+        "bsd,bse -> bsed",
+        layer_out.astype(jnp.float32),
+        post_mapping.astype(jnp.float32),
         precision=self.matmul_precision,
     )
 
     # 6. Residual mapping, res_out shape as [batch, seq, expansion_rate, emb]
     res_mapping = self.res_mapping(norm_x)
-    res_out = jnp.einsum("bskd,bskm -> bsmd", x, res_mapping, precision=self.matmul_precision)
-    return res_out + post_out, metadata
+    # Transposed residual mixing (bsme @ bsmd -> bsed) matching Xie et al. Equation 8
+    # representing the projection index: comb.T @ residual stream values.
+    # res_mapping: [B, S, H_src, H_dest]
+    # x: [B, S, H_src, D]
+    # res_out: [B, S, H_dest, D]
+    res_out = jnp.einsum(
+        "bsme,bsmd -> bsed", res_mapping.astype(jnp.float32), x.astype(jnp.float32), precision=self.matmul_precision
+    )
+    output = res_out + post_out
+    return output.astype(self.dtype), metadata

@@ -226,6 +226,8 @@ ModelName = Literal[
     "deepseek3-test",
     "deepseek3-tiny",
     "deepseek3.2-671b",
+    "deepseek_v4-tiny",
+    "deepseek_v4-flash",
     "deepseek-custom",
     "kimi-k2-1t",
     "gemma-7b",
@@ -618,6 +620,22 @@ class AttentionIndexer(BaseModel):
   indexer_loss_scaling_factor: float = Field(0.0, description="Multiplier for the indexer KL divergence loss.")
 
 
+class DeepSeekV4AttentionConfig(BaseModel):
+  """Configuration specific to DeepSeek-V4 stateless compressed attention layers."""
+
+  compress_rope_theta: float = Field(160000.0, description="Theta base frequency for long-range compressor layers.")
+  compress_ratios: list[int] = Field(
+      default_factory=list,
+      description="Layer-by-layer compressor rates (0: standard, 4: CSA, 128: HCA).",
+  )
+  index_head_dim: int = Field(128, description="Head dim for indexer query and key.")
+  index_n_heads: int = Field(64, description="Number of query heads in indexer.")
+  index_topk: int = Field(512, description="Number of tokens selected by indexer.")
+  o_groups: int = Field(8, description="Number of group partitions for grouped linear output projection.")
+  o_lora_rank: int = Field(1024, description="Low-rank output dimension prior to grouped mix projection.")
+  sliding_window: int = Field(128, description="Sliding window size for attention.")
+
+
 class Llama4Attention(BaseModel):
   """Configuration specific to Llama4-style models."""
 
@@ -814,6 +832,10 @@ class DeepSeekMoE(BaseModel):
   batch_split_factor: int = Field(
       1,
       description="Factor by which to split the batch into micro-batches. Only used if use_batch_split_schedule is True.",
+  )
+  num_hash_layers: int = Field(
+      3,
+      description="Number of initial MoE layers to apply static Hash Routing.",
   )
 
 
@@ -1365,6 +1387,7 @@ class ManifoldConstrainedHyperConnections(BaseModel):
 
   mhc_expansion_rate: PositiveInt = Field(1, description="The number of parallel streams in Hyper Connection.")
   sinkhorn_iterations: PositiveInt = Field(20, description="The number of iterations for the Sinkhorn-Knopp algorithm.")
+  hc_eps: float = Field(1e-6, description="The epsilon fallback value for numerical stability in mHC.")
 
 
 class DilocoParams(BaseModel):
@@ -2224,6 +2247,7 @@ class MaxTextConfig(
     MlaAttention,
     MoBa,
     AttentionIndexer,
+    DeepSeekV4AttentionConfig,
     Llama4Attention,
     SplashAttention,
     PagedAttention,

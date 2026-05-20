@@ -93,6 +93,7 @@ class DecoderBlockType(enum.Enum):
   MISTRAL = "mistral"
   MIXTRAL = "mixtral"
   DEEPSEEK = "deepseek"
+  DEEPSEEK_V4 = "deepseek_v4"
   GEMMA = "gemma"
   GEMMA2 = "gemma2"
   GEMMA3 = "gemma3"

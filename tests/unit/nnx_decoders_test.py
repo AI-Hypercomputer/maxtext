@@ -767,3 +767,41 @@ class TestNNXDecoderDeepseekAndGemma4(unittest.TestCase):
         logits.shape,
         (cfg.global_batch_size_to_train_on, cfg.max_target_length, cfg.vocab_size),
     )
+
+  def test_deepseek_v4_scanned_layers(self):
+    """Test NNXDecoder with deepseek_v4 block and scan_layers=True."""
+    cfg = _make_config(
+        decoder_block="deepseek_v4",
+        scan_layers=True,
+        num_decoder_layers=3,
+        q_lora_rank=1024,
+        o_lora_rank=1024,
+        qk_rope_head_dim=64,
+        compress_ratios=[4, 128, 4],
+        base_moe_mlp_dim=512,
+        shared_experts=2,
+        mhc_expansion_rate=4,
+        routed_score_func="sqrtsoftplus",
+        megablox=False,  # Disable custom Pallas GMM TPU kernels on CPU testing platforms!
+    )
+    decoder = NNXDecoder(
+        config=cfg,
+        mesh=self.mesh,
+        model_mode=MODEL_MODE_TRAIN,
+        rngs=self.rngs,
+    )
+    shared_embedding = self._make_shared_embedding(cfg)
+    ids, segment_ids, positions = self._make_token_inputs(cfg)
+
+    logits, _, _ = decoder(
+        shared_embedding,
+        ids,
+        positions,
+        decoder_segment_ids=segment_ids,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+    self.assertEqual(
+        logits.shape,
+        (cfg.global_batch_size_to_train_on, cfg.max_target_length, cfg.vocab_size),
+    )

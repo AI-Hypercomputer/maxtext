@@ -1,0 +1,78 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Default model configs for DeepSeek-V4-Flash (43 Layers)
+
+base_config: base.yml
+model_name: deepseek_v4-flash
+
+base_emb_dim: 4096
+base_num_query_heads: 64
+base_num_kv_heads: 1
+head_dim: 512
+base_mlp_dim: 2048
+base_moe_mlp_dim: 2048
+base_num_decoder_layers: 43
+first_num_dense_layers: 0
+mlp_activations: ["silu"]
+vocab_size: 129280
+tokenizer_type: "huggingface"
+tokenizer_path: "deepseek-ai/DeepSeek-V3"
+enable_dropout: False
+logits_via_embedding: False
+normalization_layer_epsilon: 1.0e-6
+num_experts: 256
+num_experts_per_tok: 6
+shared_experts: 1
+routed_scaling_factor: 1.5
+routed_score_func: "sqrtsoftplus"
+routed_bias: True
+norm_topk_prob: True
+decoder_block: "deepseek_v4"
+pure_nnx_decoder: True
+enable_nnx: True
+use_tokamax_splash: True
+# TODO: Dynamic Flash Attention masking requires use_indexer: True to route the custom compressor mask indexer_mask into Tokamax's make_dynamic_splash_mha dynamic Pallas kernel path. Refactor this MLA configuration parameter out of deep coordinator layers in subsequent milestones.
+use_indexer: True
+remat_policy: minimal_offloaded
+
+# Manifold-Constrained Hyper-Connection configurations
+mhc_expansion_rate: 4
+sinkhorn_iterations: 20
+compress_rope_theta: 160000.0
+index_head_dim: 128
+index_n_heads: 64
+index_topk: 512
+o_groups: 8
+o_lora_rank: 1024
+sliding_window: 128
+num_hash_layers: 3
+mlp_activations_limit: 10.0
+compress_ratios: [0, 0, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4]
+
+# Compressed Sparse Attention
+q_lora_rank: 1024
+kv_lora_rank: 512
+qk_nope_head_dim: 128
+qk_rope_head_dim: 64
+v_head_dim: 128
+mscale: 1.0
+
+# RoPE
+rope_type: "default"
+rope_max_timescale: 10_000
+max_position_embeddings: 1048576
+original_max_position_embeddings: 65536
+rope_factor: 16
+beta_fast: 32
