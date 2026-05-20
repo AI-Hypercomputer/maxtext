@@ -86,7 +86,7 @@ To install, click the `Extensions` icon on the left sidebar (or press `Ctrl+Shif
 
 ### Step 3: Install MaxText and Dependencies
 
-To execute post-training notebooks on your TPU-VM, follow the official [MaxText installation guides](https://maxtext.readthedocs.io/en/latest/install_maxtext.html#from-source) and specifically follow `Option 3: Installing [tpu-post-train]`. This will ensure all post-training dependencies are installed inside your virtual environment.
+To execute post-training notebooks on your TPU-VM, follow the official [MaxText installation guides](../install_maxtext.md#from-source) and specifically follow `Option 3: Installing [tpu-post-train]`. This will ensure all post-training dependencies are installed inside your virtual environment.
 
 > **Note:** If you have previously installed MaxText with a different option (e.g., `maxtext[tpu]`), we strongly recommend using a fresh virtual environment for `maxtext[tpu-post-train]` to avoid potential library version conflicts.
 
@@ -139,7 +139,7 @@ pip3 install jupyterlab
 
 ### Step 3: Install MaxText and Dependencies
 
-To execute post-training notebooks on your TPU-VM, follow the official [MaxText installation guides](https://maxtext.readthedocs.io/en/latest/install_maxtext.html#from-source) and specifically follow `Option 3: Installing [tpu-post-train]`. This will ensure all post-training dependencies are installed inside your virtual environment.
+To execute post-training notebooks on your TPU-VM, follow the official [MaxText installation guides](../install_maxtext.md#from-source) and specifically follow `Option 3: Installing [tpu-post-train]`. This will ensure all post-training dependencies are installed inside your virtual environment.
 
 > **Note:** If you have previously installed MaxText with a different option (e.g., `maxtext[tpu]`), we strongly recommend using a fresh virtual environment for `maxtext[tpu-post-train]` to avoid potential library version conflicts.
 
@@ -200,7 +200,7 @@ jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root
 
 ## Support and Resources
 
-- 📘 [MaxText Documentation](https://maxtext.readthedocs.io/)
+- 📘 [MaxText Documentation](../index.md)
 - 💻 [Google Colab](https://colab.research.google.com)
 - ⚡ [Cloud TPU Docs](https://cloud.google.com/tpu/docs)
 - 🧩 [Jupyter Lab](https://jupyterlab.readthedocs.io)

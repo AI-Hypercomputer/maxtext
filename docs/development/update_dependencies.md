@@ -139,6 +139,6 @@ mv generated_artifacts/python3_12/cuda12-requirements.txt \
 Finally, test that the new dependencies install correctly and that MaxText runs
 as expected.
 
-1. **Install MaxText and dependencies**: For instructions on installing MaxText on your VM, please refer to the [official documentation](https://maxtext.readthedocs.io/en/latest/install_maxtext.html#from-source).
+1. **Install MaxText and dependencies**: For instructions on installing MaxText on your VM, please refer to the [official documentation](../install_maxtext.md#from-source).
 
 2. **Run tests:** Run MaxText tests to ensure there are no regressions.
