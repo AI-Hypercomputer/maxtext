@@ -66,6 +66,12 @@ try:
 except AttributeError:
   pass
 
+import os
+
+if os.getenv("JAX_PLATFORMS") == "proxy":
+  # Import maxtext early to register the pathways proxy backend before JAX is queried.
+  import maxtext  # pylint: disable=unused-import
+
 try:
   _HAS_TPU = any(d.platform == "tpu" for d in jax.devices())
 except Exception:  # pragma: no cover  pylint: disable=broad-exception-caught

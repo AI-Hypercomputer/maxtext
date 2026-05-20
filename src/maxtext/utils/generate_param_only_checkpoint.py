@@ -137,6 +137,8 @@ def _generate_lora_decode_checkpoints(config, mesh):
         config.enable_checkpointing,
         config.async_checkpointing,
         config.checkpoint_period,
+        use_ocdbt=config.checkpoint_storage_use_ocdbt,
+        use_zarr3=config.checkpoint_storage_use_zarr3,
     )
 
     lora_config, lora_state, lora_state_annotations = lora_utils.setup_initial_lora_state(
@@ -192,6 +194,8 @@ def generate_decode_checkpoint(config):
       config.enable_checkpointing,
       config.async_checkpointing,
       config.checkpoint_period,
+      use_ocdbt=config.checkpoint_storage_use_ocdbt,
+      use_zarr3=config.checkpoint_storage_use_zarr3,
   )
   # Read training state from config.load_paramaters_path
   max_logging.log(f"Read training checkpoint from: {config.load_full_state_path}")
