@@ -15,7 +15,26 @@
 """
 Test initialization
 """
+import os
 
-import pathwaysutils
+# Configure JAX for parallel execution under pytest-xdist (Isolated TPU mode)
+if "PYTEST_XDIST_WORKER" in os.environ:
+  worker = os.environ["PYTEST_XDIST_WORKER"]
+  try:
+    worker_id = int(worker.replace("gw", ""))
+    # Map worker to one of the 4 TPU chips
+    tpu_chip = worker_id % 4
+    os.environ["TPU_VISIBLE_DEVICES"] = str(tpu_chip)
+    # Bypass libtpu lockfile check to allow concurrency
+    os.environ["ALLOW_MULTIPLE_LIBTPU_LOAD"] = "true"
+    # Ensure workers use TPU, overriding master's CPU setting if inherited
+    if "JAX_PLATFORMS" in os.environ:
+        del os.environ["JAX_PLATFORMS"]
+  except ValueError:
+    pass
 
-pathwaysutils.initialize()
+  import pathwaysutils
+  pathwaysutils.initialize()
+else:
+  # Master process: Force CPU to avoid grabbing TPU resources during collection
+  os.environ["JAX_PLATFORMS"] = "cpu"

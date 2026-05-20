@@ -116,6 +116,7 @@ def pytest_collection_modifyitems(config, items):
   - Skip hardware-specific tests when hardware is missing.
   - Deselect tests marked as external_serving/training in decoupled mode.
   - Mark remaining tests with the `decoupled` marker when running decoupled.
+  - Skip multi-device tests when not enough devices are visible in the worker.
   """
   decoupled = is_decoupled()
   remaining = []
@@ -162,6 +163,20 @@ def pytest_collection_modifyitems(config, items):
       # Deselect tests marked as external_serving/training entirely.
       deselected.append(item)
       continue
+
+    # Dynamic skip for specific multi-device tests
+    if item.name.startswith("test_tpu_flash_attention_context_parallel"):
+      required_devices = 4
+      try:
+        visible_devices = len(jax.devices())
+      except Exception:
+        visible_devices = 0
+            
+      if visible_devices < required_devices:
+        skip_marker = pytest.mark.skip(
+            reason=f"Skipped: requires {required_devices} devices, but only {visible_devices} are visible"
+        )
+        item.add_marker(skip_marker)
 
     remaining.append(item)
 
