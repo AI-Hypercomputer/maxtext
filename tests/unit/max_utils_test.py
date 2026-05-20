@@ -25,6 +25,7 @@ from jax import numpy as jnp
 from jax import random
 
 from flax import linen as nn
+from flax import nnx
 
 import optax
 
@@ -167,8 +168,16 @@ class UnscanTest(unittest.TestCase):
     num_layers = config.base_num_decoder_layers
 
     # Make a copy to unscan, leaving the original state intact.
-    params_to_unscan = jax.tree_util.tree_map(lambda x: x, state.params)
-    sharding_to_unscan = jax.tree_util.tree_map(lambda x: x, sharding.params)
+    if hasattr(state, "model"):
+      _, params_state, _ = nnx.split(state.model, nnx.Param, ...)
+      params_to_unscan = {"params": params_state.to_pure_dict()}
+    else:
+      params_to_unscan = jax.tree_util.tree_map(lambda x: x, state.params)
+    if hasattr(sharding, "model"):
+      _, sharding_params, _ = nnx.split(sharding.model, nnx.Param, ...)
+      sharding_to_unscan = {"params": sharding_params.to_pure_dict()}
+    else:
+      sharding_to_unscan = jax.tree_util.tree_map(lambda x: x, sharding.params)
 
     # Time the unscan operation.
     start_time = time.time()
@@ -196,8 +205,16 @@ class UnscanTest(unittest.TestCase):
     self.assertEqual(unstacked_shape, expected_shape)
 
     # Check that the original state is unchanged.
-    self.assertIn("layers", state.params["params"]["decoder"])
-    self.assertNotIn("layers_0", state.params["params"]["decoder"])
+    if hasattr(state, "model"):
+      _, params_state, _ = nnx.split(state.model, nnx.Param, ...)
+      state_decoder_params = params_state.to_pure_dict()["decoder"]
+      self.assertIn("layers", state_decoder_params)
+    else:
+      self.assertIn("layers", state.params["params"]["decoder"])
+    if hasattr(state, "model"):
+      self.assertNotIn("layers_0", state_decoder_params)
+    else:
+      self.assertNotIn("layers_0", state.params["params"]["decoder"])
 
 
 class TestGpuDistributedInitialization(unittest.TestCase):
