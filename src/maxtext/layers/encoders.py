@@ -70,6 +70,16 @@ class VisionEncoder(nnx.Module):
           self, projector_name, gemma4_vision.Gemma4VisionProjector(config=self.config, mesh=self.mesh, rngs=self.rngs)
       )
       return encoder_name, projector_name
+    elif self.config.model_name in ["qwen3.5-397b-a17b"]:
+      from maxtext.models import qwen3_5_vision  # pylint: disable=import-outside-toplevel
+
+      encoder_name = "Qwen3_5MoeVisionEncoder_0"
+      projector_name = "Qwen3_5MoeVisionProjector_0"
+      setattr(
+          self, encoder_name, qwen3_5_vision.Qwen3_5MoeVisionEncoder(config=self.config, mesh=self.mesh, rngs=self.rngs)
+      )
+      setattr(self, projector_name, qwen3_5_vision.Qwen3_5MoeVisionProjector(config=self.config, rngs=self.rngs))
+      return encoder_name, projector_name
     else:
       raise ValueError(f"No VisionEncoder implemented for {self.config.model_name} yet")
 

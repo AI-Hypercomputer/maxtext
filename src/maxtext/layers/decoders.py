@@ -661,6 +661,7 @@ class Decoder(nn.Module):
             "llama4-17b-16e",
             "llama4-17b-128e",
             "qwen3-omni-30b-a3b",
+            "qwen3.5-397b-a17b",
         ]:
           y = mm_utils.merge_mm_embeddings(
               text_embeddings=y,
