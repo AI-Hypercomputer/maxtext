@@ -715,7 +715,7 @@ class CSACompressor(nnx.Module):
     # Clamp indices safely using jnp.clip to avoid JAX negative/out-of-bounds indexing exceptions
     # under indexer -1 sentinel conditions.
     # safe_indices: [B, S, k]
-    safe_indices = jnp.clip(topk, a_min=0)
+    safe_indices = jnp.clip(topk, 0)
     # batch_idx: [B, 1, 1]
     batch_idx = jnp.arange(batch)[:, jnp.newaxis, jnp.newaxis]
     # Perform TPU-efficient JAX Advanced Indexing Gather.
