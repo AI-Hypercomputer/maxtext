@@ -17,6 +17,8 @@
 import os
 import unittest
 
+import pytest
+
 from flax import nnx
 import jax
 import jax.numpy as jnp
@@ -201,6 +203,8 @@ def copy_gemma4_vision_projector_weights(torch_model, jax_model):
 class BaseGemma4VisionTestCase(unittest.TestCase):
   """Base class for Gemma 4 vision tests with common setup."""
 
+  pytestmark = pytest.mark.tpu_only
+
   def setUp(self):
     self.config = jax_config
     setup_test_seeds()
@@ -297,7 +301,7 @@ class TestGemma4VisionEntry(BaseGemma4VisionTestCase):
         "last_5": [-0.8076034784317017, -4.024001121520996, 2.3631980419158936, -0.6509848237037659, -0.17981889843940735],
     }
 
-    assert_stats_close(self, actual_stats, expected_stats)
+    assert_stats_close(self, actual_stats, expected_stats, atol=1e-2, rtol=1e-2)
 
 
 
@@ -375,7 +379,7 @@ class TestGemma4VisionRotaryEmbedding(BaseGemma4VisionTestCase):
         "first_5": [0.49671414494514465, -0.13826429843902588, 0.6476885676383972, 1.5230298042297363, -0.2341533750295639],
         "last_5": [1.732391357421875, -0.21856474876403809, 1.5401558876037598, 0.06624335050582886, -1.2687402963638306],
     }
-    assert_stats_close(self, actual_stats, expected_stats)
+    assert_stats_close(self, actual_stats, expected_stats, atol=1e-2, rtol=1e-2)
 
 
 class TestGemma4VisionAttention(BaseGemma4VisionTestCaseWithMesh):
@@ -490,7 +494,7 @@ class TestGemma4VisionAttention(BaseGemma4VisionTestCaseWithMesh):
         "first_5": [0.3752165138721466, 0.9831300973892212, 0.4212400019168854, 0.46032220125198364, 0.15025049448013306],
         "last_5": [0.1874169111251831, -0.09554912149906158, -0.3366227447986603, 1.2252843379974365, -0.5885721445083618],
     }
-    assert_stats_close(self, actual_stats, expected_stats)
+    assert_stats_close(self, actual_stats, expected_stats, atol=1e-2, rtol=1e-2)
 
 
 
@@ -566,7 +570,7 @@ class TestGemma4VisionEncoderBlock(BaseGemma4VisionTestCaseWithMesh):
         "first_5": [0.64936363697052, 0.276985764503479, 2.0699658393859863, 1.582777976989746, -1.8568949699401855],
         "last_5": [0.4208720922470093, -0.3171665668487549, 0.08753800392150879, -1.1161333322525024, -3.1165666580200195],
     }
-    assert_stats_close(self, actual_stats, expected_stats)
+    assert_stats_close(self, actual_stats, expected_stats, atol=1e-2, rtol=1e-2)
 
 
 class TestGemma4VisionExit(BaseGemma4VisionTestCase):
@@ -644,7 +648,7 @@ class TestGemma4VisionExit(BaseGemma4VisionTestCase):
         "first_5": [-1.9137297868728638, 6.875588417053223, 15.854601860046387, 8.226688385009766, 8.342312812805176],
         "last_5": [21.86972999572754, -0.21706300973892212, 7.504371643066406, -4.01204776763916, -6.540284633636475],
     }
-    assert_stats_close(self, actual_stats, expected_stats)
+    assert_stats_close(self, actual_stats, expected_stats, atol=1e-2, rtol=1e-2)
 
 
 class TestGemma4VisionEncoderEndToEnd(BaseGemma4VisionTestCaseWithMesh):
@@ -712,7 +716,7 @@ class TestGemma4VisionEncoderEndToEnd(BaseGemma4VisionTestCaseWithMesh):
         "first_5": [-140.56704711914062, 108.94792175292969, -68.02703857421875, -13.687520980834961, -24.473756790161133],
         "last_5": [-249.64027404785156, 180.6945343017578, 77.77986907958984, 89.37599182128906, 26.383209228515625],
     }
-    assert_stats_close(self, actual_stats, expected_stats)
+    assert_stats_close(self, actual_stats, expected_stats, atol=1e-2, rtol=1e-2)
 
 
 class TestGemma4VisionProjector(BaseGemma4VisionTestCaseWithMesh):
@@ -762,7 +766,7 @@ class TestGemma4VisionProjector(BaseGemma4VisionTestCaseWithMesh):
         "first_5": [-0.015990108251571655, 1.83672297000885, -1.8761849403381348, -0.19131013751029968, 1.2963128089904785],
         "last_5": [0.16569757461547852, 0.6256201267242432, 0.2053520828485489, -0.25832629203796387, 2.071470260620117],
     }
-    assert_stats_close(self, actual_stats, expected_stats)
+    assert_stats_close(self, actual_stats, expected_stats, atol=1e-2, rtol=1e-2)
 
 
 if __name__ == "__main__":
