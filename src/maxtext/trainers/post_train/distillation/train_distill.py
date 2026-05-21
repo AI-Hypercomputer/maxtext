@@ -694,6 +694,7 @@ def train_distill(
       _log_config_details(teacher_config, "Teacher")
       teacher_model = get_maxtext_model(teacher_config, mesh)
       teacher_model.eval()
+      # breakpoint()
 
     # LTI phase needs the student initialization step to know about the teacher configuration
     student_config.get_keys()["teacher_config"] = teacher_config
@@ -701,6 +702,7 @@ def train_distill(
     max_logging.log(f"Loading Student from {student_config.load_parameters_path}...")
     _log_config_details(student_config, "Student")
     student_model = get_maxtext_model(student_config, mesh)
+
     student_params_to_update = getattr(student_config, "student_params_to_update", []) or []
     student_param_update_templates = [re.compile(t) for t in student_params_to_update]
 
@@ -889,11 +891,11 @@ def main(argv: Sequence[str]) -> None:
   teacher_overrides = global_config.teacher_overrides
 
   # Ensure load_parameters_path is set in overrides
-  if not is_offline and not teacher_overrides.get("load_parameters_path"):
-    raise ValueError(
-        "Teacher model path is missing! You must provide 'teacher_overrides.load_parameters_path' "
-        "in your config or arguments."
-    )
+  # if not is_offline and not teacher_overrides.get("load_parameters_path"):
+  #  raise ValueError(
+  #      "Teacher model path is missing! You must provide 'teacher_overrides.load_parameters_path' "
+  #      "in your config or arguments."
+  #  )
 
   # Construct sanitized argv: [script_name, config_file]
   # This ensures flags like `num_query_heads=16` passed in CLI don't affect the Teacher.

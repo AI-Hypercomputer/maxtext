@@ -29,6 +29,7 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.common.common_types import Config, DecoderBlockType, ShardMode
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN
+from maxtext.configs import pyconfig
 from maxtext.inference import page_manager
 from maxtext.layers import linears
 from maxtext.layers import mhc
@@ -985,7 +986,7 @@ class Decoder(nn.Module):
           )
         else:
           RemattedBlockLayer = RemattedBlockLayers[0]
-          scan_length = int(cfg.num_decoder_layers / cfg.inhomogeneous_layer_cycle_interval)
+          # scan_length = int(cfg.num_decoder_layers / cfg.inhomogeneous_layer_cycle_interval)
           layer_kwargs = {}
           if cfg.decoder_block == DecoderBlockType.LLAMA4:
             layer_kwargs = {
@@ -1030,7 +1031,12 @@ class Decoder(nn.Module):
             for i in range(cfg.num_decoder_layers):
               kv_caches[i] = returned_kv_cache[i]
           else:
+            RemattedBlockLayer = RemattedBlockLayers[0]
+            # breakpoint()
+            y = self._apply_standard_scanned_blocks(y, broadcast_args, RemattedBlockLayer, model_mode)
+
             # Fallback to old behavior if kv_caches is None (not vLLM RPA)
+            """
             current_broadcast_args.append(None)
             current_in_axes_tuple.append(nn.broadcast)
 
@@ -1044,6 +1050,8 @@ class Decoder(nn.Module):
                 model_mode=model_mode,
                 **layer_kwargs,
             )(y, *current_broadcast_args)
+            """
+
       else:
         if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
           assert len(RemattedBlockLayers) == 2, "Unscanned layers must have a length of 2 using deepseek."
@@ -1332,6 +1340,84 @@ class Decoder(nn.Module):
       y = layer(y, *broadcast_args)
       if cfg.scan_layers:
         y = y[0]
+
+    return y
+
+  def _apply_standard_scanned_blocks(self, y, broadcast_args, RemattedBlockLayer, model_mode, layer_kwargs={}):
+    """Applies standard scanned decoder blocks, handling possible per-layer overrides."""
+    cfg = self.config
+    mesh = self.mesh
+
+    override_indices = sorted(list(cfg.layer_configs.keys())) if getattr(cfg, "layer_configs", None) else []
+    end_idx = int(cfg.num_decoder_layers / cfg.inhomogeneous_layer_cycle_interval)
+    current_idx = 0
+
+    if not override_indices:
+      # Standard single scan to maintain backward compatibility for checkpoint names
+      y, _ = self.scan_decoder_layers(
+          cfg,
+          RemattedBlockLayer,
+          end_idx,
+          "layers",
+          mesh,
+          in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+          model_mode=model_mode,
+          **layer_kwargs,
+      )(y, *broadcast_args)
+    else:
+      # breakpoint()
+      for next_override_idx in override_indices:
+        if next_override_idx >= end_idx:
+          break
+
+        # Run chunk before the override if there is a gap
+        if current_idx < next_override_idx:
+          scan_length = next_override_idx - current_idx
+          y, _ = self.scan_decoder_layers(
+              cfg,
+              RemattedBlockLayer,
+              scan_length,
+              f"layers_chunk_{current_idx}_to_{next_override_idx - 1}",
+              mesh,
+              in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+              model_mode=model_mode,
+              **layer_kwargs,
+          )(y, *broadcast_args)
+          current_idx = next_override_idx
+
+        # Run the overridden layer individually (unscanned)
+        layer_override = cfg.layer_configs[current_idx]
+        combined_kwargs = dict(layer_kwargs)
+        # combined_kwargs["layer_idx"] = current_idx
+        layer_pydantic_cfg = cfg._pydantic_config.model_copy(update=layer_override)
+        layer_cfg = pyconfig.HyperParameters(layer_pydantic_cfg)
+        # breakpoint()
+
+        layer = RemattedBlockLayer(
+            config=layer_cfg,
+            mesh=mesh,
+            name=f"layers_override_{current_idx}",
+            quant=self.quant,
+            model_mode=model_mode,
+            **combined_kwargs,
+        )
+        y_out = layer(y, *broadcast_args)
+        y = y_out[0] if isinstance(y_out, tuple) else y_out
+        current_idx += 1
+
+      # Run remaining layers after the last override
+      if current_idx < end_idx:
+        scan_length = end_idx - current_idx
+        y, _ = self.scan_decoder_layers(
+            cfg,
+            RemattedBlockLayer,
+            scan_length,
+            f"layers_chunk_{current_idx}_to_{end_idx - 1}" if scan_length == 1 else f"layer_{current_idx}",
+            mesh,
+            in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+            model_mode=model_mode,
+            **layer_kwargs,
+        )(y, *broadcast_args)
 
     return y
 
