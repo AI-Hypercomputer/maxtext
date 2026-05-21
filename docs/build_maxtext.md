@@ -137,15 +137,44 @@ build_maxtext_docker_image DEVICE=gpu MODE=nightly JAX_VERSION=$JAX_VERSION
 build_maxtext_docker_image WORKFLOW=post-training
 ```
 
-## Upload MaxText Docker Image to Artifact Registry
+## Upload MaxText Docker Image to Registry
+
+You can upload your built Docker image to either Google Artifact Registry (recommended) or Google Container Registry (GCR, legacy).
+
+### Option 1: Upload to Artifact Registry (Recommended)
+
+To upload to Artifact Registry, provide the **full path** of the target image (including the registry location, project, and repository) in `CLOUD_IMAGE_NAME`. The script will automatically tag it as `:latest` if no tag is specified.
 
 ```bash
-# Make sure to set `CLOUD_IMAGE_NAME` with your desired image name.
-export CLOUD_IMAGE_NAME=<IMAGE_NAME>
+# 1. Define the full Artifact Registry path
+export CLOUD_IMAGE_NAME=<LOCATION>-docker.pkg.dev/<PROJECT_ID>/<REPOSITORY_NAME>/<IMAGE_NAME>
+
+# 2. Upload the image (must be run inside your activated venv)
 upload_maxtext_docker_image CLOUD_IMAGE_NAME=${CLOUD_IMAGE_NAME?}
 ```
 
-> **Note:** You will need the [**Artifact Registry Writer**](https://docs.cloud.google.com/artifact-registry/docs/access-control#permissions) role to push Docker images to your project's Artifact Registry and to allow the cluster to pull them during workload execution. If you don't have this permission, contact your project administrator to grant you this role through "Google Cloud Console -> IAM -> Grant access".
+### Option 2: Upload to Container Registry (GCR)
+
+If you provide just a simple image name, the script will default to uploading to GCR under your current active gcloud project (`gcr.io/<PROJECT_ID>/<IMAGE_NAME>:latest`).
+
+```bash
+# 1. Define a simple image name
+export CLOUD_IMAGE_NAME=<IMAGE_NAME>
+
+# 2. Upload the image (must be run inside your activated venv)
+upload_maxtext_docker_image CLOUD_IMAGE_NAME=${CLOUD_IMAGE_NAME?}
+```
+
+> [!IMPORTANT]
+> **Virtual Environment Reminder:** The `upload_maxtext_docker_image` command is a console script installed inside your virtual environment. If you open a new terminal session to upload the image, you **must re-activate your virtual environment** first:
+>
+> ```bash
+> source ${VENV_NAME?}/bin/activate
+> ```
+>
+> If you get a `command not found: upload_maxtext_docker_image` error, it means your virtual environment is not activated.
+
+> **Note on Permissions:** You will need the [**Artifact Registry Writer**](https://docs.cloud.google.com/artifact-registry/docs/access-control#permissions) role to push Docker images to Artifact Registry. If you don't have this permission, contact your project administrator to grant you this role through "Google Cloud Console -> IAM -> Grant access".
 
 ## Troubleshooting
 
