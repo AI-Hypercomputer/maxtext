@@ -507,6 +507,11 @@ class ModelArchitecture(BaseModel):
   )
   v_norm_with_scale: bool = Field(True, description="Whether to apply scale on value normalization (default True).")
 
+  layer_configs: Optional[dict[int, dict[str, Any]]] = Field(
+      None,
+      description="Per-layer parameter overrides(scan mode only now), by specific absolute layer indices. (e.g. {0: {'attention_type': 'global'}}).",
+  )
+
 
 class MTP(BaseModel):
   """Multi-Token Prediction Configs."""
