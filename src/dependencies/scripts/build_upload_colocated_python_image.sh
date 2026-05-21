@@ -48,15 +48,9 @@ for ARGUMENT in "$@"; do
     fi
 done
 
-# GCP Project for the image registry.
+# Set default values using parameter expansion.
 : "${PROJECT:=cloud-tpu-multipod-dev}"
-
-# The base name for the local Docker image tag.
 : "${LOCAL_IMAGE_NAME:=maxtext-colocated-python}"
-
-# The full URI for the final image location.
-# Defaults to gcr.io/${PROJECT}/${USER}_${LOCAL_IMAGE_NAME}:latest
-# if IMAGE_LOCATION is not already set.
 : "${IMAGE_LOCATION:=gcr.io/${PROJECT}/${USER}_${LOCAL_IMAGE_NAME}:latest}"
 
 echo "$(date): Building and pushing MaxText Colocated Python image..."
@@ -66,15 +60,65 @@ echo "  IMAGE_LOCATION: ${IMAGE_LOCATION}"
 echo "  Dockerfile: src/dependencies/dockerfiles/colocated_python.Dockerfile"
 echo "  Build Context: maxtext/"
 
-# Extract the registry from IMAGE_LOCATION (e.g., gcr.io or us-docker.pkg.dev)
-REGISTRY=$(echo "${IMAGE_LOCATION}" | cut -d/ -f1)
+# Extract JAX Version from requirements.txt
+echo "$(date): Extracting JAX version from requirements..."
+REQ_FILE="src/dependencies/requirements/generated_requirements/tpu-requirements.txt"
+if [[ ! -f "${REQ_FILE}" ]]; then
+  echo "Error: Requirements file not found: ${REQ_FILE}" >&2
+  exit 1
+fi
+# Extracts version like "0.10.0" from lines like "jax==0.10.0"
+JAX_VERSION=$(grep "^jax>=" "${REQ_FILE}" | head -1 | sed -E 's/.*>=([0-9.]+).*/\1/')
 
-# Build the Docker image. The build context is the current directory (maxtext/).
+if [[ -z "${JAX_VERSION}" ]]; then
+  echo "Error: Could not extract jax version from ${REQ_FILE}. Ensure it's in the format 'jax==X.Y.Z'." >&2
+  exit 1
+fi
+echo "  Detected required JAX version: ${JAX_VERSION}"
+
+# Find the Latest Compatible Base Image Tag
+BASE_IMAGE_REPO="us-docker.pkg.dev/cloud-tpu-v2-images/pathways-colocated-python/sidecar"
+TARGET_JAX_TAG_PART="jax_${JAX_VERSION}"
+echo "$(date): Searching for base image tag in '${BASE_IMAGE_REPO}' containing '${TARGET_JAX_TAG_PART}'..."
+
+# Authenticate Docker for the base image registry (us-docker.pkg.dev)
+BASE_REGISTRY=$(echo "${BASE_IMAGE_REPO}" | cut -d/ -f1)
+echo "$(date): Configuring Docker for base image registry: ${BASE_REGISTRY}"
+gcloud auth configure-docker --quiet "${BASE_REGISTRY}"
+
+# List tags, filter by JAX version, sort by date (desc), and take the latest.
+BASE_IMAGE_TAG=$(gcloud artifacts docker images list "${BASE_IMAGE_REPO}" --include-tags --format=json | \
+                 jq -r '.[] | .tags[]?' | \
+                 grep "${TARGET_JAX_TAG_PART}" | \
+                 sort -r | \
+                 head -1)
+
+if [[ -z "${BASE_IMAGE_TAG}" ]]; then
+  echo "Error: Could not find a suitable base image tag in ${BASE_IMAGE_REPO} for JAX version '${JAX_VERSION}'." >&2
+  echo "  Searched for tags containing '${TARGET_JAX_TAG_PART}'." >&2
+  echo "  Available matching tags found:" >&2
+  gcloud artifacts docker images list "${BASE_IMAGE_REPO}" --include-tags --format=json | \
+    jq -r '.[] | .tags[]?' | sort -r >&2
+  exit 1
+fi
+FULL_BASE_IMAGE="${BASE_IMAGE_REPO}:${BASE_IMAGE_TAG}"
+echo "  Found latest compatible base image: ${FULL_BASE_IMAGE}"
+
+# Create a Temporary Dockerfile with the Dynamic Base Image
+ORIGINAL_DOCKERFILE="src/dependencies/dockerfiles/colocated_python.Dockerfile"
+TMP_DOCKERFILE=$(mktemp maxtext_colocated_python_Dockerfile.XXXXXX)
+# Ensure the temporary file is removed on script exit
+trap 'rm -f "${TMP_DOCKERFILE}"' EXIT
+
+echo "$(date): Creating temporary Dockerfile: ${TMP_DOCKERFILE}"
+# Replace the hardcoded FROM line with the dynamically determined base image
+sed "s|^FROM us-docker.pkg.dev/cloud-tpu-v2-images/pathways-colocated-python/sidecar:.*|FROM ${FULL_BASE_IMAGE}|" "${ORIGINAL_DOCKERFILE}" > "${TMP_DOCKERFILE}"
+
+echo "$(date): Running docker build with local tag '${LOCAL_IMAGE_NAME}' using ${TMP_DOCKERFILE}..."
+# The build context '.' is the maxtext/ root directory.
 # The Dockerfile should contain 'COPY . /app/maxtext/'.
-# Tag the image locally with ${LOCAL_IMAGE_NAME}.
-echo "$(date): Running docker build with local tag '${LOCAL_IMAGE_NAME}'..."
 docker build --no-cache \
-  -f src/dependencies/dockerfiles/colocated_python.Dockerfile \
+  -f "${TMP_DOCKERFILE}" \
   -t "${LOCAL_IMAGE_NAME}" \
   .
 
