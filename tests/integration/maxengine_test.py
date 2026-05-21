@@ -26,12 +26,10 @@ import pytest
 from flax import nnx
 from flax.linen import partitioning as nn_partitioning
 from maxtext.configs import pyconfig
-from maxtext.common.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_PREFILL
-from maxtext.layers import quantizations
+from maxtext.common.common_types import MODEL_MODE_PREFILL
 
 pytest.importorskip("jetstream", reason="jetstream not installed")
 from maxtext.inference.maxengine import maxengine
-from maxtext.models import models
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
 from tests.utils.test_helpers import get_test_config_path
@@ -71,17 +69,6 @@ class MaxEngineTest(unittest.TestCase):
     )
     return config
 
-  def get_data(self):
-    s = (self.cfg.global_batch_size_to_train_on, self.cfg.max_target_length)
-    ids = jax.random.randint(self.rng, s, 0, self.cfg.vocab_size)
-
-    decoder_segment_ids = jax.numpy.zeros(s) + DECODING_ACTIVE_SEQUENCE_INDICATOR
-    decoder_positions = jnp.stack(
-        [jnp.arange(self.cfg.max_target_length, dtype=jnp.int32) for _ in range(self.cfg.global_batch_size_to_train_on)]
-    )
-
-    return ids, decoder_segment_ids, decoder_positions
-
   def test_stack_and_unstack_prefill_cache(self):
     config = pyconfig.initialize(
         [None, get_test_config_path()],
@@ -111,60 +98,8 @@ class MaxEngineTest(unittest.TestCase):
     got_unstacked = engine._maybe_unstack_prefill_result_cache(got_stacked)
     jax.tree.map(np.testing.assert_array_equal, got_unstacked, input_d)
 
-  def test_basic_prefill(self):
-    devices_array = maxtext_utils.create_device_mesh(self.cfg)
-    mesh = Mesh(devices_array, self.cfg.mesh_axes)
-    quant = quantizations.configure_quantization(self.cfg)
-    model = models.transformer_as_linen(config=self.cfg, mesh=mesh, quant=quant, model_mode=MODEL_MODE_PREFILL)
-    ids, decoder_segment_ids, decoder_positions = self.get_data()
-
-    transformer_vars = model.init(
-        {"params": self.rng, "aqt": self.rng, "dropout": self.rng},
-        ids,
-        decoder_positions,
-        decoder_segment_ids,
-        enable_dropout=False,
-    )
-    input_tokens = jnp.array([1, 306, 5360, 304, 0, 0, 0, 0])
-    true_length = 4
-    engine = maxengine.MaxEngine(self.cfg, jax.devices())
-    prefill_result, first_token = engine.prefill(
-        params=transformer_vars, padded_tokens=input_tokens, true_length=true_length
-    )
-
-    self.assertEqual(prefill_result["generated_tokens"], jnp.array([0]))
-    # test default strategy is gready which choose only one next token
-    self.assertEqual(prefill_result["tokens"].size, 1)
-    self.assertNotEqual(prefill_result["tokens"], jnp.array([0]))
-    self.assertTrue(jnp.array_equal(first_token.data.size, 3))
-    self.assertEqual(first_token.log_prob.shape, (1, 1))
-
-  def test_basic_decode(self):
-    devices_array = maxtext_utils.create_device_mesh(self.cfg)
-    mesh = Mesh(devices_array, self.cfg.mesh_axes)
-    quant = quantizations.configure_quantization(self.cfg)
-    model = models.transformer_as_linen(config=self.cfg, mesh=mesh, quant=quant, model_mode=MODEL_MODE_PREFILL)
-    ids, decoder_segment_ids, decoder_positions = self.get_data()
-
-    transformer_vars = model.init(
-        {"params": self.rng, "aqt": self.rng, "dropout": self.rng},
-        ids,
-        decoder_positions,
-        decoder_segment_ids,
-        enable_dropout=False,
-    )
-    input_tokens = jnp.array([1, 306, 5360, 304])
-    engine = maxengine.MaxEngine(self.cfg, jax.devices())
-    params = engine.load_params(params=transformer_vars)
-    decode_state = engine.init_decode_state()
-    prefill_result, _ = engine.prefill(params=params, padded_tokens=input_tokens, true_length=4)
-    decode_state = engine.insert(prefill_result, decode_state, slot=0)
-    decode_state, result_token = engine.generate(params=params, decode_state=decode_state)
-
-    self.assertEqual(result_token.log_prob.ndim, 2)
-    self.assertEqual(result_token.log_prob.shape[1], 1)
-    self.assertEqual(result_token.data.ndim, 2)
-    self.assertEqual(result_token.data.shape[1], 3)
+  # The Linen-path basic prefill/decode tests were removed when NNX became the
+  # default. test_basic_prefill_nnx / test_basic_decode_nnx below cover the NNX path.
 
   def _init_nnx_pyconfig(self, **kwargs):
     """Same as init_pyconfig but with the NNX flags turned on."""
