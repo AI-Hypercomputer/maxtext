@@ -56,9 +56,13 @@ rely on the vLLM library.
 Before starting, ensure you have:
 
 - Access to a Google Cloud Project with TPU quotas.
+- **IAM Roles** required:
+  - **Kubernetes Engine Developer** (`roles/container.developer`) to submit and manage workloads on GKE.
+  - **Artifact Registry Writer** (`roles/artifactregistry.writer`) to upload Docker images.
+  - **Storage Object Admin** (`roles/storage.objectAdmin`) on your GCS bucket to read/write checkpoints and logs.
 - A Hugging Face account with an access token for downloading models.
-- Permissions for Google Artifact Registry (Artifact Registry Writer role).
 - Prerequisites for XPK installed (follow [official documentation](https://github.com/AI-Hypercomputer/xpk/blob/main/docs/installation.md#1-prerequisites)).
+  - **Important:** Modern GKE clusters require the GKE auth plugin. If you encounter `gke-gcloud-auth-plugin not found` when running `kubectl` commands, you must install it locally (e.g., `sudo apt-get install google-cloud-sdk-gke-gcloud-auth-plugin` for `apt` installations, or `gcloud components install gke-gcloud-auth-plugin` for standalone archive installations).
 - A Pathways-ready GKE cluster (see [create GKE cluster](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster)).
 - **Docker** installed and configured for sudoless use. Follow the steps to [configure sudoless Docker](https://docs.docker.com/engine/install/linux-postinstall/).
 
