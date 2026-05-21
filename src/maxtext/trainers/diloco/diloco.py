@@ -281,13 +281,29 @@ def build_diloco_train_step(
     if config.pure_nnx:
       # For NNX: merge new Param vars back with the non-Param model vars (e.g. RNG state).
       def replace_nnx_model_params(s, new_params):
-        graphdef, _, non_param_state = nnx.split(s.model, nnx.Param, ...)
-        new_model = nnx.merge(graphdef, new_params, non_param_state)
-        # Re-construct TrainStateNNX
         import jax
-        jax.debug.print("Type of new_model: {t}", t=type(new_model))
-        from maxtext.layers.train_state_nnx import TrainStateNNX
-        return TrainStateNNX(new_model, s.optimizer)
+        from flax import nnx
+        
+        s_model = s["model"] if hasattr(s, "keys") else s.model
+        s_opt = s["optimizer"] if hasattr(s, "keys") else s.optimizer
+        
+        graphdef, _, non_param_state = nnx.split(s_model, nnx.Param, ...)
+        new_model = nnx.merge(graphdef, new_params, non_param_state)
+        
+        if type(s_model).__name__ == "State":
+            new_model = nnx.state(new_model)
+        elif type(s_model) is dict:
+            new_model = nnx.to_pure_dict(new_model)
+            
+        if hasattr(s, "keys"):
+            leaves, treedef = jax.tree_util.tree_flatten(s)
+            new_model_leaves, _ = jax.tree_util.tree_flatten(new_model)
+            N = len(new_model_leaves)
+            new_leaves = new_model_leaves + leaves[N:]
+            return jax.tree_util.tree_unflatten(treedef, new_leaves)
+        else:
+            from maxtext.layers.train_state_nnx import TrainStateNNX
+            return TrainStateNNX(new_model, s_opt)
 
       new_inner_state = drjax.map_fn(
           lambda s: replace_nnx_model_params(s, new_outer_params),
