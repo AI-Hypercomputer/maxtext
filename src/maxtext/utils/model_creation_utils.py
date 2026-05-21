@@ -790,6 +790,8 @@ def from_pretrained(
             "skip_jax_distributed_system=True",
             "--lazy_load_tensors=True",
             f"--simulated_cpu_devices_count={simulated_cpu_devices_count}",
+            f"checkpoint_storage_use_ocdbt={config.checkpoint_storage_use_ocdbt}",
+            f"checkpoint_storage_use_zarr3={config.checkpoint_storage_use_zarr3}",
         ]
 
         try:
