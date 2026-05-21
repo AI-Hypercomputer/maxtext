@@ -157,8 +157,10 @@ def build_abstract_diloco_state(
   # For NNX, model params (Param variables only) live under abstract_state.model;
   # for Linen under abstract_state.params.
   if config.pure_nnx:
-    model_params = abstract_state.model.filter(nnx.Param)
-    model_params_sharding = state_mesh_shardings.model.filter(nnx.Param)
+    _, model_params, _ = nnx.split(abstract_state.model, nnx.Param, ...)
+    model_params = model_params.to_pure_dict()
+    _, model_params_sharding, _ = nnx.split(state_mesh_shardings.model, nnx.Param, ...)
+    model_params_sharding = model_params_sharding.to_pure_dict()
   else:
     model_params = abstract_state.params
     model_params_sharding = state_mesh_shardings.params
@@ -262,9 +264,11 @@ def build_diloco_train_step(
     # state (since last synchronization).
     broadcast_outer_params = drjax.broadcast(state.params, mesh=mesh)
     # For NNX, model Param vars live under inner_state.model; for Linen under inner_state.params.
-    inner_model_params = (
-        nnx.filter_state(state.inner_state.model, nnx.Param) if config.pure_nnx else state.inner_state.params
-    )
+    if config.pure_nnx:
+      _, inner_model_params, _ = nnx.split(state.inner_state.model, nnx.Param, ...)
+      inner_model_params = inner_model_params.to_pure_dict()
+    else:
+      inner_model_params = state.inner_state.params
     model_delta = jax.tree.map(lambda x, y: y - x, inner_model_params, broadcast_outer_params)
     # Treat the average delta as the outer optimizer's gradient and apply to
     # the global (outer) model params.
@@ -277,15 +281,29 @@ def build_diloco_train_step(
     if config.pure_nnx:
       # For NNX: merge new Param vars back with the non-Param model vars (e.g. RNG state).
       def replace_nnx_model_params(s, new_params):
-        non_param_model = nnx.filter_state(s.model, nnx.Not(nnx.Param))
-        new_model = nnx.merge_state(non_param_model, new_params)
-        # Assign via __setitem__ so nested States are stored as plain dicts (matching
-        # nnx.state()'s pytree structure). The dict-literal constructor keeps them as
-        # State objects, which makes jax.lax.cond see mismatched pytree structures.
-        result = type(s)({})
-        result["model"] = new_model
-        result["optimizer"] = s["optimizer"]
-        return result
+        import jax
+        from flax import nnx
+        
+        s_model = s["model"] if hasattr(s, "keys") else s.model
+        s_opt = s["optimizer"] if hasattr(s, "keys") else s.optimizer
+        
+        graphdef, _, non_param_state = nnx.split(s_model, nnx.Param, ...)
+        new_model = nnx.merge(graphdef, new_params, non_param_state)
+        
+        if type(s_model).__name__ == "State":
+            new_model = nnx.state(new_model)
+        elif type(s_model) is dict:
+            new_model = nnx.to_pure_dict(new_model)
+            
+        if hasattr(s, "keys"):
+            leaves, treedef = jax.tree_util.tree_flatten(s)
+            new_model_leaves, _ = jax.tree_util.tree_flatten(new_model)
+            N = len(new_model_leaves)
+            new_leaves = new_model_leaves + leaves[N:]
+            return jax.tree_util.tree_unflatten(treedef, new_leaves)
+        else:
+            from maxtext.layers.train_state_nnx import TrainStateNNX
+            return TrainStateNNX(new_model, s_opt)
 
       new_inner_state = drjax.map_fn(
           lambda s: replace_nnx_model_params(s, new_outer_params),
