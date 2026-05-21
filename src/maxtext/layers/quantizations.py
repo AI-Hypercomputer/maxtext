@@ -759,8 +759,8 @@ def get_fp8_full_qwix_rule_w_sparsity(config: Config):
 
 
 def get_quantization_rule(config: Config):
-
   """Returns a list of qwix.QtRule from `dtype`."""
+
   def make_qt_rule(dtype) -> list[qwix.QtRule]:
     return [
         qwix.QtRule(
@@ -812,7 +812,16 @@ def maybe_quantize_model(model, config):
   if config.use_qwix_quantization and not config.use_batch_split_schedule:
     quantization_provider = get_qt_provider(config)
     if quantization_provider:
-      model = qwix.quantize_model(model, quantization_provider)
+      if config.pure_nnx:
+        # qwix.quantize_model traces NNX modules to locate quant points, so it
+        # requires example model inputs (Linen modules are traced lazily and
+        # take none). Feed dummy decoder tokens/positions of the train shape.
+        input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
+        dummy_tokens = jnp.ones(input_shape, dtype=jnp.int32)
+        dummy_positions = jnp.ones(input_shape, dtype=jnp.int32)
+        model = qwix.quantize_model(model, quantization_provider, dummy_tokens, dummy_positions)
+      else:
+        model = qwix.quantize_model(model, quantization_provider)
   return model
 
 
