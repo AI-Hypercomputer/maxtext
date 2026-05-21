@@ -492,9 +492,11 @@ class ToLinen(linen.Module):
       new_state = nnx.State(nnx.traversals.unflatten_mapping(filtered_state_flat))
 
     # Use split and merge to create a new module bound to the current trace level
-    # instead of using nnx.update which can leave stale tracers.
-    _, graphdef = module.split()
-    module = graphdef.merge(new_state)
+    # instead of using nnx.update directly on the module which can leave stale tracers.
+    # We must merge with the full state, so we split first, update the full state, and merge.
+    graphdef, full_state = nnx.split(module)
+    nnx.update(full_state, new_state)
+    module = nnx.merge(graphdef, full_state)
 
     _fix_for_qwix_quantization(module)
     method_fn = _get_module_method(module, nnx_method)
