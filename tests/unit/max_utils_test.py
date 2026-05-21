@@ -220,14 +220,14 @@ class UnscanTest(unittest.TestCase):
 
     # Check that the original state is unchanged.
 
-    if hasattr(state, 'model'):
+    if hasattr(state, "model"):
       _, params_state, _ = nnx.split(state.model, nnx.Param, ...)
       state_decoder_params = params_state.to_pure_dict()["decoder"]
       self.assertIn("layers", state_decoder_params)
     else:
       self.assertIn("layers", state.params["params"]["decoder"])
 
-    if hasattr(state, 'model'):
+    if hasattr(state, "model"):
       self.assertNotIn("layers_0", state_decoder_params)
     else:
       self.assertNotIn("layers_0", state.params["params"]["decoder"])
