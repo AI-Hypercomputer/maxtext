@@ -121,7 +121,34 @@ docker build --no-cache --build-arg BASEIMAGE=${LOCAL_IMAGE_NAME} \
              -f "$PACKAGE_DIR"'/dependencies/dockerfiles/maxtext_runner.Dockerfile' \
              -t ${LOCAL_IMAGE_NAME_RUNNER} .
 
-docker tag ${LOCAL_IMAGE_NAME_RUNNER} gcr.io/$PROJECT/${CLOUD_IMAGE_NAME}:latest
-docker push gcr.io/$PROJECT/${CLOUD_IMAGE_NAME}:latest
+# Determine the full target image path
+export FULL_IMAGE_PATH=""
+if [[ "${CLOUD_IMAGE_NAME}" == *"/"* ]]; then
+  # If it contains '/', assume it's a full path (e.g., us-docker.pkg.dev/project/repo/image)
+  export FULL_IMAGE_PATH="${CLOUD_IMAGE_NAME}"
+else
+  # Otherwise, default to GCR
+  export FULL_IMAGE_PATH="gcr.io/${PROJECT}/${CLOUD_IMAGE_NAME}"
+fi
 
-echo "All done, check out your artifacts at: gcr.io/$PROJECT/${CLOUD_IMAGE_NAME}"
+# Append :latest if no tag is specified
+if [[ "${FULL_IMAGE_PATH}" != *":"* ]]; then
+  export FULL_IMAGE_PATH="${FULL_IMAGE_PATH}:latest"
+fi
+
+echo "Tagging local image ${LOCAL_IMAGE_NAME_RUNNER} as ${FULL_IMAGE_PATH}..."
+docker tag ${LOCAL_IMAGE_NAME_RUNNER} ${FULL_IMAGE_PATH}
+
+echo "Pushing image to registry..."
+docker push ${FULL_IMAGE_PATH}
+
+# Since 'set -e' is active, if we reach this point, the push was successful.
+echo ""
+echo "========================================================================================================="
+echo "✅ SUCCESS: MaxText Docker image uploaded successfully!"
+echo "========================================================================================================="
+echo "Your image is available at:"
+echo "👉 ${FULL_IMAGE_PATH}"
+echo ""
+echo "You can copy-paste the path above directly into your XPK or GKE workload configurations."
+echo "========================================================================================================="
