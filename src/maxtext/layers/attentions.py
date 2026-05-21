@@ -429,7 +429,9 @@ class Attention(nnx.Module):
     self.share_kv_layer = share_kv_layer
 
     self.is_qwen2 = self.config.decoder_block == DecoderBlockType.QWEN2
-    self.is_qwen3_hybrid = self.config.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5)
+    self.is_qwen3_hybrid = (
+        self.config.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5) and not self.is_vision
+    )
 
     # Module attribute names must match names previously passed to Linen for checkpointing
     self.KVCache_0 = (
@@ -804,7 +806,7 @@ class Attention(nnx.Module):
     rope_type = self.rope_type
     rope_use_scale = self.config.rope_use_scale
     if self.is_vision:
-      if self.config.model_name.startswith("qwen3-omni"):
+      if self.config.model_name.startswith("qwen3-omni") or self.config.model_name.startswith("qwen3.5"):
         rotary_embedding = Qwen3OmniMoeVisionRotaryEmbedding(
             hidden_size=self.config.hidden_size_for_vit,
             num_attention_heads=self.config.num_attention_heads_for_vit,
