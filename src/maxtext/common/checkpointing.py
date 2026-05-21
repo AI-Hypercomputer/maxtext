@@ -355,11 +355,17 @@ def _load_full_state_from_path(
         use_ocdbt=use_ocdbt,
         use_zarr3=use_zarr3,
     )
+    # NNX checkpoints are saved as a pure dict (see maybe_save_checkpoint), so the
+    # restore target must also be a pure dict. A boxed nnx.State would not match
+    # the on-disk tree.
+    restore_target = abstract_unboxed_pre_state
+    if isinstance(abstract_unboxed_pre_state, nnx.State):
+      restore_target = abstract_unboxed_pre_state.to_pure_dict()
     # Provide sharding info to ensure restoration returns JAX arrays (not NumPy arrays).
     restore_args = jax.tree_util.tree_map(
-        lambda x: ocp.type_handlers.ArrayRestoreArgs(sharding=x.sharding), abstract_unboxed_pre_state
+        lambda x: ocp.type_handlers.ArrayRestoreArgs(sharding=x.sharding), restore_target
     )
-    return ocp.Checkpointer(handler).restore(p, abstract_unboxed_pre_state, restore_args=restore_args)
+    return ocp.Checkpointer(handler).restore(p, restore_target, restore_args=restore_args)
 
 
 def create_orbax_checkpoint_manager(
