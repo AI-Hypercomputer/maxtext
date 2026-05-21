@@ -57,6 +57,10 @@ if [ -f .dockerignore ]; then
   while IFS= read -r pattern; do
     # Ignore empty lines and comments
     if [[ -n "$pattern" && ! "$pattern" =~ ^# ]]; then
+      # Strip leading ./ if present
+      pattern="${pattern#./}"
+      # Strip trailing / if present
+      pattern="${pattern%/}"
       EXCLUDE_PATHS+=(-o -path "./$pattern")
     fi
   done < .dockerignore
@@ -74,9 +78,16 @@ DANGLING_LINKS=$(find -L . "${PRUNE_ARGS[@]}" -type l -print)
 if [ -n "$DANGLING_LINKS" ]; then
   echo "ERROR: Found dangling symbolic links in the build context:"
   echo "$DANGLING_LINKS"
+  echo ""
   echo "These can cause 'failed to compute cache key' errors during 'docker build'."
-  echo "Please remove or fix them before building the Docker image."
-  echo "Alternatively, run the command again from a clean, empty directory to bypass your local file state entirely."
+  echo "To fix this, please either:"
+  echo "  1. Remove or fix these links."
+  echo "  2. Add the following lines to your .dockerignore file:"
+  while IFS= read -r link; do
+    if [ -n "$link" ]; then
+      echo "     ${link#./}"
+    fi
+  done <<< "$DANGLING_LINKS"
   exit 1
 fi
 
@@ -85,9 +96,16 @@ ABSOLUTE_LINKS=$(find . "${PRUNE_ARGS[@]}" -type l -lname '/*' -print)
 if [ -n "$ABSOLUTE_LINKS" ]; then
   echo "ERROR: Found symbolic links with absolute paths in the build context:"
   echo "$ABSOLUTE_LINKS"
-  echo "Docker cannot follow absolute paths outside of the build context, which can cause 'failed to compute cache key' errors."
-  echo "Please remove these links or add the files to .dockerignore before building the Docker image."
-  echo "Do not include the ./ file prefix in .dockerignore"
+  echo ""
+  echo "Docker cannot follow absolute paths outside of the build context, which causes 'failed to compute cache key' errors."
+  echo "To fix this, please either:"
+  echo "  1. Remove these links from your local directory."
+  echo "  2. Add the following lines to your .dockerignore file:"
+  while IFS= read -r link; do
+    if [ -n "$link" ]; then
+      echo "     ${link#./}"
+    fi
+  done <<< "$ABSOLUTE_LINKS"
   exit 1
 fi
 
