@@ -366,7 +366,7 @@ def main(argv: Sequence[str]) -> None:
     argv: Command-line arguments, which are parsed by `pyconfig`.
   """
   # Initialize maxtext config
-  config = pyconfig.initialize(argv)
+  config = pyconfig.initialize_pydantic(argv)
   assert (
       config.load_full_state_path == ""
   ), "This script expects parameters, not a full state. Use generate_param_only_checkpoint first if needed."
