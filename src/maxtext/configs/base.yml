@@ -371,6 +371,19 @@ v_norm_with_scale: True
 qk_norm_with_scale: True
 mla_naive_kvcache: True
 
+# Gemma 4 small (E2B / E4B) specific config fields.
+# When `hidden_size_per_layer_input` is positive, each decoder layer adds an
+# extra "Per-Layer-Embedding" sub-block at the end (see models/gemma4_small.py).
+hidden_size_per_layer_input: 0
+vocab_size_per_layer_input: 0
+# Number of *trailing* decoder layers that reuse K/V from the last non-shared
+# layer of the same attention type (sliding↔sliding, full↔full). Those layers
+# do not have their own k/v projections.
+num_kv_shared_layers: 0
+# When True, KV-shared layers double their MLP intermediate size to compensate
+# for the lost K/V parameters.
+use_double_wide_mlp: False
+
 
 # Adding Mixture of Block Attention Support (MoBA): https://github.com/MoonshotAI/MoBA/blob/master/MoBA_Tech_Report.pdf
 moba: False

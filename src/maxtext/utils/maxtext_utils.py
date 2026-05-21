@@ -38,6 +38,7 @@ import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as 
 
 from maxtext.configs import pyconfig
 from maxtext.common.common_types import (
+    AttentionType,
     DecoderBlockType,
     MODEL_MODE_PREFILL,
     MODEL_MODE_AUTOREGRESSIVE,
@@ -399,6 +400,90 @@ def calculate_gemma4_tflops_training_per_device(
   )
 
   learnable_weight_tflops = total_learnable_flops * 3 / 10**12
+
+  return attention_tflops, learnable_weight_tflops
+
+
+def calculate_gemma4_small_tflops_training_per_device(config, embedding_flops):
+  """Training TFLOPs for Gemma 4 small (E2B / E4B).
+
+  Differs from the dense Gemma 4 path in three ways:
+    1. The last ``num_kv_shared_layers`` decoder layers reuse K/V from an
+       earlier layer and own no k_proj / v_proj.
+    2. With ``use_double_wide_mlp`` (E2B), those shared layers also widen the
+       MLP intermediate dim by 2x.
+    3. A Per-Layer-Embedding block adds a global projection plus a per-layer
+       gate / projection pair on top of every decoder layer.
+  """
+  # Local import keeps Bazel's dep graph cycle-free (layers -> maxtext_utils -> layers).
+  # pytype: disable=import-error
+  from maxtext.models import gemma4_small  # pylint: disable=import-outside-toplevel
+  # pytype: enable=import-error
+
+  b = config.per_device_batch_size
+  s = config.max_target_length
+  num_layers = config.num_decoder_layers
+  num_kv_shared = config.num_kv_shared_layers
+
+  layer_types = gemma4_small.build_layer_types(num_layers, config.model_name)
+  first_shared = gemma4_small.first_kv_shared_layer_idx(num_layers, num_kv_shared)
+
+  global_head_dim = config.global_head_dim or config.head_dim
+  global_num_kv_heads = config.global_num_kv_heads or config.num_kv_heads
+  num_activations = len(config.mlp_activations)
+  window = min(config.sliding_window_size, s)
+
+  # Per-layer FLOP closures parameterized by attention type.
+  def attention_flops_for(attn_type):
+    if attn_type == AttentionType.GLOBAL:
+      # Causal global attention: factor of 2 (lower-triangular half).
+      return 2 * b * s * s * config.num_query_heads * global_head_dim
+    # Sliding-window: exact closed-form for the causal-and-windowed mask.
+    return 4 * b * (s * window - 0.5 * window**2) * config.num_query_heads * config.head_dim
+
+  def qo_flops_for(attn_type):
+    head_dim = global_head_dim if attn_type == AttentionType.GLOBAL else config.head_dim
+    q = 2 * b * s * config.emb_dim * config.num_query_heads * head_dim
+    o = 2 * b * s * config.emb_dim * config.num_query_heads * head_dim
+    return q + o
+
+  def kv_flops_for(attn_type):
+    if attn_type == AttentionType.GLOBAL:
+      kv_heads, head_dim = global_num_kv_heads, global_head_dim
+    else:
+      kv_heads, head_dim = config.num_kv_heads, config.head_dim
+    return 2 * b * s * config.emb_dim * (2 * kv_heads) * head_dim
+
+  attention_flops = 0
+  projection_flops = 0
+  ffn_per_layer = (
+      2 * b * s * config.mlp_dim * config.emb_dim * num_activations  # gate / up
+      + 2 * b * s * config.mlp_dim * config.emb_dim  # down
+  )
+  ffn_flops = 0
+
+  for lyr_idx, attn_type in enumerate(layer_types):
+    attention_flops += attention_flops_for(attn_type)
+    projection_flops += qo_flops_for(attn_type)
+    is_shared = num_kv_shared > 0 and lyr_idx >= first_shared
+    if not is_shared:
+      projection_flops += kv_flops_for(attn_type)
+    if is_shared and config.use_double_wide_mlp:
+      ffn_flops += 2 * ffn_per_layer
+    else:
+      ffn_flops += ffn_per_layer
+
+  # Per-Layer-Embedding block (skipped when ple_dim == 0).
+  ple_flops = 0
+  ple_dim = config.hidden_size_per_layer_input
+  if ple_dim > 0:
+    # One global projection emb_dim -> num_layers * ple_dim.
+    ple_flops += 2 * b * s * config.emb_dim * (num_layers * ple_dim)
+    # Per-layer gate (emb_dim -> ple_dim) and projection (ple_dim -> emb_dim).
+    ple_flops += num_layers * (2 * b * s * config.emb_dim * ple_dim + 2 * b * s * ple_dim * config.emb_dim)
+
+  attention_tflops = attention_flops * 3 / 10**12
+  learnable_weight_tflops = (projection_flops + ffn_flops + ple_flops + embedding_flops) * 3 / 10**12
 
   return attention_tflops, learnable_weight_tflops
 
@@ -952,6 +1037,12 @@ def calculate_tflops_training_per_device(config, log=True):
     attention_tflops, learnable_weight_tflops = calculate_gemma4_tflops_training_per_device(
         config, total_ffn_flops_all_layers, embedding_flops, attention_pattern_length=6
     )
+  elif config.decoder_block == DecoderBlockType.GEMMA4_SMALL:
+    # The small path derives its own attention pattern from
+    # gemma4_small.get_attention_pattern(config.model_name) and accounts for
+    # KV sharing, double-wide MLP on shared layers, and the per-layer-embedding
+    # block.
+    attention_tflops, learnable_weight_tflops = calculate_gemma4_small_tflops_training_per_device(config, embedding_flops)
   elif config.decoder_block == DecoderBlockType.DEEPSEEK:
     learnable_weight_tflops = (
         (total_ffn_flops_all_layers + (qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops)

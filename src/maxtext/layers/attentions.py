@@ -319,6 +319,7 @@ class Attention(nnx.Module):
       use_v_norm: bool = False,
       rope_max_timescale: float | None = None,
       partial_rotary_factor: float | None = None,
+      share_kv_layer: bool = False,
       rngs: nnx.Rngs | None = None,
   ):
     """Initializes the Attention module.
@@ -364,6 +365,9 @@ class Attention(nnx.Module):
       use_v_norm: Whether to apply normalization to value.
       rope_max_timescale: The maximum timescale for RoPE.
       partial_rotary_factor: The factor for partial rotary embedding.
+      share_kv_layer: If True, this layer reuses K / V from an earlier (donor) layer of the same
+          attention type; k_proj / v_proj / k_norm / v_norm are not created and RoPE-on-K is
+          skipped. The caller must pass `shared_key` / `shared_value` to `__call__`.
       rngs: RNG state for initialization, passed by the nnx.to_linen wrapper.
     """
 
@@ -422,6 +426,7 @@ class Attention(nnx.Module):
     self.use_v_norm = use_v_norm
     self.rope_max_timescale = rope_max_timescale if rope_max_timescale is not None else self.config.rope_max_timescale
     self.partial_rotary_factor = partial_rotary_factor
+    self.share_kv_layer = share_kv_layer
 
     self.is_qwen2 = self.config.decoder_block == DecoderBlockType.QWEN2
     self.is_qwen3_hybrid = self.config.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5)
@@ -512,16 +517,19 @@ class Attention(nnx.Module):
           with_scale=with_scale,
           rngs=self.rngs,
       )
-      self.key_norm = qk_norm_cls(
-          num_features=k_features,
-          dtype=self.config.dtype,
-          weight_dtype=self.config.weight_dtype,
-          shard_mode=self.config.shard_mode,
-          epsilon=self.config.normalization_layer_epsilon,
-          kernel_axes=("norm",),
-          with_scale=with_scale,
-          rngs=self.rngs,
-      )
+      if self.share_kv_layer:
+        self.key_norm = None
+      else:
+        self.key_norm = qk_norm_cls(
+            num_features=k_features,
+            dtype=self.config.dtype,
+            weight_dtype=self.config.weight_dtype,
+            shard_mode=self.config.shard_mode,
+            epsilon=self.config.normalization_layer_epsilon,
+            kernel_axes=("norm",),
+            with_scale=with_scale,
+            rngs=self.rngs,
+        )
     elif self.is_qwen3_hybrid:
       self.query_norm = Qwen3NextRMSNorm(
           num_features=self.config.head_dim,
@@ -541,7 +549,7 @@ class Attention(nnx.Module):
       self.query_norm = None
       self.key_norm = None
 
-    if self.use_v_norm:
+    if self.use_v_norm and not self.share_kv_layer:
       with_scale = self.config.v_norm_with_scale
       self.value_norm = RMSNorm(
           num_features=self.head_dim,
@@ -569,9 +577,10 @@ class Attention(nnx.Module):
       self.qkv_proj = self.init_qkv_w(inputs_shape=inputs_q_shape)
     else:
       self.query = self.init_query_w(inputs_q_shape=inputs_q_shape)
-      self.key = self.init_kv_w(inputs_kv_shape=inputs_kv_shape)
-      if not self.share_kv_projections:
-        self.value = self.init_kv_w(inputs_kv_shape=inputs_kv_shape)
+      if not self.share_kv_layer:
+        self.key = self.init_kv_w(inputs_kv_shape=inputs_kv_shape)
+        if not self.share_kv_projections:
+          self.value = self.init_kv_w(inputs_kv_shape=inputs_kv_shape)
     self.out = self.init_out_w(output_dim=inputs_q_shape[-1])
 
   def init_query_w(self, inputs_q_shape: Tuple) -> nnx.Module:
@@ -738,6 +747,39 @@ class Attention(nnx.Module):
   def out_projection(self, out: Array, out_sharding: NamedSharding | None = None) -> Array:
     """out projection"""
     return self.out(out, out_sharding=out_sharding)
+
+  def compute_shared_kv(
+      self,
+      inputs_kv: Array,
+      inputs_positions: Array | None = None,
+      rope_kwargs: dict | None = None,
+  ) -> tuple[Array, Array]:
+    """Computes the rotated, normed K / V for this layer.
+
+    Used by KV-donor layers in models with cross-layer KV sharing (e.g. Gemma 4
+    small): the donor calls this once, passes the result into its own
+    ``__call__`` as ``shared_key`` / ``shared_value`` to avoid double-computing,
+    and forwards the same tensors to downstream shared layers.
+    """
+    if self.share_kv_layer:
+      raise ValueError("compute_shared_kv cannot be called on a share_kv_layer=True layer.")
+    if self.config.fused_qkv:
+      raise ValueError("compute_shared_kv is incompatible with fused_qkv.")
+    qkv_sharding = create_sharding(self.mesh, self.input_axis_names)
+    key = self.kv_projection(inputs_kv, proj_name="key", out_sharding=qkv_sharding)
+    value = (
+        key if self.share_kv_projections else self.kv_projection(inputs_kv, proj_name="value", out_sharding=qkv_sharding)
+    )
+    is_llama4_decoder_block = self.config.decoder_block == DecoderBlockType.LLAMA4
+    if (self.use_qk_norm and not is_llama4_decoder_block) or self.is_qwen3_hybrid:
+      key = self.key_norm(key)
+    if self.use_v_norm:
+      value = self.value_norm(value)
+    if not self.is_nope_layer:
+      key = self.apply_rotary_embedding(key, inputs_positions=inputs_positions, rope_kwargs=rope_kwargs)
+    if self.use_qk_norm and is_llama4_decoder_block and not self.is_nope_layer:
+      key = L2Norm(eps=self.config.normalization_layer_epsilon)(key)
+    return key, value
 
   def convert_dense_general_inputs_shape(
       self,
@@ -1046,6 +1088,8 @@ class Attention(nnx.Module):
       rope_kwargs: dict | None = None,
       kv_cache: Optional[Array] = None,
       attention_metadata: Optional[dict[str, Any]] = None,
+      shared_key: Array | None = None,
+      shared_value: Array | None = None,
   ):
     """Applies Attention on the input data.
 
@@ -1090,9 +1134,19 @@ class Attention(nnx.Module):
     inputs_kv = self._maybe_shard_with_logical(inputs_kv, input_axis_names)
     qkv_sharding = create_sharding(self.mesh, input_axis_names)
 
+    use_shared_kv = shared_key is not None and shared_value is not None
+    if self.share_kv_layer and not use_shared_kv:
+      raise ValueError("share_kv_layer=True requires both shared_key and shared_value to be provided.")
+    if use_shared_kv and self.config.fused_qkv:
+      raise ValueError("shared_key / shared_value are incompatible with fused_qkv.")
+
     # apply projection.
     if self.config.fused_qkv:
       query, key, value = self.qkv_projection(inputs_q, proj_name="qkv_proj")
+    elif use_shared_kv:
+      # Donor layer already produced rotated, normed K/V — use them directly.
+      query = self.query_projection(inputs_q, out_sharding=qkv_sharding)
+      key, value = shared_key, shared_value
     else:
       query = self.query_projection(inputs_q, out_sharding=qkv_sharding)
       key = self.kv_projection(inputs_kv, proj_name="key", out_sharding=qkv_sharding)
@@ -1113,9 +1167,10 @@ class Attention(nnx.Module):
     # Apply Qwen3Next specific RMS Norm
     if (self.use_qk_norm and not is_llama4_decoder_block) or self.is_qwen3_hybrid:
       query = self.query_norm(query)
-      key = self.key_norm(key)
+      if not use_shared_kv:
+        key = self.key_norm(key)
 
-    if self.use_v_norm:
+    if self.use_v_norm and not use_shared_kv:
       value = self.value_norm(value)
 
     # NOTE: is_nope_layer should be used in attention mask and also used in attention tuning
@@ -1124,12 +1179,14 @@ class Attention(nnx.Module):
 
     if use_rope:
       query = self.apply_rotary_embedding(query, inputs_positions=inputs_positions, rope_kwargs=rope_kwargs)
-      key = self.apply_rotary_embedding(key, inputs_positions=inputs_positions, rope_kwargs=rope_kwargs)
+      if not use_shared_kv:
+        key = self.apply_rotary_embedding(key, inputs_positions=inputs_positions, rope_kwargs=rope_kwargs)
 
     if use_qk_norm and is_llama4_decoder_block:
       l2_norm = L2Norm(eps=self.config.normalization_layer_epsilon)
       query = l2_norm(query)
-      key = l2_norm(key)
+      if not use_shared_kv:
+        key = l2_norm(key)
 
     # apply query_pre_attn_scalar if it's present.
     if self.query_pre_attn_scalar and self.query_pre_attn_scalar != 1.0:
