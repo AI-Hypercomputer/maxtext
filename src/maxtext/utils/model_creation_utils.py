@@ -32,6 +32,7 @@
 import dataclasses
 import collections
 from collections.abc import Sequence
+import re
 from typing import Callable, overload
 from functools import partial
 import os
@@ -369,11 +370,15 @@ def _fix_restore_args_for_shape_mismatch(restore_args, stored_metadata_tree, mes
   def _lookup_stored_meta(path):
     """Navigate stored_metadata_tree using path keys from the restore_args tree."""
     node = stored_metadata_tree
+
     for key in path:
       name = _key_str(key)
+      # if re.match(r"^layers?_\d+(?:_\d+)?$", name):
+      #  name = "layers"
       if isinstance(node, dict) and name in node:
         node = node[name]
       else:
+        # breakpoint()
         return None
     return node
 
@@ -876,6 +881,7 @@ def from_pretrained(
 
         # Get the structure of checkpoint in `config.load_parameters_path`
         metadata = ckptr.metadata(config.load_parameters_path)
+        # breakpoint()
         if metadata is None or metadata.item_metadata is None:
           max_logging.log(
               f"ERROR: No valid Orbax checkpoint found at '{config.load_parameters_path}'. "
@@ -937,8 +943,15 @@ def from_pretrained(
               target_for_restore, metadata.item_metadata.tree["params"]["params"], False
           )
 
+          # Automatically drop any mismatched shapes to prevent restore errors
+          # TODO: tmp code, redesign
+          target_for_restore = _filter_mismatched_shapes(
+              target_for_restore, metadata.item_metadata.tree["params"]["params"]
+          )
+
           item_to_restore = {"params": {"params": target_for_restore}}
           base_restore_args = ocp.checkpoint_utils.construct_restore_args(target_for_restore)
+          # breakpoint()
           restore_args = {
               "params": {
                   "params": _fix_restore_args_for_shape_mismatch(
@@ -966,7 +979,32 @@ def from_pretrained(
           restore_args = {"base": restore_args} if has_base_key else restore_args
 
         # Free memory used by initial sharded_state before restore, to make room for the incoming checkpoint arrays.
-        def _free_device_memory(node):
+        # We only free arrays that are actually going to be loaded from the checkpoint.
+        def _key_str(key):
+          if hasattr(key, "key"):
+            return str(key.key)
+          if hasattr(key, "attr"):
+            return str(key.attr)
+          return str(key)
+
+        def _path_exists_in_restore_target(path, tree):
+          node = tree
+          for key in path:
+            name = _key_str(key)
+            if isinstance(node, dict) and name in node:
+              node = node[name]
+            else:
+              return False
+          return True
+
+        # Free memory used by initial sharded_state before restore, to make room for the incoming checkpoint arrays.
+        def _free_device_memory_with_path(path, node):
+          # Determine if this specific parameter path is going to be restored
+          root_target = restored_root if is_nnx_checkpoint else target_for_restore
+          if not _path_exists_in_restore_target(path, root_target):
+            # Shape mismatch or ignored parameter. Skip deletion!
+            return node
+
           if isinstance(node, nnx.Variable) and not isinstance(node, nnx.RngState):
             val = node[...]
           else:
@@ -977,7 +1015,10 @@ def from_pretrained(
 
           return node
 
-        jax.tree_util.tree_map(_free_device_memory, sharded_state, is_leaf=lambda n: isinstance(n, nnx.Variable))
+        # Use path-aware tree map to safely prune only the restored parameters
+        jax.tree_util.tree_map_with_path(
+            _free_device_memory_with_path, sharded_state, is_leaf=lambda n: isinstance(n, nnx.Variable)
+        )
 
         restored = ckptr.restore(
             epath.Path(config.load_parameters_path),
@@ -1117,3 +1158,69 @@ def setup_decode_state_from_nnx(model, config, rng, mesh):
 
   state = maxtext_utils.init_decode_state(model.apply, params)
   return state, state_mesh_annotations
+
+
+def _is_metadata_or_struct(x):
+  """Helper to detect JAX ShapeDtypeStruct, ArrayMetadata, or raw arrays."""
+  return hasattr(x, "shape") and not isinstance(x, (dict, list, tuple))
+
+
+def _filter_mismatched_shapes(target, meta_tree, path=None):
+  # TODO: add param to only filter specific layers
+  """Recursively filters out any target subtrees with mismatched shapes compared to the checkpoint.
+
+  Mismatched parameters are removed from target so Orbax skips loading them.
+  """
+  if path is None:
+    path = []
+  if not isinstance(target, dict) or not isinstance(meta_tree, dict):
+    return target
+
+  filtered_target = {}
+  for k, v in target.items():
+    current_path = path + [str(k)]
+    if k not in meta_tree:
+      # Keep parameters not present in checkpoint (new parameters)
+      filtered_target[k] = v
+      continue
+
+    meta_val = meta_tree[k]
+
+    # Case A: Leaf value matches Linen-style targets (ShapeDtypeStruct vs ArrayMetadata)
+    if _is_metadata_or_struct(v) and _is_metadata_or_struct(meta_val):
+      if tuple(v.shape) != tuple(meta_val.shape):
+        max_logging.warning(
+            f"Shape mismatch detected for parameter '{'.'.join(current_path)}': "
+            f"model expects {v.shape} vs stored {meta_val.shape}. This parameter will be IGNORED."
+        )
+        continue
+      filtered_target[k] = v
+
+    # Case B: Leaf value matches NNX-style targets (nested dict with 'value' key)
+    elif (
+        isinstance(v, dict)
+        and "value" in v
+        and _is_metadata_or_struct(v["value"])
+        and isinstance(meta_val, dict)
+        and "value" in meta_val
+        and _is_metadata_or_struct(meta_val["value"])
+    ):
+      target_shape = v["value"].shape
+      stored_shape = meta_val["value"].shape
+      if tuple(target_shape) != tuple(stored_shape):
+        max_logging.warning(
+            f"Shape mismatch detected for parameter '{'.'.join(current_path)}': "
+            f"model expects {target_shape} vs stored {stored_shape}. This parameter will be IGNORED."
+        )
+        continue
+      filtered_target[k] = v
+
+    # Case C: Recurse down
+    else:
+      res = _filter_mismatched_shapes(v, meta_val, current_path)
+      # Only keep sub-structures if they contain non-empty nodes
+      if isinstance(res, dict) and len(res) == 0:
+        continue
+      filtered_target[k] = res
+
+  return filtered_target

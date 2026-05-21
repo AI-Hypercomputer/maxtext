@@ -150,7 +150,7 @@ class LlamaDecoderLayer(nnx.Module):
       attention_metadata=None,
   ):
     cfg = self.config
-
+    # breakpoint()
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
     is_scan_carry = False
     if isinstance(inputs, tuple) and len(inputs) == 3:
