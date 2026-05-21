@@ -57,11 +57,6 @@ from flax.linen import partitioning as nn_partitioning
 from flax import struct
 from flax.nnx import TrainState
 
-from cloud_tpu_diagnostics import diagnostic
-from cloud_tpu_diagnostics.configuration import debug_configuration
-from cloud_tpu_diagnostics.configuration import diagnostic_configuration
-from cloud_tpu_diagnostics.configuration import stack_trace_configuration
-
 import transformers
 
 from ml_goodput_measurement.src.goodput import GoodputRecorder
@@ -979,20 +974,9 @@ def main(argv: Sequence[str]) -> None:
   # Create the Goodput recorder
   recorder = create_goodput_recorder(config)
 
-  # Stack traces configurations
-  debug_config = debug_configuration.DebugConfig(
-      stack_trace_config=stack_trace_configuration.StackTraceConfig(
-          collect_stack_trace=config.collect_stack_trace,
-          stack_trace_to_cloud=config.stack_trace_to_cloud,
-          stack_trace_interval_seconds=config.stack_trace_interval_seconds,
-      )
-  )
-  diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
-
   record_goodput(recorder, RECORD_JOB_START_TIME)
-  with diagnostic.diagnose(diagnostic_config):
-    with maybe_monitor_goodput(config):
-      train_loop(config, config_inference, recorder)
+  with maybe_monitor_goodput(config):
+    train_loop(config, config_inference, recorder)
 
 
 if __name__ == "__main__":

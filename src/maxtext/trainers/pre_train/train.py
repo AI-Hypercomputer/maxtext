@@ -19,7 +19,6 @@
 # See github.com/google/maxtext/issues/20 for more
 
 from typing import Any, Sequence
-import contextlib
 import datetime
 import functools
 import os
@@ -57,7 +56,6 @@ from maxtext.common.goodput import (
     maybe_record_goodput,
     record_goodput,
 )
-from maxtext.common.gcloud_stub import cloud_diagnostics as _cloud_diag, is_decoupled
 from maxtext.common.gcloud_stub import vertex_tensorboard_modules
 from maxtext.common import metric_logger
 from maxtext.common.metric_logger import record_activation_metrics
@@ -74,8 +72,6 @@ from maxtext.utils import train_utils
 from maxtext.utils.gradient_accumulation import gradient_accumulation_loss_and_grad
 from maxtext.utils.vocabulary_tiling import vocab_tiling_linen_loss
 
-_diag_modules = _cloud_diag()
-diagnostic, debug_configuration, diagnostic_configuration, stack_trace_configuration = _diag_modules
 VertexTensorboardManager, _vertex_tb_is_stub = vertex_tensorboard_modules()
 
 
@@ -770,7 +766,7 @@ def train_loop(config, recorder, state=None):
   return state
 
 
-def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]:
+def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any]:
   """Initialization of hyperparameters and utilities"""
   pathwaysutils.initialize()
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
@@ -796,41 +792,16 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]
   # Create the Goodput recorder
   recorder = create_goodput_recorder(config)
 
-  # Stack traces configurations
-  debug_config = debug_configuration.DebugConfig(
-      stack_trace_config=stack_trace_configuration.StackTraceConfig(
-          collect_stack_trace=config.collect_stack_trace,
-          stack_trace_to_cloud=config.stack_trace_to_cloud,
-          stack_trace_interval_seconds=config.stack_trace_interval_seconds,
-      )
-  )
-  diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
-  return config, recorder, diagnostic_config
+  return config, recorder
 
 
-def run(config, recorder, diagnostic_config):
-  """Run the job given hyperparameters and utilities.
-
-  In decoupled mode (DECOUPLE_GCLOUD=TRUE) cloud diagnostics may be stubbed; if so, skip wrapping.
-  """
-  # Use nullcontext when diagnostics are stubbed or in decoupled mode
-  diagnostics_context = (
-      contextlib.nullcontext()
-      if is_decoupled() or getattr(diagnostic, "__class__", None).__name__ == "_StubDiag"
-      else diagnostic.diagnose(diagnostic_config)
-  )
-
-  if is_decoupled() or getattr(diagnostic, "__class__", None).__name__ == "_StubDiag":
-    max_logging.log("[DECOUPLED NO-OP] skipping cloud diagnostics wrapper.")
-
-  with (
-      diagnostics_context,
-      max_utils.maybe_get_transformer_engine_context(config),
-  ):
+def run(config, recorder):
+  """Run the job given hyperparameters and utilities."""
+  with (max_utils.maybe_get_transformer_engine_context(config),):
     train_loop(config, recorder)
 
 
-def get_train_func(config, recorder, diagnostic_config, argv):
+def get_train_func(config, recorder, argv):
   """Returns the train function, wrapping in elastic_retry if elastic training is enabled."""
   if config.elastic_enabled:
     max_logging.log("Elastic utils: Elastic training enabled.")
@@ -843,11 +814,10 @@ def get_train_func(config, recorder, diagnostic_config, argv):
 
     def elastic_train_wrapper(argv: Sequence[str]) -> None:
       """Wrapper for elastic training initializes variables and runs the train loop."""
-      elastic_config, elastic_recorder, elastic_diagnostic_config = initialize(argv)
+      elastic_config, elastic_recorder = initialize(argv)
       run(
           elastic_config,
           elastic_recorder,
-          elastic_diagnostic_config,
       )
 
     train_func = elastic_utils.elastic_retry(
@@ -858,15 +828,15 @@ def get_train_func(config, recorder, diagnostic_config, argv):
   else:
     # Use the already initialized variables
     def train_func():
-      run(config, recorder, diagnostic_config)
+      run(config, recorder)
 
   return train_func
 
 
 def main(argv: Sequence[str]) -> None:
-  config, recorder, diagnostic_config = initialize(argv)
+  config, recorder = initialize(argv)
   record_goodput(recorder, RECORD_JOB_START_TIME)
-  train_func = get_train_func(config, recorder, diagnostic_config, argv)
+  train_func = get_train_func(config, recorder, argv)
   with maybe_monitor_goodput(config):
     train_func()
 

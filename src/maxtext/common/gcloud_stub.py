@@ -18,8 +18,6 @@ Set DECOUPLE_GCLOUD=TRUE in the environment to disable optional Google Cloud / J
 integrations while still allowing local unit tests to import modules. This module provides:
 
 - is_decoupled(): returns True if decoupled flag set.
-- cloud_diagnostics(): tuple(diagnostic, debug_configuration, diagnostic_configuration, stack_trace_configuration)
-  providing either real objects or lightweight stubs.
 - jetstream(): returns a namespace-like object exposing Engine, Devices, ResultTokens etc. or stubs.
 - gcs_storage(): returns google.cloud.storage module or stub namespace with Client/Blob/Bucket.
 - goodput_modules(): returns (goodput, monitoring, is_stub) for ml_goodput_measurement integration or stubs.
@@ -71,79 +69,6 @@ def _import_or_stub(
       print(f"{prefix} {label}: dependency missing; using stub. ({type(exc).__name__})")
       return stub_fn()
     raise
-
-
-# ---------------- Cloud Diagnostics -----------------
-
-
-def _cloud_diag_stubs():
-  """Return lightweight stubs for cloud TPU diagnostics."""
-  import contextlib  # pylint: disable=import-outside-toplevel
-
-  class _StubDiag:
-    """Stub diagnostic object returning skip metadata."""
-
-    def run(self, *_a, **_k):
-      return {"status": "skipped"}
-
-    def diagnose(self, *_a, **_k):
-      """Return a context manager that swallows diagnostic errors in stub mode."""
-
-      @contextlib.contextmanager
-      def _graceful_diagnose():
-        try:
-          yield
-        except Exception as exc:  # pylint: disable=broad-exception-caught
-          print("Warning: using stubs for cloud_diagnostics diagnose() - " f"caught: {exc}")
-
-      return _graceful_diagnose()
-
-  class _StubDebugConfig:
-    """Stub debug configuration."""
-
-    def __init__(self, *a, **k):  # pylint: disable=unused-argument
-      pass
-
-  class _StubStackTraceConfig:
-    """Stub stack trace configuration."""
-
-    def __init__(self, *a, **k):  # pylint: disable=unused-argument
-      pass
-
-  class _StubDiagnosticConfig:
-    """Stub diagnostic configuration wrapper."""
-
-    def __init__(self, *a, debug_config=None, **k):  # pylint: disable=unused-argument
-      del a, k
-      self.debug_config = debug_config
-
-  return (
-      _StubDiag(),
-      SimpleNamespace(DebugConfig=_StubDebugConfig, StackTraceConfig=_StubStackTraceConfig),
-      SimpleNamespace(DiagnosticConfig=_StubDiagnosticConfig),
-      SimpleNamespace(StackTraceConfig=_StubStackTraceConfig),
-  )
-
-
-def cloud_diagnostics():
-  """Return real cloud diagnostics modules or stubs.
-
-  If a dependency is missing and we are decoupled, return stubs. Otherwise
-  re-raise the import error so callers fail fast.
-  """
-
-  def _import():
-    from cloud_tpu_diagnostics import diagnostic  # type: ignore  # pylint: disable=import-outside-toplevel
-    from cloud_tpu_diagnostics.configuration import (  # type: ignore  # pylint: disable=import-outside-toplevel
-        debug_configuration,
-        diagnostic_configuration,
-        stack_trace_configuration,
-    )
-
-    return diagnostic, debug_configuration, diagnostic_configuration, stack_trace_configuration
-
-  # Only stub on import failures if running decoupled; otherwise fail fast.
-  return _import_or_stub(_import, _cloud_diag_stubs, label="cloud_diagnostics", stub_if_decoupled=False)
 
 
 # ---------------- JetStream -----------------
@@ -390,7 +315,7 @@ def goodput_modules():
   )
 
 
-__all__ = ["is_decoupled", "cloud_diagnostics", "jetstream", "gcs_storage", "goodput_modules"]
+__all__ = ["is_decoupled", "jetstream", "gcs_storage", "goodput_modules"]
 
 # ---------------- Cloud Monitoring (monitoring_v3 / metric_pb2) -----------------
 

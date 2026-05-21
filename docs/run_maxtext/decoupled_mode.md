@@ -54,16 +54,11 @@ Optional environment variables:
 MaxText exposes a single module `maxtext.common.gcloud_stub` to avoid scattering environment checks:
 
 ```python
-from maxtext.common.gcloud_stub import is_decoupled, cloud_diagnostics, jetstream
+from maxtext.common.gcloud_stub import is_decoupled, jetstream
 
 if is_decoupled():
     # Skip optional integrations or use local fallbacks
     pass
-
-# Cloud diagnostics (returns diagnostic, debug_configuration, diagnostic_configuration, stack_trace_configuration)
-diagnostic, debug_configuration, diagnostic_configuration, stack_trace_configuration = (
-    cloud_diagnostics()
-)
 
 # JetStream (serving) components
 config_lib, engine_api, token_utils, tokenizer_api, token_params_ns = jetstream()
@@ -78,7 +73,7 @@ Behavior when `DECOUPLE_GCLOUD=TRUE`:
 
 ## Guidelines:
 
-- Prefer calling `jetstream()` / `cloud_diagnostics()` once at module import and branching on `is_decoupled()` for functionality that truly requires the dependency.
+- Prefer calling `jetstream()` once at module import and branching on `is_decoupled()` for functionality that truly requires the dependency.
 - Use `is_decoupled()` to avoid direct `os.environ["DECOUPLE_GCLOUD"]` checking.
 - Use `get_test_config_path()` instead of hard-coded `base.yml`.
 - Prefer conditional local fallbacks for cloud buckets and avoid introducing direct `gs://...` paths.

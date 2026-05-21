@@ -899,11 +899,6 @@ muon_beta: 0.95 # Decay rate for the exponentially weighted average of grads.
 muon_weight_decay: 0 # Strength of the weight decay regularization. This is multiplied with the learning rate.
 muon_consistent_rms: None # If None, apply width scaling to updates. If float, apply consistent rms scaling (recommend 0.2).
 
-# Stack trace parameters
-collect_stack_trace: False
-stack_trace_to_cloud: False  # Uploads to cloud logging if True, else to the console if False.
-stack_trace_interval_seconds: 600  # Stack trace collection frequency in seconds.
-
 # Use iota operator in Embed
 use_iota_embed: False
 # use positional embedding
