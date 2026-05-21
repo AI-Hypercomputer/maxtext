@@ -1376,6 +1376,7 @@ class Decoder(nn.Module):
 
     return y
 
+<<<<<<< HEAD
   def _apply_gemma4_small_layers(
       self,
       y,
@@ -1470,6 +1471,8 @@ class Decoder(nn.Module):
 
     return y
 
+=======
+>>>>>>> 559dd2067 (test layer-wise override)
   def _apply_standard_scanned_blocks(self, y, broadcast_args, RemattedBlockLayer, model_mode, layer_kwargs={}):
     """Applies standard scanned decoder blocks, handling possible per-layer overrides."""
     cfg = self.config
@@ -1504,7 +1507,11 @@ class Decoder(nn.Module):
               cfg,
               RemattedBlockLayer,
               scan_length,
+<<<<<<< HEAD
               f"layers_{current_idx}_to_{next_override_idx - 1}",
+=======
+              f"layers_chunk_{current_idx}_to_{next_override_idx - 1}",
+>>>>>>> 559dd2067 (test layer-wise override)
               mesh,
               in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
               model_mode=model_mode,
@@ -1523,7 +1530,11 @@ class Decoder(nn.Module):
         layer = RemattedBlockLayer(
             config=layer_cfg,
             mesh=mesh,
+<<<<<<< HEAD
             name=f"layer_{current_idx}",
+=======
+            name=f"layers_override_{current_idx}",
+>>>>>>> 559dd2067 (test layer-wise override)
             quant=self.quant,
             model_mode=model_mode,
             **combined_kwargs,
