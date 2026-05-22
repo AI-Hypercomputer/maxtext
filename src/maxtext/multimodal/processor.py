@@ -44,7 +44,7 @@ def preprocess_mm_data(config):
 
     images = [mm_utils.load_image_from_path(p) for p in config.image_path.split(",")]
     processor_outputs = preprocess_mm_data_llama4(images)
-  elif config.model_name in ["qwen3-omni-30b-a3b"]:
+  elif config.model_name in ["qwen3-omni-30b-a3b", "qwen3.5-397b-a17b"]:
     from maxtext.multimodal.processor_qwen3_omni import preprocess_mm_data_qwen3_omni  # pylint: disable=import-outside-toplevel
 
     processor_outputs = preprocess_mm_data_qwen3_omni(config)
@@ -68,7 +68,7 @@ def preprocess_image_for_training(image, model_name):
     from maxtext.multimodal.processor_llama4 import preprocess_mm_data_llama4  # pylint: disable=import-outside-toplevel
 
     return preprocess_mm_data_llama4(image)
-  elif model_name in ["qwen3-omni-30b-a3b"]:
+  elif model_name in ["qwen3-omni-30b-a3b", "qwen3.5-397b-a17b"]:
     from maxtext.multimodal.processor_qwen3_omni import preprocess_mm_data_qwen3_omni_for_training  # pylint: disable=import-outside-toplevel
 
     return preprocess_mm_data_qwen3_omni_for_training(image)
@@ -90,7 +90,7 @@ def get_image_offsets(config, processor_output: mm_utils.PreprocessorOutput | No
     from maxtext.multimodal.processor_llama4 import get_image_offsets_llama4  # pylint: disable=import-outside-toplevel
 
     return get_image_offsets_llama4(processor_output)
-  elif config.model_name in ["qwen3-omni-30b-a3b"]:
+  elif config.model_name in ["qwen3-omni-30b-a3b", "qwen3.5-397b-a17b"]:
     from maxtext.multimodal.processor_qwen3_omni import get_mm_offsets_qwen3_omni  # pylint: disable=import-outside-toplevel
 
     return get_mm_offsets_qwen3_omni(config, processor_output)
@@ -112,7 +112,7 @@ def reformat_prompt(prompt, image_placeholder, model_name, num_images, video_pla
     from maxtext.multimodal.processor_llama4 import reformat_prompt_llama4  # pylint: disable=import-outside-toplevel
 
     return reformat_prompt_llama4(prompt, image_placeholder, num_images)
-  elif model_name in ["qwen3-omni-30b-a3b"]:
+  elif model_name in ["qwen3-omni-30b-a3b", "qwen3.5-397b-a17b"]:
     from maxtext.multimodal.processor_qwen3_omni import reformat_prompt_qwen3_omni  # pylint: disable=import-outside-toplevel
 
     return reformat_prompt_qwen3_omni(
@@ -137,7 +137,7 @@ def reformat_response(response, model_name):
   elif model_name in ["gemma4-26b", "gemma4-31b", "gemma4-e2b", "gemma4-e4b"]:
     formatted_response = f"{response}<end_of_turn>"
     return formatted_response
-  elif model_name in ["qwen3-omni-30b-a3b"]:
+  elif model_name in ["qwen3-omni-30b-a3b", "qwen3.5-397b-a17b"]:
     formatted_response = f"{response}<|im_end|>"
     return formatted_response
   else:
@@ -158,7 +158,7 @@ def prepare_text_for_image_fusion(tokens, config, processor_output=None):
     from maxtext.multimodal.processor_llama4 import add_extra_tokens_for_images_llama4  # pylint: disable=import-outside-toplevel
 
     return add_extra_tokens_for_images_llama4(tokens, processor_output)
-  elif config.model_name in ["qwen3-omni-30b-a3b"]:
+  elif config.model_name in ["qwen3-omni-30b-a3b", "qwen3.5-397b-a17b"]:
     from maxtext.multimodal.processor_qwen3_omni import add_extra_tokens_for_qwen3_omni  # pylint: disable=import-outside-toplevel
 
     return add_extra_tokens_for_qwen3_omni(tokens, config, processor_output)
@@ -181,7 +181,7 @@ def get_dummy_image_shape_for_init(model_name, batch_size=1, num_image_per_seque
     from maxtext.multimodal.processor_llama4 import get_dummy_image_shape_for_init_llama4  # pylint: disable=import-outside-toplevel
 
     image_shape = get_dummy_image_shape_for_init_llama4(batch_size, num_image_per_sequence)
-  elif model_name.startswith("qwen3-omni-30b-a3b"):
+  elif model_name.startswith("qwen3-omni-30b-a3b") or model_name.startswith("qwen3.5-397b-a17b"):
     from maxtext.multimodal.processor_qwen3_omni import get_dummy_image_shape_for_init_qwen3_omni  # pylint: disable=import-outside-toplevel
 
     image_shape = get_dummy_image_shape_for_init_qwen3_omni(batch_size)
@@ -222,7 +222,7 @@ def get_bidirectional_mask_vision(config, decoder_input_tokens):
     from maxtext.multimodal.processor_llama4 import LLAMA4_PATCH_TOKEN  # pylint: disable=import-outside-toplevel
 
     bidirectional_mask_vision = decoder_input_tokens == LLAMA4_PATCH_TOKEN
-  elif config.model_name in ["qwen3-omni-30b-a3b"]:
+  elif config.model_name in ["qwen3-omni-30b-a3b", "qwen3.5-397b-a17b"]:
     from maxtext.multimodal.processor_qwen3_omni import QWEN3_OMNI_IMAGE_TOKEN, QWEN3_OMNI_VIDEO_TOKEN  # pylint: disable=import-outside-toplevel
 
     # Create bidirectional_mask for vision/video token merging
