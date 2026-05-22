@@ -1,3 +1,5 @@
+(architecture-overview)=
+
 # Architecture overview
 
 ## The MaxText philosophy

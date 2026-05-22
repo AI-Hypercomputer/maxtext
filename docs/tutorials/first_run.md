@@ -102,4 +102,4 @@ Google Kubernetes Engine (GKE) is the recommended way to run MaxText on multiple
 
 ## Next steps: preflight optimizations
 
-After you get workloads running, there are optimizations you can apply to improve performance. For more information, see [PREFLIGHT.md](https://github.com/google/maxtext/blob/main/PREFLIGHT.md).
+After you get workloads running, there are optimizations you can apply to improve performance. For more information, see [PREFLIGHT.md](https://github.com/AI-Hypercomputer/maxtext/blob/main/PREFLIGHT.md).
