@@ -2960,8 +2960,6 @@ class MaxTextConfig(
         and (self.per_device_batch_size * self.max_target_length) % self.num_vocab_tiling != 0
     ):
       raise ValueError("Per device batch size times sequence length should be divisible by the number of vocab tiles.")
-    if self.num_vocab_tiling > 1 and self.enable_nnx:
-      raise ValueError("We currently don't support vocab tiling on NNX module.")
     if self.context_parallel_size > 1 and self.context_parallel_strategy.lower() == "ring":
       if "gpu" not in self.hardware:
         raise ValueError(
