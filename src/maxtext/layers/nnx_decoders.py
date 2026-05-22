@@ -543,14 +543,8 @@ class NNXDecoder(nnx.Module):
       out = merged_layer(y_in, **kwargs)
       return out, nnx.state(merged_layer)
 
-    # Linen FP8 ops keep amax_history in mutable Linen scope; jax.checkpoint
-    # re-traces and hits UnexpectedTracerError. Skip remat for FP8.
-    uses_linen_fp8_mutable_state = self.config.quantization in ("fp8_nanoo", "fp8_gpu")
-    if uses_linen_fp8_mutable_state:
-      out, new_state = pure_layer_fn(state, y)
-    else:
-      checkpointed_fn = jax.checkpoint(pure_layer_fn, policy=policy, prevent_cse=prevent_cse)
-      out, new_state = checkpointed_fn(state, y)
+    checkpointed_fn = jax.checkpoint(pure_layer_fn, policy=policy, prevent_cse=prevent_cse)
+    out, new_state = checkpointed_fn(state, y)
     nnx.update(layer, new_state)
 
     return out
