@@ -42,6 +42,10 @@ gcloud auth configure-docker
 docker run hello-world
 ```
 
+```{note}
+If the `docker run hello-world` command fails with a permission denied error (e.g., `dial unix /var/run/docker.sock: connect: permission denied`), please ensure you have correctly followed step 2 of the prerequisites to configure sudoless Docker. Running `sudo usermod -aG docker $USER` followed by starting a new shell session is usually required to apply the group permissions.
+```
+
 ## Installation Modes
 
 We recommend building MaxText inside a Python virtual environment using `uv` for speed and dependency management.
