@@ -109,5 +109,76 @@ class RaggedAttentionTest(unittest.TestCase):
     )
 
 
+@pytest.mark.cpu_only
+class RaggedAttentionCpuTest(unittest.TestCase):
+  """Tests for ragged attention kernel on CPU (interpret mode)."""
+
+  batch_size = 2  # Smaller size for faster CPU interpretation
+  num_kv_heads = 2
+  num_query_heads = 4
+  max_target_length = 32  # Smaller size for CPU
+  head_dim = 32  # Smaller size for CPU
+
+  dtype = jnp.float32
+
+  def test_ragged_mqa_cpu(self):
+    key = jax.random.key(0)
+    k1, k2, k3 = jax.random.split(key, 3)
+
+    q = jax.random.normal(k1, (self.batch_size, 1, self.head_dim), dtype=self.dtype)
+    k = jax.random.normal(k2, (self.batch_size, self.max_target_length, self.head_dim), dtype=self.dtype)
+    v = jax.random.normal(k3, (self.batch_size, self.max_target_length, self.head_dim), dtype=self.dtype)
+    lengths = jnp.array(np.random.randint(1, self.max_target_length, self.batch_size), dtype=jnp.int32)
+
+    ragged_out, _, _ = ragged_mqa(q, k, v, lengths, block_size=16, interpret=True)
+    reference_out, _, _ = reference_mqa(q, k, v, lengths)
+    self.assertTrue(
+        jnp.max(abs(ragged_out - reference_out)) < 1.5e-1,
+        msg=f"Max difference: {jnp.max(abs(ragged_out - reference_out))} > 1e-1",
+    )
+
+  def test_ragged_mha_cpu(self):
+    key = jax.random.key(0)
+    k1, k2, k3 = jax.random.split(key, 3)
+
+    q = jax.random.normal(k1, (self.batch_size, 1, self.num_query_heads, self.head_dim), dtype=self.dtype)
+    k = jax.random.normal(
+        k2, (self.batch_size, self.max_target_length, self.num_query_heads, self.head_dim), dtype=self.dtype
+    )
+    v = jax.random.normal(
+        k3, (self.batch_size, self.max_target_length, self.num_query_heads, self.head_dim), dtype=self.dtype
+    )
+    lengths = jnp.array(np.random.randint(1, self.max_target_length, self.batch_size), dtype=jnp.int32)
+
+    ragged_out, _, ragged_denom = ragged_mha(q, k, v, lengths, block_size=16, interpret=True)
+    ragged_out = ragged_out / ragged_denom
+    reference_out, _, _ = reference_mha(q, k, v, lengths)
+    self.assertTrue(
+        jnp.max(abs(ragged_out - reference_out)) < 1.5e-1,
+        msg=f"Max difference: {jnp.max(abs(ragged_out - reference_out))} > 1e-1",
+    )
+
+  def test_ragged_gqa_cpu(self):
+    key = jax.random.key(0)
+    k1, k2, k3 = jax.random.split(key, 3)
+
+    q = jax.random.normal(k1, (self.batch_size, 1, self.num_query_heads, self.head_dim), dtype=self.dtype)
+    k = jax.random.normal(
+        k2, (self.batch_size, self.max_target_length, self.num_kv_heads, self.head_dim), dtype=self.dtype
+    )
+    v = jax.random.normal(
+        k3, (self.batch_size, self.max_target_length, self.num_kv_heads, self.head_dim), dtype=self.dtype
+    )
+    lengths = jnp.array(np.random.randint(1, self.max_target_length, self.batch_size), dtype=jnp.int32)
+
+    ragged_out, _, ragged_denom = ragged_gqa(q, k, v, lengths, block_size=16, interpret=True)
+    ragged_out = ragged_out / ragged_denom
+    reference_out, _, _ = reference_gqa(jnp.squeeze(q), jnp.swapaxes(k, 1, 2), jnp.swapaxes(v, 1, 2), lengths)
+    self.assertTrue(
+        jnp.max(abs(ragged_out - reference_out)) < 1.5e-1,
+        msg=f"Max difference: {jnp.max(abs(ragged_out - reference_out))} > 1e-1",
+    )
+
+
 if __name__ == "__main__":
   unittest.main()
