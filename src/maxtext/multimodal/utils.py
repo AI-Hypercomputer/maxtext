@@ -16,7 +16,7 @@
 
 import os
 from dataclasses import dataclass
-from typing import Optional, Union
+from typing import Optional, Union, Any
 
 import numpy as np
 import jax
@@ -789,3 +789,86 @@ def load_audio(data_path: str, sample_rate: int = 16000) -> np.ndarray:
     return audio
   except Exception as e:
     raise RuntimeError(f"Failed to load audio from {data_path}: {e}") from e
+
+
+class BaseMultimodalProcessor:
+  """Base class for multimodal data processors.
+
+  This class defines the unified interface for all multimodal operations (e.g.,
+  image/audio preprocessing, prompt formatting, token offsets). It provides
+  default or fallback implementations when a model does not implement specific
+  features.
+
+  Why there are unused arguments:
+    Because this is a polymorphic interface used to support extremely diverse
+    architectures (e.g., vision-only vs audio-vision models), some methods must
+    declare parameters (like config) that are only needed by a subset of
+    subclasses. Subclasses safely ignore parameters they do not need.
+
+  How routing is handled:
+    The router function `get_processor(config_or_model_name)` (in `processor.py`)
+    inspects the active model name and routes calls to the registered subclass
+    instance (e.g., `Gemma3Processor`, `Qwen3OmniProcessor`) that returns True for
+    `supports_model(model_name)`.
+  """
+  # pylint: disable=unused-argument,useless-return
+
+  def __init__(self, model_name: str):
+    self.model_name = model_name
+
+  @classmethod
+  def supports_model(cls, model_name: str) -> bool:
+    """Returns True if this processor class supports the given model name."""
+    return False
+
+  def preprocess_mm_data(self, config, **kwargs) -> PreprocessorOutput:
+    """Preprocesses multimodal data based on the provided configuration."""
+    raise ValueError(f"Model {self.model_name} not supported for multimodal preprocessing.")
+
+  def preprocess_image_for_training(self, image, **kwargs) -> PreprocessorOutput:
+    """Preprocesses a single image for training."""
+    raise ValueError(f"Model {self.model_name} not supported for image preprocessing.")
+
+  def get_image_offsets(self, config, processor_output: PreprocessorOutput | None, **kwargs) -> int:
+    """Get the increase in total token count after inserting image tokens."""
+    return 0
+
+  def reformat_prompt(
+      self,
+      prompt: str,
+      image_placeholder: str,
+      num_images: int,
+      **kwargs,
+  ) -> str:
+    """Reformat prompt for different models."""
+    return prompt
+
+  def reformat_response(self, response: str, **kwargs) -> str:
+    """Reformat response for different models."""
+    return response
+
+  def prepare_text_for_image_fusion(
+      self,
+      tokens,
+      config,
+      processor_output: PreprocessorOutput | None = None,
+      **kwargs,
+  ) -> Any:
+    """Prepare text by adding extra tokens for image fusion."""
+    raise ValueError(f"Model {self.model_name} does not support multimodal inference.")
+
+  def get_dummy_image_shape_for_init(self, batch_size: int = 1, num_image_per_sequence: int = 1, **kwargs) -> tuple:
+    """Return the shape of the dummy image for model initialization."""
+    return ()
+
+  def get_dummy_audio_shape_for_init(self, config, **kwargs) -> tuple:
+    """Return the shape of the dummy audio for model initialization."""
+    return ()
+
+  def get_bidirectional_mask_vision(self, config, decoder_input_tokens, **kwargs) -> Any:
+    """Get the bidirectional mask for vision tokens."""
+    return None
+
+  def get_bidirectional_mask_audio(self, config, decoder_input_tokens, **kwargs) -> Any:
+    """Get the bidirectional mask for audio tokens."""
+    return None

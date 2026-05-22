@@ -523,3 +523,50 @@ def get_dummy_image_shape_for_init_llama4(batch_size=1, num_image_per_sequence=1
       LLAMA4_TILE_SIZE,
   )
   return image_shape
+
+
+class Llama4Processor(mm_utils.BaseMultimodalProcessor):
+  """Llama4 multimodal data processor."""
+
+  # pylint: disable=unused-argument
+
+  @classmethod
+  def supports_model(cls, model_name: str) -> bool:
+    return model_name.startswith("llama4")
+
+  def preprocess_mm_data(self, config, **kwargs) -> mm_utils.PreprocessorOutput:
+    images = [mm_utils.load_image_from_path(p) for p in config.image_path.split(",")]
+    return preprocess_mm_data_llama4(images)
+
+  def preprocess_image_for_training(self, image, **kwargs) -> mm_utils.PreprocessorOutput:
+    return preprocess_mm_data_llama4(image)
+
+  def get_image_offsets(self, config, processor_output: mm_utils.PreprocessorOutput | None, **kwargs) -> int:
+    return get_image_offsets_llama4(processor_output)
+
+  def reformat_prompt(
+      self,
+      prompt: str,
+      image_placeholder: str,
+      num_images: int,
+      **kwargs,
+  ) -> str:
+    return reformat_prompt_llama4(prompt, image_placeholder, num_images)
+
+  def reformat_response(self, response: str, **kwargs) -> str:
+    return f"{response}<|eot|>"
+
+  def prepare_text_for_image_fusion(
+      self,
+      tokens,
+      config,
+      processor_output: mm_utils.PreprocessorOutput | None = None,
+      **kwargs,
+  ):
+    return add_extra_tokens_for_images_llama4(tokens, processor_output)
+
+  def get_dummy_image_shape_for_init(self, batch_size: int = 1, num_image_per_sequence: int = 1, **kwargs) -> tuple:
+    return get_dummy_image_shape_for_init_llama4(batch_size, num_image_per_sequence)
+
+  def get_bidirectional_mask_vision(self, config, decoder_input_tokens, **kwargs):
+    return decoder_input_tokens == LLAMA4_PATCH_TOKEN
