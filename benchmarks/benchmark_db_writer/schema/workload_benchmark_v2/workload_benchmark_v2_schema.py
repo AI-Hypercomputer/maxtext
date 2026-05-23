@@ -28,6 +28,31 @@ from benchmarks.benchmark_db_writer import bigquery_types
 
 
 @dataclasses.dataclass
+class StepWithValue:
+  """Helper dataclass for repeated step-value pairs."""
+
+  step: Optional[int] = None
+  value: Optional[float] = None
+
+
+@dataclasses.dataclass
+class MetricValue:
+  """Helper dataclass for metric values in key-value pairs."""
+
+  string_value: Optional[str] = None
+  float_value: Optional[float] = None
+  int_value: Optional[int] = None
+
+
+@dataclasses.dataclass
+class MetricRecord:
+  """Helper dataclass for repeated key-value metrics."""
+
+  key: Optional[str] = None
+  value: Optional[MetricValue] = None
+
+
+@dataclasses.dataclass
 class WorkloadBenchmarkV2Schema:
   """Dataclass representing the schema for the 'run_summary' BQ table.
 
@@ -94,7 +119,7 @@ class WorkloadBenchmarkV2Schema:
   metrics_tflops_per_second: Optional[float] = None
 
   hardware_num_superblocks: Optional[str] = None
-  hardware_num_slices: Optional[int] = None
+  hardware_num_slices: Optional[str] = None
   hardware_topology: Optional[str] = None
   hardware_num_cores: Optional[int] = None
   result_error: Optional[str] = None
@@ -109,7 +134,6 @@ class WorkloadBenchmarkV2Schema:
   logs_cloud_logs: Optional[str] = None
   logs_comments: Optional[str] = None
   logs_other: Optional[str] = None
-
   checkpointing_async: Optional[bool] = None
   checkpointing_interval_every_n_steps: Optional[int] = None
   checkpointing_size_in_gibs: Optional[float] = None
@@ -132,6 +156,22 @@ class WorkloadBenchmarkV2Schema:
   source_bucket: Optional[str] = None
 
   cluster_name: Optional[str] = None
+
+  bundle_name: Optional[str] = None
+  metrics_overall_goodput: Optional[float] = None
+  bug_id: Optional[int] = None
+  storage_info: Optional[dict] = None
+  run_group: Optional[str] = None
+  logs_xprof_uri: Optional[str] = None
+  tags: Optional[str] = None
+  run_name: Optional[str] = None
+  recipe_type: Optional[str] = None
+  run_mode: Optional[int] = None
+  metrics_step_wise_training_loss: list[StepWithValue] = dataclasses.field(default_factory=list)
+  metrics_step_wise_eval_loss: list[StepWithValue] = dataclasses.field(default_factory=list)
+  metrics_step_wise_raw_grad_norm: list[StepWithValue] = dataclasses.field(default_factory=list)
+  metrics_mlperf: list[MetricRecord] = dataclasses.field(default_factory=list)
+  metrics_goodput: list[MetricRecord] = dataclasses.field(default_factory=list)
 
   reviewer_ldap: str = ""
   update_timestamp: Optional[bigquery_types.TimeStamp] = datetime.datetime.now()
