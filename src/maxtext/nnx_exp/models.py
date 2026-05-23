@@ -11,6 +11,7 @@ from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 
 from maxtext.nnx_exp.rope import apply_rope_factors, rope_factors, rope_frequencies
+from maxtext.nnx_exp.kernels import dot_product_attention, KernelBackend, KernelImplementation
 
 
 _DTYPES = {"float32": jnp.float32, "bfloat16": jnp.bfloat16, "float16": jnp.float16}
@@ -28,6 +29,8 @@ class LlamaConfig:
   rope_max_timescale: float = 500_000.0
   norm_eps: float = 1e-5
   dtype: str = "float32"
+  attention_backend: KernelBackend = "legacy"
+  attention_implementation: KernelImplementation = None
 
   def __post_init__(self):
     if self.num_heads % self.num_kv_heads != 0:
@@ -45,6 +48,8 @@ class Attention(nnx.Module):
     self.scale = config.head_dim ** -0.5
     self.rope_freq = tuple(np.asarray(rope_frequencies(config.head_dim, config.rope_max_timescale), dtype=np.float32))
     self.sharding_hook = sharding_hook or (lambda x, name: x)
+    self.backend = config.attention_backend
+    self.implementation = config.attention_implementation
 
     dt = _DTYPES[config.dtype]
     kernel_init = nnx.initializers.lecun_normal()
@@ -87,12 +92,14 @@ class Attention(nnx.Module):
       k = hook(jnp.repeat(k, self.kv_repeat, axis=-2, out_sharding=k_sharding), "key_repeated")
       v = hook(jnp.repeat(v, self.kv_repeat, axis=-2, out_sharding=v_sharding), "value_repeated")
 
-    out = jax.nn.dot_product_attention(
+    out = dot_product_attention(
       q * self.scale,
       k,
       v,
       mask=mask,
       is_causal=True,
+      backend=self.backend,
+      implementation=self.implementation,
     )
     out = checkpoint_name(hook(out, "attn_out"), "attention_out")
     out_sharding = hook.get_spec("post_attn") if hasattr(hook, "get_spec") else None

@@ -37,7 +37,7 @@ def train_step(state, tokens, positions, mask, targets):
 
 def main():
   # Simple config for prototype
-  config = LlamaConfig(dtype="bfloat16")
+  config = LlamaConfig(dtype="bfloat16", attention_backend="splash")
   
   # Mock cluster config for single-host TPU or local CPU/GPU
   cluster_cfg = {
@@ -56,7 +56,7 @@ def main():
     rngs = nnx.Rngs(42)
     
     # Generate mock data (needed for quantization tracing)
-    batch_size = 24
+    batch_size = 32
     seq_len = 2048
     
     tokens = jnp.zeros((batch_size, seq_len), dtype=jnp.int32)
