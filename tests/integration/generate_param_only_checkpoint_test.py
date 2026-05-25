@@ -62,7 +62,9 @@ def run_e2e_test_flow(hardware, model_config, attention_type="autoselected", sta
     pathways_command = ["enable_single_controller=True"]
 
   if state_path is None:
-    # Run training to get a checkpoint
+    # Run training to get a checkpoint.
+    # Append model_config so training uses the same model architecture
+    # (e.g. quantization=int8) as the generate and decode steps.
     train_main(
         get_checkpointing_command(
             run_date=run_date,
@@ -73,6 +75,7 @@ def run_e2e_test_flow(hardware, model_config, attention_type="autoselected", sta
             dataset_type="synthetic",
             dataset_path=dataset_path,
         )
+        + model_config
     )
     state_path = f"{base_output_directory}/runner_{run_date}/checkpoints/0/items"
 
