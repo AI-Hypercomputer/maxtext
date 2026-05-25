@@ -244,7 +244,11 @@ def _save_decode_checkpoint_nnx(config, state, checkpoint_manager):
   wrapper. This is the shape `from_pretrained` reads via its NNX-detection
   branch (see model_creation_utils._adjust_target_for_moe_fusion / "is_nnx_checkpoint").
   """
-  pure_model = state.model.to_pure_dict() if hasattr(state.model, "to_pure_dict") else dict(state.model)
+  if hasattr(state.model, "to_pure_dict"):
+    _, params_state, _ = nnx.split(state.model, nnx.Param, ...)
+    pure_model = params_state.to_pure_dict()
+  else:
+    pure_model = dict(state.model)
   bf16_model = jax.tree_util.tree_map(lambda x: x.astype(jnp.bfloat16), pure_model)
   if checkpoint_manager is not None:
     if checkpointing.save_checkpoint(checkpoint_manager, 0, bf16_model):
