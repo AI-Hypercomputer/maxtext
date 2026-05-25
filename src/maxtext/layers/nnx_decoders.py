@@ -984,7 +984,9 @@ class NNXDecoder(nnx.Module):
     if cfg.logits_via_embedding:
       # Use the transpose of embedding matrix for logit transform.
       if isinstance(shared_embedding, nnx.Module):
-        embedding_table = shared_embedding.embedding.value
+        # Use [...] not the deprecated .value: .value records the read in NNX's mutation
+        # tracking, which leaks a tracer out of vocab_tiling_nnx_loss's custom_vjp.
+        embedding_table = shared_embedding.embedding[...]
       else:
         embedding_table = shared_embedding.variables["params"]["embedding"]
       if isinstance(embedding_table, nn.spmd.LogicallyPartitioned):
