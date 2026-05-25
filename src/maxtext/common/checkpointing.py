@@ -194,11 +194,17 @@ def _load_full_state_from_path(
     The loaded state.
   """
 
+  # Convert nnx.State to pure dict to match how NNX checkpoints are saved
+  # (maybe_save_checkpoint calls state.to_pure_dict() before saving).
+  restore_target = abstract_unboxed_pre_state
+  if isinstance(abstract_unboxed_pre_state, nnx.State):
+    restore_target = abstract_unboxed_pre_state.to_pure_dict()
+
   if enable_orbax_v1:
     if source_checkpoint_layout == "orbax":
       context = ocp_v1.Context(checkpoint_layout=ocp_v1.options.CheckpointLayout.ORBAX)
       with context:
-        return ocp_v1.load_pytree(path, abstract_unboxed_pre_state)
+        return ocp_v1.load_pytree(path, restore_target)
     elif source_checkpoint_layout == "safetensors":
       context = ocp_v1.Context(checkpoint_layout=ocp_v1.options.CheckpointLayout.SAFETENSORS)
       with context:
@@ -226,9 +232,9 @@ def _load_full_state_from_path(
     )
     # Provide sharding info to ensure restoration returns JAX arrays (not NumPy arrays).
     restore_args = jax.tree_util.tree_map(
-        lambda x: ocp.type_handlers.ArrayRestoreArgs(sharding=x.sharding), abstract_unboxed_pre_state
+        lambda x: ocp.type_handlers.ArrayRestoreArgs(sharding=x.sharding), restore_target
     )
-    return ocp.Checkpointer(handler).restore(p, abstract_unboxed_pre_state, restore_args=restore_args)
+    return ocp.Checkpointer(handler).restore(p, restore_target, restore_args=restore_args)
 
 
 def create_orbax_checkpoint_manager(

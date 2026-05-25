@@ -386,7 +386,10 @@ def generate_decode_checkpoint(config):
   # Read training state from config.load_paramaters_path
   max_logging.log(f"Read training checkpoint from: {config.load_full_state_path}")
   training_state, training_state_annotations = _read_train_checkpoint(config, checkpoint_manager, mesh)
-  assert training_state.opt_state != {}, "missing opt_state in training checkpoint"
+  if config.pure_nnx:
+    assert training_state.optimizer.opt_state != {}, "missing opt_state in training checkpoint"
+  else:
+    assert training_state.opt_state != {}, "missing opt_state in training checkpoint"
 
   _possibly_unroll_params(config, training_state, training_state_annotations, mesh)
 

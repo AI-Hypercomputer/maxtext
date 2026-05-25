@@ -112,10 +112,11 @@ class MaxEngineTest(unittest.TestCase):
     jax.tree.map(np.testing.assert_array_equal, got_unstacked, input_d)
 
   def test_basic_prefill(self):
-    devices_array = maxtext_utils.create_device_mesh(self.cfg)
-    mesh = Mesh(devices_array, self.cfg.mesh_axes)
-    quant = quantizations.configure_quantization(self.cfg)
-    model = models.transformer_as_linen(config=self.cfg, mesh=mesh, quant=quant, model_mode=MODEL_MODE_PREFILL)
+    cfg = self.init_pyconfig(enable_nnx=False, pure_nnx=False, pure_nnx_decoder=False)
+    devices_array = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices_array, cfg.mesh_axes)
+    quant = quantizations.configure_quantization(cfg)
+    model = models.transformer_as_linen(config=cfg, mesh=mesh, quant=quant, model_mode=MODEL_MODE_PREFILL)
     ids, decoder_segment_ids, decoder_positions = self.get_data()
 
     transformer_vars = model.init(
@@ -127,7 +128,7 @@ class MaxEngineTest(unittest.TestCase):
     )
     input_tokens = jnp.array([1, 306, 5360, 304, 0, 0, 0, 0])
     true_length = 4
-    engine = maxengine.MaxEngine(self.cfg, jax.devices())
+    engine = maxengine.MaxEngine(cfg, jax.devices())
     prefill_result, first_token = engine.prefill(
         params=transformer_vars, padded_tokens=input_tokens, true_length=true_length
     )
@@ -140,10 +141,11 @@ class MaxEngineTest(unittest.TestCase):
     self.assertEqual(first_token.log_prob.shape, (1, 1))
 
   def test_basic_decode(self):
-    devices_array = maxtext_utils.create_device_mesh(self.cfg)
-    mesh = Mesh(devices_array, self.cfg.mesh_axes)
-    quant = quantizations.configure_quantization(self.cfg)
-    model = models.transformer_as_linen(config=self.cfg, mesh=mesh, quant=quant, model_mode=MODEL_MODE_PREFILL)
+    cfg = self.init_pyconfig(enable_nnx=False, pure_nnx=False, pure_nnx_decoder=False)
+    devices_array = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices_array, cfg.mesh_axes)
+    quant = quantizations.configure_quantization(cfg)
+    model = models.transformer_as_linen(config=cfg, mesh=mesh, quant=quant, model_mode=MODEL_MODE_PREFILL)
     ids, decoder_segment_ids, decoder_positions = self.get_data()
 
     transformer_vars = model.init(
@@ -154,7 +156,7 @@ class MaxEngineTest(unittest.TestCase):
         enable_dropout=False,
     )
     input_tokens = jnp.array([1, 306, 5360, 304])
-    engine = maxengine.MaxEngine(self.cfg, jax.devices())
+    engine = maxengine.MaxEngine(cfg, jax.devices())
     params = engine.load_params(params=transformer_vars)
     decode_state = engine.init_decode_state()
     prefill_result, _ = engine.prefill(params=params, padded_tokens=input_tokens, true_length=4)
