@@ -495,6 +495,47 @@ class TrainRLTest(unittest.TestCase):
     with self.assertRaisesRegex(ValueError, "optimizer_memory_host_offload=True is not supported"):
       train_rl._rl_train_impl([], {})  # pylint: disable=protected-access
 
+  @pytest.mark.cpu_only
+  def test_build_reward_fns_defaults_when_no_custom(self):
+    """With neither knob set, the built-in 3-fn stack is returned."""
+    trainer_config = SimpleNamespace(reward_functions_path="", reward_functions="")
+    reward_fns = train_rl.build_reward_fns(trainer_config, make_reward_fn=lambda fn: fn)
+    self.assertEqual(
+        reward_fns,
+        [
+            train_rl.utils_rl.match_format_exactly,
+            train_rl.utils_rl.match_format_approximately,
+            train_rl.utils_rl.check_numbers,
+        ],
+    )
+
+  @pytest.mark.cpu_only
+  def test_build_reward_fns_custom_replaces_builtins(self):
+    """When both knobs are set, the stack is the user-provided functions only."""
+    trainer_config = SimpleNamespace(
+        reward_functions_path="/tmp/my_rewards.py",
+        reward_functions="reward_a, reward_b",
+    )
+    loaded = {"reward_a": object(), "reward_b": object()}
+    with mock.patch.object(
+        train_rl.utils_rl, "load_custom_callable", side_effect=lambda path, name: loaded[name]
+    ) as mock_load:
+      reward_fns = train_rl.build_reward_fns(trainer_config, make_reward_fn=lambda fn: fn)
+    self.assertEqual(reward_fns, [loaded["reward_a"], loaded["reward_b"]])
+    mock_load.assert_has_calls(
+        [
+            mock.call("/tmp/my_rewards.py", "reward_a"),
+            mock.call("/tmp/my_rewards.py", "reward_b"),
+        ]
+    )
+
+  @pytest.mark.cpu_only
+  def test_build_reward_fns_partial_config_falls_back(self):
+    """If only one of the two knobs is set, the built-in stack is used."""
+    trainer_config = SimpleNamespace(reward_functions_path="/tmp/my_rewards.py", reward_functions="")
+    reward_fns = train_rl.build_reward_fns(trainer_config, make_reward_fn=lambda fn: fn)
+    self.assertEqual(len(reward_fns), 3)
+
 
 if __name__ == "__main__":
   unittest.main()
