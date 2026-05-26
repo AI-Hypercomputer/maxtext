@@ -226,6 +226,8 @@ ModelName = Literal[
     "deepseek3-test",
     "deepseek3-tiny",
     "deepseek3.2-671b",
+    "deepseek_v4-tiny",
+    "deepseek_v4-flash",
     "deepseek-custom",
     "kimi-k2-1t",
     "gemma-7b",
@@ -831,6 +833,10 @@ class DeepSeekMoE(BaseModel):
       1,
       description="Factor by which to split the batch into micro-batches. Only used if use_batch_split_schedule is True.",
   )
+  num_hash_layers: int = Field(
+      3,
+      description="Number of initial MoE layers to apply static Hash Routing.",
+  )
 
 
 class Qwen3Next(BaseModel):
@@ -1381,6 +1387,7 @@ class ManifoldConstrainedHyperConnections(BaseModel):
 
   mhc_expansion_rate: PositiveInt = Field(1, description="The number of parallel streams in Hyper Connection.")
   sinkhorn_iterations: PositiveInt = Field(20, description="The number of iterations for the Sinkhorn-Knopp algorithm.")
+  hc_eps: float = Field(1e-6, description="The epsilon fallback value for numerical stability in mHC.")
 
 
 class DilocoParams(BaseModel):
