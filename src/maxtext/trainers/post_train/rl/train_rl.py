@@ -620,6 +620,7 @@ def create_rl_components(
         beta=trainer_config.rl.grpo_beta,
         epsilon=trainer_config.rl.grpo_epsilon,
         loss_algo=trainer_config.rl.loss_algo,
+        loss_agg_mode=trainer_config.rl.loss_agg_mode,
     )
     rl_trainer = GrpoLearner(
         rl_cluster=rl_cluster,

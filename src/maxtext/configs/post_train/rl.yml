@@ -54,6 +54,12 @@ rl:
   grpo_epsilon: 0.2
   loss_algo: 'grpo' # grpo or gspo-token
 
+  # Loss aggregation mode passed to tunix's GrpoConfig. tunix defaults to
+  # 'sequence-mean-token-mean'; set 'token-mean' for parity with GPU NeMo-RL
+  # stacks that use token-mean aggregation. With group-normalized advantages
+  # the two modes produce materially different losses.
+  loss_agg_mode: 'sequence-mean-token-mean'  # 'token-mean' | 'sequence-mean' | 'sequence-mean-token-mean'
+
   # ====== Agentic Rollout ======
   # If True, uses the async AgenticGRPOLearner, which overlaps rollout generation
   # with training for faster throughput via online vLLM inference.

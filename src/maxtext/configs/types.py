@@ -2000,6 +2000,16 @@ class RL(BaseModel):
   grpo_beta: float = Field(0.08, description="Coefficient for the KL divergence penalty (β).")
   grpo_epsilon: float = Field(0.2, description="Epsilon value for clipping in the GRPO loss.")
   loss_algo: Literal["grpo", "gspo-token"] = Field("grpo", description="Loss algorithm, i.e., 'grpo' or 'gspo-token'.")
+  loss_agg_mode: Literal["token-mean", "sequence-mean", "sequence-mean-token-mean"] = Field(
+      "sequence-mean-token-mean",
+      description=(
+          "Loss aggregation mode passed to tunix's GrpoConfig. tunix defaults"
+          " to 'sequence-mean-token-mean'; set 'token-mean' for parity with"
+          " GPU NeMo-RL stacks that use token-mean aggregation. With"
+          " group-normalized advantages the two modes produce materially"
+          " different losses."
+      ),
+  )
   use_agentic_rollout: bool = Field(
       False,
       description="If True, uses the asynchronous AgenticGRPOLearner for online vLLM rollouts.",
