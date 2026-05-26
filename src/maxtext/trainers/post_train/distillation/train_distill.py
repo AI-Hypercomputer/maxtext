@@ -733,39 +733,6 @@ def train_distill(
     )
     trainer.is_managed_externally = True
     trainer._has_aux = True  # pylint: disable=protected-access
-
-    # 4. Data Iterators (Init BEFORE Trainer pipeline setup)
-    # We use MaxText's native create_data_iterator which creates both train and eval iterators
-    # if is_offline:
-    #   max_logging.log(f"Loading Offline Dataset from {offline_data_dir}...")
-      
-    #   target_global_batch_size = student_config.per_device_batch_size * jax.device_count()
-      
-    #   raw_train_iter = distillation_utils.OfflineArrayRecordIterator(
-    #       offline_data_dir, 
-    #       global_batch_size=target_global_batch_size,
-    #       mesh=mesh,
-    #       data_sharding=student_config.data_sharding
-    #   )
-    #   raw_eval_iter = None
-    # else:
-    #   max_logging.log("Initializing Data Iterators via MaxText pipeline...")
-    #   raw_train_iter, raw_eval_iter = input_pipeline_interface.create_data_iterator(student_config, mesh)
-    
-    # if is_offline:
-    #   max_logging.log(f"Initializing Data Iterators via MaxText pipeline...")
-      
-    #   # 1. Point Grain to your offline files instead of the raw text dataset
-    #   if not offline_data_dir.endswith(".array_record"):
-    #       student_config.grain_train_files = os.path.join(offline_data_dir, "*.array_record")
-    #   else:
-    #       student_config.grain_train_files = offline_data_dir
-          
-    #   # 2. Tell the trainer not to look for an offline eval set
-    #   student_config.eval_interval = 0
-      
-    #   # 3. Tell the Grain parser to keep our custom top_k keys
-    #   student_config.get_keys()["is_offline_distillation"] = True 
     
     if is_offline:
       max_logging.log(f"Initializing Data Iterators via MaxText pipeline...")
