@@ -28,7 +28,6 @@ from typing import Any, Callable
 import drjax
 from flax import nnx
 from flax import struct
-from flax.training import train_state
 import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Int32, Key, PyTree, UInt32

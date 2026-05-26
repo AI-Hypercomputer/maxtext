@@ -895,7 +895,7 @@ def extract_nnx_weights(weights_dict: dict) -> dict[str, np.ndarray]:
         path_keys.append(val_str)
 
     # Skip NNX RNG state variables (not model weights)
-    if "to_nnx__rngs" in path_keys or any(k.endswith("_rngs") for k in path_keys):
+    if "to_nnx__rngs" in path_keys or any(k == "rngs" or k.endswith("_rngs") for k in path_keys):
       continue
     # Skip if this is the "value" key itself - we want the parent path
     if path_keys[-1] == "value":
