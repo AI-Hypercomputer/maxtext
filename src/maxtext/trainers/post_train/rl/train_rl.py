@@ -693,6 +693,10 @@ def _rl_train_impl(argv: Sequence[str], kwargs: dict):
     max_logging.log("Capturing reference model state before training.")
     ref_state_before = nnx.to_pure_dict(nnx.state(reference_model.base, nnx.Param))
 
+  # Wire intermediate eval: fire greedy `evaluate(...)` every `eval_interval`
+  # outer steps. No-op when eval_interval <= 0 or num_test_batches <= 0.
+  utils_rl.install_training_hooks(rl_cluster, trainer_config, test_dataset)
+
   max_logging.warning("Starting RL training...")
   rl_trainer.train(train_dataset)
 

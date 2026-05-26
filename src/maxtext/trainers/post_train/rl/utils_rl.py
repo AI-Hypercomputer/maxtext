@@ -760,3 +760,43 @@ class MaxTextChatParser(agentic_chat_template_parser.DefaultChatTemplateParser):
     return super().parse(
         messages=formatted_messages, add_generation_prompt=add_generation_prompt, is_first_msg=is_first_msg
     )
+
+
+def install_training_hooks(
+    rl_cluster: Any,
+    trainer_config: Any,
+    test_dataset: Any,
+) -> None:
+  """Install maxtext's `RLTrainingHooks` on the actor trainer.
+
+  No-op if `eval_interval <= 0` or `num_test_batches <= 0` or tunix's hooks
+  module is unavailable.
+  """
+  if trainer_config.num_test_batches <= 0:
+    return
+  eval_interval = int(getattr(trainer_config, "eval_interval", 0))
+  if eval_interval <= 0:
+    return
+  try:
+    # `hooks` hard-imports `tunix.sft.hooks`. If that's missing (stock-only
+    # tunix without the SFT hooks API), the import below raises and we
+    # soft-skip rather than crash the launcher.
+    from maxtext.trainers.post_train.rl.hooks import RLTrainingHooks  # pylint: disable=import-outside-toplevel
+  except ImportError:
+    max_logging.warning("[intermediate-eval] tunix.sft.hooks not importable; skipping hook install.")
+    return
+
+  # PeftTrainer composes a single training_hooks; install if free, else warn.
+  try:
+    actor = rl_cluster.actor_trainer
+    if getattr(actor, "training_hooks", None) is None:
+      actor.training_hooks = RLTrainingHooks(rl_cluster, trainer_config, test_dataset, eval_interval)
+      max_logging.warning(
+          f"[intermediate-eval] hook installed: evaluate(...) will fire every {eval_interval} outer steps."
+      )
+    else:
+      max_logging.warning(
+          "[intermediate-eval] actor.training_hooks already set; skipping install (chain manually if you need both)."
+      )
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    max_logging.warning(f"[intermediate-eval] install failed: {e!r}")
