@@ -395,6 +395,108 @@ def prepare_datasets(
   return train_dataset, test_dataset
 
 
+def _install_intermediate_eval_hook(
+    rl_cluster: Any,
+    trainer_config: Any,
+    test_dataset: Any,
+) -> None:
+  """Fire `evaluate(...)` every `eval_interval` outer steps during training.
+
+  tunix's `eval_every_n_steps` in `RLTrainingConfig` is silently dead unless
+  an `eval_ds` is passed to `trainer.train()`, and even then tunix's default
+  `_run_eval` re-runs the full GRPO rollout (`num_generations` sampled per
+  prompt), which is ~3hr/eval and impractical for trajectory monitoring.
+
+  This hook subclasses `tunix.sft.hooks.TrainingHooks` and at every
+  `eval_interval` outer step (matched against `rl_cluster.global_steps`)
+  calls maxtext's `evaluate(...)` — greedy decode + the configured scoring
+  pipeline — and logs the result. Gives matched-step PRE/INTERMEDIATE/POST
+  curves without any change to tunix.
+
+  No-op if `eval_interval <= 0` or `num_test_batches <= 0` or tunix's hooks
+  module is unavailable.
+  """
+  if trainer_config.num_test_batches <= 0:
+    return
+  eval_interval = int(getattr(trainer_config, "eval_interval", 0))
+  if eval_interval <= 0:
+    return
+  try:
+    from tunix.sft import hooks as _hk
+  except ImportError:
+    max_logging.warning(
+        "[intermediate-eval] tunix.sft.hooks not importable; skipping hook"
+        " install."
+    )
+    return
+
+  state: dict = {"last_step_evaluated": -1}
+
+  class _IntermediateEvalHook(_hk.TrainingHooks):  # type: ignore[name-defined]
+    """Fires `evaluate(...)` every `eval_interval` outer steps."""
+
+    def on_train_start(self, train_ctx):  # noqa: ARG002
+      del train_ctx
+
+    def on_train_end(self, train_ctx):  # noqa: ARG002
+      del train_ctx
+
+    def on_train_step_start(self, train_ctx):  # noqa: ARG002
+      del train_ctx
+
+    def on_eval_step_start(self, train_ctx):  # noqa: ARG002
+      del train_ctx
+
+    def on_eval_step_end(self, train_ctx, *args, **kwargs):  # noqa: ARG002
+      del train_ctx, args, kwargs
+
+    def on_train_step_end(self, trainer, step, loss):  # noqa: ARG002
+      del trainer, loss
+      try:
+        outer_step = int(rl_cluster.global_steps)
+      except Exception:  # pylint: disable=broad-exception-caught
+        outer_step = int(step) if step is not None else -1
+      if outer_step <= 0 or outer_step == state["last_step_evaluated"]:
+        return
+      if outer_step % eval_interval != 0:
+        return
+      state["last_step_evaluated"] = outer_step
+      try:
+        (corr, total, accuracy, partial_accuracy, format_accuracy), _ = evaluate(
+            trainer_config,
+            test_dataset,
+            rl_cluster=rl_cluster,
+            num_passes=trainer_config.num_eval_passes,
+            corr_lst=trainer_config.eval_corr_lst,
+            make_lst=trainer_config.eval_make_lst,
+        )
+        max_logging.warning(
+            f"Intermediate Eval (step={outer_step}): {corr=}, {total=},"
+            f" {accuracy=}%, {partial_accuracy=}%, {format_accuracy=}%"
+        )
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        max_logging.warning(
+            f"[intermediate-eval] step={outer_step} failed: {e!r}"
+        )
+
+  # PeftTrainer composes a single training_hooks; install if free, else warn.
+  try:
+    actor = rl_cluster.actor_trainer
+    if getattr(actor, "training_hooks", None) is None:
+      actor.training_hooks = _IntermediateEvalHook()
+      max_logging.warning(
+          "[intermediate-eval] hook installed: evaluate(...) will fire every"
+          f" {eval_interval} outer steps."
+      )
+    else:
+      max_logging.warning(
+          "[intermediate-eval] actor.training_hooks already set; skipping"
+          " install (chain manually if you need both)."
+      )
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    max_logging.warning(f"[intermediate-eval] install failed: {e!r}")
+
+
 def create_rl_components(
     trainer_config,
     sampler_config,
@@ -750,6 +852,10 @@ def _rl_train_impl(argv: Sequence[str], kwargs: dict):
   if trainer_config.load_checkpoint_only_once:
     max_logging.log("Capturing reference model state before training.")
     ref_state_before = nnx.to_pure_dict(nnx.state(reference_model.base, nnx.Param))
+
+  # Wire intermediate eval: fire greedy `evaluate(...)` every `eval_interval`
+  # outer steps. No-op when eval_interval <= 0 or num_test_batches <= 0.
+  _install_intermediate_eval_hook(rl_cluster, trainer_config, test_dataset)
 
   max_logging.warning("Starting RL training...")
   rl_trainer.train(train_dataset)
