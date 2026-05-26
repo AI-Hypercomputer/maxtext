@@ -2039,6 +2039,7 @@ class RLDataset(BaseModel):
   batch_size: int = Field(1, description="Global batch size for the dataset loader in RL.")
   num_batches: int = Field(4, description="Number of batches for RL training.")
   num_test_batches: int = Field(5, description="Number of batches for RL evaluation.")
+  eval_batch_size: int = Field(-1, description="Batch size for RL evaluation.")
   test_batch_start_index: int = Field(0, description="Start index for the test dataset")
   train_fraction: float = Field(1.0, description="Fraction of the dataset to be used for training.")
   train_micro_batch_size: int = Field(-1, description="Micro batch size for training.")

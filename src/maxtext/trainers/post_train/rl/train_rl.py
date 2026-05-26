@@ -342,11 +342,23 @@ def prepare_datasets(
   train_dataset = train_dataset.to_iter_dataset().batch(trainer_config.batch_size)
 
   if trainer_config.num_test_batches > 0:
+    # eval_batch_size = -1 (default) → use trainer_config.batch_size (legacy
+    # behavior). Otherwise use the override so vLLM rollout during greedy eval
+    # can pack more prompts per call — important when training batch_size is
+    # small (e.g. 4 for GRPO) but the sampler has enough DP replicas to absorb
+    # a much larger eval batch. Total eval examples = num_test_batches *
+    # eval_batch_size_for_eval; adjust num_test_batches when changing
+    # eval_batch_size to keep total eval set size constant.
+    eval_batch_size_for_eval = (
+        trainer_config.batch_size
+        if getattr(trainer_config, "eval_batch_size", -1) <= 0
+        else trainer_config.eval_batch_size
+    )
     test_dataset = test_dataset.filter(_filter_long_prompts)
     test_dataset = test_dataset[
-        trainer_config.test_batch_start_index : trainer_config.num_test_batches * trainer_config.batch_size
+        trainer_config.test_batch_start_index : trainer_config.num_test_batches * eval_batch_size_for_eval
     ]
-    test_dataset = test_dataset.to_iter_dataset().batch(trainer_config.batch_size)
+    test_dataset = test_dataset.to_iter_dataset().batch(eval_batch_size_for_eval)
 
   return train_dataset, test_dataset
 
