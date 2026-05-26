@@ -23,6 +23,7 @@ from maxtext.layers.embeddings import DeepSeekV4RotaryEmbedding, apply_rotary_po
 from maxtext.layers.normalizations import DeepSeekV4RMSNorm, DeepSeekV4UnweightedRMSNorm
 from maxtext.layers.linears import DeepSeekGroupedLinear
 from maxtext.layers.attention_op import AttentionOp
+from maxtext.layers.attention_mla import BaseIndexer
 from maxtext.common.common_types import MODEL_MODE_TRAIN, AttentionType
 
 
@@ -229,7 +230,7 @@ class HCACompressor(nnx.Module):
     return compressed_kv, block_bias
 
 
-class DeepSeekV4Indexer(nnx.Module):
+class DeepSeekV4Indexer(BaseIndexer):
   """Lightning Indexer (paper §2.3.1, eqs. 13–17).
 
   Used by Compressed Sparse Attention (CSA) to pick the top-k compressed KV
@@ -260,15 +261,14 @@ class DeepSeekV4Indexer(nnx.Module):
       dtype: The mathematical execution numerical data type.
       rngs: The Flax NNX random number generator collection.
     """
-    super().__init__()
+    super().__init__(
+        config=config,
+        kernel_init=jax.nn.initializers.lecun_normal(),
+        weights_proj_in_features=hidden_size,
+        weights_proj_dtype=dtype,
+        rngs=rngs,
+    )
     self.compress_rate = config.compress_ratios[layer_idx]
-    self.num_heads = config.index_n_heads
-    self.head_dim = config.index_head_dim
-    self.index_topk = config.index_topk
-    self.softmax_scale = config.index_head_dim**-0.5
-    self.weights_scaling = config.index_n_heads**-0.5
-    self.dtype = dtype
-    self.weight_dtype = weight_dtype
     rope_theta = config.compress_rope_theta
 
     # Key projections for indexing-scale compression
@@ -308,32 +308,16 @@ class DeepSeekV4Indexer(nnx.Module):
         weight_dtype=weight_dtype,
     )
 
-    # Query projection mapping Q LoRA rank to multi-head indexing features
-    self.q_b_proj = nnx.Linear(
-        in_features=q_lora_rank,
-        out_features=self.num_heads * self.head_dim,
-        use_bias=False,
-        dtype=dtype,
-        param_dtype=weight_dtype,
-        rngs=rngs,
-    )
-
-    # Dynamic score scaling projection
-    self.weights_proj = nnx.Linear(
-        in_features=hidden_size,
-        out_features=self.num_heads,
-        use_bias=False,
-        dtype=dtype,
-        param_dtype=weight_dtype,
-        rngs=rngs,
-    )
-
     # Interleaved rotary embedding aligning query/key pos representations
     self.rotary_emb = DeepSeekV4RotaryEmbedding(
         head_dim=self.head_dim,
         partial_rotary_factor=config.qk_rope_head_dim / self.head_dim,
         rope_theta=rope_theta,
     )
+
+  def apply_partial_rope(self, inputs: jnp.ndarray, inputs_positions: jnp.ndarray) -> jnp.ndarray:
+    cos, sin = self.rotary_emb(inputs, inputs_positions)
+    return apply_rotary_pos_emb(inputs, cos, sin, unsqueeze_dim=2)
 
   def __call__(
       self,
@@ -444,61 +428,32 @@ class DeepSeekV4Indexer(nnx.Module):
 
     # Project and reshape queries to multiple head alignments
     # q: [B, S, H, D_idx]
-    q = self.q_b_proj(q_residual)
-    q = q.reshape(batch, seq_len, self.num_heads, self.head_dim)
-
-    # Compute rotary components matching current query positions
-    # cos_q: [B, S, D_idx_rope/2]
-    # sin_q: [B, S, D_idx_rope/2]
-    cos_q, sin_q = self.rotary_emb(hidden_states, position_ids)
-    # Apply RoPE to query elements
-    # q: [B, S, H, D_idx]
-    q = apply_rotary_pos_emb(q, cos_q, sin_q, unsqueeze_dim=2)
+    q = self.prepare_query(q_residual, position_ids, self.apply_partial_rope)
 
     # Calculate attention alignment scores across windows
     # swaped_kv: [B, 1, D_idx, W]
     swaped_kv = jnp.swapaxes(compressed_kv, -1, -2)
     swaped_kv = jnp.expand_dims(swaped_kv, axis=1)
-    # scores: [B, S, H, W]
-    scores = jnp.matmul(q, swaped_kv)
-    scores = jax.nn.relu(scores) * self.softmax_scale
 
-    # Project and scale dynamic aggregation scoring weights
-    # weights: [B, S, H]
-    weights = self.weights_proj(hidden_states) * self.weights_scaling
-    # Aggregate scoring profiles over heads axis
-    # index_scores: [B, S, W]
-    index_scores = jnp.sum(scores * jnp.expand_dims(weights, axis=-1), axis=2)
-
-    # Extract top-k scoring compressed blocks per query sequence position
-    # topk_indices: [B, S, k]
     compressed_len = compressed_kv.shape[1]
-    topk_limit = min(self.index_topk, compressed_len)
+    
+    # Generate causal mask for compressed blocks
+    mask = None
+    if compressed_len > 0:
+      causal_threshold = (position_ids + 1) // self.compress_rate
+      entry_indices = jnp.arange(compressed_len, dtype=jnp.int32)
+      future_mask = entry_indices[jnp.newaxis, jnp.newaxis, :] >= causal_threshold[:, :, jnp.newaxis]
+      mask = jnp.where(future_mask, -jnp.inf, 0.0)
+
+    # Execute shared compute_topk
+    topk_indices, _ = self.compute_topk(q, swaped_kv, hidden_states, mask=mask)
 
     if compressed_len > 0:
-      # Compute sequence-level causal ready block counts.
-      # causal_threshold: [B, S]
+      # Fix sentinels that were invalidated by threshold logic in block masking
       causal_threshold = (position_ids + 1) // self.compress_rate
-      # entry_indices: [W]
-      entry_indices = jnp.arange(compressed_len, dtype=jnp.int32)
-      # Construct query-specific causal mask along compressed index dimension.
-      # future_mask: [B, S, W]
-      future_mask = entry_indices[jnp.newaxis, jnp.newaxis, :] >= causal_threshold[:, :, jnp.newaxis]
-      # Zero-out future block scores by masking them with -inf prior to top-k calculations.
-      # index_scores: [B, S, W]
-      index_scores = jnp.where(future_mask, -jnp.inf, index_scores)
-      # Select top-k indices per token position based on masked scores.
-      # topk_indices: [B, S, k]
-      _, topk_indices = jax.lax.top_k(index_scores, topk_limit)
-      # Early tokens with too few ready blocks will still have invalid top-k selections pointing
-      # to future blocks. Detect them and replace with a `-1` sentinel.
-      # invalid: [B, S, k]
       invalid = topk_indices >= causal_threshold[:, :, jnp.newaxis]
       topk_indices = jnp.where(invalid, -1, topk_indices)
-      return topk_indices
 
-    # Fallback stateless default top-k select path
-    _, topk_indices = jax.lax.top_k(index_scores, topk_limit)
     return topk_indices
 
 

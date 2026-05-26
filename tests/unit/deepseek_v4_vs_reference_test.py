@@ -1445,7 +1445,7 @@ class DeepSeekV4ParityTest(unittest.TestCase):
     jax_model.gate_proj.kernel[...] = jnp.array(torch_model.gate_proj.weight.detach().numpy().T)
     jax_model.position_bias[...] = jnp.array(torch_model.position_bias.detach().numpy())
     jax_model.kv_norm.weight[...] = jnp.array(torch_model.kv_norm.weight.detach().numpy())
-    jax_model.q_b_proj.kernel[...] = jnp.array(torch_model.q_b_proj.weight.detach().numpy().T)
+    jax_model.wq_b.kernel[...] = jnp.array(torch_model.q_b_proj.weight.detach().numpy().T)
     jax_model.weights_proj.kernel[...] = jnp.array(torch_model.weights_proj.weight.detach().numpy().T)
 
     # Execute models
@@ -1535,7 +1535,7 @@ class DeepSeekV4ParityTest(unittest.TestCase):
     jax_model.indexer.gate_proj.kernel[...] = jnp.array(torch_model.indexer.gate_proj.weight.detach().numpy().T)
     jax_model.indexer.position_bias[...] = jnp.array(torch_model.indexer.position_bias.detach().numpy())
     jax_model.indexer.kv_norm.weight[...] = jnp.array(torch_model.indexer.kv_norm.weight.detach().numpy())
-    jax_model.indexer.q_b_proj.kernel[...] = jnp.array(torch_model.indexer.q_b_proj.weight.detach().numpy().T)
+    jax_model.indexer.wq_b.kernel[...] = jnp.array(torch_model.indexer.q_b_proj.weight.detach().numpy().T)
     jax_model.indexer.weights_proj.kernel[...] = jnp.array(torch_model.indexer.weights_proj.weight.detach().numpy().T)
 
     # Execute
