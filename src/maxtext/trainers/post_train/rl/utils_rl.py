@@ -779,8 +779,13 @@ def install_training_hooks(
     rl_cluster: Any,
     trainer_config: Any,
     test_dataset: Any,
+    reward_fns: Optional[list[Callable[..., Any]]] = None,
 ) -> None:
   """Install maxtext's `RLTrainingHooks` on the actor trainer.
+
+  When `reward_fns` is provided, intermediate eval logs the per-example
+  `mean_reward` alongside the correctness metrics, mirroring the training-time
+  reward stack.
 
   No-op if `eval_interval <= 0` or `num_test_batches <= 0` or tunix's hooks
   module is unavailable.
@@ -803,7 +808,7 @@ def install_training_hooks(
   try:
     actor = rl_cluster.actor_trainer
     if getattr(actor, "training_hooks", None) is None:
-      actor.training_hooks = RLTrainingHooks(rl_cluster, trainer_config, test_dataset, eval_interval)
+      actor.training_hooks = RLTrainingHooks(rl_cluster, trainer_config, test_dataset, eval_interval, reward_fns)
       max_logging.warning(
           f"[intermediate-eval] hook installed: evaluate(...) will fire every {eval_interval} outer steps."
       )

@@ -14,6 +14,8 @@
 
 """Unit tests for evaluate_rl.py (CPU-only)."""
 
+# pylint: disable=protected-access
+
 import unittest
 import pytest
 from types import SimpleNamespace
@@ -206,6 +208,97 @@ class TestScoreResponses(unittest.TestCase):
     self.assertAlmostEqual(is_correct, 1.0)
     self.assertAlmostEqual(is_partially_correct, 1.0)
     self.assertAlmostEqual(has_correct_format, 1.0)
+
+
+class TestComputeRowReward(unittest.TestCase):
+  """Tests for _compute_row_reward (per-prompt eval-time reward aggregation)."""
+
+  def _two_fns(self):
+    """Return two reward functions whose per-response scores can be summed."""
+
+    # Each fn must accept prompts, completions, answer as keyword args and
+    # return a list of per-completion scores. The helper calls fn once per
+    # response with single-element lists, so the returned list has length 1.
+    def fn1(prompts, completions, answer):  # pylint: disable=unused-argument
+      return [1.0 for _ in completions]
+
+    def fn2(prompts, completions, answer):  # pylint: disable=unused-argument
+      return [float(len(c)) for c in completions]
+
+    return [fn1, fn2]
+
+  @pytest.mark.cpu_only
+  def test_single_response_single_fn(self):
+    def fn(prompts, completions, answer):  # pylint: disable=unused-argument
+      return [2.5 for _ in completions]
+
+    score_sum, count = evaluate_rl._compute_row_reward(
+        reward_fns=[fn],
+        prompt="p",
+        responses=["abc"],
+        answer="gold",
+        row_idx=0,
+    )
+    self.assertAlmostEqual(score_sum, 2.5)
+    self.assertEqual(count, 1)
+
+  @pytest.mark.cpu_only
+  def test_sums_across_reward_fns_for_single_response(self):
+    score_sum, count = evaluate_rl._compute_row_reward(
+        reward_fns=self._two_fns(),
+        prompt="p",
+        responses=["abcd"],
+        answer="gold",
+        row_idx=0,
+    )
+    # fn1 = 1.0, fn2 = len("abcd") = 4.0  ->  per-pass score = 5.0
+    self.assertAlmostEqual(score_sum, 5.0)
+    self.assertEqual(count, 1)
+
+  @pytest.mark.cpu_only
+  def test_sums_across_passes_for_multiple_responses(self):
+    """Multi-pass: helper must aggregate across ALL sampled responses, not just [0]."""
+    score_sum, count = evaluate_rl._compute_row_reward(
+        reward_fns=self._two_fns(),
+        prompt="p",
+        responses=["a", "bcd", "ef"],
+        answer="gold",
+        row_idx=0,
+    )
+    # Per pass: pass0 = 1 + 1 = 2,  pass1 = 1 + 3 = 4,  pass2 = 1 + 2 = 3
+    # Sum across 3 passes = 9, count = 3
+    self.assertAlmostEqual(score_sum, 9.0)
+    self.assertEqual(count, 3)
+
+  @pytest.mark.cpu_only
+  def test_empty_responses_returns_zero_and_zero_count(self):
+    """An empty responses list must contribute nothing to the running mean."""
+    score_sum, count = evaluate_rl._compute_row_reward(
+        reward_fns=self._two_fns(),
+        prompt="p",
+        responses=[],
+        answer="gold",
+        row_idx=0,
+    )
+    self.assertEqual(score_sum, 0.0)
+    self.assertEqual(count, 0)
+
+  @pytest.mark.cpu_only
+  def test_exception_in_reward_fn_swallowed_and_returns_zero_count(self):
+    """A raising reward_fn must not propagate and must not corrupt the mean denominator."""
+
+    def _boom(**kwargs):  # pylint: disable=unused-argument
+      raise RuntimeError("reward failure")
+
+    score_sum, count = evaluate_rl._compute_row_reward(
+        reward_fns=[_boom],
+        prompt="p",
+        responses=["abc"],
+        answer="gold",
+        row_idx=0,
+    )
+    self.assertEqual(score_sum, 0.0)
+    self.assertEqual(count, 0)  # zero count so the caller's mean isn't biased
 
 
 if __name__ == "__main__":

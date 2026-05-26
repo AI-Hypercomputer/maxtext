@@ -14,7 +14,7 @@
 
 """Training hooks for post-train RL."""
 
-from typing import Any
+from typing import Any, Callable, Optional
 
 from tunix.sft import hooks as _tunix_hooks
 
@@ -33,7 +33,8 @@ class RLTrainingHooks(_tunix_hooks.TrainingHooks):
 
   This hook hooks `on_train_step_end`, checks
   `rl_cluster.global_steps % eval_interval`, and calls maxtext's
-  `evaluate(...)` — greedy decode + the configured scoring pipeline —
+  `evaluate(...)` (using whichever `eval_sampling_strategy` is configured
+  in `generation_configs`) plus the configured scoring pipeline,
   logging the result. Gives matched-step PRE/INTERMEDIATE/POST curves
   without any change to tunix.
   """
@@ -44,11 +45,13 @@ class RLTrainingHooks(_tunix_hooks.TrainingHooks):
       trainer_config: Any,
       test_dataset: Any,
       eval_interval: int,
+      reward_fns: Optional[list[Callable[..., Any]]] = None,
   ):
     self._rl_cluster = rl_cluster
     self._trainer_config = trainer_config
     self._test_dataset = test_dataset
     self._eval_interval = eval_interval
+    self._reward_fns = reward_fns
     self._last_step_evaluated = -1
 
   # The five lifecycle methods below are abstract in `tunix.sft.hooks.TrainingHooks`,
@@ -83,17 +86,19 @@ class RLTrainingHooks(_tunix_hooks.TrainingHooks):
     self._last_step_evaluated = outer_step
     try:
       tc = self._trainer_config
-      (corr, total, accuracy, partial_accuracy, format_accuracy), _ = evaluate(
+      (corr, total, accuracy, partial_accuracy, format_accuracy, mean_reward), _ = evaluate(
           tc,
           self._test_dataset,
           rl_cluster=self._rl_cluster,
           num_passes=tc.num_eval_passes,
           corr_lst=tc.eval_corr_lst,
           make_lst=tc.eval_make_lst,
+          reward_fns=self._reward_fns,
       )
       max_logging.warning(
           f"Intermediate Eval (step={outer_step}): {corr=}, {total=},"
-          f" {accuracy=}%, {partial_accuracy=}%, {format_accuracy=}%"
+          f" {accuracy=}%, {partial_accuracy=}%, {format_accuracy=}%,"
+          f" {mean_reward=:.4f}"
       )
     except Exception as e:  # pylint: disable=broad-exception-caught
       max_logging.warning(f"[intermediate-eval] step={outer_step} failed: {e!r}")
