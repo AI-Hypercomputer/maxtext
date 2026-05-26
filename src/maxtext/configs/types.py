@@ -2049,6 +2049,18 @@ class RLDataset(BaseModel):
   batch_size: int = Field(1, description="Global batch size for the dataset loader in RL.")
   num_batches: int = Field(4, description="Number of batches for RL training.")
   num_test_batches: int = Field(5, description="Number of batches for RL evaluation.")
+  eval_batch_size: int = Field(
+      -1,
+      description=(
+          "Batch size for post-train RL evaluation. -1 (default) means use"
+          " `batch_size`, preserving legacy behavior. Set higher (e.g. 32-128)"
+          " to feed vLLM bigger batches during greedy eval — otherwise eval is"
+          " bottlenecked by the training batch_size, which is small for GRPO"
+          " (e.g. 4 with 8 generations per prompt). NOTE: total eval examples"
+          " = num_test_batches * eval_batch_size, so adjust num_test_batches"
+          " when changing this to keep total eval set size constant."
+      ),
+  )
   test_batch_start_index: int = Field(0, description="Start index for the test dataset")
   train_fraction: float = Field(1.0, description="Fraction of the dataset to be used for training.")
   train_micro_batch_size: int = Field(-1, description="Micro batch size for training.")
