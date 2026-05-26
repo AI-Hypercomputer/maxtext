@@ -80,7 +80,85 @@ from maxtext.utils.globals import EPS
 PLACEHOLDER_SEQ_LEN = 1
 
 
-class Indexer(nnx.Module):
+
+class BaseIndexer(nnx.Module):
+  """Base Indexer for Sparse Attention."""
+
+  def __init__(
+      self,
+      config: Any,
+      kernel_init: NdInitializer,
+      quant: Optional[Quant] = None,
+      weights_proj_in_features: Optional[int] = None,
+      weights_proj_dtype: Optional[DType] = None,
+      weights_proj_quant: Optional[Quant] = None,
+      rngs: Optional[nnx.Rngs] = None,
+  ):
+    self.config = config
+    self.dtype = config.dtype
+    self.weight_dtype = config.weight_dtype
+    self.n_heads = config.indexer_n_heads
+    self.head_dim = config.indexer_head_dim
+    self.indexer_topk = config.indexer_topk
+    self.q_lora_rank = config.q_lora_rank
+    self.softmax_scale = self.head_dim**-0.5
+    self.weights_scaling = self.n_heads**-0.5  # Optional, used mostly by V4
+
+    # Query Projection: Latent Query -> Indexer Query
+    self.wq_b = DenseGeneral(
+        in_features_shape=self.q_lora_rank,
+        out_features_shape=(self.n_heads, self.head_dim),
+        axis=-1,
+        kernel_init=kernel_init,
+        kernel_axes=("q_lora", "q_heads", "kv"),
+        dtype=self.dtype,
+        weight_dtype=self.weight_dtype,
+        quant=quant,
+        matmul_precision=config.matmul_precision,
+        shard_mode=config.shard_mode,
+        rngs=rngs,
+    )
+
+    wp_in_features = weights_proj_in_features if weights_proj_in_features is not None else config.emb_dim
+    wp_dtype = weights_proj_dtype if weights_proj_dtype is not None else self.dtype
+
+    # Projection: Input -> Importance Weights for Heads
+    self.weights_proj = DenseGeneral(
+        in_features_shape=wp_in_features,
+        out_features_shape=self.n_heads,
+        axis=-1,
+        kernel_init=kernel_init,
+        kernel_axes=("embed", "q_heads"),
+        dtype=wp_dtype,
+        weight_dtype=wp_dtype,
+        quant=weights_proj_quant,
+        matmul_precision=config.matmul_precision,
+        shard_mode=config.shard_mode,
+        rngs=rngs,
+    )
+
+  def prepare_query(self, low_rank_q: jnp.ndarray, inputs_positions: jnp.ndarray, apply_partial_rope) -> jnp.ndarray:
+    bsz, seqlen, _ = low_rank_q.shape
+    q = self.wq_b(low_rank_q)
+    q = q.reshape(bsz, seqlen, self.n_heads, self.head_dim)
+    q = apply_partial_rope(q, inputs_positions=inputs_positions)
+    return q
+
+  def compute_topk(self, q: jnp.ndarray, k: jnp.ndarray, inputs_q: jnp.ndarray, mask: Optional[jnp.ndarray]) -> tuple[jnp.ndarray, jnp.ndarray]:
+    logits = jnp.einsum("bthd, bsd -> btsh", q, k, precision=self.config.matmul_precision)
+    logits = jax.nn.relu(logits)
+    weights = self.weights_proj(inputs_q)
+    weights = weights * self.weights_scaling * self.softmax_scale
+    indexer_score = jnp.einsum("btsh, bth -> bts", logits, weights, precision=self.config.matmul_precision)
+
+    if mask is not None:
+      indexer_score += mask
+
+    _, topk_indices = jax.lax.top_k(indexer_score, k=self.indexer_topk)
+    return topk_indices, indexer_score
+
+
+class Indexer(BaseIndexer):
   """Indexer for DeepSeek Sparse Attention (DSA).
 
   This module implements the sparse attention indexer introduced in DeepSeek
@@ -105,73 +183,38 @@ class Indexer(nnx.Module):
       model_mode: str = MODEL_MODE_TRAIN,
       rngs: Optional[nnx.Rngs] = None,
   ):
-    self.config = config
+    super().__init__(
+        config=config,
+        kernel_init=kernel_init,
+        quant=quant,
+        weights_proj_in_features=config.emb_dim,
+        weights_proj_dtype=jnp.float32,
+        weights_proj_quant=None,
+        rngs=rngs,
+    )
     self.rotary_embedding = rotary_embedding
-    self.quant = quant
-    self.kernel_init = kernel_init
     self.model_mode = model_mode
-    self.rngs = rngs
-    self.dtype = config.dtype
-    self.weight_dtype = config.weight_dtype
     self.max_target_length = config.max_target_length
-
-    self.n_heads = config.indexer_n_heads
-    self.head_dim = config.indexer_head_dim
-    self.indexer_topk = config.indexer_topk
     self.emb_dim = config.emb_dim
     self.rope_head_dim = config.qk_rope_head_dim
-    self.q_lora_rank = config.q_lora_rank
-    # scale head weights for numerical stability
-    self.softmax_scale = self.head_dim**-0.5
-
-    # Query Projection: Latent Query -> Indexer Query
-    self.wq_b = DenseGeneral(
-        in_features_shape=self.q_lora_rank,
-        out_features_shape=(self.n_heads, self.head_dim),
-        axis=-1,
-        kernel_init=self.kernel_init,
-        kernel_axes=("q_lora", "q_heads", "kv"),
-        dtype=self.dtype,
-        weight_dtype=self.weight_dtype,
-        quant=self.quant,
-        matmul_precision=self.config.matmul_precision,
-        shard_mode=self.config.shard_mode,
-        rngs=self.rngs,
-    )
 
     # Key Projection: Input -> Shared Indexer Key
     self.wk = DenseGeneral(
         in_features_shape=self.emb_dim,
         out_features_shape=self.head_dim,
         axis=-1,
-        kernel_init=self.kernel_init,
+        kernel_init=kernel_init,
         kernel_axes=("embed", "kv"),
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
-        quant=self.quant,
+        quant=quant,
         matmul_precision=self.config.matmul_precision,
         shard_mode=self.config.shard_mode,
-        rngs=self.rngs,
+        rngs=rngs,
     )
 
     # Key Normalization with Bias
     self.k_norm = nnx.LayerNorm(num_features=self.head_dim, use_bias=True, dtype=self.weight_dtype, rngs=rngs)
-
-    # Projection: Input -> Importance Weights for Heads
-    # deepseek3.2 enforces FP32 and does not quantize, for precision and stability.
-    self.weights_proj = DenseGeneral(
-        in_features_shape=self.emb_dim,
-        out_features_shape=self.n_heads,
-        axis=-1,
-        kernel_init=self.kernel_init,
-        kernel_axes=("embed", "q_heads"),
-        dtype=jnp.float32,
-        weight_dtype=jnp.float32,
-        quant=None,
-        matmul_precision=self.config.matmul_precision,
-        shard_mode=self.config.shard_mode,
-        rngs=self.rngs,
-    )
 
   def update_indexer_cache(self, kv_cache, k, decoder_segment_ids, model_mode, previous_chunk):
     """Updates Indexer buffers by processing KV cache results."""
@@ -323,9 +366,7 @@ class Indexer(nnx.Module):
     inputs_kv = jax.lax.stop_gradient(inputs_kv)
 
     # Query Processing: Project from Latent low_rank_q
-    q = self.wq_b(low_rank_q)  # [b, t, q_lora_rank] -> [b, t, h * d]
-    q = q.reshape(bsz, seqlen, self.n_heads, self.head_dim)  # [b, t, h, d]
-    q = self.apply_partial_rope(q, inputs_positions=inputs_positions)
+    q = self.prepare_query(low_rank_q, inputs_positions, self.apply_partial_rope)
 
     # Key Processing: Project from Input
     k = self.wk(inputs_kv)  # [b, s, embed_dim] -> [b, s, d]
@@ -345,30 +386,20 @@ class Indexer(nnx.Module):
       return None, None, None
 
     # Compute Index Scores
-    # QK product: relu(q @ k.T), [b, t, s, h]
-    # Similar to MQA, each key is shared by h query head
-    logits = jnp.einsum("bthd, bsd -> btsh", q, k, precision=self.config.matmul_precision)
-    logits = jax.nn.relu(logits)
-    # Compute head weights: project from input, [b, t, embed_dim] -> [b, t, h]
-    weights = self.weights_proj(inputs_q)
-    # Weights scaling affect indexer_score, but does not affect topk_indices. Keep scaling for numerical stability.
-    # https://github.com/deepseek-ai/DeepSeek-V3.2-Exp/blob/87e509a2e5a100d221c97df52c6e8be7835f0057/inference/model.py#L478-L480
-    weights = weights * (self.n_heads**-0.5) * self.softmax_scale
-    # Aggregate head-wise logits: logits @ weights
-    indexer_score = jnp.einsum("btsh, bth -> bts", logits, weights, precision=self.config.matmul_precision)  # [b, t, s]
-
     internal_padding_mask = None
+    combined_mask = None
     if cached_s is not None:
       # cached_s marks valid tokens from the original prefill step and all subsequent AR steps
       internal_padding_mask = jnp.where(cached_s > 0, 0.0, DEFAULT_MASK_VALUE)
-      indexer_score += internal_padding_mask[:, None, :]
+      combined_mask = internal_padding_mask[:, None, :]
 
-    # Apply attention mask before TopK
     if attention_mask is not None:
-      indexer_score += attention_mask
+      if combined_mask is None:
+        combined_mask = attention_mask
+      else:
+        combined_mask += attention_mask
 
-    # TopK selection based on index score
-    _, topk_indices = jax.lax.top_k(indexer_score, k=self.indexer_topk)  # topk_indices [b, t, k]
+    topk_indices, indexer_score = self.compute_topk(q, k, inputs_q, combined_mask)
 
     # Create Sparse Index Mask: 0 and large negatives
     indexer_mask = self.generate_mask(topk_indices, k.shape[1])  # [b, t, s]
