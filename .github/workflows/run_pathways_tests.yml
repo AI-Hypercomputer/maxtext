@@ -106,6 +106,10 @@ jobs:
           .venv/bin/python3 -m pytest ${{ inputs.pytest_addopts }} -v -m "${FINAL_PYTEST_MARKER}" -k "not AotHloIdenticalTest and not CompileThenLoad" --durations=0
         env:
           PYTHONPATH: "${{ github.workspace }}/src"
+      - name: Cleanup git safe.directory
+        if: always()
+        shell: bash
+        run: git config --global --unset-all safe.directory 2>/dev/null || true
     services:
       resource_manager:
         image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260413-jax_0.9.2
