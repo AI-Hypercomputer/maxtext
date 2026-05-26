@@ -42,7 +42,7 @@ python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 # Setup environment variables
 export MODEL=<HF_MODEL> # e.g. 'llama3.1-8b-Instruct'
 export BASE_OUTPUT_DIRECTORY=<CKPT_PATH> # e.g., gs://my-bucket/my-checkpoint-directory
-export USE_PATHWAYS=0 # Set to 1 for Pathways, 0 for McJAX
+export USE_PATHWAYS=0 # Set to 1 if you intend to use Pathways for training, 0 for McJAX
 export LAZY_LOAD_TENSORS=<LAZY_LOAD> # Set to True to save RAM
 ```
 
