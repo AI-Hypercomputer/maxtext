@@ -283,9 +283,22 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
       mutated inside the transformation.
     """
     batch = self.gen_model_input_fn(inputs)
+<<<<<<< HEAD
     student = model.student_model
     teacher = model.teacher_model
     current_step = model.training_step[...]
+=======
+    # current_step = model.training_step.value
+    current_step = model.training_step.get_value()
+    
+    # test to see order
+    # if jax.process_index() == 0:
+    #     jax.lax.cond(
+    #         current_step == 0,
+    #         lambda: jax.debug.print("DEBUG: Step 0 input tokens sum: {tok_sum}", tok_sum=jnp.sum(batch["input_tokens"])),
+    #         lambda: None
+    #     )
+>>>>>>> a85adcad3 (updated train_distill to work with offline distillaiton)
 
     # Run teacher inference outside of value_and_grad.
     # The teacher is frozen (stop_gradient), so its output is a constant
@@ -333,8 +346,13 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
     # Propagate updated non-param state back to student.
     nnx.update(student, new_rest)
 
+<<<<<<< HEAD
     optimizer.update(student, grads)
 
+=======
+    # Increment step counter after loss computation
+    # model.training_step.value = current_step + 1
+>>>>>>> a85adcad3 (updated train_distill to work with offline distillaiton)
     model.training_step.set_value(current_step + 1)
 
     tunix_expects_grad_norm = getattr(self, "_tunix_expects_grad_norm", True)
@@ -776,11 +794,10 @@ def train_distill(
       else:
           student_config.get_keys()["grain_train_files"] = offline_data_dir
           
-      # 2. Tell the trainer not to look for an offline eval set
       student_config.get_keys()["eval_interval"] = 0
-      
-      # 3. Tell the Grain parser to keep our custom top_k keys
       student_config.get_keys()["is_offline_distillation"] = True 
+      student_config.get_keys()["dataset_shuffle_buffer_size"] = 0 
+      student_config.get_keys()["dataset_shuffle_seed"] = 0
 
 
     # Now, whether online or offline, MaxText natively handles the multi-threading!
