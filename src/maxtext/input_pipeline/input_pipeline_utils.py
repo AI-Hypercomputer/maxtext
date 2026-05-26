@@ -541,31 +541,6 @@ def make_tfrecord_iter_dataset(path: str):
     return GCSTFRecordIterDataset(path)
   return TFRecordIterDataset(path)
 
-
-# @dataclasses.dataclass
-# class ParseFeatures(grain.MapTransform):
-#   """Parse serialized example"""
-
-#   def __init__(self, data_columns, tokenize):
-#     self.data_columns = data_columns
-#     self.tokenize = tokenize
-
-#   def map(self, element):
-#     """Parse a serialized tf.train.Example proto and extract features."""
-#     example = example_pb2.Example()
-#     example.ParseFromString(element)
-#     features = example.features.feature
-
-#     parsed = {}
-#     for col in self.data_columns:
-#       if col in features:
-#         f = features[col]
-#         if self.tokenize:
-#           parsed[col] = np.array(f.bytes_list.value, dtype=object)
-#         else:
-#           parsed[col] = np.array(f.int64_list.value, dtype=np.int32)
-#     return parsed
-
 @dataclasses.dataclass
 class ParseFeatures(grain.MapTransform):
   """Parse serialized tf.train.Example protos for arrayrecord/tfrecord datasets.
@@ -597,23 +572,6 @@ class ParseFeatures(grain.MapTransform):
 
     parsed = {}
     for col in self.data_columns:
-<<<<<<< HEAD
-      f = features[col]
-      if self.tokenize:
-        if not f.bytes_list.value:
-          raise ValueError(
-              f"tokenize_data=True but column '{col}' has no text (bytes) data. "
-              "Set tokenize_train_data or tokenize_eval_data to False if your dataset is already tokenized."
-          )
-        parsed[col] = np.array(f.bytes_list.value, dtype=object)
-      else:
-        if not f.int64_list.value:
-          raise ValueError(
-              f"tokenize_data=False but column '{col}' has no integer token data. "
-              "Set tokenize_train_data or tokenize_eval_data to True if your dataset needs tokenization."
-          )
-        parsed[col] = np.array(f.int64_list.value, dtype=np.int32)
-=======
       if col in features:
         f = features[col]
         
@@ -635,7 +593,6 @@ class ParseFeatures(grain.MapTransform):
         if "top_k_indices" in parsed and len(parsed["top_k_indices"]) > 0:
             parsed["top_k_indices"] = parsed["top_k_indices"].reshape(seq_len, -1)
 
->>>>>>> 6b5d9598c (Speed up offline distillation and saving top-k teacher logits)
     return parsed
 
 
