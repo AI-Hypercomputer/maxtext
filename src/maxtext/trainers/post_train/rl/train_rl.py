@@ -601,8 +601,18 @@ def _rl_train_impl(argv: Sequence[str], kwargs: dict):
       argv, kwargs
   )
 
+  # Create model tokenizer first so we can plumb its pad_id into the model
+  # adapter (used to synthesize segment_ids that mask pad positions from
+  # attention — without this the trainer attends to pad tokens and produces
+  # corrupted log-probs).
+  model_tokenizer = AutoTokenizer.from_pretrained(
+      trainer_config.tokenizer_path,
+      token=trainer_config.hf_access_token or None,
+  )
+
   reference_model, reference_mesh, actor_model, actor_mesh, rollout_mesh = model_creation_utils.create_models_and_meshes(
-      trainer_config, sampler_config, trainer_devices, sampler_devices
+      trainer_config, sampler_config, trainer_devices, sampler_devices,
+      tokenizer_pad_id=model_tokenizer.pad_token_id,
   )
 
   if not trainer_config.debug.rl:
@@ -619,12 +629,6 @@ def _rl_train_impl(argv: Sequence[str], kwargs: dict):
     epath.Path(trainer_config.checkpoint_dir).mkdir(parents=True)
 
   max_train_steps = get_max_train_steps(trainer_config)
-
-  # Create model tokenizer
-  model_tokenizer = AutoTokenizer.from_pretrained(
-      trainer_config.tokenizer_path,
-      token=trainer_config.hf_access_token or None,
-  )
 
   train_dataset, test_dataset = prepare_datasets(trainer_config, model_tokenizer)
 

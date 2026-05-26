@@ -719,14 +719,20 @@ def setup_configs_and_devices(argv: list[str] | None = None, kwargs: dict | None
   return trainer_config, sampler_config, trainer_devices, sampler_devices
 
 
-def create_models_and_meshes(trainer_config, sampler_config, trainer_devices, sampler_devices):
+def create_models_and_meshes(trainer_config, sampler_config, trainer_devices, sampler_devices, tokenizer_pad_id=None):
   """Create reference and actor models and their respective meshes.
   This API is particularly useful for Reinforcement Learning (RL) where we need 2 models (wrapped in TunixMaxTextAdapter
   so that they are compatible with default Tunix APIs) and meshes for reference, actor and rollout (which can be disjoint
   in case of disaggreggated RL training).
+
+  `tokenizer_pad_id`: optional pad token id. When provided, plumbs through to
+  TunixMaxTextAdapter so it can synthesize segment_ids that mask pad positions
+  from attention (otherwise trainer attends to pad tokens, corrupting log-probs).
   """
   max_logging.log("Creating reference model and also meshes for reference and rollout")
-  reference_model, reference_mesh = from_pretrained(trainer_config, devices=trainer_devices, wrap_with_tunix_adapter=True)
+  reference_model, reference_mesh = from_pretrained(
+      trainer_config, devices=trainer_devices, wrap_with_tunix_adapter=True, tokenizer_pad_id=tokenizer_pad_id,
+  )
   devices_array = maxtext_utils.create_device_mesh(sampler_config, sampler_devices)
   rollout_mesh = Mesh(devices_array, sampler_config.mesh_axes)
 
@@ -738,18 +744,28 @@ def create_models_and_meshes(trainer_config, sampler_config, trainer_devices, sa
       # TunixMaxTextAdapter wraps MaxText models to be compatible with Tunix's default APIs
       # The weight mappings for vllm (which is interfaced to from MaxText via Tunix) are model specific.
       # The mappings are defined inside src/maxtext/integration/tunix/weight_mapping
-      actor_model = TunixMaxTextAdapter(base_model=actor_base_model, use_no_op_mappings=use_no_op_mappings)
+      actor_model = TunixMaxTextAdapter(
+          base_model=actor_base_model, use_no_op_mappings=use_no_op_mappings, pad_id=tokenizer_pad_id,
+      )
       actor_model.config = None
     actor_mesh = reference_mesh
   else:
     max_logging.log("Creating policy model with same config as reference model on trainer mesh")
-    actor_model, actor_mesh = from_pretrained(trainer_config, devices=trainer_devices, wrap_with_tunix_adapter=True)
+    actor_model, actor_mesh = from_pretrained(
+        trainer_config, devices=trainer_devices, wrap_with_tunix_adapter=True, tokenizer_pad_id=tokenizer_pad_id,
+    )
 
   return reference_model, reference_mesh, actor_model, actor_mesh, rollout_mesh
 
 
 def from_pretrained(
-    config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAIN, rng_key=None, wrap_with_tunix_adapter=False
+    config,
+    mesh=None,
+    devices=None,
+    model_mode=MODEL_MODE_TRAIN,
+    rng_key=None,
+    wrap_with_tunix_adapter=False,
+    tokenizer_pad_id=None,
 ):
   """Creates a NNX model with sharded parameters, possibly loading from a checkpoint."""
   original_mesh = mesh
@@ -1041,7 +1057,9 @@ def from_pretrained(
     if wrap_with_tunix_adapter:
       with mesh:
         use_no_op_mappings = "maxtext_config" in config.vllm_additional_config
-        model = TunixMaxTextAdapter(base_model=model, use_no_op_mappings=use_no_op_mappings)
+        model = TunixMaxTextAdapter(
+            base_model=model, use_no_op_mappings=use_no_op_mappings, pad_id=tokenizer_pad_id,
+        )
         model.config = None
 
     if original_mesh:
