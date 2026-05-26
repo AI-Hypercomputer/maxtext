@@ -11,8 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Smoke test for sparsity.
-"""
+"""Smoke test for sparsity."""
 
 import os
 import tempfile
@@ -49,6 +48,8 @@ class Train(parameterized.TestCase):
   )
   @pytest.mark.tpu_only
   def test_different_quant_sparsity_configs(self, quantization: str, use_sparsity: bool):
+    if quantization == "fp8_full":
+      self.skipTest("fp8 quant is broken under NNX, see b/509790223")
     test_tmpdir = os.environ.get("TEST_TMPDIR", gettempdir())
     outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", test_tmpdir)
     args = [
