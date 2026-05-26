@@ -1158,6 +1158,31 @@ class TfdsDataset(BaseModel):
   eval_dataset_name: str = Field("c4/en:3.1.0", description="Name of the TFDS eval dataset.")
   train_split: str = Field("train", description="Dataset split for training.")
   eval_split: str = Field("validation", description="Dataset split for evaluation.")
+  dataset_processor_path: str = Field(
+      "",
+      description=(
+          "Optional path to a user-provided Python file with a custom "
+          "`process_data(dataset_name, model_tokenizer, template_config, "
+          "tmvp_config, x) -> dict` function. When empty (default), the "
+          "built-in utils_rl.process_data is used."
+      ),
+  )
+  reward_functions_path: str = Field(
+      "",
+      description=(
+          "Optional path to a user Python file containing custom reward "
+          "functions. Used with `reward_functions` to fully replace the "
+          "built-in reward stack."
+      ),
+  )
+  reward_functions: str = Field(
+      "",
+      description=(
+          "Comma-separated names of reward functions to import from "
+          "`reward_functions_path`. Each function signature: "
+          "(prompts, completions, tmvp_config, **kwargs) -> list[float]."
+      ),
+  )
 
 
 class HfDataset(BaseModel):

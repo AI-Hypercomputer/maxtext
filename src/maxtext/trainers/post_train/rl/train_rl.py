@@ -546,11 +546,29 @@ def create_rl_components(
 
     return _reward_fn
 
-  reward_fns = [  # type: ignore
-      make_reward_fn(utils_rl.match_format_exactly),
-      make_reward_fn(utils_rl.match_format_approximately),
-      make_reward_fn(utils_rl.check_numbers),
-  ]
+  # Optional user-provided reward functions. `reward_functions_path` is a
+  # filesystem path to a Python file. `reward_functions` is a comma-separated
+  # list of function names to import from that file. Each function must accept
+  # `prompts`, `completions`, `tmvp_config`, and `**kwargs` and return a list
+  # of floats.
+  # When both are set, the built-in reward_fns list below is REPLACED entirely
+  # by the user-provided functions (so users have full control over their
+  # reward stack — match the GPU recipe by passing your own vtc reward fn).
+  _custom_rewards_path = getattr(trainer_config, "reward_functions_path", "") or ""
+  _custom_rewards_names = getattr(trainer_config, "reward_functions", "") or ""
+  if _custom_rewards_path and _custom_rewards_names:
+    _names = [n.strip() for n in _custom_rewards_names.split(",") if n.strip()]
+    reward_fns = [make_reward_fn(_load_custom_callable(_custom_rewards_path, n)) for n in _names]
+    max_logging.log(
+        f"reward_fns: using {len(reward_fns)} custom reward function(s) "
+        f"{_names} from {_custom_rewards_path}"
+    )
+  else:
+    reward_fns = [  # type: ignore
+        make_reward_fn(utils_rl.match_format_exactly),
+        make_reward_fn(utils_rl.match_format_approximately),
+        make_reward_fn(utils_rl.check_numbers),
+    ]
 
   # Create RL trainer
   max_logging.log("Setting up RL trainer...")

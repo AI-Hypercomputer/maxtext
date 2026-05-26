@@ -229,6 +229,13 @@ eval_dataset_name: 'openai/gsm8k'
 # tmvp_config, x) -> dict with keys {prompts, question, answer}. When empty
 # (default), the built-in utils_rl.process_data is used.
 dataset_processor_path: ''
+# Optional: path to a user-provided Python file with custom reward functions,
+# AND a comma-separated list of function names to import from that file.
+# Each function signature: fn(prompts, completions, tmvp_config, **kwargs) -> list[float].
+# When both are set, the built-in [match_format_exactly, match_format_approximately,
+# check_numbers] reward list is REPLACED entirely.
+reward_functions_path: ''
+reward_functions: ''
 train_split: 'train'
 eval_split: 'test'
 hf_name: 'main' # subset of Hugging Face dataset
