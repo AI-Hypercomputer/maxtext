@@ -224,6 +224,11 @@ skip_jax_distributed_system: True
 #      Loads separate dataset for training and evaluation (e.g., train on OpenMathInstruct-2, eval on GSM8K).
 dataset_name: 'openai/gsm8k'
 eval_dataset_name: 'openai/gsm8k'
+# Optional: path to a user-provided Python file with a custom `process_data`
+# function. Signature: process_data(dataset_name, model_tokenizer, template_config,
+# tmvp_config, x) -> dict with keys {prompts, question, answer}. When empty
+# (default), the built-in utils_rl.process_data is used.
+dataset_processor_path: ''
 train_split: 'train'
 eval_split: 'test'
 hf_name: 'main' # subset of Hugging Face dataset
