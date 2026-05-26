@@ -768,7 +768,7 @@ class DeepSeekV4Attention(nnx.Module):
         dtype=dtype,
         weight_dtype=weight_dtype,
     )
-    self.q_b_proj = nnx.Linear(
+    self.wq_b = nnx.Linear(
         in_features=q_lora_rank,
         out_features=num_heads * head_dim,
         use_bias=False,
@@ -927,11 +927,11 @@ class DeepSeekV4Attention(nnx.Module):
 
     # Project input features to low-rank query residuals and apply RMS normalization.
     # # [B, S, D_model] -> [B, S, D_rank]
-    q_residual = self.q_a_norm(self.q_a_proj(hidden_states))
+    q_residual = self.q_a_norm(self.wq_a(hidden_states))
 
     # Project low-rank residuals to multi-head query dimensions and reshape.
     # # [B, S, D_rank] -> [B, S, H, D_head]
-    q = self.q_b_proj(q_residual).reshape(batch, seq_len, self.num_heads, self.head_dim)
+    q = self.wq_b(q_residual).reshape(batch, seq_len, self.num_heads, self.head_dim)
 
     # Apply scale-free unweighted RMS normalization across multi-head queries and scale by attention scaling factor.
     # Unweighted normalization stabilizes query variance without introducing learnable scaling parameters.

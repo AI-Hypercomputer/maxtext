@@ -1651,9 +1651,9 @@ class DeepSeekV4ParityTest(unittest.TestCase):
     )
 
     # Copy projections and normalize weights from PyTorch to JAX
-    jax_model.q_a_proj.kernel[...] = jnp.array(torch_model.q_a_proj.weight.detach().numpy().T)
+    jax_model.wq_a.kernel[...] = jnp.array(torch_model.q_a_proj.weight.detach().numpy().T)
     jax_model.q_a_norm.weight[...] = jnp.array(torch_model.q_a_norm.weight.detach().numpy())
-    jax_model.q_b_proj.kernel[...] = jnp.array(torch_model.q_b_proj.weight.detach().numpy().T)
+    jax_model.wq_b.kernel[...] = jnp.array(torch_model.q_b_proj.weight.detach().numpy().T)
 
     jax_model.kv_proj.kernel[...] = jnp.array(torch_model.kv_proj.weight.detach().numpy().T)
     jax_model.kv_norm.weight[...] = jnp.array(torch_model.kv_norm.weight.detach().numpy())
