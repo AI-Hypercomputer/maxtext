@@ -531,15 +531,28 @@ def check_correctness(extracted_response: str, acceptable_answers: list[str], tm
 
 
 def get_optimizer(tmvp_config: Any, max_train_steps: int) -> optax.GradientTransformation:
-  """Function to obtain an optax optimizer, currently we use adamw."""
+  """Function to obtain an optax optimizer, currently we use adamw.
+
+  Schedule shape is controlled by `learning_rate_schedule_steps` when set
+  (>0); this decouples warmup/decay shape from training length so the same
+  schedule can be applied across runs of different num_batches. Default
+  (-1) falls back to `max_train_steps` for backward compatibility — matches
+  the documented behavior of base.yml's `learning_rate_schedule_steps: -1`
+  ("By default the length of the schedule is set to the number of steps").
+  """
+  schedule_steps = getattr(tmvp_config, "learning_rate_schedule_steps", -1)
+  if schedule_steps is None or schedule_steps <= 0:
+    schedule_steps = max_train_steps
   schedule = optax.schedules.warmup_cosine_decay_schedule(
       init_value=0.0,
       peak_value=tmvp_config.learning_rate,
       # Linearly increase learning rate from 0. to learning_rate in the first
-      # warmup_steps_fraction training steps, and then gradually decrease the
-      # learning rate to 0 using cosine scheduler.
-      warmup_steps=int(tmvp_config.warmup_steps_fraction * max_train_steps),
-      decay_steps=max_train_steps,
+      # warmup_steps_fraction × schedule_steps steps, then cosine-decay to 0
+      # over the remaining schedule_steps. When schedule_steps > max_train_steps
+      # the run ends partway through the schedule (useful for matching a fixed
+      # GPU LR schedule across TPU runs with different num_batches).
+      warmup_steps=int(tmvp_config.warmup_steps_fraction * schedule_steps),
+      decay_steps=schedule_steps,
       end_value=0.0,
   )
 
