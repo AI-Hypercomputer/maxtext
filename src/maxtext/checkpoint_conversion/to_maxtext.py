@@ -116,6 +116,8 @@ class LazyHFLoader:
     self.shard_map = {}
     self.current_shard_name = None
     self.current_shard_content = {}
+    # Cache for resolved local shard paths
+    self._local_shard_paths = {}
     # Use a lock to serialize heavy RAM operations, but NOT downloads
     self._ram_lock = threading.Lock()
     self._initialize_index()
@@ -183,17 +185,21 @@ class LazyHFLoader:
       # You might need advanced fuzzy matching here if you encounter errors.
       raise ValueError(f"Key {key} not found in HF checkpoint index.")
 
-    if self.is_local:
-      local_path = os.path.join(self.model_id, shard_name)
+    if shard_name in self._local_shard_paths:
+      local_path = self._local_shard_paths[shard_name]
     else:
-      # STEP 1: Download outside the lock.
-      # multiple threads can download different shards at the same time.
-      local_path = hf_hub_download(
-          repo_id=self.model_id,
-          filename=shard_name,
-          token=self.token,
-          revision=self.revision,
-      )
+      if self.is_local:
+        local_path = os.path.join(self.model_id, shard_name)
+      else:
+        # STEP 1: Download outside the lock.
+        # multiple threads can download different shards at the same time.
+        local_path = hf_hub_download(
+            repo_id=self.model_id,
+            filename=shard_name,
+            token=self.token,
+            revision=self.revision,
+        )
+      self._local_shard_paths[shard_name] = local_path
 
     # STEP 2: Lock ONLY the reading into RAM.
     # This prevents multiple threads from simultaneously allocating large chunks of RAM.
