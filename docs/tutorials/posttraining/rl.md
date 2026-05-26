@@ -62,9 +62,9 @@ placeholders with your actual values.
 
 ```bash
 # -- Model configuration --
-# The MaxText model name. See `src/maxtext/configs/types.py` for `ModelName` for a
-# full list of supported models.
-export MODEL=<MODEL_NAME> # e.g. 'llama3.1-8b-Instruct'
+# The MaxText model name. Must match the architecture of your checkpoint.
+# See `src/maxtext/configs/types.py` for `ModelName` for a full list of supported models.
+export MODEL=llama3.1-8b-Instruct  # replace with another model from src/maxtext/configs/types.py if needed
 
 # -- MaxText configuration --
 # Use a GCS bucket you own to store logs and checkpoints.
