@@ -1667,10 +1667,15 @@ def get_nnx_named_sharding_with_scan_axis(abs_var_state: nnx.State, mesh) -> nnx
         rules = composite_rules(context_rules, local_rules)
         raw_sharding = from_sharding_rules(out_sharding, rules)
         mesh_axis_names = mesh.axis_names if mesh is not None else ()
-        sanitized_sharding = [
-            x if (x is None or (isinstance(x, str) and x in mesh_axis_names) or isinstance(x, tuple)) else None
-            for x in raw_sharding
-        ]
+
+        def _sanitize(x):
+          if isinstance(x, list):
+            x = tuple(x)
+          if x is None or (isinstance(x, str) and x in mesh_axis_names) or isinstance(x, tuple):
+            return x
+          return None
+
+        sanitized_sharding = [_sanitize(x) for x in raw_sharding]
         pspec = PartitionSpec(*sanitized_sharding)
       else:
         pspec = PartitionSpec(*out_sharding)
