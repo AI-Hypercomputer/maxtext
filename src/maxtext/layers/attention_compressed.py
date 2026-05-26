@@ -24,7 +24,7 @@ from maxtext.layers.normalizations import DeepSeekV4RMSNorm, DeepSeekV4Unweighte
 from maxtext.layers.linears import DeepSeekGroupedLinear
 from maxtext.layers.attention_op import AttentionOp
 from maxtext.layers.attention_mla import BaseIndexer
-from maxtext.common.common_types import MODEL_MODE_TRAIN, AttentionType
+from maxtext.common.common_types import MODEL_MODE_TRAIN, AttentionType, DEFAULT_MASK_VALUE
 
 
 class HCACompressor(nnx.Module):
@@ -1033,5 +1033,7 @@ class DeepSeekV4Attention(nnx.Module):
     # Project mixed representations back to global model hidden dimension.
     # # [B, S, o_groups * o_lora_rank] -> [B, S, D_model]
     output = self.o_b_proj(grouped_flat)
+
+    return output, None
 
     return output, None
