@@ -45,8 +45,9 @@ python3 -m maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_trai
 
 from __future__ import annotations
 import contextlib
+import importlib.util
 from functools import wraps
-from typing import Any, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence
 
 import datasets
 import grain
@@ -243,6 +244,27 @@ def prepare_train_and_eval_dataset(
   }
 
 
+def _load_custom_callable(module_path: str, function_name: str) -> Callable:
+  """Load a callable from a user-provided Python file via importlib.
+
+  `module_path` is an absolute or relative filesystem path to a `.py` file.
+  The file is loaded as a fresh module (not added to sys.path) and the
+  named attribute is returned. Used to plug in user-defined `process_data`
+  (for custom datasets) and reward functions without editing maxtext.
+  """
+  if not os.path.isfile(module_path):
+    raise ValueError(f"Cannot import {module_path!r}: file does not exist")
+  spec = importlib.util.spec_from_file_location(f"_user_module_{function_name}", module_path)
+  if spec is None or spec.loader is None:
+    raise ValueError(f"Cannot import {module_path!r}: not a valid python file")
+  module = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(module)
+  fn = getattr(module, function_name, None)
+  if fn is None:
+    raise ValueError(f"{module_path!r} does not define a function named {function_name!r}")
+  return fn
+
+
 def prepare_datasets(
     trainer_config: Any,
     model_tokenizer: AutoTokenizer,
@@ -253,6 +275,17 @@ def prepare_datasets(
     raise ValueError(
         f"Chat template is required for processing dataset but failed to load from {trainer_config.chat_template_path}"
     )
+
+  # Optional user-provided `process_data(dataset_name, tokenizer, template, config, x) -> dict`.
+  # When `dataset_processor_path` is set in config, load that file's `process_data`
+  # and use it instead of the built-in utils_rl.process_data. Lets users adapt
+  # custom datasets (with non-standard answer columns / cleaning) without editing maxtext.
+  _custom_processor_path = getattr(trainer_config, "dataset_processor_path", "") or ""
+  if _custom_processor_path:
+    _process_data = _load_custom_callable(_custom_processor_path, "process_data")
+    max_logging.log(f"prepare_datasets: using custom process_data from {_custom_processor_path}")
+  else:
+    _process_data = utils_rl.process_data
 
   # Prepare train and test data from training data for certain datasets
   eval_dataset_name = getattr(trainer_config, "eval_dataset_name", None)
@@ -272,22 +305,14 @@ def prepare_datasets(
     train_dataset = (
         grain.MapDataset.source(splits["train"])
         .shuffle(seed=trainer_config.data_shuffle_seed)
-        .map(
-            lambda x: utils_rl.process_data(
-                trainer_config.dataset_name, model_tokenizer, template_config, trainer_config, x
-            )
-        )
+        .map(lambda x: _process_data(trainer_config.dataset_name, model_tokenizer, template_config, trainer_config, x))
     )
 
     if trainer_config.num_test_batches > 0:
       test_dataset = (
           grain.MapDataset.source(splits["validation"])
           .shuffle(seed=trainer_config.data_shuffle_seed)
-          .map(
-              lambda x: utils_rl.process_data(
-                  trainer_config.dataset_name, model_tokenizer, template_config, trainer_config, x
-              )
-          )
+          .map(lambda x: _process_data(trainer_config.dataset_name, model_tokenizer, template_config, trainer_config, x))
       )
   else:
     if not eval_dataset_name:
@@ -302,11 +327,7 @@ def prepare_datasets(
     train_dataset = (
         grain.MapDataset.source(train_dataset)
         .shuffle(seed=trainer_config.data_shuffle_seed)
-        .map(
-            lambda x: utils_rl.process_data(
-                trainer_config.dataset_name, model_tokenizer, template_config, trainer_config, x
-            )
-        )
+        .map(lambda x: _process_data(trainer_config.dataset_name, model_tokenizer, template_config, trainer_config, x))
     )
 
     if trainer_config.num_test_batches > 0:
@@ -319,7 +340,7 @@ def prepare_datasets(
       test_dataset = (
           grain.MapDataset.source(test_dataset)
           .shuffle(seed=trainer_config.data_shuffle_seed)
-          .map(lambda x: utils_rl.process_data(eval_dataset_name, model_tokenizer, template_config, trainer_config, x))
+          .map(lambda x: _process_data(eval_dataset_name, model_tokenizer, template_config, trainer_config, x))
       )
 
   def _filter_long_prompts(x):
