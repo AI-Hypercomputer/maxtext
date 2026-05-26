@@ -19,7 +19,7 @@ RL Evaluation Module.
 import collections
 import json
 import re
-from typing import Any
+from typing import Any, Callable, Optional
 
 from tqdm.auto import tqdm
 from tunix.rl.rollout.base_rollout import RolloutConfig
@@ -190,6 +190,7 @@ def evaluate(
     num_passes=1,
     corr_lst=False,
     make_lst=False,
+    reward_fns: Optional[list[Callable[..., Any]]] = None,
 ):
   """
   Computes accuracy and percentage of outputs matching the format.
@@ -201,15 +202,25 @@ def evaluate(
       num_passes: Number of generation passes
       corr_lst: If True, only include correct responses in the list
       make_lst: If True, return a list of (question, answer, responses)
+      reward_fns: Optional list of reward functions to also evaluate against
+          the greedy responses. Each function must accept `prompts`,
+          `completions`, `answer`, and return a list of floats (same signature
+          as the training-time reward stack). When provided, the per-example
+          score is the SUM across all reward functions (matching tunix's GRPO
+          aggregation), and the per-example mean is returned as `mean_reward`.
+          When None or empty, `mean_reward` is 0.0.
 
   Returns:
-      Tuple of statistics and optionally the response list
+      Tuple (corr, total, accuracy, partial_accuracy, format_accuracy,
+      mean_reward), response_lst
   """
   response_lst = []
   corr = 0
   partially_corr = 0
   corr_format = 0
   total = 0
+  reward_sum = 0.0
+  use_reward = bool(reward_fns)
 
   for batch in tqdm(dataset):
     answers = batch["answer"]
@@ -225,15 +236,42 @@ def evaluate(
     )
 
     # Score each question-answer pair
-    for question, responses, answer in zip(questions, multiple_call_responses, answers):
+    for question, responses, answer, prompt in zip(
+        questions, multiple_call_responses, answers, prompts
+    ):
       # decode the json-encoded list of acceptable answers
-      answer = list(dict.fromkeys(json.loads(answer)))
+      answer_list = list(dict.fromkeys(json.loads(answer)))
       is_correct, is_partially_correct, has_correct_format = score_responses(
           tmvp_config=tmvp_config,
           question=question,
           responses=responses,
-          answers=answer,
+          answers=answer_list,
       )
+
+      # ---- Reward-function mean (eval-time mirror of the training reward) ----
+      # Run each configured reward function on the greedy response and sum the
+      # per-function scores (matching how tunix's GRPO aggregates rewards
+      # across reward_fns). The per-example total is accumulated and divided
+      # by `total` at the end to produce `mean_reward`. The `answer` field is
+      # the original json-encoded gold (unchanged) so the reward function sees
+      # exactly what the training-time reward function sees.
+      if use_reward:
+        try:
+          resp = responses[0] if responses else ""
+          row_score = 0.0
+          for fn in reward_fns:
+            scores = fn(
+                prompts=[prompt],
+                completions=[resp],
+                answer=[answer],
+            )
+            if scores:
+              row_score += float(scores[0])
+          reward_sum += row_score
+        except Exception as _e_rw:  # pylint: disable=broad-exception-caught
+          max_logging.log(
+              f"[eval-reward] reward_fn failed on row {total}: {_e_rw!r}"
+          )
 
       # Update counters. For "pass" and "maj" modes, scores are booleans
       # (True=1, False=0). For "pass_at_1" mode, scores are floats in [0, 1]
@@ -245,9 +283,9 @@ def evaluate(
 
       if make_lst:
         if corr_lst and is_correct:
-          response_lst.append((question, answer, responses))
+          response_lst.append((question, answer_list, responses))
         elif not corr_lst and not is_correct:
-          response_lst.append((question, answer, responses))
+          response_lst.append((question, answer_list, responses))
 
       total += 1
 
@@ -265,6 +303,7 @@ def evaluate(
       corr / total * 100 if total > 0 else 0,
       partially_corr / total * 100 if total > 0 else 0,
       corr_format / total * 100 if total > 0 else 0,
+      reward_sum / total if (use_reward and total > 0) else 0.0,
   )
 
   return to_return, response_lst
