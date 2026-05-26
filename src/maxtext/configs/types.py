@@ -1963,6 +1963,10 @@ class RL(BaseModel):
   grpo_beta: float = Field(0.08, description="Coefficient for the KL divergence penalty (β).")
   grpo_epsilon: float = Field(0.2, description="Epsilon value for clipping in the GRPO loss.")
   loss_algo: Literal["grpo", "gspo-token"] = Field("grpo", description="Loss algorithm, i.e., 'grpo' or 'gspo-token'.")
+  loss_agg_mode: Literal["token-mean", "sequence-mean", "sequence-mean-token-mean"] = Field(
+      "sequence-mean-token-mean",
+      description="Specifies the method for aggregating loss across the batch.",
+  )
   use_agentic_rollout: bool = Field(
       False,
       description="If True, uses the asynchronous AgenticGRPOLearner for online vLLM rollouts.",

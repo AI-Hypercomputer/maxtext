@@ -54,6 +54,9 @@ rl:
   grpo_epsilon: 0.2
   loss_algo: 'grpo' # grpo or gspo-token
 
+  # Specifies the method for aggregating loss across the batch.
+  loss_agg_mode: 'sequence-mean-token-mean'  # 'token-mean' | 'sequence-mean' | 'sequence-mean-token-mean'
+
   # ====== Agentic Rollout ======
   # If true, uses the async AgenticGRPOLearner, which overlaps rollout generation
   # with training for faster throughput via online vLLM inference.
