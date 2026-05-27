@@ -425,7 +425,8 @@
     "partition_spec": [
       [
         "fsdp",
-        "context"
+        "context",
+        "expert"
       ],
       null,
       null
@@ -1323,7 +1324,8 @@
     "partition_spec": [
       [
         "fsdp",
-        "context"
+        "context",
+        "expert"
       ],
       null,
       null
@@ -2199,7 +2201,8 @@
     "partition_spec": [
       [
         "fsdp",
-        "context"
+        "context",
+        "expert"
       ],
       null,
       null
