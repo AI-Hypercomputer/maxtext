@@ -66,6 +66,7 @@ def main(config):
 
   # Import the real server_lib now that it's known present.
   from jetstream.core import server_lib  # type: ignore  # pylint: disable=import-outside-toplevel
+  import grpc  # pylint: disable=import-outside-toplevel
   import pathwaysutils  # pylint: disable=unused-import,import-outside-toplevel
 
   pathwaysutils.initialize()
@@ -78,15 +79,27 @@ def main(config):
   if config.prometheus_port != 0:
     metrics_server_config = config_lib.MetricsServerConfig(port=config.prometheus_port)
 
+  # Configure gRPC credentials. To enable secure TLS serving (e.g., for AIVS compliance or production),
+  # provide both `grpc_tls_certificate_path` (X.509 public cert) and `grpc_tls_private_key_path`.
+  # Otherwise, defaults to insecure credentials for local unit testing and development.
+  if config.grpc_tls_certificate_path and config.grpc_tls_private_key_path:
+    with open(config.grpc_tls_private_key_path, "rb") as f:
+      private_key = f.read()
+    with open(config.grpc_tls_certificate_path, "rb") as f:
+      certificate = f.read()
+    credentials = grpc.ssl_server_credentials([(private_key, certificate)])
+  else:
+    credentials = grpc.insecure_server_credentials()
+
   # We separate credential from run so that we can unit test it with
   # local credentials.
-  # TODO: Add grpc credentials for OSS.
   # pylint: disable=unexpected-keyword-arg
   jetstream_server = server_lib.run(
       threads=256,
       port=9000,
       config=server_config,
       devices=devices,
+      credentials=credentials,
       metrics_server_config=metrics_server_config,
       enable_jax_profiler=config.enable_jax_profiler if config.enable_jax_profiler else False,
       jax_profiler_port=config.jax_profiler_port if config.jax_profiler_port else 9999,
