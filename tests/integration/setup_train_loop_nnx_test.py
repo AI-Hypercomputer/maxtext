@@ -26,6 +26,7 @@ import os
 import sys
 import unittest
 
+
 from flax import nnx
 import jax
 import jax.numpy as jnp
@@ -141,7 +142,6 @@ class SetupTrainLoopNNXIntegrationTest(unittest.TestCase):
 
   def test_pure_nnx_dpo_setup_materializes_reference_model(self):
     """With use_dpo=True the NNX init_state_fn materializes a frozen reference
-
     model alongside the policy (train_utils.py:233-237). Both come from
     _create_model_partial() with the same init_weights_seed, so absent a step-0
     checkpoint the reference starts bit-identical to the policy.
@@ -149,8 +149,7 @@ class SetupTrainLoopNNXIntegrationTest(unittest.TestCase):
     Positive replacement for the removed
     test_pure_nnx_dpo_raises_not_implemented:
     NNX DPO is supported now, so setup_train_loop builds the reference instead
-    of
-    raising.
+    of raising.
     """
     config = _tiny_nnx_pyconfig(use_dpo=True, packing=False)
     *_, train_state = setup_train_loop(config, recorder=None)

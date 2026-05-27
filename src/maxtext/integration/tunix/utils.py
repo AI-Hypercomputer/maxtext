@@ -153,10 +153,47 @@ class VllmWeightMapping:
       return {}
 
   def lora_to_hf_mappings(self):
-    if self.use_standalone_mappings:
-      return STANDALONE_VLLM_WEIGHT_MAPPING[self.model_name].lora_to_hf_mappings()
+    # Dynamically generate LoRA mappings from base model weights mappings
+    base_mappings = self.to_hf_mapping()
+    if not base_mappings:
+      return None
 
-    return None
+    lora_mapping = {}
+    for maxtext_key, (hf_key, sharding_spec) in base_mappings.items():
+      segments = set(maxtext_key.split("."))
+      is_input_proj = any(p in segments for p in ["wi_0", "wi_1", "query", "key", "value", "wq_a", "wq_b", "wkv_a", "wkv_b"])
+      is_output_proj = any(p in segments for p in ["wo", "out"])
+
+      if not (is_input_proj or is_output_proj):
+        continue
+
+      # Derive MaxText LoRA keys
+      maxtext_lora_a = maxtext_key + "_lora_a"
+      maxtext_lora_b = maxtext_key + "_lora_b"
+
+      # Derive HF/vLLM LoRA keys
+      if hf_key.endswith(".kernel"):
+        hf_lora_a = hf_key.replace(".kernel", ".kernel_lora_a")
+        hf_lora_b = hf_key.replace(".kernel", ".kernel_lora_b")
+      elif hf_key.endswith(".weight"):
+        hf_lora_a = hf_key.replace(".weight", ".weight_lora_a")
+        hf_lora_b = hf_key.replace(".weight", ".weight_lora_b")
+      else:
+        hf_lora_a = hf_key + "_lora_a"
+        hf_lora_b = hf_key + "_lora_b"
+
+      # Derive sharding specifications for Qwix LoRA parameters
+      if is_input_proj:
+        sharding_a = (None, "layer", None)  # Input -> Rank (unsharded)
+        sharding_b = sharding_spec           # Rank -> Output (same as base)
+      else:
+        sharding_a = sharding_spec           # Input -> Rank (same as base)
+        sharding_b = (None, "layer", None)  # Rank -> Output (unsharded)
+
+      lora_mapping[maxtext_lora_a] = (hf_lora_a, sharding_a)
+      lora_mapping[maxtext_lora_b] = (hf_lora_b, sharding_b)
+
+    return lora_mapping
 
   def _generalize_maxtext_key(self, maxtext_key):
     """Generalizes the MaxText key to a common vLLM format."""

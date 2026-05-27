@@ -532,18 +532,23 @@ def apply_lora_to_model(
   return lora_model
 
 
-def restore_lora_from_path(trainer: Any, mt_config: pyconfig.HyperParameters) -> Any:
+def restore_lora_from_path(trainer_or_model: Any, mt_config: pyconfig.HyperParameters) -> Any:
   """Restores LoRA parameter weights from an external Orbax checkpoint for a fresh run."""
   lora_restore_path = mt_config.lora.lora_restore_path
 
-  train_steps = getattr(trainer, "train_steps", 0)
+  if isinstance(trainer_or_model, nnx.Module):
+    model = trainer_or_model
+    train_steps = 0
+  else:
+    model = trainer_or_model.model
+    train_steps = getattr(trainer_or_model, "train_steps", 0)
   if train_steps > 0:
     max_logging.log(
         f"PeftTrainer restored current run at step {train_steps}; " f"ignoring lora_restore_path '{lora_restore_path}'."
     )
-    return trainer
+    return trainer_or_model
 
-  if not is_lora_enabled(trainer.model):
+  if not is_lora_enabled(model):
     lora_module_path = _get_lora_module_path(mt_config)
     if not mt_config.lora.enable_lora:
       raise ValueError(
@@ -551,7 +556,7 @@ def restore_lora_from_path(trainer: Any, mt_config: pyconfig.HyperParameters) ->
           f"Set lora.enable_lora=True and verify lora_module_path ('{lora_module_path}') matches model modules."
       )
 
-  abstract_lora_params = nnx.state(trainer.model, nnx.LoRAParam)
+  abstract_lora_params = nnx.state(model, nnx.LoRAParam)
 
   target_for_restore = jax.tree.map(
       lambda v: {"value": v.value},
@@ -607,6 +612,6 @@ def restore_lora_from_path(trainer: Any, mt_config: pyconfig.HyperParameters) ->
       is_leaf=lambda n: isinstance(n, nnx.Variable),
   )
 
-  nnx.update(trainer.model, abstract_lora_params)
+  nnx.update(model, abstract_lora_params)
   max_logging.log(f"LoRA restore complete from '{lora_restore_path}'.")
-  return trainer
+  return trainer_or_model
