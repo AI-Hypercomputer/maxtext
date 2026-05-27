@@ -110,11 +110,11 @@ def generate_maxtext_config(vllm_config: VllmConfig, mesh: Mesh) -> pyconfig.Hyp
   )
   hidden_size = getattr(hf_config, "moe_intermediate_size", None)
   num_lanes = pltpu.get_tpu_info().num_lanes
-  use_global_kv_heads = hasattr(hf_config, "num_global_key_value_heads")
   num_kv_heads = hf_config.num_key_value_heads
 
-  # Get the number KV heads used in global attention layers if specified.
-  num_global_kv_heads = hf_config.num_global_key_value_heads if use_global_kv_heads else None
+  # Number of KV heads in global attention layers (None if the field is absent or unset).
+  num_global_kv_heads = getattr(hf_config, "num_global_key_value_heads", None)
+  use_global_kv_heads = num_global_kv_heads is not None
 
   max_logging.log(
       f"vLLM sharding config: hidden_size={hidden_size}, kv_heads={num_kv_heads}, global_kv_heads={num_global_kv_heads}, "

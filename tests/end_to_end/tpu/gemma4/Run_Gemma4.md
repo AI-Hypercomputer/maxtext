@@ -85,4 +85,59 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml model_n
 ```
 
 ## Inference
-For detailed instructions on running inference and decoding with MaxText, please refer to our [Inference Tutorial](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/tutorials/inference.md).
+
+Run Gemma 4 inference on vLLM using the MaxText model implementation, via the
+[out-of-tree](https://github.com/vllm-project/tpu-inference/blob/main/docs/getting_started/out-of-tree.md)
+vLLM model plugin. Weights are loaded directly from a MaxText (Orbax) checkpoint. See the general
+[Inference Tutorial](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/tutorials/inference.md)
+for installation and online/RL workflows; this guide is the Gemma 4 quickstart.
+
+### Installation
+
+Install MaxText with the `tpu-post-train` extra (it provides the vLLM adapter plugin and the pinned `tpu-inference` / `vllm` versions), then verify the plugin is present:
+
+```sh
+pip show maxtext_vllm_adapter
+```
+
+If it is missing, run:
+
+```sh
+install_tpu_post_train_extra_deps
+```
+
+### Offline inference
+
+`maxtext.inference.vllm_decode` runs offline decode through vLLM (it sets `NEW_MODEL_DESIGN=1` for you; you only set it yourself for direct `vllm serve`). Set `HF_HUB_OFFLINE=1` if the tokenizer is already cached locally. Pass `src/maxtext/configs/base.yml` as the config — the vLLM adapter applies `src/maxtext/configs/inference/vllm.yml` internally for the model. The vLLM path requires an **unscanned** checkpoint, so pass `scan_layers=False` (as the examples below do).
+
+Dense models (e.g. `gemma4-31b`):
+
+```sh
+python3 -m maxtext.inference.vllm_decode src/maxtext/configs/base.yml \
+    model_name=gemma4-31b \
+    tokenizer_path=google/gemma-4-31b-it \
+    load_parameters_path=${CONVERTED_CHECKPOINT} \
+    vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
+    ici_tensor_parallelism=4 scan_layers=False \
+    prompt="Who was Albert Einstein?" use_chat_template=True
+```
+
+MoE models (e.g. `gemma4-26b`) additionally require `prefuse_moe_weights=True`, which pre-fuses
+the expert gate/up projections into the per-shard layout the fused-MoE kernel expects — required
+for correct output with `ici_tensor_parallelism` > 1:
+
+```sh
+python3 -m maxtext.inference.vllm_decode src/maxtext/configs/base.yml \
+    model_name=gemma4-26b \
+    tokenizer_path=google/gemma-4-26b-a4b-it \
+    load_parameters_path=${CONVERTED_CHECKPOINT} \
+    vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
+    ici_tensor_parallelism=4 scan_layers=False prefuse_moe_weights=True \
+    prompt="Who was Albert Einstein?" use_chat_template=True
+```
+
+Set `model_name`/`tokenizer_path` to your variant (`gemma4-26b`, `gemma4-31b`) and
+`ici_tensor_parallelism` to the number of chips — pass an explicit count (e.g. `4` on a v5p-8), not
+`-1`, since `vllm_decode` forwards this value directly to vLLM's `tensor_parallel_size`.
+
+> **Note:** `gemma4-e2b` / `gemma4-e4b` are not yet supported. They use cross-layer KV sharing, and will be supported soon.
