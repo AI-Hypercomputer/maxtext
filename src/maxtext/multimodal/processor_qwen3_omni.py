@@ -472,6 +472,12 @@ def _np_extract_fbank_features(waveform_batch: np.ndarray) -> np.ndarray:
 
 def pre_process_audio_qwen3_omni(audio_array):
   """Preprocess audio for Qwen3-Omni model."""
+  chunk_samples = 16000  # hop_length (160) * chunk_size (100)
+  remainder = len(audio_array) % chunk_samples
+  if remainder > 0:
+    padding_size = chunk_samples - remainder
+    audio_array = np.pad(audio_array, (0, padding_size), mode="constant")
+
   audio_features = np.expand_dims(audio_array, axis=0)  # Add batch dimension
   audio_features = _np_extract_fbank_features(audio_features)
   audio_features_mask = np.ones((audio_features.shape[0], audio_features.shape[2]), dtype=np.int32)
@@ -532,7 +538,17 @@ def preprocess_mm_data_qwen3_omni(config):
   if config.video_path:
     video_array, _ = _read_video_decord(config.video_path)
     video_processed, video_grid_thw = preprocess_video(video_array, config)
-    processor_outputs.video_values = video_processed
+    video_values = np.reshape(
+        video_processed,
+        (
+            1,
+            config.num_channels_for_vit,
+            config.temporal_patch_size_for_vit * video_grid_thw[0, 0],
+            config.patch_size_for_vit * video_grid_thw[0, 1],
+            config.patch_size_for_vit * video_grid_thw[0, 2],
+        ),
+    )
+    processor_outputs.video_values = video_values
     processor_outputs.video_grid_thw = video_grid_thw
     processor_outputs.video_second_per_grid = np.asarray([config.temporal_patch_size_for_vit], dtype=np.float32)
     processor_outputs.num_videos = 1  # Only one video for now.
@@ -1143,6 +1159,9 @@ def get_mm_offsets_qwen3_omni(config, processor_output):
   if processor_output.audio_lengths is not None:
     audio_lengths = processor_output.audio_lengths
     for audio_len in audio_lengths:
-      total_offset += int(audio_len) - 1  # -1 for the original <|audio_pad|> token
+      if getattr(config, "use_audio_in_video", False):
+        total_offset += int(audio_len) + 2  # +2 for <|audio_start|> and <|audio_end|>, no <|audio_pad|> to remove
+      else:
+        total_offset += int(audio_len) - 1  # -1 for the original <|audio_pad|> token
 
   return total_offset

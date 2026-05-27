@@ -207,7 +207,7 @@ def get_dummy_audio_shape_for_init(config):
   return audio_shape
 
 
-def get_bidirectional_mask_vision(config, decoder_input_tokens):
+def get_bidirectional_mask_vision(config, decoder_input_tokens, is_video: bool = False):
   """Get the bidirectional mask for specific models."""
   bidirectional_mask_vision = None
   if config.model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
@@ -225,11 +225,10 @@ def get_bidirectional_mask_vision(config, decoder_input_tokens):
   elif config.model_name in ["qwen3-omni-30b-a3b", "qwen3.5-397b-a17b"]:
     from maxtext.multimodal.processor_qwen3_omni import QWEN3_OMNI_IMAGE_TOKEN, QWEN3_OMNI_VIDEO_TOKEN  # pylint: disable=import-outside-toplevel
 
-    # Create bidirectional_mask for vision/video token merging
-    bidirectional_mask_vision = (decoder_input_tokens == QWEN3_OMNI_IMAGE_TOKEN) | (
-        decoder_input_tokens == QWEN3_OMNI_VIDEO_TOKEN
-    )
-    # Create image/video mask for deepstack visual embedding injection
+    if is_video:
+      bidirectional_mask_vision = decoder_input_tokens == QWEN3_OMNI_VIDEO_TOKEN
+    else:
+      bidirectional_mask_vision = decoder_input_tokens == QWEN3_OMNI_IMAGE_TOKEN
   return bidirectional_mask_vision
 
 

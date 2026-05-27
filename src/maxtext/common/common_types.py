@@ -80,9 +80,12 @@ class MultimodalInput:
 
   image_embeddings: Array | None = None
   image_masks: Array | None = None
+  video_embeddings: Array | None = None
+  video_masks: Array | None = None
   audio_embeddings: Array | None = None
   audio_masks: Array | None = None
   bidirectional_mask: Array | None = None
+  bidirectional_mask_video: Array | None = None
 
 
 class DecoderBlockType(enum.Enum):
