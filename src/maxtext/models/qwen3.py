@@ -810,6 +810,13 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     query_start_loc = attention_metadata.query_start_loc
     seq_lens = attention_metadata.seq_lens
 
+    b = jax.lax.with_sharding_constraint(
+        b, jax.sharding.NamedSharding(self.mesh, jax.sharding.PartitionSpec(attn_data, attn_head))
+    )
+    a = jax.lax.with_sharding_constraint(
+        a, jax.sharding.NamedSharding(self.mesh, jax.sharding.PartitionSpec(attn_data, attn_head))
+    )
+
     (new_conv_state, new_recurrent_state), output = run_jax_gdn_attention(
         mixed_qkv,
         b,
