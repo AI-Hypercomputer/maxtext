@@ -55,7 +55,7 @@ _CONFIG_FILE_MAPPING: dict[str, str] = {
     "maxtext.trainers.post_train.dpo.train_dpo": "post_train/dpo.yml",
     "maxtext.trainers.post_train.rl.train_rl": "post_train/rl.yml",
     "maxtext.trainers.post_train.sft.train_sft": "post_train/sft.yml",
-    "maxtext.trainers.post_train.sft.train_sft_deprecated": "post_train/sft.yml",
+    "maxtext.trainers.post_train.sft.train_sft_native": "post_train/sft.yml",
     "maxtext.inference.decode": "base.yml",
     "maxtext.inference.decode_multi": "base.yml",
     "maxtext.inference.inference_microbenchmark": "base.yml",
