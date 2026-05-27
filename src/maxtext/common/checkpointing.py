@@ -312,17 +312,6 @@ def create_orbax_checkpoint_manager(
       logger=orbax_logger,
   )
 
-  # Use Colocated Python checkpointing optimization (Single Controller only).
-  if enable_single_controller and colocated_python_checkpointing:
-    max_logging.log("Registering colocated python array handler")
-    checkpointing_impl = ocp.pathways.CheckpointingImpl.from_options(
-        use_colocated_python=True,
-    )
-    ocp.pathways.register_type_handlers(
-        use_single_replica_array_handler=enable_single_replica_ckpt_restoring,
-        checkpointing_impl=checkpointing_impl,
-    )
-
   max_logging.log("Checkpoint manager created!")
   return manager
 
@@ -369,6 +358,7 @@ def create_orbax_emergency_replicator_checkpoint_manager(
     local_checkpoint_dir: str,
     save_interval_steps: int,
     global_mesh: jax.sharding.Mesh,
+    colocated_python_checkpointing: bool = False,
 ):
   """Returns an emergency replicator checkpoint manager."""
   flags.FLAGS.experimental_orbax_use_distributed_process_id = True
@@ -378,6 +368,7 @@ def create_orbax_emergency_replicator_checkpoint_manager(
       epath.Path(local_checkpoint_dir),
       options=emergency_replicator_checkpoint_manager.ReplicatorCheckpointManagerOptions(
           save_interval_steps=save_interval_steps,
+          use_colocated_python=colocated_python_checkpointing,
       ),
       global_mesh=global_mesh,
   )
@@ -793,7 +784,8 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
       # Linen TrainState has .step attribute
       actual_step = int(state.step) - 1
 
-  if checkpoint_manager.latest_step() == actual_step:
+  latest_step = checkpoint_manager.latest_step()
+  if latest_step == actual_step:
     max_logging.log(f"Checkpoint for step {actual_step} already exists, skipping save.")
     return
 
@@ -807,6 +799,19 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
   # AND the 'actual_step' is a valid step,
   # AND it's not a step that would normally trigger a checkpoint save.
   force_ckpt_save = step is None and actual_step != -1 and (actual_step % config.checkpoint_period != 0)
+
+  # Final-save guard: avoid forcing a duplicate step save.
+  if step is None and actual_step != -1:
+    if latest_step is not None and actual_step <= latest_step:
+      max_logging.log(
+          "Skipping final checkpoint save: effective step "
+          f"{actual_step} is already present (latest_step={latest_step})."
+      )
+      # No save attempt needed. Keep preemption semantics unchanged.
+      if checkpoint_manager.reached_preemption(actual_step):
+        checkpoint_manager.wait_until_finished()
+        raise exceptions.StopTraining("Job is preempted.")
+      return
 
   try:
     checkpoint_saved = save_checkpoint(checkpoint_manager, actual_step, state, config, data_iterator, force_ckpt_save)

@@ -430,6 +430,23 @@ class TestMaybeSaveCheckpointStepAlignment(unittest.TestCase):
     # Assert that save_checkpoint was NOT called!
     save_checkpoint_mock.assert_not_called()
 
+  def test_maybe_save_checkpoint_skips_final_save_if_latest_step_is_newer(self):
+    """Verify final save skips when checkpoint manager already has a newer step."""
+    state = self._build_nnx_state(self.N_STEPS)
+    actual_step = self.N_STEPS - 1
+
+    config = SimpleNamespace(pure_nnx=True, checkpoint_period=1, async_checkpointing=False)
+    mgr = mock.MagicMock()
+    mgr.reached_preemption.return_value = False
+    mgr.latest_step.return_value = actual_step + 1
+
+    save_checkpoint_mock = mock.MagicMock()
+
+    with mock.patch.object(checkpointing, "save_checkpoint", save_checkpoint_mock):
+      checkpointing.maybe_save_checkpoint(mgr, state, config, data_iterator=None, step=None)
+
+    save_checkpoint_mock.assert_not_called()
+
   def test_maybe_save_checkpoint_saves_if_not_already_saved(self):
     """Verify maybe_save_checkpoint saves if latest_step does not match actual_step."""
     state = self._build_nnx_state(self.N_STEPS)
