@@ -29,6 +29,7 @@ from maxtext.trainers.pre_train import train_compile
 from maxtext.trainers.pre_train import train
 
 
+@pytest.mark.skip_on_tpu7x
 class CompileThenLoadTest(unittest.TestCase):
   """Tests for the Split Compile and Train workflow"""
 

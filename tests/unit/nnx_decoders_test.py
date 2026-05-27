@@ -266,6 +266,9 @@ class TestNNXDecoderLayer(unittest.TestCase):
 
   def test_record_metrics(self):
     """Test recording intermediate activation metrics."""
+    if not hasattr(nnx, "capture"):
+      self.skipTest("flax.nnx does not support capture on this environment configuration")
+
     cfg = _make_config(record_internal_nn_metrics=1)
     layer = self._make_layer(MODEL_MODE_TRAIN, config=cfg)
     inputs, segment_ids, positions = self._make_inputs()

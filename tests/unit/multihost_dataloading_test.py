@@ -39,7 +39,7 @@ class MultihostDataloadingTest(unittest.TestCase):
     # Note: this test uses gs://max-experiments/ (not gs://runner-maxtext-logs) in cloud mode
     base_output_directory = get_test_base_output_directory(cloud_path="gs://max-experiments/")
     dataset_path = get_test_dataset_path(cloud_path="gs://maxtext-dataset/")
-    batch_size = 4
+    batch_size = len(jax.devices())
     config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         base_output_directory=base_output_directory,
