@@ -69,34 +69,21 @@ class MaxEngineTest(unittest.TestCase):
     )
     return config
 
-  def test_stack_and_unstack_prefill_cache(self):
-    config = pyconfig.initialize(
-        [None, get_test_config_path()],
-        enable_checkpointing=False,
-        stack_prefill_result_cache=True,
-    )
-    engine = maxengine.MaxEngine(config, jax.devices())
+  def test_stack_and_unstack_prefill_cache_nnx(self):
+    """scan_layers=False: per-layer cache subtrees stack onto a leading layer axis and back."""
+    cfg = self._init_nnx_pyconfig(stack_prefill_result_cache=True, scan_layers=False)
+    engine = maxengine.MaxEngine(cfg, jax.devices())
     num_layers = engine.config.num_decoder_layers
-    input_d = {
-        "decoder": {},
-    }
-    for i in range(num_layers):
-      input_d["decoder"][f"layers_{i}"] = {
-          "a": jnp.ones((1, 10)),
-          "b": jnp.ones((1, 9)),
-      }
+    # scan_layers=False keeps the per-layer subtrees under decoder/layers, keyed by layer index.
+    cache = {"decoder": {"layers": {i: {"a": jnp.ones((1, 10)), "b": jnp.ones((1, 9))} for i in range(num_layers)}}}
 
-    expected_stacked = {
-        "a": jnp.ones((num_layers, 1, 10)),
-        "b": jnp.ones((num_layers, 1, 9)),
-    }
+    expected_stacked = {"decoder": {"layers": {"a": jnp.ones((num_layers, 1, 10)), "b": jnp.ones((num_layers, 1, 9))}}}
     # pylint: disable=protected-access
-    got_stacked = engine._maybe_stack_prefill_result_cache(input_d)
+    got_stacked = engine._maybe_stack_prefill_result_cache(cache)
     jax.tree.map(np.testing.assert_array_equal, got_stacked, expected_stacked)
 
-    # pylint: disable=protected-access
     got_unstacked = engine._maybe_unstack_prefill_result_cache(got_stacked)
-    jax.tree.map(np.testing.assert_array_equal, got_unstacked, input_d)
+    jax.tree.map(np.testing.assert_array_equal, got_unstacked, cache)
 
   # The Linen-path basic prefill/decode tests were removed when NNX became the
   # default. test_basic_prefill_nnx / test_basic_decode_nnx below cover the NNX path.
@@ -112,18 +99,6 @@ class MaxEngineTest(unittest.TestCase):
       model = _create_model()
     _, params_state, _ = nnx.split(model, nnx.Param, ...)
     return params_state
-
-  def _build_linen_params(self, cfg, mesh):
-    """Materialize a Linen Transformer and return its init vars (for NNX/Linen shape parity)."""
-    quant = quantizations.configure_quantization(cfg)
-    model = models.transformer_as_linen(config=cfg, mesh=mesh, quant=quant, model_mode=MODEL_MODE_PREFILL)
-    s = (cfg.global_batch_size_to_train_on, cfg.max_target_length)
-    ids = jax.random.randint(self.rng, s, 0, cfg.vocab_size)
-    segment_ids = jnp.zeros(s) + DECODING_ACTIVE_SEQUENCE_INDICATOR
-    positions = jnp.stack([jnp.arange(cfg.max_target_length, dtype=jnp.int32) for _ in range(s[0])])
-    return model.init(
-        {"params": self.rng, "aqt": self.rng, "dropout": self.rng}, ids, positions, segment_ids, enable_dropout=False
-    )
 
   def test_init_nnx(self):
     """NNX engine init exposes graphdef + abstract Transformer."""
@@ -249,7 +224,7 @@ class MaxEngineTest(unittest.TestCase):
       engine.load_single_adapter("/nonexistent/adapter/path")
 
   def test_prefill_multisampling_nnx(self):
-    """NNX prefill_multisampling matches the Linen result shape; logits + cache stay finite."""
+    """NNX prefill_multisampling draws num_samples first tokens; logits + cache stay finite."""
     num_samples = 3
     input_tokens = jnp.array([1, 306, 5360, 304, 0, 0, 0, 0])
     true_length = 4
@@ -258,27 +233,19 @@ class MaxEngineTest(unittest.TestCase):
     mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
     engine = maxengine.MaxEngine(cfg, jax.devices())
     params = engine.load_params(params=self._build_nnx_params(cfg, mesh))
-    nnx_result, nnx_first = engine.prefill_multisampling(
+    result, first = engine.prefill_multisampling(
         params=params, padded_tokens=input_tokens, true_length=true_length, num_samples=num_samples
     )
 
-    lin_cfg = self.init_pyconfig()
-    lin_mesh = Mesh(maxtext_utils.create_device_mesh(lin_cfg), lin_cfg.mesh_axes)
-    lin_engine = maxengine.MaxEngine(lin_cfg, jax.devices())
-    lin_params = lin_engine.load_params(params=self._build_linen_params(lin_cfg, lin_mesh))
-    lin_result, lin_first = lin_engine.prefill_multisampling(
-        params=lin_params, padded_tokens=input_tokens, true_length=true_length, num_samples=num_samples
-    )
-
-    self.assertEqual(nnx_result["tokens"].shape, lin_result["tokens"].shape)
-    self.assertEqual(nnx_result["tokens"].shape[0], num_samples)
-    self.assertEqual(nnx_first.data.shape, lin_first.data.shape)
-    self.assertTrue(jnp.all(jnp.isfinite(nnx_result["logits"])))
-    for leaf in jax.tree.leaves(nnx_result["cache"]):
+    self.assertEqual(result["tokens"].shape[0], num_samples)
+    # data packs [token, valid, length] for each sample.
+    self.assertEqual(first.data.shape, (num_samples, 3))
+    self.assertTrue(jnp.all(jnp.isfinite(result["logits"])))
+    for leaf in jax.tree.leaves(result["cache"]):
       self.assertTrue(jnp.all(jnp.isfinite(leaf)), msg=f"non-finite cache leaf, shape={leaf.shape}")
 
   def test_prefill_concat_nnx(self):
-    """NNX prefill_concat matches the Linen result shape for packed prompts."""
+    """NNX prefill_concat returns one result per packed prompt; logits + cache stay finite."""
     # Two prompts of length 2 packed into one prefill of length max_prefill_predict_length=4.
     packed = {
         "padded_tokens": jnp.array([1, 306, 5360, 304]),
@@ -293,19 +260,12 @@ class MaxEngineTest(unittest.TestCase):
     mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
     engine = maxengine.MaxEngine(cfg, jax.devices())
     params = engine.load_params(params=self._build_nnx_params(cfg, mesh))
-    nnx_cache, nnx_result, nnx_first = engine.prefill_concat(params=params, **packed)
+    cache, result, first_tokens = engine.prefill_concat(params=params, **packed)
 
-    lin_cfg = self.init_pyconfig()
-    lin_mesh = Mesh(maxtext_utils.create_device_mesh(lin_cfg), lin_cfg.mesh_axes)
-    lin_engine = maxengine.MaxEngine(lin_cfg, jax.devices())
-    lin_params = lin_engine.load_params(params=self._build_linen_params(lin_cfg, lin_mesh))
-    _, lin_result, lin_first = lin_engine.prefill_concat(params=lin_params, **packed)
-
-    self.assertEqual(nnx_result["tokens"].shape, lin_result["tokens"].shape)
-    self.assertEqual(len(nnx_first), len(lin_first))
-    self.assertEqual(len(nnx_first), packed["num_prompts"])
-    self.assertTrue(jnp.all(jnp.isfinite(nnx_result["logits"])))
-    for leaf in jax.tree.leaves(nnx_cache):
+    self.assertEqual(result["tokens"].shape[0], packed["num_prompts"])
+    self.assertEqual(len(first_tokens), packed["num_prompts"])
+    self.assertTrue(jnp.all(jnp.isfinite(result["logits"])))
+    for leaf in jax.tree.leaves(cache):
       self.assertTrue(jnp.all(jnp.isfinite(leaf)), msg=f"non-finite cache leaf, shape={leaf.shape}")
 
   def _stack_prefill_roundtrip(self, cfg):
