@@ -727,34 +727,47 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # =========================================================================
     # STEP A: Input projections (same as training path, but ragged-flattened).
     # =========================================================================
-    qkvz = self.in_proj_qkvz(hidden_states)
-    ba = self.in_proj_ba(hidden_states)
-
-    new_shape_qkvz = (
-        batch,
-        seq_len,
+    # =========================================================================
+    # STEP A: Optimized Input Projections (using structured einsum to avoid activation copies)
+    # =========================================================================
+    precision = self.in_proj_qkvz.matmul_precision
+    
+    # --- A.1: Project qkv and z ---
+    w_qkvz = self.in_proj_qkvz.kernel[...]
+    w_qkvz_reshaped = w_qkvz.reshape(
+        w_qkvz.shape[0],
         self.num_k_heads,
         2 * self.head_k_dim + 2 * self.head_v_dim * self.v_heads_per_k_head,
     )
-    mixed_qkvz = qkvz.reshape(new_shape_qkvz)
-    split_indices_qkvz = [
-        self.head_k_dim,
-        2 * self.head_k_dim,
-        2 * self.head_k_dim + self.v_heads_per_k_head * self.head_v_dim,
-    ]
-    query, key, value_raw, z_raw = jnp.split(mixed_qkvz, split_indices_qkvz, axis=3)
-    # z: (B, S, H_v, D_v) — kept multi-head for the post-kernel gated norm.
-    z = z_raw.reshape(batch, seq_len, self.num_v_heads, self.head_v_dim)
+    split_idx_qkvz = 2 * self.head_k_dim + self.v_heads_per_k_head * self.head_v_dim
+    w_qkv = w_qkvz_reshaped[..., :split_idx_qkvz]
+    w_z = w_qkvz_reshaped[..., split_idx_qkvz:]
+    
+    mixed_qkv_4d = jnp.einsum("bse, ehd -> bshd", hidden_states, w_qkv, precision=precision)
+    z_4d = jnp.einsum("bse, ehd -> bshd", hidden_states, w_z, precision=precision)
+    
+    mixed_qkv = mixed_qkv_4d.reshape(num_tokens, -1)
+    z = z_4d.reshape(batch, seq_len, self.num_v_heads, self.head_v_dim)
 
-    mixed_ba = ba.reshape(batch, seq_len, self.num_k_heads, 2 * self.v_heads_per_k_head)
-    b_raw, a_raw = jnp.split(mixed_ba, [self.v_heads_per_k_head], axis=3)
-    # b, a: (num_tokens, H_v)
-    b = b_raw.reshape(num_tokens, self.num_v_heads)
-    a = a_raw.reshape(num_tokens, self.num_v_heads)
+    # --- A.2: Project b and a ---
+    w_ba = self.in_proj_ba.kernel[...]
+    w_ba_reshaped = w_ba.reshape(
+        w_ba.shape[0],
+        self.num_k_heads,
+        2 * self.v_heads_per_k_head,
+    )
+    split_idx_ba = self.v_heads_per_k_head
+    w_b = w_ba_reshaped[..., :split_idx_ba]
+    w_a = w_ba_reshaped[..., split_idx_ba:]
+    
+    b_4d = jnp.einsum("bse, ehd -> bshd", hidden_states, w_b, precision=precision)
+    a_4d = jnp.einsum("bse, ehd -> bshd", hidden_states, w_a, precision=precision)
+    
+    b = b_4d.reshape(num_tokens, -1)
+    a = a_4d.reshape(num_tokens, -1)
 
     # =========================================================================
-    # STEP B: Build mixed_qkv in the kernel's per-shard layout, then call
-    # tpu-inference's fused conv + ragged delta-rule kernel.
+    # STEP B: Call tpu-inference's fused conv + ragged delta-rule kernel.
     # =========================================================================
     attn_data = ShardingAxisName.ATTN_DATA
     # Head axis for the GDN kernel + the producer-side reshapes. Default ATTN_HEAD
@@ -768,25 +781,6 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     assert (
         self.num_k_heads % tp_size == 0 and self.num_v_heads % tp_size == 0
     ), f"GDN heads (k={self.num_k_heads}, v={self.num_v_heads}) must be divisible by tp_size={tp_size}."
-
-    # q/k/v come from in_proj_qkvz, whose feature dim is sharded over ATTN_HEAD
-    # (gdn_head). A global ``jnp.concatenate`` along that sharded axis would force an
-    # all-to-all (the contiguous global [Q|K|V] layout doesn't match each device's
-    # [q_shard, k_shard, v_shard]). Instead concatenate *within* each ATTN_HEAD shard via
-    # shard_map: each shard already holds its own q/k/v head-slices, so the local concat
-    # produces exactly the per-shard [q_local | k_local | v_local] block layout the kernel
-    # (and the conv_weight reorder below) expect — with no cross-device communication.
-    # This is byte-identical to the previous concatenate + reorder, minus the all-to-all.
-    q_flat = query.reshape(num_tokens, self.key_dim)
-    k_flat = key.reshape(num_tokens, self.key_dim)
-    v_flat = value_raw.reshape(num_tokens, self.value_dim)
-    mixed_qkv = jax.shard_map(
-        lambda q, k, v: jnp.concatenate([q, k, v], axis=-1),
-        mesh=self.mesh,
-        in_specs=(P(attn_data, attn_head),) * 3,
-        out_specs=P(attn_data, attn_head),
-        check_vma=False,
-    )(q_flat, k_flat, v_flat)
 
     # nnx.Conv kernel layout is (kernel_size, in_features // groups, out_features).
     # With feature_group_count == conv_dim this is (kernel_size, 1, conv_dim).
