@@ -225,8 +225,8 @@ class MetricLogger:
               f"avg_mtp_acceptance_rate={scalars['eval/avg_mtp_acceptance_rate_percent']:.2f}%",
           ]
       )
-    if self.config.use_dpo:
-      log_parts.append(f"dpo_reward_accuracy={scalars['eval/dpo_reward_accuracy']:.3f}")
+    if "eval/avg_dpo_reward_accuracy" in scalars:
+      log_parts.append(f"dpo_reward_accuracy={scalars['eval/avg_dpo_reward_accuracy']:.3f}")
     max_logging.log(", ".join(log_parts))
 
   def _log_running_eval_metrics(self, metrics, step):
@@ -415,10 +415,6 @@ class MetricLogger:
         scalar.get("evaluation/mtp_acceptance_rate_percent", 0.0)
     )
     self.cumulative_eval_metrics["scalar"]["eval/z_loss"] += float(scalar.get("evaluation/z_loss", 0.0))
-    if self.config.use_dpo:
-      self.cumulative_eval_metrics["scalar"]["eval/dpo_reward_accuracy"] += float(
-          scalar.get("evaluation/dpo_reward_accuracy", 0.0)
-      )
 
   def record_train_metrics(self, metrics, step, step_time):
     """Records training metrics for the current step."""
@@ -448,8 +444,7 @@ class MetricLogger:
     cumulative["eval/avg_mtp_loss"] = cumulative["eval/mtp_loss"] / eval_step_count
     cumulative["eval/avg_mtp_acceptance_rate_percent"] = cumulative["eval/mtp_acceptance_rate_percent"] / eval_step_count
     cumulative["eval/avg_z_loss"] = cumulative["eval/z_loss"] / eval_step_count
-    if self.config.use_dpo:
-      cumulative["eval/dpo_reward_accuracy"] = cumulative["eval/dpo_reward_accuracy"] / eval_step_count
+
     self.write_metrics(self.cumulative_eval_metrics, train_step, metric_type="eval")
     self._pending_eval_step_count = 0
     if self.config.target_eval_loss and eval_loss <= self.config.target_eval_loss:

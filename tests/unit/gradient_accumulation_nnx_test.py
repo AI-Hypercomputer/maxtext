@@ -105,7 +105,6 @@ class TestGradientAccumulationNNX(unittest.TestCase):
         params_shardings=self._params_shardings(),
         data=self.data,
         dropout_rng=None,
-        extra_dpo_args=[],
     )
     self.assertTrue(jnp.isfinite(loss))
     self.assertIn("xent_sum", aux)
@@ -130,7 +129,6 @@ class TestGradientAccumulationNNX(unittest.TestCase):
         params_shardings=self._params_shardings(),
         data=self.data,
         dropout_rng=None,
-        extra_dpo_args=[],
     )
     # The kernel itself is a Param — gradient_accumulation_loss_and_grad does not apply
     # gradients to params, so the value should be untouched.
@@ -148,7 +146,6 @@ class TestGradientAccumulationNNX(unittest.TestCase):
         params_shardings=self._params_shardings(),
         data=self.data,
         dropout_rng=None,
-        extra_dpo_args=[],
     )
     self.assertTrue(jnp.isfinite(loss))
     for g in jax.tree.leaves(raw_grads):
