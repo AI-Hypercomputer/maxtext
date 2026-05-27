@@ -28,7 +28,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
-import tensorflow as tf
+from etils import epath
 from array_record.python import array_record_module
 from orbax import checkpoint
 
@@ -87,7 +87,7 @@ class OfflineArrayRecordIterator:
   def __init__(self, data_dir: str, epochs: int = 100):
     self.filepath = data_dir
 
-    if not tf.io.gfile.exists(self.filepath):
+    if not epath.Path(self.filepath).exists():
       raise FileNotFoundError(f"Offline distillation file not found: {self.filepath}")
 
     self.reader = array_record_module.ArrayRecordReader(self.filepath)
