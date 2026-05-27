@@ -124,6 +124,11 @@ def check_sharding(array_or_dict, expected_sharding):
 @pytest.mark.scheduled_only
 def test_fsdp_sharding():
   """Tests FSDP sharding on a simple model simulation."""
+  # Use an imperative skip inside the test function instead of a static decorator.
+  # Calling jax.device_count() in @pytest.mark.skipif would force JAX initialization
+  # during PyTest's collection phase, locking the TPU or conflicting with CUDA.
+  if jax.device_count() != 4:
+    pytest.skip("FSDP sharding test requires exactly 4 devices")
   dcn_parallelism = [1, 1, 1]
   ici_parallelism = [1, 4, 1]
 

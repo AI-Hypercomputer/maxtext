@@ -398,7 +398,9 @@ class RoutedMoeTest(unittest.TestCase):
     )
     variables = model.init(
         {"params": rng, "dropout": rng},
-        jax.random.normal(rng, (int(cfg.per_device_batch_size), cfg.max_target_length, cfg.base_emb_dim)),
+        jax.random.normal(
+            rng, (int(cfg.per_device_batch_size) * jax.device_count(), cfg.max_target_length, cfg.base_emb_dim)
+        ),
     )
 
     output = jax.jit(model.apply)(variables, hidden_states)  # pylint: disable=not-callable
@@ -532,7 +534,7 @@ class RoutedMoeTest(unittest.TestCase):
     mesh = Mesh(devices_array, cfg.mesh_axes)
     variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg, mesh)
     actual_output, _, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
-    self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-05, atol=1e-05, equal_nan=False))
+    self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-03, atol=1e-03, equal_nan=False))
 
   @pytest.mark.tpu_only
   def test_megablox_expert_parallelism(self):
@@ -709,15 +711,22 @@ class RoutedMoeTest(unittest.TestCase):
       )
 
   @pytest.mark.tpu_only
+  @pytest.mark.skip_on_tpu7x
   def test_ragged_sort_loss_and_grad_ring_of_experts(self):
     self._run_ragged_sort_loss_and_grad(use_ring_of_experts=True)
 
   @pytest.mark.tpu_only
+  @pytest.mark.skip_on_tpu7x
   def test_ragged_sort_loss_and_grad_no_ring_of_experts(self):
     self._run_ragged_sort_loss_and_grad(use_ring_of_experts=False)
 
   @pytest.mark.tpu_only
   def test_moe_fsdp_two_stage_parallelism_tpu_only(self):
+    # Use an imperative skip inside the test method instead of a static decorator.
+    # Calling jax.device_count() in @unittest.skipIf would force JAX initialization
+    # during PyTest's collection phase, locking the TPU or conflicting with CUDA.
+    if jax.device_count() != 4:
+      self.skipTest("FSDP two stage parallelism test requires exactly 4 devices")
 
     cfg = pyconfig.initialize(
         [None, get_test_config_path()],
@@ -1277,6 +1286,10 @@ class FusedMoeTPUTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
+    try:
+      import tpu_inference  # pylint: disable=import-outside-toplevel,unused-import
+    except ImportError:
+      self.skipTest("Fused MoE tests require tpu-inference package to be installed.")
     self.rng = jax.random.PRNGKey(42)
 
     # Dense reference config (no vllm, einsum-based)

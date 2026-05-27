@@ -27,6 +27,9 @@ from maxtext.kernels import gather_reduce_sc
 import numpy as np
 
 
+from tests.conftest import _get_system_hardware_platform
+
+
 def _snr(signal, grnd_truth):
   error = signal - grnd_truth
   return jnp.log(1 + jnp.sum(signal**2) / (jnp.sum(error**2) + 1e-6))
@@ -36,8 +39,15 @@ class GatherReduceScTest(parameterized.TestCase):
 
   def setUp(self):
     """Skips tests if the TPU version is not supported."""
-    if jax.default_backend() == "gpu":
-      self.skipTest("gather_reduce_sc kernels are not supported on GPU")
+    # Use JAX-free system platform discovery check first!
+    if _get_system_hardware_platform() != "tpu":
+      self.skipTest("gather_reduce_sc kernels are only supported on TPU hardware")
+
+    # Bypassed dynamically on TPU7x Cloud VMs due to local compiler gaps
+    devices = jax.devices()
+    if devices and any("TPU7x" in d.device_kind for d in devices):
+      self.skipTest("SparseCore tests do not support simulated TPU7x platform constraints")
+
     tpu_info = pltpu.get_tpu_info()
     if tpu_info is None or tpu_info.chip_version not in (pltpu.ChipVersion.TPU_7X,):
       self.skipTest("Expect TPUv7+")

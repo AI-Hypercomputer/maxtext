@@ -62,7 +62,7 @@ class ContextParallelismTest(unittest.TestCase):
     config_cp = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         **self.config_arguments,
-        ici_context_parallelism=4,  # use context parallelism of 4
+        ici_context_parallelism=len(jax.devices()),  # use dynamic context parallelism
         context_parallel_load_balance=False,  # set load_balancing to False such that
         # there's no need for reordering the input/output
     )
@@ -73,10 +73,12 @@ class ContextParallelismTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_context_parallelism_sharding(self):
     # Ensure data is sharded following context parallelism axis when enabled
-    # Global array: 8x3. Sharded along first dim (8) across 4 devices, it becomes four 2x3 shards.
+    num_devices = len(jax.devices())
     num_rows_per_device = 2
     num_cols = 3
-    global_data_2d = jnp.arange(4 * num_rows_per_device * num_cols).reshape(4 * num_rows_per_device, num_cols)
+    global_data_2d = jnp.arange(num_devices * num_rows_per_device * num_cols).reshape(
+        num_devices * num_rows_per_device, num_cols
+    )
 
     sharding_named_cp = NamedSharding(self.mesh_cp, PartitionSpec("context", None))
 
@@ -86,19 +88,8 @@ class ContextParallelismTest(unittest.TestCase):
     # Define expected indices for data distributed across the logical mesh devices
     # The second dimension uses slice(None, None, None) as it's replicated and that's what shard.index often shows.
     expected_indices_per_logical_device = [
-        (slice(0, num_rows_per_device * 1, None), slice(None, None, None)),  # Shard for logical device 0
-        (
-            slice(num_rows_per_device * 1, num_rows_per_device * 2, None),
-            slice(None, None, None),
-        ),  # Shard for logical device 1
-        (
-            slice(num_rows_per_device * 2, num_rows_per_device * 3, None),
-            slice(None, None, None),
-        ),  # Shard for logical device 2
-        (
-            slice(num_rows_per_device * 3, num_rows_per_device * 4, None),
-            slice(None, None, None),
-        ),  # Shard for logical device 3
+        (slice(num_rows_per_device * i, num_rows_per_device * (i + 1), None), slice(None, None, None))
+        for i in range(num_devices)
     ]
     expected_shard_shape_2d = (num_rows_per_device, num_cols)
 

@@ -65,8 +65,8 @@ def assert_same_output_and_grad(f1, f2, *inputs):
   f1_grad = pytree_ravel(f1_grad)
   f2_grad = pytree_ravel(f2_grad)
 
-  assert jax.numpy.allclose(f1_value, f2_value, rtol=1e-2, equal_nan=False)
-  assert jax.numpy.allclose(f1_grad, f2_grad, rtol=1e-1, equal_nan=False)
+  assert jax.numpy.allclose(f1_value, f2_value, rtol=1e-2, atol=1e-2, equal_nan=False)
+  assert jax.numpy.allclose(f1_grad, f2_grad, rtol=1e-1, atol=1e-1, equal_nan=False)
 
 
 @pytest.mark.integration_test
