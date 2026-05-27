@@ -21,6 +21,7 @@ import os
 import pytest
 
 from maxtext.inference.decode import main as decode_main
+from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.trainers.pre_train.train import main as train_main
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from maxtext.utils.generate_param_only_checkpoint import main as generate_param_only_ckpt_main
@@ -99,6 +100,7 @@ def run_e2e_test_flow(hardware, model_config, attention_type="autoselected", sta
   decode_main(decode_config)
 
 
+@pytest.mark.skipif(is_decoupled(), reason="Bypassed in offline decoupled runs (no GCS/internet)")
 @pytest.mark.integration_test
 @pytest.mark.tpu_only
 @pytest.mark.parametrize("quantization", [(""), ("int8")])

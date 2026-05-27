@@ -66,6 +66,7 @@ class AotBaseTest(unittest.TestCase):
         shutil.rmtree(directory)
 
 
+@pytest.mark.skip_on_tpu7x
 class AotHloIdenticalTest(AotBaseTest):
   """Tests for Ahead of Time Compilation HLO Graph Verification."""
 
@@ -169,6 +170,7 @@ class AotHloIdenticalTest(AotBaseTest):
     self.assert_compile_and_real_match_hlo("default_run")
 
 
+@pytest.mark.skip_on_tpu7x
 class AotJaxprIdenticalTest(AotBaseTest):
   """Tests for Ahead of Time Compilation Jaxpr Verification."""
 

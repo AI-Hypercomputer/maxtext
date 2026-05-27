@@ -324,6 +324,7 @@ class TrainTests(unittest.TestCase):
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only
+  @unittest.skipIf(is_decoupled(), "Bypassed in offline decoupled runs (no HuggingFace internet)")
   def test_tpu_hf_input_pipeline(self):
     train_main(TrainTests.CONFIGS["hf_input_pipeline"])
 

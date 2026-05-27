@@ -211,7 +211,7 @@ def forward_with_context_expert_parallelism(
         (batch_axis, length_axis, "activation_embed"),
         nn_partitioning.get_axis_rules(),
     )
-    pos_spec = nn_partitioning.logical_to_mesh_axes((batch_axis, length_axis), nn_partitioning.get_axis_rules())
+    pos_spec = nn_partitioning.logical_to_mesh_axes((None, length_axis), nn_partitioning.get_axis_rules())
     lnx_sharding = NamedSharding(mesh_cp, lnx_spec)
     pos_sharding = NamedSharding(mesh_cp, pos_spec)
 
