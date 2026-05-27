@@ -24,7 +24,6 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.common.common_types import Config
 from maxtext.common.common_types import MODEL_MODE_PREFILL
-from maxtext.inference import page_manager
 from maxtext.layers import initializers
 from maxtext.layers import nnx_wrappers
 from maxtext.layers import quantizations
@@ -147,7 +146,6 @@ class LlamaDecoderLayer(nnx.Module):
       model_mode,
       previous_chunk=None,
       slot: None | int = None,
-      page_state: None | page_manager.PageState = None,
       kv_cache=None,
       attention_metadata=None,
   ):
@@ -177,7 +175,6 @@ class LlamaDecoderLayer(nnx.Module):
         deterministic=deterministic,
         model_mode=model_mode,
         slot=slot,
-        page_state=page_state,
         previous_chunk=previous_chunk,
         out_sharding=lnx_sharding,
         kv_cache=kv_cache,
