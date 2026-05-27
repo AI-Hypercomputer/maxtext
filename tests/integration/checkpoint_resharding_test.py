@@ -22,6 +22,7 @@ different mesh topology (resharding).
 from datetime import datetime
 import json
 from math import isclose
+import jax
 import pytest
 
 from maxtext.trainers.pre_train.train import main as train_main
@@ -95,14 +96,17 @@ def test_checkpoint_resharding():
   base_output_directory = get_test_base_output_directory()
   dataset_path = get_test_dataset_path()
 
+  num_devices = len(jax.devices())
+  if num_devices < 2 or num_devices % 2 != 0:
+    pytest.skip("This test requires a device count that is a multiple of 2.")
+
   # Phase 1: Train and Save Checkpoint
-  # Topology: FSDP=4, Tensor=1
   save_parallelism = [
       "checkpoint_period=10",
       "save_checkpoint_on_completion=True",  # Saves Checkpoint 0 upon job completion (model state after step 0)
       "dcn_data_parallelism=1",
       "dcn_fsdp_parallelism=1",
-      "ici_fsdp_parallelism=4",
+      f"ici_fsdp_parallelism={num_devices}",
       "ici_tensor_parallelism=1",
   ]
   train_main(
@@ -117,11 +121,10 @@ def test_checkpoint_resharding():
   )
 
   # Phase 2: Restore and Continue
-  # Topology: FSDP=2, Tensor=2
   restore_parallelism = [
       "dcn_data_parallelism=1",
       "dcn_fsdp_parallelism=1",
-      "ici_fsdp_parallelism=2",
+      f"ici_fsdp_parallelism={num_devices // 2}",
       "ici_tensor_parallelism=2",
   ]
   train_main(
