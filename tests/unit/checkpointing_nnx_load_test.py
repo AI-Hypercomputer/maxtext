@@ -14,12 +14,16 @@
 
 """Unit tests for the NNX branches of load_state_if_possible."""
 
+import os
+import tempfile
 import unittest
 from unittest import mock
 
+from etils import epath
 import jax
 import jax.numpy as jnp
 import optax
+import orbax.checkpoint as ocp
 from flax import nnx
 
 from maxtext.common import checkpointing
@@ -100,6 +104,29 @@ class TestLoadStateIfPossibleNNX(unittest.TestCase):
     )
     self.assertIsNone(full)
     self.assertIsNone(params)
+
+
+class TestLoadParamsIntoNNX(unittest.TestCase):
+  """Weight-only load (load_parameters_path) of a Linen-layout checkpoint into NNX."""
+
+  def test_linen_layout_params_restore_into_nnx_state(self):
+    """load_params_from_path reshapes an on-disk Linen-layout checkpoint into the NNX params state."""
+    model = _Model(rngs=nnx.Rngs(0))
+    _, params_abstract, _ = nnx.split(model, nnx.Param, ...)
+    weights = {"linear": {"kernel": jnp.arange(2, dtype=jnp.float32).reshape(2, 1), "bias": jnp.array([5.0])}}
+
+    with tempfile.TemporaryDirectory() as d:  # pylint: disable=consider-using-with
+      path = os.path.join(d, "ckpt")
+      # On-disk Linen layout: params/params/<weights> plus an unrelated `step`.
+      ocp.PyTreeCheckpointer(use_ocdbt=True, use_zarr3=True).save(
+          epath.Path(path), {"params": {"params": weights}, "step": jnp.array(3)}, force=True
+      )
+      restored = checkpointing.load_params_from_path(path, params_abstract, 8)
+
+    self.assertIsInstance(restored, nnx.State)
+    pure = restored.to_pure_dict()
+    self.assertTrue(jnp.array_equal(pure["linear"]["kernel"], weights["linear"]["kernel"]))
+    self.assertTrue(jnp.array_equal(pure["linear"]["bias"], weights["linear"]["bias"]))
 
 
 if __name__ == "__main__":

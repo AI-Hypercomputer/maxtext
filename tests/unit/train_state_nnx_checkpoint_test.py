@@ -389,20 +389,23 @@ class TestMaybeSaveCheckpointStepAlignment(unittest.TestCase):
         self._invoke_maybe_save(linen_state, pure_nnx=False)["step"],
     )
 
-  def test_nnx_state_is_converted_to_pure_dict_before_save(self):
-    """For pure_nnx=True, maybe_save_checkpoint must pass a plain dict to save_checkpoint, not an nnx.State."""
+  def test_nnx_state_is_saved_in_linen_layout(self):
+    """For pure_nnx=True, maybe_save_checkpoint reshapes the NNX state to the Linen on-disk layout."""
     state = self._build_nnx_state(self.N_STEPS)
     self.assertIsInstance(state, nnx.State)  # precondition: NNX train_step returns an nnx.State
 
     captured = self._invoke_maybe_save(state, pure_nnx=True)
 
-    # save_checkpoint should have received a plain Python dict (the result of
-    # nnx.State.to_pure_dict()), not the original nnx.State.
+    # save_checkpoint should receive a plain dict in Linen layout, not the nnx.State.
     self.assertIsInstance(captured["state"], dict)
     self.assertNotIsInstance(captured["state"], nnx.State)
-    # Sanity: the converted dict still mirrors the TrainStateNNX structure.
-    self.assertIn("model", captured["state"])
-    self.assertIn("optimizer", captured["state"])
+    # Linen layout: {params: {params: ...}, step, opt_state}; not the NNX {model, optimizer}.
+    self.assertIn("params", captured["state"])
+    self.assertIn("step", captured["state"])
+    self.assertIn("opt_state", captured["state"])
+    self.assertNotIn("model", captured["state"])
+    self.assertNotIn("optimizer", captured["state"])
+    self.assertIn("params", captured["state"]["params"])
 
   def test_linen_state_is_passed_through_unchanged(self):
     """For pure_nnx=False, maybe_save_checkpoint must pass the original TrainState object through."""
@@ -449,6 +452,55 @@ class TestMaybeSaveCheckpointStepAlignment(unittest.TestCase):
 
     # Assert that save_checkpoint WAS called!
     save_checkpoint_mock.assert_called_once()
+
+
+class TestLinenCheckpointFormatConverters(unittest.TestCase):
+  """to_linen_checkpoint_dict / from_linen_checkpoint_dict (NNX <-> Linen on-disk layout)."""
+
+  def _nnx_pure(self):
+    # A 3-element optax chain (e.g. adamw): index 1 is an EmptyState (absent in the int-keyed dict).
+    return {
+        "model": {
+            "decoder": {"norm": {"scale": jnp.ones((3,))}},
+            "dropout": {"rngs": {"default": {"key": jnp.ones((2,), dtype=jnp.uint32)}}},  # NNX-only
+        },
+        "optimizer": {
+            "step": jnp.asarray(7, dtype=jnp.uint32),
+            "opt_state": {
+                0: {"count": jnp.asarray(7), "mu": {"decoder": jnp.ones((3,))}, "nu": {"decoder": jnp.ones((3,))}},
+                2: {"count": jnp.asarray(7)},
+            },
+        },
+    }
+
+  def test_to_linen_layout(self):
+    linen = train_state_nnx.to_linen_checkpoint_dict(self._nnx_pure())
+    self.assertEqual(set(linen.keys()), {"params", "step", "opt_state"})
+    self.assertIn("params", linen["params"])  # params/params/ collection wrap
+    self.assertNotIn("dropout", linen["params"]["params"])  # NNX-only rngs/dropout stripped
+    self.assertEqual(linen["step"].dtype, jnp.int32)  # Linen step is int32
+    # opt_state is a list with None for the EmptyState slot, mu/nu wrapped under params.
+    self.assertIsInstance(linen["opt_state"], list)
+    self.assertEqual(len(linen["opt_state"]), 3)
+    self.assertIsNone(linen["opt_state"][1])
+    self.assertIn("params", linen["opt_state"][0]["mu"])
+
+  def test_round_trip_preserves_values(self):
+    nnx_pure = self._nnx_pure()
+    back = train_state_nnx.from_linen_checkpoint_dict(train_state_nnx.to_linen_checkpoint_dict(nnx_pure))
+    self.assertEqual(set(back.keys()), {"model", "optimizer"})
+    self.assertEqual(back["optimizer"]["step"].dtype, jnp.uint32)  # NNX step back to uint32
+    self.assertEqual(set(back["optimizer"]["opt_state"].keys()), {0, 2})  # int-keyed dict, EmptyState dropped
+    self.assertNotIn("params", back["optimizer"]["opt_state"][0]["mu"])  # mu/nu unwrapped
+    self.assertTrue(
+        jnp.array_equal(nnx_pure["model"]["decoder"]["norm"]["scale"], back["model"]["decoder"]["norm"]["scale"])
+    )
+
+  def test_cast_step_handles_shapedtypestruct(self):
+    sds = jax.ShapeDtypeStruct((), jnp.uint32)
+    out = train_state_nnx._cast_step(sds, jnp.int32)  # pylint: disable=protected-access
+    self.assertIsInstance(out, jax.ShapeDtypeStruct)
+    self.assertEqual(out.dtype, jnp.int32)
 
 
 if __name__ == "__main__":
