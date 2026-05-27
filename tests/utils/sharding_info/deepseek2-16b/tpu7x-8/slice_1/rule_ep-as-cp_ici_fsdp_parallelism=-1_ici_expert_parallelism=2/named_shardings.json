@@ -360,7 +360,10 @@
       }
     },
     "partition_spec": [
-      "fsdp",
+      [
+        "fsdp",
+        "expert"
+      ],
       null,
       null
     ],
@@ -1120,7 +1123,10 @@
       }
     },
     "partition_spec": [
-      "fsdp",
+      [
+        "fsdp",
+        "expert"
+      ],
       null,
       null
     ],
@@ -1862,7 +1868,10 @@
       }
     },
     "partition_spec": [
-      "fsdp",
+      [
+        "fsdp",
+        "expert"
+      ],
       null,
       null
     ],

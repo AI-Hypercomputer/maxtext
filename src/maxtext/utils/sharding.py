@@ -732,6 +732,31 @@ def remove_fsdp_sharding(sharding_tree):
   return jax.tree.map(_remove_fsdp_from_partition_spec, sharding_tree)
 
 
+def remove_fsdp_pspec(pspec):
+  """Removes 'fsdp' and 'fsdp_transpose' from a PartitionSpec."""
+  if isinstance(pspec, jax.sharding.PartitionSpec):
+    new_spec = []
+    # Iterate through each axis in the original PartitionSpec.
+    for axis in pspec:
+      if axis is None:
+        new_spec.append(None)
+      elif isinstance(axis, str):
+        # If the axis is 'fsdp', replace it with None to signify replication.
+        if axis not in ("fsdp", "fsdp_transpose"):
+          new_spec.append(axis)
+        else:
+          new_spec.append(None)
+      elif isinstance(axis, (list, tuple)):
+        # If the axis is a collection, filter out 'fsdp'.
+        new_axis = [a for a in axis if a not in ("fsdp", "fsdp_transpose")]
+        new_spec.append(tuple(new_axis))
+      else:
+        raise ValueError(f"Unsupported_axis_type: {type(axis)}")
+      # Return a new sharding object with the modified spec.
+    return jax.sharding.PartitionSpec(*new_spec)
+  return pspec
+
+
 def get_physical_spec_no_fsdp(full_logical, mesh, logical_axis_rules):
   """
   Generates a physical sharding spec for fully replicated weights.
