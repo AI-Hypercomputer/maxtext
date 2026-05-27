@@ -83,7 +83,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "context",
         "expert"
       ],
       null,
@@ -99,7 +98,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "context",
         "expert"
       ],
       null,
@@ -117,7 +115,6 @@
       null,
       [
         "fsdp",
-        "context",
         "expert"
       ]
     ],
@@ -200,7 +197,6 @@
       null,
       [
         "fsdp",
-        "context",
         "expert"
       ]
     ],
@@ -215,7 +211,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "context",
         "expert"
       ],
       null,
@@ -233,7 +228,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "context",
         "expert"
       ],
       null,
@@ -249,7 +243,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "context",
         "expert"
       ],
       null,
@@ -291,7 +284,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "context",
         "expert"
       ],
       null
@@ -305,7 +297,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "context",
         "expert"
       ],
       null,
@@ -356,11 +347,11 @@
   "['model']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wi_0']/.value": {
     "partition_spec": [
       [
-        "context",
-        "expert"
+        "expert",
+        "fsdp"
       ],
       null,
-      "fsdp",
+      null,
       null
     ],
     "shape": [
@@ -373,11 +364,11 @@
   "['model']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wi_1']/.value": {
     "partition_spec": [
       [
-        "context",
-        "expert"
+        "expert",
+        "fsdp"
       ],
       null,
-      "fsdp",
+      null,
       null
     ],
     "shape": [
@@ -390,12 +381,12 @@
   "['model']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wo']/.value": {
     "partition_spec": [
       [
-        "context",
-        "expert"
+        "expert",
+        "fsdp"
       ],
       null,
       null,
-      "fsdp"
+      null
     ],
     "shape": [
       64,
@@ -444,7 +435,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "context",
         "expert"
       ],
       null,
@@ -460,7 +450,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "context",
         "expert"
       ],
       null,
@@ -478,7 +467,6 @@
       null,
       [
         "fsdp",
-        "context",
         "expert"
       ]
     ],
@@ -561,7 +549,6 @@
       null,
       [
         "fsdp",
-        "context",
         "expert"
       ]
     ],
@@ -576,7 +563,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "context",
         "expert"
       ],
       null,
@@ -594,7 +580,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "context",
         "expert"
       ],
       null,
@@ -610,7 +595,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "context",
         "expert"
       ],
       null,
@@ -653,7 +637,6 @@
       null,
       [
         "fsdp",
-        "context",
         "expert"
       ]
     ],
@@ -678,7 +661,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "context",
         "expert"
       ],
       null,
@@ -694,7 +676,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "context",
         "expert"
       ],
       null,
@@ -712,7 +693,6 @@
       null,
       [
         "fsdp",
-        "context",
         "expert"
       ]
     ],
@@ -759,7 +739,6 @@
       null,
       [
         "fsdp",
-        "context",
         "expert"
       ]
     ],
@@ -774,7 +753,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "context",
         "expert"
       ],
       null,
@@ -792,7 +770,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "context",
         "expert"
       ],
       null,
@@ -808,7 +785,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "context",
         "expert"
       ],
       null,
@@ -826,7 +802,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "context",
         "expert"
       ],
       null
@@ -840,7 +815,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "context",
         "expert"
       ],
       null,
@@ -855,11 +829,11 @@
   "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wi_0']/.value": {
     "partition_spec": [
       [
-        "context",
-        "expert"
+        "expert",
+        "fsdp"
       ],
       null,
-      "fsdp",
+      null,
       null
     ],
     "shape": [
@@ -872,11 +846,11 @@
   "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wi_1']/.value": {
     "partition_spec": [
       [
-        "context",
-        "expert"
+        "expert",
+        "fsdp"
       ],
       null,
-      "fsdp",
+      null,
       null
     ],
     "shape": [
@@ -889,12 +863,12 @@
   "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wo']/.value": {
     "partition_spec": [
       [
-        "context",
-        "expert"
+        "expert",
+        "fsdp"
       ],
       null,
       null,
-      "fsdp"
+      null
     ],
     "shape": [
       64,
@@ -907,7 +881,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "context",
         "expert"
       ],
       null,
@@ -923,7 +896,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "context",
         "expert"
       ],
       null,
@@ -941,7 +913,6 @@
       null,
       [
         "fsdp",
-        "context",
         "expert"
       ]
     ],
@@ -988,7 +959,6 @@
       null,
       [
         "fsdp",
-        "context",
         "expert"
       ]
     ],
@@ -1003,7 +973,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "context",
         "expert"
       ],
       null,
@@ -1021,7 +990,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "context",
         "expert"
       ],
       null,
@@ -1037,7 +1005,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "context",
         "expert"
       ],
       null,
@@ -1056,7 +1023,6 @@
       null,
       [
         "fsdp",
-        "context",
         "expert"
       ]
     ],
@@ -1077,7 +1043,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "context",
         "expert"
       ],
       null,
@@ -1093,7 +1058,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "context",
         "expert"
       ],
       null,
@@ -1111,7 +1075,6 @@
       null,
       [
         "fsdp",
-        "context",
         "expert"
       ]
     ],
@@ -1158,7 +1121,6 @@
       null,
       [
         "fsdp",
-        "context",
         "expert"
       ]
     ],
@@ -1173,7 +1135,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "context",
         "expert"
       ],
       null,
@@ -1191,7 +1152,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "context",
         "expert"
       ],
       null,
@@ -1207,7 +1167,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "context",
         "expert"
       ],
       null,
@@ -1225,7 +1184,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "context",
         "expert"
       ],
       null
@@ -1239,7 +1197,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "context",
         "expert"
       ],
       null,
@@ -1254,11 +1211,11 @@
   "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wi_0']/.value": {
     "partition_spec": [
       [
-        "context",
-        "expert"
+        "expert",
+        "fsdp"
       ],
       null,
-      "fsdp",
+      null,
       null
     ],
     "shape": [
@@ -1271,11 +1228,11 @@
   "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wi_1']/.value": {
     "partition_spec": [
       [
-        "context",
-        "expert"
+        "expert",
+        "fsdp"
       ],
       null,
-      "fsdp",
+      null,
       null
     ],
     "shape": [
@@ -1288,12 +1245,12 @@
   "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wo']/.value": {
     "partition_spec": [
       [
-        "context",
-        "expert"
+        "expert",
+        "fsdp"
       ],
       null,
       null,
-      "fsdp"
+      null
     ],
     "shape": [
       64,
@@ -1306,7 +1263,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "context",
         "expert"
       ],
       null,
@@ -1322,7 +1278,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "context",
         "expert"
       ],
       null,
@@ -1340,7 +1295,6 @@
       null,
       [
         "fsdp",
-        "context",
         "expert"
       ]
     ],
@@ -1387,7 +1341,6 @@
       null,
       [
         "fsdp",
-        "context",
         "expert"
       ]
     ],
@@ -1402,7 +1355,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "context",
         "expert"
       ],
       null,
@@ -1420,7 +1372,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "context",
         "expert"
       ],
       null,
@@ -1436,7 +1387,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "context",
         "expert"
       ],
       null,
@@ -1455,7 +1405,6 @@
       null,
       [
         "fsdp",
-        "context",
         "expert"
       ]
     ],

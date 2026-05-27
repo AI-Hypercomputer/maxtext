@@ -168,3 +168,4 @@ class CustomRule(enum.Enum):
   PIPELINE_LARGE_MOE = "pipeline-large-moe"
   FSDP_2D = "2d-fsdp"
   EP_AS_DP = "ep-as-dp"
+  SHARD_EXP_ON_FSDP = "shard-exp-on-fsdp"
