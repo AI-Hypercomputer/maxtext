@@ -176,8 +176,8 @@ class BaseTrainingHooks(TrainingHooks, abc.ABC):
         ("eval/avg_perplexity", "perplexity"),
         ("eval/avg_sft_loss", "sft_loss"),
         ("eval/avg_or_loss", "or_loss"),
-        ("evaluation/dpo_reward_accuracy", "rewards/accuracy"),
-        ("evaluation/dpo_reward_margin", "rewards/margin"),
+        ("eval/avg_dpo_reward_accuracy", "rewards/accuracy"),
+        ("eval/avg_dpo_reward_margin", "rewards/margin"),
     ]:
       try:
         val = train_ctx.metrics_logger.get_metric(train_ctx.metrics_prefix, tunix_key, "eval")
