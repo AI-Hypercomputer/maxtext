@@ -417,11 +417,11 @@ def main(argv: Sequence[str]) -> None:
   hook_fn_map = mappings["hook_fn_mapping"]
 
   # 4. Extract and transform weights for Linen/NNX-SFT/NNX-RL checkpoints
-  maxtext_state_dict = detect_and_extract_checkpoint(checkpoint_dict)
+  maxtext_state_dict = detect_and_extract_checkpoint(checkpoint_dict, config)
 
   # Validate that checkpoint keys match the parameter mapping
-  state_keys = set(maxtext_state_dict) | {
-      k.replace("_lora_a", "").replace("_lora_b", "") for k in maxtext_state_dict if "_lora_" in k
+  state_keys = {
+      k.replace("_lora_a", "").replace("_lora_b", "") for k in maxtext_state_dict
   }
   filtered_map_keys = validate_and_filter_param_map_keys(param_map, state_keys)
 
