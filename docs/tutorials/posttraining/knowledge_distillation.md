@@ -165,30 +165,6 @@ python3 -m tools.data_generation.generate_distillation_data_vllm \
 
 You can now fine-tune your smaller student model using supervised fine-tuning technique in MaxText.
 
-#### Fine-tune the student model using the generated dataset
-
-Example command to run fine-tuning on a TPU v6e-8:
-
-```bash
-python3 -m maxtext.trainers.post_train.sft.train_sft_deprecated \
-  run_name=${RUN_NAME?} \
-  base_output_directory=${BASE_OUTPUT_DIRECTORY?}/distillation/qwen3-32b-distill-llama3.1-8b \
-  tokenizer_path=meta-llama/Llama-3.1-8B-Instruct tokenizer_type=huggingface \
-  dataset_type=hf \
-  hf_path=parquet \
-  hf_train_files=${OUTPUT_DATASET?} \
-  train_split='train' \
-  train_data_columns=['messages'] \
-  load_parameters_path=${MAXTEXT_CKPT_PATH?}/0/items \
-  model_name=llama3.1-8b \
-  per_device_batch_size=2 \
-  steps=200 \
-  ici_expert_parallelism=-1 ici_fsdp_parallelism=4 \
-  max_target_length=2048 \
-  hf_access_token=${HF_TOKEN?} \
-  profiler=xplane
-```
-
 #### **[OPTIONAL]** Fine-tune the student model using the original dataset
 
 The checkpoint from the student model's fine-tuning (on the teacher-generated dataset) can be used for a subsequent fine-tuning stage. In this step, the student model is fine-tuned on the original dataset that was initially provided to the teacher model for generating the dataset.
