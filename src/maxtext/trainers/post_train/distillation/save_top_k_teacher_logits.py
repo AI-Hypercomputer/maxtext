@@ -149,6 +149,7 @@ def teacher_step(model, batch, k):
     return get_top_k_logits(logits, k=k)
 
 def generate_and_save_data(config, local_args):
+  """Generates top-k logits from the teacher model and saves them locally, optionally uploading to GCS"""
   k_val = local_args.top_k
   optional_keys = local_args.optional_keys
   gcs_upload_path = local_args.gcs_upload_path
@@ -158,7 +159,7 @@ def generate_and_save_data(config, local_args):
   writer = None
   local_output_path = None
   
-  # ALL HOSTS initialize their own directories and thread pools
+  # all hosts initialize their own directories and thread pools
   if not os.path.exists(local_tmp_dir):
     os.makedirs(local_tmp_dir, exist_ok=True)
   
@@ -202,7 +203,7 @@ def generate_and_save_data(config, local_args):
             write_executor = ThreadPoolExecutor(max_workers=2)
 
         file_index = step // steps_per_file
-        # CRITICAL: Filename now includes host ID to prevent GCS collisions
+        # filename includes host ID to prevent GCS collisions
         filename = f"teacher_top_k_part_{file_index:05d}_host_{jax.process_index():03d}.array_record"
         local_output_path = os.path.join(local_tmp_dir, filename)
         writer = array_record_module.ArrayRecordWriter(local_output_path, "group_size:1")
@@ -210,7 +211,6 @@ def generate_and_save_data(config, local_args):
       tokens = batch["inputs"]
       top_k_vals, top_k_idx = teacher_step(teacher_model, batch, k_val)
 
-      # 1. Gather all data to all hosts to make it fully addressable in JAX
       global_tokens = jax.experimental.multihost_utils.process_allgather(tokens, tiled=True)
       global_vals = jax.experimental.multihost_utils.process_allgather(top_k_vals, tiled=True)
       global_idx = jax.experimental.multihost_utils.process_allgather(top_k_idx, tiled=True)
@@ -221,13 +221,13 @@ def generate_and_save_data(config, local_args):
           optional_data[key] = jax.experimental.multihost_utils.process_allgather(batch[key], tiled=True)
 
       if writer:
-        # 2. Convert to numpy safely on the CPU
+        # Convert to numpy safely on the CPU
         global_tokens_np = np.array(global_tokens)
         global_vals_np = np.array(global_vals)
         global_idx_np = np.array(global_idx)
         optional_data_np = {k: np.array(v) for k, v in optional_data.items()}
 
-        # 3. Slice out ONLY this host's local fraction of the batch
+        # Slice out this host's local fraction of the batch
         global_batch_size = global_tokens_np.shape[0]
         local_batch_size = global_batch_size // jax.process_count()
         start_idx = jax.process_index() * local_batch_size
@@ -238,7 +238,7 @@ def generate_and_save_data(config, local_args):
         local_idx_np = global_idx_np[start_idx:end_idx]
         local_opt_data_np = {k: v[start_idx:end_idx] for k, v in optional_data_np.items()}
 
-        # 4. Write synchronously (takes <0.1 seconds because it's only 1/32 of the data!)
+        # Write synchronously
         background_process_and_write(writer, local_tokens_np, local_vals_np, local_idx_np, local_opt_data_np)
 
       if step % 50 == 0 and jax.process_index() == 0:
@@ -252,7 +252,7 @@ def generate_and_save_data(config, local_args):
 
   multihost_utils.sync_global_devices("loop_finished")
 
-  # Finalize writing and handle GCS upload on ALL Hosts
+  # Finalize writing and handle GCS upload on all hosts
   if writer:
     if write_executor:
         write_executor.shutdown(wait=True)

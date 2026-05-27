@@ -55,7 +55,7 @@ class DistillationForwardOutput:
   out_projection_activations: jax.Array | None = None
   #: moe load balance loss
   moe_lb_loss: jax.Array | None = None
-  #: NEW: Top-K indices for sparse offline distillation
+  #: top-k indices for sparse offline distillation
   top_k_indices: jax.Array | None = None
 
 

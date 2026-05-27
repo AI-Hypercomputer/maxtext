@@ -226,7 +226,6 @@ def pretrain_preprocessing_pipeline(
   """Use grain pipeline to pre-process the dataset and return iterators for pretrain"""
   is_offline = getattr(config, "is_offline_distillation", False)
   
-  # CRITICAL FIX: Tell the very first step of the pipeline to keep our keys!
   columns_to_parse = list(data_columns)
   if is_offline:
       columns_to_parse.extend(["top_k_logits", "top_k_indices"])

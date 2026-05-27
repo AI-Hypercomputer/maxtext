@@ -551,7 +551,6 @@ class ParseFeatures(grain.MapTransform):
   """
 
   def __init__(self, data_columns, tokenize):
-    # Ensure our custom distillation columns are always extracted
     self.data_columns = list(data_columns)
     self.tokenize = tokenize
 

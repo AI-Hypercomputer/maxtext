@@ -737,7 +737,7 @@ def train_distill(
     if is_offline:
       max_logging.log(f"Initializing Data Iterators via MaxText pipeline...")
       
-      # 1. Point Grain to your offline files instead of the raw text dataset
+      # Point Grain to offline files instead of the raw text dataset
       if not offline_data_dir.endswith(".array_record"):
           student_config.get_keys()["grain_train_files"] = os.path.join(offline_data_dir, "*.array_record")
       else:
@@ -748,8 +748,6 @@ def train_distill(
       student_config.get_keys()["dataset_shuffle_buffer_size"] = 0 
       student_config.get_keys()["dataset_shuffle_seed"] = 0
 
-
-    # Now, whether online or offline, MaxText natively handles the multi-threading!
     raw_train_iter, raw_eval_iter = input_pipeline_interface.create_data_iterator(student_config, mesh)
 
     # 5. Input Pipeline Checkpointing & Restoration
@@ -775,11 +773,6 @@ def train_distill(
       # If we are in online mode then we exit
       if getattr(batch, "top_k_logits", None) is None:
         return inputs_dict
-
-      # # Scatter the offline arrays into a dense tensor of -10000s
-      # dense_shape = batch.input_tokens.shape + (student_config.vocab_size,)
-      # dense_logits = jnp.full(dense_shape, -10000.0, dtype=jnp.float32)
-      # dense_logits = jnp.put_along_axis(dense_logits, batch.top_k_indices, batch.top_k_logits, axis=-1, inplace=False)
 
       inputs_dict["teacher_output"] = distillation_utils.DistillationForwardOutput(
           logits=batch.top_k_logits, 
