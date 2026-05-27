@@ -20,6 +20,15 @@ name: MaxText Package Tests
 on:
   pull_request:
   workflow_call:
+    inputs:
+      maxtext_sha:
+        description: 'The specific MaxText commit SHA.'
+        required: true
+        type: string
+    outputs:
+      tests_result:
+        description: 'The result of all_tests_passed and all_notebooks_passed jobs.'
+        value: ${{ (jobs.all_tests_passed.result == 'success' && jobs.all_notebooks_passed.result == 'success') && 'success' || 'failure' }}
   workflow_dispatch:
   schedule:
     # Run the job every 4 hours
@@ -48,6 +57,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ inputs.maxtext_sha || github.sha }}
       - name: Check for Code Changes
         id: check
         run: |
@@ -127,6 +137,7 @@ jobs:
       device_type: tpu
       device_name: v4-8
       cloud_runner: linux-x86-n2-16-buildkit
+      maxtext_sha: ${{ inputs.maxtext_sha || github.sha }}
 
   maxtext_jupyter_notebooks:
     needs: build_and_upload_maxtext_package

@@ -17,18 +17,44 @@
 
 name: MaxText Release Pipeline
 
-# Triggers when a new "release" is published in the GitHub UI
+# Triggers when a new "release" is published in the GitHub UI or when manually triggered via workflow_dispatch.
 on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'MaxText Release tag to build and test (e.g., maxtext-v0.2.3).'
+        required: true
+        type: string
 
 permissions:
   contents: read
   issues: write
   id-token: write
+  actions: read
+  pull-requests: write
 
 jobs:
+  get_maxtext_sha:
+    name: Resolve MaxText SHA
+    runs-on: ubuntu-latest
+    outputs:
+      maxtext_sha: ${{ steps.vars.outputs.maxtext_sha }}
+    steps:
+      - name: Checkout MaxText
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.release_tag || github.event.release.tag_name }}
+          fetch-depth: 1
+      - name: Resolve SHA
+        id: vars
+        shell: bash
+        run: |
+          MAXTEXT_SHA=$(git rev-parse HEAD)
+          echo "Using MaxText SHA: ${MAXTEXT_SHA}"
+          echo "maxtext_sha=${MAXTEXT_SHA}" >> $GITHUB_OUTPUT
+
   release_approval:
     name: Approve Release Candidate
     if: github.event_name != 'workflow_dispatch'
@@ -42,41 +68,89 @@ jobs:
 
   build_and_test_maxtext_package:
     name: Build and Test MaxText Package
-    needs: [release_approval]
+    needs: [release_approval, get_maxtext_sha]
     if: |
       always() &&
       (needs.release_approval.result == 'success' || needs.release_approval.result == 'skipped')
     uses: ./.github/workflows/ci_pipeline.yml
+    with:
+      maxtext_sha: ${{ needs.get_maxtext_sha.outputs.maxtext_sha }}
     secrets: inherit
 
   build_release_candidate_images:
-    name: ${{ matrix.image_name }}
-    needs: [build_and_test_maxtext_package]
+    name: Build ${{ matrix.name }} Docker Image
+    needs: [build_and_test_maxtext_package, get_maxtext_sha]
+    # Ensure the SHA resolved, and CI pipeline tests are not failed or cancelled
     if: |
       always() &&
-      (needs.build_and_test_maxtext_package.result == 'success' || needs.build_and_test_maxtext_package.result == 'skipped')
+      needs.get_maxtext_sha.result == 'success' &&
+      needs.build_and_test_maxtext_package.outputs.tests_result == 'success'
     strategy:
       fail-fast: false
       matrix:
         include:
-          - device: tpu
-            build_mode: stable
+          - name: 'TPU Pre-Training Stable'
+            device: tpu
             image_name: maxtext_jax_stable
             workflow: pre-training
             dockerfile: maxtext_tpu_dependencies.Dockerfile
-          - device: tpu
-            build_mode: stable
+          - name: 'TPU Post-Training Stable'
+            device: tpu
             image_name: maxtext_post_training_stable
             workflow: post-training
             dockerfile: maxtext_tpu_dependencies.Dockerfile
+          - name: 'GPU Pre-Training Stable'
+            device: gpu
+            image_name: maxtext_gpu_jax_stable
+            workflow: pre-training
+            dockerfile: maxtext_gpu_dependencies.Dockerfile
     uses: ./.github/workflows/build_and_push_docker_image.yml
     with:
       image_name: ${{ matrix.image_name }}
       device: ${{ matrix.device }}
-      build_mode: ${{ matrix.build_mode }}
+      build_mode: stable
       workflow: ${{ matrix.workflow }}
       dockerfile: ${{ matrix.dockerfile }}
-      maxtext_sha: ${{ github.sha }}
-      include_test_assets: true
+      maxtext_sha: ${{ needs.get_maxtext_sha.outputs.maxtext_sha }}
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
+  run_e2e_tests:
+    name: Run E2E tests
+    needs: [build_release_candidate_images, get_maxtext_sha]
+    # Ensure the SHA resolved, the build job itself wasn't skipped or cancelled, and all builds succeeded
+    if: |
+      always() &&
+      needs.get_maxtext_sha.result == 'success' &&
+      needs.build_release_candidate_images.result != 'skipped' &&
+      needs.build_release_candidate_images.result != 'cancelled' &&
+      !contains(needs.build_release_candidate_images.outputs.*.build_result, 'failure') &&
+      !contains(needs.build_release_candidate_images.outputs.*.build_result, 'cancelled')
+    uses: ./.github/workflows/run_e2e_tests.yml
+    with:
+      mode: stable
+      run_id: ${{ github.run_id }}
+      maxtext_sha: ${{ needs.get_maxtext_sha.outputs.maxtext_sha }}
+    secrets: inherit
+
+  build_docs:
+    name: Build Documentation
+    needs: [release_approval, get_maxtext_sha]
+    if: |
+      always() &&
+      (needs.release_approval.result == 'success' || needs.release_approval.result == 'skipped')
+    uses: ./.github/workflows/check_docs_build.yml
+    with:
+      maxtext_sha: ${{ needs.get_maxtext_sha.outputs.maxtext_sha }}
+    secrets: inherit
+
+  check_links:
+    name: Check Links in Documentation
+    needs: [release_approval, get_maxtext_sha]
+    if: |
+      always() &&
+      (needs.release_approval.result == 'success' || needs.release_approval.result == 'skipped')
+    uses: ./.github/workflows/docs_link_check.yml
+    with:
+      maxtext_sha: ${{ needs.get_maxtext_sha.outputs.maxtext_sha }}
+    secrets: inherit

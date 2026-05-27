@@ -12,127 +12,152 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# This workflow will build, test and automatically release MaxText package to PyPI using Trusted Publishing (OIDC).
+# This workflow publishes MaxText to PyPI once the Airflow E2E DAG reports success.
 
 name: Publish MaxText to PyPI
 
-# Triggers when a new "release" is published in the GitHub UI
+# Triggered by Airflow when E2E DAG completes or can be manually triggered via workflow_dispatch.
 on:
-  release:
-    types: [published]
+  repository_dispatch:
+    types: [airflow-dag-complete]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'GitHub workflow run_id passed to the Airflow DAG run.'
+        required: true
+        type: string
+      maxtext_sha:
+        description: 'MaxText SHA to release to PyPI.'
+        required: true
+        type: string
+      publish:
+        description: 'Set to true to publish to PyPI.'
+        required: false
+        default: 'false'
+        type: boolean
 
 permissions:
   contents: read
-  issues: write
-  id-token: write
+  id-token: write  # required for PyPI Trusted Publishing (OIDC)
 
 jobs:
+  handle_result:
+    name: Handle Airflow DAG Result
+    runs-on: ubuntu-latest
+    # Only run this job if the event that triggered the workflow is 'repository_dispatch'
+    if: github.event_name == 'repository_dispatch'
+    steps:
+      - name: Report DAG result
+        run: |
+          STATE="${{ github.event.client_payload.state }}"
+          DAG_ID="${{ github.event.client_payload.dag_id }}"
+          DAG_RUN_ID="${{ github.event.client_payload.dag_run_id }}"
+          SHA="${{ github.event.client_payload.sha }}"
+
+          echo "================================"
+          echo "DAG ID:      ${DAG_ID}"
+          echo "DAG Run ID:  ${DAG_RUN_ID}"
+          echo "Commit SHA:  ${SHA}"
+          echo "State:       ${STATE}"
+          echo "================================"
+
+          # Evaluate state
+          case "${STATE}" in
+            success)
+              echo "DAG '${DAG_ID}' completed successfully."
+              exit 0
+              ;;
+            failed|upstream_failed)
+              echo "DAG '${DAG_ID}' failed with state: ${STATE}."
+              exit 1
+              ;;
+            *)
+              echo "DAG '${DAG_ID}' ended with unexpected state: ${STATE}."
+              exit 1
+              ;;
+          esac
+
   release_approval:
     name: Approve Release
     runs-on: ubuntu-latest
+    needs: handle_result
+    if: |
+      always() &&
+      (needs.handle_result.result == 'success' || needs.handle_result.result == 'skipped')
     # "release" environment is configured in MaxText repository settings.
     # This environment requires manual approval before proceeding to the next job.
     environment: release
     steps:
     - name: Acknowledge Approval
-      run: echo "Release approved, proceeding to build, test and publish MaxText package."
+      run: echo "Release approved, proceeding to publishing MaxText package."
 
-  build_and_test_maxtext_package:
-    name: Build and Test MaxText Package
-    needs: [release_approval]
-    uses: ./.github/workflows/ci_pipeline.yml
-    secrets: inherit
+  build_maxtext_package:
+    needs: release_approval
+    if: needs.release_approval.result == 'success'
+    uses: ./.github/workflows/build_package.yml
+    with:
+      device_type: tpu
+      device_name: v4-8
+      cloud_runner: linux-x86-n2-16-buildkit
+      # Build package from a particular commit to ensure we are publishing the same code that was tested
+      maxtext_sha: ${{ github.event.client_payload.sha || inputs.maxtext_sha }}
 
-  build_docs:
-    name: Build Documentation
-    needs: [build_and_test_maxtext_package]
-    uses: ./.github/workflows/check_docs_build.yml
-    secrets: inherit
-
-  check_links:
-    name: Check Links in Documentation
-    uses: ./.github/workflows/docs_link_check.yml
-    secrets: inherit
-
-  publish_maxtext_package_to_pypi:
-    name: Publish MaxText package to PyPI
-    needs: [build_and_test_maxtext_package]
+  publish_maxtext_to_pypi:
+    name: Publish MaxText to PyPI
+    needs: release_approval
     runs-on: ubuntu-latest
     environment: release
+    if: github.event_name == 'repository_dispatch' || github.event.inputs.publish == 'true'
     steps:
-    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-    - name: Download MaxText wheel
-      uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
-      with:
-        name: maxtext-wheel
-        path: dist/
-    - name: Publish MaxText wheel to PyPI
-      # Official action for PyPI Trusted Publishing
-      uses: pypa/gh-action-pypi-publish@release/v1
-      with:
-        packages-dir: dist/
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          name: maxtext-wheel
+      - name: Publish MaxText wheel to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
 
   get_latest_maxtext_pypi_version:
     name: Get latest MaxText PyPI version
-    needs: [publish_maxtext_package_to_pypi]
+    needs: publish_maxtext_to_pypi
     runs-on: ubuntu-latest
     outputs:
       latest_pypi_version: ${{ steps.get_version.outputs.version }}
     steps:
-      - name: Install jq
-        run: sudo apt-get update && sudo apt-get install -y jq
       - name: Fetch latest version of maxtext from PyPI
         id: get_version
         run: |
-          # Fetch JSON from PyPI for 'maxtext'
-          echo "Fetching latest version from https://pypi.org/pypi/maxtext/json"
           pypi_json=$(curl -s https://pypi.org/pypi/maxtext/json)
-
-          # Extract the version from the "info" section using jq
-          latest_version=$(echo "$pypi_json" | jq -r ".info.version")
-
-          if [ -z "$latest_version" ] || [ "$latest_version" == "null" ]; then
+          latest_version=$(echo "$pypi_json" | python3 -c "import sys,json; print(json.load(sys.stdin)['info']['version'])")
+          if [ -z "$latest_version" ] || [ "$latest_version" = "null" ]; then
             echo "Error: Could not parse latest version from PyPI JSON."
             exit 1
           fi
-
-          echo "Successfully fetched latest MaxText version on PyPI: $latest_version"
-          # Set the output variable for other jobs to consume
+          echo "Latest MaxText version on PyPI: $latest_version"
           echo "version=$latest_version" >> "$GITHUB_OUTPUT"
 
-  # This job builds and pushes MaxText stable Docker images for both TPU and GPU devices.
-  # It runs only after a new release is published to PyPI.
-  # Creates docker image for MaxText commit corresponding to the release.
-  upload_maxtext_docker_images:
-    name: ${{ matrix.image_name }}
+  promote_docker_images:
+    name: Promote ${{ matrix.name }} Docker Image
     needs: [get_latest_maxtext_pypi_version]
+    runs-on: linux-x86-n2-16-buildkit
+    container: google/cloud-sdk:524.0.0
     strategy:
       fail-fast: false
       matrix:
         include:
-          - device: tpu
-            build_mode: stable
+          - name: 'TPU Pre-Training Stable'
             image_name: maxtext_jax_stable
-            workflow: pre-training
-            dockerfile: maxtext_tpu_dependencies.Dockerfile
-          - device: gpu
-            build_mode: stable
-            image_name: maxtext_gpu_jax_stable
-            workflow: pre-training
-            dockerfile: maxtext_gpu_dependencies.Dockerfile
-          - device: tpu
-            build_mode: stable
+          - name: 'TPU Post-Training Stable'
             image_name: maxtext_post_training_stable
-            workflow: post-training
-            dockerfile: maxtext_tpu_dependencies.Dockerfile
-    uses: ./.github/workflows/build_and_push_docker_image.yml
-    with:
-      image_name: ${{ matrix.image_name }}
-      device: ${{ matrix.device }}
-      build_mode: ${{ matrix.build_mode }}
-      workflow: ${{ matrix.workflow }}
-      dockerfile: ${{ matrix.dockerfile }}
-      maxtext_sha: ${{ github.sha }}
-      version_name: ${{ needs.get_latest_maxtext_pypi_version.outputs.latest_pypi_version }}
-    secrets:
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+    steps:
+      - name: Configure Docker
+        run: gcloud auth configure-docker us-docker.pkg.dev,gcr.io -q
+      - name: Add tags to Docker image
+        shell: bash
+        run: |
+          SOURCE_IMAGE="gcr.io/${{ vars.PROJECT_NAME }}/${{ matrix.image_name }}"
+          GITHUB_RUN_ID="${{ github.event.client_payload.github_run_id }}"
+          gcloud container images add-tag \
+            "${SOURCE_IMAGE}:${GITHUB_RUN_ID}" \
+            "${SOURCE_IMAGE}:${{ needs.get_latest_maxtext_pypi_version.outputs.latest_pypi_version }}" \
+            --quiet

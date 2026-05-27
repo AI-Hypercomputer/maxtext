@@ -38,14 +38,14 @@ on:
         required: false
         type: string
         default: 'pre-training'
-      version_name:
-        required: false
-        type: string
-        default: ''
       include_test_assets:
         required: false
         type: boolean
         default: false
+    outputs:
+      build_result:
+        description: 'The result of build_and_push job.'
+        value: ${{ jobs.build_and_push.result }}
     secrets:
       HF_TOKEN:
         required: true
@@ -65,7 +65,8 @@ jobs:
         shell: bash
         run: |
           EVENT_NAME="${{ github.event_name }}"
-          TARGET_DEVICE="${{ github.event.inputs.target_device }}"
+          # Default to 'all' if the input is null/empty
+          TARGET_DEVICE="${{ github.event.inputs.target_device || 'all' }}"
           INPUT_DEVICE="${{ inputs.device }}"
 
           SHOULD_RUN="false"
@@ -121,6 +122,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: maxtext-wheel
+          path: .
 
       - name: Install uv and set Python version
         uses: astral-sh/setup-uv@v7
@@ -166,26 +168,18 @@ jobs:
           SOURCE_IMAGE="gcr.io/${{ vars.PROJECT_NAME }}/${INPUTS_IMAGE_NAME}"
           TEMP_IMG="${SOURCE_IMAGE}:${{ github.run_id }}"
 
-          if [[ $INPUTS_VERSION_NAME ]]; then
-            echo "Tagging docker images corresponding to PyPI release..."
-            gcloud container images add-tag "${TEMP_IMG}" "${SOURCE_IMAGE}:${INPUTS_VERSION_NAME}" --quiet
-          else
-            echo "Tagging docker images corresponding to nightly release..."
+          # Add date tag
+          IMAGE_DATE="$(date +%Y-%m-%d)"
+          gcloud container images add-tag "${TEMP_IMG}" "$SOURCE_IMAGE:$IMAGE_DATE" --quiet
 
-            # Add date tag
-            IMAGE_DATE="$(date +%Y-%m-%d)"
-            gcloud container images add-tag "${TEMP_IMG}" "$SOURCE_IMAGE:$IMAGE_DATE" --quiet
+          # Convert date to YYYYMMDD format
+          clean_date=$(echo "$IMAGE_DATE" | sed 's/[-:]//g' | cut -c1-8)
 
-            # Convert date to YYYYMMDD format
-            clean_date=$(echo "$IMAGE_DATE" | sed 's/[-:]//g' | cut -c1-8)
-
-            # Add MaxText tag
-            MAXTEXT_SHA=$(git rev-parse --short HEAD)
-            gcloud container images add-tag "${TEMP_IMG}" "${SOURCE_IMAGE}:maxtext_${MAXTEXT_SHA}_${clean_date}" --quiet
-          fi
+          # Add MaxText tag
+          MAXTEXT_SHA=$(git rev-parse --short HEAD)
+          gcloud container images add-tag "${TEMP_IMG}" "${SOURCE_IMAGE}:maxtext_${MAXTEXT_SHA}_${clean_date}" --quiet
         env:
           INPUTS_IMAGE_NAME: ${{ inputs.image_name }}
-          INPUTS_VERSION_NAME: ${{ inputs.version_name }}
 
   run_ci_tests:
     name: Run Unit and Integration Tests

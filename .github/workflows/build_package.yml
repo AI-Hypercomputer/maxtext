@@ -29,6 +29,9 @@ on:
       cloud_runner:
         required: false
         type: string
+      maxtext_sha:
+        required: false
+        type: string
     outputs:
       maxtext_sha:
         description: "MaxText short SHA used for the build"
@@ -45,12 +48,15 @@ jobs:
     steps:
       - name: Checkout MaxText
         uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.maxtext_sha || github.sha }}
       - name: Get metadata
         id: vars
         shell: bash
         run: |
           # MaxText SHA used to build the package
-          echo "maxtext_sha=${GITHUB_SHA}" >> $GITHUB_OUTPUT
+          MAXTEXT_SHA="${{ inputs.maxtext_sha || github.sha }}"
+          echo "maxtext_sha=${MAXTEXT_SHA}" >> $GITHUB_OUTPUT
       - name: Install build tools
         run: |
           python -m pip install --upgrade pip build uv
