@@ -148,3 +148,4 @@ class CustomRule(enum.Enum):
   EP_AS_CP = "ep-as-cp"  # Support EP only
   PIPELINE_LARGE_MOE = "pipeline-large-moe"
   FSDP_2D = "2d-fsdp"
+  SHARD_EXP_ON_FSDP = "shard-exp-on-fsdp"

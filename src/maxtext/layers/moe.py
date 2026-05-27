@@ -41,7 +41,7 @@ from maxtext.kernels.ragged.ragged_sort import ring_ragged_unsort
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils.sharding import create_sharding, maybe_shard_with_logical, maybe_shard_with_pspec
-from maxtext.utils.sharding import logical_to_mesh_axes
+from maxtext.utils.sharding import logical_to_mesh_axes, remove_fsdp_pspec
 import numpy as np
 import qwix
 from qwix.contrib.sparsity import sparsity_module
@@ -358,11 +358,7 @@ class RoutedMoE(nnx.Module):
         self.config.emb_dim if self.config.moe_expert_input_dim <= 0 else self.config.moe_expert_input_dim
     )
 
-    if self.config.shard_exp_on_fsdp:
-      # special sharding for dsv3
-      self.wi_kernel_axes = ("embed_moe", None, "mlp_moe")
-      self.wo_kernel_axes = ("embed_moe", "mlp_moe", None)
-    elif self.config.use_batch_split_schedule:
+    if self.config.use_batch_split_schedule:
       self.wi_kernel_axes, self.wo_kernel_axes = get_batchsplit_init_kernel_axes()
     else:
       self.wi_kernel_axes = ("exp", "embed_moe", "mlp_moe")
@@ -375,12 +371,12 @@ class RoutedMoE(nnx.Module):
       self._tensor_parallelism_name = "tensor"
 
     if self.config.attention == "vllm_rpa" and self.config.enable_dp_attention:
-      self._expert_parallelism_name = "attn_dp_expert"
+      self._expert_parallelism_name = ("attn_dp_expert",)
     elif self.config.custom_mesh_and_rule == ctypes.CustomRule.CP_AS_EP:
       # when custom mesh and rule is cp-as-ep, context axis is same with expert in MoE component
       self._expert_parallelism_name = ("context", "expert")
     else:
-      self._expert_parallelism_name = "expert"
+      self._expert_parallelism_name = ("expert",)
 
     self.gate = GateLogit(
         in_features_shape=self.moe_expert_input_dim,
@@ -1149,10 +1145,11 @@ class RoutedMoE(nnx.Module):
         rhs_quantize_dtype = quant_dg.fwd.dg_quantizer.rhs.numerics.get_dtype()
       return lhs_quantize_dtype, rhs_quantize_dtype
 
-    def gmm(inputs, kernel, tiling, group_sizes, expert_assignments, weight_gather_axes):
+    def gmm(inputs, kernel, tiling, group_sizes, expert_assignments, weight_gather_axes=None):
       if inputs.shape[0] != expert_assignments.shape[0]:
         raise ValueError("The number of input tokens must match the number of expert assignments!")
-
+      if weight_gather_axes is None:
+        weight_gather_axes = []
       tokamax_group_sizes = get_tokamax_group_sizes(group_sizes, inputs, kernel)
       orig_inputs_shape = inputs.shape  # save shape of inputs before potentially padding.
       inputs, padding_amount = max_utils.maybe_pad(inputs, self.config.wi_tile_fwd_batch_seq)
@@ -1209,13 +1206,6 @@ class RoutedMoE(nnx.Module):
       # In the decoding case, the expert axis is instead replicated along the tensor's batch dimension.
       return input_activation.shape[0] > 1
 
-    def explicitly_weight_ag(shard_exp_on_fsdp):
-      if shard_exp_on_fsdp:
-        quantization_rule = qpl.get_current_rule("gmm")
-        if quantization_rule and quantization_rule.weight_calibration_method.startswith("fixed"):
-          return True
-      return False
-
     def maybe_aqt_partition(w0_kernel, w0_pspec, w1_kernel, w1_pspec, wo_kernel, wo_pspec):
       if isinstance(w0_kernel, aqt.QTensor):
         w0_pspec = aqt.partition_spec(w0_pspec, (1,), w0_kernel.dtype, use_bias=False)
@@ -1251,25 +1241,13 @@ class RoutedMoE(nnx.Module):
         # pre_bias_logits is None for non-DeepSeek v3 models
         pre_bias_logits_pspec = None
 
-      # w0, w1, wo needs to be un sharded on fsdp / fsdp_transpose axis, so use
-      # mlp_no_fsdp axis
-      if self.config.shard_exp_on_fsdp:
-        quantization_rule = qpl.get_current_rule("gmm")
-        if quantization_rule and quantization_rule.weight_calibration_method.startswith("fixed"):
-          # special sharding when using static scaling for weights in quantization with shard_exp_on_fsdp
-          w0_pspec = self._logical_to_mesh_axes(self.wi_kernel_axes)
-          w1_pspec = self._logical_to_mesh_axes(self.wi_kernel_axes)
-          wo_pspec = self._logical_to_mesh_axes(self.wo_kernel_axes)
-        else:
-          # special sharding for dsv3 to remove overhead between gmm/AG
-          w0_pspec = self._logical_to_mesh_axes(("embed_tensor_transpose", None, "mlp_no_fsdp"))
-          w1_pspec = self._logical_to_mesh_axes(("embed_tensor_transpose", None, "mlp_no_fsdp"))
-          wo_pspec = self._logical_to_mesh_axes(("embed_tensor_transpose", "mlp_no_fsdp", None))
-      else:
-        # These are the main shardings used by default - they use funky rules to AG over FSDP.
-        w0_pspec = self._logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
-        w1_pspec = self._logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
-        wo_pspec = self._logical_to_mesh_axes(("exp", "mlp_no_fsdp", "embed_tensor_transpose"))
+      w0_pspec = self._logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
+      w1_pspec = self._logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
+      wo_pspec = self._logical_to_mesh_axes(("exp", "mlp_no_fsdp", "embed_tensor_transpose"))
+      # Update kernel pspec for FSDP AG
+      w0_pspec = remove_fsdp_pspec(w0_pspec)
+      w1_pspec = remove_fsdp_pspec(w1_pspec)
+      wo_pspec = remove_fsdp_pspec(wo_pspec)
       return (
           batch_logical_axis,
           input_partition_pspec,
@@ -1284,7 +1262,6 @@ class RoutedMoE(nnx.Module):
       )
 
     is_batch_sharded_by_expert = is_batch_sharded_by_ep(inputs)
-    weight_gather = explicitly_weight_ag(self.config.shard_exp_on_fsdp)
     (
         batch_logical_axis,
         input_partition_pspec,
@@ -1418,27 +1395,6 @@ class RoutedMoE(nnx.Module):
       if self.config.mlp_bias:
         w0_bias, w1_bias, wo_bias = self.transform_bias(selected_experts, w0_bias, w1_bias, wo_bias)
 
-      def get_active_sharding_axes(pspec_dim_axes, tensor_dim_index):
-        if pspec_dim_axes is None:
-          return []
-        axes = (pspec_dim_axes,) if isinstance(pspec_dim_axes, str) else pspec_dim_axes
-        active = []
-        for ax in axes:
-          if ax and self.mesh.shape.get(ax, 1) > 1:
-            active.append((ax, tensor_dim_index))
-        return active
-
-      wi_gather_axes = []
-      wo_gather_axes = []
-
-      if weight_gather:
-        # wi [Experts, In, Hidden] -> Gather Exp(0) and Hidden(2)
-        wi_gather_axes.extend(get_active_sharding_axes(w0_pspec[0], 0))
-        wi_gather_axes.extend(get_active_sharding_axes(w0_pspec[2], 2))
-
-        # wo [Experts, Hidden, Out] -> Gather Exp(0) and Hidden(1)
-        wo_gather_axes.extend(get_active_sharding_axes(wo_pspec[0], 0))
-        wo_gather_axes.extend(get_active_sharding_axes(wo_pspec[1], 1))
       gmm_fn = functools.partial(
           gmm,
           group_sizes=group_sizes,
@@ -1471,7 +1427,6 @@ class RoutedMoE(nnx.Module):
           x,
           w0,
           tiling=wi_tile_size,
-          weight_gather_axes=wi_gather_axes,
       )
       if self.get_tensor_transpose_parallelism_size() > 1:
         layer_w0 = jax.lax.psum(layer_w0, "tensor_transpose")
@@ -1483,7 +1438,6 @@ class RoutedMoE(nnx.Module):
           x,
           w1,
           tiling=wi_tile_size,
-          weight_gather_axes=wi_gather_axes,
       )
       if self.get_tensor_transpose_parallelism_size() > 1:
         layer_w1 = jax.lax.psum(layer_w1, "tensor_transpose")
@@ -1496,7 +1450,6 @@ class RoutedMoE(nnx.Module):
           intermediate_layer,
           wo,
           tiling=wo_tile_size,
-          weight_gather_axes=wo_gather_axes,
       )
       if self.get_tensor_parallelism_size() > 1:
         intermediate_output = jax.lax.psum_scatter(
@@ -2397,7 +2350,7 @@ class RoutedAndSharedMoE(nnx.Module):
         num_experts_per_tok=self.config.num_experts_per_tok,
         mesh=self.mesh,
         kernel_init=self.kernel_init,
-        kernel_axes=("embed_moe", None),
+        kernel_axes=("embed", None),
         intermediate_dim=self.config.moe_mlp_dim,
         dtype=self.config.dtype,
         weight_dtype=self.config.weight_dtype,

@@ -66,6 +66,13 @@ TEST_CASES = [
         "deepseek2-16b",
         "tpu7x-8",
         1,
+        "shard-exp-on-fsdp",
+        ("ici_fsdp_parallelism=-1", "ici_expert_parallelism=2"),
+    ),
+    (
+        "deepseek2-16b",
+        "tpu7x-8",
+        1,
         "2d-fsdp",
         ("ici_fsdp_parallelism=-1", "ici_fsdp_transpose_parallelism=2"),
     ),
