@@ -363,13 +363,20 @@ class MetricLogger:
     the previous call, then queues this step's metrics. The buffer is a queue of length 1: a new
     call means the previous dispatch is already submitted, so its result is safe to materialize.
 
-    Both train and eval entries carry raw metrics and defer all processing
-    (record_train_metrics / _accumulate_eval_metrics) to _flush_one_buffered_entry so float()
-    never blocks the dispatch path.
+    For train, record_train_metrics runs eagerly on the current step so the tiny JAX op it
+    enqueues for self.learning_rate_schedule(step) lands on the device queue BEFORE the next
+    iteration dispatches p_train_step. If we deferred it to flush time, lr_schedule(step) would
+    be queued behind the just-dispatched next training step and materializing
+    learning/current_learning_rate at the next flush would have to wait for that next step to
+    finish, doubling the host-side block per iteration and starving the device.
+
+    For eval, _accumulate_eval_metrics (which calls float() on JAX arrays) stays deferred to
+    _flush_one_buffered_entry so the eval dispatch loop is not serialized.
     """
     if self.buffered_metrics:
       self._flush_one_buffered_entry(self.buffered_metrics.pop(0))
     if is_training:
+      self.record_train_metrics(metrics, step, step_time_delta.total_seconds())
       self.buffered_metrics.append(("train", step, metrics, step_time_delta))
       if self._pending_eval_step_count > 0:
         self._finalize_eval_metrics(step)
@@ -378,11 +385,10 @@ class MetricLogger:
       self.buffered_metrics.append(("eval", step, metrics, step_time_delta))
 
   def _flush_one_buffered_entry(self, entry):
-    """Dispatches a single buffered entry to the writer. All float() calls happen here."""
+    """Dispatches a single buffered entry to the writer."""
     kind = entry[0]
     if kind == "train":
-      _, step, metrics, step_time_delta = entry
-      self.record_train_metrics(metrics, step, step_time_delta.total_seconds())
+      _, step, metrics, _ = entry
       self.write_metrics(metrics, step)
     elif kind == "eval":
       _, eval_step, raw_metrics, step_time_delta = entry
