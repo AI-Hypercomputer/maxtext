@@ -553,8 +553,6 @@ class ParseFeatures(grain.MapTransform):
   def __init__(self, data_columns, tokenize):
     # Ensure our custom distillation columns are always extracted
     self.data_columns = list(data_columns)
-    if "top_k_logits" not in self.data_columns:
-        self.data_columns.extend(["top_k_logits", "top_k_indices"])
     self.tokenize = tokenize
 
   def map(self, element):

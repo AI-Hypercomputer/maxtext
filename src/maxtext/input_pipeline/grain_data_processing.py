@@ -255,7 +255,6 @@ def pretrain_preprocessing_pipeline(
   batch_size = data_processing_utils.get_local_batch_size(config)
   dataset = data_processing_utils.format_and_batch(dataset, config, batch_size, pad_id, tuple(pipeline_columns), tokenizer_model)
 
-  dataset = data_processing_utils.shift_dataset(dataset, pad_id)
   dataset = data_processing_utils.apply_multiprocessing_and_prefetch(
       dataset, config, grain_worker_count, grain_per_worker_buffer_size
   )
