@@ -47,6 +47,14 @@ import qwix
 from qwix.contrib.sparsity import sparsity_module
 import qwix.pallas as qpl
 import tokamax
+from tokamax._src.ops.ragged_dot.pallas_mosaic_tpu import (
+    PallasMosaicTpuRaggedDot,
+    Config,
+    DEFAULT_RAGGED_DOT_DIM_NUMS,
+    DLHS_RAGGED_DOT_DIM_NUMS,
+    DRHS_RAGGED_DOT_DIM_NUMS,
+)
+from tokamax._src.ops import op
 
 set_xla_metadata = xla_metadata.set_xla_metadata
 
@@ -547,6 +555,9 @@ class RoutedMoE(nnx.Module):
         and self.config.fuse_expert_scales
     ):
       self.wo.value = self.wo.value * self.per_expert_scale.value[:, None, None]
+
+    # Monkey-patch Tokamax heuristics globally once
+    _monkey_patch_tokamax_heuristics(self.config)
 
   def _maybe_shard_with_logical(self, inputs, logical_name):
     return maybe_shard_with_logical(
@@ -1136,9 +1147,10 @@ class RoutedMoE(nnx.Module):
       elif self.config.attention == "vllm_rpa":
         return group_sizes
       else:
+        ep = self.get_expert_parallelism_size()
         return tokamax.RaggedDotGroupSizes(
             group_sizes,
-            (inputs.shape[0] // kernel.shape[0],) * kernel.shape[0],
+            (inputs.shape[0] // kernel.shape[0] // ep,) * kernel.shape[0],
         )
 
     def get_quantization_dtypes():
@@ -2542,3 +2554,74 @@ def get_routed_and_shared_moe(
       abstract_init=False,
   )
   return module
+
+
+_heuristics_patched = False
+
+
+def _monkey_patch_tokamax_heuristics(config, force=False):
+  """Globally monkey-patches Tokamax GMM heuristics with manual tiling overrides."""
+  global _heuristics_patched
+  if _heuristics_patched and not force:
+    return
+
+  def custom_heuristics(self, ba: op.BoundArguments) -> Config:
+    lhs, rhs = ba.arguments["lhs"], ba.arguments["rhs"]
+    dims = ba.arguments.get("ragged_dot_dimension_numbers", DEFAULT_RAGGED_DOT_DIM_NUMS)
+
+    is_wo = False
+    if dims == DEFAULT_RAGGED_DOT_DIM_NUMS:
+      is_wo = rhs.shape[1] == config.base_mlp_dim
+    elif dims == DLHS_RAGGED_DOT_DIM_NUMS:
+      is_wo = rhs.shape[2] == config.base_emb_dim
+    elif dims == DRHS_RAGGED_DOT_DIM_NUMS:
+      is_wo = lhs.shape[1] == config.base_mlp_dim
+
+    if is_wo:
+      # Return wo tile sizes
+      if dims == DEFAULT_RAGGED_DOT_DIM_NUMS:
+        return Config(
+            tile_m=config.wo_tile_fwd_batch_seq,
+            tile_k=config.wo_tile_fwd_mlp_dim,
+            tile_n=config.wo_tile_fwd_embed_dim,
+        )
+      elif dims == DLHS_RAGGED_DOT_DIM_NUMS:
+        return Config(
+            tile_m=config.wo_tile_dlhs_batch_seq,
+            tile_k=config.wo_tile_dlhs_embed_dim,
+            tile_n=config.wo_tile_dlhs_mlp_dim,
+        )
+      elif dims == DRHS_RAGGED_DOT_DIM_NUMS:
+        return Config(
+            tile_m=config.wo_tile_drhs_batch_seq,
+            tile_k=config.wo_tile_drhs_mlp_dim,
+            tile_n=config.wo_tile_drhs_embed_dim,
+        )
+    else:
+      # Return wi tile sizes
+      if dims == DEFAULT_RAGGED_DOT_DIM_NUMS:
+        return Config(
+            tile_m=config.wi_tile_fwd_batch_seq,
+            tile_k=config.wi_tile_fwd_embed_dim,
+            tile_n=config.wi_tile_fwd_mlp_dim,
+        )
+      elif dims == DLHS_RAGGED_DOT_DIM_NUMS:
+        return Config(
+            tile_m=config.wi_tile_dlhs_batch_seq,
+            tile_k=config.wi_tile_dlhs_mlp_dim,
+            tile_n=config.wi_tile_dlhs_embed_dim,
+        )
+      elif dims == DRHS_RAGGED_DOT_DIM_NUMS:
+        return Config(
+            tile_m=config.wi_tile_drhs_batch_seq,
+            tile_k=config.wi_tile_drhs_embed_dim,
+            tile_n=config.wi_tile_drhs_mlp_dim,
+        )
+
+    return Config()
+
+  # Apply class-level monkey patch!
+  # pylint: disable=protected-access
+  PallasMosaicTpuRaggedDot._get_heuristics_config = custom_heuristics
+  _heuristics_patched = True
+  print("[TOKAMAXX_PATCH] Successfully monkey-patched Tokamax GMM heuristics globally!")

@@ -32,6 +32,13 @@ from maxtext.layers.quantizations import Fp8Quantization
 from maxtext.utils import maxtext_utils
 from tests.utils.test_helpers import get_test_config_path
 import pytest
+from tokamax._src.ops import op
+from tokamax._src.ops.ragged_dot.pallas_mosaic_tpu import (
+    PallasMosaicTpuRaggedDot,
+    DEFAULT_RAGGED_DOT_DIM_NUMS,
+    DLHS_RAGGED_DOT_DIM_NUMS,
+    DRHS_RAGGED_DOT_DIM_NUMS,
+)
 
 
 class TokenDroppingTest(unittest.TestCase):
@@ -1506,6 +1513,94 @@ class FusedMoeTPUTest(unittest.TestCase):
     )
     self.assertIsNone(lb_loss)
     self.assertIsNone(bias_updates)
+
+
+class TokamaxMonkeyPatchTest(unittest.TestCase):
+  """Tests that the global monkey-patch for Tokamax heuristics applies manual tiling configs."""
+
+  def setUp(self):
+    super().setUp()
+    self.cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="monkey_patch_test",
+        enable_checkpointing=False,
+        model_name="deepseek3-tiny",
+        dtype="bfloat16",
+        base_emb_dim=256,
+        base_mlp_dim=512,
+        wi_tile_fwd_batch_seq=128,
+        wi_tile_fwd_embed_dim=128,
+        wi_tile_fwd_mlp_dim=128,
+        wi_tile_dlhs_batch_seq=256,
+        wi_tile_dlhs_embed_dim=256,
+        wi_tile_dlhs_mlp_dim=256,
+        wi_tile_drhs_batch_seq=512,
+        wi_tile_drhs_embed_dim=512,
+        wi_tile_drhs_mlp_dim=512,
+        wo_tile_fwd_batch_seq=11,
+        wo_tile_fwd_mlp_dim=22,
+        wo_tile_fwd_embed_dim=33,
+        wo_tile_dlhs_batch_seq=44,
+        wo_tile_dlhs_embed_dim=55,
+        wo_tile_dlhs_mlp_dim=66,
+        wo_tile_drhs_batch_seq=77,
+        wo_tile_drhs_mlp_dim=88,
+        wo_tile_drhs_embed_dim=99,
+        override_model_config=True,
+    )
+    # pylint: disable=protected-access
+    moe._monkey_patch_tokamax_heuristics(self.cfg, force=True)
+
+  def test_custom_heuristics_coverage(self):
+    """Directly executes all branches of custom_heuristics to verify and cover it."""
+    op_instance = PallasMosaicTpuRaggedDot()
+    get_heuristics_fn = op_instance._get_heuristics_config  # pylint: disable=protected-access
+
+    def run_heuristics(lhs_shape, rhs_shape, dims):
+      mock_lhs = jnp.zeros(lhs_shape)
+      mock_rhs = jnp.zeros(rhs_shape)
+      ba = op.BoundArguments(
+          op=op_instance,
+          arguments={
+              "lhs": mock_lhs,
+              "rhs": mock_rhs,
+              "ragged_dot_dimension_numbers": dims,
+          },
+      )
+      return get_heuristics_fn(ba)
+
+    # 1. FWD:
+    wi_fwd_config = run_heuristics((10, 256), (16, 256, 64), DEFAULT_RAGGED_DOT_DIM_NUMS)
+    self.assertEqual(wi_fwd_config.tile_m, 128)
+    self.assertEqual(wi_fwd_config.tile_k, 128)
+    self.assertEqual(wi_fwd_config.tile_n, 128)
+
+    wo_fwd_config = run_heuristics((10, 512), (16, 512, 64), DEFAULT_RAGGED_DOT_DIM_NUMS)
+    self.assertEqual(wo_fwd_config.tile_m, 11)
+    self.assertEqual(wo_fwd_config.tile_k, 22)
+    self.assertEqual(wo_fwd_config.tile_n, 33)
+
+    # 2. DLHS:
+    wi_dlhs_config = run_heuristics((10, 64), (16, 128, 64), DLHS_RAGGED_DOT_DIM_NUMS)
+    self.assertEqual(wi_dlhs_config.tile_m, 256)
+    self.assertEqual(wi_dlhs_config.tile_k, 256)
+    self.assertEqual(wi_dlhs_config.tile_n, 256)
+
+    wo_dlhs_config = run_heuristics((10, 256), (16, 128, 256), DLHS_RAGGED_DOT_DIM_NUMS)
+    self.assertEqual(wo_dlhs_config.tile_m, 44)
+    self.assertEqual(wo_dlhs_config.tile_k, 55)
+    self.assertEqual(wo_dlhs_config.tile_n, 66)
+
+    # 3. DRHS:
+    wi_drhs_config = run_heuristics((10, 256), (10, 64), DRHS_RAGGED_DOT_DIM_NUMS)
+    self.assertEqual(wi_drhs_config.tile_m, 512)
+    self.assertEqual(wi_drhs_config.tile_k, 512)
+    self.assertEqual(wi_drhs_config.tile_n, 512)
+
+    wo_drhs_config = run_heuristics((10, 512), (10, 64), DRHS_RAGGED_DOT_DIM_NUMS)
+    self.assertEqual(wo_drhs_config.tile_m, 77)
+    self.assertEqual(wo_drhs_config.tile_k, 88)
+    self.assertEqual(wo_drhs_config.tile_n, 99)
 
 
 if __name__ == "__main__":

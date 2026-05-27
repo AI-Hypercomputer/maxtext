@@ -29,6 +29,7 @@ from maxtext.layers import moe as moe_lib
 from maxtext.layers import quantizations
 import qwix.pallas as qpl
 import tokamax
+from maxtext.layers.moe import _monkey_patch_tokamax_heuristics
 
 
 @functools.partial(
@@ -833,6 +834,8 @@ def moe(
     quant,
 ):
   """Performs dropless MoE with tensor/expert parallelism."""
+  # Monkey-patch Tokamax heuristics globally once
+  _monkey_patch_tokamax_heuristics(config)
   xs, ys = list(zip(*inputs))
   ys = with_data_parallel_constraint(
       process_activations(
