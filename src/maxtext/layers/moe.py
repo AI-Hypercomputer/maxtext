@@ -548,6 +548,8 @@ class RoutedMoE(nnx.Module):
     ):
       self.wo.value = self.wo.value * self.per_expert_scale.value[:, None, None]
 
+    self.router_selections = None
+
   def _maybe_shard_with_logical(self, inputs, logical_name):
     return maybe_shard_with_logical(
         inputs,
@@ -1318,6 +1320,7 @@ class RoutedMoE(nnx.Module):
             self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", "activation_embed")),
             P(),  # Handle None or replicate the output
             P(),  # Handle None or replicate the output
+            P(),  # Handle selected_experts
         ),
         check_vma=False,
     )
@@ -1604,7 +1607,7 @@ class RoutedMoE(nnx.Module):
             group_sizes=group_sizes,
         )
 
-      return output, lb_loss, bias_updates
+      return output, lb_loss, bias_updates, selected_experts
 
     if self.config.moe_fsdp_use_two_stage_all_gather:
       # Unshard on fsdp axis
@@ -1650,9 +1653,11 @@ class RoutedMoE(nnx.Module):
     if wo_bias is not None:
       wo_bias = self._maybe_shard_with_pspec(wo_bias, wo_bias_pspec)
 
-    return wrapper(
+    output, lb_loss, bias_updates, top_k_indices = wrapper(
         inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias, self.rngs
     )
+
+    return output, lb_loss, bias_updates, top_k_indices
 
   def reshape_and_update_weights(self, weights, indices):
     """reshape and update weights."""
@@ -1911,7 +1916,7 @@ class RoutedMoE(nnx.Module):
       w0_bias,
       w1_bias,
       wo_bias,
-  ) -> tuple[jax.Array, Optional[jax.Array], Optional[jax.Array]]:
+  ) -> tuple[jax.Array, Optional[jax.Array], Optional[jax.Array], jax.Array]:
     """Dense matrix multiplication."""
     # gate_logits: batch, length, expert
     gate_logits = self._maybe_shard_with_logical(gate_logits, ("activation_batch_moe", "activation_length_moe", None))
@@ -2143,7 +2148,7 @@ class RoutedMoE(nnx.Module):
                   output.shape[3],
               ),
           )
-      return output, lb_loss, bias_updates
+      return output, lb_loss, bias_updates, top_k_indices
     else:
       inputs = self._maybe_shard_with_logical(
           inputs, ("activation_batch_moe", "activation_norm_length_moe", "activation_embed_moe")
@@ -2193,7 +2198,7 @@ class RoutedMoE(nnx.Module):
             weights,
             precision=matmul_precision,
         ).astype(self.dtype)
-      return output, lb_loss, bias_updates
+      return output, lb_loss, bias_updates, top_k_indices
 
   def fused_moe_matmul(
       self,
@@ -2341,13 +2346,17 @@ class RoutedMoE(nnx.Module):
             w1_bias,
             wo_bias,
         )
-      output, lb_loss, bias_updates = self.sparse_matmul(
+      output, lb_loss, bias_updates, top_k_indices = self.sparse_matmul(
           inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias
       )
     else:
-      output, lb_loss, bias_updates = self.dense_matmul(
+      output, lb_loss, bias_updates, top_k_indices = self.dense_matmul(
           inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias
       )
+
+    if getattr(self.config, "record_router_similarity_metrics", False):
+      self.router_selections = nnx.Intermediate(top_k_indices)
+
     return output, lb_loss, bias_updates
 
 
