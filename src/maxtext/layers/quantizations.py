@@ -41,7 +41,6 @@ import flax.linen as nn
 
 from maxtext.common.common_types import DType, Config
 from maxtext.inference.kvcache import KVQuant
-from maxtext.utils import max_logging
 
 # Params used to define mixed precision quantization configs
 DEFAULT = "__default__"  # default config
@@ -761,6 +760,7 @@ def get_fp8_full_qwix_rule_w_sparsity(config: Config):
 
 def get_quantization_rule(config: Config):
   """Returns a list of qwix.QtRule from `dtype`."""
+
   def make_qt_rule(dtype) -> list[qwix.QtRule]:
     return [
         qwix.QtRule(
