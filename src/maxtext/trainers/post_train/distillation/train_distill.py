@@ -374,11 +374,13 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
     tflops_per_sec = None
     if step_time_delta is not None and step_time_delta > 0:
       tflops_per_sec = self._tflops_combined / step_time_delta
-      tflops_metrics.update({
-          "perf/per_device_tflops_per_sec": tflops_per_sec,
-          "perf/per_device_tflops_per_sec_student": self._tflops_student / step_time_delta,
-          "perf/per_device_tflops_per_sec_teacher": self._tflops_teacher / step_time_delta,
-      })
+      tflops_metrics.update(
+          {
+              "perf/per_device_tflops_per_sec": tflops_per_sec,
+              "perf/per_device_tflops_per_sec_student": self._tflops_student / step_time_delta,
+              "perf/per_device_tflops_per_sec_teacher": self._tflops_teacher / step_time_delta,
+          }
+      )
     for name, value in tflops_metrics.items():
       self.metrics_logger.log(self.metrics_prefix, name, value, self._mode, step)
 

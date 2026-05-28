@@ -28,6 +28,7 @@ import argparse
 import time
 import sys
 from etils import epath
+import tensorflow as tf
 import re
 import numpy as np
 
