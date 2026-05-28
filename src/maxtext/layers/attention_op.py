@@ -64,7 +64,6 @@ from maxtext.common.common_types import (
     PREFILL_LENGTH,
     Q_LENGTH,
 )
-from maxtext.inference import page_manager
 from maxtext.inference.kvcache import KVQuant, KVTensor
 from maxtext.kernels.attention import jax_flash_attention
 from maxtext.kernels.attention.ragged_attention import ragged_gqa
@@ -2040,7 +2039,6 @@ class AttentionOp(nnx.Module):
       sinks=None,
       indexer_mask: Optional[Array] = None,
       slot: Optional[int] = None,
-      page_state: Optional[page_manager.PageState] = None,
       record_max_logits: bool = False,
   ):
     if cached_values is None:

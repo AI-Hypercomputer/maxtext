@@ -41,7 +41,6 @@ from maxtext.utils.globals import MAXTEXT_PKG_DIR
 from maxtext.models import models
 from maxtext.layers import quantizations
 from maxtext.inference import inference_utils
-from maxtext.inference.page_manager import PageManager, PageState
 from maxtext.multimodal import processor as mm_processor
 from maxtext.utils import lora_utils
 from maxtext.utils import max_utils
@@ -128,13 +127,6 @@ class MaxEngine(_BaseEngine):
     self.decode_state_layouts = None
     self.param_layouts = None
     self.rng = None
-
-    # Initialize page manager and page state
-    self.page_manager = None
-    self.page_state = None
-    if self.config.attention == "paged":
-      self.page_manager = PageManager(self.config)
-      self.page_state = self.page_manager.get_initial_page_state()
 
   def print_stats(self, label: str):
     max_utils.print_mem_stats(label)
@@ -250,7 +242,7 @@ class MaxEngine(_BaseEngine):
     )
 
     self.prefill_kv_cache_annotations = maxtext_utils.get_prefill_kv_cache_annotations(
-        self.model, self.config, rng2, self._mesh, self.page_state
+        self.model, self.config, rng2, self._mesh
     )
     self.prefill_kv_cache_shardings = jax.tree_util.tree_map(
         lambda x: jax.sharding.NamedSharding(self._mesh, x),
@@ -265,9 +257,7 @@ class MaxEngine(_BaseEngine):
       )
       self.prefill_kv_cache_shardings = self.prefill_kv_cache_shardings["decoder"]["layers_0"]
 
-    self.kv_cache_annotations = maxtext_utils.get_kv_cache_annotations(
-        self.model, self.config, rng2, self._mesh, self.page_state
-    )
+    self.kv_cache_annotations = maxtext_utils.get_kv_cache_annotations(self.model, self.config, rng2, self._mesh)
     self.kv_cache_shardings = jax.tree_util.tree_map(
         lambda x: jax.sharding.NamedSharding(self._mesh, x),
         self.kv_cache_annotations,
@@ -424,7 +414,6 @@ class MaxEngine(_BaseEngine):
       sampler: Callable[[Any], Any] | None = None,  # pylint: disable=unused-argument
       rng: PRNGKeyType | None = None,
       slot: int | None = None,
-      page_state: PageState | None = None,
       return_prompt_logp: bool = False,
       algorithm: str | None = None,
       topk: int | None = None,
@@ -524,7 +513,6 @@ class MaxEngine(_BaseEngine):
           previous_chunk=previous_chunk,
           true_length=true_length,
           slot=slot,
-          page_state=page_state,
       )
     if return_prompt_logp:
       prompt_logp = inference_utils.prompt_logprobs_from_prefill(flat_logits, input_tokens, true_length)
@@ -613,12 +601,6 @@ class MaxEngine(_BaseEngine):
   ):  # returns (new_prefix, result_tokens)
     """Public API for prefill that updates page state outside JIT."""
     # Update page state before JIT call
-    if self.config.attention == "paged" and self.page_manager is not None and self.page_state is not None:
-      self.page_state = self.page_manager.update_prefill_pages(  # pytype: disable=attribute-error
-          page_state=self.page_state,
-          page_group_id=slot,
-          true_length=true_length,
-      )
 
     # Sample rng before JIT call
     if rng is None:
@@ -639,7 +621,6 @@ class MaxEngine(_BaseEngine):
         audio_masks=audio_masks,
         sampler=sampler,
         true_length=true_length,
-        page_state=self.page_state,  # Pass current page state
         slot=slot,
         rng=rng,
         return_prompt_logp=return_prompt_logp,
@@ -955,8 +936,6 @@ class MaxEngine(_BaseEngine):
     """Public API for generate that updates page state outside JIT."""
 
     # Update page state before JIT call
-    if self.page_manager is not None and self.page_state is not None:
-      self.page_state = self.page_manager.update_decode_pages(self.page_state)
 
     # Sample rng before JIT call
     if rng is None:
@@ -969,7 +948,6 @@ class MaxEngine(_BaseEngine):
         params=params,
         decode_state=decode_state,
         sampler=sampler,
-        page_state=self.page_state,
         rng=rng,
         algorithm=algorithm,
         topk=topk,
@@ -989,7 +967,6 @@ class MaxEngine(_BaseEngine):
       *,
       sampler: Callable[[Any], Any] | None = None,  # pylint: disable=unused-argument
       rng: PRNGKeyType | None = None,
-      page_state: PageState | None = None,
       algorithm: str | None = None,
       topk: int | None = None,
       nucleus_topp: float | None = None,
@@ -1037,7 +1014,6 @@ class MaxEngine(_BaseEngine):
           model_mode=MODEL_MODE_AUTOREGRESSIVE,
           rngs={"params": new_rng},
           mutable=["cache"],
-          page_state=page_state,
       )
     out_logits = jax.lax.with_sharding_constraint(out_logits, self.replicated_sharding)
     new_cache = jax.lax.with_sharding_constraint(new_vars["cache"], self.kv_cache_shardings)
@@ -1213,7 +1189,6 @@ class MaxEngine(_BaseEngine):
       decode_state: DecodeState,
       slot: int,
       request_id: uuid.UUID | None = None,  # pylint: disable=unused-argument
-      page_state_in: PageState | None = None,
   ) -> DecodeState:
     """Insert a single computed prefill cache into KV cache."""
     unboxed_prefix = max_utils.unbox_logicallypartioned(prefix)
@@ -1269,45 +1244,12 @@ class MaxEngine(_BaseEngine):
       else:
         raise ValueError(f"We don't have a strategy for inserting {path_key}")
 
-    if self.config.attention == "paged" and self.page_state is not None:
-
-      def _copy_paged(path, prefix_cache, decode_state_cache):
-        path_key = path[-1].key
-        if path_key in ["key_pages", "value_pages"]:
-          page_map_for_slot = page_state_in.page_map[slot]  # pytype: disable=attribute-error
-          num_pages_to_copy = page_state_in.num_pages_used[slot]  # pytype: disable=attribute-error
-
-          def _update_pages(prefix_page_idx, state):
-            decode_state_pages, prefix_pages, current_page_map = state
-            prefix_page = jax.lax.dynamic_index_in_dim(prefix_pages, prefix_page_idx, axis=1)
-            dest_page_idx = current_page_map[prefix_page_idx]
-            decode_state_pages = jax.lax.dynamic_update_slice_in_dim(
-                decode_state_pages, prefix_page, dest_page_idx, axis=1
-            )
-            return decode_state_pages, prefix_pages, current_page_map
-
-          decode_state_cache, _, _ = jax.lax.fori_loop(
-              0,
-              num_pages_to_copy,
-              _update_pages,
-              (decode_state_cache, prefix_cache, page_map_for_slot),
-          )
-          return decode_state_cache
-        else:
-          raise ValueError(f"We don't have a strategy for inserting {path_key} for paged attention.")
-
-      inserted_cache = jax.tree_util.tree_map_with_path(
-          _copy_paged,
-          unboxed_prefix["cache"],
-          decode_state["cache"],
-      )
-    else:
-      inserted_cache = jax.tree_util.tree_map_with_path(
-          copy,
-          unboxed_prefix["cache"],
-          decode_state["cache"],
-          self.kv_cache_annotations_named,
-      )
+    inserted_cache = jax.tree_util.tree_map_with_path(
+        copy,
+        unboxed_prefix["cache"],
+        decode_state["cache"],
+        self.kv_cache_annotations_named,
+    )
 
     inserted_logits = jax.lax.dynamic_update_index_in_dim(decode_state["logits"], unboxed_prefix["logits"], slot, 0)
     inserted_next_pos = jax.lax.dynamic_update_index_in_dim(
@@ -1349,23 +1291,11 @@ class MaxEngine(_BaseEngine):
   ) -> DecodeState:
     """Non-JIT wrapper for inserting prefill cache."""
 
-    current_page_state = None
-    if self.config.attention == "paged" and self.page_manager is not None:
-      if self.page_state is None:
-        self.page_state = self.page_manager.get_initial_page_state()
-      current_page_state = self.page_state
-
     updated_decode_state = self._insert_jit(
         prefix=prefix,
         decode_state=decode_state,
         slot=slot,
-        page_state_in=current_page_state,
     )
-
-    # Update the PageState after the JIT call
-    if self.config.attention == "paged" and self.page_manager is not None and self.page_state is not None:
-      new_has_active_page = self.page_state.has_active_page.at[slot].set(True)
-      self.page_state = self.page_state.replace(has_active_page=new_has_active_page)
     return updated_decode_state
 
   @functools.partial(
@@ -1515,13 +1445,7 @@ class MaxEngine(_BaseEngine):
 
   def release_pages(self, slot: int):
     """Releases pages associated with a specific slot (page group) via the PageManager."""
-    if self.config.attention != "paged" or self.page_manager is None or self.page_state is None:
-      print(f"Warning: release_pages called for slot {slot} but paged attention is not configured or state is missing.")
-      return
-    new_page_state = self.page_manager.release_pages(
-        page_state=self.page_state, page_group_id=slot
-    )  # pytype: disable=attribute-error
-    self.page_state = new_page_state
+    print(f"Warning: release_pages called for slot {slot} but paged attention is not configured.")
 
   def get_prefix_destination_sharding(self) -> Any:
     return {
@@ -1592,12 +1516,9 @@ class MaxEngine(_BaseEngine):
     """Initialises any state which a generation step transforms."""
     if rng is None:
       rng = jax.random.PRNGKey(0)
-    page_state = None
-    if self.config.attention == "paged" and self.page_manager is not None:
-      page_state = self.page_manager.get_initial_page_state()  # pytype: disable=attribute-error
 
     # pylint: disable=unused-argument
-    def init(abstract_params, page_state):
+    def init(abstract_params):
       x = jnp.ones(
           (int(self.config.per_device_batch_size * self.mesh.size), 1),
           dtype=jnp.int32,
@@ -1622,7 +1543,6 @@ class MaxEngine(_BaseEngine):
           model_mode=MODEL_MODE_AUTOREGRESSIVE,
           rngs={"params": rng},
           mutable=["cache"],
-          page_state=page_state,
           slot=0,
       )
 
@@ -1658,7 +1578,7 @@ class MaxEngine(_BaseEngine):
       }
 
     with nn_partitioning.axis_rules(self.config.logical_axis_rules):
-      abstract_outputs = jax.eval_shape(init, self.abstract_params, page_state)
+      abstract_outputs = jax.eval_shape(init, self.abstract_params)
     logical_annotations = nn.get_partition_spec(abstract_outputs)
 
     with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):

@@ -46,7 +46,6 @@ from maxtext.common.common_types import (
     ShardMode,
 )
 from maxtext.configs import types
-from maxtext.inference.page_manager import PageState
 from maxtext.common import checkpointing
 from maxtext.multimodal import processor as mm_processor
 from maxtext.utils import gcs_utils
@@ -1750,7 +1749,7 @@ def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=Tru
   )
 
 
-def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: None | PageState = None):
+def get_prefill_kv_cache_annotations(model, config, rng, mesh):
   """Get a shaped abstraction of the state (including optimizer)"""
 
   def init_kv_cache(model, config):
@@ -1771,7 +1770,6 @@ def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: None 
         encoder_audios=jnp.ones(audio_shape) if config.use_audio else None,
         model_mode=MODEL_MODE_PREFILL,
         slot=0,
-        page_state=page_state,
     )
     return model_vars["cache"]
 
@@ -1784,7 +1782,7 @@ def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: None 
   return state_mesh_annotations
 
 
-def get_kv_cache_annotations(model, config, rng, mesh, page_state: None | PageState = None):
+def get_kv_cache_annotations(model, config, rng, mesh):
   """Get a shaped abstraction of the state (including optimizer)"""
 
   def init_kv_cache(model, config):
@@ -1802,7 +1800,6 @@ def get_kv_cache_annotations(model, config, rng, mesh, page_state: None | PageSt
         encoder_audios=jnp.ones(audio_shape) if config.use_audio else None,
         model_mode=MODEL_MODE_AUTOREGRESSIVE,
         slot=0,
-        page_state=page_state,
     )
     return model_vars["cache"]
 

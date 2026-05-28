@@ -30,7 +30,6 @@ from maxtext.layers.attentions import Attention
 from maxtext.layers.linears import DenseGeneral
 from maxtext.utils import max_utils
 from maxtext.utils.sharding import create_sharding
-from maxtext.inference import page_manager
 from maxtext.models.qwen3 import AttentionWithNorm
 from maxtext.layers.normalizations import RMSNorm
 
@@ -204,7 +203,6 @@ class Qwen3CustomMoeDecoderLayer(AttentionWithNorm):
       deterministic: bool,
       model_mode: str,
       previous_chunk=None,
-      page_state: None | page_manager.PageState = None,
       slot: None | int = None,
       kv_cache: None | jnp.ndarray = None,
       attention_metadata: None | dict[str, Any] = None,
@@ -218,7 +216,6 @@ class Qwen3CustomMoeDecoderLayer(AttentionWithNorm):
       deterministic: Whether to run in deterministic mode (e.g., no dropout).
       model_mode: The current mode of the model (e.g., "train", "decode").
       previous_chunk: Ignored in this implementation.
-      page_state: Optional PageState for paged attention.
       slot: Optional slot index for decoding.
       kv_cache: Optional KV cache for self-attention.
       attention_metadata: Optional metadata for attention.

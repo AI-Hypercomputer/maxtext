@@ -105,7 +105,6 @@ def validate_attention_kernel(s: str) -> None:
       "flash",
       "cudnn_flash_te",
       "cudnn_flash_jax",
-      "paged",
       "vllm_rpa",
   )
   if s not in valid_attention_kernels:  # currently supported attention
@@ -119,7 +118,7 @@ def validate_attention_type(s: str) -> None:
 
 
 def validate_moba_attention(moba, attention) -> None:
-  if moba and attention in ("autoselected", "flash", "cudnn_flash_te", "cudnn_flash_jax", "paged"):
+  if moba and attention in ("autoselected", "flash", "cudnn_flash_te", "cudnn_flash_jax"):
     raise ValueError("MoBA is only supported dot_product attention")
 
 
@@ -815,11 +814,6 @@ class _HyperParameters:
           " Shardy is not compatible with gradient accumulation on GPU."
       )
       raw_keys["shardy"] = False
-
-    if raw_keys["pagedattn_max_pages_per_group"] <= 0:
-      raw_keys["pagedattn_max_pages_per_group"] = (
-          raw_keys["max_target_length"] + raw_keys["pagedattn_tokens_per_page"] - 1
-      ) // raw_keys["pagedattn_tokens_per_page"]
 
     raw_keys["num_slices"] = max_utils.get_num_slices(raw_keys)
     raw_keys["quantization_local_shard_count"] = get_quantization_local_shard_count(raw_keys)
