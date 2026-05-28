@@ -840,7 +840,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         cfg.gdn_conv_kernel_dim,
         mesh=self.mesh,
         config=GdnAttentionConfig(
-            ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl("chunked_jax_pd")
+            ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl("ragged_gated_delta_rule_chunked")
         ),
     )
 
