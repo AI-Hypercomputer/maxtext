@@ -156,6 +156,27 @@ def generate_maxtext_config(vllm_config: VllmConfig, mesh: Mesh) -> pyconfig.Hyp
     overrides["padded_base_moe_mlp_dim"] = padded_hidden_size
 
   maxtext_config = pyconfig.initialize(argv_list, **overrides)
+  
+  # Align logical axis rules with vLLM physical mesh axes
+  mapping = {
+      "tensor": "model",
+      "tensor_transpose": "model",
+      "tensor_sequence": "model",
+      "fsdp": "model",           # Map FSDP to model TP axis in vLLM for inference
+      "fsdp_transpose": "model",
+      "expert": "expert",
+      "context": "dcp",
+      "data": "data",
+  }
+  new_rules = []
+  for logical_name, physical_axes in maxtext_config.logical_axis_rules:
+    if isinstance(physical_axes, tuple):
+      new_phys = tuple(mapping.get(ax, ax) for ax in physical_axes)
+    else:
+      new_phys = mapping.get(physical_axes, physical_axes)
+    new_rules.append((logical_name, new_phys))
+  maxtext_config.logical_axis_rules = tuple(new_rules)
+
   return maxtext_config
 
 
@@ -187,32 +208,94 @@ def pre_slice_gdn_weights(model: nnx.Module, config: pyconfig.HyperParameters):
     head_v_dim = config.gdn_value_head_dim
     v_heads_per_k_head = config.gdn_num_value_heads // num_k_heads
     
-    w_qkvz_reshaped = w_qkvz.reshape(
-        w_qkvz.shape[0],
-        num_k_heads,
-        2 * head_k_dim + 2 * head_v_dim * v_heads_per_k_head,
-    )
     split_idx_qkvz = 2 * head_k_dim + v_heads_per_k_head * head_v_dim
     sharding_qkvz = qkvz_param.sharding
 
-    state[parent_path + ('w_q',)] = nnx.Param(w_qkvz_reshaped[..., :head_k_dim], sharding=sharding_qkvz)
-    state[parent_path + ('w_k',)] = nnx.Param(w_qkvz_reshaped[..., head_k_dim : 2 * head_k_dim], sharding=sharding_qkvz)
-    state[parent_path + ('w_v',)] = nnx.Param(w_qkvz_reshaped[..., 2 * head_k_dim : split_idx_qkvz], sharding=sharding_qkvz)
-    state[parent_path + ('w_z',)] = nnx.Param(w_qkvz_reshaped[..., split_idx_qkvz:], sharding=sharding_qkvz)
+    # Construct correct NamedSharding by appending None to the original 2D sharding spec
+    if hasattr(sharding_qkvz, "spec") and hasattr(sharding_qkvz, "mesh"):
+      if len(w_qkvz.shape) == 3:
+        # Stacked/scanned weights: (num_layers, in_dim, out_dim) -> P(None, fsdp, tensor, None)
+        sharding_qkvz_3d = jax.sharding.NamedSharding(sharding_qkvz.mesh, (None,) + sharding_qkvz.spec + (None,))
+      else:
+        # Unstacked weights: (in_dim, out_dim) -> P(fsdp, tensor, None)
+        sharding_qkvz_3d = jax.sharding.NamedSharding(sharding_qkvz.mesh, sharding_qkvz.spec + (None,))
+    else:
+      sharding_qkvz_3d = sharding_qkvz
+
+    if len(w_qkvz.shape) == 3:
+      # Stacked/scanned weights: (num_layers, in_dim, out_dim)
+      num_layers = w_qkvz.shape[0]
+      in_dim = w_qkvz.shape[1]
+      w_qkvz_reshaped = w_qkvz.reshape(
+          num_layers,
+          in_dim,
+          num_k_heads,
+          2 * head_k_dim + 2 * head_v_dim * v_heads_per_k_head,
+      )
+      w_q_val = w_qkvz_reshaped[..., :head_k_dim]
+      w_k_val = w_qkvz_reshaped[..., head_k_dim : 2 * head_k_dim]
+      w_v_val = w_qkvz_reshaped[..., 2 * head_k_dim : split_idx_qkvz]
+      w_z_val = w_qkvz_reshaped[..., split_idx_qkvz:]
+    else:
+      # Unstacked weights: (in_dim, out_dim)
+      in_dim = w_qkvz.shape[0]
+      w_qkvz_reshaped = w_qkvz.reshape(
+          in_dim,
+          num_k_heads,
+          2 * head_k_dim + 2 * head_v_dim * v_heads_per_k_head,
+      )
+      w_q_val = w_qkvz_reshaped[..., :head_k_dim]
+      w_k_val = w_qkvz_reshaped[..., head_k_dim : 2 * head_k_dim]
+      w_v_val = w_qkvz_reshaped[..., 2 * head_k_dim : split_idx_qkvz]
+      w_z_val = w_qkvz_reshaped[..., split_idx_qkvz:]
+
+    state[parent_path + ('w_q',)] = nnx.Param(w_q_val, sharding=sharding_qkvz_3d)
+    state[parent_path + ('w_k',)] = nnx.Param(w_k_val, sharding=sharding_qkvz_3d)
+    state[parent_path + ('w_v',)] = nnx.Param(w_v_val, sharding=sharding_qkvz_3d)
+    state[parent_path + ('w_z',)] = nnx.Param(w_z_val, sharding=sharding_qkvz_3d)
 
     # 2. Slice in_proj_ba weights
     ba_path = parent_path + ('in_proj_ba', 'kernel')
     ba_param = state[ba_path]
     w_ba = ba_param.value
-
-    w_ba_reshaped = w_ba.reshape(
-        w_ba.shape[0],
-        num_k_heads,
-        2 * v_heads_per_k_head,
-    )
     sharding_ba = ba_param.sharding
-    state[parent_path + ('w_b',)] = nnx.Param(w_ba_reshaped[..., :v_heads_per_k_head], sharding=sharding_ba)
-    state[parent_path + ('w_a',)] = nnx.Param(w_ba_reshaped[..., v_heads_per_k_head:], sharding=sharding_ba)
+
+    # Construct correct NamedSharding for ba
+    if hasattr(sharding_ba, "spec") and hasattr(sharding_ba, "mesh"):
+      if len(w_ba.shape) == 3:
+        # Stacked/scanned weights -> P(None, fsdp, tensor, None)
+        sharding_ba_3d = jax.sharding.NamedSharding(sharding_ba.mesh, (None,) + sharding_ba.spec + (None,))
+      else:
+        # Unstacked weights -> P(fsdp, tensor, None)
+        sharding_ba_3d = jax.sharding.NamedSharding(sharding_ba.mesh, sharding_ba.spec + (None,))
+    else:
+      sharding_ba_3d = sharding_ba
+
+    if len(w_ba.shape) == 3:
+      # Stacked weights: (num_layers, in_dim, out_dim)
+      num_layers = w_ba.shape[0]
+      in_dim = w_ba.shape[1]
+      w_ba_reshaped = w_ba.reshape(
+          num_layers,
+          in_dim,
+          num_k_heads,
+          2 * v_heads_per_k_head,
+      )
+      w_b_val = w_ba_reshaped[..., :v_heads_per_k_head]
+      w_a_val = w_ba_reshaped[..., v_heads_per_k_head:]
+    else:
+      # Unstacked weights: (in_dim, out_dim)
+      in_dim = w_ba.shape[0]
+      w_ba_reshaped = w_ba.reshape(
+          in_dim,
+          num_k_heads,
+          2 * v_heads_per_k_head,
+      )
+      w_b_val = w_ba_reshaped[..., :v_heads_per_k_head]
+      w_a_val = w_ba_reshaped[..., v_heads_per_k_head:]
+
+    state[parent_path + ('w_b',)] = nnx.Param(w_b_val, sharding=sharding_ba_3d)
+    state[parent_path + ('w_a',)] = nnx.Param(w_a_val, sharding=sharding_ba_3d)
 
     max_logging.log(f" -> Pre-sliced layer {idx} ({parent_path}) successfully.")
 
