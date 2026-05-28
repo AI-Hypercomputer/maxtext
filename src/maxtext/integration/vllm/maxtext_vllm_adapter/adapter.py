@@ -159,46 +159,65 @@ def generate_maxtext_config(vllm_config: VllmConfig, mesh: Mesh) -> pyconfig.Hyp
   return maxtext_config
 
 
-def pre_slice_gdn_weights(model: nnx.Module):
-  """Directly iterates over the model's decoder layers and pre-slices GDN weights on the host once."""
-  if not hasattr(model, "decoder") or not hasattr(model.decoder, "layers"):
-    max_logging.log("Warning: Model does not have decoder.layers, skipping GDN weight pre-slicing.")
+def pre_slice_gdn_weights(model: nnx.Module, config: pyconfig.HyperParameters):
+  """Directly crawls the flat JAX/NNX model State and slices GDN weights once on the host."""
+  state = nnx.state(model)
+  
+  # Find all GDN block paths by searching for 'in_proj_qkvz' in the flat State keys
+  gdn_paths = []
+  for path in state.keys():
+    if len(path) >= 2 and path[-2:] == ('in_proj_qkvz', 'kernel'):
+      gdn_paths.append(path[:-2])
+
+  if not gdn_paths:
+    max_logging.log("Warning: No GDN attention layers found in flat model state, skipping pre-slicing.")
     return
 
-  for idx, layer in enumerate(model.decoder.layers):
-    if not hasattr(layer, "attention"):
-      continue
-    gdn = layer.attention
-    if "GatedDeltaNet" not in gdn.__class__.__name__:
-      continue
+  max_logging.log(f"Found {len(gdn_paths)} GDN attention layers in model state. Pre-slicing weights...")
 
-    max_logging.log(f"Pre-slicing weights for GDN layer {idx} ({gdn.__class__.__name__})...")
-    
+  # Slice and inject parameters for each GDN attention layer
+  for idx, parent_path in enumerate(gdn_paths):
     # 1. Slice in_proj_qkvz weights
-    w_qkvz = gdn.in_proj_qkvz.kernel.value
+    qkvz_path = parent_path + ('in_proj_qkvz', 'kernel')
+    qkvz_param = state[qkvz_path]
+    w_qkvz = qkvz_param.value
+
+    num_k_heads = config.gdn_num_key_heads
+    head_k_dim = config.gdn_key_head_dim
+    head_v_dim = config.gdn_value_head_dim
+    v_heads_per_k_head = config.gdn_num_value_heads // num_k_heads
+    
     w_qkvz_reshaped = w_qkvz.reshape(
         w_qkvz.shape[0],
-        gdn.num_k_heads,
-        2 * gdn.head_k_dim + 2 * gdn.head_v_dim * gdn.v_heads_per_k_head,
+        num_k_heads,
+        2 * head_k_dim + 2 * head_v_dim * v_heads_per_k_head,
     )
-    split_idx_qkvz = 2 * gdn.head_k_dim + gdn.v_heads_per_k_head * gdn.head_v_dim
-    sharding_qkvz = gdn.in_proj_qkvz.kernel.sharding
+    split_idx_qkvz = 2 * head_k_dim + v_heads_per_k_head * head_v_dim
+    sharding_qkvz = qkvz_param.sharding
 
-    gdn.w_q = nnx.Param(w_qkvz_reshaped[..., :gdn.head_k_dim], sharding=sharding_qkvz)
-    gdn.w_k = nnx.Param(w_qkvz_reshaped[..., gdn.head_k_dim : 2 * gdn.head_k_dim], sharding=sharding_qkvz)
-    gdn.w_v = nnx.Param(w_qkvz_reshaped[..., 2 * gdn.head_k_dim : split_idx_qkvz], sharding=sharding_qkvz)
-    gdn.w_z = nnx.Param(w_qkvz_reshaped[..., split_idx_qkvz:], sharding=sharding_qkvz)
+    state[parent_path + ('w_q',)] = nnx.Param(w_qkvz_reshaped[..., :head_k_dim], sharding=sharding_qkvz)
+    state[parent_path + ('w_k',)] = nnx.Param(w_qkvz_reshaped[..., head_k_dim : 2 * head_k_dim], sharding=sharding_qkvz)
+    state[parent_path + ('w_v',)] = nnx.Param(w_qkvz_reshaped[..., 2 * head_k_dim : split_idx_qkvz], sharding=sharding_qkvz)
+    state[parent_path + ('w_z',)] = nnx.Param(w_qkvz_reshaped[..., split_idx_qkvz:], sharding=sharding_qkvz)
 
     # 2. Slice in_proj_ba weights
-    w_ba = gdn.in_proj_ba.kernel.value
+    ba_path = parent_path + ('in_proj_ba', 'kernel')
+    ba_param = state[ba_path]
+    w_ba = ba_param.value
+
     w_ba_reshaped = w_ba.reshape(
         w_ba.shape[0],
-        gdn.num_k_heads,
-        2 * gdn.v_heads_per_k_head,
+        num_k_heads,
+        2 * v_heads_per_k_head,
     )
-    sharding_ba = gdn.in_proj_ba.kernel.sharding
-    gdn.w_b = nnx.Param(w_ba_reshaped[..., :gdn.v_heads_per_k_head], sharding=sharding_ba)
-    gdn.w_a = nnx.Param(w_ba_reshaped[..., gdn.v_heads_per_k_head:], sharding=sharding_ba)
+    sharding_ba = ba_param.sharding
+    state[parent_path + ('w_b',)] = nnx.Param(w_ba_reshaped[..., :v_heads_per_k_head], sharding=sharding_ba)
+    state[parent_path + ('w_a',)] = nnx.Param(w_ba_reshaped[..., v_heads_per_k_head:], sharding=sharding_ba)
+
+    max_logging.log(f" -> Pre-sliced layer {idx} ({parent_path}) successfully.")
+
+  # Update the model's state with the new parameters
+  nnx.update(model, state)
 
 
 class MaxTextForCausalLM(nnx.Module):
@@ -459,5 +478,5 @@ class MaxTextForCausalLM(nnx.Module):
       model = model_creation_utils.from_pretrained(
           self.maxtext_config, mesh=self.mesh, model_mode=self.model_mode, rng_key=rng_key
       )
-      pre_slice_gdn_weights(model)
+      pre_slice_gdn_weights(model, self.maxtext_config)
       self.model = nnx.data(model)

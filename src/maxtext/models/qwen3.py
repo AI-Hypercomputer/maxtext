@@ -734,11 +734,17 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     attn_data = ShardingAxisName.ATTN_DATA
     attn_head = ShardingAxisName.MODEL if self._gdn_replicate_expert else ShardingAxisName.ATTN_HEAD
 
+    # Retrieve pre-sliced weights from the Flax parameter dictionary (populated at startup)
+    w_q = self.param("w_q", lambda *args: None)
+    w_k = self.param("w_k", lambda *args: None)
+    w_v = self.param("w_v", lambda *args: None)
+    w_z = self.param("w_z", lambda *args: None)
+
     # Separate parallel einsums using pre-sliced weights
-    q_4d = jnp.einsum("bse, ehd -> bshd", hidden_states, self.w_q.value, precision=precision)
-    k_4d = jnp.einsum("bse, ehd -> bshd", hidden_states, self.w_k.value, precision=precision)
-    v_4d = jnp.einsum("bse, ehd -> bshd", hidden_states, self.w_v.value, precision=precision)
-    z_4d = jnp.einsum("bse, ehd -> bshd", hidden_states, self.w_z.value, precision=precision)
+    q_4d = jnp.einsum("bse, ehd -> bshd", hidden_states, w_q, precision=precision)
+    k_4d = jnp.einsum("bse, ehd -> bshd", hidden_states, w_k, precision=precision)
+    v_4d = jnp.einsum("bse, ehd -> bshd", hidden_states, w_v, precision=precision)
+    z_4d = jnp.einsum("bse, ehd -> bshd", hidden_states, w_z, precision=precision)
     
     q_flat = q_4d.reshape(num_tokens, self.key_dim)
     k_flat = k_4d.reshape(num_tokens, self.key_dim)
@@ -746,8 +752,10 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     z = z_4d.reshape(batch, seq_len, self.num_v_heads, self.head_v_dim)
 
     # Projections for b and a using pre-sliced weights
-    b_4d = jnp.einsum("bse, ehd -> bshd", hidden_states, self.w_b.value, precision=precision)
-    a_4d = jnp.einsum("bse, ehd -> bshd", hidden_states, self.w_a.value, precision=precision)
+    w_b = self.param("w_b", lambda *args: None)
+    w_a = self.param("w_a", lambda *args: None)
+    b_4d = jnp.einsum("bse, ehd -> bshd", hidden_states, w_b, precision=precision)
+    a_4d = jnp.einsum("bse, ehd -> bshd", hidden_states, w_a, precision=precision)
     
     b = b_4d.reshape(num_tokens, -1)
     a = a_4d.reshape(num_tokens, -1)
