@@ -161,7 +161,7 @@ def generate_maxtext_config(vllm_config: VllmConfig, mesh: Mesh) -> pyconfig.Hyp
 
 def pre_slice_gdn_weights(module: nnx.Module):
   """Recursively traverses the NNX module tree and pre-slices GDN weights on the host once."""
-  if module.__class__.__name__ == "Qwen3NextGatedDeltaNet":
+  if "GatedDeltaNet" in module.__class__.__name__:
     # 1. Slice in_proj_qkvz weights
     w_qkvz = module.in_proj_qkvz.kernel.value
     w_qkvz_reshaped = w_qkvz.reshape(
