@@ -100,7 +100,7 @@ def decode_with_vllm(config: Config) -> None:
   if config.load_parameters_path:
     vllm_args["additional_config"]["maxtext_config"]["load_parameters_path"] = config.load_parameters_path
   else:
-    vllm_args["load_format"] = "dummy"
+    vllm_args["load_format"] = config.vllm_load_format
 
   enable_expert_parallel = config.ici_expert_parallelism > 1
   if enable_expert_parallel:
