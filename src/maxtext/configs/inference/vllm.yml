@@ -46,17 +46,17 @@ logical_axis_rules: [
                       # ==========================================
                       # Attention Activations
                       ['activation_batch_attn', ['data', 'attn_dp', 'attn_dp_expert']],
-                      ['activation_heads', ['model', 'expert']],
-                      ['activation_kv_heads', ['model', 'expert']],
+                      ['activation_heads', ['model', 'expert', 'dcp']],
+                      ['activation_kv_heads', ['model', 'expert', 'dcp']],
                       ['activation_embed_attn', []],
                       ['activation_kv', []],
                       ['activation_kv_batch', ['data', 'attn_dp', 'attn_dp_expert']],
                       ['activation_kv_head_dim', []],
                       # Attention Weights
-                      ['heads', ['model', 'expert']],
-                      ['gdn_head', ['model', 'expert']],
-                      ['q_heads', ['model', 'expert']],
-                      ['kv_heads', ['model', 'expert']],
+                      ['heads', ['model', 'expert', 'dcp']],
+                      ['gdn_head', ['model', 'expert', 'dcp']],
+                      ['q_heads', ['model', 'expert', 'dcp']],
+                      ['kv_heads', ['model', 'expert', 'dcp']],
                       ['qkv', []],
                       ['kv', []],
                       ['kv_head_dim', []],
