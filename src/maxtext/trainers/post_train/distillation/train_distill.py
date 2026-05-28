@@ -733,19 +733,16 @@ def train_distill(
     )
     trainer.is_managed_externally = True
     trainer._has_aux = True  # pylint: disable=protected-access
-    
+
     if is_offline:
-      max_logging.log(f"Initializing Data Iterators via MaxText pipeline...")
-      
+      max_logging.log("Initializing Data Iterators via MaxText pipeline...")
+
       # Point Grain to offline files instead of the raw text dataset
-      if not offline_data_dir.endswith(".array_record"):
-          student_config.get_keys()["grain_train_files"] = os.path.join(offline_data_dir, "*.array_record")
-      else:
-          student_config.get_keys()["grain_train_files"] = offline_data_dir
-          
+      student_config.get_keys()["grain_train_files"] = offline_data_dir
+
       student_config.get_keys()["eval_interval"] = 0
-      student_config.get_keys()["is_offline_distillation"] = True 
-      student_config.get_keys()["dataset_shuffle_buffer_size"] = 0 
+      student_config.get_keys()["is_offline_distillation"] = True
+      student_config.get_keys()["dataset_shuffle_buffer_size"] = 0
       student_config.get_keys()["dataset_shuffle_seed"] = 0
 
     raw_train_iter, raw_eval_iter = input_pipeline_interface.create_data_iterator(student_config, mesh)
@@ -775,9 +772,7 @@ def train_distill(
         return inputs_dict
 
       inputs_dict["teacher_output"] = distillation_utils.DistillationForwardOutput(
-          logits=batch.top_k_logits, 
-          out_projection_activations=None,
-          top_k_indices=batch.top_k_indices
+          logits=batch.top_k_logits, out_projection_activations=None, top_k_indices=batch.top_k_indices
       )
       return inputs_dict
 

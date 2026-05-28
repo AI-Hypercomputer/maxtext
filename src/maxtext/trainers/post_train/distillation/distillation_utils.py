@@ -19,7 +19,6 @@ model structures with Tunix's training interfaces.
 """
 
 import abc
-import safetensors.numpy
 from typing import Any, Callable, Iterator, List, Literal, Optional, Sequence
 
 import flax
@@ -28,8 +27,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
-import tensorflow as tf
-from array_record.python import array_record_module
 from orbax import checkpoint
 
 from maxtext.utils import max_logging
@@ -81,6 +78,7 @@ class MaxTextTrainingInput(peft_trainer.TrainingInput):
 # -----------------------------------------------------------------------------
 # Data Loading Adapter
 # -----------------------------------------------------------------------------
+
 
 class MaxTextToTunixIterator:
   """Adapts the raw dictionary output of MaxText's data loader to Tunix objects.
@@ -495,38 +493,38 @@ class CombinedDistillationStrategy(DistillationStrategy):
     mask = jnp.any(labels != 0, axis=-1).astype(jnp.float32)  # [B, T]
     valid_count = jnp.sum(mask)
     safe_count = jnp.maximum(valid_count, 1.0)
-    
+
     # --- Soft loss: KL on temperature-softened distributions ---
-    
+
     # 1. Pre-compute Student log-probs over the full vocabulary
     log_s_T_full = jax.nn.log_softmax(s_logits / temperature, axis=-1)
     log_s_1_full = jax.nn.log_softmax(s_logits, axis=-1)
 
     if getattr(teacher_output, "top_k_indices", None) is not None:
       # --- SPARSE KL DIVERGENCE (Offline Mode) ---
-      
+
       # 2. Normalize teacher probabilities ONLY over the saved Top-K subset
       t_p_T_sparse = jax.nn.softmax(t_logits / temperature, axis=-1)
       log_t_p_T_sparse = jax.nn.log_softmax(t_logits / temperature, axis=-1)
-      
+
       # 3. Gather Student log-probs at the Teacher's exact Top-K indices
       log_s_T_sparse = jnp.take_along_axis(log_s_T_full, teacher_output.top_k_indices, axis=-1)
-      
+
       # 4. KL(T || S) = Sum_over_TopK( P_T * (log_P_T - log_P_S) )
       kl_softened_per_pos = jnp.sum(t_p_T_sparse * (log_t_p_T_sparse - log_s_T_sparse), axis=-1)
-      
+
       # We don't have the full teacher logits to compute exact cross-entropy, so we zero it out
       ce_teacher_per_pos = jnp.zeros(s_logits.shape[:-1])
-      kl_t1_sum = jnp.array(0.0) 
-      
+      kl_t1_sum = jnp.array(0.0)
+
     else:
       # --- DENSE KL DIVERGENCE (Online Mode) ---
       t_p_T = jax.nn.softmax(t_logits / temperature, axis=-1)
       t_p_1 = jax.nn.softmax(t_logits, axis=-1)
-      
+
       kl_softened_per_pos = optax.kl_divergence(log_s_T_full, t_p_T)  # [B, T]
       kl_t1_per_pos = optax.kl_divergence(log_s_1_full, t_p_1)
-      
+
       ce_teacher_per_pos = optax.softmax_cross_entropy(logits=t_logits, labels=labels)
       kl_t1_sum = jnp.sum(kl_t1_per_pos * mask)
 
@@ -539,7 +537,7 @@ class CombinedDistillationStrategy(DistillationStrategy):
     ce_student_per_pos = optax.softmax_cross_entropy(logits=s_logits, labels=labels)
     ce_student_sum = jnp.sum(ce_student_per_pos * mask)
     hard_loss_mean = ce_student_sum / safe_count
-    
+
     ce_teacher_sum = jnp.sum(ce_teacher_per_pos * mask)
 
     base_logit_loss = (alpha * soft_loss_mean) + ((1.0 - alpha) * hard_loss_mean)

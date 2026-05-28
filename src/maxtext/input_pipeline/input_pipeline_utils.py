@@ -541,6 +541,7 @@ def make_tfrecord_iter_dataset(path: str):
     return GCSTFRecordIterDataset(path)
   return TFRecordIterDataset(path)
 
+
 @dataclasses.dataclass
 class ParseFeatures(grain.MapTransform):
   """Parse serialized tf.train.Example protos for arrayrecord/tfrecord datasets.
@@ -571,7 +572,7 @@ class ParseFeatures(grain.MapTransform):
     for col in self.data_columns:
       if col in features:
         f = features[col]
-        
+
         # Dynamically check proto field type instead of relying on the tokenize flag
         if len(f.float_list.value) > 0:
           parsed[col] = np.array(f.float_list.value, dtype=np.float32)
@@ -581,14 +582,14 @@ class ParseFeatures(grain.MapTransform):
           parsed[col] = np.array(f.bytes_list.value, dtype=object)
         else:
           parsed[col] = np.array([])
-          
+
     # Reshape the flattened arrays back to 2D [seq_len, top_k]
     seq_len = len(parsed.get("inputs", []))
     if seq_len > 0:
-        if "top_k_logits" in parsed and len(parsed["top_k_logits"]) > 0:
-            parsed["top_k_logits"] = parsed["top_k_logits"].reshape(seq_len, -1)
-        if "top_k_indices" in parsed and len(parsed["top_k_indices"]) > 0:
-            parsed["top_k_indices"] = parsed["top_k_indices"].reshape(seq_len, -1)
+      if "top_k_logits" in parsed and len(parsed["top_k_logits"]) > 0:
+        parsed["top_k_logits"] = parsed["top_k_logits"].reshape(seq_len, -1)
+      if "top_k_indices" in parsed and len(parsed["top_k_indices"]) > 0:
+        parsed["top_k_indices"] = parsed["top_k_indices"].reshape(seq_len, -1)
 
     return parsed
 
