@@ -194,45 +194,27 @@ def pytest_configure(config):
     config.addinivalue_line("markers", m)
 
 
-def _get_system_hardware_platform() -> str:
-  """Determines the system hardware platform strictly from environment variables without JAX init."""
-  # 1. Check JAX_PLATFORMS env var
-  jax_platforms = os.getenv("JAX_PLATFORMS", "").lower()
-  if "tpu" in jax_platforms:
-    return "tpu"
-  if "cuda" in jax_platforms or "gpu" in jax_platforms:
-    return "gpu"
-
-  # 2. Check active CUDA visible devices
-  if os.getenv("CUDA_VISIBLE_DEVICES") is not None:
-    return "gpu"
-
-  # 3. Check TPU runtime variables
-  if os.getenv("TPU_NAME") is not None or os.getenv("TPU_CHIPS") is not None:
-    return "tpu"
-
-  # Default to CPU
-  return "cpu"
-
-
 @pytest.fixture(autouse=True)
 def handle_skip_on_tpu7x(request):
   """Dynamically skip tests marked with skip_on_tpu7x if running on TPU7x."""
   if request.node.get_closest_marker("skip_on_tpu7x"):
-    if _get_system_hardware_platform() == "tpu":
-      try:
-        is_tpu7x = any("TPU7x" in d.device_kind for d in jax.devices())
-      except Exception:  # pylint: disable=broad-exception-caught
-        is_tpu7x = False
-      if is_tpu7x:
-        pytest.skip("AOT tests do not support TPU7x platform")
+    try:
+      is_tpu7x = any("TPU7x" in d.device_kind for d in jax.devices())
+    except Exception:  # pylint: disable=broad-exception-caught
+      is_tpu7x = False
+    if is_tpu7x:
+      pytest.skip("AOT tests do not support TPU7x platform")
 
 
 @pytest.fixture(autouse=True)
 def handle_cpu_only(request):
   """Dynamically skip cpu_only tests on TPU or GPU hardware."""
   if request.node.get_closest_marker("cpu_only"):
-    if _get_system_hardware_platform() in ("tpu", "gpu"):
+    try:
+      has_accelerator = any(d.platform in ("tpu", "gpu") for d in jax.devices())
+    except Exception:  # pylint: disable=broad-exception-caught
+      has_accelerator = False
+    if has_accelerator:
       pytest.skip("Skipped: cpu_only test bypassed on hardware accelerator testbeds")
 
 
@@ -240,7 +222,11 @@ def handle_cpu_only(request):
 def handle_tpu_only(request):
   """Dynamically skip tpu_only tests if running on non-TPU hardware."""
   if request.node.get_closest_marker("tpu_only"):
-    if _get_system_hardware_platform() != "tpu":
+    try:
+      has_tpu = any(d.platform == "tpu" for d in jax.devices())
+    except Exception:  # pylint: disable=broad-exception-caught
+      has_tpu = False
+    if not has_tpu:
       pytest.skip("Skipped: requires TPU hardware, none detected")
 
 
@@ -248,5 +234,9 @@ def handle_tpu_only(request):
 def handle_gpu_only(request):
   """Dynamically skip gpu_only tests if running on non-GPU hardware."""
   if request.node.get_closest_marker("gpu_only"):
-    if _get_system_hardware_platform() != "gpu":
+    try:
+      has_gpu = any(d.platform == "gpu" for d in jax.devices())
+    except Exception:  # pylint: disable=broad-exception-caught
+      has_gpu = False
+    if not has_gpu:
       pytest.skip("Skipped: requires GPU hardware, none detected")
