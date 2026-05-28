@@ -97,6 +97,9 @@ def decode_with_vllm(config: Config) -> None:
       },
   }
 
+  if config.max_num_batched_tokens is not None:
+    vllm_args["max_num_batched_tokens"] = config.max_num_batched_tokens
+
   if config.load_parameters_path:
     vllm_args["additional_config"]["maxtext_config"]["load_parameters_path"] = config.load_parameters_path
   else:
