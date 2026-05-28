@@ -19,15 +19,14 @@ data pipeline. We use a tiny NNX module that mimics the call signature the
 production loss_fn uses (decoder_input_tokens, decoder_positions, ...).
 """
 
-import unittest
 from dataclasses import dataclass
+import unittest
 
-import jax.numpy as jnp
-import optax
 from flax import nnx
-
-from maxtext.layers import train_state_nnx
+import jax.numpy as jnp
+from maxtext.common import train_state_nnx
 from maxtext.trainers.pre_train import train as pre_train
+import optax
 
 
 @dataclass

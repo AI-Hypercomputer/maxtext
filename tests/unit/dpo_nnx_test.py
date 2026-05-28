@@ -25,13 +25,12 @@ import math
 import types
 import unittest
 
+from flax import nnx
 import jax
 import jax.numpy as jnp
-import optax
-from flax import nnx
-
-from maxtext.layers import train_state_nnx
+from maxtext.common import train_state_nnx
 from maxtext.trainers.post_train.dpo import dpo_utils
+import optax
 
 
 class _MockTransformer(nnx.Module):

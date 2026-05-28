@@ -16,26 +16,26 @@
 """Utils that are only interesting for training in MaxText."""
 
 import functools
-import os
 from functools import partial
+import os
 
-import jax
 from flax import nnx
 from flax.linen import partitioning as nn_partitioning
-from maxtext.layers import train_state_nnx
+import jax
 from maxtext.common import checkpointing
+from maxtext.common import train_state_nnx
+from maxtext.common.common_types import ReorderStrategy
 from maxtext.common.data_loader import create_dataloader
 from maxtext.common.goodput import GoodputEvent, maybe_record_goodput
 from maxtext.optimizers import optimizers
+from maxtext.trainers.diloco import diloco
 from maxtext.trainers.post_train.dpo.dpo_utils import _merge_dpo_state
-from maxtext.common.common_types import ReorderStrategy
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
 from maxtext.utils import sharding
 from maxtext.utils.rampup_batch import create_rampup_manager
-from maxtext.trainers.diloco import diloco
 
 
 def create_training_optimizer(config, model):

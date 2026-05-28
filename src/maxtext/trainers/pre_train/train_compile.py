@@ -12,12 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-Save a Cross Ahead of Time Compiled (XAOT) version of train.py's train step
-Generates shaped versions of state and data without ever constructing them, so its possible
-to compile with target hardware (e.g. hundreds/thousands of chips), without using the hardware.
-This helpfully detects if your configuration would run into memory problems (OOM) on the target hardware,
-before having to use the target hardware - you will see the same OOM error message during this compilation
+"""Save a Cross Ahead of Time Compiled (XAOT) version of train.py's train step
+
+Generates shaped versions of state and data without ever constructing them, so
+its possible
+to compile with target hardware (e.g. hundreds/thousands of chips), without
+using the hardware.
+This helpfully detects if your configuration would run into memory problems
+(OOM) on the target hardware,
+before having to use the target hardware - you will see the same OOM error
+message during this compilation
 as you would on the target hardware.
 """
 
@@ -29,25 +33,25 @@ from absl import app
 from flax import nnx
 from flax.linen import partitioning as nn_partitioning
 import jax
-import jax.numpy as jnp
 from jax.experimental.serialize_executable import serialize
 from jax.experimental.topologies import get_topology_desc
+import jax.numpy as jnp
 from jax.sharding import AxisType, Mesh
-from maxtext.utils import accelerator_to_spec_map
-from maxtext.configs import pyconfig
+from maxtext.common import train_state_nnx
 from maxtext.common.common_types import MODEL_MODE_TRAIN, ShardMode
+from maxtext.configs import pyconfig
 from maxtext.layers import quantizations
-from maxtext.layers import train_state_nnx
 from maxtext.models import models
 from maxtext.optimizers import optimizers
 from maxtext.trainers.diloco import diloco
 from maxtext.trainers.pre_train import train
+from maxtext.utils import accelerator_to_spec_map
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
-from maxtext.utils import sharding
 from maxtext.utils import maxtext_utils_nnx
 from maxtext.utils import model_creation_utils
+from maxtext.utils import sharding
 
 # pylint: disable=too-many-positional-arguments
 
@@ -56,25 +60,36 @@ Transformer = models.transformer_as_linen
 
 def validate_config(config):
   """Validates the config is is setup correctly to compile, returning a useful error message if not."""
+  assert config.compile_topology != "", (
+      "You must pass your desired target hardware in compile_topology, e.g."
+      " compile_topology=v5e-256"
+  )
   assert (
-      config.compile_topology != ""
-  ), "You must pass your desired target hardware in compile_topology, e.g. compile_topology=v5e-256"
-  assert config.compile_topology_num_slices > 0, "You must set compile_topology_num_slices to a positive integer"
+      config.compile_topology_num_slices > 0
+  ), "You must set compile_topology_num_slices to a positive integer"
 
 
 def get_topology_mesh(config):
   """Get the target hardware devices, and create configured mesh with them"""
   if config.internal_compile:
     topology_devices = get_topology_desc(
-        platform="tpu", topology_name=config.compile_topology, num_slices=config.compile_topology_num_slices
+        platform="tpu",
+        topology_name=config.compile_topology,
+        num_slices=config.compile_topology_num_slices,
     ).devices
   else:
-    target_hardware = accelerator_to_spec_map.get_system_characteristics(config.compile_topology)
+    target_hardware = accelerator_to_spec_map.get_system_characteristics(
+        config.compile_topology
+    )
     if target_hardware.platform == "gpu":
       # Disable sharded autotuning. This is an optimization to distribute
       # autotuning across the fleet, but can cause hangs with AoT compilation.
-      os.environ["XLA_FLAGS"] = os.environ.get("XLA_FLAGS", "") + " --xla_gpu_shard_autotuning=false"
-      jax.config.update("mock_num_gpu_processes", config.compile_topology_num_slices)
+      os.environ["XLA_FLAGS"] = (
+          os.environ.get("XLA_FLAGS", "") + " --xla_gpu_shard_autotuning=false"
+      )
+      jax.config.update(
+          "mock_num_gpu_processes", config.compile_topology_num_slices
+      )
       topology_devices = jax.devices()
     else:
       topology_devices = get_topology_desc(
@@ -85,10 +100,23 @@ def get_topology_mesh(config):
           num_slices=config.compile_topology_num_slices,
           wrap=target_hardware.wrap,
       ).devices
-  jax.config.update("jax_remove_size_one_mesh_axis_from_type", config.remove_size_one_mesh_axis_from_type)
-  topology_device_mesh = maxtext_utils.create_device_mesh(config, topology_devices)
-  mesh_axis_type = AxisType.Explicit if config.shard_mode == ShardMode.EXPLICIT else AxisType.Auto
-  topology_mesh = Mesh(topology_device_mesh, config.mesh_axes, axis_types=(mesh_axis_type,) * len(config.mesh_axes))
+  jax.config.update(
+      "jax_remove_size_one_mesh_axis_from_type",
+      config.remove_size_one_mesh_axis_from_type,
+  )
+  topology_device_mesh = maxtext_utils.create_device_mesh(
+      config, topology_devices
+  )
+  mesh_axis_type = (
+      AxisType.Explicit
+      if config.shard_mode == ShardMode.EXPLICIT
+      else AxisType.Auto
+  )
+  topology_mesh = Mesh(
+      topology_device_mesh,
+      config.mesh_axes,
+      axis_types=(mesh_axis_type,) * len(config.mesh_axes),
+  )
   return topology_mesh
 
 
@@ -101,7 +129,9 @@ def _collect_nnx_activation_shardings(create_model_fn, config, mesh):
   input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
   abstract_input = jax.ShapeDtypeStruct(input_shape, jnp.int32)
 
-  def _nnx_forward(decoder_input_tokens, decoder_positions, decoder_segment_ids):
+  def _nnx_forward(
+      decoder_input_tokens, decoder_positions, decoder_segment_ids
+  ):
     model_instance = create_model_fn()
     return model_instance(
         decoder_input_tokens=decoder_input_tokens,
@@ -110,7 +140,9 @@ def _collect_nnx_activation_shardings(create_model_fn, config, mesh):
         enable_dropout=False,
     )
 
-  with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
+  with jax.set_mesh(mesh), nn_partitioning.axis_rules(
+      config.logical_axis_rules
+  ):
     jax.eval_shape(_nnx_forward, abstract_input, abstract_input, abstract_input)
 
 
@@ -119,9 +151,13 @@ def get_shaped_inputs(topology_mesh, config):
   # Construct the model and optimizer to get shaped versions of the state
   quant = quantizations.configure_quantization(config)
   if config.pure_nnx:
-    _create_model_partial, model = model_creation_utils.create_nnx_abstract_model(config, topology_mesh)
+    _create_model_partial, model = (
+        model_creation_utils.create_nnx_abstract_model(config, topology_mesh)
+    )
   else:
-    model = Transformer(config, topology_mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+    model = Transformer(
+        config, topology_mesh, quant=quant, model_mode=MODEL_MODE_TRAIN
+    )
   # The learning_rate_schedule is baked into the compiled object.
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   # pass in model for muon
@@ -140,14 +176,20 @@ def get_shaped_inputs(topology_mesh, config):
 
     init_state_fn = create_train_state_fn
   else:
-    init_state_fn = functools.partial(maxtext_utils.init_initial_state, model, tx, config, True, example_rng)
+    init_state_fn = functools.partial(
+        maxtext_utils.init_initial_state, model, tx, config, True, example_rng
+    )
 
   # Shaped state
-  abstract_state, _, state_mesh_shardings = maxtext_utils.get_abstract_state(config, topology_mesh, init_state_fn, True)
+  abstract_state, _, state_mesh_shardings = maxtext_utils.get_abstract_state(
+      config, topology_mesh, init_state_fn, True
+  )
 
   if config.pure_nnx:
     # NNX doesn't use Linen logical annotations; derive PartitionSpecs from the physical shardings.
-    logical_annotations = maxtext_utils_nnx.get_partition_spec_nnx(state_mesh_shardings)
+    logical_annotations = maxtext_utils_nnx.get_partition_spec_nnx(
+        state_mesh_shardings
+    )
     # For NNX, get_functional_train_with_signature expects the graphdef (static structure),
     # not the raw model — mirroring how the training loop does nnx.split(train_state).
     with nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -156,13 +198,18 @@ def get_shaped_inputs(topology_mesh, config):
     model = graphdef
   else:
     # unsharded logical annotations
-    logical_annotations = maxtext_utils.get_logical_annotations(config, topology_mesh, init_state_fn)
+    logical_annotations = maxtext_utils.get_logical_annotations(
+        config, topology_mesh, init_state_fn
+    )
 
   # Shaped batch
   shaped_batch = maxtext_utils.get_shaped_batch(config)
 
   if config.pure_nnx:
-    shaped_train_args = (abstract_state, shaped_batch)  # NNX doesn't use dropout_rng
+    shaped_train_args = (
+        abstract_state,
+        shaped_batch,
+    )  # NNX doesn't use dropout_rng
   else:
     shaped_train_args = (abstract_state, shaped_batch, shaped_rng)
   shaped_train_kwargs = {}
@@ -170,9 +217,17 @@ def get_shaped_inputs(topology_mesh, config):
   # Collect NNX activation shardings via an abstract forward pass (must run
   # after get_abstract_state, which only traces __init__).
   if config.debug_sharding and config.pure_nnx:
-    _collect_nnx_activation_shardings(_create_model_partial, config, topology_mesh)
+    _collect_nnx_activation_shardings(
+        _create_model_partial, config, topology_mesh
+    )
 
-  return shaped_train_args, shaped_train_kwargs, state_mesh_shardings, logical_annotations, model
+  return (
+      shaped_train_args,
+      shaped_train_kwargs,
+      state_mesh_shardings,
+      logical_annotations,
+      model,
+  )
 
 
 def jit_and_compile(
@@ -201,7 +256,9 @@ def jit_and_compile(
     maxtext_utils.maybe_dump_jaxpr(config, jitted, func_input_args)
     lowered = jitted.lower(*func_input_args, **func_input_kwargs)
   # Import libtpu flags as compiler options. Defaults to empty dict if string is empty.
-  compiler_options = max_utils.parse_libtpu_flags_to_dict(config.compile_xla_flags)
+  compiler_options = max_utils.parse_libtpu_flags_to_dict(
+      config.compile_xla_flags
+  )
   compiled = lowered.compile(compiler_options=compiler_options)
   return compiled
 
@@ -236,12 +293,18 @@ def is_oom(argv: Sequence[str]) -> bool:
   ) = get_shaped_inputs(topology_mesh, config)
 
   # Update params_shardings when shard_optimizer_over_data is enabled (Zero-1)
-  params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
+  params_shardings, state_mesh_shardings = (
+      sharding.maybe_update_params_sharding_with_opt(
+          config, state_mesh_shardings
+      )
+  )
 
   # When ZeRO-1 is enabled, we need to use the original params_shardings for input shardings
   # but keep the updated state_mesh_shardings for the optimizer state
   if config.shard_optimizer_over_data:
-    input_state_mesh_shardings = state_mesh_shardings.replace(params=params_shardings)
+    input_state_mesh_shardings = state_mesh_shardings.replace(
+        params=params_shardings
+    )
   else:
     input_state_mesh_shardings = state_mesh_shardings
 
@@ -256,7 +319,12 @@ def is_oom(argv: Sequence[str]) -> bool:
       static_argnums,
       donate_argnums,
   ) = maxtext_utils.get_functional_train_with_signature(
-      train.train_step, data_sharding, input_state_mesh_shardings, model, config, params_shardings
+      train.train_step,
+      data_sharding,
+      input_state_mesh_shardings,
+      model,
+      config,
+      params_shardings,
   )
 
   try:
@@ -287,7 +355,8 @@ def is_oom(argv: Sequence[str]) -> bool:
 def main(argv: Sequence[str]) -> None:
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["LIBTPU_INIT_ARGS"] = (
-      os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+      os.environ.get("LIBTPU_INIT_ARGS", "")
+      + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
   )
   print("Starting train_compile.py...", flush=True)
 
@@ -312,12 +381,18 @@ def main(argv: Sequence[str]) -> None:
   ) = get_shaped_inputs(topology_mesh, config)
 
   # Update params_shardings when shard_optimizer_over_data is enabled (Zero-1)
-  params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
+  params_shardings, state_mesh_shardings = (
+      sharding.maybe_update_params_sharding_with_opt(
+          config, state_mesh_shardings
+      )
+  )
 
   # When ZeRO-1 is enabled, we need to use the original params_shardings for input shardings
   # but keep the updated state_mesh_shardings for the optimizer state
   if config.shard_optimizer_over_data:
-    input_state_mesh_shardings = state_mesh_shardings.replace(params=params_shardings)
+    input_state_mesh_shardings = state_mesh_shardings.replace(
+        params=params_shardings
+    )
   else:
     input_state_mesh_shardings = state_mesh_shardings
 
@@ -326,15 +401,21 @@ def main(argv: Sequence[str]) -> None:
   if config.enable_diloco:
     # Build abstract DiLoCo state and shardings for AOT compilation
     abstract_state = shaped_train_args[0]
-    diloco_state, state_mesh_shardings, inner_state_shardings = diloco.build_abstract_diloco_state(
-        config, abstract_state, state_mesh_shardings, topology_mesh
+    diloco_state, state_mesh_shardings, inner_state_shardings = (
+        diloco.build_abstract_diloco_state(
+            config, abstract_state, state_mesh_shardings, topology_mesh
+        )
     )
     # For NNX, shaped_train_args has 2 elements (state, batch) — no rng; pass None for prng.
-    shaped_rng_arg = shaped_train_args[2] if len(shaped_train_args) > 2 else None
+    shaped_rng_arg = (
+        shaped_train_args[2] if len(shaped_train_args) > 2 else None
+    )
     shaped_train_args = (diloco_state, shaped_train_args[1], shaped_rng_arg)
 
     # Wrap train_step with diloco
-    train_step_partial = functools.partial(train.train_step, model, config, inner_state_shardings, params_shardings)
+    train_step_partial = functools.partial(
+        train.train_step, model, config, inner_state_shardings, params_shardings
+    )
     train_step_fn = diloco.build_diloco_train_step(config, train_step_partial)
 
     # For DiLoCo, the train_step_fn is already fully wrapped and takes (state, batch, prng)
@@ -353,7 +434,12 @@ def main(argv: Sequence[str]) -> None:
         static_argnums,
         donate_argnums,
     ) = maxtext_utils.get_functional_train_with_signature(
-        train.train_step, data_sharding, input_state_mesh_shardings, model, config, params_shardings
+        train.train_step,
+        data_sharding,
+        input_state_mesh_shardings,
+        model,
+        config,
+        params_shardings,
     )
 
   # print weights sharding info under debug sharding mode
@@ -394,7 +480,10 @@ def main(argv: Sequence[str]) -> None:
   if config.compiled_trainstep_file != "":
     print("Saving compiled object...")
     save_compiled(compiled, config.compiled_trainstep_file)
-    print(f"Successfully saved compiled object as {config.compiled_trainstep_file}")
+    print(
+        "Successfully saved compiled object as"
+        f" {config.compiled_trainstep_file}"
+    )
   print("Finished train_compile.py successfully!", flush=True)
   print(f"Cost analysis: {compiled.cost_analysis()}")
   print(f"Memory analysis: {compiled.memory_analysis()}")

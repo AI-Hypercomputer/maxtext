@@ -18,7 +18,8 @@ setup_train_loop itself is integration territory (it touches data iterators,
 checkpoint managers, and a real mesh), so we cover the NNX-only pieces that
 have unit-testable contracts:
 
-  1. The create_train_state_fn closure pattern: builds nnx.Optimizer + TrainStateNNX
+  1. The create_train_state_fn closure pattern: builds nnx.Optimizer +
+  TrainStateNNX
      from a zero-arg model factory and a transform.
   2. nnx.split(state.model, nnx.Param, ...) returns Param-only state used to
      compute state_params / state_mesh_shardings_params.
@@ -26,15 +27,14 @@ have unit-testable contracts:
      pure-state form returned by setup_training_state.
 """
 
-import unittest
 from functools import partial
+import unittest
 
+from flax import nnx
 import jax
 import jax.numpy as jnp
+from maxtext.common import train_state_nnx
 import optax
-from flax import nnx
-
-from maxtext.layers import train_state_nnx
 
 
 class _Model(nnx.Module):
@@ -79,7 +79,9 @@ class TestCreateTrainStateFnClosure(unittest.TestCase):
 
     def create_train_state_fn():
       model = _create_model()
-      return train_state_nnx.TrainStateNNX(model, nnx.Optimizer(model, tx, wrt=nnx.Param))
+      return train_state_nnx.TrainStateNNX(
+          model, nnx.Optimizer(model, tx, wrt=nnx.Param)
+      )
 
     s1 = create_train_state_fn()
     s2 = create_train_state_fn()
@@ -89,18 +91,24 @@ class TestCreateTrainStateFnClosure(unittest.TestCase):
 
 class TestSetupTrainLoopNNXTreeOps(unittest.TestCase):
   """Cover the nnx.split(state.model, nnx.Param, ...) and nnx.merge round-trip
+
   patterns that setup_train_loop uses to derive Param-only views and rebuild
-  the full TrainStateNNX before returning."""
+  the full TrainStateNNX before returning.
+  """
 
   def setUp(self):
     self.tx = optax.sgd(0.01)
     self.model = _Model(rngs=nnx.Rngs(0))
-    self.state = train_state_nnx.TrainStateNNX(self.model, nnx.Optimizer(self.model, self.tx, wrt=nnx.Param))
+    self.state = train_state_nnx.TrainStateNNX(
+        self.model, nnx.Optimizer(self.model, self.tx, wrt=nnx.Param)
+    )
 
   def test_nnx_split_yields_param_only_state(self):
     """state_params used for assert_params_sufficiently_sharded must contain only nnx.Param leaves."""
     _, state_params, _ = nnx.split(self.state.model, nnx.Param, ...)
-    leaves = jax.tree.leaves(state_params, is_leaf=lambda x: isinstance(x, nnx.Variable))
+    leaves = jax.tree.leaves(
+        state_params, is_leaf=lambda x: isinstance(x, nnx.Variable)
+    )
     self.assertGreater(len(leaves), 0)
     for leaf in leaves:
       self.assertIsInstance(leaf, nnx.Param)
@@ -111,14 +119,20 @@ class TestSetupTrainLoopNNXTreeOps(unittest.TestCase):
     train_state = nnx.merge(state_graphdef, state_pure)
     self.assertIsInstance(train_state, train_state_nnx.TrainStateNNX)
     # Same numeric values.
-    self.assertTrue(jnp.allclose(train_state.model.linear.kernel.value, self.state.model.linear.kernel.value))
+    self.assertTrue(
+        jnp.allclose(
+            train_state.model.linear.kernel.value,
+            self.state.model.linear.kernel.value,
+        )
+    )
 
 
 class TestInitStateFnIsCallable(unittest.TestCase):
   """For the Linen path setup_train_loop builds init_state_fn = partial(...).
 
   The NNX path uses a closure instead — confirm both forms have the
-  zero-argument call contract create_checkpoint_manager / setup_training_state expect.
+  zero-argument call contract create_checkpoint_manager / setup_training_state
+  expect.
   """
 
   def test_nnx_init_state_fn_callable_with_no_args(self):
@@ -129,7 +143,9 @@ class TestInitStateFnIsCallable(unittest.TestCase):
 
     def init_state_fn():
       model = _create_model()
-      return train_state_nnx.TrainStateNNX(model, nnx.Optimizer(model, tx, wrt=nnx.Param))
+      return train_state_nnx.TrainStateNNX(
+          model, nnx.Optimizer(model, tx, wrt=nnx.Param)
+      )
 
     state = init_state_fn()  # must not raise / require args
     self.assertIsInstance(state, train_state_nnx.TrainStateNNX)
@@ -141,7 +157,9 @@ class TestInitStateFnIsCallable(unittest.TestCase):
       del model, tx, config, is_training, init_rng
       return "linen-state"
 
-    init_state_fn = partial(init_initial_state, "model", "tx", "config", True, "rng")
+    init_state_fn = partial(
+        init_initial_state, "model", "tx", "config", True, "rng"
+    )
     self.assertEqual(init_state_fn(), "linen-state")
 
 
