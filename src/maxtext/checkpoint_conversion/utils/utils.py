@@ -36,8 +36,6 @@ from jax import tree
 from jax.experimental import multihost_utils
 from jaxtyping import Array
 
-from google.cloud.storage import Client, transfer_manager
-
 from safetensors import safe_open
 from safetensors.numpy import save_file as numpy_save_file
 from safetensors.numpy import save as numpy_save
@@ -50,8 +48,13 @@ from transformers import AutoModelForCausalLM
 
 from flax.training import train_state
 from maxtext.common import checkpointing
+from maxtext.common.gcloud_stub import gcs_storage
 from maxtext.utils import max_logging
 import orbax.checkpoint as ocp
+
+_storage = gcs_storage()
+Client = _storage.Client
+transfer_manager = _storage.transfer_manager
 
 
 SAFE_TENSORS_CONFIG_FILE = "config.json"
