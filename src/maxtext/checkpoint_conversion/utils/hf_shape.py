@@ -53,7 +53,7 @@ def GEMMA3_HF_WEIGHTS_TO_SHAPE(config):
   vision_patch_size = vision_config["patch_size"]
   vision_num_channels = vision_config["num_channels"]
   vision_image_size = vision_config["image_size"]
-  vision_num_positions = (vision_image_size / vision_patch_size) ** 2
+  vision_num_positions = (vision_image_size // vision_patch_size) ** 2
 
   vocab_size = text_config["vocab_size"]
 

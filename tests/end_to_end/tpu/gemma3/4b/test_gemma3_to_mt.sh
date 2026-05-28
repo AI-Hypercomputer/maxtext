@@ -7,19 +7,21 @@
 # 2. Convert the HuggingFace checkpoint to MaxText format in both unscanned and scanned formats.
 # 3. Run a forward pass logits check to verify the converted checkpoint matches the original HF model.
 
-# Pre-requisites:
-# 1. Set HF_TOKEN environment variable to your Hugging Face access token with read permissions
-# export HF_TOKEN=<Hugging Face access token>
+# Usage:
+# export HF_TOKEN=<your Hugging Face access token>
+# export RUN_ID=$(date +%Y-%m-%d-%H-%M-%S)
+# bash test_gemma3_to_mt.sh $RUN_ID - to convert the checkpoint and run logit check for non-multimodal version
+# bash test_gemma3_to_mt.sh $RUN_ID true - to convert the checkpoint and run logit check for multimodal version
 
 
 set -ex
 
-run_id=${1:-$(date +%Y-%m-%d-%H-%M)}
+run_id=${1:-$(date +%Y-%m-%d-%H-%M-%S)}
 MODEL_NAME='gemma3-4b'
 HF_GOLDEN_MODEL='google/gemma-3-4b-it'
 
 # To convert the multimodal model, make sure the use_multimodal is set to be true
-USE_MULTIMODAL=false
+USE_MULTIMODAL=${2:-false}
 
 # Non-Googlers please remember to point `BASE_OUTPUT_DIRECTORY` to the GCS paths where you want to store scanned and unscanned checkpoints
 BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs/${MODEL_NAME}/to_maxtext
@@ -58,12 +60,14 @@ echo "Scanned checkpoint path: ${SCANNED_CKPT_PATH}"
 # Step 3: Test whether the forward pass logits match the original HF model
 # to get higher precision (eg. float32) run on CPU with `JAX_PLATFORMS=cpu`
 # ToDo: improve forward_pass_logit_checker to test multi-modal prompt
-python3 -m tests.utils.forward_pass_logit_checker \
-    load_parameters_path=${UNSCANNED_CKPT_PATH} \
-    model_name=${MODEL_NAME} \
-    use_multimodal=${USE_MULTIMODAL} \
-    scan_layers=false \
-    --hf_model_path=${HF_GOLDEN_MODEL} \
-    --max_kl_div=0.03 \
-    --run_hf_model=true \
-    hardware=cpu skip_jax_distributed_system=True
+if [ "${USE_MULTIMODAL}" = "false" ]; then
+    python3 -m tests.utils.forward_pass_logit_checker \
+        load_parameters_path=${UNSCANNED_CKPT_PATH} \
+        model_name=${MODEL_NAME} \
+        use_multimodal=${USE_MULTIMODAL} \
+        scan_layers=false \
+        --hf_model_path=${HF_GOLDEN_MODEL} \
+        --max_kl_div=0.03 \
+        --run_hf_model=true \
+        hardware=cpu skip_jax_distributed_system=True
+fi

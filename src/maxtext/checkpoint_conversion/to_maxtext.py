@@ -924,6 +924,21 @@ def main(
       max_logging.log(f"HuggingFace model loaded. dtypes: {unique_dtypes}")
       print_ram_usage("After full HF model load")
 
+      # transformers>=5.8 removed the intermediate `vision_model` attribute,
+      # so keys are now `model.vision_tower.embeddings.*` instead
+      # of `model.vision_tower.vision_model.embeddings.*`.
+      # Remap to the old format so that the param_mapping continues to work.
+      if eager_load_method == "transformers" and config.use_multimodal:
+        old_prefix = "model.vision_tower.vision_model."
+        new_prefix = "model.vision_tower."
+        needs_remap = any(k.startswith(new_prefix) and not k.startswith(old_prefix) for k in hf_state_dict_numpy)
+        if needs_remap:
+          max_logging.log("Detected new-style key layout; remapping vision_tower keys.")
+          hf_state_dict_numpy = {
+              (old_prefix + k[len(new_prefix) :] if k.startswith(new_prefix) and not k.startswith(old_prefix) else k): v
+              for k, v in hf_state_dict_numpy.items()
+          }
+
       def _eager_getter(key):
         if key not in hf_state_dict_numpy:
           raise ValueError(f"HuggingFace key {key} not found in state_dict.")
