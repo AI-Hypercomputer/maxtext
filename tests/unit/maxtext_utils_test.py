@@ -42,7 +42,7 @@ from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import maxtext_utils_nnx
 from maxtext.utils import model_creation_utils
-from maxtext.layers import train_state_nnx
+from maxtext.common import train_state_nnx
 from maxtext.utils import sharding
 from maxtext.utils.sharding import assert_params_sufficiently_sharded, get_formatted_sharding_annotations
 from tests.utils.test_helpers import get_test_config_path

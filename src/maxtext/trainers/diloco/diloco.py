@@ -34,7 +34,7 @@ from jaxtyping import Array, Int32, Key, PyTree, UInt32
 import optax
 
 from maxtext.configs import pyconfig
-from maxtext.layers.train_state_nnx import TrainStateNNX
+from maxtext.common.train_state_nnx import TrainStateNNX
 
 Batch = Any
 Params = PyTree

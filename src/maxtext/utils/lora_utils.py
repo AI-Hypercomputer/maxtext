@@ -177,7 +177,7 @@ def setup_initial_lora_state(model, data_iterator, tx, config, rng, mesh, checkp
     max_logging.log(f"Setting initial state of LoRA with lora_adapter_path = {lora_adapter_path}")
     if config.pure_nnx:
       # pylint: disable=import-outside-toplevel
-      from maxtext.layers import train_state_nnx
+      from maxtext.common import train_state_nnx
       from maxtext.utils import model_creation_utils
 
       _create_model_partial, _ = model_creation_utils.create_nnx_abstract_model(config, mesh)

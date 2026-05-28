@@ -37,7 +37,7 @@ from maxtext.configs import pyconfig
 from maxtext.common import checkpointing
 from maxtext.common.common_types import DecoderBlockType, MODEL_MODE_TRAIN
 from maxtext.layers import quantizations
-from maxtext.layers import train_state_nnx
+from maxtext.common import train_state_nnx
 from maxtext.models import models
 from maxtext.optimizers import optimizers
 from maxtext.utils import gcs_utils

@@ -63,7 +63,7 @@ from flax import nnx
 from flax import struct
 from flax.nnx import TrainState
 
-from maxtext.layers import train_state_nnx
+from maxtext.common import train_state_nnx
 
 import transformers
 

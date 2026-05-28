@@ -21,7 +21,7 @@ import jax.numpy as jnp
 import optax
 from flax import nnx
 
-from maxtext.layers import train_state_nnx
+from maxtext.common import train_state_nnx
 from maxtext.utils.standalone_checkpointer import add_entropy_to_checkpoint
 
 

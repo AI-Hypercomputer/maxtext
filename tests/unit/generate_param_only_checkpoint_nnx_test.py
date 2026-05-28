@@ -31,7 +31,7 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from flax.training import train_state as linen_train_state
 
 from maxtext.common.common_types import DecoderBlockType
-from maxtext.layers import train_state_nnx
+from maxtext.common import train_state_nnx
 from maxtext.utils.generate_param_only_checkpoint import (
     _possibly_unroll_lora_params_nnx,
     _possibly_unroll_params_nnx,
