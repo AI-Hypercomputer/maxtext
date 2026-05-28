@@ -174,6 +174,9 @@ def kv_cache_as_linen(
     key_axis_order: AxisIdxes = (2, 0, 1, 3),
     use_chunked_prefill: bool = False,
     model_mode: str = MODEL_MODE_PREFILL,
+    is_gdn: bool = False,
+    conv_kernel_size: int = 0,
+    conv_dim: int = 0,
     name: str | None = None,
 ):
   """Initializes the KVCache module and returns it as a Linen module.
@@ -224,6 +227,9 @@ def kv_cache_as_linen(
       key_axis_order=key_axis_order,
       use_chunked_prefill=use_chunked_prefill,
       model_mode=model_mode,
+      is_gdn=is_gdn,
+      conv_kernel_size=conv_kernel_size,
+      conv_dim=conv_dim,
       metadata_fn=variable_to_logically_partitioned,
       name=name,
       abstract_init=False,
@@ -265,6 +271,9 @@ class KVCache(BaseCache):
       key_axis_order: AxisIdxes = (2, 0, 1, 3),
       use_chunked_prefill: bool = False,
       model_mode: str = MODEL_MODE_PREFILL,
+      is_gdn: bool = False,  # <-- ADDED
+      conv_kernel_size: int = 0,  # <-- ADDED
+      conv_dim: int = 0,
       *,
       # Not used in KVCache but passed in by nnx_wrappers.to_linen.
       # TODO: Remove when bridge no longer needed
@@ -314,6 +323,9 @@ class KVCache(BaseCache):
     self.key_axis_order = key_axis_order
     self.model_mode = model_mode
     self.use_chunked_prefill = use_chunked_prefill
+    self.is_gdn = is_gdn  # <-- ADDED
+    self.conv_kernel_size = conv_kernel_size  # <-- ADDED
+    self.conv_dim = conv_dim
 
     if model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE):
       self._initialize_prefill_caches(model_mode)
@@ -349,8 +361,25 @@ class KVCache(BaseCache):
   def _initialize_prefill_caches(self, model_mode):
     """Get a shaped abstraction of the state"""
 
-    cache_length = self.max_prefill_length
     dtype = self._get_cached_kv_dtype()
+
+    if self.is_gdn:
+      cache_batch_axis_name = CACHE_BATCH_PREFILL if model_mode == MODEL_MODE_PREFILL else CACHE_BATCH
+      
+      self.cached_prefill_key = nnx.Cache(
+          jnp.zeros((self.batch, self.key_heads, self.key_head_size, self.value_head_size), dtype=dtype),
+          out_sharding=(cache_batch_axis_name, CACHE_HEADS, None, None),
+      )
+      self.cached_prefill_value = nnx.Cache(
+          jnp.zeros((self.batch, self.conv_kernel_size - 1, self.conv_dim), dtype=dtype),
+          out_sharding=(cache_batch_axis_name, None, None),
+      )
+      self.cache_prefill_segment_id = None
+      self.cached_prefill_key_scale = None
+      self.cached_prefill_value_scale = None
+      return
+
+    cache_length = self.max_prefill_length
 
     if model_mode == MODEL_MODE_PREFILL:
       cache_logical_axis_names = self.prefill_cache_logical_axis_names
@@ -411,6 +440,45 @@ class KVCache(BaseCache):
     """get ar cache vars"""
 
     dtype = self._get_cached_kv_dtype()
+
+    # Pre-allocate fixed-size GDN states to standard cache containers
+    if self.is_gdn:
+      cache_batch_axis_name = CACHE_BATCH_PREFILL if model_mode == MODEL_MODE_PREFILL else CACHE_BATCH
+
+      # 1. Map Recurrent State matrix directly to cached_ar_key
+      # Shape: [batch, key_heads, key_head_size, value_head_size]
+      self.cached_ar_key = nnx.Cache(
+          jnp.zeros((self.batch, self.key_heads, self.key_head_size, self.value_head_size), dtype=dtype),
+          out_sharding=(cache_batch_axis_name, CACHE_HEADS, None, None),
+      )
+
+      # 2. Map 1D Conv State directly to cached_ar_value
+      # Shape: [batch, conv_kernel_size - 1, conv_dim]
+      self.cached_ar_value = nnx.Cache(
+          jnp.zeros((self.batch, self.conv_kernel_size - 1, self.conv_dim), dtype=dtype),
+          out_sharding=(cache_batch_axis_name, None, None),
+      )
+
+      # Initialize required dummy variables to satisfy uniform engine inspection loops
+      segment_id_axis_names = (
+          (CACHE_BATCH_PREFILL, CACHE_SEQUENCE) if model_mode == MODEL_MODE_PREFILL else (CACHE_BATCH, CACHE_SEQUENCE)
+      )
+      self.cache_ar_segment_id = nnx.Cache(
+          jnp.zeros((self.batch, 1), dtype=jnp.int32),
+          out_sharding=segment_id_axis_names,
+      )
+      self.cached_ar_lengths = nnx.Cache(
+          jnp.zeros((self.batch,), dtype=jnp.int32),
+          out_sharding=(CACHE_BATCH,),
+      )
+      self.cached_ar_key_scale = None
+      self.cached_ar_value_scale = None
+      self.cache_ar_index = nnx.Cache(
+          jnp.zeros((1,), dtype=jnp.int32),
+          out_sharding=(),
+      )
+      return
+
     if self.max_target_length <= self.max_prefill_length:
       raise ValueError(
           f"max_target_length: {self.max_target_length} should be greater than max_prefill_length:"
@@ -488,6 +556,37 @@ class KVCache(BaseCache):
         jnp.zeros((1,), dtype=jnp.int32),
         out_sharding=(),
     )
+
+  def get_gdn_states(self) -> tuple[jax.Array, jax.Array]:
+    """Retrieves the recurrent state and conv state for GDN layers."""
+    # MaxEngine transfers state from prefill to AR via the prefill cache.
+    # To ensure continuity on the transition, we must read from the prefill cache.
+    assert self.is_gdn, "get_gdn_states called on a non-GDN cache object."
+    return self.cached_prefill_key.get_value(), self.cached_prefill_value.get_value()
+  
+  def update_gdn_states(self, new_recurrent_state: Array, new_conv_state: Array) -> None:
+    """Updates the recurrent state and conv state for GDN layers."""
+    assert self.is_gdn, "update_gdn_states called on a non-GDN cache object."
+    cache_batch_axis_name = CACHE_BATCH_PREFILL if self.model_mode == MODEL_MODE_PREFILL else CACHE_BATCH
+
+    # ALWAYS update prefill cache since it is our true state container,
+    # not just during MODEL_MODE_PREFILL. This ensures AR updates persist.
+    if getattr(self, "cached_prefill_key", None) is not None:
+        self.cached_prefill_key.set_value(nn.with_logical_constraint(
+            new_recurrent_state, (cache_batch_axis_name, CACHE_HEADS, None, None)
+        ))
+        self.cached_prefill_value.set_value(nn.with_logical_constraint(
+            new_conv_state, (cache_batch_axis_name, None, None)
+        ))
+
+    # Mirror to standard AR cache (optional, but harmless to prevent uninitialized zeros)
+    if getattr(self, "cached_ar_key", None) is not None:
+        self.cached_ar_key.set_value(nn.with_logical_constraint(
+            new_recurrent_state, (cache_batch_axis_name, CACHE_HEADS, None, None)
+        ))
+        self.cached_ar_value.set_value(nn.with_logical_constraint(
+            new_conv_state, (cache_batch_axis_name, None, None)
+        ))
 
   def _get_ar_cache_vars(self):
     return self.ar_key_vars, self.ar_value_vars, self.cache_ar_segment_id, self.cache_ar_index, self.cached_ar_lengths
@@ -878,76 +977,6 @@ class KVCache(BaseCache):
       return self.kv_cache_autoregressive(key, value, use_ragged_attention)
     else:
       raise ValueError(f"Model Mode isn't supported! {model_mode=}")
-
-
-class GatedDeltaNetCache(BaseCache):
-  """Cache for Linear Attention (Gated Delta Net).
-
-  Stores the fixed-size recurrent state and the sliding window state for convolution.
-  """
-
-  def __init__(
-      self,
-      batch: int,
-      num_heads: int,
-      k_head_dim: int,
-      v_head_dim: int,
-      conv_kernel_size: int,
-      conv_dim: int,
-      dtype: DType,
-      cache_batch_axis_name: str = CACHE_BATCH,
-      cache_heads_axis_name: str = CACHE_HEADS,
-  ):
-    super().__init__()
-    self.batch = batch
-    self.dtype = dtype
-
-    # 1. Recurrent State (S) for the Delta Rule
-    # Shape: [Batch, Heads, K_Dim, V_Dim]
-    # We maintain the running state matrix.
-    self.recurrent_state = nnx.Cache(
-        jnp.zeros((int(batch), num_heads, k_head_dim, v_head_dim), dtype=dtype),
-        # Sharding: Batch, Heads, None (K), None (V)
-        out_sharding=(cache_batch_axis_name, cache_heads_axis_name, None, None),
-    )
-
-    # 2. Convolution State for the 1D Conv
-    # Shape: [Batch, Kernel_Size - 1, Conv_Dim]
-    # We store the last (K-1) inputs to perform the sliding window conv during decoding.
-    self.conv_state = nnx.Cache(
-        jnp.zeros((int(batch), conv_kernel_size - 1, conv_dim), dtype=dtype),
-        # Sharding: Batch, None (Time), None (Dim)
-        out_sharding=(cache_batch_axis_name, None, None),
-    )
-
-  def __call__(self):
-    """Returns the cache variables for the layer to use."""
-    return self
-
-
-def gated_delta_net_cache_as_linen(
-    *,
-    batch: int,
-    num_heads: int,
-    head_dim: int,
-    conv_kernel_size: int,
-    conv_dim: int,
-    dtype: DType,
-    name: str | None = None,
-):
-  """Initializes the GatedDeltaNetCache and returns it as a Linen module."""
-  return nnx_wrappers.to_linen(
-      GatedDeltaNetCache,
-      batch=batch,
-      num_heads=num_heads,
-      head_dim=head_dim,
-      conv_kernel_size=conv_kernel_size,
-      conv_dim=conv_dim,
-      dtype=dtype,
-      metadata_fn=variable_to_logically_partitioned,
-      name=name,
-      abstract_init=False,
-  )
 
 
 def mla_kv_cache_as_linen(

@@ -29,8 +29,10 @@ from maxtext.layers import initializers as max_initializers
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.normalizations import Qwen3NextRMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.common.common_types import MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN
 
 from maxtext.inference import page_manager
+from maxtext.utils import max_utils, max_logging
 
 from maxtext.models.qwen3 import (
     Qwen3NextGatedDeltaNet,
@@ -159,7 +161,43 @@ class Qwen3_5DecoderLayer(nnx.Module):
           rngs=rngs,
       )
     else:
-      self.attention = Qwen3_5GatedDeltaNet(config=cfg, dtype=cfg.dtype, model_mode=model_mode, rngs=rngs)
+      def get_gdn_batch_seq_len(config, model_mode):
+        """
+        Custom override for GDN cache initialization.
+        Bypasses the max_utils assumption that prefill batch size is always 1,
+        and properly scales it to the global TPU mesh.
+        """
+        # Calculate the true global batch size based on the cluster topology
+        batch_size = config.micro_batch_size_to_train_on
+
+        if model_mode == MODEL_MODE_PREFILL:
+          return batch_size, config.max_prefill_predict_length
+
+        elif model_mode == MODEL_MODE_AUTOREGRESSIVE:
+          return batch_size, 1
+
+        elif model_mode == MODEL_MODE_TRAIN:
+          return batch_size, config.max_target_length
+
+        else:
+          raise ValueError(f"Unknown model_mode: {model_mode}")
+      # batch_size, seq_len = get_gdn_batch_seq_len(config, model_mode)
+      batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config, model_mode)
+      dummy_inputs_shape = (
+          batch_size,
+          seq_len,
+          config.emb_dim
+      )
+      print(f"\n[DEBUG INIT] Layer {self.layer_idx} | Mode: {model_mode}", flush=True)
+      print(f"[DEBUG INIT] Calculated batch_size: {batch_size}", flush=True)
+      print(f"[DEBUG INIT] Passing inputs_shape to GDN: {dummy_inputs_shape}\n", flush=True)
+      self.attention = Qwen3_5GatedDeltaNet(
+          config=cfg, 
+          inputs_shape=dummy_inputs_shape,
+          dtype=cfg.dtype, 
+          model_mode=model_mode, 
+          rngs=rngs
+      )
 
     # Second LayerNorm, applied before the MoE block.
     self.post_attention_layernorm = Qwen3NextRMSNorm(
@@ -207,13 +245,12 @@ class Qwen3_5DecoderLayer(nnx.Module):
           attention_metadata=attention_metadata,
       )
     else:
-      attention_output = cast(Qwen3_5GatedDeltaNet, self.attention)(
+      attention_output, new_kv_cache = cast(Qwen3_5GatedDeltaNet, self.attention)(
           hidden_states,
           model_mode=model_mode,
-          kv_cache=None,
+          kv_cache=kv_cache,
           decoder_segment_ids=decoder_segment_ids,
       )
-      new_kv_cache = None
 
     # First residual connection after attention
     hidden_states = residual + attention_output
