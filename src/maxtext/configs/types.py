@@ -3141,6 +3141,7 @@ class MaxTextConfig(
               "tensor": 1,
               "attn_dp": 1,
               "attn_dp_expert": 1,
+              "dcp": 1,
           }
       )
       dcn_map.update(
@@ -3149,6 +3150,7 @@ class MaxTextConfig(
               "tensor": 1,
               "attn_dp": 1,
               "attn_dp_expert": 1,
+              "dcp": 1,
           }
       )
 
