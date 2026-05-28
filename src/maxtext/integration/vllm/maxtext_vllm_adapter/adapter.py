@@ -188,15 +188,21 @@ def pre_slice_gdn_weights(module: nnx.Module):
     module.w_b = nnx.Param(w_ba_reshaped[..., :module.v_heads_per_k_head], sharding=sharding_ba)
     module.w_a = nnx.Param(w_ba_reshaped[..., module.v_heads_per_k_head:], sharding=sharding_ba)
 
+  elif isinstance(module, (list, tuple, nnx.List)):
+    # If the module itself is a list/tuple/nnx.List, loop over its elements directly
+    for item in module:
+      if isinstance(item, nnx.Module):
+        pre_slice_gdn_weights(item)
+
   else:
     # Recurse into submodules
     for name, val in list(module.__dict__.items()):
-      if isinstance(val, nnx.Module):
-        pre_slice_gdn_weights(val)
-      elif isinstance(val, (list, tuple, nnx.List)):
+      if isinstance(val, (list, tuple, nnx.List)):
         for item in val:
           if isinstance(item, nnx.Module):
             pre_slice_gdn_weights(item)
+      elif isinstance(val, nnx.Module):
+        pre_slice_gdn_weights(val)
       elif isinstance(val, dict):
         for item in val.values():
           if isinstance(item, nnx.Module):
