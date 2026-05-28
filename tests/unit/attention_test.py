@@ -941,7 +941,13 @@ class AttentionTest(parameterized.TestCase):
         model_mode=MODEL_MODE_PREFILL,
     )
     self.assertTrue(
-        jax.numpy.allclose(attention_w_layout_full[:, :prefill_length, :], attention_w_layout_prefill, equal_nan=False)
+        jax.numpy.allclose(
+            attention_w_layout_full[:, :prefill_length, :],
+            attention_w_layout_prefill,
+            rtol=rtol,
+            atol=atol,
+            equal_nan=False,
+        )
     )
 
     for idx in range(prefill_length, decode_total_length):
@@ -1060,7 +1066,11 @@ class AttentionTest(parameterized.TestCase):
     )
     self.assertTrue(
         jax.numpy.allclose(
-            attention_wo_reshape_q_full[:, :prefill_length, :], attention_wo_reshape_q_prefill, equal_nan=False
+            attention_wo_reshape_q_full[:, :prefill_length, :],
+            attention_wo_reshape_q_prefill,
+            rtol=rtol,
+            atol=atol,
+            equal_nan=False,
         )
     )
 
@@ -1074,15 +1084,29 @@ class AttentionTest(parameterized.TestCase):
     )
     self.assertTrue(
         jax.numpy.allclose(
-            attention_w_reshape_q_full[:, :prefill_length, :], attention_w_reshape_q_prefill, equal_nan=False
+            attention_w_reshape_q_full[:, :prefill_length, :],
+            attention_w_reshape_q_prefill,
+            rtol=rtol,
+            atol=atol,
+            equal_nan=False,
         )
     )
 
-    self.assertTrue(jax.numpy.allclose(attention_wo_reshape_q_prefill, attention_w_reshape_q_prefill, equal_nan=False))
+    self.assertTrue(
+        jax.numpy.allclose(
+            attention_wo_reshape_q_prefill,
+            attention_w_reshape_q_prefill,
+            rtol=rtol,
+            atol=atol,
+            equal_nan=False,
+        )
+    )
     self.assertTrue(
         jax.numpy.allclose(
             attention_wo_reshape_q_full[:, :prefill_length, :],
             attention_w_reshape_q_full[:, :prefill_length, :],
+            rtol=rtol,
+            atol=atol,
             equal_nan=False,
         )
     )

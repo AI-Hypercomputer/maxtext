@@ -27,7 +27,7 @@ import sys
 import argparse
 import safetensors.numpy
 from absl import app
-import tensorflow as tf
+from etils import epath
 from array_record.python import array_record_module
 from maxtext.utils import max_logging
 
@@ -35,11 +35,11 @@ from maxtext.utils import max_logging
 def verify_array_records(output_dir, expected_steps, expected_k, expected_keys):
   """Verifies the contents of ArrayRecord files containing top-k teacher logits."""
 
-  file_pattern = f"{output_dir}/*.array_record"
-  files = tf.io.gfile.glob(file_pattern)
+  file_pattern = "*.array_record"
+  files = list(epath.Path(output_dir).glob(file_pattern))
 
   if not files:
-    assert False, f"Error: No ArrayRecord files found matching {file_pattern}"
+    assert False, f"Error: No ArrayRecord files found in {output_dir}"
 
   max_logging.log(f"Found {len(files)} ArrayRecord files. Starting verification...")
 
@@ -48,7 +48,7 @@ def verify_array_records(output_dir, expected_steps, expected_k, expected_keys):
 
   for file_path in files:
     max_logging.log(f"Verifying: {file_path}")
-    reader = array_record_module.ArrayRecordReader(file_path)
+    reader = array_record_module.ArrayRecordReader(str(file_path))
     num_records_in_file = reader.num_records()
 
     if num_records_in_file == 0:

@@ -27,7 +27,7 @@ from typing import Sequence
 import argparse
 import time
 import sys
-import tensorflow as tf
+from etils import epath
 import re
 import numpy as np
 
@@ -60,17 +60,18 @@ def get_start_step(config, local_args):
     return 0
 
   output_dir = local_args.gcs_upload_path if local_args.gcs_upload_path else local_args.local_tmp_dir
-  if not tf.io.gfile.exists(output_dir):
-    tf.io.gfile.makedirs(output_dir)
+  output_path = epath.Path(output_dir)
+  if not output_path.exists():
+    output_path.mkdir(parents=True, exist_ok=True)
     return 0
 
-  existing_files = tf.io.gfile.glob(os.path.join(output_dir, "teacher_top_k_part_*.array_record"))
+  existing_files = list(output_path.glob("teacher_top_k_part_*.array_record"))
   if not existing_files:
     return 0
 
   # Updated regex to handle the host ID in the filename
   max_part_num = max(
-      (int(m.group(1)) for f in existing_files if (m := re.search(r"part_(\d+)_host", os.path.basename(f)))),
+      (int(m.group(1)) for f in existing_files if (m := re.search(r"part_(\d+)_host", f.name))),
       default=-1,
   )
 

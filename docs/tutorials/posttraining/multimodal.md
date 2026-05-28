@@ -130,7 +130,7 @@ Here, we use [ChartQA](https://huggingface.co/datasets/HuggingFaceM4/ChartQA) as
 export MAXTEXT_CKPT_PATH=...  # either set to an already available MaxText ckpt or to the one we just converted in the previous step
 export BASE_OUTPUT_DIRECTORY=gs://...
 export STEPS=1000
-python -m maxtext.trainers.post_train.sft.train_sft_deprecated \
+python -m maxtext.trainers.post_train.sft.train_sft_native \
     src/maxtext/configs/post_train/sft-vision-chartqa.yml \
     run_name="chartqa-sft" \
     model_name=gemma3-4b \

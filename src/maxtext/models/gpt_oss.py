@@ -36,7 +36,6 @@ from maxtext.layers import quantizations
 from maxtext.layers.attentions import Attention
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
-from maxtext.inference import page_manager
 from maxtext.utils import max_utils
 
 # -----------------------------------------
@@ -143,7 +142,6 @@ class GptOssDecoderLayer(nnx.Module):
       deterministic,
       model_mode,
       previous_chunk=None,
-      page_state: None | page_manager.PageState = None,
       slot=None,
       kv_cache=None,
       attention_metadata=None,
@@ -279,7 +277,6 @@ class GptOssScannableBlock(nnx.Module):
       deterministic,
       model_mode,
       previous_chunk=None,
-      page_state: None | page_manager.PageState = None,
       slot=None,
       kv_cache=None,
       attention_metadata=None,
@@ -299,7 +296,6 @@ class GptOssScannableBlock(nnx.Module):
           deterministic,
           model_mode,
           previous_chunk=previous_chunk,
-          page_state=page_state,
           slot=slot,
           kv_cache=kv_cache,
           attention_metadata=attention_metadata,

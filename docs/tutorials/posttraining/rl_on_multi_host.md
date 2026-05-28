@@ -79,7 +79,7 @@ placeholders with your actual values.
 # -- Model configuration --
 # The MaxText model name. See `src/maxtext/configs/types.py` for `ModelName` for a
 # full list of supported models.
-export MODEL=<MODEL_NAME> # e.g. 'llama3.1-70b-Instruct'
+export MODEL=<MODEL_NAME> # e.g. 'llama3.1-70b-Instruct' # replace with another model from src/maxtext/configs/types.py if needed
 
 # Your Hugging Face access token. Required to download gated models like Llama.
 # You can generate one at https://huggingface.co/settings/tokens.
@@ -167,7 +167,6 @@ xpk workload create-pathways --workload ${RUN_NAME?} \
 --docker-image ${DOCKER_IMAGE?} --cluster ${GKE_CLUSTER?} \
 --tpu-type=${TPU_TYPE?} --num-slices=1 \
 --project=${PROJECT_ID?} --priority=high \
---zone=${ZONE?} \
 --command "HF_TOKEN=${HF_TOKEN?} TF_CPP_MIN_LOG_LEVEL=0 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' \
 python3 -m maxtext.trainers.post_train.rl.train_rl \
   model_name=${MODEL?} \
@@ -185,7 +184,6 @@ xpk workload create-pathways --workload ${RUN_NAME?} \
 --docker-image ${DOCKER_IMAGE?} --cluster ${GKE_CLUSTER?} \
 --tpu-type=${TPU_TYPE?} --num-slices=1 \
 --project=${PROJECT_ID?} --priority=high \
---zone=${ZONE?} \
 --command "HF_TOKEN=${HF_TOKEN?} TF_CPP_MIN_LOG_LEVEL=0 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' \
 python3 -m maxtext.trainers.post_train.rl.train_rl \
   model_name=${MODEL?} \

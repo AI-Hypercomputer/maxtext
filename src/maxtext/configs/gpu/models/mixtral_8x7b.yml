@@ -24,12 +24,12 @@ per_device_batch_size: 12
 max_target_length: 4096
 attention: "cudnn_flash_te"
 remat_policy: "minimal_with_context"
-use_iota_embed: True
+use_iota_embed: true
 dataset_type: "synthetic"
 reuse_example_batch: 1
-enable_checkpointing: False
-megablox: False
-scan_layers: False
+enable_checkpointing: false
+megablox: false
+scan_layers: false
 tokenizer_path: "/deps/src/maxtext/assets/tokenizers/tokenizer.mistral-v1"
 profiler: "nsys"
 capacity_factor: 1.0
