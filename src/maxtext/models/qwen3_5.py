@@ -188,9 +188,9 @@ class Qwen3_5DecoderLayer(nnx.Module):
           seq_len,
           config.emb_dim
       )
-      print(f"\n[DEBUG INIT] Layer {self.layer_idx} | Mode: {model_mode}", flush=True)
-      print(f"[DEBUG INIT] Calculated batch_size: {batch_size}", flush=True)
-      print(f"[DEBUG INIT] Passing inputs_shape to GDN: {dummy_inputs_shape}\n", flush=True)
+      # print(f"\n[DEBUG INIT] Layer {self.layer_idx} | Mode: {model_mode}", flush=True)
+      # print(f"[DEBUG INIT] Calculated batch_size: {batch_size}", flush=True)
+      # print(f"[DEBUG INIT] Passing inputs_shape to GDN: {dummy_inputs_shape}\n", flush=True)
       self.attention = Qwen3_5GatedDeltaNet(
           config=cfg, 
           inputs_shape=dummy_inputs_shape,

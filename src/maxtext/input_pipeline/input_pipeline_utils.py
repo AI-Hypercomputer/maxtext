@@ -259,7 +259,7 @@ def verify_chat_template_generation_prompt_logic(tokenizer_model):
   assistant_prefix = prompt_w_gen_ids[len(prompt_wo_gen_ids) :]
   full_turn_tokens = extract_token_ids(
       tokenizer_model.apply_chat_template(
-          dummy_msgs + [{"role": "assistant", "content": "Dummy response"}], add_generation_prompt=False, tokenize=True
+          dummy_msgs + [{"role": "assistant", "content": "Dummy response", "reasoning_content":"Think process"}], add_generation_prompt=False, tokenize=True
       )
   )
   full_turn_ids = extract_token_ids(full_turn_tokens)
