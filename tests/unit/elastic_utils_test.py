@@ -93,6 +93,8 @@ class ElasticUtilsTest(unittest.TestCase):
     pathwaysutils.elastic.manager.Manager = self.original_manager_class
     pathwaysutils.elastic.manager.ScaleUpSignalError = self.original_scale_up_signal_error
     elastic_utils.elastic_manager = None
+    elastic_utils.pending_reinit_recorder = None
+    elastic_utils.pending_elastic_event_type = None
     super().tearDown()
 
   def test_elastic_enabled(self):
@@ -279,6 +281,99 @@ class ElasticUtilsTest(unittest.TestCase):
     self.fake_manager.elastic_retry.assert_called_once()
     kwargs = self.fake_manager.elastic_retry.call_args.kwargs
     self.assertIsNone(kwargs["minimum_slice_count"])
+
+  def test_elastic_retry_pre_callback_none_by_default(self):
+    """pre_callback must be None when pre_callback_fn is not supplied."""
+    config = FakeConfig()
+    elastic_utils.elastic_manager = self.fake_manager
+
+    elastic_utils.elastic_retry(config)
+
+    kwargs = self.fake_manager.elastic_retry.call_args.kwargs
+    self.assertIsNone(kwargs["pre_callback"])
+
+  def test_elastic_retry_pre_callback_forwarded(self):
+    """pre_callback_fn must be forwarded as pre_callback to the manager."""
+    config = FakeConfig()
+    elastic_utils.elastic_manager = self.fake_manager
+
+    fake_pre_callback = Mock()
+    elastic_utils.elastic_retry(config, pre_callback_fn=fake_pre_callback)
+
+    kwargs = self.fake_manager.elastic_retry.call_args.kwargs
+    self.assertIs(kwargs["pre_callback"], fake_pre_callback)
+
+  def test_record_elastic_event_start(self):
+    """Tests recording an elastic slice down start."""
+    elastic_utils.elastic_manager = self.fake_manager
+    self.fake_manager.new_slice_event.is_set.return_value = False
+    fake_recorder = Mock()
+    config = FakeConfig()
+
+    elastic_utils.record_elastic_event_start(fake_recorder, config)
+
+    fake_recorder.record_custom_badput_event_start_time.assert_called_once_with(
+        custom_badput_event_type='elastic_slice_down'
+    )
+    self.assertEqual(elastic_utils.pending_elastic_event_type, 'elastic_slice_down')
+
+  def test_record_elastic_event_start_scale_up(self):
+    """Tests recording an elastic slice scale up start."""
+    elastic_utils.elastic_manager = self.fake_manager
+    self.fake_manager.new_slice_event.is_set.return_value = True
+    fake_recorder = Mock()
+    config = FakeConfig()
+
+    elastic_utils.record_elastic_event_start(fake_recorder, config)
+
+    fake_recorder.record_custom_badput_event_start_time.assert_called_once_with(
+        custom_badput_event_type='elastic_scale_up'
+    )
+
+  def test_record_elastic_wait_end_and_reinit_start_noop_on_first_attempt(self):
+    """Tests recording elastic event end and elastic reinit start."""
+    elastic_utils.pending_elastic_event_type = None
+    fake_recorder = Mock()
+
+    elastic_utils.record_elastic_wait_end_and_reinit_start(fake_recorder)
+
+    fake_recorder.record_custom_badput_event_end_time.assert_not_called()
+    fake_recorder.record_custom_badput_event_start_time.assert_not_called()
+    self.assertIsNone(elastic_utils.pending_reinit_recorder)
+
+  def test_record_elastic_wait_end_and_reinit_start(self):
+    """Test recording end of slice down and start of reinit."""
+    elastic_utils.pending_elastic_event_type = 'elastic_slice_down'
+    fake_recorder = Mock()
+
+    elastic_utils.record_elastic_wait_end_and_reinit_start(fake_recorder)
+
+    fake_recorder.record_custom_badput_event_end_time.assert_called_once_with(
+        custom_badput_event_type='elastic_slice_down'
+    )
+    fake_recorder.record_custom_badput_event_start_time.assert_called_once_with(
+        custom_badput_event_type='elastic_reinitialization'
+    )
+    self.assertIs(elastic_utils.pending_reinit_recorder, fake_recorder)
+    self.assertIsNone(elastic_utils.pending_elastic_event_type)
+
+  def test_record_elastic_reinit_end(self):
+    """Tests recording end of elastic reinit."""
+    fake_recorder = Mock()
+    elastic_utils.pending_reinit_recorder = fake_recorder
+
+    elastic_utils.record_elastic_reinit_end()
+
+    fake_recorder.record_custom_badput_event_end_time.assert_called_once_with(
+        custom_badput_event_type='elastic_reinitialization'
+    )
+    self.assertIsNone(elastic_utils.pending_reinit_recorder)
+
+  def test_record_elastic_reinit_end_on_cold_start(self):
+    """Tests recording end of elastic reinit on cold start."""
+    elastic_utils.pending_reinit_recorder = None
+
+    elastic_utils.record_elastic_reinit_end()
 
   def test_ensure_elastic_manager_initialized_readonly_config(self):
     """Tests that ensure_elastic_manager_initialized works with read-only config."""

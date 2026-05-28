@@ -24,7 +24,7 @@ defaults:
 jobs:
   debugger:
     # Debug mode: with a repository variable called DEBUG to true
-    if: |- 
+    if: |-
      ${{ fromJSON(vars.DEBUG || vars.ACTIONS_STEP_DEBUG || false) }}
     runs-on: 'ubuntu-latest'
     permissions:
@@ -39,7 +39,7 @@ jobs:
           DEBUG_event__pull_request__author_association: '${{ github.event.pull_request.author_association }}'
           DEBUG_event__review__author_association: '${{ github.event.review.author_association }}'
           DEBUG_event: '${{ toJSON(github.event) }}'
-        run: |- 
+        run: |-
           env | grep '^DEBUG_'
 
   dispatch:
@@ -50,7 +50,7 @@ jobs:
         github.event_name == 'pull_request' &&
         github.event.pull_request.head.repo.fork == false &&
         github.event.action == 'labeled' &&
-        contains(github.event.label.name, 'gemini-review')
+        (contains(github.event.label.name, 'gemini-review') || contains(github.event.label.name, 'gemini-investigate'))
       ) || (
         github.event.sender.type == 'User' &&
         startsWith(github.event.comment.body || github.event.review.body || github.event.issue.body, '@gemini-cli') &&
@@ -95,6 +95,8 @@ jobs:
 
             if (payload.action === 'labeled' && payload.label && payload.label.name.includes('gemini-review')) {
               core.setOutput('command', 'review');
+            } else if (payload.action === 'labeled' && payload.label && payload.label.name.includes('gemini-investigate')) {
+              core.setOutput('command', 'investigate');
             } else if (request.startsWith("@gemini-cli /review")) {
               core.setOutput('command', 'review');
               core.setOutput('additional_context', '');

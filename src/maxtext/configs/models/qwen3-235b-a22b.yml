@@ -25,7 +25,7 @@ head_dim: 128
 mlp_activations: ["silu", "linear"]
 vocab_size: 151936
 normalization_layer_epsilon: 1.0e-6
-use_qk_norm: True
+use_qk_norm: true
 
 # MoE Specific Parameters
 num_experts: 128
@@ -38,4 +38,4 @@ norm_topk_prob: true
 rope_max_timescale: 5000000
 
 # General Model Settings
-enable_dropout: False
+enable_dropout: false

@@ -122,7 +122,7 @@ def smart_resize(
   return h_bar, w_bar
 
 
-def pre_process_qwen3_image(image: np.ndarray | list[np.ndarray], config):
+def pre_process_qwen3_image(image: np.ndarray | list[np.ndarray], config, force_resize=None):
   """Performs a bi-linear resize (with anti-aliasing) and normalizes the image."""
   patch_size = config.patch_size_for_vit
   merge_size = config.spatial_merge_size_for_vit
@@ -135,23 +135,27 @@ def pre_process_qwen3_image(image: np.ndarray | list[np.ndarray], config):
 
   for img in images_in:
     pil_img = Image.fromarray(img)
-    # Qwen3-Omni performs one resize during fetch_image and another resize before patchify.
-    resized_height_1, resized_width_1 = smart_resize(
-        height=img.shape[0],
-        width=img.shape[1],
-        factor=IMAGE_FACTOR,
-        min_pixels=MIN_PIXELS,
-        max_pixels=MAX_PIXELS,
-    )
-    pil_img = pil_img.resize((resized_width_1, resized_height_1))
-    resized_height_2, resized_width_2 = smart_resize(
-        height=resized_height_1,
-        width=resized_width_1,
-        factor=patch_size * merge_size,
-        min_pixels=MIN_PIXELS,
-        max_pixels=MAX_PIXELS,
-    )
-    resized_img_pil = pil_img.resize((resized_width_2, resized_height_2), resample=resample_method)
+    if force_resize is not None:
+      resized_height_2, resized_width_2 = force_resize
+      resized_img_pil = pil_img.resize((resized_width_2, resized_height_2), resample=resample_method)
+    else:
+      # Qwen3-Omni performs one resize during fetch_image and another resize before patchify.
+      resized_height_1, resized_width_1 = smart_resize(
+          height=img.shape[0],
+          width=img.shape[1],
+          factor=IMAGE_FACTOR,
+          min_pixels=MIN_PIXELS,
+          max_pixels=MAX_PIXELS,
+      )
+      pil_img = pil_img.resize((resized_width_1, resized_height_1))
+      resized_height_2, resized_width_2 = smart_resize(
+          height=resized_height_1,
+          width=resized_width_1,
+          factor=patch_size * merge_size,
+          min_pixels=MIN_PIXELS,
+          max_pixels=MAX_PIXELS,
+      )
+      resized_img_pil = pil_img.resize((resized_width_2, resized_height_2), resample=resample_method)
     resized_img_np = np.array(resized_img_pil).astype(np.float32)
 
     img_np = mm_utils.normalize_images(resized_img_np, mean=IMAGE_MEAN, std=IMAGE_STD)
@@ -472,6 +476,35 @@ def pre_process_audio_qwen3_omni(audio_array):
   audio_features = _np_extract_fbank_features(audio_features)
   audio_features_mask = np.ones((audio_features.shape[0], audio_features.shape[2]), dtype=np.int32)
   return audio_features, audio_features_mask
+
+
+def preprocess_mm_data_qwen3_omni_for_training(images):
+  """Preprocesses image(s) for Qwen3-Omni SFT training using default model constants."""
+
+  class _DefaultConfig:
+    patch_size_for_vit = 16
+    spatial_merge_size_for_vit = 2
+    temporal_patch_size_for_vit = QWEN3_TEMPORAL_PATCH_SIZE
+
+  images_in = [images] if isinstance(images, np.ndarray) else images
+  pixel_values, pixel_grid_thw = pre_process_qwen3_image(
+      images_in, _DefaultConfig(), force_resize=(QWEN3_OMNI_IMAGE_SIZE, QWEN3_OMNI_IMAGE_SIZE)
+  )
+  pixel_values = np.reshape(
+      pixel_values,
+      (
+          len(images_in),
+          3,  # num_channels_for_vit
+          _DefaultConfig.temporal_patch_size_for_vit * pixel_grid_thw[0, 0],
+          _DefaultConfig.patch_size_for_vit * pixel_grid_thw[0, 1],
+          _DefaultConfig.patch_size_for_vit * pixel_grid_thw[0, 2],
+      ),
+  )
+  return Qwen3OmniPreprocessorOutput(
+      num_images=len(images_in),
+      pixel_values=pixel_values,
+      pixel_grid_thw=pixel_grid_thw,
+  )
 
 
 def preprocess_mm_data_qwen3_omni(config):

@@ -12,19 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# This logical rule is designed to optimize pipeline parallelism for large-scale jobs. 
-# Key changes include removing expert weight sharding on the `q_lora` dimension, which 
-# is relatively small (e.g., 512 for DeepSeek), and limiting sharding strategies when 
-# EP x FSDP > 512. 
+# This logical rule is designed to optimize pipeline parallelism for large-scale jobs.
+# Key changes include removing expert weight sharding on the `q_lora` dimension, which
+# is relatively small (e.g., 512 for DeepSeek), and limiting sharding strategies when
+# EP x FSDP > 512.
 #
-# The `data` axis is preserved for two reasons: first, the pipeline stage acts as a 
-# data parallel (DP) domain externally, making the `data` axis a necessary reference; 
-# second, it may be required for DCN communication. 
-# 
+# The `data` axis is preserved for two reasons: first, the pipeline stage acts as a
+# data parallel (DP) domain externally, making the `data` axis a necessary reference;
+# second, it may be required for DCN communication.
+#
 # The `context` axis is used for supporting fractional per device batch size
 #
-# Finally, the `tensor` axis is used to shard weights when `pipeline_fsdp_ag_once` or 
-# `pipeline_fsdp_ag_per_repeat` is enabled, ensuring we have sufficient memory to 
+# Finally, the `tensor` axis is used to shard weights when `pipeline_fsdp_ag_once` or
+# `pipeline_fsdp_ag_per_repeat` is enabled, ensuring we have sufficient memory to
 # store prefetched weights.
 mesh_axes: ['data', 'stage', 'fsdp', 'context', 'tensor', 'expert']
 data_sharding: [['data', 'stage', 'fsdp', 'context', 'tensor', 'expert']]

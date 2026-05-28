@@ -3,7 +3,6 @@ aqtp
 array-record
 chex
 cloud-accelerator-diagnostics
-cloud-tpu-diagnostics!=1.1.14
 datasets
 drjax
 flax

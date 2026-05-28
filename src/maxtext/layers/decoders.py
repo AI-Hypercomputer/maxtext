@@ -29,7 +29,6 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.common.common_types import Config, DecoderBlockType, ShardMode
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN
-from maxtext.inference import page_manager
 from maxtext.layers import linears
 from maxtext.layers import mhc
 from maxtext.layers import normalizations
@@ -47,6 +46,7 @@ from maxtext.models import (
     gemma2,
     gemma3,
     gemma4,
+    gemma4_small,
     gpt3,
     gpt_oss,
     llama2,
@@ -94,7 +94,6 @@ class DecoderLayer(nn.Module):
       model_mode,
       previous_chunk=None,
       slot: None | int = None,
-      page_state: None | page_manager.PageState = None,
       kv_cache: jax.Array | None = None,
       attention_metadata: dict[str, Any] | None = None,
   ):
@@ -248,7 +247,6 @@ class SequentialBlockDecoderLayers(nn.Module):
       deterministic: bool,
       model_mode,
       slot: None | int = None,
-      page_state: None | page_manager.PageState = None,
   ) -> jnp.ndarray:
     for lyr in range(self.num_decoder_layers):
       inputs = self.decoder_layer(
@@ -260,7 +258,6 @@ class SequentialBlockDecoderLayers(nn.Module):
           deterministic,
           model_mode,
           slot=slot,
-          page_state=page_state,
       )
       if self.config.scan_layers:
         inputs = inputs[0]  #  When scan_layers is True the decoder layers return (outputs, None).
@@ -468,6 +465,10 @@ class Decoder(nn.Module):
         return [gemma3.Gemma3DecoderLayerToLinen]
       case DecoderBlockType.GEMMA4:
         return [gemma4.Gemma4ScannableBlockToLinen] if self.config.scan_layers else [gemma4.Gemma4DecoderLayerToLinen]
+      case DecoderBlockType.GEMMA4_SMALL:
+        # PLE input + KV-share donor threading requires per-layer-index state,
+        # which is not expressible inside ``nn.scan``.
+        return [gemma4_small.Gemma4SmallDecoderLayerToLinen]
       case DecoderBlockType.GPT3:
         return [gpt3.Gpt3DecoderLayerToLinen]
       case DecoderBlockType.GPT_OSS:
@@ -537,6 +538,7 @@ class Decoder(nn.Module):
         DecoderBlockType.GEMMA2,
         DecoderBlockType.GEMMA3,
         DecoderBlockType.GEMMA4,
+        DecoderBlockType.GEMMA4_SMALL,
         DecoderBlockType.QWEN2,
         DecoderBlockType.QWEN3,
         DecoderBlockType.QWEN3_MOE,
@@ -650,9 +652,12 @@ class Decoder(nn.Module):
             "gemma3-27b",
             "gemma4-26b",
             "gemma4-31b",
+            "gemma4-e2b",
+            "gemma4-e4b",
             "llama4-17b-16e",
             "llama4-17b-128e",
             "qwen3-omni-30b-a3b",
+            "qwen3.5-397b-a17b",
         ]:
           y = mm_utils.merge_mm_embeddings(
               text_embeddings=y,
@@ -770,7 +775,6 @@ class Decoder(nn.Module):
       model_mode=MODEL_MODE_TRAIN,
       previous_chunk=None,
       slot: None | int = None,
-      page_state: None | page_manager.PageState = None,
       multimodal_input=None,
       kv_caches: list[jax.Array] | None = None,
       attention_metadata=None,
@@ -859,7 +863,6 @@ class Decoder(nn.Module):
         if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
           assert len(RemattedBlockLayers) == 2, "Scanned layers must have a length of 2 using deepseek."
           layer_call_kwargs = {
-              "page_state": page_state,
               "previous_chunk": previous_chunk,
               "slot": slot,
           }
@@ -967,7 +970,6 @@ class Decoder(nn.Module):
               model_mode,
               bidirectional_mask_value,
               previous_chunk,
-              page_state,
               slot,
           )
         elif cfg.decoder_block == DecoderBlockType.GEMMA4:
@@ -980,7 +982,6 @@ class Decoder(nn.Module):
               model_mode,
               bidirectional_mask_value,
               previous_chunk,
-              page_state,
               slot,
           )
         else:
@@ -1006,9 +1007,9 @@ class Decoder(nn.Module):
 
             # We don't pass kv_cache as a scanned argument anymore
 
-            # Pass None for previous_chunk, slot, page_state, kv_cache to align with __call__ signature
-            current_broadcast_args.extend([None, None, None, None, attention_metadata])
-            current_in_axes_tuple.extend([nn.broadcast] * 5)
+            # Pass None for previous_chunk, slot, kv_cache to align with __call__ signature
+            current_broadcast_args.extend([None, None, None, attention_metadata])
+            current_in_axes_tuple.extend([nn.broadcast] * 4)
 
             max_logging.info(f"DEBUG: len(current_broadcast_args)={len(current_broadcast_args)}")
             max_logging.info(f"DEBUG: current_broadcast_args={[type(a) for a in current_broadcast_args]}")
@@ -1075,7 +1076,6 @@ class Decoder(nn.Module):
                   deterministic,
                   model_mode,
                   previous_chunk=previous_chunk,
-                  page_state=page_state,
                   slot=slot,
                   kv_cache=kv_cache,
                   attention_metadata=attention_metadata,
@@ -1084,6 +1084,20 @@ class Decoder(nn.Module):
               if kv_caches is not None and kv_cache is not None:
                 kv_caches[index] = kv_cache
             global_layer_idx_offset += num_layers
+        elif cfg.decoder_block == DecoderBlockType.GEMMA4_SMALL:
+          y = self._apply_gemma4_small_layers(
+              y,
+              decoder_input_tokens,
+              decoder_segment_ids,
+              decoder_positions,
+              deterministic,
+              model_mode,
+              multimodal_input=multimodal_input,
+              kv_caches=kv_caches,
+              attention_metadata=attention_metadata,
+              previous_chunk=previous_chunk,
+              slot=slot,
+          )
         else:
           for lyr in range(cfg.num_decoder_layers):
             RemattedBlockLayer = RemattedBlockLayers[0]
@@ -1128,7 +1142,6 @@ class Decoder(nn.Module):
                 deterministic,
                 model_mode,
                 previous_chunk=previous_chunk,
-                page_state=page_state,
                 slot=slot,
                 kv_cache=kv_cache,
                 attention_metadata=attention_metadata,
@@ -1195,7 +1208,6 @@ class Decoder(nn.Module):
       model_mode,
       bidirectional_mask,
       previous_chunk,
-      page_state,
       slot,
   ):
     """Applies Gemma3 scanned decoder blocks, handling main scan and remainders."""
@@ -1247,7 +1259,6 @@ class Decoder(nn.Module):
           deterministic,
           model_mode,
           previous_chunk=previous_chunk,
-          page_state=page_state,
           slot=slot,
           **layer_call_kwargs,
       )
@@ -1262,7 +1273,6 @@ class Decoder(nn.Module):
       model_mode,
       bidirectional_mask,
       previous_chunk,
-      page_state,
       slot,
   ):
     """Applies Gemma4 scanned decoder blocks, handling main scan and remainders."""
@@ -1281,7 +1291,6 @@ class Decoder(nn.Module):
         deterministic,
         model_mode,
         slot,
-        page_state,
         previous_chunk,
         bidirectional_mask,
     )
@@ -1332,6 +1341,100 @@ class Decoder(nn.Module):
       y = layer(y, *broadcast_args)
       if cfg.scan_layers:
         y = y[0]
+
+    return y
+
+  def _apply_gemma4_small_layers(
+      self,
+      y,
+      decoder_input_tokens,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      multimodal_input=None,
+      kv_caches=None,
+      attention_metadata=None,
+      previous_chunk=None,
+      slot=None,
+  ):
+    """Apply Gemma 4 small (E2B / E4B) decoder layers.
+
+    Threads per-call state through the layer loop:
+      * ``per_layer_inputs`` from PLE, sliced per layer.
+      * ``shared_kv_states``: donor-layer-index → (key, value) for
+        downstream KV-shared layers to consume.
+
+    Scan-over-layers and pipeline parallelism are not supported.
+    """
+    cfg = self.config
+    mesh = self.mesh
+    bidirectional_mask_value = multimodal_input.bidirectional_mask if multimodal_input is not None else None
+
+    per_layer_inputs = None
+    if cfg.hidden_size_per_layer_input > 0 and cfg.vocab_size_per_layer_input > 0:
+      per_layer_inputs = gemma4_small.PLEToLinen(
+          config=cfg,
+          mesh=mesh,
+          name="per_layer_embedder",
+      )(decoder_input_tokens, y)
+
+    layer_types = gemma4_small.build_layer_types(cfg.num_decoder_layers, cfg.model_name)
+    num_kv_shared = cfg.num_kv_shared_layers
+    shared_kv_states: dict[int, tuple[jax.Array, jax.Array]] = {}
+
+    for lyr in range(cfg.num_decoder_layers):
+      attention_type = layer_types[lyr]
+      donor_idx = gemma4_small.kv_donor_layer_idx(lyr, layer_types, num_kv_shared)
+      is_donor = gemma4_small.is_kv_donor_layer(lyr, layer_types, num_kv_shared)
+
+      shared_key = None
+      shared_value = None
+      if donor_idx is not None:
+        if donor_idx not in shared_kv_states:
+          raise RuntimeError(
+              f"KV-shared layer {lyr} references donor {donor_idx} but no donor K/V "
+              f"have been recorded yet. This indicates the layer iteration order is wrong."
+          )
+        shared_key, shared_value = shared_kv_states[donor_idx]
+
+      layer = gemma4_small.Gemma4SmallDecoderLayerToLinen(
+          config=cfg,
+          mesh=mesh,
+          name=f"layers_{lyr}",
+          quant=self.quant,
+          model_mode=self.model_mode,
+          attention_type=attention_type,
+          layer_idx=lyr,
+      )
+
+      # Donor layers expose their rotated, normed K / V to downstream
+      # shared layers via the decoder layer's compute_shared_kv method.
+      if is_donor:
+        donor_k, donor_v = layer(y, decoder_positions, nnx_method="compute_shared_kv")
+        shared_kv_states[lyr] = (donor_k, donor_v)
+        # Reuse the just-computed K / V in the layer's own forward pass to
+        # avoid double-computing the K / V projection / norm / RoPE.
+        shared_key, shared_value = donor_k, donor_v
+
+      ple_slice = per_layer_inputs[..., lyr, :] if per_layer_inputs is not None else None
+
+      kv_cache = kv_caches[lyr] if kv_caches is not None else None
+      y = layer(
+          y,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+          previous_chunk=previous_chunk,
+          slot=slot,
+          bidirectional_mask=bidirectional_mask_value,
+          kv_cache=kv_cache,
+          attention_metadata=attention_metadata,
+          per_layer_input=ple_slice,
+          shared_key=shared_key,
+          shared_value=shared_value,
+      )
 
     return y
 

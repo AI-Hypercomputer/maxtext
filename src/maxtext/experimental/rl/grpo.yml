@@ -1,6 +1,6 @@
 base_config: "base.yml"
 
-use_grpo: True
+use_grpo: true
 train_data_columns: 'prompt'
 
 learning_rate: 1.e-6
@@ -26,12 +26,12 @@ async_checkpointing: false
 # Pathways inference
 inference_devices_per_replica: 4
 inference_replicas: 1
-use_pathways_reshard: True
+use_pathways_reshard: true
 
-return_log_prob: True 
+return_log_prob: true
 
-add_bos: False
-add_eos: False
+add_bos: false
+add_eos: false
 
 ### Splash attention block sizes
 # These values are tuned for small sequence lengths used in the grpo test script.
@@ -43,7 +43,7 @@ sa_block_kv_dkv: 128
 sa_block_kv_dkv_compute: 128
 sa_block_q_dq: 128
 sa_block_kv_dq: 128
-sa_use_fused_bwd_kernel: False
+sa_use_fused_bwd_kernel: false
 sa_q_layout: "HEAD_DIM_MINOR"
 sa_k_layout: "HEAD_DIM_MINOR"
 sa_v_layout: "HEAD_DIM_MINOR"

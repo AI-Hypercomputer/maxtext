@@ -29,13 +29,13 @@ from jax.sharding import Mesh
 from maxtext.common.common_types import AttentionType, Config
 from maxtext.layers import attentions
 from maxtext.layers import initializers
+from maxtext.layers import linears
 from maxtext.layers import moe
 from maxtext.layers import nnx_wrappers
 from maxtext.layers import quantizations
 from maxtext.layers.attentions import Attention
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
-from maxtext.inference import page_manager
 from maxtext.utils import max_utils
 
 # -----------------------------------------
@@ -132,6 +132,8 @@ class GptOssDecoderLayer(nnx.Module):
         rngs=rngs,
     )
 
+    self.dropout = linears.Dropout(rate=config.dropout_rate, broadcast_dims=(-2,), rngs=rngs)
+
   def __call__(
       self,
       inputs,
@@ -140,7 +142,6 @@ class GptOssDecoderLayer(nnx.Module):
       deterministic,
       model_mode,
       previous_chunk=None,
-      page_state: None | page_manager.PageState = None,
       slot=None,
       kv_cache=None,
       attention_metadata=None,
@@ -189,7 +190,7 @@ class GptOssDecoderLayer(nnx.Module):
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 
     layer_output = mlp_lnx + intermediate_inputs
-    layer_output = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(layer_output, deterministic=deterministic)
+    layer_output = self.dropout(layer_output, deterministic=deterministic)
 
     layer_output = nn.with_logical_constraint(
         layer_output,
@@ -276,7 +277,6 @@ class GptOssScannableBlock(nnx.Module):
       deterministic,
       model_mode,
       previous_chunk=None,
-      page_state: None | page_manager.PageState = None,
       slot=None,
       kv_cache=None,
       attention_metadata=None,
@@ -296,7 +296,6 @@ class GptOssScannableBlock(nnx.Module):
           deterministic,
           model_mode,
           previous_chunk=previous_chunk,
-          page_state=page_state,
           slot=slot,
           kv_cache=kv_cache,
           attention_metadata=attention_metadata,

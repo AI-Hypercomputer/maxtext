@@ -155,7 +155,13 @@ def get_rollout_kwargs_for_parallelism(sampler_config, num_sampler_devices):
   if num_auto > 1:
     raise ValueError(
         "At most one of rollout_tensor_parallelism, rollout_data_parallelism, "
-        "rollout_expert_parallelism can be -1 (auto-derived)."
+        "rollout_expert_parallelism can be -1 (auto-derived).\n"
+        f"Currently resolved values:\n"
+        f"  - rollout_tensor_parallelism = {tp}\n"
+        f"  - rollout_data_parallelism = {dp}\n"
+        f"  - rollout_expert_parallelism = {ep}\n\n"
+        "To fix this, you must explicitly define at least two of these parameters in your command line arguments.\n"
+        "For example, try adding 'rollout_tensor_parallelism=4' to your command."
     )
 
   if dp == -1:

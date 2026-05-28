@@ -39,7 +39,7 @@ jobs:
           permission-pull-requests: 'write'
 
       - name: 'Run Gemini CLI'
-      # Trigger Gemini with context 
+      # Trigger Gemini with context
         id: 'run_gemini'
         uses: 'google-github-actions/run-gemini-cli@main'
         env:

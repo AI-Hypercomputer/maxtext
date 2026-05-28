@@ -19,7 +19,6 @@
 # See github.com/google/maxtext/issues/20 for more
 
 from typing import Any, Sequence
-import contextlib
 import datetime
 import functools
 import os
@@ -57,11 +56,10 @@ from maxtext.common.goodput import (
     maybe_record_goodput,
     record_goodput,
 )
-from maxtext.common.gcloud_stub import cloud_diagnostics as _cloud_diag, is_decoupled
 from maxtext.common.gcloud_stub import vertex_tensorboard_modules
 from maxtext.common import metric_logger
 from maxtext.common.metric_logger import record_activation_metrics
-from maxtext.trainers.post_train.dpo.dpo_utils import _merge_dpo_state, _split_dpo_state, dpo_loss_fn
+from maxtext.trainers.post_train.dpo.dpo_utils import _merge_dpo_state, _split_dpo_state, dpo_loss_fn, dpo_loss_fn_nnx
 from maxtext.utils import exceptions
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
@@ -72,10 +70,8 @@ from maxtext.utils import sharding
 from maxtext.utils import maxtext_utils_nnx
 from maxtext.utils import train_utils
 from maxtext.utils.gradient_accumulation import gradient_accumulation_loss_and_grad
-from maxtext.utils.vocabulary_tiling import vocab_tiling_linen_loss
+from maxtext.utils.vocabulary_tiling import vocab_tiling_linen_loss, vocab_tiling_nnx_loss
 
-_diag_modules = _cloud_diag()
-diagnostic, debug_configuration, diagnostic_configuration, stack_trace_configuration = _diag_modules
 VertexTensorboardManager, _vertex_tb_is_stub = vertex_tensorboard_modules()
 
 
@@ -203,9 +199,10 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
     intermediate_outputs = intermediates.to_pure_dict()
 
     if config.num_vocab_tiling > 1:
-      raise NotImplementedError("Vocab tiling for NNX modules has not been implemented.")
-
-    if (config.use_indexer and not config.indexer_sparse_training) and is_train:
+      hidden_state_key = ("decoder", "hidden_states")
+      hidden_states = maxtext_utils.get_nested_value(intermediate_outputs, hidden_state_key)[0]
+      xent_sum, total_z_loss = vocab_tiling_nnx_loss(model, hidden_states, data, config, is_train)
+    elif (config.use_indexer and not config.indexer_sparse_training) and is_train:
       # In Dense Warm-up stage, we skip main model loss calculation for efficiency.
       # The main model parameters are frozen and only the indexer is trained via KL divergence.
       xent_sum = 0.0
@@ -322,10 +319,15 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     params = state.params
     ga_fn, ga_model, ga_params, ga_rng, ga_dpo = _loss_fn, model, params, dropout_rng, extra_dpo_args
   else:
-    if config.use_dpo:
-      raise NotImplementedError("DPO for NNX modules has not been implemented.")
     state = nnx.merge(model, state)  # reconstruct TrainStateNNX
-    ga_fn, ga_model, ga_params, ga_rng, ga_dpo = loss_fn, state.model, None, None, []
+    if config.use_dpo:
+      # NNX DPO: reference_model is a sibling field on TrainStateNNX (set up by
+      # init_initial_state when config.use_dpo=True). dpo_loss_fn_nnx mirrors
+      # the Linen dpo_loss_fn signature, so it slots into the same dispatcher
+      # with reference_model passed as the single extra_dpo_args entry.
+      ga_fn, ga_model, ga_params, ga_rng, ga_dpo = (dpo_loss_fn_nnx, state.model, None, None, [state.reference_model])
+    else:
+      ga_fn, ga_model, ga_params, ga_rng, ga_dpo = loss_fn, state.model, None, None, []
 
   # --- Gradient computation ---
   if config.gradient_accumulation_steps > 1:
@@ -391,9 +393,14 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
         )
         nnx.update(state.model, curr_params)
 
+      # `ga_fn` and `ga_dpo` were set up earlier (loss_fn vs dpo_loss_fn_nnx;
+      # ga_dpo carries the frozen reference_model when use_dpo, else empty).
+      _nnx_loss_fn = ga_fn
+      _nnx_extra_dpo_args = ga_dpo
+
       def diff_wrapper(param, rest, config, data):
         local_model = nnx.merge(model_graphdef, param, rest, copy=True)
-        loss, aux = loss_fn(local_model, config, data, None, None, is_train=True)
+        loss, aux = _nnx_loss_fn(local_model, config, data, None, None, *_nnx_extra_dpo_args, is_train=True)
         _, _, new_rest = nnx.split(local_model, nnx.Param, ...)
         return loss, (aux, new_rest)
 
@@ -557,7 +564,9 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     if config.use_dpo:
       new_state = _merge_dpo_state(new_state, reference_params)
     return new_state, metrics
-  return nnx.state(new_state), metrics
+  # Drop Intermediates (e.g. sowed max_logits for QK-Clip) before returning;
+  # they're absent from state_mesh_shardings and would cause a leaf-count mismatch.
+  return nnx.state(new_state, nnx.Not(nnx.Intermediate)), metrics
 
 
 def eval_step(model, config, state, data, dropout_rng=None):
@@ -577,7 +586,10 @@ def eval_step(model, config, state, data, dropout_rng=None):
     loss, aux = eval_loss_fn(pure_params, *extra_dpo_args, sparsity_state=batch_stats)
   else:
     state = nnx.merge(model, state)  # reconstruct TrainStateNNX
-    loss, aux = loss_fn(state.model, config, data, None, None, is_train=False)
+    if config.use_dpo:
+      loss, aux = dpo_loss_fn_nnx(state.model, config, data, None, None, state.reference_model, is_train=False)
+    else:
+      loss, aux = loss_fn(state.model, config, data, None, None, is_train=False)
 
   mtp_acceptance_rate = 0.0
   if config.mtp_eval_target_module > 0:
@@ -635,8 +647,8 @@ def train_loop(config, recorder, state=None):
       state_mesh_shardings = _merge_dpo_state(state_mesh_shardings, state_mesh_shardings.params["params"])
     jit_model = model
   else:
-    if config.use_dpo:
-      raise NotImplementedError("DPO is not supported for NNX models.")
+    # NNX keeps the DPO reference model as a sibling field on TrainStateNNX
+    # (set up in init_state_fn), so no reference-param merge is needed here.
     jit_model, state = nnx.split(state)
 
   params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
@@ -682,6 +694,8 @@ def train_loop(config, recorder, state=None):
     _, setup_params, _ = nnx.split(state.model, nnx.Param, ...)
   metric_logger_instance.write_setup_info_to_tensorboard(setup_params)
 
+  elastic_utils.record_elastic_reinit_end()
+
   _job_completed_gracefully = False
   try:
     last_step_completion = datetime.datetime.now()
@@ -702,9 +716,8 @@ def train_loop(config, recorder, state=None):
             state, metrics = p_train_step(state, example_batch, *step_rng_args)
 
         step_time_delta = datetime.datetime.now() - last_step_completion
-        last_step_completion = datetime.datetime.now()
 
-        state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
+        state_to_save = state if not (config.use_dpo and not config.pure_nnx) else _split_dpo_state(state)[0]
         checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator, step)
 
         if config.dump_hlo and step == (config.dump_step if config.dump_step >= 0 else start_step):
@@ -717,13 +730,16 @@ def train_loop(config, recorder, state=None):
               all_host_upload=config.dump_hlo_upload_all,
           )
 
+        eval_step_count = None
         if config.eval_interval > 0 and step > start_step and (step + 1) % config.eval_interval == 0:
           assert eval_data_iterator
           # Explicitly reset the eval iterator and counters before starting the eval loop
           eval_data_iterator.reset()
           metric_logger_instance.reset_eval_metrics()
+          max_logging.log(f"Starting eval after train step {step}")
 
           eval_step_count = 0
+          last_eval_step_completion = datetime.datetime.now()
           # pylint: disable=not-callable
           for eval_batch in eval_data_iterator:
             # Shard input eval data
@@ -732,29 +748,30 @@ def train_loop(config, recorder, state=None):
               break
             with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
               eval_metrics = p_eval_step(state, eval_batch, *step_rng_args)
-              metric_logger_instance.record_eval_metrics(step, metrics=eval_metrics)
-              max_logging.log(f"Completed eval step {eval_step_count}")
-              eval_step_count += 1
-          metric_logger_instance.record_eval_metrics(step, eval_step_count=eval_step_count)
-          if metric_logger_instance.cumulative_eval_metrics["scalar"]["eval/avg_loss"] <= config.target_eval_loss:
-            prof.deactivate()
-            raise exceptions.StopTraining(f"Target loss {config.target_eval_loss=} is achieved.")
+            eval_step_time_delta = datetime.datetime.now() - last_eval_step_completion
+            last_eval_step_completion = datetime.datetime.now()
+            metric_logger_instance.buffer_and_write_metrics(
+                eval_metrics, eval_step_count, step_time_delta=eval_step_time_delta, is_training=False
+            )
+            eval_step_count += 1
 
         prof.maybe_deactivate_profiler(step, state)
 
         if step == start_step:
           max_utils.print_mem_stats("After params initialized")
 
-        metric_logger_instance.buffer_and_write_train_metrics(metrics, step, step_time_delta)
+        last_step_completion = datetime.datetime.now()
+        metric_logger_instance.buffer_and_write_metrics(metrics, step, step_time_delta)
 
     if config.save_checkpoint_on_completion:
-      state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
+      state_to_save = state if not (config.use_dpo and not config.pure_nnx) else _split_dpo_state(state)[0]
       checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator)
     if checkpoint_manager is not None:
       # in case the last checkpoint_period checkpoint is still in progress
       checkpoint_manager.wait_until_finished()
     _job_completed_gracefully = True
   except exceptions.StopTraining as e:
+    prof.deactivate()
     max_logging.log(f"Training stopped: {str(e)}")
     _job_completed_gracefully = True
   finally:
@@ -765,7 +782,7 @@ def train_loop(config, recorder, state=None):
   return state
 
 
-def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]:
+def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any]:
   """Initialization of hyperparameters and utilities"""
   pathwaysutils.initialize()
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
@@ -791,67 +808,51 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]
   # Create the Goodput recorder
   recorder = create_goodput_recorder(config)
 
-  # Stack traces configurations
-  debug_config = debug_configuration.DebugConfig(
-      stack_trace_config=stack_trace_configuration.StackTraceConfig(
-          collect_stack_trace=config.collect_stack_trace,
-          stack_trace_to_cloud=config.stack_trace_to_cloud,
-          stack_trace_interval_seconds=config.stack_trace_interval_seconds,
-      )
-  )
-  diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
-  return config, recorder, diagnostic_config
+  return config, recorder
 
 
-def run(config, recorder, diagnostic_config):
-  """Run the job given hyperparameters and utilities.
-
-  In decoupled mode (DECOUPLE_GCLOUD=TRUE) cloud diagnostics may be stubbed; if so, skip wrapping.
-  """
-  # Use nullcontext when diagnostics are stubbed or in decoupled mode
-  diagnostics_context = (
-      contextlib.nullcontext()
-      if is_decoupled() or getattr(diagnostic, "__class__", None).__name__ == "_StubDiag"
-      else diagnostic.diagnose(diagnostic_config)
-  )
-
-  if is_decoupled() or getattr(diagnostic, "__class__", None).__name__ == "_StubDiag":
-    max_logging.log("[DECOUPLED NO-OP] skipping cloud diagnostics wrapper.")
-
-  with (
-      diagnostics_context,
-      max_utils.maybe_get_transformer_engine_context(config),
-  ):
+def run(config, recorder):
+  """Run the job given hyperparameters and utilities."""
+  with (max_utils.maybe_get_transformer_engine_context(config),):
     train_loop(config, recorder)
 
 
-def get_train_func(config, recorder, diagnostic_config, argv):
+def get_train_func(config, recorder, argv):
   """Returns the train function, wrapping in elastic_retry if elastic training is enabled."""
   if config.elastic_enabled:
     max_logging.log("Elastic utils: Elastic training enabled.")
 
+    def on_elastic_event():
+      elastic_utils.record_elastic_event_start(recorder, config)
+
+    def on_slices_ready():
+      elastic_utils.record_elastic_wait_end_and_reinit_start(recorder)
+
     def elastic_train_wrapper(argv: Sequence[str]) -> None:
       """Wrapper for elastic training initializes variables and runs the train loop."""
-      elastic_config, elastic_recorder, elastic_diagnostic_config = initialize(argv)
+      elastic_config, elastic_recorder = initialize(argv)
       run(
           elastic_config,
           elastic_recorder,
-          elastic_diagnostic_config,
       )
 
-    train_func = elastic_utils.elastic_retry(config)(functools.partial(elastic_train_wrapper, argv=argv))
+    train_func = elastic_utils.elastic_retry(
+        config,
+        callback_fn=on_elastic_event,
+        pre_callback_fn=on_slices_ready,
+    )(functools.partial(elastic_train_wrapper, argv=argv))
   else:
     # Use the already initialized variables
     def train_func():
-      run(config, recorder, diagnostic_config)
+      run(config, recorder)
 
   return train_func
 
 
 def main(argv: Sequence[str]) -> None:
-  config, recorder, diagnostic_config = initialize(argv)
+  config, recorder = initialize(argv)
   record_goodput(recorder, RECORD_JOB_START_TIME)
-  train_func = get_train_func(config, recorder, diagnostic_config, argv)
+  train_func = get_train_func(config, recorder, argv)
   with maybe_monitor_goodput(config):
     train_func()
 

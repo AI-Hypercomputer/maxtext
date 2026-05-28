@@ -15,11 +15,10 @@
 """TrainStateNNX tests."""
 
 import unittest
-import jax.numpy as jnp
 from flax import nnx
+import jax.numpy as jnp
+from maxtext.common import train_state_nnx
 import optax
-
-from maxtext.layers import train_state_nnx
 
 
 class MockModel(nnx.Module):

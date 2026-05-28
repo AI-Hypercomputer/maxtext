@@ -15,22 +15,22 @@
 """TrainStateNNX checkpoint tests."""
 
 import pathlib
-import tempfile
 import shutil
+import tempfile
 from types import SimpleNamespace
-from unittest import mock
-
 import unittest
+from unittest import mock
+from absl.testing import absltest
+from flax import linen as nn
+from flax import nnx, serialization
+from flax.training import train_state
 import jax
 import jax.numpy as jnp
-from flax import nnx, serialization
-from flax import linen as nn
-from flax.training import train_state
+from maxtext.common import checkpointing
+from maxtext.common import train_state_nnx
 import optax
 import orbax.checkpoint as ocp
-
-from maxtext.common import checkpointing
-from maxtext.layers import train_state_nnx
+import pytest
 
 
 class MockModel(nnx.Module):
@@ -65,6 +65,7 @@ def _replicate_for_orbax(pytree):
   return jax.tree.map(lambda x: jax.device_put(x, sharding) if isinstance(x, jax.Array) else x, pytree)
 
 
+@pytest.mark.cpu_only
 class TestTrainStateNNXCheckpoint(unittest.TestCase):
   """Class to test NNX checkpoint."""
 
@@ -303,6 +304,7 @@ class TestTrainStateNNXCheckpoint(unittest.TestCase):
       shutil.rmtree(temp_dir)
 
 
+@pytest.mark.cpu_only
 class TestMaybeSaveCheckpointStepAlignment(unittest.TestCase):
   """Verify maybe_save_checkpoint's fallback step matches the last completed step.
 
@@ -385,20 +387,23 @@ class TestMaybeSaveCheckpointStepAlignment(unittest.TestCase):
         self._invoke_maybe_save(linen_state, pure_nnx=False)["step"],
     )
 
-  def test_nnx_state_is_converted_to_pure_dict_before_save(self):
-    """For pure_nnx=True, maybe_save_checkpoint must pass a plain dict to save_checkpoint, not an nnx.State."""
+  def test_nnx_state_is_saved_in_linen_layout(self):
+    """For pure_nnx=True, maybe_save_checkpoint reshapes the NNX state to the Linen on-disk layout."""
     state = self._build_nnx_state(self.N_STEPS)
     self.assertIsInstance(state, nnx.State)  # precondition: NNX train_step returns an nnx.State
 
     captured = self._invoke_maybe_save(state, pure_nnx=True)
 
-    # save_checkpoint should have received a plain Python dict (the result of
-    # nnx.State.to_pure_dict()), not the original nnx.State.
+    # save_checkpoint should receive a plain dict in Linen layout, not the nnx.State.
     self.assertIsInstance(captured["state"], dict)
     self.assertNotIsInstance(captured["state"], nnx.State)
-    # Sanity: the converted dict still mirrors the TrainStateNNX structure.
-    self.assertIn("model", captured["state"])
-    self.assertIn("optimizer", captured["state"])
+    # Linen layout: {params: {params: ...}, step, opt_state}; not the NNX {model, optimizer}.
+    self.assertIn("params", captured["state"])
+    self.assertIn("step", captured["state"])
+    self.assertIn("opt_state", captured["state"])
+    self.assertNotIn("model", captured["state"])
+    self.assertNotIn("optimizer", captured["state"])
+    self.assertIn("params", captured["state"]["params"])
 
   def test_linen_state_is_passed_through_unchanged(self):
     """For pure_nnx=False, maybe_save_checkpoint must pass the original TrainState object through."""
@@ -407,6 +412,113 @@ class TestMaybeSaveCheckpointStepAlignment(unittest.TestCase):
     # Linen path must not invoke to_pure_dict(); state is forwarded as-is.
     self.assertIs(captured["state"], state)
 
+  def test_maybe_save_checkpoint_skips_if_already_saved(self):
+    """Verify maybe_save_checkpoint skips saving if latest_step matches actual_step."""
+    state = self._build_nnx_state(self.N_STEPS)
+    actual_step = self.N_STEPS - 1
+
+    config = SimpleNamespace(pure_nnx=True, checkpoint_period=1, async_checkpointing=False)
+    mgr = mock.MagicMock()
+    mgr.reached_preemption.return_value = False
+    # Mock latest_step to return the same actual_step
+    mgr.latest_step.return_value = actual_step
+
+    save_checkpoint_mock = mock.MagicMock()
+
+    with mock.patch.object(checkpointing, "save_checkpoint", save_checkpoint_mock):
+      checkpointing.maybe_save_checkpoint(mgr, state, config, data_iterator=None, step=None)
+
+    # Assert that save_checkpoint was NOT called!
+    save_checkpoint_mock.assert_not_called()
+
+  def test_maybe_save_checkpoint_saves_if_not_already_saved(self):
+    """Verify maybe_save_checkpoint saves if latest_step does not match actual_step."""
+    state = self._build_nnx_state(self.N_STEPS)
+    actual_step = self.N_STEPS - 1
+
+    config = SimpleNamespace(pure_nnx=True, checkpoint_period=1, async_checkpointing=False)
+    mgr = mock.MagicMock()
+    mgr.reached_preemption.return_value = False
+    # Mock latest_step to return a different step (or None)
+    mgr.latest_step.return_value = actual_step - 1
+
+    save_checkpoint_mock = mock.MagicMock()
+    save_checkpoint_mock.return_value = False
+
+    with mock.patch.object(checkpointing, "save_checkpoint", save_checkpoint_mock):
+      checkpointing.maybe_save_checkpoint(mgr, state, config, data_iterator=None, step=None)
+
+    # Assert that save_checkpoint WAS called!
+    save_checkpoint_mock.assert_called_once()
+
+
+class TestLinenCheckpointFormatConverters(unittest.TestCase):
+  """to_linen_checkpoint_dict / from_linen_checkpoint_dict (NNX <-> Linen on-disk layout)."""
+
+  def _nnx_pure(self):
+    # A 3-element optax chain (e.g. adamw): index 1 is an EmptyState (absent in the int-keyed dict).
+    return {
+        "model": {
+            "decoder": {"norm": {"scale": jnp.ones((3,))}},
+            "dropout": {
+                "rngs": {"default": {"key": jnp.ones((2,), dtype=jnp.uint32)}}
+            },  # NNX-only
+        },
+        "optimizer": {
+            "step": jnp.asarray(7, dtype=jnp.uint32),
+            "opt_state": {
+                0: {
+                    "count": jnp.asarray(7),
+                    "mu": {"decoder": jnp.ones((3,))},
+                    "nu": {"decoder": jnp.ones((3,))},
+                },
+                2: {"count": jnp.asarray(7)},
+            },
+        },
+    }
+
+  def test_to_linen_layout(self):
+    linen = train_state_nnx.to_linen_checkpoint_dict(self._nnx_pure())
+    self.assertEqual(set(linen.keys()), {"params", "step", "opt_state"})
+    self.assertIn("params", linen["params"])  # params/params/ collection wrap
+    self.assertNotIn(
+        "dropout", linen["params"]["params"]
+    )  # NNX-only rngs/dropout stripped
+    self.assertEqual(linen["step"].dtype, jnp.int32)  # Linen step is int32
+    # opt_state is a list with None for the EmptyState slot, mu/nu wrapped under params.
+    self.assertIsInstance(linen["opt_state"], list)
+    self.assertEqual(len(linen["opt_state"]), 3)
+    self.assertIsNone(linen["opt_state"][1])
+    self.assertIn("params", linen["opt_state"][0]["mu"])
+
+  def test_round_trip_preserves_values(self):
+    nnx_pure = self._nnx_pure()
+    back = train_state_nnx.from_linen_checkpoint_dict(
+        train_state_nnx.to_linen_checkpoint_dict(nnx_pure)
+    )
+    self.assertEqual(set(back.keys()), {"model", "optimizer"})
+    self.assertEqual(
+        back["optimizer"]["step"].dtype, jnp.uint32
+    )  # NNX step back to uint32
+    self.assertEqual(
+        set(back["optimizer"]["opt_state"].keys()), {0, 2}
+    )  # int-keyed dict, EmptyState dropped
+    self.assertNotIn(
+        "params", back["optimizer"]["opt_state"][0]["mu"]
+    )  # mu/nu unwrapped
+    self.assertTrue(
+        jnp.array_equal(
+            nnx_pure["model"]["decoder"]["norm"]["scale"],
+            back["model"]["decoder"]["norm"]["scale"],
+        )
+    )
+
+  def test_cast_step_handles_shapedtypestruct(self):
+    sds = jax.ShapeDtypeStruct((), jnp.uint32)
+    out = train_state_nnx._cast_step(sds, jnp.int32)  # pylint: disable=protected-access
+    self.assertIsInstance(out, jax.ShapeDtypeStruct)
+    self.assertEqual(out.dtype, jnp.int32)
+
 
 if __name__ == "__main__":
-  unittest.main()
+  absltest.main()

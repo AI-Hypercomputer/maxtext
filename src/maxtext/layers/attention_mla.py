@@ -70,8 +70,6 @@ from maxtext.layers.linears import DenseGeneral
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.inference import kvcache
-from maxtext.inference import page_manager
-from maxtext.inference import paged_attention
 from maxtext.inference.kvcache import KVQuant
 from maxtext.utils.sharding import create_sharding
 from maxtext.utils.globals import EPS
@@ -825,31 +823,6 @@ class MLA(Attention):
 
     self.out = self.init_out_w(output_dim=inputs_q_shape[-1])
 
-    # Setup paged attention op
-    if self.config.attention == "paged":
-      # Set head_dim to the max of qk_head_dim and v_head_dim. The current paged
-      # attention kernel requires the head_dim to be the same for q, k, v.
-      head_dim = max(self.qk_head_dim, self.v_head_dim)
-      # Align head_dim to the pagedattn_head_dim_alignment if specified.
-      if self.config.pagedattn_head_dim_alignment > 0:
-        alignment = self.config.pagedattn_head_dim_alignment
-        head_dim = (head_dim + alignment - 1) // alignment * alignment
-      self.ds_paged_attention_op = paged_attention.PagedAttentionOp(
-          mesh=self.mesh,
-          num_pages=self.config.pagedattn_num_pages,
-          tokens_per_page=self.config.pagedattn_tokens_per_page,
-          max_pages_per_slot=(self.config.max_target_length + self.config.pagedattn_tokens_per_page - 1)
-          // self.config.pagedattn_tokens_per_page,
-          max_pages_per_prefill=(self.config.max_prefill_predict_length + self.config.pagedattn_tokens_per_page - 1)
-          // self.config.pagedattn_tokens_per_page,
-          pages_per_compute_block=self.config.pagedattn_pages_per_compute_block,
-          num_kv_heads=self.num_kv_heads,
-          kv_head_dim_size=head_dim,
-          dtype=self.dtype,
-          attn_logits_soft_cap=self.attn_logits_soft_cap,
-          rngs=self.rngs,
-      )
-
   @property
   def out_head_dim(self) -> int:
     return self.v_head_dim
@@ -1120,7 +1093,6 @@ class MLA(Attention):
       deterministic: bool = False,
       previous_chunk: Any = None,
       slot: Optional[int] = None,
-      page_state: Optional[page_manager.PageState] = None,
       bidirectional_mask: Optional[Any] = None,
       rope_kwargs: dict | None = None,
       kv_cache: Optional[Array] = None,
@@ -1137,7 +1109,6 @@ class MLA(Attention):
       deterministic: Disables dropout if set to True.
       previous_chunk: Information about previously processed chunks for chunked prefill.
       slot: The batch slot index for paged attention.
-      page_state: The current state of the paged attention manager.
       bidirectional_mask: A mask for bidirectional attention, used in multimodal models.
       kv_cache: Optional key-value cache used when serving models with vLLM.
       attention_metadata: Optional attention-related metadata used when serving models with vLLM.
@@ -1205,24 +1176,17 @@ class MLA(Attention):
     # Check if we need QK Clip stats
     use_qk_clip = self.model_mode == MODEL_MODE_TRAIN and self.config.use_qk_clip
 
-    if self.config.attention == "paged" and model_mode != MODEL_MODE_TRAIN:
-      unnormalized_out, _, exp_sum = self.ds_paged_attention_op(
-          query, key, value, decoder_segment_ids, model_mode, previous_chunk, slot=slot, page_state=page_state
-      )
-      unnormalized_out = unnormalized_out[..., : self.v_head_dim]
-      out = unnormalized_out / (exp_sum + 1e-9) if exp_sum is not None else unnormalized_out
-    else:
-      out = self.attention_op(
-          query,
-          key,
-          value,
-          decoder_segment_ids,
-          inputs_positions,
-          model_mode,
-          cached_values,
-          indexer_mask=indexer_mask,
-          record_max_logits=use_qk_clip,
-      )
+    out = self.attention_op(
+        query,
+        key,
+        value,
+        decoder_segment_ids,
+        inputs_positions,
+        model_mode,
+        cached_values,
+        indexer_mask=indexer_mask,
+        record_max_logits=use_qk_clip,
+    )
 
     out = self._maybe_shard_with_logical(out, self.out_axis_names)
     out = jax.ad_checkpoint.checkpoint_name(out, "attention_out")

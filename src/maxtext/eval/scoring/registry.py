@@ -41,10 +41,7 @@ def get_scorer(benchmark_name: str) -> Callable[..., dict]:
   """
   key = benchmark_name.lower()
   if key not in SCORER_REGISTRY:
-    raise KeyError(
-        f"No scorer registered for benchmark '{benchmark_name}'. "
-        f"Available: {sorted(SCORER_REGISTRY)}. "
-    )
+    raise KeyError(f"No scorer registered for benchmark '{benchmark_name}'. " f"Available: {sorted(SCORER_REGISTRY)}. ")
   return SCORER_REGISTRY[key]
 
 

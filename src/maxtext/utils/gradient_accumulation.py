@@ -71,10 +71,18 @@ def gradient_accumulation_loss_and_grad(
 
   is_nnx = isinstance(model, nnx.Module)
 
-  # For more efficient DP/ZeRO-1 + GA
-  if config.shard_mode == ShardMode.EXPLICIT and config.ici_data_parallelism > 1:
-    ga_params_shardings = jax.tree.map(update_sharding_for_reduced, params_shardings)
-    grad_shardings = jax.tree.map(update_sharding_for_unreduced, params_shardings)
+  # For ZeRO-1 + GA, read the resolved "data" axis size from the mesh rather than
+  # config.ici_data_parallelism, which may be -1 (auto-fill) and resolves to 1 when
+  # FSDP already consumes every device — in which case data parallelism is not active.
+  param_mesh = jax.tree.leaves(params_shardings)[0].mesh
+  data_parallel_active = config.shard_mode == ShardMode.EXPLICIT and param_mesh.shape.get("data", 1) > 1
+  if data_parallel_active:
+    # reduced/unreduced PartitionSpecs are rejected inside a jax.lax.scan carry: scan
+    # traces its body against an AbstractMesh whose axis types are all Auto, and the
+    # annotations require Explicit axes. Keep plain params_shardings in the carry and
+    # apply the data-parallel all-reduce to the gradients after the scan instead.
+    ga_params_shardings = params_shardings
+    grad_shardings = params_shardings
   else:
     ga_params_shardings = grad_shardings = params_shardings
 
@@ -105,7 +113,7 @@ def gradient_accumulation_loss_and_grad(
     if is_nnx:
       # Reconstruct the model using the fixed parameters (ga_params)
       # and the advancing non-parameter state (RNGs) from the carry.
-      local_model = nnx.merge(graphdef, ga_params, acc_grad_and_loss["rest_state"])
+      local_model = nnx.merge(graphdef, ga_params, acc_grad_and_loss["rest_state"], copy=True)
       (_, aux), cur_batch_gradient = grad_func(local_model, config, data, None, None, *extra_dpo_args, is_train=True)
       _, _, next_rest_state = nnx.split(local_model, nnx.Param, ...)
       acc_grad_and_loss["rest_state"] = next_rest_state
@@ -156,6 +164,12 @@ def gradient_accumulation_loss_and_grad(
       + grad_and_loss["mtp_loss"] / config.gradient_accumulation_steps
   )
   raw_grads = grad_and_loss["grad"]
+  if data_parallel_active:
+    # Mark the gradients unreduced over the "data" axis now that we're outside the
+    # scan; this triggers the cross-replica all-reduce. The annotation can't live in
+    # the scan carry (see above), so it's applied here instead.
+    unreduced_shardings = jax.tree.map(update_sharding_for_unreduced, params_shardings)
+    raw_grads = jax.tree.map(_maybe_shard_with_name, raw_grads, unreduced_shardings)
   raw_grads = jax.tree.map(_maybe_shard_with_name, raw_grads, params_shardings)
   raw_grads = jax.tree_util.tree_map(lambda arr: arr / grad_and_loss["total_weights"], raw_grads)
   aux = jax.tree.map(lambda x: jnp.sum(x, axis=0), aux)  # pytype: disable=module-attr

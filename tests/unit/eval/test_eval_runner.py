@@ -27,6 +27,7 @@ from maxtext.eval.runner.eval_runner import (
 
 
 class TestMergeConfig(unittest.TestCase):
+  """Tests for _merge_config."""
 
   def test_override_takes_precedence(self):
     base = {"concurrency": 64, "temperature": 0.0}
@@ -52,6 +53,7 @@ class TestMergeConfig(unittest.TestCase):
 
 
 class TestBuildResultsPath(unittest.TestCase):
+  """Tests for _build_results_path."""
 
   def test_standard_path(self):
     cfg = {"base_output_directory": "gs://bucket/", "run_name": "run1"}
@@ -82,12 +84,12 @@ class TestBuildResultsPath(unittest.TestCase):
 
 
 class TestDeriveFromMaxtextConfig(unittest.TestCase):
+  """Tests for _derive_from_maxtext_config."""
 
   def _write_yaml(self, content: str) -> str:
-    f = tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False)
-    f.write(textwrap.dedent(content))
-    f.close()
-    return f.name
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False, encoding="utf-8") as f:
+      f.write(textwrap.dedent(content))
+      return f.name
 
   def test_derives_max_model_len(self):
     path = self._write_yaml("max_target_length: 1024\n")
@@ -96,9 +98,7 @@ class TestDeriveFromMaxtextConfig(unittest.TestCase):
     os.unlink(path)
 
   def test_derives_max_tokens_default(self):
-    path = self._write_yaml(
-        "max_target_length: 1024\nmax_prefill_predict_length: 256\n"
-    )
+    path = self._write_yaml("max_target_length: 1024\nmax_prefill_predict_length: 256\n")
     derived = _derive_from_maxtext_config(path)
     self.assertEqual(derived["max_tokens_default"], 768)
     os.unlink(path)
@@ -110,9 +110,7 @@ class TestDeriveFromMaxtextConfig(unittest.TestCase):
     os.unlink(path)
 
   def test_derives_run_name_and_base_output_directory(self):
-    path = self._write_yaml(
-        "base_output_directory: gs://b/\nrun_name: myrun\n"
-    )
+    path = self._write_yaml("base_output_directory: gs://b/\nrun_name: myrun\n")
     derived = _derive_from_maxtext_config(path)
     self.assertEqual(derived["base_output_directory"], "gs://b/")
     self.assertEqual(derived["run_name"], "myrun")

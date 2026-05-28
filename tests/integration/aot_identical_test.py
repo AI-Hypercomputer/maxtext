@@ -66,6 +66,7 @@ class AotBaseTest(unittest.TestCase):
         shutil.rmtree(directory)
 
 
+@pytest.mark.skip_on_tpu7x
 class AotHloIdenticalTest(AotBaseTest):
   """Tests for Ahead of Time Compilation HLO Graph Verification."""
 
@@ -85,7 +86,7 @@ class AotHloIdenticalTest(AotBaseTest):
 
     # Pre-compile regex patterns for performance
     file_map_pattern = re.compile(r'^\s*\d+\s+".*"\s*$')
-    location_map_pattern = re.compile(r"^\s*\d+\s+\{file_name_id=[^}]*\}\s*$")
+    location_map_pattern = re.compile(r"^\s*\d+\s+\{(file_name_id|file_location_id)=[^}]*\}\s*$")
     metadata_pattern = re.compile(r"metadata=\{[^}]*\}")
 
     def hash_cleaned_file(raw_file, hasher, clean_file):
@@ -169,6 +170,7 @@ class AotHloIdenticalTest(AotBaseTest):
     self.assert_compile_and_real_match_hlo("default_run")
 
 
+@pytest.mark.skip_on_tpu7x
 class AotJaxprIdenticalTest(AotBaseTest):
   """Tests for Ahead of Time Compilation Jaxpr Verification."""
 

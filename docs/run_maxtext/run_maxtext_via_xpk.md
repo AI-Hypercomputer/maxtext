@@ -101,7 +101,7 @@ ______________________________________________________________________
 
 ## 3. Build the MaxText Docker image
 
-For instructions on building the MaxText Docker image, please refer to the [official documentation](https://maxtext.readthedocs.io/en/latest/build_maxtext.html).
+For instructions on building the MaxText Docker image, please refer to the [official documentation](../build_maxtext.md).
 
 ______________________________________________________________________
 
@@ -160,6 +160,10 @@ This guide focuses on submitting workloads to an existing cluster. Cluster creat
 The examples below run on a single TPU slice (`--num-slices=1`) or a small number of GPU nodes (`--num-nodes=2`). To scale your job to a larger, multi-host configuration, you simply increase the `NUM_SLICES` value.
 
 For instance, to run a job across **four TPU slices**, you would change `export NUM_SLICES=1` to `export NUM_SLICES=4`. This tells XPK to allocate four `v5litepod-256` slices and orchestrate the training job across all of them as a single workload. Similarly, for GPUs, you would increase the value.
+
+```{note}
+If you installed `xpk` inside a Python virtual environment (`venv`), make sure to reactivate your virtual environment (e.g., `source <VENV_NAME>/bin/activate`) in any new terminal sessions before running `xpk` commands. Otherwise, you will encounter a `Command xpk not found` error.
+```
 
 3. **Create the workload (run the job)**
    - **On your TPU cluster:**

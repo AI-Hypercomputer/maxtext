@@ -73,7 +73,7 @@ jobs:
           # 2. Install MaxText package and all the post training dependencies
           uv pip install ${maxtext_wheel}[tpu-post-train] --resolution=lowest
           install_tpu_post_train_extra_deps
-          
+
           python3 -m pip freeze
       - name: Run Post-Training Notebooks
         shell: bash
@@ -81,7 +81,7 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           MAXTEXT_INSTALLED: ${{ inputs.maxtext_installed }}
           # TODO: Fix evaluation in sft_qwen3_demo.ipynb and remove this env variable
-          RUN_EVALUATION: "False"
+          RUN_EVALUATION: "false"
         run: |
           if [ "${MAXTEXT_INSTALLED}" == "true" ]; then
             # Move to the directory where code is baked into the image. See the Dockerfile.

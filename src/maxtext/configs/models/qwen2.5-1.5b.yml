@@ -26,9 +26,9 @@ vocab_size: 151936
 decoder_block: "qwen2"
 normalization_layer_epsilon: 1e-06
 rope_max_timescale: 1000000.0
-use_qk_norm: False
+use_qk_norm: false
 # Bias for q, k, v proj.
-attention_bias: True
-logits_via_embedding: True
-normalize_embedding_logits: False
+attention_bias: true
+logits_via_embedding: true
+normalize_embedding_logits: false
 tokenizer_type: "huggingface"

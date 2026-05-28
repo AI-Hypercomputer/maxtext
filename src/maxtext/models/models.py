@@ -26,7 +26,6 @@ from flax import linen as nn
 from flax import nnx
 
 from maxtext.common.common_types import Config, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN, MultimodalInput
-from maxtext.inference import page_manager
 from maxtext.layers.nnx_decoders import NNXDecoder
 from maxtext.layers import initializers
 from maxtext.layers import nnx_wrappers
@@ -108,7 +107,7 @@ class TransformerLinenPure(nn.Module):
           rngs=self.make_rng("mtp_block"),
       )
 
-  def logits_from_hidden_states(self, hidden_states, deterministic, model_mode):
+  def logits_from_hidden_states_for_vocab_tiling(self, hidden_states, deterministic, model_mode):
     """
     Compute logits from hidden states (wrapping decoder.apply_output_head).
     This function is only used for vocabulary tiling.
@@ -134,7 +133,6 @@ class TransformerLinenPure(nn.Module):
       previous_chunk=None,
       true_length: None | int = None,
       slot: None | int = None,
-      page_state: None | page_manager.PageState = None,
       decoder_target_tokens: None | jnp.ndarray = None,
       decoder_target_mask: None | jnp.ndarray = None,
       nnx_method=None,
@@ -194,7 +192,6 @@ class TransformerLinenPure(nn.Module):
         model_mode=model_mode,
         previous_chunk=previous_chunk,
         slot=slot,
-        page_state=page_state,
         multimodal_input=multimodal_input,
         kv_caches=kv_caches,
         attention_metadata=attention_metadata,
@@ -398,6 +395,15 @@ class Transformer(nnx.Module):
     """A no-op method to allow the model to be used in a lazy context."""
     return
 
+  def logits_from_hidden_states_for_vocab_tiling(self, hidden_states, deterministic, model_mode):
+    """Computes logits from hidden states; used by vocabulary tiling."""
+    return self.decoder.apply_output_head(
+        shared_embedding=self.token_embedder,
+        y=hidden_states,
+        deterministic=deterministic,
+        model_mode=model_mode,
+    )
+
   def init_cache(self, cache_size: int, batch_size: int, dtype=jnp.float32):
     """Initializes the KV cache for the Transformer.
 
@@ -425,7 +431,6 @@ class Transformer(nnx.Module):
       previous_chunk=None,
       true_length: int | None = None,
       slot: int | None = None,
-      page_state: page_manager.PageState | None = None,
       decoder_target_tokens: jax.Array | None = None,
       decoder_target_mask: jax.Array | None = None,
       kv_caches: list[jax.Array] | None = None,
@@ -445,7 +450,6 @@ class Transformer(nnx.Module):
       previous_chunk: Previous chunk for incremental decoding (optional).
       true_length: True length of the prompt before padding (optional).
       slot: An integer representing the decode batch index selected for this request (optional).
-      page_state: Page state for paged attention (optional).
       partition_spec: Partition specification for FSDP all-gather.
       decoder_target_tokens: Target tokens for the decoder (optional, used in MTP).
       decoder_target_mask: Target mask for the decoder (optional, used in MTP).
@@ -508,7 +512,6 @@ class Transformer(nnx.Module):
           model_mode=model_mode,
           previous_chunk=previous_chunk,
           slot=slot,
-          page_state=page_state,
           multimodal_input=multimodal_input,
           kv_caches=kv_caches,
           attention_metadata=attention_metadata,
@@ -524,7 +527,6 @@ class Transformer(nnx.Module):
           model_mode=model_mode,
           previous_chunk=previous_chunk,
           slot=slot,
-          page_state=page_state,
           multimodal_input=multimodal_input,
           kv_caches=kv_caches,
           attention_metadata=attention_metadata,

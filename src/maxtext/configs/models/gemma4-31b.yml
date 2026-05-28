@@ -26,7 +26,7 @@ global_num_kv_heads: 4
 vocab_size: 262144
 decoder_block: "gemma4"
 normalization_layer_epsilon: 1e-6
-logits_via_embedding: True
+logits_via_embedding: true
 use_post_attn_norm: true
 use_post_ffw_norm: true
 

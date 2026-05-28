@@ -23,6 +23,7 @@ from maxtext.utils.gcs_utils import upload_blob
 
 logger = logging.getLogger(__name__)
 
+
 def upload_results(local_path: str, gcs_path: str) -> None:
   """Upload local_path to gcs_path.
 

@@ -30,7 +30,6 @@ from maxtext.layers import nnx_wrappers
 from maxtext.layers.normalizations import Qwen3NextRMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
 
-from maxtext.inference import page_manager
 
 from maxtext.models.qwen3 import (
     Qwen3NextGatedDeltaNet,
@@ -89,7 +88,6 @@ class Qwen3_5ScannableBlock(nnx.Module):
       deterministic: bool,
       model_mode: str,
       previous_chunk=None,
-      page_state: None | page_manager.PageState = None,
       slot: None | int = None,
   ) -> tuple[Array, None]:
     cfg = self.config
@@ -104,7 +102,6 @@ class Qwen3_5ScannableBlock(nnx.Module):
           deterministic,
           model_mode,
           previous_chunk,
-          page_state,
           slot,
       )
 
@@ -181,7 +178,6 @@ class Qwen3_5DecoderLayer(nnx.Module):
       deterministic: bool,
       model_mode: str,
       previous_chunk=None,
-      page_state: None | page_manager.PageState = None,
       slot: None | int = None,
       kv_cache: None | dict[str, Array] = None,
       attention_metadata: None | dict[str, Any] = None,

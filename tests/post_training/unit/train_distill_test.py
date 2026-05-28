@@ -722,7 +722,7 @@ class TrainDistillTest(unittest.TestCase):
     mock_iter = object()  # No save method
 
     config = mock.Mock()
-    config.dataset_type = "tfds"  # Not grain
+    config.dataset_type = "synthetic"  # Not grain
     config.checkpoint_dir = self.test_dir
 
     # Use real options
@@ -958,7 +958,7 @@ class TrainDistillTest(unittest.TestCase):
 
     config = mock.Mock()
     config.checkpoint_dir = self.test_dir
-    config.dataset_type = "tfds"
+    config.dataset_type = "synthetic"
     config.lora_enabled = False
 
     # pylint: disable=import-outside-toplevel

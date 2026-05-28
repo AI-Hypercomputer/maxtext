@@ -56,9 +56,13 @@ rely on the vLLM library.
 Before starting, ensure you have:
 
 - Access to a Google Cloud Project with TPU quotas.
+- **IAM Roles** required:
+  - **Kubernetes Engine Developer** (`roles/container.developer`) to submit and manage workloads on GKE.
+  - **Artifact Registry Writer** (`roles/artifactregistry.writer`) to upload Docker images.
+  - **Storage Object Admin** (`roles/storage.objectAdmin`) on your GCS bucket to read/write checkpoints and logs.
 - A Hugging Face account with an access token for downloading models.
-- Permissions for Google Artifact Registry (Artifact Registry Writer role).
 - Prerequisites for XPK installed (follow [official documentation](https://github.com/AI-Hypercomputer/xpk/blob/main/docs/installation.md#1-prerequisites)).
+  - **Important:** Modern GKE clusters require the GKE auth plugin. If you encounter `gke-gcloud-auth-plugin not found` when running `kubectl` commands, you must install it locally (e.g., `sudo apt-get install google-cloud-sdk-gke-gcloud-auth-plugin` for `apt` installations, or `gcloud components install gke-gcloud-auth-plugin` for standalone archive installations).
 - A Pathways-ready GKE cluster (see [create GKE cluster](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster)).
 - **Docker** installed and configured for sudoless use. Follow the steps to [configure sudoless Docker](https://docs.docker.com/engine/install/linux-postinstall/).
 
@@ -170,6 +174,7 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
   load_parameters_path=${MAXTEXT_CKPT_PATH?} \
   run_name=${RUN_NAME?} \
   base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+  rollout_tensor_parallelism=8 \
   hf_access_token=${HF_TOKEN?}"
 ```
 
@@ -187,6 +192,7 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
   load_parameters_path=${MAXTEXT_CKPT_PATH?} \
   run_name=${RUN_NAME?} \
   base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+  rollout_tensor_parallelism=8 \
   hf_access_token=${HF_TOKEN?} \
   loss_algo=gspo-token"
 ```
@@ -214,6 +220,8 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
   installed and authentication is configured.
 - **Workload Failures**: Review the logs for specific error messages and
   ensure all environment variables are properly set.
+- **Parallelism ValueError (At most one can be -1)**: If you see `ValueError: At most one of rollout_tensor_parallelism, ... can be -1 (auto-derived)`, it means you have not explicitly defined the rollout parallelism parameters.
+  - **Solution**: Explicitly pass at least one of them in your training command (e.g., `rollout_tensor_parallelism=8` as shown in the example commands above).
 - **Workload retry / resume**:
   - **Retry (fresh run)**: Use a unique run name to avoid overwriting
     outputs: `export RUN_NAME=${RUN_NAME?}-retry1 export MAXTEXT_CKPT_PATH=${BASE_OUTPUT_DIRECTORY?}/${RUN_NAME?}/0/items`. Then
@@ -226,5 +234,5 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
     resuming.
 
 For more detailed troubleshooting, refer to the
-[MaxText documentation](https://maxtext.readthedocs.io) and
+[MaxText documentation](../../index.md) and
 [XPK documentation](https://github.com/AI-Hypercomputer/xpk).

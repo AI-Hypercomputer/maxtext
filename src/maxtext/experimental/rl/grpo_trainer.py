@@ -45,7 +45,12 @@ from typing import Sequence, Callable, Iterator
 
 from absl import app
 
-import tensorflow as tf
+try:
+  import tensorflow as tf
+
+  _TF_AVAILABLE = True
+except ImportError:
+  _TF_AVAILABLE = False
 
 import numpy as np
 
@@ -56,11 +61,6 @@ from jax import random
 from flax.linen import partitioning as nn_partitioning
 from flax import struct
 from flax.nnx import TrainState
-
-from cloud_tpu_diagnostics import diagnostic
-from cloud_tpu_diagnostics.configuration import debug_configuration
-from cloud_tpu_diagnostics.configuration import diagnostic_configuration
-from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
 import transformers
 
@@ -542,29 +542,26 @@ def setup_train_loop(
       - eval_data_iterator: The iterator for the evaluation dataset (or None).
       - state: The initialized training state.
   """
+  # GRPO is Linen-shaped end-to-end (inference goes through Linen MaxEngine).
+  # Route to Linen regardless of pure_nnx; warn since NNX checkpoints won't load.
+  if config.pure_nnx or config_inference.pure_nnx:
+    max_logging.log(
+        "WARNING: GRPO RL trainer does not yet support pure_nnx natively; "
+        "running on the Linen path. NNX-format checkpoints will not load correctly here."
+    )
   with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
     max_logging.log("Training mesh used for the workload")
     num_inference_devices = config.inference_devices_per_replica * config.inference_replicas
     training_devices = jax.devices()[num_inference_devices:]
-    if config.pure_nnx:
-      raise NotImplementedError("Pure NNX support has not been implemented yet.")
-    else:
-      model = mt.from_config(config, devices=training_devices)
+    model = mt.from_config(config, devices=training_devices)
     mesh = model.mesh
     max_logging.log("Inference mesh used for the workload")
     inference_devices = jax.devices()[:num_inference_devices]
-    if config_inference.pure_nnx:
-      raise NotImplementedError("Pure NNX support has not been implemented yet.")
-    else:
-      inference_model = mt.from_config(config_inference, devices=inference_devices)
+    inference_model = mt.from_config(config_inference, devices=inference_devices)
     inference_mesh = inference_model.mesh
     init_rng = jax.random.PRNGKey(config.init_weights_seed)
     learning_rate_schedule, tx = train_utils.create_training_optimizer(config, model)
-    if config.pure_nnx:
-      # NNX has a different function to init the training state.
-      raise NotImplementedError("Pure NNX support has not been implemented yet.")
-    else:
-      init_state_fn = functools.partial(maxtext_utils.init_initial_state, model, tx, config, True, init_rng)
+    init_state_fn = functools.partial(maxtext_utils.init_initial_state, model, tx, config, True, init_rng)
     checkpoint_manager = train_utils.create_checkpoint_manager(config, mesh, init_state_fn)
 
   with maybe_record_goodput(recorder, GoodputEvent.TRAINING_PREPARATION):
@@ -573,14 +570,10 @@ def setup_train_loop(
         data_iterator, config, mesh, checkpoint_manager, init_state_fn
     )
 
-  # create inference_state_mesh_shardings from inference_mesh
-  if config_inference.pure_nnx:
-    # NNX has a different function to init the training state.
-    raise NotImplementedError("Pure NNX support has not been implemented yet.")
-  else:
-    init_inference_state_fn = functools.partial(
-        maxtext_utils.init_initial_state, inference_model, tx, config_inference, False, init_rng
-    )
+  # create inference_state_mesh_shardings from inference_mesh (Linen path; see warning above)
+  init_inference_state_fn = functools.partial(
+      maxtext_utils.init_initial_state, inference_model, tx, config_inference, False, init_rng
+  )
   inference_state_mesh_shardings = maxtext_utils.get_abstract_state(
       config_inference, inference_mesh, init_inference_state_fn, is_training=False
   )[2]
@@ -860,7 +853,6 @@ def train_loop(config, config_inference, recorder, state=None):
             data_buffer.clear()
 
       step_time_delta = datetime.datetime.now() - last_step_completion
-      last_step_completion = datetime.datetime.now()
 
       state_to_save = _split_grpo_state(state)[0]
       checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator, step)
@@ -877,27 +869,33 @@ def train_loop(config, config_inference, recorder, state=None):
 
       if config.eval_interval > 0 and step > start_step and (step + 1) % config.eval_interval == 0:
         assert eval_data_iterator
+        # Explicitly reset the eval iterator and counters before starting the eval loop
+        eval_data_iterator.reset()
+        metric_logger.reset_eval_metrics()
+        max_logging.log(f"Starting eval after train step {step}")
         eval_step_count = 0
+        last_eval_step_completion = datetime.datetime.now()
         # pylint: disable=not-callable
         for eval_batch in eval_data_iterator:
           if 0 < config.eval_steps <= eval_step_count:
             break
           with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
             eval_metrics = p_eval_step(state, eval_batch, rng)
-          metric_logger.record_eval_metrics(step, metrics=eval_metrics)
+          eval_step_time_delta = datetime.datetime.now() - last_eval_step_completion
+          last_eval_step_completion = datetime.datetime.now()
+          metric_logger.buffer_and_write_metrics(
+              eval_metrics, eval_step_count, step_time_delta=eval_step_time_delta, is_training=False
+          )
           max_logging.log(f"Completed eval step {eval_step_count}")
           eval_step_count += 1
-        metric_logger.record_eval_metrics(step, eval_step_count=eval_step_count)
-        if metric_logger.cumulative_eval_metrics["scalar"]["eval/avg_loss"] <= config.target_eval_loss:
-          prof.deactivate()
-          raise exceptions.StopTraining(f"Target loss {config.target_eval_loss=} is achieved.")
 
       prof.maybe_deactivate_profiler(step, state)
 
       if step == start_step:
         max_utils.print_mem_stats("After params initialized")
 
-      metric_logger.buffer_and_write_train_metrics(metrics, step, step_time_delta)
+      last_step_completion = datetime.datetime.now()
+      metric_logger.buffer_and_write_metrics(metrics, step, step_time_delta)
 
       if config.save_checkpoint_on_completion:
         state_to_save = _split_grpo_state(state)[0]
@@ -907,6 +905,7 @@ def train_loop(config, config_inference, recorder, state=None):
         checkpoint_manager.wait_until_finished()
     _job_completed_gracefully = True
   except exceptions.StopTraining as e:
+    prof.deactivate()
     max_logging.log(f"Training stopped: {str(e)}")
     _job_completed_gracefully = True
   finally:
@@ -932,9 +931,10 @@ def main(argv: Sequence[str]) -> None:
   """
   pathwaysutils.initialize()
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
-  # TF allocates extraneous GPU memory when using TFDS data
-  # this leads to CUDA OOMs. WAR for now is to hide GPUs from TF
-  tf.config.set_visible_devices([], "GPU")
+  if _TF_AVAILABLE:
+    # TF allocates extraneous GPU memory when using TFDS data
+    # this leads to CUDA OOMs. WAR for now is to hide GPUs from TF
+    tf.config.set_visible_devices([], "GPU")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
     os.environ["LIBTPU_INIT_ARGS"] = (
@@ -965,7 +965,8 @@ def main(argv: Sequence[str]) -> None:
   jax.config.update("jax_use_shardy_partitioner", config.shardy)
   max_utils.print_system_information()
   train_utils.validate_train_config(config)
-  os.environ["TFDS_DATA_DIR"] = config.dataset_path
+  if _TF_AVAILABLE:
+    os.environ["TFDS_DATA_DIR"] = config.dataset_path
   vertex_tensorboard_manager = VertexTensorboardManager()
   if config.use_vertex_tensorboard or os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):
     vertex_tensorboard_manager.configure_vertex_tensorboard(config)
@@ -973,20 +974,9 @@ def main(argv: Sequence[str]) -> None:
   # Create the Goodput recorder
   recorder = create_goodput_recorder(config)
 
-  # Stack traces configurations
-  debug_config = debug_configuration.DebugConfig(
-      stack_trace_config=stack_trace_configuration.StackTraceConfig(
-          collect_stack_trace=config.collect_stack_trace,
-          stack_trace_to_cloud=config.stack_trace_to_cloud,
-          stack_trace_interval_seconds=config.stack_trace_interval_seconds,
-      )
-  )
-  diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
-
   record_goodput(recorder, RECORD_JOB_START_TIME)
-  with diagnostic.diagnose(diagnostic_config):
-    with maybe_monitor_goodput(config):
-      train_loop(config, config_inference, recorder)
+  with maybe_monitor_goodput(config):
+    train_loop(config, config_inference, recorder)
 
 
 if __name__ == "__main__":

@@ -105,7 +105,6 @@ def validate_attention_kernel(s: str) -> None:
       "flash",
       "cudnn_flash_te",
       "cudnn_flash_jax",
-      "paged",
       "vllm_rpa",
   )
   if s not in valid_attention_kernels:  # currently supported attention
@@ -119,7 +118,7 @@ def validate_attention_type(s: str) -> None:
 
 
 def validate_moba_attention(moba, attention) -> None:
-  if moba and attention in ("autoselected", "flash", "cudnn_flash_te", "cudnn_flash_jax", "paged"):
+  if moba and attention in ("autoselected", "flash", "cudnn_flash_te", "cudnn_flash_jax"):
     raise ValueError("MoBA is only supported dot_product attention")
 
 
@@ -195,10 +194,9 @@ def validate_expert_shard_attention_option(expert_shard_attention_option: str) -
 
 
 def validate_vocab_tiling(num_vocab_tiling: int, per_device_batch_size: int, max_target_length: int, enable_nnx: bool):
+  del enable_nnx  # NNX vocab tiling supported via vocab_tiling_nnx_loss in vocabulary_tiling.py
   if (per_device_batch_size * max_target_length) % num_vocab_tiling != 0:
     raise ValueError("Per device batch size times sequence length should be divisible by the number of vocab tiles.")
-  if num_vocab_tiling > 1 and enable_nnx:  # TODO (chengnuojin) enable vocab tiling on NNX after NNX migration
-    raise ValueError("We currently don't support vocab tiling on NNX module.")
 
 
 def validate_rampup_batch_size(batch_size_start, batch_size_end, batch_size_increment, global_rampup_samples):
@@ -816,11 +814,6 @@ class _HyperParameters:
           " Shardy is not compatible with gradient accumulation on GPU."
       )
       raw_keys["shardy"] = False
-
-    if raw_keys["pagedattn_max_pages_per_group"] <= 0:
-      raw_keys["pagedattn_max_pages_per_group"] = (
-          raw_keys["max_target_length"] + raw_keys["pagedattn_tokens_per_page"] - 1
-      ) // raw_keys["pagedattn_tokens_per_page"]
 
     raw_keys["num_slices"] = max_utils.get_num_slices(raw_keys)
     raw_keys["quantization_local_shard_count"] = get_quantization_local_shard_count(raw_keys)

@@ -59,7 +59,6 @@ import time
 from typing import Any, Callable, List, Sequence
 import absl
 import ml_dtypes
-import torch
 import flax.linen as nn
 from huggingface_hub import hf_hub_download, list_repo_files
 import jax
@@ -77,6 +76,11 @@ from maxtext.utils.globals import HF_IDS
 import numpy as np
 from orbax.checkpoint import type_handlers
 from safetensors import safe_open
+
+try:
+  import torch
+except ImportError:
+  torch = None
 
 
 absl.logging.set_verbosity(absl.logging.INFO)  # for max_logging.log
@@ -112,6 +116,8 @@ class LazyHFLoader:
     self.shard_map = {}
     self.current_shard_name = None
     self.current_shard_content = {}
+    # Cache for resolved local shard paths
+    self._local_shard_paths = {}
     # Use a lock to serialize heavy RAM operations, but NOT downloads
     self._ram_lock = threading.Lock()
     self._initialize_index()
@@ -179,17 +185,21 @@ class LazyHFLoader:
       # You might need advanced fuzzy matching here if you encounter errors.
       raise ValueError(f"Key {key} not found in HF checkpoint index.")
 
-    if self.is_local:
-      local_path = os.path.join(self.model_id, shard_name)
+    if shard_name in self._local_shard_paths:
+      local_path = self._local_shard_paths[shard_name]
     else:
-      # STEP 1: Download outside the lock.
-      # multiple threads can download different shards at the same time.
-      local_path = hf_hub_download(
-          repo_id=self.model_id,
-          filename=shard_name,
-          token=self.token,
-          revision=self.revision,
-      )
+      if self.is_local:
+        local_path = os.path.join(self.model_id, shard_name)
+      else:
+        # STEP 1: Download outside the lock.
+        # multiple threads can download different shards at the same time.
+        local_path = hf_hub_download(
+            repo_id=self.model_id,
+            filename=shard_name,
+            token=self.token,
+            revision=self.revision,
+        )
+      self._local_shard_paths[shard_name] = local_path
 
     # STEP 2: Lock ONLY the reading into RAM.
     # This prevents multiple threads from simultaneously allocating large chunks of RAM.
@@ -807,7 +817,7 @@ def _setup_merge_mode_getter(tensor_getter, config, hf_lora_adapter_path, revisi
 def main(
     args: Sequence[str],
     lazy_load_tensors: bool = False,
-    eager_load_method: str = "transformers",
+    eager_load_method: str = "safetensors",
     hf_model_path: str | None = None,
     revision: str | None = None,
     save_dtype: str = "bfloat16",
@@ -894,9 +904,9 @@ def main(
       #      (e.g., Multi-Token Prediction weights (`layers.61`) in DeepSeek-V3).
       #
       # Recommendation:
-      # - Use 'transformers' as the default for backward compatibility of mapping.
-      # - 'safetensors' is an interchangeable and valid alternative for most models,
-      #   and is strictly required if the model or specific weights lack Transformers support.
+      # - Use 'safetensors' as the default. Since transformers 5.8.0, model initialization
+      #   changed and the 'transformers' method may produce different key structures.
+      # - Use 'transformers' only if explicitly needed for backward-compatible key mapping (e.g. Gemma3).
       if eager_load_method == "transformers":
         max_logging.log("Eager load with Transformers backend, from_pretrained with auto dtype")
         # For auto mode, loaded dtype is the same as `dtype` specified in config.json (or `torch_dtype` for older version)

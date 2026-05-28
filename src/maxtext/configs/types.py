@@ -87,6 +87,8 @@ class QuantizationType(str, Enum):
   INT4 = "int4"
   INT8 = "int8"
   INTMP = "intmp"
+  FP8_E5M2 = "fp8_e5m2"
+  FP8_E4M3 = "fp8_e4m3"
   FP8 = "fp8"
   NANOO_FP8 = "nanoo_fp8"
   FP8_NANO_V2 = "fp8_nanoo"
@@ -237,6 +239,8 @@ ModelName = Literal[
     "gemma3-27b",
     "gemma4-26b",
     "gemma4-31b",
+    "gemma4-e2b",
+    "gemma4-e4b",
     "qwen2.5-1.5b",
     "qwen2.5-7b",
     "qwen2.5-14b",
@@ -557,6 +561,34 @@ class Attention(BaseModel):
       0,
       description="If greater than 0, sets the number of KV heads for global attention.",
   )
+  hidden_size_per_layer_input: NonNegativeInt = Field(
+      0,
+      description=(
+          "Per-Layer-Embedding (PLE) inner dim used by Gemma 4 small models. "
+          "When > 0, each decoder layer adds an extra PLE sub-block at the end."
+      ),
+  )
+  vocab_size_per_layer_input: NonNegativeInt = Field(
+      0,
+      description=(
+          "Vocab size of the per-layer input embedding table used by Gemma 4 small models. "
+          "Defaults to 0 (disabled); typically set equal to `vocab_size`."
+      ),
+  )
+  num_kv_shared_layers: NonNegativeInt = Field(
+      0,
+      description=(
+          "Number of trailing decoder layers that reuse K/V from the last non-shared layer "
+          "of the same attention type (sliding↔sliding, full↔full). Used by Gemma 4 small."
+      ),
+  )
+  use_double_wide_mlp: bool = Field(
+      False,
+      description=(
+          "When True, KV-shared layers double their MLP intermediate size to compensate for "
+          "the missing K/V projections. Used by Gemma 4 small."
+      ),
+  )
   attention_sink: bool = Field(False, description="If True, enables attention sinks.")
   float32_qk_product: bool = Field(False, description="In dot-product attention, cast query-key product to fp32.")
   float32_logits: bool = Field(
@@ -666,18 +698,6 @@ class SplashAttention(BaseModel):
   use_splash_scheduler: bool = Field(False, description="Use experimental splash attention scheduler.")
 
 
-class PagedAttention(BaseModel):
-  """Tunable parameters for Paged Attention kernels."""
-
-  pagedattn_num_pages: int = Field(64, description="Total number of pages to allocate for paged attention.")
-  pagedattn_tokens_per_page: int = Field(32, description="Number of tokens each page can hold.")
-  pagedattn_pages_per_compute_block: int = Field(4, description="Number of pages processed together in pallas kernels.")
-  pagedattn_max_pages_per_group: int = Field(-1, description="Max pages per request; -1 defaults to max_target_length.")
-  # Alignment of head_dim to the nearest multiple of this value, set to 0 to disable alignment. On
-  # TPUs, the head_dim is padded to the nearest multiple of 128.
-  pagedattn_head_dim_alignment: int = Field(128, description="Alignment of head_dim to the nearest multiple.")
-
-
 class MoEGeneral(BaseModel):
   """General configuration for Mixture of Experts (MoE) layers."""
 
@@ -701,6 +721,9 @@ class MoEGeneral(BaseModel):
   use_ring_of_experts: bool = Field(
       False,
       description="Whether to use Ring of Experts for sparse matmul expert parallelism.",
+  )
+  use_ragged_sort: bool = Field(
+      False, description="Whether to use ragged kernel for sorting, improve performance when EP is enabled."
   )
   use_gather_mosaic_kernel: bool = Field(
       False,
@@ -1201,12 +1224,24 @@ class OlmoGrainDataset(BaseModel):
   olmo_apply_ngram_filter: bool = Field(True, description="Mask repetitive instances per OLMo-core's repetition filter.")
 
 
+class DPO(BaseModel):
+  """Configuration for DPO and ORPO preference optimization algorithms."""
+
+  algo: Literal["dpo", "orpo"] = Field("dpo", description="Alignment algorithm to use.")
+  dpo_beta: float = Field(0.1, description="Beta parameter for DPO.")
+  orpo_lambda: float = Field(0.1, description="Weight for preference loss in ORPO.")
+  dpo_label_smoothing: float = Field(0.0, ge=0.0, le=1.0, description="Label smoothing for DPO.")
+  max_prompt_length: int | None = Field(
+      None,
+      gt=0,
+      description="Maximum length for prompt. If None, defaults to half of max_target_length.",
+  )
+
+
 class FineTuning(BaseModel):
   """Configuration for fine-tuning methods like DPO, SFT, and GRPO."""
 
   use_dpo: bool = Field(False, description="If True, enables Direct Preference Optimization training.")
-  dpo_label_smoothing: float = Field(0.0, ge=0.0, le=1.0, description="Label smoothing for DPO.")
-  dpo_beta: float = Field(0.1, description="Beta parameter for DPO.")
   use_sft: bool = Field(False, description="If True, enables Supervised Fine-Tuning.")
   sft_train_on_completion_only: bool = Field(
       False, description="If True, trains only on the completion part of the text."
@@ -1691,14 +1726,6 @@ class HloDump(BaseModel):
   )
   dump_jaxpr_delete_local_after: bool = Field(True, description="Delete local jaxpr dump after uploading to GCS.")
   dump_jaxpr_gcs_dir: PathStr = Field("", description="GCS directory to upload jaxpr dumps.")
-
-
-class StackTrace(BaseModel):
-  """Configuration for collecting and logging stack traces."""
-
-  collect_stack_trace: bool = Field(False, description="Enable periodic stack trace collection.")
-  stack_trace_to_cloud: bool = Field(False, description="Upload stack traces to cloud logging instead of console.")
-  stack_trace_interval_seconds: int = Field(600, description="Frequency of stack trace collection in seconds.")
 
 
 class Metrics(BaseModel):
@@ -2221,7 +2248,6 @@ class MaxTextConfig(
     AttentionIndexer,
     Llama4Attention,
     SplashAttention,
-    PagedAttention,
     # Mixture of Experts
     MoEGeneral,
     MoEKernels,
@@ -2274,7 +2300,6 @@ class MaxTextConfig(
     DevelopmentAndDebugging,
     Profiling,
     HloDump,
-    StackTrace,
     # Metrics and Monitoring
     Metrics,
     Goodput,
@@ -2298,6 +2323,10 @@ class MaxTextConfig(
   """
 
   debug: Debug = Field(default_factory=Debug, description="Configuration for debugging options.")
+  dpo: DPO = Field(
+      default_factory=DPO,
+      description="Configuration for DPO and ORPO alignment algorithms.",
+  )
   rl: RL = Field(
       default_factory=RL,
       description="Configuration for RL algorithms like Group Relative Policy Optimization (GRPO).",
@@ -2865,7 +2894,17 @@ class MaxTextConfig(
       if self.routed_bias and self.routed_bias_update_rate > 0.0 and self.decoder_block != DecoderBlockType.DEEPSEEK:
         raise ValueError("Loss-free load balancing is only supported for the DeepSeek decoder block.")
       self.validate_ragged_buffer_factor()
+
+    # Gemma 4 small (E2B / E4B) uses per-layer KV sharing, which is incompatible with nn.scan.
+    if self.model_name in ("gemma4-e2b", "gemma4-e4b") and self.scan_layers:
+      raise ValueError(
+          f"{self.model_name} requires scan_layers=False (per-layer KV sharing is incompatible with nn.scan)."
+      )
     if self.use_multimodal:
+      # Gemma 4 small (E2B / E4B) only supports text for now; multimodal
+      # support is pending clipped-linears in the vision encoder.
+      if self.model_name in ("gemma4-e2b", "gemma4-e4b"):
+        raise ValueError(f"Multimodal is not yet supported for {self.model_name}; only text inputs are supported.")
       valid_mm_models = (
           "gemma3-4b",
           "gemma3-12b",
@@ -2875,6 +2914,7 @@ class MaxTextConfig(
           "llama4-17b-16e",
           "llama4-17b-128e",
           "qwen3-omni-30b-a3b",
+          "qwen3.5-397b-a17b",
       )
       if self.model_name not in valid_mm_models and self.model_name != "default":
         raise ValueError(f"Multimodal is only supported for {valid_mm_models}, not {self.model_name}")
@@ -2883,6 +2923,16 @@ class MaxTextConfig(
           raise ValueError("For multimodal SFT, `sft_train_on_completion_only` must be True.")
         if self.packing:
           raise ValueError("For multimodal SFT, `packing` is not yet supported.")
+    if self.use_dpo:
+      if self.packing:
+        raise ValueError("For DPO/ORPO, `packing` is not supported.")
+      if self.dpo.max_prompt_length is not None and self.dpo.max_prompt_length >= self.max_target_length:
+        raise ValueError(
+            f"dpo.max_prompt_length ({self.dpo.max_prompt_length}) must be less than max_target_length"
+            f" ({self.max_target_length})."
+        )
+    if self.use_sft and self.use_dpo:
+      raise ValueError("Only one of `use_sft` or `use_dpo` can be True.")
     if self.shard_mode == ShardMode.EXPLICIT:
       supported_decoders = {"simple", "simple_mlp", "llama2", "deepseek"}
       if self.decoder_block.value not in supported_decoders:
@@ -2897,8 +2947,6 @@ class MaxTextConfig(
         and (self.per_device_batch_size * self.max_target_length) % self.num_vocab_tiling != 0
     ):
       raise ValueError("Per device batch size times sequence length should be divisible by the number of vocab tiles.")
-    if self.num_vocab_tiling > 1 and self.enable_nnx:
-      raise ValueError("We currently don't support vocab tiling on NNX module.")
     if self.context_parallel_size > 1 and self.context_parallel_strategy.lower() == "ring":
       if "gpu" not in self.hardware:
         raise ValueError(
@@ -3032,6 +3080,12 @@ class MaxTextConfig(
     if self.share_kv_projections and self.attention_type == "mla":
       raise ValueError("`share_kv_projections` is not compatible with `attention_type='mla'`.")
 
+    if self.num_kv_shared_layers > 0:
+      if self.fused_qkv:
+        raise ValueError("`num_kv_shared_layers > 0` is not compatible with `fused_qkv`.")
+      if self.share_kv_projections:
+        raise ValueError("`num_kv_shared_layers > 0` is not compatible with `share_kv_projections`.")
+
     # I. FINAL TYPE CONVERSIONS AND DERIVED LISTS
     ici_map = {
         "diloco": self.ici_diloco_parallelism,
@@ -3141,5 +3195,4 @@ class MaxTextConfig(
             f"For qwen3_custom_moe, moe_expert_input_dim ({self.moe_expert_input_dim}) "
             f"must be equal to attention_output_dim ({self.attention_output_dim})"
         )
-
     return self

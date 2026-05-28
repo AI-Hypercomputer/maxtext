@@ -44,7 +44,7 @@ from maxtext.layers.moe import RoutedMoE
 from maxtext.layers.initializers import nd_dense_init, variable_to_logically_partitioned
 
 from maxtext.utils import max_utils
-from maxtext.inference import page_manager, kvcache
+from maxtext.inference import kvcache
 
 
 # -----------------------------------------
@@ -894,7 +894,6 @@ class Qwen3NextScannableBlock(nnx.Module):
       deterministic: bool,
       model_mode: str,
       previous_chunk=None,
-      page_state: None | page_manager.PageState = None,
       slot: None | int = None,
       kv_cache=None,
       attention_metadata=None,
@@ -924,7 +923,6 @@ class Qwen3NextScannableBlock(nnx.Module):
           deterministic,
           model_mode,
           previous_chunk,
-          page_state,
           slot,
           kv_cache=kv_cache,
           attention_metadata=attention_metadata,
@@ -1008,7 +1006,6 @@ class Qwen3NextDecoderLayer(nnx.Module):
       deterministic: bool,
       model_mode: str,
       previous_chunk=None,
-      page_state: None | page_manager.PageState = None,
       slot: None | int = None,
       kv_cache: None | dict[str, Array] = None,
       attention_metadata: None | dict[str, Any] = None,
@@ -1215,7 +1212,6 @@ class Qwen3DecoderLayer(AttentionWithNorm):
       deterministic: bool,
       model_mode: str,
       previous_chunk=None,
-      page_state: None | page_manager.PageState = None,
       slot: None | int = None,
       kv_cache: None | jnp.ndarray = None,
       attention_metadata: None | dict[str, Any] = None,
@@ -1279,7 +1275,6 @@ class Qwen3MoeDecoderLayer(AttentionWithNorm):
       deterministic: bool,
       model_mode: str,
       previous_chunk=None,
-      page_state: None | page_manager.PageState = None,
       slot: None | int = None,
       kv_cache: None | jnp.ndarray = None,
       attention_metadata: None | dict[str, Any] = None,

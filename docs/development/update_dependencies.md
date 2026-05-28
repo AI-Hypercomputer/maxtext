@@ -98,7 +98,7 @@ mv generated_artifacts/python3_12/tpu-requirements.txt \
 
 ### TPU Post-Training
 
-> **Note:** The current `src/dependencies/requirements/generated_requirements/tpu-post-train-requirements.txt` in the repository was generated using JAX build commit hash: e0d2967b50abbefd651d563dbcd7afbcb963d08c. When regenerating the requirements, either use the same commit hash or update this hash if you use a different one.
+> **Note:** The current `src/dependencies/requirements/generated_requirements/tpu-post-train-requirements.txt` in the repository was generated using JAX build commit hash: efd6cf797ee9c4f29c6c6d5e91ae4432209063be. When regenerating the requirements, either use the same commit hash or update this hash if you use a different one.
 
 If you have made changes to the post-training dependencies in `src/dependencies/requirements/base_requirements/tpu-post-train-requirements.txt`, you need to regenerate the pinned post-training requirements in `generated_requirements/` directory. Run the following command, replacing `<jax-build-commit-hash>` with the hash you copied in the previous step:
 
@@ -139,6 +139,6 @@ mv generated_artifacts/python3_12/cuda12-requirements.txt \
 Finally, test that the new dependencies install correctly and that MaxText runs
 as expected.
 
-1. **Install MaxText and dependencies**: For instructions on installing MaxText on your VM, please refer to the [official documentation](https://maxtext.readthedocs.io/en/latest/install_maxtext.html#from-source).
+1. **Install MaxText and dependencies**: For instructions on installing MaxText on your VM, please refer to the [official documentation](../install_maxtext.md#from-source).
 
 2. **Run tests:** Run MaxText tests to ensure there are no regressions.

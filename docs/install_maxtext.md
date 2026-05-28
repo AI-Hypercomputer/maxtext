@@ -74,7 +74,7 @@ This is the easiest way to get started with the latest stable version.
      access to the `build_maxtext_docker_image`, `upload_maxtext_docker_image`,
      and `xpk` commands. For more details on building and uploading Docker
      images, see the
-     [Build MaxText Docker Image](https://maxtext.readthedocs.io/en/latest/build_maxtext.html)
+     [Build MaxText Docker Image](build_maxtext.md)
      guide.
 
      ```bash
@@ -149,6 +149,23 @@ environment to avoid dependency conflicts.
      uv pip install -e .[runner] --resolution=lowest
      ```
 
-After installation, you can verify the package is available with
-`python3 -c "import maxtext"` and run training jobs with
-`python3 -m maxtext.trainers.pre_train.train ...`.
+## Verify installation
+
+After installing MaxText (either from PyPI or from source), verify that your virtual environment is healthy and free of package version conflicts:
+
+1. **Verify the environment has no dependency conflicts:**
+
+   ```bash
+   uv pip check
+   ```
+
+   ```{note}
+   If `uv pip check` reports any package version conflicts, they can usually be resolved by starting with a fresh virtual environment (see above) and reinstalling using the platform-specific target and the `--resolution=lowest` flag to ensure all dependencies resolve to their verified versions.
+   ```
+
+2. **Verify MaxText is importable and runnable:**
+
+   ```bash
+   python3 -c "import maxtext"
+   python3 -m maxtext.trainers.pre_train.train --help
+   ```

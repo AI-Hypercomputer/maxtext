@@ -14,6 +14,10 @@ If the change fixes a bug or a Github issue, please include a link, e.g.,:
 FIXES: b/123456
 FIXES: #123456
 
+You can also provide a comma-separated list. If you don't want to close a bug but
+simply to reference it, use BUGS, e.g.: 
+BUGS: b/123456
+
 *Notice 1:* Once all tests pass, the "pull ready" label will automatically be assigned.
 This label is used for administrative purposes. Please do not add it manually.
 
