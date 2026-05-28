@@ -48,4 +48,6 @@ generate_responses "${SFT_BASELINE}" "quals/logs/sft_responses.log" "sft"
 echo "=== Generating responses from DPO Checkpoint ==="
 generate_responses "${DPO_CHECKPOINT}" "quals/logs/dpo_responses.log" "dpo"
 
-echo "Decoding complete. Compare quals/logs/sft_responses.log and quals/logs/dpo_responses.log."
+echo "=== Running Automated Qualitative Decoding Comparison and Validation ==="
+python3 quals/compare_quals.py
+
