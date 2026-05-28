@@ -33,9 +33,6 @@ pytest.importorskip("tunix")
 
 pytestmark = [pytest.mark.cpu_only, pytest.mark.post_training]
 
-import os
-import safetensors.numpy
-import tempfile
 import unittest
 from typing import List, Optional
 
@@ -44,7 +41,6 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 from absl.testing import absltest
-from array_record.python import array_record_module
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
 from maxtext.trainers.post_train.distillation import distillation_utils
