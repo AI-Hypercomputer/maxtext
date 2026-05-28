@@ -22,19 +22,17 @@ import unittest
 import os.path
 import numpy as np
 import jax
-import re
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 from datasets import Dataset
 import transformers
 from parameterized import parameterized_class
-from unittest.mock import patch
 from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_PKG_DIR, MAXTEXT_CONFIGS_DIR, MAXTEXT_ASSETS_ROOT
 from maxtext.input_pipeline import hf_data_processing
 from maxtext.input_pipeline import input_pipeline_interface
 from maxtext.input_pipeline.hf_data_processing import _get_pad_id
-from maxtext.input_pipeline.input_pipeline_utils import verify_chat_template_generation_prompt_logic
+from maxtext.input_pipeline.input_pipeline_utils import apply_chat_template, SFTPromptMasking, tokenization
 
 PROMPT_DATA = [
     [
@@ -512,26 +510,118 @@ class SFTChatTemplateLogicTest(unittest.TestCase):
     super().setUp()
     self.qwen3_tokenizer = transformers.AutoTokenizer.from_pretrained("Qwen/Qwen3-4B")
     self.llama2_tokenizer = transformers.AutoTokenizer.from_pretrained(self.LLAMA_TOKENIZER_PATH)
+    self.gemma4_tokenizer = transformers.AutoTokenizer.from_pretrained("google/gemma-4-26B-A4B-it")
 
-  def test_tokenizer_w_generation_prompt(self):
-    verify_chat_template_generation_prompt_logic(self.qwen3_tokenizer)
+  def _apply_chat_template(self, tokenizer):
+    """Helper function to apply the chat template to a sample input and return the result for testing."""
+    messages = [
+        {"role": "user", "content": "Q1"},
+        {"role": "assistant", "content": "A1"},
+        {"role": "user", "content": "Q2"},
+        {"role": "assistant", "content": "A2"},
+    ]
+    example = {"messages": messages}
+    return apply_chat_template(example, tokenizer, "messages")
 
-  def test_tokenizer_wo_generation_prompt(self):
-    verify_chat_template_generation_prompt_logic(self.llama2_tokenizer)
+  def test_apply_chat_template_with_qwen3_tokenizer(self):
+    """Verifies that apply_chat_template correctly applies Qwen3's chat template."""
+    result = self._apply_chat_template(self.qwen3_tokenizer)
+    self.assertEqual(result["is_prompt"], [True, False, True, False])
+    self.assertEqual(len(result["messages"]), 4)
+    self.assertIn("<|im_start|>user\nQ1<|im_end|>\n<|im_start|>assistant\n", result["messages"][0])
+    self.assertIn("<think>\n\n</think>\n\nA1<|im_end|>\n", result["messages"][1])
+    self.assertIn("<|im_start|>user\nQ2<|im_end|>\n<|im_start|>assistant\n", result["messages"][2])
+    self.assertIn("<think>\n\n</think>\n\nA2<|im_end|>\n", result["messages"][3])
 
-  def test_failure_path_with_modified_template(self):
-    """Verifies the function correctly raises a ValueError on a bad template."""
-    # Replace the role within the existing add_generation_prompt block with a deliberately faulty one.
-    fault_chat_template = re.sub(
-        r"(\{%-?\s*if add_generation_prompt\s*%\}.*?<\|im_start\|>)assistant(.*?\{%-?\s*endif\s*%\})",
-        r"\1wrong_role\2",
-        self.qwen3_tokenizer.chat_template,
-        flags=re.DOTALL,
+  def test_apply_chat_template_with_llama2_tokenizer(self):
+    """Verifies that apply_chat_template correctly applies Llama2's chat template."""
+    result = self._apply_chat_template(self.llama2_tokenizer)
+    self.assertEqual(result["is_prompt"], [True, False, True, False])
+    self.assertEqual(len(result["messages"]), 4)
+    self.assertIn("<s>[INST] Q1 [/INST]", result["messages"][0])
+    self.assertIn("A1 </s>", result["messages"][1])
+    self.assertIn("<s>[INST] Q2 [/INST]", result["messages"][2])
+    self.assertIn("A2 </s>", result["messages"][3])
+
+  def test_apply_chat_template_with_gemma4_tokenizer(self):
+    """Verifies that apply_chat_template correctly applies Gemma4's chat template."""
+    result = self._apply_chat_template(self.gemma4_tokenizer)
+    self.assertEqual(result["is_prompt"], [True, False, True, False])
+    self.assertEqual(len(result["messages"]), 4)
+    self.assertIn("<|turn>user\nQ1<turn|>\n<|turn>model\n<|channel>thought\n<channel|>", result["messages"][0])
+    self.assertIn("A1<turn|>\n", result["messages"][1])
+    self.assertIn("<|turn>user\nQ2<turn|>\n<|turn>model\n<|channel>thought\n<channel|>", result["messages"][2])
+    self.assertIn("A2<turn|>\n", result["messages"][3])
+
+
+@pytest.mark.external_training
+class SFTPromptMaskingTest(unittest.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    self.max_target_length = 50
+    self.qwen3_tokenizer = transformers.AutoTokenizer.from_pretrained("Qwen/Qwen3-4B")
+    self.gemma4_tokenizer = transformers.AutoTokenizer.from_pretrained("google/gemma-4-26B-A4B-it")
+
+  def _apply_prompt_masking(self, tokenizer, unk_id, completion_only=True):
+    """Helper function to apply the prompt masking to a sample input and return the result for testing."""
+    messages = [
+        {"role": "user", "content": "Q1"},
+        {"role": "assistant", "content": "A1"},
+        {"role": "user", "content": "Q2"},
+        {"role": "assistant", "content": "A2"},
+    ]
+    example = {"messages": messages}
+    modified_example = apply_chat_template(example, tokenizer, "messages")
+    tokenized_example = tokenization(modified_example, tokenizer, False, self.max_target_length, ["messages"])
+    op = SFTPromptMasking(
+        text_column_name="messages",
+        completion_only=completion_only,
+        max_target_length=self.max_target_length,
+        unk_id=unk_id,
     )
-    with patch.object(self.qwen3_tokenizer, "chat_template", fault_chat_template):
-      # Verify that our function catches the mismatch and raises the expected error
-      with self.assertRaisesRegex(ValueError, "Chat template generation prompt mismatch!"):
-        verify_chat_template_generation_prompt_logic(self.qwen3_tokenizer)
+    return op.map({"messages": tokenized_example["messages"], "is_prompt": modified_example["is_prompt"]})
+
+  def _verify_prompt_masking(self, tokenizer, inputs, targets, unk_id):
+    """Helper function to verify that the prompt masking was applied correctly."""
+    # Unmasked positions must match inputs exactly
+    np.testing.assert_array_equal(inputs[targets != unk_id], targets[targets != unk_id])
+
+    # Some tokens must be masked
+    self.assertTrue(np.any(targets == unk_id))
+
+    # Decoding unmasked tokens yields completions, not prompts
+    completion = tokenizer.decode(targets[targets != unk_id], skip_special_tokens=False)
+    self.assertIn("A1", completion)
+    self.assertIn("A2", completion)
+    self.assertNotIn("Q1", completion)
+    self.assertNotIn("Q2", completion)
+
+  def test_sft_prompt_masking_with_qwen3_tokenizer(self):
+    """Verifies that SFTPromptMasking correctly applies masking for Qwen3's chat template."""
+    unk_id = _get_pad_id(self.qwen3_tokenizer)
+    result = self._apply_prompt_masking(self.qwen3_tokenizer, unk_id)
+    inputs, targets = result["inputs"], result["targets"]
+    self._verify_prompt_masking(self.qwen3_tokenizer, inputs, targets, unk_id)
+
+  def test_sft_prompt_masking_with_gemma4_tokenizer(self):
+    """Verifies that SFTPromptMasking correctly applies masking for Gemma4's chat template."""
+    unk_id = _get_pad_id(self.gemma4_tokenizer)
+    result = self._apply_prompt_masking(self.gemma4_tokenizer, unk_id)
+    inputs, targets = result["inputs"], result["targets"]
+    self._verify_prompt_masking(self.gemma4_tokenizer, inputs, targets, unk_id)
+
+  def test_sft_no_prompt_masking_with_qwen3_tokenizer(self):
+    """Verifies that prompt masking is not applied when completion_only=False with Qwen3 tokenizer."""
+    unk_id = _get_pad_id(self.qwen3_tokenizer)
+    result = self._apply_prompt_masking(self.qwen3_tokenizer, unk_id, completion_only=False)
+    np.testing.assert_array_equal(result["inputs"], result["targets"])
+
+  def test_sft_no_prompt_masking_with_gemma4_tokenizer(self):
+    """Verifies that prompt masking is not applied when completion_only=False with Gemma4 tokenizer."""
+    unk_id = _get_pad_id(self.gemma4_tokenizer)
+    result = self._apply_prompt_masking(self.gemma4_tokenizer, unk_id, completion_only=False)
+    np.testing.assert_array_equal(result["inputs"], result["targets"])
 
 
 if __name__ == "__main__":

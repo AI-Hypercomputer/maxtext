@@ -19,8 +19,6 @@ import warnings
 from threading import current_thread
 from typing import Any, Iterable, TYPE_CHECKING
 
-from jinja2 import TemplateError
-
 if TYPE_CHECKING:
   import datasets
   import tensorflow as tf
@@ -210,83 +208,24 @@ def extract_token_ids(tokens):
     raise ValueError(f"Can't extract token_ids from type {type(tokens)}")
 
 
-def verify_chat_template_generation_prompt_logic(tokenizer_model):
-  """Verifies the tokenizer's chat template for correct SFT loss masking.
-
-  This function ensures that the tokens added by `add_generation_prompt=True`
-  are identical to the tokens that begin an assistant's turn in a complete
-  conversation, which is critical for masking prompt tokens during SFT loss
-  calculation.
-
-  Example of a mismatch:
-    A `ValueError` is raised if the generation prompt and the actual
-    assistant prefix do not match. For example:
-
-    - `add_generation_prompt=True` on a user message produces a prompt ending in:
-      `...<|im_start|>generation\n`
-    - A full turn with an assistant message starts the reply with:
-      `...<|im_start|>assistant\n...`
-
-    This function would fail because the tokens for "generation" do not
-    match the tokens for "assistant".
-
-  Args:
-    tokenizer_model: The Hugging Face tokenizer instance to verify.
-
-  Raises:
-    ValueError: If the `add_generation_prompt` tokens do not exactly
-      match the beginning of an assistant message in the template.
-  """
-  dummy_msgs = [{"role": "system", "content": "System message"}, {"role": "user", "content": "Test message"}]
-
-  try:
-    prompt_wo_gen_tokens = tokenizer_model.apply_chat_template(dummy_msgs, add_generation_prompt=False, tokenize=True)
-  except TemplateError:
-    max_logging.info(
-        "Tokenizer failed to apply chat template with 'system' role. "
-        "Falling back to 'user' role only for chat template verification."
-    )
-    dummy_msgs.pop(0)
-    prompt_wo_gen_tokens = tokenizer_model.apply_chat_template(dummy_msgs, add_generation_prompt=False, tokenize=True)
-  prompt_wo_gen_ids = extract_token_ids(prompt_wo_gen_tokens)
-
-  prompt_w_gen_tokens = tokenizer_model.apply_chat_template(dummy_msgs, add_generation_prompt=True, tokenize=True)
-  prompt_w_gen_ids = extract_token_ids(prompt_w_gen_tokens)
-
-  if prompt_w_gen_ids[: len(prompt_wo_gen_ids)] != prompt_wo_gen_ids:
-    raise ValueError("Unable to extract generation prompt tokens.")
-  # Extract the tokenized generation prompt (the expected assistant prefix)
-  assistant_prefix = prompt_w_gen_ids[len(prompt_wo_gen_ids) :]
-  full_turn_tokens = extract_token_ids(
-      tokenizer_model.apply_chat_template(
-          dummy_msgs + [{"role": "assistant", "content": "Dummy response"}], add_generation_prompt=False, tokenize=True
-      )
-  )
-  full_turn_ids = extract_token_ids(full_turn_tokens)
-  # Extract the actual tokens that appear right after the user message in the full turn
-  actual_prefix_in_full_turn = full_turn_ids[len(prompt_wo_gen_ids) : len(prompt_wo_gen_ids) + len(assistant_prefix)]
-
-  if actual_prefix_in_full_turn != assistant_prefix:
-    expected_str = tokenizer_model.decode(assistant_prefix)
-    actual_str = tokenizer_model.decode(actual_prefix_in_full_turn)
-    raise ValueError(
-        "Chat template generation prompt mismatch!\n"
-        f"Expected assistant prefix tokens: {assistant_prefix} ('{expected_str}')\n"
-        f"Actual prefix tokens found: {actual_prefix_in_full_turn} ('{actual_str}')\n"
-        "This means the tokenizer's chat template will break the sft masking logic."
-    )
-
-
 def _get_completion_in_chat_template(tokenizer_model, round_msgs):
-  """
-  Calculates the completion part of a conversation turn when formatted with a chat template.
+  """Calculates the completion part of a conversation turn formatted with a chat template.
 
-  This function handles both older and current Hugging Face tokenizers. Modern tokenizers
-  may return a `BatchEncoding` object instead of a simple list of token IDs.
+  Uses the longest-common-prefix between the full conversation tokens and the
+  generation-prompt tokens to locate where the completion starts.
+
+  For most models (Llama, Qwen, …) the generation prompt is an exact prefix of the
+  full conversation, so common_len == len(prompt_ids).
+
+  For Gemma4, add_generation_prompt=True emits thinking-channel tokens
+  (<|channel>thought\\n<channel|>) that diverge from the plain conversation
+  at the model-turn boundary. The common prefix ends just before that
+  divergence, and the completion correctly captures the thinking content
+  and response tokens.
 
   Args:
     tokenizer_model: The tokenizer instance.
-    round_msgs: A list of messages for the current conversational turn, including the assistant's response.
+    round_msgs: Messages for the current conversational turn including the assistant response.
 
   Returns:
     A string representing the completion formatted by the chat template.
@@ -298,9 +237,24 @@ def _get_completion_in_chat_template(tokenizer_model, round_msgs):
   prompt_completion_ids = extract_token_ids(prompt_completion_tokens)
   prompt_ids = extract_token_ids(prompt_tokens)
 
-  completion_tokens = prompt_completion_ids[len(prompt_ids) :]
-  completion_in_chat_template = tokenizer_model.decode(completion_tokens, skip_special_tokens=False)
-  return completion_in_chat_template
+  # Walk forward until the two sequences diverge
+  common_len = 0
+  for full_id, prompt_id in zip(prompt_completion_ids, prompt_ids):
+    if full_id == prompt_id:
+      common_len += 1
+    else:
+      break
+
+  if common_len == 0:
+    raise ValueError(
+        "Chat template generation prompt mismatch: no common prefix tokens found.\n"
+        f"Full conversation tokens: {prompt_completion_ids} ('{tokenizer_model.decode(prompt_completion_ids)}')\n"
+        f"Generation prompt tokens: {prompt_ids} ('{tokenizer_model.decode(prompt_ids)}')\n"
+        "Cannot determine completion boundary."
+    )
+
+  completion_tokens = prompt_completion_ids[common_len:]
+  return tokenizer_model.decode(completion_tokens, skip_special_tokens=False)
 
 
 def apply_chat_template(example, tokenizer_model, data_column_name):
