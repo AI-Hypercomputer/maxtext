@@ -497,14 +497,17 @@ class CombinedDistillationStrategy(DistillationStrategy):
     safe_count = jnp.maximum(valid_count, 1.0)
     
     # --- Soft loss: KL on temperature-softened distributions ---
+    
+    # 1. Pre-compute Student log-probs over the full vocabulary
+    log_s_T_full = jax.nn.log_softmax(s_logits / temperature, axis=-1)
+    log_s_1_full = jax.nn.log_softmax(s_logits, axis=-1)
+
     if getattr(teacher_output, "top_k_indices", None) is not None:
       # --- SPARSE KL DIVERGENCE (Offline Mode) ---
-      # 1. Normalize teacher probabilities ONLY over the saved Top-K subset
+      
+      # 2. Normalize teacher probabilities ONLY over the saved Top-K subset
       t_p_T_sparse = jax.nn.softmax(t_logits / temperature, axis=-1)
       log_t_p_T_sparse = jax.nn.log_softmax(t_logits / temperature, axis=-1)
-
-      # 2. Student log-probs must be computed over the FULL vocabulary to be mathematically valid
-      log_s_T_full = jax.nn.log_softmax(s_logits / temperature, axis=-1)
       
       # 3. Gather Student log-probs at the Teacher's exact Top-K indices
       log_s_T_sparse = jnp.take_along_axis(log_s_T_full, teacher_output.top_k_indices, axis=-1)
@@ -513,24 +516,21 @@ class CombinedDistillationStrategy(DistillationStrategy):
       kl_softened_per_pos = jnp.sum(t_p_T_sparse * (log_t_p_T_sparse - log_s_T_sparse), axis=-1)
       
       # We don't have the full teacher logits to compute exact cross-entropy, so we zero it out
-      ce_teacher_per_pos = jnp.zeros_like(kl_softened_per_pos)
+      ce_teacher_per_pos = jnp.zeros(s_logits.shape[:-1])
       kl_t1_sum = jnp.array(0.0) 
       
     else:
       # --- DENSE KL DIVERGENCE (Online Mode) ---
-      log_s_T = jax.nn.log_softmax(s_logits / temperature, axis=-1)
       t_p_T = jax.nn.softmax(t_logits / temperature, axis=-1)
-      kl_softened_per_pos = optax.kl_divergence(log_s_T, t_p_T)  # [B, T]
-      
-      # --- Teacher CE (verification metric) ---
-      ce_teacher_per_pos = optax.softmax_cross_entropy(logits=t_logits, labels=labels)
-      
-      # --- Always-T=1 KL ---
-      log_s_1 = jax.nn.log_softmax(s_logits, axis=-1)
       t_p_1 = jax.nn.softmax(t_logits, axis=-1)
-      kl_t1_per_pos = optax.kl_divergence(log_s_1, t_p_1)
+      
+      kl_softened_per_pos = optax.kl_divergence(log_s_T_full, t_p_T)  # [B, T]
+      kl_t1_per_pos = optax.kl_divergence(log_s_1_full, t_p_1)
+      
+      ce_teacher_per_pos = optax.softmax_cross_entropy(logits=t_logits, labels=labels)
       kl_t1_sum = jnp.sum(kl_t1_per_pos * mask)
 
+    # --- Final Loss Aggregation ---
     kl_softened_sum = jnp.sum(kl_softened_per_pos * mask)
     soft_loss_sum_scaled = kl_softened_sum * (temperature**2)
     soft_loss_mean = soft_loss_sum_scaled / safe_count
