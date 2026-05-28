@@ -237,11 +237,27 @@ def _gcs_stubs():  # pragma: no cover - simple no-op placeholders
     def list_blobs(self, *a, **k):  # pylint: disable=unused-argument
       return iter([])
 
-  return SimpleNamespace(Client=_StubClient, _IS_STUB=True)
+  def _stub_upload_many_from_filenames(*_a, **_k):
+    """No-op stub for transfer_manager.upload_many_from_filenames."""
+    return []
+
+  transfer_manager_stub = SimpleNamespace(
+      upload_many_from_filenames=_stub_upload_many_from_filenames,
+      _IS_STUB=True,
+  )
+
+  return SimpleNamespace(Client=_StubClient, transfer_manager=transfer_manager_stub, _IS_STUB=True)
 
 
 def gcs_storage():
-  """Return google.cloud.storage module or stub when decoupled or missing."""
+  """Return google.cloud.storage module (with transfer_manager attached) or stub.
+
+  The returned object always exposes both ``.Client`` and ``.transfer_manager``
+  so callers can use ``storage.transfer_manager.upload_many_from_filenames(...)``
+  without an extra import. ``transfer_manager`` is a submodule of
+  ``google.cloud.storage`` and is not auto-imported by ``from google.cloud
+  import storage``; we explicitly import and attach it here.
+  """
   # In decoupled mode always prefer the stub, even if the library is installed,
   # to avoid accidental GCS calls in tests or local runs.
   if is_decoupled():  # fast path
@@ -250,7 +266,9 @@ def gcs_storage():
 
   try:  # pragma: no cover - attempt real import when not decoupled
     from google.cloud import storage  # type: ignore  # pylint: disable=import-outside-toplevel
+    from google.cloud.storage import transfer_manager  # type: ignore  # pylint: disable=import-outside-toplevel
 
+    setattr(storage, "transfer_manager", transfer_manager)
     setattr(storage, "_IS_STUB", False)
     return storage
   except Exception:  # ModuleNotFoundError / ImportError for partial installs  # pylint: disable=broad-exception-caught
