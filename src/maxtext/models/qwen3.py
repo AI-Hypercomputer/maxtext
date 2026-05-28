@@ -731,34 +731,45 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # STEP A: Optimized Input Projections (using structured einsum to avoid activation copies)
     # =========================================================================
     precision = self.in_proj_qkvz.matmul_precision
-    
-    # --- A.1: Project qkv and z ---
+    attn_data = ShardingAxisName.ATTN_DATA
+    attn_head = ShardingAxisName.MODEL if self._gdn_replicate_expert else ShardingAxisName.ATTN_HEAD
+
+    # --- A.1: Project qkv and z separately using weight slicing ---
     w_qkvz = self.in_proj_qkvz.kernel[...]
     w_qkvz_reshaped = w_qkvz.reshape(
         w_qkvz.shape[0],
         self.num_k_heads,
         2 * self.head_k_dim + 2 * self.head_v_dim * self.v_heads_per_k_head,
     )
-    split_idx_qkvz = 2 * self.head_k_dim + self.v_heads_per_k_head * self.head_v_dim
-    w_qkv = w_qkvz_reshaped[..., :split_idx_qkvz]
-    w_z = w_qkvz_reshaped[..., split_idx_qkvz:]
     
-    mixed_qkv_4d = jnp.einsum("bse, ehd -> bshd", hidden_states, w_qkv, precision=precision)
+    # Slice weight for query, key, value, and z individually
+    w_q = w_qkvz_reshaped[..., :self.head_k_dim]
+    w_k = w_qkvz_reshaped[..., self.head_k_dim : 2 * self.head_k_dim]
+    
+    val_end = 2 * self.head_k_dim + self.v_heads_per_k_head * self.head_v_dim
+    w_v = w_qkvz_reshaped[..., 2 * self.head_k_dim : val_end]
+    w_z = w_qkvz_reshaped[..., val_end:]
+    
+    # Separate parallel einsums
+    q_4d = jnp.einsum("bse, ehd -> bshd", hidden_states, w_q, precision=precision)
+    k_4d = jnp.einsum("bse, ehd -> bshd", hidden_states, w_k, precision=precision)
+    v_4d = jnp.einsum("bse, ehd -> bshd", hidden_states, w_v, precision=precision)
     z_4d = jnp.einsum("bse, ehd -> bshd", hidden_states, w_z, precision=precision)
     
-    mixed_qkv = mixed_qkv_4d.reshape(num_tokens, -1)
+    q_flat = q_4d.reshape(num_tokens, self.key_dim)
+    k_flat = k_4d.reshape(num_tokens, self.key_dim)
+    v_flat = v_4d.reshape(num_tokens, self.value_dim)
     z = z_4d.reshape(batch, seq_len, self.num_v_heads, self.head_v_dim)
 
-    # --- A.2: Project b and a ---
+    # --- A.2: Project b and a separately using weight slicing ---
     w_ba = self.in_proj_ba.kernel[...]
     w_ba_reshaped = w_ba.reshape(
         w_ba.shape[0],
         self.num_k_heads,
         2 * self.v_heads_per_k_head,
     )
-    split_idx_ba = self.v_heads_per_k_head
-    w_b = w_ba_reshaped[..., :split_idx_ba]
-    w_a = w_ba_reshaped[..., split_idx_ba:]
+    w_b = w_ba_reshaped[..., :self.v_heads_per_k_head]
+    w_a = w_ba_reshaped[..., self.v_heads_per_k_head:]
     
     b_4d = jnp.einsum("bse, ehd -> bshd", hidden_states, w_b, precision=precision)
     a_4d = jnp.einsum("bse, ehd -> bshd", hidden_states, w_a, precision=precision)
@@ -769,11 +780,6 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # =========================================================================
     # STEP B: Call tpu-inference's fused conv + ragged delta-rule kernel.
     # =========================================================================
-    attn_data = ShardingAxisName.ATTN_DATA
-    # Head axis for the GDN kernel + the producer-side reshapes. Default ATTN_HEAD
-    # (model*expert); the experimental MAXTEXT_GDN_REPLICATE_EXPERT path uses 'model' only
-    # so GDN replicates over the expert axis (no expert-axis transpose all-to-all).
-    attn_head = ShardingAxisName.MODEL if self._gdn_replicate_expert else ShardingAxisName.ATTN_HEAD
     tp_size = get_mesh_shape_product(self.mesh, attn_head)
 
     # Both head counts must divide tp_size or the per-shard reshape in the kernel/reorder is
@@ -781,6 +787,15 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     assert (
         self.num_k_heads % tp_size == 0 and self.num_v_heads % tp_size == 0
     ), f"GDN heads (k={self.num_k_heads}, v={self.num_v_heads}) must be divisible by tp_size={tp_size}."
+
+    # Concatenate q/k/v within each ATTN_HEAD shard locally via shard_map to avoid all-to-all
+    mixed_qkv = jax.shard_map(
+        lambda q, k, v: jnp.concatenate([q, k, v], axis=-1),
+        mesh=self.mesh,
+        in_specs=(P(attn_data, attn_head),) * 3,
+        out_specs=P(attn_data, attn_head),
+        check_vma=False,
+    )(q_flat, k_flat, v_flat)
 
     # nnx.Conv kernel layout is (kernel_size, in_features // groups, out_features).
     # With feature_group_count == conv_dim this is (kernel_size, 1, conv_dim).
