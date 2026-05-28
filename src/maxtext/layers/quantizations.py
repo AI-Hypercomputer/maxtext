@@ -764,7 +764,6 @@ def get_fp8_full_qwix_rule_w_sparsity(config: Config):
 
 
 def get_quantization_rule(config: Config):
-
   """Returns a list of qwix.QtRule from `dtype`."""
   def make_qt_rule(dtype) -> list[qwix.QtRule]:
     return [
