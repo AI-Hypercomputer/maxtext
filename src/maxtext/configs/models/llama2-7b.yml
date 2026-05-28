@@ -22,8 +22,8 @@ base_num_decoder_layers: 32
 head_dim: 128
 mlp_activations: ["silu","linear"]
 vocab_size: 32000
-enable_dropout: False
-logits_via_embedding: False
+enable_dropout: false
+logits_via_embedding: false
 normalization_layer_epsilon: 1.0e-5
 decoder_block: "llama2"
 logical_axis_rules: [['norm', 'fsdp']]

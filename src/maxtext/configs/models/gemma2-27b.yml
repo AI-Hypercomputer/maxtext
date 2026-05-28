@@ -18,15 +18,15 @@ base_emb_dim: 4608
 base_num_query_heads: 32
 base_num_kv_heads: 16
 base_mlp_dim: 36864
-base_num_decoder_layers: 23 # half of the real number of layers because we merge [local_attention, global_attention] into one layer 
+base_num_decoder_layers: 23 # half of the real number of layers because we merge [local_attention, global_attention] into one layer
 head_dim: 128
 mlp_activations: ["gelu","linear"]
 vocab_size: 256128
 decoder_block: "gemma2"
 normalization_layer_epsilon: 1.e-06
-logits_via_embedding: True
+logits_via_embedding: true
 final_logits_soft_cap: 30.0
 attn_logits_soft_cap: 50.0
 sliding_window_size: 4096
-use_post_attn_norm: True
-use_post_ffw_norm: True
+use_post_attn_norm: true
+use_post_ffw_norm: true

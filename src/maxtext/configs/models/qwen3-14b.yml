@@ -28,10 +28,10 @@ decoder_block: "qwen3"
 normalization_layer_epsilon: 1.0e-6
 rope_max_timescale: 1000000
 
-use_qk_norm: True
+use_qk_norm: true
 
-logits_via_embedding: False # different from 0.6 and 4B variants, "tie_word_embeddings": false
-normalize_embedding_logits: False
+logits_via_embedding: false # different from 0.6 and 4B variants, "tie_word_embeddings": false
+normalize_embedding_logits: false
 
 tokenizer_type: "huggingface"
 

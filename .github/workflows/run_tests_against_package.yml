@@ -86,9 +86,9 @@ jobs:
         TF_FORCE_GPU_ALLOW_GROWTH: ${{ inputs.tf_force_gpu_allow_growth }}
         TPU_SKIP_MDS_QUERY: ${{ inputs.device_type == 'cpu' && '1' || '' }}
         MAXTEXT_PACKAGE_EXTRA: >-
-          ${{ 
-            !contains(inputs.pytest_marker, 'not post_training') && 'tpu-post-train' 
-            || (inputs.device_type == 'cpu' && 'tpu' || inputs.device_type) 
+          ${{
+            !contains(inputs.pytest_marker, 'not post_training') && 'tpu-post-train'
+            || (inputs.device_type == 'cpu' && 'tpu' || inputs.device_type)
           }}
         ALLOW_MULTIPLE_LIBTPU_LOAD: ${{ inputs.device_type == 'cpu' && 'true' || '' }} # bypass /tmp/libtpu_lockfile check for cpu tests, which don't actually use accelerators (to allow concurrency)
       options: ${{ inputs.container_resource_option }}
@@ -177,7 +177,7 @@ jobs:
           else
             SPLIT_ARGS=""
           fi
-          
+
           # Setup substitution: If manually updating HLO, skip tests execution and run only the update script instead!
           if [ "${INPUTS_IS_UPDATE_HLO}" == "true" ]; then
             python3 tests/utils/update_hlo_references.py
