@@ -159,6 +159,50 @@ def generate_maxtext_config(vllm_config: VllmConfig, mesh: Mesh) -> pyconfig.Hyp
   return maxtext_config
 
 
+def pre_slice_gdn_weights(module: nnx.Module):
+  """Recursively traverses the NNX module tree and pre-slices GDN weights on the host once."""
+  if module.__class__.__name__ == "Qwen3NextGatedDeltaNet":
+    # 1. Slice in_proj_qkvz weights
+    w_qkvz = module.in_proj_qkvz.kernel.value
+    w_qkvz_reshaped = w_qkvz.reshape(
+        w_qkvz.shape[0],
+        module.num_k_heads,
+        2 * module.head_k_dim + 2 * module.head_v_dim * module.v_heads_per_k_head,
+    )
+    split_idx_qkvz = 2 * module.head_k_dim + module.v_heads_per_k_head * module.head_v_dim
+    sharding_qkvz = module.in_proj_qkvz.kernel.sharding
+
+    module.w_q = nnx.Param(w_qkvz_reshaped[..., :module.head_k_dim], sharding=sharding_qkvz)
+    module.w_k = nnx.Param(w_qkvz_reshaped[..., module.head_k_dim : 2 * module.head_k_dim], sharding=sharding_qkvz)
+    module.w_v = nnx.Param(w_qkvz_reshaped[..., 2 * module.head_k_dim : split_idx_qkvz], sharding=sharding_qkvz)
+    module.w_z = nnx.Param(w_qkvz_reshaped[..., split_idx_qkvz:], sharding=sharding_qkvz)
+
+    # 2. Slice in_proj_ba weights
+    w_ba = module.in_proj_ba.kernel.value
+    w_ba_reshaped = w_ba.reshape(
+        w_ba.shape[0],
+        module.num_k_heads,
+        2 * module.v_heads_per_k_head,
+    )
+    sharding_ba = module.in_proj_ba.kernel.sharding
+    module.w_b = nnx.Param(w_ba_reshaped[..., :module.v_heads_per_k_head], sharding=sharding_ba)
+    module.w_a = nnx.Param(w_ba_reshaped[..., module.v_heads_per_k_head:], sharding=sharding_ba)
+
+  else:
+    # Recurse into submodules
+    for name, val in list(module.__dict__.items()):
+      if isinstance(val, nnx.Module):
+        pre_slice_gdn_weights(val)
+      elif isinstance(val, (list, tuple, nnx.List)):
+        for item in val:
+          if isinstance(item, nnx.Module):
+            pre_slice_gdn_weights(item)
+      elif isinstance(val, dict):
+        for item in val.values():
+          if isinstance(item, nnx.Module):
+            pre_slice_gdn_weights(item)
+
+
 class MaxTextForCausalLM(nnx.Module):
   """A vLLM-compatible causal language model wrapper for MaxText.
 
@@ -417,4 +461,5 @@ class MaxTextForCausalLM(nnx.Module):
       model = model_creation_utils.from_pretrained(
           self.maxtext_config, mesh=self.mesh, model_mode=self.model_mode, rng_key=rng_key
       )
+      pre_slice_gdn_weights(model)
       self.model = nnx.data(model)
