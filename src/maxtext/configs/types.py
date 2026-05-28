@@ -2570,6 +2570,14 @@ class MaxTextConfig(
     }
     self.num_slices = max_utils.get_num_slices(raw_keys_for_num_slices)
 
+    # Check for AQT deprecation warning
+    if self.quantization and not self.use_qwix_quantization:
+      if self.quantization not in ("fp8", "nanoo_fp8") and not self.quantization.startswith("te_"):
+        logger.warning(
+            "WARNING: AQT quantization is deprecated and will be removed in a future release. "
+            "Please migrate to Qwix by setting use_qwix_quantization=True."
+        )
+
     # Default quantization sharding count to number of local devices if not set.
     if self.quantization_local_shard_count == -1:
       try:
