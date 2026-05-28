@@ -29,7 +29,7 @@ override_model_config: True
 
 
 # -------------- Logical Axis Rules --------------
-mesh_axes: ['data', 'attn_dp', 'model', 'expert', 'attn_dp_expert']
+mesh_axes: ['data', 'attn_dp', 'attn_dp_expert', 'expert', 'model', 'dcp']
 logical_axis_rules: [
                       # ==========================================
                       # Vocabulary Embedding
