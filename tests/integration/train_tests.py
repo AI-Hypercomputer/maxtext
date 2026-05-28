@@ -511,7 +511,7 @@ class TrainTests(unittest.TestCase):
         "enable_checkpointing=False",
         "enable_goodput_recording=False",
         "dataset_type=synthetic",
-        "remat_policy=minimal",
+        "remat_policy=none",
         "max_target_length=512",
         "per_device_batch_size=2",
         "ici_data_parallelism=-1",
