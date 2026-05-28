@@ -17,6 +17,8 @@
 from tpu_inference.logger import init_logger
 from tpu_inference.models.common.model_loader import register_model
 from .adapter import MaxTextForCausalLM
+from .multimodal_adapter import MaxTextForConditionalGeneration
+
 
 
 logger = init_logger(__name__)
@@ -31,3 +33,5 @@ def register():
   logger.info("Registering MaxTextForCausalLM model with tpu_inference and vllm.")
   register_model("MaxTextForCausalLM", MaxTextForCausalLM)
   logger.info("Successfully registered MaxTextForCausalLM model.")
+  register_model("MaxTextForConditionalGeneration", MaxTextForConditionalGeneration)
+  logger.info("Successfully registered MaxTextForConditionalGeneration model.")

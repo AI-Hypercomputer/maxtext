@@ -188,9 +188,6 @@ class MaxTextForCausalLM(nnx.Module):
     # Model creation
     self.model: nnx.Module | None = None
 
-    # Indicates that the model handles its own sharding logic
-    self._self_manages_sharding = True
-
     # Handle dummy weight loading during initialization
     if vllm_config.load_config.load_format == "dummy":
       self.load_weights(rng_key)

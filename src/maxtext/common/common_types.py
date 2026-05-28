@@ -83,6 +83,7 @@ class MultimodalInput:
   audio_embeddings: Array | None = None
   audio_masks: Array | None = None
   bidirectional_mask: Array | None = None
+  precomputed_embeddings: Array | None = None
 
 
 class DecoderBlockType(enum.Enum):
