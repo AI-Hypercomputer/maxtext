@@ -734,13 +734,26 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     attn_data = ShardingAxisName.ATTN_DATA
     attn_head = ShardingAxisName.MODEL if self._gdn_replicate_expert else ShardingAxisName.ATTN_HEAD
 
-    # Retrieve pre-sliced weights from the Flax parameter dictionary (populated at startup)
-    w_q = self.param("w_q", lambda *args: None)
-    w_k = self.param("w_k", lambda *args: None)
-    w_v = self.param("w_v", lambda *args: None)
-    w_z = self.param("w_z", lambda *args: None)
+    # Retrieve pre-sliced weights if they exist, otherwise fall back to dynamic slicing (robust to shape tracers)
+    if hasattr(self, "w_q"):
+      w_q = self.w_q.value
+      w_k = self.w_k.value
+      w_v = self.w_v.value
+      w_z = self.w_z.value
+    else:
+      w_qkvz = self.in_proj_qkvz.kernel.value
+      w_qkvz_reshaped = w_qkvz.reshape(
+          w_qkvz.shape[0],
+          self.num_k_heads,
+          2 * self.head_k_dim + 2 * self.head_v_dim * self.v_heads_per_k_head,
+      )
+      split_idx_qkvz = 2 * self.head_k_dim + self.v_heads_per_k_head * self.head_v_dim
+      w_q = w_qkvz_reshaped[..., :self.head_k_dim]
+      w_k = w_qkvz_reshaped[..., self.head_k_dim : 2 * self.head_k_dim]
+      w_v = w_qkvz_reshaped[..., 2 * self.head_k_dim : split_idx_qkvz]
+      w_z = w_qkvz_reshaped[..., split_idx_qkvz:]
 
-    # Separate parallel einsums using pre-sliced weights
+    # Separate parallel einsums using resolved weights
     q_4d = jnp.einsum("bse, ehd -> bshd", hidden_states, w_q, precision=precision)
     k_4d = jnp.einsum("bse, ehd -> bshd", hidden_states, w_k, precision=precision)
     v_4d = jnp.einsum("bse, ehd -> bshd", hidden_states, w_v, precision=precision)
@@ -751,9 +764,20 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     v_flat = v_4d.reshape(num_tokens, self.value_dim)
     z = z_4d.reshape(batch, seq_len, self.num_v_heads, self.head_v_dim)
 
-    # Projections for b and a using pre-sliced weights
-    w_b = self.param("w_b", lambda *args: None)
-    w_a = self.param("w_a", lambda *args: None)
+    # Projections for b and a
+    if hasattr(self, "w_b"):
+      w_b = self.w_b.value
+      w_a = self.w_a.value
+    else:
+      w_ba = self.in_proj_ba.kernel.value
+      w_ba_reshaped = w_ba.reshape(
+          w_ba.shape[0],
+          self.num_k_heads,
+          2 * self.v_heads_per_k_head,
+      )
+      w_b = w_ba_reshaped[..., :self.v_heads_per_k_head]
+      w_a = w_ba_reshaped[..., self.v_heads_per_k_head:]
+
     b_4d = jnp.einsum("bse, ehd -> bshd", hidden_states, w_b, precision=precision)
     a_4d = jnp.einsum("bse, ehd -> bshd", hidden_states, w_a, precision=precision)
     
