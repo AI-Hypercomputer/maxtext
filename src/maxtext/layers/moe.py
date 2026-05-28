@@ -1414,6 +1414,7 @@ class RoutedMoE(nnx.Module):
                 use_custom_sort_vjp=self.config.use_custom_sort_vjp,
                 use_ragged_sort=self.config.use_ragged_sort,
             )
+        mask = jnp.arange(x.shape[0]) < jnp.sum(group_sizes)
 
       if self.config.mlp_bias:
         w0_bias, w1_bias, wo_bias = self.transform_bias(selected_experts, w0_bias, w1_bias, wo_bias)
@@ -1477,6 +1478,7 @@ class RoutedMoE(nnx.Module):
         layer_w0 = jax.lax.psum(layer_w0, "tensor_transpose")
       if self.config.mlp_bias:
         layer_w0 = layer_w0 + w0_bias
+        layer_w0 = jnp.where(mask[:, None], layer_w0, 0)
       layer_w0 = adc.checkpoint_name(layer_w0, "moe_mlpwi_0")
 
       layer_w1 = gmm_fn(
@@ -1489,6 +1491,7 @@ class RoutedMoE(nnx.Module):
         layer_w1 = jax.lax.psum(layer_w1, "tensor_transpose")
       if self.config.mlp_bias:
         layer_w1 = layer_w1 + w1_bias
+        layer_w1 = jnp.where(mask[:, None], layer_w1, 0)
       layer_w1 = adc.checkpoint_name(layer_w1, "moe_mlpwi_1")
       intermediate_layer = self.apply_ffn_activation(layer_w0, layer_w1)
 
@@ -1504,6 +1507,7 @@ class RoutedMoE(nnx.Module):
         )
       if self.config.mlp_bias:
         intermediate_output = intermediate_output + wo_bias
+        intermediate_output = jnp.where(mask[:, None], intermediate_output, 0)
       intermediate_output = adc.checkpoint_name(intermediate_output, "moe_mlpwo")
 
       if self.config.use_ring_of_experts:
