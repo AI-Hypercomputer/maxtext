@@ -58,7 +58,7 @@ def validate_and_configure_sft_columns(data_columns, tokenizer_model, chat_templ
   if chat_template and hasattr(tokenizer_model, "chat_template"):
     tokenizer_model.chat_template = chat_template
 
-  supported_columns = [["prompt", "completion"], ["messages"], ["question", "answer"]]
+  supported_columns = [["input", "output"], ["prompt", "completion"], ["messages"], ["question", "answer"]]
   assert any(
       set(data_columns) == set(supported) for supported in supported_columns
   ), f"Dataset column names mismatch. Expected columns to match one of {supported_columns}, but got {data_columns}"

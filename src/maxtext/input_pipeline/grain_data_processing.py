@@ -290,6 +290,8 @@ def _format_chat_template_grain(element, data_columns, tokenizer_model):
     messages = [{"role": "user", "content": element["prompt"]}, {"role": "assistant", "content": element["completion"]}]
   elif set(data_columns) == {"question", "answer"}:
     messages = [{"role": "user", "content": element["question"]}, {"role": "assistant", "content": element["answer"]}]
+  elif set(data_columns) == {"input", "output"}:
+    messages = [{"role": "user", "content": element["input"]}, {"role": "assistant", "content": element["output"]}]
   else:
     # Fallback if it's already a single string
     messages = element[data_columns[0]]
