@@ -48,8 +48,6 @@ class Train(parameterized.TestCase):
   )
   @pytest.mark.tpu_only
   def test_different_quant_sparsity_configs(self, quantization: str, use_sparsity: bool):
-    if quantization == "fp8_full":
-      self.skipTest("fp8 quant is broken under NNX, see b/509790223")
     test_tmpdir = os.environ.get("TEST_TMPDIR", gettempdir())
     outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", test_tmpdir)
     args = [

@@ -28,7 +28,7 @@ from maxtext.models import models
 from maxtext.optimizers import optimizers
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
-from maxtext.layers import train_state_nnx
+from maxtext.common import train_state_nnx
 from tests.utils.test_helpers import get_test_config_path
 
 Transformer = models.transformer_as_linen

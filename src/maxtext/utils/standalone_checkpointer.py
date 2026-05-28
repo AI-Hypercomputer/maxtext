@@ -30,7 +30,7 @@ import jax
 from jax import numpy as jnp
 from maxtext.configs import pyconfig
 from maxtext.common import checkpointing
-from maxtext.layers import train_state_nnx
+from maxtext.common import train_state_nnx
 from maxtext.models import models
 from maxtext.trainers.pre_train.train import get_first_step
 from maxtext.utils import max_logging

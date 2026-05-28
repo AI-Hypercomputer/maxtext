@@ -49,7 +49,7 @@ from maxtext.utils.globals import MAXTEXT_PKG_DIR
 from maxtext.common import checkpointing
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.layers import quantizations
-from maxtext.layers import train_state_nnx
+from maxtext.common import train_state_nnx
 from maxtext.models.models import transformer_as_linen
 from maxtext.optimizers import optimizers
 from maxtext.utils import max_logging
