@@ -270,3 +270,50 @@ def get_dummy_image_shape_for_init_gemma3(batch_size=1, num_image_per_sequence=1
       mm_utils.NUM_IMAGE_CHANNELS,
   )
   return image_shape
+
+
+class Gemma3Processor(mm_utils.BaseMultimodalProcessor):
+  """Gemma3 multimodal data processor."""
+
+  # pylint: disable=unused-argument
+
+  @classmethod
+  def supports_model(cls, model_name: str) -> bool:
+    return model_name.startswith("gemma3")
+
+  def preprocess_mm_data(self, config, **kwargs) -> mm_utils.PreprocessorOutput:
+    images = [mm_utils.load_image_from_path(p) for p in config.image_path.split(",")]
+    return preprocess_mm_data_gemma3(images)
+
+  def preprocess_image_for_training(self, image, **kwargs) -> mm_utils.PreprocessorOutput:
+    return preprocess_mm_data_gemma3(image)
+
+  def get_image_offsets(self, config, processor_output: mm_utils.PreprocessorOutput | None, **kwargs) -> int:
+    return get_image_offsets_gemma3(processor_output)
+
+  def reformat_prompt(
+      self,
+      prompt: str,
+      image_placeholder: str,
+      num_images: int,
+      **kwargs,
+  ) -> str:
+    return reformat_prompt_gemma3(prompt, image_placeholder, num_images)
+
+  def reformat_response(self, response: str, **kwargs) -> str:
+    return f"{response}<end_of_turn>"
+
+  def prepare_text_for_image_fusion(
+      self,
+      tokens,
+      config,
+      processor_output: mm_utils.PreprocessorOutput | None = None,
+      **kwargs,
+  ):
+    return add_extra_tokens_for_images_gemma3(tokens, max_num_images=processor_output.num_images)
+
+  def get_dummy_image_shape_for_init(self, batch_size: int = 1, num_image_per_sequence: int = 1, **kwargs) -> tuple:
+    return get_dummy_image_shape_for_init_gemma3(batch_size, num_image_per_sequence)
+
+  def get_bidirectional_mask_vision(self, config, decoder_input_tokens, **kwargs):
+    return decoder_input_tokens == GEMMA_TOKEN_PLACEHOLDER

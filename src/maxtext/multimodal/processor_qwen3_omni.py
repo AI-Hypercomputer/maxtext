@@ -1146,3 +1146,63 @@ def get_mm_offsets_qwen3_omni(config, processor_output):
       total_offset += int(audio_len) - 1  # -1 for the original <|audio_pad|> token
 
   return total_offset
+
+
+class Qwen3OmniProcessor(mm_utils.BaseMultimodalProcessor):
+  """Qwen3-Omni multimodal data processor."""
+
+  # pylint: disable=unused-argument
+
+  @classmethod
+  def supports_model(cls, model_name: str) -> bool:
+    return model_name.startswith("qwen3-omni") or model_name.startswith("qwen3.5-397b-a17b")
+
+  def preprocess_mm_data(self, config, **kwargs) -> mm_utils.PreprocessorOutput:
+    return preprocess_mm_data_qwen3_omni(config)
+
+  def preprocess_image_for_training(self, image, **kwargs) -> mm_utils.PreprocessorOutput:
+    return preprocess_mm_data_qwen3_omni_for_training(image)
+
+  def get_image_offsets(self, config, processor_output: mm_utils.PreprocessorOutput | None, **kwargs) -> int:
+    return get_mm_offsets_qwen3_omni(config, processor_output)
+
+  def reformat_prompt(
+      self,
+      prompt: str,
+      image_placeholder: str,
+      num_images: int,
+      video_placeholder: str = "<|video|>",
+      num_videos: int = 0,
+      **kwargs,
+  ) -> str:
+    return reformat_prompt_qwen3_omni(
+        prompt=prompt,
+        image_placeholder=image_placeholder,
+        num_images=num_images,
+        video_placeholder=video_placeholder,
+        num_videos=num_videos,
+    )
+
+  def reformat_response(self, response: str, **kwargs) -> str:
+    return f"{response}<|im_end|>"
+
+  def prepare_text_for_image_fusion(
+      self,
+      tokens,
+      config,
+      processor_output: mm_utils.PreprocessorOutput | None = None,
+      **kwargs,
+  ):
+    return add_extra_tokens_for_qwen3_omni(tokens, config, processor_output)
+
+  def get_dummy_image_shape_for_init(self, batch_size: int = 1, num_image_per_sequence: int = 1, **kwargs) -> tuple:
+    return get_dummy_image_shape_for_init_qwen3_omni(batch_size)
+
+  def get_dummy_audio_shape_for_init(self, config, **kwargs) -> tuple:
+    return get_dummy_audio_shape_for_init_qwen3_omni(config)
+
+  def get_bidirectional_mask_vision(self, config, decoder_input_tokens, **kwargs):
+    return (decoder_input_tokens == QWEN3_OMNI_IMAGE_TOKEN) | (decoder_input_tokens == QWEN3_OMNI_VIDEO_TOKEN)
+
+  def get_bidirectional_mask_audio(self, config, decoder_input_tokens, **kwargs):
+    return decoder_input_tokens == QWEN3_OMNI_AUDIO_TOKEN
