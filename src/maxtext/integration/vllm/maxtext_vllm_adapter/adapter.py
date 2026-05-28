@@ -159,54 +159,46 @@ def generate_maxtext_config(vllm_config: VllmConfig, mesh: Mesh) -> pyconfig.Hyp
   return maxtext_config
 
 
-def pre_slice_gdn_weights(module: nnx.Module):
-  """Recursively traverses the NNX module tree and pre-slices GDN weights on the host once."""
-  if "GatedDeltaNet" in module.__class__.__name__:
+def pre_slice_gdn_weights(model: nnx.Module):
+  """Directly iterates over the model's decoder layers and pre-slices GDN weights on the host once."""
+  if not hasattr(model, "decoder") or not hasattr(model.decoder, "layers"):
+    max_logging.log("Warning: Model does not have decoder.layers, skipping GDN weight pre-slicing.")
+    return
+
+  for idx, layer in enumerate(model.decoder.layers):
+    if not hasattr(layer, "attention"):
+      continue
+    gdn = layer.attention
+    if "GatedDeltaNet" not in gdn.__class__.__name__:
+      continue
+
+    max_logging.log(f"Pre-slicing weights for GDN layer {idx} ({gdn.__class__.__name__})...")
+    
     # 1. Slice in_proj_qkvz weights
-    w_qkvz = module.in_proj_qkvz.kernel.value
+    w_qkvz = gdn.in_proj_qkvz.kernel.value
     w_qkvz_reshaped = w_qkvz.reshape(
         w_qkvz.shape[0],
-        module.num_k_heads,
-        2 * module.head_k_dim + 2 * module.head_v_dim * module.v_heads_per_k_head,
+        gdn.num_k_heads,
+        2 * gdn.head_k_dim + 2 * gdn.head_v_dim * gdn.v_heads_per_k_head,
     )
-    split_idx_qkvz = 2 * module.head_k_dim + module.v_heads_per_k_head * module.head_v_dim
-    sharding_qkvz = module.in_proj_qkvz.kernel.sharding
+    split_idx_qkvz = 2 * gdn.head_k_dim + gdn.v_heads_per_k_head * gdn.head_v_dim
+    sharding_qkvz = gdn.in_proj_qkvz.kernel.sharding
 
-    module.w_q = nnx.Param(w_qkvz_reshaped[..., :module.head_k_dim], sharding=sharding_qkvz)
-    module.w_k = nnx.Param(w_qkvz_reshaped[..., module.head_k_dim : 2 * module.head_k_dim], sharding=sharding_qkvz)
-    module.w_v = nnx.Param(w_qkvz_reshaped[..., 2 * module.head_k_dim : split_idx_qkvz], sharding=sharding_qkvz)
-    module.w_z = nnx.Param(w_qkvz_reshaped[..., split_idx_qkvz:], sharding=sharding_qkvz)
+    gdn.w_q = nnx.Param(w_qkvz_reshaped[..., :gdn.head_k_dim], sharding=sharding_qkvz)
+    gdn.w_k = nnx.Param(w_qkvz_reshaped[..., gdn.head_k_dim : 2 * gdn.head_k_dim], sharding=sharding_qkvz)
+    gdn.w_v = nnx.Param(w_qkvz_reshaped[..., 2 * gdn.head_k_dim : split_idx_qkvz], sharding=sharding_qkvz)
+    gdn.w_z = nnx.Param(w_qkvz_reshaped[..., split_idx_qkvz:], sharding=sharding_qkvz)
 
     # 2. Slice in_proj_ba weights
-    w_ba = module.in_proj_ba.kernel.value
+    w_ba = gdn.in_proj_ba.kernel.value
     w_ba_reshaped = w_ba.reshape(
         w_ba.shape[0],
-        module.num_k_heads,
-        2 * module.v_heads_per_k_head,
+        gdn.num_k_heads,
+        2 * gdn.v_heads_per_k_head,
     )
-    sharding_ba = module.in_proj_ba.kernel.sharding
-    module.w_b = nnx.Param(w_ba_reshaped[..., :module.v_heads_per_k_head], sharding=sharding_ba)
-    module.w_a = nnx.Param(w_ba_reshaped[..., module.v_heads_per_k_head:], sharding=sharding_ba)
-
-  elif isinstance(module, (list, tuple, nnx.List)):
-    # If the module itself is a list/tuple/nnx.List, loop over its elements directly
-    for item in module:
-      if isinstance(item, nnx.Module):
-        pre_slice_gdn_weights(item)
-
-  else:
-    # Recurse into submodules
-    for name, val in list(module.__dict__.items()):
-      if isinstance(val, (list, tuple, nnx.List)):
-        for item in val:
-          if isinstance(item, nnx.Module):
-            pre_slice_gdn_weights(item)
-      elif isinstance(val, nnx.Module):
-        pre_slice_gdn_weights(val)
-      elif isinstance(val, dict):
-        for item in val.values():
-          if isinstance(item, nnx.Module):
-            pre_slice_gdn_weights(item)
+    sharding_ba = gdn.in_proj_ba.kernel.sharding
+    gdn.w_b = nnx.Param(w_ba_reshaped[..., :gdn.v_heads_per_k_head], sharding=sharding_ba)
+    gdn.w_a = nnx.Param(w_ba_reshaped[..., gdn.v_heads_per_k_head:], sharding=sharding_ba)
 
 
 class MaxTextForCausalLM(nnx.Module):
