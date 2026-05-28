@@ -65,7 +65,7 @@ from maxtext.layers.initializers import nd_dense_init, NdInitializer, variable_t
 from maxtext.layers.linears import DenseGeneral, canonicalize_tuple, normalize_axes
 from maxtext.layers.normalizations import RMSNorm, Qwen3NextRMSNorm, GlobalRMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
-from maxtext.inference import kvcache, page_manager, paged_attention
+from maxtext.inference import kvcache
 from maxtext.inference.kvcache import KVQuant
 from maxtext.utils.sharding import maybe_shard_with_logical, create_sharding
 
@@ -466,24 +466,6 @@ class Attention(nnx.Module):
         ragged_block_size=self.ragged_block_size,
         rngs=self.rngs,
     )
-    # When paged attention is enabled, paged attention op is used for all model modes except TRAIN,
-    # which uses default attention op.
-    if self.config.attention == "paged":
-      self.paged_attention_op = paged_attention.PagedAttentionOp(
-          mesh=self.mesh,
-          num_pages=self.config.pagedattn_num_pages,
-          tokens_per_page=self.config.pagedattn_tokens_per_page,
-          max_pages_per_slot=(self.config.max_target_length + self.config.pagedattn_tokens_per_page - 1)
-          // self.config.pagedattn_tokens_per_page,
-          max_pages_per_prefill=(self.config.max_prefill_predict_length + self.config.pagedattn_tokens_per_page - 1)
-          // self.config.pagedattn_tokens_per_page,
-          pages_per_compute_block=self.config.pagedattn_pages_per_compute_block,
-          num_kv_heads=self.num_kv_heads,
-          kv_head_dim_size=self.head_dim,
-          dtype=self.dtype,
-          attn_logits_soft_cap=self.attn_logits_soft_cap,
-          rngs=self.rngs,
-      )
 
     self._init_projections(inputs_q_shape, inputs_kv_shape)
 
@@ -1085,7 +1067,6 @@ class Attention(nnx.Module):
       deterministic: bool = False,
       previous_chunk: Any = None,
       slot: Optional[int] = None,
-      page_state: Optional[page_manager.PageState] = None,
       bidirectional_mask: Any = None,
       rope_kwargs: dict | None = None,
       kv_cache: Optional[Array] = None,
@@ -1117,7 +1098,6 @@ class Attention(nnx.Module):
       deterministic: If True, disables dropout.
       previous_chunk: Information about previously processed chunks for chunked prefill.
       slot: The batch slot index for paged attention.
-      page_state: The current state of the paged attention manager.
       bidirectional_mask: A mask for bidirectional attention, used in multimodal models.
       kv_cache: Optional KV cache input, used when invoking from vLLM.
       attention_metadata: Optional mapping to store attention metadata, used when invoking from vLLM.
@@ -1221,13 +1201,7 @@ class Attention(nnx.Module):
 
     assert not self.config.quantize_kvcache or self.kv_quant
 
-    if self.config.attention == "paged" and model_mode != MODEL_MODE_TRAIN:
-      unnormalized_out, _, exp_sum = self.paged_attention_op(
-          query, key, value, decoder_segment_ids, model_mode, previous_chunk, slot=slot, page_state=page_state
-      )
-      out = unnormalized_out / (exp_sum + 1e-9) if exp_sum is not None else unnormalized_out
-
-    elif self.config.attention == "vllm_rpa" and model_mode != MODEL_MODE_TRAIN:
+    if self.config.attention == "vllm_rpa" and model_mode != MODEL_MODE_TRAIN:
       batch, seq_len, num_heads, head_dim = query.shape
       attn_out, updated_kv = self.forward_serve_vllm(
           query, key, value, rpa_kv_cache=kv_cache, rpa_metadata=attention_metadata

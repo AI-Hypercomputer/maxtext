@@ -698,18 +698,6 @@ class SplashAttention(BaseModel):
   use_splash_scheduler: bool = Field(False, description="Use experimental splash attention scheduler.")
 
 
-class PagedAttention(BaseModel):
-  """Tunable parameters for Paged Attention kernels."""
-
-  pagedattn_num_pages: int = Field(64, description="Total number of pages to allocate for paged attention.")
-  pagedattn_tokens_per_page: int = Field(32, description="Number of tokens each page can hold.")
-  pagedattn_pages_per_compute_block: int = Field(4, description="Number of pages processed together in pallas kernels.")
-  pagedattn_max_pages_per_group: int = Field(-1, description="Max pages per request; -1 defaults to max_target_length.")
-  # Alignment of head_dim to the nearest multiple of this value, set to 0 to disable alignment. On
-  # TPUs, the head_dim is padded to the nearest multiple of 128.
-  pagedattn_head_dim_alignment: int = Field(128, description="Alignment of head_dim to the nearest multiple.")
-
-
 class MoEGeneral(BaseModel):
   """General configuration for Mixture of Experts (MoE) layers."""
 
@@ -2260,7 +2248,6 @@ class MaxTextConfig(
     AttentionIndexer,
     Llama4Attention,
     SplashAttention,
-    PagedAttention,
     # Mixture of Experts
     MoEGeneral,
     MoEKernels,
@@ -3208,5 +3195,4 @@ class MaxTextConfig(
             f"For qwen3_custom_moe, moe_expert_input_dim ({self.moe_expert_input_dim}) "
             f"must be equal to attention_output_dim ({self.attention_output_dim})"
         )
-
     return self

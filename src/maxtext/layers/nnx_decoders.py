@@ -38,7 +38,6 @@ from maxtext.common.common_types import (
     MultimodalInput,
     ShardMode,
 )
-from maxtext.inference import page_manager
 from maxtext.layers import initializers, linears, mhc, normalizations, quantizations
 from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import Embed, PositionalEmbedding, attend_on_embedding
@@ -158,7 +157,6 @@ class NNXDecoderLayer(nnx.Module):
       model_mode,
       previous_chunk=None,
       slot: None | int = None,
-      page_state: None | page_manager.PageState = None,
       kv_cache: jax.Array | None = None,
       attention_metadata: dict[str, Any] | None = None,
   ):
@@ -1107,7 +1105,6 @@ class NNXDecoder(nnx.Module):
       model_mode=MODEL_MODE_TRAIN,
       previous_chunk=None,
       slot: None | int = None,
-      page_state: None | page_manager.PageState = None,
       kv_caches: list[jax.Array] | None = None,
       attention_metadata=None,
       deepstack_visual_embeds: None | list[jnp.ndarray] = None,
@@ -1149,7 +1146,6 @@ class NNXDecoder(nnx.Module):
       if self.is_deepseek:
         layer_kwargs = {
             "previous_chunk": previous_chunk,
-            "page_state": page_state,
             "slot": slot,
         }
 
@@ -1218,7 +1214,6 @@ class NNXDecoder(nnx.Module):
             model_mode,
             bidirectional_mask,
             previous_chunk,
-            page_state,
             slot,
         )
       elif self.is_gemma4:
@@ -1230,7 +1225,6 @@ class NNXDecoder(nnx.Module):
             model_mode,
             bidirectional_mask,
             previous_chunk,
-            page_state,
             slot,
         )
       else:
@@ -1333,7 +1327,6 @@ class NNXDecoder(nnx.Module):
       model_mode,
       bidirectional_mask,
       previous_chunk,
-      page_state,
       slot,
   ):
     """Applies Gemma3 scanned decoder blocks, handling main scan and remainders."""
@@ -1359,9 +1352,7 @@ class NNXDecoder(nnx.Module):
 
       def pure_gemma_fn(graphdef, state_in, y_in):
         merged_layer = nnx.merge(graphdef, state_in)
-        out_y, _ = merged_layer(
-            y_in, *layer_args, previous_chunk=previous_chunk, page_state=page_state, slot=slot, **layer_kwargs
-        )
+        out_y, _ = merged_layer(y_in, *layer_args, previous_chunk=previous_chunk, slot=slot, **layer_kwargs)
         return out_y, nnx.state(merged_layer)
 
       checkpointed_gemma_fn = jax.checkpoint(pure_gemma_fn, policy=policy, prevent_cse=prevent_cse)
@@ -1381,7 +1372,6 @@ class NNXDecoder(nnx.Module):
       model_mode,
       bidirectional_mask,
       previous_chunk,
-      page_state,
       slot,
   ):
     """Applies Gemma4 scanned decoder blocks, handling main scan and remainders."""
@@ -1409,9 +1399,7 @@ class NNXDecoder(nnx.Module):
 
       def pure_gemma_fn(graphdef, state_in, y_in):
         merged_layer = nnx.merge(graphdef, state_in)
-        out_y, _ = merged_layer(
-            y_in, *layer_args, previous_chunk=previous_chunk, page_state=page_state, slot=slot, **layer_kwargs
-        )
+        out_y, _ = merged_layer(y_in, *layer_args, previous_chunk=previous_chunk, slot=slot, **layer_kwargs)
         return out_y, nnx.state(merged_layer)
 
       checkpointed_gemma_fn = jax.checkpoint(pure_gemma_fn, policy=policy, prevent_cse=prevent_cse)

@@ -308,7 +308,6 @@ class Olmo3ScannableBlock(nnx.Module):
           deterministic,
           model_mode,
           previous_chunk=previous_chunk,
-          page_state=page_state,
           slot=slot,
           kv_cache=kv_cache,
           attention_metadata=attention_metadata,

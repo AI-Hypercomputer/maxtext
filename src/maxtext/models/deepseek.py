@@ -26,7 +26,6 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.common.common_types import Config
 from maxtext.common.common_types import HyperConnectionType, MODEL_MODE_PREFILL
-from maxtext.inference import page_manager
 from maxtext.layers import attention_mla
 from maxtext.layers import initializers
 from maxtext.layers import linears
@@ -210,7 +209,6 @@ class DeepSeekGenericLayer(nnx.Module):
       decoder_positions,
       deterministic,
       previous_chunk=None,
-      page_state: None | page_manager.PageState = None,
       slot: None | int = None,
   ):
     """Executes the attention layer."""
@@ -223,7 +221,6 @@ class DeepSeekGenericLayer(nnx.Module):
         model_mode=self.model_mode,
         out_sharding=self.out_sharding,
         previous_chunk=previous_chunk,
-        page_state=page_state,
         slot=slot,
     )
     return self.with_logical_constraint(attention_result)
@@ -271,7 +268,6 @@ class DeepSeekGenericLayer(nnx.Module):
       decoder_positions,
       deterministic,
       previous_chunk=None,
-      page_state: None | page_manager.PageState = None,
       slot: None | int = None,
   ):
     """self-attention with normalization"""
@@ -287,7 +283,6 @@ class DeepSeekGenericLayer(nnx.Module):
           model_mode=self.model_mode,
           out_sharding=self.out_sharding,
           previous_chunk=previous_chunk,
-          page_state=page_state,
           slot=slot,
       )
     else:
@@ -298,7 +293,6 @@ class DeepSeekGenericLayer(nnx.Module):
           decoder_positions,
           deterministic,
           previous_chunk,
-          page_state,
           slot,
       )
       intermediate_inputs = inputs + attention_lnx
@@ -351,7 +345,6 @@ class DeepSeekDenseLayer(DeepSeekGenericLayer):
       deterministic,
       model_mode,
       previous_chunk=None,
-      page_state: None | page_manager.PageState = None,
       slot: None | int = None,
       kv_cache=None,
       attention_metadata=None,
@@ -373,7 +366,6 @@ class DeepSeekDenseLayer(DeepSeekGenericLayer):
         decoder_positions,
         deterministic,
         previous_chunk,
-        page_state,
         slot,
     )
 
@@ -435,7 +427,6 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       deterministic,
       model_mode,
       previous_chunk=None,
-      page_state: None | page_manager.PageState = None,
       slot: None | int = None,
       kv_cache=None,
       attention_metadata=None,
@@ -588,7 +579,6 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
         decoder_positions,
         deterministic,
         previous_chunk,
-        page_state,
         slot,
     )
 

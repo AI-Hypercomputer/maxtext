@@ -339,7 +339,6 @@ class Gemma3ScannableBlock(nnx.Module):
           deterministic,
           model_mode,
           previous_chunk=previous_chunk,
-          page_state=page_state,
           slot=slot,
           bidirectional_mask=bidirectional_mask,
       )

@@ -33,7 +33,6 @@ from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.layers.attentions import Attention
 from maxtext.layers.linears import MlpBlock
-from maxtext.inference import page_manager
 from maxtext.utils import max_utils
 
 
@@ -183,7 +182,6 @@ class Qwen2DecoderLayer(AttentionWithNorm):
       deterministic: bool,
       model_mode: str,
       previous_chunk=None,
-      page_state: None | page_manager.PageState = None,
       slot: None | int = None,
       kv_cache: None | jnp.ndarray = None,
       attention_metadata: None | dict[str, Any] = None,

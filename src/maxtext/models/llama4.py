@@ -26,7 +26,6 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.common.common_types import Array, AttentionType, Config, MODEL_MODE_TRAIN
 from maxtext.common.common_types import MODEL_MODE_PREFILL
-from maxtext.inference import page_manager
 from maxtext.layers import initializers
 from maxtext.layers import linears
 from maxtext.layers import nnx_wrappers
@@ -445,7 +444,6 @@ class Llama4DecoderLayer(nnx.Module):
       model_mode,
       previous_chunk=None,
       slot: None | int = None,
-      page_state: None | page_manager.PageState = None,
       kv_cache=None,
       attention_metadata=None,
   ):
@@ -476,7 +474,6 @@ class Llama4DecoderLayer(nnx.Module):
         deterministic=deterministic,
         model_mode=model_mode,
         slot=slot,
-        page_state=page_state,
         previous_chunk=previous_chunk,
         kv_cache=kv_cache,
         attention_metadata=attention_metadata,
@@ -588,7 +585,6 @@ class Llama4ScannableBlock(nnx.Module):
       model_mode,
       previous_chunk=None,
       slot: None | int = None,
-      page_state: None | page_manager.PageState = None,
       kv_cache=None,
       attention_metadata=None,
   ):
@@ -606,7 +602,6 @@ class Llama4ScannableBlock(nnx.Module):
           deterministic,
           model_mode,
           previous_chunk=previous_chunk,
-          page_state=page_state,
           slot=slot,
           kv_cache=kv_cache,
           attention_metadata=attention_metadata,
