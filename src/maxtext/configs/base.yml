@@ -518,7 +518,7 @@ logical_axis_rules: [
                       # Mixture of Experts (MoE)
                       # ==========================================
                       # MoE Activations
-                      ['activation_batch_moe', ['data', 'fsdp', 'fsdp_transpose']],
+                      ['activation_batch_moe', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_length_moe', ['context']],
                       ['activation_norm_length_moe', ['tensor_sequence', 'context']],
                       ['activation_embed_moe', ['tensor', 'tensor_transpose']],
