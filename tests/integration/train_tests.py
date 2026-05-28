@@ -500,6 +500,8 @@ class TrainTests(unittest.TestCase):
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only
+  # TODO(b/517509898): Skip ZeRo-1 compiler Segfault on TPU7x SparseCore platforms
+  @pytest.mark.skip_on_tpu7x
   def test_tpu_zero1_gradient_accumulation(self):
     zero1_ga = [  # tests Zero-1 optimizer sharding with gradient accumulation
         None,
