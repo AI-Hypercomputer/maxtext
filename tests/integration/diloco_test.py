@@ -30,7 +30,7 @@ import optax
 import pytest
 
 from maxtext.configs.pyconfig import initialize_pydantic
-from maxtext.layers.train_state_nnx import TrainStateNNX
+from maxtext.common.train_state_nnx import TrainStateNNX
 from maxtext.trainers.pre_train.train_compile import main as train_compile_main
 from maxtext.trainers.diloco import diloco
 from tests.utils.test_helpers import get_test_config_path
