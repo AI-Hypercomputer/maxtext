@@ -611,6 +611,8 @@ def build_training_components(
       beta_end=student_config.distill_beta_end,
       beta_schedule=student_config.distill_beta_schedule,
       max_steps=student_config.steps,
+      # [NEW] Extract the flag from the MaxText config object
+      teacher_top_k=student_config.get_keys().get("distill_teacher_top_k", 0),
   )
 
   # Prepare optimizer

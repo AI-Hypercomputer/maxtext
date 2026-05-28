@@ -1259,6 +1259,7 @@ distill_temperature_end: None
 distill_temperature_schedule: "constant"
 distill_beta_end: None
 distill_beta_schedule: "constant"
+distill_teacher_top_k: 0
 
 ##### Elastic training parameters
 # Elastic training is Pathways-specific and does not work on McJAX.

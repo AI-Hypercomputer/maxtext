@@ -342,6 +342,7 @@ class CombinedDistillationStrategy(DistillationStrategy):
       beta_end: float | None = None,
       beta_schedule: Literal["constant", "linear", "cosine"] = "constant",
       max_steps: int = 1,
+      teacher_top_k: int = 0,
   ):
     """Initializes the Combined distillation strategy.
 
@@ -388,6 +389,8 @@ class CombinedDistillationStrategy(DistillationStrategy):
     self.beta_end = beta_end
     self.beta_schedule = beta_schedule
     self.max_steps = max_steps
+    
+    self.teacher_top_k = teacher_top_k
 
     # Validate schedule parameter ranges
     if alpha_end is not None and not 0.0 <= alpha_end <= 1.0:
@@ -496,6 +499,50 @@ class CombinedDistillationStrategy(DistillationStrategy):
     valid_count = jnp.sum(mask)
     safe_count = jnp.maximum(valid_count, 1.0)
     
+    # # --- Soft loss: KL on temperature-softened distributions ---
+    # if getattr(teacher_output, "top_k_indices", None) is not None:
+    #   # --- SPARSE KL DIVERGENCE (Offline Mode) ---
+    #   # 1. Normalize teacher probabilities ONLY over the saved Top-K subset
+    #   t_p_T_sparse = jax.nn.softmax(t_logits / temperature, axis=-1)
+    #   log_t_p_T_sparse = jax.nn.log_softmax(t_logits / temperature, axis=-1)
+
+    #   # 2. Student log-probs must be computed over the FULL vocabulary to be mathematically valid
+    #   log_s_T_full = jax.nn.log_softmax(s_logits / temperature, axis=-1)
+      
+    #   # 3. Gather Student log-probs at the Teacher's exact Top-K indices
+    #   log_s_T_sparse = jnp.take_along_axis(log_s_T_full, teacher_output.top_k_indices, axis=-1)
+      
+    #   # 4. KL(T || S) = Sum_over_TopK( P_T * (log_P_T - log_P_S) )
+    #   kl_softened_per_pos = jnp.sum(t_p_T_sparse * (log_t_p_T_sparse - log_s_T_sparse), axis=-1)
+      
+    #   # We don't have the full teacher logits to compute exact cross-entropy, so we zero it out
+    #   ce_teacher_per_pos = jnp.zeros_like(kl_softened_per_pos)
+    #   kl_t1_sum = jnp.array(0.0) 
+      
+    # else:
+    #   # --- DENSE KL DIVERGENCE (Online Mode) ---
+      
+    #   # [NEW] Intercept and mask teacher logits if Top-K is specified
+    #   if self.teacher_top_k > 0:
+    #     # Find the threshold value for the Top-K elements
+    #     top_k_vals, _ = jax.lax.top_k(t_logits, self.teacher_top_k)
+    #     kth_vals = top_k_vals[..., -1:]  # Get the smallest value in the Top-K
+    #     # Mask everything below the K-th value to -inf
+    #     t_logits = jnp.where(t_logits >= kth_vals, t_logits, -jnp.inf)
+        
+    #   log_s_T = jax.nn.log_softmax(s_logits / temperature, axis=-1)
+    #   t_p_T = jax.nn.softmax(t_logits / temperature, axis=-1)
+    #   kl_softened_per_pos = optax.kl_divergence(log_s_T, t_p_T)  # [B, T]
+      
+    #   # --- Teacher CE (verification metric) ---
+    #   ce_teacher_per_pos = optax.softmax_cross_entropy(logits=t_logits, labels=labels)
+      
+    #   # --- Always-T=1 KL ---
+    #   log_s_1 = jax.nn.log_softmax(s_logits, axis=-1)
+    #   t_p_1 = jax.nn.softmax(t_logits, axis=-1)
+    #   kl_t1_per_pos = optax.kl_divergence(log_s_1, t_p_1)
+    #   kl_t1_sum = jnp.sum(kl_t1_per_pos * mask)
+    
     # --- Soft loss: KL on temperature-softened distributions ---
     if getattr(teacher_output, "top_k_indices", None) is not None:
       # --- SPARSE KL DIVERGENCE (Offline Mode) ---
@@ -516,6 +563,35 @@ class CombinedDistillationStrategy(DistillationStrategy):
       ce_teacher_per_pos = jnp.zeros_like(kl_softened_per_pos)
       kl_t1_sum = jnp.array(0.0) 
       
+    elif getattr(self, "teacher_top_k", 0) > 0:
+      # --- SPARSE KL DIVERGENCE (Online Top-K Mode) ---
+      # 1. Dynamically extract Top-K from the dense teacher logits
+      t_logits_top_k, t_indices_top_k = jax.lax.top_k(t_logits, self.teacher_top_k)
+      
+      # 2. Normalize teacher probabilities ONLY over the Top-K subset
+      t_p_T_sparse = jax.nn.softmax(t_logits_top_k / temperature, axis=-1)
+      log_t_p_T_sparse = jax.nn.log_softmax(t_logits_top_k / temperature, axis=-1)
+      
+      # 3. Student log-probs over the FULL vocabulary
+      log_s_T_full = jax.nn.log_softmax(s_logits / temperature, axis=-1)
+      
+      # 4. Gather Student log-probs at the Teacher's exact Top-K indices
+      log_s_T_sparse = jnp.take_along_axis(log_s_T_full, t_indices_top_k, axis=-1)
+      
+      # 5. KL(T || S)
+      kl_softened_per_pos = jnp.sum(t_p_T_sparse * (log_t_p_T_sparse - log_s_T_sparse), axis=-1)
+      
+      # --- Teacher CE (verification metric) on the FULL dense logits ---
+      ce_teacher_per_pos = optax.softmax_cross_entropy(logits=t_logits, labels=labels)
+      
+      # --- Always-T=1 KL (Sparse Approximation for metrics) ---
+      log_s_1_full = jax.nn.log_softmax(s_logits, axis=-1)
+      log_s_1_sparse = jnp.take_along_axis(log_s_1_full, t_indices_top_k, axis=-1)
+      t_p_1_sparse = jax.nn.softmax(t_logits_top_k, axis=-1)
+      log_t_p_1_sparse = jax.nn.log_softmax(t_logits_top_k, axis=-1)
+      kl_t1_per_pos = jnp.sum(t_p_1_sparse * (log_t_p_1_sparse - log_s_1_sparse), axis=-1)
+      kl_t1_sum = jnp.sum(kl_t1_per_pos * mask)
+
     else:
       # --- DENSE KL DIVERGENCE (Online Mode) ---
       log_s_T = jax.nn.log_softmax(s_logits / temperature, axis=-1)
