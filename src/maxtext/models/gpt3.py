@@ -28,6 +28,7 @@ from flax import linen as nn
 from flax import nnx
 
 from maxtext.common.common_types import Config, DType, AxisNames, BATCH, LENGTH, EMBED, HEAD, D_KV, Array, MODEL_MODE_TRAIN
+from maxtext.inference import kvcache
 from maxtext.layers import initializers, nnx_wrappers
 from maxtext.layers.linears import DenseGeneral, MlpBlock, canonicalize_tuple, normalize_axes
 from maxtext.layers import quantizations
@@ -35,7 +36,6 @@ from maxtext.layers import linears
 from maxtext.layers.attentions import AttentionOp, KVQuant
 from maxtext.layers.initializers import Initializer, NdInitializer, nd_dense_init
 from maxtext.layers.quantizations import AqtQuantization as Quant
-from maxtext.inference import kvcache
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 
@@ -258,6 +258,7 @@ class Gpt3MultiHeadAttention(nnx.Module):
         mesh=self.mesh,
         attention_kernel=self.attention_kernel,
         max_target_length=self.max_target_length,
+        max_prefill_predict_length=self.max_prefill_predict_length,
         float32_qk_product=self.float32_qk_product,
         float32_logits=self.float32_logits,
         quant=self.quant,

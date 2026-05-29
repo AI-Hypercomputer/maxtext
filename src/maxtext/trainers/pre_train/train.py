@@ -371,7 +371,8 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
           is_train=True,
       )
     else:
-      model_graphdef, curr_params, rest = nnx.split(state.model, nnx.Param, ...)
+      OverwriteWithGradient = nnx.variablelib.variable_type_from_name(maxtext_utils.OVERWRITE_WITH_GRADIENT, allow_register=True)
+      model_graphdef, curr_params, overwrite_vars, rest = nnx.split(state.model, nnx.Param, OverwriteWithGradient, ...)
       if config.parameter_memory_host_offload:
         # Params are kept on host (pinned_host) in in_shardings. Move only Param
         # variables to device before the forward/backward pass so that all dot_general
@@ -398,15 +399,16 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       _nnx_loss_fn = ga_fn
       _nnx_extra_dpo_args = ga_dpo
 
-      def diff_wrapper(param, rest, config, data):
-        local_model = nnx.merge(model_graphdef, param, rest, copy=True)
+      def diff_wrapper(param, overwrite_vars, rest, config, data):
+        local_model = nnx.merge(model_graphdef, param, overwrite_vars, rest, copy=True)
         loss, aux = _nnx_loss_fn(local_model, config, data, None, None, *_nnx_extra_dpo_args, is_train=True)
-        _, _, new_rest = nnx.split(local_model, nnx.Param, ...)
-        return loss, (aux, new_rest)
+        _, _, new_overwrite_vars, new_rest = nnx.split(local_model, nnx.Param, OverwriteWithGradient, ...)
+        return loss, (aux, new_overwrite_vars, new_rest)
 
-      grad_func = jax.value_and_grad(diff_wrapper, argnums=0, has_aux=True)
-      (loss, (aux, new_rest)), raw_grads = grad_func(curr_params, rest, config, data)
+      grad_func = jax.value_and_grad(diff_wrapper, argnums=(0, 1), has_aux=True)
+      (loss, (aux, new_overwrite_vars, new_rest)), (raw_grads, overwrite_grads) = grad_func(curr_params, overwrite_vars, rest, config, data)
       nnx.update(state.model, new_rest)
+      nnx.update(state.model, overwrite_grads)
 
   raw_grads = jax.tree_util.tree_map(
       lambda x: x.astype(config.grad_dtype) if x.dtype == jnp.float32 else x,
@@ -526,11 +528,11 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       "learning/total_weights": total_weights,
   }
   if config.use_qk_clip:
-    # Apply QK-Clip (Linen path only; NNX uses different state layout — TODO: implement for NNX)
     if isinstance(model, nn.Module):
       new_state = qk_clip_utils.apply_qk_clip(new_state, intermediate_outputs, config)
+    else:
+      new_state = qk_clip_utils.apply_qk_clip_nnx(new_state, intermediate_outputs, config)
 
-    # Report max_logits metric
     global_max_logit = qk_clip_utils.calculate_max_logit_metric(intermediate_outputs)
     if global_max_logit is not None:
       scalar_metrics["learning/max_logits"] = global_max_logit

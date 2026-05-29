@@ -707,6 +707,30 @@ def configure_kv_quant(config):
   return None if not config.quantize_kvcache else KVQuant(config)
 
 
+def _apply_linen_module_in_nnx(linen_module_cls, op_id, *args, **kwargs):
+  try:
+    from qwix._src import flax_util
+    parent = flax_util.get_current_module()
+    from flax import nnx
+    is_nnx = isinstance(parent, nnx.Module)
+  except Exception:
+    is_nnx = False
+
+  if is_nnx:
+    attr_name = f"_qwix_fp8_gpu_{op_id}"
+    if not hasattr(parent, attr_name):
+      from maxtext.layers import nnx_wrappers
+      rngs = getattr(parent, "qwix_rngs", None)
+      if rngs is None:
+        rngs = nnx.Rngs(0)
+      wrapper = nnx_wrappers.ToNNX(linen_module_cls(name=op_id), rngs=rngs)
+      wrapper.lazy_init(*args, **kwargs)
+      setattr(parent, attr_name, wrapper)
+    return getattr(parent, attr_name)(*args, mutable=["_overwrite_with_gradient"], **kwargs)
+  else:
+    return linen_module_cls(name=op_id)(*args, **kwargs)
+
+
 class NvidaFp8Provider(qwix.QtProvider):
   """Wraps nn.Fp8DirectDotGeneralOp with Qwix's provider interface."""
 
@@ -715,13 +739,13 @@ class NvidaFp8Provider(qwix.QtProvider):
     rule, op_id = self._get_current_rule_and_op_id("dot_general")
     if rule is None:
       return jax.lax.dot_general(*args, **kwargs)
-    return nn.Fp8DirectDotGeneralOp(name=op_id)(*args, **kwargs)
+    return _apply_linen_module_in_nnx(nn.Fp8DirectDotGeneralOp, op_id, *args, **kwargs)
 
   def einsum(self, *args, **kwargs):
     rule, op_id = self._get_current_rule_and_op_id("einsum")
     if rule is None:
       return jnp.einsum(*args, **kwargs)
-    return nn.Fp8Einsum(name=op_id)(*args, **kwargs)
+    return _apply_linen_module_in_nnx(nn.Fp8Einsum, op_id, *args, **kwargs)
 
 
 class NANOOFp8Provider(qwix.QtProvider):
@@ -731,7 +755,7 @@ class NANOOFp8Provider(qwix.QtProvider):
     rule, op_id = self._get_current_rule_and_op_id("dot_general")
     if rule is None:
       return jax.lax.dot_general(*args, **kwargs)
-    return nn.NANOOFp8DotGeneralOp(name=op_id)(*args, **kwargs)
+    return _apply_linen_module_in_nnx(nn.NANOOFp8DotGeneralOp, op_id, *args, **kwargs)
 
 
 def get_fp8_full_qwix_rule_w_sparsity(config: Config):
@@ -759,8 +783,8 @@ def get_fp8_full_qwix_rule_w_sparsity(config: Config):
 
 
 def get_quantization_rule(config: Config):
-
   """Returns a list of qwix.QtRule from `dtype`."""
+
   def make_qt_rule(dtype) -> list[qwix.QtRule]:
     return [
         qwix.QtRule(
@@ -812,7 +836,15 @@ def maybe_quantize_model(model, config):
   if config.use_qwix_quantization and not config.use_batch_split_schedule:
     quantization_provider = get_qt_provider(config)
     if quantization_provider:
-      model = qwix.quantize_model(model, quantization_provider)
+      if config.pure_nnx:
+        input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
+        import jax.numpy as jnp
+        dummy_tokens = jnp.ones(input_shape, dtype=jnp.int32)
+        dummy_positions = jnp.ones(input_shape, dtype=jnp.int32)
+        dummy_segment_ids = jnp.ones(input_shape, dtype=jnp.int32)
+        model = qwix.quantize_model(model, quantization_provider, dummy_tokens, dummy_positions, dummy_segment_ids, enable_dropout=False)
+      else:
+        model = qwix.quantize_model(model, quantization_provider)
   return model
 
 
