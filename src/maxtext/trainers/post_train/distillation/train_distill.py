@@ -45,6 +45,8 @@ import jax
 import jax.numpy as jnp
 import optax
 import re
+import os
+import pathwaysutils
 from orbax import checkpoint
 
 # MaxText Imports
@@ -210,6 +212,8 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
   This class overrides `_prepare_inputs` to ensure MaxText-specific fields
   (positions, segment_ids) are passed to the model.
   """
+
+  checkpoint_manager: distillation_utils.MaxTextCheckpointManager | None
 
   def __init__(
       self,
@@ -506,10 +510,9 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
         )
 
     # 1. Ensure clean resource release of the base class's manager
-    # pylint: disable=access-member-before-definition
-    if self.checkpoint_manager:
-      self.checkpoint_manager.close()
-    # pylint: enable=access-member-before-definition
+    cm = self.checkpoint_manager
+    if cm is not None:
+      cm.close()
 
     # 2. Assign the specialized manager
     self.checkpoint_manager = distillation_utils.MaxTextCheckpointManager(
@@ -873,6 +876,14 @@ def main(argv: Sequence[str]) -> None:
   Args:
     argv: List of command-line arguments. Expects [script_name, config_file, ...].
   """
+
+  pathwaysutils.initialize()
+  jax.config.update("jax_default_prng_impl", "unsafe_rbg")
+  if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
+    os.environ["LIBTPU_INIT_ARGS"] = (
+        os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+    )
+
   # 1. Parse Global Config to extract Overrides
   global_config = pyconfig.initialize(argv)
   _save_run_manifest(argv, global_config)
