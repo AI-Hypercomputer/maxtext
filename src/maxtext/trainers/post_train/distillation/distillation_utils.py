@@ -29,12 +29,17 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 from etils import epath
-from array_record.python import array_record_module
+
+try:
+  from array_record import ArrayRecordReader
+except ImportError:
+  from array_record.python.array_record_module import ArrayRecordReader  # pytype: disable=import-error
+
 from orbax import checkpoint
 
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils
-# Reuse MaxText's native checkpointing logic
+# Reuse MaxText's native checkpointing logic.
 from maxtext.common.checkpointing import GrainCheckpointHandler, GrainCheckpointSave, GrainCheckpointRestore
 from tunix.sft import checkpoint_manager as tunix_checkpoint_manager
 from tunix.sft import peft_trainer
@@ -84,13 +89,19 @@ class MaxTextTrainingInput(peft_trainer.TrainingInput):
 class OfflineArrayRecordIterator:
   """Reads the pre-generated global top-k logits file."""
 
-  def __init__(self, data_dir: str, epochs: int = 100):
+  def __init__(
+      self,
+      data_dir: str,
+      epochs: int = 100,
+      reader_factory: Callable[[str], ArrayRecordReader] = ArrayRecordReader,
+  ):
     self.filepath = data_dir
 
     if not epath.Path(self.filepath).exists():
       raise FileNotFoundError(f"Offline distillation file not found: {self.filepath}")
 
-    self.reader = array_record_module.ArrayRecordReader(self.filepath)
+    self.reader_factory = reader_factory
+    self.reader = self.reader_factory(self.filepath)
     self.num_records = self.reader.num_records()
     self.epochs = epochs
     self.current_epoch = 0
@@ -105,8 +116,10 @@ class OfflineArrayRecordIterator:
       if self.current_epoch >= self.epochs:
         raise StopIteration
 
+      # Close the current reader before opening a new one.
+      self.reader.close()
       self.record_index = 0
-      self.reader = array_record_module.ArrayRecordReader(self.filepath)
+      self.reader = self.reader_factory(self.filepath)
 
     record = self.reader.read()
     self.record_index += 1
