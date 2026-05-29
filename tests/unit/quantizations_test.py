@@ -386,10 +386,10 @@ class QuantTest(unittest.TestCase):
 
     jax.tree_util.tree_map_with_path(compare_fn, a, b)
 
-  def quantization_config(self, quant, logits_tolerance=2e-1, grad_tolerance=5e-1):
+  def quantization_config(self, quant, logits_tolerance=2e-1, grad_tolerance=5e-1, **kwargs):
     """Run forward pass and backward pass for quantized model and compare with base model."""
     # pylint: disable=protected-access
-    cfg = self.init_pyconfig(quantization=quant)
+    cfg = self.init_pyconfig(quantization=quant, **kwargs)
     ids, decoder_segment_ids, decoder_positions = self.get_data()
 
     if cfg.pure_nnx:
@@ -549,10 +549,10 @@ class QuantTest(unittest.TestCase):
   def test_fp8_full_quantization(self):
     self.quantization_config("fp8_full")
 
-  @pytest.mark.gpu_only
+  # @pytest.mark.gpu_only
   @pytest.mark.external_serving
   def test_fp8_gpu_quantization(self):
-    self.quantization_config("fp8_gpu", grad_tolerance=1.5)
+    self.quantization_config("fp8_gpu", grad_tolerance=1.5, pure_nnx=True, enable_nnx=True)
 
 
 

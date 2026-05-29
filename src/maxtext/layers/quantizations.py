@@ -726,7 +726,7 @@ def _apply_linen_module_in_nnx(linen_module_cls, op_id, *args, **kwargs):
       wrapper = nnx_wrappers.ToNNX(linen_module_cls(name=op_id), rngs=rngs)
       wrapper.lazy_init(*args, **kwargs)
       setattr(parent, attr_name, wrapper)
-    return getattr(parent, attr_name)(*args, **kwargs)
+    return getattr(parent, attr_name)(*args, mutable=["_overwrite_with_gradient"], **kwargs)
   else:
     return linen_module_cls(name=op_id)(*args, **kwargs)
 
