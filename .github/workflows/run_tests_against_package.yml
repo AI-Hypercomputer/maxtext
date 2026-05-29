@@ -134,8 +134,9 @@ jobs:
       - name: Run Tests
         shell: bash
         run: |
+          set -x
           LOG_FILE="/tmp/pytest_output_$(date +%Y%m%d_%H%M%S).txt"
-          # Upload log to GCS on any exit (normal, error, or SIGTERM from pod eviction)
+          
           upload_log() {
             echo "=== Uploading pytest log to GCS ==="
             gcloud storage cp "$LOG_FILE" "gs://runner-maxtext-logs/pytest-logs/" 2>&1 \
@@ -144,18 +145,16 @@ jobs:
           }
           trap upload_log EXIT SIGTERM SIGHUP
 
-          # Determine environment and entry directory
+          echo "=== DEBUG: Determining environment ==="
           if [ "${INPUTS_MAXTEXT_INSTALLED}" == "true" ]; then
-            # Move to the directory where code is baked into the image. See the Dockerfile.
             cd /deps
             PYTHON_EXE="python3"
-            # Disable coverage flags when testing against a pre-installed package
             PYTEST_COV_ARGS=""
+            echo "DEBUG: Running against pre-installed package in /deps"
           else
             source .venv/bin/activate
-            # Use the local virtual environment created in Step 3
             PYTHON_EXE=".venv/bin/python3"
-            # Ensure pytest-cov is available and enable coverage flags
+            echo "DEBUG: Installing pytest-cov..."
             uv pip install pytest-cov
             PYTEST_COV_ARGS="--cov=maxtext --cov-report=xml --cov-report=term"
           fi
@@ -166,43 +165,67 @@ jobs:
           else
             FINAL_PYTEST_MARKER="${INPUTS_PYTEST_MARKER} and not scheduled_only"
           fi
-          # TODO: Use package data for testing and remove the env vars
+          
           export MAXTEXT_REPO_ROOT=$(pwd)
           echo "MAXTEXT_REPO_ROOT (the current working directory) is ${MAXTEXT_REPO_ROOT}."
+          
+          # --- NEW DEBUG LOGGING BLOCK ---
+          echo "=== DEBUG: Workspace State ==="
+          ls -la
+          echo "=== DEBUG: Python Info ==="
+          which $PYTHON_EXE || echo "WARNING: Executable not found in path"
+          $PYTHON_EXE --version
+          echo "=== DEBUG: Pip Freeze ==="
+          $PYTHON_EXE -m pip freeze
+          # -------------------------------
+
           export MAXTEXT_ASSETS_ROOT=$(pwd)/src/maxtext/assets
           export MAXTEXT_TEST_ASSETS_ROOT=$(pwd)/tests/assets
           export MAXTEXT_PKG_DIR=$(pwd)/src/maxtext
-          # omit this libtpu init args for gpu tests
+          
+          echo "=== DEBUG: Setting up environment variables ==="
           if [ "${INPUTS_DEVICE_TYPE}" != "cuda12" ]; then
             export LIBTPU_INIT_ARGS='--xla_tpu_scoped_vmem_limit_kib=65536'
-          else
-            # For cuda12, explicitly point to the pip-installed CUDA libraries
-            # to avoid conflicts with system-level installations on the runner.
+            echo "DEBUG: Set LIBTPU_INIT_ARGS for non-cuda12"
+          elif [ "${INPUTS_MAXTEXT_INSTALLED}" != "true" ]; then
             if [ -d ".venv/lib/python3.12/site-packages/nvidia" ]; then
               export LD_LIBRARY_PATH=$(pwd)/.venv/lib/python3.12/site-packages/nvidia/cudnn/lib:${LD_LIBRARY_PATH}
+              echo "DEBUG: Set LD_LIBRARY_PATH for cuda12"
             else
               echo "Warning: Could not find pinned nvidia libraries in .venv."
             fi
           fi
+
           if [ "${INPUTS_TOTAL_WORKERS}" -gt 1 ]; then
-            $PYTHON_EXE -m pip install --quiet pytest-split pytest-xdist
+            echo "=== DEBUG: Installing distributed testing dependencies ==="
+            # Removed --quiet so you can see if the installation fails here
+            $PYTHON_EXE -m pip install pytest-split pytest-xdist
             SPLIT_ARGS="--splits ${INPUTS_TOTAL_WORKERS} --group ${INPUTS_WORKER_GROUP} -n auto"
           else
             SPLIT_ARGS=""
           fi
 
-          # Setup substitution: If manually updating HLO, skip tests execution and run only the update script instead!
+          echo "=== DEBUG: Preparing to execute tests ==="
           if [ "${INPUTS_IS_UPDATE_HLO}" == "true" ]; then
-            python3 tests/utils/update_hlo_references.py
+            echo "DEBUG: Executing update_hlo_references.py..."
+            $PYTHON_EXE tests/utils/update_hlo_references.py
           else
+            echo "DEBUG: Starting Pytest..."
+            echo "Command args: -m \"${FINAL_PYTEST_MARKER}\" $PYTEST_COV_ARGS $SPLIT_ARGS ${INPUTS_PYTEST_EXTRA_ARGS}"
+            
+            # Added -vv and --showlocals for deeper traceback logging
             $PYTHON_EXE -m pytest ${INPUTS_PYTEST_ADDOPTS} \
-              -v \
+              -vv \
+              --showlocals \
               -m "${FINAL_PYTEST_MARKER}" \
               --durations=0 \
               $PYTEST_COV_ARGS \
               $SPLIT_ARGS \
               ${INPUTS_PYTEST_EXTRA_ARGS} 2>&1 | tee "$LOG_FILE"
-            exit ${PIPESTATUS[0]}
+            
+            EXIT_CODE=${PIPESTATUS[0]}
+            echo "=== DEBUG: Pytest finished with exit code ${EXIT_CODE} ==="
+            exit $EXIT_CODE
           fi
 
         env:
