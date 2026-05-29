@@ -789,6 +789,7 @@ class Attention(nnx.Module):
     rope_use_scale = self.config.rope_use_scale
     if self.is_vision:
       if self.config.model_name.startswith("qwen3-omni") or self.config.model_name.startswith("qwen3.5"):
+        print(f"DEBUG: Instantiating Qwen3OmniMoeVisionRotaryEmbedding for {self.config.model_name}")
         rotary_embedding = Qwen3OmniMoeVisionRotaryEmbedding(
             hidden_size=self.config.hidden_size_for_vit,
             num_attention_heads=self.config.num_attention_heads_for_vit,
@@ -812,6 +813,7 @@ class Attention(nnx.Module):
         raise ValueError(f"Unsupported model type for vision rotary embedding: {self.config.model_name}")
 
     elif self.use_mrope:
+      print(f"DEBUG: Instantiating Qwen3OmniMoeThinkerTextRotaryEmbedding for {self.config.model_name}")
       rotary_embedding = Qwen3OmniMoeThinkerTextRotaryEmbedding(
           min_timescale=self.config.rope_min_timescale,
           max_timescale=self.rope_max_timescale,
@@ -851,6 +853,7 @@ class Attention(nnx.Module):
           rngs=self.rngs,
       )
     elif self.is_qwen3_hybrid:
+      print(f"DEBUG: Instantiating PartialRotaryEmbedding (hybrid) for {self.config.model_name}")
       rotary_embedding = PartialRotaryEmbedding(
           min_timescale=self.config.rope_min_timescale,
           max_timescale=self.rope_max_timescale,
