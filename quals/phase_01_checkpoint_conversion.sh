@@ -20,7 +20,7 @@ echo "Starting conversion for $MODEL..."
 python3 -m maxtext.checkpoint_conversion.to_maxtext \
     model_name=${MODEL?} \
     base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
-    scan_layers=False \
+    scan_layers=True \
     use_multimodal=false \
     hardware=cpu \
     skip_jax_distributed_system=true \

@@ -70,6 +70,7 @@ class TunixMaxTextAdapter(nnx.Module):
       attention_mask: Optional[Array],  # [B, L, L] or None
       decoder_segment_ids: Optional[Array] = None,
       output_hidden_states: bool = False,  # ignored
+      **kwargs, # Accept extra kwargs safely
   ) -> Tuple[Array, None]:
     """Forward compatible with Tunix Trainers default loss.
     Returns logits, None.

@@ -1,13 +1,29 @@
 #!/bin/bash
-# Phase 1: MaxText Baseline Evaluation (Pre-DPO)
-# This script runs a single-step evaluation to establish baseline alignment metrics.
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Phase 2: SFT Baseline Metrics Evaluation (Pre-DPO)
+# This script runs a single-step DPO training run to establish baseline alignment metrics.
+
+set -e
 
 if [ -f .env ]; then
   source .env
 fi
 
 if [ -z "$HF_TOKEN" ]; then
-  echo "Error: HF_TOKEN is not set."
+  echo "Error: HF_TOKEN is not set. Please export HF_TOKEN before running."
   exit 1
 fi
 
@@ -15,9 +31,10 @@ export HF_TOKEN=$HF_TOKEN
 
 RUN_NAME="dpo-baseline-qwen-v11-$(date +%s)"
 
-# Ensure a fresh run by cleaning up the output directory
+# Ensure a fresh run by cleaning up any prior output directories under this run name
 gsutil -m rm -rf gs://igorts_europe/ttl=30d/dpo_quals/maxtext_baseline/${RUN_NAME} || true
 
+# Execute DPO training for exactly 1 step to evaluate SFT baseline alignment metrics
 python3 -m maxtext.trainers.post_train.dpo.train_dpo \
     run_name="${RUN_NAME}" \
     base_output_directory="gs://igorts_europe/ttl=30d/dpo_quals/maxtext_baseline" \
@@ -37,8 +54,7 @@ python3 -m maxtext.trainers.post_train.dpo.train_dpo \
     eval_steps=5 \
     learning_rate=1e-6 \
     weight_dtype=bfloat16 \
-    dpo_beta=0.1 \
-    scan_layers=False \
+    scan_layers=True \
     log_config=0 \
     async_checkpointing=False \
     enable_checkpointing=True
