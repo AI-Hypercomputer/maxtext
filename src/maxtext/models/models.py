@@ -127,6 +127,8 @@ class TransformerLinenPure(nn.Module):
       decoder_segment_ids=None,
       encoder_images: None | jnp.ndarray = None,
       encoder_image_masks: None | jnp.ndarray = None,
+      encoder_videos: None | jnp.ndarray = None,
+      encoder_video_masks: None | jnp.ndarray = None,
       encoder_audios: None | jnp.ndarray = None,
       enable_dropout=True,
       model_mode=MODEL_MODE_TRAIN,
@@ -153,8 +155,10 @@ class TransformerLinenPure(nn.Module):
           f" which is always {DECODING_ACTIVE_SEQUENCE_INDICATOR}."
       )
 
-    bidirectional_mask = None
+    bidirectional_mask_image = None
+    bidirectional_mask_video = None
     image_embeddings = None
+    video_embeddings = None
     audio_embeddings = None
     deepstack_visual_embeds = None
 
@@ -162,8 +166,17 @@ class TransformerLinenPure(nn.Module):
       image_embeddings, deepstack_visual_embeds = self.vision_encoder(
           input_images=encoder_images, deterministic=not enable_dropout
       )
+      bidirectional_mask_image = mm_processor.get_bidirectional_mask_vision(
+          self.config, decoder_input_tokens, is_video=False
+      )
 
-      bidirectional_mask = mm_processor.get_bidirectional_mask_vision(self.config, decoder_input_tokens)
+    if self.config.use_multimodal and encoder_videos is not None:
+      video_embeddings, deepstack_visual_embeds = self.vision_encoder(
+          input_images=encoder_videos, deterministic=not enable_dropout
+      )
+      bidirectional_mask_video = mm_processor.get_bidirectional_mask_vision(
+          self.config, decoder_input_tokens, is_video=True
+      )
 
     if self.config.use_multimodal and encoder_audios is not None and self.audio_encoder is not None:
       audio_embeddings = self.audio_encoder(input_audio=encoder_audios, deterministic=not enable_dropout)
@@ -174,13 +187,16 @@ class TransformerLinenPure(nn.Module):
       audio_masks = mm_processor.get_bidirectional_mask_audio(self.config, decoder_input_tokens)
 
     multimodal_input = None
-    if image_embeddings is not None or audio_embeddings is not None:
+    if image_embeddings is not None or video_embeddings is not None or audio_embeddings is not None:
       multimodal_input = MultimodalInput(
           image_embeddings=image_embeddings,
           image_masks=encoder_image_masks,
+          video_embeddings=video_embeddings,
+          video_masks=encoder_video_masks,
           audio_embeddings=audio_embeddings,
           audio_masks=audio_masks,
-          bidirectional_mask=bidirectional_mask,
+          bidirectional_mask=bidirectional_mask_image,
+          bidirectional_mask_video=bidirectional_mask_video,
       )
 
     logits, hidden_state, kv_caches = self.decoder(
@@ -425,6 +441,8 @@ class Transformer(nnx.Module):
       cache=None,
       encoder_images: jax.Array | None = None,
       encoder_image_masks: jax.Array | None = None,
+      encoder_videos: jax.Array | None = None,
+      encoder_video_masks: jax.Array | None = None,
       encoder_audios: jax.Array | None = None,
       enable_dropout=True,
       model_mode=MODEL_MODE_TRAIN,
@@ -466,16 +484,28 @@ class Transformer(nnx.Module):
           f" which is always {DECODING_ACTIVE_SEQUENCE_INDICATOR}."
       )
 
-    bidirectional_mask = None
+    bidirectional_mask_image = None
+    bidirectional_mask_video = None
     image_embeddings = None
+    video_embeddings = None
+    audio_embeddings = None
     deepstack_visual_embeds = None
     if self.config.use_multimodal and encoder_images is not None:
       image_embeddings, deepstack_visual_embeds = self.vision_encoder(
           input_images=encoder_images, deterministic=not enable_dropout
       )
-      bidirectional_mask = mm_processor.get_bidirectional_mask_vision(self.config, decoder_input_tokens)
+      bidirectional_mask_image = mm_processor.get_bidirectional_mask_vision(
+          self.config, decoder_input_tokens, is_video=False
+      )
 
-    audio_embeddings = None
+    if self.config.use_multimodal and encoder_videos is not None:
+      video_embeddings, deepstack_visual_embeds = self.vision_encoder(
+          input_images=encoder_videos, deterministic=not enable_dropout
+      )
+      bidirectional_mask_video = mm_processor.get_bidirectional_mask_vision(
+          self.config, decoder_input_tokens, is_video=True
+      )
+
     if self.config.use_multimodal and encoder_audios is not None and self.audio_encoder is not None:
       audio_embeddings = self.audio_encoder(input_audio=encoder_audios, deterministic=not enable_dropout)
 
@@ -485,13 +515,16 @@ class Transformer(nnx.Module):
       audio_masks = mm_processor.get_bidirectional_mask_audio(self.config, decoder_input_tokens)
 
     multimodal_input = None
-    if image_embeddings is not None or audio_embeddings is not None:
+    if image_embeddings is not None or video_embeddings is not None or audio_embeddings is not None:
       multimodal_input = MultimodalInput(
           image_embeddings=image_embeddings,
           image_masks=encoder_image_masks,
+          video_embeddings=video_embeddings,
+          video_masks=encoder_video_masks,
           audio_embeddings=audio_embeddings,
           audio_masks=audio_masks,
-          bidirectional_mask=bidirectional_mask,
+          bidirectional_mask=bidirectional_mask_image,
+          bidirectional_mask_video=bidirectional_mask_video,
       )
 
     mutable_collections = []
