@@ -38,6 +38,8 @@ Then use this command to convert an unscanned checkpoint from HuggingFace to Max
 ```shell
 # Your Hugging Face access token. Required to download gated models like Llama.
 # You can generate one at https://huggingface.co/settings/tokens.
+# We explicitly set lazy_load_tensors to False here as lazy loading of tensors
+# is not supported when use_multimodal is True.
 export HF_TOKEN=<Hugging Face access token>
 export MAXTEXT_CKPT_PATH=<Checkpoint GCS path> # gs://my-bucket/path
 python -m maxtext.checkpoint_conversion.to_maxtext \
@@ -45,7 +47,8 @@ python -m maxtext.checkpoint_conversion.to_maxtext \
     hf_access_token=${HF_TOKEN?} \
     base_output_directory=${MAXTEXT_CKPT_PATH?} \
     use_multimodal=true \
-    scan_layers=false
+    scan_layers=false \
+    --lazy_load_tensors=False
 ```
 
 For the Llama4 model family, we are using a separate checkpoint conversion script (of note, we will gradually migrate all checkpoint conversion scripts to the above consolidated tool soon):
