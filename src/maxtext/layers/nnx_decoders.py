@@ -665,22 +665,7 @@ class NNXDecoder(nnx.Module):
       params = nnx_ensure_scan_leading_axis(params, length)
       state = nnx_ensure_scan_leading_axis(state, length)
 
-      # Linen FP8 ops keep amax_history in mutable Linen scope; jax.lax.scan
-      # leaks the tracer and hits UnexpectedTracerError. Use a Python for-loop
-      # for FP8 instead.
-      uses_linen_fp8_mutable_state = self.config.quantization in ("fp8_nanoo", "fp8_gpu")
-      if uses_linen_fp8_mutable_state:
-        carry = x_in
-        per_layer_states = []
-        for i in range(length):
-          current_params = jax.tree.map(lambda x, i=i: x[i], params)
-          current_state = jax.tree.map(lambda x, i=i: x[i], state)
-          carry, new_state_i = layer_fn(carry, (current_params, current_state))
-          per_layer_states.append(new_state_i)
-        final_carry = carry
-        scanned_state = jax.tree.map(lambda *xs: jnp.stack(list(xs)), *per_layer_states)
-      else:
-        final_carry, scanned_state = jax.lax.scan(layer_fn_wrapped, x_in, (params, state))
+      final_carry, scanned_state = jax.lax.scan(layer_fn_wrapped, x_in, (params, state))
       returned_kv_stacked = None
 
     if scan_axis != 0:
