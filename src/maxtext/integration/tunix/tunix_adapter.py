@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from typing import Any, Optional, Tuple
 
+import jax.numpy as jnp
 from flax import nnx
 from jax import Array
 from maxtext.checkpoint_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS  # pylint: disable=ungrouped-imports
@@ -38,6 +39,7 @@ class TunixMaxTextAdapter(nnx.Module):
       base_model: Transformer,
       use_standalone_mappings: bool = True,
       use_no_op_mappings: bool = False,
+      pad_id: Optional[int] = None,
   ):
     super().__init__()
     self.base = base_model
@@ -47,6 +49,15 @@ class TunixMaxTextAdapter(nnx.Module):
         use_standalone_mappings,
     )
     self.use_no_op_mappings = use_no_op_mappings
+    # When `pad_id` is provided AND tunix passes `decoder_segment_ids=None`,
+    # synthesize per-token segment_ids (1 for non-pad, 0 for pad). MaxText's
+    # segment-based attention mask then blocks queries at non-pad positions
+    # from attending to pad-position keys. Without this, the adapter forwards
+    # `decoder_segment_ids=None` and MaxText falls back to causal-only masking,
+    # so padded tokens get attended to as if they were real input — silently
+    # corrupting trainer log-probs on every batch. (Rollout-side vLLM does the
+    # right thing because it batches without padding via its scheduler.)
+    self._pad_id = pad_id
 
   # ------------------------------------------------------------------ #
   # Tunix call signature
@@ -63,6 +74,8 @@ class TunixMaxTextAdapter(nnx.Module):
     """Forward compatible with Tunix Trainers default loss.
     Returns logits, None.
     """
+    if decoder_segment_ids is None and self._pad_id is not None:
+      decoder_segment_ids = (input_tokens != self._pad_id).astype(jnp.int32)
     logits = self.base(
         decoder_input_tokens=input_tokens,
         decoder_positions=positions,
