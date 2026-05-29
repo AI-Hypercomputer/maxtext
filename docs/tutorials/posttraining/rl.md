@@ -62,8 +62,8 @@ placeholders with your actual values.
 
 ```bash
 # -- Model configuration --
-# The MaxText model name. See `src/maxtext/configs/types.py` for `ModelName` for a
-# full list of supported models.
+# The MaxText model name. Supported model names can be found under
+# `src/maxtext/configs/types.py` by looking at the `ModelName` variable.
 export MODEL=<MODEL_NAME> # e.g. 'llama3.1-8b-Instruct'
 
 # -- MaxText configuration --

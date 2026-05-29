@@ -77,9 +77,9 @@ placeholders with your actual values.
 
 ```bash
 # -- Model configuration --
-# The MaxText model name. See `src/maxtext/configs/types.py` for `ModelName` for a
-# full list of supported models.
-export MODEL=<MODEL_NAME> # e.g. 'llama3.1-70b-Instruct' # replace with another model from src/maxtext/configs/types.py if needed
+# The MaxText model name. Supported model names can be found under
+# `src/maxtext/configs/types.py` by looking at the `ModelName` variable.
+export MODEL=<MODEL_NAME> # e.g. 'llama3.1-70b-Instruct'
 
 # Your Hugging Face access token. Required to download gated models like Llama.
 # You can generate one at https://huggingface.co/settings/tokens.
