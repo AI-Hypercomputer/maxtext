@@ -69,6 +69,7 @@ Example Usage:
 import jax
 import jax.numpy as jnp
 import os
+import re
 from typing import Sequence
 import time
 
@@ -93,6 +94,7 @@ from maxtext.checkpoint_conversion.utils.utils import (
     MemoryMonitorTqdm,
     print_peak_memory,
     save_adapter_files,
+    get_lora_delta
 )
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
@@ -107,22 +109,6 @@ flags.DEFINE_bool(
 )
 
 FLAGS = flags.FLAGS
-
-
-def _get_lora_delta(key, lora_state_dict, lora_scaling):
-  """Calculates the LoRA delta for a given parameter key."""
-  a_key, b_key = key + "_lora_a", key + "_lora_b"
-  if a_key not in lora_state_dict and key.startswith("params-"):
-    a_key, b_key = key[7:] + "_lora_a", key[7:] + "_lora_b"
-
-  if a_key in lora_state_dict and b_key in lora_state_dict:
-    data_a, data_b = jnp.asarray(lora_state_dict[a_key], dtype=jnp.float32), jnp.asarray(
-        lora_state_dict[b_key], dtype=jnp.float32
-    )
-    if data_a.ndim > 2:
-      return jnp.einsum("ipr,rpo->ipo", data_a, data_b) * lora_scaling
-    return jnp.matmul(data_a, data_b) * lora_scaling
-  return None
 
 
 def _get_model_mappings(
@@ -303,17 +289,30 @@ def _transform_weights_to_adapter(param_map, state_dict):
 def _transform_weights_to_full_model(config, filtered_map_keys, state_dict, param_map, hook_fn_map, shape_map):
   """Transforms MaxText weights to HF full model format, with optional LoRA merging."""
   processed_params_list = []
+  merged_layers = set()
+  merged_params_count = 0
   lora_scaling = config.lora.lora_alpha / config.lora.lora_rank if config.lora.lora_rank > 0 else 1.0
+  
   for key in MemoryMonitorTqdm(filtered_map_keys, leave=True):
     weight = [state_dict[subkey] for subkey in key] if isinstance(key, tuple) else state_dict.get(key)
     if weight is not None and not isinstance(key, tuple):
-      delta = _get_lora_delta(key, state_dict, lora_scaling)
+      delta = get_lora_delta(key, state_dict, lora_scaling)
       if delta is not None:
         if delta.shape != weight.shape and delta.size == weight.size:
           delta = delta.reshape(weight.shape)
         weight = (jnp.asarray(weight, dtype=jnp.float32) + delta).astype(weight.dtype)
+        merged_params_count += 1
+        layer_match = re.search(r"layers[_\-/](\d+)", key)
+        if layer_match:
+          merged_layers.add(int(layer_match.group(1)))
     if weight is not None:
       processed_params_list.extend(process_maxtext_param(key, weight, param_map, hook_fn_map, shape_map, config))
+
+  if merged_params_count > 0:
+    max_logging.log(
+        f"Successfully merged LoRA weights into {merged_params_count} parameters "
+        f"across {len(merged_layers)} layers."
+    )
   return dict(processed_params_list)
 
 
@@ -420,9 +419,12 @@ def main(argv: Sequence[str]) -> None:
   maxtext_state_dict = detect_and_extract_checkpoint(checkpoint_dict)
 
   # Validate that checkpoint keys match the parameter mapping
-  state_keys = set(maxtext_state_dict) | {
-      k.replace("_lora_a", "").replace("_lora_b", "") for k in maxtext_state_dict if "_lora_" in k
-  }
+  state_keys = set()
+  for k in maxtext_state_dict:
+    # Remove LoRA suffixes to match against base parameter map
+    base_k = k.replace("_lora_a", "").replace("_lora_b", "")
+    state_keys.add(base_k)
+
   filtered_map_keys = validate_and_filter_param_map_keys(param_map, state_keys)
 
   # When not converting a multimodal model, skip vision encoder weights even if

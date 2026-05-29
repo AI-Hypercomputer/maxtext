@@ -60,6 +60,36 @@ SAFE_TENSORS_INDEX_FILE = "model.safetensors.index.json"
 DEFAULT_MAX_SHARD_SIZE = 1024 * 1024 * 1024 * 3  # 3GB default
 
 
+def get_lora_delta(key, lora_state_dict, lora_scaling):
+  """Calculates the LoRA delta for a given parameter key."""
+  import jax.numpy as jnp
+  # Standard pattern (e.g., used by to_maxtext.py)
+  a_key, b_key = key + "_lora_a", key + "_lora_b"
+  if a_key not in lora_state_dict and key.startswith("params-"):
+    a_key, b_key = key[7:] + "_lora_a", key[7:] + "_lora_b"
+
+  # MaxText training patterns (e.g., params-decoder-layers-layers_0-self_attention-query-lora_a-kernel)
+  if a_key not in lora_state_dict:
+    for suffix in ["-kernel", "-scale", "-embedding"]:
+      if key.endswith(suffix):
+        a_key, b_key = key.replace(suffix, f"-lora_a{suffix}"), key.replace(suffix, f"-lora_b{suffix}")
+        if a_key in lora_state_dict:
+          break
+        # Try dot separator as well
+        a_key, b_key = key.replace(suffix, f"-lora_a.{suffix[1:]}"), key.replace(suffix, f"-lora_b.{suffix[1:]}")
+        if a_key in lora_state_dict:
+          break
+
+  if a_key in lora_state_dict and b_key in lora_state_dict:
+    data_a, data_b = jnp.asarray(lora_state_dict[a_key], dtype=jnp.float32), jnp.asarray(
+        lora_state_dict[b_key], dtype=jnp.float32
+    )
+    if data_a.ndim > 2:
+      return jnp.einsum("ipr,rpo->ipo", data_a, data_b) * lora_scaling
+    return jnp.matmul(data_a, data_b) * lora_scaling
+  return None
+
+
 def _get_local_directory(output_dir: str) -> str:
   """Determines the local directory for saving files."""
   if output_dir.startswith("gs://") or output_dir.startswith("hf://"):
@@ -794,6 +824,16 @@ class MemoryMonitorTqdm(tqdm):
     return super().format_meter(n=n, total=total, elapsed=elapsed, postfix=postfix, **extra_kwargs)
 
 
+def deep_merge_dict(base, update):
+  """Recursively merges update into base."""
+  for k, v in update.items():
+    if k in base and isinstance(base[k], dict) and isinstance(v, dict):
+      deep_merge_dict(base[k], v)
+    else:
+      base[k] = v
+  return base
+
+
 def load_orbax_checkpoint(config) -> dict:
   """Loads Orbax checkpoints from Base and/or LoRA paths in config.
 
@@ -825,7 +865,7 @@ def load_orbax_checkpoint(config) -> dict:
     else:
       return None
 
-  lora_path = config.lora.lora_restore_path
+  lora_path = config.lora.lora_restore_path if hasattr(config, "lora") and hasattr(config.lora, "lora_restore_path") else ""
   paths = [p for p in [config.load_parameters_path, lora_path] if p]
 
   merged_dict = {}
@@ -837,7 +877,8 @@ def load_orbax_checkpoint(config) -> dict:
         metadata.item_metadata.tree,
         is_leaf=lambda x: hasattr(x, "shape"),
     )
-    merged_dict.update(ckptr.restore(checkpoint_path, restore_args=restore_args))
+    restored = ckptr.restore(checkpoint_path, restore_args=restore_args)
+    merged_dict = deep_merge_dict(merged_dict, restored)
 
   return merged_dict
 
@@ -936,28 +977,36 @@ def detect_and_extract_checkpoint(checkpoint_dict: dict) -> dict[str, np.ndarray
   Returns:
     Dictionary mapping MaxText parameter names to weight arrays
   """
-  # Detect checkpoint type by structure
-  actual_weights_dict = checkpoint_dict.get("params")
+  all_extracted_weights = {}
 
-  if actual_weights_dict is None:
-    # NNX checkpoint: structure is directly at the root
-    # Check for NNX-RL variant with 'base' wrapper
-    if "base" in checkpoint_dict and isinstance(checkpoint_dict["base"], dict):
-      # NNX-RL: {'base': {'decoder': ..., 'token_embedder': ...}}
-      max_logging.log("Detected NNX-RL checkpoint structure (with 'base' wrapper)")
-      return extract_nnx_weights(checkpoint_dict["base"])
-    else:
-      # NNX-SFT: {'decoder': ..., 'token_embedder': ...}
-      max_logging.log("Detected NNX-SFT checkpoint structure")
-      return extract_nnx_weights(checkpoint_dict)
-  else:
-    # Linen checkpoint: check if there's a nested 'params' key
+  # 1. Try to extract Linen weights (under 'params' key)
+  if "params" in checkpoint_dict:
+    actual_weights_dict = checkpoint_dict["params"]
     if isinstance(actual_weights_dict, dict) and "params" in actual_weights_dict:
       actual_weights_dict = actual_weights_dict["params"]
       max_logging.log("Detected Linen checkpoint structure")
     else:
       max_logging.log("Detected Linen checkpoint structure (single params layer)")
-    return extract_linen_weights(actual_weights_dict)
+    all_extracted_weights.update(extract_linen_weights(actual_weights_dict))
+
+  # 2. Try to extract NNX-RL weights (under 'base' key)
+  if "base" in checkpoint_dict and isinstance(checkpoint_dict["base"], dict):
+    max_logging.log("Detected NNX-RL checkpoint structure (with 'base' wrapper)")
+    all_extracted_weights.update(extract_nnx_weights(checkpoint_dict["base"]))
+
+  # 3. Try to extract NNX weights from root-level keys
+  # We look for keys that typically appear in model structures (like 'decoder', 'token_embedder')
+  # but are not the 'params', 'base', 'opt_state', or 'step' metadata keys.
+  known_metadata_keys = {"params", "base", "opt_state", "step"}
+  root_nnx_dict = {k: v for k, v in checkpoint_dict.items() if k not in known_metadata_keys}
+  if root_nnx_dict:
+    max_logging.log(f"Detected NNX-style weights at root level for keys: {list(root_nnx_dict.keys())}")
+    all_extracted_weights.update(extract_nnx_weights(root_nnx_dict))
+
+  if not all_extracted_weights:
+    raise ValueError(f"Could not extract any weights from checkpoint. Top-level keys: {list(checkpoint_dict.keys())}")
+
+  return all_extracted_weights
 
 
 def load_hf_dict_from_transformers(model_id: str, token: str, revision: str | None = None, dtype: str = "auto"):
