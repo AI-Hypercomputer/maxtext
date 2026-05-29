@@ -36,8 +36,9 @@ Use the `to_maxtext.py` script to convert a Hugging Face model checkpoint into a
 ### Setup Environment
 
 ```bash
-# Install PyTorch (in MaxText virtual environment)
+# Install PyTorch and safetensors (in MaxText virtual environment)
 python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+python3 -m pip install safetensors --no-deps
 
 # Setup environment variables
 export MODEL=<HF_MODEL> # e.g. 'llama3.1-8b-Instruct'
@@ -89,8 +90,9 @@ Use the `to_huggingface.py` script to convert a MaxText checkpoint into the Hugg
 ### Setup Environment
 
 ```bash
-# Install PyTorch (in MaxText virtual environment)
+# Install PyTorch and safetensors (in MaxText virtual environment)
 python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+python3 -m pip install safetensors --no-deps
 
 # Setup environment variables
 export MODEL=<MODEL_NAME> # e.g. 'qwen3-4b'
