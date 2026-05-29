@@ -153,22 +153,15 @@ jobs:
           export MAXTEXT_ASSETS_ROOT=$(pwd)/src/maxtext/assets
           export MAXTEXT_TEST_ASSETS_ROOT=$(pwd)/tests/assets
           export MAXTEXT_PKG_DIR=$(pwd)/src/maxtext
-          # omit this libtpu init args for gpu tests
           if [ "${INPUTS_DEVICE_TYPE}" != "cuda12" ]; then
             export LIBTPU_INIT_ARGS='--xla_tpu_scoped_vmem_limit_kib=65536'
-          else
-            # For cuda12, explicitly point to the pip-installed CUDA libraries
-            # to avoid conflicts with system-level installations on the runner.
-            # Dynamically discover the 'nvidia' folder and prepend all its sub-library
-            # directories (including nccl, cublas, cudnn) to LD_LIBRARY_PATH to prevent
-            # JAX from partially loading incompatible system-level CUDA libraries.
-            NVIDIA_DIR=$(find .venv/lib/ -maxdepth 3 -name "nvidia" -type d 2>/dev/null | head -n 1)
-            if [ -n "${NVIDIA_DIR}" ]; then
-              for dir in "${NVIDIA_DIR}"/*; do
-                if [ -d "$dir/lib" ]; then
-                  export LD_LIBRARY_PATH=$(pwd)/$dir/lib:${LD_LIBRARY_PATH}
-                fi
-              done
+            echo "DEBUG: Set LIBTPU_INIT_ARGS for non-cuda12"
+          elif [ "${INPUTS_MAXTEXT_INSTALLED}" != "true" ]; then
+            if [ -d ".venv/lib/python3.12/site-packages/nvidia" ]; then
+              export LD_LIBRARY_PATH=$(pwd)/.venv/lib/python3.12/site-packages/nvidia/cudnn/lib:${LD_LIBRARY_PATH}
+              echo "DEBUG: Set LD_LIBRARY_PATH for cuda12"
+            else
+              echo "Warning: Could not find pinned nvidia libraries in .venv."
             fi
           fi
           if [ "${INPUTS_TOTAL_WORKERS}" -gt 1 ]; then
