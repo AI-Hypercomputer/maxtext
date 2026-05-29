@@ -122,9 +122,26 @@ jobs:
       - name: Copy test assets files
         if: ${{ !inputs.maxtext_installed }}
         run : gcloud storage cp gs://maxtext-test-assets/* tests/assets
+      - name: Runner diagnostics
+        if: always()
+        shell: bash
+        run: |
+          echo "=== Disk usage ===" && df -h
+          echo "=== Memory ===" && free -h
+          echo "=== Python ===" && python3 --version 2>&1 || echo "python3 not found"
       - name: Run Tests
         shell: bash
         run: |
+          LOG_FILE="/tmp/pytest_output_$(date +%Y%m%d_%H%M%S).txt"
+          # Upload log to GCS on any exit (normal, error, or SIGTERM from pod eviction)
+          upload_log() {
+            echo "=== Uploading pytest log to GCS ==="
+            gcloud storage cp "$LOG_FILE" "gs://runner-maxtext-logs/pytest-logs/" 2>&1 \
+              && echo "GCS upload succeeded: gs://runner-maxtext-logs/pytest-logs/$(basename $LOG_FILE)" \
+              || echo "GCS upload failed (log still available in Print test logs step)"
+          }
+          trap upload_log EXIT SIGTERM SIGHUP
+
           # Determine environment and entry directory
           if [ "${INPUTS_MAXTEXT_INSTALLED}" == "true" ]; then
             # Move to the directory where code is baked into the image. See the Dockerfile.
@@ -188,7 +205,8 @@ jobs:
               --durations=0 \
               $PYTEST_COV_ARGS \
               $SPLIT_ARGS \
-              ${INPUTS_PYTEST_EXTRA_ARGS}
+              ${INPUTS_PYTEST_EXTRA_ARGS} 2>&1 | tee "$LOG_FILE"
+            exit ${PIPESTATUS[0]}
           fi
 
         env:
@@ -201,6 +219,17 @@ jobs:
           INPUTS_PYTEST_EXTRA_ARGS: ${{ inputs.pytest_extra_args }}
           INPUTS_MAXTEXT_INSTALLED: ${{ inputs.maxtext_installed }}
           INPUTS_IS_UPDATE_HLO: ${{ inputs.is_update_hlo }}
+      - name: Print test logs
+        if: always()
+        shell: bash
+        run: |
+          LOG_FILE=$(ls /tmp/pytest_output_*.txt 2>/dev/null | tail -1)
+          if [ -n "$LOG_FILE" ]; then
+            echo "=== pytest output ($(wc -l < $LOG_FILE) lines) ==="
+            cat "$LOG_FILE"
+          else
+            echo "No pytest log found — process was likely killed before pytest started (OOMKill or disk full)"
+          fi
       - name: Upload Reference HLO
         if: ${{ inputs.is_update_hlo }}
         uses: actions/upload-artifact@v4
