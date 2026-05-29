@@ -10,14 +10,14 @@
 
 # Usage:
 # export HF_TOKEN=<your Hugging Face access token>
-# export RUN_ID=$(date +%Y-%m-%d-%H-%M)
+# export RUN_ID=$(date +%Y-%m-%d-%H-%M-%S)
 # bash test_gemma3_to_mt.sh $RUN_ID
 # bash test_gemma3_sft.sh $RUN_ID
 
 
 set -ex
 
-run_id=${1:-$(date +%Y-%m-%d-%H-%M)}
+run_id=${1:-$(date +%Y-%m-%d-%H-%M-%S)}
 MODEL_NAME='gemma3-4b'
 
 # Non-Googlers please remember to point `BASE_OUTPUT_DIRECTORY` to the GCS paths where you have the scanned and unscanned checkpoints stored
