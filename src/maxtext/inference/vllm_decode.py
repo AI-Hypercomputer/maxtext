@@ -83,7 +83,7 @@ def decode_with_vllm(config: Config) -> None:
       "additional_config": {
           "maxtext_config": {
               "model_name": config.model_name,
-              "weight_dtype": "bfloat16",
+              "weight_dtype": str(config.weight_dtype),
               "allow_split_physical_axes": True,
               "debug_sharding": config.debug_sharding,
               "prefuse_moe_weights": config.prefuse_moe_weights,
@@ -98,15 +98,13 @@ def decode_with_vllm(config: Config) -> None:
   }
 
   if config.lora.enable_lora:
-    vllm_args["additional_config"]["maxtext_config"].update(
-        {
-            "lora.enable_lora": config.lora.enable_lora,
-            "lora.lora_restore_path": config.lora.lora_restore_path,
-            "lora.lora_rank": config.lora.lora_rank,
-            "lora.lora_alpha": config.lora.lora_alpha,
-            "lora.lora_module_path": config.lora.lora_module_path,
-        }
-    )
+    vllm_args["additional_config"]["maxtext_config"]["lora"] = {
+        "enable_lora": config.lora.enable_lora,
+        "lora_restore_path": config.lora.lora_restore_path,
+        "lora_rank": config.lora.lora_rank,
+        "lora_alpha": config.lora.lora_alpha,
+        "lora_module_path": config.lora.lora_module_path,
+    }
 
   if config.load_parameters_path:
     vllm_args["additional_config"]["maxtext_config"]["load_parameters_path"] = config.load_parameters_path
@@ -223,28 +221,57 @@ def decode_with_tunix(
 
   # Create vLLM rollout for inference
   rollout_vllm_lora_config = None
+  maxtext_config_overrides = {
+      "model_name": config.model_name,
+      "tokenizer_path": config.tokenizer_path,
+      "weight_dtype": str(config.weight_dtype),
+      "scan_layers": config.scan_layers,
+      "allow_split_physical_axes": config.allow_split_physical_axes,
+  }
+
   if config.lora.enable_lora:
     rollout_vllm_lora_config = {
         "module_path": lora_utils._get_lora_module_path(config),
         "rank": config.lora.lora_rank,
         "alpha": config.lora.lora_alpha,
     }
+    maxtext_config_overrides["lora"] = {
+        "enable_lora": config.lora.enable_lora,
+        "lora_restore_path": config.lora.lora_restore_path,
+        "lora_rank": config.lora.lora_rank,
+        "lora_alpha": config.lora.lora_alpha,
+        "lora_module_path": config.lora.lora_module_path,
+    }
+
+  if config.load_parameters_path:
+    maxtext_config_overrides["load_parameters_path"] = config.load_parameters_path
+
+  # MaxText uses -1 to mean "disabled" for top_p; vLLM requires top_p in (0, 1].
+  top_p = config.decode_sampling_nucleus_p if config.decode_sampling_nucleus_p > 0 else 1.0
+  # MaxText uses 0 to mean "disabled" for top_k; vLLM uses -1.
+  top_k = config.decode_sampling_top_k if config.decode_sampling_top_k > 0 else -1
+
+  rollout_vllm_kwargs = {
+      "additional_config": {"maxtext_config": maxtext_config_overrides},
+  }
+  if hasattr(config, "vllm_hf_overrides") and config.vllm_hf_overrides:
+    rollout_vllm_kwargs["hf_overrides"] = config.vllm_hf_overrides
+  if not config.load_parameters_path:
+    rollout_vllm_kwargs["load_format"] = "dummy"
 
   rollout_config = base_rollout.RolloutConfig(
       max_tokens_to_generate=max_tokens_to_generate,
       max_prompt_length=max_prompt_length,
       temperature=config.decode_sampling_temperature,
-      top_p=config.decode_sampling_nucleus_p,
-      top_k=config.decode_sampling_top_k,
+      top_p=top_p,
+      top_k=top_k,
       rollout_vllm_model_version=config.tokenizer_path,
       rollout_vllm_hbm_utilization=config.hbm_utilization_vllm,
-      rollout_vllm_init_with_random_weights=True,
+      rollout_vllm_init_with_random_weights=False if config.load_parameters_path else True,
       rollout_vllm_tpu_backend_type="jax",
       rollout_vllm_hf_config_path=config.model if hasattr(config, "model") else None,
       rollout_vllm_lora_config=rollout_vllm_lora_config,
-      rollout_vllm_kwargs={
-          "hf_overrides": config.vllm_hf_overrides,
-      } if hasattr(config, "vllm_hf_overrides") and config.vllm_hf_overrides else {},
+      rollout_vllm_kwargs=rollout_vllm_kwargs,
   )
 
   vllm_rollout = VllmRollout(
