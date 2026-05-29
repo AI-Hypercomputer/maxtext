@@ -797,6 +797,16 @@ class MemoryMonitorTqdm(tqdm):
     return super().format_meter(n=n, total=total, elapsed=elapsed, postfix=postfix, **extra_kwargs)
 
 
+def recursive_update(d: dict, u: dict) -> dict:
+  """Recursively updates dictionary d with dictionary u in place."""
+  for k, v in u.items():
+    if isinstance(v, dict) and k in d and isinstance(d[k], dict):
+      recursive_update(d[k], v)
+    else:
+      d[k] = v
+  return d
+
+
 def load_orbax_checkpoint(config) -> dict:
   """Loads Orbax checkpoints from Base and/or LoRA paths in config.
 
@@ -840,7 +850,7 @@ def load_orbax_checkpoint(config) -> dict:
         metadata.item_metadata.tree,
         is_leaf=lambda x: hasattr(x, "shape"),
     )
-    merged_dict.update(ckptr.restore(checkpoint_path, restore_args=restore_args))
+    recursive_update(merged_dict, ckptr.restore(checkpoint_path, restore_args=restore_args))
 
   return merged_dict
 
@@ -921,7 +931,7 @@ def extract_linen_weights(weights_dict: dict) -> dict[str, np.ndarray]:
   return result
 
 
-def detect_and_extract_checkpoint(checkpoint_dict: dict) -> dict[str, np.ndarray]:
+def detect_and_extract_checkpoint(checkpoint_dict: dict, config=None) -> dict[str, np.ndarray]:
   """Detect checkpoint type (Linen vs NNX) and extract weights.
 
   Handles multiple NNX checkpoint variants:
@@ -935,24 +945,35 @@ def detect_and_extract_checkpoint(checkpoint_dict: dict) -> dict[str, np.ndarray
 
   Args:
     checkpoint_dict: Raw checkpoint dictionary from Orbax
+    config: Optional MaxText configuration
 
   Returns:
     Dictionary mapping MaxText parameter names to weight arrays
   """
+  # Determine if we are using an NNX model from config or if there is no top-level "params" key
+  is_nnx = config.enable_nnx if config is not None else ("params" not in checkpoint_dict)
+
   # Detect checkpoint type by structure
   actual_weights_dict = checkpoint_dict.get("params")
 
-  if actual_weights_dict is None:
-    # NNX checkpoint: structure is directly at the root
-    # Check for NNX-RL variant with 'base' wrapper
-    if "base" in checkpoint_dict and isinstance(checkpoint_dict["base"], dict):
-      # NNX-RL: {'base': {'decoder': ..., 'token_embedder': ...}}
-      max_logging.log("Detected NNX-RL checkpoint structure (with 'base' wrapper)")
-      return extract_nnx_weights(checkpoint_dict["base"])
+  if is_nnx:
+    if actual_weights_dict is None:
+      # NNX checkpoint: structure is directly at the root
+      # Check for NNX-RL variant with 'base' wrapper
+      if "base" in checkpoint_dict and isinstance(checkpoint_dict["base"], dict):
+        # NNX-RL: {'base': {'decoder': ..., 'token_embedder': ...}}
+        max_logging.log("Detected NNX-RL checkpoint structure (with 'base' wrapper)")
+        return extract_nnx_weights(checkpoint_dict["base"])
+      else:
+        # NNX-SFT: {'decoder': ..., 'token_embedder': ...}
+        max_logging.log("Detected NNX-SFT checkpoint structure")
+        return extract_nnx_weights(checkpoint_dict)
     else:
-      # NNX-SFT: {'decoder': ..., 'token_embedder': ...}
-      max_logging.log("Detected NNX-SFT checkpoint structure")
-      return extract_nnx_weights(checkpoint_dict)
+      # NNX checkpoint wrapped inside top-level 'params' key
+      if isinstance(actual_weights_dict, dict) and "params" in actual_weights_dict:
+        actual_weights_dict = actual_weights_dict["params"]
+      max_logging.log("Detected NNX checkpoint structure wrapped in 'params'")
+      return extract_nnx_weights(actual_weights_dict)
   else:
     # Linen checkpoint: check if there's a nested 'params' key
     if isinstance(actual_weights_dict, dict) and "params" in actual_weights_dict:

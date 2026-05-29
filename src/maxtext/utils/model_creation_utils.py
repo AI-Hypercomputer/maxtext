@@ -738,7 +738,7 @@ def create_models_and_meshes(trainer_config, sampler_config, trainer_devices, sa
       # TunixMaxTextAdapter wraps MaxText models to be compatible with Tunix's default APIs
       # The weight mappings for vllm (which is interfaced to from MaxText via Tunix) are model specific.
       # The mappings are defined inside src/maxtext/integration/tunix/weight_mapping
-      actor_model = TunixMaxTextAdapter(base_model=actor_base_model, use_no_op_mappings=use_no_op_mappings)
+      actor_model = TunixMaxTextAdapter(base_model=actor_base_model, use_no_op_mappings=use_no_op_mappings, mesh=reference_mesh)
       actor_model.config = None
     actor_mesh = reference_mesh
   else:
@@ -1041,7 +1041,7 @@ def from_pretrained(
     if wrap_with_tunix_adapter:
       with mesh:
         use_no_op_mappings = "maxtext_config" in config.vllm_additional_config
-        model = TunixMaxTextAdapter(base_model=model, use_no_op_mappings=use_no_op_mappings)
+        model = TunixMaxTextAdapter(base_model=model, use_no_op_mappings=use_no_op_mappings, mesh=mesh)
         model.config = None
 
     if original_mesh:
