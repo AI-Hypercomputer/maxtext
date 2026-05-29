@@ -47,6 +47,7 @@ from maxtext.utils import lora_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
+from maxtext.utils import maxtext_utils_nnx
 from maxtext.utils import model_creation_utils
 from maxtext.common.gcloud_stub import jetstream, is_decoupled
 from maxtext.common.common_types import MODEL_MODE_PREFILL, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE
@@ -198,7 +199,6 @@ class MaxEngine(_BaseEngine):
       previous_chunk=None,
       true_length=None,
       slot=None,
-      page_state=None,
       encoder_images=None,
       encoder_image_masks=None,
       encoder_audios=None,
@@ -221,7 +221,6 @@ class MaxEngine(_BaseEngine):
         previous_chunk=previous_chunk,
         true_length=true_length,
         slot=slot,
-        page_state=page_state,
     )
     new_cache = nnx.state(model, nnx.Cache).to_pure_dict()
     return logits, new_cache
@@ -383,16 +382,22 @@ class MaxEngine(_BaseEngine):
     if params:
       print("Resharding given NNX params")
       _, params_abs, _ = nnx.split(self.model, nnx.Param, ...)
-      target_shardings = jax.tree.map(
-          lambda x: x.sharding if hasattr(x, "sharding") else None,
-          params_abs,
-          is_leaf=lambda x: isinstance(x, nnx.Variable),
-      )
-      params_state = jax.device_put(params, target_shardings)
-      # Build a concrete model once to capture a real `rest` (RNG vars) for nnx.merge.
-      # Wasteful but simple; the from_pretrained branch below avoids this.
+      # self.model is abstract (built via nnx.eval_shape), so its leaves carry logical
+      # axis metadata but no physical .sharding. Resolve logical to physical here so
+      # device_put actually reshards instead of being a no-op.
       with nn_partitioning.axis_rules(self.config.logical_axis_rules):
-        concrete_model = self._create_model_fn()
+        target_shardings = maxtext_utils.get_nnx_named_sharding_with_scan_axis(params_abs, self._mesh)
+      params_state = jax.device_put(params, target_shardings)
+      # We only need a concrete `rest` (RNG vars) for nnx.merge. create_nnx_sharded_model
+      # builds the model with a jitted out_shardings so params are produced already
+      # sharded, avoiding a single-device allocation of the full model (an OOM risk for
+      # large models). self.model is abstract with no .sharding, so pass an explicit one.
+      _, full_abs = nnx.split(self.model)
+      with nn_partitioning.axis_rules(self.config.logical_axis_rules):
+        full_sharding = maxtext_utils.get_nnx_named_sharding_with_scan_axis(full_abs, self._mesh)
+      concrete_model = maxtext_utils_nnx.create_nnx_sharded_model(
+          self.model, self._create_model_fn, mesh=self._mesh, named_sharding=full_sharding
+      )
       graphdef, _, _, rest_state = nnx.split(concrete_model, nnx.Param, nnx.Cache, ...)
       self.graphdef = graphdef
       self._nnx_rest_state = rest_state
@@ -686,7 +691,6 @@ class MaxEngine(_BaseEngine):
       sampler: A callable for custom sampling logic (currently unused).
       rng: JAX random number generator key for sampling.
       slot: The batch slot index for this request, used for paged attention.
-      page_state: The current state of the paged attention manager.
       return_prompt_logp: If True, calculates and returns the log probabilities
         of the prompt tokens.
       algorithm: The sampling algorithm to use (e.g., 'greedy', 'composite').
@@ -765,7 +769,6 @@ class MaxEngine(_BaseEngine):
             previous_chunk=previous_chunk,
             true_length=true_length,
             slot=slot,
-            page_state=page_state,
         )
       new_vars = {"cache": new_cache_dict}
     else:
@@ -785,7 +788,6 @@ class MaxEngine(_BaseEngine):
             previous_chunk=previous_chunk,
             true_length=true_length,
             slot=slot,
-            page_state=page_state,
         )
     if return_prompt_logp:
       prompt_logp = inference_utils.prompt_logprobs_from_prefill(flat_logits, input_tokens, true_length)
@@ -1289,7 +1291,6 @@ class MaxEngine(_BaseEngine):
         This argument is donated to save memory.
       sampler: A callable for custom sampling logic (currently unused).
       rng: JAX random number generator key for sampling.
-      page_state: The current state of the paged attention manager.
       algorithm: The sampling algorithm to use (e.g., 'greedy', 'composite').
         Overrides the engine's default.
       topk: The value for top-k sampling. Overrides the engine's default.
@@ -1317,7 +1318,6 @@ class MaxEngine(_BaseEngine):
             decoder_positions=decode_state["next_pos"],
             enable_dropout=False,
             model_mode=MODEL_MODE_AUTOREGRESSIVE,
-            page_state=page_state,
         )
       new_vars = {"cache": new_cache_dict}
     else:
@@ -1330,7 +1330,6 @@ class MaxEngine(_BaseEngine):
             model_mode=MODEL_MODE_AUTOREGRESSIVE,
             rngs={"params": new_rng},
             mutable=["cache"],
-            page_state=page_state,
         )
     out_logits = jax.lax.with_sharding_constraint(out_logits, self.replicated_sharding)
     new_cache = jax.lax.with_sharding_constraint(new_vars["cache"], self.kv_cache_shardings)
@@ -1835,7 +1834,7 @@ class MaxEngine(_BaseEngine):
       rng = jax.random.PRNGKey(0)
 
     if self.config.pure_nnx:
-      return self._init_decode_state_nnx(rng=rng, page_state=page_state)
+      return self._init_decode_state_nnx(rng=rng)
 
     # pylint: disable=unused-argument
     def init(abstract_params):
@@ -1929,9 +1928,9 @@ class MaxEngine(_BaseEngine):
     zeroed = max_utils.unbox_logicallypartioned(init_state)
     return zeroed
 
-  def _init_decode_state_nnx(self, rng, page_state) -> DecodeState:
+  def _init_decode_state_nnx(self, rng) -> DecodeState:
     """NNX equivalent of init_decode_state. Returns a decode_state dict with a pure-dict cache."""
-    del rng, page_state  # cache shape comes from the abstract model
+    del rng  # cache shape comes from the abstract model
     batch = int(self.config.per_device_batch_size * self.mesh.size)
     vocab = self.config.vocab_size
 
