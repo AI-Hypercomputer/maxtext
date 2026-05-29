@@ -293,7 +293,25 @@ def deepstack_process(hidden_states, bidirectional_mask, visual_embeds):
 
 # TODO: write in NNX
 class WindowedFsdpDecoderStep(nn.Module):
-  """Single step of Windowed Scan dual-buffer FSDP weight prefetching."""
+  """Standard single-step decoder layer, used ONLY during model initialization."""
+  decoder_layer: Any
+  config: Config
+  mesh: Mesh
+  quant: Quant
+  model_mode: str
+
+  @nn.compact
+  def __call__(self, carry, loop_iteration, *broadcast_args, **kwargs):
+    y, _ = carry
+    layer_instance = self.decoder_layer(
+        config=self.config, mesh=self.mesh, quant=self.quant, model_mode=self.model_mode
+    )
+    out = layer_instance(y, *broadcast_args, **kwargs)
+    return (out[0], None), out[1]
+
+
+class WindowedFsdpTwoDecoderStep(nn.Module):
+  """Optimized unrolled 2-layer decoder step, executing BSW prefetching without HBM copy."""
   decoder_layer: Any
   num_layers: int
   config: Config
@@ -304,14 +322,12 @@ class WindowedFsdpDecoderStep(nn.Module):
 
   @nn.compact
   def __call__(self, carry, loop_iteration, *broadcast_args, **kwargs):
-    y, w_curr = carry
+    y, w_curr = carry  # w_curr is Layer 2*loop_iteration (hot and ready in registers!)
+    
     layer_instance = self.decoder_layer(
         config=self.config, mesh=self.mesh, quant=self.quant, model_mode=self.model_mode
     )
-    if self.is_initializing():
-      out = layer_instance(y, *broadcast_args, **kwargs)
-      return (out[0], None), out[1]
-
+    
     full_params = list(self.scope.variables()['params'].values())[0]
 
     def _slice_params(params_tree, idx):
@@ -325,18 +341,32 @@ class WindowedFsdpDecoderStep(nn.Module):
       w_sharding = getattr(jax.typeof(w), 'sharding', None) or getattr(w, 'sharding', None)
       return sharding.maybe_shard_with_name(w, w_sharding, shard_mode=self.config.shard_mode)
 
-    nxt_params = _slice_params(full_params, (loop_iteration + 1) % self.num_layers)
-    w_next = jax.tree.map(_apply_sharding_hint, nxt_params)
+    # --- LAYER 2*i (Compute + Asynchronous Prefetch of Layer 2*i + 1) ---
+    active_params_0 = w_curr
+    
+    nxt_params_1 = _slice_params(full_params, 2 * loop_iteration + 1)
+    w_next_1 = jax.tree.map(_apply_sharding_hint, nxt_params_1)
+    
+    bsw_0 = jax.ad_checkpoint.checkpoint_name((active_params_0, w_next_1), "fsdp_bsw_0")
+    active_params_0, active_params_1 = bsw_0[0], bsw_0[1]
+    
+    out_0 = layer_instance.apply({'params': active_params_0}, y, *broadcast_args, **kwargs)
+    y_0 = out_0[0]
 
-    bsw = jax.ad_checkpoint.checkpoint_name((w_curr, w_next), "fsdp_bsw")
-    active_params, carried_next = bsw[0], bsw[1]
-
-    out = layer_instance.apply({'params': active_params}, y, *broadcast_args, **kwargs)
-    return (out[0], carried_next), out[1]
+    # --- LAYER 2*i + 1 (Compute + Asynchronous Prefetch of Layer 2*(i+1)) ---
+    nxt_params_2 = _slice_params(full_params, (2 * loop_iteration + 2) % self.num_layers)
+    w_next_2 = jax.tree.map(_apply_sharding_hint, nxt_params_2)
+    
+    bsw_1 = jax.ad_checkpoint.checkpoint_name((active_params_1, w_next_2), "fsdp_bsw_1")
+    active_params_1, carried_next_2 = bsw_1[0], bsw_1[1]
+    
+    out_1 = layer_instance.apply({'params': active_params_1}, y_0, *broadcast_args, **kwargs)
+    
+    return (out_1[0], carried_next_2), out_1[1]
 
 
 class ScannedWindowedFsdpStack(nn.Module):
-  """Parent module that wraps WindowedFsdpDecoderStep with nn.scan and passes loop_iteration."""
+  """Parent module coordinating standard parameter initialization and optimized unrolled BSW prefetching."""
   decoder_layer: Any
   num_layers: int
   config: Config
@@ -350,43 +380,65 @@ class ScannedWindowedFsdpStack(nn.Module):
   @nn.compact
   def __call__(self, y, *broadcast_args):
     initializing = self.is_mutable_collection("params")
-    variable_axes = {
-        "cache": 0,
-        "intermediates": 0,
-        "aqt": 0,
-    }
-    if initializing:
-      variable_axes["params"] = self.config.param_scan_axis
-      variable_broadcast = ["_overwrite_with_gradient"]
-    else:
-      variable_broadcast = ["params", "_overwrite_with_gradient"]
-
-    scan_fn = nn.scan(
-        WindowedFsdpDecoderStep,
-        variable_axes=variable_axes,
-        variable_broadcast=variable_broadcast,
-        split_rngs={"params": True, "dropout": self.config.enable_dropout},
-        in_axes=(0,) + self.in_axes_tuple,
-        length=self.num_layers,
-        metadata_params={nn.PARTITION_NAME: self.metadata_axis_name},
-    )
-    scanned_instance = scan_fn(
-        decoder_layer=self.decoder_layer,
-        num_layers=self.num_layers,
-        config=self.config,
-        mesh=self.mesh,
-        quant=self.quant,
-        model_mode=self.model_mode,
-        metadata_axis_name=self.metadata_axis_name,
-        name=self.metadata_axis_name,
-    )
-    loop_iterations = jnp.arange(self.num_layers)
 
     if initializing:
-      w_curr_0 = None
+      # 1. Initialization Path: standard length = num_layers
+      scan_fn = nn.scan(
+          WindowedFsdpDecoderStep,
+          variable_axes={
+              "params": self.config.param_scan_axis,
+              "cache": 0,
+              "intermediates": 0,
+              "aqt": 0,
+          },
+          split_rngs={"params": True, "dropout": self.config.enable_dropout},
+          in_axes=(0,) + self.in_axes_tuple,
+          length=self.num_layers,
+          metadata_params={nn.PARTITION_NAME: self.metadata_axis_name},
+      )
+      scanned_instance = scan_fn(
+          decoder_layer=self.decoder_layer,
+          config=self.config,
+          mesh=self.mesh,
+          quant=self.quant,
+          model_mode=self.model_mode,
+          name=self.metadata_axis_name,
+      )
+      loop_iterations = jnp.arange(self.num_layers)
+      initial_carry = (y, None)
+      (final_y, _), stacked_ys = scanned_instance(initial_carry, loop_iterations, *broadcast_args)
+      return (final_y, stacked_ys)
+
     else:
+      # 2. Execution Path: unrolled 2-layer step with length = num_layers // 2
+      scan_fn = nn.scan(
+          WindowedFsdpTwoDecoderStep,
+          variable_axes={
+              "cache": 0,
+              "intermediates": 0,
+              "aqt": 0,
+          },
+          variable_broadcast=["params", "_overwrite_with_gradient"],
+          split_rngs={"params": True, "dropout": self.config.enable_dropout},
+          in_axes=(0,) + self.in_axes_tuple,
+          length=self.num_layers // 2,
+          metadata_params={nn.PARTITION_NAME: self.metadata_axis_name},
+      )
+      scanned_instance = scan_fn(
+          decoder_layer=self.decoder_layer,
+          num_layers=self.num_layers,
+          config=self.config,
+          mesh=self.mesh,
+          quant=self.quant,
+          model_mode=self.model_mode,
+          metadata_axis_name=self.metadata_axis_name,
+          name=self.metadata_axis_name,
+      )
+      loop_iterations = jnp.arange(self.num_layers // 2)
+
       step_params = list(self.scope.variables()['params'].values())[0]
       full_params = list(step_params.values())[0]
+      
       def _slice_params(params_tree, idx):
         scan_axis = self.config.param_scan_axis
         return jax.tree.map(
@@ -399,9 +451,9 @@ class ScannedWindowedFsdpStack(nn.Module):
 
       w_curr_0 = jax.tree.map(_apply_sharding_hint, _slice_params(full_params, 0))
 
-    initial_carry = (y, w_curr_0)
-    (final_y, final_w), stacked_ys = scanned_instance(initial_carry, loop_iterations, *broadcast_args)
-    return (final_y, stacked_ys)
+      initial_carry = (y, w_curr_0)
+      (final_y, _), stacked_ys = scanned_instance(initial_carry, loop_iterations, *broadcast_args)
+      return (final_y, stacked_ys)
 
 
 class Decoder(nn.Module):
