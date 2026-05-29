@@ -322,7 +322,7 @@ class DistillationStrategy(abc.ABC):
       teacher_output: "DistillationForwardOutput",
       labels: jax.Array,
       step: jax.Array | None = None,
-  ) -> tuple[jax.Array, dict[str, jax.Array]]:
+  ) -> tuple[jax.Array, dict[str, tuple[jax.Array, jax.Array]]]:
     """Computes the distillation loss.
 
     Args:
@@ -342,7 +342,7 @@ class DistillationStrategy(abc.ABC):
       self,
       student_output: "DistillationForwardOutput",
       labels: jax.Array,
-  ) -> tuple[jax.Array, dict[str, jax.Array]]:
+  ) -> tuple[jax.Array, dict[str, tuple[jax.Array, jax.Array]]]:
     """Computes the evaluation loss (typically just the task loss).
 
     Args:
@@ -568,6 +568,7 @@ class CombinedDistillationStrategy(DistillationStrategy):
 
     feature_loss = jnp.array(0.0, dtype=jnp.float32)
     if self.beta_feature > 0.0:
+      assert s_features is not None and t_features is not None
       if self.layer_indices is not None:
         s_features_sliced = jnp.take(s_features, self.layer_indices, axis=0)
         t_features_sliced = jnp.take(t_features, self.layer_indices, axis=0)
@@ -675,7 +676,7 @@ class MaxTextCheckpointManager(tunix_checkpoint_manager.CheckpointManager):
       self,
       raw_iterator: Any | None,
       root_directory: str | None,
-      student_config: Any | None,
+      student_config: Any,
       options: checkpoint.CheckpointManagerOptions | None = None,
   ):
     super().__init__(root_directory=root_directory, options=options)
