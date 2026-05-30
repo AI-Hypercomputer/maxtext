@@ -41,6 +41,7 @@ See our guide on running MaxText in decoupled mode, without any GCP dependencies
 
 ## 🔥 Latest news 🔥
 
+* \[May 29, 2026\] A new eval framework is now available for running lm-eval, evalchemy, and custom benchmarks against MaxText checkpoints. See the [Evaluation guide](https://maxtext.readthedocs.io/en/latest/guides/eval_framework.html) to get started.
 * \[May 6, 2026\] Kimi-K2-Thinking, Kimi-K2.5 (text), and Kimi-K2.6 (text) are now supported. See [Run_Kimi.md](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/kimi/Run_Kimi.md#quantized-variants-k2-thinking-k25-k26) for details.
 * \[April 18, 2026\] Added a new notebook [maxtext_with_gepa.ipynb](https://github.com/AI-Hypercomputer/maxtext/blob/3c7d8d27864fc12cccac07786f02bd0e5262c982/src/maxtext/examples/maxtext_with_gepa.ipynb) for optimizing AIME prompts using the GEPA framework with Maxtext.
 * \[April 14, 2026\] Legacy `MaxText.*` post-training shims have been removed. Please refer to [src/MaxText/README.md](https://github.com/AI-Hypercomputer/maxtext/blob/0536605a8ca116087ed93178433a67e905be566c/src/MaxText/README.md) for details on the new command locations and how to migrate. 

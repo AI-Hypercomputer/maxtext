@@ -69,6 +69,13 @@ A step-by-step guide for the community to help expand MaxText's model library.
 
 How online distillation works in MaxText: loss anatomy, α / β / temperature schedule tuning, layer indices, monitoring metrics, and troubleshooting.
 :::
+
+:::{grid-item-card} 📊 Evaluation
+:link: guides/eval_framework
+:link-type: doc
+
+Run benchmark evaluation (lm-eval, evalchemy, custom datasets) against MaxText checkpoints using the vLLM-native eval framework.
+:::
 ::::
 
 ```{toctree}
@@ -83,4 +90,5 @@ guides/monitoring_and_debugging.md
 guides/run_python_notebook.md
 guides/model_bringup.md
 guides/distillation.md
+guides/eval_framework.md
 ```
