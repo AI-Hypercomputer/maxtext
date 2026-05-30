@@ -108,7 +108,11 @@ def vision_sft_preprocessing_pipeline(
 
   dataset = dataset.map(
       input_pipeline_utils.pre_process_image_sft,
-      fn_kwargs={"image_column": "images", "config": config},
+      fn_kwargs={
+          "image_column": "images",
+          "model_name": config.model_name,
+          "video_directory": getattr(config, "video_directory", ""),
+      },
   )
 
   tokenizer = transformers.AutoTokenizer.from_pretrained(
@@ -405,6 +409,20 @@ def make_hf_train_iterator(
       streaming=True,
       token=config.hf_access_token,
   )
+  if config.hf_path == "lmms-lab/LLaVA-Video-178K":
+    def format_llava_video_dataset(example):
+      conversations = example["conversations"]
+      query = ""
+      label = ""
+      for turn in conversations:
+        if turn["from"] == "human" and not query:
+          query = turn["value"]
+        elif turn["from"] == "gpt" and not label:
+          label = turn["value"]
+      example["query"] = query
+      example["label"] = label
+      return example
+    train_ds = train_ds.map(format_llava_video_dataset)
   if config.use_sft and config.use_multimodal:
     train_iter = vision_sft_preprocessing_pipeline(
         dataset=train_ds,
@@ -467,6 +485,20 @@ def make_hf_eval_iterator(
       streaming=True,
       token=config.hf_access_token,
   )
+  if config.hf_path == "lmms-lab/LLaVA-Video-178K":
+    def format_llava_video_dataset(example):
+      conversations = example["conversations"]
+      query = ""
+      label = ""
+      for turn in conversations:
+        if turn["from"] == "human" and not query:
+          query = turn["value"]
+        elif turn["from"] == "gpt" and not label:
+          label = turn["value"]
+      example["query"] = query
+      example["label"] = label
+      return example
+    eval_ds = eval_ds.map(format_llava_video_dataset)
   if config.use_sft and config.use_multimodal:
     eval_iter = vision_sft_preprocessing_pipeline(
         dataset=eval_ds,

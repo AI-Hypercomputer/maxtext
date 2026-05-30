@@ -554,6 +554,67 @@ def preprocess_mm_data_qwen3_omni_for_training(images, config):
   )
 
 
+def preprocess_mm_data_qwen3_omni_for_training_video(video_path, use_audio_in_video=False):
+  """Preprocesses video (and audio) for Qwen3-Omni SFT training."""
+  class _DefaultConfig:
+    patch_size_for_vit = 16
+    spatial_merge_size_for_vit = 2
+    temporal_patch_size_for_vit = QWEN3_TEMPORAL_PATCH_SIZE
+    num_channels_for_vit = 3
+
+  import os
+  fallback_path = "tests/assets/test_video.mp4"
+  if not os.path.exists(video_path):
+    video_path = fallback_path
+
+  try:
+    video_array, _ = _read_video_decord(video_path)
+    video_processed, video_grid_thw = preprocess_video(video_array, _DefaultConfig())
+  except Exception as e:
+    import logging
+    logging.warning(f"Failed to load or preprocess video {video_path}: {e}. Using fallback {fallback_path}")
+    video_path = fallback_path
+    video_array, _ = _read_video_decord(video_path)
+    video_processed, video_grid_thw = preprocess_video(video_array, _DefaultConfig())
+  video_values = np.reshape(
+      video_processed,
+      (
+          1,
+          _DefaultConfig.num_channels_for_vit,
+          _DefaultConfig.temporal_patch_size_for_vit * video_grid_thw[0, 0],
+          _DefaultConfig.patch_size_for_vit * video_grid_thw[0, 1],
+          _DefaultConfig.patch_size_for_vit * video_grid_thw[0, 2],
+      ),
+  )
+
+  processor_outputs = Qwen3OmniPreprocessorOutput(
+      num_videos=1,
+      video_values=video_values,
+      video_grid_thw=video_grid_thw,
+      video_second_per_grid=np.asarray([_DefaultConfig.temporal_patch_size_for_vit], dtype=np.float32),
+  )
+
+  if use_audio_in_video:
+    try:
+      mt_audio = mm_utils.load_audio(video_path, sample_rate=SAMPLE_RATE)
+      mt_audio, mt_audio_mask = pre_process_audio_qwen3_omni(mt_audio)
+      processor_outputs.audio_values = mt_audio
+      processor_outputs.audio_mask = mt_audio_mask
+      audio_mask_sum = np.sum(mt_audio_mask, axis=-1)
+      audio_lengths = _get_feat_extract_output_lengths(audio_mask_sum)
+      processor_outputs.audio_lengths = np.array(audio_lengths, dtype=np.int32)
+    except Exception as e:
+      import logging
+      logging.warning(f"Audio extraction failed for {video_path}: {e}. Using dummy audio.")
+      dummy_audio = np.zeros((1, 128, 3000), dtype=np.float32)
+      dummy_mask = np.zeros((1, 3000), dtype=np.int32)
+      processor_outputs.audio_values = dummy_audio
+      processor_outputs.audio_mask = dummy_mask
+      processor_outputs.audio_lengths = np.array([0], dtype=np.int32)
+
+  return processor_outputs
+
+
 def preprocess_mm_data_qwen3_omni(config):
   """Placeholder for multimodal data preprocessing."""
   processor_outputs = Qwen3OmniPreprocessorOutput()

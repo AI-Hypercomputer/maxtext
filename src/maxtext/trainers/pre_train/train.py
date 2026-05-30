@@ -103,10 +103,12 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   # decimate proportion of data when per_device_batch_size<1
   if is_train:
     for k, v in data.items():
-      data[k] = v[: config.micro_batch_size_to_train_on, :]
+      if v is not None:
+        data[k] = v[: config.micro_batch_size_to_train_on, :]
   else:
     for k, v in data.items():
-      data[k] = v[: config.micro_batch_size_to_eval_on, :]
+      if v is not None:
+        data[k] = v[: config.micro_batch_size_to_eval_on, :]
   mutable_collections = ["intermediates"]
   if config.mtp_num_layers > 0 and is_train:
     # The single model.apply call now triggers the entire chain if MTP is enabled:
