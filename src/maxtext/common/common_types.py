@@ -100,6 +100,7 @@ class DecoderBlockType(enum.Enum):
   GEMMA2 = "gemma2"
   GEMMA3 = "gemma3"
   GEMMA4 = "gemma4"
+  GEMMA4_LATENT_MOE = "gemma4_latent_moe"
   GEMMA4_SMALL = "gemma4_small"
   QWEN2 = "qwen2"
   QWEN3 = "qwen3"

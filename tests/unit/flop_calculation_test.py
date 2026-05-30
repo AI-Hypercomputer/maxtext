@@ -358,6 +358,35 @@ class FlopCalculation(parameterized.TestCase):
     calculated_tflops, _, _ = calculate_tflops_training_per_device(cfg)
     self.assertFlopsAlmostEqual(calculated_tflops, golden_tflops)
 
+  def test_gemma4_latent_moe_26b_flops(self):
+    """Test Gemma4 latent-MoE 26B FLOPs calculation.
+
+    Latent-MoE Gemma4 projects attention output to attention_output_dim=1024
+    (vs emb_dim=2816), runs the MoE block at that latent dim, and
+    up-projects 1024 -> 2816 once per layer. Attention follows the standard
+    Gemma4 5:1 local:global pattern (sliding window 1024, global head_dim
+    512). ~3.76B active parameters per token.
+    """
+    cfg = self._initialize_model_config(
+        "gemma4-latent-moe-26b",
+        max_target_length=2048,
+        per_device_batch_size=4,
+    )
+    B = cfg.per_device_batch_size
+    S = cfg.max_target_length
+    N = cfg.base_num_decoder_layers
+    num_global = N // 6
+    num_local = N - num_global
+    H_q = cfg.base_num_query_heads
+    # Local layers use head_dim, global layers use global_head_dim.
+    local_attn = 2 * 3 * num_local * B * (cfg.sliding_window_size**2) * H_q * cfg.head_dim
+    global_attn = 2 * 3 * num_global * B * (S**2) * H_q * cfg.global_head_dim
+    attention_flops = (local_attn + global_attn) / 1e12
+    golden_param_size = 3.76e9  # active params per token
+    golden_tflops = 6 * B * S * golden_param_size / 1e12 + attention_flops
+    calculated_tflops, _, _ = calculate_tflops_training_per_device(cfg)
+    self.assertFlopsAlmostEqual(calculated_tflops, golden_tflops)
+
   def test_deepseek32_671b_flops(self):
     """Test DeepSeek3.2-671b FLops calculation"""
     cfg = self._initialize_model_config(

@@ -684,9 +684,13 @@ def calculate_ffn_mamtul_tflops_per_device(config, mlp_dim, in_dim=None):
 def get_shared_expert_mlp_dim(config):
   """Returns the MLP dimension used by the shared expert.
 
-  GEMMA4 shared experts use mlp_dim, while other MoE blocks use moe_mlp_dim. See moe.py.
+  Gemma4 variants use mlp_dim, other MoE blocks use moe_mlp_dim. See moe.py.
   """
-  return config.mlp_dim if config.decoder_block == DecoderBlockType.GEMMA4 else config.moe_mlp_dim
+  return (
+      config.mlp_dim
+      if config.decoder_block in (DecoderBlockType.GEMMA4, DecoderBlockType.GEMMA4_LATENT_MOE)
+      else config.moe_mlp_dim
+  )
 
 
 def calculate_routed_and_shared_ffn_tflops_per_device(config):
@@ -965,6 +969,18 @@ def calculate_tflops_training_per_device(config, log=True):
     ):
       total_ffn_flops = calculate_routed_and_shared_ffn_tflops_per_device(config)
       is_ffn_flops_already_total = True
+    elif config.decoder_block == DecoderBlockType.GEMMA4_LATENT_MOE:
+      # Gemma4 latent MoE: routed and shared experts both live at moe_expert_input_dim
+      # (the latent), shared experts use mlp_dim as intermediate (matching GEMMA4).
+      in_dim = config.moe_expert_input_dim
+      gate_flops = 2 * config.per_device_batch_size * config.max_target_length * in_dim * config.num_experts
+      shared_experts_flops = (
+          calculate_ffn_mamtul_tflops_per_device(config, config.mlp_dim, in_dim=in_dim) * config.shared_experts
+      )
+      routed_experts_flops = (
+          calculate_ffn_mamtul_tflops_per_device(config, config.moe_mlp_dim, in_dim=in_dim) * config.num_experts_per_tok
+      )
+      total_ffn_flops = gate_flops + shared_experts_flops + routed_experts_flops
     elif config.decoder_block == DecoderBlockType.QWEN3_CUSTOM_MOE:
       # MoE operates at moe_expert_input_dim (compressed latent), not emb_dim.
       in_dim = config.moe_expert_input_dim
@@ -1046,6 +1062,27 @@ def calculate_tflops_training_per_device(config, log=True):
     attention_tflops, learnable_weight_tflops = calculate_gemma4_tflops_training_per_device(
         config, total_ffn_flops_all_layers, embedding_flops, attention_pattern_length=6
     )
+  elif config.decoder_block == DecoderBlockType.GEMMA4_LATENT_MOE:
+    # Latent-MoE Gemma4: attention output projects to attention_output_dim and a
+    # per-layer up-projection maps it back to emb_dim before the residual.
+    attention_tflops, learnable_weight_tflops = calculate_gemma4_tflops_training_per_device(
+        config, total_ffn_flops_all_layers, embedding_flops, attention_pattern_length=6
+    )
+    # Correct the projection cost: gemma4's helper assumed emb_dim, but here
+    # the output is attention_output_dim. Adjust both local and global layers.
+    num_global_layers = config.num_decoder_layers // 6
+    num_local_layers = config.num_decoder_layers - num_global_layers
+    global_head_dim = config.global_head_dim or config.head_dim
+    bs_seq = 2 * config.per_device_batch_size * config.max_target_length
+    delta_per_local = bs_seq * config.num_query_heads * config.head_dim * (config.attention_output_dim - config.emb_dim)
+    delta_per_global = bs_seq * config.num_query_heads * global_head_dim * (config.attention_output_dim - config.emb_dim)
+    up_proj_per_layer = bs_seq * config.attention_output_dim * config.emb_dim
+    delta_total = (
+        delta_per_local * num_local_layers
+        + delta_per_global * num_global_layers
+        + up_proj_per_layer * config.num_decoder_layers
+    )
+    learnable_weight_tflops += delta_total * 3 / 10**12
   elif config.decoder_block == DecoderBlockType.GEMMA4_SMALL:
     # The small path derives its own attention pattern from
     # gemma4_small.get_attention_pattern(config.model_name) and accounts for
@@ -1122,6 +1159,7 @@ def calculate_tflops_training_per_device(config, log=True):
           DecoderBlockType.LLAMA4,
           DecoderBlockType.QWEN3_NEXT,
           DecoderBlockType.GEMMA4,
+          DecoderBlockType.GEMMA4_LATENT_MOE,
       ):
         shared_flops = (
             calculate_ffn_mamtul_tflops_per_device(config, get_shared_expert_mlp_dim(config)) * config.shared_experts

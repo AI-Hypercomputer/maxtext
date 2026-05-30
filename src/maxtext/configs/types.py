@@ -238,6 +238,7 @@ ModelName = Literal[
     "gemma3-12b",
     "gemma3-27b",
     "gemma4-26b",
+    "gemma4-latent-moe-26b",
     "gemma4-31b",
     "gemma4-e2b",
     "gemma4-e4b",
@@ -1046,6 +1047,13 @@ class RematAndOffload(BaseModel):
   out_proj: RematLocation = Field(
       RematLocation.REMAT,
       description="Remat policy for the attention output projection.",
+  )
+  latent_input: RematLocation = Field(
+      RematLocation.REMAT,
+      description=(
+          "Remat policy for the attention output in latent-MoE decoders. "
+          "DEVICE saves it at attention_output_dim so the backward pass skips recomputing attention."
+      ),
   )
   mla_q: RematLocation = Field(
       RematLocation.REMAT,
@@ -2679,6 +2687,7 @@ class MaxTextConfig(
           "qkv_proj",
           "attention_out",
           "out_proj",
+          "latent_input",
       ]
       self.tensors_on_device = [t for t in tensors if getattr(self, t) == "device"]
       self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
@@ -2883,8 +2892,8 @@ class MaxTextConfig(
           self.base_mlp_dim = self.base_moe_mlp_dim
           _, _, mlp_dim_scale, _ = get_individual_scales(self.global_parameter_scale)
           self.mlp_dim = (2**mlp_dim_scale) * self.base_mlp_dim
-        elif self.decoder_block != DecoderBlockType.GEMMA4:
-          # Allow Gemma 4 to keep distinct shared and routed MLP dimensions
+        elif self.decoder_block not in (DecoderBlockType.GEMMA4, DecoderBlockType.GEMMA4_LATENT_MOE):
+          # Allow Gemma 4 variants to keep distinct shared and routed MLP dimensions
           raise ValueError(
               "For a fully MoE model, base_mlp_dim must equal base_moe_mlp_dim. "
               f"Got base_mlp_dim={self.base_mlp_dim}, base_moe_mlp_dim={self.base_moe_mlp_dim}."
@@ -3189,10 +3198,10 @@ class MaxTextConfig(
       else:
         self.constant_bound_config = []
 
-    if self.decoder_block == DecoderBlockType.QWEN3_CUSTOM_MOE:
+    if self.decoder_block in (DecoderBlockType.QWEN3_CUSTOM_MOE, DecoderBlockType.GEMMA4_LATENT_MOE):
       if self.moe_expert_input_dim != self.attention_output_dim:
         raise ValueError(
-            f"For qwen3_custom_moe, moe_expert_input_dim ({self.moe_expert_input_dim}) "
+            f"For {self.decoder_block.value}, moe_expert_input_dim ({self.moe_expert_input_dim}) "
             f"must be equal to attention_output_dim ({self.attention_output_dim})"
         )
     return self

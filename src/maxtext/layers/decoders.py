@@ -46,6 +46,7 @@ from maxtext.models import (
     gemma2,
     gemma3,
     gemma4,
+    gemma4_latent_moe,
     gemma4_small,
     gpt3,
     gpt_oss,
@@ -465,6 +466,12 @@ class Decoder(nn.Module):
         return [gemma3.Gemma3DecoderLayerToLinen]
       case DecoderBlockType.GEMMA4:
         return [gemma4.Gemma4ScannableBlockToLinen] if self.config.scan_layers else [gemma4.Gemma4DecoderLayerToLinen]
+      case DecoderBlockType.GEMMA4_LATENT_MOE:
+        return (
+            [gemma4_latent_moe.Gemma4LatentMoEScannableBlockToLinen]
+            if self.config.scan_layers
+            else [gemma4_latent_moe.Gemma4LatentMoEDecoderLayerToLinen]
+        )
       case DecoderBlockType.GEMMA4_SMALL:
         # PLE input + KV-share donor threading requires per-layer-index state,
         # which is not expressible inside ``nn.scan``.
@@ -538,6 +545,7 @@ class Decoder(nn.Module):
         DecoderBlockType.GEMMA2,
         DecoderBlockType.GEMMA3,
         DecoderBlockType.GEMMA4,
+        DecoderBlockType.GEMMA4_LATENT_MOE,
         DecoderBlockType.GEMMA4_SMALL,
         DecoderBlockType.QWEN2,
         DecoderBlockType.QWEN3,
