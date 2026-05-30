@@ -109,8 +109,8 @@ _sort_activations_custom.defvjp(_sort_activations_custom_fwd, _sort_activations_
 
 def get_batchsplit_init_kernel_axes():
   return (
-      ("embed_moe", None, "expert_only"),
-      ("embed_moe", "expert_only", None),
+      ("expert_only", "embed_moe", None),
+      ("expert_only", None, "embed_moe"),
   )
 
 
