@@ -1106,6 +1106,7 @@ class DatasetGeneral(BaseModel):
   max_corpus_chars: int = Field(10_000_000, description="Maximum number of characters to use from the corpus.")
   train_data_columns: list[str] = Field(["text"], description="Column(s) to use from the training data.")
   train_image_column: str | list[str] = Field("image", description="Column name(s) for images in the training data.")
+  video_directory: str = Field("", description="Local directory containing video files.")
   eval_data_columns: list[str] = Field(["text"], description="Column(s) to use from the evaluation data.")
   eval_image_column: str | list[str] = Field("image", description="Column name(s) for images in evaluation data.")
   packing: bool = Field(

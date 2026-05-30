@@ -90,13 +90,33 @@ def TokenizeOp(tokenizer_model, features: Features, data_keys: Iterable[str] = (
 ########## Functions used by HF pipeline
 
 
-def reformat_prompt(example, column, image_placeholder, model_name):
-  """reformat prompt for multimodal SFT"""
-  if isinstance(example["images"], list):
-    num_images = len(example["images"])
+def reformat_prompt(example, column, image_placeholder, model_name, video_placeholder="<|video|>"):
+  """reformat prompt for multimodal SFT (supports image and video)"""
+  is_video = False
+  if isinstance(element_images := example.get("images"), str):
+    is_video = True
+
+  if is_video:
+    num_images = 0
+    num_videos = 1
   else:
-    num_images = 1
-  example[column] = mm_processor.reformat_prompt(example[column], image_placeholder, model_name, num_images)
+    if isinstance(element_images, list):
+      num_images = len(element_images)
+    else:
+      num_images = 1
+    num_videos = 0
+
+  if is_video and image_placeholder in example[column]:
+    example[column] = example[column].replace(image_placeholder, video_placeholder)
+
+  example[column] = mm_processor.reformat_prompt(
+      example[column],
+      image_placeholder=image_placeholder,
+      model_name=model_name,
+      num_images=num_images,
+      video_placeholder=video_placeholder,
+      num_videos=num_videos,
+  )
   return example
 
 
@@ -119,10 +139,16 @@ def merge_image_columns(example, image_columns, max_num_images_per_example):
   return example
 
 
-def pre_process_image_sft(example, image_column, model_name):
-  """pre-process image for multimodal SFT"""
+def pre_process_image_sft(example, image_column, model_name, video_directory=""):
+  """pre-process image or video for multimodal SFT"""
 
   def _process_image_fn(image):
+    if isinstance(image, str):
+      import os
+      if video_directory:
+        image = os.path.join(video_directory, image)
+      return mm_processor.preprocess_image_for_training(image, model_name)
+
     if isinstance(image, list):
       image = [np.array(mm_utils.convert_to_RGB(img)) for img in image]
     else:
@@ -131,7 +157,7 @@ def pre_process_image_sft(example, image_column, model_name):
     image = mm_processor.preprocess_image_for_training(image, model_name)
     return image
 
-  example[image_column] = _process_image_fn(example[image_column])
+  example[image_column] = _process_image_fn(element_image) if (element_image := example.get(image_column)) else None
   return example
 
 
@@ -693,14 +719,14 @@ class PadOrTrimToMaxLength(grain.MapTransform):
       - The dummy images used for padding are based on the image shape for initialization
         of this model (ignoring batch size).
     """
+    if self.config.model_name and self.config.model_name.startswith("qwen3-omni"):
+      return preprocessed_image
+
     if not isinstance(preprocessed_image, mm_utils.PreprocessorOutput):
       raise TypeError(f"Input must be multimodal_utils.PreprocessorOutput, but got {type(preprocessed_image)}")
 
     if preprocessed_image.pixel_values is None:
       raise ValueError("Input preprocessed_image must have pixel_values to pad images.")
-
-    if self.config.model_name and self.config.model_name.startswith("qwen3-omni"):
-      return preprocessed_image
 
     # Determine the maximum number of images/masks allowed.
     image_offsets = mm_processor.get_image_offsets(self.config, preprocessed_image)

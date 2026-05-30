@@ -1,0 +1,36 @@
+# Copyright 2023–2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+base_config: "base.yml"
+
+use_sft: True
+use_tunix_gradient_accumulation: True
+use_multimodal: True
+use_audio_in_video: True
+sft_train_on_completion_only: True
+packing: False  # packing is not supported yet for multimodal
+freeze_vision_encoder_params: True
+learning_rate: 2.e-5
+
+# -------------- HF pipeline --------------
+dataset_type: hf
+hf_path: 'lmms-lab/LLaVA-Video-178K'
+hf_name: '0_30_s_academic_v0_1'
+train_split: 'open_ended'
+hf_eval_split: 'open_ended'
+train_data_columns: ['query', 'label']  # Conversations are flattened to query/label in code
+train_image_column: 'video'             # Points to the video path column
+eval_data_columns: ['query', 'label']
+eval_image_column: 'video'
+video_directory: '/mounted/LLaVA-Video-178K/0_30_s_academic_v0_1'  # Joined with relative video paths in code
