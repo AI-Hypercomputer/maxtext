@@ -681,13 +681,23 @@ def calculate_ffn_mamtul_tflops_per_device(config, mlp_dim, in_dim=None):
   return ffn1_flops + ffn2_flops
 
 
+def get_shared_expert_mlp_dim(config):
+  """Returns the MLP dimension used by the shared expert.
+
+  GEMMA4 shared experts use mlp_dim, while other MoE blocks use moe_mlp_dim. See moe.py.
+  """
+  return config.mlp_dim if config.decoder_block == DecoderBlockType.GEMMA4 else config.moe_mlp_dim
+
+
 def calculate_routed_and_shared_ffn_tflops_per_device(config):
   """Helper function to calculate DeepSeek-style ffn TFLOP"""
   gate_flops = 2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.num_experts
   # Due to the mixed decoder layers, the flops is multiplied by num of layers for both dense and moe
   num_dense_layers, num_moe_layers = get_dense_moe_layers(config)
   dense_ffn_flops = calculate_ffn_mamtul_tflops_per_device(config, config.mlp_dim) * num_dense_layers
-  shared_experts_flops = calculate_ffn_mamtul_tflops_per_device(config, config.moe_mlp_dim) * config.shared_experts
+  shared_experts_flops = (
+      calculate_ffn_mamtul_tflops_per_device(config, get_shared_expert_mlp_dim(config)) * config.shared_experts
+  )
   routed_experts_flops = calculate_ffn_mamtul_tflops_per_device(config, config.moe_mlp_dim) * config.num_experts_per_tok
   moe_ffn_flops = (gate_flops + shared_experts_flops + routed_experts_flops) * num_moe_layers
   total_ffn_flops = dense_ffn_flops + moe_ffn_flops
@@ -1113,7 +1123,9 @@ def calculate_tflops_training_per_device(config, log=True):
           DecoderBlockType.QWEN3_NEXT,
           DecoderBlockType.GEMMA4,
       ):
-        shared_flops = calculate_ffn_mamtul_tflops_per_device(config, config.moe_mlp_dim) * config.shared_experts
+        shared_flops = (
+            calculate_ffn_mamtul_tflops_per_device(config, get_shared_expert_mlp_dim(config)) * config.shared_experts
+        )
         routed_flops = calculate_ffn_mamtul_tflops_per_device(config, config.moe_mlp_dim) * config.num_experts_per_tok
         last_layer_ffn_flops = gate_flops + shared_flops + routed_flops
       else:

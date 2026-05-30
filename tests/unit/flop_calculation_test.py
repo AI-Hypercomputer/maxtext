@@ -959,6 +959,12 @@ class FlopCalculation(parameterized.TestCase):
 
   # ========== Parameterized Tests for Multiple Standard Models ==========
 
+  # Published active-param counts (billions). Anchors the reference against
+  # external ground truth so symmetric ref/code bugs don't cancel out silently.
+  PUBLISHED_ACTIVE_PARAMS_B = {
+      "gemma4-26b": 3.82,
+  }
+
   def _verify_flops(self, model_name, max_target_length=1):
     """
     Verifies that for a given sequence length, the total compute matches exactly what we
@@ -981,10 +987,11 @@ class FlopCalculation(parameterized.TestCase):
 
     # 2. Calculate FFN (Feed-Forward Network) parameters
     dense_ffn_params = (config.emb_dim * config.mlp_dim * 2 + config.mlp_dim * config.emb_dim) * num_dense
+    shared_expert_mlp_dim = maxtext_utils.get_shared_expert_mlp_dim(config)
     moe_ffn_params = (
         (config.emb_dim * config.num_experts)  # gate (router module)
         + (
-            (config.emb_dim * config.moe_mlp_dim * 2 + config.moe_mlp_dim * config.emb_dim) * config.shared_experts
+            (config.emb_dim * shared_expert_mlp_dim * 2 + shared_expert_mlp_dim * config.emb_dim) * config.shared_experts
         )  # shared experts
         + (
             (config.emb_dim * config.moe_mlp_dim * 2 + config.moe_mlp_dim * config.emb_dim) * config.num_experts_per_tok
@@ -1104,6 +1111,17 @@ class FlopCalculation(parameterized.TestCase):
 
     # 5% margin for approximations and any edge cases
     self.assertAlmostEqual(tflops, expected_total_flops, delta=max(expected_total_flops * 0.05, 0.001))
+
+    # Anchor active_params against published value (2% tol) when known.
+    expected_active_b = self.PUBLISHED_ACTIVE_PARAMS_B.get(model_name)
+    if expected_active_b is not None:
+      expected_active = expected_active_b * 1e9
+      self.assertAlmostEqual(
+          active_params,
+          expected_active,
+          delta=expected_active * 0.02,
+          msg=f"{model_name}: computed {active_params / 1e9:.3f}B active, expected {expected_active_b:.2f}B",
+      )
 
   def _verify_short_sequence_flops(self, model_name):
     """Verifies short sequence flops."""

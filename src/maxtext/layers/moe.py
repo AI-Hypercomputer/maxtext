@@ -40,6 +40,7 @@ from maxtext.kernels.ragged.ragged_sort import ring_ragged_sort
 from maxtext.kernels.ragged.ragged_sort import ring_ragged_unsort
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
+from maxtext.utils import maxtext_utils
 from maxtext.utils.sharding import create_sharding, maybe_shard_with_logical, maybe_shard_with_pspec
 from maxtext.utils.sharding import logical_to_mesh_axes
 import numpy as np
@@ -2405,9 +2406,7 @@ class RoutedAndSharedMoE(nnx.Module):
         rngs=self.rngs,
     )
 
-    shared_expert_mlp_dim = (
-        self.config.mlp_dim if self.config.decoder_block == ctypes.DecoderBlockType.GEMMA4 else self.config.moe_mlp_dim
-    )
+    shared_expert_mlp_dim = maxtext_utils.get_shared_expert_mlp_dim(self.config)
     self.shared_experts = linears.MlpBlock(
         mesh=self.mesh,
         in_features=self.moe_expert_input_dim,
