@@ -85,6 +85,11 @@
 #   XPK_DATASET_SUBPATH  default: array-record/climbmix/*.arrayrecord
 #                        The script always sets grain_train_files from these
 #                        two, overriding the YAML in both modes.
+#   XPK_HF_CACHE_DIR     default: /dev/shm/hf — HF `datasets` Arrow cache dir.
+#                        tmpfs by default so the full HF dataset doesn't fill
+#                        the ~10GB ephemeral quota and Evict the pod (hit on
+#                        gpt-oss stage1+stage2, ~23GB). No-op for grain runs.
+#                        Point at a local SSD if the dataset exceeds host RAM.
 #   STEPS_OVERRIDE       default: empty — yml `steps` is used unless set
 #   CHECKPOINT_PERIOD_OVERRIDE  default: empty — yml `checkpoint_period` is used
 #   MAX_RETRIES          default: 10 — only used by resume_until_done
@@ -149,6 +154,7 @@ require_env() {
 : "${XPK_USE_GCSFUSE:=1}"
 : "${XPK_DATASET_BUCKET:=maxtext-dataset}"
 : "${XPK_DATASET_SUBPATH:=array-record/climbmix/*.arrayrecord}"
+: "${XPK_HF_CACHE_DIR:=/dev/shm/hf}"
 : "${MAX_RETRIES:=10}"
 
 # Feature-mapping / distillation loss hyperparameters.
@@ -197,6 +203,35 @@ if [ "$XPK_USE_GCSFUSE" = "1" ]; then
 else
   grain_files_override="grain_train_files=gs://${XPK_DATASET_BUCKET}/${XPK_DATASET_SUBPATH}"
 fi
+
+# Optional: stage the YAML from GCS instead of baking via upload_runner.
+yaml_prelude=""
+if [ -n "${XPK_YAML_GCS:-}" ]; then
+  yaml_prelude="gcloud storage cp \"${XPK_YAML_GCS}\" \"${XPK_DISTILL_CONFIG}\";"
+fi
+
+# Optional: stage HF tokenizer files from GCS for models whose tokenizer isn't
+# baked into the image (e.g. gpt-oss).
+tokenizer_prelude=""
+if [ -n "${XPK_TOKENIZER_GCS:-}" ] && [ -n "${XPK_TOKENIZER_LOCAL:-}" ]; then
+  tokenizer_prelude="mkdir -p \"${XPK_TOKENIZER_LOCAL}\" && gcloud storage rsync \"${XPK_TOKENIZER_GCS}\" \"${XPK_TOKENIZER_LOCAL}\";"
+fi
+
+# Default v7x XLA flags. The default vmem limit (32 MB) is too small for
+# tokamax splash backward; we need ≥60 MB.
+default_libtpu_args="--xla_tpu_scoped_vmem_limit_kib=61440 \
+--xla_tpu_enable_all_experimental_scheduler_features=true \
+--xla_tpu_enable_scheduler_memory_pressure_tracking=true \
+--xla_tpu_host_transfer_overlap_limit=24 \
+--xla_tpu_aggressive_opt_barrier_removal=ENABLED \
+--xla_lhs_prioritize_async_depth_over_stall=ENABLED \
+--xla_tpu_enable_ag_backward_pipelining=true \
+--xla_should_allow_loop_variant_parameter_in_chain=ENABLED \
+--xla_should_add_loop_invariant_op_in_chain=ENABLED \
+--xla_max_concurrent_host_send_recv=100 \
+--xla_tpu_scheduler_percent_shared_memory_limit=100 \
+--xla_latency_hiding_scheduler_rerun=2"
+libtpu_init_args=$(printf '%s' "${XPK_LIBTPU_INIT_ARGS:-$default_libtpu_args}" | tr -s '[:space:]' ' ')
 
 # -------------------------- prep_image --------------------------
 # Adds tunix and repins jax/libtpu on top of $XPK_BASE_IMAGE, then retags
@@ -279,6 +314,11 @@ submit_workload() {
   echo "Image flag:  $image_flag=$XPK_BASE_IMAGE"
 
   # PYTHONPATH covers both image flows: /deps/src (upload_runner-baked) and /app/src (xpk crane overlay).
+  # TMPDIR=/dev/shm (set in --command below): XPK Pathways mounts /dev/shm as a
+  # disk-backed emptyDir by default (NOT real tmpfs), so this redirect just moves
+  # scratch off the image filesystem — it does NOT consume RAM. Make /dev/shm
+  # Memory-backed via a kubectl patch if you want true tmpfs. (Comment lives here,
+  # not inline: a `#` in the quoted --command would comment out the rest.)
   xpk workload create \
     --cluster "$XPK_CLUSTER" \
     --workload "$XPK_WORKLOAD" \
@@ -290,6 +330,11 @@ submit_workload() {
     "$image_flag=$XPK_BASE_IMAGE" \
     --command "export PYTHONPATH=/deps/src:/app/src; \
 export BASE_OUTPUT_DIRECTORY=${OUTPUT_DIR}; \
+export LIBTPU_INIT_ARGS='${libtpu_init_args}'; \
+export TMPDIR=/dev/shm; export JAX_COMPILATION_CACHE_DIR=/dev/shm/jax_cache; \
+export HF_HOME=${XPK_HF_CACHE_DIR}; export HF_DATASETS_CACHE=${XPK_HF_CACHE_DIR}/datasets; mkdir -p ${XPK_HF_CACHE_DIR}/datasets; \
+${yaml_prelude} \
+${tokenizer_prelude} \
 ${gcsfuse_prelude} \
 python3 -m maxtext.trainers.post_train.distillation.train_distill ${XPK_DISTILL_CONFIG} \
   run_name=${XPK_RUN_NAME} \
