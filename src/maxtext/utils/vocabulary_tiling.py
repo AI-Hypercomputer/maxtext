@@ -30,6 +30,18 @@ from maxtext.common.common_types import ShardMode
 from maxtext.utils import max_utils
 
 
+# Submodule names whose params are used by logits_from_hidden_states_for_vocab_tiling:
+# the final norm, the LM-head dense, and the embedding table when logits are tied.
+# vocab_tiling_nnx_loss splits these out as the only params the loss differentiates.
+_OUTPUT_HEAD_PATH_KEYS = ("token_embedder", "shared_embedding", "decoder_norm", "logits_dense")
+
+
+def _is_output_head_param_path(path, _value):
+  """Filter for nnx.split: True when the param path belongs to the output head."""
+  keys = [str(getattr(k, "key", k)) for k in path]
+  return any(k in keys for k in _OUTPUT_HEAD_PATH_KEYS)
+
+
 def vocab_tiling_linen_loss(
     hidden_states,
     data,
@@ -253,12 +265,12 @@ def vocab_tiling_linen_loss(
 def vocab_tiling_nnx_loss(model, hidden_states, data, config, is_train):
   """Computes cross-entropy loss with vocab tiling for NNX models.
 
-  NNX equivalent of ``vocab_tiling_linen_loss``. Scans the vocab dimension
-  and calls ``model.logits_from_hidden_states_for_vocab_tiling`` per chunk. The NNX model
-  carries its own parameters, so no explicit gather is needed.
-
-  Uses default autograd; a custom_vjp for backward memory savings can be
-  added later if needed.
+  NNX equivalent of `vocab_tiling_linen_loss`. A `custom_vjp` runs the loss in
+  vocab chunks via `jax.lax.scan` so the backward only holds one chunk's logits
+  at a time, matching the Linen path's memory profile. `nnx.split` separates the
+  output-head params (which the loss differentiates) from everything else; the
+  rest of the model is passed through but not differentiated, so the scan's
+  residuals stay small.
 
   Args:
     model: NNX model exposing ``logits_from_hidden_states_for_vocab_tiling``.
@@ -320,42 +332,137 @@ def vocab_tiling_nnx_loss(model, hidden_states, data, config, is_train):
   labels = _maybe_shard_with_name(labels, label_spec)
   segmentation = _maybe_shard_with_name(segmentation, label_spec)
 
-  batch_size, seq_len, emb_dim = hidden_states.shape
-  vocab_tile_size = (batch_size * seq_len) // config.num_vocab_tiling
+  # head_params is what the loss differentiates; other_params (transformer layers) and
+  # rest (rngs) are passed through the custom_vjp but not differentiated. They go through
+  # as primals rather than closure captures: capturing them leaks tracers across the
+  # custom_vjp + lax.scan boundary, which fails for tied embeddings.
+  graphdef, head_params, other_params, rest = nnx.split(model, _is_output_head_param_path, nnx.Param, ...)
 
-  reshaped_hidden_states = _reshape(
-      hidden_states, (config.num_vocab_tiling, vocab_tile_size, emb_dim), reshaped_hidden_spec
-  )
-  reshaped_labels = _reshape(labels, (config.num_vocab_tiling, vocab_tile_size), reshaped_data_spec)
-  reshaped_segmentation = _reshape(segmentation, (config.num_vocab_tiling, vocab_tile_size), reshaped_data_spec)
+  def _logits_for_chunk(chunk_head_params, chunk_other_params, chunk_rest, hidden_chunk):
+    local_model = nnx.merge(graphdef, chunk_head_params, chunk_other_params, chunk_rest, copy=True)
+    chunk_logits = local_model.logits_from_hidden_states_for_vocab_tiling(hidden_chunk, deterministic, model_mode)
+    return _maybe_shard_with_name(chunk_logits, chunked_logits_spec)
 
-  # Rebuild the model per chunk inside the scan: the output head pulls an rng stream, and
-  # mutating the outer model's rng inside scan's sub-trace raises TraceContextError.
-  # nnx.merge(..., copy=True) makes fresh Variables local to each iteration.
-  graphdef, model_state = nnx.split(model)
+  @jax.custom_vjp
+  def chunked_cross_entropy_loss(chunk_head_params, chunk_other_params, chunk_rest, hidden_states, labels, segmentation):
+    (total_loss, total_z_loss), _ = _chunked_cross_entropy_loss_fwd(
+        chunk_head_params, chunk_other_params, chunk_rest, hidden_states, labels, segmentation
+    )
+    return total_loss, total_z_loss
 
-  def _scan_body(accumulators, chunk_data):
-    loss_accumulator, z_loss_accumulator = accumulators
-    hidden_chunk, label_chunk, segmentation_chunk = chunk_data
-    hidden_chunk = _maybe_shard_with_name(hidden_chunk, chunked_hidden_spec)
-    label_chunk = _maybe_shard_with_name(label_chunk, chunked_data_spec)
-    segmentation_chunk = _maybe_shard_with_name(segmentation_chunk, chunked_data_spec)
+  def _chunked_cross_entropy_loss_fwd(
+      chunk_head_params, chunk_other_params, chunk_rest, hidden_states, labels, segmentation
+  ):
+    batch_size, seq_len, emb_dim = hidden_states.shape
+    vocab_tile_size = (batch_size * seq_len) // config.num_vocab_tiling
 
-    chunk_model = nnx.merge(graphdef, model_state, copy=True)
-    chunk_logits = chunk_model.logits_from_hidden_states_for_vocab_tiling(hidden_chunk, deterministic, model_mode)
-    chunk_logits = _maybe_shard_with_name(chunk_logits, chunked_logits_spec)
-    one_hot_label_chunk = jax.nn.one_hot(label_chunk, config.vocab_size)
-    chunk_xent, chunk_z_loss = max_utils.cross_entropy_with_logits(
-        chunk_logits, one_hot_label_chunk, z_loss=config.z_loss_multiplier
+    reshaped_hidden_states = _reshape(
+        hidden_states, (config.num_vocab_tiling, vocab_tile_size, emb_dim), reshaped_hidden_spec
+    )
+    reshaped_labels = _reshape(labels, (config.num_vocab_tiling, vocab_tile_size), reshaped_data_spec)
+    reshaped_segmentation = _reshape(segmentation, (config.num_vocab_tiling, vocab_tile_size), reshaped_data_spec)
+
+    def _fwd_scan_body(accumulators, chunk_data):
+      loss_accumulator, z_loss_accumulator = accumulators
+      hidden_chunk, label_chunk, segmentation_chunk = chunk_data
+      hidden_chunk = _maybe_shard_with_name(hidden_chunk, chunked_hidden_spec)
+      label_chunk = _maybe_shard_with_name(label_chunk, chunked_data_spec)
+      segmentation_chunk = _maybe_shard_with_name(segmentation_chunk, chunked_data_spec)
+
+      chunk_logits = _logits_for_chunk(chunk_head_params, chunk_other_params, chunk_rest, hidden_chunk)
+      one_hot_label_chunk = jax.nn.one_hot(label_chunk, config.vocab_size)
+      chunk_xent, chunk_z_loss = max_utils.cross_entropy_with_logits(
+          chunk_logits, one_hot_label_chunk, z_loss=config.z_loss_multiplier
+      )
+
+      masked_xent = jnp.sum(chunk_xent * (segmentation_chunk != 0))
+      masked_z_loss = jnp.sum(chunk_z_loss * (segmentation_chunk != 0))
+
+      return (loss_accumulator + masked_xent, z_loss_accumulator + masked_z_loss), None
+
+    # Always accumulate in fp32 — `cross_entropy_with_logits` returns fp32 regardless of
+    # logits dtype, and a bf16 carry would mismatch the body output type under lax.scan.
+    initial_acc = (jnp.zeros((), dtype=jnp.float32), jnp.zeros((), dtype=jnp.float32))
+    (total_loss, total_z_loss), _ = jax.lax.scan(
+        _fwd_scan_body, initial_acc, (reshaped_hidden_states, reshaped_labels, reshaped_segmentation)
+    )
+    residuals = (
+        chunk_head_params,
+        chunk_other_params,
+        chunk_rest,
+        reshaped_hidden_states,
+        reshaped_labels,
+        reshaped_segmentation,
+        batch_size,
+        seq_len,
+        emb_dim,
+    )
+    return (total_loss, total_z_loss), residuals
+
+  def _chunked_cross_entropy_loss_bwd(residuals, cotangents):
+    # z_loss is folded into the xent loss inside cross_entropy_with_logits.
+    loss_cotangent, _ = cotangents
+
+    (
+        chunk_head_params,
+        chunk_other_params,
+        chunk_rest,
+        reshaped_hidden_states,
+        reshaped_labels,
+        reshaped_segmentation,
+        batch_size,
+        seq_len,
+        emb_dim,
+    ) = residuals
+
+    def _single_chunk_loss_fn(input_head_params, input_hidden_chunk, input_label_chunk, input_segmentation_chunk):
+      chunk_logits = _logits_for_chunk(input_head_params, chunk_other_params, chunk_rest, input_hidden_chunk)
+      one_hot_label_chunk = jax.nn.one_hot(input_label_chunk, config.vocab_size)
+      xent, _ = max_utils.cross_entropy_with_logits(chunk_logits, one_hot_label_chunk, z_loss=config.z_loss_multiplier)
+      return jnp.sum(xent * (input_segmentation_chunk != 0))
+
+    def _bwd_scan_body(grad_head_acc, chunk_data):
+      hidden_chunk, label_chunk, segmentation_chunk = chunk_data
+      hidden_chunk = _maybe_shard_with_name(hidden_chunk, chunked_hidden_spec)
+      label_chunk = _maybe_shard_with_name(label_chunk, chunked_data_spec)
+      segmentation_chunk = _maybe_shard_with_name(segmentation_chunk, chunked_data_spec)
+
+      # pylint: disable=unnecessary-lambda-assignment
+      loss_fn_for_vjp = lambda p, h: _single_chunk_loss_fn(p, h, label_chunk, segmentation_chunk)
+      _, vjp_fn = jax.vjp(loss_fn_for_vjp, chunk_head_params, hidden_chunk)
+      (grad_head_update, grad_hidden_chunk) = vjp_fn(1.0)
+      grad_hidden_chunk = _maybe_shard_with_name(grad_hidden_chunk, chunked_hidden_spec)
+
+      grad_head_acc = jax.tree_util.tree_map(lambda acc, update: acc + update, grad_head_acc, grad_head_update)
+      return grad_head_acc, grad_hidden_chunk
+
+    initial_grad_head = jax.tree_util.tree_map(jnp.zeros_like, chunk_head_params)
+
+    grad_head, grad_reshaped_hidden_states = jax.lax.scan(
+        _bwd_scan_body, initial_grad_head, (reshaped_hidden_states, reshaped_labels, reshaped_segmentation)
+    )
+    grad_reshaped_hidden_states = _maybe_shard_with_name(grad_reshaped_hidden_states, reshaped_hidden_spec)
+    grad_head = jax.tree_util.tree_map(lambda g: g * loss_cotangent, grad_head)
+    grad_head = jax.tree_util.tree_map(lambda x, y: y.astype(x.dtype), chunk_head_params, grad_head)
+    grad_reshaped_hidden_states = _reshape(grad_reshaped_hidden_states, (batch_size, seq_len, emb_dim), hidden_spec)
+
+    # Return explicit zeros for other_params and rest, not None. With None, JAX builds
+    # the zero cotangents with the wrong layer-axis order for scanned params, and the
+    # AOT trace fails the cotangent shape check.
+    grad_other = jax.tree_util.tree_map(jnp.zeros_like, chunk_other_params)
+    grad_rest = jax.tree_util.tree_map(jnp.zeros_like, chunk_rest)
+    return (
+        grad_head,
+        grad_other,
+        grad_rest,
+        grad_reshaped_hidden_states.astype(reshaped_hidden_states.dtype),
+        None,
+        None,
     )
 
-    masked_xent = jnp.sum(chunk_xent * (segmentation_chunk != 0))
-    masked_z_loss = jnp.sum(chunk_z_loss * (segmentation_chunk != 0))
+  chunked_cross_entropy_loss.defvjp(_chunked_cross_entropy_loss_fwd, _chunked_cross_entropy_loss_bwd)
 
-    return (loss_accumulator + masked_xent, z_loss_accumulator + masked_z_loss), None
-
-  initial_acc = (jnp.zeros((), dtype=hidden_states.dtype), jnp.zeros((), dtype=hidden_states.dtype))
-  (total_loss, total_z_loss), _ = jax.lax.scan(
-      _scan_body, initial_acc, (reshaped_hidden_states, reshaped_labels, reshaped_segmentation)
+  total_loss, total_z_loss = chunked_cross_entropy_loss(
+      head_params, other_params, rest, hidden_states, labels, segmentation
   )
   return total_loss, total_z_loss
