@@ -18,7 +18,7 @@ export LOSS_THRESHOLD=100.0 # Set to large value so test is guaranteed to pass.
 export STEPS=20400 # Run for 20B tokens for a 1B sized mode for "chinchilla" scaling https://arxiv.org/abs/2203.15556
 export EVAL_STEPS=160
 export EVAL_INTERVAL=100
-export DATASET_TYPE=tfds
+export DATASET_TYPE=grain
 export MTP_NUM_LAYERS=0 # Disable MTP by default
 export PER_DEVICE_BATCH_SIZE=8.0 # With the default learning rate (3e-4) this should have global batch of 512, with 2k sequence length (1M global batch in tokens)
 
