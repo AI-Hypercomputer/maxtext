@@ -28,6 +28,7 @@ MaxText was co-designed with key Google led innovations to provide a unified pos
   - [SFT on Multi-Host TPUs](../tutorials/posttraining/sft_on_multi_host.md)
 - **LoRA (Low-Rank Adaptation)**
   - [LoRA on Single-Host TPUs](../tutorials/posttraining/lora.md)
+  - [LoRA on Multi-Host TPUs](../tutorials/posttraining/lora_on_multi_host.md)
 - **DPO (Direct Preference Optimization) and ORPO (Odds-Ratio Policy Optimization)**
   - [DPO/ORPO on Single-Host TPUs](../tutorials/posttraining/dpo.md)
 - **Multimodal SFT**
