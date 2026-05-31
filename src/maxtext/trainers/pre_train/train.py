@@ -59,7 +59,6 @@ from maxtext.common.goodput import (
 from maxtext.common.gcloud_stub import vertex_tensorboard_modules
 from maxtext.common import metric_logger
 from maxtext.common.metric_logger import record_activation_metrics
-from maxtext.trainers.post_train.dpo.dpo_utils import _merge_dpo_state, _split_dpo_state, dpo_loss_fn, dpo_loss_fn_nnx
 from maxtext.utils import exceptions
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
@@ -310,45 +309,25 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   """
   # --- Per-path initialization ---
   if isinstance(model, nn.Module):
-    reference_params, reference_params_sharding, extra_dpo_args, _loss_fn = [], [], [], loss_fn
-    if config.use_dpo:
-      state, reference_params = _split_dpo_state(state)
-      state_mesh_shardings, reference_params_sharding = _split_dpo_state(state_mesh_shardings)
-      extra_dpo_args = [reference_params]
-      _loss_fn = dpo_loss_fn
     params = state.params
-    ga_fn, ga_model, ga_params, ga_rng, ga_dpo = _loss_fn, model, params, dropout_rng, extra_dpo_args
+    loss_model, loss_params, loss_rng = model, params, dropout_rng
   else:
     state = nnx.merge(model, state)  # reconstruct TrainStateNNX
-    if config.use_dpo:
-      # NNX DPO: reference_model is a sibling field on TrainStateNNX (set up by
-      # init_initial_state when config.use_dpo=True). dpo_loss_fn_nnx mirrors
-      # the Linen dpo_loss_fn signature, so it slots into the same dispatcher
-      # with reference_model passed as the single extra_dpo_args entry.
-      ga_fn, ga_model, ga_params, ga_rng, ga_dpo = (dpo_loss_fn_nnx, state.model, None, None, [state.reference_model])
-    else:
-      ga_fn, ga_model, ga_params, ga_rng, ga_dpo = loss_fn, state.model, None, None, []
+    loss_model, loss_params, loss_rng = state.model, None, None
 
   # --- Gradient computation ---
   if config.gradient_accumulation_steps > 1:
     loss, aux, raw_grads = gradient_accumulation_loss_and_grad(
-        ga_fn,
+        loss_fn,
         config,
-        ga_model,
-        ga_params,
+        loss_model,
+        loss_params,
         params_shardings,
         data,
-        ga_rng,
-        ga_dpo,
+        loss_rng,
     )
   else:
     if isinstance(model, nn.Module):
-      if config.optimizer_memory_host_offload and config.use_dpo:
-        reference_params = jax.device_put(
-            reference_params,
-            max_utils.with_memory_kind(reference_params_sharding, "device"),
-        )
-        extra_dpo_args = [reference_params]
       if config.shard_optimizer_over_data:
         params = jax.tree.map(
             functools.partial(sharding.maybe_shard_with_name, shard_mode=config.shard_mode),
@@ -359,14 +338,13 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       pure_params = params["params"] if sparsity_enabled else params
       batch_stats = params.get("batch_stats", {})
 
-      grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
+      grad_func = jax.value_and_grad(loss_fn, argnums=4, has_aux=True)
       (loss, aux), raw_grads = grad_func(
           model,
           config,
           data,
           dropout_rng,
           pure_params,
-          *extra_dpo_args,
           sparsity_state=batch_stats,
           is_train=True,
       )
@@ -393,14 +371,9 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
         )
         nnx.update(state.model, curr_params)
 
-      # `ga_fn` and `ga_dpo` were set up earlier (loss_fn vs dpo_loss_fn_nnx;
-      # ga_dpo carries the frozen reference_model when use_dpo, else empty).
-      _nnx_loss_fn = ga_fn
-      _nnx_extra_dpo_args = ga_dpo
-
       def diff_wrapper(param, rest, config, data):
         local_model = nnx.merge(model_graphdef, param, rest, copy=True)
-        loss, aux = _nnx_loss_fn(local_model, config, data, None, None, *_nnx_extra_dpo_args, is_train=True)
+        loss, aux = loss_fn(local_model, config, data, None, None, is_train=True)
         _, _, new_rest = nnx.split(local_model, nnx.Param, ...)
         return loss, (aux, new_rest)
 
@@ -550,9 +523,6 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     is_skipped = new_opt_state.get("is_skipped") if isinstance(new_opt_state, dict) else None
     if is_skipped is not None:
       scalar_metrics["optim/step_skipped"] = is_skipped.astype(jnp.float32)
-  if config.use_dpo:
-    scalar_metrics["learning/dpo_loss"] = aux["dpo_loss"]
-    scalar_metrics["learning/dpo_reward_accuracy"] = aux["reward_accuracy"]
   metrics = {
       "scalar": scalar_metrics,
       "scalars": {},
@@ -561,8 +531,6 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     record_activation_metrics(metrics, intermediate_outputs, config)
 
   if isinstance(model, nn.Module):
-    if config.use_dpo:
-      new_state = _merge_dpo_state(new_state, reference_params)
     return new_state, metrics
   # Drop Intermediates (e.g. sowed max_logits for QK-Clip) before returning;
   # they're absent from state_mesh_shardings and would cause a leaf-count mismatch.
@@ -572,24 +540,15 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
 def eval_step(model, config, state, data, dropout_rng=None):
   """eval_step no backprop and new state compared with train_step."""
   if isinstance(model, nn.Module):
-    reference_params, extra_dpo_args, _loss_fn = [], [], loss_fn
-    if config.use_dpo:
-      state, reference_params = _split_dpo_state(state)
-      extra_dpo_args = [reference_params]
-      _loss_fn = dpo_loss_fn
-
     sparsity_enabled = config.weight_sparsity_n and config.weight_sparsity_m
     pure_params = state.params["params"] if sparsity_enabled else state.params
     batch_stats = state.params.get("batch_stats", {})
 
-    eval_loss_fn = functools.partial(_loss_fn, model, config, data, dropout_rng, is_train=False)
-    loss, aux = eval_loss_fn(pure_params, *extra_dpo_args, sparsity_state=batch_stats)
+    eval_loss_fn = functools.partial(loss_fn, model, config, data, dropout_rng, is_train=False)
+    loss, aux = eval_loss_fn(pure_params, sparsity_state=batch_stats)
   else:
     state = nnx.merge(model, state)  # reconstruct TrainStateNNX
-    if config.use_dpo:
-      loss, aux = dpo_loss_fn_nnx(state.model, config, data, None, None, state.reference_model, is_train=False)
-    else:
-      loss, aux = loss_fn(state.model, config, data, None, None, is_train=False)
+    loss, aux = loss_fn(state.model, config, data, None, None, is_train=False)
 
   mtp_acceptance_rate = 0.0
   if config.mtp_eval_target_module > 0:
@@ -601,10 +560,7 @@ def eval_step(model, config, state, data, dropout_rng=None):
   moe_lb_loss = aux["moe_lb_loss"]
   indexer_loss = aux.get("indexer_loss", 0.0)
   mtp_loss = aux.get("mtp_loss", 0.0)
-  # For DPO, report the unnormalized sum of per-sample preference losses so that
-  # MetricLogger (which divides eval/total_loss by eval/total_weights) recovers
-  # the correct mean DPO loss. xent_sum is always 0 for DPO and must not be used.
-  eval_total_loss = aux.get("dpo_loss", 0.0) * total_weights if config.use_dpo else xent_sum
+  eval_total_loss = xent_sum
   metrics = {
       "scalar": {
           "evaluation/loss": loss,
@@ -617,8 +573,6 @@ def eval_step(model, config, state, data, dropout_rng=None):
           "evaluation/mtp_acceptance_rate_percent": mtp_acceptance_rate,
       },
   }
-  if isinstance(model, nn.Module) and config.use_dpo:
-    metrics["scalar"]["evaluation/dpo_reward_accuracy"] = aux.get("reward_accuracy", 0.0)
 
   return metrics
 
@@ -640,15 +594,8 @@ def train_loop(config, recorder, state=None):
   ) = train_utils.setup_train_loop(config, recorder)
 
   if isinstance(model, nn.Module):
-    if config.use_dpo:
-      if "reference_params" not in state.params:
-        reference_params = jax.tree.map(jnp.copy, state.params["params"])
-        state = _merge_dpo_state(state, reference_params)
-      state_mesh_shardings = _merge_dpo_state(state_mesh_shardings, state_mesh_shardings.params["params"])
     jit_model = model
   else:
-    # NNX keeps the DPO reference model as a sibling field on TrainStateNNX
-    # (set up in init_state_fn), so no reference-param merge is needed here.
     jit_model, state = nnx.split(state)
 
   params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
@@ -717,8 +664,7 @@ def train_loop(config, recorder, state=None):
 
         step_time_delta = datetime.datetime.now() - last_step_completion
 
-        state_to_save = state if not (config.use_dpo and not config.pure_nnx) else _split_dpo_state(state)[0]
-        checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator, step)
+        checkpointing.maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step)
 
         if config.dump_hlo and step == (config.dump_step if config.dump_step >= 0 else start_step):
           jax.block_until_ready(state)  # Ensure compilation has finished.
@@ -764,8 +710,7 @@ def train_loop(config, recorder, state=None):
         metric_logger_instance.buffer_and_write_metrics(metrics, step, step_time_delta)
 
     if config.save_checkpoint_on_completion:
-      state_to_save = state if not (config.use_dpo and not config.pure_nnx) else _split_dpo_state(state)[0]
-      checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator)
+      checkpointing.maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator)
     if checkpoint_manager is not None:
       # in case the last checkpoint_period checkpoint is still in progress
       checkpoint_manager.wait_until_finished()

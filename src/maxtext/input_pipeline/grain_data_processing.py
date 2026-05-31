@@ -255,32 +255,6 @@ def pretrain_preprocessing_pipeline(
   return dataset
 
 
-def dpo_preprocessing_pipeline(
-    dataset,
-    config,
-    data_columns,
-    tokenize,
-    grain_worker_count,
-    grain_per_worker_buffer_size,
-):
-  """Use grain to pre-process the dataset and return iterators for dpo fine-tuning"""
-  dataset = data_processing_utils.parse_and_keep_features(dataset, config, data_columns, tokenize)
-  tokenizer_model, pad_id = data_processing_utils.get_tokenizer_and_pad_id(config)
-
-  if tokenize:
-    dataset = dataset.map(grain_tokenizer.TokenizeAndTrim(data_columns, config.max_target_length, tokenizer_model))
-
-  batch_size = config.global_batch_size_to_load // jax.process_count()
-  # DPO scores full sequences, so no shift.
-  dataset = data_processing_utils.format_and_batch(
-      dataset, config, batch_size, pad_id, data_columns, tokenizer_model, shift=False
-  )
-  dataset = data_processing_utils.apply_multiprocessing_and_prefetch(
-      dataset, config, grain_worker_count, grain_per_worker_buffer_size
-  )
-  return dataset
-
-
 def _format_chat_template_grain(element, data_columns, tokenizer_model):
   """Grain-compatible mapping function to format raw columns into conversational messages."""
   # Convert raw columns to conversational messages
@@ -368,8 +342,6 @@ def sft_preprocessing_pipeline(
 
 def _get_pipeline_fn(config):
   """Returns the appropriate preprocessing pipeline function based on config."""
-  if config.use_dpo:
-    return dpo_preprocessing_pipeline
   if config.use_sft:
     return sft_preprocessing_pipeline
   return pretrain_preprocessing_pipeline
