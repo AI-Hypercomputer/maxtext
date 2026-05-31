@@ -213,7 +213,7 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
   (positions, segment_ids) are passed to the model.
   """
 
-  checkpoint_manager: distillation_utils.MaxTextCheckpointManager | None
+  checkpoint_manager: distillation_utils.MaxTextCheckpointManager
 
   def __init__(
       self,
