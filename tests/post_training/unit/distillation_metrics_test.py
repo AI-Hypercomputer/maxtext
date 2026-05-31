@@ -33,9 +33,6 @@ pytest.importorskip("tunix")
 
 pytestmark = [pytest.mark.cpu_only, pytest.mark.post_training]
 
-import os
-import safetensors.numpy
-import tempfile
 import unittest
 from typing import List, Optional
 
@@ -44,7 +41,6 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 from absl.testing import absltest
-from array_record.python import array_record_module
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
 from maxtext.trainers.post_train.distillation import distillation_utils
@@ -217,37 +213,6 @@ class DistillationMetricsTest(unittest.TestCase):
     self.assertGreater(float(np.sum(labels_unpacked[0, 3])), 0.0)
     for pos in (0, 1, 2):
       np.testing.assert_array_equal(np.asarray(labels_packed[0, pos]), np.asarray(labels_unpacked[0, pos]))
-
-  def test_offline_iterator_preserves_packing_fields(self):
-    """Packed segmentation fields survive write -> ArrayRecord -> OfflineArrayRecordIterator -> Tunix adapter."""
-    record = {
-        "tokens": np.array([[10, 11, 12, 13]], dtype=np.int32),
-        "top_k_logits": np.zeros((1, 4, 8), dtype=np.float32),
-        "top_k_indices": np.zeros((1, 4, 8), dtype=np.int32),
-        "inputs_position": np.array([[0, 1, 0, 0]], dtype=np.int32),
-        "inputs_segmentation": np.array([[1, 1, 2, 0]], dtype=np.int32),
-        "targets": np.array([[11, 12, 13, 0]], dtype=np.int32),
-        "targets_segmentation": np.array([[1, 1, 2, 0]], dtype=np.int32),
-    }
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-      path = os.path.join(tmpdir, "test.array_record")
-      writer = array_record_module.ArrayRecordWriter(path, "group_size:1")
-      writer.write(safetensors.numpy.save(record))
-      writer.close()
-
-      it = distillation_utils.OfflineArrayRecordIterator(path, epochs=1)
-      batch = next(it)
-
-    np.testing.assert_array_equal(batch["inputs"], record["tokens"])
-    np.testing.assert_array_equal(batch["inputs_segmentation"], record["inputs_segmentation"])
-    np.testing.assert_array_equal(batch["targets_segmentation"], record["targets_segmentation"])
-    np.testing.assert_array_equal(batch["targets"], record["targets"])
-
-    adapter = distillation_utils.MaxTextToTunixIterator(iter([batch]))
-    tunix_input = next(adapter)
-    np.testing.assert_array_equal(np.asarray(tunix_input.decoder_segment_ids), record["inputs_segmentation"])
-    np.testing.assert_array_equal(np.asarray(tunix_input.targets_segmentation), record["targets_segmentation"])
 
   # --- 4. Temperature^2 scaling of soft loss ----------------------------
 

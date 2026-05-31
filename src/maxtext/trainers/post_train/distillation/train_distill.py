@@ -737,15 +737,18 @@ def train_distill(
     trainer.is_managed_externally = True
     trainer._has_aux = True  # pylint: disable=protected-access
 
-    # 4. Data Iterators (Init BEFORE Trainer pipeline setup)
-    # We use MaxText's native create_data_iterator which creates both train and eval iterators
     if is_offline:
-      max_logging.log(f"Loading Offline Dataset from {offline_data_dir}...")
-      raw_train_iter = distillation_utils.OfflineArrayRecordIterator(offline_data_dir)
-      raw_eval_iter = None
-    else:
       max_logging.log("Initializing Data Iterators via MaxText pipeline...")
-      raw_train_iter, raw_eval_iter = input_pipeline_interface.create_data_iterator(student_config, mesh)
+
+      # Point Grain to offline files instead of the raw text dataset
+      student_config.get_keys()["grain_train_files"] = offline_data_dir
+
+      student_config.get_keys()["eval_interval"] = 0
+      student_config.get_keys()["is_offline_distillation"] = True
+      student_config.get_keys()["dataset_shuffle_buffer_size"] = 0
+      student_config.get_keys()["dataset_shuffle_seed"] = 0
+
+    raw_train_iter, raw_eval_iter = input_pipeline_interface.create_data_iterator(student_config, mesh)
 
     # 5. Input Pipeline Checkpointing & Restoration
     # Replace the default CheckpointManager with a Grain-aware one, which enables iterator checkpointing for grain datasets.
@@ -771,14 +774,8 @@ def train_distill(
       if getattr(batch, "top_k_logits", None) is None:
         return inputs_dict
 
-      # Scatter the offline arrays into a dense tensor of -10000s
-      dense_shape = batch.input_tokens.shape + (student_config.vocab_size,)
-      dense_logits = jnp.full(dense_shape, -10000.0, dtype=jnp.float32)
-      dense_logits = jnp.put_along_axis(dense_logits, batch.top_k_indices, batch.top_k_logits, axis=-1, inplace=False)
-
-      # Inject it as teacher_output so the trainer skips the teacher forward pass
       inputs_dict["teacher_output"] = distillation_utils.DistillationForwardOutput(
-          logits=dense_logits, out_projection_activations=None
+          logits=batch.top_k_logits, out_projection_activations=None, top_k_indices=batch.top_k_indices
       )
       return inputs_dict
 
