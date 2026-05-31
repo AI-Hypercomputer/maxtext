@@ -298,6 +298,7 @@ LutFn = Callable[[int, int, int], Optional[tuple[int, int, int]]]
         "tiling",
         "transpose_rhs",
         "interpret",
+        "varying_axes",
     ],
 )
 def gmm(
@@ -310,6 +311,7 @@ def gmm(
     existing_out: jnp.ndarray | None = None,
     transpose_rhs: bool = False,
     interpret: bool = False,
+    varying_axes: tuple[str, ...] = (),
 ) -> jnp.ndarray:
   """Compute lhs[sizes[i-1]:sizes[i], :] @ rhs for each group 'i'.
 
@@ -522,7 +524,7 @@ def gmm(
   }
   call_gmm = qpl.pallas_call(
       kernel,
-      out_shape=jax.ShapeDtypeStruct((m, n), preferred_element_type),
+      out_shape=jax.ShapeDtypeStruct((m, n), preferred_element_type, manual_axis_type=jax.sharding.ManualAxisType(varying=frozenset(varying_axes))),
       grid_spec=pltpu.PrefetchScalarGridSpec(
           num_scalar_prefetch=2,
           in_specs=[
@@ -565,6 +567,7 @@ def gmm(
         "tiling",
         "num_actual_groups",
         "interpret",
+        "varying_axes",
     ],
 )
 def tgmm(
@@ -577,6 +580,7 @@ def tgmm(
     num_actual_groups: int | None = None,
     existing_out: jnp.ndarray | None = None,
     interpret: bool = False,
+    varying_axes: tuple[str, ...] = (),
 ) -> jnp.ndarray:
   """Compute lhs[:, sizes[i-1]:sizes[i]] @ rhs[sizes[i-1]:sizes[i], :].
 
@@ -775,7 +779,9 @@ def tgmm(
   }
   call_gmm = qpl.pallas_call(
       kernel,
-      out_shape=jax.ShapeDtypeStruct((num_actual_groups, k, n), preferred_element_type),
+      out_shape=jax.ShapeDtypeStruct(
+          (num_actual_groups, k, n), preferred_element_type, manual_axis_type=jax.sharding.ManualAxisType(varying=frozenset(varying_axes))
+      ),
       grid_spec=pltpu.PrefetchScalarGridSpec(
           num_scalar_prefetch=2,
           in_specs=[
