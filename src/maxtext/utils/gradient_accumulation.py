@@ -31,7 +31,6 @@ def gradient_accumulation_loss_and_grad(
     params_shardings,
     data,
     dropout_rng,
-    extra_dpo_args,
 ):
   """
   Calculates gradients using gradient accumulation.
@@ -56,7 +55,6 @@ def gradient_accumulation_loss_and_grad(
       data: A PyTree of batched data. The leading dimension is assumed
           to be the total batch size (microbatch_size * num_accumulations).
       dropout_rng: JAX PRNGKey for dropout.
-      extra_dpo_args: A tuple of extra arguments to pass to the loss function.
 
   Returns:
       A tuple containing:
@@ -114,7 +112,7 @@ def gradient_accumulation_loss_and_grad(
       # Reconstruct the model using the fixed parameters (ga_params)
       # and the advancing non-parameter state (RNGs) from the carry.
       local_model = nnx.merge(graphdef, ga_params, acc_grad_and_loss["rest_state"], copy=True)
-      (_, aux), cur_batch_gradient = grad_func(local_model, config, data, None, None, *extra_dpo_args, is_train=True)
+      (_, aux), cur_batch_gradient = grad_func(local_model, config, data, None, None, is_train=True)
       _, _, next_rest_state = nnx.split(local_model, nnx.Param, ...)
       acc_grad_and_loss["rest_state"] = next_rest_state
     else:
@@ -123,7 +121,7 @@ def gradient_accumulation_loss_and_grad(
           if dropout_rng is not None
           else None
       )
-      (_, aux), cur_batch_gradient = grad_func(model, config, data, rng, ga_params, *extra_dpo_args, is_train=True)
+      (_, aux), cur_batch_gradient = grad_func(model, config, data, rng, ga_params, is_train=True)
     acc_grad_and_loss["loss"] += aux["xent_sum"] + aux.get("dpo_loss", 0.0)
     acc_grad_and_loss["moe_lb_loss"] += aux["moe_lb_loss"]
     acc_grad_and_loss["indexer_loss"] += aux["indexer_loss"]

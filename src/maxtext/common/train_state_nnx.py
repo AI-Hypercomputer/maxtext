@@ -30,31 +30,21 @@ class TrainStateNNX(nnx.Module):
     {"params": {...}, "opt_state": {}...}
   TrainStateNNX state pytree:
     {"model": {...}, "optimizer": {"opt_state": {...}}}
-
-  For DPO (Direct Preference Optimization), an optional `reference_model`
-  carries a frozen copy of the same architecture used to compute reference
-  log-probabilities. Only `model` is updated by `apply_gradients`; the
-  reference is held alongside so it is sharded, jit-traced, and checkpointed
-  with the rest of the train state.
   """
 
   def __init__(
       self,
       model: nnx.Module,
       optimizer: nnx.Optimizer | None,
-      reference_model: nnx.Module | None = None,
   ):
     self.model = model
     self.optimizer = optimizer
-    if reference_model is not None:
-      self.reference_model = reference_model
 
   def apply_gradients(self, grads: Any):
     """Mimics the Linen apply_gradients function.
 
     Updates the optimizer state, applies updates to parameters, and increments
-    the step counter. Only updates `self.model`; `self.reference_model` (if
-    present) is left untouched.
+    the step counter. Only updates `self.model`.
     """
     if self.optimizer is None:
       raise RuntimeError(
@@ -88,9 +78,7 @@ def _cast_step(step, dtype):
   values.
   """
   if isinstance(step, jax.ShapeDtypeStruct):
-    return jax.ShapeDtypeStruct(
-        step.shape, dtype, sharding=getattr(step, "sharding", None)
-    )
+    return jax.ShapeDtypeStruct(step.shape, dtype, sharding=getattr(step, "sharding", None))
   return jnp.asarray(step, dtype=dtype)
 
 
@@ -117,10 +105,7 @@ def _wrap_mu_nu_with_params(state):
   """Wraps mu/nu under an inner 'params' key (the Linen collection)."""
   if not isinstance(state, dict):
     return state
-  return {
-      k: {"params": v} if k in ("mu", "nu") and isinstance(v, dict) else v
-      for k, v in state.items()
-  }
+  return {k: {"params": v} if k in ("mu", "nu") and isinstance(v, dict) else v for k, v in state.items()}
 
 
 def _as_chain_index(key):
@@ -172,23 +157,14 @@ def _strip_mu_nu_params(state):
   if not isinstance(state, dict):
     return state
   return {
-      k: (
-          v["params"]
-          if k in ("mu", "nu") and isinstance(v, dict) and "params" in v
-          else v
-      )
-      for k, v in state.items()
+      k: (v["params"] if k in ("mu", "nu") and isinstance(v, dict) and "params" in v else v) for k, v in state.items()
   }
 
 
 def _opt_state_from_linen(opt_state):
   """Inverse of `_opt_state_to_linen`: Linen list-with-None -> NNX int-keyed dict."""
   if isinstance(opt_state, list):
-    return {
-        i: _strip_mu_nu_params(e)
-        for i, e in enumerate(opt_state)
-        if isinstance(e, dict)
-    }
+    return {i: _strip_mu_nu_params(e) for i, e in enumerate(opt_state) if isinstance(e, dict)}
   if not isinstance(opt_state, dict):
     return opt_state
   return {0: _strip_mu_nu_params(opt_state)}
