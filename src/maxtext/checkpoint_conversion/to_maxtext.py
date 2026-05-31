@@ -832,7 +832,7 @@ def _setup_merge_mode_getter(tensor_getter, config, hf_lora_adapter_path, revisi
 
 def main(
     args: Sequence[str],
-    lazy_load_tensors: bool = False,
+    lazy_load_tensors: bool = True,
     eager_load_method: str = "safetensors",
     hf_model_path: str | None = None,
     revision: str | None = None,
@@ -1093,7 +1093,7 @@ if __name__ == "__main__":
       "--lazy_load_tensors",
       type=str2bool,
       required=False,
-      default=False,
+      default=True,
       help="Whether to use lazy loading of HF tensors",
   )
   # Eager load uses `transformers_class.from_pretrained` with auto dtype or `safetensors.safe_open` with pt.
