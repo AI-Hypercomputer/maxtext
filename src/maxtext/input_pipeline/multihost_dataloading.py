@@ -117,20 +117,17 @@ class MultiHostDataLoadIterator:
     else:
       SLEEP_TIME = 10
       MAX_DATA_LOAD_ATTEMPTS = 30
+      # Grain checkpoint requires a fixed batch_size, so when expansion_factor > 1 we
+      # collect `expansion_loading_factor_for_grain` sub-batches and concatenate them.
+      # to get the correct batch_size
+      sub_batches_per_step = max(1, int(self.expansion_loading_factor_for_grain))
 
       local_data = None
       for _ in range(MAX_DATA_LOAD_ATTEMPTS):
+        sub_batches = []
         try:
-          local_data = next(self.local_iterator)
-          if self.expansion_loading_factor_for_grain > 1:
-            # Since grain checkpoint requires fixed batch_size, we run the dataIterator for
-            # expansion_loading_factor_for_grain times to get the
-            # right batch_size for the host that is loading real data.
-            local_data_list = [local_data]
-            for _ in range(1, int(self.expansion_loading_factor_for_grain)):
-              next_batch = next(self.local_iterator)
-              local_data_list.append(next_batch)
-            local_data = jtu.tree_map(lambda *xs: np.concatenate(xs, axis=0), *local_data_list)
+          while len(sub_batches) < sub_batches_per_step:
+            sub_batches.append(next(self.local_iterator))
           break  # exit the loop on success
         except tf.errors.FailedPreconditionError as e:
           max_logging.log(f"Failed to get next data batch due to {e}, retrying")
@@ -142,13 +139,24 @@ class MultiHostDataLoadIterator:
                 "It may have reached the end of the data. Generating a padding batch as generate_padding_batch=True."
             )
             self.out_of_data = True
-            local_data = self._make_padding_batch()
+            # Preserve any sub-batches we already pulled and pad only the missing slots —
+            # discarding partial work would silently waste a batch's worth of records.
+            template = sub_batches[0] if sub_batches else self.last_local_data
+            if template is None:
+              raise ValueError("No prior batch to derive padding shape from.") from e
+            padding = jtu.tree_map(lambda x: jnp.full_like(x, 0), template)
+            while len(sub_batches) < sub_batches_per_step:
+              sub_batches.append(padding)
             break
           else:
             raise e
       else:
         raise TimeoutError(f"Failed to load data after {MAX_DATA_LOAD_ATTEMPTS} retry attempts.")
 
+      if sub_batches_per_step > 1:
+        local_data = jtu.tree_map(lambda *xs: np.concatenate(xs, axis=0), *sub_batches)
+      else:
+        local_data = sub_batches[0]
       self.last_local_data = local_data
     input_gdas = jtu.tree_map_with_path(partial(_form_global_array, global_mesh=self.global_mesh), local_data)
 
@@ -186,8 +194,14 @@ class RemoteIterator:
     max_logging.log("RemoteIterator initiated")
 
   def reset(self):
-    ds = self.get_ds_fn(dataloading_host_index=jax.process_index(), dataloading_host_count=jax.process_count())
-    dataloader = self.preprocessing_fn(dataset=ds)
+    result = self.get_ds_fn(dataloading_host_index=jax.process_index(), dataloading_host_count=jax.process_count())
+    # grain's get_datasets returns (dataset, effective_worker_count) so the cap from
+    # shard_by_row fallback can flow into preprocessing_fn; tfds returns just the dataset.
+    if isinstance(result, tuple):
+      ds, effective_worker_count = result
+      dataloader = self.preprocessing_fn(dataset=ds, grain_worker_count=effective_worker_count)
+    else:
+      dataloader = self.preprocessing_fn(dataset=result)
     if isinstance(dataloader, tf.data.Dataset):
       self.iterator = dataloader.as_numpy_iterator()
     elif isinstance(dataloader, Iterable):
