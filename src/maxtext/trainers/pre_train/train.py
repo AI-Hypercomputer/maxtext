@@ -684,6 +684,13 @@ def train_loop(config, recorder, state=None):
       max_utils.print_compiled_memory_stats(compiled_stats)
 
   start_step = get_first_step(model, state)  # this is the start_step for training
+  if start_step >= config.steps:
+    raise RuntimeError(
+        f"Requested training up to step {config.steps}, but a checkpoint already exists at step {start_step - 1} "
+        f"(which means {start_step} steps have been completed). "
+        f"Did you mean to continue training past step {start_step} (you should set steps > {start_step}) "
+        f"or to not load the checkpoint (use enable_checkpointing=False?)"
+    )
   prof = profiler.Profiler(config, offset_step=start_step)
   metric_logger_instance = metric_logger.MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
 

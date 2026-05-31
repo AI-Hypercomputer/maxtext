@@ -240,6 +240,15 @@ def setup_train_loop(config, recorder, devices=None):
     else:
       init_state_fn = partial(maxtext_utils.init_initial_state, model, tx, config, is_training, init_rng)
     checkpoint_manager = create_checkpoint_manager(config, mesh, init_state_fn)
+    if checkpoint_manager is not None:
+      checkpoint_step = checkpoint_manager.latest_step()
+      if checkpoint_step is not None and checkpoint_step + 1 >= config.steps:
+        raise RuntimeError(
+            f"Requested training up to step {config.steps}, but a checkpoint already exists at step {checkpoint_step} "
+            f"(which means {checkpoint_step + 1} steps have been completed). "
+            f"Did you mean to continue training past step {checkpoint_step + 1} (you should set steps > {checkpoint_step + 1}) "
+            f"or to not load the checkpoint (use enable_checkpointing=False?)"
+        )
 
   with maybe_record_goodput(recorder, GoodputEvent.TRAINING_PREPARATION):
     data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
