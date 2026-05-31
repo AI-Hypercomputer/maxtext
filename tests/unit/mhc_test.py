@@ -15,14 +15,14 @@
 """Test for DeepSeek Manifold-Constrained Hyper Connections (mHC)."""
 
 import unittest
-import pytest
-
+from absl.testing import parameterized
 from flax import nnx
 from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 import numpy as np
+import pytest
 
 from maxtext.configs import pyconfig
 from maxtext.common.common_types import HyperConnectionType
@@ -86,14 +86,15 @@ class TestSinkhorn(unittest.TestCase):
     np.testing.assert_allclose(col_sums, jnp.ones_like(col_sums), atol=1e-3)
 
 
-class TestMHC(unittest.TestCase):
+class TestMHC(parameterized.TestCase):
   """Test for MHC module"""
 
-  def setUp(self):
+  def _setup_mhc(self, rate, enable_mhc_lite=False):
+    """Sets up the common configurations and modules for MHC testing."""
     self.dim = 16
     self.config = pyconfig.initialize(
         [None, get_test_config_path()],
-        run_name="test_mhc",
+        run_name=f"test_mhc_k{rate}",
         enable_checkpointing=False,
         model_name="deepseek-custom",
         per_device_batch_size=jax.device_count(),
@@ -105,7 +106,8 @@ class TestMHC(unittest.TestCase):
         # override
         override_model_config=True,
         base_emb_dim=self.dim,
-        mhc_expansion_rate=3,
+        mhc_expansion_rate=rate,
+        enable_mhc_lite=enable_mhc_lite,
         num_experts=4,
         num_experts_per_tok=2,
         engram_layers=[],
@@ -135,7 +137,10 @@ class TestMHC(unittest.TestCase):
 
   # Skip GPU due to NotImplementedError: dynamic grid bounds not supported in the Triton backend
   @pytest.mark.tpu_only
-  def test_moe_layer_output_shape(self):
+  @parameterized.named_parameters(("Rate3", 3), ("Rate4", 4))
+  def test_moe_layer_output_shape(self, rate):
+    self._setup_mhc(rate)
+
     with nn_partitioning.axis_rules(self.config.logical_axis_rules):
       module = mhc.ManifoldConstrainedHyperConnections(self.config, self.dim, self.mesh, self.rngs)
       layer = moe.RoutedMoE(
@@ -154,12 +159,14 @@ class TestMHC(unittest.TestCase):
       b, s, k, d = self.x.shape
       output, metadata = module(self.pre_norm, layer, x=self.x, mhc_type=HyperConnectionType.MLP_MOE)
       # metadata includes load_balance_loss & moe_bias_updates
-      self.assertEqual(len(metadata), 2)
+      self.assertLen(metadata, 2)
       for key, value in metadata.items():
         self.assertIsNotNone(value, f"Key '{key}' has a value of None")
       self.assertEqual(output.shape, (b, s, k, d))
 
-  def test_dense_layer_output_shape(self):
+  @parameterized.named_parameters(("Rate3", 3), ("Rate4", 4))
+  def test_dense_layer_output_shape(self, rate):
+    self._setup_mhc(rate)
     with nn_partitioning.axis_rules(self.config.logical_axis_rules):
       module = mhc.ManifoldConstrainedHyperConnections(self.config, self.dim, self.mesh, self.rngs)
       layer = linears.MlpBlock(
@@ -180,8 +187,14 @@ class TestMHC(unittest.TestCase):
       self.assertDictEqual(metadata, {})
       self.assertEqual(output.shape, (b, s, k, d))
 
-  def test_attention_layer_output_shape(self):
-    inputs_shape = (self.config.per_device_batch_size, self.config.max_target_length, self.config.emb_dim)
+  @parameterized.named_parameters(("Rate3", 3), ("Rate4", 4))
+  def test_attention_layer_output_shape(self, rate):
+    self._setup_mhc(rate)
+    inputs_shape = (
+        self.config.per_device_batch_size,
+        self.config.max_target_length,
+        self.config.emb_dim,
+    )
     with nn_partitioning.axis_rules(self.config.logical_axis_rules):
       module = mhc.ManifoldConstrainedHyperConnections(self.config, self.dim, self.mesh, self.rngs)
       layer = attention_mla.MLA(
@@ -218,6 +231,65 @@ class TestMHC(unittest.TestCase):
       output, metadata = module(self.pre_norm, layer, x=self.x, mhc_type=HyperConnectionType.ATTENTION)
       self.assertDictEqual(metadata, {})
       self.assertEqual(output.shape, (b, s, k, d))
+
+  def test_mhc_lite_doubly_stochastic(self):
+    """Verify that mHC-lite output is doubly stochastic (rows/cols sum to 1)."""
+    self._setup_mhc(4, enable_mhc_lite=True)
+    with nn_partitioning.axis_rules(self.config.logical_axis_rules):
+      module = mhc.ManifoldConstrainedHyperConnections(self.config, self.dim, self.mesh, self.rngs)
+
+      b, s, k, d = self.x.shape
+
+      # Generate random input X
+      random_x = jax.random.normal(jax.random.PRNGKey(42), (b, s, k * d))
+      norm_x = module.mhc_norm(random_x)
+
+      # Output from mHC-lite mapping
+      res_mapping_out = module.res_mapping(norm_x)
+
+      row_sums = jnp.sum(res_mapping_out, axis=-1)
+      col_sums = jnp.sum(res_mapping_out, axis=-2)
+
+      # Check if sums are close to 1.0
+      np.testing.assert_allclose(row_sums, jnp.ones_like(row_sums), atol=1e-2)
+      np.testing.assert_allclose(col_sums, jnp.ones_like(col_sums), atol=1e-2)
+
+  def test_feature_flag_gates_lite(self):
+    """Verify that setting enable_mhc_lite=False falls back to Sinkhorn."""
+    self.dim = 16
+    self.config = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="test_mhc_lite_gated",
+        enable_checkpointing=False,
+        model_name="deepseek-custom",
+        per_device_batch_size=4,
+        max_target_length=7,
+        max_prefill_predict_length=7,
+        attention="dot_product",
+        routed_bias_update_rate=0.01,
+        load_balance_loss_weight=0.02,
+        # override
+        override_model_config=True,
+        base_emb_dim=self.dim,
+        mhc_expansion_rate=4,
+        enable_mhc_lite=False,
+        num_experts=4,
+        num_experts_per_tok=2,
+        engram_layers=[],
+    )
+    devices_array = maxtext_utils.create_device_mesh(self.config)
+    self.mesh = Mesh(devices_array, self.config.mesh_axes)
+    self.rngs = nnx.Rngs(params=jax.random.key(0), dropout=jax.random.key(42))
+
+    with nn_partitioning.axis_rules(self.config.logical_axis_rules):
+      module = mhc.ManifoldConstrainedHyperConnections(self.config, self.dim, self.mesh, self.rngs)
+
+      # Shape of res_alpha should be (4*16, 4*4) = (64, 16) instead of (64, 24)
+      self.assertEqual(module.res_alpha.shape, (64, 16))
+      # Shape of res_beta should be (4, 4) instead of (24,)
+      self.assertEqual(module.res_beta.shape, (4, 4))
+      # Permutation matrices shouldn't be defined
+      self.assertFalse(hasattr(module, "permutation_matrices"))
 
 
 if __name__ == "__main__":
