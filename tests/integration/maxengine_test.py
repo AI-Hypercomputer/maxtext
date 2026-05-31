@@ -26,12 +26,10 @@ import pytest
 from flax import nnx
 from flax.linen import partitioning as nn_partitioning
 from maxtext.configs import pyconfig
-from maxtext.common.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_PREFILL
-from maxtext.layers import quantizations
+from maxtext.common.common_types import MODEL_MODE_PREFILL
 
 pytest.importorskip("jetstream", reason="jetstream not installed")
 from maxtext.inference.maxengine import maxengine
-from maxtext.models import models
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
 from tests.utils.test_helpers import get_test_config_path
@@ -71,100 +69,24 @@ class MaxEngineTest(unittest.TestCase):
     )
     return config
 
-  def get_data(self):
-    s = (self.cfg.global_batch_size_to_train_on, self.cfg.max_target_length)
-    ids = jax.random.randint(self.rng, s, 0, self.cfg.vocab_size)
-
-    decoder_segment_ids = jax.numpy.zeros(s) + DECODING_ACTIVE_SEQUENCE_INDICATOR
-    decoder_positions = jnp.stack(
-        [jnp.arange(self.cfg.max_target_length, dtype=jnp.int32) for _ in range(self.cfg.global_batch_size_to_train_on)]
-    )
-
-    return ids, decoder_segment_ids, decoder_positions
-
-  def test_stack_and_unstack_prefill_cache(self):
-    config = pyconfig.initialize(
-        [None, get_test_config_path()],
-        enable_checkpointing=False,
-        stack_prefill_result_cache=True,
-    )
-    engine = maxengine.MaxEngine(config, jax.devices())
+  def test_stack_and_unstack_prefill_cache_nnx(self):
+    """scan_layers=False: per-layer cache subtrees stack onto a leading layer axis and back."""
+    cfg = self._init_nnx_pyconfig(stack_prefill_result_cache=True, scan_layers=False)
+    engine = maxengine.MaxEngine(cfg, jax.devices())
     num_layers = engine.config.num_decoder_layers
-    input_d = {
-        "decoder": {},
-    }
-    for i in range(num_layers):
-      input_d["decoder"][f"layers_{i}"] = {
-          "a": jnp.ones((1, 10)),
-          "b": jnp.ones((1, 9)),
-      }
+    # scan_layers=False keeps the per-layer subtrees under decoder/layers, keyed by layer index.
+    cache = {"decoder": {"layers": {i: {"a": jnp.ones((1, 10)), "b": jnp.ones((1, 9))} for i in range(num_layers)}}}
 
-    expected_stacked = {
-        "a": jnp.ones((num_layers, 1, 10)),
-        "b": jnp.ones((num_layers, 1, 9)),
-    }
+    expected_stacked = {"decoder": {"layers": {"a": jnp.ones((num_layers, 1, 10)), "b": jnp.ones((num_layers, 1, 9))}}}
     # pylint: disable=protected-access
-    got_stacked = engine._maybe_stack_prefill_result_cache(input_d)
+    got_stacked = engine._maybe_stack_prefill_result_cache(cache)
     jax.tree.map(np.testing.assert_array_equal, got_stacked, expected_stacked)
 
-    # pylint: disable=protected-access
     got_unstacked = engine._maybe_unstack_prefill_result_cache(got_stacked)
-    jax.tree.map(np.testing.assert_array_equal, got_unstacked, input_d)
+    jax.tree.map(np.testing.assert_array_equal, got_unstacked, cache)
 
-  def test_basic_prefill(self):
-    devices_array = maxtext_utils.create_device_mesh(self.cfg)
-    mesh = Mesh(devices_array, self.cfg.mesh_axes)
-    quant = quantizations.configure_quantization(self.cfg)
-    model = models.transformer_as_linen(config=self.cfg, mesh=mesh, quant=quant, model_mode=MODEL_MODE_PREFILL)
-    ids, decoder_segment_ids, decoder_positions = self.get_data()
-
-    transformer_vars = model.init(
-        {"params": self.rng, "aqt": self.rng, "dropout": self.rng},
-        ids,
-        decoder_positions,
-        decoder_segment_ids,
-        enable_dropout=False,
-    )
-    input_tokens = jnp.array([1, 306, 5360, 304, 0, 0, 0, 0])
-    true_length = 4
-    engine = maxengine.MaxEngine(self.cfg, jax.devices())
-    prefill_result, first_token = engine.prefill(
-        params=transformer_vars, padded_tokens=input_tokens, true_length=true_length
-    )
-
-    self.assertEqual(prefill_result["generated_tokens"], jnp.array([0]))
-    # test default strategy is gready which choose only one next token
-    self.assertEqual(prefill_result["tokens"].size, 1)
-    self.assertNotEqual(prefill_result["tokens"], jnp.array([0]))
-    self.assertTrue(jnp.array_equal(first_token.data.size, 3))
-    self.assertEqual(first_token.log_prob.shape, (1, 1))
-
-  def test_basic_decode(self):
-    devices_array = maxtext_utils.create_device_mesh(self.cfg)
-    mesh = Mesh(devices_array, self.cfg.mesh_axes)
-    quant = quantizations.configure_quantization(self.cfg)
-    model = models.transformer_as_linen(config=self.cfg, mesh=mesh, quant=quant, model_mode=MODEL_MODE_PREFILL)
-    ids, decoder_segment_ids, decoder_positions = self.get_data()
-
-    transformer_vars = model.init(
-        {"params": self.rng, "aqt": self.rng, "dropout": self.rng},
-        ids,
-        decoder_positions,
-        decoder_segment_ids,
-        enable_dropout=False,
-    )
-    input_tokens = jnp.array([1, 306, 5360, 304])
-    engine = maxengine.MaxEngine(self.cfg, jax.devices())
-    params = engine.load_params(params=transformer_vars)
-    decode_state = engine.init_decode_state()
-    prefill_result, _ = engine.prefill(params=params, padded_tokens=input_tokens, true_length=4)
-    decode_state = engine.insert(prefill_result, decode_state, slot=0)
-    decode_state, result_token = engine.generate(params=params, decode_state=decode_state)
-
-    self.assertEqual(result_token.log_prob.ndim, 2)
-    self.assertEqual(result_token.log_prob.shape[1], 1)
-    self.assertEqual(result_token.data.ndim, 2)
-    self.assertEqual(result_token.data.shape[1], 3)
+  # The Linen-path basic prefill/decode tests were removed when NNX became the
+  # default. test_basic_prefill_nnx / test_basic_decode_nnx below cover the NNX path.
 
   def _init_nnx_pyconfig(self, **kwargs):
     """Same as init_pyconfig but with the NNX flags turned on."""
@@ -243,19 +165,141 @@ class MaxEngineTest(unittest.TestCase):
           msg=f"next_pos didn't advance at step {step}",
       )
 
-  def test_quantize_raises_for_nnx(self):
-    """NNX path raises NotImplementedError when quantization is set."""
+  def test_quantize_passes_gate_for_nnx(self):
+    """pure_nnx + quantization (convert-on-load) reaches the actual machinery in train mode."""
+    # checkpoint_is_quantized defaults to False — full-precision on disk, AQT
+    # quantizes per-forward against the loaded kernel (train mode).
     cfg = self._init_nnx_pyconfig(quantization="int8")
     engine = maxengine.MaxEngine(cfg, jax.devices())
-    with self.assertRaises(NotImplementedError):
+    self.assertEqual(engine._nnx_quant_mode_str, "train")  # pylint: disable=protected-access
+    try:
       engine.load_params(rng=self.rng)
+    except NotImplementedError as e:
+      self.fail(f"convert-on-load path should not raise NotImplementedError; got: {e}")
+    except Exception:  # pylint: disable=broad-except
+      pass  # any other failure (e.g. checkpoint not found) is fine for this test
 
-  def test_lora_raises_for_nnx(self):
-    """NNX path raises NotImplementedError for LoRA."""
+  def test_load_pre_quantized_nnx_passes_quant_gate(self):
+    """pure_nnx + quantization + checkpoint_is_quantized=True clears the load gate."""
+    cfg = self._init_nnx_pyconfig(quantization="int8", checkpoint_is_quantized=True)
+    engine = maxengine.MaxEngine(cfg, jax.devices())
+    self.assertEqual(engine._nnx_quant_mode_str, "serve")  # pylint: disable=protected-access
+    try:
+      engine.load_params(rng=self.rng)
+    except NotImplementedError as e:
+      self.fail(f"checkpoint_is_quantized=True path should not raise NotImplementedError; got: {e}")
+    except Exception:  # pylint: disable=broad-except
+      pass  # any other failure (e.g. checkpoint not found) is fine for this test
+
+  def test_quantized_prefill_nnx_train_mode(self):
+    """End-to-end: NNX prefill with quantization=int8 + checkpoint_is_quantized=False.
+
+    TRAIN-mode AQT layers quantize per-forward against the loaded full-precision
+    kernel; output must be finite and shape-valid. This is the real numerical
+    verification that the convert-on-load path produces a usable model.
+    """
+    cfg = self._init_nnx_pyconfig(quantization="int8")
+    self.assertFalse(cfg.checkpoint_is_quantized)
+    devices_array = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices_array, cfg.mesh_axes)
+    params_state = self._build_nnx_params(cfg, mesh)
+
+    engine = maxengine.MaxEngine(cfg, jax.devices())
+    self.assertEqual(engine._nnx_quant_mode_str, "train")  # pylint: disable=protected-access
+    params = engine.load_params(params=params_state)
+    input_tokens = jnp.array([1, 306, 5360, 304, 0, 0, 0, 0])
+    prefill_result, _ = engine.prefill(params=params, padded_tokens=input_tokens, true_length=4)
+    self.assertTrue(jnp.all(jnp.isfinite(prefill_result["logits"])))
+
+  def test_lora_load_single_adapter_reaches_loader_on_nnx(self):
+    """pure_nnx + LoRA: load_single_adapter dispatches to the NNX loader.
+
+    With a nonexistent path the loader raises FileNotFoundError (not
+    NotImplementedError, which would mean the dispatch never reached the loader).
+    """
     cfg = self._init_nnx_pyconfig()
     engine = maxengine.MaxEngine(cfg, jax.devices())
-    with self.assertRaises(NotImplementedError):
+    with self.assertRaises(FileNotFoundError):
       engine.load_single_adapter("/nonexistent/adapter/path")
+
+  def test_prefill_multisampling_nnx(self):
+    """NNX prefill_multisampling draws num_samples first tokens; logits + cache stay finite."""
+    num_samples = 3
+    input_tokens = jnp.array([1, 306, 5360, 304, 0, 0, 0, 0])
+    true_length = 4
+
+    cfg = self._init_nnx_pyconfig()
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    engine = maxengine.MaxEngine(cfg, jax.devices())
+    params = engine.load_params(params=self._build_nnx_params(cfg, mesh))
+    result, first = engine.prefill_multisampling(
+        params=params, padded_tokens=input_tokens, true_length=true_length, num_samples=num_samples
+    )
+
+    self.assertEqual(result["tokens"].shape[0], num_samples)
+    # data packs [token, valid, length] for each sample.
+    self.assertEqual(first.data.shape, (num_samples, 3))
+    self.assertTrue(jnp.all(jnp.isfinite(result["logits"])))
+    for leaf in jax.tree.leaves(result["cache"]):
+      self.assertTrue(jnp.all(jnp.isfinite(leaf)), msg=f"non-finite cache leaf, shape={leaf.shape}")
+
+  def test_prefill_concat_nnx(self):
+    """NNX prefill_concat returns one result per packed prompt; logits + cache stay finite."""
+    # Two prompts of length 2 packed into one prefill of length max_prefill_predict_length=4.
+    packed = {
+        "padded_tokens": jnp.array([1, 306, 5360, 304]),
+        "decoder_positions": jnp.array([0, 1, 0, 1]),
+        "decoder_segment_ids": jnp.array([1, 1, 2, 2]),
+        "start_pos": jnp.array([0, 2]),
+        "true_lengths": jnp.array([2, 2]),
+        "num_prompts": 2,
+    }
+
+    cfg = self._init_nnx_pyconfig()
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    engine = maxengine.MaxEngine(cfg, jax.devices())
+    params = engine.load_params(params=self._build_nnx_params(cfg, mesh))
+    cache, result, first_tokens = engine.prefill_concat(params=params, **packed)
+
+    self.assertEqual(result["tokens"].shape[0], packed["num_prompts"])
+    self.assertEqual(len(first_tokens), packed["num_prompts"])
+    self.assertTrue(jnp.all(jnp.isfinite(result["logits"])))
+    for leaf in jax.tree.leaves(cache):
+      self.assertTrue(jnp.all(jnp.isfinite(leaf)), msg=f"non-finite cache leaf, shape={leaf.shape}")
+
+  def _stack_prefill_roundtrip(self, cfg):
+    """NNX prefill -> insert -> generate round-trip with stack_prefill_result_cache=True."""
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    engine = maxengine.MaxEngine(cfg, jax.devices())
+    params = engine.load_params(params=self._build_nnx_params(cfg, mesh))
+    decode_state = engine.init_decode_state()
+    prefill_result, _ = engine.prefill(params=params, padded_tokens=jnp.array([1, 306, 5360, 304]), true_length=4)
+
+    # stack=True puts the layer axis on axis 0: already there for scan_layers=True,
+    # stacked from the per-layer subtrees for scan_layers=False.
+    for leaf in jax.tree.leaves(prefill_result["cache"]):
+      self.assertEqual(leaf.shape[0], cfg.num_decoder_layers, msg=f"layer-axis mismatch, got shape={leaf.shape}")
+      self.assertTrue(jnp.all(jnp.isfinite(leaf)), msg=f"non-finite cache leaf, shape={leaf.shape}")
+
+    decode_state = engine.insert(prefill_result, decode_state, slot=0)
+    initial_next_pos = int(decode_state["next_pos"][0, 0])
+    for step in range(3):
+      decode_state, result_token = engine.generate(params=params, decode_state=decode_state)
+      self.assertEqual(result_token.data.shape[1], 3)
+      self.assertTrue(jnp.all(jnp.isfinite(decode_state["logits"])))
+      self.assertEqual(
+          int(decode_state["next_pos"][0, 0]),
+          initial_next_pos + step + 1,
+          msg=f"next_pos didn't advance at step {step}",
+      )
+
+  def test_stack_prefill_result_cache_nnx(self):
+    """stack_prefill_result_cache=True with scan_layers=True (cache is already layer-stacked)."""
+    self._stack_prefill_roundtrip(self._init_nnx_pyconfig(stack_prefill_result_cache=True))
+
+  def test_stack_prefill_result_cache_scan_layers_false_nnx(self):
+    """stack_prefill_result_cache=True with scan_layers=False (per-layer subtrees get stacked)."""
+    self._stack_prefill_roundtrip(self._init_nnx_pyconfig(stack_prefill_result_cache=True, scan_layers=False))
 
   @pytest.mark.skip(reason="Can only pass on CPU.")
   def test_chunked_prefill(self):

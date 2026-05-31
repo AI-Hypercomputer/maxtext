@@ -117,14 +117,25 @@ class MaxEngine(_BaseEngine):
     # Model and Optimizer definition.
     quant = quantizations.configure_quantization(config)
     if config.pure_nnx:
+      # `serve` only when the on-disk checkpoint already carries `qrhs.frozen`
+      # (no full-precision kernel). For `checkpoint_is_quantized=False` with
+      # quant enabled we stay in `train` mode and let AQT quantize per-forward
+      # against the full-precision kernel — same numerical result as `serve`
+      # for absmax calibration, just slower.
+      nnx_quant_mode_str = "serve" if (quant is not None and config.checkpoint_is_quantized) else "train"
       # We need both PREFILL and AR abstract models because the cache vars inherit
       # CACHE_BATCH_PREFILL vs CACHE_BATCH from the construction model_mode, and
       # bulk_insert searches for the substring "cache_batch" in the AR-mode names.
-      _create_model = model_creation_utils.get_nnx_create_model_fn(config, mesh=self._mesh, model_mode=MODEL_MODE_PREFILL)
-      _create_model_ar = model_creation_utils.get_nnx_create_model_fn(
-          config, mesh=self._mesh, model_mode=MODEL_MODE_AUTOREGRESSIVE
+      # Calling nnx.eval_shape directly (instead of create_nnx_abstract_model) avoids
+      # the jax.set_mesh wrap that trips Flax 0.12.6 on logical-only axes like "norm".
+      _create_model = model_creation_utils.get_nnx_create_model_fn(
+          config, mesh=self._mesh, model_mode=MODEL_MODE_PREFILL, quant_mode_str=nnx_quant_mode_str
       )
-      with jax.set_mesh(self._mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
+      _create_model_ar = model_creation_utils.get_nnx_create_model_fn(
+          config, mesh=self._mesh, model_mode=MODEL_MODE_AUTOREGRESSIVE, quant_mode_str=nnx_quant_mode_str
+      )
+      self._nnx_quant_mode_str = nnx_quant_mode_str
+      with nn_partitioning.axis_rules(config.logical_axis_rules):
         abstract_model = nnx.eval_shape(_create_model)
         abstract_model_ar = nnx.eval_shape(_create_model_ar)
       self.model = abstract_model
@@ -370,9 +381,15 @@ class MaxEngine(_BaseEngine):
     return params
 
   def _load_params_nnx(self, params, rng):
-    """NNX equivalent of load_params: returns an nnx.Param state and populates KV cache shardings."""
-    if self.model.quant is not None:
-      raise NotImplementedError("pure_nnx + quantization not yet supported. Use pure_nnx=False.")
+    """NNX equivalent of load_params: returns an nnx.Param state and populates KV cache shardings.
+
+    Quantization handling:
+      * `checkpoint_is_quantized=True`: model built in `serve` mode (no full
+        kernel), `from_pretrained` reads `qrhs.frozen` from disk.
+      * `checkpoint_is_quantized=False` + `quantization=...`: model built in
+        `train` mode, full-precision kernel loaded; AQT layers quantize per
+        forward. Same output as serve mode (absmax calibration), slower.
+    """
 
     if params:
       print("Resharding given NNX params")
@@ -401,13 +418,46 @@ class MaxEngine(_BaseEngine):
       max_logging.log("Loading NNX params via from_pretrained")
       with self._mesh:
         nnx_model = model_creation_utils.from_pretrained(
-            self.config, mesh=self._mesh, model_mode=MODEL_MODE_AUTOREGRESSIVE
+            self.config,
+            mesh=self._mesh,
+            model_mode=MODEL_MODE_AUTOREGRESSIVE,
+            quant_mode_str=self._nnx_quant_mode_str,
         )
-      # Refresh graphdef from the concrete loaded model so subsequent merges line up.
-      graphdef, params_state, _, rest_state = nnx.split(nnx_model, nnx.Param, nnx.Cache, ...)
+      # 4-way split keeps the loaded AQT `qrhs.frozen` leaves (and any other
+      # non-Param/non-Cache vars) in `loaded_rest_state` so they survive into
+      # `_nnx_rest_state`. Param-only filtering would silently drop them and
+      # the model would run with random qrhs values.
+      _, params_state, _, loaded_rest_state = nnx.split(nnx_model, nnx.Param, nnx.Cache, ...)
+      # `_prefill_jit` re-merges with `self.graphdef`, which must be the PREFILL
+      # graphdef built in `__init__` (matching `_create_model_fn`). Don't
+      # overwrite with the AR-mode graphdef from `from_pretrained` — the
+      # PREFILL/AR attention ops have different cache variable shapes, and a
+      # mismatch trips the `assert prefill_kv_cache` check inside attention_op.
+      with nn_partitioning.axis_rules(self.config.logical_axis_rules):
+        concrete_model = self._create_model_fn()
+      graphdef, _, _, rest_state = nnx.split(concrete_model, nnx.Param, nnx.Cache, ...)
+      # Overlay loaded non-Param/non-Cache leaves (e.g. AQT qrhs.frozen) onto
+      # the PREFILL-mode rest_state. The PREFILL concrete_model already has
+      # placeholder qrhs vars at the right paths; we just swap in the loaded
+      # values. Anything only in `loaded_rest_state` (e.g. AR-only RNG slots)
+      # is ignored. We keep PREFILL rest_state as the base so RNG variables
+      # match the PREFILL graphdef's expectations.
+      loaded_rest_dict = loaded_rest_state.to_pure_dict()
+      rest_dict = rest_state.to_pure_dict()
+
+      def _overlay(dst, src):
+        if isinstance(dst, dict):
+          for k, v in dst.items():
+            if k in src:
+              dst[k] = _overlay(v, src[k])
+          return dst
+        return src if not isinstance(src, dict) else dst
+
+      rest_dict = _overlay(rest_dict, loaded_rest_dict)
+      nnx.replace_by_pure_dict(rest_state, rest_dict)
       self.graphdef = graphdef
       self._nnx_rest_state = rest_state
-      del nnx_model
+      del nnx_model, concrete_model
 
     self.abstract_params = jax.tree.map(
         lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding)
@@ -423,11 +473,15 @@ class MaxEngine(_BaseEngine):
         lambda x: jax.sharding.NamedSharding(self._mesh, x),
         self.prefill_kv_cache_annotations,
     )
-    if self.config.stack_prefill_result_cache:
-      # With scan_layers=True the NNX cache leaves are already stacked on axis 0,
-      # so the engine's manual-stack helper (which assumes an unstacked Linen tree)
-      # doesn't apply. Wiring this up cleanly is a Phase-2 follow-up.
-      raise NotImplementedError("pure_nnx + stack_prefill_result_cache=True not yet supported.")
+    if self.config.stack_prefill_result_cache and not self.config.scan_layers:
+      # scan_layers=False has unstacked per-layer subtrees; _maybe_stack_prefill_result_cache
+      # stacks them on a new axis 0, so add that axis to each spec and keep one layer's subtree.
+      self.prefill_kv_cache_shardings = jax.tree.map(
+          lambda x: jax.sharding.NamedSharding(self._mesh, jax.sharding.PartitionSpec(None, *x.spec)),
+          self.prefill_kv_cache_shardings,
+      )
+      self.prefill_kv_cache_shardings = {"decoder": {"layers": self.prefill_kv_cache_shardings["decoder"]["layers"][0]}}
+    # scan_layers=True is already stacked on axis 0; shardings stay as-is and stack/unstack are no-ops.
     # AR-mode abstract model so axis names use CACHE_BATCH (not CACHE_BATCH_PREFILL);
     # bulk_insert / _insert_jit search for "cache_batch" in the per-leaf logical axes.
     self.kv_cache_annotations = maxtext_utils.get_kv_cache_annotations_nnx(self.model_ar, self.config, self._mesh)
@@ -443,12 +497,11 @@ class MaxEngine(_BaseEngine):
     return params_state
 
   def load_single_adapter(self, adapter_path):
+    """Load a single LoRA adapter from `adapter_path`.
+
+    Expects `adapter_config.json` plus adapter weights at `<adapter_path>/0/items`.
+    The returned `params` shape matches `self.abstract_params` (NNX or Linen).
     """
-    Load Single adapter from adapter_path.
-    Expect adapter_config.json and LoRA adapter weights at this path within subdirectory `/0/items`.
-    """
-    if self.config.pure_nnx:
-      raise NotImplementedError("pure_nnx + LoRA not yet supported. Use pure_nnx=False.")
     adapter_config_path = os.path.join(adapter_path, "adapter_config.json")
     adapter_weights_path = os.path.join(adapter_path, "0", "items")
 
@@ -471,21 +524,36 @@ class MaxEngine(_BaseEngine):
 
     lora_rank = int(adapter_config["r"])
     lora_scale_factor = float(adapter_config["lora_alpha"]) / lora_rank
-    lora_utils.apply_lora_on_base_params(base_params, adapter_params, lora_scale_factor)
+    if self.config.pure_nnx:
+      lora_utils.apply_lora_on_base_params_nnx(base_params, adapter_params, lora_scale_factor)
+    else:
+      lora_utils.apply_lora_on_base_params(base_params, adapter_params, lora_scale_factor)
 
   def unapply_adapter(self, base_params, adapter_config, adapter_params):
     """Unapply the adapter params from the merged params to get back the base params."""
 
     lora_rank = int(adapter_config["r"])
     lora_scale_factor = float(adapter_config["lora_alpha"]) / lora_rank
-    lora_utils.unapply_lora_from_base_params(base_params, adapter_params, lora_scale_factor)
+    if self.config.pure_nnx:
+      lora_utils.unapply_lora_from_base_params_nnx(base_params, adapter_params, lora_scale_factor)
+    else:
+      lora_utils.unapply_lora_from_base_params(base_params, adapter_params, lora_scale_factor)
 
   def quantize_params(self, state, rng: PRNGKeyType | None = None):
     """Forward pass to quantize decode params."""
     if rng is None:
       rng = jax.random.PRNGKey(0)
     if self.config.pure_nnx:
-      raise NotImplementedError("pure_nnx + quantize_params not yet supported.")
+      # NNX takes a different code path: convert-on-load lives in `_load_params_nnx`
+      # via `_convert_and_quantize_nnx`, which runs the dummy forward against a
+      # CONVERT-mode model and transfers `qrhs.frozen` into the SERVE model.
+      # The standalone `quantize_params(state, rng)` API expects a Linen-shape
+      # `state.params` dict and isn't reachable on the NNX pathway in maxengine
+      # (load_params already dispatched to _load_params_nnx).
+      raise NotImplementedError(
+          "Use load_params() on NNX — the convert step runs inside _load_params_nnx via "
+          "_convert_and_quantize_nnx. quantize_params(state, rng) is the Linen API."
+      )
 
     self.model.quant.quant_mode = quantizations.get_quant_mode("convert")
 
@@ -531,6 +599,16 @@ class MaxEngine(_BaseEngine):
     if not self.config.stack_prefill_result_cache:
       return cache
 
+    if self.config.pure_nnx:
+      if self.config.scan_layers:
+        # scan_layers already stacks the per-layer KV cache on axis 0; nothing to restack.
+        return cache
+      # scan_layers=False: stack the per-layer subtrees under decoder/layers into one
+      # subtree with a leading layer axis (matching the scan_layers=True shape).
+      layers = cache["decoder"]["layers"]
+      stacked = jax.tree.map(lambda *c: jnp.stack(c), *[layers[i] for i in range(self.config.num_decoder_layers)])
+      return {"decoder": {"layers": stacked}}
+
     layer_keys = []
     for i in range(self.config.num_decoder_layers):
       layer_keys.append(f"layers_{i}")
@@ -543,6 +621,16 @@ class MaxEngine(_BaseEngine):
     """Unstack the caches across the layers."""
     if not self.config.stack_prefill_result_cache:
       return cache
+
+    if self.config.pure_nnx:
+      if self.config.scan_layers:
+        # Mirror _maybe_stack_prefill_result_cache: the cache already carries the
+        # layer axis, so there is nothing to unstack.
+        return cache
+      # scan_layers=False: split the leading layer axis back into per-layer subtrees.
+      stacked = cache["decoder"]["layers"]
+      layers = {i: jax.tree.map(lambda x, i=i: x[i], stacked) for i in range(self.config.num_decoder_layers)}
+      return {"decoder": {"layers": layers}}
 
     flat_cache, treedef = jax.tree.flatten(cache)
     layer_cache = [jax.tree.unflatten(treedef, flat_cache_vars) for flat_cache_vars in zip(*flat_cache, strict=True)]
@@ -924,9 +1012,6 @@ class MaxEngine(_BaseEngine):
     prefilling stage. The number of tokens is specified by num_samples.
     """
 
-    if self.config.pure_nnx:
-      raise NotImplementedError("pure_nnx + prefill_multisampling not yet supported. Use pure_nnx=False.")
-
     input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
     positions = jnp.expand_dims(jnp.arange(0, input_tokens.shape[1]), 0)
 
@@ -936,17 +1021,32 @@ class MaxEngine(_BaseEngine):
     sequence_indicator = jnp.expand_dims(one_d_output, 0)
 
     rng, new_rng = jax.random.split(rng)
-    with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
-      flat_logits, new_vars = self.model.apply(
-          params,
-          input_tokens,
-          positions,
-          decoder_segment_ids=sequence_indicator,
-          enable_dropout=False,
-          model_mode=MODEL_MODE_PREFILL,
-          rngs={"params": new_rng},
-          mutable=["cache"],
-      )
+    if self.config.pure_nnx:
+      # Prefill is batch=1 (one prompt); multi-sampling only draws several first
+      # tokens from the shared logits below. Mirror the _prefill_jit NNX branch.
+      with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
+        flat_logits, new_cache_dict = self._nnx_run_model(
+            params=params,
+            cache_dict=self._nnx_init_cache_dict(mode=MODEL_MODE_PREFILL),
+            decoder_input_tokens=input_tokens,
+            decoder_positions=positions,
+            decoder_segment_ids=sequence_indicator,
+            enable_dropout=False,
+            model_mode=MODEL_MODE_PREFILL,
+        )
+      new_vars = {"cache": new_cache_dict}
+    else:
+      with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
+        flat_logits, new_vars = self.model.apply(
+            params,
+            input_tokens,
+            positions,
+            decoder_segment_ids=sequence_indicator,
+            enable_dropout=False,
+            model_mode=MODEL_MODE_PREFILL,
+            rngs={"params": new_rng},
+            mutable=["cache"],
+        )
 
     next_pos = jnp.full((1, 1), true_length, dtype=jnp.int32)
     selected_logits = jax.lax.dynamic_slice(
@@ -1052,26 +1152,38 @@ class MaxEngine(_BaseEngine):
     if existing_prefix:
       raise ValueError("We don't know what to do with existing_prefix")
 
-    if self.config.pure_nnx:
-      raise NotImplementedError("pure_nnx + prefill_concat not yet supported. Use pure_nnx=False.")
-
     if rng is None:
       rng = jax.random.PRNGKey(0)
     input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
     decoder_positions = jnp.expand_dims(decoder_positions, 0)
     decoder_segment_ids = jnp.expand_dims(decoder_segment_ids, 0)
     rng, new_rng = jax.random.split(rng)
-    with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
-      flat_logits, new_vars = self.model.apply(
-          params,
-          input_tokens,
-          decoder_positions,
-          decoder_segment_ids=decoder_segment_ids,
-          enable_dropout=False,
-          model_mode=MODEL_MODE_PREFILL,
-          rngs={"params": new_rng},
-          mutable=["cache"],
-      )
+    if self.config.pure_nnx:
+      # Packed prompts run as a single batch=1 prefill; the packed positions and
+      # segment ids keep the prompts separated. Mirror the _prefill_jit NNX branch.
+      with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
+        flat_logits, new_cache_dict = self._nnx_run_model(
+            params=params,
+            cache_dict=self._nnx_init_cache_dict(mode=MODEL_MODE_PREFILL),
+            decoder_input_tokens=input_tokens,
+            decoder_positions=decoder_positions,
+            decoder_segment_ids=decoder_segment_ids,
+            enable_dropout=False,
+            model_mode=MODEL_MODE_PREFILL,
+        )
+      new_vars = {"cache": new_cache_dict}
+    else:
+      with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
+        flat_logits, new_vars = self.model.apply(
+            params,
+            input_tokens,
+            decoder_positions,
+            decoder_segment_ids=decoder_segment_ids,
+            enable_dropout=False,
+            model_mode=MODEL_MODE_PREFILL,
+            rngs={"params": new_rng},
+            mutable=["cache"],
+        )
     cache = new_vars["cache"]
     cache = self._maybe_stack_prefill_result_cache(cache)
     if return_prompt_logp:
