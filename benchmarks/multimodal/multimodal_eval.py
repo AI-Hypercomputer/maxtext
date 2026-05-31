@@ -230,6 +230,7 @@ def main(config, local_args):
             second_per_grids=processor_output.video_second_per_grid,  # pytype: disable=attribute-error
             spatial_merge_size=config.spatial_merge_size_for_vit,  # pytype: disable=attribute-error
             position_id_per_seconds=config.position_id_per_seconds,
+            config=config,
         )
 
     if true_length > max_prefill_predict_length:
