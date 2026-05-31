@@ -154,6 +154,7 @@ def main(argv: Sequence[str]) -> None:
           second_per_grids=processor_outputs.video_second_per_grid,  # pytype: disable=attribute-error
           spatial_merge_size=config.spatial_merge_size_for_vit,  # pytype: disable=attribute-error
           position_id_per_seconds=config.position_id_per_seconds,
+          config=config,
       )
 
   assert (

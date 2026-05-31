@@ -2916,6 +2916,7 @@ class MaxTextConfig(
           "llama4-17b-128e",
           "qwen3-omni-30b-a3b",
           "qwen3.5-397b-a17b",
+          "qwen3.5-35b-a3b",
       )
       if self.model_name not in valid_mm_models and self.model_name != "default":
         raise ValueError(f"Multimodal is only supported for {valid_mm_models}, not {self.model_name}")
