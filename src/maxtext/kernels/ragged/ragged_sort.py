@@ -131,13 +131,20 @@ def ring_ragged_sort(hidden_states_local, topk_indices_local, num_experts, topk,
     # gather-reduce: each input token has exactly `topk` contributions located
     # at sorted positions `topk_argsort_revert_indices[t*topk:(t+1)*topk]`.
     # `topk_weights` is set to ones because this op has no per-row weighting.
-    grad_hidden_states = ragged_gather_reduce(
-        g_x,
-        topk_argsort_revert_indices,
-        topk_weights=jnp.ones((n,), dtype=jnp.float32),
-        valid_rows_mask=valid_rows_mask,
-        reduce_group_size=topk,
-    )
+    # TODO: Fix ragged_gather_reduce kernel for backward pass — it sometimes
+    # only allocates one sparse core instead of two, degrading performance.
+    # Use JAX fallback until the kernel is fixed.
+    # grad_hidden_states = ragged_gather_reduce(
+    #     g_x,
+    #     topk_argsort_revert_indices,
+    #     topk_weights=jnp.ones((n,), dtype=jnp.float32),
+    #     valid_rows_mask=valid_rows_mask,
+    #     reduce_group_size=topk,
+    # )
+    grad_hidden_states = g_x[topk_argsort_revert_indices]
+    grad_hidden_states = jnp.where(valid_rows_mask[:, None], grad_hidden_states, 0)
+    grad_hidden_states = grad_hidden_states.reshape(-1, topk, grad_hidden_states.shape[-1])
+    grad_hidden_states = jnp.sum(grad_hidden_states, axis=1).astype(g_x.dtype)
     return grad_hidden_states, None
 
   _ring_ragged_sort.defvjp(_ring_ragged_sort_fwd, _ring_ragged_sort_bwd)

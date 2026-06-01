@@ -267,6 +267,20 @@ def ragged_gather(x: jax.Array, indices: jax.Array, start: jax.Array, end: jax.A
 
   aligned_hidden_size = pl.cdiv(hidden_size, col_size) * col_size
 
+  # Cost estimate for the ragged gather kernel.
+  # This is a pure data-movement kernel (gather/scatter), so flops = 0.
+  # bytes_accessed accounts for reading input rows and writing output rows,
+  # plus reading the indices array and start/end scalars.
+  dtype_bytes = jax.dtypes.itemsize_bits(dtype) // 8
+  padded_out_size = out_size + (pl.cdiv(out_size, block_size) * block_size - out_size)
+  bytes_accessed = (
+      padded_out_size * aligned_hidden_size * dtype_bytes  # read from x
+      + padded_out_size * aligned_hidden_size * dtype_bytes  # write to output
+      + indices.size * jnp.dtype(jnp.int32).itemsize  # read indices
+      + 2 * jnp.dtype(jnp.int32).itemsize  # read start and end
+  )
+  cost_estimate = pl.CostEstimate(flops=0, transcendentals=0, bytes_accessed=bytes_accessed)
+
   vector_mesh = plsc.VectorSubcoreMesh(
       num_cores=sc_info.num_cores,
       num_subcores=sc_info.num_subcores,
@@ -285,6 +299,7 @@ def ragged_gather(x: jax.Array, indices: jax.Array, start: jax.Array, end: jax.A
       ),
       mesh=vector_mesh,
       name="sc_ragged_gather",
+      cost_estimate=cost_estimate,
       **{
           _OUT_KW: jax.ShapeDtypeStruct((out_size + out_pad_size, aligned_hidden_size), dtype),
           _SCRATCH_KW: [
