@@ -55,6 +55,9 @@ class DistillationForwardOutput:
   #: top-k indices for sparse offline distillation
   top_k_indices: jax.Array | None = None
 
+  #: tmp: field to carry teacher attention inputs
+  attention_inputs: jax.Array | None = None
+
 
 @flax.struct.dataclass(frozen=True)
 class MaxTextTrainingInput(peft_trainer.TrainingInput):

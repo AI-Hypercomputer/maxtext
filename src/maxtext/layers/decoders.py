@@ -30,7 +30,6 @@ from jax.sharding import Mesh
 from maxtext.common.common_types import Config, DecoderBlockType, ShardMode
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN
 from maxtext.configs import pyconfig
-from maxtext.inference import page_manager
 from maxtext.layers import linears
 from maxtext.layers import mhc
 from maxtext.layers import normalizations
@@ -795,6 +794,8 @@ class Decoder(nn.Module):
       kv_caches: list[jax.Array] | None = None,
       attention_metadata=None,
       deepstack_visual_embeds: None | list[jnp.ndarray] = None,
+      # Add injected_attention_inputs
+      injected_attention_inputs: jax.Array | None = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -1047,26 +1048,16 @@ class Decoder(nn.Module):
             for i in range(cfg.num_decoder_layers):
               kv_caches[i] = returned_kv_cache[i]
           else:
-            RemattedBlockLayer = RemattedBlockLayers[0]
-            # breakpoint()
-            y = self._apply_standard_scanned_blocks(y, broadcast_args, RemattedBlockLayer, model_mode)
-
             # Fallback to old behavior if kv_caches is None (not vLLM RPA)
-            """
-            current_broadcast_args.append(None)
-            current_in_axes_tuple.append(nn.broadcast)
-
-            y, _ = self.scan_decoder_layers(
-                cfg,
-                RemattedBlockLayer,
-                scan_length,
-                "layers",
-                mesh,
-                in_axes_tuple=tuple(current_in_axes_tuple),
-                model_mode=model_mode,
-                **layer_kwargs,
-            )(y, *current_broadcast_args)
-            """
+            RemattedBlockLayer = RemattedBlockLayers[0]
+            if injected_attention_inputs is not None:
+              #Append injected_attention_inputs as the 10th positional argument
+              current_broadcast_args.extend([None, None, None, None, injected_attention_inputs])
+              current_in_axes_tuple.extend([nn.broadcast] * 4 + [0])
+            else:
+              current_broadcast_args.append(None) # previous_chunk decoder's call() argument
+              current_in_axes_tuple.append(nn.broadcast)
+            y = self._apply_standard_scanned_blocks(y, current_broadcast_args, tuple(current_in_axes_tuple), RemattedBlockLayer, model_mode)                        
 
       else:
         if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
@@ -1163,8 +1154,8 @@ class Decoder(nn.Module):
               layer_override = cfg.layer_configs[lyr]
               layer_pydantic_cfg = cfg._pydantic_config.model_copy(update=layer_override)
               layer_cfg = pyconfig.HyperParameters(layer_pydantic_cfg)
-              # TODO: change name?
-              # layer_name = f"layers_override_{lyr}"
+
+            current_injected_attn = injected_attention_inputs[lyr] if injected_attention_inputs is not None else None  
 
             layer = RemattedBlockLayer(
                 config=layer_cfg,
@@ -1184,6 +1175,7 @@ class Decoder(nn.Module):
                 slot=slot,
                 kv_cache=kv_cache,
                 attention_metadata=attention_metadata,
+                injected_attention_inputs=current_injected_attn,
                 **layer_call_kwargs,
             )
             if kv_caches is not None and returned_cache is not None:
@@ -1376,7 +1368,6 @@ class Decoder(nn.Module):
 
     return y
 
-<<<<<<< HEAD
   def _apply_gemma4_small_layers(
       self,
       y,
@@ -1471,9 +1462,7 @@ class Decoder(nn.Module):
 
     return y
 
-=======
->>>>>>> 559dd2067 (test layer-wise override)
-  def _apply_standard_scanned_blocks(self, y, broadcast_args, RemattedBlockLayer, model_mode, layer_kwargs={}):
+  def _apply_standard_scanned_blocks(self, y, broadcast_args, in_axes_tuple,RemattedBlockLayer, model_mode, layer_kwargs={}):
     """Applies standard scanned decoder blocks, handling possible per-layer overrides."""
     cfg = self.config
     mesh = self.mesh
@@ -1490,7 +1479,7 @@ class Decoder(nn.Module):
           end_idx,
           "layers",
           mesh,
-          in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+          in_axes_tuple=in_axes_tuple,
           model_mode=model_mode,
           **layer_kwargs,
       )(y, *broadcast_args)
@@ -1507,13 +1496,9 @@ class Decoder(nn.Module):
               cfg,
               RemattedBlockLayer,
               scan_length,
-<<<<<<< HEAD
-              f"layers_{current_idx}_to_{next_override_idx - 1}",
-=======
-              f"layers_chunk_{current_idx}_to_{next_override_idx - 1}",
->>>>>>> 559dd2067 (test layer-wise override)
+              f"layers_{current_idx}_to_{next_override_idx - 1}",              
               mesh,
-              in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+              in_axes_tuple=in_axes_tuple,
               model_mode=model_mode,
               **layer_kwargs,
           )(y, *broadcast_args)
@@ -1530,11 +1515,7 @@ class Decoder(nn.Module):
         layer = RemattedBlockLayer(
             config=layer_cfg,
             mesh=mesh,
-<<<<<<< HEAD
             name=f"layer_{current_idx}",
-=======
-            name=f"layers_override_{current_idx}",
->>>>>>> 559dd2067 (test layer-wise override)
             quant=self.quant,
             model_mode=model_mode,
             **combined_kwargs,

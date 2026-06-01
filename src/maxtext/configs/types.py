@@ -1365,6 +1365,13 @@ class Distillation(BaseModel):
       "The other parameters will be frozen if this attribute is non empty)",
   )
 
+  # ---- Experimental ----
+  blockwise_distill: bool = Field(
+      False,
+      description="Enables blockwise parallel disitllaion mode.",
+  )  
+
+
 
 class TrainingLoop(BaseModel):
   """Configuration for the main training loop, evaluation, and reproducibility."""
