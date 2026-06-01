@@ -54,6 +54,8 @@ class DistillationForwardOutput:
   moe_lb_loss: jax.Array | None = None
   #: top-k indices for sparse offline distillation
   top_k_indices: jax.Array | None = None
+  #: router selections
+  router_selections: jax.Array | None = None
 
 
 @flax.struct.dataclass(frozen=True)
@@ -340,6 +342,8 @@ class CombinedDistillationStrategy(DistillationStrategy):
       beta_end: float | None = None,
       beta_schedule: Literal["constant", "linear", "cosine"] = "constant",
       max_steps: int = 1,
+      num_experts: int = 1,
+      record_router_similarity_metrics: bool = False,
   ):
     """Initializes the Combined distillation strategy.
 
@@ -364,6 +368,8 @@ class CombinedDistillationStrategy(DistillationStrategy):
         beta_end: Target beta_feature value at end of training. None keeps beta fixed.
         beta_schedule: Schedule type for beta annealing.
         max_steps: Total training steps, used for schedule computation.
+        num_experts: Number of experts in the model (used for distribution tracking).
+        record_router_similarity_metrics: Whether to record router similarity metrics per layer.
     """
 
     super().__init__(
@@ -377,6 +383,8 @@ class CombinedDistillationStrategy(DistillationStrategy):
     self.alpha = alpha
     self.beta_feature = beta_feature
     self.layer_indices = jnp.array(layer_indices) if layer_indices is not None else None
+    self.num_experts = num_experts
+    self.record_router_similarity_metrics = record_router_similarity_metrics
 
     # Schedule parameters
     self.alpha_end = alpha_end
@@ -459,6 +467,72 @@ class CombinedDistillationStrategy(DistillationStrategy):
     )
     beta_feature = compute_schedule(step, self.max_steps, self.beta_feature, self.beta_end, self.beta_schedule)
     return alpha, temperature, beta_feature
+
+  def _record_router_similarity_metrics(
+      self,
+      student_output: DistillationForwardOutput,
+      teacher_output: Optional[DistillationForwardOutput],
+      mask: jax.Array,
+      metrics: dict[str, tuple[jax.Array, jax.Array]],
+      prefix: str,
+      use_sharding_constraints: bool = False,
+  ):
+    """Helper to record router similarity metrics per layer (shape [L, B, T, K])."""
+    if not (
+        self.record_router_similarity_metrics
+        and self.num_experts > 1
+        and teacher_output is not None
+        and student_output.router_selections is not None
+        and teacher_output.router_selections is not None
+    ):
+      return
+
+    s_top1 = student_output.router_selections[..., 0]
+    t_top1 = teacher_output.router_selections[..., 0]
+    top1_match = (s_top1 == t_top1).astype(jnp.float32)
+
+    s_expanded = jnp.expand_dims(student_output.router_selections, axis=-1)
+    t_expanded = jnp.expand_dims(teacher_output.router_selections, axis=-2)
+    matches = s_expanded == t_expanded
+    overlap_counts = jnp.sum(jnp.any(matches, axis=-1), axis=-1).astype(jnp.float32)
+    k_val = student_output.router_selections.shape[-1]
+
+    num_layers = student_output.router_selections.shape[0]
+
+    for layer_idx in range(num_layers):
+      layer_top1_match = top1_match[layer_idx]
+      layer_overlap_counts = overlap_counts[layer_idx]
+      layer_mask = mask
+
+      metrics[f"{prefix}/layer_{layer_idx}_router_similarity_top1"] = (
+          jnp.sum(layer_top1_match * layer_mask),
+          jnp.sum(layer_mask),
+      )
+
+      metrics[f"{prefix}/layer_{layer_idx}_router_similarity_top{k_val}"] = (
+          jnp.sum((layer_overlap_counts / k_val) * layer_mask),
+          jnp.sum(layer_mask),
+      )
+
+  def _record_expert_fractions(
+      self,
+      router_selections: jax.Array,
+      mask: jax.Array,
+      metrics: dict[str, tuple[jax.Array, jax.Array]],
+      prefix: str,
+  ):
+    """Helper to record expert selection fractions across all layers (shape [L, B, T, K])."""
+    L, B, T, K = router_selections.shape
+
+    flat_mask = jnp.broadcast_to(mask[None, :, :, None], (L, B, T, K))
+
+    one_hot = jax.nn.one_hot(router_selections, num_classes=self.num_experts)
+
+    total_tokens_per_expert = jnp.sum(one_hot * flat_mask[..., None], axis=(0, 1, 2, 3))
+    total_valid_tokens = jnp.sum(flat_mask)
+
+    for i in range(self.num_experts):
+      metrics[f"{prefix}_expert_{i}_fraction"] = (total_tokens_per_expert[i], total_valid_tokens)
 
   def compute_loss(
       self,
@@ -602,12 +676,24 @@ class CombinedDistillationStrategy(DistillationStrategy):
         METRIC_ALPHA: (alpha, one),
         METRIC_BETA_FEATURE: (beta_feature, one),
     }
+
+    if self.num_experts > 1:
+      if student_output.router_selections is not None:
+        self._record_expert_fractions(student_output.router_selections, mask, metrics, prefix="distill/student")
+      if teacher_output.router_selections is not None:
+        self._record_expert_fractions(teacher_output.router_selections, mask, metrics, prefix="distill/teacher")
+
+      self._record_router_similarity_metrics(
+          student_output, teacher_output, mask, metrics, prefix="distill", use_sharding_constraints=True
+      )
+
     return total_loss, metrics
 
   def compute_eval_loss(
       self,
       student_output: DistillationForwardOutput,
       labels: jax.Array,
+      teacher_output: Optional["DistillationForwardOutput"] = None,
   ) -> tuple[jax.Array, dict[str, tuple[jax.Array, jax.Array]]]:
     """Computes Eval Loss. Returns (loss, metrics) with (sum, count) metric pairs."""
     s_logits = student_output.logits.astype(jnp.float32)
@@ -622,8 +708,17 @@ class CombinedDistillationStrategy(DistillationStrategy):
 
     metrics = {
         "eval/hard_loss": (ce_sum, valid_count),
-        "eval/student_perplexity": (jnp.exp(jnp.minimum(task_loss, _PPL_CE_CAP)), jnp.array(1.0, dtype=jnp.float32)),
+        "eval/student_perplexity": (
+            jnp.exp(jnp.minimum(task_loss, _PPL_CE_CAP)),
+            jnp.array(1.0, dtype=jnp.float32),
+        ),
     }
+
+    if self.num_experts > 1:
+      self._record_router_similarity_metrics(
+          student_output, teacher_output, mask, metrics, prefix="eval", use_sharding_constraints=False
+      )
+
     return task_loss, metrics
 
   def create_labels(self, targets, targets_segmentation=None, **kwargs):
