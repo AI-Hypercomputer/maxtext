@@ -240,6 +240,10 @@ def setup_train_loop(config, recorder, devices=None):
     else:
       init_state_fn = partial(maxtext_utils.init_initial_state, model, tx, config, is_training, init_rng)
     checkpoint_manager = create_checkpoint_manager(config, mesh, init_state_fn)
+    if checkpoint_manager is not None:
+      checkpoint_step = checkpoint_manager.latest_step()
+      if checkpoint_step is not None:
+        validate_completed_steps(checkpoint_step + 1, config.steps)
 
   with maybe_record_goodput(recorder, GoodputEvent.TRAINING_PREPARATION):
     data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
@@ -404,4 +408,15 @@ def validate_train_config(config):
     max_logging.log(
         "WARNING: Sequence packing is essentially ignored for synthetic data. "
         "Please use a real dataset to use sequence packing."
+    )
+
+
+def validate_completed_steps(completed_steps: int, config_steps: int):
+  """Raises RuntimeError if training has already completed up to config_steps."""
+  if completed_steps >= config_steps:
+    raise RuntimeError(
+        f"Requested training up to step {config_steps}, but a checkpoint already exists at step {completed_steps - 1} "
+        f"(which means {completed_steps} steps have been completed). "
+        f"Did you mean to continue training past step {completed_steps} (you should set steps > {completed_steps}) "
+        f"or to not load the checkpoint (use enable_checkpointing=False?)"
     )
