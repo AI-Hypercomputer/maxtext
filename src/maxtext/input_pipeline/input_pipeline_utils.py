@@ -506,7 +506,7 @@ class ParseFeatures(grain.MapTransform):
   """
 
   def __init__(self, data_columns, tokenize):
-    self.data_columns = data_columns
+    self.data_columns = list(data_columns)
     self.tokenize = tokenize
 
   def map(self, element):
@@ -524,21 +524,27 @@ class ParseFeatures(grain.MapTransform):
 
     parsed = {}
     for col in self.data_columns:
-      f = features[col]
-      if self.tokenize:
-        if not f.bytes_list.value:
-          raise ValueError(
-              f"tokenize_data=True but column '{col}' has no text (bytes) data. "
-              "Set tokenize_train_data or tokenize_eval_data to False if your dataset is already tokenized."
-          )
-        parsed[col] = np.array(f.bytes_list.value, dtype=object)
-      else:
-        if not f.int64_list.value:
-          raise ValueError(
-              f"tokenize_data=False but column '{col}' has no integer token data. "
-              "Set tokenize_train_data or tokenize_eval_data to True if your dataset needs tokenization."
-          )
-        parsed[col] = np.array(f.int64_list.value, dtype=np.int32)
+      if col in features:
+        f = features[col]
+
+        # Dynamically check proto field type instead of relying on the tokenize flag
+        if len(f.float_list.value) > 0:
+          parsed[col] = np.array(f.float_list.value, dtype=np.float32)
+        elif len(f.int64_list.value) > 0:
+          parsed[col] = np.array(f.int64_list.value, dtype=np.int32)
+        elif len(f.bytes_list.value) > 0:
+          parsed[col] = np.array(f.bytes_list.value, dtype=object)
+        else:
+          parsed[col] = np.array([])
+
+    # Reshape the flattened arrays back to 2D [seq_len, top_k]
+    seq_len = len(parsed.get("inputs", []))
+    if seq_len > 0:
+      if "top_k_logits" in parsed and len(parsed["top_k_logits"]) > 0:
+        parsed["top_k_logits"] = parsed["top_k_logits"].reshape(seq_len, -1)
+      if "top_k_indices" in parsed and len(parsed["top_k_indices"]) > 0:
+        parsed["top_k_indices"] = parsed["top_k_indices"].reshape(seq_len, -1)
+
     return parsed
 
 
