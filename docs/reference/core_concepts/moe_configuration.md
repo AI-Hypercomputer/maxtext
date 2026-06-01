@@ -105,8 +105,6 @@ Dropping:
 
 `moe_fsdp_use_two_stage_all_gather`: If enabled, split the All-Gather operation for MoE weights into two separate stages when using FSDP/FSDP-transpose sharding. This is preferred when 3D All-Gather support is unavailable.
 
-`shard_exp_on_fsdp`: If enabled, shard the expert dimension of the MLP weights on the FSDP axis, and recommended only when num_experts is a multiple of fsdp_parallelism.
-
 ## 3. Performance Tuning
 
 These parameters provide granular control over the tiling dimensions for sparse matmul Pallas kernel.

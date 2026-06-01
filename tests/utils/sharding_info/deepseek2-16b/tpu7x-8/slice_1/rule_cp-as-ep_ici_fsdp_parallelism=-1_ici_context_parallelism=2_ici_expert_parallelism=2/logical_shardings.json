@@ -143,7 +143,7 @@
   },
   ".params/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['gate']/['kernel']": {
     "partition_spec": [
-      "embed_moe",
+      "embed",
       "moe_layers",
       null
     ],
@@ -469,7 +469,7 @@
   },
   ".opt_state/[0]/.mu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['gate']/['kernel']": {
     "partition_spec": [
-      "embed_moe",
+      "embed",
       "moe_layers",
       null
     ],
@@ -791,7 +791,7 @@
   },
   ".opt_state/[0]/.nu/['params']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['gate']/['kernel']": {
     "partition_spec": [
-      "embed_moe",
+      "embed",
       "moe_layers",
       null
     ],

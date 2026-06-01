@@ -736,11 +736,6 @@ class MoEGeneral(BaseModel):
       False,
       description="Use two separate All-Gather calls for MoE weights sharded on both FSDP and FSDP-transpose.",
   )
-  shard_exp_on_fsdp: bool = Field(
-      False,
-      description="Shard the expert dimension of the MLP weights on the FSDP axis, "
-      "and recommended only when num_experts is a multiple of fsdp_parallelism",
-  )
   norm_topk_prob: bool = Field(
       False,
       description="Enable top-k probability normalization for router weights (Qwen3-specific).",
