@@ -246,6 +246,17 @@ class TunixMaxTextAdapter(nnx.Module):
                 delta = jnp.einsum("isr,rsd->isd", lora_a, lora_b)
               elif len(base_w.shape) == 2:  # Non-scanned layers: (input_dim, output_dim)
                 delta = jnp.einsum("ir,rd->id", lora_a, lora_b)
+              elif len(base_w.shape) == 4:
+                try:
+                  if len(lora_b.shape) == 4:
+                    delta = jnp.einsum("isr,rscd->iscd", lora_a, lora_b)
+                  elif len(lora_b.shape) == 3:
+                    delta_flat = jnp.einsum("isr,rsx->isx", lora_a, lora_b)
+                    delta = delta_flat.reshape(base_w.shape)
+                  else:
+                    raise ValueError(f"Lora shapes not matching 4D base: a={lora_a.shape}, b={lora_b.shape}")
+                except Exception as einsum_err:
+                  raise ValueError(f"Gemma3 4D merge failed. base={base_w.shape}, lora_a={lora_a.shape}, lora_b={lora_b.shape}. Error: {einsum_err}")
               else:
                 raise ValueError(f"Unexpected base weight shape: {base_w.shape}")
               module.kernel.value = base_w + delta * lora_scale_factor
