@@ -18,7 +18,11 @@ import unittest
 from dataclasses import dataclass
 from unittest.mock import MagicMock
 
-from maxtext.utils.train_utils import validate_train_config, create_training_optimizer
+from maxtext.utils.train_utils import (
+    validate_train_config,
+    create_training_optimizer,
+    validate_completed_steps,
+)
 
 
 @dataclass
@@ -185,12 +189,32 @@ class TestCreateTrainingOptimizer(unittest.TestCase):
     config.learning_rate_schedule_steps = 100
     config.lr_schedule_type = "cosine"
     config.use_iota_embed = False
-
     _, tx = create_training_optimizer(config, model=None)
-
     self.assertIsNotNone(tx)
     self.assertTrue(hasattr(tx, "init"))
 
 
+class TestValidateCompletedSteps(unittest.TestCase):
+  """Tests for validate_completed_steps."""
+
+  def test_under_steps_passes(self):
+    """Verifies no exception raised when completed_steps < config_steps."""
+    # Should not raise
+    validate_completed_steps(completed_steps=50, config_steps=100)
+
+  def test_equal_steps_raises(self):
+    """Verifies RuntimeError raised when completed_steps == config_steps."""
+    with self.assertRaises(RuntimeError) as context:
+      validate_completed_steps(completed_steps=100, config_steps=100)
+    self.assertIn("Requested training up to step 100, but a checkpoint already exists at step 99", str(context.exception))
+
+  def test_over_steps_raises(self):
+    """Verifies RuntimeError raised when completed_steps > config_steps."""
+    with self.assertRaises(RuntimeError) as context:
+      validate_completed_steps(completed_steps=105, config_steps=100)
+    self.assertIn("Requested training up to step 100, but a checkpoint already exists at step 104", str(context.exception))
+
+
 if __name__ == "__main__":
   unittest.main()
+
