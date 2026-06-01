@@ -185,7 +185,7 @@ def generate_and_save_data(config, local_args):
 
   multihost_utils.sync_global_devices("start_generation_loop")
 
-  with mesh:
+  with jax.set_mesh(mesh):
     if jax.process_index() == 0:
       max_logging.log(f"Starting Distributed Top-K generation loop for {config.steps - start_step} steps...")
 
