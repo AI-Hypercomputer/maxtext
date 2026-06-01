@@ -20,7 +20,7 @@
 
 Quantization in deep learning is the process of reducing the precision of numbers used to represent a model's weights and/or activations. Instead of using higher-precision floating-point formats like 32-bit floats (`float32`) or 16-bit brain floats (`bfloat16`), quantization maps these values to lower-precision numerical formats, most commonly 8-bit integers (`int8`) or floats (`fp8`).
 
-MaxText supports quantization via both the [AQT](https://github.com/google/aqt) and [Qwix](https://github.com/google/qwix) libraries. Qwix is the recommended approach, providing a non-intrusive way to apply Quantized Training (QT).
+MaxText supports quantization via the [Qwix](https://github.com/google/qwix) library. Accurate Quantized Training (AQT) is deprecated and will be removed in a future release. Qwix is the recommended approach, providing a non-intrusive way to apply Quantized Training (QT).
 
 ## Why use quantization?
 
@@ -40,7 +40,7 @@ The primary trade-off with quantization is between the model accuracy and comput
 - Impact on Gradients: Gradients during backpropagation can have very different, often wider, distributions than weights or activations, making them more sensitive to quantization errors.
 - Convergence Issues: The approximations introduced by quantization can sometimes hinder the model's ability to converge during training.
 
-To overcome the challenges of quantization, libraries like Google's Accurate Quantized Training (AQT) and its successor Qwix (used in MaxText) employ a suite of advanced techniques. These methods ensure that models can be trained with low-precision arithmetic without significant loss in accuracy and with stable convergence.
+To overcome the challenges of quantization, libraries like Google's Accurate Quantized Training (AQT, deprecated) and its successor Qwix (used in MaxText) employ a suite of advanced techniques. These methods ensure that models can be trained with low-precision arithmetic without significant loss in accuracy and with stable convergence.
 
 ## How Quantized Training (QT) works with Qwix
 
@@ -56,7 +56,7 @@ By integrating the quantization simulation directly into the training, the model
 
 ## Using Quantization in MaxText
 
-You can enable quantization in MaxText by setting flags in your configuration file (e.g., `base.yml`) or via the command line. MaxText supports two quantization libraries: Qwix (recommended) and AQT.
+You can enable quantization in MaxText by setting flags in your configuration file (e.g., `base.yml`) or via the command line. MaxText supports Qwix (recommended) and the legacy AQT library (deprecated).
 
 ### Configuration Flags
 
@@ -64,8 +64,8 @@ The primary flags to control quantization are:
 
 - `use_qwix_quantization`: A boolean flag.
   - Set to `True` to enable quantization using the Qwix library.
-  - Set to `False` (or omit) to use the AQT library if `quantization` is set.
-- `quantization`: A string that specifies the type of quantization to apply. The accepted values depend on whether you are using Qwix or AQT.
+  - Set to `False` (or omit) to use the AQT library (deprecated) if `quantization` is set.
+- `quantization`: A string that specifies the type of quantization to apply. The accepted values depend on whether you are using Qwix or legacy AQT.
 - `quantization_calibration_method`: The calibration method for weights and activations (e.g., `"absmax"`). This is mainly for Qwix.
 
 ### Qwix Quantization (Recommended)
@@ -126,6 +126,9 @@ model = qwix.quantize_model(model, qwix.QtProvider(rule))
 ```
 
 ### AQT Quantization
+
+> [!WARNING]
+> **DEPRECATION NOTICE**: AQT quantization is deprecated and will be removed in a future release. Please migrate to Qwix by setting `use_qwix_quantization=True`.
 
 If `use_qwix_quantization` is `False` or not set, you can still apply quantization using the AQT library by setting the `quantization` flag. You can read more about AQT on this [Google Cloud blog](https://cloud.google.com/blog/products/compute/accurate-quantized-training-aqt-for-tpu-v5e).
 

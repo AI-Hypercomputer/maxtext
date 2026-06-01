@@ -63,7 +63,7 @@ The table below summarizes some of the most critical parameters in base.yml and 
 | dataset_type                     | input_pipeline.py           | Specifies the data loader backend ('tfds', 'grain', 'hf').                                                    |
 | enable_checkpointing             | checkpointing.py, train.py  | Enables or disables saving model state.                                                                       |
 | async_checkpointing              | checkpointing.py, train.py  | If True, saves checkpoints without blocking the training loop.                                                |
-| quantization                     | layers.py, optimizers.py    | Enables quantization, e.g., 'int8' for AQT or Qwix.                                                           |
+| quantization                     | layers.py, optimizers.py    | Enables quantization, e.g., 'int8' for Qwix or legacy AQT (deprecated).                                       |
 | compile_topology                 | train_compile.py            | Specifies the target hardware topology for AOT compilation.                                                   |
 
 ## Core architectural components
@@ -82,7 +82,7 @@ While the base model implementations are typically simple, MaxText is equipped t
 
 - Advanced attention mechanisms: The architecture is not limited to standard self-attention. It supports variants like Grouped-Query Attention (GQA), Multi-Query Attention (MQA) and Multi-headed Latent Attention (MLA). Since, like MoE, attention can be a performance hot-spot in transformers, attention is typically implemented in [Pallas](https://docs.jax.dev/en/latest/pallas/index.html) kernels, with Splash (Sparse, Flash) Attention being the default for training.
 
-- Quantization: The framework seamlessly integrates with Google's Accurate Quantized Training (AQT) and Qwix libraries. Quantization logic is applied at the layer level.
+- Quantization: The framework seamlessly integrates with the Qwix and Google's Accurate Quantized Training (AQT, deprecated) libraries. Quantization logic is applied at the layer level.
 
 The modularity of this design is clearly demonstrated by third-party extensions. For instance, the NVIDIA maxtext-jaxpp fork was able to add support for pipeline parallelism by inserting jaxpp.pipeline_enter_stage hooks directly into the \_\_call\_\_ method of the Decoder class, a testament to the codebase's modularity and extensibility.
 
@@ -158,7 +158,7 @@ Performance can be further tuned by setting specific XLA flags in the configurat
 
 ### Quantization for throughput boost
 
-One of the most significant performance levers available in MaxText is the integration of Google's Accurate Quantized Training (AQT) and Qwix libraries. These enable training with reduced numerical precision, reducing memory requirements and often increasing FLOPS, while maintaining model quality and convergence characteristics that are very close to the full-precision baseline.
+One of the most significant performance levers available in MaxText is the integration of the Qwix and Google's Accurate Quantized Training (AQT, deprecated) libraries. These enable training with reduced numerical precision, reducing memory requirements and often increasing FLOPS, while maintaining model quality and convergence characteristics that are very close to the full-precision baseline.
 
 Integration into MaxText is seamless for the user. Quantization can be enabled by simply setting, for example, `quantization: 'int8'` in the configuration file. This flag activates quantization-aware layers (defined in
 [`src/maxtext/layers/quantizations.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/layers/quantizations.py)) that are applied to the relevant dense layers within the model's Flax definition. The quantization library handles the complexities of simulating quantization during the forward and backward passes, allowing the model to learn weights that are robust to the reduced precision.
