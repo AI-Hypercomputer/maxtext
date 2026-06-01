@@ -423,11 +423,15 @@ class MaxEngine(_BaseEngine):
         lambda x: jax.sharding.NamedSharding(self._mesh, x),
         self.prefill_kv_cache_annotations,
     )
-    if self.config.stack_prefill_result_cache:
-      # With scan_layers=True the NNX cache leaves are already stacked on axis 0,
-      # so the engine's manual-stack helper (which assumes an unstacked Linen tree)
-      # doesn't apply. Wiring this up cleanly is a Phase-2 follow-up.
-      raise NotImplementedError("pure_nnx + stack_prefill_result_cache=True not yet supported.")
+    if self.config.stack_prefill_result_cache and not self.config.scan_layers:
+      # scan_layers=False has unstacked per-layer subtrees; _maybe_stack_prefill_result_cache
+      # stacks them on a new axis 0, so add that axis to each spec and keep one layer's subtree.
+      self.prefill_kv_cache_shardings = jax.tree.map(
+          lambda x: jax.sharding.NamedSharding(self._mesh, jax.sharding.PartitionSpec(None, *x.spec)),
+          self.prefill_kv_cache_shardings,
+      )
+      self.prefill_kv_cache_shardings = {"decoder": {"layers": self.prefill_kv_cache_shardings["decoder"]["layers"][0]}}
+    # scan_layers=True is already stacked on axis 0; shardings stay as-is and stack/unstack are no-ops.
     # AR-mode abstract model so axis names use CACHE_BATCH (not CACHE_BATCH_PREFILL);
     # bulk_insert / _insert_jit search for "cache_batch" in the per-leaf logical axes.
     self.kv_cache_annotations = maxtext_utils.get_kv_cache_annotations_nnx(self.model_ar, self.config, self._mesh)
@@ -531,6 +535,16 @@ class MaxEngine(_BaseEngine):
     if not self.config.stack_prefill_result_cache:
       return cache
 
+    if self.config.pure_nnx:
+      if self.config.scan_layers:
+        # scan_layers already stacks the per-layer KV cache on axis 0; nothing to restack.
+        return cache
+      # scan_layers=False: stack the per-layer subtrees under decoder/layers into one
+      # subtree with a leading layer axis (matching the scan_layers=True shape).
+      layers = cache["decoder"]["layers"]
+      stacked = jax.tree.map(lambda *c: jnp.stack(c), *[layers[i] for i in range(self.config.num_decoder_layers)])
+      return {"decoder": {"layers": stacked}}
+
     layer_keys = []
     for i in range(self.config.num_decoder_layers):
       layer_keys.append(f"layers_{i}")
@@ -543,6 +557,16 @@ class MaxEngine(_BaseEngine):
     """Unstack the caches across the layers."""
     if not self.config.stack_prefill_result_cache:
       return cache
+
+    if self.config.pure_nnx:
+      if self.config.scan_layers:
+        # Mirror _maybe_stack_prefill_result_cache: the cache already carries the
+        # layer axis, so there is nothing to unstack.
+        return cache
+      # scan_layers=False: split the leading layer axis back into per-layer subtrees.
+      stacked = cache["decoder"]["layers"]
+      layers = {i: jax.tree.map(lambda x, i=i: x[i], stacked) for i in range(self.config.num_decoder_layers)}
+      return {"decoder": {"layers": layers}}
 
     flat_cache, treedef = jax.tree.flatten(cache)
     layer_cache = [jax.tree.unflatten(treedef, flat_cache_vars) for flat_cache_vars in zip(*flat_cache, strict=True)]
@@ -924,9 +948,6 @@ class MaxEngine(_BaseEngine):
     prefilling stage. The number of tokens is specified by num_samples.
     """
 
-    if self.config.pure_nnx:
-      raise NotImplementedError("pure_nnx + prefill_multisampling not yet supported. Use pure_nnx=False.")
-
     input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
     positions = jnp.expand_dims(jnp.arange(0, input_tokens.shape[1]), 0)
 
@@ -936,17 +957,32 @@ class MaxEngine(_BaseEngine):
     sequence_indicator = jnp.expand_dims(one_d_output, 0)
 
     rng, new_rng = jax.random.split(rng)
-    with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
-      flat_logits, new_vars = self.model.apply(
-          params,
-          input_tokens,
-          positions,
-          decoder_segment_ids=sequence_indicator,
-          enable_dropout=False,
-          model_mode=MODEL_MODE_PREFILL,
-          rngs={"params": new_rng},
-          mutable=["cache"],
-      )
+    if self.config.pure_nnx:
+      # Prefill is batch=1 (one prompt); multi-sampling only draws several first
+      # tokens from the shared logits below. Mirror the _prefill_jit NNX branch.
+      with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
+        flat_logits, new_cache_dict = self._nnx_run_model(
+            params=params,
+            cache_dict=self._nnx_init_cache_dict(mode=MODEL_MODE_PREFILL),
+            decoder_input_tokens=input_tokens,
+            decoder_positions=positions,
+            decoder_segment_ids=sequence_indicator,
+            enable_dropout=False,
+            model_mode=MODEL_MODE_PREFILL,
+        )
+      new_vars = {"cache": new_cache_dict}
+    else:
+      with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
+        flat_logits, new_vars = self.model.apply(
+            params,
+            input_tokens,
+            positions,
+            decoder_segment_ids=sequence_indicator,
+            enable_dropout=False,
+            model_mode=MODEL_MODE_PREFILL,
+            rngs={"params": new_rng},
+            mutable=["cache"],
+        )
 
     next_pos = jnp.full((1, 1), true_length, dtype=jnp.int32)
     selected_logits = jax.lax.dynamic_slice(
@@ -1052,26 +1088,38 @@ class MaxEngine(_BaseEngine):
     if existing_prefix:
       raise ValueError("We don't know what to do with existing_prefix")
 
-    if self.config.pure_nnx:
-      raise NotImplementedError("pure_nnx + prefill_concat not yet supported. Use pure_nnx=False.")
-
     if rng is None:
       rng = jax.random.PRNGKey(0)
     input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
     decoder_positions = jnp.expand_dims(decoder_positions, 0)
     decoder_segment_ids = jnp.expand_dims(decoder_segment_ids, 0)
     rng, new_rng = jax.random.split(rng)
-    with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
-      flat_logits, new_vars = self.model.apply(
-          params,
-          input_tokens,
-          decoder_positions,
-          decoder_segment_ids=decoder_segment_ids,
-          enable_dropout=False,
-          model_mode=MODEL_MODE_PREFILL,
-          rngs={"params": new_rng},
-          mutable=["cache"],
-      )
+    if self.config.pure_nnx:
+      # Packed prompts run as a single batch=1 prefill; the packed positions and
+      # segment ids keep the prompts separated. Mirror the _prefill_jit NNX branch.
+      with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
+        flat_logits, new_cache_dict = self._nnx_run_model(
+            params=params,
+            cache_dict=self._nnx_init_cache_dict(mode=MODEL_MODE_PREFILL),
+            decoder_input_tokens=input_tokens,
+            decoder_positions=decoder_positions,
+            decoder_segment_ids=decoder_segment_ids,
+            enable_dropout=False,
+            model_mode=MODEL_MODE_PREFILL,
+        )
+      new_vars = {"cache": new_cache_dict}
+    else:
+      with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
+        flat_logits, new_vars = self.model.apply(
+            params,
+            input_tokens,
+            decoder_positions,
+            decoder_segment_ids=decoder_segment_ids,
+            enable_dropout=False,
+            model_mode=MODEL_MODE_PREFILL,
+            rngs={"params": new_rng},
+            mutable=["cache"],
+        )
     cache = new_vars["cache"]
     cache = self._maybe_stack_prefill_result_cache(cache)
     if return_prompt_logp:
