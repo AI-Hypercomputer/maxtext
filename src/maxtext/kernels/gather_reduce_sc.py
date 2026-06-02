@@ -1617,6 +1617,7 @@ def sc_gather_reduce(
     return mosaic.as_tpu_kernel(
         m,
         out_type=out_type,
+        tiling=mosaic.Tiling.COMPACT,
     )(
         *(
             [
