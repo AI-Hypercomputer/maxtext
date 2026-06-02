@@ -1,0 +1,79 @@
+# gpt-oss-20b distillation. ~17% MFU on v7x.
+base_config: "base.yml"
+
+# NOTE: load_parameters_path values are placeholders. Replace them with paths
+# to your own student and teacher checkpoints (Orbax format, ending in /0/items).
+student_overrides:
+  model_name: "gpt-oss-20b"
+  override_model_config: True
+  base_num_query_heads: 32
+  head_dim: 128
+  base_num_kv_heads: 4
+  load_parameters_path: "gs://YOUR-BUCKET/distillation/gpt_oss_20b/student/0/items"
+teacher_overrides:
+  model_name: "gpt-oss-20b"
+  load_parameters_path: "gs://YOUR-BUCKET/distillation/gpt_oss_20b/teacher/0/items"
+
+# distill_beta=0: decoder feature loss is broken on gpt-oss.
+distill_alpha: 0.5
+distill_temperature: 1.0
+distill_beta: 0
+distill_layer_indices: []
+enable_nnx: True
+load_balance_loss_weight: 0.001
+
+ici_fsdp_parallelism: 32
+ici_data_parallelism: 4
+
+dataset_type: "grain"
+grain_file_type: "arrayrecord"
+# Launcher's gcsfuse override (CLI arg) replaces this for the student config.
+grain_train_files: "gs://maxtext-dataset/array-record/climbmix/*.arrayrecord"
+grain_worker_count: 16
+grain_ram_budget_mb: 1024
+grain_per_worker_buffer_size: 2
+grain_prefetch_buffer_size: 1024
+num_epoch: 10
+
+tokenizer_path: "src/maxtext/assets/tokenizers/gpt-oss-20b-tokenizer"
+tokenizer_type: "huggingface"
+
+max_target_length: 32768
+per_device_batch_size: 1
+gradient_accumulation_steps: 1
+
+steps: 100000
+learning_rate_schedule_steps: 100000
+log_period: 10
+checkpoint_period: 500
+save_checkpoint_on_completion: True
+enable_checkpointing: True
+async_checkpointing: True
+skip_jax_distributed_system: False
+
+learning_rate: 5.0e-5
+learning_rate_final_fraction: 0.2
+warmup_steps_fraction: 0.02
+adam_b1: 0.9
+adam_b2: 0.95
+adam_eps: 1.e-5
+adam_weight_decay: 0.01
+adamw_mask: ['.*embedding.*', '.*norm.*', '.*bias']
+z_loss_multiplier: 1.0e-5
+float32_logits: True
+
+# Tokamax splash attention. Layouts: HEAD_DIM_MINOR | SEQ_MINOR.
+attention: "flash"
+use_tokamax_splash: True
+sa_use_fused_bwd_kernel: True
+sa_block_q: 2048
+sa_block_kv: 2048
+sa_block_kv_compute: 2048
+sa_block_q_dkv: 2048
+sa_block_kv_dkv: 2048
+sa_block_kv_dkv_compute: 2048
+sa_block_q_dq: 2048
+sa_block_kv_dq: 2048
+sa_q_layout: "SEQ_MINOR"
+sa_k_layout: "SEQ_MINOR"
+sa_v_layout: "SEQ_MINOR"
