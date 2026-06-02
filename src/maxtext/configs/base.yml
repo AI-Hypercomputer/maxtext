@@ -645,6 +645,8 @@ tokenizer_path: ""
 tokenizer_type: "sentencepiece" # Currently supporting: "tiktoken", "sentencepiece", "huggingface"
 use_chat_template: false
 chat_template_path: "" # path to chat template json file
+chat_template: "" # Chat template to use with HF tokenizers. It should be a valid Jinja2-formatted template.
+tokenizer_chat_template_path: "" # Path to a chat template file to be loaded into the tokenizer if missing.
 tokenize_train_data: true  # false if the dataset is pre-tokenized
 tokenize_eval_data: true  # false if the dataset is pre-tokenized
 add_bos: true
