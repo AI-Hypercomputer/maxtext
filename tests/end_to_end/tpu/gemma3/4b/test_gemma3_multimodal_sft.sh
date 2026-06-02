@@ -6,7 +6,6 @@
 # 1. Run inference on the pre-converted checkpoint.
 # 2. Run SFT of Gemma3-4B on ChartQA dataset with the converted checkpoint.
 # 3. Run inference on the checkpoint produced by the SFT run.
-# 4. Convert the checkpoint produced by the SFT run back to HuggingFace format.
 
 # Usage:
 # export HF_TOKEN=<your Hugging Face access token>
@@ -26,8 +25,7 @@ BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs/${MODEL_NAME}
 UNSCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/to_maxtext/unscanned/${run_id}/0/items
 SCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/to_maxtext/scanned/${run_id}/0/items
 
-# Step 1: Install torch and google-jetstream
-python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+# Step 1: Install google-jetstream
 python3 -m pip install google-jetstream@https://github.com/AI-Hypercomputer/JetStream/archive/29329e8e73820993f77cfc8efe34eb2a73f5de98.zip --no-deps
 
 # Step 2: Run inference on the original checkpoint converted from Hugging Face
@@ -79,9 +77,3 @@ python3 -m maxtext.inference.decode \
     image_path=\'tests/assets/test_image.jpg\' \
     attention=\'dot_product\'
 
-# Step 5: Convert the SFT checkpoint back to HuggingFace format
-python3 -m maxtext.checkpoint_conversion.to_huggingface \
-    model_name=${MODEL_NAME} \
-    load_parameters_path=${BASE_OUTPUT_DIRECTORY}/multimodal/sft/${run_id}/checkpoints/4/items \
-    base_output_directory=${BASE_OUTPUT_DIRECTORY}/to_huggingface/unscanned/${run_id} \
-    use_multimodal=true scan_layers=false

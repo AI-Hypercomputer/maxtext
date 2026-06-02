@@ -6,7 +6,6 @@
 # 1. Run inference on the pre-converted checkpoint.
 # 2. Run SFT starting from the pre-converted checkpoint.
 # 3. Run inference on the checkpoint produced by the SFT run.
-# 4. Convert the checkpoint produced by the SFT run back to HuggingFace format.
 
 # Usage:
 # export HF_TOKEN=<your Hugging Face access token>
@@ -25,10 +24,7 @@ BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs/${MODEL_NAME}
 UNSCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/to_maxtext/unscanned/${run_id}/0/items
 SCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/to_maxtext/scanned/${run_id}/0/items
 
-# Step 1: Install torch
-python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
-
-# Step 2: Run inference on the original checkpoint converted from Hugging Face
+# Step 1: Run inference on the original checkpoint converted from Hugging Face
 python3 -m maxtext.inference.vllm_decode \
     model_name=${MODEL_NAME} \
     load_parameters_path=${UNSCANNED_CKPT_PATH} \
@@ -37,7 +33,7 @@ python3 -m maxtext.inference.vllm_decode \
     prompt="Suggest some famous landmarks in London." \
     use_chat_template=True scan_layers=false
 
-# Step 3: Run SFT on the converted checkpoint
+# Step 2: Run SFT on the converted checkpoint
 python3 -m maxtext.trainers.post_train.sft.train_sft \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/sft \
     load_parameters_path=${SCANNED_CKPT_PATH} \
@@ -46,7 +42,7 @@ python3 -m maxtext.trainers.post_train.sft.train_sft \
     model_name=${MODEL_NAME} enable_single_controller=True \
     checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False
 
-# Step 4: Run inference on the checkpoint generated from the previous run
+# Step 3: Run inference on the checkpoint generated from the previous run
 python3 -m maxtext.inference.vllm_decode \
     model_name=${MODEL_NAME} \
     load_parameters_path=${BASE_OUTPUT_DIRECTORY}/sft/${run_id}/checkpoints/5/model_params \
@@ -55,9 +51,4 @@ python3 -m maxtext.inference.vllm_decode \
     prompt="Suggest some famous landmarks in London." \
     use_chat_template=True scan_layers=true
 
-# Step 5: Convert the checkpoint from MaxText format to Hugging Face format
-python3 -m maxtext.checkpoint_conversion.to_huggingface \
-    model_name=${MODEL_NAME} \
-    load_parameters_path=${BASE_OUTPUT_DIRECTORY}/sft/${run_id}/checkpoints/5/model_params \
-    base_output_directory=${BASE_OUTPUT_DIRECTORY}/to_huggingface/unscanned/${run_id} \
-    use_multimodal=false scan_layers=true
+
