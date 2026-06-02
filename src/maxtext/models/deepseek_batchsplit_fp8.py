@@ -940,6 +940,16 @@ def unroute(
 
 def compute(x, w0, w1, wo, group_sizes, weights, *, config, mesh):
   """Processes routed tokens through the MLP."""
+  gmm_impl_wi = moe_lib.PallasMosaicTpuRaggedDotCustom(
+      fwd_tile=(config.wi_tile_fwd_batch_seq, config.wi_tile_fwd_embed_dim, config.wi_tile_fwd_mlp_dim),
+      dlhs_tile=(config.wi_tile_dlhs_batch_seq, config.wi_tile_dlhs_mlp_dim, config.wi_tile_dlhs_embed_dim),
+      drhs_tile=(config.wi_tile_drhs_batch_seq, config.wi_tile_drhs_embed_dim, config.wi_tile_drhs_mlp_dim),
+  )
+  gmm_impl_wo = moe_lib.PallasMosaicTpuRaggedDotCustom(
+      fwd_tile=(config.wo_tile_fwd_batch_seq, config.wo_tile_fwd_mlp_dim, config.wo_tile_fwd_embed_dim),
+      dlhs_tile=(config.wo_tile_dlhs_batch_seq, config.wo_tile_dlhs_embed_dim, config.wo_tile_dlhs_mlp_dim),
+      drhs_tile=(config.wo_tile_drhs_batch_seq, config.wo_tile_drhs_mlp_dim, config.wo_tile_drhs_embed_dim),
+  )
 
   def gmm(
       inputs,
@@ -948,6 +958,7 @@ def compute(x, w0, w1, wo, group_sizes, weights, *, config, mesh):
       group_sizes,
       preferred_element_type,
       weight_gather_axes,
+      gmm_impl=None,
   ):
     if config.use_qwix_quantization:
       output = megablox.gmm(
@@ -968,7 +979,7 @@ def compute(x, w0, w1, wo, group_sizes, weights, *, config, mesh):
           group_sizes=tokamax.RaggedDotGroupSizes(group_sizes, len(inputs)),
           precision=jax.lax.Precision.DEFAULT,
           preferred_element_type=preferred_element_type,
-          implementation="mosaic",
+          implementation="mosaic" if gmm_impl is None else [gmm_impl],
       )
     return output
 
@@ -1028,6 +1039,7 @@ def compute(x, w0, w1, wo, group_sizes, weights, *, config, mesh):
         w01,
         tiling=wi_tile_size,
         weight_gather_axes=wi_gather_axes,
+        gmm_impl=gmm_impl_wi,
     )
     layer_w0, layer_w1 = jnp.split(layer_w01, 2, axis=-1)
   else:
@@ -1036,12 +1048,14 @@ def compute(x, w0, w1, wo, group_sizes, weights, *, config, mesh):
         w0,
         tiling=wi_tile_size,
         weight_gather_axes=wi_gather_axes,
+        gmm_impl=gmm_impl_wi,
     )
     layer_w1 = gmm_fn(
         x,
         w1,
         tiling=wi_tile_size,
         weight_gather_axes=wi_gather_axes,
+        gmm_impl=gmm_impl_wi,
     )
   layer_w0 = jax.ad_checkpoint.checkpoint_name(layer_w0, "mlpwi_0")
   layer_w1 = jax.ad_checkpoint.checkpoint_name(layer_w1, "mlpwi_1")
@@ -1052,6 +1066,7 @@ def compute(x, w0, w1, wo, group_sizes, weights, *, config, mesh):
       wo,
       tiling=wo_tile_size,
       weight_gather_axes=wo_gather_axes,
+      gmm_impl=gmm_impl_wo,
   )
   return layer_wo
 
