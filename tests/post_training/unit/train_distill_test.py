@@ -1047,7 +1047,6 @@ class TrainDistillTest(unittest.TestCase):
     if hasattr(trainer2.checkpoint_manager, "wait_until_finished"):
       trainer2.checkpoint_manager.wait_until_finished()
 
-  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.distillation_utils.OfflineArrayRecordIterator")
   @mock.patch("maxtext.trainers.post_train.distillation.train_distill.MaxTextDistillationTrainer")
   @mock.patch("maxtext.trainers.post_train.distillation.train_distill.input_pipeline_interface.create_data_iterator")
   @mock.patch("maxtext.trainers.post_train.distillation.train_distill.get_maxtext_model")
@@ -1062,7 +1061,6 @@ class TrainDistillTest(unittest.TestCase):
       mock_get_model,
       mock_create_iterator,
       mock_trainer_cls,
-      mock_offline_iter_cls,
   ):
     """Verifies offline mode (offline_data_dir is set) skips teacher model loading."""
     # 1. Configs
