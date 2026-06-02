@@ -627,6 +627,7 @@ class RoutedMoeTest(unittest.TestCase):
           use_ring_of_experts=use_ring_of_experts,
           max_target_length=128,
           use_ragged_sort=use_ragged_sort,
+          use_tokamax_gmm=True,
       )
 
     def _build_model(cfg, mesh):
@@ -711,12 +712,12 @@ class RoutedMoeTest(unittest.TestCase):
       )
 
   @pytest.mark.tpu_only
-  @pytest.mark.skip_on_tpu7x
+  #   @pytest.mark.skip_on_tpu7x
   def test_ragged_sort_loss_and_grad_ring_of_experts(self):
     self._run_ragged_sort_loss_and_grad(use_ring_of_experts=True)
 
   @pytest.mark.tpu_only
-  @pytest.mark.skip_on_tpu7x
+  #   @pytest.mark.skip_on_tpu7x
   def test_ragged_sort_loss_and_grad_no_ring_of_experts(self):
     self._run_ragged_sort_loss_and_grad(use_ring_of_experts=False)
 

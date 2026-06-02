@@ -92,8 +92,8 @@ def ring_ragged_sort(hidden_states_local, topk_indices_local, num_experts, topk,
         shard_output_end,
     )
 
-    valid_mask = (jnp.arange(x.shape[0]) >= shard_output_start) & (jnp.arange(x.shape[0]) < shard_output_end)
-    x = jnp.where(valid_mask[:, None], x, 0.0)
+    # valid_mask = (jnp.arange(x.shape[0]) >= shard_output_start) & (jnp.arange(x.shape[0]) < shard_output_end)
+    # x = jnp.where(valid_mask[:, None], x, 0.0)
 
     out = (x, group_sizes_local, topk_argsort_revert_indices)
 
@@ -134,17 +134,13 @@ def ring_ragged_sort(hidden_states_local, topk_indices_local, num_experts, topk,
     # TODO: Fix ragged_gather_reduce kernel for backward pass — it sometimes
     # only allocates one sparse core instead of two, degrading performance.
     # Use JAX fallback until the kernel is fixed.
-    # grad_hidden_states = ragged_gather_reduce(
-    #     g_x,
-    #     topk_argsort_revert_indices,
-    #     topk_weights=jnp.ones((n,), dtype=jnp.float32),
-    #     valid_rows_mask=valid_rows_mask,
-    #     reduce_group_size=topk,
-    # )
-    grad_hidden_states = g_x[topk_argsort_revert_indices]
-    grad_hidden_states = jnp.where(valid_rows_mask[:, None], grad_hidden_states, 0)
-    grad_hidden_states = grad_hidden_states.reshape(-1, topk, grad_hidden_states.shape[-1])
-    grad_hidden_states = jnp.sum(grad_hidden_states, axis=1).astype(g_x.dtype)
+    grad_hidden_states = ragged_gather_reduce(
+        g_x,
+        topk_argsort_revert_indices,
+        topk_weights=jnp.ones((n,), dtype=jnp.float32),
+        valid_rows_mask=valid_rows_mask,
+        reduce_group_size=topk,
+    )
     return grad_hidden_states, None
 
   _ring_ragged_sort.defvjp(_ring_ragged_sort_fwd, _ring_ragged_sort_bwd)
@@ -216,7 +212,6 @@ def ring_ragged_unsort(sorted_tokens_local, group_sizes_local, topk_argsort_reve
         topk_argsort_revert_indices,
         shard_output_start,
         shard_output_end,
-        sorted_tokens_local.shape,
     )
 
     return out, res
@@ -243,9 +238,8 @@ def ring_ragged_unsort(sorted_tokens_local, group_sizes_local, topk_argsort_reve
     range of ``j``.  The simpler equivalent: gather of g_hidden_states_local
     using the inverse permutation, masked.
     """
-    topk_argsort_revert_indices, shard_output_start, shard_output_end, sorted_tokens_local_shape = res
+    topk_argsort_revert_indices, shard_output_start, shard_output_end = res
     g_hidden_states_local = g_out
-    num_rows = sorted_tokens_local_shape[0]
 
     # We want: g_sorted_tokens[j] = g_hidden_states_local[i] where revert[i]=j.
     # Build the inverse permutation idx_inv such that idx_inv[j] = i.
@@ -257,12 +251,6 @@ def ring_ragged_unsort(sorted_tokens_local, group_sizes_local, topk_argsort_reve
         shard_output_start,
         shard_output_end,
     )
-    # Outside [start, end), positions must be zero — which the ragged_gather
-    # already guarantees because untouched output rows are uninitialized; we
-    # explicitly zero them.
-    pos = jnp.arange(num_rows)
-    valid = (pos >= shard_output_start) & (pos < shard_output_end)
-    grad_sorted_tokens = jnp.where(valid[:, None], grad_sorted_tokens, jnp.zeros_like(grad_sorted_tokens))
     return grad_sorted_tokens, None, None
 
   _ring_ragged_unsort.defvjp(_ring_ragged_unsort_fwd, _ring_ragged_unsort_bwd)
