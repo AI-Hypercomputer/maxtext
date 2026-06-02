@@ -56,7 +56,8 @@ python3 -m maxtext.checkpoint_conversion.to_maxtext src/maxtext/configs/base.yml
     hf_access_token=${HF_TOKEN} \
     base_output_directory=${MODEL_BUCKET}/26b/converted/${idx} \
     use_multimodal=true \
-    scan_layers=false
+    scan_layers=false \
+    --lazy_load_tensors=False
 ```
 
 This will convert the checkpoints and save them to a Google Cloud Storage (GCS) bucket.

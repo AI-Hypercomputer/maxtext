@@ -54,7 +54,6 @@ class Qwen3CheckpointConversionTest(unittest.TestCase):
           "checkpoint_storage_use_ocdbt=False",
           "checkpoint_storage_use_zarr3=False",
           "--save_dtype=bfloat16",
-          "--lazy_load_tensors=True",
       ]
       env = os.environ.copy()
       env["JAX_PLATFORMS"] = "cpu"
