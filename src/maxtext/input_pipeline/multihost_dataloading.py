@@ -288,11 +288,17 @@ class RemoteIteratorWrapper:
     return jax.device_put(out, self.tpu_sharding)
 
   def save_state(self, step):
-    step_array = jnp.full(self.dummy_array.shape, step, dtype=jnp.int32)
-    step_array = jax.device_put(step_array, self.cpu_sharding)
+    replicated_cpu_sharding = jax.sharding.NamedSharding(
+        self.cpu_mesh, PartitionSpec()
+    )
+    step_array = jnp.array(step, dtype=jnp.int32)
+    step_array = jax.device_put(step_array, replicated_cpu_sharding)
     self.local_iterator.save_state(step_array)
 
   def restore_state(self, step):
-    step_array = jnp.full(self.dummy_array.shape, step, dtype=jnp.int32)
-    step_array = jax.device_put(step_array, self.cpu_sharding)
+    replicated_cpu_sharding = jax.sharding.NamedSharding(
+        self.cpu_mesh, PartitionSpec()
+    )
+    step_array = jnp.array(step, dtype=jnp.int32)
+    step_array = jax.device_put(step_array, replicated_cpu_sharding)
     self.local_iterator.restore_state(step_array)
