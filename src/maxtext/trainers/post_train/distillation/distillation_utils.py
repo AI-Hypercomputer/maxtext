@@ -31,7 +31,7 @@ from orbax import checkpoint
 
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils
-# Reuse MaxText's native checkpointing logic
+# Reuse MaxText's native checkpointing logic.
 from maxtext.common.checkpointing import GrainCheckpointHandler, GrainCheckpointSave, GrainCheckpointRestore
 from tunix.sft import checkpoint_manager as tunix_checkpoint_manager
 from tunix.sft import peft_trainer
