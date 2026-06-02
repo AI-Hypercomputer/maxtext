@@ -486,15 +486,22 @@ def _train_step_nnx(model_graphdef, config, state_mesh_shardings, state, data):
 
   state = nnx.merge(model_graphdef, state)  # Reconstruct the TrainStateNNX.
   policy_graphdef, curr_params, rest = nnx.split(state.model, nnx.Param, ...)
+  # Split the reference model into (graphdef, state) so we pass `ref_state` as
+  # an explicit pytree-typed argument to `diff_wrapper` instead of closing over
+  # the mutable nnx.Module — closure capture inside jax.value_and_grad works
+  # only by accident (Modules aren't registered JAX pytrees) and breaks the
+  # moment the reference forward touches any internal state.
+  ref_graphdef, ref_state = nnx.split(state.reference_model)
 
-  def diff_wrapper(param, rest, config, data):
+  def diff_wrapper(param, rest, ref_state, config, data):
     local_model = nnx.merge(policy_graphdef, param, rest, copy=True)
-    loss, aux = grpo_loss_fn_nnx(local_model, config, data, None, None, state.reference_model, is_train=True)
+    local_ref = nnx.merge(ref_graphdef, ref_state, copy=True)
+    loss, aux = grpo_loss_fn_nnx(local_model, config, data, None, None, local_ref, is_train=True)
     _, _, new_rest = nnx.split(local_model, nnx.Param, ...)
     return loss, (aux, new_rest)
 
   grad_func = jax.value_and_grad(diff_wrapper, argnums=0, has_aux=True)
-  (loss, (aux, new_rest)), raw_grads = grad_func(curr_params, rest, config, data)
+  (loss, (aux, new_rest)), raw_grads = grad_func(curr_params, rest, ref_state, config, data)
   nnx.update(state.model, new_rest)
 
   if config.gradient_clipping_threshold > 0:
@@ -798,8 +805,11 @@ def setup_train_loop(
         optimizer = nnx.Optimizer(nnx_model, tx, wrt=nnx.Param)
         # Reference uses the same init seed so it starts identical to the policy.
         reference_model = _create_model_partial()
-        # pylint: disable-next=unexpected-keyword-arg
-        return train_state_nnx.TrainStateNNX(nnx_model, optimizer, reference_model=reference_model)
+        # TrainStateNNX only takes (model, optimizer); reference_model is an NNX
+        # sibling attribute set after construction (nnx.Module is mutable).
+        state = train_state_nnx.TrainStateNNX(nnx_model, optimizer)
+        state.reference_model = reference_model
+        return state
 
     else:
       init_state_fn = functools.partial(maxtext_utils.init_initial_state, model, tx, config, True, init_rng)

@@ -16,6 +16,7 @@
 
 import jax
 import jax.numpy as jnp
+from flax import nnx
 
 
 def _get_key_name(k):
@@ -30,132 +31,150 @@ def _get_key_name(k):
 def calculate_max_logit_metric(intermediate_outputs):
   """Extracts and computes the global maximum logit from intermediate outputs.
 
-  Args:
-    intermediate_outputs: A pytree containing model intermediates, potentially
-      including 'max_logits' sowed by Attention layers.
+  Recognizes two shapes: Linen sow stores `(array,)` so the leaf path ends in
+  `max_logits, 0`; NNX `nnx.Intermediate(array)` stores the array directly so
+  the leaf path ends in `max_logits`.
 
-  Returns:
-    The global maximum logit scalar, or None if no logits were found.
+  Returns the global max scalar, or None if no logits were found.
   """
   all_max_logits = []
 
   def extract_logits(path, val):
-    # 'sow' stores values in a tuple/list. tree_map descends into it.
-    # The path to the leaf array will look like: (..., 'max_logits', 0)
-    # So we check if the parent key (path[-2]) is 'max_logits'.
-    if len(path) >= 2:
-      parent_key = _get_key_name(path[-2])
-      if parent_key == "max_logits":
-        all_max_logits.append(val)
+    if not path:
+      return
+    last_key = _get_key_name(path[-1])
+    parent_key = _get_key_name(path[-2]) if len(path) >= 2 else None
+    if last_key == "max_logits" or parent_key == "max_logits":
+      all_max_logits.append(val)
 
   jax.tree_util.tree_map_with_path(extract_logits, intermediate_outputs)
 
   if not all_max_logits:
     return None
 
-  # Compute max per layer first to handle potential shape mismatches
   return jnp.max(jnp.stack([jnp.max(x) for x in all_max_logits]))
 
 
-def apply_qk_clip(state, intermediate_outputs, config):
-  """Applies QK-Clip to MLA weights based on max_logits.
-
-  Iterates over parameters. If a parameter belongs to an MLA attention layer,
-  it finds the corresponding max_logits statistics from intermediate_outputs,
-  calculates the clipping factor, and applies it to W_q and W_k components.
-
-  Args:
-    state: The current training state containing model parameters.
-    intermediate_outputs: A dictionary of intermediate outputs from the model
-      forward pass. It is expected to contain 'max_logits' entries sowed by
-      Attention layers if QK-Clip is enabled.
-    config: The model configuration object, containing QK-Clip hyperparameters
-      (e.g. qk_clip_threshold, qk_nope_head_dim) and attention_type.
-
-  Returns:
-    A new training state with updated (clipped) parameters.
-
-  Raises:
-    ValueError: If the configured attention_type is not 'mla'.
-  """
+def _check_attention_type(config):
   if getattr(config, "attention_type", None) != "mla":
     raise ValueError(
         f"QK-Clip is only supported for MLA attention (attention_type='mla'). "
         f"Current configuration: {getattr(config, 'attention_type', 'None')}"
     )
 
+
+def _max_logits_at(curr):
+  """Read max_logits from a node in the intermediates tree.
+
+  Returns the [batch, num_heads] array, or None if not present. Handles both
+  the Linen sow shape (`{"max_logits": (array,)}`) and the NNX shape
+  (`{"max_logits": array}` or `{"attention_op": {"max_logits": array}}`).
+  """
+  if not isinstance(curr, dict):
+    return None
+  ml = curr.get("max_logits")
+  if ml is None and "attention_op" in curr and isinstance(curr["attention_op"], dict):
+    ml = curr["attention_op"].get("max_logits")
+  if ml is None:
+    return None
+  if isinstance(ml, (tuple, list)):
+    return ml[0] if ml else None
+  return ml
+
+
+def _scale_from_max_logits(max_logits_batch, tau):
+  s_max = jnp.max(max_logits_batch, axis=0)
+  return jnp.minimum(1.0, tau / (s_max + 1e-6))
+
+
+def _clip_mla_weight(layer_name, param, scale, qk_nope):
+  """Apply the per-head scale to a wq_b or wkv_b kernel."""
+  scale_b = scale[None, :, None]  # broadcasts over [rank, heads, dim]
+  head = param[..., :qk_nope]
+  tail = param[..., qk_nope:]
+  head_new = head * jnp.sqrt(scale_b)
+  if layer_name == "wq_b":
+    tail_new = tail * scale_b
+  else:  # wkv_b: tail is the V slice, untouched
+    tail_new = tail
+  return jnp.concatenate([head_new, tail_new], axis=-1)
+
+
+def apply_qk_clip(state, intermediate_outputs, config):
+  """Applies QK-Clip to MLA weights based on max_logits (Linen path).
+
+  Returns a new TrainState with `wq_b`/`wkv_b` kernels rescaled per-head.
+  """
+  _check_attention_type(config)
   tau = float(config.qk_clip_threshold)
 
   def clip_mla_weights(path, param):
-    """Applies QK-Clip to a single parameter if it's an MLA projection weight.
-
-    Args:
-      path: A tuple of JAX Key objects representing the hierarchy path to the parameter in the state PyTree.
-      param: The actual JAX array (weight tensor) at the given path.
-
-    Returns:
-      The scaled parameter if it is an MLA projection ('wq_b' or 'wkv_b'), otherwise the original parameter.
-    """
-    # Skip irrelevant weights (embeddings, norms, etc.).
-    # We only care about specific MLA projection matrices ('wq_b', 'wkv_b').
     if len(path) < 2:
       return param
-
     layer_name = _get_key_name(path[-2])
     if layer_name not in ("wq_b", "wkv_b"):
       return param
 
-    # Search for max_logits in intermediate_outputs
     curr = intermediate_outputs.get("intermediates", intermediate_outputs)
     for node in path[:-2]:
       key = _get_key_name(node)
       if isinstance(curr, dict) and key in curr:
         curr = curr[key]
       else:
-        return param  # Path not found in intermediates, skip
+        return param
 
-    if not isinstance(curr, dict) or "max_logits" not in curr:
+    max_logits_batch = _max_logits_at(curr)
+    if max_logits_batch is None:
       return param
 
-    # max_logits was sowed as a tuple (array,)
-    # shape: [batch, num_heads]
-    max_logits_sowed = curr["max_logits"]
-    if not max_logits_sowed:
-      return param
+    scale = _scale_from_max_logits(max_logits_batch, tau)
+    return _clip_mla_weight(layer_name, param, scale, config.qk_nope_head_dim)
 
-    max_logits_batch = max_logits_sowed[0]
-
-    # Calculate S_max (per head)
-    # We want the global maximum across the batch dimension.
-    # Result shape: [num_heads]
-    s_max = jnp.max(max_logits_batch, axis=0)
-
-    # Calculate scaling factor gamma
-    # gamma = tau / s_max. Clip if s_max > tau.
-    scale = jnp.minimum(1.0, tau / (s_max + 1e-6))
-
-    # Apply qk clipping based on weight type
-    if layer_name == "wq_b":
-      # MLA Up-projection for Query [rank, heads, q_head_dim]
-      qk_nope = config.qk_nope_head_dim
-      w_qc = param[..., :qk_nope]
-      w_qr = param[..., qk_nope:]
-      scale_b = scale[None, :, None]  # Broadcast: [1, heads, 1]
-      w_qc_new = w_qc * jnp.sqrt(scale_b)
-      w_qr_new = w_qr * scale_b
-      return jnp.concatenate([w_qc_new, w_qr_new], axis=-1)
-
-    elif layer_name == "wkv_b":
-      # MLA Up-projection for Key/Value [rank, heads, kv_head_dim]
-      qk_nope = config.qk_nope_head_dim
-      w_kc = param[..., :qk_nope]
-      w_v = param[..., qk_nope:]
-      scale_b = scale[None, :, None]
-      w_kc_new = w_kc * jnp.sqrt(scale_b)
-      return jnp.concatenate([w_kc_new, w_v], axis=-1)
-
-    return param
-
-  # Apply transformation
   new_params = jax.tree_util.tree_map_with_path(clip_mla_weights, state.params)
   return state.replace(params=new_params)
+
+
+def apply_qk_clip_nnx(state, intermediate_outputs, config):
+  """Applies QK-Clip to MLA weights on an NNX TrainStateNNX.
+
+  `state.model` is mutated in place (NNX modules are mutable). Returns `state`
+  so call sites can use the same `new_state = apply_qk_clip(...)` pattern as
+  the Linen path.
+
+  The intermediates tree mirrors the NNX module hierarchy, so `max_logits`
+  sowed by `AttentionOp` lives at `...self_attention.attention_op.max_logits`.
+  We accept either that shape or `...self_attention.max_logits` (matching the
+  Linen-side fixtures and small-test setups).
+  """
+  _check_attention_type(config)
+  tau = float(config.qk_clip_threshold)
+
+  _, params_state, _ = nnx.split(state.model, nnx.Param, ...)
+  params_dict = params_state.to_pure_dict()
+
+  def clip_mla_weights(path, param):
+    if len(path) < 2:
+      return param
+    layer_name = _get_key_name(path[-2])
+    if layer_name not in ("wq_b", "wkv_b"):
+      return param
+
+    curr = intermediate_outputs
+    for node in path[:-2]:
+      key = _get_key_name(node)
+      if isinstance(curr, dict) and key in curr:
+        curr = curr[key]
+      else:
+        return param
+
+    max_logits_batch = _max_logits_at(curr)
+    if max_logits_batch is None:
+      return param
+
+    scale = _scale_from_max_logits(max_logits_batch, tau)
+    return _clip_mla_weight(layer_name, param, scale, config.qk_nope_head_dim)
+
+  new_params_dict = jax.tree_util.tree_map_with_path(clip_mla_weights, params_dict)
+  nnx.replace_by_pure_dict(params_state, new_params_dict)
+  nnx.update(state.model, params_state)
+  return state
