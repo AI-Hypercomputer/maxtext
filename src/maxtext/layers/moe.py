@@ -453,8 +453,13 @@ class DeepSeekV4HashRouter(nnx.Module):
     # passes by bypassing real-valued autograd exceptions, while setting trainable=False
     # ensures Optax optimization rules correctly bypass weight decay updates. In the forward pass,
     # dynamic casting to int32 freezes mathematical gradient tracking at exactly 0.0.
+    # Balanced/random initialization of static token-to-expert mapping table.
+    # This prevents extreme routing imbalances when starting training from scratch
+    # or in local debugging runs where a checkpoint is not loaded.
+    rng = jax.random.PRNGKey(42)
+    random_indices = jax.random.randint(rng, (config.vocab_size, self.top_k), 0, self.num_experts)
     self.tid2eid = nnx.Param(
-        jnp.zeros((config.vocab_size, self.top_k), dtype=jnp.float32),
+        random_indices.astype(jnp.float32),
         trainable=False,
     )
 

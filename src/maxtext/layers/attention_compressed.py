@@ -1014,6 +1014,9 @@ class DeepSeekV4Attention(nnx.Module):
       kv = jnp.concatenate([kv, compressed_kv], axis=1)
 
     # Reconcile structural block bias masks with runtime attention masks.
+    if attention_mask is None and block_bias is not None:
+      attention_mask = jnp.zeros((batch, 1, seq_len, seq_len), dtype=self.dtype)
+
     if attention_mask is not None:
       if block_bias is not None:
         # Concatenate block bias mask to attention mask along trailing sequence dimension.
