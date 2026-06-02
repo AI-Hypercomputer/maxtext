@@ -1,0 +1,15 @@
+# Secrets / local config
+.env
+terraform.tfvars
+
+# Terraform state (the .terraform.lock.hcl IS committed for reproducible installs)
+.terraform/
+*.tfstate
+*.tfstate.*
+
+# Python
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store

@@ -1,0 +1,48 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+project_id      = "your-project-id"
+region          = "us-central1"
+zone            = "us-central1-a"
+cluster_name    = "maxtext-elastic-training"
+# Leave empty to let the RAPID channel pick the current GKE version (recommended).
+# Pin a specific version only if you must, e.g. "1.35.3-gke.1993000".
+cluster_version = ""
+network         = "default"
+subnetwork      = "default"
+
+# TPU config: 3 slices of v5litepod-16 (48 chips total)
+tpu_machine_type = "ct5lp-hightpu-4t"
+tpu_topology     = "4x4"
+num_tpu_slices   = 3
+nodes_per_slice  = 4
+
+# Pathways controller
+cpu_machine_type = "n2-standard-64"
+num_cpu_nodes    = 1
+
+# GCS
+gcs_bucket_name = "maxtext-elastic-training-your-project-id"
+
+# HuggingFace token (Qwen3 is ungated, but wired through for swapping to gated models)
+# Get yours at https://huggingface.co/settings/tokens
+# Terraform pushes this to Secret Manager (for Cloud Build) and K8s (for training pods)
+hf_token = "hf_..."
+
+# TPU reservation (optional, leave empty for on-demand)
+# tpu_reservation = "my-reservation-name"
+
+# Spot (preemptible) TPUs: cheaper, reclaimable. Off by default (on-demand).
+# Mutually exclusive with a reservation.
+# tpu_spot = true

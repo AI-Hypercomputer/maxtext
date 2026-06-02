@@ -1,0 +1,48 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: data-prep-glaive
+spec:
+  backoffLimit: 1
+  template:
+    spec:
+      nodeSelector:
+        cloud.google.com/gke-nodepool: cpu-pathways-np
+      restartPolicy: Never
+      containers:
+      - name: data-prep
+        image: IMAGE_PLACEHOLDER
+        resources:
+          requests:
+            cpu: "16"
+            memory: "64Gi"
+          limits:
+            cpu: "32"
+            memory: "96Gi"
+        command:
+        - python3
+        - /scripts/prepare_data.py
+        - --dataset=HF_DATASET_PLACEHOLDER
+        - --output=gs://BUCKET_PLACEHOLDER/data/glaive-fc-v2
+        - --num-shards=NUM_SHARDS_PLACEHOLDER
+        volumeMounts:
+        - name: script
+          mountPath: /scripts
+      volumes:
+      - name: script
+        configMap:
+          name: data-prep-script

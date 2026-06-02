@@ -1,0 +1,227 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Cloud Build pipeline: build the MaxText image, prepare data, deploy training.
+# Run after `terraform apply`. The Makefile `deploy` target and the notebook both
+# invoke this; `terraform output -raw cloudbuild_command` prints the full command.
+
+substitutions:
+  _CLUSTER_NAME: ""
+  _CLUSTER_ZONE: ""
+  _BUCKET_NAME: ""
+  _IMAGE_NAME: maxtext-runner
+  _RUN_NAME: elastic-qwen3-0.6b
+  _DATASET: glaive          # "synthetic" or "glaive"
+  _HF_DATASET: hiyouga/glaive-function-calling-v2-sharegpt
+  _NUM_SHARDS: "64"
+  _MAXTEXT_REPO: https://github.com/AI-Hypercomputer/maxtext.git
+  _MAXTEXT_BRANCH: main
+  _JOBSET_VERSION: v0.8.0
+  _AR_REGION: us-central1
+  _AR_REPO: maxtext-elastic
+  _DEBUGGING: "false"
+
+steps:
+  # =========================================================================
+  # Phase 1: Build and push MaxText Docker image
+  # =========================================================================
+
+  - id: clone-maxtext
+    name: gcr.io/cloud-builders/git
+    args: ['clone', '--depth=1', '--branch=${_MAXTEXT_BRANCH}', '${_MAXTEXT_REPO}', 'maxtext']
+
+  - id: build-base-image
+    name: gcr.io/cloud-builders/docker
+    dir: maxtext
+    waitFor: ['clone-maxtext']
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        bash src/dependencies/scripts/docker_build_dependency_image.sh MODE=stable DEVICE=tpu
+
+  - id: upgrade-deps
+    name: gcr.io/cloud-builders/docker
+    waitFor: ['build-base-image']
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -e
+        docker run --name deps-upgrade maxtext_base_image \
+          uv pip install --system \
+            "pathwaysutils>=0.1.7" \
+            "datasets" \
+            "array-record"
+        docker commit deps-upgrade maxtext_base_image
+        docker rm deps-upgrade
+
+  - id: push-image
+    name: gcr.io/cloud-builders/docker
+    waitFor: ['upgrade-deps']
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -e
+        docker tag maxtext_base_image ${_AR_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:latest
+        docker push ${_AR_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:latest
+
+  # =========================================================================
+  # Phase 2: Configure cluster and install K8s APIs
+  # =========================================================================
+
+  - id: get-credentials
+    name: gcr.io/cloud-builders/gcloud
+    waitFor: ['-']
+    args:
+      - container
+      - clusters
+      - get-credentials
+      - ${_CLUSTER_NAME}
+      - --zone=${_CLUSTER_ZONE}
+      - --project=$PROJECT_ID
+
+  - id: install-jobset
+    name: gcr.io/cloud-builders/kubectl
+    waitFor: ['get-credentials']
+    args: ['apply', '--server-side', '-f', 'https://github.com/kubernetes-sigs/jobset/releases/download/${_JOBSET_VERSION}/manifests.yaml']
+    env:
+      - CLOUDSDK_COMPUTE_ZONE=${_CLUSTER_ZONE}
+      - CLOUDSDK_CONTAINER_CLUSTER=${_CLUSTER_NAME}
+
+  - id: verify-apis
+    name: gcr.io/cloud-builders/kubectl
+    waitFor: ['install-jobset']
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        echo "=== Waiting for CRDs to be established ==="
+        sleep 10
+        kubectl get crd | grep jobset
+    env:
+      - CLOUDSDK_COMPUTE_ZONE=${_CLUSTER_ZONE}
+      - CLOUDSDK_CONTAINER_CLUSTER=${_CLUSTER_NAME}
+
+  # =========================================================================
+  # Phase 3: Download tokenizer to GCS
+  # =========================================================================
+
+  - id: download-tokenizer
+    name: ${_AR_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:latest
+    waitFor: ['push-image']
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -e
+        # Qwen3 family shares one tokenizer; the 4B repo is ungated and works
+        # for qwen3-0.6b too. Keep the path stable across model swaps.
+        TOKENIZER_PATH="Qwen/Qwen3-4B"
+        GCS_PATH="gs://${_BUCKET_NAME}/tokenizer/qwen3-4b"
+
+        # Skip if already downloaded
+        if gcloud storage ls "$${GCS_PATH}/tokenizer.json" >/dev/null 2>&1; then
+          echo "=== Tokenizer already exists in GCS, skipping ==="
+          exit 0
+        fi
+
+        echo "=== Downloading tokenizer: $${TOKENIZER_PATH} ==="
+        python3 -c "
+        from huggingface_hub import snapshot_download
+        snapshot_download(
+            '$${TOKENIZER_PATH}',
+            local_dir='/tmp/tokenizer',
+            allow_patterns=['tokenizer*', 'special_tokens_map*', '*.model'],
+        )
+        "
+
+        echo "=== Uploading tokenizer to $${GCS_PATH}/ ==="
+        gcloud storage cp -r /tmp/tokenizer/* "$${GCS_PATH}/"
+        echo "=== Tokenizer uploaded ==="
+        gcloud storage ls "$${GCS_PATH}/"
+
+  # =========================================================================
+  # Phase 4: Data preparation (runs on cluster CPU pool, skipped for synthetic)
+  # =========================================================================
+
+  - id: submit-data-prep
+    name: gcr.io/cloud-builders/kubectl
+    waitFor: ['download-tokenizer', 'verify-apis']
+    entrypoint: bash
+    args: ['deploy/jobs/data-prep/submit.sh']
+    env:
+      - CLOUDSDK_COMPUTE_ZONE=${_CLUSTER_ZONE}
+      - CLOUDSDK_CONTAINER_CLUSTER=${_CLUSTER_NAME}
+      - DATASET=${_DATASET}
+      - BUCKET_NAME=${_BUCKET_NAME}
+      - PROJECT_ID=$PROJECT_ID
+      - NUM_SHARDS=${_NUM_SHARDS}
+      - HF_DATASET=${_HF_DATASET}
+      - IMAGE=${_AR_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:latest
+
+  - id: wait-data-prep
+    name: gcr.io/cloud-builders/kubectl
+    waitFor: ['submit-data-prep']
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -e
+        if [ "${_DATASET}" = "synthetic" ]; then exit 0; fi
+
+        # Skip if data prep was not submitted (data already existed)
+        if ! kubectl get job data-prep-glaive >/dev/null 2>&1; then
+          echo "=== Data prep skipped (data already exists) ==="
+          exit 0
+        fi
+
+        echo "=== Waiting for data prep to complete (timeout: 15m) ==="
+        kubectl wait --for=condition=complete job/data-prep-glaive --timeout=900s
+
+        echo ""
+        echo "=== Data prep logs ==="
+        kubectl logs job/data-prep-glaive --tail=20
+
+        echo ""
+        echo "=== Data files ==="
+        gcloud storage ls "gs://${_BUCKET_NAME}/data/glaive-fc-v2/" --project=$PROJECT_ID
+    env:
+      - CLOUDSDK_COMPUTE_ZONE=${_CLUSTER_ZONE}
+      - CLOUDSDK_CONTAINER_CLUSTER=${_CLUSTER_NAME}
+
+  # =========================================================================
+  # Phase 5: Deploy JobSet with elastic training
+  # =========================================================================
+
+  - id: deploy-training
+    name: gcr.io/cloud-builders/kubectl
+    waitFor: ['wait-data-prep']
+    entrypoint: bash
+    args: ['deploy/jobs/training/submit.sh']
+    env:
+      - CLOUDSDK_COMPUTE_ZONE=${_CLUSTER_ZONE}
+      - CLOUDSDK_CONTAINER_CLUSTER=${_CLUSTER_NAME}
+      - DATASET=${_DATASET}
+      - BUCKET_NAME=${_BUCKET_NAME}
+      - IMAGE=${_AR_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:latest
+      - RUN_NAME=${_RUN_NAME}
+      - DEBUGGING=${_DEBUGGING}
+
+options:
+  machineType: E2_HIGHCPU_32
+  logging: CLOUD_LOGGING_ONLY
+
+timeout: 5400s
