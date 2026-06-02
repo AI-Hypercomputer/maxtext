@@ -262,11 +262,16 @@ class MaxEngineTest(unittest.TestCase):
     with self.assertRaises(NotImplementedError):
       engine.load_params(rng=self.rng)
 
-  def test_lora_raises_for_nnx(self):
-    """NNX path raises NotImplementedError for LoRA."""
+  def test_lora_load_single_adapter_reaches_loader_on_nnx(self):
+    """pure_nnx + LoRA: load_single_adapter dispatches to the NNX loader.
+
+    A nonexistent adapter path should raise FileNotFoundError from the
+    loader itself. A NotImplementedError here would mean the dispatch
+    never reached the loader (i.e. the legacy carve-out is still in place).
+    """
     cfg = self._init_nnx_pyconfig()
     engine = maxengine.MaxEngine(cfg, jax.devices())
-    with self.assertRaises(NotImplementedError):
+    with self.assertRaises(FileNotFoundError):
       engine.load_single_adapter("/nonexistent/adapter/path")
 
   def test_prefill_multisampling_nnx(self):
