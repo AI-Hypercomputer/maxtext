@@ -472,5 +472,94 @@ class TrainRLTest(unittest.TestCase):
     assert mock_load.call_count == len(expected_calls)
 
 
+class TokenizerChatTemplateTest(unittest.TestCase):
+  """Unit tests for configure_tokenizer_chat_template."""
+  
+  @pytest.mark.cpu_only
+  def test_chat_template_populated_from_config_string(self):
+    """Test that chat_template is set from config.chat_template when tokenizer lacks one."""
+    mock_tokenizer = mock.MagicMock()
+    mock_tokenizer.chat_template = None
+    trainer_config = SimpleNamespace(
+        chat_template="{{ messages[0].content }}",
+        tokenizer_chat_template_path=None,
+        tokenizer_path="dummy-base-model",
+    )
+    train_rl.configure_tokenizer_chat_template(mock_tokenizer, trainer_config)
+    self.assertEqual(mock_tokenizer.chat_template, "{{ messages[0].content }}")
+  
+  @pytest.mark.cpu_only
+  @mock.patch("maxtext.input_pipeline.instruction_data_processing.load_chat_template_from_file")
+  def test_chat_template_populated_from_config_file(self, mock_load):
+    """Test that chat_template is loaded from tokenizer_chat_template_path when tokenizer lacks one."""
+    mock_tokenizer = mock.MagicMock()
+    mock_tokenizer.chat_template = None
+    mock_load.return_value = "{% for message in messages %}{{ message.content }}{% endfor %}"
+    trainer_config = SimpleNamespace(
+        chat_template=None,
+        tokenizer_chat_template_path="/path/to/jinja_template.json",
+        tokenizer_path="dummy-base-model",
+    )
+    train_rl.configure_tokenizer_chat_template(mock_tokenizer, trainer_config)
+    mock_load.assert_called_once_with("/path/to/jinja_template.json")
+    self.assertEqual(
+        mock_tokenizer.chat_template,
+        "{% for message in messages %}{{ message.content }}{% endfor %}",
+    )
+  @pytest.mark.cpu_only
+  def test_chat_template_raises_value_error_when_empty(self):
+    """Test that ValueError is raised when tokenizer lacks chat_template and both config options are empty."""
+    mock_tokenizer = mock.MagicMock()
+    mock_tokenizer.chat_template = None
+    trainer_config = SimpleNamespace(
+        chat_template=None,
+        tokenizer_chat_template_path=None,
+        tokenizer_path="dummy-base-model",
+    )
+    with self.assertRaisesRegex(ValueError, "Tokenizer 'dummy-base-model' has no chat_template"):
+      train_rl.configure_tokenizer_chat_template(mock_tokenizer, trainer_config)
+  
+  @pytest.mark.cpu_only
+  def test_chat_template_unchanged_when_already_exists(self):
+    """Test that an existing chat_template on the tokenizer is preserved (backward compatibility)."""
+    mock_tokenizer = mock.MagicMock()
+    mock_tokenizer.chat_template = "{{ existing_template }}"
+    trainer_config = SimpleNamespace(
+        chat_template="{{ overridden_template }}",
+        tokenizer_chat_template_path=None,
+        tokenizer_path="dummy-instruction-tuned-model",
+    )
+    train_rl.configure_tokenizer_chat_template(mock_tokenizer, trainer_config)
+    self.assertEqual(mock_tokenizer.chat_template, "{{ existing_template }}")
+  
+  @pytest.mark.cpu_only
+  def test_apply_chat_template_works_after_configuration(self):
+    """Verifies apply_chat_template succeeds and produces the expected format after our code path runs."""
+    class DummyTokenizer:
+      def __init__(self):
+        self.chat_template = None
+      
+      def apply_chat_template(self, conversation, tokenize=False):
+        if self.chat_template is None:
+          raise ValueError("Cannot apply chat template because chat_template is None")
+        import jinja2
+        env = jinja2.Environment()
+        template = env.from_string(self.chat_template)
+        return template.render(messages=conversation)
+    tokenizer = DummyTokenizer()
+    trainer_config = SimpleNamespace(
+        chat_template="{{ messages[0].content }}",
+        tokenizer_chat_template_path=None,
+        tokenizer_path="dummy-base-model",
+    )
+    # Initially, apply_chat_template fails (simulating HF tokenizer crash when chat_template is None)
+    with self.assertRaises(ValueError):
+      tokenizer.apply_chat_template([{"role": "user", "content": "Hello!"}])
+    # Run the proposed change
+    train_rl.configure_tokenizer_chat_template(tokenizer, trainer_config)
+    # Verify apply_chat_template now runs successfully and renders correct content
+    rendered = tokenizer.apply_chat_template([{"role": "user", "content": "Hello!"}])
+    self.assertEqual(rendered, "Hello!")
+
 if __name__ == "__main__":
   unittest.main()

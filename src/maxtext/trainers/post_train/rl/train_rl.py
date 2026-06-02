@@ -582,6 +582,30 @@ def create_rl_components(
   return rl_cluster, rl_trainer, optimizer
 
 
+
+def configure_tokenizer_chat_template(model_tokenizer: Any, trainer_config: Any) -> None:
+  """Populates the tokenizer's chat_template from config if missing."""
+  if getattr(model_tokenizer, "chat_template", None) is None:
+    if getattr(trainer_config, "chat_template", None):
+      model_tokenizer.chat_template = trainer_config.chat_template
+    elif getattr(trainer_config, "tokenizer_chat_template_path", None):
+      from maxtext.input_pipeline.instruction_data_processing import (
+          load_chat_template_from_file,
+      )
+      model_tokenizer.chat_template = load_chat_template_from_file(
+          trainer_config.tokenizer_chat_template_path
+      )
+    else:
+      raise ValueError(
+          f"Tokenizer {getattr(trainer_config, 'tokenizer_path', None)!r} has no chat_template "
+          "and config.chat_template / config.tokenizer_chat_template_path "
+          "are both empty. Either pick an instruction-tuned tokenizer that "
+          "ships with a chat_template, set config.chat_template to a Jinja "
+          "string, or set config.tokenizer_chat_template_path to a JSON file "
+          "with a 'chat_template' key."
+      )
+
+
 def rl_train(argv: Sequence[str], kwargs: dict):
   """
   Run RL training with the provided configuration.
@@ -610,6 +634,7 @@ def _rl_train_impl(argv: Sequence[str], kwargs: dict):
       trainer_config.tokenizer_path,
       token=trainer_config.hf_access_token or None,
   )
+  configure_tokenizer_chat_template(model_tokenizer, trainer_config)
 
   reference_model, reference_mesh, actor_model, actor_mesh, rollout_mesh = model_creation_utils.create_models_and_meshes(
       trainer_config,
