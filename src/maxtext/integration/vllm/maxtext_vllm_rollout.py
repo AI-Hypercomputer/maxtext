@@ -35,12 +35,15 @@ from tunix.generate.vllm_sampler import VllmConfig, VllmSampler
 from tunix.rl.rollout import base_rollout, vllm_rollout
 
 from maxtext.integration.vllm.torchax_converter.qwen3_moe import Qwen3MaxTextToVLLMConverter
+from maxtext.integration.vllm.torchax_converter.qwen35_moe import Qwen35MaxTextToVLLMConverter
 
 
 def _create_model_converter(model_name: str, config: Any, mesh: jax.sharding.Mesh):
   """Instantiate the converter for a MaxText model name."""
   if model_name in {"qwen3-30b-a3b", "qwen3-30b-a3b-base", "qwen3-235b-a22b"}:
     return Qwen3MaxTextToVLLMConverter(config=config, mesh=mesh)
+  elif model_name in {"qwen3.5-35b-a3b"}:
+    return Qwen35MaxTextToVLLMConverter(config=config, mesh=mesh)
 
   raise ValueError(f"No MaxText->vLLM converter registered for model {model_name!r}.")
 
