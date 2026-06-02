@@ -182,13 +182,7 @@ def _default_for_sds(sds):
   def _make():
     if "key" in str(sds.dtype):
       base = jax.random.key(0)
-      return (
-          base
-          if sds.shape == ()
-          else jax.random.split(base, int(np.prod(sds.shape))).reshape(
-              sds.shape
-          )
-      )
+      return base if sds.shape == () else jax.random.split(base, int(np.prod(sds.shape))).reshape(sds.shape)
     return jnp.zeros(sds.shape, dtype=sds.dtype)
 
   sharding = getattr(sds, "sharding", None)
@@ -208,9 +202,7 @@ def _populate_pure_dict_from_partial(abstract_pure, partial_concrete):
     return {
         k: _populate_pure_dict_from_partial(
             v,
-            partial_concrete.get(k)
-            if isinstance(partial_concrete, dict)
-            else None,
+            partial_concrete.get(k) if isinstance(partial_concrete, dict) else None,
         )
         for k, v in abstract_pure.items()
     }
@@ -243,9 +235,7 @@ def _load_linen_checkpoint_into_nnx(
       )
   )
   restore_args = ocp.checkpoint_utils.construct_restore_args(linen_abstract)
-  restored = ocp.args.PyTreeRestore(
-      item=linen_abstract, restore_args=restore_args, partial_restore=True
-  )
+  restored = ocp.args.PyTreeRestore(item=linen_abstract, restore_args=restore_args, partial_restore=True)
   restored = ckptr.restore(epath.Path(path), args=restored)
   partial_nnx = train_state_nnx.from_linen_checkpoint_dict(restored)
   return _populate_pure_dict_from_partial(nnx_abstract_pure, partial_nnx)
@@ -253,19 +243,13 @@ def _load_linen_checkpoint_into_nnx(
 
 def _rebuild_nnx_with_values(abstract_nnx_state, concrete_weights):
   """Fills each Variable in `abstract_nnx_state` with the matching restored array."""
-  leaves, treedef = jax.tree_util.tree_flatten(
-      abstract_nnx_state, is_leaf=lambda x: isinstance(x, nnx.Variable)
-  )
+  leaves, treedef = jax.tree_util.tree_flatten(abstract_nnx_state, is_leaf=lambda x: isinstance(x, nnx.Variable))
   concrete = jax.tree_util.tree_leaves(concrete_weights)
   if len(leaves) != len(concrete):
     raise ValueError(
-        f"Params load leaf-count mismatch: {len(leaves)} abstract Variables vs"
-        f" {len(concrete)} restored."
+        f"Params load leaf-count mismatch: {len(leaves)} abstract Variables vs" f" {len(concrete)} restored."
     )
-  new_leaves = [
-      v.replace(value=a) if isinstance(v, nnx.Variable) else a
-      for v, a in zip(leaves, concrete)
-  ]
+  new_leaves = [v.replace(value=a) if isinstance(v, nnx.Variable) else a for v, a in zip(leaves, concrete)]
   return jax.tree_util.tree_unflatten(treedef, new_leaves)
 
 
@@ -284,9 +268,7 @@ def _load_linen_params_into_nnx(
   NNX params Variables.
   """
   max_logging.log(f"Restoring Linen-layout params into NNX state at {path}")
-  linen_abstract = train_state_nnx.to_linen_checkpoint_dict(
-      {"model": nnx_params_abstract.to_pure_dict()}
-  )
+  linen_abstract = train_state_nnx.to_linen_checkpoint_dict({"model": nnx_params_abstract.to_pure_dict()})
   ckptr = ocp.Checkpointer(
       ocp.PyTreeCheckpointHandler(
           restore_concurrent_gb=checkpoint_storage_concurrent_gb,
@@ -298,13 +280,9 @@ def _load_linen_params_into_nnx(
   restore_args = ocp.checkpoint_utils.construct_restore_args(linen_abstract)
   restored = ckptr.restore(
       epath.Path(path),
-      args=ocp.args.PyTreeRestore(
-          item=linen_abstract, restore_args=restore_args, partial_restore=True
-      ),
+      args=ocp.args.PyTreeRestore(item=linen_abstract, restore_args=restore_args, partial_restore=True),
   )
-  return _rebuild_nnx_with_values(
-      nnx_params_abstract, restored["params"]["params"]
-  )
+  return _rebuild_nnx_with_values(nnx_params_abstract, restored["params"]["params"])
 
 
 def _load_full_state_from_path(
@@ -388,7 +366,7 @@ def create_orbax_checkpoint_manager(
     enable_checkpointing: bool,
     use_async: bool,
     save_interval_steps: int,
-    dataset_type: None | str = "tfds",
+    dataset_type: None | str = None,
     orbax_logger: Any = None,  # pytype: disable=attribute-error
     use_ocdbt: bool = True,
     use_zarr3: bool = True,
@@ -421,7 +399,7 @@ def create_orbax_checkpoint_manager(
       )
   }
 
-  if dataset_type == "grain":
+  if dataset_type is not None and dataset_type == "grain":
     item_names += ("iter",)
     item_handlers["iter"] = GrainCheckpointHandler()
 
@@ -798,9 +776,7 @@ def load_state_if_possible(
           checkpoint_manager,
           (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager),
       ):
-        checkpoint_path = str(
-            checkpoint_manager.directory / str(step) / "items"
-        )
+        checkpoint_path = str(checkpoint_manager.directory / str(step) / "items")
         restored_nnx = _load_linen_checkpoint_into_nnx(
             checkpoint_path,
             abstract_unboxed_pre_state,
@@ -831,9 +807,7 @@ def load_state_if_possible(
             (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager),
         ):
           return (
-              checkpoint_manager.restore(
-                  step, args=Composite(state=checkpoint_args)
-              ).state,
+              checkpoint_manager.restore(step, args=Composite(state=checkpoint_args)).state,
               None,
           )
         # Case 2: Matches if dataset type is "grain" and the data iterator is not a

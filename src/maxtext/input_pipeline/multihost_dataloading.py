@@ -25,7 +25,14 @@ import time
 import json
 
 from etils import epath
-import tensorflow as tf  # pylint: disable=g-import-not-at-top
+
+try:
+  import tensorflow as tf
+
+  _TF_RETRYABLE_ERRORS = (tf.errors.FailedPreconditionError,)
+except ImportError:
+  tf = None  # type: ignore[assignment]
+  _TF_RETRYABLE_ERRORS = ()
 
 import numpy as np
 
@@ -74,14 +81,14 @@ class MultiHostDataLoadIterator:
 
   def __init__(
       self,
-      dataloader: tf.data.Dataset | Iterable,
+      dataloader: Iterable,
       global_mesh: Mesh,
       generate_padding_batch: bool = False,
       expansion_loading_factor_for_grain: int = -1,
   ):
     self.global_mesh = global_mesh
     self.dataloader = dataloader
-    if isinstance(self.dataloader, tf.data.Dataset):
+    if hasattr(self.dataloader, "as_numpy_iterator"):
       self.local_iterator = self.dataloader.as_numpy_iterator()
     elif isinstance(self.dataloader, Iterable):
       self.local_iterator = iter(self.dataloader)
@@ -93,7 +100,7 @@ class MultiHostDataLoadIterator:
     self.expansion_loading_factor_for_grain = expansion_loading_factor_for_grain
 
   def reset(self):
-    if isinstance(self.dataloader, tf.data.Dataset):
+    if hasattr(self.dataloader, "as_numpy_iterator"):
       self.local_iterator = self.dataloader.as_numpy_iterator()
     elif isinstance(self.dataloader, Iterable):
       self.local_iterator = iter(self.dataloader)
@@ -132,7 +139,7 @@ class MultiHostDataLoadIterator:
               local_data_list.append(next_batch)
             local_data = jtu.tree_map(lambda *xs: np.concatenate(xs, axis=0), *local_data_list)
           break  # exit the loop on success
-        except tf.errors.FailedPreconditionError as e:
+        except _TF_RETRYABLE_ERRORS as e:
           max_logging.log(f"Failed to get next data batch due to {e}, retrying")
           time.sleep(SLEEP_TIME)
         except StopIteration as e:
@@ -188,7 +195,7 @@ class RemoteIterator:
   def reset(self):
     ds = self.get_ds_fn(dataloading_host_index=jax.process_index(), dataloading_host_count=jax.process_count())
     dataloader = self.preprocessing_fn(dataset=ds)
-    if isinstance(dataloader, tf.data.Dataset):
+    if hasattr(dataloader, "as_numpy_iterator"):
       self.iterator = dataloader.as_numpy_iterator()
     elif isinstance(dataloader, Iterable):
       self.iterator = iter(dataloader)

@@ -32,7 +32,7 @@ class MockConfig:
   quantization: str = ""
   gradient_accumulation_steps: int = 1
   packing: bool = False
-  dataset_type: str = "tfds"
+  dataset_type: str = "synthetic"
 
   # Fields needed for create_training_optimizer
   opt_type: str = "adamw"
