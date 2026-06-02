@@ -41,7 +41,9 @@ from tests.utils.test_helpers import (
 )
 
 
-def get_checkpointing_command(run_date, hardware, steps, metrics_file, attention_type, dataset_type, dataset_path):
+def get_checkpointing_command(
+    run_date, hardware, steps, metrics_file, attention_type, dataset_type, dataset_path, base_output_directory=None
+):
   """Generates a command list for a checkpointing test run.
 
   Args:
@@ -56,7 +58,8 @@ def get_checkpointing_command(run_date, hardware, steps, metrics_file, attention
   Returns:
     A list of strings representing the command line arguments.
   """
-  base_output_directory = get_test_base_output_directory()
+  if base_output_directory is None:
+    base_output_directory = get_test_base_output_directory()
   model_params = [
       "base_emb_dim=128",
       "base_num_query_heads=2",
@@ -148,6 +151,7 @@ def run_checkpointing(hardware, attention_type):
       "grain_worker_count=0",
       f"grain_train_files={selected_pattern}",
   ]
+  local_ckpt_dir = "/tmp/maxtext_local_output"
   train_main(
       get_checkpointing_command(
           run_date,
@@ -157,6 +161,7 @@ def run_checkpointing(hardware, attention_type):
           attention_type=attention_type,
           dataset_type="grain",
           dataset_path=dataset_path,
+          base_output_directory=local_ckpt_dir,
       )
       + grain_command
   )
@@ -170,6 +175,7 @@ def run_checkpointing(hardware, attention_type):
           attention_type=attention_type,
           dataset_type="grain",
           dataset_path=dataset_path,
+          base_output_directory=local_ckpt_dir,
       )
       + grain_command
   )
