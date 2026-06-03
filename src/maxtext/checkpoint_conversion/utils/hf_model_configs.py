@@ -1548,8 +1548,38 @@ olmo3_32b_dict = {
 olmo3_32b_config = transformers.Olmo3Config(**olmo3_32b_dict)
 
 
+# from nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16
+nemotron_h_dict = {
+    "vocab_size": 131072,
+    "hidden_size": 2688,
+    "layers_block_type": ['mamba', 'moe', 'mamba', 'moe', 'mamba', 'attention', 'moe', 'mamba', 'moe', 'mamba', 'moe', 'mamba', 'attention', 'moe', 'mamba', 'moe', 'mamba', 'moe', 'mamba', 'attention', 'moe', 'mamba', 'moe', 'mamba', 'moe', 'mamba', 'attention', 'moe', 'mamba', 'moe', 'mamba', 'moe', 'mamba', 'attention', 'moe', 'mamba', 'moe', 'mamba', 'moe', 'mamba', 'moe', 'mamba', 'attention', 'moe', 'mamba', 'moe', 'mamba', 'moe', 'mamba', 'moe', 'mamba', 'moe'],
+    "n_groups": 8,
+    "mamba_head_dim": 64,
+    "ssm_state_size": 128,
+    "mamba_num_heads": 64,
+    "conv_kernel": 4,
+    "n_routed_experts": 128,
+    "num_experts_per_tok": 6,
+    "routed_scaling_factor": 2.5,
+    "moe_intermediate_size": 1856,
+    "moe_shared_expert_intermediate_size": 3712,
+    "n_shared_experts": 1,
+    "mlp_hidden_act": "relu2",
+    "mamba_hidden_act": "silu",
+    "time_step_min": 0.001,
+    "time_step_max": 0.1,
+    "use_conv_bias": True,
+    "chunk_size": 128,
+    "use_bias": False,
+    "layer_norm_epsilon": 1e-05,
+    "tie_word_embeddings": False,
+}
+nemotron_h_config = transformers.NemotronHConfig(**nemotron_h_dict)
+
+
 # {maxtext model name: hf model config}
 HF_MODEL_CONFIGS = {
+    "nemotron_h": nemotron_h_config,
     "gemma2-2b": gemma2_2b_config,
     "gemma2-9b": gemma2_9b_config,
     "gemma2-27b": gemma2_27b_config,

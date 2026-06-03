@@ -57,6 +57,7 @@ from maxtext.models import (
     llama4,
     mistral,
     mixtral,
+    nemotron_h,
     olmo3,
     qwen3,
     qwen3_5,
@@ -427,7 +428,7 @@ class NNXDecoder(nnx.Module):
                 "is_nope_layer": llama4.determine_is_nope_layer(lyr, self.config.nope_layer_interval),
                 "is_moe_layer": llama4.determine_is_moe_layer(lyr, self.config.interleave_moe_layer_step),
             }
-          elif config.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
+          elif config.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5, DecoderBlockType.NEMOTRON_H):
             layer_kwargs = {"layer_idx": lyr}
           elif config.decoder_block == DecoderBlockType.GPT_OSS:
             layer_kwargs = {"attention_type": gpt_oss.get_attention_type(layer_id=lyr)}
@@ -722,6 +723,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.LLAMA2: [llama2.LlamaDecoderLayer],
         DecoderBlockType.MISTRAL: [mistral.MistralDecoderLayer],
         DecoderBlockType.MIXTRAL: [mixtral.MixtralDecoderLayer],
+        DecoderBlockType.NEMOTRON_H: [nemotron_h.NemotronHDecoderLayer],
         DecoderBlockType.GEMMA: [gemma.GemmaDecoderLayer],
         DecoderBlockType.GEMMA2: [gemma2.Gemma2DecoderLayer],
         DecoderBlockType.GEMMA3: [gemma3.Gemma3DecoderLayer],

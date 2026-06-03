@@ -1141,3 +1141,72 @@ class MlaKVCache(KVCache):
           lengths,
       )
     return prefill_cache, ar_cache
+
+
+class NemotronHMamba2Cache(BaseCache):
+  """Cache for Nemotron-H Mamba-2 layer.
+
+  Stores the conv state and the SSM (recurrent) state.
+  """
+
+  def __init__(
+      self,
+      batch: int,
+      num_heads: int,
+      head_dim: int,
+      ssm_state_size: int,
+      conv_kernel_size: int,
+      conv_dim: int,
+      dtype: DType,
+      cache_batch_axis_name: str = CACHE_BATCH,
+      cache_heads_axis_name: str = CACHE_HEADS,
+  ):
+    super().__init__()
+    self.batch = batch
+    self.dtype = dtype
+
+    # 1. SSM (Recurrent) State
+    # Shape: [Batch, Heads, Head_Dim, SSM_State_Size]
+    self.recurrent_state = nnx.Cache(
+        jnp.zeros((int(batch), num_heads, head_dim, ssm_state_size), dtype=dtype),
+        # Sharding: Batch, Heads, None, None
+        out_sharding=(cache_batch_axis_name, cache_heads_axis_name, None, None),
+    )
+
+    # 2. Convolution State
+    # Shape: [Batch, Conv_Dim, Kernel_Size - 1]
+    self.conv_state = nnx.Cache(
+        jnp.zeros((int(batch), conv_dim, conv_kernel_size - 1), dtype=dtype),
+        # Sharding: Batch, None, None
+        out_sharding=(cache_batch_axis_name, None, None),
+    )
+
+  def __call__(self):
+    return self
+
+
+def nemotron_h_mamba2_cache_as_linen(
+    *,
+    batch: int,
+    num_heads: int,
+    head_dim: int,
+    ssm_state_size: int,
+    conv_kernel_size: int,
+    conv_dim: int,
+    dtype: DType,
+    name: str | None = None,
+):
+  """Initializes the NemotronHMamba2Cache and returns it as a Linen module."""
+  return nnx_wrappers.to_linen(
+      NemotronHMamba2Cache,
+      batch=batch,
+      num_heads=num_heads,
+      head_dim=head_dim,
+      ssm_state_size=ssm_state_size,
+      conv_kernel_size=conv_kernel_size,
+      conv_dim=conv_dim,
+      dtype=dtype,
+      metadata_fn=variable_to_logically_partitioned,
+      name=name,
+      abstract_init=False,
+  )

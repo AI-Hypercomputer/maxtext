@@ -3519,8 +3519,137 @@ def OLMO3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False,
   return hooks
 
 
+
+
+
+def NEMOTRON_H_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
+  """Generates parameter mapping for Nemotron-H."""
+  if scan_layers:
+    raise NotImplementedError("Scan layers is not supported for nemotron_h.")
+
+  tc = config.get("llm_config", config)
+  if isinstance(tc, dict):
+    pass
+  elif hasattr(tc, "to_dict"):
+    tc = tc.to_dict()
+  else:
+    tc = tc.__dict__
+
+  n_layers = tc.get("num_hidden_layers", 52)
+  layer_types = tc.get("layers_block_type", tc.get("layer_types"))
+  if layer_types is None:
+    pattern = "MEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEMEM*EMEMEMEME"
+    pattern_mapping = {"M": "mamba", "E": "moe", "*": "attention"}
+    layer_types = [pattern_mapping[c] for c in pattern]
+
+  mapping = {
+      "params-token_embedder-embedding": "language_model.backbone.embeddings.weight",
+      "params-decoder-decoder_norm-scale": "language_model.backbone.norm_f.weight",
+      "params-decoder-logits_dense-kernel": "language_model.lm_head.weight",
+  }
+
+  for i in range(n_layers):
+    prefix = f"params-decoder-layers_{i}"
+    hf_prefix = f"language_model.backbone.layers.{i}"
+
+    mapping[f"{prefix}-norm-scale"] = f"{hf_prefix}.norm.weight"
+
+    block_type = layer_types[i]
+    if block_type == "mamba":
+      mapping[f"{prefix}-mixer-in_proj-kernel"] = f"{hf_prefix}.mixer.in_proj.weight"
+      mapping[f"{prefix}-mixer-conv1d-conv-kernel"] = f"{hf_prefix}.mixer.conv1d.weight"
+      mapping[f"{prefix}-mixer-conv1d-conv-bias"] = f"{hf_prefix}.mixer.conv1d.bias"
+      mapping[f"{prefix}-mixer-dt_bias"] = f"{hf_prefix}.mixer.dt_bias"
+      mapping[f"{prefix}-mixer-A_log"] = f"{hf_prefix}.mixer.A_log"
+      mapping[f"{prefix}-mixer-D"] = f"{hf_prefix}.mixer.D"
+      mapping[f"{prefix}-mixer-norm-scale"] = f"{hf_prefix}.mixer.norm.weight"
+      mapping[f"{prefix}-mixer-out_proj-kernel"] = f"{hf_prefix}.mixer.out_proj.weight"
+    elif block_type == "moe":
+      mapping[f"{prefix}-mixer-gate-weight"] = f"{hf_prefix}.mixer.gate.weight"
+      mapping[f"{prefix}-mixer-gate-e_score_correction_bias"] = f"{hf_prefix}.mixer.gate.e_score_correction_bias"
+      num_experts = tc.get("n_routed_experts", 128)
+      mapping[f"{prefix}-mixer-experts-up_proj"] = [
+          f"{hf_prefix}.mixer.experts.{j}.up_proj.weight" for j in range(num_experts)
+      ]
+      mapping[f"{prefix}-mixer-experts-down_proj"] = [
+          f"{hf_prefix}.mixer.experts.{j}.down_proj.weight" for j in range(num_experts)
+      ]
+      mapping[f"{prefix}-mixer-shared_experts-up_proj-kernel"] = f"{hf_prefix}.mixer.shared_experts.up_proj.weight"
+      mapping[f"{prefix}-mixer-shared_experts-down_proj-kernel"] = f"{hf_prefix}.mixer.shared_experts.down_proj.weight"
+      if tc.get("moe_latent_size") is not None:
+        mapping[f"{prefix}-mixer-fc1_latent_proj-kernel"] = f"{hf_prefix}.mixer.fc1_latent_proj.weight"
+        mapping[f"{prefix}-mixer-fc2_latent_proj-kernel"] = f"{hf_prefix}.mixer.fc2_latent_proj.weight"
+    elif block_type == "attention":
+      mapping[f"{prefix}-mixer-query-kernel"] = f"{hf_prefix}.mixer.q_proj.weight"
+      mapping[f"{prefix}-mixer-key-kernel"] = f"{hf_prefix}.mixer.k_proj.weight"
+      mapping[f"{prefix}-mixer-value-kernel"] = f"{hf_prefix}.mixer.v_proj.weight"
+      mapping[f"{prefix}-mixer-out-kernel"] = f"{hf_prefix}.mixer.o_proj.weight"
+    else:
+      raise ValueError(f"Unknown block type {block_type} at layer {i}")
+
+  return mapping
+
+
+def NEMOTRON_H_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Transformation hooks for Nemotron-H."""
+  if scan_layers:
+    raise NotImplementedError("Scan layers is not supported for nemotron_h.")
+
+  tc = config.get("llm_config", config)
+  if isinstance(tc, dict):
+    pass
+  elif hasattr(tc, "to_dict"):
+    tc = tc.to_dict()
+  else:
+    tc = tc.__dict__
+
+  n_layers = tc.get("num_hidden_layers", 52)
+  layer_types = tc.get("layers_block_type", tc.get("layer_types"))
+  if layer_types is None:
+    pattern = "MEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEMEM*EMEMEMEME"
+    pattern_mapping = {"M": "mamba", "E": "moe", "*": "attention"}
+    layer_types = [pattern_mapping[c] for c in pattern]
+
+  hooks = {}
+
+  def reshape_kernel(input_tensor, target_shape):
+    if saving_to_hf:
+      flipped_target_shape = np.flip(np.array(target_shape))
+      return input_tensor.reshape(flipped_target_shape).T
+    else:
+      return input_tensor.T.reshape(target_shape)
+
+  def transpose_conv1d_kernel(input_tensor, target_shape):
+    return input_tensor.transpose(2, 1, 0)
+
+  hooks["params-decoder-logits_dense-kernel"] = reshape_kernel
+
+  for i in range(n_layers):
+    prefix = f"params-decoder-layers_{i}"
+    block_type = layer_types[i]
+
+    if block_type == "mamba":
+      hooks[f"{prefix}-mixer-in_proj-kernel"] = reshape_kernel
+      hooks[f"{prefix}-mixer-out_proj-kernel"] = reshape_kernel
+      hooks[f"{prefix}-mixer-conv1d-conv-kernel"] = transpose_conv1d_kernel
+    elif block_type == "moe":
+      hooks[f"{prefix}-mixer-shared_experts-up_proj-kernel"] = reshape_kernel
+      hooks[f"{prefix}-mixer-shared_experts-down_proj-kernel"] = reshape_kernel
+      if tc.get("moe_latent_size") is not None:
+        hooks[f"{prefix}-mixer-fc1_latent_proj-kernel"] = reshape_kernel
+        hooks[f"{prefix}-mixer-fc2_latent_proj-kernel"] = reshape_kernel
+    elif block_type == "attention":
+      hooks[f"{prefix}-mixer-query-kernel"] = reshape_kernel
+      hooks[f"{prefix}-mixer-key-kernel"] = reshape_kernel
+      hooks[f"{prefix}-mixer-value-kernel"] = reshape_kernel
+      hooks[f"{prefix}-mixer-out-kernel"] = reshape_kernel
+
+  return hooks
+
+
 # {maxtext model name: {maxtext weight name: hf weight name}}
 PARAM_MAPPING = {
+    "nemotron_h": NEMOTRON_H_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-27b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -3571,6 +3700,7 @@ PARAM_MAPPING = {
 
 # {maxtext model name: {maxtext weight name: bi-directional transform}}
 HOOK_FNS = {
+    "nemotron_h": NEMOTRON_H_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-27b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,

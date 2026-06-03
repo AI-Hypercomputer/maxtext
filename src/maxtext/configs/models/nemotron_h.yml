@@ -1,0 +1,45 @@
+# model config for nemotron_h (text backbone of Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16)
+
+base_emb_dim: 2688
+base_num_query_heads: 32
+base_num_kv_heads: 2
+base_num_decoder_layers: 52
+head_dim: 128
+vocab_size: 131072
+
+decoder_block: "nemotron_h"
+
+normalization_layer_epsilon: 1.0e-5
+
+# Mamba parameters
+ssm_state_size: 128
+mamba_num_heads: 64
+mamba_head_dim: 64
+conv_kernel: 4
+expand: 2
+n_groups: 8
+mamba_chunk_size: 128
+
+# MoE parameters
+num_experts: 128
+num_experts_per_tok: 6
+shared_experts: 1
+routed_scaling_factor: 2.5
+norm_topk_prob: true
+n_routing_groups: 1
+topk_routing_group: 1
+base_moe_mlp_dim: 1856
+base_moe_shared_expert_intermediate_size: 3712
+inhomogeneous_layer_cycle_interval: 7
+layers_block_type: [
+  'mamba', 'moe', 'mamba', 'moe', 'mamba', 'attention', 'moe',
+  'mamba', 'moe', 'mamba', 'moe', 'mamba', 'attention', 'moe',
+  'mamba', 'moe', 'mamba', 'moe', 'mamba', 'attention', 'moe',
+  'mamba', 'moe', 'mamba', 'moe', 'mamba', 'attention', 'moe',
+  'mamba', 'moe', 'mamba', 'moe', 'mamba', 'attention', 'moe',
+  'mamba', 'moe', 'mamba', 'moe', 'mamba', 'moe', 'mamba',
+  'attention', 'moe', 'mamba', 'moe', 'mamba', 'moe', 'mamba',
+  'moe', 'mamba', 'moe'
+]
+
+scan_layers: false

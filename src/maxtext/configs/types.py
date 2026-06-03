@@ -275,6 +275,7 @@ ModelName = Literal[
     "olmo3-7b",
     "olmo3-7b-pt",
     "olmo3-32b",
+    "nemotron_h",
 ]
 
 
@@ -511,6 +512,10 @@ class ModelArchitecture(BaseModel):
       description="Whether to apply scale on query and key normalizations (default True).",
   )
   v_norm_with_scale: bool = Field(True, description="Whether to apply scale on value normalization (default True).")
+  layers_block_type: list[str] = Field(
+      default_factory=list,
+      description="List of block types for each layer (e.g. ['mamba', 'moe', 'attention'])."
+  )
 
 
 class MTP(BaseModel):
@@ -711,6 +716,9 @@ class MoEGeneral(BaseModel):
       description="Dimension of tokens entering the MoE layer. If < 0, defaults to emb_dim.",
   )
   base_moe_mlp_dim: int = Field(-1, description="Intermediate dimension at MoE layer.")
+  base_moe_shared_expert_intermediate_size: int = Field(
+      -1, description="Base intermediate dimension for shared experts in MoE layer."
+  )
   padded_base_moe_mlp_dim: Optional[int] = Field(
       None, description="Padded intermediate dimension at MoE layer for efficient GMM_v2 kernel execution."
   )
@@ -1558,6 +1566,7 @@ class YarnRope(BaseModel):
   )
 
 
+
 class InferenceGeneral(BaseModel):
   """General configuration for inference."""
 
@@ -2097,6 +2106,10 @@ class DerivedValues(BaseModel):
       None,
       description="Effective MLP dimension for MoE layers, scaled by `global_parameter_scale`.",
   )
+  moe_shared_expert_intermediate_size: None | int = Field(
+      None,
+      description="Effective intermediate dimension for shared experts in MoE layers, scaled by `global_parameter_scale`.",
+  )
   num_decoder_layers: None | int = Field(
       None,
       description="Effective number of decoder layers, scaled by `global_parameter_scale`.",
@@ -2226,6 +2239,22 @@ def get_individual_scales(scale: int) -> tuple[int, int, int, int]:
   return emb_scale, num_head_scale, mlp_dim_scale, layer_scale
 
 
+class Mamba(BaseModel):
+  """Configuration for Mamba layers."""
+
+  ssm_state_size: int = Field(128, description="SSM state size (d_state) for Mamba.")
+  mamba_num_heads: int = Field(64, description="Number of Mamba heads.")
+  mamba_head_dim: int = Field(64, description="Mamba head dimension.")
+  conv_kernel: int = Field(4, description="Mamba convolution kernel size.")
+  expand: int = Field(2, description="Mamba expansion factor.")
+  n_groups: int = Field(8, description="Number of groups for Grouped SSM in Mamba-2.")
+  mamba_chunk_size: int = Field(128, description="Chunk size for Mamba-2.")
+  use_bias: bool = Field(False, description="Whether to use bias in Mamba projections.")
+  use_conv_bias: bool = Field(True, description="Whether to use bias in Mamba conv1d.")
+  time_step_min: float = Field(0.001, description="Minimum time step for Mamba.")
+  time_step_max: float = Field(0.1, description="Maximum time step for Mamba.")
+
+
 # ----------------------------------------------------------------------------
 # Main Config Class
 # ----------------------------------------------------------------------------
@@ -2243,7 +2272,9 @@ class MaxTextConfig(
     Quantization,
     # Core Model Architecture
     ModelArchitecture,
+    Mamba,
     Engram,
+
     MTP,
     Logits,
     # Attention Mechanisms
@@ -2537,6 +2568,7 @@ class MaxTextConfig(
     self.num_kv_heads = (2**num_head_scale) * self.base_num_kv_heads
     self.mlp_dim = (2**mlp_dim_scale) * self.base_mlp_dim
     self.moe_mlp_dim = (2**mlp_dim_scale) * self.base_moe_mlp_dim
+    self.moe_shared_expert_intermediate_size = (2**mlp_dim_scale) * self.base_moe_shared_expert_intermediate_size
     self.num_decoder_layers = (2**layer_scale) * self.base_num_decoder_layers
 
     # E. HARDWARE-DEPENDENT CALCULATIONS
@@ -3021,6 +3053,7 @@ class MaxTextConfig(
     else:
       if self.partial_rotary_factor is not None and self.partial_rotary_factor != 1.0:
         raise ValueError("`partial_rotary_factor` is only effective when `decoder_block` is set to 'qwen3_next'.")
+
 
     tokenizer_path = getattr(self, "tokenizer_path", None)
     if (
