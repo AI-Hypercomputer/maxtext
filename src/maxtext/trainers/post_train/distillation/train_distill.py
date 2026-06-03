@@ -213,8 +213,6 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
   (positions, segment_ids) are passed to the model.
   """
 
-  checkpoint_manager: distillation_utils.MaxTextCheckpointManager | None
-
   def __init__(
       self,
       model,
@@ -234,6 +232,7 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
     super().__init__(model=model, optimizer=dummy_optimizer, training_config=training_config, **kwargs)
 
     self.strategy = strategy
+    self.checkpoint_manager: distillation_utils.MaxTextCheckpointManager = None
 
     # Per-step per-device TFLOPs (constants for the run): student fwd+bwd + teacher fwd-only.
     (

@@ -8,9 +8,6 @@ dpo:
   dpo_beta: 0.1
   max_prompt_length: null
 packing: false
-train_data_columns: ['chosen', 'rejected']
-eval_data_columns: ['chosen', 'rejected']
-base_output_directory: 'gs://maxtext-external/logs'
 
 per_device_batch_size: 2.0
 steps: 10
@@ -18,14 +15,14 @@ max_target_length: 512
 eval_interval: 5  # test eval once, in the middle of 10 training steps
 eval_steps: 2
 
-# TFDS Pipeline ----------------------
-dataset_type: tfds
-dataset_path: 'gs://maxtext-dataset/dpo/anthropic_rlhf'
-dataset_name: 'tfds:1.0.0'
-eval_dataset_name: 'tfds:1.0.0'
-eval_split: 'test'
-
-# HF Pipeline -------------------------
+# Some reasonable defaults for running DPO without extra config params.
+model_name: "qwen3-0.6b"
+tokenizer_path: "src/maxtext/assets/tokenizers/qwen3-tokenizer"
+tokenizer_type: "huggingface"
+dataset_type: hf
+hf_path: 'Anthropic/hh-rlhf'
+train_data_columns: ['chosen', 'rejected']
+eval_data_columns: ['chosen', 'rejected']
 hf_eval_split: 'test'
 
 gradient_clipping_threshold: 10.0

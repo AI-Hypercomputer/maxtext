@@ -49,6 +49,7 @@ from maxtext.common.goodput import (
 )
 from maxtext.configs import pyconfig
 from maxtext.configs.types import MaxTextConfig
+from maxtext.input_pipeline import tokenizer
 from maxtext.optimizers import optimizers
 from maxtext.trainers.post_train.dpo import hooks
 from maxtext.utils import max_logging
@@ -90,7 +91,6 @@ def get_tunix_config(mt_config: MaxTextConfig) -> DPOTrainingConfig:
         set_profile_options=set_profile_options,
     )
 
-  max_prompt_length = mt_config.max_target_length // 2
   return DPOTrainingConfig(
       eval_every_n_steps=mt_config.eval_interval,
       max_steps=mt_config.steps,
@@ -103,8 +103,8 @@ def get_tunix_config(mt_config: MaxTextConfig) -> DPOTrainingConfig:
       lambda_orpo=mt_config.dpo.orpo_lambda,
       beta=mt_config.dpo.dpo_beta,
       label_smoothing=mt_config.dpo.dpo_label_smoothing,
-      max_prompt_length=max_prompt_length,
-      max_response_length=mt_config.max_target_length - max_prompt_length,
+      max_prompt_length=mt_config.dpo.max_prompt_length,
+      max_response_length=mt_config.max_target_length - mt_config.dpo.max_prompt_length,
   )
 
 
@@ -113,7 +113,21 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
   tunix_config = get_tunix_config(mt_config)
 
   with maybe_record_goodput(goodput_recorder, GoodputEvent.TPU_INIT):
-    model, mesh = model_creation_utils.from_pretrained(mt_config, wrap_with_tunix_adapter=True)
+    # We need pad_id to correctly initialize the MaxTextTunixAdapter in the from_pretrained call below.
+    # To do that we instantiate a separate copy of the tokenizer here, which is somewhat redundant.
+    # However, there is no clean way to get the pad_id from the tokenizer in the datapipiline here.
+    tok = tokenizer.build_tokenizer(
+        mt_config.tokenizer_path,
+        mt_config.tokenizer_type,
+        False,
+        False,
+        mt_config.hf_access_token,
+    )
+    model, mesh = model_creation_utils.from_pretrained(
+        mt_config,
+        wrap_with_tunix_adapter=True,
+        tokenizer_pad_id=tok.pad_id,
+    )
 
     learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(mt_config)
     # pass in model for muon

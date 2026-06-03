@@ -23,9 +23,11 @@ import numpy as np
 import pytest
 import transformers
 
+import grain.python as grain
 from maxtext.configs import pyconfig
 from maxtext.input_pipeline import dpo_utils
 from maxtext.input_pipeline import hf_data_processing
+from maxtext.input_pipeline import grain_data_processing
 from maxtext.input_pipeline import input_pipeline_interface
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_CONFIGS_DIR, MAXTEXT_PKG_DIR
 
@@ -44,6 +46,7 @@ class TestDPODataFormatting(unittest.TestCase):
         pad_id=self.pad_id,
         max_target_length=21,
         data_column_names=("input", "chosen", "rejected"),
+        max_prompt_length=10,
     )
     sample = {
         "input": np.array([1, 2, 3]),
@@ -72,6 +75,7 @@ class TestDPODataFormatting(unittest.TestCase):
         pad_id=self.pad_id,
         max_target_length=21,
         data_column_names=("liked", "disliked"),
+        max_prompt_length=10,
     )
     sample = {
         "liked": np.array([1, 2, 3, 10, 11]),
@@ -103,6 +107,7 @@ class TestDPODataFormatting(unittest.TestCase):
         pad_id=self.pad_id,
         max_target_length=20,
         data_column_names=("input", "chosen", "rejected"),
+        max_prompt_length=10,
     )
     sample = {
         "input": np.array([1, 2]),
@@ -128,6 +133,7 @@ class TestDPODataFormatting(unittest.TestCase):
         pad_id=self.pad_id,
         max_target_length=9,
         data_column_names=("input", "chosen", "rejected"),
+        max_prompt_length=4,
     )
     sample = {
         "input": np.arange(1, 10),
@@ -152,6 +158,7 @@ class TestDPODataFormatting(unittest.TestCase):
         pad_id=self.pad_id,
         max_target_length=20,
         data_column_names=("chosen", "rejected"),
+        max_prompt_length=10,
     )
 
     # Case 1: Identical strings
@@ -201,6 +208,7 @@ class TestDPODataFormatting(unittest.TestCase):
         pad_id=self.pad_id,
         max_target_length=20,
         data_column_names=("input", "chosen", "rejected"),
+        max_prompt_length=10,
     )
     # 'rejected' column is missing
     sample = {"input": np.array([1, 2]), "chosen": np.array([3, 4])}
@@ -387,6 +395,155 @@ class TestDPOPipelineProcessing(unittest.TestCase):
           max_target_length=64,
           dpo={"algo": "dpo", "max_prompt_length": 0},
       )
+
+
+@pytest.mark.external_training
+class TestGrainDPOPipelineProcessing(unittest.TestCase):
+  """End-to-end Grain DPO pipeline processing tests."""
+
+  def setUp(self):
+    super().setUp()
+    self.config = pyconfig.initialize_pydantic(
+        [
+            os.path.join(MAXTEXT_PKG_DIR, "dpo_trainer"),
+            os.path.join(MAXTEXT_CONFIGS_DIR, "post_train", "dpo.yml"),
+        ],
+        per_device_batch_size=2,
+        run_name="test",
+        mesh_axes=["data"],
+        logical_axis_rules=[["batch", "data"]],
+        data_sharding=["data"],
+        base_output_directory="gs://max-experiments/",
+        tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "qwen3-tokenizer"),
+        train_split="train",
+        enable_checkpointing=False,
+        use_dpo=True,
+        enable_data_shuffling=False,
+        max_target_length=64,
+        grain_file_type="parquet",  # to trigger KeepFeatures in parse_and_keep_features
+        tokenizer_type="huggingface",
+        dataset_type="grain",
+        grain_train_files="dummy",
+        eval_interval=0,
+    )
+    self.mesh_shape_1d = (len(jax.devices()),)
+    self.mesh = Mesh(mesh_utils.create_device_mesh(self.mesh_shape_1d), self.config.mesh_axes)
+    self.process_indices = input_pipeline_interface.get_process_loading_real_data(
+        self.config.data_sharding,
+        self.config.global_batch_size_to_load,
+        self.config.global_batch_size_to_train_on,
+        self.config.max_target_length,
+        self.mesh,
+    )
+    self.tokenizer = transformers.AutoTokenizer.from_pretrained(
+        self.config.tokenizer_path,
+        add_bos_token=False,
+        add_eos_token=False,
+        legacy=False,
+    )
+    self.pad_id = hf_data_processing._get_pad_id(self.tokenizer)  # pylint: disable=protected-access
+
+  def get_data_iterator(self, list_of_dicts, data_columns):
+    """Helper to initialize the Grain preprocessing pipeline."""
+    dataset = grain.MapDataset.source(list_of_dicts)
+    dataset = dataset[self.process_indices.index(jax.process_index()) :: len(self.process_indices)]
+    dataset = dataset.to_iter_dataset()
+
+    iter_ds = grain_data_processing.dpo_preprocessing_pipeline(
+        dataset=dataset,
+        config=self.config,
+        data_columns=data_columns,
+        tokenize=self.config.tokenize_train_data,
+        grain_worker_count=0,
+        grain_per_worker_buffer_size=1,
+    )
+    return iter(iter_ds)
+
+  def test_dpo_format_3_columns(self):
+    """Verify that the 3-column explicit DPO dataset is processed correctly."""
+    prompt_str = "Question: What is 2+2?"
+    chosen_str = "Answer: 4"
+    rejected_str = "Answer: 5"
+
+    list_of_dicts = [
+        {
+            "input": prompt_str,
+            "chosen": chosen_str,
+            "rejected": rejected_str,
+        }
+        for _ in range(10)
+    ]
+
+    data_iter = self.get_data_iterator(list_of_dicts, ["input", "chosen", "rejected"])
+    batch = next(data_iter)
+
+    # Verify expected keys
+    for key in (
+        "prompt_ids",
+        "chosen_ids",
+        "rejected_ids",
+        "prompt_mask",
+        "chosen_mask",
+        "rejected_mask",
+    ):
+      self.assertIn(key, batch)
+
+    # Verify batch dimensions match global batch size and split max_target_length
+    max_prompt_len = self.config.max_target_length // 2
+    max_response_len = self.config.max_target_length - max_prompt_len
+    self.assertEqual(
+        batch["prompt_ids"].shape,
+        (self.config.global_batch_size_to_load, max_prompt_len),
+    )
+    self.assertEqual(
+        batch["chosen_ids"].shape,
+        (self.config.global_batch_size_to_load, max_response_len),
+    )
+    self.assertEqual(
+        batch["rejected_ids"].shape,
+        (self.config.global_batch_size_to_load, max_response_len),
+    )
+
+    # Verify decoded content directly
+    decoded_prompt = self.tokenizer.decode(batch["prompt_ids"][0], skip_special_tokens=True)
+    decoded_chosen = self.tokenizer.decode(batch["chosen_ids"][0], skip_special_tokens=True)
+    decoded_rejected = self.tokenizer.decode(batch["rejected_ids"][0], skip_special_tokens=True)
+
+    self.assertEqual(decoded_prompt, prompt_str)
+    self.assertEqual(decoded_chosen, chosen_str)
+    self.assertEqual(decoded_rejected, rejected_str)
+
+    # Verify mask structure (left padding for prompt -> 1s at the end; right padding for responses -> 1s at start)
+    self.assertEqual(batch["prompt_mask"][0][-1], 1)
+    self.assertEqual(batch["chosen_mask"][0][0], 1)
+    self.assertEqual(batch["rejected_mask"][0][0], 1)
+
+  def test_dpo_format_2_columns(self):
+    """Verify that 2-column DPO datasets correctly extract common prefixes."""
+    # We use a clear common prefix and different suffixes
+    prefix = "Common prompt context for DPO:"
+    chosen_suffix = " the chosen completion"
+    rejected_suffix = " the rejected completion"
+
+    list_of_dicts = [
+        {
+            "chosen": prefix + chosen_suffix,
+            "rejected": prefix + rejected_suffix,
+        }
+        for _ in range(10)
+    ]
+
+    data_iter = self.get_data_iterator(list_of_dicts, ["chosen", "rejected"])
+    batch = next(data_iter)
+
+    # Verify decoded extracted prefix and completions robustly against BPE token boundary quirks
+    decoded_prompt = self.tokenizer.decode(batch["prompt_ids"][0], skip_special_tokens=True)
+    decoded_chosen = self.tokenizer.decode(batch["chosen_ids"][0], skip_special_tokens=True)
+    decoded_rejected = self.tokenizer.decode(batch["rejected_ids"][0], skip_special_tokens=True)
+
+    self.assertIn("Common prompt context", decoded_prompt)
+    self.assertIn("chosen", decoded_chosen)
+    self.assertIn("rejected", decoded_rejected)
 
 
 if __name__ == "__main__":
