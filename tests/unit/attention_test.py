@@ -1925,6 +1925,8 @@ class Qwen3NextGatedDeltaNetTest(unittest.TestCase):
         [sys.argv[0], get_test_config_path()],
         **self.config_arguments,
     )
+    devices_array = maxtext_utils.create_device_mesh(self.cfg)
+    self.mesh = Mesh(devices_array, self.cfg.mesh_axes)
     self.rng = jax.random.PRNGKey(0)
     self.nnx_rng = nnx.Rngs(params=0, dropout=jax.random.PRNGKey(42))
 
@@ -1950,6 +1952,7 @@ class Qwen3NextGatedDeltaNetTest(unittest.TestCase):
     gdn = Qwen3NextGatedDeltaNet(
         config=cfg,
         inputs_shape=lnx.shape,
+        mesh=self.mesh,
         dtype=cfg.dtype,
         model_mode=MODEL_MODE_PREFILL,
         rngs=self.nnx_rng,

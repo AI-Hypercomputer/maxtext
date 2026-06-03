@@ -30,4 +30,11 @@ def register():
   """
   logger.info("Registering MaxTextForCausalLM model with tpu_inference and vllm.")
   register_model("MaxTextForCausalLM", MaxTextForCausalLM)
+
+  # Dynamically apply KVCacheManager patch when registering the adapter
+  # pylint: disable=import-outside-toplevel
+  from .adapter import patch_kv_cache_manager
+
+  patch_kv_cache_manager()
+
   logger.info("Successfully registered MaxTextForCausalLM model.")
