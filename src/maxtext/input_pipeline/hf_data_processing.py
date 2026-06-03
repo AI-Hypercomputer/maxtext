@@ -108,7 +108,7 @@ def vision_sft_preprocessing_pipeline(
 
   dataset = dataset.map(
       input_pipeline_utils.pre_process_image_sft,
-      fn_kwargs={"image_column": "images", "model_name": config.model_name},
+      fn_kwargs={"image_column": "images", "config": config},
   )
 
   tokenizer = transformers.AutoTokenizer.from_pretrained(

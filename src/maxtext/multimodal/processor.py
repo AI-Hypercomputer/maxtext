@@ -54,26 +54,26 @@ def preprocess_mm_data(config):
   return processor_outputs
 
 
-def preprocess_image_for_training(image, model_name):
+def preprocess_image_for_training(image, config):
   """Preprocesses a single image for training based on the model name."""
-  if model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
+  if config.model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
     from maxtext.multimodal.processor_gemma3 import preprocess_mm_data_gemma3  # pylint: disable=import-outside-toplevel
 
     return preprocess_mm_data_gemma3(image)
-  elif model_name in ["gemma4-26b", "gemma4-31b", "gemma4-e2b", "gemma4-e4b"]:
+  elif config.model_name in ["gemma4-26b", "gemma4-31b", "gemma4-e2b", "gemma4-e4b"]:
     from maxtext.multimodal.processor_gemma4 import preprocess_mm_data_gemma4  # pylint: disable=import-outside-toplevel
 
     return preprocess_mm_data_gemma4(image)
-  elif model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
+  elif config.model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
     from maxtext.multimodal.processor_llama4 import preprocess_mm_data_llama4  # pylint: disable=import-outside-toplevel
 
     return preprocess_mm_data_llama4(image)
-  elif model_name in ["qwen3-omni-30b-a3b", "qwen3.5-35b-a3b", "qwen3.5-397b-a17b"]:
+  elif config.model_name in ["qwen3-omni-30b-a3b", "qwen3.5-35b-a3b", "qwen3.5-397b-a17b"]:
     from maxtext.multimodal.processor_qwen3_omni import preprocess_mm_data_qwen3_omni_for_training  # pylint: disable=import-outside-toplevel
 
-    return preprocess_mm_data_qwen3_omni_for_training(image)
+    return preprocess_mm_data_qwen3_omni_for_training(image, config)
   else:
-    raise ValueError(f"Model {model_name} not supported for image preprocessing.")
+    raise ValueError(f"Model {config.model_name} not supported for image preprocessing.")
 
 
 def get_image_offsets(config, processor_output: mm_utils.PreprocessorOutput | None):
