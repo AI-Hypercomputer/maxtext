@@ -15,6 +15,7 @@
 """Common LoRA utils needed to support LoRA adapters."""
 
 
+import dataclasses
 from functools import partial
 import json
 import os
@@ -495,13 +496,14 @@ def apply_lora_to_model(
   model_rngs = getattr(model.decoder, "rngs", None)
   decoder_input_tokens, decoder_positions = _prepare_dummy_inputs()
 
-  lora_model = qwix.apply_lora_to_model(
-      model,
-      lora_provider,
-      decoder_input_tokens=decoder_input_tokens,
-      decoder_positions=decoder_positions,
-      rngs=model_rngs,
-  )
+  with nn_partitioning.axis_rules([]):
+    lora_model = qwix.apply_lora_to_model(
+        model,
+        lora_provider,
+        decoder_input_tokens=decoder_input_tokens,
+        decoder_positions=decoder_positions,
+        rngs=model_rngs,
+    )
 
   if mesh is not None:
     with mesh, nn_partitioning.axis_rules(mt_config.logical_axis_rules):
@@ -532,18 +534,23 @@ def apply_lora_to_model(
   return lora_model
 
 
-def restore_lora_from_path(trainer: Any, mt_config: pyconfig.HyperParameters) -> Any:
+def restore_lora_from_path(trainer_or_model: Any, mt_config: pyconfig.HyperParameters) -> Any:
   """Restores LoRA parameter weights from an external Orbax checkpoint for a fresh run."""
   lora_restore_path = mt_config.lora.lora_restore_path
 
-  train_steps = getattr(trainer, "train_steps", 0)
+  if isinstance(trainer_or_model, nnx.Module):
+    model = trainer_or_model
+    train_steps = 0
+  else:
+    model = trainer_or_model.model
+    train_steps = getattr(trainer_or_model, "train_steps", 0)
   if train_steps > 0:
     max_logging.log(
         f"PeftTrainer restored current run at step {train_steps}; " f"ignoring lora_restore_path '{lora_restore_path}'."
     )
-    return trainer
+    return trainer_or_model
 
-  if not is_lora_enabled(trainer.model):
+  if not is_lora_enabled(model):
     lora_module_path = _get_lora_module_path(mt_config)
     if not mt_config.lora.enable_lora:
       raise ValueError(
@@ -551,7 +558,7 @@ def restore_lora_from_path(trainer: Any, mt_config: pyconfig.HyperParameters) ->
           f"Set lora.enable_lora=True and verify lora_module_path ('{lora_module_path}') matches model modules."
       )
 
-  abstract_lora_params = nnx.state(trainer.model, nnx.LoRAParam)
+  abstract_lora_params = nnx.state(model, nnx.LoRAParam)
 
   target_for_restore = jax.tree.map(
       lambda v: {"value": v.value},
@@ -561,6 +568,33 @@ def restore_lora_from_path(trainer: Any, mt_config: pyconfig.HyperParameters) ->
 
   sharding_tree = jax.tree.map(lambda x: x.sharding if hasattr(x, "sharding") else None, target_for_restore)
   restore_args_tree = ocp.checkpoint_utils.construct_restore_args(target_for_restore, sharding_tree)
+
+  def _adjust_restore_arg(restore_arg):
+    if hasattr(restore_arg, "global_shape") and restore_arg.global_shape is not None:
+      mesh = getattr(restore_arg, "mesh", None)
+      if mesh is not None:
+        replicated = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+        return dataclasses.replace(
+            restore_arg,
+            global_shape=None,
+            shape=None,
+            sharding=replicated,
+            mesh=None,
+            mesh_axes=None,
+        )
+      else:
+        return dataclasses.replace(
+            restore_arg,
+            global_shape=None,
+            shape=None,
+        )
+    return restore_arg
+
+  restore_args_tree = jax.tree.map(
+      _adjust_restore_arg,
+      restore_args_tree,
+      is_leaf=lambda x: hasattr(x, "global_shape"),
+  )
 
   try:
     restore_args = ocp.args.PyTreeRestore(
@@ -575,6 +609,81 @@ def restore_lora_from_path(trainer: Any, mt_config: pyconfig.HyperParameters) ->
   except Exception as e:  # pylint: disable=broad-exception-caught
     max_logging.log(f"Guided restore failed: {e}. Falling back to basic restore.")
     restored_lora_params = ocp.PyTreeCheckpointer().restore(lora_restore_path)
+
+  def _align_restored_shape(matched_val, target_shape):
+    """Align restored LoRA parameter shape to match the model parameter shape."""
+    if not hasattr(matched_val, "shape") or not isinstance(target_shape, (tuple, list)):
+      return matched_val
+
+    if matched_val.shape == target_shape:
+      return matched_val
+
+    # 2D to 3D alignment (e.g. flat checkpoint parameter to heads-dimensioned model parameter)
+    if matched_val.ndim == 2 and len(target_shape) == 3:
+      lora_rank, out_features_ckpt = matched_val.shape
+      if target_shape[2] > 256:
+        # target_shape is (lora_rank, scan_len, out_features)
+        scan_len = target_shape[1]
+        out_features_model = target_shape[2]
+        head_dim = 256
+        if out_features_ckpt % head_dim == 0:
+          ckpt_heads = out_features_ckpt // head_dim
+          matched_val = jnp.reshape(matched_val, (lora_rank, scan_len, ckpt_heads, head_dim))
+          model_heads = out_features_model // head_dim
+          if model_heads % ckpt_heads == 0 and model_heads > ckpt_heads:
+            ratio = model_heads // ckpt_heads
+            matched_val = jnp.repeat(matched_val, ratio, axis=2)
+          matched_val = jnp.reshape(matched_val, target_shape)
+      else:
+        # target_shape is (lora_rank, heads, head_dim)
+        head_dim = target_shape[2]
+        heads_ckpt = out_features_ckpt // head_dim
+        if heads_ckpt * head_dim == out_features_ckpt:
+          matched_val = jnp.reshape(matched_val, (lora_rank, heads_ckpt, head_dim))
+
+    # 3D with mismatched out_features
+    if matched_val.ndim == 3 and len(target_shape) == 3:
+      if matched_val.shape[0] == target_shape[0] and matched_val.shape[1] == target_shape[1]:
+        ckpt_out = matched_val.shape[2]
+        model_out = target_shape[2]
+        if model_out % ckpt_out == 0 and model_out > ckpt_out:
+          ratio = model_out // ckpt_out
+          head_dim = 256
+          if ckpt_out % head_dim == 0 and model_out % head_dim == 0:
+            lora_rank, scan_len, _ = matched_val.shape
+            ckpt_heads = ckpt_out // head_dim
+            matched_val = jnp.reshape(matched_val, (lora_rank, scan_len, ckpt_heads, head_dim))
+            matched_val = jnp.repeat(matched_val, ratio, axis=2)
+            matched_val = jnp.reshape(matched_val, (lora_rank, scan_len, model_out))
+          else:
+            matched_val = jnp.repeat(matched_val, ratio, axis=2)
+
+      # 3D mismatch in heads count (without scan_len dimension)
+      elif matched_val.shape[0] == target_shape[0] and matched_val.shape[2] == target_shape[2]:
+        ckpt_heads = matched_val.shape[1]
+        model_heads = target_shape[1]
+        if model_heads % ckpt_heads == 0 and model_heads > ckpt_heads:
+          ratio = model_heads // ckpt_heads
+          matched_val = jnp.repeat(matched_val, ratio, axis=1)
+
+    # 2D flat alignment
+    elif matched_val.ndim == 2 and len(target_shape) == 2:
+      if matched_val.shape[0] == target_shape[0]:
+        ckpt_dim = matched_val.shape[1]
+        model_dim = target_shape[1]
+        if model_dim % ckpt_dim == 0 and model_dim > ckpt_dim:
+          ratio = model_dim // ckpt_dim
+          head_dim = 256
+          if ckpt_dim % head_dim == 0 and model_dim % head_dim == 0:
+            lora_rank, _ = matched_val.shape
+            ckpt_heads = ckpt_dim // head_dim
+            matched_val = jnp.reshape(matched_val, (lora_rank, ckpt_heads, head_dim))
+            matched_val = jnp.repeat(matched_val, ratio, axis=1)
+            matched_val = jnp.reshape(matched_val, (lora_rank, model_dim))
+          else:
+            matched_val = jnp.repeat(matched_val, ratio, axis=1)
+
+    return matched_val
 
   # Post processing
   def _map_to_state(path, variable):
@@ -599,7 +708,7 @@ def restore_lora_from_path(trainer: Any, mt_config: pyconfig.HyperParameters) ->
     else:
       matched_val = curr
 
-    variable.value = matched_val
+    variable.value = _align_restored_shape(matched_val, variable.value.shape)
 
   jax.tree_util.tree_map_with_path(
       _map_to_state,
@@ -607,6 +716,6 @@ def restore_lora_from_path(trainer: Any, mt_config: pyconfig.HyperParameters) ->
       is_leaf=lambda n: isinstance(n, nnx.Variable),
   )
 
-  nnx.update(trainer.model, abstract_lora_params)
+  nnx.update(model, abstract_lora_params)
   max_logging.log(f"LoRA restore complete from '{lora_restore_path}'.")
-  return trainer
+  return trainer_or_model

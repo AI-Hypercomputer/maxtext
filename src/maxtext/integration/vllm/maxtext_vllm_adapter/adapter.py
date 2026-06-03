@@ -15,6 +15,7 @@
 """vLLM adapter for MaxText models."""
 
 import os
+import types
 import jax
 
 from flax import nnx
@@ -28,6 +29,7 @@ from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE
 from maxtext.utils import max_logging
 from maxtext.utils import model_creation_utils
+from maxtext.utils import lora_utils
 
 
 try:
@@ -319,8 +321,12 @@ class MaxTextForCausalLM(nnx.Module):
     if self.model is not None:
       return
 
-    with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
+    with nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
       model = model_creation_utils.from_pretrained(
           self.maxtext_config, mesh=self.mesh, model_mode=self.model_mode, rng_key=rng_key
       )
+      if self.maxtext_config.lora.enable_lora:
+        model = lora_utils.apply_lora_to_model(model, self.mesh, self.maxtext_config)
+        if self.maxtext_config.lora.lora_restore_path:
+          lora_utils.restore_lora_from_path(types.SimpleNamespace(model=model), self.maxtext_config)
       self.model = nnx.data(model)

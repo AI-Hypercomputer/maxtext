@@ -129,9 +129,7 @@ def nnx_attrs_to_linen_vars(nnx_attrs: dict) -> dict:
     if isinstance(v, variablelib.Variable):
       col_name = variablelib.variable_name_from_type(v.type)
       v = to_linen_var(v)
-    else:
-      raise ValueError(f"Cannot infer collection name from value: {v}")
-    linen_structured[(col_name, *kp)] = v
+      linen_structured[(col_name, *kp)] = v
   variables = nnx.traversals.unflatten_mapping(linen_structured)
   return variables
 

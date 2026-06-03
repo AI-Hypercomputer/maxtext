@@ -26,6 +26,7 @@ import os
 import sys
 import unittest
 
+
 from flax import nnx
 import jax
 import jax.numpy as jnp
@@ -55,17 +56,13 @@ def _tiny_nnx_pyconfig(**overrides):
       "max_target_length": 128,
       "vocab_size": 256,
       "steps": 1,
-      "tokenizer_path": os.path.join(
-          MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.llama2"
-      ),
+      "tokenizer_path": os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.llama2"),
       "enable_goodput_recording": False,
       "enable_checkpoint_cloud_logger": False,
       "monitor_goodput": False,
   }
   init_kwargs.update(overrides)
-  return pyconfig.initialize(
-      [sys.argv[0], get_test_config_path()], **init_kwargs
-  )
+  return pyconfig.initialize([sys.argv[0], get_test_config_path()], **init_kwargs)
 
 
 @pytest.mark.integration_test
@@ -120,14 +117,10 @@ class SetupTrainLoopNNXIntegrationTest(unittest.TestCase):
     whose structure matches state_mesh_shardings.model after the same split.
     """
     config = _tiny_nnx_pyconfig()
-    *_, state_mesh_shardings, model, _, _, _, _, _, _, train_state = (
-        setup_train_loop(config, recorder=None)
-    )
+    *_, state_mesh_shardings, model, _, _, _, _, _, _, train_state = setup_train_loop(config, recorder=None)
 
     _, params, _ = nnx.split(train_state.model, nnx.Param, ...)
-    _, params_shardings, _ = nnx.split(
-        state_mesh_shardings.model, nnx.Param, ...
-    )
+    _, params_shardings, _ = nnx.split(state_mesh_shardings.model, nnx.Param, ...)
 
     # Same key-set after nnx.split — this is what setup_train_loop relies on at
     # train_utils.py:281-282 to pair state_params with state_mesh_shardings_params.
@@ -141,7 +134,6 @@ class SetupTrainLoopNNXIntegrationTest(unittest.TestCase):
 
   def test_pure_nnx_dpo_setup_materializes_reference_model(self):
     """With use_dpo=True the NNX init_state_fn materializes a frozen reference
-
     model alongside the policy (train_utils.py:233-237). Both come from
     _create_model_partial() with the same init_weights_seed, so absent a step-0
     checkpoint the reference starts bit-identical to the policy.
@@ -149,8 +141,7 @@ class SetupTrainLoopNNXIntegrationTest(unittest.TestCase):
     Positive replacement for the removed
     test_pure_nnx_dpo_raises_not_implemented:
     NNX DPO is supported now, so setup_train_loop builds the reference instead
-    of
-    raising.
+    of raising.
     """
     config = _tiny_nnx_pyconfig(use_dpo=True, packing=False)
     *_, train_state = setup_train_loop(config, recorder=None)
@@ -163,9 +154,7 @@ class SetupTrainLoopNNXIntegrationTest(unittest.TestCase):
 
     # Same param tree, identical values at init (same seed, no step-0 override).
     policy_leaves = jax.tree.leaves(nnx.state(train_state.model, nnx.Param))
-    reference_leaves = jax.tree.leaves(
-        nnx.state(train_state.reference_model, nnx.Param)
-    )
+    reference_leaves = jax.tree.leaves(nnx.state(train_state.reference_model, nnx.Param))
     self.assertGreater(len(policy_leaves), 0)
     self.assertEqual(len(policy_leaves), len(reference_leaves))
     for p, r in zip(policy_leaves, reference_leaves):
