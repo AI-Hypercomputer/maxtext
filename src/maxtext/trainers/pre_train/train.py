@@ -36,6 +36,13 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import NamedSharding
 
+
+import flax
+
+try:
+  flax.config.update("flax_always_shard_variable", False)
+except LookupError:
+  pass
 from flax import linen as nn, nnx
 from flax.linen import partitioning as nn_partitioning
 
