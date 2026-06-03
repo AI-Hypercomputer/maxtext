@@ -334,7 +334,7 @@ class TrainRLTest(unittest.TestCase):
         eval_split="eval",
         hf_train_files=None,
         hf_eval_files=None,
-        chat_template_path="maxtext/examples/chat_templates/gsm8k_rl.json",
+        data_template_path="maxtext/examples/chat_templates/gsm8k_rl.json",
         data_shuffle_seed=42,
         max_prefill_predict_length=10,
         batch_size=2,
@@ -389,7 +389,7 @@ class TrainRLTest(unittest.TestCase):
         eval_dataset_name="open-r1/OpenR1-Math-220k",
         train_split="train",
         hf_train_files="hf://open-r1/OpenR1-Math-220k/data/dummy.parquet",
-        chat_template_path="maxtext/examples/chat_templates/gsm8k_rl.json",
+        data_template_path="maxtext/examples/chat_templates/gsm8k_rl.json",
         data_shuffle_seed=42,
         num_batches=1,
         batch_size=5,
@@ -435,7 +435,7 @@ class TrainRLTest(unittest.TestCase):
         eval_split="test",
         hf_train_files="hf://openai/gsm8k/data/dummy.parquet",
         hf_eval_files="hf://openai/gsm8k/data/dummy.parquet",
-        chat_template_path="maxtext/examples/chat_templates/gsm8k_rl.json",
+        data_template_path="maxtext/examples/chat_templates/gsm8k_rl.json",
         data_shuffle_seed=42,
         num_batches=1,
         batch_size=5,
@@ -482,7 +482,7 @@ class TokenizerChatTemplateTest(unittest.TestCase):
     mock_tokenizer.chat_template = None
     trainer_config = SimpleNamespace(
         chat_template="{{ messages[0].content }}",
-        tokenizer_chat_template_path=None,
+        chat_template_path=None,
         tokenizer_path="dummy-base-model",
     )
     train_rl.configure_tokenizer_chat_template(mock_tokenizer, trainer_config)
@@ -491,13 +491,13 @@ class TokenizerChatTemplateTest(unittest.TestCase):
   @pytest.mark.cpu_only
   @mock.patch("maxtext.input_pipeline.instruction_data_processing.load_chat_template_from_file")
   def test_chat_template_populated_from_config_file(self, mock_load):
-    """Test that chat_template is loaded from tokenizer_chat_template_path when tokenizer lacks one."""
+    """Test that chat_template is loaded from chat_template_path when tokenizer lacks one."""
     mock_tokenizer = mock.MagicMock()
     mock_tokenizer.chat_template = None
     mock_load.return_value = "{% for message in messages %}{{ message.content }}{% endfor %}"
     trainer_config = SimpleNamespace(
         chat_template=None,
-        tokenizer_chat_template_path="/path/to/jinja_template.json",
+        chat_template_path="/path/to/jinja_template.json",
         tokenizer_path="dummy-base-model",
     )
     train_rl.configure_tokenizer_chat_template(mock_tokenizer, trainer_config)
@@ -513,7 +513,7 @@ class TokenizerChatTemplateTest(unittest.TestCase):
     mock_tokenizer.chat_template = None
     trainer_config = SimpleNamespace(
         chat_template=None,
-        tokenizer_chat_template_path=None,
+        chat_template_path=None,
         tokenizer_path="dummy-base-model",
     )
     with self.assertRaisesRegex(ValueError, "Tokenizer 'dummy-base-model' has no chat_template"):
@@ -526,7 +526,7 @@ class TokenizerChatTemplateTest(unittest.TestCase):
     mock_tokenizer.chat_template = "{{ existing_template }}"
     trainer_config = SimpleNamespace(
         chat_template="{{ overridden_template }}",
-        tokenizer_chat_template_path=None,
+        chat_template_path=None,
         tokenizer_path="dummy-instruction-tuned-model",
     )
     train_rl.configure_tokenizer_chat_template(mock_tokenizer, trainer_config)
@@ -549,7 +549,7 @@ class TokenizerChatTemplateTest(unittest.TestCase):
     tokenizer = DummyTokenizer()
     trainer_config = SimpleNamespace(
         chat_template="{{ messages[0].content }}",
-        tokenizer_chat_template_path=None,
+        chat_template_path=None,
         tokenizer_path="dummy-base-model",
     )
     # Initially, apply_chat_template fails (simulating HF tokenizer crash when chat_template is None)

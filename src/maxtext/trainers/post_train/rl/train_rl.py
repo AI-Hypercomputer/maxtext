@@ -248,10 +248,10 @@ def prepare_datasets(
     model_tokenizer: AutoTokenizer,
 ) -> tuple[grain.IterDataset, grain.IterDataset | None]:
   """Setup and return train and test datasets."""
-  template_config = load_data_template_from_file(trainer_config.chat_template_path)
+  template_config = load_data_template_from_file(trainer_config.data_template_path)
   if template_config is None:
     raise ValueError(
-        f"Chat template is required for processing dataset but failed to load from {trainer_config.chat_template_path}"
+        f"Chat template is required for processing dataset but failed to load from {trainer_config.data_template_path}"
     )
 
   # Prepare train and test data from training data for certain datasets
@@ -548,10 +548,10 @@ def create_rl_components(
         epsilon_high=trainer_config.rl.epsilon_high,
     )
     # Instantiate the custom MaxText chat parser
-    template_config = load_data_template_from_file(trainer_config.chat_template_path)
+    template_config = load_data_template_from_file(trainer_config.data_template_path)
     if template_config is None:
       raise ValueError(
-          f"Chat template is required for AgenticGRPOLearner but failed to load from {trainer_config.chat_template_path}"
+          f"Chat template is required for AgenticGRPOLearner but failed to load from {trainer_config.data_template_path}"
       )
     chat_parser = utils_rl.MaxTextChatParser(
         model_tokenizer=model_tokenizer, template_config=template_config, tmvp_config=trainer_config
@@ -588,20 +588,20 @@ def configure_tokenizer_chat_template(model_tokenizer: Any, trainer_config: Any)
   if getattr(model_tokenizer, "chat_template", None) is None:
     if getattr(trainer_config, "chat_template", None):
       model_tokenizer.chat_template = trainer_config.chat_template
-    elif getattr(trainer_config, "tokenizer_chat_template_path", None):
+    elif getattr(trainer_config, "chat_template_path", None):
       from maxtext.input_pipeline.instruction_data_processing import (
           load_chat_template_from_file,
       )
       model_tokenizer.chat_template = load_chat_template_from_file(
-          trainer_config.tokenizer_chat_template_path
+          trainer_config.chat_template_path
       )
     else:
       raise ValueError(
           f"Tokenizer {getattr(trainer_config, 'tokenizer_path', None)!r} has no chat_template "
-          "and config.chat_template / config.tokenizer_chat_template_path "
+          "and config.chat_template / config.chat_template_path "
           "are both empty. Either pick an instruction-tuned tokenizer that "
           "ships with a chat_template, set config.chat_template to a Jinja "
-          "string, or set config.tokenizer_chat_template_path to a JSON file "
+          "string, or set config.chat_template_path to a JSON file "
           "with a 'chat_template' key."
       )
 
