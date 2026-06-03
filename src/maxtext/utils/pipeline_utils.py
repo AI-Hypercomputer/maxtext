@@ -20,6 +20,7 @@ from jax.sharding import PartitionSpec as P
 from flax import linen as nn
 from flax.linen.spmd import LogicallyPartitioned
 import jax.numpy as jnp
+from flax import nnx
 
 
 def get_mesh_axis_dim_indices(physical_partition_spec, axis_name="fsdp"):
@@ -399,3 +400,148 @@ def create_flax_pipeline_scan(pipeline_stage_fn, length, remat_policy, use_scan=
       length=length,
       unroll=unroll_length,
   )
+
+
+def is_static_param(path, v):
+  """Predicate matching nnx.Param and FP8 _overwrite_with_gradient variables.
+
+  Used throughout the pipeline to split state into trainable params vs other state.
+  Must be consistent everywhere to prevent tree structure mismatches.
+  """
+  return isinstance(v, nnx.Param) or type(v).__name__ == "_overwrite_with_gradient"
+
+
+def advance_rng_state(state, iteration):
+  """Fold loop_iteration into all RNG keys to produce unique dropout masks per scan step.
+
+  jax.lax.scan has no split_rngs mechanism (unlike Linen's nn.scan), so every
+  iteration would otherwise see the same dropout mask. This mirrors the effect
+  of ``nn.scan(split_rngs={"random": True})`` from the Linen pipeline.
+
+  Only typed PRNG key variables (``RngKey``) are folded. RNG counters
+  (``RngCount``) are uint32 arrays and must be left untouched -- calling
+  ``jax.random.fold_in`` on raw uint32 data triggers a PRNG-impl shape
+  mismatch (e.g. shape ``(N, 2)`` vs ``unsafe_rbg`` expecting ``(4,)``).
+
+  Args:
+    state: An ``nnx.State`` (or partition thereof) that may contain
+        ``nnx.RngState`` variable entries whose ``.value`` is a JAX PRNG key.
+    iteration: A scalar integer (the loop counter) folded into each key via
+        ``jax.random.fold_in``.
+
+  Returns:
+    A new state with the same tree structure, where every typed PRNG key
+    entry has a unique key derived from the original key and *iteration*.
+  """
+
+  def _fold_if_rng(x):
+    if isinstance(x, nnx.Variable) and issubclass(x.type, nnx.RngState):
+      val = x.value
+      if jax.dtypes.issubdtype(val.dtype, jax.dtypes.prng_key):
+
+        def folded(k):
+          return jax.random.fold_in(k, iteration)
+
+        for _ in range(val.ndim):
+          folded = jax.vmap(folded)
+        return x.replace(value=folded(val))
+    return x
+
+  return jax.tree.map(_fold_if_rng, state, is_leaf=lambda x: isinstance(x, nnx.Variable))
+
+
+def is_spec_leaf(x):
+  """Predicate matching leaves in the bsw_pps treedef, which can be either P or None (if no sharding)."""
+  return isinstance(x, P) or x is None
+
+
+def flatten_nnx_state(state):
+  """Flatten nnx.State to (arrays, treedef, is_var_flags, var_types, var_metadata).
+
+  Returns raw arrays and Python-only metadata for reconstruction.
+  var_metadata: list of dicts with Variable field metadata (NO .raw_value).
+  Captures: nothing (pure function on inputs).
+  """
+
+  def _is_var(x):
+    return isinstance(x, nnx.Variable)
+
+  leaves_with_path, treedef = jax.tree_util.tree_flatten_with_path(state, is_leaf=_is_var)
+  arrays = []
+  is_var_flags = []
+  var_types = []
+  var_metadata = []
+  for _, leaf in leaves_with_path:
+    if isinstance(leaf, nnx.Variable):
+      arrays.append(leaf.value)
+      is_var_flags.append(True)
+      var_types.append(type(leaf))
+      var_metadata.append(dict(leaf._var_metadata))  # pylint: disable=protected-access
+    else:
+      arrays.append(leaf)
+      is_var_flags.append(False)
+      var_types.append(None)
+      var_metadata.append({})
+  return arrays, treedef, is_var_flags, var_types, var_metadata
+
+
+def unflatten_nnx_state(arrays, treedef, is_var_flags, var_types, var_metadata):
+  """Reconstruct nnx.State from flattened arrays + metadata.
+
+  Does NOT reference any nnx.Variable objects from the original state.
+  var_metadata contains only Python objects (no JAX arrays).
+  Captures: nothing (pure function on inputs).
+  """
+  new_leaves = []
+  for arr, is_var, vtype, meta in zip(arrays, is_var_flags, var_types, var_metadata):
+    if is_var and vtype is not None:
+      new_leaves.append(vtype(arr, **meta))
+    else:
+      new_leaves.append(arr)
+  return treedef.unflatten(new_leaves)
+
+
+def arrays_to_linen_collection(arrays, keys):
+  """Convert list of arrays + key names to a Linen-style flat dict.
+
+  Captures: nothing (pure function).
+  """
+  return dict(zip(keys, arrays))
+
+
+def linen_collection_to_arrays(collection, keys):
+  """Extract arrays from Linen-style flat dict in key order.
+
+  Captures: nothing (pure function).
+  """
+  return [collection[k] for k in keys]
+
+
+# ---------------------------------------------------------------------------
+# Non-pytree context: holds Python-only attributes from the pipeline module.
+# NNX modules are JAX pytrees — capturing them in lift.scan closures leaks
+# JIT-level tracers from self.layers. This wrapper is NOT a JAX pytree,
+# so JAX never tries to flatten it.
+# ---------------------------------------------------------------------------
+
+
+class PipelineContext:
+  """Non-pytree wrapper holding pipeline methods + Python config.
+
+  Created from an NNXCircularPipeline ONCE before entering transforms.
+  Captures ONLY bound methods (which internally access config/mesh/Python attrs)
+  and Python objects. No nnx.Variable or JAX arrays.
+  """
+
+  __slots__ = (
+      "weight_prefetching",
+      "run_one_iteration",
+      "from_all_variables_to_repeat_weights",
+      "from_repeat_weights_to_bsw",
+  )
+
+  def __init__(self, pipeline_module):
+    self.weight_prefetching = pipeline_module.weight_prefetching
+    self.run_one_iteration = pipeline_module.run_one_iteration
+    self.from_all_variables_to_repeat_weights = pipeline_module.from_all_variables_to_repeat_weights
+    self.from_repeat_weights_to_bsw = pipeline_module.from_repeat_weights_to_bsw
