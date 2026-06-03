@@ -18,6 +18,7 @@
 
 from typing import Any, cast
 
+import jax
 from jax.sharding import Mesh
 import jax.numpy as jnp
 
@@ -89,6 +90,9 @@ class Qwen3_5ScannableBlock(nnx.Module):
       model_mode: str,
       previous_chunk=None,
       slot: None | int = None,
+      kv_cache=None,
+      attention_metadata=None,
+      forced_routed_experts=None,
   ) -> tuple[Array, None]:
     cfg = self.config
     x = carry
@@ -103,6 +107,9 @@ class Qwen3_5ScannableBlock(nnx.Module):
           model_mode,
           previous_chunk,
           slot,
+          kv_cache=kv_cache,
+          attention_metadata=attention_metadata,
+          forced_routed_experts=forced_routed_experts[i] if forced_routed_experts is not None else None,
       )
 
     return x, None
@@ -181,6 +188,7 @@ class Qwen3_5DecoderLayer(nnx.Module):
       slot: None | int = None,
       kv_cache: None | dict[str, Array] = None,
       attention_metadata: None | dict[str, Any] = None,
+      forced_routed_experts: jax.Array | None = None,
   ):
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
     if isinstance(inputs, tuple):
@@ -223,7 +231,9 @@ class Qwen3_5DecoderLayer(nnx.Module):
     hidden_states = nn.with_logical_constraint(hidden_states, self.activation_axis_names)
 
     # Instantiate and call our `Qwen3_5SparseMoEBlock`.
-    mlp_output, load_balance_loss = self.mlp(hidden_states, deterministic=deterministic)
+    mlp_output, load_balance_loss = self.mlp(
+        hidden_states, deterministic=deterministic, forced_routed_experts=forced_routed_experts
+    )
 
     # We sow the load balancing loss so it can be collected and added to the total loss
     # during training.

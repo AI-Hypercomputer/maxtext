@@ -40,10 +40,11 @@ class _CallableStubBase:
     self.config = SimpleNamespace(model_name=_STUB_MODEL_NAME)
     self.captured = {}
 
-  def __call__(self, *, decoder_input_tokens, decoder_positions, decoder_segment_ids):
+  def __call__(self, *, decoder_input_tokens, decoder_positions, decoder_segment_ids, forced_routed_experts=None):
     self.captured["decoder_input_tokens"] = decoder_input_tokens
     self.captured["decoder_positions"] = decoder_positions
     self.captured["decoder_segment_ids"] = decoder_segment_ids
+    self.captured["forced_routed_experts"] = forced_routed_experts
     # Return dummy logits shaped [B, L, V=2] so the adapter has something to forward.
     b, l = decoder_input_tokens.shape
     return jnp.zeros((b, l, 2), dtype=jnp.float32)

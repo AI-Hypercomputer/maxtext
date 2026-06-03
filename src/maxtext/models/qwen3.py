@@ -823,13 +823,16 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
         rngs=rngs,
     )
 
-  def __call__(self, hidden_states: Array, deterministic: bool) -> tuple[Array, Array | None]:
+  def __call__(
+      self, hidden_states: Array, deterministic: bool, forced_routed_experts: Array | None = None
+  ) -> tuple[Array, Array | None]:
     """
     Applies the sparse MoE block to the input hidden states.
 
     Args:
       hidden_states: The input array from the previous layer. Shape: (batch, seq, embed_dim)
       deterministic: If True, disables dropout.
+      forced_routed_experts: Optional tensor of forced routing indices.
 
     Returns:
       A tuple containing:
@@ -837,7 +840,7 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
         - The load balancing loss from the routed experts, if applicable during training.
     """
     # 1. Apply the routed experts block.
-    routed_output, load_balance_loss, _ = self.routed_experts(hidden_states)
+    routed_output, load_balance_loss, _ = self.routed_experts(hidden_states, forced_routed_experts=forced_routed_experts)
 
     # 2. Apply the shared expert.
     shared_expert_output = self.shared_expert(hidden_states, deterministic=deterministic)
@@ -899,6 +902,7 @@ class Qwen3NextScannableBlock(nnx.Module):
       slot: None | int = None,
       kv_cache=None,
       attention_metadata=None,
+      forced_routed_experts=None,
   ) -> tuple[Array, None]:
     """Applies the block of decoder layers to the input carry.
 
@@ -928,6 +932,7 @@ class Qwen3NextScannableBlock(nnx.Module):
           slot,
           kv_cache=kv_cache,
           attention_metadata=attention_metadata,
+          forced_routed_experts=forced_routed_experts[i] if forced_routed_experts is not None else None,
       )
 
     # The output of the block is the carry for the next scan iteration.
@@ -1011,6 +1016,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
       slot: None | int = None,
       kv_cache: None | dict[str, Array] = None,
       attention_metadata: None | dict[str, Any] = None,
+      forced_routed_experts: jax.Array | None = None,
   ):
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
     if isinstance(inputs, tuple):
@@ -1053,7 +1059,9 @@ class Qwen3NextDecoderLayer(nnx.Module):
     hidden_states = nn.with_logical_constraint(hidden_states, self.activation_axis_names)
 
     # Instantiate and call our `Qwen3NextSparseMoeBlock`.
-    mlp_output, load_balance_loss = self.mlp(hidden_states, deterministic=deterministic)
+    mlp_output, load_balance_loss = self.mlp(
+        hidden_states, deterministic=deterministic, forced_routed_experts=forced_routed_experts
+    )
 
     # We sow the load balancing loss so it can be collected and added to the total loss
     # during training.
@@ -1280,6 +1288,7 @@ class Qwen3MoeDecoderLayer(AttentionWithNorm):
       slot: None | int = None,
       kv_cache: None | jnp.ndarray = None,
       attention_metadata: None | dict[str, Any] = None,
+      forced_routed_experts: jax.Array | None = None,
   ):
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
     is_scan_carry = False
@@ -1302,7 +1311,7 @@ class Qwen3MoeDecoderLayer(AttentionWithNorm):
         attention_metadata=attention_metadata,
     )
 
-    mlp_lnx, load_balance_loss, _ = self.moe_block(hidden_states)
+    mlp_lnx, load_balance_loss, _ = self.moe_block(hidden_states, forced_routed_experts=forced_routed_experts)
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, self.activation_axis_names)
     if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
       self.moe_lb_loss = nnx.Intermediate(load_balance_loss)
