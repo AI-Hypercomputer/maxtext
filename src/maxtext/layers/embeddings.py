@@ -162,7 +162,9 @@ class Embed(nnx.Module):
 
     if self.config.shard_mode == ShardMode.EXPLICIT:
       output_axis_names = output_prefill_axis_names if model_mode == MODEL_MODE_PREFILL else output_default_axis_names
-      out_pspec = logical_to_mesh_axes(output_axis_names, self.mesh, rules=getattr(self.config, "logical_axis_rules", None))
+      out_pspec = logical_to_mesh_axes(
+          output_axis_names, self.mesh, rules=getattr(self.config, "logical_axis_rules", None)
+      )
       out_sharding = NamedSharding(self.mesh, out_pspec)
     else:
       out_sharding = None
