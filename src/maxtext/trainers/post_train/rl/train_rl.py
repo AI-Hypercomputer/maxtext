@@ -602,6 +602,12 @@ def _rl_train_impl(argv: Sequence[str], kwargs: dict):
       argv, kwargs
   )
 
+  if trainer_config.num_vocab_tiling > 1:
+    raise ValueError(
+        f"Vocab Tiling is not supported with RL. "
+        f"num_vocab_tiling was configured to {trainer_config.num_vocab_tiling}, but it must be 1 when running train_rl."
+    )
+
   # Create model tokenizer first so we can plumb its pad_id into the model
   # adapter (used to synthesize segment_ids that mask pad positions from
   # attention — without this the trainer attends to pad tokens and produces
