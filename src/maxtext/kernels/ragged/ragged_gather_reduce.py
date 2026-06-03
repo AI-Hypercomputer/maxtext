@@ -488,10 +488,7 @@ def ragged_gather_reduce(
           num_row_partitions=num_rows_partitions,
           num_column_partitions=num_column_partitions,
       ),
-      compiler_params=pltpu.CompilerParams(
-          use_tc_tiling_on_sc=True,
-          disable_bounds_checks=True,
-      ),
+      compiler_params=pltpu.CompilerParams(disable_bounds_checks=True),
       mesh=vector_mesh,
       name="sc_ragged_gather_reduce",
       **{

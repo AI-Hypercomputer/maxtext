@@ -279,10 +279,7 @@ def ragged_gather(x: jax.Array, indices: jax.Array, start: jax.Array, end: jax.A
           core_axis_name=vector_mesh.core_axis_name,
           subcore_axis_name=vector_mesh.subcore_axis_name,
       ),
-      compiler_params=pltpu.CompilerParams(
-          use_tc_tiling_on_sc=True,
-          disable_bounds_checks=True,
-      ),
+      compiler_params=pltpu.CompilerParams(disable_bounds_checks=True),
       mesh=vector_mesh,
       name="sc_ragged_gather",
       **{
