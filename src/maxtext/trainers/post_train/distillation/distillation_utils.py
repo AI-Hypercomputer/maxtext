@@ -520,7 +520,6 @@ class CombinedDistillationStrategy(DistillationStrategy):
       ce_teacher_per_pos = jnp.zeros(s_logits.shape[:-1])
       kl_t1_sum = jnp.array(0.0)
 
-
     else:
       # --- DENSE KL DIVERGENCE (Online Mode) ---
       t_p_T = jax.nn.softmax(t_logits / temperature, axis=-1)

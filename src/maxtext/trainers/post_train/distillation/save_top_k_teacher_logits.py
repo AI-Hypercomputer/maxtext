@@ -218,7 +218,7 @@ def generate_and_save_data(config, local_args):
             if jax.process_index() == 0:
               max_logging.log(f"Queueing distributed background uploads for Step {step}...")
             upload_executor.submit(background_upload, local_output_path, gcs_file_path, jax.process_index())
-          
+
           # Re-initialize the writer with 1 worker
           write_executor = ThreadPoolExecutor(max_workers=1)
 
@@ -260,13 +260,13 @@ def generate_and_save_data(config, local_args):
         # --- Local Disk Writing ---
         # Submit to the background thread with the serialization_executor
         write_executor.submit(
-            background_process_and_write, 
-            writer, 
-            local_tokens_np, 
-            local_vals_np, 
-            local_idx_np, 
+            background_process_and_write,
+            writer,
+            local_tokens_np,
+            local_vals_np,
+            local_idx_np,
             local_opt_data_np,
-            serialization_executor
+            serialization_executor,
         )
 
       if step % 50 == 0 and jax.process_index() == 0:
@@ -303,9 +303,9 @@ def generate_and_save_data(config, local_args):
 def main(argv: Sequence[str], local_args):
   global_config = pyconfig.initialize(argv)
   teacher_overrides = global_config.teacher_overrides
-  
+
   teacher_config = pyconfig.initialize(argv, **teacher_overrides)
-  
+
   generate_and_save_data(teacher_config, local_args)
 
 
