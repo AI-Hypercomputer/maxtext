@@ -57,16 +57,59 @@ N_FFT = 400  # Number of FFT points for spectrogram computation.
 HOP_LENGTH = 160  # Number of samples between successive frames.
 DITHER = 0.0  # Amount of dithering to apply to audio signal.
 
-# Qwen3OmniMoe-specific processing
-QWEN3_OMNI_VISION_START_TOKEN = 151652  # <|vision_start|>
-QWEN3_OMNI_VISION_END_TOKEN = 151653  # <|vision_end|>
-QWEN3_OMNI_IMAGE_TOKEN = 151655  # <|image_pad|>
-QWEN3_OMNI_VIDEO_TOKEN = 151656  # <|video_pad|>
-QWEN3_OMNI_AUDIO_START_TOKEN = 151669  # <|audio_start|>
-QWEN3_OMNI_AUDIO_END_TOKEN = 151670  # <|audio_end|>
-QWEN3_OMNI_AUDIO_TOKEN = 151675  # <|audio_pad|>
 QWEN3_TEMPORAL_PATCH_SIZE = 2
 QWEN3_OMNI_IMAGE_SIZE = 768
+
+
+QWEN_SPECIAL_TOKEN_CONFIGS = {
+    "qwen3-omni-30b-a3b": {
+        "vision_start": 151652,  # <|vision_start|>
+        "vision_end": 151653,  # <|vision_end|>
+        "image_pad": 151655,  # <|image_pad|>
+        "video_pad": 151656,  # <|video_pad|>
+        "audio_start": 151669,  # <|audio_start|>
+        "audio_end": 151670,  # <|audio_end|>
+        "audio_pad": 151675,  # <|audio_pad|>
+    },
+    "qwen3.5": {
+        "vision_start": 248053,  # <|vision_start|>
+        "vision_end": 248054,  # <|vision_end|>
+        "image_pad": 248056,  # <|image_pad|>
+        "video_pad": 248057,  # <|video_pad|>
+        "audio_start": 248070,  # <|audio_start|>
+        "audio_end": 248071,  # <|audio_end|>
+        "audio_pad": 248076,  # <|audio_pad|>
+    },
+}
+
+
+class QwenTokens:
+  """Helper class to manage special token IDs for Qwen models.
+
+  Token attributes are set dynamically from QWEN_SPECIAL_TOKEN_CONFIGS, so adding a new
+  token type only requires updating that dict — no changes here needed.
+  """
+
+  _DEFAULT_MODEL = "qwen3-omni-30b-a3b"
+
+  vision_start: int | None = None
+  vision_end: int | None = None
+  image_pad: int | None = None
+  video_pad: int | None = None
+  audio_start: int | None = None
+  audio_end: int | None = None
+  audio_pad: int | None = None
+
+  def __init__(self, config=None):
+    # If config is None, will fall back to default Qwen3-Omni tokens.
+    self.model_name = getattr(config, "model_name", None) or self._DEFAULT_MODEL
+    # Match by prefix (e.g. "qwen3.5" covers qwen3.5 family), fall back to default.
+    token_config = next(
+        (v for k, v in QWEN_SPECIAL_TOKEN_CONFIGS.items() if self.model_name.startswith(k)),
+        QWEN_SPECIAL_TOKEN_CONFIGS[self._DEFAULT_MODEL],
+    )
+    # Sets model-specific token attributes from QWEN_SPECIAL_TOKEN_CONFIGS above.
+    self.__dict__.update(token_config)
 
 
 @dataclass
@@ -600,6 +643,9 @@ def add_extra_tokens_for_qwen3_omni(tokens, config, processor_output):
 
   tokens = tokens.flatten()  # Ensure 1D
 
+  # Get dynamic tokens based on config
+  qwen_tokens = QwenTokens(config)
+
   # Merge lengths for computing number of tokens
   merge_length = spatial_merge_size**2
 
@@ -616,19 +662,19 @@ def add_extra_tokens_for_qwen3_omni(tokens, config, processor_output):
     token = token_list[i]
 
     # Handle image tokens
-    if token == QWEN3_OMNI_IMAGE_TOKEN and image_grid_thw is not None and image_idx < len(image_grid_thw):
+    if token == qwen_tokens.image_pad and image_grid_thw is not None and image_idx < len(image_grid_thw):
       grid = image_grid_thw[image_idx]
       num_image_tokens = int((grid[0] * grid[1] * grid[2]) // merge_length)
-      new_tokens.extend([QWEN3_OMNI_IMAGE_TOKEN] * num_image_tokens)
+      new_tokens.extend([qwen_tokens.image_pad] * num_image_tokens)
       image_idx += 1
 
     # Handle audio-in-video: <|vision_start|><|video_pad|><|vision_end|>
     elif (
         config.use_audio_in_video
-        and token == QWEN3_OMNI_VISION_START_TOKEN
+        and token == qwen_tokens.vision_start
         and i + 2 < len(token_list)
-        and token_list[i + 1] == QWEN3_OMNI_VIDEO_TOKEN
-        and token_list[i + 2] == QWEN3_OMNI_VISION_END_TOKEN
+        and token_list[i + 1] == qwen_tokens.video_pad
+        and token_list[i + 2] == qwen_tokens.vision_end
         and video_grid_thw is not None
         and video_idx < len(video_grid_thw)
     ):
@@ -650,46 +696,46 @@ def add_extra_tokens_for_qwen3_omni(tokens, config, processor_output):
       video_token_indices = np.broadcast_to(video_token_indices, (num_frames, height, width)).flatten()
       video_token_indices = video_token_indices * second_per_grids[video_idx] * position_id_per_seconds
 
-      new_tokens.append(QWEN3_OMNI_VISION_START_TOKEN)
-      new_tokens.append(QWEN3_OMNI_AUDIO_START_TOKEN)
+      new_tokens.append(qwen_tokens.vision_start)
+      new_tokens.append(qwen_tokens.audio_start)
 
       video_data_idx = 0
       audio_data_idx = 0
 
       while video_data_idx < len(video_token_indices) and audio_data_idx < len(audio_token_indices):
         if video_token_indices[video_data_idx] <= audio_token_indices[audio_data_idx]:
-          new_tokens.append(QWEN3_OMNI_VIDEO_TOKEN)
+          new_tokens.append(qwen_tokens.video_pad)
           video_data_idx += 1
         else:
-          new_tokens.append(QWEN3_OMNI_AUDIO_TOKEN)
+          new_tokens.append(qwen_tokens.audio_pad)
           audio_data_idx += 1
 
       while video_data_idx < len(video_token_indices):
-        new_tokens.append(QWEN3_OMNI_VIDEO_TOKEN)
+        new_tokens.append(qwen_tokens.video_pad)
         video_data_idx += 1
 
       while audio_data_idx < len(audio_token_indices):
-        new_tokens.append(QWEN3_OMNI_AUDIO_TOKEN)
+        new_tokens.append(qwen_tokens.audio_pad)
         audio_data_idx += 1
 
-      new_tokens.append(QWEN3_OMNI_AUDIO_END_TOKEN)
-      new_tokens.append(QWEN3_OMNI_VISION_END_TOKEN)
+      new_tokens.append(qwen_tokens.audio_pad)
+      new_tokens.append(qwen_tokens.vision_end)
 
       video_idx += 1
       audio_idx += 1
       i += 2
 
     # Handle video tokens (without audio-in-video)
-    elif token == QWEN3_OMNI_VIDEO_TOKEN and video_grid_thw is not None and video_idx < len(video_grid_thw):
+    elif token == qwen_tokens.video_pad and video_grid_thw is not None and video_idx < len(video_grid_thw):
       grid = video_grid_thw[video_idx]
       num_video_tokens = int((grid[0] * grid[1] * grid[2]) // merge_length)
-      new_tokens.extend([QWEN3_OMNI_VIDEO_TOKEN] * num_video_tokens)
+      new_tokens.extend([qwen_tokens.video_pad] * num_video_tokens)
       video_idx += 1
 
     # Handle audio tokens (standalone, not in video)
-    elif token == QWEN3_OMNI_AUDIO_TOKEN and audio_lengths is not None and audio_idx < len(audio_lengths):
+    elif token == qwen_tokens.audio_pad and audio_lengths is not None and audio_idx < len(audio_lengths):
       num_audio_tokens = int(audio_lengths[audio_idx])
-      new_tokens.extend([QWEN3_OMNI_AUDIO_TOKEN] * num_audio_tokens)
+      new_tokens.extend([qwen_tokens.audio_pad] * num_audio_tokens)
       audio_idx += 1
 
     # All other tokens pass through unchanged
@@ -858,6 +904,7 @@ def get_rope_index(
     second_per_grids: np.ndarray | None = None,
     spatial_merge_size: int = 2,
     position_id_per_seconds: int = 25,
+    config=None,  # None defaults to Qwen3-Omni special tokens
 ) -> tuple[np.ndarray, np.ndarray]:
   """Calculate 3D RoPE position indices for multimodal sequences.
 
@@ -895,6 +942,7 @@ def get_rope_index(
   Raises:
     ValueError: If multimodal tokens are present but grid info is missing.
   """
+  qwen_tokens = QwenTokens(config)
   batch_size, seq_len = input_ids.shape
 
   # Handle text-only case (no multimodal content)
@@ -929,16 +977,16 @@ def get_rope_index(
     valid_input_ids = input_ids[i][attention_mask_bool[i]]
 
     # Count multimodal elements in this sequence
-    vision_start_indices = np.where(valid_input_ids == QWEN3_OMNI_VISION_START_TOKEN)[0]
+    vision_start_indices = np.where(valid_input_ids == qwen_tokens.vision_start)[0]
     vision_tokens = valid_input_ids[vision_start_indices + 1] if len(vision_start_indices) > 0 else np.array([])
 
-    audio_nums = np.sum(valid_input_ids == QWEN3_OMNI_AUDIO_START_TOKEN).item()
-    image_nums = np.sum(vision_tokens == QWEN3_OMNI_IMAGE_TOKEN).item() if len(vision_tokens) > 0 else 0
+    audio_nums = np.sum(valid_input_ids == qwen_tokens.audio_start).item()
+    image_nums = np.sum(vision_tokens == qwen_tokens.image_pad).item() if len(vision_tokens) > 0 else 0
     video_nums = (
         (
-            np.sum(vision_tokens == QWEN3_OMNI_AUDIO_START_TOKEN).item()
+            np.sum(vision_tokens == qwen_tokens.audio_start).item()
             if use_audio_in_video
-            else np.sum(vision_tokens == QWEN3_OMNI_VIDEO_TOKEN).item()
+            else np.sum(vision_tokens == qwen_tokens.video_pad).item()
         )
         if len(vision_tokens) > 0
         else 0
@@ -961,19 +1009,19 @@ def get_rope_index(
       st_idx = llm_pos_ids_list[-1].max().item() + 1 if len(llm_pos_ids_list) > 0 else 0
 
       # Find next vision or audio start token
-      if (QWEN3_OMNI_IMAGE_TOKEN in input_tokens or QWEN3_OMNI_VIDEO_TOKEN in input_tokens) and (
+      if (qwen_tokens.image_pad in input_tokens or qwen_tokens.video_pad in input_tokens) and (
           remain_videos > 0 or remain_images > 0
       ):
         try:
-          ed_vision_start = input_tokens.index(QWEN3_OMNI_VISION_START_TOKEN, st)
+          ed_vision_start = input_tokens.index(qwen_tokens.vision_start, st)
         except ValueError:
           ed_vision_start = len(input_tokens) + 1
       else:
         ed_vision_start = len(input_tokens) + 1
 
-      if QWEN3_OMNI_AUDIO_TOKEN in input_tokens and remain_audios > 0:
+      if qwen_tokens.audio_pad in input_tokens and remain_audios > 0:
         try:
-          ed_audio_start = input_tokens.index(QWEN3_OMNI_AUDIO_START_TOKEN, st)
+          ed_audio_start = input_tokens.index(qwen_tokens.audio_start, st)
         except ValueError:
           ed_audio_start = len(input_tokens) + 1
       else:
@@ -1011,7 +1059,7 @@ def get_rope_index(
         remain_audios -= 1
 
       # Image Only
-      elif min_ed == ed_vision_start and input_tokens[ed_vision_start + 1] == QWEN3_OMNI_IMAGE_TOKEN:
+      elif min_ed == ed_vision_start and input_tokens[ed_vision_start + 1] == qwen_tokens.image_pad:
         grid_t = image_grid_thw[image_idx, 0].item()
         grid_hs = image_grid_thw[:, 1]
         grid_ws = image_grid_thw[:, 2]
@@ -1026,7 +1074,7 @@ def get_rope_index(
         remain_images -= 1
 
       # Video Only
-      elif min_ed == ed_vision_start and input_tokens[ed_vision_start + 1] == QWEN3_OMNI_VIDEO_TOKEN:
+      elif min_ed == ed_vision_start and input_tokens[ed_vision_start + 1] == qwen_tokens.video_pad:
         grid_t = video_grid_thw[video_idx, 0].item()
         grid_hs = video_grid_thw[:, 1]
         grid_ws = video_grid_thw[:, 2]

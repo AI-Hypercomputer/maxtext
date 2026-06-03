@@ -1042,6 +1042,64 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
               ): f"model.language_model.layers.{i}.mlp.experts.gate_up_proj",
           }
       )
+
+  # Vision mapping for Qwen3.5
+  if maxtext_config.use_multimodal and "vision_config" in config:
+    vision_config = config["vision_config"]
+    n_vision_layers = vision_config["depth"]
+
+    # Vision patch embedding
+    mapping["params-vision_encoder-Qwen3_5MoeVisionEncoder_0-patch_embed-proj-kernel"] = (
+        "model.visual.patch_embed.proj.weight"
+    )
+    mapping["params-vision_encoder-Qwen3_5MoeVisionEncoder_0-patch_embed-proj-bias"] = (
+        "model.visual.patch_embed.proj.bias"
+    )
+
+    # Vision positional embedding
+    mapping["params-vision_encoder-Qwen3_5MoeVisionEncoder_0-pos_embed_interpolate-pos_embed"] = (
+        "model.visual.pos_embed.weight"
+    )
+
+    # Vision blocks
+    for i in range(n_vision_layers):
+      prefix = f"params-vision_encoder-Qwen3_5MoeVisionEncoder_0-blocks_{i}"
+      hf_prefix = f"model.visual.blocks.{i}"
+
+      # Layer norms
+      mapping[f"{prefix}-ln1-scale"] = f"{hf_prefix}.norm1.weight"
+      mapping[f"{prefix}-ln1-bias"] = f"{hf_prefix}.norm1.bias"
+      mapping[f"{prefix}-ln2-scale"] = f"{hf_prefix}.norm2.weight"
+      mapping[f"{prefix}-ln2-bias"] = f"{hf_prefix}.norm2.bias"
+
+      # Attention
+      mapping[f"{prefix}-attn-attn-query-kernel"] = f"{hf_prefix}.attn.qkv.weight"
+      mapping[f"{prefix}-attn-attn-query-bias"] = f"{hf_prefix}.attn.qkv.bias"
+      mapping[f"{prefix}-attn-attn-key-kernel"] = f"{hf_prefix}.attn.qkv.weight"
+      mapping[f"{prefix}-attn-attn-key-bias"] = f"{hf_prefix}.attn.qkv.bias"
+      mapping[f"{prefix}-attn-attn-value-kernel"] = f"{hf_prefix}.attn.qkv.weight"
+      mapping[f"{prefix}-attn-attn-value-bias"] = f"{hf_prefix}.attn.qkv.bias"
+      mapping[f"{prefix}-attn-attn-out-kernel"] = f"{hf_prefix}.attn.proj.weight"
+      mapping[f"{prefix}-attn-attn-out-bias"] = f"{hf_prefix}.attn.proj.bias"
+
+      # MLP
+      mapping[f"{prefix}-mlp-kernel"] = f"{hf_prefix}.mlp.linear_fc1.weight"
+      mapping[f"{prefix}-mlp-bias"] = f"{hf_prefix}.mlp.linear_fc1.bias"
+      mapping[f"{prefix}-mlp_out-kernel"] = f"{hf_prefix}.mlp.linear_fc2.weight"
+      mapping[f"{prefix}-mlp_out-bias"] = f"{hf_prefix}.mlp.linear_fc2.bias"
+
+    # Vision projector (final merger)
+    mapping["params-vision_encoder-Qwen3_5MoeVisionProjector_0-merger-ln_q-scale"] = "model.visual.merger.norm.weight"
+    mapping["params-vision_encoder-Qwen3_5MoeVisionProjector_0-merger-ln_q-bias"] = "model.visual.merger.norm.bias"
+    mapping["params-vision_encoder-Qwen3_5MoeVisionProjector_0-merger-mlp_0-kernel"] = (
+        "model.visual.merger.linear_fc1.weight"
+    )
+    mapping["params-vision_encoder-Qwen3_5MoeVisionProjector_0-merger-mlp_0-bias"] = "model.visual.merger.linear_fc1.bias"
+    mapping["params-vision_encoder-Qwen3_5MoeVisionProjector_0-merger-mlp_2-kernel"] = (
+        "model.visual.merger.linear_fc2.weight"
+    )
+    mapping["params-vision_encoder-Qwen3_5MoeVisionProjector_0-merger-mlp_2-bias"] = "model.visual.merger.linear_fc2.bias"
+
   return mapping
 
 
@@ -1213,6 +1271,92 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
 
     hooks[(f"{mlp_prefix}-routed_experts-wi_0", f"{mlp_prefix}-routed_experts-wi_1")] = process_wi_0_wi_1
     hooks[f"{mlp_prefix}-routed_experts-wo"] = transpose_expert
+
+  # Vision hooks for Qwen3.5
+  vision_config = config.get("vision_config", None)
+  if vision_config and maxtext_config.use_multimodal:
+    n_vision_layers = vision_config["depth"]
+    hidden_size = vision_config["hidden_size"]
+
+    def reshape_kernel_vision(input_tensor, target_shape):
+      if saving_to_hf:
+        flipped_target_shape = np.flip(np.array(target_shape))
+        return input_tensor.reshape(flipped_target_shape).T
+      else:
+        return input_tensor.T.reshape(target_shape)
+
+    def reshape_conv3d_patch_embed(input_tensor, target_shape):
+      if saving_to_hf:
+        return input_tensor.transpose(4, 3, 0, 1, 2)
+      else:
+        return input_tensor.transpose(2, 3, 4, 1, 0)
+
+    def split_qkv_query(input_tensor, target_shape):
+      if saving_to_hf:
+        raise NotImplementedError("Use fusion hook for MaxText->HF")
+      else:
+        q_weight = input_tensor[:hidden_size, :]
+        return q_weight.T.reshape(target_shape)
+
+    def split_qkv_key(input_tensor, target_shape):
+      if saving_to_hf:
+        raise NotImplementedError("Use fusion hook for MaxText->HF")
+      else:
+        k_weight = input_tensor[hidden_size : 2 * hidden_size, :]
+        return k_weight.T.reshape(target_shape)
+
+    def split_qkv_value(input_tensor, target_shape):
+      if saving_to_hf:
+        raise NotImplementedError("Use fusion hook for MaxText->HF")
+      else:
+        v_weight = input_tensor[2 * hidden_size :, :]
+        return v_weight.T.reshape(target_shape)
+
+    def split_qkv_bias_query(input_tensor, target_shape):
+      if saving_to_hf:
+        raise NotImplementedError("Use fusion hook for MaxText->HF")
+      else:
+        q_bias = input_tensor[:hidden_size]
+        return q_bias.reshape(target_shape)
+
+    def split_qkv_bias_key(input_tensor, target_shape):
+      if saving_to_hf:
+        raise NotImplementedError("Use fusion hook for MaxText->HF")
+      else:
+        k_bias = input_tensor[hidden_size : 2 * hidden_size]
+        return k_bias.reshape(target_shape)
+
+    def split_qkv_bias_value(input_tensor, target_shape):
+      if saving_to_hf:
+        raise NotImplementedError("Use fusion hook for MaxText->HF")
+      else:
+        v_bias = input_tensor[2 * hidden_size :]
+        return v_bias.reshape(target_shape)
+
+    def reshape_vision_attn_out(input_tensor, target_shape):
+      if saving_to_hf:
+        return input_tensor.reshape(hidden_size, hidden_size).T
+      else:
+        return input_tensor.T.reshape(target_shape)
+
+    # Apply vision hooks
+    hooks["params-vision_encoder-Qwen3_5MoeVisionEncoder_0-patch_embed-proj-kernel"] = reshape_conv3d_patch_embed
+
+    for i in range(n_vision_layers):
+      prefix = f"params-vision_encoder-Qwen3_5MoeVisionEncoder_0-blocks_{i}"
+      hooks[f"{prefix}-attn-attn-query-kernel"] = split_qkv_query
+      hooks[f"{prefix}-attn-attn-query-bias"] = split_qkv_bias_query
+      hooks[f"{prefix}-attn-attn-key-kernel"] = split_qkv_key
+      hooks[f"{prefix}-attn-attn-key-bias"] = split_qkv_bias_key
+      hooks[f"{prefix}-attn-attn-value-kernel"] = split_qkv_value
+      hooks[f"{prefix}-attn-attn-value-bias"] = split_qkv_bias_value
+      hooks[f"{prefix}-attn-attn-out-kernel"] = reshape_vision_attn_out
+      hooks[f"{prefix}-mlp-kernel"] = reshape_kernel_vision
+      hooks[f"{prefix}-mlp_out-kernel"] = reshape_kernel_vision
+
+    # Vision projector
+    hooks["params-vision_encoder-Qwen3_5MoeVisionProjector_0-merger-mlp_0-kernel"] = reshape_kernel_vision
+    hooks["params-vision_encoder-Qwen3_5MoeVisionProjector_0-merger-mlp_2-kernel"] = reshape_kernel_vision
 
   return hooks
 

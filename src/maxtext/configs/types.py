@@ -262,8 +262,8 @@ ModelName = Literal[
     "qwen3-next-80b-a3b",
     "qwen3-omni-30b-a3b",
     "qwen3-custom-30b-a3b",
-    "qwen3.5-397b-a17b",
     "qwen3.5-35b-a3b",
+    "qwen3.5-397b-a17b",
     "gpt3-175b",
     "gpt3-22b",
     "gpt3-6b",
@@ -2927,6 +2927,7 @@ class MaxTextConfig(
           "llama4-17b-16e",
           "llama4-17b-128e",
           "qwen3-omni-30b-a3b",
+          "qwen3.5-35b-a3b",
           "qwen3.5-397b-a17b",
       )
       if self.model_name not in valid_mm_models and self.model_name != "default":

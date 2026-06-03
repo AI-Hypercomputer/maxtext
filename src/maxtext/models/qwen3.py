@@ -734,6 +734,8 @@ class Qwen3NextFullAttention(nnx.Module):
         use_qk_norm=cfg.use_qk_norm,
         query_pre_attn_scalar=scaling_factor,
         model_mode=model_mode,
+        use_mrope=cfg.use_mrope,
+        mrope_section=cfg.mrope_section,
         rngs=rngs,
     )
 

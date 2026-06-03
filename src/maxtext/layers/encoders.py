@@ -70,7 +70,7 @@ class VisionEncoder(nnx.Module):
           self, projector_name, gemma4_vision.Gemma4VisionProjector(config=self.config, mesh=self.mesh, rngs=self.rngs)
       )
       return encoder_name, projector_name
-    elif self.config.model_name in ["qwen3.5-397b-a17b"]:
+    elif self.config.model_name in ["qwen3.5-35b-a3b", "qwen3.5-397b-a17b"]:
       from maxtext.models import qwen3_5_vision  # pylint: disable=import-outside-toplevel
 
       encoder_name = "Qwen3_5MoeVisionEncoder_0"
