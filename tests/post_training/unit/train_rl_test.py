@@ -58,7 +58,10 @@ class TrainRLTest(unittest.TestCase):
     # Following the pattern in distillation_checkpointing_test.py for mocking jax objects
     with (
         mock.patch.object(jax, "devices", return_value=mock_devices),
-        mock.patch("maxtext.utils.model_creation_utils.pyconfig.initialize_pydantic", return_value=mock_config),
+        mock.patch(
+            "maxtext.utils.model_creation_utils.pyconfig.initialize_pydantic",
+            return_value=mock_config,
+        ),
     ):
       trainer_config, sampler_config, trainer_devices, sampler_devices = model_creation_utils.setup_configs_and_devices(
           ["dummy", "dummy"]
@@ -87,7 +90,10 @@ class TrainRLTest(unittest.TestCase):
 
     with (
         mock.patch.object(jax, "devices", return_value=mock_devices),
-        mock.patch("maxtext.utils.model_creation_utils.pyconfig.initialize_pydantic", return_value=mock_config),
+        mock.patch(
+            "maxtext.utils.model_creation_utils.pyconfig.initialize_pydantic",
+            return_value=mock_config,
+        ),
     ):
       _, _, trainer_devices, sampler_devices = model_creation_utils.setup_configs_and_devices(["dummy", "dummy"])
 
@@ -189,7 +195,10 @@ class TrainRLTest(unittest.TestCase):
         "tensor_parallel_size": 2,
         "expert_parallel_size": 4,
     }
-    self.assertEqual(train_rl.get_rollout_kwargs_for_parallelism(sampler_config, 16), expected_result)
+    self.assertEqual(
+        train_rl.get_rollout_kwargs_for_parallelism(sampler_config, 16),
+        expected_result,
+    )
 
   @pytest.mark.cpu_only
   def test_get_rollout_kwargs_auto_tp(self):
@@ -204,7 +213,10 @@ class TrainRLTest(unittest.TestCase):
         "tensor_parallel_size": 2,
         "expert_parallel_size": 1,
     }
-    self.assertEqual(train_rl.get_rollout_kwargs_for_parallelism(sampler_config, 4), expected_result)
+    self.assertEqual(
+        train_rl.get_rollout_kwargs_for_parallelism(sampler_config, 4),
+        expected_result,
+    )
 
   @pytest.mark.cpu_only
   def test_get_rollout_kwargs_fixed_tp_dp(self):
@@ -219,7 +231,10 @@ class TrainRLTest(unittest.TestCase):
         "tensor_parallel_size": 2,
         "expert_parallel_size": 1,
     }
-    self.assertEqual(train_rl.get_rollout_kwargs_for_parallelism(sampler_config, 4), expected_result)
+    self.assertEqual(
+        train_rl.get_rollout_kwargs_for_parallelism(sampler_config, 4),
+        expected_result,
+    )
 
   @pytest.mark.cpu_only
   def test_get_rollout_kwargs_auto_ep(self):
@@ -235,7 +250,10 @@ class TrainRLTest(unittest.TestCase):
         "tensor_parallel_size": 2,
         "expert_parallel_size": 2,
     }
-    self.assertEqual(train_rl.get_rollout_kwargs_for_parallelism(sampler_config, 8), expected_result)
+    self.assertEqual(
+        train_rl.get_rollout_kwargs_for_parallelism(sampler_config, 8),
+        expected_result,
+    )
 
   @pytest.mark.cpu_only
   def test_get_rollout_kwargs_errors(self):
@@ -307,7 +325,10 @@ class TrainRLTest(unittest.TestCase):
         {"question": "short", "answer": "a3"},
         {"question": "long", "answer": "a4"},
     ]
-    test_data = [{"question": "short", "answer": "a5"}, {"question": "long", "answer": "a6"}]
+    test_data = [
+        {"question": "short", "answer": "a5"},
+        {"question": "long", "answer": "a6"},
+    ]
     train_map_ds = grain.MapDataset.source(train_data)
     test_map_ds = grain.MapDataset.source(test_data)
 
@@ -346,8 +367,14 @@ class TrainRLTest(unittest.TestCase):
     )
 
     with (
-        mock.patch("maxtext.trainers.post_train.rl.train_rl.get_dataset", side_effect=get_dataset_side_effect),
-        mock.patch("maxtext.trainers.post_train.rl.utils_rl.process_data", side_effect=get_filtered_data_side_effect),
+        mock.patch(
+            "maxtext.trainers.post_train.rl.train_rl.get_dataset",
+            side_effect=get_dataset_side_effect,
+        ),
+        mock.patch(
+            "maxtext.trainers.post_train.rl.utils_rl.process_data",
+            side_effect=get_filtered_data_side_effect,
+        ),
     ):
       train_dataset, test_dataset = train_rl.prepare_datasets(trainer_config, mock_tokenizer)
 
@@ -378,7 +405,10 @@ class TrainRLTest(unittest.TestCase):
   def test_prepare_datasets_with_split(self, mock_load):
     mock_ds = mock.MagicMock()
     mock_split_result = {
-        "train": [{"question": "q1", "answer": "a1"}, {"question": "q2", "answer": "a2"}],
+        "train": [
+            {"question": "q1", "answer": "a1"},
+            {"question": "q2", "answer": "a2"},
+        ],
         "test": [{"question": "q3", "answer": "a3"}],
     }
     mock_ds.train_test_split.return_value = mock_split_result
@@ -480,7 +510,7 @@ class TrainRLTest(unittest.TestCase):
     mock_setup.return_value = (mock_config, mock_config, [], [])
 
     with self.assertRaisesRegex(ValueError, "Vocab Tiling is not supported with RL"):
-      train_rl._rl_train_impl([], {})
+      train_rl._rl_train_impl([], {})  # pylint: disable=protected-access
 
 
 class TokenizerChatTemplateTest(unittest.TestCase):
