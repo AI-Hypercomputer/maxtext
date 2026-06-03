@@ -69,8 +69,12 @@ class MixtralDecoderLayer(nn.Module):
 
     def shard(x):
       return maybe_shard_with_logical(
-          x, activation_axis_names, mesh=mesh, shard_mode=cfg.shard_mode,
-          rules=cfg.logical_axis_rules, skip_trivial_specs=True,
+          x,
+          activation_axis_names,
+          mesh=mesh,
+          shard_mode=cfg.shard_mode,
+          rules=cfg.logical_axis_rules,
+          skip_trivial_specs=True,
       )
 
     inputs = shard(inputs)
