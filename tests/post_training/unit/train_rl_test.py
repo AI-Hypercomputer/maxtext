@@ -471,6 +471,17 @@ class TrainRLTest(unittest.TestCase):
     mock_load.assert_has_calls(expected_calls, any_order=True)
     assert mock_load.call_count == len(expected_calls)
 
+  @pytest.mark.cpu_only
+  @mock.patch("maxtext.trainers.post_train.rl.train_rl.model_creation_utils.setup_configs_and_devices")
+  def test_rl_train_invalid_vocab_tiling(self, mock_setup):
+    mock_config = SimpleNamespace(
+        num_vocab_tiling=2,
+    )
+    mock_setup.return_value = (mock_config, mock_config, [], [])
+
+    with self.assertRaisesRegex(ValueError, "Vocab Tiling is not supported with RL"):
+      train_rl._rl_train_impl([], {})
+
 
 if __name__ == "__main__":
   unittest.main()
