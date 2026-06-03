@@ -1083,7 +1083,7 @@ class Tokenizer(BaseModel):
   )
   data_template_path: str = Field(
       "",
-      description="Path to a chat template file to be used when tokenizing the dataset. Used in RL workloads to provide the conversation.",
+      description="Path to a chat template file to be used when tokenizing the dataset.",
   )
   tokenize_train_data: bool = Field(True, description="If False, assumes the training dataset is pre-tokenized.")
   tokenize_eval_data: bool = Field(True, description="If False, assumes the evaluation dataset is pre-tokenized.")

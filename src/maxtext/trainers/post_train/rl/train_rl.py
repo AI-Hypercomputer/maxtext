@@ -589,7 +589,7 @@ def configure_tokenizer_chat_template(model_tokenizer: Any, trainer_config: Any)
     if getattr(trainer_config, "chat_template", None):
       model_tokenizer.chat_template = trainer_config.chat_template
     elif getattr(trainer_config, "chat_template_path", None):
-      from maxtext.input_pipeline.instruction_data_processing import (
+      from maxtext.input_pipeline.instruction_data_processing import (  # pylint: disable=import-outside-toplevel
           load_chat_template_from_file,
       )
       model_tokenizer.chat_template = load_chat_template_from_file(

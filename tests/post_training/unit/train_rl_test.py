@@ -474,7 +474,7 @@ class TrainRLTest(unittest.TestCase):
 
 class TokenizerChatTemplateTest(unittest.TestCase):
   """Unit tests for configure_tokenizer_chat_template."""
-  
+
   @pytest.mark.cpu_only
   def test_chat_template_populated_from_config_string(self):
     """Test that chat_template is set from config.chat_template when tokenizer lacks one."""
@@ -487,7 +487,7 @@ class TokenizerChatTemplateTest(unittest.TestCase):
     )
     train_rl.configure_tokenizer_chat_template(mock_tokenizer, trainer_config)
     self.assertEqual(mock_tokenizer.chat_template, "{{ messages[0].content }}")
-  
+
   @pytest.mark.cpu_only
   @mock.patch("maxtext.input_pipeline.instruction_data_processing.load_chat_template_from_file")
   def test_chat_template_populated_from_config_file(self, mock_load):
@@ -518,7 +518,7 @@ class TokenizerChatTemplateTest(unittest.TestCase):
     )
     with self.assertRaisesRegex(ValueError, "Tokenizer 'dummy-base-model' has no chat_template"):
       train_rl.configure_tokenizer_chat_template(mock_tokenizer, trainer_config)
-  
+
   @pytest.mark.cpu_only
   def test_chat_template_unchanged_when_already_exists(self):
     """Test that an existing chat_template on the tokenizer is preserved (backward compatibility)."""
@@ -531,18 +531,18 @@ class TokenizerChatTemplateTest(unittest.TestCase):
     )
     train_rl.configure_tokenizer_chat_template(mock_tokenizer, trainer_config)
     self.assertEqual(mock_tokenizer.chat_template, "{{ existing_template }}")
-  
+
   @pytest.mark.cpu_only
   def test_apply_chat_template_works_after_configuration(self):
     """Verifies apply_chat_template succeeds and produces the expected format after our code path runs."""
-    class DummyTokenizer:
+    class DummyTokenizer:  # pylint: disable=missing-class-docstring
       def __init__(self):
         self.chat_template = None
-      
+
       def apply_chat_template(self, conversation, tokenize=False):
         if self.chat_template is None:
           raise ValueError("Cannot apply chat template because chat_template is None")
-        import jinja2
+        import jinja2  # pylint: disable=import-outside-toplevel
         env = jinja2.Environment()
         template = env.from_string(self.chat_template)
         return template.render(messages=conversation)
