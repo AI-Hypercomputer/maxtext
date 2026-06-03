@@ -1445,17 +1445,44 @@ class RoutedMoE(nnx.Module):
           group_sizes=group_sizes,
           expert_assignments=selected_experts,
       )
-      # Forward-only 3-tuple tiling. The 9-tuple form includes dlhs/drhs backward-pass
-      # tile values that are allocated but unused when megablox=False (JAX ragged_dot path).
+      # mblx.gmm (megablox=True or use_tokamax_gmm with quantization) uses a custom_vjp
+      # whose backward pass slices tiling[3:6] for dlhs and tiling[6:9] for drhs.
+      # Those paths require a 9-tuple. The ragged_dot path (megablox=False) only uses
+      # tiling[0:3] for the forward pass, so a 3-tuple suffices there.
+      needs_bwd_tiling = self.config.megablox or (self.config.use_tokamax_gmm and self.config.quantization)
       wi_tile_size = (
-          self.config.wi_tile_fwd_batch_seq,  # m (LHS batch)
-          self.config.wi_tile_fwd_embed_dim,  # k (contracting)
-          self.config.wi_tile_fwd_mlp_dim,  # n (RHS batch)
+          self.config.wi_tile_fwd_batch_seq,  # m fwd
+          self.config.wi_tile_fwd_embed_dim,  # k fwd
+          self.config.wi_tile_fwd_mlp_dim,  # n fwd
+          *(
+              (
+                  self.config.wi_tile_dlhs_batch_seq,  # m dlhs
+                  self.config.wi_tile_dlhs_embed_dim,  # k dlhs
+                  self.config.wi_tile_dlhs_mlp_dim,  # n dlhs
+                  self.config.wi_tile_drhs_batch_seq,  # m drhs
+                  self.config.wi_tile_drhs_embed_dim,  # k drhs
+                  self.config.wi_tile_drhs_mlp_dim,  # n drhs
+              )
+              if needs_bwd_tiling
+              else ()
+          ),
       )
       wo_tile_size = (
-          self.config.wo_tile_fwd_batch_seq,  # m (LHS batch)
-          self.config.wo_tile_fwd_mlp_dim,  # k (contracting)
-          self.config.wo_tile_fwd_embed_dim,  # n (RHS batch)
+          self.config.wo_tile_fwd_batch_seq,  # m fwd
+          self.config.wo_tile_fwd_mlp_dim,  # k fwd
+          self.config.wo_tile_fwd_embed_dim,  # n fwd
+          *(
+              (
+                  self.config.wo_tile_dlhs_batch_seq,  # m dlhs
+                  self.config.wo_tile_dlhs_embed_dim,  # k dlhs
+                  self.config.wo_tile_dlhs_mlp_dim,  # n dlhs
+                  self.config.wo_tile_drhs_batch_seq,  # m drhs
+                  self.config.wo_tile_drhs_embed_dim,  # k drhs
+                  self.config.wo_tile_drhs_mlp_dim,  # n drhs
+              )
+              if needs_bwd_tiling
+              else ()
+          ),
       )
 
       layer_w0 = gmm_fn(
