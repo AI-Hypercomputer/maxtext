@@ -30,7 +30,7 @@ You may use only a CPU or a single VM from a different family to pre-compile for
 
 - The ahead of time compilation can be saved and then loaded for fast startup and restart times on the target hardware.
 
-The tool `train_compile.py` is tightly linked to `train.py` and uses the same configuration file `src/maxtext/configs/base.yml`. Although you don't need to run on a TPU, you do need to install `jax[tpu]` in addition to other dependencies, so we recommend running `setup.sh` to install these if you have not already done so.
+The tool `train_compile.py` is tightly linked to `train.py` and uses the same configuration file `src/maxtext/configs/base.yml`. Although you don't need to run on a TPU, you do need to install `jax[tpu]` in addition to other dependencies, so we recommend following the [MaxText installation instructions](../../install_maxtext.md) to install these if you have not already done so.
 
 #### Example AOT 1: Compile ahead of time basics
 

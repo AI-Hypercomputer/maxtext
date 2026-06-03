@@ -47,15 +47,7 @@ export RUN_NAME=<your-run-name> # e.g., distill-20260115
 
 #### b. Install dependencies
 
-To install MaxText and its dependencies for post-training (including vLLM for the teacher), run the following:
-
-1. Follow the [MaxText installation instructions](../../install_maxtext.md).
-
-2. Install the additional dependencies for post-training:
-
-```bash
-bash tools/setup/setup_post_training_requirements.sh
-```
+To install MaxText and its dependencies for post-training (including vLLM for the teacher), follow the [MaxText installation instructions](../../install_maxtext.md) and select the `tpu-post-train` installation target (e.g., `maxtext[tpu-post-train]` or `.[tpu-post-train]`).
 
 #### c. Setup storage with Hyperdisk
 
