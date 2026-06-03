@@ -1,3 +1,17 @@
+# Copyright 2023–2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """
 This module provides functionality to save top-k teacher logits
 for distillation purposes in MaxText.
@@ -81,12 +95,11 @@ def create_tf_example(example_dict):
     if flat_val.dtype in [np.float32, np.float64, np.float16, jnp.bfloat16]:
       if flat_val.dtype != np.float32:
         flat_val = flat_val.astype(np.float32)
-      # Use .tolist() for extremely fast Protobuf C++ ingestion
+      # Use .tolist() for fast Protobuf C++ ingestion
       features[key] = tf.train.Feature(float_list=tf.train.FloatList(value=flat_val.tolist()))
     elif flat_val.dtype in [np.int32, np.int64]:
       if flat_val.dtype != np.int64:
         flat_val = flat_val.astype(np.int64)
-      # Use .tolist() for extremely fast Protobuf C++ ingestion
       features[key] = tf.train.Feature(int64_list=tf.train.Int64List(value=flat_val.tolist()))
     else:
       raise ValueError(f"Unsupported dtype {flat_val.dtype} for key {key}")
@@ -96,51 +109,46 @@ def create_tf_example(example_dict):
 
 def background_process_and_write(writer, tokens, vals, idx, opt_data, serialization_executor):
   """Executes entirely on a background CPU thread so the TPU never waits."""
-  with tf.profiler.experimental.Trace("background_local_disk_write"):
-    # Convert exactly once
-    tokens_np = np.asarray(tokens)
-    vals_np = np.asarray(vals)
-    idx_np = np.asarray(idx)
-    opt_data_np = {k: np.asarray(v) for k, v in opt_data.items()}
+  # Convert exactly once
+  tokens_np = np.asarray(tokens)
+  vals_np = np.asarray(vals)
+  idx_np = np.asarray(idx)
+  opt_data_np = {k: np.asarray(v) for k, v in opt_data.items()}
 
-    batch_size = tokens_np.shape[0]
-    example_dicts = []
+  batch_size = tokens_np.shape[0]
+  example_dicts = []
 
-    # Prepare dictionaries sequentially
-    for i in range(batch_size):
-      seq_bytes = tokens_np[i].tobytes()
-      example_dict = {
-          "inputs": tokens_np[i],
-          "top_k_logits": vals_np[i],
-          "top_k_indices": idx_np[i],
-          "sequence_hash": hash(seq_bytes),
-      }
-      for key, val_np in opt_data_np.items():
-        example_dict[key] = val_np[i]
-      example_dicts.append(example_dict)
+  # Prepare dictionaries sequentially
+  for i in range(batch_size):
+    seq_bytes = tokens_np[i].tobytes()
+    example_dict = {
+        "inputs": tokens_np[i],
+        "top_k_logits": vals_np[i],
+        "top_k_indices": idx_np[i],
+        "sequence_hash": hash(seq_bytes),
+    }
+    for key, val_np in opt_data_np.items():
+      example_dict[key] = val_np[i]
+    example_dicts.append(example_dict)
 
-    # Serialize to Protobufs in parallel across multiple CPU cores
-    with tf.profiler.experimental.Trace("parallel_serialize"):
-      serialized_records = list(serialization_executor.map(create_tf_example, example_dicts))
+  # Serialize to Protobufs in parallel across multiple CPU cores
+  serialized_records = list(serialization_executor.map(create_tf_example, example_dicts))
 
-    # Write the serialized bytes to disk sequentially
-    with tf.profiler.experimental.Trace("sequential_write"):
-      for record in serialized_records:
-        writer.write(record)
+  # Write the serialized bytes to disk sequentially
+  for record in serialized_records:
+    writer.write(record)
 
 
 def background_upload(local_path, gcs_path, process_index):
   """Executes a highly optimized concurrent upload via gcloud."""
-  # Swapped to TF Trace context
-  with tf.profiler.experimental.Trace("gcs_upload_and_cleanup"):
-    try:
-      subprocess.run(["gcloud", "storage", "cp", local_path, gcs_path], check=True, capture_output=True)
-      os.remove(local_path)
-      if process_index == 0:
-        max_logging.log(f"Background upload complete: {gcs_path}")
-    except subprocess.CalledProcessError as e:
-      if process_index == 0:
-        max_logging.log(f"Upload failed for {local_path}: {e.stderr.decode()}")
+  try:
+    subprocess.run(["gcloud", "storage", "cp", local_path, gcs_path], check=True, capture_output=True)
+    os.remove(local_path)
+    if process_index == 0:
+      max_logging.log(f"Background upload complete: {gcs_path}")
+  except subprocess.CalledProcessError as e:
+    if process_index == 0:
+      max_logging.log(f"Upload failed for {local_path}: {e.stderr.decode()}")
 
 
 @nnx.jit(static_argnames=("k",))
@@ -201,22 +209,6 @@ def generate_and_save_data(config, local_args):
     for step, batch in enumerate(islice(train_iter, start_step, config.steps), start=start_step):
       step_start = time.time()
 
-      # --- 1. PROFILER SETUP ---
-      is_profiling_step = (
-          config.profiler == "xplane"
-          and step == config.skip_first_n_steps_for_profiler
-      )
-
-      is_profiling_stop_step = (
-          config.profiler == "xplane"
-          and step == config.skip_first_n_steps_for_profiler + config.profiler_steps
-      )
-
-      if is_profiling_step and jax.process_index() == 0:
-          max_logging.log(f"Recording Host-Only XProf trace for step {step} using TF API...")
-          options = tf.profiler.experimental.ProfilerOptions(host_tracer_level=2, device_tracer_level=0)
-          tf.profiler.experimental.start(config.tensorboard_dir, options=options)
-
       if step % steps_per_file == 0:
         if writer:
           write_executor.shutdown(wait=True)
@@ -225,9 +217,7 @@ def generate_and_save_data(config, local_args):
             gcs_file_path = os.path.join(gcs_upload_path, os.path.basename(local_output_path))
             if jax.process_index() == 0:
               max_logging.log(f"Queueing distributed background uploads for Step {step}...")
-            # Swapped to TF Trace context
-            with tf.profiler.experimental.Trace("submit_to_gcs_upload"):
-              upload_executor.submit(background_upload, local_output_path, gcs_file_path, jax.process_index())
+            upload_executor.submit(background_upload, local_output_path, gcs_file_path, jax.process_index())
           
           # Re-initialize the writer with 1 worker
           write_executor = ThreadPoolExecutor(max_workers=1)
@@ -239,19 +229,17 @@ def generate_and_save_data(config, local_args):
 
       tokens = batch["inputs"]
 
-      # --- TRACE 1: Model Forward Pass & Network Gather ---
-      # Swapped to TF Trace context
-      with tf.profiler.experimental.Trace("teacher_forward_and_gather"):
-        top_k_vals, top_k_idx = teacher_step(teacher_model, batch, k_val)
+      # --- Model Forward Pass & Network Gather ---
+      top_k_vals, top_k_idx = teacher_step(teacher_model, batch, k_val)
 
-        global_tokens = jax.experimental.multihost_utils.process_allgather(tokens, tiled=True)
-        global_vals = jax.experimental.multihost_utils.process_allgather(top_k_vals, tiled=True)
-        global_idx = jax.experimental.multihost_utils.process_allgather(top_k_idx, tiled=True)
+      global_tokens = jax.experimental.multihost_utils.process_allgather(tokens, tiled=True)
+      global_vals = jax.experimental.multihost_utils.process_allgather(top_k_vals, tiled=True)
+      global_idx = jax.experimental.multihost_utils.process_allgather(top_k_idx, tiled=True)
 
-        optional_data = {}
-        for key in optional_keys:
-          if key in batch:
-            optional_data[key] = jax.experimental.multihost_utils.process_allgather(batch[key], tiled=True)
+      optional_data = {}
+      for key in optional_keys:
+        if key in batch:
+          optional_data[key] = jax.experimental.multihost_utils.process_allgather(batch[key], tiled=True)
 
       if writer:
         global_tokens_np = np.array(global_tokens)
@@ -269,29 +257,22 @@ def generate_and_save_data(config, local_args):
         local_idx_np = global_idx_np[start_idx:end_idx]
         local_opt_data_np = {k: v[start_idx:end_idx] for k, v in optional_data_np.items()}
 
-        # --- TRACE 2: Local Disk Writing ---
+        # --- Local Disk Writing ---
         # Submit to the background thread with the serialization_executor
-        with tf.profiler.experimental.Trace("local_disk_write_submit"):
-          write_executor.submit(
-              background_process_and_write, 
-              writer, 
-              local_tokens_np, 
-              local_vals_np, 
-              local_idx_np, 
-              local_opt_data_np,
-              serialization_executor
-          )
+        write_executor.submit(
+            background_process_and_write, 
+            writer, 
+            local_tokens_np, 
+            local_vals_np, 
+            local_idx_np, 
+            local_opt_data_np,
+            serialization_executor
+        )
 
       if step % 50 == 0 and jax.process_index() == 0:
         max_logging.log(f"Successfully processed step {step} in {time.time() - step_start:.4f}s")
 
       multihost_utils.sync_global_devices(f"step_{step}_complete")
-
-      # --- 2. STOP PROFILER ---
-      if is_profiling_stop_step:
-        if jax.process_index() == 0:
-          max_logging.log(f"Stopping XProf profiler and uploading clean host trace...")
-        tf.profiler.experimental.stop()
 
     if jax.process_index() == 0:
       max_logging.log(f"Generation loop finished in {time.time() - loop_start:.2f}s")
@@ -307,9 +288,7 @@ def generate_and_save_data(config, local_args):
 
     if gcs_upload_path:
       gcs_file_path = os.path.join(gcs_upload_path, os.path.basename(local_output_path))
-      # Swapped to TF Trace context
-      with tf.profiler.experimental.Trace("submit_to_gcs_upload"):
-        upload_executor.submit(background_upload, local_output_path, gcs_file_path, jax.process_index())
+      upload_executor.submit(background_upload, local_output_path, gcs_file_path, jax.process_index())
 
     if upload_executor:
       if jax.process_index() == 0:
@@ -319,10 +298,6 @@ def generate_and_save_data(config, local_args):
         max_logging.log("All GCS uploads complete.")
 
   multihost_utils.sync_global_devices("upload_complete")
-  
-  if jax.process_index() == 0:
-    max_logging.log("Waiting 15 seconds for XProf to save the trace...")
-    time.sleep(15)
 
 
 def main(argv: Sequence[str], local_args):
@@ -345,7 +320,7 @@ if __name__ == "__main__":
   )
   parser.add_argument("--gcs_upload_path", type=str, default=None)
   parser.add_argument("--local_tmp_dir", type=str, default="/tmp")
-  parser.add_argument("--steps_per_file", type=int, default=2)
+  parser.add_argument("--steps_per_file", type=int, default=50)
   local_arg, remaining_args = parser.parse_known_args()
 
   main_wrapper = functools.partial(main, local_args=local_arg)
