@@ -616,9 +616,9 @@ class RoutedMoeTest(unittest.TestCase):
           enable_checkpointing=False,
           model_name="mixtral-8x7b",
           override_model_config=True,
-          base_emb_dim=256,
-          base_mlp_dim=256,
-          base_moe_mlp_dim=256,
+          base_emb_dim=2048,
+          base_mlp_dim=2048,
+          base_moe_mlp_dim=2048,
           dtype="bfloat16",
           megablox=True,
           sparse_matmul=True,
@@ -627,7 +627,6 @@ class RoutedMoeTest(unittest.TestCase):
           use_ring_of_experts=use_ring_of_experts,
           max_target_length=128,
           use_ragged_sort=use_ragged_sort,
-          use_tokamax_gmm=True,
       )
 
     def _build_model(cfg, mesh):
@@ -712,12 +711,12 @@ class RoutedMoeTest(unittest.TestCase):
       )
 
   @pytest.mark.tpu_only
-  #   @pytest.mark.skip_on_tpu7x
+  @pytest.mark.skip_on_tpu7x
   def test_ragged_sort_loss_and_grad_ring_of_experts(self):
     self._run_ragged_sort_loss_and_grad(use_ring_of_experts=True)
 
   @pytest.mark.tpu_only
-  #   @pytest.mark.skip_on_tpu7x
+  @pytest.mark.skip_on_tpu7x
   def test_ragged_sort_loss_and_grad_no_ring_of_experts(self):
     self._run_ragged_sort_loss_and_grad(use_ring_of_experts=False)
 

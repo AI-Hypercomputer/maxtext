@@ -31,9 +31,18 @@ from packaging.version import Version
 if Version(jax.__version__) <= Version("0.10.0"):
   _OUT_KW = "out_shape"
   _SCRATCH_KW = "scratch_shapes"
+  _COMPILER_PARAMS = {
+      "use_tc_tiling_on_sc": True,
+      "disable_bounds_checks": True,
+  }
 else:
   _OUT_KW = "out_type"
   _SCRATCH_KW = "scratch_types"
+  _COMPILER_PARAMS = {
+      "use_tc_tiling_on_sc": True,
+      "disable_bounds_checks": True,
+      "needs_layout_passes": False,
+  }
 
 
 # ceil up to the nearest multiple of b.
@@ -514,30 +523,6 @@ def ragged_gather_reduce(
   )
   col_size = x.shape[-1] // num_column_partitions
 
-  # Cost estimate for the ragged gather reduce kernel.
-  # The kernel gathers rows from x, multiplies each by a topk_weight scalar,
-  # and reduces (sums) groups of `reduce_group_size` rows together.
-  # flops: input_size * hidden_size multiplies (weight scaling)
-  #      + input_size * hidden_size adds (reduction)
-  padded_input_size = x.shape[0]
-  padded_hidden_size = x.shape[-1]
-  gather_reduce_flops = 2 * padded_input_size * padded_hidden_size
-  # bytes_accessed: read x rows + write output rows + read metadata arrays.
-  gather_reduce_bytes_accessed = (
-      padded_input_size * padded_hidden_size * dtype_bytes  # read from x
-      + (padded_input_size // reduce_group_size) * padded_hidden_size * 4  # write output (float32)
-      + padded_input_size * 4  # read indices (int32)
-      + padded_input_size * 4  # read dst_indices (int32)
-      + padded_input_size * 4  # read topk_weights (float32)
-      + padded_input_size * 4  # read sorted_by_validity (int32)
-      + num_simd_lanes * 4  # read num_src_rows_per_row_partition (int32)
-  )
-  cost_estimate = pl.CostEstimate(
-      flops=gather_reduce_flops,
-      transcendentals=0,
-      bytes_accessed=gather_reduce_bytes_accessed,
-  )
-
   (
       dst_indices,
       sorted_by_validity,
@@ -567,13 +552,11 @@ def ragged_gather_reduce(
           num_row_partitions=num_row_partitions,
           num_column_partitions=num_column_partitions,
       ),
-      compiler_params=pltpu.CompilerParams(
-          use_tc_tiling_on_sc=True,
-          disable_bounds_checks=True,
+      compiler_params=pltpu.CompilerParams(  # pytype: disable=wrong-keyword-args
+          **_COMPILER_PARAMS,
       ),
       mesh=vector_mesh,
       name="sc_ragged_gather_reduce",
-      cost_estimate=cost_estimate,
       **{
           _OUT_KW: jax.ShapeDtypeStruct(
               (x.shape[0] // reduce_group_size, x.shape[1]),

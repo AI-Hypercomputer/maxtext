@@ -1510,7 +1510,7 @@ class RoutedMoE(nnx.Module):
       if self.config.use_ring_of_experts:
         # Set the outputs of tokens which were not processed to 0.
         mask = jnp.arange(intermediate_output.shape[0]) < jnp.sum(group_sizes)
-        # intermediate_output = jnp.where(mask[:, None], intermediate_output, 0)
+        intermediate_output = jnp.where(mask[:, None], intermediate_output, 0)
 
         # Unsort and deduplicate the outputs locally.
         output = self.unpermute(
