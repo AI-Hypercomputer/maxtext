@@ -141,4 +141,67 @@ Set `model_name`/`tokenizer_path` to your variant (`gemma4-26b`, `gemma4-31b`) a
 `ici_tensor_parallelism` to the number of chips — pass an explicit count (e.g. `4` on a v5p-8), not
 `-1`, since `vllm_decode` forwards this value directly to vLLM's `tensor_parallel_size`.
 
-> **Note:** `gemma4-e2b` / `gemma4-e4b` are not yet supported. They use cross-layer KV sharing, and will be supported soon.
+#### E2B / E4B
+
+`gemma4-e2b` and `gemma4-e4b` run through the same `vllm_decode` entry point as the larger variants, but the `-it` fine-tunes need **three things** the larger models tolerate without:
+
+1. **A system prompt** ([per the HF model card](https://huggingface.co/google/gemma-4-E2B-it)) — without it the `-it` checkpoints drift off-topic at any temperature.
+2. **Stochastic sampling** `temperature=1.0, top_p=0.95, top_k=64` (the model card's recommended settings). Greedy decoding tends to loop on these small checkpoints, independent of the MaxText path.
+3. **The full stop-token set.** The upstream `google/gemma-4-*-it` repos declare `eos_token_id: [1, 106, 50]` (`<eos>`, `<turn|>`, `<|tool_response>`). If a converted checkpoint only carries `eos_token_id: 1`, end-of-turn `<turn|>` is no longer registered as a stop and generation runs to `max_tokens`. Using the upstream repo id for `tokenizer_path` keeps the full stop list automatically. A local checkpoint dir works equally well — just verify its `generation_config.json` carries the full list.
+
+The CLI form, using the `system_prompt=` flag and the model card's sampling params:
+
+```sh
+python3 -m maxtext.inference.vllm_decode src/maxtext/configs/base.yml \
+    model_name=gemma4-e2b \
+    tokenizer_path=google/gemma-4-e2b-it \
+    load_parameters_path=${CONVERTED_CHECKPOINT} \
+    vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
+    ici_tensor_parallelism=1 scan_layers=False \
+    system_prompt="You are a helpful assistant." \
+    prompt="Who was Albert Einstein?" use_chat_template=True \
+    decode_sampling_temperature=1.0 \
+    decode_sampling_nucleus_p=0.95 \
+    decode_sampling_top_k=64
+```
+
+Or via the Python API, useful for fixing a seed or stitching multiple requests:
+
+```python
+import maxtext.integration.vllm.maxtext_vllm_adapter as adapter
+adapter.register()
+from vllm import LLM
+from vllm.sampling_params import SamplingParams
+import transformers
+
+llm = LLM(
+    model="google/gemma-4-e2b-it",                     # tokenizer + HF config dir
+    hf_overrides={"architectures": ["MaxTextForCausalLM"]},
+    additional_config={
+        "maxtext_config": {
+            "model_name": "gemma4-e2b",                # or gemma4-e4b
+            "scan_layers": False,
+            "load_parameters_path": "${CONVERTED_CHECKPOINT}",
+        }
+    },
+    tensor_parallel_size=1,                            # set to chip count (e.g. 4 on v5p-8)
+    max_model_len=1024,
+)
+
+tok = transformers.AutoTokenizer.from_pretrained("google/gemma-4-e2b-it")
+prompt = tok.apply_chat_template(
+    [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user",   "content": "Who was Albert Einstein?"},
+    ],
+    tokenize=False,
+    add_generation_prompt=True,
+)
+
+out = llm.generate(
+    [prompt],
+    SamplingParams(temperature=1.0, top_p=0.95, top_k=64,
+                   seed=42, max_tokens=300),
+)
+print(out[0].outputs[0].text)
+```

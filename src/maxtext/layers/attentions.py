@@ -1026,15 +1026,22 @@ class Attention(nnx.Module):
       # Return dummy values for dry runs (e.g. during model initialization or JIT tracing)
       return query, []
 
-    if self.config.sliding_window_size > 0:
+    # Sliding window applies only to LOCAL_SLIDING layers; global layers must run
+    # full attention.
+    if self.attention_type == AttentionType.LOCAL_SLIDING and self.config.sliding_window_size > 0:
       attention_chunk_size = self.config.sliding_window_size
     else:
-      # Chunked attention currently not used in vLLM RPA.
       attention_chunk_size = None
 
     q_scale, k_scale, v_scale = None, None, None
 
     md = rpa_metadata
+
+    # With cross-layer KV sharing (Gemma 4 E2B / E4B), a KV-shared layer has no
+    # cache of its own: `rpa_kv_cache` here is the donor layer's cache, and
+    # attention must run against the K/V the donor already wrote for this
+    # position. Only the donor writes the cache; shared layers read it as-is.
+    update_kv_cache = not self.share_kv_layer
 
     output, kv_cache = rpa_ops(
         self.mesh,
@@ -1052,6 +1059,7 @@ class Attention(nnx.Module):
         q_scale,
         k_scale,
         v_scale,
+        update_kv_cache=update_kv_cache,
     )
     return output, kv_cache
 
