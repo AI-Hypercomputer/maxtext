@@ -278,6 +278,13 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
     else:
       max_logging.debug("\nNo MoE load balance loss found. Defaulting to 0.0.")
 
+  # get MoE routing mismatch rate
+  moe_mismatch_rate = None
+  if config.num_experts > 1:
+    moe_mismatch_rates = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "mismatch_rate")
+    if moe_mismatch_rates:
+      moe_mismatch_rate = jnp.mean(jnp.stack(moe_mismatch_rates))
+
   # get MoE routed bias term updates
   moe_bias_updates = None
   if config.routed_bias and config.routed_bias_update_rate > 0.0:
@@ -299,6 +306,8 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       "mtp_loss": mtp_loss,
       "batch_stats": (intermediate_outputs.get("batch_stats", None) if hasattr(intermediate_outputs, "get") else None),
   }
+  if moe_mismatch_rate is not None:
+    aux["moe_mismatch_rate"] = moe_mismatch_rate
   return loss, aux
 
 
@@ -409,6 +418,12 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   xent_sum = aux["xent_sum"]
   total_weights = aux["total_weights"]
   moe_lb_loss = aux["moe_lb_loss"]
+  if config.num_experts > 1 and "moe_mismatch_rate" in aux:
+    moe_mismatch_rate = aux["moe_mismatch_rate"]
+    if config.gradient_accumulation_steps > 1:
+      moe_mismatch_rate = moe_mismatch_rate / config.gradient_accumulation_steps
+  else:
+    moe_mismatch_rate = None
   indexer_loss = aux.get("indexer_loss", 0.0)
   z_loss = aux.get("z_loss", 0.0)
   moe_bias_updates = aux.get("moe_bias_updates")
@@ -511,6 +526,8 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       "learning/mtp_loss": mtp_loss,
       "learning/total_weights": total_weights,
   }
+  if moe_mismatch_rate is not None:
+    scalar_metrics["learning/routing_mismatch_rate"] = moe_mismatch_rate
   if config.use_qk_clip:
     if isinstance(model, nn.Module):
       new_state = qk_clip_utils.apply_qk_clip(new_state, intermediate_outputs, config)

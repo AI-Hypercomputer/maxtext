@@ -945,7 +945,16 @@ class NNXDecoder(nnx.Module):
 
     return out
 
-  def _apply_layers_sequentially(self, layers, x_in, *args, length: int, kv_caches_stacked=None, **kwargs):
+  def _apply_layers_sequentially(
+      self,
+      layers,
+      x_in,
+      *args,
+      length: int,
+      kv_caches_stacked=None,
+      forced_routed_experts: jax.Array | None = None,
+      **kwargs,
+  ):
     """Runs the layer stack using nnx.scan.
 
     Args:
@@ -956,6 +965,7 @@ class NNXDecoder(nnx.Module):
       kv_caches_stacked: Optional pytree whose leaves have shape [num_layers, ...].
         When provided, the i-th slice is passed as `kv_cache=` to layer i and the
         updated caches are returned as a third element of the tuple.
+      forced_routed_experts: Optional jax.Array containing experts for mismatch measurement.
       **kwargs: Keyword args forwarded to the layer (filtered by the layer signature).
 
     Returns:
@@ -991,14 +1001,23 @@ class NNXDecoder(nnx.Module):
     updated_graphdef = [graphdef]
 
     use_kv = kv_caches_stacked is not None
+    use_forced = forced_routed_experts is not None
 
     def layer_fn(carry, scanned_vars):
 
       # Unpack the sliced variables for THIS layer
       if use_kv:
-        current_params, current_state, kv_cache_layer = scanned_vars
+        if use_forced:
+          current_params, current_state, kv_cache_layer, forced_routed_experts_layer = scanned_vars
+        else:
+          current_params, current_state, kv_cache_layer = scanned_vars
+          forced_routed_experts_layer = None
       else:
-        current_params, current_state = scanned_vars
+        if use_forced:
+          current_params, current_state, forced_routed_experts_layer = scanned_vars
+        else:
+          current_params, current_state = scanned_vars
+          forced_routed_experts_layer = None
         kv_cache_layer = None
 
       if self.config.parameter_memory_host_offload:
@@ -1013,6 +1032,8 @@ class NNXDecoder(nnx.Module):
       call_kwargs = dict(valid_kwargs)
       if kv_cache_layer is not None:
         call_kwargs["kv_cache"] = kv_cache_layer
+      if forced_routed_experts_layer is not None:
+        call_kwargs["forced_routed_experts"] = forced_routed_experts_layer
 
       layer_out = layer(carry, *args, **call_kwargs)
 
@@ -1052,11 +1073,20 @@ class NNXDecoder(nnx.Module):
         # Statically slice the parameters and state for this layer
         current_params = jax.tree.map(lambda x, i=i: x[i], params)
         current_state = jax.tree.map(lambda x, i=i: x[i], state)
+        current_forced = jax.tree.map(lambda x, i=i: x[i], forced_routed_experts) if use_forced else None
+
+        if use_forced:
+          scanned_vars = (
+              current_params,
+              current_state,
+              kv_caches_list[i],
+              current_forced,
+          )
+        else:
+          scanned_vars = (current_params, current_state, kv_caches_list[i])
 
         # Call the layer
-        current_carry, (_, updated_kv) = layer_fn_wrapped(
-            current_carry, (current_params, current_state, kv_caches_list[i])
-        )
+        current_carry, (_, updated_kv) = layer_fn_wrapped(current_carry, scanned_vars)
 
         # Update the list in-place (mutates the list passed by reference)
         kv_caches_list[i] = updated_kv
@@ -1068,7 +1098,11 @@ class NNXDecoder(nnx.Module):
       params = nnx_ensure_scan_leading_axis(params, length)
       state = nnx_ensure_scan_leading_axis(state, length)
 
-      final_carry, scanned_state = jax.lax.scan(layer_fn_wrapped, x_in, (params, state))
+      if use_forced:
+        scan_xs = (params, state, forced_routed_experts)
+      else:
+        scan_xs = (params, state)
+      final_carry, scanned_state = jax.lax.scan(layer_fn_wrapped, x_in, scan_xs)
       returned_kv_stacked = None
 
     if scan_axis != 0:
@@ -1556,6 +1590,7 @@ class NNXDecoder(nnx.Module):
       attention_metadata=None,
       deepstack_visual_embeds: None | list[jnp.ndarray] = None,
       multimodal_input: None | MultimodalInput = None,
+      forced_routed_experts: jax.Array | None = None,
   ):
     cfg = self.config
     assert decoder_input_tokens.ndim == 2  # [batch, len]
@@ -1762,11 +1797,16 @@ class NNXDecoder(nnx.Module):
                     num_layers=num_moe,
                 )
             else:
+              if forced_routed_experts is not None:
+                forced_experts_t = jnp.transpose(forced_routed_experts, (2, 0, 1, 3))
+              else:
+                forced_experts_t = None
               y, self.moe_layers, _ = self._apply_layers_sequentially(
                   self.moe_layers,
                   y,
                   *layer_args,
                   length=num_moe,
+                  forced_routed_experts=forced_experts_t,
                   **layer_kwargs,
               )
         elif self.is_gemma3:
@@ -1793,6 +1833,16 @@ class NNXDecoder(nnx.Module):
           )
         else:
           scan_length = int(cfg.num_decoder_layers / cfg.inhomogeneous_layer_cycle_interval)
+          if forced_routed_experts is not None:
+            forced_experts_t = jnp.transpose(forced_routed_experts, (2, 0, 1, 3))
+            cycle_interval = cfg.inhomogeneous_layer_cycle_interval
+            forced_routed_experts_t = jnp.reshape(
+                forced_experts_t,
+                (scan_length, cycle_interval) + forced_experts_t.shape[1:],
+            )
+          else:
+            forced_routed_experts_t = None
+
           if kv_caches is not None:
             # Pass the kv_caches list directly to avoid copying in jnp.stack,
             # which breaks vLLM PagedAttention in-place memory updates.
@@ -1803,6 +1853,7 @@ class NNXDecoder(nnx.Module):
                 *layer_args,
                 length=scan_length,
                 kv_caches_stacked=kv_caches,
+                forced_routed_experts=forced_routed_experts_t,
                 **layer_kwargs,
             )
             # kv_caches list is updated in-place inside _apply_layers_sequentially
@@ -1812,13 +1863,14 @@ class NNXDecoder(nnx.Module):
                 y,
                 *layer_args,
                 length=scan_length,
+                forced_routed_experts=forced_routed_experts_t,
                 **layer_kwargs,
             )
       else:
         prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg)
 
         # Hoisted function to preserve XLA cache ID
-        def pure_layer_fn(graphdef, state_in, y_in, kv_in):
+        def pure_layer_fn(graphdef, state_in, y_in, kv_in, forced_routed_experts_in):
 
           if cfg.parameter_memory_host_offload:
             state_in = jax.tree.map(
@@ -1827,11 +1879,15 @@ class NNXDecoder(nnx.Module):
             )
 
           merged_layer = nnx.merge(graphdef, state_in)
-          out_y, out_kv = merged_layer(y_in, *layer_args, kv_cache=kv_in, **layer_kwargs)
+          call_kwargs = dict(layer_kwargs)
+          if forced_routed_experts_in is not None:
+            call_kwargs["forced_routed_experts"] = forced_routed_experts_in
+          out_y, out_kv = merged_layer(y_in, *layer_args, kv_cache=kv_in, **call_kwargs)
           return out_y, out_kv, nnx.state(merged_layer)
 
         checkpointed_fn = jax.checkpoint(pure_layer_fn, policy=policy, prevent_cse=prevent_cse)
 
+        moe_lyr_idx = 0
         for lyr, layer in enumerate(self.layers):
           graphdef, state = nnx.split(layer)
           if kv_caches is not None:
@@ -1852,7 +1908,20 @@ class NNXDecoder(nnx.Module):
           if input_tokens is not None:
             layer_kwargs["decoder_input_tokens"] = input_tokens
 
-          y, kv_cache, new_state = checkpointed_fn(graphdef, state, y, kv_cache)
+          supports_forced_routing = cfg.decoder_block in (
+              DecoderBlockType.QWEN3_MOE,
+              DecoderBlockType.QWEN3_NEXT,
+              DecoderBlockType.QWEN3_5,
+          )
+
+          current_forced_routed_experts = None
+          if supports_forced_routing and forced_routed_experts is not None:
+            current_forced_routed_experts = forced_routed_experts[:, :, moe_lyr_idx, :]
+            moe_lyr_idx += 1
+          elif supports_forced_routing:
+            moe_lyr_idx += 1
+
+          y, kv_cache, new_state = checkpointed_fn(graphdef, state, y, kv_cache, current_forced_routed_experts)
           nnx.update(layer, new_state)
 
           if kv_caches is not None and kv_cache is not None:
