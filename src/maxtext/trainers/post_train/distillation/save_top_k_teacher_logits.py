@@ -89,13 +89,11 @@ def create_tf_example(example_dict):
       features[key] = tf.train.Feature(int64_list=tf.train.Int64List(value=[val]))
       continue
 
-    # Use .ravel() to avoid the memory copy that .flatten() does
     flat_val = np.asarray(val).ravel()
 
     if flat_val.dtype in [np.float32, np.float64, np.float16, jnp.bfloat16]:
       if flat_val.dtype != np.float32:
         flat_val = flat_val.astype(np.float32)
-      # Use .tolist() for fast Protobuf C++ ingestion
       features[key] = tf.train.Feature(float_list=tf.train.FloatList(value=flat_val.tolist()))
     elif flat_val.dtype in [np.int32, np.int64]:
       if flat_val.dtype != np.int64:
@@ -179,11 +177,11 @@ def generate_and_save_data(config, local_args):
   if not os.path.exists(local_tmp_dir):
     os.makedirs(local_tmp_dir, exist_ok=True)
 
-  upload_executor = ThreadPoolExecutor(max_workers=4)
+  upload_executor = ThreadPoolExecutor(max_workers=local_args.upload_workers)
   # Restrict to 1 worker to ensure sequential writing to the ArrayRecord file
   write_executor = ThreadPoolExecutor(max_workers=1)
   # New executor purely for CPU-bound protobuf serialization
-  serialization_executor = ThreadPoolExecutor(max_workers=16)
+  serialization_executor = ThreadPoolExecutor(max_workers=local_args.serialization_workers)
 
   devices = jax.devices()
   devices_array = maxtext_utils.create_device_mesh(config, devices)
@@ -219,7 +217,9 @@ def generate_and_save_data(config, local_args):
               max_logging.log(f"Queueing distributed background uploads for Step {step}...")
             upload_executor.submit(background_upload, local_output_path, gcs_file_path, jax.process_index())
 
-          # Re-initialize the writer with 1 worker
+          # Re-initialize the writer thread pool. We restrict it to exactly 1 worker
+          # to ensure sequential, in-order writing to the ArrayRecord file. A new pool
+          # is needed because the previous one was shut down to flush all pending writes.
           write_executor = ThreadPoolExecutor(max_workers=1)
 
         file_index = step // steps_per_file
@@ -321,6 +321,10 @@ if __name__ == "__main__":
   parser.add_argument("--gcs_upload_path", type=str, default=None)
   parser.add_argument("--local_tmp_dir", type=str, default="/tmp")
   parser.add_argument("--steps_per_file", type=int, default=50)
+  parser.add_argument("--upload_workers", type=int, default=4, help="Number of workers for GCS uploads.")
+  parser.add_argument(
+      "--serialization_workers", type=int, default=16, help="Number of workers for protobuf serialization."
+  )
   local_arg, remaining_args = parser.parse_known_args()
 
   main_wrapper = functools.partial(main, local_args=local_arg)
