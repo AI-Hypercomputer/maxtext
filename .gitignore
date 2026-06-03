@@ -1,6 +1,7 @@
 *__pycache__*
 tmp/
 logs/
+manual_test_runs/
 .venvs
 venv*
 maxtext_venv/
