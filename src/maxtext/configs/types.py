@@ -1324,6 +1324,9 @@ class Distillation(BaseModel):
   distill_beta_schedule: Literal["constant", "linear", "cosine"] = Field(
       "constant", description="Schedule type for beta annealing ('constant', 'linear', or 'cosine')."
   )
+  distill_teacher_top_k: int = Field(
+      0, description="If > 0, online distillation will slice the teacher logits to only use the top-K values."
+  )
 
   # --- Learn to init related parameters --
   learn_to_init_mode: bool = Field(False, description="Runs in the learn-to-init mode only")

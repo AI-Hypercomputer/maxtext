@@ -126,7 +126,7 @@ def get_distillation_optimizer(config, max_train_steps):
   return optimizer
 
 
-def create_forward_fn(config: pyconfig.HyperParameters) -> Callable[..., distillation_utils.DistillationForwardOutput]:
+def create_forward_fn(config: pyconfig.HyperParameters, is_teacher: bool = False) -> Callable[..., distillation_utils.DistillationForwardOutput]:
   """Creates a forward function closure that binds the specific model configuration.
 
   Args:
@@ -151,6 +151,10 @@ def create_forward_fn(config: pyconfig.HyperParameters) -> Callable[..., distill
         decoder_target_tokens=kwargs.get("decoder_target_tokens", None),
         decoder_target_mask=kwargs.get("decoder_target_mask", None),
     )
+    top_k_indices = None
+    if is_teacher and getattr(config, "distill_teacher_top_k", 0) > 0:
+      logits, top_k_indices = jax.lax.top_k(logits, config.distill_teacher_top_k)
+      
     out_projection_activations = None
     if config.distill_beta > 0.0:
       out_projection_activations = maxtext_utils.get_intermediate_value(model, "out_projection_activations", clear=True)
@@ -163,8 +167,12 @@ def create_forward_fn(config: pyconfig.HyperParameters) -> Callable[..., distill
         moe_lb_loss = jnp.mean(jnp.concatenate(total_moe_lb_losses))
 
     retval = distillation_utils.DistillationForwardOutput(
-        logits=logits, out_projection_activations=out_projection_activations, moe_lb_loss=moe_lb_loss
+      logits=logits, 
+      out_projection_activations=out_projection_activations, 
+      moe_lb_loss=moe_lb_loss,
+      top_k_indices=top_k_indices
     )
+
     return retval
 
   return model_forward_fn
@@ -592,8 +600,8 @@ def build_training_components(
   # 3. Define Distillation Strategy
 
   # Both Student and Teacher use the same forward logic via the adapter
-  student_forward_fn = create_forward_fn(student_config)
-  teacher_forward_fn = create_forward_fn(teacher_config)
+  student_forward_fn = create_forward_fn(student_config, is_teacher=False)
+  teacher_forward_fn = create_forward_fn(teacher_config, is_teacher=True)
 
   # Use Monitored strategy from Utils
   strategy = distillation_utils.CombinedDistillationStrategy(

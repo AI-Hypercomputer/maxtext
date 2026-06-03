@@ -6,9 +6,9 @@
 # image before running — the placeholders below will not work as-is. Everything
 # else has a working default. Example:
 #
-#   DISTILL_GCS_BUCKET=gs://your-bucket \
-#   XPK_BASE_IMAGE=gcr.io/your-project/maxtext_base_image:tag \
-#     bash scripts/distillation/distill_qwen3_30b_base.sh submit
+  # DISTILL_GCS_BUCKET=gs://ajkv-distillation \ß
+  # XPK_BASE_IMAGE=gcr.io/cloud-tpu-multipod-dev/maxtext_base_image:latest \
+  #   bash scripts/distillation/distill_qwen3_30b_base.sh submit
 set -euo pipefail
 
 MODE="${1:-submit}"
@@ -16,7 +16,7 @@ REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$REPO_ROOT"
 
 # Your GCS bucket: run outputs and staged YAML land here.
-export DISTILL_GCS_BUCKET="${DISTILL_GCS_BUCKET:-gs://YOUR-BUCKET}"
+export DISTILL_GCS_BUCKET="${DISTILL_GCS_BUCKET:-gs://ajkv-distillation}"
 
 export XPK_WORKLOAD="${XPK_WORKLOAD:-q30b-base-$(date +%Y%m%d-%H%M)}"
 export XPK_RUN_NAME="${XPK_RUN_NAME:-qwen3_30b_base}"
@@ -25,20 +25,21 @@ export XPK_PROJECT="${XPK_PROJECT:-cloud-tpu-multipod-dev}"
 export XPK_ZONE="${XPK_ZONE:-us-central1}"
 export XPK_DEVICE_TYPE="${XPK_DEVICE_TYPE:-tpu7x-4x4x4}"
 export XPK_BASE_OUTPUT_DIR="${XPK_BASE_OUTPUT_DIR:-${DISTILL_GCS_BUCKET}/distillation}"
-export XPK_BASE_IMAGE="${XPK_BASE_IMAGE:-gcr.io/cloud-tpu-multipod-dev/maxtext_base_image:agagik-distill}"
+export XPK_BASE_IMAGE="${XPK_BASE_IMAGE:-gcr.io/cloud-tpu-multipod-dev/maxtext_fixed_python_v2}"
 export XPK_PRIORITY="${XPK_PRIORITY:-high}"
 
 export XPK_USE_GCSFUSE=1
 export XPK_DATASET_BUCKET="${XPK_DATASET_BUCKET:-maxtext-dataset}"
 export XPK_DATASET_SUBPATH="${XPK_DATASET_SUBPATH:-array-record/climbmix/*.arrayrecord}"
 
-LOCAL_YAML="src/maxtext/configs/post_train/distillation_qwen3_30b_base.yml"
+LOCAL_YAML="src/maxtext/configs/post_train/distillation.yml"
 export XPK_DISTILL_CONFIG="${XPK_DISTILL_CONFIG:-$LOCAL_YAML}"
-export XPK_YAML_GCS="${XPK_YAML_GCS:-${DISTILL_GCS_BUCKET}/distill-configs/distillation_qwen3_30b_base.yml}"
+export XPK_YAML_GCS="${XPK_YAML_GCS:-${DISTILL_GCS_BUCKET}/distill-configs/distillation.yml}"
 
 export DISTILL_ALPHA="${DISTILL_ALPHA:-0.6}"
 export DISTILL_TEMPERATURE="${DISTILL_TEMPERATURE:-1.0}"
-export DISTILL_BETA="${DISTILL_BETA:-1.0}"
+export DISTILL_BETA="${DISTILL_BETA:-0.0}"
+export DISTILL_TEACHER_TOP_K="${DISTILL_TEACHER_TOP_K:-64}"
 export DISTILL_LAYER_INDICES="${DISTILL_LAYER_INDICES:-[0,1,2,3,4,5,6,7]}"
 
 # XLA flags tuned for ~20% MFU.
@@ -56,7 +57,7 @@ export XPK_LIBTPU_INIT_ARGS="${XPK_LIBTPU_INIT_ARGS:---xla_tpu_scoped_vmem_limit
 --xla_latency_hiding_scheduler_rerun=2}"
 
 if [ "$MODE" = "submit" ]; then
-  gcloud storage cp "$XPK_DISTILL_CONFIG" "$XPK_YAML_GCS"
+  gcloud storage cp "$LOCAL_YAML" "$XPK_YAML_GCS"
 fi
 
 exec bash src/maxtext/trainers/post_train/distillation/scripts/run_distill_xpk.sh "$MODE"
