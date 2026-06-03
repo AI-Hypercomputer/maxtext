@@ -45,6 +45,7 @@ from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import Embed
 from maxtext.layers.nnx_decoders import NNXDecoder, NNXDecoderLayer, deepstack_process
 from maxtext.layers.normalizations import RMSNorm
+from maxtext.models import gemma4_small
 from maxtext.models.gpt3 import Gpt3LayerNorm
 from maxtext.models.llama2 import LlamaDecoderLayer
 from maxtext.utils import maxtext_utils
@@ -907,9 +908,6 @@ class TestGemma4SmallNNXDecoder(unittest.TestCase):
         mesh=mesh,
         rngs=rngs,
     )
-
-    # Pass in kv_caches list to be populated
-    from maxtext.models import gemma4_small
 
     layer_types = gemma4_small.build_layer_types(cfg.num_decoder_layers, cfg.model_name)
     cache_index_of = gemma4_small.kv_cache_slot_map(layer_types, cfg.num_kv_shared_layers)
