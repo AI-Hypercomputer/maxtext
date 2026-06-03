@@ -48,6 +48,57 @@ import qwix
 from qwix.contrib.sparsity import sparsity_module
 import qwix.pallas as qpl
 import tokamax
+from tokamax._src.ops.ragged_dot.pallas_mosaic_tpu import (
+    PallasMosaicTpuRaggedDot,
+    Config,
+    DEFAULT_RAGGED_DOT_DIM_NUMS,
+    DLHS_RAGGED_DOT_DIM_NUMS,
+    DRHS_RAGGED_DOT_DIM_NUMS,
+)
+from tokamax._src.ops.ragged_dot import base
+import dataclasses
+
+
+@jax.tree_util.register_dataclass
+@dataclasses.dataclass(frozen=True, kw_only=True, slots=True)
+class PallasMosaicTpuRaggedDotCustom(PallasMosaicTpuRaggedDot):
+  """A custom PallasMosaicTpuRaggedDot subclass that overrides _get_heuristics_config."""
+
+  config: Config | None = None
+  fwd_tile: tuple[int, int, int] = (128, 128, 128)
+  dlhs_tile: tuple[int, int, int] = (128, 128, 128)
+  drhs_tile: tuple[int, int, int] = (128, 128, 128)
+
+  def __post_init__(self):
+    qdtype = self.qdtype if self.qdtype is None else jnp.dtype(self.qdtype).name
+    if self.vjp is None:
+
+      def fn(*args, **kw):
+        # pylint: disable=unexpected-keyword-arg
+        return PallasMosaicTpuRaggedDotCustom(
+            qdtype=qdtype,
+            interpret=self.interpret,
+            fwd_tile=self.fwd_tile,
+            dlhs_tile=self.dlhs_tile,
+            drhs_tile=self.drhs_tile,
+        )(*args, **kw)
+
+      object.__setattr__(
+          self,
+          "vjp",
+          functools.partial(base.vjp, dlhs_ragged_dot=fn, drhs_ragged_dot=fn),
+      )
+
+  def _get_heuristics_config(self, ba) -> Config:
+    dims = ba.arguments.get("ragged_dot_dimension_numbers", DEFAULT_RAGGED_DOT_DIM_NUMS)
+    if dims == DEFAULT_RAGGED_DOT_DIM_NUMS:
+      return Config(tile_m=self.fwd_tile[0], tile_k=self.fwd_tile[1], tile_n=self.fwd_tile[2])
+    elif dims == DLHS_RAGGED_DOT_DIM_NUMS:
+      return Config(tile_m=self.dlhs_tile[0], tile_k=self.dlhs_tile[1], tile_n=self.dlhs_tile[2])
+    elif dims == DRHS_RAGGED_DOT_DIM_NUMS:
+      return Config(tile_m=self.drhs_tile[0], tile_k=self.drhs_tile[1], tile_n=self.drhs_tile[2])
+    return Config()
+
 
 set_xla_metadata = xla_metadata.set_xla_metadata
 
@@ -1084,6 +1135,18 @@ class RoutedMoE(nnx.Module):
       wo_bias,
   ):
     """Perform sparse matrix multiplication of inputs and Experts."""
+    config = self.config
+
+    gmm_impl_wi = PallasMosaicTpuRaggedDotCustom(
+        fwd_tile=(config.wi_tile_fwd_batch_seq, config.wi_tile_fwd_embed_dim, config.wi_tile_fwd_mlp_dim),
+        dlhs_tile=(config.wi_tile_dlhs_batch_seq, config.wi_tile_dlhs_mlp_dim, config.wi_tile_dlhs_embed_dim),
+        drhs_tile=(config.wi_tile_drhs_batch_seq, config.wi_tile_drhs_embed_dim, config.wi_tile_drhs_mlp_dim),
+    )
+    gmm_impl_wo = PallasMosaicTpuRaggedDotCustom(
+        fwd_tile=(config.wo_tile_fwd_batch_seq, config.wo_tile_fwd_mlp_dim, config.wo_tile_fwd_embed_dim),
+        dlhs_tile=(config.wo_tile_dlhs_batch_seq, config.wo_tile_dlhs_embed_dim, config.wo_tile_dlhs_mlp_dim),
+        drhs_tile=(config.wo_tile_drhs_batch_seq, config.wo_tile_drhs_mlp_dim, config.wo_tile_drhs_embed_dim),
+    )
 
     def jax_ragged_dot_gmm(inputs, kernel, tiling, group_sizes, expert_assignments, padding_amount):
       """Execute jax.lax.ragged_dot, with potential quantization"""
@@ -1128,6 +1191,15 @@ class RoutedMoE(nnx.Module):
         output *= scales
       return output
 
+    def get_gmm_group_sizes(inputs, kernel, ep):
+      # Calculates perfectly balanced group sizes where each local expert receives an equal
+      # share of local tokens, adjusted for expert parallelism.
+      #
+      # Note: This function assumes the inputs are ragged and padded to the worst-case size
+      # (which is generally a factor of EP larger than perfectly balanced). This is why we must
+      # divide by EP.
+      return (inputs.shape[0] // kernel.shape[0] // ep,) * kernel.shape[0]
+
     def get_tokamax_group_sizes(group_sizes, inputs, kernel):
       # TODO (b/491979205) pipeline fsdp ag per repeat fails tokamax gmm
       if self.config.use_qwix_quantization or (
@@ -1137,9 +1209,10 @@ class RoutedMoE(nnx.Module):
       elif self.config.attention == "vllm_rpa":
         return group_sizes
       else:
+        ep = self.get_expert_parallelism_size()
         return tokamax.RaggedDotGroupSizes(
             group_sizes,
-            (inputs.shape[0] // kernel.shape[0],) * kernel.shape[0],
+            get_gmm_group_sizes(inputs, kernel, ep),
         )
 
     def get_quantization_dtypes():
@@ -1150,7 +1223,7 @@ class RoutedMoE(nnx.Module):
         rhs_quantize_dtype = quant_dg.fwd.dg_quantizer.rhs.numerics.get_dtype()
       return lhs_quantize_dtype, rhs_quantize_dtype
 
-    def gmm(inputs, kernel, tiling, group_sizes, expert_assignments, weight_gather_axes):
+    def gmm(inputs, kernel, tiling, group_sizes, expert_assignments, weight_gather_axes, gmm_impl=None):
       if inputs.shape[0] != expert_assignments.shape[0]:
         raise ValueError("The number of input tokens must match the number of expert assignments!")
 
@@ -1184,7 +1257,7 @@ class RoutedMoE(nnx.Module):
               group_sizes=tokamax_group_sizes,
               precision=jax.lax.Precision.DEFAULT,
               preferred_element_type=self.dtype,
-              implementation="mosaic",
+              implementation="mosaic" if gmm_impl is None else [gmm_impl],
           )
       elif self.config.megablox:  # Older forked megablox
         output = mblx.gmm(
@@ -1473,6 +1546,7 @@ class RoutedMoE(nnx.Module):
           w0,
           tiling=wi_tile_size,
           weight_gather_axes=wi_gather_axes,
+          gmm_impl=gmm_impl_wi,
       )
       if self.get_tensor_transpose_parallelism_size() > 1:
         layer_w0 = jax.lax.psum(layer_w0, "tensor_transpose")
@@ -1485,6 +1559,7 @@ class RoutedMoE(nnx.Module):
           w1,
           tiling=wi_tile_size,
           weight_gather_axes=wi_gather_axes,
+          gmm_impl=gmm_impl_wi,
       )
       if self.get_tensor_transpose_parallelism_size() > 1:
         layer_w1 = jax.lax.psum(layer_w1, "tensor_transpose")
@@ -1498,6 +1573,7 @@ class RoutedMoE(nnx.Module):
           wo,
           tiling=wo_tile_size,
           weight_gather_axes=wo_gather_axes,
+          gmm_impl=gmm_impl_wo,
       )
       if self.get_tensor_parallelism_size() > 1:
         intermediate_output = jax.lax.psum_scatter(
