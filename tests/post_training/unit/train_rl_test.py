@@ -506,6 +506,7 @@ class TokenizerChatTemplateTest(unittest.TestCase):
         mock_tokenizer.chat_template,
         "{% for message in messages %}{{ message.content }}{% endfor %}",
     )
+
   @pytest.mark.cpu_only
   def test_chat_template_raises_value_error_when_empty(self):
     """Test that ValueError is raised when tokenizer lacks chat_template and both config options are empty."""
@@ -535,7 +536,9 @@ class TokenizerChatTemplateTest(unittest.TestCase):
   @pytest.mark.cpu_only
   def test_apply_chat_template_works_after_configuration(self):
     """Verifies apply_chat_template succeeds and produces the expected format after our code path runs."""
+
     class DummyTokenizer:  # pylint: disable=missing-class-docstring
+
       def __init__(self):
         self.chat_template = None
 
@@ -543,9 +546,11 @@ class TokenizerChatTemplateTest(unittest.TestCase):
         if self.chat_template is None:
           raise ValueError("Cannot apply chat template because chat_template is None")
         import jinja2  # pylint: disable=import-outside-toplevel
+
         env = jinja2.Environment()
         template = env.from_string(self.chat_template)
         return template.render(messages=conversation)
+
     tokenizer = DummyTokenizer()
     trainer_config = SimpleNamespace(
         chat_template="{{ messages[0].content }}",
@@ -560,6 +565,7 @@ class TokenizerChatTemplateTest(unittest.TestCase):
     # Verify apply_chat_template now runs successfully and renders correct content
     rendered = tokenizer.apply_chat_template([{"role": "user", "content": "Hello!"}])
     self.assertEqual(rendered, "Hello!")
+
 
 if __name__ == "__main__":
   unittest.main()

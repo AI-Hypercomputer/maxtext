@@ -582,7 +582,6 @@ def create_rl_components(
   return rl_cluster, rl_trainer, optimizer
 
 
-
 def configure_tokenizer_chat_template(model_tokenizer: Any, trainer_config: Any) -> None:
   """Populates the tokenizer's chat_template from config if missing."""
   if getattr(model_tokenizer, "chat_template", None) is None:
@@ -592,9 +591,8 @@ def configure_tokenizer_chat_template(model_tokenizer: Any, trainer_config: Any)
       from maxtext.input_pipeline.instruction_data_processing import (  # pylint: disable=import-outside-toplevel
           load_chat_template_from_file,
       )
-      model_tokenizer.chat_template = load_chat_template_from_file(
-          trainer_config.chat_template_path
-      )
+
+      model_tokenizer.chat_template = load_chat_template_from_file(trainer_config.chat_template_path)
     else:
       raise ValueError(
           f"Tokenizer {getattr(trainer_config, 'tokenizer_path', None)!r} has no chat_template "
