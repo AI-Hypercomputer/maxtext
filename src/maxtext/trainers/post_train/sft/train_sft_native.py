@@ -61,7 +61,7 @@ def train_loop(config, recorder, state=None):
     raise TypeError("Set use_sft to True to run Supervised Fine Tuning.")
 
   (
-      init_rng,
+      _,
       checkpoint_manager,
       state_mesh_shardings,
       model,
@@ -77,24 +77,18 @@ def train_loop(config, recorder, state=None):
   params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
 
   # NNX jits over the GraphDef + a flat nnx.State, so split the TrainStateNNX
-  # here (mirrors trainers/pre_train/train.py). Linen jits over the module.
-  if config.pure_nnx:
-    jit_model, state = nnx.split(state)
-  else:
-    jit_model = model
+  # here (mirrors trainers/pre_train/train.py).
+  jit_model, state = nnx.split(state)
 
   p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
       config, jit_model, mesh, state, state_mesh_shardings, train_step, eval_step, eval_data_iterator, params_shardings
   )
 
-  # The NNX train/eval step takes (state, batch); the Linen one also takes a
-  # dropout rng. Only pass the rng on the Linen path so the args match the jitted
-  # in_shardings (see get_functional_train_with_signature).
-  rng_args = () if config.pure_nnx else (init_rng,)
-
+  # The NNX train/eval step takes (state, batch); no dropout rng is passed
+  # (see get_functional_train_with_signature).
   with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
     shaped_batch = maxtext_utils.get_shaped_batch(config)
-    compiled = p_train_step.lower(state, shaped_batch, *rng_args).compile()
+    compiled = p_train_step.lower(state, shaped_batch).compile()
     compiled_stats = compiled.memory_analysis()
     max_utils.print_compiled_memory_stats(compiled_stats)
 
@@ -104,10 +98,7 @@ def train_loop(config, recorder, state=None):
   metric_logger = MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
 
   # Write train config params, num model params, and XLA flags to tensorboard
-  if config.pure_nnx:
-    _, setup_params, _ = nnx.split(state.model, nnx.Param, ...)
-  else:
-    setup_params = state.params
+  _, setup_params, _ = nnx.split(state.model, nnx.Param, ...)
   metric_logger.write_setup_info_to_tensorboard(setup_params)
 
   _job_completed_gracefully = False
@@ -118,9 +109,7 @@ def train_loop(config, recorder, state=None):
 
       with jax.profiler.StepTraceAnnotation("train", step_num=step):
         example_batch = data_loader.load_next_batch()
-        # pylint: disable=not-callable
-        nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
-        step_rng_args = () if config.pure_nnx else (nextrng,)
+        step_rng_args = ()
         with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
           with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
             state, metrics = p_train_step(state, example_batch, *step_rng_args)

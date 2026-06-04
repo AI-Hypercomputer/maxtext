@@ -860,14 +860,11 @@ def from_pretrained(
     )
     config = pyconfig.HyperParameters(new_config)
 
-  if config.pure_nnx:
-    _create_model, abstract_model = create_nnx_abstract_model(
-        config, mesh, devices, model_mode, rng_key, quant_mode_str=quant_mode_str
-    )
-    model = maxtext_utils_nnx.create_nnx_sharded_model(abstract_model, _create_model, mesh=mesh)
-    # TODO: print debug_sharding info
-  else:
-    model = create_nnx_sharded_model_hybrid(config, mesh, devices, model_mode, rng_key)
+  _create_model, abstract_model = create_nnx_abstract_model(
+      config, mesh, devices, model_mode, rng_key, quant_mode_str=quant_mode_str
+  )
+  model = maxtext_utils_nnx.create_nnx_sharded_model(abstract_model, _create_model, mesh=mesh)
+  # TODO: print debug_sharding info
 
   # Compute logical-axis specs for downstream checkpoint alignment.
   # The model-creation helpers above resolve specs internally for sharding, but

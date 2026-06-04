@@ -1030,26 +1030,21 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
   if step is not None:
     actual_step = int(step)
   else:
-    if config.pure_nnx:
-      # Under DiLoCo the step lives on the DiLoCoTrainState; otherwise on the optimizer.
-      actual_step = int(state.step if config.enable_diloco else state.optimizer.step) - 1
-    else:
-      # Linen TrainState has .step attribute
-      actual_step = int(state.step) - 1
+    # Under DiLoCo the step lives on the DiLoCoTrainState; otherwise on the optimizer.
+    actual_step = int(state.step if config.enable_diloco else state.optimizer.step) - 1
 
   if checkpoint_manager.latest_step() == actual_step:
     max_logging.log(f"Checkpoint for step {actual_step} already exists, skipping save.")
     return
 
-  if config.pure_nnx:
-    # Save in the Linen on-disk layout so pure_nnx and Linen checkpoints are interchangeable.
-    if config.enable_diloco:
-      # DiLoCoTrainState: persist the synchronized global model (outer params).
-      # The per-replica inner optimizer / outer-momentum state is not checkpointed.
-      step_value = state.step.get_value() if hasattr(state.step, "get_value") else state.step
-      state = train_state_nnx.to_linen_checkpoint_dict({"model": state.params, "optimizer": {"step": step_value}})
-    else:
-      state = train_state_nnx.to_linen_checkpoint_dict(state.to_pure_dict())
+  # Save in the Linen on-disk layout so pure_nnx and Linen checkpoints are interchangeable.
+  if config.enable_diloco:
+    # DiLoCoTrainState: persist the synchronized global model (outer params).
+    # The per-replica inner optimizer / outer-momentum state is not checkpointed.
+    step_value = state.step.get_value() if hasattr(state.step, "get_value") else state.step
+    state = train_state_nnx.to_linen_checkpoint_dict({"model": state.params, "optimizer": {"step": step_value}})
+  else:
+    state = train_state_nnx.to_linen_checkpoint_dict(state.to_pure_dict())
 
   # Determine if a checkpoint save should be forced, overriding the usual `config.checkpoint_period` logic.
   # This occurs if this function was called:
