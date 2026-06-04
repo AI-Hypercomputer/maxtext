@@ -849,25 +849,22 @@ def maybe_quantize_model(model, config):
   if config.use_qwix_quantization and not config.use_batch_split_schedule:
     quantization_provider = get_qt_provider(config)
     if quantization_provider:
-      if config.pure_nnx:
-        input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
-        dummy_tokens = jnp.ones(input_shape, dtype=jnp.int32)
-        dummy_positions = jnp.ones(input_shape, dtype=jnp.int32)
-        dummy_segment_ids = jnp.ones(input_shape, dtype=jnp.int32)
-        model = qwix.quantize_model(
-            model,
-            quantization_provider,
-            dummy_tokens,
-            dummy_positions,
-            dummy_segment_ids,
-            enable_dropout=False,
-        )
-        # Qwix quantization runs a forward pass during tracing, which sows transient nnx.Intermediate variables
-        # (e.g. max_logits from QK-Clip, MTP losses) into the model. Popping them here prevents structural mismatches
-        # between the initial setup GraphDef/state_mesh_shardings and the stripped states during train steps.
-        nnx.pop(model, nnx.Intermediate)
-      else:
-        model = qwix.quantize_model(model, quantization_provider)
+      input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
+      dummy_tokens = jnp.ones(input_shape, dtype=jnp.int32)
+      dummy_positions = jnp.ones(input_shape, dtype=jnp.int32)
+      dummy_segment_ids = jnp.ones(input_shape, dtype=jnp.int32)
+      model = qwix.quantize_model(
+          model,
+          quantization_provider,
+          dummy_tokens,
+          dummy_positions,
+          dummy_segment_ids,
+          enable_dropout=False,
+      )
+      # Qwix quantization runs a forward pass during tracing, which sows transient nnx.Intermediate variables
+      # (e.g. max_logits from QK-Clip, MTP losses) into the model. Popping them here prevents structural mismatches
+      # between the initial setup GraphDef/state_mesh_shardings and the stripped states during train steps.
+      nnx.pop(model, nnx.Intermediate)
   return model
 
 
