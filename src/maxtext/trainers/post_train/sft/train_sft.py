@@ -252,8 +252,8 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
     # Provide rules context so 'norm' is translated to mesh axes during maybe_restore
     with nn_partitioning.axis_rules(mt_config.logical_axis_rules):
       trainer = MaxTextPeftTrainer(model, optimizer, tunix_config)
-      if mt_config.lora.lora_restore_path:
-        trainer = lora_utils.restore_lora_from_path(trainer, mt_config)
+      if mt_config.lora.lora_restore_path and trainer.train_steps == 0:
+        lora_utils.restore_lora_from_path(trainer.model, mt_config)
       trainer.with_training_hooks(training_hooks)
       trainer.with_data_hooks(data_hooks)
       trainer = use_maxtext_loss_function(trainer, mt_config)
