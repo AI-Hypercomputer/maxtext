@@ -36,7 +36,7 @@ from maxtext.common.common_types import (
     MultimodalInput,
     ShardMode,
 )
-from maxtext.layers import initializers, linears, mhc, normalizations, quantizations
+from maxtext.layers import linears, mhc, normalizations, quantizations
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import Embed, PositionalEmbedding, attend_on_embedding
@@ -1111,38 +1111,22 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.GEMMA: [gemma.GemmaDecoderLayer],
         DecoderBlockType.GEMMA2: [gemma2.Gemma2DecoderLayer],
         DecoderBlockType.GEMMA3: [gemma3.Gemma3DecoderLayer],
-        DecoderBlockType.GEMMA4: get_scannable(
-            gemma4.Gemma4DecoderLayer, gemma4.Gemma4ScannableBlock
-        ),
+        DecoderBlockType.GEMMA4: get_scannable(gemma4.Gemma4DecoderLayer, gemma4.Gemma4ScannableBlock),
         DecoderBlockType.GEMMA4_SMALL: [gemma4_small.Gemma4SmallDecoderLayer],
         DecoderBlockType.GPT3: [gpt3.Gpt3DecoderLayer],
         DecoderBlockType.QWEN2: [qwen2.Qwen2DecoderLayer],
         DecoderBlockType.QWEN3: [qwen3.Qwen3DecoderLayer],
         DecoderBlockType.QWEN3_MOE: [qwen3.Qwen3MoeDecoderLayer],
-        DecoderBlockType.QWEN3_CUSTOM_MOE: [
-            qwen3_custom.Qwen3CustomMoeDecoderLayer
-        ],
+        DecoderBlockType.QWEN3_CUSTOM_MOE: [qwen3_custom.Qwen3CustomMoeDecoderLayer],
         DecoderBlockType.SIMPLE: [simple_layer.SimpleDecoderLayer],
         DecoderBlockType.SIMPLE_MLP: [simple_layer.SimpleMlpDecoderLayer],
         DecoderBlockType.DEEPSEEK: get_deepseek(),
-        DecoderBlockType.DEEPSEEK4: get_scannable(
-            deepseek4.DeepSeek4DecoderLayer, deepseek4.DeepSeek4ScannableBlock
-        ),
-        DecoderBlockType.GPT_OSS: get_scannable(
-            gpt_oss.GptOssDecoderLayer, gpt_oss.GptOssScannableBlock
-        ),
-        DecoderBlockType.QWEN3_NEXT: get_scannable(
-            qwen3.Qwen3NextDecoderLayer, qwen3.Qwen3NextScannableBlock
-        ),
-        DecoderBlockType.QWEN3_5: get_scannable(
-            qwen3_5.Qwen3_5DecoderLayer, qwen3_5.Qwen3_5ScannableBlock
-        ),
-        DecoderBlockType.LLAMA4: get_scannable(
-            llama4.Llama4DecoderLayer, llama4.Llama4ScannableBlock
-        ),
-        DecoderBlockType.OLMO3: get_scannable(
-            olmo3.Olmo3DecoderLayer, olmo3.Olmo3ScannableBlock
-        ),
+        DecoderBlockType.DEEPSEEK4: get_scannable(deepseek4.DeepSeek4DecoderLayer, deepseek4.DeepSeek4ScannableBlock),
+        DecoderBlockType.GPT_OSS: get_scannable(gpt_oss.GptOssDecoderLayer, gpt_oss.GptOssScannableBlock),
+        DecoderBlockType.QWEN3_NEXT: get_scannable(qwen3.Qwen3NextDecoderLayer, qwen3.Qwen3NextScannableBlock),
+        DecoderBlockType.QWEN3_5: get_scannable(qwen3_5.Qwen3_5DecoderLayer, qwen3_5.Qwen3_5ScannableBlock),
+        DecoderBlockType.LLAMA4: get_scannable(llama4.Llama4DecoderLayer, llama4.Llama4ScannableBlock),
+        DecoderBlockType.OLMO3: get_scannable(olmo3.Olmo3DecoderLayer, olmo3.Olmo3ScannableBlock),
     }
 
     if cfg.decoder_block not in layer_map:
@@ -2095,25 +2079,3 @@ class NNXDecoder(nnx.Module):
         kv_caches[cache_idx] = kv_cache
 
     return y, kv_caches
-
-
-def decoder_as_linen(
-    config: Config,
-    mesh: Mesh,
-    rngs: nnx.Rngs,
-    model_mode: str,
-    quant: None | Quant = None,
-):
-  """Creates a Decoder module"""
-  module = nnx_wrappers.to_linen(
-      NNXDecoder,
-      config=config,
-      mesh=mesh,
-      model_mode=model_mode,
-      rngs=rngs,
-      quant=quant,
-      name="decoder",
-      abstract_init=False,
-      metadata_fn=initializers.variable_to_logically_partitioned,
-  )
-  return module
