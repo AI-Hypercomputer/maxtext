@@ -138,12 +138,17 @@ class TestHloDiff:
 
     try:
       base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
-      config_path = os.path.join(base_dir, config_file)
+      # Compile via base.yml + model_name (the normal training path) so the config inherits
+      # base.yml's logical_axis_rules and exercises the real NNX path. Loading the model yml
+      # directly as the top-level config skips base.yml, leaving logical_axis_rules empty.
+      base_config_path = os.path.join(base_dir, "src/maxtext/configs/base.yml")
+      model_name = os.path.splitext(os.path.basename(config_file))[0]
 
       # Arguments for train_compile
       test_args = [
           None,
-          config_path,
+          base_config_path,
+          f"model_name={model_name}",
           "dataset_type=synthetic",
           "override_model_config=true",
           "compile_topology_num_slices=1",

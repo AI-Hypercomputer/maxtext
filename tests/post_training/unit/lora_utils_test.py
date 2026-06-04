@@ -47,8 +47,6 @@ _BASE_CONFIG = {
     "base_mlp_dim": 256,
     "max_prefill_predict_length": 4,
     "model_name": "llama2-7b",
-    "enable_nnx": True,
-    "pure_nnx_decoder": True,
     "override_model_config": True,
     "weight_dtype": "bfloat16",
 }
