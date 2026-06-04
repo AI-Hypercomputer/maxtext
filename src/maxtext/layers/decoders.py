@@ -986,6 +986,8 @@ class Decoder(nn.Module):
               bidirectional_mask_value,
               previous_chunk,
               slot,
+              kv_caches=kv_caches,
+              attention_metadata=attention_metadata,
           )
         elif cfg.decoder_block == DecoderBlockType.GEMMA4:
           bidirectional_mask_value = multimodal_input.bidirectional_mask if multimodal_input is not None else None
@@ -998,6 +1000,8 @@ class Decoder(nn.Module):
               bidirectional_mask_value,
               previous_chunk,
               slot,
+              kv_caches=kv_caches,
+              attention_metadata=attention_metadata,
           )
         else:
           RemattedBlockLayer = RemattedBlockLayers[0]
@@ -1224,6 +1228,8 @@ class Decoder(nn.Module):
       bidirectional_mask,
       previous_chunk,
       slot,
+      kv_caches=None,
+      attention_metadata=None,
   ):
     """Applies Gemma3 scanned decoder blocks, handling main scan and remainders."""
 
@@ -1237,27 +1243,65 @@ class Decoder(nn.Module):
     policy = self.get_remat_policy()
     RemattedGemma3Block = self.set_remat_policy([gemma3.Gemma3ScannableBlockToLinen], policy)[0]
 
-    layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
     layer_kwargs = {"num_of_layers": attention_pattern_length}
 
     # Apply the main scan over the full blocks
     if scan_length > 0:
+      kv_cache_scanned = None
+      if kv_caches is not None:
+        grouped_kv_caches = []
+        for i in range(scan_length):
+          start_idx = i * attention_pattern_length
+          end_idx = start_idx + attention_pattern_length
+          grouped_kv_caches.append(tuple(kv_caches[start_idx:end_idx]))
+
+        # Stack the list of tuples into a tuple of stacked PyTrees
+        kv_cache_scanned = jax.tree_util.tree_map(lambda *args: jnp.stack(args, axis=0), *grouped_kv_caches)
+
       broadcast_args = (
           decoder_segment_ids,
           decoder_positions,
           deterministic,
           model_mode,
+          slot,
+          None,  # page_state
+          previous_chunk,
+          bidirectional_mask,
+          kv_cache_scanned,
+          attention_metadata,
       )
-      y, _ = self.scan_decoder_layers(
+
+      in_axes_tuple = (
+          nn.broadcast,  # decoder_segment_ids
+          nn.broadcast,  # decoder_positions
+          nn.broadcast,  # deterministic
+          nn.broadcast,  # model_mode
+          nn.broadcast,  # slot
+          nn.broadcast,  # page_state
+          nn.broadcast,  # previous_chunk
+          nn.broadcast,  # bidirectional_mask
+          0 if kv_caches is not None else nn.broadcast,  # kv_cache
+          nn.broadcast,  # attention_metadata
+      )
+
+      y, returned_kv_cache = self.scan_decoder_layers(
           cfg,
           RemattedGemma3Block,
           scan_length,
           "layers",
           mesh,
-          in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+          in_axes_tuple=in_axes_tuple,
           model_mode=self.model_mode,
           **layer_kwargs,
-      )(y, *broadcast_args, **layer_call_kwargs)
+      )(y, *broadcast_args)
+
+      if kv_caches is not None and returned_kv_cache is not None:
+        # Unstack the returned tuple of stacked PyTrees back into list of tuples
+        unstacked = [jax.tree_util.tree_map(lambda x: x[i], returned_kv_cache) for i in range(scan_length)]
+        for i, updated_group in enumerate(unstacked):
+          start_idx = i * attention_pattern_length
+          for offset, updated_item in enumerate(updated_group):
+            kv_caches[start_idx + offset] = updated_item
 
     # Apply any remaining layers that did not fit into a full scanned block
     num_remaining_layers = cfg.num_decoder_layers % attention_pattern_length
@@ -1267,7 +1311,13 @@ class Decoder(nn.Module):
       layer = RemattedGemma3Block(
           config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode, name="layers_remainder", **rem_layer_kwargs
       )  # pytype: disable=wrong-keyword-args
-      y, _ = layer(
+
+      remainder_kv = None
+      if kv_caches is not None:
+        start_idx = scan_length * attention_pattern_length
+        remainder_kv = tuple(kv_caches[start_idx : start_idx + num_remaining_layers])
+
+      y_and_kv = layer(
           y,
           decoder_segment_ids,
           decoder_positions,
@@ -1275,8 +1325,23 @@ class Decoder(nn.Module):
           model_mode,
           previous_chunk=previous_chunk,
           slot=slot,
-          **layer_call_kwargs,
+          bidirectional_mask=bidirectional_mask,
+          kv_cache=remainder_kv,
+          attention_metadata=attention_metadata,
       )
+
+      if isinstance(y_and_kv, tuple):
+        y = y_and_kv[0]
+        updated_remainder_kv = y_and_kv[1]
+      else:
+        y = y_and_kv
+        updated_remainder_kv = None
+
+      if kv_caches is not None and updated_remainder_kv is not None:
+        start_idx = scan_length * attention_pattern_length
+        for offset, updated_item in enumerate(updated_remainder_kv):
+          kv_caches[start_idx + offset] = updated_item
+
     return y
 
   def _apply_gemma4_scanned_blocks(
@@ -1289,6 +1354,8 @@ class Decoder(nn.Module):
       bidirectional_mask,
       previous_chunk,
       slot,
+      kv_caches=None,
+      attention_metadata=None,
   ):
     """Applies Gemma4 scanned decoder blocks, handling main scan and remainders."""
 
@@ -1300,22 +1367,50 @@ class Decoder(nn.Module):
     num_full_blocks = cfg.num_decoder_layers // block_pattern_len
     remainder_layers = cfg.num_decoder_layers % block_pattern_len
 
-    broadcast_args = (
-        decoder_segment_ids,
-        decoder_positions,
-        deterministic,
-        model_mode,
-        slot,
-        previous_chunk,
-        bidirectional_mask,
-    )
-
     if num_full_blocks > 0:
       ScannableBlockToLinen = gemma4.Gemma4ScannableBlockToLinen
       policy = self.get_remat_policy()
       RemattedGemma4Block = self.set_remat_policy([ScannableBlockToLinen], policy)[0]
+
+      kv_cache_scanned = None
+      if kv_caches is not None:
+        grouped_kv_caches = []
+        for i in range(num_full_blocks):
+          start_idx = i * block_pattern_len
+          end_idx = start_idx + block_pattern_len
+          grouped_kv_caches.append(tuple(kv_caches[start_idx:end_idx]))
+
+        # Stack the list of tuples into a tuple of stacked PyTrees
+        kv_cache_scanned = jax.tree_util.tree_map(lambda *args: jnp.stack(args, axis=0), *grouped_kv_caches)
+
+      broadcast_args = (
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+          slot,
+          None,  # page_state
+          previous_chunk,
+          bidirectional_mask,
+          kv_cache_scanned,
+          attention_metadata,
+      )
+
+      in_axes_tuple = (
+          nn.broadcast,  # decoder_segment_ids
+          nn.broadcast,  # decoder_positions
+          nn.broadcast,  # deterministic
+          nn.broadcast,  # model_mode
+          nn.broadcast,  # slot
+          nn.broadcast,  # page_state
+          nn.broadcast,  # previous_chunk
+          nn.broadcast,  # bidirectional_mask
+          0 if kv_caches is not None else nn.broadcast,  # kv_cache
+          nn.broadcast,  # attention_metadata
+      )
+
       # For a fully scanned block, apply it inside a nn.scan over the calculated number of full blocks
-      y, _ = nn.scan(
+      y, returned_kv_cache = nn.scan(
           RemattedGemma4Block,
           variable_axes={
               "params": cfg.param_scan_axis,
@@ -1325,7 +1420,7 @@ class Decoder(nn.Module):
               "_overwrite_with_gradient": 0,
           },
           split_rngs={"params": True, "dropout": cfg.enable_dropout},
-          in_axes=(nn.broadcast,) * len(broadcast_args),
+          in_axes=in_axes_tuple,
           length=num_full_blocks,
           metadata_params={
               nn.PARTITION_NAME: "layers",
@@ -1342,6 +1437,14 @@ class Decoder(nn.Module):
           y, *broadcast_args
       )
 
+      if kv_caches is not None and returned_kv_cache is not None:
+        # Unstack the returned tuple of stacked PyTrees back into list of tuples
+        unstacked = [jax.tree_util.tree_map(lambda x: x[i], returned_kv_cache) for i in range(num_full_blocks)]
+        for i, updated_group in enumerate(unstacked):
+          start_idx = i * block_pattern_len
+          for offset, updated_item in enumerate(updated_group):
+            kv_caches[start_idx + offset] = updated_item
+
     # Process any remaining layers that don't fit into a full scanned block
     for layer_id in range(cfg.num_decoder_layers - remainder_layers, cfg.num_decoder_layers):
       attention_type = gemma4.get_attention_type(layer_id)
@@ -1353,9 +1456,34 @@ class Decoder(nn.Module):
           attention_type=attention_type,
           layer_idx=layer_id,
       )
-      y = layer(y, *broadcast_args)
-      if cfg.scan_layers:
-        y = y[0]
+
+      kv_cache = kv_caches[layer_id] if kv_caches is not None else None
+
+      # inputs, decoder_segment_ids, decoder_positions, deterministic, model_mode,
+      # previous_chunk, page_state, slot, bidirectional_mask, kv_cache, attention_metadata
+      remainder_args = (
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+          previous_chunk,
+          None,  # page_state
+          slot,
+          bidirectional_mask,
+          kv_cache,
+          attention_metadata,
+      )
+
+      y_and_kv = layer(y, *remainder_args)
+      if isinstance(y_and_kv, tuple):
+        y = y_and_kv[0]
+        new_kv = y_and_kv[1]
+      else:
+        y = y_and_kv
+        new_kv = None
+
+      if kv_caches is not None and new_kv is not None:
+        kv_caches[layer_id] = new_kv
 
     return y
 
