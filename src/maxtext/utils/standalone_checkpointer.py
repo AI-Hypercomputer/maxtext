@@ -118,8 +118,8 @@ def add_entropy_to_checkpoint(state):
     * Linen `TrainState`: `state.params` + `state.opt_state` (tuple).
     * NNX `TrainStateNNX` (Module): `state.model` is an `nnx.Module`; the
       optimizer's `opt_state` is the optax tuple of NamedTuples.
-    * NNX `nnx.State` (post-split, what `setup_training_state` returns under
-      `pure_nnx`): `state.model` and `state.optimizer.opt_state` are sub-States;
+    * NNX `nnx.State` (post-split, what `setup_training_state` returns):
+      `state.model` and `state.optimizer.opt_state` are sub-States;
       `opt_state[0].mu`/`nu` are themselves States that can be reassigned.
   """
   if hasattr(state, "model"):

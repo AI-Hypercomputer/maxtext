@@ -14,24 +14,19 @@
 
 """Test that all weights are expected dtype (default float32)"""
 
-from functools import partial
 import unittest
 
 from flax import nnx
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
+
 from maxtext.common import train_state_nnx
-from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.configs import pyconfig
-from maxtext.layers import quantizations
-from maxtext.models import models
 from maxtext.optimizers import optimizers
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
 from tests.utils.test_helpers import get_test_config_path
-
-Transformer = models.transformer_as_linen
 
 
 class StateDtypes(unittest.TestCase):
@@ -41,47 +36,30 @@ class StateDtypes(unittest.TestCase):
     """Gets model state including weights and optimizer state"""
     # Setup necessary inputs to build a model state
     config = pyconfig.initialize(argv)
-    quant = quantizations.configure_quantization(config)
     devices_array = maxtext_utils.create_device_mesh(config)
     mesh = Mesh(devices_array, config.mesh_axes)
 
-    if config.pure_nnx:
-      _create_model_partial, model = (
-          model_creation_utils.create_nnx_abstract_model(config, mesh)
-      )
-    else:
-      model = Transformer(
-          config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN
-      )
+    _create_model_partial, model = model_creation_utils.create_nnx_abstract_model(config, mesh)
 
     learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
     tx = optimizers.get_optimizer(config, learning_rate_schedule, model)
-    _, example_rng = jax.random.split(jax.random.PRNGKey(0), 2)
 
-    if config.pure_nnx:
+    def create_train_state_fn():
+      nnx_model = _create_model_partial()
+      optimizer = nnx.Optimizer(nnx_model, tx, wrt=nnx.Param)
+      return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
 
-      def create_train_state_fn():
-        nnx_model = _create_model_partial()
-        optimizer = nnx.Optimizer(nnx_model, tx, wrt=nnx.Param)
-        return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
-
-      init_state_fn = create_train_state_fn
-    else:
-      init_state_fn = partial(maxtext_utils.init_initial_state, model, tx, config, True, example_rng)
+    init_state_fn = create_train_state_fn
     abstract_state, _, _ = maxtext_utils.get_abstract_state(config, mesh, init_state_fn, True)
-    return abstract_state, config.pure_nnx
+    return abstract_state
 
   def get_weights(self, argv):
-    state, is_nnx = self.get_state(argv)
-    if is_nnx:
-      return state.model
-    return state.params
+    state = self.get_state(argv)
+    return state.model
 
   def get_mu(self, argv):
-    state, is_nnx = self.get_state(argv)
-    if is_nnx:
-      return state.optimizer.opt_state[0]["mu"]
-    return state.opt_state[0].mu
+    state = self.get_state(argv)
+    return state.optimizer.opt_state[0]["mu"]
 
   def assert_pytree_is_dtype(self, weights, expected_dtype):
     """Asserts that all valid parameter arrays within the PyTree match the expected dtype."""
@@ -96,9 +74,7 @@ class StateDtypes(unittest.TestCase):
         return
 
       # Skip PRNG keys
-      if type(leaf_dtype).__name__ == "KeyTy" or str(leaf_dtype).startswith(
-          "key<"
-      ):
+      if type(leaf_dtype).__name__ == "KeyTy" or str(leaf_dtype).startswith("key<"):
         return
 
       if jnp.issubdtype(leaf_dtype, jnp.integer):

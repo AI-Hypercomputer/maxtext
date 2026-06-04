@@ -222,7 +222,7 @@ def _load_linen_checkpoint_into_nnx(
     use_ocdbt,
     use_zarr3,
 ):
-  """Restores a Linen-layout checkpoint into an NNX state (pure_nnx resume).
+  """Restores a Linen-layout checkpoint into an NNX state.
 
   Restores against a Linen-shape abstract, reshapes back via
   `from_linen_checkpoint_dict`, then fills NNX-only rngs/dropout with defaults.
@@ -340,7 +340,7 @@ def _load_full_state_from_path(
     else:
       raise ocp_v1.errors.InvalidLayoutError(f"Unknown checkpoint layout: {source_checkpoint_layout}")
   else:
-    # pure_nnx saves in the Linen on-disk layout; reshape it back into the NNX state.
+    # Checkpoints use the Linen on-disk layout; reshape it back into the NNX state.
     if isinstance(abstract_unboxed_pre_state, nnx.State):
       return _load_linen_checkpoint_into_nnx(
           path,
@@ -832,7 +832,7 @@ def load_state_if_possible(
         )
         ocp.type_handlers.register_type_handler(jax.Array, array_handler, override=True)
 
-      # pure_nnx saves in the Linen on-disk layout; reshape it back into the NNX state.
+      # Checkpoints use the Linen on-disk layout; reshape it back into the NNX state.
       # (Emergency managers use their own restore path below.)
       if isinstance(abstract_unboxed_pre_state, nnx.State) and not isinstance(
           checkpoint_manager,
@@ -1041,7 +1041,7 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
     max_logging.log(f"Checkpoint for step {actual_step} already exists, skipping save.")
     return
 
-  # Save in the Linen on-disk layout so pure_nnx and Linen checkpoints are interchangeable.
+  # Save in the Linen on-disk layout so checkpoints stay interchangeable across formats.
   if config.enable_diloco:
     # DiLoCoTrainState: persist the synchronized global model (outer params).
     # The per-replica inner optimizer / outer-momentum state is not checkpointed.
