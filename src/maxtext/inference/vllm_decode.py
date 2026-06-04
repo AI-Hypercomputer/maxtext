@@ -98,8 +98,6 @@ def decode_with_vllm(config: Config) -> None:
               "debug_sharding": config.debug_sharding,
               "prefuse_moe_weights": config.prefuse_moe_weights,
               "scan_layers": config.scan_layers,
-              "enable_nnx": config.enable_nnx,
-              "pure_nnx_decoder": config.pure_nnx_decoder,
           },
           "sharding": {
               "sharding_strategy": {
@@ -201,9 +199,7 @@ def decode_with_tunix(
     overrides = config.vllm_hf_overrides
     if isinstance(overrides, str) and "MaxTextForCausalLM" in overrides:
       use_no_op_mappings = True
-    elif isinstance(overrides, dict) and "MaxTextForCausalLM" in overrides.get(
-        "architectures", []
-    ):
+    elif isinstance(overrides, dict) and "MaxTextForCausalLM" in overrides.get("architectures", []):
       use_no_op_mappings = True
 
   tunix_model = TunixMaxTextAdapter(
@@ -238,14 +234,8 @@ def decode_with_tunix(
     )
 
   # MaxText uses -1 to mean "disabled"; vLLM requires top_p in (0, 1].
-  top_p = (
-      config.decode_sampling_nucleus_p
-      if config.decode_sampling_nucleus_p > 0
-      else 1.0
-  )
-  top_k = (
-      config.decode_sampling_top_k if config.decode_sampling_top_k > 0 else -1
-  )
+  top_p = config.decode_sampling_nucleus_p if config.decode_sampling_nucleus_p > 0 else 1.0
+  top_k = config.decode_sampling_top_k if config.decode_sampling_top_k > 0 else -1
 
   rollout_vllm_additional_config = {
       "maxtext_config": {
@@ -255,8 +245,6 @@ def decode_with_tunix(
           "debug_sharding": config.debug_sharding,
           "prefuse_moe_weights": config.prefuse_moe_weights,
           "scan_layers": config.scan_layers,
-          "enable_nnx": config.enable_nnx,
-          "pure_nnx_decoder": config.pure_nnx_decoder,
       }
   }
 
@@ -280,17 +268,9 @@ def decode_with_tunix(
       rollout_vllm_hbm_utilization=config.hbm_utilization_vllm,
       rollout_vllm_init_with_random_weights=True,
       rollout_vllm_tpu_backend_type="jax",
-      tensor_parallel_size=(
-          config.ici_tensor_parallelism
-          if config.ici_tensor_parallelism > 0
-          else 1
-      ),
+      tensor_parallel_size=(config.ici_tensor_parallelism if config.ici_tensor_parallelism > 0 else 1),
       data_parallel_size=jax.device_count()
-      // (
-          config.ici_tensor_parallelism
-          if config.ici_tensor_parallelism > 0
-          else 1
-      ),
+      // (config.ici_tensor_parallelism if config.ici_tensor_parallelism > 0 else 1),
       rollout_vllm_additional_config=rollout_vllm_additional_config,
       rollout_vllm_kwargs={"hf_overrides": config.vllm_hf_overrides},
   )
@@ -330,9 +310,7 @@ def main(argv: Sequence[str]) -> None:
   if FLAGS.use_tunix:
     maxtext_model, mesh = model_creation_utils.from_pretrained(config)
     if config.lora.enable_lora:
-      maxtext_model = lora_utils.apply_lora_to_model(
-          maxtext_model, mesh, config
-      )
+      maxtext_model = lora_utils.apply_lora_to_model(maxtext_model, mesh, config)
       if config.lora.lora_restore_path:
         lora_utils.restore_lora_from_path(maxtext_model, config)
     decode_with_tunix(config, model=maxtext_model, mesh=mesh)
