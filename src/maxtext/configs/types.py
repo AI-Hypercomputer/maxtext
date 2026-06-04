@@ -1500,6 +1500,10 @@ class Muon(BaseModel):
       None,
       description="If None, apply width scaling to updates. If float, apply consistent rms scaling (recommend 0.2).",
   )
+  ds4_ns: bool = Field(
+      False,
+      description="Whether to use the DeepSeek-V4 hybrid Newton-Schulz iteration parameters (10 steps with custom coefficients).",
+  )
 
 
 class PositionalEmbedding(BaseModel):
@@ -3033,6 +3037,7 @@ class MaxTextConfig(
 
     if self.opt_type == "muon" and self.decoder_block not in [
         DecoderBlockType.DEEPSEEK,
+        DecoderBlockType.DEEPSEEK_V4,
         DecoderBlockType.QWEN3,
         DecoderBlockType.GEMMA3,
         DecoderBlockType.LLAMA2,

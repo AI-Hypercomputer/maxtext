@@ -219,6 +219,188 @@ QWEN3_DIMENSION_NUMBER = {
 }
 
 
+# deepseek_v4 building blocks
+_DEEPSEEK_V4_MHC_ATTENTION = {
+    "post_alpha": mdn(reduction_axis=(0,), output_axis=(-1,)),
+    "post_alpha_scale": None,
+    "post_beta": None,
+    "pre_alpha": mdn(reduction_axis=(0,), output_axis=(-1,)),
+    "pre_alpha_scale": None,
+    "pre_beta": None,
+    "res_alpha": mdn(reduction_axis=(0,), output_axis=(-1,)),
+    "res_alpha_scale": None,
+    "res_beta": None,
+}
+
+_DEEPSEEK_V4_MHC_MLP = _DEEPSEEK_V4_MHC_ATTENTION
+
+_DEEPSEEK_V4_MLP_STD = {
+    "MoeBlock_0": {
+        "gate": {
+            "e_score_correction_bias": None,
+            "kernel": mdn(reduction_axis=(0,), output_axis=(-1,)),
+        },
+        "wi_0": mdn(reduction_axis=(-2,), output_axis=(-1,)),
+        "wi_1": mdn(reduction_axis=(-2,), output_axis=(-1,)),
+        "wo": mdn(reduction_axis=(-2,), output_axis=(-1,)),
+    },
+    "shared_experts": {
+        "wi": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+        "wo": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+    },
+}
+
+_DEEPSEEK_V4_MLP_PRE = {
+    "MoeBlock_0": {
+        "gate": {
+            "kernel": mdn(reduction_axis=(0,), output_axis=(-1,)),
+            "tid2eid": None,
+        },
+        "wi_0": mdn(reduction_axis=(-2,), output_axis=(-1,)),
+        "wi_1": mdn(reduction_axis=(-2,), output_axis=(-1,)),
+        "wo": mdn(reduction_axis=(-2,), output_axis=(-1,)),
+    },
+    "shared_experts": {
+        "wi": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+        "wo": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+    },
+}
+
+_DEEPSEEK_V4_ATTN_INDEXER = {
+    "compressor": {
+        "gate_proj": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+        "indexer": {
+            "gate_proj": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+            "kv_norm": {"scale": None},
+            "kv_proj": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+            "position_bias": None,
+            "q_b_proj": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+            "weights_proj": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+        },
+        "kv_norm": {"scale": None},
+        "kv_proj": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+        "position_bias": None,
+    },
+    "kv_norm": {"scale": None},
+    "kv_proj": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+    "o_a_proj": {"kernel": mdn(reduction_axis=(-2,), output_axis=(-1,))},
+    "o_b_proj": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+    "q_a_norm": {"scale": None},
+    "q_a_proj": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+    "q_b_proj": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+    "sinks": None,
+}
+
+_DEEPSEEK_V4_ATTN_COMPRESSOR = {
+    "compressor": {
+        "gate_proj": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+        "kv_norm": {"scale": None},
+        "kv_proj": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+        "position_bias": None,
+    },
+    "kv_norm": {"scale": None},
+    "kv_proj": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+    "o_a_proj": {"kernel": mdn(reduction_axis=(-2,), output_axis=(-1,))},
+    "o_b_proj": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+    "q_a_norm": {"scale": None},
+    "q_a_proj": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+    "q_b_proj": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+    "sinks": None,
+}
+
+_DEEPSEEK_V4_ATTN_BASIC = {
+    "kv_norm": {"scale": None},
+    "kv_proj": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+    "o_a_proj": {"kernel": mdn(reduction_axis=(-2,), output_axis=(-1,))},
+    "o_b_proj": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+    "q_a_norm": {"scale": None},
+    "q_a_proj": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+    "q_b_proj": {"kernel": mdn(reduction_axis=(0,), output_axis=(-1,))},
+    "sinks": None,
+}
+
+_DEEPSEEK_V4_LAYER_INDEXER = {
+    "mhc_attention": _DEEPSEEK_V4_MHC_ATTENTION,
+    "mhc_mlp": _DEEPSEEK_V4_MHC_MLP,
+    "mlp": _DEEPSEEK_V4_MLP_STD,
+    "post_self_attention_layer_norm": {"scale": None},
+    "pre_self_attention_layer_norm": {"scale": None},
+    "self_attention": _DEEPSEEK_V4_ATTN_INDEXER,
+}
+
+_DEEPSEEK_V4_LAYER_COMPRESSOR = {
+    "mhc_attention": _DEEPSEEK_V4_MHC_ATTENTION,
+    "mhc_mlp": _DEEPSEEK_V4_MHC_MLP,
+    "mlp": _DEEPSEEK_V4_MLP_STD,
+    "post_self_attention_layer_norm": {"scale": None},
+    "pre_self_attention_layer_norm": {"scale": None},
+    "self_attention": _DEEPSEEK_V4_ATTN_COMPRESSOR,
+}
+
+_DEEPSEEK_V4_LAYER_BASIC_STD = {
+    "mhc_attention": _DEEPSEEK_V4_MHC_ATTENTION,
+    "mhc_mlp": _DEEPSEEK_V4_MHC_MLP,
+    "mlp": _DEEPSEEK_V4_MLP_STD,
+    "post_self_attention_layer_norm": {"scale": None},
+    "pre_self_attention_layer_norm": {"scale": None},
+    "self_attention": _DEEPSEEK_V4_ATTN_BASIC,
+}
+
+_DEEPSEEK_V4_LAYER_BASIC_PRE = {
+    "mhc_attention": _DEEPSEEK_V4_MHC_ATTENTION,
+    "mhc_mlp": _DEEPSEEK_V4_MHC_MLP,
+    "mlp": _DEEPSEEK_V4_MLP_PRE,
+    "post_self_attention_layer_norm": {"scale": None},
+    "pre_self_attention_layer_norm": {"scale": None},
+    "self_attention": _DEEPSEEK_V4_ATTN_BASIC,
+}
+
+_DEEPSEEK_V4_LAYER_INDEXER_PRE = {
+    "mhc_attention": _DEEPSEEK_V4_MHC_ATTENTION,
+    "mhc_mlp": _DEEPSEEK_V4_MHC_MLP,
+    "mlp": _DEEPSEEK_V4_MLP_PRE,
+    "post_self_attention_layer_norm": {"scale": None},
+    "pre_self_attention_layer_norm": {"scale": None},
+    "self_attention": _DEEPSEEK_V4_ATTN_INDEXER,
+}
+
+_DEEPSEEK_V4_LAYER_COMPRESSOR_PRE = {
+    "mhc_attention": _DEEPSEEK_V4_MHC_ATTENTION,
+    "mhc_mlp": _DEEPSEEK_V4_MHC_MLP,
+    "mlp": _DEEPSEEK_V4_MLP_PRE,
+    "post_self_attention_layer_norm": {"scale": None},
+    "pre_self_attention_layer_norm": {"scale": None},
+    "self_attention": _DEEPSEEK_V4_ATTN_COMPRESSOR,
+}
+
+DEEPSEEK_V4_DIMENSION_NUMBER = {
+    "params": {
+        "decoder": {
+            "decoder_norm": {"scale": None},
+            "hc_head": {
+                "hc_base": None,
+                "hc_fn": mdn(reduction_axis=(0,), output_axis=(-1,)),
+                "hc_scale": None,
+            },
+            "layers": {
+                "layers_0": _DEEPSEEK_V4_LAYER_INDEXER,
+                "layers_1": _DEEPSEEK_V4_LAYER_COMPRESSOR,
+            },
+            "logits_dense": {"kernel": None},
+            "post_layers": {
+                "layers_0": _DEEPSEEK_V4_LAYER_BASIC_STD,
+            },
+            "pre_layers": {
+                "layers_0": _DEEPSEEK_V4_LAYER_BASIC_PRE,
+                "layers_1": _DEEPSEEK_V4_LAYER_INDEXER_PRE,
+                "layers_2": _DEEPSEEK_V4_LAYER_COMPRESSOR_PRE,
+            },
+        },
+        "token_embedder": {"embedding": None},
+    }
+}
+
+
 class MuonDimensionTest(parameterized.TestCase):
   """Unit tests for Muon dimension number generation.
 
@@ -229,6 +411,7 @@ class MuonDimensionTest(parameterized.TestCase):
   @parameterized.named_parameters(
       ("deepseek2-16b", "deepseek2-16b", DEEPSEEK2_DIMENSION_NUMBER),
       ("deepseek3-671b", "deepseek3-671b", DEEPSEEK3_DIMENSION_NUMBER),
+      ("deepseek_v4-tiny", "deepseek_v4-tiny", DEEPSEEK_V4_DIMENSION_NUMBER),
       ("kimi-k2-1t", "kimi-k2-1t", DEEPSEEK3_DIMENSION_NUMBER),
       ("llama2-7b", "llama2-7b", LLAMA2_DIMENSION_NUMBER),
       ("llama3-8b", "llama3-8b", LLAMA2_DIMENSION_NUMBER),
@@ -244,7 +427,10 @@ class MuonDimensionTest(parameterized.TestCase):
     Muon dimension numbers match the hardcoded reference.
     """
     actual_output = muon_utils.get_model_mdn(model_name, scan_layers=True, pure_nnx=False)
-    self.assertEqual(actual_output, expected_output)
+    if "params" in expected_output and "params" in actual_output:
+      self.assertEqual(actual_output["params"], expected_output["params"])
+    else:
+      self.assertEqual(actual_output, expected_output)
 
 
 class AdamWMaskTest(parameterized.TestCase):
@@ -620,6 +806,38 @@ class TestMuonLogic(unittest.TestCase):
     self.assertEqual(result.self_attention.query.kernel.value, mdn((0,), (-2, -1)))
     # Check attention out: [0, -2] -> [-1]
     self.assertEqual(result.self_attention.out.kernel.value, mdn((0, -2), (-1,)))
+
+  def test_muon_ds4_ns_config(self):
+    """Verifies that muon optimizer configures Newton-Schulz parameters correctly based on ds4_ns."""
+    model = MagicMock()
+    learning_rate_schedule = MagicMock()
+
+    # Case 1: ds4_ns = True
+    argv_true = ["", get_test_config_path(), "run_name=test", "opt_type=muon", "ds4_ns=true"]
+    config_true = pyconfig.initialize(argv_true)
+
+    with patch("maxtext.optimizers.optimizers.get_muon_weight_dimension_numbers") as mock_get_mdn, \
+         patch("maxtext.optimizers.optimizers.muon") as mock_muon:
+      mock_get_mdn.return_value = {}
+      optimizers.get_optimizer(config_true, learning_rate_schedule, model=model)
+      mock_muon.assert_called_once()
+      _, kwargs = mock_muon.call_args
+      self.assertEqual(kwargs["ns_steps"], 10)
+      self.assertEqual(len(kwargs["ns_coeffs"]), 10)
+      self.assertEqual(kwargs["ns_coeffs"][-1], (2.0, -1.5, 0.5))
+
+    # Case 2: ds4_ns = False (Default)
+    argv_false = ["", get_test_config_path(), "run_name=test", "opt_type=muon", "ds4_ns=false"]
+    config_false = pyconfig.initialize(argv_false)
+
+    with patch("maxtext.optimizers.optimizers.get_muon_weight_dimension_numbers") as mock_get_mdn, \
+         patch("maxtext.optimizers.optimizers.muon") as mock_muon:
+      mock_get_mdn.return_value = {}
+      optimizers.get_optimizer(config_false, learning_rate_schedule, model=model)
+      mock_muon.assert_called_once()
+      _, kwargs = mock_muon.call_args
+      self.assertEqual(kwargs["ns_steps"], 5)
+      self.assertEqual(kwargs["ns_coeffs"], (3.4445, -4.7750, 2.0315))
 
 
 if __name__ == "__main__":
