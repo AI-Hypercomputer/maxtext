@@ -43,7 +43,6 @@ maxdepth: 2
 hidden:
 ---
 install_maxtext
-build_maxtext
 tutorials
 run_maxtext
 guides
