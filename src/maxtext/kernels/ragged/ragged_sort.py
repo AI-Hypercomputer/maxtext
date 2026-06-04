@@ -125,7 +125,7 @@ def ring_ragged_sort(hidden_states_local, topk_indices_local, num_experts, topk,
     n = topk_argsort_revert_indices.shape[0]
     # pos = jnp.arange(n)
     # valid_rows_mask = (pos >= shard_output_start) & (pos < shard_output_end)
-    valid_rows_mask = jnp.ones((n,), dtype=jnp.bool_)
+    valid_rows_mask = jnp.broadcast_to(True, (n,))
     # The forward scatter-add over `token_indices_sorted` is equivalent to a
     # gather-reduce: each input token has exactly `topk` contributions located
     # at sorted positions `topk_argsort_revert_indices[t*topk:(t+1)*topk]`.
