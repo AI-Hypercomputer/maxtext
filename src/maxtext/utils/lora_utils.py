@@ -19,7 +19,7 @@ from functools import partial
 import json
 import os
 import re
-from typing import Any, Optional
+from typing import Optional
 
 from flax import nnx, linen as nn
 from flax.linen import partitioning as nn_partitioning
@@ -465,10 +465,9 @@ def _build_lora_provider(mt_config: pyconfig.HyperParameters) -> qwix.LoraProvid
   return qwix.LoraProvider(**lora_kwargs)
 
 
-def _prepare_dummy_inputs() -> tuple[jnp.ndarray, jnp.ndarray]:
+def _prepare_dummy_inputs(dummy_bs: int = 1) -> tuple[jnp.ndarray, jnp.ndarray]:
   """Builds dummy decoder inputs used to materialize LoRA parameters."""
   # Keep LoRA warmup as small as possible to minimize compile/memory overhead.
-  dummy_bs = 1
   seq_len = 1
   decoder_input_tokens = jnp.zeros((dummy_bs, seq_len), dtype=jnp.int32)
   decoder_positions = jnp.zeros((dummy_bs, seq_len), dtype=jnp.int32)
@@ -483,29 +482,49 @@ def is_lora_enabled(model: nnx.Module) -> bool:
   return False
 
 
-def _verify_lora_parameters(lora_model: nnx.Module, mt_config: pyconfig.HyperParameters):
+def _verify_lora_parameters(lora_model: nnx.Module, mt_config: pyconfig.HyperParameters) -> None:
   """Validates that LoRA is active or that target modules were matched."""
 
   if is_lora_enabled(lora_model):
+    wrapped_modules = set()
+    for path, value in nnx.iter_graph(lora_model):
+      if isinstance(value, nnx.LoRAParam):
+        if len(path) > 1:
+          parent_path = "/".join(str(p) for p in path[:-1])
+          wrapped_modules.add(parent_path)
+
+    if wrapped_modules:
+      wrapped_modules = sorted(list(wrapped_modules))
+      max_logging.log(
+          f"LoRA configured: module_path='{_get_lora_module_path(mt_config)}' successfully matched "
+          f"{len(wrapped_modules)} target submodules."
+      )
+      preview_limit = 20
+      preview_modules = wrapped_modules[:preview_limit]
+      max_logging.log(f"Sample matched submodules ({len(preview_modules)} of {len(wrapped_modules)}): {preview_modules}")
+    else:
+      max_logging.log("LoRA is enabled. (Detailed submodules match report skipped due to mock model or empty state)")
     return
 
   lora_module_path = _get_lora_module_path(mt_config)
   compiled_module_path = re.compile(lora_module_path)
-  matched_module_paths = []
-  sample_module_paths = []
 
+  matched_module_paths = []
   for path, _ in nnx.iter_modules(lora_model):
     module_path = "/".join(str(p) for p in path)
-    if len(sample_module_paths) < 100:
-      sample_module_paths.append(module_path)
-    if compiled_module_path.search(module_path):
+    if module_path and compiled_module_path.search(module_path):
       matched_module_paths.append(module_path)
 
   if not matched_module_paths:
-    max_logging.log(
-        f"LoRA module_path='{lora_module_path}' did not match any weights. " f"Sample module paths: {sample_module_paths}"
-    )
+    max_logging.log(f"Error: LoRA module_path='{lora_module_path}' did not match any weights.")
     raise ValueError("LoRA enabled but no LoRA parameters found in decoder/model state.")
+
+  # Simplify matched paths by replacing numeric layer indices with "*" to avoid redundant output
+  simplified_matches = sorted(
+      {"/".join("*" if p.isdigit() else p for p in path.split("/")) for path in matched_module_paths}
+  )
+  max_logging.log(f"LoRA target verification: successfully matched {len(matched_module_paths)} modules.")
+  max_logging.log(f"Matched submodule patterns: {simplified_matches}")
 
   raise ValueError(
       "LoRA module path matched target modules, but nnx.LoRAParam is still "
@@ -572,8 +591,12 @@ def apply_lora_to_model(
 
   lora_provider = _build_lora_provider(mt_config)
 
+  dp_size = 1
+  if mesh is not None and "data" in mesh.shape:
+    dp_size = mesh.shape["data"]
+
   model_rngs = getattr(model.decoder, "rngs", None)
-  decoder_input_tokens, decoder_positions = _prepare_dummy_inputs()
+  decoder_input_tokens, decoder_positions = _prepare_dummy_inputs(dummy_bs=dp_size)
 
   lora_model = qwix.apply_lora_to_model(
       model,
@@ -621,20 +644,27 @@ def apply_lora_to_model(
   return lora_model
 
 
-def restore_lora_from_path(trainer: Any, mt_config: pyconfig.HyperParameters) -> Any:
-  """Restores LoRA parameter weights from an external Orbax checkpoint for a fresh run."""
+def restore_lora_from_path(model: nnx.Module, mt_config: pyconfig.HyperParameters) -> nnx.Module:
+  """Restores LoRA parameter weights from an external Orbax checkpoint.
+
+  This function performs the restore in-place on the model's parameters and
+  returns the model with the restored weights applied.
+
+  Args:
+    model: The JAX/Flax NNX model (nnx.Module).
+    mt_config: The HyperParameters config containing the lora configuration.
+
+  Returns:
+    The model with the restored LoRA weights applied in-place.
+
+  Raises:
+    ValueError: If LoRA is not enabled on the model, but a restore path is set.
+  """
   lora_restore_path = mt_config.lora.lora_restore_path
   if not lora_restore_path:
-    return trainer
+    return model
 
-  train_steps = getattr(trainer, "train_steps", 0)
-  if train_steps > 0:
-    max_logging.log(
-        f"PeftTrainer restored current run at step {train_steps}; " f"ignoring lora_restore_path '{lora_restore_path}'."
-    )
-    return trainer
-
-  if not is_lora_enabled(trainer.model):
+  if not is_lora_enabled(model):
     lora_module_path = _get_lora_module_path(mt_config)
     if not mt_config.lora.enable_lora:
       raise ValueError(
@@ -644,7 +674,7 @@ def restore_lora_from_path(trainer: Any, mt_config: pyconfig.HyperParameters) ->
 
   sync_lora_metadata(mt_config)
 
-  abstract_lora_params = nnx.state(trainer.model, nnx.LoRAParam)
+  abstract_lora_params = nnx.state(model, nnx.LoRAParam)
 
   target_for_restore = jax.tree.map(
       lambda v: {"value": v.value},
@@ -700,9 +730,9 @@ def restore_lora_from_path(trainer: Any, mt_config: pyconfig.HyperParameters) ->
       is_leaf=lambda n: isinstance(n, nnx.Variable),
   )
 
-  nnx.update(trainer.model, abstract_lora_params)
+  nnx.update(model, abstract_lora_params)
   max_logging.log(f"LoRA restore complete from '{lora_restore_path}'.")
-  return trainer
+  return model
 
 
 # NNX-shaped LoRA helpers.

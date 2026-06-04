@@ -141,26 +141,41 @@ class LoraUtilsTest(unittest.TestCase):
     self.assertEqual(tokens.shape, (1, 1))
     self.assertEqual(positions.shape, (1, 1))
 
-  def test_verify_lora_parameters_enabled(self):
-    """Test verification of LoRA parameters when enabled."""
-    mock_model = mock.MagicMock()
-    mock_config = mock.MagicMock(spec=pyconfig.HyperParameters)
-
-    # Note: we use our local is_lora_enabled now
-    with mock.patch("maxtext.utils.lora_utils.is_lora_enabled", return_value=True):
-      # Should not raise
-      lora_utils._verify_lora_parameters(mock_model, mock_config)
-
-  def test_verify_lora_parameters_not_enabled_no_match(self):
-    """Test verification fails when LoRA parameters are expected but not found."""
+  def test_verify_lora_parameters_success(self):
+    """Test verification of LoRA parameters with matches and enabled LoRA."""
     mock_model = mock.MagicMock()
     mock_config = mock.MagicMock(spec=pyconfig.HyperParameters)
     mock_config.lora = mock.MagicMock()
-    mock_config.model_name = "llama"
+    mock_config.lora.lora_module_path = ".*mlp/wi_0.*"
+
+    mock_param = nnx.LoRAParam(0.0)
+    mock_graph_entries = [
+        (("decoder", "layers", 0, "mlp", "wi_0", "lora_a"), mock_param),
+    ]
+
+    with (
+        mock.patch("maxtext.utils.lora_utils.nnx.iter_graph", return_value=mock_graph_entries),
+        mock.patch("maxtext.utils.lora_utils.is_lora_enabled", return_value=True),
+        mock.patch("maxtext.utils.max_logging.log") as mock_log,
+    ):
+      lora_utils._verify_lora_parameters(mock_model, mock_config)
+
+      # Should log the successful match pattern summary
+      log_calls = [call[0][0] for call in mock_log.call_args_list]
+      self.assertTrue(any("successfully matched" in msg for msg in log_calls))
+      self.assertTrue(any("Sample matched submodules" in msg for msg in log_calls))
+
+  def test_verify_lora_parameters_not_enabled_no_match(self):
+    """Test verification fails with ValueError when no modules match at all."""
+    mock_model = mock.MagicMock()
+    mock_config = mock.MagicMock(spec=pyconfig.HyperParameters)
+    mock_config.lora = mock.MagicMock()
     mock_config.lora.lora_module_path = "non_existent"
 
-    with mock.patch("maxtext.utils.lora_utils.is_lora_enabled", return_value=False):
-      mock_model.iter_modules.return_value = []
+    with (
+        mock.patch("flax.nnx.iter_modules", return_value=[]),
+        mock.patch("maxtext.utils.lora_utils.is_lora_enabled", return_value=False),
+    ):
       with self.assertRaisesRegex(ValueError, "no LoRA parameters found"):
         lora_utils._verify_lora_parameters(mock_model, mock_config)
 
@@ -274,15 +289,11 @@ class LoraUtilsTest(unittest.TestCase):
     model, _ = model_creation_utils.from_pretrained(cfg, mesh=None, model_mode=model_creation_utils.MODEL_MODE_TRAIN)
     model = lora_utils.apply_lora_to_model(model, None, cfg)
 
-    trainer = mock.MagicMock()
-    trainer.model = model
-    trainer.train_steps = 0
-
     restored_state = nnx.state(model, nnx.LoRAParam)
 
     with mock.patch("orbax.checkpoint.PyTreeCheckpointer.restore", return_value=restored_state) as mock_restore:
       with mock.patch("flax.nnx.update") as mock_update:
-        lora_utils.restore_lora_from_path(trainer, cfg)
+        lora_utils.restore_lora_from_path(model, cfg)
         mock_restore.assert_called_once()
         args, kwargs = mock_restore.call_args
         self.assertEqual(args[0], "some/path")
