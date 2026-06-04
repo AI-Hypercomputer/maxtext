@@ -259,8 +259,6 @@ class Gemma3DecoderLayer(nnx.Module):
 
       stacked_kv_cache = jax.tree_util.tree_map(update_cache, stacked_kv_cache, kv_cache)
       return (layer_output, stacked_kv_cache, layer_idx + 1), None
-    elif cfg.scan_layers:
-      return layer_output, None
     else:
       return layer_output, kv_cache
 
@@ -324,6 +322,8 @@ class Gemma3ScannableBlock(nnx.Module):
       page_state=None,
       previous_chunk=None,
       bidirectional_mask=None,
+      kv_cache=None,
+      attention_metadata=None,
   ):
 
     cfg = self.config
@@ -331,8 +331,10 @@ class Gemma3ScannableBlock(nnx.Module):
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     y = inputs
 
+    updated_kvs = []
     for layer_id in range(self.num_of_layers):
-      y = getattr(self, f"layers_{layer_id}")(
+      current_kv = kv_cache[layer_id] if kv_cache is not None else None
+      y, new_kv = getattr(self, f"layers_{layer_id}")(
           y,
           decoder_segment_ids,
           decoder_positions,
@@ -341,10 +343,15 @@ class Gemma3ScannableBlock(nnx.Module):
           previous_chunk=previous_chunk,
           slot=slot,
           bidirectional_mask=bidirectional_mask,
+          kv_cache=current_kv,
+          attention_metadata=attention_metadata,
       )
-      if cfg.scan_layers:
-        y = y[0]
-    if cfg.scan_layers:
+      if kv_cache is not None:
+        updated_kvs.append(new_kv)
+
+    if kv_cache is not None:
+      return y, tuple(updated_kvs)
+    elif cfg.scan_layers:
       return y, None
     else:
       return y

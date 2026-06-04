@@ -933,7 +933,21 @@ class TestMeshUtils(unittest.TestCase):
 
   def setUp(self):
     # Setup a dummy device array for the mock to return
-    self.devices_array = np.array(jax.devices())
+    devices = jax.devices()
+    if len(devices) < 2:
+      mock_devices = []
+      for i in range(2):
+        d = MagicMock(spec=jax.Device)
+        d.id = i
+        d.device_kind = "cpu"
+        d.platform = "cpu"
+        # make it hashable
+        d.__hash__ = lambda self, idx=i: idx
+        d.__eq__ = lambda self, other, idx=i: isinstance(other, MagicMock) and other.id == idx
+        mock_devices.append(d)
+      self.devices_array = np.array(mock_devices)
+    else:
+      self.devices_array = np.array(devices)
 
   @patch("maxtext.utils.maxtext_utils.create_device_mesh")
   def test_get_mesh_explicit_mode(self, mock_create_device_mesh):
@@ -1503,6 +1517,7 @@ class TestNNXAbstractState(unittest.TestCase):
     optimizer_memory_host_offload: bool = False
     parameter_memory_host_offload: bool = False
     param_scan_axis: int = 0
+    remove_size_one_mesh_axis_from_type: bool = True
     logical_axis_rules: list = field(default_factory=lambda: [["data", ["data"]]])
 
   class MockTrainState(nnx.Module):
