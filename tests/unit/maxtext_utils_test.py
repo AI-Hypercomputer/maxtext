@@ -16,7 +16,6 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-import functools
 from typing import Any, Sequence
 import unittest
 from unittest.mock import MagicMock, Mock, patch
@@ -30,11 +29,9 @@ from jax.experimental import mesh_utils
 import jax.numpy as jnp
 from jax.sharding import AxisType, Mesh, NamedSharding, PartitionSpec
 from maxtext.common import train_state_nnx
-from maxtext.common.common_types import DecoderBlockType, MODEL_MODE_TRAIN, ShardMode
 from maxtext.configs import pyconfig
+from maxtext.common.common_types import DecoderBlockType, ShardMode
 from maxtext.inference import inference_utils
-from maxtext.layers import quantizations
-from maxtext.models import models
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import maxtext_utils_nnx
@@ -45,8 +42,6 @@ from tests.utils.test_helpers import get_test_config_path
 import numpy as np
 import optax
 import pytest
-
-Transformer = models.transformer_as_linen
 
 
 class TestGradientClipping(unittest.TestCase):
@@ -350,49 +345,28 @@ class MaxUtilsInitTransformerState(unittest.TestCase):
     self.config = pyconfig.initialize([None, get_test_config_path()], enable_checkpointing=False)
     devices_array = maxtext_utils.create_device_mesh(self.config)
     self.mesh = Mesh(devices_array, self.config.mesh_axes)
-    quant = quantizations.configure_quantization(self.config)
-    if self.config.pure_nnx:
-      self._create_model_partial, self.model = model_creation_utils.create_nnx_abstract_model(self.config, self.mesh)
-    else:
-      self.model = models.transformer_as_linen(self.config, mesh=self.mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+    self._create_model_partial, self.model = model_creation_utils.create_nnx_abstract_model(self.config, self.mesh)
 
   def test_setup_decode_state(self):
-    rng = random.PRNGKey(0)
-    if self.config.pure_nnx:
+    def create_train_state_fn():
+      nnx_model = self._create_model_partial()
+      return train_state_nnx.TrainStateNNX(nnx_model, None)
 
-      def create_train_state_fn():
-        nnx_model = self._create_model_partial()
-        return train_state_nnx.TrainStateNNX(nnx_model, None)
-
-      init_state_fn = create_train_state_fn
-    else:
-      init_state_fn = functools.partial(maxtext_utils.init_initial_state, self.model, None, self.config, False, rng)
+    init_state_fn = create_train_state_fn
     state, _ = maxtext_utils.setup_decode_state(self.config, self.mesh, None, init_state_fn)
-    if self.config.pure_nnx:
-      self.assertNotIn("optimizer", state)
-    else:
-      self.assertEqual(state.tx, None)
-      self.assertEqual(state.opt_state, {})
+    self.assertNotIn("optimizer", state)
 
   def test_setup_initial_state(self):
-    rng = random.PRNGKey(0)
     tx = optax.adam(learning_rate=0.001)
-    if self.config.pure_nnx:
 
-      def create_train_state_fn():
-        nnx_model = self._create_model_partial()
-        optimizer = nnx.Optimizer(nnx_model, tx, wrt=nnx.Param)
-        return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
+    def create_train_state_fn():
+      nnx_model = self._create_model_partial()
+      optimizer = nnx.Optimizer(nnx_model, tx, wrt=nnx.Param)
+      return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
 
-      init_state_fn = create_train_state_fn
-    else:
-      init_state_fn = functools.partial(maxtext_utils.init_initial_state, self.model, tx, self.config, True, rng)
+    init_state_fn = create_train_state_fn
     state, _, _, _ = maxtext_utils.setup_initial_state(None, self.config, self.mesh, None, init_state_fn)
-    if self.config.pure_nnx:
-      self.assertIsNotNone(state.optimizer)
-    else:
-      self.assertEqual(state.tx, tx)
-      self.assertNotEqual(state.opt_state, {})
+    self.assertIsNotNone(state.optimizer)
 
 
 class MaxUtilsPpAsDp(unittest.TestCase):
@@ -1020,9 +994,8 @@ class TestGetFunctionalTrainWithSignature(unittest.TestCase):
 
     return train_step
 
-  def _make_mock_config(self, pure_nnx=False):
+  def _make_mock_config(self):
     cfg = MagicMock()
-    cfg.pure_nnx = pure_nnx
     return cfg
 
   def test_returns_five_tuple(self):
@@ -1039,20 +1012,11 @@ class TestGetFunctionalTrainWithSignature(unittest.TestCase):
     )
     self.assertEqual(fn.__name__, "train_step")
 
-  def test_linen_in_shardings_includes_rng(self):
-    """pure_nnx=False: in_shardings should be (state, batch, rng)."""
-    step = self._make_mock_step()
-    _, in_shardings, _, _, _ = maxtext_utils.get_functional_train_with_signature(
-        step, "data_sharding", "state_shardings", "model", self._make_mock_config(pure_nnx=False)
-    )
-    self.assertEqual(len(in_shardings), 3)
-    self.assertIsNone(in_shardings[2])  # rng sharding is None
-
   def test_nnx_in_shardings_excludes_rng(self):
-    """pure_nnx=True: in_shardings should be (state, batch) — no rng slot."""
+    """in_shardings should be (state, batch) — no rng slot."""
     step = self._make_mock_step()
     _, in_shardings, _, _, _ = maxtext_utils.get_functional_train_with_signature(
-        step, "data_sharding", "state_shardings", "model", self._make_mock_config(pure_nnx=True)
+        step, "data_sharding", "state_shardings", "model", self._make_mock_config()
     )
     self.assertEqual(len(in_shardings), 2)
 
@@ -1088,9 +1052,8 @@ class TestGetFunctionalEvalWithSignature(unittest.TestCase):
 
     return eval_step
 
-  def _make_mock_config(self, pure_nnx=False):
+  def _make_mock_config(self):
     cfg = MagicMock()
-    cfg.pure_nnx = pure_nnx
     return cfg
 
   def test_returns_five_tuple(self):
@@ -1118,20 +1081,12 @@ class TestGetFunctionalEvalWithSignature(unittest.TestCase):
     self.assertEqual(donate_argnums, ())
 
   def test_nnx_in_shardings_excludes_rng(self):
-    """pure_nnx=True: in_shardings should be (state, batch) — no rng slot."""
+    """in_shardings should be (state, batch) — no rng slot."""
     step = self._make_mock_eval_step()
     _, in_shardings, _, _, _ = maxtext_utils.get_functional_eval_with_signature(
-        step, "batch_sharding", "state_sharding", "model", self._make_mock_config(pure_nnx=True)
+        step, "batch_sharding", "state_sharding", "model", self._make_mock_config()
     )
     self.assertEqual(len(in_shardings), 2)
-
-  def test_linen_in_shardings_includes_rng(self):
-    """pure_nnx=False: in_shardings should be (state, batch, rng)."""
-    step = self._make_mock_eval_step()
-    _, in_shardings, _, _, _ = maxtext_utils.get_functional_eval_with_signature(
-        step, "batch_sharding", "state_sharding", "model", self._make_mock_config(pure_nnx=False)
-    )
-    self.assertEqual(len(in_shardings), 3)
 
 
 @pytest.mark.cpu_only
@@ -1387,38 +1342,19 @@ class TestSetupTrainingState(unittest.TestCase):
     self.config = pyconfig.initialize([None, get_test_config_path()], enable_checkpointing=False)
     devices_array = maxtext_utils.create_device_mesh(self.config)
     self.mesh = Mesh(devices_array, self.config.mesh_axes)
-    quant = quantizations.configure_quantization(self.config)
-    if self.config.pure_nnx:
-      self._create_model_partial, self.model = model_creation_utils.create_nnx_abstract_model(self.config, self.mesh)
-    else:
-      self.model = Transformer(self.config, mesh=self.mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+    self._create_model_partial, self.model = model_creation_utils.create_nnx_abstract_model(self.config, self.mesh)
 
   def test_setup_training_state_returns_train_state(self):
-    rng = jax.random.PRNGKey(0)
     tx = optax.adam(learning_rate=0.001)
-    if self.config.pure_nnx:
 
-      def create_train_state_fn():
-        nnx_model = self._create_model_partial()
-        optimizer = nnx.Optimizer(nnx_model, tx, wrt=nnx.Param)
-        return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
+    def create_train_state_fn():
+      nnx_model = self._create_model_partial()
+      optimizer = nnx.Optimizer(nnx_model, tx, wrt=nnx.Param)
+      return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
 
-      init_state_fn = create_train_state_fn
-    else:
-      init_state_fn = functools.partial(
-          maxtext_utils.init_initial_state,
-          self.model,
-          tx,
-          self.config,
-          True,
-          rng,
-      )
+    init_state_fn = create_train_state_fn
     state, _, _, _ = maxtext_utils.setup_training_state(None, self.config, self.mesh, None, init_state_fn)
-    if self.config.pure_nnx:
-      self.assertIsNotNone(state.optimizer)
-    else:
-      self.assertEqual(state.tx, tx)
-      self.assertNotEqual(state.opt_state, {})
+    self.assertIsNotNone(state.optimizer)
 
 
 class TestGetLogicalAnnotations(unittest.TestCase):
@@ -1428,36 +1364,20 @@ class TestGetLogicalAnnotations(unittest.TestCase):
     self.config = pyconfig.initialize([None, get_test_config_path()], enable_checkpointing=False)
     devices_array = maxtext_utils.create_device_mesh(self.config)
     self.mesh = Mesh(devices_array, self.config.mesh_axes)
-    quant = quantizations.configure_quantization(self.config)
-    if self.config.pure_nnx:
-      self._create_model_partial, self.model = model_creation_utils.create_nnx_abstract_model(self.config, self.mesh)
-    else:
-      self.model = Transformer(self.config, mesh=self.mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+    self._create_model_partial, self.model = model_creation_utils.create_nnx_abstract_model(self.config, self.mesh)
     self.rng = jax.random.PRNGKey(0)
     self.tx = optax.adam(learning_rate=0.001)
 
   def test_returns_partition_spec_tree(self):
-    if self.config.pure_nnx:
+    def create_train_state_fn():
+      nnx_model = self._create_model_partial()
+      optimizer = nnx.Optimizer(nnx_model, self.tx, wrt=nnx.Param)
+      return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
 
-      def create_train_state_fn():
-        nnx_model = self._create_model_partial()
-        optimizer = nnx.Optimizer(nnx_model, self.tx, wrt=nnx.Param)
-        return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
-
-      init_state_fn = create_train_state_fn
-      annotations = maxtext_utils_nnx.get_partition_spec_nnx(
-          maxtext_utils.get_abstract_state(self.config, self.mesh, init_state_fn, True)[2]
-      )
-    else:
-      init_state_fn = functools.partial(
-          maxtext_utils.init_initial_state,
-          self.model,
-          self.tx,
-          self.config,
-          True,
-          self.rng,
-      )
-      annotations = maxtext_utils.get_logical_annotations(self.config, self.mesh, init_state_fn)
+    init_state_fn = create_train_state_fn
+    annotations = maxtext_utils_nnx.get_partition_spec_nnx(
+        maxtext_utils.get_abstract_state(self.config, self.mesh, init_state_fn, True)[2]
+    )
     # Result should be a pytree with PartitionSpec leaves
     leaves = jax.tree_util.tree_leaves(annotations)
     self.assertGreater(len(leaves), 0)

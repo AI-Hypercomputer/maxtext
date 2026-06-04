@@ -25,7 +25,6 @@ import os
 import unittest
 
 from datasets import load_dataset
-from flax import linen as nn
 from flax import nnx
 import jax
 import jax.numpy as jnp
@@ -33,11 +32,10 @@ from jax.sharding import Mesh
 import jsonlines
 from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_PKG_DIR, MAXTEXT_TEST_ASSETS_ROOT
-from maxtext.common.common_types import Array, MODEL_MODE_TRAIN
-from maxtext.experimental.rl.grpo_trainer import _merge_grpo_state, generate_completions, grpo_loss_fn, grpo_loss_fn_nnx
-from maxtext.experimental.rl.grpo_utils import compute_log_probs, compute_log_probs_nnx
+from maxtext.common.common_types import Array
+from maxtext.experimental.rl.grpo_trainer import generate_completions, grpo_loss_fn_nnx
+from maxtext.experimental.rl.grpo_utils import compute_log_probs_nnx
 from maxtext.inference.maxengine import maxengine
-from maxtext.models import models
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
 from tests.post_training.integration.grpo_trainer_correctness_test import prepare_maxtext_inputs
@@ -49,40 +47,28 @@ from trl import GRPOConfig, GRPOTrainer
 
 
 def _setup_model(config, mesh, rng):
-  """Builds the model, and for NNX a frozen reference clone, dispatching on pure_nnx.
+  """Builds the model and a frozen reference clone.
 
-  Returns (model, reference_model, state). For NNX the model carries its own params
-  (from_pretrained loads the checkpoint or inits) and state is None; for Linen the
-  model is a ToLinen module with a separate decode state.
+  Returns (model, reference_model). The model carries its own params (from_pretrained
+  loads the checkpoint or inits) and the reference is a clone of the policy.
   """
-  if config.pure_nnx:
-    model = model_creation_utils.from_pretrained(config, mesh=mesh, rng_key=rng)
-    return model, nnx.clone(model), None
-  model = models.transformer_as_linen(config=config, mesh=mesh, quant=None, model_mode=MODEL_MODE_TRAIN)
-  init_state_fn = functools.partial(maxtext_utils.init_initial_state, model, None, config, False, rng)
-  state, state_mesh_annotations = maxtext_utils.setup_decode_state(config, mesh, None, init_state_fn)
-  return model, None, (state, state_mesh_annotations)
+  model = model_creation_utils.from_pretrained(config, mesh=mesh, rng_key=rng)
+  return model, nnx.clone(model)
 
 
-def _logps(config, model, state, ids, pos, seg, comp_seg):
-  """Policy per-token log-probs, dispatching between NNX and Linen."""
-  if config.pure_nnx:
-    return compute_log_probs_nnx(model, ids, pos, seg, comp_seg, config, is_train=False)
-  return compute_log_probs(model, state.params, ids, pos, seg, comp_seg, config, is_train=False)
+def _logps(config, model, ids, pos, seg, comp_seg):
+  """Policy per-token log-probs."""
+  return compute_log_probs_nnx(model, ids, pos, seg, comp_seg, config, is_train=False)
 
 
-def _reference_logps(config, model, reference_model, reference_params, ids, pos, seg, comp_seg):
-  """Reference per-token log-probs. NNX uses the cloned reference model; Linen uses the saved params."""
-  if config.pure_nnx:
-    return compute_log_probs_nnx(reference_model, ids, pos, seg, comp_seg, config, is_train=False)
-  return compute_log_probs(model, {"params": reference_params}, ids, pos, seg, comp_seg, config, is_train=False)
+def _reference_logps(config, reference_model, ids, pos, seg, comp_seg):
+  """Reference per-token log-probs, using the cloned reference model."""
+  return compute_log_probs_nnx(reference_model, ids, pos, seg, comp_seg, config, is_train=False)
 
 
-def _grpo_loss(config, model, reference_model, state, reference_params, data, rng):
-  """GRPO loss, dispatching between NNX (reference model) and Linen (reference params)."""
-  if config.pure_nnx:
-    return grpo_loss_fn_nnx(model, config, data, rng, None, reference_model)
-  return grpo_loss_fn(model, config, data, rng, state.params, reference_params)
+def _grpo_loss(config, model, reference_model, data, rng):
+  """GRPO loss, using the cloned reference model."""
+  return grpo_loss_fn_nnx(model, config, data, rng, None, reference_model)
 
 
 class GRPOTest(unittest.TestCase):
@@ -113,19 +99,12 @@ class GRPOTest(unittest.TestCase):
     mesh = Mesh(devices_array, self.cfg.mesh_axes)
     self.mesh = mesh
     # With checkpoint
-    self.model, self.reference_model, linen_state = _setup_model(self.cfg, mesh, self.rng)
-    if self.cfg.pure_nnx:
-      self.state = None
-      self.state_mesh_shardings = None  # NNX param shardings are derived in the generation step.
-    else:
-      self.state, state_mesh_annotations = linen_state
-      self.state_mesh_shardings = nn.logical_to_mesh_sharding(state_mesh_annotations, mesh, self.cfg.logical_axis_rules)
+    self.model, self.reference_model = _setup_model(self.cfg, mesh, self.rng)
     self.data_sharding = jax.NamedSharding(mesh, jax.sharding.PartitionSpec(None))
     # Without checkpoint
-    self.model_no_ckpt_loading, self.reference_model_no_ckpt_loading, linen_state_no_ckpt = _setup_model(
+    self.model_no_ckpt_loading, self.reference_model_no_ckpt_loading = _setup_model(
         self.cfg_no_ckpt_loading, mesh, self.rng
     )
-    self.state_no_ckpt_loading = None if self.cfg_no_ckpt_loading.pure_nnx else linen_state_no_ckpt[0]
 
     self.tokenizer_model = transformers.AutoTokenizer.from_pretrained(
         "meta-llama/Llama-3.1-8B",
@@ -214,19 +193,8 @@ class GRPOTest(unittest.TestCase):
         self.cfg.prompt, self.tokenizer_model
     )
     maxtext_per_token_logps, _ = _logps(
-        self.cfg, self.model, self.state, input_ids, input_position, input_segmentation, completion_segmentation
+        self.cfg, self.model, input_ids, input_position, input_segmentation, completion_segmentation
     )
-
-    # The reference is a frozen copy of the step-0 policy. NNX holds it as a cloned
-    # model (built in setUp); Linen snapshots the params and merges them into the state.
-    reference_params = None
-    reference_params_no_ckpt_loading = None
-    if not self.cfg.pure_nnx:
-      reference_params = jax.tree.map(jnp.copy, self.state.params["params"])
-      self.state = _merge_grpo_state(self.state, reference_params)
-    if not self.cfg_no_ckpt_loading.pure_nnx:
-      reference_params_no_ckpt_loading = jax.tree.map(jnp.copy, self.state_no_ckpt_loading.params["params"])
-      self.state_no_ckpt_loading = _merge_grpo_state(self.state_no_ckpt_loading, reference_params_no_ckpt_loading)
 
     data = {
         "prompt_completions": input_ids,
@@ -234,9 +202,7 @@ class GRPOTest(unittest.TestCase):
         "prompt_completions_segmentation": input_segmentation,
         "ar_completions_segmentation": completion_segmentation,
     }
-    maxtext_loss, aux = _grpo_loss(
-        self.cfg, self.model, self.reference_model, self.state, reference_params, data, self.rng
-    )
+    maxtext_loss, aux = _grpo_loss(self.cfg, self.model, self.reference_model, data, self.rng)
     # pylint: disable=protected-access
     self.assertEqual(self.trainer._metrics["train"]["kl"][0], aux.avg_kl.tolist())
     self.assertEqual(hf_loss.item(), maxtext_loss.tolist())
@@ -244,13 +210,11 @@ class GRPOTest(unittest.TestCase):
     self.assertEqual(aux.avg_advantage.tolist(), 0.0)
     # since we are at step 0
     maxtext_per_token_logps, _ = _logps(
-        self.cfg, self.model, self.state, input_ids, input_position, input_segmentation, completion_segmentation
+        self.cfg, self.model, input_ids, input_position, input_segmentation, completion_segmentation
     )
     maxtext_per_token_logps_ref, _ = _reference_logps(
         self.cfg,
-        self.model,
         self.reference_model,
-        reference_params,
         input_ids,
         input_position,
         input_segmentation,
@@ -271,7 +235,6 @@ class GRPOTest(unittest.TestCase):
     maxtext_per_token_logps_no_ckpt_loading, _ = _logps(
         self.cfg_no_ckpt_loading,
         self.model_no_ckpt_loading,
-        self.state_no_ckpt_loading,
         input_ids,
         input_position,
         input_segmentation,
@@ -282,8 +245,6 @@ class GRPOTest(unittest.TestCase):
         self.cfg_no_ckpt_loading,
         self.model_no_ckpt_loading,
         self.reference_model_no_ckpt_loading,
-        self.state_no_ckpt_loading,
-        reference_params_no_ckpt_loading,
         data,
         self.rng,
     )
@@ -298,13 +259,9 @@ class GRPOTest(unittest.TestCase):
     )
     prompt_true_length = jnp.array([len(prompt_tokens)] * 4)
     engine_data = {"prompt": prompt, "prompt_true_length": prompt_true_length}
-    if self.cfg_no_ckpt_loading.pure_nnx:
-      # NNX params live on the model; the inference engine is NNX-aware (config.pure_nnx).
-      gen_params = nnx.state(self.model_no_ckpt_loading, nnx.Param)
-      gen_param_shardings = jax.tree.map(lambda _: jax.NamedSharding(self.mesh, jax.sharding.PartitionSpec()), gen_params)
-    else:
-      gen_params = {"params": self.state_no_ckpt_loading.params["params"]}
-      gen_param_shardings = self.state_mesh_shardings.params
+    # Params live on the model; the inference engine reads them directly.
+    gen_params = nnx.state(self.model_no_ckpt_loading, nnx.Param)
+    gen_param_shardings = jax.tree.map(lambda _: jax.NamedSharding(self.mesh, jax.sharding.PartitionSpec()), gen_params)
     p_generate_completions: Callable[[dict, dict, Array], Array] = jax.jit(
         functools.partial(generate_completions, self.cfg, self.tokenizer_model, engine),
         in_shardings=(self.data_sharding, gen_param_shardings, None),

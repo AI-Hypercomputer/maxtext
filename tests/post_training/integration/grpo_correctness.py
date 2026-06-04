@@ -13,7 +13,6 @@
 # limitations under the License.
 """GRPO correctness tests"""
 
-import functools
 import os
 import unittest
 
@@ -23,11 +22,9 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.configs import pyconfig
-from maxtext.common.common_types import MODEL_MODE_TRAIN
-from maxtext.experimental.rl.grpo_trainer import _merge_grpo_state, grpo_loss_fn, grpo_loss_fn_nnx
-from maxtext.experimental.rl.grpo_utils import compute_log_probs, compute_log_probs_nnx
+from maxtext.experimental.rl.grpo_trainer import grpo_loss_fn_nnx
+from maxtext.experimental.rl.grpo_utils import compute_log_probs_nnx
 from maxtext.utils.globals import MAXTEXT_PKG_DIR
-from maxtext.models import models
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
 import numpy as np
@@ -63,17 +60,11 @@ class GRPOTest(unittest.TestCase):
     self.rng = jax.random.PRNGKey(42)
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
     mesh = Mesh(devices_array, self.cfg.mesh_axes)
-    if self.cfg.pure_nnx:
-      # NNX: from_pretrained loads the checkpoint (or inits) into the model, which
-      # carries its own params. The frozen reference is a clone of the policy.
-      self.model = model_creation_utils.from_pretrained(self.cfg, mesh=mesh, rng_key=self.rng)
-      self.reference_model = nnx.clone(self.model)
-      self.state = None
-    else:
-      self.model = models.transformer_as_linen(config=self.cfg, mesh=mesh, quant=None, model_mode=MODEL_MODE_TRAIN)
-      init_state_fn = functools.partial(maxtext_utils.init_initial_state, self.model, None, self.cfg, False, self.rng)
-      self.reference_model = None
-      self.state, _ = maxtext_utils.setup_decode_state(self.cfg, mesh, None, init_state_fn)
+    # from_pretrained loads the checkpoint (or inits) into the model, which carries
+    # its own params. The frozen reference is a clone of the policy.
+    self.model = model_creation_utils.from_pretrained(self.cfg, mesh=mesh, rng_key=self.rng)
+    self.reference_model = nnx.clone(self.model)
+    self.state = None
     self.tokenizer_model = transformers.AutoTokenizer.from_pretrained(
         "meta-llama/Llama-3.1-8B",
         add_bos_token=False,
@@ -147,57 +138,24 @@ class GRPOTest(unittest.TestCase):
     return input_ids, attention_mask, logits_to_keep
 
   def _maxtext_logits(self, inputs, inputs_position, inputs_segmentation):
-    """Forward pass logits, dispatching between the NNX and Linen models."""
-    if self.cfg.pure_nnx:
-      return self.model(
-          decoder_input_tokens=inputs,
-          decoder_positions=inputs_position,
-          decoder_segment_ids=inputs_segmentation,
-          enable_dropout=False,
-      )
-    logits, _ = self.model.apply(
-        self.state.params,
-        inputs,
-        inputs_position,
+    """Forward pass logits."""
+    return self.model(
+        decoder_input_tokens=inputs,
+        decoder_positions=inputs_position,
         decoder_segment_ids=inputs_segmentation,
         enable_dropout=False,
-        rngs=self.rng,
-        mutable="intermediates",
     )
-    return logits
 
   def _policy_logps(self, input_ids, input_position, input_segmentation, completion_segmentation):
-    """Policy per-token log-probs, dispatching between NNX and Linen."""
-    if self.cfg.pure_nnx:
-      return compute_log_probs_nnx(
-          self.model, input_ids, input_position, input_segmentation, completion_segmentation, self.cfg, is_train=False
-      )
-    return compute_log_probs(
-        self.model,
-        self.state.params,
-        input_ids,
-        input_position,
-        input_segmentation,
-        completion_segmentation,
-        self.cfg,
-        is_train=False,
+    """Policy per-token log-probs."""
+    return compute_log_probs_nnx(
+        self.model, input_ids, input_position, input_segmentation, completion_segmentation, self.cfg, is_train=False
     )
 
   def _reference_logps(self, input_ids, input_position, input_segmentation, completion_segmentation, reference_params):
-    """Reference per-token log-probs. NNX uses the cloned reference model; Linen uses the saved params."""
-    if self.cfg.pure_nnx:
-      return compute_log_probs_nnx(
-          self.reference_model,
-          input_ids,
-          input_position,
-          input_segmentation,
-          completion_segmentation,
-          self.cfg,
-          is_train=False,
-      )
-    return compute_log_probs(
-        self.model,
-        {"params": reference_params},
+    """Reference per-token log-probs, using the cloned reference model."""
+    return compute_log_probs_nnx(
+        self.reference_model,
         input_ids,
         input_position,
         input_segmentation,
@@ -207,10 +165,8 @@ class GRPOTest(unittest.TestCase):
     )
 
   def _grpo_loss(self, data, reference_params):
-    """GRPO loss, dispatching between NNX (reference model) and Linen (reference params)."""
-    if self.cfg.pure_nnx:
-      return grpo_loss_fn_nnx(self.model, self.cfg, data, self.rng, None, self.reference_model)
-    return grpo_loss_fn(self.model, self.cfg, data, self.rng, self.state.params, reference_params)
+    """GRPO loss, using the cloned reference model."""
+    return grpo_loss_fn_nnx(self.model, self.cfg, data, self.rng, None, self.reference_model)
 
   def test_logits(self):
     def _prepare_inputs():
@@ -306,12 +262,8 @@ class GRPOTest(unittest.TestCase):
         input_ids, input_position, input_segmentation, completion_segmentation
     )
 
-    # The reference is a frozen copy of the step-0 policy. NNX holds it as a cloned
-    # model (built in setUp); Linen snapshots the params and merges them into the state.
+    # The reference is a frozen copy of the step-0 policy, held as a cloned model built in setUp.
     reference_params = None
-    if not self.cfg.pure_nnx:
-      reference_params = jax.tree.map(jnp.copy, self.state.params["params"])
-      self.state = _merge_grpo_state(self.state, reference_params)
     data = {
         "prompt_completions": input_ids,
         "prompt_completions_position": input_position,
