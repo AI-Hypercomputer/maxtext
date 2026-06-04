@@ -1722,7 +1722,9 @@ def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=Tru
     _, abs_var_state = nnx.split(abs_model)
     named_sharding_state = get_nnx_named_sharding_with_scan_axis(abs_var_state, mesh)
     abstract_state = jax.tree.map(
-        lambda a, s: jax.ShapeDtypeStruct(a.shape, a.dtype, sharding=s),
+        lambda a, s: jax.ShapeDtypeStruct(
+            a.shape, a.dtype, sharding=s if isinstance(s, jax.sharding.Sharding) else getattr(s, "sharding", None)
+        ),
         abs_var_state,
         named_sharding_state,
     )

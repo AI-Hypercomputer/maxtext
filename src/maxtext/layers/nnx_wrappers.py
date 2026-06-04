@@ -499,7 +499,31 @@ class ToLinen(linen.Module):
       for path, _ in unknown_state_flat.items():
         paths_str += f"\n  - {'/'.join(map(str, path))}"
 
-      warnings.warn(f"Found unknown module paths in incoming state:{paths_str}")
+        # Dynamically reconstruct the unknown variables
+        curr = module
+        for p in path[:-1]:
+          if isinstance(curr, dict):
+            if p not in curr:
+              curr[p] = nnx.Module()
+            curr = curr[p]
+          elif isinstance(curr, list):
+            if not isinstance(p, int):
+              raise TypeError(f"Expected int index for list, got {type(p)}: {p}")
+            while len(curr) <= p:
+              curr.append(nnx.Module())
+            curr = curr[p]
+          elif isinstance(curr, tuple):
+            raise ValueError(f"Cannot dynamically reconstruct elements within a tuple at path {path}.")
+          else:
+            if not isinstance(p, str):
+              p = str(p)
+            if not hasattr(curr, p):
+              setattr(curr, p, nnx.Module())
+            curr = getattr(curr, p)
+
+      warnings.warn(
+          f"Found unknown module paths in incoming state:{paths_str}. Intermediate modules have been reconstructed."
+      )
 
     nnx.update(module, new_state)
     _refresh_variable_trace_state(module)
