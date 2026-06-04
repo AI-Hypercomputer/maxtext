@@ -20,14 +20,14 @@ This module provides a config-driven validation entrypoint that:
 3. loads the matching vLLM model, and
 4. assigns the converted weights before running a short generation check.
 
-	python -m maxtext.integration.vllm.torchax_converter.validate_converter \
-			src/maxtext/configs/post_train/rl.yml model_name=qwen3-30b-a3b \
-			tokenizer_type=huggingface tokenizer_path=Qwen/Qwen3-30B-A3B \
-			load_parameters_path=<your_maxtext_checkpoint_path> run_name=qwen3_converter_validation \
-			per_device_batch_size=1 max_prefill_predict_length=8 max_target_length=16 steps=1 \
-			scan_layers=true skip_jax_distributed_system=true weight_dtype=bfloat16 \
-			rollout_tensor_parallelism=4 hbm_utilization_vllm=0.6 async_scheduling=false \
-			prompt="Paris is" hf_access_token=<token> use_chat_template=true
+  python -m maxtext.integration.vllm.torchax_converter.validate_converter \
+      src/maxtext/configs/post_train/rl.yml model_name=qwen3-30b-a3b \
+      tokenizer_type=huggingface tokenizer_path=Qwen/Qwen3-30B-A3B \
+      load_parameters_path=<your_maxtext_checkpoint_path> run_name=qwen3_converter_validation \
+      per_device_batch_size=1 max_prefill_predict_length=8 max_target_length=16 steps=1 \
+      scan_layers=true skip_jax_distributed_system=true weight_dtype=bfloat16 \
+      rollout_tensor_parallelism=4 hbm_utilization_vllm=0.6 async_scheduling=false \
+      prompt="Paris is" hf_access_token=<token> use_chat_template=true
   For multislice (e.g. 2x128-device slices), additionally pass:
         num_trainer_slices=1 num_samplers_slices=1
 
@@ -70,6 +70,7 @@ from maxtext.integration.vllm.torchax_converter.base import RESET
 from maxtext.integration.vllm.torchax_converter.base import timer
 from maxtext.integration.vllm.torchax_converter.gemma4_moe import Gemma4MaxTextToVLLMConverter
 from maxtext.integration.vllm.torchax_converter.qwen3_moe import Qwen3MaxTextToVLLMConverter
+from maxtext.integration.vllm.torchax_converter.qwen35_moe import Qwen35MaxTextToVLLMConverter
 from maxtext.utils import model_creation_utils
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
@@ -81,6 +82,7 @@ vllm_model_name_mapping = {
     "qwen3-30b-a3b-base": "Qwen/Qwen3-30B-A3B",
     "qwen3-235b-a22b": "Qwen/Qwen3-235B-A22B",
     "gemma4-26b": "google/gemma-4-26B-A4B",
+    "qwen3.5-35b-a3b": "Qwen/Qwen3.5-35B-A3B",
     # Add more mappings as needed
 }
 
@@ -289,6 +291,8 @@ def validate_converter(argv) -> None:
 
   if trainer_config.model_name.startswith("gemma4"):
     converter = Gemma4MaxTextToVLLMConverter(trainer_config, mesh)
+  elif trainer_config.model_name.startswith("qwen3.5"):
+    converter = Qwen35MaxTextToVLLMConverter(trainer_config, mesh)
   else:
     converter = Qwen3MaxTextToVLLMConverter(trainer_config, mesh)
   with timer("Overall Conversion"):
@@ -317,6 +321,10 @@ def validate_converter(argv) -> None:
       "gpu_memory_utilization": getattr(sampler_config, "hbm_utilization_vllm", 0.5),
       "async_scheduling": getattr(sampler_config, "async_scheduling", False),
   }
+  # Conditionally add max_num_batched_tokens only for qwen3.5
+  if trainer_config.model_name == "qwen3.5-35b-a3b":
+    vllm_kwargs["max_num_batched_tokens"] = 16384
+
   if multislice:
     # Pin vLLM to its assigned sampler devices so it doesn't overlap with trainer.
     vllm_kwargs["additional_config"] = {
