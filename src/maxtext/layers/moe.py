@@ -1171,9 +1171,10 @@ class RoutedMoE(nnx.Module):
       elif self.config.attention == "vllm_rpa":
         return group_sizes
       else:
+        num_groups = group_sizes.shape[0]
         return tokamax.RaggedDotGroupSizes(
             group_sizes,
-            (inputs.shape[0] // kernel.shape[0],) * kernel.shape[0],
+            (inputs.shape[0] // num_groups,) * num_groups,
         )
 
     def get_quantization_dtypes():
@@ -1184,7 +1185,15 @@ class RoutedMoE(nnx.Module):
         rhs_quantize_dtype = quant_dg.fwd.dg_quantizer.rhs.numerics.get_dtype()
       return lhs_quantize_dtype, rhs_quantize_dtype
 
-    def gmm(inputs, kernel, tiling, group_sizes, expert_assignments, weight_gather_axes):
+    def gmm(
+        inputs,
+        kernel,
+        tiling,
+        group_sizes,
+        expert_assignments,
+        weight_gather_axes,
+        group_offset,
+    ):
       if inputs.shape[0] != expert_assignments.shape[0]:
         raise ValueError("The number of input tokens must match the number of expert assignments!")
 
@@ -1205,6 +1214,7 @@ class RoutedMoE(nnx.Module):
               group_sizes=group_sizes,
               preferred_element_type=self.dtype,
               tiling=tiling,
+              group_offset=group_offset,
               lhs_quantize_dtype=lhs_quantize_dtype,
               rhs_quantize_dtype=rhs_quantize_dtype,
               use_qwix_quantization=self.config.use_qwix_quantization,
@@ -1219,6 +1229,7 @@ class RoutedMoE(nnx.Module):
               precision=jax.lax.Precision.DEFAULT,
               preferred_element_type=self.dtype,
               implementation="mosaic",
+              group_offset=group_offset,
           )
       elif self.config.megablox:  # Older forked megablox
         output = mblx.gmm(
@@ -1227,6 +1238,7 @@ class RoutedMoE(nnx.Module):
             group_sizes=group_sizes,
             preferred_element_type=self.dtype,
             tiling=tiling,
+            group_offset=group_offset,
             lhs_quantize_dtype=lhs_quantize_dtype,
             rhs_quantize_dtype=rhs_quantize_dtype,
             use_qwix_quantization=self.config.use_qwix_quantization,
@@ -1364,11 +1376,6 @@ class RoutedMoE(nnx.Module):
             rngs=rngs,
         )
 
-        # Filter down to the group sizes that apply to only the experts in the
-        # current shard.
-        group_sizes = group_sizes[:num_experts_per_shard]
-        mask = jnp.arange(x.shape[0]) < jnp.sum(group_sizes)
-        x = jnp.where(mask[:, None], x, 0)
       else:
         x, sorted_selected_experts, weights, group_sizes, selected_experts, lb_loss, bias_updates = self.permute(
             x, logits, pre_bias_logits, self.config.use_custom_sort_vjp, rngs
@@ -1462,6 +1469,7 @@ class RoutedMoE(nnx.Module):
         # wi [Experts, In, Hidden] -> Gather Exp(0) and Hidden(2)
         wi_gather_axes.extend(get_active_sharding_axes(w0_pspec[0], 0))
         wi_gather_axes.extend(get_active_sharding_axes(w0_pspec[2], 2))
+
       wi_tile_size = (
           self.config.wi_tile_fwd_batch_seq,  # m (LHS batch)
           self.config.wi_tile_fwd_embed_dim,  # k  (contracting)
@@ -1541,7 +1549,17 @@ class RoutedMoE(nnx.Module):
       if self.config.mlp_bias:
         w0_bias, w1_bias, wo_bias = self.transform_bias(routing.selected_experts, w0_bias, w1_bias, wo_bias)
 
-      gmm_fn = functools.partial(gmm, group_sizes=routing.group_sizes, expert_assignments=routing.selected_experts)
+      num_ep = self.get_expert_parallelism_size()
+      num_experts_per_shard = self.config.num_experts // num_ep
+      if self.config.use_ragged_sort and self.config.use_ring_of_experts:
+        experts_start = route_metadata.expert_shard_id * num_experts_per_shard
+      else:
+        experts_start = 0
+
+      gmm_fn = functools.partial(gmm, 
+                                 group_sizes=routing.group_sizes, 
+                                 expert_assignments=routing.selected_experts,
+                                 group_offset=experts_start)
       intermediate_layer = gmm_up(x, w0, w1, w0_bias, w1_bias, gmm_fn, weight_gather)
 
       wo_gather_axes, wo_tile_size = get_wo_gmm_params()
@@ -1560,10 +1578,6 @@ class RoutedMoE(nnx.Module):
       intermediate_output = adc.checkpoint_name(adc.checkpoint_name(intermediate_output, "mlpwo"), "moe_mlpwo")
 
       if self.config.use_ring_of_experts:
-        # Set the outputs of tokens which were not processed to 0.
-        mask = jnp.arange(intermediate_output.shape[0]) < jnp.sum(routing.group_sizes)
-        intermediate_output = jnp.where(mask[:, None], intermediate_output, 0)
-
         # Unsort and deduplicate the outputs locally.
         output = self.unpermute(
             intermediate_output,

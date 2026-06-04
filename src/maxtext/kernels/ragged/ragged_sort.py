@@ -99,6 +99,8 @@ def ring_ragged_sort(hidden_states_local, topk_indices_local, num_experts, topk,
 
     res = (
         topk_argsort_revert_indices,
+        shard_output_start,
+        shard_output_end,        
         hidden_states_local.shape,
     )
 
@@ -116,16 +118,16 @@ def ring_ragged_sort(hidden_states_local, topk_indices_local, num_experts, topk,
 
     which is exactly a ragged gather reduce.
     """
-    topk_argsort_revert_indices, _ = res
+    topk_argsort_revert_indices, shard_output_start, shard_output_end, _ = res
     g_x, _, _ = g_out
     # Restrict to the [start, end) source range via a validity bitmask. The
     # ragged kernel packs valid rows to the front of each row-partition and
     # only iterates over the populated prefix, so we hand it the mask directly
     # rather than materializing a (mostly-zero) dense buffer ourselves.
     n = topk_argsort_revert_indices.shape[0]
-    # pos = jnp.arange(n)
-    # valid_rows_mask = (pos >= shard_output_start) & (pos < shard_output_end)
-    valid_rows_mask = jnp.broadcast_to(True, (n,))
+    valid_rows_mask = (topk_argsort_revert_indices >= shard_output_start) & (
+        topk_argsort_revert_indices < shard_output_end
+    )
     # The forward scatter-add over `token_indices_sorted` is equivalent to a
     # gather-reduce: each input token has exactly `topk` contributions located
     # at sorted positions `topk_argsort_revert_indices[t*topk:(t+1)*topk]`.
