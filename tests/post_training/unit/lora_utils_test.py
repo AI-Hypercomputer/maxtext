@@ -216,15 +216,11 @@ class LoraUtilsTest(unittest.TestCase):
     model, _ = model_creation_utils.from_pretrained(cfg, mesh=None, model_mode=model_creation_utils.MODEL_MODE_TRAIN)
     model = lora_utils.apply_lora_to_model(model, None, cfg)
 
-    trainer = mock.MagicMock()
-    trainer.model = model
-    trainer.train_steps = 0
-
     restored_state = nnx.state(model, nnx.LoRAParam)
 
     with mock.patch("orbax.checkpoint.PyTreeCheckpointer.restore", return_value=restored_state) as mock_restore:
       with mock.patch("flax.nnx.update") as mock_update:
-        lora_utils.restore_lora_from_path(trainer, cfg)
+        lora_utils.restore_lora_from_path(model, cfg)
         mock_restore.assert_called_once()
         args, kwargs = mock_restore.call_args
         self.assertEqual(args[0], "some/path")
