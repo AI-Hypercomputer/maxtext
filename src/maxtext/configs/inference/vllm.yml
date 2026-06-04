@@ -87,6 +87,9 @@ logical_axis_rules: [
                       ['mlp', ['attn_dp', 'model']],
                       ['embed', []],
                       ['norm', []],
+                      ['layers', []],
+                      ['dense_layers', []],
+                      ['moe_layers', []],
                       # ==========================================
                       # Inference(Prefill, Decode, Cache)
                       # ==========================================
