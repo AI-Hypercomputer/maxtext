@@ -38,7 +38,7 @@ from maxtext.common.common_types import (
     MultimodalInput,
     ShardMode,
 )
-from maxtext.layers import initializers, linears, mhc, normalizations, quantizations
+from maxtext.layers import linears, mhc, normalizations, quantizations
 from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import Embed, PositionalEmbedding, attend_on_embedding
 from maxtext.layers.normalizations import RMSNorm
@@ -1388,25 +1388,3 @@ class NNXDecoder(nnx.Module):
       nnx.update(self.layers_remainder, new_state)
 
     return y
-
-
-def decoder_as_linen(
-    config: Config,
-    mesh: Mesh,
-    rngs: nnx.Rngs,
-    model_mode: str,
-    quant: None | Quant = None,
-):
-  """Creates a Decoder module"""
-  module = nnx_wrappers.to_linen(
-      NNXDecoder,
-      config=config,
-      mesh=mesh,
-      model_mode=model_mode,
-      rngs=rngs,
-      quant=quant,
-      name="decoder",
-      abstract_init=False,
-      metadata_fn=initializers.variable_to_logically_partitioned,
-  )
-  return module
