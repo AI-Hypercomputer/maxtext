@@ -56,12 +56,12 @@ If you installed `xpk` inside a Python virtual environment (`venv`), reactivate 
 Set these environment variables in your shell. Replace the placeholders with your own values.
 
 ```bash
-# -- Google Cloud Configuration --
+# Google Cloud Configuration
 export PROJECT_ID=<GCP project ID>
 export ZONE=<GCP location>        # e.g., 'us-central1'
 export GKE_CLUSTER=<cluster name> # your Pathways-enabled cluster
 
-# -- Workload Configuration --
+# Workload Configuration
 # Kubernetes requires workload names to be valid DNS labels (lowercase, no underscores/periods).
 export RUN_NAME="elastic-qwen3-$(date +%Y%m%d-%H%M%S)"
 
@@ -69,7 +69,7 @@ export RUN_NAME="elastic-qwen3-$(date +%Y%m%d-%H%M%S)"
 export TPU_TYPE="v5litepod-16"  # one slice = 16 v5e chips
 export NUM_SLICES=3             # total slices in the run
 
-# -- MaxText & Storage Configuration --
+# MaxText & Storage Configuration
 export BASE_OUTPUT_DIRECTORY=<gcs bucket path>  # e.g., gs://my-bucket/maxtext-runs
 export DOCKER_IMAGE="gcr.io/${PROJECT_ID?}/<your maxtext image>"
 ```
