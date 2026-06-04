@@ -14,7 +14,7 @@
 
 """Common LoRA utils needed to support LoRA adapters."""
 
-from collections.abc import Mapping
+
 from functools import partial
 import json
 import os
@@ -37,9 +37,6 @@ from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import sharding
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
-
-# NNX-only imports (train_state_nnx, model_creation_utils) are loaded lazily
-# inside the NNX dispatch branches so the Linen-only flow doesn't pull them in.
 
 
 def apply_lora_on_base_params(base_params, lora_params, lora_scale_factor=1.0):
@@ -121,21 +118,8 @@ def unapply_lora_from_base_params(base_params, lora_params, lora_scale_factor=1.
 
 
 def load_adapter(config, base_abstract_state_params, adapter_config_path, adapter_weights_path):
-  """Load a LoRA adapter from disk and return its parameters.
-
-  When `config.pure_nnx` is True, `base_abstract_state_params` is the NNX
-  abstract param state (no outer `params` wrapper) and the returned
-  `lora_params` follows the same shape. Otherwise both use the Linen tree.
-
-  Args:
-    config: Top-level MaxText config.
-    base_abstract_state_params: Abstract param state of the base model.
-    adapter_config_path: Path to `adapter_config.json` (local or GCS).
-    adapter_weights_path: Path to the adapter weights directory.
-
-  Returns:
-    A tuple `(lora_params, lora_config)`. Both are None when
-    `adapter_config_path` is empty.
+  """
+  Load the LoRA weights into a PyTree and return it.
   """
   # Load LoRA weights
   lora_params = None
@@ -153,10 +137,7 @@ def load_adapter(config, base_abstract_state_params, adapter_config_path, adapte
     if not gcs_utils.gcs_path_exists(f"{adapter_weights_path}/commit_success.txt"):
       raise FileNotFoundError(f"Failed to read lora_weights from {adapter_weights_path}.")
 
-    if config.pure_nnx:
-      lora_state, _ = get_lora_abstract_state_nnx(base_abstract_state_params, lora_config)
-    else:
-      lora_state, _ = get_lora_abstract_state(base_abstract_state_params, lora_config)
+    lora_state, _ = get_lora_abstract_state(base_abstract_state_params, lora_config)
 
     with nn_partitioning.axis_rules(config.logical_axis_rules):
       lora_params = checkpointing.load_params_from_path(
@@ -171,27 +152,22 @@ def load_adapter(config, base_abstract_state_params, adapter_config_path, adapte
 
 
 def setup_initial_lora_state(model, data_iterator, tx, config, rng, mesh, checkpoint_manager, lora_adapter_path):
-  """Initialize the LoRA train state and optionally restore it from a checkpoint.
-
-  On the NNX path, `model` is unused; the abstract state is built from
-  `model_creation_utils.create_nnx_abstract_model` and `lora_state.params`
-  follows the NNX shape. On the Linen path the existing `{"params": ...}`
-  tree shape is preserved.
+  """We initialize the model and optimizer state, and optionally load from a
+  checkpoint as necessary.
 
   Args:
-    model: Linen `nn.Module` used on the Linen path; ignored on NNX.
-    data_iterator: Data iterator passed through to `load_state_if_possible`.
-    tx: Optax gradient transformation for the optimizer.
-    config: Top-level MaxText config.
-    rng: PRNG key used for the Linen init.
-    mesh: JAX device mesh.
-    checkpoint_manager: Orbax `CheckpointManager` for the adapter.
-    lora_adapter_path: Path to the adapter directory containing
-      `adapter_config.json`.
+    model: the flax model to initialize
+    tx: the optax.GradientTransformation
+    config: config object
+    rng: jax.prng key
+    mesh: jax.devices() mesh
+    checkpoint_manager: an Orbax checkpointing.CheckpointManager object
+    lora_adapter_path: Path of the LoRA adapter which is expected to have
+        `adapter_config.json` and adapter weights
 
   Returns:
-    A tuple `(lora_config, lora_state, lora_state_annotations)`. All three
-    are None when `lora_adapter_path` is empty.
+    state: the initialized train state
+    state_mesh_annotations: the mesh annotations for the train state
   """
 
   lora_state = None
@@ -200,32 +176,21 @@ def setup_initial_lora_state(model, data_iterator, tx, config, rng, mesh, checkp
 
   if lora_adapter_path:
     max_logging.log(f"Setting initial state of LoRA with lora_adapter_path = {lora_adapter_path}")
+    # LoRA adapters on disk are Linen-format and downstream expects Linen TrainState.
+    # Route to Linen regardless of pure_nnx; native NNX LoRA is a separate effort.
     if config.pure_nnx:
-      # pylint: disable=import-outside-toplevel
-      from maxtext.common import train_state_nnx
-      from maxtext.utils import model_creation_utils
-
-      _create_model_partial, _ = model_creation_utils.create_nnx_abstract_model(config, mesh)
-
-      def create_train_state_fn():
-        nnx_model = _create_model_partial()
-        optimizer = nnx.Optimizer(nnx_model, tx, wrt=nnx.Param)
-        return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
-
-      init_state_fn = create_train_state_fn
-    else:
-      init_state_fn = partial(maxtext_utils.init_initial_state, model, tx, config, True, rng)
+      max_logging.log(
+          "WARNING: LoRA does not yet support pure_nnx natively; "
+          "running on the Linen path. NNX-format checkpoints will not load correctly here."
+      )
+    init_state_fn = partial(maxtext_utils.init_initial_state, model, tx, config, True, rng)
     unboxed_abstract_state, _, _ = maxtext_utils.get_abstract_state(config, mesh, init_state_fn, True)
 
     lora_config_path = lora_adapter_path + "adapter_config.json"
 
     lora_config = gcs_utils.read_json_from_gcs(lora_config_path)
 
-    if config.pure_nnx:
-      base_abstract_params = _nnx_param_subtree(unboxed_abstract_state)
-      lora_state, lora_state_annotations = get_lora_abstract_state_nnx(base_abstract_params, lora_config)
-    else:
-      lora_state, lora_state_annotations = get_lora_abstract_state(unboxed_abstract_state.params, lora_config)
+    lora_state, lora_state_annotations = get_lora_abstract_state(unboxed_abstract_state.params, lora_config)
 
     lora_weights_path = f"{lora_adapter_path}/0/items"
 
@@ -567,18 +532,25 @@ def apply_lora_to_model(
   return lora_model
 
 
-def restore_lora_from_path(trainer: Any, mt_config: pyconfig.HyperParameters) -> Any:
-  """Restores LoRA parameter weights from an external Orbax checkpoint for a fresh run."""
+def restore_lora_from_path(model: nnx.Module, mt_config: pyconfig.HyperParameters) -> nnx.Module:
+  """Restores LoRA parameter weights from an external Orbax checkpoint.
+
+  This function performs the restore in-place on the model's parameters and
+  returns the model with the restored weights applied.
+
+  Args:
+    model: The JAX/Flax NNX model (nnx.Module).
+    mt_config: The HyperParameters config containing the lora configuration.
+
+  Returns:
+    The model with the restored LoRA weights applied in-place.
+
+  Raises:
+    ValueError: If LoRA is not enabled on the model, but a restore path is set.
+  """
   lora_restore_path = mt_config.lora.lora_restore_path
 
-  train_steps = getattr(trainer, "train_steps", 0)
-  if train_steps > 0:
-    max_logging.log(
-        f"PeftTrainer restored current run at step {train_steps}; " f"ignoring lora_restore_path '{lora_restore_path}'."
-    )
-    return trainer
-
-  if not is_lora_enabled(trainer.model):
+  if not is_lora_enabled(model):
     lora_module_path = _get_lora_module_path(mt_config)
     if not mt_config.lora.enable_lora:
       raise ValueError(
@@ -586,10 +558,12 @@ def restore_lora_from_path(trainer: Any, mt_config: pyconfig.HyperParameters) ->
           f"Set lora.enable_lora=True and verify lora_module_path ('{lora_module_path}') matches model modules."
       )
 
-  abstract_lora_params = nnx.state(trainer.model, nnx.LoRAParam)
+  abstract_lora_params = nnx.state(model, nnx.LoRAParam)
 
+  # Prepare target for restore: map each variable to its value dict.
+  # Use v[...] to avoid deprecated v.value access for Variable[Array] instances.
   target_for_restore = jax.tree.map(
-      lambda v: {"value": v.value},
+      lambda v: {"value": v[...] if isinstance(v, nnx.Variable) else getattr(v, "value", v)},
       abstract_lora_params,
       is_leaf=lambda n: isinstance(n, nnx.Variable),
   )
@@ -611,8 +585,8 @@ def restore_lora_from_path(trainer: Any, mt_config: pyconfig.HyperParameters) ->
     max_logging.log(f"Guided restore failed: {e}. Falling back to basic restore.")
     restored_lora_params = ocp.PyTreeCheckpointer().restore(lora_restore_path)
 
-  # Post processing
-  def _map_to_state(path, variable):
+  # Post processing: Map restored parameters back to the abstract state.
+  def _map_to_state(path, variable: nnx.Variable) -> None:
     if not isinstance(variable, nnx.Variable):
       return
 
@@ -625,6 +599,7 @@ def restore_lora_from_path(trainer: Any, mt_config: pyconfig.HyperParameters) ->
       elif hasattr(curr, p):
         curr = getattr(curr, p)
       else:
+        # Parameter path not found in restored checkpoint; skip updating this variable.
         return
 
     if isinstance(curr, dict) and "value" in curr:
@@ -634,6 +609,7 @@ def restore_lora_from_path(trainer: Any, mt_config: pyconfig.HyperParameters) ->
     else:
       matched_val = curr
 
+    # Assign value back to variable in abstract state.
     variable.value = matched_val
 
   jax.tree_util.tree_map_with_path(
@@ -642,191 +618,7 @@ def restore_lora_from_path(trainer: Any, mt_config: pyconfig.HyperParameters) ->
       is_leaf=lambda n: isinstance(n, nnx.Variable),
   )
 
-  nnx.update(trainer.model, abstract_lora_params)
+  # Apply updated states in-place to the model.
+  nnx.update(model, abstract_lora_params)
   max_logging.log(f"LoRA restore complete from '{lora_restore_path}'.")
-  return trainer
-
-
-# NNX-shaped LoRA helpers.
-#
-# The Linen walkers above use `isinstance(x, dict)` and unwrapped leaves. NNX
-# trees use `nnx.State` (a Mapping that is not a dict) and Variable-wrapped
-# leaves, so a separate set of walkers is needed. The math (W += B @ A * s)
-# is identical to the Linen path.
-
-
-def _is_nnx_branch(x):
-  """Return True if `x` should be recursed into as a sub-tree."""
-  return isinstance(x, Mapping)
-
-
-def _nnx_param_subtree(unboxed_abstract_state):
-  """Return the `model` substate, peeling off the outer `TrainStateNNX` wrapping."""
-  return unboxed_abstract_state["model"] if "model" in unboxed_abstract_state else unboxed_abstract_state
-
-
-def apply_lora_on_base_params_nnx(base_params, lora_params, lora_scale_factor=1.0):
-  """Apply LoRA deltas to `base_params` on the NNX path.
-
-  Standard LoRA decomposition: `W_new = W + lora_a @ lora_b * scale`, where
-  `lora_a` is the down-projection of shape `(emb, rank)` and `lora_b` is
-  the up-projection of shape `(rank, num_heads, head_dim)`. Mutates
-  `base_params` in place.
-
-  Mirrors `apply_lora_on_base_params` but operates on an `nnx.State`-shaped
-  tree (a nested `Mapping` whose leaves are arrays). The recursion follows
-  the natural nested-dict structure of the lora tree, matching the Linen
-  sibling above.
-  """
-
-  def recurse(base_node, lora_node, path):
-    # Leaf-level node for a target module: it contains lora_a and lora_b
-    # side by side, so we handle the pair together and stop descending.
-    if "lora_a.kernel" in lora_node:
-      lora_a = lora_node["lora_a.kernel"]
-      lora_b = lora_node["lora_b.kernel"]
-      if lora_a is not None and lora_b is not None:
-        base_node["kernel"] = base_node["kernel"] + jnp.einsum("er,rnd->end", lora_a, lora_b) * lora_scale_factor
-      return
-    for name, lora_child in lora_node.items():
-      if _is_nnx_branch(lora_child):
-        recurse(base_node[name], lora_child, f"{path}.{name}")
-      elif lora_child is not None:
-        raise ValueError(f"Unexpected non-lora key ({path}.{name}) in lora_params")
-
-  recurse(base_params, lora_params, "")
-
-
-def unapply_lora_from_base_params_nnx(base_params, lora_params, lora_scale_factor=1.0):
-  """Unapply LoRA deltas from `base_params` on the NNX path.
-
-  Symmetric inverse of `apply_lora_on_base_params_nnx`: `W -= lora_a @ lora_b * scale`
-  at each target module. Mutates `base_params` in place.
-  """
-
-  def recurse(base_node, lora_node, path):
-    # Leaf-level node for a target module: handle the lora_a / lora_b pair together.
-    if "lora_a.kernel" in lora_node:
-      lora_a = lora_node["lora_a.kernel"]
-      lora_b = lora_node["lora_b.kernel"]
-      if lora_a is not None and lora_b is not None:
-        base_node["kernel"] = base_node["kernel"] - jnp.einsum("er,rnd->end", lora_a, lora_b) * lora_scale_factor
-      return
-    for name, lora_child in lora_node.items():
-      if _is_nnx_branch(lora_child):
-        recurse(base_node[name], lora_child, f"{path}.{name}")
-      elif lora_child is not None:
-        raise ValueError(f"Unexpected non-lora key ({path}.{name}) in lora_params")
-
-  recurse(base_params, lora_params, "")
-
-
-def get_lora_abstract_state_nnx(base_abstract_params, lora_config):
-  """Build an abstract LoRA state from an NNX-shaped base abstract state.
-
-  Walks `base_abstract_params` (the abstract `state.model` substate) and
-  emits a parallel tree with `lora_a.kernel` and `lora_b.kernel` leaves at
-  target attention paths, and `None` elsewhere. Shardings are derived from
-  the matching base leaves.
-
-  Args:
-    base_abstract_params: NNX abstract param state whose leaves are
-      `jax.ShapeDtypeStruct`.
-    lora_config: Adapter config dict containing `target_modules` and `r`.
-
-  Returns:
-    A tuple `(lora_state, lora_state_mesh_annotations)` matching the shape
-    returned by the Linen `get_lora_abstract_state`.
-  """
-  other_lora_format_to_jax_format = {
-      "q_proj": "self_attention.query",
-      "k_proj": "self_attention.key",
-      "v_proj": "self_attention.value",
-      "o_proj": "self_attention.out",
-  }
-
-  lora_target_modules = [other_lora_format_to_jax_format.get(s, s) for s in lora_config["target_modules"]]
-  lora_rank = int(lora_config["r"])
-
-  def get_lora_param_shape(base_array_shape, lora_module):
-    if len(base_array_shape) > 4:
-      raise ValueError(f"Unsupported base array shape {base_array_shape} (>4D)")
-    if lora_module in ("self_attention.query", "self_attention.key", "self_attention.value"):
-      lora_a_shape = base_array_shape[:-2] + (lora_rank,)
-      lora_b_shape = (lora_rank,) + base_array_shape[1:]
-    elif lora_module == "self_attention.out":
-      lora_a_shape = base_array_shape[:-1] + (lora_rank,)
-      if len(base_array_shape) == 4:
-        lora_b_shape = (lora_rank, base_array_shape[1], base_array_shape[-1])
-      else:
-        lora_b_shape = (lora_rank, base_array_shape[-1])
-    else:
-      raise ValueError(f"Unsupported lora_module={lora_module}")
-    return lora_a_shape, lora_b_shape
-
-  def get_lora_param_sharding(base_param_sharding, lora_module):
-    if base_param_sharding is None:
-      return None, None
-    base_pspec = base_param_sharding.spec
-    if len(base_pspec) > 4:
-      raise ValueError("PartitionSpec size > 4 not supported")
-    if lora_module in ("self_attention.query", "self_attention.key", "self_attention.value"):
-      lora_a_pspec = jax.sharding.PartitionSpec(*(base_pspec[:-2] + ((),)))
-      lora_b_pspec = jax.sharding.PartitionSpec(*(((),) + base_pspec[1:]))
-    elif lora_module == "self_attention.out":
-      lora_a_pspec = jax.sharding.PartitionSpec(*(base_pspec[:-1] + ((),)))
-      if len(base_pspec) == 4:
-        lora_b_pspec = jax.sharding.PartitionSpec((), base_pspec[1], base_pspec[-1])
-      else:
-        lora_b_pspec = jax.sharding.PartitionSpec((), base_pspec[-1])
-    else:
-      raise ValueError(f"Unsupported lora_module={lora_module}")
-    mesh = base_param_sharding.mesh
-    mem_kind = base_param_sharding.memory_kind
-    return (
-        jax.sharding.NamedSharding(mesh=mesh, spec=lora_a_pspec, memory_kind=mem_kind),
-        jax.sharding.NamedSharding(mesh=mesh, spec=lora_b_pspec, memory_kind=mem_kind),
-    )
-
-  def module_is_target(module_path):
-    for tgt in lora_target_modules:
-      if tgt in module_path:
-        return tgt
-    return None
-
-  def add_lora(out_node, base_node, path):
-    for name, child in base_node.items():
-      if _is_nnx_branch(child):
-        out_node[name] = {}
-        add_lora(out_node[name], child, f"{path}.{name}")
-      else:
-        if name not in ("kernel", "scale", "embedding"):
-          raise ValueError(f"Unexpected key={name} in base abstract params at {path}")
-        if not isinstance(child, jax.ShapeDtypeStruct):
-          raise ValueError(f"Unexpected leaf type {type(child).__name__} at {path}.{name}")
-        target_module = module_is_target(path)
-        if target_module is not None:
-          a_shape, b_shape = get_lora_param_shape(child.shape, target_module)
-          a_sharding, b_sharding = get_lora_param_sharding(child.sharding, target_module)
-          out_node["lora_a.kernel"] = jax.ShapeDtypeStruct(shape=a_shape, dtype=child.dtype, sharding=a_sharding)
-          out_node["lora_b.kernel"] = jax.ShapeDtypeStruct(shape=b_shape, dtype=child.dtype, sharding=b_sharding)
-        else:
-          out_node[name] = None
-
-  lora_abstract_params = {}
-  add_lora(lora_abstract_params, base_abstract_params, "")
-
-  unboxed_abstract_lora_state = train_state.TrainState(
-      step=0, apply_fn=None, params=lora_abstract_params, tx=None, opt_state={}  # type: ignore
-  )
-  lora_state_mesh_annotations = train_state.TrainState(
-      step=0,
-      apply_fn=None,
-      params=jax.tree_util.tree_map(
-          lambda x: x.sharding.spec if x.sharding is not None else None,
-          lora_abstract_params,
-      ),
-      tx=None,  # type: ignore
-      opt_state={},
-  )
-  return unboxed_abstract_lora_state, lora_state_mesh_annotations
+  return model

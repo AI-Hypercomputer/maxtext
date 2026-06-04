@@ -261,8 +261,7 @@ def main(config, test_args):  # pylint: disable=W0621
       if config.lora.enable_lora:
         model = lora_utils.apply_lora_to_model(model, mesh, config)
         if config.lora.lora_restore_path:
-          mock_trainer = type("MockTrainer", (), {"model": model, "train_steps": 0})
-          lora_utils.restore_lora_from_path(mock_trainer, config)
+          lora_utils.restore_lora_from_path(model, config)
       state = None
     else:
       model = models.transformer_as_linen(config, mesh=mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
@@ -432,7 +431,7 @@ def main(config, test_args):  # pylint: disable=W0621
     max_logging.log(f"Loading HF model with dtype: {torch_dtype} (derived from config.dtype: {config.dtype})")
 
     hf_model = AutoModelForCausalLM.from_pretrained(
-        test_args.hf_model_path, dtype=torch_dtype, token=hf_token, trust_remote_code=test_args.trust_remote_code
+        test_args.hf_model_path, torch_dtype=torch_dtype, token=hf_token, trust_remote_code=test_args.trust_remote_code
     )
     hf_lora_path = config.hf_lora_adapter_path
     if hf_lora_path:
@@ -469,8 +468,7 @@ def main(config, test_args):  # pylint: disable=W0621
       if config.lora.enable_lora:
         maxtext_model = lora_utils.apply_lora_to_model(maxtext_model, mesh, config)
         if config.lora.lora_restore_path:
-          mock_trainer = type("MockTrainer", (), {"model": maxtext_model, "train_steps": 0})
-          lora_utils.restore_lora_from_path(mock_trainer, config)
+          lora_utils.restore_lora_from_path(maxtext_model, config)
       maxtext_state = None
     else:
       maxtext_model = models.transformer_as_linen(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
