@@ -523,6 +523,11 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
 
     # 3. Restore Model & Optimizer State correctly via MaxTextCheckpointManager.
     # Accessing protected variables of the base class IS allowed inside the subclass!
+    # Fence: wait for the freshly-built teacher + student + optimizer device programs
+    # to finish. Orbax v1 runs its restore device_put transfers on a background
+    # thread, if they race the still-in-flight model build they can deadlock on
+    # TPU with no timeout. Draining here removes that concurrency.
+    jax.block_until_ready((nnx.state(self.model), nnx.state(self.optimizer)))
     self._train_steps, self._restored_custom_metadata = self.checkpoint_manager.maybe_restore(
         self.model,
         self.optimizer,
@@ -562,6 +567,19 @@ def get_maxtext_model(config: pyconfig.HyperParameters, mesh: jax.sharding.Mesh)
 # -----------------------------------------------------------------------------
 # Main Training Loop
 # -----------------------------------------------------------------------------
+
+
+class DummyMetricsLogger(metrics_logger.MetricsLogger):
+  """A completely silent metrics logger for testing/benchmarking."""
+
+  def __init__(self):
+    super().__init__(None)
+
+  def log(self, metrics_prefix, metric_name, scalar_value, mode, step):
+    pass
+
+  def close(self):
+    pass
 
 
 def build_training_components(
@@ -732,6 +750,7 @@ def train_distill(
         teacher_config=teacher_config,
         is_offline=is_offline,
         student_freeze_param_filter=student_freeze_param_fn if student_params_to_update else None,
+        metrics_logger=DummyMetricsLogger(),
     )
     trainer.is_managed_externally = True
     trainer._has_aux = True  # pylint: disable=protected-access
