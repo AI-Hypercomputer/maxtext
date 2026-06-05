@@ -412,7 +412,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
     self.DeepSeekMoeBlock_0 = moe.RoutedAndSharedMoE(
         config=self.config,
         mesh=mesh,
-        kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_init=initializers.nd_dense_init(self.config.dense_init_scale, "fan_in", "truncated_normal"),
         kernel_axes=("embed", None),
         dtype=self.config.dtype,
         weight_dtype=self.config.weight_dtype,
