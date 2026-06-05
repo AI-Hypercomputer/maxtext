@@ -869,14 +869,13 @@ def recover(
   object.__setattr__(config, "global_batch_size_to_eval_on", gbs_eval)
   object.__setattr__(config, "micro_batch_size_to_eval_on", mbs_eval)
 
-  # Update rampup batch size parameters if enabled
   if config.enable_rampup_batch_size:
-    gbs_load_start, _, _ = calc_gbs(
+    gbs_load_start = calc_gbs(
         config.per_device_batch_size_start,
         config.expansion_factor_real_data,
         new_num_devices,
         config.gradient_accumulation_steps,
-    )
+    )[0]
     gbs_load_inc, _, _ = calc_gbs(
         config.per_device_batch_size_increment,
         config.expansion_factor_real_data,
