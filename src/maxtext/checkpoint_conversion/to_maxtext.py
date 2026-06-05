@@ -398,7 +398,11 @@ def _build_single_axis_stacked_tensor(
 
   if config.scan_layers:
     # If it's a standard scanned layer, we use the configured param_scan_axis.
-    axis_to_stack = config.param_scan_axis
+    # Except if we are stacking experts on an unscanned layer under scan_layers=True (e.g. pre_layers)
+    if len(hf_source_keys) == target_shape[0] and (len(target_shape) < 4 or target_shape[config.param_scan_axis] != len(hf_source_keys)):
+      axis_to_stack = 0
+    else:
+      axis_to_stack = config.param_scan_axis
   else:
     # Otherwise, if an unscanned MoE layer, and we stack along the expert axis (0).
     axis_to_stack = 0
@@ -519,7 +523,10 @@ def _get_maxtext_weight(
       # The hook returns a tensor that can be split in last dim.
       # In eager mode, we can just split the materialized tensor.
       for i, mt_target_idx in enumerate(mt_target_idx_or_indices):
-        final_mt_weights[mt_target_idx] = final_mt_tensor_numpy[..., i]
+        if isinstance(final_mt_tensor_numpy, (list, tuple)):
+          final_mt_weights[mt_target_idx] = final_mt_tensor_numpy[i]
+        else:
+          final_mt_weights[mt_target_idx] = final_mt_tensor_numpy[..., i]
         if final_mt_weights[mt_target_idx].shape != mt_target_shape_or_shapes[i]:
           raise ValueError(
               f"Shape mismatch for {mt_param_key_or_keys[i]}: Expect {mt_target_shape_or_shapes[i]}, "
@@ -551,7 +558,10 @@ def _get_maxtext_weight(
       for i, mt_target_idx in enumerate(mt_target_idx_or_indices):
 
         def _slicing_loader(base_loader, slice_idx):
-          return np.array(base_loader)[..., slice_idx]
+          val = base_loader.__array__() if hasattr(base_loader, "__array__") else base_loader
+          if isinstance(val, (list, tuple)):
+            return val[slice_idx]
+          return np.array(val)[..., slice_idx]
 
         # Each LazyTensor gets a new load_fn that wraps the original and applies the slice.
         slicing_load_fn = partial(_slicing_loader, final_mt_tensor_numpy, i)

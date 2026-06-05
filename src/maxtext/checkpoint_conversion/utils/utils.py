@@ -260,12 +260,16 @@ def process_maxtext_param(
   if not isinstance(hf_target_paths[0], list):
     # Case 2 or 3: The source tensor is stacked on a single axis.
     # i.e., hf_target_paths is an (un-nested) list
-    # We determine if it's standard scanned (stack on layer axis) or unscanned MoE (stack on expert axis).
     if maxtext_config.scan_layers:
-      max_logging.log("\tscan")
-      # Case 2: Standard scanned layer.
-      # The tensor is stacked ONLY on the layer axis.
-      axis_to_slice = maxtext_config.param_scan_axis
+      weight_shape = maxtext_param_weight[0].shape if isinstance(maxtext_param_weight, list) else maxtext_param_weight.shape
+      if len(hf_target_paths) == weight_shape[0] and (len(weight_shape) < 4 or weight_shape[maxtext_config.param_scan_axis] != len(hf_target_paths)):
+        max_logging.log("\tunscan moe under scan_layers=True")
+        axis_to_slice = 0
+      else:
+        max_logging.log("\tscan")
+        # Case 2: Standard scanned layer.
+        # The tensor is stacked ONLY on the layer axis.
+        axis_to_slice = maxtext_config.param_scan_axis
     else:
       max_logging.log("\tunscan moe")
       # Case 3: Unscanned MoE layer, e.g., from 'layers_0-moe_block-wi_0'.
