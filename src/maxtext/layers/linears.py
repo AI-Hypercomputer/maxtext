@@ -567,3 +567,143 @@ def mlp_block(
       abstract_init=False,
   )
   return module
+
+
+class DeepSeekV4GroupedLinear(nnx.Module):
+  """Block-diagonal grouped linear used by the grouped output projection in DeepSeek-V4.
+
+  The core attention's stacked output is `num_attention_heads * head_dim`-dim,
+  which is extremely large. A direct projection would dominate the per-token cost.
+  This module splits the heads into `g` groups, projecting each independently
+  to a smaller intermediate dimension, which are later mixed.
+  """
+
+  def __init__(
+      self,
+      in_features_per_group: int,
+      out_features: int,
+      n_groups: int,
+      weight_dtype: DType = jnp.float32,
+      dtype: DType = jnp.float32,
+      kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal"),
+      kernel_axes: tuple[None | str, ...] = ("groups", "embed", "mlp"),
+      matmul_precision: str = "default",
+      parameter_memory_host_offload: bool = False,
+      *,
+      rngs: nnx.Rngs,
+  ):
+    """Initializes the DeepSeekV4GroupedLinear module.
+
+    Args:
+      in_features_per_group: The size of the input dimension for each group.
+      out_features: The total output dimension across all groups. Must be divisible by n_groups.
+      n_groups: The number of independent groups to split the projection into.
+      weight_dtype: the dtype of the weights (default: float32).
+      dtype: the dtype of the computation (default: float32).
+      kernel_init: initializer function for the weight matrix.
+      kernel_axes: logical axes for partitioning the kernel.
+      matmul_precision: Precision for matrix multiplication.
+      parameter_memory_host_offload: Determines whether to offload params to host
+      rngs: RNG state for initialization in nnx.
+    """
+    if out_features % n_groups != 0:
+      raise ValueError(f"out_features ({out_features}) must be divisible by n_groups ({n_groups})")
+
+    self.in_features_per_group = in_features_per_group
+    self.out_features = out_features
+    self.n_groups = n_groups
+    self.out_features_per_group = out_features // n_groups
+
+    self.weight_dtype = weight_dtype
+    self.dtype = dtype
+    self.kernel_init = kernel_init
+    self.kernel_axes = kernel_axes
+    self.matmul_precision = matmul_precision
+    self.parameter_memory_host_offload = parameter_memory_host_offload
+
+    # Kernel shape splits the projection up into a batched representation
+    kernel_shape = (self.n_groups, self.in_features_per_group, self.out_features_per_group)
+
+    # NdInitializer takes tuple positions to calculate fan_in / fan_out.
+    # Axis 1 represents the inner contracting dimension (fan_in).
+    # Axis 2 represents the output features dimension (fan_out).
+    kernel_in_axis = (1,)
+    kernel_out_axis = (2,)
+
+    self.kernel = nnx.Param(
+        self.kernel_init(
+            rngs.params(),
+            kernel_shape,
+            self.weight_dtype,
+            kernel_in_axis,
+            kernel_out_axis,
+        ),
+        sharding=self.kernel_axes,
+    )
+
+  def __call__(self, inputs: Array) -> Array:
+    """Applies a batched grouped linear transformation to the inputs.
+
+    Args:
+      inputs: The nd-array to be transformed. Expected shape is `[..., n_groups, in_features_per_group]`.
+
+    Returns:
+      The transformed input of shape `[..., n_groups, out_features_per_group]`.
+      When later flattened across the last two dims, this results in `out_features`.
+    """
+    inputs = jnp.asarray(inputs, self.dtype)
+
+    kernel = self.kernel[...]
+    if self.parameter_memory_host_offload:
+      max_logging.log("linear.py: Moving parameter grouped_linear kernel to device")
+      kernel = jax.device_put(kernel, max_utils.device_space())
+    kernel = jnp.asarray(kernel, self.dtype)
+
+    # Perform a batched matrix multiplication using einsum with explicit precision.
+    # We use jnp.einsum instead of explicitly flattening and using lax.dot_general
+    # to make the group-wise broadcast highly readable and natively batched.
+    #
+    # Notation breakdown:
+    #   ... : Any leading batch/sequence dimensions (e.g., [Batch, SeqLen]).
+    #   g   : The n_groups dimension.
+    #   i   : The in_features_per_group dimension (the contracting dimension).
+    #   o   : The out_features_per_group dimension.
+    #
+    # Input shape:  [..., g, i]
+    # Kernel shape: [g, i, o]
+    # Output shape: [..., g, o]
+    output = jnp.einsum("...gi,gio->...go", inputs, kernel, precision=lax.Precision(self.matmul_precision))
+
+    return output
+
+
+def deepseek_v4_grouped_linear(
+    *,
+    in_features_per_group: int,
+    out_features: int,
+    n_groups: int,
+    weight_dtype: DType = jnp.float32,
+    dtype: DType = jnp.float32,
+    kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal"),
+    kernel_axes: tuple[None | str, ...] = ("groups", "embed", "mlp"),
+    matmul_precision: str = "default",
+    parameter_memory_host_offload: bool = False,
+    name: None | str = None,
+):
+  """Creates a DeepSeekV4GroupedLinear Linen module using nnx.bridge.to_linen."""
+  module = nnx_wrappers.to_linen(
+      DeepSeekV4GroupedLinear,
+      in_features_per_group=in_features_per_group,
+      out_features=out_features,
+      n_groups=n_groups,
+      weight_dtype=weight_dtype,
+      dtype=dtype,
+      kernel_init=kernel_init,
+      kernel_axes=kernel_axes,
+      matmul_precision=matmul_precision,
+      parameter_memory_host_offload=parameter_memory_host_offload,
+      name=name,
+      metadata_fn=variable_to_logically_partitioned,
+      abstract_init=False,
+  )
+  return module
