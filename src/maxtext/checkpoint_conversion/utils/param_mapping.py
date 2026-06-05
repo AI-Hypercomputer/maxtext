@@ -86,17 +86,17 @@ def GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False
   # pylint: disable=line-too-long
   mapping = {
       # Embedding & final norm
-      "params-token_embedder-embedding": "model.language_model.embed_tokens.weight",
-      "params-decoder-decoder_norm-scale": "model.language_model.norm.weight",
+      "params-token_embedder-embedding": "language_model.model.embed_tokens.weight",
+      "params-decoder-decoder_norm-scale": "language_model.model.norm.weight",
       # Vision embed & pos
-      "params-vision_encoder-Gemma3VisionEncoderLayer_0-embedding-kernel": "model.vision_tower.vision_model.embeddings.patch_embedding.weight",
-      "params-vision_encoder-Gemma3VisionEncoderLayer_0-embedding-bias": "model.vision_tower.vision_model.embeddings.patch_embedding.bias",
-      "params-vision_encoder-Gemma3VisionEncoderLayer_0-pos_embedding": "model.vision_tower.vision_model.embeddings.position_embedding.weight",
-      "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoder_norm-scale": "model.vision_tower.vision_model.post_layernorm.weight",
-      "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoder_norm-bias": "model.vision_tower.vision_model.post_layernorm.bias",
+      "params-vision_encoder-Gemma3VisionEncoderLayer_0-embedding-kernel": "vision_tower.vision_model.embeddings.patch_embedding.weight",
+      "params-vision_encoder-Gemma3VisionEncoderLayer_0-embedding-bias": "vision_tower.vision_model.embeddings.patch_embedding.bias",
+      "params-vision_encoder-Gemma3VisionEncoderLayer_0-pos_embedding": "vision_tower.vision_model.embeddings.position_embedding.weight",
+      "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoder_norm-scale": "vision_tower.vision_model.post_layernorm.weight",
+      "params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoder_norm-bias": "vision_tower.vision_model.post_layernorm.bias",
       # Multi-modal projector
-      "params-vision_encoder-VisionEmbedder_0-mm_input_projection-w": "model.multi_modal_projector.mm_input_projection_weight",
-      "params-vision_encoder-VisionEmbedder_0-mm_soft_embedding_norm-scale": "model.multi_modal_projector.mm_soft_emb_norm.weight",
+      "params-vision_encoder-VisionEmbedder_0-mm_input_projection-w": "multi_modal_projector.mm_input_projection_weight",
+      "params-vision_encoder-VisionEmbedder_0-mm_soft_embedding_norm-scale": "multi_modal_projector.mm_soft_emb_norm.weight",
   }
 
   vision_params = [
@@ -122,7 +122,7 @@ def GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False
   for i in range(Nvis):
     for mx, hf in vision_params:
       key = f"params-vision_encoder-Gemma3VisionEncoderLayer_0-Transformer-encoderblock_{i}-{mx}"
-      mapping[key] = f"model.vision_tower.vision_model.encoder.layers.{i}.{hf}"
+      mapping[key] = f"vision_tower.vision_model.encoder.layers.{i}.{hf}"
 
   # Text decoder mapping
   text_params = [
@@ -153,7 +153,7 @@ def GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False
       hf_indices = list(range(block_idx, num_scanned, attention_pattern_length))
       for mx, hf in text_params:
         key = f"params-decoder-layers-layers_{block_idx}-{mx}"
-        mapping[key] = [f"model.language_model.layers.{i}.{hf}" for i in hf_indices]
+        mapping[key] = [f"language_model.model.layers.{i}.{hf}" for i in hf_indices]
 
     # Remainder layers (unscanned): params-decoder-layers_remainder-layers_{rem_idx}-{param}
     if num_remaining > 0:
@@ -161,12 +161,12 @@ def GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False
         hf_layer_idx = num_scanned + rem_idx
         for mx, hf in text_params:
           key = f"params-decoder-layers_remainder-layers_{rem_idx}-{mx}"
-          mapping[key] = f"model.language_model.layers.{hf_layer_idx}.{hf}"
+          mapping[key] = f"language_model.model.layers.{hf_layer_idx}.{hf}"
   else:
     for i in range(Ndec):
       for mx, hf in text_params:
         key = f"params-decoder-layers_{i}-{mx}"
-        mapping[key] = f"model.language_model.layers.{i}.{hf}"
+        mapping[key] = f"language_model.model.layers.{i}.{hf}"
 
   return mapping
 
