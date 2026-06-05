@@ -205,34 +205,58 @@ def build_diloco_state(
       nesterov=True,
   )
 
+  state = initialize_state()
+
   @drjax.program(placements={"diloco": config.num_diloco_replicas})
-  def init_diloco_state() -> tuple[DiLoCoTrainState, PyTree]:
-    state = initialize_state()
+  def init_inner_state() -> Any:
     # Inner state must be broadcast across clients.
     # Pass mesh explicitly because jax.set_mesh() uses a different thread-local
     # than pxla.thread_resources (which drjax reads), so drjax cannot find the
     # mesh automatically when jax.set_mesh is used.
-    inner_state = drjax.broadcast(state, mesh=mesh)
-    # Outer state retains a single copy of the model parameters and optimizer state.
-    # For NNX, model params (Param variables only) live under state.model;
-    # for Linen under state.params.
-    outer_params = state.model.filter(nnx.Param) if config.pure_nnx else state.params
-    outer_opt_state = outer_optimizer.init(outer_params)
-    outer_opt_state_sharding = jax.tree_util.tree_map(lambda x: x.sharding, outer_opt_state)
-    # For NNX, the step counter lives at state.optimizer.step; for Linen at state.step.
-    step = state.optimizer.step if config.pure_nnx else state.step
+    return drjax.broadcast(state, mesh=mesh)
+
+  inner_state = init_inner_state()
+
+  # Outer state retains a single copy of the model parameters and optimizer state.
+  # For NNX, model params (Param variables only) live under state.model;
+  # for Linen under state.params.
+  outer_params = state.model.filter(nnx.Param) if config.pure_nnx else state.params
+
+  # For NNX, the step counter lives at state.optimizer.step; for Linen at state.step.
+  step = state.optimizer.step if config.pure_nnx else state.step
+
+  # Drop the reference to `state` so that JAX's asynchronous garbage collector
+  # can naturally free the inner optimizer arrays from the original non-DiLoCo state.
+  # This prevents the TPU from holding both copies in memory while allocating outer_opt_state.
+  del state
+
+  outer_opt_state_sharding = (
+      optax.TraceState(trace=jax.tree_util.tree_map(lambda x: getattr(x, "sharding", None), outer_params)),
+      optax.EmptyState(),
+  )
+
+  # Initialize outer_opt_state using jax.jit with explicit out_shardings to avoid
+  # creating unsharded zeros eagerly or relying on tracers' sharding inside drjax.program.
+  def init_outer_opt_state():
     return (
-        DiLoCoTrainState(inner_state=inner_state, params=outer_params, outer_opt_state=outer_opt_state, step=step),
-        outer_opt_state_sharding,
+        optax.TraceState(trace=jax.tree_util.tree_map(lambda p: jnp.zeros(p.shape, p.dtype), outer_params)),
+        optax.EmptyState(),
     )
 
-  return init_diloco_state()
+  outer_opt_state = jax.jit(init_outer_opt_state, out_shardings=outer_opt_state_sharding)()
+  return (
+      DiLoCoTrainState(inner_state=inner_state, params=outer_params, outer_opt_state=outer_opt_state, step=step),
+      outer_opt_state_sharding,
+  )
 
 
 def build_diloco_train_step(
     config: pyconfig.HyperParameters,
     train_step: Callable[[Any, Batch, PRNGKey], tuple[Any, Metrics]],
     mesh: jax.sharding.Mesh | None = None,
+    outer_params_shardings: PyTree | None = None,
+    inner_model_params_shardings: PyTree | None = None,
+    outer_opt_state_shardings: PyTree | None = None,
 ) -> Callable[[DiLoCoTrainState, Batch, PRNGKey], tuple[DiLoCoTrainState, Metrics]]:
   """Convert a local state and train step into DiLoCo-compatible versions.
 
@@ -256,17 +280,58 @@ def build_diloco_train_step(
   def synchronize(state):
     # Calculate the delta between the current replica's state and the global
     # state (since last synchronization).
-    broadcast_outer_params = drjax.broadcast(state.params, mesh=mesh)
     # For NNX, model Param vars live under inner_state.model; for Linen under inner_state.params.
     inner_model_params = (
         nnx.filter_state(state.inner_state.model, nnx.Param) if config.pure_nnx else state.inner_state.params
     )
+
+    # Helper to enforce the correct FSDP/Tensor sharding so XLA doesn't gather the full tensor
+    # and OOM the TPU during the megascale All-Reduce over the DCN.
+    def _apply_sharding(reference, target, explicit_sharding=None):
+      if explicit_sharding is not None:
+        return jax.lax.with_sharding_constraint(target, explicit_sharding)
+      sharding = getattr(reference, "sharding", None)
+      if sharding is not None:
+        return jax.lax.with_sharding_constraint(target, sharding)
+      return target
+
+    _inner_shardings = (
+        inner_model_params_shardings
+        if inner_model_params_shardings is not None
+        else jax.tree.map(lambda _: None, inner_model_params)
+    )
+    _outer_shardings = (
+        outer_params_shardings if outer_params_shardings is not None else jax.tree.map(lambda _: None, state.params)
+    )
+    _opt_shardings = (
+        outer_opt_state_shardings
+        if outer_opt_state_shardings is not None
+        else jax.tree.map(lambda _: None, state.outer_opt_state)
+    )
+
+    broadcast_outer_params = drjax.broadcast(state.params, mesh=mesh)
+    broadcast_outer_params = jax.tree.map(_apply_sharding, inner_model_params, broadcast_outer_params, _inner_shardings)
+
     model_delta = jax.tree.map(lambda x, y: y - x, inner_model_params, broadcast_outer_params)
+    model_delta = jax.tree.map(_apply_sharding, inner_model_params, model_delta, _inner_shardings)
+
     # Treat the average delta as the outer optimizer's gradient and apply to
     # the global (outer) model params.
     averaged_pseudo_grad = drjax.reduce_mean(model_delta)
+    averaged_pseudo_grad = jax.tree.map(_apply_sharding, state.params, averaged_pseudo_grad, _outer_shardings)
+
     updates, new_opt_state = outer_optimizer.update(averaged_pseudo_grad, state.outer_opt_state, state.params)
     new_outer_params = optax.apply_updates(state.params, updates)
+
+    # Cast back to original dtype to prevent silent promotion to f32 (which doubles memory)
+    # and enforce sharding on the new params.
+    def _cast_and_shard(reference, target, explicit_sharding=None):
+      target = target.astype(reference.dtype)
+      return _apply_sharding(reference, target, explicit_sharding)
+
+    new_outer_params = jax.tree.map(_cast_and_shard, state.params, new_outer_params, _outer_shardings)
+    new_opt_state = jax.tree.map(_cast_and_shard, state.outer_opt_state, new_opt_state, _opt_shardings)
+
     # Replace inner model params with the new global model params.
     # NOTE: inner optimizer state is retained despite the change in parameters,
     # see section 6.1 in https://arxiv.org/pdf/2311.08105.

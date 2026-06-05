@@ -708,6 +708,7 @@ def train_loop(config, recorder, state=None):
           max_utils.print_mem_stats("After params initialized")
 
         last_step_completion = datetime.datetime.now()
+        # Temporarily disable metric logging to avoid cross-slice read
         metric_logger_instance.buffer_and_write_metrics(metrics, step, step_time_delta)
 
     if config.save_checkpoint_on_completion:
