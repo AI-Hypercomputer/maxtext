@@ -527,26 +527,24 @@ def pre_process_audio_qwen3_omni(audio_array):
   return audio_features, audio_features_mask
 
 
-def preprocess_mm_data_qwen3_omni_for_training(images):
-  """Preprocesses image(s) for Qwen3-Omni SFT training using default model constants."""
-
-  class _DefaultConfig:
-    patch_size_for_vit = 16
-    spatial_merge_size_for_vit = 2
-    temporal_patch_size_for_vit = QWEN3_TEMPORAL_PATCH_SIZE
-
+def preprocess_mm_data_qwen3_omni_for_training(images, config):
+  """Preprocesses image(s) for Qwen3-Omni SFT training using model config constants."""
   images_in = [images] if isinstance(images, np.ndarray) else images
-  pixel_values, pixel_grid_thw = pre_process_qwen3_image(
-      images_in, _DefaultConfig(), force_resize=(QWEN3_OMNI_IMAGE_SIZE, QWEN3_OMNI_IMAGE_SIZE)
-  )
+  if config.image_size_for_vit is None:
+    force_resize = None
+  elif isinstance(config.image_size_for_vit, (list, tuple)):
+    force_resize = tuple(config.image_size_for_vit)
+  else:
+    force_resize = (config.image_size_for_vit, config.image_size_for_vit)
+  pixel_values, pixel_grid_thw = pre_process_qwen3_image(images_in, config, force_resize=force_resize)
   pixel_values = np.reshape(
       pixel_values,
       (
           len(images_in),
-          3,  # num_channels_for_vit
-          _DefaultConfig.temporal_patch_size_for_vit * pixel_grid_thw[0, 0],
-          _DefaultConfig.patch_size_for_vit * pixel_grid_thw[0, 1],
-          _DefaultConfig.patch_size_for_vit * pixel_grid_thw[0, 2],
+          config.num_channels_for_vit,
+          config.temporal_patch_size_for_vit * pixel_grid_thw[0, 0],
+          config.patch_size_for_vit * pixel_grid_thw[0, 1],
+          config.patch_size_for_vit * pixel_grid_thw[0, 2],
       ),
   )
   return Qwen3OmniPreprocessorOutput(
