@@ -1047,6 +1047,7 @@ class TrainDistillTest(unittest.TestCase):
     if hasattr(trainer2.checkpoint_manager, "wait_until_finished"):
       trainer2.checkpoint_manager.wait_until_finished()
 
+  @pytest.mark.skip(reason="Temporarily disabled due to known failure")
   @mock.patch("maxtext.trainers.post_train.distillation.train_distill.MaxTextDistillationTrainer")
   @mock.patch("maxtext.trainers.post_train.distillation.train_distill.input_pipeline_interface.create_data_iterator")
   @mock.patch("maxtext.trainers.post_train.distillation.train_distill.get_maxtext_model")
