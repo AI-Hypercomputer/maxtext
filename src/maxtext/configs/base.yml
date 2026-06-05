@@ -112,7 +112,6 @@ dtype: "bfloat16"
 # used to configure quantization in the transformer layers, defaults to null implying bf16.
 # possible alternative settings are as follows:
 # 'int8' for dynamic range quantization using 8-bits
-# 'intmp' for mixed precision quantization for inference as described here: src/maxtext/configs/quantization/readme.md
 # 'fp8' for 8-bit floating-point gemms on nvidia gpus.
 # 'nanoo_fp8' for 8-bit floating-point gemms on amd mi300/mi325 gpus.
 # 'fp8_full' for fp8 quantization with static scaling.
@@ -123,10 +122,6 @@ constant_bound_config: ""
 # https://kolonist26-jax-kr.readthedocs.io/en/latest/jax.lax.html#jax.lax.precision
 matmul_precision: "default"
 activations_in_float32: false # sets activations to float32 before nonlinearity it true, else dtype
-# used to replicate the quantization scale to avoid the inefficient xla fusion for 2d sharding.
-replicate_quant_scale: false
-# path to file with quantization config for intmp.
-quant_cfg_path: ""
 quantize_kvcache: false # set to true to quantize kv cache values, defaults to false
 # valid kv_quant_axis values:
 #   - "" is valid only when quantize_kvcache is false
@@ -143,7 +138,7 @@ save_quantized_params_path: ""
 # when left as is, corresponds to training
 # accepted values are "inference"
 model_call_mode: ""
-use_qwix_quantization: false # [DEPRECATED: AQT will be removed in a future release. It is strongly recommended to set use_qwix_quantization to true] whether to use qwix for quantization. if set to true, the model will be quantized using qwix.
+use_qwix_quantization: true # [DEPRECATED: AQT will be removed in a future release. It is strongly recommended to set use_qwix_quantization to true] whether to use qwix for quantization. if set to true, the model will be quantized using qwix.
 use_manual_quantization: false # a flag if to use manual quantization for batch split. Only used if use_batch_split_schedule is true.
 # quantization calibration method used for weights and activations. supported methods can be found in https://github.com/google/qwix/blob/dc2a0770351c740e5ab3cce7c0efe9f7beacce9e/qwix/qconfig.py#l70-l80
 weight_quantization_calibration_method: "absmax"

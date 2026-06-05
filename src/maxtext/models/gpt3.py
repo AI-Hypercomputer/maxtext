@@ -35,7 +35,7 @@ from maxtext.layers import quantizations
 from maxtext.layers import linears
 from maxtext.layers.attentions import AttentionOp, KVQuant
 from maxtext.layers.initializers import Initializer, NdInitializer, nd_dense_init
-from maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.layers.quantizations import Quantization as Quant
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 

@@ -37,7 +37,7 @@ from maxtext.layers import quantizations
 from maxtext.layers.attentions import attention_as_linen
 from maxtext.layers.embeddings import attend_on_embedding, embed_as_linen, positional_embedding_as_linen
 from maxtext.layers.normalizations import rms_norm
-from maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.layers.quantizations import Quantization as Quant
 from maxtext.models import (
     deepseek,
     deepseek_batchsplit,

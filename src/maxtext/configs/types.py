@@ -86,7 +86,6 @@ class QuantizationType(str, Enum):
   NONE = ""
   INT4 = "int4"
   INT8 = "int8"
-  INTMP = "intmp"
   FP8_E5M2 = "fp8_e5m2"
   FP8_E4M3 = "fp8_e4m3"
   FP8 = "fp8"
@@ -339,7 +338,7 @@ class Checkpointing(BaseModel):
   )
   checkpoint_is_quantized: bool = Field(
       False,
-      description="Set to True if reading from a saved AQT quantized checkpoint.",
+      description="Set to True if reading from a saved quantized checkpoint.",
   )
   save_quantized_params_path: PathStr = Field("", description="Path to save params quantized on the fly.")
   enable_orbax_v1: bool = Field(False, description="Bool flag for enabling Orbax v1.")
@@ -427,16 +426,11 @@ class Quantization(BaseModel):
       QuantizationType.NONE,
       description="Activates quantization for transformer layers.",
   )
-  replicate_quant_scale: bool = Field(
-      False,
-      description="Replicates quantization scale to avoid inefficient XLA fusion.",
-  )
-  quant_cfg_path: PathStr = Field("", description="Path to the configuration file for 'intmp' quantization.")
   quantize_kvcache: bool = Field(False, description="If True, quantizes the Key-Value cache.")
   kv_quant_axis: KvQuantAxis = Field(KvQuantAxis.HEADS_AND_DKV, description="Axes to quantize over for the KV cache.")
   kv_quant_dtype: Literal["int8", "int4"] = Field("int8", description="Data type for KV cache quantization.")
   quantization_local_shard_count: int = Field(-1, description="Shards the range finding operation for quantization.")
-  use_qwix_quantization: bool = Field(False, description="Whether to use qwix for quantization.")
+  use_qwix_quantization: bool = Field(True, description="Whether to use qwix for quantization.")
   use_manual_quantization: bool = Field(
       False,
       description="Whether to use manual quantization for batch split. Only used if use_batch_split_schedule is True.",
@@ -2640,12 +2634,19 @@ class MaxTextConfig(
     }
     self.num_slices = max_utils.get_num_slices(raw_keys_for_num_slices)
 
-    # Check for AQT deprecation warning
+    # Enforce that Qwix is required for non-native/non-TE quantization
     if self.quantization and not self.use_qwix_quantization:
-      if self.quantization not in ("fp8", "nanoo_fp8") and not self.quantization.startswith("te_"):
-        logger.warning(
-            "WARNING: AQT quantization is deprecated and will be removed in a future release. "
-            "Please migrate to Qwix by setting use_qwix_quantization=True."
+      is_native_or_te = self.quantization in (
+          QuantizationType.FP8,
+          QuantizationType.NANOO_FP8,
+          QuantizationType.FP8_NANO_V2,
+          QuantizationType.FP8_GPU,
+      ) or self.quantization.startswith("te_")
+      if not is_native_or_te:
+        raise ValueError(
+            f"Quantization type '{self.quantization}' without Qwix (use_qwix_quantization=False) "
+            f"is unsupported because legacy AQT has been completely removed. "
+            f"Please migrate to Qwix by setting use_qwix_quantization=True."
         )
 
     # Default quantization sharding count to number of local devices if not set.
@@ -2850,15 +2851,6 @@ class MaxTextConfig(
       ):
         self.data_sharding[0].remove("stage")
         self.data_sharding[0].insert(0, "stage")
-
-      # Add sharding for FP8 amax history when using pipeline parallelism.
-      if self.quantization and self.quantization in (
-          "fp8",
-          "nanoo_fp8",
-          "fp8_gpu",
-          "te_fp8_delayedscaling",
-      ):
-        self.logical_axis_rules.append(["aqt_amax_history", ("stage",)])
 
     # H. RUN ALL CROSS-FIELD VALIDATIONS
     if self.load_parameters_path and self.load_full_state_path:
@@ -3137,7 +3129,7 @@ class MaxTextConfig(
       self.use_grpo = False
 
     if self.use_batch_split_schedule:
-      if self.quantization and not self.quantization == "fp8_full":
+      if self.quantization and self.quantization != "fp8_full":
         raise ValueError("Batch split quantization only supports `quantization=fp8_full`")
 
     if self.opt_type == "muon" and self.decoder_block not in [

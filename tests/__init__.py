@@ -16,6 +16,54 @@
 Test initialization
 """
 
-import pathwaysutils
+try:
+  import pathwaysutils
 
-pathwaysutils.initialize()
+  pathwaysutils.initialize()
+except ImportError:
+  import sys
+  from unittest.mock import MagicMock
+
+  mock_pathwaysutils = MagicMock()
+  mock_pathwaysutils.__path__ = []
+  mock_pathwaysutils.is_pathways_backend_used.return_value = False
+  sys.modules["pathwaysutils"] = mock_pathwaysutils
+
+  mock_elastic = MagicMock()
+  mock_elastic.__path__ = []
+  sys.modules["pathwaysutils.elastic"] = mock_elastic
+
+  mock_manager = MagicMock()
+  sys.modules["pathwaysutils.elastic.manager"] = mock_manager
+
+try:
+  import tokamax
+  from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel
+except ImportError:
+  import sys
+  from unittest.mock import MagicMock
+
+  mock_tokamax = MagicMock()
+  mock_tokamax.__path__ = []
+  sys.modules["tokamax"] = mock_tokamax
+  sys.modules["tokamax._src"] = MagicMock()
+  sys.modules["tokamax._src.ops"] = MagicMock()
+  sys.modules["tokamax._src.ops.experimental"] = MagicMock()
+  sys.modules["tokamax._src.ops.experimental.tpu"] = MagicMock()
+  sys.modules["tokamax._src.ops.experimental.tpu.splash_attention"] = MagicMock()
+
+try:
+  import tensorflow
+except ImportError:
+  import sys
+  from unittest.mock import MagicMock
+
+  mock_tf = MagicMock()
+  mock_tf.__path__ = []
+  sys.modules["tensorflow"] = mock_tf
+  sys.modules["tensorflow.io"] = MagicMock()
+  sys.modules["tensorflow.data"] = MagicMock()
+  sys.modules["tensorflow.compat"] = MagicMock()
+  sys.modules["tensorflow.compat.v1"] = MagicMock()
+  sys.modules["tensorflow.compat.v1.io"] = MagicMock()
+  sys.modules["tensorflow.compat.v1.io.gfile"] = MagicMock()

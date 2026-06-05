@@ -31,10 +31,10 @@ import flax.linen as nn
 
 from maxtext.common.common_types import DecoderBlockType, ShardMode, DType, Array, Config
 from maxtext.common.common_types import MODEL_MODE_PREFILL
-from maxtext.layers import nnx_wrappers, quantizations
+from maxtext.layers import nnx_wrappers
 from maxtext.layers import normalizations
 from maxtext.layers.initializers import NdInitializer, nd_dense_init, default_bias_init, variable_to_logically_partitioned
-from maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.layers.quantizations import Quantization as Quant
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils.sharding import maybe_shard_with_logical
@@ -157,17 +157,16 @@ class DenseGeneral(nnx.Module):
     kernel_in_axis = np.arange(len(self.axis))
     kernel_out_axis = np.arange(len(self.axis), len(self.axis) + len(self.out_features_shape))
 
-    if not quantizations.in_serve_mode(self.quant):
-      self.kernel = nnx.Param(
-          self.kernel_init(
-              rngs.params(),
-              kernel_shape,
-              self.weight_dtype,
-              kernel_in_axis,
-              kernel_out_axis,
-          ),
-          sharding=self.kernel_axes,
-      )
+    self.kernel = nnx.Param(
+        self.kernel_init(
+            rngs.params(),
+            kernel_shape,
+            self.weight_dtype,
+            kernel_in_axis,
+            kernel_out_axis,
+        ),
+        sharding=self.kernel_axes,
+    )
 
     if self.use_bias:
       bias_axes = self.kernel_axes[-len(self.out_features_shape) :]
@@ -216,16 +215,12 @@ class DenseGeneral(nnx.Module):
             f"does not match expected input feature size {self.in_features_shape[i]}"
         )
 
-    if quantizations.in_serve_mode(self.quant):
-      kernel_shape = self.in_features_shape + self.out_features_shape
-      kernel = jnp.zeros(kernel_shape, dtype=self.dtype)
-    else:
-      kernel = self.kernel[...]
-      # Move logit_dense kernel to device if parameter offloading is enabled
-      if self.parameter_memory_host_offload:
-        max_logging.log("linear.py: Moving parameter logits_dense kernel to device")
-        kernel = jax.device_put(kernel, max_utils.device_space())
-      kernel = jnp.asarray(kernel, self.dtype)
+    kernel = self.kernel[...]
+    # Move logit_dense kernel to device if parameter offloading is enabled
+    if self.parameter_memory_host_offload:
+      max_logging.log("linear.py: Moving parameter logits_dense kernel to device")
+      kernel = jax.device_put(kernel, max_utils.device_space())
+    kernel = jnp.asarray(kernel, self.dtype)
 
     # out_sharding should be None for auto mesh axis
     if self.shard_mode != ShardMode.EXPLICIT:

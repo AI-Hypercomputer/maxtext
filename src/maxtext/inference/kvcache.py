@@ -22,9 +22,12 @@ import jax.numpy as jnp
 from flax import linen as nn
 from flax import nnx
 
-from aqt.jax.v2 import config as aqt_config
-from aqt.jax.v2.aqt_tensor import QTensor as KVTensor
-from aqt.jax.v2.flax import aqt_flax
+
+class KVTensor:
+
+  def __init__(self, *args, **kwargs):
+    raise NotImplementedError("KV Cache quantization is not supported because AQT is deprecated.")
+
 
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.initializers import variable_to_logically_partitioned
@@ -96,56 +99,10 @@ class KVQuant:
       lhs_dequant_mode=None,
       lhs_calibration_mode=None,
   ):
-    """einsum function where QTensor is the right-hand-side"""
-    # Assumes kv is already quantized.
-    einsum = jnp.einsum
-    if self.dtype != jnp.float8_e4m3fn:
-      num_bits = 4 if self.dtype == jnp.int4 else 8
-      kv_cfg = aqt_config.dot_general_make(
-          lhs_bits=None,
-          rhs_bits=num_bits,
-          bwd_bits=None,
-          use_fwd_quant=False,
-      )
-    else:
-      kv_cfg = aqt_config.config_fwd_fp8()
-
-    if rhs_dequant_mode:
-      aqt_config.set_fwd_dequant_mode(kv_cfg, rhs_dequant_mode=rhs_dequant_mode)
-    if rhs_calibration_mode:
-      aqt_config.set_fwd_calibration_mode(
-          kv_cfg,
-          rhs_calibration_mode=rhs_calibration_mode,
-      )
-    if lhs_dequant_mode:
-      aqt_config.set_fwd_dequant_mode(kv_cfg, lhs_dequant_mode=lhs_dequant_mode)
-    if lhs_calibration_mode:
-      aqt_config.set_fwd_calibration_mode(
-          kv_cfg,
-          lhs_calibration_mode=lhs_calibration_mode,
-      )
-    einsum = aqt_flax.AqtEinsum(
-        rhs_quant_mode=aqt_flax.QuantMode.TRAIN,
-        lhs_freeze_mode=aqt_flax.FreezerMode.NONE,
-        rhs_freeze_mode=aqt_flax.FreezerMode.NONE,
-        cfg=kv_cfg,
-    )
-    return einsum
+    raise NotImplementedError("KV Cache quantization is not supported because AQT is deprecated.")
 
   def einsum_fn_with_rhs_qtensor_and_dequant(self):
-    """Get einstein summation for different dequant modes."""
-    if self.dtype == jnp.float8_e4m3fn:
-      return self.einsum_fn_with_rhs_qtensor(
-          lhs_dequant_mode=aqt_config.DequantMode.THIS_INPUT,
-          lhs_calibration_mode=aqt_config.CalibrationMode.REMAINING_AXIS,
-          rhs_dequant_mode=aqt_config.DequantMode.OTHER_INPUT,
-          rhs_calibration_mode=aqt_config.CalibrationMode.REMAINING_AXIS,
-      )
-    else:
-      return self.einsum_fn_with_rhs_qtensor(
-          rhs_dequant_mode=aqt_config.DequantMode.OTHER_INPUT,
-          rhs_calibration_mode=aqt_config.CalibrationMode.REMAINING_AXIS,
-      )
+    raise NotImplementedError("KV Cache quantization is not supported because AQT is deprecated.")
 
 
 def kv_cache_as_linen(
