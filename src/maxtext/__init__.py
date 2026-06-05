@@ -33,6 +33,16 @@ import os
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "0")
 del os
 
+import google_cloud_mldiagnostics  # pylint: disable=unused-import
+from google_cloud_mldiagnostics.utils.libtpu_utils import libtpu_metric
+from maxtext.utils import max_logging
+
+try:
+  max_logging.info("ML diagnostics initialization")
+  libtpu_metric._initialize()
+except Exception as e:
+  max_logging.warning(f"ML diagnostics initialization failed: {e}")
+
 from jax.sharding import Mesh
 
 from maxtext.configs import pyconfig
