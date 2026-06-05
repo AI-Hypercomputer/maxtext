@@ -24,7 +24,7 @@ from typing import Iterable, Optional
 
 from maxtext.common.common_types import DType, ShardMode, Array
 from maxtext.layers.nnx_wrappers import ToNNX
-from maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.layers.quantizations import Quantization as Quant
 from maxtext.layers.initializers import NdInitializer, nd_dense_init
 from maxtext.utils import max_logging, max_utils
 

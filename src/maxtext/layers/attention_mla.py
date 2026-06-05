@@ -68,7 +68,7 @@ from maxtext.layers.attentions import Attention
 from maxtext.layers.initializers import nd_dense_init, NdInitializer, variable_to_logically_partitioned
 from maxtext.layers.linears import DenseGeneral
 from maxtext.layers.normalizations import RMSNorm
-from maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.layers.quantizations import Quantization as Quant
 from maxtext.inference import kvcache
 from maxtext.inference.kvcache import KVQuant
 from maxtext.utils.sharding import create_sharding

@@ -29,7 +29,7 @@ from maxtext.layers import quantizations
 from maxtext.layers.attentions import Attention
 from maxtext.layers.linears import Dropout
 from maxtext.layers.normalizations import RMSNorm
-from maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.layers.quantizations import Quantization as Quant
 from maxtext.utils import max_utils
 
 # -----------------------------------------
