@@ -184,7 +184,10 @@ class PipelineBase(nn.Module):
     if self.config.remat_policy == "custom":
       return self.remat_policy
 
-    save_input_policy = jax.checkpoint_policies.save_only_these_names("iteration_input")
+    names_to_save = ["iteration_input"]
+    if self.config.pipeline_save_decoder_layer_input:
+      names_to_save.append("decoder_layer_input")
+    save_input_policy = jax.checkpoint_policies.save_only_these_names(*names_to_save)
     if self.remat_policy is not None:
       remat_policy = jax.checkpoint_policies.save_from_both_policies(self.remat_policy, save_input_policy)
     else:

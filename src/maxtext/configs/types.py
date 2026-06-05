@@ -990,6 +990,14 @@ class PipelineParallelism(BaseModel):
   scan_layers_per_stage: bool = Field(False, description="Use jax.lax.scan over layers within a stage.")
   set_remat_policy_on_pipeline_iterations: bool = Field(True, description="Set remat policy on the pipeline scan.")
   set_remat_policy_on_layers_per_stage: bool = Field(False, description="Set remat policy on the inner layer scan.")
+  pipeline_save_decoder_layer_input: bool = Field(
+      True,
+      description=(
+          "Whether to save 'decoder_layer_input' activations in the pipeline remat policy. "
+          "Setting to False reduces temporary memory (tmem) during pipeline execution at the cost "
+          "of recomputing decoder layer inputs in the backward pass."
+      ),
+  )
 
 
 class RematAndOffload(BaseModel):
