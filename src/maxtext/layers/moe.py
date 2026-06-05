@@ -485,7 +485,7 @@ class RoutedMoE(nnx.Module):
               kernel_in_axis,
               kernel_out_axis,
           ),
-          out_sharding=self.wi_kernel_axes,
+          sharding=self.wi_kernel_axes,
       )
       self.wo = nnx.Param(
           self.kernel_init(
@@ -495,7 +495,7 @@ class RoutedMoE(nnx.Module):
               kernel_in_axis,
               kernel_out_axis,
           ),
-          out_sharding=self.wo_kernel_axes,
+          sharding=self.wo_kernel_axes,
       )
     else:
       # Pad model dimension in Unfused MoE weight kernels for GMM_v2 execution.
@@ -512,7 +512,7 @@ class RoutedMoE(nnx.Module):
               kernel_in_axis,
               kernel_out_axis,
           ),
-          out_sharding=self.wi_kernel_axes,
+          sharding=self.wi_kernel_axes,
       )
       self.wi_1 = nnx.Param(
           self.kernel_init(
@@ -522,7 +522,7 @@ class RoutedMoE(nnx.Module):
               kernel_in_axis,
               kernel_out_axis,
           ),
-          out_sharding=self.wi_kernel_axes,
+          sharding=self.wi_kernel_axes,
       )
       self.wo = nnx.Param(
           self.kernel_init(
@@ -532,7 +532,7 @@ class RoutedMoE(nnx.Module):
               kernel_in_axis,
               kernel_out_axis,
           ),
-          out_sharding=self.wo_kernel_axes,
+          sharding=self.wo_kernel_axes,
       )
 
     if self.config.mlp_bias:
@@ -542,15 +542,15 @@ class RoutedMoE(nnx.Module):
       wo_bias_shape = (self.num_experts, self.moe_expert_input_dim)
       self.wi_0_bias = nnx.Param(
           default_bias_init(self.rngs.params(), wi_bias_shape, self.weight_dtype),
-          out_sharding=wi_bias_axes,
+          sharding=wi_bias_axes,
       )
       self.wi_1_bias = nnx.Param(
           default_bias_init(self.rngs.params(), wi_bias_shape, self.weight_dtype),
-          out_sharding=wi_bias_axes,
+          sharding=wi_bias_axes,
       )
       self.wo_bias = nnx.Param(
           default_bias_init(self.rngs.params(), wo_bias_shape, self.weight_dtype),
-          out_sharding=wo_bias_axes,
+          sharding=wo_bias_axes,
       )
     else:
       self.wi_0_bias = None
@@ -560,7 +560,7 @@ class RoutedMoE(nnx.Module):
     if self.config.decoder_block == ctypes.DecoderBlockType.GEMMA4:
       self.per_expert_scale = nnx.Param(
           jnp.ones((self.num_experts,), dtype=self.weight_dtype),
-          out_sharding=("exp",),
+          sharding=("exp",),
       )
     else:
       self.per_expert_scale = None
