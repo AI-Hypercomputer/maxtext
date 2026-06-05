@@ -1556,10 +1556,9 @@ class RoutedMoE(nnx.Module):
       else:
         experts_start = 0
 
-      gmm_fn = functools.partial(gmm, 
-                                 group_sizes=routing.group_sizes, 
-                                 expert_assignments=routing.selected_experts,
-                                 group_offset=experts_start)
+      gmm_fn = functools.partial(
+          gmm, group_sizes=routing.group_sizes, expert_assignments=routing.selected_experts, group_offset=experts_start
+      )
       intermediate_layer = gmm_up(x, w0, w1, w0_bias, w1_bias, gmm_fn, weight_gather)
 
       wo_gather_axes, wo_tile_size = get_wo_gmm_params()

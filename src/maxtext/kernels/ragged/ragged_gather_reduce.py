@@ -76,6 +76,7 @@ def main_kernel(
     subcore_axis_name: str,
     num_row_partitions: int,
     num_column_partitions: int,
+    num_col_tiles: int,
 ):
   """Main Pallas kernel for ragged gather and reduction on SparseCore."""
   tpu_info = pltpu.get_tpu_info()
@@ -83,7 +84,9 @@ def main_kernel(
   assert sc_info is not None
   num_simd_lanes = sc_info.num_lanes
   num_lanes = tpu_info.num_lanes
-  col_size = out_vmem_ref.shape[-1]
+  aligned_hidden_size = in_hbm_ref.shape[-1]
+  col_size = aligned_hidden_size // num_column_partitions
+  col_tile_size = out_vmem_ref.shape[-1]
   num_cores = jax.lax.axis_size((core_axis_name, subcore_axis_name))
 
   recv_sem = sem_ref.at[0]
@@ -91,12 +94,13 @@ def main_kernel(
 
   @functools.partial(
       pltpu.emit_pipeline,
-      grid=(num_cores,),
+      grid=(num_cores, num_col_tiles),
       core_axis_name=(core_axis_name, subcore_axis_name),
-      dimension_semantics=(pltpu.PARALLEL,),
+      dimension_semantics=(pltpu.PARALLEL, pltpu.ARBITRARY),
   )
   def inner_kernel():
     core_id = pl.program_id(0)
+    col_tile_id = pl.program_id(1)
     row_partition_size = in_hbm_ref.shape[0] // num_row_partitions
     row_partition_id = core_id // num_column_partitions
     col_partition_id = core_id % num_column_partitions
@@ -121,7 +125,7 @@ def main_kernel(
     row_tile_size = num_simd_lanes
     num_row_tiles = pl.cdiv(num_rows_current_row_partition, row_tile_size)
     row_start = row_partition_id * row_partition_size
-    col_start = col_partition_id * col_size
+    col_start = col_partition_id * col_size + col_tile_id * col_tile_size
 
     @pl.loop(0, num_row_tiles)
     def row_loop(row_block_id):
@@ -166,7 +170,7 @@ def main_kernel(
       in_32b_hbm_ref = in_hbm_ref.bitcast(jnp.uint32)
       out_32b_hbm_ref = out_hbm_ref.bitcast(jnp.uint32)
 
-      for col_vmem_start in range(0, col_size, num_lanes):
+      for col_vmem_start in range(0, col_tile_size, num_lanes):
         col_hbm_start = col_start + col_vmem_start
         for row_vmem in range(num_simd_lanes):
           row_hbm = src_indices[row_vmem] // input_packing
@@ -181,7 +185,7 @@ def main_kernel(
 
       # VMEM to HBM transfer.
       # Use dynamic loop to minimize register spills.
-      @pl.loop(0, col_size, step=num_lanes, init_carry=(prev_dst_row_hbm,))
+      @pl.loop(0, col_tile_size, step=num_lanes, init_carry=(prev_dst_row_hbm,))
       @jax.named_scope("dma_write_loop")
       def dma_write_loop(col_vmem_start, carry):
         col_hbm_start = col_start + col_vmem_start
@@ -302,7 +306,7 @@ def main_kernel(
         return carry
 
       # Wait for dma write to finish.
-      for _ in range(0, col_size, num_lanes):
+      for _ in range(0, col_tile_size, num_lanes):
         for _ in range(num_simd_lanes):
           pltpu.make_async_copy(
               out_vmem_ref.at[0, :num_lanes],
@@ -364,6 +368,28 @@ def _preprocess(
   )
 
 
+def calculate_col_tile_size(col_size: int) -> int:
+  """Calculate col tile size for ragged gather reduce kernel."""
+  tpu_info = pltpu.get_tpu_info()
+  sc_info = tpu_info.sparse_core
+  assert sc_info is not None
+  num_lanes = tpu_info.num_lanes
+  num_simd_lanes = sc_info.num_lanes
+
+  target_bytes = sc_info.vmem_capacity_bytes * 0.9
+
+  # We need out_vmem_ref (num_simd_lanes, col_tile_size) and
+  # prev_iter_last_row_vmem_ref (1, col_tile_size) of uint32 (4 bytes).
+  num_tiles = 1
+  while True:
+    col_tile_size = pl.cdiv(col_size, (num_tiles * num_lanes)) * num_lanes
+    vmem_bytes = (num_simd_lanes + 1) * col_tile_size * 4
+    if vmem_bytes <= target_bytes:
+      break
+    num_tiles += 1
+  return col_tile_size
+
+
 @functools.partial(jax.jit, static_argnames=("reduce_group_size",))
 def ragged_gather_reduce(
     x: jax.Array,
@@ -404,117 +430,127 @@ def ragged_gather_reduce(
   assert topk_weights.ndim == 1, "ragged_gather_reduce only supports 1d topk_weights."
   assert valid_rows_mask.ndim == 1, "ragged_gather_reduce only supports 1d valid_rows_mask."
 
-  # sc_info = pltpu.get_tpu_info().sparse_core
-  # if sc_info is None:
-  return _fallback_implementation(x, indices, topk_weights, valid_rows_mask, reduce_group_size)
+  sc_info = pltpu.get_tpu_info().sparse_core
+  if sc_info is None:
+    # Force TensorCore fallback
+    return _fallback_implementation(x, indices, topk_weights, valid_rows_mask, reduce_group_size)
 
-  # # Heuristic threshold on whether to fallback for small inputs.
-  # dtype = x.dtype
-  # dtype_bytes = jax.dtypes.itemsize_bits(dtype) // 8
-  # if jnp.size(x) * dtype_bytes * 2 < pltpu.get_tpu_info().vmem_capacity_bytes * 0.6:
-  #   # For small {input + output}, it's likely that both can be put in TC VMEM,
-  #   # so it's likely faster to run TC-based implementation on it than going
-  #   # through SC, without data movement to/from HBM.
-  #   return _fallback_implementation(x, indices, topk_weights, valid_rows_mask, reduce_group_size)
+  # Heuristic threshold on whether to fallback for small inputs.
+  dtype = x.dtype
+  dtype_bytes = jax.dtypes.itemsize_bits(dtype) // 8
+  if jnp.size(x) * dtype_bytes * 2 < pltpu.get_tpu_info().vmem_capacity_bytes * 0.6:
+    # For small {input + output}, it's likely that both can be put in TC VMEM,
+    # so it's likely faster to run TC-based implementation on it than going
+    # through SC, without data movement to/from HBM.
+    return _fallback_implementation(x, indices, topk_weights, valid_rows_mask, reduce_group_size)
 
-  # hidden_size = x.shape[-1]
-  # input_size = indices.size
-  # num_simd_lanes = sc_info.num_lanes
-  # num_cores = sc_info.num_cores * sc_info.num_subcores
+  hidden_size = x.shape[-1]
+  input_size = indices.size
+  num_simd_lanes = sc_info.num_lanes
+  num_cores = sc_info.num_cores * sc_info.num_subcores
 
-  # # This kernel partitions the output's columns into `num_column_partitions` and
-  # # partition the output's rows into `num_row_partitions` and run each
-  # # {row_partition} x {column_partition} combination on a separate SC subcore
-  # # for parallelism. With such work partitioning, we guarantee that there won't
-  # # be write collision (from different subcores) to the any output row X column.
-  # #
-  # # Each column partition should be multiple of 128 (number of lanes) due to
-  # # DMA requirements. Unless requiring padding on the column dimension, larger
-  # # column partitions (thus smaller row partitions given fixed num_cores) is
-  # # more preferable because large row partition may lead to imbalanced load
-  # # (valid_rows_mask may have more rows in some partitions than others).
-  # # Most LLM's hidden size is multiple of 1024, `num_column_partitions=8` should
-  # # work well in practice without requiring padding on the column size.
-  # num_column_partitions = 8
-  # assert num_cores % num_column_partitions == 0
-  # num_rows_partitions = num_cores // num_column_partitions
+  # This kernel partitions the output's columns into `num_column_partitions` and
+  # partition the output's rows into `num_row_partitions` and run each
+  # {row_partition} x {column_partition} combination on a separate SC subcore
+  # for parallelism. With such work partitioning, we guarantee that there won't
+  # be write collision (from different subcores) to the any output row X column.
+  #
+  # Each column partition should be multiple of 128 (number of lanes) due to
+  # DMA requirements. Unless requiring padding on the column dimension, larger
+  # column partitions (thus smaller row partitions given fixed num_cores) is
+  # more preferable because large row partition may lead to imbalanced load
+  # (valid_rows_mask may have more rows in some partitions than others).
+  # Most LLM's hidden size is multiple of 1024, `num_column_partitions=8` should
+  # work well in practice without requiring padding on the column size.
+  num_column_partitions = 8
+  assert num_cores % num_column_partitions == 0
+  num_rows_partitions = num_cores // num_column_partitions
 
-  # aligned_hidden_size = _align_to(hidden_size, 128 * num_column_partitions)
-  # col_size = aligned_hidden_size // num_column_partitions
-  # row_tile_size = num_simd_lanes
-  # padded_input_size = _align_to(
-  #     input_size,
-  #     math.lcm(num_rows_partitions * row_tile_size, reduce_group_size),
-  # )
-  # pad_input_size = padded_input_size - input_size
+  approx_col_size = pl.cdiv(hidden_size, num_column_partitions)
+  col_tile_size = calculate_col_tile_size(approx_col_size)
+  col_tile_size = max(col_tile_size, 128)
 
-  # x = jnp.pad(
-  #     x,
-  #     ((0, pad_input_size), (0, aligned_hidden_size - hidden_size)),
-  #     constant_values=0,
-  # )
-  # indices = jnp.pad(indices, (0, pad_input_size), constant_values=0)
-  # topk_weights = jnp.pad(topk_weights, (0, pad_input_size), constant_values=0)
-  # valid_rows_mask = jnp.pad(valid_rows_mask, (0, pad_input_size), constant_values=False)
+  aligned_hidden_size = _align_to(hidden_size, col_tile_size * num_column_partitions)
+  col_size = aligned_hidden_size // num_column_partitions
+  num_col_tiles = col_size // col_tile_size
 
-  # (
-  #     src_indices,
-  #     dst_indices,
-  #     topk_weights,
-  #     num_src_rows_per_row_partition,
-  #     mask,
-  # ) = _preprocess(
-  #     indices,
-  #     topk_weights,
-  #     valid_rows_mask,
-  #     reduce_group_size,
-  #     num_rows_partitions,
-  #     num_simd_lanes,
-  # )
+  row_tile_size = num_simd_lanes
+  padded_input_size = _align_to(
+      input_size,
+      math.lcm(num_rows_partitions * row_tile_size, reduce_group_size),
+  )
+  pad_input_size = padded_input_size - input_size
 
-  # vector_mesh = plsc.VectorSubcoreMesh(
-  #     num_cores=sc_info.num_cores,
-  #     num_subcores=sc_info.num_subcores,
-  #     core_axis_name="core",
-  #     subcore_axis_name="subcore",
-  # )
-  # # Each output row from `main_kernel` will be of type float32, and then casted
-  # # to the input dtype when doing the filter operation.
-  # out = pl.kernel(  # pytype: disable=wrong-keyword-args
-  #     functools.partial(
-  #         main_kernel,
-  #         core_axis_name=vector_mesh.core_axis_name,
-  #         subcore_axis_name=vector_mesh.subcore_axis_name,
-  #         num_row_partitions=num_rows_partitions,
-  #         num_column_partitions=num_column_partitions,
-  #     ),
-  #     compiler_params=pltpu.CompilerParams(
-  #         use_tc_tiling_on_sc=True,
-  #         disable_bounds_checks=True,
-  #     ),
-  #     mesh=vector_mesh,
-  #     name="sc_ragged_gather_reduce",
-  #     **{
-  #         _OUT_KW: jax.ShapeDtypeStruct(
-  #             (padded_input_size // reduce_group_size, aligned_hidden_size),
-  #             jnp.float32,
-  #         ),
-  #         _SCRATCH_KW: dict(  # pylint: disable=use-dict-literal
-  #             num_rows_per_row_partition_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
-  #             out_vmem_ref=pltpu.VMEM((num_simd_lanes, col_size), jnp.uint32),
-  #             prev_iter_last_row_vmem_ref=pltpu.VMEM((1, col_size), jnp.uint32),
-  #             src_indices_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
-  #             dst_indices_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
-  #             topk_weights_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.float32),
-  #             sem_ref=pltpu.SemaphoreType.DMA((2,)),
-  #         ),
-  #     },
-  # )(num_src_rows_per_row_partition, x, src_indices, dst_indices, topk_weights)
+  x = jnp.pad(
+      x,
+      ((0, pad_input_size), (0, aligned_hidden_size - hidden_size)),
+      constant_values=0,
+  )
+  indices = jnp.pad(indices, (0, pad_input_size), constant_values=0)
+  topk_weights = jnp.pad(topk_weights, (0, pad_input_size), constant_values=0)
+  valid_rows_mask = jnp.pad(valid_rows_mask, (0, pad_input_size), constant_values=False)
 
-  # # If there is no valid source row in a reduce group, set that group's output
-  # # to zero.
-  # return jnp.where(
-  #     mask[:, None],
-  #     out.astype(x.dtype),
-  #     jnp.zeros_like(out, dtype=x.dtype),
-  # )[: (input_size // reduce_group_size), :hidden_size]
+  (
+      src_indices,
+      dst_indices,
+      topk_weights,
+      num_src_rows_per_row_partition,
+      mask,
+  ) = _preprocess(
+      indices,
+      topk_weights,
+      valid_rows_mask,
+      reduce_group_size,
+      num_rows_partitions,
+      num_simd_lanes,
+  )
+
+  assert sc_info is not None
+  vector_mesh = plsc.VectorSubcoreMesh(
+      num_cores=sc_info.num_cores,
+      num_subcores=sc_info.num_subcores,
+      core_axis_name="core",
+      subcore_axis_name="subcore",
+  )
+  # Each output row from `main_kernel` will be of type float32, and then casted
+  # to the input dtype when doing the filter operation.
+  out = pl.kernel(  # pytype: disable=wrong-keyword-args
+      functools.partial(
+          main_kernel,
+          core_axis_name=vector_mesh.core_axis_name,
+          subcore_axis_name=vector_mesh.subcore_axis_name,
+          num_row_partitions=num_rows_partitions,
+          num_column_partitions=num_column_partitions,
+          num_col_tiles=num_col_tiles,
+      ),
+      compiler_params=pltpu.CompilerParams(
+          use_tc_tiling_on_sc=True,
+          disable_bounds_checks=True,
+          needs_layout_passes=False,
+      ),
+      mesh=vector_mesh,
+      name="sc_ragged_gather_reduce",
+      **{
+          _OUT_KW: jax.ShapeDtypeStruct(
+              (padded_input_size // reduce_group_size, aligned_hidden_size),
+              jnp.float32,
+          ),
+          _SCRATCH_KW: dict(  # pylint: disable=use-dict-literal
+              num_rows_per_row_partition_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
+              out_vmem_ref=pltpu.VMEM((num_simd_lanes, col_tile_size), jnp.uint32),
+              prev_iter_last_row_vmem_ref=pltpu.VMEM((1, col_tile_size), jnp.uint32),
+              src_indices_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
+              dst_indices_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
+              topk_weights_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.float32),
+              sem_ref=pltpu.SemaphoreType.DMA((2,)),
+          ),
+      },
+  )(num_src_rows_per_row_partition, x, src_indices, dst_indices, topk_weights)
+
+  # If there is no valid source row in a reduce group, set that group's output
+  # to zero.
+  return jnp.where(
+      mask[:, None],
+      out.astype(x.dtype),
+      jnp.zeros_like(out, dtype=x.dtype),
+  )[: (input_size // reduce_group_size), :hidden_size]
