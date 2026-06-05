@@ -35,6 +35,7 @@ from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
+from maxtext.utils import elastic_utils
 from collections import defaultdict
 
 mldiag, _ = mldiagnostics_modules()
@@ -169,6 +170,12 @@ class MetricLogger:
               f"seconds: {scalars['perf/step_time_seconds']:.3f}",
           ]
       )
+      if elastic_utils.elastic_enabled(self.config):
+        log_parts.extend(
+            [
+                f"live slice count: {len(elastic_utils.live_slice_indices(self.config))}",
+            ]
+        )
 
     # Add performance metrics only if strictly NOT in rampup phase
     # TODO(b/452468482): Enable performance metric (TFLOPs, Tokens/s) tracking during batch size rampup.

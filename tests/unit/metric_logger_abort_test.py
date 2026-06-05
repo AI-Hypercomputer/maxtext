@@ -117,3 +117,69 @@ class MetricLoggerMetadataTest(unittest.TestCase):
 
     self.assertEqual(logger.metadata[MetadataKey.PER_DEVICE_TFLOPS], 100.0)
     self.assertEqual(logger.metadata[MetadataKey.PER_DEVICE_TOKENS], 1000.0)
+
+
+class MetricLoggerLogMetricsTest(unittest.TestCase):
+  """Tests for metric_logger.log_metrics."""
+
+  def test_log_training_metrics_elastic_enabled(self):
+    logger = MetricLogger.__new__(MetricLogger)
+    logger.config = SimpleNamespace(
+        rampup_end_step=-1,
+        hide_profiler_step_metric=False,
+        num_experts=1,
+        mtp_num_layers=0,
+    )
+    metrics = {
+        "scalar": {
+            "learning/loss": 1.0,
+            "perf/step_time_seconds": 2.0,
+            "perf/per_device_tflops_per_sec": 100.0,
+            "perf/per_device_tokens_per_sec": 1000.0,
+            "learning/total_weights": 100,
+        }
+    }
+
+    with (
+        mock.patch.object(logger, "_is_profiler_boundary_step", return_value=False),
+        mock.patch("maxtext.common.metric_logger.max_logging.log") as mock_log,
+        mock.patch("maxtext.common.metric_logger.elastic_utils.elastic_enabled", return_value=True),
+        mock.patch("maxtext.common.metric_logger.elastic_utils.live_slice_indices", return_value=[0, 1, 2]),
+    ):
+      logger.log_metrics(metrics, step=1, metric_type="train")
+
+    mock_log.assert_called_once()
+    log_string = mock_log.call_args[0][0]
+    self.assertIn("live slice count: 3", log_string)
+
+  def test_log_training_metrics_elastic_disabled(self):
+    logger = MetricLogger.__new__(MetricLogger)
+    logger.config = SimpleNamespace(
+        rampup_end_step=-1,
+        hide_profiler_step_metric=False,
+        num_experts=1,
+        mtp_num_layers=0,
+    )
+
+    metrics = {
+        "scalar": {
+            "learning/loss": 1.0,
+            "perf/step_time_seconds": 2.0,
+            "perf/per_device_tflops_per_sec": 100.0,
+            "perf/per_device_tokens_per_sec": 1000.0,
+            "learning/total_weights": 100,
+        }
+    }
+
+    with (
+        mock.patch.object(logger, "_is_profiler_boundary_step", return_value=False),
+        mock.patch("maxtext.common.metric_logger.max_logging.log") as mock_log,
+        mock.patch("maxtext.common.metric_logger.elastic_utils.elastic_enabled", return_value=False),
+        mock.patch("maxtext.common.metric_logger.elastic_utils.live_slice_indices") as mock_live_slices,
+    ):
+      logger.log_metrics(metrics, step=1, metric_type="train")
+
+    mock_log.assert_called_once()
+    log_string = mock_log.call_args[0][0]
+    self.assertNotIn("live slice count", log_string)
+    mock_live_slices.assert_not_called()
