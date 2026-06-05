@@ -686,7 +686,7 @@ def train_distill(
 
   # Hardware Execution (Safe Context)
   max_logging.log("Applying logical axis rules for model initialization and training...")
-  with mesh, nn_partitioning.axis_rules(student_config.logical_axis_rules):
+  with jax.set_mesh(mesh), nn_partitioning.axis_rules(student_config.logical_axis_rules):
     # 2. Load Models
     if is_offline:
       max_logging.log("Offline Distillation: Skipping Teacher Model loading.")

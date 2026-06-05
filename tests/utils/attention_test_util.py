@@ -196,15 +196,18 @@ def forward_with_context_expert_parallelism(
         "inputs_segmentation": decoder_segment_ids,
         "inputs_position": decoder_positions,
     }
-    with mesh_cp:
+    # jax.set_mesh requires all sharding constraints inside the block to reference devices in the context mesh.
+    with jax.set_mesh(mesh_cp):
+      replicated = NamedSharding(mesh_cp, P())
+      replicated_batch = {k: jax.device_put(v, replicated) for k, v in batch.items()}
       reordered_batch = maxtext_utils.get_reorder_callable(
           context_parallel_size, ShardMode.AUTO, hardware=cfg_cp.hardware
-      )(batch)
+      )(replicated_batch)
     lnx = reordered_batch["inputs"]
     decoder_segment_ids = reordered_batch["inputs_segmentation"]
     decoder_positions = reordered_batch["inputs_position"]
   # apply attention with sharding
-  with mesh_cp, nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
+  with jax.set_mesh(mesh_cp), nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
     batch_axis = "activation_batch"
     length_axis = "activation_length"
     lnx_spec = nn_partitioning.logical_to_mesh_axes(
