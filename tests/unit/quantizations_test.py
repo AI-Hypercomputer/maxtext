@@ -24,6 +24,7 @@ from maxtext.common.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR
 from flax import nnx
 from maxtext.layers import moe
 from maxtext.layers import quantizations
+from maxtext.kernels.megablox.ops import gmm
 from maxtext.layers.initializers import nd_dense_init
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils

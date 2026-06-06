@@ -373,7 +373,7 @@ class MaxEngine(_BaseEngine):
 
   def _load_params_nnx(self, params, rng):
     """NNX equivalent of load_params: returns an nnx.Param state and populates KV cache shardings."""
-    if self.model.quant is not None:
+    if self.config.quantization:
       raise NotImplementedError("pure_nnx + quantization not yet supported. Use pure_nnx=False.")
 
     if params:
