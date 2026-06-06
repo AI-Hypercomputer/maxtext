@@ -63,7 +63,7 @@ python3 -m maxtext.inference.decode \
   per_device_batch_size=1
 ```
 
-**Note:** Because the model hasn't been properly trained, the output text will be random. To generate meaningful output, you need to load a trained checkpoint using the `load_parameters_path` argument.
+**Note:** Because the model hasn't been properly trained, the output text will be random. To generate meaningful output, you need to load a trained checkpoint using the `load_parameters_path` argument. For instructions on how to convert pre-trained Hugging Face model checkpoints (like Llama or Gemma) to MaxText's Orbax format, please refer to the [Checkpoint Conversion Guide](../guides/checkpointing_solutions/convert_checkpoint.md).
 
 ### Running models using provided configs
 

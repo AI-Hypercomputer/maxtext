@@ -22,13 +22,6 @@ Explore our tutorials to learn how to use MaxText, from your first run to advanc
 ---
 gutter: 2
 ---
-```{grid-item-card} 🚀 Getting Started
-:link: tutorials/first_run
-:link-type: doc
-
-Installation, prerequisites, verification, and your first training run.
-```
-
 ```{grid-item-card} 🛠️ Build and upload MaxText Docker Images
 ---
 link: tutorials/build_maxtext
@@ -64,7 +57,6 @@ Step-by-step guides for running inference of MaxText models on vLLM.
 hidden:
 maxdepth: 1
 ---
-tutorials/first_run.md
 tutorials/build_maxtext.md
 tutorials/pretraining.md
 tutorials/post_training_index.md
