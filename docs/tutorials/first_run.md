@@ -58,7 +58,7 @@ python3 -m maxtext.inference.decode \
   per_device_batch_size=1
 ```
 
-This command uses a model with randomly initialized weights, so the outputs are also random. To get high quality output you need pass in a checkpoint, typically via the `load_parameters_path` argument.
+This command uses a model with randomly initialized weights, so the outputs are also random. To get high quality output you need pass in a checkpoint, typically via the `load_parameters_path` argument. For instructions on how to convert pre-trained Hugging Face model checkpoints (like Llama or Gemma) to MaxText's Orbax format, please refer to the [Checkpoint Conversion Guide](../guides/checkpointing_solutions/convert_checkpoint.md).
 
 ### Run MaxText via notebook
 
@@ -66,7 +66,7 @@ In the same TPU VM where you just installed all the dependencies of MaxText, You
 
 #### Decoding in MaxText via notebook
 
-You can use [demo_decoding.ipynb](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/examples/demo_decoding.ipynb) to try out decoding on MaxText's `Llama3.1-8b` model implementation. In this notebook, we give `"I love to"` as the prompt, and the greedily sampled first output token is `" cook"`. Please remember to provide the path to your `Llama3.1-8b` checkpoint for the `load_parameters_path` argument in the config inside the notebook. You can use [to_maxtext.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/to_maxtext.py) to create a MaxText/Orbax checkpoint from a Huggingface checkpoint.
+You can use [demo_decoding.ipynb](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/examples/demo_decoding.ipynb) to try out decoding on MaxText's `Llama3.1-8b` model implementation. In this notebook, we give `"I love to"` as the prompt, and the greedily sampled first output token is `" cook"`. Please remember to provide the path to your `Llama3.1-8b` checkpoint for the `load_parameters_path` argument in the config inside the notebook. You can use the [to_maxtext.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/to_maxtext.py) script or follow the [Checkpoint Conversion Guide](../guides/checkpointing_solutions/convert_checkpoint.md) to create a MaxText/Orbax checkpoint from a Hugging Face checkpoint.
 
 ### Run MaxText on NVIDIA GPUs
 

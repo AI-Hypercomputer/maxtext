@@ -183,6 +183,8 @@ linkcheck_ignore = [
     # Ignore GitHub PRs and blobs that trigger rate limiting
     r"https://github\.com/AI-Hypercomputer/maxtext/pull/.*",
     r"https://github\.com/AI-Hypercomputer/maxtext/blob/.*",
+    # Ignore Toronto CS links which frequently time out in CI environment
+    r"https://www\.cs\.toronto\.edu/.*",
 ]
 
 
