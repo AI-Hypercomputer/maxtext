@@ -336,7 +336,7 @@ class QuantizationCoverageTest(unittest.TestCase):
         [None, get_test_config_path()],
         enable_checkpointing=False,
         quantization="fp8",
-        use_qwix_quantization=False,
+        use_qwix_quantization=True,
     )
     quant_fp8 = quantizations.configure_quantization(config_fp8, "train")
     self.assertIsNotNone(quant_fp8)
@@ -345,7 +345,7 @@ class QuantizationCoverageTest(unittest.TestCase):
         [None, get_test_config_path()],
         enable_checkpointing=False,
         quantization="nanoo_fp8",
-        use_qwix_quantization=False,
+        use_qwix_quantization=True,
     )
     quant_nanoo = quantizations.configure_quantization(config_nanoo, "train")
     self.assertIsNotNone(quant_nanoo)
@@ -363,7 +363,7 @@ class QuantizationCoverageTest(unittest.TestCase):
           [None, get_test_config_path()],
           enable_checkpointing=False,
           quantization="te_fp8_delayedscaling",
-          use_qwix_quantization=False,
+          use_qwix_quantization=True,
       )
       quant_te = quantizations.configure_quantization(config_te, "train")
       self.assertIsNotNone(quant_te)
