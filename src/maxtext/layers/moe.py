@@ -1118,7 +1118,7 @@ class RoutedMoE(nnx.Module):
           min(tiling[2], n),
       )
       rhs_inputs = kernel
-      if self.config.use_qwix_quantization:
+      if self.config.use_qwix_quantization and self.config.quantization:
         # Use full contraction for QWIX quantization to allow quantization
         # fusion (max reduce over contracting dimension).
         tiling = (tiling[0], k, tiling[2])
@@ -1140,7 +1140,7 @@ class RoutedMoE(nnx.Module):
 
     def get_tokamax_group_sizes(group_sizes, inputs, kernel):
       # TODO (b/491979205) pipeline fsdp ag per repeat fails tokamax gmm
-      if self.config.use_qwix_quantization or (
+      if (self.config.use_qwix_quantization and self.config.quantization) or (
           self.config.using_pipeline_parallelism and self.config.pipeline_fsdp_ag_per_repeat
       ):
         return group_sizes
