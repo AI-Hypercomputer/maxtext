@@ -386,6 +386,7 @@ class QuantizationCoverageTest(unittest.TestCase):
     with self.assertRaises(ValueError):
       quantizations.configure_kv_quant(config_fail)
 
+  @pytest.mark.tpu_only
   def test_moe_quantization_coverage(self):
     # Instantiates RoutedMoE on CPU to cover the AQT-free parameter initialization path in moe.py
     config = pyconfig.initialize(
@@ -479,6 +480,7 @@ class QuantizationCoverageTest(unittest.TestCase):
     quant_manual = quantizations.configure_quantization(config_bs_manual, "train")
     self.assertIsNone(quant_manual)
 
+  @pytest.mark.tpu_only
   def test_moe_gemma4_coverage(self):
     # Covers GEMMA4 routing and expert scale fusion paths in moe.py
 
