@@ -23,6 +23,7 @@ from unittest.mock import MagicMock, patch
 import datasets
 
 from maxtext.input_pipeline import instruction_data_processing
+from maxtext.input_pipeline import data_processing_utils
 
 
 class InstructionDataProcessingTest(unittest.TestCase):
@@ -229,6 +230,32 @@ class TestCustomDataFormatting(unittest.TestCase):
     mock_formatter.assert_called_once_with(self.dataset, self.dataset_features)
     self.assertIs(returned_dataset, expected_dataset)
     self.assertEqual(returned_columns, ["messages"])
+
+
+class TestDataProcessingUtils(unittest.TestCase):
+  """Unit tests for dataset column validation (Scenario B)."""
+
+  def test_validate_sft_columns_valid(self):
+    """Verifies that valid SFT columns do not raise any error."""
+    # These should pass without raising any exception
+    data_processing_utils.validate_and_configure_sft_columns(["messages"], None)
+    data_processing_utils.validate_and_configure_sft_columns(["prompt", "completion"], None)
+    data_processing_utils.validate_and_configure_sft_columns(["question", "answer"], None)
+
+  def test_validate_sft_columns_invalid_raises_helpful_error(self):
+    """Verifies that invalid SFT columns raise a helpful AssertionError."""
+    with self.assertRaises(AssertionError) as ctx:
+      data_processing_utils.validate_and_configure_sft_columns(["some_invalid_column"], None)
+
+    # Verify that the error message is helpful and contains the expected guidance
+    self.assertIn("Dataset column names mismatch", str(ctx.exception))
+    self.assertIn("Expected columns to match one of", str(ctx.exception))
+    self.assertIn("prompt", str(ctx.exception))
+    self.assertIn("completion", str(ctx.exception))
+    self.assertIn("messages", str(ctx.exception))
+    self.assertIn("question", str(ctx.exception))
+    self.assertIn("answer", str(ctx.exception))
+    self.assertIn("some_invalid_column", str(ctx.exception))
 
 
 if __name__ == "__main__":
