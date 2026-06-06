@@ -1100,7 +1100,7 @@ class Decoder(nn.Module):
                 kv_caches[index] = kv_cache
             global_layer_idx_offset += num_layers
         elif cfg.decoder_block == DecoderBlockType.GEMMA4_SMALL:
-          y = self._apply_gemma4_small_layers(
+          y, kv_caches = self._apply_gemma4_small_layers(
               y,
               decoder_input_tokens,
               decoder_segment_ids,
@@ -1379,8 +1379,12 @@ class Decoder(nn.Module):
       * ``per_layer_inputs`` from PLE, sliced per layer.
       * ``shared_kv_states``: donor-layer-index → (key, value) for
         downstream KV-shared layers to consume.
+      * ``kv_caches``: when running via the vLLM RPA path, the per-layer
+        cache buffer threaded back from the kernel. KV-shared layers
+        redirect to the donor's cache slot via ``cache_index_of``.
 
-    Scan-over-layers and pipeline parallelism are not supported.
+    Returns ``(y, kv_caches)``. Scan-over-layers and pipeline
+    parallelism are not supported.
     """
     cfg = self.config
     mesh = self.mesh
@@ -1397,6 +1401,10 @@ class Decoder(nn.Module):
     layer_types = gemma4_small.build_layer_types(cfg.num_decoder_layers, cfg.model_name)
     num_kv_shared = cfg.num_kv_shared_layers
     shared_kv_states: dict[int, tuple[jax.Array, jax.Array]] = {}
+
+    # tpu-inference allocates one `kv_caches` slot per non-shared layer;
+    # KV-shared layers reuse the donor's slot.
+    cache_index_of = gemma4_small.kv_cache_slot_map(layer_types, num_kv_shared)
 
     for lyr in range(cfg.num_decoder_layers):
       attention_type = layer_types[lyr]
@@ -1434,8 +1442,9 @@ class Decoder(nn.Module):
 
       ple_slice = per_layer_inputs[..., lyr, :] if per_layer_inputs is not None else None
 
-      kv_cache = kv_caches[lyr] if kv_caches is not None else None
-      y = layer(
+      cache_idx = cache_index_of[lyr]
+      kv_cache = kv_caches[cache_idx] if kv_caches is not None else None
+      y, kv_cache = layer(
           y,
           decoder_segment_ids,
           decoder_positions,
@@ -1450,8 +1459,10 @@ class Decoder(nn.Module):
           shared_key=shared_key,
           shared_value=shared_value,
       )
+      if kv_caches is not None and kv_cache is not None:
+        kv_caches[cache_idx] = kv_cache
 
-    return y
+    return y, kv_caches
 
   # TODO(b/490118813): Relocate the following functions to their designated directories
   # once the plug-in strategy is implemented: _find_next_boundary(), _apply_single_engram_layer()

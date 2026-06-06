@@ -106,6 +106,27 @@ def kv_donor_layer_idx(
   return None
 
 
+def kv_cache_slot_map(
+    layer_types: tuple[AttentionType, ...],
+    num_kv_shared_layers: int,
+) -> dict[int, int]:
+  """Maps decoder layer index -> KV-cache slot.
+
+  tpu-inference allocates one KV-cache slot per non-shared layer; KV-shared
+  layers reuse their donor's slot.
+  """
+  slot_of: dict[int, int] = {}
+  next_slot = 0
+  for lyr in range(len(layer_types)):
+    donor_idx = kv_donor_layer_idx(lyr, layer_types, num_kv_shared_layers)
+    if donor_idx is not None:
+      slot_of[lyr] = slot_of[donor_idx]
+    else:
+      slot_of[lyr] = next_slot
+      next_slot += 1
+  return slot_of
+
+
 def is_kv_donor_layer(
     layer_idx: int,
     layer_types: tuple[AttentionType, ...],
@@ -454,7 +475,7 @@ class Gemma4SmallDecoderLayer(nnx.Module):
     h = h * jnp.asarray(self.layer_scalar.value, cfg.dtype)
     h = nn.with_logical_constraint(h, self.activation_axis_names)
 
-    return h
+    return h, kv_cache
 
 
 Gemma4SmallDecoderLayerToLinen = nnx_wrappers.to_linen_class(

@@ -1569,6 +1569,14 @@ class InferenceGeneral(BaseModel):
   max_target_length: int = Field(2048, description="Maximum sequence length for the model.")
   max_prefill_predict_length: int = Field(64, description="Maximum length for the prefill stage in decoding.")
   prompt: str = Field("I love to", description="The default prompt for sampling.")
+  system_prompt: str = Field(
+      "",
+      description=(
+          "Optional system prompt prepended to the chat message list when "
+          "use_chat_template=True. Required for the gemma4-e2b / gemma4-e4b -it "
+          "checkpoints which need a system role to produce coherent output."
+      ),
+  )
   load_from_prefill_dir: bool = Field(False, description="Reads prefill cache from directory instead of computing it.")
   prefill_cache_dir: PathStr = Field("", description="Directory for the prefill cache.")
   autoregressive_decode_assert: str = Field(
