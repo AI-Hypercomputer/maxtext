@@ -337,7 +337,7 @@ class QuantizationCoverageTest(unittest.TestCase):
         [None, get_test_config_path()],
         enable_checkpointing=False,
         quantization="fp8",
-        use_qwix_quantization=True,
+        use_qwix_quantization=False,
     )
     quant_fp8 = quantizations.configure_quantization(config_fp8, "train")
     self.assertIsNotNone(quant_fp8)
@@ -346,7 +346,7 @@ class QuantizationCoverageTest(unittest.TestCase):
         [None, get_test_config_path()],
         enable_checkpointing=False,
         quantization="nanoo_fp8",
-        use_qwix_quantization=True,
+        use_qwix_quantization=False,
     )
     quant_nanoo = quantizations.configure_quantization(config_nanoo, "train")
     self.assertIsNotNone(quant_nanoo)
@@ -364,7 +364,7 @@ class QuantizationCoverageTest(unittest.TestCase):
           [None, get_test_config_path()],
           enable_checkpointing=False,
           quantization="te_fp8_delayedscaling",
-          use_qwix_quantization=True,
+          use_qwix_quantization=False,
       )
       quant_te = quantizations.configure_quantization(config_te, "train")
       self.assertIsNotNone(quant_te)
@@ -422,9 +422,11 @@ class QuantizationCoverageTest(unittest.TestCase):
 
       # Execute a forward pass to cover DenseGeneral.__call__, RoutedMoE.__call__,
       # sparse_matmul, and the custom quant_einsum wrapper in moe.py
-      inputs = jnp.ones((2, 4, 8), dtype=jnp.float32)
+      # Batch size must be a multiple of the mesh axis size (e.g. devices_array.size) to be divisible under FSDP sharding
+      batch_size = max(4, devices_array.size)
+      inputs = jnp.ones((batch_size, 4, 8), dtype=jnp.float32)
       outputs, _, _ = moe_layer(inputs)
-      self.assertEqual(outputs.shape, (2, 4, 8))
+      self.assertEqual(outputs.shape, (batch_size, 4, 8))
 
   def test_quantization_fallbacks(self):
     # Cover the fallback return None path in _get_quant_config when an unsupported scheme is passed
@@ -461,7 +463,7 @@ class QuantizationCoverageTest(unittest.TestCase):
         enable_checkpointing=False,
         use_batch_split_schedule=True,
         quantization="fp8_full",
-        use_qwix_quantization=False,
+        use_qwix_quantization=True,
     )
     quant = quantizations.configure_quantization(config_bs, "train")
     self.assertIsInstance(quant, quantizations.QwixQuantization)
@@ -472,7 +474,7 @@ class QuantizationCoverageTest(unittest.TestCase):
         use_batch_split_schedule=True,
         quantization="fp8_full",
         use_manual_quantization=True,
-        use_qwix_quantization=False,
+        use_qwix_quantization=True,
     )
     quant_manual = quantizations.configure_quantization(config_bs_manual, "train")
     self.assertIsNone(quant_manual)
@@ -504,9 +506,11 @@ class QuantizationCoverageTest(unittest.TestCase):
           kernel_axes=("expert", "embed_moe", "heads"),
           rngs=nnx.Rngs(0),
       )
-      inputs = jnp.ones((2, 4, 8), dtype=jnp.float32)
+      # Batch size must be a multiple of the mesh axis size (e.g. devices_array.size) to be divisible under FSDP sharding
+      batch_size = max(4, devices_array.size)
+      inputs = jnp.ones((batch_size, 4, 8), dtype=jnp.float32)
       outputs, _, _ = moe_layer(inputs)
-      self.assertEqual(outputs.shape, (2, 4, 8))
+      self.assertEqual(outputs.shape, (batch_size, 4, 8))
 
 
 if __name__ == "__main__":
