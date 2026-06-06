@@ -91,6 +91,8 @@ jobs:
             || (inputs.device_type == 'cpu' && 'tpu' || inputs.device_type)
           }}
         ALLOW_MULTIPLE_LIBTPU_LOAD: ${{ inputs.device_type == 'cpu' && 'true' || '' }} # bypass /tmp/libtpu_lockfile check for cpu tests, which don't actually use accelerators (to allow concurrency)
+        NCCL_P2P_DISABLE: ${{ inputs.device_type == 'cuda12' && '1' || '' }}
+        NCCL_IB_DISABLE: ${{ inputs.device_type == 'cuda12' && '1' || '' }}
       options: ${{ inputs.container_resource_option }}
     steps:
       - name: Checkout MaxText
@@ -171,6 +173,11 @@ jobs:
                   fi
                 done
               fi
+            fi
+            # Restrict GPU unit tests to a single GPU to avoid multi-device NCCL failures
+            if [[ "${INPUTS_PYTEST_MARKER}" == *"not integration_test"* ]]; then
+              export CUDA_VISIBLE_DEVICES=0
+              echo "Restricting GPU unit tests to a single GPU: CUDA_VISIBLE_DEVICES=0"
             fi
           fi
           if [ "${INPUTS_TOTAL_WORKERS}" -gt 1 ]; then
