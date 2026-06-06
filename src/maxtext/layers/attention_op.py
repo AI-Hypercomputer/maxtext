@@ -1154,14 +1154,25 @@ class AttentionOp(nnx.Module):
     global global_block_q, global_block_kv, global_block_kv_compute, global_block_q_dkv, global_block_kv_dkv
     global global_block_kv_dkv_compute, global_block_q_dq, global_block_kv_dq, global_use_fused_bwd_kernel
     global global_q_layout, global_k_layout, global_v_layout
-    global_block_q = self.config.sa_block_q
-    global_block_kv = self.config.sa_block_kv
-    global_block_kv_compute = self.config.sa_block_kv_compute
-    global_block_q_dkv = self.config.sa_block_q_dkv
-    global_block_kv_dkv = self.config.sa_block_kv_dkv
-    global_block_kv_dkv_compute = self.config.sa_block_kv_dkv_compute
-    global_block_q_dq = self.config.sa_block_q_dq
-    global_block_kv_dq = self.config.sa_block_kv_dq
+    if self.attention_type == AttentionType.LOCAL:
+      global_block_q = self.config.local_sa_block_q
+      global_block_kv = self.config.local_sa_block_kv
+      global_block_kv_compute = self.config.local_sa_block_kv_compute
+      global_block_q_dkv = self.config.local_sa_block_q_dkv
+      global_block_kv_dkv = self.config.local_sa_block_kv_dkv
+      global_block_kv_dkv_compute = self.config.local_sa_block_kv_dkv_compute
+      global_block_q_dq = self.config.local_sa_block_q_dq
+      global_block_kv_dq = self.config.local_sa_block_kv_dq
+    else:
+      global_block_q = self.config.sa_block_q
+      global_block_kv = self.config.sa_block_kv
+      global_block_kv_compute = self.config.sa_block_kv_compute
+      global_block_q_dkv = self.config.sa_block_q_dkv
+      global_block_kv_dkv = self.config.sa_block_kv_dkv
+      global_block_kv_dkv_compute = self.config.sa_block_kv_dkv_compute
+      global_block_q_dq = self.config.sa_block_q_dq
+      global_block_kv_dq = self.config.sa_block_kv_dq
+
     global_use_fused_bwd_kernel = self.config.sa_use_fused_bwd_kernel
     global_q_layout = self.config.sa_q_layout
     global_k_layout = self.config.sa_k_layout
@@ -1453,8 +1464,8 @@ class AttentionOp(nnx.Module):
             key,
             value,
             decoder_segment_ids_tuple,
-            block_kv=self.config.sa_block_kv,
-            block_q=self.config.sa_block_q,
+            block_kv=global_block_kv,
+            block_q=global_block_q,
             mask=materialized_mask,
             mask_value=DEFAULT_MASK_VALUE,
         )
