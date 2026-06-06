@@ -265,6 +265,22 @@ def _get_store_mask(
   return jnp.logical_and(iota >= group_start, iota < group_end)
 
 
+def _zero_uninitialized_memory(
+    out: jnp.ndarray,
+    *,
+    start_group: jnp.ndarray,
+    num_nonzero_groups: int,
+    group_metadata: GroupMetadata,
+) -> jnp.ndarray:
+  """Zero out uninitialized memory from output."""
+  group_offsets = group_metadata[0]
+  group_start = group_offsets[start_group]
+  group_end = group_offsets[start_group + num_nonzero_groups]
+  valid_mask = jax.lax.broadcasted_iota(jnp.int32, (out.shape[0],), 0)
+  valid_mask = (valid_mask >= group_start) & (valid_mask < group_end)
+  return jnp.where(valid_mask[:, None], out, 0)
+
+
 def _calculate_bytes(x: jax.Array | qpl.QArray) -> int:
   total_bytes = 0
   for leaf in jax.tree.leaves(x):
@@ -470,13 +486,6 @@ def gmm(
     del k_i, group_offsets, group_ids, group_offset
     return m_tile_ids[grid_id], n_i
 
-  # When EP is enabled (num_current_groups < num_total_groups) and no existing
-  # output is provided, pre-zero the output buffer so that rows belonging to
-  # inactive groups are already zero -- avoiding the need for a separate
-  # _zero_uninitialized_memory post-processing pass.
-  if existing_out is None and num_current_groups < num_total_groups:
-    existing_out = jnp.zeros((m, n), dtype=preferred_element_type)
-
   out_block_spec = pl.BlockSpec((tm, tn), out_transform_indices)
   if existing_out is None:
     in_out_block_spec: Any = None
@@ -543,6 +552,13 @@ def gmm(
       rhs,
       existing_out,
   )
+  if existing_out is None and num_current_groups < num_total_groups:
+    out = _zero_uninitialized_memory(
+        out,
+        start_group=group_offset[0],
+        num_nonzero_groups=rhs.shape[0],
+        group_metadata=group_metadata,
+    )
   return out
 
 
