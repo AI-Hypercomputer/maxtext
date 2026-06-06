@@ -440,6 +440,75 @@ class QuantizationCoverageTest(unittest.TestCase):
     )
     self.assertIsNone(quantizations.configure_kv_quant(config_no_kv))
 
+  def test_dense_general_parameter_offload_coverage(self):
+    # Covers parameter_memory_host_offload paths in linears.py
+    from maxtext.layers import linears
+
+    dense_layer = linears.DenseGeneral(
+        in_features_shape=8,
+        out_features_shape=8,
+        parameter_memory_host_offload=True,
+        rngs=nnx.Rngs(0),
+    )
+    inputs = jnp.ones((2, 8), dtype=jnp.float32)
+    outputs = dense_layer(inputs)
+    self.assertEqual(outputs.shape, (2, 8))
+
+  def test_configure_quantization_batch_split_schedule(self):
+    # Covers use_batch_split_schedule path in quantizations.py
+    config_bs = pyconfig.initialize(
+        [None, get_test_config_path()],
+        enable_checkpointing=False,
+        use_batch_split_schedule=True,
+        quantization="fp8_full",
+        use_qwix_quantization=False,
+    )
+    quant = quantizations.configure_quantization(config_bs, "train")
+    self.assertIsInstance(quant, quantizations.QwixQuantization)
+
+    config_bs_manual = pyconfig.initialize(
+        [None, get_test_config_path()],
+        enable_checkpointing=False,
+        use_batch_split_schedule=True,
+        quantization="fp8_full",
+        use_manual_quantization=True,
+        use_qwix_quantization=False,
+    )
+    quant_manual = quantizations.configure_quantization(config_bs_manual, "train")
+    self.assertIsNone(quant_manual)
+
+  def test_moe_gemma4_coverage(self):
+    # Covers GEMMA4 routing and expert scale fusion paths in moe.py
+    from maxtext.layers import moe
+
+    config = pyconfig.initialize(
+        [None, get_test_config_path()],
+        enable_checkpointing=False,
+        decoder_block="gemma4",
+        model_call_mode="inference",
+        fuse_expert_scales=True,
+        num_experts=2,
+        base_emb_dim=8,
+        base_mlp_dim=8,
+        base_moe_mlp_dim=8,
+    )
+    devices_array = maxtext_utils.create_device_mesh(config)
+    mesh = Mesh(devices_array, config.mesh_axes)
+
+    with mesh:
+      moe_layer = moe.RoutedMoE(
+          config=config,
+          num_experts=config.num_experts,
+          num_experts_per_tok=1,
+          mesh=mesh,
+          kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+          kernel_axes=("expert", "embed_moe", "heads"),
+          rngs=nnx.Rngs(0),
+      )
+      inputs = jnp.ones((2, 4, 8), dtype=jnp.float32)
+      outputs, _, _ = moe_layer(inputs)
+      self.assertEqual(outputs.shape, (2, 4, 8))
+
 
 if __name__ == "__main__":
   unittest.main()
