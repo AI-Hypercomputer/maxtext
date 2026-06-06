@@ -65,6 +65,9 @@ python3 -m maxtext.inference.decode \
 
 **Note:** Because the model hasn't been properly trained, the output text will be random. To generate meaningful output, you need to load a trained checkpoint using the `load_parameters_path` argument.
 
+> [!NOTE]
+> **Checkpoints & `scan_layers` compatibility:** When loading an external or converted checkpoint via `load_parameters_path`, the `scan_layers` setting in your command **must** match the setting used to save the checkpoint. If the checkpoint was saved/converted with `scan_layers=False` (common for Hugging Face conversions and inference runs), you must specify `scan_layers=False` in your command. Otherwise, JAX/Orbax will raise PyTree structure mismatch errors.
+
 ### Running models using provided configs
 
 MaxText provides many OSS model configs that you can use directly to run training jobs on those model-specific architectures. These model-specific YAML files are located in `src/maxtext/configs/models` for TPU-oriented defaults, and `src/maxtext/configs/models/gpu` for GPU-oriented defaults.

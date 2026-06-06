@@ -50,6 +50,7 @@ from maxtext.models import models
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils, maxtext_utils, maxtext_utils_nnx
 from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
+from maxtext.common.checkpointing import handle_checkpoint_mismatch
 from orbax import checkpoint as ocp
 
 try:
@@ -421,12 +422,7 @@ def _fix_restore_args_for_shape_mismatch(restore_args, stored_metadata_tree, mes
   if rank_mismatched_paths:
     sample = "\n".join(rank_mismatched_paths[:5])
     more = f"\n  ... and {len(rank_mismatched_paths) - 5} more" if len(rank_mismatched_paths) > 5 else ""
-    raise ValueError(
-        f"Checkpoint rank mismatches detected ({len(rank_mismatched_paths)} arrays). "
-        "This usually means a scanned (scan_layers=True) checkpoint was loaded with "
-        "scan_layers=False, or vice versa. Please ensure the checkpoint format matches "
-        f"the scan_layers setting.\n{sample}{more}"
-    )
+    raise ValueError(f"Checkpoint rank mismatches detected ({len(rank_mismatched_paths)} arrays):\n{sample}{more}")
 
   # Detect structural mismatch (e.g. scanned checkpoint loaded into unscanned model).
   # In that case the checkpoint tree has "layers" (all layers stacked) but the model
@@ -438,10 +434,7 @@ def _fix_restore_args_for_shape_mismatch(restore_args, stored_metadata_tree, mes
     more = f"\n  ... and {len(missing_paths) - 5} more" if len(missing_paths) > 5 else ""
     raise ValueError(
         f"Checkpoint structure mismatch: {len(missing_paths)} of {total_arrays} model parameter "
-        "paths were not found in the checkpoint. "
-        "This usually means a scanned (scan_layers=True) checkpoint is being loaded with "
-        "scan_layers=False, or vice versa. Please ensure the checkpoint format matches the "
-        f"scan_layers setting.\nExample missing paths:\n{sample}{more}"
+        f"paths were not found in the checkpoint.\nExample missing paths:\n{sample}{more}"
     )
 
   if mismatched_paths_sharded:
@@ -859,7 +852,7 @@ def from_pretrained(
 
   with mesh:
     if config.load_parameters_path:
-      try:
+      with handle_checkpoint_mismatch("load parameters", config.load_parameters_path):
         ckptr = ocp.Checkpointer(
             ocp.PyTreeCheckpointHandler(
                 restore_concurrent_gb=config.checkpoint_storage_concurrent_gb,
@@ -1058,9 +1051,6 @@ def from_pretrained(
               "(e.g. a scanned checkpoint loaded with scan_layers=False, or vice versa). "
               "Please ensure the checkpoint format matches the scan_layers setting."
           )
-
-      except Exception as e:
-        raise ValueError(f"Checkpoint loading failed: {e}") from e
 
     if wrap_with_tunix_adapter:
       with mesh:
