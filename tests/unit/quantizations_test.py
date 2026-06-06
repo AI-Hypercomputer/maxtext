@@ -23,6 +23,7 @@ from maxtext.configs import pyconfig
 from maxtext.common.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR
 from flax import nnx
 from maxtext.layers import moe
+from maxtext.layers import linears
 from maxtext.layers import quantizations
 from maxtext.kernels.megablox.ops import gmm
 from maxtext.layers.initializers import nd_dense_init
@@ -442,7 +443,6 @@ class QuantizationCoverageTest(unittest.TestCase):
 
   def test_dense_general_parameter_offload_coverage(self):
     # Covers parameter_memory_host_offload paths in linears.py
-    from maxtext.layers import linears
 
     dense_layer = linears.DenseGeneral(
         in_features_shape=8,
@@ -479,7 +479,6 @@ class QuantizationCoverageTest(unittest.TestCase):
 
   def test_moe_gemma4_coverage(self):
     # Covers GEMMA4 routing and expert scale fusion paths in moe.py
-    from maxtext.layers import moe
 
     config = pyconfig.initialize(
         [None, get_test_config_path()],
