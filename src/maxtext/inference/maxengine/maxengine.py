@@ -383,15 +383,9 @@ class MaxEngine(_BaseEngine):
     return params
 
   def _load_params_nnx(self, params, rng):
-    """NNX equivalent of load_params: returns an nnx.Param state and populates KV cache shardings.
-
-    Quantization handling:
-      * `checkpoint_is_quantized=True`: model built in `serve` mode (no full
-        kernel), `from_pretrained` reads `qrhs.frozen` from disk.
-      * `checkpoint_is_quantized=False` + `quantization=...`: model built in
-        `train` mode, full-precision kernel loaded; AQT layers quantize per
-        forward. Same output as serve mode (absmax calibration), slower.
-    """
+    """NNX equivalent of load_params: returns an nnx.Param state and populates KV cache shardings."""
+    if self.config.quantization:
+      raise NotImplementedError("pure_nnx + quantization not yet supported. Use pure_nnx=False.")
 
     if params:
       print("Resharding given NNX params")

@@ -386,7 +386,7 @@ def get_qt_provider(config):
 def maybe_quantize_model(model, config):
   """Quantize the model if quantization is enabled."""
   # Batch split is not using Qwix's interception feature but manual plumbing
-  if config.use_qwix_quantization and not config.use_batch_split_schedule:
+  if config.use_qwix_quantization and not config.use_batch_split_schedule and not config.pure_nnx:
     quantization_provider = get_qt_provider(config)
     if quantization_provider:
       model = qwix.quantize_model(model, quantization_provider)
