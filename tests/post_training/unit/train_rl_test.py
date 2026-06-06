@@ -476,11 +476,24 @@ class TrainRLTest(unittest.TestCase):
   def test_rl_train_invalid_vocab_tiling(self, mock_setup):
     mock_config = SimpleNamespace(
         num_vocab_tiling=2,
+        optimizer_memory_host_offload=False,
     )
     mock_setup.return_value = (mock_config, mock_config, [], [])
 
     with self.assertRaisesRegex(ValueError, "Vocab Tiling is not supported with RL"):
-      train_rl._rl_train_impl([], {})
+      train_rl._rl_train_impl([], {})  # pylint: disable=protected-access
+
+  @pytest.mark.cpu_only
+  @mock.patch("maxtext.trainers.post_train.rl.train_rl.model_creation_utils.setup_configs_and_devices")
+  def test_rl_train_invalid_optimizer_memory_host_offload(self, mock_setup):
+    mock_config = SimpleNamespace(
+        num_vocab_tiling=1,
+        optimizer_memory_host_offload=True,
+    )
+    mock_setup.return_value = (mock_config, mock_config, [], [])
+
+    with self.assertRaisesRegex(ValueError, "optimizer_memory_host_offload=True is not supported"):
+      train_rl._rl_train_impl([], {})  # pylint: disable=protected-access
 
 
 if __name__ == "__main__":

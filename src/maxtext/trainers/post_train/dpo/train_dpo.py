@@ -182,6 +182,22 @@ def train(mt_config, goodput_recorder=None):
   return trainer, mesh
 
 
+def validate_config(config):
+  """Validates the configuration parameters for DPO training."""
+  if config.optimizer_memory_host_offload:
+    raise ValueError(
+        "optimizer_memory_host_offload=True is not supported on the post-training "
+        "DPO path because the underlying Tunix DPOTrainer does not support "
+        "host offloading of the optimizer state."
+    )
+
+  if config.num_vocab_tiling > 1:
+    raise ValueError(
+        f"Vocab Tiling is not supported with DPO. "
+        f"num_vocab_tiling was configured to {config.num_vocab_tiling}, but it must be 1 when running train_dpo."
+    )
+
+
 def main(argv: list[str]) -> None:
   """Main function to run DPO training.
 
@@ -191,6 +207,7 @@ def main(argv: list[str]) -> None:
   pathwaysutils.initialize()
 
   mt_config = pyconfig.initialize_pydantic(argv)
+  validate_config(mt_config)
   max_utils.print_system_information()
 
   goodput_recorder = create_goodput_recorder(mt_config)
