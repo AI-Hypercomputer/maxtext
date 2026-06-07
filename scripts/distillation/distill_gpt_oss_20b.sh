@@ -46,8 +46,9 @@ export DISTILL_TEMPERATURE="${DISTILL_TEMPERATURE:-1.0}"
 export DISTILL_BETA="${DISTILL_BETA:-0}"
 export DISTILL_LAYER_INDICES="${DISTILL_LAYER_INDICES:-[]}"
 
-# XLA flags tuned for ~17% MFU. sparse_core_collective_aggregator is required
-# by latency_hiding_layer_scheduler.
+# XLA flags tuned for ~17% MFU (~19% with context=device, the splash/megablox
+# tile sizes, and the dp2 x fsdp64 mesh, all set in the config).
+# sparse_core_collective_aggregator is required by latency_hiding_layer_scheduler.
 export XPK_LIBTPU_INIT_ARGS="${XPK_LIBTPU_INIT_ARGS:---xla_tpu_scoped_vmem_limit_kib=65536 \
 --xla_tpu_impure_enable_packed_bf16_math_ops=true \
 --xla_tpu_aggressive_opt_barrier_removal=true \
