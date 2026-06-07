@@ -1086,6 +1086,10 @@ class Tokenizer(BaseModel):
       "",
       description="Chat template to use with HF tokenizers. It should be a valid Jinja2-formatted template.",
   )
+  data_template_path: str = Field(
+      "",
+      description="Path to a chat template file to be used when tokenizing the dataset.",
+  )
   tokenize_train_data: bool = Field(True, description="If False, assumes the training dataset is pre-tokenized.")
   tokenize_eval_data: bool = Field(True, description="If False, assumes the evaluation dataset is pre-tokenized.")
   add_bos: bool = Field(True, description="Whether to add a beginning-of-sentence token.")
