@@ -28,11 +28,10 @@ if [ -n "${JOB_COMPLETION_INDEX}" ] && [ "${JOB_COMPLETION_INDEX}" -ne 0 ]; then
   exit 0
 fi
 
-# Configurable paths
 MODEL_NAME="qwen3.5-35b-a3b"
 CHECKPOINT_DIR="gs://snehalv-data/qwen3-5/unscanned/qwen3-5-unscanned-sft/checkpoints/10"
 SCANNED_CKPT_PATH="${CHECKPOINT_DIR}/model_params"
-HF_CKPT_PATH="${CHECKPOINT_DIR}/hf_checkpoint"
+HF_CKPT_PATH="temp_hf_checkpoint"
 UNSCANNED_CKPT_PATH="${CHECKPOINT_DIR}/unscanned_checkpoint"
 
 # Disable fsspec directory caching to avoid multi-host / eventual consistency sync delays
@@ -68,6 +67,9 @@ python3 -m maxtext.checkpoint_conversion.to_maxtext \
   scan_layers=False \
   skip_jax_distributed_system=True \
   hardware=cpu
+
+# Clean up intermediate local HF checkpoint folder to free space
+rm -rf "${HF_CKPT_PATH}"
 
 echo "=========================================================="
 echo "Unscanning checkpoint conversion completed successfully!"
