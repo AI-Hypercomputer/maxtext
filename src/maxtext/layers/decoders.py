@@ -475,6 +475,8 @@ class Decoder(nn.Module):
         return [gpt_oss.GptOssScannableBlockToLinen] if self.config.scan_layers else [gpt_oss.GptOssDecoderLayerToLinen]
       case DecoderBlockType.QWEN2:
         return [qwen2.Qwen2DecoderLayerToLinen]
+      case DecoderBlockType.QWEN2_MOE:
+        return [qwen2.Qwen2MoeDecoderLayerToLinen]
       case DecoderBlockType.QWEN3:
         return [qwen3.Qwen3DecoderLayerToLinen]
       case DecoderBlockType.QWEN3_MOE:
@@ -540,6 +542,7 @@ class Decoder(nn.Module):
         DecoderBlockType.GEMMA4,
         DecoderBlockType.GEMMA4_SMALL,
         DecoderBlockType.QWEN2,
+        DecoderBlockType.QWEN2_MOE,
         DecoderBlockType.QWEN3,
         DecoderBlockType.QWEN3_MOE,
         DecoderBlockType.QWEN3_CUSTOM_MOE,
