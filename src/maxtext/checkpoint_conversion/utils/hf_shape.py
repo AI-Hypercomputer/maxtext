@@ -1060,7 +1060,7 @@ def QWEN3_5_MOE_HF_WEIGHTS_TO_SHAPE(config):
               f"{layer_prefix}.linear_attn.conv1d.weight": [conv_dim, 1, linear_conv_kernel_dim],
               f"{layer_prefix}.linear_attn.A_log": [linear_num_value_heads],
               f"{layer_prefix}.linear_attn.dt_bias": [linear_num_value_heads],
-              f"{layer_prefix}.linear_attn.norm.weight": [head_dim],
+              f"{layer_prefix}.linear_attn.norm.weight": [linear_value_head_dim],
               f"{layer_prefix}.linear_attn.out_proj.weight": [hidden_size, linear_v_dim],
           }
       )
