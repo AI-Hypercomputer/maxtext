@@ -14,8 +14,10 @@
 
 # pylint: disable=bare-except, consider-using-generator, chained-comparison, broad-exception-caught
 """RL Utils Module."""
+import importlib.util
 import itertools
 import json
+import os
 import re
 import uuid
 from typing import Any, Callable, Optional
@@ -813,3 +815,24 @@ def install_training_hooks(
       )
   except Exception as e:  # pylint: disable=broad-exception-caught
     max_logging.warning(f"[intermediate-eval] install failed: {e!r}")
+
+
+def load_custom_callable(module_path: str, function_name: str) -> Callable:
+  """Load a callable from a user-provided Python file via importlib.
+
+  `module_path` is an absolute or relative filesystem path to a `.py` file.
+  The file is loaded as a fresh module (not added to sys.path) and the
+  named attribute is returned. Used to plug in user-defined `process_data`
+  (for custom datasets) and reward functions without editing maxtext.
+  """
+  if not os.path.isfile(module_path):
+    raise ValueError(f"Cannot import {module_path!r}: file does not exist")
+  spec = importlib.util.spec_from_file_location(f"_user_module_{function_name}", module_path)
+  if spec is None or spec.loader is None:
+    raise ValueError(f"Cannot import {module_path!r}: not a valid python file")
+  module = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(module)
+  fn = getattr(module, function_name, None)
+  if fn is None:
+    raise ValueError(f"{module_path!r} does not define a function named {function_name!r}")
+  return fn

@@ -2024,6 +2024,13 @@ class RLDataset(BaseModel):
   train_fraction: float = Field(1.0, description="Fraction of the dataset to be used for training.")
   train_micro_batch_size: int = Field(-1, description="Micro batch size for training.")
   rollout_micro_batch_size: int = Field(-1, description="Micro batch size for rollout.")
+  dataset_processor_path: str = Field(
+      "",
+      description=(
+          "Optional path to a user-provided Python file with a `process_data` function. "
+          "When set, replaces the built-in dataset processor for custom datasets."
+      ),
+  )
 
 
 class RLEvaluation(BaseModel):
