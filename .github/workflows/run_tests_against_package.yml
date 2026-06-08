@@ -162,16 +162,22 @@ jobs:
             # Dynamically discover the 'nvidia' folder and prepend all its sub-library
             # directories (including nccl, cublas, cudnn) to LD_LIBRARY_PATH to prevent
             # JAX from partially loading incompatible system-level CUDA libraries.
-            if [ -d ".venv/lib" ]; then
-              NVIDIA_DIR=$(find .venv/lib/ -maxdepth 3 -name "nvidia" -type d 2>/dev/null | head -n 1)
-              if [ -n "${NVIDIA_DIR}" ]; then
-                for dir in "${NVIDIA_DIR}"/*; do
-                  if [ -d "$dir/lib" ]; then
-                    export LD_LIBRARY_PATH=$(pwd)/$dir/lib:${LD_LIBRARY_PATH}
-                  fi
-                done
-              fi
+            NVIDIA_DIR=$(find -L .venv -name "nvidia" -type d 2>/dev/null | head -n 1)
+            echo "=== GPU Diagnostics ==="
+            echo "Found NVIDIA_DIR: ${NVIDIA_DIR}"
+            if [ -n "${NVIDIA_DIR}" ]; then
+              for dir in "${NVIDIA_DIR}"/*; do
+                if [ -d "$dir/lib" ]; then
+                  ABS_LIB_PATH=$(realpath "$dir/lib")
+                  export LD_LIBRARY_PATH=${ABS_LIB_PATH}:${LD_LIBRARY_PATH}
+                  echo "Prepended to LD_LIBRARY_PATH: ${ABS_LIB_PATH}"
+                fi
+              done
+            else
+              echo "WARNING: nvidia directory not found under .venv!"
             fi
+            echo "Final LD_LIBRARY_PATH: ${LD_LIBRARY_PATH}"
+            echo "======================="
 
             # Set NCCL environment variables to prevent multi-GPU communication failures on the runner.
             # Disabling P2P and IB forces NCCL to fall back to shared memory and standard socket communication,
