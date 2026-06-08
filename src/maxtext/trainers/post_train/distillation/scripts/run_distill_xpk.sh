@@ -193,6 +193,7 @@ fi
 if [ -n "${CHECKPOINT_PERIOD_OVERRIDE:-}" ]; then
   extra_cli="$extra_cli checkpoint_period=${CHECKPOINT_PERIOD_OVERRIDE}"
 fi
+extra_cli="$extra_cli ${XPK_EXTRA_ARGS:-}"
 
 # Build grain_train_files (configs leave it empty); pick local mount or direct gs://.
 gcsfuse_prelude=""

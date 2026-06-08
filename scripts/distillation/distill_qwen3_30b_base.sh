@@ -25,7 +25,7 @@ export XPK_PROJECT="${XPK_PROJECT:-cloud-tpu-multipod-dev}"
 export XPK_ZONE="${XPK_ZONE:-us-central1}"
 export XPK_DEVICE_TYPE="${XPK_DEVICE_TYPE:-tpu7x-4x4x4}"
 export XPK_BASE_OUTPUT_DIR="${XPK_BASE_OUTPUT_DIR:-${DISTILL_GCS_BUCKET}/distillation}"
-export XPK_BASE_IMAGE="${XPK_BASE_IMAGE:-gcr.io/cloud-tpu-multipod-dev/maxtext_fixed_python_v2}"
+export XPK_BASE_IMAGE="${XPK_BASE_IMAGE:-gcr.io/cloud-tpu-multipod-dev/maxtext_base_image:latest}"
 export XPK_PRIORITY="${XPK_PRIORITY:-high}"
 
 export XPK_USE_GCSFUSE=1
@@ -39,7 +39,7 @@ export XPK_YAML_GCS="${XPK_YAML_GCS:-${DISTILL_GCS_BUCKET}/distill-configs/disti
 export DISTILL_ALPHA="${DISTILL_ALPHA:-0.6}"
 export DISTILL_TEMPERATURE="${DISTILL_TEMPERATURE:-1.0}"
 export DISTILL_BETA="${DISTILL_BETA:-0.0}"
-export DISTILL_TEACHER_TOP_K="${DISTILL_TEACHER_TOP_K:-64}"
+export DISTILL_TEACHER_TOP_K="${DISTILL_TEACHER_TOP_K:-32}"
 export DISTILL_LAYER_INDICES="${DISTILL_LAYER_INDICES:-[0,1,2,3,4,5,6,7]}"
 
 # XLA flags tuned for ~20% MFU.
@@ -56,7 +56,7 @@ export XPK_LIBTPU_INIT_ARGS="${XPK_LIBTPU_INIT_ARGS:---xla_tpu_scoped_vmem_limit
 --xla_tpu_scheduler_percent_shared_memory_limit=100 \
 --xla_latency_hiding_scheduler_rerun=2}"
 
-if [ "$MODE" = "submit" ]; then
+if [ "$MODE" = "submit" ] || [ "$MODE" = "resume_until_done" ]; then
   gcloud storage cp "$LOCAL_YAML" "$XPK_YAML_GCS"
 fi
 
