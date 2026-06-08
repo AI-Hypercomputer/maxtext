@@ -172,6 +172,13 @@ jobs:
                 done
               fi
             fi
+
+            # Set NCCL environment variables to prevent multi-GPU communication failures on the runner.
+            # Disabling P2P and IB forces NCCL to fall back to shared memory and standard socket communication,
+            # which is stable and avoids "invalid argument" errors on virtualized runner environments.
+            export NCCL_P2P_DISABLE=1
+            export NCCL_IB_DISABLE=1
+            echo "Setting NCCL_P2P_DISABLE=1 and NCCL_IB_DISABLE=1 for GPU execution."
           fi
           if [ "${INPUTS_TOTAL_WORKERS}" -gt 1 ]; then
             $PYTHON_EXE -m pip install --quiet pytest-split pytest-xdist
