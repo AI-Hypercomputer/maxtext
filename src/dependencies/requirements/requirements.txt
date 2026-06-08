@@ -1,4 +1,5 @@
 absl-py
+aqtp
 array-record
 cloud-accelerator-diagnostics
 cloud-tpu-diagnostics

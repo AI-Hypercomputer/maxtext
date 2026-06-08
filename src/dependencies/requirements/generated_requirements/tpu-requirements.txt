@@ -10,6 +10,7 @@ annotated-doc>=0.0.4
 annotated-types>=0.7.0
 antlr4-python3-runtime>=4.9.3
 anyio>=4.13.0
+aqtp>=0.9.0
 array-record>=0.8.3
 astroid>=4.0.4
 astunparse>=1.6.3

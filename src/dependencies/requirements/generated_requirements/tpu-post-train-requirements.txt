@@ -14,6 +14,7 @@ antlr4-python3-runtime>=4.9.3
 anyio>=4.13.0
 apache-tvm-ffi>=0.1.11
 appnope>=0.1.4 ; sys_platform == 'darwin'
+aqtp>=0.9.0
 array-record>=0.8.3
 astor>=0.8.1
 astroid>=4.0.4
