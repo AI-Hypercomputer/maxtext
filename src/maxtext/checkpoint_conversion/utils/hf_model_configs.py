@@ -1345,3 +1345,17 @@ HF_MODEL_CONFIGS = {
     "olmo3-7b-pt": olmo3_7b_config,
     "olmo3-32b": olmo3_32b_config,
 }
+
+# Qwen3.5-35B-A3B Config Definition
+try:
+  qwen35_35b_a3b_config = transformers.AutoConfig.from_pretrained("Qwen/Qwen3.5-35B-A3B")
+except Exception:
+  try:
+    from transformers import Qwen3_5MoeConfig
+    qwen35_35b_a3b_config = Qwen3_5MoeConfig()
+  except ImportError:
+    qwen35_35b_a3b_config = None
+
+if qwen35_35b_a3b_config is not None:
+  HF_MODEL_CONFIGS["qwen3.5-35b-a3b"] = qwen35_35b_a3b_config
+

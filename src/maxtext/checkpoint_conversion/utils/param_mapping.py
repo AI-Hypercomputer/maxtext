@@ -3135,14 +3135,185 @@ def OLMO3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False,
   return hooks
 
 
+def QWEN3_5_MOE_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
+  """Returns mapping from MaxText to HuggingFace Qwen3.5 MoE weight paths."""
+  tcfg = config.get("text_config", config)
+  n_layers = tcfg["num_hidden_layers"]
+  num_experts = tcfg.get("num_experts", tcfg.get("num_local_experts", 0))
+  layer_cycle_interval = maxtext_config.inhomogeneous_layer_cycle_interval
+  vcfg = config.get("vision_config", {})
+  text_base = "model.language_model" if vcfg else "model"
+
+  mapping = {
+      "params-token_embedder-embedding": f"{text_base}.embed_tokens.weight",
+      "params-decoder-decoder_norm-scale": f"{text_base}.norm.weight",
+  }
+
+  if scan_layers:
+    raise NotImplementedError("Scan layers is not supported for Qwen3.5 MoE mapping.")
+
+  for i in range(n_layers):
+    prefix = f"params-decoder-layers_{i}"
+    hf_prefix = f"{text_base}.layers.{i}"
+
+    # Common layer norms
+    mapping[f"{prefix}-input_layernorm-scale"] = f"{hf_prefix}.input_layernorm.weight"
+    mapping[f"{prefix}-post_attention_layernorm-scale"] = f"{hf_prefix}.post_attention_layernorm.weight"
+
+    block_idx = i % layer_cycle_interval
+    is_full_attention_layer = (block_idx + 1) % layer_cycle_interval == 0
+
+    if is_full_attention_layer:
+      mapping.update(
+          {
+              f"{prefix}-attention-attention-query-kernel": f"{hf_prefix}.self_attn.q_proj.weight",
+              f"{prefix}-attention-attention-key-kernel": f"{hf_prefix}.self_attn.k_proj.weight",
+              f"{prefix}-attention-attention-value-kernel": f"{hf_prefix}.self_attn.v_proj.weight",
+              f"{prefix}-attention-attention-out-kernel": f"{hf_prefix}.self_attn.o_proj.weight",
+              f"{prefix}-attention-attention-query_norm-scale": f"{hf_prefix}.self_attn.q_norm.weight",
+              f"{prefix}-attention-attention-key_norm-scale": f"{hf_prefix}.self_attn.k_norm.weight",
+          }
+      )
+    else:
+      # Linear/Hybrid Attention Block (GDN)
+      mapping.update(
+          {
+              f"{prefix}-attention-in_proj_qkvz-kernel": f"{hf_prefix}.linear_attn.in_proj_qkvz.weight",
+              f"{prefix}-attention-in_proj_ba-kernel": f"{hf_prefix}.linear_attn.in_proj_ba.weight",
+              f"{prefix}-attention-conv1d-kernel": f"{hf_prefix}.linear_attn.conv1d.weight",
+              f"{prefix}-attention-A_log": f"{hf_prefix}.linear_attn.A_log",
+              f"{prefix}-attention-dt_bias": f"{hf_prefix}.linear_attn.dt_bias",
+              f"{prefix}-attention-norm-rms_norm-scale": f"{hf_prefix}.linear_attn.norm.weight",
+              f"{prefix}-attention-out_proj-kernel": f"{hf_prefix}.linear_attn.out_proj.weight",
+          }
+      )
+
+    # MLP: Shared Experts
+    mapping.update(
+        {
+            f"{prefix}-mlp-routed_experts-gate-kernel": f"{hf_prefix}.mlp.gate.weight",
+            f"{prefix}-mlp-shared_expert-wi_0-kernel": f"{hf_prefix}.mlp.shared_expert.gate_proj.weight",
+            f"{prefix}-mlp-shared_expert-wi_1-kernel": f"{hf_prefix}.mlp.shared_expert.up_proj.weight",
+            f"{prefix}-mlp-shared_expert-wo-kernel": f"{hf_prefix}.mlp.shared_expert.down_proj.weight",
+            f"{prefix}-mlp-shared_expert_gate-kernel": f"{hf_prefix}.mlp.shared_expert_gate.weight",
+        }
+    )
+
+    # Fused Routed Experts
+    if num_experts > 1:
+      mapping.update(
+          {
+              f"{prefix}-mlp-routed_experts-wi_0": f"{hf_prefix}.mlp.experts.gate_up_proj",
+              f"{prefix}-mlp-routed_experts-wi_1": f"{hf_prefix}.mlp.experts.gate_up_proj",
+              f"{prefix}-mlp-routed_experts-wo": f"{hf_prefix}.mlp.experts.down_proj",
+          }
+      )
+
+  return {k: v for k, v in mapping.items() if v is not None}
+
+
+def QWEN3_5_MOE_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Creates parameter transformation functions for Qwen3.5 MoE."""
+  tcfg = config.get("text_config", config)
+  n_layers = tcfg["num_hidden_layers"]
+  num_experts = tcfg.get("num_experts", tcfg.get("num_local_experts", 0))
+  layer_cycle_interval = maxtext_config.inhomogeneous_layer_cycle_interval
+  hooks = {}
+
+  def transpose(input_tensor, target_shape=None):
+    return input_tensor.T
+
+  def reshape_kernel(input_tensor, target_shape):
+    if saving_to_hf:
+      flipped_target_shape = np.flip(np.array(target_shape))
+      return input_tensor.reshape(flipped_target_shape).T
+    else:
+      return input_tensor.T.reshape(target_shape)
+
+  def scale_rmsnorm_layer(input_tensor, target_shape):
+    return input_tensor.reshape(target_shape)
+
+  # Fused experts splitting/merging
+  def split_moe_wi0(input_tensor, target_shape):
+    if saving_to_hf:
+      raise NotImplementedError("Saving to HF for fused gate_up_proj requires custom concat hook.")
+    _, two_FF, _ = input_tensor.shape
+    FF = two_FF // 2
+    return input_tensor[:, :FF, :].transpose(0, 2, 1)
+
+  def split_moe_wi1(input_tensor, target_shape):
+    if saving_to_hf:
+      raise NotImplementedError("Saving to HF for fused gate_up_proj requires custom concat hook.")
+    _, two_FF, _ = input_tensor.shape
+    FF = two_FF // 2
+    return input_tensor[:, FF:, :].transpose(0, 2, 1)
+
+  def reshape_moe_wo(input_tensor, target_shape):
+    return input_tensor.transpose(0, 2, 1)
+
+  def moe_gate_up_hook(weight_list, target_shape):
+    wi_0 = jnp.asarray(weight_list[0])
+    wi_1 = jnp.asarray(weight_list[1])
+    return jnp.swapaxes(jnp.concatenate([wi_0, wi_1], axis=-1), -2, -1)
+
+  hooks["params-token_embedder-embedding"] = transpose
+  hooks["params-decoder-decoder_norm-scale"] = scale_rmsnorm_layer
+
+  for i in range(n_layers):
+    prefix = f"params-decoder-layers_{i}"
+    hooks[f"{prefix}-input_layernorm-scale"] = scale_rmsnorm_layer
+    hooks[f"{prefix}-post_attention_layernorm-scale"] = scale_rmsnorm_layer
+
+    block_idx = i % layer_cycle_interval
+    is_full_attention_layer = (block_idx + 1) % layer_cycle_interval == 0
+
+    if is_full_attention_layer:
+      hooks[f"{prefix}-attention-attention-query-kernel"] = reshape_kernel
+      hooks[f"{prefix}-attention-attention-key-kernel"] = reshape_kernel
+      hooks[f"{prefix}-attention-attention-value-kernel"] = reshape_kernel
+      hooks[f"{prefix}-attention-attention-out-kernel"] = reshape_kernel
+      hooks[f"{prefix}-attention-attention-query_norm-scale"] = scale_rmsnorm_layer
+      hooks[f"{prefix}-attention-attention-key_norm-scale"] = scale_rmsnorm_layer
+    else:
+      # GDN block
+      hooks[f"{prefix}-attention-in_proj_qkvz-kernel"] = transpose
+      hooks[f"{prefix}-attention-in_proj_ba-kernel"] = transpose
+      hooks[f"{prefix}-attention-conv1d-kernel"] = transpose
+      hooks[f"{prefix}-attention-A_log"] = transpose
+      hooks[f"{prefix}-attention-dt_bias"] = transpose
+      hooks[f"{prefix}-attention-norm-rms_norm-scale"] = scale_rmsnorm_layer
+      hooks[f"{prefix}-attention-out_proj-kernel"] = transpose
+
+    # Shared Expert MLP
+    hooks[f"{prefix}-mlp-shared_expert-wi_0-kernel"] = transpose
+    hooks[f"{prefix}-mlp-shared_expert-wi_1-kernel"] = transpose
+    hooks[f"{prefix}-mlp-shared_expert-wo-kernel"] = transpose
+    hooks[f"{prefix}-mlp-shared_expert_gate-kernel"] = transpose
+
+    # Routed Expert MoE
+    hooks[f"{prefix}-mlp-routed_experts-gate-kernel"] = transpose
+    if saving_to_hf and num_experts > 1:
+      wi0_key = f"{prefix}-mlp-routed_experts-wi_0"
+      wi1_key = f"{prefix}-mlp-routed_experts-wi_1"
+      hooks[(wi0_key, wi1_key)] = moe_gate_up_hook
+    else:
+      hooks[f"{prefix}-mlp-routed_experts-wi_0"] = split_moe_wi0
+      hooks[f"{prefix}-mlp-routed_experts-wi_1"] = split_moe_wi1
+    hooks[f"{prefix}-mlp-routed_experts-wo"] = reshape_moe_wo
+
+  return hooks
+
+
 # {maxtext model name: {maxtext weight name: hf weight name}}
 PARAM_MAPPING = {
+    "qwen3.5-35b-a3b": QWEN3_5_MOE_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-27b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma3-4b": GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma3-12b": GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma3-27b": GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING,
+
     "gemma4-26b": GEMMA4_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma4-31b": GEMMA4_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma4-e2b": GEMMA4_SMALL_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -3185,7 +3356,9 @@ PARAM_MAPPING = {
 
 # {maxtext model name: {maxtext weight name: bi-directional transform}}
 HOOK_FNS = {
+    "qwen3.5-35b-a3b": QWEN3_5_MOE_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-27b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma3-4b": GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
