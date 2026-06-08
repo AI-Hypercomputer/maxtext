@@ -42,6 +42,7 @@ See our guide on running MaxText in decoupled mode, without any GCP dependencies
 
 ## 🔥 Latest news 🔥
 
+- [June 9, 2026] Qwen3.5 35B & 397B is now [supported](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/qwen/moe/run_qwen_moe.md).
 - [May 29, 2026] A new eval framework is now available for running lm-eval, evalchemy, and custom benchmarks against MaxText checkpoints. See the [Evaluation guide](https://maxtext.readthedocs.io/en/latest/guides/eval_framework.html) to get started.
 - [May 6, 2026] Kimi-K2-Thinking, Kimi-K2.5 (text), and Kimi-K2.6 (text) are now supported. See [Run_Kimi.md](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/kimi/Run_Kimi.md#quantized-variants-k2-thinking-k25-k26) for details.
 - [April 18, 2026] Added a new notebook [maxtext_with_gepa.ipynb](https://github.com/AI-Hypercomputer/maxtext/blob/3c7d8d27864fc12cccac07786f02bd0e5262c982/src/maxtext/examples/maxtext_with_gepa.ipynb) for optimizing AIME prompts using the GEPA framework with Maxtext.
@@ -122,6 +123,7 @@ MaxText aims to provide you with the best OSS models, whether as a reference imp
   - Gemma 2 (2B, 9B, 27B)
   - Gemma 1 (2B, 7B)
 - Alibaba
+  - Qwen 3.5 MoE (35B, 397B)
   - Qwen 3 Next (80B)
   - Qwen 3 MoE (30B, 235B), Qwen 3 MoE 2507 (235B, 480B)
   - Qwen 3 Dense (0.6B, 1.7B, 4B, 8B, 14B, 32B)
