@@ -3357,7 +3357,20 @@ def QWEN3_5_MOE_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=
     wi_1 = jnp.asarray(weight_list[1])
     return jnp.swapaxes(jnp.concatenate([wi_0, wi_1], axis=-1), -2, -1)
 
-  hooks["params-token_embedder-embedding"] = transpose
+  # Padding for Embedding layer (Vocab size adjustments)
+  def pad_hf_embedding_layer(input_tensor, target_shape):
+    source_vocab_size = input_tensor.shape[0]
+    target_vocab_size = target_shape[0]
+    if source_vocab_size == target_vocab_size:
+      return input_tensor
+    if saving_to_hf:
+      return input_tensor[:target_vocab_size, :]
+    else:
+      padded_tensor = np.zeros(target_shape, dtype=input_tensor.dtype)
+      padded_tensor[:source_vocab_size, :] = input_tensor
+      return padded_tensor
+
+  hooks["params-token_embedder-embedding"] = pad_hf_embedding_layer
   hooks["params-decoder-decoder_norm-scale"] = scale_rmsnorm_layer
   hooks["params-decoder-logits_dense-kernel"] = transpose
 
