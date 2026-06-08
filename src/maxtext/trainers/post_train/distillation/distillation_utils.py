@@ -496,19 +496,22 @@ class CombinedDistillationStrategy(DistillationStrategy):
 
     # --- Soft loss: KL on temperature-softened distributions ---
 
-    # 1. Pre-compute Student log-probs over the full vocabulary
+    # Pre-compute Student log-probs over the full vocabulary
     log_s_T_full = jax.nn.log_softmax(s_logits / temperature, axis=-1)
     log_s_1_full = jax.nn.log_softmax(s_logits, axis=-1)
 
     if getattr(teacher_output, "top_k_indices", None) is not None:
       # --- SPARSE KL DIVERGENCE (Offline Mode) ---
 
-      # 2. Normalize teacher probabilities ONLY over the saved Top-K subset
+      # 1. Normalize teacher probabilities only over the saved Top-K subset
       t_p_T_sparse = jax.nn.softmax(t_logits / temperature, axis=-1)
       log_t_p_T_sparse = jax.nn.log_softmax(t_logits / temperature, axis=-1)
 
-      # 3. Gather Student log-probs at the Teacher's exact Top-K indices
-      log_s_T_sparse = jnp.take_along_axis(log_s_T_full, teacher_output.top_k_indices, axis=-1)
+      # 2. Gather Student unnormalized logits at the Teacher's exact Top-K indices
+      s_logits_sparse = jnp.take_along_axis(s_logits, teacher_output.top_k_indices, axis=-1)
+
+      # 3. Normalize Student probabilities only over the exact same Top-K subset
+      log_s_T_sparse = jax.nn.log_softmax(s_logits_sparse / temperature, axis=-1)
 
       # 4. KL(T || S) = Sum_over_TopK( P_T * (log_P_T - log_P_S) )
       kl_softened_per_pos = jnp.sum(t_p_T_sparse * (log_t_p_T_sparse - log_s_T_sparse), axis=-1)
@@ -661,6 +664,7 @@ class MaxTextCheckpointManager(tunix_checkpoint_manager.CheckpointManager):
 
     # Re-initialize internal Orbax manager with MaxText's Grain handler
     # pylint: disable=access-member-before-definition
+    # pytype: disable=attribute-error
     if self._checkpoint_manager is not None:
       root_directory = self._checkpoint_manager.directory
 
@@ -681,6 +685,7 @@ class MaxTextCheckpointManager(tunix_checkpoint_manager.CheckpointManager):
           item_handlers=item_handlers,
           options=options,
       )
+    # pytype: enable=attribute-error
     # pylint: enable=access-member-before-definition
 
   def save(
