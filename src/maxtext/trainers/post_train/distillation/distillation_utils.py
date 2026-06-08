@@ -664,6 +664,7 @@ class MaxTextCheckpointManager(tunix_checkpoint_manager.CheckpointManager):
 
     # Re-initialize internal Orbax manager with MaxText's Grain handler
     # pylint: disable=access-member-before-definition
+    # pytype: disable=attribute-error
     if self._checkpoint_manager is not None:
       root_directory = self._checkpoint_manager.directory
 
@@ -684,6 +685,7 @@ class MaxTextCheckpointManager(tunix_checkpoint_manager.CheckpointManager):
           item_handlers=item_handlers,
           options=options,
       )
+    # pytype: enable=attribute-error
     # pylint: enable=access-member-before-definition
 
   def save(
