@@ -432,8 +432,9 @@ def main(config, test_args):  # pylint: disable=W0621
     max_logging.log(f"Loading HF model with dtype: {torch_dtype} (derived from config.dtype: {config.dtype})")
 
     hf_model = AutoModelForCausalLM.from_pretrained(
-        test_args.hf_model_path, dtype=torch_dtype, token=hf_token, trust_remote_code=test_args.trust_remote_code
+        test_args.hf_model_path, dtype=torch_dtype, token=hf_token, trust_remote_code=test_args.trust_remote_code, low_cpu_mem_usage=False
     )
+
     hf_lora_path = config.hf_lora_adapter_path
     if hf_lora_path:
       max_logging.log(f"Loading HF PEFT LoRA adapter from {hf_lora_path}")
@@ -570,6 +571,17 @@ def main(config, test_args):  # pylint: disable=W0621
       max_logging.log(f"Uploaded logits to {test_args.gcs_output_logits_path}")
 
 
+def str2bool(v):
+  if isinstance(v, bool):
+    return v
+  if v.lower() in ('yes', 'true', 't', 'y', '1'):
+    return True
+  elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+    return False
+  else:
+    raise argparse.ArgumentTypeError('Boolean value expected.')
+
+
 if __name__ == "__main__":
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
@@ -582,7 +594,7 @@ if __name__ == "__main__":
   # golden_logits_path supports file format: json with suffix ".jsonl", and pickle with suffix ".pickle" or ".pkl"
   parser.add_argument("--golden_logits_path", type=str, required=False, default="")
   parser.add_argument("--hf_model_path", type=str, required=False, default="")
-  parser.add_argument("--run_hf_model", type=bool, required=False, default=False)
+  parser.add_argument("--run_hf_model", type=str2bool, required=False, default=False)
   parser.add_argument("--output_logits_path", type=str, required=False, default="")
   parser.add_argument("--gcs_output_logits_path", type=str, required=False, default="")
   parser.add_argument("--clip_logits_epsilon", type=float, required=False, default=None)
@@ -602,7 +614,7 @@ if __name__ == "__main__":
       help="Checkpoint format to load: 'linen' (default) or 'nnx'.",
   )
   parser.add_argument(
-      "--trust_remote_code", type=bool, required=False, default=True, help="from_pretrained: trust_remote_code"
+      "--trust_remote_code", type=str2bool, required=False, default=True, help="from_pretrained: trust_remote_code"
   )
 
   # Parse known args returns the namespace AND the list of remaining arguments

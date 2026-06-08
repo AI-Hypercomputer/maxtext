@@ -241,6 +241,7 @@ ModelName = Literal[
     "gemma4-31b",
     "gemma4-e2b",
     "gemma4-e4b",
+    "phi4",
     "qwen2.5-1.5b",
     "qwen2.5-7b",
     "qwen2.5-14b",
@@ -1560,6 +1561,10 @@ class YarnRope(BaseModel):
   rope_attention_scaling: bool = Field(
       False,
       description="Scale the rotary embedding output. Used by some models like gpt-oss.",
+  )
+  rope_attention_scaling_factor: float = Field(
+      1.0,
+      description="Custom float scale factor applied to cos/sin embeddings.",
   )
 
 
@@ -3048,9 +3053,11 @@ class MaxTextConfig(
     if self.decoder_block in (
         DecoderBlockType.QWEN3_NEXT,
         DecoderBlockType.QWEN3_5,
+        DecoderBlockType.PHI4,
     ):
-      if int(self.gdn_num_value_heads) % int(self.gdn_num_key_heads) != 0:
-        raise ValueError("gdn_num_value_heads must be divisible by gdn_num_key_heads")
+      if self.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
+        if int(self.gdn_num_value_heads) % int(self.gdn_num_key_heads) != 0:
+          raise ValueError("gdn_num_value_heads must be divisible by gdn_num_key_heads")
       rotary_dim = int(self.head_dim * self.partial_rotary_factor)
       if rotary_dim % 2 != 0:
         raise ValueError(f"Calculated rotary dimension ({rotary_dim}) must be a multiple of 2.")
