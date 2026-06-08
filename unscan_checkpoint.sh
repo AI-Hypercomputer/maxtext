@@ -53,7 +53,8 @@ python3 src/maxtext/checkpoint_conversion/to_huggingface.py \
   load_parameters_path="${SCANNED_CKPT_PATH}" \
   base_output_directory="${HF_CKPT_PATH}" \
   scan_layers=True \
-  weight_dtype=bfloat16
+  weight_dtype=bfloat16 \
+  skip_jax_distributed_system=True
 
 echo "=========================================================="
 echo "Step 2: Converting Hugging Face -> Unscanned MaxText format"
