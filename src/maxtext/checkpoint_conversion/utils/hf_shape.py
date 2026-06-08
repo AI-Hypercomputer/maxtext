@@ -1029,6 +1029,7 @@ def QWEN3_5_MOE_HF_WEIGHTS_TO_SHAPE(config):
   mapping = {
       f"{text_base}.embed_tokens.weight": [vocab_size, hidden_size],
       f"{text_base}.norm.weight": [hidden_size],
+      "lm_head.weight": [vocab_size, hidden_size],
   }
 
   for layer_idx in range(num_hidden_layers):
