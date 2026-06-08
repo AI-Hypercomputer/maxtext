@@ -3147,6 +3147,7 @@ def QWEN3_5_MOE_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=
   mapping = {
       "params-token_embedder-embedding": f"{text_base}.embed_tokens.weight",
       "params-decoder-decoder_norm-scale": f"{text_base}.norm.weight",
+      "params-decoder-logits_dense-kernel": "lm_head.weight",
   }
 
   if scan_layers:
@@ -3358,6 +3359,7 @@ def QWEN3_5_MOE_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=
 
   hooks["params-token_embedder-embedding"] = transpose
   hooks["params-decoder-decoder_norm-scale"] = scale_rmsnorm_layer
+  hooks["params-decoder-logits_dense-kernel"] = transpose
 
   if scan_layers:
     for cycle_idx in range(layer_cycle_interval):
