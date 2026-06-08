@@ -145,7 +145,7 @@ class TestDeepSeekScanEngram(unittest.TestCase):
 
     shared_embedding = DummyEmbedding(emb_dim=config.emb_dim)
 
-    with mesh, jax.disable_jit():
+    with jax.set_mesh(mesh), jax.disable_jit():
       variables = decoder.init(
           {"params": jax.random.PRNGKey(0), "dropout": jax.random.PRNGKey(1), "aqt": jax.random.PRNGKey(2)},
           shared_embedding=shared_embedding,

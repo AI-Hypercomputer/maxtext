@@ -1064,6 +1064,8 @@ class TrainDistillTest(unittest.TestCase):
   ):
     """Verifies offline mode (offline_data_dir is set) skips teacher model loading."""
     # 1. Configs
+    devices = jax.devices()[:1]
+    mock_create_mesh.return_value = np.array(devices)
     mock_global = mock.Mock()
     mock_global.student_overrides = {}
     mock_global.teacher_overrides = {}  # No checkpoint needed
@@ -1172,6 +1174,8 @@ class TrainDistillTest(unittest.TestCase):
       mock_trainer_cls,
   ):
     """Verifies online mode (offline_data_dir is None) loads both student and teacher models."""
+    devices = jax.devices()[:1]
+    mock_create_mesh.return_value = np.array(devices)
     mock_global = mock.Mock()
     mock_global.student_overrides = {}
     mock_global.teacher_overrides = {"load_parameters_path": "gs://ckpt"}

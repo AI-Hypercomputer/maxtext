@@ -119,7 +119,7 @@ def merge_image_columns(example, image_columns, max_num_images_per_example):
   return example
 
 
-def pre_process_image_sft(example, image_column, model_name):
+def pre_process_image_sft(example, image_column, config):
   """pre-process image for multimodal SFT"""
 
   def _process_image_fn(image):
@@ -128,7 +128,7 @@ def pre_process_image_sft(example, image_column, model_name):
     else:
       image = np.array(mm_utils.convert_to_RGB(image))
 
-    image = mm_processor.preprocess_image_for_training(image, model_name)
+    image = mm_processor.preprocess_image_for_training(image, config)
     return image
 
   example[image_column] = _process_image_fn(example[image_column])

@@ -102,5 +102,35 @@ class Gemma4SmallKvSharingTest(unittest.TestCase):
       self.assertFalse(gemma4_small.is_kv_donor_layer(i, layer_types, 0))
 
 
+class Gemma4SmallKvCacheSlotMapTest(unittest.TestCase):
+  """Layer -> KV-cache slot mapping used by the vLLM RPA path."""
+
+  def _check_slot_map(self, model_name, num_layers, num_kv_shared):
+    """Asserts slot-map invariants for the given model layout."""
+    layer_types = gemma4_small.build_layer_types(num_layers, model_name)
+    slot_map = gemma4_small.kv_cache_slot_map(layer_types, num_kv_shared)
+
+    num_slots = num_layers - num_kv_shared
+    self.assertEqual(len(slot_map), num_layers)
+    # Non-shared layers get consecutive slots 0..num_slots-1.
+    self.assertEqual([slot_map[i] for i in range(num_slots)], list(range(num_slots)))
+    # Shared layers reuse the slot of a donor with the same attention type.
+    for lyr in range(num_slots, num_layers):
+      donor = gemma4_small.kv_donor_layer_idx(lyr, layer_types, num_kv_shared)
+      self.assertEqual(slot_map[lyr], slot_map[donor], f"layer {lyr}")
+      self.assertEqual(layer_types[lyr], layer_types[donor], f"layer {lyr}")
+
+  def test_e2b_slot_map(self):
+    self._check_slot_map("gemma4-e2b", 35, 20)
+
+  def test_e4b_slot_map(self):
+    self._check_slot_map("gemma4-e4b", 42, 18)
+
+  def test_slot_map_without_sharing_is_identity(self):
+    layer_types = gemma4_small.build_layer_types(10, None)
+    slot_map = gemma4_small.kv_cache_slot_map(layer_types, 0)
+    self.assertEqual(slot_map, {i: i for i in range(10)})
+
+
 if __name__ == "__main__":
   unittest.main()

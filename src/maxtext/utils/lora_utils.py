@@ -539,7 +539,7 @@ def apply_lora_to_model(
   )
 
   if mesh is not None:
-    with mesh, nn_partitioning.axis_rules(mt_config.logical_axis_rules):
+    with jax.set_mesh(mesh), nn_partitioning.axis_rules(mt_config.logical_axis_rules):
       graph_def, state = nnx.split(lora_model)
 
       # We handle explicit replication for LoRA to ensure safety and efficiency.

@@ -921,6 +921,11 @@ class LayoutAndSharding(BaseModel):
       le=1.0,
       description="Allowed percentage of non-sharded parameters.",
   )
+  check_vma: bool = Field(
+      False,
+      description="Enabled check_vma flag in shard_map calls. Recommended for improved performance but only supported "
+      "with auto sharding, megablox kernel, and EP / FSDP parallelisms.",
+  )
   shard_optimizer_over_data: bool = Field(False, description="Enable ZeRO-1 optimizer sharding over the data axis.")
   internal_compile: bool = Field(False, description="Use internal_compile to bypass open-source topology mappings.")
   internal_compile_num_devices: int = Field(-1, description="Number of devices when using internal_compile.")
@@ -1564,6 +1569,14 @@ class InferenceGeneral(BaseModel):
   max_target_length: int = Field(2048, description="Maximum sequence length for the model.")
   max_prefill_predict_length: int = Field(64, description="Maximum length for the prefill stage in decoding.")
   prompt: str = Field("I love to", description="The default prompt for sampling.")
+  system_prompt: str = Field(
+      "",
+      description=(
+          "Optional system prompt prepended to the chat message list when "
+          "use_chat_template=True. Required for the gemma4-e2b / gemma4-e4b -it "
+          "checkpoints which need a system role to produce coherent output."
+      ),
+  )
   load_from_prefill_dir: bool = Field(False, description="Reads prefill cache from directory instead of computing it.")
   prefill_cache_dir: PathStr = Field("", description="Directory for the prefill cache.")
   autoregressive_decode_assert: str = Field(
@@ -1816,7 +1829,7 @@ class MultimodalGeneral(BaseModel):
   freeze_vision_encoder_params: bool = Field(True, description="Freeze the parameters of the vision encoder.")
   freeze_audio_encoder_params: bool = Field(True, description="Freeze the parameters of the audio encoder.")
   use_audio: bool = Field(False, description="Enable audio encoder for multimodal models.")
-  image_size_for_vit: int | list[int] = Field(896, description="Input image size for the Vision Transformer.")
+  image_size_for_vit: int | list[int] | None = Field(896, description="Input image size for the Vision Transformer.")
   image_path: PathStr = Field("", description="Path to an image for decoding.")
   image_placeholder: str = Field("<|image|>", description="Placeholder string for images in text prompts.")
   posemb_type_for_vit: str = Field("learn", description="Positional embedding type for the vision encoder.")
@@ -2347,6 +2360,26 @@ class MaxTextConfig(
   def load_model_specific_defaults(cls, values: dict[str, Any]) -> dict[str, Any]:
     """This method is a no-op because `pyconfig` handles model-specific config loading."""
     return values
+
+  def _validate_check_vma_is_supported(self):
+    """Validates that check_vma is used with supported settings."""
+    if not self.check_vma:
+      return
+    if self.shard_mode != ShardMode.AUTO:
+      raise ValueError(f"check_vma requires shard_mode='auto', got shard_mode='{self.shard_mode.value}'.")
+    if self.use_tokamax_gmm:
+      raise ValueError("check_vma is not yet supported with tokamax gmm kernel.")
+    if self.use_ragged_sort:
+      raise ValueError("check_vma is not yet supported with ragged sort kernel.")
+    if self.use_ring_of_experts:
+      raise ValueError("check_vma is not yet supported with ring of experts.")
+    _allowed = {"ici_expert_parallelism", "ici_fsdp_parallelism"}
+    active = [name for name in IciParallelism.model_fields if name not in _allowed and getattr(self, name) != 1]
+    if active:
+      raise ValueError(
+          f"check_vma=True only supports ici_expert_parallelism and ici_fsdp_parallelism. "
+          f"Found other ICI axes enabled: {active}."
+      )
 
   def validate_ragged_buffer_factor(self):
     if self.ragged_buffer_factor <= 0:
@@ -3200,6 +3233,8 @@ class MaxTextConfig(
           "incompatibility between tokamax's GroupSizes vmap_rule and JAX's scan batching. "
           "Please set use_tokamax_gmm=False."
       )
+
+    self._validate_check_vma_is_supported()
 
     # Final string-to-enum conversions if they haven't been coerced by pydantic yet.
     if isinstance(self.decoder_block, str):

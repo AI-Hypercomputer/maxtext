@@ -50,17 +50,21 @@ from vllm.sampling_params import SamplingParams
 from maxtext.configs import pyconfig
 import maxtext.integration.vllm.maxtext_vllm_adapter as adapter
 
-adapter.register()
-
-os.environ["SKIP_JAX_PRECOMPILE"] = "1"
-os.environ["NEW_MODEL_DESIGN"] = "1"
-
 
 # --- DEFINE FLAGS GLOBALLY ---
 FLAGS = flags.FLAGS
 
 flags.DEFINE_bool("use_tunix", False, "Whether to use Tunix for vLLM decoding.")
 flags.DEFINE_integer("seed", 42, "Random seed for sampling.")
+
+
+def build_chat_messages(config: Config) -> list[dict[str, str]]:
+  """Builds the chat message list, prepending a system prompt when set."""
+  messages = []
+  if config.system_prompt:
+    messages.append({"role": "system", "content": config.system_prompt})
+  messages.append({"role": "user", "content": config.prompt})
+  return messages
 
 
 def decode_with_vllm(config: Config) -> None:
@@ -127,11 +131,8 @@ def decode_with_vllm(config: Config) -> None:
   prompts = [config.prompt]
   if config.use_chat_template:
     # Format the prompt using chat template if specified
-    messages = [
-        {"role": "user", "content": config.prompt},
-    ]
     input_with_chat_template = tokenizer.apply_chat_template(
-        messages,
+        build_chat_messages(config),
         tokenize=False,  # Set to False to get the string
         add_generation_prompt=True,
         add_special_tokens=False,  # Prevent adding special tokens
@@ -191,11 +192,8 @@ def decode_with_tunix(
   prompts = [config.prompt]
   if config.use_chat_template:
     # Format the prompt using chat template if specified
-    messages = [
-        {"role": "user", "content": config.prompt},
-    ]
     input_with_chat_template = tokenizer.apply_chat_template(
-        messages,
+        build_chat_messages(config),
         tokenize=False,  # Set to False to get the string
         add_generation_prompt=True,
         add_special_tokens=False,  # Prevent adding special tokens
@@ -240,6 +238,12 @@ def decode_with_tunix(
 
 
 def main(argv: Sequence[str]) -> None:
+  # Keep these in main(): registering the adapter and setting engine env flags
+  # at import time would leak into any process that merely imports this module.
+  adapter.register()
+  os.environ["SKIP_JAX_PRECOMPILE"] = "1"
+  os.environ["NEW_MODEL_DESIGN"] = "1"
+
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):

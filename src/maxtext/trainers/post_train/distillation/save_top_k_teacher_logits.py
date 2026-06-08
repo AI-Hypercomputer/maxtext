@@ -21,8 +21,6 @@ import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 
-# Force the pure Python protobuf implementation to avoid UPB compatibility issues with TFDS
-os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
 from typing import Sequence
 import argparse
 import time
@@ -70,7 +68,6 @@ def get_start_step(config, local_args):
   if not existing_files:
     return 0
 
-  # Updated regex to handle the host ID in the filename
   max_part_num = max(
       (int(m.group(1)) for f in existing_files if (m := re.search(r"part_(\d+)_host", f.name))),
       default=-1,
@@ -92,26 +89,34 @@ def create_tf_example(example_dict):
       features[key] = tf.train.Feature(int64_list=tf.train.Int64List(value=[val]))
       continue
 
-    flat_val = np.asarray(val).flatten()
+    flat_val = np.asarray(val).ravel()
 
     if flat_val.dtype in [np.float32, np.float64, np.float16, jnp.bfloat16]:
-      features[key] = tf.train.Feature(float_list=tf.train.FloatList(value=flat_val.astype(np.float32)))
+      if flat_val.dtype != np.float32:
+        flat_val = flat_val.astype(np.float32)
+      features[key] = tf.train.Feature(float_list=tf.train.FloatList(value=flat_val.tolist()))
     elif flat_val.dtype in [np.int32, np.int64]:
-      features[key] = tf.train.Feature(int64_list=tf.train.Int64List(value=flat_val.astype(np.int64)))
+      if flat_val.dtype != np.int64:
+        flat_val = flat_val.astype(np.int64)
+      features[key] = tf.train.Feature(int64_list=tf.train.Int64List(value=flat_val.tolist()))
     else:
       raise ValueError(f"Unsupported dtype {flat_val.dtype} for key {key}")
 
   return tf.train.Example(features=tf.train.Features(feature=features)).SerializeToString()
 
 
-def background_process_and_write(writer, tokens, vals, idx, opt_data):
+def background_process_and_write(writer, tokens, vals, idx, opt_data, serialization_executor):
   """Executes entirely on a background CPU thread so the TPU never waits."""
-  tokens_np = np.array(tokens)
-  vals_np = np.array(vals)
-  idx_np = np.array(idx)
-  opt_data_np = {k: np.array(v) for k, v in opt_data.items()}
+  # Convert exactly once
+  tokens_np = np.asarray(tokens)
+  vals_np = np.asarray(vals)
+  idx_np = np.asarray(idx)
+  opt_data_np = {k: np.asarray(v) for k, v in opt_data.items()}
 
   batch_size = tokens_np.shape[0]
+  example_dicts = []
+
+  # Prepare dictionaries sequentially
   for i in range(batch_size):
     seq_bytes = tokens_np[i].tobytes()
     example_dict = {
@@ -122,8 +127,14 @@ def background_process_and_write(writer, tokens, vals, idx, opt_data):
     }
     for key, val_np in opt_data_np.items():
       example_dict[key] = val_np[i]
+    example_dicts.append(example_dict)
 
-    writer.write(create_tf_example(example_dict))
+  # Serialize to Protobufs in parallel across multiple CPU cores
+  serialized_records = list(serialization_executor.map(create_tf_example, example_dicts))
+
+  # Write the serialized bytes to disk sequentially
+  for record in serialized_records:
+    writer.write(record)
 
 
 def background_upload(local_path, gcs_path, process_index):
@@ -163,12 +174,14 @@ def generate_and_save_data(config, local_args):
   writer = None
   local_output_path = None
 
-  # all hosts initialize their own directories and thread pools
   if not os.path.exists(local_tmp_dir):
     os.makedirs(local_tmp_dir, exist_ok=True)
 
-  upload_executor = ThreadPoolExecutor(max_workers=4)
-  write_executor = ThreadPoolExecutor(max_workers=2)
+  upload_executor = ThreadPoolExecutor(max_workers=local_args.upload_workers)
+  # Restrict to 1 worker to ensure sequential writing to the ArrayRecord file
+  write_executor = ThreadPoolExecutor(max_workers=1)
+  # New executor purely for CPU-bound protobuf serialization
+  serialization_executor = ThreadPoolExecutor(max_workers=local_args.serialization_workers)
 
   devices = jax.devices()
   devices_array = maxtext_utils.create_device_mesh(config, devices)
@@ -185,7 +198,7 @@ def generate_and_save_data(config, local_args):
 
   multihost_utils.sync_global_devices("start_generation_loop")
 
-  with mesh:
+  with jax.set_mesh(mesh):
     if jax.process_index() == 0:
       max_logging.log(f"Starting Distributed Top-K generation loop for {config.steps - start_step} steps...")
 
@@ -194,7 +207,6 @@ def generate_and_save_data(config, local_args):
     for step, batch in enumerate(islice(train_iter, start_step, config.steps), start=start_step):
       step_start = time.time()
 
-      # ALL HOSTS execute the file opening/closing logic
       if step % steps_per_file == 0:
         if writer:
           write_executor.shutdown(wait=True)
@@ -204,15 +216,20 @@ def generate_and_save_data(config, local_args):
             if jax.process_index() == 0:
               max_logging.log(f"Queueing distributed background uploads for Step {step}...")
             upload_executor.submit(background_upload, local_output_path, gcs_file_path, jax.process_index())
-          write_executor = ThreadPoolExecutor(max_workers=2)
+
+          # Re-initialize the writer thread pool. We restrict it to exactly 1 worker
+          # to ensure sequential, in-order writing to the ArrayRecord file. A new pool
+          # is needed because the previous one was shut down to flush all pending writes.
+          write_executor = ThreadPoolExecutor(max_workers=1)
 
         file_index = step // steps_per_file
-        # filename includes host ID to prevent GCS collisions
         filename = f"teacher_top_k_part_{file_index:05d}_host_{jax.process_index():03d}.array_record"
         local_output_path = os.path.join(local_tmp_dir, filename)
         writer = array_record_module.ArrayRecordWriter(local_output_path, "group_size:1")
 
       tokens = batch["inputs"]
+
+      # --- Model Forward Pass & Network Gather ---
       top_k_vals, top_k_idx = teacher_step(teacher_model, batch, k_val)
 
       global_tokens = jax.experimental.multihost_utils.process_allgather(tokens, tiled=True)
@@ -225,13 +242,11 @@ def generate_and_save_data(config, local_args):
           optional_data[key] = jax.experimental.multihost_utils.process_allgather(batch[key], tiled=True)
 
       if writer:
-        # Convert to numpy safely on the CPU
         global_tokens_np = np.array(global_tokens)
         global_vals_np = np.array(global_vals)
         global_idx_np = np.array(global_idx)
         optional_data_np = {k: np.array(v) for k, v in optional_data.items()}
 
-        # Slice out this host's local fraction of the batch
         global_batch_size = global_tokens_np.shape[0]
         local_batch_size = global_batch_size // jax.process_count()
         start_idx = jax.process_index() * local_batch_size
@@ -242,13 +257,21 @@ def generate_and_save_data(config, local_args):
         local_idx_np = global_idx_np[start_idx:end_idx]
         local_opt_data_np = {k: v[start_idx:end_idx] for k, v in optional_data_np.items()}
 
-        # Write synchronously
-        background_process_and_write(writer, local_tokens_np, local_vals_np, local_idx_np, local_opt_data_np)
+        # --- Local Disk Writing ---
+        # Submit to the background thread with the serialization_executor
+        write_executor.submit(
+            background_process_and_write,
+            writer,
+            local_tokens_np,
+            local_vals_np,
+            local_idx_np,
+            local_opt_data_np,
+            serialization_executor,
+        )
 
       if step % 50 == 0 and jax.process_index() == 0:
         max_logging.log(f"Successfully processed step {step} in {time.time() - step_start:.4f}s")
 
-      # Sync hosts briefly to ensure TPU compute stays aligned across the mesh
       multihost_utils.sync_global_devices(f"step_{step}_complete")
 
     if jax.process_index() == 0:
@@ -256,10 +279,11 @@ def generate_and_save_data(config, local_args):
 
   multihost_utils.sync_global_devices("loop_finished")
 
-  # Finalize writing and handle GCS upload on all hosts
   if writer:
     if write_executor:
       write_executor.shutdown(wait=True)
+    if serialization_executor:
+      serialization_executor.shutdown(wait=True)
     writer.close()
 
     if gcs_upload_path:
@@ -279,8 +303,9 @@ def generate_and_save_data(config, local_args):
 def main(argv: Sequence[str], local_args):
   global_config = pyconfig.initialize(argv)
   teacher_overrides = global_config.teacher_overrides
-  teacher_argv = [argv[0], argv[1]]
-  teacher_config = pyconfig.initialize(teacher_argv, **teacher_overrides)
+
+  teacher_config = pyconfig.initialize(argv, **teacher_overrides)
+
   generate_and_save_data(teacher_config, local_args)
 
 
@@ -295,7 +320,11 @@ if __name__ == "__main__":
   )
   parser.add_argument("--gcs_upload_path", type=str, default=None)
   parser.add_argument("--local_tmp_dir", type=str, default="/tmp")
-  parser.add_argument("--steps_per_file", type=int, default=1000)
+  parser.add_argument("--steps_per_file", type=int, default=50)
+  parser.add_argument("--upload_workers", type=int, default=4, help="Number of workers for GCS uploads.")
+  parser.add_argument(
+      "--serialization_workers", type=int, default=16, help="Number of workers for protobuf serialization."
+  )
   local_arg, remaining_args = parser.parse_known_args()
 
   main_wrapper = functools.partial(main, local_args=local_arg)

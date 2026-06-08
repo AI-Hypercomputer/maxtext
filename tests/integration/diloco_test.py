@@ -79,7 +79,7 @@ class DiLoCoTest(unittest.TestCase):
         ]
     )
 
-    with mesh:
+    with jax.set_mesh(mesh):
       tx = optax.sgd(learning_rate=0.1)
       rngs = nnx.Rngs(params=jax.random.key(seed=42))
       model = SimpleNNXModel(rngs=rngs)

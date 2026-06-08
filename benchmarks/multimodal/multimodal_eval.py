@@ -202,7 +202,7 @@ def main(config, local_args):
     prefill_length = config.max_prefill_predict_length
     parsed_dataset_example = parse_dataset_example(example, hf_path, local_args)
     prompt = construct_prompt(parsed_dataset_example, config, local_args)
-    processor_output = mm_processor.preprocess_image_for_training(parsed_dataset_example.image_np, config.model_name)
+    processor_output = mm_processor.preprocess_image_for_training(parsed_dataset_example.image_np, config)
     prefill_length -= mm_processor.get_image_offsets(config=config, processor_output=processor_output)
     print("\n" + "*" * 50)
 
