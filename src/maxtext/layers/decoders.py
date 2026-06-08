@@ -107,9 +107,17 @@ class DecoderLayer(nn.Module):
     )
 
     if self.model_mode == MODEL_MODE_PREFILL:
-      logical_axis_names = ("activation_batch", "prefill_activation_length", "activation_embed")
+      logical_axis_names = (
+          "activation_batch",
+          "prefill_activation_length",
+          "activation_embed",
+      )
     else:
-      logical_axis_names = ("activation_batch", "activation_length", "activation_embed")
+      logical_axis_names = (
+          "activation_batch",
+          "activation_length",
+          "activation_embed",
+      )
 
     if model_mode == MODEL_MODE_PREFILL:
       inputs = _maybe_shard_with_logical(inputs, logical_axis_names)
@@ -250,7 +258,11 @@ class SequentialBlockDecoderLayers(nn.Module):
   ) -> jnp.ndarray:
     for lyr in range(self.num_decoder_layers):
       inputs = self.decoder_layer(
-          config=self.config, mesh=self.mesh, name=f"layers_{lyr}", quant=self.quant, model_mode=model_mode
+          config=self.config,
+          mesh=self.mesh,
+          name=f"layers_{lyr}",
+          quant=self.quant,
+          model_mode=model_mode,
       )(
           inputs,
           decoder_segment_ids,
@@ -308,7 +320,10 @@ class Decoder(nn.Module):
       pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer)
       remat_policy = self.get_remat_policy()
       self.pipeline_module = pipeline.create_pipeline(
-          config=self.config, mesh=self.mesh, layers=pipeline_stage_module, remat_policy=remat_policy
+          config=self.config,
+          mesh=self.mesh,
+          layers=pipeline_stage_module,
+          remat_policy=remat_policy,
       )
 
   def minimal_policy(self, with_context=False, with_quantization=False):
@@ -398,7 +413,11 @@ class Decoder(nn.Module):
       elif cfg.remat_policy == "qkv_proj_offloaded":
         policy = jax.checkpoint_policies.save_and_offload_only_these_names(
             names_which_can_be_saved=[],
-            names_which_can_be_offloaded=["query_proj", "value_proj", "key_proj"],
+            names_which_can_be_offloaded=[
+                "query_proj",
+                "value_proj",
+                "key_proj",
+            ],
             offload_src="device",
             offload_dst="pinned_host",
         )
@@ -521,7 +540,10 @@ class Decoder(nn.Module):
           block_layer,
           prevent_cse=maxtext_utils.should_prevent_cse_in_remat(self.config),
           policy=policy,
-          static_argnums=(4, 5),  # Deterministic and model mode are static arguments.
+          static_argnums=(
+              4,
+              5,
+          ),  # Deterministic and model mode are static arguments.
       )
       RemattedBlockLayers.append(layer)
     return RemattedBlockLayers
@@ -551,15 +573,34 @@ class Decoder(nn.Module):
     ):
       return functools.partial(rms_norm, num_features=num_features, shard_mode=self.config.shard_mode)
     elif self.config.decoder_block == DecoderBlockType.GPT3:
-      return functools.partial(gpt3.gpt3_layer_norm, num_features=num_features, reductions_in_fp32=False, use_bias=True)
-    elif self.config.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
       return functools.partial(
-          normalizations.Qwen3NextRMSNormLinen, num_features=num_features, shard_mode=self.config.shard_mode
+          gpt3.gpt3_layer_norm,
+          num_features=num_features,
+          reductions_in_fp32=False,
+          use_bias=True,
+      )
+    elif self.config.decoder_block in (
+        DecoderBlockType.QWEN3_NEXT,
+        DecoderBlockType.QWEN3_5,
+    ):
+      return functools.partial(
+          normalizations.Qwen3NextRMSNormLinen,
+          num_features=num_features,
+          shard_mode=self.config.shard_mode,
       )
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
 
-  def scan_decoder_layers(self, cfg, decoder_layer, length, metadata_axis_name, mesh, in_axes_tuple, **kwargs):
+  def scan_decoder_layers(
+      self,
+      cfg,
+      decoder_layer,
+      length,
+      metadata_axis_name,
+      mesh,
+      in_axes_tuple,
+      **kwargs,
+  ):
     """scan decoder layers, calls `flax.linen.transforms.scan`"""
     initializing = self.is_mutable_collection("params")
     params_spec = cfg.param_scan_axis if initializing else ScanIn(cfg.param_scan_axis)
@@ -583,7 +624,11 @@ class Decoder(nn.Module):
         metadata_params={nn.PARTITION_NAME: metadata_axis_name},
     )
     return scan_fn(
-        config=cfg, mesh=mesh, name=metadata_axis_name, quant=self.quant, **kwargs  # pytype: disable=wrong-keyword-args
+        config=cfg,
+        mesh=mesh,
+        name=metadata_axis_name,
+        quant=self.quant,
+        **kwargs,  # pytype: disable=wrong-keyword-args
     )
 
   def get_pipeline_stage_module(self, decoder_blocks):
@@ -674,7 +719,11 @@ class Decoder(nn.Module):
           raise ValueError(f"Unsupported model_name for multimodal: {cfg.model_name}")
 
       if video_embeddings is not None and cfg.use_multimodal:
-        if cfg.model_name in ["qwen3-omni-30b-a3b", "qwen3.5-35b-a3b", "qwen3.5-397b-a17b"]:
+        if cfg.model_name in [
+            "qwen3-omni-30b-a3b",
+            "qwen3.5-35b-a3b",
+            "qwen3.5-397b-a17b",
+        ]:
           y = mm_utils.merge_mm_embeddings(
               text_embeddings=y,
               multimodal_embeddings=video_embeddings,
@@ -737,7 +786,12 @@ class Decoder(nn.Module):
       out_sharding = create_sharding(self.mesh, (None, None, "activation_vocab"))
     else:
       out_sharding = create_sharding(
-          self.mesh, ("activation_embed_and_logits_batch", "activation_length", "activation_vocab")
+          self.mesh,
+          (
+              "activation_embed_and_logits_batch",
+              "activation_length",
+              "activation_vocab",
+          ),
       )
 
     # [batch, length, emb_dim] -> [batch, length, vocab_size]
@@ -794,6 +848,7 @@ class Decoder(nn.Module):
       kv_caches: list[jax.Array] | None = None,
       attention_metadata=None,
       deepstack_visual_embeds: None | list[jnp.ndarray] = None,
+      forced_routed_experts: jax.Array | None = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -863,7 +918,10 @@ class Decoder(nn.Module):
         remaining_layers = self.config.num_decoder_layers - self.config.pipeline_parallel_layers
         if remaining_layers > 0:
           logical_axis_rules_pp_as_dp = sharding.logical_axis_rules_pp_act_as_dp(self.config.logical_axis_rules)
-          with self.mesh, nn.partitioning.axis_rules(logical_axis_rules_pp_as_dp):
+          with (
+              self.mesh,
+              nn.partitioning.axis_rules(logical_axis_rules_pp_as_dp),
+          ):
             y, _ = self.scan_decoder_layers(
                 cfg,
                 RemattedBlockLayers[0],
@@ -1013,6 +1071,23 @@ class Decoder(nn.Module):
           current_broadcast_args = list(broadcast_args)
           current_in_axes_tuple = list(in_axes_tuple)
 
+          supports_forced_routing = cfg.decoder_block in (
+              DecoderBlockType.QWEN3_MOE,
+              DecoderBlockType.QWEN3_NEXT,
+              DecoderBlockType.QWEN3_5,
+          )
+
+          if supports_forced_routing and forced_routed_experts is not None:
+            # Transpose [B, L, N, E] -> [N, B, L, E] for scan
+            forced_routed_experts_t = jnp.transpose(forced_routed_experts, (2, 0, 1, 3))
+            cycle_interval = cfg.inhomogeneous_layer_cycle_interval
+            reshaped_forced = jnp.reshape(
+                forced_routed_experts_t,
+                (scan_length, cycle_interval) + forced_routed_experts_t.shape[1:],
+            )
+          else:
+            reshaped_forced = None
+
           if kv_caches is not None:
             # Stack kv_caches for scan: [num_layers, ...]
             stacked_kv_cache = jnp.stack(kv_caches, axis=0)
@@ -1020,11 +1095,17 @@ class Decoder(nn.Module):
             # We pass (y, stacked_kv_cache, 0) as the carry
             carry = (y, stacked_kv_cache, 0)
 
-            # We don't pass kv_cache as a scanned argument anymore
-
             # Pass None for previous_chunk, slot, kv_cache to align with __call__ signature
             current_broadcast_args.extend([None, None, None, attention_metadata])
             current_in_axes_tuple.extend([nn.broadcast] * 4)
+
+            if supports_forced_routing and forced_routed_experts is not None:
+              if reshaped_forced is not None:
+                current_broadcast_args.append(reshaped_forced)
+                current_in_axes_tuple.append(0)
+              else:
+                current_broadcast_args.append(None)
+                current_in_axes_tuple.append(nn.broadcast)
 
             max_logging.info(f"DEBUG: len(current_broadcast_args)={len(current_broadcast_args)}")
             max_logging.info(f"DEBUG: current_broadcast_args={[type(a) for a in current_broadcast_args]}")
@@ -1047,8 +1128,19 @@ class Decoder(nn.Module):
               kv_caches[i] = returned_kv_cache[i]
           else:
             # Fallback to old behavior if kv_caches is None (not vLLM RPA)
-            current_broadcast_args.append(None)
-            current_in_axes_tuple.append(nn.broadcast)
+            if supports_forced_routing and forced_routed_experts is not None:
+              current_broadcast_args.extend([None, None, None, None])
+              current_in_axes_tuple.extend([nn.broadcast] * 4)
+
+              if reshaped_forced is not None:
+                current_broadcast_args.append(reshaped_forced)
+                current_in_axes_tuple.append(0)
+              else:
+                current_broadcast_args.append(None)
+                current_in_axes_tuple.append(nn.broadcast)
+            else:
+              current_broadcast_args.append(None)
+              current_in_axes_tuple.append(nn.broadcast)
 
             y, _ = self.scan_decoder_layers(
                 cfg,
@@ -1077,6 +1169,10 @@ class Decoder(nn.Module):
               global_layer_idx = global_layer_idx_offset + index
               kv_cache = kv_caches[index] if kv_caches is not None else None
               input_tokens = decoder_input_tokens if cfg.engram_layers else None
+              extra_kwargs = {}
+              if layer_prefix == "moe_layers" and forced_routed_experts is not None:
+                extra_kwargs["forced_routed_experts"] = forced_routed_experts[:, :, index, :]
+
               y, kv_cache = layer(
                   config=cfg,
                   mesh=mesh,
@@ -1095,6 +1191,7 @@ class Decoder(nn.Module):
                   kv_cache=kv_cache,
                   attention_metadata=attention_metadata,
                   decoder_input_tokens=input_tokens,
+                  **extra_kwargs,
               )
               if kv_caches is not None and kv_cache is not None:
                 kv_caches[index] = kv_cache
@@ -1114,6 +1211,7 @@ class Decoder(nn.Module):
               slot=slot,
           )
         else:
+          moe_lyr_idx = 0
           for lyr in range(cfg.num_decoder_layers):
             RemattedBlockLayer = RemattedBlockLayers[0]
             layer_kwargs = {}
@@ -1133,23 +1231,60 @@ class Decoder(nn.Module):
                   "is_nope_layer": llama4.determine_is_nope_layer(lyr, self.config.nope_layer_interval),
                   "is_moe_layer": llama4.determine_is_moe_layer(lyr, self.config.interleave_moe_layer_step),
               }
-            if cfg.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
+            if cfg.decoder_block in (
+                DecoderBlockType.QWEN3_NEXT,
+                DecoderBlockType.QWEN3_5,
+            ):
               layer_kwargs = {"layer_idx": lyr}
             kv_cache = None
-            if kv_caches is not None and cfg.decoder_block not in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
+            if kv_caches is not None and cfg.decoder_block not in (
+                DecoderBlockType.QWEN3_NEXT,
+                DecoderBlockType.QWEN3_5,
+            ):
               kv_cache = kv_caches[lyr]
-            elif kv_caches is not None and cfg.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
+            elif kv_caches is not None and cfg.decoder_block in (
+                DecoderBlockType.QWEN3_NEXT,
+                DecoderBlockType.QWEN3_5,
+            ):
               # For Qwen3Next & Qwen3.5, kv_caches is a dictionary of lists of caches.
               if (lyr + 1) % cfg.inhomogeneous_layer_cycle_interval == 0:
-                kv_cache = (kv_caches["key_cache"][lyr], kv_caches["value_cache"][lyr])
+                kv_cache = (
+                    kv_caches["key_cache"][lyr],
+                    kv_caches["value_cache"][lyr],
+                )
 
             if cfg.decoder_block == DecoderBlockType.GPT_OSS:
               layer_kwargs = {"attention_type": gpt_oss.get_attention_type(layer_id=lyr)}
             if cfg.decoder_block == DecoderBlockType.OLMO3:
               layer_kwargs = {"attention_type": olmo3.get_attention_type(layer_id=lyr)}
             layer = RemattedBlockLayer(
-                config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant, model_mode=self.model_mode, **layer_kwargs
+                config=cfg,
+                mesh=mesh,
+                name=f"layers_{lyr}",
+                quant=self.quant,
+                model_mode=self.model_mode,
+                **layer_kwargs,
             )
+
+            is_moe = False
+            if cfg.decoder_block in (
+                DecoderBlockType.QWEN3_MOE,
+                DecoderBlockType.QWEN3_NEXT,
+                DecoderBlockType.QWEN3_5,
+            ):
+              is_moe = True
+
+            current_forced_routed_experts = None
+            if is_moe and forced_routed_experts is not None:
+              current_forced_routed_experts = forced_routed_experts[:, :, moe_lyr_idx, :]
+              moe_lyr_idx += 1
+            elif is_moe:
+              moe_lyr_idx += 1
+
+            extra_kwargs = {}
+            if is_moe and current_forced_routed_experts is not None:
+              extra_kwargs["forced_routed_experts"] = current_forced_routed_experts
+
             y, returned_cache = layer(
                 y,
                 decoder_segment_ids,
@@ -1160,10 +1295,14 @@ class Decoder(nn.Module):
                 slot=slot,
                 kv_cache=kv_cache,
                 attention_metadata=attention_metadata,
+                **extra_kwargs,
                 **layer_call_kwargs,
             )
             if kv_caches is not None and returned_cache is not None:
-              if cfg.decoder_block not in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
+              if cfg.decoder_block not in (
+                  DecoderBlockType.QWEN3_NEXT,
+                  DecoderBlockType.QWEN3_5,
+              ):
                 kv_caches[lyr] = returned_cache
               elif (lyr + 1) % cfg.inhomogeneous_layer_cycle_interval == 0:
                 kv_caches["key_cache"][lyr] = returned_cache[0]
@@ -1265,7 +1404,12 @@ class Decoder(nn.Module):
       # We name the remainder block with a 'remainder' suffix to avoid parameter name collisions
       rem_layer_kwargs = {"num_of_layers": num_remaining_layers}
       layer = RemattedGemma3Block(
-          config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode, name="layers_remainder", **rem_layer_kwargs
+          config=cfg,
+          mesh=mesh,
+          quant=self.quant,
+          model_mode=self.model_mode,
+          name="layers_remainder",
+          **rem_layer_kwargs,
       )  # pytype: disable=wrong-keyword-args
       y, _ = layer(
           y,

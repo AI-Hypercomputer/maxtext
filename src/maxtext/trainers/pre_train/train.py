@@ -266,6 +266,12 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       loss += moe_lb_loss
     else:
       max_logging.debug("\nNo MoE load balance loss found. Defaulting to 0.0.")
+  # get MoE routing mismatch rate
+  moe_mismatch_rate = None
+  if config.num_experts > 1:
+    moe_mismatch_rates = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "mismatch_rate")
+    if moe_mismatch_rates:
+      moe_mismatch_rate = jnp.mean(jnp.stack(moe_mismatch_rates))
 
   # get MoE routed bias term updates
   moe_bias_updates = None
@@ -288,6 +294,8 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       "mtp_loss": mtp_loss,
       "batch_stats": (intermediate_outputs.get("batch_stats", None) if hasattr(intermediate_outputs, "get") else None),
   }
+  if moe_mismatch_rate is not None:
+    aux["moe_mismatch_rate"] = moe_mismatch_rate
   return loss, aux
 
 
@@ -396,6 +404,12 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   xent_sum = aux["xent_sum"]
   total_weights = aux["total_weights"]
   moe_lb_loss = aux["moe_lb_loss"]
+  if config.num_experts > 1 and "moe_mismatch_rate" in aux:
+    moe_mismatch_rate = aux["moe_mismatch_rate"]
+    if config.gradient_accumulation_steps > 1:
+      moe_mismatch_rate = moe_mismatch_rate / config.gradient_accumulation_steps
+  else:
+    moe_mismatch_rate = None
   indexer_loss = aux.get("indexer_loss", 0.0)
   z_loss = aux.get("z_loss", 0.0)
   moe_bias_updates = aux.get("moe_bias_updates")
@@ -459,7 +473,15 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
 
     # Apply updates for Auxiliary-Loss-Free load balancing for DeepSeek family
     if config.routed_bias and config.routed_bias_update_rate > 0.0 and moe_bias_updates is not None:
-      target_path = ("params", "decoder", "moe_layers", "DeepSeekMoeBlock_0", "MoeBlock_0", "gate", "bias")
+      target_path = (
+          "params",
+          "decoder",
+          "moe_layers",
+          "DeepSeekMoeBlock_0",
+          "MoeBlock_0",
+          "gate",
+          "bias",
+      )
       # Updates the shape to be aligned with state.
       moe_bias_updates = jnp.array(moe_bias_updates[0]).transpose()
       new_state = maxtext_utils.update_state_param(new_state, target_path, moe_bias_updates)
@@ -498,6 +520,8 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       "learning/mtp_loss": mtp_loss,
       "learning/total_weights": total_weights,
   }
+  if moe_mismatch_rate is not None:
+    scalar_metrics["learning/routing_mismatch_rate"] = moe_mismatch_rate
   if config.use_qk_clip:
     # Apply QK-Clip (Linen path only; NNX uses different state layout — TODO: implement for NNX)
     if isinstance(model, nn.Module):
@@ -615,7 +639,11 @@ def train_loop(config, recorder, state=None):
       params_shardings,
   )
 
-  with jax.set_mesh(mesh), mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+  with (
+      jax.set_mesh(mesh),
+      mesh,
+      nn_partitioning.axis_rules(config.logical_axis_rules),
+  ):
     shaped_batch = maxtext_utils.get_shaped_batch(config)
     if config.shard_optimizer_over_data and isinstance(model, nn.Module):
       state = sharding.maybe_shard_with_name(state, state_mesh_shardings, config.shard_mode)
@@ -658,7 +686,10 @@ def train_loop(config, recorder, state=None):
         else:
           step_rng_args = ()
         with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
-          with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
+          with (
+              jax.set_mesh(mesh),
+              nn_partitioning.axis_rules(config.logical_axis_rules),
+          ):
             if config.shard_optimizer_over_data and isinstance(model, nn.Module):
               state = sharding.maybe_shard_with_name(state, state_mesh_shardings, config.shard_mode)
             state, metrics = p_train_step(state, example_batch, *step_rng_args)
@@ -693,12 +724,18 @@ def train_loop(config, recorder, state=None):
             eval_batch = jax.device_put(eval_batch, sharding.get_input_data_sharding(config, mesh))
             if config.eval_steps > 0 and eval_step_count >= config.eval_steps:
               break
-            with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
+            with (
+                jax.set_mesh(mesh),
+                nn_partitioning.axis_rules(config.logical_axis_rules),
+            ):
               eval_metrics = p_eval_step(state, eval_batch, *step_rng_args)
             eval_step_time_delta = datetime.datetime.now() - last_eval_step_completion
             last_eval_step_completion = datetime.datetime.now()
             metric_logger_instance.buffer_and_write_metrics(
-                eval_metrics, eval_step_count, step_time_delta=eval_step_time_delta, is_training=False
+                eval_metrics,
+                eval_step_count,
+                step_time_delta=eval_step_time_delta,
+                is_training=False,
             )
             eval_step_count += 1
 
@@ -745,7 +782,10 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any]:
   max_utils.print_system_information()
   train_utils.validate_train_config(config)
   jax.config.update("jax_use_shardy_partitioner", config.shardy)
-  jax.config.update("jax_remove_size_one_mesh_axis_from_type", config.remove_size_one_mesh_axis_from_type)
+  jax.config.update(
+      "jax_remove_size_one_mesh_axis_from_type",
+      config.remove_size_one_mesh_axis_from_type,
+  )
   os.environ["TFDS_DATA_DIR"] = config.dataset_path or ""
   vertex_tensorboard_manager = VertexTensorboardManager()
   if config.use_vertex_tensorboard or os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):
