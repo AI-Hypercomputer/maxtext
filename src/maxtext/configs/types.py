@@ -2448,7 +2448,12 @@ class MaxTextConfig(
     # If the tokenizer path is a relative name without a directory, resolve it against the assets root.
     # This maintains backward compatibility for configs that just specify e.g., "tokenizer.llama2".
     tokenizer_path = getattr(self, "tokenizer_path", "")
-    if tokenizer_path and not os.path.exists(tokenizer_path) and not tokenizer_path.startswith("gs://"):
+    if (
+        tokenizer_path
+        and not os.path.exists(tokenizer_path)
+        and not tokenizer_path.startswith("gs://")
+        and not self.colocated_python_data_input
+    ):
       tokenizer_path = next(
           filter(
               os.path.exists,

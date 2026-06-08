@@ -42,7 +42,10 @@ class TikTokenTokenizer:
         model_path (str): The path to the Tiktoken model file.
     """
 
-    mergeable_ranks = load_tiktoken_bpe(model_path)
+    try:
+      mergeable_ranks = load_tiktoken_bpe(model_path)
+    except Exception as e:
+      raise ValueError(f"Failed to load tiktoken tokenizer from {model_path}: {e}") from e
     num_base_tokens = len(mergeable_ranks)
     special_tokens = [
         "<|begin_of_text|>",
@@ -222,12 +225,15 @@ class HFTokenizer:
 
   def __init__(self, model_path: str, add_bos: bool, add_eos: bool, hf_access_token: str):
     max_logging.log(f"Loading HF tokenizer: {model_path}")
-    self.tokenizer = transformers.AutoTokenizer.from_pretrained(
-        model_path,
-        add_bos_token=add_bos,
-        add_eos_token=add_eos,
-        token=hf_access_token,
-    )
+    try:
+      self.tokenizer = transformers.AutoTokenizer.from_pretrained(
+          model_path,
+          add_bos_token=add_bos,
+          add_eos_token=add_eos,
+          token=hf_access_token,
+      )
+    except Exception as e:
+      raise ValueError(f"Failed to load Hugging Face tokenizer from {model_path}: {e}") from e
     self.pad_id = self.tokenizer.pad_token_id
     self.unk_id = self.tokenizer.unk_token_id
     self.bos_id = self.tokenizer.bos_token_id
