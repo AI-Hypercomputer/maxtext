@@ -216,10 +216,12 @@ def maybe_elastic_scale_up(config, checkpoint_manager):
   """Waits for a checkpoint to finish before interrupting for scale up."""
   if is_scale_up_event(config):
     max_logging.log(
-        "Started a checkpoint and a new slice is available. Waiting for current"
-        " checkpoint to finish before interrupting."
+        "A new slice is available for scale up. Checking for ongoing checkpoint..."
     )
     if checkpoint_manager is not None:
+      max_logging.log("Waiting for current checkpoint to finish before interrupting.")
       checkpoint_manager.wait_until_finished()
-    max_logging.log("Checkpoint save completed. Interrupting")
+      max_logging.log("Checkpoint save completed.")
+      
+    max_logging.log("Interrupting training for Elastic Scale Up...")
     raise manager.ScaleUpSignalError()

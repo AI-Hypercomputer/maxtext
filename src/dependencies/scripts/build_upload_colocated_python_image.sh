@@ -50,7 +50,7 @@ done
 
 # Set default values using parameter expansion.
 : "${PROJECT:=cloud-tpu-multipod-dev}"
-: "${LOCAL_IMAGE_NAME:=maxtext-colocated-python}"
+: "${LOCAL_IMAGE_NAME:=rr-dag-colocated-python}"
 : "${IMAGE_LOCATION:=gcr.io/${PROJECT}/${USER}_${LOCAL_IMAGE_NAME}:latest}"
 
 echo "$(date): Building and pushing MaxText Colocated Python image..."
