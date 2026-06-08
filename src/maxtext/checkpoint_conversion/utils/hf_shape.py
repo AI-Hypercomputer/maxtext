@@ -1013,6 +1013,7 @@ def QWEN3_5_MOE_HF_WEIGHTS_TO_SHAPE(config):
   linear_key_head_dim = tcfg["linear_key_head_dim"]
   linear_num_key_heads = tcfg["linear_num_key_heads"]
   linear_num_value_heads = tcfg["linear_num_value_heads"]
+  linear_value_head_dim = tcfg.get("linear_value_head_dim", head_dim)
   moe_intermediate_size = tcfg["moe_intermediate_size"]
   shared_expert_intermediate_size = tcfg["shared_expert_intermediate_size"]
   cycle_interval = tcfg["full_attention_interval"]
@@ -1021,7 +1022,7 @@ def QWEN3_5_MOE_HF_WEIGHTS_TO_SHAPE(config):
   kv_dim = num_key_value_heads * head_dim
 
   linear_k_dim = linear_num_key_heads * linear_key_head_dim
-  linear_v_dim = linear_num_value_heads * head_dim
+  linear_v_dim = linear_num_value_heads * linear_value_head_dim
   conv_dim = 2 * linear_k_dim + linear_v_dim
   qkvz_dim = 2 * linear_k_dim + 2 * linear_v_dim
   ba_dim = 2 * linear_num_value_heads
