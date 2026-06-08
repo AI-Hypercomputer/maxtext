@@ -3254,7 +3254,7 @@ def QWEN3_5_MOE_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=
         )
   else:
     for i in range(n_layers):
-      prefix = f"params-decoder-layers-layer_{i}"
+      prefix = f"params-decoder-layers_{i}"
       hf_prefix = f"{text_base}.layers.{i}"
 
       # Common layer norms
@@ -3406,7 +3406,7 @@ def QWEN3_5_MOE_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=
       hooks[f"{prefix}-mlp-routed_experts-wo"] = reshape_moe_wo
   else:
     for i in range(n_layers):
-      prefix = f"params-decoder-layers-layer_{i}"
+      prefix = f"params-decoder-layers_{i}"
       hooks[f"{prefix}-input_layernorm-scale"] = scale_rmsnorm_layer
       hooks[f"{prefix}-post_attention_layernorm-scale"] = scale_rmsnorm_layer
 
