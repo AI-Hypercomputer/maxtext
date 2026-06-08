@@ -996,12 +996,104 @@ def MIXTRAL_HF_WEIGHTS_TO_SHAPE(config):
   return shapes
 
 
+def QWEN3_5_MOE_HF_WEIGHTS_TO_SHAPE(config):
+  """Returns mapping between HuggingFace Qwen3.5 MoE weights path and their shape."""
+  tcfg = config.get("text_config", config)
+  vcfg = config.get("vision_config", {})
+  text_base = "model.language_model" if vcfg else "model"
+
+  hidden_size = tcfg["hidden_size"]
+  num_hidden_layers = tcfg["num_hidden_layers"]
+  vocab_size = tcfg["vocab_size"]
+  num_attention_heads = tcfg["num_attention_heads"]
+  num_key_value_heads = tcfg["num_key_value_heads"]
+  num_experts = tcfg["num_experts"]
+  head_dim = tcfg["head_dim"]
+  linear_conv_kernel_dim = tcfg["linear_conv_kernel_dim"]
+  linear_key_head_dim = tcfg["linear_key_head_dim"]
+  linear_num_key_heads = tcfg["linear_num_key_heads"]
+  linear_num_value_heads = tcfg["linear_num_value_heads"]
+  moe_intermediate_size = tcfg["moe_intermediate_size"]
+  shared_expert_intermediate_size = tcfg["shared_expert_intermediate_size"]
+  cycle_interval = tcfg["full_attention_interval"]
+
+  q_dim = num_attention_heads * head_dim
+  kv_dim = num_key_value_heads * head_dim
+
+  linear_k_dim = linear_num_key_heads * linear_key_head_dim
+  linear_v_dim = linear_num_value_heads * head_dim
+  conv_dim = 2 * linear_k_dim + linear_v_dim
+  qkvz_dim = 2 * linear_k_dim + 2 * linear_v_dim
+  ba_dim = 2 * linear_num_value_heads
+
+  mapping = {
+      f"{text_base}.embed_tokens.weight": [vocab_size, hidden_size],
+      f"{text_base}.norm.weight": [hidden_size],
+  }
+
+  for layer_idx in range(num_hidden_layers):
+    layer_prefix = f"{text_base}.layers.{layer_idx}"
+
+    mapping[f"{layer_prefix}.input_layernorm.weight"] = [hidden_size]
+    mapping[f"{layer_prefix}.post_attention_layernorm.weight"] = [hidden_size]
+
+    is_full_attention_layer = (layer_idx + 1) % cycle_interval == 0
+
+    if is_full_attention_layer:
+      mapping.update(
+          {
+              f"{layer_prefix}.self_attn.q_proj.weight": [2 * q_dim, hidden_size],
+              f"{layer_prefix}.self_attn.k_proj.weight": [kv_dim, hidden_size],
+              f"{layer_prefix}.self_attn.v_proj.weight": [kv_dim, hidden_size],
+              f"{layer_prefix}.self_attn.o_proj.weight": [hidden_size, q_dim],
+              f"{layer_prefix}.self_attn.q_norm.weight": [head_dim],
+              f"{layer_prefix}.self_attn.k_norm.weight": [head_dim],
+          }
+      )
+    else:
+      mapping.update(
+          {
+              f"{layer_prefix}.linear_attn.in_proj_qkvz.weight": [qkvz_dim, hidden_size],
+              f"{layer_prefix}.linear_attn.in_proj_ba.weight": [ba_dim, hidden_size],
+              f"{layer_prefix}.linear_attn.conv1d.weight": [conv_dim, 1, linear_conv_kernel_dim],
+              f"{layer_prefix}.linear_attn.A_log": [linear_num_value_heads],
+              f"{layer_prefix}.linear_attn.dt_bias": [linear_num_value_heads],
+              f"{layer_prefix}.linear_attn.norm.weight": [head_dim],
+              f"{layer_prefix}.linear_attn.out_proj.weight": [hidden_size, linear_v_dim],
+          }
+      )
+
+    # MLP logic: experts are fused, shared experts are separate
+    mapping.update(
+        {
+            f"{layer_prefix}.mlp.gate.weight": [num_experts, hidden_size],
+            f"{layer_prefix}.mlp.shared_expert.gate_proj.weight": [shared_expert_intermediate_size, hidden_size],
+            f"{layer_prefix}.mlp.shared_expert.up_proj.weight": [shared_expert_intermediate_size, hidden_size],
+            f"{layer_prefix}.mlp.shared_expert.down_proj.weight": [hidden_size, shared_expert_intermediate_size],
+            f"{layer_prefix}.mlp.shared_expert_gate.weight": [1, hidden_size],
+        }
+    )
+
+    if num_experts > 1:
+      # Fused Experts
+      mapping.update(
+          {
+              f"{layer_prefix}.mlp.experts.gate_up_proj": [num_experts, 2 * moe_intermediate_size, hidden_size],
+              f"{layer_prefix}.mlp.experts.down_proj": [num_experts, hidden_size, moe_intermediate_size],
+          }
+      )
+
+  return mapping
+
+
 # {maxtext model name: {hf weight name: hf shape}}
 HF_SHAPE = {
+    "qwen3.5-35b-a3b": QWEN3_5_MOE_HF_WEIGHTS_TO_SHAPE,
     "gemma2-2b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
     "gemma2-9b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
     "gemma2-27b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
     "gemma3-4b": GEMMA3_HF_WEIGHTS_TO_SHAPE,
+
     "gemma3-12b": GEMMA3_HF_WEIGHTS_TO_SHAPE,
     "gemma3-27b": GEMMA3_HF_WEIGHTS_TO_SHAPE,
     "gemma4-26b": GEMMA4_HF_WEIGHTS_TO_SHAPE,
