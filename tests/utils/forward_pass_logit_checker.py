@@ -434,7 +434,6 @@ def main(config, test_args):  # pylint: disable=W0621
     hf_model = AutoModelForCausalLM.from_pretrained(
         test_args.hf_model_path, dtype=torch_dtype, token=hf_token, trust_remote_code=test_args.trust_remote_code
     )
-
     hf_lora_path = config.hf_lora_adapter_path
     if hf_lora_path:
       max_logging.log(f"Loading HF PEFT LoRA adapter from {hf_lora_path}")
