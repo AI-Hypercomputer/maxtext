@@ -50,6 +50,23 @@ from maxtext.common.gcloud_stub import jetstream, is_decoupled
 from maxtext.common.common_types import MODEL_MODE_PREFILL, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE
 
 config_lib, engine_api, token_utils, tokenizer_api, _token_params_ns = jetstream()
+
+# Monkeypatch HuggingFaceTokenizer to handle empty access_token correctly in JetStream
+if not getattr(token_utils, "_IS_STUB", False):
+  original_hf_init = token_utils.HuggingFaceTokenizer.__init__
+  def patched_hf_init(self, metadata, *args, **kwargs):
+    if hasattr(metadata, "access_token") and metadata.access_token == "":
+      class MetadataProxy:
+        def __init__(self, orig):
+          self._orig = orig
+        def __getattr__(self, name):
+          val = getattr(self._orig, name)
+          if name == "access_token" and val == "":
+            return None
+          return val
+      metadata = MetadataProxy(metadata)
+    original_hf_init(self, metadata, *args, **kwargs)
+  token_utils.HuggingFaceTokenizer.__init__ = patched_hf_init
 TokenizerParameters = getattr(_token_params_ns, "TokenizerParameters", object)  # type: ignore[assignment]
 TokenizerType = getattr(_token_params_ns, "TokenizerType", object)  # type: ignore[assignment]
 
