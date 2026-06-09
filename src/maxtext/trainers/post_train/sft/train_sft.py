@@ -225,6 +225,16 @@ def use_maxtext_loss_function(trainer, mt_config):
   return trainer
 
 
+def validate_config(config):
+  """Validates the configuration parameters for SFT training."""
+  if config.optimizer_memory_host_offload:
+    raise ValueError(
+        "optimizer_memory_host_offload=True is not supported on the post-training "
+        "SFT path because the underlying Tunix PeftTrainer does not support "
+        "host offloading of the optimizer state."
+    )
+
+
 def setup_trainer_state(mt_config, goodput_recorder=None):
   """Set up prerequisites for training loop."""
   tunix_config = get_tunix_config(mt_config)
@@ -299,6 +309,7 @@ def main(argv: Sequence[str]) -> None:
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 
   mt_config = pyconfig.initialize_pydantic(argv)
+  validate_config(mt_config)
   max_utils.print_system_information()
 
   goodput_recorder = create_goodput_recorder(mt_config)

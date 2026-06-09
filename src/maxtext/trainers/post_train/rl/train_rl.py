@@ -595,17 +595,28 @@ def rl_train(argv: Sequence[str], kwargs: dict):
     _rl_train_impl(argv, kwargs)
 
 
+def validate_config(config):
+  """Validates the configuration parameters for RL training."""
+  if config.optimizer_memory_host_offload:
+    raise ValueError(
+        "optimizer_memory_host_offload=True is not supported on the post-training "
+        "RL path because the underlying Tunix RLCluster/Trainer does not "
+        "support host offloading of the optimizer state."
+    )
+
+  if config.num_vocab_tiling > 1:
+    raise ValueError(
+        f"Vocab Tiling is not supported with RL. "
+        f"num_vocab_tiling was configured to {config.num_vocab_tiling}, but it must be 1 when running train_rl."
+    )
+
+
 def _rl_train_impl(argv: Sequence[str], kwargs: dict):
   """rl_train body — kept separate so _tpu_inference_compat_patches wraps it cleanly."""
   trainer_config, sampler_config, trainer_devices, sampler_devices = model_creation_utils.setup_configs_and_devices(
       argv, kwargs
   )
-
-  if trainer_config.num_vocab_tiling > 1:
-    raise ValueError(
-        f"Vocab Tiling is not supported with RL. "
-        f"num_vocab_tiling was configured to {trainer_config.num_vocab_tiling}, but it must be 1 when running train_rl."
-    )
+  validate_config(trainer_config)
 
   # Create model tokenizer first so we can plumb its pad_id into the model
   # adapter (used to synthesize segment_ids that mask pad positions from
