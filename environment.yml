@@ -1,0 +1,24 @@
+name: maxtext-eval
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      # Evaluation harness (MMLU, GSM8K, GPQA, etc.)
+      - lm_eval>=0.4.4
+      # Model loading and tokenization
+      - transformers>=4.45.0
+      - torch>=2.3.0
+      - accelerate>=0.34.0
+      - sentencepiece
+      # Datasets and HuggingFace hub
+      - datasets>=2.19.0
+      - huggingface_hub>=0.23.0
+      # Framework utilities
+      - pyyaml>=6.0
+      - requests>=2.31.0
+      - aiohttp>=3.9.0
+      - fastapi>=0.110.0
+      - uvicorn[standard]>=0.29.0

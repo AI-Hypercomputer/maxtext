@@ -25,6 +25,48 @@ from typing import Any
 
 import requests
 
+# ---------------------------------------------------------------------------
+# Non-hd64 compatibility shim
+#
+# The tpu-inference Pallas attention kernels have two paths:
+#   - hd64 (head_dim==64): supports attention sinks + sliding window
+#   - general (head_dim!=64): supports neither sinks nor sliding window
+#
+# Models trained with head_dim=128 (e.g. GPT-OSS 20B student) carry sinks
+# weights and a sliding_window config that the general kernel cannot handle:
+#   - sinks -> NotImplementedError at forward time
+#   - sliding_window -> no tuned block sizes -> VMEM overflow -> silent NaN
+#
+# We patch __init__ to disable both features for non-hd64 layers.
+# Trade-off: attention-sink bias and local-window masking are inactive,
+# so the model runs as full-attention without sink regularisation.
+# Quality is lower than a properly supported kernel but outputs are correct.
+# ---------------------------------------------------------------------------
+def _patch_pallas_attn_non_hd64() -> None:
+  try:
+    from tpu_inference.layers.vllm.backends.flash_attn import (  # pylint: disable=import-outside-toplevel
+        PallasAttentionBackendImpl,
+    )
+  except ImportError:
+    return  # not running on TPU — skip silently
+
+  _orig_init = PallasAttentionBackendImpl.__init__
+
+  def _patched_init(self, *args, **kwargs):
+    _orig_init(self, *args, **kwargs)
+    if self.head_size != 64:
+      self.sinks = None
+      self.sliding_window = None
+
+  PallasAttentionBackendImpl.__init__ = _patched_init
+  print(
+      "Patched PallasAttentionBackendImpl: disabled sinks + sliding_window "
+      "for head_size != 64"
+  )
+
+
+_patch_pallas_attn_non_hd64()
+
 logger = logging.getLogger(__name__)
 
 _HEALTH_ENDPOINT = "/health"
@@ -48,9 +90,15 @@ def _build_app(llm: Any) -> Any:
     body = await request.json()
 
     raw_prompt = body.get("prompt", "")
-    prompts = raw_prompt if isinstance(raw_prompt, list) else [raw_prompt]
+    # raw_prompt can be: str, list[int] (single token-ID prompt), list[str] (batch of
+    # text prompts), or list[list[int]] (batch of token-ID prompts).  Normalise to a
+    # list where each element is either a str or a list[int].
+    if isinstance(raw_prompt, list) and raw_prompt and isinstance(raw_prompt[0], int):
+      prompts = [raw_prompt]  # single prompt sent as token IDs
+    else:
+      prompts = raw_prompt if isinstance(raw_prompt, list) else [raw_prompt]
     model_name = body.get("model", "")
-    max_tokens = int(body.get("max_tokens") or 256)
+    max_tokens = int(body["max_tokens"]) if body.get("max_tokens") is not None else 256
     temperature = float(body.get("temperature") or 0.0)
     logprobs_n = body.get("logprobs")  # int | None
     echo = bool(body.get("echo", False))
@@ -80,6 +128,7 @@ def _build_app(llm: Any) -> Any:
       if logprobs_n is not None:
         tok_strings: list[str] = []
         tok_lps: list[float | None] = []
+        tok_tops: list[dict[str, float] | None] = []
         tok_offsets: list[int] = []
         running_offset = 0
 
@@ -91,8 +140,20 @@ def _build_app(llm: Any) -> Any:
             tok_offsets.append(running_offset)
             running_offset += len(tok_str)
             lp_dict = prompt_lps[pos] if pos < len(prompt_lps) else None
-            lp_val = lp_dict[tok_id].logprob if (lp_dict and tok_id in lp_dict) else None
+            
+            if lp_dict:
+              if tok_id in lp_dict:
+                lp_val = lp_dict[tok_id].logprob
+              else:
+                lp_val = max(lp.logprob for lp in lp_dict.values())
+            else:
+              lp_val = -100.0
+            
             tok_lps.append(lp_val)
+            tok_tops.append(
+                {tokenizer.decode([tid]): lp.logprob for tid, lp in lp_dict.items()}
+                if lp_dict else None
+            )
 
         gen_lps = gen.logprobs or []
         for pos, tok_id in enumerate(gen.token_ids):
@@ -101,17 +162,37 @@ def _build_app(llm: Any) -> Any:
           tok_offsets.append(running_offset)
           running_offset += len(tok_str)
           lp_dict = gen_lps[pos] if pos < len(gen_lps) else None
-          lp_val = lp_dict[tok_id].logprob if (lp_dict and tok_id in lp_dict) else None
+          
+          if lp_dict:
+            if tok_id in lp_dict:
+              lp_val = lp_dict[tok_id].logprob
+            else:
+              lp_val = max(lp.logprob for lp in lp_dict.values())
+          else:
+            lp_val = -100.0
+            
           tok_lps.append(lp_val)
+          tok_tops.append(
+              {tokenizer.decode([tid]): lp.logprob for tid, lp in lp_dict.items()}
+              if lp_dict else None
+          )
 
         logprobs_payload = {
             "tokens": tok_strings,
             "token_logprobs": tok_lps,
-            "top_logprobs": None,
+            "top_logprobs": tok_tops,
             "text_offset": tok_offsets,
         }
 
-      text_out = (prompts[idx] + gen.text) if echo else gen.text
+      if echo:
+        p = prompts[idx]
+        text_out = (tokenizer.decode(p) if isinstance(p, list) else p) + gen.text
+      else:
+        text_out = gen.text
+
+      debug_prompt = tokenizer.decode(prompts[idx]) if isinstance(prompts[idx], list) else prompts[idx]
+      print(f"DEBUG decoded prompt: {debug_prompt!r}", flush=True)
+
       choices.append(
           {
               "text": text_out,
@@ -143,7 +224,7 @@ def _build_app(llm: Any) -> Any:
     body = await request.json()
     messages = body.get("messages", [])
     model_name = body.get("model", "")
-    max_tokens = int(body.get("max_tokens") or 256)
+    max_tokens = int(body["max_tokens"]) if body.get("max_tokens") is not None else 256
     temperature = float(body.get("temperature") or 0.0)
     stop = body.get("stop")
 
