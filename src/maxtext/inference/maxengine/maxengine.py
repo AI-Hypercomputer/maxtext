@@ -536,7 +536,6 @@ class MaxEngine(_BaseEngine):
     else:
       lora_utils.unapply_lora_from_base_params(base_params, adapter_params, lora_scale_factor)
 
-
   def _maybe_stack_prefill_result_cache(self, cache):
     """Stack the caches across the layers."""
     if not self.config.stack_prefill_result_cache:
