@@ -162,7 +162,7 @@ jobs:
             # Dynamically discover the 'nvidia' folder and prepend all its sub-library
             # directories (including nccl, cublas, cudnn) to LD_LIBRARY_PATH to prevent
             # JAX from partially loading incompatible system-level CUDA libraries.
-            NVIDIA_DIR=$(find -L .venv -name "nvidia" -type d 2>/dev/null | head -n 1)
+            NVIDIA_DIR=$(find -L .venv -path "*/site-packages/nvidia" -type d 2>/dev/null | head -n 1)
             echo "=== GPU Diagnostics ==="
             echo "Found NVIDIA_DIR: ${NVIDIA_DIR}"
             if [ -n "${NVIDIA_DIR}" ]; then
