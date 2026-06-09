@@ -122,7 +122,7 @@ class MaxEngine(_BaseEngine):
       # quant enabled we stay in `train` mode and let AQT quantize per-forward
       # against the full-precision kernel — same numerical result as `serve`
       # for absmax calibration, just slower.
-      nnx_quant_mode_str = "serve" if (quant is not None and config.checkpoint_is_quantized) else "train"
+      nnx_quant_mode_str = "serve" if (config.quantization and config.checkpoint_is_quantized) else "train"
       # We need both PREFILL and AR abstract models because the cache vars inherit
       # CACHE_BATCH_PREFILL vs CACHE_BATCH from the construction model_mode, and
       # bulk_insert searches for the substring "cache_batch" in the AR-mode names.
@@ -384,8 +384,6 @@ class MaxEngine(_BaseEngine):
 
   def _load_params_nnx(self, params, rng):
     """NNX equivalent of load_params: returns an nnx.Param state and populates KV cache shardings."""
-    if self.config.quantization:
-      raise NotImplementedError("pure_nnx + quantization not yet supported. Use pure_nnx=False.")
 
     if params:
       print("Resharding given NNX params")
