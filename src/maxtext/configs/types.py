@@ -514,7 +514,8 @@ class ModelArchitecture(BaseModel):
 
   layer_configs: Optional[dict[int, dict[str, Any]]] = Field(
       None,
-      description="Per-layer parameter overrides(scan mode only now), by specific absolute layer indices. (e.g. {0: {'attention_type': 'global'}}).",
+      description="Per-layer parameter overrides(scan mode only now), "
+      "by specific absolute layer indices. (e.g. {0: {'attention_type': 'global'}}).",
   )
 
 
@@ -1369,8 +1370,7 @@ class Distillation(BaseModel):
   blockwise_distill: bool = Field(
       False,
       description="Enables blockwise parallel disitllaion mode.",
-  )  
-
+  )
 
 
 class TrainingLoop(BaseModel):

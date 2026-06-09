@@ -258,7 +258,6 @@ class NNXDecoder(nnx.Module):
     self.quant = quant
     self.model_mode = model_mode
     self.rngs = rngs
-    # breakpoint()
     decoder_block_classes = self.get_decoder_layers()
 
     if config.trainable_position_size > 0:

@@ -169,11 +169,10 @@ class LlamaDecoderLayer(nnx.Module):
     # Override attention module inputs if teacher activations are injected
     attn_q = injected_attention_inputs if injected_attention_inputs is not None else lnx
     attn_kv = injected_attention_inputs if injected_attention_inputs is not None else lnx
-    
 
     # Self-attention block
     attention_lnx, kv_cache = self.self_attention(
-      	attn_q,
+        attn_q,
         attn_kv,
         decoder_positions,
         decoder_segment_ids=decoder_segment_ids,

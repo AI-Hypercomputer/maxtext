@@ -169,7 +169,9 @@ def create_forward_fn(config: pyconfig.HyperParameters) -> Callable[..., distill
         moe_lb_loss = jnp.mean(jnp.concatenate(total_moe_lb_losses))
 
     retval = distillation_utils.DistillationForwardOutput(
-        logits=logits, out_projection_activations=out_projection_activations, moe_lb_loss=moe_lb_loss,
+        logits=logits,
+        out_projection_activations=out_projection_activations,
+        moe_lb_loss=moe_lb_loss,
         attention_inputs=attention_inputs,
     )
     return retval
@@ -315,7 +317,6 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
           cache=None,
       )
     teacher_output = jax.tree.map(jax.lax.stop_gradient, teacher_output)
-    #breakpoint()
     # Split student into differentiable params and non-differentiable rest.
     # Capture graphdef outside of jax.value_and_grad for stable graph tracking.
     student_graphdef, diff_params, rest = nnx.split(student, self.wrt_filter, ...)
@@ -706,8 +707,6 @@ def train_distill(
       _log_config_details(teacher_config, "Teacher")
       teacher_model = get_maxtext_model(teacher_config, mesh)
       teacher_model.eval()
-      # breakpoint()
-      # breakpoint()
 
     # LTI phase needs the student initialization step to know about the teacher configuration
     student_config.get_keys()["teacher_config"] = teacher_config
@@ -909,11 +908,11 @@ def main(argv: Sequence[str]) -> None:
   teacher_overrides = global_config.teacher_overrides
 
   # Ensure load_parameters_path is set in overrides
-  # if not is_offline and not teacher_overrides.get("load_parameters_path"):
-  #  raise ValueError(
-  #      "Teacher model path is missing! You must provide 'teacher_overrides.load_parameters_path' "
-  #      "in your config or arguments."
-  #  )
+  if not is_offline and not teacher_overrides.get("load_parameters_path"):
+    raise ValueError(
+        "Teacher model path is missing! You must provide 'teacher_overrides.load_parameters_path' "
+        "in your config or arguments."
+    )
 
   # Construct sanitized argv: [script_name, config_file]
   # This ensures flags like `num_query_heads=16` passed in CLI don't affect the Teacher.

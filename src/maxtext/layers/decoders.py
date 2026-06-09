@@ -1003,7 +1003,7 @@ class Decoder(nn.Module):
           )
         else:
           RemattedBlockLayer = RemattedBlockLayers[0]
-          # scan_length = int(cfg.num_decoder_layers / cfg.inhomogeneous_layer_cycle_interval)
+          scan_length = int(cfg.num_decoder_layers / cfg.inhomogeneous_layer_cycle_interval)
           layer_kwargs = {}
           if cfg.decoder_block == DecoderBlockType.LLAMA4:
             layer_kwargs = {
@@ -1051,13 +1051,15 @@ class Decoder(nn.Module):
             # Fallback to old behavior if kv_caches is None (not vLLM RPA)
             RemattedBlockLayer = RemattedBlockLayers[0]
             if injected_attention_inputs is not None:
-              #Append injected_attention_inputs as the 10th positional argument
+              # Append injected_attention_inputs as the 10th positional argument
               current_broadcast_args.extend([None, None, None, None, injected_attention_inputs])
               current_in_axes_tuple.extend([nn.broadcast] * 4 + [0])
             else:
-              current_broadcast_args.append(None) # previous_chunk decoder's call() argument
+              current_broadcast_args.append(None)  # previous_chunk decoder's call() argument
               current_in_axes_tuple.append(nn.broadcast)
-            y = self._apply_standard_scanned_blocks(y, current_broadcast_args, tuple(current_in_axes_tuple), RemattedBlockLayer, model_mode)                        
+            y = self._apply_standard_scanned_blocks(
+                y, current_broadcast_args, tuple(current_in_axes_tuple), RemattedBlockLayer, model_mode
+            )
 
       else:
         if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
@@ -1155,7 +1157,7 @@ class Decoder(nn.Module):
               layer_pydantic_cfg = cfg._pydantic_config.model_copy(update=layer_override)
               layer_cfg = pyconfig.HyperParameters(layer_pydantic_cfg)
 
-            current_injected_attn = injected_attention_inputs[lyr] if injected_attention_inputs is not None else None  
+            current_injected_attn = injected_attention_inputs[lyr] if injected_attention_inputs is not None else None
 
             layer = RemattedBlockLayer(
                 config=layer_cfg,
@@ -1462,7 +1464,9 @@ class Decoder(nn.Module):
 
     return y
 
-  def _apply_standard_scanned_blocks(self, y, broadcast_args, in_axes_tuple,RemattedBlockLayer, model_mode, layer_kwargs={}):
+  def _apply_standard_scanned_blocks(
+      self, y, broadcast_args, in_axes_tuple, RemattedBlockLayer, model_mode, layer_kwargs={}
+  ):
     """Applies standard scanned decoder blocks, handling possible per-layer overrides."""
     cfg = self.config
     mesh = self.mesh
@@ -1484,7 +1488,6 @@ class Decoder(nn.Module):
           **layer_kwargs,
       )(y, *broadcast_args)
     else:
-      # breakpoint()
       for next_override_idx in override_indices:
         if next_override_idx >= end_idx:
           break
@@ -1496,7 +1499,7 @@ class Decoder(nn.Module):
               cfg,
               RemattedBlockLayer,
               scan_length,
-              f"layers_{current_idx}_to_{next_override_idx - 1}",              
+              f"layers_{current_idx}_to_{next_override_idx - 1}",
               mesh,
               in_axes_tuple=in_axes_tuple,
               model_mode=model_mode,
@@ -1510,7 +1513,6 @@ class Decoder(nn.Module):
         # combined_kwargs["layer_idx"] = current_idx
         layer_pydantic_cfg = cfg._pydantic_config.model_copy(update=layer_override)
         layer_cfg = pyconfig.HyperParameters(layer_pydantic_cfg)
-        # breakpoint()
 
         layer = RemattedBlockLayer(
             config=layer_cfg,
