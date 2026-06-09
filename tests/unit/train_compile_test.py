@@ -950,6 +950,7 @@ class TrainCompile(parameterized.TestCase):
             "use_random_routing=true",
             "max_target_length=128",
             "pipeline_fsdp_ag_per_repeat=true",
+            "pipeline_save_decoder_layer_input=false",
         )
     )
 
