@@ -22,6 +22,7 @@ import unittest
 from flax import linen as nn
 from flax import nnx
 from flax.core import meta
+from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
@@ -52,8 +53,26 @@ def _adapt_parallelism(args, pipeline_stages=4):
       args.append(f"ici_data_parallelism={data_par}")
 
 
-def assert_same_output_and_grad(f1, f2, *inputs):
-  """check that the output and gradient are the same"""
+def assert_same_output_and_grad(
+    f1,
+    f2,
+    *inputs,
+    value_rtol=1e-2,
+    value_atol=1e-2,
+    grad_rtol=1e-1,
+    grad_atol=1e-1,
+):
+  """check that the output and gradient are the same.
+
+  Args:
+    f1: Reference scalar-loss function (e.g. sequential layers).
+    f2: Function under test (e.g. the pipeline).
+    *inputs: Inputs forwarded to both `f1` and `f2`.
+    value_rtol: Relative tolerance for the scalar loss comparison.
+    value_atol: Absolute tolerance for the scalar loss comparison.
+    grad_rtol: Relative tolerance for the flattened gradient comparison.
+    grad_atol: Absolute tolerance for the flattened gradient comparison.
+  """
   f1_value, f1_grad = jax.value_and_grad(f1)(*inputs)
   f2_value, f2_grad = jax.value_and_grad(f2)(*inputs)
 
@@ -65,8 +84,23 @@ def assert_same_output_and_grad(f1, f2, *inputs):
   f1_grad = pytree_ravel(f1_grad)
   f2_grad = pytree_ravel(f2_grad)
 
-  assert jax.numpy.allclose(f1_value, f2_value, rtol=1e-2, atol=1e-2, equal_nan=False)
-  assert jax.numpy.allclose(f1_grad, f2_grad, rtol=1e-1, atol=1e-1, equal_nan=False)
+  # Forward correctness.
+  assert jax.numpy.allclose(f1_value, f2_value, rtol=value_rtol, atol=value_atol, equal_nan=False)
+  # Backward correctness: gradients must have matching shape, be finite, and be
+  # numerically close within the (configurable) tolerance.
+  assert f1_grad.shape == f2_grad.shape, f"gradient shape mismatch: {f1_grad.shape} vs {f2_grad.shape}"
+  assert jnp.all(jnp.isfinite(f1_grad)) and jnp.all(jnp.isfinite(f2_grad)), "gradients contain non-finite values"
+  # Equivalent to jnp.allclose(f1_grad, f2_grad, rtol=grad_rtol, atol=grad_atol)
+  # but reports actionable diagnostics (violation count and max deviation) on
+  # failure, so tolerances can be set from measured data rather than guessed.
+  abs_diff = jnp.abs(f1_grad - f2_grad)
+  tolerance = grad_atol + grad_rtol * jnp.abs(f2_grad)
+  num_violations = int(jnp.sum(abs_diff > tolerance))
+  assert num_violations == 0, (
+      f"gradient mismatch: {num_violations} of {f1_grad.size} entries exceed atol={grad_atol} + rtol={grad_rtol} * |grad|."
+      f" max abs diff={float(jnp.max(abs_diff)):.6g} (flat index {int(jnp.argmax(abs_diff))}),"
+      f" max |grad|={float(jnp.max(jnp.abs(f2_grad))):.6g}"
+  )
 
 
 @pytest.mark.integration_test
@@ -75,8 +109,25 @@ class PipelineParallelismTest(unittest.TestCase):
   base_output_directory = get_test_base_output_directory()
   dataset_path = get_test_dataset_path()
 
-  def assert_pipeline_same_output_and_grad(self, config, single_pipeline_stage_class=None):
-    """check that the output and gradient are the same"""
+  def assert_pipeline_same_output_and_grad(
+      self,
+      config,
+      single_pipeline_stage_class=None,
+      grad_rtol=1e-1,
+      grad_atol=1e-1,
+  ):
+    """check that the output and gradient of the pipeline match a sequential reference.
+
+    Args:
+      config: The resolved MaxText config for the run.
+      single_pipeline_stage_class: Optional Linen/NNX layer class to use as the
+        per-stage module. Defaults to a `SimpleDecoderLayer` for fast tests.
+      grad_rtol: Relative tolerance for the gradient comparison. Looser values
+        are needed for collectives such as `ragged_all_to_all` whose custom_vjp
+        backward is not bit-reproducible across the pipeline and sequential
+        execution paths.
+      grad_atol: Absolute tolerance for the gradient comparison.
+    """
     devices_array = maxtext_utils.create_device_mesh(config)
     mesh = Mesh(devices_array, config.mesh_axes)
     model_mode = MODEL_MODE_TRAIN
@@ -114,25 +165,20 @@ class PipelineParallelismTest(unittest.TestCase):
         config.global_batch_size_to_train_on, config.max_target_length, config.emb_dim
     )
     deterministic = True
-    # We use a simpler single matmul decoder layer for fast compilation in these tests.
-    rngs = nnx.Rngs(params=0)
-    single_pipeline_stage = simple_layer.SimpleDecoderLayerToLinen(
-        config=config, mesh=mesh, model_mode=model_mode, rngs=rngs
-    )
     my_pipeline = pipeline.create_pipeline(config=config, layers=single_pipeline_stage, mesh=mesh)
     init_pipeline_params = my_pipeline.init(
-        jax.random.PRNGKey(0), inputs, inputs_position, inputs_segmentation, deterministic, model_mode
+        jax.random.PRNGKey(0), inputs, inputs_segmentation, inputs_position, deterministic, model_mode
     )
     logical_partition_spec = my_pipeline.get_weight_sharding(
-        inputs, inputs_position, inputs_segmentation, deterministic, model_mode
+        inputs, inputs_segmentation, inputs_position, deterministic, model_mode
     )
 
     # Create a dummy scalar loss function so we may take the gradient wrt weights
     def pipeline_parallelism_dummy_loss_extra(
         params,
         inputs,
-        inputs_position,
         inputs_segmentation,
+        inputs_position,
         deterministic,
         model_mode,
         dummy_targets,
@@ -141,8 +187,8 @@ class PipelineParallelismTest(unittest.TestCase):
       outputs = my_pipeline.apply(
           params,
           inputs,
-          inputs_position,
           inputs_segmentation,
+          inputs_position,
           deterministic,
           model_mode,
           logical_partition_spec=logical_partition_spec,
@@ -154,7 +200,7 @@ class PipelineParallelismTest(unittest.TestCase):
         pipeline_parallelism_dummy_loss_extra, logical_partition_spec=logical_partition_spec
     )
 
-    def regular_sequential_layers(params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode):
+    def regular_sequential_layers(params, inputs, inputs_segmentation, inputs_position, deterministic, model_mode):
       def get_cur_layer_params(params, layer_idx):
         def get_cur_layer_params_arr(leaf):
           # Reshape layers into a linear list of layers, e.g. [repeat, stage] into [layers]
@@ -181,28 +227,35 @@ class PipelineParallelismTest(unittest.TestCase):
           )
           cur_layer_params["params"] = meta.remove_axis(cur_layer_params["params"], 0, {nn.PARTITION_NAME: "layers"})
         reg_layer_activations, _ = single_pipeline_stage.apply(
-            cur_layer_params, reg_layer_activations, inputs_position, inputs_segmentation, deterministic, model_mode
+            cur_layer_params, reg_layer_activations, inputs_segmentation, inputs_position, deterministic, model_mode
         )
       return reg_layer_activations
 
     def regular_sequential_layers_dummy_loss(
-        params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode, dummy_targets
+        params, inputs, inputs_segmentation, inputs_position, deterministic, model_mode, dummy_targets
     ):
-      outputs = regular_sequential_layers(params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
+      outputs = regular_sequential_layers(params, inputs, inputs_segmentation, inputs_position, deterministic, model_mode)
       loss = jnp.linalg.norm(outputs - dummy_targets)
       return loss
 
-    assert_same_output_and_grad(
-        regular_sequential_layers_dummy_loss,
-        pipeline_parallelism_dummy_loss,
-        init_pipeline_params,
-        inputs,
-        inputs_segmentation,
-        inputs_position,
-        deterministic,
-        model_mode,
-        dummy_targets,
-    )
+    # Establish the device mesh and logical axis rules so that any sharded
+    # collectives used inside the stage (e.g. `ragged_all_to_all` on the
+    # dropless DeepSeek MoE expert-parallel path) can resolve their mesh axis
+    # names. Non-expert-parallel stages simply ignore these rules.
+    with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
+      assert_same_output_and_grad(
+          regular_sequential_layers_dummy_loss,
+          pipeline_parallelism_dummy_loss,
+          init_pipeline_params,
+          inputs,
+          inputs_segmentation,
+          inputs_position,
+          deterministic,
+          model_mode,
+          dummy_targets,
+          grad_rtol=grad_rtol,
+          grad_atol=grad_atol,
+      )
 
   @pytest.mark.tpu_only
   def test_circular_minimum_microbatches_same_output_and_grad(self):
@@ -262,6 +315,53 @@ class PipelineParallelismTest(unittest.TestCase):
         base_mlp_dim=1024,
     )
     self.assert_pipeline_same_output_and_grad(config, single_pipeline_stage_class=deepseek.DeepSeekMoELayerToLinen)
+
+  @pytest.mark.tpu_only
+  def test_circular_deepseek_ra2a_ep_same_output_and_grad(self):
+    # DeepSeek dropless (capacity_factor=-1) expert parallelism dispatches
+    # tokens between expert shards with `ragged_all_to_all`. This test covers
+    # the interaction between that collective and the per-stage vmap performed
+    # by pipeline parallelism (see b/418313093).
+    #
+    # 2 pipeline stages x 2 expert-parallel shards = 4 devices.
+    config = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        enable_checkpointing=False,
+        enable_goodput_recording=False,
+        run_name="circular_deepseek_ra2a_ep",
+        dtype="float32",
+        weight_dtype="float32",
+        matmul_precision="high",
+        max_target_length=128,
+        base_emb_dim=256,
+        ici_pipeline_parallelism=2,
+        ici_expert_parallelism=2,
+        base_num_decoder_layers=4,
+        num_pipeline_microbatches=4,
+        per_device_batch_size=4,
+        num_experts=4,
+        num_experts_per_tok=2,
+        shared_experts=1,
+        megablox=True,
+        sparse_matmul=True,
+        capacity_factor=-1,
+        decoder_block="deepseek",
+        attention_type="mla",
+        base_moe_mlp_dim=256,
+        base_mlp_dim=256,
+    )
+    # The `ragged_all_to_all` custom_vjp backward is not bit-reproducible across
+    # the pipeline (vmapped, per-microbatch token grouping) and the sequential
+    # reference (full-batch token grouping). Gradients flowing through the
+    # routing gate/bias are therefore sensitive on borderline-routed tokens, so
+    # a looser tolerance is used here, consistent with the expert-parallel
+    # gradient tests in `tests/unit/moe_test.py`.
+    self.assert_pipeline_same_output_and_grad(
+        config,
+        single_pipeline_stage_class=deepseek.DeepSeekMoELayerToLinen,
+        grad_rtol=2e-1,
+        grad_atol=2e-1,
+    )
 
   @pytest.mark.tpu_only
   def test_circular_ag_once(self):
