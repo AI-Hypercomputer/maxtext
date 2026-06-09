@@ -88,6 +88,8 @@ class RouteOutput:
   lb_loss: Optional[jax.Array]
   # Dynamic bias updates for loss-free load balancing, used only for Deepseek models
   bias_updates: Optional[jax.Array]
+  # Shape [local experts], tracks number of local tokens routed to every local expert.
+  local_group_sizes: Optional[jax.Array] = None
 
 
 def _sort_activations(
@@ -785,9 +787,22 @@ class RoutedMoE(nnx.Module):
     # let local_permute()/local_unpermute apply the ragged kernels on the
     # local prefix of valid rows.
     use_ragged_in_permute = self.config.use_ragged_sort and self.config.use_ring_of_experts
+    buffer_size = None
     if use_ragged_in_permute:
       topk_indices_2d = jnp.reshape(selected_experts, (bsz_times_seq_len, selected_experts.shape[2]))
       # roll_to_expert_id is not directly used in the kernel, ep axis id is directly called
+      if self.config.ragged_buffer_factor > 0.0:
+        balanced_size = (bsz_times_seq_len // num_expert_parallelism) * self.num_experts_per_tok
+        buffer_size = self.get_ragged_buffer_size(
+            balanced_size,
+            num_expert_parallelism,
+            self.config.num_experts,
+            self.num_experts_per_tok,
+            self.config.ragged_buffer_factor,
+        )
+      else:
+        buffer_size = None
+
       sorted_inputs, group_size, sorted_selected_experts = ring_ragged_sort(
           inputs_2d,
           topk_indices_2d,
@@ -795,6 +810,7 @@ class RoutedMoE(nnx.Module):
           self.num_experts_per_tok,
           self._expert_parallelism_name,
           num_expert_parallelism,
+          buffer_size=buffer_size,
       )
     else:
       flatten_selected_experts = jnp.ravel(selected_experts)
@@ -808,13 +824,37 @@ class RoutedMoE(nnx.Module):
           self.dtype
       )
       group_size = jnp.bincount(flatten_selected_experts, length=self.num_experts)
-      # Return the experts for each sorted input.
-    expert_indices = jnp.arange(self.num_experts)
-    sorted_experts = jnp.repeat(
-        expert_indices,
-        repeats=group_size,
-        total_repeat_length=math.prod(selected_experts.shape),
-    )
+
+    # Return the experts for each sorted input.
+    local_num_experts = self.config.num_experts // num_expert_parallelism
+    shard_idx = jax.lax.axis_index(self._expert_parallelism_name) if num_expert_parallelism > 1 else 0
+    experts_start = shard_idx * local_num_experts
+
+    n = bsz_times_seq_len * self.num_experts_per_tok
+    is_buffering = use_ragged_in_permute and buffer_size is not None and buffer_size < n
+
+    if is_buffering:
+      local_group_size = jax.lax.dynamic_slice_in_dim(
+          group_size,
+          experts_start,
+          local_num_experts,
+          axis=0,
+      )
+      expert_indices = jnp.arange(local_num_experts)
+      sorted_experts = jnp.repeat(
+          expert_indices,
+          repeats=local_group_size,
+          total_repeat_length=buffer_size,
+      )
+    else:
+      local_group_size = None
+      expert_indices = jnp.arange(self.num_experts)
+      sorted_experts = jnp.repeat(
+          expert_indices,
+          repeats=group_size,
+          total_repeat_length=math.prod(selected_experts.shape),
+      )
+
     return (
         sorted_inputs,
         sorted_selected_experts,
@@ -823,6 +863,7 @@ class RoutedMoE(nnx.Module):
         sorted_experts,
         lb_loss,
         bias_updates,
+        local_group_size,
     )
 
   def unpermute(
@@ -1383,7 +1424,16 @@ class RoutedMoE(nnx.Module):
 
         # "Route" tokens within each shard.
         num_experts_per_shard = self.config.num_experts // num_ep
-        x, sorted_selected_experts, weights, group_sizes, selected_experts, lb_loss, bias_updates = self.permute(
+        (
+            x,
+            sorted_selected_experts,
+            weights,
+            group_sizes,
+            selected_experts,
+            lb_loss,
+            bias_updates,
+            local_group_sizes,
+        ) = self.permute(
             x,
             logits,
             pre_bias_logits,
@@ -1393,9 +1443,16 @@ class RoutedMoE(nnx.Module):
         )
 
       else:
-        x, sorted_selected_experts, weights, group_sizes, selected_experts, lb_loss, bias_updates = self.permute(
-            x, logits, pre_bias_logits, self.config.use_custom_sort_vjp, rngs
-        )
+        (
+            x,
+            sorted_selected_experts,
+            weights,
+            group_sizes,
+            selected_experts,
+            lb_loss,
+            bias_updates,
+            local_group_sizes,
+        ) = self.permute(x, logits, pre_bias_logits, self.config.use_custom_sort_vjp, rngs)
 
         if num_ep > 1:
           batch_axis = self._expert_parallelism_name if is_batch_sharded_by_expert else "data"
@@ -1460,6 +1517,7 @@ class RoutedMoE(nnx.Module):
               weights=weights,
               lb_loss=lb_loss,
               bias_updates=bias_updates,
+              local_group_sizes=local_group_sizes,
           ),
           RouteMetadata(
               expert_shard_id=expert_shard_id,
@@ -1566,14 +1624,29 @@ class RoutedMoE(nnx.Module):
 
       num_ep = self.get_expert_parallelism_size()
       num_experts_per_shard = self.config.num_experts // num_ep
-      if self.config.use_ragged_sort and self.config.use_ring_of_experts:
-        experts_start = route_metadata.expert_shard_id * num_experts_per_shard
-      else:
-        experts_start = 0
+      real_experts_start = route_metadata.expert_shard_id * num_experts_per_shard
 
-      gmm_fn = functools.partial(
-          gmm, group_sizes=routing.group_sizes, expert_assignments=routing.selected_experts, group_offset=experts_start
-      )
+      is_buffering = self.config.use_ring_of_experts and x.shape[0] < routing.sorted_selected_experts.shape[0]
+
+      if is_buffering:
+        local_group_sizes = routing.local_group_sizes
+        gmm_fn = functools.partial(
+            gmm,
+            group_sizes=local_group_sizes,
+            expert_assignments=routing.selected_experts,
+            group_offset=0,
+        )
+      else:
+        if self.config.use_ragged_sort and self.config.use_ring_of_experts:
+          experts_start = real_experts_start
+        else:
+          experts_start = 0
+        gmm_fn = functools.partial(
+            gmm,
+            group_sizes=routing.group_sizes,
+            expert_assignments=routing.selected_experts,
+            group_offset=experts_start,
+        )
       intermediate_layer = gmm_up(x, w0, w1, w0_bias, w1_bias, gmm_fn, weight_gather)
 
       wo_gather_axes, wo_tile_size = get_wo_gmm_params()

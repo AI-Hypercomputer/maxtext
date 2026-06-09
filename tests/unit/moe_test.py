@@ -600,7 +600,7 @@ class RoutedMoeTest(unittest.TestCase):
       actual_output, _, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
       self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
 
-  def _run_ragged_sort_loss_and_grad(self, use_ring_of_experts: bool):
+  def _run_ragged_sort_loss_and_grad(self, use_ring_of_experts: bool, ragged_buffer_factor: float = -1.0):
     """Loss and gradient correctness for the use_ragged_sort flag.
 
     Compares an EP run with use_ragged_sort=True against the same
@@ -627,6 +627,7 @@ class RoutedMoeTest(unittest.TestCase):
           use_ring_of_experts=use_ring_of_experts,
           max_target_length=128,
           use_ragged_sort=use_ragged_sort,
+          ragged_buffer_factor=ragged_buffer_factor,
       )
 
     def _build_model(cfg, mesh):
@@ -717,8 +718,19 @@ class RoutedMoeTest(unittest.TestCase):
 
   @pytest.mark.tpu_only
   @pytest.mark.skip_on_tpu7x
+  def test_ragged_sort_loss_and_grad_ring_of_experts_ragged_buffer(self):
+    # no dropping is expected
+    self._run_ragged_sort_loss_and_grad(use_ring_of_experts=True, ragged_buffer_factor=1.5)
+
+  @pytest.mark.tpu_only
+  @pytest.mark.skip_on_tpu7x
   def test_ragged_sort_loss_and_grad_no_ring_of_experts(self):
     self._run_ragged_sort_loss_and_grad(use_ring_of_experts=False)
+
+  @pytest.mark.tpu_only
+  @pytest.mark.skip_on_tpu7x
+  def test_ragged_sort_loss_and_grad_no_ring_of_experts_ragged_buffer(self):
+    self._run_ragged_sort_loss_and_grad(use_ring_of_experts=False, ragged_buffer_factor=1.5)
 
   @pytest.mark.tpu_only
   def test_moe_fsdp_two_stage_parallelism_tpu_only(self):

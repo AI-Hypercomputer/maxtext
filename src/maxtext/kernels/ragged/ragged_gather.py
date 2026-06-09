@@ -69,9 +69,9 @@ def main_kernel(
 
   # Read start and end tensor values.
   dma_list = []
-  dma = pltpu.make_async_copy(start_ref, start_vmem_ref.at[:1], recv_sem)
+  dma = pltpu.make_async_copy(start_ref.at[:1], start_vmem_ref.at[:1], recv_sem)
   dma_list.append(dma)
-  dma = pltpu.make_async_copy(end_ref, end_vmem_ref.at[:1], recv_sem)
+  dma = pltpu.make_async_copy(end_ref.at[:1], end_vmem_ref.at[:1], recv_sem)
   dma_list.append(dma)
 
   jax.tree.map(lambda x: x.start(), dma_list)
@@ -241,10 +241,15 @@ def ragged_gather(x: jax.Array, indices: jax.Array, start: jax.Array, end: jax.A
   assert x.ndim == 2, "Ragged gather only supports 2d inputs."
   assert indices.ndim == 1, "Ragged gather only supports 1d indices."
 
-  if jnp.isscalar(start):
-    start = start[None]
-  if jnp.isscalar(end):
-    end = end[None]
+  if jnp.ndim(start) == 0:
+    start = jnp.repeat(start, 2)
+  elif start.shape == (1,):
+    start = jnp.pad(start, (0, 1))
+
+  if jnp.ndim(end) == 0:
+    end = jnp.repeat(end, 2)
+  elif end.shape == (1,):
+    end = jnp.pad(end, (0, 1))
 
   dtype = x.dtype
 
