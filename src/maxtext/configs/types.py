@@ -636,6 +636,17 @@ class MlaAttention(BaseModel):
   v_head_dim: NonNegativeInt = Field(128, description="Dimension of V heads in MLA.")
 
 
+class CompressedAttention(BaseModel):
+  """Configuration for Compressed Attention."""
+
+  o_lora_rank: NonNegativeInt = Field(0, description="Output LoRA rank for Compressed Attention.")
+  o_groups: NonNegativeInt = Field(0, description="Output groups for Compressed Attention.")
+  compress_ratios: list[int] = Field(default_factory=list, description="Per-layer compression ratios (0, 4, 128, etc).")
+  compressed_rope_max_timescale: int = Field(
+      160000, description="If positive, used for Compressed Sparse/Heavy Attention."
+  )
+
+
 class AttentionIndexer(BaseModel):
   """Configuration for DeepSeek Sparse Attention (DSA): DeepSeek3.2-style MLA with indexer."""
 
@@ -2277,6 +2288,7 @@ class MaxTextConfig(
     # Attention Mechanisms
     Attention,
     MlaAttention,
+    CompressedAttention,
     MoBa,
     AttentionIndexer,
     Llama4Attention,
@@ -3157,6 +3169,10 @@ class MaxTextConfig(
       raise ValueError("`share_kv_projections` is not compatible with `fused_qkv`.")
     if self.share_kv_projections and self.attention_type == "mla":
       raise ValueError("`share_kv_projections` is not compatible with `attention_type='mla'`.")
+
+    for val in self.compress_ratios:
+      if val != 0 and val < 4:
+        raise ValueError(f"compress_ratio must be 0 (disabled) or >= 4, got {val}")
 
     if self.num_kv_shared_layers > 0:
       if self.fused_qkv:
