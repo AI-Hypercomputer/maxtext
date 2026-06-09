@@ -2646,7 +2646,7 @@ class MaxTextConfig(
         raise ValueError(
             f"Quantization type '{self.quantization}' without Qwix (use_qwix_quantization=False) "
             f"is unsupported because legacy AQT has been completely removed. "
-            f"Please migrate to Qwix by setting use_qwix_quantization=True."
+            f"Please migrate to Qwix by setting use_qwix_quantization=False."
         )
 
     # Default quantization sharding count to number of local devices if not set.
