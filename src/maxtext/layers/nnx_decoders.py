@@ -277,12 +277,7 @@ class NNXScannedPipelineStage(nnx.Module):
     def create_layer_fn(rng):
       return layer_cls(config=config, mesh=mesh, quant=quant, model_mode=model_mode, rngs=rng)
 
-    # Workaround for Deepseek MTP test failure.
-    # TODO: Handle this properly.
-    try:
-      forked_rngs = rngs.fork(split=num_layers)
-    except:  # pylint: disable=bare-except
-      forked_rngs = rngs
+    forked_rngs = rngs.fork(split=num_layers)
 
     out_axes = nnx.StateAxes({nnx.Param: config.param_scan_axis, ...: 0})
     self.scanned_layers = nnx.vmap(
