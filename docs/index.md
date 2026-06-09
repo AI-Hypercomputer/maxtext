@@ -42,6 +42,7 @@ end-before: <!-- NEWS END -->
 maxdepth: 2
 hidden:
 ---
+getting_started
 install_maxtext
 tutorials
 run_maxtext
