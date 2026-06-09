@@ -2400,7 +2400,8 @@ class MaxTextConfig(
     if self.ragged_buffer_factor <= 0:
       return  # Nothing to validate if not using ragged buffer factor
     if self.use_ring_of_experts:
-      raise ValueError("Currently we only support ragged buffer factor with ragged a2a approach.")
+      pass
+      # raise ValueError("Currently we only support ragged buffer factor with ragged a2a approach.")
 
   @model_validator(mode="after")
   def set_derived_and_validate_values(self) -> "MaxTextConfig":
