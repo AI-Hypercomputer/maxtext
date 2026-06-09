@@ -14,6 +14,7 @@
 
 # pytype: skip-file
 """Pydantic-based configuration management for MaxText."""
+import ast
 import logging
 import os
 import sys
@@ -214,6 +215,29 @@ def _lists_to_tuples(l: list | Any) -> tuple | Any:
   return tuple(_lists_to_tuples(x) for x in l) if isinstance(l, list) else l
 
 
+def _coerce_to_list(value: Any) -> list[str] | Any:
+  """Coerce string/tuple inputs for list[str] configuration fields into Python lists.
+
+  This prevents unhelpful Pydantic validation errors when users pass string values
+  from the CLI (e.g., train_data_columns=messages is coerced to ['messages'], and
+  stringified lists like "['col1', 'col2']" are safely parsed to a Python list).
+  """
+  if isinstance(value, str):
+    cleaned = value.strip()
+    if (cleaned.startswith("[") and cleaned.endswith("]")) or (cleaned.startswith("(") and cleaned.endswith(")")):
+      try:
+        parsed = ast.literal_eval(cleaned)
+        if isinstance(parsed, (list, tuple)):
+          return list(parsed)
+        return [str(parsed)]
+      except (ValueError, SyntaxError):
+        return [value]
+    return [value]
+  if isinstance(value, tuple):
+    return list(value)
+  return value
+
+
 def _prepare_for_pydantic(raw_keys: dict[str, Any]) -> dict[str, Any]:
   """Prepares the raw dictionary for Pydantic model instantiation."""
   pydantic_kwargs = {}
@@ -235,6 +259,10 @@ def _prepare_for_pydantic(raw_keys: dict[str, Any]) -> dict[str, Any]:
         new_value = _tuples_to_lists(new_value)
       if key == "data_sharding" and isinstance(new_value, list) and new_value and isinstance(new_value[0], str):
         new_value = [new_value]
+
+    # Coerce string/tuple inputs for list[str] configuration fields into Python lists.
+    if key in ("train_data_columns", "eval_data_columns", "trainable_parameters_mask", "adamw_mask"):
+      new_value = _coerce_to_list(new_value)
 
     # An empty value provided in the configuration is treated as None
     if (

@@ -20,6 +20,7 @@ import unittest
 
 from maxtext.configs import pyconfig
 from maxtext.configs.pyconfig import resolve_config_path, _CONFIG_FILE_MAPPING, _module_from_path
+from maxtext.input_pipeline import data_processing_utils
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_PKG_DIR
 from tests.utils.test_helpers import get_test_config_path, get_post_train_test_config_path
 
@@ -172,6 +173,70 @@ class PyconfigTest(unittest.TestCase):
         tokenizer_type="huggingface",  # Defined as huggingface in qwen3-8b
     )
     self.assertEqual(config.tokenizer_type, "huggingface")
+
+  def test_list_config_coercion(self):
+    """Verifies that string/tuple inputs for list[str] config fields are coerced to lists."""
+    # Case 1: Plain string (coerced to single-item list)
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        train_data_columns="messages",
+    )
+    self.assertEqual(config.train_data_columns, ["messages"])
+
+    # Case 2: Stringified list literal
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        train_data_columns="['col1', 'col2']",
+    )
+    self.assertEqual(config.train_data_columns, ["col1", "col2"])
+
+    # Case 3: Stringified list literal with whitespace
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        train_data_columns="[ 'col1' ,    'col2' ]",
+    )
+    self.assertEqual(config.train_data_columns, ["col1", "col2"])
+
+    # Case 4: Stringified tuple literal
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        train_data_columns="('col1', 'col2')",
+    )
+    self.assertEqual(config.train_data_columns, ["col1", "col2"])
+
+    # Case 5: Real tuple value (passed via kwargs)
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        train_data_columns=("col1", "col2"),
+    )
+    self.assertEqual(config.train_data_columns, ["col1", "col2"])
+
+    # Case 6: Malformed stringified list (falls back to wrapping as single-item list)
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        train_data_columns="[malformed, list",
+    )
+    self.assertEqual(config.train_data_columns, ["[malformed, list"])
+
+  def test_coerced_list_is_validated_successfully(self):
+    """Verifies that a coerced list from pyconfig is successfully validated by the dataset pipeline."""
+    # Simulate a user passing `train_data_columns=messages` on the CLI
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        train_data_columns="messages",
+    )
+    # Verify coercion to list was successful
+    self.assertEqual(config.train_data_columns, ["messages"])
+
+    # Verify that passing this coerced list to the SFT column validator passes without error (Scenario A)
+    data_processing_utils.validate_and_configure_sft_columns(config.train_data_columns, None)
 
 
 if __name__ == "__main__":
