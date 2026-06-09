@@ -29,7 +29,7 @@ if [ -n "${JOB_COMPLETION_INDEX}" ] && [ "${JOB_COMPLETION_INDEX}" -ne 0 ]; then
 fi
 
 MODEL_NAME="qwen3.5-35b-a3b"
-CHECKPOINT_DIR="gs://snehalv-data/qwen3-5/unscanned/qwen3-5-unscanned-sft/checkpoints/10"
+CHECKPOINT_DIR="gs://snehalv-data/qwen3-5/unscanned/qwen3.5-35b-a3b_2026-06-09-01-41/checkpoints/10"
 SCANNED_CKPT_PATH="${CHECKPOINT_DIR}/model_params"
 HF_CKPT_PATH="temp_hf_checkpoint"
 UNSCANNED_CKPT_PATH="${CHECKPOINT_DIR}/unscanned_checkpoint"
