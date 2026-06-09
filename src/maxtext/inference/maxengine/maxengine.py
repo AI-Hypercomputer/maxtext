@@ -314,9 +314,8 @@ class MaxEngine(_BaseEngine):
 
     if self.model.quant and self.config.checkpoint_is_quantized:
       print("Loading from the quantized checkpoint...")
-      self.model.quant.quant_mode = quantizations.get_quant_mode("serve")
 
-    rng1, rng2, rng3 = jax.random.split(rng, 3)
+    rng1, rng2 = jax.random.split(rng, 2)
     if params:
       print("Resharding given params")
       init_state_fn = functools.partial(maxtext_utils.init_initial_state, self.model, None, self.config, False, rng)
@@ -361,7 +360,10 @@ class MaxEngine(_BaseEngine):
     )
 
     if self.model.quant and not self.config.checkpoint_is_quantized:
-      params = self.quantize_params(state, rng3)
+      raise ValueError(
+          "On-the-fly parameter quantization is not supported for the modern backends. "
+          "Please load a pre-quantized checkpoint."
+      )
     else:
       params = state.params
 
@@ -371,7 +373,7 @@ class MaxEngine(_BaseEngine):
 
   def _load_params_nnx(self, params, rng):
     """NNX equivalent of load_params: returns an nnx.Param state and populates KV cache shardings."""
-    if self.model.quant is not None:
+    if self.config.quantization:
       raise NotImplementedError("pure_nnx + quantization not yet supported. Use pure_nnx=False.")
 
     if params:
@@ -489,52 +491,6 @@ class MaxEngine(_BaseEngine):
       lora_utils.unapply_lora_from_base_params_nnx(base_params, adapter_params, lora_scale_factor)
     else:
       lora_utils.unapply_lora_from_base_params(base_params, adapter_params, lora_scale_factor)
-
-  def quantize_params(self, state, rng: PRNGKeyType | None = None):
-    """Forward pass to quantize decode params."""
-    if rng is None:
-      rng = jax.random.PRNGKey(0)
-    if self.config.pure_nnx:
-      raise NotImplementedError("pure_nnx + quantize_params not yet supported.")
-
-    self.model.quant.quant_mode = quantizations.get_quant_mode("convert")
-
-    @jax.jit
-    def model_apply(_p, _rng):
-      image_shape = mm_processor.get_dummy_image_shape_for_init(
-          model_name=self.config.model_name,
-          batch_size=self.config.micro_batch_size_to_train_on,
-      )
-      audio_shape = mm_processor.get_dummy_audio_shape_for_init(self.config)
-      return self.model.apply(
-          _p | {"aqt": {}},
-          jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
-          jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
-          encoder_images=jnp.ones(image_shape, dtype=jnp.float32) if self.config.use_multimodal else None,
-          # encoder_image_masks indicates valid tiles if image tiling + padding is used in vision encoder input.
-          encoder_image_masks=jnp.ones(image_shape[:2], dtype=jnp.int32)
-          if self.config.use_multimodal and "llama4" in self.config.model_name
-          else None,
-          encoder_audios=jnp.ones(audio_shape, dtype=jnp.float32) if self.config.use_audio else None,
-          decoder_segment_ids=jnp.zeros((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
-          enable_dropout=False,
-          model_mode=MODEL_MODE_PREFILL,
-          rngs={"params": _rng},
-          mutable=True,
-      )
-
-    _, new_vars = model_apply(state.params, rng)
-    # Remove param values which have corresponding qtensors in aqt to save memory.
-    params = {}
-    params["aqt"] = new_vars["aqt"]
-    params["params"] = quantizations.remove_quantized_params(state.params["params"], new_vars["aqt"])
-    self.abstract_params = jax.tree_util.tree_map(
-        lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding),
-        params,
-    )
-    maxtext_utils.save_quantized_checkpoint_if_configured(self.config, params)
-    self.model.quant.quant_mode = quantizations.get_quant_mode("serve")
-    return params
 
   def _maybe_stack_prefill_result_cache(self, cache):
     """Stack the caches across the layers."""
@@ -1979,8 +1935,7 @@ def set_engine_vars_from_base_engine(
   """Set internal vars from base_engine, which has already loaded the checkpoint and has sharding,
   mesh, and kv cache related vars set.
   """
-  if base_engine.model.quant:
-    engine.model.quant.quant_mode = base_engine.model.quant.quant_mode
+
   engine.state_mesh_annotations = base_engine.state_mesh_annotations
   engine.abstract_params = base_engine.abstract_params
   engine.kv_cache_annotations = maxtext_utils.get_kv_cache_annotations(engine.model, engine.config, rng, engine.mesh)  # pylint: disable=protected-access

@@ -64,7 +64,7 @@ from maxtext.layers.embeddings import (
 from maxtext.layers.initializers import nd_dense_init, NdInitializer, variable_to_logically_partitioned, default_bias_init
 from maxtext.layers.linears import DenseGeneral, canonicalize_tuple, normalize_axes
 from maxtext.layers.normalizations import RMSNorm, Qwen3NextRMSNorm, GlobalRMSNorm
-from maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.layers.quantizations import Quantization as Quant
 from maxtext.inference import kvcache
 from maxtext.inference.kvcache import KVQuant
 from maxtext.utils.sharding import maybe_shard_with_logical, create_sharding

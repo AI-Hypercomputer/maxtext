@@ -5,8 +5,6 @@ sharding_strategy: "experimental"
 attention: 'dot_product'
 allow_split_physical_axes: true
 tokenizer_path: "assets/tokenizer_llama3.tiktoken"
-# Used to replicate the quantization scale to avoid the inefficient XLA fusion.
-replicate_quant_scale: true
 
 inference_server: "ExperimentalMaxtextDisaggregatedServer"
 

@@ -42,7 +42,7 @@ from maxtext.layers import initializers, linears, mhc, normalizations, quantizat
 from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import Embed, PositionalEmbedding, attend_on_embedding
 from maxtext.layers.normalizations import RMSNorm
-from maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.layers.quantizations import Quantization as Quant
 from maxtext.models import (
     deepseek,
     deepseek_batchsplit,

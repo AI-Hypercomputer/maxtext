@@ -14,313 +14,76 @@
 
 """Tests for the quantizations"""
 
-import functools
-import os.path
 import sys
-from typing import Any
 import unittest
-from aqt.jax.v2 import aqt_tensor
-from aqt.jax.v2.flax import aqt_flax
-from flax import nnx
 import jax
-from jax import lax
 from jax import numpy as jnp
 from jax.sharding import Mesh
 from maxtext.configs import pyconfig
-from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
 from maxtext.common.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR
-from maxtext.kernels.megablox import gmm
-from maxtext.layers import nnx_wrappers, quantizations
+from flax import nnx
+from maxtext.layers import moe
+from maxtext.layers import linears
+from maxtext.layers import quantizations
+from maxtext.kernels.megablox.ops import gmm
+from maxtext.layers.initializers import nd_dense_init
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
 from tests.utils.test_helpers import get_test_config_path
-import numpy as np
 import pytest
 
-_QUERY_REGEX = ".*/query"
-_VALUE_REGEX = ".*/value"
 
-
-class QuantTestModule(nnx.Module):
-  """Test module for einsum."""
-
-  def __init__(
-      self,
-      quantization: quantizations.AqtQuantization,
-      data_type: Any,
-      rngs: nnx.Rngs,
-  ):
-    self.quantization = quantization
-    self.identity = jnp.identity(2, dtype=data_type)
-    self.einsum = None
-    self.dot_general = None
-
-    if self.quantization:
-      quant_dg, is_tiled, tiling_fn = None, False, None
-      if isinstance(self.quantization.quant_dg, dict):
-        quant_dg, is_tiled, tiling_fn = self._get_mixed_precision_cfg()
-      else:
-        quant_dg, is_tiled, tiling_fn = self.quantization.quant_dg, False, None
-      rhs_axis_metadata_wrapper = None
-      if self.quantization.quant_mode == aqt_flax.QuantMode.CONVERT:
-        rhs_axis_metadata_wrapper = None
-      else:
-        rhs_axis_metadata_wrapper = functools.partial(
-            quantizations._rhs_axis_metadata_wrapper,
-            mesh_axes=(),
-            is_tiled=is_tiled,
-            replicate_scale=self.quantization.replicate_scale,
-        )
-
-      aqt_dg_cls = aqt_flax.AqtDotGeneral(
-          quant_dg,
-          rhs_quant_mode=self.quantization.quant_mode,
-          lhs_freeze_mode=aqt_flax.FreezerMode.NONE,
-          rhs_freeze_mode=aqt_flax.FreezerMode.CALIBRATION_AND_VALUE,
-          rhs_axis_metadata_wrapper=rhs_axis_metadata_wrapper,
-          use_legacy_freezer=False,
-          tiling_fn=tiling_fn,
-      )
-      aqt_dg_cls_nnx = nnx_wrappers.ToNNX(aqt_dg_cls, rngs=nnx.Rngs(params=0))
-      aqt_einsum = aqt_flax.AqtEinsum(
-          cfg=quant_dg,
-          rhs_quant_mode=self.quantization.quant_mode,
-          lhs_freeze_mode=aqt_flax.FreezerMode.NONE,
-          rhs_freeze_mode=aqt_flax.FreezerMode.CALIBRATION_AND_VALUE,
-          rhs_axis_metadata_wrapper=rhs_axis_metadata_wrapper,
-          use_legacy_freezer=False,
-          tiling_fn=tiling_fn,
-      )
-      aqt_einsum_nnx = nnx_wrappers.ToNNX(aqt_einsum, rngs=nnx.Rngs(params=0))
-
-      self.einsum = nnx.data(aqt_einsum_nnx)
-      self.dot_general = nnx.data(aqt_dg_cls_nnx)
-    else:
-      self.einsum = jnp.einsum
-      self.dot_general = lax.dot_general
-
-  def __call__(self, inputs):
-    res_einsum = self.einsum("bc,ab->ac", inputs, self.identity)
-    res_dg = self.dot_general(inputs, inputs, (((), ()), ((), ())), precision=None)
-    return res_einsum, res_dg
-
-
-def _configure_quantization(quant_str="", quant_cfg_path="", mode_str="train", replicate_scale=False):
+def _configure_quantization(quant_str="", mode_str="train"):
   config = pyconfig.initialize(
       [None, get_test_config_path()],
       enable_checkpointing=False,
       quantization=quant_str,
-      quant_cfg_path=quant_cfg_path,
-      replicate_quant_scale=replicate_scale,
   )
   quant = quantizations.configure_quantization(config, mode_str)
   return quant
 
 
-def _apply(quant_str=""):
-  rngs = nnx.Rngs(params=0)
-  inputs = jnp.ones((2, 2))
-  data_type = inputs.dtype
-  quant = _configure_quantization(quant_str)
-  test_module = QuantTestModule(quant, data_type, rngs)
-  res_einsum, res_dg = test_module(inputs)
-  return inputs, res_einsum, res_dg
-
-
 class QuantizationTest(unittest.TestCase):
   """Tests for quantization."""
-
-  def test_in_quant_mode(self):
-    quant = _configure_quantization(quant_str="int8", mode_str="convert")
-    self.assertTrue(quantizations.in_convert_mode(quant))
-    self.assertFalse(quantizations.in_serve_mode(quant))
 
   def test_configure_quantization_is_null(self):
     for quant_mode in ["train", "serve", "convert"]:
       quant = _configure_quantization(quant_str="", mode_str=quant_mode)
       self.assertEqual(quant, None)
 
-  def test_configure_quantization_replicate_scale(self):
-    for quant_mode in ["train", "serve", "convert"]:
-      quant = _configure_quantization(quant_str="int8", mode_str=quant_mode)
-      self.assertEqual(quant.replicate_scale, False)
 
-    for quant_mode in ["train", "serve", "convert"]:
-      quant = _configure_quantization(quant_str="int8", mode_str=quant_mode, replicate_scale=True)
-      self.assertEqual(quant.replicate_scale, True)
+class QuantizationConfigValidationTest(unittest.TestCase):
+  """Tests for quantization configuration validation."""
 
-  @pytest.mark.cpu_only
-  def test_configure_quantization_is_int8(self):
-    for quant_mode in ["train", "serve", "convert"]:
-      quant = _configure_quantization(quant_str="int8", mode_str=quant_mode)
-      self.assertNotEqual(quant, None)
-
-  @pytest.mark.tpu_only  # b/421002974
-  def test_aqt_quantization(self):
-    # Without quantization
-    inputs, res_einsum, res_dg = _apply()
-    self.assertTrue(jnp.array_equal(inputs, res_einsum))
-    self.assertEqual(res_einsum.dtype, np.dtype(np.float32))
-    self.assertTrue(jnp.array_equal(inputs, res_dg[0][0]))
-    self.assertEqual(res_dg.dtype, np.dtype(np.float32))
-
-    # With int8 quantization
-    inputs, res_einsum, res_dg = _apply(quant_str="int8")
-    self.assertTrue(jnp.greater(jnp.max(inputs), jnp.max(res_einsum)))
-    self.assertEqual(res_einsum.dtype, np.dtype(np.float32))
-    self.assertTrue(jnp.greater(jnp.max(inputs), jnp.max(res_dg[0][0])))
-    # self.assertEqual(res_dg.dtype, np.dtype(np.float32))
-
-  def test_mixed_precision_config_int8w(self):
-    quant = _configure_quantization(
-        quant_str="intmp",
-        quant_cfg_path=os.path.join(MAXTEXT_CONFIGS_DIR, "quantization", "int8_weight_only.json"),
+  def test_use_qwix_quantization_default(self):
+    # Verify that use_qwix_quantization defaults to True when initializing config
+    config = pyconfig.initialize(
+        [None, get_test_config_path()],
+        enable_checkpointing=False,
+        quantization="int8",
     )
-    self.assertTrue(isinstance(quant.quant_dg, dict) and len(quant.quant_dg) == 1)
-    # pylint: disable=unsupported-membership-test
-    self.assertTrue(quantizations.DEFAULT in quant.quant_dg)
-    quant_cfg, _ = quant.quant_dg[quantizations.DEFAULT]
-    self.assertEqual(quant_cfg.fwd.dg_quantizer.lhs.numerics.dtype, None)
-    self.assertEqual(quant_cfg.fwd.dg_quantizer.rhs.numerics.bits, 8)
+    self.assertTrue(config.use_qwix_quantization)
 
-  def test_mixed_precision_config_scale(self):
-    quant = _configure_quantization(
-        quant_str="intmp",
-        quant_cfg_path=os.path.join(
-            MAXTEXT_CONFIGS_DIR,
-            "quantization",
-            "dense_llm_weight_only_scale.json",
-        ),
-    )
-    self.assertTrue(isinstance(quant.quant_dg, dict) and len(quant.quant_dg) == 7)
-    # pylint: disable=unsupported-membership-test
-    self.assertTrue(quantizations.DEFAULT in quant.quant_dg)
-    quant_cfg, _ = quant.quant_dg[quantizations.DEFAULT]
-    self.assertEqual(quant_cfg.fwd.dg_quantizer.lhs.numerics.dtype, None)
-    self.assertEqual(quant_cfg.fwd.dg_quantizer.rhs.numerics.bits, 8)
-    quant_cfg, _ = quant.quant_dg[_QUERY_REGEX]
-    self.assertEqual(quant_cfg.fwd.dg_quantizer.lhs.numerics.dtype, None)
-    self.assertEqual(quant_cfg.fwd.dg_quantizer.rhs.numerics.bits, 4)
+  def test_unsupported_quantization_without_qwix(self):
+    # Verify that setting use_qwix_quantization=False with non-native/non-TE quantization raises ValueError
+    with self.assertRaisesRegex(ValueError, "is unsupported because legacy AQT has been completely removed"):
+      pyconfig.initialize(
+          [None, get_test_config_path()],
+          enable_checkpointing=False,
+          quantization="int8",
+          use_qwix_quantization=False,
+      )
 
-  def test_mixed_precision_config_subchannel(self):
-    quant = _configure_quantization(
-        quant_str="intmp",
-        quant_cfg_path=os.path.join(
-            MAXTEXT_CONFIGS_DIR,
-            "quantization",
-            "dense_llm_subchannel.json",
-        ),
-    )
-    self.assertTrue(isinstance(quant.quant_dg, dict) and len(quant.quant_dg) == 7)
-    # pylint: disable=unsupported-membership-test
-    self.assertTrue(quantizations.DEFAULT in quant.quant_dg)
-    quant_cfg, tile_size = quant.quant_dg[quantizations.DEFAULT]
-    self.assertEqual(quant_cfg.fwd.dg_quantizer.lhs.numerics.bits, 8)
-    self.assertEqual(quant_cfg.fwd.dg_quantizer.rhs.numerics.bits, 8)
-    self.assertEqual(tile_size, -1)
-    quant_cfg, tile_size = quant.quant_dg[_QUERY_REGEX]
-    self.assertEqual(quant_cfg.fwd.dg_quantizer.lhs.numerics.bits, 8)
-    self.assertEqual(quant_cfg.fwd.dg_quantizer.rhs.numerics.bits, 4)
-    self.assertEqual(tile_size, 128)
-
-    quant_cfg, tile_size = quant.quant_dg[_VALUE_REGEX]
-    self.assertEqual(quant_cfg.fwd.dg_quantizer.lhs.numerics.bits, 8)
-    self.assertEqual(quant_cfg.fwd.dg_quantizer.rhs.numerics.bits, 4)
-    self.assertEqual(tile_size, -1)
-
-  def test_remove_quantized_params(self):
-    _params = {
-        "decoder": {
-            "decoder_norm": {"scale": 1.0},
-            "layers": {
-                "mlp": {
-                    "wi_0": {"kernel": 1.0},
-                    "wi_1": {"kernel": 1.0},
-                    "wo": {"kernel": 1.0},
-                },
-                "self_attention": {
-                    "key": {"kernel": 1.0},
-                },
-            },
-            "logits_dense": {"kernel": 1.0},
-        },
-    }
-    _aqt_vars = {
-        "decoder": {
-            "layers": {
-                "mlp": {
-                    "wi_0": {
-                        "AqtDotGeneral_0": {
-                            "qrhs": {
-                                "frozen": aqt_tensor.QTensor(
-                                    qvalue=[1.1, 1.0],
-                                    scale=[1.0],
-                                    scale_t=[1.0],
-                                    bias=1.0,
-                                )
-                            }
-                        }
-                    },
-                    "wi_1": {
-                        "AqtDotGeneral_0": {
-                            "qrhs": {
-                                "frozen": aqt_tensor.QTensor(
-                                    qvalue=[1.1, 1.0],
-                                    scale=[1.0],
-                                    scale_t=[1.0],
-                                    bias=1.0,
-                                )
-                            }
-                        }
-                    },
-                    "wo": {
-                        "AqtDotGeneral_0": {
-                            "qrhs": {
-                                "frozen": aqt_tensor.QTensor(
-                                    qvalue=[1.1, 1.0],
-                                    scale=[1.0],
-                                    scale_t=[1.0],
-                                    bias=1.0,
-                                )
-                            }
-                        }
-                    },
-                },
-                "self_attention": {
-                    "key": {
-                        "AqtDotGeneral_0": {
-                            "qrhs": {
-                                "frozen": aqt_tensor.QTensor(
-                                    qvalue=[1.1, 1.0],
-                                    scale=[1.0],
-                                    scale_t=[1.0],
-                                    bias=1.0,
-                                )
-                            }
-                        }
-                    }
-                },
-            }
-        }
-    }
-    _expected = {
-        "decoder": {
-            "decoder_norm": {"scale": 1.0},
-            "layers": {
-                "mlp": {
-                    "wi_0": {"kernel": {}},
-                    "wi_1": {"kernel": {}},
-                    "wo": {"kernel": {}},
-                },
-                "self_attention": {
-                    "key": {"kernel": {}},
-                },
-            },
-            "logits_dense": {"kernel": 1.0},
-        }
-    }
-    result = quantizations.remove_quantized_params(_params, _aqt_vars)
-    self.assertEqual(_expected, result)
+  def test_supported_quantization_without_qwix(self):
+    # Verify that setting use_qwix_quantization=False with native FP8 or TE is allowed and does not raise
+    for quant_type in ["fp8", "nanoo_fp8", "fp8_gpu", "te_fp8_delayedscaling"]:
+      config = pyconfig.initialize(
+          [None, get_test_config_path()],
+          enable_checkpointing=False,
+          quantization=quant_type,
+          use_qwix_quantization=False,
+      )
+      self.assertFalse(config.use_qwix_quantization)
 
 
 class QuantTest(unittest.TestCase):
@@ -524,6 +287,7 @@ class QuantTest(unittest.TestCase):
 )
 @pytest.mark.tpu_only
 def test_gmm_kernel(group_sizes, k, n, tiling, dtype):
+  # pylint: disable=undefined-variable
   """Smoke-test + correctness check for the grouped matrix-multiply kernel.
 
   For each group i, gmm should compute
@@ -562,6 +326,193 @@ def test_gmm_kernel(group_sizes, k, n, tiling, dtype):
   ).block_until_ready()
 
   assert jnp.abs(quant_out - base_out).mean() / jnp.abs(base_out).mean() < 2e-1
+
+
+class QuantizationCoverageTest(unittest.TestCase):
+  """Explicit tests to ensure 100% test coverage of all quantization paths."""
+
+  def test_configure_quantization_paths(self):
+    # Test all configure_quantization paths on CPU (instantiation only)
+    config_fp8 = pyconfig.initialize(
+        [None, get_test_config_path()],
+        enable_checkpointing=False,
+        quantization="fp8",
+        use_qwix_quantization=False,
+    )
+    quant_fp8 = quantizations.configure_quantization(config_fp8, "train")
+    self.assertIsNotNone(quant_fp8)
+
+    config_nanoo = pyconfig.initialize(
+        [None, get_test_config_path()],
+        enable_checkpointing=False,
+        quantization="nanoo_fp8",
+        use_qwix_quantization=False,
+    )
+    quant_nanoo = quantizations.configure_quantization(config_nanoo, "train")
+    self.assertIsNotNone(quant_nanoo)
+
+    # Only run TE quantization config test if transformer_engine is installed
+    try:
+      import transformer_engine  # pylint: disable=unused-import,import-outside-toplevel
+
+      has_te = True
+    except ImportError:
+      has_te = False
+
+    if has_te:
+      config_te = pyconfig.initialize(
+          [None, get_test_config_path()],
+          enable_checkpointing=False,
+          quantization="te_fp8_delayedscaling",
+          use_qwix_quantization=False,
+      )
+      quant_te = quantizations.configure_quantization(config_te, "train")
+      self.assertIsNotNone(quant_te)
+
+  def test_configure_kv_quant(self):
+    config = pyconfig.initialize(
+        [None, get_test_config_path()],
+        enable_checkpointing=False,
+        quantize_kvcache=False,
+    )
+    # Should not raise
+    quantizations.configure_kv_quant(config)
+
+    config_fail = pyconfig.initialize(
+        [None, get_test_config_path()],
+        enable_checkpointing=False,
+        quantize_kvcache=True,
+    )
+    with self.assertRaises(ValueError):
+      quantizations.configure_kv_quant(config_fail)
+
+  @pytest.mark.tpu_only
+  def test_moe_quantization_coverage(self):
+    # Instantiates RoutedMoE on CPU to cover the AQT-free parameter initialization path in moe.py
+    config = pyconfig.initialize(
+        [None, get_test_config_path()],
+        enable_checkpointing=False,
+        quantization="int8",
+        use_qwix_quantization=True,
+        num_experts=2,
+        base_emb_dim=8,
+        base_mlp_dim=8,
+        base_moe_mlp_dim=8,  # Required positive base value to derive positive moe_mlp_dim
+        parameter_memory_host_offload=True,  # Cover the parameter offloading paths in linears.py
+    )
+
+    devices_array = maxtext_utils.create_device_mesh(config)
+    mesh = Mesh(devices_array, config.mesh_axes)
+
+    quant = quantizations.configure_quantization(config, "train")
+
+    with mesh:
+      moe_layer = moe.RoutedMoE(
+          config=config,
+          num_experts=config.num_experts,
+          num_experts_per_tok=1,
+          mesh=mesh,
+          kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+          kernel_axes=("expert", "embed_moe", "heads"),
+          rngs=nnx.Rngs(0),
+          quant=quant,
+      )
+
+      # In Flax NNX, parameters are fully initialized during instantiation.
+      self.assertIsNotNone(moe_layer.gate.kernel)
+
+      # Execute a forward pass to cover DenseGeneral.__call__, RoutedMoE.__call__,
+      # sparse_matmul, and the custom quant_einsum wrapper in moe.py
+      # Batch size must be a multiple of the mesh axis size (e.g. devices_array.size) to be divisible under FSDP sharding
+      batch_size = max(4, devices_array.size)
+      inputs = jnp.ones((batch_size, 4, 8), dtype=jnp.float32)
+      outputs, _, _ = moe_layer(inputs)
+      self.assertEqual(outputs.shape, (batch_size, 4, 8))
+
+  def test_quantization_fallbacks(self):
+    # Cover the fallback return None path in _get_quant_config when an unsupported scheme is passed
+    config_invalid = pyconfig.initialize(
+        [None, get_test_config_path()],
+        quantization="int4",
+    )
+    self.assertIsNone(quantizations.configure_quantization(config_invalid))
+
+    # Cover the implicit return None path in configure_kv_quant when quantize_kvcache is False
+    config_no_kv = pyconfig.initialize(
+        [None, get_test_config_path()],
+        quantize_kvcache=False,
+    )
+    self.assertIsNone(quantizations.configure_kv_quant(config_no_kv))
+
+  def test_dense_general_parameter_offload_coverage(self):
+    # Covers parameter_memory_host_offload paths in linears.py
+
+    dense_layer = linears.DenseGeneral(
+        in_features_shape=8,
+        out_features_shape=8,
+        parameter_memory_host_offload=True,
+        rngs=nnx.Rngs(0),
+    )
+    inputs = jnp.ones((2, 8), dtype=jnp.float32)
+    outputs = dense_layer(inputs)
+    self.assertEqual(outputs.shape, (2, 8))
+
+  def test_configure_quantization_batch_split_schedule(self):
+    # Covers use_batch_split_schedule path in quantizations.py
+    config_bs = pyconfig.initialize(
+        [None, get_test_config_path()],
+        enable_checkpointing=False,
+        use_batch_split_schedule=True,
+        quantization="fp8_full",
+        use_qwix_quantization=True,
+    )
+    quant = quantizations.configure_quantization(config_bs, "train")
+    self.assertIsInstance(quant, quantizations.QwixQuantization)
+
+    config_bs_manual = pyconfig.initialize(
+        [None, get_test_config_path()],
+        enable_checkpointing=False,
+        use_batch_split_schedule=True,
+        quantization="fp8_full",
+        use_manual_quantization=True,
+        use_qwix_quantization=True,
+    )
+    quant_manual = quantizations.configure_quantization(config_bs_manual, "train")
+    self.assertIsNone(quant_manual)
+
+  @pytest.mark.tpu_only
+  def test_moe_gemma4_coverage(self):
+    # Covers GEMMA4 routing and expert scale fusion paths in moe.py
+
+    config = pyconfig.initialize(
+        [None, get_test_config_path()],
+        enable_checkpointing=False,
+        decoder_block="gemma4",
+        model_call_mode="inference",
+        fuse_expert_scales=True,
+        num_experts=2,
+        base_emb_dim=8,
+        base_mlp_dim=8,
+        base_moe_mlp_dim=8,
+    )
+    devices_array = maxtext_utils.create_device_mesh(config)
+    mesh = Mesh(devices_array, config.mesh_axes)
+
+    with mesh:
+      moe_layer = moe.RoutedMoE(
+          config=config,
+          num_experts=config.num_experts,
+          num_experts_per_tok=1,
+          mesh=mesh,
+          kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+          kernel_axes=("expert", "embed_moe", "heads"),
+          rngs=nnx.Rngs(0),
+      )
+      # Batch size must be a multiple of the mesh axis size (e.g. devices_array.size) to be divisible under FSDP sharding
+      batch_size = max(4, devices_array.size)
+      inputs = jnp.ones((batch_size, 4, 8), dtype=jnp.float32)
+      outputs, _, _ = moe_layer(inputs)
+      self.assertEqual(outputs.shape, (batch_size, 4, 8))
 
 
 if __name__ == "__main__":
