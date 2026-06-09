@@ -430,7 +430,7 @@ class Quantization(BaseModel):
   kv_quant_axis: KvQuantAxis = Field(KvQuantAxis.HEADS_AND_DKV, description="Axes to quantize over for the KV cache.")
   kv_quant_dtype: Literal["int8", "int4"] = Field("int8", description="Data type for KV cache quantization.")
   quantization_local_shard_count: int = Field(-1, description="Shards the range finding operation for quantization.")
-  use_qwix_quantization: bool = Field(False, description="Whether to use qwix for quantization.")
+  use_qwix_quantization: bool = Field(True, description="Whether to use qwix for quantization.")
   use_manual_quantization: bool = Field(
       False,
       description="Whether to use manual quantization for batch split. Only used if use_batch_split_schedule is True.",
@@ -2646,7 +2646,7 @@ class MaxTextConfig(
         raise ValueError(
             f"Quantization type '{self.quantization}' without Qwix (use_qwix_quantization=False) "
             f"is unsupported because legacy AQT has been completely removed. "
-            f"Please migrate to Qwix by setting use_qwix_quantization=False."
+            f"Please migrate to Qwix by setting use_qwix_quantization=True."
         )
 
     # Default quantization sharding count to number of local devices if not set.

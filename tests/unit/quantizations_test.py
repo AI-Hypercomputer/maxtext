@@ -433,7 +433,8 @@ class QuantizationCoverageTest(unittest.TestCase):
     # Cover the fallback return None path in _get_quant_config when an unsupported scheme is passed
     config_invalid = pyconfig.initialize(
         [None, get_test_config_path()],
-        quantization="int4",
+        quantization="fp8_gpu",
+        use_qwix_quantization=False,
     )
     self.assertIsNone(quantizations.configure_quantization(config_invalid))
 
