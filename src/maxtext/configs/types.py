@@ -2959,7 +2959,7 @@ class MaxTextConfig(
       # For AOT compilation and correctness, always prioritize the 'stage' axis for sharding when pipelining.
       for rule in self.logical_axis_rules:
         if rule and rule[0] == "activation_embed_and_logits_batch":
-          rule[1] = ["stage", "data", "fsdp", "fsdp_transpose", "expert"]
+          rule[1] = [ax for ax in ["stage", "data", "fsdp", "fsdp_transpose", "expert"] if ax in self.mesh_axes]
           break
 
       if "stage" in self.mesh_axes:
