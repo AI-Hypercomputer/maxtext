@@ -378,7 +378,6 @@ def _fix_restore_args_for_shape_mismatch(restore_args, stored_metadata_tree, mes
       if isinstance(node, dict) and name in node:
         node = node[name]
       else:
-        # breakpoint()
         return None
     return node
 
@@ -881,7 +880,6 @@ def from_pretrained(
 
         # Get the structure of checkpoint in `config.load_parameters_path`
         metadata = ckptr.metadata(config.load_parameters_path)
-        # breakpoint()
         if metadata is None or metadata.item_metadata is None:
           max_logging.log(
               f"ERROR: No valid Orbax checkpoint found at '{config.load_parameters_path}'. "
@@ -951,7 +949,6 @@ def from_pretrained(
 
           item_to_restore = {"params": {"params": target_for_restore}}
           base_restore_args = ocp.checkpoint_utils.construct_restore_args(target_for_restore)
-          # breakpoint()
           restore_args = {
               "params": {
                   "params": _fix_restore_args_for_shape_mismatch(

@@ -315,7 +315,6 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
           cache=None,
       )
     teacher_output = jax.tree.map(jax.lax.stop_gradient, teacher_output)
-    #breakpoint()
     # Split student into differentiable params and non-differentiable rest.
     # Capture graphdef outside of jax.value_and_grad for stable graph tracking.
     student_graphdef, diff_params, rest = nnx.split(student, self.wrt_filter, ...)
@@ -706,8 +705,6 @@ def train_distill(
       _log_config_details(teacher_config, "Teacher")
       teacher_model = get_maxtext_model(teacher_config, mesh)
       teacher_model.eval()
-      # breakpoint()
-      # breakpoint()
 
     # LTI phase needs the student initialization step to know about the teacher configuration
     student_config.get_keys()["teacher_config"] = teacher_config

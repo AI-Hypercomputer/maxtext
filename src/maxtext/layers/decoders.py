@@ -30,6 +30,7 @@ from jax.sharding import Mesh
 from maxtext.common.common_types import Config, DecoderBlockType, ShardMode
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN
 from maxtext.configs import pyconfig
+from maxtext.inference import page_manager
 from maxtext.layers import linears
 from maxtext.layers import mhc
 from maxtext.layers import normalizations
@@ -1048,6 +1049,9 @@ class Decoder(nn.Module):
             for i in range(cfg.num_decoder_layers):
               kv_caches[i] = returned_kv_cache[i]
           else:
+            RemattedBlockLayer = RemattedBlockLayers[0]
+            y = self._apply_standard_scanned_blocks(y, broadcast_args, RemattedBlockLayer, model_mode)
+
             # Fallback to old behavior if kv_caches is None (not vLLM RPA)
             RemattedBlockLayer = RemattedBlockLayers[0]
             if injected_attention_inputs is not None:
@@ -1484,7 +1488,6 @@ class Decoder(nn.Module):
           **layer_kwargs,
       )(y, *broadcast_args)
     else:
-      # breakpoint()
       for next_override_idx in override_indices:
         if next_override_idx >= end_idx:
           break
@@ -1510,7 +1513,6 @@ class Decoder(nn.Module):
         # combined_kwargs["layer_idx"] = current_idx
         layer_pydantic_cfg = cfg._pydantic_config.model_copy(update=layer_override)
         layer_cfg = pyconfig.HyperParameters(layer_pydantic_cfg)
-        # breakpoint()
 
         layer = RemattedBlockLayer(
             config=layer_cfg,
