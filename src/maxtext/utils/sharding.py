@@ -132,7 +132,15 @@ def maybe_shard_with_pspec(
 
 
 def maybe_shard_with_logical(
-    inputs, logical_axes, mesh, shard_mode, rules=None, debug_sharding=False, extra_stack_level=0, sharding_desc=""
+    inputs,
+    logical_axes,
+    mesh,
+    shard_mode,
+    rules=None,
+    debug_sharding=False,
+    extra_stack_level=0,
+    sharding_desc="",
+    skip_trivial_specs=False,
 ):
   """
   A wrapper of maybe_shard_with_name when logical axes are inputs
@@ -146,6 +154,9 @@ def maybe_shard_with_logical(
     sharding_desc = _get_sharding_desc(inputs, extra_stack_level + 1)
 
   named_sharding = create_sharding(mesh, logical_axes, rules=rules)
+
+  if skip_trivial_specs and all(ax is None or ax == () for ax in named_sharding.spec):
+    return inputs
 
   return maybe_shard_with_name(
       inputs,
