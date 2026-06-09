@@ -6,6 +6,13 @@ Conduct a detailed analysis of model specifics for both Hugging Face and MaxText
 ## Expected Outcome / Outputs Generated
 - **`<model_family>_tracing.json`**: A JSON file documenting the checkpoint architectures of the models. This file maps out the dimensions, names, and hierarchical structure of parameters, ensuring a thorough understanding before any mapping begins. This JSON file will be used as the primary input for Phase 2 and Phase 3.
 
+- **Config Alignment** Read the target model's HuggingFace config.json and ensure every structural parameter perfectly matches the MaxText {MODEL}.yml file (or base.yml defaults). Pay explicit attention to:
+rms_norm_eps
+mlp_activations
+logits_via_embedding (Weight tying)
+attention_kwargs (softcapping, query scaling, sliding windows)
+max_target_positions and RoPE base frequencies.
+
 
 ## Command to run scripts
 `TMPDIR=/dev/shm JAX_PLATFORMS=cpu ${VIRTUAL_ENV}/bin/python \

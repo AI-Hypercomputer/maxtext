@@ -76,7 +76,8 @@ def main():
             print(f"Skip {mt_key}, corresponding HF key not in hf weights")
             continue
             
-        target_shape = tuple(mt_parameters[mt_key]) if mt_key in mt_parameters else None
+        mt_key_stripped = mt_key.replace("params-", "", 1) if mt_key.startswith("params-") else mt_key
+        target_shape = tuple(mt_parameters[mt_key_stripped]) if mt_key_stripped in mt_parameters else None
         hook_fn = hook_fns.get(mt_key, lambda x, shape: x)
         
         try:

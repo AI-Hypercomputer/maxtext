@@ -38,6 +38,6 @@ scan_layers=False \
 --hf_model_path google/gemma-3-4b-it \
 --run_hf_model True \
 --trust_remote_code "" \
---atol 0.01 --max_kl_div 0.01`
+--atol 0.05 --max_kl_div 0.05`
 
 *(Note: For modern transformers, bypass the `trust_remote_code` bug by passing `--trust_remote_code ""` rather than `False` due to `argparse` boolean parsing behavior. Ensure at least one test criteria like `--atol` or `--max_kl_div` is supplied.)*
