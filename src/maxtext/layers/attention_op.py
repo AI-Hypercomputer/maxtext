@@ -79,19 +79,6 @@ from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
 
-# Used to pass in splash attention block sizes from config.
-global_block_q = 0
-global_block_kv = 0
-global_block_kv_compute = 0
-global_block_q_dkv = 0
-global_block_kv_dkv = 0
-global_block_kv_dkv_compute = 0
-global_block_q_dq = 0
-global_block_kv_dq = 0
-global_use_fused_bwd_kernel = False
-global_q_layout = ""
-global_k_layout = ""
-global_v_layout = ""
 
 dynamic_vector_slice_in_dim = jax.vmap(lax.dynamic_slice_in_dim, in_axes=(None, 0, None, None))
 
@@ -492,6 +479,32 @@ class AttentionOp(nnx.Module):
     self.quant = quant
     self.kv_quant = kv_quant
     self.attention_type = attention_type
+    if self.attention_type == AttentionType.LOCAL_SLIDING:
+      self.block_q = self.config.local_sa_block_q
+      self.block_kv = self.config.local_sa_block_kv
+      self.block_kv_compute = self.config.local_sa_block_kv_compute
+      self.block_q_dkv = self.config.local_sa_block_q_dkv
+      self.block_kv_dkv = self.config.local_sa_block_kv_dkv
+      self.block_kv_dkv_compute = self.config.local_sa_block_kv_dkv_compute
+      self.block_q_dq = self.config.local_sa_block_q_dq
+      self.block_kv_dq = self.config.local_sa_block_kv_dq
+      self.q_layout = self.config.local_sa_q_layout
+      self.k_layout = self.config.local_sa_k_layout
+      self.v_layout = self.config.local_sa_v_layout
+      self.use_splash_scheduler = self.config.local_use_splash_scheduler
+    else:
+      self.block_q = self.config.sa_block_q
+      self.block_kv = self.config.sa_block_kv
+      self.block_kv_compute = self.config.sa_block_kv_compute
+      self.block_q_dkv = self.config.sa_block_q_dkv
+      self.block_kv_dkv = self.config.sa_block_kv_dkv
+      self.block_kv_dkv_compute = self.config.sa_block_kv_dkv_compute
+      self.block_q_dq = self.config.sa_block_q_dq
+      self.block_kv_dq = self.config.sa_block_kv_dq
+      self.q_layout = self.config.sa_q_layout
+      self.k_layout = self.config.sa_k_layout
+      self.v_layout = self.config.sa_v_layout
+      self.use_splash_scheduler = self.config.use_splash_scheduler
     self.attn_logits_soft_cap = attn_logits_soft_cap
     self.sliding_window_size = sliding_window_size
     self.chunk_attn_window_size = chunk_attn_window_size
@@ -1151,21 +1164,6 @@ class AttentionOp(nnx.Module):
     axis_names_kv = self._logical_to_mesh_axes(self.flash_axis_names_kv)
     indexer_mask_axis_names = self._logical_to_mesh_axes((BATCH_ATTN, Q_LENGTH, KV_LENGTH))
 
-    global global_block_q, global_block_kv, global_block_kv_compute, global_block_q_dkv, global_block_kv_dkv
-    global global_block_kv_dkv_compute, global_block_q_dq, global_block_kv_dq, global_use_fused_bwd_kernel
-    global global_q_layout, global_k_layout, global_v_layout
-    global_block_q = self.config.sa_block_q
-    global_block_kv = self.config.sa_block_kv
-    global_block_kv_compute = self.config.sa_block_kv_compute
-    global_block_q_dkv = self.config.sa_block_q_dkv
-    global_block_kv_dkv = self.config.sa_block_kv_dkv
-    global_block_kv_dkv_compute = self.config.sa_block_kv_dkv_compute
-    global_block_q_dq = self.config.sa_block_q_dq
-    global_block_kv_dq = self.config.sa_block_kv_dq
-    global_use_fused_bwd_kernel = self.config.sa_use_fused_bwd_kernel
-    global_q_layout = self.config.sa_q_layout
-    global_k_layout = self.config.sa_k_layout
-    global_v_layout = self.config.sa_v_layout
 
     devices_in_data_fsdp = self.mesh.shape.get("data", 1) * self.mesh.shape.get("fsdp", 1)
     assert (query.shape[0] / devices_in_data_fsdp).is_integer(), (
@@ -1178,16 +1176,16 @@ class AttentionOp(nnx.Module):
     def create_sa_config(config, query, key, attn_logits_soft_cap):
       if config.use_tokamax_splash:
         sa_config = tokamax_splash_kernel.SplashConfig(
-            block_q=min(global_block_q, query.shape[2]),
-            block_kv=min(global_block_kv, key.shape[2]),
-            block_kv_compute=min(global_block_kv_compute, key.shape[2]),
-            block_q_dkv=min(global_block_q_dkv, query.shape[2]),
-            block_kv_dkv=min(global_block_kv_dkv, key.shape[2]),
-            block_kv_dkv_compute=min(global_block_kv_dkv_compute, query.shape[2]),
+            block_q=min(self.block_q, query.shape[2]),
+            block_kv=min(self.block_kv, key.shape[2]),
+            block_kv_compute=min(self.block_kv_compute, key.shape[2]),
+            block_q_dkv=min(self.block_q_dkv, query.shape[2]),
+            block_kv_dkv=min(self.block_kv_dkv, key.shape[2]),
+            block_kv_dkv_compute=min(self.block_kv_dkv_compute, query.shape[2]),
             use_fused_bwd_kernel=True,  # tokamax only supports fused bwd kernel
-            q_layout=tokamax_splash_kernel.QKVLayout[global_q_layout],
-            k_layout=tokamax_splash_kernel.QKVLayout[global_k_layout],
-            v_layout=tokamax_splash_kernel.QKVLayout[global_v_layout],
+            q_layout=tokamax_splash_kernel.QKVLayout[self.q_layout],
+            k_layout=tokamax_splash_kernel.QKVLayout[self.k_layout],
+            v_layout=tokamax_splash_kernel.QKVLayout[self.v_layout],
             attn_logits_soft_cap=attn_logits_soft_cap,
             residual_checkpoint_name="context",
             fwd_cost_estimate=pl.CostEstimate(
@@ -1205,22 +1203,22 @@ class AttentionOp(nnx.Module):
             if config.cost_estimate_flops_bwd >= 0
             else None,
             dq_reduction_steps=config.dq_reduction_steps if config.dq_reduction_steps > 0 else None,
-            use_experimental_scheduler=config.use_splash_scheduler,
+            use_experimental_scheduler=self.use_splash_scheduler,
         )
       else:
         sa_config = splash_attention_kernel.BlockSizes(
-            block_q=min(global_block_q, query.shape[2]),
-            block_kv=min(global_block_kv, key.shape[2]),
-            block_kv_compute=min(global_block_kv_compute, key.shape[2]),
-            block_q_dkv=min(global_block_q_dkv, query.shape[2]),
-            block_kv_dkv=min(global_block_kv_dkv, key.shape[2]),
-            block_kv_dkv_compute=min(global_block_kv_dkv_compute, query.shape[2]),
-            block_q_dq=None if global_use_fused_bwd_kernel else min(global_block_q_dq, query.shape[2]),
-            block_kv_dq=None if global_use_fused_bwd_kernel else min(global_block_kv_dq, query.shape[2]),
-            use_fused_bwd_kernel=global_use_fused_bwd_kernel,
-            q_layout=splash_attention_kernel.QKVLayout[global_q_layout],
-            k_layout=splash_attention_kernel.QKVLayout[global_k_layout],
-            v_layout=splash_attention_kernel.QKVLayout[global_v_layout],
+            block_q=min(self.block_q, query.shape[2]),
+            block_kv=min(self.block_kv, key.shape[2]),
+            block_kv_compute=min(self.block_kv_compute, key.shape[2]),
+            block_q_dkv=min(self.block_q_dkv, query.shape[2]),
+            block_kv_dkv=min(self.block_kv_dkv, key.shape[2]),
+            block_kv_dkv_compute=min(self.block_kv_dkv_compute, query.shape[2]),
+            block_q_dq=None if config.sa_use_fused_bwd_kernel else min(self.block_q_dq, query.shape[2]),
+            block_kv_dq=None if config.sa_use_fused_bwd_kernel else min(self.block_kv_dq, query.shape[2]),
+            use_fused_bwd_kernel=config.sa_use_fused_bwd_kernel,
+            q_layout=splash_attention_kernel.QKVLayout[self.q_layout],
+            k_layout=splash_attention_kernel.QKVLayout[self.k_layout],
+            v_layout=splash_attention_kernel.QKVLayout[self.v_layout],
         )
       return sa_config
 
@@ -1453,8 +1451,8 @@ class AttentionOp(nnx.Module):
             key,
             value,
             decoder_segment_ids_tuple,
-            block_kv=self.config.sa_block_kv,
-            block_q=self.config.sa_block_q,
+            block_kv=self.block_kv,
+            block_q=self.block_q,
             mask=materialized_mask,
             mask_value=DEFAULT_MASK_VALUE,
         )

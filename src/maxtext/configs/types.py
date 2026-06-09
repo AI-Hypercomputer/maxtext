@@ -674,10 +674,21 @@ class SplashAttention(BaseModel):
   sa_block_kv_dkv_compute: int = Field(512, description="Block size for KV_dkv compute in splash attention.")
   sa_block_q_dq: int = Field(512, description="Block size for Q_dq in splash attention.")
   sa_block_kv_dq: int = Field(512, description="Block size for KV_dq in splash attention.")
+  local_sa_block_q: int = Field(512, description="Block size for Q in local splash attention.")
+  local_sa_block_kv: int = Field(512, description="Block size for KV in local splash attention.")
+  local_sa_block_kv_compute: int = Field(512, description="Block size for KV compute in local splash attention.")
+  local_sa_block_q_dkv: int = Field(512, description="Block size for Q_dkv in local splash attention.")
+  local_sa_block_kv_dkv: int = Field(512, description="Block size for KV_dkv in local splash attention.")
+  local_sa_block_kv_dkv_compute: int = Field(512, description="Block size for KV_dkv compute in local splash attention.")
+  local_sa_block_q_dq: int = Field(512, description="Block size for Q_dq in local splash attention.")
+  local_sa_block_kv_dq: int = Field(512, description="Block size for KV_dq in local splash attention.")
   sa_use_fused_bwd_kernel: bool = Field(False, description="Use fused backward kernel in splash attention.")
   sa_q_layout: str = Field("HEAD_DIM_MINOR", description="Layout for Q in splash attention.")
   sa_k_layout: str = Field("HEAD_DIM_MINOR", description="Layout for K in splash attention.")
   sa_v_layout: str = Field("HEAD_DIM_MINOR", description="Layout for V in splash attention.")
+  local_sa_q_layout: str = Field("HEAD_DIM_MINOR", description="Layout for Q in local splash attention.")
+  local_sa_k_layout: str = Field("HEAD_DIM_MINOR", description="Layout for K in local splash attention.")
+  local_sa_v_layout: str = Field("HEAD_DIM_MINOR", description="Layout for V in local splash attention.")
   use_max_logit_estimate: int = Field(
       -1,
       description="-1 means no estimate, any > 0 value will be used as max logit estimate",
@@ -697,6 +708,7 @@ class SplashAttention(BaseModel):
       description="the number of reduction steps. For now, only 3 or all the kv steps are supported.",
   )
   use_splash_scheduler: bool = Field(False, description="Use experimental splash attention scheduler.")
+  local_use_splash_scheduler: bool = Field(False, description="Use experimental local splash attention scheduler.")
 
 
 class MoEGeneral(BaseModel):
@@ -2441,7 +2453,7 @@ class MaxTextConfig(
     # If the tokenizer path is a relative name without a directory, resolve it against the assets root.
     # This maintains backward compatibility for configs that just specify e.g., "tokenizer.llama2".
     tokenizer_path = getattr(self, "tokenizer_path", "")
-    if tokenizer_path and not os.path.exists(tokenizer_path) and not tokenizer_path.startswith("gs://"):
+    if tokenizer_path and not os.path.exists(tokenizer_path) and not tokenizer_path.startswith("gs://") and not self.colocated_python_data_input:
       tokenizer_path = next(
           filter(
               os.path.exists,
