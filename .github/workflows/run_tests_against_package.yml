@@ -186,6 +186,7 @@ jobs:
           else
             $PYTHON_EXE -m pytest ${INPUTS_PYTEST_ADDOPTS} \
               -v \
+              -s \
               -m "${FINAL_PYTEST_MARKER}" \
               --durations=0 \
               $PYTEST_COV_ARGS \
@@ -203,6 +204,9 @@ jobs:
           INPUTS_PYTEST_EXTRA_ARGS: ${{ inputs.pytest_extra_args }}
           INPUTS_MAXTEXT_INSTALLED: ${{ inputs.maxtext_installed }}
           INPUTS_IS_UPDATE_HLO: ${{ inputs.is_update_hlo }}
+      - name: surface hang dump
+        if: always()
+        run: cat "$GITHUB_WORKSPACE/hang_watchdog_dump.txt" || true
       - name: Upload Reference HLO
         if: ${{ inputs.is_update_hlo }}
         uses: actions/upload-artifact@v4

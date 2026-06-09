@@ -1,3 +1,4 @@
-google-tunix @ https://github.com/google/tunix/archive/387072374f99a100cb11f99dec951940b1475a04.zip
+orbax-checkpoint @ https://github.com/google/orbax/archive/030a16419688ca45d95e92990aeeb93891e12ec0.zip#subdirectory=checkpoint
+google-tunix @ https://github.com/google/tunix/archive/44af800726dd5b2c5779a1987a9294f9a3eec9ef.zip
 tpu-inference @ https://github.com/vllm-project/tpu-inference/archive/a46baf9ee149da0fbc1cfe335650e3780e30b585.zip
 vllm @ git+https://github.com/vllm-project/vllm@a51376b3f05a2f74eac6ceeed7e52598b871a0fb

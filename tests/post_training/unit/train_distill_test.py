@@ -890,6 +890,8 @@ class TrainDistillTest(unittest.TestCase):
     teacher_config_1 = pyconfig.initialize(argv_run1, **global_config_1.teacher_overrides)
 
     # Execute first run
+    with open(os.environ["HANG_DUMP_FILE"], "a") as _f:
+      _f.write("\n>>> PHASE: RUN 1 -- train + save (step 1)\n")
     train_distill.train_distill(student_config_1, teacher_config_1)
 
     # Run 2: Resume and train up to step 2
@@ -908,6 +910,8 @@ class TrainDistillTest(unittest.TestCase):
       mock_restore.side_effect = side_effect
 
       # Execute second run
+      with open(os.environ["HANG_DUMP_FILE"], "a") as _f:
+        _f.write("\n>>> PHASE: RUN 2 -- restore step 1 + train to step 2\n")
       train_distill.train_distill(student_config_2, teacher_config_2)
 
       # Verify that restore was called and returned train_steps = 1
