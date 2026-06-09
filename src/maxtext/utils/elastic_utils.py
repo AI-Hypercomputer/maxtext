@@ -31,7 +31,7 @@ pending_elastic_event_type = None
 def record_elastic_event_start(recorder, config) -> None:
   """Records start of an elastic scale up event."""
   global pending_elastic_event_type
-  event_type = 'elastic_scale_up' if is_scale_up_event(config) else 'elastic_slice_down'
+  event_type = "elastic_scale_up" if is_scale_up_event(config) else "elastic_slice_down"
   pending_elastic_event_type = event_type
   if recorder:
     recorder.record_custom_badput_event_start_time(custom_badput_event_type=event_type)
@@ -46,7 +46,7 @@ def record_elastic_wait_end_and_reinit_start(recorder) -> None:
   pending_elastic_event_type = None
   if recorder:
     recorder.record_custom_badput_event_end_time(custom_badput_event_type=event_type)
-    recorder.record_custom_badput_event_start_time(custom_badput_event_type='elastic_reinitialization')
+    recorder.record_custom_badput_event_start_time(custom_badput_event_type="elastic_reinitialization")
   pending_reinit_recorder = recorder
 
 
@@ -54,15 +54,18 @@ def record_elastic_reinit_end() -> None:
   """Records end of elastic reinitialization event."""
   global pending_reinit_recorder
   if pending_reinit_recorder is not None:
-    pending_reinit_recorder.record_custom_badput_event_end_time(
-        custom_badput_event_type='elastic_reinitialization'
-    )
+    pending_reinit_recorder.record_custom_badput_event_end_time(custom_badput_event_type="elastic_reinitialization")
     pending_reinit_recorder = None
 
 
 def elastic_enabled(config) -> bool:
   """Returns whether elastic mode is enabled."""
   return pathwaysutils.is_pathways_backend_used() and config.elastic_enabled
+
+
+def should_use_elastic(config) -> bool:
+  """Returns whether elastic training should be used."""
+  return config is not None and elastic_enabled(config)
 
 
 def clean_up_checkpoints(checkpoint_dir: str):
@@ -102,7 +105,7 @@ def clean_up_checkpoints(checkpoint_dir: str):
 def ensure_elastic_manager_initialized(config):
   """Initializes elastic manager if it's not initialized and pathways is used."""
   global elastic_manager
-  if pathwaysutils.is_pathways_backend_used() and config.elastic_enabled and elastic_manager is None:
+  if should_use_elastic(config) and elastic_manager is None:
     elastic_manager = manager.Manager()
 
 
@@ -114,7 +117,7 @@ def get_local_batch_size(config) -> int:
 def live_devices(config=None):
   """Returns the list of live devices."""
   # If pathways is not used or elastic_manager is not initialized, return all devices
-  if pathwaysutils.is_pathways_backend_used() and config is not None:
+  if should_use_elastic(config):
     ensure_elastic_manager_initialized(config)
     assert elastic_manager is not None
     # Filter devices that are in active slices
