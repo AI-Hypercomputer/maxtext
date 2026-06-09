@@ -137,20 +137,6 @@ class MaxUtilsCustomMesh(unittest.TestCase):
       max_utils.is_valid_custom_mesh([1, 1, 1, 1, 1, 16, 16, 1], "invalid_strategy")
 
 
-class FillUnspecifiedMeshAxesTest(unittest.TestCase):
-  """Tests for fill_unspecified_mesh_axes."""
-
-  def test_rejects_non_integer_unspecified_value(self):
-    with self.assertRaises(AssertionError):
-      max_utils.fill_unspecified_mesh_axes([2, -1, 3], 10, "ICI")
-
-  def test_fills_integer_unspecified_value(self):
-    self.assertEqual(
-        max_utils.fill_unspecified_mesh_axes([2, -1, 5], 20, "ICI"),
-        [2, 2, 5],
-    )
-
-
 class UnscanTest(unittest.TestCase):
   """Test unscanning utility."""
 

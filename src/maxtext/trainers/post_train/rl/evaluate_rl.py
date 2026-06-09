@@ -19,7 +19,7 @@ RL Evaluation Module.
 import collections
 import json
 import re
-from typing import Any
+from typing import Any, Callable, Optional
 
 from tqdm.auto import tqdm
 from tunix.rl.rollout.base_rollout import RolloutConfig
@@ -183,6 +183,35 @@ def score_responses(tmvp_config, question, responses, answers):
   raise ValueError(f"Unknown eval_mode: {eval_mode!r}")
 
 
+def _compute_row_reward(reward_fns, prompt, responses, answer, row_idx):
+  """Sum the per-function reward scores across all sampled responses for one prompt.
+
+  Honors the sampling strategy `evaluate()` ran with: when `num_passes > 1`
+  (or when a non-greedy `eval_sampling_strategy` is configured),
+  `responses` contains one entry per pass for the same prompt, and this
+  helper sums the reward across all of them. The caller divides the
+  total by the number of (prompt, response) pairs to get the per-sample
+  mean reward, mirroring tunix's GRPO per-rollout reward aggregation.
+
+  Returns a tuple `(score_sum, n_responses)`. On any exception the
+  failure is logged and `(0.0, 0)` is returned so the caller's running
+  mean is not corrupted.
+  """
+  if not responses:
+    return 0.0, 0
+  try:
+    score_sum = 0.0
+    for resp in responses:
+      for fn in reward_fns:
+        scores = fn(prompts=[prompt], completions=[resp], answer=[answer])
+        if scores:
+          score_sum += float(scores[0])
+    return score_sum, len(responses)
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    max_logging.log(f"[eval-reward] reward_fn failed on row {row_idx}: {e!r}")
+    return 0.0, 0
+
+
 def evaluate(
     tmvp_config,
     dataset,
@@ -190,6 +219,7 @@ def evaluate(
     num_passes=1,
     corr_lst=False,
     make_lst=False,
+    reward_fns: Optional[list[Callable[..., Any]]] = None,
 ):
   """
   Computes accuracy and percentage of outputs matching the format.
@@ -201,15 +231,27 @@ def evaluate(
       num_passes: Number of generation passes
       corr_lst: If True, only include correct responses in the list
       make_lst: If True, return a list of (question, answer, responses)
+      reward_fns: Optional list of reward functions to also evaluate against
+          the sampled responses (using whichever `eval_sampling_strategy`
+          is configured). Each function must accept `prompts`,
+          `completions`, `answer`, and return a list of floats (same signature
+          as the training-time reward stack). When provided, the per-example
+          score is the SUM across all reward functions (matching tunix's GRPO
+          aggregation), and the per-example mean is returned as `mean_reward`.
+          When None or empty, `mean_reward` is 0.0.
 
   Returns:
-      Tuple of statistics and optionally the response list
+      Tuple (corr, total, accuracy, partial_accuracy, format_accuracy,
+      mean_reward), response_lst
   """
   response_lst = []
   corr = 0
   partially_corr = 0
   corr_format = 0
   total = 0
+  reward_sum = 0.0
+  reward_count = 0  # number of (prompt, sampled response) pairs scored
+  use_reward = bool(reward_fns)
 
   for batch in tqdm(dataset):
     answers = batch["answer"]
@@ -225,15 +267,25 @@ def evaluate(
     )
 
     # Score each question-answer pair
-    for question, responses, answer in zip(questions, multiple_call_responses, answers):
+    for question, responses, answer, prompt in zip(questions, multiple_call_responses, answers, prompts):
       # decode the json-encoded list of acceptable answers
-      answer = list(dict.fromkeys(json.loads(answer)))
+      answer_list = list(dict.fromkeys(json.loads(answer)))
       is_correct, is_partially_correct, has_correct_format = score_responses(
           tmvp_config=tmvp_config,
           question=question,
           responses=responses,
-          answers=answer,
+          answers=answer_list,
       )
+
+      # Per-example reward (eval-time mirror of the training reward). The
+      # total is accumulated across all sampled responses (across num_passes
+      # and across the eval_sampling_strategy distribution) and divided by
+      # the actual per-(prompt, response) count at the end. See
+      # `_compute_row_reward` for details.
+      if use_reward:
+        row_sum, row_count = _compute_row_reward(reward_fns, prompt, responses, answer, total)
+        reward_sum += row_sum
+        reward_count += row_count
 
       # Update counters. For "pass" and "maj" modes, scores are booleans
       # (True=1, False=0). For "pass_at_1" mode, scores are floats in [0, 1]
@@ -245,9 +297,9 @@ def evaluate(
 
       if make_lst:
         if corr_lst and is_correct:
-          response_lst.append((question, answer, responses))
+          response_lst.append((question, answer_list, responses))
         elif not corr_lst and not is_correct:
-          response_lst.append((question, answer, responses))
+          response_lst.append((question, answer_list, responses))
 
       total += 1
 
@@ -265,6 +317,7 @@ def evaluate(
       corr / total * 100 if total > 0 else 0,
       partially_corr / total * 100 if total > 0 else 0,
       corr_format / total * 100 if total > 0 else 0,
+      reward_sum / reward_count if (use_reward and reward_count > 0) else 0.0,
   )
 
   return to_return, response_lst

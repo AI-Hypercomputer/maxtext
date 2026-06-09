@@ -578,7 +578,7 @@ def create_rl_components(
         algo_config=grpo_config,
     )
 
-  return rl_cluster, rl_trainer, optimizer
+  return rl_cluster, rl_trainer, optimizer, reward_fns
 
 
 def rl_train(argv: Sequence[str], kwargs: dict):
@@ -674,7 +674,7 @@ def _rl_train_impl(argv: Sequence[str], kwargs: dict):
     max_logging.log(f"Policy mesh shape: {actor_mesh.shape}")
     max_logging.log(f"Rollout_mesh shape: {rollout_mesh.shape}")
 
-  rl_cluster, rl_trainer, _ = create_rl_components(
+  rl_cluster, rl_trainer, _, reward_fns = create_rl_components(
       trainer_config,
       sampler_config,
       sampler_devices,
@@ -692,16 +692,18 @@ def _rl_train_impl(argv: Sequence[str], kwargs: dict):
     # Update vllm with model parameters from checkpoint
     rl_cluster.rollout.update_params(nnx.state(actor_model))
 
-    (corr, total, accuracy, partial_accuracy, format_accuracy), _ = evaluate(
+    (corr, total, accuracy, partial_accuracy, format_accuracy, mean_reward), _ = evaluate(
         trainer_config,
         test_dataset,
         rl_cluster=rl_cluster,
         num_passes=trainer_config.num_eval_passes,
         corr_lst=trainer_config.eval_corr_lst,
         make_lst=trainer_config.eval_make_lst,
+        reward_fns=reward_fns,
     )
     max_logging.warning(
-        f"Pre RL Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%," f" {format_accuracy=}%"
+        f"Pre RL Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%,"
+        f" {format_accuracy=}%, {mean_reward=:.4f}"
     )
 
   # Start training
@@ -711,7 +713,7 @@ def _rl_train_impl(argv: Sequence[str], kwargs: dict):
 
   # Wire intermediate eval: fire greedy `evaluate(...)` every `eval_interval`
   # outer steps. No-op when eval_interval <= 0 or num_test_batches <= 0.
-  utils_rl.install_training_hooks(rl_cluster, trainer_config, test_dataset)
+  utils_rl.install_training_hooks(rl_cluster, trainer_config, test_dataset, reward_fns)
 
   max_logging.warning("Starting RL training...")
   rl_trainer.train(train_dataset)
@@ -728,16 +730,18 @@ def _rl_train_impl(argv: Sequence[str], kwargs: dict):
 
   # Run evaluation after training
   if trainer_config.num_test_batches > 0:
-    (corr, total, accuracy, partial_accuracy, format_accuracy), _ = evaluate(
+    (corr, total, accuracy, partial_accuracy, format_accuracy, mean_reward), _ = evaluate(
         trainer_config,
         test_dataset,
         rl_cluster=rl_cluster,
         num_passes=trainer_config.num_eval_passes,
         corr_lst=trainer_config.eval_corr_lst,
         make_lst=trainer_config.eval_make_lst,
+        reward_fns=reward_fns,
     )
     max_logging.warning(
-        f"Post RL Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%," f" {format_accuracy=}%"
+        f"Post RL Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%,"
+        f" {format_accuracy=}%, {mean_reward=:.4f}"
     )
 
 

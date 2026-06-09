@@ -54,8 +54,8 @@ class RLTrainingHooksTest(unittest.TestCase):
     eval_patcher = mock.patch.object(rl_hooks, "evaluate")
     self.mock_evaluate = eval_patcher.start()
     self.addCleanup(eval_patcher.stop)
-    # evaluate(...) returns ((corr, total, acc, partial_acc, fmt_acc), _).
-    self.mock_evaluate.return_value = ((1, 2, 50.0, 50.0, 100.0), None)
+    # evaluate(...) returns ((corr, total, acc, partial_acc, fmt_acc, mean_reward), _).
+    self.mock_evaluate.return_value = ((1, 2, 50.0, 50.0, 100.0, 0.42), None)
 
   def _build_hook(self, eval_interval=10, global_steps=0):
     cluster = _make_rl_cluster(global_steps=global_steps)
@@ -107,6 +107,21 @@ class RLTrainingHooksTest(unittest.TestCase):
     hook = rl_hooks.RLTrainingHooks(bad_cluster, cfg, test_dataset=None, eval_interval=10)
     hook.on_train_step_end(trainer=None, step=10, loss=None)
     self.mock_evaluate.assert_called_once()
+
+  def test_reward_fns_plumbed_to_evaluate(self):
+    """`reward_fns` passed to the hook is forwarded to evaluate(...)."""
+    cluster = _make_rl_cluster(global_steps=10)
+    cfg = _make_trainer_config(eval_interval=10)
+    sentinel_reward_fns = [lambda **kw: [1.0]]
+    hook = rl_hooks.RLTrainingHooks(cluster, cfg, test_dataset=None, eval_interval=10, reward_fns=sentinel_reward_fns)
+    hook.on_train_step_end(trainer=None, step=10, loss=None)
+    self.assertIs(self.mock_evaluate.call_args.kwargs["reward_fns"], sentinel_reward_fns)
+
+  def test_reward_fns_default_none(self):
+    """When `reward_fns` is omitted, evaluate(...) gets reward_fns=None."""
+    hook = self._build_hook(eval_interval=10, global_steps=10)
+    hook.on_train_step_end(trainer=None, step=10, loss=None)
+    self.assertIsNone(self.mock_evaluate.call_args.kwargs["reward_fns"])
 
 
 class InstallTrainingHooksTest(unittest.TestCase):
