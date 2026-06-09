@@ -455,7 +455,7 @@ def fill_unspecified_mesh_axes(parallelism_vals, target_product, parallelism_typ
     determined_val = target_product / np.prod(parallelism_vals) * -1
 
     assert (
-        determined_val >= 1 and determined_val.is_integer
+        determined_val >= 1 and determined_val.is_integer()
     ), f"Unspecified value unable to be determined with the given\
       {parallelism_type} parallelism values"
 
