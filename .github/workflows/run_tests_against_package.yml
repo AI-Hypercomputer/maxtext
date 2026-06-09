@@ -178,6 +178,12 @@ jobs:
             fi
             echo "Final LD_LIBRARY_PATH: ${LD_LIBRARY_PATH}"
             echo "======================="
+
+            # Configure NCCL for stable single-node communication in Docker containers
+            export NCCL_SOCKET_IFNAME=lo
+            export NCCL_NET_GDR_LEVEL=0
+            export NCCL_DEBUG=INFO
+            echo "Set NCCL_SOCKET_IFNAME=lo, NCCL_NET_GDR_LEVEL=0, and NCCL_DEBUG=INFO for GPU execution."
           fi
           if [ "${INPUTS_TOTAL_WORKERS}" -gt 1 ]; then
             $PYTHON_EXE -m pip install --quiet pytest-split pytest-xdist
