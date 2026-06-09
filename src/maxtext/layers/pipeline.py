@@ -855,12 +855,8 @@ class NNXPipeline(NNXPipelineBase):
 
     loop_state = self.init_states(inputs)
 
-    # MISS-1: Output shape assumes decoder-only models (micro_batch_size_to_train_on,
-    # max_target_length, emb_dim). After the use_nnx_pipeline flag was removed, ToLinen-NNX
-    # is the only path through create_pipeline — there is no native-Linen alternative that
-    # would compute the output shape generically. If pipeline parallelism is reused for
-    # encoder/seq2seq, this short-circuit must be updated to compute shape from the stage's
-    # abstract eval rather than hardcoding the decoder shape.
+    # During Linen init, skip the pipeline compute
+    # and return a zeros placeholder with the output shape.
     if is_linen_initializing():
       return jnp.zeros(
           (self.config.micro_batch_size_to_train_on, self.config.max_target_length, self.config.emb_dim),
@@ -974,24 +970,23 @@ class NNXPipeline(NNXPipelineBase):
 
 
 class NNXCircularPipeline(NNXPipelineBase):
-  """
-  Uses ``flax.core.lift.scan`` over REPEATS with ``flax.core.lift.checkpoint``
-  wrapping a stage function that CONTAINS ``jax.lax.scan`` over microbatches.
+  """Implements an circular pipeline schedule with asynchronous weight prefetching.
 
-  All JAX arrays are placed into Linen scope collections. The scan body reads
-  from scope, calls standalone functions, and writes back. No NNX module with
-  JAX array attributes is captured in any closure crossing transform boundaries.
-
+  Circular pipelining reduces the pipeline "bubble" by interleaving multiple pipeline
+  stages on the same physical devices. To hide the communication overhead of Fully
+  Sharded Data Parallelism (FSDP), this module utilizes a Buffer Sliding Window (BSW)
+  to prefetch and all-gather the weights for the *next* pipeline repeat while the
+  *current* repeat is executing.
   """
 
   def get_main_vmap_func_for_iterations(self):
-    """Override: vmap returns only non-param state to avoid stacking params across stages.
-
-    Captures via self: spmd_axis_name (str or None) -- Python object, safe.
+    """
+    Returns main stage function vmapped by number of stages.
+    This becomes a vmap over a single layer instance if body_instance is a single layer,
+    else a set of layers if body_instance is a set of layers.
     """
 
     def func_to_vmap(graph, state, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode):
-      # Captures: nothing from outer scope (all args are positional).
       module = nnx.merge(graph, state)
       out = module(stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
       _, _, updated_metrics, updated_mutables = nnx.split(module, pipeline_utils.is_static_param, nnx.Intermediate, ...)
@@ -1006,10 +1001,8 @@ class NNXCircularPipeline(NNXPipelineBase):
     return jax.vmap(func_to_vmap, **vmap_kwargs)
 
   def gather_microbatch_inputs_vmap(self, xs, ids, ids_dim):
-    """Slices out specific sequence inputs for the current microbatch.
+    """Slices out the specific sequence inputs (e.g., positions, segments) for the current microbatch."""
 
-    Captures via self: mesh (Python), config.shard_mode (Python enum) -- safe.
-    """
     if xs is None:
       return None
 
@@ -1017,7 +1010,6 @@ class NNXCircularPipeline(NNXPipelineBase):
     ndim = xs.ndim
 
     def _gather_one(x, i):
-      # Captures: ndim (int), ids_dim (int), self.mesh (Python), self.config (Python) -- safe.
       idx = tuple(i if d == ids_dim else slice(None) for d in range(ndim))
       positions_sharding = (
           create_sharding(self.mesh, (None, "layers", "activation_length"))
@@ -1029,13 +1021,9 @@ class NNXCircularPipeline(NNXPipelineBase):
     return jax.vmap(_gather_one, in_axes=(None, 0), out_axes=ids_dim)(xs, ids)
 
   def gather_weights_across_stages_vmap(self, weights_state, repeat_ids, repeat_dim_in_weights, stages_dim_in_weights):
-    """Uses jax.vmap to dynamically slice and gather weights for specific pipeline repeats.
-
-    Captures via self: nothing (self not used in inner function).
-    """
+    """Uses jax.vmap to dynamically slice and gather weights for specific pipeline repeats."""
 
     def _gather_repeat_leaf(w_leaf, rep_id):
-      # Captures: repeat_dim_in_weights (int) -- safe.
       if w_leaf is None:
         return None
       return jnp.squeeze(
@@ -1046,11 +1034,7 @@ class NNXCircularPipeline(NNXPipelineBase):
     return jax.tree.map(lambda w: vmap_gather(w, repeat_ids) if w is not None else None, weights_state)
 
   def from_all_variables_to_repeat_weights(self, weights_state, loop_iteration):
-    """Slices out the specific repeat's weights from the full weights state.
-
-    Captures via self: config (Python), mesh (Python), forwarding_delay (int),
-    num_stages (int) -- all Python, safe.
-    """
+    """Gathers weights corresponding to the repeat IDs for current iteration."""
     if self.config.num_pipeline_repeats == 1:
       return weights_state
 
@@ -1068,10 +1052,7 @@ class NNXCircularPipeline(NNXPipelineBase):
       # TODO (chengnuojin) set use_shardmap=true after JAX >= 10.0.0 and use all_gather(..., to='invarying')
       use_shardmap=False,  # using shardmap produces additional reduce-scatter in backward pass
   ):
-    """Executes the FSDP-like all-gathers to fully materialize a block of weights for the BSW.
-
-    Captures via self: mesh (Python), config (Python) -- safe.
-    """
+    """Executes the FSDP-like all-gathers to fully materialize a block of weights for the BSW."""
     axes_to_remove = ["fsdp", "fsdp_transpose", "context"]
     if physical_partition_spec is not None:
       bsw_partition_specs = pipeline_utils.derive_stage_weight_partition_specs(physical_partition_spec, axes_to_remove)
@@ -1083,13 +1064,13 @@ class NNXCircularPipeline(NNXPipelineBase):
         physical_partition_spec,
         axes_to_gather,
     ):
-      # Captures: self.mesh (Python), bsw_partition_specs (PartitionSpec pytree -- Python) -- safe.
       repeat_weights_partition_specs = jax.tree.map(
           lambda p: P(*p[1:]) if isinstance(p, P) else p,
           physical_partition_spec,
           is_leaf=pipeline_utils.is_spec_leaf,
       )
 
+      # Dynamically gather the index pytrees for all specified axes
       axis_indices_dict = {
           axis: pipeline_utils.get_mesh_axis_dim_indices(physical_partition_spec, axis) for axis in axes_to_gather
       }
@@ -1098,9 +1079,10 @@ class NNXCircularPipeline(NNXPipelineBase):
       axis_pytrees = list(axis_indices_dict.values())
 
       def should_skip_gather(axis_name, path_keys):
-        # Captures: nothing (pure function on args).
+        """Defines specific rule-based exceptions for gathering certain axes."""
         if axis_name == "expert" and "MoeBlock_0" in path_keys:
           return True
+        # Add more exclusion rules for other axes here if needed in the future
         return False
 
       weights_treedef = jax.tree.structure(repeat_weights)
@@ -1119,11 +1101,12 @@ class NNXCircularPipeline(NNXPipelineBase):
           check_vma=False,
       )
       def _shard_map_gather_weights(sharded_weights, indices_pytrees_list):
-        # Captures: axis_names (list[str]), should_skip_gather (function) -- safe.
 
+        # Renamed to clarify we are gathering a single tensor iteratively along requested axes
         def _gather_tensor_along_axes(path, x, *indices):
           path_keys = [getattr(p, "key", str(p)) for p in path]
 
+          # Iterate through the provided axes and their corresponding indices
           for axis_name, axis_idx in zip(axis_names, indices):
             if axis_idx >= 0 and not should_skip_gather(axis_name, path_keys):
               x = jax.lax.all_gather(x, axis_name=axis_name, axis=axis_idx - 1, tiled=True)
@@ -1135,8 +1118,6 @@ class NNXCircularPipeline(NNXPipelineBase):
       return weights_treedef.unflatten(jax.tree.leaves(raw_bsw))
 
     def _from_repeat_weights_to_bsw_hint(repeat_weights):
-      # Captures: bsw_partition_specs (PartitionSpec pytree -- Python), self.mesh (Python),
-      # self.config (Python) -- safe.
       def _apply_sharding_hint(weight, pspec):
         if pspec is None or weight is None:
           return weight
@@ -1161,25 +1142,23 @@ class NNXCircularPipeline(NNXPipelineBase):
     return _from_repeat_weights_to_bsw_hint(repeat_weights)
 
   def weight_prefetching(self, weights_state, physical_partition_spec, loop_iteration):
-    """Prefetch next repeat's weights for the Buffer Sliding Window.
+    """Triggers asynchronous FSDP-like all-gathers for the next pipeline steps.
 
-    Captures via self: config (Python), mesh (Python) -- safe.
+    By gathering weights for `loop_iteration + 1` right now, the network communication
+    can overlap with the compute happening in `loop_iteration`.
     """
     next_repeat_weights = self.from_all_variables_to_repeat_weights(weights_state, loop_iteration + 1)
     return self.from_repeat_weights_to_bsw(next_repeat_weights, physical_partition_spec)
 
   def fetch_active_stage_weights(self, bsw, loop_iteration, physical_partition_spec=None):
-    """Fetches actively prefetched weights from BSW.
-
-    Captures via self: config (Python), mesh (Python) -- safe.
+    """The module fetches the actively prefetched weights
+    from the Buffer Sliding Window to avoid mid-iteration FSDP all-gathers.
     """
     return self.get_current_weights_from_bsw(bsw, loop_iteration, physical_partition_spec)
 
   def get_current_weights_from_bsw(self, bsw, loop_iteration, physical_partition_spec):
-    """Pulls the fully gathered parameters for the current repeat from BSW dual-buffer.
+    """Pulls the fully gathered parameters for the current repeat from the BSW dual-buffer."""
 
-    Captures via self: config (Python), mesh (Python) -- safe.
-    """
     if bsw[0] is bsw[1]:
       treedef = jax.tree.structure(bsw[0])
       leaves = jax.tree.leaves(bsw[0])
@@ -1212,9 +1191,6 @@ class NNXCircularPipeline(NNXPipelineBase):
           check_vma=True,
       )
       def select_weights_from_bsw(bsw_inner, repeat_id):
-        # Captures: stage0_repeat_id (JAX scalar from outer scope -- but this is
-        # inside shard_map which is itself inside the scan body, and
-        # stage0_repeat_id is computed from loop_iteration which comes from scope).
         return jax.tree.map(
             lambda first_slot, second_slot: jax.lax.select(repeat_id[0] == stage0_repeat_id, second_slot, first_slot),
             bsw_inner[0],
@@ -1226,7 +1202,6 @@ class NNXCircularPipeline(NNXPipelineBase):
     else:
 
       def select_weights_from_bsw(bsw_inner, repeat_id):
-        # Captures: stage0_repeat_id (JAX scalar) -- same as above.
         return jax.tree.map(
             lambda first_slot, second_slot: jax.lax.select(repeat_id == stage0_repeat_id, second_slot, first_slot)
             if first_slot is not None
@@ -1250,12 +1225,18 @@ class NNXCircularPipeline(NNXPipelineBase):
       segment_ids,
       deterministic,
       model_mode,
-      logical_partition_spec,
+      logical_partition_spec=None,
   ):
-    """Executes the forward/backward logic for a single microbatch inside the circular pipeline.
+    """Run one loop iteration - gets weights and inputs for each stage, run the stages in parallel,
+    and update the loop state.
 
-    Captures via self: config (Python), mesh (Python), shard helpers (methods) -- safe.
-    All JAX data passed as arguments.
+    Args:
+      loop_state: Dictionary containing the current state of the pipeline (state_io, shift, etc.)
+      positions: Positional encodings.
+      segment_ids: Segment IDs for packed sequences.
+      deterministic: Boolean indicating if execution should be deterministic (e.g. for dropout).
+      model_mode: Current model mode (train/predict).
+      logical_partition_spec: Logical partition specification for weights.
     """
     state_io = loop_state["state_io"]
     shift = loop_state["shift"]
@@ -1315,7 +1296,6 @@ class NNXCircularPipeline(NNXPipelineBase):
     if self.config.num_pipeline_repeats > 1:
 
       def _scatter_update_mutables(full_tree, updated_tree):
-        # Captures: repeat_ids (JAX array from current scope), self (Python objects) -- safe.
         if full_tree is None or updated_tree is None:
           return full_tree
 
@@ -1345,14 +1325,8 @@ class NNXCircularPipeline(NNXPipelineBase):
       model_mode=MODEL_MODE_TRAIN,
       logical_partition_spec=None,
   ) -> jnp.ndarray:
-    """V65: Uses flax.core.lift.scan + lift.checkpoint with all state in scope.
+    """Entry point for the Circular Pipeline Module. Sets up microbatch schedules and executes scans."""
 
-    Architecture:
-      lift.scan(REPEATS) -> lift.checkpoint(stage_fn containing jax.lax.scan(MICROBATCHES))
-
-    All JAX arrays read from Linen scope inside the stage function.
-    NO NNX module captured in any closure crossing transform boundaries.
-    """
     inputs = inputs.reshape(
         (
             self.config.num_pipeline_microbatches,
@@ -1464,32 +1438,6 @@ class NNXCircularPipeline(NNXPipelineBase):
     # ---- BSW mutable ref (closure, NOT carry -- carry would OOM) ----
     bsw_ref = [None]
 
-    # ---- Stage function for lift.scan + lift.checkpoint ----
-    #
-    # CLOSURE AUDIT (V65 fixed):
-    #   - ctx (_PipelineContext): NOT a JAX pytree. Holds bound methods only. SAFE.
-    #   - layers_graph (GraphDef): @register_static, no JAX arrays. SAFE.
-    #   - param_keys/mutables_keys/metrics_keys/input_keys: lists of strings. SAFE.
-    #   - param_treedef/mutables_treedef/metrics_treedef: PyTreeDef (Python). SAFE.
-    #   - param_is_var/mutables_is_var/metrics_is_var: lists of bool. SAFE.
-    #   - param_var_types/mutables_var_types/metrics_var_types: lists of Python types. SAFE.
-    #   - param_meta/mutables_meta/metrics_meta: lists of dicts (Python metadata only,
-    #     NO nnx.Variable refs, NO JAX arrays). SAFE.
-    #   - physical_partition_spec_full: PartitionSpec pytree (Python). SAFE.
-    #   - logical_partition_spec_stripped: PartitionSpec pytree (Python). SAFE.
-    #   - remat_policy: Python callable. SAFE.
-    #   - bsw_ref: Python mutable list (contents set from scope inside body). SAFE.
-    #   - num_microbatches, bubble_iterations: Python int. SAFE.
-    #   - deterministic, model_mode: Python bool/str. SAFE.
-    #   - _flatten_nnx_state, _unflatten_nnx_state, etc.: module-level functions. SAFE.
-    #
-    # REMOVED from closure (vs V64):
-    #   - self (NNX module = JAX pytree with tracer arrays) → replaced by ctx
-    #   - param_meta/mutables_meta/metrics_meta (nnx.Variable refs with tracer .raw_value)
-    #     → replaced by param_meta/mutables_meta/metrics_meta (Python-only dicts)
-    #
-    # VERDICT: ZERO JAX pytree objects in closure. All JAX data from scope reads.
-
     def _stage_fn_for_scope(scope, carry):
       """One repeat: prefetch w_next, run microbatch scan, return updated carry.
 
@@ -1521,32 +1469,12 @@ class NNXCircularPipeline(NNXPipelineBase):
           cur_mutables_arrays, mutables_treedef, mutables_is_var, mutables_var_types, mutables_meta
       )
 
-      # Weight prefetching moved into Level 3 custom_vjp (_execute_stage_fwd).
-      # bsw_ref no longer needed — BSW constructed inside _execute_stage_fwd.
-
-      # ---- Level 1: Per-microbatch custom_vjp (opaque barrier to partial eval) ----
-      # Defined LOCALLY so all JAX captures come from scope reads above.
-      #
-      # CLOSURE AUDIT for _run_iter_local:
-      #   - self: NNXCircularPipeline -- attributes are Python objects -- SAFE.
-      #   - layers_graph: GraphDef -- no JAX arrays -- SAFE.
-      #   - local_layers_metrics: reconstructed from scope-provided arrays -- at CURRENT trace level -- SAFE.
-      #   - local_positions, local_segment_ids: from scope -- at CURRENT trace level -- SAFE.
-      #   - deterministic, model_mode: Python -- SAFE.
-      #   - logical_partition_spec_stripped: PartitionSpec pytree (Python) -- SAFE.
-      #   - remat_policy: Python callable -- SAFE.
-      #   - bsw_ref: Python list (contents set from scope) -- SAFE.
-      #
-      # VERDICT: No stale outer-trace JAX arrays captured. All JAX data from scope reads or args.
-
       @jax.custom_vjp
       def _run_iter_local(loop_state_arg, bsw_arg, mutables_arg, metrics_arg, positions_arg, segment_ids_arg):
         return _run_iter_local_fwd(loop_state_arg, bsw_arg, mutables_arg, metrics_arg, positions_arg, segment_ids_arg)[0]
 
       def _run_iter_local_fwd(loop_state_arg, bsw_arg, mutables_arg, metrics_arg, positions_arg, segment_ids_arg):
         def _run(loop_state, bsw):
-          # Captures: ctx (_PipelineContext, NOT pytree), layers_graph (GraphDef),
-          # deterministic/model_mode (Python), logical_partition_spec_stripped (Python).
           return ctx.run_one_iteration(
               loop_state,
               bsw,
@@ -1565,7 +1493,6 @@ class NNXCircularPipeline(NNXPipelineBase):
         return (new_loop_state, new_layer_state), vjp_fn
 
       def _run_iter_local_bwd(vjp_fn, output_grads):
-        # Captures: nothing beyond vjp_fn (residuals from fwd) -- SAFE.
         output_grad_loop_state, output_grad_layer_state = output_grads
         input_grad_loop_state, input_grad_bsw = vjp_fn((output_grad_loop_state, output_grad_layer_state))
         # Mutables, metrics, positions, segment_ids have no gradient (stop_gradient or non-differentiable).
@@ -1793,18 +1720,6 @@ class NNXCircularPipeline(NNXPipelineBase):
     # ---- Bubble iterations (pipeline drain) ----
     if bubble_iterations > 0:
       bsw_ref[0] = (final_w_curr, final_w_curr)
-
-      # Bubble custom_vjp -- defined outside scope since bubble runs without lift.scan.
-      # CLOSURE AUDIT:
-      #   - self: Python attrs -- SAFE.
-      #   - layers_graph: GraphDef -- SAFE.
-      #   - layers_metrics: NNX state from OUTER scope. This is OK for bubble iterations
-      #     because they run AFTER the lift.scan completes, at the outer trace level.
-      #   - positions, segment_ids: JAX arrays from outer scope -- same trace level -- SAFE.
-      #   - deterministic, model_mode: Python -- SAFE.
-      #   - logical_partition_spec_stripped: Python -- SAFE.
-      #   - remat_policy: Python -- SAFE.
-      #   - bsw_ref: Python list, contents set to (final_w_curr, final_w_curr) -- SAFE.
 
       @jax.custom_vjp
       def _run_iter_bubble(
