@@ -309,11 +309,16 @@ class Decoder(nn.Module):
       remat_policy = self.get_remat_policy()
       nnx_blocks = self._get_nnx_decoder_block_classes()
 
-      def stage_factory(rngs):
+      # Per-stage builder handed to create_pipeline: the pipeline transform invokes it
+      # once per pipeline stage, passing that stage's rngs, to construct the stage's
+      # decoder block(s). nnx_blocks (the selected decoder block classes) is captured from
+      # this setup scope; remat_policy is applied separately by create_pipeline.
+      def build_pipeline_stage_layers(rngs):
+        """Builds one pipeline stage module from the selected NNX decoder block classes."""
         return self._build_nnx_pipeline_stage(nnx_blocks, rngs)
 
       self.pipeline_module = pipeline.create_pipeline(
-          config=self.config, layers=stage_factory, mesh=self.mesh, remat_policy=remat_policy
+          config=self.config, layers=build_pipeline_stage_layers, mesh=self.mesh, remat_policy=remat_policy
       )
 
   def minimal_policy(self, with_context=False, with_quantization=False):
@@ -1356,10 +1361,16 @@ class Decoder(nn.Module):
         decoder_positions,
         deterministic,
         model_mode,
-        slot,
-        previous_chunk,
-        bidirectional_mask,
     )
+
+    # Pass slot/previous_chunk/bidirectional_mask by keyword only (via layer_call_kwargs),
+    # never positionally in broadcast_args: Gemma4DecoderLayer and Gemma4ScannableBlock
+    # declare slot and previous_chunk in swapped order, so positional passing misroutes them.
+    layer_call_kwargs = {
+        "slot": slot,
+        "previous_chunk": previous_chunk,
+        "bidirectional_mask": bidirectional_mask,
+    }
 
     if num_full_blocks > 0:
       ScannableBlockToLinen = gemma4.Gemma4ScannableBlockToLinen
@@ -1390,7 +1401,7 @@ class Decoder(nn.Module):
           num_of_layers=block_pattern_len,
           name="scanned_blocks",
       )(
-          y, *broadcast_args
+          y, *broadcast_args, **layer_call_kwargs
       )
 
     # Process any remaining layers that don't fit into a full scanned block
@@ -1404,7 +1415,7 @@ class Decoder(nn.Module):
           attention_type=attention_type,
           layer_idx=layer_id,
       )
-      y = layer(y, *broadcast_args)
+      y = layer(y, *broadcast_args, **layer_call_kwargs)
       if cfg.scan_layers:
         y = y[0]
 
