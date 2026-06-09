@@ -721,6 +721,130 @@ class RoutedMoeTest(unittest.TestCase):
     self._run_ragged_sort_loss_and_grad(use_ring_of_experts=False)
 
   @pytest.mark.tpu_only
+  @pytest.mark.skip_on_tpu7x
+  def test_ragged_sort_with_ragged_buffer_factor_ring_of_experts(self):
+    """Verify ragged_buffer_factor works with ring-of-experts + ragged sort.
+
+    Uses a generous ragged_buffer_factor (4.0) so that no tokens should be
+    dropped with the small test sizes. Compares the loss and gradients
+    against a reference run without ragged sort to verify correctness.
+    """
+    device_count = jax.device_count()
+
+    def _build_cfg(use_ragged_sort: bool, ragged_buffer_factor: float = -1.0):
+      return pyconfig.initialize(
+          [None, get_test_config_path()],
+          run_name=(f"moe_ragged_buffer_factor_{ragged_buffer_factor}" f"_ragged_sort_{use_ragged_sort}_test"),
+          enable_checkpointing=False,
+          model_name="mixtral-8x7b",
+          override_model_config=True,
+          base_emb_dim=256,
+          base_mlp_dim=256,
+          base_moe_mlp_dim=256,
+          dtype="bfloat16",
+          megablox=True,
+          sparse_matmul=True,
+          per_device_batch_size=4,
+          ici_expert_parallelism=2,
+          use_ring_of_experts=True,
+          max_target_length=128,
+          use_ragged_sort=use_ragged_sort,
+          ragged_buffer_factor=ragged_buffer_factor,
+      )
+
+    def _build_model(cfg, mesh):
+      return moe.get_routed_moe(
+          name="MoeBlock",
+          config=cfg,
+          num_experts=cfg.num_experts,
+          num_experts_per_tok=cfg.num_experts_per_tok,
+          mesh=mesh,
+          kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+          kernel_axes=("embed", "mlp"),
+          intermediate_dim=cfg.mlp_dim,
+          dtype=cfg.dtype,
+      )
+
+    def _loss_and_grad(model, variables, hidden_states):
+      def loss_fn(params, x):
+        out, lb_loss, _ = model.apply({"params": params}, x)
+        loss = jnp.mean(out.astype(jnp.float32) ** 2)
+        if lb_loss is not None:
+          loss = loss + lb_loss.astype(jnp.float32)
+        return loss
+
+      return jax.jit(jax.value_and_grad(loss_fn, argnums=(0, 1)))(variables["params"], hidden_states)
+
+    rng = jax.random.PRNGKey(2345)
+    rng_model, rng_hidden_states = jax.random.split(rng)
+
+    # Reference: use_ragged_sort=False
+    cfg_ref = _build_cfg(use_ragged_sort=False)
+    hidden_states = jax.random.uniform(
+        rng_hidden_states,
+        (
+            int(cfg_ref.per_device_batch_size) * device_count,
+            cfg_ref.max_target_length,
+            cfg_ref.base_emb_dim,
+        ),
+        dtype=cfg_ref.dtype,
+    )
+    devices_array_ref = maxtext_utils.create_device_mesh(cfg_ref)
+    mesh_ref = Mesh(devices_array_ref, cfg_ref.mesh_axes)
+    model_ref = _build_model(cfg_ref, mesh_ref)
+    with jax.set_mesh(mesh_ref), nn_partitioning.axis_rules(cfg_ref.logical_axis_rules):
+      variables = model_ref.init({"params": rng_model, "dropout": rng_model}, hidden_states)
+      loss_ref, (grads_ref, x_grad_ref) = _loss_and_grad(model_ref, variables, hidden_states)
+
+    # Target: use_ragged_sort=True with ragged_buffer_factor=4.0
+    cfg_rbf = _build_cfg(use_ragged_sort=True, ragged_buffer_factor=4.0)
+    devices_array_rbf = maxtext_utils.create_device_mesh(cfg_rbf)
+    mesh_rbf = Mesh(devices_array_rbf, cfg_rbf.mesh_axes)
+    model_rbf = _build_model(cfg_rbf, mesh_rbf)
+    with jax.set_mesh(mesh_rbf), nn_partitioning.axis_rules(cfg_rbf.logical_axis_rules):
+      loss_rbf, (grads_rbf, x_grad_rbf) = _loss_and_grad(model_rbf, variables, hidden_states)
+
+    # Loss correctness
+    self.assertTrue(
+        jnp.allclose(loss_rbf, loss_ref, rtol=1e-2, atol=1e-2),
+        msg=f"Loss mismatch: ragged_buffer_factor={loss_rbf} ref={loss_ref}",
+    )
+
+    # Hidden-state gradient correctness
+    self.assertEqual(x_grad_ref.shape, x_grad_rbf.shape, "Hidden-state grad shape mismatch")
+    self.assertTrue(
+        jnp.allclose(
+            x_grad_rbf.astype(jnp.float32),
+            x_grad_ref.astype(jnp.float32),
+            rtol=1e-2,
+            atol=1e-2,
+        ),
+        msg=(
+            "Hidden-state gradient mismatch: max abs diff="
+            f"{jnp.max(jnp.abs(x_grad_rbf.astype(jnp.float32) - x_grad_ref.astype(jnp.float32)))}"
+        ),
+    )
+
+    # Parameter gradient correctness
+    leaves_ref, treedef_ref = jax.tree_util.tree_flatten(grads_ref)
+    leaves_rbf, treedef_rbf = jax.tree_util.tree_flatten(grads_rbf)
+    self.assertEqual(treedef_ref, treedef_rbf, "Gradient pytree structures differ")
+    for i, (g_ref, g_rbf) in enumerate(zip(leaves_ref, leaves_rbf)):
+      self.assertEqual(g_ref.shape, g_rbf.shape, f"Grad shape mismatch at leaf {i}")
+      self.assertTrue(
+          jnp.allclose(
+              g_rbf.astype(jnp.float32),
+              g_ref.astype(jnp.float32),
+              rtol=1e-2,
+              atol=1e-2,
+          ),
+          msg=(
+              f"Gradient mismatch at leaf {i} (shape={g_ref.shape}): "
+              f"max abs diff={jnp.max(jnp.abs(g_rbf.astype(jnp.float32) - g_ref.astype(jnp.float32)))}"
+          ),
+      )
+
+  @pytest.mark.tpu_only
   def test_moe_fsdp_two_stage_parallelism_tpu_only(self):
     # Use an imperative skip inside the test method instead of a static decorator.
     # Calling jax.device_count() in @unittest.skipIf would force JAX initialization

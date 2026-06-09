@@ -787,6 +787,19 @@ class RoutedMoE(nnx.Module):
     use_ragged_in_permute = self.config.use_ragged_sort and self.config.use_ring_of_experts
     if use_ragged_in_permute:
       topk_indices_2d = jnp.reshape(selected_experts, (bsz_times_seq_len, selected_experts.shape[2]))
+      # Compute max_output_size from ragged_buffer_factor when set.
+      # The full output would be bsz_times_seq_len * topk rows; the
+      # balanced load per EP shard is bsz_times_seq_len * topk / ep_size.
+      if self.config.ragged_buffer_factor > 0:
+        max_output_size = self.get_ragged_buffer_size(
+            bsz_times_seq_len * self.num_experts_per_tok,
+            num_expert_parallelism,
+            self.config.num_experts,
+            self.num_experts_per_tok,
+            self.config.ragged_buffer_factor,
+        )
+      else:
+        max_output_size = None
       # roll_to_expert_id is not directly used in the kernel, ep axis id is directly called
       sorted_inputs, group_size, sorted_selected_experts = ring_ragged_sort(
           inputs_2d,
@@ -795,6 +808,7 @@ class RoutedMoE(nnx.Module):
           self.num_experts_per_tok,
           self._expert_parallelism_name,
           num_expert_parallelism,
+          max_output_size=max_output_size,
       )
     else:
       flatten_selected_experts = jnp.ravel(selected_experts)
@@ -810,10 +824,18 @@ class RoutedMoE(nnx.Module):
       group_size = jnp.bincount(flatten_selected_experts, length=self.num_experts)
       # Return the experts for each sorted input.
     expert_indices = jnp.arange(self.num_experts)
+    if use_ragged_in_permute and max_output_size is not None:
+      # When the output buffer is capped, the total number of active tokens
+      # may be less than the full math.prod(selected_experts.shape). Use the
+      # capped max_output_size as the repeat length so that the expert
+      # assignment array matches the compact sorted_inputs buffer.
+      total_repeat_length = max_output_size
+    else:
+      total_repeat_length = math.prod(selected_experts.shape)
     sorted_experts = jnp.repeat(
         expert_indices,
         repeats=group_size,
-        total_repeat_length=math.prod(selected_experts.shape),
+        total_repeat_length=total_repeat_length,
     )
     return (
         sorted_inputs,
@@ -843,6 +865,24 @@ class RoutedMoE(nnx.Module):
       # topk_argsort_revert_indices (i.e. the flat token×topk order before
       # sorting by expert). `weights` has shape (batch, seq, topk); flatten it.
       flat_weights = jnp.ravel(weights).astype(jnp.float32)
+      # Compute max_output_size consistently with permute() so that the
+      # compact-buffer layout matches between sort and unsort.
+      num_expert_parallelism = self.get_expert_parallelism_size()
+      if self.config.ragged_buffer_factor > 0:
+        # For ring-of-experts the full token count (after all_gather) times topk
+        # equals sorted_selected_experts.shape[0] in the non-capped case, but
+        # when max_output_size was used in sort, the revert indices are already
+        # remapped. We re-derive max_output_size from the same formula.
+        bsz_times_seq_len_times_topk = batch_size * sequence_length * num_expert_parallelism * self.num_experts_per_tok
+        max_output_size = self.get_ragged_buffer_size(
+            bsz_times_seq_len_times_topk,
+            num_expert_parallelism,
+            self.config.num_experts,
+            self.num_experts_per_tok,
+            self.config.ragged_buffer_factor,
+        )
+      else:
+        max_output_size = None
       output = ring_ragged_unsort(
           intermediate,
           group_sizes,
@@ -851,6 +891,7 @@ class RoutedMoE(nnx.Module):
           local_num_experts,
           self._expert_parallelism_name,
           topk_weights=flat_weights,
+          max_output_size=max_output_size,
       )
     else:
       unsort_intermediate = _sort_activations(
@@ -1207,7 +1248,11 @@ class RoutedMoE(nnx.Module):
       lhs_vma_axes = extract_vma(inputs)
       rhs_vma_axes = extract_vma(kernel)
       if inputs.shape[0] != expert_assignments.shape[0]:
-        raise ValueError("The number of input tokens must match the number of expert assignments!")
+        # When ragged_buffer_factor caps the output buffer, sorted_inputs has
+        # shape [max_output_size, hidden] while the sorted_experts array from
+        # jnp.repeat may still carry the full (uncapped) length.  Truncate the
+        # expert_assignments to match the compact buffer.
+        expert_assignments = expert_assignments[: inputs.shape[0]]
 
       tokamax_group_sizes = get_tokamax_group_sizes(group_sizes, inputs, kernel)
       orig_inputs_shape = inputs.shape  # save shape of inputs before potentially padding.
@@ -1571,6 +1616,11 @@ class RoutedMoE(nnx.Module):
       else:
         experts_start = 0
 
+      # When max_output_size is used, sorted_inputs has shape [max_output_size, hidden]
+      # but routing.selected_experts (= sorted_experts from permute) also has
+      # length max_output_size, matching. However the gmm function checks that
+      # inputs.shape[0] == expert_assignments.shape[0]. Both should be max_output_size
+      # when the compact buffer is active.
       gmm_fn = functools.partial(
           gmm, group_sizes=routing.group_sizes, expert_assignments=routing.selected_experts, group_offset=experts_start
       )
