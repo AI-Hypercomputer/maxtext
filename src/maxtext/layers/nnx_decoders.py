@@ -27,7 +27,7 @@ from flax import linen as nn
 from flax import nnx
 from flax.nnx import wrappers as nnx_wrappers
 from jax.ad_checkpoint import checkpoint_name
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding
 
 from maxtext.common.common_types import (
     MODEL_MODE_AUTOREGRESSIVE,
@@ -705,6 +705,105 @@ class NNXDecoder(nnx.Module):
 
     return final_carry, out_layers, returned_kv_stacked if use_kv else None
 
+  def _apply_layers_sequentially_prefetch(self, layers, x_in, *args, length: int, **kwargs):
+    """Runs the layer stack using nnx.scan with 2-layer BSW prefetching."""
+    if length == 0:
+      return x_in, layers, None
+    assert length % 2 == 0, "2-Layer prefetching requires even number of layers"
+    policy = self.get_remat_policy()
+    prevent_cse = maxtext_utils.should_prevent_cse_in_remat(self.config)
+    graphdef, params, state = nnx.split(layers, nnx.Param, ...)
+
+    scan_axis = self.config.param_scan_axis
+    if scan_axis != 0:
+      params = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0), params)
+
+    layer_cls = layers.__class__
+    sig = inspect.signature(layer_cls.__call__)
+    valid_kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters or "kwargs" in sig.parameters}
+
+    # Reshape non-param state to pair layers: [length, ...] -> [length // 2, 2, ...]
+    def reshape_state(x):
+      return jnp.reshape(x, (length // 2, 2) + x.shape[1:])
+    paired_state = jax.tree.map(reshape_state, state)
+
+    loop_iterations = jnp.arange(length // 2)
+
+    def _slice_params(params_tree, idx):
+      return jax.tree.map(lambda x: x[idx], params_tree)
+
+    def _apply_sharding_hint(w):
+      w_sharding = getattr(jax.typeof(w), 'sharding', None) or getattr(w, 'sharding', None)
+      if isinstance(w_sharding, NamedSharding) and w_sharding.mesh.empty:
+        w_sharding = NamedSharding(self.mesh, w_sharding.spec)
+      return sharding.maybe_shard_with_name(w, w_sharding, shard_mode=self.config.shard_mode)
+
+    # Bootstrap Layer 0 params for carry
+    w_curr_0 = _slice_params(params, 0)
+    w_curr_0 = jax.tree.map(_apply_sharding_hint, w_curr_0)
+
+    initial_carry = (x_in, w_curr_0)
+
+    def layer_fn_prefetch(carry, scanned_vars):
+      y, w_curr = carry
+      loop_iteration, current_state_pair = scanned_vars
+
+      # Split current_state_pair into state for layer 2*i and 2*i+1
+      state_0 = jax.tree.map(lambda x: x[0], current_state_pair)
+      state_1 = jax.tree.map(lambda x: x[1], current_state_pair)
+
+      # --- LAYER 2*i (Compute + Asynchronous Prefetch of Layer 2*i + 1) ---
+      active_params_0 = w_curr
+
+      nxt_params_1 = _slice_params(params, 2 * loop_iteration + 1)
+      w_next_1 = jax.tree.map(_apply_sharding_hint, nxt_params_1)
+
+      bsw_0 = jax.ad_checkpoint.checkpoint_name((active_params_0, w_next_1), "fsdp_bsw_0")
+      active_params_0, active_params_1 = bsw_0[0], bsw_0[1]
+
+      layer_0 = nnx.merge(graphdef, active_params_0, state_0)
+      layer_out_0 = layer_0(y, *args, **valid_kwargs)
+      y_0 = layer_out_0[0] if isinstance(layer_out_0, tuple) else layer_out_0
+      new_state_0 = nnx.state(layer_0)
+
+      # --- LAYER 2*i + 1 (Compute + Asynchronous Prefetch of Layer 2*(i+1)) ---
+      nxt_params_2 = _slice_params(params, (2 * loop_iteration + 2) % length)
+      w_next_2 = jax.tree.map(_apply_sharding_hint, nxt_params_2)
+
+      bsw_1 = jax.ad_checkpoint.checkpoint_name((active_params_1, w_next_2), "fsdp_bsw_1")
+      active_params_1, carried_next_2 = bsw_1[0], bsw_1[1]
+
+      layer_1 = nnx.merge(graphdef, active_params_1, state_1)
+      layer_out_1 = layer_1(y_0, *args, **valid_kwargs)
+      y_1 = layer_out_1[0] if isinstance(layer_out_1, tuple) else layer_out_1
+      new_state_1 = nnx.state(layer_1)
+
+      # Combine updated states back into a pair
+      new_state_pair = jax.tree.map(lambda x, y: jnp.stack([x, y]), new_state_0, new_state_1)
+
+      return (y_1, carried_next_2), new_state_pair
+
+    layer_fn_wrapped = jax.checkpoint(layer_fn_prefetch, policy=policy, prevent_cse=prevent_cse)
+
+    (final_y, _), scanned_state_pairs = jax.lax.scan(
+        layer_fn_wrapped,
+        initial_carry,
+        (loop_iterations, paired_state)
+    )
+
+    # Reshape scanned_state_pairs back to [length, ...]
+    def flatten_state(x):
+      return jnp.reshape(x, (length,) + x.shape[2:])
+    scanned_state = jax.tree.map(flatten_state, scanned_state_pairs)
+
+    if scan_axis != 0:
+      new_params, new_rest = scanned_state.split(nnx.Param, ...)
+      new_params = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0), new_params)
+      scanned_state = nnx.merge_state(new_params, new_rest)
+
+    nnx.update(layers, scanned_state)
+    return final_y, layers, None
+
   def get_decoder_layers(self):
     """Retrieves decoder layer classes based on config using a dictionary lookup."""
     cfg = self.config
@@ -1238,9 +1337,14 @@ class NNXDecoder(nnx.Module):
           )
           # kv_caches list is updated in-place inside _apply_layers_sequentially
         else:
-          y, self.layers, _ = self._apply_layers_sequentially(
-              self.layers, y, *layer_args, length=scan_length, **layer_kwargs
-          )
+          if cfg.prefetch_fsdp_weights:
+            y, self.layers, _ = self._apply_layers_sequentially_prefetch(
+                self.layers, y, *layer_args, length=scan_length, **layer_kwargs
+            )
+          else:
+            y, self.layers, _ = self._apply_layers_sequentially(
+                self.layers, y, *layer_args, length=scan_length, **layer_kwargs
+            )
     else:
       prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg)
 

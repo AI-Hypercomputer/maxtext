@@ -707,6 +707,42 @@ class TestNNXDecoderForwardPass(unittest.TestCase):
     )
     self.assertEqual(logits.shape, (batch, seq_len, cfg.vocab_size))
 
+  def test_scan_layers_prefetch(self):
+    """Test NNXDecoder with scan_layers=True and prefetch_fsdp_weights=True."""
+    cfg = _make_config(scan_layers=True, prefetch_fsdp_weights=True)
+    rngs = nnx.Rngs(params=0, dropout=1)
+    decoder = NNXDecoder(
+        config=cfg,
+        mesh=self.mesh,
+        model_mode=MODEL_MODE_TRAIN,
+        rngs=rngs,
+    )
+    shared_embedding = Embed(
+        num_embeddings=cfg.vocab_size,
+        num_features=cfg.emb_dim,
+        dtype=cfg.dtype,
+        embedding_init=nn.initializers.normal(stddev=1.0),
+        config=cfg,
+        mesh=self.mesh,
+        rngs=rngs,
+    )
+
+    batch = cfg.global_batch_size_to_train_on
+    seq_len = cfg.max_target_length
+    ids = jax.random.randint(self.rng, (batch, seq_len), 0, cfg.vocab_size)
+    segment_ids = jnp.full((batch, seq_len), DECODING_ACTIVE_SEQUENCE_INDICATOR)
+    positions = jnp.broadcast_to(jnp.arange(seq_len)[None], (batch, seq_len))
+
+    logits, _, _ = decoder(
+        shared_embedding,
+        ids,
+        positions,
+        decoder_segment_ids=segment_ids,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+    self.assertEqual(logits.shape, (batch, seq_len, cfg.vocab_size))
+
 
 if __name__ == "__main__":
   unittest.main()
