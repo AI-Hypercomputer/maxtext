@@ -8,3 +8,5 @@ Align layer designations between Hugging Face and MaxText to confirm total param
 
 ## Expected Outcome / Outputs Generated
 - **`{MODEL}_MAXTEXT_TO_HF_PARAM_MAPPING` function**: Implemented within [`param_mapping.py`](../../../../../checkpoint_conversion/utils/param_mapping.py). This function provides a 1:1 mapping structure linking Hugging Face parameter string paths to their MaxText equivalents. This mapping dictionary will be used in Phase 3 and Phase 4.
+
+- **`{MODEL}_HF_WEIGHTS_TO_SHAPE` function**: Implemented within [`hf_shape.py`](../../../../../checkpoint_conversion/utils/hf_shape.py). This is a dictionary mapping each Hugging Face parameter name to its expected tensor shape. This shape mapping is required for the operations in Phase 5.

@@ -285,12 +285,23 @@ def main():
     matched_layers = 0
     
     for mt_key, hf_keys in param_mapping.items():
-        if mt_key not in mt_flat:
-            print(f"Skip {mt_key}, not in mt ckpt")
+        # Check if HF key exists in hf_weights instead of mt_key in mt_flat
+        hf_exists = False
+        if isinstance(hf_keys, str):
+            hf_exists = hf_keys in hf_weights
+        elif isinstance(hf_keys, list) and len(hf_keys) > 0:
+            if isinstance(hf_keys[0], list) and len(hf_keys[0]) > 0:
+                hf_exists = hf_keys[0][0] in hf_weights
+            else:
+                hf_exists = hf_keys[0] in hf_weights
+        elif isinstance(hf_keys, tuple) and len(hf_keys) > 0:
+            hf_exists = hf_keys[0] in hf_weights
+            
+        if not hf_exists:
+            print(f"Skip {mt_key}, corresponding HF key not in hf weights")
             continue
             
-        mt_tensor = mt_flat[mt_key]
-        target_shape = mt_tensor.shape
+        target_shape = mt_flat[mt_key].shape if mt_key in mt_flat else None
         hook_fn = hook_fns.get(mt_key, lambda x, shape: x)
         
         try:
