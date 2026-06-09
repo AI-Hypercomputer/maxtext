@@ -1949,13 +1949,14 @@ class Qwen3NextGatedDeltaNetTest(unittest.TestCase):
     # 2. Init GDN Layer
     gdn = Qwen3NextGatedDeltaNet(
         config=cfg,
+        inputs_shape=lnx.shape,
         dtype=cfg.dtype,
         model_mode=MODEL_MODE_PREFILL,
         rngs=self.nnx_rng,
     )
 
     # 3. Full / Train mode
-    gdn_full = gdn(
+    gdn_full, _ = gdn(
         lnx,
         model_mode=MODEL_MODE_TRAIN,
     )
@@ -1963,7 +1964,7 @@ class Qwen3NextGatedDeltaNetTest(unittest.TestCase):
     # 4. Prefill mode
     lnx_prefill = lnx[:, 0:prefill_length, :]
 
-    gdn_prefill = gdn(
+    gdn_prefill, _ = gdn(
         lnx_prefill,
         model_mode=MODEL_MODE_PREFILL,
     )
@@ -1976,7 +1977,7 @@ class Qwen3NextGatedDeltaNetTest(unittest.TestCase):
     for idx in range(prefill_length, decode_total_length):
       lnx_idx = lnx[:, idx : idx + 1, :]
 
-      gdn_idx = gdn(
+      gdn_idx, _ = gdn(
           lnx_idx,
           model_mode=MODEL_MODE_AUTOREGRESSIVE,
       )
