@@ -165,6 +165,26 @@ def verify_layer(hf_name, pt_in, pt_out, jax_w, mt_key, hf_config, model_name):
         # PyTorch output might be (batch, seq, num_heads * head_dim)
         # We flatten pt_out to match jax_out's shape if needed
         # In reality, they should match as (batch, seq, out_features)
+        
+        # Handle concatenated projections (e.g. qkv_proj or gate_up_proj)
+        if pt_out.shape[-1] != jax_out.shape[-1]:
+            if "query" in mt_key.lower():
+                pt_out = pt_out[..., :jax_out.shape[-1]]
+                head_dim = hf_config.get("head_dim", hf_config.get("hidden_size", 1) // hf_config.get("num_attention_heads", 1))
+                jax_out = jax_out * np.sqrt(head_dim)
+            elif "key" in mt_key.lower():
+                head_dim = hf_config.get("head_dim", hf_config.get("hidden_size", 1) // hf_config.get("num_attention_heads", 1))
+                q_dim = hf_config.get("num_attention_heads", 1) * head_dim
+                pt_out = pt_out[..., q_dim : q_dim + jax_out.shape[-1]]
+            elif "value" in mt_key.lower():
+                head_dim = hf_config.get("head_dim", hf_config.get("hidden_size", 1) // hf_config.get("num_attention_heads", 1))
+                q_dim = hf_config.get("num_attention_heads", 1) * head_dim
+                k_dim = hf_config.get("num_key_value_heads", 1) * head_dim
+                pt_out = pt_out[..., q_dim + k_dim : q_dim + k_dim + jax_out.shape[-1]]
+            elif "wi_0" in mt_key.lower() or "gate" in mt_key.lower():
+                pt_out = pt_out[..., :jax_out.shape[-1]]
+            elif "wi_1" in mt_key.lower() or "up" in mt_key.lower():
+                pt_out = pt_out[..., jax_out.shape[-1] : jax_out.shape[-1]*2]
     
     # Compare
     # For bfloat16 models, we need generous tolerances
@@ -189,11 +209,12 @@ def main():
     parser.add_argument("--model_name", type=str, default="gemma3-4b")
     parser.add_argument("--scan_layers", action="store_true")
     parser.add_argument("--use_multimodal", action="store_true")
+    parser.add_argument("--disable_trust_remote_code", action="store_true")
     args = parser.parse_args()
 
     print("Loading HuggingFace model...")
     # Load model with bfloat16 for realistic numericals
-    hf_model = AutoModelForCausalLM.from_pretrained(args.hf_path, torch_dtype=torch.bfloat16, device_map="cpu", trust_remote_code=True)
+    hf_model = AutoModelForCausalLM.from_pretrained(args.hf_path, torch_dtype=torch.bfloat16, device_map="cpu", trust_remote_code=not args.disable_trust_remote_code)
     hf_model.eval()
 
     # Register hooks to capture inputs and outputs

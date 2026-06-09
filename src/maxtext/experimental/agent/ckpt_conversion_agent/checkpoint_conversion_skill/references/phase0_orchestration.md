@@ -3,7 +3,7 @@
 ## Objective
 Entry point for eng: One SKILL to rule them all.
 
-## Successful Criteria
+## Expected Outcome
 All codes written and passed full model logits checker.
 
 As the primary entry point, the orchestration stage utilizes this skill to launch the sequence.
@@ -19,7 +19,7 @@ The orchestration SKILL establishes the automated cycle by specifying:
 Organize the workflow into distinct phases, ensuring each is successfully completed before proceeding to the next.
 
 ### Routing & Iteration
-Oversee phase transitions and manage feedback loops. For example, if Phase 4 (Validation) fails due to a high max difference in `forward_pass_logit_checker.py`, revert back to Phase 3 (Transformation) and run `layerwise_verify.py` to identify which specific layer is causing the divergence.
+Oversee phase transitions and manage feedback loops. For example, if Phase 4 (exuection) fails due to a high max difference in `forward_pass_logit_checker.py`, revert back to Phase 3 (Transformation) and run `layer_shape_verify.py` and `layerwise_verify.py` to identify which specific layer is causing the divergence.
 
 ### Milestone Reporting
 Record findings and implementation nuances after each milestone. This real-time documentation allows engineers to track progress effectively without navigating through raw log outputs.

@@ -111,6 +111,7 @@ def main():
     parser = argparse.ArgumentParser(description="Trace HuggingFace model and MaxText checkpoint to extract layer names and shapes.")
     parser.add_argument("--hf_path", type=str, default=None, help="Path to HF model")
     parser.add_argument("--mt_path", type=str, default=None, help="Path to MaxText checkpoint")
+    parser.add_argument("--mt_args", type=str, default=None, help="MaxText pyconfig args string (e.g. 'models/phi4.yml scan_layers=False') to trace model abstract parameters.")
     parser.add_argument("--output_file", type=str, default="tracing_result.json")
     parser.add_argument("--unroll_scan_layers", action="store_true", help="Unroll scanned layers in MT checkpoint")
     args = parser.parse_args()
@@ -166,19 +167,67 @@ def main():
             hf_model(dummy_input)
             
         # Determine num_layers if hf_model is loaded
-        num_layers = None
-        if args.hf_path:
-            # We can parse config directly if hf_model is not easily accessible globally
-            config = AutoConfig.from_pretrained(args.hf_path, trust_remote_code=True)
-            if hasattr(config, "num_hidden_layers"):
-                num_layers = config.num_hidden_layers
-            elif hasattr(config, "n_layer"):
-                num_layers = config.n_layer
+    num_layers = None
+    if args.hf_path:
+        # We can parse config directly if hf_model is not easily accessible globally
+        config = AutoConfig.from_pretrained(args.hf_path, trust_remote_code=True)
+        if hasattr(config, "num_hidden_layers"):
+            num_layers = config.num_hidden_layers
+        elif hasattr(config, "n_layer"):
+            num_layers = config.n_layer
 
-        print(f"Loading MaxText checkpoint from {args.mt_path}...")
-        mt_state = load_mt_ckpt(args.mt_path)
-        if mt_state:
-            mt_flat_raw = flatten_dict(mt_state, parent_key="")
+    if args.mt_args:
+        print(f"Loading MaxText model from args: {args.mt_args}...")
+        import jax
+        from maxtext import pyconfig
+        from maxtext.inference.maxengine import maxengine
+
+        pyconfig_argv = [""] + args.mt_args.split()
+        config = pyconfig.initialize(pyconfig_argv)
+        
+        engine = maxengine.MaxEngine(config)
+        rng = jax.random.PRNGKey(1234)
+        _, rng_load_params = jax.random.split(rng)
+        loaded_params_from_engine = engine.load_params(rng_load_params)
+        
+        actual_weights_dict = loaded_params_from_engine.get("params")
+        if actual_weights_dict is None:
+            actual_weights_dict = loaded_params_from_engine
+            
+        leaves_with_paths = jax.tree_util.tree_leaves_with_path(actual_weights_dict)
+
+        for path_tuple, leaf_value in leaves_with_paths:
+            key_parts = []
+            for p_entry in path_tuple:
+                if isinstance(p_entry, jax.tree_util.DictKey):
+                    key_parts.append(p_entry.key)
+                elif isinstance(p_entry, jax.tree_util.SequenceKey):
+                    key_parts.append(str(p_entry.idx))
+                else:
+                    key_parts.append(f"__unhandled_key_{type(p_entry).__name__}__")
+            
+            k = "-".join(key_parts)
+            
+            if hasattr(leaf_value, "shape"):
+                shape = list(leaf_value.shape)
+            else:
+                shape = "unknown"
+            
+            if args.unroll_scan_layers and "layers-" in k and num_layers is not None and num_layers in shape:
+                layer_dim = shape.index(num_layers)
+                new_shape = list(shape)
+                new_shape.pop(layer_dim)
+                for i in range(num_layers):
+                    new_k = k.replace("layers-", f"layers_{i}-")
+                    result["mt_parameters"][new_k] = new_shape
+            else:
+                result["mt_parameters"][k] = shape
+
+    elif args.mt_path:
+            print(f"Loading MaxText checkpoint from {args.mt_path}...")
+            mt_state = load_mt_ckpt(args.mt_path)
+            if mt_state:
+                mt_flat_raw = flatten_dict(mt_state, parent_key="")
             for k, v in mt_flat_raw.items():
                 if k.startswith("-"):
                     k = k[1:]
