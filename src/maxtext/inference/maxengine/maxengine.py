@@ -1551,7 +1551,7 @@ class MaxEngine(_BaseEngine):
       return TokenizerParameters(
           path=self.config.tokenizer_path,
           tokenizer_type=tokenizer_type_val,
-          access_token=self.config.hf_access_token,
+          access_token=self.config.hf_access_token or None,
           use_chat_template=self.config.use_chat_template,
           extra_ids=0,
       )
