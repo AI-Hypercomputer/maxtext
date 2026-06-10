@@ -1916,11 +1916,9 @@ class RoutedMoE(nnx.Module):
 
     if self.quant:
 
-      def quant_einsum(*args, **kwargs):  # pylint: disable=unused-argument
-        # simply skip kwargs, since einsum doesn't support any kwargs
-        # like precision
+      def quant_einsum(*args, **kwargs):
         kw = {"dtype": self.dtype}
-        return self.quant.einsum(**kw)(*args)  # pytype: disable=attribute-error
+        return self.quant.einsum(**kw)(*args, **kwargs)  # pytype: disable=attribute-error
 
       einsum_op = quant_einsum
     else:
