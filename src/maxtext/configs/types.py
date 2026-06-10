@@ -1780,7 +1780,12 @@ class ManagedMLDiagnostics(BaseModel):
   """Configuration for managed mldiagnostics."""
 
   managed_mldiagnostics: bool = Field(False, description="Enable managed mldiagnostics.")
+  managed_mldiagnostics_on_demand_profiling: bool = Field(
+      True,
+      description=("Enable on-demand profiling server when managed mldiagnostics is" " enabled."),
+  )
   managed_mldiagnostics_run_group: str = Field("", description="Name used to group multiple runs.")
+  managed_mldiagnostics_region: str = Field("us-central1", description="GCP region for managed mldiagnostics.")
 
 
 class Goodput(BaseModel):
