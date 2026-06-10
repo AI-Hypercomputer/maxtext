@@ -44,6 +44,9 @@ def _convert_to_activation_function(fn_or_string: str | Callable[..., Any]) -> C
   """Convert a string to an activation function."""
   if fn_or_string == "linear":
     return lambda x: x
+  elif fn_or_string == "sqrtsoftplus":
+    # Custom activation function used by DeepSeek V4 Top-K MoE router
+    return lambda x: jnp.sqrt(jax.nn.softplus(x))
   elif isinstance(fn_or_string, str):
     return getattr(nn, fn_or_string)
   elif callable(fn_or_string):

@@ -226,6 +226,7 @@ ModelName = Literal[
     "deepseek3-test",
     "deepseek3-tiny",
     "deepseek3.2-671b",
+    "deepseek4",
     "deepseek-custom",
     "kimi-k2-1t",
     "gemma-7b",
@@ -493,6 +494,7 @@ class ModelArchitecture(BaseModel):
       -1.0,
       description="Upper bound to clip the MLP activation values. -1.0 means no clipping.",
   )
+
   normalization_layer_epsilon: float = Field(1.0e-05, description="Epsilon value for normalization layers.")
   fused_qkv: bool = Field(False, description="If supported, fuse the Q, K, and V projections.")
   attention_bias: bool = Field(
@@ -830,6 +832,9 @@ class DeepSeekMoE(BaseModel):
       "and originally implemented to support the GPT-OSS model architecture",
   )
   n_routing_groups: int = Field(-1, description="Number of groups for routing, disabled by default.")
+  first_num_hash_layers: int = Field(
+      0, description="Number of hash routing layers, used in DeepSeek V4 (0 means disabled)."
+  )
   topk_routing_group: int = Field(-1, description="Number of top groups to route inputs to.")
   use_batch_split_schedule: bool = Field(
       False,
@@ -2033,6 +2038,7 @@ class RLDataset(BaseModel):
   batch_size: int = Field(1, description="Global batch size for the dataset loader in RL.")
   num_batches: int = Field(4, description="Number of batches for RL training.")
   num_test_batches: int = Field(5, description="Number of batches for RL evaluation.")
+  eval_batch_size: int = Field(-1, description="Batch size for RL evaluation.")
   test_batch_start_index: int = Field(0, description="Start index for the test dataset")
   train_fraction: float = Field(1.0, description="Fraction of the dataset to be used for training.")
   train_micro_batch_size: int = Field(-1, description="Micro batch size for training.")
@@ -2963,6 +2969,8 @@ class MaxTextConfig(
         raise ValueError("GPT-OSS MoE only supports dropless (capacity_factor=-1) with dense matmul.")
       if self.routed_bias and self.routed_bias_update_rate > 0.0 and self.decoder_block != DecoderBlockType.DEEPSEEK:
         raise ValueError("Loss-free load balancing is only supported for the DeepSeek decoder block.")
+      if self.model_name.startswith("deepseek4") and self.first_num_hash_layers > 0 and self.use_ring_of_experts:
+        raise ValueError("DeepSeek V4 hash routing is currently not supported with ring of experts.")
       self.validate_ragged_buffer_factor()
 
     # Gemma 4 small (E2B / E4B) uses per-layer KV sharing, which is incompatible with nn.scan.

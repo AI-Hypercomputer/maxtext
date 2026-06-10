@@ -38,6 +38,9 @@ from transformers.models.deepseek_v4.configuration_deepseek_v4 import DeepseekV4
 from transformers.models.deepseek_v4.modeling_deepseek_v4 import (
     DeepseekV4RotaryEmbedding as DeepseekV4RotaryEmbedding_PT,
     DeepseekV4GroupedLinear as DeepseekV4GroupedLinear_PT,
+    DeepseekV4HashRouter as DeepseekV4HashRouter_PT,
+    DeepseekV4TopKRouter as DeepseekV4TopKRouter_PT,
+    DeepseekV4Experts as DeepseekV4Experts_PT,
     apply_rotary_pos_emb as ref_apply_rotary_pos_emb,
 )
 
@@ -47,6 +50,8 @@ from maxtext.layers.attention_op import AttentionOp
 from maxtext.common.common_types import AttentionType, DEFAULT_MASK_VALUE
 
 from flax import nnx
+from maxtext.layers.moe import RoutedMoE
+from maxtext.layers import initializers
 
 # ==============================================================================
 # Tests
@@ -280,7 +285,14 @@ class DeepSeekV4GroupedLinearTest(unittest.TestCase):
 # TODO(parambole): This test is duplicated here to maintain debugging continuity alongside the other reference tests.
 # It has also been duplicated into tests/unit/attention_test.py for CI/CD resilience, as this file is skipped in CI.
 class DeepSeekV4AttentionMaskingTest(unittest.TestCase):
-  """Tests to validate AttentionOp masking logic for DeepSeek-V4 attention patterns."""
+  """Tests to validate AttentionOp masking logic for DeepSeek-V4 attention patterns.
+
+  TODO: This test is intentionally duplicated here and in `tests/unit/attention_test.py`.
+  We keep it here because this file serves as the central source of truth for all DeepSeek-V4
+  specifics, keeping the masking logic validation closely coupled to the structural tests.
+  However, because `deepseek_v4_vs_reference_test.py` is currently skipped by our CI/CD pipeline,
+  it is mirrored in `attention_test.py` to ensure it runs resiliently on every PR.
+  """
 
   def setUp(self):
     self.config = pyconfig.initialize([sys.argv[0], "src/maxtext/configs/base.yml"], run_name="test")
@@ -724,6 +736,219 @@ class DeepSeekV4CompressedAttentionTest(unittest.TestCase):
 
   def test_document_packing_masking(self):
     self._run_e2e_test("heavily_compressed_attention", is_packed=True)
+
+
+class DeepSeekV4MoERouterTest(unittest.TestCase):
+
+  def setUp(self):
+    self.batch_size = 2
+    self.seq_len = 8
+    self.hidden_dim = 128
+    self.num_experts = 16
+    self.num_experts_per_tok = 4
+    self.vocab_size = 1000
+
+    self.pt_config = DeepseekV4Config(
+        hidden_size=self.hidden_dim,
+        num_local_experts=self.num_experts,
+        num_experts_per_tok=self.num_experts_per_tok,
+        routed_scaling_factor=2.0,
+        scoring_func="sqrtsoftplus",
+        vocab_size=self.vocab_size,
+    )
+
+    config_arguments = {
+        "per_device_batch_size": 1.0,
+        "run_name": "test",
+        "enable_checkpointing": False,
+        "base_emb_dim": self.hidden_dim,
+        "num_experts": self.num_experts,
+        "topk_routing_group": self.num_experts_per_tok,
+        "routed_scaling_factor": 2.0,
+        "routed_score_func": "sqrtsoftplus",
+        "routed_bias": True,
+        "n_routing_groups": -1,
+        "vocab_size": self.vocab_size,
+        "first_num_hash_layers": 3,
+        "decoder_block": "deepseek",
+        "model_name": "deepseek4",
+        "attention": "dot_product",
+        "base_mlp_dim": 256,
+        "base_moe_mlp_dim": 256,
+        "override_model_config": True,
+    }
+    argv = [sys.argv[0], "src/maxtext/configs/base.yml"]
+    self.mx_config = pyconfig.initialize(argv, **config_arguments)
+
+    devices = np.array(jax.devices()[:1])
+    self.mesh = jax.sharding.Mesh(devices, ("tensor",))
+    self.rngs = nnx.Rngs(0)
+
+  def test_hash_router(self):
+    pt_router = DeepseekV4HashRouter_PT(self.pt_config)
+    # Explicitly initialize PyTorch weights since torch.empty leaves garbage in memory,
+    # which causes NaN/Inf drift between PyTorch and MaxText/XLA execution.
+    torch.nn.init.normal_(pt_router.weight)
+
+    # Hash Router operates deterministically based on input_ids via a frozen tid2eid lookup table.
+    # In practice, this table is pre-computed (e.g. by K-Means on the dataset) and loaded statically.
+    # For this parity test, we randomly initialize the lookup table on the PyTorch side
+    # and explicitly sync it to the MaxText side to ensure both routers route the exact same way.
+    pt_tid2eid = torch.randint(0, self.num_experts, (self.vocab_size, self.num_experts_per_tok))
+    pt_router.tid2eid.copy_(pt_tid2eid)
+
+    mx_moe = RoutedMoE(
+        config=self.mx_config,
+        num_experts=self.num_experts,
+        num_experts_per_tok=self.num_experts_per_tok,
+        mesh=self.mesh,
+        kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_axes=("embed_moe", "mlp_moe", None),
+        rngs=self.rngs,
+        is_hash_routing=True,  # Hash layer
+    )
+
+    # Sync weights
+    mx_moe.tid2eid.value = jnp.array(pt_router.tid2eid.numpy())
+    mx_moe.gate.kernel.value = jnp.array(pt_router.weight.detach().numpy()).T
+
+    hidden_states = torch.randn(self.batch_size, self.seq_len, self.hidden_dim)
+    input_ids = torch.randint(0, self.vocab_size, (self.batch_size, self.seq_len))
+
+    # PT forward
+    _, pt_weights, pt_indices = pt_router(hidden_states, input_ids)
+
+    # MaxText forward
+    gate_logits, pre_bias_logits = mx_moe.gate(jnp.array(hidden_states.numpy()))
+    mx_weights, mx_indices = mx_moe.get_topk(
+        gate_logits, pre_bias_logits, rngs=self.rngs, input_ids=jnp.array(input_ids.numpy())
+    )
+
+    # --- Assertion Logic for Hash Router ---
+    # PyTorch returns flat tensors: (batch * seq_len, top_k)
+    # MaxText returns structured tensors: (batch, seq_len, top_k)
+    # We must explicitly reshape PyTorch outputs to match MaxText's nested sequence structure.
+    pt_indices_reshaped = pt_indices.numpy().reshape(self.batch_size, self.seq_len, -1)
+    pt_weights_reshaped = pt_weights.detach().numpy().reshape(self.batch_size, self.seq_len, -1)
+    np.testing.assert_allclose(mx_indices, pt_indices_reshaped, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(mx_weights, pt_weights_reshaped, rtol=1e-5, atol=1e-5)
+
+  def test_topk_router(self):
+    pt_router = DeepseekV4TopKRouter_PT(self.pt_config)
+
+    # Explicitly initialize PyTorch weights since torch.empty leaves garbage in memory,
+    # which causes NaN/Inf drift between PyTorch and MaxText/XLA execution.
+    torch.nn.init.normal_(pt_router.weight)
+    torch.nn.init.normal_(pt_router.e_score_correction_bias)
+
+    mx_moe = RoutedMoE(
+        config=self.mx_config,
+        num_experts=self.num_experts,
+        num_experts_per_tok=self.num_experts_per_tok,
+        mesh=self.mesh,
+        kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_axes=("embed_moe", "mlp_moe", None),
+        rngs=self.rngs,
+        is_hash_routing=False,  # TopK layer
+    )
+
+    # Sync weights
+    mx_moe.gate.kernel.value = jnp.array(pt_router.weight.detach().numpy()).T
+    mx_moe.gate.bias.value = jnp.array(pt_router.e_score_correction_bias.detach().numpy())
+
+    hidden_states = torch.randn(self.batch_size, self.seq_len, self.hidden_dim)
+
+    # PT forward
+    _, pt_weights, pt_indices = pt_router(hidden_states)
+
+    # MaxText forward
+    gate_logits, pre_bias_logits = mx_moe.gate(jnp.array(hidden_states.numpy()))
+    mx_weights, mx_indices = mx_moe.get_topk(gate_logits, pre_bias_logits, rngs=self.rngs)
+
+    # --- Assertion Logic for TopK Router ---
+    # PyTorch returns flat tensors: (batch * seq_len, top_k)
+    # MaxText returns structured tensors: (batch, seq_len, top_k)
+    # 1. Reshape PyTorch outputs to match MaxText's nested sequence structure.
+    pt_indices_reshaped = pt_indices.numpy().reshape(self.batch_size, self.seq_len, -1)
+    pt_weights_reshaped = pt_weights.detach().numpy().reshape(self.batch_size, self.seq_len, -1)
+
+    # 2. Sort both by indices so they can be compared directly.
+    # jax.lax.top_k and torch.topk resolve exact-value ties differently.
+    # Because TopK routing weights are summed commutatively during the MoE forward pass,
+    # only the mathematical *set* of selected experts matters, not their strict sorted order.
+    mx_sort_idx = np.argsort(mx_indices, axis=-1)
+    pt_sort_idx = np.argsort(pt_indices_reshaped, axis=-1)
+
+    mx_indices_sorted = np.take_along_axis(np.array(mx_indices), mx_sort_idx, axis=-1)
+    mx_weights_sorted = np.take_along_axis(np.array(mx_weights), mx_sort_idx, axis=-1)
+
+    pt_indices_sorted = np.take_along_axis(pt_indices_reshaped, pt_sort_idx, axis=-1)
+    pt_weights_sorted = np.take_along_axis(pt_weights_reshaped, pt_sort_idx, axis=-1)
+
+    np.testing.assert_allclose(mx_indices_sorted, pt_indices_sorted, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(mx_weights_sorted, pt_weights_sorted, rtol=1e-4, atol=1e-4)
+
+
+class DeepSeekV4SwiGLUClampTest(unittest.TestCase):
+
+  def test_swiglu_clamp(self):
+    limit = 10.0
+    pt_config = DeepseekV4Config(
+        hidden_size=128,
+        num_local_experts=2,
+        num_experts_per_tok=1,
+        intermediate_size=256,
+        swiglu_limit=limit,
+    )
+
+    config_arguments = {
+        "per_device_batch_size": 1.0,
+        "run_name": "test",
+        "enable_checkpointing": False,
+        "base_emb_dim": 128,
+        "num_experts": 2,
+        "topk_routing_group": 1,
+        "mlp_activations_limit": limit,
+        "decoder_block": "deepseek",
+        "model_name": "deepseek4",
+        "attention": "dot_product",
+        "base_mlp_dim": 256,
+        "base_moe_mlp_dim": 256,
+        "override_model_config": True,
+    }
+    argv = [sys.argv[0], "src/maxtext/configs/base.yml"]
+    mx_config = pyconfig.initialize(argv, **config_arguments)
+
+    pt_experts = DeepseekV4Experts_PT(pt_config)
+
+    devices = np.array(jax.devices()[:1])
+    mesh = jax.sharding.Mesh(devices, ("tensor",))
+    rngs = nnx.Rngs(0)
+
+    mx_moe = RoutedMoE(
+        config=mx_config,
+        num_experts=2,
+        num_experts_per_tok=1,
+        mesh=mesh,
+        kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_axes=("embed_moe", "mlp_moe", None),
+        rngs=rngs,
+    )
+
+    # Gate & Up merged matrix in PT
+    gate_up = torch.randn(1, 4, 256 * 2) * 20.0  # Force large values to trigger the clamping mechanism
+
+    # PyTorch reference executes the standard SwiGLU followed by clamping
+    # to self.config.swiglu_limit (which translates to mlp_activations_limit in MaxText)
+    pt_out = pt_experts._apply_gate(gate_up)  # pylint: disable=protected-access
+
+    # In MaxText, the gate and up projections are separated mathematically.
+    # apply_ffn_activation executes the swiglu limit internally during the activation phase.
+    gate, up = gate_up.chunk(2, dim=-1)
+    mx_out = mx_moe.apply_ffn_activation(jnp.array(gate.numpy()), jnp.array(up.numpy()))
+
+    # Validate that both clamped outputs match identically
+    np.testing.assert_allclose(mx_out, pt_out.numpy(), rtol=1e-5, atol=1e-5)
 
 
 if __name__ == "__main__":

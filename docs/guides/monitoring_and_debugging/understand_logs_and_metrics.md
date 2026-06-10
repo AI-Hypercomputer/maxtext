@@ -20,11 +20,11 @@
 
 When you run a training job, MaxText produces detailed output logs. This guide shows you how to interpret these logs to understand your configuration and monitor performance.
 
-To start, run a simple pretraining job on a single-host TPU. For instance, we can run the following command on TPU v5p-8. The resulting log is used as an example throughout this guide.
+To start, run a simple pretraining job on a single-host TPU. For instance, we can run the following command on TPU v5p-8. The resulting log is used as an example throughout this guide. Replace `<GCS_BUCKET>` in the command below to point to the GCS bucket you want to use for your output.
 
 ```bash
 python3 -m maxtext.trainers.pre_train.train \
-base_output_directory=gs://runner-maxtext-logs run_name=demo \
+base_output_directory=gs://<GCS_BUCKET> run_name=demo \
 model_name=deepseek2-16b \
 per_device_batch_size=24 max_target_length=2048 steps=10 dataset_type=synthetic enable_checkpointing=false
 ```
@@ -80,23 +80,23 @@ Config param data_sharding: (('data', 'stage', 'fsdp', 'fsdp_transpose', 'sequen
 This also includes the **output paths** for your run artifacts.
 
 ```
-Config param base_output_directory: gs://runner-maxtext-logs
+Config param base_output_directory: gs://<GCS_BUCKET>
 Config param run_name: demo
-Config param metrics_dir: gs://runner-maxtext-logs/demo/metrics/
-Config param tensorboard_dir: gs://runner-maxtext-logs/demo/tensorboard/
-Config param checkpoint_dir: gs://runner-maxtext-logs/demo/checkpoints/
+Config param metrics_dir: gs://<GCS_BUCKET>/demo/metrics/
+Config param tensorboard_dir: gs://<GCS_BUCKET>/demo/tensorboard/
+Config param checkpoint_dir: gs://<GCS_BUCKET>/demo/checkpoints/
 ```
 
 ### Understanding output paths
 
-MaxText organizes all of your run's artifacts into a main output directory. The primary location for your run is constructed by combining the `base_output_directory` and the `run_name` you specify in your command. Based on the logs above, the base path for this specific run is `gs://runner-maxtext-logs/demo`.
+MaxText organizes all of your run's artifacts into a main output directory. The primary location for your run is constructed by combining the `base_output_directory` and the `run_name` you specify in your command. Based on the logs above, the base path for this specific run is `gs://<GCS_BUCKET>/demo`.
 
 Within this base path, MaxText creates several subdirectories for different types of artifacts. Many of these are optional and only created if you enable them with a specific flag.
 
 - **TensorBoard logs (`tensorboard/`)**
 
   - Flag: `enable_tensorboard=True` (default)
-  - Path: `gs://runner-maxtext-logs/demo/tensorboard/`
+  - Path: `gs://<GCS_BUCKET>/demo/tensorboard/`
 
 - **Profiler traces (`tensorboard/plugins/profile/`)**
 
@@ -106,17 +106,17 @@ Within this base path, MaxText creates several subdirectories for different type
 - **Metrics in plain text (`metrics/`)**
 
   - Flag: `gcs_metrics=True`
-  - Path: `gs://runner-maxtext-logs/demo/metrics/`
+  - Path: `gs://<GCS_BUCKET>/demo/metrics/`
 
 - **Configuration file (`config.yml`)**
 
   - Flag: `save_config_to_gcs=True`
-  - Path: `gs://runner-maxtext-logs/demo/config.yml`
+  - Path: `gs://<GCS_BUCKET>/demo/config.yml`
 
 - **Checkpoints (`checkpoints/`)**
 
   - Flag: `enable_checkpointing=True`
-  - Path: `gs://runner-maxtext-logs/demo/checkpoints/`
+  - Path: `gs://<GCS_BUCKET>/demo/checkpoints/`
 
 To generate all optional artifacts in one run, you can set the corresponding flags in the command line, like in the example below.
 
@@ -124,7 +124,7 @@ This command enables tensorboard, profiler, text metrics, config saving, and che
 
 ```bash
 python3 -m maxtext.trainers.pre_train.train \
-base_output_directory=gs://runner-maxtext-logs run_name=demo2 \
+base_output_directory=gs://<GCS_BUCKET> run_name=demo2 \
 model_name=deepseek2-16b \
 per_device_batch_size=24 max_target_length=2048 steps=10 dataset_type=synthetic \
 enable_tensorboard=True \
@@ -278,7 +278,7 @@ $$\text{number of tokens per device} = \text{per device batch size} \times \text
 **Total weights**. When discussing the throughput, we have $\text{number of tokens} = \text{per device batch size} \times \text{max target length} \times \text{number of device}$. In this example, $\text{number of tokens} = 24 \times 2048 \times 4 = 196608$. There are two types of tokens: real tokens and pad tokens. The pad tokens are placeholders introduced by data preprocessing: We truncate or pad each sentence to max target length. Only real tokens contribute to the learning signal (i.e., loss). Therefore, we monitor $\text{number of real tokens}$, which is shown as [total weights](https://github.com/AI-Hypercomputer/maxtext/blob/28e5097ac467ed8b1d17676d68aa5acc50f9d60d/src/MaxText/train.py#L151).
 
 - Here we see `total_weights: 196608` for all steps. This is because we are using `dataset_type=synthetic`, where all sentences are generated with a length of `max_target_length=2048`. As a result, there are no pad tokens and total weights = number of tokens.
-- However, in real datasets, sentences can have variable lengths and total weights < number of tokens. For example, we can set `dataset_type=tfds dataset_path=gs://maxtext-dataset dataset_name='c4/en:3.0.1'`, and will see total weights smaller than `196608`:
+- However, in real datasets, sentences can have variable lengths and total weights < number of tokens. For example, we can set `dataset_type=tfds dataset_path=gs://<DATASET_PATH> dataset_name='c4/en:3.0.1'`, and will see total weights smaller than `196608`:
   ```none
   completed step: 8, seconds: 5.670, TFLOP/s/device: 134.856, Tokens/s/device: 8668.393, total_weights: 163259, loss: 9.596
   completed step: 9, seconds: 5.669, TFLOP/s/device: 134.884, Tokens/s/device: 8670.184, total_weights: 155934, loss: 9.580

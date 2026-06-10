@@ -52,6 +52,7 @@ This is the easiest way to get started with the latest stable version.
 
      ```bash
      uv pip install maxtext[tpu]=={{version}} --resolution=lowest
+     install_tpu_pre_train_extra_deps
      ```
 
    - **Option 2:** Install `maxtext[cuda12]`, used for pre-training and decoding
@@ -59,6 +60,7 @@ This is the easiest way to get started with the latest stable version.
 
      ```bash
      uv pip install maxtext[cuda12]=={{version}} --resolution=lowest
+     install_cuda12_pre_train_extra_deps
      ```
 
    - **Option 3:** Install `maxtext[tpu-post-train]`, used for post-training on
@@ -66,7 +68,8 @@ This is the easiest way to get started with the latest stable version.
      on TPUs.
 
      ```bash
-     uv pip install maxtext[tpu-post-train]=={{version}} --resolution=lowest
+     UV_TORCH_BACKEND=cpu uv pip install maxtext[tpu-post-train]=={{version}} --resolution=lowest
+     install_tpu_post_train_extra_deps
      ```
 
    - **Option 4:** Install `maxtext[runner]`, used for building MaxText's Docker
@@ -139,7 +142,7 @@ environment to avoid dependency conflicts.
    - **Option 3:** Install `.[tpu-post-train]`
 
      ```bash
-     uv pip install -e .[tpu-post-train] --resolution=lowest
+     UV_TORCH_BACKEND=cpu uv pip install -e .[tpu-post-train] --resolution=lowest
      install_tpu_post_train_extra_deps
      ```
 

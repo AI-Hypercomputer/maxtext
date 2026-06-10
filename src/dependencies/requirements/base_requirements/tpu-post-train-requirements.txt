@@ -1,15 +1,13 @@
 -r requirements.txt
 anthropic
 astor
+blake3>=1.0
 cachetools
 cbor2
-compressed-tensors
 gepa
 gguf
-google-cloud-storage
 google-tunix
 gspread
-hypothesis
 ipykernel
 ipywidgets
 ijson
@@ -20,6 +18,7 @@ mistral_common
 model-hosting-container-standards
 openai
 openai-harmony
+outlines-core==0.2.11
 papermill
 partial-json-parser
 peft
@@ -31,14 +30,9 @@ pytest-mock
 python-json-logger
 pyzmq
 ray
-runai-model-streamer[s3,gcs]
-setuptools<81.0.0
-sortedcontainers
+setproctitle>=1.0
+setuptools==78.1.0
 torch==2.11.0
-torchax==0.0.11
-torchvision==0.26.0
-tpu-info
 watchfiles
 xgrammar
 xprof
-yapf

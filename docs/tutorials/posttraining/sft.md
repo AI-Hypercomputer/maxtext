@@ -186,4 +186,4 @@ python3 -m maxtext.trainers.post_train.sft.train_sft \
 
 ### Runnable Example in the Codebase
 
-For a complete, runnable SFT workflow that demonstrates how to configure the training loop and use a custom dataset formatter (`formatting_func_path` and `formatting_func_kwargs`), check out the [sft_qwen3_demo.ipynb](../../../src/maxtext/examples/sft_qwen3_demo.ipynb) Jupyter notebook.
+For a complete, runnable SFT workflow that demonstrates how to configure the training loop and use a custom dataset formatter (`formatting_func_path` and `formatting_func_kwargs`), check out the [sft_qwen3_demo.ipynb](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/examples/sft_qwen3_demo.ipynb) Jupyter notebook.
