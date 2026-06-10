@@ -39,6 +39,10 @@ global_rope_proportion: 0.25
 local_rope_proportion: 1.0
 v_norm_with_scale: false
 final_logits_soft_cap: 30.0
+# Run the qk product and softmax inputs in fp32. gemma4 has head_dim=256 and no
+# attn_logits_soft_cap, so bf16 attention logits can overflow to inf/nan.
+float32_qk_product: true
+float32_logits: true
 
 # MoE configuration
 num_experts: 128

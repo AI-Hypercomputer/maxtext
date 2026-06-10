@@ -28,6 +28,10 @@ logits_via_embedding: true
 sliding_window_size: 1024
 use_post_attn_norm: true
 use_post_ffw_norm: true
+# Run the qk product and softmax inputs in fp32 to avoid bf16 attention-logit
+# overflow (no attn_logits_soft_cap on gemma3/4).
+float32_qk_product: true
+float32_logits: true
 local_rope_max_timescale: 10_000
 rope_max_timescale: 1_000_000
 rope_linear_scaling_factor: 8.0
