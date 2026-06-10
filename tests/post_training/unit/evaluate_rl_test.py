@@ -18,9 +18,11 @@
 
 import unittest
 import pytest
+from functools import wraps
 from types import SimpleNamespace
 
 from maxtext.trainers.post_train.rl import evaluate_rl
+from maxtext.trainers.post_train.rl import utils_rl
 
 pytestmark = [pytest.mark.post_training]
 
@@ -213,7 +215,7 @@ class TestScoreResponses(unittest.TestCase):
 class TestComputeRowReward(unittest.TestCase):
   """Tests for _compute_row_reward (per-prompt eval-time reward aggregation)."""
 
-  def _two_fns(self):
+  def _reward_fns(self):
     """Return two reward functions whose per-response scores can be summed."""
 
     # Each fn must accept prompts, completions, answer as keyword args and
@@ -225,7 +227,7 @@ class TestComputeRowReward(unittest.TestCase):
     def fn2(prompts, completions, answer):  # pylint: disable=unused-argument
       return [float(len(c)) for c in completions]
 
-    return [fn1, fn2]
+    return [fn1, fn2, utils_rl.match_format_exactly]
 
   @pytest.mark.cpu_only
   def test_single_response_single_fn(self):
@@ -245,7 +247,7 @@ class TestComputeRowReward(unittest.TestCase):
   @pytest.mark.cpu_only
   def test_sums_across_reward_fns_for_single_response(self):
     score_sum, count = evaluate_rl._compute_row_reward(
-        reward_fns=self._two_fns(),
+        reward_fns=self._reward_fns(),
         prompt="p",
         responses=["abcd"],
         answer="gold",
@@ -259,7 +261,7 @@ class TestComputeRowReward(unittest.TestCase):
   def test_sums_across_passes_for_multiple_responses(self):
     """Multi-pass: helper must aggregate across ALL sampled responses, not just [0]."""
     score_sum, count = evaluate_rl._compute_row_reward(
-        reward_fns=self._two_fns(),
+        reward_fns=self._reward_fns(),
         prompt="p",
         responses=["a", "bcd", "ef"],
         answer="gold",
@@ -274,7 +276,7 @@ class TestComputeRowReward(unittest.TestCase):
   def test_empty_responses_returns_zero_and_zero_count(self):
     """An empty responses list must contribute nothing to the running mean."""
     score_sum, count = evaluate_rl._compute_row_reward(
-        reward_fns=self._two_fns(),
+        reward_fns=self._reward_fns(),
         prompt="p",
         responses=[],
         answer="gold",

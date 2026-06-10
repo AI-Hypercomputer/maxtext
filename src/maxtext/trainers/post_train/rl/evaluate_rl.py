@@ -208,7 +208,7 @@ def _compute_row_reward(reward_fns, prompt, responses, answer, row_idx):
           score_sum += float(scores[0])
     return score_sum, len(responses)
   except Exception as e:  # pylint: disable=broad-exception-caught
-    max_logging.log(f"[eval-reward] reward_fn failed on row {row_idx}: {e!r}")
+    max_logging.log(f"[eval-reward] Reward function {fn.__name__} failed on row {row_idx}: {e!r}")
     return 0.0, 0
 
 
