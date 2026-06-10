@@ -839,12 +839,18 @@ class RoutedMoE(nnx.Module):
 
     if self.config.use_ragged_sort and self.config.use_ring_of_experts:
       local_num_experts = self.config.num_experts // self.get_expert_parallelism_size()
-      unsort_intermediate = ring_ragged_unsort(
+      # Build the flat routing weights in the same layout as
+      # topk_argsort_revert_indices (i.e. the flat token×topk order before
+      # sorting by expert). `weights` has shape (batch, seq, topk); flatten it.
+      flat_weights = jnp.ravel(weights).astype(jnp.float32)
+      output = ring_ragged_unsort(
           intermediate,
           group_sizes,
           sorted_selected_experts,
+          self.num_experts_per_tok,
           local_num_experts,
           self._expert_parallelism_name,
+          topk_weights=flat_weights,
       )
     else:
       unsort_intermediate = _sort_activations(
@@ -852,25 +858,25 @@ class RoutedMoE(nnx.Module):
           jnp.argsort(sorted_selected_experts),
           use_custom_sort_vjp,
       )
-    reshaped_weights = jnp.reshape(weights, (-1, self.num_experts_per_tok))
-    reshaped_intermediate = jnp.reshape(
-        unsort_intermediate,
-        (reshaped_weights.shape[0], self.num_experts_per_tok, -1),
-    )
-    with jax.named_scope("weight_sum"):
-      matmul_precision = jax.lax.Precision(self.config.matmul_precision)
-      if self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4:
-        # For Llama4, combine using weights of 1 for selected experts
-        reshaped_weights = jnp.ones_like(reshaped_weights)
-      if self.config.float32_weight_sum:
-        reshaped_intermediate = reshaped_intermediate.astype(jnp.float32)
-        reshaped_weights = reshaped_weights.astype(jnp.float32)
-      output = jnp.einsum(
-          "BKE,BK -> BE",
-          reshaped_intermediate,
-          reshaped_weights,
-          precision=matmul_precision,
+      reshaped_weights = jnp.reshape(weights, (-1, self.num_experts_per_tok))
+      reshaped_intermediate = jnp.reshape(
+          unsort_intermediate,
+          (reshaped_weights.shape[0], self.num_experts_per_tok, -1),
       )
+      with jax.named_scope("weight_sum"):
+        matmul_precision = jax.lax.Precision(self.config.matmul_precision)
+        if self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4:
+          # For Llama4, combine using weights of 1 for selected experts
+          reshaped_weights = jnp.ones_like(reshaped_weights)
+        if self.config.float32_weight_sum:
+          reshaped_intermediate = reshaped_intermediate.astype(jnp.float32)
+          reshaped_weights = reshaped_weights.astype(jnp.float32)
+        output = jnp.einsum(
+            "BKE,BK -> BE",
+            reshaped_intermediate,
+            reshaped_weights,
+            precision=matmul_precision,
+        )
     return output.reshape(batch_size, sequence_length, -1).astype(self.dtype)
 
   @staticmethod
