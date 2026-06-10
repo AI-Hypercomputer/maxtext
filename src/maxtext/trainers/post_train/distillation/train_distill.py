@@ -623,6 +623,7 @@ def build_training_components(
       beta_end=student_config.distill_beta_end,
       beta_schedule=student_config.distill_beta_schedule,
       max_steps=student_config.steps,
+      blockwise_distill=teacher_config.blockwise_distill,
   )
 
   # Prepare optimizer

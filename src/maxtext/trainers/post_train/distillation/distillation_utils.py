@@ -343,6 +343,7 @@ class CombinedDistillationStrategy(DistillationStrategy):
       beta_end: float | None = None,
       beta_schedule: Literal["constant", "linear", "cosine"] = "constant",
       max_steps: int = 1,
+      blockwise_distill: bool = False,
   ):
     """Initializes the Combined distillation strategy.
 
@@ -380,6 +381,7 @@ class CombinedDistillationStrategy(DistillationStrategy):
     self.alpha = alpha
     self.beta_feature = beta_feature
     self.layer_indices = jnp.array(layer_indices) if layer_indices is not None else None
+    self.blockwise_distill = blockwise_distill
 
     # Schedule parameters
     self.alpha_end = alpha_end
@@ -563,7 +565,7 @@ class CombinedDistillationStrategy(DistillationStrategy):
 
       feature_loss = beta_feature * self.feature_loss_fn(s_features_sliced, t_features_sliced, mask)
 
-    total_loss = base_logit_loss + feature_loss
+    total_loss = feature_loss if self.blockwise_distill else base_logit_loss + feature_loss
 
     moe_lb_loss = jnp.array(0.0)
     if student_output.moe_lb_loss is not None:

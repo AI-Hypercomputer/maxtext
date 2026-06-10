@@ -575,6 +575,85 @@ class TrainDistillTest(unittest.TestCase):
     self.assertTrue(19.0 < _mean(metrics["distill/kl_div_at_T"]) < 21.0)
     self.assertTrue(_mean(metrics["distill/teacher_loss"]) == 0.0)
 
+  def test_monitored_strategy_blockwise_distill(self):
+    """Verifies the strategy ignores base_logit_loss when blockwise_distill is enabled."""
+    strategy = distillation_utils.CombinedDistillationStrategy(
+        student_forward_fn=lambda m, **k: None,
+        teacher_forward_fn=lambda m, **k: None,
+        vocab_size=4,
+        temperature=1.0,
+        alpha=0.5,
+        beta_feature=1.5,
+        feature_loss_type="cosine",
+        layer_indices=None,
+        blockwise_distill=True,
+    )
+    student_output = distillation_utils.DistillationForwardOutput(
+        logits=jnp.array([[[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]]]) * 10,
+        out_projection_activations=jnp.ones((32, 1, 1, 8)),
+    )
+    teacher_output = distillation_utils.DistillationForwardOutput(
+        logits=jnp.array([[[0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]]) * 10,
+        out_projection_activations=jnp.ones((32, 1, 1, 8)) * 1.5,
+    )
+    labels_indices = jnp.array([[0, 1]])
+    labels = jax.nn.one_hot(labels_indices, 4)
+    total_loss, _ = strategy.compute_loss(student_output, teacher_output, labels)
+    self.assertAlmostEqual(float(total_loss), 0.0, places=5)
+
+  def test_build_training_components_blockwise_distill(self):
+    """Verifies build_training_components gets blockwise_distill from teacher_config."""
+    student_config = mock.Mock()
+    student_config.tokenizer_path = ""
+    student_config.tokenizer_type = "huggingface"
+    student_config.add_bos = True
+    student_config.add_eos = True
+    student_config.hf_access_token = None
+    student_config.distill_temperature = 1.0
+    student_config.distill_alpha = 0.5
+    student_config.distill_beta = 0.0
+    student_config.distill_layer_indices = None
+    student_config.distill_feature_loss_type = "cosine"
+    student_config.vocab_size = 4
+    student_config.distill_alpha_end = None
+    student_config.distill_alpha_schedule = "constant"
+    student_config.distill_temperature_end = None
+    student_config.distill_temperature_schedule = "constant"
+    student_config.distill_beta_end = None
+    student_config.distill_beta_schedule = "constant"
+    student_config.steps = 100
+    student_config.checkpoint_period = 10
+    student_config.max_num_checkpoints_to_keep = 1
+    student_config.async_checkpointing = False
+    student_config.profiler = "none"
+    student_config.tensorboard_dir = ""
+    student_config.log_period = 10
+    student_config.gradient_accumulation_steps = 1
+    student_config.data_sharding = ["data"]
+    student_config.learning_rate = 1e-4
+    student_config.opt_type = "adamw"
+    student_config.adam_b1 = 0.9
+    student_config.adam_b2 = 0.99
+    student_config.adam_eps = 1e-8
+    student_config.adam_eps_root = 0.0
+    student_config.adam_weight_decay = 0.0
+    student_config.mu_dtype = "float32"
+    student_config.gradient_clipping_threshold = 1.0
+    student_config.warmup_steps_fraction = 0.1
+    student_config.learning_rate_final_fraction = 0.1
+    student_config.blockwise_distill = False
+
+    teacher_config = mock.Mock()
+    teacher_config.blockwise_distill = True
+
+    with mock.patch("maxtext.trainers.post_train.distillation.train_distill.tokenizer.build_tokenizer") as mock_build:
+      mock_tok = mock.Mock()
+      mock_tok.pad_id = 0
+      mock_build.return_value = mock_tok
+
+      strategy, _, _ = train_distill.build_training_components(student_config, teacher_config)
+      self.assertTrue(strategy.blockwise_distill)
+
   def test_setup_pipeline_grain_enabled(self):
     """Covers setup_checkpoint_manager_and_restore when Grain IS detected."""
     mock_trainer = mock.Mock()
@@ -1136,6 +1215,7 @@ class TrainDistillTest(unittest.TestCase):
     mock_teacher_cfg.per_device_batch_size = 1
     mock_teacher_cfg.max_target_length = 16
     mock_teacher_cfg.gradient_accumulation_steps = 1
+    mock_teacher_cfg.blockwise_distill = False
     mock_pyconfig_init.side_effect = [mock_global, mock_student_cfg, mock_teacher_cfg]
 
     # 2. Model Loading
@@ -1246,6 +1326,7 @@ class TrainDistillTest(unittest.TestCase):
     mock_teacher_cfg.per_device_batch_size = 1
     mock_teacher_cfg.max_target_length = 16
     mock_teacher_cfg.gradient_accumulation_steps = 1
+    mock_teacher_cfg.blockwise_distill = False
     mock_pyconfig_init.side_effect = [mock_global, mock_student_cfg, mock_teacher_cfg]
 
     mock_student_model = mock.Mock()
