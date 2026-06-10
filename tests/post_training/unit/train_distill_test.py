@@ -671,6 +671,7 @@ class TrainDistillTest(unittest.TestCase):
     model_bundle = mock.Mock()
     student_model = mock.Mock()
     model_bundle.student_model = student_model
+    model_bundle.teacher_model = None
 
     # Setup return values for the strategy functions to track the data flow
     mock_student_output = mock.Mock()
@@ -707,7 +708,7 @@ class TrainDistillTest(unittest.TestCase):
 
     # Verify loss computation pipeline
     trainer.strategy.create_labels.assert_called_once_with(mock_batch["targets"], targets_segmentation=None)
-    trainer.strategy.compute_eval_loss.assert_called_once_with(mock_student_output, mock_labels)
+    trainer.strategy.compute_eval_loss.assert_called_once_with(mock_student_output, mock_labels, teacher_output=None)
 
     # Verify it returns the correct loss
     self.assertEqual(actual_loss, mock_loss)
