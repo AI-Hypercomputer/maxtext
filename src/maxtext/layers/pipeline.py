@@ -42,7 +42,7 @@ from maxtext.utils.sharding import (
 from maxtext.utils import pipeline_utils
 
 
-class NNXPipelineBase(nnx.Module):
+class PipelineBase(nnx.Module):
   """
   Base module that implements shared pipelining logic across stages.
   Contains pure JAX and mathematical utilities.
@@ -184,13 +184,7 @@ class NNXPipelineBase(nnx.Module):
     return microbatch_ids, repeat_ids
 
   def get_pipeline_remat_policy(self):
-    """Returns the pipeline remat policy for this pipeline.
-
-    Saves two named tensors during jax.checkpoint recomputation:
-      - "iteration_input": routed microbatch data entering the decoder
-      - "decoder_layer_input": input to the decoder layer itself
-    Everything else is recomputed during backward to save memory.
-    """
+    """Returns the pipeline remat policy for this pipeline."""
     if self.config.remat_policy == "custom":
       return self.remat_policy
     save_input_policy = jax.checkpoint_policies.save_only_these_names("iteration_input", "decoder_layer_input")
@@ -701,7 +695,7 @@ class NNXPipelineBase(nnx.Module):
     self.layers = nnx.merge(graphdef, params, rest)
 
 
-class NNXPipeline(NNXPipelineBase):
+class NNXPipeline(PipelineBase):
   """Original Pipeline implementation adapted for NNX."""
 
   def get_current_stage_weights(self, pipeline_weights, loop_iteration, physical_partition_spec=None):
@@ -969,7 +963,7 @@ class NNXPipeline(NNXPipelineBase):
     )
 
 
-class NNXCircularPipeline(NNXPipelineBase):
+class NNXCircularPipeline(PipelineBase):
   """Implements an circular pipeline schedule with asynchronous weight prefetching.
 
   Circular pipelining reduces the pipeline "bubble" by interleaving multiple pipeline

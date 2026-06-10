@@ -516,8 +516,6 @@ class Decoder(nn.Module):
       return [scannable_cls] if cfg.scan_layers else [normal_cls]
 
     def get_deepseek():
-      if cfg.use_batch_split_schedule:
-        return [deepseek_batchsplit.DeepSeekDenseLayer, deepseek_batchsplit.DeepSeekMoELayer]
       return [deepseek.DeepSeekDenseLayer, deepseek.DeepSeekMoELayer]
 
     layer_map = {

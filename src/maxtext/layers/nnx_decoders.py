@@ -51,6 +51,7 @@ from maxtext.models import (
     gemma2,
     gemma3,
     gemma4,
+    gemma4_small,
     gpt3,
     gpt_oss,
     llama2,
@@ -58,8 +59,10 @@ from maxtext.models import (
     mistral,
     mixtral,
     olmo3,
+    qwen2,
     qwen3,
     qwen3_5,
+    qwen3_custom,
     simple_layer,
 )
 from maxtext.multimodal import utils as mm_utils
@@ -179,7 +182,7 @@ class NNXDecoderLayer(nnx.Module):
     else:
       logical_axis_names = (
           "activation_batch",
-          "activation_length_no_exp",
+          "activation_length",
           "activation_embed",
       )
 
@@ -428,20 +431,21 @@ class NNXDecoder(nnx.Module):
     self.is_deepseek = self.config.decoder_block == DecoderBlockType.DEEPSEEK
     self.is_gemma3 = self.config.decoder_block == DecoderBlockType.GEMMA3
     self.is_gemma4 = self.config.decoder_block == DecoderBlockType.GEMMA4
+    self.is_gemma4_small = self.config.decoder_block == DecoderBlockType.GEMMA4_SMALL
 
     self._init_decoder_layers(decoder_block_classes, rngs, mesh)
 
   def _init_decoder_layers(self, decoder_block_classes, rngs, mesh):
-    """Routes layer construction through three main paths: pipeline, scanned non-pipeline, sequential.
-
-    Three main paths:
-    - Pipeline parallelism: distribute layers across devices
-    - Scanned (non-pipeline): loop-scanned layers
-    - Sequential: explicit per-layer loop
-    """
+    """Routes layer construction through three main paths: pipeline, scanned non-pipeline, sequential."""
     config = self.config
 
-    if config.using_pipeline_parallelism:
+    if self.is_gemma4_small:
+      # Gemma4 E2B/E4B: per-layer-index KV-share donor threading and a distinct attention_type
+      # per layer are not expressible inside nn.scan; pipeline parallelism is also unsupported.
+      if config.using_pipeline_parallelism or config.scan_layers:
+        raise ValueError("gemma4_small (Gemma4 E2B/E4B) does not support pipeline parallelism or scan_layers.")
+      self._init_gemma4_small_layers(rngs)
+    elif config.using_pipeline_parallelism:
       self._init_pipeline_layers(decoder_block_classes, rngs, mesh)
     elif config.scan_layers:
       self._init_scanned_layers(decoder_block_classes, rngs, mesh)
@@ -734,6 +738,37 @@ class NNXDecoder(nnx.Module):
         layer_kwargs = {"attention_type": olmo3.get_attention_type(layer_id=lyr)}
 
       self._create_and_register_layer(layer_cls, rngs, "layers", lyr, **layer_kwargs)
+
+  def _init_gemma4_small_layers(self, rngs):
+    """Eagerly builds the Gemma4-small (E2B/E4B) per-layer-input embedder and one DISTINCT
+    decoder layer per index.
+
+    Each layer bakes its own attention_type + layer_idx at construction (these select head_dim,
+    RoPE base, and KV-share role), so the layers are heterogeneous and cannot be folded into a
+    scanned stack. Layers are registered both as named attrs (``layers_{i}``, matching the Linen
+    checkpoint keys) and appended to ``self.layers`` for iteration, mirroring
+    ``_create_and_register_layer``.
+    """
+    cfg = self.config
+    self.layers = nnx.List([])
+    # Only register the PLE submodule when it exists (mirrors the optional position_embedder
+    # pattern); assigning None first would make nnx treat the attribute as static.
+    if cfg.hidden_size_per_layer_input > 0 and cfg.vocab_size_per_layer_input > 0:
+      self.per_layer_embedder = gemma4_small.Gemma4SmallPLE(config=cfg, mesh=self.mesh, rngs=rngs)
+
+    layer_types = gemma4_small.build_layer_types(cfg.num_decoder_layers, cfg.model_name)
+    for lyr in range(cfg.num_decoder_layers):
+      layer = gemma4_small.Gemma4SmallDecoderLayer(
+          config=cfg,
+          mesh=self.mesh,
+          quant=self.quant,
+          model_mode=self.model_mode,
+          attention_type=layer_types[lyr],
+          layer_idx=lyr,
+          rngs=rngs,
+      )
+      setattr(self, f"layers_{lyr}", layer)
+      self.layers.append(layer)
 
   def _get_pipeline_stage_module(self, decoder_blocks, rngs):
     """Retrieves the wrapper module formatted for single pipeline stage execution."""
@@ -1088,11 +1123,6 @@ class NNXDecoder(nnx.Module):
       return [scannable_cls] if cfg.scan_layers else [normal_cls]
 
     def get_deepseek():
-      if cfg.use_batch_split_schedule:
-        return [
-            deepseek_batchsplit.DeepSeekDenseLayer,
-            deepseek_batchsplit.DeepSeekMoELayer,
-        ]
       return [deepseek.DeepSeekDenseLayer, deepseek.DeepSeekMoELayer]
 
     layer_map = {
@@ -1104,9 +1134,12 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.GEMMA2: [gemma2.Gemma2DecoderLayer],
         DecoderBlockType.GEMMA3: [gemma3.Gemma3DecoderLayer],
         DecoderBlockType.GEMMA4: get_scannable(gemma4.Gemma4DecoderLayer, gemma4.Gemma4ScannableBlock),
+        DecoderBlockType.GEMMA4_SMALL: [gemma4_small.Gemma4SmallDecoderLayer],
         DecoderBlockType.GPT3: [gpt3.Gpt3DecoderLayer],
+        DecoderBlockType.QWEN2: [qwen2.Qwen2DecoderLayer],
         DecoderBlockType.QWEN3: [qwen3.Qwen3DecoderLayer],
         DecoderBlockType.QWEN3_MOE: [qwen3.Qwen3MoeDecoderLayer],
+        DecoderBlockType.QWEN3_CUSTOM_MOE: [qwen3_custom.Qwen3CustomMoeDecoderLayer],
         DecoderBlockType.SIMPLE: [simple_layer.SimpleDecoderLayer],
         DecoderBlockType.SIMPLE_MLP: [simple_layer.SimpleMlpDecoderLayer],
         DecoderBlockType.DEEPSEEK: get_deepseek(),
@@ -1257,8 +1290,11 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.GEMMA2,
         DecoderBlockType.GEMMA3,
         DecoderBlockType.GEMMA4,
+        DecoderBlockType.GEMMA4_SMALL,
+        DecoderBlockType.QWEN2,
         DecoderBlockType.QWEN3,
         DecoderBlockType.QWEN3_MOE,
+        DecoderBlockType.QWEN3_CUSTOM_MOE,
         DecoderBlockType.GPT_OSS,
         DecoderBlockType.SIMPLE,
         DecoderBlockType.SIMPLE_MLP,
@@ -1284,7 +1320,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.QWEN3_5,
     }:
       return functools.partial(
-          normalizations.RMSNorm,
+          normalizations.Qwen3NextRMSNorm,
           num_features=num_features,
           shard_mode=self.config.shard_mode,
           rngs=rngs,
@@ -1311,6 +1347,9 @@ class NNXDecoder(nnx.Module):
       image_embeddings = multimodal_input.image_embeddings
       bidirectional_mask = multimodal_input.bidirectional_mask
       image_masks = multimodal_input.image_masks
+      video_embeddings = getattr(multimodal_input, "video_embeddings", None)
+      video_masks = getattr(multimodal_input, "video_masks", None)
+      bidirectional_mask_video = getattr(multimodal_input, "bidirectional_mask_video", None)
       audio_embeddings = multimodal_input.audio_embeddings
       audio_masks = multimodal_input.audio_masks
 
@@ -1321,9 +1360,13 @@ class NNXDecoder(nnx.Module):
             "gemma3-27b",
             "gemma4-26b",
             "gemma4-31b",
+            "gemma4-e2b",
+            "gemma4-e4b",
             "llama4-17b-16e",
             "llama4-17b-128e",
             "qwen3-omni-30b-a3b",
+            "qwen3.5-35b-a3b",
+            "qwen3.5-397b-a17b",
         }:
           y = mm_utils.merge_mm_embeddings(
               text_embeddings=y,
@@ -1333,7 +1376,16 @@ class NNXDecoder(nnx.Module):
           )
         else:
           raise ValueError(f"Unsupported model_name for multimodal: {cfg.model_name}")
-
+      if video_embeddings is not None and cfg.use_multimodal:
+        if cfg.model_name in {"qwen3-omni-30b-a3b", "qwen3.5-35b-a3b", "qwen3.5-397b-a17b"}:
+          y = mm_utils.merge_mm_embeddings(
+              text_embeddings=y,
+              multimodal_embeddings=video_embeddings,
+              mask=bidirectional_mask_video,
+              token_masks=video_masks,
+          )
+        else:
+          raise ValueError(f"Unsupported model_name for video: {cfg.model_name}")
       if audio_embeddings is not None and cfg.use_audio:
         if cfg.model_name in {"qwen3-omni-30b-a3b"}:
           y = mm_utils.merge_mm_embeddings(
@@ -1363,7 +1415,7 @@ class NNXDecoder(nnx.Module):
     if cfg.shard_mode == ShardMode.EXPLICIT:
       norm_out_sharding = create_sharding(
           self.mesh,
-          ("activation_batch", "activation_length_no_exp", "activation_embed"),
+          ("activation_batch", "activation_length", "activation_embed"),
       )
     else:
       norm_out_sharding = None
@@ -1378,7 +1430,7 @@ class NNXDecoder(nnx.Module):
           self.mesh,
           (
               "activation_embed_and_logits_batch",
-              "activation_length_no_exp",
+              "activation_length",
               "activation_vocab",
           ),
       )
@@ -1618,7 +1670,7 @@ class NNXDecoder(nnx.Module):
       else:
         # Standard pipeline run (non-DeepSeek, incl. Gemma4 — matches Linen decoders.py).
         # Gemma4 routes through the pipeline here; _apply_gemma4_scanned_blocks is
-        # non-pipeline-only (its scanned_blocks/layers_remainder are not built when
+        # non-pipeline-only (its layers/layers_remainder are not built when
         # pipeline parallelism is enabled).
         y = self.pipeline_module(
             y,
@@ -1652,7 +1704,21 @@ class NNXDecoder(nnx.Module):
                 y = out[0] if isinstance(out, tuple) else out
 
     else:
-      if cfg.scan_layers:
+      if self.is_gemma4_small:
+        y, kv_caches = self._apply_gemma4_small_layers(
+            y,
+            decoder_input_tokens,
+            decoder_segment_ids,
+            decoder_positions,
+            deterministic,
+            model_mode,
+            multimodal_input=multimodal_input,
+            kv_caches=kv_caches,
+            attention_metadata=attention_metadata,
+            previous_chunk=previous_chunk,
+            slot=slot,
+        )
+      elif cfg.scan_layers:
         if self.is_deepseek:
           layer_kwargs = {
               "previous_chunk": previous_chunk,
@@ -1699,7 +1765,7 @@ class NNXDecoder(nnx.Module):
               policy = self.get_remat_policy()
               mock_params = self._build_linen_params(self.moe_layers)
 
-              if cfg.use_qwix_quantization:
+              if cfg.use_qwix_quantization and not cfg.use_manual_quantization:
                 y = deepseek_batchsplit_fp8.scan_batch_split_layers(
                     y,
                     mock_params,
@@ -1795,7 +1861,7 @@ class NNXDecoder(nnx.Module):
         for lyr, layer in enumerate(self.layers):
           graphdef, state = nnx.split(layer)
           if kv_caches is not None:
-            if cfg.decoder_block == DecoderBlockType.QWEN3_NEXT:
+            if cfg.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
               if (lyr + 1) % cfg.inhomogeneous_layer_cycle_interval == 0:
                 kv_cache = (
                     kv_caches["key_cache"][lyr],
@@ -1816,7 +1882,7 @@ class NNXDecoder(nnx.Module):
           nnx.update(layer, new_state)
 
           if kv_caches is not None and kv_cache is not None:
-            if cfg.decoder_block == DecoderBlockType.QWEN3_NEXT:
+            if cfg.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
               if (lyr + 1) % cfg.inhomogeneous_layer_cycle_interval == 0:
                 kv_caches["key_cache"][lyr] = kv_cache[0]
                 kv_caches["value_cache"][lyr] = kv_cache[1]
@@ -1843,7 +1909,9 @@ class NNXDecoder(nnx.Module):
 
     # When in the Indexer Dense Warm-up stage, skip the expensive output head projection
     # for efficiency, as the main model is frozen and the LM loss is not needed.
-    elif (cfg.use_indexer and not cfg.indexer_sparse_training) and self.model_mode == MODEL_MODE_TRAIN:
+    elif (
+        cfg.use_indexer and cfg.indexer_loss_scaling_factor > 0.0 and not cfg.indexer_sparse_training
+    ) and self.model_mode == MODEL_MODE_TRAIN:
       logits = None
 
     # When vocab tiling is enabled in training mode, full logits won't generate to reduce memory
@@ -1928,13 +1996,11 @@ class NNXDecoder(nnx.Module):
     scan_length = cfg.num_decoder_layers // attention_pattern_length
 
     layer_args = (decoder_segment_ids, decoder_positions, deterministic, model_mode)
-    layer_kwargs = {"bidirectional_mask": bidirectional_mask}
+    layer_kwargs = {"bidirectional_mask": bidirectional_mask, "slot": slot, "previous_chunk": previous_chunk}
 
     # Apply the main scan over the full blocks
     if scan_length > 0:
-      y, self.scanned_blocks, _ = self._apply_layers_sequentially(
-          self.scanned_blocks, y, *layer_args, length=scan_length, **layer_kwargs
-      )
+      y, self.layers, _ = self._apply_layers_sequentially(self.layers, y, *layer_args, length=scan_length, **layer_kwargs)
 
     # Apply any remaining layers that did not fit into a full scanned block
     num_remaining_layers = cfg.num_decoder_layers % attention_pattern_length
@@ -1947,8 +2013,6 @@ class NNXDecoder(nnx.Module):
         out_y, _ = merged_layer(
             y_in,
             *layer_args,
-            previous_chunk=previous_chunk,
-            slot=slot,
             **layer_kwargs,
         )
         return out_y, nnx.state(merged_layer)
@@ -1960,6 +2024,80 @@ class NNXDecoder(nnx.Module):
       nnx.update(self.layers_remainder, new_state)
 
     return y
+
+  def _apply_gemma4_small_layers(
+      self,
+      y,
+      decoder_input_tokens,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      multimodal_input=None,
+      kv_caches=None,
+      attention_metadata=None,
+      previous_chunk=None,
+      slot=None,
+  ):
+    """Apply Gemma 4 small (E2B/E4B) decoder layers (pure-NNX)."""
+    cfg = self.config
+    bidirectional_mask_value = multimodal_input.bidirectional_mask if multimodal_input is not None else None
+
+    per_layer_inputs = None
+    if cfg.hidden_size_per_layer_input > 0 and cfg.vocab_size_per_layer_input > 0:
+      per_layer_inputs = self.per_layer_embedder(decoder_input_tokens, y)
+
+    layer_types = gemma4_small.build_layer_types(cfg.num_decoder_layers, cfg.model_name)
+    num_kv_shared = cfg.num_kv_shared_layers
+    shared_kv_states: dict[int, tuple[jax.Array, jax.Array]] = {}
+    # tpu-inference allocates one kv_caches slot per non-shared layer; KV-shared layers reuse the donor's slot.
+    cache_index_of = gemma4_small.kv_cache_slot_map(layer_types, num_kv_shared)
+
+    for lyr in range(cfg.num_decoder_layers):
+      layer = self.layers[lyr]
+      donor_idx = gemma4_small.kv_donor_layer_idx(lyr, layer_types, num_kv_shared)
+      is_donor = gemma4_small.is_kv_donor_layer(lyr, layer_types, num_kv_shared)
+
+      shared_key = None
+      shared_value = None
+      if donor_idx is not None:
+        if donor_idx not in shared_kv_states:
+          raise RuntimeError(
+              f"KV-shared layer {lyr} references donor {donor_idx} but no donor K/V "
+              f"have been recorded yet. This indicates the layer iteration order is wrong."
+          )
+        shared_key, shared_value = shared_kv_states[donor_idx]
+
+      # Donor layers expose their rotated, normed K/V to downstream shared layers, and reuse the
+      # just-computed K/V in their own forward to avoid double-computing the K/V projection.
+      if is_donor:
+        donor_k, donor_v = layer.compute_shared_kv(y, decoder_positions)
+        shared_kv_states[lyr] = (donor_k, donor_v)
+        shared_key, shared_value = donor_k, donor_v
+
+      ple_slice = per_layer_inputs[..., lyr, :] if per_layer_inputs is not None else None
+
+      cache_idx = cache_index_of[lyr]
+      kv_cache = kv_caches[cache_idx] if kv_caches is not None else None
+      y, kv_cache = layer(
+          y,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+          previous_chunk=previous_chunk,
+          slot=slot,
+          bidirectional_mask=bidirectional_mask_value,
+          kv_cache=kv_cache,
+          attention_metadata=attention_metadata,
+          per_layer_input=ple_slice,
+          shared_key=shared_key,
+          shared_value=shared_value,
+      )
+      if kv_caches is not None and kv_cache is not None:
+        kv_caches[cache_idx] = kv_cache
+
+    return y, kv_caches
 
 
 def decoder_as_linen(

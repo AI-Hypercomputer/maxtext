@@ -44,6 +44,7 @@ from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import Embed
 from maxtext.layers.nnx_decoders import NNXDecoder, NNXDecoderLayer, deepstack_process
 from maxtext.layers.normalizations import RMSNorm
+from maxtext.models import gemma4, gemma4_small
 from maxtext.models.gpt3 import Gpt3LayerNorm
 from maxtext.models.llama2 import LlamaDecoderLayer
 from maxtext.utils import maxtext_utils
@@ -769,3 +770,73 @@ class TestNNXDecoderDeepseekAndGemma4(unittest.TestCase):
         logits.shape,
         (cfg.global_batch_size_to_train_on, cfg.max_target_length, cfg.vocab_size),
     )
+
+  def test_gemma4_scanned_layers_scan_length_positive(self):
+    """Regression: gemma4 + scan with num_decoder_layers == pattern length so scan_length > 0.
+
+    The scanned-block path reads ``self.layers`` (previously the never-assigned
+    ``self.scanned_blocks``, which raised AttributeError). The existing
+    ``test_gemma4_scanned_layers`` uses num_decoder_layers=3 (< pattern length 6), giving
+    scan_length=0 which SKIPS this path — so it never caught the bug.
+    """
+    pattern_len = len(gemma4.GEMMA4_ATTENTION_PATTERN)
+    cfg = _make_config(decoder_block="gemma4", scan_layers=True, num_decoder_layers=pattern_len)
+    decoder = NNXDecoder(config=cfg, mesh=self.mesh, model_mode=MODEL_MODE_TRAIN, rngs=self.rngs)
+    shared_embedding = self._make_shared_embedding(cfg)
+    ids, segment_ids, positions = self._make_token_inputs(cfg)
+    logits, _, _ = decoder(
+        shared_embedding,
+        ids,
+        positions,
+        decoder_segment_ids=segment_ids,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+    self.assertEqual(logits.shape, (cfg.global_batch_size_to_train_on, cfg.max_target_length, cfg.vocab_size))
+    self.assertTrue(jnp.all(jnp.isfinite(logits)))
+
+  def test_gemma4_small_forward(self):
+    """GEMMA4_SMALL pure-NNX port: construct (PLE + distinct per-layer instances) and forward
+    (PLE per-layer slice + KV-share donor threading)."""
+    cfg = _make_config(
+        model_name="gemma4-e2b",
+        base_num_decoder_layers=10,
+        num_kv_shared_layers=4,
+        hidden_size_per_layer_input=64,
+        vocab_size_per_layer_input=256,
+        scan_layers=False,
+        use_multimodal=False,
+    )
+    decoder = NNXDecoder(config=cfg, mesh=self.mesh, model_mode=MODEL_MODE_TRAIN, rngs=self.rngs)
+    self.assertIsInstance(decoder.per_layer_embedder, gemma4_small.Gemma4SmallPLE)
+    self.assertEqual(len(decoder.layers), cfg.num_decoder_layers)
+    self.assertIsNot(decoder.layers[0], decoder.layers[1])  # heterogeneous per-layer instances
+
+    shared_embedding = self._make_shared_embedding(cfg)
+    ids, segment_ids, positions = self._make_token_inputs(cfg)
+    logits, _, _ = decoder(
+        shared_embedding,
+        ids,
+        positions,
+        decoder_segment_ids=segment_ids,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+    self.assertEqual(logits.shape, (cfg.global_batch_size_to_train_on, cfg.max_target_length, cfg.vocab_size))
+    self.assertTrue(jnp.all(jnp.isfinite(logits)))
+
+  def test_qwen2_forward(self):
+    """Coverage: QWEN2 (newly added to the NNX layer_map) constructs and runs a forward pass."""
+    cfg = _make_config(model_name="qwen2.5-1.5b", base_num_decoder_layers=2)
+    decoder = NNXDecoder(config=cfg, mesh=_make_mesh(cfg), model_mode=MODEL_MODE_TRAIN, rngs=self.rngs)
+    shared_embedding = self._make_shared_embedding(cfg)
+    ids, segment_ids, positions = self._make_token_inputs(cfg)
+    logits, _, _ = decoder(
+        shared_embedding,
+        ids,
+        positions,
+        decoder_segment_ids=segment_ids,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+    self.assertEqual(logits.shape, (cfg.global_batch_size_to_train_on, cfg.max_target_length, cfg.vocab_size))
