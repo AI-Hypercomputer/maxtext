@@ -80,6 +80,28 @@ class MaxTextTrainingInput(peft_trainer.TrainingInput):
 # -----------------------------------------------------------------------------
 
 
+class BoundedIterator:
+  """Wraps an iterator to enforce dynamic termination via a callable predicate.
+
+  Yields items from the underlying iterable until `stop_condition()` returns
+  True, at which point it raises StopIteration. This allows trainers that
+  otherwise run indefinitely (or until data exhaustion) to be cleanly bounded
+  by dynamic state limits, such as a maximum optimizer step count.
+  """
+
+  def __init__(self, iterable, stop_condition):
+    self._iterator = iter(iterable)
+    self._stop_condition = stop_condition
+
+  def __iter__(self):
+    return self
+
+  def __next__(self):
+    if self._stop_condition():
+      raise StopIteration
+    return next(self._iterator)
+
+
 class MaxTextToTunixIterator:
   """Adapts the raw dictionary output of MaxText's data loader to Tunix objects.
 
