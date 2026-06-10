@@ -2876,6 +2876,11 @@ class MaxTextConfig(
       raise ValueError("At most one of `load_parameters_path` or `load_full_state_path` should be set.")
     if self.elastic_enabled and not self.enable_single_controller:
       raise ValueError("Elastic training is only supported with Pathways (`enable_single_controller=True`).")
+    if self.colocated_python_data_input and not self.enable_single_controller:
+      raise ValueError(
+          "Colocated python data input is only supported with Pathways (single"
+          " controller) enabled (`enable_single_controller=True`)."
+      )
     if self.grain_use_elastic_iterator and self.grain_file_type != "arrayrecord":
       raise ValueError(
           "`grain_use_elastic_iterator=True` only supports `grain_file_type=arrayrecord`. "
