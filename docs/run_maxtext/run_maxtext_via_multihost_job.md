@@ -51,7 +51,7 @@ The `multihost_job.py` script:
    Create a bucket if you don't already have one, see: https://cloud.google.com/storage/docs/creating-buckets for instructions to create one. Once you've identified your bucket:
 
    ```
-   BUCKET_NAME=<your-bucket>
+   BUCKET_NAME=<GCS_BUCKET>
    ```
 
 4. **Run your training job.**

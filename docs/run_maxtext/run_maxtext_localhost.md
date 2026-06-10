@@ -26,7 +26,11 @@ MaxText uses a primary YAML file, `configs/base.yml`, to manage its settings. Th
   - `learning_rate`: The core hyperparameter for the optimizer.
   - Mode shape parameters: `base_num_decoder_layers`, `base_emb_dim`, `base_num_query_heads`, `base_num_kv_heads`, and `head_dim`.
 - **Override settings (optional):** You can modify training parameters in two ways: by editing `configs/base.yml` directly or by passing them as command-line arguments to the training script which is the recommended method. For example, to change the number of training steps, you can pass `--steps=500` when running `train.py`.
-- **Note**: You **must** update the variable `base_output_directory` which is initialized in `configs/base.yml` to point to a folder within the GCS bucket you just created (e.g., `gs://your-bucket-name/maxtext-output`).
+- **Note**: You **must** update the variable `base_output_directory` which is initialized in `configs/base.yml` to point to a folder within the GCS bucket you just created (e.g., `gs://<GCS_BUCKET>/maxtext-output`). You can set set an environment variable for that:
+
+```bash
+export BASE_OUTPUT_DIRECTORY=gs://<GCS_BUCKET>/maxtext-output
+```
 
 ## Development
 
@@ -40,12 +44,12 @@ Local development on a single host TPU/GPU VM is a convenient way to run MaxText
 
 #### Run a Test Training Job
 
-After the installation is complete, run a short training job using synthetic data to confirm everything is working correctly. This command trains a model for just 10 steps. Remember to replace `$YOUR_JOB_NAME` with a unique name for your run and `gs://<my-bucket>` with the path to the GCS bucket you configured in the prerequisites.
+After the installation is complete, run a short training job using synthetic data to confirm everything is working correctly. This command trains a model for just 10 steps. Remember to replace `$YOUR_JOB_NAME` with a unique name for your run and to set `$BASE_OUTPUT_DIRECTORY` with the path to the GCS bucket you configured in the prerequisites.
 
 ```bash
 python3 -m maxtext.trainers.pre_train.train \
   run_name=${YOUR_JOB_NAME?} \
-  base_output_directory=gs://<my-bucket> \
+  base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
   dataset_type=synthetic \
   steps=10
 ```
@@ -59,7 +63,7 @@ To demonstrate model output, run the following command:
 ```bash
 python3 -m maxtext.inference.decode \
   run_name=${YOUR_JOB_NAME?} \
-  base_output_directory=gs://<my-bucket> \
+  base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
   per_device_batch_size=1
 ```
 
@@ -80,7 +84,7 @@ To use a pre-configured model for TPUs, you override the `model_name` parameter,
 python3 -m maxtext.trainers.pre_train.train \
   model_name=llama3-8b \
   run_name=${YOUR_JOB_NAME?} \
-  base_output_directory=gs://<my-bucket> \
+  base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
   dataset_type=synthetic \
   steps=10
 ```
@@ -94,7 +98,7 @@ python3 -m maxtext.trainers.pre_train.train \
 python3 -m maxtext.trainers.pre_train.train \
   model_name=qwen3-4b \
   run_name=${YOUR_JOB_NAME?} \
-  base_output_directory=gs://<my-bucket> \
+  base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
   dataset_type=synthetic \
   steps=10
 ```
@@ -111,7 +115,7 @@ To use a GPU-optimized configuration, you should specify the path to the model's
 ```bash
 python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/gpu/models/mixtral_8x7b.yml \
   run_name=${YOUR_JOB_NAME?} \
-  base_output_directory=gs://<my-bucket> \
+  base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
   dataset_type=synthetic \
   steps=10
 ```
@@ -126,7 +130,7 @@ This will load `gpu/mixtral_8x7b.yml`, which inherits from `base.yml`.
 ```bash
 python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/gpu/models/llama3-8b.yml \
   run_name=${YOUR_JOB_NAME?} \
-  base_output_directory=gs://<my-bucket> \
+  base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
   dataset_type=synthetic \
   steps=10
 ```
