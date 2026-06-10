@@ -733,9 +733,9 @@ def recover(
   recorder = python_vars["recorder"]
 
   # Safe Metrics Extraction & Flushing
-  metric_logger = python_vars.get("metric_logger")
-  if metric_logger is not None:
-    metric_logger.recover_metrics()
+  metric_logger_instance = python_vars.get("metric_logger_instance")
+  if metric_logger_instance is not None:
+    metric_logger_instance.recover_metrics()
 
   # 1. Find currently active slices (wait if none are active)
   min_slices = config.elastic_min_slice_count
