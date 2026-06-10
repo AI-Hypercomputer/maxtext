@@ -43,6 +43,6 @@ tensorflow-text
 tensorflow
 tiktoken
 tokamax!=0.1.0
-transformers>=5.8.0
+transformers>=5.11.0
 uvloop
 qwix>=0.1.6
