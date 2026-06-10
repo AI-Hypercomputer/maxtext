@@ -769,7 +769,7 @@ def get_train_func(config, recorder, argv):
     max_logging.log("Elastic utils: Elastic training enabled.")
 
     def on_elastic_event():
-      elastic_utils.record_elastic_event_start(recorder, config)
+      elastic_utils.record_elastic_event_start(recorder, config.elastic_enabled)
 
     def on_slices_ready():
       elastic_utils.record_elastic_wait_end_and_reinit_start(recorder)

@@ -406,7 +406,7 @@ def get_num_slices(raw_keys, config=None):
     return raw_keys["compile_topology_num_slices"]
   else:
     try:
-      return len(elastic_utils.live_slice_indices(config))
+      return len(elastic_utils.live_slice_indices(config.elastic_enabled))
     except (ValueError, AttributeError):
       return 1
 
