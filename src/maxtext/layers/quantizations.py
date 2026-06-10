@@ -81,7 +81,7 @@ class QwixQuantization:
     """Returns Qwix dot_general."""
     return functools.partial(QwixDotGeneral, config=self._get_fp8_full_qwix_config())
 
-  def einsum(self, mesh_axes: Tuple[str, ...] = ()):
+  def einsum(self, mesh_axes: Tuple[str, ...] = (), **kwargs):
     """Returns Qwix einsum."""
     return QwixEinsum(config=self._get_fp8_full_qwix_config())
 
