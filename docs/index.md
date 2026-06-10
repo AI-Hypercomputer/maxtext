@@ -22,8 +22,6 @@ file: index.html
 ---
 ```
 
-:link: reference/api
-
 <div class="doc-body">
 <section class="latest-news">
 
