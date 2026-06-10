@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 """Create an Orbax CheckpointManager with specified (Async or not) Checkpointer."""
 
 import time
@@ -844,9 +845,7 @@ def load_state_if_possible(
           (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager),
       ):
         checkpoint_path = str(checkpoint_manager.directory / str(step) / "items")
-        with handle_checkpoint_mismatch(
-            "restore NNX checkpoint", checkpoint_path
-        ):
+        with handle_checkpoint_mismatch("restore NNX checkpoint", checkpoint_path):
           restored_nnx = _load_linen_checkpoint_into_nnx(
               checkpoint_path,
               abstract_unboxed_pre_state,
@@ -882,9 +881,7 @@ def load_state_if_possible(
                   EmergencyReplicatorCheckpointManager,
               ),
           ):
-            restored = checkpoint_manager.restore(
-                step, args=Composite(state=checkpoint_args)
-            ).state
+            restored = checkpoint_manager.restore(step, args=Composite(state=checkpoint_args)).state
             _assert_no_shaped_dtype_struct(restored)
             return (
                 restored,
@@ -912,9 +909,7 @@ def load_state_if_possible(
           # Case 3: Default/Fallback case.
           # This case acts as a wildcard ('_') and matches if none of the preceding cases were met.
           case _:
-            restored = checkpoint_manager.restore(
-                step, args=Composite(items=checkpoint_args)
-            )
+            restored = checkpoint_manager.restore(step, args=Composite(items=checkpoint_args))
             _assert_no_shaped_dtype_struct(restored)
             return (restored, None)
 
@@ -924,9 +919,7 @@ def load_state_if_possible(
     else:
       params = abstract_unboxed_pre_state.params
 
-    with handle_checkpoint_mismatch(
-        "load parameters", load_parameters_from_path
-    ):
+    with handle_checkpoint_mismatch("load parameters", load_parameters_from_path):
       restored_params = load_params_from_path(
           load_parameters_from_path,
           params,
@@ -938,9 +931,7 @@ def load_state_if_possible(
     return None, restored_params
   elif load_full_state_from_path != "":
     max_logging.log(f"Loading full state from path: {load_full_state_from_path}")
-    with handle_checkpoint_mismatch(
-        "load full state", load_full_state_from_path
-    ):
+    with handle_checkpoint_mismatch("load full state", load_full_state_from_path):
       restored_state = _load_full_state_from_path(
           path=load_full_state_from_path,
           abstract_unboxed_pre_state=abstract_unboxed_pre_state,
