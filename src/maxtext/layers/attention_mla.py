@@ -153,7 +153,12 @@ class Indexer(nnx.Module):
     )
 
     # Key Normalization with Bias
-    self.k_norm = nnx.LayerNorm(num_features=self.head_dim, use_bias=True, dtype=self.weight_dtype, rngs=rngs)
+    self.k_norm = nnx.LayerNorm(
+        num_features=self.head_dim,
+        use_bias=True,
+        dtype=self.weight_dtype,
+        rngs=rngs,
+    )
 
     # Projection: Input -> Importance Weights for Heads
     # deepseek3.2 enforces FP32 and does not quantize, for precision and stability.
@@ -416,9 +421,24 @@ def mla_as_linen(
     # Shard the query activation as the same as the key and value.
     # TODO: Find a better sharding axis name.
     # TODO: Further break down the Training and Inference axes for the q, k, v.
-    prefill_query_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
-    prefill_key_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
-    prefill_value_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
+    prefill_query_axis_names: AxisNames = (
+        PREFILL_KV_BATCH,
+        PREFILL_LENGTH,
+        KV_HEAD,
+        KV_HEAD_DIM,
+    ),
+    prefill_key_axis_names: AxisNames = (
+        PREFILL_KV_BATCH,
+        PREFILL_LENGTH,
+        KV_HEAD,
+        KV_HEAD_DIM,
+    ),
+    prefill_value_axis_names: AxisNames = (
+        PREFILL_KV_BATCH,
+        PREFILL_LENGTH,
+        KV_HEAD,
+        KV_HEAD_DIM,
+    ),
     query_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM),
     key_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM),
     value_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM),
@@ -554,9 +574,24 @@ class MLA(Attention):
       # Shard the query activation as the same as the key and value.
       # TODO: Find a better sharding axis name.
       # TODO: Further break down the Training and Inference axes for the q, k, v.
-      prefill_query_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
-      prefill_key_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
-      prefill_value_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
+      prefill_query_axis_names: AxisNames = (
+          PREFILL_KV_BATCH,
+          PREFILL_LENGTH,
+          KV_HEAD,
+          KV_HEAD_DIM,
+      ),
+      prefill_key_axis_names: AxisNames = (
+          PREFILL_KV_BATCH,
+          PREFILL_LENGTH,
+          KV_HEAD,
+          KV_HEAD_DIM,
+      ),
+      prefill_value_axis_names: AxisNames = (
+          PREFILL_KV_BATCH,
+          PREFILL_LENGTH,
+          KV_HEAD,
+          KV_HEAD_DIM,
+      ),
       query_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM),
       key_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM),
       value_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM),
@@ -564,7 +599,12 @@ class MLA(Attention):
       out_axis_names: AxisNames = (BATCH_ATTN, LENGTH, HEAD, D_KV),
       prefill_input_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, EMBED),
       decode_input_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, EMBED),
-      prefill_out_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, HEAD, D_KV),
+      prefill_out_axis_names: AxisNames = (
+          PREFILL_KV_BATCH,
+          PREFILL_LENGTH,
+          HEAD,
+          D_KV,
+      ),
       decode_out_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV),
       prefill_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
       ar_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
@@ -702,8 +742,18 @@ class MLA(Attention):
         value_head_size=self.config.indexer_head_dim,
         dtype=self.dtype,
         kv_quant=None,  # Quantization is not yet supported by the indexer.
-        prefill_cache_logical_axis_names=(CACHE_BATCH_PREFILL, CACHE_SEQUENCE, CACHE_HEADS_NONE, CACHE_KV),
-        cache_logical_axis_names=(CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS_NONE, CACHE_KV),
+        prefill_cache_logical_axis_names=(
+            CACHE_BATCH_PREFILL,
+            CACHE_SEQUENCE,
+            CACHE_HEADS_NONE,
+            CACHE_KV,
+        ),
+        cache_logical_axis_names=(
+            CACHE_BATCH,
+            CACHE_SEQUENCE,
+            CACHE_HEADS_NONE,
+            CACHE_KV,
+        ),
         prefill_cache_axis_order=(1, 2, 0, 3),
         ar_cache_axis_order=(1, 2, 0, 3),
         use_chunked_prefill=self.config.use_chunked_prefill,
@@ -886,7 +936,15 @@ class MLA(Attention):
 
     # Split kv_out into key_nope and value parts.
     key_nope, value = jnp.split(kv_out, [self.qk_nope_head_dim], axis=-1)
-    key_rope = jnp.broadcast_to(key_rope, (key_nope.shape[0], key_nope.shape[1], self.num_query_heads, key_rope.shape[3]))
+    key_rope = jnp.broadcast_to(
+        key_rope,
+        (
+            key_nope.shape[0],
+            key_nope.shape[1],
+            self.num_query_heads,
+            key_rope.shape[3],
+        ),
+    )
     key_nope = self._maybe_shard_with_logical(key_nope, key_logical_name)
     key_rope = self._maybe_shard_with_logical(key_rope, key_logical_name)
 
@@ -934,7 +992,14 @@ class MLA(Attention):
         rngs=self.rngs,
     )
 
-  def update_mla_kv_caches(self, low_rank_main, key_rope, decoder_segment_ids, model_mode, previous_chunk=None):
+  def update_mla_kv_caches(
+      self,
+      low_rank_main,
+      key_rope,
+      decoder_segment_ids,
+      model_mode,
+      previous_chunk=None,
+  ):
     """Updates the MLA (Multi-Head Latent Attention) KV caches.
 
     This method is specific to the MLA attention mechanism. It calls the
@@ -981,7 +1046,14 @@ class MLA(Attention):
       ar_kv_cache = None
     return [prefill_kv_cache, ar_kv_cache]
 
-  def mla_kv_projection(self, inputs: Array, inputs_positions: Array, decoder_segment_ids, model_mode, previous_chunk):
+  def mla_kv_projection(
+      self,
+      inputs: Array,
+      inputs_positions: Array,
+      decoder_segment_ids,
+      model_mode,
+      previous_chunk,
+  ):
     """MLA key/value projection with integrated rotary embedding."""
     if model_mode == MODEL_MODE_PREFILL:
       wka_logical_name = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_LORA_UP_PROJ)
@@ -1004,7 +1076,11 @@ class MLA(Attention):
         cached_values = self.update_kv_caches(key, value, decoder_segment_ids, model_mode, previous_chunk)
       else:
         cached_values = self.update_mla_kv_caches(
-            low_rank_main, key_rope, decoder_segment_ids, model_mode, previous_chunk
+            low_rank_main,
+            key_rope,
+            decoder_segment_ids,
+            model_mode,
+            previous_chunk,
         )
 
     return key, value, cached_values
@@ -1053,31 +1129,174 @@ class MLA(Attention):
     query = jax.lax.stop_gradient(query)
     key = jax.lax.stop_gradient(key)
 
-    # Compute attention scores: [b, t, h, d] @ [b, s, h, d] -> [b, h, t, s]
-    attention_scores = jnp.einsum("bthd, bshd -> bhts", query, key, precision=self.config.matmul_precision)
+    chunk_size = 8
+    bsz, seqlen, num_heads, head_dim = query.shape
 
-    if sparse_loss:
-      # indexer_mask is already pre-filtered with the attention_mask if any
-      attention_scores = attention_scores + indexer_mask[:, None, :, :]
-      indexer_score = indexer_score + indexer_mask
-    elif attention_mask is not None:
-      # indexer_score already applies attention_mask; updating attention_scores only
-      attention_scores = attention_scores + attention_mask[:, None, :, :]
+    if chunk_size > 0:
+      assert (
+          seqlen % chunk_size == 0
+      ), f"Query sequence length {seqlen} must be divisible by indexer_loss_chunk_size {chunk_size}"
+      num_chunks = seqlen // chunk_size
 
-    # Use float32 for softmax numerical stability.
-    attention_probs = jax.nn.softmax(attention_scores.astype(jnp.float32), axis=-1)
-    indexer_probs = jax.nn.softmax(indexer_score.astype(jnp.float32), axis=-1)
+      # Reshape inputs for scanning
+      # [b, t, ...] -> [b, num_chunks, chunk_size, ...]
+      query_reshaped = query.reshape(bsz, num_chunks, chunk_size, num_heads, head_dim)
+      query_reshaped = self._maybe_shard_with_logical(
+          query_reshaped,
+          (
+              self.query_axis_names[0],
+              "replicated_num_chunks",
+              self.query_axis_names[1],
+              self.query_axis_names[2],
+              self.query_axis_names[3],
+          ),
+      )
+      query_reshaped = jnp.transpose(query_reshaped, (1, 0, 2, 3, 4))
 
-    # Aggregate heads: [b, h, t, s] -> [b, t, s]
-    attention_probs = jnp.sum(attention_probs, axis=1)
-    # L1 normalize aggregated target distribution
-    attention_probs = attention_probs / (jnp.sum(attention_probs, axis=-1, keepdims=True) + EPS)
+      indexer_score_reshaped = indexer_score.reshape(bsz, num_chunks, chunk_size, -1)
+      indexer_score_reshaped = self._maybe_shard_with_logical(
+          indexer_score_reshaped,
+          (
+              self.query_axis_names[0],
+              "replicated_num_chunks",
+              self.query_axis_names[1],
+              "replicated_s",
+          ),
+      )
+      indexer_score_reshaped = jnp.transpose(indexer_score_reshaped, (1, 0, 2, 3))
 
-    # KL Divergence: KL(attention || indexer)
-    log_attention_probs = jnp.log(attention_probs + EPS)
-    log_indexer_probs = jnp.log(indexer_probs + EPS)
-    kl_per_token = attention_probs * (log_attention_probs - log_indexer_probs)
-    indexer_loss = jnp.mean(jnp.sum(kl_per_token, axis=-1))
+      indexer_mask_reshaped = indexer_mask.reshape(bsz, num_chunks, chunk_size, -1)
+      indexer_mask_reshaped = self._maybe_shard_with_logical(
+          indexer_mask_reshaped,
+          (
+              self.query_axis_names[0],
+              "replicated_num_chunks",
+              self.query_axis_names[1],
+              "replicated_s",
+          ),
+      )
+      indexer_mask_reshaped = jnp.transpose(indexer_mask_reshaped, (1, 0, 2, 3))
+
+      if attention_mask is not None:
+        attention_mask_reshaped = attention_mask.reshape(bsz, num_chunks, chunk_size, -1)
+        attention_mask_reshaped = self._maybe_shard_with_logical(
+            attention_mask_reshaped,
+            (
+                self.query_axis_names[0],
+                "replicated_num_chunks",
+                self.query_axis_names[1],
+                "replicated_s",
+            ),
+        )
+        attention_mask_reshaped = jnp.transpose(attention_mask_reshaped, (1, 0, 2, 3))
+      else:
+        attention_mask_reshaped = None
+
+      if attention_mask_reshaped is None:
+        # Dummy mask that has no effect (0.0)
+        # Shape: [num_chunks, b, chunk_size, s]
+        attention_mask_reshaped = jnp.zeros((num_chunks, bsz, chunk_size, key.shape[1]), dtype=query.dtype)
+        attention_mask_reshaped = self._maybe_shard_with_logical(
+            attention_mask_reshaped,
+            (
+                "replicated_num_chunks",
+                self.query_axis_names[0],
+                self.query_axis_names[1],
+                "replicated_s",
+            ),
+        )
+        has_attention_mask = False
+      else:
+        has_attention_mask = True
+
+      xs = (
+          query_reshaped,
+          indexer_score_reshaped,
+          indexer_mask_reshaped,
+          attention_mask_reshaped,
+      )
+
+      key_gathered = self._maybe_shard_with_logical(
+          key,
+          (
+              self.key_axis_names[0],
+              "replicated_s",
+              self.key_axis_names[2],
+              self.key_axis_names[3],
+          ),
+      )
+
+      def scan_body(carry, xs_chunk):
+        q_chunk, idx_score_chunk, idx_mask_chunk, att_mask_chunk = xs_chunk
+
+        # Compute attention scores: [b, C, h, d] @ [b, s, h, d] -> [b, h, C, s]
+        attn_scores_chunk = jnp.einsum(
+            "bthd, bshd -> bhts",
+            q_chunk,
+            key_gathered,
+            precision=self.config.matmul_precision,
+        )
+
+        if sparse_loss:
+          attn_scores_chunk = attn_scores_chunk + idx_mask_chunk[:, None, :, :]
+          idx_score_chunk = idx_score_chunk + idx_mask_chunk
+        elif has_attention_mask:
+          attn_scores_chunk = attn_scores_chunk + att_mask_chunk[:, None, :, :]
+
+        # Use float32 for softmax numerical stability.
+        attn_probs_chunk = jax.nn.softmax(attn_scores_chunk.astype(jnp.float32), axis=-1)
+        idx_probs_chunk = jax.nn.softmax(idx_score_chunk.astype(jnp.float32), axis=-1)
+
+        # Aggregate heads: [b, h, C, s] -> [b, C, s]
+        attn_probs_chunk = jnp.sum(attn_probs_chunk, axis=1)
+        # L1 normalize
+        attn_probs_chunk = attn_probs_chunk / (jnp.sum(attn_probs_chunk, axis=-1, keepdims=True) + EPS)
+
+        # KL Divergence
+        log_attn_probs_chunk = jnp.log(attn_probs_chunk + EPS)
+        log_idx_probs_chunk = jnp.log(idx_probs_chunk + EPS)
+        kl_chunk = attn_probs_chunk * (log_attn_probs_chunk - log_idx_probs_chunk)
+
+        # Sum over s, keep b and C
+        kl_sum_s = jnp.sum(kl_chunk, axis=-1)
+
+        return carry, kl_sum_s
+
+      # Run scan with dummy carry
+      _, total_kl_sum_s = jax.lax.scan(scan_body, None, xs)
+
+      # Sum over all dimensions (num_chunks, b, chunk_size)
+      total_kl_sum = jnp.sum(total_kl_sum_s)
+
+      # Mean over b and t
+      indexer_loss = total_kl_sum / (bsz * seqlen)
+
+    else:
+      # Compute attention scores: [b, t, h, d] @ [b, s, h, d] -> [b, h, t, s]
+      attention_scores = jnp.einsum("bthd, bshd -> bhts", query, key, precision=self.config.matmul_precision)
+
+      if sparse_loss:
+        # indexer_mask is already pre-filtered with the attention_mask if any
+        attention_scores = attention_scores + indexer_mask[:, None, :, :]
+        indexer_score = indexer_score + indexer_mask
+      elif attention_mask is not None:
+        # indexer_score already applies attention_mask; updating attention_scores only
+        attention_scores = attention_scores + attention_mask[:, None, :, :]
+
+      # Use float32 for softmax numerical stability.
+      attention_probs = jax.nn.softmax(attention_scores.astype(jnp.float32), axis=-1)
+      indexer_probs = jax.nn.softmax(indexer_score.astype(jnp.float32), axis=-1)
+
+      # Aggregate heads: [b, h, t, s] -> [b, t, s]
+      attention_probs = jnp.sum(attention_probs, axis=1)
+      # L1 normalize aggregated target distribution
+      attention_probs = attention_probs / (jnp.sum(attention_probs, axis=-1, keepdims=True) + EPS)
+
+      # KL Divergence: KL(attention || indexer)
+      log_attention_probs = jnp.log(attention_probs + EPS)
+      log_indexer_probs = jnp.log(indexer_probs + EPS)
+      kl_per_token = attention_probs * (log_attention_probs - log_indexer_probs)
+      indexer_loss = jnp.mean(jnp.sum(kl_per_token, axis=-1))
 
     return indexer_loss * scaling_factor
 
@@ -1144,7 +1363,12 @@ class MLA(Attention):
     if self.use_indexer:
       # generate mask: with 0 and large negative, [b, 1, 1, q_len, kv_len] -> [b, q_len, kv_len]
       attention_mask = self.attention_op.generate_attention_mask(
-          query, key, decoder_segment_ids, model_mode, previous_chunk, bidirectional_mask
+          query,
+          key,
+          decoder_segment_ids,
+          model_mode,
+          previous_chunk,
+          bidirectional_mask,
       )
       if attention_mask is not None:
         attention_mask = attention_mask.squeeze(axis=(1, 2))
