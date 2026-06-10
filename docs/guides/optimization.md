@@ -35,6 +35,13 @@ Optimize and customize your LLM model configurations for higher performance (MFU
 Choose efficient sharding strategies (FSDP, TP, EP, PP) using Roofline Analysis and understand arithmetic intensity.
 :::
 
+:::{grid-item-card} 🎛️ Custom Mesh & Rule
+:link: optimization/custom_mesh_and_rule
+:link-type: doc
+
+Master advanced sharding by overriding default device meshes and logical axis rules for complex models.
+:::
+
 :::{grid-item-card} ⚡ Pallas Kernels
 :link: optimization/pallas_kernels_performance
 :link-type: doc
@@ -48,6 +55,13 @@ Optimize with Pallas kernels for fine-grained control.
 
 Guide to setting up benchmarks, performing performance tuning, and analyzing metrics.
 :::
+
+:::{grid-item-card} 🚀 Optimizing frontier model training on TPU v7x (Ironwood)
+:link: optimization/optimizing_frontier_model_training_on_tpu_v7x
+:link-type: doc
+
+Guide to optimizing frontier model training on TPU v7x (Ironwood).
+:::
 ::::
 
 ```{toctree}
@@ -57,6 +71,8 @@ maxdepth: 1
 ---
 optimization/custom_model.md
 optimization/sharding.md
+optimization/custom_mesh_and_rule.md
 optimization/pallas_kernels_performance.md
 optimization/benchmark_and_performance.md
+optimization/optimizing_frontier_model_training_on_tpu_v7x.md
 ```
