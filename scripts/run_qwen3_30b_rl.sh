@@ -83,6 +83,7 @@ XLA_FLAGS="--xla_tpu_dvfs_p_state=7 \
 # MaxText command
 MAXTEXT_COMMAND="JAX_RANDOM_WEIGHTS=1 \
 VLLM_ENABLE_V1_MULTIPROCESSING=0 \
+SKIP_JAX_PRECOMPILE=1 \
 NEW_MODEL_DESIGN=1 \
 TPU_MIN_LOG_LEVEL=0 \
 TF_CPP_MIN_LOG_LEVEL=0 \
@@ -133,7 +134,9 @@ enable_checkpointing=true \
 load_parameters_path=$MAXTEXT_CKPT_PATH \
 profiler=xplane \
 skip_first_n_steps_for_profiler=5 \
-profiler_steps=2"
+profiler_steps=2 \
+vllm_hf_overrides='{architectures: [\"MaxTextForCausalLM\"]}' \
+vllm_additional_config='{\"maxtext_config\": {\"model_name\": \"qwen3-30b-a3b\", \"model_call_mode\": \"inference\", \"enable_dp_attention\": false, \"allow_split_physical_axes\": true, \"log_config\": false, \"weight_dtype\": \"bfloat16\", \"prefuse_moe_weights\": true}}'"
 
 # Workload Creation
 xpk workload create-pathways \
