@@ -216,25 +216,27 @@ class TestComputeRowReward(unittest.TestCase):
   def _two_fns(self):
     """Return two reward functions whose per-response scores can be summed."""
 
-    # Each fn must accept prompts, completions, answer as keyword args and
-    # return a list of per-completion scores. The helper calls fn once per
-    # response with single-element lists, so the returned list has length 1.
-    def fn1(prompts, completions, answer):  # pylint: disable=unused-argument
+    # Each fn must accept prompts, completions, answer, question as keyword
+    # args and return a list of per-completion scores. The helper calls fn
+    # once per response with single-element lists, so the returned list has
+    # length 1.
+    def fn1(prompts, completions, answer, question):  # pylint: disable=unused-argument
       return [1.0 for _ in completions]
 
-    def fn2(prompts, completions, answer):  # pylint: disable=unused-argument
+    def fn2(prompts, completions, answer, question):  # pylint: disable=unused-argument
       return [float(len(c)) for c in completions]
 
     return [fn1, fn2]
 
   @pytest.mark.cpu_only
   def test_single_response_single_fn(self):
-    def fn(prompts, completions, answer):  # pylint: disable=unused-argument
+    def fn(prompts, completions, answer, question):  # pylint: disable=unused-argument
       return [2.5 for _ in completions]
 
     score_sum, count = evaluate_rl._compute_row_reward(
         reward_fns=[fn],
         prompt="p",
+        question="q",
         responses=["abc"],
         answer="gold",
         row_idx=0,
@@ -247,6 +249,7 @@ class TestComputeRowReward(unittest.TestCase):
     score_sum, count = evaluate_rl._compute_row_reward(
         reward_fns=self._two_fns(),
         prompt="p",
+        question="q",
         responses=["abcd"],
         answer="gold",
         row_idx=0,
@@ -261,6 +264,7 @@ class TestComputeRowReward(unittest.TestCase):
     score_sum, count = evaluate_rl._compute_row_reward(
         reward_fns=self._two_fns(),
         prompt="p",
+        question="q",
         responses=["a", "bcd", "ef"],
         answer="gold",
         row_idx=0,
@@ -276,6 +280,7 @@ class TestComputeRowReward(unittest.TestCase):
     score_sum, count = evaluate_rl._compute_row_reward(
         reward_fns=self._two_fns(),
         prompt="p",
+        question="q",
         responses=[],
         answer="gold",
         row_idx=0,
@@ -293,12 +298,64 @@ class TestComputeRowReward(unittest.TestCase):
     score_sum, count = evaluate_rl._compute_row_reward(
         reward_fns=[_boom],
         prompt="p",
+        question="q",
         responses=["abc"],
         answer="gold",
         row_idx=0,
     )
     self.assertEqual(score_sum, 0.0)
     self.assertEqual(count, 0)  # zero count so the caller's mean isn't biased
+
+  @pytest.mark.cpu_only
+  def test_question_is_forwarded_to_reward_fn(self):
+    """Regression: helper must pass `question` through to reward fns.
+
+    The built-in `check_numbers` reward reads `kwargs["question"]`; if the
+    helper omits it, every eval row produces `KeyError('question')` and
+    `mean_reward` collapses to 0.0.
+    """
+    received = {}
+
+    def fn(prompts, completions, answer, question):  # pylint: disable=unused-argument
+      received["question"] = question
+      return [1.0 for _ in completions]
+
+    evaluate_rl._compute_row_reward(
+        reward_fns=[fn],
+        prompt="p",
+        question="What is 2+2?",
+        responses=["abc"],
+        answer="gold",
+        row_idx=0,
+    )
+    self.assertEqual(received["question"], "What is 2+2?")
+
+  @pytest.mark.cpu_only
+  def test_integrates_with_real_check_numbers_reward(self):
+    """End-to-end: real `check_numbers` from utils_rl must not raise on the
+    eval-time kwargs the helper passes (regression for the original
+    `KeyError('question')` failure mode in production)."""
+    from maxtext.trainers.post_train.rl import utils_rl  # pylint: disable=import-outside-toplevel
+
+    config = _make_config(eval_mode="pass")
+
+    # `check_numbers` takes tmvp_config positionally via partial; mirror what
+    # train_rl.py's make_reward_fn does.
+    def wrapped_check_numbers(**kwargs):
+      return utils_rl.check_numbers(tmvp_config=config, **kwargs)
+
+    # A correct-answer response should yield a non-zero score (proves the
+    # kwargs all reached the inside of check_numbers).
+    score_sum, count = evaluate_rl._compute_row_reward(
+        reward_fns=[wrapped_check_numbers],
+        prompt="solve: 2+2",
+        question="What is 2+2?",
+        responses=["<reasoning>2+2=4</reasoning><answer>4</answer>"],
+        answer='["4"]',  # json-encoded list of acceptable answers
+        row_idx=0,
+    )
+    self.assertEqual(count, 1)
+    self.assertGreater(score_sum, 0.0)
 
 
 if __name__ == "__main__":
