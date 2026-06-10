@@ -153,6 +153,18 @@ class ElasticUtilsTest(unittest.TestCase):
     devices = elastic_utils.live_devices(config)
     self.assertEqual(devices, [device0])
 
+  def test_live_devices_disabled(self):
+    """Tests live_devices when pathways is used but elastic is disabled."""
+    self.fake_pathwaysutils.is_pathways_backend_used.return_value = True
+    device0 = FakeDevice(slice_index=0)
+    self.fake_jax.devices.return_value = [device0]
+
+    config = FakeConfig()
+    config.elastic_enabled = False
+    devices = elastic_utils.live_devices(config)
+    self.assertEqual(devices, [device0])
+    self.assertIsNone(elastic_utils.elastic_manager)
+
   def test_elastic_retry_disabled(self):
     """Tests elastic_retry when disabled but pathways is used."""
     self.fake_pathwaysutils.is_pathways_backend_used.return_value = True
@@ -313,9 +325,9 @@ class ElasticUtilsTest(unittest.TestCase):
     elastic_utils.record_elastic_event_start(fake_recorder, config)
 
     fake_recorder.record_custom_badput_event_start_time.assert_called_once_with(
-        custom_badput_event_type='elastic_slice_down'
+        custom_badput_event_type="elastic_slice_down"
     )
-    self.assertEqual(elastic_utils.pending_elastic_event_type, 'elastic_slice_down')
+    self.assertEqual(elastic_utils.pending_elastic_event_type, "elastic_slice_down")
 
   def test_record_elastic_event_start_scale_up(self):
     """Tests recording an elastic slice scale up start."""
@@ -327,7 +339,7 @@ class ElasticUtilsTest(unittest.TestCase):
     elastic_utils.record_elastic_event_start(fake_recorder, config)
 
     fake_recorder.record_custom_badput_event_start_time.assert_called_once_with(
-        custom_badput_event_type='elastic_scale_up'
+        custom_badput_event_type="elastic_scale_up"
     )
 
   def test_record_elastic_wait_end_and_reinit_start_noop_on_first_attempt(self):
@@ -343,16 +355,16 @@ class ElasticUtilsTest(unittest.TestCase):
 
   def test_record_elastic_wait_end_and_reinit_start(self):
     """Test recording end of slice down and start of reinit."""
-    elastic_utils.pending_elastic_event_type = 'elastic_slice_down'
+    elastic_utils.pending_elastic_event_type = "elastic_slice_down"
     fake_recorder = Mock()
 
     elastic_utils.record_elastic_wait_end_and_reinit_start(fake_recorder)
 
     fake_recorder.record_custom_badput_event_end_time.assert_called_once_with(
-        custom_badput_event_type='elastic_slice_down'
+        custom_badput_event_type="elastic_slice_down"
     )
     fake_recorder.record_custom_badput_event_start_time.assert_called_once_with(
-        custom_badput_event_type='elastic_reinitialization'
+        custom_badput_event_type="elastic_reinitialization"
     )
     self.assertIs(elastic_utils.pending_reinit_recorder, fake_recorder)
     self.assertIsNone(elastic_utils.pending_elastic_event_type)
@@ -365,7 +377,7 @@ class ElasticUtilsTest(unittest.TestCase):
     elastic_utils.record_elastic_reinit_end()
 
     fake_recorder.record_custom_badput_event_end_time.assert_called_once_with(
-        custom_badput_event_type='elastic_reinitialization'
+        custom_badput_event_type="elastic_reinitialization"
     )
     self.assertIsNone(elastic_utils.pending_reinit_recorder)
 
