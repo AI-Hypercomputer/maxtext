@@ -712,6 +712,7 @@ def load_state_if_possible(
     checkpoint_conversion_fn=None,
     source_checkpoint_layout="orbax",
     expansion_factor_real_data: int = -1,
+    maxtext_config: Any | None = None,
 ):
   """Loads TrainState as possible from the inputs.
 
@@ -830,7 +831,16 @@ def load_state_if_possible(
         case _:
           return (checkpoint_manager.restore(step, args=Composite(items=checkpoint_args)), None)
 
-  if load_parameters_from_path != "":
+  if source_checkpoint_layout == "safetensors_dynamic":
+    path = load_parameters_from_path or load_full_state_from_path
+    max_logging.log(f"Dynamic On-the-Fly Formatting: Loading SafeTensors from {path}")
+    
+    from maxtext.checkpoint_conversion.utils.load_dynamic import load_safetensors_dynamic_state
+    
+    return load_safetensors_dynamic_state(
+        path, abstract_unboxed_pre_state, maxtext_config
+    )
+  elif load_parameters_from_path != "":
     if isinstance(abstract_unboxed_pre_state, nnx.State):
       _, params, _ = nnx.split(abstract_unboxed_pre_state.model, nnx.Param, ...)
     else:
@@ -842,6 +852,9 @@ def load_state_if_possible(
         checkpoint_storage_concurrent_gb,
         use_ocdbt=use_ocdbt,
         use_zarr3=use_zarr3,
+        enable_orbax_v1=enable_orbax_v1,
+        source_checkpoint_layout=source_checkpoint_layout,
+        checkpoint_conversion_fn=checkpoint_conversion_fn,
     )
     return None, restored_params
   elif load_full_state_from_path != "":
@@ -882,21 +895,18 @@ def setup_checkpoint_logger(config) -> Any | None:  # pytype: disable=attribute-
 
 
 def load_params_from_path(
-    load_parameters_from_path, abstract_unboxed_params, checkpoint_storage_concurrent_gb, use_ocdbt=True, use_zarr3=True
+    load_parameters_from_path,
+    abstract_unboxed_params,
+    checkpoint_storage_concurrent_gb,
+    use_ocdbt=True,
+    use_zarr3=True,
+    enable_orbax_v1=False,
+    source_checkpoint_layout="orbax",
+    checkpoint_conversion_fn=None,
 ):
   """Load decode params from checkpoint at specified path."""
   assert load_parameters_from_path, "load_parameters_from_path is not defined."
   max_logging.log(f"restoring params from {load_parameters_from_path}")
-
-  # NNX target: the on-disk checkpoint is in Linen layout; reshape it into the NNX params state.
-  if isinstance(abstract_unboxed_params, nnx.State):
-    return _load_linen_params_into_nnx(
-        load_parameters_from_path,
-        abstract_unboxed_params,
-        checkpoint_storage_concurrent_gb,
-        use_ocdbt,
-        use_zarr3,
-    )
 
   # *_concurrent_gb should be set for large models, the default is 96.
   max_logging.log(f"Creating checkpoint manager with ocdbt={use_ocdbt} and zarr3={use_zarr3}")
