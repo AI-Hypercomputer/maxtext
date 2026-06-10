@@ -129,6 +129,9 @@ def ring_ragged_sort(hidden_states_local, topk_indices_local, num_experts, topk,
     # gather-reduce: each input token has exactly `topk` contributions located
     # at sorted positions `topk_argsort_revert_indices[t*topk:(t+1)*topk]`.
     # `topk_weights` is set to ones because this op has no per-row weighting.
+    # TODO(b/518953536): Fix ragged_gather_reduce kernel for backward pass —
+    # we observe it only allocates one sparse core instead of two, degrading
+    # performance.
     grad_hidden_states = ragged_gather_reduce(
         g_x,
         topk_argsort_revert_indices,
