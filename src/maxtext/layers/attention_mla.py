@@ -346,6 +346,9 @@ class Indexer(nnx.Module):
     # QK product: relu(q @ k.T), [b, t, s, h]
     # Similar to MQA, each key is shared by h query head
     logits = jnp.einsum("bthd, bsd -> btsh", q, k, precision=self.config.matmul_precision)
+    # Cast to fp32 before relu/aggregation: in bf16 the qk product can overflow to
+    # inf and propagate to a NaN loss (the main attention softmax is fp32 too).
+    logits = logits.astype(jnp.float32)
     logits = jax.nn.relu(logits)
     # Compute head weights: project from input, [b, t, embed_dim] -> [b, t, h]
     weights = self.weights_proj(inputs_q)
