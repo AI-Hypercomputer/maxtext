@@ -109,7 +109,7 @@ jobs:
           # Run Hugging Face authentication
           hf auth login --token "$HF_TOKEN"
 
-          for notebook in "$MAXTEXT_NOTEBOOKS_ROOT"/{sft,rl}*.ipynb; do
+          for notebook in "$MAXTEXT_NOTEBOOKS_ROOT"/{sft,rl,lora}*.ipynb; do
             filename=$(basename "$notebook")
             # TODO: Update runnner to v6e-8 as RL with LLama3.1-8b doesn't fit on v6e-4
             if [[ "$filename" == "sft_llama3_demo_gpu.ipynb" || "$filename" == "maxtext_with_gepa.ipynb" ]]; then

@@ -63,6 +63,13 @@ Interactive development guides for running MaxText on Google Colab or local Jupy
 A step-by-step guide for the community to help expand MaxText's model library.
 :::
 
+:::{grid-item-card} 🎗️ LoRA Model Bringup
+:link: guides/lora_model_bringup
+:link-type: doc
+
+Learn how to integrate Low-Rank Adaptation (LoRA) support for a new model architecture.
+:::
+
 :::{grid-item-card} 🎓 Distillation
 :link: guides/distillation
 :link-type: doc
@@ -89,6 +96,7 @@ guides/checkpointing_solutions.md
 guides/monitoring_and_debugging.md
 guides/run_python_notebook.md
 guides/model_bringup.md
+guides/lora_model_bringup.md
 guides/distillation.md
 guides/eval_framework.md
 ```
