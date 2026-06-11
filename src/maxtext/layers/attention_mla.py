@@ -348,17 +348,58 @@ class Indexer(nnx.Module):
       return None, None, None
 
     # Compute Index Scores
-    # QK product: relu(q @ k.T), [b, t, s, h]
-    # Similar to MQA, each key is shared by h query head
-    logits = jnp.einsum("bthd, bsd -> btsh", q, k, precision=self.config.matmul_precision)
-    logits = jax.nn.relu(logits)
-    # Compute head weights: project from input, [b, t, embed_dim] -> [b, t, h]
-    weights = self.weights_proj(inputs_q)
-    # Weights scaling affect indexer_score, but does not affect topk_indices. Keep scaling for numerical stability.
-    # https://github.com/deepseek-ai/DeepSeek-V3.2-Exp/blob/87e509a2e5a100d221c97df52c6e8be7835f0057/inference/model.py#L478-L480
-    weights = weights * (self.n_heads**-0.5) * self.softmax_scale
-    # Aggregate head-wise logits: logits @ weights
-    indexer_score = jnp.einsum("btsh, bth -> bts", logits, weights, precision=self.config.matmul_precision)  # [b, t, s]
+    # To handle extremely long sequence lengths (e.g., 65k) without OOM, we dynamically
+    # chunk the query sequence dimension (t) and scan over the chunks.
+    indexer_chunk_size = 1
+    for c in [1024, 512, 256, 128, 64, 32, 16, 8, 4, 2]:
+      if seqlen % c == 0:
+        indexer_chunk_size = c
+        break
+
+    if indexer_chunk_size > 1:
+      num_chunks = seqlen // indexer_chunk_size
+
+      # Reshape q and inputs_q to have the chunk dimension as the leading axis for scan
+      q_reshaped = q.reshape(bsz, num_chunks, indexer_chunk_size, self.n_heads, self.head_dim)
+      q_reshaped = jnp.transpose(q_reshaped, (1, 0, 2, 3, 4))
+
+      inputs_q_reshaped = inputs_q.reshape(bsz, num_chunks, indexer_chunk_size, self.emb_dim)
+      inputs_q_reshaped = jnp.transpose(inputs_q_reshaped, (1, 0, 2, 3))
+
+      def indexer_chunk_fn(carry, xs):
+        q_chunk, inputs_q_chunk = xs
+
+        # QK product for this chunk: [b, C_t, h, d] @ [b, s, d] -> [b, C_t, s, h]
+        # Similar to MQA, each key is shared by h query heads
+        logits_chunk = jnp.einsum("bthd, bsd -> btsh", q_chunk, k, precision=self.config.matmul_precision)
+        logits_chunk = jax.nn.relu(logits_chunk)
+
+        # Compute head weights for this chunk: [b, C_t, embed_dim] -> [b, C_t, h]
+        weights_chunk = self.weights_proj(inputs_q_chunk)
+        # Weights scaling affect indexer_score, but does not affect topk_indices. Keep scaling for numerical stability.
+        weights_chunk = weights_chunk * (self.n_heads**-0.5) * self.softmax_scale
+
+        # Aggregate head-wise logits for this chunk: [b, C_t, s, h] @ [b, C_t, h] -> [b, C_t, s]
+        score_chunk = jnp.einsum("btsh, bth -> bts", logits_chunk, weights_chunk, precision=self.config.matmul_precision)
+
+        return carry, score_chunk
+
+      # Run scan over chunks of the query sequence, checkpointed to save activation memory
+      _, indexer_score_chunks = jax.lax.scan(jax.checkpoint(indexer_chunk_fn), None, (q_reshaped, inputs_q_reshaped))
+
+      # Reassemble indexer_score: [num_chunks, bsz, indexer_chunk_size, s] -> [bsz, seqlen, s]
+      indexer_score = jnp.transpose(indexer_score_chunks, (1, 0, 2, 3)).reshape(bsz, seqlen, -1)
+    else:
+      # Standard unchunked calculation for short or non-divisible sequences
+      # QK product: relu(q @ k.T), [b, t, s, h]
+      logits = jnp.einsum("bthd, bsd -> btsh", q, k, precision=self.config.matmul_precision)
+      logits = jax.nn.relu(logits)
+      # Compute head weights: project from input, [b, t, embed_dim] -> [b, t, h]
+      weights = self.weights_proj(inputs_q)
+      # Weights scaling affect indexer_score, but does not affect topk_indices. Keep scaling for numerical stability.
+      weights = weights * (self.n_heads**-0.5) * self.softmax_scale
+      # Aggregate head-wise logits: logits @ weights
+      indexer_score = jnp.einsum("btsh, bth -> bts", logits, weights, precision=self.config.matmul_precision)  # [b, t, s]
 
     internal_padding_mask = None
     if cached_s is not None:
@@ -1129,8 +1170,15 @@ class MLA(Attention):
     query = jax.lax.stop_gradient(query)
     key = jax.lax.stop_gradient(key)
 
-    chunk_size = 8
+    chunk_size = 128
     bsz, seqlen, num_heads, head_dim = query.shape
+
+    if seqlen % chunk_size != 0:
+      # Fallback to smaller chunk sizes or factors of seqlen to ensure divisibility
+      for c in [64, 32, 16, 8, 4, 2, 1]:
+        if seqlen % c == 0:
+          chunk_size = c
+          break
 
     if chunk_size > 0:
       assert (
@@ -1262,8 +1310,8 @@ class MLA(Attention):
 
         return carry, kl_sum_s
 
-      # Run scan with dummy carry
-      _, total_kl_sum_s = jax.lax.scan(scan_body, None, xs)
+      # Run scan with dummy carry, checkpointed to save activation memory
+      _, total_kl_sum_s = jax.lax.scan(jax.checkpoint(scan_body), None, xs)
 
       # Sum over all dimensions (num_chunks, b, chunk_size)
       total_kl_sum = jnp.sum(total_kl_sum_s)
@@ -1384,6 +1432,16 @@ class MLA(Attention):
           kv_cache=self.IndexerKVCache_0,
           model_mode=model_mode,
       )
+
+      if model_mode == MODEL_MODE_PREFILL:
+        score_logical_name = (PREFILL_KV_BATCH, PREFILL_LENGTH, "replicated_s")
+      else:
+        score_logical_name = (BATCH_ATTN, LENGTH, "replicated_s")
+
+      if indexer_mask is not None:
+        indexer_mask = self._maybe_shard_with_logical(indexer_mask, score_logical_name)
+      if indexer_score is not None:
+        indexer_score = self._maybe_shard_with_logical(indexer_score, score_logical_name)
 
       if indexer_mask is not None and self.config.indexer_loss_scaling_factor > 0.0:
         indexer_loss = self.calculate_indexer_loss(
