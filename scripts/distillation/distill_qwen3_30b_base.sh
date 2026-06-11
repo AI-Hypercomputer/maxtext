@@ -41,7 +41,9 @@ export DISTILL_TEMPERATURE="${DISTILL_TEMPERATURE:-1.0}"
 export DISTILL_BETA="${DISTILL_BETA:-1.0}"
 export DISTILL_LAYER_INDICES="${DISTILL_LAYER_INDICES:-[0,1,2,3,4,5,6,7]}"
 
-# XLA flags tuned for ~20% MFU.
+# XLA flags tuned for ~20% MFU. With the megablox tiles, SEQ_MINOR q-layout,
+# and context=device now set in the configs: ~26% MFU (default config) /
+# ~24% (pdbs=8 + activation offload variant).
 export XPK_LIBTPU_INIT_ARGS="${XPK_LIBTPU_INIT_ARGS:---xla_tpu_scoped_vmem_limit_kib=61440 \
 --xla_tpu_enable_all_experimental_scheduler_features=true \
 --xla_tpu_enable_scheduler_memory_pressure_tracking=true \

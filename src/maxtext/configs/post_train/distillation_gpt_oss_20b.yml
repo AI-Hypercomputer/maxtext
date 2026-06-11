@@ -1,4 +1,4 @@
-# gpt-oss-20b distillation. ~17% MFU on v7x.
+# gpt-oss-20b distillation. ~19% MFU on v7x.
 base_config: "base.yml"
 
 # NOTE: load_parameters_path values are placeholders. Replace them with paths
@@ -22,8 +22,18 @@ distill_layer_indices: []
 enable_nnx: True
 load_balance_loss_weight: 0.001
 
-ici_fsdp_parallelism: 32
-ici_data_parallelism: 4
+# Megablox grouped-matmul m-tile (batch_seq). The k/n dims already default to
+# the full 2880 for gpt-oss; raising the m-tile from the 512 default is worth
+# ~+3% MFU on v7x.
+wi_tile_fwd_batch_seq: 1024
+wi_tile_dlhs_batch_seq: 1024
+wi_tile_drhs_batch_seq: 1024
+wo_tile_fwd_batch_seq: 1024
+wo_tile_dlhs_batch_seq: 1024
+wo_tile_drhs_batch_seq: 1024
+
+ici_fsdp_parallelism: 64
+ici_data_parallelism: 2
 
 dataset_type: "grain"
 grain_file_type: "arrayrecord"
@@ -41,6 +51,12 @@ tokenizer_type: "huggingface"
 max_target_length: 32768
 per_device_batch_size: 1
 gradient_accumulation_steps: 1
+
+# Keep attention outputs on device instead of rematerializing them: the
+# backward pass skips the splash-forward re-runs (~+8% MFU). pdbs=1 is the
+# HBM frontier at this sequence length (pdbs=2 OOMs with or without this).
+remat_policy: 'custom'
+context: 'device'
 
 steps: 100000
 learning_rate_schedule_steps: 100000
@@ -63,15 +79,17 @@ z_loss_multiplier: 1.0e-5
 float32_logits: True
 
 # Tokamax splash attention. Layouts: HEAD_DIM_MINOR | SEQ_MINOR.
+# kv-compute sub-blocks of 1024 inside the 2048 fetch blocks are ~+2% MFU on
+# v7x (uniformly smaller blocks regress).
 attention: "flash"
 use_tokamax_splash: True
 sa_use_fused_bwd_kernel: True
 sa_block_q: 2048
 sa_block_kv: 2048
-sa_block_kv_compute: 2048
+sa_block_kv_compute: 1024
 sa_block_q_dkv: 2048
 sa_block_kv_dkv: 2048
-sa_block_kv_dkv_compute: 2048
+sa_block_kv_dkv_compute: 1024
 sa_block_q_dq: 2048
 sa_block_kv_dq: 2048
 sa_q_layout: "SEQ_MINOR"

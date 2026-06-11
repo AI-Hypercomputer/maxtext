@@ -1,4 +1,4 @@
-# Qwen3-30b-a3b-base distillation. ~20% MFU on v7x.
+# Qwen3-30b-a3b-base distillation. ~26% MFU on v7x.
 base_config: "base.yml"
 
 # NOTE: load_parameters_path values are placeholders. Replace them with paths
@@ -41,8 +41,15 @@ tokenizer_path: "src/maxtext/assets/tokenizers/qwen3-tokenizer"
 tokenizer_type: "huggingface"
 
 max_target_length: 8192
-per_device_batch_size: 4
+per_device_batch_size: 6
 gradient_accumulation_steps: 1
+
+# Keep attention outputs on device instead of rematerializing them: the
+# backward pass skips the splash-forward re-runs. Fits with the teacher
+# resident up to pdbs=6 (does NOT fit at pdbs=8, with or without host
+# offload).
+remat_policy: 'custom'
+context: 'device'
 
 steps: 100000
 learning_rate_schedule_steps: 100000
@@ -76,6 +83,21 @@ sa_block_kv_dkv: 2048
 sa_block_kv_dkv_compute: 1024
 sa_block_q_dq: 1024
 sa_block_kv_dq: 1024
-sa_q_layout: "HEAD_DIM_MINOR"
+sa_q_layout: "SEQ_MINOR"
 sa_k_layout: "SEQ_MINOR"
 sa_v_layout: "HEAD_DIM_MINOR"
+
+# Megablox grouped-matmul tile sizes at the full dims (emb 2048 / moe-mlp 768).
+# Worth ~+10% MFU together with sa_q_layout=SEQ_MINOR on v7x.
+wi_tile_fwd_embed_dim: 2048
+wi_tile_dlhs_embed_dim: 2048
+wi_tile_drhs_embed_dim: 2048
+wo_tile_fwd_embed_dim: 2048
+wo_tile_dlhs_embed_dim: 2048
+wo_tile_drhs_embed_dim: 2048
+wi_tile_fwd_mlp_dim: 768
+wi_tile_dlhs_mlp_dim: 768
+wi_tile_drhs_mlp_dim: 768
+wo_tile_fwd_mlp_dim: 768
+wo_tile_dlhs_mlp_dim: 768
+wo_tile_drhs_mlp_dim: 768
