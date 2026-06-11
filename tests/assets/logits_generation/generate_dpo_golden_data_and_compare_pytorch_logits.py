@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Script to execute JAX and HuggingFace TRL DPO in parallel, verify DPO correctness parity,
+"""Script to execute JAX and HuggingFace TRL DPO/ORPO in parallel, verify DPO/ORPO correctness parity,
 and output golden JAX metrics to a JSON file.
 
 The parity is verified by running JAX and PyTorch/TRL on an identical, miniaturized 2-layer Qwen2 model.
@@ -42,6 +42,7 @@ How to run:
      $ python3 -m tests.assets.logits_generation.generate_dpo_golden_data_and_compare_pytorch_logits
 """
 
+import argparse
 import json
 import os
 import tempfile
@@ -83,8 +84,8 @@ class PyTorchSyncTrainingHooks(InterceptingTrainingHooks):
       sync_jax_to_pytorch(train_ctx.model, PyTorchSyncTrainingHooks.torch_policy_model)
 
 
-def run_parity_and_generate_golden():
-  """Runs DPO scenarios to verify parity and outputs golden JAX metrics."""
+def run_parity_and_generate_golden(algo="dpo"):
+  """Runs DPO or ORPO scenarios to verify parity and outputs golden JAX metrics."""
   # Setup JAX CPU options to align with base test environment setup
   jax.config.update("jax_platforms", "cpu")
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
@@ -101,6 +102,7 @@ def run_parity_and_generate_golden():
   model_id = "Qwen/Qwen2.5-1.5B-Instruct"
   max_target_length = 256
   beta = 0.1
+  lambda_orpo = 0.1
   init_weights_seed = 0
 
   scenarios = {
@@ -108,11 +110,8 @@ def run_parity_and_generate_golden():
       "default_prompt_len_2_column": (None, "dpo_2_column_dataset.json", ["chosen", "rejected"]),
   }
 
-  # ============================================================================
-  # DPO GENERATION
-  # ============================================================================
-  dpo_results = {}
-  print("\n>>> Running DPO Parity & Golden Generation...")
+  results = {}
+  print(f"\n>>> Running {algo.upper()} Parity & Golden Generation...")
   for name, (max_prompt_len, dataset_filename, data_columns) in scenarios.items():
     print(f"\n--- Scenario: {name} ---")
     InterceptingTrainingHooks.captured_metrics = []
@@ -125,7 +124,16 @@ def run_parity_and_generate_golden():
     PyTorchSyncTrainingHooks.torch_policy_model = torch_policy_model
     PyTorchSyncTrainingHooks.torch_ref_model = torch_ref_model
 
+    # Configure JAX MaxText Config
     with tempfile.TemporaryDirectory() as temp_dir:
+      jax_extra_args = [f"run_name=correctness_gen_{algo}"]
+      if algo == "orpo":
+        jax_extra_args.extend(
+            [
+                "dpo.algo=orpo",
+                f"dpo.orpo_lambda={lambda_orpo}",
+            ]
+        )
       config = base_test.build_jax_config(
           model_id=model_id,
           max_target_length=max_target_length,
@@ -134,7 +142,7 @@ def run_parity_and_generate_golden():
           dataset_filename=dataset_filename,
           data_columns=data_columns,
           max_prompt_len=max_prompt_len,
-          extra_args=["run_name=dpo_correctness_gen"],
+          extra_args=jax_extra_args,
       )
       jax_ref = run_jax_training(config)
 
@@ -156,6 +164,8 @@ def run_parity_and_generate_golden():
         chosen_str=chosen_str,
         rejected_str=rejected_str,
         beta=beta,
+        algo=algo,
+        lambda_orpo=lambda_orpo,
         tokenize_together=(len(data_columns) == 2),
     )
 
@@ -176,19 +186,25 @@ def run_parity_and_generate_golden():
     )
     print(f"JAX Loss: {jax_ref['loss']:.6f} | PyTorch Loss: {py_ref['loss']:.6f} (diff: {loss_diff:.6f})")
 
+    # ORPO loss includes the SFT term and is much larger (~45.0) than DPO loss (<0.7).
+    # We relax the cross-framework JAX-vs-PyTorch tolerance (~2.2% relative).
+    loss_tolerance = (
+        DPOCorrectnessTestBase.DPO_LOSS_TOLERANCE if algo == "orpo" else DPOCorrectnessTestBase.ORPO_LOSS_TOLERANCE
+    )
+
     assert chosen_diff < DPOCorrectnessTestBase.LOG_PROBS_TOLERANCE, f"Chosen logps diff {chosen_diff} exceeds tolerance!"
     assert (
         rejected_diff < DPOCorrectnessTestBase.LOG_PROBS_TOLERANCE
     ), f"Rejected logps diff {rejected_diff} exceeds tolerance!"
-    assert loss_diff < DPOCorrectnessTestBase.DPO_LOSS_TOLERANCE, f"Loss diff {loss_diff} exceeds tolerance!"
+    assert loss_diff < loss_tolerance, f"Loss diff {loss_diff} exceeds tolerance!"
 
-    dpo_results[name] = jax_ref
+    results[name] = jax_ref
 
-  # Write DPO Golden Logits
-  dpo_output_path = "tests/assets/golden_logits/golden_dpo_correctness.json"
-  with open(dpo_output_path, "w", encoding="utf-8") as f:
-    json.dump(dpo_results, f, indent=2)
-  print(f"\nWrote DPO golden metrics to: {dpo_output_path}")
+  # Write Golden Logits
+  output_path = f"tests/assets/golden_logits/golden_{algo}_correctness.json"
+  with open(output_path, "w", encoding="utf-8") as f:
+    json.dump(results, f, indent=2)
+  print(f"\nWrote {algo.upper()} golden metrics to: {output_path}")
 
   # Cleanup hooks
   PyTorchSyncTrainingHooks.torch_policy_model = None
@@ -199,4 +215,13 @@ def run_parity_and_generate_golden():
 
 
 if __name__ == "__main__":
-  run_parity_and_generate_golden()
+  parser = argparse.ArgumentParser(description="Generate golden data and compare JAX vs PyTorch logits for DPO or ORPO.")
+  parser.add_argument(
+      "--algo",
+      type=str,
+      default="dpo",
+      choices=["dpo", "orpo"],
+      help="Which algorithm to generate golden logits for: 'dpo' or 'orpo' (default: 'dpo').",
+  )
+  args = parser.parse_args()
+  run_parity_and_generate_golden(algo=args.algo)

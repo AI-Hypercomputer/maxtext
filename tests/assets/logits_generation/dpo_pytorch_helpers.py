@@ -28,6 +28,7 @@ from flax import nnx
 import torch
 from transformers import Qwen2Config
 from trl import DPOConfig, DPOTrainer
+from trl.experimental.orpo import ORPOConfig, ORPOTrainer
 from datasets import Dataset
 
 
@@ -138,6 +139,8 @@ def get_pytorch_reference(
     chosen_str,
     rejected_str,
     beta=0.1,
+    algo="dpo",
+    lambda_orpo=0.1,
     tokenize_together=False,
 ):
   # pylint: disable=too-many-positional-arguments
@@ -164,49 +167,82 @@ def get_pytorch_reference(
       ]
   )
 
-  training_args = DPOConfig(
-      output_dir="/tmp/trl_ref",
-      beta=beta,
-      max_length=256,
-      use_cpu=True,
-      remove_unused_columns=False,
-  )
-  trainer = DPOTrainer(
-      model=policy_model,
-      ref_model=ref_model,
-      args=training_args,
-      train_dataset=dataset,
-      processing_class=tokenizer,
-  )
-  dataloader = trainer.get_train_dataloader()
-  batch = next(iter(dataloader))
-  device = torch.device("cpu")
-  batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+  if algo == "orpo":
+    training_args = ORPOConfig(
+        output_dir="/tmp/trl_ref",
+        beta=lambda_orpo,
+        max_length=256,
+        use_cpu=True,
+        remove_unused_columns=False,
+    )
+    trainer = ORPOTrainer(
+        model=policy_model,
+        args=training_args,
+        train_dataset=dataset,
+        processing_class=tokenizer,
+    )
+    dataloader = trainer.get_train_dataloader()
+    batch = next(iter(dataloader))
+    device = torch.device("cpu")
+    batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
 
-  with torch.no_grad():
-    loss = trainer.compute_loss(policy_model, batch)
+    with torch.no_grad():
+      loss, metrics = trainer.compute_loss(policy_model, batch, return_outputs=True)
 
-  # Extract logps and ref_logps from "eval" key in trainer._metrics
-  # pylint: disable=protected-access
-  metrics = trainer._metrics["eval"]
-  chosen_logps = metrics["logps/chosen"][0]
-  rejected_logps = metrics["logps/rejected"][0]
+    # Both TRL and JAX log average log probabilities for ORPO, so we compare them directly.
+    chosen_logps = metrics["logps/chosen"]
+    rejected_logps = metrics["logps/rejected"]
 
-  # Reconstruct ref_chosen_logps and ref_rejected_logps:
-  ref_chosen_logps = chosen_logps - (metrics["rewards/chosen"][0] / beta)
-  ref_rejected_logps = rejected_logps - (metrics["rewards/rejected"][0] / beta)
+    return {
+        "chosen_logps": chosen_logps,
+        "rejected_logps": rejected_logps,
+        "loss": loss.item(),
+        "margin": metrics["rewards/margins"],
+    }
+  else:
+    training_args = DPOConfig(
+        output_dir="/tmp/trl_ref",
+        beta=beta,
+        max_length=256,
+        use_cpu=True,
+        remove_unused_columns=False,
+    )
+    trainer = DPOTrainer(
+        model=policy_model,
+        ref_model=ref_model,
+        args=training_args,
+        train_dataset=dataset,
+        processing_class=tokenizer,
+    )
+    dataloader = trainer.get_train_dataloader()
+    batch = next(iter(dataloader))
+    device = torch.device("cpu")
+    batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
 
-  # Margin:
-  margin = metrics["rewards/margins"][0] / beta
+    with torch.no_grad():
+      loss = trainer.compute_loss(policy_model, batch)
 
-  return {
-      "chosen_logps": chosen_logps,
-      "rejected_logps": rejected_logps,
-      "ref_chosen_logps": ref_chosen_logps,
-      "ref_rejected_logps": ref_rejected_logps,
-      "loss": loss.item(),
-      "margin": margin,
-  }
+    # Extract logps and ref_logps from "eval" key in trainer._metrics
+    # pylint: disable=protected-access
+    metrics = trainer._metrics["eval"]
+    chosen_logps = metrics["logps/chosen"][0]
+    rejected_logps = metrics["logps/rejected"][0]
+
+    # Reconstruct ref_chosen_logps and ref_rejected_logps:
+    ref_chosen_logps = chosen_logps - (metrics["rewards/chosen"][0] / beta)
+    ref_rejected_logps = rejected_logps - (metrics["rewards/rejected"][0] / beta)
+
+    # Margin:
+    margin = metrics["rewards/margins"][0] / beta
+
+    return {
+        "chosen_logps": chosen_logps,
+        "rejected_logps": rejected_logps,
+        "ref_chosen_logps": ref_chosen_logps,
+        "ref_rejected_logps": ref_rejected_logps,
+        "loss": loss.item(),
+        "margin": margin,
+    }
 
 
 def create_pytorch_config(max_target_length: int) -> Qwen2Config:

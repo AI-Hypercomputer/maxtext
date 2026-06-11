@@ -23,6 +23,26 @@ MaxText supports two primary methods for aligning models with human preferences:
 - **Direct Preference Optimization (DPO):** Optimizes the policy by maximizing the relative log-probability of preferred responses over rejected ones. DPO requires a **reference model** (a frozen copy of the base model) to regularize the training and ensure the policy does not drift too far from the original model's distribution.
 - **Odds Ratio Preference Optimization (ORPO):** A newer, reference-free alignment method that integrates the preference loss directly into the supervised fine-tuning objective using an odds ratio. Because it **does not require a reference model**, ORPO is more memory-efficient and faster than DPO.
 
+## ORPO-Specific Configurations
+
+MaxText provides two configuration flags to fine-tune the behavior of the ORPO algorithm. Both flags are defined under the `dpo` configuration scope:
+
+- **`dpo.enable_prompt_loss_orpo` (Boolean, defaults to `True`):**
+  Controls whether the Supervised Fine-Tuning (SFT) loss ($L_{SFT}$) is computed over the full sequence (Prompt + Completion) or only over the Completion.
+
+  - `True` (Default): Computes SFT loss over the full sequence (prompt + completion). This matches the mathematical definition in the ORPO paper (Equation 2) and the canonical implementations in Hugging Face TRL and `xfactlab/orpo`.
+  - `False`: Computes SFT loss only over the completion part.
+  - *Note:* This flag is only supported with ORPO. If set to `True` when running standard DPO, it will be automatically and silently resolved to `False` to ensure compatibility and allow easy switching between algorithms.
+
+- **`dpo.average_log_prob_orpo` (Boolean, defaults to `True`):**
+  Controls whether the log probabilities are averaged (normalized) by sequence length when computing both the SFT loss and the Odds Ratio preference loss.
+
+  - `True` (Default): Uses length-averaged log probabilities. This matches the ORPO paper (Equations 4 and 7) and the canonical Hugging Face TRL implementation to prevent length bias.
+  - `False`: Uses summed log probabilities.
+  - *Note:* This flag is only supported with ORPO. If set to `True` when running standard DPO, it will be automatically and silently resolved to `False` to ensure compatibility and allow easy switching between algorithms.
+
+Both flags default to `True` in MaxText to align with the official ORPO paper and Hugging Face TRL's canonical behavior. If you run standard DPO, these flags are automatically and silently resolved to `False` to ensure compatibility.
+
 ## Data Requirements
 
 Both methods consume preference data in a **triplet format** consisting of a Prompt, a Chosen response, and a Rejected response. MaxText supports two ways to provide this data via the `train_data_columns` configuration:

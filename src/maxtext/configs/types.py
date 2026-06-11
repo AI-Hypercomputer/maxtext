@@ -1258,6 +1258,34 @@ class DPO(BaseModel):
       gt=0,
       description="Maximum length for prompt. If None, defaults to half of max_target_length.",
   )
+  enable_prompt_loss_orpo: bool = Field(
+      True,
+      description=(
+          "Whether to compute NLL/SFT loss over the full sequence"
+          " (prompt + completion) instead of response/completion only. Supported"
+          " only with ORPO (automatically resolved/set to False if running DPO)."
+          " Defaults to True for ORPO, False for DPO."
+          " (ORPO paper Eq. 2 defines SFT loss over prompt + completion, matching"
+          " the official xfactlab/orpo and Hugging Face TRL implementations)."
+      ),
+  )
+  average_log_prob_orpo: bool = Field(
+      True,
+      description=(
+          "Whether to use length-averaged log probabilities for SFT"
+          " and Odds Ratio losses. Supported only with ORPO (automatically resolved/set"
+          " to False if running DPO). Defaults to True for ORPO, False for DPO."
+          " (ORPO paper Eq. 4 and 7 use length-averaged log probabilities,"
+          " matching canonical HuggingFace TRL)."
+      ),
+  )
+
+  @model_validator(mode="after")
+  def validate_dpo_flags(self) -> "DPO":
+    if self.algo == "dpo":
+      self.enable_prompt_loss_orpo = False
+      self.average_log_prob_orpo = False
+    return self
 
 
 class FineTuning(BaseModel):

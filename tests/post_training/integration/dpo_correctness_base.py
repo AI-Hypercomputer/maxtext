@@ -89,6 +89,10 @@ def run_jax_training(config):
 class DPOCorrectnessTestBase(parameterized.TestCase):
   """Shared base class establishing environment setup and configuration helpers for DPO parity tests."""
 
+  # These prompt and response strings must match the content of the pre-generated local
+  # dataset JSON files (e.g., dpo_2_column_dataset.json and dpo_3_column_dataset.json)
+  # loaded in the integration tests. If these strings are modified, the dataset files
+  # must be regenerated using the parity generator script.
   COMMON_PROMPT = "What is preference optimization?"
   COMMON_CHOSEN = "Aligning LLMs using pairs of chosen and rejected responses is called preference optimization."
   COMMON_REJECTED = "Database operations to choose preferred options are called preference optimization."
@@ -100,14 +104,35 @@ class DPOCorrectnessTestBase(parameterized.TestCase):
   # 1. JAX vs PyTorch CPU Parity (validated on the same host):
   #    - Loss Difference: stable across all seeds, ranging from 0.001 to 0.057.
   #    - Log Probs Difference: max diff ~0.60.
-  # 2. JAX Local CPU vs Remote CPU/TPU Divergence (Option B):
-  #    - Running JAX on different CPU architectures introduces float32 numerical noise.
-  #    - Loss / Margin Difference: max observed diff is 0.113 (Seed 0, 2-column). We set
-  #      DPO_LOSS_TOLERANCE to 0.15 to safely cover this hardware-specific divergence.
-  #    - Log Probs Difference: max observed diff is 1.020 (Seed 99999, 2-column). We set
-  #      LOG_PROBS_TOLERANCE to 1.5 to safely cover this hardware-specific divergence.
+  # 2. Cross-Platform Numerical Divergence (Local CPU vs Remote CPU/TPU):
+  #    - Running JAX on different hardware platforms (e.g., local workstation CPU vs
+  #      remote TPU VM CPU or TPU accelerator) introduces float32 compiler and numerical noise.
+  #      (Note: JAX CPU and TPU runs on the same remote host are 100% mathematically identical).
+  #    - Loss / Margin Difference: max observed cross-platform diff is 0.113 (Seed 0, 2-column).
+  #      We set DPO_LOSS_TOLERANCE to 0.15 to safely cover this hardware-specific divergence.
+  #    - Log Probs Difference: max observed cross-platform diff is 1.020 (Seed 99999, 2-column).
+  #      We set LOG_PROBS_TOLERANCE to 1.5 to safely cover this hardware-specific divergence.
+  # 3. Sensitivity to Semantic Mutations:
+  #    - A single-character spelling mutation ("responses" -> "response" in the chosen sequence)
+  #      in the dataset files leads to a ~4.8 (2-column) and ~10.9 (3-column) difference in final
+  #      log probabilities. Since this is much larger than the cross-platform noise (max ~1.02),
+  #      our LOG_PROBS_TOLERANCE of 1.5 is highly sensitive and guaranteed to catch such mutations.
+  # 4. ORPO Cross-Platform Numerical Divergence:
+  #    - Running JAX ORPO on different hardware platforms (local workstation CPU vs remote TPU VM)
+  #      introduces larger absolute divergence. Even though ORPO SFT loss and logprobs are length-averaged
+  #      (average_log_prob_orpo=True), the tiny, randomly initialized model (only 2 layers, hidden dimension 64)
+  #      has extremely poor token prediction capabilities.
+  #    - This results in an extremely negative average token logprob of ~ -47.0 (a raw sum of ~ -850.0 divided
+  #      by a completion length of 18 tokens), yielding a highly scaled loss of ~45.0 and wider absolute
+  #      numerical noise bounds during float32 compiler optimizations.
+  #    - Loss Difference: max observed cross-platform diff is 1.522 (Seed 2026, 3-column).
+  #      We set ORPO_LOSS_TOLERANCE to 2.0 to safely cover this compiler noise (~4.4% relative).
+  #    - Log Probs Difference: max observed cross-platform diff is 3.683 (Seed 2026, 3-column).
+  #      We set ORPO_LOG_PROBS_TOLERANCE to 4.5 to safely cover this compiler noise.
   LOG_PROBS_TOLERANCE = 1.5
   DPO_LOSS_TOLERANCE = 0.15
+  ORPO_LOSS_TOLERANCE = 2.0
+  ORPO_LOG_PROBS_TOLERANCE = 4.5
 
   @classmethod
   def setUpClass(cls):
