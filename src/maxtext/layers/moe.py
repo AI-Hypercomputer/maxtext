@@ -1275,6 +1275,7 @@ class RoutedMoE(nnx.Module):
               rhs_vma_axes=rhs_vma_axes,
           )
         else:  # tokamax (unquantized)
+          group_offset = None
           output = tokamax.ragged_dot(
               lhs=inputs,
               rhs=kernel,

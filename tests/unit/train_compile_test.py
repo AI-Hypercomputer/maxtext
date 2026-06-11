@@ -986,6 +986,32 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
+  @pytest.mark.cpu_only
+  @pytest.mark.skip(reason="b/489205940 Tokamax GMM not supported by AOT on CPU backend.")
+  def test_tokamax_gmm(self):
+    """AOT test for Tokamax GMM for DeepSeek3 Tiny model"""
+    compiled_trainstep_file = "/tmp/test_tokamax_gmm.pickle"
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-8",
+            "compile_topology_num_slices=1",
+            "model_name=deepseek3-tiny",
+            "ici_expert_parallelism=2",
+            "scan_layers=True",
+            "sparse_matmul=True",
+            "megablox=True",
+            "use_tokamax_gmm=True",
+            "max_target_length=128",
+            "per_device_batch_size=1",
+            "dtype=bfloat16",
+            "weight_dtype=float32",
+            "use_tokamax_splash=True",
+        )
+    )
+
   @parameterized.named_parameters(
       {"testcase_name": "consistent_rms_scaling", "muon_consistent_rms": 0.2},
       {"testcase_name": "width_scaling", "muon_consistent_rms": None},
