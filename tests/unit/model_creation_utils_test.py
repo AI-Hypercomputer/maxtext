@@ -712,15 +712,15 @@ class TestCreateNnxModel(unittest.TestCase):
     self.assertIsInstance(model, models.Transformer)
 
   @patch("maxtext.utils.model_creation_utils.ocp")
-  def test_checkpoint_load_error_raises_value_error(self, mock_ocp):
-    """Any exception during checkpoint loading should be re-raised as ValueError."""
+  def test_checkpoint_load_error_propagates(self, mock_ocp):
+    """Non-mismatch exceptions during checkpoint loading should propagate directly."""
     mock_ckptr = MagicMock()
     mock_ckptr.metadata.side_effect = RuntimeError("disk on fire")
     mock_ocp.Checkpointer.return_value = mock_ckptr
     mock_ocp.PyTreeCheckpointHandler.return_value = MagicMock()
 
     cfg = _make_config(enable_checkpointing=True, load_parameters_path="gs://fake/bad_ckpt")
-    with self.assertRaises(ValueError):
+    with self.assertRaises(RuntimeError):
       model_creation_utils.from_pretrained(cfg, self.mesh)
 
 

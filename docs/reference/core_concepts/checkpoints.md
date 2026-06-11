@@ -66,6 +66,14 @@ Their difference can also be represented in the following pytree structure:
 
 The stacked format is highly efficient but has one key requirement: all layers within the `scan` operation must have identical configurations. For models with heterogeneous layers (where layer configurations differ), stacking is not possible, and only unstacked checkpoints can be used.
 
+In MaxText, the **`scan_layers`** configuration parameter is used to control this setting:
+
+- `scan_layers=true` tells MaxText to stack layer parameters (recommended for training).
+- `scan_layers=false` tells MaxText to keep layer parameters unstacked (often required for inference and certain model architectures).
+
+> [!IMPORTANT]
+> **PyTree Structure Compatibility:** Because JAX expects the loaded PyTree structure to exactly match the model's instantiated structure, the value of the `scan_layers` flag during execution (training, SFT, RL, DPO, or decoding) **must** match the format of the checkpoint being loaded. A mismatch will cause PyTree loading or shape/path mismatch errors (which MaxText will intercept to raise a descriptive `ValueError` pointing to the scan_layers setting).
+
 ### Takeaways
 
 To summarize the four checkpoint types:

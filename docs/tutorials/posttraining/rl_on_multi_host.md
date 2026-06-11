@@ -148,6 +148,14 @@ Refer to the steps in [Hugging Face to MaxText](../../guides/checkpointing_solut
 export MAXTEXT_CKPT_PATH=<CKPT_PATH> # e.g., gs://my-bucket/my-model-checkpoint/0/items
 ```
 
+> [!IMPORTANT]
+> **Matching the `scan_layers` Parameter:**
+> The `scan_layers` setting during your RL training run **must match** the setting used when creating the checkpoint at `MAXTEXT_CKPT_PATH`.
+>
+> - If the checkpoint was converted or saved with `scan_layers=False` (which is common for Hugging Face conversions and inference-ready models), you **must also provide `scan_layers=False` in the MaxText command.**
+> - If `scan_layers` does not match, MaxText will raise a `ValueError`.
+>   See the [Checkpoints concept guide](../../reference/core_concepts/checkpoints.md) for more details.
+
 ## Submit your RL workload via Pathways
 
 See the **Troubleshooting** section for concise instructions on how to retry or

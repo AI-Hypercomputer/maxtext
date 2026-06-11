@@ -104,6 +104,123 @@ class TestLoadStateIfPossibleNNX(unittest.TestCase):
     self.assertIsNone(full)
     self.assertIsNone(params)
 
+  def test_load_state_if_possible_wraps_load_params_mismatch_exception(self):
+    """Verifies that load_state_if_possible intercepts and wraps PyTree mismatches in load_params_from_path."""
+    abstract = _abstract_nnx_state()
+    with mock.patch.object(
+        checkpointing,
+        "load_params_from_path",
+        side_effect=ValueError("PyTree structure mismatch"),
+    ):
+      with self.assertRaises(ValueError) as ctx:
+        checkpointing.load_state_if_possible(
+            checkpoint_manager=None,
+            data_iterator=None,
+            load_parameters_from_path="gs://does-not-exist/params",
+            load_full_state_from_path="",
+            checkpoint_storage_concurrent_gb=8,
+            abstract_unboxed_pre_state=abstract,
+        )
+      self.assertIn(
+          "Failed to load parameters from gs://does-not-exist/params.",
+          str(ctx.exception),
+      )
+      self.assertIn(
+          "This is often caused by a mismatch in the 'scan_layers'"
+          " configuration",
+          str(ctx.exception),
+      )
+
+  def test_load_state_if_possible_re_raises_other_load_params_exceptions(self):
+    """Verifies that load_state_if_possible does not intercept other errors from load_params_from_path."""
+    abstract = _abstract_nnx_state()
+    with mock.patch.object(
+        checkpointing,
+        "load_params_from_path",
+        side_effect=FileNotFoundError("no such file"),
+    ):
+      with self.assertRaises(FileNotFoundError):
+        checkpointing.load_state_if_possible(
+            checkpoint_manager=None,
+            data_iterator=None,
+            load_parameters_from_path="gs://does-not-exist/params",
+            load_full_state_from_path="",
+            checkpoint_storage_concurrent_gb=8,
+            abstract_unboxed_pre_state=abstract,
+        )
+
+
+class TestCheckpointMismatchHandling(unittest.TestCase):
+  """Unit tests for the checkpoint mismatch detection and wrapper context manager."""
+
+  def test_is_structural_or_shape_mismatch(self):
+    """Verifies that is_structural_or_shape_mismatch matches only shape/tree mismatches in ValueError/TypeError."""
+    # Matches
+    self.assertTrue(
+        checkpointing.is_structural_or_shape_mismatch(
+            ValueError("PyTree structure mismatch")
+        )
+    )
+    self.assertTrue(
+        checkpointing.is_structural_or_shape_mismatch(
+            TypeError("shape mismatch in leaf")
+        )
+    )
+    self.assertTrue(
+        checkpointing.is_structural_or_shape_mismatch(
+            ValueError("tree paths matched 143/145")
+        )
+    )
+    self.assertTrue(
+        checkpointing.is_structural_or_shape_mismatch(
+            ValueError("invalid type shapedtypestruct")
+        )
+    )
+
+    # Does not match
+    self.assertFalse(
+        checkpointing.is_structural_or_shape_mismatch(
+            ValueError("checkpoint directory does not exist")
+        )
+    )
+    self.assertFalse(
+        checkpointing.is_structural_or_shape_mismatch(
+            FileNotFoundError("file not found: checkpoint")
+        )
+    )
+    self.assertFalse(
+        checkpointing.is_structural_or_shape_mismatch(
+            RuntimeError("something went wrong")
+        )
+    )
+
+  def test_handle_checkpoint_mismatch_intercepts_matching_exceptions(self):
+    """Verifies that handle_checkpoint_mismatch intercepts and wraps structural errors."""
+    with self.assertRaises(ValueError) as ctx:
+      with checkpointing.handle_checkpoint_mismatch(
+          "load parameters", "gs://bucket/params"
+      ):
+        raise ValueError("PyTree structure mismatch")
+
+    self.assertIn(
+        "Failed to load parameters from gs://bucket/params.", str(ctx.exception)
+    )
+    self.assertIn(
+        "This is often caused by a mismatch in the 'scan_layers' configuration",
+        str(ctx.exception),
+    )
+    self.assertIn(
+        "Original error: PyTree structure mismatch", str(ctx.exception)
+    )
+
+  def test_handle_checkpoint_mismatch_re_raises_non_matching_exceptions(self):
+    """Verifies that handle_checkpoint_mismatch does not intercept non-structural errors."""
+    with self.assertRaises(FileNotFoundError):
+      with checkpointing.handle_checkpoint_mismatch(
+          "load parameters", "gs://bucket/params"
+      ):
+        raise FileNotFoundError("file not found: checkpoint")
+
 
 class TestLoadParamsIntoNNX(unittest.TestCase):
   """Weight-only load (load_parameters_path) of a Linen-layout checkpoint into NNX."""

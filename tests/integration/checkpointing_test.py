@@ -195,3 +195,40 @@ def test_autoselected_attention():
 def test_with_dot_product():
   """Tests checkpointing with dot_product attention on GPU."""
   run_checkpointing("gpu", "dot_product")
+
+
+@pytest.mark.integration_test
+@pytest.mark.tpu_only
+@pytest.mark.scheduled_only
+def test_scan_layers_mismatch_tpu():
+  """Tests scan_layers mismatch checkpoint loading raises ValueError on TPU."""
+  hardware = "tpu"
+  attention_type = "autoselected"
+  run_date = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+  local_ckpt_dir = "/tmp/maxtext_local_output"
+
+  def get_cmd(steps, metrics_file):
+    return get_checkpointing_command(
+        run_date,
+        hardware=hardware,
+        steps=steps,
+        metrics_file=metrics_file,
+        attention_type=attention_type,
+        dataset_type="synthetic",
+        dataset_path="/tmp/gcsfuse",
+        base_output_directory=local_ckpt_dir,
+    )
+
+  # 1. Save checkpoint with scan_layers=True (default) and steps=1
+  train_main(get_cmd(steps=1, metrics_file="saved_metrics_mismatch.txt"))
+
+  # 2. Attempt to restore with scan_layers=False and assert ValueError
+  mismatch_command = get_cmd(
+      steps=2, metrics_file="restored_metrics_mismatch.txt"
+  ) + ["scan_layers=False"]
+
+  with pytest.raises(ValueError) as excinfo:
+    train_main(mismatch_command)
+
+  assert "Failed to restore checkpoint" in str(excinfo.value)
+  assert "scan_layers" in str(excinfo.value)
