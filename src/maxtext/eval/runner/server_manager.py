@@ -27,6 +27,60 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Non-hd64 compatibility shims
+#
+# The tpu-inference Pallas attention kernels have two paths:
+#   - hd64 (head_dim==64): supports attention sinks + sliding window
+#   - general (head_dim!=64): supports sliding window, but NOT sinks
+#
+# Models trained with head_dim=128 (e.g. GPT-OSS 20B student) carry sinks
+# weights that the general kernel cannot handle:
+#   - sinks  ->  NotImplementedError in sharded_ragged_paged_attention
+#
+# sliding_window is PRESERVED because kernel.py does implement it (via KV-tile
+# masking in flash_attention_step1_qk_softmax) and the GPT-OSS alternating
+# architecture relies on it.  Disabling it degrades accuracy to near-random
+# because even layers that were trained with a 128-token window would attend
+# over the full context instead.
+#
+# The second issue is block sizes: for this model config + sliding_window,
+# there are no tuned block-size entries in TUNED_BLOCK_SIZES, so the fallback
+# fires and can return very large KV tiles (4096 // page_size pages on v7)
+# that overflow VMEM.  We cap bkv_p to 1 in that path so each KV tile is at
+# most page_size tokens, which always fits in VMEM.
+#
+# Fix 1: patch __init__ to disable ONLY sinks for head_size != 64.
+# Fix 2: patch get_tuned_block_sizes to cap bkv_p when the fallback fires.
+# ---------------------------------------------------------------------------
+
+def _patch_rpa_block_sizes() -> None:
+  try:
+    import tpu_inference.kernels.ragged_paged_attention.v3.tuned_block_sizes as _m  # pylint: disable=import-outside-toplevel
+  except ImportError:
+    return
+
+  _orig = _m.get_tuned_block_sizes
+
+  def _safe(*args, sliding_window=None, **kwargs):
+    bkv_p, bq = _orig(*args, sliding_window=sliding_window, **kwargs)
+    # Cap bkv_p to 1 when a sliding_window is active (no tuned entries exist).
+    # Cap bkv_p to 32 in all other cases — the fallback for large max_model_len
+    # (>8192) picks up to 4096//page_size pages which overflows VMEM at head_dim=128.
+    if sliding_window is not None:
+      bkv_p = min(bkv_p, 1)
+    else:
+      bkv_p = min(bkv_p, 32)
+    return bkv_p, bq
+
+  _m.get_tuned_block_sizes = _safe
+  logger.debug("Patched get_tuned_block_sizes to cap bkv_p for VMEM safety")
+
+
+_patch_rpa_block_sizes()
+
+_completions_debug_counter: list[int] = [0]  # mutable counter for closure access
+
 _HEALTH_ENDPOINT = "/health"
 
 
@@ -48,9 +102,15 @@ def _build_app(llm: Any) -> Any:
     body = await request.json()
 
     raw_prompt = body.get("prompt", "")
-    prompts = raw_prompt if isinstance(raw_prompt, list) else [raw_prompt]
+    # raw_prompt can be: str, list[int] (single token-ID prompt), list[str] (batch of
+    # text prompts), or list[list[int]] (batch of token-ID prompts).  Normalise to a
+    # list where each element is either a str or a list[int].
+    if isinstance(raw_prompt, list) and raw_prompt and isinstance(raw_prompt[0], int):
+      prompts = [raw_prompt]  # single prompt sent as token IDs
+    else:
+      prompts = raw_prompt if isinstance(raw_prompt, list) else [raw_prompt]
     model_name = body.get("model", "")
-    max_tokens = int(body.get("max_tokens") or 256)
+    max_tokens = int(body["max_tokens"]) if body.get("max_tokens") is not None else 256
     temperature = float(body.get("temperature") or 0.0)
     logprobs_n = body.get("logprobs")  # int | None
     echo = bool(body.get("echo", False))
@@ -80,6 +140,7 @@ def _build_app(llm: Any) -> Any:
       if logprobs_n is not None:
         tok_strings: list[str] = []
         tok_lps: list[float | None] = []
+        tok_tops: list[dict[str, float] | None] = []
         tok_offsets: list[int] = []
         running_offset = 0
 
@@ -93,6 +154,10 @@ def _build_app(llm: Any) -> Any:
             lp_dict = prompt_lps[pos] if pos < len(prompt_lps) else None
             lp_val = lp_dict[tok_id].logprob if (lp_dict and tok_id in lp_dict) else None
             tok_lps.append(lp_val)
+            tok_tops.append(
+                {tokenizer.decode([tid]): lp.logprob for tid, lp in lp_dict.items()}
+                if lp_dict else None
+            )
 
         gen_lps = gen.logprobs or []
         for pos, tok_id in enumerate(gen.token_ids):
@@ -103,15 +168,23 @@ def _build_app(llm: Any) -> Any:
           lp_dict = gen_lps[pos] if pos < len(gen_lps) else None
           lp_val = lp_dict[tok_id].logprob if (lp_dict and tok_id in lp_dict) else None
           tok_lps.append(lp_val)
+          tok_tops.append(
+              {tokenizer.decode([tid]): lp.logprob for tid, lp in lp_dict.items()}
+              if lp_dict else None
+          )
 
         logprobs_payload = {
             "tokens": tok_strings,
             "token_logprobs": tok_lps,
-            "top_logprobs": None,
+            "top_logprobs": tok_tops,
             "text_offset": tok_offsets,
         }
 
-      text_out = (prompts[idx] + gen.text) if echo else gen.text
+      if echo:
+        p = prompts[idx]
+        text_out = (tokenizer.decode(p) if isinstance(p, list) else p) + gen.text
+      else:
+        text_out = gen.text
       choices.append(
           {
               "text": text_out,
@@ -143,7 +216,7 @@ def _build_app(llm: Any) -> Any:
     body = await request.json()
     messages = body.get("messages", [])
     model_name = body.get("model", "")
-    max_tokens = int(body.get("max_tokens") or 256)
+    max_tokens = int(body["max_tokens"]) if body.get("max_tokens") is not None else 256
     temperature = float(body.get("temperature") or 0.0)
     stop = body.get("stop")
 

@@ -404,6 +404,20 @@ def main(argv: Sequence[str]) -> None:
   # Validate architecture consistency (raising ValueError on mismatch) or override HF config if specified.
   _validate_or_update_architecture(hf_config_obj, config, override=FLAGS.override_model_architecture)
 
+  # Ensure YaRN rope params are preserved if specified in the maxtext config
+  if getattr(config, "rope_type", None) == "yarn":
+    hf_config_obj.rope_theta = config.rope_max_timescale
+    hf_config_obj.rope_scaling = {
+        "beta_fast": float(getattr(config, "beta_fast", 32.0)),
+        "beta_slow": float(getattr(config, "beta_slow", 1.0)),
+        "factor": float(getattr(config, "rope_factor", 32.0)),
+        "original_max_position_embeddings": getattr(config, "original_max_position_embeddings", 4096),
+        "rope_theta": config.rope_max_timescale,
+        "rope_type": "yarn",
+        "truncate": getattr(config, "rope_truncate", False),
+    }
+    hf_config_obj.rope_parameters = hf_config_obj.rope_scaling
+
   # 2. Load Tokenizer
   if model_key not in HF_IDS:
     raise ValueError(f"HF Tokenizer ID not found for model key: {model_key}")
