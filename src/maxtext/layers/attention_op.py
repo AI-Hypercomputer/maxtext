@@ -919,6 +919,14 @@ class AttentionOp(nnx.Module):
       wv_product_einsum: Callable[..., Array],
   ):
     """Apply attention"""
+    if self.attention_kernel == "cudnn_flash_jax":
+      validate_gpu_flash_attention(sinks, record_max_logits)
+      if isinstance(key, KVTensor):
+        key = key.dequant()
+      if isinstance(value, KVTensor):
+        value = value.dequant()
+      query, key, value = self._align_qkv_for_cudnn_flash(query, key, value)
+
     self.check_attention_inputs(query, key, value)
     length = query.shape[-3]
     target_hardware = self.mesh.devices[(0,) * self.mesh.devices.ndim].platform
@@ -1044,11 +1052,6 @@ class AttentionOp(nnx.Module):
           None,
       )
     elif self.attention_kernel == "cudnn_flash_jax":
-      validate_gpu_flash_attention(sinks, record_max_logits)
-      if isinstance(key, KVTensor):
-        key = key.dequant()
-      if isinstance(value, KVTensor):
-        value = value.dequant()
       return (
           *self.cudnn_jax_flash_attention(query, key, value, decoder_segment_ids, model_mode),
           None,
@@ -1674,6 +1677,36 @@ class AttentionOp(nnx.Module):
     )
     return dpa_layer(query, key, value, sequence_descriptor=attn_mask)
 
+  def _align_qkv_for_cudnn_flash(
+      self,
+      query: Array,
+      key: Array,
+      value: Array,
+  ) -> tuple[Array, Array, Array]:
+    if query.shape[0] != key.shape[0]:
+      if key.shape[0] == 1 and query.shape[0] > 1:
+        key = jnp.broadcast_to(key, (query.shape[0], *key.shape[1:]))
+        value = jnp.broadcast_to(value, (query.shape[0], *value.shape[1:]))
+      else:
+        raise ValueError(
+            "Query and key/value batch sizes must match for cuDNN flash attention: "
+            f"{query.shape=}, {key.shape=}, {value.shape=}"
+        )
+
+    query_sharding = jax.typeof(query).sharding
+    if query_sharding is not None and not (
+        isinstance(query_sharding, jax.sharding.NamedSharding) and query_sharding.mesh.empty
+    ):
+      query = jax.lax.with_sharding_constraint(query, query_sharding)
+      key = jax.lax.with_sharding_constraint(key, query_sharding)
+      value = jax.lax.with_sharding_constraint(value, query_sharding)
+    elif self.is_partition_in_decode(query.shape[1]):
+      decode_qkv_sharding = (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV)
+      query = partitioning.with_sharding_constraint(query, decode_qkv_sharding)
+      key = partitioning.with_sharding_constraint(key, decode_qkv_sharding)
+      value = partitioning.with_sharding_constraint(value, decode_qkv_sharding)
+    return query, key, value
+
   def cudnn_jax_flash_attention(
       self,
       query: Array,
@@ -1694,6 +1727,8 @@ class AttentionOp(nnx.Module):
 
     if model_mode == MODEL_MODE_AUTOREGRESSIVE:
       lengths = jnp.sum(decoder_segment_ids, axis=-1)
+      if lengths.shape[0] == 1 and query.shape[0] > 1:
+        lengths = jnp.broadcast_to(lengths, (query.shape[0],))
 
       output, lse = dot_product_attention(
           query,
