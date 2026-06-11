@@ -36,10 +36,6 @@ Use the `to_maxtext.py` script to convert a Hugging Face model checkpoint into a
 ### Setup Environment
 
 ```bash
-# Install PyTorch and safetensors (in MaxText virtual environment)
-python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
-python3 -m pip install safetensors --no-deps
-
 # Setup environment variables
 export MODEL=<HF_MODEL> # e.g. 'llama3.1-8b-Instruct'
 export BASE_OUTPUT_DIRECTORY=<CKPT_PATH> # e.g., gs://my-bucket/my-checkpoint-directory
@@ -87,10 +83,6 @@ Use the `to_huggingface.py` script to convert a MaxText checkpoint into the Hugg
 ### Setup Environment
 
 ```bash
-# Install PyTorch and safetensors (in MaxText virtual environment)
-python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
-python3 -m pip install safetensors --no-deps
-
 # Setup environment variables
 export MODEL=<MODEL_NAME> # e.g. 'qwen3-4b'
 export MAXTEXT_CKPT_PATH=<CKPT_PATH> # e.g., gs://my-bucket/my-model-checkpoint/0/items
@@ -136,6 +128,9 @@ To ensure the conversion was successful, you can use the [test script](https://g
 export MODEL=<MODEL_NAME> # e.g. 'qwen3-4b'
 export MAXTEXT_CKPT_PATH=<CKPT_PATH> # e.g., gs://my-bucket/my-model-checkpoint/0/items
 export HF_CKPT_PATH=<HF_CKPT_PATH> # e.g., gs://my-bucket/my-checkpoint-directory
+
+# Install PyTorch (in MaxText virtual environment)
+python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 ```
 
 ### Run Correctness Test
