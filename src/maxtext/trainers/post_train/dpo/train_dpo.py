@@ -108,7 +108,7 @@ def get_tunix_config(mt_config: MaxTextConfig) -> DPOTrainingConfig:
   )
 
 
-def setup_trainer_state(mt_config, goodput_recorder=None):
+def setup_trainer_state(mt_config, goodput_recorder=None, test_only_training_hooks_class=None):
   """Set up prerequisites for training loop."""
   tunix_config = get_tunix_config(mt_config)
 
@@ -143,7 +143,10 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
   ref_model = nnx.clone(model) if mt_config.dpo.algo == "dpo" else None
 
   with maybe_record_goodput(goodput_recorder, GoodputEvent.TRAINING_PREPARATION):
-    training_hooks = hooks.DPOTrainingHooks(mt_config, mesh, learning_rate_schedule, goodput_recorder)
+    if test_only_training_hooks_class is None:
+      test_only_training_hooks_class = hooks.DPOTrainingHooks
+
+    training_hooks = test_only_training_hooks_class(mt_config, mesh, learning_rate_schedule, goodput_recorder)
     data_hooks = hooks.DPODataHooks(mt_config, mesh, goodput_recorder)
 
     # Provide rules context so logical axes (e.g. 'norm') are translated to mesh axes during maybe_restore
@@ -164,14 +167,15 @@ def train_model(mt_config: MaxTextConfig, trainer, mesh):
   return trainer
 
 
-def train(mt_config, goodput_recorder=None):
+def train(mt_config, goodput_recorder=None, test_only_training_hooks_class=None):
   """Main method for DPO training.
 
   Args:
     mt_config: MaxText config.
     goodput_recorder: An optional GoodputRecorder to record performance metrics.
+    test_only_training_hooks_class: An optional DPOTrainingHooks subclass to override hooks.
   """
-  trainer, mesh = setup_trainer_state(mt_config, goodput_recorder)
+  trainer, mesh = setup_trainer_state(mt_config, goodput_recorder, test_only_training_hooks_class)
   _job_completed_gracefully = False
   try:
     trainer = train_model(mt_config, trainer, mesh)
