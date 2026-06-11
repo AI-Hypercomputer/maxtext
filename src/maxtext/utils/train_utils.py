@@ -174,8 +174,19 @@ def jit_train_and_eval_step(
 ):
   """Returns a JIT-compiled train and eval step function."""
   if config.enable_diloco:
-    train_step_partial = functools.partial(train_step, model, config, state_mesh_shardings, params_shardings)
-    train_step = diloco.build_diloco_train_step(config, train_step_partial, mesh=mesh)
+    train_step_partial = functools.partial(train_step, model, config, state_mesh_shardings.inner_state, params_shardings)
+    train_step = diloco.build_diloco_train_step(
+        config,
+        train_step_partial,
+        mesh=mesh,
+        outer_params_shardings=state_mesh_shardings.params
+        if not config.pure_nnx
+        else nnx.filter_state(state_mesh_shardings.model, nnx.Param),
+        inner_model_params_shardings=state_mesh_shardings.inner_state.params
+        if not config.pure_nnx
+        else nnx.filter_state(state_mesh_shardings.inner_state.model, nnx.Param),
+        outer_opt_state_shardings=state_mesh_shardings.outer_opt_state,
+    )
   data_sharding = sharding.get_input_data_sharding(config, mesh)
   p_train_step = jit_train_step(
       config, model, state, state_mesh_shardings, data_sharding, train_step, params_shardings, mesh=mesh
@@ -288,7 +299,14 @@ def setup_train_loop(config, recorder, devices=None):
 
     if config.enable_diloco:
       with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
-        state, outer_opt_state_sharding = diloco.build_diloco_state(config, lambda: state, mesh=mesh)
+
+        def _get_and_clear_state():
+          nonlocal state
+          s = state
+          state = None
+          return s
+
+        state, outer_opt_state_sharding = diloco.build_diloco_state(config, _get_and_clear_state, mesh=mesh)
 
         # create state_mesh_shardings for the DilocoState
         inner_state_shardings = diloco.add_diloco_to_sharding(state_mesh_shardings)
