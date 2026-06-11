@@ -71,7 +71,7 @@ from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.inference import kvcache
 from maxtext.inference.kvcache import KVQuant
-from maxtext.utils.sharding import create_sharding
+from maxtext.utils.sharding import create_sharding, maybe_shard_with_logical
 from maxtext.utils.globals import EPS
 
 
@@ -98,6 +98,7 @@ class Indexer(nnx.Module):
       self,
       config: Any,
       rotary_embedding,
+      mesh: Optional[Mesh] = None,
       kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal"),
       quant: Optional[Quant] = None,
       model_mode: str = MODEL_MODE_TRAIN,
@@ -105,6 +106,7 @@ class Indexer(nnx.Module):
   ):
     self.config = config
     self.rotary_embedding = rotary_embedding
+    self.mesh = mesh
     self.quant = quant
     self.kernel_init = kernel_init
     self.model_mode = model_mode
@@ -247,6 +249,19 @@ class Indexer(nnx.Module):
     val_false = jnp.array(DEFAULT_MASK_VALUE, dtype=self.dtype)
     return jnp.where(is_topk, val_true, val_false)
 
+  def _maybe_shard_with_logical(self, inputs, logical_name):
+    if self.mesh is None:
+      return inputs
+
+    return maybe_shard_with_logical(
+        inputs,
+        logical_name,
+        mesh=self.mesh,
+        shard_mode=self.config.shard_mode,
+        debug_sharding=self.config.debug_sharding,
+        extra_stack_level=1,
+    )
+
   def __call__(
       self,
       inputs_q: Array,
@@ -325,17 +340,31 @@ class Indexer(nnx.Module):
     low_rank_q = jax.lax.stop_gradient(low_rank_q)
     inputs_kv = jax.lax.stop_gradient(inputs_kv)
 
+    if model_mode == MODEL_MODE_PREFILL:
+      query_logical_name = (PREFILL_KV_BATCH, PREFILL_LENGTH, "q_heads", "kv")
+      key_logical_name = (PREFILL_KV_BATCH, PREFILL_LENGTH, "kv")
+    else:
+      query_logical_name = (KV_BATCH, LENGTH, "q_heads", "kv")
+      key_logical_name = (KV_BATCH, LENGTH, "kv")
+
+    query_sharding = create_sharding(self.mesh, query_logical_name) if self.mesh is not None else None
+    key_sharding = create_sharding(self.mesh, key_logical_name) if self.mesh is not None else None
+
     # Query Processing: Project from Latent low_rank_q
-    q = self.wq_b(low_rank_q)  # [b, t, q_lora_rank] -> [b, t, h * d]
+    q = self.wq_b(low_rank_q, out_sharding=query_sharding)  # [b, t, q_lora_rank] -> [b, t, h * d]
     q = q.reshape(bsz, seqlen, self.n_heads, self.head_dim)  # [b, t, h, d]
+    q = self._maybe_shard_with_logical(q, query_logical_name)
     q = self.apply_partial_rope(q, inputs_positions=inputs_positions)
+    q = self._maybe_shard_with_logical(q, query_logical_name)
 
     # Key Processing: Project from Input
-    k = self.wk(inputs_kv)  # [b, s, embed_dim] -> [b, s, d]
+    k = self.wk(inputs_kv, out_sharding=key_sharding)  # [b, s, embed_dim] -> [b, s, d]
     k = self.k_norm(k)
+    k = self._maybe_shard_with_logical(k, key_logical_name)
     k = k[:, :, None, :]  # [b, s, d] -> [b, s, 1, d]
     k = self.apply_partial_rope(k, inputs_positions=inputs_positions)
     k = k.squeeze(2)  # [b, s, 1, d] -> [b, s, d]
+    k = self._maybe_shard_with_logical(k, key_logical_name)
 
     # Update and retrieve from cache if not training
     cached_s = None
@@ -366,8 +395,21 @@ class Indexer(nnx.Module):
       inputs_q_reshaped = inputs_q.reshape(bsz, num_chunks, indexer_chunk_size, self.emb_dim)
       inputs_q_reshaped = jnp.transpose(inputs_q_reshaped, (1, 0, 2, 3))
 
+      # Reshape segment IDs and query positions for scanning
+      if decoder_segment_ids is not None:
+        segment_ids_reshaped = decoder_segment_ids.reshape(bsz, num_chunks, indexer_chunk_size)
+        segment_ids_reshaped = jnp.transpose(segment_ids_reshaped, (1, 0, 2))
+      else:
+        segment_ids_reshaped = jnp.zeros((num_chunks, bsz, indexer_chunk_size), dtype=jnp.int32)
+
+      if inputs_positions is not None:
+        query_pos_reshaped = inputs_positions.reshape(bsz, num_chunks, indexer_chunk_size)
+        query_pos_reshaped = jnp.transpose(query_pos_reshaped, (1, 0, 2))
+      else:
+        query_pos_reshaped = jnp.zeros((num_chunks, bsz, indexer_chunk_size), dtype=jnp.int32)
+
       def indexer_chunk_fn(carry, xs):
-        q_chunk, inputs_q_chunk = xs
+        q_chunk, inputs_q_chunk, segment_ids_chunk, query_pos_chunk = xs
 
         # QK product for this chunk: [b, C_t, h, d] @ [b, s, d] -> [b, C_t, s, h]
         # Similar to MQA, each key is shared by h query heads
@@ -382,10 +424,38 @@ class Indexer(nnx.Module):
         # Aggregate head-wise logits for this chunk: [b, C_t, s, h] @ [b, C_t, h] -> [b, C_t, s]
         score_chunk = jnp.einsum("btsh, bth -> bts", logits_chunk, weights_chunk, precision=self.config.matmul_precision)
 
+        # Generate and apply chunk-level attention mask on-the-fly during training
+        if model_mode == MODEL_MODE_TRAIN:
+          # Causal mask: key_positions <= query_positions
+          if inputs_positions is not None:
+            causal_mask = query_pos_chunk[:, :, None] >= inputs_positions[:, None, :]
+          else:
+            causal_mask = None
+
+          # Segment mask: query_segment == key_segment
+          if decoder_segment_ids is not None:
+            segment_mask = segment_ids_chunk[:, :, None] == decoder_segment_ids[:, None, :]
+          else:
+            segment_mask = None
+
+          if causal_mask is not None and segment_mask is not None:
+            chunk_mask = jnp.where(causal_mask & segment_mask, 0.0, DEFAULT_MASK_VALUE)
+            score_chunk = score_chunk + chunk_mask
+          elif causal_mask is not None:
+            chunk_mask = jnp.where(causal_mask, 0.0, DEFAULT_MASK_VALUE)
+            score_chunk = score_chunk + chunk_mask
+          elif segment_mask is not None:
+            chunk_mask = jnp.where(segment_mask, 0.0, DEFAULT_MASK_VALUE)
+            score_chunk = score_chunk + chunk_mask
+
         return carry, score_chunk
 
       # Run scan over chunks of the query sequence, checkpointed to save activation memory
-      _, indexer_score_chunks = jax.lax.scan(jax.checkpoint(indexer_chunk_fn), None, (q_reshaped, inputs_q_reshaped))
+      _, indexer_score_chunks = jax.lax.scan(
+          jax.checkpoint(indexer_chunk_fn),
+          None,
+          (q_reshaped, inputs_q_reshaped, segment_ids_reshaped, query_pos_reshaped),
+      )
 
       # Reassemble indexer_score: [num_chunks, bsz, indexer_chunk_size, s] -> [bsz, seqlen, s]
       indexer_score = jnp.transpose(indexer_score_chunks, (1, 0, 2, 3)).reshape(bsz, seqlen, -1)
@@ -395,11 +465,35 @@ class Indexer(nnx.Module):
       logits = jnp.einsum("bthd, bsd -> btsh", q, k, precision=self.config.matmul_precision)
       logits = jax.nn.relu(logits)
       # Compute head weights: project from input, [b, t, embed_dim] -> [b, t, h]
-      weights = self.weights_proj(inputs_q)
+      if model_mode == MODEL_MODE_PREFILL:
+        weights_logical_name = (PREFILL_KV_BATCH, PREFILL_LENGTH, "q_heads")
+      else:
+        weights_logical_name = (KV_BATCH, LENGTH, "q_heads")
+      weights_sharding = create_sharding(self.mesh, weights_logical_name) if self.mesh is not None else None
+      weights = self.weights_proj(inputs_q, out_sharding=weights_sharding)
       # Weights scaling affect indexer_score, but does not affect topk_indices. Keep scaling for numerical stability.
       weights = weights * (self.n_heads**-0.5) * self.softmax_scale
       # Aggregate head-wise logits: logits @ weights
       indexer_score = jnp.einsum("btsh, bth -> bts", logits, weights, precision=self.config.matmul_precision)  # [b, t, s]
+
+      # Generate and apply attention mask on-the-fly during training
+      if model_mode == MODEL_MODE_TRAIN:
+        if inputs_positions is not None:
+          causal_mask = inputs_positions[:, :, None] >= inputs_positions[:, None, :]
+        else:
+          causal_mask = None
+
+        if decoder_segment_ids is not None:
+          segment_mask = decoder_segment_ids[:, :, None] == decoder_segment_ids[:, None, :]
+        else:
+          segment_mask = None
+
+        if causal_mask is not None and segment_mask is not None:
+          indexer_score = indexer_score + jnp.where(causal_mask & segment_mask, 0.0, DEFAULT_MASK_VALUE)
+        elif causal_mask is not None:
+          indexer_score = indexer_score + jnp.where(causal_mask, 0.0, DEFAULT_MASK_VALUE)
+        elif segment_mask is not None:
+          indexer_score = indexer_score + jnp.where(segment_mask, 0.0, DEFAULT_MASK_VALUE)
 
     internal_padding_mask = None
     if cached_s is not None:
@@ -751,6 +845,7 @@ class MLA(Attention):
       indexer_rope.interleave = False
       self.indexer = Indexer(
           config,
+          mesh=mesh,
           rngs=rngs,
           rotary_embedding=indexer_rope,
           kernel_init=kernel_init,
@@ -1410,16 +1505,20 @@ class MLA(Attention):
     indexer_mask = None
     if self.use_indexer:
       # generate mask: with 0 and large negative, [b, 1, 1, q_len, kv_len] -> [b, q_len, kv_len]
-      attention_mask = self.attention_op.generate_attention_mask(
-          query,
-          key,
-          decoder_segment_ids,
-          model_mode,
-          previous_chunk,
-          bidirectional_mask,
-      )
-      if attention_mask is not None:
-        attention_mask = attention_mask.squeeze(axis=(1, 2))
+      # To avoid allocating a massive [b, t, s] global mask during training under long contexts,
+      # we generate the mask chunk-by-chunk on-the-fly inside the indexer.
+      attention_mask = None
+      if model_mode != MODEL_MODE_TRAIN:
+        attention_mask = self.attention_op.generate_attention_mask(
+            query,
+            key,
+            decoder_segment_ids,
+            model_mode,
+            previous_chunk,
+            bidirectional_mask,
+        )
+        if attention_mask is not None:
+          attention_mask = attention_mask.squeeze(axis=(1, 2))
       # apply indexer, indexer_mask [b, q_len, kv_len]
       indexer_mask, _, indexer_score = self.indexer(
           inputs_q=inputs_q,
