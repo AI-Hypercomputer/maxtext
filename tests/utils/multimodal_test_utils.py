@@ -16,7 +16,13 @@
 
 import jax.numpy as jnp
 import numpy as np
-import torch
+try:
+  import torch
+  HAS_TORCH = True
+except ImportError:
+  HAS_TORCH = False
+  torch = None
+
 
 
 def create_random_jax_torch(*shape, dtype=np.float32):
@@ -30,7 +36,32 @@ def create_random_jax_torch(*shape, dtype=np.float32):
       tuple: (jax_array, torch_tensor)
   """
   np_array = np.random.randn(*shape).astype(dtype)
-  return jnp.array(np_array), torch.from_numpy(np_array)
+  jax_array = jnp.array(np_array)
+  torch_tensor = torch.from_numpy(np_array) if torch is not None else None
+  return jax_array, torch_tensor
+
+
+def get_array_stats(x):
+  """Calculate statistics of a JAX array for CI validation."""
+  x_np = np.array(x)
+  return {
+      "min": float(x_np.min()),
+      "max": float(x_np.max()),
+      "mean": float(x_np.mean()),
+      "std": float(x_np.std()),
+      "first_5": [float(v) for v in x_np.flatten()[:5]],
+      "last_5": [float(v) for v in x_np.flatten()[-5:]],
+  }
+
+
+def assert_stats_close(test_case, actual_stats, expected_stats, rtol=1e-4, atol=1e-4):
+  """Assert that actual statistics match expected statistics."""
+  test_case.assertAlmostEqual(actual_stats["min"], expected_stats["min"], delta=atol)
+  test_case.assertAlmostEqual(actual_stats["max"], expected_stats["max"], delta=atol)
+  test_case.assertAlmostEqual(actual_stats["mean"], expected_stats["mean"], delta=atol)
+  test_case.assertAlmostEqual(actual_stats["std"], expected_stats["std"], delta=atol)
+  np.testing.assert_allclose(actual_stats["first_5"], expected_stats["first_5"], rtol=rtol, atol=atol)
+  np.testing.assert_allclose(actual_stats["last_5"], expected_stats["last_5"], rtol=rtol, atol=atol)
 
 
 def split_into_patches(x, temporal_patch_size, patch_size):
