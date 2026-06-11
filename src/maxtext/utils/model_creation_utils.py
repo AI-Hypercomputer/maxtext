@@ -442,10 +442,7 @@ def _fix_restore_args_for_shape_mismatch(restore_args, stored_metadata_tree, mes
   if rank_mismatched_paths:
     sample = "\n".join(rank_mismatched_paths[:5])
     more = f"\n  ... and {len(rank_mismatched_paths) - 5} more" if len(rank_mismatched_paths) > 5 else ""
-    raise ValueError(
-        f"Checkpoint rank mismatches detected ({len(rank_mismatched_paths)}"
-        f" arrays):\n{sample}{more}"
-    )
+    raise ValueError(f"Checkpoint rank mismatches detected ({len(rank_mismatched_paths)}" f" arrays):\n{sample}{more}")
 
   # Detect structural mismatch (e.g. scanned checkpoint loaded into unscanned model).
   # In that case the checkpoint tree has "layers" (all layers stacked) but the model
@@ -892,9 +889,7 @@ def from_pretrained(
 
   with mesh:
     if config.load_parameters_path:
-      with handle_checkpoint_mismatch(
-          "load parameters", config.load_parameters_path
-      ):
+      with handle_checkpoint_mismatch("load parameters", config.load_parameters_path):
         ckptr = ocp.Checkpointer(
             ocp.PyTreeCheckpointHandler(
                 restore_concurrent_gb=config.checkpoint_storage_concurrent_gb,
@@ -1040,17 +1035,16 @@ def from_pretrained(
 
         # Free memory used by initial sharded_state before restore, to make room for the incoming checkpoint arrays.
         def _free_device_memory(node):
-          val = node
           if isinstance(node, nnx.Variable) and not isinstance(node, nnx.RngState):
             inner = node.get_value() if hasattr(node, "get_value") else node[...]
-            # Same QTensor caveat as `_build_value_target`: AQT serve-mode `qrhs.frozen`
-            # wraps a QTensor whose `__getitem__` fails on `LogicallyPartitioned`.
-            # We only need to free a single jax.Array leaf — for composite values
-            # there's nothing to free at this level, so skip.
-            val = inner if hasattr(inner, "shape") else None
-
-          if isinstance(val, jax.Array) and not val.is_deleted():
-            val.delete()
+            # AQT serve-mode `qrhs.frozen` wraps a QTensor (composite pytree) rather
+            # than a single jax.Array. Walking via tree_leaves frees the qvalue/scale
+            # arrays too; the single-leaf case is a 1-element tree.
+            for leaf in jax.tree_util.tree_leaves(inner):
+              if isinstance(leaf, jax.Array) and not leaf.is_deleted():
+                leaf.delete()
+          elif isinstance(node, jax.Array) and not node.is_deleted():
+            node.delete()
 
           return node
 

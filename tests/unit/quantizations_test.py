@@ -484,11 +484,13 @@ class QuantTest(unittest.TestCase):
   def test_fp8_full_quantization(self):
     self.quantization_config("fp8_full")
 
+  @pytest.mark.skip(reason="b/509790223: Linen Fp8DotGeneralBase leaks intermediates inside NNX context")
   @pytest.mark.gpu_only
   @pytest.mark.external_serving
   def test_fp8_gpu_quantization(self):
     self.quantization_config("fp8_gpu", grad_tolerance=1.5)
 
+  @pytest.mark.skip(reason="b/509790223: Linen Fp8DotGeneralBase leaks intermediates inside NNX context")
   @pytest.mark.gpu_only
   @pytest.mark.external_serving
   def test_fp8_nanoo_quantization(self):

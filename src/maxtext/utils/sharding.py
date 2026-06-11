@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # pylint: disable=line-too-long, disable=bare-except, consider-using-generator
-""" Utils that are only interesting to MaxText and sharding related. """
+"""Utils that are only interesting to MaxText and sharding related."""
 
 from flax import linen as nn, nnx
 
@@ -618,6 +618,34 @@ def maybe_update_params_sharding_with_opt_nnx(
   updated_state.model = new_model_shardings
 
   return prev_params_shardings, updated_state
+
+
+def build_zero1_input_state_mesh_shardings(config, state_mesh_shardings, params_shardings):
+  """Build the train-step input shardings under shard_optimizer_over_data (Zero-1).
+
+  Model params on input use the original pre-Zero-1 sharding (params_shardings), while the rest
+  of the state — including the optimizer state — keeps the Zero-1 layout from state_mesh_shardings,
+  so the optimizer state input matches its output. When shard_optimizer_over_data is False,
+  state_mesh_shardings passes through unchanged.
+  """
+  if not config.shard_optimizer_over_data:
+    return state_mesh_shardings
+  if not config.pure_nnx:
+    return state_mesh_shardings.replace(params=params_shardings)
+  # nnx.State has no .replace. tree_map below shallow-copies state_mesh_shardings preserving
+  # nested container types; then we walk params_shardings and overwrite the matching keys under
+  # input_state.model (the NNX home of model params).
+  input_state = jax.tree_util.tree_map(lambda x: x, state_mesh_shardings, is_leaf=lambda x: isinstance(x, nnx.Variable))
+
+  def _overlay(model_node, params_node):
+    for k, pv in params_node.items():
+      if isinstance(pv, nnx.Variable):
+        model_node[k] = pv
+      elif hasattr(pv, "items"):
+        _overlay(model_node[k], pv)
+
+  _overlay(input_state.model, params_shardings)
+  return input_state
 
 
 def logical_axis_rules_pp_act_as_dp(logical_rules):
