@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Smoke test for sparsity."""
+"""Test for tokamax gmm."""
 
 import os
 import tempfile
@@ -28,39 +28,33 @@ gettempdir = tempfile.gettempdir
 
 @pytest.mark.integration_test
 class Train(parameterized.TestCase):
-  """Smoke test for sparsity."""
+  """Test for tokamax gmm."""
 
   @parameterized.named_parameters(
       {
-          "testcase_name": "not_quantized",
+          "testcase_name": "gmm bf16",
           "quantization": "",
-          "use_sparsity": False,
       },
       {
-          "testcase_name": "fp8_full",
+          "testcase_name": "gmm fp8",
           "quantization": "fp8_full",
-          "use_sparsity": False,
-      },
-      {
-          "testcase_name": "fp8_full_with_sparsity",
-          "quantization": "fp8_full",
-          "use_sparsity": True,
       },
   )
   @pytest.mark.tpu_only
-  def test_different_quant_sparsity_configs(self, quantization: str, use_sparsity: bool):
+  def test_different_configs(self, quantization: str):
+    """Smoke train with small config."""
     test_tmpdir = os.environ.get("TEST_TMPDIR", gettempdir())
     outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", test_tmpdir)
     args = [
         None,
         get_test_config_path(),
         f"base_output_directory={test_tmpdir}",
-        "run_name=different_quant_sparsity_configs_test",
-        "base_emb_dim=16",
+        "run_name=toktmax_gmm_test",
+        "base_emb_dim=256",
         "base_num_query_heads=1",
         "base_num_kv_heads=1",
-        "base_mlp_dim=16",
-        "base_moe_mlp_dim=16",
+        "base_mlp_dim=256",
+        "base_moe_mlp_dim=256",
         "base_num_decoder_layers=2",
         "head_dim=64",
         "decoder_block=deepseek",
@@ -69,26 +63,21 @@ class Train(parameterized.TestCase):
         "shared_experts=1",
         "sparse_matmul=True",
         "megablox=False",
-        f'quantization="{quantization}"',
+        "use_tokamax_gmm=True",
+        f"quantization={quantization}",
         "use_qwix_quantization=True",
+        "weight_quantization_calibration_method=fixed,-224,224",
+        "act_quantization_calibration_method=fixed,-224,224",
         "per_device_batch_size=2",
         "max_target_length=128",
         "dataset_type=synthetic",
-        "steps=1",
+        "steps=3",
         "enable_checkpointing=False",
         "enable_goodput_recording=False",
         "enable_checkpoint_cloud_logger=False",
         "monitor_goodput=False",
         f"metrics_file={os.path.join(outputs_dir, 'metrics.json')}",
     ]
-    if use_sparsity:
-      args.extend(
-          [
-              "weight_sparsity_n=2",
-              "weight_sparsity_m=4",
-              "weight_sparsity_update_step=1",
-          ]
-      )
     train_main(args)
 
 
