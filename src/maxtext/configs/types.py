@@ -1379,7 +1379,7 @@ class Distillation(BaseModel):
   # --- Experimental features ----
   blockwise_distill: bool = Field(
       False,
-      description="Enables blockwise parallel disitllaion mode.",
+      description="Enables layer-wise parallel distillaion mode.",
   )
 
 

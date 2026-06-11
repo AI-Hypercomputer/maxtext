@@ -175,6 +175,7 @@ class TrainDistillTest(unittest.TestCase):
     trainer = train_distill.MaxTextDistillationTrainer.__new__(train_distill.MaxTextDistillationTrainer)
     trainer.strategy = mock.Mock()
     trainer.wrt_filter = lambda path, x: True  # type: ignore
+    mock_tree_map.side_effect = lambda f, x: x
 
     # 2. Setup Batch WITH teacher_output
     mock_batch = {
@@ -238,6 +239,7 @@ class TrainDistillTest(unittest.TestCase):
     trainer = train_distill.MaxTextDistillationTrainer.__new__(train_distill.MaxTextDistillationTrainer)
     trainer.strategy = mock.Mock()
     trainer.wrt_filter = lambda path, x: True  # type: ignore
+    mock_tree_map.side_effect = lambda f, x: x
 
     # 2. Setup Batch WITHOUT teacher_output
     mock_batch = {
@@ -326,6 +328,7 @@ class TrainDistillTest(unittest.TestCase):
     trainer = train_distill.MaxTextDistillationTrainer.__new__(train_distill.MaxTextDistillationTrainer)
     trainer.strategy = mock.Mock()
     trainer.wrt_filter = lambda path, x: True  # type: ignore
+    mock_tree_map.side_effect = lambda f, x: x
 
     # 2. Setup Batch WITH targets_segmentation
     mock_targets_segmentation = jnp.array([[1, 1, 0]])
@@ -386,6 +389,73 @@ class TrainDistillTest(unittest.TestCase):
         decoder_target_tokens=mock_batch["targets"],
         decoder_target_mask=mock_targets_segmentation,
         cache=None,
+    )
+
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.optax.global_norm")
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.jax.tree.map")
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.nnx.update")
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.nnx.merge")
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.nnx.split")
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.jax.value_and_grad")
+  def test_train_step_passes_injected_attention_inputs_under_blockwise_distill(
+      self, mock_value_and_grad, mock_split, mock_merge, mock_update, mock_tree_map, mock_global_norm
+  ):
+    """Verifies that teacher's attention_inputs are passed to student_forward_fn as injected_attention_inputs."""
+    # 1. Initialize Trainer
+    # pylint: disable=no-value-for-parameter
+    trainer = train_distill.MaxTextDistillationTrainer.__new__(train_distill.MaxTextDistillationTrainer)
+    trainer.strategy = mock.Mock()
+    trainer.wrt_filter = lambda path, x: True  # type: ignore
+    mock_tree_map.side_effect = lambda f, x: x
+
+    # 2. Setup Batch WITH teacher_output containing attention_inputs
+    mock_attention_inputs = jnp.ones((1, 2, 8))
+    fake_teacher_output = distillation_utils.DistillationForwardOutput(
+        logits=jnp.zeros((1, 2, 4)),
+        out_projection_activations=None,
+        attention_inputs=mock_attention_inputs,
+    )
+    mock_batch = {
+        "input_tokens": mock.Mock(),
+        "positions": mock.Mock(),
+        "attention_mask": mock.Mock(),
+        "decoder_segment_ids": mock.Mock(),
+        "targets": mock.Mock(),
+        "teacher_output": fake_teacher_output,
+    }
+    trainer.gen_model_input_fn = mock.Mock(return_value=mock_batch)
+
+    # 3. Setup Models & Inputs
+    teacher_model, student_model = mock.Mock(), mock.Mock()
+    model_bundle = train_distill.ModelBundle(teacher_model=teacher_model, student_model=student_model)
+    optimizer, inputs = mock.Mock(), mock.Mock()
+
+    # 4. Configure nnx.split/merge/update mocks
+    mock_graphdef, mock_diff_params, mock_rest = mock.Mock(), mock.Mock(), mock.Mock()
+    mock_split.return_value = (mock_graphdef, mock_diff_params, mock_rest)
+
+    # 5. Configure mocked jax.value_and_grad
+    mock_grad_fn = mock.Mock(return_value=((mock.Mock(), ({}, mock.Mock())), mock.Mock()))
+    mock_value_and_grad.return_value = mock_grad_fn
+    mock_global_norm.return_value = mock.Mock()
+    trainer.strategy.compute_loss.return_value = (mock.Mock(), {})
+
+    # 6. Execute outer function & trigger inner loss_wrapper_pure
+    trainer._train_step(model_bundle, optimizer, inputs)
+    loss_wrapper = mock_value_and_grad.call_args[0][0]
+    loss_wrapper(mock_diff_params, mock_rest)
+
+    # 7. Assertions
+    trainer.strategy.student_forward_fn.assert_called_once_with(
+        model=mock.ANY,  # local_student from nnx.merge, not the original student_model
+        input_tokens=mock_batch["input_tokens"],
+        positions=mock_batch["positions"],
+        attention_mask=mock_batch["attention_mask"],
+        decoder_segment_ids=mock_batch["decoder_segment_ids"],
+        decoder_target_tokens=mock_batch["targets"],
+        decoder_target_mask=None,
+        cache=None,
+        injected_attention_inputs=mock_attention_inputs,
     )
 
   def test_optimizer_factory(self):

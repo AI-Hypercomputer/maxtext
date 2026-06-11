@@ -323,17 +323,23 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
 
     def loss_wrapper_pure(diff_params, rest):
       local_student = nnx.merge(student_graphdef, diff_params, rest, copy=True)
-      student_output = self.strategy.student_forward_fn(
-          model=local_student,
-          input_tokens=batch["input_tokens"],
-          positions=batch["positions"],
-          attention_mask=batch.get("attention_mask"),
-          decoder_segment_ids=batch.get("decoder_segment_ids"),
-          decoder_target_tokens=batch.get("targets", None),
-          decoder_target_mask=batch.get("targets_segmentation", None),
-          cache=None,
-          injected_attention_inputs=getattr(teacher_output, "attention_inputs", None),
-      )
+      student_kwargs = {
+          "model": local_student,
+          "input_tokens": batch["input_tokens"],
+          "positions": batch["positions"],
+          "attention_mask": batch.get("attention_mask"),
+          "decoder_segment_ids": batch.get("decoder_segment_ids"),
+          "decoder_target_tokens": batch.get("targets", None),
+          "decoder_target_mask": batch.get("targets_segmentation", None),
+          "cache": None,
+      }
+      if (
+          isinstance(teacher_output, distillation_utils.DistillationForwardOutput)
+          and teacher_output.attention_inputs is not None
+      ):
+        student_kwargs["injected_attention_inputs"] = teacher_output.attention_inputs
+
+      student_output = self.strategy.student_forward_fn(**student_kwargs)
       labels = self.strategy.create_labels(batch["targets"], targets_segmentation=batch.get("targets_segmentation", None))
       loss, aux = self.strategy.compute_loss(student_output, teacher_output, labels, step=current_step)
       # Capture updated non-param state (e.g. RNG counters) from local_student.
