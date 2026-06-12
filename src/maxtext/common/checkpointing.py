@@ -1024,6 +1024,17 @@ def save_params_to_path(checkpoint_dir, params, use_ocdbt=True, use_zarr3=True):
 
 def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step=None):
   """Save checkpoint if checkpointing is enabled."""
+
+  if config and config.elastic_enabled:
+    try:
+      elastic_utils.maybe_elastic_scale_up(config, checkpoint_manager)
+    except elastic_utils.manager.ScaleUpSignalError as e:
+      max_logging.log(f"Elastic event detected, letting exception bubble up: {e}")
+      raise
+    except jax.errors.JaxRuntimeError as e:
+      max_logging.log(f"Elastic event detected, letting exception bubble up: {e}")
+      raise
+
   if checkpoint_manager is None:
     return
 
@@ -1058,8 +1069,8 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
     checkpoint_saved = save_checkpoint(checkpoint_manager, actual_step, state, config, data_iterator, force_ckpt_save)
     if checkpoint_saved:
       print_save_message(actual_step, config.async_checkpointing)
-      if config.elastic_enabled:
-        elastic_utils.maybe_elastic_scale_up(config, checkpoint_manager)
+      # if config.elastic_enabled:
+      #   elastic_utils.maybe_elastic_scale_up(config, checkpoint_manager)
   except elastic_utils.manager.ScaleUpSignalError as e:
     if config.elastic_enabled:
       max_logging.log(f"Elastic event detected, letting exception bubble up: {e}")

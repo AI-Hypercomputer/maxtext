@@ -35,6 +35,7 @@ from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
+from maxtext.utils import elastic_utils
 from collections import defaultdict
 
 mldiag, _ = mldiagnostics_modules()
@@ -166,6 +167,7 @@ class MetricLogger:
       log_parts.extend(
           [
               f"completed step: {step}",
+              f"live slice count: {len(elastic_utils.live_slice_indices(self.config))}",
               f"seconds: {scalars['perf/step_time_seconds']:.3f}",
           ]
       )
