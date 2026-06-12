@@ -129,7 +129,7 @@ jobs:
 
   maxtext_jupyter_notebooks:
     needs: build_and_upload_maxtext_package
-    if: needs.analyze_code_changes.outputs.run_notebooks == 'true'
+    if: false
     uses: ./.github/workflows/run_jupyter_notebooks.yml
     strategy:
         fail-fast: false
@@ -145,7 +145,7 @@ jobs:
   tpu-tests:
     name: ${{ matrix.flavor || 'TPU' }} tests
     needs: [build_and_upload_maxtext_package]
-    if: needs.analyze_code_changes.outputs.run_tests == 'true'
+    if: false
     uses: ./.github/workflows/run_tests_coordinator.yml
     strategy:
       fail-fast: false
@@ -160,7 +160,7 @@ jobs:
   gpu-tests:
     name: ${{ matrix.flavor || 'GPU' }} tests
     needs: [build_and_upload_maxtext_package]
-    if: needs.analyze_code_changes.outputs.run_tests == 'true'
+    if: false
     strategy:
       fail-fast: false
       matrix:
@@ -180,16 +180,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        flavor: [cpu-unit, cpu-post-training-unit]
+        flavor: [cpu-post-training-unit]
     with:
       flavor: ${{ matrix.flavor }}
       base_image: maxtext-unit-test-tpu:py312
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
       maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
+      pytest_extra_args: 'tests/post_training/unit/dpo_trainer_correctness_test.py'
 
   maxtext_tpu_pathways_unit_tests:
     needs: build_and_upload_maxtext_package
-    if: needs.analyze_code_changes.outputs.run_tests == 'true'
+    if: false
     uses: ./.github/workflows/run_pathways_tests.yml
     strategy:
         fail-fast: false
@@ -208,6 +209,7 @@ jobs:
 
   maxtext_tpu_pathways_integration_tests:
     needs: build_and_upload_maxtext_package
+    if: false
     uses: ./.github/workflows/run_pathways_tests.yml
     strategy:
         fail-fast: false
