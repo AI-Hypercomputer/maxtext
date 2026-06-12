@@ -100,8 +100,11 @@ def create_data_iterator(config: pyconfig.HyperParameters, mesh):
       mesh,
   )
   output_train_iterator = create_process_specific_iterator(config, mesh, process_indices_train, train_iterator)
-  if config.expansion_factor_real_data > 1:  # assert number of hosts loading real data
-    assert len(process_indices_train) == jax.process_count() // config.expansion_factor_real_data
+  active_process_count = len(set(d.process_index for d in mesh.devices.flat))
+  exp_factor = config.expansion_factor_real_data
+  expected_processes = active_process_count // exp_factor
+  if exp_factor > 1:  # assert number of hosts loading real data
+    assert len(process_indices_train) == expected_processes
 
   # Generate output eval iterator
   output_eval_iterator = None
@@ -114,7 +117,8 @@ def create_data_iterator(config: pyconfig.HyperParameters, mesh):
         mesh,
     )
 
-    if config.expansion_factor_real_data > 1:
-      assert len(process_indices_eval) == jax.process_count() // config.expansion_factor_real_data
+    if exp_factor > 1:
+      assert len(process_indices_eval) == expected_processes
+
     output_eval_iterator = create_process_specific_iterator(config, mesh, process_indices_eval, eval_iterator)
   return output_train_iterator, output_eval_iterator

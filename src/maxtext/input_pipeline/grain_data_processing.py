@@ -397,18 +397,48 @@ def _get_pipeline_fn(config):
   return pretrain_preprocessing_pipeline
 
 
-def _make_elastic_iterator(dataset, config, preprocessing_fn, shard_index=None, shard_count=None, mp_opts=None):
+def _make_elastic_iterator(
+    dataset,
+    config,
+    preprocessing_fn,
+    shard_index=None,
+    shard_count=None,
+    process_indices=None,
+    mp_opts=None,
+):
   """Applies preprocessing_fn then wraps the result with ElasticIterator.
 
-  When shard_index/shard_count are None, defaults to jax.process_index()/jax.process_count().
+  When shard_index/shard_count are None, defaults to
+  jax.process_index()/jax.process_count() (or calculated from
+  process_indices if provided).
+
+  Args:
+    dataset: The input dataset.
+    config: The hyperparameter configuration.
+    preprocessing_fn: The function to apply before wrapping.
+    shard_index: The shard index. Defaults to None.
+    shard_count: The shard count. Defaults to None.
+    process_indices: The active process indices. Defaults to None.
+    mp_opts: Multiprocessing options. Defaults to None.
   """
   ds = preprocessing_fn(dataset=dataset)
+  if shard_index is None:
+    if process_indices is not None:
+      shard_index = process_indices.index(jax.process_index())
+    else:
+      shard_index = jax.process_index()
+  if shard_count is None:
+    if process_indices is not None:
+      shard_count = len(process_indices)
+    else:
+      shard_count = jax.process_count()
+
   return ElasticIterator(
       ds,
       global_batch_size=config.global_batch_size_to_load,
       shard_options=grain.ShardOptions(
-          shard_index=shard_index if shard_index is not None else jax.process_index(),
-          shard_count=shard_count if shard_count is not None else jax.process_count(),
+          shard_index=shard_index,
+          shard_count=shard_count,
       ),
       read_options=grain.ReadOptions(
           num_threads=config.grain_num_threads,
@@ -463,7 +493,12 @@ def make_grain_train_iterator(
   # pass to MultiHostDataLoadIterator
   if config.colocated_python_data_input:
     if config.grain_use_elastic_iterator:
-      preprocessing_fn = functools.partial(_make_elastic_iterator, config=config, preprocessing_fn=preprocessing_fn)
+      preprocessing_fn = functools.partial(
+          _make_elastic_iterator,
+          config=config,
+          preprocessing_fn=preprocessing_fn,
+          process_indices=process_indices,
+      )
 
     global_shape = (config.global_batch_size_to_load, config.max_target_length)
     return multihost_dataloading.RemoteIteratorWrapper(
