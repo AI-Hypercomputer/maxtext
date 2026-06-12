@@ -123,6 +123,11 @@ jobs:
             echo "------------------------------------------------------"
 
             $PAPERMILL_EXE "$notebook" "$output_name" -k maxtext_venv
+
+            # Clean up any checkpoint directories created by the notebook to avoid filling up disk space
+            echo "Post-notebook disk cleanup for $filename ..."
+            rm -rf "$MAXTEXT_PKG_DIR"/sft_*_output "$MAXTEXT_PKG_DIR"/rl_*_output
+            rm -rf "$HOME/.cache/huggingface/hub"
           done
       - name: Upload Outputs
         if: always()
