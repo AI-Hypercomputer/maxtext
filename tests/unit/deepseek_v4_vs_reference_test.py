@@ -524,9 +524,13 @@ class DeepSeekV4CompressedAttentionTest(unittest.TestCase):
         "compressed_sparse_attention": self.pt_config.compress_rates["compressed_sparse_attention"],
         "heavily_compressed_attention": self.pt_config.compress_rates["heavily_compressed_attention"],
     }
+    compress_ratio = compress_ratio_map[layer_type]
+    layer_attention_type = AttentionType.LOCAL_SLIDING if compress_ratio == 0 else AttentionType.COMPRESSED
+
     mt_attn = CompressedAttention(
         config=mt_config,
-        compress_ratio=compress_ratio_map[layer_type],
+        compress_ratio=compress_ratio,
+        attention_type=layer_attention_type,
         num_query_heads=self.num_heads,
         num_kv_heads=1,
         head_dim=self.head_dim,
@@ -652,8 +656,7 @@ class DeepSeekV4CompressedAttentionTest(unittest.TestCase):
       print(f"top_k_indices mismatches: {num_mismatches}")
 
     # 6. Execute MaxText
-
-    mt_out = mt_attn(x_mt, x_mt, segs_mt, pos_mt, deterministic=True, model_mode=MODEL_MODE_TRAIN)
+    mt_out, _ = mt_attn(x_mt, x_mt, segs_mt, pos_mt, deterministic=True, model_mode=MODEL_MODE_TRAIN)
 
     # 7. Asserts
     if not is_packed:
