@@ -904,12 +904,13 @@ class TestQwen3Next(unittest.TestCase):
     print("Running test_gated_delta_net_structure...")
     hidden_states_jax = jnp.ones((self.batch_size, self.seq_len, self.hidden_size), dtype=self.cfg.dtype)
 
-    jax_model = qwen3.Qwen3NextGatedDeltaNet(config=self.cfg, rngs=self.nnx_rngs)
+    jax_model = qwen3.Qwen3NextGatedDeltaNet(config=self.cfg, mesh=self.mesh, rngs=self.nnx_rngs)
 
     @jax.jit
     def run_jax(hidden_states):
       """Runs the JAX GatedDeltaNet model."""
-      return jax_model(hidden_states)
+      output, _ = jax_model(hidden_states)
+      return output
 
     output_jax = run_jax(hidden_states_jax)
 
@@ -932,22 +933,22 @@ class TestQwen3Next(unittest.TestCase):
       expected_output = pt_model(hidden_states_pt)
 
     # 2. Set up the JAX implementation.
-    jax_model = Qwen3NextRMSNorm(
-        num_features=self.hidden_size,
-        eps=self.cfg.normalization_layer_epsilon,
-        dtype=jnp.float32,
-        weight_dtype=jnp.float32,
-        rngs=self.nnx_rngs,
-    )
+    class DummyModule(nnx.Module):
+
+      def __init__(self, hidden_size, eps, rngs):
+        self.norm = Qwen3NextRMSNorm(hidden_size, eps=eps, rngs=rngs)
+
+    jax_model_wrapped = DummyModule(self.hidden_size, self.cfg.normalization_layer_epsilon, self.nnx_rngs)
+    jax_model = jax_model_wrapped.norm
 
     params = {"scale": nnx.Param(jnp.array(weight_pt.numpy()))}
-    nnx.update(jax_model.value, params)
+    nnx.update(jax_model, params)
     hidden_states_jax = jnp.array(hidden_states_pt.numpy())
 
     @jax.jit
     def run_jax(x):
       """Runs the JAX Qwen3NextRMSNorm model."""
-      return jax_model.value(x)  # Call the module inside DataAttr
+      return jax_model(x)  # Call the module
 
     actual_output = run_jax(hidden_states_jax)
 
@@ -1047,17 +1048,50 @@ class TestQwen3Next(unittest.TestCase):
     with torch.no_grad():
       expected_output = pt_model(hidden_states_pt)
 
+    def reorder_pt_qkvz_to_jax(w, num_heads, head_k_dim, head_v_dim):
+      key_dim = num_heads * head_k_dim
+      value_dim = num_heads * head_v_dim
+      q, k, v, z = np.split(w, [key_dim, 2 * key_dim, 2 * key_dim + value_dim], axis=0)
+      jax_heads = []
+      for i in range(num_heads):
+        head_i = np.concatenate(
+            [
+                q[i * head_k_dim : (i + 1) * head_k_dim],
+                k[i * head_k_dim : (i + 1) * head_k_dim],
+                v[i * head_v_dim : (i + 1) * head_v_dim],
+                z[i * head_v_dim : (i + 1) * head_v_dim],
+            ],
+            axis=0,
+        )
+        jax_heads.append(head_i)
+      return np.concatenate(jax_heads, axis=0)
+
+    def reorder_pt_ba_to_jax(w, num_heads):
+      b, a = np.split(w, 2, axis=0)
+      jax_heads = []
+      for i in range(num_heads):
+        head_i = np.concatenate([b[i : i + 1], a[i : i + 1]], axis=0)
+        jax_heads.append(head_i)
+      return np.concatenate(jax_heads, axis=0)
+
     # 2. Setup JAX model and map weights
-    jax_model = qwen3.Qwen3NextGatedDeltaNet(config=self.cfg, rngs=self.nnx_rngs)
+    jax_model = qwen3.Qwen3NextGatedDeltaNet(config=self.cfg, mesh=self.mesh, rngs=self.nnx_rngs)
+    assert jax_model.num_k_heads == jax_model.num_v_heads
 
     conv1d_weight_pt = pt_model.conv1d.weight.detach().numpy()
     # Transpose PT (out, in/groups, kw) -> JAX (kw, in/groups, out)
     # For depthwise, out=in=groups, so PT=(C, 1, kw) -> JAX=(kw, 1, C)
     conv1d_weight_jax = np.transpose(conv1d_weight_pt, (2, 1, 0))
 
+    w_qkvz_pt = pt_model.in_proj_qkvz.weight.detach().numpy()
+    w_qkvz_jax = reorder_pt_qkvz_to_jax(w_qkvz_pt, jax_model.num_v_heads, jax_model.head_k_dim, jax_model.head_v_dim)
+
+    w_ba_pt = pt_model.in_proj_ba.weight.detach().numpy()
+    w_ba_jax = reorder_pt_ba_to_jax(w_ba_pt, jax_model.num_v_heads)
+
     params = {
-        "in_proj_qkvz": {"kernel": nnx.Param(jnp.array(pt_model.in_proj_qkvz.weight.T.detach().numpy()))},
-        "in_proj_ba": {"kernel": nnx.Param(jnp.array(pt_model.in_proj_ba.weight.T.detach().numpy()))},
+        "in_proj_qkvz": {"kernel": nnx.Param(jnp.array(w_qkvz_jax.T))},
+        "in_proj_ba": {"kernel": nnx.Param(jnp.array(w_ba_jax.T))},
         "conv1d": {"kernel": nnx.Param(jnp.array(conv1d_weight_jax))},
         "A_log": nnx.Param(jnp.array(pt_model.A_log.detach().numpy())),
         "dt_bias": nnx.Param(jnp.array(pt_model.dt_bias.detach().numpy())),
@@ -1070,7 +1104,8 @@ class TestQwen3Next(unittest.TestCase):
     @jax.jit
     def run_jax(x):
       """Runs the JAX GatedDeltaNet model."""
-      return jax_model(x)
+      output, _ = jax_model(x)
+      return output
 
     actual_output = run_jax(hidden_states_jax)
 
@@ -1242,13 +1277,14 @@ class TestQwen3Next(unittest.TestCase):
     # 8. Run JAX Model
     @jax.jit
     def run_jax(inputs, segment_ids, positions):
-      return jax_model(
+      output, _ = jax_model(
           inputs,
           decoder_segment_ids=segment_ids,
           decoder_positions=positions,
           deterministic=True,
           model_mode="train",
       )
+      return output
 
     jax_output = run_jax(hidden_states_jax, decoder_segment_ids_jax, decoder_positions_jax)
 
