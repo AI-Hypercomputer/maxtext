@@ -632,7 +632,7 @@ ici_autoregressive_parallelism: 1
 ici_pipeline_parallelism: 1
 ici_expert_parallelism: 1
 
-# Enabling check_vma is recommended for improved performance. Only supported for EP / FSDP ICI parallelisms, shard_mode: "auto", use_ragged_sort: False, use_ring_of_experts: False, and use_tokamax_gmm=False.
+# Enabling check_vma is recommended for improved performance. Only supported for EP / FSDP ICI parallelisms, shard_mode: "auto", use_ragged_sort: False, and use_tokamax_gmm=False.
 check_vma: False
 
 # Enable ZeRO-1 optimizer sharding over data axis
