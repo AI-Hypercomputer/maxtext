@@ -30,7 +30,7 @@ This is the fastest way to run MaxText python notebooks without managing infrast
 **⚠️ IMPORTANT NOTE ⚠️**
 The free tier of Google Colab provides access to `v5e-1 TPU`, but this access is not guaranteed and is subject to availability and usage limits.
 
-Currently, this method only supports the **`sft_qwen3_demo.ipynb`** notebook, which demonstrates Qwen3-0.6B SFT training and evaluation on [OpenAI's GSM8K dataset](https://huggingface.co/datasets/openai/gsm8k). If you want to run other notebooks, please use the other methods below.
+Currently, this method supports the **`sft_qwen3_demo.ipynb`** and **`dpo_qwen3_demo.ipynb`** notebooks. If you want to run other notebooks, please use the other methods below.
 
 Before proceeding, please verify that the specific notebook you are running works reliably on the free-tier TPU resources. If you encounter frequent disconnections or resource limitations, you may need to:
 
@@ -185,6 +185,10 @@ jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root
 
 - **`sft_qwen3_demo.ipynb`** → Qwen3-0.6B SFT training and evaluation on [OpenAI's GSM8K dataset](https://huggingface.co/datasets/openai/gsm8k). This notebook is friendly for beginners and runs successfully on Google Colab's free-tier v5e-1 TPU runtime.
 - **`sft_llama3_demo_tpu.ipynb`** → Llama3.1-8B SFT training on [Hugging Face ultrachat_200k dataset](https://huggingface.co/datasets/HuggingFaceH4/ultrachat_200k). We recommend running this on a v5p-8 TPU VM using [Method 2](#method-2-visual-studio-code-with-tpu-recommended) or [Method 3](#method-3-local-jupyter-lab-with-tpu-recommended).
+
+### Preference Optimization (DPO & ORPO) Training
+
+- **`dpo_qwen3_demo.ipynb`** → Direct Preference Optimization (DPO) and Odds Ratio Preference Optimization (ORPO) training on [Hugging Face argilla/distilabel-intel-orca-dpo-pairs dataset](https://huggingface.co/datasets/argilla/distilabel-intel-orca-dpo-pairs). Friendly for beginners and runs successfully on single-host TPU environments. Includes a dropdown parameter toggle for switching between algorithms.
 
 ### Reinforcement Learning (GRPO/GSPO) Training
 
