@@ -57,6 +57,21 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
+def concat(args, axis=0):
+  if any(isinstance(x, jax.Array) for x in args):
+    return jnp.concatenate(args, axis=axis)
+  return np.concatenate(args, axis=axis)
+
+def stack(args, axis=0):
+  if any(isinstance(x, jax.Array) for x in args):
+    return jnp.stack(args, axis=axis)
+  return np.stack(args, axis=axis)
+
+def split(arr, num_or_size_splits, axis=0):
+  if isinstance(arr, jax.Array):
+    return jnp.split(arr, num_or_size_splits, axis=axis)
+  return np.split(arr, num_or_size_splits, axis=axis)
+
 
 def GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
   """Generates a parameter mapping from MaxText to Hugging Face for Gemma3.
@@ -1155,21 +1170,21 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
       # input_tensor is a tuple of the two extracted MaxText arrays: (wi_0, wi_1)
       wi_0, wi_1 = input_tensor
       # Concatenate them along the final feature dimension
-      gate_up = np.concatenate([wi_0, wi_1], axis=-1)
+      gate_up = concat([wi_0, wi_1], axis=-1)
       # Transpose to match Hugging Face's expected layout: (experts, 2 * out_features, in_features)
       return gate_up.swapaxes(-1, -2)
     else:
       # 2. HF -> MaxText (Splitting)
       # input_tensor is the massive HF gate_up_proj. Shape: (..., out, in)
       # Split into gate and up along the output dimension (axis=-2 for transposed shape logic)
-      gate, up = np.split(input_tensor, 2, axis=-2)
+      gate, up = split(input_tensor, 2, axis=-2)
 
       # Swap the last two dimensions
       gate = gate.swapaxes(-1, -2)
       up = up.swapaxes(-1, -2)
 
       # Stack them along a new final dimension so the base conversion script can iterate and split them
-      return np.stack([gate, up], axis=-1)
+      return stack([gate, up], axis=-1)
 
   text_cfg = config.get("text_config", config)
   H_k = text_cfg["linear_num_key_heads"]
@@ -1194,7 +1209,7 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
       v = v_r.reshape(H_v * D_v, -1)
       z = z_r.reshape(H_v * D_v, -1)
 
-      qkv = np.concatenate([q, k, v], axis=0)
+      qkv = concat([q, k, v], axis=0)
       return qkv, z
     else:
       qkv_m, z_m = input_tensor
@@ -1213,7 +1228,7 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
       z_r = z_m.reshape(H_k, V_per_K * D_v, -1)
 
       # Concat along the feature dim (axis 1) so they are interleaved per Key-head
-      interleaved = np.concatenate([q_r, k_r, v_r, z_r], axis=1)
+      interleaved = concat([q_r, k_r, v_r, z_r], axis=1)
       return interleaved.reshape(-1, qkv_m.shape[-1]).T
 
   def concat_ba_and_transpose(input_tensor, target_shape=None):
@@ -1232,7 +1247,7 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
       b_m, a_m = input_tensor
       b_r = b_m.reshape(H_k, V_per_K, -1)
       a_r = a_m.reshape(H_k, V_per_K, -1)
-      interleaved = np.concatenate([b_r, a_r], axis=1)
+      interleaved = concat([b_r, a_r], axis=1)
       return interleaved.reshape(-1, b_m.shape[-1]).T
 
   # Initialize Hooks
@@ -1924,7 +1939,7 @@ def GPT_OSS_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, savin
       wi_0_1 = input_tensor
       wi_0 = wi_0_1[..., ::2]
       wi_1 = wi_0_1[..., 1::2]
-      return np.stack([wi_0, wi_1], axis=-1)
+      return stack([wi_0, wi_1], axis=-1)
 
   n_layers = config["num_hidden_layers"]  # hf config
   layer_cycle_interval = maxtext_config.inhomogeneous_layer_cycle_interval
@@ -2489,13 +2504,13 @@ def LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
       # Convert from MaxText's interleaved layout to HF's concatenated layout
       evens = arr[..., ::2]
       odds = arr[..., 1::2]
-      return jax.numpy.concatenate((evens, odds), axis=arr.ndim - 1)
+      return concat((evens, odds), axis=arr.ndim - 1)
     else:
       # Convert from HF's concatenated layout to MaxText's interleaved layout
       half_dim = arr.shape[-1] // 2
       first_half = arr[..., :half_dim]
       second_half = arr[..., half_dim:]
-      return jax.numpy.stack([first_half, second_half], axis=-1).reshape(arr.shape)
+      return stack([first_half, second_half], axis=-1).reshape(arr.shape)
 
   def reshape_kernel(input_tensor, target_shape):
     if saving_to_hf:

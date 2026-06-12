@@ -1496,6 +1496,7 @@ def setup_initial_state(
         checkpoint_conversion_fn=config.checkpoint_conversion_fn,
         source_checkpoint_layout=config.source_checkpoint_layout,
         expansion_factor_real_data=config.expansion_factor_real_data,
+        config=config,
     )
 
     if restored:
