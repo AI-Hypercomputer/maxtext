@@ -295,12 +295,15 @@ def setup_train_loop(config, recorder, devices=None):
         state, outer_opt_state_sharding = diloco.build_diloco_state(config, lambda: state, mesh=mesh)
 
         # create state_mesh_shardings for the DilocoState
+        step_mesh = state_mesh_shardings.optimizer.step.mesh if config.pure_nnx else state_mesh_shardings.step.mesh
         inner_state_shardings = diloco.add_diloco_to_sharding(state_mesh_shardings)
         state_mesh_shardings = diloco.DiLoCoTrainState(
             inner_state_shardings,
-            state_mesh_shardings.params,
+            # Match the outer params' pure-dict structure (build_diloco_state stores
+            # outer_params via to_pure_dict), so the sharding tree matches the state tree.
+            state_mesh_shardings_params.to_pure_dict() if config.pure_nnx else state_mesh_shardings_params,
             outer_opt_state_sharding,
-            jax.sharding.NamedSharding(mesh=state_mesh_shardings.step.mesh, spec=jax.sharding.PartitionSpec()),
+            jax.sharding.NamedSharding(mesh=step_mesh, spec=jax.sharding.PartitionSpec()),
         )
 
     # TODO(aireenmei, hengtaoguo): support sharding in vit for multimodal
@@ -322,8 +325,16 @@ def setup_train_loop(config, recorder, devices=None):
       maxtext_utils.print_shardings_params(state_params, state_mesh_shardings_params, mesh, logical_annotations_params)
 
   if config.pure_nnx:
-    train_state = nnx.merge(state_graphdef, state)
-    model = train_state.model
+    if config.enable_diloco:
+      # `state` is a DiLoCoTrainState whose inner_state holds the broadcast
+      # TrainStateNNX. Don't merge it into the plain-model graphdef. The inner
+      # train step needs that graphdef, so surface it as `model`: train_loop
+      # uses it as jit_model and feeds the DiLoCoTrainState through as state.
+      train_state = state
+      model = state_graphdef
+    else:
+      train_state = nnx.merge(state_graphdef, state)
+      model = train_state.model
   else:
     train_state = state
 
