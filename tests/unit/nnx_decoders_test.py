@@ -23,6 +23,7 @@ Tests cover:
 
 import sys
 import unittest
+import pytest
 
 import jax
 import jax.numpy as jnp
@@ -747,6 +748,7 @@ class TestNNXDecoderDeepseekAndGemma4(unittest.TestCase):
         decoder_block="gemma4",
         scan_layers=True,
         num_decoder_layers=3,  # Not a multiple of the pattern length (which is usually larger) to test remainder logic
+        vocab_size=256,
     )
     decoder = NNXDecoder(
         config=cfg,
@@ -769,3 +771,183 @@ class TestNNXDecoderDeepseekAndGemma4(unittest.TestCase):
         logits.shape,
         (cfg.global_batch_size_to_train_on, cfg.max_target_length, cfg.vocab_size),
     )
+
+
+@pytest.mark.tpu_only
+class TestGemma4SmallNNXDecoder(unittest.TestCase):
+  """Unit tests for Gemma4 Small NNXDecoder to improve code coverage."""
+
+  def test_gemma4_small_decoder(self):
+    cfg = pyconfig.initialize(
+        [
+            None,
+            get_test_config_path(),
+            "run_name=gemma4_small_test",
+            "decoder_block=gemma4_small",
+            "model_name=gemma4-e2b",
+            "scan_layers=False",
+            "attention=dot_product",
+            "num_decoder_layers=3",
+            "num_kv_shared_layers=1",
+            "base_emb_dim=128",
+            "base_num_query_heads=4",
+            "base_num_kv_heads=4",
+            "base_mlp_dim=256",
+            "dtype=float32",
+            "weight_dtype=float32",
+            "vocab_size=256",
+        ],
+        override_model_config=True,
+    )
+
+    devices = np.array(jax.devices())
+    num_devices = len(devices)
+    mesh_shape = [1] * len(cfg.mesh_axes)
+    mesh_shape[cfg.mesh_axes.index("data")] = num_devices
+    mesh = Mesh(devices.reshape(mesh_shape), cfg.mesh_axes)
+
+    rngs = nnx.Rngs(params=0, dropout=1)
+    decoder = NNXDecoder(
+        config=cfg,
+        mesh=mesh,
+        model_mode=MODEL_MODE_TRAIN,
+        rngs=rngs,
+    )
+
+    # Inputs
+    batch = cfg.global_batch_size_to_train_on
+    seq_len = cfg.max_target_length
+    ids = jax.random.randint(jax.random.PRNGKey(0), (batch, seq_len), 0, cfg.vocab_size)
+    segment_ids = jnp.full((batch, seq_len), DECODING_ACTIVE_SEQUENCE_INDICATOR)
+    positions = jnp.broadcast_to(jnp.arange(seq_len)[None], (batch, seq_len))
+
+    shared_embedding = Embed(
+        num_embeddings=cfg.vocab_size,
+        num_features=cfg.emb_dim,
+        dtype=cfg.dtype,
+        embedding_init=jax.nn.initializers.normal(stddev=1.0),
+        config=cfg,
+        mesh=mesh,
+        rngs=rngs,
+    )
+
+    logits, _, _ = decoder(
+        shared_embedding,
+        ids,
+        positions,
+        decoder_segment_ids=segment_ids,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+
+    self.assertEqual(
+        logits.shape,
+        (cfg.global_batch_size_to_train_on, cfg.max_target_length, cfg.vocab_size),
+    )
+
+  def test_gemma4_small_decoder_with_mock_cache_and_ple(self):
+    # pylint: disable=import-outside-toplevel
+    from unittest.mock import MagicMock, patch
+
+    cfg = pyconfig.initialize(
+        [
+            None,
+            get_test_config_path(),
+            "run_name=gemma4_small_test",
+            "decoder_block=gemma4_small",
+            "model_name=gemma4-e2b",
+            "scan_layers=False",
+            "attention=dot_product",
+            "num_decoder_layers=3",
+            "num_kv_shared_layers=1",
+            "base_emb_dim=128",
+            "base_num_query_heads=4",
+            "base_num_kv_heads=4",
+            "base_mlp_dim=256",
+            "dtype=float32",
+            "weight_dtype=float32",
+            "hidden_size_per_layer_input=128",
+            "vocab_size_per_layer_input=256",
+            "vocab_size=256",
+        ],
+        override_model_config=True,
+    )
+
+    devices = np.array(jax.devices())
+    num_devices = len(devices)
+    mesh_shape = [1] * len(cfg.mesh_axes)
+    mesh_shape[cfg.mesh_axes.index("data")] = num_devices
+    mesh = Mesh(devices.reshape(mesh_shape), cfg.mesh_axes)
+
+    rngs = nnx.Rngs(params=0, dropout=1)
+    decoder = NNXDecoder(
+        config=cfg,
+        mesh=mesh,
+        model_mode=MODEL_MODE_TRAIN,
+        rngs=rngs,
+    )
+
+    # Mock each layer's compute_shared_kv
+    for layer in decoder.layers:
+      layer.compute_shared_kv = MagicMock(return_value=(jnp.zeros((1, 16, 128)), jnp.zeros((1, 16, 128))))
+
+    # Inputs
+    batch = cfg.global_batch_size_to_train_on
+    seq_len = cfg.max_target_length
+    ids = jax.random.randint(jax.random.PRNGKey(0), (batch, seq_len), 0, cfg.vocab_size)
+    segment_ids = jnp.full((batch, seq_len), DECODING_ACTIVE_SEQUENCE_INDICATOR)
+    positions = jnp.broadcast_to(jnp.arange(seq_len)[None], (batch, seq_len))
+
+    shared_embedding = Embed(
+        num_embeddings=cfg.vocab_size,
+        num_features=cfg.emb_dim,
+        dtype=cfg.dtype,
+        embedding_init=jax.nn.initializers.normal(stddev=1.0),
+        config=cfg,
+        mesh=mesh,
+        rngs=rngs,
+    )
+
+    # Pass in kv_caches list to be populated
+    from maxtext.models import gemma4_small
+
+    layer_types = gemma4_small.build_layer_types(cfg.num_decoder_layers, cfg.model_name)
+    cache_index_of = gemma4_small.kv_cache_slot_map(layer_types, cfg.num_kv_shared_layers)
+    max_slot = max(cache_index_of.values())
+    kv_caches = [f"initial_cache_{i}" for i in range(max_slot + 1)]
+
+    with patch(
+        "maxtext.models.gemma4_small.Gemma4SmallDecoderLayer.__call__",
+        return_value=(jnp.zeros((1, 16, 128)), "mock_kv_cache"),
+    ):
+      _, _, updated_caches = decoder(
+          shared_embedding,
+          ids,
+          positions,
+          decoder_segment_ids=segment_ids,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+          kv_caches=kv_caches,
+      )
+
+      # Verify that the mocked kv_caches were correctly updated
+      self.assertEqual(updated_caches, ["mock_kv_cache"] * len(kv_caches))
+
+      # Test RuntimeError branch coverage
+      with self.assertRaises(RuntimeError):
+
+        def mock_donor_idx(lyr, layer_types, num_kv_shared):
+          if lyr == 2:
+            return 0
+          return gemma4_small.kv_donor_layer_idx(lyr, layer_types, num_kv_shared)
+
+        with patch("maxtext.models.gemma4_small.kv_donor_layer_idx", side_effect=mock_donor_idx):
+          decoder(
+              shared_embedding,
+              ids,
+              positions,
+              decoder_segment_ids=segment_ids,
+              deterministic=True,
+              model_mode=MODEL_MODE_TRAIN,
+              kv_caches=kv_caches,
+          )

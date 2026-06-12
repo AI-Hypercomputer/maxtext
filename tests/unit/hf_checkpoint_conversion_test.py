@@ -169,5 +169,91 @@ class HFToMaxTextLoRAConversionTest(unittest.TestCase):
     self.assertEqual(stacked[1, 0, 0], 2.0)
 
 
+class ParamKeyPartsFromPathTest(unittest.TestCase):
+  """Tests param_key_parts_from_path with different path tuple entries."""
+
+  def test_param_key_parts_from_path(self):
+    # pylint: disable=import-outside-toplevel
+    from maxtext.checkpoint_conversion.utils.utils import param_key_parts_from_path
+
+    # Mock JAX/NNX path key components
+    class MockDictKey:
+
+      def __init__(self, key):
+        self.key = key
+
+    class MockSequenceKey:
+
+      def __init__(self, idx):
+        self.idx = idx
+
+    class MockGetAttrKey:
+
+      def __init__(self, name):
+        self.name = name
+
+    # Test basic string path keys
+    path = (
+        MockDictKey("decoder"),
+        MockGetAttrKey("layers"),
+        MockSequenceKey(0),
+        MockDictKey("kernel"),
+        MockDictKey("value"),
+    )
+    result = param_key_parts_from_path(path)
+    self.assertEqual(result, ["decoder", "layers_0", "kernel"])
+
+    # Test pure string path
+    path = ("decoder", "layers", "kernel")
+    result = param_key_parts_from_path(path)
+    self.assertEqual(result, ["decoder", "layers", "kernel"])
+
+    # Test trailing value segment dropped
+    path = ("decoder", "layers", "kernel", "value")
+    result = param_key_parts_from_path(path)
+    self.assertEqual(result, ["decoder", "layers", "kernel"])
+
+    # Test numeric string round-trip folding
+    path = ("decoder", "layers", "0", "kernel")
+    result = param_key_parts_from_path(path)
+    self.assertEqual(result, ["decoder", "layers_0", "kernel"])
+
+  def test_get_maxtext_model_info(self):
+    # pylint: disable=import-outside-toplevel
+    from maxtext.configs import pyconfig
+    from tests.utils.test_helpers import get_test_config_path
+    from maxtext.checkpoint_conversion.to_maxtext import get_maxtext_model_info
+
+    # Initialize a small test config
+    cfg = pyconfig.initialize(
+        [
+            None,
+            get_test_config_path(),
+            "run_name=gemma4_small_test",
+            "decoder_block=gemma4_small",
+            "model_name=gemma4-e2b",
+            "scan_layers=False",
+            "attention=dot_product",
+            "num_decoder_layers=2",
+            "num_kv_shared_layers=1",
+            "base_emb_dim=128",
+            "base_num_query_heads=4",
+            "base_num_kv_heads=4",
+            "base_mlp_dim=256",
+            "dtype=float32",
+            "weight_dtype=float32",
+            "hidden_size_per_layer_input=128",
+            "vocab_size_per_layer_input=256",
+            "vocab_size=256",
+        ],
+        override_model_config=True,
+    )
+
+    model_info, treedef = get_maxtext_model_info(cfg)
+    self.assertIsNotNone(model_info)
+    self.assertIsNotNone(treedef)
+    self.assertTrue(any("decoder" in k for k in model_info))
+
+
 if __name__ == "__main__":
   unittest.main()
