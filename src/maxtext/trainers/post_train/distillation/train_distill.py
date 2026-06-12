@@ -274,6 +274,35 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
       # Fallback if source code is unavailable
       pass
 
+  def train(self, train_ds, eval_ds=None, *args, **kwargs):
+    """Trains exactly `config.max_steps` steps via the data stream.
+
+    Tunix makes externally managed trainers terminate on data
+    exhaustion only. We reinstate the max_steps stop as a stop condition
+    evaluated against the live train_steps count.
+    """
+    max_steps = self.config.max_steps
+    if max_steps is None:
+      return super().train(train_ds, eval_ds, *args, **kwargs)
+
+    if getattr(self, "data_hooks", None) is not None:
+      raise ValueError(
+          "data_hooks bypass the training iterator, preventing the step-based"
+          " stop condition from being evaluated. Configure the boundary limits"
+          " directly within the data hook instead."
+      )
+    bounded = distillation_utils.BoundedIterator(
+        train_ds, lambda: self.train_steps >= max_steps
+    )
+    result = super().train(bounded, eval_ds, *args, **kwargs)
+
+    if self.train_steps < max_steps:
+      raise RuntimeError(
+          f"Training ended after {self.train_steps}/{max_steps} steps: data"
+          " stream exhausted early."
+      )
+    return result
+
   # Inherits _shard_optimizer from PeftTrainer.
 
   def _train_step(self, model, optimizer, inputs):
