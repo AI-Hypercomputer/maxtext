@@ -279,7 +279,8 @@ def setup_train_loop(config, recorder, devices=None):
     if config.pure_nnx:
       with nn_partitioning.axis_rules(config.logical_axis_rules):
         # train_state is instance of TrainStateNNX
-        state_graphdef, _ = nnx.get_abstract_model(init_state_fn, mesh)
+        abs_model = nnx.eval_shape(init_state_fn)
+        state_graphdef, _ = nnx.split(abs_model)
         _, state_params, _ = nnx.split(state.model, nnx.Param, ...)
         _, state_mesh_shardings_params, _ = nnx.split(state_mesh_shardings.model, nnx.Param, ...)
     else:
