@@ -19,7 +19,6 @@
 import io
 import contextlib
 import unittest
-from unittest import mock
 
 import jax
 import jax.numpy as jnp
@@ -150,9 +149,9 @@ class TestGetMuonWeightDimensionNumbersNNX(unittest.TestCase):
     # NNX Variables are walked by jax.tree_util.tree_map_with_path, so the returned
     # tree replaces each Variable's value with transform_logic(path_strings).
     # 'scale' matches the exclusion branch → value is None.
-    self.assertIsNone(result["scale"].get_value())
+    self.assertIsNone(result["scale"])
     # 'w_standard' does not trigger any special rule → standard mdn.
-    self.assertEqual(result["w_standard"].get_value(), mdn((0,), (-1,)))
+    self.assertEqual(result["w_standard"], mdn((0,), (-1,)))
 
   def test_nnx_verbose_path_executes_print_debug(self):
     """verbose=True should also execute _print_structure_debug without raising."""
@@ -161,37 +160,6 @@ class TestGetMuonWeightDimensionNumbersNNX(unittest.TestCase):
       muon_utils.get_muon_weight_dimension_numbers(self.model, config=None, verbose=True)
     self.assertIn("Model Structure", buf.getvalue())
     self.assertIn("Muon Dimension Numbers", buf.getvalue())
-
-
-class TestGetMuonWeightDimensionNumbersLinen(unittest.TestCase):
-  """Covers the Linen branch of get_muon_weight_dimension_numbers."""
-
-  def test_linen_branch_uses_get_abstract_param(self):
-    """Linen models dispatch to maxtext_utils.get_abstract_param + get_transform_tree."""
-    # Build a Linen nn.Module so isinstance(model, nnx.Module) is False.
-
-    class LinenStub(nn.Module):
-
-      @nn.compact
-      def __call__(self, x):
-        return x
-
-    model = LinenStub()
-
-    # Mock the heavy get_abstract_param call with a pre-shaped dict that exercises
-    # both a standard weight path and an excluded path.
-    fake_abstract_param = {
-        "params": {
-            "self_attention": {"out": object()},
-            "norm": {"scale": object()},
-        },
-    }
-
-    with mock.patch.object(muon_utils.maxtext_utils, "get_abstract_param", return_value=fake_abstract_param):
-      result = muon_utils.get_muon_weight_dimension_numbers(model, config=mock.MagicMock())
-
-    self.assertEqual(result["params"]["self_attention"]["out"], mdn((0, -2), (-1,)))
-    self.assertIsNone(result["params"]["norm"]["scale"])
 
 
 class TestPrintStructureDebug(unittest.TestCase):

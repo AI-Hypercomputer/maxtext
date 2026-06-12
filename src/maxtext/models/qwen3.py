@@ -45,7 +45,8 @@ from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.layers.attentions import Attention
 from maxtext.layers.linears import DenseGeneral, MlpBlock
 from maxtext.layers.moe import RoutedMoE
-from maxtext.layers.initializers import nd_dense_init, variable_to_logically_partitioned
+from maxtext.layers.initializers import nd_dense_init
+
 from maxtext.utils import max_utils
 from maxtext.inference import kvcache
 
@@ -2157,29 +2158,6 @@ class Qwen3OmniMoeVisionProjector(nnx.Module):
     return output
 
 
-def qwen3omni_visionencoder_as_linen(config: Config, mesh: Mesh) -> nn.Module:
-  """Convert Qwen3OmniMoeVisionEncoder to Linen module."""
-  return nnx_wrappers.to_linen(
-      Qwen3OmniMoeVisionEncoder,
-      config=config,
-      mesh=mesh,
-      name="Qwen3OmniMoeVisionEncoder_0",
-      abstract_init=False,
-      metadata_fn=max_initializers.variable_to_logically_partitioned,
-  )
-
-
-def qwen3omni_visionprojector_as_linen(config: Config, mesh: Mesh) -> nn.Module:
-  """Convert Qwen3OmniMoeVisionProjector to Linen module."""
-  return nnx_wrappers.to_linen(
-      Qwen3OmniMoeVisionProjector,
-      config=config,
-      name="Qwen3OmniMoeVisionProjector_0",
-      abstract_init=False,
-      metadata_fn=max_initializers.variable_to_logically_partitioned,
-  )
-
-
 class Qwen3OmniAudioEncoderLayer(nnx.Module):
   """Transformer encoder layer for audio model."""
 
@@ -2475,29 +2453,6 @@ class Qwen3OmniAudioProjector(nnx.Module):
     hidden_states = jax.nn.gelu(hidden_states)
     hidden_states = self.proj2(hidden_states)
     return hidden_states
-
-
-def qwen3omni_audioencoder_as_linen(config: Config, mesh: Mesh):
-  """Convert AudioEncoder (convs + transformer layers, no projector) to Linen module."""
-  return nnx_wrappers.to_linen(
-      Qwen3OmniAudioEncoder,
-      config=config,
-      mesh=mesh,
-      name="Qwen3OmniAudioEncoder_0",
-      abstract_init=False,
-      metadata_fn=variable_to_logically_partitioned,
-  )
-
-
-def qwen3omni_audioprojector_as_linen(config: Config, mesh: Mesh):
-  """Convert AudioProjector to Linen module."""
-  return nnx_wrappers.to_linen(
-      Qwen3OmniAudioProjector,
-      config=config,
-      name="Qwen3OmniAudioProjector_0",
-      abstract_init=False,
-      metadata_fn=variable_to_logically_partitioned,
-  )
 
 
 # Vision encoder Linen wrappers

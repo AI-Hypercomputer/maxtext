@@ -256,9 +256,7 @@ def pathways_reshard_nnx(
     destination_shardings_model: Shardings for the inference-side model.
   """
   if not config.scan_layers:
-    raise NotImplementedError(
-        "GRPO + pure_nnx + scan_layers=False not supported yet. " "Use scan_layers=True or pure_nnx=False."
-    )
+    raise NotImplementedError("GRPO with scan_layers=False is not supported yet. Use scan_layers=True.")
   policy_params = nnx.state(policy_state_model, nnx.Param)
   source_param_shardings = nnx.state(source_shardings_model, nnx.Param)
   dest_param_shardings = nnx.state(destination_shardings_model, nnx.Param)

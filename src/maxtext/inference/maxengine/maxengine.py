@@ -31,18 +31,14 @@ if jax.__version_info__ >= (0, 6, 3):
 else:
   from jax.experimental.layout import DeviceLocalLayout as DLL  # type: ignore
 
-from flax import linen as nn
 from flax import nnx
 from flax import struct
 from flax.linen import partitioning as nn_partitioning
-import flax
 
 from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_PKG_DIR
-from maxtext.models import models
 from maxtext.layers import quantizations
 from maxtext.inference import inference_utils
-from maxtext.multimodal import processor as mm_processor
 from maxtext.utils import lora_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
@@ -116,40 +112,35 @@ class MaxEngine(_BaseEngine):
 
     # Model and Optimizer definition.
     quant = quantizations.configure_quantization(config)
-    if config.pure_nnx:
-      # `serve` only when the on-disk checkpoint already carries `qrhs.frozen`
-      # (no full-precision kernel). For `checkpoint_is_quantized=False` with
-      # quant enabled we stay in `train` mode and let AQT quantize per-forward
-      # against the full-precision kernel — same numerical result as `serve`
-      # for absmax calibration, just slower.
-      nnx_quant_mode_str = "serve" if (quant is not None and config.checkpoint_is_quantized) else "train"
-      # We need both PREFILL and AR abstract models because the cache vars inherit
-      # CACHE_BATCH_PREFILL vs CACHE_BATCH from the construction model_mode, and
-      # bulk_insert searches for the substring "cache_batch" in the AR-mode names.
-      # Calling nnx.eval_shape directly (instead of create_nnx_abstract_model) avoids
-      # the jax.set_mesh wrap that trips Flax 0.12.6 on logical-only axes like "norm".
-      _create_model = model_creation_utils.get_nnx_create_model_fn(
-          config, mesh=self._mesh, model_mode=MODEL_MODE_PREFILL, quant_mode_str=nnx_quant_mode_str
-      )
-      _create_model_ar = model_creation_utils.get_nnx_create_model_fn(
-          config, mesh=self._mesh, model_mode=MODEL_MODE_AUTOREGRESSIVE, quant_mode_str=nnx_quant_mode_str
-      )
-      self._nnx_quant_mode_str = nnx_quant_mode_str
-      with nn_partitioning.axis_rules(config.logical_axis_rules):
-        abstract_model = nnx.eval_shape(_create_model)
-        abstract_model_ar = nnx.eval_shape(_create_model_ar)
-      self.model = abstract_model
-      self.model_ar = abstract_model_ar
-      # 3-way split so JIT bodies can pass (params, cache, rest) separately to
-      # nnx.merge. `rest` (RNG state etc.) is materialized in load_params.
-      graphdef, _, _, _ = nnx.split(abstract_model, nnx.Param, nnx.Cache, ...)
-      self.graphdef = graphdef
-      self._create_model_fn = _create_model
-      self._nnx_rest_state = None
-    else:
-      self.model = models.transformer_as_linen(config, mesh=self._mesh, quant=quant, model_mode=MODEL_MODE_PREFILL)
-      self.graphdef = None
-      self._create_model_fn = None
+    # `serve` only when the on-disk checkpoint already carries `qrhs.frozen`
+    # (no full-precision kernel). For `checkpoint_is_quantized=False` with
+    # quant enabled we stay in `train` mode and let AQT quantize per-forward
+    # against the full-precision kernel — same numerical result as `serve`
+    # for absmax calibration, just slower.
+    nnx_quant_mode_str = "serve" if (quant is not None and config.checkpoint_is_quantized) else "train"
+    # We need both PREFILL and AR abstract models because the cache vars inherit
+    # CACHE_BATCH_PREFILL vs CACHE_BATCH from the construction model_mode, and
+    # bulk_insert searches for the substring "cache_batch" in the AR-mode names.
+    # Calling nnx.eval_shape directly (instead of create_nnx_abstract_model) avoids
+    # the jax.set_mesh wrap that trips Flax 0.12.6 on logical-only axes like "norm".
+    _create_model = model_creation_utils.get_nnx_create_model_fn(
+        config, mesh=self._mesh, model_mode=MODEL_MODE_PREFILL, quant_mode_str=nnx_quant_mode_str
+    )
+    _create_model_ar = model_creation_utils.get_nnx_create_model_fn(
+        config, mesh=self._mesh, model_mode=MODEL_MODE_AUTOREGRESSIVE, quant_mode_str=nnx_quant_mode_str
+    )
+    self._nnx_quant_mode_str = nnx_quant_mode_str
+    with nn_partitioning.axis_rules(config.logical_axis_rules):
+      abstract_model = nnx.eval_shape(_create_model)
+      abstract_model_ar = nnx.eval_shape(_create_model_ar)
+    self.model = abstract_model
+    self.model_ar = abstract_model_ar
+    # 3-way split so JIT bodies can pass (params, cache, rest) separately to
+    # nnx.merge. `rest` (RNG state etc.) is materialized in load_params.
+    graphdef, _, _, _ = nnx.split(abstract_model, nnx.Param, nnx.Cache, ...)
+    self.graphdef = graphdef
+    self._create_model_fn = _create_model
+    self._nnx_rest_state = None
     self.replicated_sharding = jax.sharding.NamedSharding(self._mesh, P(None))
 
     self.abstract_params = None
@@ -320,65 +311,7 @@ class MaxEngine(_BaseEngine):
     if rng is None:
       rng = jax.random.PRNGKey(0)
 
-    if self.config.pure_nnx:
-      return self._load_params_nnx(params=params, rng=rng)
-
-    if self.model.quant and self.config.checkpoint_is_quantized:
-      print("Loading from the quantized checkpoint...")
-      self.model.quant.quant_mode = quantizations.get_quant_mode("serve")
-
-    rng1, rng2, rng3 = jax.random.split(rng, 3)
-    if params:
-      print("Resharding given params")
-      init_state_fn = functools.partial(maxtext_utils.init_initial_state, self.model, None, self.config, False, rng)
-      _, self.state_mesh_annotations, state_mesh_shardings = maxtext_utils.get_abstract_state(
-          self.config, self._mesh, init_state_fn, False
-      )
-      # reshard given params based on shardings from config in MaxEngine
-      params = jax.device_put(params, state_mesh_shardings.params)
-      state = maxtext_utils.init_decode_state(None, params)
-      state = max_utils.unbox_logicallypartioned(state)
-    else:
-      init_state_fn = functools.partial(maxtext_utils.init_initial_state, self.model, None, self.config, False, rng1)
-      state, self.state_mesh_annotations = maxtext_utils.setup_decode_state(self.config, self._mesh, None, init_state_fn)
-    # pylint: disable=isinstance-second-argument-not-valid-type
-    self.abstract_params = jax.tree_util.tree_map(
-        lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding)
-        if isinstance(x, jax.Array)
-        else None,
-        state.params,
-    )
-
-    self.prefill_kv_cache_annotations = maxtext_utils.get_prefill_kv_cache_annotations(
-        self.model, self.config, rng2, self._mesh
-    )
-    self.prefill_kv_cache_shardings = jax.tree_util.tree_map(
-        lambda x: jax.sharding.NamedSharding(self._mesh, x),
-        self.prefill_kv_cache_annotations,
-    )
-
-    if self.config.stack_prefill_result_cache:
-      # Add extra axis for the axis generated by the stack.
-      self.prefill_kv_cache_shardings = jax.tree_util.tree_map(
-          lambda x: jax.sharding.NamedSharding(self._mesh, jax.sharding.PartitionSpec(None, *x.spec)),
-          self.prefill_kv_cache_shardings,
-      )
-      self.prefill_kv_cache_shardings = self.prefill_kv_cache_shardings["decoder"]["layers_0"]
-
-    self.kv_cache_annotations = maxtext_utils.get_kv_cache_annotations(self.model, self.config, rng2, self._mesh)
-    self.kv_cache_shardings = jax.tree_util.tree_map(
-        lambda x: jax.sharding.NamedSharding(self._mesh, x),
-        self.kv_cache_annotations,
-    )
-
-    if self.model.quant and not self.config.checkpoint_is_quantized:
-      params = self.quantize_params(state, rng3)
-    else:
-      params = state.params
-
-    self.print_stats("After load_params")
-
-    return params
+    return self._load_params_nnx(params=params, rng=rng)
 
   def _load_params_nnx(self, params, rng):
     """NNX equivalent of load_params: returns an nnx.Param state and populates KV cache shardings.
@@ -529,122 +462,57 @@ class MaxEngine(_BaseEngine):
 
     lora_rank = int(adapter_config["r"])
     lora_scale_factor = float(adapter_config["lora_alpha"]) / lora_rank
-    if self.config.pure_nnx:
-      lora_utils.apply_lora_on_base_params_nnx(base_params, adapter_params, lora_scale_factor)
-    else:
-      lora_utils.apply_lora_on_base_params(base_params, adapter_params, lora_scale_factor)
+    lora_utils.apply_lora_on_base_params_nnx(base_params, adapter_params, lora_scale_factor)
 
   def unapply_adapter(self, base_params, adapter_config, adapter_params):
     """Unapply the adapter params from the merged params to get back the base params."""
 
     lora_rank = int(adapter_config["r"])
     lora_scale_factor = float(adapter_config["lora_alpha"]) / lora_rank
-    if self.config.pure_nnx:
-      lora_utils.unapply_lora_from_base_params_nnx(base_params, adapter_params, lora_scale_factor)
-    else:
-      lora_utils.unapply_lora_from_base_params(base_params, adapter_params, lora_scale_factor)
+    lora_utils.unapply_lora_from_base_params_nnx(base_params, adapter_params, lora_scale_factor)
 
   def quantize_params(self, state, rng: PRNGKeyType | None = None):
     """Forward pass to quantize decode params."""
     if rng is None:
       rng = jax.random.PRNGKey(0)
-    if self.config.pure_nnx:
-      # NNX takes a different code path: convert-on-load lives in `_load_params_nnx`
-      # via `_convert_and_quantize_nnx`, which runs the dummy forward against a
-      # CONVERT-mode model and transfers `qrhs.frozen` into the SERVE model.
-      # The standalone `quantize_params(state, rng)` API expects a Linen-shape
-      # `state.params` dict and isn't reachable on the NNX pathway in maxengine
-      # (load_params already dispatched to _load_params_nnx).
-      raise NotImplementedError(
-          "Use load_params() on NNX — the convert step runs inside _load_params_nnx via "
-          "_convert_and_quantize_nnx. quantize_params(state, rng) is the Linen API."
-      )
-
-    self.model.quant.quant_mode = quantizations.get_quant_mode("convert")
-
-    @jax.jit
-    def model_apply(_p, _rng):
-      image_shape = mm_processor.get_dummy_image_shape_for_init(
-          model_name=self.config.model_name,
-          batch_size=self.config.micro_batch_size_to_train_on,
-      )
-      audio_shape = mm_processor.get_dummy_audio_shape_for_init(self.config)
-      return self.model.apply(
-          _p | {"aqt": {}},
-          jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
-          jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
-          encoder_images=jnp.ones(image_shape, dtype=jnp.float32) if self.config.use_multimodal else None,
-          # encoder_image_masks indicates valid tiles if image tiling + padding is used in vision encoder input.
-          encoder_image_masks=jnp.ones(image_shape[:2], dtype=jnp.int32)
-          if self.config.use_multimodal and "llama4" in self.config.model_name
-          else None,
-          encoder_audios=jnp.ones(audio_shape, dtype=jnp.float32) if self.config.use_audio else None,
-          decoder_segment_ids=jnp.zeros((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
-          enable_dropout=False,
-          model_mode=MODEL_MODE_PREFILL,
-          rngs={"params": _rng},
-          mutable=True,
-      )
-
-    _, new_vars = model_apply(state.params, rng)
-    # Remove param values which have corresponding qtensors in aqt to save memory.
-    params = {}
-    params["aqt"] = new_vars["aqt"]
-    params["params"] = quantizations.remove_quantized_params(state.params["params"], new_vars["aqt"])
-    self.abstract_params = jax.tree_util.tree_map(
-        lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding),
-        params,
+    # NNX takes a different code path: convert-on-load lives in `_load_params_nnx`
+    # via `_convert_and_quantize_nnx`, which runs the dummy forward against a
+    # CONVERT-mode model and transfers `qrhs.frozen` into the SERVE model.
+    # The standalone `quantize_params(state, rng)` API expects a Linen-shape
+    # `state.params` dict and isn't reachable on the NNX pathway in maxengine
+    # (load_params already dispatched to _load_params_nnx).
+    raise NotImplementedError(
+        "Use load_params() on NNX — the convert step runs inside _load_params_nnx via "
+        "_convert_and_quantize_nnx. quantize_params(state, rng) is the Linen API."
     )
-    maxtext_utils.save_quantized_checkpoint_if_configured(self.config, params)
-    self.model.quant.quant_mode = quantizations.get_quant_mode("serve")
-    return params
 
   def _maybe_stack_prefill_result_cache(self, cache):
     """Stack the caches across the layers."""
     if not self.config.stack_prefill_result_cache:
       return cache
 
-    if self.config.pure_nnx:
-      if self.config.scan_layers:
-        # scan_layers already stacks the per-layer KV cache on axis 0; nothing to restack.
-        return cache
-      # scan_layers=False: stack the per-layer subtrees under decoder/layers into one
-      # subtree with a leading layer axis (matching the scan_layers=True shape).
-      layers = cache["decoder"]["layers"]
-      stacked = jax.tree.map(lambda *c: jnp.stack(c), *[layers[i] for i in range(self.config.num_decoder_layers)])
-      return {"decoder": {"layers": stacked}}
-
-    layer_keys = []
-    for i in range(self.config.num_decoder_layers):
-      layer_keys.append(f"layers_{i}")
-
-    layer_cache = [cache["decoder"][layer_key] for layer_key in layer_keys]
-
-    return jax.tree.map(lambda *c: jnp.stack(c), *layer_cache)
+    if self.config.scan_layers:
+      # scan_layers already stacks the per-layer KV cache on axis 0; nothing to restack.
+      return cache
+    # scan_layers=False: stack the per-layer subtrees under decoder/layers into one
+    # subtree with a leading layer axis (matching the scan_layers=True shape).
+    layers = cache["decoder"]["layers"]
+    stacked = jax.tree.map(lambda *c: jnp.stack(c), *[layers[i] for i in range(self.config.num_decoder_layers)])
+    return {"decoder": {"layers": stacked}}
 
   def _maybe_unstack_prefill_result_cache(self, cache):
     """Unstack the caches across the layers."""
     if not self.config.stack_prefill_result_cache:
       return cache
 
-    if self.config.pure_nnx:
-      if self.config.scan_layers:
-        # Mirror _maybe_stack_prefill_result_cache: the cache already carries the
-        # layer axis, so there is nothing to unstack.
-        return cache
-      # scan_layers=False: split the leading layer axis back into per-layer subtrees.
-      stacked = cache["decoder"]["layers"]
-      layers = {i: jax.tree.map(lambda x, i=i: x[i], stacked) for i in range(self.config.num_decoder_layers)}
-      return {"decoder": {"layers": layers}}
-
-    flat_cache, treedef = jax.tree.flatten(cache)
-    layer_cache = [jax.tree.unflatten(treedef, flat_cache_vars) for flat_cache_vars in zip(*flat_cache, strict=True)]
-    res_cache = {"decoder": {}}
-
-    for i in range(self.config.num_decoder_layers):
-      res_cache["decoder"][f"layers_{i}"] = layer_cache[i]
-
-    return res_cache
+    if self.config.scan_layers:
+      # Mirror _maybe_stack_prefill_result_cache: the cache already carries the
+      # layer axis, so there is nothing to unstack.
+      return cache
+    # scan_layers=False: split the leading layer axis back into per-layer subtrees.
+    stacked = cache["decoder"]["layers"]
+    layers = {i: jax.tree.map(lambda x, i=i: x[i], stacked) for i in range(self.config.num_decoder_layers)}
+    return {"decoder": {"layers": layers}}
 
   def prefill_aot(  # pylint: disable=too-many-positional-arguments
       self,
@@ -733,10 +601,7 @@ class MaxEngine(_BaseEngine):
     if existing_prefix is not None:
       if not self.use_chunked_prefill:
         raise ValueError("Using chunked prefill is needed for existing_prefix.")
-      # NNX threads existing_prefix.cache via the nnx_cache local below; only
-      # the Linen path merges cache into input_params (params is a dict there).
-      if not self.config.pure_nnx:
-        input_params = params | {"cache": existing_prefix.cache}
+      # NNX threads existing_prefix.cache via the nnx_cache local below.
       start_position = existing_prefix.common_prefix_tokens.shape[0]
       # TODO(yuyanpeng): rename previous_chunk
       previous_chunk = jnp.expand_dims(existing_prefix.common_prefix_tokens, 0)
@@ -768,50 +633,29 @@ class MaxEngine(_BaseEngine):
     sequence_indicator = jnp.expand_dims(one_d_output, 0)
 
     rng, new_rng = jax.random.split(rng)
-    if self.config.pure_nnx:
-      # Prefill always operates on batch=1 (one padded prompt at a time).
-      nnx_cache = (
-          existing_prefix.cache if existing_prefix is not None else self._nnx_init_cache_dict(mode=MODEL_MODE_PREFILL)
+    # Prefill always operates on batch=1 (one padded prompt at a time).
+    nnx_cache = (
+        existing_prefix.cache if existing_prefix is not None else self._nnx_init_cache_dict(mode=MODEL_MODE_PREFILL)
+    )
+    with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
+      flat_logits, new_cache_dict = self._nnx_run_model(
+          params=input_params,
+          cache_dict=nnx_cache,
+          decoder_input_tokens=input_tokens,
+          decoder_positions=positions,
+          decoder_segment_ids=sequence_indicator,
+          encoder_images=images,
+          encoder_image_masks=image_masks,
+          encoder_videos=videos,
+          encoder_video_masks=video_masks,
+          encoder_audios=audio_values,
+          enable_dropout=False,
+          model_mode=MODEL_MODE_PREFILL,
+          previous_chunk=previous_chunk,
+          true_length=true_length,
+          slot=slot,
       )
-      with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
-        flat_logits, new_cache_dict = self._nnx_run_model(
-            params=input_params,
-            cache_dict=nnx_cache,
-            decoder_input_tokens=input_tokens,
-            decoder_positions=positions,
-            decoder_segment_ids=sequence_indicator,
-            encoder_images=images,
-            encoder_image_masks=image_masks,
-            encoder_videos=videos,
-            encoder_video_masks=video_masks,
-            encoder_audios=audio_values,
-            enable_dropout=False,
-            model_mode=MODEL_MODE_PREFILL,
-            previous_chunk=previous_chunk,
-            true_length=true_length,
-            slot=slot,
-        )
-      new_vars = {"cache": new_cache_dict}
-    else:
-      with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
-        flat_logits, new_vars = self.model.apply(
-            input_params,
-            input_tokens,
-            positions,
-            encoder_images=images,
-            encoder_image_masks=image_masks,
-            encoder_videos=videos,
-            encoder_video_masks=video_masks,
-            encoder_audios=audio_values,
-            decoder_segment_ids=sequence_indicator,
-            enable_dropout=False,
-            model_mode=MODEL_MODE_PREFILL,
-            rngs={"params": new_rng},
-            mutable=["cache"],
-            previous_chunk=previous_chunk,
-            true_length=true_length,
-            slot=slot,
-        )
+    new_vars = {"cache": new_cache_dict}
     if return_prompt_logp:
       prompt_logp = inference_utils.prompt_logprobs_from_prefill(flat_logits, input_tokens, true_length)
     else:
@@ -1026,32 +870,19 @@ class MaxEngine(_BaseEngine):
     sequence_indicator = jnp.expand_dims(one_d_output, 0)
 
     rng, new_rng = jax.random.split(rng)
-    if self.config.pure_nnx:
-      # Prefill is batch=1 (one prompt); multi-sampling only draws several first
-      # tokens from the shared logits below. Mirror the _prefill_jit NNX branch.
-      with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
-        flat_logits, new_cache_dict = self._nnx_run_model(
-            params=params,
-            cache_dict=self._nnx_init_cache_dict(mode=MODEL_MODE_PREFILL),
-            decoder_input_tokens=input_tokens,
-            decoder_positions=positions,
-            decoder_segment_ids=sequence_indicator,
-            enable_dropout=False,
-            model_mode=MODEL_MODE_PREFILL,
-        )
-      new_vars = {"cache": new_cache_dict}
-    else:
-      with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
-        flat_logits, new_vars = self.model.apply(
-            params,
-            input_tokens,
-            positions,
-            decoder_segment_ids=sequence_indicator,
-            enable_dropout=False,
-            model_mode=MODEL_MODE_PREFILL,
-            rngs={"params": new_rng},
-            mutable=["cache"],
-        )
+    # Prefill is batch=1 (one prompt); multi-sampling only draws several first
+    # tokens from the shared logits below.
+    with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
+      flat_logits, new_cache_dict = self._nnx_run_model(
+          params=params,
+          cache_dict=self._nnx_init_cache_dict(mode=MODEL_MODE_PREFILL),
+          decoder_input_tokens=input_tokens,
+          decoder_positions=positions,
+          decoder_segment_ids=sequence_indicator,
+          enable_dropout=False,
+          model_mode=MODEL_MODE_PREFILL,
+      )
+    new_vars = {"cache": new_cache_dict}
 
     next_pos = jnp.full((1, 1), true_length, dtype=jnp.int32)
     selected_logits = jax.lax.dynamic_slice(
@@ -1162,33 +993,20 @@ class MaxEngine(_BaseEngine):
     input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
     decoder_positions = jnp.expand_dims(decoder_positions, 0)
     decoder_segment_ids = jnp.expand_dims(decoder_segment_ids, 0)
-    rng, new_rng = jax.random.split(rng)
-    if self.config.pure_nnx:
-      # Packed prompts run as a single batch=1 prefill; the packed positions and
-      # segment ids keep the prompts separated. Mirror the _prefill_jit NNX branch.
-      with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
-        flat_logits, new_cache_dict = self._nnx_run_model(
-            params=params,
-            cache_dict=self._nnx_init_cache_dict(mode=MODEL_MODE_PREFILL),
-            decoder_input_tokens=input_tokens,
-            decoder_positions=decoder_positions,
-            decoder_segment_ids=decoder_segment_ids,
-            enable_dropout=False,
-            model_mode=MODEL_MODE_PREFILL,
-        )
-      new_vars = {"cache": new_cache_dict}
-    else:
-      with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
-        flat_logits, new_vars = self.model.apply(
-            params,
-            input_tokens,
-            decoder_positions,
-            decoder_segment_ids=decoder_segment_ids,
-            enable_dropout=False,
-            model_mode=MODEL_MODE_PREFILL,
-            rngs={"params": new_rng},
-            mutable=["cache"],
-        )
+    rng, _ = jax.random.split(rng)
+    # Packed prompts run as a single batch=1 prefill; the packed positions and
+    # segment ids keep the prompts separated.
+    with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
+      flat_logits, new_cache_dict = self._nnx_run_model(
+          params=params,
+          cache_dict=self._nnx_init_cache_dict(mode=MODEL_MODE_PREFILL),
+          decoder_input_tokens=input_tokens,
+          decoder_positions=decoder_positions,
+          decoder_segment_ids=decoder_segment_ids,
+          enable_dropout=False,
+          model_mode=MODEL_MODE_PREFILL,
+      )
+    new_vars = {"cache": new_cache_dict}
     cache = new_vars["cache"]
     cache = self._maybe_stack_prefill_result_cache(cache)
     if return_prompt_logp:
@@ -1336,28 +1154,16 @@ class MaxEngine(_BaseEngine):
     previous_token = decode_state["tokens"]
     rng, new_rng = jax.random.split(rng)
     # run one step generation
-    if self.config.pure_nnx:
-      with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
-        out_logits, new_cache_dict = self._nnx_run_model(
-            params=params,
-            cache_dict=decode_state["cache"],
-            decoder_input_tokens=previous_token,
-            decoder_positions=decode_state["next_pos"],
-            enable_dropout=False,
-            model_mode=MODEL_MODE_AUTOREGRESSIVE,
-        )
-      new_vars = {"cache": new_cache_dict}
-    else:
-      with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
-        out_logits, new_vars = self.model.apply(
-            params | {"cache": decode_state["cache"]},
-            previous_token,
-            decode_state["next_pos"],
-            enable_dropout=False,
-            model_mode=MODEL_MODE_AUTOREGRESSIVE,
-            rngs={"params": new_rng},
-            mutable=["cache"],
-        )
+    with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
+      out_logits, new_cache_dict = self._nnx_run_model(
+          params=params,
+          cache_dict=decode_state["cache"],
+          decoder_input_tokens=previous_token,
+          decoder_positions=decode_state["next_pos"],
+          enable_dropout=False,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
+      )
+    new_vars = {"cache": new_cache_dict}
     out_logits = jax.lax.with_sharding_constraint(out_logits, self.replicated_sharding)
     new_cache = jax.lax.with_sharding_constraint(new_vars["cache"], self.kv_cache_shardings)
     # sampling tokens
@@ -1857,103 +1663,7 @@ class MaxEngine(_BaseEngine):
       **kwargs,  # pylint: disable=unused-argument
   ) -> DecodeState:
     """Initialises any state which a generation step transforms."""
-    if rng is None:
-      rng = jax.random.PRNGKey(0)
-
-    if self.config.pure_nnx:
-      return self._init_decode_state_nnx()
-
-    # pylint: disable=unused-argument
-    def init(abstract_params):
-      x = jnp.ones(
-          (int(self.config.per_device_batch_size * self.mesh.size), 1),
-          dtype=jnp.int32,
-      )
-      dummy_image = jnp.ones(
-          mm_processor.get_dummy_image_shape_for_init(
-              model_name=self.config.model_name, batch_size=int(self.config.per_device_batch_size * self.mesh.size)
-          ),
-          dtype=jnp.int32,
-      )
-      dummy_audio = jnp.ones(
-          mm_processor.get_dummy_audio_shape_for_init(self.config),
-          dtype=jnp.float32,
-      )
-      _, cache = self.model.apply(
-          abstract_params,
-          x,
-          x,
-          encoder_images=dummy_image if self.config.use_multimodal else None,
-          encoder_audios=dummy_audio if self.config.use_audio else None,
-          enable_dropout=False,
-          model_mode=MODEL_MODE_AUTOREGRESSIVE,
-          rngs={"params": rng},
-          mutable=["cache"],
-          slot=0,
-      )
-
-      next_pos = jnp.zeros(
-          (int(self.config.per_device_batch_size * self.mesh.size), 1),
-          dtype=jnp.int32,
-      )
-      generated_tokens = jnp.zeros(
-          (int(self.config.per_device_batch_size * self.mesh.size), 1),
-          dtype=jnp.int32,
-      )
-      tokens = jnp.zeros(
-          (int(self.config.per_device_batch_size * self.mesh.size), 1),
-          dtype=jnp.int32,
-      )
-      token_logp = jnp.zeros(
-          (int(self.config.per_device_batch_size * self.mesh.size), 1),
-          dtype=jnp.float32,
-      )
-      return {
-          "logits": jnp.zeros(
-              (
-                  int(self.config.per_device_batch_size * self.mesh.size),
-                  1,
-                  self.config.vocab_size,
-              )
-          ),
-          "cache": cache["cache"],
-          "next_pos": next_pos,
-          "generated_tokens": generated_tokens,
-          "tokens": tokens,
-          "token_logp": token_logp,
-      }
-
-    with nn_partitioning.axis_rules(self.config.logical_axis_rules):
-      abstract_outputs = jax.eval_shape(init, self.abstract_params)
-    logical_annotations = nn.get_partition_spec(abstract_outputs)
-
-    with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
-      mesh_annotations = nn.logical_to_mesh(logical_annotations)
-
-    shardings = jax.tree_util.tree_map(
-        lambda mesh_annotation: jax.sharding.NamedSharding(self._mesh, mesh_annotation),
-        mesh_annotations,
-    )
-
-    @functools.partial(jax.jit, out_shardings=shardings)
-    def initialize():
-      return jax.tree_util.tree_map(lambda x: jnp.zeros(x.shape, x.dtype), abstract_outputs)
-
-    init_state = initialize()
-    cache = init_state["cache"]
-
-    def is_lp(k):
-      return isinstance(k, flax.linen.spmd.LogicallyPartitioned)
-
-    self.kv_cache_annotations_named = jax.tree_util.tree_map(
-        lambda x: tuple(x.logical_axes)
-        if hasattr(x, "logical_axes")
-        else (tuple(x.names) if hasattr(x, "names") else ()),
-        cache,
-        is_leaf=is_lp,
-    )
-    zeroed = max_utils.unbox_logicallypartioned(init_state)
-    return zeroed
+    return self._init_decode_state_nnx()
 
   def _init_decode_state_nnx(self) -> DecodeState:
     """NNX equivalent of init_decode_state. Returns a decode_state dict with a pure-dict cache."""

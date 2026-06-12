@@ -911,11 +911,8 @@ class HardwareAndMesh(BaseModel):
       CustomRule.DEFAULT, description="Customized mesh and logical rules for granularity."
   )
   allow_split_physical_axes: bool = Field(False, description="Allow splitting physical axes for device mesh creation.")
-  enable_nnx: bool = Field(False, description="Whether to use NNX for model definition.")
   optimize_mesh_for_tpu_v6e: bool = Field(False, description="Apply transformations to the mesh for TPU v6e.")
   shardy: bool = Field(True, description="Whether to use shardy XLA backend.")
-  pure_nnx_decoder: bool = Field(False, description="Whether to enable pure NNX decoder.")
-  pure_nnx: bool = Field(False, description="Whether to enable pure NNX mode.")
   remove_size_one_mesh_axis_from_type: bool = Field(
       True, description="Whether to remove size one mesh axis from type through jax.config."
   )
@@ -2578,8 +2575,6 @@ class MaxTextConfig(
     if self.distill_beta > 0.0:
       if not self.scan_layers:
         raise ValueError("a value of self.distill_beta > 0.0 requires self.scan_layers = True")
-      if not self.enable_nnx:
-        raise ValueError("a value of self.distill_beta > 0.0 requires self.enable_nnx = True")
 
     # Validate distillation schedule parameters
     if self.distill_alpha_end is not None and not 0.0 <= self.distill_alpha_end <= 1.0:
@@ -2784,6 +2779,15 @@ class MaxTextConfig(
 
     self.using_pipeline_parallelism = self.ici_pipeline_parallelism > 1 or self.dcn_pipeline_parallelism > 1
     if self.using_pipeline_parallelism:
+      if self.pure_nnx:
+        # The NNX decoder has no pipeline path yet, so the scanned-layers axis ends up
+        # sharded by 'stage' and fails with a cryptic IndivisibleError at state init.
+        # Fail fast with a clear message instead. NNX pipeline support is tracked as PR11.5.
+        raise NotImplementedError(
+            "Pipeline parallelism is not yet supported on the NNX path. Set "
+            "ici_pipeline_parallelism=1 and dcn_pipeline_parallelism=1, or use the Linen path "
+            "(pure_nnx=False enable_nnx=False)."
+        )
       num_stages = int(self.ici_pipeline_parallelism * self.dcn_pipeline_parallelism)
       if self.num_pipeline_repeats == -1:
         num_pipeline_repeats, remainder = divmod(

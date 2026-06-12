@@ -210,6 +210,10 @@ class PipelineParallelismTest(unittest.TestCase):
     config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         enable_checkpointing=False,
+        # PR11.5 deferred: NNX pipeline parallelism not yet supported, pin to Linen.
+        enable_nnx=False,
+        pure_nnx=False,
+        pure_nnx_decoder=False,
         enable_goodput_recording=False,
         run_name="circular_minimum_microbatches",
         max_target_length=128,
@@ -227,6 +231,10 @@ class PipelineParallelismTest(unittest.TestCase):
     config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         enable_checkpointing=False,
+        # PR11.5 deferred: NNX pipeline parallelism not yet supported, pin to Linen.
+        enable_nnx=False,
+        pure_nnx=False,
+        pure_nnx_decoder=False,
         enable_goodput_recording=False,
         run_name="circular_extra_microbatches",
         max_target_length=128,
@@ -244,6 +252,10 @@ class PipelineParallelismTest(unittest.TestCase):
     config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         enable_checkpointing=False,
+        # PR11.5 deferred: NNX pipeline parallelism not yet supported, pin to Linen.
+        enable_nnx=False,
+        pure_nnx=False,
+        pure_nnx_decoder=False,
         enable_goodput_recording=False,
         run_name="circular_moe",
         max_target_length=128,
@@ -269,6 +281,10 @@ class PipelineParallelismTest(unittest.TestCase):
     config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         enable_checkpointing=False,
+        # PR11.5 deferred: NNX pipeline parallelism not yet supported, pin to Linen.
+        enable_nnx=False,
+        pure_nnx=False,
+        pure_nnx_decoder=False,
         enable_goodput_recording=False,
         run_name="circular_ag_once",
         max_target_length=128,
@@ -287,6 +303,10 @@ class PipelineParallelismTest(unittest.TestCase):
     config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         enable_checkpointing=False,
+        # PR11.5 deferred: NNX pipeline parallelism not yet supported, pin to Linen.
+        enable_nnx=False,
+        pure_nnx=False,
+        pure_nnx_decoder=False,
         enable_goodput_recording=False,
         run_name="circular_ag_per_repeat",
         max_target_length=128,
@@ -305,6 +325,10 @@ class PipelineParallelismTest(unittest.TestCase):
     config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         enable_checkpointing=False,
+        # PR11.5 deferred: NNX pipeline parallelism not yet supported, pin to Linen.
+        enable_nnx=False,
+        pure_nnx=False,
+        pure_nnx_decoder=False,
         run_name="non_circular",
         max_target_length=128,
         base_emb_dim=28,
@@ -386,6 +410,10 @@ class PipelineParallelismTest(unittest.TestCase):
     config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         enable_checkpointing=False,
+        # PR11.5 deferred: NNX pipeline parallelism not yet supported, pin to Linen.
+        enable_nnx=False,
+        pure_nnx=False,
+        pure_nnx_decoder=False,
         enable_goodput_recording=False,
         run_name="activation_forwarding",
         max_target_length=128,

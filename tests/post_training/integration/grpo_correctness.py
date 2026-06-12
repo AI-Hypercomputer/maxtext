@@ -61,12 +61,8 @@ class GRPOTest(unittest.TestCase):
     self.rng = jax.random.PRNGKey(42)
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
     mesh = Mesh(devices_array, self.cfg.mesh_axes)
-    if self.cfg.pure_nnx:
-      # NNX has a different function to init the training state.
-      raise NotImplementedError("Pure NNX support has not been implemented yet.")
-    else:
-      self.model = models.transformer_as_linen(config=self.cfg, mesh=mesh, quant=None, model_mode=MODEL_MODE_TRAIN)
-      init_state_fn = functools.partial(maxtext_utils.init_initial_state, self.model, None, self.cfg, False, self.rng)
+    self.model = models.transformer_as_linen(config=self.cfg, mesh=mesh, quant=None, model_mode=MODEL_MODE_TRAIN)
+    init_state_fn = functools.partial(maxtext_utils.init_initial_state, self.model, None, self.cfg, False, self.rng)
     self.state, _ = maxtext_utils.setup_decode_state(self.cfg, mesh, None, init_state_fn)
     self.tokenizer_model = transformers.AutoTokenizer.from_pretrained(
         "meta-llama/Llama-3.1-8B",
