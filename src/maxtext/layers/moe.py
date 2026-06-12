@@ -1321,7 +1321,8 @@ class RoutedMoE(nnx.Module):
               precision=jax.lax.Precision.DEFAULT,
               preferred_element_type=self.dtype,
               implementation="mosaic",
-              group_offset=group_offset,
+              # `group_offset` is not yet supported
+              group_offset=None,
           )
       elif self.config.megablox:  # Older forked megablox
         output = mblx.gmm(
