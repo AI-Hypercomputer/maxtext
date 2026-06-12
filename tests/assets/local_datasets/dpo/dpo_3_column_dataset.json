@@ -1,0 +1,112 @@
+[
+  {
+    "prompt": "How does gradient descent work?",
+    "chosen": "Updating parameters in the opposite direction of the gradient is how gradient descent works.",
+    "rejected": "Climbing up hills to find local maxima is how gradient descent works."
+  },
+  {
+    "prompt": "What is a neural network?",
+    "chosen": "Interconnected nodes that learn representations from data form a neural network.",
+    "rejected": "Storing tabular data in a designed schema is the purpose of a neural network."
+  },
+  {
+    "prompt": "What is preference optimization?",
+    "chosen": "Aligning LLMs using pairs of chosen and rejected responses is called preference optimization.",
+    "rejected": "Database operations to choose preferred options are called preference optimization."
+  },
+  {
+    "prompt": "What is preference optimization?",
+    "chosen": "Aligning LLMs using pairs of chosen and rejected responses is called preference optimization.",
+    "rejected": "Database operations to choose preferred options are called preference optimization."
+  },
+  {
+    "prompt": "What is preference optimization?",
+    "chosen": "Aligning LLMs using pairs of chosen and rejected responses is called preference optimization.",
+    "rejected": "Database operations to choose preferred options are called preference optimization."
+  },
+  {
+    "prompt": "What is preference optimization?",
+    "chosen": "Aligning LLMs using pairs of chosen and rejected responses is called preference optimization.",
+    "rejected": "Database operations to choose preferred options are called preference optimization."
+  },
+  {
+    "prompt": "What is preference optimization?",
+    "chosen": "Aligning LLMs using pairs of chosen and rejected responses is called preference optimization.",
+    "rejected": "Database operations to choose preferred options are called preference optimization."
+  },
+  {
+    "prompt": "What is preference optimization?",
+    "chosen": "Aligning LLMs using pairs of chosen and rejected responses is called preference optimization.",
+    "rejected": "Database operations to choose preferred options are called preference optimization."
+  },
+  {
+    "prompt": "What is preference optimization?",
+    "chosen": "Aligning LLMs using pairs of chosen and rejected responses is called preference optimization.",
+    "rejected": "Database operations to choose preferred options are called preference optimization."
+  },
+  {
+    "prompt": "What is preference optimization?",
+    "chosen": "Aligning LLMs using pairs of chosen and rejected responses is called preference optimization.",
+    "rejected": "Database operations to choose preferred options are called preference optimization."
+  },
+  {
+    "prompt": "What is preference optimization?",
+    "chosen": "Aligning LLMs using pairs of chosen and rejected responses is called preference optimization.",
+    "rejected": "Database operations to choose preferred options are called preference optimization."
+  },
+  {
+    "prompt": "What is preference optimization?",
+    "chosen": "Aligning LLMs using pairs of chosen and rejected responses is called preference optimization.",
+    "rejected": "Database operations to choose preferred options are called preference optimization."
+  },
+  {
+    "prompt": "What is preference optimization?",
+    "chosen": "Aligning LLMs using pairs of chosen and rejected responses is called preference optimization.",
+    "rejected": "Database operations to choose preferred options are called preference optimization."
+  },
+  {
+    "prompt": "What is preference optimization?",
+    "chosen": "Aligning LLMs using pairs of chosen and rejected responses is called preference optimization.",
+    "rejected": "Database operations to choose preferred options are called preference optimization."
+  },
+  {
+    "prompt": "What is preference optimization?",
+    "chosen": "Aligning LLMs using pairs of chosen and rejected responses is called preference optimization.",
+    "rejected": "Database operations to choose preferred options are called preference optimization."
+  },
+  {
+    "prompt": "What is preference optimization?",
+    "chosen": "Aligning LLMs using pairs of chosen and rejected responses is called preference optimization.",
+    "rejected": "Database operations to choose preferred options are called preference optimization."
+  },
+  {
+    "prompt": "What is preference optimization?",
+    "chosen": "Aligning LLMs using pairs of chosen and rejected responses is called preference optimization.",
+    "rejected": "Database operations to choose preferred options are called preference optimization."
+  },
+  {
+    "prompt": "What is preference optimization?",
+    "chosen": "Aligning LLMs using pairs of chosen and rejected responses is called preference optimization.",
+    "rejected": "Database operations to choose preferred options are called preference optimization."
+  },
+  {
+    "prompt": "What is preference optimization?",
+    "chosen": "Aligning LLMs using pairs of chosen and rejected responses is called preference optimization.",
+    "rejected": "Database operations to choose preferred options are called preference optimization."
+  },
+  {
+    "prompt": "What is preference optimization?",
+    "chosen": "Aligning LLMs using pairs of chosen and rejected responses is called preference optimization.",
+    "rejected": "Database operations to choose preferred options are called preference optimization."
+  },
+  {
+    "prompt": "What is preference optimization?",
+    "chosen": "Aligning LLMs using pairs of chosen and rejected responses is called preference optimization.",
+    "rejected": "Database operations to choose preferred options are called preference optimization."
+  },
+  {
+    "prompt": "What is preference optimization?",
+    "chosen": "Aligning LLMs using pairs of chosen and rejected responses is called preference optimization.",
+    "rejected": "Database operations to choose preferred options are called preference optimization."
+  }
+]
