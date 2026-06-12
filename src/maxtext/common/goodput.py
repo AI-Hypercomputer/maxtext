@@ -23,6 +23,7 @@ import contextlib
 import jax
 from enum import Enum
 from maxtext.utils import max_logging
+from maxtext.utils import pathwaysutils
 from maxtext.common.gcloud_stub import goodput_modules
 
 goodput, monitoring, _GOODPUT_STUB = goodput_modules()
@@ -66,31 +67,30 @@ def maybe_monitor_goodput(config):
         enable_gcp_goodput_metrics=config.enable_gcp_goodput_metrics,
         enable_gcp_step_deviation_metrics=config.enable_gcp_step_deviation_metrics,
     )
-    use_elastic = False
-    if getattr(config, "elastic_enabled", False):
+    monitor_class = monitoring.GoodputMonitor
+    use_elastic = getattr(config, 'elastic_enabled', False) and pathwaysutils.is_pathways_backend_used()
+    if use_elastic:
       try:
-        import pathwaysutils
-        use_elastic = pathwaysutils.is_pathways_backend_used()
+        from ml_goodput_measurement import monitoring_elastic
+        monitor_class = monitoring_elastic.ElasticGoodputMonitor
       except ImportError:
         pass
 
-    if use_elastic and hasattr(monitoring, "ElasticGoodputMonitor"):
-      monitor_class = monitoring.ElasticGoodputMonitor
-    else:
-      monitor_class = monitoring.GoodputMonitor
-
-    goodput_monitor = monitor_class(
+    kwargs = dict(
         job_name=config.run_name,
         logger_name=f"goodput_{config.run_name}",
         tensorboard_dir=config.tensorboard_dir,
         upload_interval=config.goodput_upload_interval_seconds,
         monitoring_enabled=True,
-        pathway_enabled=config.enable_pathways_goodput,
         include_badput_breakdown=True,
         include_step_deviation=config.monitor_step_time_deviation,
         step_deviation_interval_seconds=config.step_deviation_interval_seconds,
         gcp_options=gcp_options,
     )
+    if monitor_class == monitoring.GoodputMonitor:
+        kwargs["pathway_enabled"] = config.enable_pathways_goodput
+
+    goodput_monitor = monitor_class(**kwargs)
     goodput_monitor.start_goodput_uploader()
     max_logging.log("Started Goodput upload to Tensorboard & GCM in the background!")
     yield
@@ -138,16 +138,16 @@ def create_goodput_recorder(config):
     logger_name = f"goodput_{config.run_name}"
     
     # Detect if we should use the elastic-aware recorder
-    use_elastic = False
-    if getattr(config, "elastic_enabled", False):
+    use_elastic = getattr(config, 'elastic_enabled', False) and pathwaysutils.is_pathways_backend_used()
+    recorder = None
+    if use_elastic:
       try:
-        import pathwaysutils  
-        use_elastic = pathwaysutils.is_pathways_backend_used()
+        from ml_goodput_measurement import goodput_elastic
+        recorder = goodput_elastic.ElasticGoodputRecorder(config.run_name, logger_name, jax.process_index() == 0)
       except ImportError:
         pass
-    if use_elastic and hasattr(goodput, "ElasticGoodputRecorder"):
-      recorder = goodput.ElasticGoodputRecorder(config.run_name, logger_name, jax.process_index() == 0)
-    else:
+    
+    if recorder is None:
       recorder = goodput.GoodputRecorder(config.run_name, logger_name, jax.process_index() == 0)
     return recorder
   return None
