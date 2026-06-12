@@ -2784,6 +2784,15 @@ class MaxTextConfig(
 
     self.using_pipeline_parallelism = self.ici_pipeline_parallelism > 1 or self.dcn_pipeline_parallelism > 1
     if self.using_pipeline_parallelism:
+      if self.pure_nnx:
+        # The NNX decoder has no pipeline path yet, so the scanned-layers axis ends up
+        # sharded by 'stage' and fails with a cryptic IndivisibleError at state init.
+        # Fail fast with a clear message instead. NNX pipeline support is tracked as PR11.5.
+        raise NotImplementedError(
+            "Pipeline parallelism is not yet supported on the NNX path. Set "
+            "ici_pipeline_parallelism=1 and dcn_pipeline_parallelism=1, or use the Linen path "
+            "(pure_nnx=False enable_nnx=False)."
+        )
       num_stages = int(self.ici_pipeline_parallelism * self.dcn_pipeline_parallelism)
       if self.num_pipeline_repeats == -1:
         num_pipeline_repeats, remainder = divmod(
