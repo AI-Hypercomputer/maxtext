@@ -1612,7 +1612,9 @@ def get_abstract_state(config, mesh, init_state_fn, is_training=True):
   )
 
 
-def get_nnx_named_sharding_with_scan_axis(abs_var_state: nnx.State, mesh) -> nnx.State:
+def get_nnx_named_sharding_with_scan_axis(
+    abs_var_state: nnx.State, mesh, remove_size_one_mesh_axis_from_type: bool = True
+) -> nnx.State:
   """Compute NamedSharding for each NNX variable, correctly handling the scan (stacked layers) axis.
 
   Unlike flax.nnx.spmd.get_var_pspec (used inside nnx.get_abstract_model), this function also
@@ -1623,6 +1625,7 @@ def get_nnx_named_sharding_with_scan_axis(abs_var_state: nnx.State, mesh) -> nnx
   Args:
     abs_var_state: NNX abstract variable state from nnx.split(nnx.eval_shape(...)).
     mesh: JAX physical mesh.
+    remove_size_one_mesh_axis_from_type: Whether to remove size one mesh axis from the spec.
 
   Returns:
     Same tree structure as abs_var_state but each Variable's value replaced with NamedSharding.
@@ -1673,6 +1676,9 @@ def get_nnx_named_sharding_with_scan_axis(abs_var_state: nnx.State, mesh) -> nnx
         pspec = PartitionSpec(*from_sharding_rules(out_sharding, rules))
       else:
         pspec = PartitionSpec(*out_sharding)
+      # Only collapse size-one axes under real multi-device meshes where parallelization is active.
+      if remove_size_one_mesh_axis_from_type and mesh.size > 1:
+        pspec = sharding.remove_size_one_mesh_axis(pspec, mesh)
     return v.replace(NamedSharding(mesh, pspec))
 
   return jax.tree.map(_make_named_sharding, abs_var_state, is_leaf=lambda x: isinstance(x, nnx.Variable))
@@ -1720,7 +1726,9 @@ def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=Tru
     # needed here.
     abs_model = nnx.eval_shape(nnx_init_trainstate_fn)
     _, abs_var_state = nnx.split(abs_model)
-    named_sharding_state = get_nnx_named_sharding_with_scan_axis(abs_var_state, mesh)
+    named_sharding_state = get_nnx_named_sharding_with_scan_axis(
+        abs_var_state, mesh, remove_size_one_mesh_axis_from_type=config.remove_size_one_mesh_axis_from_type
+    )
     abstract_state = jax.tree.map(
         lambda a, s: jax.ShapeDtypeStruct(a.shape, a.dtype, sharding=s),
         abs_var_state,
@@ -1836,7 +1844,9 @@ def _nnx_cache_partition_specs(abstract_model, config, mesh):
   # get_nnx_named_sharding_with_scan_axis reads logical axis rules from the
   # active flax partitioning context, so wrap.
   with nn_partitioning.axis_rules(config.logical_axis_rules):
-    named_state = get_nnx_named_sharding_with_scan_axis(cache_state, mesh)
+    named_state = get_nnx_named_sharding_with_scan_axis(
+        cache_state, mesh, remove_size_one_mesh_axis_from_type=config.remove_size_one_mesh_axis_from_type
+    )
   return jax.tree.map(lambda s: s.spec, named_state.to_pure_dict())
 
 
@@ -2138,3 +2148,37 @@ def get_mesh_from_config(
     axis_types = tuple([AxisType.Auto] * len(config.mesh_axes))
 
   return Mesh(devices_array, config.mesh_axes, axis_types=axis_types)
+
+
+def prepare_kv_caches_for_scan(kv_caches, scan_length, block_len, stack=False):
+  """Groups the flat list of KV caches into block-sized tuples and optionally stacks them."""
+  if kv_caches is None:
+    return None
+
+  grouped = [tuple(kv_caches[i * block_len : (i + 1) * block_len]) for i in range(scan_length)]
+
+  if stack:
+    # Stack the list of tuples into a tuple of stacked PyTrees along a new leading axis
+    return jax.tree_util.tree_map(lambda *args: jnp.stack(args, axis=0), *grouped)
+  else:
+    return grouped
+
+
+def update_kv_caches_after_scan(kv_caches, returned_kv_cache, scan_length, block_len, stacked=False):
+  """Updates the original flat list of KV caches from the scanned outputs."""
+  if kv_caches is None or returned_kv_cache is None:
+    return
+
+  if stacked:
+    # Unstack the returned tuple of stacked PyTrees back into a list of tuples
+    unstacked = [jax.tree_util.tree_map(lambda x, i=i: x[i], returned_kv_cache) for i in range(scan_length)]
+    for i in range(scan_length):
+      start_idx = i * block_len
+      for offset, updated_item in enumerate(unstacked[i]):
+        kv_caches[start_idx + offset] = updated_item
+  else:
+    # returned_kv_cache is already a list of tuples
+    for i in range(scan_length):
+      start_idx = i * block_len
+      for offset, updated_item in enumerate(returned_kv_cache[i]):
+        kv_caches[start_idx + offset] = updated_item
