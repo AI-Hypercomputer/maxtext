@@ -27,7 +27,7 @@ from flax import linen as nn
 from flax import nnx
 from flax.nnx import wrappers as nnx_wrappers
 from jax.ad_checkpoint import checkpoint_name
-from jax.sharding import Mesh, NamedSharding
+from jax.sharding import Mesh, NamedSharding, reshard
 
 from maxtext.common.common_types import (
     MODEL_MODE_AUTOREGRESSIVE,
@@ -706,7 +706,7 @@ class NNXDecoder(nnx.Module):
     return final_carry, out_layers, returned_kv_stacked if use_kv else None
 
   def _apply_layers_sequentially_prefetch(self, layers, x_in, *args, length: int, **kwargs):
-    """Runs the layer stack using nnx.scan with 1-layer BSW prefetching."""
+    """Runs the layer stack using nnx.scan with 1-layer BSW prefetching and custom VJP."""
     if length == 0:
       return x_in, layers, None
     policy = self.get_remat_policy()
@@ -721,53 +721,157 @@ class NNXDecoder(nnx.Module):
     sig = inspect.signature(layer_cls.__call__)
     valid_kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters or "kwargs" in sig.parameters}
 
-    loop_iterations = jnp.arange(length)
+    # Helper functions for All-Gather and Reduce-Scatter
+    def ag(w):
+      shardings = jax.tree.map(lambda x: getattr(x, 'sharding', None), w)
+      target_shardings = sharding.remove_fsdp_sharding(shardings)
+      return jax.tree.map(lambda x, s: reshard(x, s) if isinstance(s, NamedSharding) else x, w, target_shardings)
 
-    def _slice_params(params_tree, idx):
+    def rs(grad_w, w_sharded):
+      target_shardings = jax.tree.map(lambda x: getattr(x, 'sharding', None), w_sharded)
+      return jax.tree.map(lambda x, s: reshard(x, s) if isinstance(s, NamedSharding) else x, grad_w, target_shardings)
+
+    def slice_params(params_tree, idx):
       return jax.tree.map(lambda x: x[idx], params_tree)
 
-    def _apply_sharding_hint(w):
-      w_sharding = getattr(jax.typeof(w), 'sharding', None) or getattr(w, 'sharding', None)
-      if isinstance(w_sharding, NamedSharding) and w_sharding.mesh.empty:
-        w_sharding = NamedSharding(self.mesh, w_sharding.spec)
-      return sharding.maybe_shard_with_name(w, w_sharding, shard_mode=self.config.shard_mode)
+    def slice_state(state_tree, idx):
+      return jax.tree.map(lambda x: x[idx], state_tree)
 
-    # Bootstrap Layer 0 params for carry
-    w_curr = _slice_params(params, 0)
-    w_curr = jax.tree.map(_apply_sharding_hint, w_curr)
-
-    initial_carry = (x_in, w_curr)
-
-    def layer_fn_prefetch(carry, scanned_vars):
-      y, w_curr = carry
-      loop_iteration, current_state = scanned_vars
-
-      # --- Asynchronous Prefetch of Layer i + 1 ---
-      nxt_params = _slice_params(params, (loop_iteration + 1) % length)
-      w_next = jax.tree.map(_apply_sharding_hint, nxt_params)
-
-      bsw = jax.ad_checkpoint.checkpoint_name((w_curr, w_next), name="fsdp_bsw")
-      active_params, carried_next = bsw[0], bsw[1]
-
-      layer = nnx.merge(graphdef, active_params, current_state)
+    # Define the layer apply function (pure JAX)
+    def apply_layer(y, w, layer_state):
+      layer = nnx.merge(graphdef, w, layer_state)
       layer_out = layer(y, *args, **valid_kwargs)
       y_out = layer_out[0] if isinstance(layer_out, tuple) else layer_out
       _, _, new_state = nnx.split(layer, nnx.Param, ...)
+      return y_out, new_state
 
-      return (y_out, carried_next), new_state
+    if policy is not None:
+      apply_layer_wrapped = jax.checkpoint(apply_layer, policy=policy, prevent_cse=prevent_cse)
+    else:
+      apply_layer_wrapped = apply_layer
 
-    layer_fn_wrapped = jax.checkpoint(layer_fn_prefetch, policy=policy, prevent_cse=prevent_cse)
+    @jax.custom_vjp
+    def fsdp_pipe(x, params, state):
+      w0 = ag(slice_params(params, 0))
+      carry = (x, w0)
+      
+      def body(carry, vars_in):
+        x, w = carry
+        w_n_sharded, layer_state = vars_in
+        w_n = ag(w_n_sharded)
+        x, new_layer_state = apply_layer_wrapped(x, w, layer_state)
+        return (x, w_n), new_layer_state
+      
+      state_scan = jax.tree.map(lambda x: x[:-1], state)
+      state_last = slice_state(state, -1)
+      
+      (x, w_last), scanned_state = jax.lax.scan(body, carry, (jax.tree.map(lambda x: x[1:], params), state_scan))
+      x, state_last_new = apply_layer_wrapped(x, w_last, state_last)
+      
+      final_state = jax.tree.map(
+          lambda x, y: jnp.concatenate([x, y[None]], axis=0),
+          scanned_state, state_last_new
+      )
+      return x, final_state
 
-    (final_y, _), scanned_state = jax.lax.scan(
-        layer_fn_wrapped,
-        initial_carry,
-        (loop_iterations, state)
-    )
+    def fsdp_pipe_fwd(x, params, state):
+      w0 = ag(slice_params(params, 0))
+      state_first = slice_state(state, 0)
+      
+      (x, state_first_new), vjp_first = jax.vjp(
+          lambda x, w: apply_layer_wrapped(x, w, state_first), x, w0
+      )
+      vjp_first.args_res[1] = None
+      
+      w1 = ag(slice_params(params, 1))
+      carry = (x, w1)
+      
+      state_scan = jax.tree.map(lambda x: x[1:-1], state)
+      
+      def body(carry, vars_in):
+        x, w = carry
+        w_n_sharded, layer_state = vars_in
+        w_n = ag(w_n_sharded)
+        (x, new_layer_state), vjp = jax.vjp(
+            lambda x, w: apply_layer_wrapped(x, w, layer_state), x, w
+        )
+        vjp.args_res[1] = None
+        return (x, w_n), (vjp, new_layer_state)
 
-    if scan_axis != 0:
-      new_params, new_rest = scanned_state.split(nnx.Param, ...)
-      new_params = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0), new_params)
-      scanned_state = nnx.merge_state(new_params, new_rest)
+      (x, w_last), (vjps, scanned_state) = jax.lax.scan(
+          body, carry, (jax.tree.map(lambda x: x[2:], params), state_scan)
+      )
+
+      state_last = slice_state(state, -1)
+      (x, state_last_new), vjp_last = jax.vjp(
+          lambda x, w: apply_layer_wrapped(x, w, state_last), x, w_last
+      )
+      vjp_last.args_res[1] = None
+
+      final_state = jax.tree.map(
+          lambda x, y, z: jnp.concatenate([x[None], y, z[None]], axis=0),
+          state_first_new, scanned_state, state_last_new
+      )
+
+      return (x, final_state), (vjp_first, vjps, vjp_last, params, state)
+
+    def fsdp_pipe_bwd(res, grads):
+      vjp_first, vjps, vjp_last, params, state = res
+      x_bar, state_bar = grads
+      
+      w_m1 = ag(slice_params(params, -1))
+      vjp_last.args_res[1] = w_m1
+      
+      state_last_bar = slice_state(state_bar, -1)
+      x_bar, w_m1_bar_unreduced = vjp_last((x_bar, state_last_bar))
+
+      w_m2 = ag(slice_params(params, -2))
+      carry = (x_bar, w_m2, w_m1_bar_unreduced)
+
+      state_scan_bar = jax.tree.map(lambda x: x[1:-1] if x is not None else None, state_bar)
+      
+      params_for_ag = jax.tree.map(lambda x: x[:-2], params)
+      params_for_rs = jax.tree.map(lambda x: x[2:], params)
+
+      def body(carry, inputs):
+        y_bar, w, w_p1_bar_unreduced = carry
+        vjp, w_m1_sharded, layer_state_bar, w_p1_sharded = inputs
+
+        w_m1 = ag(w_m1_sharded)
+        vjp.args_res[1] = w
+        x_bar, w_bar_unreduced = vjp((y_bar, layer_state_bar))
+        w_p1_bar_sharded = rs(w_p1_bar_unreduced, w_p1_sharded)
+
+        return (x_bar, w_m1, w_bar_unreduced), w_p1_bar_sharded
+
+      (x_bar, w_0, w_1_bar_unreduced), ws_bar = jax.lax.scan(
+          body,
+          carry,
+          (vjps, params_for_ag, state_scan_bar, params_for_rs),
+          reverse=True
+      )
+
+      vjp_first.args_res[1] = w_0
+      state_first_bar = slice_state(state_bar, 0)
+      x_bar, w_0_bar_unreduced = vjp_first((x_bar, state_first_bar))
+
+      w_1_bar = rs(w_1_bar_unreduced, slice_params(params, 1))
+      w_0_bar = rs(w_0_bar_unreduced, slice_params(params, 0))
+
+      ws_bar_final = jax.tree.map(
+          lambda w0, w1, rest: jnp.concatenate([w0[None], w1[None], rest], axis=0),
+          w_0_bar, w_1_bar, ws_bar
+      )
+      
+      # Reshard to match original params sharding (with scan axis at 0)
+      target_shardings = jax.tree.map(lambda x: getattr(x, 'sharding', None), params)
+      ws_bar_final = jax.tree.map(lambda x, s: reshard(x, s) if s is not None else x, ws_bar_final, target_shardings)
+      
+      return x_bar, ws_bar_final, None
+
+    fsdp_pipe.defvjp(fsdp_pipe_fwd, fsdp_pipe_bwd)
+
+    final_y, scanned_state = fsdp_pipe(x_in, params, state)
 
     nnx.update(layers, scanned_state)
     return final_y, layers, None
