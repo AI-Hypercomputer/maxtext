@@ -888,6 +888,29 @@ def save_adapter_files(output_dir, weights, config, found_modules, model_id):
     json.dump(adapter_config, f, indent=4)
 
 
+def path_tuple_to_param_key_parts(path_tuple) -> list[str]:
+  """Convert a JAX tree path into MaxText param-key parts.
+
+  Layer indices show up differently depending on the source: an abstract nnx.List flattens to a
+  FlattenedIndexKey with an int ``.key``, while a loaded checkpoint keys layers as an int OR a digit
+  STRING DictKey (e.g. ``"0"``). Fold either form into the preceding name with '_' so
+  ``["layers", 0]`` / ``["layers", "0"]`` -> ``"layers_0"`` — matching the checkpoint param key (and
+  avoiding a TypeError when the parts are later "-".join'd). Only ``.key`` path elements are kept;
+  GetAttrKey/SequenceKey wrappers (e.g. the nnx.Param ``value`` leaf) are intentionally skipped.
+  """
+  key_parts: list[str] = []
+  for k in path_tuple:
+    if not hasattr(k, "key"):
+      continue
+    part = k.key
+    is_index = isinstance(part, int) or (isinstance(part, str) and part.isdigit())
+    if is_index and key_parts:
+      key_parts[-1] = f"{key_parts[-1]}_{part}"
+    else:
+      key_parts.append(str(part))
+  return key_parts
+
+
 def extract_nnx_weights(weights_dict: dict) -> dict[str, np.ndarray]:
   """Extract weights from NNX checkpoint structure.
 
@@ -903,7 +926,7 @@ def extract_nnx_weights(weights_dict: dict) -> dict[str, np.ndarray]:
   result = {}
   leaves_with_paths = jax.tree_util.tree_leaves_with_path(weights_dict)
   for path_tuple, leaf_value in leaves_with_paths:
-    path_keys = [k.key for k in path_tuple]
+    path_keys = path_tuple_to_param_key_parts(path_tuple)
     # Skip NNX RNG state variables (not model weights)
     if "to_nnx__rngs" in path_keys or any(k.endswith("_rngs") for k in path_keys):
       continue
@@ -932,7 +955,7 @@ def extract_linen_weights(weights_dict: dict) -> dict[str, np.ndarray]:
   result = {}
   leaves_with_paths = jax.tree_util.tree_leaves_with_path(weights_dict)
   for path_tuple, leaf_value in leaves_with_paths:
-    path_keys = [k.key for k in path_tuple]
+    path_keys = path_tuple_to_param_key_parts(path_tuple)
     # Construct maxtext_param_key from path_tuple
     maxtext_param_key = "params-" + "-".join(path_keys)
     if not isinstance(leaf_value, (jax.Array, np.ndarray)):
