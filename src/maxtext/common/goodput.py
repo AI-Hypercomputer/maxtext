@@ -66,7 +66,20 @@ def maybe_monitor_goodput(config):
         enable_gcp_goodput_metrics=config.enable_gcp_goodput_metrics,
         enable_gcp_step_deviation_metrics=config.enable_gcp_step_deviation_metrics,
     )
-    goodput_monitor = monitoring.GoodputMonitor(
+    use_elastic = False
+    if getattr(config, "elastic_enabled", False):
+      try:
+        import pathwaysutils
+        use_elastic = pathwaysutils.is_pathways_backend_used()
+      except ImportError:
+        pass
+
+    if use_elastic and hasattr(monitoring, "ElasticGoodputMonitor"):
+      monitor_class = monitoring.ElasticGoodputMonitor
+    else:
+      monitor_class = monitoring.GoodputMonitor
+
+    goodput_monitor = monitor_class(
         job_name=config.run_name,
         logger_name=f"goodput_{config.run_name}",
         tensorboard_dir=config.tensorboard_dir,
@@ -121,12 +134,12 @@ def create_goodput_recorder(config):
     if config.enable_goodput_recording and jax.process_index() == 0:
       max_logging.log("[GOODPUT NO-OP] recorder skipped (decoupled stub).")
     return None
-if config.enable_goodput_recording:
+  if config.enable_goodput_recording:
     logger_name = f"goodput_{config.run_name}"
     
     # Detect if we should use the elastic-aware recorder
     use_elastic = False
-    if hasattr(config, "elastic_enabled") and elastic_enabled():
+    if getattr(config, "elastic_enabled", False):
       try:
         import pathwaysutils  
         use_elastic = pathwaysutils.is_pathways_backend_used()
