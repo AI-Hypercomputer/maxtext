@@ -21,6 +21,7 @@ are not marked.
 """
 
 import pytest
+import sys
 import warnings
 
 warnings.filterwarnings(
@@ -32,6 +33,14 @@ warnings.filterwarnings(
 warnings.filterwarnings(
     "ignore", message="builtin type SwigPyObject has no __module__ attribute", category=DeprecationWarning
 )
+
+# Prevent libraries that use absl flags (e.g. tokamax) from lazily parsing sys.argv,
+# which would pick up pytest flags like `-v -m` and fail to parse them as integers.
+from absl import flags as _absl_flags
+
+if not _absl_flags.FLAGS.is_parsed():
+  _absl_flags.FLAGS(sys.argv[:1])
+
 import jax
 import os
 import importlib.util
