@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Multimodal data preprocessor router."""
+# pylint: disable=g-import-not-at-top
 
 from maxtext.multimodal import utils as mm_utils
 
@@ -245,3 +246,35 @@ def get_bidirectional_mask_audio(config, decoder_input_tokens):
     # Create bidirectional_mask for audio token merging
     bidirectional_mask_audio = decoder_input_tokens == tokens.audio_pad
   return bidirectional_mask_audio
+
+
+def get_rope_index(config, input_ids, image_grid_thw, attention_mask):
+  """Compute 3D position IDs (RoPE index) for multimodal models."""
+  if getattr(config, "use_mrope", False):
+    if config.model_name in [
+        "qwen3-omni-30b-a3b",
+        "qwen3.5-35b-a3b",
+        "qwen3.5-397b-a17b",
+    ]:
+      from maxtext.multimodal import processor_qwen3_omni  # pylint: disable=import-outside-toplevel
+
+      position_ids, _ = processor_qwen3_omni.get_rope_index(
+          input_ids=input_ids,
+          image_grid_thw=image_grid_thw,
+          attention_mask=attention_mask,
+          spatial_merge_size=config.spatial_merge_size_for_vit,
+      )
+      return position_ids
+    else:
+      raise NotImplementedError(
+          f"M-RoPE is not supported for model {config.model_name}"
+      )
+  else:
+    # Standard 1D sequential positions
+    # input_ids shape is (batch, seq_len)
+    import numpy as np  # pylint: disable=import-outside-toplevel
+
+    batch_size, seq_len = input_ids.shape
+    positions = np.arange(seq_len, dtype=np.int32)
+    positions = np.broadcast_to(positions[np.newaxis, :], (batch_size, seq_len))
+    return positions

@@ -1740,7 +1740,16 @@ class Qwen3OmniMoeThinkerTextRotaryEmbedding(RotaryEmbedding):
     if position.ndim == 2:
       # Text-only: expand (batch, seq) -> (3, batch, seq) with same positions
       position = jnp.broadcast_to(position[jnp.newaxis, ...], (3,) + position.shape)
-    elif position.ndim != 3 or position.shape[0] != 3:
+    elif position.ndim == 3:
+      if position.shape[0] != 3:
+        if position.shape[1] == 3:
+          position = jnp.transpose(position, axes=[1, 0, 2])
+        else:
+          raise ValueError(
+              "Position IDs must be 2D (batch, seq) or 3D (3, batch, seq), got"
+              f" shape {position.shape}"
+          )
+    else:
       raise ValueError(f"Position IDs must be 2D (batch, seq) or 3D (3, batch, seq), got shape {position.shape}")
 
     # Compute frequencies: (3, batch, seq, 1) @ (head_dim // 2, 1) -> (3, batch, seq, head_dim // 2)
