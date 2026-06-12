@@ -427,6 +427,7 @@ fused_qkv: false
 fused_mlp: false
 
 record_internal_nn_metrics: 0
+record_layerwise_hidden_states: false
 
 # Output directory
 # Create a GCS bucket, e.g. my-maxtext-outputs and set this to "gs://my-maxtext-outputs/"
