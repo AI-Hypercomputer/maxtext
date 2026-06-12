@@ -14,6 +14,8 @@
  limitations under the License.
  -->
 
+(moe-configuration)=
+
 # Mixture of Experts (MoE) Configuration
 
 This document provides a detailed explanation of the configuration parameters related to Mixture of Experts (MoE) models in MaxText. These settings control the model architecture, routing mechanisms, and performance optimizations. Default values and parameter definitions are located in `src/maxtext/configs/base.yml` and are primarily used in `src/maxtext/layers/moe.py`.
