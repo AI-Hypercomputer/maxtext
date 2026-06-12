@@ -14,6 +14,7 @@
 
 """Create an Orbax CheckpointManager with specified (Async or not) Checkpointer."""
 
+import asyncio
 import time
 from typing import Any, Optional
 
@@ -166,6 +167,44 @@ class GrainCheckpointRestore(ocp.args.CheckpointArgs):
   item: Any
   process_index: Optional[int | list[int]] = None
   process_count: Optional[int] = None
+
+
+class GrainCheckpointable(ocp_v1.StatefulCheckpointable):
+  """Adapts `GrainCheckpointHandler` to Orbax v1's `StatefulCheckpointable`."""
+
+  def __init__(
+      self,
+      *,
+      save_args: GrainCheckpointSave | None = None,
+      restore_args: GrainCheckpointRestore | None = None,
+  ):
+    self._handler = GrainCheckpointHandler()
+    self._save_args = save_args
+    self._restore_args = restore_args
+
+  async def save(self, directory):
+    """Saves the Grain iterator state to the given directory."""
+    # `GrainCheckpointHandler.save` snapshots iterator state (`get_state`) AND
+    # writes it; both must happen in this (blocking) save phase, NOT in the
+    # returned background coroutine.
+    path = await directory.await_creation()
+    self._handler.save(path, args=self._save_args)
+
+    async def _committed():  # nothing left for the background commit phase
+      return None
+
+    return _committed()
+
+  async def load(self, directory: epath.Path):
+    """Loads the Grain iterator state from the given directory."""
+    handler, args = self._handler, self._restore_args
+
+    # This will be ran to completion so asynchronous portion is just for
+    # compatibility with Orbax v1 API.
+    async def _background_load():
+      await asyncio.to_thread(handler.restore, directory, args=args)
+
+    return _background_load()
 
 
 def _default_for_sds(sds):
