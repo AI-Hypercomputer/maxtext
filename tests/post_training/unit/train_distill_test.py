@@ -175,6 +175,7 @@ class TrainDistillTest(unittest.TestCase):
     trainer = train_distill.MaxTextDistillationTrainer.__new__(train_distill.MaxTextDistillationTrainer)
     trainer.strategy = mock.Mock()
     trainer.wrt_filter = lambda path, x: True  # type: ignore
+    mock_tree_map.side_effect = lambda f, x: x
 
     # 2. Setup Batch WITH teacher_output
     mock_batch = {
@@ -238,6 +239,7 @@ class TrainDistillTest(unittest.TestCase):
     trainer = train_distill.MaxTextDistillationTrainer.__new__(train_distill.MaxTextDistillationTrainer)
     trainer.strategy = mock.Mock()
     trainer.wrt_filter = lambda path, x: True  # type: ignore
+    mock_tree_map.side_effect = lambda f, x: x
 
     # 2. Setup Batch WITHOUT teacher_output
     mock_batch = {
@@ -326,6 +328,7 @@ class TrainDistillTest(unittest.TestCase):
     trainer = train_distill.MaxTextDistillationTrainer.__new__(train_distill.MaxTextDistillationTrainer)
     trainer.strategy = mock.Mock()
     trainer.wrt_filter = lambda path, x: True  # type: ignore
+    mock_tree_map.side_effect = lambda f, x: x
 
     # 2. Setup Batch WITH targets_segmentation
     mock_targets_segmentation = jnp.array([[1, 1, 0]])
@@ -386,6 +389,73 @@ class TrainDistillTest(unittest.TestCase):
         decoder_target_tokens=mock_batch["targets"],
         decoder_target_mask=mock_targets_segmentation,
         cache=None,
+    )
+
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.optax.global_norm")
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.jax.tree.map")
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.nnx.update")
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.nnx.merge")
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.nnx.split")
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.jax.value_and_grad")
+  def test_train_step_passes_injected_attention_inputs_under_blockwise_distill(
+      self, mock_value_and_grad, mock_split, mock_merge, mock_update, mock_tree_map, mock_global_norm
+  ):
+    """Verifies that teacher's attention_inputs are passed to student_forward_fn as injected_attention_inputs."""
+    # 1. Initialize Trainer
+    # pylint: disable=no-value-for-parameter
+    trainer = train_distill.MaxTextDistillationTrainer.__new__(train_distill.MaxTextDistillationTrainer)
+    trainer.strategy = mock.Mock()
+    trainer.wrt_filter = lambda path, x: True  # type: ignore
+    mock_tree_map.side_effect = lambda f, x: x
+
+    # 2. Setup Batch WITH teacher_output containing attention_inputs
+    mock_attention_inputs = jnp.ones((1, 2, 8))
+    fake_teacher_output = distillation_utils.DistillationForwardOutput(
+        logits=jnp.zeros((1, 2, 4)),
+        out_projection_activations=None,
+        attention_inputs=mock_attention_inputs,
+    )
+    mock_batch = {
+        "input_tokens": mock.Mock(),
+        "positions": mock.Mock(),
+        "attention_mask": mock.Mock(),
+        "decoder_segment_ids": mock.Mock(),
+        "targets": mock.Mock(),
+        "teacher_output": fake_teacher_output,
+    }
+    trainer.gen_model_input_fn = mock.Mock(return_value=mock_batch)
+
+    # 3. Setup Models & Inputs
+    teacher_model, student_model = mock.Mock(), mock.Mock()
+    model_bundle = train_distill.ModelBundle(teacher_model=teacher_model, student_model=student_model)
+    optimizer, inputs = mock.Mock(), mock.Mock()
+
+    # 4. Configure nnx.split/merge/update mocks
+    mock_graphdef, mock_diff_params, mock_rest = mock.Mock(), mock.Mock(), mock.Mock()
+    mock_split.return_value = (mock_graphdef, mock_diff_params, mock_rest)
+
+    # 5. Configure mocked jax.value_and_grad
+    mock_grad_fn = mock.Mock(return_value=((mock.Mock(), ({}, mock.Mock())), mock.Mock()))
+    mock_value_and_grad.return_value = mock_grad_fn
+    mock_global_norm.return_value = mock.Mock()
+    trainer.strategy.compute_loss.return_value = (mock.Mock(), {})
+
+    # 6. Execute outer function & trigger inner loss_wrapper_pure
+    trainer._train_step(model_bundle, optimizer, inputs)
+    loss_wrapper = mock_value_and_grad.call_args[0][0]
+    loss_wrapper(mock_diff_params, mock_rest)
+
+    # 7. Assertions
+    trainer.strategy.student_forward_fn.assert_called_once_with(
+        model=mock.ANY,  # local_student from nnx.merge, not the original student_model
+        input_tokens=mock_batch["input_tokens"],
+        positions=mock_batch["positions"],
+        attention_mask=mock_batch["attention_mask"],
+        decoder_segment_ids=mock_batch["decoder_segment_ids"],
+        decoder_target_tokens=mock_batch["targets"],
+        decoder_target_mask=None,
+        cache=None,
+        injected_attention_inputs=mock_attention_inputs,
     )
 
   def test_optimizer_factory(self):
@@ -574,6 +644,85 @@ class TrainDistillTest(unittest.TestCase):
     self.assertTrue(19.0 < _mean(metrics["distill/soft_loss"]) < 21.0)
     self.assertTrue(19.0 < _mean(metrics["distill/kl_div_at_T"]) < 21.0)
     self.assertTrue(_mean(metrics["distill/teacher_loss"]) == 0.0)
+
+  def test_monitored_strategy_blockwise_distill(self):
+    """Verifies the strategy ignores base_logit_loss when blockwise_distill is enabled."""
+    strategy = distillation_utils.CombinedDistillationStrategy(
+        student_forward_fn=lambda m, **k: None,
+        teacher_forward_fn=lambda m, **k: None,
+        vocab_size=4,
+        temperature=1.0,
+        alpha=0.5,
+        beta_feature=1.5,
+        feature_loss_type="cosine",
+        layer_indices=None,
+        blockwise_distill=True,
+    )
+    student_output = distillation_utils.DistillationForwardOutput(
+        logits=jnp.array([[[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]]]) * 10,
+        out_projection_activations=jnp.ones((32, 1, 1, 8)),
+    )
+    teacher_output = distillation_utils.DistillationForwardOutput(
+        logits=jnp.array([[[0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]]) * 10,
+        out_projection_activations=jnp.ones((32, 1, 1, 8)) * 1.5,
+    )
+    labels_indices = jnp.array([[0, 1]])
+    labels = jax.nn.one_hot(labels_indices, 4)
+    total_loss, _ = strategy.compute_loss(student_output, teacher_output, labels)
+    self.assertAlmostEqual(float(total_loss), 0.0, places=5)
+
+  def test_build_training_components_blockwise_distill(self):
+    """Verifies build_training_components gets blockwise_distill from teacher_config."""
+    student_config = mock.Mock()
+    student_config.tokenizer_path = ""
+    student_config.tokenizer_type = "huggingface"
+    student_config.add_bos = True
+    student_config.add_eos = True
+    student_config.hf_access_token = None
+    student_config.distill_temperature = 1.0
+    student_config.distill_alpha = 0.5
+    student_config.distill_beta = 0.0
+    student_config.distill_layer_indices = None
+    student_config.distill_feature_loss_type = "cosine"
+    student_config.vocab_size = 4
+    student_config.distill_alpha_end = None
+    student_config.distill_alpha_schedule = "constant"
+    student_config.distill_temperature_end = None
+    student_config.distill_temperature_schedule = "constant"
+    student_config.distill_beta_end = None
+    student_config.distill_beta_schedule = "constant"
+    student_config.steps = 100
+    student_config.checkpoint_period = 10
+    student_config.max_num_checkpoints_to_keep = 1
+    student_config.async_checkpointing = False
+    student_config.profiler = "none"
+    student_config.tensorboard_dir = ""
+    student_config.log_period = 10
+    student_config.gradient_accumulation_steps = 1
+    student_config.data_sharding = ["data"]
+    student_config.learning_rate = 1e-4
+    student_config.opt_type = "adamw"
+    student_config.adam_b1 = 0.9
+    student_config.adam_b2 = 0.99
+    student_config.adam_eps = 1e-8
+    student_config.adam_eps_root = 0.0
+    student_config.adam_weight_decay = 0.0
+    student_config.mu_dtype = "float32"
+    student_config.gradient_clipping_threshold = 1.0
+    student_config.warmup_steps_fraction = 0.1
+    student_config.learning_rate_final_fraction = 0.1
+    student_config.blockwise_distill = False
+
+    teacher_config = mock.Mock()
+    teacher_config.blockwise_distill = True
+
+    with mock.patch("maxtext.trainers.post_train.distillation.train_distill.tokenizer.build_tokenizer") as mock_build:
+      mock_tok = mock.Mock()
+      mock_tok.pad_id = 0
+      mock_build.return_value = mock_tok
+
+      strategy, _, _ = train_distill.build_training_components(student_config, teacher_config)
+      self.assertTrue(strategy.blockwise_distill)
 
   def test_setup_pipeline_grain_enabled(self):
     """Covers setup_checkpoint_manager_and_restore when Grain IS detected."""
@@ -1137,6 +1286,7 @@ class TrainDistillTest(unittest.TestCase):
     mock_teacher_cfg.per_device_batch_size = 1
     mock_teacher_cfg.max_target_length = 16
     mock_teacher_cfg.gradient_accumulation_steps = 1
+    mock_teacher_cfg.blockwise_distill = False
     mock_pyconfig_init.side_effect = [mock_global, mock_student_cfg, mock_teacher_cfg]
 
     # 2. Model Loading
@@ -1247,6 +1397,7 @@ class TrainDistillTest(unittest.TestCase):
     mock_teacher_cfg.per_device_batch_size = 1
     mock_teacher_cfg.max_target_length = 16
     mock_teacher_cfg.gradient_accumulation_steps = 1
+    mock_teacher_cfg.blockwise_distill = False
     mock_pyconfig_init.side_effect = [mock_global, mock_student_cfg, mock_teacher_cfg]
 
     mock_student_model = mock.Mock()
