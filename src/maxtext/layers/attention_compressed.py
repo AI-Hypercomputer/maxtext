@@ -694,10 +694,6 @@ class CompressedAttention(Attention):
     self.q_lora_rank = q_lora_rank
     self.compress_ratio = compress_ratio
 
-    # Determine the correct underlying attention type based on the compress_ratio
-    if self.compress_ratio == 0:
-      attention_type = AttentionType.LOCAL_SLIDING
-
     super().__init__(
         config=config,
         num_query_heads=num_query_heads,
@@ -727,6 +723,7 @@ class CompressedAttention(Attention):
         use_bias_in_projections=use_bias_in_projections,
         name=name,
         rngs=rngs,
+        rope_type="deepseek4",
         **kwargs,
     )
 
@@ -1047,7 +1044,7 @@ class CompressedAttention(Attention):
     # -> [batch, q_length, emb_dim]
     final_out = self.o_b_proj(grouped_flat)
 
-    return final_out
+    return final_out, None
 
 
 def compressed_attention(

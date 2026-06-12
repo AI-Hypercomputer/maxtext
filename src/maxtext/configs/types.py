@@ -553,7 +553,7 @@ class Attention(BaseModel):
       "autoselected",
       description="The attention algorithm to use (dot_product, flash, etc).",
   )
-  attention_type: Literal["global", "local_sliding", "chunk", "mla", "full"] = Field(
+  attention_type: Literal["global", "local_sliding", "chunk", "mla", "full", "compressed"] = Field(
       "global", description="The variant of attention to use."
   )
   share_kv_projections: bool = Field(

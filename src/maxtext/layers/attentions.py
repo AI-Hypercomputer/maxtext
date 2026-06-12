@@ -58,6 +58,7 @@ from maxtext.layers.embeddings import (
     Qwen3OmniMoeVisionRotaryEmbedding,
     RotaryEmbedding,
     YarnRotaryEmbedding,
+    DeepSeekV4RotaryEmbedding,
     PartialRotaryEmbedding,
     Gemma4PartialRotaryEmbedding,
 )
@@ -849,6 +850,13 @@ class Attention(nnx.Module):
           attention_scaling=self.config.rope_attention_scaling,
           shard_mode=self.config.shard_mode,
           rngs=self.rngs,
+      )
+    elif rope_type == "deepseek4":
+      rotary_embedding = DeepSeekV4RotaryEmbedding(
+          head_dim=rope_embedding_dims,
+          partial_rotary_factor=self.partial_rotary_factor if self.partial_rotary_factor is not None else 1.0,
+          rope_theta=self.rope_max_timescale,
+          dtype=self.dtype,
       )
     elif self.is_qwen3_hybrid:
       rotary_embedding = PartialRotaryEmbedding(
