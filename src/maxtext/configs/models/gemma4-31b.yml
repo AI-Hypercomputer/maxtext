@@ -34,6 +34,10 @@ use_post_ffw_norm: true
 sliding_window_size: 1024
 share_kv_projections: true
 v_norm_with_scale: false
+# Run the qk product and softmax inputs in fp32. gemma4 has head_dim=256 and no
+# attn_logits_soft_cap, so bf16 attention logits can overflow to inf/nan.
+float32_qk_product: true
+float32_logits: true
 
 # RoPE scaling
 local_rope_max_timescale: 10000
