@@ -64,7 +64,6 @@ def record_elastic_wait_end_and_reinit_start(recorder) -> None:
     recorder.record_custom_badput_event_end_time(custom_badput_event_type=event_type)
     recorder.record_custom_badput_event_start_time(custom_badput_event_type='elastic_reinitialization')
     record_slice_state(recorder)
-    recorder.record_custom_badput_event_start_time(custom_badput_event_type="elastic_reinitialization")
   pending_reinit_recorder = recorder
 
 

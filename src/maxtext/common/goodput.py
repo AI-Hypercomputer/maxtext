@@ -121,8 +121,20 @@ def create_goodput_recorder(config):
     if config.enable_goodput_recording and jax.process_index() == 0:
       max_logging.log("[GOODPUT NO-OP] recorder skipped (decoupled stub).")
     return None
-  if config.enable_goodput_recording:
+if config.enable_goodput_recording:
     logger_name = f"goodput_{config.run_name}"
-    recorder = goodput.GoodputRecorder(config.run_name, logger_name, jax.process_index() == 0)
+    
+    # Detect if we should use the elastic-aware recorder
+    use_elastic = False
+    if hasattr(config, "elastic_enabled") and elastic_enabled():
+      try:
+        import pathwaysutils  
+        use_elastic = pathwaysutils.is_pathways_backend_used()
+      except ImportError:
+        pass
+    if use_elastic and hasattr(goodput, "ElasticGoodputRecorder"):
+      recorder = goodput.ElasticGoodputRecorder(config.run_name, logger_name, jax.process_index() == 0)
+    else:
+      recorder = goodput.GoodputRecorder(config.run_name, logger_name, jax.process_index() == 0)
     return recorder
   return None
