@@ -39,6 +39,7 @@ python3 -m maxtext.checkpoint_conversion.to_maxtext \
     scan_layers=false \
     hardware=cpu skip_jax_distributed_system=True \
     checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False \
+    --lazy_load_tensors=False \
     --eager_load_method='transformers'
 
 UNSCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/unscanned/${run_id}/0/items
@@ -52,6 +53,7 @@ python3 -m maxtext.checkpoint_conversion.to_maxtext \
     scan_layers=true \
     hardware=cpu skip_jax_distributed_system=True \
     checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False \
+    --lazy_load_tensors=False \
     --eager_load_method='transformers'
 
 SCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/scanned/${run_id}/0/items
