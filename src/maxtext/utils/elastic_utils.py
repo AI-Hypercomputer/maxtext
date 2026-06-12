@@ -28,6 +28,21 @@ pending_reinit_recorder = None
 pending_elastic_event_type = None
 
 
+def record_slice_state(recorder, active_slices_override: int | None = None) -> None:
+  """Queries live slice counts and logs them to the GoodputRecorder."""
+  if recorder is None or not pathwaysutils.is_pathways_backend_used() or elastic_manager is None:
+    return
+
+  available_slices = len(pathwaysutils.elastic.get_active_slice_indices())
+  active_slices = active_slices_override if active_slices_override is not None else len(elastic_manager.active_slice_indices)
+  total_slices = len(elastic_manager.slice_to_devices)
+
+  recorder.record_elastic_slice_counts(
+      available_slices=available_slices,
+      active_slices=active_slices,
+      total_slices=total_slices
+  )
+
 def record_elastic_event_start(recorder, config) -> None:
   """Records start of an elastic scale up event."""
   global pending_elastic_event_type
@@ -35,6 +50,7 @@ def record_elastic_event_start(recorder, config) -> None:
   pending_elastic_event_type = event_type
   if recorder:
     recorder.record_custom_badput_event_start_time(custom_badput_event_type=event_type)
+    record_slice_state(recorder, active_slices_override=0)
 
 
 def record_elastic_wait_end_and_reinit_start(recorder) -> None:
@@ -46,7 +62,8 @@ def record_elastic_wait_end_and_reinit_start(recorder) -> None:
   pending_elastic_event_type = None
   if recorder:
     recorder.record_custom_badput_event_end_time(custom_badput_event_type=event_type)
-    recorder.record_custom_badput_event_start_time(custom_badput_event_type="elastic_reinitialization")
+    recorder.record_custom_badput_event_start_time(custom_badput_event_type='elastic_reinitialization')
+    record_slice_state(recorder)
   pending_reinit_recorder = recorder
 
 
@@ -54,6 +71,10 @@ def record_elastic_reinit_end() -> None:
   """Records end of elastic reinitialization event."""
   global pending_reinit_recorder
   if pending_reinit_recorder is not None:
+    pending_reinit_recorder.record_custom_badput_event_end_time(
+        custom_badput_event_type='elastic_reinitialization'
+    )
+    record_slice_state(pending_reinit_recorder)
     pending_reinit_recorder.record_custom_badput_event_end_time(custom_badput_event_type="elastic_reinitialization")
     pending_reinit_recorder = None
 
