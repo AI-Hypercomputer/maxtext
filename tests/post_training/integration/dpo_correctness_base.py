@@ -21,7 +21,7 @@ import os
 # Force JAX/XLA to only create 1 virtual CPU device to prevent batch size scaling
 # issues on large multi-core CI runners (which would cause the 20-example test
 # dataset to be dropped completely due to drop_remainder=True).
-os.environ["XLA_FLAGS"] = os.environ.get("XLA_FLAGS", "") + " --xla_force_host_platform_device_count=1"
+# os.environ["XLA_FLAGS"] = os.environ.get("XLA_FLAGS", "") + " --xla_force_host_platform_device_count=1"
 
 from typing import Any
 from absl.testing import parameterized
