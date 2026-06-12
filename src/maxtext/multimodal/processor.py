@@ -135,7 +135,7 @@ def reformat_response(response, model_name):
     formatted_response = f"{response}<end_of_turn>"
     return formatted_response
   elif model_name in ["gemma4-26b", "gemma4-31b", "gemma4-e2b", "gemma4-e4b"]:
-    formatted_response = f"{response}<end_of_turn>"
+    formatted_response = f"{response}<turn|>"
     return formatted_response
   elif model_name in ["qwen3-omni-30b-a3b", "qwen3.5-35b-a3b", "qwen3.5-397b-a17b"]:
     formatted_response = f"{response}<|im_end|>"
