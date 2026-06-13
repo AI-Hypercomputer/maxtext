@@ -64,5 +64,6 @@ hidden:
 data_input_pipeline/data_input_grain
 data_input_pipeline/data_input_hf
 data_input_pipeline/data_input_tfds
+data_input_pipeline/olmo_grain
 data_input_pipeline/data_pipeline_perf.md
 ```

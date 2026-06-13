@@ -102,7 +102,6 @@ class QwixDotGeneral(nn.Module):
       *,
       out_sharding=None,
   ) -> jax.Array:
-
     return dot_general_qt.dot_general_qt(lhs, rhs, dimension_numbers, self.config)
 
 
@@ -121,7 +120,6 @@ class QwixEinsum(nn.Module):
       _dot_general: Callable[..., jax.Array] | None = None,
       out_sharding=None,
   ) -> jax.Array:
-
     def custom_dot_general(*args, **kwargs):
       return dot_general_qt.dot_general_qt(*args[:3], self.config)
 
@@ -416,13 +414,14 @@ def _get_max_min(target_dtype):
     return jnp.finfo(target_dtype).max.astype(jnp.bfloat16), jnp.finfo(target_dtype).min.astype(jnp.bfloat16)
 
 
-def manual_quantize(tensor, calibration_method, dtype=jnp.float8_e4m3fn):
+def manual_quantize(tensor: jax.Array, dtype: jax.typing.DTypeLike, calibration_method: str) -> qwix.QArray:
   """Manually quantizes a tensor based on a fixed calibration method.
 
   Args:
     tensor: The tensor to quantize.
+    dtype: The logical type of the quantized value, e.g. jnp.float8_e4m3fn
     calibration_method: A string specifying the calibration method. Expected
-      format is "fixed,{scale},{max_val}".
+      format is "fixed,{scale},{max_val}". e.g., "fixed,-224,224"
 
   Returns:
     A qwix.QArray containing the quantized value and the scale.
@@ -430,12 +429,13 @@ def manual_quantize(tensor, calibration_method, dtype=jnp.float8_e4m3fn):
   Raises:
     ValueError: If calibration_method is None or has an unexpected format.
   """
+  # validate calibration method and parse
   calib_method = calibration_method
   if calib_method is None:
     raise ValueError("calibration_method cannot be None for manual quantization")
   if not calib_method.startswith("fixed"):
-    raise ValueError("Only static weight/activation quantization is supported, but got" f" {calib_method}")
-
+    # we can use static scale for weight/activation, but grad usually needs dynamic
+    raise ValueError("Only static scale quantization is supported, but got" f" {calib_method}")
   parts = calib_method.split(",")
   if len(parts) != 3:
     raise ValueError(f"Unexpected format for weight calibration method: {calib_method}")

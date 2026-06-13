@@ -22,6 +22,37 @@ MaxText is [available in PyPI](https://pypi.org/project/maxtext/) and can be ins
 
 ## Releases
 
+### v0.2.3
+
+#### Changes
+
+- Upgraded JAX to version 0.10.0 for pre-training and 0.10.1 for post-training.
+- **New vLLM-Powered Evaluation Framework**: Introduced an eval framework for running lm-eval, evalchemy, and custom benchmarking against MaxText checkpoints. See the [evaluation guide](https://maxtext.readthedocs.io/en/latest/guides/eval_framework.html) for details.
+- Added support for pre-training new models:
+  - **Qwen3.5**: Qwen3.5 35B & 397B is now [supported](https://github.com/AI-Hypercomputer/maxtext/blob/d938b91acaa3baaaf32956e21677bd29e14549a1/tests/end_to_end/tpu/qwen/moe/run_qwen_moe.md).
+  - **Qwen3-Omni**: Support for multimodal SFT ([PR #3863](https://github.com/AI-Hypercomputer/maxtext/pull/3863)).
+- **Direct Preference Optimization (DPO/ORPO) Support**: Full support for DPO and ORPO alignment pipelines. See the [DPO tutorial](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/dpo.html) for details.
+- **Reinforcement Learning (RL) Recipe**: Added a pre-configured [RL recipe for Qwen3-30b-a3b](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/rl_qwen3_30b.html).
+- **Iterative Quality Monitoring (RL)**: Added intermediate evaluation hooks to automatically run quality benchmarks during RL training (every `eval_interval` steps), optimized with a new `eval_batch_size` configuration knob.
+- **Developer Extensibility**: Added `dataset_processor_path` CLI knob for custom dataset integration, and refactored shared post-training hooks to simplify custom SFT, DPO, and RL workflow development.
+- **Generalized Learn-to-Init (LTI) for Distillation**: Enhanced post-training distillation capabilities with generalized LTI support.
+- Added support for recording elastic goodput events during training to track efficiency ([PR #3901](https://github.com/AI-Hypercomputer/maxtext/pull/3901)).
+- **Installation Updates**: Updated the `[tpu-post-train]` installation command to require `UV_TORCH_BACKEND=cpu`(see [Installation Guide](install_maxtext.md)).
+- **Zero1 AOT Compilation**: Added zero1 support to Ahead-Of-Time (AOT) compilation in train compile, improving compilation capabilities for zero1 config.
+- **MoE Performance Optimization**: Integrated ragged gather reduce into Mixture of Experts (MoE) layers to optimize memory and performance by replacing ragged scatter and supporting backward pass.
+- Added [E2E scripts](https://github.com/AI-Hypercomputer/maxtext/tree/main/tests/end_to_end/tpu/gemma3/4b) to run checkpoint conversion, pre-training and post-training (SFT, RL) with Gemma3-4B model.
+- **Bug Fixes and Usability Enhancements**:
+  - **Attention Masking Fix in RL**: Fixed an issue in `TunixMaxTextAdapter` where queries at non-pad positions could attend to pad-position keys during training, which was corrupting log-probabilities and affecting GRPO training reward trajectories ([PR #4016](https://github.com/AI-Hypercomputer/maxtext/pull/4016)).
+  - **JAX/NNX Gradient Mutation Fix**: Refactored post-training loops (`train_distill`, `train_sft`, `train_rl`) to use `jax.value_and_grad` with explicit NNX state split/merge instead of nesting `nnx.value_and_grad` inside `nnx.jit` ([PR #3652](https://github.com/AI-Hypercomputer/maxtext/pull/3652)).
+  - **Qwen3-MoE Checkpoint Conversion**: Fixed checkpoint conversion issues for Qwen3-MoE models ([PR #3868](https://github.com/AI-Hypercomputer/maxtext/pull/3868)).
+  - **Duplicate Configuration Failures Fix**: Allowed identical config overrides and handled configuration exceptions cleanly ([PR #3933](https://github.com/AI-Hypercomputer/maxtext/pull/3933)).
+- **Documentation Improvements**: Updated [Getting started](https://maxtext.readthedocs.io/en/latest/getting_started.html) guide, including new guides for the [evaluation framework](https://maxtext.readthedocs.io/en/latest/guides/eval_framework.html) and the [DPO tutorial](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/dpo.html).
+
+#### Deprecations
+
+- Deleted [legacy DPO implementation](https://github.com/AI-Hypercomputer/maxtext/pull/3997) in favor of the integrated [DPO trainer](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/dpo.html).
+- Removed stack trace collection feature.
+
 ### v0.2.2
 
 #### Changes

@@ -29,29 +29,30 @@
 # pylint: disable=bare-except, consider-using-generator
 """Utils that are only interesting for creating a model in MaxText."""
 
-import dataclasses
 import collections
 from collections.abc import Sequence
-from typing import Callable, overload
+import dataclasses
 from functools import partial
 import os
 import subprocess
 import sys
+from typing import Callable, overload
 from etils import epath
 from flax import nnx
 from flax.core.meta import Partitioned
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
-import numpy as np
 from jax.sharding import Mesh
-from maxtext.configs import pyconfig
+from maxtext.common.checkpointing import handle_checkpoint_mismatch
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN
+from maxtext.configs import pyconfig
+from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from maxtext.layers import quantizations
 from maxtext.models import models
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils, maxtext_utils, maxtext_utils_nnx
-from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
+import numpy as np
 from orbax import checkpoint as ocp
 
 try:
@@ -441,12 +442,7 @@ def _fix_restore_args_for_shape_mismatch(restore_args, stored_metadata_tree, mes
   if rank_mismatched_paths:
     sample = "\n".join(rank_mismatched_paths[:5])
     more = f"\n  ... and {len(rank_mismatched_paths) - 5} more" if len(rank_mismatched_paths) > 5 else ""
-    raise ValueError(
-        f"Checkpoint rank mismatches detected ({len(rank_mismatched_paths)} arrays). "
-        "This usually means a scanned (scan_layers=True) checkpoint was loaded with "
-        "scan_layers=False, or vice versa. Please ensure the checkpoint format matches "
-        f"the scan_layers setting.\n{sample}{more}"
-    )
+    raise ValueError(f"Checkpoint rank mismatches detected ({len(rank_mismatched_paths)}" f" arrays):\n{sample}{more}")
 
   # Detect structural mismatch (e.g. scanned checkpoint loaded into unscanned model).
   # In that case the checkpoint tree has "layers" (all layers stacked) but the model
@@ -457,11 +453,9 @@ def _fix_restore_args_for_shape_mismatch(restore_args, stored_metadata_tree, mes
     sample = "\n".join(missing_paths[:5])
     more = f"\n  ... and {len(missing_paths) - 5} more" if len(missing_paths) > 5 else ""
     raise ValueError(
-        f"Checkpoint structure mismatch: {len(missing_paths)} of {total_arrays} model parameter "
-        "paths were not found in the checkpoint. "
-        "This usually means a scanned (scan_layers=True) checkpoint is being loaded with "
-        "scan_layers=False, or vice versa. Please ensure the checkpoint format matches the "
-        f"scan_layers setting.\nExample missing paths:\n{sample}{more}"
+        f"Checkpoint structure mismatch: {len(missing_paths)} of {total_arrays}"
+        " model parameter paths were not found in the checkpoint.\nExample"
+        f" missing paths:\n{sample}{more}"
     )
 
   if mismatched_paths_sharded:
@@ -895,7 +889,7 @@ def from_pretrained(
 
   with mesh:
     if config.load_parameters_path:
-      try:
+      with handle_checkpoint_mismatch("load parameters", config.load_parameters_path):
         ckptr = ocp.Checkpointer(
             ocp.PyTreeCheckpointHandler(
                 restore_concurrent_gb=config.checkpoint_storage_concurrent_gb,
@@ -1040,18 +1034,19 @@ def from_pretrained(
           restore_args = {"base": restore_args} if has_base_key else restore_args
 
         # Free memory used by initial sharded_state before restore, to make room for the incoming checkpoint arrays.
+        # Skip nnx.Cache variables — they hold runtime state (e.g. GDN conv/recurrent state) that is
+        # not present in the checkpoint and must remain valid after the restore.
         def _free_device_memory(node):
-          val = node
-          if isinstance(node, nnx.Variable) and not isinstance(node, nnx.RngState):
+          if isinstance(node, nnx.Variable) and not isinstance(node, (nnx.RngState, nnx.Cache)):
             inner = node.get_value() if hasattr(node, "get_value") else node[...]
-            # Same QTensor caveat as `_build_value_target`: AQT serve-mode `qrhs.frozen`
-            # wraps a QTensor whose `__getitem__` fails on `LogicallyPartitioned`.
-            # We only need to free a single jax.Array leaf — for composite values
-            # there's nothing to free at this level, so skip.
-            val = inner if hasattr(inner, "shape") else None
-
-          if isinstance(val, jax.Array) and not val.is_deleted():
-            val.delete()
+            # AQT serve-mode `qrhs.frozen` wraps a QTensor (composite pytree) rather
+            # than a single jax.Array. Walking via tree_leaves frees the qvalue/scale
+            # arrays too; the single-leaf case is a 1-element tree.
+            for leaf in jax.tree_util.tree_leaves(inner):
+              if isinstance(leaf, jax.Array) and not leaf.is_deleted():
+                leaf.delete()
+          elif isinstance(node, jax.Array) and not node.is_deleted():
+            node.delete()
 
           return node
 
@@ -1148,9 +1143,6 @@ def from_pretrained(
               "(e.g. a scanned checkpoint loaded with scan_layers=False, or vice versa). "
               "Please ensure the checkpoint format matches the scan_layers setting."
           )
-
-      except Exception as e:
-        raise ValueError(f"Checkpoint loading failed: {e}") from e
 
     if wrap_with_tunix_adapter:
       with mesh:

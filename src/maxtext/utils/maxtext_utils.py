@@ -1670,7 +1670,23 @@ def get_nnx_named_sharding_with_scan_axis(abs_var_state: nnx.State, mesh) -> nnx
       local_rules = metadata.get("sharding_rules", ())
       if context_rules or local_rules:
         rules = composite_rules(context_rules, local_rules)
-        pspec = PartitionSpec(*from_sharding_rules(out_sharding, rules))
+        raw_sharding = from_sharding_rules(out_sharding, rules)
+        mesh_axis_names = mesh.axis_names if mesh is not None else ()
+
+        # from_sharding_rules leaves a logical name with no matching rule unchanged, so a
+        # name missing from logical_axis_rules (e.g. concat_embed on the MTP kernel)
+        # reaches NamedSharding and is rejected as an unknown mesh axis. Map any such
+        # leftover name to None (replicated), matching Linen, whose logical_to_mesh_axes
+        # replicates unmatched names.
+        def _sanitize(x):
+          if isinstance(x, list):
+            x = tuple(x)
+          if x is None or (isinstance(x, str) and x in mesh_axis_names) or isinstance(x, tuple):
+            return x
+          return None
+
+        sanitized_sharding = [_sanitize(x) for x in raw_sharding]
+        pspec = PartitionSpec(*sanitized_sharding)
       else:
         pspec = PartitionSpec(*out_sharding)
     return v.replace(NamedSharding(mesh, pspec))

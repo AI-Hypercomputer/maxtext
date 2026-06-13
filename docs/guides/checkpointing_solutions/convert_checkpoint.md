@@ -36,10 +36,6 @@ Use the `to_maxtext.py` script to convert a Hugging Face model checkpoint into a
 ### Setup Environment
 
 ```bash
-# Install PyTorch and safetensors (in MaxText virtual environment)
-python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
-python3 -m pip install safetensors --no-deps
-
 # Setup environment variables
 export MODEL=<HF_MODEL> # e.g. 'llama3.1-8b-Instruct'
 export BASE_OUTPUT_DIRECTORY=<CKPT_PATH> # e.g., gs://my-bucket/my-checkpoint-directory
@@ -70,7 +66,7 @@ You can find your converted checkpoint files under `${BASE_OUTPUT_DIRECTORY}/0/i
 ### Key Parameters
 
 - `model_name`: The specific model identifier. It must match a supported entry in the MaxText [globals.py](https://github.com/AI-Hypercomputer/maxtext/blob/16b684840db9b96b19e24e84ac49f06af7204ae3/src/maxtext/utils/globals.py#L46C1-L46C7).
-- `scan_layers`: Controls whether the output uses a scanned (`scan_layers=true`) or unscanned (`scan_layers=false`) checkpoint format. Refer [here](../../reference/core_concepts/checkpoints.md) for more information.
+- `scan_layers`: Controls whether the output uses a scanned (`scan_layers=true`) or unscanned (`scan_layers=false`) checkpoint format. Refer [here](../../reference/core_concepts/checkpoints.md) for more information. **IMPORTANT:** This setting *must* match the `scan_layers` value used during model training or loading. A mismatch will cause PyTree loading errors (though MaxText will intercept these and raise a descriptive `ValueError` explaining the mismatch).
 - `use_multimodal`: Indicates if multimodality is used, important for Gemma3.
 - `base_output_directory`: The path where the converted Orbax checkpoint will be stored; it can be Google Cloud Storage (GCS) or local.
 - `hardware=cpu`: The conversion script runs on a CPU machine.
@@ -87,10 +83,6 @@ Use the `to_huggingface.py` script to convert a MaxText checkpoint into the Hugg
 ### Setup Environment
 
 ```bash
-# Install PyTorch and safetensors (in MaxText virtual environment)
-python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
-python3 -m pip install safetensors --no-deps
-
 # Setup environment variables
 export MODEL=<MODEL_NAME> # e.g. 'qwen3-4b'
 export MAXTEXT_CKPT_PATH=<CKPT_PATH> # e.g., gs://my-bucket/my-model-checkpoint/0/items
@@ -136,6 +128,9 @@ To ensure the conversion was successful, you can use the [test script](https://g
 export MODEL=<MODEL_NAME> # e.g. 'qwen3-4b'
 export MAXTEXT_CKPT_PATH=<CKPT_PATH> # e.g., gs://my-bucket/my-model-checkpoint/0/items
 export HF_CKPT_PATH=<HF_CKPT_PATH> # e.g., gs://my-bucket/my-checkpoint-directory
+
+# Install PyTorch (in MaxText virtual environment)
+python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 ```
 
 ### Run Correctness Test
@@ -239,7 +234,10 @@ Here is an example [PR to add support for gemma3 multi-modal model](https://gith
 
 ### Common Errors
 
-- "Type ShapeDtypeStruct is not a valid JAX type": Usually caused by a mismatch in the `scan_layers` flag.
+- "Type ShapeDtypeStruct is not a valid JAX type" or generic **PyTree structure/shape mismatches** (e.g., Orbax reporting `"X/Y paths matched"`, such as `143/145 paths`):
+  This is almost always caused by a mismatch in the `scan_layers` configuration between the checkpoint conversion script (e.g., `to_maxtext.py` or `to_huggingface.py`) and the trainer/inference runner (e.g., `train.py`).
+
+  - **Solution:** Ensure the `scan_layers` flag is set to the exact same value (`True` or `False`) in both the conversion command and your training/execution command.
 
 - If the converted checkpoint loads without errors but produces nonsensical output, likely an error in the Q/K/V weight reshaping logic during conversion.
 

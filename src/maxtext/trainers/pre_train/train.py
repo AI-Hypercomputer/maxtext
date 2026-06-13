@@ -45,7 +45,7 @@ from maxtext.utils import elastic_utils
 # Placeholder: internal
 
 # pylint: disable=too-many-positional-arguments
-from maxtext.layers.multi_token_prediction import calculate_mtp_acceptance_rate, calculate_mtp_loss
+from maxtext.layers.multi_token_prediction import calculate_mtp_acceptance_rate, calculate_mtp_loss, mtp_acceptance, mtp_losses
 from maxtext.common import checkpointing, profiler
 from maxtext.common.goodput import (
     GoodputEvent,
@@ -196,6 +196,16 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
     )
     intermediates = nnx.pop(model, nnx.Intermediate)
     intermediate_outputs = intermediates.to_pure_dict()
+
+    # MTP sows mtp_losses/mtp_acceptance as custom Variable subclasses, not
+    # Intermediate, so the nnx.pop above misses them. Pop them here under their
+    # collection names so calculate_mtp_loss / calculate_mtp_acceptance_rate
+    # find them. Otherwise the MTP loss is silently zeroed. They are also
+    # excluded from the returned state below so they don't leak into
+    # out_shardings.
+    if config.mtp_num_layers > 0:
+      intermediate_outputs["mtp_losses"] = nnx.pop(model, mtp_losses).to_pure_dict()
+      intermediate_outputs["mtp_acceptance"] = nnx.pop(model, mtp_acceptance).to_pure_dict()
 
     if config.num_vocab_tiling > 1:
       hidden_state_key = ("decoder", "hidden_states")
@@ -532,9 +542,10 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
 
   if isinstance(model, nn.Module):
     return new_state, metrics
-  # Drop Intermediates (e.g. sowed max_logits for QK-Clip) before returning;
-  # they're absent from state_mesh_shardings and would cause a leaf-count mismatch.
-  return nnx.state(new_state, nnx.Not(nnx.Intermediate)), metrics
+  # Drop Intermediates (e.g. sowed max_logits for QK-Clip) and the MTP sown
+  # vars (mtp_losses/mtp_acceptance) before returning. They're absent from
+  # state_mesh_shardings and would cause a leaf-count / structure mismatch.
+  return nnx.state(new_state, nnx.Not(nnx.Any(nnx.Intermediate, mtp_losses, mtp_acceptance))), metrics
 
 
 def eval_step(model, config, state, data, dropout_rng=None):

@@ -183,7 +183,7 @@ def score_responses(tmvp_config, question, responses, answers):
   raise ValueError(f"Unknown eval_mode: {eval_mode!r}")
 
 
-def _compute_row_reward(reward_fns, prompt, responses, answer, row_idx):
+def _compute_row_reward(reward_fns, prompt, question, responses, answer, row_idx):
   """Sum the per-function reward scores across all sampled responses for one prompt.
 
   Honors the sampling strategy `evaluate()` ran with: when `num_passes > 1`
@@ -192,6 +192,12 @@ def _compute_row_reward(reward_fns, prompt, responses, answer, row_idx):
   helper sums the reward across all of them. The caller divides the
   total by the number of (prompt, response) pairs to get the per-sample
   mean reward, mirroring tunix's GRPO per-rollout reward aggregation.
+
+  `question` is forwarded as a reward-fn kwarg because the built-in
+  `check_numbers` reward (and any user reward that wants to inspect the
+  raw question) reads it from `kwargs`. Training-time tunix passes the
+  whole dataset row to each reward fn; we mirror the kwargs the trainer
+  passes so eval-time and train-time reward calls are interchangeable.
 
   Returns a tuple `(score_sum, n_responses)`. On any exception the
   failure is logged and `(0.0, 0)` is returned so the caller's running
@@ -203,7 +209,7 @@ def _compute_row_reward(reward_fns, prompt, responses, answer, row_idx):
     score_sum = 0.0
     for resp in responses:
       for fn in reward_fns:
-        scores = fn(prompts=[prompt], completions=[resp], answer=[answer])
+        scores = fn(prompts=[prompt], completions=[resp], answer=[answer], question=question)
         if scores:
           score_sum += float(scores[0])
     return score_sum, len(responses)
@@ -283,7 +289,7 @@ def evaluate(
       # the actual per-(prompt, response) count at the end. See
       # `_compute_row_reward` for details.
       if use_reward:
-        row_sum, row_count = _compute_row_reward(reward_fns, prompt, responses, answer, total)
+        row_sum, row_count = _compute_row_reward(reward_fns, prompt, question, responses, answer, total)
         reward_sum += row_sum
         reward_count += row_count
 

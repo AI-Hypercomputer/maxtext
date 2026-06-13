@@ -42,6 +42,7 @@ from maxtext.utils import model_creation_utils
 from maxtext.utils import max_logging
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
 from maxtext.common.common_types import Config
+from maxtext.common import profiler
 from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from tunix.rl.rollout import base_rollout
 from tunix.rl.rollout.vllm_rollout import VllmRollout
@@ -50,6 +51,13 @@ from vllm.sampling_params import SamplingParams
 from maxtext.configs import pyconfig
 import maxtext.integration.vllm.maxtext_vllm_adapter as adapter
 
+# Force uses_mrope to False to disable 3D multimodal position IDs in text-only runs.
+# TODO(b/520142315): Class-level monkey patching is required here because ModelConfig.uses_mrope
+# is evaluated during the internal initialization of the LLM engine, making instance-level
+# configuration impossible. Check if a cleaner configuration option can be added in upstream vLLM.
+from vllm.config import ModelConfig
+
+ModelConfig.uses_mrope = property(lambda _: False)
 
 # --- DEFINE FLAGS GLOBALLY ---
 FLAGS = flags.FLAGS
@@ -110,6 +118,11 @@ def decode_with_vllm(config: Config) -> None:
     vllm_args["additional_config"]["sharding"]["sharding_strategy"]["expert_parallelism"] = config.ici_expert_parallelism
     vllm_args["enable_expert_parallel"] = enable_expert_parallel
 
+  if config.max_num_batched_tokens is not None:
+    vllm_args["max_num_batched_tokens"] = config.max_num_batched_tokens
+  if config.max_num_seqs is not None:
+    vllm_args["max_num_seqs"] = config.max_num_seqs
+
   max_logging.log(
       f"Initializing LLM with DP={config.ici_data_parallelism}, TP={config.ici_tensor_parallelism} "
       f"and EP={config.ici_expert_parallelism if enable_expert_parallel else 1}..."
@@ -157,7 +170,10 @@ def decode_with_vllm(config: Config) -> None:
       top_p=top_p,
   )
 
+  prof = profiler.Profiler(config)
+  prof.activate()
   outputs = llm.generate(prompts, sampling_params)
+  prof.deactivate()
 
   # max_logging.log Outputs
   for output in outputs:

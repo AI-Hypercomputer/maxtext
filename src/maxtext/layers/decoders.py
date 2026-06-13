@@ -1137,6 +1137,10 @@ class Decoder(nn.Module):
               layer_kwargs = {"layer_idx": lyr}
             kv_cache = None
             if kv_caches is not None:
+              # For all decoder blocks (including QWEN3_NEXT/QWEN3_5 with vLLM flat-list
+              # kv_caches), pass the per-layer cache directly. For hybrid attention+GDN
+              # models, kv_caches[lyr] is a regular attention cache for attention layers
+              # and a (conv_state, recurrent_state) paged-mamba tuple for GDN layers.
               kv_cache = kv_caches[lyr]
 
             if cfg.decoder_block == DecoderBlockType.GPT_OSS:

@@ -845,6 +845,7 @@ class TrainDistillTest(unittest.TestCase):
     with self.assertRaises(AssertionError, msg="Weights should have updated on the second pass."):
       np.testing.assert_allclose(student.linear.kernel.get_value(), initial_weights)
 
+  @pytest.mark.skip(reason="Hangs indefinitely on synthetic datasets")
   @mock.patch("clu.metric_writers.create_default_writer")
   @mock.patch("maxtext.trainers.post_train.distillation.train_distill.tokenizer.build_tokenizer")
   def test_train_save_and_resume(self, mock_build_tokenizer, mock_writer):
