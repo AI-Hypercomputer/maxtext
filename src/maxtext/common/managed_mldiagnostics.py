@@ -72,6 +72,6 @@ class ManagedMLDiagnostics:
         run_group=config.managed_mldiagnostics_run_group,
         configs=config_dict,
         gcs_path=config.managed_mldiagnostics_dir,
-        # TODO: b/455623960 - Remove the following once multi-region and prod support are enabled.
-        region="us-central1",
+        on_demand_xprof=config.managed_mldiagnostics_on_demand_profiling,
+        region=config.managed_mldiagnostics_region,
     )
