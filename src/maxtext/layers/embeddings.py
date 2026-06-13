@@ -284,6 +284,7 @@ class RotaryEmbedding(nnx.Module):
       # Not used in RotaryEmbedding but passed in by nnx.bridge.to_linen.
       # TODO: Remove when bridge no longer needed
       rope_linear_scaling_factor: float = 1.0,
+      rope_attention_scaling: float = 1.0,
       rngs: nnx.Rngs = None,
   ):
     """Initializes the RotaryEmbedding module.
@@ -306,6 +307,7 @@ class RotaryEmbedding(nnx.Module):
     self.fprop_dtype = fprop_dtype
     self.shard_mode = shard_mode
     self.rope_linear_scaling_factor = rope_linear_scaling_factor
+    self.rope_attention_scaling = rope_attention_scaling
 
     if self.embedding_dims % 2:
       raise ValueError("Embedding dim for rotary position embedding must be a multiple of 2.")
@@ -365,6 +367,9 @@ class RotaryEmbedding(nnx.Module):
     cos = jnp.concatenate([cos_half, cos_half], axis=-1)
 
     x_out = self.apply_rotary(inputs, cos, sin)
+
+    if self.rope_attention_scaling != 1.0:
+      x_out = x_out * self.rope_attention_scaling
 
     if self.cast_as_fprop_dtype:
       x_out = x_out.astype(self.fprop_dtype)
@@ -460,6 +465,7 @@ class PartialRotaryEmbedding(RotaryEmbedding):
       fprop_dtype: DType = jnp.bfloat16,
       partial_rotary_factor: float = 0.25,
       shard_mode: ShardMode = ShardMode.AUTO,
+      rope_attention_scaling: float = 1.0,
       rngs: nnx.Rngs = None,
   ):
     """Initializes the PartialRotaryEmbedding module.
@@ -486,6 +492,7 @@ class PartialRotaryEmbedding(RotaryEmbedding):
         cast_as_fprop_dtype=cast_as_fprop_dtype,
         fprop_dtype=fprop_dtype,
         shard_mode=shard_mode,
+        rope_attention_scaling=rope_attention_scaling,
         rngs=rngs,
     )
 
@@ -532,6 +539,7 @@ class Gemma4PartialRotaryEmbedding(RotaryEmbedding):
       fprop_dtype: DType = jnp.bfloat16,
       partial_rotary_factor: float = 0.25,
       shard_mode: ShardMode = ShardMode.AUTO,
+      rope_attention_scaling: float = 1.0,
       rngs: nnx.Rngs = None,
   ):
     """Initializes the instance."""

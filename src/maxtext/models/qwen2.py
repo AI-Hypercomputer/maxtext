@@ -18,6 +18,7 @@
 
 from typing import Any
 
+import jax
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
 import jax.numpy as jnp
@@ -32,7 +33,9 @@ from maxtext.layers import quantizations
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.layers.attentions import Attention
-from maxtext.layers.linears import MlpBlock
+from maxtext.layers.linears import MlpBlock, DenseGeneral
+from maxtext.layers import moe
+from maxtext.layers.moe import RoutedMoE
 from maxtext.utils import max_utils
 
 
@@ -215,3 +218,145 @@ Qwen2DecoderLayerToLinen = nnx_wrappers.to_linen_class(
     Qwen2DecoderLayer,
     base_metadata_fn=max_initializers.variable_to_logically_partitioned,
 )
+
+
+class Qwen2MoeSparseMoeBlock(nnx.Module):
+  """This module encapsulates the unique MoE structure of Qwen2-MoE, which includes:
+
+  1. A set of routed experts, where each token is sent to a subset of experts.
+  2. A single shared expert, which all tokens pass through.
+  3. A learnable gate that determines the contribution of the shared expert.
+
+  Attributes:
+    config: The model configuration object.
+    mesh: The device mesh for sharding.
+    quant: Optional quantization configuration.
+  """
+
+  def __init__(self, config: Config, mesh: Mesh, quant: None | Quant = None, *, rngs: nnx.Rngs):
+    self.config = config
+    self.mesh = mesh
+    self.quant = quant
+    cfg = self.config
+
+    # 1. Instantiate and apply the routed experts block.
+    self.routed_experts = moe.RoutedMoE(
+        config=cfg,
+        num_experts=cfg.num_experts,
+        num_experts_per_tok=cfg.num_experts_per_tok,
+        mesh=self.mesh,
+        kernel_init=max_initializers.nd_dense_init(cfg.dense_init_scale, "fan_in", "truncated_normal"),
+        kernel_axes=("embed", None),
+        intermediate_dim=cfg.moe_mlp_dim,
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        quant=self.quant,
+        rngs=rngs,
+    )
+
+    # 2. Instantiate and apply the shared expert.
+    self.shared_expert = MlpBlock(
+        config=cfg,
+        mesh=mesh,
+        in_features=cfg.emb_dim,
+        intermediate_dim=cfg.mlp_dim,
+        activations=cfg.mlp_activations,
+        intermediate_dropout_rate=cfg.dropout_rate,
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        quant=self.quant,
+        model_mode=config.model_call_mode,
+        rngs=rngs,
+    )
+
+    # 3. Instantiate and apply the gate for the shared expert.
+    self.shared_expert_gate = DenseGeneral(
+        in_features_shape=cfg.emb_dim,
+        out_features_shape=1,
+        use_bias=False,
+        dtype=cfg.dtype,
+        kernel_init=max_initializers.nd_dense_init(cfg.dense_init_scale, "fan_in", "truncated_normal"),
+        kernel_axes=("embed", None),
+        matmul_precision=cfg.matmul_precision,
+        rngs=rngs,
+    )
+
+  def __call__(self, hidden_states: jnp.ndarray, deterministic: bool) -> tuple[jnp.ndarray, jnp.ndarray | None]:
+    # 1. Apply the routed experts block.
+    routed_output, load_balance_loss, _ = self.routed_experts(hidden_states)
+
+    # 2. Apply the shared expert.
+    shared_expert_output = self.shared_expert(hidden_states, deterministic=deterministic)
+
+    # 3. Apply the gate for the shared expert.
+    shared_gate_output = self.shared_expert_gate(hidden_states)
+
+    # 4. Combine the outputs.
+    final_output = routed_output + jax.nn.sigmoid(shared_gate_output) * shared_expert_output
+
+    return final_output, load_balance_loss
+
+
+class Qwen2MoeDecoderLayer(AttentionWithNorm):
+  """Qwen2 Transformer decoder layer (MoE)."""
+
+  def __init__(
+      self,
+      config: Config,
+      mesh: Mesh,
+      model_mode: str,
+      quant: None | Quant,
+      rngs: nnx.Rngs,
+  ):
+    super().__init__(config, mesh, model_mode, quant, rngs)
+    self.moe_block = Qwen2MoeSparseMoeBlock(
+        config=config,
+        mesh=mesh,
+        quant=quant,
+        rngs=rngs,
+    )
+
+  def __call__(
+      self,
+      inputs: jnp.ndarray,
+      decoder_segment_ids: None | jnp.ndarray,
+      decoder_positions: None | jnp.ndarray,
+      deterministic: bool,
+      model_mode: str,
+      previous_chunk=None,
+      slot: None | int = None,
+      kv_cache: None | jnp.ndarray = None,
+      attention_metadata: None | dict[str, Any] = None,
+  ):
+    # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
+    if isinstance(inputs, tuple):
+      inputs = inputs[0]
+    hidden_states, intermediate_inputs, kv_cache = self.apply_attention_with_norm(
+        inputs,
+        decoder_segment_ids,
+        decoder_positions,
+        deterministic,
+        model_mode,
+        kv_cache=kv_cache,
+        attention_metadata=attention_metadata,
+    )
+
+    mlp_lnx, load_balance_loss = self.moe_block(hidden_states, deterministic=deterministic)
+    mlp_lnx = nn.with_logical_constraint(mlp_lnx, self.activation_axis_names)
+    if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
+      self.moe_lb_loss = nnx.Intermediate(load_balance_loss)
+
+    layer_output = intermediate_inputs + mlp_lnx
+    layer_output = nn.with_logical_constraint(layer_output, self.activation_axis_names)
+
+    if self.config.scan_layers:
+      return layer_output, None
+    else:
+      return layer_output, kv_cache
+
+
+Qwen2MoeDecoderLayerToLinen = nnx_wrappers.to_linen_class(
+    Qwen2MoeDecoderLayer,
+    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
+)
+
