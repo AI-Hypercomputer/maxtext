@@ -15,6 +15,9 @@
 name: CodeQuality
 
 on:
+  push:
+    branches:
+      - deprecate-aqt-keep-deps
   pull_request:
 
 concurrency:
