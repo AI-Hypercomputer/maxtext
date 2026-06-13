@@ -30,6 +30,7 @@ from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from tests.utils.test_helpers import get_test_config_path, get_test_base_output_directory
 
 import pytest
+
 pytestmark = pytest.mark.cpu_only
 
 
