@@ -356,7 +356,7 @@ class QuantizationCoverageTest(unittest.TestCase):
       import transformer_engine  # pylint: disable=unused-import,import-outside-toplevel
 
       has_te = True
-    except ImportError:
+    except (ImportError, OSError):
       has_te = False
 
     if has_te:
