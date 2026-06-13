@@ -72,9 +72,11 @@ jobs:
       options: ${{ inputs.container_resource_option }}
     steps:
       - name: Checkout MaxText
-        uses: actions/checkout@v5
-        with:
-          ref: ${{ inputs.maxtext_sha }}
+        run: |
+          git config --global --add safe.directory /__w/maxtext/maxtext
+          git clone https://github.com/google/maxtext.git .
+          git fetch origin ${{ inputs.maxtext_sha }}
+          git checkout FETCH_HEAD
       - name: Download the maxtext wheel
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
