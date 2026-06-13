@@ -65,7 +65,7 @@ python3 -m maxtext.checkpoint_conversion.standalone_scripts.convert_deepseek_fam
     --base_model_path $LOCAL_HF_PATH \
     --maxtext_model_path $GCS_PATH_TO_SAVE
 ```
-Use `convert_deepseek_family_unscanned_ckpt.py` with the same `--model_size` for the unscanned (decoding) layout.
+Use `convert_deepseek_family_unscanned_ckpt.py` with the same `--model_size` for the unscanned (decoding) layout. Converting a trillion-parameter variant this way holds the whole dequantized model plus the assembled output in host RAM (~2.5 TB for K2.6); on smaller hosts add `--low_memory true`, which streams tensors from the shards one at a time and stages converted weights in disk-backed memmaps under `TMPDIR` (needs free disk for one fp16 copy of the model, ~4x the int4 checkpoint size).
 
 > **Note:** The Pre-training / fine-tuning / decoding flows below use `model_name=kimi-k2-1t`. K2-Thinking / K2.5 / K2.6 text branches share K2's architecture, so the same config works — just point `tokenizer_path` at the variant-specific HF tokenizer (e.g. `moonshotai/Kimi-K2.5`) and `load_parameters_path` at the converted checkpoint.
 
