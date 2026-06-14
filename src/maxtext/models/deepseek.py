@@ -63,7 +63,7 @@ class DeepSeekGenericLayer(nnx.Module):
       model_mode: str,
       mesh: Mesh,
       rngs: nnx.Rngs,
-      quant: Optional[quantizations.AqtQuantization] = None,
+      quant: Optional[quantizations.Quantization] = None,
       layer_idx: int = -1,
   ) -> None:
     self.config = config
@@ -315,7 +315,7 @@ class DeepSeekDenseLayer(DeepSeekGenericLayer):
       model_mode: str,
       mesh: Mesh,
       rngs: nnx.Rngs,
-      quant: Optional[quantizations.AqtQuantization] = None,
+      quant: Optional[quantizations.Quantization] = None,
       layer_idx: int = -1,
   ) -> None:
     super().__init__(config, model_mode, mesh, rngs, quant, layer_idx)
@@ -404,7 +404,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       model_mode: str,
       mesh: Mesh,
       rngs: nnx.Rngs,
-      quant: Optional[quantizations.AqtQuantization] = None,
+      quant: Optional[quantizations.Quantization] = None,
       layer_idx: int = -1,
   ) -> None:
     super().__init__(config, model_mode, mesh, rngs, quant, layer_idx)

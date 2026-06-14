@@ -33,7 +33,7 @@ from maxtext.layers.linears import MlpBlock
 
 import jax.sharding
 from maxtext.layers.normalizations import RMSNorm
-from maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.layers.quantizations import Quantization as Quant
 from maxtext.utils import max_utils
 
 

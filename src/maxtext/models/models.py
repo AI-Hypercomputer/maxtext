@@ -33,7 +33,7 @@ from maxtext.layers.decoders import Decoder
 from maxtext.layers.embeddings import Embed, embed_as_linen
 from maxtext.layers.encoders import AudioEncoder, VisionEncoder, audio_encoder_as_linen, vision_encoder_as_linen
 from maxtext.layers.multi_token_prediction import MultiTokenPredictionBlock, multi_token_prediction_block_as_linen
-from maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.layers.quantizations import Quantization as Quant
 from maxtext.multimodal import processor as mm_processor
 from maxtext.utils import max_utils
 

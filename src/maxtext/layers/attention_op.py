@@ -70,7 +70,7 @@ from maxtext.kernels.attention.ragged_attention import ragged_gqa
 from maxtext.kernels.attention.ragged_attention import ragged_mha
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.initializers import variable_to_logically_partitioned
-from maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.layers.quantizations import Quantization as Quant
 from maxtext.utils import max_utils
 from maxtext.utils.sharding import logical_to_mesh_axes, maybe_shard_with_pspec
 import numpy as np

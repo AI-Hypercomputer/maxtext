@@ -62,7 +62,6 @@ class DecodeTests(unittest.TestCase):
           "max_target_length=128",
           "per_device_batch_size=1",
           "quantization=int8",
-          "quantize_kvcache=True",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ],
       "pdb_lt_1": [  # tests decode with per_device_batch_size < 1

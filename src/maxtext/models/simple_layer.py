@@ -37,7 +37,7 @@ class SimpleDecoderLayer(nnx.Module):
       mesh: Mesh,
       model_mode: str,
       rngs: nnx.Rngs,
-      quant: Optional[quantizations.AqtQuantization] = None,
+      quant: Optional[quantizations.Quantization] = None,
   ) -> None:
 
     self.config = config
@@ -93,7 +93,7 @@ class SimpleMlpDecoderLayer(nnx.Module):
       mesh: Mesh,
       model_mode: str,
       rngs: nnx.Rngs,
-      quant: Optional[quantizations.AqtQuantization] = None,
+      quant: Optional[quantizations.Quantization] = None,
   ) -> None:
 
     self.config = config

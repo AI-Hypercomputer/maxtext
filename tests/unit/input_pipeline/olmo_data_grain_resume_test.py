@@ -43,6 +43,10 @@ from maxtext.input_pipeline.olmo_data_grain import (
     make_olmo_grain_data_loader,
 )
 
+import pytest
+
+pytestmark = pytest.mark.cpu_only
+
 
 def _write_raw_uint32(tmpdir: str, name: str, values: np.ndarray) -> str:
   assert values.dtype == np.uint32 and values.ndim == 1

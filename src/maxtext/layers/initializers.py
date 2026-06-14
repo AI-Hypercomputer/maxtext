@@ -20,7 +20,6 @@ import jax
 
 from flax import linen as nn
 from flax import nnx
-from aqt.jax.v2 import aqt_tensor
 
 from maxtext.common.common_types import Array, DType, Shape, PRNGKey
 
@@ -68,7 +67,7 @@ def variable_to_logically_partitioned(variable: nnx.Variable):
   present, it wraps the variable's value in `nn.LogicallyPartitioned` to apply
   the specified sharding constraints.
 
-  It handles special cases for `aqt_tensor.QTensor` and variables of type
+  It handles special cases for variables of type
   `_overwrite_with_gradient` by returning their values directly without
   wrapping.
 
@@ -79,8 +78,6 @@ def variable_to_logically_partitioned(variable: nnx.Variable):
     The variable's value, potentially wrapped in `nn.LogicallyPartitioned`.
   """
   val = variable.get_value()
-  if isinstance(val, aqt_tensor.QTensor):
-    return val
 
   if variable.type.__name__ == "_overwrite_with_gradient":
     return val

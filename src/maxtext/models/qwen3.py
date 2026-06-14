@@ -41,7 +41,7 @@ from maxtext.layers import nnx_wrappers
 from maxtext.layers import quantizations
 from maxtext.layers.embeddings import Qwen3OmniMoeVisionPosEmbedInterpolate, PositionalEmbedding
 from maxtext.layers.normalizations import RMSNorm, l2norm, Qwen3NextRMSNorm, Qwen3NextRMSNormGated
-from maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.layers.quantizations import Quantization as Quant
 from maxtext.layers.attentions import Attention
 from maxtext.layers.linears import DenseGeneral, MlpBlock
 from maxtext.layers.moe import RoutedMoE

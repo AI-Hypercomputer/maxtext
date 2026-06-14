@@ -30,7 +30,7 @@ from maxtext.layers import quantizations
 from maxtext.layers.attentions import Attention
 from maxtext.layers.linears import Dropout, MlpBlock
 from maxtext.layers.normalizations import RMSNorm
-from maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.layers.quantizations import Quantization as Quant
 from maxtext.utils import max_utils
 from maxtext.utils.sharding import create_sharding, maybe_shard_with_logical
 from maxtext.layers.learn_to_init_layer import apply_lti_modification
