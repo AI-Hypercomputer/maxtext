@@ -17,9 +17,6 @@
 name: MaxText Package Tests
 
 on:
-  push:
-    branches:
-      - deprecate-aqt-keep-deps
   pull_request:
   workflow_call:
   workflow_dispatch:
