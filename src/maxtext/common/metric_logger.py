@@ -197,7 +197,7 @@ class MetricLogger:
 
     if self.config.num_experts > 1:
       moe_lb_loss = scalars.get("learning/moe_lb_loss", 0.0)
-      log_parts.append(f"moe_lb_loss: {moe_lb_loss:.3f}")
+      log_parts.append(f"moe_lb_loss: {moe_lb_loss:.6f}")
 
     if self.config.mtp_num_layers > 0:
       mtp_loss = scalars.get("learning/mtp_loss", 0.0)
@@ -217,7 +217,7 @@ class MetricLogger:
         f"avg_z_loss={scalars.get('eval/avg_z_loss', 0.0):.3f}",
     ]
     if self.config.num_experts > 1:
-      log_parts.append(f"avg_moe_lb_loss={scalars['eval/avg_moe_lb_loss']:.3f}")
+      log_parts.append(f"avg_moe_lb_loss={scalars['eval/avg_moe_lb_loss']:.6f}")
     if self.config.mtp_num_layers > 0:
       log_parts.extend(
           [

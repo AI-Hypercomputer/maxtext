@@ -238,6 +238,21 @@ def get_optimizer(config, learning_rate_schedule, model=None):
         lambda params: jax.tree_util.tree_map(lambda x: "frozen" if x else "trainable", freeze_mask_fn(params)),
     )
 
+  if getattr(config, "routed_bias", False):
+    import re
+    from flax import traverse_util
+    bias_regex = re.compile(".*gate.*bias.*")
+    # Architectural Note: Optax's Muon implementation correctly routes 2D+ matrices to the
+    # Newton-Schulz algorithm, but its fallback logic for 1D vectors (like our GateLogit bias)
+    # routes them to a standard AdamW optimizer *without* exposing a weight decay mask.
+    # To prevent the Muon optimizer from decaying our auxiliary-loss-free bias to zero,
+    # we apply a global optax.set_to_zero() mask here.
+    def bias_mask_fn(params):
+      flat_params = traverse_util.flatten_dict(params)
+      mask = {k: bool(bias_regex.match("/".join(map(str, k)))) for k in flat_params.keys()}
+      return traverse_util.unflatten_dict(mask)
+    base_opt = optax.chain(base_opt, optax.masked(optax.set_to_zero(), bias_mask_fn))
+
   return base_opt
 
 
