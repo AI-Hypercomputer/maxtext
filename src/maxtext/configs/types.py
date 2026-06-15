@@ -1786,6 +1786,7 @@ class ManagedMLDiagnostics(BaseModel):
 
   managed_mldiagnostics: bool = Field(False, description="Enable managed mldiagnostics.")
   managed_mldiagnostics_run_group: str = Field("", description="Name used to group multiple runs.")
+  managed_mldiagnostics_region: str = Field("", description="GCP region for managed mldiagnostics.")
 
 
 class Goodput(BaseModel):

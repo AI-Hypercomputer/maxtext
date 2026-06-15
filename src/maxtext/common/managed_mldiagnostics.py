@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Create the managed mldiagnostics run."""
+
 import json
 from typing import Any
 
@@ -24,16 +25,16 @@ from maxtext.configs.pyconfig import KEYS_NO_LOGGING
 
 
 class ManagedMLDiagnostics:
-  """
-  ML Diagnostics Run, implemented with the Singleton pattern.
+  """ML Diagnostics Run, implemented with the Singleton pattern.
+
   Ensures that only one instance of the class can exist.
   """
 
   _instance = None  # Class attribute to hold the single instance
 
   def __new__(cls, *args: Any, **kwargs: Any):
-    """
-    Overrides the instance creation method.
+    """Overrides the instance creation method.
+
     If an instance already exists, it is returned instead of creating a new one.
     """
     if cls._instance is None:
@@ -42,9 +43,7 @@ class ManagedMLDiagnostics:
     return cls._instance
 
   def __init__(self, config):
-    """
-    Initializes the ManagedMLDiagnostics, ensuring this method runs only once.
-    """
+    """Initializes the ManagedMLDiagnostics, ensuring this method runs only once."""
     # We need a flag to ensure __init__ only runs once,
     # as the object is returned multiple times by __new__.
     if hasattr(self, "_initialized"):
@@ -67,11 +66,11 @@ class ManagedMLDiagnostics:
     config_dict = {key: value for key, value in config.get_keys().items() if should_log_key(key, value)}
 
     # Create a run for the managed mldiagnostics, and upload the configuration.
+    region = config.managed_mldiagnostics_region if config.managed_mldiagnostics_region else None
     mldiag.machinelearning_run(
         name=f"{config.run_name}",
         run_group=config.managed_mldiagnostics_run_group,
         configs=config_dict,
         gcs_path=config.managed_mldiagnostics_dir,
-        # TODO: b/455623960 - Remove the following once multi-region and prod support are enabled.
-        region="us-central1",
+        region=region,
     )
