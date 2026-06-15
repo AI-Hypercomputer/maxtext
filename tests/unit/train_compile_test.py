@@ -807,7 +807,7 @@ class TrainCompile(parameterized.TestCase):
   )
   @pytest.mark.cpu_only
   def test_deepseek4(self, scan_layers):
-    # test deepseek4 compile
+    # test deepseek4 compile (Linen-only: DeepSeek NNX decoder rewrite is a follow-up PR).
     compiled_trainstep_file = f"/tmp/test_deepseek4_{scan_layers}.pickle"
     train_compile_main(
         (
@@ -824,6 +824,9 @@ class TrainCompile(parameterized.TestCase):
             "attention=dot_product",
             "dtype=bfloat16",
             "weight_dtype=bfloat16",
+            "enable_nnx=False",
+            "pure_nnx=False",
+            "pure_nnx_decoder=False",
         )
     )
 

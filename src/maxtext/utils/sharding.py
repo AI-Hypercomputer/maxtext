@@ -176,9 +176,7 @@ def remove_size_one_mesh_axis(spec, mesh):
   return P(*new_spec, unreduced=spec.unreduced, reduced=spec.reduced)
 
 
-def get_nnx_var_named_sharding_with_scan_axis(
-    v: nnx.Variable, mesh
-) -> nnx.Variable:
+def get_nnx_var_named_sharding_with_scan_axis(v: nnx.Variable, mesh) -> nnx.Variable:
   """Compute NamedSharding for an NNX variable, correctly handling the scan axis."""
   val = v.get_value()
   if not hasattr(val, "shape"):
@@ -190,11 +188,7 @@ def get_nnx_var_named_sharding_with_scan_axis(
       return v.replace(jax.tree.map(lambda _: replicated, val))
     return v
   metadata = v.get_metadata()
-  out_sharding = (
-      metadata.get("out_sharding")
-      or metadata.get("sharding_names")
-      or metadata.get("sharding")
-  )
+  out_sharding = metadata.get("out_sharding") or metadata.get("sharding_names") or metadata.get("sharding")
   if not out_sharding:
     pspec = P()
   else:
@@ -202,11 +196,7 @@ def get_nnx_var_named_sharding_with_scan_axis(
     if nnx.PARTITION_NAME in metadata:
       partition_name = metadata[nnx.PARTITION_NAME]
       scan_axis = metadata.get("param_scan_axis", 0)
-      out_sharding = (
-          [out_sharding]
-          if isinstance(out_sharding, str)
-          else list(out_sharding)
-      )
+      out_sharding = [out_sharding] if isinstance(out_sharding, str) else list(out_sharding)
       if partition_name not in out_sharding:
         out_sharding.insert(scan_axis, partition_name)
       out_sharding = tuple(out_sharding)
@@ -215,9 +205,7 @@ def get_nnx_var_named_sharding_with_scan_axis(
     local_rules = metadata.get("sharding_rules", ())
     if context_rules or local_rules:
       local_rules_list = list(local_rules) if local_rules is not None else []
-      context_rules_list = (
-          list(context_rules) if context_rules is not None else []
-      )
+      context_rules_list = list(context_rules) if context_rules is not None else []
       rules = local_rules_list + context_rules_list
       pspec = logical_to_mesh_axes(out_sharding, mesh, rules=rules)
     else:
@@ -699,6 +687,33 @@ def maybe_update_params_sharding_with_opt_nnx(
   updated_state.model = new_model_shardings
 
   return prev_params_shardings, updated_state
+
+
+def build_zero1_input_state_mesh_shardings(config, state_mesh_shardings, params_shardings):
+  """Build the train-step input shardings under shard_optimizer_over_data (Zero-1).
+
+  Model params on input use the original pre-Zero-1 sharding (params_shardings), while the rest
+  of the state — including the optimizer state — keeps the Zero-1 layout from state_mesh_shardings,
+  so the optimizer state input matches its output. When shard_optimizer_over_data is False,
+  state_mesh_shardings passes through unchanged.
+  """
+  if not config.shard_optimizer_over_data:
+    return state_mesh_shardings
+  if not config.pure_nnx:
+    return state_mesh_shardings.replace(params=params_shardings)
+  # nnx.State has no .replace: shallow-copy via tree_map (preserves nested container
+  # types) and overlay params_shardings under input_state.model.
+  input_state = jax.tree_util.tree_map(lambda x: x, state_mesh_shardings, is_leaf=lambda x: isinstance(x, nnx.Variable))
+
+  def _overlay(model_node, params_node):
+    for k, pv in params_node.items():
+      if isinstance(pv, nnx.Variable):
+        model_node[k] = pv
+      elif hasattr(pv, "items"):
+        _overlay(model_node[k], pv)
+
+  _overlay(input_state.model, params_shardings)
+  return input_state
 
 
 def logical_axis_rules_pp_act_as_dp(logical_rules):
