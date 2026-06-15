@@ -30,18 +30,7 @@ gettempdir = tempfile.gettempdir
 class Train(parameterized.TestCase):
   """Test for tokamax gmm and splash."""
 
-  @parameterized.named_parameters(
-      {
-          "testcase_name": "gmm bf16",
-          "quantization": "",
-      },
-      {
-          "testcase_name": "gmm fp8",
-          "quantization": "fp8_full",
-      },
-  )
-  @pytest.mark.tpu_only
-  def test_different_configs(self, quantization: str):
+  def _run_test_different_configs(self, quantization: str):
     """Smoke train with small config."""
     test_tmpdir = os.environ.get("TEST_TMPDIR", gettempdir())
     outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", test_tmpdir)
@@ -86,6 +75,17 @@ class Train(parameterized.TestCase):
         f"metrics_file={os.path.join(outputs_dir, 'metrics.json')}",
     ]
     train_main(args)
+
+  @pytest.mark.tpu_only
+  def test_different_configs_gmm_bf16(self):
+    """Smoke train with small config."""
+    self._run_test_different_configs("")
+
+  @pytest.mark.skip(reason="b/509790223: Linen Fp8DotGeneralBase leaks intermediates inside NNX context")
+  @pytest.mark.tpu_only
+  def test_different_configs_gmm_fp8(self):
+    """Smoke train with small config."""
+    self._run_test_different_configs("fp8_full")
 
 
 if __name__ == "__main__":
