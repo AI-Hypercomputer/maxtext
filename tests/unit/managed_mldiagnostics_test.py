@@ -17,7 +17,7 @@
 import unittest
 from unittest import mock
 
-from maxtext.common.managed_mldiagnostics import ManagedMLDiagnostics
+from maxtext.common.managed_mldiagnostics import ManagedMLDiagnostics, mldiag
 import pytest
 
 
@@ -34,7 +34,7 @@ class ManagedMLDiagnosticsTest(unittest.TestCase):
     mock_config = mock.MagicMock()
     mock_config.managed_mldiagnostics = False
 
-    with mock.patch.object(ManagedMLDiagnostics.mldiag, "machinelearning_run") as mock_run:
+    with mock.patch.object(mldiag, "machinelearning_run") as mock_run:
       ManagedMLDiagnostics(mock_config)
       mock_run.assert_not_called()
 
@@ -45,15 +45,17 @@ class ManagedMLDiagnosticsTest(unittest.TestCase):
     mock_config.run_name = "test_run"
     mock_config.managed_mldiagnostics_run_group = "test_group"
     mock_config.managed_mldiagnostics_dir = "gs://test_dir"
+    mock_config.managed_mldiagnostics_on_demand_profiling = False
     mock_config.get_keys.return_value = {"key1": "val1"}
 
-    with mock.patch.object(ManagedMLDiagnostics.mldiag, "machinelearning_run") as mock_run:
+    with mock.patch.object(mldiag, "machinelearning_run") as mock_run:
       ManagedMLDiagnostics(mock_config)
       mock_run.assert_called_once_with(
           name="test_run",
           run_group="test_group",
           configs={"key1": "val1"},
           gcs_path="gs://test_dir",
+          on_demand_xprof=False,
           region=None,
       )
 
@@ -64,15 +66,17 @@ class ManagedMLDiagnosticsTest(unittest.TestCase):
     mock_config.run_name = "test_run"
     mock_config.managed_mldiagnostics_run_group = "test_group"
     mock_config.managed_mldiagnostics_dir = "gs://test_dir"
+    mock_config.managed_mldiagnostics_on_demand_profiling = False
     mock_config.get_keys.return_value = {"key1": "val1"}
 
-    with mock.patch.object(ManagedMLDiagnostics.mldiag, "machinelearning_run") as mock_run:
+    with mock.patch.object(mldiag, "machinelearning_run") as mock_run:
       ManagedMLDiagnostics(mock_config)
       mock_run.assert_called_once_with(
           name="test_run",
           run_group="test_group",
           configs={"key1": "val1"},
           gcs_path="gs://test_dir",
+          on_demand_xprof=False,
           region="us-east1",
       )
 
