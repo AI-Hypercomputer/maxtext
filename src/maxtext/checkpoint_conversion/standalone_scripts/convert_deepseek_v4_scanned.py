@@ -26,19 +26,17 @@ Transformer = models.transformer_as_linen
 # Values: List of HuggingFace layer indices that belong to this block.
 # ==============================================================================
 SCANNED_LAYER_MAPPING = {
-    # 1. Prefix Blocks
-    "decoder-pre_layers-layers_0": [0], 
-    "decoder-pre_layers-layers_1": [1], 
-    "decoder-pre_layers-layers_2": [2], 
+    # 1. Standalone/Unscanned layers
+    "decoder-layers_0": [0],
+    "decoder-layers_1": [1],
+    "decoder-layers_42": [42],
 
-    # 2. Scanned Blocks (Adjusted for a 43-layer model: 0 through 42)
-    # range(start, stop, step) - Stop is exclusive, so 43 stops at 42.
-    
-    # Odd indices: 3, 5, 7 ... 41
-    "decoder-layers-layers_0": list(range(3, 43, 2)), 
-    
-    # Even indices: 4, 6, 8 ... 42
-    "decoder-layers-layers_1": list(range(4, 43, 2)), 
+    # 2. Scanned Blocks
+    # Even indices starting from 2 to 40 (inclusive) -> scanned block 0
+    "decoder-scanned_blocks-layers_0": list(range(2, 42, 2)),
+
+    # Odd indices starting from 3 to 41 (inclusive) -> scanned block 1
+    "decoder-scanned_blocks-layers_1": list(range(3, 42, 2)),
 }
 
 def get_path_string(path):
@@ -61,14 +59,15 @@ def get_path_string2(path):
 
 def get_block_prefix(path_str):
   """Extracts the high-level block prefix for chunking."""
-  if not path_str.startswith("decoder-pre_layers") and \
-     not path_str.startswith("decoder-layers") and \
-     not path_str.startswith("decoder-post_layers"):
-    return "GLOBAL"
-  parts = path_str.split("-")
-  if len(parts) >= 3:
-    return f"{parts[0]}-{parts[1]}-{parts[2]}"
-  return "UNKNOWN"
+  if path_str.startswith("decoder-scanned_blocks-layers_"):
+    parts = path_str.split("-")
+    if len(parts) >= 3:
+      return f"{parts[0]}-{parts[1]}-{parts[2]}"
+  elif path_str.startswith("decoder-layers_"):
+    parts = path_str.split("-")
+    if len(parts) >= 2:
+      return f"{parts[0]}-{parts[1]}"
+  return "GLOBAL"
 
 def valid_match(hf_param):
   if isinstance(hf_param, torch.Tensor):
@@ -116,6 +115,22 @@ def preload_all_weights(weight_map, hf_weights_dir):
 def get_unscanned_weight(hf_prefix, suffix, weight_dict, config):
   """Extracts a single un-scanned layer weight. Extracted from original map_fn."""
   num_experts = config.num_experts
+
+  # Normalize DeepSeek V4 compressor prefixes to legacy format
+  if suffix.startswith("self_attention-csa_compressor-"):
+    suffix = suffix.replace("self_attention-csa_compressor-", "self_attention-compressor-")
+  elif suffix.startswith("self_attention-hca_compressor-"):
+    suffix = suffix.replace("self_attention-hca_compressor-", "self_attention-compressor-")
+
+  # Normalize q_proj to q_b_proj for indexer
+  if "indexer-q_proj-kernel" in suffix:
+    suffix = suffix.replace("indexer-q_proj-kernel", "indexer-q_b_proj-kernel")
+
+  # mHC Norms (unweighted in HF, so we initialize to ones)
+  if suffix == "mhc_attention-mhc_norm-scale":
+    return np.ones((config.base_emb_dim * config.mhc_expansion_rate,), dtype=np.float32)
+  if suffix == "mhc_mlp-mhc_norm-scale":
+    return np.ones((config.base_emb_dim * config.mhc_expansion_rate,), dtype=np.float32)
 
   # RMSNorms
   if suffix == "pre_self_attention_layer_norm-scale" and f"{hf_prefix}.attn_norm.weight" in weight_dict:
@@ -283,7 +298,7 @@ def main():
   argv = sys.argv
   if len(argv) < 2:
     # Important: Default arguments updated for a scanned conversion run
-    argv = ['', 'src/maxtext/configs/base.yml', 'model_name=deepseek_v4-flash', 'override_model_config=True', 'attention=dot_product', 'skip_jax_distributed_system=True', 'weight_dtype=bfloat16', 'scan_layers=True', 'base_output_directory=gs://snehalv-data/deepseek_v4-flash/scanned/']
+    argv = ['', 'src/maxtext/configs/base.yml', 'model_name=deepseek4', 'override_model_config=True', 'attention=dot_product', 'skip_jax_distributed_system=True', 'weight_dtype=bfloat16', 'scan_layers=True', 'base_output_directory=gs://snehalv-data/deepseek_v4-flash/scanned/']
 
   print("Initializing configuration...")
   # Initialize without heavyweight runtime
