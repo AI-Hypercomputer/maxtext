@@ -112,7 +112,10 @@ def generate_maxtext_config(vllm_config: VllmConfig) -> pyconfig.HyperParameters
       if hasattr(vllm_config.model_config.hf_config, "text_config")
       else vllm_config.model_config.hf_config
   )
-  hidden_size = getattr(hf_config, "moe_intermediate_size", None)
+  hidden_size = (
+      getattr(hf_config, "moe_intermediate_size", None)
+      or getattr(hf_config, "intermediate_size", None)
+  )
   num_lanes = pltpu.get_tpu_info().num_lanes
   num_kv_heads = hf_config.num_key_value_heads
 
