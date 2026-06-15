@@ -261,12 +261,9 @@ def is_oom(argv: Sequence[str]) -> bool:
   # Update params_shardings when shard_optimizer_over_data is enabled (Zero-1)
   params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
 
-  # When ZeRO-1 is enabled, we need to use the original params_shardings for input shardings
-  # but keep the updated state_mesh_shardings for the optimizer state
-  if config.shard_optimizer_over_data:
-    input_state_mesh_shardings = state_mesh_shardings.replace(params=params_shardings)
-  else:
-    input_state_mesh_shardings = state_mesh_shardings
+  input_state_mesh_shardings = sharding.build_zero1_input_state_mesh_shardings(
+      config, state_mesh_shardings, params_shardings
+  )
 
   # Get data sharding
   data_sharding = sharding.get_input_data_sharding(config, topology_mesh)
@@ -343,12 +340,9 @@ def main(argv: Sequence[str]) -> None:
   # Update params_shardings when shard_optimizer_over_data is enabled (Zero-1)
   params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
 
-  # When ZeRO-1 is enabled, we need to use the original params_shardings for input shardings
-  # but keep the updated state_mesh_shardings for the optimizer state
-  if config.shard_optimizer_over_data:
-    input_state_mesh_shardings = state_mesh_shardings.replace(params=params_shardings)
-  else:
-    input_state_mesh_shardings = state_mesh_shardings
+  input_state_mesh_shardings = sharding.build_zero1_input_state_mesh_shardings(
+      config, state_mesh_shardings, params_shardings
+  )
 
   # Get data sharding
   data_sharding = sharding.get_input_data_sharding(config, topology_mesh)

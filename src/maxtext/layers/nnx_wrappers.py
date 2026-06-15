@@ -26,7 +26,6 @@ from flax import nnx
 from flax.core import FrozenDict
 from flax.core import meta
 from flax.nnx import graph
-from flax.nnx import tracers as nnx_tracers
 from flax.nnx import variablelib
 from flax.nnx.bridge import module as bdg_module
 from flax.nnx.module import Module
@@ -178,19 +177,6 @@ def is_linen_initializing() -> bool:
   if module is not None and hasattr(module, "is_initializing") and callable(module.is_initializing):
     return module.is_initializing()
   return False
-
-
-def _refresh_variable_trace_state(module: Module) -> None:
-  """Resets stale ``_trace_state`` on Variables to unblock downstream ``nnx.split``.
-
-  ``nnx.update`` called with JAX tracer values uses ``_unsafe_bypass_check=True``,
-  which leaves Variables with a stale ``_trace_state`` from the outer Python
-  context and breaks ``nnx.split`` with "Cannot extract graph node from different
-  trace level". Resets ``_trace_state`` on any Variable whose ``_can_update`` is False.
-  """
-  for _, v in nnx.graph.iter_graph(module):
-    if isinstance(v, variablelib.Variable) and not v._can_update:  # pylint: disable=protected-access
-      object.__setattr__(v, "_trace_state", nnx_tracers.TraceState())
 
 
 class ToNNX(Module):
@@ -539,9 +525,17 @@ class ToLinen(linen.Module):
           f"Found unknown module paths in incoming state:{paths_str}. Intermediate modules have been reconstructed."
       )
 
+      # Filter out unknown paths so we don't try to assign them to static attributes
+      filtered_state_flat = {k: v for k, v in new_state_flat.items() if k not in unknown_state_flat}
+      new_state = nnx.State(nnx.traversals.unflatten_mapping(filtered_state_flat))
+
+    # Rebind the module to the current trace via split / update / merge.
+    # nnx.update directly on the live module can leave stale tracers.
+    graphdef, full_state = nnx.split(module)
+    nnx.update(full_state, new_state)
+    module = nnx.merge(graphdef, full_state)
+
     _fix_for_qwix_quantization(module)
-    nnx.update(module, new_state)
-    _refresh_variable_trace_state(module)
     method_fn = _get_module_method(module, nnx_method)
     out = method_fn(module, *args, **kwargs)
     self._update_variables(module)
