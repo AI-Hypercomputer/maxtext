@@ -541,9 +541,14 @@ def _initialize_pydantic(argv: list[str] | None = None, **kwargs) -> MaxTextConf
   if "pytest" not in sys.modules:
     max_utils.maybe_initialize_jax_distributed_system(pydantic_kwargs)
   if pydantic_kwargs.get("jax_cache_dir"):
-    from jax.experimental.compilation_cache import compilation_cache  # pylint: disable=import-outside-toplevel
+    if pydantic_kwargs.get("dump_hlo"):
+      max_logging.warning(
+          "JAX compilation cache is disabled because dump_hlo is True. HLO dumping requires recompilation."
+      )
+    else:
+      from jax.experimental.compilation_cache import compilation_cache  # pylint: disable=import-outside-toplevel
 
-    compilation_cache.set_cache_dir(os.path.expanduser(pydantic_kwargs["jax_cache_dir"]))
+      compilation_cache.set_cache_dir(os.path.expanduser(pydantic_kwargs["jax_cache_dir"]))
 
   pydantic_config = types.MaxTextConfig(**pydantic_kwargs)
   config = HyperParameters(pydantic_config)
