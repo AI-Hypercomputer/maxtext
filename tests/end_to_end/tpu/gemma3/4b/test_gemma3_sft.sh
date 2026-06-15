@@ -17,6 +17,7 @@
 set -ex
 
 run_id=${1:-$(date +%Y-%m-%d-%H-%M-%S)}
+use_pathways=${2:-false}
 MODEL_NAME='gemma3-4b'
 
 # Non-Googlers please remember to point `BASE_OUTPUT_DIRECTORY` to the GCS paths where you have the scanned and unscanned checkpoints stored
@@ -31,7 +32,7 @@ python3 -m maxtext.inference.vllm_decode \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
     hbm_utilization_vllm=0.5 \
     prompt="Suggest some famous landmarks in London." \
-    use_chat_template=True scan_layers=false
+    use_chat_template=True scan_layers=false enable_single_controller=${use_pathways}
 
 # Step 2: Run SFT on the converted checkpoint
 python3 -m maxtext.trainers.post_train.sft.train_sft \
@@ -39,7 +40,7 @@ python3 -m maxtext.trainers.post_train.sft.train_sft \
     load_parameters_path=${SCANNED_CKPT_PATH} \
     per_device_batch_size=1 run_name=${run_id} \
     steps=5 scan_layers=true \
-    model_name=${MODEL_NAME} enable_single_controller=True \
+    model_name=${MODEL_NAME} enable_single_controller=${use_pathways} \
     checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False
 
 # Step 3: Run inference on the checkpoint generated from the previous run
@@ -49,6 +50,6 @@ python3 -m maxtext.inference.vllm_decode \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
     hbm_utilization_vllm=0.5 \
     prompt="Suggest some famous landmarks in London." \
-    use_chat_template=True scan_layers=true
+    use_chat_template=True scan_layers=true enable_single_controller=${use_pathways}
 
 
