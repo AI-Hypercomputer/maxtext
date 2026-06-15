@@ -838,6 +838,7 @@ tpu_num_sparse_cores_to_trace: 2
 # - upload xplane profiling, if it is enabled.
 # - upload training metrics, at the defined log_period interval.
 managed_mldiagnostics: false # Whether to enable the managed diagnostics
+managed_mldiagnostics_on_demand_profiling: true # Enable on-demand profiling server by default
 managed_mldiagnostics_run_group: ""  # Optional. Used to group multiple runs.
 managed_mldiagnostics_region: "" # Optional. GCP region for managed mldiagnostics. If empty, it will be auto-detected by the SDK.
 

@@ -72,5 +72,6 @@ class ManagedMLDiagnostics:
         run_group=config.managed_mldiagnostics_run_group,
         configs=config_dict,
         gcs_path=config.managed_mldiagnostics_dir,
+        on_demand_xprof=config.managed_mldiagnostics_on_demand_profiling,
         region=region,
     )
