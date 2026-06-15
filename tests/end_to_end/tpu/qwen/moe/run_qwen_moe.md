@@ -9,13 +9,19 @@ Qwen3 is a family of open-source large language models from the Qwen team at Ali
 
 -   **Qwen3-480B-A35B**
 
+-   **Qwen3-Omni-30B-A3B**
+
 -   **Qwen3.5-397B-A17B**
 
 -   **Qwen3.5-35B-A3B**
 
 For more details on Qwen3 architecture, see the [Qwen3 Technical Report](https://arxiv.org/abs/2505.09388).
 
+For more details on Qwen3-Omni architecture, see the [Qwen3-Omni Technical Report](https://arxiv.org/abs/2509.17765).
+
 For more details on Qwen3.5 architecture, see the [Qwen3.5 Blog](https://qwen.ai/blog?id=qwen3.5)
+
+For multimodal functionality (image, video, and audio input), see the [Multimodal Support guide](../../../../../docs/tutorials/posttraining/multimodal.md).
 
 * * * * *
 
@@ -151,6 +157,22 @@ export MAXTEXT_CHECKPOINT_PATH=gs://your-gcs-bucket/qwen3-480b-a35b_maxtext_ckpt
 
 # Execute the validation script
 bash tests/end_to_end/tpu/qwen/moe/qwen3-480b-a35b/1_test_qwen3_480b_a35b.sh
+```
+
+### Qwen3-Omni-30B-A3B
+
+```bash
+# 1. Export your Hugging Face token
+export HF_TOKEN="your_hf_token_here"
+
+# 2. Set the base path for conversion and SFT outputs
+export BASE_OUTPUT_PATH=gs://<YOUR-GCS-BUCKET>/qwen3-omni-30b-a3b_maxtext_ckpt
+
+# (Optional) Set the path if you are using a local Hugging Face checkpoint instead of downloading
+# export HF_MODEL_PATH=/path/to/local/qwen3-omni-30b-a3b_hf_checkpoint
+
+# 3. Execute the conversion and multimodal decode verification
+bash tests/end_to_end/tpu/qwen/moe/qwen3-omni-30b-a3b/1_test_qwen3_omni_30b_a3b.sh
 ```
 
 ### Qwen3.5-35B-A3B
