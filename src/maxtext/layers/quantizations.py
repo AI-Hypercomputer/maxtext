@@ -1025,8 +1025,7 @@ class TransformerEngineQuantization(Quantization):
           fp8_recipe: recipe.Recipe | None = None,
           n_groups: int | None = None,
       ):
-        """Generates a set of quantizers for TransformerEngine."""
-
+        """Route quantizer-set generation through the OVERWRITE_WITH_GRADIENT collection."""
         OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
         return super().generate_quantizer_set(  # pytype: disable=wrong-keyword-args
             postfix=postfix,
