@@ -379,15 +379,25 @@ def _fix_for_qwix_quantization(module: Module):
 
     return wrapped
 
+  def wrap_setattr(old_setattr):
+    def wrapped_setattr(self, name: str, value: Any):
+      if name.startswith("dot_general") and not isinstance(value, (nnx.Variable, nnx.Module, nnx.Dict, nnx.List)):
+        value = nnx.data(value)
+      old_setattr(self, name, value)
+
+    return wrapped_setattr
+
   for path, node in nnx.iter_graph(module):
-    # Only enable it on non-root nnx modules.
-    if path and isinstance(node, nnx.Module):
+    if isinstance(node, nnx.Module):
+      methods = {
+          "__setattr__": wrap_setattr(node.__class__.__setattr__),
+      }
+      if path:
+        methods["__call__"] = wrap(node.__class__.__call__, str(path[-1]))
       node.__class__ = type(
           node.__class__.__name__,
           (node.__class__,),
-          {
-              "__call__": wrap(node.__class__.__call__, str(path[-1])),
-          },
+          methods,
       )
 
   # Set the correct weight names. We call QtProvider.process_model_inputs here
@@ -501,10 +511,9 @@ class ToLinen(linen.Module):
 
       warnings.warn(f"Found unknown module paths in incoming state:{paths_str}")
 
+    _fix_for_qwix_quantization(module)
     nnx.update(module, new_state)
     _refresh_variable_trace_state(module)
-
-    _fix_for_qwix_quantization(module)
     method_fn = _get_module_method(module, nnx_method)
     out = method_fn(module, *args, **kwargs)
     self._update_variables(module)

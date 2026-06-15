@@ -888,6 +888,51 @@ def save_adapter_files(output_dir, weights, config, found_modules, model_id):
     json.dump(adapter_config, f, indent=4)
 
 
+def param_key_parts_from_path(path_tuple) -> list[str]:
+  """Convert a JAX tree path into MaxText dash-joined key segments.
+
+  Normalizes two NNX storage artifacts so the result follows the MaxText-Linen
+  naming convention and matches the param-mapping tables (e.g.
+  ``params-decoder-layers_0-self_attention-query-kernel``):
+
+  * ``nnx.List`` layer stacks flatten to an *integer* path key
+    (``decoder -> layers -> 0 -> ...``), which Orbax may restore as a numeric
+    *string* (``"0"``). Either form is folded into the preceding segment as
+    ``<name>_<idx>`` (``layers_0``), matching Linen's ``layers_0`` name. (A pure
+    integer key would otherwise raise ``TypeError: sequence item N: expected str
+    instance, int found`` when joined; a string ``"0"`` would mismatch the
+    ``layers_0`` mapping.)
+  * ``nnx.Variable`` leaves flatten with a trailing ``value`` key
+    (``...-kernel -> value``). That wrapper segment is dropped, since MaxText-Linen
+    param keys have no such suffix.
+
+  Scanned / plain Linen string paths (no integer key, no trailing ``value``) are
+  returned unchanged.
+
+  Args:
+    path_tuple: A path produced by ``jax.tree_util.tree_flatten_with_path`` or
+      ``tree_leaves_with_path`` (a sequence of ``DictKey`` / ``SequenceKey`` /
+      ``GetAttrKey`` / ``FlattenedIndexKey`` entries).
+
+  Returns:
+    The list of string key segments, e.g. ``["decoder", "layers_0", "kernel"]``.
+  """
+  parts: list[str] = []
+  for entry in path_tuple:
+    key = getattr(entry, "key", getattr(entry, "idx", getattr(entry, "name", entry)))
+    # Fold a layer/expert index (an int, or a numeric string after an Orbax
+    # round-trip) into the preceding segment: ["layers", 0] -> "layers_0".
+    if (isinstance(key, int) or (isinstance(key, str) and key.isdigit())) and parts:
+      parts[-1] = f"{parts[-1]}_{key}"
+    else:
+      parts.append(str(key))
+  # Drop the trailing ``value`` segment that NNX adds for each ``nnx.Variable``
+  # leaf (``...-kernel -> value``); MaxText-Linen param keys have no such wrapper.
+  if parts and parts[-1] == "value":
+    parts.pop()
+  return parts
+
+
 def extract_nnx_weights(weights_dict: dict) -> dict[str, np.ndarray]:
   """Extract weights from NNX checkpoint structure.
 
@@ -903,13 +948,10 @@ def extract_nnx_weights(weights_dict: dict) -> dict[str, np.ndarray]:
   result = {}
   leaves_with_paths = jax.tree_util.tree_leaves_with_path(weights_dict)
   for path_tuple, leaf_value in leaves_with_paths:
-    path_keys = [k.key for k in path_tuple]
+    path_keys = param_key_parts_from_path(path_tuple)
     # Skip NNX RNG state variables (not model weights)
     if "to_nnx__rngs" in path_keys or any(k.endswith("_rngs") for k in path_keys):
       continue
-    # Skip if this is the "value" key itself - we want the parent path
-    if path_keys[-1] == "value":
-      path_keys = path_keys[:-1]
     maxtext_param_key = "params-" + "-".join(path_keys)
     if not isinstance(leaf_value, (jax.Array, np.ndarray)):
       raise ValueError(f"Leaf value for {maxtext_param_key} is not an array. Type: {type(leaf_value)}.")
@@ -932,8 +974,7 @@ def extract_linen_weights(weights_dict: dict) -> dict[str, np.ndarray]:
   result = {}
   leaves_with_paths = jax.tree_util.tree_leaves_with_path(weights_dict)
   for path_tuple, leaf_value in leaves_with_paths:
-    path_keys = [k.key for k in path_tuple]
-    # Construct maxtext_param_key from path_tuple
+    path_keys = param_key_parts_from_path(path_tuple)
     maxtext_param_key = "params-" + "-".join(path_keys)
     if not isinstance(leaf_value, (jax.Array, np.ndarray)):
       raise ValueError(f"Leaf value for {maxtext_param_key} is not an array. Type: {type(leaf_value)}.")
