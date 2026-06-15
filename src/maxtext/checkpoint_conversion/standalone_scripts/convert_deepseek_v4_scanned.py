@@ -69,7 +69,72 @@ def get_block_prefix(path_str):
       return f"{parts[0]}-{parts[1]}"
   return "GLOBAL"
 
+class MockTensor:
+  def __init__(self, shape, dtype=jnp.bfloat16):
+    self.shape = tuple(shape)
+    self.dtype = dtype
+
+  @property
+  def size(self):
+    return np.prod(self.shape)
+
+  @property
+  def ndim(self):
+    return len(self.shape)
+
+  @property
+  def T(self):
+    return MockTensor(self.shape[::-1], self.dtype)
+
+  def transpose(self, *args):
+    if not args:
+      return self.T
+    return MockTensor(self.shape[::-1], self.dtype)
+
+  def reshape(self, *shape):
+    if len(shape) == 1 and isinstance(shape[0], (list, tuple)):
+      shape = shape[0]
+    return MockTensor(shape, self.dtype)
+
+  def permute(self, *dims):
+    new_shape = tuple(self.shape[d] for d in dims)
+    return MockTensor(new_shape, self.dtype)
+
+  def moveaxis(self, source, destination):
+    dims = list(range(self.ndim))
+    dims.pop(source)
+    dims.insert(destination, source)
+    return self.permute(*dims)
+
+  def __getitem__(self, key):
+    if not isinstance(key, tuple):
+      key = (key,)
+    new_shape = []
+    for i, k in enumerate(key):
+      dim_size = self.shape[i]
+      if isinstance(k, slice):
+        start = k.start if k.start is not None else 0
+        stop = k.stop if k.stop is not None else dim_size
+        step = k.step if k.step is not None else 1
+        slice_len = len(range(start, stop, step))
+        new_shape.append(slice_len)
+      elif isinstance(k, int):
+        pass
+    new_shape.extend(self.shape[len(key):])
+    return MockTensor(new_shape, self.dtype)
+
+  @staticmethod
+  def stack(tensors, axis=0):
+    if not tensors:
+      return MockTensor((0,))
+    shape = tensors[0].shape
+    new_shape = list(shape)
+    new_shape.insert(axis, len(tensors))
+    return MockTensor(new_shape, tensors[0].dtype)
+
 def valid_match(hf_param):
+  if isinstance(hf_param, MockTensor):
+    return hf_param
   if isinstance(hf_param, torch.Tensor):
     return hf_param.to(torch.float32).cpu().numpy()
   return hf_param
@@ -78,6 +143,10 @@ def transposed_match(hf_param):
   return valid_match(hf_param).transpose()
 
 def split_attention_projection_match(hf_param, num_heads):
+  if isinstance(hf_param, MockTensor):
+    total_out, embed_dim = hf_param.shape
+    head_dim = total_out // num_heads
+    return MockTensor((num_heads, embed_dim, head_dim), hf_param.dtype)
   hf_param = hf_param.to(torch.float32)
   total_out, embed_dim = hf_param.shape
   head_dim = total_out // num_heads
@@ -88,16 +157,17 @@ def stacked_moe_match(weight_dict, hf_prefix, num_experts, suffix):
   params = []
   for i in range(num_experts):
     key = f"{hf_prefix}.experts.{i}.{suffix}"
-    p = weight_dict[key].to(torch.float32).cpu().numpy()
+    p = valid_match(weight_dict[key])
     params.append(p.transpose())
+  if isinstance(params[0], MockTensor):
+    return MockTensor.stack(params, axis=0)
   return np.stack(params, axis=0)
 
-def preload_all_weights(weight_map, hf_weights_dir):
+def preload_all_weights(weight_map, hf_weights_dir, dry_run=False):
   """Loads all safetensors directly into a massive in-memory dictionary."""
-  print(f"Preloading all HF weights into RAM from {hf_weights_dir}...")
+  print(f"Preloading all HF weights into RAM from {hf_weights_dir} (Dry run: {dry_run})...")
   full_weight_dict = {}
   
-  # Find all unique safetensor files to avoid opening the same file multiple times
   unique_files = set(weight_map.values())
   
   for i, filename in enumerate(unique_files):
@@ -106,10 +176,14 @@ def preload_all_weights(weight_map, hf_weights_dir):
     
     with safe_open(file_path, framework="pt", device="cpu") as f:
       for key in f.keys():
-        # f.get_tensor() explicitly reads the data from the file into PyTorch RAM
-        full_weight_dict[key] = f.get_tensor(key)
+        if dry_run:
+          tensor_slice = f.get_slice(key)
+          shape = tensor_slice.get_shape()
+          full_weight_dict[key] = MockTensor(shape, jnp.bfloat16)
+        else:
+          full_weight_dict[key] = f.get_tensor(key)
         
-  print(f"Successfully preloaded {len(full_weight_dict)} total tensors into RAM.")
+  print(f"Successfully preloaded {len(full_weight_dict)} total tensors into RAM (Dry run: {dry_run}).")
   return full_weight_dict
 
 def get_unscanned_weight(hf_prefix, suffix, weight_dict, config):
@@ -175,15 +249,15 @@ def get_unscanned_weight(hf_prefix, suffix, weight_dict, config):
       if suffix == "mhc_mlp-res_alpha_scale": return valid_match(weight_dict[hf_key_scale][2:3])
 
   # Self Attention
-  if suffix == "self_attention-q_a_proj-kernel" and f"{hf_prefix}.attn.wq_a.weight" in weight_dict: return transposed_match(weight_dict[f"{hf_prefix}.attn.wq_a.weight"])
-  if suffix == "self_attention-q_b_proj-kernel" and f"{hf_prefix}.attn.wq_b.weight" in weight_dict: return transposed_match(weight_dict[f"{hf_prefix}.attn.wq_b.weight"])
-  if suffix == "self_attention-q_a_norm-scale" and f"{hf_prefix}.attn.q_norm.weight" in weight_dict: return valid_match(weight_dict[f"{hf_prefix}.attn.q_norm.weight"])
-  if suffix == "self_attention-kv_proj-kernel" and f"{hf_prefix}.attn.wkv.weight" in weight_dict: return transposed_match(weight_dict[f"{hf_prefix}.attn.wkv.weight"])
+  if suffix in ("self_attention-wq_a-kernel", "self_attention-q_a_proj-kernel") and f"{hf_prefix}.attn.wq_a.weight" in weight_dict: return transposed_match(weight_dict[f"{hf_prefix}.attn.wq_a.weight"])
+  if suffix in ("self_attention-wq_b-kernel", "self_attention-q_b_proj-kernel") and f"{hf_prefix}.attn.wq_b.weight" in weight_dict: return transposed_match(weight_dict[f"{hf_prefix}.attn.wq_b.weight"])
+  if suffix in ("self_attention-q_norm-scale", "self_attention-q_a_norm-scale") and f"{hf_prefix}.attn.q_norm.weight" in weight_dict: return valid_match(weight_dict[f"{hf_prefix}.attn.q_norm.weight"])
+  if suffix in ("self_attention-wkv-kernel", "self_attention-kv_proj-kernel") and f"{hf_prefix}.attn.wkv.weight" in weight_dict: return transposed_match(weight_dict[f"{hf_prefix}.attn.wkv.weight"])
   if suffix == "self_attention-kv_norm-scale" and f"{hf_prefix}.attn.kv_norm.weight" in weight_dict: return valid_match(weight_dict[f"{hf_prefix}.attn.kv_norm.weight"])
-  if suffix == "self_attention-o_a_proj-kernel" and f"{hf_prefix}.attn.wo_a.weight" in weight_dict:
+  if suffix in ("self_attention-wo_a-kernel", "self_attention-o_a_proj-kernel") and f"{hf_prefix}.attn.wo_a.weight" in weight_dict:
     o_groups = getattr(config, "o_groups", 8)
     return split_attention_projection_match(weight_dict[f"{hf_prefix}.attn.wo_a.weight"], o_groups)
-  if suffix == "self_attention-o_b_proj-kernel" and f"{hf_prefix}.attn.wo_b.weight" in weight_dict: return transposed_match(weight_dict[f"{hf_prefix}.attn.wo_b.weight"])
+  if suffix in ("self_attention-wo_b-kernel", "self_attention-o_b_proj-kernel") and f"{hf_prefix}.attn.wo_b.weight" in weight_dict: return transposed_match(weight_dict[f"{hf_prefix}.attn.wo_b.weight"])
   if suffix == "self_attention-sinks" and f"{hf_prefix}.attn.attn_sink" in weight_dict: return valid_match(weight_dict[f"{hf_prefix}.attn.attn_sink"])
 
   # Compressor / Indexer
@@ -213,6 +287,8 @@ def get_unscanned_weight(hf_prefix, suffix, weight_dict, config):
     return stacked_moe_match(weight_dict, f"{hf_prefix}.ffn", num_experts, "w2.weight")
 
   # MLP Shared Experts
+  if suffix == "mlp-shared_experts-wi_0-kernel" and f"{hf_prefix}.ffn.shared_experts.w1.weight" in weight_dict: return transposed_match(weight_dict[f"{hf_prefix}.ffn.shared_experts.w1.weight"])
+  if suffix == "mlp-shared_experts-wi_1-kernel" and f"{hf_prefix}.ffn.shared_experts.w3.weight" in weight_dict: return transposed_match(weight_dict[f"{hf_prefix}.ffn.shared_experts.w3.weight"])
   if suffix == "mlp-shared_experts-wi-kernel" and f"{hf_prefix}.ffn.shared_experts.w3.weight" in weight_dict: return transposed_match(weight_dict[f"{hf_prefix}.ffn.shared_experts.w3.weight"])
   if suffix == "mlp-shared_experts-wi_up-kernel" and f"{hf_prefix}.ffn.shared_experts.w1.weight" in weight_dict: return transposed_match(weight_dict[f"{hf_prefix}.ffn.shared_experts.w1.weight"])
   if suffix == "mlp-shared_experts-wo-kernel" and f"{hf_prefix}.ffn.shared_experts.w2.weight" in weight_dict: return transposed_match(weight_dict[f"{hf_prefix}.ffn.shared_experts.w2.weight"])
@@ -256,7 +332,10 @@ def convert_weights(abstract_params, weight_dict, config, block_to_convert=None)
         stacked_weights.append(w)
 
       # Initially stack along 0-th dimension
-      stacked_np = np.stack(stacked_weights, axis=0)
+      if isinstance(stacked_weights[0], MockTensor):
+        stacked_np = MockTensor.stack(stacked_weights, axis=0)
+      else:
+        stacked_np = np.stack(stacked_weights, axis=0)
 
       # DYNAMIC PERMUTATION: MaxText scan axes aren't always axis 0.
       # e.g., kv_proj-kernel might expect [4096, 20, 512].
@@ -270,7 +349,10 @@ def convert_weights(abstract_params, weight_dict, config, block_to_convert=None)
         for i in range(len(u_shape) + 1):
           proposed_shape = u_shape[:i] + (N,) + u_shape[i:]
           if proposed_shape == target_shape:
-            stacked_np = np.moveaxis(stacked_np, 0, i)
+            if isinstance(stacked_np, MockTensor):
+              stacked_np = stacked_np.moveaxis(0, i)
+            else:
+              stacked_np = np.moveaxis(stacked_np, 0, i)
             matched = True
             break
 
@@ -290,12 +372,21 @@ def convert_weights(abstract_params, weight_dict, config, block_to_convert=None)
   def finalize(p, v):
     if p is None:
       return None
+    if isinstance(p, MockTensor):
+      return jax.ShapeDtypeStruct(p.shape, v.dtype)
     return jax.device_put(jnp.asarray(p, dtype=v.dtype), jax.devices("cpu")[0])
 
   return jax.tree_util.tree_map(finalize, params, abstract_params, is_leaf=lambda x: x is None)
 
 def main():
   argv = sys.argv
+  
+  # Check if dry-run flag is passed
+  dry_run = False
+  if "dry_run=True" in argv:
+    dry_run = True
+    argv = [arg for arg in argv if arg != "dry_run=True"]
+
   if len(argv) < 2:
     # Important: Default arguments updated for a scanned conversion run
     argv = ['', 'src/maxtext/configs/base.yml', 'model_name=deepseek4', 'override_model_config=True', 'attention=dot_product', 'skip_jax_distributed_system=True', 'weight_dtype=bfloat16', 'scan_layers=True', 'base_output_directory=gs://snehalv-data/deepseek_v4-flash/scanned/']
@@ -331,7 +422,7 @@ def main():
 
     print(f"Found {len(sorted_blocks)} logical blocks to convert: {sorted_blocks}")
     final_params = abstract_params
-    full_in_memory_dict = preload_all_weights(weight_map, hf_weights_dir)
+    full_in_memory_dict = preload_all_weights(weight_map, hf_weights_dir, dry_run=dry_run)
 
     def process_block(block_prefix):
       print(f"Starting block {block_prefix}...")
@@ -360,6 +451,10 @@ def main():
         print(f"Block {block_prefix} generated an exception: {exc}")
         raise exc
       # break
+
+    if dry_run:
+      print("\n[Dry Run] All shapes processed successfully. Parameter matching verified!")
+      return
 
     flat_params = jax.tree_util.tree_flatten_with_path(final_params)[0]
     nested_zeros_dict = {}
@@ -396,7 +491,8 @@ def main():
         nested_zeros_dict['params'],
         mesh.size,
         use_ocdbt=config.checkpoint_storage_use_ocdbt,
-        use_zarr3=config.checkpoint_storage_use_zarr3
+        use_zarr3=config.checkpoint_storage_use_zarr3,
+        checkpoint_storage_concurrent_gb=config.checkpoint_storage_concurrent_gb,
     )
     print("Conversion complete.")
   else:

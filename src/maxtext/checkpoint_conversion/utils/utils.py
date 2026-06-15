@@ -1178,6 +1178,7 @@ def save_weights_to_checkpoint(
     device_count: int,
     use_ocdbt: bool,
     use_zarr3: bool,
+    checkpoint_storage_concurrent_gb: int = 96,
 ):
   """Saves model weights to a MaxText-compatible checkpoint with optional sharding.
 
@@ -1220,6 +1221,7 @@ def save_weights_to_checkpoint(
       save_interval_steps,
       use_ocdbt=use_ocdbt,
       use_zarr3=use_zarr3,
+      checkpoint_storage_concurrent_gb=checkpoint_storage_concurrent_gb,
   )
   if checkpoint_manager is None:
     raise RuntimeError("Failed to create Orbax checkpoint manager.")
