@@ -18,6 +18,7 @@ from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Optional, Tuple
 import unittest
+import pytest
 
 from flax import nnx
 import jax
@@ -227,16 +228,16 @@ class Qwen3NextRMSNorm_PT(nn.Module):
   This version applies a (1.0 + weight) scaling factor after normalization.
   """
 
-  def __init__(self, dim: int, eps: float = 1e-6):
+  def __init__(self, dim: int, epsilon: float = 1e-6):
     """Initializes the Qwen3NextRMSNorm_PT layer."""
     super().__init__()
-    self.eps = eps
+    self.epsilon = epsilon
     # The weight is initialized to zeros, matching the real model.
     self.weight = torch.nn.Parameter(torch.zeros(dim))
 
   def _norm(self, x):
     """Applies the RMS normalization."""
-    return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+    return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.epsilon)
 
   def forward(self, x):
     """Forward pass for Qwen3NextRMSNorm_PT."""
@@ -422,11 +423,11 @@ class Qwen3NextRMSNormGated_PT(nn.Module):
   by SiLU(gate).
   """
 
-  def __init__(self, hidden_size, eps=1e-6):
+  def __init__(self, hidden_size, epsilon=1e-6):
     """Initializes the RMSNormGated layer."""
     super().__init__()
     self.weight = torch.nn.Parameter(torch.ones(hidden_size))
-    self.variance_epsilon = eps
+    self.variance_epsilon = epsilon
 
   def forward(self, hidden_states, gate=None):
     """Forward pass for RMSNormGated."""
@@ -480,7 +481,7 @@ class Qwen3NextGatedDeltaNet_PT(nn.Module):
     self.dt_bias = nn.Parameter(torch.ones(self.num_v_heads))
     A = torch.empty(self.num_v_heads).uniform_(0, 16)
     self.A_log = nn.Parameter(torch.log(A))
-    self.norm = Qwen3NextRMSNormGated_PT(self.head_v_dim, eps=self.layer_norm_epsilon)
+    self.norm = Qwen3NextRMSNormGated_PT(self.head_v_dim, epsilon=self.layer_norm_epsilon)
     self.out_proj = nn.Linear(self.value_dim, self.hidden_size, bias=False)
 
   def forward(self, hidden_states):
@@ -569,8 +570,8 @@ class Qwen3NextFullAttention_PT(nn.Module):
         config.hidden_size,
         bias=config.attention_bias,
     )
-    self.q_norm = Qwen3NextRMSNorm_PT(self.head_dim, eps=config.rms_norm_eps)
-    self.k_norm = Qwen3NextRMSNorm_PT(self.head_dim, eps=config.rms_norm_eps)
+    self.q_norm = Qwen3NextRMSNorm_PT(self.head_dim, epsilon=config.rms_norm_eps)
+    self.k_norm = Qwen3NextRMSNorm_PT(self.head_dim, epsilon=config.rms_norm_eps)
 
   def forward(
       self,
@@ -698,12 +699,12 @@ class TestQwen3Next(unittest.TestCase):
         norm_topk_prob=self.cfg.norm_topk_prob,
     )
 
-    self.batch_size = 4
+    devices = np.array(jax.devices())
+    num_devices = len(devices)
+    self.batch_size = max(8, num_devices)
     self.seq_len = 128
     # Use the emb_dim calculated by pyconfig from base_emb_dim
     self.hidden_size = self.cfg.emb_dim
-    devices = np.array(jax.devices())
-    num_devices = len(devices)
 
     # Create a mesh shape where the 'data' axis gets all available devices,
     # and all other axes defined in the config have a size of 1.
@@ -726,7 +727,7 @@ class TestQwen3Next(unittest.TestCase):
     weight_pt = torch.rand(self.hidden_size)
 
     # PyTorch reference
-    pt_model = Qwen3NextRMSNormGated_PT(self.hidden_size, eps=self.cfg.normalization_layer_epsilon)
+    pt_model = Qwen3NextRMSNormGated_PT(self.hidden_size, epsilon=self.cfg.normalization_layer_epsilon)
     pt_model.weight.data = weight_pt
     pt_model.eval()
     with torch.no_grad():
@@ -735,7 +736,7 @@ class TestQwen3Next(unittest.TestCase):
     # JAX implementation
     jax_model = Qwen3NextRMSNormGated(
         num_features=self.hidden_size,
-        eps=self.cfg.normalization_layer_epsilon,
+        epsilon=self.cfg.normalization_layer_epsilon,
         dtype=self.cfg.dtype,
         weight_dtype=self.cfg.weight_dtype,
         rngs=self.nnx_rngs,
@@ -904,15 +905,14 @@ class TestQwen3Next(unittest.TestCase):
     print("Running test_gated_delta_net_structure...")
     hidden_states_jax = jnp.ones((self.batch_size, self.seq_len, self.hidden_size), dtype=self.cfg.dtype)
 
-    jax_model = qwen3.Qwen3NextGatedDeltaNet(config=self.cfg, mesh=self.mesh, rngs=self.nnx_rngs)
+    jax_model = qwen3.Qwen3NextGatedDeltaNet(config=self.cfg, rngs=self.nnx_rngs, inputs_shape=hidden_states_jax.shape)
 
     @jax.jit
     def run_jax(hidden_states):
       """Runs the JAX GatedDeltaNet model."""
-      output, _ = jax_model(hidden_states)
-      return output
+      return jax_model(hidden_states)
 
-    output_jax = run_jax(hidden_states_jax)
+    output_jax, _ = run_jax(hidden_states_jax)
 
     self.assertEqual(output_jax.shape, (self.batch_size, self.seq_len, self.hidden_size))
 
@@ -925,7 +925,7 @@ class TestQwen3Next(unittest.TestCase):
     hidden_states_pt = torch.randn(self.batch_size, self.seq_len, self.hidden_size)
     weight_pt = torch.rand(self.hidden_size)
 
-    pt_model = Qwen3NextRMSNorm_PT(self.hidden_size, eps=self.cfg.normalization_layer_epsilon)
+    pt_model = Qwen3NextRMSNorm_PT(self.hidden_size, epsilon=self.cfg.normalization_layer_epsilon)
     pt_model.weight.data = weight_pt
     pt_model.eval()
 
@@ -935,8 +935,8 @@ class TestQwen3Next(unittest.TestCase):
     # 2. Set up the JAX implementation.
     class DummyModule(nnx.Module):
 
-      def __init__(self, hidden_size, eps, rngs):
-        self.norm = Qwen3NextRMSNorm(hidden_size, eps=eps, rngs=rngs)
+      def __init__(self, hidden_size, epsilon, rngs):
+        self.norm = Qwen3NextRMSNorm(hidden_size, epsilon=epsilon, rngs=rngs)
 
     jax_model_wrapped = DummyModule(self.hidden_size, self.cfg.normalization_layer_epsilon, self.nnx_rngs)
     jax_model = jax_model_wrapped.norm
@@ -948,7 +948,7 @@ class TestQwen3Next(unittest.TestCase):
     @jax.jit
     def run_jax(x):
       """Runs the JAX Qwen3NextRMSNorm model."""
-      return jax_model(x)  # Call the module
+      return jax_model(x)
 
     actual_output = run_jax(hidden_states_jax)
 
@@ -1048,50 +1048,42 @@ class TestQwen3Next(unittest.TestCase):
     with torch.no_grad():
       expected_output = pt_model(hidden_states_pt)
 
-    def reorder_pt_qkvz_to_jax(w, num_heads, head_k_dim, head_v_dim):
-      key_dim = num_heads * head_k_dim
-      value_dim = num_heads * head_v_dim
-      q, k, v, z = np.split(w, [key_dim, 2 * key_dim, 2 * key_dim + value_dim], axis=0)
-      jax_heads = []
-      for i in range(num_heads):
-        head_i = np.concatenate(
-            [
-                q[i * head_k_dim : (i + 1) * head_k_dim],
-                k[i * head_k_dim : (i + 1) * head_k_dim],
-                v[i * head_v_dim : (i + 1) * head_v_dim],
-                z[i * head_v_dim : (i + 1) * head_v_dim],
-            ],
-            axis=0,
-        )
-        jax_heads.append(head_i)
-      return np.concatenate(jax_heads, axis=0)
-
-    def reorder_pt_ba_to_jax(w, num_heads):
-      b, a = np.split(w, 2, axis=0)
-      jax_heads = []
-      for i in range(num_heads):
-        head_i = np.concatenate([b[i : i + 1], a[i : i + 1]], axis=0)
-        jax_heads.append(head_i)
-      return np.concatenate(jax_heads, axis=0)
-
     # 2. Setup JAX model and map weights
-    jax_model = qwen3.Qwen3NextGatedDeltaNet(config=self.cfg, mesh=self.mesh, rngs=self.nnx_rngs)
-    assert jax_model.num_k_heads == jax_model.num_v_heads
+    jax_model = qwen3.Qwen3NextGatedDeltaNet(config=self.cfg, rngs=self.nnx_rngs, inputs_shape=hidden_states_pt.shape)
 
     conv1d_weight_pt = pt_model.conv1d.weight.detach().numpy()
     # Transpose PT (out, in/groups, kw) -> JAX (kw, in/groups, out)
     # For depthwise, out=in=groups, so PT=(C, 1, kw) -> JAX=(kw, 1, C)
     conv1d_weight_jax = np.transpose(conv1d_weight_pt, (2, 1, 0))
 
-    w_qkvz_pt = pt_model.in_proj_qkvz.weight.detach().numpy()
-    w_qkvz_jax = reorder_pt_qkvz_to_jax(w_qkvz_pt, jax_model.num_v_heads, jax_model.head_k_dim, jax_model.head_v_dim)
+    # Reorder in_proj_qkvz from PT layout to JAX layout
+    in_features = self.cfg.emb_dim
+    H_k = self.cfg.gdn_num_key_heads
+    D_k = self.cfg.gdn_key_head_dim
+    H_v = self.cfg.gdn_num_value_heads
+    D_v = self.cfg.gdn_value_head_dim
+    key_dim = H_k * D_k
+    value_dim = H_v * D_v
+    V_per_K = H_v // H_k
 
-    w_ba_pt = pt_model.in_proj_ba.weight.detach().numpy()
-    w_ba_jax = reorder_pt_ba_to_jax(w_ba_pt, jax_model.num_v_heads)
+    qkvz_pt = pt_model.in_proj_qkvz.weight.T.detach().numpy()
+    q_w = qkvz_pt[:, :key_dim].reshape(in_features, H_k, D_k)
+    k_w = qkvz_pt[:, key_dim : 2 * key_dim].reshape(in_features, H_k, D_k)
+    v_w = qkvz_pt[:, 2 * key_dim : 2 * key_dim + value_dim].reshape(in_features, H_k, V_per_K * D_v)
+    z_w = qkvz_pt[:, 2 * key_dim + value_dim :].reshape(in_features, H_k, V_per_K * D_v)
+
+    reordered_qkvz = np.concatenate([q_w, k_w, v_w, z_w], axis=-1).reshape(in_features, -1)
+
+    # Reorder in_proj_ba from PT layout to JAX layout
+    ba_pt = pt_model.in_proj_ba.weight.T.detach().numpy()
+    b_w = ba_pt[:, :H_v].reshape(in_features, H_k, V_per_K)
+    a_w = ba_pt[:, H_v:].reshape(in_features, H_k, V_per_K)
+
+    reordered_ba = np.concatenate([b_w, a_w], axis=-1).reshape(in_features, -1)
 
     params = {
-        "in_proj_qkvz": {"kernel": nnx.Param(jnp.array(w_qkvz_jax.T))},
-        "in_proj_ba": {"kernel": nnx.Param(jnp.array(w_ba_jax.T))},
+        "in_proj_qkvz": {"kernel": nnx.Param(jnp.array(reordered_qkvz))},
+        "in_proj_ba": {"kernel": nnx.Param(jnp.array(reordered_ba))},
         "conv1d": {"kernel": nnx.Param(jnp.array(conv1d_weight_jax))},
         "A_log": nnx.Param(jnp.array(pt_model.A_log.detach().numpy())),
         "dt_bias": nnx.Param(jnp.array(pt_model.dt_bias.detach().numpy())),
@@ -1104,10 +1096,9 @@ class TestQwen3Next(unittest.TestCase):
     @jax.jit
     def run_jax(x):
       """Runs the JAX GatedDeltaNet model."""
-      output, _ = jax_model(x)
-      return output
+      return jax_model(x)
 
-    actual_output = run_jax(hidden_states_jax)
+    actual_output, _ = run_jax(hidden_states_jax)
 
     # 3. Compare outputs
     np.testing.assert_allclose(
@@ -1277,16 +1268,15 @@ class TestQwen3Next(unittest.TestCase):
     # 8. Run JAX Model
     @jax.jit
     def run_jax(inputs, segment_ids, positions):
-      output, _ = jax_model(
+      return jax_model(
           inputs,
           decoder_segment_ids=segment_ids,
           decoder_positions=positions,
           deterministic=True,
           model_mode="train",
       )
-      return output
 
-    jax_output = run_jax(hidden_states_jax, decoder_segment_ids_jax, decoder_positions_jax)
+    jax_output, _ = run_jax(hidden_states_jax, decoder_segment_ids_jax, decoder_positions_jax)
 
     # 9. Compare
     pt_out_np = pt_output.detach().numpy()
@@ -1315,6 +1305,7 @@ class TestQwen3Next(unittest.TestCase):
   def test_full_attention_dot_product(self):
     return self._run_full_attention_jax_vs_pytorch_attention("dot_product")
 
+  @pytest.mark.tpu_only
   def test_full_attention_flash(self):
     return self._run_full_attention_jax_vs_pytorch_attention("flash")
 

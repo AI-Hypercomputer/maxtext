@@ -319,14 +319,9 @@ def get_maxtext_model_info(config):
   # Get abstract model structure (name, shape) without materializing the weights to save memory
   abstract_params_tree = maxtext_utils.get_abstract_param(maxtext_model_flax, config)["params"]
 
-  abstract_params_flat, _ = jax.tree_util.tree_flatten_with_path(abstract_params_tree)
-  # Standardize abstract tree for later unflattening
-  abstract_params_tree = jax.tree.map(
-      lambda _: 0,
-      abstract_params_tree,
-      is_leaf=lambda x: isinstance(x, nn.LogicallyPartitioned),
+  abstract_params_flat, abstract_params_treedef = jax.tree_util.tree_flatten_with_path(
+      abstract_params_tree, is_leaf=lambda x: isinstance(x, nn.LogicallyPartitioned)
   )
-  abstract_params_treedef = jax.tree_util.tree_structure(abstract_params_tree)
 
   max_logging.log("MaxText abstract model and state initialized.")
 
@@ -334,7 +329,10 @@ def get_maxtext_model_info(config):
   maxtext_abstract_dict = {}
   for mt_target_idx, (path_tuple, abstract_leaf_value) in enumerate(abstract_params_flat):
     mt_param_key = "params-" + "-".join(param_key_parts_from_path(path_tuple))
-    mt_target_shape = abstract_leaf_value.shape
+    if isinstance(abstract_leaf_value, nn.LogicallyPartitioned):
+      mt_target_shape = abstract_leaf_value.value.shape
+    else:
+      mt_target_shape = abstract_leaf_value.shape
     maxtext_abstract_dict[mt_param_key] = (mt_target_idx, mt_target_shape)
 
   return maxtext_abstract_dict, abstract_params_treedef
