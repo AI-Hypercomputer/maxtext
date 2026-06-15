@@ -125,6 +125,7 @@ def run_harness(cfg: dict, hf_token: str | None = None) -> dict:
   gcs_results_path = cfg.get("gcs_results_path")
   apply_chat_template = cfg.get("apply_chat_template", False)
   fewshot_as_multiturn = cfg.get("fewshot_as_multiturn", False)
+  gen_kwargs = cfg.get("gen_kwargs")
   token = resolve_token(cfg, hf_token)
 
   lm_model_type = "local-chat-completions" if backend == "evalchemy" else "local-completions"
@@ -173,6 +174,8 @@ def run_harness(cfg: dict, hf_token: str | None = None) -> dict:
         # concatenating them as one long context. Required when apply_chat_template
         # is True and num_fewshot > 0 to avoid a malformed single-turn prompt.
         simple_eval_kwargs["fewshot_as_multiturn"] = True
+      if gen_kwargs:
+        simple_eval_kwargs["gen_kwargs"] = gen_kwargs
       raw_results = lm_eval_lib.simple_evaluate(**simple_eval_kwargs)
 
     # All ranks block here until rank-0 finishes evaluation. Non-rank-0 hosts
@@ -250,6 +253,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
           "When --apply_chat_template and --num_fewshot > 0: format each few-shot "
           "example as a separate user/assistant chat turn instead of one big context. "
           "Recommended for chat models with few-shot MMLU."
+      ),
+  )
+  parser.add_argument(
+      "--gen_kwargs",
+      type=str,
+      default=None,
+      help=(
+          "Comma-separated key=value overrides for generation tasks (generate_until). "
+          "Passed directly to lm-eval simple_evaluate(gen_kwargs=...). "
+          "No effect on loglikelihood tasks (e.g. MMLU). "
+          "Example for GPT-OSS GSM8K CoT: 'until=[],max_gen_toks=1024' "
+          "(clears default stop sequences and raises the token budget)."
       ),
   )
   return parser
