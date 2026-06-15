@@ -85,9 +85,7 @@ VertexTensorboardManager, _vertex_tb_is_stub = vertex_tensorboard_modules()
 def get_first_step(model, state):
   if isinstance(model, nn.Module):
     return int(state.step)
-  if hasattr(
-      state, "inner_state"
-  ):  # DiLoCoTrainState (NNX DiLoCo): step is the optimizer step var
+  if hasattr(state, "inner_state"):  # DiLoCoTrainState (NNX DiLoCo): step is the optimizer step var
     return int(state.step.get_value())
   return int(state.optimizer.step.get_value())
 
@@ -792,11 +790,7 @@ def train_loop(config, recorder, state=None):
     # the Zero-1 opt overlay doesn't apply through the diloco wrapper.
     params_shardings = state_mesh_shardings.params
   else:
-    params_shardings, state_mesh_shardings = (
-        sharding.maybe_update_params_sharding_with_opt(
-            config, state_mesh_shardings
-        )
-    )
+    params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
 
   p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
       config,
@@ -836,9 +830,7 @@ def train_loop(config, recorder, state=None):
   if isinstance(model, nn.Module):
     setup_params = state.params
   elif config.enable_diloco:
-    setup_params = (
-        state.params
-    )  # DiLoCoTrainState.params: the outer (global) params
+    setup_params = state.params  # DiLoCoTrainState.params: the outer (global) params
   else:
     _, setup_params, _ = nnx.split(state.model, nnx.Param, ...)
   metric_logger_instance.write_setup_info_to_tensorboard(setup_params)

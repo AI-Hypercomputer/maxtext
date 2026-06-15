@@ -321,23 +321,15 @@ def setup_train_loop(config, recorder, devices=None):
         state, outer_opt_state_sharding = diloco.build_diloco_state(config, lambda: state, mesh=mesh)
 
         # create state_mesh_shardings for the DilocoState
-        step_mesh = (
-            state_mesh_shardings.optimizer.step.mesh
-            if config.pure_nnx
-            else state_mesh_shardings.step.mesh
-        )
+        step_mesh = state_mesh_shardings.optimizer.step.mesh if config.pure_nnx else state_mesh_shardings.step.mesh
         inner_state_shardings = diloco.add_diloco_to_sharding(state_mesh_shardings)
         state_mesh_shardings = diloco.DiLoCoTrainState(
             inner_state_shardings,
             # Match the outer params' pure-dict structure (build_diloco_state stores
             # outer_params via to_pure_dict), so the sharding tree matches the state tree.
-            state_mesh_shardings_params.to_pure_dict()
-            if config.pure_nnx
-            else state_mesh_shardings_params,
+            state_mesh_shardings_params.to_pure_dict() if config.pure_nnx else state_mesh_shardings_params,
             outer_opt_state_sharding,
-            jax.sharding.NamedSharding(
-                mesh=step_mesh, spec=jax.sharding.PartitionSpec()
-            ),
+            jax.sharding.NamedSharding(mesh=step_mesh, spec=jax.sharding.PartitionSpec()),
         )
 
     # TODO(aireenmei, hengtaoguo): support sharding in vit for multimodal

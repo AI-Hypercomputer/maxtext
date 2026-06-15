@@ -712,17 +712,12 @@ def maybe_update_params_sharding_with_opt_nnx(
   return prev_params_shardings, updated_state
 
 
-def build_zero1_input_state_mesh_shardings(
-    config, state_mesh_shardings, params_shardings
-):
+def build_zero1_input_state_mesh_shardings(config, state_mesh_shardings, params_shardings):
   """Build the train-step input shardings under shard_optimizer_over_data (Zero-1).
 
-  Model params on input use the original pre-Zero-1 sharding (params_shardings),
-  while the rest
-  of the state — including the optimizer state — keeps the Zero-1 layout from
-  state_mesh_shardings,
-  so the optimizer state input matches its output. When
-  shard_optimizer_over_data is False,
+  Model params on input use the original pre-Zero-1 sharding (params_shardings), while the rest
+  of the state — including the optimizer state — keeps the Zero-1 layout from state_mesh_shardings,
+  so the optimizer state input matches its output. When shard_optimizer_over_data is False,
   state_mesh_shardings passes through unchanged.
   """
   if not config.shard_optimizer_over_data:
@@ -731,11 +726,7 @@ def build_zero1_input_state_mesh_shardings(
     return state_mesh_shardings.replace(params=params_shardings)
   # nnx.State has no .replace: shallow-copy via tree_map (preserves nested container
   # types) and overlay params_shardings under input_state.model.
-  input_state = jax.tree_util.tree_map(
-      lambda x: x,
-      state_mesh_shardings,
-      is_leaf=lambda x: isinstance(x, nnx.Variable),
-  )
+  input_state = jax.tree_util.tree_map(lambda x: x, state_mesh_shardings, is_leaf=lambda x: isinstance(x, nnx.Variable))
 
   def _overlay(model_node, params_node):
     for k, pv in params_node.items():

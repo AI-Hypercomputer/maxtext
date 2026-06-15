@@ -158,9 +158,7 @@ def build_abstract_diloco_state(
   if config.pure_nnx:
     _, model_params, _ = nnx.split(abstract_state.model, nnx.Param, ...)
     model_params = model_params.to_pure_dict()
-    _, model_params_sharding, _ = nnx.split(
-        state_mesh_shardings.model, nnx.Param, ...
-    )
+    _, model_params_sharding, _ = nnx.split(state_mesh_shardings.model, nnx.Param, ...)
     model_params_sharding = model_params_sharding.to_pure_dict()
   else:
     model_params = abstract_state.params
@@ -266,9 +264,7 @@ def build_diloco_train_step(
     broadcast_outer_params = drjax.broadcast(state.params, mesh=mesh)
     # For NNX, model Param vars live under inner_state.model; for Linen under inner_state.params.
     if config.pure_nnx:
-      _, inner_model_params, _ = nnx.split(
-          state.inner_state.model, nnx.Param, ...
-      )
+      _, inner_model_params, _ = nnx.split(state.inner_state.model, nnx.Param, ...)
       inner_model_params = inner_model_params.to_pure_dict()
     else:
       inner_model_params = state.inner_state.params
@@ -306,15 +302,9 @@ def build_diloco_train_step(
             if not path:
               return False
             k = path[0]
-            return (
-                getattr(k, "key", None) == "model"
-                or getattr(k, "name", None) == "model"
-            )
+            return getattr(k, "key", None) == "model" or getattr(k, "name", None) == "model"
 
-          new_leaves = [
-              next(new_model_iter) if _is_model_leaf(p) else leaf
-              for p, leaf in leaves_with_paths
-          ]
+          new_leaves = [next(new_model_iter) if _is_model_leaf(p) else leaf for p, leaf in leaves_with_paths]
           return jax.tree_util.tree_unflatten(treedef, new_leaves)
         else:
           return TrainStateNNX(new_model, s_opt)

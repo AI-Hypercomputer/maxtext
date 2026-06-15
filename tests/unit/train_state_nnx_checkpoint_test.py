@@ -380,12 +380,7 @@ class TestMaybeSaveCheckpointStepAlignment(unittest.TestCase):
   def _invoke_maybe_save(self, state, pure_nnx):
     """Call maybe_save_checkpoint with save_checkpoint patched, return {step, state} captured."""
     # checkpoint_period=1 keeps force_ckpt_save False regardless of actual_step.
-    config = SimpleNamespace(
-        pure_nnx=pure_nnx,
-        checkpoint_period=1,
-        async_checkpointing=False,
-        enable_diloco=False,
-    )
+    config = SimpleNamespace(pure_nnx=pure_nnx, checkpoint_period=1, async_checkpointing=False, enable_diloco=False)
     mgr = mock.MagicMock()
     mgr.reached_preemption.return_value = False
 
@@ -451,12 +446,7 @@ class TestMaybeSaveCheckpointStepAlignment(unittest.TestCase):
     state = self._build_nnx_state(self.N_STEPS)
     actual_step = self.N_STEPS - 1
 
-    config = SimpleNamespace(
-        pure_nnx=True,
-        checkpoint_period=1,
-        async_checkpointing=False,
-        enable_diloco=False,
-    )
+    config = SimpleNamespace(pure_nnx=True, checkpoint_period=1, async_checkpointing=False, enable_diloco=False)
     mgr = mock.MagicMock()
     mgr.reached_preemption.return_value = False
     # Mock latest_step to return the same actual_step
@@ -475,12 +465,7 @@ class TestMaybeSaveCheckpointStepAlignment(unittest.TestCase):
     state = self._build_nnx_state(self.N_STEPS)
     actual_step = self.N_STEPS - 1
 
-    config = SimpleNamespace(
-        pure_nnx=True,
-        checkpoint_period=1,
-        async_checkpointing=False,
-        enable_diloco=False,
-    )
+    config = SimpleNamespace(pure_nnx=True, checkpoint_period=1, async_checkpointing=False, enable_diloco=False)
     mgr = mock.MagicMock()
     mgr.reached_preemption.return_value = False
     # Mock latest_step to return a different step (or None)

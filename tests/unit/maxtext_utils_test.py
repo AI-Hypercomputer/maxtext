@@ -1405,14 +1405,7 @@ class TestSetupTrainingState(unittest.TestCase):
 
       init_state_fn = create_train_state_fn
     else:
-      init_state_fn = functools.partial(
-          maxtext_utils.init_initial_state,
-          self.model,
-          tx,
-          self.config,
-          True,
-          rng,
-      )
+      init_state_fn = functools.partial(maxtext_utils.init_initial_state, self.model, tx, self.config, True, rng)
     state, _, _, _ = maxtext_utils.setup_training_state(None, self.config, self.mesh, None, init_state_fn)
     if self.config.pure_nnx:
       self.assertIsNotNone(state.optimizer)
@@ -1450,12 +1443,7 @@ class TestGetLogicalAnnotations(unittest.TestCase):
       )
     else:
       init_state_fn = functools.partial(
-          maxtext_utils.init_initial_state,
-          self.model,
-          self.tx,
-          self.config,
-          True,
-          self.rng,
+          maxtext_utils.init_initial_state, self.model, self.tx, self.config, True, self.rng
       )
       annotations = maxtext_utils.get_logical_annotations(self.config, self.mesh, init_state_fn)
     # Result should be a pytree with PartitionSpec leaves

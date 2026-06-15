@@ -321,8 +321,7 @@ def get_maxtext_model_info(config):
   abstract_params_tree = maxtext_utils.get_abstract_param(maxtext_model_flax, config)["params"]
 
   abstract_params_flat, abstract_params_treedef = jax.tree_util.tree_flatten_with_path(
-      abstract_params_tree,
-      is_leaf=lambda x: isinstance(x, nn.LogicallyPartitioned),
+      abstract_params_tree, is_leaf=lambda x: isinstance(x, nn.LogicallyPartitioned)
   )
 
   max_logging.log("MaxText abstract model and state initialized.")

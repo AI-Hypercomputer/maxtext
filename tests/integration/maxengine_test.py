@@ -71,29 +71,13 @@ class MaxEngineTest(unittest.TestCase):
 
   def test_stack_and_unstack_prefill_cache_nnx(self):
     """scan_layers=False: per-layer cache subtrees stack onto a leading layer axis and back."""
-    cfg = self._init_nnx_pyconfig(
-        stack_prefill_result_cache=True, scan_layers=False
-    )
+    cfg = self._init_nnx_pyconfig(stack_prefill_result_cache=True, scan_layers=False)
     engine = maxengine.MaxEngine(cfg, jax.devices())
     num_layers = engine.config.num_decoder_layers
     # scan_layers=False keeps the per-layer subtrees under decoder/layers, keyed by layer index.
-    cache = {
-        "decoder": {
-            "layers": {
-                i: {"a": jnp.ones((1, 10)), "b": jnp.ones((1, 9))}
-                for i in range(num_layers)
-            }
-        }
-    }
+    cache = {"decoder": {"layers": {i: {"a": jnp.ones((1, 10)), "b": jnp.ones((1, 9))} for i in range(num_layers)}}}
 
-    expected_stacked = {
-        "decoder": {
-            "layers": {
-                "a": jnp.ones((num_layers, 1, 10)),
-                "b": jnp.ones((num_layers, 1, 9)),
-            }
-        }
-    }
+    expected_stacked = {"decoder": {"layers": {"a": jnp.ones((num_layers, 1, 10)), "b": jnp.ones((num_layers, 1, 9))}}}
     # pylint: disable=protected-access
     got_stacked = engine._maybe_stack_prefill_result_cache(cache)
     jax.tree.map(np.testing.assert_array_equal, got_stacked, expected_stacked)
@@ -250,10 +234,7 @@ class MaxEngineTest(unittest.TestCase):
     engine = maxengine.MaxEngine(cfg, jax.devices())
     params = engine.load_params(params=self._build_nnx_params(cfg, mesh))
     result, first = engine.prefill_multisampling(
-        params=params,
-        padded_tokens=input_tokens,
-        true_length=true_length,
-        num_samples=num_samples,
+        params=params, padded_tokens=input_tokens, true_length=true_length, num_samples=num_samples
     )
 
     self.assertEqual(result["tokens"].shape[0], num_samples)
