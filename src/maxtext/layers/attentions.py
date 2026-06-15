@@ -472,7 +472,7 @@ class Attention(nnx.Module):
     if self.config.attention_sink:
       self.sinks = nnx.Param(
           default_bias_init(self.rngs.params(), (self.config.num_query_heads,), self.weight_dtype),
-          sharding=(None,),
+          out_sharding=(None,),
       )
     else:
       self.sinks = None
@@ -517,14 +517,14 @@ class Attention(nnx.Module):
     elif self.is_qwen3_hybrid:
       self.query_norm = Qwen3NextRMSNorm(
           num_features=self.config.head_dim,
-          eps=self.config.normalization_layer_epsilon,
+          epsilon=self.config.normalization_layer_epsilon,
           dtype=self.config.dtype,
           weight_dtype=self.config.weight_dtype,
           rngs=self.rngs,
       )
       self.key_norm = Qwen3NextRMSNorm(
           num_features=self.config.head_dim,
-          eps=self.config.normalization_layer_epsilon,
+          epsilon=self.config.normalization_layer_epsilon,
           dtype=self.config.dtype,
           weight_dtype=self.config.weight_dtype,
           rngs=self.rngs,
