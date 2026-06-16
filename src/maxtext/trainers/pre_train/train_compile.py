@@ -172,7 +172,8 @@ def get_shaped_inputs(topology_mesh, config):
     logical_annotations = maxtext_utils.get_logical_annotations(config, topology_mesh, init_state_fn)
 
   # Shaped batch
-  shaped_batch = maxtext_utils.get_shaped_batch(config)
+  data_sharding = sharding.get_input_data_sharding(config, topology_mesh)
+  shaped_batch = maxtext_utils.get_shaped_batch(config, batch_sharding=data_sharding)
 
   if config.pure_nnx:
     shaped_train_args = (

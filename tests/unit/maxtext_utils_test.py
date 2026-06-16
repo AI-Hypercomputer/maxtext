@@ -1104,6 +1104,7 @@ class TestGetFunctionalEvalWithSignature(unittest.TestCase):
     self.assertEqual(len(in_shardings), 3)
 
 
+@pytest.mark.cpu_only
 class TestGetShapedBatch(unittest.TestCase):
   """Tests for get_shaped_batch."""
 
@@ -1158,6 +1159,25 @@ class TestGetShapedBatch(unittest.TestCase):
     batch = maxtext_utils.get_shaped_batch(self._make_cfg())
     for v in batch.values():
       self.assertIsInstance(v, jax.ShapeDtypeStruct)
+
+  def test_get_shaped_batch_unsharded(self):
+    """Verify that get_shaped_batch returns unsharded ShapeDtypeStructs by default."""
+    cfg = self._make_cfg()
+    shaped_batch = maxtext_utils.get_shaped_batch(cfg)
+    self.assertIn("inputs", shaped_batch)
+    self.assertIsNone(shaped_batch["inputs"].sharding)
+
+  def test_get_shaped_batch_sharded(self):
+    """Verify that get_shaped_batch applies the passed sharding to ShapeDtypeStructs."""
+    cfg = self._make_cfg()
+    devices = np.array(jax.local_devices()[:1]).reshape(
+        1,
+    )
+    mesh = Mesh(devices, ("x",))
+    sharding_spec = NamedSharding(mesh, PartitionSpec("x"))
+    shaped_batch = maxtext_utils.get_shaped_batch(cfg, batch_sharding=sharding_spec)
+    self.assertIn("inputs", shaped_batch)
+    self.assertEqual(shaped_batch["inputs"].sharding, sharding_spec)
 
 
 class TestShouldPreventCseInRemat(unittest.TestCase):

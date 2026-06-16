@@ -80,7 +80,8 @@ def train_loop(config, recorder, state=None):
   )
 
   with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
-    shaped_batch = maxtext_utils.get_shaped_batch(config)
+    data_sharding = sharding.get_input_data_sharding(config, mesh)
+    shaped_batch = maxtext_utils.get_shaped_batch(config, batch_sharding=data_sharding)
     compiled = p_train_step.lower(state, shaped_batch, init_rng).compile()
     compiled_stats = compiled.memory_analysis()
     max_utils.print_compiled_memory_stats(compiled_stats)
