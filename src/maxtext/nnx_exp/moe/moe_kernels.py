@@ -7,7 +7,7 @@ import jax
 from jax.experimental.pallas.ops.tpu import megablox
 import jax.numpy as jnp
 
-from maxtext.nnx_exp.moe_types import MegabloxConfig
+from maxtext.nnx_exp.moe.moe_types import MegabloxConfig
 
 
 SparseMoEKernel: TypeAlias = Literal["ragged_dot", "megablox"]
