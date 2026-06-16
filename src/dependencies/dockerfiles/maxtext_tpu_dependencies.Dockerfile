@@ -63,8 +63,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # Now copy the remaining code (source files that may change frequently)
 COPY ${PACKAGE_DIR}/maxtext/ src/maxtext/
-COPY ${PACKAGE_DIR}/MaxText/ src/MaxText/
+# Now copy resource needed for pytest:
 COPY tests*/ tests/
+COPY pytest.ini* pytest.ini
 COPY benchmarks*/ benchmarks/
 
 # Download test assets from GCS if building image with test assets
@@ -76,4 +77,4 @@ RUN if [ "$INCLUDE_TEST_ASSETS" = "true" ]; then \
         fi; \
     fi
 
-ENV PYTHONPATH="/deps/src:${PYTHONPATH}"
+ENV PYTHONPATH="/deps/src${PYTHONPATH:+:${PYTHONPATH}}"

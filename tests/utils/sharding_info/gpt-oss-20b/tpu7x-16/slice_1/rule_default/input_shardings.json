@@ -2,32 +2,50 @@
   "Activation Sharding Dump": [
     {
       "attentions/inputs_q: bfloat16[192,2048,2880]": {
-        "logic_axes": "('activation_batch', 'activation_attn_length', 'activation_attn_embed')",
+        "logic_axes": "('activation_batch_attn', 'activation_length_attn', 'activation_embed_attn')",
         "PartitionSpec": "P('fsdp', None, None)"
       }
     },
     {
       "attentions/inputs_kv: bfloat16[192,2048,2880]": {
-        "logic_axes": "('activation_batch', 'activation_attn_length', 'activation_attn_embed')",
+        "logic_axes": "('activation_batch_attn', 'activation_length_attn', 'activation_embed_attn')",
         "PartitionSpec": "P('fsdp', None, None)"
       }
     },
     {
       "attentions/query: bfloat16[192,2048,64,64]": {
-        "logic_axes": "('activation_kv_batch', 'activation_attn_length', 'activation_kv_heads', 'activation_kv_head_dim')",
+        "logic_axes": "('activation_kv_batch', 'activation_length_attn', 'activation_kv_heads', 'activation_kv_head_dim')",
         "PartitionSpec": "P('fsdp', None, None, None)"
       }
     },
     {
       "attentions/key: bfloat16[192,2048,8,64]": {
-        "logic_axes": "('activation_kv_batch', 'activation_attn_length', 'activation_kv_heads', 'activation_kv_head_dim')",
+        "logic_axes": "('activation_kv_batch', 'activation_length_attn', 'activation_kv_heads', 'activation_kv_head_dim')",
         "PartitionSpec": "P('fsdp', None, None, None)"
       }
     },
     {
       "attentions/value: bfloat16[192,2048,8,64]": {
-        "logic_axes": "('activation_kv_batch', 'activation_attn_length', 'activation_kv_heads', 'activation_kv_head_dim')",
+        "logic_axes": "('activation_kv_batch', 'activation_length_attn', 'activation_kv_heads', 'activation_kv_head_dim')",
         "PartitionSpec": "P('fsdp', None, None, None)"
+      }
+    },
+    {
+      "attention_op/arr: int8[1,4,2]": {
+        "logic_axes": "Unknown",
+        "PartitionSpec": "P(None, None)"
+      }
+    },
+    {
+      "attention_op/arr: bool[2,512,512]": {
+        "logic_axes": "Unknown",
+        "PartitionSpec": "P()"
+      }
+    },
+    {
+      "attention_op/arr: int8[1,2,4]": {
+        "logic_axes": "Unknown",
+        "PartitionSpec": "P(None, None)"
       }
     },
     {
@@ -50,7 +68,7 @@
     },
     {
       "attentions/out: bfloat16[192,2048,64,64]": {
-        "logic_axes": "('activation_batch', 'activation_attn_length', 'activation_heads', 'activation_kv')",
+        "logic_axes": "('activation_batch_attn', 'activation_length_attn', 'activation_heads', 'activation_kv')",
         "PartitionSpec": "P('fsdp', None, None, None)"
       }
     },
@@ -64,6 +82,54 @@
       "moe/gate_logits: bfloat16[192,2048,32]": {
         "logic_axes": "('activation_batch', 'activation_norm_length', None)",
         "PartitionSpec": "P('fsdp', None, None)"
+      }
+    },
+    {
+      "moe/w0_kernel: bfloat16[32,2880,2880]": {
+        "logic_axes": "Unknown",
+        "PartitionSpec": "P(None, None, None)"
+      }
+    },
+    {
+      "moe/w1_kernel: bfloat16[32,2880,2880]": {
+        "logic_axes": "Unknown",
+        "PartitionSpec": "P(None, None, None)"
+      }
+    },
+    {
+      "moe/wo_kernel: bfloat16[32,2880,2880]": {
+        "logic_axes": "Unknown",
+        "PartitionSpec": "P(None, None, None)"
+      }
+    },
+    {
+      "moe/w0_bias: bfloat16[32,2880]": {
+        "logic_axes": "Unknown",
+        "PartitionSpec": "P(None, None)"
+      }
+    },
+    {
+      "moe/w1_bias: bfloat16[32,2880]": {
+        "logic_axes": "Unknown",
+        "PartitionSpec": "P(None, None)"
+      }
+    },
+    {
+      "moe/wo_bias: bfloat16[32,2880]": {
+        "logic_axes": "Unknown",
+        "PartitionSpec": "P(None, None)"
+      }
+    },
+    {
+      "attention_op/arr: int8[1,4,4]": {
+        "logic_axes": "Unknown",
+        "PartitionSpec": "P(None, None)"
+      }
+    },
+    {
+      "attention_op/arr: int32[2048]": {
+        "logic_axes": "Unknown",
+        "PartitionSpec": "P(None,)"
       }
     }
   ]

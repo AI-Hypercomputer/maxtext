@@ -14,13 +14,13 @@
 
 base_config: "base.yml"
 
-use_sft: True
-use_tunix_gradient_accumulation: True
-use_multimodal: True
+use_sft: true
+use_tunix_gradient_accumulation: true
+use_multimodal: true
 # For vision, the prompt contains image, we only train on completion tokens
-sft_train_on_completion_only: True
-packing: False  # packing is not supported yet
-freeze_vision_encoder_params: True
+sft_train_on_completion_only: true
+packing: false  # packing is not supported yet
+freeze_vision_encoder_params: true
 learning_rate: 2.e-5
 
 # -------------- HF pipeline --------------

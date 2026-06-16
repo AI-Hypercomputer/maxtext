@@ -50,6 +50,9 @@ jobs:
     runs-on: ${{ inputs.cloud_runner != '' && inputs.cloud_runner || fromJson(format('["self-hosted", "{0}", "{1}"]', inputs.device_type, inputs.device_name)) }}
     container:
       image: gcr.io/tpu-prod-env-multipod/${{ inputs.base_image }}
+      env:
+        VLLM_TARGET_DEVICE: "tpu"
+        UV_TORCH_BACKEND: "cpu"
     steps:
       - name: Checkout MaxText
         if: ${{ !inputs.maxtext_installed }}
@@ -73,14 +76,15 @@ jobs:
           # 2. Install MaxText package and all the post training dependencies
           uv pip install ${maxtext_wheel}[tpu-post-train] --resolution=lowest
           install_tpu_post_train_extra_deps
-          
+
           python3 -m pip freeze
       - name: Run Post-Training Notebooks
         shell: bash
         env:
-          PYTHONPATH: "${{ github.workspace }}/src"
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           MAXTEXT_INSTALLED: ${{ inputs.maxtext_installed }}
+          # TODO: Fix evaluation in sft_qwen3_demo.ipynb and remove this env variable
+          RUN_EVALUATION: "false"
         run: |
           if [ "${MAXTEXT_INSTALLED}" == "true" ]; then
             # Move to the directory where code is baked into the image. See the Dockerfile.
@@ -93,6 +97,7 @@ jobs:
             PAPERMILL_EXE=".venv/bin/papermill"
             source .venv/bin/activate
           fi
+          export PYTHONPATH="${PWD}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
           export MAXTEXT_REPO_ROOT=$(pwd)
           export MAXTEXT_PKG_DIR=$(pwd)/src/maxtext
@@ -101,9 +106,13 @@ jobs:
           # Register maxtext_venv as a selectable kernel in Jupyter
           $PYTHON_EXE -m ipykernel install --user --name maxtext_venv
 
+          # Run Hugging Face authentication
+          hf auth login --token "$HF_TOKEN"
+
           for notebook in "$MAXTEXT_NOTEBOOKS_ROOT"/{sft,rl}*.ipynb; do
             filename=$(basename "$notebook")
-            if [[ "$filename" == "sft_qwen3_demo.ipynb" || "$filename" == "sft_llama3_demo_gpu.ipynb" ]]; then
+            # TODO: Update runnner to v6e-8 as RL with LLama3.1-8b doesn't fit on v6e-4
+            if [[ "$filename" == "sft_llama3_demo_gpu.ipynb" || "$filename" == "maxtext_with_gepa.ipynb" ]]; then
               echo "Skipping $filename"
               continue
             fi

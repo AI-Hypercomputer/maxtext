@@ -14,7 +14,10 @@
 
 """DeepSeek Manifold-Constrained Hyper Connections (mHC) Layer."""
 
+import itertools
+import math
 from typing import Callable
+
 from flax import nnx
 import jax
 import jax.numpy as jnp
@@ -25,6 +28,17 @@ from maxtext.layers.initializers import default_bias_init, default_scalar_init, 
 from maxtext.layers.normalizations import RMSNorm
 
 
+def get_permutation_matrices(k: int) -> Array:
+  """Generates all permutation matrices of size k.
+
+  Reference: mHC-lite: https://openreview.net/pdf?id=5IJX6kvOif
+  Shape: (k!, k, k)
+  """
+  perms = list(itertools.permutations(range(k)))
+  perms_array = jnp.array(perms)
+  return jnp.eye(k)[perms_array]
+
+
 def get_functions(expansion_rate: int):
   """Creates functions to broadcast a single feature stream into multiple
 
@@ -33,9 +47,7 @@ def get_functions(expansion_rate: int):
 
   def expand(x: Array):
     # (batch, length, dim) -> (batch, length, streams, dim)
-    return jnp.repeat(
-        jnp.expand_dims(x, axis=2), expansion_rate, axis=2
-    ).astype(x.dtype)
+    return jnp.repeat(jnp.expand_dims(x, axis=2), expansion_rate, axis=2).astype(x.dtype)
 
   def reduce(x: Array):
     # (batch, length, streams, dim) -> (batch, length, dim)
@@ -109,16 +121,27 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     # Scalars
     self.res_alpha_scale = nnx.Param(
         default_scalar_init(self.rngs.params(), (1,), self.weight_dtype),
-        sharding=(None,),
+        out_sharding=(None,),
     )
     self.pre_alpha_scale = nnx.Param(
         default_scalar_init(self.rngs.params(), (1,), self.weight_dtype),
-        sharding=(None,),
+        out_sharding=(None,),
     )
     self.post_alpha_scale = nnx.Param(
         default_scalar_init(self.rngs.params(), (1,), self.weight_dtype),
-        sharding=(None,),
+        out_sharding=(None,),
     )
+
+    if self.config.enable_mhc_lite:
+      num_perms = math.factorial(self.k)
+      res_out_dim = num_perms
+      res_beta_shape = (num_perms,)
+      res_beta_sharding = (None,)
+      self.permutation_matrices = get_permutation_matrices(self.k)
+    else:
+      res_out_dim = self.k * self.k
+      res_beta_shape = (self.k, self.k)
+      res_beta_sharding = (None, None)
 
     # Weight matrices
     scale_init = nd_dense_init(1.0, "fan_in", "normal")
@@ -128,12 +151,12 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     self.res_alpha = nnx.Param(
         scale_init(
             self.rngs.params(),
-            (self.k * self.dim, self.k * self.k),
+            (self.k * self.dim, res_out_dim),
             self.weight_dtype,
             in_axis=in_axis,
             out_axis=out_axis,
         ),
-        sharding=weight_sharding_axis_name,
+        out_sharding=weight_sharding_axis_name,
     )
     self.pre_alpha = nnx.Param(
         scale_init(
@@ -143,7 +166,7 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
             in_axis=in_axis,
             out_axis=out_axis,
         ),
-        sharding=weight_sharding_axis_name,
+        out_sharding=weight_sharding_axis_name,
     )
     self.post_alpha = nnx.Param(
         scale_init(
@@ -153,23 +176,21 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
             in_axis=in_axis,
             out_axis=out_axis,
         ),
-        sharding=weight_sharding_axis_name,
+        out_sharding=weight_sharding_axis_name,
     )
 
     # Biases
     self.res_beta = nnx.Param(
-        default_bias_init(
-            self.rngs.params(), (self.k, self.k), self.weight_dtype
-        ),
-        sharding=(None, None),
+        default_bias_init(self.rngs.params(), res_beta_shape, self.weight_dtype),
+        out_sharding=res_beta_sharding,
     )
     self.pre_beta = nnx.Param(
         default_bias_init(self.rngs.params(), (self.k,), self.weight_dtype),
-        sharding=(None,),
+        out_sharding=(None,),
     )
     self.post_beta = nnx.Param(
         default_bias_init(self.rngs.params(), (self.k,), self.weight_dtype),
-        sharding=(None,),
+        out_sharding=(None,),
     )
 
   def res_mapping(self, x: Array):
@@ -178,19 +199,32 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     res_alpha = jnp.asarray(self.res_alpha[...], self.dtype)
     res_beta = jnp.asarray(self.res_beta[...], self.dtype)
     res_alpha_scale = jnp.asarray(self.res_alpha_scale[...], self.dtype)
-    # Apply projection: (b, s, k*d) @ (k*d, k*k) -> (b, s, k*k)
-    h_res = jnp.einsum(
-        "bsm,mn -> bsn", x, res_alpha, precision=self.matmul_precision
-    )
-    b, s, _ = h_res.shape
-    h_res = jnp.reshape(h_res, (b, s, self.k, self.k))
-    intermediate = res_alpha_scale * h_res + res_beta[None, None, :, :]
-    output = sinkhorn(intermediate, self.sinkhorn_iterations)
-    return output
 
-  def mapping(
-      self, x: Array, alpha_scale: Array, alpha: Array, beta: Array, scale: int
-  ):
+    if self.config.enable_mhc_lite:
+      # Apply projection: (b, s, k*d) @ (k*d, k!) -> (b, s, k!)
+      h_res = jnp.einsum("bsm,mn -> bsn", x, res_alpha, precision=self.matmul_precision)
+      intermediate = res_alpha_scale * h_res + res_beta[None, None, :]
+      # Use float32 for numerical stability during softmax
+      weights = jax.nn.softmax(intermediate.astype(jnp.float32), axis=-1).astype(self.dtype)
+      # Sum the permutation matrices with the weights
+      permutation_matrices = self.permutation_matrices.astype(self.dtype)
+      output = jnp.einsum(
+          "bsn,nkm -> bskm",
+          weights,
+          permutation_matrices,
+          precision=self.matmul_precision,
+      )
+      return output
+    else:
+      # Apply projection: (b, s, k*d) @ (k*d, k*k) -> (b, s, k*k)
+      h_res = jnp.einsum("bsm,mn -> bsn", x, res_alpha, precision=self.matmul_precision)
+      b, s, _ = h_res.shape
+      h_res = jnp.reshape(h_res, (b, s, self.k, self.k))
+      intermediate = res_alpha_scale * h_res + res_beta[None, None, :, :]
+      output = sinkhorn(intermediate, self.sinkhorn_iterations)
+      return output
+
+  def mapping(self, x: Array, alpha_scale: Array, alpha: Array, beta: Array, scale: int):
     """Helper function for both pre and post mappings."""
     # In MaxText, we match weight precision to activations before Matmul
     alpha = jnp.asarray(alpha, self.dtype)
@@ -236,9 +270,7 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
         self.pre_beta[...],
         1.0,
     )
-    layer_input = jnp.einsum(
-        "bskd,bsk -> bsd", x, pre_mapping, precision=self.matmul_precision
-    )
+    layer_input = jnp.einsum("bskd,bsk -> bsd", x, pre_mapping, precision=self.matmul_precision)
 
     # 3. Pre-norm
     layer_input = norm_fn(layer_input)
@@ -246,15 +278,11 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     # 4. Attention or MLP
     metadata = {}
     if mhc_type == HyperConnectionType.ATTENTION:
-      layer_out, _ = branch_fn(
-          inputs_q=layer_input, inputs_kv=layer_input, **kwargs
-      )
+      layer_out, _ = branch_fn(inputs_q=layer_input, inputs_kv=layer_input, **kwargs)
     elif mhc_type == HyperConnectionType.MLP_DENSE:
       layer_out = branch_fn(inputs=layer_input, **kwargs)
     elif mhc_type == HyperConnectionType.MLP_MOE:
-      layer_out, load_balance_loss, moe_bias_updates = branch_fn(
-          inputs=layer_input, **kwargs
-      )
+      layer_out, load_balance_loss, moe_bias_updates = branch_fn(inputs=layer_input, **kwargs)
       metadata["load_balance_loss"] = load_balance_loss
       metadata["moe_bias_updates"] = moe_bias_updates
     else:
@@ -277,7 +305,5 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
 
     # 6. Residual mapping, res_out shape as [batch, seq, expansion_rate, emb]
     res_mapping = self.res_mapping(norm_x)
-    res_out = jnp.einsum(
-        "bskd,bskm -> bsmd", x, res_mapping, precision=self.matmul_precision
-    )
+    res_out = jnp.einsum("bskd,bskm -> bsmd", x, res_mapping, precision=self.matmul_precision)
     return res_out + post_out, metadata

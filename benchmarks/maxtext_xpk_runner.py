@@ -115,6 +115,7 @@ class WorkloadConfig:
   disruption_configs: DisruptionConfig = None
   xpk_storage: None | list[str] = None
   hlo_dump: None | bool = None
+  skip_validation: bool = False
 
   def __post_init__(self):
     """Initializes num_devices_per_slice and topology for recording the run into BigQuery"""
@@ -643,6 +644,9 @@ def generate_xpk_workload_cmd(
     docker_image_flag = f"--docker-image={pw_config.runner_image}"
   else:
     docker_image_flag = f'--base-docker-image="{wl_config.base_docker_image}"'
+
+  if wl_config.skip_validation:
+    workload_create_command += " --skip-validation"
 
   upload_metrics_to_bq_cmd = ""
   if wl_config.generate_metrics_and_upload_to_big_query and not is_pathways_headless_enabled:

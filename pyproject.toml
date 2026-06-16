@@ -3,7 +3,7 @@ requires = ["hatchling", "hatch-requirements-txt"]
 build-backend = "hatchling.build"
 
 [tool.hatch.version]
-path = "src/MaxText/__init__.py"
+path = "src/maxtext/__init__.py"
 
 [project]
 name = "maxtext"
@@ -42,8 +42,7 @@ allow-direct-references = true
 [tool.hatch.build.targets.wheel]
 packages = ["src/maxtext", "src/dependencies"]
 
-[tool.hatch.build.targets.wheel.hooks.custom]
-path = "build_hooks.py"
+
 
 [project.scripts]
 install_tpu_pre_train_extra_deps = "dependencies.scripts.install_pre_train_extra_deps:main"

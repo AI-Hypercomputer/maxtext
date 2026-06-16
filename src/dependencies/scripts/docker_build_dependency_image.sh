@@ -63,6 +63,9 @@ fi
 if [[ -z ${WORKFLOW} ]]; then
   export WORKFLOW=pre-training
 fi
+if [[ -z ${INCLUDE_TEST_ASSETS} ]]; then
+  export INCLUDE_TEST_ASSETS=false
+fi
 
 # Create docker build arguments array
 docker_build_args=(
@@ -71,6 +74,7 @@ docker_build_args=(
   "MODE=${MODE}"
   "JAX_VERSION=${JAX_VERSION}"
   "PACKAGE_DIR=${PACKAGE_DIR}"
+  "INCLUDE_TEST_ASSETS=${INCLUDE_TEST_ASSETS}"
 )
 
 run_docker_build() {

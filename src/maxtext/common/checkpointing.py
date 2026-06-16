@@ -18,17 +18,22 @@ import time
 from typing import Any, Optional
 
 from absl import flags
+import contextlib
 import datetime
 from etils import epath
+from flax import nnx
 from flax.training import train_state
 import jax
+import jax.numpy as jnp
 from maxtext.utils.globals import DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
 from maxtext.input_pipeline.multihost_dataloading import MultiHostDataLoadIterator
-from maxtext.input_pipeline.multihost_dataloading import RemoteIterator
+from maxtext.input_pipeline.multihost_dataloading import RemoteIteratorWrapper
 from maxtext.input_pipeline.synthetic_data_processing import PlaceHolderDataIterator
+from maxtext.common import train_state_nnx
 from maxtext.utils import exceptions
 from maxtext.utils import max_logging
 from maxtext.utils import gcs_utils
+from maxtext.utils import elastic_utils
 import numpy as np
 import orbax.checkpoint as ocp
 from orbax.checkpoint import v1 as ocp_v1
@@ -43,6 +48,7 @@ import json
 
 import grain
 from grain.python import PyGrainCheckpointHandler
+from grain.experimental import ElasticIterator
 
 CheckpointManager = ocp.CheckpointManager
 CheckpointManagerOptions = ocp.CheckpointManagerOptions
@@ -67,6 +73,22 @@ class GrainCheckpointHandler(PyGrainCheckpointHandler, ocp.CheckpointHandler):
   ):
     """Saves the given iterator to the checkpoint in `directory`."""
     item = item or args.item  # pytype:disable=attribute-error
+
+    # RemoteIteratorWrapper handles checkpointing via colocated python
+    if isinstance(item, RemoteIteratorWrapper):
+      step = int(directory.parent.name)
+      item.save_state(step)
+      return
+
+    # ElasticIterator state is a single global scalar shared by all shards,
+    # so we write one fixed `process_0.json` from process 0 only. This file
+    # layout survives changes in `jax.process_count()`.
+    if isinstance(item, ElasticIterator):
+      if jax.process_index() == 0:
+        directory.mkdir(parents=True, exist_ok=True)
+        filename = directory / "process_0.json"
+        filename.write_text(json.dumps(item.get_state(), indent=4))
+      return
 
     def save_single_process(item, process_index, process_count):
       filename = directory / f"process_{process_index}-of-{process_count}.json"
@@ -93,6 +115,21 @@ class GrainCheckpointHandler(PyGrainCheckpointHandler, ocp.CheckpointHandler):
     item = item or args.item
     process_index = getattr(args, "process_index", None)
     process_count = getattr(args, "process_count", None)
+
+    # In Pathways + colocated_python environment, RemoteIteratorWrapper handles checkpointing
+    if isinstance(item, RemoteIteratorWrapper):
+      step = int(directory.parent.name)
+      item.restore_state(step)
+      return item
+
+    # McJax and Pathways through controller cases
+    # ElasticIterator: every process reads the same shared `process_0.json`.
+    if isinstance(item, ElasticIterator):
+      filename = directory / "process_0.json"
+      if not filename.exists():
+        raise ValueError(f"File {filename} does not exist.")
+      item.set_state(json.loads(filename.read_text()))
+      return item
 
     def restore_single_process(item, process_index, process_count):
       filename = directory / f"process_{process_index}-of-{process_count}.json"
@@ -131,13 +168,122 @@ class GrainCheckpointRestore(ocp.args.CheckpointArgs):
   process_count: Optional[int] = None
 
 
-def _is_remote_iterator(data_iterator):
-  """Check if data_iterator is a RemoteIterator or contains RemoteIterator instances."""
-  if isinstance(data_iterator, RemoteIterator):
-    return True
-  if isinstance(data_iterator, list):
-    return any(isinstance(item, RemoteIterator) for item in data_iterator)
-  return False
+def _default_for_sds(sds):
+  """Returns a deterministic value matching `sds` shape/dtype/sharding.
+
+  Used to fill NNX-only state (rngs/dropout) that the Linen on-disk layout never
+  carried. Materializes under jit with the target out_shardings so it works on
+  multi-host meshes (device_put can't place a global sharding whose devices
+  aren't
+  all addressable from this process).
+  """
+  if not (hasattr(sds, "dtype") and hasattr(sds, "shape")):
+    return sds
+
+  def _make():
+    if "key" in str(sds.dtype):
+      base = jax.random.key(0)
+      return base if sds.shape == () else jax.random.split(base, int(np.prod(sds.shape))).reshape(sds.shape)
+    return jnp.zeros(sds.shape, dtype=sds.dtype)
+
+  sharding = getattr(sds, "sharding", None)
+  if sharding is None:
+    return _make()
+  return jax.jit(_make, out_shardings=sharding)()
+
+
+def _populate_pure_dict_from_partial(abstract_pure, partial_concrete):
+  """Fills `abstract_pure` with values from `partial_concrete` (by path), defaulting the rest.
+
+  Paths present in `partial_concrete` take the restored value; paths absent from
+  it
+  (NNX-only state the Linen checkpoint never had) get `_default_for_sds`.
+  """
+  if isinstance(abstract_pure, dict):
+    return {
+        k: _populate_pure_dict_from_partial(
+            v,
+            partial_concrete.get(k) if isinstance(partial_concrete, dict) else None,
+        )
+        for k, v in abstract_pure.items()
+    }
+  if partial_concrete is not None and not isinstance(partial_concrete, dict):
+    return partial_concrete
+  return _default_for_sds(abstract_pure)
+
+
+def _load_linen_checkpoint_into_nnx(
+    path,
+    abstract_nnx_state,
+    checkpoint_storage_concurrent_gb,
+    use_ocdbt,
+    use_zarr3,
+):
+  """Restores a Linen-layout checkpoint into an NNX state (pure_nnx resume).
+
+  Restores against a Linen-shape abstract, reshapes back via
+  `from_linen_checkpoint_dict`, then fills NNX-only rngs/dropout with defaults.
+  """
+  max_logging.log(f"Restoring Linen-layout checkpoint into NNX state at {path}")
+  nnx_abstract_pure = abstract_nnx_state.to_pure_dict()
+  linen_abstract = train_state_nnx.to_linen_checkpoint_dict(nnx_abstract_pure)
+  ckptr = ocp.Checkpointer(
+      ocp.PyTreeCheckpointHandler(
+          restore_concurrent_gb=checkpoint_storage_concurrent_gb,
+          save_concurrent_gb=checkpoint_storage_concurrent_gb,
+          use_ocdbt=use_ocdbt,
+          use_zarr3=use_zarr3,
+      )
+  )
+  restore_args = ocp.checkpoint_utils.construct_restore_args(linen_abstract)
+  restored = ocp.args.PyTreeRestore(item=linen_abstract, restore_args=restore_args, partial_restore=True)
+  restored = ckptr.restore(epath.Path(path), args=restored)
+  partial_nnx = train_state_nnx.from_linen_checkpoint_dict(restored)
+  return _populate_pure_dict_from_partial(nnx_abstract_pure, partial_nnx)
+
+
+def _rebuild_nnx_with_values(abstract_nnx_state, concrete_weights):
+  """Fills each Variable in `abstract_nnx_state` with the matching restored array."""
+  leaves, treedef = jax.tree_util.tree_flatten(abstract_nnx_state, is_leaf=lambda x: isinstance(x, nnx.Variable))
+  concrete = jax.tree_util.tree_leaves(concrete_weights)
+  if len(leaves) != len(concrete):
+    raise ValueError(
+        f"Params load leaf-count mismatch: {len(leaves)} abstract Variables vs" f" {len(concrete)} restored."
+    )
+  new_leaves = [v.replace(value=a) if isinstance(v, nnx.Variable) else a for v, a in zip(leaves, concrete)]
+  return jax.tree_util.tree_unflatten(treedef, new_leaves)
+
+
+def _load_linen_params_into_nnx(
+    path,
+    nnx_params_abstract,
+    checkpoint_storage_concurrent_gb,
+    use_ocdbt,
+    use_zarr3,
+):
+  """Weight-only load of a Linen-layout checkpoint into an NNX params state.
+
+  Reuses `to_linen_checkpoint_dict` (wrapping the params under `model`) to build
+  the
+  `params/params/...` restore target, then rebinds the restored weights into the
+  NNX params Variables.
+  """
+  max_logging.log(f"Restoring Linen-layout params into NNX state at {path}")
+  linen_abstract = train_state_nnx.to_linen_checkpoint_dict({"model": nnx_params_abstract.to_pure_dict()})
+  ckptr = ocp.Checkpointer(
+      ocp.PyTreeCheckpointHandler(
+          restore_concurrent_gb=checkpoint_storage_concurrent_gb,
+          save_concurrent_gb=checkpoint_storage_concurrent_gb,
+          use_ocdbt=use_ocdbt,
+          use_zarr3=use_zarr3,
+      )
+  )
+  restore_args = ocp.checkpoint_utils.construct_restore_args(linen_abstract)
+  restored = ckptr.restore(
+      epath.Path(path),
+      args=ocp.args.PyTreeRestore(item=linen_abstract, restore_args=restore_args, partial_restore=True),
+  )
+  return _rebuild_nnx_with_values(nnx_params_abstract, restored["params"]["params"])
 
 
 def _load_full_state_from_path(
@@ -191,6 +337,16 @@ def _load_full_state_from_path(
     else:
       raise ocp_v1.errors.InvalidLayoutError(f"Unknown checkpoint layout: {source_checkpoint_layout}")
   else:
+    # pure_nnx saves in the Linen on-disk layout; reshape it back into the NNX state.
+    if isinstance(abstract_unboxed_pre_state, nnx.State):
+      return _load_linen_checkpoint_into_nnx(
+          path,
+          abstract_unboxed_pre_state,
+          checkpoint_storage_concurrent_gb,
+          use_ocdbt,
+          use_zarr3,
+      )
+
     # Original v0 logic.
     p = epath.Path(path)
     handler = ocp.PyTreeCheckpointHandler(
@@ -211,7 +367,7 @@ def create_orbax_checkpoint_manager(
     enable_checkpointing: bool,
     use_async: bool,
     save_interval_steps: int,
-    dataset_type: None | str = "tfds",
+    dataset_type: None | str = None,
     orbax_logger: Any = None,  # pytype: disable=attribute-error
     use_ocdbt: bool = True,
     use_zarr3: bool = True,
@@ -244,7 +400,7 @@ def create_orbax_checkpoint_manager(
       )
   }
 
-  if dataset_type == "grain":
+  if dataset_type is not None and dataset_type == "grain":
     item_names += ("iter",)
     item_handlers["iter"] = GrainCheckpointHandler()
 
@@ -481,6 +637,19 @@ def _restore_grain_iterator(
   This function dispatches to the correct restore strategy based on
   the number of stored checkpoint files vs. current JAX processes.
   """
+  if isinstance(data_iterator, RemoteIteratorWrapper):
+    grain_restore_args = GrainCheckpointRestore(item=data_iterator)
+    restored_state = checkpoint_manager.restore(step, args=Composite(items=checkpoint_args, iter=grain_restore_args))
+    _assert_no_shaped_dtype_struct(restored_state)
+    return (restored_state, None)
+
+  # ElasticIterator: one shared `process_0.json` regardless of shard count.
+  if not isinstance(data_iterator, list) and isinstance(data_iterator.local_iterator, ElasticIterator):
+    grain_restore_args = GrainCheckpointRestore(item=data_iterator.local_iterator)
+    restored_state = checkpoint_manager.restore(step, args=Composite(items=checkpoint_args, iter=grain_restore_args))
+    _assert_no_shaped_dtype_struct(restored_state)
+    return (restored_state, None)
+
   directory = checkpoint_manager.directory / str(step) / "iter"
   process_count_jax = jax.process_count()
 
@@ -527,7 +696,65 @@ def _restore_grain_iterator(
 
   # Call restore once with the composed arguments
   restored_state = checkpoint_manager.restore(step, args=Composite(items=checkpoint_args, iter=grain_restore_args))
+  _assert_no_shaped_dtype_struct(restored_state)
   return (restored_state, None)
+
+
+def is_structural_or_shape_mismatch(e: Exception) -> bool:
+  """Helper to check if an exception is likely a PyTree structure or shape mismatch."""
+  if not isinstance(e, (ValueError, TypeError)):
+    return False
+  msg = str(e).lower()
+  mismatch_keywords = [
+      "mismatch",
+      "structure",
+      "shape",
+      "tree",
+      "leaf",
+      "leaves",
+      "paths matched",
+      "shapedtypestruct",
+      "invalid type",
+  ]
+  return any(kw in msg for kw in mismatch_keywords)
+
+
+def _assert_no_shaped_dtype_struct(pytree):
+  """Asserts that there are no jax.ShapeDtypeStruct leaves in the restored pytree."""
+  if isinstance(pytree, jax.ShapeDtypeStruct):
+    raise ValueError(
+        "Some parameters in the restored state remained as ShapeDtypeStruct"
+        f" (indicating structure mismatch): {pytree}."
+    )
+
+  if hasattr(pytree, "keys") and hasattr(pytree, "__getitem__"):
+    for k in pytree.keys():
+      _assert_no_shaped_dtype_struct(pytree[k])
+  elif isinstance(pytree, (list, tuple)):
+    for v in pytree:
+      _assert_no_shaped_dtype_struct(v)
+  else:
+    leaves = jax.tree_util.tree_leaves(pytree)
+    if len(leaves) == 1 and leaves[0] is pytree:
+      return
+    for leaf in leaves:
+      _assert_no_shaped_dtype_struct(leaf)
+
+
+@contextlib.contextmanager
+def handle_checkpoint_mismatch(context_name: str, path: str):
+  """Context manager to intercept PyTree/shape mismatches and raise descriptive errors."""
+  try:
+    yield
+  except Exception as e:
+    if is_structural_or_shape_mismatch(e):
+      raise ValueError(
+          f"Failed to {context_name} from {path}. This is often caused by a"
+          " mismatch in the 'scan_layers' configuration (stacked vs unstacked)"
+          " between your current execution command and the saved checkpoint."
+          f" Original error: {e}"
+      ) from e
+    raise
 
 
 def load_state_if_possible(
@@ -536,7 +763,7 @@ def load_state_if_possible(
     load_parameters_from_path: str,
     load_full_state_from_path: str,
     checkpoint_storage_concurrent_gb: int,
-    abstract_unboxed_pre_state: train_state.TrainState,
+    abstract_unboxed_pre_state: train_state.TrainState | nnx.State,
     enable_single_replica_ckpt_restoring: bool | None = False,
     dataset_type: str | None = "tfds",
     step: int = -1,  # -1 means latest
@@ -604,62 +831,121 @@ def load_state_if_possible(
         )
         ocp.type_handlers.register_type_handler(jax.Array, array_handler, override=True)
 
-      restore_args = jax.tree_util.tree_map(map_to_pspec, abstract_unboxed_pre_state)
-      checkpoint_args = ocp.args.PyTreeRestore(item=abstract_unboxed_pre_state, restore_args=restore_args)
+      # pure_nnx saves in the Linen on-disk layout; reshape it back into the NNX state.
+      # (Emergency managers use their own restore path below.)
+      if isinstance(abstract_unboxed_pre_state, nnx.State) and not isinstance(
+          checkpoint_manager,
+          (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager),
+      ):
+        checkpoint_path = str(checkpoint_manager.directory / str(step) / "items")
+        with handle_checkpoint_mismatch(
+            "restore NNX checkpoint", checkpoint_path
+        ):
+          restored_nnx = _load_linen_checkpoint_into_nnx(
+              checkpoint_path,
+              abstract_unboxed_pre_state,
+              checkpoint_storage_concurrent_gb,
+              use_ocdbt,
+              use_zarr3,
+          )
+          _assert_no_shaped_dtype_struct(restored_nnx)
+        return ({"items": restored_nnx}, None)
 
-      match (checkpoint_manager, dataset_type, data_iterator):
-        # Case 1: Matches if 'checkpoint_manager' is an instance of either EmergencyCheckpointManager
-        # or EmergencyReplicatorCheckpointManager. The '_' indicates that 'dataset_type' and
-        # 'data_iterator' can be any value and aren't used in this pattern.
-        case (checkpoint_manager, _, _) if isinstance(
-            checkpoint_manager, (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager)
-        ):
-          return (
-              checkpoint_manager.restore(step, args=Composite(state=checkpoint_args)).state,
-              None,
-          )
-        # Case 2: Matches if dataset type is "grain" and the data iterator is not a
-        # PlaceHolderDataIterator or RemoteIterator and a specific checkpoint file exists for the iterator
-        case (
-            checkpoint_manager,
-            dataset_type,
-            data_iterator,
-        ) if (
-            dataset_type == "grain"
-            and data_iterator
-            and not isinstance(data_iterator, PlaceHolderDataIterator)
-            and not _is_remote_iterator(data_iterator)
-            and (checkpoint_manager.directory / str(step) / "iter").exists()
-        ):
-          return _restore_grain_iterator(
-              checkpoint_manager, step, data_iterator, checkpoint_args, expansion_factor_real_data
-          )
-        # Case 3: Default/Fallback case.
-        # This case acts as a wildcard ('_') and matches if none of the preceding cases were met.
-        case _:
-          return (checkpoint_manager.restore(step, args=Composite(items=checkpoint_args)), None)
+      # Convert nnx.State to pure dict to match how checkpoints are saved for NNX
+      restore_target = abstract_unboxed_pre_state
+      if isinstance(abstract_unboxed_pre_state, nnx.State):
+        restore_target = abstract_unboxed_pre_state.to_pure_dict()
+
+      restore_args = jax.tree_util.tree_map(map_to_pspec, restore_target)
+      checkpoint_args = ocp.args.PyTreeRestore(
+          item=restore_target,
+          restore_args=restore_args,
+          partial_restore=True,
+      )
+
+      checkpoint_path = str(checkpoint_manager.directory / str(step))
+      with handle_checkpoint_mismatch("restore checkpoint", checkpoint_path):
+        match (checkpoint_manager, dataset_type, data_iterator):
+          # Case 1: Matches if 'checkpoint_manager' is an instance of either EmergencyCheckpointManager
+          # or EmergencyReplicatorCheckpointManager. The '_' indicates that 'dataset_type' and
+          # 'data_iterator' can be any value and aren't used in this pattern.
+          case (checkpoint_manager, _, _) if isinstance(
+              checkpoint_manager,
+              (
+                  EmergencyCheckpointManager,
+                  EmergencyReplicatorCheckpointManager,
+              ),
+          ):
+            restored = checkpoint_manager.restore(
+                step, args=Composite(state=checkpoint_args)
+            ).state
+            _assert_no_shaped_dtype_struct(restored)
+            return (
+                restored,
+                None,
+            )
+          # Case 2: Matches if dataset type is "grain" and the data iterator is not a
+          # PlaceHolderDataIterator and a specific checkpoint file exists for the iterator
+          case (
+              checkpoint_manager,
+              dataset_type,
+              data_iterator,
+          ) if (
+              dataset_type == "grain"
+              and data_iterator
+              and not isinstance(data_iterator, PlaceHolderDataIterator)
+              and (checkpoint_manager.directory / str(step) / "iter").exists()
+          ):
+            return _restore_grain_iterator(
+                checkpoint_manager,
+                step,
+                data_iterator,
+                checkpoint_args,
+                expansion_factor_real_data,
+            )
+          # Case 3: Default/Fallback case.
+          # This case acts as a wildcard ('_') and matches if none of the preceding cases were met.
+          case _:
+            restored = checkpoint_manager.restore(
+                step, args=Composite(items=checkpoint_args)
+            )
+            _assert_no_shaped_dtype_struct(restored)
+            return (restored, None)
 
   if load_parameters_from_path != "":
-    restored_params = load_params_from_path(
-        load_parameters_from_path,
-        abstract_unboxed_pre_state.params,
-        checkpoint_storage_concurrent_gb,
-        use_ocdbt=use_ocdbt,
-        use_zarr3=use_zarr3,
-    )
+    if isinstance(abstract_unboxed_pre_state, nnx.State):
+      _, params, _ = nnx.split(abstract_unboxed_pre_state.model, nnx.Param, ...)
+    else:
+      params = abstract_unboxed_pre_state.params
+
+    with handle_checkpoint_mismatch(
+        "load parameters", load_parameters_from_path
+    ):
+      restored_params = load_params_from_path(
+          load_parameters_from_path,
+          params,
+          checkpoint_storage_concurrent_gb,
+          use_ocdbt=use_ocdbt,
+          use_zarr3=use_zarr3,
+      )
+      _assert_no_shaped_dtype_struct(restored_params)
     return None, restored_params
   elif load_full_state_from_path != "":
     max_logging.log(f"Loading full state from path: {load_full_state_from_path}")
-    restored_state = _load_full_state_from_path(
-        path=load_full_state_from_path,
-        abstract_unboxed_pre_state=abstract_unboxed_pre_state,
-        enable_orbax_v1=enable_orbax_v1,
-        checkpoint_conversion_fn=checkpoint_conversion_fn,
-        source_checkpoint_layout=source_checkpoint_layout,
-        checkpoint_storage_concurrent_gb=checkpoint_storage_concurrent_gb,
-        use_ocdbt=use_ocdbt,
-        use_zarr3=use_zarr3,
-    )
+    with handle_checkpoint_mismatch(
+        "load full state", load_full_state_from_path
+    ):
+      restored_state = _load_full_state_from_path(
+          path=load_full_state_from_path,
+          abstract_unboxed_pre_state=abstract_unboxed_pre_state,
+          enable_orbax_v1=enable_orbax_v1,
+          checkpoint_conversion_fn=checkpoint_conversion_fn,
+          source_checkpoint_layout=source_checkpoint_layout,
+          checkpoint_storage_concurrent_gb=checkpoint_storage_concurrent_gb,
+          use_ocdbt=use_ocdbt,
+          use_zarr3=use_zarr3,
+      )
+      _assert_no_shaped_dtype_struct(restored_state)
     return {"items": restored_state}, None
   else:
     max_logging.log("No existing checkpoints found, not restoring checkpoint.")
@@ -691,6 +977,16 @@ def load_params_from_path(
   """Load decode params from checkpoint at specified path."""
   assert load_parameters_from_path, "load_parameters_from_path is not defined."
   max_logging.log(f"restoring params from {load_parameters_from_path}")
+
+  # NNX target: the on-disk checkpoint is in Linen layout; reshape it into the NNX params state.
+  if isinstance(abstract_unboxed_params, nnx.State):
+    return _load_linen_params_into_nnx(
+        load_parameters_from_path,
+        abstract_unboxed_params,
+        checkpoint_storage_concurrent_gb,
+        use_ocdbt,
+        use_zarr3,
+    )
 
   # *_concurrent_gb should be set for large models, the default is 96.
   max_logging.log(f"Creating checkpoint manager with ocdbt={use_ocdbt} and zarr3={use_zarr3}")
@@ -734,7 +1030,22 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
   # Determine the effective step for saving a checkpoint.
   # If 'step' is not provided, this call is for a potential final checkpoint
   # and use the last completed step from the state.
-  actual_step = (int(state.step) - 1) if step is None else int(step)
+  if step is not None:
+    actual_step = int(step)
+  else:
+    if config.pure_nnx:
+      actual_step = int(state.optimizer.step) - 1
+    else:
+      # Linen TrainState has .step attribute
+      actual_step = int(state.step) - 1
+
+  if checkpoint_manager.latest_step() == actual_step:
+    max_logging.log(f"Checkpoint for step {actual_step} already exists, skipping save.")
+    return
+
+  if config.pure_nnx:
+    # Save in the Linen on-disk layout so pure_nnx and Linen checkpoints are interchangeable.
+    state = train_state_nnx.to_linen_checkpoint_dict(state.to_pure_dict())
 
   # Determine if a checkpoint save should be forced, overriding the usual `config.checkpoint_period` logic.
   # This occurs if this function was called:
@@ -747,6 +1058,20 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
     checkpoint_saved = save_checkpoint(checkpoint_manager, actual_step, state, config, data_iterator, force_ckpt_save)
     if checkpoint_saved:
       print_save_message(actual_step, config.async_checkpointing)
+      if config.elastic_enabled:
+        elastic_utils.maybe_elastic_scale_up(config, checkpoint_manager)
+  except elastic_utils.manager.ScaleUpSignalError as e:
+    if config.elastic_enabled:
+      max_logging.log(f"Elastic event detected, letting exception bubble up: {e}")
+      raise
+    else:
+      raise exceptions.StopTraining("Job is preempted.") from e
+  except jax.errors.JaxRuntimeError as e:
+    if config.elastic_enabled:
+      max_logging.log(f"Elastic event detected, letting exception bubble up: {e}")
+      raise
+    else:
+      raise exceptions.StopTraining("Job is preempted.") from e
   except Exception as e:
     raise exceptions.StopTraining(f"Checkpointing failed. {str(e)}") from e
 
@@ -790,22 +1115,24 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
   )
   save_args_composite = {"items": checkpoint_args}
 
-  if (
-      config
-      and config.dataset_type == "grain"
-      and not isinstance(data_iterator, PlaceHolderDataIterator)
-      and not _is_remote_iterator(data_iterator)
-  ):
-    if not isinstance(data_iterator, list):
-      data_iterator = [data_iterator]
-    grain_iters_to_save = []
-    process_count_total = jax.process_count() * len(data_iterator)
-    if config.expansion_factor_real_data > 1:
-      process_count_total = process_count_total // config.expansion_factor_real_data
-    for i, data_iter in enumerate(data_iterator):
-      process_index = jax.process_index() + i * jax.process_count()
-      grain_iters_to_save.append((data_iter.local_iterator, process_index, process_count_total))
-    save_args_composite["iter"] = GrainCheckpointSave(item=grain_iters_to_save)
+  if config and config.dataset_type == "grain" and not isinstance(data_iterator, PlaceHolderDataIterator):
+    if isinstance(data_iterator, RemoteIteratorWrapper):
+      # Pass the wrapper directly; GrainCheckpointHandler will call save_state with the step
+      save_args_composite["iter"] = GrainCheckpointSave(item=data_iterator)
+    elif not isinstance(data_iterator, list) and isinstance(data_iterator.local_iterator, ElasticIterator):
+      # ElasticIterator checkpoints a single global scalar shared by all shards.
+      save_args_composite["iter"] = GrainCheckpointSave(item=data_iterator.local_iterator)
+    else:
+      if not isinstance(data_iterator, list):
+        data_iterator = [data_iterator]
+      grain_iters_to_save = []
+      process_count_total = jax.process_count() * len(data_iterator)
+      if config.expansion_factor_real_data > 1:
+        process_count_total = process_count_total // config.expansion_factor_real_data
+      for i, data_iter in enumerate(data_iterator):
+        process_index = jax.process_index() + i * jax.process_count()
+        grain_iters_to_save.append((data_iter.local_iterator, process_index, process_count_total))
+      save_args_composite["iter"] = GrainCheckpointSave(item=grain_iters_to_save)
 
   match (checkpoint_manager, config, data_iterator):
     case (checkpoint_manager, _, _) if isinstance(

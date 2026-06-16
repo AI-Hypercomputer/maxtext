@@ -335,6 +335,29 @@ class FlopCalculation(parameterized.TestCase):
     calculated_tflops, _, _ = calculate_tflops_training_per_device(cfg)
     self.assertFlopsAlmostEqual(calculated_tflops, golden_tflops)
 
+  def test_qwen3_custom_30b_a3b_flops(self):
+    """Test Qwen3 Custom 30B-A3B (compressed-latent MoE) FLOPs calculation.
+
+    The custom variant compresses attention output and MoE input to
+    attention_output_dim = moe_expert_input_dim = 768 (vs emb_dim = 2048),
+    then up-projects 768 -> 2048 once per layer. ~2.86B active parameters
+    per token (48 layers x (Q/K/V/O + gate + 8 routed experts + up_proj)
+    + unembedding).
+    """
+    cfg = self._initialize_model_config(
+        "qwen3-custom-30b-a3b",
+        max_target_length=2048,
+        per_device_batch_size=4,
+    )
+    kwargs = cfg.get_keys()
+    B = cfg.per_device_batch_size
+    S = cfg.max_target_length
+    attention_flops = self.compute_regular_attention_flops_per_device(kwargs)
+    golden_param_size = 2.86e9  # active params per token
+    golden_tflops = 6 * B * S * golden_param_size / 1e12 + attention_flops
+    calculated_tflops, _, _ = calculate_tflops_training_per_device(cfg)
+    self.assertFlopsAlmostEqual(calculated_tflops, golden_tflops)
+
   def test_deepseek32_671b_flops(self):
     """Test DeepSeek3.2-671b FLops calculation"""
     cfg = self._initialize_model_config(
@@ -636,6 +659,140 @@ class FlopCalculation(parameterized.TestCase):
 
     self.assertAlmostEqual(learnable_weight_tflops, expected_learnable_tflops, places=5)
 
+  def test_calculate_gemma4_small_tflops_e2b(self):
+    """E2B: KV sharing (20 of 35 layers), double-wide MLP on shared, period-5 pattern, PLE."""
+    config = MagicMock()
+    config.model_name = "gemma4-e2b"
+    config.per_device_batch_size = 1
+    config.max_target_length = 2048
+    config.sliding_window_size = 512
+    config.num_query_heads = 8
+    config.num_kv_heads = 1
+    config.head_dim = 256
+    config.global_head_dim = 512
+    config.global_num_kv_heads = 0  # falls back to num_kv_heads
+    config.num_decoder_layers = 35
+    config.num_kv_shared_layers = 20
+    config.use_double_wide_mlp = True
+    config.emb_dim = 1536
+    config.mlp_dim = 6144
+    config.mlp_activations = ["gelu", "linear"]
+    config.hidden_size_per_layer_input = 256
+
+    embedding_flops = 12345
+    attn_tflops, learn_tflops = maxtext_utils.calculate_gemma4_small_tflops_training_per_device(config, embedding_flops)
+
+    b = config.per_device_batch_size
+    s = config.max_target_length
+    w = min(config.sliding_window_size, s)
+    h = config.num_query_heads
+    d = config.head_dim
+    gd = config.global_head_dim
+
+    # E2B period-5 -> 7 global, 28 local; KV sharing starts at layer 15
+    # so layers 15..34 are shared. Global layers are i=4,9,14,19,24,29,34
+    # -> 4 of those 7 global are shared, 3 are unshared.
+    # Local 28 total, 16 shared, 12 unshared.
+    num_global = 7
+    num_local = 28
+    num_global_unshared = 3
+    num_local_unshared = 12
+
+    expected_attn = num_global * 2 * b * s * s * h * gd + num_local * 4 * b * (s * w - 0.5 * w**2) * h * d
+    expected_attn_tflops = expected_attn * 3 / 10**12
+    self.assertAlmostEqual(attn_tflops, expected_attn_tflops, places=5)
+
+    qo_global_per_layer = 2 * (2 * b * s * config.emb_dim * h * gd)
+    qo_local_per_layer = 2 * (2 * b * s * config.emb_dim * h * d)
+    kv_global = 2 * b * s * config.emb_dim * (2 * config.num_kv_heads) * gd
+    kv_local = 2 * b * s * config.emb_dim * (2 * config.num_kv_heads) * d
+
+    projection_flops = (
+        num_global * qo_global_per_layer
+        + num_local * qo_local_per_layer
+        + num_global_unshared * kv_global
+        + num_local_unshared * kv_local
+    )
+
+    ffn_per_layer = 2 * b * s * config.mlp_dim * config.emb_dim * 3  # gate+up (2 acts) + down
+    num_unshared = config.num_decoder_layers - config.num_kv_shared_layers
+    # use_double_wide_mlp doubles ffn on shared layers
+    ffn_flops = num_unshared * ffn_per_layer + config.num_kv_shared_layers * 2 * ffn_per_layer
+
+    ple = config.hidden_size_per_layer_input
+    ple_flops = 2 * b * s * config.emb_dim * (config.num_decoder_layers * ple) + config.num_decoder_layers * (
+        2 * 2 * b * s * config.emb_dim * ple
+    )
+
+    expected_learn = (projection_flops + ffn_flops + ple_flops + embedding_flops) * 3 / 10**12
+    self.assertAlmostEqual(learn_tflops, expected_learn, places=5)
+
+  def test_calculate_gemma4_small_tflops_e4b(self):
+    """E4B: KV sharing (18 of 42 layers), no double-wide MLP, period-6, PLE."""
+    config = MagicMock()
+    config.model_name = "gemma4-e4b"
+    config.per_device_batch_size = 1
+    config.max_target_length = 2048
+    config.sliding_window_size = 512
+    config.num_query_heads = 8
+    config.num_kv_heads = 2
+    config.head_dim = 256
+    config.global_head_dim = 512
+    config.global_num_kv_heads = 0
+    config.num_decoder_layers = 42
+    config.num_kv_shared_layers = 18
+    config.use_double_wide_mlp = False
+    config.emb_dim = 2560
+    config.mlp_dim = 10240
+    config.mlp_activations = ["gelu", "linear"]
+    config.hidden_size_per_layer_input = 256
+
+    embedding_flops = 99999
+    attn_tflops, learn_tflops = maxtext_utils.calculate_gemma4_small_tflops_training_per_device(config, embedding_flops)
+
+    b = config.per_device_batch_size
+    s = config.max_target_length
+    w = min(config.sliding_window_size, s)
+    h = config.num_query_heads
+    d = config.head_dim
+    gd = config.global_head_dim
+
+    # E4B period-6 -> 7 global, 35 local; sharing starts at layer 24.
+    # Global layers are i=5,11,17,23,29,35,41 -> 3 of those 7 global are shared,
+    # 4 unshared. Local 35 total, 15 shared, 20 unshared.
+    num_global = 7
+    num_local = 35
+    num_global_unshared = 4
+    num_local_unshared = 20
+
+    expected_attn = num_global * 2 * b * s * s * h * gd + num_local * 4 * b * (s * w - 0.5 * w**2) * h * d
+    expected_attn_tflops = expected_attn * 3 / 10**12
+    self.assertAlmostEqual(attn_tflops, expected_attn_tflops, places=5)
+
+    qo_global_per_layer = 2 * (2 * b * s * config.emb_dim * h * gd)
+    qo_local_per_layer = 2 * (2 * b * s * config.emb_dim * h * d)
+    kv_global = 2 * b * s * config.emb_dim * (2 * config.num_kv_heads) * gd
+    kv_local = 2 * b * s * config.emb_dim * (2 * config.num_kv_heads) * d
+
+    projection_flops = (
+        num_global * qo_global_per_layer
+        + num_local * qo_local_per_layer
+        + num_global_unshared * kv_global
+        + num_local_unshared * kv_local
+    )
+
+    ffn_per_layer = 2 * b * s * config.mlp_dim * config.emb_dim * 3
+    # No double-wide -> all 42 layers use plain ffn_per_layer
+    ffn_flops = config.num_decoder_layers * ffn_per_layer
+
+    ple = config.hidden_size_per_layer_input
+    ple_flops = 2 * b * s * config.emb_dim * (config.num_decoder_layers * ple) + config.num_decoder_layers * (
+        2 * 2 * b * s * config.emb_dim * ple
+    )
+
+    expected_learn = (projection_flops + ffn_flops + ple_flops + embedding_flops) * 3 / 10**12
+    self.assertAlmostEqual(learn_tflops, expected_learn, places=5)
+
   def test_calculate_routed_and_shared_ffn_tflops_per_device(self):
     """Test calculate_routed_and_shared_ffn_tflops_per_device."""
     config = MagicMock()
@@ -682,7 +839,131 @@ class FlopCalculation(parameterized.TestCase):
 
     self.assertAlmostEqual(ffn_tflops, expected_total, places=5)
 
+  def test_mtp_dense_flops(self):
+    """Test model with MTP modules on a Dense architecture (Llama3)."""
+    # Inject MTP modules during initialization
+    cfg = self._initialize_model_config(
+        "llama3-8b",
+        max_target_length=2048,
+        per_device_batch_size=4,
+        mtp_num_layers=2,
+    )
+
+    kwargs = cfg.get_keys()
+    B = cfg.per_device_batch_size
+    S = cfg.max_target_length
+
+    # 1. Base Llama3-8b FLOPs
+    base_attention_flops = self.compute_regular_attention_flops_per_device(kwargs)
+    # LLaMA3-8b has ~7.50B active parameters with tied embeddings
+    golden_base_param_size = 7.50e9
+    golden_base_tflops = 6 * B * S * golden_base_param_size / 1e12 + base_attention_flops
+
+    # 2. MTP Module Active Params (Per Module) for Dense
+    # MTP acts as a final layer replica without vocab embeddings or output projections.
+    Hq = kwargs["base_num_query_heads"]
+    Hkv = kwargs["base_num_kv_heads"]
+    Hd = kwargs["head_dim"]
+    emb_dim = kwargs["base_emb_dim"]
+    mlp_dim = kwargs["base_mlp_dim"]
+
+    # Attention Params: Q, K, V, and Out projections
+    attn_params = (emb_dim * (Hq + 2 * Hkv) * Hd) + (Hq * Hd * emb_dim)
+
+    # FFN Params: Llama uses SwiGLU, which consists of 3 matrices (Gate, Up, Down)
+    ffn_params = 3 * emb_dim * mlp_dim
+
+    # Total MTP Params
+    mtp_active_params = (attn_params + ffn_params) * cfg.mtp_num_layers
+    mtp_weight_tflops = 6 * B * S * mtp_active_params / 1e12
+
+    # MTP Attention FLOPs (Causal)
+    # 2 for QK^T and SV operations. 3 for fwd + bwd passes.
+    mtp_attention_tflops = 2 * 3 * cfg.mtp_num_layers * B * (S**2) * Hq * Hd / 1e12
+
+    # Final Expected TFLOPs
+    golden_total_tflops = golden_base_tflops + mtp_weight_tflops + mtp_attention_tflops
+
+    # Run Calculation
+    calculated_tflops, _, _ = calculate_tflops_training_per_device(cfg)
+
+    self.assertFlopsAlmostEqual(calculated_tflops, golden_total_tflops)
+
+  def test_mtp_moe_flops(self):
+    """Test model with MTP modules on an MoE architecture (DeepSeek)."""
+    # Inject MTP modules during initialization
+    cfg = self._initialize_model_config(
+        "deepseek2-16b",
+        max_target_length=8192,
+        per_device_batch_size=4,
+        mtp_num_layers=2,
+    )
+
+    kwargs = cfg.get_keys()
+    B = cfg.per_device_batch_size
+    S = cfg.max_target_length
+
+    # 1. Base DeepSeek FLOPs
+    base_attention_flops = self.compute_deepseek_attention_flops_per_device(kwargs)
+    # deepseek2-16b has ~2.4B active parameters
+    golden_base_param_size = 2.4e9
+    golden_base_tflops = 6 * B * S * golden_base_param_size / 1e12 + base_attention_flops
+
+    # 2. MTP Module Active Params for MoE (DeepSeek style)
+    emb_dim = kwargs["base_emb_dim"]
+    num_experts = kwargs["num_experts"]
+    moe_mlp_dim = kwargs["base_moe_mlp_dim"]
+    shared_experts = kwargs.get("shared_experts", 1)
+    num_experts_per_tok = kwargs["num_experts_per_tok"]
+
+    # FFN Params (Gate + Shared + Routed)
+    # SwiGLU requires 3 matrices (Gate, Up, Down) per expert
+    gate_params = emb_dim * num_experts
+    shared_params = 3 * emb_dim * moe_mlp_dim * shared_experts
+    routed_params = 3 * emb_dim * moe_mlp_dim * num_experts_per_tok
+    ffn_params = gate_params + shared_params + routed_params
+
+    # MLA Attention Params (Q, KV, and Out Projections)
+    qk_nope_hd = kwargs["qk_nope_head_dim"]
+    qk_rope_hd = kwargs["qk_rope_head_dim"]
+    v_hd = kwargs["v_head_dim"]
+    H_q = kwargs["base_num_query_heads"]
+    q_lora_rank = kwargs.get("q_lora_rank", 0)
+    kv_lora_rank = kwargs.get("kv_lora_rank", 0)
+
+    qk_head_dim_sum = qk_nope_hd + qk_rope_hd
+    if q_lora_rank == 0:
+      q_params = emb_dim * H_q * qk_head_dim_sum
+    else:
+      q_params = emb_dim * q_lora_rank + q_lora_rank * H_q * qk_head_dim_sum
+
+    kv_params = emb_dim * (kv_lora_rank + qk_rope_hd) + kv_lora_rank * H_q * (qk_nope_hd + v_hd)
+    proj_params = emb_dim * H_q * v_hd
+    attn_params = q_params + kv_params + proj_params
+
+    # Total MTP Active Params
+    mtp_active_params = (attn_params + ffn_params) * cfg.mtp_num_layers
+    mtp_weight_tflops = 6 * B * S * mtp_active_params / 1e12
+
+    # 3. MTP Attention FLOPs
+    # Causal attention flops for MLA (3 for fwd + bwd pass)
+    mtp_attention_tflops = 3 * cfg.mtp_num_layers * B * (S**2) * H_q * (qk_nope_hd + qk_rope_hd + v_hd) / 1e12
+
+    # Final Expected TFLOPs
+    golden_total_tflops = golden_base_tflops + mtp_weight_tflops + mtp_attention_tflops
+
+    # Run Calculation
+    calculated_tflops, _, _ = calculate_tflops_training_per_device(cfg)
+
+    self.assertFlopsAlmostEqual(calculated_tflops, golden_total_tflops)
+
   # ========== Parameterized Tests for Multiple Standard Models ==========
+
+  # Published active-param counts (billions). Anchors the reference against
+  # external ground truth so symmetric ref/code bugs don't cancel out silently.
+  PUBLISHED_ACTIVE_PARAMS_B = {
+      "gemma4-26b": 3.82,
+  }
 
   def _verify_flops(self, model_name, max_target_length=1):
     """
@@ -706,10 +987,11 @@ class FlopCalculation(parameterized.TestCase):
 
     # 2. Calculate FFN (Feed-Forward Network) parameters
     dense_ffn_params = (config.emb_dim * config.mlp_dim * 2 + config.mlp_dim * config.emb_dim) * num_dense
+    shared_expert_mlp_dim = maxtext_utils.get_shared_expert_mlp_dim(config)
     moe_ffn_params = (
         (config.emb_dim * config.num_experts)  # gate (router module)
         + (
-            (config.emb_dim * config.moe_mlp_dim * 2 + config.moe_mlp_dim * config.emb_dim) * config.shared_experts
+            (config.emb_dim * shared_expert_mlp_dim * 2 + shared_expert_mlp_dim * config.emb_dim) * config.shared_experts
         )  # shared experts
         + (
             (config.emb_dim * config.moe_mlp_dim * 2 + config.moe_mlp_dim * config.emb_dim) * config.num_experts_per_tok
@@ -753,7 +1035,10 @@ class FlopCalculation(parameterized.TestCase):
       ) + config.kv_lora_rank * config.num_query_heads * (config.qk_nope_head_dim + config.v_head_dim)
       proj_params = config.emb_dim * config.num_query_heads * config.v_head_dim
       total_qkv_proj_params = (q_params + kv_params + proj_params) * config.num_decoder_layers
-    elif getattr(config, "decoder_block", None) == maxtext_utils.DecoderBlockType.QWEN3_NEXT:
+    elif getattr(config, "decoder_block", None) in (
+        maxtext_utils.DecoderBlockType.QWEN3_NEXT,
+        maxtext_utils.DecoderBlockType.QWEN3_5,
+    ):
       # Interleaved Full Attention and Gated Delta Net (Linear Attention)
       cycle_interval = config.inhomogeneous_layer_cycle_interval
       num_full_attn_layers = config.num_decoder_layers // cycle_interval
@@ -826,6 +1111,17 @@ class FlopCalculation(parameterized.TestCase):
 
     # 5% margin for approximations and any edge cases
     self.assertAlmostEqual(tflops, expected_total_flops, delta=max(expected_total_flops * 0.05, 0.001))
+
+    # Anchor active_params against published value (2% tol) when known.
+    expected_active_b = self.PUBLISHED_ACTIVE_PARAMS_B.get(model_name)
+    if expected_active_b is not None:
+      expected_active = expected_active_b * 1e9
+      self.assertAlmostEqual(
+          active_params,
+          expected_active,
+          delta=expected_active * 0.02,
+          msg=f"{model_name}: computed {active_params / 1e9:.3f}B active, expected {expected_active_b:.2f}B",
+      )
 
   def _verify_short_sequence_flops(self, model_name):
     """Verifies short sequence flops."""

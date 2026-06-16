@@ -36,7 +36,7 @@ from maxtext.common.common_types import (
     Array,
     AxisIdxes,
     AxisNames,
-    BATCH,
+    BATCH_ATTN,
     CACHE_BATCH,
     CACHE_BATCH_PREFILL,
     CACHE_SEQUENCE,
@@ -48,7 +48,6 @@ from maxtext.common.common_types import (
     D_KV,
     DType,
     EMBED,
-    EP_AS_CONTEXT,
     HEAD,
     Q_LORA_UP_PROJ,
     KV_BATCH,
@@ -71,8 +70,6 @@ from maxtext.layers.linears import DenseGeneral
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.inference import kvcache
-from maxtext.inference import page_manager
-from maxtext.inference import paged_attention
 from maxtext.inference.kvcache import KVQuant
 from maxtext.utils.sharding import create_sharding
 from maxtext.utils.globals import EPS
@@ -425,8 +422,8 @@ def mla_as_linen(
     query_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM),
     key_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM),
     value_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM),
-    input_axis_names: AxisNames = (BATCH, LENGTH, EMBED),
-    out_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV),
+    input_axis_names: AxisNames = (BATCH_ATTN, LENGTH, EMBED),
+    out_axis_names: AxisNames = (BATCH_ATTN, LENGTH, HEAD, D_KV),
     prefill_input_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, EMBED),
     decode_input_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, EMBED),
     prefill_out_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, HEAD, D_KV),
@@ -563,8 +560,8 @@ class MLA(Attention):
       query_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM),
       key_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM),
       value_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM),
-      input_axis_names: AxisNames = (BATCH, LENGTH, EMBED),
-      out_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV),
+      input_axis_names: AxisNames = (BATCH_ATTN, LENGTH, EMBED),
+      out_axis_names: AxisNames = (BATCH_ATTN, LENGTH, HEAD, D_KV),
       prefill_input_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, EMBED),
       decode_input_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, EMBED),
       prefill_out_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, HEAD, D_KV),
@@ -826,31 +823,6 @@ class MLA(Attention):
 
     self.out = self.init_out_w(output_dim=inputs_q_shape[-1])
 
-    # Setup paged attention op
-    if self.config.attention == "paged":
-      # Set head_dim to the max of qk_head_dim and v_head_dim. The current paged
-      # attention kernel requires the head_dim to be the same for q, k, v.
-      head_dim = max(self.qk_head_dim, self.v_head_dim)
-      # Align head_dim to the pagedattn_head_dim_alignment if specified.
-      if self.config.pagedattn_head_dim_alignment > 0:
-        alignment = self.config.pagedattn_head_dim_alignment
-        head_dim = (head_dim + alignment - 1) // alignment * alignment
-      self.ds_paged_attention_op = paged_attention.PagedAttentionOp(
-          mesh=self.mesh,
-          num_pages=self.config.pagedattn_num_pages,
-          tokens_per_page=self.config.pagedattn_tokens_per_page,
-          max_pages_per_slot=(self.config.max_target_length + self.config.pagedattn_tokens_per_page - 1)
-          // self.config.pagedattn_tokens_per_page,
-          max_pages_per_prefill=(self.config.max_prefill_predict_length + self.config.pagedattn_tokens_per_page - 1)
-          // self.config.pagedattn_tokens_per_page,
-          pages_per_compute_block=self.config.pagedattn_pages_per_compute_block,
-          num_kv_heads=self.num_kv_heads,
-          kv_head_dim_size=head_dim,
-          dtype=self.dtype,
-          attn_logits_soft_cap=self.attn_logits_soft_cap,
-          rngs=self.rngs,
-      )
-
   @property
   def out_head_dim(self) -> int:
     return self.v_head_dim
@@ -905,9 +877,6 @@ class MLA(Attention):
     if model_mode == MODEL_MODE_PREFILL:
       key_logical_name = self.prefill_key_axis_names
       value_logical_name = self.prefill_value_axis_names
-    elif model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-      key_logical_name = self.ep_key_axis_names
-      value_logical_name = self.ep_value_axis_names
     else:
       key_logical_name = self.key_axis_names
       value_logical_name = self.value_axis_names
@@ -1124,7 +1093,6 @@ class MLA(Attention):
       deterministic: bool = False,
       previous_chunk: Any = None,
       slot: Optional[int] = None,
-      page_state: Optional[page_manager.PageState] = None,
       bidirectional_mask: Optional[Any] = None,
       rope_kwargs: dict | None = None,
       kv_cache: Optional[Array] = None,
@@ -1141,7 +1109,6 @@ class MLA(Attention):
       deterministic: Disables dropout if set to True.
       previous_chunk: Information about previously processed chunks for chunked prefill.
       slot: The batch slot index for paged attention.
-      page_state: The current state of the paged attention manager.
       bidirectional_mask: A mask for bidirectional attention, used in multimodal models.
       kv_cache: Optional key-value cache used when serving models with vLLM.
       attention_metadata: Optional attention-related metadata used when serving models with vLLM.
@@ -1157,7 +1124,7 @@ class MLA(Attention):
     else:
       inputs_q = self._maybe_shard_with_logical(inputs_q, self.input_axis_names)
       inputs_kv = self._maybe_shard_with_logical(inputs_kv, self.input_axis_names)
-      out_logical_name = (BATCH, LENGTH, HEAD, D_KV)
+      out_logical_name = (BATCH_ATTN, LENGTH, HEAD, D_KV)
 
     if model_mode != MODEL_MODE_TRAIN and decoder_segment_ids is None:
       decoder_segment_ids = jnp.ones(inputs_q.shape[:2], dtype=jnp.int32)
@@ -1204,34 +1171,25 @@ class MLA(Attention):
             sparse_loss=self.config.indexer_sparse_training,
             scaling_factor=self.config.indexer_loss_scaling_factor,
         )
-        self.sow(nnx.Intermediate, "indexer_loss", indexer_loss)
+        self.indexer_loss = nnx.Intermediate(indexer_loss)
 
     # Check if we need QK Clip stats
     use_qk_clip = self.model_mode == MODEL_MODE_TRAIN and self.config.use_qk_clip
 
-    if self.config.attention == "paged" and model_mode != MODEL_MODE_TRAIN:
-      unnormalized_out, _, exp_sum = self.ds_paged_attention_op(
-          query, key, value, decoder_segment_ids, model_mode, previous_chunk, slot=slot, page_state=page_state
-      )
-      unnormalized_out = unnormalized_out[..., : self.v_head_dim]
-      out = unnormalized_out / (exp_sum + 1e-9) if exp_sum is not None else unnormalized_out
-    else:
-      out = self.attention_op(
-          query,
-          key,
-          value,
-          decoder_segment_ids,
-          model_mode,
-          cached_values,
-          indexer_mask=indexer_mask,
-          record_max_logits=use_qk_clip,
-      )
+    out = self.attention_op(
+        query,
+        key,
+        value,
+        decoder_segment_ids,
+        inputs_positions,
+        model_mode,
+        cached_values,
+        indexer_mask=indexer_mask,
+        record_max_logits=use_qk_clip,
+    )
 
+    out = self._maybe_shard_with_logical(out, self.out_axis_names)
     out = jax.ad_checkpoint.checkpoint_name(out, "attention_out")
-    if model_mode == MODEL_MODE_TRAIN and self.config.expert_shard_attention_option == EP_AS_CONTEXT:
-      out = self._maybe_shard_with_logical(out, self.ep_out_axis_names)
-    else:
-      out = self._maybe_shard_with_logical(out, self.out_axis_names)
 
     out_sharding = create_sharding(self.mesh, out_logical_name)
     out = self.out_projection(out, out_sharding=out_sharding)

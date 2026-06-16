@@ -28,7 +28,7 @@ from maxtext.layers.attention_mla import MLA
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils.sharding import maybe_shard_with_name
-from tests.utils.test_helpers import get_test_config_path, get_decoupled_parallelism_overrides
+from tests.utils.test_helpers import get_test_config_path
 
 
 class MLATestBase(parameterized.TestCase):
@@ -61,9 +61,6 @@ class MLATestBase(parameterized.TestCase):
         jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
       except AttributeError:
         pass
-      # In decoupled mode, adapt mesh/ICI parallelism to local devices so
-      # fill_unspecified_mesh_axes matches the available device count.
-      config_args.update(get_decoupled_parallelism_overrides(include_mesh_defaults=True))
     else:
       jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
 
@@ -191,26 +188,33 @@ def forward_with_context_expert_parallelism(
   # If load balanced cp, shuffle along seq dim for input
   # This corresponds to the pre-shuffle step in training
   context_parallel_size = cfg_cp.context_parallel_size
+  # This helper is TPU-oriented and uses the TPU-compatible DUAL_CHUNK_SWAP reorder path.
+  # It does not model GPU-specific packed/striped reorder behavior.
   if context_parallel_size > 1 and cfg_cp.context_parallel_load_balance:
     batch = {
         "inputs": lnx,
         "inputs_segmentation": decoder_segment_ids,
         "inputs_position": decoder_positions,
     }
-    with mesh_cp:
-      reordered_batch = maxtext_utils.get_reorder_callable(context_parallel_size, ShardMode.AUTO)(batch)
+    # jax.set_mesh requires all sharding constraints inside the block to reference devices in the context mesh.
+    with jax.set_mesh(mesh_cp):
+      replicated = NamedSharding(mesh_cp, P())
+      replicated_batch = {k: jax.device_put(v, replicated) for k, v in batch.items()}
+      reordered_batch = maxtext_utils.get_reorder_callable(
+          context_parallel_size, ShardMode.AUTO, hardware=cfg_cp.hardware
+      )(replicated_batch)
     lnx = reordered_batch["inputs"]
     decoder_segment_ids = reordered_batch["inputs_segmentation"]
     decoder_positions = reordered_batch["inputs_position"]
   # apply attention with sharding
-  with mesh_cp, nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
+  with jax.set_mesh(mesh_cp), nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
     batch_axis = "activation_batch"
     length_axis = "activation_length"
     lnx_spec = nn_partitioning.logical_to_mesh_axes(
         (batch_axis, length_axis, "activation_embed"),
         nn_partitioning.get_axis_rules(),
     )
-    pos_spec = nn_partitioning.logical_to_mesh_axes((batch_axis, length_axis), nn_partitioning.get_axis_rules())
+    pos_spec = nn_partitioning.logical_to_mesh_axes((None, length_axis), nn_partitioning.get_axis_rules())
     lnx_sharding = NamedSharding(mesh_cp, lnx_spec)
     pos_sharding = NamedSharding(mesh_cp, pos_spec)
 

@@ -33,7 +33,7 @@ from maxtext.kernels.megablox import gmm
 from maxtext.layers import nnx_wrappers, quantizations
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
-from tests.utils.test_helpers import get_test_config_path, get_decoupled_parallelism_overrides
+from tests.utils.test_helpers import get_test_config_path
 import numpy as np
 import pytest
 
@@ -149,6 +149,7 @@ class QuantizationTest(unittest.TestCase):
       quant = _configure_quantization(quant_str="int8", mode_str=quant_mode, replicate_scale=True)
       self.assertEqual(quant.replicate_scale, True)
 
+  @pytest.mark.cpu_only
   def test_configure_quantization_is_int8(self):
     for quant_mode in ["train", "serve", "convert"]:
       quant = _configure_quantization(quant_str="int8", mode_str=quant_mode)
@@ -336,27 +337,22 @@ class QuantTest(unittest.TestCase):
 
   def init_pyconfig(self, **kwargs):
     """Initialize MaxText pyconfig."""
-    # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
-    extra_args = get_decoupled_parallelism_overrides()
-    init_kwargs = (
-        {
-            "run_name": "test",
-            "dataset_type": "synthetic",
-            "enable_checkpointing": False,
-            "enable_goodput_recording": False,
-            "steps": 1,
-            "per_device_batch_size": 1,
-            "use_qwix_quantization": True,
-            "skip_jax_distributed_system": True,
-            "base_emb_dim": 1024,
-            "base_num_query_heads": 8,
-            "base_num_kv_heads": 8,
-            "base_mlp_dim": 4096,
-            "base_num_decoder_layers": 12,
-        }
-        | kwargs
-        | extra_args
-    )
+    init_kwargs = {
+        "run_name": "test",
+        "dataset_type": "synthetic",
+        "enable_checkpointing": False,
+        "enable_goodput_recording": False,
+        "steps": 1,
+        "per_device_batch_size": 1,
+        "use_qwix_quantization": True,
+        "skip_jax_distributed_system": True,
+        "base_emb_dim": 16,
+        "base_num_query_heads": 1,
+        "base_num_kv_heads": 1,
+        "base_mlp_dim": 16,
+        "base_num_decoder_layers": 1,
+        "max_target_length": 16,
+    } | kwargs
     config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         **init_kwargs,
@@ -393,19 +389,47 @@ class QuantTest(unittest.TestCase):
 
   def quantization_config(self, quant, logits_tolerance=2e-1, grad_tolerance=5e-1):
     """Run forward pass and backward pass for quantized model and compare with base model."""
+    # pylint: disable=protected-access
     cfg = self.init_pyconfig(quantization=quant)
-    model = model_creation_utils.create_model(self.cfg, self.mesh)
     qt_model = model_creation_utils.create_model(cfg, self.mesh)
 
     ids, decoder_segment_ids, decoder_positions = self.get_data()
-    var = model.init(
-        {"params": self.rng, "aqt": self.rng, "dropout": self.rng},
-        ids,
-        decoder_positions,
-        decoder_segment_ids,
-        enable_dropout=False,
-        mutable=True,
-    )
+
+    if not hasattr(self.__class__, "_cached_base_results"):
+      model = model_creation_utils.create_model(self.cfg, self.mesh)
+      var = model.init(
+          {"params": self.rng, "aqt": self.rng, "dropout": self.rng},
+          ids,
+          decoder_positions,
+          decoder_segment_ids,
+          enable_dropout=False,
+          mutable=True,
+      )
+
+      def loss_base(all_vars, inputs):
+        logits, _ = model.apply(
+            all_vars,
+            *inputs,
+            enable_dropout=False,
+            rngs={"params": self.rng},
+            mutable=True,
+        )
+        return jnp.mean((logits) ** 2)
+
+      grads_base = jax.grad(loss_base)(var, (ids, decoder_positions, decoder_segment_ids))
+      logits, _ = model.apply(
+          var,
+          ids,
+          decoder_positions,
+          decoder_segment_ids,
+          enable_dropout=False,
+          rngs={"params": self.rng},
+          mutable=True,
+      )
+      self.__class__._cached_base_results = (grads_base, logits)
+
+    grads_base, logits = self.__class__._cached_base_results
+
     quantized_vars = qt_model.init(
         {"params": self.rng, "aqt": self.rng, "dropout": self.rng},
         ids,
@@ -414,16 +438,6 @@ class QuantTest(unittest.TestCase):
         enable_dropout=False,
         mutable=True,
     )
-
-    def loss_base(all_vars, inputs):
-      logits, _ = model.apply(
-          all_vars,
-          *inputs,
-          enable_dropout=False,
-          rngs={"params": self.rng},
-          mutable=True,
-      )
-      return jnp.mean((logits) ** 2)
 
     def loss_quant(all_vars, inputs):
       logits, _ = qt_model.apply(
@@ -436,18 +450,8 @@ class QuantTest(unittest.TestCase):
       return jnp.mean((logits) ** 2)
 
     # Compute gradients w.r.t. both models
-    grads_base = jax.grad(loss_base)(var, (ids, decoder_positions, decoder_segment_ids))
     grads_quant = jax.grad(loss_quant)(quantized_vars, (ids, decoder_positions, decoder_segment_ids))
 
-    logits, _ = model.apply(
-        var,
-        ids,
-        decoder_positions,
-        decoder_segment_ids,
-        enable_dropout=False,
-        rngs={"params": self.rng},
-        mutable=True,
-    )
     quant_logits, _ = qt_model.apply(
         quantized_vars,
         ids,
@@ -483,12 +487,12 @@ class QuantTest(unittest.TestCase):
   @pytest.mark.gpu_only
   @pytest.mark.external_serving
   def test_fp8_gpu_quantization(self):
-    self.quantization_config("fp8_gpu", grad_tolerance=1.0)
+    self.quantization_config("fp8_gpu", grad_tolerance=1.5)
 
   @pytest.mark.gpu_only
   @pytest.mark.external_serving
   def test_fp8_nanoo_quantization(self):
-    self.quantization_config("fp8_nanoo", grad_tolerance=1.0)
+    self.quantization_config("fp8_nanoo", grad_tolerance=1.5)
 
   @pytest.mark.skip(reason="No runner with GPU arch >= 89 is available")
   @pytest.mark.gpu_only

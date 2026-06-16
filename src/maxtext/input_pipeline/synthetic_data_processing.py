@@ -21,10 +21,11 @@ import numpy as np
 
 import jax
 import jax.numpy as jnp
-from jax.sharding import PartitionSpec as P
+
 
 from maxtext.input_pipeline import multihost_dataloading
 from maxtext.configs import pyconfig
+from maxtext.utils import sharding
 
 
 class SyntheticDataIterator:
@@ -35,8 +36,7 @@ class SyntheticDataIterator:
   def __init__(self, config, mesh):
     self.mesh = mesh
     self.config = config
-    data_pspec = P(*config.data_sharding)
-    data_pspec_shardings = jax.tree_util.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
+    data_pspec_shardings = sharding.get_input_data_sharding(config, mesh)
     self.data_generator = jax.jit(
         SyntheticDataIterator.raw_generate_synthetic_data, out_shardings=data_pspec_shardings, static_argnums=0
     )
@@ -55,6 +55,9 @@ class SyntheticDataIterator:
     )
     segmentation = jnp.ones((config.global_batch_size_to_load, config.max_target_length), dtype=jnp.int32)
     self.data = (tokens, batch_positions, segmentation)
+
+  def reset(self):
+    pass  # Synthetic data is stateless; nothing to reset.
 
   def __iter__(self):
     return self

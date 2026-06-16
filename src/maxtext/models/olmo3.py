@@ -24,11 +24,13 @@ from typing import Optional
 from flax import linen as nn
 from flax import nnx
 from jax.ad_checkpoint import checkpoint_name
+import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.common.common_types import AttentionType, Config
 from maxtext.layers import attentions
 from maxtext.layers import initializers
+from maxtext.layers import linears
 from maxtext.layers import nnx_wrappers
 from maxtext.layers import quantizations
 from maxtext.layers.attentions import Attention
@@ -95,9 +97,11 @@ class Olmo3DecoderLayer(nnx.Module):
         rngs=rngs,
     )
 
+    # Match HF runtime: a single rotary (with rope_scaling/YaRN) is applied to every layer,
+    # including sliding-window. The "RoPE scaling is not applied to sliding window attention
+    # layers" comment in HF's modular_olmo3.py is unimplemented design intent — its code
+    # passes the same (cos, sin) to all layers.
     current_rope_type = config.rope_type.lower()
-    if self.attention_type == attentions.AttentionType.LOCAL_SLIDING:
-      current_rope_type = "default"
 
     # Self-attention block
     self.attention = Attention(
@@ -139,6 +143,7 @@ class Olmo3DecoderLayer(nnx.Module):
         model_mode=model_mode,
         rngs=rngs,
     )
+    self.dropout = linears.Dropout(rate=config.dropout_rate, broadcast_dims=(-2,), rngs=rngs)
 
   def __call__(
       self,
@@ -155,7 +160,13 @@ class Olmo3DecoderLayer(nnx.Module):
   ):
     cfg = self.config
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
-    if isinstance(inputs, tuple):
+    is_scan_carry = False
+    if isinstance(inputs, tuple) and len(inputs) == 3:
+      hidden_states, stacked_kv_cache, layer_idx = inputs
+      kv_cache = stacked_kv_cache[layer_idx]
+      inputs = hidden_states
+      is_scan_carry = True
+    elif isinstance(inputs, tuple):
       inputs = inputs[0]
 
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
@@ -193,7 +204,7 @@ class Olmo3DecoderLayer(nnx.Module):
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 
     layer_output = mlp_lnx + intermediate_inputs
-    layer_output = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(layer_output, deterministic=deterministic)
+    layer_output = self.dropout(layer_output, deterministic=deterministic)
 
     layer_output = nn.with_logical_constraint(
         layer_output,
@@ -209,7 +220,16 @@ class Olmo3DecoderLayer(nnx.Module):
           jnp.sum(layer_output == 0) / jnp.size(layer_output),
       )
 
-    if cfg.scan_layers:
+    if is_scan_carry:
+
+      def update_cache(cache, val):
+        if jnp.size(val) > 0:
+          return cache.at[layer_idx].set(val)
+        return cache
+
+      stacked_kv_cache = jax.tree_util.tree_map(update_cache, stacked_kv_cache, kv_cache)
+      return (layer_output, stacked_kv_cache, layer_idx + 1), None
+    elif cfg.scan_layers:
       return layer_output, None
     else:
       return layer_output, kv_cache
@@ -267,6 +287,11 @@ class Olmo3ScannableBlock(nnx.Module):
       decoder_positions,
       deterministic,
       model_mode,
+      previous_chunk=None,
+      page_state=None,
+      slot=None,
+      kv_cache=None,
+      attention_metadata=None,
   ):
     cfg = self.config
 
@@ -282,6 +307,10 @@ class Olmo3ScannableBlock(nnx.Module):
           decoder_positions,
           deterministic,
           model_mode,
+          previous_chunk=previous_chunk,
+          slot=slot,
+          kv_cache=kv_cache,
+          attention_metadata=attention_metadata,
       )
       if cfg.scan_layers:
         y = y[0]

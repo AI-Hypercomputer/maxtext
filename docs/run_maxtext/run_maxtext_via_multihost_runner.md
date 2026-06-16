@@ -87,10 +87,10 @@ Although there are several steps below, most are for the initial setup. Once set
    ```
 
 4. **Install dependencies.**
-   Install the dependencies of `train.py` on each worker using `multihost_runner.py`:
+   Install the dependencies of `train.py` on each worker using `multihost_runner.py` inside a virtual environment:
 
    ```
-   python3 multihost_runner.py --TPU_PREFIX=${TPU_PREFIX?} --COMMAND="bash tools/setup/setup.sh"
+   python3 tools/orchestration/multihost_runner.py --TPU_PREFIX=${TPU_PREFIX?} --COMMAND="pip install uv && uv venv --python 3.12 --seed venv-maxtext && source venv-maxtext/bin/activate && uv pip install -e .[tpu] --resolution=lowest && install_tpu_pre_train_extra_deps"
    ```
 
    If you are running the `multihost_runner.py` script from a TPUVM, you will need to set `--INTERNAL_IP=true`.
@@ -106,7 +106,7 @@ Although there are several steps below, most are for the initial setup. Once set
    Set config values for `base_output_directory` and `dataset_path` in `configs/base.yml` if not set already.
 
    ```
-   python3 multihost_runner.py --TPU_PREFIX=${TPU_PREFIX?} --COMMAND="python3 -m maxtext.trainers.pre_train.train run_name=${RUN_NAME?}"
+   python3 tools/orchestration/multihost_runner.py --TPU_PREFIX=${TPU_PREFIX?} --COMMAND="source venv-maxtext/bin/activate && python3 -m maxtext.trainers.pre_train.train run_name=${RUN_NAME?}"
    ```
 
    If you are running the `multihost_runner.py` script from a TPUVM, you will need to set `--INTERNAL_IP=true`.

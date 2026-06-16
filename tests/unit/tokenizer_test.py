@@ -18,6 +18,7 @@ import numpy as np
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from maxtext.input_pipeline import input_pipeline_utils
 from maxtext.trainers.tokenizer import train_tokenizer
+from maxtext.common.gcloud_stub import is_decoupled
 
 import unittest
 import pytest
@@ -25,6 +26,7 @@ import subprocess
 import os
 
 
+@unittest.skipIf(is_decoupled(), "Bypassed in offline decoupled runs (no GCS/internet)")
 class TrainTokenizerTest(unittest.TestCase):
   """Tests for train_tokenizer.py using data from Parquet files"""
 
@@ -69,6 +71,7 @@ class TrainTokenizerTest(unittest.TestCase):
     self.assertEqual(np.asarray(self.source_tokenizer.decode(tokens)), np.asarray(self.test_tokenizer.decode(tokens)))
 
 
+@unittest.skipIf(is_decoupled(), "Bypassed in offline decoupled runs (no GCS/internet)")
 class TikTokenTest(unittest.TestCase):
   """Tests for TikToken"""
 
@@ -96,6 +99,7 @@ class TikTokenTest(unittest.TestCase):
     self.assertEqual(np.asarray(self.source_tokenizer.decode(tokens)), np.asarray(text))
 
 
+@unittest.skipIf(is_decoupled(), "Bypassed in offline decoupled runs (no GCS/internet)")
 class HFTokenizerTest(unittest.TestCase):
   """Tests for HFTokenizer"""
 

@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2023-2026 Google LLC
 
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -42,7 +42,18 @@ jobs:
     needs: [release_approval]
     uses: ./.github/workflows/build_and_test_maxtext.yml
     secrets: inherit
-      
+
+  build_docs:
+    name: Build Documentation
+    needs: [build_and_test_maxtext_package]
+    uses: ./.github/workflows/check_docs_build.yml
+    secrets: inherit
+
+  check_links:
+    name: Check Links in Documentation
+    uses: ./.github/workflows/linkcheck.yml
+    secrets: inherit
+
   publish_maxtext_package_to_pypi:
     name: Publish MaxText package to PyPI
     needs: [build_and_test_maxtext_package]
@@ -103,17 +114,17 @@ jobs:
             build_mode: stable
             image_name: maxtext_jax_stable
             workflow: pre-training
-            dockerfile: ./src/dependencies/dockerfiles/maxtext_tpu_dependencies.Dockerfile
+            dockerfile: maxtext_tpu_dependencies.Dockerfile
           - device: gpu
             build_mode: stable
             image_name: maxtext_gpu_jax_stable
             workflow: pre-training
-            dockerfile: ./src/dependencies/dockerfiles/maxtext_gpu_dependencies.Dockerfile
+            dockerfile: maxtext_gpu_dependencies.Dockerfile
           - device: tpu
             build_mode: stable
             image_name: maxtext_post_training_stable
             workflow: post-training
-            dockerfile: ./src/dependencies/dockerfiles/maxtext_tpu_dependencies.Dockerfile
+            dockerfile: maxtext_tpu_dependencies.Dockerfile
     uses: ./.github/workflows/build_and_push_docker_image.yml
     with:
       image_name: ${{ matrix.image_name }}
@@ -123,3 +134,5 @@ jobs:
       dockerfile: ${{ matrix.dockerfile }}
       maxtext_sha: ${{ github.sha }}
       version_name: ${{ needs.get_latest_maxtext_pypi_version.outputs.latest_pypi_version }}
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}

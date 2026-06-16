@@ -8,9 +8,13 @@ This document provides a guide to use the multimodal functionalities in MaxText 
 
 We also provide a [colab](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/examples/multimodal_gemma3_demo.ipynb) for multimodal features demonstration. The following table provides a list of models and modalities we currently support:
 
-| Models                                         | Input Modalities | Output Modalities |
-| :--------------------------------------------- | :--------------- | :---------------- |
-| - Gemma3-4B/12B/27B<br>- Llama4-Scout/Maverick | Text, images     | Text              |
+| Models                      | Input: Text | Input: Image | Input: Video | Input: Audio | Output |
+| :-------------------------- | :---------: | :----------: | :----------: | :----------: | :----: |
+| **Gemma3** (4B/12B/27B)     |      ✓      |      ✓       |              |              |  Text  |
+| **Gemma4** (26B/31B)        |      ✓      |      ✓       |              |              |  Text  |
+| **Llama4** (Scout/Maverick) |      ✓      |      ✓       |              |              |  Text  |
+| **Qwen3-Omni**              |      ✓      |      ✓       |      ✓       |      ✓       |  Text  |
+| **Qwen3.5** (35B/397B)      |      ✓      |      ✓       |      ✓       |              |  Text  |
 
 ## Introduction
 
@@ -38,6 +42,8 @@ Then use this command to convert an unscanned checkpoint from HuggingFace to Max
 ```shell
 # Your Hugging Face access token. Required to download gated models like Llama.
 # You can generate one at https://huggingface.co/settings/tokens.
+# We explicitly set lazy_load_tensors to False here as lazy loading of tensors
+# is not supported when use_multimodal is True.
 export HF_TOKEN=<Hugging Face access token>
 export MAXTEXT_CKPT_PATH=<Checkpoint GCS path> # gs://my-bucket/path
 python -m maxtext.checkpoint_conversion.to_maxtext \
@@ -45,7 +51,8 @@ python -m maxtext.checkpoint_conversion.to_maxtext \
     hf_access_token=${HF_TOKEN?} \
     base_output_directory=${MAXTEXT_CKPT_PATH?} \
     use_multimodal=true \
-    scan_layers=false
+    scan_layers=false \
+    --lazy_load_tensors=False
 ```
 
 For the Llama4 model family, we are using a separate checkpoint conversion script (of note, we will gradually migrate all checkpoint conversion scripts to the above consolidated tool soon):
@@ -69,6 +76,8 @@ MaxText supports multimodal decoding, allowing you to input text with multiple i
 - `image_path`: The path(s) to the image file(s) MaxText will load and process.
 
 Since each model uses a unique native chatting template from its pretraining, we've implemented these specific templates within `multimodal_utils.py` and apply them directly to your prompt.
+
+### Decode with text+image
 
 To run a forward pass and verify the model's output, use the following command:
 
@@ -121,16 +130,53 @@ python -m maxtext.inference.decode \
 
 For larger models such as Llama4-Scout/Maverick, we suggest to run the decoding on a TPU cluster such as v5p-16.
 
+### Decode with text+video+audio
+
+For models that support video input (e.g., Qwen3-Omni and Qwen3.5), pass a video file via `video_path`. For Qwen3-Omni, which also supports audio, set `use_audio_in_video=true` to additionally process the embedded audio track. Since the required token budget scales with video length and resolution, set `max_prefill_predict_length` accordingly.
+
+```shell
+# Qwen3-Omni decode with video + audio
+export MAXTEXT_CKPT_PATH=<Checkpoint GCS path>  # gs://my-bucket/path for Qwen3-Omni
+python -m maxtext.inference.decode \
+    model_name=qwen3-omni-30b-a3b \
+    tokenizer_path=Qwen/Qwen3-Omni-30B-A3B-Instruct \
+    tokenizer_type=huggingface \
+    load_parameters_path=${MAXTEXT_CKPT_PATH?}/0/items \
+    per_device_batch_size=1 \
+    run_name=ht_test \
+    steps=1 \
+    async_checkpointing=false \
+    scan_layers=false \
+    use_multimodal=true \
+    use_audio_in_video=true \
+    prompt='What can you see and hear? Answer in one short sentence.' \
+    video_path='tests/assets/test_video.mp4' \
+    max_prefill_predict_length=1250 \
+    max_target_length=1280 \
+    add_bos=false \
+    attention='dot_product' \
+```
+
+The expected output will look similar to:
+
+```
+Input `<|im_start|>user
+<|vision_start|><|video_pad|><|vision_end|>What can you see and hear? Answer in one short sentence.<|im_end|>
+<|im_start|>assistant
+` -> `A roaring Tyrannosaurus rex animatronic is displayed in a museum exhibit.
+```
+
 ## Supervised Fine-Tuning
 
 Supervised Fine-Tuning (SFT) of multimodal LLMs in MaxText focuses specifically on post-training; we don't yet support pre-training multimodal models from scratch. The SFT process typically involves training on Visual Question Answering (VQA) datasets where the model learns to generate accurate text responses based on both visual and textual inputs. During this fine-tuning phase, we recommend to freeze the pre-trained encoder layers (such as vision transformers) to preserve their learned visual representations, while the projection layers and LLM decoder components remain trainable. This selective training strategy allows the model to adapt the cross-modal alignment and text generation capabilities without disrupting the robust feature extraction abilities of the encoders, ultimately leading to improved performance on multimodal understanding and reasoning tasks while maintaining computational efficiency. This is achieved by setting `freeze_vision_encoder_params=True` in [sft-vision-chartqa.yml](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/configs/post_train/sft-vision-chartqa.yml).
-Here, we use [ChartQA](https://huggingface.co/datasets/HuggingFaceM4/ChartQA) as an example to demonstrate SFT functionality:
+
+**Text+image SFT is supported for all models listed above.** The following example uses Gemma3-4B with the [ChartQA](https://huggingface.co/datasets/HuggingFaceM4/ChartQA) dataset:
 
 ```shell
-export MAXTEXT_CKPT_PATH=...  # either set to an already available MaxText ckpt or to the one we just converted in the previous step
-export BASE_OUTPUT_DIRECTORY=gs://...
+export MAXTEXT_CKPT_PATH=<your-checkpoints-path>  # either set to an already available MaxText ckpt or to the one we just converted in the previous step
+export BASE_OUTPUT_DIRECTORY=gs://<GCS_BUCKET>
 export STEPS=1000
-python -m maxtext.trainers.post_train.sft.train_sft_deprecated \
+python -m maxtext.trainers.post_train.sft.train_sft_native \
     src/maxtext/configs/post_train/sft-vision-chartqa.yml \
     run_name="chartqa-sft" \
     model_name=gemma3-4b \

@@ -12,8 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# AllenAI OLMo 3 7B Configuration for pretraining.
-# It uses default RoPE for both global and sliding window attention.
+# AllenAI OLMo 3 7B configuration for stage 1 / stage 2 pretraining revisions
+# of allenai/Olmo-3-1025-7B (e.g. `stage1-step1413814`, `stage2-step*`). At
+# these revisions the HF config has rope_scaling=null and
+# max_position_embeddings=8192, so default RoPE is used for both global and
+# sliding-window attention. YaRN scaling at 65k is introduced at stage 3 of
+# pretraining; for stage-3 / post-trained checkpoints use olmo3-7b.yml instead.
 # https://huggingface.co/allenai/Olmo-3-1025-7B/tree/stage1-step1413814
 
 decoder_block: "olmo3"
@@ -29,7 +33,7 @@ head_dim: 128
 # Activations & Normalization
 mlp_activations: ["silu", "linear"] # SwiGLU
 normalization_layer_epsilon: 1.e-6
-use_qk_norm: True
+use_qk_norm: true
 
 # Attention
 # Layers 0,1,2 use sliding window 4096. Layer 3 uses global. Repeats.
@@ -38,14 +42,14 @@ inhomogeneous_layer_cycle_interval: 4
 
 # RoPE
 # Default RoPE for both global and sliding window attention.
-rope_type: "default" 
-rope_interleave: False
+rope_type: "default"
+rope_interleave: false
 rope_max_timescale: 500000 # rope_theta
 max_position_embeddings: 8192
-rope_attention_scaling: True
-rope_truncate: False
+rope_attention_scaling: true
+rope_truncate: false
 
 # Embeddings
 vocab_size: 100278
-logits_via_embedding: False
-normalize_embedding_logits: False
+logits_via_embedding: false
+normalize_embedding_logits: false

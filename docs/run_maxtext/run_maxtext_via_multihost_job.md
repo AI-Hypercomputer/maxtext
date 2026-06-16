@@ -51,7 +51,7 @@ The `multihost_job.py` script:
    Create a bucket if you don't already have one, see: https://cloud.google.com/storage/docs/creating-buckets for instructions to create one. Once you've identified your bucket:
 
    ```
-   BUCKET_NAME=<your-bucket>
+   BUCKET_NAME=<GCS_BUCKET>
    ```
 
 4. **Run your training job.**
@@ -68,7 +68,7 @@ The `multihost_job.py` script:
 
    ```sh
    RUN_NAME=${YOUR_JOB_NAME?} # You may set this to any unique name for a fresh run.
-   python3 multihost_job.py --NUM_SLICES=${NODE_COUNT?} --RUN_NAME=${RUN_NAME?} --BUCKET_NAME=${BUCKET_NAME?} --CQR_EXTRA_ARGS="--reserved" --COMMAND="bash tools/setup/setup.sh && python3 -m maxtext.trainers.pre_train.train run_name=${RUN_NAME?}"
+   python3 tools/orchestration/multihost_job.py --NUM_SLICES=${NODE_COUNT?} --RUN_NAME=${RUN_NAME?} --BUCKET_NAME=${BUCKET_NAME?} --CQR_EXTRA_ARGS="--reserved" --COMMAND="pip install uv && uv pip install -e .[tpu] --resolution=lowest && install_tpu_pre_train_extra_deps && python3 -m maxtext.trainers.pre_train.train run_name=${RUN_NAME?}"
    ```
 
    We tell `multihost_job` to target the `reserved` pool by by including `--reserved` as extra arguments to the CQR request, but you may instead target the `on-demand` pool by removing the `--CQR_EXTRA_ARGS` flag (on-demand is default), or the pre-emptible pool with `--CQR_EXTRA_ARGS="--best-effort"`, which may be necessary if your reservation is full.

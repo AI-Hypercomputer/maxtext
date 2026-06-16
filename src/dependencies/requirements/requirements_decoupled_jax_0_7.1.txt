@@ -21,7 +21,7 @@ optax>=0.2.6
 orbax-checkpoint>=0.11.25
 pandas>=2.3.3
 parameterized==0.9.0
-pathwaysutils>=0.1.3
+pathwaysutils>=0.1.7
 pillow>=11.3.0
 protobuf>=5.29.5
 psutil>=7.0.0

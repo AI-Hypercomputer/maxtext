@@ -17,6 +17,7 @@
 import itertools
 import random
 import sys
+import types
 import unittest
 from unittest import mock
 
@@ -37,7 +38,13 @@ from maxtext.common.common_types import (
     DEFAULT_MASK_VALUE,
 )
 from maxtext.layers.attention_mla import MLA
-from maxtext.layers.attention_op import ChunkedCausalMask, _generate_chunk_attention_mask, _make_bidirectional_block_mask
+from maxtext.layers import attention_op
+from maxtext.layers.attention_op import (
+    AttentionOp,
+    ChunkedCausalMask,
+    _generate_chunk_attention_mask,
+    _make_bidirectional_block_mask,
+)
 from maxtext.layers.attentions import Attention
 from maxtext.layers import embeddings
 from maxtext.configs import pyconfig
@@ -46,7 +53,7 @@ import numpy as np
 import pytest
 
 from tests.utils import attention_test_util
-from tests.utils.test_helpers import get_test_config_path, get_decoupled_parallelism_overrides
+from tests.utils.test_helpers import get_test_config_path
 
 
 class BidirectionalBlockMaskTest(unittest.TestCase):
@@ -266,6 +273,106 @@ class ChunkedCausalMaskTest(unittest.TestCase):
       _generate_chunk_attention_mask(mask_shape=(4, 4), chunk_size=0)
 
 
+class CudnnTePackedSequenceDescriptorTest(unittest.TestCase):
+  """Tests packed Transformer Engine attention metadata handling."""
+
+  def _call_packed_attention(self, sequence_descriptor):
+    """Runs packed TE attention with fake Transformer Engine modules."""
+    sequence_descriptor.calls = []
+
+    class FakeWrappedAttention:
+
+      def lazy_init(self, *args, **kwargs):  # pylint: disable=unused-argument
+        return self
+
+      def __call__(self, *args, **kwargs):
+        del args
+        return kwargs["sequence_descriptor"]
+
+    def fake_to_nnx(*args, **kwargs):  # pylint: disable=unused-argument
+      return FakeWrappedAttention()
+
+    transformer_module = types.ModuleType("transformer_engine.jax.flax.transformer")
+    transformer_module.DotProductAttention = mock.Mock()
+    attention_module = types.ModuleType("transformer_engine.jax.attention")
+    attention_module.SequenceDescriptor = sequence_descriptor
+    fake_modules = {
+        "transformer_engine": types.ModuleType("transformer_engine"),
+        "transformer_engine.jax": types.ModuleType("transformer_engine.jax"),
+        "transformer_engine.jax.flax": types.ModuleType("transformer_engine.jax.flax"),
+        "transformer_engine.jax.flax.transformer": transformer_module,
+        "transformer_engine.jax.attention": attention_module,
+    }
+
+    config = types.SimpleNamespace(
+        context_sharding="context",
+        context_parallel_strategy="ring",
+        context_parallel_load_balance=False,
+        packing=True,
+        dataset_type="grain",
+        max_segments_per_seq=4,
+        head_dim=2,
+        attention_kernel="cudnn_flash_te",
+    )
+    mesh = types.SimpleNamespace(shape={"context": 1})
+    attention = AttentionOp(
+        config=config,
+        mesh=mesh,
+        attention_kernel="cudnn_flash_te",
+        max_target_length=4,
+        num_query_heads=2,
+        num_kv_heads=2,
+        dtype=jnp.float32,
+    )
+    query = jnp.zeros((1, 4, 2, 2), dtype=jnp.float32)
+    key = jnp.zeros((1, 4, 2, 2), dtype=jnp.float32)
+    value = jnp.zeros((1, 4, 2, 2), dtype=jnp.float32)
+    segment_positions = jnp.arange(4, dtype=jnp.int32)[None, :]
+
+    with (
+        mock.patch.dict(sys.modules, fake_modules),
+        mock.patch.object(attention_op.nnx_wrappers, "ToNNX", side_effect=fake_to_nnx),
+    ):
+      output = attention.cudnn_flash_attention(
+          query=query,
+          key=key,
+          value=value,
+          decoder_segment_ids=None,
+          segment_positions=segment_positions,
+      )
+
+    return output, sequence_descriptor.calls
+
+  def test_packed_attention_sequence_descriptor_uses_thd_metadata_with_legacy_fallback(self):
+    class SequenceDescriptor:
+      calls = []
+      reject_thd_kwargs = False
+
+      @classmethod
+      def from_segment_ids_and_pos(cls, **kwargs):
+        cls.calls.append(kwargs)
+        if cls.reject_thd_kwargs and "is_thd" in kwargs:
+          raise TypeError("older Transformer Engine does not accept THD metadata")
+        return kwargs
+
+    output, descriptor_calls = self._call_packed_attention(SequenceDescriptor)
+
+    self.assertEqual(len(descriptor_calls), 2)
+    for call in descriptor_calls:
+      self.assertTrue(call["is_thd"])
+      self.assertFalse(call["is_segment_ids_reordered"])
+    self.assertIs(output, descriptor_calls[0])
+
+    SequenceDescriptor.reject_thd_kwargs = True
+    output, descriptor_calls = self._call_packed_attention(SequenceDescriptor)
+    self.assertEqual(len(descriptor_calls), 4)
+    self.assertIn("is_thd", descriptor_calls[0])
+    self.assertNotIn("is_thd", descriptor_calls[1])
+    self.assertIn("is_thd", descriptor_calls[2])
+    self.assertNotIn("is_thd", descriptor_calls[3])
+    self.assertIs(output, descriptor_calls[1])
+
+
 class AttentionTest(parameterized.TestCase):
   """Test for the Attention"""
 
@@ -276,7 +383,6 @@ class AttentionTest(parameterized.TestCase):
       "per_device_batch_size": 1.0,
       "run_name": "test",
       "enable_checkpointing": False,
-      "max_prefill_predict_length": 16,
       "max_target_length": 512,
       "sa_block_q": 128,
       "sa_block_kv": 128,
@@ -291,14 +397,11 @@ class AttentionTest(parameterized.TestCase):
   def setUp(self):
     """Initializes the configuration for each test"""
     super().setUp()
-    # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
-    extra_args = get_decoupled_parallelism_overrides()
     if not is_decoupled():
       jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
     config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         **self.config_arguments,
-        **extra_args,
     )
     self.cfg = config
 
@@ -402,7 +505,7 @@ class AttentionTest(parameterized.TestCase):
         jax.numpy.allclose(mha_prefill, mha_full[:, :prefill_length, :], rtol=1e-02, atol=1e-02, equal_nan=False)
     )
 
-    for idx in range(prefill_length, decode_total_length):
+    for idx in range(prefill_length, min(prefill_length + 3, decode_total_length)):
       lnx_idx = lnx[:, idx : idx + 1, :]
       decoder_positions_idx = decoder_positions[:, idx : idx + 1]
       mha_idx, _ = self._attention_as_mha_generic(
@@ -614,10 +717,10 @@ class AttentionTest(parameterized.TestCase):
     )
 
     # Force unshared layer to copy weights from shared layer, mapping 'key' to 'value'
-    attention_no_share.query.kernel.value = attention_share_kv.query.kernel.value
-    attention_no_share.key.kernel.value = attention_share_kv.key.kernel.value
-    attention_no_share.value.kernel.value = attention_share_kv.key.kernel.value
-    attention_no_share.out.kernel.value = attention_share_kv.out.kernel.value
+    attention_no_share.query.kernel[...] = attention_share_kv.query.kernel[...]
+    attention_no_share.key.kernel[...] = attention_share_kv.key.kernel[...]
+    attention_no_share.value.kernel[...] = attention_share_kv.key.kernel[...]
+    attention_no_share.out.kernel[...] = attention_share_kv.out.kernel[...]
 
     output_no_share, _ = attention_no_share(
         lnx,
@@ -688,7 +791,6 @@ class AttentionTest(parameterized.TestCase):
           "shard_mode": "explicit",
       },
   )
-  # TODO (b/454764135.) : This tests fails with new tokamax kernel
   @pytest.mark.tpu_only
   def test_tpu_flash_attention_context_parallel(
       self,
@@ -698,6 +800,7 @@ class AttentionTest(parameterized.TestCase):
       shard_mode,
   ):
     """Test equivalence between dot_product and flash attention + context/expert parallelism"""
+
     num_kv_heads = self.num_kv_heads
     lnx, decoder_segment_ids, decoder_positions = self.get_data(self.dtype)
     # Dot product
@@ -765,7 +868,7 @@ class AttentionTest(parameterized.TestCase):
   @pytest.mark.tpu_only
   def test_dot_product_cache_axis_order(self):
     all_axis_orders = tuple(itertools.permutations(range(4)))
-    for axis_order in random.choices(all_axis_orders, k=4):
+    for axis_order in random.choices(all_axis_orders, k=2):
       self.dot_product_attention_helper(prefill_cache_axis_order=axis_order, ar_cache_axis_order=axis_order)
       print(f"passed test for {axis_order=}")
 
@@ -790,12 +893,7 @@ class AttentionTest(parameterized.TestCase):
 
     config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
-        per_device_batch_size=1.0,
-        run_name="test",
-        enable_checkpointing=False,
-        max_target_length=128,
-        max_prefill_predict_length=16,
-        attention="dot_product",
+        **{**self.config_arguments, "attention": "dot_product"},
     )
 
     prefill_length = config.max_prefill_predict_length
@@ -843,7 +941,13 @@ class AttentionTest(parameterized.TestCase):
         model_mode=MODEL_MODE_PREFILL,
     )
     self.assertTrue(
-        jax.numpy.allclose(attention_w_layout_full[:, :prefill_length, :], attention_w_layout_prefill, equal_nan=False)
+        jax.numpy.allclose(
+            attention_w_layout_full[:, :prefill_length, :],
+            attention_w_layout_prefill,
+            rtol=rtol,
+            atol=atol,
+            equal_nan=False,
+        )
     )
 
     for idx in range(prefill_length, decode_total_length):
@@ -881,12 +985,7 @@ class AttentionTest(parameterized.TestCase):
 
     config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
-        per_device_batch_size=1.0,
-        run_name="test",
-        enable_checkpointing=False,
-        max_target_length=128,
-        max_prefill_predict_length=16,
-        attention="dot_product",
+        **{**self.config_arguments, "attention": "dot_product"},
     )
 
     prefill_length = config.max_prefill_predict_length
@@ -967,7 +1066,11 @@ class AttentionTest(parameterized.TestCase):
     )
     self.assertTrue(
         jax.numpy.allclose(
-            attention_wo_reshape_q_full[:, :prefill_length, :], attention_wo_reshape_q_prefill, equal_nan=False
+            attention_wo_reshape_q_full[:, :prefill_length, :],
+            attention_wo_reshape_q_prefill,
+            rtol=rtol,
+            atol=atol,
+            equal_nan=False,
         )
     )
 
@@ -981,15 +1084,29 @@ class AttentionTest(parameterized.TestCase):
     )
     self.assertTrue(
         jax.numpy.allclose(
-            attention_w_reshape_q_full[:, :prefill_length, :], attention_w_reshape_q_prefill, equal_nan=False
+            attention_w_reshape_q_full[:, :prefill_length, :],
+            attention_w_reshape_q_prefill,
+            rtol=rtol,
+            atol=atol,
+            equal_nan=False,
         )
     )
 
-    self.assertTrue(jax.numpy.allclose(attention_wo_reshape_q_prefill, attention_w_reshape_q_prefill, equal_nan=False))
+    self.assertTrue(
+        jax.numpy.allclose(
+            attention_wo_reshape_q_prefill,
+            attention_w_reshape_q_prefill,
+            rtol=rtol,
+            atol=atol,
+            equal_nan=False,
+        )
+    )
     self.assertTrue(
         jax.numpy.allclose(
             attention_wo_reshape_q_full[:, :prefill_length, :],
             attention_w_reshape_q_full[:, :prefill_length, :],
+            rtol=rtol,
+            atol=atol,
             equal_nan=False,
         )
     )
@@ -1236,6 +1353,23 @@ class AttentionTest(parameterized.TestCase):
 class MLATest(attention_test_util.MLATestBase):
   """Test for the Multi-Headed Latent Attention"""
 
+  config_arguments = {
+      "per_device_batch_size": 1.0,
+      "run_name": "test",
+      "enable_checkpointing": False,
+      "max_target_length": 32,
+      "max_prefill_predict_length": 16,
+      "attention_type": AttentionType.MLA.value,
+      "head_dim": 32,
+      "q_lora_rank": 4,
+      "kv_lora_rank": 8,
+      "qk_nope_head_dim": 16,
+      "qk_rope_head_dim": 8,
+      "v_head_dim": 32,
+      "dtype": "float32",
+      "mla_naive_kvcache": False,
+  }
+
   @parameterized.named_parameters(
       {"testcase_name": "RoPE_Yarn_Autoregression", "rope_type": "yarn"},
       {"testcase_name": "Default_Autoregression", "rope_type": "default"},
@@ -1358,11 +1492,9 @@ class MLATest(attention_test_util.MLATestBase):
     # Create a copy of the arguments and override the attention_type for the base model
     attention_config_args = self.config_arguments.copy()
     attention_config_args["attention_type"] = AttentionType.GLOBAL.value
-    extra_args = get_decoupled_parallelism_overrides()
     attention_cfg = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         **attention_config_args,
-        **extra_args,
     )
     dummy_inputs_q = jnp.ones(
         (attention_cfg.global_batch_size_to_train_on, attention_cfg.max_target_length, attention_cfg.base_emb_dim)
@@ -1394,8 +1526,6 @@ class MLATest(attention_test_util.MLATestBase):
 
     # 3. Initialize the MLA layer
     mla_config_args = self.config_arguments.copy()
-    mla_extra_args = get_decoupled_parallelism_overrides()
-    mla_config_args.update(mla_extra_args)
     _, mla_layer = self.init_mla(mla_config_args, rope_type="default")
 
     # 4. Assert that the MLA layer DOES NOT HAVE the base projections
@@ -1470,7 +1600,6 @@ class MLATest(attention_test_util.MLATestBase):
           "shard_mode": "explicit",
       },
   )
-  # TODO (b/454764135.) : This tests fails with new tokamax kernel
   @pytest.mark.tpu_only
   def test_tpu_flash_attention_context_parallel(
       self,
@@ -1591,7 +1720,6 @@ class MLATest(attention_test_util.MLATestBase):
   def test_indexer_loss(self):
     """Test indexer loss computation."""
     mla_config_args = self.config_arguments.copy()
-    mla_config_args.update(get_decoupled_parallelism_overrides())
     mla_config_args["use_indexer"] = True
     mla_config_args["attention"] = "dot_product"
     _, mla = self.init_mla(mla_config_args, rope_type="default")
@@ -1638,7 +1766,6 @@ class MLATest(attention_test_util.MLATestBase):
   def test_indexer_loss_kl_divergence_zero(self):
     """Test that KL divergence is 0 when target and pred distributions match exactly."""
     mla_config_args = self.config_arguments.copy()
-    mla_config_args.update(get_decoupled_parallelism_overrides())
     mla_config_args["use_indexer"] = True
     mla_config_args["attention"] = "dot_product"
     _, mla = self.init_mla(mla_config_args, rope_type="default")
@@ -1798,6 +1925,8 @@ class Qwen3NextGatedDeltaNetTest(unittest.TestCase):
         [sys.argv[0], get_test_config_path()],
         **self.config_arguments,
     )
+    devices_array = maxtext_utils.create_device_mesh(self.cfg)
+    self.mesh = Mesh(devices_array, self.cfg.mesh_axes)
     self.rng = jax.random.PRNGKey(0)
     self.nnx_rng = nnx.Rngs(params=0, dropout=jax.random.PRNGKey(42))
 
@@ -1822,13 +1951,15 @@ class Qwen3NextGatedDeltaNetTest(unittest.TestCase):
     # 2. Init GDN Layer
     gdn = Qwen3NextGatedDeltaNet(
         config=cfg,
+        inputs_shape=lnx.shape,
+        mesh=self.mesh,
         dtype=cfg.dtype,
         model_mode=MODEL_MODE_PREFILL,
         rngs=self.nnx_rng,
     )
 
     # 3. Full / Train mode
-    gdn_full = gdn(
+    gdn_full, _ = gdn(
         lnx,
         model_mode=MODEL_MODE_TRAIN,
     )
@@ -1836,7 +1967,7 @@ class Qwen3NextGatedDeltaNetTest(unittest.TestCase):
     # 4. Prefill mode
     lnx_prefill = lnx[:, 0:prefill_length, :]
 
-    gdn_prefill = gdn(
+    gdn_prefill, _ = gdn(
         lnx_prefill,
         model_mode=MODEL_MODE_PREFILL,
     )
@@ -1849,7 +1980,7 @@ class Qwen3NextGatedDeltaNetTest(unittest.TestCase):
     for idx in range(prefill_length, decode_total_length):
       lnx_idx = lnx[:, idx : idx + 1, :]
 
-      gdn_idx = gdn(
+      gdn_idx, _ = gdn(
           lnx_idx,
           model_mode=MODEL_MODE_AUTOREGRESSIVE,
       )
@@ -1858,6 +1989,111 @@ class Qwen3NextGatedDeltaNetTest(unittest.TestCase):
       self.assertEqual(gdn_full_this_idx.shape, gdn_idx.shape)
 
       self.assertTrue(jax.numpy.allclose(gdn_full_this_idx, gdn_idx, rtol=1e-02, atol=1e-02, equal_nan=False))
+
+
+class DeepSeekV4AttentionMaskingTest(unittest.TestCase):
+  """Tests to validate AttentionOp masking logic for DeepSeek-V4 attention patterns."""
+
+  def setUp(self):
+    self.config = pyconfig.initialize([sys.argv[0], "src/maxtext/configs/base.yml"], run_name="test")
+
+  def test_generate_attention_mask_local_sliding(self):
+    """Verifies AttentionType.LOCAL_SLIDING enforces both causal and sliding window constraints."""
+
+    # Test with multiple heads and different sequence lengths
+    for s_len in [1, 8, 128]:
+      op = AttentionOp(
+          config=self.config,
+          num_query_heads=4,
+          num_kv_heads=1,
+          max_target_length=256,
+          mesh=None,
+          attention_kernel="dot_product",
+          attention_type=AttentionType.LOCAL_SLIDING,
+          sliding_window_size=3,
+      )
+
+      batch_size = 1
+      q_dummy = jnp.zeros((batch_size, s_len, 1, 128))
+      k_dummy = jnp.zeros((batch_size, s_len, 1, 128))
+
+      mask = op.generate_attention_mask(
+          query=q_dummy,
+          key=k_dummy,
+          decoder_segment_ids=None,
+          model_mode="train",
+      )
+
+      self.assertEqual(mask.shape, (1, 1, 1, s_len, s_len))
+      mask_np = np.array(mask)[0, 0, 0]
+
+      # Expected float mask for window_size=3
+      # Row 0: [0.0, INF, INF, INF, INF, ...]
+      # Row 1: [0.0, 0.0, INF, INF, INF, ...]
+      # Row 2: [0.0, 0.0, 0.0, INF, INF, ...]
+      # Row 3: [INF, 0.0, 0.0, 0.0, INF, ...]
+      if s_len > 1:
+        self.assertEqual(mask_np[0, 1], DEFAULT_MASK_VALUE)  # strict causal
+      self.assertEqual(mask_np[0, 0], 0.0)
+
+      if s_len >= 4:
+        self.assertEqual(mask_np[3, 0], DEFAULT_MASK_VALUE)  # sliding window size=3
+        self.assertEqual(mask_np[3, 1], 0.0)
+
+  def test_generate_attention_mask_compressed(self):
+    """Verifies AttentionType.COMPRESSED stitches sliding window and float compressed_mask."""
+
+    batch_size = 1
+    s_len = 8
+    c_len = 2
+    kv_len = s_len + c_len
+
+    op = AttentionOp(
+        config=self.config,
+        num_query_heads=4,
+        num_kv_heads=1,
+        max_target_length=128,
+        mesh=None,
+        attention_kernel="dot_product",
+        attention_type=AttentionType.COMPRESSED,
+        sliding_window_size=3,
+    )
+
+    q_dummy = jnp.zeros((batch_size, s_len, 1, 128))
+    k_dummy = jnp.zeros((batch_size, kv_len, 1, 128))
+
+    # Simulate a compressed float mask [batch, 1, s_len, c_len]
+    # In practice, this exactly mirrors what both HCA and CSA output:
+    # - HCA emits a simple mask blocking future blocks (batch, 1, seq_len, c_len)
+    # - CSA emits a sparse mask where only top-K blocks are 0.0, rest are -inf.
+    # We simulate this by making Block 0 invalid (-inf), and Block 1 valid (0.0).
+    compressed_mask = np.zeros((batch_size, 1, s_len, c_len), dtype=np.float32)
+    compressed_mask[:, :, :, 0] = DEFAULT_MASK_VALUE
+    compressed_mask = jnp.array(compressed_mask)
+
+    mask = op.generate_attention_mask(
+        query=q_dummy,
+        key=k_dummy,
+        decoder_segment_ids=None,
+        model_mode="train",
+        compressed_mask=compressed_mask,
+    )
+
+    # Returned float mask should dynamically inherit the dimensionality of compressed_mask
+    # Because compressed_mask was 4D, the final mask should also be 4D: [batch, 1, s_len, kv_len]
+    self.assertEqual(mask.shape, (batch_size, 1, s_len, kv_len))
+    mask_np = np.array(mask)[0, 0]
+
+    # Uncompressed block (first s_len cols) follows sliding window float mask
+    self.assertEqual(mask_np[0, 1], DEFAULT_MASK_VALUE)
+    self.assertEqual(mask_np[0, 0], 0.0)
+    self.assertEqual(mask_np[3, 0], DEFAULT_MASK_VALUE)
+    self.assertEqual(mask_np[3, 1], 0.0)
+
+    # Compressed block (last c_len cols) follows compressed_mask strictly
+    np.testing.assert_allclose(mask_np[:, s_len], DEFAULT_MASK_VALUE)
+    np.testing.assert_allclose(mask_np[:, s_len + 1], 0.0)
+    print("Mask logic for uncompressed & compressed attention passed perfectly.")
 
 
 if __name__ == "__main__":

@@ -27,7 +27,6 @@ from maxtext.kernels import megablox, sort_activations
 from maxtext.layers import attention_op
 from maxtext.layers import moe as moe_lib
 from maxtext.layers import quantizations
-from maxtext.utils import max_utils
 import qwix.pallas as qpl
 import tokamax
 
@@ -949,8 +948,6 @@ def compute(x, w0, w1, wo, group_sizes, weights, *, config, mesh):
       group_sizes,
       preferred_element_type,
       weight_gather_axes,
-      input_buffer_count,
-      combine_scopes,
   ):
     if config.use_qwix_quantization:
       output = megablox.gmm(
@@ -962,18 +959,13 @@ def compute(x, w0, w1, wo, group_sizes, weights, *, config, mesh):
           use_qwix_quantization=config.use_qwix_quantization,
           use_tokamax_backend=config.use_tokamax_gmm,
           weight_gather_axes=weight_gather_axes,
-          input_buffer_count=input_buffer_count,
-          combine_scopes=combine_scopes,
-          qwix_rule=quantizations.get_fp8_full_qwix_rule(config),
+          qwix_rule=quantizations.get_fp8_full_qwix_rule_w_sparsity(config)[0],
       )
     else:
       output = tokamax.ragged_dot(
           lhs=inputs,
           rhs=kernel,
-          group_sizes=tokamax.RaggedDotGroupSizes(
-              group_sizes,
-              max_utils.generate_representative_group_sizes(inputs.shape[0], kernel.shape[0]),
-          ),
+          group_sizes=tokamax.RaggedDotGroupSizes(group_sizes, len(inputs)),
           precision=jax.lax.Precision.DEFAULT,
           preferred_element_type=preferred_element_type,
           implementation="mosaic",
@@ -985,40 +977,29 @@ def compute(x, w0, w1, wo, group_sizes, weights, *, config, mesh):
   wo_gather_axes = []
 
   wi_tile_size = (
-      config.wi_tile_fwd_batch_seq,
-      config.wi_tile_fwd_embed_dim,
-      config.wi_tile_fwd_mlp_dim,
-      config.wi_tile_dlhs_batch_seq,
-      config.wi_tile_dlhs_embed_dim,
-      config.wi_tile_dlhs_mlp_dim,
-      config.wi_tile_drhs_batch_seq,
-      config.wi_tile_drhs_embed_dim,
-      config.wi_tile_drhs_mlp_dim,
-  )
-  wo_tile_size = (
-      config.wo_tile_fwd_batch_seq,
-      config.wo_tile_fwd_embed_dim,
-      config.wo_tile_fwd_mlp_dim,
-      config.wo_tile_dlhs_batch_seq,
-      config.wo_tile_dlhs_embed_dim,
-      config.wo_tile_dlhs_mlp_dim,
-      config.wo_tile_drhs_batch_seq,
-      config.wo_tile_drhs_embed_dim,
-      config.wo_tile_drhs_mlp_dim,
-  )
-  wi_input_buffer_count = (
-      config.wi_tile_fwd_buffer_count,
-      config.wi_tile_dlhs_buffer_count,
-      config.wi_tile_drhs_buffer_count,
-  )
-  wo_input_buffer_count = (
-      config.wo_tile_fwd_buffer_count,
-      config.wo_tile_dlhs_buffer_count,
-      config.wo_tile_drhs_buffer_count,
+      config.wi_tile_fwd_batch_seq,  # m (LHS batch)
+      config.wi_tile_fwd_embed_dim,  # k  (contracting)
+      config.wi_tile_fwd_mlp_dim,  # n (RHS batch)
+      config.wi_tile_dlhs_batch_seq,  # m (LHS batch)
+      config.wi_tile_dlhs_mlp_dim,  # k (contracting)
+      config.wi_tile_dlhs_embed_dim,  # n (RHS batch)
+      config.wi_tile_drhs_batch_seq,  # Called m in megablox, but this is contracting
+      config.wi_tile_drhs_embed_dim,  # Called k in megablox, but this is LHS batch dim
+      config.wi_tile_drhs_mlp_dim,  # Called n in megablox, and indeed is the RHS batch dim
   )
 
-  wi_combine_scopes = config.wi_combine_scopes
-  wo_combine_scopes = config.wo_combine_scopes
+  wo_tile_size = (
+      config.wo_tile_fwd_batch_seq,  # m (LHS batch)
+      config.wo_tile_fwd_mlp_dim,  # k (contracting)
+      config.wo_tile_fwd_embed_dim,  # n (RHS batch)
+      config.wo_tile_dlhs_batch_seq,  # m (LHS batch)
+      config.wo_tile_dlhs_embed_dim,  # k (contracting)
+      config.wo_tile_dlhs_mlp_dim,  # n (RHS)
+      config.wo_tile_drhs_batch_seq,  # Called m in megablox, but this is contracting
+      config.wo_tile_drhs_mlp_dim,  # Called k in megablox, but this is LHS batch dim
+      config.wo_tile_drhs_embed_dim,  # Called n in megablox, and indeed is the RHS batch dim
+  )
+
   if config.use_qwix_quantization:
     gating_pspec, linear_pspec = moe_lib.get_batchsplit_init_kernel_axes()
     w0_pspec = nn.logical_to_mesh_axes(gating_pspec)
@@ -1047,8 +1028,6 @@ def compute(x, w0, w1, wo, group_sizes, weights, *, config, mesh):
         w01,
         tiling=wi_tile_size,
         weight_gather_axes=wi_gather_axes,
-        input_buffer_count=wi_input_buffer_count,
-        combine_scopes=wi_combine_scopes,
     )
     layer_w0, layer_w1 = jnp.split(layer_w01, 2, axis=-1)
   else:
@@ -1057,16 +1036,12 @@ def compute(x, w0, w1, wo, group_sizes, weights, *, config, mesh):
         w0,
         tiling=wi_tile_size,
         weight_gather_axes=wi_gather_axes,
-        input_buffer_count=wi_input_buffer_count,
-        combine_scopes=wi_combine_scopes,
     )
     layer_w1 = gmm_fn(
         x,
         w1,
         tiling=wi_tile_size,
         weight_gather_axes=wi_gather_axes,
-        input_buffer_count=wi_input_buffer_count,
-        combine_scopes=wi_combine_scopes,
     )
   layer_w0 = jax.ad_checkpoint.checkpoint_name(layer_w0, "mlpwi_0")
   layer_w1 = jax.ad_checkpoint.checkpoint_name(layer_w1, "mlpwi_1")
@@ -1077,8 +1052,6 @@ def compute(x, w0, w1, wo, group_sizes, weights, *, config, mesh):
       wo,
       tiling=wo_tile_size,
       weight_gather_axes=wo_gather_axes,
-      input_buffer_count=wo_input_buffer_count,
-      combine_scopes=wo_combine_scopes,
   )
   return layer_wo
 

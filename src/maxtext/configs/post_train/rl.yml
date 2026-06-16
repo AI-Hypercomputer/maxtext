@@ -23,10 +23,9 @@ sampler_devices_fraction: 0.5
 chips_per_vm: 4  # depends on hardware, for v5p this is 4
 num_trainer_slices: -1
 num_samplers_slices: -1
-# Only specify rollout_data_parallelism when you would like to use more than one model
-# replicas in rollout. If not specified, rollout_tensor_parallelism will be auto-determined.
+# If rollout_data_parallelism is not specified, it will be auto-determined.
 rollout_data_parallelism: -1
-rollout_tensor_parallelism: -1
+rollout_tensor_parallelism: 1
 rollout_expert_parallelism: 1
 
 # ====== Reproducibility ======
@@ -54,20 +53,26 @@ rl:
   grpo_epsilon: 0.2
   loss_algo: 'grpo' # grpo or gspo-token
 
+  # Specifies the method for aggregating loss across the batch.
+  loss_agg_mode: 'sequence-mean-token-mean'  # 'token-mean' | 'sequence-mean' | 'sequence-mean-token-mean'
+
   # ====== Agentic Rollout ======
-  # If True, uses the async AgenticGRPOLearner, which overlaps rollout generation
+  # If true, uses the async AgenticGRPOLearner, which overlaps rollout generation
   # with training for faster throughput via online vLLM inference.
-  use_agentic_rollout: False
+  use_agentic_rollout: false
   # Max concurrent rollout requests when using agentic rollout.
   max_concurrency: 256
   # Number of off-policy steps tolerated before requiring a policy update.
   off_policy_steps: 0
   # System prompt injected into the agent at rollout time.
   system_prompt: ''
-  # If True, mask degenerate groups (all-zero advantages) from contributing to the loss.
-  degenerate_group_masking: True
+  # If true, mask degenerate groups (all-zero advantages) from contributing to the loss.
+  degenerate_group_masking: true
   # Upper-bound clipping epsilon for GRPO loss; defaults to grpo_epsilon when null.
   epsilon_high: null
+  # Number of model keys to chunk for resharding tensors between trainer and rollout devices.
+  # If null, the entire model is resharded at once.
+  reshard_chunk_size: null
 
 
 # ====== Models ======
@@ -92,17 +97,18 @@ decoder_layer_input: 'offload'
 query_proj: 'offload'
 key_proj: 'offload'
 value_proj: 'offload'
-checkpoint_storage_use_ocdbt: False # For Pathways
-checkpoint_storage_use_zarr3: False # For Pathways
-use_pathways: True
+checkpoint_storage_use_ocdbt: false # For Pathways
+checkpoint_storage_use_zarr3: false # For Pathways
+use_pathways: true
 log_period: 20
+convert_checkpoint_if_possible: true
 
 # ====== Debugging ======
 debug:
-  rl: True
-# If True, Tunix-managed metrics measurement will be enabled. The metrics will be
+  rl: true
+# If true, Tunix-managed metrics measurement will be enabled. The metrics will be
 # uploaded to tensorboard.
-enable_tunix_perf_metrics: False
+enable_tunix_perf_metrics: false
 
 # ====== Training ======
 batch_size: 1
@@ -116,6 +122,12 @@ rollout_micro_batch_size: -1
 # Keep `num_test_batches` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
 num_test_batches: 5  # 200
+# Optional override: batch size used during post-train RL evaluation. -1 (default)
+# = use `batch_size`. Set higher (e.g. 32-128) to feed vLLM bigger batches during
+# greedy eval — otherwise eval is bottlenecked by training batch_size, which is
+# small for GRPO (e.g. 4 prompts × 8 generations per step). Total eval examples
+# = num_test_batches * eval_batch_size, so adjust num_test_batches accordingly.
+eval_batch_size: -1
 test_batch_start_index: 0
 train_fraction: 1.0
 
@@ -145,8 +157,9 @@ generation_configs:
     eval_top_p: 1.0
 
 num_eval_passes: 1 # Number of generation passes during evaluation
-eval_corr_lst: False # If True, only include correct responses in the list during evaluation
-eval_make_lst: False # If True, return a list of (question, answer, responses) during evaluation
+eval_corr_lst: false # If true, only include correct responses in the list during evaluation
+eval_make_lst: false # If true, return a list of (question, answer, responses) during evaluation
+eval_mode: "pass" # Evaluation mode ("pass" for pass@K, "maj" for majority voting maj@K, "pass_at_1" for pass@1 estimation)
 
 # ====== Inference ======
 # === Generation during GRPO training ===
@@ -163,18 +176,18 @@ decode_sampling_temperature: 0.9
 decode_sampling_top_k: 50
 decode_sampling_nucleus_p: 1.0
 # Optional sharding configuration for samplers
-enable_dp_attention: False
+enable_dp_attention: false
 # Performance tuning for samplers
 max_num_batched_tokens: null
 max_num_seqs: null
-# If True, enables asynchronous scheduling in vLLM for faster generation
-async_scheduling: True
+# If true, enables asynchronous scheduling in vLLM for faster generation
+async_scheduling: true
 # stop generation when any of these strings is generated
 stop_strings: null
 
 # ====== Checkpoint Configuration ======
-enable_checkpointing: True
-async_checkpointing: False
+enable_checkpointing: true
+async_checkpointing: false
 checkpoint_period: 50
 max_num_checkpoints_to_keep: 10
 
@@ -189,18 +202,47 @@ reward_ratio_guess_to_answer_low: 0.0
 penalty_incorrect_format: 0.0
 penalty_incorrect_answer: 0.0
 
+# ====== Configuration for math_verify Pool ======
+# Global timeout (seconds) for math_verify calls across all examples in a batch
+math_verify_timeout: 120
+# Max worker processes for the math_verify pool. null ⇒ min(batch_size, cpu_count())
+math_verify_num_procs: null
+
 # ====== Special tokens/templates for GSM8K reasoning ======
 reasoning_start_token: '<reasoning>'
 reasoning_end_token: '</reasoning>'
 solution_start_token: '<answer>'
 solution_end_token: '</answer>'
 chat_template_path: 'maxtext/examples/chat_templates/gsm8k_rl.json'
-skip_jax_distributed_system: True
+skip_jax_distributed_system: true
 
-# # TODO(@mazumdera): fix this
-# Dataset Configuration
-dataset_name: 'gsm8k' # huggingface:open-r1/DAPO-Math-17k-Processed
-eval_dataset_name: 'gsm8k' # huggingface:BytedTsinghua-SIA/AIME-2024
+# ====== Dataset Configuration ======
+# Supported values for dataset_name:
+#   ['openai/gsm8k', 'nvidia/OpenMathInstruct-2', 'nvidia/OpenMathReasoning', 'open-r1/OpenR1-Math-220k', 'bethgelab/CuratedThoughts']
+#
+# Scenarios:
+#   1. dataset_name='openai/gsm8k' and eval_dataset_name='openai/gsm8k'
+#      Loads the train and test splits of GSM8K directly.
+#
+#   2. Datasets other than 'gsm8k' with same eval: dataset_name=eval_dataset_name=<dataset>
+#      The dataset has no separate test split, so the training data is
+#      automatically split into train and test sets internally.
+#
+#   3. Train and evaluation on different datasets: dataset_name=<train_dataset>, eval_dataset_name=<eval_dataset>
+#      Loads separate dataset for training and evaluation (e.g., train on OpenMathInstruct-2, eval on GSM8K).
+dataset_name: 'openai/gsm8k'
+eval_dataset_name: 'openai/gsm8k'
+# Optional: path to a user-provided Python file with a custom `process_data`
+# function. Signature: process_data(dataset_name, model_tokenizer, template_config,
+# tmvp_config, x) -> dict with keys {prompts, question, answer}. When empty
+# (default), the built-in utils_rl.process_data is used.
+dataset_processor_path: ''
 train_split: 'train'
 eval_split: 'test'
+hf_name: 'main' # subset of Hugging Face dataset
 tokenizer_type: 'huggingface'
+
+##### MaxText to VLLM Converter validation parameters
+vllm_load_format: dummy # Format to load the model for conversion. Options are "auto", "dummy"
+debug_converter: false # If true, run key coverage check, weight stats, and GCS upload then exit without generation.
+gcs_debug_path: "" # If set and debug_converter=true, upload converted layer-0 and global tensors as .npy to this GCS prefix.

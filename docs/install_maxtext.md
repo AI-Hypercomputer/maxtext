@@ -1,5 +1,5 @@
 <!--
- Copyright 2023-2025 Google LLC
+ Copyright 2023-2026 Google LLC
 
  Licensed under the Apache License, Version 2.0 (the "License");
  you may not use this file except in compliance with the License.
@@ -33,8 +33,8 @@ This is the easiest way to get started with the latest stable version.
 1. **Create a virtual environment:**
 
    ```bash
-   uv venv --python 3.12 --seed <virtual env name>
-   source <virtual env name>/bin/activate
+   uv venv --python 3.12 --seed <VENV_NAME>
+   source <VENV_NAME>/bin/activate
    ```
 
 2. **Install MaxText and its dependencies.**
@@ -51,14 +51,16 @@ This is the easiest way to get started with the latest stable version.
      TPUs.
 
      ```bash
-     uv pip install maxtext[tpu]==0.2.1 --resolution=lowest
+     uv pip install maxtext[tpu]=={{version}} --resolution=lowest
+     install_tpu_pre_train_extra_deps
      ```
 
    - **Option 2:** Install `maxtext[cuda12]`, used for pre-training and decoding
      on GPUs.
 
      ```bash
-     uv pip install maxtext[cuda12]==0.2.1 --resolution=lowest
+     uv pip install maxtext[cuda12]=={{version}} --resolution=lowest
+     install_cuda12_pre_train_extra_deps
      ```
 
    - **Option 3:** Install `maxtext[tpu-post-train]`, used for post-training on
@@ -66,7 +68,8 @@ This is the easiest way to get started with the latest stable version.
      on TPUs.
 
      ```bash
-     uv pip install maxtext[tpu-post-train]==0.2.1 --resolution=lowest
+     UV_TORCH_BACKEND=cpu uv pip install maxtext[tpu-post-train]=={{version}} --resolution=lowest
+     install_tpu_post_train_extra_deps
      ```
 
    - **Option 4:** Install `maxtext[runner]`, used for building MaxText's Docker
@@ -74,11 +77,11 @@ This is the easiest way to get started with the latest stable version.
      access to the `build_maxtext_docker_image`, `upload_maxtext_docker_image`,
      and `xpk` commands. For more details on building and uploading Docker
      images, see the
-     [Build MaxText Docker Image](https://maxtext.readthedocs.io/en/latest/build_maxtext.html)
+     [Build MaxText Docker Image](build_maxtext.md)
      guide.
 
      ```bash
-     uv pip install maxtext[runner]==0.2.1 --resolution=lowest
+     uv pip install maxtext[runner]=={{version}} --resolution=lowest
      ```
 
 ```{note}
@@ -115,8 +118,8 @@ environment to avoid dependency conflicts.
 2. Create virtual environment:
 
    ```bash
-   uv venv --python 3.12 --seed <virtual env name>
-   source <virtual env name>/bin/activate
+   uv venv --python 3.12 --seed <VENV_NAME>
+   source <VENV_NAME>/bin/activate
    ```
 
 3. Install dependencies in editable mode. Choose a single installation option
@@ -139,7 +142,7 @@ environment to avoid dependency conflicts.
    - **Option 3:** Install `.[tpu-post-train]`
 
      ```bash
-     uv pip install -e .[tpu-post-train] --resolution=lowest
+     UV_TORCH_BACKEND=cpu uv pip install -e .[tpu-post-train] --resolution=lowest
      install_tpu_post_train_extra_deps
      ```
 
@@ -149,6 +152,23 @@ environment to avoid dependency conflicts.
      uv pip install -e .[runner] --resolution=lowest
      ```
 
-After installation, you can verify the package is available with
-`python3 -c "import maxtext"` and run training jobs with
-`python3 -m maxtext.trainers.pre_train.train ...`.
+## Verify installation
+
+After installing MaxText (either from PyPI or from source), verify that your virtual environment is healthy and free of package version conflicts:
+
+1. **Verify the environment has no dependency conflicts:**
+
+   ```bash
+   uv pip check
+   ```
+
+   ```{note}
+   If `uv pip check` reports any package version conflicts, they can usually be resolved by starting with a fresh virtual environment (see above) and reinstalling using the platform-specific target and the `--resolution=lowest` flag to ensure all dependencies resolve to their verified versions.
+   ```
+
+2. **Verify MaxText is importable and runnable:**
+
+   ```bash
+   python3 -c "import maxtext"
+   python3 -m maxtext.trainers.pre_train.train --help
+   ```

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 # pylint: disable=missing-module-docstring, missing-function-docstring
+import itertools
 import sys
 import unittest
 
@@ -23,9 +24,6 @@ import numpy as np
 import jax
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
-from jax.sharding import PartitionSpec
-
-import tensorflow as tf
 
 from maxtext.configs import pyconfig
 from maxtext.input_pipeline import multihost_dataloading
@@ -39,7 +37,7 @@ class MultihostDataloadingTest(unittest.TestCase):
     # Note: this test uses gs://max-experiments/ (not gs://runner-maxtext-logs) in cloud mode
     base_output_directory = get_test_base_output_directory(cloud_path="gs://max-experiments/")
     dataset_path = get_test_dataset_path(cloud_path="gs://maxtext-dataset/")
-    batch_size = 4
+    batch_size = len(jax.devices())
     config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         base_output_directory=base_output_directory,
@@ -51,16 +49,14 @@ class MultihostDataloadingTest(unittest.TestCase):
         data_sharding=["data"],
         enable_checkpointing=False,
     )
-    global_data_shape = PartitionSpec(batch_size, config.max_target_length)
     mesh_shape_1d = (len(jax.devices()),)
     self.mesh = Mesh(mesh_utils.create_device_mesh(mesh_shape_1d), config.mesh_axes)
-    # creating 2 batches of data
-    global_data = np.arange(np.prod(global_data_shape) * 2).reshape((batch_size * 2, config.max_target_length))
-
-    dataset = tf.data.Dataset.from_tensor_slices(global_data)
-    dataset = dataset.repeat()
-    dataset = dataset.batch(batch_size)
-    self.multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(dataset, self.mesh)
+    # Create 2 distinct batches and cycle through them infinitely.
+    global_data = np.arange(batch_size * 2 * config.max_target_length, dtype=np.int32).reshape(
+        (batch_size * 2, config.max_target_length)
+    )
+    data_batches = [global_data[:batch_size], global_data[batch_size:]]
+    self.multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(itertools.cycle(data_batches), self.mesh)
 
   @pytest.mark.tpu_only
   def test_batch_sharded_data_pipeline(self):

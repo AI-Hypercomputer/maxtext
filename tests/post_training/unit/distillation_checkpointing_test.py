@@ -86,8 +86,10 @@ class MaxTextCheckpointManagerTest(absltest.TestCase):
     self.assertEqual(iterator.counter, 10)
 
     # 2. Save Checkpoint
+    mock_student_config = mock.Mock()
+    mock_student_config.learn_to_init_mode = False
     manager = distillation_utils.MaxTextCheckpointManager(
-        raw_iterator=iterator, root_directory=self.test_dir, options=self.options
+        raw_iterator=iterator, root_directory=self.test_dir, student_config=mock_student_config, options=self.options
     )
 
     # Create dummy model so 'model_params' is not empty
@@ -115,8 +117,13 @@ class MaxTextCheckpointManagerTest(absltest.TestCase):
     new_iterator = FakeGrainIterator()
     self.assertEqual(new_iterator.counter, 0)
 
+    mock_student_config_restore = mock.Mock()
+    mock_student_config_restore.learn_to_init_mode = False
     restore_manager = distillation_utils.MaxTextCheckpointManager(
-        raw_iterator=new_iterator, root_directory=self.test_dir, options=self.options
+        raw_iterator=new_iterator,
+        root_directory=self.test_dir,
+        student_config=mock_student_config_restore,
+        options=self.options,
     )
 
     with mock.patch.object(jax, "process_index", return_value=0), mock.patch.object(jax, "process_count", return_value=1):
@@ -128,8 +135,13 @@ class MaxTextCheckpointManagerTest(absltest.TestCase):
   def test_restore_returns_none_if_no_checkpoint(self):
     """Verifies restore_iterator returns None gracefully if no checkpoint exists."""
     iterator = FakeGrainIterator()
+    mock_student_config_restore = mock.Mock()
+    mock_student_config_restore.learn_to_init_mode = False
     manager = distillation_utils.MaxTextCheckpointManager(
-        raw_iterator=iterator, root_directory=self.test_dir, options=self.options
+        raw_iterator=iterator,
+        root_directory=self.test_dir,
+        student_config=mock_student_config_restore,
+        options=self.options,
     )
 
     # No save called

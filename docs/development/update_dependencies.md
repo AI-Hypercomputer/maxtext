@@ -34,19 +34,15 @@ to keep dependencies in sync for users installing MaxText from source.
 To update dependencies, you will follow these general steps:
 
 1. **Modify base requirements**: Update the desired dependencies in
-   `src/dependencies/requirements/base_requirements/requirements.txt` or the hardware-specific files
-   (`src/dependencies/requirements/base_requirements/tpu-base-requirements.txt`,
-   `src/dependencies/requirements/base_requirements/gpu-base-requirements.txt`).
+   `src/dependencies/requirements/base_requirements/requirements.txt` or the hardware-specific pre-training files
+   (`src/dependencies/requirements/base_requirements/tpu-requirements.txt`,
+   `src/dependencies/requirements/base_requirements/cuda12-requirements.txt`) or the post-training files (`src/dependencies/requirements/base_requirements/tpu-post-train-requirements.txt`).
 2. **Find the JAX build commit hash**: The dependency generation process is
    pinned to a specific nightly build of JAX. You need to find the commit hash
    for the desired JAX build.
-3. **Generate the requirement files**: Run the `seed-env` CLI tool to generate
-   new, fully-pinned requirements files based on your changes.
-4. **Update project files**: Copy the newly generated files into the
-   `src/dependencies/requirements/generated_requirements/` directory. If
-   necessary, also update any dependencies that are installed directly from
-   GitHub from the generated files to `src/dependencies/extra_deps`.
-5. **Verify the new dependencies**: Test the new dependencies to ensure the
+3. **Generate the requirement files**: Run `src/dependencies/scripts/generate_requirements.sh`,
+   which internally invokes `seed-env` to produce fully-pinned requirements files.
+4. **Verify the new dependencies**: Test the new dependencies to ensure the
    project installs and runs correctly.
 
 The following sections provide detailed instructions for each step.
@@ -70,79 +66,79 @@ if you want to build `seed-env` from source.
 
 ## Step 1: Modify base requirements
 
-Update the desired dependencies in
-`src/dependencies/requirements/base_requirements/requirements.txt` or the
-hardware-specific files
-(`src/dependencies/requirements/base_requirements/tpu-base-requirements.txt`,
-`src/dependencies/requirements/base_requirements/gpu-base-requirements.txt`).
+Update the desired dependencies in `src/dependencies/requirements/base_requirements/requirements.txt` or the hardware-specific pre-training files (`src/dependencies/requirements/base_requirements/tpu-requirements.txt`, `src/dependencies/requirements/base_requirements/cuda12-requirements.txt`) or the post-training files (`src/dependencies/requirements/base_requirements/tpu-post-train-requirements.txt`).
 
 ## Step 2: Find the JAX build commit hash
 
-The dependency generation process is pinned to a specific nightly build of JAX.
-You need to find the commit hash for the desired JAX build.
-
-You can find the latest commit hashes in the
-[JAX `build/` folder](https://github.com/jax-ml/jax/commits/main/build). Choose
-a recent, successful build and copy its full commit hash.
+The dependency generation process is pinned to a specific nightly build of JAX. You need to find the commit hash for the desired JAX build from [JAX `build/` folder](https://github.com/jax-ml/jax/commits/main/build) and copy its full commit hash.
 
 ## Step 3: Generate the requirements files
 
-Next, run the `seed-env` CLI to generate the new requirements files. You will
-need to do this separately for the TPU and GPU environments. The generated files
-will be placed in a directory specified by `--output-dir`.
+Next, run `generate_requirements.sh` to generate the new requirements files. This
+script wraps the `seed-env` CLI and handles exporting the lock, and applying any
+overrides. You will need to do this separately for the TPU and GPU environments.
 
-### For TPU
+### TPU Pre-Training
 
-Run the following command, replacing `<jax-build-commit-hash>` with the hash you
-copied in the previous step.
+> **Note:** The current `src/dependencies/requirements/generated_requirements/tpu-requirements.txt` in the repository was generated using JAX build commit hash: [efd6cf797ee9c4f29c6c6d5e91ae4432209063be](https://github.com/jax-ml/jax/commit/efd6cf797ee9c4f29c6c6d5e91ae4432209063be). When regenerating the requirements, either use the same commit hash or update this hash if you use a different one.
 
-```bash
-seed-env \
-  --local-requirements=src/dependencies/requirements/base_requirements/tpu-base-requirements.txt \
-  --host-name=MaxText \
-  --seed-commit=<jax-build-commit-hash> \
-  --python-version=3.12 \
-  --requirements-txt=tpu-requirements.txt \
-  --output-dir=generated_tpu_artifacts
-```
-
-### For GPU
-
-Similarly, run the command for the GPU requirements.
+If you have made changes to TPU pre-training dependencies in `src/dependencies/requirements/base_requirements/tpu-requirements.txt`, you need to regenerate the pinned pre-training requirements in `generated_requirements/` directory. Run the following command, replacing `<jax-build-commit-hash>` with the hash you copied in the previous step:
 
 ```bash
-seed-env \
-  --local-requirements=src/dependencies/requirements/base_requirements/gpu-base-requirements.txt \
-  --host-name=MaxText \
-  --seed-commit=<jax-build-commit-hash> \
-  --python-version=3.12 \
-  --requirements-txt=cuda12-requirements.txt \
-  --hardware=cuda12 \
-  --output-dir=generated_gpu_artifacts
+bash src/dependencies/scripts/generate_requirements.sh \
+--base-requirements src/dependencies/requirements/base_requirements/tpu-requirements.txt \
+--generated-requirements tpu-requirements.txt \
+--override-requirements src/dependencies/extra_deps/tpu_overrides.txt \
+--seed-commit efd6cf797ee9c4f29c6c6d5e91ae4432209063be
+
+# Copy generated requirements to src/dependencies/requirements/generated_requirements
+mv generated_artifacts/python3_12/tpu-requirements.txt \
+  src/dependencies/requirements/generated_requirements/tpu-requirements.txt
 ```
 
-## Step 4: Update project files
+### TPU Post-Training
 
-After generating the new requirements, you need to update the files in the
-MaxText repository.
+> **Note:** The current `src/dependencies/requirements/generated_requirements/tpu-post-train-requirements.txt` in the repository was generated using JAX build commit hash: [a0d62932cbb02835296964e707f1cac0cbb939f8](https://github.com/jax-ml/jax/commit/a0d62932cbb02835296964e707f1cac0cbb939f8). When regenerating the requirements, either use the same commit hash or update this hash if you use a different one.
 
-1. **Copy the generated files:**
+If you have made changes to the post-training dependencies in `src/dependencies/requirements/base_requirements/tpu-post-train-requirements.txt`, you need to regenerate the pinned post-training requirements in `generated_requirements/` directory. Run the following command, replacing `<jax-build-commit-hash>` with the hash you copied in the previous step:
 
-   - Move `generated_tpu_artifacts/tpu-requirements.txt` to `generated_requirements/tpu-requirements.txt`.
-   - Move `generated_gpu_artifacts/cuda12-requirements.txt` to `generated_requirements/cuda12-requirements.txt`.
+```bash
 
-2. **Update `src/dependencies/extra_deps` (if necessary):**
-   Currently, MaxText uses a few dependencies, such as `mlperf-logging` and
-   `google-jetstream`, that are installed directly from GitHub source. These are
-   defined in `base_requirements/requirements.txt`, and the `seed-env` tool will
-   carry them over to the generated requirements files.
+bash src/dependencies/scripts/generate_requirements.sh \
+--base-requirements src/dependencies/requirements/base_requirements/tpu-post-train-requirements.txt \
+--generated-requirements tpu-post-train-requirements.txt \
+--override-requirements src/dependencies/extra_deps/tpu_post_train_overrides.txt \
+--seed-commit a0d62932cbb02835296964e707f1cac0cbb939f8
 
-## Step 5: Verify the new dependencies
+# Copy generated requirements to src/dependencies/requirements/generated_requirements
+mv generated_artifacts/python3_12/tpu-post-train-requirements.txt \
+  src/dependencies/requirements/generated_requirements/tpu-post-train-requirements.txt
+```
+
+### GPU Pre-Training
+
+> **Note:** The current `src/dependencies/requirements/generated_requirements/cuda12-requirements.txt` in the repository was generated using JAX build commit hash: [efd6cf797ee9c4f29c6c6d5e91ae4432209063be](https://github.com/jax-ml/jax/commit/efd6cf797ee9c4f29c6c6d5e91ae4432209063be). When regenerating the requirements, either use the same commit hash or update this hash if you use a different one.
+
+If you have made changes to the GPU pre-training dependencies in `src/dependencies/requirements/base_requirements/cuda12-requirements.txt`, you need to regenerate the pinned pre-training requirements in `generated_requirements/` directory. Run the following command, replacing `<jax-build-commit-hash>` with the hash you copied in the previous step:
+
+```bash
+bash src/dependencies/scripts/generate_requirements.sh \
+--base-requirements src/dependencies/requirements/base_requirements/cuda12-requirements.txt \
+--generated-requirements cuda12-requirements.txt \
+--seed-commit efd6cf797ee9c4f29c6c6d5e91ae4432209063be \
+--override-requirements src/dependencies/extra_deps/cuda12_overrides.txt \
+--hardware cuda12
+
+# Copy generated requirements to src/dependencies/requirements/generated_requirements
+mv generated_artifacts/python3_12/cuda12-requirements.txt \
+  src/dependencies/requirements/generated_requirements/cuda12-requirements.txt
+```
+
+## Step 4: Verify the new dependencies
 
 Finally, test that the new dependencies install correctly and that MaxText runs
 as expected.
 
-1. **Install MaxText:** Follow the instructions to
-   [install MaxText from source](install-from-source).
+1. **Install MaxText and dependencies**: For instructions on installing MaxText on your VM, please refer to the [official documentation](../install_maxtext.md#from-source).
 
 2. **Run tests:** Run MaxText tests to ensure there are no regressions.

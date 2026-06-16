@@ -23,11 +23,13 @@ from typing import Optional
 from flax import linen as nn
 from flax import nnx
 from jax.ad_checkpoint import checkpoint_name
+import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.common.common_types import AttentionType, Config
 from maxtext.layers import attentions
 from maxtext.layers import initializers
+from maxtext.layers import linears
 from maxtext.layers import moe
 from maxtext.layers import nnx_wrappers
 from maxtext.layers import quantizations
@@ -121,7 +123,7 @@ class GptOssDecoderLayer(nnx.Module):
         num_experts=config.num_experts,
         num_experts_per_tok=config.num_experts_per_tok,
         mesh=mesh,
-        kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_init=initializers.nd_dense_init(config.dense_init_scale, "fan_in", "truncated_normal"),
         kernel_axes=("embed", None),
         intermediate_dim=config.mlp_dim,
         dtype=config.dtype,
@@ -129,6 +131,8 @@ class GptOssDecoderLayer(nnx.Module):
         quant=self.quant,
         rngs=rngs,
     )
+
+    self.dropout = linears.Dropout(rate=config.dropout_rate, broadcast_dims=(-2,), rngs=rngs)
 
   def __call__(
       self,
@@ -138,14 +142,19 @@ class GptOssDecoderLayer(nnx.Module):
       deterministic,
       model_mode,
       previous_chunk=None,
-      page_state=None,
       slot=None,
       kv_cache=None,
       attention_metadata=None,
   ):
     cfg = self.config
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
-    if isinstance(inputs, tuple):
+    is_scan_carry = False
+    if isinstance(inputs, tuple) and len(inputs) == 3:
+      hidden_states, stacked_kv_cache, layer_idx = inputs
+      kv_cache = stacked_kv_cache[layer_idx]
+      inputs = hidden_states
+      is_scan_carry = True
+    elif isinstance(inputs, tuple):
       inputs = inputs[0]
 
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
@@ -181,7 +190,7 @@ class GptOssDecoderLayer(nnx.Module):
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 
     layer_output = mlp_lnx + intermediate_inputs
-    layer_output = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(layer_output, deterministic=deterministic)
+    layer_output = self.dropout(layer_output, deterministic=deterministic)
 
     layer_output = nn.with_logical_constraint(
         layer_output,
@@ -200,7 +209,16 @@ class GptOssDecoderLayer(nnx.Module):
           jnp.sum(layer_output == 0) / jnp.size(layer_output),
       )
 
-    if cfg.scan_layers:
+    if is_scan_carry:
+
+      def update_cache(cache, val):
+        if jnp.size(val) > 0:
+          return cache.at[layer_idx].set(val)
+        return cache
+
+      stacked_kv_cache = jax.tree_util.tree_map(update_cache, stacked_kv_cache, kv_cache)
+      return (layer_output, stacked_kv_cache, layer_idx + 1), None
+    elif cfg.scan_layers:
       return layer_output, None
     else:
       return layer_output, kv_cache
@@ -258,6 +276,10 @@ class GptOssScannableBlock(nnx.Module):
       decoder_positions,
       deterministic,
       model_mode,
+      previous_chunk=None,
+      slot=None,
+      kv_cache=None,
+      attention_metadata=None,
   ):
     cfg = self.config
 
@@ -267,19 +289,18 @@ class GptOssScannableBlock(nnx.Module):
     for layer_id in range(cfg.inhomogeneous_layer_cycle_interval):
       layer_name = f"layers_{layer_id}"
       layer = getattr(self, layer_name)
-      y = layer(
+      y, kv_cache = layer(
           y,
           decoder_segment_ids,
           decoder_positions,
           deterministic,
           model_mode,
+          previous_chunk=previous_chunk,
+          slot=slot,
+          kv_cache=kv_cache,
+          attention_metadata=attention_metadata,
       )
-      if cfg.scan_layers:
-        y = y[0]
-    if cfg.scan_layers:
-      return y, None
-    else:
-      return y
+    return y, kv_cache
 
 
 GptOssScannableBlockToLinen = nnx_wrappers.to_linen_class(

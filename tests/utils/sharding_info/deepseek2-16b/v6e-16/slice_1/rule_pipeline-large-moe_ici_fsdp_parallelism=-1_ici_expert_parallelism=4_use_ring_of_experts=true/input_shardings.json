@@ -14,13 +14,13 @@
     },
     {
       "attention_mla/inputs_q: bfloat16[192,2048,2048]": {
-        "logic_axes": "('activation_batch', 'activation_length', 'activation_embed')",
+        "logic_axes": "('activation_batch_attn', 'activation_length', 'activation_embed')",
         "PartitionSpec": "P(('fsdp', 'expert'), None, None)"
       }
     },
     {
       "attention_mla/inputs_kv: bfloat16[192,2048,2048]": {
-        "logic_axes": "('activation_batch', 'activation_length', 'activation_embed')",
+        "logic_axes": "('activation_batch_attn', 'activation_length', 'activation_embed')",
         "PartitionSpec": "P(('fsdp', 'expert'), None, None)"
       }
     },
@@ -67,6 +67,18 @@
       }
     },
     {
+      "attention_op/arr: int8[1,4,4]": {
+        "logic_axes": "Unknown",
+        "PartitionSpec": "P(None, None)"
+      }
+    },
+    {
+      "attention_op/arr: int32[2048]": {
+        "logic_axes": "Unknown",
+        "PartitionSpec": "P(None,)"
+      }
+    },
+    {
       "attention_op/query: bfloat16[192,16,2048,192]": {
         "logic_axes": "Unknown",
         "PartitionSpec": "P(('fsdp', 'expert'), None, None, None)"
@@ -86,7 +98,7 @@
     },
     {
       "attention_mla/out: bfloat16[192,2048,16,128]": {
-        "logic_axes": "('activation_batch', 'activation_length', 'activation_heads', 'activation_kv')",
+        "logic_axes": "('activation_batch_attn', 'activation_length', 'activation_heads', 'activation_kv')",
         "PartitionSpec": "P(('fsdp', 'expert'), None, None, None)"
       }
     },
@@ -130,6 +142,24 @@
       "moe/gate_logits: bfloat16[192,2048,64]": {
         "logic_axes": "('activation_batch', 'activation_norm_length', None)",
         "PartitionSpec": "P(('fsdp', 'expert'), None, None)"
+      }
+    },
+    {
+      "moe/w0_kernel: bfloat16[64,2048,1408]": {
+        "logic_axes": "Unknown",
+        "PartitionSpec": "P('expert', None, None)"
+      }
+    },
+    {
+      "moe/w1_kernel: bfloat16[64,2048,1408]": {
+        "logic_axes": "Unknown",
+        "PartitionSpec": "P('expert', None, None)"
+      }
+    },
+    {
+      "moe/wo_kernel: bfloat16[64,1408,2048]": {
+        "logic_axes": "Unknown",
+        "PartitionSpec": "P('expert', None, None)"
       }
     },
     {

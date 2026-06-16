@@ -15,8 +15,9 @@ export TOKENIZER_PATH='deepseek-ai/DeepSeek-V3.2'
 # Installing torch for checkpoint conversion and forward_pass_logit_checker.py
 python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
-# e.g., $HOME/maxtext/src/maxtext
-export MAXTEXT_PKG_DIR="${MAXTEXT_PKG_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext}"
+# TODO: remove this version pin when deepseek32 become available in transformers library
+# deepseek_v32 is missing from transformer config, will cause error with transformers==5.6.1
+python3 -m pip install transformers==4.57.3
 
 if [ -z "${BASE_OUTPUT_PATH}" ]; then
   # Non-Googlers please remember to point `BASE_OUTPUT_PATH` to GCS buckets that you own, this script uses internal buckets for testing.
@@ -46,10 +47,14 @@ if [ ! -f "${GOLDEN_LOGITS_DISK_LOCATION}" ]; then
   gcloud storage cp ${GOLDEN_LOGITS_PATH} ${GOLDEN_LOGITS_DISK_LOCATION}
 fi
 
-# override deepseek3.2-671b.yml with indexer_topk=2
+# Note: override deepseek3.2-671b.yml with indexer_topk=2 for testing
 OVERRIDE="override_model_config=True indexer_topk=2"
 python3 -m tests.utils.forward_pass_logit_checker ${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}/base.yml base_output_directory=${BASE_OUTPUT_PATH} run_name=forward_logits_check load_parameters_path=${SCANNED_CKPT_PATH} scan_layers=true attention=dot_product per_device_batch_size=1 model_name=${MODEL_NAME} max_prefill_predict_length=4 max_target_length=4 async_checkpointing=false sparse_matmul=false ici_fsdp_parallelism=1 ici_expert_parallelism=-1 checkpoint_storage_concurrent_gb=1024 weight_dtype=float32 dtype=float32 activations_in_float32=true matmul_precision=highest float32_logits=true float32_qk_product=true ${OVERRIDE} --golden_logits_path=${GOLDEN_LOGITS_DISK_LOCATION} --max_kl_div=0.3
 
+# Run pre-training - tokamax_gmm implementation
+# Note: use sgd due to memory constraint
+python3 -m maxtext.trainers.pre_train.train ${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}/base.yml base_output_directory=${BASE_OUTPUT_PATH} run_name=tokamax_gmm_pre_training model_name=${MODEL_NAME} tokenizer_type=huggingface tokenizer_path=${TOKENIZER_PATH} dataset_type=synthetic enable_checkpointing=false attention=flash use_tokamax_splash=True sparse_matmul=True use_tokamax_gmm=True dtype=bfloat16 weight_dtype=bfloat16 per_device_batch_size=1 steps=5 max_target_length=4096 ici_fsdp_parallelism=-1 opt_type=sgd
+
 # Run decoding - megablox implementation
-# Note decode requires the access token for huggingface tokenizer even if the model is not gated
+# Note: decode requires the access token for huggingface tokenizer even if the model is not gated
 python3 -m maxtext.inference.decode ${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}/base.yml base_output_directory=${BASE_OUTPUT_PATH} run_name=decode model_name=${MODEL_NAME} tokenizer_type=huggingface tokenizer_path=${TOKENIZER_PATH} hf_access_token=${HF_TOKEN} load_parameters_path=${UNSCANNED_CKPT_PATH} scan_layers=False attention=dot_product sparse_matmul=True use_tokamax_gmm=False dtype=bfloat16 weight_dtype=bfloat16 per_device_batch_size=1 max_prefill_predict_length=3072 max_target_length=4096 ici_fsdp_parallelism=1 ici_tensor_parallelism=-1 ici_expert_parallelism=1 checkpoint_storage_concurrent_gb=1024 mla_naive_kvcache=false prompt="An attention function can be described as mapping a query and a set of key-value pairs to an output, where the query, keys, values, and outputs are all vectors. The output is "

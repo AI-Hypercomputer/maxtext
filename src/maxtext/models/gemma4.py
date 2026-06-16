@@ -70,7 +70,7 @@ class Gemma4MoE(nnx.Module):
     self.moe_block = moe.RoutedAndSharedMoE(
         config=config,
         mesh=mesh,
-        kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_init=initializers.nd_dense_init(config.dense_init_scale, "fan_in", "truncated_normal"),
         kernel_axes=("embed", None),
         weight_dtype=config.weight_dtype,
         dtype=config.dtype,
@@ -299,7 +299,7 @@ class Gemma4DecoderLayer(nnx.Module):
     else:
       self.post_ffw_norm = None
 
-    self.layer_scalar = nnx.Param(jnp.ones((1,), dtype=config.dtype), sharding=(None,))
+    self.layer_scalar = nnx.Param(jnp.ones((1,), dtype=config.weight_dtype), sharding=(None,))
 
     if model_mode == MODEL_MODE_PREFILL:
       self.activation_axis_names = ("activation_batch", "prefill_activation_norm_length", "activation_embed")
@@ -322,7 +322,13 @@ class Gemma4DecoderLayer(nnx.Module):
   ):
     cfg = self.config
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
-    if isinstance(inputs, tuple):
+    is_scan_carry = False
+    if isinstance(inputs, tuple) and len(inputs) == 3:
+      hidden_states, stacked_kv_cache, layer_idx = inputs
+      kv_cache = stacked_kv_cache[layer_idx]
+      inputs = hidden_states
+      is_scan_carry = True
+    elif isinstance(inputs, tuple):
       inputs = inputs[0]
     inputs = nn.with_logical_constraint(inputs, self.activation_axis_names)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
@@ -370,7 +376,7 @@ class Gemma4DecoderLayer(nnx.Module):
 
     next_layer_addition = mlp_lnx + residual
     layer_output = next_layer_addition
-    layer_output = layer_output * self.layer_scalar.value
+    layer_output = layer_output * jnp.asarray(self.layer_scalar.value, cfg.dtype)
 
     layer_output = nn.with_logical_constraint(layer_output, self.activation_axis_names)
 
@@ -383,7 +389,16 @@ class Gemma4DecoderLayer(nnx.Module):
           jnp.sum(layer_output == 0) / jnp.size(layer_output),
       )
 
-    if cfg.scan_layers:
+    if is_scan_carry:
+
+      def update_cache(cache, val):
+        if jnp.size(val) > 0:
+          return cache.at[layer_idx].set(val)
+        return cache
+
+      stacked_kv_cache = jax.tree_util.tree_map(update_cache, stacked_kv_cache, kv_cache)
+      return (layer_output, stacked_kv_cache, layer_idx + 1), None
+    elif cfg.scan_layers:
       return layer_output, None
     else:
       return layer_output, kv_cache
@@ -462,7 +477,6 @@ class Gemma4ScannableBlock(nnx.Module):
           deterministic,
           model_mode,
           previous_chunk=previous_chunk,
-          page_state=page_state,
           slot=slot,
           bidirectional_mask=bidirectional_mask,
       )

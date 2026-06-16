@@ -257,10 +257,12 @@ def preprocess_train_dataset(
     pad_id = sp_tokenizer.unk_id
   else:
     pad_id = -1
+
   train_ds = train_ds.map(
       lambda x: TokenizeOp(tokenizer_model=sp_tokenizer, features=x, data_keys=("targets",)),
       num_parallel_calls=AUTOTUNE,
   )
+
   train_ds = reduce_concat_tokens(train_ds, feature_key="targets", batch_size=4096)
   train_ds = split_tokens_to_targets_length(train_ds, max_target_length)
   train_ds = train_ds.shuffle(shuffle_buffer_size, seed=data_shuffle_seed)
@@ -329,8 +331,8 @@ def make_c4_mlperf_train_iterator(
       enable_data_shuffling=config.enable_data_shuffling,
       data_shuffle_seed=config.data_shuffle_seed,
   )
-  train_ds = rekey(train_ds, {"inputs": None, "targets": "text"})
 
+  train_ds = rekey(train_ds, {"inputs": None, "targets": "text"})
   sp_tokenizer = get_tokenizer(
       config.tokenizer_path, config.tokenizer_type, config.add_bos, config.add_eos, config.hf_access_token
   )
@@ -352,17 +354,21 @@ def make_c4_mlperf_eval_iterator(
     process_indices,
 ):
   """Make eval iterator of customized C4 dataset for mlperf gpt3 training."""
-  eval_slit = "None"
+  eval_split = "None"
   if config.eval_dataset_name == "c4/en:3.0.5":
     is_tokenized_dataset = True
   elif config.eval_dataset_name == "c4/en:3.0.4":
     is_tokenized_dataset = False
-    eval_slit = "validation_24567exp"
+    eval_split = "validation_24567exp"
   elif config.eval_dataset_name in ["c4/en:3.0.1", "c4/en:3.0.8", "c4/en:3.0.9"]:
     is_tokenized_dataset = False
-    eval_slit = "validation"
+    eval_split = "validation"
   else:
-    raise ValueError(f"{config.eval_dataset_name=} should be one of ('c4/en:3.0.1', 'c4/en:3.0.4', 'c4/en:3.0.5')")
+    raise ValueError(
+        f"{config.eval_dataset_name=} should be one of "
+        "('c4/en:3.0.1', 'c4/en:3.0.4', 'c4/en:3.0.5', "
+        "'c4/en:3.0.8', 'c4/en:3.0.9')"
+    )
 
   if is_tokenized_dataset:
     eval_ds = get_dataset(
@@ -378,7 +384,7 @@ def make_c4_mlperf_eval_iterator(
   else:
     eval_ds = get_dataset(
         dataset_name=config.eval_dataset_name,
-        split=eval_slit,
+        split=eval_split,
         dataloading_host_index=process_indices.index(jax.process_index()),
         dataloading_host_count=len(process_indices),
         enable_data_shuffling=False,

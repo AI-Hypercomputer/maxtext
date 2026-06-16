@@ -28,17 +28,15 @@ if __name__ == "__main__":
   parser.add_argument(
       "--dir_path", type=str, required=True, help='The file path to the context directory (e.g., "context/gemma3").'
   )
-  parser.add_argument("--api_key", type=str, help="Optional API key for external services.")
   args = parser.parse_args()
 
   TARGET_MODEL = args.target_model
   dir_path = args.dir_path
-  api_key = args.api_key
 
-  analysisAgent = AnalysisAgent(api_key=api_key, dir_path=dir_path, target_model=TARGET_MODEL)
+  analysisAgent = AnalysisAgent(dir_path=dir_path, target_model=TARGET_MODEL)
   analysisAgent.analyze_model_structures()
 
-  dslAgent = DSLAgent(api_key=api_key, dir_path=dir_path, target_model=TARGET_MODEL)
+  dslAgent = DSLAgent(dir_path=dir_path, target_model=TARGET_MODEL)
   dslAgent.verify_dsl()
 
   # Human interaction needed,

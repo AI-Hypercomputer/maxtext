@@ -1095,7 +1095,7 @@ def sc_gather_reduce(
             dynamic_sizes=[],
         )
 
-        tpu.enqueue_dma(source_slice, idx_tile_0, sflag_0)
+        tpu.enqueue_dma(source_slice, idx_tile_0, target_semaphore=sflag_0)
         tpu.wait_dma2(semaphore=sflag_0, src=source_slice, dst=idx_tile_0)
 
         if topk_weights is not None:
@@ -1222,7 +1222,7 @@ def sc_gather_reduce(
               dynamic_sizes=[],
           )
 
-          tpu.enqueue_dma(source_slice, idx_tile_1, sflag_1)
+          tpu.enqueue_dma(source_slice, idx_tile_1, target_semaphore=sflag_1)
           tpu.wait_dma2(semaphore=sflag_1, src=source_slice, dst=idx_tile_1)
 
           if topk_weights is not None:
@@ -1292,7 +1292,7 @@ def sc_gather_reduce(
               base_idx=[base_idx_val],
               dynamic_sizes=[],
           )
-          tpu.enqueue_dma(source_slice, idx_tile_0, sflag_0)
+          tpu.enqueue_dma(source_slice, idx_tile_0, target_semaphore=sflag_0)
           tpu.wait_dma2(semaphore=sflag_0, src=source_slice, dst=idx_tile_0)
 
           offset_tile_0, idx_parity_0 = fill_load_offset_tile(offset_tile_0, idx_tile_0, col_chunk_ij)
@@ -1404,7 +1404,7 @@ def sc_gather_reduce(
             base_idx=[base_idx_val],
             dynamic_sizes=[],
         )
-        tpu.enqueue_dma(source_slice, idx_tile_1, sflag_1)
+        tpu.enqueue_dma(source_slice, idx_tile_1, target_semaphore=sflag_1)
         tpu.wait_dma2(semaphore=sflag_1, src=source_slice, dst=idx_tile_1)
 
         if topk_weights is not None:
@@ -1560,13 +1560,6 @@ def sc_gather_reduce(
             ir.Attribute.parse("#tpu.dimension_semantics<parallel>"),
         ]
     )
-    args_attributes = [
-        ir.DictAttr.get({}),  # i
-        ir.DictAttr.get({}),  # j
-        ir.DictAttr.get({"sc.persistent": ir.UnitAttr.get()}),  # idx
-        ir.DictAttr.get({"sc.persistent": ir.UnitAttr.get()}),  # op
-        ir.DictAttr.get({"sc.persistent": ir.UnitAttr.get()}),  # out
-    ]
     window_params = [
         ir.DictAttr.get(
             {
@@ -1588,7 +1581,6 @@ def sc_gather_reduce(
     if topk_weights is not None:
       # Insert weights before output - we append here because it's the same
       # attribute as output.
-      args_attributes.append(ir.DictAttr.get({"sc.persistent": ir.UnitAttr.get()}))
       window_params.append(
           ir.DictAttr.get(
               {
@@ -1598,7 +1590,6 @@ def sc_gather_reduce(
       )
 
     f.attributes["window_params"] = ir.ArrayAttr.get(window_params)
-    f.arg_attrs = args_attributes
     f.attributes["tpu.core_type"] = ir.Attribute.parse("#tpu.core_type<sc_vector_subcore>")
     assert f.verify(), f
     m = ir.Module.create()
@@ -1626,6 +1617,7 @@ def sc_gather_reduce(
     return mosaic.as_tpu_kernel(
         m,
         out_type=out_type,
+        tiling=mosaic.Tiling.COMPACT,
     )(
         *(
             [

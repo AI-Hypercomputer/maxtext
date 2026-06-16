@@ -14,7 +14,6 @@
 """ Timing utility functions """
 
 import datetime
-import os.path
 import tempfile
 
 import jax
@@ -25,8 +24,7 @@ def simple_timeit(f, *args, tries=10, task=None, enable_profile=False):
   assert task is not None
 
   trace_name = f"{task}"  # + '_' ]+ ''.join(random.choice(string.ascii_uppercase + string.digits) for _ in range(10))
-  temp_dir = tempfile.gettempdir()
-  trace_dir = os.path.join(temp_dir, trace_name)
+  trace_dir = tempfile.mkdtemp(prefix=trace_name + "_")
   print(trace_dir)
 
   outcomes_ms = []

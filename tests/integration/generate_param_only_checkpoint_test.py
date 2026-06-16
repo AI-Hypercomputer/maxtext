@@ -21,6 +21,7 @@ import os
 import pytest
 
 from maxtext.inference.decode import main as decode_main
+from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.trainers.pre_train.train import main as train_main
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from maxtext.utils.generate_param_only_checkpoint import main as generate_param_only_ckpt_main
@@ -31,12 +32,12 @@ from tests.utils.test_helpers import get_test_config_path, get_test_dataset_path
 def get_model_params(quantization):
   return [
       f"quantization={quantization}",
-      "base_emb_dim=384",
-      "base_num_query_heads=8",
-      "base_num_kv_heads=8",
-      "base_mlp_dim=192",
-      "base_num_decoder_layers=8",
-      "head_dim=128",
+      "base_emb_dim=128",
+      "base_num_query_heads=2",
+      "base_num_kv_heads=2",
+      "base_mlp_dim=128",
+      "base_num_decoder_layers=1",
+      "head_dim=64",
   ]
 
 
@@ -50,6 +51,7 @@ def run_e2e_test_flow(hardware, model_config, attention_type="autoselected", sta
       get_test_config_path(),
       f"base_output_directory={base_output_directory}",
       "async_checkpointing=False",
+      "enable_checkpointing=True",
       f"hardware={hardware}",
       f"attention={attention_type}",
       "max_target_length=128",
@@ -69,7 +71,7 @@ def run_e2e_test_flow(hardware, model_config, attention_type="autoselected", sta
             steps=1,
             metrics_file="run_metrics.txt",
             attention_type=attention_type,
-            dataset_type="tfds",
+            dataset_type="synthetic",
             dataset_path=dataset_path,
         )
     )
@@ -98,6 +100,7 @@ def run_e2e_test_flow(hardware, model_config, attention_type="autoselected", sta
   decode_main(decode_config)
 
 
+@pytest.mark.skipif(is_decoupled(), reason="Bypassed in offline decoupled runs (no GCS/internet)")
 @pytest.mark.integration_test
 @pytest.mark.tpu_only
 @pytest.mark.parametrize("quantization", [(""), ("int8")])

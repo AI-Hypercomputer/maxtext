@@ -94,7 +94,7 @@ def reformat_prompt_gemma4(prompt, image_placeholder, num_images):
   image_placeholder_count = prompt.count(GEMMA4_IMAGE_PLACEHOLDER_IN_PROMPT)
   if image_placeholder_count < num_images:
     prompt = GEMMA4_IMAGE_PLACEHOLDER_IN_PROMPT * (num_images - image_placeholder_count) + prompt
-  formatted_prompt = f"<start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n"
+  formatted_prompt = f"<bos><|turn>user\n{prompt}<turn|>\n<|turn>model\n"
   return formatted_prompt
 
 

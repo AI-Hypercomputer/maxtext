@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,6 +14,7 @@
 
 # pytype: skip-file
 """Pydantic-based configuration management for MaxText."""
+import ast
 import logging
 import os
 import sys
@@ -52,9 +53,10 @@ _CONFIG_FILE_MAPPING: dict[str, str] = {
     "maxtext.trainers.pre_train.train": "base.yml",
     "maxtext.trainers.pre_train.train_compile": "base.yml",
     "maxtext.trainers.post_train.distillation.train_distill": "post_train/distillation.yml",
+    "maxtext.trainers.post_train.dpo.train_dpo": "post_train/dpo.yml",
     "maxtext.trainers.post_train.rl.train_rl": "post_train/rl.yml",
     "maxtext.trainers.post_train.sft.train_sft": "post_train/sft.yml",
-    "maxtext.trainers.post_train.sft.train_sft_deprecated": "post_train/sft.yml",
+    "maxtext.trainers.post_train.sft.train_sft_native": "post_train/sft.yml",
     "maxtext.inference.decode": "base.yml",
     "maxtext.inference.decode_multi": "base.yml",
     "maxtext.inference.inference_microbenchmark": "base.yml",
@@ -77,27 +79,75 @@ def _module_from_path(path: str) -> str | None:
   return None
 
 
-def _resolve_or_infer_config(argv: list[str]) -> tuple[str, list[str]]:
+def _resolve_or_infer_config(argv: list[str] | None = None, **kwargs) -> tuple[str, list[str]]:
   """Resolves or infers config file path from module."""
+  if argv is None:
+    argv = [""]
+
+  if kwargs.get("base_config"):
+    logger.info("Using config : %s", kwargs["base_config"])
+    return resolve_config_path(kwargs["base_config"]), argv[1:]
+
+  # if passing at least two arguments via list (no kwargs), then we have to specify
+  # first one as either "" or python script like train_rl.py or train.py
+  # the second argument is the yaml file
   if len(argv) >= 2 and argv[1].endswith(".yml"):
     return resolve_config_path(argv[1]), argv[2:]
-  module = _module_from_path(argv[0])
+  module = _module_from_path(argv[0]) if len(argv) > 0 else None
   if module not in _CONFIG_FILE_MAPPING:
-    raise ValueError(f"No config file provided and no default config found for module '{module}'")
-  config_path = os.path.join(MAXTEXT_CONFIGS_DIR, _CONFIG_FILE_MAPPING[module])
-  logger.warning("No config file provided, using default config mapping: %s", config_path)
-  return config_path, argv[1:]
+    config_path = os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")
+    logger.warning("No config file provided and no default config found for module '%s', using base.yml", module)
+  else:
+    config_path = os.path.join(MAXTEXT_CONFIGS_DIR, _CONFIG_FILE_MAPPING[module])
+    logger.warning("No config file provided, using default config mapping: %s", config_path)
+  remaining_argv = argv[1:]
+
+  return config_path, remaining_argv
+
+
+def _resolve_or_infer_addl_config(**kwargs):
+  """Resolves or infers more configs from module."""
+  inferred_kwargs = {}
+  # if base_output_directory key is not seen
+  if not kwargs.get("base_output_directory"):
+    max_logging.warning("base_output_directory is not provided; Using local directory called maxtext_output")
+    base_output_directory = os.path.abspath("maxtext_output")
+    inferred_kwargs["base_output_directory"] = base_output_directory
+
+  # if hf_access_token key is not seen
+  if not kwargs.get("hf_access_token"):
+    hf_access_token = os.environ.get("HF_TOKEN")
+    if hf_access_token:
+      inferred_kwargs["hf_access_token"] = hf_access_token
+
+  return inferred_kwargs
 
 
 def yaml_key_to_env_key(s: str) -> str:
   return _MAX_PREFIX + s.upper()
 
 
-def validate_no_keys_overridden_twice(keys1: list[str], keys2: list[str]):
-  overridden_keys = [k for k in keys1 if k in keys2]
-  if overridden_keys:
+def validate_no_keys_overridden_twice(model_loaded_cfg: omegaconf.DictConfig, overrides_cfg: omegaconf.DictConfig):
+  """Validates that no keys are overridden by both model config and overrides with different values."""
+  overridden_keys = [k for k in model_loaded_cfg.keys() if k in overrides_cfg.keys()]
+  really_overridden_keys = []
+  for k in overridden_keys:
+    try:
+      model_val = omegaconf.OmegaConf.to_container(omegaconf.OmegaConf.create({k: model_loaded_cfg[k]}), resolve=True)[k]
+    except Exception:  # pylint: disable=broad-exception-caught
+      model_val = model_loaded_cfg[k]
+
+    try:
+      override_val = omegaconf.OmegaConf.to_container(omegaconf.OmegaConf.create({k: overrides_cfg[k]}), resolve=True)[k]
+    except Exception:  # pylint: disable=broad-exception-caught
+      override_val = overrides_cfg[k]
+
+    if model_val != override_val:
+      really_overridden_keys.append(k)
+
+  if really_overridden_keys:
     raise ValueError(
-        f"Keys {overridden_keys} are overridden by both model config and CLI/kwargs."
+        f"Keys {really_overridden_keys} are overridden by both model config and CLI/kwargs with different values."
         "This is not allowed, unless setting `override_model_config=True`."
     )
 
@@ -106,10 +156,6 @@ def resolve_config_path(param: str) -> str:
   """Resolve config path to auto rewrite to use new src folder."""
   if os.path.isfile(param):
     return param
-  elif "MaxText" in param:
-    lowercase_param = param.replace("MaxText", "maxtext")
-    if os.path.isfile(lowercase_param):
-      return lowercase_param
   # For pip-installed packages, strip the src prefix and resolve against
   # the installed configs directory (MAXTEXT_CONFIGS_DIR).
   if param.startswith("src/maxtext/configs/"):
@@ -169,6 +215,29 @@ def _lists_to_tuples(l: list | Any) -> tuple | Any:
   return tuple(_lists_to_tuples(x) for x in l) if isinstance(l, list) else l
 
 
+def _coerce_to_list(value: Any) -> list[str] | Any:
+  """Coerce string/tuple inputs for list[str] configuration fields into Python lists.
+
+  This prevents unhelpful Pydantic validation errors when users pass string values
+  from the CLI (e.g., train_data_columns=messages is coerced to ['messages'], and
+  stringified lists like "['col1', 'col2']" are safely parsed to a Python list).
+  """
+  if isinstance(value, str):
+    cleaned = value.strip()
+    if (cleaned.startswith("[") and cleaned.endswith("]")) or (cleaned.startswith("(") and cleaned.endswith(")")):
+      try:
+        parsed = ast.literal_eval(cleaned)
+        if isinstance(parsed, (list, tuple)):
+          return list(parsed)
+        return [str(parsed)]
+      except (ValueError, SyntaxError):
+        return [value]
+    return [value]
+  if isinstance(value, tuple):
+    return list(value)
+  return value
+
+
 def _prepare_for_pydantic(raw_keys: dict[str, Any]) -> dict[str, Any]:
   """Prepares the raw dictionary for Pydantic model instantiation."""
   pydantic_kwargs = {}
@@ -190,6 +259,10 @@ def _prepare_for_pydantic(raw_keys: dict[str, Any]) -> dict[str, Any]:
         new_value = _tuples_to_lists(new_value)
       if key == "data_sharding" and isinstance(new_value, list) and new_value and isinstance(new_value[0], str):
         new_value = [new_value]
+
+    # Coerce string/tuple inputs for list[str] configuration fields into Python lists.
+    if key in ("train_data_columns", "eval_data_columns", "trainable_parameters_mask", "adamw_mask"):
+      new_value = _coerce_to_list(new_value)
 
     # An empty value provided in the configuration is treated as None
     if (
@@ -223,16 +296,6 @@ def _prepare_for_pydantic(raw_keys: dict[str, Any]) -> dict[str, Any]:
           Using the default src/maxtext/assets/tokenizers/tokenizer.llama2 instead. \
           Please pass tokenizer_path in your command if this is not intended."
         )
-
-    # Preprocess muon_consistent_rms to be None or float
-    if key == "muon_consistent_rms":
-      if value in ["None", "none"]:
-        new_value = None
-      else:
-        try:
-          new_value = float(value)
-        except ValueError as e:
-          raise ValueError("muon_consistent_rms should be None or float") from e
 
     pydantic_kwargs[key] = new_value
 
@@ -277,7 +340,10 @@ class HyperParameters:
     # This is necessary for proper pickling/unpickling support
     flat_config = object.__getattribute__(self, "_flat_config")
     if attr in flat_config:
-      return flat_config[attr]
+      val = flat_config[attr]
+      if isinstance(val, dict) and attr in ("debug", "rl", "lora"):
+        return getattr(object.__getattribute__(self, "_pydantic_config"), attr)
+      return val
     raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{attr}'")
 
   def __setattr__(self, attr: str, value: Any) -> None:
@@ -289,28 +355,84 @@ class HyperParameters:
     return self._flat_config
 
 
-def initialize(argv: list[str], **kwargs) -> HyperParameters:
+def _handle_config_exception(e: Exception):
+  """Handles configuration exceptions, prints to stderr, writes log, and exits or raises."""
+  # Format a clear and concise error message
+  err_msg = f"MAXTEXT CONFIG ERROR: {str(e)}"
+
+  # Log in highly visible format
+  max_logging.error("=" * 80)
+  max_logging.error(err_msg)
+  max_logging.error("=" * 80)
+
+  # Try writing to /dev/termination-log for Kubernetes
+  try:
+    with open("/dev/termination-log", "w", encoding="utf-8") as f:
+      f.write(err_msg)
+  except Exception:  # pylint: disable=broad-exception-caught
+    pass
+
+  # Exit with code 2 if not running in a test framework
+  if "pytest" not in sys.modules and "unittest" not in sys.modules:
+    sys.exit(2)
+  else:
+    raise e
+
+
+def initialize(argv: list[str] | None = None, **kwargs) -> HyperParameters:
   """Initializes the configuration by loading YAML files, and applying CLI, env, and kwarg overrides."""
-  pydantic_config = initialize_pydantic(argv, **kwargs)
-  config = HyperParameters(pydantic_config)
-  return config
+  try:
+    pydantic_config = _initialize_pydantic(argv, **kwargs)
+    config = HyperParameters(pydantic_config)
+    return config
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    if isinstance(e, (SystemExit, KeyboardInterrupt)):
+      raise e
+    _handle_config_exception(e)
+    raise e
 
 
-def initialize_pydantic(argv: list[str], **kwargs) -> MaxTextConfig:
+def initialize_pydantic(argv: list[str] | None = None, **kwargs) -> MaxTextConfig:
+  """Initializes the configuration by loading YAML files, and applying CLI, env, and overrides.
+
+  Returns the pydantic MaxTextConfig class.
+  """
+  try:
+    return _initialize_pydantic(argv, **kwargs)
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    if isinstance(e, (SystemExit, KeyboardInterrupt)):
+      raise e
+    _handle_config_exception(e)
+    raise e
+
+
+def _initialize_pydantic(argv: list[str] | None = None, **kwargs) -> MaxTextConfig:
   """Initializes the configuration by loading YAML files, and applying CLI, env, and kwarg overrides.
   Returns pydantic MaxTextConfig class whereas `initialize` returns the og `HyperParameters`
   """
   # 1. Load base and inherited configs from file(s)
-  config_path, cli_args = _resolve_or_infer_config(argv)
+  config_path, cli_args = _resolve_or_infer_config(argv, **kwargs)
   base_yml_config = _load_config(config_path)
 
   # 2. Get overrides from CLI and kwargs
   cli_cfg = omegaconf.OmegaConf.from_cli(cli_args)
+  if "hf_access_token" in cli_cfg:
+    logger.warning(
+        "WARNING: Passing 'hf_access_token' via command-line arguments is deprecated and insecure because it makes "
+        "your token visible in 'ps' and shell history. Please set the 'HF_TOKEN' environment variable instead."
+    )
   kwargs_cfg = omegaconf.OmegaConf.create(kwargs)
   overrides_cfg = omegaconf.OmegaConf.merge(cli_cfg, kwargs_cfg)
 
-  # 3. Handle model-specific config
+  temp_cfg1 = omegaconf.OmegaConf.merge(base_yml_config, overrides_cfg)
+  # 3.1. infer more configs if possible
+  temp_cfg1 = _resolve_or_infer_addl_config(**temp_cfg1)
+  # update overrides_cfg with temp_cfg1
+  overrides_cfg = omegaconf.OmegaConf.merge(overrides_cfg, temp_cfg1)
   temp_cfg = omegaconf.OmegaConf.merge(base_yml_config, overrides_cfg)
+
+  # 3.2. Handle model-specific config
+
   model_name = temp_cfg.get("model_name", "default")
   # The architecture for -Instruct v/s base models are the same, so for identifying the
   # architecture we replace "-Instruct" from the model_name and get the base model name
@@ -340,7 +462,7 @@ def initialize_pydantic(argv: list[str], **kwargs) -> MaxTextConfig:
       else:
         model_cfg = model_loaded_cfg
         # Validate that no keys are overridden by both model config and CLI/kwargs
-        validate_no_keys_overridden_twice(model_loaded_cfg.keys(), overrides_cfg.keys())
+        validate_no_keys_overridden_twice(model_loaded_cfg, overrides_cfg)
     else:
       logger.warning("Model config for '%s' not found at %s", model_name, model_config_path)
 
@@ -419,9 +541,14 @@ def initialize_pydantic(argv: list[str], **kwargs) -> MaxTextConfig:
   if "pytest" not in sys.modules:
     max_utils.maybe_initialize_jax_distributed_system(pydantic_kwargs)
   if pydantic_kwargs.get("jax_cache_dir"):
-    from jax.experimental.compilation_cache import compilation_cache  # pylint: disable=import-outside-toplevel
+    if pydantic_kwargs.get("dump_hlo"):
+      max_logging.warning(
+          "JAX compilation cache is disabled because dump_hlo is True. HLO dumping requires recompilation."
+      )
+    else:
+      from jax.experimental.compilation_cache import compilation_cache  # pylint: disable=import-outside-toplevel
 
-    compilation_cache.set_cache_dir(os.path.expanduser(pydantic_kwargs["jax_cache_dir"]))
+      compilation_cache.set_cache_dir(os.path.expanduser(pydantic_kwargs["jax_cache_dir"]))
 
   pydantic_config = types.MaxTextConfig(**pydantic_kwargs)
   config = HyperParameters(pydantic_config)
@@ -437,3 +564,13 @@ def initialize_pydantic(argv: list[str], **kwargs) -> MaxTextConfig:
 # Shim for backward compatibility with pyconfig_deprecated_test.py
 validate_and_update_keys = pyconfig_deprecated.validate_and_update_keys
 __all__ = ["initialize", "initialize_pydantic"]
+
+
+class _CallablePyconfigModule(sys.modules[__name__].__class__):
+  """Allows calling the module directly as mt.pyconfig()."""
+
+  def __call__(self, argv: list[str] | None = None, **kwargs) -> HyperParameters:
+    return initialize(argv, **kwargs)
+
+
+sys.modules[__name__].__class__ = _CallablePyconfigModule

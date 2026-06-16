@@ -70,22 +70,27 @@ on:
         description: 'If false, maxtext_sha must be provided for checkout'
         type: boolean
         default: false
-
+      is_update_hlo:
+        required: false
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
   run:
     runs-on: ${{ inputs.cloud_runner != '' && inputs.cloud_runner || fromJson(format('["self-hosted", "{0}", "{1}"]', inputs.device_type, inputs.device_name)) }}
     container:
-      image: gcr.io/tpu-prod-env-multipod/${{ inputs.base_image }}
+      image: gcr.io/${{ vars.PROJECT_NAME || 'tpu-prod-env-multipod' }}/${{ inputs.base_image }}
       env:
         XLA_PYTHON_CLIENT_MEM_FRACTION: ${{ inputs.xla_python_client_mem_fraction }}
         TF_FORCE_GPU_ALLOW_GROWTH: ${{ inputs.tf_force_gpu_allow_growth }}
         TPU_SKIP_MDS_QUERY: ${{ inputs.device_type == 'cpu' && '1' || '' }}
+        VLLM_TARGET_DEVICE: "tpu"
+        UV_TORCH_BACKEND: "cpu"
         MAXTEXT_PACKAGE_EXTRA: >-
-          ${{ 
-            !contains(inputs.pytest_marker, 'not post_training') && 'tpu-post-train' 
-            || (inputs.device_type == 'cpu' && 'tpu' || inputs.device_type) 
+          ${{
+            !contains(inputs.pytest_marker, 'not post_training') && 'tpu-post-train'
+            || (inputs.device_type == 'cpu' && 'tpu' || inputs.device_type)
           }}
         ALLOW_MULTIPLE_LIBTPU_LOAD: ${{ inputs.device_type == 'cpu' && 'true' || '' }} # bypass /tmp/libtpu_lockfile check for cpu tests, which don't actually use accelerators (to allow concurrency)
       options: ${{ inputs.container_resource_option }}
@@ -135,8 +140,9 @@ jobs:
             PYTHON_EXE=".venv/bin/python3"
             # Ensure pytest-cov is available and enable coverage flags
             uv pip install pytest-cov
-            PYTEST_COV_ARGS="--cov=MaxText --cov=maxtext --cov-report=xml --cov-report=term"
+            PYTEST_COV_ARGS="--cov=maxtext --cov-report=xml --cov-report=term"
           fi
+          export PYTHONPATH="${PWD}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
           if [ "${INPUTS_IS_SCHEDULED_RUN}" == "true" ]; then
             FINAL_PYTEST_MARKER="${INPUTS_PYTEST_MARKER}"
@@ -152,6 +158,22 @@ jobs:
           # omit this libtpu init args for gpu tests
           if [ "${INPUTS_DEVICE_TYPE}" != "cuda12" ]; then
             export LIBTPU_INIT_ARGS='--xla_tpu_scoped_vmem_limit_kib=65536'
+          else
+            # For cuda12, explicitly point to the pip-installed CUDA libraries
+            # to avoid conflicts with system-level installations on the runner.
+            # Dynamically discover the 'nvidia' folder and prepend all its sub-library
+            # directories (including nccl, cublas, cudnn) to LD_LIBRARY_PATH to prevent
+            # JAX from partially loading incompatible system-level CUDA libraries.
+            if [ -d ".venv/lib" ]; then
+              NVIDIA_DIR=$(find .venv/lib/ -maxdepth 3 -name "nvidia" -type d 2>/dev/null | head -n 1)
+              if [ -n "${NVIDIA_DIR}" ]; then
+                for dir in "${NVIDIA_DIR}"/*; do
+                  if [ -d "$dir/lib" ]; then
+                    export LD_LIBRARY_PATH=$(pwd)/$dir/lib:${LD_LIBRARY_PATH}
+                  fi
+                done
+              fi
+            fi
           fi
           if [ "${INPUTS_TOTAL_WORKERS}" -gt 1 ]; then
             $PYTHON_EXE -m pip install --quiet pytest-split pytest-xdist
@@ -159,16 +181,21 @@ jobs:
           else
             SPLIT_ARGS=""
           fi
-          $PYTHON_EXE -m pytest ${INPUTS_PYTEST_ADDOPTS} \
-            -v \
-            -m "${FINAL_PYTEST_MARKER}" \
-            --durations=0 \
-            $PYTEST_COV_ARGS \
-            $SPLIT_ARGS \
-            ${INPUTS_PYTEST_EXTRA_ARGS}
+
+          # Setup substitution: If manually updating HLO, skip tests execution and run only the update script instead!
+          if [ "${INPUTS_IS_UPDATE_HLO}" == "true" ]; then
+            python3 tests/utils/update_hlo_references.py
+          else
+            $PYTHON_EXE -m pytest ${INPUTS_PYTEST_ADDOPTS} \
+              -v \
+              -m "${FINAL_PYTEST_MARKER}" \
+              --durations=0 \
+              $PYTEST_COV_ARGS \
+              $SPLIT_ARGS \
+              ${INPUTS_PYTEST_EXTRA_ARGS}
+          fi
 
         env:
-          PYTHONPATH: "${{ github.workspace }}/src"
           INPUTS_IS_SCHEDULED_RUN: ${{ inputs.is_scheduled_run }}
           INPUTS_PYTEST_MARKER: ${{ inputs.pytest_marker }}
           INPUTS_DEVICE_TYPE: ${{ inputs.device_type }}
@@ -177,13 +204,21 @@ jobs:
           INPUTS_WORKER_GROUP: ${{ inputs.worker_group }}
           INPUTS_PYTEST_EXTRA_ARGS: ${{ inputs.pytest_extra_args }}
           INPUTS_MAXTEXT_INSTALLED: ${{ inputs.maxtext_installed }}
+          INPUTS_IS_UPDATE_HLO: ${{ inputs.is_update_hlo }}
+      - name: Upload Reference HLO
+        if: ${{ inputs.is_update_hlo }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: reference-hlo
+          path: tests/utils/reference_hlo_*.txt
+          if-no-files-found: ignore
       - name: Upload results to Codecov
         if: ${{ !inputs.maxtext_installed }} # Skip code coverage upload for maxtext image testing
         uses: codecov/codecov-action@v5
         continue-on-error: true
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          file: ./coverage.xml
+          files: ./coverage.xml
           # If scheduled, upload to scheduled flag only. If PR, upload to regular flag only.
           flags: ${{ inputs.is_scheduled_run == 'true' && 'scheduled' || 'regular' }}
           verbose: true

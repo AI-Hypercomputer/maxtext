@@ -1,0 +1,78 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This rule uses data, stage, FSDP, context, and expert. Context axis acts as expert
+# parallelism in core MoE part (between EP all2all).
+mesh_axes: ['data', 'stage', 'fsdp', 'context', 'expert']
+data_sharding: [['data', 'stage', 'fsdp', 'context', 'expert']]
+context_sharding: 'context'
+logical_axis_rules: [
+                      # ==========================================
+                      # Vocabulary Embedding
+                      # ==========================================
+                      # Vocab Activations
+                      ['activation_embed_and_logits_batch', ['data', 'stage', 'fsdp', 'expert']],
+                      ['activation_embed_and_logits_batch_sequence', ['data', 'stage', 'fsdp', 'expert']],
+                      # Vocab Weights
+                      ['vocab', []],
+                      ['embed_vocab', ['fsdp', 'context', 'expert']],
+                      # ==========================================
+                      # Attention
+                      # ==========================================
+                      # Attention Activations
+                      ['activation_batch_attn', ['data', 'fsdp', 'expert']],
+                      ['activation_heads', []],
+                      ['activation_kv_heads', []],
+                      ['activation_length_attn', ['context']],
+                      ['activation_q_length', ['context']],
+                      ['activation_kv_length', []],
+                      ['activation_embed_attn', []],
+                      ['activation_kv', []],
+                      ['activation_kv_batch', ['data', 'fsdp', 'expert']],
+                      ['activation_kv_head_dim', []],
+                      # Attention Weights
+                      ['heads', []],
+                      ['q_heads', []],
+                      ['kv_heads', []],
+                      ['qkv', []],
+                      ['kv', []],
+                      ['kv_head_dim', []],
+                      ['q_lora', ['fsdp', 'context', 'expert']],
+                      ["q_lora_up_proj", []],
+                      ['kv_lora', ['fsdp', 'context', 'expert']],
+                      ["kv_lora_up_proj", []],
+                      # ==========================================
+                      # Mixture of Experts (MoE)
+                      # ==========================================
+                      # MoE Activations
+                      ['activation_batch_moe', ['data', 'fsdp']],
+                      ['activation_exp', ['context', 'expert']],
+                      # MoE Weights
+                      ['exp', ['context', 'expert']],
+                      ['embed_moe', ['fsdp']],
+                      # ==========================================
+                      # Standard MLP / Dense Layers / Model Structure
+                      # ==========================================
+                      # Dense Activations
+                      ['activation_mlp', []],
+                      ['activation_batch', ['data', 'fsdp', 'expert']],
+                      ['activation_length', ['context']],
+                      ['activation_norm_length', ['context']],
+                      ['activation_embed', []],
+                      ['activation_stage', 'stage'],
+                      # General Weights
+                      ['mlp', []],
+                      ['layers', 'stage'],
+                      ['embed', ['fsdp', 'context', 'expert']],
+                  ]

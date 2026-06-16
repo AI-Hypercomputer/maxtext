@@ -35,22 +35,27 @@ Architecture Overview:
 
 import inspect
 import logging
+import shlex
 from typing import Sequence, Callable, Any
 from absl import app
+from etils import epath
 from flax import nnx
 from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
-import numpy as np
 import optax
+import re
+import os
+import pathwaysutils
 from orbax import checkpoint
 
 # MaxText Imports
 from maxtext.configs import pyconfig
 from maxtext.input_pipeline import tokenizer
 from maxtext.input_pipeline import input_pipeline_interface
+from maxtext.layers.learn_to_init_layer import apply_lti_model_update
 from maxtext.optimizers import optimizers
-from maxtext.trainers.post_train.distillation import distillation_utils
+from maxtext.trainers.post_train.distillation import distillation_utils, lti_utils
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
@@ -150,8 +155,15 @@ def create_forward_fn(config: pyconfig.HyperParameters) -> Callable[..., distill
     if config.distill_beta > 0.0:
       out_projection_activations = maxtext_utils.get_intermediate_value(model, "out_projection_activations", clear=True)
 
+    moe_lb_loss = None
+    if config.num_experts > 1 and config.load_balance_loss_weight > 0.0:
+      intermediate_outputs = nnx.pop(model, nnx.Intermediate)
+      total_moe_lb_losses = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "moe_lb_loss")
+      if total_moe_lb_losses:
+        moe_lb_loss = jnp.mean(jnp.concatenate(total_moe_lb_losses))
+
     retval = distillation_utils.DistillationForwardOutput(
-        logits=logits, out_projection_activations=out_projection_activations
+        logits=logits, out_projection_activations=out_projection_activations, moe_lb_loss=moe_lb_loss
     )
     return retval
 
@@ -179,9 +191,10 @@ def _log_config_details(config: pyconfig.HyperParameters, label: str) -> None:
 class ModelBundle(nnx.Module):
   """Wrapper for teacher and student modules."""
 
-  def __init__(self, teacher_model: nnx.Module, student_model: nnx.Module):
+  def __init__(self, teacher_model: nnx.Module | None, student_model: nnx.Module):
     self.teacher_model = teacher_model
     self.student_model = student_model
+    self.training_step = nnx.Variable(jnp.zeros((), dtype=jnp.int32))
 
   def __call__(self, *args, **kwargs):
     raise NotImplementedError("Use `call_student` or `call_teacher` explicitly.")
@@ -206,6 +219,9 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
       strategy: distillation_utils.DistillationStrategy,
       optimizer,
       training_config,
+      student_config: pyconfig.HyperParameters,
+      teacher_config: pyconfig.HyperParameters | None,
+      is_offline: bool = False,
       student_freeze_param_filter: Callable[[Any], bool] | None = None,
       **kwargs,
   ):
@@ -216,6 +232,18 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
     super().__init__(model=model, optimizer=dummy_optimizer, training_config=training_config, **kwargs)
 
     self.strategy = strategy
+    self.checkpoint_manager: distillation_utils.MaxTextCheckpointManager = None
+
+    # Per-step per-device TFLOPs (constants for the run): student fwd+bwd + teacher fwd-only.
+    (
+        self._tflops_combined,
+        self._tflops_student,
+        self._tflops_teacher,
+    ) = distillation_utils.calculate_distillation_tflops_per_device(student_config, teacher_config, is_offline=is_offline)
+    max_logging.log(
+        f"Per-step per-device TFLOPs — combined: {self._tflops_combined:.2f}, "
+        f"student (fwd+bwd): {self._tflops_student:.2f}, teacher (fwd-only): {self._tflops_teacher:.2f}"
+    )
 
     # override optimizer to only use student_model.
     if training_config.gradient_accumulation_steps is not None and training_config.gradient_accumulation_steps > 1:
@@ -246,49 +274,30 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
       # Fallback if source code is unavailable
       pass
 
-  def _shard_optimizer(self, mesh: jax.sharding.Mesh) -> None:
-    """Overrides base _shard_optimizer to safely shard restored scalars.
-
-    This is necessary because the optimizer state restored from checkpoints may contain unsharded
-    scalars (e.g., Adam moments).
-    """
-    if mesh.empty:
-      return
-    optimizer_state = nnx.state(self.optimizer, nnx.optimizer.OptState)
-    optimizer_pspecs = nnx.get_partition_spec(optimizer_state)
-
-    def _safe_shard(x, pspec):
-      if isinstance(pspec, jax.sharding.PartitionSpec):
-        return jax.device_put(x, jax.sharding.NamedSharding(mesh, pspec))
-      return x
-
-    optimizer_sharded_state = jax.tree.map(_safe_shard, optimizer_state, optimizer_pspecs)
-    nnx.update(self.optimizer, optimizer_sharded_state)
+  # Inherits _shard_optimizer from PeftTrainer.
 
   def _train_step(self, model, optimizer, inputs):
-    """Overrides the main JIT block to natively handle ModelBundle module."""
+    """Overrides the main JIT block to natively handle ModelBundle module.
 
+    Uses jax.value_and_grad with explicit split/merge to avoid nesting
+    nnx.value_and_grad inside nnx.jit, which causes Flax NNX to assign
+    conflicting outer_index values and raises:
+      ValueError: The graph structure of a node added to cached_partial was
+      mutated inside the transformation.
+    """
     batch = self.gen_model_input_fn(inputs)
+    student = model.student_model
+    teacher = model.teacher_model
+    current_step = model.training_step[...]
 
-    def loss_wrapper(student, teacher, batch):
-      if "teacher_output" in batch:
-        teacher_output = batch["teacher_output"]
-      else:
-        teacher_output = self.strategy.teacher_forward_fn(
-            model=teacher,
-            input_tokens=batch["input_tokens"],
-            positions=batch["positions"],
-            attention_mask=batch.get("attention_mask"),
-            decoder_segment_ids=batch.get("decoder_segment_ids"),
-            decoder_target_tokens=batch.get("targets", None),
-            decoder_target_mask=batch.get("targets_segmentation", None),
-            cache=None,
-        )
-
-      teacher_output = jax.tree.map(jax.lax.stop_gradient, teacher_output)
-
-      student_output = self.strategy.student_forward_fn(
-          model=student,
+    # Run teacher inference outside of value_and_grad.
+    # The teacher is frozen (stop_gradient), so its output is a constant
+    # from the perspective of the student gradient computation.
+    if "teacher_output" in batch:
+      teacher_output = batch["teacher_output"]
+    else:
+      teacher_output = self.strategy.teacher_forward_fn(
+          model=teacher,
           input_tokens=batch["input_tokens"],
           positions=batch["positions"],
           attention_mask=batch.get("attention_mask"),
@@ -297,27 +306,44 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
           decoder_target_mask=batch.get("targets_segmentation", None),
           cache=None,
       )
-      # we should apply a mask for labels to disable segment-separator tokens
+    teacher_output = jax.tree.map(jax.lax.stop_gradient, teacher_output)
+
+    # Split student into differentiable params and non-differentiable rest.
+    # Capture graphdef outside of jax.value_and_grad for stable graph tracking.
+    student_graphdef, diff_params, rest = nnx.split(student, self.wrt_filter, ...)
+
+    def loss_wrapper_pure(diff_params, rest):
+      local_student = nnx.merge(student_graphdef, diff_params, rest, copy=True)
+      student_output = self.strategy.student_forward_fn(
+          model=local_student,
+          input_tokens=batch["input_tokens"],
+          positions=batch["positions"],
+          attention_mask=batch.get("attention_mask"),
+          decoder_segment_ids=batch.get("decoder_segment_ids"),
+          decoder_target_tokens=batch.get("targets", None),
+          decoder_target_mask=batch.get("targets_segmentation", None),
+          cache=None,
+      )
       labels = self.strategy.create_labels(batch["targets"], targets_segmentation=batch.get("targets_segmentation", None))
-      return self.strategy.compute_loss(student_output, teacher_output, labels)
+      loss, aux = self.strategy.compute_loss(student_output, teacher_output, labels, step=current_step)
+      # Capture updated non-param state (e.g. RNG counters) from local_student.
+      _, _, new_rest = nnx.split(local_student, self.wrt_filter, ...)
+      return loss, (aux, new_rest)
 
-    # Because student is the 0th argument, argnums=0 guarantees
-    # we only compute gradients for the student.
-    grad_fn = nnx.value_and_grad(
-        loss_wrapper,
-        argnums=nnx.DiffState(0, self.wrt_filter),
-        has_aux=True,
-    )
+    grad_fn = jax.value_and_grad(loss_wrapper_pure, argnums=0, has_aux=True)
+    (loss, (aux, new_rest)), grads = grad_fn(diff_params, rest)
 
-    out, grads = grad_fn(model.student_model, model.teacher_model, batch)
+    # Propagate updated non-param state back to student.
+    nnx.update(student, new_rest)
+
+    optimizer.update(student, grads)
+
+    model.training_step.set_value(current_step + 1)
 
     tunix_expects_grad_norm = getattr(self, "_tunix_expects_grad_norm", True)
-
-    optimizer.update(model.student_model, grads)
-
     if tunix_expects_grad_norm:
-      return out[0], out[1], optax.global_norm(grads)
-    return out[0], out[1]
+      return loss, aux, optax.global_norm(grads)
+    return loss, aux
 
   def _eval_step(self, model, inputs):
     """Evaluation only needs the student."""
@@ -333,6 +359,42 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
     )
     labels = self.strategy.create_labels(inputs["targets"], targets_segmentation=inputs.get("targets_segmentation", None))
     return self.strategy.compute_eval_loss(student_output, labels)
+
+  def _log_metrics(self, loss, step=None, additional_metrics=None, **kwargs):
+    """Adds per-device TFLOPs to the standard Tunix metrics.
+
+    `step_time_delta` is consumed via **kwargs so this override works against
+    older tunix versions whose base `_log_metrics` does not accept it.
+    """
+    super()._log_metrics(loss=loss, step=step, additional_metrics=additional_metrics, **kwargs)
+    step_time_delta = kwargs.get("step_time_delta")
+
+    tflops_metrics = {
+        "perf/per_device_tflops": self._tflops_combined,
+        "perf/per_device_tflops_student": self._tflops_student,
+        "perf/per_device_tflops_teacher": self._tflops_teacher,
+    }
+    tflops_per_sec = None
+    if step_time_delta is not None and step_time_delta > 0:
+      tflops_per_sec = self._tflops_combined / step_time_delta
+      tflops_metrics.update(
+          {
+              "perf/per_device_tflops_per_sec": tflops_per_sec,
+              "perf/per_device_tflops_per_sec_student": self._tflops_student / step_time_delta,
+              "perf/per_device_tflops_per_sec_teacher": self._tflops_teacher / step_time_delta,
+          }
+      )
+    for name, value in tflops_metrics.items():
+      self.metrics_logger.log(self.metrics_prefix, name, value, self._mode, step)
+
+    # Console summary — keep it tight; everything else is in TensorBoard.
+    if tflops_per_sec is not None and self._mode == metrics_logger.Mode.TRAIN:
+      max_logging.log(
+          f"step {step} | step_time={step_time_delta:.2f}s | "
+          f"TFLOPs/s/device: {tflops_per_sec:.2f} "
+          f"(student={self._tflops_student / step_time_delta:.2f}, "
+          f"teacher={self._tflops_teacher / step_time_delta:.2f})"
+      )
 
   def _prepare_inputs(
       self, input_data: distillation_utils.MaxTextTrainingInput
@@ -363,20 +425,55 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
         top_k_indices=input_data.top_k_indices,
     )
 
-  def _post_process_train_step(self, aux: dict[str, jax.Array]) -> None:
-    """Extracts auxiliary metrics from the strategy and buffers them for logging."""
+  def _post_process_train_step(self, aux: dict[str, tuple[jax.Array, jax.Array]]) -> None:
+    """Buffers (sum, count) metrics from the strategy for token-weighted logging.
+
+    `compute_loss` returns each metric as a (sum, count) pair. We store the pair
+    in the metrics buffer and use `weighted_mean` as the aggregator so the final
+    logged value is `sum(sums) / sum(counts)` — unbiased across hosts and across
+    logging windows even when valid-token counts vary per step.
+    """
     if self._buffered_train_metrics is None:
       return
 
-    # 'aux' contains the dictionary we returned from compute_loss:
-    # {"distill/soft_loss": ..., "distill/hard_loss": ...}
     for name, value in aux.items():
-      # We accumulate these values. PeftTrainer handles the averaging.
-      # The structure expected is: dict[metric_name, (list_of_values, aggregation_fn)]
       if name not in self._buffered_train_metrics.additional_metrics:
-        self._buffered_train_metrics.additional_metrics[name] = ([], np.mean)
+        self._buffered_train_metrics.additional_metrics[name] = ([], distillation_utils.weighted_mean)
 
       self._buffered_train_metrics.additional_metrics[name][0].append(value)
+
+    # Compact per-step summary: only the metrics that change run-to-run, and
+    # only those that are nonzero (so MoE / feature-distill terms hide when off).
+    # `aux` values are (sum, count) tuples; reduce to scalar via sum/count.
+    def _scalar(v):
+      s, c = v
+      c = float(c)
+      return float(s) / c if c > 0 else 0.0
+
+    headline_keys = (
+        distillation_utils.METRIC_TOTAL_LOSS,
+        distillation_utils.METRIC_HARD_LOSS,
+        distillation_utils.METRIC_SOFT_LOSS,
+        distillation_utils.METRIC_KL_DIV_T1,
+        distillation_utils.METRIC_STUDENT_PERPLEXITY,
+        distillation_utils.METRIC_TEACHER_PERPLEXITY,
+    )
+    optional_keys = (
+        distillation_utils.METRIC_OUT_PROJ_FEATURE_LOSS,
+        distillation_utils.METRIC_MOE_LB_LOSS,
+        distillation_utils.METRIC_TEACHER_MOE_LB_LOSS,
+    )
+    parts = []
+    for k in headline_keys:
+      if k in aux:
+        parts.append(f"{k.split('/', 1)[1]}={_scalar(aux[k]):.4g}")
+    for k in optional_keys:
+      if k in aux:
+        v = _scalar(aux[k])
+        if v != 0:
+          parts.append(f"{k.split('/', 1)[1]}={v:.4g}")
+    if parts:
+      max_logging.log("Distillation metrics | " + " ".join(parts))
 
   def setup_checkpoint_manager_and_restore(self, raw_train_iter, config):
     """Configures the trainer's CheckpointManager and restores states.
@@ -412,15 +509,15 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
         )
 
     # 1. Ensure clean resource release of the base class's manager
-    # pylint: disable=access-member-before-definition
-    if self.checkpoint_manager:
-      self.checkpoint_manager.close()
-    # pylint: enable=access-member-before-definition
+    cm = self.checkpoint_manager
+    if cm is not None:
+      cm.close()
 
     # 2. Assign the specialized manager
     self.checkpoint_manager = distillation_utils.MaxTextCheckpointManager(
         raw_iterator=iterator_to_manage,
         root_directory=config.checkpoint_dir,
+        student_config=config,  # Pass the config here
         options=self.config.checkpointing_options,
     )
 
@@ -458,7 +555,7 @@ def get_maxtext_model(config: pyconfig.HyperParameters, mesh: jax.sharding.Mesh)
     The loaded MaxText model.
   """
   max_logging.log(f"Initializing model: {config.model_name}...")
-  model, _ = model_creation_utils.create_nnx_model(config, mesh=mesh)
+  model = model_creation_utils.from_pretrained(config, mesh=mesh)
   return model
 
 
@@ -509,9 +606,16 @@ def build_training_components(
       layer_indices=student_config.distill_layer_indices,
       feature_loss_type=student_config.distill_feature_loss_type,
       vocab_size=student_config.vocab_size,
+      alpha_end=student_config.distill_alpha_end,
+      alpha_schedule=student_config.distill_alpha_schedule,
+      temperature_end=student_config.distill_temperature_end,
+      temperature_schedule=student_config.distill_temperature_schedule,
+      beta_end=student_config.distill_beta_end,
+      beta_schedule=student_config.distill_beta_schedule,
+      max_steps=student_config.steps,
   )
 
-  # 4. Optimizer & Config
+  # Prepare optimizer
   optimizer = get_distillation_optimizer(student_config, student_config.steps)
 
   checkpointing_options = checkpoint.CheckpointManagerOptions(
@@ -582,19 +686,8 @@ def train_distill(
 
   # Hardware Execution (Safe Context)
   max_logging.log("Applying logical axis rules for model initialization and training...")
-  with mesh, nn_partitioning.axis_rules(student_config.logical_axis_rules):
-
+  with jax.set_mesh(mesh), nn_partitioning.axis_rules(student_config.logical_axis_rules):
     # 2. Load Models
-    max_logging.log(f"Loading Student from {student_config.load_parameters_path}...")
-    _log_config_details(student_config, "Student")
-    student_model = get_maxtext_model(student_config, mesh)
-
-    student_params_to_update = getattr(student_config, "student_params_to_update", [])
-
-    def student_freeze_param_fn(path) -> bool:
-      path_str = "/".join(str(p) for p in path)
-      return not any(template in path_str for template in student_params_to_update)
-
     if is_offline:
       max_logging.log("Offline Distillation: Skipping Teacher Model loading.")
       teacher_model = None
@@ -603,6 +696,28 @@ def train_distill(
       _log_config_details(teacher_config, "Teacher")
       teacher_model = get_maxtext_model(teacher_config, mesh)
       teacher_model.eval()
+
+    # LTI phase needs the student initialization step to know about the teacher configuration
+    student_config.get_keys()["teacher_config"] = teacher_config
+
+    max_logging.log(f"Loading Student from {student_config.load_parameters_path}...")
+    _log_config_details(student_config, "Student")
+    student_model = get_maxtext_model(student_config, mesh)
+    student_params_to_update = getattr(student_config, "student_params_to_update", []) or []
+    student_param_update_templates = [re.compile(t) for t in student_params_to_update]
+
+    def student_freeze_param_fn(path) -> bool:
+      path_str = "/".join(str(p) for p in path)
+      return not any(regex.search(path_str) for regex in student_param_update_templates)
+
+    # Inject the teacher's frozen weights into the student model
+    if teacher_model:
+      lti_utils.prepare_student_weights(
+          student_model,
+          teacher_model,
+          teacher_weights_copy_map=getattr(student_config, "distill_weights_copy_map", {}),
+          student_weights_share_map=getattr(student_config, "distill_student_weights_share_map", {}),
+      )
 
     student_model.train()
     model_bundle = ModelBundle(teacher_model, student_model)
@@ -613,24 +728,34 @@ def train_distill(
         strategy=strategy,
         optimizer=optimizer,
         training_config=train_config,
+        student_config=student_config,
+        teacher_config=teacher_config,
+        is_offline=is_offline,
         student_freeze_param_filter=student_freeze_param_fn if student_params_to_update else None,
     )
     trainer.is_managed_externally = True
     trainer._has_aux = True  # pylint: disable=protected-access
 
-    # 4. Data Iterators (Init BEFORE Trainer pipeline setup)
-    # We use MaxText's native create_data_iterator which creates both train and eval iterators
     if is_offline:
-      max_logging.log(f"Loading Offline Dataset from {offline_data_dir}...")
-      raw_train_iter = distillation_utils.OfflineArrayRecordIterator(offline_data_dir)
-      raw_eval_iter = None
-    else:
       max_logging.log("Initializing Data Iterators via MaxText pipeline...")
-      raw_train_iter, raw_eval_iter = input_pipeline_interface.create_data_iterator(student_config, mesh)
+
+      # Point Grain to offline files instead of the raw text dataset
+      student_config.get_keys()["grain_train_files"] = offline_data_dir
+
+      student_config.get_keys()["eval_interval"] = 0
+      student_config.get_keys()["is_offline_distillation"] = True
+      student_config.get_keys()["dataset_shuffle_buffer_size"] = 0
+      student_config.get_keys()["dataset_shuffle_seed"] = 0
+
+    raw_train_iter, raw_eval_iter = input_pipeline_interface.create_data_iterator(student_config, mesh)
 
     # 5. Input Pipeline Checkpointing & Restoration
     # Replace the default CheckpointManager with a Grain-aware one, which enables iterator checkpointing for grain datasets.
     raw_train_iter = trainer.setup_checkpoint_manager_and_restore(raw_train_iter, student_config)
+
+    # Sync the ModelBundle step counter with the restored training step so that
+    # loss weight schedules resume from the correct position after checkpoint restore.
+    model_bundle.training_step.set_value(jnp.array(trainer._train_steps, dtype=jnp.int32))  # pylint: disable=protected-access
 
     # 6. Configure Input Mapping
     def custom_gen_model_input_fn(batch):
@@ -648,14 +773,8 @@ def train_distill(
       if getattr(batch, "top_k_logits", None) is None:
         return inputs_dict
 
-      # Scatter the offline arrays into a dense tensor of -10000s
-      dense_shape = batch.input_tokens.shape + (student_config.vocab_size,)
-      dense_logits = jnp.full(dense_shape, -10000.0, dtype=jnp.float32)
-      dense_logits = jnp.put_along_axis(dense_logits, batch.top_k_indices, batch.top_k_logits, axis=-1, inplace=False)
-
-      # Inject it as teacher_output so the trainer skips the teacher forward pass
       inputs_dict["teacher_output"] = distillation_utils.DistillationForwardOutput(
-          logits=dense_logits, out_projection_activations=None
+          logits=batch.top_k_logits, out_projection_activations=None, top_k_indices=batch.top_k_indices
       )
       return inputs_dict
 
@@ -676,6 +795,11 @@ def train_distill(
     # Pass both iterators to the trainer
     trainer.train(train_iter, eval_iter)
 
+  if student_config.learn_to_init_mode:
+    # If learn_to_init_mode is enabled, generate the final weights and update the model structure
+    max_logging.log("Learn-to-init mode enabled. Finalizing student model...")
+    apply_lti_model_update(student_model, student_config)
+
   # 9. Final Save (Conditional)
   if student_config.save_checkpoint_on_completion:
     should_save = student_config.steps % student_config.checkpoint_period
@@ -683,8 +807,12 @@ def train_distill(
     if should_save:
       max_logging.log(f"Saving final checkpoint to {student_config.checkpoint_dir}...")
       try:
+        # TODO: tmp solution for learn_to_init_mode - we need to save the changed model checkpoint,
+        # force=True doesn't work and orbax can keep skip saving the most recent model
+        # temporal hack is to simply bump the step number
+        # you are supppsed to run regular distillation from scratch afterwards anyway
         saved = trainer.checkpoint_manager.save(
-            trainer.train_steps,
+            trainer.train_steps + (1 if student_config.learn_to_init_mode else 0),
             trainer.model,
             optimizer=trainer.optimizer,
             save_only_lora_params=getattr(trainer, "_lora_enabled", False),
@@ -706,6 +834,35 @@ def train_distill(
   max_logging.log("Distillation Complete.")
 
 
+def _save_run_manifest(argv: Sequence[str], config: pyconfig.HyperParameters) -> None:
+  """Writes the source YAML and a shell-pasteable command to the output dir.
+
+  Saves `distillation.yml` (verbatim copy of the user's config file) and
+  `command.sh` (the CLI overrides) so a run can be reproduced by copying the
+  YAML and re-running the saved command.
+  """
+  if jax.process_index() != 0:
+    return
+  if not (config.base_output_directory and config.run_name):
+    return
+  if len(argv) < 2:
+    return
+
+  try:
+    out_dir = epath.Path(config.base_output_directory) / config.run_name
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    source_yml = epath.Path(pyconfig.resolve_config_path(argv[1]))
+    source_yml.copy(out_dir / "distillation.yml", overwrite=True)
+
+    cli_args = shlex.join(argv[2:])
+    command = "python3 -m maxtext.trainers.post_train.distillation.train_distill " f"distillation.yml {cli_args}\n"
+    (out_dir / "command.sh").write_text(command)
+    max_logging.log(f"Saved run manifest (distillation.yml, command.sh) to {out_dir}")
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    max_logging.log(f"Warning: could not save run manifest: {e}")
+
+
 def main(argv: Sequence[str]) -> None:
   """Entry point for the script.
 
@@ -715,8 +872,17 @@ def main(argv: Sequence[str]) -> None:
   Args:
     argv: List of command-line arguments. Expects [script_name, config_file, ...].
   """
+
+  pathwaysutils.initialize()
+  jax.config.update("jax_default_prng_impl", "unsafe_rbg")
+  if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
+    os.environ["LIBTPU_INIT_ARGS"] = (
+        os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+    )
+
   # 1. Parse Global Config to extract Overrides
   global_config = pyconfig.initialize(argv)
+  _save_run_manifest(argv, global_config)
 
   # 2. Initialize STUDENT Config
   # Order of precedence: YAML < CLI < kwargs (student_overrides).
@@ -740,6 +906,20 @@ def main(argv: Sequence[str]) -> None:
   # This ensures flags like `num_query_heads=16` passed in CLI don't affect the Teacher.
   teacher_argv = [argv[0], argv[1]]
   teacher_config = pyconfig.initialize(teacher_argv, **teacher_overrides)
+
+  # Batch shape (per_device_batch_size / max_target_length / gradient_accumulation_steps)
+  # must be set at the YAML top level — not inside *_overrides — since student and
+  # teacher share the input pipeline.
+  for batch_field in ("per_device_batch_size", "max_target_length", "gradient_accumulation_steps"):
+    s_val = getattr(student_config, batch_field)
+    t_val = getattr(teacher_config, batch_field)
+    if s_val != t_val:
+      raise ValueError(
+          f"Distillation batch shape mismatch on '{batch_field}': "
+          f"student={s_val} vs teacher={t_val}. The teacher consumes batches from the "
+          f"student-driven input pipeline, so these must agree. Set '{batch_field}' at "
+          f"the YAML top level (not inside *_overrides) so both configs inherit it."
+      )
 
   # 4. Run Training
   train_distill(student_config, teacher_config, is_offline, global_config.offline_data_dir)

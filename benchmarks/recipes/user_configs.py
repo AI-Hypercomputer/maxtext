@@ -82,6 +82,7 @@ class UserConfig:
   max_restarts: int = 0
   temp_key: str = None
   workload_id: str = None
+  skip_validation: bool = False
 
   def __post_init__(self):
     """Automatically generate derived attributes after the object is created."""

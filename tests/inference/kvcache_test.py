@@ -67,15 +67,15 @@ class MlaKVCacheTest(unittest.TestCase):
         model_mode,
     )
     prefill_low_rank_main = jnp.transpose(
-        test_module.cached_prefill_key.value,
+        test_module.cached_prefill_key[...],
         test_module.key_axis_order,
     )
     prefill_key_rope = jnp.transpose(
-        test_module.cached_prefill_value.value,
+        test_module.cached_prefill_value[...],
         test_module.key_axis_order,
     )
-    ar_low_rank_main = jnp.transpose(test_module.cached_ar_key.value, test_module.key_axis_order)
-    ar_key_rope = jnp.transpose(test_module.cached_ar_value.value, test_module.key_axis_order)
+    ar_low_rank_main = jnp.transpose(test_module.cached_ar_key[...], test_module.key_axis_order)
+    ar_key_rope = jnp.transpose(test_module.cached_ar_value[...], test_module.key_axis_order)
 
     # Ensure prefill cache variables have correct shapes and values
     self.assertEqual(
@@ -113,15 +113,15 @@ class MlaKVCacheTest(unittest.TestCase):
         model_mode,
     )
     prefill_low_rank_main = jnp.transpose(
-        test_module.cached_prefill_key.value,
+        test_module.cached_prefill_key[...],
         test_module.key_axis_order,
     )
     prefill_key_rope = jnp.transpose(
-        test_module.cached_prefill_value.value,
+        test_module.cached_prefill_value[...],
         test_module.key_axis_order,
     )
-    ar_low_rank_main = jnp.transpose(test_module.cached_ar_key.value, test_module.key_axis_order)
-    ar_key_rope = jnp.transpose(test_module.cached_ar_value.value, test_module.key_axis_order)
+    ar_low_rank_main = jnp.transpose(test_module.cached_ar_key[...], test_module.key_axis_order)
+    ar_key_rope = jnp.transpose(test_module.cached_ar_value[...], test_module.key_axis_order)
 
     # Ensure prefill cache variables are same as before
     self.assertEqual(

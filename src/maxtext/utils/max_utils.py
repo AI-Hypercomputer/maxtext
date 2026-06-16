@@ -42,8 +42,9 @@ import orbax.checkpoint as ocp
 from orbax.checkpoint.experimental.emergency.multi_tier_checkpointing import initialization
 import psutil
 
+from maxtext.utils import elastic_utils
 from maxtext.common.gcloud_stub import is_decoupled
-from maxtext.common.gcloud_stub import writer, _TENSORBOARDX_AVAILABLE
+from maxtext.common.gcloud_stub import writer, _TENSORBOARDX_AVAILABLE, StubSummaryWriter
 from maxtext.utils import max_logging
 from maxtext.common.common_types import MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN
 
@@ -181,7 +182,7 @@ def summarize_size_from_pytree(params):
   return num_params, num_bytes, num_bytes / num_params
 
 
-def initialize_summary_writer(tensorboard_dir, run_name):
+def initialize_summary_writer(tensorboard_dir, run_name, enable_tensorboard=True):
   """Return a tensorboardX SummaryWriter or a no-op stub.
 
   In decoupled mode (no Google Cloud), this prefers a repo-local
@@ -189,6 +190,10 @@ def initialize_summary_writer(tensorboard_dir, run_name):
   """
   if jax.process_index() != 0:
     return None
+
+  if not enable_tensorboard:
+    max_logging.log("TensorBoard disabled; using no-op SummaryWriter.")
+    return StubSummaryWriter()
 
   if not _TENSORBOARDX_AVAILABLE:
     max_logging.log("tensorboardX not available; using no-op SummaryWriter.")
@@ -234,6 +239,8 @@ def maybe_initialize_jax_distributed_system(raw_keys):
 
   For CPUs, we call jax.distributed.initialize() explicitly, with the specified arguments.
   """
+
+  # Early exit for cases where we don't need to initialize the jax distributed system.
   if raw_keys["skip_jax_distributed_system"]:
     max_logging.log("Skipping jax distributed system due to skip_jax_distributed_system=True flag.")
     return
@@ -243,22 +250,40 @@ def maybe_initialize_jax_distributed_system(raw_keys):
   if jax.distributed.is_initialized():
     max_logging.log("Jax distributed system is already initialized.")
     return
-  if raw_keys["inference_benchmark_test"]:
-    # Disable initialization for inference benmark test.
+  if raw_keys["inference_benchmark_test"] or raw_keys["compile_topology"]:
+    max_logging.log("Skipping jax distributed system initialization.")
     return
-  if raw_keys["compile_topology"]:
-    # Don't initialize jax distributed with AOT compilation
-    return
+
+  # Initialization for gpu backend
   if is_gpu_backend(raw_keys):
     max_logging.log("Attempting to initialize the jax distributed system for GPU backend...")
     initialize_jax_for_gpu(raw_keys)
     max_logging.log("Jax distributed system initialized on GPU!")
-  elif is_cpu_backend(raw_keys):
+    return
+
+  # Initialization for cpu backend
+  if is_cpu_backend(raw_keys):
     max_logging.log("Attempting to initialize the jax distributed system for CPU backend...")
     initialize_jax_for_cpu(raw_keys)
     max_logging.log("Jax distributed system initialized on CPUs!")
-  elif raw_keys["enable_multi_tier_checkpointing"]:
-    max_logging.log("Attempting to initialize the jax distributed system for multi-tier " "checkpointing...")
+    return
+
+  # Initialization for gpu_multiprocess hardware
+  if raw_keys["hardware"] == "gpu_multiprocess":
+    max_logging.log("Attempting to initialize the jax distributed system for gpu_multiprocess hardware...")
+    if not raw_keys["enable_emergency_checkpoint"]:
+      jax.distributed.initialize(initialization_timeout=raw_keys["jax_distributed_initialization_timeout"])
+    else:
+      max_logging.log("Initializing jax distributed to support local checkpointing with GPUs...")
+      jax.distributed.initialize(initialization_timeout=raw_keys["jax_distributed_initialization_timeout"])
+      ocp.multihost.initialize_runtime_to_distributed_ids()
+      ocp.multihost.initialize_distributed_to_device_ids()
+      max_logging.log("Jax distributed system initialized!")
+    return
+
+  # Initialization for tpu backend
+  max_logging.log("Attempting to initialize the jax distributed system for TPU backend...")
+  if raw_keys["enable_multi_tier_checkpointing"]:
     initialize_multi_tier_checkpointing(
         local_checkpoint_directory=raw_keys["local_checkpoint_directory"],
         backup_interval_minutes=raw_keys["multi_tier_checkpointing_backup_interval_minutes"],
@@ -266,22 +291,13 @@ def maybe_initialize_jax_distributed_system(raw_keys):
         jax_initialization_timeout_seconds=raw_keys["jax_distributed_initialization_timeout"],
         data_parallelism=raw_keys["mtc_data_parallelism"],
     )
-    max_logging.log("Jax distributed system initialized for multi-tier checkpointing!")
-  elif (raw_keys["enable_checkpointing"] and raw_keys["compile_topology_num_slices"] == -1) or raw_keys[
-      "hardware"
-  ] == "gpu_multiprocess":
-    max_logging.log("Attempting to initialize the jax distributed system...")
+    max_logging.log("Jax distributed system initialized on TPUs for multi-tier checkpointing!")
+  elif raw_keys["enable_checkpointing"] and raw_keys["compile_topology_num_slices"] == -1:
     if not raw_keys["enable_emergency_checkpoint"]:
       jax.distributed.initialize(initialization_timeout=raw_keys["jax_distributed_initialization_timeout"])
     else:
-      if raw_keys["hardware"] == "gpu_multiprocess":
-        max_logging.log("Initializing jax distribtued to support local checkpointing with" " GPUs...")
-        jax.distributed.initialize(initialization_timeout=raw_keys["jax_distributed_initialization_timeout"])
-        ocp.multihost.initialize_runtime_to_distributed_ids()
-        ocp.multihost.initialize_distributed_to_device_ids()
-      else:
-        initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys)
-    max_logging.log("Jax distributed system initialized!")
+      initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys)
+    max_logging.log("Jax distributed system initialized on TPUs!")
 
 
 def initialize_jax_for_gpu(raw_keys):
@@ -378,7 +394,7 @@ def _retrieve_jax_init_info(raw_keys):
   return "", ""
 
 
-def get_num_slices(raw_keys):
+def get_num_slices(raw_keys, config=None):
   """Calculate num_slices based on number of devices."""
   if raw_keys.get("num_slices", -1) != -1:
     max_logging.log(f"Using num_slices={raw_keys['num_slices']} per user request.")
@@ -389,9 +405,8 @@ def get_num_slices(raw_keys):
   if int(raw_keys["compile_topology_num_slices"]) > 0:
     return raw_keys["compile_topology_num_slices"]
   else:
-    devices = jax.devices()
     try:
-      return 1 + max(d.slice_index for d in devices)
+      return len(elastic_utils.live_slice_indices(config))
     except (ValueError, AttributeError):
       return 1
 
@@ -440,7 +455,7 @@ def fill_unspecified_mesh_axes(parallelism_vals, target_product, parallelism_typ
     determined_val = target_product / np.prod(parallelism_vals) * -1
 
     assert (
-        determined_val >= 1 and determined_val.is_integer
+        determined_val >= 1 and determined_val.is_integer()
     ), f"Unspecified value unable to be determined with the given\
       {parallelism_type} parallelism values"
 
@@ -887,26 +902,85 @@ def reorder_sequence(tensor, cp_size: int, seq_dim: int = 1, to_contiguous: bool
   return reordered.reshape(ori_tensor_shape)
 
 
-@partial(jax.jit, static_argnums=1)
-def reorder_causal_load_balanced(batch, cp_size):
-  """Reorders the example batch sequences"""
-  return {
-      key: reorder_sequence(
-          value,  # Pass each key's value inside batch separately
-          cp_size=cp_size,
-      )
-      if key
-      in [
-          "inputs",
-          "targets",
-          "inputs_position",
-          "targets_position",
-          "inputs_segmentation",
-          "targets_segmentation",
-      ]
-      else value
-      for key, value in batch.items()
+@partial(jax.jit, static_argnums=(1, 2, 3))
+def reorder_causal_load_balanced(batch, cp_size, reorder_strategy, hardware="tpu"):
+  """Reorders the example batch sequences using a hardware-appropriate backend.
+
+  On GPU (hardware="gpu" or "gpu_multiprocess"), uses Transformer Engine's
+  reorder_causal_load_balancing which supports both DUAL_CHUNK_SWAP and STRIPED strategies.
+  On TPU/CPU, falls back to the pure-JAX reorder_sequence (DUAL_CHUNK_SWAP only).
+
+  Args:
+    batch: The batch to reorder.
+    cp_size: The size of the compute parallelism.
+    reorder_strategy: The ReorderStrategy enum value (DUAL_CHUNK_SWAP or STRIPED).
+    hardware: The hardware type string ("tpu", "gpu", "gpu_multiprocess", "cpu").
+
+  Returns:
+    The reordered batch.
+
+  Reorder Strategy:
+  - DUAL_CHUNK_SWAP: This strategy splits each query into two chunks and do the mirror swap between
+    GPUs. This is currently used for non-THD load balance. It requires the max_seqlens be the
+    multiple of 2 * cp_size.
+    Examples:
+    - Before reorder: GPU0: [0, 1, 2, 3]; GPU1: [4, 5, 6, 7]; GPU2: [8, 9, 10, 11]; GPU3: [12, 13, 14, 15];
+    - After reorder: GPU0: [0, 1, 14, 15]; GPU1: [4, 5, 10, 11]; GPU2: [8, 9, 6, 7]; GPU3: [12, 13, 2, 3]
+
+  - STRIPED: This strategy distributes the tokens in a striped (interleaved) manner across
+    the sequence. This is currently used for THD load balance.
+    Example: Consider 4 GPUs with seqlens=16.
+    - Before reorder: GPU0: [0, 1, 2, 3]; GPU1: [4, 5, 6, 7]; ...; GPU3: [12, 13, 14, 15]
+    - After reorder: GPU0: [0, 4, 8, 12]; GPU1: [1, 5, 9, 13]; ...; GPU3: [3, 7, 11, 15]
+
+  See: https://github.com/NVIDIA/TransformerEngine/blob/main/transformer_engine/jax/attention.py
+  """
+  # pylint: disable=import-outside-toplevel
+  from maxtext.common.common_types import ReorderStrategy
+
+  _reorder_keys = {
+      "inputs",
+      "targets",
+      "inputs_position",
+      "targets_position",
+      "inputs_segmentation",
+      "targets_segmentation",
   }
+
+  if hardware in ("gpu", "gpu_multiprocess"):
+    from transformer_engine.jax.attention import ReorderStrategy as TE_ReorderStrategy
+    from transformer_engine.jax.attention import reorder_causal_load_balancing
+
+    reorder_strategy_map = {
+        ReorderStrategy.DUAL_CHUNK_SWAP: TE_ReorderStrategy.DualChunkSwap,
+        ReorderStrategy.STRIPED: TE_ReorderStrategy.Striped,
+    }
+
+    return {
+        key: reorder_causal_load_balancing(
+            value,
+            reorder_strategy_map[reorder_strategy],
+            cp_size=cp_size,
+            seq_dim=1,
+        )
+        if key in _reorder_keys
+        else value
+        for key, value in batch.items()
+    }
+  else:
+    if reorder_strategy == ReorderStrategy.STRIPED:
+      raise ValueError(
+          f"STRIPED reorder strategy requires Transformer Engine and is only supported on GPU, got hardware={hardware!r}."
+      )
+    return {
+        key: reorder_sequence(
+            value,
+            cp_size=cp_size,
+        )
+        if key in _reorder_keys
+        else value
+        for key, value in batch.items()
+    }
 
 
 @staticmethod
@@ -1135,16 +1209,6 @@ def transformer_engine_context():
       yield
   except (ImportError, AttributeError):
     yield
-
-
-def generate_representative_group_sizes(target_m: int, g: int) -> tuple[int, ...]:
-  """Generate group sizes for a given target m."""
-  np.random.seed(0)
-  repr_val = np.random.uniform(size=(g,))
-  repr_val = np.random.binomial(1, 0.9, (g,)) * repr_val
-  repr_val = np.int32((repr_val / np.sum(repr_val)) * target_m)
-  repr_val[0] += target_m - np.sum(repr_val)
-  return tuple(map(int, repr_val))
 
 
 def maybe_pad(inputs, tile_size):

@@ -38,7 +38,6 @@ ignore:
   - "src/maxtext/experimental"
   - "src/maxtext/inference"
   - "src/maxtext/scratch_code"
-  - "src/MaxText"
 
 flags:
   # Updated ONLY by PRs (contains subset of tests, excluding scheduled_only).

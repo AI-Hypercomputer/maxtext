@@ -26,6 +26,7 @@ from maxtext.configs import pyconfig
 from maxtext.input_pipeline import hf_data_processing
 from maxtext.input_pipeline import input_pipeline_interface
 from maxtext.common.gcloud_stub import is_decoupled
+from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from tests.utils.test_helpers import get_test_config_path, get_test_base_output_directory
 
 
@@ -60,7 +61,7 @@ class HfDataProcessingTest(unittest.TestCase):
             if decoupled
             else "gs://maxtext-dataset/hf/c4/c4-train-00000-of-01637.parquet"
         ),
-        tokenizer_path="google-t5/t5-large",
+        tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "qwen3-tokenizer"),
         enable_checkpointing=False,
     )
     self.mesh_shape_1d = (len(jax.devices()),)
@@ -73,7 +74,14 @@ class HfDataProcessingTest(unittest.TestCase):
         self.mesh,
     )
 
-    self.train_iter = hf_data_processing.make_hf_train_iterator(self.config, self.mesh, self.process_indices)
+  @property
+  def train_iter(self):
+    # pylint: disable=protected-access
+    if not hasattr(self.__class__, "_cached_train_iter"):
+      self.__class__._cached_train_iter = hf_data_processing.make_hf_train_iterator(
+          self.config, self.mesh, self.process_indices
+      )
+    return self.__class__._cached_train_iter
 
   def test_train_ds(self):
     expected_shape = [jax.device_count(), self.config.max_target_length]

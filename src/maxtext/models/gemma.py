@@ -126,8 +126,6 @@ class GemmaDecoderLayer(nnx.Module):
       deterministic,
       model_mode,
       previous_chunk=None,
-      page_manager=None,
-      page_state=None,
       slot=None,
       kv_cache=None,
       attention_metadata=None,

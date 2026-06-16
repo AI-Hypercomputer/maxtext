@@ -18,21 +18,13 @@ import unittest
 import pytest
 from types import SimpleNamespace
 
+from maxtext.trainers.post_train.rl import utils_rl
+
 pytestmark = [pytest.mark.post_training]
-
-evaluate_rl = pytest.importorskip(
-    "maxtext.trainers.post_train.rl.evaluate_rl",
-    reason="tunix (required by evaluate_rl) is not installed GPU",
-)
-
-utils_rl = pytest.importorskip(
-    "maxtext.trainers.post_train.rl.utils_rl",
-    reason="tunix (required by utils_rl) is not installed GPU",
-)
 
 
 def _make_config():
-  """Create a minimal config object with the parameters required by score_responses."""
+  """Create a minimal config object."""
   return SimpleNamespace(
       reasoning_start_token="<reasoning>",
       reasoning_end_token="</reasoning>",
@@ -51,63 +43,17 @@ def _make_config():
   )
 
 
-class TestScoreResponses(unittest.TestCase):
-  """Tests for evaluate_rl.score_responses parsing and correctness logic."""
-
-  def setUp(self):
-    self.config = _make_config()
+class TestProcessAnswer(unittest.TestCase):
+  """Tests for utils_rl.process_answer."""
 
   @pytest.mark.cpu_only
-  def test_nested_tags(self):
-    """Response with nested reasoning tags still extracts the correct answer."""
-    is_correct, is_partially_correct, has_correct_format = evaluate_rl.score_responses(
-        tmvp_config=self.config,
-        question="What is 11/3?",
-        responses=[
-            "<reasoning>Need to use <reasoning> and </reasoning>, "
-            "<answer> and </answer></reasoning><answer>11/3</answer>"
-        ],
-        answer="11/3",
+  def test_for_mcq(self):
+    self.assertEqual(len(utils_rl.process_answer("(A) 1\n(B) 2\n(C) 3\n", "B", "MCQ")), 2)
+    self.assertEqual(len(utils_rl.process_answer("A. 1\nB. 2\n(C) 3\n", "B", "MCQ")), 2)
+    self.assertEqual(
+        len(utils_rl.process_answer("$\\textbf{(A)}~\\frac{1}{24}\\qquad\\textbf{(B)}~\\frac{1}{12}$", "B", "MCQ")), 2
     )
-    self.assertTrue(is_correct)
-    self.assertTrue(is_partially_correct)
-    self.assertTrue(has_correct_format)
-
-  @pytest.mark.cpu_only
-  def test_with_extra_ending_tags(self):
-    """Answer with extra ending tags such as <end_of_turn>."""
-    is_correct, is_partially_correct, has_correct_format = evaluate_rl.score_responses(
-        tmvp_config=self.config,
-        question=(
-            "James buys a new wardrobe.  He buys 10 suits and 10 dress pants.  "
-            "He also buys 3 dress shirts per suit.  The suits cost $750 each and "
-            "the dress pants cost 1/5 that cost.  The dress shirts were $60 each.  "
-            "How much did everything cost?"
-        ),
-        responses=[
-            "<reasoning>This is the sum of the cost of the suits, the pants, and the "
-            "shirts: $7500 + $1500 + $1800 = $10800.\n\n</reasoning>\n"
-            "<answer>10800</answer><end_of_turn>"
-        ],
-        answer="10,800",
-    )
-    self.assertTrue(is_correct)
-    self.assertTrue(is_partially_correct)
-    self.assertTrue(has_correct_format)
-
-  @pytest.mark.cpu_only
-  def test_with_incomplete_reasoning_tags(self):
-    """(1) Incomplete reasoning tags still extracts the correct answer."""
-    """(2) Currency symbols works with math_verify."""
-    is_correct, is_partially_correct, has_correct_format = evaluate_rl.score_responses(
-        tmvp_config=self.config,
-        question="What is the price of the item?",
-        responses=["<reasoning>The item costs $16.<answer>$16</answer>"],
-        answer="16",
-    )
-    self.assertTrue(is_correct)
-    self.assertTrue(is_partially_correct)
-    self.assertFalse(has_correct_format)
+    self.assertEqual(len(utils_rl.process_answer("$(\\mathrm {A}) \\ 1 \\qquad (\\mathrm {B}) \\ 2$", "B", "MCQ")), 2)
 
 
 class TestNormalizeFinalAnswer(unittest.TestCase):
@@ -138,6 +84,7 @@ class TestNormalizeFinalAnswer(unittest.TestCase):
   def test_dollar_math_extraction(self):
     # Content inside $...$ is extracted
     self.assertEqual(utils_rl.normalize_final_answer("The answer is $\\frac{1}{2}$"), "\\frac{1}{2}")
+    self.assertEqual(utils_rl.normalize_final_answer("The answer is 3 $\\frac{1}{2}$"), "3\\frac{1}{2}")
 
   @pytest.mark.cpu_only
   def test_shorthand_frac_and_sqrt(self):
@@ -222,7 +169,7 @@ class TestCheckNumbers(unittest.TestCase):
     """Full <reasoning>…</reasoning><answer>…</answer> format allows extraction."""
     scores = self._check(
         completions=["<reasoning>40 + 2 = 42</reasoning><answer>42</answer>"],
-        answer=["42"],
+        answer=['["42"]'],
     )
     self.assertEqual(scores[0], self.config.reward_exact_answer)
 
@@ -231,16 +178,16 @@ class TestCheckNumbers(unittest.TestCase):
     """Plain-text completion without any tags yields score 0 (cannot extract)."""
     scores = self._check(
         completions=["The answer is 42."],
-        answer=["42"],
+        answer=['["42"]'],
     )
-    self.assertEqual(scores[0], 0)
+    self.assertEqual(scores[0], self.config.penalty_incorrect_format)
 
   @pytest.mark.cpu_only
   def test_extraction_fails_answer_tags_only(self):
     """<answer> tag alone (no <reasoning> block) is matched by the regex as a fallback, score 1.5."""
     scores = self._check(
         completions=["<answer>42</answer>"],
-        answer=["42"],
+        answer=['["42"]'],
     )
     self.assertEqual(scores[0], self.config.reward_exact_answer)
 
@@ -249,9 +196,9 @@ class TestCheckNumbers(unittest.TestCase):
     """<reasoning> block with no <answer> tag cannot be extracted, score 0."""
     scores = self._check(
         completions=["<reasoning>The answer is 42.</reasoning>"],
-        answer=["42"],
+        answer=['["42"]'],
     )
-    self.assertEqual(scores[0], 0)
+    self.assertEqual(scores[0], self.config.penalty_incorrect_format)
 
   @pytest.mark.cpu_only
   def test_extraction_batch_mixed(self):
@@ -261,10 +208,25 @@ class TestCheckNumbers(unittest.TestCase):
             "<reasoning>thinking</reasoning><answer>7</answer>",  # extractable
             "just 7",  # not extractable
         ],
-        answer=["7", "7"],
+        answer=['["7"]', '["7"]'],
     )
     self.assertEqual(scores[0], self.config.reward_exact_answer)
-    self.assertEqual(scores[1], 0)
+    self.assertEqual(scores[1], self.config.penalty_incorrect_format)
+
+  @pytest.mark.cpu_only
+  def test_extraction_for_mcq(self):
+    """Batch with two multiple-choice questions and one single-answer question."""
+    scores = self._check(
+        completions=[
+            "<reasoning>thinking</reasoning><answer>7</answer>",
+            "<reasoning>thinking</reasoning><answer>A</answer>",
+            "<reasoning>thinking</reasoning><answer>A</answer>",
+        ],
+        answer=['["7", "B"]', '["7", "A"]', '["7", "7"]'],
+    )
+    self.assertEqual(scores[0], self.config.reward_exact_answer)
+    self.assertEqual(scores[1], self.config.reward_exact_answer)
+    self.assertEqual(scores[2], self.config.penalty_incorrect_answer)  # extracted "A" does not match "7"
 
   # ---------------------------------------------------------------
   # Scenario 2: extraction succeeds, value matches/mismatches the answer
@@ -275,7 +237,7 @@ class TestCheckNumbers(unittest.TestCase):
     """Extracted integer equal to reference answer earns 1.5."""
     scores = self._check(
         completions=["<reasoning>simple</reasoning><answer>100</answer>"],
-        answer=["100"],
+        answer=['["100"]'],
     )
     self.assertEqual(scores[0], self.config.reward_exact_answer)
 
@@ -284,16 +246,16 @@ class TestCheckNumbers(unittest.TestCase):
     """Extracted number that differs from the reference answer earns 0.0."""
     scores = self._check(
         completions=["<reasoning>wrong path</reasoning><answer>99</answer>"],
-        answer=["42"],
+        answer=['["42"]'],
     )
-    self.assertEqual(scores[0], 0.0)
+    self.assertEqual(scores[0], self.config.penalty_incorrect_answer)
 
   @pytest.mark.cpu_only
   def test_extracted_matches_comma_formatted_number(self):
     """Comma-formatted guess (e.g. '1,000') normalizes to match integer answer '1000'."""
     scores = self._check(
         completions=["<reasoning>cost calculation</reasoning><answer>1,000</answer>"],
-        answer=["1000"],
+        answer=['["1000"]'],
     )
     self.assertEqual(scores[0], self.config.reward_exact_answer)
 
@@ -302,7 +264,7 @@ class TestCheckNumbers(unittest.TestCase):
     """Leading '$' in extracted answer is normalized away before comparison."""
     scores = self._check(
         completions=["<reasoning>price is $16</reasoning><answer>$16</answer>"],
-        answer=["16"],
+        answer=['["16"]'],
     )
     self.assertEqual(scores[0], self.config.reward_exact_answer)
 
@@ -311,9 +273,9 @@ class TestCheckNumbers(unittest.TestCase):
     """Non-numeric extraction that cannot be float-converted and does not math-verify returns 0."""
     scores = self._check(
         completions=["<reasoning>thinking</reasoning><answer>blue</answer>"],
-        answer=["red"],
+        answer=['["red"]'],
     )
-    self.assertEqual(scores[0], 0.0)
+    self.assertEqual(scores[0], self.config.penalty_incorrect_format)
 
 
 class TestExtractHashAnswer(unittest.TestCase):
@@ -368,6 +330,38 @@ class TestGetOptimizer(unittest.TestCase):
     params = {"w": jnp.ones(3)}
     state = opt.init(params)
     self.assertIn("learning_rate", state.hyperparams)
+
+
+class TestFormatMaxTextMessages(unittest.TestCase):
+  """Tests for utils_rl.format_maxtext_messages."""
+
+  def setUp(self):
+    self.config = _make_config()
+    self.template_config = {
+        "SYSTEM_PROMPT": "Reason between {reasoning_start_token} and {reasoning_end_token}. "
+        + "Solution between {solution_start_token} and {solution_end_token}.",
+        "TEMPLATE": "system: {system_prompt}\nquestion: {question}",
+    }
+
+  @pytest.mark.cpu_only
+  def test_format_with_template(self):
+    """Test formatting when a template is provided."""
+    messages = ["What is 2+2?"]
+    formatted = utils_rl.format_maxtext_messages(messages, self.template_config, self.config)
+    self.assertEqual(len(formatted), 1)
+    self.assertEqual(formatted[0]["role"], "user")
+    expected_content = (
+        "system: Reason between <reasoning> and </reasoning>. "
+        "Solution between <answer> and </answer>.\n"
+        "question: What is 2+2?"
+    )
+    self.assertEqual(formatted[0]["content"], expected_content)
+
+  @pytest.mark.cpu_only
+  def test_format_without_template(self):
+    """Test formatting when template_config is None (the fix)."""
+    messages = ["What is 2+2?"]
+    self.assertRaises(ValueError, lambda: utils_rl.format_maxtext_messages(messages, None, self.config))
 
 
 if __name__ == "__main__":

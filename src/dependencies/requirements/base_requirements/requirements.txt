@@ -1,8 +1,8 @@
 absl-py
 aqtp
 array-record
+chex
 cloud-accelerator-diagnostics
-cloud-tpu-diagnostics
 datasets
 drjax
 flax
@@ -12,7 +12,7 @@ google-cloud-aiplatform
 google-cloud-mldiagnostics
 google-cloud-monitoring
 grain[parquet]
-huggingface_hub
+huggingface_hub>=1.14.0
 jax
 jaxlib
 jaxtyping
@@ -24,6 +24,7 @@ numpy
 omegaconf
 optax
 orbax-checkpoint
+parameterized
 pathwaysutils
 pillow
 pre-commit
@@ -34,15 +35,14 @@ pylint
 pytest
 pytype
 sentencepiece
+seqio
 tensorboard-plugin-profile
 tensorboardx
 tensorflow-datasets
 tensorflow-text
 tensorflow
 tiktoken
-tokamax
-transformers
+tokamax!=0.1.0
+transformers>=5.8.0
 uvloop
-qwix
-google-jetstream @ https://github.com/AI-Hypercomputer/JetStream/archive/29329e8e73820993f77cfc8efe34eb2a73f5de98.zip
-mlperf-logging @ https://github.com/mlcommons/logging/archive/38ab22670527888c8eb7825a4ece176fcc36a95d.zip
+qwix>=0.1.6

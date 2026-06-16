@@ -22,17 +22,18 @@ from jax.sharding import Mesh, NamedSharding
 
 from maxtext.utils import max_logging
 from maxtext.configs import pyconfig
+from maxtext.common.common_types import MODEL_MODE_TRAIN
 
 
 def create_nnx_rngs(
-    config: pyconfig.HyperParameters, is_training: bool = True, rng_key: jax.Array | None = None
+    config: pyconfig.HyperParameters, model_mode: str = MODEL_MODE_TRAIN, rng_key: jax.Array | None = None
 ) -> nnx.Rngs:
   """
   Create NNX Rngs
 
   Args:
     config: the configuration
-    is_training: if the Rngs are for training
+    model_mode: the model mode. See maxtext.common.common_types for valid values.
     rng_key: the Rng key
 
   Returns:
@@ -41,7 +42,9 @@ def create_nnx_rngs(
   if rng_key is None:
     rng_key = jax.random.PRNGKey(config.init_weights_seed)
 
-  if is_training:
+  if model_mode == MODEL_MODE_TRAIN:
+    # Use fold_in to derive independent keys for each stream from a single seed.
+    # aqt is needed for quantization-aware training.
     return nnx.Rngs(
         params=jax.random.fold_in(rng_key, 0), dropout=jax.random.fold_in(rng_key, 1), aqt=jax.random.fold_in(rng_key, 2)
     )
@@ -170,3 +173,17 @@ def create_nnx_sharded_model(
   with jax.set_mesh(mesh):
     sharded_state = create_sharded_state()
   return nnx.merge(graphdef, sharded_state)
+
+
+def nnx_ensure_scan_leading_axis(tree, length):
+  """Broadcasts scalar-like variables to have a leading scan axis."""
+
+  def _op(x):
+    is_var = isinstance(x, nnx.Variable)
+    val = x.get_value() if is_var else x
+    if hasattr(val, "shape") and len(val.shape) == 0:
+      new_val = jax.numpy.broadcast_to(val, (length,))
+      return x.replace(value=new_val) if is_var else new_val
+    return x
+
+  return jax.tree.map(_op, tree, is_leaf=lambda x: isinstance(x, nnx.Variable))

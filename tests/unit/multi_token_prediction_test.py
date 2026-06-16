@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" multi_token_prediction_test """
+"""multi_token_prediction_test"""
 
 import unittest
 
@@ -29,7 +29,7 @@ from maxtext.layers.nnx_decoders import NNXDecoderLayer
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils
 
-from tests.utils.test_helpers import get_test_config_path, get_decoupled_parallelism_overrides
+from tests.utils.test_helpers import get_test_config_path
 
 
 TEST_LAYER_NUM = 1
@@ -40,14 +40,18 @@ class MultiTokenPredictionLayerTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
-    # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
-    extra_args = get_decoupled_parallelism_overrides()
     self.cfg = pyconfig.initialize(
         [None, get_test_config_path()],
         run_name="multi_token_prediction_layer_test",
         skip_jax_distributed_system=True,
         per_device_batch_size=8,
-        **extra_args,
+        base_emb_dim=16,
+        base_mlp_dim=32,
+        base_num_query_heads=4,
+        base_num_kv_heads=4,
+        head_dim=8,
+        max_target_length=128,
+        vocab_size=128,
     )
     self.rng = jax.random.PRNGKey(42)  # Base RNG for setup
     self.rngs = nnx.Rngs(params=self.rng, dropout=self.rng)
@@ -196,16 +200,19 @@ class MultiTokenPredictionBlockTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
-    # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
     num_devices = jax.device_count()
-    extra_args = get_decoupled_parallelism_overrides()
     self.cfg = pyconfig.initialize(
         [None, get_test_config_path()],
         run_name="mtp_block_test",
         skip_jax_distributed_system=True,
         mtp_num_layers=2,
         base_emb_dim=16,
-        **extra_args,
+        base_mlp_dim=32,
+        base_num_query_heads=4,
+        base_num_kv_heads=4,
+        head_dim=8,
+        max_target_length=128,
+        vocab_size=128,
     )
     self.nnx_rngs = nnx.Rngs(params=0)
     self.rng = jax.random.PRNGKey(43)
@@ -248,8 +255,8 @@ class MultiTokenPredictionBlockTest(unittest.TestCase):
     self.assertTrue(hasattr(state.mtp_block, "weights"))
 
     # Access the actual data tuple inside the .value attribute.
-    losses_val = state.mtp_block.losses.value
-    weights_val = state.mtp_block.weights.value
+    losses_val = state.mtp_block.losses[...]
+    weights_val = state.mtp_block.weights[...]
 
     self.assertEqual(len(losses_val), self.cfg.mtp_num_layers)
     self.assertEqual(len(weights_val), self.cfg.mtp_num_layers)
@@ -283,8 +290,8 @@ class MultiTokenPredictionBlockTest(unittest.TestCase):
 
     # Perform the aggregation logic exactly as in `loss_fn`.
     if mtp_losses_var and mtp_weights_var:
-      sum_of_all_mtp_losses = jnp.sum(jnp.array(mtp_losses_var.value))
-      sum_of_all_mtp_weights = jnp.sum(jnp.array(mtp_weights_var.value))
+      sum_of_all_mtp_losses = jnp.sum(jnp.array(mtp_losses_var[...]))
+      sum_of_all_mtp_weights = jnp.sum(jnp.array(mtp_weights_var[...]))
 
       self.assertGreater(sum_of_all_mtp_weights, 0)
 

@@ -34,15 +34,16 @@ import pytest
 
 from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.trainers.pre_train.train import main as train_main
-from maxtext.utils.globals import MAXTEXT_PKG_DIR
+from maxtext.utils.globals import MAXTEXT_TEST_ASSETS_ROOT
 from tests.utils.test_helpers import (
     get_test_config_path,
     get_test_base_output_directory,
-    get_decoupled_parallelism_overrides,
 )
 
 
-def get_checkpointing_command(run_date, hardware, steps, metrics_file, attention_type, dataset_type, dataset_path):
+def get_checkpointing_command(
+    run_date, hardware, steps, metrics_file, attention_type, dataset_type, dataset_path, base_output_directory=None
+):
   """Generates a command list for a checkpointing test run.
 
   Args:
@@ -57,14 +58,15 @@ def get_checkpointing_command(run_date, hardware, steps, metrics_file, attention
   Returns:
     A list of strings representing the command line arguments.
   """
-  base_output_directory = get_test_base_output_directory()
+  if base_output_directory is None:
+    base_output_directory = get_test_base_output_directory()
   model_params = [
-      "base_emb_dim=384",
-      "base_num_query_heads=8",
-      "base_num_kv_heads=8",
-      "base_mlp_dim=192",
-      "base_num_decoder_layers=8",
-      "head_dim=128",
+      "base_emb_dim=128",
+      "base_num_query_heads=2",
+      "base_num_kv_heads=2",
+      "base_mlp_dim=128",
+      "base_num_decoder_layers=1",
+      "head_dim=64",
   ]
   pathways_command = []
   if os.getenv("JAX_PLATFORMS") == "proxy":
@@ -72,10 +74,6 @@ def get_checkpointing_command(run_date, hardware, steps, metrics_file, attention
         "enable_single_controller=True",
         "checkpoint_storage_use_zarr3=False",
     ]
-
-  extra_parallelism = []
-  if is_decoupled():  # Match device topology in decoupled/local mode
-    extra_parallelism.extend(get_decoupled_parallelism_overrides(as_argv=True))
 
   return (
       [
@@ -87,6 +85,7 @@ def get_checkpointing_command(run_date, hardware, steps, metrics_file, attention
           "max_target_length=128",
           "per_device_batch_size=1",
           f"metrics_file={metrics_file}",
+          "enable_checkpointing=True",
           "checkpoint_period=3",
           f"base_output_directory={base_output_directory}",
           f"dataset_path={dataset_path}",
@@ -96,7 +95,6 @@ def get_checkpointing_command(run_date, hardware, steps, metrics_file, attention
       ]
       + model_params
       + pathways_command
-      + extra_parallelism
   )
 
 
@@ -135,7 +133,7 @@ def run_checkpointing(hardware, attention_type):
   # Determine dataset path/pattern depending on decoupled mode.
   gcsfuse_pattern = "/tmp/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record*"
   local_decoupled_root = os.path.join(
-      MAXTEXT_PKG_DIR, "..", "tests", "assets", "local_datasets", "c4_en_dataset_minimal", "c4", "en", "3.0.1"
+      MAXTEXT_TEST_ASSETS_ROOT, "local_datasets", "c4_en_dataset_minimal", "c4", "en", "3.0.1"
   )
   local_pattern = os.path.join(local_decoupled_root, "c4-train.array_record*")
   selected_pattern = gcsfuse_pattern
@@ -145,7 +143,7 @@ def run_checkpointing(hardware, attention_type):
     # Prefer local minimal dataset if gcsfuse data absent
     if not glob.glob(gcsfuse_pattern) and glob.glob(local_pattern):
       selected_pattern = local_pattern
-      dataset_path = os.path.join(MAXTEXT_PKG_DIR, "..", "tests", "assets", "local_datasets")
+      dataset_path = os.path.join(MAXTEXT_TEST_ASSETS_ROOT, "local_datasets")
     elif not glob.glob(gcsfuse_pattern) and not glob.glob(local_pattern):
       pytest.skip("No grain ArrayRecord shards found for checkpointing test in decoupled mode.")
 
@@ -153,6 +151,7 @@ def run_checkpointing(hardware, attention_type):
       "grain_worker_count=0",
       f"grain_train_files={selected_pattern}",
   ]
+  local_ckpt_dir = "/tmp/maxtext_local_output"
   train_main(
       get_checkpointing_command(
           run_date,
@@ -162,6 +161,7 @@ def run_checkpointing(hardware, attention_type):
           attention_type=attention_type,
           dataset_type="grain",
           dataset_path=dataset_path,
+          base_output_directory=local_ckpt_dir,
       )
       + grain_command
   )
@@ -175,6 +175,7 @@ def run_checkpointing(hardware, attention_type):
           attention_type=attention_type,
           dataset_type="grain",
           dataset_path=dataset_path,
+          base_output_directory=local_ckpt_dir,
       )
       + grain_command
   )
@@ -194,3 +195,40 @@ def test_autoselected_attention():
 def test_with_dot_product():
   """Tests checkpointing with dot_product attention on GPU."""
   run_checkpointing("gpu", "dot_product")
+
+
+@pytest.mark.integration_test
+@pytest.mark.tpu_only
+@pytest.mark.scheduled_only
+def test_scan_layers_mismatch_tpu():
+  """Tests scan_layers mismatch checkpoint loading raises ValueError on TPU."""
+  hardware = "tpu"
+  attention_type = "autoselected"
+  run_date = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+  local_ckpt_dir = "/tmp/maxtext_local_output"
+
+  def get_cmd(steps, metrics_file):
+    return get_checkpointing_command(
+        run_date,
+        hardware=hardware,
+        steps=steps,
+        metrics_file=metrics_file,
+        attention_type=attention_type,
+        dataset_type="synthetic",
+        dataset_path="/tmp/gcsfuse",
+        base_output_directory=local_ckpt_dir,
+    )
+
+  # 1. Save checkpoint with scan_layers=True (default) and steps=1
+  train_main(get_cmd(steps=1, metrics_file="saved_metrics_mismatch.txt"))
+
+  # 2. Attempt to restore with scan_layers=False and assert ValueError
+  mismatch_command = get_cmd(
+      steps=2, metrics_file="restored_metrics_mismatch.txt"
+  ) + ["scan_layers=False"]
+
+  with pytest.raises(ValueError) as excinfo:
+    train_main(mismatch_command)
+
+  assert "Failed to restore checkpoint" in str(excinfo.value)
+  assert "scan_layers" in str(excinfo.value)

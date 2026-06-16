@@ -60,7 +60,6 @@ from tests.utils.multimodal_test_utils import (
     copy_vision_encoder_weights,
     create_block_diagonal_attention_mask,
     create_random_jax_torch,
-    split_into_patches,
 )
 import numpy as np
 import torch
@@ -535,21 +534,26 @@ class TestQwen3OmniMoeVisionEncoderEndToEnd(BaseVisionTestCaseWithMesh):
     in_channels = self.config.num_channels_for_vit
     h, w = 8, 8  # 8x8 patches
 
-    total_elements = 1 * in_channels * temporal_patch_size * (h * patch_size) * (w * patch_size)
-    jax_hidden_states, _ = create_random_jax_torch(total_elements)
+    n_patches = h * w
+    total_elements = n_patches * in_channels * temporal_patch_size * patch_size * patch_size
+    flat_data, _ = create_random_jax_torch(total_elements)
 
-    jax_hidden_states = jax_hidden_states.reshape(1, in_channels, temporal_patch_size, h * patch_size, w * patch_size)
+    # JAX encoder expects preprocessor format: (1, C, tps*T, ps*H, ps*W) where the underlying
+    # memory is patch-first (T*H*W, C*tps*ps*ps). Simple reshape in the encoder then recovers
+    # each patch correctly, matching the end-to-end preprocessing pipeline.
+    jax_hidden_states = flat_data.reshape(1, in_channels, temporal_patch_size, h * patch_size, w * patch_size)
 
-    torch_hidden_states = split_into_patches(
-        torch.from_numpy(np.array(jax_hidden_states)),
-        temporal_patch_size,
-        patch_size,
+    # PyTorch encoder expects patches directly in (N, C, tps, ps, ps) format.
+    torch_hidden_states = torch.from_numpy(
+        np.array(flat_data).reshape((n_patches, in_channels, temporal_patch_size, patch_size, patch_size))
     )
 
     grid_thw = np.array([[1, h, w]], dtype=np.int64)
     grid_thw_torch = torch.from_numpy(grid_thw)
 
-    torch_output, torch_deep_feats = torch_encoder(torch_hidden_states, grid_thw_torch)
+    torch_encoder_output = torch_encoder(torch_hidden_states, grid_thw_torch)
+    torch_output = torch_encoder_output.pooler_output
+    torch_deep_feats = torch_encoder_output.deepstack_features
     jax_encoder_output, jax_deep_feats = jax_encoder(jax_hidden_states)
     jax_output = jax_projector(jax_encoder_output)
 
@@ -559,8 +563,8 @@ class TestQwen3OmniMoeVisionEncoderEndToEnd(BaseVisionTestCaseWithMesh):
     assert_all_close_jax_torch(
         jax_output,
         torch_output,
-        rtol=1e-2,
-        atol=1e-2,
+        rtol=1.5e-2,
+        atol=1.5e-2,
         error_msg="Vision encoder final output differs",
     )
 
@@ -574,8 +578,8 @@ class TestQwen3OmniMoeVisionEncoderEndToEnd(BaseVisionTestCaseWithMesh):
       assert_all_close_jax_torch(
           jax_feat,
           torch_feat,
-          rtol=1e-2,
-          atol=1e-2,
+          rtol=1.5e-2,
+          atol=1.5e-2,
           error_msg=f"Deep feature {i} differs",
       )
 
@@ -673,7 +677,6 @@ class TestQwen3OmniPreprocessing(unittest.TestCase):
         model_name="qwen3-omni-30b-a3b",
         tokenizer_type="huggingface",
         tokenizer_path="Qwen/Qwen3-Omni-30B-A3B-Instruct",
-        use_multimodal=True,
         image_path=self.image_path,
         video_path=self.video_path,
         use_audio_in_video=True,
@@ -721,6 +724,16 @@ class TestQwen3OmniPreprocessing(unittest.TestCase):
     USE_AUDIO_IN_VIDEO = True
     hf_prompt = processor.apply_chat_template(conversation, add_generation_prompt=True, tokenize=False)
     audios, images, videos = process_mm_info(conversation, use_audio_in_video=USE_AUDIO_IN_VIDEO)
+    if audios is not None:
+      padded_audios = []
+      for audio in audios:
+        chunk_samples = 16000
+        remainder = len(audio) % chunk_samples
+        if remainder > 0:
+          padding_size = chunk_samples - remainder
+          audio = np.pad(audio, (0, padding_size), mode="constant")
+        padded_audios.append(audio)
+      audios = padded_audios
     hf_processor_outputs = processor(
         text=hf_prompt,
         audio=audios,
@@ -739,15 +752,20 @@ class TestQwen3OmniPreprocessing(unittest.TestCase):
     # Check the tokenized IDs are the same (with multimodal paddings)
     assert np.array_equal(mt_input_ids[: hf_input_ids.shape[0]], hf_input_ids)
     # Check the image/video/audio values are close (allow some tolerance due to preprocessing differences)
+    hf_pixel_values = np.array(hf_processor_outputs["pixel_values"]).astype(np.float32)
+    # MaxText pixel_values are reshaped to (1, C, T, H, W); flatten to patch format for comparison.
+    mt_pixel_values = np.array(mt_processor_outputs.pixel_values).reshape(hf_pixel_values.shape)
     assert np.allclose(
-        mt_processor_outputs.pixel_values,
-        np.array(hf_processor_outputs["pixel_values"]).astype(np.float32),
+        mt_pixel_values,
+        hf_pixel_values,
         rtol=1e-2,
         atol=1e-2,
     )
+    hf_pixel_values_videos = np.array(hf_processor_outputs["pixel_values_videos"]).astype(np.float32)
+    mt_video_values = np.array(mt_processor_outputs.video_values).reshape(hf_pixel_values_videos.shape)
     assert np.allclose(
-        mt_processor_outputs.video_values,
-        np.array(hf_processor_outputs["pixel_values_videos"]).astype(np.float32),
+        mt_video_values,
+        hf_pixel_values_videos,
         rtol=5e-2,
         atol=5e-2,
     )

@@ -20,6 +20,7 @@ import unittest
 
 from maxtext.configs import pyconfig
 from maxtext.configs.pyconfig import resolve_config_path, _CONFIG_FILE_MAPPING, _module_from_path
+from maxtext.input_pipeline import data_processing_utils
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_PKG_DIR
 from tests.utils.test_helpers import get_test_config_path, get_post_train_test_config_path
 
@@ -110,6 +111,14 @@ class PyconfigTest(unittest.TestCase):
     self.assertEqual(config.base_emb_dim, 1024)  # override
     self.assertEqual(config.base_mlp_dim, 14336)  # unchanged
 
+  def test_tokenizer_path_resolution_for_qwen3_base(self):
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        model_name="qwen3-30b-a3b-base",
+    )
+    self.assertEqual(config.tokenizer_path, "Qwen/Qwen3-30B-A3B-Base")
+
   def test_resolve_config_path(self):
     self.assertEqual(resolve_config_path("foo"), os.path.join("src", "foo"))
     self.assertEqual(resolve_config_path(__file__), __file__)
@@ -149,9 +158,85 @@ class PyconfigTest(unittest.TestCase):
     self.assertEqual(config.dump_hlo_local_module_name, "")
     self.assertEqual(config.dump_hlo_module_name, "")
 
-  def test_unknown_module_raises(self):
-    with self.assertRaises(ValueError):
-      pyconfig.initialize_pydantic(["/custom_rl/module.py", "run_name=test"])
+  def test_unknown_module_falls_back_to_base_yml(self):
+    """An unknown module should fall back to base.yml with a warning (not raise)."""
+    config = pyconfig.initialize_pydantic(["/custom_rl/module.py", "run_name=test", "skip_jax_distributed_system=True"])
+    self.assertEqual(config.run_name, "test")
+
+  def test_identical_override_allowed(self):
+    """Test that overriding a model config key with an identical value is allowed."""
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        model_name="qwen3-8b",
+        override_model_config=False,
+        tokenizer_type="huggingface",  # Defined as huggingface in qwen3-8b
+    )
+    self.assertEqual(config.tokenizer_type, "huggingface")
+
+  def test_list_config_coercion(self):
+    """Verifies that string/tuple inputs for list[str] config fields are coerced to lists."""
+    # Case 1: Plain string (coerced to single-item list)
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        train_data_columns="messages",
+    )
+    self.assertEqual(config.train_data_columns, ["messages"])
+
+    # Case 2: Stringified list literal
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        train_data_columns="['col1', 'col2']",
+    )
+    self.assertEqual(config.train_data_columns, ["col1", "col2"])
+
+    # Case 3: Stringified list literal with whitespace
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        train_data_columns="[ 'col1' ,    'col2' ]",
+    )
+    self.assertEqual(config.train_data_columns, ["col1", "col2"])
+
+    # Case 4: Stringified tuple literal
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        train_data_columns="('col1', 'col2')",
+    )
+    self.assertEqual(config.train_data_columns, ["col1", "col2"])
+
+    # Case 5: Real tuple value (passed via kwargs)
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        train_data_columns=("col1", "col2"),
+    )
+    self.assertEqual(config.train_data_columns, ["col1", "col2"])
+
+    # Case 6: Malformed stringified list (falls back to wrapping as single-item list)
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        train_data_columns="[malformed, list",
+    )
+    self.assertEqual(config.train_data_columns, ["[malformed, list"])
+
+  def test_coerced_list_is_validated_successfully(self):
+    """Verifies that a coerced list from pyconfig is successfully validated by the dataset pipeline."""
+    # Simulate a user passing `train_data_columns=messages` on the CLI
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        train_data_columns="messages",
+    )
+    # Verify coercion to list was successful
+    self.assertEqual(config.train_data_columns, ["messages"])
+
+    # Verify that passing this coerced list to the SFT column validator passes without error (Scenario A)
+    data_processing_utils.validate_and_configure_sft_columns(config.train_data_columns, None)
 
 
 if __name__ == "__main__":

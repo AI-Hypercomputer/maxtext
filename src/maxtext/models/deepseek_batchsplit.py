@@ -33,9 +33,10 @@ from typing import Sequence
 
 import jax
 import jax.numpy as jnp
-from maxtext.kernels import attention, sort_activations
-
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
+
+from maxtext.kernels import attention, sort_activations, megablox
+from maxtext.layers import quantizations
 
 
 def scheduling_group(group_id) -> contextlib.AbstractContextManager[None]:
@@ -166,9 +167,9 @@ def gather_weights(weights, mesh):
     wkv_b = jax.lax.all_gather(wkv_b, axis_name="fsdp", tiled=True, to="reduced")
     out = jax.lax.all_gather(out, axis_name="fsdp", tiled=True, axis=2, to="reduced")
     gate = jax.lax.all_gather(gate, axis_name="fsdp", tiled=True, to="reduced")
-    routed_wi_0 = jax.lax.all_gather(routed_wi_0, axis_name="fsdp", tiled=True, to="reduced")
-    routed_wi_1 = jax.lax.all_gather(routed_wi_1, axis_name="fsdp", tiled=True, to="reduced")
-    routed_wo = jax.lax.all_gather(routed_wo, axis_name="fsdp", tiled=True, to="reduced")
+    routed_wi_0 = jax.lax.all_gather(routed_wi_0, axis_name="fsdp", tiled=True, axis=1, to="reduced")
+    routed_wi_1 = jax.lax.all_gather(routed_wi_1, axis_name="fsdp", tiled=True, axis=1, to="reduced")
+    routed_wo = jax.lax.all_gather(routed_wo, axis_name="fsdp", tiled=True, axis=2, to="reduced")
     shared_wi_0 = jax.lax.all_gather(shared_wi_0, axis_name="fsdp", tiled=True, to="reduced")
     shared_wi_1 = jax.lax.all_gather(shared_wi_1, axis_name="fsdp", tiled=True, to="reduced")
     shared_wo = jax.lax.all_gather(shared_wo, axis_name="fsdp", tiled=True, axis=1, to="reduced")
@@ -211,9 +212,9 @@ def gather_weights(weights, mesh):
                           jax.sharding.PartitionSpec(None),
                       ),
                       (
-                          jax.sharding.PartitionSpec("fsdp", None, "expert"),
-                          jax.sharding.PartitionSpec("fsdp", None, "expert"),
-                          jax.sharding.PartitionSpec("fsdp", "expert", None),
+                          jax.sharding.PartitionSpec("expert", "fsdp", None),
+                          jax.sharding.PartitionSpec("expert", "fsdp", None),
+                          jax.sharding.PartitionSpec("expert", None, "fsdp"),
                       ),
                       (
                           jax.sharding.PartitionSpec("fsdp", None),
@@ -243,9 +244,9 @@ def gather_weights(weights, mesh):
                       jax.sharding.PartitionSpec(None),
                   ),
                   (
-                      jax.sharding.PartitionSpec(None, None, "expert", reduced={"data", "fsdp"}),
-                      jax.sharding.PartitionSpec(None, None, "expert", reduced={"data", "fsdp"}),
-                      jax.sharding.PartitionSpec(None, "expert", None, reduced={"data", "fsdp"}),
+                      jax.sharding.PartitionSpec("expert", None, None, reduced={"data", "fsdp"}),
+                      jax.sharding.PartitionSpec("expert", None, None, reduced={"data", "fsdp"}),
+                      jax.sharding.PartitionSpec("expert", None, None, reduced={"data", "fsdp"}),
                   ),
                   (
                       jax.sharding.PartitionSpec(None, None, reduced={"data", "fsdp", "expert"}),
@@ -282,9 +283,9 @@ def reduce_scatter_ws_grad(ws_grad, mesh):
     wkv_b = jax.lax.psum_scatter(wkv_b, axis_name="fsdp", tiled=True)
     out = jax.lax.psum_scatter(out, axis_name="fsdp", tiled=True, scatter_dimension=2)
     gate = jax.lax.psum_scatter(gate, axis_name="fsdp", tiled=True)
-    routed_wi_0 = jax.lax.psum_scatter(routed_wi_0, axis_name="fsdp", tiled=True)
-    routed_wi_1 = jax.lax.psum_scatter(routed_wi_1, axis_name="fsdp", tiled=True)
-    routed_wo = jax.lax.psum_scatter(routed_wo, axis_name="fsdp", tiled=True)
+    routed_wi_0 = jax.lax.psum_scatter(routed_wi_0, axis_name="fsdp", tiled=True, scatter_dimension=1)
+    routed_wi_1 = jax.lax.psum_scatter(routed_wi_1, axis_name="fsdp", tiled=True, scatter_dimension=1)
+    routed_wo = jax.lax.psum_scatter(routed_wo, axis_name="fsdp", tiled=True, scatter_dimension=2)
     shared_wi_0 = jax.lax.psum_scatter(shared_wi_0, axis_name="fsdp", tiled=True)
     shared_wi_1 = jax.lax.psum_scatter(shared_wi_1, axis_name="fsdp", tiled=True)
     shared_wo = jax.lax.psum_scatter(shared_wo, axis_name="fsdp", tiled=True, scatter_dimension=1)
@@ -335,9 +336,9 @@ def reduce_scatter_ws_grad(ws_grad, mesh):
                       jax.sharding.PartitionSpec(None),
                   ),
                   (
-                      jax.sharding.PartitionSpec(None, None, "expert", unreduced={"data", "fsdp"}),
-                      jax.sharding.PartitionSpec(None, None, "expert", unreduced={"data", "fsdp"}),
-                      jax.sharding.PartitionSpec(None, "expert", None, unreduced={"data", "fsdp"}),
+                      jax.sharding.PartitionSpec("expert", None, None, unreduced={"data", "fsdp"}),
+                      jax.sharding.PartitionSpec("expert", None, None, unreduced={"data", "fsdp"}),
+                      jax.sharding.PartitionSpec("expert", None, None, unreduced={"data", "fsdp"}),
                   ),
                   (
                       jax.sharding.PartitionSpec(None, None, unreduced={"data", "fsdp", "expert"}),
@@ -367,9 +368,9 @@ def reduce_scatter_ws_grad(ws_grad, mesh):
                   jax.sharding.PartitionSpec(None),
               ),
               (
-                  jax.sharding.PartitionSpec("fsdp", None, "expert", unreduced={"data"}),
-                  jax.sharding.PartitionSpec("fsdp", None, "expert", unreduced={"data"}),
-                  jax.sharding.PartitionSpec("fsdp", "expert", None, unreduced={"data"}),
+                  jax.sharding.PartitionSpec("expert", "fsdp", None, unreduced={"data"}),
+                  jax.sharding.PartitionSpec("expert", "fsdp", None, unreduced={"data"}),
+                  jax.sharding.PartitionSpec("expert", None, "fsdp", unreduced={"data"}),
               ),
               (
                   jax.sharding.PartitionSpec("fsdp", None, unreduced={"data"}),
@@ -448,9 +449,9 @@ def all_reduce_ws_grad_dcn(ws_grad, mesh):
                       jax.sharding.PartitionSpec(None),
                   ),
                   (
-                      jax.sharding.PartitionSpec("fsdp", None, "expert", unreduced={"data"}),
-                      jax.sharding.PartitionSpec("fsdp", None, "expert", unreduced={"data"}),
-                      jax.sharding.PartitionSpec("fsdp", "expert", None, unreduced={"data"}),
+                      jax.sharding.PartitionSpec("expert", "fsdp", None, unreduced={"data"}),
+                      jax.sharding.PartitionSpec("expert", "fsdp", None, unreduced={"data"}),
+                      jax.sharding.PartitionSpec("expert", None, "fsdp", unreduced={"data"}),
                   ),
                   (
                       jax.sharding.PartitionSpec("fsdp", None, unreduced={"data"}),
@@ -480,9 +481,9 @@ def all_reduce_ws_grad_dcn(ws_grad, mesh):
                   jax.sharding.PartitionSpec(None),
               ),
               (
-                  jax.sharding.PartitionSpec("fsdp", None, "expert"),
-                  jax.sharding.PartitionSpec("fsdp", None, "expert"),
-                  jax.sharding.PartitionSpec("fsdp", "expert", None),
+                  jax.sharding.PartitionSpec("expert", "fsdp", None),
+                  jax.sharding.PartitionSpec("expert", "fsdp", None),
+                  jax.sharding.PartitionSpec("expert", None, "fsdp"),
               ),
               (
                   jax.sharding.PartitionSpec("fsdp", None),
@@ -644,6 +645,125 @@ def tpu_flash_attention_bwd(
   return dq, dk, dv
 
 
+def batch_split_layer(
+    inputs,
+    params,
+    positions,
+    *,
+    mesh,
+    cfg,
+):
+  """Processes a single layer with batch-split schedule."""
+  all_weights = fetch_weights(params, cfg.dtype)
+  activation_pspec = jax.sharding.PartitionSpec(
+      ("data", "fsdp", "expert"),
+      None,
+      None,
+  )
+  # The data mesh axis can be size 1, but we still want to keep it in the
+  # partition spec because the code supports multi-slice runs and thus
+  # expects the data axis to be present.
+  inputs = jax.reshard(inputs, jax.sharding.NamedSharding(mesh, activation_pspec))
+  yarn_freqs = initialize_yarn_freqs(
+      positions=positions,
+      embedding_dims=cfg.qk_rope_head_dim,
+      rope_theta=cfg.rope_max_timescale,
+      max_position_embeddings=cfg.max_position_embeddings,
+      original_max_position_embeddings=cfg.original_max_position_embeddings,
+      beta_fast=cfg.beta_fast,
+      beta_slow=cfg.beta_slow,
+      rope_factor=cfg.rope_factor,
+      mesh=mesh,
+      activation_pspec=activation_pspec,
+  )
+  yarn_mask = initialize_yarn_mask(cfg.qk_rope_head_dim)
+  splash_kernel = init_splash_kernel(cfg)
+
+  @jax.custom_vjp
+  def process_layer(inputs, all_weights, yarn_freqs):
+    return process_layer_fwd(inputs, all_weights, yarn_freqs)[0]
+
+  def process_layer_fwd(inputs, weights, yarn_freqs):
+    ws = gather_weights(weights, mesh)
+    outputs, res = batch_split_schedule(
+        inputs,
+        ws,
+        yarn_freqs,
+        mesh=mesh,
+        cfg=cfg,
+        splash_kernel=splash_kernel,
+        activation_pspec=activation_pspec,
+        pairwise_swap_and_negate_mask=yarn_mask,
+    )
+    moe_inputs, routed_expert_out, shared_expert_out, selected_experts = outputs[1]
+    outputs[1], unroute_res = unroute_ubatch_shard_mapped(
+        moe_inputs,
+        routed_expert_out,
+        shared_expert_out,
+        selected_experts,
+        expert_axis_name="expert",
+        use_gather_mosaic_kernel=cfg.use_gather_mosaic_kernel,
+        target_length=cfg.max_target_length,
+        mesh=mesh,
+        activation_pspec=activation_pspec,
+    )
+    return outputs, (
+        res,
+        unroute_res,
+        ws,
+        yarn_freqs,
+    )
+
+  def process_layer_bwd(res, g):
+    (
+        res,
+        unroute_res,
+        ws,
+        yarn_freqs,
+    ) = res
+
+    g[1] = unroute_ubatch_remat_and_bwd_shard_mapped(
+        unroute_res["selected_experts"],
+        g[1],
+        expert_axis_name="expert",
+        use_gather_mosaic_kernel=cfg.use_gather_mosaic_kernel,
+        mesh=mesh,
+        activation_pspec=activation_pspec,
+    )
+    g, ws_grad = batch_split_schedule_bwd(
+        res,
+        g,
+        ws,
+        yarn_freqs,
+        mesh=mesh,
+        cfg=cfg,
+        splash_kernel=splash_kernel,
+        activation_pspec=activation_pspec,
+        pairwise_swap_and_negate_mask=yarn_mask,
+    )
+    weights_grad = reduce_scatter_ws_grad(ws_grad, mesh)
+    weights_grad = all_reduce_ws_grad_dcn(weights_grad, mesh)
+    return g, weights_grad, None
+
+  process_layer.defvjp(process_layer_fwd, process_layer_bwd)
+
+  inputs = jax.shard_map(
+      functools.partial(split, split_factor=cfg.batch_split_factor),
+      mesh=mesh,
+      in_specs=activation_pspec,
+      out_specs=[activation_pspec] * cfg.batch_split_factor,
+  )(inputs)
+  yarn_freqs = split(yarn_freqs, split_factor=cfg.batch_split_factor)
+  outputs = process_layer(inputs, all_weights, yarn_freqs)
+  outputs = jax.shard_map(
+      functools.partial(merge, split_factor=cfg.batch_split_factor),
+      mesh=mesh,
+      in_specs=([activation_pspec] * cfg.batch_split_factor,),
+      out_specs=activation_pspec,
+  )(outputs)
+  return outputs
+
+
 def scan_batch_split_layers(
     inputs,
     params,
@@ -654,6 +774,8 @@ def scan_batch_split_layers(
     num_layers,
 ):
   """Scans the layers with batch-split schedule."""
+  assert num_layers >= 4, "num_layers must be at least 4 for batch-split schedule."
+
   all_weights = fetch_weights(params, cfg.dtype)
   activation_pspec = jax.sharding.PartitionSpec(
       ("data", "fsdp", "expert"),
@@ -714,7 +836,7 @@ def scan_batch_split_layers(
           pairwise_swap_and_negate_mask=yarn_mask,
       )
       # Offload to host memory.
-      for residual_name in ("mlpwi_0", "mlpwi_1"):
+      for residual_name in ("mlpwi_0", "mlpwi_1", "attn_out", "layer_inputs"):
         r = res.pop(residual_name)
         r = jax.tree.map(lambda x: jax.device_put(x, jax.typeof(x).sharding.with_memory_kind("pinned_host")), r)
         res[residual_name] = r
@@ -736,7 +858,7 @@ def scan_batch_split_layers(
         pairwise_swap_and_negate_mask=yarn_mask,
     )
     # Offload first layer residuals to host memory.
-    for residual_name in ("mlpwi_0", "mlpwi_1"):
+    for residual_name in ("mlpwi_0", "mlpwi_1", "attn_out", "layer_inputs"):
       r = first_res.pop(residual_name)
       r = jax.tree.map(lambda x: jax.device_put(x, jax.typeof(x).sharding.with_memory_kind("pinned_host")), r)
       first_res[residual_name] = r
@@ -829,7 +951,7 @@ def scan_batch_split_layers(
       next_next_ws_grad = all_reduce_ws_grad_dcn(next_next_ws_grad, mesh)
       all_layer_ws_grad = insert_layer_ws_grad(all_layer_ws_grad, next_next_ws_grad, layer_idx + 2, cfg.param_scan_axis)
       # Get residuals from host.
-      for residual_name in ("mlpwi_0", "mlpwi_1"):
+      for residual_name in ("mlpwi_0", "mlpwi_1", "attn_out", "layer_inputs"):
         r = res.pop(residual_name)
         r = jax.tree.map(lambda x: jax.device_put(x, jax.typeof(x).sharding.with_memory_kind("device")), r)
         res[residual_name] = r
@@ -890,7 +1012,7 @@ def scan_batch_split_layers(
       prev_prev_ws = gather_weights(extract_layer_weights(all_weights, num_layers - 3, cfg.param_scan_axis), mesh)
       ws_grad = reduce_scatter_ws_grad(ws_grad, mesh)
     # Get residuals from host.
-    for residual_name in ("mlpwi_0", "mlpwi_1"):
+    for residual_name in ("mlpwi_0", "mlpwi_1", "attn_out", "layer_inputs"):
       r = last_last_res.pop(residual_name)
       r = jax.tree.map(lambda x: jax.device_put(x, jax.typeof(x).sharding.with_memory_kind("device")), r)
       last_last_res[residual_name] = r
@@ -931,7 +1053,7 @@ def scan_batch_split_layers(
     third_ws_grad = all_reduce_ws_grad_dcn(third_ws_grad, mesh)
     all_layer_ws_grad = insert_layer_ws_grad(all_layer_ws_grad, third_ws_grad, 2, cfg.param_scan_axis)
     # Get residuals from host.
-    for residual_name in ("mlpwi_0", "mlpwi_1"):
+    for residual_name in ("mlpwi_0", "mlpwi_1", "attn_out", "layer_inputs"):
       r = first_res.pop(residual_name)
       r = jax.tree.map(lambda x: jax.device_put(x, jax.typeof(x).sharding.with_memory_kind("device")), r)
       first_res[residual_name] = r
@@ -991,6 +1113,7 @@ def batch_split_schedule(
       norm_mla_ws,
       positions,
       mesh=mesh,
+      config=cfg,
       splash_kernel=splash_kernel,
       normalization_layer_epsilon=cfg.normalization_layer_epsilon,
       kv_lora_rank=cfg.kv_lora_rank,
@@ -1012,7 +1135,15 @@ def batch_split_schedule(
       num_experts=cfg.num_experts,
       num_experts_per_tok=cfg.num_experts_per_tok,
       routed_scaling_factor=cfg.routed_scaling_factor,
+      n_routing_groups=cfg.n_routing_groups,
+      topk_routing_group=cfg.topk_routing_group,
+      top_k_in_group=2,
       expert_axis_name="expert",
+      num_expert_shards=mesh.shape.get("expert", 1),
+      # Capacity factor indicates how many tokens will be checkpointed in the MoE
+      # block. It does not actually drop any tokens, unlike the `capacity_factor`
+      # option available in maxtext configs.
+      capacity_factor=2,
       use_gather_mosaic_kernel=cfg.use_gather_mosaic_kernel,
       config=cfg,
       normalization_layer_epsilon=cfg.normalization_layer_epsilon,
@@ -1036,11 +1167,12 @@ def batch_split_schedule_bwd(
 ):
   """Performs the backward pass for a single layer."""
   norm_mla_ws, moe_ws = weights
-  mla_out, mla_bwds = mla_with_norms_remat(
+  _, mla_bwds = mla_with_norms_remat(
       residuals,
       norm_mla_ws,
       positions,
       mesh=mesh,
+      config=cfg,
       splash_kernel=splash_kernel,
       normalization_layer_epsilon=cfg.normalization_layer_epsilon,
       kv_lora_rank=cfg.kv_lora_rank,
@@ -1055,7 +1187,6 @@ def batch_split_schedule_bwd(
       dtype=cfg.dtype,
       activation_pspec=activation_pspec,
   )
-  residuals["mla_out"] = mla_out
   attn_out_grad, moe_ws_grad = moe_bwd(
       residuals,
       outputs_grad,
@@ -1064,7 +1195,11 @@ def batch_split_schedule_bwd(
       num_experts=cfg.num_experts,
       num_experts_per_tok=cfg.num_experts_per_tok,
       routed_scaling_factor=cfg.routed_scaling_factor,
+      n_routing_groups=cfg.n_routing_groups,
+      topk_routing_group=cfg.topk_routing_group,
+      top_k_in_group=2,
       expert_axis_name="expert",
+      num_expert_shards=mesh.shape.get("expert", 1),
       use_gather_mosaic_kernel=cfg.use_gather_mosaic_kernel,
       config=cfg,
       normalization_layer_epsilon=cfg.normalization_layer_epsilon,
@@ -1099,6 +1234,7 @@ def mla_with_norms(
     yarn_freqs,
     *,
     mesh,
+    config,
     splash_kernel,
     normalization_layer_epsilon,
     kv_lora_rank,
@@ -1141,6 +1277,7 @@ def mla_with_norms(
         pairwise_swap_and_negate_mask=pairwise_swap_and_negate_mask,
         dtype=dtype,
         mscale=mscale,
+        config=config,
         splash_kernel=splash_kernel,
         mesh=mesh,
         activation_pspec=activation_pspec,
@@ -1148,7 +1285,8 @@ def mla_with_norms(
     # Prevent fusion with MoE ops, especially the RMS norm.
     # Unfortunately, this seems to be needed to avoid slight numerical differences
     # between the fwd pass and remat.
-    return jax.lax.optimization_barrier(mla_out + x), mla_res
+    out = jax.lax.optimization_barrier(mla_out + x)
+    return out, {"mla_out": out, **mla_res}
 
   return staggered_call(fn, list(zip(inputs, yarn_freqs)))
 
@@ -1159,6 +1297,7 @@ def mla_with_norms_remat(
     yarn_freqs,
     *,
     mesh,
+    config,
     splash_kernel,
     normalization_layer_epsilon,
     kv_lora_rank,
@@ -1205,15 +1344,16 @@ def mla_with_norms_remat(
         pairwise_swap_and_negate_mask=pairwise_swap_and_negate_mask,
         dtype=dtype,
         mscale=mscale,
+        config=config,
         splash_kernel=splash_kernel,
         mesh=mesh,
         activation_pspec=activation_pspec,
     )
-    out = x + mla_out
     # Prevent fusion with MoE ops, especially the RMS norm.
     # Unfortunately, this seems to be needed to avoid slight numerical differences
     # between the fwd pass and remat.
-    return jax.lax.optimization_barrier(out), (pre_attn_rms_norm_bwd, mla_bwds)
+    out = jax.lax.optimization_barrier(x + mla_out)
+    return out, (pre_attn_rms_norm_bwd, mla_bwds)
 
   bwds = [None] * len(xs)
   for i, x in enumerate(zip(xs, yarn_freqs, residuals.pop("attn_out"), residuals.pop("lse"))):
@@ -1257,6 +1397,7 @@ def mla(
     original_max_position_embeddings,
     rope_factor,
     mscale,
+    config,
     splash_kernel,
     pairwise_swap_and_negate_mask,
     dtype,
@@ -1288,6 +1429,7 @@ def mla(
       dtype=dtype,
       qk_nope_head_dim=qk_nope_head_dim,
       mscale=mscale,
+      config=config,
       mesh=mesh,
       activation_pspec=activation_pspec,
   )
@@ -1303,6 +1445,7 @@ def mla(
       dtype=dtype,
       qk_nope_head_dim=qk_nope_head_dim,
       num_query_heads=num_query_heads,
+      config=config,
       mesh=mesh,
       activation_pspec=activation_pspec,
   )
@@ -1333,6 +1476,7 @@ def mla_remat(
     original_max_position_embeddings,
     rope_factor,
     mscale,
+    config,
     splash_kernel,
     pairwise_swap_and_negate_mask,
     dtype,
@@ -1362,6 +1506,7 @@ def mla_remat(
           dtype=dtype,
           qk_nope_head_dim=qk_nope_head_dim,
           mscale=mscale,
+          config=config,
           mesh=mesh,
           activation_pspec=activation_pspec,
       ),
@@ -1380,6 +1525,7 @@ def mla_remat(
           dtype=dtype,
           qk_nope_head_dim=qk_nope_head_dim,
           num_query_heads=num_query_heads,
+          config=config,
           mesh=mesh,
           activation_pspec=activation_pspec,
       ),
@@ -1422,7 +1568,6 @@ def mla_bwd(
   """Performs the backward pass for the mla function."""
   query_projection_bwd, kv_projection_bwd, attn_op_bwd, out_projection_bwd = bwds
   attn_out_grad, out_weights_grad = out_projection_bwd(out_grad)
-  # query_grad, key_grad, value_grad, _ = attention_op_bwd(attn_out_grad)
   query_grad, key_grad, value_grad = attn_op_bwd(attn_out_grad)
   inputs_grad_from_kv, _, wkv_a_weights_grad, wkv_b_weights_grad, kv_norm_scale_weights_grad = kv_projection_bwd(
       (key_grad, value_grad)
@@ -1457,6 +1602,7 @@ def query_projection(
     pairwise_swap_and_negate_mask,
     dtype,
     mscale,
+    config,
     mesh,
     activation_pspec,
 ):
@@ -1504,6 +1650,7 @@ def kv_projection(
     dtype,
     qk_nope_head_dim,
     num_query_heads,
+    config,
     mesh,
     activation_pspec,
 ):
@@ -1641,9 +1788,14 @@ def shared_expert_and_route(
     *,
     num_experts,
     num_experts_per_tok,
+    num_expert_shards,
     routed_scaling_factor,
+    n_routing_groups,
+    topk_routing_group,
+    top_k_in_group,
     expert_axis_name,
     use_gather_mosaic_kernel,
+    config,
     normalization_layer_epsilon,
     dtype,
 ):
@@ -1664,6 +1816,9 @@ def shared_expert_and_route(
       num_experts=num_experts,
       num_experts_per_tok=num_experts_per_tok,
       routed_scaling_factor=routed_scaling_factor,
+      n_routing_groups=n_routing_groups,
+      topk_routing_group=topk_routing_group,
+      top_k_in_group=top_k_in_group,
   )
   x, selected_experts, weights, group_sizes = route(
       inputs,
@@ -1671,6 +1826,8 @@ def shared_expert_and_route(
       weights,
       group_sizes,
       expert_axis_name=expert_axis_name,
+      num_experts=num_experts,
+      num_expert_shards=num_expert_shards,
       use_gather_mosaic_kernel=use_gather_mosaic_kernel,
   )
   return x, y, selected_experts, weights, group_sizes
@@ -1680,13 +1837,54 @@ def shared_expert(inputs, shared_w0, shared_w1, shared_wo):
   return dot(jax.nn.silu(dot(inputs, shared_w0)) * dot(inputs, shared_w1), shared_wo)
 
 
+# NOTE: Consider deduplicating this logic which is also in `moe.py`.
+def expert_group_mask(gate_logits, *, n_routing_groups, topk_routing_group, top_k_in_group):
+  """Computes expert group mask for node-limited routing."""
+  num_experts = gate_logits.shape[-1]
+  # Find top groups based on each group's top-2 expert scores, where
+  # `scores_grouped.shape =
+  # (batch * seq, n_routing_groups, experts_per_group)`.
+  scores_grouped = jnp.reshape(
+      gate_logits,
+      gate_logits.shape[:-1] + (n_routing_groups, -1),
+  )
+  top2_in_group_vals, _ = jax.lax.top_k(scores_grouped, k=top_k_in_group)
+  group_scores = jnp.sum(jnp.astype(top2_in_group_vals, jnp.float32), axis=-1)
+  _, group_idx = jax.lax.top_k(group_scores, k=topk_routing_group)
+
+  # Mask selected groups so that only those experts are considered.
+  group_mask = jax.nn.one_hot(group_idx, num_classes=n_routing_groups, dtype=jnp.float32)
+  group_mask = jnp.sum(group_mask, axis=-2)
+
+  # Apply masks and get top-k indices.
+  score_mask_expanded = jnp.broadcast_to(
+      group_mask[..., None],
+      group_mask.shape + (num_experts // n_routing_groups,),
+  )
+  return jnp.reshape(
+      score_mask_expanded,
+      score_mask_expanded.shape[:-2] + (num_experts,),
+  )
+
+
 def expert_indices_and_weights(
     gate_logits: jax.Array,
     pre_bias_logits: jax.Array,
     num_experts_per_tok: int,
     routed_scaling_factor: float,
+    n_routing_groups: int,
+    topk_routing_group: int,
+    top_k_in_group: int,
 ) -> tuple[jax.Array, jax.Array]:
   """Computes expert indices for each token and their corresponding weights."""
+  expert_mask = expert_group_mask(
+      gate_logits,
+      n_routing_groups=n_routing_groups,
+      topk_routing_group=topk_routing_group,
+      top_k_in_group=top_k_in_group,
+  )
+  gate_logits = jnp.where(expert_mask > 0, gate_logits, -jnp.inf)
+
   _, indices = jax.lax.top_k(
       gate_logits,
       k=num_experts_per_tok,
@@ -1701,9 +1899,12 @@ def expert_selection(
     routing_kernel,
     routing_bias,
     *,
-    num_experts,
-    num_experts_per_tok,
-    routed_scaling_factor,
+    num_experts: int,
+    num_experts_per_tok: int,
+    routed_scaling_factor: float,
+    n_routing_groups: int,
+    topk_routing_group: int,
+    top_k_in_group: int,
 ):
   """Selects experts for each token and calculates group sizes for each expert."""
   pre_bias_logits = jax.nn.sigmoid(dot(x, routing_kernel))
@@ -1714,6 +1915,9 @@ def expert_selection(
       pre_bias_logits,
       num_experts_per_tok=num_experts_per_tok,
       routed_scaling_factor=routed_scaling_factor,
+      n_routing_groups=n_routing_groups,
+      topk_routing_group=topk_routing_group,
+      top_k_in_group=top_k_in_group,
   )
   group_sizes = jnp.bincount(jnp.ravel(selected_experts), length=num_experts)
   return selected_experts, weights, group_sizes
@@ -1726,18 +1930,25 @@ def route(
     group_sizes,
     *,
     expert_axis_name,
+    num_experts,
+    num_expert_shards,
     use_gather_mosaic_kernel,
 ):
   """All-gather tokens and then perform local routing."""
   # Communicate local results across the expert axis.
   weights = jax.lax.all_gather(weights, axis_name=expert_axis_name, tiled=True)
   selected_experts = jax.lax.all_gather(selected_experts, axis_name=expert_axis_name, tiled=True)
-  weights = jnp.ravel(weights)[jnp.argsort(jnp.ravel(selected_experts))]
   group_sizes = jax.lax.psum(group_sizes, axis_name=expert_axis_name)
 
+  expert_id = jax.lax.axis_index(expert_axis_name)
+  expert_shift = expert_id * (num_experts / num_expert_shards)
+  selected_experts = (selected_experts - expert_shift) % num_experts
+
+  weights = jnp.ravel(weights)[jnp.argsort(jnp.ravel(selected_experts))]
   x = route_impl(
       x, selected_experts, expert_axis_name=expert_axis_name, use_gather_mosaic_kernel=use_gather_mosaic_kernel
   )
+  group_sizes = jnp.reshape(group_sizes, (num_expert_shards, -1))[expert_id]
   return x, selected_experts, weights, group_sizes
 
 
@@ -1820,35 +2031,154 @@ route_impl.defvjp(route_impl_fwd, route_impl_bwd)
 unroute_impl.defvjp(unroute_impl_fwd, unroute_impl_bwd)
 
 
-def compute_gating(x, w0, w1, group_sizes, *, dtype):
+# TODO(b/517203548): After integrating with the GMMv2 kernel and `zero_initialize` is set,
+# we will not need to mask the GMM token output explicitly in the fwd or bwd passes.
+# At that point, we can delete this custom ragged dot function.
+@functools.partial(jax.custom_vjp, nondiff_argnums=(3,))
+def ragged_dot_with_mask(x, ws, group_sizes, dtype):
+  return ragged_dot_with_mask_fwd(x, ws, group_sizes, dtype)[0]
+
+
+def ragged_dot_with_mask_fwd(x, ws, group_sizes, dtype):
+  """Performs ragged dot and masks unprocessed tokens."""
+  out, ragged_dot_bwd = jax.vjp(
+      functools.partial(
+          jax.lax.ragged_dot,
+          precision=jax.lax.Precision.DEFAULT,
+          preferred_element_type=dtype,
+          group_sizes=group_sizes,
+      ),
+      x,
+      ws,
+  )
+  mask = jnp.arange(x.shape[0]) < jnp.sum(group_sizes)
+  out = jnp.where(mask[:, None], out, 0.0)
+  return out, (mask, ragged_dot_bwd)
+
+
+def ragged_dot_with_mask_bwd(dtype, res, grad):
+  """Dual of ragged dot and masks gradients of unprocessed tokens."""
+  mask, ragged_dot_bwd = res
+  x_grad, ws_grad = ragged_dot_bwd(grad)
+  x_grad = jnp.where(mask[:, None], x_grad, 0.0)
+  return x_grad, ws_grad, None
+
+
+ragged_dot_with_mask.defvjp(ragged_dot_with_mask_fwd, ragged_dot_with_mask_bwd)
+
+
+# TODO(b/517203548): After integrating with the GMMv2 kernel and `zero_initialize` is set,
+# we will not need to mask the GMM token output explicitly in the fwd or bwd passes.
+# At that point, we can delete this custom ragged dot function.
+@functools.partial(jax.custom_vjp, nondiff_argnums=(3, 4))
+def megablox_gmm_with_mask(x, ws, group_sizes, dtype, qwix_rule):
+  return megablox_gmm_with_mask_fwd(x, ws, group_sizes, dtype, qwix_rule)[0]
+
+
+def megablox_gmm_with_mask_fwd(x, ws, group_sizes, dtype, qwix_rule):
+  """Performs Megablox GMM and masks unprocessed tokens."""
+  out, megablox_gmm_bwd = jax.vjp(
+      functools.partial(
+          megablox.gmm,
+          preferred_element_type=dtype,
+          use_qwix_quantization=True,
+          use_tokamax_backend=True,
+          qwix_rule=qwix_rule,
+          use_manual_quantization=True,
+          group_sizes=group_sizes,
+      ),
+      x,
+      ws,
+  )
+  mask = jnp.arange(x.shape[0]) < jnp.sum(group_sizes)
+  out = jnp.where(mask[:, None], out, 0.0)
+  return out, (mask, megablox_gmm_bwd)
+
+
+def megablox_gmm_with_mask_bwd(dtype, qwix_rule, res, grad):
+  """Dual of Megablox GMM and masks gradients of unprocessed tokens."""
+  mask, megablox_gmm_bwd = res
+  x_grad, ws_grad = megablox_gmm_bwd(grad)
+  x_grad = jnp.where(mask[:, None], x_grad, 0.0)
+  return x_grad, ws_grad, None
+
+
+megablox_gmm_with_mask.defvjp(megablox_gmm_with_mask_fwd, megablox_gmm_with_mask_bwd)
+
+
+def gmm(
+    inputs,
+    kernel,
+    group_sizes,
+    preferred_element_type,
+    config,
+):
+  """Performs a Grouped Matrix Multiplication (GMM).
+
+  This function can use either a quantized Megablox kernel or a standard
+  jax.lax.ragged_dot for the GMM operation, based on the configuration.
+
+  Args:
+    inputs: The left-hand side operand of the GMM.
+    kernel: The right-hand side operand (kernel) of the GMM.
+    group_sizes: An array indicating the size of each group.
+    preferred_element_type: The preferred element type for the computation.
+    config: Configuration object containing model settings, including
+      `use_qwix_quantization` and `merge_gating_gmm`.
+
+  Returns:
+    The result of the grouped matrix multiplication.
+  """
+  if config.quantization:
+    output = megablox_gmm_with_mask(
+        inputs,
+        kernel,
+        group_sizes=group_sizes,
+        dtype=preferred_element_type,
+        qwix_rule=quantizations.get_fp8_full_qwix_rule_w_sparsity(config)[0],
+    )
+  else:
+    output = ragged_dot_with_mask(
+        inputs,
+        kernel,
+        group_sizes=group_sizes,
+        dtype=preferred_element_type,
+    )
+  return output
+
+
+def compute_gating(x, w0, w1, group_sizes, *, dtype, config):
   """Computes the gating GMMs."""
-  layer_w0 = jax.lax.ragged_dot(
-      x,
-      w0,
+  gmm_fn = functools.partial(
+      gmm,
       group_sizes=group_sizes,
-      precision=jax.lax.Precision.DEFAULT,
       preferred_element_type=dtype,
+      config=config,
   )
-  layer_w1 = jax.lax.ragged_dot(
-      x,
-      w1,
-      group_sizes=group_sizes,
-      precision=jax.lax.Precision.DEFAULT,
-      preferred_element_type=dtype,
-  )
+  if config.merge_gating_gmm:
+    w01 = jnp.concatenate([w0, w1], axis=-1)
+    layer_w01 = gmm_fn(x, w01)
+    layer_w0, layer_w1 = jnp.split(layer_w01, 2, axis=-1)
+  else:
+    layer_w0 = gmm_fn(x, w0)
+    layer_w1 = gmm_fn(x, w1)
+
   return layer_w0, layer_w1
 
 
-def compute_linear(layer_w0, layer_w1, wo, group_sizes, weights, *, dtype):
+def compute_linear(layer_w0, layer_w1, wo, group_sizes, weights, *, dtype, config):
   """Combines the outputs of the gating GMMs and computes the final GMM."""
   intermediate_layer = jax.nn.silu(layer_w0) * layer_w1
   intermediate_layer *= weights[:, None]
-  layer_wo = jax.lax.ragged_dot(
+  gmm_fn = functools.partial(
+      gmm,
+      group_sizes=group_sizes,
+      preferred_element_type=dtype,
+      config=config,
+  )
+  layer_wo = gmm_fn(
       intermediate_layer,
       wo,
-      group_sizes=group_sizes,
-      precision=jax.lax.Precision.DEFAULT,
-      preferred_element_type=dtype,
   )
   return layer_wo
 
@@ -1860,10 +2190,16 @@ def route_compute_unroute(
     num_experts,
     num_experts_per_tok,
     routed_scaling_factor,
+    n_routing_groups,
+    topk_routing_group,
+    top_k_in_group,
     expert_axis_name,
+    num_expert_shards,
+    capacity_factor,
     use_gather_mosaic_kernel,
     normalization_layer_epsilon,
     dtype,
+    config,
 ):
   """Routes, processes, and unroutes activations."""
   target_length = xs[0].shape[1]
@@ -1885,9 +2221,14 @@ def route_compute_unroute(
         gate_bias,
         num_experts=num_experts,
         num_experts_per_tok=num_experts_per_tok,
+        num_expert_shards=num_expert_shards,
+        n_routing_groups=n_routing_groups,
+        topk_routing_group=topk_routing_group,
+        top_k_in_group=top_k_in_group,
         routed_scaling_factor=routed_scaling_factor,
         expert_axis_name=expert_axis_name,
         use_gather_mosaic_kernel=use_gather_mosaic_kernel,
+        config=config,
         normalization_layer_epsilon=normalization_layer_epsilon,
         dtype=dtype,
     )
@@ -1895,9 +2236,10 @@ def route_compute_unroute(
 
   def compute_fn(inputs):
     moe_inputs, x, y, selected_experts, weights, group_sizes = inputs
+    capacity = int(x.shape[0] / num_expert_shards * capacity_factor)
     layer_w0, layer_w1 = compute_gating_fn((x, group_sizes))
     x = compute_linear_fn((layer_w0, layer_w1, weights, group_sizes))
-    return (moe_inputs, x, y, selected_experts), {"mlpwi_0": layer_w0, "mlpwi_1": layer_w1}
+    return (moe_inputs, x, y, selected_experts), {"mlpwi_0": layer_w0[:capacity], "mlpwi_1": layer_w1[:capacity]}
 
   def compute_gating_fn(inputs):
     x, group_sizes = inputs
@@ -1907,6 +2249,7 @@ def route_compute_unroute(
         routed_w1,
         group_sizes,
         dtype=dtype,
+        config=config,
     )
     return layer_w0, layer_w1
 
@@ -1919,6 +2262,7 @@ def route_compute_unroute(
         group_sizes,
         weights,
         dtype=dtype,
+        config=config,
     )
     return x
 
@@ -2090,11 +2434,16 @@ def route_compute_unroute_bwd(
     *,
     num_experts,
     num_experts_per_tok,
+    num_expert_shards,
     routed_scaling_factor,
+    n_routing_groups,
+    topk_routing_group,
+    top_k_in_group,
     expert_axis_name,
     use_gather_mosaic_kernel,
     normalization_layer_epsilon,
     dtype,
+    config,
 ):
   """Performs the backward pass for route_compute_unroute."""
   xs = residuals.pop("mla_out")
@@ -2111,9 +2460,14 @@ def route_compute_unroute_bwd(
             shared_expert_and_route,
             num_experts=num_experts,
             num_experts_per_tok=num_experts_per_tok,
+            num_expert_shards=num_expert_shards,
             routed_scaling_factor=routed_scaling_factor,
+            n_routing_groups=n_routing_groups,
+            topk_routing_group=topk_routing_group,
+            top_k_in_group=top_k_in_group,
             expert_axis_name=expert_axis_name,
             use_gather_mosaic_kernel=use_gather_mosaic_kernel,
+            config=config,
             normalization_layer_epsilon=normalization_layer_epsilon,
             dtype=dtype,
         ),
@@ -2155,8 +2509,22 @@ def route_compute_unroute_bwd(
     )
 
   def compute_fn_remat(inputs):
-    (moe_inputs, x, y, selected_experts, weights, group_sizes), layer_w0, layer_w1 = inputs
+    (moe_inputs, x, y, selected_experts, weights, group_sizes), layer_w0_res, layer_w1_res = inputs
+    # I think this can be moved into the cond fns but it'd require caching using jit or some other method.
+    # This shouldn't result in any duplicate computation though.
     _, compute_gating_bwd = compute_gating_fn_remat((x, group_sizes))
+
+    def remat():
+      return compute_gating(x, routed_w0, routed_w1, group_sizes, dtype=dtype, config=config)
+
+    def use_res():
+      # Pad to full token buffer size.
+      layer_w0 = jnp.pad(layer_w0_res, [(0, x.shape[0] - layer_w0_res.shape[0]), (0, 0)])
+      layer_w1 = jnp.pad(layer_w1_res, [(0, x.shape[0] - layer_w1_res.shape[0]), (0, 0)])
+      return layer_w0, layer_w1
+
+    tokens_in_capacity = jnp.sum(group_sizes) <= layer_w0_res.shape[0]
+    layer_w0, layer_w1 = jax.lax.cond(tokens_in_capacity, use_res, remat)
     x, compute_linear_bwd = compute_linear_fn_remat((layer_w0, layer_w1, weights, group_sizes))
     return (moe_inputs, x, y, selected_experts), (compute_gating_bwd, compute_linear_bwd)
 
@@ -2176,6 +2544,7 @@ def route_compute_unroute_bwd(
         functools.partial(
             compute_gating,
             dtype=dtype,
+            config=config,
         ),
         x,
         routed_w0,
@@ -2190,6 +2559,7 @@ def route_compute_unroute_bwd(
         functools.partial(
             compute_linear,
             dtype=dtype,
+            config=config,
         ),
         layer_w0,
         layer_w1,
@@ -2249,7 +2619,12 @@ def moe(
     num_experts,
     num_experts_per_tok,
     routed_scaling_factor,
+    n_routing_groups,
+    topk_routing_group,
+    top_k_in_group,
     expert_axis_name,
+    num_expert_shards,
+    capacity_factor,
     use_gather_mosaic_kernel,
     config,
     normalization_layer_epsilon,
@@ -2263,10 +2638,16 @@ def moe(
           num_experts=num_experts,
           num_experts_per_tok=num_experts_per_tok,
           routed_scaling_factor=routed_scaling_factor,
+          n_routing_groups=n_routing_groups,
+          topk_routing_group=topk_routing_group,
+          top_k_in_group=top_k_in_group,
           expert_axis_name=expert_axis_name,
+          num_expert_shards=num_expert_shards,
+          capacity_factor=capacity_factor,
           use_gather_mosaic_kernel=use_gather_mosaic_kernel,
           normalization_layer_epsilon=normalization_layer_epsilon,
           dtype=dtype,
+          config=config,
       ),
       mesh=mesh,
       in_specs=(
@@ -2278,9 +2659,9 @@ def moe(
                   jax.sharding.PartitionSpec(None),
               ),
               (
-                  jax.sharding.PartitionSpec(None, None, expert_axis_name, reduced={"data", "fsdp"}),
-                  jax.sharding.PartitionSpec(None, None, expert_axis_name, reduced={"data", "fsdp"}),
-                  jax.sharding.PartitionSpec(None, expert_axis_name, None, reduced={"data", "fsdp"}),
+                  jax.sharding.PartitionSpec(expert_axis_name, None, None, reduced={"data", "fsdp"}),
+                  jax.sharding.PartitionSpec(expert_axis_name, None, None, reduced={"data", "fsdp"}),
+                  jax.sharding.PartitionSpec(expert_axis_name, None, None, reduced={"data", "fsdp"}),
               ),
               (
                   jax.sharding.PartitionSpec(None, None, reduced={"data", "fsdp", "expert"}),
@@ -2317,7 +2698,11 @@ def moe_bwd(
     num_experts,
     num_experts_per_tok,
     routed_scaling_factor,
+    n_routing_groups,
+    topk_routing_group,
+    top_k_in_group,
     expert_axis_name,
+    num_expert_shards,
     use_gather_mosaic_kernel,
     config,
     normalization_layer_epsilon,
@@ -2331,10 +2716,15 @@ def moe_bwd(
           num_experts=num_experts,
           num_experts_per_tok=num_experts_per_tok,
           routed_scaling_factor=routed_scaling_factor,
+          n_routing_groups=n_routing_groups,
+          topk_routing_group=topk_routing_group,
+          top_k_in_group=top_k_in_group,
           expert_axis_name=expert_axis_name,
+          num_expert_shards=num_expert_shards,
           use_gather_mosaic_kernel=use_gather_mosaic_kernel,
           normalization_layer_epsilon=normalization_layer_epsilon,
           dtype=dtype,
+          config=config,
       ),
       mesh=mesh,
       in_specs=(
@@ -2359,9 +2749,9 @@ def moe_bwd(
                   jax.sharding.PartitionSpec(None),
               ),
               (
-                  jax.sharding.PartitionSpec(None, None, expert_axis_name, reduced={"data", "fsdp"}),
-                  jax.sharding.PartitionSpec(None, None, expert_axis_name, reduced={"data", "fsdp"}),
-                  jax.sharding.PartitionSpec(None, expert_axis_name, None, reduced={"data", "fsdp"}),
+                  jax.sharding.PartitionSpec(expert_axis_name, None, None, reduced={"data", "fsdp"}),
+                  jax.sharding.PartitionSpec(expert_axis_name, None, None, reduced={"data", "fsdp"}),
+                  jax.sharding.PartitionSpec(expert_axis_name, None, None, reduced={"data", "fsdp"}),
               ),
               (
                   jax.sharding.PartitionSpec(None, None, reduced={"data", "fsdp", "expert"}),
@@ -2379,9 +2769,9 @@ def moe_bwd(
                   jax.sharding.PartitionSpec(None),
               ),
               (
-                  jax.sharding.PartitionSpec(None, None, expert_axis_name, unreduced={"data", "fsdp"}),
-                  jax.sharding.PartitionSpec(None, None, expert_axis_name, unreduced={"data", "fsdp"}),
-                  jax.sharding.PartitionSpec(None, expert_axis_name, None, unreduced={"data", "fsdp"}),
+                  jax.sharding.PartitionSpec(expert_axis_name, None, None, unreduced={"data", "fsdp"}),
+                  jax.sharding.PartitionSpec(expert_axis_name, None, None, unreduced={"data", "fsdp"}),
+                  jax.sharding.PartitionSpec(expert_axis_name, None, None, unreduced={"data", "fsdp"}),
               ),
               (
                   jax.sharding.PartitionSpec(None, None, unreduced={"data", "fsdp", "expert"}),

@@ -174,6 +174,9 @@ def kv_cache_as_linen(
     key_axis_order: AxisIdxes = (2, 0, 1, 3),
     use_chunked_prefill: bool = False,
     model_mode: str = MODEL_MODE_PREFILL,
+    is_gdn: bool = False,
+    conv_kernel_size: int = 0,
+    conv_dim: int = 0,
     name: str | None = None,
 ):
   """Initializes the KVCache module and returns it as a Linen module.
@@ -224,6 +227,9 @@ def kv_cache_as_linen(
       key_axis_order=key_axis_order,
       use_chunked_prefill=use_chunked_prefill,
       model_mode=model_mode,
+      is_gdn=is_gdn,
+      conv_kernel_size=conv_kernel_size,
+      conv_dim=conv_dim,
       metadata_fn=variable_to_logically_partitioned,
       name=name,
       abstract_init=False,
@@ -265,6 +271,9 @@ class KVCache(BaseCache):
       key_axis_order: AxisIdxes = (2, 0, 1, 3),
       use_chunked_prefill: bool = False,
       model_mode: str = MODEL_MODE_PREFILL,
+      is_gdn: bool = False,
+      conv_kernel_size: int = 0,
+      conv_dim: int = 0,
       *,
       # Not used in KVCache but passed in by nnx_wrappers.to_linen.
       # TODO: Remove when bridge no longer needed
@@ -314,6 +323,9 @@ class KVCache(BaseCache):
     self.key_axis_order = key_axis_order
     self.model_mode = model_mode
     self.use_chunked_prefill = use_chunked_prefill
+    self.is_gdn = is_gdn
+    self.conv_kernel_size = conv_kernel_size
+    self.conv_dim = conv_dim
 
     if model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE):
       self._initialize_prefill_caches(model_mode)
@@ -349,8 +361,25 @@ class KVCache(BaseCache):
   def _initialize_prefill_caches(self, model_mode):
     """Get a shaped abstraction of the state"""
 
-    cache_length = self.max_prefill_length
     dtype = self._get_cached_kv_dtype()
+
+    if self.is_gdn:
+      cache_batch_axis_name = CACHE_BATCH_PREFILL if model_mode == MODEL_MODE_PREFILL else CACHE_BATCH
+
+      self.cached_prefill_key = nnx.Cache(
+          jnp.zeros((self.batch, self.key_heads, self.key_head_size, self.value_head_size), dtype=dtype),
+          out_sharding=(cache_batch_axis_name, CACHE_HEADS, None, None),
+      )
+      self.cached_prefill_value = nnx.Cache(
+          jnp.zeros((self.batch, self.conv_kernel_size - 1, self.conv_dim), dtype=dtype),
+          out_sharding=(cache_batch_axis_name, None, None),
+      )
+      self.cache_prefill_segment_id = None
+      self.cached_prefill_key_scale = None
+      self.cached_prefill_value_scale = None
+      return
+
+    cache_length = self.max_prefill_length
 
     if model_mode == MODEL_MODE_PREFILL:
       cache_logical_axis_names = self.prefill_cache_logical_axis_names
@@ -366,11 +395,11 @@ class KVCache(BaseCache):
 
     self.cached_prefill_key = nnx.Cache(
         jnp.zeros(cache_shape_key, dtype=dtype),
-        sharding=cache_axis_names,
+        out_sharding=cache_axis_names,
     )
     self.cached_prefill_value = nnx.Cache(
         jnp.zeros(cache_shape_value, dtype=dtype),
-        sharding=cache_axis_names,
+        out_sharding=cache_axis_names,
     )
 
     if model_mode == MODEL_MODE_PREFILL:
@@ -380,7 +409,7 @@ class KVCache(BaseCache):
 
     self.cache_prefill_segment_id = nnx.Cache(
         jnp.zeros((cache_logical_shape[0], cache_length), dtype=jnp.int32),
-        sharding=segment_id_axis_names,
+        out_sharding=segment_id_axis_names,
     )
 
     if self.kv_quant:
@@ -394,11 +423,11 @@ class KVCache(BaseCache):
 
       self.cached_prefill_key_scale = nnx.Cache(
           jnp.zeros(cache_key_scale_shape, dtype=jnp.bfloat16),
-          sharding=cache_scale_axis_names,
+          out_sharding=cache_scale_axis_names,
       )
       self.cached_prefill_value_scale = nnx.Cache(
           jnp.zeros(cache_value_scale_shape, dtype=jnp.bfloat16),
-          sharding=cache_scale_axis_names,
+          out_sharding=cache_scale_axis_names,
       )
     else:
       self.cached_prefill_key_scale = None
@@ -411,6 +440,33 @@ class KVCache(BaseCache):
     """get ar cache vars"""
 
     dtype = self._get_cached_kv_dtype()
+
+    if self.is_gdn:
+      # GDN models read/write continuous state via prefill cache ONLY.
+      self.cached_ar_key = None
+      self.cached_ar_value = None
+
+      # Initialize required dummy variables to satisfy uniform engine inspection loops
+      segment_id_axis_names = (
+          (CACHE_BATCH_PREFILL, CACHE_SEQUENCE) if model_mode == MODEL_MODE_PREFILL else (CACHE_BATCH, CACHE_SEQUENCE)
+      )
+      self.cache_ar_segment_id = nnx.Cache(
+          jnp.zeros((self.batch, 1), dtype=jnp.int32),
+          out_sharding=segment_id_axis_names,
+      )
+      self.cached_ar_lengths = nnx.Cache(
+          jnp.zeros((self.batch,), dtype=jnp.int32),
+          out_sharding=(CACHE_BATCH,),
+      )
+      self.cached_ar_key_scale = None
+      self.cached_ar_value_scale = None
+      self.cache_ar_index = nnx.Cache(
+          jnp.zeros((1,), dtype=jnp.int32),
+          out_sharding=(),
+      )
+      return
+
+    # Standard Self-Attention AR Cache allocation begins here
     if self.max_target_length <= self.max_prefill_length:
       raise ValueError(
           f"max_target_length: {self.max_target_length} should be greater than max_prefill_length:"
@@ -433,19 +489,19 @@ class KVCache(BaseCache):
     # TODO(b/339703100): investigate the issue why with_logical_partitioning doesn't enforce sharding
     self.cached_ar_key = nnx.Cache(
         jnp.zeros(cache_shape_key, dtype=dtype),
-        sharding=cache_axis_names,
+        out_sharding=cache_axis_names,
     )
-    self.cached_ar_key.value = nn.with_logical_constraint(
-        self.cached_ar_key.value,
+    self.cached_ar_key[...] = nn.with_logical_constraint(
+        self.cached_ar_key[...],
         cache_axis_names,
     )
 
     self.cached_ar_value = nnx.Cache(
         jnp.zeros(cache_shape_value, dtype=dtype),
-        sharding=cache_axis_names,
+        out_sharding=cache_axis_names,
     )
-    self.cached_ar_value.value = nn.with_logical_constraint(
-        self.cached_ar_value.value,
+    self.cached_ar_value[...] = nn.with_logical_constraint(
+        self.cached_ar_value[...],
         cache_axis_names,
     )
 
@@ -455,12 +511,12 @@ class KVCache(BaseCache):
       segment_id_axis_names = (CACHE_BATCH, CACHE_SEQUENCE)
     self.cache_ar_segment_id = nnx.Cache(
         jnp.zeros((cache_logical_shape[0], cache_length), dtype=jnp.int32),
-        sharding=segment_id_axis_names,
+        out_sharding=segment_id_axis_names,
     )
 
     self.cached_ar_lengths = nnx.Cache(
         jnp.zeros((cache_logical_shape[0],), dtype=jnp.int32),
-        sharding=(CACHE_BATCH,),
+        out_sharding=(CACHE_BATCH,),
     )
 
     if self.kv_quant:
@@ -474,11 +530,11 @@ class KVCache(BaseCache):
 
       self.cached_ar_key_scale = nnx.Cache(
           jnp.zeros(cache_key_scale_shape, dtype=jnp.bfloat16),
-          sharding=cache_scale_axis_names,
+          out_sharding=cache_scale_axis_names,
       )
       self.cached_ar_value_scale = nnx.Cache(
           jnp.zeros(cache_value_scale_shape, dtype=jnp.bfloat16),
-          sharding=cache_scale_axis_names,
+          out_sharding=cache_scale_axis_names,
       )
     else:
       self.cached_ar_key_scale = None
@@ -486,8 +542,28 @@ class KVCache(BaseCache):
 
     self.cache_ar_index = nnx.Cache(
         jnp.zeros((1,), dtype=jnp.int32),
-        sharding=(),
+        out_sharding=(),
     )
+
+  def get_gdn_states(self) -> tuple[jax.Array, jax.Array]:
+    """Retrieves the recurrent state and conv state for GDN layers."""
+    # MaxEngine transfers state from prefill to AR via the prefill cache.
+    # To ensure continuity on the transition, we must read from the prefill cache.
+    assert self.is_gdn, "get_gdn_states called on a non-GDN cache object."
+    return self.cached_prefill_key.get_value(), self.cached_prefill_value.get_value()
+
+  def update_gdn_states(self, new_recurrent_state: Array, new_conv_state: Array) -> None:
+    """Updates the recurrent state and conv state for GDN layers."""
+    assert self.is_gdn, "update_gdn_states called on a non-GDN cache object."
+    cache_batch_axis_name = CACHE_BATCH_PREFILL if self.model_mode == MODEL_MODE_PREFILL else CACHE_BATCH
+
+    # ALWAYS update prefill cache since it is our true state container,
+    # not just during MODEL_MODE_PREFILL. This ensures AR updates persist.
+    if getattr(self, "cached_prefill_key", None) is not None:
+      self.cached_prefill_key.set_value(
+          nn.with_logical_constraint(new_recurrent_state, (cache_batch_axis_name, CACHE_HEADS, None, None))
+      )
+      self.cached_prefill_value.set_value(nn.with_logical_constraint(new_conv_state, (cache_batch_axis_name, None, None)))
 
   def _get_ar_cache_vars(self):
     return self.ar_key_vars, self.ar_value_vars, self.cache_ar_segment_id, self.cache_ar_index, self.cached_ar_lengths
@@ -549,35 +625,46 @@ class KVCache(BaseCache):
     )
 
     # We don't zero out remain values. Use segment id to mask out.
-    cached_prefill_key_vars[0].value = jax.lax.dynamic_update_slice_in_dim(
-        cached_key_value, key_shaped_for_cache, next_pos, cache_seq_axis
+    cached_prefill_key_vars[0].set_value(
+        jax.lax.dynamic_update_slice_in_dim(cached_key_value, key_shaped_for_cache, next_pos, cache_seq_axis)
     )
-    cached_prefill_value_vars[0].value = jax.lax.dynamic_update_slice_in_dim(
-        cached_value_value, value_shaped_for_cache, next_pos, cache_seq_axis
+    cached_prefill_value_vars[0].set_value(
+        jax.lax.dynamic_update_slice_in_dim(cached_value_value, value_shaped_for_cache, next_pos, cache_seq_axis)
     )
 
     if decoder_segment_ids is not None:
+      assert cached_prefill_segment_id_var is not None
       # Need zero out the remain values to prevent wrong mask in autoregressive.
-      previous_segment_id = cached_prefill_segment_id_var.value[:, :next_pos]
-      cached_prefill_segment_id_var.value = jnp.zeros_like(cached_prefill_segment_id_var.value, dtype=jnp.int32)
-      cached_prefill_segment_id_var.value = jax.lax.dynamic_update_slice_in_dim(
-          cached_prefill_segment_id_var.value, previous_segment_id, start_index=0, axis=1
+      previous_segment_id = cached_prefill_segment_id_var.get_value()[:, :next_pos]
+      cached_prefill_segment_id_var.set_value(jnp.zeros_like(cached_prefill_segment_id_var.get_value(), dtype=jnp.int32))
+      cached_prefill_segment_id_var.set_value(
+          jax.lax.dynamic_update_slice_in_dim(
+              cached_prefill_segment_id_var.get_value(), previous_segment_id, start_index=0, axis=1
+          )
       )
-      cached_prefill_segment_id_var.value = jax.lax.dynamic_update_slice_in_dim(
-          cached_prefill_segment_id_var.value, decoder_segment_ids, next_pos, axis=1
+      cached_prefill_segment_id_var.set_value(
+          jax.lax.dynamic_update_slice_in_dim(
+              cached_prefill_segment_id_var.get_value(), decoder_segment_ids, next_pos, axis=1
+          )
       )
 
     # Return needed kv cache to reduce computation of attention.
     needed_prefill_key_value = jax.lax.dynamic_slice_in_dim(
-        cached_prefill_key_vars[0].value, start_index=0, slice_size=(next_pos + self.key_seq_len), axis=cache_seq_axis
+        cached_prefill_key_vars[0].get_value(),
+        start_index=0,
+        slice_size=(next_pos + self.key_seq_len),
+        axis=cache_seq_axis,
     )
     needed_prefill_value_value = jax.lax.dynamic_slice_in_dim(
-        cached_prefill_value_vars[0].value, start_index=0, slice_size=(next_pos + self.value_seq_len), axis=cache_seq_axis
+        cached_prefill_value_vars[0].get_value(),
+        start_index=0,
+        slice_size=(next_pos + self.value_seq_len),
+        axis=cache_seq_axis,
     )
     needed_segment_id = None
     if decoder_segment_ids is not None:
       needed_segment_id = jax.lax.dynamic_slice_in_dim(
-          cached_prefill_segment_id_var.value, start_index=0, slice_size=(next_pos + segment_id_seq_len), axis=1
+          cached_prefill_segment_id_var.get_value(), start_index=0, slice_size=(next_pos + segment_id_seq_len), axis=1
       )
 
     return (
@@ -620,14 +707,17 @@ class KVCache(BaseCache):
       value_shaped_for_cache, value_scale_shaped_for_cache = self.kv_quant.quantize(
           value_shaped_for_cache, prefill_key_axis_names
       )
-      cached_prefill_key_vars[1].value = key_scale_shaped_for_cache
-      cached_prefill_value_vars[1].value = value_scale_shaped_for_cache
+      assert cached_prefill_key_vars[1] is not None, "cached_prefill_key_vars[1] cannot be None"
+      assert cached_prefill_value_vars[1] is not None, "cached_prefill_value_vars[1] cannot be None"
+      cached_prefill_key_vars[1].set_value(key_scale_shaped_for_cache)
+      cached_prefill_value_vars[1].set_value(value_scale_shaped_for_cache)
 
-    cached_prefill_key_vars[0].value = key_shaped_for_cache
-    cached_prefill_value_vars[0].value = value_shaped_for_cache
+    cached_prefill_key_vars[0].set_value(key_shaped_for_cache)
+    cached_prefill_value_vars[0].set_value(value_shaped_for_cache)
 
     if decoder_segment_ids is not None:
-      cached_prefill_segment_id_var.value = decoder_segment_ids
+      assert cached_prefill_segment_id_var is not None
+      cached_prefill_segment_id_var.set_value(decoder_segment_ids)
     return key, value, decoder_segment_ids
 
   def update_ar_key_value(
@@ -691,51 +781,61 @@ class KVCache(BaseCache):
         new_token_locations[ar_cache_batch_axis] = i
         return val.at[tuple(cache_locations)].set(one_token_value_shaped_for_cache[tuple(new_token_locations)])
 
-      cached_key.value = jax.lax.fori_loop(
-          0, one_token_key_shaped_for_cache.shape[0], key_body, cached_key.value, unroll=8
-      )
-      cached_value.value = jax.lax.fori_loop(
-          0, one_token_value_shaped_for_cache.shape[0], value_body, cached_value.value, unroll=8
+      cached_key[...] = jax.lax.fori_loop(0, one_token_key_shaped_for_cache.shape[0], key_body, cached_key[...], unroll=8)
+      cached_value[...] = jax.lax.fori_loop(
+          0, one_token_value_shaped_for_cache.shape[0], value_body, cached_value[...], unroll=8
       )
 
     else:
       one_hot_indices = one_hot_indices.astype(int)
 
       # Align batch size for cache with new token in decoding
-      if cached_key.value.shape[2] != one_token_key_shaped_for_cache.shape[2]:
-        cached_key.value = jnp.repeat(cached_key.value, one_token_key_shaped_for_cache.shape[2], axis=2)
-        cached_value.value = jnp.repeat(cached_value.value, one_token_value_shaped_for_cache.shape[2], axis=2)
+      if cached_key.get_value().shape[2] != one_token_key_shaped_for_cache.shape[2]:
+        cached_key.set_value(jnp.repeat(cached_key.get_value(), one_token_key_shaped_for_cache.shape[2], axis=2))
+        cached_value.set_value(jnp.repeat(cached_value.get_value(), one_token_value_shaped_for_cache.shape[2], axis=2))
 
-      cached_key.value = jax.lax.dynamic_update_index_in_dim(
-          cached_key.value, one_token_key_shaped_for_cache, ar_cache_update_idx, ar_cache_update_axis
+      cached_key.set_value(
+          jax.lax.dynamic_update_index_in_dim(
+              cached_key.get_value(), one_token_key_shaped_for_cache, ar_cache_update_idx, ar_cache_update_axis
+          )
       )
-      cached_value.value = jax.lax.dynamic_update_index_in_dim(
-          cached_value.value, one_token_value_shaped_for_cache, ar_cache_update_idx, ar_cache_update_axis
+      cached_value.set_value(
+          jax.lax.dynamic_update_index_in_dim(
+              cached_value.get_value(), one_token_value_shaped_for_cache, ar_cache_update_idx, ar_cache_update_axis
+          )
       )
-    cached_key.value = nn.with_logical_constraint(cached_key.value, ar_cache_axis_names)
-    cached_value.value = nn.with_logical_constraint(cached_value.value, ar_cache_axis_names)
+    cached_key.set_value(nn.with_logical_constraint(cached_key.get_value(), ar_cache_axis_names))
+    cached_value.set_value(nn.with_logical_constraint(cached_value.get_value(), ar_cache_axis_names))
 
     if self.kv_quant:
       ar_cache_scale_axis_names = transpose_tuple(self.cache_scale_logical_axis_names, self.ar_cache_axis_order)
       ar_cache_scale_update_axis = ar_cache_scale_axis_names.index(CACHE_SCALE_SEQUENCE)
       assert cached_key_scale is not None, "cached_key_scale_var cannot be None"
       assert cached_value_scale is not None, "cached_value_scale_var cannot be None"
-      cached_key_scale.value = jax.lax.dynamic_update_index_in_dim(
-          cached_key_scale.value, one_token_key_scale_shaped_for_cache, ar_cache_update_idx, ar_cache_scale_update_axis
+      cached_key_scale.set_value(
+          jax.lax.dynamic_update_index_in_dim(
+              cached_key_scale.get_value(),
+              one_token_key_scale_shaped_for_cache,
+              ar_cache_update_idx,
+              ar_cache_scale_update_axis,
+          )
       )
-      cached_value_scale.value = jax.lax.dynamic_update_index_in_dim(
-          cached_value_scale.value,
-          one_token_value_scale_shaped_for_cache,
-          ar_cache_update_idx,
-          ar_cache_scale_update_axis,
+      cached_value_scale.set_value(
+          jax.lax.dynamic_update_index_in_dim(
+              cached_value_scale.get_value(),
+              one_token_value_scale_shaped_for_cache,
+              ar_cache_update_idx,
+              ar_cache_scale_update_axis,
+          )
       )
 
   def get_cached_values(self, cache_vars, target_dtype, cache_axis_order) -> jax.Array | KVTensor:
     """get cached values"""
     cache_var, cache_scale_var = cache_vars
-    cache_value = cache_var.value
+    assert cache_var is not None
+    cache_value = cache_var.get_value()
     if cache_scale_var is not None:
-      scale_value = cache_scale_var.value
+      scale_value = cache_scale_var.get_value()
       dtype = cache_value.dtype
       if dtype == jnp.int8:
         scale_value /= MAX_INT8
@@ -771,44 +871,56 @@ class KVCache(BaseCache):
     if sequence != 1:
       raise ValueError(f"Sequence length should be 1 during autoregression, got {sequence=}")
 
-    cached_ar_key_vars, cached_ar_value_vars, cached_ar_segment_id_var, cache_ar_index_var, cache_ar_lengths_var = (
-        self._get_ar_cache_vars()
-    )
+    (
+        cached_ar_key_vars,
+        cached_ar_value_vars,
+        cached_ar_segment_id_var,
+        cache_ar_index_var,
+        cache_ar_lengths_var,
+    ) = self._get_ar_cache_vars()
 
     self.update_ar_key_value(
         key,
         value,
         cached_ar_key_vars,
         cached_ar_value_vars,
-        cache_ar_index_var.value,
-        cache_ar_lengths_var.value,
+        cache_ar_index_var.get_value(),
+        cache_ar_lengths_var.get_value(),
         use_ragged_attention,
     )
     active_indicator = jnp.zeros((self.batch, 1), dtype=jnp.int32) + DECODING_ACTIVE_SEQUENCE_INDICATOR
 
     # Align batch size for cached segment IDs with indicator in decoding
-    if cached_ar_segment_id_var.value.shape[0] != active_indicator.shape[0]:
-      cached_ar_segment_id_var.value = jnp.repeat(cached_ar_segment_id_var.value, active_indicator.shape[0], axis=0)
+    if cached_ar_segment_id_var.get_value().shape[0] != active_indicator.shape[0]:
+      cached_ar_segment_id_var.set_value(
+          jnp.repeat(cached_ar_segment_id_var.get_value(), active_indicator.shape[0], axis=0)
+      )
 
-    cached_ar_segment_id_var.value = jax.lax.dynamic_update_index_in_dim(
-        cached_ar_segment_id_var.value, active_indicator, jnp.squeeze(cache_ar_index_var.value), 1
+    cached_ar_segment_id_var.set_value(
+        jax.lax.dynamic_update_index_in_dim(
+            cached_ar_segment_id_var.get_value(), active_indicator, jnp.squeeze(cache_ar_index_var.get_value()), 1
+        )
     )
-    cache_ar_index_var.value = jnp.mod(cache_ar_index_var.value + 1, self.max_target_length - self.max_prefill_length)
-    cache_ar_lengths_var.value = cache_ar_lengths_var.value.at[:].add(1)
+    cache_ar_index_var.set_value(
+        jnp.mod(cache_ar_index_var.get_value() + 1, self.max_target_length - self.max_prefill_length)
+    )
+    cache_ar_lengths_var.set_value(cache_ar_lengths_var.get_value().at[:].add(1))
 
     cached_prefill_key_vars, cached_prefill_value_vars, cached_prefill_segment_id_var = self._get_prefill_cache_vars()
+
+    assert cached_prefill_segment_id_var is not None
 
     cached_prefill = (
         self.get_cached_values(cached_prefill_key_vars, key.dtype, self.prefill_cache_axis_order),
         self.get_cached_values(cached_prefill_value_vars, value.dtype, self.prefill_cache_axis_order),
-        cached_prefill_segment_id_var.value,
+        cached_prefill_segment_id_var.get_value(),
     )
 
     cached_ar = (
         self.get_cached_values(cached_ar_key_vars, key.dtype, self.ar_cache_axis_order),
         self.get_cached_values(cached_ar_value_vars, value.dtype, self.ar_cache_axis_order),
-        cached_ar_segment_id_var.value,
-        cache_ar_lengths_var.value,
+        cached_ar_segment_id_var.get_value(),
+        cache_ar_lengths_var.get_value(),
     )
     return cached_prefill, cached_ar
 
@@ -847,76 +959,6 @@ class KVCache(BaseCache):
       return self.kv_cache_autoregressive(key, value, use_ragged_attention)
     else:
       raise ValueError(f"Model Mode isn't supported! {model_mode=}")
-
-
-class GatedDeltaNetCache(BaseCache):
-  """Cache for Linear Attention (Gated Delta Net).
-
-  Stores the fixed-size recurrent state and the sliding window state for convolution.
-  """
-
-  def __init__(
-      self,
-      batch: int,
-      num_heads: int,
-      k_head_dim: int,
-      v_head_dim: int,
-      conv_kernel_size: int,
-      conv_dim: int,
-      dtype: DType,
-      cache_batch_axis_name: str = CACHE_BATCH,
-      cache_heads_axis_name: str = CACHE_HEADS,
-  ):
-    super().__init__()
-    self.batch = batch
-    self.dtype = dtype
-
-    # 1. Recurrent State (S) for the Delta Rule
-    # Shape: [Batch, Heads, K_Dim, V_Dim]
-    # We maintain the running state matrix.
-    self.recurrent_state = nnx.Cache(
-        jnp.zeros((int(batch), num_heads, k_head_dim, v_head_dim), dtype=dtype),
-        # Sharding: Batch, Heads, None (K), None (V)
-        sharding=(cache_batch_axis_name, cache_heads_axis_name, None, None),
-    )
-
-    # 2. Convolution State for the 1D Conv
-    # Shape: [Batch, Kernel_Size - 1, Conv_Dim]
-    # We store the last (K-1) inputs to perform the sliding window conv during decoding.
-    self.conv_state = nnx.Cache(
-        jnp.zeros((int(batch), conv_kernel_size - 1, conv_dim), dtype=dtype),
-        # Sharding: Batch, None (Time), None (Dim)
-        sharding=(cache_batch_axis_name, None, None),
-    )
-
-  def __call__(self):
-    """Returns the cache variables for the layer to use."""
-    return self
-
-
-def gated_delta_net_cache_as_linen(
-    *,
-    batch: int,
-    num_heads: int,
-    head_dim: int,
-    conv_kernel_size: int,
-    conv_dim: int,
-    dtype: DType,
-    name: str | None = None,
-):
-  """Initializes the GatedDeltaNetCache and returns it as a Linen module."""
-  return nnx_wrappers.to_linen(
-      GatedDeltaNetCache,
-      batch=batch,
-      num_heads=num_heads,
-      head_dim=head_dim,
-      conv_kernel_size=conv_kernel_size,
-      conv_dim=conv_dim,
-      dtype=dtype,
-      metadata_fn=variable_to_logically_partitioned,
-      name=name,
-      abstract_init=False,
-  )
 
 
 def mla_kv_cache_as_linen(

@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -32,86 +32,78 @@ on:
           - all
           - tpu
           - gpu
+      image_suffix:
+        description: 'An image suffix can be provided to add to the image name'
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
 
 jobs:
-  setup:
-    runs-on: ubuntu-latest
-    outputs:
-      maxtext_sha: ${{ steps.vars.outputs.maxtext_sha }}
-      image_date: ${{ steps.vars.outputs.image_date }}
-    steps:
-     - name: Checkout MaxText
-       uses: actions/checkout@v5
+  build_and_upload_maxtext_package:
+    uses: ./.github/workflows/build_package.yml
+    with:
+      device_type: tpu
+      device_name: v4-8
+      cloud_runner: linux-x86-n2-16-buildkit
 
-     - name: Get metadata
-       id: vars
-       run: |
-        # MaxText SHA
-        echo "maxtext_sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
-
-        # Image date
-        echo "image_date=$(date +%Y-%m-%d)" >> $GITHUB_OUTPUT
-
-  tpu-pre-training:
+  build-and-push:
     name: ${{ matrix.image_name }}
-    needs: setup
+    needs: build_and_upload_maxtext_package
     strategy:
       fail-fast: false
       matrix:
         include:
           - device: tpu
             build_mode: stable
+            workflow: pre-training
             image_name: maxtext_jax_stable
-            dockerfile: ./src/dependencies/dockerfiles/maxtext_tpu_dependencies.Dockerfile
+            dockerfile: maxtext_tpu_dependencies.Dockerfile
           - device: tpu
             build_mode: nightly
+            workflow: pre-training
             image_name: maxtext_jax_nightly
-            dockerfile: ./src/dependencies/dockerfiles/maxtext_tpu_dependencies.Dockerfile
-    uses: ./.github/workflows/build_and_push_docker_image.yml
-    with:
-      image_name: ${{ matrix.image_name }}
-      device: ${{ matrix.device }}
-      build_mode: ${{ matrix.build_mode }}
-      dockerfile: ${{ matrix.dockerfile }}
-      maxtext_sha: ${{ needs.setup.outputs.maxtext_sha }}
-      image_date: ${{ needs.setup.outputs.image_date }}
-
-  tpu-post-training-nightly:
-    name: tpu-post-training-nightly
-    needs: [setup]
-    uses: ./.github/workflows/build_and_push_docker_image.yml
-    with:
-      image_name: maxtext_post_training_nightly
-      device: tpu
-      build_mode: nightly
-      workflow: post-training
-      dockerfile: ./src/dependencies/dockerfiles/maxtext_tpu_dependencies.Dockerfile
-      maxtext_sha: ${{ needs.setup.outputs.maxtext_sha }}
-      image_date: ${{ needs.setup.outputs.image_date }}
-
-  gpu-pre-training:
-    name: ${{ matrix.image_name }}
-    needs: setup
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
+            dockerfile: maxtext_tpu_dependencies.Dockerfile
+          - device: tpu
+            build_mode: nightly
+            workflow: post-training
+            image_name: maxtext_post_training_nightly
+            dockerfile: maxtext_tpu_dependencies.Dockerfile
           - device: gpu
             build_mode: stable
+            workflow: pre-training
             image_name: maxtext_gpu_jax_stable
-            dockerfile: ./src/dependencies/dockerfiles/maxtext_gpu_dependencies.Dockerfile
+            dockerfile: maxtext_gpu_dependencies.Dockerfile
           - device: gpu
             build_mode: nightly
+            workflow: pre-training
             image_name: maxtext_gpu_jax_nightly
-            dockerfile: ./src/dependencies/dockerfiles/maxtext_gpu_dependencies.Dockerfile
+            dockerfile: maxtext_gpu_dependencies.Dockerfile
     uses: ./.github/workflows/build_and_push_docker_image.yml
     with:
-      image_name: ${{ matrix.image_name }}
+      image_name: ${{ inputs.image_suffix != '' && format('{0}_{1}', matrix.image_name, inputs.image_suffix) || matrix.image_name }}
       device: ${{ matrix.device }}
       build_mode: ${{ matrix.build_mode }}
+      workflow: ${{ matrix.workflow }}
       dockerfile: ${{ matrix.dockerfile }}
-      maxtext_sha: ${{ needs.setup.outputs.maxtext_sha }}
-      image_date: ${{ needs.setup.outputs.image_date }}
+      maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
+      include_test_assets: true
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
+  notify_failure:
+    name: Notify failed build
+    needs: [build-and-push]
+    if: ${{ failure() && inputs.image_suffix == '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Create issue on failure
+        uses: jayqi/failed-build-issue-action@1a893bbf43ef1c2a8705e2b115cd4f0fe3c5649b
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          title-template: "MaxText Docker Image Build Failure"
+          label-name: "docker-image-build-failure"

@@ -34,7 +34,7 @@ def preprocess_mm_data(config):
 
     images = [mm_utils.load_image_from_path(p) for p in config.image_path.split(",")]
     processor_outputs = preprocess_mm_data_gemma3(images)
-  elif config.model_name in ["gemma4-26b", "gemma4-31b"]:
+  elif config.model_name in ["gemma4-26b", "gemma4-31b", "gemma4-e2b", "gemma4-e4b"]:
     from maxtext.multimodal.processor_gemma4 import preprocess_mm_data_gemma4  # pylint: disable=import-outside-toplevel
 
     images = [mm_utils.load_image_from_path(p) for p in config.image_path.split(",")]
@@ -44,7 +44,7 @@ def preprocess_mm_data(config):
 
     images = [mm_utils.load_image_from_path(p) for p in config.image_path.split(",")]
     processor_outputs = preprocess_mm_data_llama4(images)
-  elif config.model_name in ["qwen3-omni-30b-a3b"]:
+  elif config.model_name in ["qwen3-omni-30b-a3b", "qwen3.5-35b-a3b", "qwen3.5-397b-a17b"]:
     from maxtext.multimodal.processor_qwen3_omni import preprocess_mm_data_qwen3_omni  # pylint: disable=import-outside-toplevel
 
     processor_outputs = preprocess_mm_data_qwen3_omni(config)
@@ -54,22 +54,26 @@ def preprocess_mm_data(config):
   return processor_outputs
 
 
-def preprocess_image_for_training(image, model_name):
+def preprocess_image_for_training(image, config):
   """Preprocesses a single image for training based on the model name."""
-  if model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
+  if config.model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
     from maxtext.multimodal.processor_gemma3 import preprocess_mm_data_gemma3  # pylint: disable=import-outside-toplevel
 
     return preprocess_mm_data_gemma3(image)
-  elif model_name in ["gemma4-26b", "gemma4-31b"]:
+  elif config.model_name in ["gemma4-26b", "gemma4-31b", "gemma4-e2b", "gemma4-e4b"]:
     from maxtext.multimodal.processor_gemma4 import preprocess_mm_data_gemma4  # pylint: disable=import-outside-toplevel
 
     return preprocess_mm_data_gemma4(image)
-  elif model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
+  elif config.model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
     from maxtext.multimodal.processor_llama4 import preprocess_mm_data_llama4  # pylint: disable=import-outside-toplevel
 
     return preprocess_mm_data_llama4(image)
+  elif config.model_name in ["qwen3-omni-30b-a3b", "qwen3.5-35b-a3b", "qwen3.5-397b-a17b"]:
+    from maxtext.multimodal.processor_qwen3_omni import preprocess_mm_data_qwen3_omni_for_training  # pylint: disable=import-outside-toplevel
+
+    return preprocess_mm_data_qwen3_omni_for_training(image, config)
   else:
-    raise ValueError(f"Model {model_name} not supported for image preprocessing.")
+    raise ValueError(f"Model {config.model_name} not supported for image preprocessing.")
 
 
 def get_image_offsets(config, processor_output: mm_utils.PreprocessorOutput | None):
@@ -78,7 +82,7 @@ def get_image_offsets(config, processor_output: mm_utils.PreprocessorOutput | No
     from maxtext.multimodal.processor_gemma3 import get_image_offsets_gemma3  # pylint: disable=import-outside-toplevel
 
     return get_image_offsets_gemma3(processor_output)
-  elif config.model_name in ["gemma4-26b", "gemma4-31b"]:
+  elif config.model_name in ["gemma4-26b", "gemma4-31b", "gemma4-e2b", "gemma4-e4b"]:
     from maxtext.multimodal.processor_gemma4 import get_image_offsets_gemma4  # pylint: disable=import-outside-toplevel
 
     return get_image_offsets_gemma4(processor_output)
@@ -86,7 +90,7 @@ def get_image_offsets(config, processor_output: mm_utils.PreprocessorOutput | No
     from maxtext.multimodal.processor_llama4 import get_image_offsets_llama4  # pylint: disable=import-outside-toplevel
 
     return get_image_offsets_llama4(processor_output)
-  elif config.model_name in ["qwen3-omni-30b-a3b"]:
+  elif config.model_name in ["qwen3-omni-30b-a3b", "qwen3.5-35b-a3b", "qwen3.5-397b-a17b"]:
     from maxtext.multimodal.processor_qwen3_omni import get_mm_offsets_qwen3_omni  # pylint: disable=import-outside-toplevel
 
     return get_mm_offsets_qwen3_omni(config, processor_output)
@@ -100,7 +104,7 @@ def reformat_prompt(prompt, image_placeholder, model_name, num_images, video_pla
     from maxtext.multimodal.processor_gemma3 import reformat_prompt_gemma3  # pylint: disable=import-outside-toplevel
 
     return reformat_prompt_gemma3(prompt, image_placeholder, num_images)
-  elif model_name in ["gemma4-26b", "gemma4-31b"]:
+  elif model_name in ["gemma4-26b", "gemma4-31b", "gemma4-e2b", "gemma4-e4b"]:
     from maxtext.multimodal.processor_gemma4 import reformat_prompt_gemma4  # pylint: disable=import-outside-toplevel
 
     return reformat_prompt_gemma4(prompt, image_placeholder, num_images)
@@ -108,7 +112,7 @@ def reformat_prompt(prompt, image_placeholder, model_name, num_images, video_pla
     from maxtext.multimodal.processor_llama4 import reformat_prompt_llama4  # pylint: disable=import-outside-toplevel
 
     return reformat_prompt_llama4(prompt, image_placeholder, num_images)
-  elif model_name in ["qwen3-omni-30b-a3b"]:
+  elif model_name in ["qwen3-omni-30b-a3b", "qwen3.5-35b-a3b", "qwen3.5-397b-a17b"]:
     from maxtext.multimodal.processor_qwen3_omni import reformat_prompt_qwen3_omni  # pylint: disable=import-outside-toplevel
 
     return reformat_prompt_qwen3_omni(
@@ -130,10 +134,10 @@ def reformat_response(response, model_name):
   elif model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
     formatted_response = f"{response}<end_of_turn>"
     return formatted_response
-  elif model_name in ["gemma4-26b", "gemma4-31b"]:
-    formatted_response = f"{response}<end_of_turn>"
+  elif model_name in ["gemma4-26b", "gemma4-31b", "gemma4-e2b", "gemma4-e4b"]:
+    formatted_response = f"{response}<turn|>"
     return formatted_response
-  elif model_name in ["qwen3-omni-30b-a3b"]:
+  elif model_name in ["qwen3-omni-30b-a3b", "qwen3.5-35b-a3b", "qwen3.5-397b-a17b"]:
     formatted_response = f"{response}<|im_end|>"
     return formatted_response
   else:
@@ -146,7 +150,7 @@ def prepare_text_for_image_fusion(tokens, config, processor_output=None):
     from maxtext.multimodal.processor_gemma3 import add_extra_tokens_for_images_gemma3  # pylint: disable=import-outside-toplevel
 
     return add_extra_tokens_for_images_gemma3(tokens, max_num_images=processor_output.num_images)
-  elif config.model_name in ["gemma4-26b", "gemma4-31b"]:
+  elif config.model_name in ["gemma4-26b", "gemma4-31b", "gemma4-e2b", "gemma4-e4b"]:
     from maxtext.multimodal.processor_gemma4 import add_extra_tokens_for_images_gemma4  # pylint: disable=import-outside-toplevel
 
     return add_extra_tokens_for_images_gemma4(tokens, max_num_images=processor_output.num_images)
@@ -154,7 +158,7 @@ def prepare_text_for_image_fusion(tokens, config, processor_output=None):
     from maxtext.multimodal.processor_llama4 import add_extra_tokens_for_images_llama4  # pylint: disable=import-outside-toplevel
 
     return add_extra_tokens_for_images_llama4(tokens, processor_output)
-  elif config.model_name in ["qwen3-omni-30b-a3b"]:
+  elif config.model_name in ["qwen3-omni-30b-a3b", "qwen3.5-35b-a3b", "qwen3.5-397b-a17b"]:
     from maxtext.multimodal.processor_qwen3_omni import add_extra_tokens_for_qwen3_omni  # pylint: disable=import-outside-toplevel
 
     return add_extra_tokens_for_qwen3_omni(tokens, config, processor_output)
@@ -177,7 +181,7 @@ def get_dummy_image_shape_for_init(model_name, batch_size=1, num_image_per_seque
     from maxtext.multimodal.processor_llama4 import get_dummy_image_shape_for_init_llama4  # pylint: disable=import-outside-toplevel
 
     image_shape = get_dummy_image_shape_for_init_llama4(batch_size, num_image_per_sequence)
-  elif model_name.startswith("qwen3-omni-30b-a3b"):
+  elif model_name.startswith("qwen3-omni-30b-a3b") or model_name.startswith("qwen3.5"):
     from maxtext.multimodal.processor_qwen3_omni import get_dummy_image_shape_for_init_qwen3_omni  # pylint: disable=import-outside-toplevel
 
     image_shape = get_dummy_image_shape_for_init_qwen3_omni(batch_size)
@@ -203,14 +207,14 @@ def get_dummy_audio_shape_for_init(config):
   return audio_shape
 
 
-def get_bidirectional_mask_vision(config, decoder_input_tokens):
+def get_bidirectional_mask_vision(config, decoder_input_tokens, is_video: bool = False):
   """Get the bidirectional mask for specific models."""
   bidirectional_mask_vision = None
   if config.model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
     from maxtext.multimodal.processor_gemma3 import GEMMA_TOKEN_PLACEHOLDER  # pylint: disable=import-outside-toplevel
 
     bidirectional_mask_vision = decoder_input_tokens == GEMMA_TOKEN_PLACEHOLDER
-  elif config.model_name in ["gemma4-26b", "gemma4-31b"]:
+  elif config.model_name in ["gemma4-26b", "gemma4-31b", "gemma4-e2b", "gemma4-e4b"]:
     from maxtext.multimodal.processor_gemma4 import GEMMA4_TOKEN_PLACEHOLDER  # pylint: disable=import-outside-toplevel
 
     bidirectional_mask_vision = decoder_input_tokens == GEMMA4_TOKEN_PLACEHOLDER
@@ -218,14 +222,15 @@ def get_bidirectional_mask_vision(config, decoder_input_tokens):
     from maxtext.multimodal.processor_llama4 import LLAMA4_PATCH_TOKEN  # pylint: disable=import-outside-toplevel
 
     bidirectional_mask_vision = decoder_input_tokens == LLAMA4_PATCH_TOKEN
-  elif config.model_name in ["qwen3-omni-30b-a3b"]:
-    from maxtext.multimodal.processor_qwen3_omni import QWEN3_OMNI_IMAGE_TOKEN, QWEN3_OMNI_VIDEO_TOKEN  # pylint: disable=import-outside-toplevel
+  elif config.model_name in ["qwen3-omni-30b-a3b", "qwen3.5-35b-a3b", "qwen3.5-397b-a17b"]:
+    from maxtext.multimodal.processor_qwen3_omni import QwenTokens  # pylint: disable=import-outside-toplevel
 
-    # Create bidirectional_mask for vision/video token merging
-    bidirectional_mask_vision = (decoder_input_tokens == QWEN3_OMNI_IMAGE_TOKEN) | (
-        decoder_input_tokens == QWEN3_OMNI_VIDEO_TOKEN
-    )
-    # Create image/video mask for deepstack visual embedding injection
+    tokens = QwenTokens(config)
+
+    if is_video:
+      bidirectional_mask_vision = decoder_input_tokens == tokens.video_pad
+    else:
+      bidirectional_mask_vision = decoder_input_tokens == tokens.image_pad
   return bidirectional_mask_vision
 
 
@@ -233,8 +238,10 @@ def get_bidirectional_mask_audio(config, decoder_input_tokens):
   """Get the bidirectional mask for specific models."""
   bidirectional_mask_audio = None
   if config.model_name in ["qwen3-omni-30b-a3b"]:
-    from maxtext.multimodal.processor_qwen3_omni import QWEN3_OMNI_AUDIO_TOKEN  # pylint: disable=import-outside-toplevel
+    from maxtext.multimodal.processor_qwen3_omni import QwenTokens  # pylint: disable=import-outside-toplevel
+
+    tokens = QwenTokens(config)
 
     # Create bidirectional_mask for audio token merging
-    bidirectional_mask_audio = decoder_input_tokens == QWEN3_OMNI_AUDIO_TOKEN
+    bidirectional_mask_audio = decoder_input_tokens == tokens.audio_pad
   return bidirectional_mask_audio

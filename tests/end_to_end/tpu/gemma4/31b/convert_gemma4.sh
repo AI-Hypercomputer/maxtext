@@ -4,7 +4,7 @@ set -ex
 idx=$(date +%Y-%m-%d-%H-%M)
 
 MODEL_NAME='gemma4-31b'
-export MODEL_VARIATION='31b'
+export MODEL_VARIATION='31b-it'
 TOKENIZER_PATH='google/gemma-4-31b-it'
 # To convert the multimodal model, make sure the use_multimodal is set to be true
 USE_MULTIMODAL=false
@@ -55,7 +55,6 @@ if [ ${USE_MULTIMODAL} == true ]; then
         dtype=float32 \
         matmul_precision=highest \
         per_device_batch_size=1 \
-        vision_output_length=280 \
         attention=dot_product \
         prompt="${TEST_PROMPT}" \
         image_path=${TEST_IMAGE} \

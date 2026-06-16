@@ -24,10 +24,10 @@ in [MyST Markdown syntax](https://myst-parser.readthedocs.io/en/latest/syntax/ty
 
 If you are writing documentation for MaxText, you may want to preview the
 documentation site locally to ensure things work as expected before a deployment
-to [Read The Docs](https://readthedocs.org/).
+to [Read The Docs](https://about.readthedocs.com/?ref=app.readthedocs.org).
 
 First, make sure you
-[install MaxText from source](https://maxtext.readthedocs.io/en/latest/install_maxtext.html#from-source)
+[install MaxText from source](../install_maxtext.md#from-source)
 and install the necessary dependencies. You can do this by navigating to your
 local clone of the MaxText repo and running:
 

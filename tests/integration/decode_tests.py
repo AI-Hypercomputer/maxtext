@@ -203,6 +203,7 @@ class DecodeTests(unittest.TestCase):
 
   @pytest.mark.tpu_only
   @pytest.mark.scheduled_only
+  @pytest.mark.skip(reason="Fail due to JAX upgrade, tracked in b/504459487.")
   def test_tpu_deepseek32(self):
     decode_main(DecodeTests.CONFIGS["deepseek32"])
 

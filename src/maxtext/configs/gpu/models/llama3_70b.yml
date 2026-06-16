@@ -24,8 +24,8 @@ per_device_batch_size: 4
 max_target_length: 8192
 attention: "cudnn_flash_te"
 remat_policy: "full"
-use_iota_embed: True
+use_iota_embed: true
 dataset_type: "synthetic"
 reuse_example_batch: 1
-enable_checkpointing: False
+enable_checkpointing: false
 max_segments_per_seq: 32

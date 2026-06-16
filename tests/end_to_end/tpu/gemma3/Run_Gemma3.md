@@ -20,6 +20,8 @@
 
 We provide examples for checkpoint conversion and decoding/training/finetuning Gemma3 in test scripts at [tests/end_to_end/tpu/gemma3](https://github.com/AI-Hypercomputer/maxtext/tree/main/tests/end_to_end/tpu/gemma3). 
 
+For multimodal functionality, see the [Multimodal Support guide](../../../../docs/tutorials/posttraining/multimodal.md).
+
 
 ## Pre-training
 You can train from scratch to generate a new checkpoint. One example command to run pretraining Gemma3-4B model is as follows:

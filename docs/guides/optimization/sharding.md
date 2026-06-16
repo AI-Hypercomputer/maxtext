@@ -47,11 +47,11 @@ Explanation: Both the activations ($BM$) and weights ($ME$) are sharded on the M
 | $M$    | mlp_dim (aka intermediate dim)        |
 | $X$    | expert                                |
 
-Note for the feed forward computation the batch and sequence dimensions act the same and thus we use only one $B$ axis (which you can think of as a token batch dimension, a reshaping of batch and sequence into one axis), but for context and sequence parallelism they act differently and thus we use both a $B$ and $S$ dimension and the $B$ dimension is really batch in sequences. For example a matmul with an explicit sequence dimension might look like
+Note for the feed forward computation the batch and sequence dimensions act the same and thus we use only one $B$ axis (which you can think of as a token batch dimension, a reshaping of batch and sequence into one axis), but for context parallelism they act differently and thus we use both a $B$ and $S$ dimension and the $B$ dimension is really batch in sequences. For example a matmul with an explicit sequence dimension might look like
 
 $$BSE \times EM = BSM$$
 
-But for arithmetic intensity roofline analysis purposes the $B$ and $S$ axis act as one, and generally we omit the $S$ axis except for when its needed (context/sequence parallelism), thus we only write
+But for arithmetic intensity roofline analysis purposes the $B$ and $S$ axis act as one, and generally we omit the $S$ axis except for when its needed (context parallelism), thus we only write
 
 $$BE \times EM = BM$$
 
@@ -113,7 +113,7 @@ $$B_yM_x \times M_xE = B_yE \rightarrow \text{RS over x } \rightarrow B_yE_x $$
 
 **Ratio (Arithmetic Intensity)** = $|M_x|$ Flops/byte
 
-This "independence" of sharding strategies is true for the main four parallelisms (data, model (tensor), pipeline, and expert). Note that data, fsdp, context and sequence parallelism are all roughly the same for the purpose of
+This "independence" of sharding strategies is true for the main four parallelisms (data, model (tensor), pipeline, and expert). Note that data, fsdp, and context parallelism are all roughly the same for the purpose of
 arithmetic intensity analysis since they shard the batch, as we will illustrate in the individual sections below. In addition both data and pipeline parallelism (microbatches) shard the batch which decreases the HBM arithmetic intensity.
 
 ## Code implementation of sharding in MaxText
@@ -269,28 +269,6 @@ The extra cost of all gathering of keys and values is small, especially for long
 **Communicate (KV all gather)**: All-gather keys and values - `4 * batch * seq_len * kv_heads * head_dim`
 
 **Ratio**: `seq_len * query_heads / (kv_heads * |CP|)`
-
-## Sequence Parallelism (SP)
-
-Sequence parallelism is very similar to context parallelism - we shard the layer inputs and feed forward activations along the sequence dimension. The difference is for attention - we shard the queries, keys, and values along the head dimension instead of sequence dimension (this is fairly MaxText specific, you might not see this in other codebases). This is because the head dimension is easy to shard on for attention (it is not a contracting dimension), and thus can be more efficient than context parallelism as long as there are enough heads. Both sequence parallelism and tensor parallelism shard the heads, so we are constrained by `tensor_parallelism * sequence_parallelism < kv_heads`. E.g. if there are only 8 `kv_heads` as for llama3 and we use `tensor_parallelism=8`, then we cannot use any `sequence_parallelism` (e.g. `sequence_parallelism=1`)
-
-Sequence parallelism is currently only supported with TPUs attention kernel, for GPUs we recommend context parallelism above.
-
-### SP Arithmetic Intensity
-
-The main communications are the same as `FSDP` (all gather weights and synchronize gradients), with an arithmetic intensity of `local_batch` / `sparsity`
-
-#### SP Extra A2A cost
-
-Sequence parallelism has an additional cost of transferring the sharding from sequence to heads (and back again) for attention. This is executed via and all-to-all which are generally cheap operations, analyzed below:
-
-**Compute**: Attention ($4 * batch * seq_len^2 * heads * head_dim / |SP|$)
-
-**Communicate:** A2A QKV activations and output activations (roughly $4 * batch * seq_len * heads * head_dim$)
-
-**Ratio (Arithmetic Intensity)**: Proportional to $seq_len / |SP|$
-
-The exact ratio depends on MHA vs GQA, how many kv heads there are and the efficiency of an all-to-all on the given hardware.
 
 ## Tensor Parallelism (TP)
 

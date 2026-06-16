@@ -44,7 +44,7 @@ def load_meta(meta_checkpoint_folder):
   meta_tensor = {}
   ckpt_paths = sorted(pathlib.Path(meta_checkpoint_folder).glob("[!.]*.pth"))
   for ckpt_path in ckpt_paths:
-    meta_tensor = torch.load(ckpt_path, map_location="cpu")
+    meta_tensor = torch.load(ckpt_path, map_location="cpu", weights_only=True)
   return meta_tensor
 
 

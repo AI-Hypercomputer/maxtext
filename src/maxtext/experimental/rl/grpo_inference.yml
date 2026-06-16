@@ -1,8 +1,8 @@
-# This config is used for loading the inference model for GRPO. Note that base_config is set to "rl.yml" 
+# This config is used for loading the inference model for GRPO. Note that base_config is set to "rl.yml"
 # to inherit the necessary sharding rules for GRPO inference.
 base_config: "rl_mt_jt.yml"
 
-use_grpo: True
+use_grpo: true
 train_data_columns: 'prompt'
 
 attention: 'dot_product'
@@ -20,10 +20,10 @@ decode_sampling_strategy: "weighted"
 decode_sampling_temperature: 0.9
 async_checkpointing: false
 
-return_log_prob: True
+return_log_prob: true
 
-add_bos: False
-add_eos: False
+add_bos: false
+add_eos: false
 
 ### Splash attention block sizes
 # These values are tuned for small sequence lengths used in the grpo test script.
@@ -35,7 +35,7 @@ sa_block_kv_dkv: 128
 sa_block_kv_dkv_compute: 128
 sa_block_q_dq: 128
 sa_block_kv_dq: 128
-sa_use_fused_bwd_kernel: False
+sa_use_fused_bwd_kernel: false
 sa_q_layout: "HEAD_DIM_MINOR"
 sa_k_layout: "HEAD_DIM_MINOR"
 sa_v_layout: "HEAD_DIM_MINOR"

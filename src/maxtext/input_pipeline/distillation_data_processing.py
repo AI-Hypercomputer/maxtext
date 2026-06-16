@@ -121,7 +121,9 @@ def filter_dataset(config, dataset, tokenizer):
     max_output_tokens = min(max_output_length, len(tokenizer.encode(actual_completion)))
     if config.use_chat_template:
       message = [{"role": "user", "content": prompt}]
-      prompt_token_ids = tokenizer.apply_chat_template(message, add_generation_prompt=True, tokenize=True)
+      prompt_token_ids = input_pipeline_utils.extract_token_ids(
+          tokenizer.apply_chat_template(message, add_generation_prompt=True, tokenize=True)
+      )
     else:
       prompt_token_ids = tokenizer.encode(prompt)
 

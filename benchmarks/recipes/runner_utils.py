@@ -48,6 +48,7 @@ def _create_workload_config(
       "generate_metrics_and_upload_to_big_query": user_config.bq_enable,
       "db_project": user_config.bq_db_project,
       "db_dataset": user_config.bq_db_dataset,
+      "skip_validation": user_config.skip_validation,
   }
   # Add any extra arguments, like disruption_configs, if they exist
   config_args.update(kwargs)

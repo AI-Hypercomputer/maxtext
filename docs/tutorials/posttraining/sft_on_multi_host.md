@@ -29,15 +29,19 @@ Let's get started!
 Before starting, ensure you have:
 
 - Access to a Google Cloud Project with TPU quotas.
+- **IAM Roles** required:
+  - **Kubernetes Engine Developer** (`roles/container.developer`) to submit and manage workloads on GKE.
+  - **Artifact Registry Writer** (`roles/artifactregistry.writer`) to upload Docker images.
+  - **Storage Admin** (`roles/storage.admin`) or **Storage Object Admin** (`roles/storage.objectAdmin`) combined with **Storage Legacy Bucket Reader** (`roles/storage.legacyBucketReader`) on your GCS bucket to read/write checkpoints and logs. (Note: A bucket-level read permission like `storage.buckets.get` is required by JAX/TensorStore to verify bucket existence and metadata; using `roles/storage.objectAdmin` alone will cause a misleading "bucket not found" error).
 - A Hugging Face account with an access token for downloading models.
-- Permissions for Google Artifact Registry (Artifact Registry Writer role).
 - Prerequisites for XPK installed (follow [official documentation](https://github.com/AI-Hypercomputer/xpk/blob/main/docs/installation.md#1-prerequisites)).
+  - **Important:** Modern GKE clusters require the GKE auth plugin. If you encounter `gke-gcloud-auth-plugin not found` when running `kubectl` commands, you must install it locally (e.g., `sudo apt-get install google-cloud-sdk-gke-gcloud-auth-plugin` for `apt` installations, or `gcloud components install gke-gcloud-auth-plugin` for standalone archive installations).
 - A Pathways-ready GKE cluster (see [create GKE cluster](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster)).
 - **Docker** installed and configured for sudoless use. Follow the steps to [configure sudoless Docker](https://docs.docker.com/engine/install/linux-postinstall/).
 
 ## Build and upload MaxText Docker image
 
-For instructions on building and uploading the MaxText Docker image with post-training dependencies, please refer to the [official documentation](https://maxtext.readthedocs.io/en/latest/build_maxtext.html).
+For instructions on building and uploading the MaxText Docker image with post-training dependencies, please refer to the [official documentation](../build_maxtext.md).
 
 ## Create GKE cluster
 
@@ -52,11 +56,11 @@ placeholders with your actual values.
 # -- Model configuration --
 # The MaxText model name. See `src/maxtext/configs/types.py` for `ModelName` for a
 # full list of supported models.
-export MODEL=<MaxText Model> # e.g., deepseek3-671b
+export MODEL=<MODEL_NAME> # e.g., deepseek3-671b
 
 # Your Hugging Face access token. Required to download gated models like Llama.
 # You can generate one at https://huggingface.co/settings/tokens.
-export HF_TOKEN=<Hugging Face Access Token>
+export HF_TOKEN=<HF_TOKEN>
 
 # -- MaxText configuration --
 # Use a GCS bucket you own to store logs and checkpoints. Ideally in the same
@@ -64,24 +68,24 @@ export HF_TOKEN=<Hugging Face Access Token>
 # You can list your buckets and their locations in the
 # [Cloud Console](https://console.cloud.google.com/storage/browser) or via
 # `gcloud storage buckets list --format="table(name, location)"`.
-export BASE_OUTPUT_DIRECTORY=<GCS Path for Output/Logs> # e.g., gs://my-bucket/maxtext-runs
+export BASE_OUTPUT_DIRECTORY=<GCS_BUCKET> # e.g., gs://my-bucket/maxtext-runs
 
 # An arbitrary string to identify this specific run.
 # We recommend to include the model, user, and timestamp.
 # Note: Kubernetes requires workload names to be valid DNS labels (lowercase, no underscores or periods).
-export RUN_NAME=<Name for this run>
+export RUN_NAME=<RUN_NAME>
 
 # -- Workload configuration --
 # Your GCP project ID. Find it on the [Cloud Console Dashboard](https://console.cloud.google.com/home/dashboard).
 # If you've already set it in your local config, you can retrieve it via:
 # gcloud config get-value project
-export PROJECT_ID=<Google Cloud Project ID>
+export PROJECT_ID=<PROJECT_ID>
 
 # The GCP location (listed as "Location" in the UI) and name of your
 # TPU-enabled GKE cluster. Both can be found on the
 # [Cloud Console](https://console.cloud.google.com/kubernetes/list).
-export ZONE=<GKE Cluster Zone> # e.g., 'us-central1'
-export GKE_CLUSTER=<Name of GKE Cluster>
+export ZONE=<ZONE> # e.g., 'us-central1'
+export GKE_CLUSTER=<CLUSTER_NAME>
 
 # For a full list of MaxText-supported TPU types, see: `src/maxtext/utils/accelerator_to_spec_map.py`. To see the TPU type
 # of your cluster:
@@ -91,20 +95,20 @@ export GKE_CLUSTER=<Name of GKE Cluster>
 
 # 2. Find your TPU type (e.g., 'v5p-128') by checking the accelerator labels on your nodes:
 # kubectl get nodes -l cloud.google.com/gke-tpu-accelerator -o jsonpath='{.items[*].metadata.labels.cloud\.google\.com/gke-tpu-accelerator}' | tr ' ' '\n' | sort -u
-export TPU_TYPE=<TPU Type>
-export NUM_SLICES=<number of slices>
+export TPU_TYPE=<TPU_TYPE>
+export NUM_SLICES=<NUM_SLICES>
 
 # The Docker image you pushed in the prerequisite step
-export CLOUD_IMAGE_NAME=<image name>
+export CLOUD_IMAGE_NAME=<IMAGE_NAME>
 export DOCKER_IMAGE="gcr.io/${PROJECT_ID?}/${CLOUD_IMAGE_NAME?}"
 
 # -- Fine-Tuning configuration --
-export STEPS=<Fine-Tuning Steps> # e.g., 1000
+export STEPS=<STEPS> # e.g., 1000
 
 # -- Dataset configuration --
-export DATASET_NAME=<Hugging Face Dataset Name> # e.g., HuggingFaceH4/ultrachat_200k
-export TRAIN_SPLIT=<Data Split for Train> # e.g., train_sft
-export TRAIN_DATA_COLUMNS=<Data Columns to Train on> # e.g., ['messages']
+export DATASET_NAME=<DATASET_NAME> # e.g., HuggingFaceH4/ultrachat_200k
+export TRAIN_SPLIT=<TRAIN_SPLIT> # e.g., train_sft
+export TRAIN_DATA_COLUMNS=<DATA_COLUMNS> # e.g., ['messages']
 ```
 
 ## Get MaxText model checkpoint
@@ -116,7 +120,7 @@ This section explains how to prepare your model checkpoint for use with MaxText.
 If you already have a MaxText-compatible model checkpoint, simply set the following environment variable and move on to the next section.
 
 ```bash
-export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint> # e.g., gs://my-bucket/my-model-checkpoint/0/items
+export MAXTEXT_CKPT_PATH=<CKPT_PATH> # e.g., gs://my-bucket/my-model-checkpoint/0/items
 ```
 
 **Note:** Make sure that `MAXTEXT_CKPT_PATH` has the checkpoints created using the correct storage flags:
@@ -129,11 +133,19 @@ checkpoint_storage_use_ocdbt=$((1 - USE_PATHWAYS))
 
 ### Option 2: Converting a Hugging Face checkpoint
 
-Refer the steps in [Hugging Face to MaxText](https://maxtext.readthedocs.io/en/maxtext-v0.2.1/guides/checkpointing_solutions/convert_checkpoint.html#hugging-face-to-maxtext) to convert a hugging face checkpoint to MaxText. Make sure you have correct checkpoint files converted and saved. Similar as Option 1, you can set the following environment and move on.
+Refer the steps in [Hugging Face to MaxText](../../guides/checkpointing_solutions/convert_checkpoint.md#hugging-face-to-maxtext) to convert a hugging face checkpoint to MaxText. Make sure you have correct checkpoint files converted and saved. Similar as Option 1, you can set the following environment and move on.
 
 ```bash
-export MAXTEXT_CKPT_PATH=<gcs path for MaxText checkpoint> # gs://my-bucket/my-checkpoint-directory/0/items
+export MAXTEXT_CKPT_PATH=<CKPT_PATH> # gs://my-bucket/my-checkpoint-directory/0/items
 ```
+
+> [!IMPORTANT]
+> **Matching the `scan_layers` Parameter:**
+> The `scan_layers` setting during your fine-tuning run **must match** the setting used when creating the checkpoint at `MAXTEXT_CKPT_PATH`.
+>
+> - If the checkpoint was converted or saved with `scan_layers=False` (which is common for Hugging Face conversions and inference-ready models), you **must also provide `scan_layers=False` in the MaxText command.**
+> - If `scan_layers` does not match, MaxText will raise a `ValueError`.
+>   See the [Checkpoints concept guide](../../reference/core_concepts/checkpoints.md) for more details.
 
 ## Submit workload on GKE cluster
 

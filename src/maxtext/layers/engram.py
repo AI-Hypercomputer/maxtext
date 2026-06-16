@@ -15,7 +15,7 @@
 """
 DeepSeek-AI, `Conditional Memory via Scalable Lookup: A New Axis of Sparsity for Large Language Models
   <https://arxiv.org/pdf/2601.07372>`_, 2026
-  
+
 Reference implementation: https://github.com/deepseek-ai/Engram/blob/main/engram_demo_v1.py
 """
 
@@ -53,7 +53,7 @@ class CompressedTokenizer:
   def __init__(self, tokenizer: HFTokenizer):
     normalizer = self._build_normalizer()
     self.lookup_table_np, self.num_new_token = self._build_lookup_table(tokenizer, normalizer)
-    self.lookup_table = jnp.array(self.lookup_table_np, dtype=jnp.int64)
+    self.lookup_table = jnp.array(self.lookup_table_np, dtype=jnp.int32)
 
   def __len__(self) -> int:
     return self.num_new_token
@@ -125,7 +125,7 @@ class CompressedTokenizer:
     """
     Maps original token IDs to compressed IDs.
     """
-    input_ids = jnp.asarray(input_ids, dtype=jnp.int64)
+    input_ids = jnp.asarray(input_ids, dtype=jnp.int32)
 
     # Map negative IDs to 0 for lookup, then mask output back.
     safe_ids = jnp.where(input_ids < 0, 0, input_ids)
@@ -187,7 +187,7 @@ class NgramHashMapping:
     # Pre-calculate odd multipliers for hashing: {layer_id: multipliers}
     # Store as JAX arrays
     self.layer_multipliers = {
-        k: jnp.array(v, dtype=jnp.int64) for k, v in self._calculate_multipliers_across_layers(seed).items()
+        k: jnp.array(v, dtype=jnp.int32) for k, v in self._calculate_multipliers_across_layers(seed).items()
     }
 
     # Pre-calculate unique prime vocab sizes for every head
@@ -201,9 +201,9 @@ class NgramHashMapping:
     Returns:
       A dictionary mapping layer_id to a list of `max_ngram_size` multipliers.
     """
-    # Pre-calculate bounds for random generation
-    max_long = np.iinfo(np.int64).max
-    m_max = int(max_long // self.tokenizer_vocab_size)
+    # Pre-calculate bounds for random generation using int32 to avoid overflow
+    max_int = np.iinfo(np.int32).max
+    m_max = int(max_int // self.tokenizer_vocab_size)
     half_bound = max(1, m_max // 2)
     # Hard-code prime number to align with reference
     LAYER_PRIME_OFFSET = 10007
@@ -214,7 +214,7 @@ class NgramHashMapping:
       layer_seed = int(seed + LAYER_PRIME_OFFSET * int(layer_id))
       np_rng = np.random.default_rng(layer_seed)
       # Generate random odd integers
-      random_value = np_rng.integers(low=0, high=half_bound, size=(self.max_ngram_size,), dtype=np.int64)
+      random_value = np_rng.integers(low=0, high=half_bound, size=(self.max_ngram_size,), dtype=np.int32)
       multipliers = random_value * 2 + 1
       layer_multipliers[layer_id] = multipliers
     return layer_multipliers
@@ -272,7 +272,7 @@ class NgramHashMapping:
     Returns:
       hash_ids: [B, S, H_total] where H_total = H * num_ngram_orders
     """
-    x = jnp.asarray(compressed_ids, dtype=jnp.int64)
+    x = jnp.asarray(compressed_ids, dtype=jnp.int32)
     B, _ = x.shape
 
     # 1. Create Sliding Windows via Shifting
@@ -282,7 +282,7 @@ class NgramHashMapping:
         shifted_inputs.append(x)
       else:
         # Pre-allocate full array with PAD_ID
-        padding = jnp.full((B, k), self.pad_id, dtype=jnp.int64)
+        padding = jnp.full((B, k), self.pad_id, dtype=jnp.int32)
         # Fast memory copy, slicing and assignment
         # e.g., k=1, [PAD, The, cat]
         #       k=2, [PAD, PAD, The]
@@ -309,7 +309,7 @@ class NgramHashMapping:
 
       # Retrieve prime vocab sizes for all heads of this n-gram order
       vocab_sizes_for_this_gram = vocab_sizes[n - 2]
-      mods = jnp.array(vocab_sizes_for_this_gram, dtype=jnp.int64)
+      mods = jnp.array(vocab_sizes_for_this_gram, dtype=jnp.int32)
 
       # Broadcast Modulo: Map hash to valid table indices
       # [B, S, 1] % [H] -> [B, S, H]

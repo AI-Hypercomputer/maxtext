@@ -147,7 +147,7 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
 One example command to run supervised finetuning with V3 on v5p-256. Supervised fine-tuning is only working with HuggingFace conversational datasets. And, you can customize the dataset path using the `hf_path` config and provide your access token with `hf_access_token` config.
 
 ```sh
-python3 -m maxtext.trainers.post_train.sft.train_sft_deprecated src/maxtext/configs/post_train/sft.yml \
+python3 -m maxtext.trainers.post_train.sft.train_sft_native src/maxtext/configs/post_train/sft.yml \
     base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
     load_parameters_path=${SCANNED_CKPT_PATH?} \
     run_name=matmul_supervised_fine_tuning \
@@ -170,7 +170,10 @@ python3 -m maxtext.trainers.post_train.sft.train_sft_deprecated src/maxtext/conf
 ```
 
 ## Continued pre-training for V3.2 Sparse Attention
-**DeepSeek Sparse Attention (DSA)** enhances the Multi-Head Latent Attention (MLA) architecture by introducing a **Lightning Indexer**, which selects the top-k tokens for attention. DeepSeek-V3.2 is instantiated from DeepSeek-V3.1 and undergoes continued pre-training to adapt this indexer via a two-stage strategy: **Dense Warm-up** and **Sparse Training**.  
+
+**DeepSeek Sparse Attention (DSA)** enhances the Multi-Head Latent Attention (MLA) architecture by introducing a **Lightning Indexer**, which selects the top-k tokens for attention. Note that Indexer is activated only if `max_target_length` > `indexer_topk` (2048).
+
+DeepSeek-V3.2 is instantiated from DeepSeek-V3.1 and undergoes continued pre-training to adapt this indexer via a two-stage strategy: **Dense Warm-up** and **Sparse Training**.
 
 1. **Dense Warmup Stage**
 The indexer is trained exclusively using dense indexer loss while all other model parameters remain frozen.  
@@ -186,6 +189,7 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     async_checkpointing=false \
     ici_fsdp_parallelism=128 \
     steps=5 \
+    # Indexer is activated only if max_target_length > indexer_topk (2048)
     max_target_length=4096 \
     attention=flash \
     dtype=bfloat16 \
@@ -212,6 +216,7 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     async_checkpointing=false \
     ici_fsdp_parallelism=128 \
     steps=5 \
+    # Indexer is activated only if max_target_length > indexer_topk (2048)
     max_target_length=4096 \
     attention=flash \
     dtype=bfloat16 \

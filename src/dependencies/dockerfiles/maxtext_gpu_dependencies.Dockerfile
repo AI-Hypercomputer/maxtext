@@ -27,7 +27,7 @@ RUN apt-get update && apt-get install -y google-cloud-sdk
 ENV PATH="/usr/local/google-cloud-sdk/bin:${PATH}"
 
 # Upgrade libcusprase to work with Jax
-RUN apt-get update && apt-get install -y libcusparse-12-6
+RUN apt-get update && apt-get install -y libcusparse-13-2
 
 ARG MODE
 ENV ENV_MODE=$MODE
@@ -63,9 +63,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # Now copy the remaining code (source files that may change frequently)
 COPY ${PACKAGE_DIR}/maxtext/ src/maxtext/
-COPY ${PACKAGE_DIR}/MaxText/ src/MaxText/
+# Now copy resource needed for pytest:
 COPY tests*/ tests/
+COPY pytest.ini* pytest.ini
 COPY benchmarks*/ benchmarks/
+
 
 # Download test assets from GCS if building image with test assets
 ARG INCLUDE_TEST_ASSETS=false
@@ -76,4 +78,4 @@ RUN if [ "$INCLUDE_TEST_ASSETS" = "true" ]; then \
         fi; \
     fi
 
-ENV PYTHONPATH="/deps/src:${PYTHONPATH}"
+ENV PYTHONPATH="/deps/src${PYTHONPATH:+:${PYTHONPATH}}"

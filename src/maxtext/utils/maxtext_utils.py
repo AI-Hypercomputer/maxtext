@@ -13,38 +13,47 @@
 # limitations under the License.
 
 # pylint: disable=line-too-long, disable=bare-except, consider-using-generator
-""" Utils that are only interesting to MaxText. """
+"""Utils that are only interesting to MaxText."""
 
 import functools
-import pickle
 import os
+from typing import Sequence
 
-from flax import linen as nn
+from flax import nnx, linen as nn
+from flax.core.spmd import composite_rules, from_sharding_rules, get_logical_axis_rules
 from flax.linen import partitioning as nn_partitioning
-from flax.training import train_state
+from flax.training.train_state import TrainState
 
 import numpy as np
 
+import jax
+import jax.numpy as jnp
+from jax.sharding import AxisType, Mesh, NamedSharding, PartitionSpec
 from jax.experimental import mesh_utils
 from jax.experimental.serialize_executable import deserialize_and_load
 
-import jax
-import jax.numpy as jnp
-
 import optax
-
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
 import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
 
-from maxtext.common.common_types import DecoderBlockType, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
+from maxtext.configs import pyconfig
+from maxtext.common.common_types import (
+    AttentionType,
+    DecoderBlockType,
+    MODEL_MODE_PREFILL,
+    MODEL_MODE_AUTOREGRESSIVE,
+    ReorderStrategy,
+    ShardMode,
+)
 from maxtext.configs import types
-from maxtext.inference.page_manager import PageState
 from maxtext.common import checkpointing
 from maxtext.multimodal import processor as mm_processor
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import sharding
+from maxtext.utils import elastic_utils
+from maxtext.utils import maxtext_utils_nnx
 
 OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
 
@@ -92,7 +101,10 @@ def get_functional_train_with_signature(
   """Get the shardings (both state and data) for `train_step`."""
   functional_train = functools.partial(train_step, model, config, state_mesh_shardings, params_shardings)
   functional_train.__name__ = "train_step"
-  in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
+  if config.pure_nnx:
+    in_shardings = (state_mesh_shardings, data_sharding)  # State, batch
+  else:
+    in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
   out_shardings = (state_mesh_shardings, None)  # State, metrics
   static_argnums = ()  # We partial out the static argnums of model and config
   donate_argnums = 0  # This is the index of the state - we allow the compiler to make use of this memory.
@@ -103,16 +115,21 @@ def get_functional_eval_with_signature(eval_step, data_sharding, state_mesh_shar
   """Get the shardings (both state and data) for `eval_step`."""
   functional_eval = functools.partial(eval_step, model, config)
   functional_eval.__name__ = "eval_step"
-  in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
+  if config.pure_nnx:
+    in_shardings = (state_mesh_shardings, data_sharding)  # State, batch (NNX: no rng)
+  else:
+    in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
   out_shardings = None  # metrics
   static_argnums = ()  # We partial out the static argnums of model, config
   donate_argnums = ()  # state will be kept instead of being donated in eval_step
   return functional_eval, in_shardings, out_shardings, static_argnums, donate_argnums
 
 
-def shard_reorder_causal_load_balanced(batch, cp_size, shard_mode):
+def shard_reorder_causal_load_balanced(
+    batch, cp_size, shard_mode, reorder_strategy=ReorderStrategy.DUAL_CHUNK_SWAP, hardware="tpu"
+):
   """Shard the output of the reordered sequence."""
-  reordered = max_utils.reorder_causal_load_balanced(batch, cp_size)
+  reordered = max_utils.reorder_causal_load_balanced(batch, cp_size, reorder_strategy, hardware)
   for _, v in batch.items():
     if isinstance(v, jax.Array):
       reordered = sharding.maybe_shard_with_name(reordered, v.sharding, shard_mode)
@@ -120,9 +137,15 @@ def shard_reorder_causal_load_balanced(batch, cp_size, shard_mode):
   return reordered
 
 
-def get_reorder_callable(cp_size, shard_mode):
+def get_reorder_callable(cp_size, shard_mode, reorder_strategy=ReorderStrategy.DUAL_CHUNK_SWAP, hardware="tpu"):
   """Creates a callable that can be used with map() to reorder batches."""
-  return functools.partial(shard_reorder_causal_load_balanced, cp_size=cp_size, shard_mode=shard_mode)
+  return functools.partial(
+      shard_reorder_causal_load_balanced,
+      cp_size=cp_size,
+      shard_mode=shard_mode,
+      reorder_strategy=reorder_strategy,
+      hardware=hardware,
+  )
 
 
 def get_shaped_batch(config):
@@ -185,8 +208,7 @@ def load_compiled(config, partial_train, state, execution_devices):
   # Parker is working on a serializing these
   def load_serialized_compiled(save_name):
     with open(save_name, "rb") as f:
-      serialized_compiled = pickle.load(f)
-    return serialized_compiled
+      return f.read()
 
   def get_train_input_output_trees(func, input_args, input_kwargs):
     _, in_tree_recreated = jax.tree_util.tree_flatten((input_args, input_kwargs))
@@ -374,6 +396,90 @@ def calculate_gemma4_tflops_training_per_device(
   return attention_tflops, learnable_weight_tflops
 
 
+def calculate_gemma4_small_tflops_training_per_device(config, embedding_flops):
+  """Training TFLOPs for Gemma 4 small (E2B / E4B).
+
+  Differs from the dense Gemma 4 path in three ways:
+    1. The last ``num_kv_shared_layers`` decoder layers reuse K/V from an
+       earlier layer and own no k_proj / v_proj.
+    2. With ``use_double_wide_mlp`` (E2B), those shared layers also widen the
+       MLP intermediate dim by 2x.
+    3. A Per-Layer-Embedding block adds a global projection plus a per-layer
+       gate / projection pair on top of every decoder layer.
+  """
+  # Local import keeps Bazel's dep graph cycle-free (layers -> maxtext_utils -> layers).
+  # pytype: disable=import-error
+  from maxtext.models import gemma4_small  # pylint: disable=import-outside-toplevel
+  # pytype: enable=import-error
+
+  b = config.per_device_batch_size
+  s = config.max_target_length
+  num_layers = config.num_decoder_layers
+  num_kv_shared = config.num_kv_shared_layers
+
+  layer_types = gemma4_small.build_layer_types(num_layers, config.model_name)
+  first_shared = gemma4_small.first_kv_shared_layer_idx(num_layers, num_kv_shared)
+
+  global_head_dim = config.global_head_dim or config.head_dim
+  global_num_kv_heads = config.global_num_kv_heads or config.num_kv_heads
+  num_activations = len(config.mlp_activations)
+  window = min(config.sliding_window_size, s)
+
+  # Per-layer FLOP closures parameterized by attention type.
+  def attention_flops_for(attn_type):
+    if attn_type == AttentionType.GLOBAL:
+      # Causal global attention: factor of 2 (lower-triangular half).
+      return 2 * b * s * s * config.num_query_heads * global_head_dim
+    # Sliding-window: exact closed-form for the causal-and-windowed mask.
+    return 4 * b * (s * window - 0.5 * window**2) * config.num_query_heads * config.head_dim
+
+  def qo_flops_for(attn_type):
+    head_dim = global_head_dim if attn_type == AttentionType.GLOBAL else config.head_dim
+    q = 2 * b * s * config.emb_dim * config.num_query_heads * head_dim
+    o = 2 * b * s * config.emb_dim * config.num_query_heads * head_dim
+    return q + o
+
+  def kv_flops_for(attn_type):
+    if attn_type == AttentionType.GLOBAL:
+      kv_heads, head_dim = global_num_kv_heads, global_head_dim
+    else:
+      kv_heads, head_dim = config.num_kv_heads, config.head_dim
+    return 2 * b * s * config.emb_dim * (2 * kv_heads) * head_dim
+
+  attention_flops = 0
+  projection_flops = 0
+  ffn_per_layer = (
+      2 * b * s * config.mlp_dim * config.emb_dim * num_activations  # gate / up
+      + 2 * b * s * config.mlp_dim * config.emb_dim  # down
+  )
+  ffn_flops = 0
+
+  for lyr_idx, attn_type in enumerate(layer_types):
+    attention_flops += attention_flops_for(attn_type)
+    projection_flops += qo_flops_for(attn_type)
+    is_shared = num_kv_shared > 0 and lyr_idx >= first_shared
+    if not is_shared:
+      projection_flops += kv_flops_for(attn_type)
+    if is_shared and config.use_double_wide_mlp:
+      ffn_flops += 2 * ffn_per_layer
+    else:
+      ffn_flops += ffn_per_layer
+
+  # Per-Layer-Embedding block (skipped when ple_dim == 0).
+  ple_flops = 0
+  ple_dim = config.hidden_size_per_layer_input
+  if ple_dim > 0:
+    # One global projection emb_dim -> num_layers * ple_dim.
+    ple_flops += 2 * b * s * config.emb_dim * (num_layers * ple_dim)
+    # Per-layer gate (emb_dim -> ple_dim) and projection (ple_dim -> emb_dim).
+    ple_flops += num_layers * (2 * b * s * config.emb_dim * ple_dim + 2 * b * s * ple_dim * config.emb_dim)
+
+  attention_tflops = attention_flops * 3 / 10**12
+  learnable_weight_tflops = (projection_flops + ffn_flops + ple_flops + embedding_flops) * 3 / 10**12
+
+  return attention_tflops, learnable_weight_tflops
+
+
 def _calculate_chunked_attention_flops_per_layer(config, seq_len, chunk_size):
   """Calculates the non-causal FLOPs for a single layer of chunked attention."""
   num_chunks = seq_len // chunk_size
@@ -549,19 +655,31 @@ def calculate_mla_tflops_per_device(config):
   return qkv_flops, attention_flops, projection_flops
 
 
-def calculate_ffn_mamtul_tflops_per_device(config, mlp_dim):
+def calculate_ffn_mamtul_tflops_per_device(config, mlp_dim, in_dim=None):
   """Helper function to calculate matmul TFLOP in ffn based on MLP dimension.
 
   Applies to:
     - Dense FFN layers (mlp_dim = config.mlp_dim).
     - MoE FFN layers (mlp_dim = config.moe_mlp_dim),
       need to scale by shared_experts or num_experts_per_tok.
+    - Architectures that compress to a latent before the FFN (e.g. qwen3_custom_moe)
+      pass ``in_dim=config.moe_expert_input_dim``; defaults to ``config.emb_dim``.
   """
+  if in_dim is None:
+    in_dim = config.emb_dim
   ffn1_flops = (
-      2 * config.per_device_batch_size * config.max_target_length * mlp_dim * config.emb_dim * len(config.mlp_activations)
+      2 * config.per_device_batch_size * config.max_target_length * mlp_dim * in_dim * len(config.mlp_activations)
   )
-  ffn2_flops = 2 * config.per_device_batch_size * config.max_target_length * mlp_dim * config.emb_dim
+  ffn2_flops = 2 * config.per_device_batch_size * config.max_target_length * mlp_dim * in_dim
   return ffn1_flops + ffn2_flops
+
+
+def get_shared_expert_mlp_dim(config):
+  """Returns the MLP dimension used by the shared expert.
+
+  GEMMA4 shared experts use mlp_dim, while other MoE blocks use moe_mlp_dim. See moe.py.
+  """
+  return config.mlp_dim if config.decoder_block == DecoderBlockType.GEMMA4 else config.moe_mlp_dim
 
 
 def calculate_routed_and_shared_ffn_tflops_per_device(config):
@@ -570,7 +688,9 @@ def calculate_routed_and_shared_ffn_tflops_per_device(config):
   # Due to the mixed decoder layers, the flops is multiplied by num of layers for both dense and moe
   num_dense_layers, num_moe_layers = get_dense_moe_layers(config)
   dense_ffn_flops = calculate_ffn_mamtul_tflops_per_device(config, config.mlp_dim) * num_dense_layers
-  shared_experts_flops = calculate_ffn_mamtul_tflops_per_device(config, config.moe_mlp_dim) * config.shared_experts
+  shared_experts_flops = (
+      calculate_ffn_mamtul_tflops_per_device(config, get_shared_expert_mlp_dim(config)) * config.shared_experts
+  )
   routed_experts_flops = calculate_ffn_mamtul_tflops_per_device(config, config.moe_mlp_dim) * config.num_experts_per_tok
   moe_ffn_flops = (gate_flops + shared_experts_flops + routed_experts_flops) * num_moe_layers
   total_ffn_flops = dense_ffn_flops + moe_ffn_flops
@@ -587,7 +707,7 @@ def get_dense_moe_layers(config):
     num_moe_layers = config.num_decoder_layers // config.interleave_moe_layer_step
     num_dense_layers = config.num_decoder_layers - num_moe_layers
     return num_dense_layers, num_moe_layers
-  elif config.decoder_block == DecoderBlockType.QWEN3_NEXT:
+  elif config.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
     return 0, config.num_decoder_layers
   elif config.decoder_block == DecoderBlockType.DEFAULT:
     raise ValueError("Unsupported decoder block for dense/MoE layer calculation")
@@ -833,10 +953,19 @@ def calculate_tflops_training_per_device(config, log=True):
         DecoderBlockType.DEEPSEEK,
         DecoderBlockType.LLAMA4,
         DecoderBlockType.QWEN3_NEXT,
+        DecoderBlockType.QWEN3_5,
         DecoderBlockType.GEMMA4,
     ):
       total_ffn_flops = calculate_routed_and_shared_ffn_tflops_per_device(config)
       is_ffn_flops_already_total = True
+    elif config.decoder_block == DecoderBlockType.QWEN3_CUSTOM_MOE:
+      # MoE operates at moe_expert_input_dim (compressed latent), not emb_dim.
+      in_dim = config.moe_expert_input_dim
+      gate_flops = 2 * config.per_device_batch_size * config.max_target_length * in_dim * config.num_experts
+      total_ffn_flops = (
+          gate_flops
+          + calculate_ffn_mamtul_tflops_per_device(config, config.moe_mlp_dim, in_dim=in_dim) * config.num_experts_per_tok
+      )
     else:
       gate_flops = 2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.num_experts
       total_ffn_flops = (
@@ -910,6 +1039,12 @@ def calculate_tflops_training_per_device(config, log=True):
     attention_tflops, learnable_weight_tflops = calculate_gemma4_tflops_training_per_device(
         config, total_ffn_flops_all_layers, embedding_flops, attention_pattern_length=6
     )
+  elif config.decoder_block == DecoderBlockType.GEMMA4_SMALL:
+    # The small path derives its own attention pattern from
+    # gemma4_small.get_attention_pattern(config.model_name) and accounts for
+    # KV sharing, double-wide MLP on shared layers, and the per-layer-embedding
+    # block.
+    attention_tflops, learnable_weight_tflops = calculate_gemma4_small_tflops_training_per_device(config, embedding_flops)
   elif config.decoder_block == DecoderBlockType.DEEPSEEK:
     learnable_weight_tflops = (
         (total_ffn_flops_all_layers + (qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops)
@@ -917,7 +1052,28 @@ def calculate_tflops_training_per_device(config, log=True):
         / 10**12
     )
     attention_tflops = causal_attention_flops * config.num_decoder_layers * 3 / 10**12
-  elif config.decoder_block == DecoderBlockType.QWEN3_NEXT:
+  elif config.decoder_block == DecoderBlockType.QWEN3_CUSTOM_MOE:
+    # Attention output projects (num_query_heads * head_dim) -> attention_output_dim, not -> emb_dim.
+    qwen3_custom_proj_flops = (
+        2
+        * config.per_device_batch_size
+        * config.max_target_length
+        * config.attention_output_dim
+        * config.num_query_heads
+        * config.head_dim
+    )
+    # Each layer has a final up-projection: attention_output_dim -> emb_dim.
+    layer_up_proj_flops = (
+        2 * config.per_device_batch_size * config.max_target_length * config.attention_output_dim * config.emb_dim
+    )
+    per_layer_flops = qkv_flops + qwen3_custom_proj_flops + layer_up_proj_flops
+    total_weight_flops = total_ffn_flops_all_layers + per_layer_flops * config.num_decoder_layers + embedding_flops
+    learnable_weight_tflops = total_weight_flops * 3 / 10**12
+    attention_tflops = causal_attention_flops * config.num_decoder_layers * 3 / 10**12
+  elif config.decoder_block in (
+      DecoderBlockType.QWEN3_NEXT,
+      DecoderBlockType.QWEN3_5,
+  ):
     gdn_weight_flops_per_layer, gdn_attn_flops_per_layer = calculate_gated_delta_net_flops_per_device(config)
     cycle_interval = config.inhomogeneous_layer_cycle_interval
     num_full_attn_layers = config.num_decoder_layers // cycle_interval
@@ -943,6 +1099,47 @@ def calculate_tflops_training_per_device(config, log=True):
         / 10**12
     )
     attention_tflops = causal_attention_flops * config.num_decoder_layers * 3 / 10**12
+
+  # MTP (Multi-Token Prediction) FLOPs Calculation
+  mtp_num_layers = getattr(config, "mtp_num_layers", 0)
+  if mtp_num_layers > 0:
+    # MTP modules act as structural replicas of the model's final decoder layer.
+    # To calculate accurately for mixed architectures (e.g., DeepSeek, Llama 4),
+    # we must explicitly reconstruct the FLOPs for the final layer rather than averaging.
+    if config.num_experts > 1:
+      # For MoE architectures, the final layer is always an MoE layer.
+      # Reconstruct the gate, shared expert (if applicable), and routed expert FLOPs.
+      gate_flops = 2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.num_experts
+      if config.decoder_block in (
+          DecoderBlockType.DEEPSEEK,
+          DecoderBlockType.LLAMA4,
+          DecoderBlockType.QWEN3_NEXT,
+          DecoderBlockType.GEMMA4,
+      ):
+        shared_flops = (
+            calculate_ffn_mamtul_tflops_per_device(config, get_shared_expert_mlp_dim(config)) * config.shared_experts
+        )
+        routed_flops = calculate_ffn_mamtul_tflops_per_device(config, config.moe_mlp_dim) * config.num_experts_per_tok
+        last_layer_ffn_flops = gate_flops + shared_flops + routed_flops
+      else:
+        routed_flops = calculate_ffn_mamtul_tflops_per_device(config, config.moe_mlp_dim) * config.num_experts_per_tok
+        last_layer_ffn_flops = gate_flops + routed_flops
+    else:
+      # For dense architectures, the final layer is a standard dense FFN.
+      last_layer_ffn_flops = calculate_ffn_mamtul_tflops_per_device(config, config.mlp_dim)
+
+    # Calculate total weight FLOPs per MTP module.
+    # Crucially, MTP shares the base model's vocabulary embeddings and final output
+    # projections, so we strictly add only the FFN, QKV, and standard projection FLOPs.
+    mtp_weight_flops = (last_layer_ffn_flops + qkv_flops + projection_flops) * mtp_num_layers
+
+    # Attention FLOPs scale linearly with the number of MTP modules.
+    mtp_attn_flops = causal_attention_flops * mtp_num_layers
+
+    # Convert to TFLOPs (multiply by 3 to account for 1 forward pass + 2 backward passes).
+    # Add directly to the running totals before Engram and Vision calculations.
+    learnable_weight_tflops += mtp_weight_flops * 3 / 10**12
+    attention_tflops += mtp_attn_flops * 3 / 10**12
 
   # Engram flops
   if config.engram_layers:
@@ -1060,6 +1257,30 @@ def get_nested_value(dictionary, nested_key, default=None):
   return current_level
 
 
+def collect_intermediates_by_suffix(intermediate_outputs, *suffix_keys: str) -> list:
+  """Collects intermediate leaf values whose dict-key path ends with suffix_keys.
+
+  Works regardless of model architecture (scanned, scannable blocks, or standard),
+  since it matches only the tail of the path rather than the full path.
+
+  Args:
+    intermediate_outputs: The intermediates dict returned by model.apply().
+    *suffix_keys: One or more key names forming the expected path suffix,
+      e.g. ``("moe_lb_loss",)`` or ``("self_attention", "indexer_loss")``.
+
+  Returns:
+    A list of 1-D JAX arrays, one per matching leaf (already ravelled).
+  """
+  suffix = tuple(suffix_keys)
+  n = len(suffix)
+  values = []
+  for path, val in jax.tree_util.tree_leaves_with_path(intermediate_outputs):
+    path_keys = tuple(k.key for k in path if hasattr(k, "key"))
+    if len(path_keys) >= n and path_keys[-n:] == suffix:
+      values.append(jnp.ravel(val))
+  return values
+
+
 def get_intermediate_value(model, nested_key, default=None, clear=False):
   """
   Retrieves an intermediate value from an NNX model. This functions has context about
@@ -1114,15 +1335,15 @@ def update_state_param(state, target_path, value):
   return state.replace(params=new_params)
 
 
-def init_decode_state(apply_fn, params) -> train_state.TrainState:
+def init_decode_state(apply_fn, params) -> TrainState:
   """Init train state with null opt state for decode."""
-  state = train_state.TrainState(step=0, apply_fn=apply_fn, params=params, tx=None, opt_state={})  # type: ignore
+  state = TrainState(step=0, apply_fn=apply_fn, params=params, tx=None, opt_state={})  # type: ignore
   return state
 
 
 def init_training_state(apply_fn, params, tx):
   """Init train state with null opt state for decode."""
-  state = train_state.TrainState.create(apply_fn=apply_fn, params=params, tx=tx)
+  state = TrainState.create(apply_fn=apply_fn, params=params, tx=tx)
   return state
 
 
@@ -1250,7 +1471,7 @@ def setup_initial_state(
     is_training: True to initialize training state, False for decode state
 
   Returns:
-    state: the initialized train state
+    train_state: the initialized train state. For NNX, this is a TrainStateNNX instance
     state_mesh_annotations: the mesh annotations for the train state
   """
 
@@ -1289,20 +1510,48 @@ def setup_initial_state(
       else:
         # The update of data_iterator state happens in place, no need to assign explicitly
         state = restored["items"]
+
+      # For NNX, convert the pure dict to nnx.State using the abstract state as template
+      if config.pure_nnx:
+        nnx.replace_by_pure_dict(unboxed_abstract_state, state)
+        state = unboxed_abstract_state
     else:
       init_state_partial = init_state_fn
       init_state_partial.__name__ = "initialize_state"
-      # pylint: disable=not-callable
-      state = jax.jit(
-          init_state_partial,
-          in_shardings=None,
-          out_shardings=state_mesh_shardings,
-      )()
+      if config.pure_nnx:
+        state = jax.jit(
+            lambda: nnx.state(init_state_partial()),  # Get state only, mapping to out_sharding structure
+            in_shardings=None,
+            out_shardings=state_mesh_shardings,
+        )()
+      else:
+        # pylint: disable=not-callable
+        state = jax.jit(
+            init_state_partial,
+            in_shardings=None,
+            out_shardings=state_mesh_shardings,
+        )()
       if raw_params:  # If we loaded a partial state, we need to merge it.
-        state = state.replace(params=raw_params)
+        if config.pure_nnx:
+          # raw_params should have the same sharding info as in the model
+          nnx.update(state.model, raw_params)
+        else:
+          sparsity_enabled = config.weight_sparsity_n and config.weight_sparsity_m
+          if sparsity_enabled:
+            # Sparsity-init keeps freshly initialized params for any leaf still
+            # represented as an abstract ShapeDtypeStruct in raw_params (i.e. not
+            # actually restored), and uses the restored value otherwise.
+            def _merge_params(p_raw, p_init):
+              if isinstance(p_raw, jax.ShapeDtypeStruct):
+                return p_init
+              return p_raw
 
-  state = max_utils.unbox_logicallypartioned(state)
-
+            merged_params = jax.tree_util.tree_map(_merge_params, raw_params, state.params)
+            state = state.replace(params=merged_params)
+          else:
+            state = state.replace(params=raw_params)
+  if not config.pure_nnx:
+    state = max_utils.unbox_logicallypartioned(state)
   return state, state_mesh_annotations, state_mesh_shardings, data_iterator
 
 
@@ -1317,6 +1566,9 @@ def get_logical_annotations(config, mesh, init_state_fn):
 
 def get_abstract_state(config, mesh, init_state_fn, is_training=True):
   """Get a shaped abstraction of the state (including optimizer)"""
+  if config.pure_nnx:
+    return get_abstract_state_nnx(config, mesh, init_state_fn, is_training)
+
   init_state_partial = init_state_fn
 
   with nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -1360,7 +1612,174 @@ def get_abstract_state(config, mesh, init_state_fn, is_training=True):
   )
 
 
-def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: None | PageState = None):
+def get_nnx_named_sharding_with_scan_axis(abs_var_state: nnx.State, mesh) -> nnx.State:
+  """Compute NamedSharding for each NNX variable, correctly handling the scan (stacked layers) axis.
+
+  Unlike flax.nnx.spmd.get_var_pspec (used inside nnx.get_abstract_model), this function also
+  inserts the partition_name axis at the correct scan_axis position for parameters created by
+  _create_scanned_layers. Without this, scanned parameters get a 2D partition spec applied to a
+  3D tensor, placing sharding on the stacked-layers dimension instead of the embedding dimension.
+
+  Args:
+    abs_var_state: NNX abstract variable state from nnx.split(nnx.eval_shape(...)).
+    mesh: JAX physical mesh.
+
+  Returns:
+    Same tree structure as abs_var_state but each Variable's value replaced with NamedSharding.
+  """
+
+  def _make_named_sharding(v):
+    val = v.get_value()
+    if not hasattr(val, "shape"):
+      # `val` is either truly leafless (e.g. optax MaskedNode) or a composite
+      # pytree of tensors (e.g. AQT QTensor on serve-mode quantized variables —
+      # a `qvalue` int8 array + a list of `scale` bf16 arrays). For the latter
+      # we must emit a parallel tree of NamedSharding leaves so the downstream
+      # `jax.tree.map(lambda a, s: ShapeDtypeStruct(..., sharding=s), abs, names)`
+      # finds a real Sharding at every position. Replicated sharding is a safe
+      # default — AQT serve-mode QTensors are normally small (per-channel scale
+      # factors and packed int8 weights) and don't need axis-aware sharding.
+      if jax.tree_util.tree_leaves(val):
+        replicated = NamedSharding(mesh, PartitionSpec())
+        return v.replace(jax.tree.map(lambda _: replicated, val))
+      return v
+    metadata = v.get_metadata()
+    out_sharding = metadata.get("out_sharding") or metadata.get("sharding_names") or metadata.get("sharding")
+    if not out_sharding:
+      pspec = PartitionSpec()
+    else:
+      # Insert the scan axis for parameters created by _create_scanned_layers.
+      # _add_scan_metadata stores the axis name in nnx.PARTITION_NAME and the
+      # axis index in "param_scan_axis". flax.nnx.spmd.get_var_pspec ignores these.
+      if nnx.PARTITION_NAME in metadata:
+        partition_name = metadata[nnx.PARTITION_NAME]
+        # Always use param_scan_axis from metadata. OptVariable (optimizer state) inherits
+        # param_scan_axis=1 from the model Param via to_opt_state(), so we must not hardcode
+        # scan_axis=0 for non-Param types. stacked_rest non-Param variables have
+        # param_scan_axis=0 set explicitly by _add_scan_metadata, so this is always correct.
+        scan_axis = metadata.get("param_scan_axis", 0)
+        out_sharding = [out_sharding] if isinstance(out_sharding, str) else list(out_sharding)
+        # Guard against double-insertion: Flax 0.12.6 _remap_sharding_metadata renames
+        # 'sharding' -> 'out_sharding', so _add_scan_metadata may have already inserted
+        # the scan axis. Only insert if not already present.
+        if partition_name not in out_sharding:
+          out_sharding.insert(scan_axis, partition_name)
+        out_sharding = tuple(out_sharding)
+      # Convert logical axis names to physical mesh axes using current context rules.
+      context_rules = get_logical_axis_rules()
+      local_rules = metadata.get("sharding_rules", ())
+      if context_rules or local_rules:
+        rules = composite_rules(context_rules, local_rules)
+        raw_sharding = from_sharding_rules(out_sharding, rules)
+        mesh_axis_names = mesh.axis_names if mesh is not None else ()
+
+        # from_sharding_rules leaves a logical name with no matching rule unchanged, so a
+        # name missing from logical_axis_rules (e.g. concat_embed on the MTP kernel)
+        # reaches NamedSharding and is rejected as an unknown mesh axis. Map any such
+        # leftover name to None (replicated), matching Linen, whose logical_to_mesh_axes
+        # replicates unmatched names.
+        def _sanitize(x):
+          if isinstance(x, list):
+            x = tuple(x)
+          if x is None or (isinstance(x, str) and x in mesh_axis_names) or isinstance(x, tuple):
+            return x
+          return None
+
+        sanitized_sharding = [_sanitize(x) for x in raw_sharding]
+        pspec = PartitionSpec(*sanitized_sharding)
+      else:
+        pspec = PartitionSpec(*out_sharding)
+    return v.replace(NamedSharding(mesh, pspec))
+
+  return jax.tree.map(_make_named_sharding, abs_var_state, is_leaf=lambda x: isinstance(x, nnx.Variable))
+
+
+def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=True):
+  """Calculates the abstract sharded state and memory placement for an NNX TrainState.
+
+  This function performs an abstract trace of the NNX model and optimizer using
+  `nnx.get_abstract_model`. It resolves logical sharding annotations into physical
+  JAX shardings and applies memory placement optimizations such as optimizer
+  sharding and host memory offloading (pinning to CPU RAM).
+
+  Args:
+    config: Configuration object containing sharding and offloading hyperparameters
+      (e.g., shard_optimizer_over_data, optimizer_memory_host_offload).
+    mesh: JAX physical mesh used to resolve logical axis names to physical devices.
+    nnx_init_trainstate_fn: A zero-argument factory function that produces a
+      TrainStateNNX instance during the abstract trace.
+    is_training: Boolean indicating if the state is for training. If True,
+      optimizer state is processed and memory offloading strategies are applied.
+
+  Returns:
+    A tuple containing (abstract_sharded_state, None, state_mesh_shardings):
+      abstract_sharded_state: An nnx.State containing ShapeDtypeStructs with
+        fully resolved physical sharding and memory_kind metadata.
+      state_mesh_annotations: An nnx.State tree consisting of the raw PartitionSpec
+        objects corresponding to each parameter/variable.
+      state_mesh_shardings: An nnx.State tree consisting of the raw JAX
+        Sharding objects corresponding to each parameter/variable.
+  """
+  assert nnx_init_trainstate_fn is not None, "get_abstract_state_nnx: init function must be given."
+
+  with nn_partitioning.axis_rules(config.logical_axis_rules):
+    # Use nnx.eval_shape + nnx.split instead of nnx.get_abstract_model, so we can apply
+    # get_nnx_named_sharding_with_scan_axis which correctly inserts the stacked-layers
+    # axis into the partition spec. nnx.get_abstract_model uses get_var_pspec internally
+    # which ignores nnx.PARTITION_NAME / param_scan_axis metadata set by _create_scanned_layers,
+    # causing the 2D partition spec to be misapplied to the 3D stacked parameter tensor.
+    # Do NOT wrap nnx.eval_shape in jax.set_mesh: Flax 0.12.6's _to_variable calls
+    # var.shape for every variable when a global mesh is active, but masked optimizer
+    # state variables (e.g. from trainable_parameters_mask) have value=MaskedNode()
+    # which has no .shape and would raise AttributeError.  We handle sharding
+    # ourselves via get_nnx_named_sharding_with_scan_axis, so auto-assignment is not
+    # needed here.
+    abs_model = nnx.eval_shape(nnx_init_trainstate_fn)
+    _, abs_var_state = nnx.split(abs_model)
+    named_sharding_state = get_nnx_named_sharding_with_scan_axis(abs_var_state, mesh)
+    abstract_state = jax.tree.map(
+        lambda a, s: jax.ShapeDtypeStruct(a.shape, a.dtype, sharding=s),
+        abs_var_state,
+        named_sharding_state,
+    )
+
+  state_mesh_shardings = maxtext_utils_nnx.get_named_sharding_nnx(abstract_state)
+
+  if is_training and config.shard_optimizer_over_data:
+    # Add data to sharding for optimizer state
+    optimizer_sharding = jax.tree_util.tree_map_with_path(
+        functools.partial(sharding.add_data_to_sharding, mesh),
+        abstract_state.optimizer,
+        state_mesh_shardings.optimizer,
+    )
+    state_mesh_shardings.optimizer = optimizer_sharding
+  if is_training and config.optimizer_memory_host_offload:
+    optimizer_sharding = jax.tree_util.tree_map_with_path(
+        maxtext_utils_nnx.move_memory_to_host,
+        state_mesh_shardings.optimizer,
+        is_leaf=lambda x: isinstance(x, NamedSharding),
+    )
+    state_mesh_shardings.optimizer = optimizer_sharding
+  if is_training and config.parameter_memory_host_offload:
+    assert config.param_scan_axis == 0, "You must set the scan axis 0 to enable parameter offloading."
+    _, state_params, _ = nnx.split(state_mesh_shardings, nnx.Param, ...)
+    state_params = jax.tree_util.tree_map_with_path(
+        maxtext_utils_nnx.move_memory_to_host,
+        state_params,
+        is_leaf=lambda x: isinstance(x, NamedSharding),
+    )
+    nnx.update(state_mesh_shardings, state_params)
+
+  abstract_sharded_state = maxtext_utils_nnx.set_named_sharding_nnx(abstract_state, state_mesh_shardings)
+  state_mesh_annotations = maxtext_utils_nnx.get_partition_spec_nnx(state_mesh_shardings)
+  return (
+      abstract_sharded_state,
+      state_mesh_annotations,
+      state_mesh_shardings,
+  )
+
+
+def get_prefill_kv_cache_annotations(model, config, rng, mesh):
   """Get a shaped abstraction of the state (including optimizer)"""
 
   def init_kv_cache(model, config):
@@ -1381,7 +1800,6 @@ def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: None 
         encoder_audios=jnp.ones(audio_shape) if config.use_audio else None,
         model_mode=MODEL_MODE_PREFILL,
         slot=0,
-        page_state=page_state,
     )
     return model_vars["cache"]
 
@@ -1394,7 +1812,7 @@ def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: None 
   return state_mesh_annotations
 
 
-def get_kv_cache_annotations(model, config, rng, mesh, page_state: None | PageState = None):
+def get_kv_cache_annotations(model, config, rng, mesh):
   """Get a shaped abstraction of the state (including optimizer)"""
 
   def init_kv_cache(model, config):
@@ -1412,7 +1830,6 @@ def get_kv_cache_annotations(model, config, rng, mesh, page_state: None | PageSt
         encoder_audios=jnp.ones(audio_shape) if config.use_audio else None,
         model_mode=MODEL_MODE_AUTOREGRESSIVE,
         slot=0,
-        page_state=page_state,
     )
     return model_vars["cache"]
 
@@ -1423,6 +1840,30 @@ def get_kv_cache_annotations(model, config, rng, mesh, page_state: None | PageSt
   with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
   return state_mesh_annotations
+
+
+def _nnx_cache_partition_specs(abstract_model, config, mesh):
+  """Per-leaf PartitionSpec tree for the abstract model's nnx.Cache vars.
+
+  Returned as a pure dict so the engine can wrap it in NamedSharding the same
+  way it does for the Linen helpers below.
+  """
+  _, cache_state, _ = nnx.split(abstract_model, nnx.Cache, ...)
+  # get_nnx_named_sharding_with_scan_axis reads logical axis rules from the
+  # active flax partitioning context, so wrap.
+  with nn_partitioning.axis_rules(config.logical_axis_rules):
+    named_state = get_nnx_named_sharding_with_scan_axis(cache_state, mesh)
+  return jax.tree.map(lambda s: s.spec, named_state.to_pure_dict())
+
+
+def get_prefill_kv_cache_annotations_nnx(abstract_model, config, mesh):
+  """NNX equivalent of get_prefill_kv_cache_annotations."""
+  return _nnx_cache_partition_specs(abstract_model, config, mesh)
+
+
+def get_kv_cache_annotations_nnx(abstract_model, config, mesh):
+  """NNX equivalent of get_kv_cache_annotations."""
+  return _nnx_cache_partition_specs(abstract_model, config, mesh)
 
 
 def save_quantized_checkpoint_if_configured(config, params):
@@ -1442,7 +1883,13 @@ def save_quantized_checkpoint_if_configured(config, params):
 def add_config_to_summary_writer(config, summary_writer):
   """Writes config params to tensorboard"""
   if jax.process_index() == 0:
-    for key, value in config.get_keys().items():
+    if hasattr(config, "get_keys"):
+      config_dict = config.get_keys()
+    elif hasattr(config, "model_dump"):
+      config_dict = config.model_dump()
+    else:
+      config_dict = dict(config)
+    for key, value in config_dict.items():
       max_utils.add_text_to_summary_writer(key, str(value), summary_writer)
 
 
@@ -1450,7 +1897,14 @@ def create_device_mesh(config, devices=None):
   """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas"""
   if devices is None:
     devices = jax.devices()
-  if config.subslice_shape and config.enable_single_controller and config.num_slices == 1:
+
+  if config.elastic_enabled:
+    devices = elastic_utils.live_devices(config)
+    num_slices = len(elastic_utils.live_slice_indices(config))
+  else:
+    num_slices = config.num_slices
+
+  if config.subslice_shape and config.enable_single_controller and num_slices == 1:
     max_logging.log(f"Trying to create a subslice with shape: {config.subslice_shape}")
     subslice_shape = tuple(int(x) for x in config.subslice_shape.split(","))
     device_coords = [device.coords for device in devices]
@@ -1467,7 +1921,7 @@ def create_device_mesh(config, devices=None):
     devices = subslice_devices
 
   num_devices = len(devices)
-  num_slices = 1 if config.inference_benchmark_test else config.num_slices
+  num_slices = 1 if config.inference_benchmark_test else num_slices
   num_devices_per_slice = num_devices // num_slices
 
   multi_slice_env = num_slices > 1
@@ -1598,26 +2052,41 @@ def print_shardings_params(params, params_sharding, mesh, logical_annotations=No
   """
   Print state shardings comparing Logical Definition vs Physical Result.
   """
-  if not hasattr(params, "params"):
-    params = {"params": params}
-  if not hasattr(params_sharding, "params"):
-    params_sharding = {"params": params_sharding}
-  if logical_annotations and not hasattr(logical_annotations, "params"):
-    logical_annotations = {"params": logical_annotations}
+  if not isinstance(params, nnx.State):
+    if not hasattr(params, "params"):
+      params = {"params": params}
+    if not hasattr(params_sharding, "params"):
+      params_sharding = {"params": params_sharding}
+    if logical_annotations and not hasattr(logical_annotations, "params"):
+      logical_annotations = {"params": logical_annotations}
 
   leaves_params, _ = jax.tree_util.tree_flatten_with_path(params)
   leaves_sharding, _ = jax.tree_util.tree_flatten_with_path(params_sharding)
-  leaves_logical, _ = jax.tree_util.tree_flatten_with_path(logical_annotations)
 
-  for (path, leaf_val), (_, leaf_sharding), (_, leaf_logical_val) in zip(leaves_params, leaves_sharding, leaves_logical):
-    path_str = "/".join(str(p.key if hasattr(p, "key") else p.name) for p in path)
-    shape = jax.typeof(leaf_val)
-    pspec = sharding.remove_size_one_mesh_axis(leaf_sharding.spec, mesh)
-    pspec_str = str(tuple(pspec))
-    logical_str = str(leaf_logical_val)
+  if logical_annotations is not None:
+    leaves_logical, _ = jax.tree_util.tree_flatten_with_path(logical_annotations)
+    for (path, leaf_val), (_, leaf_sharding), (_, leaf_logical_val) in zip(
+        leaves_params, leaves_sharding, leaves_logical
+    ):
+      path_str = "/".join(str(p.key if hasattr(p, "key") else p.name) for p in path)
+      shape = jax.typeof(leaf_val)
+      pspec = sharding.remove_size_one_mesh_axis(leaf_sharding.spec, mesh)
+      pspec_str = str(tuple(pspec))
+      logical_str = str(leaf_logical_val)
 
-    message = f" {path_str}\n" f"    Shape:     {shape}\n" f"    Logical:   {logical_str}\n" f"    Physical:  {pspec_str}"
-    max_logging.info(message)
+      message = (
+          f" {path_str}\n" f"    Shape:     {shape}\n" f"    Logical:   {logical_str}\n" f"    Physical:  {pspec_str}"
+      )
+      max_logging.info(message)
+  else:
+    for (path, leaf_val), (_, leaf_sharding) in zip(leaves_params, leaves_sharding):
+      path_str = "/".join(str(p.key if hasattr(p, "key") else p.name) for p in path)
+      shape = jax.typeof(leaf_val)
+      pspec = sharding.remove_size_one_mesh_axis(leaf_sharding.spec, mesh)
+      pspec_str = str(tuple(pspec))
+
+      message = f" {path_str}\n" f"    Shape:     {shape}\n" f"    Physical:  {pspec_str}"
+      max_logging.info(message)
 
   print(flush=True)
 
@@ -1628,8 +2097,19 @@ def maybe_dump_jaxpr(config, p_train_step, train_step_inputs):
     return
   max_logging.log("Tracing train_step to jaxpr...")
 
-  # We use the p_train_step (the JIT-decorated function)
-  p_train_jaxpr = jax.make_jaxpr(p_train_step)(*train_step_inputs)
+  # Trace the underlying un-jitted function via __wrapped__ to avoid heavy remote
+  # compilation/gRPC round-trips to the Pathways controller.
+  unwrapped_step = getattr(p_train_step, "__wrapped__", p_train_step)
+
+  def to_abstract(x):
+    if hasattr(x, "shape") and hasattr(x, "dtype"):
+      return jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype)
+    return x
+
+  # Convert all input arguments recursively to purely local abstract ShapeDtypeStruct objects
+  # to completely bypass remote Array objects and proxy tracing overhead.
+  abstract_inputs = jax.tree.map(to_abstract, train_step_inputs)
+  p_train_jaxpr = jax.make_jaxpr(unwrapped_step)(*abstract_inputs)
 
   local_filename = "train_step.jaxpr"
   local_path = os.path.join(config.dump_jaxpr_local_dir, local_filename)
@@ -1650,3 +2130,27 @@ def maybe_dump_jaxpr(config, p_train_step, train_step_inputs):
         delete_local_after=config.dump_jaxpr_delete_local_after,  # Keeping local for debugging
         all_host_upload=False,  # Only upload from lead host (Host 0)
     )
+
+
+def get_mesh_from_config(
+    config: pyconfig.HyperParameters,
+    devices: Sequence[jax.Device] | None = None,
+) -> Mesh:
+  """
+  Geh mesh from the configuration.
+
+  Args:
+    config: the configuration
+    devices: the devices
+
+  Returns:
+    the device mesh
+  """
+  devices_array = create_device_mesh(config, devices)
+
+  if config.shard_mode == ShardMode.EXPLICIT:
+    axis_types = tuple([AxisType.Explicit] * len(config.mesh_axes))
+  else:
+    axis_types = tuple([AxisType.Auto] * len(config.mesh_axes))
+
+  return Mesh(devices_array, config.mesh_axes, axis_types=axis_types)

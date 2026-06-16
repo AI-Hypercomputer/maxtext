@@ -375,8 +375,18 @@ def main():
   log.info("Mlperf config: %s", args.mlperf_conf)
   log.info("User config: %s", user_conf)
 
-  log.info("dataset path: %s", args.dataset_path)
-  dataset = pd.read_pickle(args.dataset_path)
+  ext = os.path.splitext(args.dataset_path)[1].lower()
+  if ext == ".parquet":
+    dataset = pd.read_parquet(args.dataset_path)
+  elif ext == ".csv":
+    dataset = pd.read_csv(args.dataset_path)
+  elif ext in (".json", ".jsonl"):
+    dataset = pd.read_json(args.dataset_path)
+  else:
+    raise ValueError(
+        f"Unsupported dataset file format: {args.dataset_path}. "
+        "Please use safe formats like Parquet (.parquet), CSV (.csv), or JSON/JSONL (.json/.jsonl)."
+    )
   if args.rename_dataset_cols:
     rename_dict = json.loads(args.rename_dataset_cols)
     dataset.rename(columns=rename_dict, inplace=True)

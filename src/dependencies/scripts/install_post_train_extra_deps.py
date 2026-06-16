@@ -29,6 +29,7 @@ def main():
   It executes 'uv pip install -r <path_to_extra_deps.txt> --resolution=lowest'.
   """
   os.environ["VLLM_TARGET_DEVICE"] = "tpu"
+  os.environ["UV_TORCH_BACKEND"] = "cpu"
 
   current_dir = os.path.dirname(os.path.abspath(__file__))
   repo_root = os.path.abspath(os.path.join(current_dir, "..", ".."))
@@ -54,6 +55,7 @@ def main():
       "-r",
       str(github_deps_path),
       "--no-deps",
+      "--no-build-isolation",
   ]
 
   local_vllm_install_command = [
@@ -69,12 +71,12 @@ def main():
   try:
     # Run the command to install Github dependencies
     print(f"Installing Github dependencies: {' '.join(github_deps_command)}")
-    _ = subprocess.run(github_deps_command, check=True, capture_output=True, text=True)
+    _ = subprocess.run(github_deps_command, check=True, capture_output=True, text=True, env=os.environ)
     print("Github dependencies installed successfully!")
 
     # Run the command to install the MaxText vLLM directory
     print(f"Installing MaxText vLLM dependency: {' '.join(local_vllm_install_command)}")
-    _ = subprocess.run(local_vllm_install_command, check=True, capture_output=True, text=True)
+    _ = subprocess.run(local_vllm_install_command, check=True, capture_output=True, text=True, env=os.environ)
     print("MaxText vLLM dependency installed successfully!")
   except subprocess.CalledProcessError as e:
     print("Failed to install extra dependencies.")

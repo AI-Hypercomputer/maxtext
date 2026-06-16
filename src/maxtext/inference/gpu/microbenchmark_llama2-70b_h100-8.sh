@@ -51,7 +51,7 @@ done
 
 # Default parameters
 if [[ -z ${BASE_OUTPUT_DIRECTORY} ]] ; then
-    export BASE_OUTPUT_DIRECTORY="/tmp/maxtext"
+    export BASE_OUTPUT_DIRECTORY=$(mktemp -d)
 fi
 if [[ -z ${INFERENCE_LOG_FILE_PATH} ]] ; then
     export INFERENCE_LOG_FILE_PATH="${BASE_OUTPUT_DIRECTORY}/microbenchmark_llama2-70b_h100-8_results.txt"

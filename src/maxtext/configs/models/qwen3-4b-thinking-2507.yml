@@ -28,9 +28,9 @@ decoder_block: "qwen3"
 normalization_layer_epsilon: 1.0e-6
 rope_max_timescale: 5000000
 
-use_qk_norm: True
+use_qk_norm: true
 
-logits_via_embedding: True # from "tie_word_embeddings": true
-normalize_embedding_logits: False
-enable_dropout: False # deterministic for testing
+logits_via_embedding: true # from "tie_word_embeddings": true
+normalize_embedding_logits: false
+enable_dropout: false # deterministic for testing
 

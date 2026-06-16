@@ -27,7 +27,7 @@ class AnalysisAgent(BaseAgent):
   conversion script, with verification that every parameter is mapped.
   """
 
-  def __init__(self, api_key, dir_path, target_model="gemma3", max_retries=3):
+  def __init__(self, dir_path, target_model="gemma3", max_retries=3):
     """
     Initializes the PlanAgent.
 
@@ -35,7 +35,7 @@ class AnalysisAgent(BaseAgent):
         target_model (str): The target model for conversion.
         max_retries (int): The maximum number of retries for generation.
     """
-    super().__init__(api_key)
+    super().__init__()
 
     self.target_model = target_model
     self.max_retries = max_retries

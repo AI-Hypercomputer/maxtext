@@ -1,0 +1,362 @@
+# Copyright 2023-2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Unit tests for evaluate_rl.py (CPU-only)."""
+
+# pylint: disable=protected-access
+
+import unittest
+import pytest
+from types import SimpleNamespace
+
+from maxtext.trainers.post_train.rl import evaluate_rl
+
+pytestmark = [pytest.mark.post_training]
+
+
+def _make_config(eval_mode="pass"):
+  """Create a minimal config object with the parameters required by score_responses."""
+  return SimpleNamespace(
+      reasoning_start_token="<reasoning>",
+      reasoning_end_token="</reasoning>",
+      solution_start_token="<answer>",
+      solution_end_token="</answer>",
+      reward_exact_answer=3.0,
+      reward_exact_format_match=2.0,
+      reward_partial_format_match=0.5,
+      reward_white_space_format_match=1.5,
+      reward_ratio_guess_to_answer_high=1.0,
+      reward_ratio_guess_to_answer_low=0.5,
+      penalty_incorrect_format=-0.5,
+      penalty_incorrect_answer=-0.5,
+      dataset_name="test",
+      debug=SimpleNamespace(rl=False),
+      eval_mode=eval_mode,
+  )
+
+
+class TestScoreResponses(unittest.TestCase):
+  """Tests for evaluate_rl.score_responses parsing and correctness logic."""
+
+  def setUp(self):
+    self.config = _make_config(eval_mode="pass")
+    self.maj_config = _make_config(eval_mode="maj")
+
+  @pytest.mark.cpu_only
+  def test_nested_tags(self):
+    """Response with nested reasoning tags still extracts the correct answer."""
+    is_correct, is_partially_correct, has_correct_format = evaluate_rl.score_responses(
+        tmvp_config=self.config,
+        question="What is 11/3?",
+        responses=[
+            "<reasoning>Need to use <reasoning> and </reasoning>, "
+            "<answer> and </answer></reasoning><answer>11/3</answer>"
+        ],
+        answers=["11/3"],
+    )
+    self.assertTrue(is_correct)
+    self.assertTrue(is_partially_correct)
+    self.assertTrue(has_correct_format)
+
+  @pytest.mark.cpu_only
+  def test_with_extra_ending_tags(self):
+    """Answer with extra ending tags such as <end_of_turn>."""
+    is_correct, is_partially_correct, has_correct_format = evaluate_rl.score_responses(
+        tmvp_config=self.config,
+        question=(
+            "James buys a new wardrobe.  He buys 10 suits and 10 dress pants.  "
+            "He also buys 3 dress shirts per suit.  The suits cost $750 each and "
+            "the dress pants cost 1/5 that cost.  The dress shirts were $60 each.  "
+            "How much did everything cost?"
+        ),
+        responses=[
+            "<reasoning>This is the sum of the cost of the suits, the pants, and the "
+            "shirts: $7500 + $1500 + $1800 = $10800.\n\n</reasoning>\n"
+            "<answer>10800</answer><end_of_turn>"
+        ],
+        answers=["10,800"],
+    )
+    self.assertTrue(is_correct)
+    self.assertTrue(is_partially_correct)
+    self.assertTrue(has_correct_format)
+
+  @pytest.mark.cpu_only
+  def test_with_incomplete_reasoning_tags(self):
+    """(1) Incomplete reasoning tags still extracts the correct answer."""
+    """(2) Currency symbols works with math_verify."""
+    is_correct, is_partially_correct, has_correct_format = evaluate_rl.score_responses(
+        tmvp_config=self.config,
+        question="What is the price of the item?",
+        responses=["<reasoning>The item costs $16.<answer>$16</answer>"],
+        answers=["16"],
+    )
+    self.assertTrue(is_correct)
+    self.assertTrue(is_partially_correct)
+    self.assertFalse(has_correct_format)
+
+  @pytest.mark.cpu_only
+  def test_for_mcq_value(self):
+    """Test for MCQ, where model responds with a math value."""
+    is_correct, is_partially_correct, has_correct_format = evaluate_rl.score_responses(
+        tmvp_config=self.config,
+        question=(
+            r"What is the quantity of the item? "
+            r"(A) $2 \frac{1}{3}$ (B) $3 \frac{1}{3}$ "
+            r"(C) $1 \frac{2}{3}$ (D) $1 \frac{1}{3}$ (E) 2"
+        ),
+        responses=["<reasoning>The answer is 3\frac{1}{3}.<answer>3\frac{1}{3}</answer>"],
+        answers=["3\frac{1}{3}", "B"],
+    )
+    self.assertTrue(is_correct)
+    self.assertTrue(is_partially_correct)
+    self.assertFalse(has_correct_format)
+
+  @pytest.mark.cpu_only
+  def test_for_mcq_option(self):
+    """Test for MCQ, where model responds with an option."""
+    is_correct, is_partially_correct, has_correct_format = evaluate_rl.score_responses(
+        tmvp_config=self.config,
+        question=(
+            r"What is the quantity of the item? "
+            r"(A) $2 \frac{1}{3}$ (B) $3 \frac{1}{3}$ "
+            r"(C) $1 \frac{2}{3}$ (D) $1 \frac{1}{3}$ (E) 2"
+        ),
+        responses=["<reasoning>The answer is B.<answer>B</answer>"],
+        answers=["3\frac{1}{3}", "B"],
+    )
+    self.assertTrue(is_correct)
+    self.assertTrue(is_partially_correct)
+    self.assertFalse(has_correct_format)
+
+  @pytest.mark.cpu_only
+  def test_majority_eval_mode(self):
+    is_correct, is_partially_correct, has_correct_format = evaluate_rl.score_responses(
+        tmvp_config=self.maj_config,
+        question="What is the quantity of the item?",
+        responses=[
+            r"<reasoning>The item is 3\frac{1}{3}</reasoning><answer>3\frac{1}{3}</answer>",
+            r"<reasoning>It is 3\frac{1}{3}</reasoning><answer>3\frac{1}{3}</answer>",
+            r"<reasoning>The item is 3\frac{1}{3}</reasoning><answer>\frac{1}{3}</answer>",
+        ],
+        answers=[r"3\frac{1}{3}"],
+    )
+    self.assertTrue(is_correct)
+    self.assertTrue(is_partially_correct)
+    self.assertTrue(has_correct_format)
+
+  @pytest.mark.cpu_only
+  def test_pass_at_1_eval_mode(self):
+    """pass@1 returns fraction of correct samples, not a boolean."""
+    config = _make_config(eval_mode="pass_at_1")
+    # 3 out of 4 samples are correct → expect 0.75
+    is_correct, is_partially_correct, has_correct_format = evaluate_rl.score_responses(
+        tmvp_config=config,
+        question="What is 2+2?",
+        responses=[
+            "<reasoning>2+2=4</reasoning><answer>4</answer>",
+            "<reasoning>2+2=4</reasoning><answer>4</answer>",
+            "<reasoning>2+2=4</reasoning><answer>4</answer>",
+            "<reasoning>2+2=5</reasoning><answer>5</answer>",
+        ],
+        answers=["4"],
+    )
+    self.assertAlmostEqual(is_correct, 0.75)
+    self.assertAlmostEqual(is_partially_correct, 0.75)
+    self.assertAlmostEqual(has_correct_format, 1.0)
+
+  @pytest.mark.cpu_only
+  def test_pass_at_1_all_wrong(self):
+    """pass@1 with all wrong samples returns 0.0."""
+    config = _make_config(eval_mode="pass_at_1")
+    is_correct, is_partially_correct, has_correct_format = evaluate_rl.score_responses(
+        tmvp_config=config,
+        question="What is 2+2?",
+        responses=[
+            "<reasoning>2+2=5</reasoning><answer>5</answer>",
+            "<reasoning>2+2=6</reasoning><answer>6</answer>",
+        ],
+        answers=["4"],
+    )
+    self.assertAlmostEqual(is_correct, 0.0)
+    self.assertAlmostEqual(is_partially_correct, 0.0)
+    self.assertAlmostEqual(has_correct_format, 1.0)
+
+  @pytest.mark.cpu_only
+  def test_pass_at_1_all_correct(self):
+    """pass@1 with all correct samples returns 1.0."""
+    config = _make_config(eval_mode="pass_at_1")
+    is_correct, is_partially_correct, has_correct_format = evaluate_rl.score_responses(
+        tmvp_config=config,
+        question="What is 2+2?",
+        responses=[
+            "<reasoning>2+2=4</reasoning><answer>4</answer>",
+            "<reasoning>Simple: 4</reasoning><answer>4</answer>",
+        ],
+        answers=["4"],
+    )
+    self.assertAlmostEqual(is_correct, 1.0)
+    self.assertAlmostEqual(is_partially_correct, 1.0)
+    self.assertAlmostEqual(has_correct_format, 1.0)
+
+
+class TestComputeRowReward(unittest.TestCase):
+  """Tests for _compute_row_reward (per-prompt eval-time reward aggregation)."""
+
+  def _two_fns(self):
+    """Return two reward functions whose per-response scores can be summed."""
+
+    # Each fn must accept prompts, completions, answer, question as keyword
+    # args and return a list of per-completion scores. The helper calls fn
+    # once per response with single-element lists, so the returned list has
+    # length 1.
+    def fn1(prompts, completions, answer, question):  # pylint: disable=unused-argument
+      return [1.0 for _ in completions]
+
+    def fn2(prompts, completions, answer, question):  # pylint: disable=unused-argument
+      return [float(len(c)) for c in completions]
+
+    return [fn1, fn2]
+
+  @pytest.mark.cpu_only
+  def test_single_response_single_fn(self):
+    def fn(prompts, completions, answer, question):  # pylint: disable=unused-argument
+      return [2.5 for _ in completions]
+
+    score_sum, count = evaluate_rl._compute_row_reward(
+        reward_fns=[fn],
+        prompt="p",
+        question="q",
+        responses=["abc"],
+        answer="gold",
+        row_idx=0,
+    )
+    self.assertAlmostEqual(score_sum, 2.5)
+    self.assertEqual(count, 1)
+
+  @pytest.mark.cpu_only
+  def test_sums_across_reward_fns_for_single_response(self):
+    score_sum, count = evaluate_rl._compute_row_reward(
+        reward_fns=self._two_fns(),
+        prompt="p",
+        question="q",
+        responses=["abcd"],
+        answer="gold",
+        row_idx=0,
+    )
+    # fn1 = 1.0, fn2 = len("abcd") = 4.0  ->  per-pass score = 5.0
+    self.assertAlmostEqual(score_sum, 5.0)
+    self.assertEqual(count, 1)
+
+  @pytest.mark.cpu_only
+  def test_sums_across_passes_for_multiple_responses(self):
+    """Multi-pass: helper must aggregate across ALL sampled responses, not just [0]."""
+    score_sum, count = evaluate_rl._compute_row_reward(
+        reward_fns=self._two_fns(),
+        prompt="p",
+        question="q",
+        responses=["a", "bcd", "ef"],
+        answer="gold",
+        row_idx=0,
+    )
+    # Per pass: pass0 = 1 + 1 = 2,  pass1 = 1 + 3 = 4,  pass2 = 1 + 2 = 3
+    # Sum across 3 passes = 9, count = 3
+    self.assertAlmostEqual(score_sum, 9.0)
+    self.assertEqual(count, 3)
+
+  @pytest.mark.cpu_only
+  def test_empty_responses_returns_zero_and_zero_count(self):
+    """An empty responses list must contribute nothing to the running mean."""
+    score_sum, count = evaluate_rl._compute_row_reward(
+        reward_fns=self._two_fns(),
+        prompt="p",
+        question="q",
+        responses=[],
+        answer="gold",
+        row_idx=0,
+    )
+    self.assertEqual(score_sum, 0.0)
+    self.assertEqual(count, 0)
+
+  @pytest.mark.cpu_only
+  def test_exception_in_reward_fn_swallowed_and_returns_zero_count(self):
+    """A raising reward_fn must not propagate and must not corrupt the mean denominator."""
+
+    def _boom(**kwargs):  # pylint: disable=unused-argument
+      raise RuntimeError("reward failure")
+
+    score_sum, count = evaluate_rl._compute_row_reward(
+        reward_fns=[_boom],
+        prompt="p",
+        question="q",
+        responses=["abc"],
+        answer="gold",
+        row_idx=0,
+    )
+    self.assertEqual(score_sum, 0.0)
+    self.assertEqual(count, 0)  # zero count so the caller's mean isn't biased
+
+  @pytest.mark.cpu_only
+  def test_question_is_forwarded_to_reward_fn(self):
+    """Regression: helper must pass `question` through to reward fns.
+
+    The built-in `check_numbers` reward reads `kwargs["question"]`; if the
+    helper omits it, every eval row produces `KeyError('question')` and
+    `mean_reward` collapses to 0.0.
+    """
+    received = {}
+
+    def fn(prompts, completions, answer, question):  # pylint: disable=unused-argument
+      received["question"] = question
+      return [1.0 for _ in completions]
+
+    evaluate_rl._compute_row_reward(
+        reward_fns=[fn],
+        prompt="p",
+        question="What is 2+2?",
+        responses=["abc"],
+        answer="gold",
+        row_idx=0,
+    )
+    self.assertEqual(received["question"], "What is 2+2?")
+
+  @pytest.mark.cpu_only
+  def test_integrates_with_real_check_numbers_reward(self):
+    """End-to-end: real `check_numbers` from utils_rl must not raise on the
+    eval-time kwargs the helper passes (regression for the original
+    `KeyError('question')` failure mode in production)."""
+    from maxtext.trainers.post_train.rl import utils_rl  # pylint: disable=import-outside-toplevel
+
+    config = _make_config(eval_mode="pass")
+
+    # `check_numbers` takes tmvp_config positionally via partial; mirror what
+    # train_rl.py's make_reward_fn does.
+    def wrapped_check_numbers(**kwargs):
+      return utils_rl.check_numbers(tmvp_config=config, **kwargs)
+
+    # A correct-answer response should yield a non-zero score (proves the
+    # kwargs all reached the inside of check_numbers).
+    score_sum, count = evaluate_rl._compute_row_reward(
+        reward_fns=[wrapped_check_numbers],
+        prompt="solve: 2+2",
+        question="What is 2+2?",
+        responses=["<reasoning>2+2=4</reasoning><answer>4</answer>"],
+        answer='["4"]',  # json-encoded list of acceptable answers
+        row_idx=0,
+    )
+    self.assertEqual(count, 1)
+    self.assertGreater(score_sum, 0.0)
+
+
+if __name__ == "__main__":
+  unittest.main()

@@ -19,44 +19,44 @@
 # ==================================
 
 # Install dependencies in dependencies/generated_requirements/tpu-requirements.txt
-## bash tools/setup/setup.sh MODE=stable
+## bash src/dependencies/scripts/setup.sh MODE=stable
 
 # Install dependencies in dependencies/generated_requirements/tpu-requirements.txt + specified jax, jaxlib, libtpu
-## bash tools/setup/setup.sh MODE=stable JAX_VERSION=0.8.0
+## bash src/dependencies/scripts/setup.sh MODE=stable JAX_VERSION=0.8.0
 
 # Install dependencies in dependencies/generated_requirements/tpu-requirements.txt + custom libtpu
-## bash tools/setup/setup.sh MODE=stable LIBTPU_GCS_PATH=gs://my_custom_libtpu/libtpu.so
+## bash src/dependencies/scripts/setup.sh MODE=stable LIBTPU_GCS_PATH=gs://my_custom_libtpu/libtpu.so
 
 # Install dependencies in dependencies/generated_requirements/tpu-requirements.txt + jax-nightly, jaxlib-nightly, libtpu-nightly
-## bash tools/setup/setup.sh MODE=nightly
+## bash src/dependencies/scripts/setup.sh MODE=nightly
 
 # Install dependencies in dependencies/generated_requirements/tpu-requirements.txt + specified jax-nightly, jaxlib-nightly + latest libtpu-nightly
-## bash tools/setup/setup.sh MODE=nightly JAX_VERSION=0.8.2.dev20251211
+## bash src/dependencies/scripts/setup.sh MODE=nightly JAX_VERSION=0.8.2.dev20251211
 
 # Install dependencies in dependencies/generated_requirements/tpu-requirements.txt + specified jax-nightly, jaxlib-nightly + specific libtpu-nightly
-## bash tools/setup/setup.sh MODE=nightly JAX_VERSION=0.8.1 LIBTPU_VERSION=0.0.31.dev20251119+nightly
+## bash src/dependencies/scripts/setup.sh MODE=nightly JAX_VERSION=0.8.1 LIBTPU_VERSION=0.0.31.dev20251119+nightly
 
 # Install dependencies in dependencies/generated_requirements/tpu-requirements.txt + jax-nightly, jaxlib-nightly + custom libtpu
-## bash tools/setup/setup.sh MODE=nightly LIBTPU_GCS_PATH=gs://my_custom_libtpu/libtpu.so
+## bash src/dependencies/scripts/setup.sh MODE=nightly LIBTPU_GCS_PATH=gs://my_custom_libtpu/libtpu.so
 
 # Install custom libtpu only
-## bash tools/setup/setup.sh MODE=libtpu-only LIBTPU_GCS_PATH=gs://my_custom_libtpu/libtpu.so
+## bash src/dependencies/scripts/setup.sh MODE=libtpu-only LIBTPU_GCS_PATH=gs://my_custom_libtpu/libtpu.so
 
 # ==================================
 # GPU EXAMPLES
 # ==================================
 
 # Install dependencies in dependencies/generated_requirements/cuda12-requirements.txt
-## bash tools/setup/setup.sh MODE=stable DEVICE=gpu
+## bash src/dependencies/scripts/setup.sh MODE=stable DEVICE=gpu
 
 # Install dependencies in dependencies/generated_requirements/cuda12-requirements.txt + specified jax, jaxlib, jax-cuda12-plugin, jax-cuda12-pjrt
-## bash tools/setup/setup.sh MODE=stable DEVICE=gpu JAX_VERSION=0.4.13
+## bash src/dependencies/scripts/setup.sh MODE=stable DEVICE=gpu JAX_VERSION=0.4.13
 
 # Install dependencies in dependencies/generated_requirements/cuda12-requirements.txt + jax-nightly, jaxlib-nightly
-## bash tools/setup/setup.sh MODE=nightly DEVICE=gpu
+## bash src/dependencies/scripts/setup.sh MODE=nightly DEVICE=gpu
 
 # Install dependencies in dependencies/generated_requirements/cuda12-requirements.txt + specified jax, jaxlib, jax-cuda12-plugin, jax-cuda12-pjrt
-## bash tools/setup/setup.sh MODE=nightly DEVICE=gpu JAX_VERSION=0.4.36.dev20241109
+## bash src/dependencies/scripts/setup.sh MODE=nightly DEVICE=gpu JAX_VERSION=0.4.36.dev20241109
 
 
 # Enable "exit immediately if any command fails" option
@@ -227,9 +227,16 @@ install_post_training_deps() {
       exit 1
     fi
     echo "Setting up MaxText post-training workflow for $DEVICE device"
+
+    # Install build tools needed to compile vllm from source.
+    # With --no-install-recommends, apt-get only installs the dependencies
+    # that are absolutely required for the package to run, without any of the
+    # additional packages that are recommended but not strictly necessary.
+    apt-get update -y && apt-get install -y --no-install-recommends build-essential
+
     dep_name='src/dependencies/requirements/generated_requirements/tpu-post-train-requirements.txt'
     echo "Installing requirements from $dep_name"
-    python3 -m uv pip install --resolution=lowest -r "$dep_name"
+    UV_TORCH_BACKEND=cpu python3 -m uv pip install --resolution=lowest -r "$dep_name"
     python3 -m src.dependencies.scripts.install_post_train_extra_deps
 }
 

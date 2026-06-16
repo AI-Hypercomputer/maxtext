@@ -140,6 +140,8 @@ GEMMA_CONFIGS = [
     os.path.join(CONFIGS_DIR, "models", "gemma3-4b.yml"),
     os.path.join(CONFIGS_DIR, "models", "gemma3-12b.yml"),
     os.path.join(CONFIGS_DIR, "models", "gemma3-27b.yml"),
+    os.path.join(CONFIGS_DIR, "models", "gemma4-e2b.yml"),
+    os.path.join(CONFIGS_DIR, "models", "gemma4-e4b.yml"),
 ]
 
 
@@ -200,7 +202,6 @@ DEEPSEEK_CONFIGS = [
     os.path.join(CONFIGS_DIR, "models", "deepseek2-236b.yml"),
     os.path.join(CONFIGS_DIR, "models", "deepseek3-test.yml"),
     os.path.join(CONFIGS_DIR, "models", "deepseek3-671b.yml"),
-    os.path.join(CONFIGS_DIR, "models", "deepseek3-671b-2dfsdp.yml"),
     os.path.join(CONFIGS_DIR, "models", "deepseek3-671b-batchsplit.yml"),
 ]
 

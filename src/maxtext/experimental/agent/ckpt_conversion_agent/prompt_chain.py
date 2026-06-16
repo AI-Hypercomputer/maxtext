@@ -29,9 +29,9 @@ class prompt_chaining_agent(BaseAgent):
   with verification that every parameter is actually mapped.
   """
 
-  def __init__(self, api_key, target_model="gemma3", max_retries=3, dir_path="context"):
+  def __init__(self, target_model="gemma3", max_retries=3, dir_path="context"):
     # Initialize the parent BaseAgent with the client
-    super().__init__(api_key)
+    super().__init__()
     self.target_model = target_model
     self.max_retries = max_retries
     self.dir_path = dir_path
@@ -178,7 +178,6 @@ if __name__ == "__main__":
 
   parser.add_argument("--target_model", type=str, required=True, help='The name of the target model (e.g., "GEMMA3").')
   parser.add_argument("--dir_path", type=str, required=True, help="The file path to the ckpt conversion agent directory.")
-  parser.add_argument("--api_key", type=str, required=True, help="Gemini API key.")
   args = parser.parse_args()
-  agent = prompt_chaining_agent(api_key=args.api_key, target_model=args.target_model, dir_path=args.dir_path)
+  agent = prompt_chaining_agent(target_model=args.target_model, dir_path=args.dir_path)
   agent.run_chain()

@@ -19,11 +19,11 @@
 import functools
 from flax import nnx
 from jax.ad_checkpoint import checkpoint_name
+import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.common.common_types import Config
 from maxtext.common.common_types import MODEL_MODE_PREFILL
-from maxtext.inference import page_manager
 from maxtext.layers import initializers
 from maxtext.layers import nnx_wrappers
 from maxtext.layers import quantizations
@@ -33,6 +33,7 @@ from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_utils
 from maxtext.utils.sharding import create_sharding, maybe_shard_with_logical
+from maxtext.layers.learn_to_init_layer import apply_lti_modification
 
 # -----------------------------------------
 # The Decoder Layer specific for Llama2
@@ -50,7 +51,6 @@ class LlamaDecoderLayer(nnx.Module):
       rngs: nnx.Rngs,
       quant: None | Quant = None,
   ):
-
     self.config = config
     self.mesh = mesh
     self.quant = quant
@@ -70,6 +70,7 @@ class LlamaDecoderLayer(nnx.Module):
         shard_mode=config.shard_mode,
         kernel_axes=("norm",),
         epsilon=config.normalization_layer_epsilon,
+        parameter_memory_host_offload=config.parameter_memory_host_offload,
         rngs=rngs,
     )
 
@@ -143,16 +144,21 @@ class LlamaDecoderLayer(nnx.Module):
       decoder_positions,
       deterministic,
       model_mode,
-      slot: None | int = None,
-      page_state: None | page_manager.PageState = None,
       previous_chunk=None,
+      slot: None | int = None,
       kv_cache=None,
       attention_metadata=None,
   ):
     cfg = self.config
 
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
-    if isinstance(inputs, tuple):
+    is_scan_carry = False
+    if isinstance(inputs, tuple) and len(inputs) == 3:
+      hidden_states, stacked_kv_cache, layer_idx = inputs
+      kv_cache = stacked_kv_cache[layer_idx]
+      inputs = hidden_states
+      is_scan_carry = True
+    elif isinstance(inputs, tuple):
       inputs = inputs[0]
     inputs = self._maybe_shard_with_logical(inputs, self.activation_axis_names)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
@@ -169,7 +175,6 @@ class LlamaDecoderLayer(nnx.Module):
         deterministic=deterministic,
         model_mode=model_mode,
         slot=slot,
-        page_state=page_state,
         previous_chunk=previous_chunk,
         out_sharding=lnx_sharding,
         kv_cache=kv_cache,
@@ -206,7 +211,16 @@ class LlamaDecoderLayer(nnx.Module):
           jnp.sum(layer_output == 0) / jnp.size(layer_output),
       )
 
-    if cfg.scan_layers:
+    if is_scan_carry:
+
+      def update_cache(cache, val):
+        if jnp.size(val) > 0:
+          return cache.at[layer_idx].set(val)
+        return cache
+
+      stacked_kv_cache = jax.tree_util.tree_map(update_cache, stacked_kv_cache, kv_cache)
+      return (layer_output, stacked_kv_cache, layer_idx + 1), None
+    elif cfg.scan_layers:
       return layer_output, None
     else:
       return layer_output, kv_cache
@@ -215,4 +229,5 @@ class LlamaDecoderLayer(nnx.Module):
 LlamaDecoderLayerToLinen = nnx_wrappers.to_linen_class(
     LlamaDecoderLayer,
     base_metadata_fn=initializers.variable_to_logically_partitioned,
+    nnx_module_augment_fn=apply_lti_modification,
 )

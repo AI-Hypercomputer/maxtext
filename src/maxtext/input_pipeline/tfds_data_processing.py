@@ -91,19 +91,34 @@ def preprocessing_pipeline(
     shift: bool = True,
     drop_remainder: bool = True,
     prefetch_size=tf.data.experimental.AUTOTUNE,
-    use_dpo: bool = False,
     hf_access_token: str = "",
 ):
   """pipeline for preprocessing TFDS dataset."""
-  if not use_dpo:
-    assert len(data_column_names) == 1
-    dataset = dataset.map(
-        lambda x: input_pipeline_utils.normalize_features(x, data_column_names[0]), num_parallel_calls=AUTOTUNE
+  missing = [c for c in data_column_names if c not in dataset.element_spec]
+  if missing:
+    raise ValueError(
+        f"Column {missing} not found in dataset. Available columns: {sorted(dataset.element_spec.keys())}. "
+        "Please set train_data_columns or eval_data_columns accordingly."
     )
-  else:
-    dataset = dataset.map(lambda x: {col: x[col] for col in data_column_names}, num_parallel_calls=AUTOTUNE)
 
-  data_column_names = data_column_names if use_dpo else ("inputs", "targets")
+  for col in data_column_names:
+    col_dtype = dataset.element_spec[col].dtype
+    if tokenize and col_dtype != tf.string:
+      raise ValueError(
+          f"tokenize_data=True but column '{col}' has dtype {col_dtype} (expected tf.string). "
+          "Set tokenize_train_data or tokenize_eval_data to False if your dataset is already tokenized."
+      )
+    if not tokenize and col_dtype == tf.string:
+      raise ValueError(
+          f"tokenize_data=False but column '{col}' has dtype tf.string (expected integer). "
+          "Set tokenize_train_data or tokenize_eval_data to True if your dataset needs tokenization."
+      )
+
+  assert len(data_column_names) == 1
+  dataset = dataset.map(
+      lambda x: input_pipeline_utils.normalize_features(x, data_column_names[0]), num_parallel_calls=AUTOTUNE
+  )
+  data_column_names = ("inputs", "targets")
 
   tokenizer_model = input_pipeline_utils.get_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token)
   if tokenizer_model.pad_id is not None:
@@ -124,7 +139,7 @@ def preprocessing_pipeline(
   if max_target_length > 0:
     # in pre-training we can take upto max_length+1 because there would be truncation by
     # 1 token for both inputs and targets
-    extra_tokens = 1 if not use_dpo else 0
+    extra_tokens = 1
     dataset = dataset.map(
         lambda x: input_pipeline_utils.truncate_to_max_allowable_length(x, max_target_length + extra_tokens),
         num_parallel_calls=AUTOTUNE,
@@ -137,13 +152,13 @@ def preprocessing_pipeline(
   dataset = dataset.repeat(num_epochs)
 
   # Shift inputs for teacher-forced training
-  if shift and not use_dpo:
+  if shift:
     dataset = dataset.map(
         input_pipeline_utils.shift_data_by_truncation, num_parallel_calls=tf.data.AUTOTUNE, deterministic=True
     )
 
   # Perform greedy sequence packing and batching
-  if pack_examples and not use_dpo:
+  if pack_examples:
     dataset = sequence_packing.pack_dataset(dataset, max_target_length, pad_id)
     dataset = dataset.batch(global_batch_size // jax.process_count(), drop_remainder=drop_remainder)
   else:
@@ -203,7 +218,6 @@ def make_tfds_train_iterator(
         add_eos=config.add_eos,
         num_epochs=config.num_epoch,
         pack_examples=config.packing,
-        use_dpo=config.use_dpo,
         hf_access_token=config.hf_access_token,
     )
     return multihost_dataloading.MultiHostDataLoadIterator(
@@ -228,11 +242,12 @@ def make_tfds_train_iterator(
         add_eos=config.add_eos,
         num_epochs=config.num_epoch,
         pack_examples=config.packing,
-        use_dpo=config.use_dpo,
         hf_access_token=config.hf_access_token,
     )
     global_shape = (config.global_batch_size_to_load, config.max_target_length)
-    return multihost_dataloading.RemoteIterator(get_ds_fn, preprocessing_fn, global_mesh, global_shape)
+    return multihost_dataloading.RemoteIteratorWrapper(
+        get_ds_fn, preprocessing_fn, global_mesh, global_shape, checkpoint_path=config.checkpoint_dir
+    )
 
 
 def make_tfds_eval_iterator(
@@ -247,6 +262,7 @@ def make_tfds_eval_iterator(
   if not config.colocated_python_data_input:
     eval_ds = get_datasets(
         dataset_name=config.eval_dataset_name,
+        dataset_path=config.dataset_path,
         data_split=config.eval_split,
         shuffle_files=False,
         shuffle_seed=config.data_shuffle_seed,
@@ -266,7 +282,6 @@ def make_tfds_eval_iterator(
         add_bos=config.add_bos,
         add_eos=config.add_eos,
         pack_examples=config.packing,
-        use_dpo=config.use_dpo,
         hf_access_token=config.hf_access_token,
     )
     return multihost_dataloading.MultiHostDataLoadIterator(
@@ -276,6 +291,7 @@ def make_tfds_eval_iterator(
     get_ds_fn = functools.partial(
         get_datasets,
         dataset_name=config.eval_dataset_name,
+        dataset_path=config.dataset_path,
         data_split=config.eval_split,
         shuffle_files=False,
         shuffle_seed=config.data_shuffle_seed,
@@ -293,7 +309,9 @@ def make_tfds_eval_iterator(
         add_bos=config.add_bos,
         add_eos=config.add_eos,
         pack_examples=config.packing,
-        use_dpo=config.use_dpo,
         hf_access_token=config.hf_access_token,
     )
-    return multihost_dataloading.RemoteIterator(get_ds_fn, preprocessing_fn, config, global_mesh)
+    global_shape = (config.global_batch_size_to_load_eval, config.max_target_length)
+    return multihost_dataloading.RemoteIteratorWrapper(
+        get_ds_fn, preprocessing_fn, global_mesh, global_shape, checkpoint_path=config.checkpoint_dir
+    )

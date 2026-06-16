@@ -15,23 +15,24 @@
 """
 This module provides functionality to save top-k teacher logits
 for distillation purposes in MaxText.
-
-Example command: 
-python3 src/maxtext/trainers/post_train/distillation/save_top_k_teacher_logits.py \
-src/maxtext/configs/post_train/distillation.yml \
---top_k=128 \
---gcs_upload_path=gs://my-bucket/teacher_logits/
 """
 
 import os
-import pickle
+import subprocess
+from concurrent.futures import ThreadPoolExecutor
+
 from typing import Sequence
 import argparse
 import time
 import sys
+from etils import epath
 import tensorflow as tf
+import re
+import numpy as np
 
 import jax
+import jax.numpy as jnp
+from flax import nnx
 import functools
 from itertools import islice
 
@@ -52,135 +53,277 @@ def get_top_k_logits(logits: jax.Array, k: int):
   return top_k_values, top_k_indices
 
 
+def get_start_step(config, local_args):
+  """Determines the starting step for the generation process."""
+  if jax.process_index() != 0:
+    return 0
+
+  output_dir = local_args.gcs_upload_path if local_args.gcs_upload_path else local_args.local_tmp_dir
+  output_path = epath.Path(output_dir)
+  if not output_path.exists():
+    output_path.mkdir(parents=True, exist_ok=True)
+    return 0
+
+  existing_files = list(output_path.glob("teacher_top_k_part_*.array_record"))
+  if not existing_files:
+    return 0
+
+  max_part_num = max(
+      (int(m.group(1)) for f in existing_files if (m := re.search(r"part_(\d+)_host", f.name))),
+      default=-1,
+  )
+
+  if max_part_num == -1:
+    return 0
+
+  start_step = max_part_num * local_args.steps_per_file
+  max_logging.log(f"Found existing data, resuming from step {start_step}")
+  return start_step
+
+
+def create_tf_example(example_dict):
+  """Converts a dictionary of single-example numpy arrays to a tf.train.Example."""
+  features = {}
+  for key, val in example_dict.items():
+    if key == "sequence_hash":
+      features[key] = tf.train.Feature(int64_list=tf.train.Int64List(value=[val]))
+      continue
+
+    flat_val = np.asarray(val).ravel()
+
+    if flat_val.dtype in [np.float32, np.float64, np.float16, jnp.bfloat16]:
+      if flat_val.dtype != np.float32:
+        flat_val = flat_val.astype(np.float32)
+      features[key] = tf.train.Feature(float_list=tf.train.FloatList(value=flat_val.tolist()))
+    elif flat_val.dtype in [np.int32, np.int64]:
+      if flat_val.dtype != np.int64:
+        flat_val = flat_val.astype(np.int64)
+      features[key] = tf.train.Feature(int64_list=tf.train.Int64List(value=flat_val.tolist()))
+    else:
+      raise ValueError(f"Unsupported dtype {flat_val.dtype} for key {key}")
+
+  return tf.train.Example(features=tf.train.Features(feature=features)).SerializeToString()
+
+
+def background_process_and_write(writer, tokens, vals, idx, opt_data, serialization_executor):
+  """Executes entirely on a background CPU thread so the TPU never waits."""
+  # Convert exactly once
+  tokens_np = np.asarray(tokens)
+  vals_np = np.asarray(vals)
+  idx_np = np.asarray(idx)
+  opt_data_np = {k: np.asarray(v) for k, v in opt_data.items()}
+
+  batch_size = tokens_np.shape[0]
+  example_dicts = []
+
+  # Prepare dictionaries sequentially
+  for i in range(batch_size):
+    seq_bytes = tokens_np[i].tobytes()
+    example_dict = {
+        "inputs": tokens_np[i],
+        "top_k_logits": vals_np[i],
+        "top_k_indices": idx_np[i],
+        "sequence_hash": hash(seq_bytes),
+    }
+    for key, val_np in opt_data_np.items():
+      example_dict[key] = val_np[i]
+    example_dicts.append(example_dict)
+
+  # Serialize to Protobufs in parallel across multiple CPU cores
+  serialized_records = list(serialization_executor.map(create_tf_example, example_dicts))
+
+  # Write the serialized bytes to disk sequentially
+  for record in serialized_records:
+    writer.write(record)
+
+
+def background_upload(local_path, gcs_path, process_index):
+  """Executes a highly optimized concurrent upload via gcloud."""
+  try:
+    subprocess.run(["gcloud", "storage", "cp", local_path, gcs_path], check=True, capture_output=True)
+    os.remove(local_path)
+    if process_index == 0:
+      max_logging.log(f"Background upload complete: {gcs_path}")
+  except subprocess.CalledProcessError as e:
+    if process_index == 0:
+      max_logging.log(f"Upload failed for {local_path}: {e.stderr.decode()}")
+
+
+@nnx.jit(static_argnames=("k",))
+def teacher_step(model, batch, k):
+  """Runs a forward pass through the teacher model and extracts top-k logits."""
+  logits = model(
+      decoder_input_tokens=batch["inputs"],
+      decoder_positions=batch["inputs_position"],
+      decoder_segment_ids=batch.get("inputs_segmentation"),
+      decoder_target_tokens=batch.get("targets"),
+      decoder_target_mask=batch.get("targets_segmentation"),
+      enable_dropout=False,
+  )
+  return get_top_k_logits(logits, k=k)
+
+
 def generate_and_save_data(config, local_args):
-  """Generates top-k logits from the teacher model and saves them locally, optionally uploading to GCS."""
+  """Generates top-k logits from the teacher model and saves them locally, optionally uploading to GCS"""
   k_val = local_args.top_k
   optional_keys = local_args.optional_keys
   gcs_upload_path = local_args.gcs_upload_path
   local_tmp_dir = local_args.local_tmp_dir
+  steps_per_file = local_args.steps_per_file
+
+  writer = None
+  local_output_path = None
+
+  if not os.path.exists(local_tmp_dir):
+    os.makedirs(local_tmp_dir, exist_ok=True)
+
+  upload_executor = ThreadPoolExecutor(max_workers=local_args.upload_workers)
+  # Restrict to 1 worker to ensure sequential writing to the ArrayRecord file
+  write_executor = ThreadPoolExecutor(max_workers=1)
+  # New executor purely for CPU-bound protobuf serialization
+  serialization_executor = ThreadPoolExecutor(max_workers=local_args.serialization_workers)
 
   devices = jax.devices()
   devices_array = maxtext_utils.create_device_mesh(config, devices)
   mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
 
-  # Loading teacher model and dataset iterator
-  max_logging.log(f"Loading Teacher Model from {config.load_parameters_path}...")
-  teacher_model, _ = model_creation_utils.create_nnx_model(config, mesh=mesh)
+  if jax.process_index() == 0:
+    max_logging.log(f"Loading Teacher Model from {config.load_parameters_path}...")
+
+  teacher_model = model_creation_utils.from_pretrained(config, mesh=mesh)
   train_iter, _ = input_pipeline_interface.create_data_iterator(config, mesh)
 
-  # Setup local tmp directory for Host 0
-  filename = "teacher_top_k_global.array_record"
-  local_output_path = os.path.join(local_tmp_dir, filename)
+  start_step = get_start_step(config, local_args)
+  start_step = int(multihost_utils.broadcast_one_to_all(jnp.array(start_step)))
 
-  writer = None
-  if jax.process_index() == 0:
-    if not os.path.exists(local_tmp_dir):
-      os.makedirs(local_tmp_dir)
-    max_logging.log(f"Process 0 writing globally gathered data to local path: {local_output_path}")
-    writer = array_record_module.ArrayRecordWriter(local_output_path, "group_size:1000")
-
-  # Sync all hosts before starting the loop
   multihost_utils.sync_global_devices("start_generation_loop")
 
-  max_logging.log(f"Starting Top-K generation loop for {config.steps} steps...")
-  loop_start = time.time()
-
-  for step, batch in enumerate(islice(train_iter, config.steps)):
-    step_start = time.time()
-    tokens = batch["inputs"]
-    logits = teacher_model(
-        decoder_input_tokens=tokens,
-        decoder_positions=batch["inputs_position"],
-        enable_dropout=False,
-    )
-    top_k_vals, top_k_idx = get_top_k_logits(logits, k=k_val)
-
-    # Fetch the global distributed jax arrays
-    global_vals = jax.device_get(top_k_vals)
-    global_idx = jax.device_get(top_k_idx)
-    global_tokens = jax.device_get(tokens)
-
+  with jax.set_mesh(mesh):
     if jax.process_index() == 0:
-      record_dict = {
-          "tokens": global_tokens,
-          "top_k_logits": global_vals,
-          "top_k_indices": global_idx,
-      }
+      max_logging.log(f"Starting Distributed Top-K generation loop for {config.steps - start_step} steps...")
 
+    loop_start = time.time()
+
+    for step, batch in enumerate(islice(train_iter, start_step, config.steps), start=start_step):
+      step_start = time.time()
+
+      if step % steps_per_file == 0:
+        if writer:
+          write_executor.shutdown(wait=True)
+          writer.close()
+          if gcs_upload_path:
+            gcs_file_path = os.path.join(gcs_upload_path, os.path.basename(local_output_path))
+            if jax.process_index() == 0:
+              max_logging.log(f"Queueing distributed background uploads for Step {step}...")
+            upload_executor.submit(background_upload, local_output_path, gcs_file_path, jax.process_index())
+
+          # Re-initialize the writer thread pool. We restrict it to exactly 1 worker
+          # to ensure sequential, in-order writing to the ArrayRecord file. A new pool
+          # is needed because the previous one was shut down to flush all pending writes.
+          write_executor = ThreadPoolExecutor(max_workers=1)
+
+        file_index = step // steps_per_file
+        filename = f"teacher_top_k_part_{file_index:05d}_host_{jax.process_index():03d}.array_record"
+        local_output_path = os.path.join(local_tmp_dir, filename)
+        writer = array_record_module.ArrayRecordWriter(local_output_path, "group_size:1")
+
+      tokens = batch["inputs"]
+
+      # --- Model Forward Pass & Network Gather ---
+      top_k_vals, top_k_idx = teacher_step(teacher_model, batch, k_val)
+
+      global_tokens = jax.experimental.multihost_utils.process_allgather(tokens, tiled=True)
+      global_vals = jax.experimental.multihost_utils.process_allgather(top_k_vals, tiled=True)
+      global_idx = jax.experimental.multihost_utils.process_allgather(top_k_idx, tiled=True)
+
+      optional_data = {}
       for key in optional_keys:
         if key in batch:
-          record_dict[key] = jax.device_get(batch[key])
+          optional_data[key] = jax.experimental.multihost_utils.process_allgather(batch[key], tiled=True)
 
-      writer.write(pickle.dumps(record_dict))
+      if writer:
+        global_tokens_np = np.array(global_tokens)
+        global_vals_np = np.array(global_vals)
+        global_idx_np = np.array(global_idx)
+        optional_data_np = {k: np.array(v) for k, v in optional_data.items()}
 
-      if step % 50 == 0:
+        global_batch_size = global_tokens_np.shape[0]
+        local_batch_size = global_batch_size // jax.process_count()
+        start_idx = jax.process_index() * local_batch_size
+        end_idx = start_idx + local_batch_size
+
+        local_tokens_np = global_tokens_np[start_idx:end_idx]
+        local_vals_np = global_vals_np[start_idx:end_idx]
+        local_idx_np = global_idx_np[start_idx:end_idx]
+        local_opt_data_np = {k: v[start_idx:end_idx] for k, v in optional_data_np.items()}
+
+        # --- Local Disk Writing ---
+        # Submit to the background thread with the serialization_executor
+        write_executor.submit(
+            background_process_and_write,
+            writer,
+            local_tokens_np,
+            local_vals_np,
+            local_idx_np,
+            local_opt_data_np,
+            serialization_executor,
+        )
+
+      if step % 50 == 0 and jax.process_index() == 0:
         max_logging.log(f"Successfully processed step {step} in {time.time() - step_start:.4f}s")
 
-  max_logging.log(f"Generation loop finished in {time.time() - loop_start:.2f}s")
+      multihost_utils.sync_global_devices(f"step_{step}_complete")
 
-  # Sync to ensure all hosts finish the forward passes before host 0 starts uploading
+    if jax.process_index() == 0:
+      max_logging.log(f"Generation loop finished in {time.time() - loop_start:.2f}s")
+
   multihost_utils.sync_global_devices("loop_finished")
 
-  # Finalize writing and handle GCS upload on Host 0
-  if jax.process_index() == 0:
+  if writer:
+    if write_executor:
+      write_executor.shutdown(wait=True)
+    if serialization_executor:
+      serialization_executor.shutdown(wait=True)
     writer.close()
-    max_logging.log(f"Finished writing to local disk: {local_output_path}")
 
     if gcs_upload_path:
-      gcs_file_path = os.path.join(gcs_upload_path, filename)
-      max_logging.log(f"Flag --gcs_upload_path detected. Uploading to: {gcs_file_path}")
+      gcs_file_path = os.path.join(gcs_upload_path, os.path.basename(local_output_path))
+      upload_executor.submit(background_upload, local_output_path, gcs_file_path, jax.process_index())
 
-      if not tf.io.gfile.exists(gcs_upload_path):
-        tf.io.gfile.makedirs(gcs_upload_path)
+    if upload_executor:
+      if jax.process_index() == 0:
+        max_logging.log("Waiting for all background uploads to finish across all hosts...")
+      upload_executor.shutdown(wait=True)
+      if jax.process_index() == 0:
+        max_logging.log("All GCS uploads complete.")
 
-      # Perform the bulk copy to GCS
-      tf.io.gfile.copy(local_output_path, gcs_file_path, overwrite=True)
-      max_logging.log("GCS Upload complete.")
-
-  # Sync all hosts one last time so worker hosts don't terminate the job
   multihost_utils.sync_global_devices("upload_complete")
 
 
 def main(argv: Sequence[str], local_args):
-  # Initialize the global configuration
   global_config = pyconfig.initialize(argv)
   teacher_overrides = global_config.teacher_overrides
-  teacher_argv = [argv[0], argv[1]]
-  teacher_config = pyconfig.initialize(teacher_argv, **teacher_overrides)
 
-  # Pass the entire local_args object to clean up the function signature
+  teacher_config = pyconfig.initialize(argv, **teacher_overrides)
+
   generate_and_save_data(teacher_config, local_args)
 
 
 if __name__ == "__main__":
   parser = argparse.ArgumentParser()
-  parser.add_argument(
-      "--top_k",
-      type=int,
-      required=False,
-      default=128,
-      help="Top K value for logits.",
-  )
+  parser.add_argument("--top_k", type=int, default=128)
   parser.add_argument(
       "--optional_keys",
       type=str,
       nargs="*",
       default=["inputs_position", "inputs_segmentation", "targets_segmentation", "targets"],
-      help="Optional keys to save from teacher logits (space-separated).",
   )
+  parser.add_argument("--gcs_upload_path", type=str, default=None)
+  parser.add_argument("--local_tmp_dir", type=str, default="/tmp")
+  parser.add_argument("--steps_per_file", type=int, default=50)
+  parser.add_argument("--upload_workers", type=int, default=4, help="Number of workers for GCS uploads.")
   parser.add_argument(
-      "--gcs_upload_path",
-      type=str,
-      required=False,
-      default=None,
-      help="Optional GCS directory (e.g., gs://my-bucket/logits/) to upload the locally saved ArrayRecord file.",
-  )
-  parser.add_argument(
-      "--local_tmp_dir",
-      type=str,
-      required=False,
-      default="/tmp",
-      help="Local temporary directory to write the ArrayRecord file before optional GCS upload.",
+      "--serialization_workers", type=int, default=16, help="Number of workers for protobuf serialization."
   )
   local_arg, remaining_args = parser.parse_known_args()
 

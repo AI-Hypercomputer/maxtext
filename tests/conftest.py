@@ -21,23 +21,104 @@ are not marked.
 """
 
 import pytest
-from maxtext.common.gcloud_stub import is_decoupled
+import sys
+import warnings
+
+warnings.filterwarnings(
+    "ignore", message="builtin type swigvarlink has no __module__ attribute", category=DeprecationWarning
+)
+warnings.filterwarnings(
+    "ignore", message="builtin type SwigPyPacked has no __module__ attribute", category=DeprecationWarning
+)
+warnings.filterwarnings(
+    "ignore", message="builtin type SwigPyObject has no __module__ attribute", category=DeprecationWarning
+)
+
+# Prevent libraries that use absl flags (e.g. tokamax) from lazily parsing sys.argv,
+# which would pick up pytest flags like `-v -m` and fail to parse them as integers.
+from absl import flags as _absl_flags
+
+if not _absl_flags.FLAGS.is_parsed():
+  _absl_flags.FLAGS(sys.argv[:1])
+
 import jax
+import os
 import importlib.util
+
+# Force early JAX initialization on GPU to prevent CUDA context conflicts with TensorFlow/PyTorch.
+# If JAX initialization is deferred, TensorFlow/PyTorch (imported during test collection)
+# might initialize CUDA first, causing JAX's subsequent NCCL communicator creation to fail
+# with 'corrupted comm object detected'.
+# Detect GPU environment using standard JAX env vars, GHA runner device types,
+# and nvidia-docker visible device markers.
+_jax_platforms = os.getenv("JAX_PLATFORMS", "").lower()
+_device_type = os.getenv("INPUTS_DEVICE_TYPE", "").lower()
+_has_gpu = (
+    "cuda" in _jax_platforms
+    or "gpu" in _jax_platforms
+    or "cuda" in _device_type
+    or "gpu" in _device_type
+    or os.getenv("CUDA_VISIBLE_DEVICES") is not None
+    or os.getenv("NVIDIA_VISIBLE_DEVICES") is not None
+)
+if _has_gpu:
+  try:
+    _ = jax.devices()
+  except Exception:  # pylint: disable=broad-exception-caught
+    pass
+
+# --- Monkeypatch for absl.testing.parameterized ---
+# Context: Decorating a test method with @parameterized.named_parameters returns a custom
+# iterable container (_ParameterizedTestIter) instead of a standard function object.
+# Problem: When pytest markers are applied above @parameterized in the decorator stack:
+#
+#   @pytest.mark.cpu_only
+#   @parameterized.named_parameters(...)
+#   def test_foo(self, ...):
+#
+# pytest attaches the marker attributes exclusively to the outer iterable container object.
+# During class initialization, the test metaclass unwraps the base function to generate
+# individual test methods, omitting the outer container entirely. Consequently, marker
+# attributes attached to the outer container are dropped and lost before pytest collection.
+# Solution: Intercept _ParameterizedTestIter.__iter__ to dynamically propagate any discovered
+# pytestmark attributes from the outer container object down to all generated test methods.
+from absl.testing import parameterized
+
+try:
+  # pylint: disable=protected-access
+  _orig_iter = parameterized._ParameterizedTestIter.__iter__
+
+  def _custom_iter(self):
+    """Custom iterator propagating outer pytestmark attributes to generated test methods."""
+    outer_marks = getattr(self, "pytestmark", None)
+    if outer_marks is None:
+      yield from _orig_iter(self)
+    else:
+      if not isinstance(outer_marks, list):
+        outer_marks = [outer_marks]
+
+      for func in _orig_iter(self):
+        existing_marks = getattr(func, "pytestmark", [])
+        if not isinstance(existing_marks, list):
+          existing_marks = [existing_marks]
+        func.pytestmark = existing_marks + outer_marks
+        yield func
+
+  parameterized._ParameterizedTestIter.__iter__ = _custom_iter
+  # pylint: enable=protected-access
+except AttributeError:
+  pass
+
+
+if os.getenv("JAX_PLATFORMS") == "proxy":
+  # Import maxtext early to register the pathways proxy backend before JAX is queried.
+  import maxtext  # pylint: disable=unused-import
+
+from maxtext.common.gcloud_stub import is_decoupled
 
 # Configure JAX to use unsafe_rbg PRNG implementation to match main scripts.
 if is_decoupled():
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
-
-try:
-  _HAS_TPU = any(d.platform == "tpu" for d in jax.devices())
-except Exception:  # pragma: no cover  pylint: disable=broad-exception-caught
-  _HAS_TPU = False
-
-try:
-  _HAS_GPU = any(d.platform == "gpu" for d in jax.devices())
-except Exception:  # pragma: no cover  pylint: disable=broad-exception-caught
-  _HAS_GPU = False
 
 
 GCP_MARKERS = {"external_serving", "external_training"}
@@ -72,15 +153,7 @@ def pytest_collection_modifyitems(config, items):
   remaining = []
   deselected = []
 
-  skip_no_tpu = None
-  skip_no_gpu = None
   skip_no_tpu_backend = None
-  if not _HAS_TPU:
-    skip_no_tpu = pytest.mark.skip(reason="Skipped: requires TPU hardware, none detected")
-
-  if not _HAS_GPU:
-    skip_no_gpu = pytest.mark.skip(reason="Skipped: requires GPU hardware, none detected")
-
   if not _has_tpu_backend_support():
     skip_no_tpu_backend = pytest.mark.skip(
         reason=(
@@ -90,19 +163,7 @@ def pytest_collection_modifyitems(config, items):
     )
 
   for item in items:
-    # Iterate thru the markers of every test.
     cur_test_markers = {m.name for m in item.iter_markers()}
-
-    # Hardware skip retains skip semantics.
-    if skip_no_tpu and "tpu_only" in cur_test_markers:
-      item.add_marker(skip_no_tpu)
-      remaining.append(item)
-      continue
-
-    if skip_no_gpu and "gpu_only" in cur_test_markers:
-      item.add_marker(skip_no_gpu)
-      remaining.append(item)
-      continue
 
     if skip_no_tpu_backend and "tpu_backend" in cur_test_markers:
       item.add_marker(skip_no_tpu_backend)
@@ -128,12 +189,63 @@ def pytest_collection_modifyitems(config, items):
 
 
 def pytest_configure(config):
+  """Registers custom pytest markers dynamically."""
   for m in [
       "gpu_only: tests that require GPU hardware",
       "tpu_only: tests that require TPU hardware",
+      "cpu_only: tests that require CPU-only environment (skipped on active accelerator hardware)",
       "tpu_backend: tests that require a TPU-enabled JAX install (TPU PJRT plugin), but not TPU hardware",
       "external_serving: JetStream / serving / decode server components",
       "external_training: goodput integrations",
       "decoupled: marked on tests that are not skipped due to GCP deps, when DECOUPLE_GCLOUD=TRUE",
+      "skip_on_tpu7x: skip test if running on TPU7x platform",
   ]:
     config.addinivalue_line("markers", m)
+
+
+@pytest.fixture(autouse=True)
+def handle_skip_on_tpu7x(request):
+  """Dynamically skip tests marked with skip_on_tpu7x if running on TPU7x."""
+  if request.node.get_closest_marker("skip_on_tpu7x"):
+    try:
+      is_tpu7x = any("TPU7x" in d.device_kind for d in jax.devices())
+    except Exception:  # pylint: disable=broad-exception-caught
+      is_tpu7x = False
+    if is_tpu7x:
+      pytest.skip("AOT tests do not support TPU7x platform")
+
+
+@pytest.fixture(autouse=True)
+def handle_cpu_only(request):
+  """Dynamically skip cpu_only tests on TPU or GPU hardware."""
+  if request.node.get_closest_marker("cpu_only"):
+    try:
+      has_accelerator = any(d.platform in ("tpu", "gpu") for d in jax.devices())
+    except Exception:  # pylint: disable=broad-exception-caught
+      has_accelerator = False
+    if has_accelerator:
+      pytest.skip("Skipped: cpu_only test bypassed on hardware accelerator testbeds")
+
+
+@pytest.fixture(autouse=True)
+def handle_tpu_only(request):
+  """Dynamically skip tpu_only tests if running on non-TPU hardware."""
+  if request.node.get_closest_marker("tpu_only"):
+    try:
+      has_tpu = any(d.platform == "tpu" for d in jax.devices())
+    except Exception:  # pylint: disable=broad-exception-caught
+      has_tpu = False
+    if not has_tpu:
+      pytest.skip("Skipped: requires TPU hardware, none detected")
+
+
+@pytest.fixture(autouse=True)
+def handle_gpu_only(request):
+  """Dynamically skip gpu_only tests if running on non-GPU hardware."""
+  if request.node.get_closest_marker("gpu_only"):
+    try:
+      has_gpu = any(d.platform == "gpu" for d in jax.devices())
+    except Exception:  # pylint: disable=broad-exception-caught
+      has_gpu = False
+    if not has_gpu:
+      pytest.skip("Skipped: requires GPU hardware, none detected")

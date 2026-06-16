@@ -119,7 +119,7 @@ jobs:
     needs: analyze_code_changes
     # Run if either tests or notebooks need to run
     if: |
-      needs.analyze_code_changes.outputs.run_tests == 'true' || 
+      needs.analyze_code_changes.outputs.run_tests == 'true' ||
       needs.analyze_code_changes.outputs.run_notebooks == 'true'
     uses: ./.github/workflows/build_package.yml
     with:
@@ -135,15 +135,15 @@ jobs:
         fail-fast: false
     with:
       device_type: tpu
-      device_name: v6e-4
+      device_name: v6e-8
       base_image: maxtext-unit-test-tpu:py312
-      cloud_runner: linux-x86-ct6e-180-4tpu
+      cloud_runner: linux-x86-ct6e-180-8tpu
       maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
   tpu-tests:
-    name: ${{ matrix.flavor }} tests
+    name: ${{ matrix.flavor || 'TPU' }} tests
     needs: [build_and_upload_maxtext_package]
     if: needs.analyze_code_changes.outputs.run_tests == 'true'
     uses: ./.github/workflows/run_tests_coordinator.yml
@@ -158,7 +158,7 @@ jobs:
       maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
 
   gpu-tests:
-    name: ${{ matrix.flavor }} tests
+    name: ${{ matrix.flavor || 'GPU' }} tests
     needs: [build_and_upload_maxtext_package]
     if: needs.analyze_code_changes.outputs.run_tests == 'true'
     strategy:
@@ -173,7 +173,7 @@ jobs:
       maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
 
   cpu-tests:
-    name: ${{ matrix.flavor }} tests
+    name: ${{ matrix.flavor || 'CPU' }} tests
     needs: [build_and_upload_maxtext_package]
     if: needs.analyze_code_changes.outputs.run_tests == 'true'
     uses: ./.github/workflows/run_tests_coordinator.yml
@@ -199,6 +199,7 @@ jobs:
       base_image: maxtext-unit-test-tpu:py312
       cloud_runner: linux-x86-ct6e-180-4tpu
       pytest_marker: 'not cpu_only and not gpu_only and not integration_test and not post_training'
+      pytest_addopts: '--ignore=tests/post_training'
       xla_python_client_mem_fraction: 0.75
       tf_force_gpu_allow_growth: false
       container_resource_option: "--privileged"
@@ -207,7 +208,6 @@ jobs:
 
   maxtext_tpu_pathways_integration_tests:
     needs: build_and_upload_maxtext_package
-    if: needs.analyze_code_changes.outputs.run_tests == 'true'
     uses: ./.github/workflows/run_pathways_tests.yml
     strategy:
         fail-fast: false
@@ -217,6 +217,7 @@ jobs:
       base_image: maxtext-unit-test-tpu:py312
       cloud_runner: linux-x86-ct6e-180-4tpu
       pytest_marker: 'not cpu_only and not gpu_only and integration_test and not post_training'
+      pytest_addopts: '--ignore=tests/post_training --ignore=tests/integration/hlo_diff_test.py'
       xla_python_client_mem_fraction: 0.75
       tf_force_gpu_allow_growth: false
       container_resource_option: "--privileged"
@@ -231,9 +232,8 @@ jobs:
     steps:
       - name: Check test results
         run: |
-          # If doc-only, all tests should be skipped
-          if [ "${NEEDS_DOC_ONLY_CHECK_OUTPUTS_RUN_TESTS}" == "false" ]; then
-            echo "Documentation-only changes detected, tests were skipped"
+          if [ "${NEEDS_ANALYZE_CHANGES_OUTPUTS_RUN_TESTS}" == "false" ]; then
+            echo "Tests were skipped"
             exit 0
           fi
 
@@ -303,3 +303,18 @@ jobs:
         uses: jayqi/failed-build-issue-action@1a893bbf43ef1c2a8705e2b115cd4f0fe3c5649b  # v1.2.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
+
+  investigate_failure:
+    name: Investigate failed build # investigates failure of scheduled run and comments on tracking issue
+    needs: [tpu-tests, gpu-tests, cpu-tests, maxtext_jupyter_notebooks, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, notify_failure]
+    if: ${{ always() && contains(needs.*.result, 'failure') && github.event_name == 'schedule' }}
+    uses: ./.github/workflows/gemini-investigate.yml
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+      issues: 'write'
+      pull-requests: 'write'
+      actions: 'read'
+    with:
+      failed_run_id: '${{ github.run_id }}'
+    secrets: inherit

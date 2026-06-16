@@ -26,10 +26,16 @@ before running tests locally.
 """
 
 from datetime import datetime
+import importlib.util
 import json
 import os
 import pytest
 from maxtext.trainers.pre_train.train import main as train_main
+
+pytestmark = pytest.mark.skipif(
+    importlib.util.find_spec("tensorflow") is None,
+    reason="tensorflow not installed; skip testing checkpoint compatibility between tfds and grain",
+)
 from maxtext.utils.globals import MAXTEXT_REPO_ROOT
 from tests.integration.checkpointing_test import get_checkpointing_command
 
@@ -49,6 +55,7 @@ def run_checkpoint_compatibility(hardware, attention_type):
       "grain_worker_count=0",
       "grain_train_files=/tmp/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record*",
   ]
+  local_ckpt_dir = "/tmp/maxtext_local_output"
 
   # Run training using grain input pipeline
   train_main(
@@ -60,6 +67,7 @@ def run_checkpoint_compatibility(hardware, attention_type):
           attention_type=attention_type,
           dataset_type="grain",
           dataset_path="/tmp/gcsfuse",
+          base_output_directory=local_ckpt_dir,
       )
       + grain_command
   )
@@ -74,6 +82,7 @@ def run_checkpoint_compatibility(hardware, attention_type):
           attention_type=attention_type,
           dataset_type="tfds",
           dataset_path="/tmp/gcsfuse",
+          base_output_directory=local_ckpt_dir,
       )
   )
 

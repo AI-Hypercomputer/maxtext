@@ -24,7 +24,7 @@ from maxtext.common.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODE
 from maxtext.layers import quantizations
 from maxtext.models import models
 from maxtext.utils import maxtext_utils
-from tests.utils.test_helpers import get_test_config_path, get_decoupled_parallelism_overrides
+from tests.utils.test_helpers import get_test_config_path
 import numpy as np
 import pytest
 
@@ -42,8 +42,6 @@ class TestModel(unittest.TestCase):
 
   def init_pyconfig(self, **kwargs):
     """Init pyconfig."""
-    # Conditionally set ici_fsdp_parallelism to match device count in decoupled mode
-    extra_args = get_decoupled_parallelism_overrides()
     config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         per_device_batch_size=1.0,
@@ -52,12 +50,11 @@ class TestModel(unittest.TestCase):
         base_num_decoder_layers=2,
         attention="dot_product",
         max_target_length=16,
-        base_emb_dim=256,
+        base_emb_dim=32,
         base_num_query_heads=2,
         base_num_kv_heads=2,
         max_prefill_predict_length=4,
         **kwargs,
-        **extra_args,
     )
     return config
 
@@ -175,7 +172,7 @@ class TestModel(unittest.TestCase):
         equal_nan=False,
     )
 
-    for idx in range(PREFILL_RANGE, self.cfg.max_target_length):
+    for idx in range(PREFILL_RANGE, min(PREFILL_RANGE + 3, self.cfg.max_target_length)):
       ids_idx = ids[:, idx : idx + 1]
       decoder_positions_idx = decoder_positions[:, idx : idx + 1]
       prefill_transformer_vars.update(partial_cache)

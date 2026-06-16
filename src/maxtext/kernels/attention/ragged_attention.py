@@ -219,6 +219,7 @@ def ragged_mqa(
     block_size: int = 256,
     mask_value: float = DEFAULT_MASK_VALUE,
     cost_estimate: pl.CostEstimate | None = None,
+    interpret: bool = False,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
   """Ragged multi query attention.
 
@@ -245,7 +246,7 @@ def ragged_mqa(
     length = lengths_ref[b]
     not_done = i * block_size < length
     am_last_batch = b == batch_size - 1
-    last_good_block = lax.div(length, block_size) - 1
+    last_good_block = jnp.maximum(0, lax.div(length, block_size) - 1)
     b_next = jnp.where(not_done, b, jnp.where(am_last_batch, b, b + 1))
     i_next = jnp.where(not_done, i, jnp.where(am_last_batch, last_good_block, 0))
     return b_next, i_next, 0
@@ -277,6 +278,7 @@ def ragged_mqa(
           jax.ShapeDtypeStruct((batch_size, num_heads, head_dim), jnp.float32),
       ],
       cost_estimate=cost_estimate,
+      interpret=interpret,
   )(lengths, q, k, v)
   return out, m[..., 0], l[..., 0]
 
@@ -286,6 +288,7 @@ def ragged_mqa(
     static_argnames=[
         "block_size",
         "mask_value",
+        "interpret",
     ],
 )
 def ragged_mha(
@@ -296,6 +299,7 @@ def ragged_mha(
     *,
     block_size: int = 256,
     mask_value: float = DEFAULT_MASK_VALUE,
+    interpret: bool = False,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
   """Ragged multi head attention.
 
@@ -325,12 +329,17 @@ def ragged_mha(
           block_size=block_size,
           mask_value=mask_value,
           cost_estimate=cost_estimate,
+          interpret=interpret,
       ),
       in_axes=(1, 1, 1, None),
       out_axes=2,
   )(query, key, value, lengths)
   m = jnp.expand_dims(m, axis=-1)
   l = jnp.expand_dims(l, axis=-1)
+  # The outer layer (Attention block in attention_op.py) expects unnormalized
+  # outputs to support multi-chunk (prefill + decode) cache merging and final
+  # normalization. Since the Pallas kernel internally normalizes, we scale it
+  # back here by the denominator (l) to return unnormalized states.
   o = o * l
   return o, m, l
 
@@ -340,6 +349,7 @@ def ragged_mha(
     static_argnames=[
         "block_size",
         "mask_value",
+        "interpret",
     ],
 )
 def ragged_gqa(
@@ -350,6 +360,7 @@ def ragged_gqa(
     *,
     block_size: int = 256,
     mask_value: float = DEFAULT_MASK_VALUE,
+    interpret: bool = False,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
   """Ragged group query attention.
 
@@ -383,6 +394,7 @@ def ragged_gqa(
           block_size=block_size,
           mask_value=mask_value,
           cost_estimate=cost_estimate,
+          interpret=interpret,
       ),
       in_axes=(1, 1, 1, None),
       out_axes=1,
@@ -391,5 +403,9 @@ def ragged_gqa(
   m = jnp.reshape(m, (batch_size, 1, num_heads_q, 1))
   l = jnp.reshape(l, (batch_size, 1, num_heads_q, 1))
   o = jnp.reshape(o, (batch_size, 1, num_heads_q, head_dim))
+  # The outer layer (Attention block in attention_op.py) expects unnormalized
+  # outputs to support multi-chunk (prefill + decode) cache merging and final
+  # normalization. Since the Pallas kernel internally normalizes, we scale it
+  # back here by the denominator (l) to return unnormalized states.
   o = o * l
   return o, m, l

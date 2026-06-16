@@ -22,8 +22,6 @@ file: index.html
 ---
 ```
 
-:link: reference/api
-
 <div class="doc-body">
 <section class="latest-news">
 
@@ -42,8 +40,8 @@ end-before: <!-- NEWS END -->
 maxdepth: 2
 hidden:
 ---
+getting_started
 install_maxtext
-build_maxtext
 tutorials
 run_maxtext
 guides

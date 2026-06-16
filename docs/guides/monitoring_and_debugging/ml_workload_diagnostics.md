@@ -37,8 +37,8 @@ MaxText has integrated the ML Diagnostics [SDK](https://github.com/AI-Hypercompu
    ```
       python3 -m maxtext.trainers.pre_train.train \
          run_name=${USER}-tpu-job \
-         base_output_directory="gs://your-output-bucket/" \
-         dataset_path="gs://your-dataset-bucket/" \
+         base_output_directory="gs://<GCS_BUCKET>/" \
+         dataset_path="gs://<DATASET_PATH>/" \
          steps=100 \
          log_period=10 \
          managed_mldiagnostics=True
@@ -49,8 +49,8 @@ MaxText has integrated the ML Diagnostics [SDK](https://github.com/AI-Hypercompu
    ```
       python3 -m maxtext.trainers.pre_train.train \
          run_name=${USER}-tpu-job \
-         base_output_directory="gs://your-output-bucket/" \
-         dataset_path="gs://your-dataset-bucket/" \
+         base_output_directory="gs://<GCS_BUCKET>/" \
+         dataset_path="gs://<DATASET_PATH>/" \
          steps=100 \
          log_period=10 \
          profiler=xplane \
@@ -62,8 +62,8 @@ MaxText has integrated the ML Diagnostics [SDK](https://github.com/AI-Hypercompu
    ```
       python3 -m maxtext.trainers.pre_train.train \
          run_name=${USER}-tpu-job \
-         base_output_directory="gs://your-output-bucket/" \
-         dataset_path="gs://your-dataset-bucket/" \
+         base_output_directory="gs://<GCS_BUCKET>/" \
+         dataset_path="gs://<DATASET_PATH>/" \
          steps=100 \
          log_period=10 \
          profiler=xplane \

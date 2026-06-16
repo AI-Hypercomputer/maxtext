@@ -61,7 +61,7 @@ class RMSNorm(nnx.Module):
     if self.with_scale:
       self.scale = nnx.Param(
           scale_init(rngs.params(), (num_features,), weight_dtype),
-          sharding=kernel_axes,
+          out_sharding=kernel_axes,
       )
     else:
       self.scale = None
@@ -81,7 +81,7 @@ class RMSNorm(nnx.Module):
         y = jax.lax.with_sharding_constraint(y, out_sharding)
       return y
 
-    scale = self.scale.value
+    scale = self.scale.get_value()
     # Move scale to device if parameter offloading is enabled
     if self.parameter_memory_host_offload:
       max_logging.log("normalizations.py: Moving scale parameter to device")
@@ -114,7 +114,17 @@ class GlobalRMSNorm(RMSNorm):
     return y_flat.reshape(input_shape)
 
 
-def Qwen3NextRMSNorm(num_features: int, eps: float, dtype: DType, weight_dtype: DType, *, rngs: nnx.Rngs):
+def Qwen3NextRMSNorm(
+    num_features: int,
+    epsilon: float = 1e-6,
+    dtype: DType = None,
+    weight_dtype: DType = None,
+    shard_mode=None,
+    kernel_axes=None,
+    parameter_memory_host_offload=None,
+    *,
+    rngs: nnx.Rngs,
+):
   """
   Used for input and post attention layernorms
   in Qwen3NextDecoderLayer.
@@ -123,11 +133,13 @@ def Qwen3NextRMSNorm(num_features: int, eps: float, dtype: DType, weight_dtype: 
   1.  The learnable scale parameter `scale` is initialized to ZEROS.
   2.  The scale is applied as `(1.0 + self.scale)`, making the initial scale effectively 1.0.
       This matches the PyTorch implementation of Qwen3NextRMSNorm.
+
   """
+
   return nnx.data(
       RMSNorm(
           num_features=num_features,
-          epsilon=eps,
+          epsilon=epsilon,
           dtype=dtype,
           weight_dtype=weight_dtype,
           scale_init=linen_initializers.zeros,
@@ -152,15 +164,15 @@ class Qwen3NextRMSNormGated(nnx.Module):
     weight_dtype: The datatype of the internal RMSNorm scale.
   """
 
-  def __init__(self, num_features: int, eps: float, dtype: DType, weight_dtype: DType, *, rngs: nnx.Rngs):
+  def __init__(self, num_features: int, epsilon: float, dtype: DType, weight_dtype: DType, *, rngs: nnx.Rngs):
     self.num_features = num_features
-    self.eps = eps
+    self.epsilon = epsilon
     self.dtype = dtype
     self.weight_dtype = weight_dtype
     self.rms_norm = nnx.data(
         RMSNorm(
             num_features=num_features,
-            epsilon=eps,
+            epsilon=self.epsilon,
             dtype=dtype,
             weight_dtype=weight_dtype,
             scale_init=nnx.initializers.ones,

@@ -7,7 +7,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -22,7 +21,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -43,7 +41,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -58,7 +55,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -86,7 +82,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -101,7 +96,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -114,7 +108,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "sequence",
         "tensor_transpose",
         "context",
         "expert"
@@ -141,7 +134,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -156,7 +148,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -169,7 +160,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "sequence",
         "tensor_transpose",
         "context",
         "expert"
@@ -196,7 +186,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -211,7 +200,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -231,7 +219,6 @@
       null,
       [
         "fsdp",
-        "sequence",
         "tensor_transpose",
         "context",
         "expert"
@@ -251,7 +238,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -266,7 +252,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -296,7 +281,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -311,7 +295,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -341,7 +324,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -356,7 +338,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -386,7 +367,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -401,7 +381,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -423,7 +402,6 @@
       [
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "expert"
       ]
@@ -443,7 +421,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -458,7 +435,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -472,7 +448,6 @@
       [
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "expert"
       ],
@@ -500,7 +475,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -515,7 +489,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -529,7 +502,6 @@
       [
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "tensor_transpose",
         "context",
         "expert"
@@ -551,7 +523,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -566,7 +537,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -580,7 +550,6 @@
       [
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "expert"
       ],
@@ -608,7 +577,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -623,7 +591,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -637,7 +604,6 @@
       [
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "expert"
       ],
@@ -661,7 +627,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -676,7 +641,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -690,7 +654,6 @@
       [
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "tensor_transpose",
         "context"
       ],
@@ -711,7 +674,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -726,7 +688,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -741,7 +702,6 @@
       null,
       [
         "fsdp",
-        "sequence",
         "tensor_transpose",
         "context"
       ],
@@ -767,7 +727,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -782,7 +741,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -797,7 +755,6 @@
       null,
       [
         "fsdp",
-        "sequence",
         "tensor_transpose",
         "context"
       ],
@@ -823,7 +780,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -838,7 +794,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -859,7 +814,6 @@
       ],
       [
         "fsdp",
-        "sequence",
         "tensor_transpose",
         "context"
       ]
@@ -879,7 +833,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -894,7 +847,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -907,7 +859,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "sequence",
         "tensor_transpose",
         "context",
         "expert"
@@ -934,7 +885,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -949,7 +899,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -962,7 +911,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "sequence",
         "tensor_transpose",
         "context",
         "expert"
@@ -989,7 +937,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -1004,7 +951,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -1024,7 +970,6 @@
       null,
       [
         "fsdp",
-        "sequence",
         "tensor_transpose",
         "context",
         "expert"
@@ -1044,7 +989,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -1059,7 +1003,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -1089,7 +1032,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -1104,7 +1046,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -1134,7 +1075,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -1149,7 +1089,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -1179,7 +1118,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -1194,7 +1132,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -1216,7 +1153,6 @@
       [
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "expert"
       ]
@@ -1236,7 +1172,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -1251,7 +1186,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -1265,7 +1199,6 @@
       [
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "expert"
       ],
@@ -1293,7 +1226,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -1308,7 +1240,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -1322,7 +1253,6 @@
       [
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "tensor_transpose",
         "context",
         "expert"
@@ -1344,7 +1274,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -1359,7 +1288,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -1373,7 +1301,6 @@
       [
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "expert"
       ],
@@ -1401,7 +1328,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -1416,7 +1342,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -1436,7 +1361,6 @@
       [
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "expert"
       ]
@@ -1454,7 +1378,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -1469,7 +1392,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -1490,7 +1412,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -1505,7 +1426,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -1533,7 +1453,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -1548,7 +1467,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -1561,7 +1479,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "sequence",
         "tensor_transpose",
         "context",
         "expert"
@@ -1588,7 +1505,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -1603,7 +1519,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -1616,7 +1531,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "sequence",
         "tensor_transpose",
         "context",
         "expert"
@@ -1643,7 +1557,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -1658,7 +1571,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -1678,7 +1590,6 @@
       null,
       [
         "fsdp",
-        "sequence",
         "tensor_transpose",
         "context",
         "expert"
@@ -1698,7 +1609,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -1713,7 +1623,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -1743,7 +1652,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -1758,7 +1666,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -1788,7 +1695,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -1803,7 +1709,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -1833,7 +1738,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -1848,7 +1752,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -1870,7 +1773,6 @@
       [
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "expert"
       ]
@@ -1890,7 +1792,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -1905,7 +1806,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -1919,7 +1819,6 @@
       [
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "expert"
       ],
@@ -1947,7 +1846,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -1962,7 +1860,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -1976,7 +1873,6 @@
       [
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "tensor_transpose",
         "context",
         "expert"
@@ -1998,7 +1894,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -2013,7 +1908,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -2027,7 +1921,6 @@
       [
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "expert"
       ],
@@ -2055,7 +1948,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -2070,7 +1962,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -2084,7 +1975,6 @@
       [
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "expert"
       ],
@@ -2108,7 +1998,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -2123,7 +2012,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -2137,7 +2025,6 @@
       [
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "tensor_transpose",
         "context"
       ],
@@ -2158,7 +2045,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -2173,7 +2059,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -2188,7 +2073,6 @@
       null,
       [
         "fsdp",
-        "sequence",
         "tensor_transpose",
         "context"
       ],
@@ -2214,7 +2098,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -2229,7 +2112,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -2244,7 +2126,6 @@
       null,
       [
         "fsdp",
-        "sequence",
         "tensor_transpose",
         "context"
       ],
@@ -2270,7 +2151,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -2285,7 +2165,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -2306,7 +2185,6 @@
       ],
       [
         "fsdp",
-        "sequence",
         "tensor_transpose",
         "context"
       ]
@@ -2326,7 +2204,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -2341,7 +2218,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -2354,7 +2230,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "sequence",
         "tensor_transpose",
         "context",
         "expert"
@@ -2381,7 +2256,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -2396,7 +2270,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -2409,7 +2282,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "sequence",
         "tensor_transpose",
         "context",
         "expert"
@@ -2436,7 +2308,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -2451,7 +2322,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -2471,7 +2341,6 @@
       null,
       [
         "fsdp",
-        "sequence",
         "tensor_transpose",
         "context",
         "expert"
@@ -2491,7 +2360,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -2506,7 +2374,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -2536,7 +2403,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -2551,7 +2417,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -2581,7 +2446,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -2596,7 +2460,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -2626,7 +2489,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -2641,7 +2503,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -2663,7 +2524,6 @@
       [
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "expert"
       ]
@@ -2683,7 +2543,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -2698,7 +2557,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -2712,7 +2570,6 @@
       [
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "expert"
       ],
@@ -2740,7 +2597,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -2755,7 +2611,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -2769,7 +2624,6 @@
       [
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "tensor_transpose",
         "context",
         "expert"
@@ -2791,7 +2645,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -2806,7 +2659,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -2820,7 +2672,6 @@
       [
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "expert"
       ],
@@ -2848,7 +2699,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -2863,7 +2713,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -2883,7 +2732,6 @@
       [
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "expert"
       ]
@@ -2901,7 +2749,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -2916,7 +2763,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -2944,7 +2790,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -2959,7 +2804,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -2972,7 +2816,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "sequence",
         "tensor_transpose",
         "context",
         "expert"
@@ -2999,7 +2842,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -3014,7 +2856,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -3027,7 +2868,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "sequence",
         "tensor_transpose",
         "context",
         "expert"
@@ -3054,7 +2894,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -3069,7 +2908,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -3089,7 +2927,6 @@
       null,
       [
         "fsdp",
-        "sequence",
         "tensor_transpose",
         "context",
         "expert"
@@ -3109,7 +2946,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -3124,7 +2960,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -3154,7 +2989,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -3169,7 +3003,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -3199,7 +3032,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -3214,7 +3046,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -3244,7 +3075,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -3259,7 +3089,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -3281,7 +3110,6 @@
       [
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "expert"
       ]
@@ -3301,7 +3129,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -3316,7 +3143,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -3330,7 +3156,6 @@
       [
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "expert"
       ],
@@ -3358,7 +3183,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -3373,7 +3197,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -3387,7 +3210,6 @@
       [
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "tensor_transpose",
         "context",
         "expert"
@@ -3409,7 +3231,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -3424,7 +3245,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -3438,7 +3258,6 @@
       [
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "expert"
       ],
@@ -3466,7 +3285,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -3481,7 +3299,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -3495,7 +3312,6 @@
       [
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "expert"
       ],
@@ -3519,7 +3335,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -3534,7 +3349,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -3548,7 +3362,6 @@
       [
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "tensor_transpose",
         "context"
       ],
@@ -3569,7 +3382,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -3584,7 +3396,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -3599,7 +3410,6 @@
       null,
       [
         "fsdp",
-        "sequence",
         "tensor_transpose",
         "context"
       ],
@@ -3625,7 +3435,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -3640,7 +3449,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -3655,7 +3463,6 @@
       null,
       [
         "fsdp",
-        "sequence",
         "tensor_transpose",
         "context"
       ],
@@ -3681,7 +3488,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -3696,7 +3502,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -3717,7 +3522,6 @@
       ],
       [
         "fsdp",
-        "sequence",
         "tensor_transpose",
         "context"
       ]
@@ -3737,7 +3541,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -3752,7 +3555,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -3765,7 +3567,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "sequence",
         "tensor_transpose",
         "context",
         "expert"
@@ -3792,7 +3593,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -3807,7 +3607,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -3820,7 +3619,6 @@
     "partition_spec": [
       [
         "fsdp",
-        "sequence",
         "tensor_transpose",
         "context",
         "expert"
@@ -3847,7 +3645,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -3862,7 +3659,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -3882,7 +3678,6 @@
       null,
       [
         "fsdp",
-        "sequence",
         "tensor_transpose",
         "context",
         "expert"
@@ -3902,7 +3697,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -3917,7 +3711,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -3947,7 +3740,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -3962,7 +3754,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -3992,7 +3783,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -4007,7 +3797,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -4037,7 +3826,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -4052,7 +3840,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -4074,7 +3861,6 @@
       [
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "expert"
       ]
@@ -4094,7 +3880,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -4109,7 +3894,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -4123,7 +3907,6 @@
       [
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "expert"
       ],
@@ -4151,7 +3934,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -4166,7 +3948,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -4180,7 +3961,6 @@
       [
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "tensor_transpose",
         "context",
         "expert"
@@ -4202,7 +3982,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -4217,7 +3996,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -4231,7 +4009,6 @@
       [
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "expert"
       ],
@@ -4259,7 +4036,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -4274,7 +4050,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
@@ -4294,7 +4069,6 @@
       [
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "expert"
       ]
@@ -4312,7 +4086,6 @@
         "stage",
         "fsdp",
         "fsdp_transpose",
-        "sequence",
         "context",
         "context_autoregressive",
         "tensor",
@@ -4327,7 +4100,6 @@
         "stage": 1,
         "fsdp": 4,
         "fsdp_transpose": 1,
-        "sequence": 1,
         "context": 1,
         "context_autoregressive": 1,
         "tensor": 1,
