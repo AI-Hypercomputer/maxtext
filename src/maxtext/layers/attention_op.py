@@ -2134,6 +2134,7 @@ class AttentionOp(nnx.Module):
         use_ragged_attention=self.use_ragged_attention,
         bidirectional_mask=bidirectional_mask,
         indexer_mask=indexer_mask_ar,
+        compressed_mask=compressed_mask,
         qk_product_einsum=self.AqtEinsum_2,
         wv_product_einsum=self.AqtEinsum_3,
     )

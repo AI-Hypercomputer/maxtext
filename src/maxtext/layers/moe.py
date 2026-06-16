@@ -208,6 +208,10 @@ def calculate_load_balance_updates(top_k_indices, num_experts, rate):
   return output
 
 
+class Tid2EidVar(nnx.Variable):
+  """Custom variable to hold tid2eid without trainable param overhead."""
+
+
 class GateLogit(nnx.Module):
   """A layer used to compute gate logits, allowing to return the pre bias values for DeepSeek routing."""
 
@@ -399,8 +403,11 @@ class RoutedMoE(nnx.Module):
     # DeepSeek V4 Hash Routing
     if self.is_hash_routing:
       # Token-ID to Expert-ID lookup table for static routing
-      self.tid2eid = nnx.Variable(
-          jnp.zeros((self.config.vocab_size, self.num_experts_per_tok), dtype=jnp.int32),
+      # Must be stored as float32 because MaxText passes the entire variable tree
+      # through jax.value_and_grad, which strictly requires all leaves to be inexact types
+      # (even if they receive no gradients). We cast to int32 dynamically during routing.
+      self.tid2eid = Tid2EidVar(
+          jnp.zeros((self.config.vocab_size, self.num_experts_per_tok), dtype=jnp.float32),
           out_sharding=None,  # Replicated across shards for local lookup
       )
     else:
@@ -665,7 +672,13 @@ class RoutedMoE(nnx.Module):
       return top_k_weights, top_k_indices
 
     if self.is_hash_routing:
-      top_k_indices = self.tid2eid[input_ids]
+      if input_ids is None:
+        raise ValueError("input_ids cannot be None when is_hash_routing is True")
+      # Access the static routing table
+      tid2eid_int = self.tid2eid.value
+      # Cast the float32 array to int32 (JAX automatically assigns 0.0 gradients to integer casts)
+      tid2eid_int = tid2eid_int.astype(jnp.int32)
+      top_k_indices = tid2eid_int[input_ids.astype(jnp.int32)]
       top_k_weights = jnp.take_along_axis(pre_bias_logits, top_k_indices, axis=-1)
     # NOTE: deepseek2 has a different pattern
     elif self.config.model_name.startswith(("deepseek3", "deepseek4")):
