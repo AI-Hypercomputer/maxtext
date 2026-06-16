@@ -8,13 +8,13 @@ from typing import cast
 import jax
 import jax.numpy as jnp
 
-from maxtext.nnx_exp.moe_types import (
+from maxtext.nnx_exp.moe.moe_types import (
     MegabloxConfig,
     MoEExecutor,
     MoERuntimeConfig,
     RoutingMode,
 )
-from maxtext.nnx_exp.moe_kernels import (
+from maxtext.nnx_exp.moe.moe_kernels import (
     SparseMoEKernel,
     abstract_mesh,
     grouped_matmul,
