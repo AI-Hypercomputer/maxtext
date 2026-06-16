@@ -242,17 +242,17 @@ ______________________________________________________________________
 
 We first introduce some auxiliary tools useful for both development and troubleshoot.
 
-**Tool1 (HF inspector)**: To see the HuggingFace checkpoint structure: You can print out the keys and shapes of your original `.safetensors` or `.pth` files.
+**Tool1 (HF inspector)**. To inspect the HuggingFace checkpoint structure: You can print out the keys and shapes of your original `.safetensors` or `.pth` files.
 ```
 python src/maxtext/checkpoint_conversion/inspect_checkpoint.py hf --path <local_hf_path> --format <safetensors | pth>
 ```
 
-**Tool2 (MaxText inspector)**: To see the MaxText model structure:
+**Tool2 (MaxText inspector)**. To inspect the MaxText model structure:
 ```
-python src/maxtext/checkpoint_conversion/inspect_checkpoint.py maxtext model_name <maxtext_model_name> scan_layers <True | False>
+python src/maxtext/checkpoint_conversion/inspect_checkpoint.py maxtext model_name=<maxtext_model_name> scan_layers=<True | False>
 ```
 
-**Tool3 (Orbax inspector)**: To inspect the Orbax checkpoint
+**Tool3 (Orbax inspector)**. To inspect the Orbax checkpoint:
 ```
 python src/maxtext/checkpoint_conversion/inspect_checkpoint.py orbax --path <local_orbax_path | gcs_orbax_path>
 ```

@@ -60,7 +60,7 @@ python src/maxtext/checkpoint_conversion/inspect_checkpoint.py hf --path <local_
 
 Maxtext Inspector: To see the MaxText model structure
 ```
-python src/maxtext/checkpoint_conversion/inspect_checkpoint.py maxtext model_name <maxtext_model_name> scan_layers <True | False>
+python src/maxtext/checkpoint_conversion/inspect_checkpoint.py maxtext model_name=<maxtext_model_name> scan_layers=<True | False>
 ```
 
 Orbax Inspector: Alternatively, if you have saved an Orbax checkpoint from pretraining, you can inspect with

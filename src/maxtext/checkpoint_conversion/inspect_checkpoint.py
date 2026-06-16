@@ -15,17 +15,22 @@
 
 """
 A unified tool to inspect checkpoint structures for:
-1. HuggingFace/PyTorch (need load weight)
+1. HuggingFace Checkpoints
+- safetensors: lightweight, no weights loaded
+- pth: need weight load
 2. MaxText Model Architecture (lightweight, no weights loaded)
 3. Orbax Checkpoints (lightweight, no weights loaded)
 
 Usage Examples:
-[Mode 1: HF/PyTorch]   
+[Mode 1: HF]   
   python src/maxtext/checkpoint_conversion/inspect_checkpoint.py hf --path <local_hf_path> --format <safetensors | pth>
 [Mode 2: MaxText Architecture] 
-  python src/maxtext/checkpoint_conversion/inspect_checkpoint.py maxtext model_name <maxtext_model_name> scan_layers <True | False>
+  python src/maxtext/checkpoint_conversion/inspect_checkpoint.py maxtext model_name=<maxtext_model_name> scan_layers=<True | False>
 [Mode 3: Orbax]        
   python src/maxtext/checkpoint_conversion/inspect_checkpoint.py orbax --path <local_orbax_path | gcs_orbax_path>
+
+Additional flag: 
+  `--check_dtype` to print dtype
 """
 
 import argparse
@@ -33,7 +38,11 @@ import sys
 import os
 import re
 import pathlib
+import absl
 from maxtext.inference.inference_utils import str2bool
+from maxtext.checkpoint_conversion.utils.utils import print_peak_memory
+
+absl.logging.set_verbosity(absl.logging.INFO)  # for max_logging.log
 
 
 def natural_sort_key(s: str):
@@ -48,9 +57,19 @@ def print_structure(data_dict):
 
 
 # ==============================================================================
-# Mode 1: HuggingFace / PyTorch (.safetensors or .pth)
+# Mode 1: HuggingFace Checkpoint (.safetensors or .pth)
 # ==============================================================================
 def inspect_hf(args):
+  """
+  Inspects the structure and tensor shapes of HuggingFace checkpoints.
+
+  Note: The checkpoint structure is usually the same as the standard `from_pretrained` 
+  format, with a few exceptions (e.g., multimodal Gemma). Use this inspection 
+  method to ensure better compatibility with `to_maxtext` conversion pipelines.
+
+  safetensors: instant and no weight
+  pth: load per weight
+  """
   print(f"\n--- Inspecting {args.format} files in {args.path} ---")
 
   ckpt_paths = sorted(pathlib.Path(args.path).glob(f"[!.]*.{args.format}"))
@@ -70,8 +89,16 @@ def inspect_hf(args):
       with safe_open(ckpt_path, framework="pt") as f:
         for k in f.keys():
           # Storing shape directly to save memory, rather than the full tensor
-          shape = f.get_tensor(k).shape
+          # An alternative is `f.get_tensor(k).shape`, but it loads the entire tensor into memory
+          # `f.get_slice(k)` reads only the header, which is instant with no memory.
+          slice = f.get_slice(k)
+          shape = slice.get_shape()
           param_dict[k] = f"shape: {shape}"
+
+          if args.check_dtype:
+            dtype = slice.get_dtype()
+            param_dict[k] += f" | dtype: {dtype}"
+
 
   elif args.format == "pth":
     try:
@@ -87,9 +114,10 @@ def inspect_hf(args):
       if isinstance(checkpoint, dict):
         for k, v in checkpoint.items():
           # check shape
-          # Handle nested state dicts or wrapper keys if common in your workflow
-          shape = v.shape if hasattr(v, "shape") else "Non-tensor found"
-          param_dict[k] = f"shape: {shape}"
+          param_dict[k] = f"shape: {v.shape}"
+
+          if args.check_dtype:
+            param_dict[k] += f" | dtype: {v.dtype}"
 
   print("\n=== Structure ===")
   print_structure(param_dict)
@@ -103,7 +131,7 @@ def inspect_maxtext(args, remaining_args):
   # Lazy imports
   import jax
   from maxtext.utils import max_utils, maxtext_utils
-  from MaxText import pyconfig
+  from maxtext import pyconfig
   from maxtext.utils.globals import MAXTEXT_PKG_DIR
   from maxtext.layers import quantizations
   from maxtext.models import models
@@ -234,6 +262,8 @@ def main():
     inspect_maxtext(args, remaining_args)
   elif args.mode == "orbax":
     inspect_orbax(args)
+  
+  print_peak_memory()
 
 
 if __name__ == "__main__":
