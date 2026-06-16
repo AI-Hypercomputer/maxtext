@@ -509,7 +509,7 @@ class TestMaybeSaveCheckpointStepAlignment(unittest.TestCase):
     with mock.patch.object(checkpointing, "save_checkpoint", save_checkpoint_mock):
       with self.assertRaises(checkpointing.exceptions.StopTraining) as context:
         checkpointing.maybe_save_checkpoint(mgr, state, config, data_iterator=None, step=None)
-      
+
       self.assertEqual(str(context.exception), "Job received termination signal (SIGTERM).")
 
   def test_maybe_save_checkpoint_propagates_jax_runtime_error_elastic_disabled(self):
