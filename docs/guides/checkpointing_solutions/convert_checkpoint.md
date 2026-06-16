@@ -37,9 +37,17 @@ Use the `to_maxtext.py` script to convert a Hugging Face model checkpoint into a
 
 ```bash
 # Setup environment variables
+# -- Model configuration --
+# The MaxText model name. See `src/maxtext/configs/types.py` for `ModelName` for a
+# full list of supported models.
 export MODEL=<HF_MODEL> # e.g. 'llama3.1-8b-Instruct'
+
+# -- MaxText configuration --
+# The directory where the converted Orbax checkpoint will be stored (GCS bucket or local directory).
 export BASE_OUTPUT_DIRECTORY=<CKPT_PATH> # e.g., gs://my-bucket/my-checkpoint-directory
-export USE_PATHWAYS=0 # Set to 1 if you intend to use Pathways for training, 0 for McJAX
+
+# Set to 1 if you intend to use Pathways for training, 0 for McJAX.
+export USE_PATHWAYS=0
 ```
 
 ### Run Conversion
@@ -84,8 +92,17 @@ Use the `to_huggingface.py` script to convert a MaxText checkpoint into the Hugg
 
 ```bash
 # Setup environment variables
+# -- Model configuration --
+# The MaxText model name. See `src/maxtext/configs/types.py` for `ModelName` for a
+# full list of supported models.
 export MODEL=<MODEL_NAME> # e.g. 'qwen3-4b'
+
+# The path to the MaxText compatible model checkpoint (Orbax format).
 export MAXTEXT_CKPT_PATH=<CKPT_PATH> # e.g., gs://my-bucket/my-model-checkpoint/0/items
+
+# -- MaxText configuration --
+# The directory where the converted Hugging Face checkpoint will be stored (GCS bucket,
+# local directory, or Hugging Face Hub path).
 export BASE_OUTPUT_DIRECTORY=<HF_CKPT_PATH> # e.g., gs://my-bucket/my-checkpoint-directory
 ```
 
@@ -125,8 +142,15 @@ To ensure the conversion was successful, you can use the [test script](https://g
 
 ```bash
 # Setup environment variables
+# -- Model configuration --
+# The MaxText model name. See `src/maxtext/configs/types.py` for `ModelName` for a
+# full list of supported models.
 export MODEL=<MODEL_NAME> # e.g. 'qwen3-4b'
+
+# The path to the MaxText compatible model checkpoint (Orbax format).
 export MAXTEXT_CKPT_PATH=<CKPT_PATH> # e.g., gs://my-bucket/my-model-checkpoint/0/items
+
+# The path to the Hugging Face model checkpoint directory.
 export HF_CKPT_PATH=<HF_CKPT_PATH> # e.g., gs://my-bucket/my-checkpoint-directory
 
 # Install PyTorch (in MaxText virtual environment)
