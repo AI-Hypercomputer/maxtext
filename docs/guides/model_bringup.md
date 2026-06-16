@@ -53,24 +53,24 @@ There are [two primary formats](../reference/core_concepts/checkpoints.md) for O
 
 Success starts with a clear map. You must align the parameter names from your source checkpoints (Safetensors/PyTorch) with the corresponding MaxText internal names.
 
-To see the HuggingFace checkpoint structure: You can print out the keys and shapes of your original `.safetensors` or `.pth` files.
+HF Inspector: To see the HuggingFace checkpoint structure: You can print out the keys and shapes of your original `.safetensors` or `.pth` files.
 ```
-python src/MaxText/utils/ckpt_conversion/inspect_checkpoint.py hf --path <local_hf_path> --format <safetensors | pth>
-```
-
-To see the MaxText model structure:
-```
-python src/MaxText/utils/ckpt_conversion/inspect_checkpoint.py maxtext --model_name <maxtext_model_name> --scan_layers <True | False>
+python src/maxtext/checkpoint_conversion/inspect_checkpoint.py hf --path <local_hf_path> --format <safetensors | pth>
 ```
 
-Alternatively, if you have saved an Orbax checkpoint from pretraining, you can inspect with
+Maxtext Inspector: To see the MaxText model structure
 ```
-python src/MaxText/utils/ckpt_conversion/inspect_checkpoint.py orbax --path <local_orbax_path | gcs_orbax_path>
+python src/maxtext/checkpoint_conversion/inspect_checkpoint.py maxtext model_name <maxtext_model_name> scan_layers <True | False>
+```
+
+Orbax Inspector: Alternatively, if you have saved an Orbax checkpoint from pretraining, you can inspect with
+```
+python src/maxtext/checkpoint_conversion/inspect_checkpoint.py orbax --path <local_orbax_path | gcs_orbax_path>
 ```
 
 ### 3.2 Write Script
 
-Use existing model scripts within the repository as templates to tailor the conversion logic for your specific architecture. We strongly recommended to use the [checkpoint conversion utility](checkpointing_solutions/convert_checkpoint.md) rather than [standalone scripts](https://github.com/AI-Hypercomputer/maxtext/tree/main/src/maxtext/checkpoint_conversion/standalone_scripts).
+Use existing model scripts within the repository as templates to tailor the conversion logic for your specific architecture. We strongly recommended to use the [checkpoint conversion utility](checkpointing_solutions/convert_checkpoint.md), rather than [standalone scripts](https://github.com/AI-Hypercomputer/maxtext/tree/main/src/maxtext/checkpoint_conversion/standalone_scripts).
 
 ### 3.3 Verify Compatibility
 

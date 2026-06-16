@@ -263,9 +263,9 @@ To extend conversion support to a new model architecture, you must define its sp
 
 1. **Add parameter mappings**:
 
-To see the HuggingFace checkpoint structure use Tool1. 
+To see the HuggingFace checkpoint structure use **Tool1 (HF inspector)**.
 
-To see the MaxText model structure, use Tool2.
+To see the MaxText model structure, use **Tool2 (MaxText inspector)**.
 
 - In [`utils/param_mapping.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/utils/param_mapping.py), add the parameter name mappings(`def {MODEL}_MAXTEXT_TO_HF_PARAM_MAPPING`). This is the 1-to-1 mappings of parameters names per layer.
 
@@ -283,15 +283,17 @@ Here is an example [PR to add support for gemma3 multi-modal model](https://gith
 
 
 
-- When loading converted checkpoint, `Type ShapeDtypeStruct is not a valid JAX type` or generic **PyTree structure/shape mismatches** (e.g., Orbax reporting `"X/Y paths matched"`, such as `143/145 paths`):
+- Error: When loading converted checkpoint, `Type ShapeDtypeStruct is not a valid JAX type` 
+
+  - **Cause (most common): Structure mismatch** between the converted checkpoint and MaxText model
+
+  - **Solution:** To see the MaxText model structure use **Tool2 (MaxText inspector)**. To inspect the checkpoint use **Tool3 (Orbax inspector)**.
+
+- Error: `Type ShapeDtypeStruct is not a valid JAX type` or generic **PyTree structure/shape mismatches** (e.g., Orbax reporting `"X/Y paths matched"`, such as `143/145 paths`):
   
-  - **Configuration mismatch**: For example, `scan_layers` is different between the checkpoint conversion script (e.g., `to_maxtext.py` or `to_huggingface.py`) and the trainer/inference runner (e.g., `train.py`).
+  - **Cause: configuration mismatch** (e.g., `scan_layers`) between the checkpoint conversion script (e.g., `to_maxtext.py` or `to_huggingface.py`) and the trainer/inference runner (e.g., `train.py`).
 
-     - **Solution:** Ensure the `scan_layers` flag is set to the exact same value (`True` or `False`) in both the conversion command and your training/execution command.
-
-  - **Most Common -- Structure mismatch**: between the converted checkpoint and MaxText model
-
-    - **Solution:** To see the MaxText model structure use Tool2 (MaxText inspector). To inspect the checkpoint use Tool3 (Orbax inspector).
+  - **Solution:** Ensure the `scan_layers` flag is set to the exact same value (`True` or `False`) in both the conversion command and your training/execution command.
 
 
 - If the converted checkpoint loads without errors but produces nonsensical output, likely an error in the Q/K/V weight reshaping logic during conversion.

@@ -129,9 +129,11 @@ def inspect_maxtext(args, remaining_args):
 
   # Get abstract params (no memory/compute)
   abstract_param = maxtext_utils.get_abstract_param(model, config)
+  
+  # Count total parameter
   num_params = max_utils.calculate_num_params_from_pytree(abstract_param)
-
   print(f"\nTotal Parameters: {num_params} (~{num_params/1e9:.2f} B)")
+  
   print("\n=== Structure ===")
 
   abstract_params_flat, _ = jax.tree_util.tree_flatten_with_path(abstract_param)
