@@ -21,8 +21,8 @@ A unified tool to inspect checkpoint structures for:
 
 Usage Examples:
 [Mode 1: HF/PyTorch]   
-   python src/maxtext/checkpoint_conversion/inspect_checkpoint.py hf --path <local_hf_path> --format <safetensors | pth>
-[Mode 2: MaxText Arch] 
+  python src/maxtext/checkpoint_conversion/inspect_checkpoint.py hf --path <local_hf_path> --format <safetensors | pth>
+[Mode 2: MaxText Architecture] 
   python src/maxtext/checkpoint_conversion/inspect_checkpoint.py maxtext model_name <maxtext_model_name> scan_layers <True | False>
 [Mode 3: Orbax]        
   python src/maxtext/checkpoint_conversion/inspect_checkpoint.py orbax --path <local_orbax_path | gcs_orbax_path>
