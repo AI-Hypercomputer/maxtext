@@ -252,7 +252,7 @@ class MaxTextForCausalLM(nnx.Module):
 
     # Ensure inputs are at least 2D with a batch dimension
     input_ids = jnp.expand_dims(input_ids, axis=1)
-    input_positions = jnp.expand_dims(attention_metadata.input_positions, axis=1)
+    input_positions = jnp.expand_dims(attention_metadata.input_positions, axis=-1)
 
     with self.mesh, nn.logical_axis_rules(self.maxtext_config.logical_axis_rules):
       aux_hidden_states = []
