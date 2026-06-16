@@ -743,6 +743,13 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to use Ring of Experts for sparse matmul expert parallelism.",
   )
+  moe_dispatch_no_expert_sharding: bool = Field(
+      False,
+      description=(
+          "If true, shard the MoE dispatch/MLP batch dim without 'expert' so the expert GEMM "
+          "stays expert-parallel (AllToAll); false keeps 'expert' on it (activation_batch_moe)."
+      ),
+  )
   use_ragged_sort: bool = Field(
       False, description="Whether to use ragged kernel for sorting, improve performance when EP is enabled."
   )
