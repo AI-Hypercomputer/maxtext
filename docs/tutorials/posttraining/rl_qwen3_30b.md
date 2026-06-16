@@ -143,6 +143,24 @@ kubectl logs -f <POD_NAME>
 
 Alternatively, after running the bash script, you will also get a link to the Google Cloud Console to view your workload logs. Follow the link to view logs and monitor your workload's progress in the Cloud Console.
 
+### Monitor RL Metrics
+
+During RL training, you can monitor key metrics to track model convergence, reward trends, and hardware performance.
+
+To enable Tunix-managed metrics measurement, set `enable_tunix_perf_metrics` to `true` in `src/maxtext/configs/post_train/rl.yml`. Note that this flag is already set to `True` by default in the [scripts/run_qwen3_30b_rl.sh](../../../scripts/run_qwen3_30b_rl.sh) script for this tutorial workload. When enabled, Tunix automatically collects and uploads these metrics to TensorBoard.
+
+For a complete list of collected metrics, see the [Tunix Metrics Documentation](https://tunix.readthedocs.io/en/latest/metrics.html). Key metrics to monitor include:
+
+- **Model Quality & Reward Metrics:**
+  - `rewards/mean`: The average reward across the batch (crucial for tracking learning progress).
+  - `score/mean`: The average raw score from the reward model before applying the KL penalty.
+- **Rollout & Generation Metrics:**
+  - `rollout_time`: How long each rollout step takes.
+  - `completions/mean_length`: The average token length of generated completions.
+  - `actor_dequeue_time`: The time spent waiting for data from the rollout workers (relevant when async rollout is enabled).
+- **Performance & Efficiency Metrics:**
+  - `step_time_sec`: The execution time for a single training step.
+
 ## Convert Checkpoint to Hugging Face Format
 
 After training, you may want to convert your MaxText checkpoint back to Hugging Face format. Use the following script to perform the conversion:
