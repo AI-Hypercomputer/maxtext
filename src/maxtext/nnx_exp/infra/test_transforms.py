@@ -3,8 +3,8 @@ import jax.numpy as jnp
 from flax import nnx
 import pytest
 
-from maxtext.nnx_exp.models import Llama, LlamaConfig
-from maxtext.nnx_exp.sharding import LlamaSharding, create_mesh, LlamaShardingHook
+from maxtext.nnx_exp.models import Llama, LlamaConfig, Qwen3MoE, Qwen3MoEConfig
+from maxtext.nnx_exp.sharding import LlamaSharding, create_mesh, LlamaShardingHook, Qwen3MoESharding, Qwen3MoEShardingHook
 from maxtext.nnx_exp.infra import (
     apply_remat,
     maybe_apply_remat,
@@ -144,4 +144,74 @@ def test_quantization():
         
         out = quantized_model(tokens, positions)
         assert out.shape == (8, 32, CONFIG.vocab_size)
+
+
+# Mock config for Qwen MoE tests
+QWEN_CONFIG = Qwen3MoEConfig(
+    vocab_size=1000,
+    emb_dim=256,
+    num_heads=4,
+    num_kv_heads=2,
+    num_layers=2,
+    dense_mlp_dim=512,
+    moe_mlp_dim=128,
+    head_dim=64,
+    num_experts=4,
+    num_experts_per_tok=2,
+    decoder_sparse_step=1,
+)
+
+def test_qwen_moe_forward():
+    mesh = create_mesh({"ici_dp_parallelism": 1, "ici_fsdp_parallelism": -1, "ici_tensor_parallelism": 1})
+    with jax.set_mesh(mesh):
+        sharding = Qwen3MoESharding()
+        sharding_hook = Qwen3MoEShardingHook(sharding)
+        rngs = nnx.Rngs(42)
+        model = Qwen3MoE(QWEN_CONFIG, rngs=rngs, sharding_hook=sharding_hook)
+        
+        tokens = jnp.zeros((8, 32), dtype=jnp.int32)
+        positions = jnp.broadcast_to(jnp.arange(32), (8, 32))
+        
+        out = model(tokens, positions)
+        assert out.logits.shape == (8, 32, QWEN_CONFIG.vocab_size)
+        assert out.aux_loss is not None
+        assert len(out.router_logits) == 2
+
+
+def test_qwen_moe_remat():
+    mesh = create_mesh({"ici_dp_parallelism": 1, "ici_fsdp_parallelism": -1, "ici_tensor_parallelism": 1})
+    with jax.set_mesh(mesh):
+        sharding = Qwen3MoESharding()
+        sharding_hook = Qwen3MoEShardingHook(sharding)
+        rngs = nnx.Rngs(42)
+        model = Qwen3MoE(QWEN_CONFIG, rngs=rngs, sharding_hook=sharding_hook)
+        
+        apply_remat(model, "full")
+        
+        tokens = jnp.zeros((8, 32), dtype=jnp.int32)
+        positions = jnp.broadcast_to(jnp.arange(32), (8, 32))
+        
+        out = model(tokens, positions)
+        assert out.logits.shape == (8, 32, QWEN_CONFIG.vocab_size)
+
+
+def test_qwen_moe_quantization():
+    mesh = create_mesh({"ici_dp_parallelism": 1, "ici_fsdp_parallelism": -1, "ici_tensor_parallelism": 1})
+    with jax.set_mesh(mesh):
+        sharding = Qwen3MoESharding()
+        sharding_hook = Qwen3MoEShardingHook(sharding)
+        rngs = nnx.Rngs(42)
+        model = Qwen3MoE(QWEN_CONFIG, rngs=rngs, sharding_hook=sharding_hook)
+        
+        tokens = jnp.zeros((8, 32), dtype=jnp.int32)
+        positions = jnp.broadcast_to(jnp.arange(32), (8, 32))
+        
+        from maxtext.nnx_exp.infra import quantize_model, int8_rules
+        
+        quantized_model = quantize_model(model, int8_rules(), tokens, positions)
+        
+        out = quantized_model(tokens, positions)
+        assert out.logits.shape == (8, 32, QWEN_CONFIG.vocab_size)
+
+
 
