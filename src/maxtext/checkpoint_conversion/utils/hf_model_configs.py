@@ -718,6 +718,7 @@ qwen3_30b_a3b_thinking_2507_config = transformers.Qwen3MoeConfig(
     vocab_size=151936,
 )
 
+# Matches Qwen/Qwen3-30B-A3B-Base
 qwen3_30b_a3b_base_config = transformers.Qwen3MoeConfig(
     architectures=["Qwen3MoeForCausalLM"],
     attention_bias=False,
