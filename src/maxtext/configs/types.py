@@ -750,6 +750,16 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to use a custom mosaic kernel for token gather ops.",
   )
+  ragged_gather_fallback: bool = Field(
+      False,
+      description="When true, unconditionally use the JAX reference implementation instead of the ragged gather "
+      "SparseCore kernel. When false (default), use the SparseCore kernel.",
+  )
+  ragged_gather_reduce_fallback: bool = Field(
+      False,
+      description="When true, unconditionally use the JAX reference implementation instead of the ragged gather "
+      "reduce SparseCore kernel. When false (default), use the SparseCore kernel.",
+  )
   use_random_routing: bool = Field(False, description="Whether to use random routing for debugging.")
   interleave_moe_layer_step: int = Field(1, description="Frequency of MoE layers, e.g., 2 means every 2nd layer is MoE.")
   moe_fsdp_use_two_stage_all_gather: bool = Field(

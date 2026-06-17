@@ -849,6 +849,8 @@ class RoutedMoE(nnx.Module):
           self._expert_parallelism_name,
           num_expert_parallelism,
           buffer_size=buffer_size,
+          enforce_gather_fallback=self.config.ragged_gather_fallback,
+          enforce_gather_reduce_fallback=self.config.ragged_gather_reduce_fallback,
       )
     else:
       flatten_selected_experts = jnp.ravel(selected_experts)
@@ -928,6 +930,8 @@ class RoutedMoE(nnx.Module):
           local_num_experts,
           self._expert_parallelism_name,
           topk_weights=flat_weights,
+          enforce_gather_fallback=self.config.ragged_gather_fallback,
+          enforce_gather_reduce_fallback=self.config.ragged_gather_reduce_fallback,
       )
     else:
       unsort_intermediate = _sort_activations(
