@@ -41,6 +41,7 @@ from maxtext.layers.normalizations import rms_norm
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.models import (
     deepseek,
+    deepseek4,
     deepseek_batchsplit,
     deepseek_batchsplit_fp8,
     gemma,
@@ -467,6 +468,10 @@ class Decoder(nn.Module):
             deepseek.DeepSeekDenseLayerToLinen,
             deepseek.DeepSeekMoELayerToLinen,
         ]
+      case DecoderBlockType.DEEPSEEK4:
+        return (
+            [deepseek4.DeepSeek4ScannableBlockToLinen] if self.config.scan_layers else [deepseek4.DeepSeek4LayerToLinen]
+        )
       case DecoderBlockType.GEMMA:
         return [gemma.GemmaDecoderLayerToLinen]
       case DecoderBlockType.GEMMA2:
@@ -632,6 +637,7 @@ class Decoder(nn.Module):
         DecoderBlockType.MISTRAL,
         DecoderBlockType.MIXTRAL,
         DecoderBlockType.DEEPSEEK,
+        DecoderBlockType.DEEPSEEK4,
         DecoderBlockType.GEMMA,
         DecoderBlockType.GEMMA2,
         DecoderBlockType.GEMMA3,
@@ -1061,6 +1067,17 @@ class Decoder(nn.Module):
               previous_chunk,
               slot,
           )
+        elif cfg.decoder_block == DecoderBlockType.DEEPSEEK4:
+          y = self._apply_deepseek4_scanned_blocks(
+              y,
+              decoder_segment_ids,
+              decoder_positions,
+              deterministic,
+              model_mode,
+              previous_chunk,
+              slot,
+              decoder_input_tokens,
+          )
         else:
           RemattedBlockLayer = RemattedBlockLayers[0]
           scan_length = int(cfg.num_decoder_layers / cfg.inhomogeneous_layer_cycle_interval)
@@ -1195,7 +1212,7 @@ class Decoder(nn.Module):
                   "is_nope_layer": llama4.determine_is_nope_layer(lyr, self.config.nope_layer_interval),
                   "is_moe_layer": llama4.determine_is_moe_layer(lyr, self.config.interleave_moe_layer_step),
               }
-            if cfg.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
+            if cfg.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5, DecoderBlockType.DEEPSEEK4):
               layer_kwargs = {"layer_idx": lyr}
             kv_cache = None
             if kv_caches is not None:
@@ -1420,6 +1437,97 @@ class Decoder(nn.Module):
       y = layer(y, *broadcast_args, **layer_call_kwargs)
       if cfg.scan_layers:
         y = y[0]
+
+    return y
+
+  def _apply_deepseek4_scanned_blocks(
+      self,
+      y,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      previous_chunk,
+      slot,
+      decoder_input_tokens,
+  ):
+    """Applies DeepSeek V4 scanned decoder blocks.
+
+    DeepSeek V4 has some number of prefix layers (defined by `first_num_hash_layers`)
+    that use static Hash Routing. The remaining layers alternate `compress_ratio=128` (HCA)
+    and `compress_ratio=4` (CSA) and are evaluated in a single `nn.scan` block.
+
+    For DeepSeek4-Flash (43 hidden layers total):
+    - 3 Prefix layers (Indices 0, 1, 2)
+    - 40 Scanned layers: 20 perfectly repeating chunks of [128, 4]
+    """
+
+    cfg = self.config
+    mesh = self.mesh
+
+    broadcast_args = (
+        decoder_segment_ids,
+        decoder_positions,
+        deterministic,
+        model_mode,
+        slot,
+        previous_chunk,
+    )
+
+    layer_call_kwargs = {
+        "previous_chunk": previous_chunk,
+        "slot": slot,
+        "decoder_input_tokens": decoder_input_tokens,
+    }
+
+    # 1. Prefix Unrolling
+    # These layers use Hash Routing.
+    num_hash_layers = cfg.first_num_hash_layers
+    for layer_idx in range(num_hash_layers):
+      prefix_layer = deepseek4.DeepSeek4LayerToLinen(
+          config=cfg,
+          mesh=mesh,
+          name=f"layers_{layer_idx}",
+          quant=self.quant,
+          model_mode=self.model_mode,
+          layer_idx=layer_idx,
+      )
+      y, _ = prefix_layer(
+          y,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+          **layer_call_kwargs,
+      )
+
+    # 2. Chunked Scanning
+    # The remaining layers perfectly alternate HCA (128) and CSA (4).
+    num_remaining_layers = cfg.num_decoder_layers - num_hash_layers
+    num_full_blocks = num_remaining_layers // 2
+
+    if num_full_blocks > 0:
+      ScannableBlockToLinen = deepseek4.DeepSeek4ScannableBlockToLinen
+      policy = self.get_remat_policy()
+      RemattedDeepSeek4Block = self.set_remat_policy([ScannableBlockToLinen], policy)[0]
+
+      y, _ = nn.scan(
+          RemattedDeepSeek4Block,
+          variable_axes={
+              "params": cfg.param_scan_axis,
+              "cache": 0,
+              "intermediates": 0,
+              "aqt": 0,
+              "_overwrite_with_gradient": 0,
+          },
+          split_rngs={"params": True, "dropout": cfg.enable_dropout},
+          in_axes=(nn.broadcast,) * len(broadcast_args),
+          length=num_full_blocks,
+          metadata_params={
+              nn.PARTITION_NAME: "layers",
+              "abstract_init": False,
+          },
+      )(config=cfg, mesh=mesh, quant=self.quant, model_mode=model_mode, name="scanned_blocks",)(y, *broadcast_args)
 
     return y
 

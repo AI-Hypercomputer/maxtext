@@ -58,6 +58,7 @@ from maxtext.layers.embeddings import (
     Qwen3OmniMoeVisionRotaryEmbedding,
     RotaryEmbedding,
     YarnRotaryEmbedding,
+    DeepSeekV4RotaryEmbedding,
     PartialRotaryEmbedding,
     Gemma4PartialRotaryEmbedding,
 )
@@ -849,6 +850,15 @@ class Attention(nnx.Module):
           attention_scaling=self.config.rope_attention_scaling,
           shard_mode=self.config.shard_mode,
           rngs=self.rngs,
+      )
+    elif self.config.decoder_block == DecoderBlockType.DEEPSEEK4:
+      # DeepSeek models apply RoPE only to the first `qk_rope_head_dim` channels out of the full `head_dim`.
+      # We explicitly calculate this ratio so DeepSeekV4RotaryEmbedding can internally slice the correct dimension.
+      rotary_embedding = DeepSeekV4RotaryEmbedding(
+          head_dim=self.config.head_dim,
+          partial_rotary_factor=self.config.qk_rope_head_dim / self.config.head_dim,
+          rope_theta=self.rope_max_timescale,
+          fprop_dtype=self.dtype,
       )
     elif self.is_qwen3_hybrid:
       rotary_embedding = PartialRotaryEmbedding(
