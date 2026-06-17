@@ -54,11 +54,16 @@ def get_path_string(path):
 
 def get_path_string2(path):
   key_parts = [k.key for k in path if hasattr(k, "key")]
-  param_key = "params." + ".".join(key_parts)
+  param_key = ".".join(key_parts)
   return param_key
 
 def get_block_prefix(path_str):
   """Extracts the high-level block prefix for chunking."""
+  if path_str.startswith("Tid2EidVar-"):
+    path_str = path_str[len("Tid2EidVar-"):]
+  elif path_str.startswith("params-"):
+    path_str = path_str[len("params-"):]
+
   if path_str.startswith("decoder-scanned_blocks-layers_"):
     parts = path_str.split("-")
     if len(parts) >= 3:
@@ -275,8 +280,6 @@ def get_unscanned_weight(hf_prefix, suffix, weight_dict, config):
   # MLP Experts
   if suffix == "mlp-MoeBlock_0-gate-kernel" and f"{hf_prefix}.ffn.gate.weight" in weight_dict:
     return transposed_match(weight_dict[f"{hf_prefix}.ffn.gate.weight"])
-  if suffix == "mlp-MoeBlock_0-gate-tid2eid" and f"{hf_prefix}.ffn.gate.tid2eid" in weight_dict:
-    return valid_match(weight_dict[f"{hf_prefix}.ffn.gate.tid2eid"])
   if suffix == "mlp-MoeBlock_0-gate-e_score_correction_bias" and f"{hf_prefix}.ffn.gate.bias" in weight_dict:
     return valid_match(weight_dict[f"{hf_prefix}.ffn.gate.bias"])
   if suffix == "mlp-MoeBlock_0-wi_0":
@@ -301,11 +304,31 @@ def convert_weights(abstract_params, weight_dict, config, block_to_convert=None)
 
   def map_fn(path, abstract_var):
     path_str = get_path_string(path)
+    
+    is_tid2eid = False
+    if path_str.startswith("Tid2EidVar-"):
+      is_tid2eid = True
+      path_str = path_str[len("Tid2EidVar-"):]
+    elif path_str.startswith("params-"):
+      path_str = path_str[len("params-"):]
+
     block_prefix = get_block_prefix(path_str)
 
     # Filter out paths that don't belong to the current block
     if block_to_convert is not None and block_prefix != block_to_convert:
       return None
+
+    if is_tid2eid:
+      is_dry_run = False
+      if weight_dict:
+        # Check first value in weight_dict
+        first_val = next(iter(weight_dict.values()))
+        if isinstance(first_val, MockTensor):
+          is_dry_run = True
+      if is_dry_run:
+        return MockTensor(abstract_var.shape, np.float32)
+      else:
+        return np.zeros(abstract_var.shape, dtype=np.float32)
 
     # 1. Global / Unscanned base params
     if block_prefix == "GLOBAL":
@@ -401,7 +424,7 @@ def main():
   model = Transformer(config, mesh=mesh, quant=quant)
 
   # Get abstract params (no memory/compute)
-  abstract_params = maxtext_utils.get_abstract_param(model, config)["params"]
+  abstract_params = maxtext_utils.get_abstract_param(model, config)
 
   hf_weights_dir = "/home/snehalv_google_com/test-ckpt-bf16"
   index_path = os.path.join(hf_weights_dir, "model.safetensors.index.json")
@@ -488,7 +511,7 @@ def main():
     print(f"\nSaving converted checkpoint to {config.checkpoint_dir}...")
     llama_or_mistral_ckpt.save_weights_to_checkpoint(
         config.checkpoint_dir,
-        nested_zeros_dict['params'],
+        nested_zeros_dict,
         mesh.size,
         use_ocdbt=config.checkpoint_storage_use_ocdbt,
         use_zarr3=config.checkpoint_storage_use_zarr3,
