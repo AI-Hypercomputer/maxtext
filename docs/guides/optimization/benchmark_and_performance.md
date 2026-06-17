@@ -61,6 +61,128 @@ To use a custom policy, set `remat_policy` to `custom` and specify the layers in
 - `device`: The activation remains on the TPU device.
 - `Remat`: Rematerialization is performed during the backward pass.
 
+**Automatic remat policy search with the Estimator**
+
+Finding the optimal remat policy and batch size manually can be time-consuming. MaxText provides an **Estimator** tool (`estimator.py`) that automates this search using [Ahead-of-Time (AOT) compilation](../monitoring_and_debugging/features_and_diagnostics.md#ahead-of-time-compilation-aot). It leverages `train_compile` to test whether a given configuration causes an Out-Of-Memory (OOM) error *without* requiring the target hardware.
+
+The estimator supports two modes:
+
+1. **Search both batch size and remat policy** (when `per_device_batch_size` is *not* provided): It finds the Pareto frontier of batch size vs. remat policy by iterating through policies from full remat to full device, using binary search for the largest non-OOM batch size at each step.
+2. **Search remat policy only** (when `per_device_batch_size` *is* provided): It finds the least aggressive (fastest) remat policy that fits in memory for the given fixed batch size.
+
+*Mode 1 example: Search both batch size and remat policy (Llama 3.1 405B on tpu7x-1024)*
+
+```bash
+python -m maxtext.utils.estimator \
+  maxtext/configs/base.yml \
+  compile_topology=tpu7x-1024 \
+  compile_topology_num_slices=1 \
+  model_name=llama3.1-405b \
+  max_target_length=32768 \
+  ici_context_parallelism=8 \
+  ici_fsdp_parallelism=-1 \
+  log_config=False \
+  write_estimator_result=False
+```
+
+*Mode 2 example: Search best remat policy for a fixed batch size (DeepSeek3 671B on v5p-1024)*
+
+```bash
+python3 -m maxtext.utils.estimator maxtext/configs/base.yml \
+  model_name=deepseek3-671b \
+  compile_topology=v5p-1024 \
+  compile_topology_num_slices=1 \
+  ici_fsdp_parallelism=512 \
+  per_device_batch_size=2.0 \
+  dtype=bfloat16 \
+  weight_dtype=float32 \
+  max_target_length=8192 \
+  log_config=False \
+  write_estimator_result=False \
+  decoder_layer_input=offload
+```
+
+Key options:
+
+- `write_estimator_result=True`: Writes runnable training commands to `remat_commands_from_estimator.txt`.
+- `write_estimator_result=False` (default): Prints results to stdout only.
+- You can pin specific tensor remat actions (e.g., `context=offload`) to constrain the search space.
+
+*Advanced example: Search remat policy with XLA tuning flags (DeepSeek3 671B on tpu7x-512)*
+
+For production workloads you often want to combine the estimator with XLA compiler tuning flags for SparseCore offloading, latency-hiding scheduling, and other optimizations. Set these via `LIBTPU_INIT_ARGS` before invoking the estimator:
+
+```bash
+export LIBTPU_INIT_ARGS=" \
+  --xla_tpu_dvfs_p_state=7 \
+  --xla_tpu_scoped_vmem_limit_kib=65536 \
+  --xla_tpu_bf16_emission_mode=NATIVE_EMISSION \
+  --xla_tpu_enable_sparse_core_reduce_scatter_v2=true \
+  --xla_tpu_enable_sparse_core_collective_offload_all_gather=true \
+  --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true \
+  --xla_tpu_enable_all_gather_offload_tracing=true \
+  --xla_tpu_use_tc_device_shape_on_sc=True \
+  --xla_sc_disable_megacore_partitioning=True \
+  --xla_tpu_enable_async_collective_fusion_fuse_all_gather=false \
+  --xla_enable_async_all_gather=true \
+  --xla_tpu_prefer_async_allgather_to_allreduce=true \
+  --xla_tpu_enable_sparse_core_collective_offload_all_reduce=true \
+  --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true \
+  --xla_tpu_enable_sparse_core_collective_offload_3d_all_gather=true \
+  --xla_tpu_use_single_sparse_core_for_all_gather_offload=true \
+  --xla_tpu_enable_concurrent_sparse_core_offloading=true \
+  --xla_tpu_aggressive_opt_barrier_removal=true \
+  --xla_tpu_enable_offloading_gather_to_sparsecore=true \
+  --xla_tpu_sparse_core_all_gather_latency_multiplier=1 \
+  --xla_tpu_sparse_core_reduce_scatter_latency_multiplier=3 \
+  --xla_tpu_enable_sparse_core_collective_aggregator=true \
+  --xla_tpu_enable_latency_hiding_layer_scheduler=true \
+  --xla_tpu_scheduler_percent_shared_memory_limit=150 \
+  --xla_tpu_enable_layer_scheduler_for_dependent_collectives=true \
+  --xla_tpu_enable_sparse_core_collective_offload_nd_reduce_scatter=true \
+  --xla_tpu_pcie_bandwidth_multiplier=0.03 \
+  --xla_tpu_enable_sparse_core_offload_queuing_in_lhs=true \
+  --xla_tpu_enable_multi_compute_overlap_in_layer_scheduler=false \
+  --xla_tpu_enable_3d_reduce_scatter_decomposer=false "
+
+python3 -m maxtext.utils.estimator maxtext/configs/base.yml \
+  compile_topology=tpu7x-512 \
+  compile_topology_num_slices=1 \
+  run_name=${WORKLOAD_NAME} \
+  skip_jax_distributed_system=true \
+  dtype=bfloat16 \
+  per_device_batch_size=4.0 \
+  model_name=deepseek3-671b \
+  remat_policy=custom \
+  decoder_layer_input=device \
+  mu_dtype=bfloat16 \
+  grad_dtype=bfloat16 \
+  ici_fsdp_parallelism=128 \
+  ici_expert_parallelism=4 \
+  dataset_type=synthetic \
+  dataset_path=gs://max-datasets-rogue \
+  opt_type=adamw \
+  steps=20 \
+  sa_use_fused_bwd_kernel=true \
+  use_max_logit_estimate=-1 \
+  cost_estimate_flops_fwd=5000000000000 \
+  cost_estimate_flops_bwd=5000000000000 \
+  float32_weight_sum=False \
+  megablox=true \
+  sparse_matmul=true \
+  use_tokamax_gmm=false \
+  use_tokamax_splash=true \
+  max_target_length=4096 \
+  use_random_routing=true \
+  use_ring_of_experts=true \
+  use_ragged_sort=true \
+  tokenizer_path=assets/tokenizer.mistral-v3 \
+  base_output_directory=${BASE_OUTPUT_DIR} \
+  merge_gating_gmm=false
+```
+
+This example fixes `per_device_batch_size=4.0` so the estimator runs in **Mode 2** (policy-only search), finding the least aggressive remat policy that fits the DeepSeek3 671B model on a tpu7x-512 pod. The XLA flags enable SparseCore collective offloading and latency-hiding scheduling, which affect compilation memory layout and thus the OOM boundary.
+
 ### Low precision training
 
 MaxText supports quantization via QWIX. To enable this, set `use_qwix_quantization=true`.
