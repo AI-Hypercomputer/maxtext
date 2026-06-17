@@ -236,13 +236,40 @@ Max KL divergence for a single token in the set: 0.003497
 
 ______________________________________________________________________
 
-## Troubleshooting and Development
+## Development and Troubleshooting
+
+### Inspection Tools
+
+We provide a unified inspection tool In [`inspect_checkpoint.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/inspect_checkpoint.py) to help you view model structures. This is highly useful for both development and troubleshooting.
+
+- **Memory-efficient:** Operates without requiring heavy compute or massive RAM allocation.
+- **Detailed outputs:** Prints tensor keys and shapes. Optional: data types with `--check_dtype=True` flag.
+
+**Tool 1 (HF Inspector)**. To inspect the HuggingFace checkpoint structure, from either `.safetensors` or `.pth` files:
+
+```
+python src/maxtext/checkpoint_conversion/inspect_checkpoint.py hf --path <local_hf_path> --format <safetensors | pth>
+```
+
+**Tool 2 (MaxText Inspector)**. To inspect the MaxText model structure:
+
+```
+python src/maxtext/checkpoint_conversion/inspect_checkpoint.py maxtext model_name=<maxtext_model_name> scan_layers=<True | False>
+```
+
+**Tool 3 (Orbax Inspector)**. To inspect the Orbax checkpoint:
+
+```
+python src/maxtext/checkpoint_conversion/inspect_checkpoint.py orbax --path <local_orbax_path | gcs_orbax_path>
+```
 
 ### Adding New Models
 
 To extend conversion support to a new model architecture, you must define its specific parameter and configuration mappings. The conversion logic is decoupled, so you only need to modify the mapping files.
 
 1. **Add parameter mappings**:
+
+- As the first step, we inspect the checkpoint structures. To see the HuggingFace checkpoint structure, use **Tool 1 (HF Inspector)**. To see the MaxText model structure, use **Tool 2 (MaxText Inspector)**.
 
 - In [`utils/param_mapping.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/utils/param_mapping.py), add the parameter name mappings(`def {MODEL}_MAXTEXT_TO_HF_PARAM_MAPPING`). This is the 1-to-1 mappings of parameters names per layer.
 
@@ -258,11 +285,22 @@ Here is an example [PR to add support for gemma3 multi-modal model](https://gith
 
 ### Common Errors
 
-- "Type ShapeDtypeStruct is not a valid JAX type" or generic **PyTree structure/shape mismatches** (e.g., Orbax reporting `"X/Y paths matched"`, such as `143/145 paths`):
-  This is almost always caused by a mismatch in the `scan_layers` configuration between the checkpoint conversion script (e.g., `to_maxtext.py` or `to_huggingface.py`) and the trainer/inference runner (e.g., `train.py`).
+- **Error:** When loading a converted checkpoint, `Type ShapeDtypeStruct is not a valid JAX type`.
+
+  - **Cause (most common): Structure mismatch** between the converted checkpoint and the MaxText model.
+
+  - **Solution:** To see the MaxText model structure, use **Tool 2 (MaxText Inspector)**. To inspect the checkpoint, use **Tool 3 (Orbax Inspector)**.
+
+- **Error:** `Type ShapeDtypeStruct is not a valid JAX type` or generic **PyTree structure/shape mismatches** (e.g., Orbax reporting `"X/Y paths matched"`, such as `143/145 paths`).
+
+  - **Cause: Configuration mismatch** (e.g., `scan_layers`) between the checkpoint conversion script (e.g., `to_maxtext.py` or `to_huggingface.py`) and the trainer/inference runner (e.g., `train.py`).
 
   - **Solution:** Ensure the `scan_layers` flag is set to the exact same value (`True` or `False`) in both the conversion command and your training/execution command.
 
-- If the converted checkpoint loads without errors but produces nonsensical output, likely an error in the Q/K/V weight reshaping logic during conversion.
+- **Error:** The converted checkpoint loads without errors but produces nonsensical output.
 
-- If the model generates repetitive text sequences, check if layer normalization parameters were mapped correctly.
+  - **Cause:** There is likely an error in the Q/K/V weight reshaping logic during conversion.
+
+- **Error:** The model generates repetitive text sequences.
+
+  - **Cause:** Layer normalization parameters were likely not mapped correctly.
