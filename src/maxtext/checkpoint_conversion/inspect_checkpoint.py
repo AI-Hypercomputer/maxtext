@@ -12,25 +12,33 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""A unified command-line tool to inspect checkpoint structures.
 
-"""
-A unified tool to inspect checkpoint structures for:
-1. HuggingFace Checkpoints
-- safetensors: lightweight, no weights loaded
-- pth: need weight load
-2. MaxText Model Architecture (lightweight, no weights loaded)
-3. Orbax Checkpoints (lightweight, no weights loaded)
+Supported formats and frameworks:
+  1. HuggingFace Checkpoints
+     - safetensors: Lightweight & Instant. Parses file headers to read metadata instantly without allocating RAM.
+     - pth: Per-tensor load. Deserializes the file to load weights per-tensor. 
+        Incurs a time cost for deserialization, but memory footprint is constrained to individual tensors.
+  2. MaxText Model Architecture: Lightweight & On-the-fly. Traces JAX shapes abstractly; 
+      evaluates theoretical parameters dynamically without executing compute or allocating VRAM/HBM.
+  3. Orbax Checkpoints: Lightweight & Instant. Reads structural metadata trees instantly 
+      without pulling underlying TensorStore data chunks from disk/GCS.
 
 Usage Examples:
-[Mode 1: HF]   
-  python src/maxtext/checkpoint_conversion/inspect_checkpoint.py hf --path <local_hf_path> --format <safetensors | pth>
-[Mode 2: MaxText Architecture] 
-  python src/maxtext/checkpoint_conversion/inspect_checkpoint.py maxtext model_name=<maxtext_model_name> scan_layers=<True | False>
-[Mode 3: Orbax]        
-  python src/maxtext/checkpoint_conversion/inspect_checkpoint.py orbax --path <local_orbax_path | gcs_orbax_path>
+  [Mode 1: HuggingFace]   
+    python src/maxtext/checkpoint_conversion/inspect_checkpoint.py hf \
+        --path <local_hf_path> --format <safetensors | pth>
+  
+  [Mode 2: MaxText Architecture] 
+    python src/maxtext/checkpoint_conversion/inspect_checkpoint.py maxtext \
+        model_name=<maxtext_model_name> scan_layers=<True | False>
+  
+  [Mode 3: Orbax]        
+    python src/maxtext/checkpoint_conversion/inspect_checkpoint.py orbax \
+        --path <local_orbax_path | gcs_orbax_path>
 
-Additional flag: 
-  `--check_dtype` to print dtype
+Additional Flags:
+  `--check_dtype`: Appends the data type (dtype) of each tensor to the output.
 """
 
 import argparse
@@ -42,16 +50,14 @@ import absl
 from maxtext.inference.inference_utils import str2bool
 from maxtext.checkpoint_conversion.utils.utils import print_peak_memory
 
-absl.logging.set_verbosity(absl.logging.INFO)  # for max_logging.log
-
 
 def natural_sort_key(s: str):
-  """Sorts strings containing numbers naturally (1, 2, 10 instead of 1, 10, 2)."""
+  """Sorts strings containing numbers naturally (e.g., 1, 2, 10 instead of 1, 10, 2)."""
   return [int(text) if text.isdigit() else text for text in re.split(r"(\d+)", str(s))]
 
 
 def print_structure(data_dict):
-  """Utility to print sorted keys and shapes from a flat dictionary."""
+  """Utility to format and print sorted keys and shapes from a flattened dictionary."""
   for key in sorted(data_dict.keys(), key=natural_sort_key):
     print(f"key: {key} | {data_dict[key]}")
 
@@ -59,16 +65,84 @@ def print_structure(data_dict):
 # ==============================================================================
 # Mode 1: HuggingFace Checkpoint (.safetensors or .pth)
 # ==============================================================================
-def inspect_hf(args):
+
+
+def _inspect_safetensors(ckpt_paths, check_dtype):
+  """Inspects HuggingFace safetensors checkpoints instantly without loading weights.
+
+  Lightweight & Instant: This method completely bypasses heavy RAM allocation and
+  disk I/O. It strictly parses the JSON header of the safetensors file to extract
+  shapes and dtypes instantly.
+
+  Optimization: Read metadata rather than weights via `f.get_slice(k)`.
   """
-  Inspects the structure and tensor shapes of HuggingFace checkpoints.
+  try:
+    from safetensors import safe_open
+  except ImportError:
+    sys.exit("Error: 'safetensors' is required. Run `pip install safetensors`")
 
-  Note: The checkpoint structure is usually the same as the standard `from_pretrained` 
-  format, with a few exceptions (e.g., multimodal Gemma). Use this inspection 
-  method to ensure better compatibility with `to_maxtext` conversion pipelines.
+  param_dict = {}
+  for i, ckpt_path in enumerate(ckpt_paths):
+    print(f"Loading {ckpt_path.name} ({i+1}/{len(ckpt_paths)})...")
+    with safe_open(ckpt_path, framework="pt") as f:
+      for k in f.keys():
+        # Optimization: `f.get_slice(k)` only reads the file header.
+        # This provides instant access to metadata. Using `f.get_tensor(k)`
+        # instead would force the actual tensor values into host RAM.
+        slice_obj = f.get_slice(k)
+        shape = slice_obj.get_shape()
+        param_dict[k] = f"shape: {shape}"
 
-  safetensors: instant and no weight
-  pth: load per weight
+        if check_dtype:
+          dtype = slice_obj.get_dtype()
+          param_dict[k] += f" | dtype: {dtype}"
+
+  return param_dict
+
+
+def _inspect_pth(ckpt_paths, check_dtype):
+  """Inspects HuggingFace .pth checkpoints.
+
+  Per-tensor load: Memory is allocated per-tensor rather than loading
+  the entire massive file into RAM at once. However, because it relies on PyTorch's
+  pickled format, it incurs a time cost for sequential deserialization just to
+  extract keys and shapes.
+
+  Optimization: Per-tensor load via `mmap=True`.
+  """
+  try:
+    import torch
+  except ImportError:
+    sys.exit("Error: 'torch' is required for this mode. Run `pip install torch`")
+
+  param_dict = {}
+  for i, ckpt_path in enumerate(ckpt_paths):
+    print(f"Loading {ckpt_path.name} ({i+1}/{len(ckpt_paths)})...")
+
+    # `mmap=True`: ensures the file is memory-mapped, keeping the RAM footprint
+    #   strictly bounded to the per-tensor level rather than pulling the whole file.
+    # `weights_only=True`: prevents arbitrary code execution.
+    checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=True, mmap=True)
+
+    # Flattening logic may be necessary depending on the .pth structure.
+    # This assumes a standard state_dict; wrapper keys may need manual handling if present.
+    if isinstance(checkpoint, dict):
+      for k, v in checkpoint.items():
+        if hasattr(v, "shape"):
+          param_dict[k] = f"shape: {v.shape}"
+
+        if check_dtype and hasattr(v, "dtype"):
+          param_dict[k] += f" | dtype: {v.dtype}"
+
+  return param_dict
+
+
+def inspect_hf(args):
+  """Inspects the structure and tensor shapes of HuggingFace checkpoints.
+
+  Note: The checkpoint structure typically matches the standard `from_pretrained`
+  format, with minor exceptions for specific architectures (e.g., multimodal Gemma).
+  Use this to verify structure compatibility with `to_maxtext` conversion pipelines.
   """
   print(f"\n--- Inspecting {args.format} files in {args.path} ---")
 
@@ -76,48 +150,12 @@ def inspect_hf(args):
   if not ckpt_paths:
     sys.exit(f"No files with extension .{args.format} found in {args.path}")
 
-  param_dict = {}
-
   if args.format == "safetensors":
-    try:
-      from safetensors import safe_open
-    except ImportError:
-      sys.exit("Error: 'safetensors' is required. `pip install safetensors`")
-
-    for i, ckpt_path in enumerate(ckpt_paths):
-      print(f"Loading {ckpt_path.name} ({i+1}/{len(ckpt_paths)})...")
-      with safe_open(ckpt_path, framework="pt") as f:
-        for k in f.keys():
-          # Storing shape directly to save memory, rather than the full tensor
-          # An alternative is `f.get_tensor(k).shape`, but it loads the entire tensor into memory
-          # `f.get_slice(k)` reads only the header, which is instant with no memory.
-          slice = f.get_slice(k)
-          shape = slice.get_shape()
-          param_dict[k] = f"shape: {shape}"
-
-          if args.check_dtype:
-            dtype = slice.get_dtype()
-            param_dict[k] += f" | dtype: {dtype}"
-
-
+    param_dict = _inspect_safetensors(ckpt_paths, args.check_dtype)
   elif args.format == "pth":
-    try:
-      import torch
-    except ImportError:
-      sys.exit("Error: 'torch' is required for this mode. `pip install torch`")
-
-    for i, ckpt_path in enumerate(ckpt_paths):
-      print(f"Loading {ckpt_path.name} ({i+1}/{len(ckpt_paths)})...")
-      checkpoint = torch.load(ckpt_path, map_location="cpu")
-      # Flatten logic might be needed depending on pth structure,
-      # here we assume standard state_dict or handle the wrapper keys manually if needed.
-      if isinstance(checkpoint, dict):
-        for k, v in checkpoint.items():
-          # check shape
-          param_dict[k] = f"shape: {v.shape}"
-
-          if args.check_dtype:
-            param_dict[k] += f" | dtype: {v.dtype}"
+    param_dict = _inspect_pth(ckpt_paths, args.check_dtype)
+  else:
+    sys.exit(f"Unsupported format: {args.format}")
 
   print("\n=== Structure ===")
   print_structure(param_dict)
@@ -126,9 +164,18 @@ def inspect_hf(args):
 # ==============================================================================
 # Mode 2: MaxText Architecture (On-the-fly)
 # ==============================================================================
-def inspect_maxtext(args, remaining_args):
 
-  # Lazy imports
+
+def inspect_maxtext(args, remaining_args):
+  """Inspects MaxText theoretical architecture shapes.
+
+  Lightweight & On-the-fly: Uses JAX's abstract tracing to evaluate the model's
+  parameters dynamically. This instantly computes theoretical shapes and dtypes
+  without executing actual FLOPs or allocating device memory (VRAM/TPU HBM).
+
+  Optimization: Uses `jax.eval_shape`.
+  """
+  # Defer imports to avoid overhead when running in other modes.
   import jax
   from maxtext.utils import max_utils, maxtext_utils
   from maxtext import pyconfig
@@ -138,16 +185,16 @@ def inspect_maxtext(args, remaining_args):
 
   Transformer = models.transformer_as_linen
 
-  # Setup config
+  # Configure the PyConfig environment.
+  # The first argument in argv is typically the script name.
   argv = (
-      # First arg is usually script name in pyconfig
       [None, os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")]
       + remaining_args
       + ["attention=dot_product", "skip_jax_distributed_system=true"]
   )
   print(argv)
 
-  # Initialize without heavyweight runtime
+  # Initialize the configuration without spinning up the heavyweight distributed runtime.
   config = pyconfig.initialize(argv)
   print(f"\n--- Inspecting MaxText Architecture: {config.model_name} (Scan: {config.scan_layers}) ---")
   devices_array = maxtext_utils.create_device_mesh(config)
@@ -155,27 +202,29 @@ def inspect_maxtext(args, remaining_args):
   quant = quantizations.configure_quantization(config)
   model = Transformer(config, mesh=mesh, quant=quant)
 
-  # Get abstract params (no memory/compute)
+  # Extract abstract parameters. This returns a PyTree of `ShapeDtypeStruct`
+  # objects, meaning zero memory payload is attached to the weights.
   abstract_param = maxtext_utils.get_abstract_param(model, config)
-  
-  # Count total parameter
+
+  # Calculate and display the total parameter count based purely on abstract shapes.
   num_params = max_utils.calculate_num_params_from_pytree(abstract_param)
   print(f"\nTotal Parameters: {num_params} (~{num_params/1e9:.2f} B)")
-  
+
   print("\n=== Structure ===")
 
   abstract_params_flat, _ = jax.tree_util.tree_flatten_with_path(abstract_param)
 
   param_dict = {}
-  # abstract_leaf_value: ShapeDtypeStruct(shape=(128, 58), dtype=float32)
+  # Example of abstract_leaf_value format: ShapeDtypeStruct(shape=(128, 58), dtype=float32)
   for path_tuple, abstract_leaf_value in abstract_params_flat:
     key_parts = [k.key for k in path_tuple if hasattr(k, "key")]
-    # Construct MaxText style parameter key
+
+    # Construct a MaxText-style parameter key (e.g., "params.layer.weight").
     param_key = "params." + ".".join(key_parts)
-    # check shape
+
     shape = abstract_leaf_value.shape
     param_dict[param_key] = f"shape: {shape}"
-    # check dtype
+
     if args.check_dtype:
       dtype = abstract_leaf_value.dtype
       param_dict[param_key] += f" | dtype: {dtype}"
@@ -187,40 +236,50 @@ def inspect_maxtext(args, remaining_args):
 # Mode 3: Orbax Checkpoint (Saved)
 # ==============================================================================
 def inspect_orbax(args):
+  """Inspects Orbax checkpoint structures.
+
+  Lightweight & Instant: Orbax separates metadata from heavy payload data.
+  This method strictly parses the structural metadata tree, bypassing the
+  need to download or allocate RAM for the actual weight data from disk or GCS.
+
+  Optimization: Reads metadata rather than weights.
+  """
   print(f"\n--- Inspecting Orbax Checkpoint: {args.path} ---")
 
-  # Lazy imports
+  # Defer imports to avoid overhead when running in other modes.
   try:
     import orbax.checkpoint as ocp
     from etils import epath
   except ImportError:
-    sys.exit("Error: 'orbax-checkpoint' or 'etils' not found. `pip install orbax-checkpoint etils[epath]`")
+    sys.exit("Error: 'orbax-checkpoint' or 'etils' not found. Run `pip install orbax-checkpoint etils[epath]`")
 
   path = epath.Path(args.path)
 
-  # Depending on Orbax version, metadata access might vary slightly.
-  # This aligns with StandardCheckpointer usage.
+  # Retrieve structural metadata. Note: Depending on the Orbax version, metadata
+  # access might vary slightly. This logic aligns with StandardCheckpointer usage.
   metadata = ocp.StandardCheckpointer().metadata(path)
   if hasattr(metadata, "item_metadata"):
     metadata = metadata.item_metadata
 
-  # Convert to flat dict
+  # Flatten the nested metadata tree into a standard dictionary.
   dictionary = ocp.tree.to_flat_dict(metadata)
 
-  # Filter for params only and clean up keys
+  # Filter strictly for parameter keys and format them.
   param_dict = {}
   for k, v in dictionary.items():
-    # k is a tuple, join it. v is metadata object with .shape
+    # `k` is a tuple representing the path hierarchy; join it into a single string.
+    # `v` is a metadata object containing `.shape` and `.dtype`.
     param_key = ".".join(k)
     if not param_key.startswith("params"):
       continue
-    # check shape
+
     shape = v.shape
     param_dict[param_key] = f"shape: {shape}"
-    # check dtype
+
     if args.check_dtype:
       dtype = v.dtype
       param_dict[param_key] += f" | dtype: {dtype}"
+
     print(v)
 
   print("\n=== Structure ===")
@@ -231,20 +290,29 @@ def inspect_orbax(args):
 # Main CLI Driver
 # ==============================================================================
 def main():
+  # Set the ABSL logging level to INFO so JAX and Orbax initialization logs are properly visible.
+  absl.logging.set_verbosity(absl.logging.INFO)
 
-  # shared parser
+  # Shared parser for arguments common across all modes.
   shared_parser = argparse.ArgumentParser(add_help=False)
-  shared_parser.add_argument("--check_dtype", type=str2bool, required=False, default=False, help="Whether to check dtype")
+  shared_parser.add_argument(
+      "--check_dtype", type=str2bool, required=False, default=False, help="Whether to append dtype info to the output"
+  )
 
-  # sub parsers
+  # Main parser and sub-parsers for distinct inspection modes.
   parser = argparse.ArgumentParser(description="Consolidated Model Checkpoint Inspector")
   subparsers = parser.add_subparsers(dest="mode", required=True, help="Inspection mode: hf, maxtext, orbax")
 
-  # Mode 1: HuggingFace / PyTorch
+  # Mode 1: HuggingFace
   parser_hf = subparsers.add_parser("hf", parents=[shared_parser], help="Inspect .safetensors or .pth files")
   parser_hf.add_argument("--path", type=str, required=True, help="Directory containing checkpoint files")
   parser_hf.add_argument(
-      "--format", type=str, required=False, choices=["safetensors", "pth"], default="safetensors", help="File format"
+      "--format",
+      type=str,
+      required=False,
+      choices=["safetensors", "pth"],
+      default="safetensors",
+      help="Checkpoint file format",
   )
 
   # Mode 2: MaxText Architecture
@@ -262,7 +330,7 @@ def main():
     inspect_maxtext(args, remaining_args)
   elif args.mode == "orbax":
     inspect_orbax(args)
-  
+
   print_peak_memory()
 
 
