@@ -38,6 +38,7 @@ from jax.sharding import NamedSharding
 
 from flax import linen as nn, nnx
 from flax.linen import partitioning as nn_partitioning
+from flax.nnx import variablelib
 
 from maxtext.configs import pyconfig
 from maxtext.utils.globals import EPS
@@ -359,7 +360,13 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
           is_train=True,
       )
     else:
-      model_graphdef, curr_params, rest = nnx.split(state.model, nnx.Param, ...)
+      owg_type = variablelib.variable_type_from_name(
+          "_overwrite_with_gradient", allow_register=True
+      )
+      custom_param_filter = nnx.Any(owg_type)
+      model_graphdef, curr_params, custom_params, rest = nnx.split(
+          state.model, nnx.Param, custom_param_filter, ...
+      )
       if config.parameter_memory_host_offload:
         # Params are kept on host (pinned_host) in in_shardings. Move only Param
         # variables to device before the forward/backward pass so that all dot_general
@@ -381,15 +388,21 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
         )
         nnx.update(state.model, curr_params)
 
-      def diff_wrapper(param, rest, config, data):
-        local_model = nnx.merge(model_graphdef, param, rest, copy=True)
+      def diff_wrapper(curr_params, custom_params, rest, config, data):
+        local_model = nnx.merge(
+            model_graphdef, curr_params, custom_params, rest, copy=True
+        )
         loss, aux = loss_fn(local_model, config, data, None, None, is_train=True)
-        _, _, new_rest = nnx.split(local_model, nnx.Param, ...)
+        _, _, _, new_rest = nnx.split(
+            local_model, nnx.Param, custom_param_filter, ...
+        )
         return loss, (aux, new_rest)
 
-      grad_func = jax.value_and_grad(diff_wrapper, argnums=0, has_aux=True)
-      (loss, (aux, new_rest)), raw_grads = grad_func(curr_params, rest, config, data)
-      nnx.update(state.model, new_rest)
+      grad_func = jax.value_and_grad(diff_wrapper, argnums=(0, 1), has_aux=True)
+      (loss, (aux, new_rest)), (raw_grads, custom_grads) = grad_func(
+          curr_params, custom_params, rest, config, data
+      )
+      nnx.update(state.model, nnx.State.merge(custom_grads, new_rest))
 
   raw_grads = jax.tree_util.tree_map(
       lambda x: x.astype(config.grad_dtype) if x.dtype == jnp.float32 else x,
