@@ -63,7 +63,7 @@ def print_structure(data_dict):
 
 
 # ==============================================================================
-# Mode 1: HuggingFace Checkpoint (.safetensors or .pth)
+# Mode 1: HuggingFace Checkpoint (Locally downloaded, safetensors or pth)
 # ==============================================================================
 
 
@@ -236,7 +236,7 @@ def inspect_maxtext(args, remaining_args):
 
 
 # ==============================================================================
-# Mode 3: Orbax Checkpoint
+# Mode 3: Orbax Checkpoint (Pre-saved)
 # ==============================================================================
 
 
@@ -296,8 +296,6 @@ def inspect_orbax(args):
 # Main CLI Driver
 # ==============================================================================
 def main():
-  # Set the ABSL logging level to INFO so JAX and Orbax initialization logs are properly visible.
-  absl.logging.set_verbosity(absl.logging.INFO)
 
   # Shared parser for arguments common across all modes.
   shared_parser = argparse.ArgumentParser(add_help=False)
@@ -337,6 +335,7 @@ def main():
   elif args.mode == "orbax":
     inspect_orbax(args)
 
+  absl.logging.set_verbosity(absl.logging.INFO)
   print_peak_memory()
 
 
