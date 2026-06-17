@@ -29,7 +29,7 @@ import jax.numpy as jnp
 if jax.__version_info__ >= (0, 6, 3):
   from jax.experimental.layout import Layout as DLL  # type: ignore
 else:
-  from jax.experimental.layout import DeviceLocalLayout as DLL  # type: ignore
+  from jax.experimental.layout import DeviceLocalLayout as DLL  # type: ignore # pylint: disable=no-name-in-module
 
 from flax import linen as nn
 from flax import nnx

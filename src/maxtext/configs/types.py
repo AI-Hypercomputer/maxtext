@@ -2406,7 +2406,7 @@ class MaxTextConfig(
     if self.use_ring_of_experts:
       raise ValueError("check_vma is not yet supported with ring of experts.")
     _allowed = {"ici_expert_parallelism", "ici_fsdp_parallelism"}
-    active = [name for name in IciParallelism.model_fields if name not in _allowed and getattr(self, name) != 1]
+    active = [name for name in IciParallelism.model_fields if name not in _allowed and getattr(self, name) != 1]  # pylint: disable=not-an-iterable
     if active:
       raise ValueError(
           f"check_vma=True only supports ici_expert_parallelism and ici_fsdp_parallelism. "

@@ -48,6 +48,7 @@ import importlib.util
 # from grabbing the GPU context and causing JAX NCCL communicator creation to fail.
 try:
   import tensorflow as tf
+
   tf.config.set_visible_devices([], "GPU")
 except Exception:  # pylint: disable=broad-exception-caught
   pass

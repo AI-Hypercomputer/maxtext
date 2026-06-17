@@ -143,7 +143,7 @@ def validate_gpu_flash_attention(sinks: Array | None, record_max_logits: bool) -
 
 
 # TODO(agagik): change splash_attention_mask._ComputableMask to be non protected
-class ChunkedCausalMask(splash_attention_mask._ComputableMask):  # pylint: disable=protected-access
+class ChunkedCausalMask(splash_attention_mask._ComputableMask):  # pylint: disable=protected-access,abstract-method
   """Lazy chunked causal mask.
 
   Attention is causal within each chunk (0, K), (K, 2K), (2K, 3K), ... tokens
@@ -2157,7 +2157,7 @@ class AttentionOp(nnx.Module):
 
 
 # pylint: disable=protected-access
-class LoadBalancedCausalMask(splash_attention_mask._ComputableMask):
+class LoadBalancedCausalMask(splash_attention_mask._ComputableMask):  # pylint: disable=abstract-method
   """Lazy causal mask, prevents the model from attending to future tokens.
 
   Attributes:
