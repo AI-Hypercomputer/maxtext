@@ -38,7 +38,7 @@ from maxtext.layers import nnx_wrappers
 import qwix
 from qwix._src.core import dot_general_qt
 from qwix._src.core import sparsity
-from qwix._src.utils import flax_util
+from qwix._src import flax_util
 import qwix.pallas as qpl
 
 # Params used to define mixed precision quantization configs
