@@ -618,7 +618,7 @@ class RoutedMoeTest(unittest.TestCase):
           enable_checkpointing=False,
           model_name="mixtral-8x7b",
           override_model_config=True,
-          base_emb_dim=256,
+          base_emb_dim=2048,  # we want emb dim being multiple of 1024 for fully using the kernel
           base_mlp_dim=256,
           base_moe_mlp_dim=256,
           dtype="bfloat16",
