@@ -15,14 +15,14 @@
 """A unified command-line tool to inspect checkpoint structures.
 
 Supported formats and frameworks:
-  1. HuggingFace Checkpoints
-     - safetensors: Lightweight & Instant. Parses file headers to read metadata instantly without allocating RAM.
-     - pth: Per-tensor load. Deserializes the file to load weights per-tensor. 
+  1. HuggingFace Checkpoints: Locally downloaded file.
+     - safetensors: Lightweight with near-zero cost. Parses file headers to read metadata instantly without allocating RAM.
+     - pth: Per-tensor load with small cost. Deserializes the file to load weights per-tensor. 
         Incurs a time cost for deserialization, but memory footprint is constrained to individual tensors.
-  2. MaxText Model Architecture: Lightweight & On-the-fly. Traces JAX shapes abstractly; 
-      evaluates theoretical parameters dynamically without executing compute or allocating VRAM/HBM.
-  3. Orbax Checkpoints: Lightweight & Instant. Reads structural metadata trees instantly 
-      without pulling underlying TensorStore data chunks from disk/GCS.
+  2. MaxText Model Architecture: On-the-fly. 
+     - Lightweight with near-zero cost. Traces JAX shapes abstractly; evaluates theoretical parameters dynamically without executing compute or allocating VRAM/HBM.
+  3. Orbax Checkpoints: Pre-saved disk/GCS file.
+     - Lightweight with near-zero cost. Reads structural metadata trees instantly without pulling underlying TensorStore data chunks.
 
 Usage Examples:
   [Mode 1: HuggingFace]   
@@ -69,11 +69,11 @@ def print_structure(data_dict):
 
 # pylint: disable=import-outside-toplevel
 def _inspect_safetensors(ckpt_paths, check_dtype):
-  """Inspects HuggingFace safetensors checkpoints instantly without loading weights.
+  """Inspects HuggingFace checkpoints, from local .safetensors file.
 
-  Lightweight & Instant: This method completely bypasses heavy RAM allocation and
-  disk I/O. It strictly parses the JSON header of the safetensors file to extract
-  shapes and dtypes instantly.
+  Lightweight with near-zero cost: Bypasses heavy RAM allocation and disk I/O.
+  It strictly parses the JSON header of the locally downloaded safetensors file
+  to extract shapes and dtypes instantly.
 
   Optimization: Read metadata rather than weights via `f.get_slice(k)`.
   """
@@ -103,12 +103,11 @@ def _inspect_safetensors(ckpt_paths, check_dtype):
 
 # pylint: disable=import-outside-toplevel
 def _inspect_pth(ckpt_paths, check_dtype):
-  """Inspects HuggingFace .pth checkpoints.
+  """Inspects HuggingFace checkpoints, from local .pth file.
 
-  Per-tensor load: Memory is allocated per-tensor rather than loading
-  the entire massive file into RAM at once. However, because it relies on PyTorch's
-  pickled format, it incurs a time cost for sequential deserialization just to
-  extract keys and shapes.
+  Per-tensor load with small cost: Memory is allocated per-tensor rather than
+  loading the entire massive file into RAM at once. Because it deserializes
+  PyTorch's pickled format, it incurs a time cost just to extract keys and shapes.
 
   Optimization: Per-tensor load via `mmap=True`.
   """
@@ -170,11 +169,12 @@ def inspect_hf(args):
 
 # pylint: disable=import-outside-toplevel
 def inspect_maxtext(args, remaining_args):
-  """Inspects MaxText theoretical architecture shapes.
+  """Inspects MaxText model architecture, from on-the-fly execution.
 
-  Lightweight & On-the-fly: Uses JAX's abstract tracing to evaluate the model's
-  parameters dynamically. This instantly computes theoretical shapes and dtypes
-  without executing actual FLOPs or allocating device memory (VRAM/TPU HBM).
+  Lightweight with near-zero cost: Uses JAX's abstract tracing
+  to evaluate the model's parameters dynamically. This instantly computes
+  theoretical shapes and dtypes without executing actual FLOPs or allocating
+  device memory (VRAM/TPU HBM).
 
   Optimization: Uses `jax.eval_shape`.
   """
@@ -242,11 +242,11 @@ def inspect_maxtext(args, remaining_args):
 
 # pylint: disable=import-outside-toplevel
 def inspect_orbax(args):
-  """Inspects Orbax checkpoint structures.
+  """Inspects Orbax checkpoint, from pre-saved disk/GCS file.
 
-  Lightweight & Instant: Orbax separates metadata from heavy payload data.
-  This method strictly parses the structural metadata tree, bypassing the
-  need to download or allocate RAM for the actual weight data from disk or GCS.
+  Lightweight with near-zero cost: Orbax separates metadata from
+  heavy payload data. This method strictly parses the structural metadata tree,
+  bypassing the need to pull the underlying TensorStore data chunks from disk or GCS.
 
   Optimization: Reads metadata rather than weights.
   """
