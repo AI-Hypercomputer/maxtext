@@ -1311,6 +1311,7 @@ class RoutedMoE(nnx.Module):
             weight_gather_axes=weight_gather_axes,
             lhs_vma_axes=lhs_vma_axes,
             rhs_vma_axes=rhs_vma_axes,
+            use_gmm_v2=True,
         )
       elif self.config.megablox:  # Older forked megablox
         output = mblx.gmm(
