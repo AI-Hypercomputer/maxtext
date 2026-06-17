@@ -37,11 +37,12 @@ python3 -m maxtext.inference.vllm_decode \
 python3 -m maxtext.trainers.post_train.sft.train_sft \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/sft \
     load_parameters_path=${SCANNED_CKPT_PATH} \
-    per_device_batch_size=1 run_name=${run_id} \
+    per_device_batch_size=0.125 run_name=${run_id} \
     steps=5 scan_layers=true \
     model_name=${MODEL_NAME} enable_single_controller=${use_pathways} \
     checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False \
-    ici_tensor_parallelism=4 ici_fsdp_parallelism=2 max_target_length=512 weight_dtype=bfloat16 dtype=bfloat16
+    remat_policy=full \
+    ici_tensor_parallelism=4 ici_fsdp_parallelism=2 max_target_length=64 weight_dtype=bfloat16 dtype=bfloat16 opt_type=sgd
 
 python3 -m maxtext.inference.vllm_decode \
     model_name=${MODEL_NAME} \

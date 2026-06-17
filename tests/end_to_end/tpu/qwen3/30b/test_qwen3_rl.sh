@@ -41,7 +41,8 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
     checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False \
     rollout_tensor_parallelism=4 \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
-    ici_tensor_parallelism=4 ici_fsdp_parallelism=1 max_target_length=512 weight_dtype=bfloat16 dtype=bfloat16
+    remat_policy=full \
+    ici_tensor_parallelism=4 ici_fsdp_parallelism=1 max_target_length=64 weight_dtype=bfloat16 dtype=bfloat16 opt_type=sgd
 
 python3 -m maxtext.inference.vllm_decode \
     model_name=${MODEL_NAME} \
