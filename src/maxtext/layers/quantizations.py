@@ -14,41 +14,32 @@
 
 """Quantization library."""
 
+from dataclasses import dataclass
 import functools
 import json
-import qwix.pallas as qpl
 import re
-from typing import Tuple, Sequence, Callable
-from dataclasses import dataclass
+from typing import Callable, Sequence, Tuple
 
-from aqt.jax.v2 import config as aqt_config
 from aqt.jax.v2 import aqt_tensor
-from aqt.jax.v2.flax import aqt_flax
-from aqt.jax.v2 import tiled_dot_general
 from aqt.jax.v2 import calibration
-
-import qwix
-from qwix._src.core import dot_general_qt
-from qwix._src.core import sparsity
-
+from aqt.jax.v2 import config as aqt_config
+from aqt.jax.v2 import tiled_dot_general
+from aqt.jax.v2.flax import aqt_flax
+from flax import nnx
+import flax.linen as nn
+from flax.linen import fp8_ops
+from flax.linen import initializers as flax_initializers
 import jax
 import jax.numpy as jnp
 from jax.tree_util import tree_flatten_with_path, tree_unflatten
-
-from flax.linen import fp8_ops
-from flax.linen import initializers as flax_initializers
-import flax.linen as nn
-from flax import nnx
-# Support different packaging structures across environments even within
-# the same Qwix version identifier (imports from _src.utils vs _src).
-try:
-  from qwix._src.utils import flax_util
-except ImportError:
-  from qwix._src import flax_util  # pytype: disable=import-error
-from maxtext.layers import nnx_wrappers
-
-from maxtext.common.common_types import DType, Config
+from maxtext.common.common_types import Config, DType
 from maxtext.inference.kvcache import KVQuant
+from maxtext.layers import nnx_wrappers
+import qwix
+from qwix._src.core import dot_general_qt
+from qwix._src.core import sparsity
+from qwix._src import flax_util
+import qwix.pallas as qpl
 
 # Params used to define mixed precision quantization configs
 DEFAULT = "__default__"  # default config
@@ -850,7 +841,10 @@ def maybe_quantize_model(model, config):
     quantization_provider = get_qt_provider(config)
     if quantization_provider:
       if config.pure_nnx:
-        input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
+        input_shape = (
+            config.micro_batch_size_to_train_on,
+            config.max_target_length,
+        )
         dummy_tokens = jnp.ones(input_shape, dtype=jnp.int32)
         dummy_positions = jnp.ones(input_shape, dtype=jnp.int32)
         dummy_segment_ids = jnp.ones(input_shape, dtype=jnp.int32)
