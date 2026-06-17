@@ -71,7 +71,7 @@ def ring_ragged_sort(
     """Sort and gather activations to different EP shards."""
     return _ring_ragged_sort_fwd(hidden_states_local, topk_indices_local)[0]
 
-  @jax.named_scope("ragged-gather-fwd")
+  @jax.named_scope("ragged-sort-fwd")
   def _ring_ragged_sort_fwd(hidden_states_local, topk_indices_local):
     """Sort and gather activations forward pass."""
 
@@ -136,7 +136,7 @@ def ring_ragged_sort(
 
     return out, res
 
-  @jax.named_scope("ragged-gather-bwd")
+  @jax.named_scope("ragged-sort-bwd")
   def _ring_ragged_sort_bwd(res, g_out):
     """Backward pass for the gather: a Pallas SC ragged gather reduce.
     The forward gathers ``hidden_states_local[token_indices_sorted[i]]`` into
@@ -248,7 +248,7 @@ def ring_ragged_unsort(
         sorted_tokens_local, group_sizes_local, topk_argsort_revert_indices, topk_weights_flat
     )[0]
 
-  @jax.named_scope("ragged-scatter-fwd")
+  @jax.named_scope("ragged-unsort-fwd")
   def _ring_ragged_unsort_fwd(sorted_tokens_local, group_sizes_local, topk_argsort_revert_indices, topk_weights_flat):
     """Executes unsorting sending tokens back."""
     group_offsets = jnp.cumulative_sum(group_sizes_local, include_initial=True)
@@ -309,7 +309,7 @@ def ring_ragged_unsort(
 
     return out, res
 
-  @jax.named_scope("ragged-scatter-bwd")
+  @jax.named_scope("ragged-unsort-bwd")
   def _ring_ragged_unsort_bwd(res, g_out):
     """Backward pass for the scatter with routing weights.
 
@@ -330,38 +330,44 @@ def ring_ragged_unsort(
     ) = res
     g_hidden_states_local = g_out
 
-    # Expand g_out from [num_tokens] to [num_tokens * topk] by repeating each
-    # row topk times, so that g_expanded[i] = g_out[i // topk].
-    g_expanded = jnp.repeat(g_hidden_states_local, topk, axis=0)
-
-    # Apply per-slot routing weights: g_weighted[i] = w[i] * g_out[i // topk]
-    g_weighted = g_expanded * topk_weights_flat[:, None]
-
     n = topk_argsort_revert_indices.shape[0]
+    # Build the inverse permutation idx_inv such that idx_inv[j] = i
+    # where revert[i] = j.
+    idx_inv = jnp.argsort(topk_argsort_revert_indices)
 
     # Handle the same two buffering modes for backward pass.
+    # We let ragged_gather do both the fan-out (by indexing into the
+    # un-expanded g_hidden_states_local via idx_inv // topk) and the
+    # per-slot weight application (via the fused weights parameter),
+    # avoiding an extra HBM read-write pass.
     if buffer_size >= n:
-      # We want: g_sorted_tokens[j] = g_weighted[i] where revert[i]=j.
-      # Build the inverse permutation idx_inv such that idx_inv[j] = i.
-      idx_inv = jnp.argsort(topk_argsort_revert_indices)
-      # Because revert is a permutation, gathering with idx_inv reorders correctly.
+      # ragged_gather fans out g_hidden_states_local by reading the same row
+      # multiple times when idx_inv // topk maps multiple positions to it.
+      # Per-slot routing weights are applied inside the kernel.
+      weight_for_sorted = topk_weights_flat[idx_inv]
       grad_sorted_tokens = ragged_gather(
-          g_weighted,
-          idx_inv,
+          g_hidden_states_local,
+          idx_inv // topk,
           shard_output_start[None],
           shard_output_end[None],
+          weights=weight_for_sorted,
+          has_weights=True,
       )
     else:
       # Slice the inverse permutation to match the packed local buffer.
-      idx_inv = jnp.argsort(topk_argsort_revert_indices)
       padded_idx_inv = jnp.pad(idx_inv, (0, buffer_size))
       sliced_idx_inv = jax.lax.dynamic_slice_in_dim(padded_idx_inv, shard_output_start, buffer_size, axis=0)
       gather_end = jnp.minimum(shard_output_end - shard_output_start, buffer_size)
+      # Slice the per-slot routing weights to match the packed local buffer.
+      padded_weights = jnp.pad(topk_weights_flat[idx_inv], (0, buffer_size))
+      sliced_weights = jax.lax.dynamic_slice_in_dim(padded_weights, shard_output_start, buffer_size, axis=0)
       grad_sorted_tokens = ragged_gather(
-          g_weighted,
-          sliced_idx_inv,
+          g_hidden_states_local,
+          sliced_idx_inv // topk,
           jnp.int32(0)[None],
           gather_end[None],
+          weights=sliced_weights,
+          has_weights=True,
       )
     return grad_sorted_tokens, None, None, None
 
@@ -409,7 +415,7 @@ def a2a_ragged_sort(inputs, sort_indices, valid_end):
   def _a2a_ragged_sort(inputs, sort_indices, valid_end):
     return _a2a_ragged_sort_fwd(inputs, sort_indices, valid_end)[0]
 
-  @jax.named_scope("local-ragged-gather-fwd")
+  @jax.named_scope("local-ragged-sort-fwd")
   def _a2a_ragged_sort_fwd(inputs, sort_indices, valid_end):
     start = jnp.int32(0)
     end = valid_end.astype(jnp.int32) if hasattr(valid_end, "astype") else jnp.int32(valid_end)
@@ -420,7 +426,7 @@ def a2a_ragged_sort(inputs, sort_indices, valid_end):
     res = (sort_indices, end, inputs.shape)
     return out, res
 
-  @jax.named_scope("local-ragged-gather-bwd")
+  @jax.named_scope("local-ragged-sort-bwd")
   def _a2a_ragged_sort_bwd(res, g_out):
     sort_indices, end, _ = res
     n = sort_indices.shape[0]
@@ -474,7 +480,7 @@ def a2a_ragged_unsort(sorted_tokens, revert_indices, valid_end):
   def _a2a_ragged_unsort(sorted_tokens, revert_indices, valid_end):
     return _a2a_ragged_unsort_fwd(sorted_tokens, revert_indices, valid_end)[0]
 
-  @jax.named_scope("local-ragged-scatter-fwd")
+  @jax.named_scope("local-ragged-unsort-fwd")
   def _a2a_ragged_unsort_fwd(sorted_tokens, revert_indices, valid_end):
     start = jnp.int32(0)
     end = valid_end.astype(jnp.int32) if hasattr(valid_end, "astype") else jnp.int32(valid_end)
@@ -490,7 +496,7 @@ def a2a_ragged_unsort(sorted_tokens, revert_indices, valid_end):
     res = (revert_indices, end, sorted_tokens.shape, start)
     return out, res
 
-  @jax.named_scope("local-ragged-scatter-bwd")
+  @jax.named_scope("local-ragged-unsort-bwd")
   def _a2a_ragged_unsort_bwd(res, g_out):
     revert_indices, end, sorted_tokens_shape, start = res
     # g_sorted_tokens[revert_indices[i]] = g_out[i] for i in [0, end).
