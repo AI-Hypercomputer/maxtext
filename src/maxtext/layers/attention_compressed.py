@@ -680,23 +680,22 @@ class CompressedAttention(Attention):
       rngs: Optional[nnx.Rngs] = None,
       **kwargs,
   ):
-    """Initializes the CompressedAttention layer.
+    """Inherits all standard Attention hyperparameters and selectively instantiates
+    an underlying HCA or CSA compressor based on the provided `compress_ratio`.
 
-    Inherits all standard Attention hyperparameters and selectively instantiates
-    an underlying HCA or CSA compressor based on the provided `layer_type`.
+    Highlights of DeepSeek-V4 attention integration:
+    - Shared-KV: The layer supports decoupling Q and KV heads for heavy compression.
+    - MQA: Multi-Query Attention used alongside heavy KV compression.
+    - 3 Different Attention Modes: Sliding Window (prefix), HCA (128x), and CSA (4x).
+    - Dual RoPE Theta: Uses 10000 for standard uncompressed tokens and 160000 for compressed.
 
     Args:
       (See maxtext.layers.attentions.Attention for standard attention arguments)
       q_lora_rank: The rank for the LoRA projection in the compressed query.
-      compress_ratio: The compression ratio for the compressor.
+      compress_ratio: The compression ratio (0, 4, or 128) for the compressor.
     """
-    """Initializes the Compressed Attention module."""
     self.q_lora_rank = q_lora_rank
     self.compress_ratio = compress_ratio
-
-    # Determine the correct underlying attention type based on the compress_ratio
-    if self.compress_ratio == 0:
-      attention_type = AttentionType.LOCAL_SLIDING
 
     super().__init__(
         config=config,
@@ -809,20 +808,22 @@ class CompressedAttention(Attention):
         rngs=self.rngs,
     )
 
-    # DeepSeek-V4 uses a separate RoPE theta (160000) for compressed tokens.
-    # We must instantiate a dedicated rotary embedding for the compressors
-    self.compress_rotary_embedding = DeepSeekV4RotaryEmbedding(
+    # Override the base rotary embedding with the correct theta for this layer.
+    # CSA / HCA layers use compressed_rope_max_timescale (160000).
+    # Sliding window prefix layers use rope_max_timescale (10000).
+    rope_theta = self.config.compressed_rope_max_timescale if self.compress_ratio > 0 else self.config.rope_max_timescale
+    self.rotary_embedding = DeepSeekV4RotaryEmbedding(
         head_dim=self.config.head_dim,
-        partial_rotary_factor=1.0,
-        rope_theta=self.config.compressed_rope_max_timescale,
-        dtype=self.dtype,
+        partial_rotary_factor=self.config.qk_rope_head_dim / self.config.head_dim,
+        rope_theta=rope_theta,
+        fprop_dtype=self.dtype,
     )
 
     if self.compress_ratio > 4:
       self.hca_compressor = DeepseekV4HCACompressor(
           config=self.config,
           compress_ratio=self.compress_ratio,
-          rotary_embedding=self.compress_rotary_embedding,
+          rotary_embedding=self.rotary_embedding,
           kernel_init=self.kernel_init,
           quant=self.quant,
           model_mode=self.model_mode,
@@ -832,7 +833,7 @@ class CompressedAttention(Attention):
       self.csa_compressor = DeepseekV4CSACompressor(
           config=self.config,
           compress_ratio=self.compress_ratio,
-          rotary_embedding=self.compress_rotary_embedding,
+          rotary_embedding=self.rotary_embedding,
           kernel_init=self.kernel_init,
           quant=self.quant,
           model_mode=self.model_mode,
@@ -1047,7 +1048,7 @@ class CompressedAttention(Attention):
     # -> [batch, q_length, emb_dim]
     final_out = self.o_b_proj(grouped_flat)
 
-    return final_out
+    return final_out, None
 
 
 def compressed_attention(

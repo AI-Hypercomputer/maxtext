@@ -1016,6 +1016,7 @@ class DeepseekV32Config(PTConfig):
 
   def __init__(self, **kwargs):
     self.max_position_embeddings = kwargs.get("max_position_embeddings", 163840)
+    self.rope_scaling = kwargs.pop("rope_scaling", None)
     super().__init__(**kwargs)
 
 
