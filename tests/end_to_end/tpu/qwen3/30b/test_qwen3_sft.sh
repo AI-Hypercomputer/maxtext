@@ -41,8 +41,9 @@ python3 -m maxtext.trainers.post_train.sft.train_sft \
     steps=5 scan_layers=true \
     model_name=${MODEL_NAME} enable_single_controller=${use_pathways} \
     checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False \
-    remat_policy=full \
-    ici_tensor_parallelism=4 ici_fsdp_parallelism=2 max_target_length=64 weight_dtype=bfloat16 dtype=bfloat16 opt_type=sgd
+    remat_policy=full use_tunix_gradient_accumulation=False \
+    lora.enable_lora=true lora.lora_rank=8 \
+    ici_tensor_parallelism=1 ici_fsdp_parallelism=8 ici_expert_parallelism=1 max_target_length=64 weight_dtype=bfloat16 dtype=bfloat16 opt_type=sgd
 
 python3 -m maxtext.inference.vllm_decode \
     model_name=${MODEL_NAME} \
