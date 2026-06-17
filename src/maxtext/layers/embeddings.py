@@ -1803,7 +1803,7 @@ def qwen3_omni_mrope_embedding_as_linen(
   )
 
 
-class DeepSeekV4RotaryEmbedding(nnx.Module):
+class DeepSeekV4RotaryEmbedding(RotaryEmbedding):
   """DeepSeek-V4 partial rotary embedding with interleaved frequencies.
 
   DeepSeek-V4 uses an interleaved positional encoding where consecutive channels
@@ -1822,12 +1822,23 @@ class DeepSeekV4RotaryEmbedding(nnx.Module):
       head_dim: int,
       partial_rotary_factor: float = 64.0 / 512.0,
       rope_theta: float = 10000.0,
-      dtype: Any = jnp.float32,
+      fprop_dtype: Any = jnp.float32,
+      min_timescale: int = 10000,
+      max_timescale: int = 10000,
+      mesh: Any = None,
+      **kwargs,
   ):
+    super().__init__(
+        min_timescale=min_timescale,
+        max_timescale=max_timescale,
+        mesh=mesh,
+        fprop_dtype=fprop_dtype,
+        **kwargs,
+    )
     self.head_dim = head_dim
     self.partial_rotary_factor = partial_rotary_factor
     self.rope_theta = rope_theta
-    self.dtype = dtype
+    self.fprop_dtype = fprop_dtype
 
     # Compute the partial rotary dimension (rope_head_dim)
     self.dim = int(head_dim * partial_rotary_factor)
