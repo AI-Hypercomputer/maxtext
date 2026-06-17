@@ -174,9 +174,9 @@ jobs:
             fi
 
             # Configure NCCL for GPU execution
-            export NCCL_SOCKET_IFNAME=lo
+            # Removed NCCL_SOCKET_IFNAME=lo as it breaks multi-gpu collective ops in Docker
             export NCCL_DEBUG=WARN
-            echo "Set NCCL_DEBUG=WARN and NCCL_SOCKET_IFNAME=lo for GPU execution."
+            echo "Set NCCL_DEBUG=WARN for GPU execution."
           fi
           if [ "${INPUTS_TOTAL_WORKERS}" -gt 1 ]; then
             $PYTHON_EXE -m pip install --quiet pytest-split pytest-xdist

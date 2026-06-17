@@ -44,13 +44,11 @@ if not _absl_flags.FLAGS.is_parsed():
 import jax
 import os
 import importlib.util
-# Force early JAX initialization on all platforms to prevent CUDA context conflicts with TensorFlow/PyTorch/Qwix.
-# If JAX initialization is deferred, other libraries (imported during test collection)
-# might initialize CUDA first, causing JAX's subsequent NCCL communicator creation to fail
-# with 'corrupted comm object detected'.
+# Prevent TensorFlow (which might be imported by qwix or other libraries during test collection)
+# from grabbing the GPU context and causing JAX NCCL communicator creation to fail.
 try:
-  _ = jax.devices()
-  # Call the internal function if it was previously wrapped, or run raw at the top level
+  import tensorflow as tf
+  tf.config.set_visible_devices([], "GPU")
 except Exception:  # pylint: disable=broad-exception-caught
   pass
 
