@@ -55,6 +55,7 @@ permissions:
 
 jobs:
   pre_build_check:
+    name: Pre-build Check
     runs-on: ubuntu-latest
     outputs:
       should_run: ${{ steps.check.outputs.should_run }}
@@ -85,6 +86,7 @@ jobs:
           fi
 
   build_and_push:
+    name: Build and Push Docker Image
     needs: pre_build_check
     runs-on: linux-x86-n2-16-buildkit
     container: google/cloud-sdk:524.0.0
@@ -185,10 +187,11 @@ jobs:
           INPUTS_IMAGE_NAME: ${{ inputs.image_name }}
           INPUTS_VERSION_NAME: ${{ inputs.version_name }}
 
-  promote_image:
+  run_ci_tests:
+    name: Run Unit and Integration Tests
     needs: [pre_build_check, build_and_push]
     if: needs.pre_build_check.outputs.should_run == 'true' && inputs.include_test_assets == true
-    uses: ./.github/workflows/promote_docker_image.yml
+    uses: ./.github/workflows/run_ci_tests.yml
     with:
       image_name: ${{ inputs.image_name }}
       image_tag: ${{ github.run_id }}
