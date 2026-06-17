@@ -248,10 +248,10 @@ def prepare_datasets(
     model_tokenizer: AutoTokenizer,
 ) -> tuple[grain.IterDataset, grain.IterDataset | None]:
   """Setup and return train and test datasets."""
-  template_config = load_data_template_from_file(trainer_config.chat_template_path)
+  template_config = load_data_template_from_file(trainer_config.data_template_path)
   if template_config is None:
     raise ValueError(
-        f"Chat template is required for processing dataset but failed to load from {trainer_config.chat_template_path}"
+        f"Data template is required for processing dataset but failed to load from {trainer_config.data_template_path}"
     )
 
   # Optional user-provided `process_data(dataset_name, tokenizer, template, config, x) -> dict`.
@@ -559,10 +559,10 @@ def create_rl_components(
         epsilon_high=trainer_config.rl.epsilon_high,
     )
     # Instantiate the custom MaxText chat parser
-    template_config = load_data_template_from_file(trainer_config.chat_template_path)
+    template_config = load_data_template_from_file(trainer_config.data_template_path)
     if template_config is None:
       raise ValueError(
-          f"Chat template is required for AgenticGRPOLearner but failed to load from {trainer_config.chat_template_path}"
+          f"Data template is required for AgenticGRPOLearner but failed to load from {trainer_config.data_template_path}"
       )
     chat_parser = utils_rl.MaxTextChatParser(
         model_tokenizer=model_tokenizer, template_config=template_config, tmvp_config=trainer_config
@@ -591,6 +591,28 @@ def create_rl_components(
     )
 
   return rl_cluster, rl_trainer, optimizer, reward_fns
+
+
+def configure_tokenizer_chat_template(model_tokenizer: Any, trainer_config: Any) -> None:
+  """Populates the tokenizer's chat_template from config if missing."""
+  if getattr(model_tokenizer, "chat_template", None) is None:
+    if getattr(trainer_config, "chat_template", None):
+      model_tokenizer.chat_template = trainer_config.chat_template
+    elif getattr(trainer_config, "chat_template_path", None):
+      from maxtext.input_pipeline.instruction_data_processing import (  # pylint: disable=import-outside-toplevel
+          load_chat_template_from_file,
+      )
+
+      model_tokenizer.chat_template = load_chat_template_from_file(trainer_config.chat_template_path)
+    else:
+      raise ValueError(
+          f"Tokenizer {getattr(trainer_config, 'tokenizer_path', None)!r} has no chat_template "
+          "and config.chat_template / config.chat_template_path "
+          "are both empty. Either pick an instruction-tuned tokenizer that "
+          "ships with a chat_template, set config.chat_template to a Jinja "
+          "string, or set config.chat_template_path to a JSON file "
+          "with a 'chat_template' key."
+      )
 
 
 def rl_train(argv: Sequence[str], kwargs: dict):
@@ -638,6 +660,7 @@ def _rl_train_impl(argv: Sequence[str], kwargs: dict):
       trainer_config.tokenizer_path,
       token=trainer_config.hf_access_token or None,
   )
+  configure_tokenizer_chat_template(model_tokenizer, trainer_config)
 
   reference_model, reference_mesh, actor_model, actor_mesh, rollout_mesh = model_creation_utils.create_models_and_meshes(
       trainer_config,

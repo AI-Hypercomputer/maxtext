@@ -58,7 +58,10 @@ class TrainRLTest(unittest.TestCase):
     # Following the pattern in distillation_checkpointing_test.py for mocking jax objects
     with (
         mock.patch.object(jax, "devices", return_value=mock_devices),
-        mock.patch("maxtext.utils.model_creation_utils.pyconfig.initialize_pydantic", return_value=mock_config),
+        mock.patch(
+            "maxtext.utils.model_creation_utils.pyconfig.initialize_pydantic",
+            return_value=mock_config,
+        ),
     ):
       trainer_config, sampler_config, trainer_devices, sampler_devices = model_creation_utils.setup_configs_and_devices(
           ["dummy", "dummy"]
@@ -87,7 +90,10 @@ class TrainRLTest(unittest.TestCase):
 
     with (
         mock.patch.object(jax, "devices", return_value=mock_devices),
-        mock.patch("maxtext.utils.model_creation_utils.pyconfig.initialize_pydantic", return_value=mock_config),
+        mock.patch(
+            "maxtext.utils.model_creation_utils.pyconfig.initialize_pydantic",
+            return_value=mock_config,
+        ),
     ):
       _, _, trainer_devices, sampler_devices = model_creation_utils.setup_configs_and_devices(["dummy", "dummy"])
 
@@ -189,7 +195,10 @@ class TrainRLTest(unittest.TestCase):
         "tensor_parallel_size": 2,
         "expert_parallel_size": 4,
     }
-    self.assertEqual(train_rl.get_rollout_kwargs_for_parallelism(sampler_config, 16), expected_result)
+    self.assertEqual(
+        train_rl.get_rollout_kwargs_for_parallelism(sampler_config, 16),
+        expected_result,
+    )
 
   @pytest.mark.cpu_only
   def test_get_rollout_kwargs_auto_tp(self):
@@ -204,7 +213,10 @@ class TrainRLTest(unittest.TestCase):
         "tensor_parallel_size": 2,
         "expert_parallel_size": 1,
     }
-    self.assertEqual(train_rl.get_rollout_kwargs_for_parallelism(sampler_config, 4), expected_result)
+    self.assertEqual(
+        train_rl.get_rollout_kwargs_for_parallelism(sampler_config, 4),
+        expected_result,
+    )
 
   @pytest.mark.cpu_only
   def test_get_rollout_kwargs_fixed_tp_dp(self):
@@ -219,7 +231,10 @@ class TrainRLTest(unittest.TestCase):
         "tensor_parallel_size": 2,
         "expert_parallel_size": 1,
     }
-    self.assertEqual(train_rl.get_rollout_kwargs_for_parallelism(sampler_config, 4), expected_result)
+    self.assertEqual(
+        train_rl.get_rollout_kwargs_for_parallelism(sampler_config, 4),
+        expected_result,
+    )
 
   @pytest.mark.cpu_only
   def test_get_rollout_kwargs_auto_ep(self):
@@ -235,7 +250,10 @@ class TrainRLTest(unittest.TestCase):
         "tensor_parallel_size": 2,
         "expert_parallel_size": 2,
     }
-    self.assertEqual(train_rl.get_rollout_kwargs_for_parallelism(sampler_config, 8), expected_result)
+    self.assertEqual(
+        train_rl.get_rollout_kwargs_for_parallelism(sampler_config, 8),
+        expected_result,
+    )
 
   @pytest.mark.cpu_only
   def test_get_rollout_kwargs_errors(self):
@@ -307,7 +325,10 @@ class TrainRLTest(unittest.TestCase):
         {"question": "short", "answer": "a3"},
         {"question": "long", "answer": "a4"},
     ]
-    test_data = [{"question": "short", "answer": "a5"}, {"question": "long", "answer": "a6"}]
+    test_data = [
+        {"question": "short", "answer": "a5"},
+        {"question": "long", "answer": "a6"},
+    ]
     train_map_ds = grain.MapDataset.source(train_data)
     test_map_ds = grain.MapDataset.source(test_data)
 
@@ -334,7 +355,7 @@ class TrainRLTest(unittest.TestCase):
         eval_split="eval",
         hf_train_files=None,
         hf_eval_files=None,
-        chat_template_path="maxtext/examples/chat_templates/gsm8k_rl.json",
+        data_template_path="maxtext/examples/chat_templates/gsm8k_rl.json",
         data_shuffle_seed=42,
         max_prefill_predict_length=10,
         batch_size=2,
@@ -346,8 +367,14 @@ class TrainRLTest(unittest.TestCase):
     )
 
     with (
-        mock.patch("maxtext.trainers.post_train.rl.train_rl.get_dataset", side_effect=get_dataset_side_effect),
-        mock.patch("maxtext.trainers.post_train.rl.utils_rl.process_data", side_effect=get_filtered_data_side_effect),
+        mock.patch(
+            "maxtext.trainers.post_train.rl.train_rl.get_dataset",
+            side_effect=get_dataset_side_effect,
+        ),
+        mock.patch(
+            "maxtext.trainers.post_train.rl.utils_rl.process_data",
+            side_effect=get_filtered_data_side_effect,
+        ),
     ):
       train_dataset, test_dataset = train_rl.prepare_datasets(trainer_config, mock_tokenizer)
 
@@ -378,7 +405,10 @@ class TrainRLTest(unittest.TestCase):
   def test_prepare_datasets_with_split(self, mock_load):
     mock_ds = mock.MagicMock()
     mock_split_result = {
-        "train": [{"question": "q1", "answer": "a1"}, {"question": "q2", "answer": "a2"}],
+        "train": [
+            {"question": "q1", "answer": "a1"},
+            {"question": "q2", "answer": "a2"},
+        ],
         "test": [{"question": "q3", "answer": "a3"}],
     }
     mock_ds.train_test_split.return_value = mock_split_result
@@ -389,7 +419,7 @@ class TrainRLTest(unittest.TestCase):
         eval_dataset_name="open-r1/OpenR1-Math-220k",
         train_split="train",
         hf_train_files="hf://open-r1/OpenR1-Math-220k/data/dummy.parquet",
-        chat_template_path="maxtext/examples/chat_templates/gsm8k_rl.json",
+        data_template_path="maxtext/examples/chat_templates/gsm8k_rl.json",
         data_shuffle_seed=42,
         num_batches=1,
         batch_size=5,
@@ -435,7 +465,7 @@ class TrainRLTest(unittest.TestCase):
         eval_split="test",
         hf_train_files="hf://openai/gsm8k/data/dummy.parquet",
         hf_eval_files="hf://openai/gsm8k/data/dummy.parquet",
-        chat_template_path="maxtext/examples/chat_templates/gsm8k_rl.json",
+        data_template_path="maxtext/examples/chat_templates/gsm8k_rl.json",
         data_shuffle_seed=42,
         num_batches=1,
         batch_size=5,
@@ -494,6 +524,101 @@ class TrainRLTest(unittest.TestCase):
 
     with self.assertRaisesRegex(ValueError, "optimizer_memory_host_offload=True is not supported"):
       train_rl._rl_train_impl([], {})  # pylint: disable=protected-access
+
+
+class TokenizerChatTemplateTest(unittest.TestCase):
+  """Unit tests for configure_tokenizer_chat_template."""
+
+  @pytest.mark.cpu_only
+  def test_chat_template_populated_from_config_string(self):
+    """Test that chat_template is set from config.chat_template when tokenizer lacks one."""
+    mock_tokenizer = mock.MagicMock()
+    mock_tokenizer.chat_template = None
+    trainer_config = SimpleNamespace(
+        chat_template="{{ messages[0].content }}",
+        chat_template_path=None,
+        tokenizer_path="dummy-base-model",
+    )
+    train_rl.configure_tokenizer_chat_template(mock_tokenizer, trainer_config)
+    self.assertEqual(mock_tokenizer.chat_template, "{{ messages[0].content }}")
+
+  @pytest.mark.cpu_only
+  @mock.patch("maxtext.input_pipeline.instruction_data_processing.load_chat_template_from_file")
+  def test_chat_template_populated_from_config_file(self, mock_load):
+    """Test that chat_template is loaded from chat_template_path when tokenizer lacks one."""
+    mock_tokenizer = mock.MagicMock()
+    mock_tokenizer.chat_template = None
+    mock_load.return_value = "{% for message in messages %}{{ message.content }}{% endfor %}"
+    trainer_config = SimpleNamespace(
+        chat_template=None,
+        chat_template_path="/path/to/jinja_template.json",
+        tokenizer_path="dummy-base-model",
+    )
+    train_rl.configure_tokenizer_chat_template(mock_tokenizer, trainer_config)
+    mock_load.assert_called_once_with("/path/to/jinja_template.json")
+    self.assertEqual(
+        mock_tokenizer.chat_template,
+        "{% for message in messages %}{{ message.content }}{% endfor %}",
+    )
+
+  @pytest.mark.cpu_only
+  def test_chat_template_raises_value_error_when_empty(self):
+    """Test that ValueError is raised when tokenizer lacks chat_template and both config options are empty."""
+    mock_tokenizer = mock.MagicMock()
+    mock_tokenizer.chat_template = None
+    trainer_config = SimpleNamespace(
+        chat_template=None,
+        chat_template_path=None,
+        tokenizer_path="dummy-base-model",
+    )
+    with self.assertRaisesRegex(ValueError, "Tokenizer 'dummy-base-model' has no chat_template"):
+      train_rl.configure_tokenizer_chat_template(mock_tokenizer, trainer_config)
+
+  @pytest.mark.cpu_only
+  def test_chat_template_unchanged_when_already_exists(self):
+    """Test that an existing chat_template on the tokenizer is preserved (backward compatibility)."""
+    mock_tokenizer = mock.MagicMock()
+    mock_tokenizer.chat_template = "{{ existing_template }}"
+    trainer_config = SimpleNamespace(
+        chat_template="{{ overridden_template }}",
+        chat_template_path=None,
+        tokenizer_path="dummy-instruction-tuned-model",
+    )
+    train_rl.configure_tokenizer_chat_template(mock_tokenizer, trainer_config)
+    self.assertEqual(mock_tokenizer.chat_template, "{{ existing_template }}")
+
+  @pytest.mark.cpu_only
+  def test_apply_chat_template_works_after_configuration(self):
+    """Verifies apply_chat_template succeeds and produces the expected format after our code path runs."""
+
+    class DummyTokenizer:  # pylint: disable=missing-class-docstring
+
+      def __init__(self):
+        self.chat_template = None
+
+      def apply_chat_template(self, conversation, tokenize=False):
+        if self.chat_template is None:
+          raise ValueError("Cannot apply chat template because chat_template is None")
+        import jinja2  # pylint: disable=import-outside-toplevel
+
+        env = jinja2.Environment()
+        template = env.from_string(self.chat_template)
+        return template.render(messages=conversation)
+
+    tokenizer = DummyTokenizer()
+    trainer_config = SimpleNamespace(
+        chat_template="{{ messages[0].content }}",
+        chat_template_path=None,
+        tokenizer_path="dummy-base-model",
+    )
+    # Initially, apply_chat_template fails (simulating HF tokenizer crash when chat_template is None)
+    with self.assertRaises(ValueError):
+      tokenizer.apply_chat_template([{"role": "user", "content": "Hello!"}])
+    # Run the proposed change
+    train_rl.configure_tokenizer_chat_template(tokenizer, trainer_config)
+    # Verify apply_chat_template now runs successfully and renders correct content
+    rendered = tokenizer.apply_chat_template([{"role": "user", "content": "Hello!"}])
+    self.assertEqual(rendered, "Hello!")
 
 
 if __name__ == "__main__":
