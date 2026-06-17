@@ -409,9 +409,8 @@ Gemma4DecoderLayerToLinen = nnx_wrappers.to_linen_class(
     base_metadata_fn=initializers.variable_to_logically_partitioned,
 )
 
-
 class Gemma4ScannableBlock(nnx.Module):
-  """A repeatable block of Gemma4 decoder layers."""
+  """A repeatable block of Gemma4 decoder layers, scanning local layers."""
 
   def __init__(
       self,
@@ -420,7 +419,7 @@ class Gemma4ScannableBlock(nnx.Module):
       model_mode: str,
       rngs: nnx.Rngs,
       quant: None | Quant = None,
-      num_of_layers: int = 1,
+      num_of_layers: int = 6,
   ):
     """Initializes the instance.
 
@@ -439,19 +438,78 @@ class Gemma4ScannableBlock(nnx.Module):
     self.rngs = rngs
     self.num_of_layers = num_of_layers
 
-    for layer_id in range(self.num_of_layers):
-      attention_type = get_attention_type(layer_id)
-      layer_name = f"layers_{layer_id}"
-      layer = Gemma4DecoderLayer(
+    # Pattern is 5 local, 1 global.
+    self.num_local = min(5, num_of_layers)
+    self.num_global = max(0, num_of_layers - 5)
+
+    if self.num_local > 0:
+      self.local_layers = nnx_wrappers.create_scanned_layers(
+          Gemma4DecoderLayer,
+          config=self.config,
+          mesh=self.mesh,
+          model_mode=self.model_mode,
+          quant=self.quant,
+          length=self.num_local,
+          metadata_axis_name="local_layers",
+          rngs=self.rngs,
+          attention_type=AttentionType.LOCAL_SLIDING,
+          layer_idx=0,
+      )
+    else:
+      self.local_layers = None
+
+    if self.num_global > 0:
+      self.global_layer = Gemma4DecoderLayer(
           config=self.config,
           mesh=self.mesh,
           model_mode=self.model_mode,
           rngs=self.rngs,
           quant=self.quant,
-          attention_type=attention_type,
-          layer_idx=layer_id,
+          attention_type=AttentionType.GLOBAL,
+          layer_idx=5,
       )
-      setattr(self, layer_name, layer)
+    else:
+      self.global_layer = None
+
+  def _apply_local_layers(
+      self,
+      y,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      slot=None,
+      page_state=None,
+      previous_chunk=None,
+      bidirectional_mask=None,
+  ):
+    graphdef, params, state = nnx.split(self.local_layers, nnx.Param, ...)
+
+    def scan_body(carry, scanned_vars):
+      current_params, current_state = scanned_vars
+      layer = nnx.merge(graphdef, current_params, current_state)
+      out_y, _ = layer(
+          carry,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+          slot=slot,
+          page_state=page_state,
+          previous_chunk=previous_chunk,
+          bidirectional_mask=bidirectional_mask,
+      )
+      _, _, new_state = nnx.split(layer, nnx.Param, ...)
+      return out_y, new_state
+
+    scan_axis = self.config.param_scan_axis
+    if scan_axis != 0:
+      params = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0), params)
+
+    final_y, new_states = jax.lax.scan(scan_body, y, (params, state), unroll=True)
+
+    nnx.update(self.local_layers, new_states)
+    return final_y
 
   def __call__(
       self,
@@ -469,8 +527,21 @@ class Gemma4ScannableBlock(nnx.Module):
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     y = inputs
 
-    for layer_id in range(self.num_of_layers):
-      y, _ = getattr(self, f"layers_{layer_id}")(
+    if self.local_layers is not None:
+      y = self._apply_local_layers(
+          y,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+          slot=slot,
+          page_state=page_state,
+          previous_chunk=previous_chunk,
+          bidirectional_mask=bidirectional_mask,
+      )
+
+    if self.global_layer is not None:
+      y, _ = self.global_layer(
           y,
           decoder_segment_ids,
           decoder_positions,
