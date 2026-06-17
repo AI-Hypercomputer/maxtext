@@ -14,41 +14,32 @@
 
 """Quantization library."""
 
+from dataclasses import dataclass
 import functools
 import json
-import qwix.pallas as qpl
 import re
-from typing import Tuple, Sequence, Callable
-from dataclasses import dataclass
+from typing import Callable, Sequence, Tuple
 
-from aqt.jax.v2 import config as aqt_config
 from aqt.jax.v2 import aqt_tensor
-from aqt.jax.v2.flax import aqt_flax
-from aqt.jax.v2 import tiled_dot_general
 from aqt.jax.v2 import calibration
-
-import qwix
-from qwix._src.core import dot_general_qt
-from qwix._src.core import sparsity
-
+from aqt.jax.v2 import config as aqt_config
+from aqt.jax.v2 import tiled_dot_general
+from aqt.jax.v2.flax import aqt_flax
+from flax import nnx
+import flax.linen as nn
+from flax.linen import fp8_ops
+from flax.linen import initializers as flax_initializers
 import jax
 import jax.numpy as jnp
 from jax.tree_util import tree_flatten_with_path, tree_unflatten
-
-from flax.linen import fp8_ops
-from flax.linen import initializers as flax_initializers
-import flax.linen as nn
-from flax import nnx
-# Support different packaging structures across environments even within
-# the same Qwix version identifier (imports from _src.utils vs _src).
-try:
-  from qwix._src.utils import flax_util
-except ImportError:
-  from qwix._src import flax_util  # pytype: disable=import-error
-from maxtext.layers import nnx_wrappers
-
-from maxtext.common.common_types import DType, Config
+from maxtext.common.common_types import Config, DType
 from maxtext.inference.kvcache import KVQuant
+from maxtext.layers import nnx_wrappers
+import qwix
+from qwix._src.core import dot_general_qt
+from qwix._src.core import sparsity
+from qwix._src import flax_util
+import qwix.pallas as qpl
 
 # Params used to define mixed precision quantization configs
 DEFAULT = "__default__"  # default config
@@ -150,12 +141,18 @@ class AqtQuantization:
     return quant_dg, is_tiled, tiling_fn
 
   def _get_rhs_axis_metadata_wrapper(
-      self, mesh_axes: Tuple[str, ...] = (), is_tiled: bool = False, replicate_scale: bool = False
+      self,
+      mesh_axes: Tuple[str, ...] = (),
+      is_tiled: bool = False,
+      replicate_scale: bool = False,
   ):
     if self.quant_mode == aqt_flax.QuantMode.CONVERT:
       return None
     return functools.partial(
-        _rhs_axis_metadata_wrapper, mesh_axes=mesh_axes, is_tiled=is_tiled, replicate_scale=replicate_scale
+        _rhs_axis_metadata_wrapper,
+        mesh_axes=mesh_axes,
+        is_tiled=is_tiled,
+        replicate_scale=replicate_scale,
     )
 
   def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
@@ -359,8 +356,20 @@ class Fp8Einsum(nn.Module):
     k = jnp.asarray(k, comp_dtype)
     x = jnp.asarray(x, comp_dtype)
 
-    x_qdq = fp8_ops.in_qdq(comp_dtype, self.e4m3_dtype, x, self.input_scale.value, self.input_amax_history.value)
-    k_qdq = fp8_ops.in_qdq(comp_dtype, self.e4m3_dtype, k, self.kernel_scale.value, self.kernel_amax_history.value)
+    x_qdq = fp8_ops.in_qdq(
+        comp_dtype,
+        self.e4m3_dtype,
+        x,
+        self.input_scale.value,
+        self.input_amax_history.value,
+    )
+    k_qdq = fp8_ops.in_qdq(
+        comp_dtype,
+        self.e4m3_dtype,
+        k,
+        self.kernel_scale.value,
+        self.kernel_amax_history.value,
+    )
 
     y_qdq = jnp.einsum(eqn, x_qdq, k_qdq, _dot_general=fp8_ops.dot_general_with_precision)
 
@@ -386,6 +395,7 @@ class NANOOFp8Quantization(Quantization):
 
 
 def _get_int8_quant_config(config):
+  """Get int8 quantization configuration."""
   drhs_bits = None
   drhs_accumulator_dtype = None
   drhs_local_aqt = None
@@ -553,7 +563,12 @@ def _get_aqt_fp8_default_config(config):
 
 def _get_aqt_fp8_quant_config(config):
   """get aqt for 8-bit floating point quantization configuration"""
-  cfg = aqt_config.config_v4(fwd_bits="e4m3", dlhs_bits=None, drhs_bits=None, fwd_accumulator_dtype=jnp.bfloat16)
+  cfg = aqt_config.config_v4(
+      fwd_bits="e4m3",
+      dlhs_bits=None,
+      drhs_bits=None,
+      fwd_accumulator_dtype=jnp.bfloat16,
+  )
   return cfg
 
 
@@ -572,7 +587,14 @@ def _dot_general_make(quant_cfg):
 
 
 def _get_default_mp_config(default=None):
-  default_config = {_W_BITS: None, _A_BITS: None, _W_SCALE: 1.0, _A_SCALE: 1.0, _TILE_SIZE: -1}
+  """Get default mixed precision configuration."""
+  default_config = {
+      _W_BITS: None,
+      _A_BITS: None,
+      _W_SCALE: 1.0,
+      _A_SCALE: 1.0,
+      _TILE_SIZE: -1,
+  }
   if default:
     default_config.update(default)
   return default_config
@@ -590,7 +612,10 @@ def _get_mixed_precision_quant_config(mixed_precision_config):
     if layer_name_re != DEFAULT:
       for k in quant_config:
         quant_config[k] = layer_quantization_config.get(k, default_mp_config[k])
-    ret_config[layer_name_re] = [_dot_general_make(quant_config), quant_config["tile_size"]]
+    ret_config[layer_name_re] = [
+        _dot_general_make(quant_config),
+        quant_config["tile_size"],
+    ]
   return ret_config
 
 
@@ -850,7 +875,10 @@ def maybe_quantize_model(model, config):
     quantization_provider = get_qt_provider(config)
     if quantization_provider:
       if config.pure_nnx:
-        input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
+        input_shape = (
+            config.micro_batch_size_to_train_on,
+            config.max_target_length,
+        )
         dummy_tokens = jnp.ones(input_shape, dtype=jnp.int32)
         dummy_positions = jnp.ones(input_shape, dtype=jnp.int32)
         dummy_segment_ids = jnp.ones(input_shape, dtype=jnp.int32)
@@ -1012,19 +1040,25 @@ class TransformerEngineQuantization(Quantization):
     """
 
     import transformer_engine.jax  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
-
-    fp8_recipe = self._recipe
+    from transformer_engine.common import recipe  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
 
     class TEWrapper(transformer_engine.jax.flax.module.TransformerEngineBase):
       """Wrapper module for TransformerEngine quantization."""
 
-      def generate_quantizer_set(self, postfix: str = ""):
+      def generate_quantizer_set(
+          self,
+          postfix: str = "",
+          _variable_collection: str | None = None,
+          _quantization_checkpoint_name: str | None = None,
+          _fp8_recipe: recipe.Recipe | None = None,
+          **_kwargs,
+      ):
         OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
         return super().generate_quantizer_set(  # pytype: disable=wrong-keyword-args
             postfix=postfix,
             variable_collection=OVERWRITE_WITH_GRADIENT,
             quantization_checkpoint_name="quantization",
-            fp8_recipe=fp8_recipe,
+            fp8_recipe=self._recipe,
         )
 
       @nn.compact
@@ -1039,9 +1073,12 @@ class TransformerEngineQuantization(Quantization):
     """Placeholder for dot_general implementation in subclasses."""
     import transformer_engine.jax  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
 
-    def te_dot_general(generate_quantizer_set, x, kernel, dims, **kwargs):
+    def te_dot_general(generate_quantizer_set, x, kernel, dims, **_kwargs):
       contracting_dims, batch_dims = dims
-      assert batch_dims == ((), ()), "Batch dimensions must be empty for TransformerEngine dot."
+      assert batch_dims == (
+          (),
+          (),
+      ), "Batch dimensions must be empty for TransformerEngine dot."
 
       quantizer_set = generate_quantizer_set()
       return transformer_engine.jax.dense.dense(
