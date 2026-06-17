@@ -67,6 +67,7 @@ def print_structure(data_dict):
 # ==============================================================================
 
 
+# pylint: disable=import-outside-toplevel
 def _inspect_safetensors(ckpt_paths, check_dtype):
   """Inspects HuggingFace safetensors checkpoints instantly without loading weights.
 
@@ -100,6 +101,7 @@ def _inspect_safetensors(ckpt_paths, check_dtype):
   return param_dict
 
 
+# pylint: disable=import-outside-toplevel
 def _inspect_pth(ckpt_paths, check_dtype):
   """Inspects HuggingFace .pth checkpoints.
 
@@ -166,6 +168,7 @@ def inspect_hf(args):
 # ==============================================================================
 
 
+# pylint: disable=import-outside-toplevel
 def inspect_maxtext(args, remaining_args):
   """Inspects MaxText theoretical architecture shapes.
 
@@ -233,8 +236,11 @@ def inspect_maxtext(args, remaining_args):
 
 
 # ==============================================================================
-# Mode 3: Orbax Checkpoint (Saved)
+# Mode 3: Orbax Checkpoint
 # ==============================================================================
+
+
+# pylint: disable=import-outside-toplevel
 def inspect_orbax(args):
   """Inspects Orbax checkpoint structures.
 
@@ -316,7 +322,7 @@ def main():
   )
 
   # Mode 2: MaxText Architecture
-  parser_mt = subparsers.add_parser("maxtext", parents=[shared_parser], help="Inspect MaxText theoretical architecture")
+  subparsers.add_parser("maxtext", parents=[shared_parser], help="Inspect MaxText theoretical architecture")
 
   # Mode 3: Orbax
   parser_orbax = subparsers.add_parser("orbax", parents=[shared_parser], help="Inspect saved Orbax checkpoint metadata")

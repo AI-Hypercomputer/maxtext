@@ -252,11 +252,13 @@ python src/maxtext/checkpoint_conversion/inspect_checkpoint.py hf --path <local_
 ```
 
 **Tool 2 (MaxText Inspector)**. To inspect the MaxText model structure:
+
 ```
 python src/maxtext/checkpoint_conversion/inspect_checkpoint.py maxtext model_name=<maxtext_model_name> scan_layers=<True | False>
 ```
 
 **Tool 3 (Orbax Inspector)**. To inspect the Orbax checkpoint:
+
 ```
 python src/maxtext/checkpoint_conversion/inspect_checkpoint.py orbax --path <local_orbax_path | gcs_orbax_path>
 ```
@@ -292,13 +294,15 @@ Here is an example [PR to add support for gemma3 multi-modal model](https://gith
   - **Solution:** To see the MaxText model structure, use **Tool 2 (MaxText Inspector)**. To inspect the checkpoint, use **Tool 3 (Orbax Inspector)**.
 
 - **Error:** `Type ShapeDtypeStruct is not a valid JAX type` or generic **PyTree structure/shape mismatches** (e.g., Orbax reporting `"X/Y paths matched"`, such as `143/145 paths`).
-  
+
   - **Cause: Configuration mismatch** (e.g., `scan_layers`) between the checkpoint conversion script (e.g., `to_maxtext.py` or `to_huggingface.py`) and the trainer/inference runner (e.g., `train.py`).
 
   - **Solution:** Ensure the `scan_layers` flag is set to the exact same value (`True` or `False`) in both the conversion command and your training/execution command.
 
 - **Error:** The converted checkpoint loads without errors but produces nonsensical output.
+
   - **Cause:** There is likely an error in the Q/K/V weight reshaping logic during conversion.
 
 - **Error:** The model generates repetitive text sequences.
+
   - **Cause:** Layer normalization parameters were likely not mapped correctly.
