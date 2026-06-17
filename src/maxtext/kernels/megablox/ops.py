@@ -26,7 +26,15 @@ from maxtext.layers import quantizations
 import qwix
 import qwix.pallas as qpl
 import tokamax
+from tokamax._src.ops.ragged_dot import pallas_mosaic_tpu_v2_gmm_kernel as gmm_v2
+from tokamax._src.ops.ragged_dot import pallas_mosaic_tpu_v2_tgmm_kernel as tgmm_v2
 
+
+DLHS_RAGGED_DOT_DIM_NUMS = jax.lax.RaggedDotDimensionNumbers(
+    dot_dimension_numbers=(([1], [2]), ([], [])),
+    lhs_ragged_dimensions=[0],
+    rhs_group_dimensions=[0],
+)
 
 DRHS_RAGGED_DOT_DIM_NUMS = jax.lax.RaggedDotDimensionNumbers(
     dot_dimension_numbers=(([0], [0]), ([], [])),
@@ -64,7 +72,8 @@ def gmm(
     rhs_vma_axes: tuple = tuple(),
     # TODO(amandaliang): get rid of the qwix_rule in favor of Qwix's interception feature
     qwix_rule: qwix.QtRule | None = None,
-    use_manual_quantization: bool = False,  # used in batchsplit
+    use_manual_quantization: bool = False,
+    use_gmm_v2: bool = False,
 ):
   """Grouped matrix multiplication operation."""
   quantization_rule = None
@@ -84,7 +93,7 @@ def gmm(
       )
 
   gmm_fwd_bwd = lambda *args: _gmm_fwd(*args)[0]  # pylint: disable=C3001
-  gmm_fwd_bwd = jax.custom_vjp(gmm_fwd_bwd, nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14))
+  gmm_fwd_bwd = jax.custom_vjp(gmm_fwd_bwd, nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15))
   gmm_fwd_bwd.defvjp(_gmm_fwd, functools.partial(_gmm_bwd, lhs.dtype, rhs.dtype))
   return gmm_fwd_bwd(
       lhs,
@@ -100,6 +109,7 @@ def gmm(
       use_tokamax_backend,
       weight_gather_axes,
       use_manual_quantization,
+      use_gmm_v2,
       lhs_vma_axes,
       rhs_vma_axes,
   )
@@ -129,6 +139,7 @@ def _gmm_fwd(
     use_tokamax_backend: bool = False,
     weight_gather_axes: List[Tuple[str, int]] | None = None,
     use_manual_quantization: bool = False,
+    use_gmm_v2: bool = False,
     lhs_vma_axes: tuple = tuple(),
     rhs_vma_axes: tuple = tuple(),
 ) -> tuple[
@@ -142,7 +153,7 @@ def _gmm_fwd(
 ]:
   """Forward function for GMM VJP."""
   if quantization_rule:
-    if quantization_rule.act_qtype and not isinstance(lhs, qpl.QArray):
+    if not use_gmm_v2 and quantization_rule.act_qtype and not isinstance(lhs, qpl.QArray):
       lhs = qpl.quantize(
           lhs,
           quantization_rule.act_qtype,
@@ -150,7 +161,7 @@ def _gmm_fwd(
           calibration_method=quantization_rule.act_calibration_method,
       )
     if quantization_rule.weight_qtype and not isinstance(rhs, qpl.QArray):
-      if not use_manual_quantization:
+      if use_gmm_v2 or not use_manual_quantization:
         rhs = qpl.quantize(
             rhs,
             quantization_rule.weight_qtype,
@@ -163,11 +174,11 @@ def _gmm_fwd(
       else:
         rhs = quantizations.manual_quantize(
             rhs,
+            quantization_rule.weight_calibration_method,
             quantization_rule.weight_qtype,
-            calibration_method=quantization_rule.weight_calibration_method,
         )
   # QAG is only supported for following conditions
-  if use_tokamax_backend:
+  if use_gmm_v2 or use_tokamax_backend:
     if quantization_rule and quantization_rule.bwd_qtype:
       if quantization_rule.weight_calibration_method.startswith("fixed") and isinstance(rhs, qpl.QArray):
         if weight_gather_axes:
@@ -178,23 +189,41 @@ def _gmm_fwd(
     if transpose_rhs:
       rhs = rhs.swapaxes(1, 2)
 
-    # manual_axis_type is for gmm with shard_map check_vma=True, needs tokamax > 0.0.12
-    out_kwargs = {}
-    if use_manual_quantization:
-      # used in batchsplit
-      out_kwargs["manual_axis_type"] = jax.sharding.ManualAxisType(varying=frozenset(["data", "fsdp", "expert"]))
-
-    out = tokamax.ragged_dot(
-        lhs=lhs,
-        rhs=rhs,
+  if use_gmm_v2:
+    out = gmm_v2.gmm_v2(
+        lhs=lhs.qvalue if isinstance(lhs, qpl.QArray) else lhs,
+        rhs=rhs.qvalue if isinstance(rhs, qpl.QArray) else rhs,
         group_sizes=group_sizes,
-        precision=jax.lax.Precision.DEFAULT,
+        rhs_scale=jnp.expand_dims(rhs.scale, axis=2) if isinstance(rhs, qpl.QArray) else None,
+        tile_info=gmm_v2.TileSizes(
+            tile_m=tiling[0],
+            tile_k=tiling[1],
+            tile_n=tiling[2],
+        ),
         preferred_element_type=preferred_element_type,
-        # `group_offset` is not yet supported
-        group_offset=None,
-        implementation="mosaic",
-        **out_kwargs,
     )
+  elif use_tokamax_backend:
+    if use_manual_quantization:
+      out = tokamax.ragged_dot(
+          lhs=lhs,
+          rhs=rhs,
+          group_sizes=group_sizes,
+          precision=jax.lax.Precision.DEFAULT,
+          preferred_element_type=preferred_element_type,
+          group_offset=group_offset,
+          implementation="mosaic",
+          manual_axis_type=jax.sharding.ManualAxisType(varying=frozenset(["data", "fsdp", "expert"])),
+      )
+    else:
+      out = tokamax.ragged_dot(
+          lhs=lhs,
+          rhs=rhs,
+          group_sizes=group_sizes,
+          precision=jax.lax.Precision.DEFAULT,
+          preferred_element_type=preferred_element_type,
+          group_offset=group_offset,
+          implementation="mosaic",
+      )
   else:
     out = backend.gmm(
         lhs,
@@ -224,6 +253,7 @@ def _gmm_bwd(
     use_tokamax_backend: bool,
     weight_gather_axes: List[Tuple[str, int]] | None,
     use_manual_quantization: bool,
+    use_gmm_v2: bool,
     lhs_vma_axes: tuple,
     rhs_vma_axes: tuple,
     residual: tuple[
@@ -236,6 +266,7 @@ def _gmm_bwd(
 ) -> tuple[jnp.ndarray, jnp.ndarray, None, None, jnp.ndarray]:
   """Backward function for throughput GMM VJP."""
   del preferred_element_type
+  # grad = grad.astype(lhs_dtype)
   lhs, rhs, group_sizes, group_offset = residual
   num_actual_groups = rhs.shape[0]
 
@@ -260,6 +291,15 @@ def _gmm_bwd(
     # Apply lhs.scale to drhs_dout, as axis m will disappear in drhs.
     drhs_dout *= lhs.scale.astype(grad.dtype)
     lhs = lhs.qvalue
+  elif use_gmm_v2 and quantization_rule:
+    lhs_quant = qpl.quantize(
+        lhs,
+        quantization_rule.act_qtype,
+        channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [0],
+        calibration_method=quantization_rule.act_calibration_method,
+    )
+    lhs = lhs_quant.qvalue
+    drhs_dout *= lhs_quant.scale.astype(grad.dtype)
   if quantization_rule and quantization_rule.bwd_qtype:
     # Enable backward pass quantization
     dlhs_dout = qpl.quantize(
@@ -274,45 +314,93 @@ def _gmm_bwd(
         channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [1],
         calibration_method=quantization_rule.bwd_calibration_method,
     )
-  if use_tokamax_backend:
+  # use_tokamax_backend = False
+  # use_gmm_v2 = False
+  if use_tokamax_backend or use_gmm_v2:
     # Handle transpose_rhs manually
     dlhs_rhs = rhs
-    if not transpose_rhs:
+    if transpose_rhs or use_gmm_v2:
       dlhs_rhs = dlhs_rhs.swapaxes(1, 2)
 
-    # manual_axis_type is for gmm with shard_map check_vma=True, needs tokamax > 0.0.12
-    dlhs_kwargs = {}
-    drhs_kwargs = {}
-    if use_manual_quantization:
-      # used in batchsplit
-      dlhs_kwargs["manual_axis_type"] = jax.sharding.ManualAxisType(varying=frozenset(["data", "fsdp", "expert"]))
-      drhs_kwargs["manual_axis_type"] = jax.sharding.ManualAxisType(
-          varying=frozenset(["expert"]), unreduced=frozenset(["data", "fsdp"])
-      )
-
-    dlhs = tokamax.ragged_dot(
+    if use_gmm_v2:
+      dlhs = gmm_v2.gmm_v2(
         lhs=dlhs_dout,
         rhs=dlhs_rhs,
         group_sizes=group_sizes,
-        precision=jax.lax.Precision.DEFAULT,
+        tile_info=gmm_v2.TileSizes(
+            tile_m=tiling[3],
+            tile_k=tiling[4],
+            tile_n=tiling[5],
+          ),
         preferred_element_type=lhs_dtype,
-        # `group_offset` is not yet supported
-        group_offset=None,
-        implementation="mosaic",
-        **dlhs_kwargs,
-    )
-    drhs = tokamax.ragged_dot_general(
-        lhs=lhs,
-        rhs=drhs_dout,
-        group_sizes=group_sizes,
-        ragged_dot_dimension_numbers=DRHS_RAGGED_DOT_DIM_NUMS,
-        precision=jax.lax.Precision.DEFAULT,
-        preferred_element_type=rhs_dtype,
-        # `group_offset` is not yet supported
-        group_offset=None,
-        implementation="mosaic",
-        **drhs_kwargs,
-    )
+      )
+    elif use_manual_quantization:
+      dlhs = tokamax.ragged_dot_general(
+          lhs=dlhs_dout,
+          rhs=dlhs_rhs,
+          group_sizes=group_sizes,
+          ragged_dot_dimension_numbers=DLHS_RAGGED_DOT_DIM_NUMS,
+          precision=jax.lax.Precision.DEFAULT,
+          preferred_element_type=lhs_dtype,
+          group_offset=group_offset,
+          implementation="mosaic",
+          manual_axis_type=jax.sharding.ManualAxisType(varying=frozenset(["data", "fsdp", "expert"])),
+      )
+    else:
+      dlhs = tokamax.ragged_dot_general(
+          lhs=dlhs_dout,
+          rhs=dlhs_rhs,
+          group_sizes=group_sizes,
+          ragged_dot_dimension_numbers=DLHS_RAGGED_DOT_DIM_NUMS,
+          precision=jax.lax.Precision.DEFAULT,
+          preferred_element_type=lhs_dtype,
+          group_offset=group_offset,
+          implementation="mosaic",
+      )
+    if use_gmm_v2:
+      # If mismatch, cast lhs to match rhs_q.
+      if lhs.dtype != drhs_dout.dtype:
+        drhs_dout = drhs_dout.astype(lhs.dtype)
+      drhs = tgmm_v2.tgmm_v2(
+          lhs=lhs,
+          rhs=drhs_dout.qvalue if isinstance(drhs_dout, qpl.QArray) else drhs_dout,
+          group_sizes=group_sizes,
+          num_actual_groups=num_actual_groups,
+          precision=jax.lax.Precision.DEFAULT,
+          preferred_element_type=rhs_dtype,
+          group_offset=group_offset,
+          tile_info=gmm_v2.TileSizes(
+              tile_m=tiling[6],
+              tile_k=tiling[7],
+              tile_n=tiling[8],
+          ),
+      )
+    elif use_manual_quantization:
+      drhs = tokamax.ragged_dot_general(
+          lhs=lhs,
+          rhs=drhs_dout,
+          group_sizes=group_sizes,
+          ragged_dot_dimension_numbers=DRHS_RAGGED_DOT_DIM_NUMS,
+          precision=jax.lax.Precision.DEFAULT,
+          preferred_element_type=rhs_dtype,
+          group_offset=group_offset,
+          implementation="mosaic",
+          manual_axis_type=jax.sharding.ManualAxisType(
+              varying=frozenset(["expert"]),
+              unreduced=frozenset(["data", "fsdp"]),
+          ),
+      )
+    else:
+      drhs = tokamax.ragged_dot_general(
+          lhs=lhs,
+          rhs=drhs_dout,
+          group_sizes=group_sizes,
+          ragged_dot_dimension_numbers=DRHS_RAGGED_DOT_DIM_NUMS,
+          precision=jax.lax.Precision.DEFAULT,
+          preferred_element_type=rhs_dtype,
+          group_offset=group_offset,
+          implementation="mosaic",
+      )
     if quantization_rule and quantization_rule.bwd_qtype and weight_gather_axes:
       # Scatter back in reverse order of gather
       for axis_name, axis_idx in reversed(weight_gather_axes):

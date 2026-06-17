@@ -1297,33 +1297,21 @@ class RoutedMoE(nnx.Module):
       # We support three implementations for gmm - tokamax, older forked kernel, or jax.lax.ragged_dot
       # For quantized tokamax we call a forked version that supports our quantization recipes.
       if self.config.use_tokamax_gmm:
-        if self.config.quantization:  # tokamax (quantized)
-          output = mblx.gmm(
-              lhs=inputs,
-              rhs=kernel,
-              group_sizes=group_sizes,
-              preferred_element_type=self.dtype,
-              tiling=tiling,
-              group_offset=group_offset,
-              lhs_quantize_dtype=lhs_quantize_dtype,
-              rhs_quantize_dtype=rhs_quantize_dtype,
-              use_qwix_quantization=self.config.use_qwix_quantization,
-              use_tokamax_backend=self.config.use_tokamax_gmm,
-              weight_gather_axes=weight_gather_axes,
-              lhs_vma_axes=lhs_vma_axes,
-              rhs_vma_axes=rhs_vma_axes,
-          )
-        else:  # tokamax (unquantized)
-          output = tokamax.ragged_dot(
-              lhs=inputs,
-              rhs=kernel,
-              group_sizes=tokamax_group_sizes,
-              precision=jax.lax.Precision.DEFAULT,
-              preferred_element_type=self.dtype,
-              implementation="mosaic",
-              # `group_offset` is not yet supported
-              group_offset=None,
-          )
+        output = mblx.gmm(
+            lhs=inputs,
+            rhs=kernel,
+            group_sizes=group_sizes,
+            preferred_element_type=self.dtype,
+            tiling=tiling,
+            group_offset=group_offset,
+            lhs_quantize_dtype=lhs_quantize_dtype,
+            rhs_quantize_dtype=rhs_quantize_dtype,
+            use_qwix_quantization=self.config.use_qwix_quantization,
+            use_tokamax_backend=self.config.use_tokamax_gmm,
+            weight_gather_axes=weight_gather_axes,
+            lhs_vma_axes=lhs_vma_axes,
+            rhs_vma_axes=rhs_vma_axes,
+        )
       elif self.config.megablox:  # Older forked megablox
         output = mblx.gmm(
             lhs=inputs,
