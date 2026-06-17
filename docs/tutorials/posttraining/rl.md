@@ -126,6 +126,20 @@ The overview of what this run will do is as follows:
 4. Evaluate the policy model's performance on GSM8K math reasoning benchmark
    after the post-training with GRPO.
 
+By default, the above command will train the model using GRPOLearner from Tunix. To enable
+asynchronous RL training with AgenticGRPOLearner, we can set `rl.use_agentic_rollout` to
+true. An example command will be:
+
+```
+python3 -m maxtext.trainers.post_train.rl.train_rl \
+  model_name=${MODEL?} \
+  load_parameters_path=${MAXTEXT_CKPT_PATH?} \
+  run_name=${RUN_NAME?} \
+  base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+  chips_per_vm=${CHIPS_PER_VM?} \
+  rl.use_agentic_rollout=True
+```
+
 ## Run GSPO
 
 Run the following command for GSPO:
