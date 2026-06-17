@@ -95,15 +95,31 @@ jobs:
 
   notify_failure:
     name: Notify failed build
-    needs: [build-and-push]
-    if: ${{ failure() && inputs.image_suffix == '' }}
+    needs: [build_and_upload_maxtext_package, build-and-push]
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     permissions:
       issues: write
     steps:
       - name: Create issue on failure
+        if: ${{ contains(needs.*.result, 'failure') && inputs.image_suffix == '' }}
         uses: jayqi/failed-build-issue-action@1a893bbf43ef1c2a8705e2b115cd4f0fe3c5649b
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           title-template: "MaxText Docker Image Build Failure"
           label-name: "docker-image-build-failure"
+
+  investigate_failure:
+    name: Investigate failed build
+    needs: [build_and_upload_maxtext_package, build-and-push, notify_failure]
+    if: ${{ always() && contains(needs.*.result, 'failure') && inputs.image_suffix == '' }}
+    uses: ./.github/workflows/gemini-investigate.yml
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+      issues: 'write'
+      pull-requests: 'write'
+      actions: 'read'
+    with:
+      failed_run_id: '${{ github.run_id }}'
+    secrets: inherit
