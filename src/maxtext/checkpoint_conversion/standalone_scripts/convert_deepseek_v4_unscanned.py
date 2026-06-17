@@ -35,7 +35,7 @@ def get_path_string(path):
 
 def get_path_string2(path):
   key_parts = [str(k.key) for k in path if hasattr(k, "key")]
-  param_key = "params." + ".".join(key_parts)
+  param_key = ".".join(key_parts)
   return param_key
 
 def get_block_prefix(path_str):
@@ -175,6 +175,7 @@ def get_unscanned_weight(hf_prefix, suffix, weight_dict, config):
   """Extracts a single un-scanned layer weight. Extracted from original map_fn."""
   num_experts = config.num_experts
 
+
   # Normalize HCA / CSA prefix differences
   if suffix.startswith("self_attention-csa_compressor-"):
     suffix = suffix.replace("self_attention-csa_compressor-", "self_attention-compressor-")
@@ -235,7 +236,9 @@ def get_unscanned_weight(hf_prefix, suffix, weight_dict, config):
 
   # Self Attention
   if suffix in ("self_attention-wq_a-kernel", "self_attention-q_a_proj-kernel") and f"{hf_prefix}.attn.wq_a.weight" in weight_dict: return transposed_match(weight_dict[f"{hf_prefix}.attn.wq_a.weight"])
-  if suffix in ("self_attention-wq_b-kernel", "self_attention-q_b_proj-kernel") and f"{hf_prefix}.attn.wq_b.weight" in weight_dict: return transposed_match(weight_dict[f"{hf_prefix}.attn.wq_b.weight"])
+  if suffix in ("self_attention-wq_b-kernel", "self_attention-q_b_proj-kernel") and f"{hf_prefix}.attn.wq_b.weight" in weight_dict:
+    w = transposed_match(weight_dict[f"{hf_prefix}.attn.wq_b.weight"])
+    return w.reshape(config.q_lora_rank, config.num_query_heads, config.head_dim)
   if suffix in ("self_attention-q_norm-scale", "self_attention-q_a_norm-scale") and f"{hf_prefix}.attn.q_norm.weight" in weight_dict: return valid_match(weight_dict[f"{hf_prefix}.attn.q_norm.weight"])
   if suffix in ("self_attention-wkv-kernel", "self_attention-kv_proj-kernel") and f"{hf_prefix}.attn.wkv.weight" in weight_dict: return transposed_match(weight_dict[f"{hf_prefix}.attn.wkv.weight"])
   if suffix == "self_attention-kv_norm-scale" and f"{hf_prefix}.attn.kv_norm.weight" in weight_dict: return valid_match(weight_dict[f"{hf_prefix}.attn.kv_norm.weight"])
@@ -250,7 +253,9 @@ def get_unscanned_weight(hf_prefix, suffix, weight_dict, config):
   if suffix == "self_attention-compressor-kv_norm-scale" and f"{hf_prefix}.attn.compressor.norm.weight" in weight_dict: return valid_match(weight_dict[f"{hf_prefix}.attn.compressor.norm.weight"])
   if suffix == "self_attention-compressor-gate_proj-kernel" and f"{hf_prefix}.attn.compressor.wgate.weight" in weight_dict: return transposed_match(weight_dict[f"{hf_prefix}.attn.compressor.wgate.weight"])
   if suffix == "self_attention-compressor-kv_proj-kernel" and f"{hf_prefix}.attn.compressor.wkv.weight" in weight_dict: return transposed_match(weight_dict[f"{hf_prefix}.attn.compressor.wkv.weight"])
-  if suffix == "self_attention-compressor-indexer-q_b_proj-kernel" and f"{hf_prefix}.attn.indexer.wq_b.weight" in weight_dict: return transposed_match(weight_dict[f"{hf_prefix}.attn.indexer.wq_b.weight"])
+  if suffix == "self_attention-compressor-indexer-q_b_proj-kernel" and f"{hf_prefix}.attn.indexer.wq_b.weight" in weight_dict:
+    w = transposed_match(weight_dict[f"{hf_prefix}.attn.indexer.wq_b.weight"])
+    return w.reshape(config.q_lora_rank, config.indexer_n_heads, config.indexer_head_dim)
   if suffix == "self_attention-compressor-indexer-position_bias" and f"{hf_prefix}.attn.indexer.compressor.ape" in weight_dict: return valid_match(weight_dict[f"{hf_prefix}.attn.indexer.compressor.ape"])
   if suffix == "self_attention-compressor-indexer-kv_norm-scale" and f"{hf_prefix}.attn.indexer.compressor.norm.weight" in weight_dict: return valid_match(weight_dict[f"{hf_prefix}.attn.indexer.compressor.norm.weight"])
   if suffix == "self_attention-compressor-indexer-gate_proj-kernel" and f"{hf_prefix}.attn.indexer.compressor.wgate.weight" in weight_dict: return transposed_match(weight_dict[f"{hf_prefix}.attn.indexer.compressor.wgate.weight"])
@@ -362,7 +367,7 @@ def main():
 
   if len(argv) < 2:
     # Important: Default arguments updated for an unscanned conversion run
-    argv = ['', 'src/maxtext/configs/base.yml', 'model_name=deepseek_v4-flash', 'override_model_config=True', 'attention=dot_product', 'skip_jax_distributed_system=True', 'weight_dtype=bfloat16', 'scan_layers=False', 'base_output_directory=gs://snehalv-data/deepseek_v4-flash/unscanned/']
+    argv = ['', 'src/maxtext/configs/base.yml', 'model_name=deepseek4-284b', 'override_model_config=True', 'attention=dot_product', 'skip_jax_distributed_system=True', 'weight_dtype=bfloat16', 'scan_layers=False', 'base_output_directory=gs://snehalv-data/deepseek_v4-flash/unscanned/']
 
   print("Initializing configuration...")
   # Initialize without heavyweight runtime

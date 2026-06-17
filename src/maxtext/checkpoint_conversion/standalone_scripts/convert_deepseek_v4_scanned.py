@@ -26,17 +26,11 @@ Transformer = models.transformer_as_linen
 # Values: List of HuggingFace layer indices that belong to this block.
 # ==============================================================================
 SCANNED_LAYER_MAPPING = {
-    # 1. Standalone/Unscanned layers
     "decoder-layers_0": [0],
     "decoder-layers_1": [1],
-    "decoder-layers_42": [42],
-
-    # 2. Scanned Blocks
-    # Even indices starting from 2 to 40 (inclusive) -> scanned block 0
-    "decoder-scanned_blocks-layers_0": list(range(2, 42, 2)),
-
-    # Odd indices starting from 3 to 41 (inclusive) -> scanned block 1
-    "decoder-scanned_blocks-layers_1": list(range(3, 42, 2)),
+    "decoder-layers_2": [2],
+    "decoder-scanned_blocks-layers_0": [3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31, 33, 35, 37, 39, 41],
+    "decoder-scanned_blocks-layers_1": [4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40, 42],
 }
 
 def get_path_string(path):
@@ -255,7 +249,9 @@ def get_unscanned_weight(hf_prefix, suffix, weight_dict, config):
 
   # Self Attention
   if suffix in ("self_attention-wq_a-kernel", "self_attention-q_a_proj-kernel") and f"{hf_prefix}.attn.wq_a.weight" in weight_dict: return transposed_match(weight_dict[f"{hf_prefix}.attn.wq_a.weight"])
-  if suffix in ("self_attention-wq_b-kernel", "self_attention-q_b_proj-kernel") and f"{hf_prefix}.attn.wq_b.weight" in weight_dict: return transposed_match(weight_dict[f"{hf_prefix}.attn.wq_b.weight"])
+  if suffix in ("self_attention-wq_b-kernel", "self_attention-q_b_proj-kernel") and f"{hf_prefix}.attn.wq_b.weight" in weight_dict:
+    w = transposed_match(weight_dict[f"{hf_prefix}.attn.wq_b.weight"])
+    return w.reshape(config.q_lora_rank, config.num_query_heads, config.head_dim)
   if suffix in ("self_attention-q_norm-scale", "self_attention-q_a_norm-scale") and f"{hf_prefix}.attn.q_norm.weight" in weight_dict: return valid_match(weight_dict[f"{hf_prefix}.attn.q_norm.weight"])
   if suffix in ("self_attention-wkv-kernel", "self_attention-kv_proj-kernel") and f"{hf_prefix}.attn.wkv.weight" in weight_dict: return transposed_match(weight_dict[f"{hf_prefix}.attn.wkv.weight"])
   if suffix == "self_attention-kv_norm-scale" and f"{hf_prefix}.attn.kv_norm.weight" in weight_dict: return valid_match(weight_dict[f"{hf_prefix}.attn.kv_norm.weight"])
@@ -270,7 +266,9 @@ def get_unscanned_weight(hf_prefix, suffix, weight_dict, config):
   if suffix == "self_attention-compressor-kv_norm-scale" and f"{hf_prefix}.attn.compressor.norm.weight" in weight_dict: return valid_match(weight_dict[f"{hf_prefix}.attn.compressor.norm.weight"])
   if suffix == "self_attention-compressor-gate_proj-kernel" and f"{hf_prefix}.attn.compressor.wgate.weight" in weight_dict: return transposed_match(weight_dict[f"{hf_prefix}.attn.compressor.wgate.weight"])
   if suffix == "self_attention-compressor-kv_proj-kernel" and f"{hf_prefix}.attn.compressor.wkv.weight" in weight_dict: return transposed_match(weight_dict[f"{hf_prefix}.attn.compressor.wkv.weight"])
-  if suffix == "self_attention-compressor-indexer-q_b_proj-kernel" and f"{hf_prefix}.attn.indexer.wq_b.weight" in weight_dict: return transposed_match(weight_dict[f"{hf_prefix}.attn.indexer.wq_b.weight"])
+  if suffix == "self_attention-compressor-indexer-q_b_proj-kernel" and f"{hf_prefix}.attn.indexer.wq_b.weight" in weight_dict:
+    w = transposed_match(weight_dict[f"{hf_prefix}.attn.indexer.wq_b.weight"])
+    return w.reshape(config.q_lora_rank, config.indexer_n_heads, config.indexer_head_dim)
   if suffix == "self_attention-compressor-indexer-position_bias" and f"{hf_prefix}.attn.indexer.compressor.ape" in weight_dict: return valid_match(weight_dict[f"{hf_prefix}.attn.indexer.compressor.ape"])
   if suffix == "self_attention-compressor-indexer-kv_norm-scale" and f"{hf_prefix}.attn.indexer.compressor.norm.weight" in weight_dict: return valid_match(weight_dict[f"{hf_prefix}.attn.indexer.compressor.norm.weight"])
   if suffix == "self_attention-compressor-indexer-gate_proj-kernel" and f"{hf_prefix}.attn.indexer.compressor.wgate.weight" in weight_dict: return transposed_match(weight_dict[f"{hf_prefix}.attn.indexer.compressor.wgate.weight"])
@@ -412,7 +410,7 @@ def main():
 
   if len(argv) < 2:
     # Important: Default arguments updated for a scanned conversion run
-    argv = ['', 'src/maxtext/configs/base.yml', 'model_name=deepseek4', 'override_model_config=True', 'attention=dot_product', 'skip_jax_distributed_system=True', 'weight_dtype=bfloat16', 'scan_layers=True', 'base_output_directory=gs://snehalv-data/deepseek_v4-flash/scanned/']
+    argv = ['', 'src/maxtext/configs/base.yml', 'model_name=deepseek4-284b', 'override_model_config=True', 'attention=dot_product', 'skip_jax_distributed_system=True', 'weight_dtype=bfloat16', 'scan_layers=True', 'base_output_directory=gs://snehalv-data/deepseek_v4-flash/scanned/']
 
   print("Initializing configuration...")
   # Initialize without heavyweight runtime

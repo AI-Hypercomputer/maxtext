@@ -604,6 +604,7 @@ def DEEPSEEK_V4_HF_WEIGHTS_TO_SHAPE(config):
   index_n_heads = config["index_n_heads"]
 
   num_heads = config.get("num_attention_heads", 64)
+  head_dim = config.get("head_dim", 512)
 
   mapping = {
       "embed.weight": [vocab_size, hidden_size],
@@ -616,36 +617,49 @@ def DEEPSEEK_V4_HF_WEIGHTS_TO_SHAPE(config):
 
   for layer_idx in range(num_hidden_layers):
     layer_prefix = f"layers.{layer_idx}"
+    hc_mult = config.get("hc_mult", 4)
     layer_mapping = {
         f"{layer_prefix}.attn_norm.weight": [hidden_size],
         f"{layer_prefix}.ffn_norm.weight": [hidden_size],
-        f"{layer_prefix}.hc_attn_fn": [24, hidden_size],
+        f"{layer_prefix}.hc_attn_fn": [24, hc_mult * hidden_size],
         f"{layer_prefix}.hc_attn_base": [24],
         f"{layer_prefix}.hc_attn_scale": [3],
-        f"{layer_prefix}.hc_ffn_fn": [24, hidden_size],
+        f"{layer_prefix}.hc_ffn_fn": [24, hc_mult * hidden_size],
         f"{layer_prefix}.hc_ffn_base": [24],
         f"{layer_prefix}.hc_ffn_scale": [3],
         f"{layer_prefix}.attn.wq_a.weight": [q_lora_rank, hidden_size],
-        f"{layer_prefix}.attn.wq_b.weight": [num_heads * (qk_nope_head_dim + qk_rope_head_dim), q_lora_rank],
+        f"{layer_prefix}.attn.wq_b.weight": [num_heads * head_dim, q_lora_rank],
         f"{layer_prefix}.attn.q_norm.weight": [q_lora_rank],
-        f"{layer_prefix}.attn.wkv.weight": [kv_lora_rank + qk_rope_head_dim, hidden_size],
+        f"{layer_prefix}.attn.wkv.weight": [head_dim, hidden_size],
         f"{layer_prefix}.attn.kv_norm.weight": [kv_lora_rank],
-        f"{layer_prefix}.attn.wo_a.weight": [config["o_lora_rank"], v_head_dim * num_heads],
-        f"{layer_prefix}.attn.wo_b.weight": [hidden_size, config["o_lora_rank"]],
+        f"{layer_prefix}.attn.wo_a.weight": [config["o_groups"] * config["o_lora_rank"], (num_heads * head_dim) // config["o_groups"]],
+        f"{layer_prefix}.attn.wo_b.weight": [hidden_size, config["o_groups"] * config["o_lora_rank"]],
         f"{layer_prefix}.attn.attn_sink": [num_heads],
-        f"{layer_prefix}.attn.compressor.ape": [config["sliding_window"], num_heads],
-        f"{layer_prefix}.attn.compressor.norm.weight": [config["sliding_window"]],
-        f"{layer_prefix}.attn.compressor.wgate.weight": [config["sliding_window"], hidden_size],
-        f"{layer_prefix}.attn.compressor.wkv.weight": [config["sliding_window"], hidden_size],
-        f"{layer_prefix}.attn.indexer.wq_b.weight": [index_n_heads * index_head_dim, q_lora_rank],
-        f"{layer_prefix}.attn.indexer.compressor.ape": [config["sliding_window"], index_n_heads],
-        f"{layer_prefix}.attn.indexer.compressor.norm.weight": [config["sliding_window"]],
-        f"{layer_prefix}.attn.indexer.compressor.wgate.weight": [config["sliding_window"], hidden_size],
-        f"{layer_prefix}.attn.indexer.compressor.wkv.weight": [config["sliding_window"], hidden_size],
-        f"{layer_prefix}.attn.indexer.weights_proj.weight": [index_n_heads, hidden_size],
         f"{layer_prefix}.ffn.gate.weight": [num_experts, hidden_size],
         f"{layer_prefix}.ffn.gate.bias": [num_experts],
     }
+
+    compress_ratio = config["compress_ratios"][layer_idx]
+    if compress_ratio > 0:
+      is_csa = (compress_ratio == 4)
+      comp_out_features = head_dim if not is_csa else 2 * head_dim
+
+      layer_mapping.update({
+          f"{layer_prefix}.attn.compressor.wkv.weight": [comp_out_features, hidden_size],
+          f"{layer_prefix}.attn.compressor.wgate.weight": [comp_out_features, hidden_size],
+          f"{layer_prefix}.attn.compressor.ape": [compress_ratio, comp_out_features],
+          f"{layer_prefix}.attn.compressor.norm.weight": [head_dim],
+      })
+
+      if is_csa:
+        layer_mapping.update({
+            f"{layer_prefix}.attn.indexer.wq_b.weight": [index_n_heads * index_head_dim, q_lora_rank],
+            f"{layer_prefix}.attn.indexer.compressor.ape": [compress_ratio, 2 * index_head_dim],
+            f"{layer_prefix}.attn.indexer.compressor.norm.weight": [index_head_dim],
+            f"{layer_prefix}.attn.indexer.compressor.wgate.weight": [2 * index_head_dim, hidden_size],
+            f"{layer_prefix}.attn.indexer.compressor.wkv.weight": [2 * index_head_dim, hidden_size],
+            f"{layer_prefix}.attn.indexer.weights_proj.weight": [index_n_heads, hidden_size],
+        })
 
     if layer_idx < num_hash_layers:
       layer_mapping[f"{layer_prefix}.ffn.gate.tid2eid"] = [vocab_size, config["num_experts_per_tok"]]
