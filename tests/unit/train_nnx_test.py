@@ -61,6 +61,11 @@ class _Cfg:
   shard_mode: int = 0  # ShardMode.AUTO
   weight_sparsity_n: int = 0
   weight_sparsity_m: int = 0
+  decoder_block: str = "default"
+
+
+class _DummyDecoder(nnx.Module):
+  pass
 
 
 class _TinyDecoder(nnx.Module):
@@ -73,6 +78,7 @@ class _TinyDecoder(nnx.Module):
   def __init__(self, vocab_size: int, hidden: int, rngs: nnx.Rngs):
     self.embed = nnx.Embed(vocab_size, hidden, rngs=rngs)
     self.proj = nnx.Linear(hidden, vocab_size, rngs=rngs)
+    self.decoder = _DummyDecoder()
 
   def __call__(
       self,
@@ -125,7 +131,6 @@ class TestLossFnNNX(unittest.TestCase):
         "total_weights",
         "moe_lb_loss",
         "indexer_loss",
-        "moe_bias_updates",
         "mtp_loss",
     ):
       self.assertIn(key, aux)
@@ -193,6 +198,19 @@ class TestTrainStepNNX(unittest.TestCase):
     )
     self.assertIsInstance(new_state, nnx.State)
     self.assertTrue(jnp.isfinite(metrics["scalar"]["learning/loss"]))
+
+  def test_train_step_deepseek_aux_loss(self):
+    cfg, ts = _build_state()
+    cfg.routed_bias = True
+    cfg.routed_bias_update_rate = 0.001
+    cfg.decoder_block = "deepseek"
+    state_graphdef, state_pure = nnx.split(ts)
+    data = _make_data(batch=cfg.micro_batch_size_to_train_on, vocab=cfg.vocab_size)
+    # The robust trainer logic will correctly traverse and NOT crash, ignoring the hardcoded path
+    new_state, _ = pre_train.train_step(
+        state_graphdef, cfg, state_mesh_shardings=None, params_shardings=None, state=state_pure, data=data
+    )
+    self.assertIsInstance(new_state, nnx.State)
 
 
 class TestEvalStepNNX(unittest.TestCase):

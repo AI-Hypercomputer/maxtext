@@ -622,5 +622,25 @@ class TestMuonLogic(unittest.TestCase):
     self.assertEqual(result.self_attention.out.kernel.value, mdn((0, -2), (-1,)))
 
 
+class TestGetOptimizerGlobalMask(unittest.TestCase):
+  """Tests that the global optimizer cleanly masks out the routed bias."""
+
+  def test_routed_bias_global_mask(self):
+    config = pyconfig.initialize(["", "src/maxtext/configs/base.yml", "routed_bias=True", "opt_type=sgd"])
+    # We define a dummy params dict containing a routed bias and a regular weight.
+    # The routed bias must be completely ignored by the optimizer.
+    params = {"decoder": {"moe_layers": {"MoeBlock_0": {"gate": {"bias": jnp.array([1.0]), "kernel": jnp.array([1.0])}}}}}
+    grads = {"decoder": {"moe_layers": {"MoeBlock_0": {"gate": {"bias": jnp.array([0.5]), "kernel": jnp.array([0.5])}}}}}
+    # We use sgd because it's simple to test updates, but the mask logic applies
+    # cleanly to any base optimizer returned by get_optimizer.
+    opt = optimizers.get_optimizer(config, learning_rate_schedule=0.1)
+    opt_state = opt.init(params)
+    updates, _ = opt.update(grads, opt_state, params)
+    # The routed bias update should be exactly 0.0 (masked by set_to_zero)
+    self.assertEqual(updates["decoder"]["moe_layers"]["MoeBlock_0"]["gate"]["bias"].item(), 0.0)
+    # The kernel should receive the SGD gradient update (-0.1 * 0.5)
+    self.assertTrue(updates["decoder"]["moe_layers"]["MoeBlock_0"]["gate"]["kernel"].item() < 0.0)
+
+
 if __name__ == "__main__":
   unittest.main()
