@@ -481,6 +481,7 @@ def create_rl_components(
               "enable_prefix_caching": True,  # Enable prefix caching to speed up generation for long prompts
               # Ensures vLLM model initializes with correct dtype (not float32 default)
               "dtype": trainer_config.weight_dtype,
+              "load_format": trainer_config.vllm_load_format,
           },
           rollout_vllm_sampling_kwargs={
               "stop": trainer_config.stop_strings,
