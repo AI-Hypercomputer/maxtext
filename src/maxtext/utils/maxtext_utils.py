@@ -1669,19 +1669,10 @@ def get_nnx_named_sharding_with_scan_axis(abs_var_state: nnx.State, mesh) -> nnx
       context_rules = get_logical_axis_rules()
       local_rules = metadata.get("sharding_rules", ())
       if context_rules or local_rules:
-        rules = composite_rules(context_rules, local_rules)
-        raw_sharding = from_sharding_rules(out_sharding, rules)
         mesh_axis_names = mesh.axis_names if mesh is not None else ()
-
-        def _sanitize(x):
-          if isinstance(x, list):
-            x = tuple(x)
-          if x is None or (isinstance(x, str) and x in mesh_axis_names) or isinstance(x, tuple):
-            return x
-          return None
-
-        sanitized_sharding = [_sanitize(x) for x in raw_sharding]
-        pspec = PartitionSpec(*sanitized_sharding)
+        mesh_axis_rules = tuple((axis, axis) for axis in mesh_axis_names)
+        rules = tuple(local_rules) + tuple(context_rules) + mesh_axis_rules
+        pspec = sharding.logical_to_mesh_axes(out_sharding, mesh, rules=rules)
       else:
         pspec = PartitionSpec(*out_sharding)
     return v.replace(NamedSharding(mesh, pspec))

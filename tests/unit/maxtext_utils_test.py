@@ -1606,10 +1606,11 @@ class TestNNXAbstractState(unittest.TestCase):
 
     # Verify PartitionSpec was extracted correctly from the mock model's annotations
     # Path: params -> kernel -> spec
+    expected_model_axis = "model" if self.mesh.shape["model"] > 1 else None
     self.assertEqual(
         annotations.params.kernel.get_value(),
         PartitionSpec(
-            "model",
+            expected_model_axis,
         ),
     )
 
@@ -1625,7 +1626,8 @@ class TestNNXAbstractState(unittest.TestCase):
     opt_spec = annotations.optimizer.get_value()
 
     # Verify 'data' is now in the spec
-    self.assertEqual(opt_spec, PartitionSpec(("data", "model")))
+    expected_opt_spec = ("data", "model") if self.mesh.shape["model"] > 1 else "data"
+    self.assertEqual(opt_spec, PartitionSpec(expected_opt_spec))
 
   def test_optimizer_host_offload(self):
     """Verifies that optimizer memory is moved to host when configured."""
