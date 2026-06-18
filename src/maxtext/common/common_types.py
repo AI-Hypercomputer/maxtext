@@ -120,6 +120,7 @@ class AttentionType(enum.Enum):
   LOCAL_SLIDING = "local_sliding"
   CHUNK = "chunk"
   MLA = "mla"
+  COMPRESSED = "compressed"
   FULL = "full"
 
 

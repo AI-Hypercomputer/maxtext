@@ -448,7 +448,11 @@ def partial_rotary_embedding_as_linen(
 
 
 class PartialRotaryEmbedding(RotaryEmbedding):
-  """Rotary Position Embedding applied to a partial fraction of dimensions."""
+  """Rotary Position Embedding applied to a partial fraction of dimensions.
+
+  This class has been updated to support interleaved channels, trailing slices,
+  and inverse output rotations to satisfy DeepSeek-V4 requirements.
+  """
 
   def __init__(
       self,
@@ -460,6 +464,8 @@ class PartialRotaryEmbedding(RotaryEmbedding):
       fprop_dtype: DType = jnp.bfloat16,
       partial_rotary_factor: float = 0.25,
       shard_mode: ShardMode = ShardMode.AUTO,
+      interleaved: bool = False,
+      trailing: bool = False,
       rngs: nnx.Rngs = None,
   ):
     """Initializes the PartialRotaryEmbedding module.
@@ -471,11 +477,15 @@ class PartialRotaryEmbedding(RotaryEmbedding):
         added signal.
       embedding_dims: Dimension of the embedding to be generated.
       partial_rotary_factor: Ratio of dimensions to apply ROPE to
+      interleaved: Whether to use interleaved channel pairing (even/odd).
+      trailing: Whether to apply RoPE to the trailing slice of the vector.
       rngs: rng keys passed in by nnx.bridge.to_linen.
     """
     self.head_dim = embedding_dims
     self.partial_rotary_factor = partial_rotary_factor
     self.rotary_dim = int(self.head_dim * self.partial_rotary_factor)
+    self.interleaved = interleaved
+    self.trailing = trailing
 
     # Initialize the base class with only the rotary_dim
     super().__init__(
@@ -489,7 +499,12 @@ class PartialRotaryEmbedding(RotaryEmbedding):
         rngs=rngs,
     )
 
-  def __call__(self, inputs: jax.Array, position: None | jax.Array = None) -> jax.Array:
+  def __call__(
+      self,
+      inputs: jax.Array,
+      position: None | jax.Array = None,
+      reverse: bool = False,
+  ) -> jax.Array:
     """Applies Partial variant of rotary position embedding.
 
     Args:
@@ -497,14 +512,54 @@ class PartialRotaryEmbedding(RotaryEmbedding):
         embedding. It is assumed of shape [B, S, H, D].
       position: Optional position array [B, S]. Only needed when the sequence
         is packed.
+      reverse: Whether to apply reverse rotation (-sin).
 
     Returns:
-      A jax.Array of shape [B, S, H, D - rotary_dim] with rotary position embeddings applied.
+      A jax.Array of shape [B, S, H, D] with rotary position embeddings applied.
     """
-    # Split, apply base RoPE to the first fraction, and concatenate
-    inputs_rot, inputs_pass = jnp.split(inputs, [self.rotary_dim], axis=-1)
-    inputs_rot = super().__call__(inputs_rot, position)
-    inputs = jnp.concatenate([inputs_rot, inputs_pass], axis=-1)
+    assert position is not None
+
+    # 1. Split into rotated and passive parts (trailing or leading slice)
+    if self.trailing:
+      inputs_pass, inputs_rot = jnp.split(inputs, [self.head_dim - self.rotary_dim], axis=-1)
+    else:
+      inputs_rot, inputs_pass = jnp.split(inputs, [self.rotary_dim], axis=-1)
+
+    # 2. Apply rotation to the rotary part
+    position_expanded = position[:, :, jnp.newaxis, jnp.newaxis]
+    sinusoid_inp = position_expanded / self.timescale
+    cos_half = jnp.cos(sinusoid_inp).astype(inputs.dtype)
+    sin_half = jnp.sin(sinusoid_inp).astype(inputs.dtype)
+
+    if reverse:
+      sin_half = -sin_half
+
+    if self.interleaved:
+      # Interleaved pairing (DeepSeek-V4 style)
+      cos = jnp.repeat(cos_half, 2, axis=-1)
+      sin = jnp.repeat(sin_half, 2, axis=-1)
+
+      def _rotate_half_interleaved(x):
+        x1 = x[..., 0::2]
+        x2 = x[..., 1::2]
+        return jnp.stack((-x2, x1), axis=-1).reshape(x.shape)
+
+      inputs_rot_f32 = inputs_rot.astype(jnp.float32)
+      inputs_rot = ((inputs_rot_f32 * cos) + (_rotate_half_interleaved(inputs_rot_f32) * sin)).astype(inputs_rot.dtype)
+    else:
+      # Standard split-half pairing (LLaMA/Mistral style)
+      cos = jnp.concatenate([cos_half, cos_half], axis=-1)
+      sin = jnp.concatenate([sin_half, sin_half], axis=-1)
+      inputs_rot = (inputs_rot * cos) + (self._rotate_half(inputs_rot) * sin)
+
+    # 3. Concatenate back
+    if self.trailing:
+      inputs = jnp.concatenate([inputs_pass, inputs_rot], axis=-1)
+    else:
+      inputs = jnp.concatenate([inputs_rot, inputs_pass], axis=-1)
+
+    if self.cast_as_fprop_dtype:
+      inputs = inputs.astype(self.fprop_dtype)
     return inputs
 
 

@@ -411,6 +411,12 @@ qk_nope_head_dim: 128
 qk_rope_head_dim: 64
 v_head_dim: 128
 
+# Compressed Attention parameters
+o_lora_rank: 0 # Output LoRA rank for Compressed Attention.
+o_groups: 0 # Output groups for Compressed Attention.
+compress_ratios: [] # Per-layer compression ratios (0, 4, 128, etc).
+compressed_rope_max_timescale: 160_000 # If positive, used for Compressed Sparse/Heavy Attention.
+
 # QK-Clip (Muon Clip) Configuration
 use_qk_clip: false  # Enable QK-Clip (supported in MLA with DotProduct or Tokamax Splash)
 qk_clip_threshold: 100.0  # Threshold for clipping (tau in the paper)

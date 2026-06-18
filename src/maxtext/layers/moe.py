@@ -361,6 +361,8 @@ class RoutedMoE(nnx.Module):
       weight_dtype: ctypes.DType = jnp.float32,
       dtype: ctypes.DType = jnp.float32,
       quant: Optional[quantizations.AqtQuantization] = None,
+      use_hash_routing: bool = False,
+      tid2eid: jax.Array | None = None,
   ):
     """Initializes the RoutedMoE module.
 
@@ -378,6 +380,9 @@ class RoutedMoE(nnx.Module):
       quant: The quantization configuration. If None, no quantization is applied.
     """
     self.config = config
+    self.use_hash_routing = use_hash_routing
+    if self.use_hash_routing:
+      self.tid2eid = tid2eid if tid2eid is not None else jnp.zeros((self.config.vocab_size, num_experts_per_tok), dtype=jnp.int32)
     self.num_experts = num_experts
     self.num_experts_per_tok = num_experts_per_tok
     self.mesh = mesh
@@ -631,10 +636,23 @@ class RoutedMoE(nnx.Module):
     """Determines if loss-free load balancing updates should be applied."""
     return self.config.routed_bias and self.config.routed_bias_update_rate > 0.0
 
-  def get_topk(self, gate_logits, pre_bias_logits, rngs=None):
+  def get_topk(self, gate_logits, pre_bias_logits, rngs=None, input_ids=None):
     """get topk."""
     # shape of top_k_weights & top_k_indices:
     # (batch, sequence, num_experts_per_tok).
+    if self.use_hash_routing:
+      if input_ids is None:
+        raise ValueError("input_ids must be provided for Hash-MoE routing.")
+      top_k_indices = self.tid2eid[input_ids]
+      top_k_weights = jnp.take_along_axis(pre_bias_logits if pre_bias_logits is not None else gate_logits, top_k_indices, axis=-1)
+      if self.config.decoder_block == ctypes.DecoderBlockType.DEEPSEEK:
+        top_k_weights = self.deepseek_scale_weights(top_k_weights)
+      elif self.config.decoder_block not in (ctypes.DecoderBlockType.LLAMA4, ctypes.DecoderBlockType.GEMMA4):
+        top_k_weights = jax.nn.softmax(top_k_weights.astype(jnp.float32), axis=-1).astype(self.dtype)
+      if self.config.norm_topk_prob:
+        top_k_weights /= top_k_weights.sum(axis=-1, keepdims=True)
+      return top_k_weights, top_k_indices
+
     if self.config.use_random_routing:
       if rngs is None:
         raise ValueError("The random key cannot be None for random routing.")
@@ -751,13 +769,13 @@ class RoutedMoE(nnx.Module):
         intermediate_layer = jnp.multiply(layer_act, layer_w1)
       return intermediate_layer.astype(self.dtype)
 
-  def permute(self, inputs, gate_logits, pre_bias_logits, use_custom_sort_vjp=True, rngs=None, roll_to_expert_id=None):
+  def permute(self, inputs, gate_logits, pre_bias_logits, use_custom_sort_vjp=True, rngs=None, roll_to_expert_id=None, input_ids=None):
     """Permute tokens to group by expert to fit gmm call."""
     # reshape inputs (batch, sequence, emb) to (batch * sequence, emb)
     inputs_shape = inputs.shape
     bsz_times_seq_len = inputs_shape[0] * inputs_shape[1]
     inputs_2d = jnp.reshape(inputs, (bsz_times_seq_len, inputs_shape[2]))
-    weights, selected_experts = self.get_topk(gate_logits, pre_bias_logits, rngs)
+    weights, selected_experts = self.get_topk(gate_logits, pre_bias_logits, rngs, input_ids)
     lb_loss = None
     if self.config.load_balance_loss_weight > 0.0:
       softmax_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
@@ -1116,6 +1134,7 @@ class RoutedMoE(nnx.Module):
       w0_bias,
       w1_bias,
       wo_bias,
+      input_ids=None,
   ):
     """Perform sparse matrix multiplication of inputs and Experts."""
 
@@ -1384,11 +1403,12 @@ class RoutedMoE(nnx.Module):
             self.config.use_custom_sort_vjp,
             roll_to_expert_id=num_experts_per_shard * expert_shard_id,
             rngs=rngs,
+            input_ids=input_ids,
         )
 
       else:
         x, sorted_selected_experts, weights, group_sizes, selected_experts, lb_loss, bias_updates = self.permute(
-            x, logits, pre_bias_logits, self.config.use_custom_sort_vjp, rngs
+            x, logits, pre_bias_logits, self.config.use_custom_sort_vjp, rngs, input_ids=input_ids
         )
 
         if num_ep > 1:
@@ -1986,6 +2006,7 @@ class RoutedMoE(nnx.Module):
       w0_bias,
       w1_bias,
       wo_bias,
+      input_ids=None,
   ) -> tuple[jax.Array, Optional[jax.Array], Optional[jax.Array]]:
     """Dense matrix multiplication."""
     # gate_logits: batch, length, expert
@@ -1995,7 +2016,7 @@ class RoutedMoE(nnx.Module):
       pre_bias_logits = self._maybe_shard_with_logical(
           pre_bias_logits, ("activation_batch_moe", "activation_length_moe", None)
       )
-    top_k_weights, top_k_indices = self.get_topk(gate_logits, pre_bias_logits, self.rngs)
+    top_k_weights, top_k_indices = self.get_topk(gate_logits, pre_bias_logits, self.rngs, input_ids)
     is_llama4_decoder_layer = self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4
     if is_llama4_decoder_layer:
       router_scores = jax.nn.sigmoid(top_k_weights.astype(jnp.float32)).astype(self.dtype)
@@ -2364,7 +2385,7 @@ class RoutedMoE(nnx.Module):
     return w0_kernel, w1_kernel, wo_kernel
 
   def __call__(
-      self, inputs: jax.Array, gate_inputs: jax.Array | None = None, out_sharding: NamedSharding | None = None
+      self, inputs: jax.Array, gate_inputs: jax.Array | None = None, out_sharding: NamedSharding | None = None, input_ids: jax.Array | None = None
   ) -> tuple[jax.Array, Optional[jax.Array], Optional[jax.Array]]:
     cfg = self.config
     inputs = inputs.astype(cfg.dtype)
@@ -2417,11 +2438,11 @@ class RoutedMoE(nnx.Module):
             wo_bias,
         )
       output, lb_loss, bias_updates = self.sparse_matmul(
-          inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias
+          inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias, input_ids=input_ids
       )
     else:
       output, lb_loss, bias_updates = self.dense_matmul(
-          inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias
+          inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias, input_ids=input_ids
       )
     return output, lb_loss, bias_updates
 
