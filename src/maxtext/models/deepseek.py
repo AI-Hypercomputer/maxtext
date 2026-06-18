@@ -214,16 +214,14 @@ class DeepSeekGenericLayer(nnx.Module):
       slot: None | int = None,
   ):
     """Executes the attention layer."""
-    # When moe_weight_ag_scheduling_group is set, tag the splash attention into the
-    # same XLA _scheduling_group_id as the MoE FSDP weight all-gather (emitted just
-    # before, via gather_routed_weights). Both run in the same scanned decoder-layer
-    # body and the SparseCore is idle during splash, so the scheduler can overlap the
-    # otherwise-exposed SC-offloaded weight-AG with the splash kernel.
-    _sched = (
-        jax.experimental.xla_metadata.set_xla_metadata(_scheduling_group_id=moe.WEIGHT_AG_SCHED_GROUP)
-        if self.config.moe_weight_ag_scheduling_group
-        else contextlib.nullcontext()
-    )
+    # Splash attention is NOT tagged. The weight-AG scheduling group must contain ONLY
+    # the gather (a contiguous, self-contained collective block, already tagged inside
+    # gather_weights). Co-tagging splash makes the group span the un-annotated QKV
+    # dot_generals between the gather and splash -> "annotation group with gaps" ->
+    # XLA UNIMPLEMENTED. Overlap is emergent (batchsplit pattern): the grouped gather
+    # is emitted before attention and the latency-hiding scheduler floats it over the
+    # (ungrouped) splash compute while the SparseCore is idle.
+    _sched = contextlib.nullcontext()
     with _sched:
       attention_result, _ = self.self_attention(
           x,
