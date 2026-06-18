@@ -646,9 +646,15 @@ class NNXDecoder(nnx.Module):
     attention_pattern_length = len(gemma4.GEMMA4_ATTENTION_PATTERN)
     scan_length = config.num_decoder_layers // attention_pattern_length
     num_remaining_layers = config.num_decoder_layers % attention_pattern_length
-    layer_kwargs = {"num_of_layers": attention_pattern_length}
-
-    rem_layer_kwargs = {"num_of_layers": num_remaining_layers}
+    policy = self.get_remat_policy()
+    layer_kwargs = {
+        "num_of_layers": attention_pattern_length,
+        "remat_policy_fn": policy,
+    }
+    rem_layer_kwargs = {
+        "num_of_layers": num_remaining_layers,
+        "remat_policy_fn": policy,
+    }
 
     RemattedGemma4Block = gemma4.Gemma4ScannableBlock
 
