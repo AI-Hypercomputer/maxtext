@@ -15,6 +15,7 @@
 """Specialized layers for Gemma 4."""
 
 import jax
+from jax.experimental import xla_metadata
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
 import jax.numpy as jnp
@@ -485,10 +486,14 @@ class Gemma4ScannableBlock(nnx.Module):
   ):
     graphdef, params, state = nnx.split(self.local_layers, nnx.Param, ...)
 
+    scan_axis = self.config.param_scan_axis
+    if scan_axis != 0:
+      params = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0), params)
+
     def scan_body(carry, scanned_vars):
       current_params, current_state = scanned_vars
       layer = nnx.merge(graphdef, current_params, current_state)
-      out_y, _ = layer(
+      layer_out = layer(
           carry,
           decoder_segment_ids,
           decoder_positions,
@@ -499,17 +504,27 @@ class Gemma4ScannableBlock(nnx.Module):
           previous_chunk=previous_chunk,
           bidirectional_mask=bidirectional_mask,
       )
-      _, _, new_state = nnx.split(layer, nnx.Param, ...)
-      return out_y, new_state
+      new_carry = layer_out[0] if isinstance(layer_out, tuple) else layer_out
+      return new_carry, nnx.state(layer)
 
-    scan_axis = self.config.param_scan_axis
+    final_carry = y
+    scanned_state_parts = []
+    with xla_metadata.set_xla_metadata(**{"skip-simplify-while-loops_trip-count-one": "true"}):
+      for i in range(self.num_local):
+        p_i = jax.tree.map(lambda x: jnp.expand_dims(x[i], 0), params)
+        s_i = jax.tree.map(lambda x: jnp.expand_dims(x[i], 0), state)
+        final_carry, state_i = jax.lax.scan(scan_body, final_carry, (p_i, s_i))
+        scanned_state_parts.append(state_i)
+        
+    scanned_state = jax.tree.map(lambda *x: jnp.concatenate(x, axis=0), *scanned_state_parts)
+
     if scan_axis != 0:
-      params = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0), params)
+      scanned_params, scanned_other = scanned_state.split(nnx.Param, ...)
+      scanned_params = jax.tree.map(lambda x: jnp.moveaxis(x, 0, scan_axis), scanned_params)
+      scanned_state = nnx.State.merge(scanned_params, scanned_other)
 
-    final_y, new_states = jax.lax.scan(scan_body, y, (params, state), unroll=True)
-
-    nnx.update(self.local_layers, new_states)
-    return final_y
+    nnx.update(self.local_layers, scanned_state)
+    return final_carry
 
   def __call__(
       self,
@@ -541,16 +556,33 @@ class Gemma4ScannableBlock(nnx.Module):
       )
 
     if self.global_layer is not None:
-      y, _ = self.global_layer(
-          y,
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic,
-          model_mode,
-          previous_chunk=previous_chunk,
-          slot=slot,
-          bidirectional_mask=bidirectional_mask,
-      )
+      graphdef_g, state_g = nnx.split(self.global_layer)
+      
+      # Add a dummy dimension of 1 for scanning
+      state_g = jax.tree.map(lambda x: jnp.expand_dims(x, 0), state_g)
+
+      def scan_body_g(carry, curr_state):
+        layer = nnx.merge(graphdef_g, curr_state)
+        layer_out = layer(
+            carry,
+            decoder_segment_ids,
+            decoder_positions,
+            deterministic,
+            model_mode,
+            previous_chunk=previous_chunk,
+            slot=slot,
+            bidirectional_mask=bidirectional_mask,
+        )
+        new_carry = layer_out[0] if isinstance(layer_out, tuple) else layer_out
+        return new_carry, nnx.state(layer)
+
+      with xla_metadata.set_xla_metadata(**{"skip-simplify-while-loops_trip-count-one": "true"}):
+        y, scanned_state_g = jax.lax.scan(scan_body_g, y, state_g)
+
+      # Remove the dummy dimension
+      scanned_state_g = jax.tree.map(lambda x: jnp.squeeze(x, 0), scanned_state_g)
+      
+      nnx.update(self.global_layer, scanned_state_g)
 
     return y, None
 
