@@ -421,18 +421,9 @@ class Decoder(nn.Module):
             offload_dst="pinned_host",
         )
       elif cfg.remat_policy == "custom":
-        _offload = cfg.tensors_to_offload
-        if cfg.moe_weight_ag_scheduling_group:
-          # Offload the splash-attention activations (output "context" + q/k/v
-          # projections) so the BACKWARD splash runs recompute-free -> a clean,
-          # ready compute block the MoE weight-grad reduce-scatter can float over
-          # (mirrors the forward gather||splash overlap; batchsplit offloads attn_out).
-          _offload = list(_offload or []) + [
-              n for n in ("context", "query_proj", "key_proj", "value_proj") if n not in (_offload or [])
-          ]
         policy = jax.checkpoint_policies.save_and_offload_only_these_names(
             names_which_can_be_saved=cfg.tensors_on_device,
-            names_which_can_be_offloaded=_offload,
+            names_which_can_be_offloaded=cfg.tensors_to_offload,
             offload_src="device",
             offload_dst="pinned_host",
         )
