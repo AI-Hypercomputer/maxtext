@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# This file defines a module for running tests against the built maxtext package or
+# This workflow runs tests against the built MaxText package or
 # pre-built images. It can run unit tests and integration tests.
 
 name: MaxText Test Coordinator

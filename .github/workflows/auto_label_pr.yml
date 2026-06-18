@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,7 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-name: Add Label
+# This workflow automatically adds a "pull ready" label to a PR
+# when it has received at least 2 approving reviews and all checks have passed.
+# It runs on pull request review events, workflow run completion events for the "MaxText Package Tests" workflow,
+# and can also be triggered manually via workflow dispatch.
+
+name: Add Pull Ready Label
 
 on:
   workflow_run:
