@@ -34,14 +34,21 @@ class Train(parameterized.TestCase):
       {
           "testcase_name": "gmm bf16",
           "quantization": "",
+          "use_gmm_v2": False,
       },
       {
           "testcase_name": "gmm fp8",
           "quantization": "fp8_full",
+          "use_gmm_v2": False,
+      },
+      {
+          "testcase_name": "gmm v2 bf16",
+          "quantization": "",
+          "use_gmm_v2": True,
       },
   )
   @pytest.mark.tpu_only
-  def test_different_configs(self, quantization: str):
+  def test_different_configs(self, quantization: str, use_gmm_v2: bool):
     """Smoke train with small config."""
     test_tmpdir = os.environ.get("TEST_TMPDIR", gettempdir())
     outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", test_tmpdir)
@@ -66,13 +73,33 @@ class Train(parameterized.TestCase):
         "sparse_matmul=True",
         "megablox=False",
         "use_tokamax_gmm=True",
+        f"use_gmm_v2={use_gmm_v2}",
+        # tile sizes
+        "wi_tile_fwd_batch_seq=128",
+        "wi_tile_fwd_embed_dim=128",
+        "wi_tile_fwd_mlp_dim=128",
+        "wi_tile_dlhs_batch_seq=128",
+        "wi_tile_dlhs_embed_dim=128",
+        "wi_tile_dlhs_mlp_dim=128",
+        "wi_tile_drhs_batch_seq=128",
+        "wi_tile_drhs_embed_dim=128",
+        "wi_tile_drhs_mlp_dim=128",
+        "wo_tile_fwd_batch_seq=128",
+        "wo_tile_fwd_embed_dim=128",
+        "wo_tile_fwd_mlp_dim=128",
+        "wo_tile_dlhs_batch_seq=128",
+        "wo_tile_dlhs_embed_dim=128",
+        "wo_tile_dlhs_mlp_dim=128",
+        "wo_tile_drhs_batch_seq=128",
+        "wo_tile_drhs_embed_dim=128",
+        "wo_tile_drhs_mlp_dim=128",
         # tokamax splash
         "max_target_length=128",
         "attention=flash",
         "use_tokamax_splash=True",
         # quantization
         f"quantization={quantization}",
-        "use_qwix_quantization=True",
+        f"use_qwix_quantization={quantization == 'fp8_full'}",
         "weight_quantization_calibration_method=fixed,-224,224",
         "act_quantization_calibration_method=fixed,-224,224",
         # train

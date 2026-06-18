@@ -610,6 +610,13 @@ class Attention(BaseModel):
       False,
       description="Whether to use the Tokamax library for GMM kernel implementation.",
   )
+  use_gmm_v2: bool = Field(
+      False,
+      description=(
+          "Whether to use GMM v2 (with bf16 activations and weights) for MoE."
+          " Requires use_tokamax_gmm: true. Currently incompatible with quantization."
+      ),
+  )
   ragged_block_size: int = Field(256, description="Block size for ragged attention.")
   enable_padding_causal_mask: bool = Field(True, description="Temporary flag for TE padding.")
   use_tokamax_splash: bool = Field(False, description="Whether to use tokamax splash attention.")
@@ -3188,6 +3195,11 @@ class MaxTextConfig(
       raise ValueError("`share_kv_projections` is not compatible with `fused_qkv`.")
     if self.share_kv_projections and self.attention_type == "mla":
       raise ValueError("`share_kv_projections` is not compatible with `attention_type='mla'`.")
+
+    if self.use_gmm_v2 and (self.quantization or self.use_qwix_quantization):
+      raise ValueError("Quantization with GMM v2 is not supported yet.")
+    if self.use_gmm_v2 and not self.use_tokamax_gmm:
+      raise ValueError("GMM v2 requires `use_tokamax_gmm=true`.")
 
     for val in self.compress_ratios:
       if val != 0 and val < 4:

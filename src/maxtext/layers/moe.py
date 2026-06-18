@@ -1297,7 +1297,9 @@ class RoutedMoE(nnx.Module):
       # We support three implementations for gmm - tokamax, older forked kernel, or jax.lax.ragged_dot
       # For quantized tokamax we call a forked version that supports our quantization recipes.
       if self.config.use_tokamax_gmm:
-        if self.config.quantization:  # tokamax (quantized)
+        # tokamax gmm v1 (quantized) or tokamax gmm v2 (unquantized)
+        # tokamax gmm v2 (quantized) not supported yet
+        if self.config.quantization or self.config.use_gmm_v2:
           output = mblx.gmm(
               lhs=inputs,
               rhs=kernel,
@@ -1312,6 +1314,7 @@ class RoutedMoE(nnx.Module):
               weight_gather_axes=weight_gather_axes,
               lhs_vma_axes=lhs_vma_axes,
               rhs_vma_axes=rhs_vma_axes,
+              use_gmm_v2=self.config.use_gmm_v2,
           )
         else:  # tokamax (unquantized)
           output = tokamax.ragged_dot(
