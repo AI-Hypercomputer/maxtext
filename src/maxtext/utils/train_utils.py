@@ -16,6 +16,7 @@
 """ Utils that are only interesting for training in MaxText. """
 
 import os
+import subprocess
 import jax
 import functools
 from flax.linen import partitioning as nn_partitioning
@@ -332,3 +333,53 @@ def validate_train_config(config):
         "WARNING: Sequence packing is essentially ignored for synthetic data. "
         "Please use a real dataset to use sequence packing."
     )
+
+
+def apply_dcn_throttling(config):
+  """Applies programmatic traffic control (tc) bandwidth limit if configured."""
+  if not config.dcn_bandwidth_limit:
+    return
+
+  rate = config.dcn_bandwidth_limit
+  burst = config.dcn_bandwidth_burst
+  latency = config.dcn_bandwidth_latency
+  interface = config.dcn_bandwidth_interface
+
+  max_logging.log(
+      f"Applying tc egress limit of {rate} (burst: {burst}, latency: {latency}) on {interface}..."
+  )
+  try:
+    subprocess.run(
+        ["tc", "qdisc", "del", "dev", interface, "root"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    cmd = [
+        "tc", "qdisc", "add", "dev", interface, "root", "tbf",
+        "rate", rate, "burst", burst, "latency", latency
+    ]
+    subprocess.run(cmd, check=True)
+    max_logging.log("DCN Bandwidth throttling applied successfully.")
+  except Exception as e:  # pylint: disable=bare-except
+    max_logging.error(f"Failed to apply DCN bandwidth throttling: {e}")
+
+
+def cleanup_dcn_throttling(config):
+  """Cleans up traffic control (tc) rules."""
+  if not config.dcn_bandwidth_limit:
+    return
+
+  interface = config.dcn_bandwidth_interface
+  max_logging.log(f"Cleaning up tc egress limit on {interface}...")
+  try:
+    subprocess.run(
+        ["tc", "qdisc", "del", "dev", interface, "root"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    max_logging.log("DCN Bandwidth throttling cleaned up successfully.")
+  except Exception as e:  # pylint: disable=bare-except
+    max_logging.error(f"Failed to clean up DCN bandwidth throttling: {e}")
+

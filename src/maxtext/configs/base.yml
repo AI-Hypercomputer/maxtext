@@ -871,6 +871,10 @@ enable_diloco: false
 diloco_sync_period: 36
 diloco_outer_lr: 0.3
 diloco_outer_momentum: 0.9
+dcn_bandwidth_limit: ""
+dcn_bandwidth_burst: "10mb"
+dcn_bandwidth_latency: "50ms"
+dcn_bandwidth_interface: "eth0"
 
 # You may disable clipping by setting gradient_clipping_threshold to zero.
 gradient_clipping_threshold: 1.0
