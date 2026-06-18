@@ -22,7 +22,7 @@ import jax.numpy as jnp
 
 from flax import linen as nn
 from flax import nnx
-from typing import Optional
+from typing import Optional, Any
 
 from maxtext.common.common_types import Config, AttentionType, MODEL_MODE_PREFILL
 from maxtext.layers import initializers
@@ -36,6 +36,7 @@ import jax.sharding
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_utils
+from maxtext.utils import maxtext_utils
 
 
 GEMMA4_ATTENTION_PATTERN = (
@@ -421,6 +422,7 @@ class Gemma4ScannableBlock(nnx.Module):
       rngs: nnx.Rngs,
       quant: None | Quant = None,
       num_of_layers: int = 6,
+      remat_policy_fn: Any = None,
   ):
     """Initializes the instance.
 
@@ -431,6 +433,7 @@ class Gemma4ScannableBlock(nnx.Module):
       rngs: The random number generators for initialization.
       quant: The quantization configuration.
       num_of_layers: The number of layers in the model.
+      remat_policy_fn: The resolved rematerialization policy function.
     """
     self.config = config
     self.mesh = mesh
@@ -438,6 +441,7 @@ class Gemma4ScannableBlock(nnx.Module):
     self.quant = quant
     self.rngs = rngs
     self.num_of_layers = num_of_layers
+    self.remat_policy_fn = remat_policy_fn
 
     # Pattern is 5 local, 1 global.
     self.num_local = min(5, num_of_layers)
@@ -490,33 +494,42 @@ class Gemma4ScannableBlock(nnx.Module):
     if scan_axis != 0:
       params = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0), params)
 
-    def scan_body(carry, scanned_vars):
-      current_params, current_state = scanned_vars
-      layer = nnx.merge(graphdef, current_params, current_state)
-      layer_out = layer(
-          carry,
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic,
-          model_mode,
-          slot=slot,
-          page_state=page_state,
-          previous_chunk=previous_chunk,
-          bidirectional_mask=bidirectional_mask,
-      )
-      new_carry = layer_out[0] if isinstance(layer_out, tuple) else layer_out
-      return new_carry, nnx.state(layer)
-
     final_carry = y
     scanned_state_parts = []
-    with xla_metadata.set_xla_metadata(**{"skip-simplify-while-loops_trip-count-one": "true"}):
-      for i in range(self.num_local):
-        p_i = jax.tree.map(lambda x: jnp.expand_dims(x[i], 0), params)
-        s_i = jax.tree.map(lambda x: jnp.expand_dims(x[i], 0), state)
-        final_carry, state_i = jax.lax.scan(scan_body, final_carry, (p_i, s_i))
-        scanned_state_parts.append(state_i)
-        
-    scanned_state = jax.tree.map(lambda *x: jnp.concatenate(x, axis=0), *scanned_state_parts)
+
+    for i in range(self.num_local):
+      p_i = jax.tree.map(lambda x: x[i], params)
+      s_i = jax.tree.map(lambda x: x[i], state)
+
+      def pure_layer_fn(p, s, carry):
+        layer = nnx.merge(graphdef, p, s)
+        layer_out = layer(
+            carry,
+            decoder_segment_ids,
+            decoder_positions,
+            deterministic,
+            model_mode,
+            slot=slot,
+            page_state=page_state,
+            previous_chunk=previous_chunk,
+            bidirectional_mask=bidirectional_mask,
+        )
+        new_carry = layer_out[0] if isinstance(layer_out, tuple) else layer_out
+        return new_carry, nnx.state(layer)
+
+      if self.config.remat_policy != "none":
+        prevent_cse = maxtext_utils.should_prevent_cse_in_remat(self.config)
+        checkpointed_fn = jax.checkpoint(
+            pure_layer_fn,
+            policy=self.remat_policy_fn,
+            prevent_cse=prevent_cse,
+        )
+        final_carry, state_i = checkpointed_fn(p_i, s_i, final_carry)
+      else:
+        final_carry, state_i = pure_layer_fn(p_i, s_i, final_carry)
+      scanned_state_parts.append(state_i)
+
+    scanned_state = jax.tree.map(lambda *x: jnp.stack(x), *scanned_state_parts)
 
     if scan_axis != 0:
       scanned_params, scanned_other = scanned_state.split(nnx.Param, ...)
