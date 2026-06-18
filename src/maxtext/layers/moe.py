@@ -66,6 +66,14 @@ def _scheduling_group(group_id):
   return set_xla_metadata(_scheduling_group_id=group_id)
 
 
+# Fixed scheduling-group id shared by the MoE FSDP weight all-gather and the
+# splash attention earlier in the same (scanned) decoder layer. Under
+# scan_layers=true the body is traced once, so a fixed id scopes to one layer.
+# Public alias is referenced from deepseek.py to tag the splash attention.
+_WEIGHT_AG_SCHED_GROUP = 1
+WEIGHT_AG_SCHED_GROUP = _WEIGHT_AG_SCHED_GROUP
+
+
 DISPATCH = "dispatch"
 COMBINE = "combine"
 
@@ -1220,8 +1228,14 @@ class RoutedMoE(nnx.Module):
       w1_bias,
       wo_bias,
       input_ids=None,
+      weights_pregathered=False,
   ):
-    """Perform sparse matrix multiplication of inputs and Experts."""
+    """Perform sparse matrix multiplication of inputs and Experts.
+
+    When `weights_pregathered` is True, w0/w1/wo are already FSDP-all-gathered
+    (done earlier, in the attention phase, by `gather_weights`) so the in-line
+    `_wag_sched` gather is skipped to avoid a double gather.
+    """
 
     def jax_ragged_dot_gmm(inputs, kernel, tiling, group_sizes, expert_assignments, padding_amount):
       """Execute jax.lax.ragged_dot, with potential quantization"""
@@ -1453,8 +1467,8 @@ class RoutedMoE(nnx.Module):
         self.config.moe_weight_ag_scheduling_group
         and self.config.use_ring_of_experts
         and not self.config.shard_exp_on_fsdp
+        and not weights_pregathered  # gather already done in the attention phase
     )
-    _WEIGHT_AG_SCHED_GROUP = 1
 
     def _wag_scheduling_group():
       return _scheduling_group(_WEIGHT_AG_SCHED_GROUP) if _wag_sched else contextlib.nullcontext()
@@ -2597,14 +2611,70 @@ class RoutedMoE(nnx.Module):
     wo_kernel = max_utils.unbox_logicallypartioned(wo_kernel)
     return w0_kernel, w1_kernel, wo_kernel
 
+  def gather_weights(self):
+    """FSDP-all-gather the routed expert weights (wi_0/wi_1/wo) early, so the
+    all-gather can be emitted in the ATTENTION phase (program-order before the
+    splash kernel) and overlap it (the SparseCore is idle during splash).
+
+    Returns (w0, w1, wo) gathered to the same layout sparse_matmul would use,
+    for passing back as `pregathered_weights`; or None when the simple bf16
+    ring path doesn't hold (sparsity / fused / per-expert-scale / serve-quant),
+    in which case the caller falls back to the normal in-MoE gather. Mirrors the
+    `_wag_sched` gather in `sparse_matmul` and `deepseek_batchsplit.gather_weights`.
+    """
+    cfg = self.config
+    if not (cfg.moe_weight_ag_scheduling_group and cfg.use_ring_of_experts and not cfg.shard_exp_on_fsdp):
+      return None
+    # Only the plain path is safe to pre-gather; otherwise weights need
+    # post-processing (scale/sparsity/fuse) that happens in __call__.
+    fused = cfg.prefuse_moe_weights and cfg.attention == "vllm_rpa" and not self.is_hash_routing
+    if (
+        fused
+        or self.wi_0_sparsity_module is not None
+        or self.per_expert_scale is not None
+        or quantizations.in_serve_mode(self.quant)
+    ):
+      return None
+
+    w0 = jnp.asarray(self.wi_0[...], self.dtype)
+    w1 = jnp.asarray(self.wi_1[...], self.dtype)
+    wo = jnp.asarray(self.wo[...], self.dtype)
+    # in = fsdp-sharded-on-embed kernel layout; out = the gathered (mlp_no_fsdp /
+    # embed_tensor_transpose) layout sparse_matmul expects (default ring branch).
+    wi_in = self._logical_to_mesh_axes(self.wi_kernel_axes)
+    wo_in = self._logical_to_mesh_axes(self.wo_kernel_axes)
+    w0_out = self._logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
+    wo_out = self._logical_to_mesh_axes(("exp", "mlp_no_fsdp", "embed_tensor_transpose"))
+
+    def _sched_gather(w, in_pspec, out_pspec, gather_axis):
+      def _fn(x):
+        # Tag the all-gather op ITSELF (inside the shard_map body); a tag on the
+        # shard_map call does not propagate to the inner collective. The matching
+        # tag on the splash attention (deepseek.attention_op) is the group partner
+        # that keeps the id live and tells the scheduler to overlap them.
+        with _scheduling_group(_WEIGHT_AG_SCHED_GROUP):
+          return jax.lax.all_gather(x, "fsdp", axis=gather_axis, tiled=True)
+      gathered = jax.shard_map(_fn, mesh=self.mesh, in_specs=(in_pspec,), out_specs=out_pspec, check_vma=False)(w)
+      return jax.lax.optimization_barrier(gathered)
+
+    w0 = _sched_gather(w0, wi_in, w0_out, 1)
+    w1 = _sched_gather(w1, wi_in, w0_out, 1)
+    wo = _sched_gather(wo, wo_in, wo_out, 2)
+    return (w0, w1, wo)
+
   def __call__(
       self,
       inputs: jax.Array,
       input_ids: jax.Array | None = None,
       gate_inputs: jax.Array | None = None,
       out_sharding: NamedSharding | None = None,
+      pregathered_weights: tuple | None = None,
   ) -> tuple[jax.Array, Optional[jax.Array], Optional[jax.Array]]:
     """Executes the routed MoE block.
+
+    `pregathered_weights`, if given, are (w0, w1, wo) already FSDP-all-gathered
+    by `gather_weights` in the attention phase; they replace the in-block read +
+    in-MoE gather (no double gather). Only used on the plain bf16 ring path.
 
     Args:
       inputs: The input activations.
@@ -2623,16 +2693,20 @@ class RoutedMoE(nnx.Module):
     routing_inputs = inputs if gate_inputs is None else gate_inputs.astype(gate_dtype)
     gate_logits, pre_bias_logits = self.gate(routing_inputs)
 
-    wo_kernel = jnp.asarray(self.wo[...], self.dtype)
-
     fused_kernel = None
     w0_kernel = None
     w1_kernel = None
-    if cfg.prefuse_moe_weights and cfg.attention == "vllm_rpa" and not self.is_hash_routing:
-      fused_kernel = jnp.asarray(self.wi[...], self.dtype)
+    if pregathered_weights is not None:
+      # Already FSDP-gathered in the attention phase; skip the in-block read and
+      # the in-MoE gather (sparse_matmul gets weights_pregathered=True below).
+      w0_kernel, w1_kernel, wo_kernel = pregathered_weights
     else:
-      w0_kernel = jnp.asarray(self.wi_0[...], self.dtype)
-      w1_kernel = jnp.asarray(self.wi_1[...], self.dtype)
+      wo_kernel = jnp.asarray(self.wo[...], self.dtype)
+      if cfg.prefuse_moe_weights and cfg.attention == "vllm_rpa" and not self.is_hash_routing:
+        fused_kernel = jnp.asarray(self.wi[...], self.dtype)
+      else:
+        w0_kernel = jnp.asarray(self.wi_0[...], self.dtype)
+        w1_kernel = jnp.asarray(self.wi_1[...], self.dtype)
 
     # Only apply per expert scales if we have not fused with the out-projections at init time.
     if self.per_expert_scale is not None and cfg.model_call_mode != "inference" and not cfg.fuse_expert_scales:
@@ -2671,7 +2745,8 @@ class RoutedMoE(nnx.Module):
             wo_bias,
         )
       output, lb_loss, bias_updates = self.sparse_matmul(
-          inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias, input_ids
+          inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias, input_ids,
+          weights_pregathered=pregathered_weights is not None,
       )
     else:
       output, lb_loss, bias_updates = self.dense_matmul(
@@ -2757,6 +2832,11 @@ class RoutedAndSharedMoE(nnx.Module):
   def routed_moe(self):
     return self.MoeBlock_0
 
+  def gather_routed_weights(self):
+    """Pre-gather the routed experts' FSDP weights (see RoutedMoE.gather_weights).
+    Call this in the attention phase; pass the result back as pregathered_weights."""
+    return self.MoeBlock_0.gather_weights()
+
   def __call__(
       self,
       inputs: jax.Array,
@@ -2765,6 +2845,7 @@ class RoutedAndSharedMoE(nnx.Module):
       intermediate_sharding: NamedSharding | None = None,
       out_sharding: NamedSharding | None = None,
       input_ids: jax.Array | None = None,
+      pregathered_weights: tuple | None = None,
   ) -> tuple[jax.Array, Optional[jax.Array], Optional[jax.Array]]:
     """Executes both the routed experts and the shared expert block.
 
@@ -2782,7 +2863,8 @@ class RoutedAndSharedMoE(nnx.Module):
       the load balance loss, and any routed bias updates.
     """
     routed_experts, load_balance_loss, moe_bias_updates = self.routed_moe(
-        inputs, gate_inputs=gate_inputs, out_sharding=out_sharding, input_ids=input_ids
+        inputs, gate_inputs=gate_inputs, out_sharding=out_sharding, input_ids=input_ids,
+        pregathered_weights=pregathered_weights,
     )
     shared_experts = self.shared_experts(inputs, intermediate_sharding=intermediate_sharding, out_sharding=out_sharding)
     return routed_experts + shared_experts, load_balance_loss, moe_bias_updates

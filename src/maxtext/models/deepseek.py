@@ -16,12 +16,14 @@
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
+import contextlib
 import functools
 from typing import Optional
 
 from flax import nnx
 import jax
 from jax.ad_checkpoint import checkpoint_name
+import jax.experimental.xla_metadata
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.common.common_types import Config
@@ -212,17 +214,28 @@ class DeepSeekGenericLayer(nnx.Module):
       slot: None | int = None,
   ):
     """Executes the attention layer."""
-    attention_result, _ = self.self_attention(
-        x,
-        x,
-        decoder_positions,
-        decoder_segment_ids=decoder_segment_ids,
-        deterministic=deterministic,
-        model_mode=self.model_mode,
-        out_sharding=self.out_sharding,
-        previous_chunk=previous_chunk,
-        slot=slot,
+    # When moe_weight_ag_scheduling_group is set, tag the splash attention into the
+    # same XLA _scheduling_group_id as the MoE FSDP weight all-gather (emitted just
+    # before, via gather_routed_weights). Both run in the same scanned decoder-layer
+    # body and the SparseCore is idle during splash, so the scheduler can overlap the
+    # otherwise-exposed SC-offloaded weight-AG with the splash kernel.
+    _sched = (
+        jax.experimental.xla_metadata.set_xla_metadata(_scheduling_group_id=moe.WEIGHT_AG_SCHED_GROUP)
+        if self.config.moe_weight_ag_scheduling_group
+        else contextlib.nullcontext()
     )
+    with _sched:
+      attention_result, _ = self.self_attention(
+          x,
+          x,
+          decoder_positions,
+          decoder_segment_ids=decoder_segment_ids,
+          deterministic=deterministic,
+          model_mode=self.model_mode,
+          out_sharding=self.out_sharding,
+          previous_chunk=previous_chunk,
+          slot=slot,
+      )
     return self.with_logical_constraint(attention_result)
 
   @property
@@ -573,6 +586,16 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       engram_output = self.engram_op(x, decoder_input_tokens)
       x = x + engram_output
 
+    # Pre-gather the routed MoE FSDP weights HERE, before the splash attention, so
+    # the (SC-offloaded) weight all-gather is emitted in program order during the
+    # attention phase where the SparseCore is idle -> the scheduler overlaps it with
+    # the splash kernel (both share the _scheduling_group_id tagged in attention_op).
+    # Returns None unless the plain bf16 ring path holds, in which case the MoE falls
+    # back to its in-block gather.
+    pregathered_weights = None
+    if self.config.moe_weight_ag_scheduling_group:
+      pregathered_weights = self.DeepSeekMoeBlock_0.gather_routed_weights()
+
     hidden_states, intermediate_inputs = self.self_attention_with_norm_op(
         x,
         decoder_segment_ids,
@@ -592,15 +615,20 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       load_balance_loss = metadata["load_balance_loss"]
       moe_bias_updates = metadata["moe_bias_updates"]
     else:
-      mlp_lnx, load_balance_loss, moe_bias_updates = self.mlp_op(hidden_states, deterministic)
+      mlp_lnx, load_balance_loss, moe_bias_updates = self.mlp_op(
+          hidden_states, deterministic, pregathered_weights=pregathered_weights
+      )
       layer_output = mlp_lnx + intermediate_inputs
     layer_output = self.dropout_op(layer_output, deterministic=deterministic)
 
     return self.post_process(layer_output, load_balance_loss, moe_bias_updates, kv_cache)
 
-  def mlp_op(self, x, deterministic, *args, **kwargs):
+  def mlp_op(self, x, deterministic, *args, pregathered_weights=None, **kwargs):
     mlp_lnx, load_balance_loss, moe_bias_updates = self.DeepSeekMoeBlock_0(
-        x, intermediate_sharding=self.mlp_intermediate_sharding, out_sharding=self.out_sharding
+        x,
+        intermediate_sharding=self.mlp_intermediate_sharding,
+        out_sharding=self.out_sharding,
+        pregathered_weights=pregathered_weights,
     )
     return self.with_logical_constraint(mlp_lnx), load_balance_loss, moe_bias_updates
 
