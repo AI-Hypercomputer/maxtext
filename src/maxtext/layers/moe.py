@@ -2646,26 +2646,44 @@ class RoutedMoE(nnx.Module):
     w0_out = self._logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
     wo_out = self._logical_to_mesh_axes(("exp", "mlp_no_fsdp", "embed_tensor_transpose"))
 
-    def _sched_gather(w, in_pspec, out_pspec, gather_axis):
-      def _fn(x):
-        # Tag the all-gather op ITSELF (inside the shard_map body); a tag on the
-        # shard_map call does not propagate to the inner collective. The matching
-        # tag on the splash attention (deepseek.attention_op) is the group partner
-        # that keeps the id live and tells the scheduler to overlap them.
-        with _scheduling_group(_WEIGHT_AG_SCHED_GROUP):
-          return jax.lax.all_gather(x, "fsdp", axis=gather_axis, tiled=True)
-      gathered = jax.shard_map(_fn, mesh=self.mesh, in_specs=(in_pspec,), out_specs=out_pspec, check_vma=False)(w)
-      return jax.lax.optimization_barrier(gathered)
+    # custom_vjp so the FORWARD gather carries the _scheduling_group_id (overlaps the
+    # splash kernel) while the BACKWARD/remat path re-gathers PLAINLY (no annotation)
+    # and nothing big is saved. This avoids BOTH failure modes seen earlier:
+    #   (1) tagging the backward gather -> the gather's reduce-scatter back-edges into
+    #       the rematerialized forward -> FAILED_PRECONDITION scheduling cycle;
+    #   (2) saving/offloading the full gathered weights to dodge the cycle -> ~325GB/core
+    #       across the scanned layers -> HBM/host OOM.
+    # The custom_vjp PRIMAL is the plain (unannotated) gather, which is what
+    # remat_policy=custom recomputes in the backward -> no annotation in the rematted
+    # gather -> no cycle. The custom forward rule applies the annotation (forward
+    # overlap). Grad of a tiled fsdp all-gather is a tiled psum_scatter (the transpose),
+    # so FSDP weight grads stay correct; nothing big is held as a residual.
+    def _make_cv_gather(in_pspec, out_pspec, gather_axis):
+      @jax.custom_vjp
+      def _g(w):  # PRIMAL: plain gather (what remat recomputes in the backward)
+        return jax.shard_map(
+            lambda x: jax.lax.all_gather(x, "fsdp", axis=gather_axis, tiled=True),
+            mesh=self.mesh, in_specs=(in_pspec,), out_specs=out_pspec, check_vma=False)(w)
 
-    # checkpoint_name the gathered weights so remat SAVES/OFFLOADS them instead of
-    # re-running this gather in the backward. Otherwise remat_policy=custom
-    # rematerializes the MoE forward through the gather, and the gather's backward
-    # reduce-scatter forms a scheduling cycle with the rematted forward
-    # (FAILED_PRECONDITION: cycle). The name is added to the offload list in
-    # decoders.get_remat_policy (batchsplit-style host offload).
-    w0 = adc.checkpoint_name(_sched_gather(w0, wi_in, w0_out, 1), "moe_gathered_weights")
-    w1 = adc.checkpoint_name(_sched_gather(w1, wi_in, w0_out, 1), "moe_gathered_weights")
-    wo = adc.checkpoint_name(_sched_gather(wo, wo_in, wo_out, 2), "moe_gathered_weights")
+      def _g_fwd(w):  # FORWARD under diff: annotated gather (overlaps splash)
+        def _fn(x):
+          with _scheduling_group(_WEIGHT_AG_SCHED_GROUP):
+            return jax.lax.all_gather(x, "fsdp", axis=gather_axis, tiled=True)
+        w_full = jax.shard_map(_fn, mesh=self.mesh, in_specs=(in_pspec,), out_specs=out_pspec, check_vma=False)(w)
+        return w_full, None  # no big residual saved (sharded w is recomputed cheaply / not needed)
+
+      def _g_bwd(_res, ct):  # transpose of tiled all-gather over fsdp = tiled psum_scatter
+        g_sharded = jax.shard_map(
+            lambda gg: jax.lax.psum_scatter(gg, "fsdp", scatter_dimension=gather_axis, tiled=True),
+            mesh=self.mesh, in_specs=(out_pspec,), out_specs=in_pspec, check_vma=False)(ct)
+        return (g_sharded,)
+
+      _g.defvjp(_g_fwd, _g_bwd)
+      return _g
+
+    w0 = jax.lax.optimization_barrier(_make_cv_gather(wi_in, w0_out, 1)(w0))
+    w1 = jax.lax.optimization_barrier(_make_cv_gather(wi_in, w0_out, 1)(w1))
+    wo = jax.lax.optimization_barrier(_make_cv_gather(wo_in, wo_out, 2)(wo))
     return (w0, w1, wo)
 
   def __call__(
