@@ -39,15 +39,17 @@ import maxtext as mt
 from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_PKG_DIR, MAXTEXT_TEST_ASSETS_ROOT
 from maxtext.common.common_types import MODEL_MODE_TRAIN
+from flax import nnx
 from maxtext.experimental.rl import grpo_utils
-from maxtext.experimental.rl.grpo_trainer import _merge_grpo_state, grpo_loss_fn, setup_train_loop
-from maxtext.experimental.rl.grpo_utils import compute_log_probs
+from maxtext.experimental.rl.grpo_trainer import _merge_grpo_state, grpo_loss_fn, grpo_loss_fn_nnx, setup_train_loop
+from maxtext.experimental.rl.grpo_utils import compute_log_probs, compute_log_probs_nnx
 from maxtext.inference import offline_engine
 from maxtext.inference.maxengine import maxengine
 from maxtext.inference.offline_engine import InputData
 from maxtext.layers import quantizations
 from maxtext.models import models
 from maxtext.utils import maxtext_utils
+from maxtext.utils import model_creation_utils
 import numpy as np
 import pytest
 import transformers
@@ -69,19 +71,27 @@ def get_golden_data(config):
 
 
 def setup_maxtext_model(config, mesh):
-  """setup maxtext model"""
+  """Sets up the MaxText model.
+
+  Returns (model, state, reference, init_rng, state_mesh_shardings, data_sharding). On
+  the NNX path the model carries its own params (state is None) and reference is a
+  cloned frozen model; on Linen, state is the decode state and reference is a copy of
+  the params merged into it.
+  """
   init_rng = jax.random.PRNGKey(config.init_weights_seed)
-  quant = quantizations.configure_quantization(config)
+  data_sharding = jax.NamedSharding(mesh, jax.sharding.PartitionSpec(None))
 
   if config.pure_nnx:
-    # NNX has a different function to init the training state.
-    raise NotImplementedError("Pure NNX support has not been implemented yet.")
-  else:
-    maxtext_model = models.transformer_as_linen(config=config, mesh=mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
-    init_state_fn = functools.partial(maxtext_utils.init_initial_state, maxtext_model, None, config, False, init_rng)
+    maxtext_model = model_creation_utils.from_pretrained(config, mesh=mesh, rng_key=init_rng)
+    reference = nnx.clone(maxtext_model)
+    # state_mesh_shardings is unused by the live correctness test on the NNX path.
+    return maxtext_model, None, reference, init_rng, None, data_sharding
+
+  quant = quantizations.configure_quantization(config)
+  maxtext_model = models.transformer_as_linen(config=config, mesh=mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+  init_state_fn = functools.partial(maxtext_utils.init_initial_state, maxtext_model, None, config, False, init_rng)
   state, state_mesh_annotations = maxtext_utils.setup_decode_state(config, mesh, None, init_state_fn)
   state_mesh_shardings = nn.logical_to_mesh_sharding(state_mesh_annotations, mesh, config.logical_axis_rules)
-  data_sharding = jax.NamedSharding(mesh, jax.sharding.PartitionSpec(None))
   reference_params = jax.tree.map(jnp.copy, state.params["params"])
   state = _merge_grpo_state(state, reference_params)
   return (
@@ -92,6 +102,20 @@ def setup_maxtext_model(config, mesh):
       state_mesh_shardings,
       data_sharding,
   )
+
+
+def _logps(config, model, state, ids, pos, seg, comp_seg, rngs=None):
+  """Per-token log-probs, dispatching between the NNX and Linen models."""
+  if config.pure_nnx:
+    return compute_log_probs_nnx(model, ids, pos, seg, comp_seg, config, is_train=False)
+  return compute_log_probs(model, state.params, ids, pos, seg, comp_seg, config, is_train=False, rngs=rngs)
+
+
+def _grpo_loss(config, model, state, reference, data, rng):
+  """GRPO loss. On NNX `reference` is the frozen reference model; on Linen it is the reference params."""
+  if config.pure_nnx:
+    return grpo_loss_fn_nnx(model, config, data, rng, None, reference)
+  return grpo_loss_fn(model, config, data, rng, state.params, reference)
 
 
 def prepare_maxtext_inputs(input_str, tokenizer_model):
@@ -184,15 +208,14 @@ class GrpoTrainerTest(unittest.TestCase):
         self.config.prompt, self.tokenizer_model
     )
     # Obtain per-token logits.
-    maxtext_per_token_logps, _ = compute_log_probs(
+    maxtext_per_token_logps, _ = _logps(
+        self.config,
         maxtext_model,
-        state.params,
+        state,
         input_ids,
         input_position,
         input_segmentation,
         completion_segmentation,
-        self.config,
-        is_train=False,
         rngs=self.rng,
     )
     jax.debug.print(
@@ -225,7 +248,7 @@ class GrpoTrainerTest(unittest.TestCase):
         "ar_completions_segmentation": completion_segmentation,
     }
     # Compute the loss and auxiliary values.
-    maxtext_loss, aux = grpo_loss_fn(maxtext_model, self.config, data, rng, state.params, reference_params)
+    maxtext_loss, aux = _grpo_loss(self.config, maxtext_model, state, reference_params, data, rng)
 
     # Assert that the computed loss and auxiliary averages match the golden data.
     self.assertEqual(maxtext_loss.tolist(), golden_data["maxtext_loss"])
