@@ -351,7 +351,7 @@ def convert_weights(abstract_params, weight_dict, config, block_to_convert=None)
     if p is None:
       return None
     if isinstance(p, MockTensor):
-      return MockTensor(v.shape, v.dtype)
+      return jax.ShapeDtypeStruct(p.shape, v.dtype)
     return jax.device_put(jnp.asarray(p, dtype=v.dtype), jax.devices("cpu")[0])
 
   return jax.tree_util.tree_map(finalize, params, abstract_params, is_leaf=lambda x: x is None)
