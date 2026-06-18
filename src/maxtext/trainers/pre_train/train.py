@@ -627,7 +627,8 @@ def train_loop(config, recorder, state=None):
   )
 
   with jax.set_mesh(mesh), mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-    shaped_batch = maxtext_utils.get_shaped_batch(config)
+    data_sharding = sharding.get_input_data_sharding(config, mesh)
+    shaped_batch = maxtext_utils.get_shaped_batch(config, batch_sharding=data_sharding)
     if config.shard_optimizer_over_data and isinstance(model, nn.Module):
       state = sharding.maybe_shard_with_name(state, state_mesh_shardings, config.shard_mode)
     elif config.shard_optimizer_over_data:

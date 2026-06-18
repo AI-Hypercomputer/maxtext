@@ -148,7 +148,7 @@ def get_reorder_callable(cp_size, shard_mode, reorder_strategy=ReorderStrategy.D
   )
 
 
-def get_shaped_batch(config):
+def get_shaped_batch(config, batch_sharding=None):
   """Return the shape of the batch - this is what eval_shape would return for the
   output of create_data_iterator, but eval_shape doesn't work, see b/306901078."""
   if config.enable_diloco:
@@ -160,21 +160,21 @@ def get_shaped_batch(config):
   else:
     batch_shape = (config.global_batch_size_to_load, config.max_target_length)
   shaped_batch = {}
-  shaped_batch["inputs"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
-  shaped_batch["inputs_position"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
-  shaped_batch["inputs_segmentation"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
-  shaped_batch["targets"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
-  shaped_batch["targets_position"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
-  shaped_batch["targets_segmentation"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
+  shaped_batch["inputs"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
+  shaped_batch["inputs_position"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
+  shaped_batch["inputs_segmentation"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
+  shaped_batch["targets"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
+  shaped_batch["targets_position"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
+  shaped_batch["targets_segmentation"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
   if config.use_multimodal:
     image_shape = mm_processor.get_dummy_image_shape_for_init(
         config.model_name, batch_size=config.micro_batch_size_to_train_on
     )
-    shaped_batch["images"] = jax.ShapeDtypeStruct(image_shape, jnp.int32)
-    shaped_batch["image_masks"] = jax.ShapeDtypeStruct(image_shape[:2], jnp.int32)
+    shaped_batch["images"] = jax.ShapeDtypeStruct(image_shape, jnp.int32, sharding=batch_sharding)
+    shaped_batch["image_masks"] = jax.ShapeDtypeStruct(image_shape[:2], jnp.int32, sharding=batch_sharding)
   if config.use_audio:
     audio_shape = mm_processor.get_dummy_audio_shape_for_init(config)
-    shaped_batch["audios"] = jax.ShapeDtypeStruct(audio_shape, jnp.float32)
+    shaped_batch["audios"] = jax.ShapeDtypeStruct(audio_shape, jnp.float32, sharding=batch_sharding)
   return shaped_batch
 
 
