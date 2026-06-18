@@ -719,6 +719,14 @@ class MoEGeneral(BaseModel):
   num_experts_per_tok: PositiveInt = Field(1, description="The number of experts to route each token to.")
   capacity_factor: float = Field(-1.0, description="Expert capacity factor. If < 0, no token dropping.")
   ragged_buffer_factor: float = Field(-1.0, description="Ragged buffer factor. If < 0, ragged buffer is worst case size.")
+  moe_n_chunks: PositiveInt = Field(
+      1,
+      description=(
+          "Number of token chunks for the ring-of-experts MoE pipeline. 1 disables chunking (identical to baseline). "
+          ">1 splits the per-shard tokens along the sequence dimension so each chunk's EP all-gather / reduce-scatter "
+          "overlaps the previous chunk's GMM compute. Requires use_ring_of_experts=True."
+      ),
+  )
   moe_expert_input_dim: int = Field(
       -1,
       description="Dimension of tokens entering the MoE layer. If < 0, defaults to emb_dim.",
@@ -742,6 +750,25 @@ class MoEGeneral(BaseModel):
   use_gather_mosaic_kernel: bool = Field(
       False,
       description="Whether to use a custom mosaic kernel for token gather ops.",
+  )
+  moe_combine_kernel: str = Field(
+      "auto",
+      description=(
+          "Which kernel runs the MoE combine (unpermute) for the ring-of-experts path, "
+          "independent of the gather kernel (which follows use_ragged_sort). "
+          "'auto' = follow use_ragged_sort; 'sc' = SparseCore ring_ragged_unsort; "
+          "'tc' = TensorCore _sort_activations + einsum. Lets gather stay on SC while combine moves to TC."
+      ),
+  )
+  moe_weight_ag_scheduling_group: bool = Field(
+      False,
+      description=(
+          "Ring-of-experts only (shard_exp_on_fsdp=False). When True, make the FSDP weight "
+          "all-gather (w0/w1/wo embed dim) explicit INSIDE the shard_map body and tag it with the "
+          "same _scheduling_group_id as the route/dispatch sort, so the XLA scheduler overlaps the "
+          "exposed weight all-gather with the preceding SparseCore sort (different engines, data-"
+          "independent). Default False = implicit boundary gather (unchanged behavior)."
+      ),
   )
   use_random_routing: bool = Field(False, description="Whether to use random routing for debugging.")
   interleave_moe_layer_step: int = Field(1, description="Frequency of MoE layers, e.g., 2 means every 2nd layer is MoE.")

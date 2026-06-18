@@ -15,6 +15,7 @@
 
 """MoE related Layers."""
 
+import contextlib
 import enum
 import functools
 import math
@@ -51,6 +52,18 @@ import qwix.pallas as qpl
 import tokamax
 
 set_xla_metadata = xla_metadata.set_xla_metadata
+
+
+def _scheduling_group(group_id):
+  """Tag enclosed ops with an XLA `_scheduling_group_id`.
+
+  Instructions sharing a `_scheduling_group_id` are candidates for the XLA
+  scheduler to overlap (see batchsplit's `scheduling_group`). Used here to put
+  the explicit FSDP weight all-gather in the same group as the dispatch sort so
+  the scheduler overlaps the (otherwise exposed) weight-AG with the SparseCore
+  sort that precedes the GMM.
+  """
+  return set_xla_metadata(_scheduling_group_id=group_id)
 
 
 DISPATCH = "dispatch"
@@ -914,7 +927,14 @@ class RoutedMoE(nnx.Module):
   ):
     """Unpermute tokens to original order and combine weights."""
 
-    if self.config.use_ragged_sort and self.config.use_ring_of_experts:
+    # Combine kernel is decoupled from the gather kernel (use_ragged_sort):
+    # 'auto' follows use_ragged_sort; 'sc'/'tc' force SparseCore/TensorCore combine.
+    # Lets the gather stay on SC (cheap) while the combine moves to TC (frees the
+    # SparseCore so the SC-offloaded reduce-scatter isn't serialized behind the unsort).
+    _combine_ragged = self.config.moe_combine_kernel == "sc" or (
+        self.config.moe_combine_kernel == "auto" and self.config.use_ragged_sort
+    )
+    if _combine_ragged and self.config.use_ring_of_experts:
       local_num_experts = self.config.num_experts // self.get_expert_parallelism_size()
       # Build the flat routing weights in the same layout as
       # topk_argsort_revert_indices (i.e. the flat token×topk order before
@@ -1402,6 +1422,15 @@ class RoutedMoE(nnx.Module):
           w0_pspec = self._logical_to_mesh_axes(("embed_tensor_transpose", None, "mlp_no_fsdp"))
           w1_pspec = self._logical_to_mesh_axes(("embed_tensor_transpose", None, "mlp_no_fsdp"))
           wo_pspec = self._logical_to_mesh_axes(("embed_tensor_transpose", "mlp_no_fsdp", None))
+      elif self.config.moe_weight_ag_scheduling_group:
+        # Keep the embed dim FSDP-sharded into the shard_map body (use `embed_moe`,
+        # which carries 'fsdp', instead of the funky `embed_tensor_transpose` that
+        # drops fsdp and triggers the implicit boundary all-gather). The weight
+        # all-gather is then done explicitly in-body and tagged for overlap with
+        # the dispatch sort. (mlp dim keeps `mlp_no_fsdp` as before.)
+        w0_pspec = self._logical_to_mesh_axes(("exp", "embed_moe", "mlp_no_fsdp"))
+        w1_pspec = self._logical_to_mesh_axes(("exp", "embed_moe", "mlp_no_fsdp"))
+        wo_pspec = self._logical_to_mesh_axes(("exp", "mlp_no_fsdp", "embed_moe"))
       else:
         # These are the main shardings used by default - they use funky rules to AG over FSDP.
         w0_pspec = self._logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
@@ -1423,6 +1452,21 @@ class RoutedMoE(nnx.Module):
 
     is_batch_sharded_by_expert = is_batch_sharded_by_ep(inputs)
     weight_gather = explicitly_weight_ag(self.config.shard_exp_on_fsdp)
+
+    # When enabled, the FSDP weight all-gather is made explicit inside the
+    # shard_map body and tagged into this scheduling group together with the
+    # dispatch sort, so the scheduler overlaps the (otherwise exposed) weight-AG
+    # with the SparseCore sort. Only valid for the ring-of-experts boundary-gather
+    # path (shard_exp_on_fsdp=False); a no-op context otherwise.
+    _wag_sched = (
+        self.config.moe_weight_ag_scheduling_group
+        and self.config.use_ring_of_experts
+        and not self.config.shard_exp_on_fsdp
+    )
+    _WEIGHT_AG_SCHED_GROUP = 1
+
+    def _wag_scheduling_group():
+      return _scheduling_group(_WEIGHT_AG_SCHED_GROUP) if _wag_sched else contextlib.nullcontext()
     (
         batch_logical_axis,
         input_partition_pspec,
@@ -1629,32 +1673,13 @@ class RoutedMoE(nnx.Module):
       layer_w1 = adc.checkpoint_name(layer_w1, "moe_mlpwi_1")
       return self.apply_ffn_activation(layer_w0, layer_w1)
 
-    @functools.partial(
-        jax.shard_map,
-        mesh=self.mesh,
-        in_specs=(
-            input_partition_pspec,
-            gate_logits_pspec,
-            pre_bias_logits_pspec,
-            w0_pspec,
-            w1_pspec,
-            wo_pspec,
-            w0_bias_pspec,
-            w1_bias_pspec,
-            wo_bias_pspec,
-            decoder_tokens_pspec,
-            P(),  # Replicate the input key
-        ),
-        out_specs=(
-            self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", "activation_embed")),
-            P(),  # Handle None or replicate the output
-            P(),  # Handle None or replicate the output
-        ),
-        check_vma=self.config.check_vma,
-    )
-    def wrapper(x, logits, pre_bias_logits, w0, w1, wo, w0_bias, w1_bias, wo_bias, sharded_input_ids, rngs):
+    def _moe_body(x, logits, pre_bias_logits, w0, w1, wo, w0_bias, w1_bias, wo_bias, sharded_input_ids, rngs):
       batch_size, sequence_length, _ = x.shape
-      x, routing, route_metadata = route(x, logits, pre_bias_logits, rngs, input_ids=sharded_input_ids)
+      # Tag route() (EP all-gather + dispatch permute/sort, incl. the SparseCore
+      # ring_ragged_sort) into the same scheduling group as the explicit weight-AG
+      # above so the scheduler overlaps the exposed weight-AG with the SC sort.
+      with _wag_scheduling_group():
+        x, routing, route_metadata = route(x, logits, pre_bias_logits, rngs, input_ids=sharded_input_ids)
 
       if self.config.mlp_bias:
         w0_bias, w1_bias, wo_bias = self.transform_bias(routing.selected_experts, w0_bias, w1_bias, wo_bias)
@@ -1794,6 +1819,82 @@ class RoutedMoE(nnx.Module):
         )
 
       return output, routing.lb_loss, routing.bias_updates
+
+    @functools.partial(
+        jax.shard_map,
+        mesh=self.mesh,
+        in_specs=(
+            input_partition_pspec,
+            gate_logits_pspec,
+            pre_bias_logits_pspec,
+            w0_pspec,
+            w1_pspec,
+            wo_pspec,
+            w0_bias_pspec,
+            w1_bias_pspec,
+            wo_bias_pspec,
+            decoder_tokens_pspec,
+            P(),  # Replicate the input key
+        ),
+        out_specs=(
+            self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", "activation_embed")),
+            P(),  # Handle None or replicate the output
+            P(),  # Handle None or replicate the output
+        ),
+        check_vma=self.config.check_vma,
+    )
+    def wrapper(x, logits, pre_bias_logits, w0, w1, wo, w0_bias, w1_bias, wo_bias, sharded_input_ids, rngs):
+      # The expert weights (w0/w1/wo) are all-gathered over FSDP once at this
+      # shard_map entry and reused across chunks. By default the gather is implicit
+      # (the `embed_tensor_transpose` pspec drops fsdp -> GSPMD inserts it at the
+      # boundary). With moe_weight_ag_scheduling_group, the weights instead enter
+      # fsdp-sharded on embed and we gather them explicitly here, tagged into the
+      # dispatch-sort scheduling group so the scheduler overlaps the (otherwise
+      # exposed) weight-AG with the SparseCore sort. Done once -> reused by all chunks.
+      if _wag_sched:
+        with _wag_scheduling_group():
+          # w0/w1 = (E_local, embed, mlp): embed is axis 1; wo = (E_local, mlp, embed): axis 2.
+          w0 = jax.lax.all_gather(w0, "fsdp", axis=1, tiled=True)
+          w1 = jax.lax.all_gather(w1, "fsdp", axis=1, tiled=True)
+          wo = jax.lax.all_gather(wo, "fsdp", axis=2, tiled=True)
+      n_chunks = self.config.moe_n_chunks
+      if n_chunks <= 1 or not self.config.use_ring_of_experts:
+        return _moe_body(x, logits, pre_bias_logits, w0, w1, wo, w0_bias, w1_bias, wo_bias, sharded_input_ids, rngs)
+
+      # Chunked ring-of-experts pipeline: split the per-shard tokens along the
+      # sequence dim into `n_chunks` data-independent chunks. Each chunk runs the
+      # full route -> GMM -> combine path; with no barrier between them XLA is
+      # free to overlap chunk (c+1)'s EP all-gather and chunk (c-1)'s
+      # reduce-scatter with chunk c's GMM compute. Token routing is per-token, so
+      # the main (lm) output is identical to n_chunks=1; only the aggregate
+      # load-balance loss / bias updates are averaged across chunks.
+      seq_len = x.shape[1]
+      if seq_len % n_chunks != 0:
+        raise ValueError(f"moe_n_chunks={n_chunks} must evenly divide the MoE sequence length {seq_len}.")
+      chunk = seq_len // n_chunks
+      outs, lb_losses, bias_updates_list = [], [], []
+      for c in range(n_chunks):
+        sl = slice(c * chunk, (c + 1) * chunk)
+        out_c, lb_c, bu_c = _moe_body(
+            x[:, sl, :],
+            logits[:, sl, :],
+            None if pre_bias_logits is None else pre_bias_logits[:, sl, :],
+            w0,
+            w1,
+            wo,
+            w0_bias,
+            w1_bias,
+            wo_bias,
+            None if sharded_input_ids is None else sharded_input_ids[:, sl],
+            rngs,
+        )
+        outs.append(out_c)
+        lb_losses.append(lb_c)
+        bias_updates_list.append(bu_c)
+      output = jnp.concatenate(outs, axis=1)
+      lb_loss = None if lb_losses[0] is None else sum(lb_losses) / n_chunks
+      bias_updates = None if bias_updates_list[0] is None else sum(bias_updates_list) / n_chunks
+      return output, lb_loss, bias_updates
 
     if self.config.moe_fsdp_use_two_stage_all_gather:
       # Unshard on fsdp axis
