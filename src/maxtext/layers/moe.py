@@ -2684,9 +2684,14 @@ class RoutedMoE(nnx.Module):
     # Distinct scheduling-group ids per weight so the all-gather-combiner cannot
     # fuse the three into one un-hideable monolith; each smaller (~5ms) gather can
     # then be scheduled independently behind different attention-phase compute.
-    w0 = jax.lax.optimization_barrier(_make_cv_gather(wi_in, w0_out, 1, _WEIGHT_AG_SCHED_GROUP)(w0))
-    w1 = jax.lax.optimization_barrier(_make_cv_gather(wi_in, w0_out, 1, _WEIGHT_AG_SCHED_GROUP + 1)(w1))
-    wo = jax.lax.optimization_barrier(_make_cv_gather(wo_in, wo_out, 2, _WEIGHT_AG_SCHED_GROUP + 2)(wo))
+    # NO optimization_barrier: it is self-dual, so a barrier on the gathered weight
+    # fences the weight-grad feeding the backward psum_scatter -> pins the RS exposed.
+    # The distinct group ids already prevent the all-gather-combiner fusion, so the
+    # barriers were redundant in the forward and harmful in the backward. Dropping
+    # them lets the scheduler float the backward RS over the backward GMM matmuls.
+    w0 = _make_cv_gather(wi_in, w0_out, 1, _WEIGHT_AG_SCHED_GROUP)(w0)
+    w1 = _make_cv_gather(wi_in, w0_out, 1, _WEIGHT_AG_SCHED_GROUP + 1)(w1)
+    wo = _make_cv_gather(wo_in, wo_out, 2, _WEIGHT_AG_SCHED_GROUP + 2)(wo)
     return (w0, w1, wo)
 
   def __call__(
