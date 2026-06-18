@@ -20,7 +20,7 @@ echo "2. Creating workload via xpk (this builds & uploads container image)..."
   --priority=very-high \
   --workload="${WORKLOAD_NAME}" \
   --base-docker-image="gcr.io/tpu-prod-env-multipod/maxtext_jax_nightly:latest" \
-  --command="PYTHONPATH=src:\$PYTHONPATH python3 src/maxtext/trainers/pre_train/train.py src/maxtext/configs/base.yml run_name=pb-dsv4-v7x-c4 metrics_file=metrics.txt base_output_directory=gs://pb-maxtext-logs/ dataset_type=tfds dataset_name=c4/en:3.1.0 dataset_path=gs://maxtext-dataset load_parameters_path=gs://snehalv-data/deepseek_v4-flash/scanned/deepseek4-284b_2026-06-17-18-16/checkpoints/0/items steps=20 per_device_batch_size=1 max_target_length=4096 enable_checkpointing=True model_name=deepseek4-284b tokenizer_type=huggingface tokenizer_path=deepseek-ai/DeepSeek-V4-Flash ici_fsdp_parallelism=-1 profiler=xplane skip_first_n_steps_for_profiler=10 profiler_steps=5" \
+  --command="PYTHONPATH=src:\$PYTHONPATH python3 src/maxtext/trainers/pre_train/train_compile.py src/maxtext/configs/base.yml run_name=test_compile metrics_file=metrics.txt base_output_directory=/tmp/maxtext_logs dataset_path=gs://maxtext-dataset dataset_type=synthetic steps=1 per_device_batch_size=1 max_target_length=2048 enable_checkpointing=False model_name=deepseek4-284b compile_topology=v5p-256 compile_topology_num_slices=1 ici_fsdp_parallelism=-1 opt_type=sgd attention=dot_product" \
   --output-manifest-file=workload_manifest.yaml
 
 echo "3. Deleting un-schedulable base workload from cluster..."
