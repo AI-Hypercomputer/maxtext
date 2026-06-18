@@ -421,9 +421,16 @@ class Decoder(nn.Module):
             offload_dst="pinned_host",
         )
       elif cfg.remat_policy == "custom":
+        names_to_offload = list(cfg.tensors_to_offload or [])
+        # Host-offload the attention-phase pre-gathered MoE weights (batchsplit-style)
+        # so the backward loads them instead of re-running the gather, which would
+        # otherwise form a remat scheduling cycle (the gather's backward reduce-scatter
+        # back-edges into the rematerialized MoE forward).
+        if getattr(cfg, "moe_weight_ag_scheduling_group", False):
+          names_to_offload = names_to_offload + ["moe_gathered_weights"]
         policy = jax.checkpoint_policies.save_and_offload_only_these_names(
             names_which_can_be_saved=cfg.tensors_on_device,
-            names_which_can_be_offloaded=cfg.tensors_to_offload,
+            names_which_can_be_offloaded=names_to_offload,
             offload_src="device",
             offload_dst="pinned_host",
         )

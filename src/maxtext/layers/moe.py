@@ -2657,9 +2657,15 @@ class RoutedMoE(nnx.Module):
       gathered = jax.shard_map(_fn, mesh=self.mesh, in_specs=(in_pspec,), out_specs=out_pspec, check_vma=False)(w)
       return jax.lax.optimization_barrier(gathered)
 
-    w0 = _sched_gather(w0, wi_in, w0_out, 1)
-    w1 = _sched_gather(w1, wi_in, w0_out, 1)
-    wo = _sched_gather(wo, wo_in, wo_out, 2)
+    # checkpoint_name the gathered weights so remat SAVES/OFFLOADS them instead of
+    # re-running this gather in the backward. Otherwise remat_policy=custom
+    # rematerializes the MoE forward through the gather, and the gather's backward
+    # reduce-scatter forms a scheduling cycle with the rematted forward
+    # (FAILED_PRECONDITION: cycle). The name is added to the offload list in
+    # decoders.get_remat_policy (batchsplit-style host offload).
+    w0 = adc.checkpoint_name(_sched_gather(w0, wi_in, w0_out, 1), "moe_gathered_weights")
+    w1 = adc.checkpoint_name(_sched_gather(w1, wi_in, w0_out, 1), "moe_gathered_weights")
+    wo = adc.checkpoint_name(_sched_gather(wo, wo_in, wo_out, 2), "moe_gathered_weights")
     return (w0, w1, wo)
 
   def __call__(
