@@ -16,12 +16,14 @@
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
+import contextlib
 import functools
 import inspect
 import warnings
 from typing import Any
 
 import jax
+import jax.experimental.xla_metadata
 import jax.numpy as jnp
 from flax import linen as nn
 from flax import nnx
@@ -191,16 +193,27 @@ class NNXDecoderLayer(nnx.Module):
     lnx = self.pre_self_attention_norm(inputs)
     lnx = _maybe_shard_with_logical(lnx, logical_axis_names)
 
-    attention_lnx, kv_cache = self.self_attention(
-        lnx,
-        lnx,
-        decoder_positions,
-        decoder_segment_ids=decoder_segment_ids,
-        deterministic=deterministic,
-        model_mode=model_mode,
-        kv_cache=kv_cache,
-        attention_metadata=attention_metadata,
+    # When moe_weight_ag_scheduling_group is set, tag the (splash) attention into
+    # the same XLA _scheduling_group_id as the MoE FSDP weight all-gather (see
+    # RoutedMoE.sparse_matmul). Both run in the same scanned decoder-layer body, so
+    # a fixed group id is correct under scan_layers=true; it tells the scheduler to
+    # overlap the otherwise-exposed weight-AG with the splash attention kernel.
+    _attn_sched_group = (
+        jax.experimental.xla_metadata.set_xla_metadata(_scheduling_group_id=1)
+        if cfg.moe_weight_ag_scheduling_group
+        else contextlib.nullcontext()
     )
+    with _attn_sched_group:
+      attention_lnx, kv_cache = self.self_attention(
+          lnx,
+          lnx,
+          decoder_positions,
+          decoder_segment_ids=decoder_segment_ids,
+          deterministic=deterministic,
+          model_mode=model_mode,
+          kv_cache=kv_cache,
+          attention_metadata=attention_metadata,
+      )
     attention_lnx = _maybe_shard_with_logical(attention_lnx, logical_axis_names)
 
     mlp_lnx = self.mlp(lnx, deterministic=deterministic)
