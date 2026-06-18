@@ -2658,7 +2658,7 @@ class RoutedMoE(nnx.Module):
     # gather -> no cycle. The custom forward rule applies the annotation (forward
     # overlap). Grad of a tiled fsdp all-gather is a tiled psum_scatter (the transpose),
     # so FSDP weight grads stay correct; nothing big is held as a residual.
-    def _make_cv_gather(in_pspec, out_pspec, gather_axis, sched_group):
+    def _make_cv_gather(in_pspec, out_pspec, gather_axis, sched_group, bwd_sched_group):
       @jax.custom_vjp
       def _g(w):  # PRIMAL: plain gather (what remat recomputes in the backward)
         return jax.shard_map(
@@ -2673,9 +2673,14 @@ class RoutedMoE(nnx.Module):
         return w_full, None  # no big residual saved (sharded w is recomputed cheaply / not needed)
 
       def _g_bwd(_res, ct):  # transpose of tiled all-gather over fsdp = tiled psum_scatter
-        g_sharded = jax.shard_map(
-            lambda gg: jax.lax.psum_scatter(gg, "fsdp", scatter_dimension=gather_axis, tiled=True),
-            mesh=self.mesh, in_specs=(out_pspec,), out_specs=in_pspec, check_vma=False)(ct)
+        # Annotate the bwd weight-grad reduce-scatter into its own scheduling group so the
+        # scheduler floats it over the backward attention/GMM compute (mirrors the forward
+        # gather overlap; batchsplit groups its bwd RS the same way). Un-annotated, the RS
+        # is never floated -> fully exposed (the +0.57s backward drag).
+        def _fn(gg):
+          with _scheduling_group(bwd_sched_group):
+            return jax.lax.psum_scatter(gg, "fsdp", scatter_dimension=gather_axis, tiled=True)
+        g_sharded = jax.shard_map(_fn, mesh=self.mesh, in_specs=(out_pspec,), out_specs=in_pspec, check_vma=False)(ct)
         return (g_sharded,)
 
       _g.defvjp(_g_fwd, _g_bwd)
@@ -2684,9 +2689,9 @@ class RoutedMoE(nnx.Module):
     # Distinct scheduling-group ids per weight so the all-gather-combiner cannot
     # fuse the three into one un-hideable monolith; each smaller (~5ms) gather can
     # then be scheduled independently behind different attention-phase compute.
-    w0 = jax.lax.optimization_barrier(_make_cv_gather(wi_in, w0_out, 1, _WEIGHT_AG_SCHED_GROUP)(w0))
-    w1 = jax.lax.optimization_barrier(_make_cv_gather(wi_in, w0_out, 1, _WEIGHT_AG_SCHED_GROUP + 1)(w1))
-    wo = jax.lax.optimization_barrier(_make_cv_gather(wo_in, wo_out, 2, _WEIGHT_AG_SCHED_GROUP + 2)(wo))
+    w0 = jax.lax.optimization_barrier(_make_cv_gather(wi_in, w0_out, 1, _WEIGHT_AG_SCHED_GROUP, _WEIGHT_AG_SCHED_GROUP + 3)(w0))
+    w1 = jax.lax.optimization_barrier(_make_cv_gather(wi_in, w0_out, 1, _WEIGHT_AG_SCHED_GROUP + 1, _WEIGHT_AG_SCHED_GROUP + 4)(w1))
+    wo = jax.lax.optimization_barrier(_make_cv_gather(wo_in, wo_out, 2, _WEIGHT_AG_SCHED_GROUP + 2, _WEIGHT_AG_SCHED_GROUP + 5)(wo))
     return (w0, w1, wo)
 
   def __call__(
