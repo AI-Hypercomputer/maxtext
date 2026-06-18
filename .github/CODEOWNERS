@@ -1,11 +1,11 @@
-* @abhinavclemson @gobbleturk @khatwanimohit @bvandermoon @vipannalla @RissyRan @richjames0 @gagika @shralex @SurbhiJainUSC @hengtaoguo @A9isha @aireenmei @NuojCheng @jiangjy1982 @suexu1025 @NicoGrande @jesselu-google @dipannita08 @igorts-git @darisoy
+* @abhinavclemson @gobbleturk @khatwanimohit @bvandermoon @vipannalla @RissyRan @richjames0 @gagika @shralex @SurbhiJainUSC @hengtaoguo @A9isha @aireenmei @NuojCheng @jiangjy1982 @suexu1025 @NicoGrande @jesselu-google @dipannita08 @igorts-git @darisoy @entrpn
 
 # Model bring-up
-src/maxtext/assets @parambole @shuningjin @RissyRan @suexu1025 @jiangjy1982 @gobbleturk @bvandermoon @gagika @shralex @richjames0 @NicoGrande
-src/maxtext/configs/models @parambole @shuningjin @RissyRan @suexu1025 @jiangjy1982 @gobbleturk @bvandermoon @gagika @shralex @richjames0 @NicoGrande @jesselu-google @NuojCheng
-src/maxtext/checkpoint_conversion @parambole @shuningjin @RissyRan @suexu1025 @jiangjy1982 @gobbleturk @bvandermoon @hengtaoguo @gagika @shralex @richjames0 @NicoGrande
-src/maxtext/layers @parambole @shuningjin @RissyRan @suexu1025 @jiangjy1982 @gobbleturk @bvandermoon @gagika @shralex @richjames0 @NicoGrande @jesselu-google @NuojCheng
-src/maxtext/models @parambole @shuningjin @RissyRan @suexu1025 @jiangjy1982 @gobbleturk @bvandermoon @gagika @shralex @richjames0 @NicoGrande @jesselu-google @NuojCheng
+src/maxtext/assets @parambole @shuningjin @RissyRan @suexu1025 @jiangjy1982 @gobbleturk @bvandermoon @gagika @shralex @richjames0 @NicoGrande @entrpn
+src/maxtext/configs/models @parambole @shuningjin @RissyRan @suexu1025 @jiangjy1982 @gobbleturk @bvandermoon @gagika @shralex @richjames0 @NicoGrande @jesselu-google @NuojCheng @entrpn
+src/maxtext/checkpoint_conversion @parambole @shuningjin @RissyRan @suexu1025 @jiangjy1982 @gobbleturk @bvandermoon @hengtaoguo @gagika @shralex @richjames0 @NicoGrande @entrpn
+src/maxtext/layers @parambole @shuningjin @RissyRan @suexu1025 @jiangjy1982 @gobbleturk @bvandermoon @gagika @shralex @richjames0 @NicoGrande @jesselu-google @NuojCheng @entrpn
+src/maxtext/models @parambole @shuningjin @RissyRan @suexu1025 @jiangjy1982 @gobbleturk @bvandermoon @gagika @shralex @richjames0 @NicoGrande @jesselu-google @NuojCheng @entrpn
 
 # Features
 src/maxtext/experimental/rl @A9isha @khatwanimohit @xuefgu @gagika @richjames0 @shralex @NicoGrande @darisoy
