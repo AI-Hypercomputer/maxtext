@@ -40,7 +40,7 @@ jobs:
   build_and_test_maxtext_package:
     name: Build and Test MaxText Package
     needs: [release_approval]
-    uses: ./.github/workflows/build_and_test_maxtext.yml
+    uses: ./.github/workflows/ci_pipeline.yml
     secrets: inherit
 
   build_docs:
@@ -51,7 +51,7 @@ jobs:
 
   check_links:
     name: Check Links in Documentation
-    uses: ./.github/workflows/linkcheck.yml
+    uses: ./.github/workflows/docs_link_check.yml
     secrets: inherit
 
   publish_maxtext_package_to_pypi:

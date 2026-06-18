@@ -13,9 +13,9 @@
 # limitations under the License.
 
 # This workflow builds and pushes MaxText images for both TPU and GPU devices.
-# It runs automatically daily at 12am UTC, on Pull Requests, or manually via Workflow Dispatch.
+# It runs automatically daily at 12am UTC, or manually via Workflow Dispatch.
 
-name: Build Images
+name: Build Nightly Docker Images
 
 on:
   schedule:

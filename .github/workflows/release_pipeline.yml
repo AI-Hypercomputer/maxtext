@@ -1,4 +1,4 @@
-# Copyright 2026 Google LLC
+# Copyright 2023-2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -46,7 +46,7 @@ jobs:
     if: |
       always() &&
       (needs.release_approval.result == 'success' || needs.release_approval.result == 'skipped')
-    uses: ./.github/workflows/build_and_test_maxtext.yml
+    uses: ./.github/workflows/ci_pipeline.yml
     secrets: inherit
 
   build_release_candidate_images:
