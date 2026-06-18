@@ -13,40 +13,32 @@
 # limitations under the License.
 
 # pylint: disable=bare-except, consider-using-generator
-"""Utils that are only interesting for training in MaxText."""
+""" Utils that are only interesting for training in MaxText. """
 
-import functools
-from functools import partial
-
-from flax import nnx
-from flax.linen import partitioning as nn_partitioning
+import os
 import jax
+import functools
+from flax.linen import partitioning as nn_partitioning
 from maxtext.common import checkpointing
-from maxtext.common import train_state_nnx
-from maxtext.common.common_types import ReorderStrategy
 from maxtext.common.data_loader import create_dataloader
 from maxtext.common.goodput import GoodputEvent, maybe_record_goodput
 from maxtext.optimizers import optimizers
-from maxtext.trainers.diloco import diloco
+from maxtext.trainers.post_train.dpo.dpo_utils import _merge_dpo_state
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
 from maxtext.utils import sharding
 from maxtext.utils.rampup_batch import create_rampup_manager
+from maxtext.trainers.diloco import diloco
 
 
-def create_training_optimizer(config, model):
-  """Creates the optimizer and learning rate schedule."""
+def create_training_tools(config, model, mesh):
+  """Creates the init_rng, optimizer, learning rate schedule, and checkpoint manager."""
+  init_rng = jax.random.PRNGKey(config.init_weights_seed)
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   # pass in model for muon
   tx = optimizers.get_optimizer(config, learning_rate_schedule, model)
-  return learning_rate_schedule, tx
-
-
-def create_checkpoint_manager(config, mesh, init_state_fn):
-  """Creates the init_rng, optimizer, learning rate schedule, and checkpoint manager."""
-  # pass in model for muon
   logger = checkpointing.setup_checkpoint_logger(config)
   if config.enable_multi_tier_checkpointing:
     checkpoint_manager = checkpointing.create_orbax_emergency_replicator_checkpoint_manager(
@@ -55,7 +47,7 @@ def create_checkpoint_manager(config, mesh, init_state_fn):
         mesh,
     )
   elif config.enable_emergency_checkpoint:
-    abstract_state, _, _ = maxtext_utils.get_abstract_state(config, mesh, init_state_fn, is_training=True)
+    abstract_state, _, _ = maxtext_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
     checkpoint_manager = checkpointing.create_orbax_emergency_checkpoint_manager(
         config.local_checkpoint_directory,
         config.checkpoint_dir,
@@ -90,15 +82,12 @@ def create_checkpoint_manager(config, mesh, init_state_fn):
         config.enable_single_controller,
         config.colocated_python_checkpointing,
         config.enable_single_replica_ckpt_restoring,
-        config.enable_autocheckpoint,
-        config.checkpoint_todelete_subdir,
-        config.checkpoint_todelete_full_path,
     )
 
-  return checkpoint_manager
+  return init_rng, checkpoint_manager, learning_rate_schedule, tx
 
 
-def jit_train_step(config, model, state, state_mesh_shardings, data_sharding, train_step, params_shardings, mesh=None):
+def jit_train_step(config, model, state, state_mesh_shardings, data_sharding, train_step, params_shardings):
   """Returns a JIT-compiled train step function, which is loaded from a file if specified in the config."""
   if config.enable_diloco:
     functional_train = train_step
@@ -106,6 +95,16 @@ def jit_train_step(config, model, state, state_mesh_shardings, data_sharding, tr
     out_shardings = (state_mesh_shardings, None)  # State, metrics
     static_argnums = ()  # We partial out the static argnums of model and config
     donate_argnums = 0  # This is the index of the state - we allow the compiler to make use of this memory.
+    print("DEBUG DILOCO state_mesh_shardings tree structure:")
+    import pprint
+    pprint.pprint(jax.tree_util.tree_map(lambda x: str(type(x)) + " -- " + str(x), state_mesh_shardings))
+    print("DEBUG DILOCO state tree structure:")
+    pprint.pprint(jax.tree_util.tree_map(lambda x: str(type(x)) + " -- " + str(getattr(x, 'sharding', 'no_sharding_attribute')), state))
+    print("DEBUG DILOCO in_shardings tree structure:")
+    pprint.pprint(jax.tree_util.tree_map(lambda x: str(type(x)) + " -- " + str(x), in_shardings))
+    print("DEBUG DILOCO inner_state.step type:", type(state.inner_state.step))
+    print("DEBUG DILOCO inner_state.step shape:", state.inner_state.step.shape)
+    print("DEBUG DILOCO inner_state.step sharding:", state.inner_state.step.sharding)
   else:
     (
         functional_train,
@@ -120,9 +119,7 @@ def jit_train_step(config, model, state, state_mesh_shardings, data_sharding, tr
   # Define the compilation of functional_train, either by loading the compiled version or wrapping a new one in a jit
   if config.compiled_trainstep_file != "":
     max_logging.log("Loading the compiled function...")
-    # For NNX, model is the GraphDef (no .mesh); use the mesh passed explicitly instead.
-    execution_mesh = mesh if mesh is not None else model.mesh
-    execution_devices = execution_mesh.devices.flatten().tolist()
+    execution_devices = model.mesh.devices.flatten().tolist()
     # Need to pass train signature and state to determine i/o shapes of train_state for now.
     p_train_step = maxtext_utils.load_compiled(config, functional_train, state, execution_devices)
     max_logging.log("Loaded compiled function!")
@@ -177,9 +174,7 @@ def jit_train_and_eval_step(
     train_step_partial = functools.partial(train_step, model, config, state_mesh_shardings, params_shardings)
     train_step = diloco.build_diloco_train_step(config, train_step_partial, mesh=mesh)
   data_sharding = sharding.get_input_data_sharding(config, mesh)
-  p_train_step = jit_train_step(
-      config, model, state, state_mesh_shardings, data_sharding, train_step, params_shardings, mesh=mesh
-  )
+  p_train_step = jit_train_step(config, model, state, state_mesh_shardings, data_sharding, train_step, params_shardings)
   p_eval_step = None
   if eval_data_iterator:
     p_eval_step = jit_eval_step(config, model, state_mesh_shardings, data_sharding, eval_step)
@@ -205,90 +200,42 @@ def setup_train_loop(config, recorder, devices=None):
     data_iterator:
     data_loader:
     rampup_manager: the class managing rampup batch sizes
-    train_state: the initialized train state. For NNX, this is a TrainStateNNX instance
+    state: the initialized train state
   """
   # pylint: disable=import-outside-toplevel
   from maxtext.input_pipeline.input_pipeline_interface import create_data_iterator
 
   with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
-    is_training = True
-    init_rng = jax.random.PRNGKey(config.init_weights_seed)
-    mesh = maxtext_utils.get_mesh_from_config(config, devices)
-    if config.pure_nnx:
-      # Create abstract NNX model.
-      _create_model_partial, model = model_creation_utils.create_nnx_abstract_model(config, mesh, devices)
-    else:
-      model = model_creation_utils.from_config(config, devices)
-    learning_rate_schedule, tx = create_training_optimizer(config, model)
-
-    if config.pure_nnx:
-      # For NNX, the train state is wrapped in the TrainStateNNX module.
-      def create_train_state_fn():
-        model = _create_model_partial()
-        optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
-        return train_state_nnx.TrainStateNNX(model, optimizer)
-
-      init_state_fn = create_train_state_fn
-    else:
-      init_state_fn = partial(maxtext_utils.init_initial_state, model, tx, config, is_training, init_rng)
-    checkpoint_manager = create_checkpoint_manager(config, mesh, init_state_fn)
-    if checkpoint_manager is not None:
-      checkpoint_step = checkpoint_manager.latest_step()
-      if checkpoint_step is not None:
-        validate_completed_steps(checkpoint_step + 1, config.steps)
+    model = model_creation_utils.from_config(config, devices)
+    mesh = model.mesh
+    init_rng, checkpoint_manager, learning_rate_schedule, tx = create_training_tools(config, model, mesh)
 
   with maybe_record_goodput(recorder, GoodputEvent.TRAINING_PREPARATION):
     data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
     rampup_manager = create_rampup_manager(config, checkpoint_manager)
-    # Validate context parallelism with packing configuration
-    if config.context_parallel_size > 1 and config.packing:
-      if config.dataset_type == "synthetic":
-        raise ValueError(
-            "Context parallelism with sequence packing is not supported with synthetic data. "
-            "Please disable sequence packing (set packing=False)."
-        )
-      if config.context_parallel_strategy != "ring":
-        raise ValueError(
-            "Context parallelism with 'all_gather' strategy cannot be used with sequence packing. "
-            "Please use 'ring' strategy instead."
-        )
+    data_loader = create_dataloader(config, mesh, data_iterator, recorder, rampup_manager)
+    context_parallel_size = mesh.shape["context"]
+    # Check if context parallelism is being used with sequence packing
+    if context_parallel_size > 1 and config.packing and config.dataset_type != "synthetic":
+      raise ValueError(
+          "Context parallelism cannot be used with sequence packing. "
+          "Disable sequence packing (set packing=False). "
+          "Context parallelism with packing support will be added soon."
+      )
 
     # Apply reordering wrapper to data iterators if context parallelism is enabled
     with jax.set_mesh(mesh):
-      if config.context_parallel_size > 1 and config.context_parallel_load_balance:
-
-        # Determine load balancing reorder strategy based on whether packing is enabled
-        if config.context_parallel_reorder_strategy == ReorderStrategy.AUTO:
-          reorder_strategy = ReorderStrategy.STRIPED if config.packing else ReorderStrategy.DUAL_CHUNK_SWAP
-        else:
-          reorder_strategy = config.context_parallel_reorder_strategy
-
-        reorder_fn = maxtext_utils.get_reorder_callable(
-            config.context_parallel_size, config.shard_mode, reorder_strategy, config.hardware
-        )
-        data_iterator = map(reorder_fn, data_iterator)
+      if context_parallel_size > 1 and config.context_parallel_load_balance:
+        data_iterator = map(maxtext_utils.get_reorder_callable(context_parallel_size, config.shard_mode), data_iterator)
         if eval_data_iterator:
-          eval_data_iterator = map(reorder_fn, eval_data_iterator)
-
-    # Create data_loader AFTER reordering wrapper is applied
-    data_loader = create_dataloader(config, mesh, data_iterator, recorder, rampup_manager)
+          eval_data_iterator = map(
+              maxtext_utils.get_reorder_callable(context_parallel_size, config.shard_mode),
+              eval_data_iterator,
+          )
 
     state, _, state_mesh_shardings, data_iterator = maxtext_utils.setup_training_state(
-        data_iterator, config, mesh, checkpoint_manager, init_state_fn
+        model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
     )
-    if config.pure_nnx:
-      with nn_partitioning.axis_rules(config.logical_axis_rules):
-        # We only need the graphdef here; it's merged with state below. Avoid
-        # nnx.get_abstract_model: it eagerly builds a NamedSharding for every variable
-        # under jax.set_mesh(mesh) and rejects any logical name missing from
-        # logical_axis_rules (e.g. concat_embed on the MTP kernel). Tracing shapes
-        # without a mesh skips sharding resolution, so it avoids the crash.
-        state_graphdef = nnx.graphdef(nnx.eval_shape(init_state_fn))
-        _, state_params, _ = nnx.split(state.model, nnx.Param, ...)
-        _, state_mesh_shardings_params, _ = nnx.split(state_mesh_shardings.model, nnx.Param, ...)
-    else:
-      state_params = state.params
-      state_mesh_shardings_params = state_mesh_shardings.params
 
     if config.enable_diloco:
       with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -306,26 +253,47 @@ def setup_train_loop(config, recorder, devices=None):
     # TODO(aireenmei, hengtaoguo): support sharding in vit for multimodal
     if not config.using_pipeline_parallelism and not config.use_multimodal:
       # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage
-      sharding.assert_params_sufficiently_sharded(state_params, mesh, config.sharding_tolerance)
+      sharding.assert_params_sufficiently_sharded(state.params, mesh, config.sharding_tolerance)
 
     # print weights sharding info under debug sharding mode
     if config.debug_sharding:
-      if config.pure_nnx:
-        # TODO: Study how to get logical annotations of NNX module. Because of eager sharding, we
-        # probably already lost the logical partition info at this moment.
-        logical_annotations_params = None
-      else:
-        logical_annotations = maxtext_utils.get_logical_annotations(config, mesh, init_state_fn)
-        logical_annotations_params = logical_annotations.params
-
+      logical_annotations = maxtext_utils.get_logical_annotations(model, tx, config, init_rng, mesh, is_training=True)
       max_utils.print_non_trivial_mesh_axis(model.mesh)
-      maxtext_utils.print_shardings_params(state_params, state_mesh_shardings_params, mesh, logical_annotations_params)
+      maxtext_utils.print_shardings_params(
+          state.params, state_mesh_shardings.params, model.mesh, logical_annotations.params
+      )
 
-  if config.pure_nnx:
-    train_state = nnx.merge(state_graphdef, state)
-    model = train_state.model
-  else:
-    train_state = state
+    if config.use_dpo:
+      abstract_state, _, _ = maxtext_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
+      max_logging.log(
+          "Restoring reference parameters for DPO from" f" '{os.path.join(str(config.checkpoint_dir), str(0))}'"
+      )
+      try:
+        step0_restored, _ = checkpointing.load_state_if_possible(
+            checkpoint_manager,
+            data_iterator,
+            load_parameters_from_path="",
+            load_full_state_from_path="",
+            checkpoint_storage_concurrent_gb=config.checkpoint_storage_concurrent_gb,
+            abstract_unboxed_pre_state=abstract_state,
+            enable_single_replica_ckpt_restoring=False,
+            dataset_type=config.dataset_type,
+            step=0,
+            use_ocdbt=config.checkpoint_storage_use_ocdbt,
+            use_zarr3=config.checkpoint_storage_use_zarr3,
+            enable_orbax_v1=config.enable_orbax_v1,
+            checkpoint_conversion_fn=config.checkpoint_conversion_fn,
+            source_checkpoint_layout=config.source_checkpoint_layout,
+        )
+      except FileNotFoundError:
+        step0_restored = None
+      if step0_restored is not None:
+        reference_params = step0_restored["items"].params["params"]
+        state = _merge_dpo_state(state, reference_params)
+      else:
+        max_logging.log(
+            "Could not restore reference parameters for DPO from" f" '{os.path.join(str(config.checkpoint_dir), str(0))}'"
+        )
 
   return (
       init_rng,
@@ -338,15 +306,12 @@ def setup_train_loop(config, recorder, devices=None):
       data_loader,
       rampup_manager,
       eval_data_iterator,
-      train_state,
+      state,
   )
 
 
 def validate_train_config(config):
   """Validates the configuration is set correctly for 'train.py'."""
-
-  if getattr(config, "use_dpo", False):
-    raise ValueError("Legacy DPO implementation in train.py is removed. Please use post-training train_dpo.py instead.")
 
   assert config.run_name, "Erroring out, need a real run_name"
   if config.dataset_path and not config.dataset_path.startswith("gs://"):
@@ -366,15 +331,4 @@ def validate_train_config(config):
     max_logging.log(
         "WARNING: Sequence packing is essentially ignored for synthetic data. "
         "Please use a real dataset to use sequence packing."
-    )
-
-
-def validate_completed_steps(completed_steps: int, config_steps: int):
-  """Raises RuntimeError if training has already completed up to config_steps."""
-  if completed_steps >= config_steps:
-    raise RuntimeError(
-        f"Requested training up to step {config_steps}, but a checkpoint already exists at step {completed_steps - 1} "
-        f"(which means {completed_steps} steps have been completed). "
-        f"Did you mean to continue training past step {completed_steps} (you should set steps > {completed_steps}) "
-        f"or to not load the checkpoint (use enable_checkpointing=False?)"
     )
