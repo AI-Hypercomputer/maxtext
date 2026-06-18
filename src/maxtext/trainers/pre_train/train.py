@@ -156,8 +156,36 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       xent_sum = 0.0
       total_z_loss = 0.0
     elif config.num_vocab_tiling > 1:
-      hidden_state_key = ("intermediates", "decoder", "hidden_states")
-      hidden_states = maxtext_utils.get_nested_value(intermediate_outputs, hidden_state_key)[0]
+      def find_hidden_states(d):
+        if isinstance(d, dict):
+          if "hidden_states" in d:
+            return d["hidden_states"]
+          for k, v in d.items():
+            res = find_hidden_states(v)
+            if res is not None:
+              return res
+        elif isinstance(d, tuple) and len(d) == 2 and isinstance(d[1], dict):
+          # Sometimes intermediates are wrapped in tuples/frozen dicts
+          return find_hidden_states(d[1])
+        # Also check frozen dicts if any
+        if hasattr(d, "unfreeze"):
+          return find_hidden_states(d.unfreeze())
+        if hasattr(d, "keys"):
+          if "hidden_states" in d:
+            return d["hidden_states"]
+          for k in d.keys():
+            res = find_hidden_states(d[k])
+            if res is not None:
+              return res
+        return None
+        
+      hidden_states_res = find_hidden_states(intermediate_outputs)
+      if isinstance(hidden_states_res, tuple) or isinstance(hidden_states_res, list):
+        hidden_states = hidden_states_res[0] if len(hidden_states_res) > 0 else None
+      else:
+        hidden_states = hidden_states_res
+      if hidden_states is None:
+        raise ValueError(f"hidden_states not found in intermediate_outputs keys: {jax.tree_util.tree_map(lambda x: x.shape, intermediate_outputs)}")
       xent_sum, total_z_loss = vocab_tiling_linen_loss(hidden_states, data, config, model, params, is_train)
     else:
       one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
