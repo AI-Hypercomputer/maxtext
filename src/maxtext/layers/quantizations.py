@@ -38,7 +38,6 @@ from maxtext.layers import nnx_wrappers
 import qwix
 from qwix._src.core import dot_general_qt
 from qwix._src.core import sparsity
-from qwix._src.utils import flax_util
 import qwix.pallas as qpl
 
 # Params used to define mixed precision quantization configs
@@ -712,6 +711,7 @@ def configure_kv_quant(config):
 def _apply_linen_module_in_nnx(linen_module_cls, op_id, *args, **kwargs):
   """Applies a Linen module within an NNX context."""
   try:
+    from qwix._src.utils import flax_util
     parent = flax_util.get_current_module()
     is_nnx = isinstance(parent, nnx.Module)
   except ValueError:
