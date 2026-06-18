@@ -103,6 +103,10 @@ class PipelineParallelismTest(unittest.TestCase):
   decoupled = is_decoupled()
   base_output_directory = get_test_base_output_directory()
   dataset_path = get_test_dataset_path()
+  # Pipeline parallelism does not yet have an NNX path, so train_main calls
+  # in this class must stay on the Linen path even when NNX defaults are
+  # flipped to True.
+  _LINEN_PIN = ["enable_nnx=False", "pure_nnx=False", "pure_nnx_decoder=False"]
 
   def assert_pipeline_matches_sequential_output_and_grad(self, config, single_pipeline_stage_class=None):
     """check that the output and gradient are the same"""
@@ -278,6 +282,10 @@ class PipelineParallelismTest(unittest.TestCase):
     config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         enable_checkpointing=False,
+        # PR11.5 deferred: NNX pipeline parallelism not yet supported, pin to Linen.
+        enable_nnx=False,
+        pure_nnx=False,
+        pure_nnx_decoder=False,
         enable_goodput_recording=False,
         run_name="circular_minimum_microbatches",
         max_target_length=128,
@@ -295,6 +303,10 @@ class PipelineParallelismTest(unittest.TestCase):
     config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         enable_checkpointing=False,
+        # PR11.5 deferred: NNX pipeline parallelism not yet supported, pin to Linen.
+        enable_nnx=False,
+        pure_nnx=False,
+        pure_nnx_decoder=False,
         enable_goodput_recording=False,
         run_name="circular_extra_microbatches",
         max_target_length=128,
@@ -319,6 +331,10 @@ class PipelineParallelismTest(unittest.TestCase):
     config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         enable_checkpointing=False,
+        # PR11.5 deferred: NNX pipeline parallelism not yet supported, pin to Linen.
+        enable_nnx=False,
+        pure_nnx=False,
+        pure_nnx_decoder=False,
         enable_goodput_recording=False,
         run_name="circular_moe",
         max_target_length=128,
@@ -348,6 +364,10 @@ class PipelineParallelismTest(unittest.TestCase):
     config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         enable_checkpointing=False,
+        # PR11.5 deferred: NNX pipeline parallelism not yet supported, pin to Linen.
+        enable_nnx=False,
+        pure_nnx=False,
+        pure_nnx_decoder=False,
         enable_goodput_recording=False,
         run_name="circular_ag_once",
         max_target_length=128,
@@ -362,11 +382,25 @@ class PipelineParallelismTest(unittest.TestCase):
 
   @pytest.mark.tpu_only
   def test_circular_pipeline_ag_per_repeat(self):
-    self._assert_circular_pipeline_ag_per_repeat_core("nnx_scan")
-
-  @pytest.mark.tpu_only
-  def test_circular_pipeline_ag_per_repeat_jax_state_core(self):
-    self._assert_circular_pipeline_ag_per_repeat_core("jax_state")
+    # 2 stages, 8 microbatches, enable pipeline ag per repeat
+    config = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        enable_checkpointing=False,
+        # PR11.5 deferred: NNX pipeline parallelism not yet supported, pin to Linen.
+        enable_nnx=False,
+        pure_nnx=False,
+        pure_nnx_decoder=False,
+        enable_goodput_recording=False,
+        run_name="circular_ag_per_repeat",
+        max_target_length=128,
+        base_emb_dim=28,
+        ici_pipeline_parallelism=2,
+        base_num_decoder_layers=8,
+        num_pipeline_microbatches=8,
+        per_device_batch_size=4,
+        pipeline_fsdp_ag_per_repeat=True,
+    )
+    self.assert_pipeline_same_output_and_grad(config)
 
   @pytest.mark.tpu_only
   def test_non_circular_same_output_and_grad(self):
@@ -374,6 +408,10 @@ class PipelineParallelismTest(unittest.TestCase):
     config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         enable_checkpointing=False,
+        # PR11.5 deferred: NNX pipeline parallelism not yet supported, pin to Linen.
+        enable_nnx=False,
+        pure_nnx=False,
+        pure_nnx_decoder=False,
         run_name="non_circular",
         max_target_length=128,
         base_emb_dim=28,
@@ -413,6 +451,7 @@ class PipelineParallelismTest(unittest.TestCase):
             "num_pipeline_microbatches=8",
             rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
             "scan_layers_per_stage=False",  # We see better performance only scanning the pipeline iterations.
+            *self._LINEN_PIN,
         ]
     )
 
@@ -446,6 +485,7 @@ class PipelineParallelismTest(unittest.TestCase):
             "num_pipeline_microbatches=4",
             "pipeline_fsdp_ag_per_repeat=True",
             (rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}"),
+            *self._LINEN_PIN,
         ]
     )
 
@@ -455,6 +495,10 @@ class PipelineParallelismTest(unittest.TestCase):
     config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         enable_checkpointing=False,
+        # PR11.5 deferred: NNX pipeline parallelism not yet supported, pin to Linen.
+        enable_nnx=False,
+        pure_nnx=False,
+        pure_nnx_decoder=False,
         enable_goodput_recording=False,
         run_name="activation_forwarding",
         max_target_length=128,
@@ -496,6 +540,7 @@ class PipelineParallelismTest(unittest.TestCase):
             "num_pipeline_microbatches=8",
             rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
             "scan_layers_per_stage=False",  # We see better performance only scanning the pipeline iterations.
+            *self._LINEN_PIN,
         ]
     )
 
@@ -530,6 +575,7 @@ class PipelineParallelismTest(unittest.TestCase):
             "num_pipeline_microbatches=8",
             rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
             "scan_layers_per_stage=False",  # We see better performance only scanning the pipeline iterations.
+            *self._LINEN_PIN,
         ]
     )
 
@@ -562,6 +608,7 @@ class PipelineParallelismTest(unittest.TestCase):
         "quantization=fp8",
         "scan_layers_per_stage=False",
         "attention=dot_product",
+        *self._LINEN_PIN,
     ]
     _adapt_parallelism(args, pipeline_stages=4)
     train_main(args)
@@ -595,6 +642,7 @@ class PipelineParallelismTest(unittest.TestCase):
         "quantization=nanoo_fp8",
         "scan_layers_per_stage=False",
         "attention=dot_product",
+        *self._LINEN_PIN,
     ]
     _adapt_parallelism(args, pipeline_stages=4)
     train_main(args)

@@ -77,6 +77,8 @@ VertexTensorboardManager, _vertex_tb_is_stub = vertex_tensorboard_modules()
 def get_first_step(model, state):
   if isinstance(model, nn.Module):
     return int(state.step)
+  if hasattr(state, "inner_state"):  # DiLoCoTrainState (NNX DiLoCo): step is the optimizer step var
+    return int(state.step.get_value())
   return int(state.optimizer.step.get_value())
 
 
@@ -154,8 +156,36 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       xent_sum = 0.0
       total_z_loss = 0.0
     elif config.num_vocab_tiling > 1:
-      hidden_state_key = ("intermediates", "decoder", "hidden_states")
-      hidden_states = maxtext_utils.get_nested_value(intermediate_outputs, hidden_state_key)[0]
+      def find_hidden_states(d):
+        if isinstance(d, dict):
+          if "hidden_states" in d:
+            return d["hidden_states"]
+          for k, v in d.items():
+            res = find_hidden_states(v)
+            if res is not None:
+              return res
+        elif isinstance(d, tuple) and len(d) == 2 and isinstance(d[1], dict):
+          # Sometimes intermediates are wrapped in tuples/frozen dicts
+          return find_hidden_states(d[1])
+        # Also check frozen dicts if any
+        if hasattr(d, "unfreeze"):
+          return find_hidden_states(d.unfreeze())
+        if hasattr(d, "keys"):
+          if "hidden_states" in d:
+            return d["hidden_states"]
+          for k in d.keys():
+            res = find_hidden_states(d[k])
+            if res is not None:
+              return res
+        return None
+        
+      hidden_states_res = find_hidden_states(intermediate_outputs)
+      if isinstance(hidden_states_res, tuple) or isinstance(hidden_states_res, list):
+        hidden_states = hidden_states_res[0] if len(hidden_states_res) > 0 else None
+      else:
+        hidden_states = hidden_states_res
+      if hidden_states is None:
+        raise ValueError(f"hidden_states not found in intermediate_outputs keys: {jax.tree_util.tree_map(lambda x: x.shape, intermediate_outputs)}")
       xent_sum, total_z_loss = vocab_tiling_linen_loss(hidden_states, data, config, model, params, is_train)
     else:
       one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
@@ -609,10 +639,18 @@ def train_loop(config, recorder, state=None):
 
   if isinstance(model, nn.Module):
     jit_model = model
+  elif config.enable_diloco:
+    # state is the DiLoCoTrainState; `model` is already the TrainStateNNX graphdef the inner step needs.
+    jit_model = model
   else:
     jit_model, state = nnx.split(state)
 
-  params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
+  if config.pure_nnx and config.enable_diloco:
+    # DiLoCoTrainState.params already holds the param shardings the inner step needs;
+    # the Zero-1 opt overlay doesn't apply through the diloco wrapper.
+    params_shardings = state_mesh_shardings.params
+  else:
+    params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
 
   p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
       config,
@@ -634,7 +672,8 @@ def train_loop(config, recorder, state=None):
     elif config.shard_optimizer_over_data:
       # NNX: reshard state so params match the data-sharded in_shardings (Zero-1 layout)
       state = jax.device_put(state, state_mesh_shardings)
-    if isinstance(model, nn.Module):
+    if isinstance(model, nn.Module) or config.enable_diloco:
+      # The DiLoCo train step takes (state, batch, rng), like the Linen step.
       lower_args = (state, shaped_batch, init_rng)
     else:
       lower_args = (state, shaped_batch)
@@ -650,6 +689,8 @@ def train_loop(config, recorder, state=None):
   # Write train config params, num model params, and XLA flags to tensorboard
   if isinstance(model, nn.Module):
     setup_params = state.params
+  elif config.enable_diloco:
+    setup_params = state.params  # DiLoCoTrainState.params: the outer (global) params
   else:
     _, setup_params, _ = nnx.split(state.model, nnx.Param, ...)
   metric_logger_instance.write_setup_info_to_tensorboard(setup_params)
@@ -664,7 +705,7 @@ def train_loop(config, recorder, state=None):
 
       with jax.profiler.StepTraceAnnotation("train", step_num=step):
         example_batch = data_loader.load_next_batch(rampup_manager=rampup_manager)
-        if isinstance(model, nn.Module):
+        if isinstance(model, nn.Module) or config.enable_diloco:
           # pylint: disable=not-callable
           step_rng_args = (jax.jit(jax.random.fold_in)(init_rng, step),)
         else:
