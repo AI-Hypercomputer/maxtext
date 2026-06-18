@@ -42,7 +42,7 @@ This step can be bypassed if the current MaxText codebase already supports all c
 
 ## 3. Checkpoint Conversion
 
-While most open-source models are distributed in Safetensors or PyTorch formats, MaxText requires conversion to the [Orbax](https://orbax.readthedocs.io/en/latest/) format.
+While most open-source models are distributed in Safetensors or PyTorch formats, MaxText requires conversion to the [Orbax](https://orbax.readthedocs.io/en/latest) format.
 
 There are [two primary formats](checkpoints) for Orbax checkpoints within MaxText, and while both are technically compatible with training and inference, we recommend following these performance-optimized guidelines:
 
@@ -51,10 +51,27 @@ There are [two primary formats](checkpoints) for Orbax checkpoints within MaxTex
 
 ### 3.1 Create Mapping
 
-Success starts with a clear map. You must align the parameter names from your source checkpoints (Safetensors/PyTorch) with the corresponding MaxText internal names.
+To successfully convert a model, you must define the exact mapping between the parameter names in your source checkpoints (Safetensors/PyTorch) and the corresponding MaxText internal names.
 
-- You can print out the keys and shapes of your original `.safetensors` or `.pth` files.
-- To see the target structure, you can initiate a pre-training run to save a randomly initialized checkpoint for inspection.
+We provide a unified utility [`inspect_checkpoint.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/inspect_checkpoint.py) to help you view and compare these structures.
+
+(1) **HF Inspector**. To see the HuggingFace checkpoint structure, you can print out the keys and shapes of your original `.safetensors` or `.pth` files.
+
+```
+python -m maxtext.checkpoint_conversion.inspect_checkpoint hf --path <local_hf_path> --format <safetensors | pth>
+```
+
+(2) **MaxText Inspector**. View the expected parameter structure of the target MaxText model:
+
+```
+python -m maxtext.checkpoint_conversion.inspect_checkpoint maxtext model_name=<maxtext_model_name> scan_layers=<True | False>
+```
+
+(3) **Orbax Inspector** (Optional). If you have already saved an Orbax checkpoint during pretraining, you can inspect its structure directly:
+
+```
+python -m maxtext.checkpoint_conversion.inspect_checkpoint orbax --path <local_orbax_path | gcs_orbax_path>
+```
 
 ### 3.2 Write Script
 
