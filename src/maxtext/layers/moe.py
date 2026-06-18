@@ -2658,7 +2658,7 @@ class RoutedMoE(nnx.Module):
     # gather -> no cycle. The custom forward rule applies the annotation (forward
     # overlap). Grad of a tiled fsdp all-gather is a tiled psum_scatter (the transpose),
     # so FSDP weight grads stay correct; nothing big is held as a residual.
-    def _make_cv_gather(in_pspec, out_pspec, gather_axis):
+    def _make_cv_gather(in_pspec, out_pspec, gather_axis, sched_group):
       @jax.custom_vjp
       def _g(w):  # PRIMAL: plain gather (what remat recomputes in the backward)
         return jax.shard_map(
@@ -2667,7 +2667,7 @@ class RoutedMoE(nnx.Module):
 
       def _g_fwd(w):  # FORWARD under diff: annotated gather (overlaps splash)
         def _fn(x):
-          with _scheduling_group(_WEIGHT_AG_SCHED_GROUP):
+          with _scheduling_group(sched_group):
             return jax.lax.all_gather(x, "fsdp", axis=gather_axis, tiled=True)
         w_full = jax.shard_map(_fn, mesh=self.mesh, in_specs=(in_pspec,), out_specs=out_pspec, check_vma=False)(w)
         return w_full, None  # no big residual saved (sharded w is recomputed cheaply / not needed)
@@ -2681,9 +2681,12 @@ class RoutedMoE(nnx.Module):
       _g.defvjp(_g_fwd, _g_bwd)
       return _g
 
-    w0 = jax.lax.optimization_barrier(_make_cv_gather(wi_in, w0_out, 1)(w0))
-    w1 = jax.lax.optimization_barrier(_make_cv_gather(wi_in, w0_out, 1)(w1))
-    wo = jax.lax.optimization_barrier(_make_cv_gather(wo_in, wo_out, 2)(wo))
+    # Distinct scheduling-group ids per weight so the all-gather-combiner cannot
+    # fuse the three into one un-hideable monolith; each smaller (~5ms) gather can
+    # then be scheduled independently behind different attention-phase compute.
+    w0 = jax.lax.optimization_barrier(_make_cv_gather(wi_in, w0_out, 1, _WEIGHT_AG_SCHED_GROUP)(w0))
+    w1 = jax.lax.optimization_barrier(_make_cv_gather(wi_in, w0_out, 1, _WEIGHT_AG_SCHED_GROUP + 1)(w1))
+    wo = jax.lax.optimization_barrier(_make_cv_gather(wo_in, wo_out, 2, _WEIGHT_AG_SCHED_GROUP + 2)(wo))
     return (w0, w1, wo)
 
   def __call__(
