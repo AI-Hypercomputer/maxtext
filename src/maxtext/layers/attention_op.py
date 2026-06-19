@@ -1529,6 +1529,12 @@ class AttentionOp(nnx.Module):
     )
     with xla_metadata.set_xla_metadata(_scheduling_group_id=1) if _wag_splash else contextlib.nullcontext():
       value = self._maybe_shard_with_pspec(value, axis_names_kv)
+      if _wag_splash:
+        # Guaranteed single group-1 anchor op that FEEDS the splash (the shard op above is a no-op for
+        # this config). optimization_barrier is never elided; on the splash INPUT (not the gathered
+        # weight) it does not fence the backward weight-grad RS. This is the op the weight all-gathers
+        # share group 1 with, anchoring them at the splash so the scheduler floats them over it.
+        value = jax.lax.optimization_barrier(value)
     decoder_segment_ids_q = self._maybe_shard_with_pspec(decoder_segment_ids, segment_axis_names_q)
     decoder_segment_ids_kv = self._maybe_shard_with_pspec(decoder_segment_ids, segment_axis_names_kv)
     sinks = self._maybe_shard_with_pspec(sinks, sink_axis_names)
