@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, PartitionSpec as P, NamedSharding
 from jax.experimental import mesh_utils
-from jax.experimental.shard_map import shard_map
+from jax import shard_map
 import functools
 import time
 
@@ -53,7 +53,6 @@ def main():
       mesh=mesh,
       in_specs=(P('fsdp', None), P('fsdp', None), P('fsdp', None), P('fsdp', None), P('fsdp', None)),
       out_specs=P('fsdp', None),
-      check_vmap=False
   )
   def forward_shard_map(x_local, w1_local, w2_local, w3_local, w4_local):
     # Layer 1: All-gather W1, then matmul
