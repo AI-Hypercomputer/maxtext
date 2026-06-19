@@ -18,6 +18,7 @@
 # Calling jax.device_count here prevents a "TPU platform already registered" error.
 # See github.com/google/maxtext/issues/20 for more
 
+# hello from jetski
 from typing import Any, Sequence
 import datetime
 import functools
