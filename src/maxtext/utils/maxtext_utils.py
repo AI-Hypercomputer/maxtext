@@ -20,7 +20,7 @@ import os
 from typing import Sequence
 
 from flax import nnx, linen as nn
-from flax.core.spmd import composite_rules, from_sharding_rules, get_logical_axis_rules
+from flax.core.spmd import get_logical_axis_rules
 from flax.linen import partitioning as nn_partitioning
 from flax.training.train_state import TrainState
 
@@ -1612,6 +1612,43 @@ def get_abstract_state(config, mesh, init_state_fn, is_training=True):
   )
 
 
+def _resolve_logical_sharding(out_sharding, context_rules, local_rules) -> list:
+  """Resolves logical sharding annotations into physical sharding specs.
+
+  This matches rules sequentially (first-match-wins) and ensures that physical
+  mesh axes are bound to at most one dimension per tensor, preventing JAX
+  DuplicateSpecError.
+  """
+  local_rules_list = list(local_rules) if local_rules is not None else []
+  context_rules_list = list(context_rules) if context_rules is not None else []
+  merged_rules = local_rules_list + context_rules_list
+  raw_sharding = list(out_sharding)
+  assigned_positions = set()
+  assigned_axes = set()
+
+  for rule_logical, rule_physical in merged_rules:
+    if rule_logical not in out_sharding:
+      continue
+    pos = out_sharding.index(rule_logical)
+    if pos in assigned_positions:
+      continue
+
+    if rule_physical is None:
+      raw_sharding[pos] = None
+      assigned_positions.add(pos)
+      continue
+
+    physical_axes = [rule_physical] if isinstance(rule_physical, str) else list(rule_physical)
+    if any(axis in assigned_axes for axis in physical_axes):
+      continue
+
+    raw_sharding[pos] = rule_physical
+    assigned_positions.add(pos)
+    assigned_axes.update(physical_axes)
+
+  return raw_sharding
+
+
 def get_nnx_named_sharding_with_scan_axis(abs_var_state: nnx.State, mesh) -> nnx.State:
   """Compute NamedSharding for each NNX variable, correctly handling the scan (stacked layers) axis.
 
@@ -1669,20 +1706,22 @@ def get_nnx_named_sharding_with_scan_axis(abs_var_state: nnx.State, mesh) -> nnx
       context_rules = get_logical_axis_rules()
       local_rules = metadata.get("sharding_rules", ())
       if context_rules or local_rules:
-        rules = composite_rules(context_rules, local_rules)
-        raw_sharding = from_sharding_rules(out_sharding, rules)
+        raw_sharding = _resolve_logical_sharding(out_sharding, context_rules, local_rules)
         mesh_axis_names = mesh.axis_names if mesh is not None else ()
 
-        # from_sharding_rules leaves a logical name with no matching rule unchanged, so a
-        # name missing from logical_axis_rules (e.g. concat_embed on the MTP kernel)
-        # reaches NamedSharding and is rejected as an unknown mesh axis. Map any such
-        # leftover name to None (replicated), matching Linen, whose logical_to_mesh_axes
-        # replicates unmatched names.
+        # Map unmatched logical names to None (replicated), matching Linen's behavior.
+        # Also clean up tuples to only keep physical axes present in the active mesh.
         def _sanitize(x):
           if isinstance(x, list):
             x = tuple(x)
-          if x is None or (isinstance(x, str) and x in mesh_axis_names) or isinstance(x, tuple):
-            return x
+          if x is None:
+            return None
+          if isinstance(x, str):
+            return x if x in mesh_axis_names else None
+          if isinstance(x, tuple):
+            # Only keep axes that actually exist in the physical mesh.
+            sanitized_tuple = tuple(i for i in x if i in mesh_axis_names)
+            return sanitized_tuple if sanitized_tuple else None
           return None
 
         sanitized_sharding = [_sanitize(x) for x in raw_sharding]

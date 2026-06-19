@@ -25,6 +25,7 @@ import numpy as np
 import optax
 
 from flax import linen as nn
+from flax.linen import partitioning as nn_partitioning
 from flax import nnx
 from flax.core.scope import FrozenVariableDict
 from flax.training import train_state
@@ -1689,6 +1690,60 @@ class TestGetNnxNamedShardingWithScanAxis(unittest.TestCase):
     result_sharding = out["w"].get_value()
     # The single string 'fsdp' is turned into a list, and 'layers' is prepended.
     self.assertEqual(result_sharding.spec, PartitionSpec("layers", "fsdp"))
+
+  def test_sequential_matching_first_match_wins(self):
+    """Multiple rules for the same logical axis are matched sequentially, first-match-wins."""
+    # We define rules for 'embed' mapping to 'fsdp' (specific) then 'layers' (fallback)
+    rules = (
+        ("embed", "fsdp"),
+        ("embed", "layers"),
+    )
+    with nn_partitioning.axis_rules(rules):
+      with jax.set_mesh(self.mesh):
+        v = nnx.Param(
+            jnp.zeros((3,)),
+            out_sharding=("embed",),
+        )
+      out = self._run(self._build_state(w=v))
+      result_sharding = out["w"].get_value()
+      # 'embed' must match the first rule ('fsdp'), not the second ('layers').
+      self.assertEqual(result_sharding.spec, PartitionSpec("fsdp"))
+
+  def test_deduplicates_assigned_physical_axes(self):
+    """Physical axes already bound to a dimension cannot be bound to another dimension."""
+    # Define rules where 'embed' maps to ('fsdp', 'layers') and 'mlp' maps to 'fsdp'.
+    # Because 'embed' is defined first, it binds 'fsdp'.
+    # When matching 'mlp', 'fsdp' is already bound, so it is skipped (unassigned/None).
+    rules = (
+        ("embed", ("fsdp", "layers")),
+        ("mlp", "fsdp"),
+    )
+    with nn_partitioning.axis_rules(rules):
+      with jax.set_mesh(self.mesh):
+        v = nnx.Param(
+            jnp.zeros((3, 4)),
+            out_sharding=("embed", "mlp"),
+        )
+      out = self._run(self._build_state(w=v))
+      result_sharding = out["w"].get_value()
+      # 'embed' maps to ('fsdp', 'layers').
+      # 'mlp' maps to None (replicated) because 'fsdp' is already bound.
+      self.assertEqual(result_sharding.spec, PartitionSpec(("fsdp", "layers"), None))
+
+  def test_resolves_when_context_rules_is_none(self):
+    """When context_rules is None but local_rules are defined, resolution should succeed."""
+    # Ensure get_logical_axis_rules() returns None (which is the default outside axis_rules)
+    # We define local rules on the variable metadata.
+    with jax.set_mesh(self.mesh):
+      v = nnx.Param(
+          jnp.zeros((3,)),
+          out_sharding=("embed",),
+          sharding_rules=(("embed", "fsdp"),),
+      )
+    out = self._run(self._build_state(w=v))
+    result_sharding = out["w"].get_value()
+    # 'embed' must match the local rules even when context_rules is None.
+    self.assertEqual(result_sharding.spec, PartitionSpec("fsdp"))
 
 
 if __name__ == "__main__":
