@@ -673,15 +673,25 @@ class RoutedMoE(nnx.Module):
     """
     return self.config.routed_bias and self.config.routed_bias_update_rate > 0.0 and not self.is_hash_routing
 
-  def get_topk(self, gate_logits, pre_bias_logits, rngs=None, input_ids=None):
-    """get topk."""
+  def get_topk(self, gate_logits, pre_bias_logits, rngs=None, input_ids=None, routing_key=None):
+    """get topk.
+
+    routing_key: optional explicit PRNG key for random routing. When provided it is used
+    directly INSTEAD of the stateful ``rngs.params()`` consumption. This lets the hand-written
+    layer backward (deepseek ``moe_handwritten_bwd``) recompute the MoE without mutating the nnx
+    RngCount across trace levels. The forward folds ``rngs.key`` by the chunk index, so the value
+    is bit-identical to ``rngs.params()`` (which is ``fold_in(key, count)`` with count == chunk).
+    """
     # shape of top_k_weights & top_k_indices:
     # (batch, sequence, num_experts_per_tok).
     if self.config.use_random_routing:
-      if rngs is None:
+      if routing_key is not None:
+        rng = routing_key
+      elif rngs is None:
         raise ValueError("The random key cannot be None for random routing.")
-      # Reuse the 'params' RNG stream to ensure random routing
-      rng = rngs.params()
+      else:
+        # Reuse the 'params' RNG stream to ensure random routing
+        rng = rngs.params()
       top_k_weights, top_k_indices = random_routing(rng, gate_logits, self.num_experts_per_tok)
       return top_k_weights, top_k_indices
 
@@ -812,13 +822,14 @@ class RoutedMoE(nnx.Module):
       rngs=None,
       roll_to_expert_id=None,
       input_ids=None,
+      routing_key=None,
   ):
     """Permute tokens to group by expert to fit gmm call."""
     # reshape inputs (batch, sequence, emb) to (batch * sequence, emb)
     inputs_shape = inputs.shape
     bsz_times_seq_len = inputs_shape[0] * inputs_shape[1]
     inputs_2d = jnp.reshape(inputs, (bsz_times_seq_len, inputs_shape[2]))
-    weights, selected_experts = self.get_topk(gate_logits, pre_bias_logits, rngs, input_ids)
+    weights, selected_experts = self.get_topk(gate_logits, pre_bias_logits, rngs, input_ids, routing_key=routing_key)
     lb_loss = None
     if self.config.load_balance_loss_weight > 0.0 and not self.is_hash_routing:
       softmax_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
@@ -1229,13 +1240,24 @@ class RoutedMoE(nnx.Module):
       wo_bias,
       input_ids=None,
       weights_pregathered=False,
+      routing_base_key=None,
   ):
     """Perform sparse matrix multiplication of inputs and Experts.
 
     When `weights_pregathered` is True, w0/w1/wo are already FSDP-all-gathered
     (done earlier, in the attention phase, by `gather_weights`) so the in-line
     `_wag_sched` gather is skipped to avoid a double gather.
+
+    When `routing_base_key` is not None (deepseek `moe_handwritten_bwd`), random routing uses
+    fold_in(routing_base_key, chunk_idx) per chunk instead of the stateful `self.rngs.params()`,
+    so the MoE forward can be recomputed in the hand-written layer backward without mutating an
+    nnx RngCount across trace levels. Bit-identical (rngs.params() == fold_in(key, count==chunk)).
     """
+    # The shard_map always receives a valid key array; a static flag selects the explicit-routing
+    # path so the default path keeps using rngs.params() (unchanged behavior / numerics).
+    use_explicit_routing_key = routing_base_key is not None
+    if not use_explicit_routing_key:
+      routing_base_key = jax.random.key(0)  # dummy; ignored when use_explicit_routing_key is False
 
     def jax_ragged_dot_gmm(inputs, kernel, tiling, group_sizes, expert_assignments, padding_amount):
       """Execute jax.lax.ragged_dot, with potential quantization"""
@@ -1487,7 +1509,7 @@ class RoutedMoE(nnx.Module):
     ) = get_routed_moe_shardings(is_batch_sharded_by_expert, input_ids is not None)
     w0_pspec, w1_pspec, wo_pspec = maybe_aqt_partition(w0_kernel, w0_pspec, w1_kernel, w1_pspec, wo_kernel, wo_pspec)
 
-    def route(x, logits, pre_bias_logits, rngs, input_ids=None):
+    def route(x, logits, pre_bias_logits, rngs, input_ids=None, routing_key=None):
       """Performs both across device and within device token routing/sorting"""
       num_ep = self.get_expert_parallelism_size()
       expert_shard_id = jax.lax.axis_index(self._expert_parallelism_name) if num_ep > 1 else 0
@@ -1525,6 +1547,7 @@ class RoutedMoE(nnx.Module):
             roll_to_expert_id=num_experts_per_shard * expert_shard_id,
             rngs=rngs,
             input_ids=input_ids,
+            routing_key=routing_key,
         )
 
       else:
@@ -1537,7 +1560,9 @@ class RoutedMoE(nnx.Module):
             lb_loss,
             bias_updates,
             local_group_sizes,
-        ) = self.permute(x, logits, pre_bias_logits, self.config.use_custom_sort_vjp, rngs, input_ids=input_ids)
+        ) = self.permute(
+            x, logits, pre_bias_logits, self.config.use_custom_sort_vjp, rngs, input_ids=input_ids, routing_key=routing_key
+        )
 
         if num_ep > 1:
           batch_axis = self._expert_parallelism_name if is_batch_sharded_by_expert else "data"
@@ -1678,9 +1703,11 @@ class RoutedMoE(nnx.Module):
       layer_w1 = adc.checkpoint_name(layer_w1, "moe_mlpwi_1")
       return self.apply_ffn_activation(layer_w0, layer_w1)
 
-    def _moe_body(x, logits, pre_bias_logits, w0, w1, wo, w0_bias, w1_bias, wo_bias, sharded_input_ids, rngs):
+    def _moe_body(x, logits, pre_bias_logits, w0, w1, wo, w0_bias, w1_bias, wo_bias, sharded_input_ids, rngs, routing_key=None):
       batch_size, sequence_length, _ = x.shape
-      x, routing, route_metadata = route(x, logits, pre_bias_logits, rngs, input_ids=sharded_input_ids)
+      x, routing, route_metadata = route(
+          x, logits, pre_bias_logits, rngs, input_ids=sharded_input_ids, routing_key=routing_key
+      )
 
       if self.config.mlp_bias:
         w0_bias, w1_bias, wo_bias = self.transform_bias(routing.selected_experts, w0_bias, w1_bias, wo_bias)
@@ -1836,6 +1863,7 @@ class RoutedMoE(nnx.Module):
             wo_bias_pspec,
             decoder_tokens_pspec,
             P(),  # Replicate the input key
+            P(),  # Replicate the routing base key (explicit-routing path; dummy when unused)
         ),
         out_specs=(
             self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", "activation_embed")),
@@ -1844,12 +1872,22 @@ class RoutedMoE(nnx.Module):
         ),
         check_vma=self.config.check_vma,
     )
-    def wrapper(x, logits, pre_bias_logits, w0, w1, wo, w0_bias, w1_bias, wo_bias, sharded_input_ids, rngs):
+    def wrapper(x, logits, pre_bias_logits, w0, w1, wo, w0_bias, w1_bias, wo_bias, sharded_input_ids, rngs, routing_base_key):
       # The expert weights (w0/w1/wo) are all-gathered over FSDP once at this
       # shard_map entry and reused across chunks.
+      # Explicit-routing path (hand-written layer backward): when use_explicit_routing_key is set,
+      # each chunk's routing key is fold_in(routing_base_key, chunk_idx) -- bit-identical to the
+      # stateful rngs.params() (= fold_in(key, count), one consumption per chunk), but a pure jax op
+      # that does not mutate an nnx RngCount (so the MoE forward can be recomputed in the bwd).
+      def _chunk_key(c):
+        return jax.random.fold_in(routing_base_key, c) if use_explicit_routing_key else None
+
       n_chunks = self.config.moe_n_chunks
       if n_chunks <= 1 or not self.config.use_ring_of_experts:
-        return _moe_body(x, logits, pre_bias_logits, w0, w1, wo, w0_bias, w1_bias, wo_bias, sharded_input_ids, rngs)
+        return _moe_body(
+            x, logits, pre_bias_logits, w0, w1, wo, w0_bias, w1_bias, wo_bias, sharded_input_ids, rngs,
+            routing_key=_chunk_key(0),
+        )
 
       # Chunked ring-of-experts pipeline: split the per-shard tokens along the
       # sequence dim into `n_chunks` data-independent chunks. Each chunk runs the
@@ -1877,6 +1915,7 @@ class RoutedMoE(nnx.Module):
             wo_bias,
             None if sharded_input_ids is None else sharded_input_ids[:, sl],
             rngs,
+            routing_key=_chunk_key(c),
         )
         outs.append(out_c)
         lb_losses.append(lb_c)
@@ -1969,6 +2008,7 @@ class RoutedMoE(nnx.Module):
         wo_bias,
         input_ids,
         self.rngs,
+        routing_base_key,
     )
 
   def reshape_and_update_weights(self, weights, indices):
@@ -2740,6 +2780,7 @@ class RoutedMoE(nnx.Module):
       gate_inputs: jax.Array | None = None,
       out_sharding: NamedSharding | None = None,
       pregathered_weights: tuple | None = None,
+      routing_base_key: jax.Array | None = None,
   ) -> tuple[jax.Array, Optional[jax.Array], Optional[jax.Array]]:
     """Executes the routed MoE block.
 
@@ -2818,6 +2859,7 @@ class RoutedMoE(nnx.Module):
       output, lb_loss, bias_updates = self.sparse_matmul(
           inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias, input_ids,
           weights_pregathered=pregathered_weights is not None,
+          routing_base_key=routing_base_key,
       )
     else:
       output, lb_loss, bias_updates = self.dense_matmul(
@@ -2917,6 +2959,7 @@ class RoutedAndSharedMoE(nnx.Module):
       out_sharding: NamedSharding | None = None,
       input_ids: jax.Array | None = None,
       pregathered_weights: tuple | None = None,
+      routing_base_key: jax.Array | None = None,
   ) -> tuple[jax.Array, Optional[jax.Array], Optional[jax.Array]]:
     """Executes both the routed experts and the shared expert block.
 
@@ -2935,7 +2978,7 @@ class RoutedAndSharedMoE(nnx.Module):
     """
     routed_experts, load_balance_loss, moe_bias_updates = self.routed_moe(
         inputs, gate_inputs=gate_inputs, out_sharding=out_sharding, input_ids=input_ids,
-        pregathered_weights=pregathered_weights,
+        pregathered_weights=pregathered_weights, routing_base_key=routing_base_key,
     )
     shared_experts = self.shared_experts(inputs, intermediate_sharding=intermediate_sharding, out_sharding=out_sharding)
     return routed_experts + shared_experts, load_balance_loss, moe_bias_updates
