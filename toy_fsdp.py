@@ -57,18 +57,22 @@ def main():
   def forward_shard_map(x_local, w1_local, w2_local, w3_local, w4_local):
     # Layer 1: All-gather W1, then matmul
     w1_gathered = jax.lax.all_gather(w1_local, axis_name='fsdp', axis=0)
+    w1_gathered = w1_gathered.reshape(-1, w1_gathered.shape[-1])
     y1_local = jnp.matmul(x_local, w1_gathered)
 
     # Layer 2: All-gather W2, then matmul
     w2_gathered = jax.lax.all_gather(w2_local, axis_name='fsdp', axis=0)
+    w2_gathered = w2_gathered.reshape(-1, w2_gathered.shape[-1])
     y2_local = jnp.matmul(y1_local, w2_gathered)
 
     # Layer 3: All-gather W3, then matmul
     w3_gathered = jax.lax.all_gather(w3_local, axis_name='fsdp', axis=0)
+    w3_gathered = w3_gathered.reshape(-1, w3_gathered.shape[-1])
     y3_local = jnp.matmul(y2_local, w3_gathered)
 
     # Layer 4: All-gather W4, then matmul
     w4_gathered = jax.lax.all_gather(w4_local, axis_name='fsdp', axis=0)
+    w4_gathered = w4_gathered.reshape(-1, w4_gathered.shape[-1])
     y4_local = jnp.matmul(y3_local, w4_gathered)
 
     return y4_local
