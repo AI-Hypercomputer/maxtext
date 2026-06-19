@@ -3,6 +3,7 @@ import jax.numpy as jnp
 from jax.sharding import Mesh, PartitionSpec as P, NamedSharding
 from jax import shard_map
 from jax.experimental import xla_metadata
+import jax.experimental.pallas as pl
 import functools
 import time
 import numpy as np
@@ -65,15 +66,26 @@ def main():
   # W_proj: [H_in, H_out] sharded along H_in
   w_proj = jax.device_put(jax.random.normal(k4, (H_in, H_out), dtype=jnp.bfloat16), w_sharding)
 
+  # Define Cost Estimate for Splash Attention
+  # Local FLOPs per device: 2 * B_local * H * S^2 * D = 2 * 2 * 16 * 2048^2 * 128 = 68.7 GFLOPs
+  # Local Bytes accessed: (3 * B_local * H * S * D + 1 * B_local * H * S * D) * 2 bytes = 67 MB
+  cost_est = pl.CostEstimate(
+      flops=68_000_000_000,
+      transcendentals=0,
+      bytes_accessed=67_000_000,
+  )
+
   # Setup Splash Attention Config
   # We use HEAD_DIM_MINOR because shape is [H, S, D]
+  # We use block size 2048 (entire sequence) for maximum performance
   sa_config = tokamax_splash_kernel.SplashConfig(
-      block_q=128,
-      block_kv=128,
-      block_kv_compute=128,
+      block_q=2048,
+      block_kv=2048,
+      block_kv_compute=2048,
       q_layout=tokamax_splash_kernel.QKVLayout.HEAD_DIM_MINOR if tokamax_splash_kernel.QKVLayout else None,
       k_layout=tokamax_splash_kernel.QKVLayout.HEAD_DIM_MINOR if tokamax_splash_kernel.QKVLayout else None,
       v_layout=tokamax_splash_kernel.QKVLayout.HEAD_DIM_MINOR if tokamax_splash_kernel.QKVLayout else None,
+      fwd_cost_estimate=cost_est,
   )
   
   # Causal mask for the sequence length
@@ -107,7 +119,7 @@ def main():
     attn_fn = jax.vmap(lambda q, k, v: splash_kernel(q, k, v), in_axes=(0, 0, 0))
 
     # Use scheduling group to force overlap of Splash Attention and All-Gather
-    with xla_metadata.set_xla_metadata(_scheduling_group_id=1234):
+    with xla_metadata.set_xla_metadata(_scheduling_group_id=0):
       # Gather W_proj
       w_proj_gathered = jax.lax.all_gather(w_proj_local, axis_name='fsdp', axis=0)
       w_proj_gathered = w_proj_gathered.reshape(-1, w_proj_gathered.shape[-1])
