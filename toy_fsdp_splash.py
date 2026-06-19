@@ -2,6 +2,7 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, PartitionSpec as P, NamedSharding
 from jax import shard_map
+from jax.experimental.scheduling_groups import scheduling_group
 import functools
 import time
 import numpy as np
@@ -102,25 +103,20 @@ def main():
       check_vma=False,
   )
   def forward_shard_map(q_local, k_local, v_local, w_proj_local):
-    # 1. Start Async Gather of W_proj
-    # w_proj_local is [H_in/8, H_out]
-    # gathered will be [8, H_in/8, H_out] -> reshaped to [H_in, H_out]
-    w_proj_gathered = jax.lax.all_gather(w_proj_local, axis_name='fsdp', axis=0)
-    w_proj_gathered = w_proj_gathered.reshape(-1, w_proj_gathered.shape[-1])
-
-    # 2. Run Splash Attention (Compute Heavy)
-    # q_local is [B_local, H, S, D]
-    # We need to vmap the splash_kernel over the local batch dimension (axis 0)
-    # splash_kernel expects [H, S, D] and returns [H, S, D] (or transpose?)
-    # Actually, let's check the return shape of splash_kernel.
-    # It should match the input query shape [H, S, D_v] where D_v is head_dim_v.
-    # Here D_v = D = 128.
-    
     # We vmap over the batch dimension (axis 0 of local inputs)
     attn_fn = jax.vmap(lambda q, k, v: splash_kernel(q, k, v), in_axes=(0, 0, 0))
-    
-    # attn_out_local shape: [B_local, H, S, D]
-    attn_out_local = attn_fn(q_local, k_local, v_local)
+
+    # Use scheduling group to force overlap of Splash Attention and All-Gather
+    @scheduling_group("overlap_group")
+    def compute_and_gather(q, k, v, w_local):
+      # Gather W_proj
+      w_gathered = jax.lax.all_gather(w_local, axis_name='fsdp', axis=0)
+      w_gathered = w_gathered.reshape(-1, w_gathered.shape[-1])
+      # Run Splash Attention
+      attn_out = attn_fn(q, k, v)
+      return attn_out, w_gathered
+
+    attn_out_local, w_proj_gathered = compute_and_gather(q_local, k_local, v_local, w_proj_local)
 
     # 3. Reshape attention output for Projection Matmul
     # We need to transpose to [B_local, S, H, D] then reshape to [B_local * S, H * D]
