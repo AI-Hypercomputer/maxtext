@@ -778,7 +778,13 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
     # `rest_other` holds forward-trace tracers, so it must be THREADED through residuals -- never
     # closed over in the bwd -- or it leaks across the nn.scan boundary. graphdef/det are static.
     def _gather(p, rest_):
-      return _merge(p, rest_).DeepSeekMoeBlock_0.gather_routed_weights()  # annotated custom_vjp gather
+      # annotated custom_vjp gather. Under moe_handwritten_splash_group the w0/w1 slots come back as
+      # zero-arg CLOSURES (deferred so the forward can emit them adjacent to the splash); the backward
+      # MATERIALIZES them here (placement = scheduler default, gather math identical -> bit-exact).
+      w = _merge(p, rest_).DeepSeekMoeBlock_0.gather_routed_weights()
+      if w is None:
+        return w
+      return tuple(wi() if callable(wi) else wi for wi in w)
 
     def _attn(p, x_in, seg, pos, rest_):
       return _merge(p, rest_).self_attention_with_norm_op(x_in, seg, pos, det)  # (hidden, intermediate)
@@ -800,7 +806,18 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       # attention) to preserve the hoist.
       m = _merge(p, rest_)
       weights = m.DeepSeekMoeBlock_0.gather_routed_weights()
-      hidden_states, intermediate_inputs = m.self_attention_with_norm_op(x_in, seg0, pos0, det)
+      # moe_handwritten_splash_group: w0/w1 come back as zero-arg CLOSURES. Thread them into the
+      # attention via wag_cell so tpu_flash_attention invokes them ADJACENT to the splash kernel
+      # (inside the splash's _scheduling_group -> contiguous group 1 -> w0/w1 gathers overlap the
+      # idle-SC splash). wo (weights[2]) is already gathered inline and hides behind the up-GMM.
+      wag_cell = None
+      if weights is not None and callable(weights[0]):
+        wag_cell = {"gather_w0": weights[0], "gather_w1": weights[1]}
+      hidden_states, intermediate_inputs = m.self_attention_with_norm_op(
+          x_in, seg0, pos0, det, wag_cell=wag_cell
+      )
+      if wag_cell is not None:
+        weights = (wag_cell["w0_gathered"], wag_cell["w1_gathered"], weights[2])
       mlp_lnx, load_balance_loss, moe_bias_updates = m.mlp_op(
           hidden_states, det, pregathered_weights=weights, routing_key_bits=_routing_bits()
       )

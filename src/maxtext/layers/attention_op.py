@@ -1534,13 +1534,16 @@ class AttentionOp(nnx.Module):
         xla_metadata.set_xla_metadata(_scheduling_group_id=1) if _wag_splash_group else contextlib.nullcontext()
     )
     with _splash_group_ctx:
+      # w0/w1-in-splash: gather the expert weights ADJACENT to the splash kernel, inside the SAME
+      # _scheduling_group -> the gather(s) (group 1) and the splash kernel (group 1) form a contiguous
+      # region (no ungrouped QKV between them -> no annotation gap) so the scheduler overlaps the
+      # FSDP all-gather(s) with splash. Each closure runs the same custom_vjp gather (fwd annotated /
+      # bwd psum_scatter) as the inline path -> numerics unchanged. Results spliced into the MoE's
+      # pregathered_weights back in deepseek.py. (moe_handwritten_splash_group threads both w0 and w1;
+      # moe_wag_splash_group threads w1 only.)
+      if wag_cell is not None and "gather_w0" in wag_cell:
+        wag_cell["w0_gathered"] = wag_cell["gather_w0"]()
       if wag_cell is not None and "gather_w1" in wag_cell:
-        # w1-in-splash: gather the expert weight w1 ADJACENT to the splash kernel, inside the SAME
-        # _scheduling_group -> the gather (group 1) and the splash kernel (group 1) form a contiguous
-        # region (no ungrouped QKV between them -> no annotation gap) so the scheduler overlaps w1's
-        # FSDP all-gather with splash. The closure runs the same custom_vjp gather (fwd annotated /
-        # bwd psum_scatter) as the inline path -> numerics unchanged. Result spliced into the MoE's
-        # pregathered_weights back in deepseek.py.
         wag_cell["w1_gathered"] = wag_cell["gather_w1"]()
       ret = wrap_flash_attention(
           query,
