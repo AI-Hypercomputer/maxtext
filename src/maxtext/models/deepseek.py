@@ -751,32 +751,40 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       base = jax.random.key(seed)
       return jnp.stack([jax.random.key_data(jax.random.fold_in(base, c)) for c in range(n_route_chunks)])
 
-    # Split the bridge nnx Rngs OUT and thread a fresh DUMMY in its place, so no bridge key<urbg> is
-    # carried in `rest` (which would escape nn.scan in the recompute). The dummy is never drawn.
+    # Split the bridge nnx Rngs OUT (NrgState filter) so the threaded `rest` carries NO rng key: an
+    # rng key<urbg> in a custom_vjp residual escapes nn.scan (bridge OR a body-built dummy alike). We
+    # capture only STATIC reconstruction specs (Variable types + metadata + treedef -- no bridge
+    # values) and rebuild a fresh DUMMY rng IN-SCOPE inside each merge (fwd and bwd). The dummy is a
+    # constant, never threaded and never drawn (routing is key-driven, dropout is off), so numerics
+    # are unchanged. Validated bit-exact on CPU.
     graphdef, params, rngstate, rest_other = nnx.split(self, nnx.Param, nnx.RngState, ...)
+    _rng_leaves, _rng_treedef = jax.tree.flatten(rngstate, is_leaf=lambda n: isinstance(n, nnx.Variable))
+    _rng_specs = tuple((type(v), v.get_metadata()) for v in _rng_leaves)  # static
 
-    def _dummy_rng(v):
-      if isinstance(v, nnx.RngKey):
-        return nnx.RngKey(jax.random.key(0), **v.get_metadata())
-      if isinstance(v, nnx.RngCount):
-        return nnx.RngCount(jnp.zeros_like(v[...]), **v.get_metadata())
-      return v
+    def _dummy_rngstate():
+      leaves = []
+      for vtype, meta in _rng_specs:
+        if vtype is nnx.RngKey:
+          leaves.append(nnx.RngKey(jax.random.key(0), **meta))
+        elif vtype is nnx.RngCount:
+          leaves.append(nnx.RngCount(jnp.zeros((), jnp.uint32), **meta))
+        else:
+          raise TypeError(f"unexpected RngState variable {vtype}")
+      return jax.tree.unflatten(_rng_treedef, leaves)
 
-    dummy_rngstate = jax.tree.map(_dummy_rng, rngstate, is_leaf=lambda n: isinstance(n, nnx.Variable))
-    rest = nnx.merge_state(dummy_rngstate, rest_other)  # clean state: dummy rng + other; NO bridge key
+    def _merge(p, rest_):  # merge with a fresh in-scope dummy rng (rest_ carries no rng key)
+      return nnx.merge(graphdef, p, _dummy_rngstate(), rest_)
 
-    # `rest` holds forward-trace tracers, so it must be THREADED through residuals -- never closed over
-    # in the bwd -- or it leaks across the nn.scan boundary. graphdef/det are static.
+    # `rest_other` holds forward-trace tracers, so it must be THREADED through residuals -- never
+    # closed over in the bwd -- or it leaks across the nn.scan boundary. graphdef/det are static.
     def _gather(p, rest_):
-      m = nnx.merge(graphdef, p, rest_)
-      return m.DeepSeekMoeBlock_0.gather_routed_weights()  # (w0, w1, wo); annotated custom_vjp gather
+      return _merge(p, rest_).DeepSeekMoeBlock_0.gather_routed_weights()  # annotated custom_vjp gather
 
     def _attn(p, x_in, seg, pos, rest_):
-      m = nnx.merge(graphdef, p, rest_)
-      return m.self_attention_with_norm_op(x_in, seg, pos, det)  # (hidden_states, intermediate_inputs)
+      return _merge(p, rest_).self_attention_with_norm_op(x_in, seg, pos, det)  # (hidden, intermediate)
 
     def _moe(p, hidden_states, intermediate_inputs, weights, rest_):
-      m = nnx.merge(graphdef, p, rest_)
+      m = _merge(p, rest_)
       mlp_lnx, load_balance_loss, moe_bias_updates = m.mlp_op(
           hidden_states, det, pregathered_weights=weights, routing_key_bits=_routing_bits()
       )
@@ -785,18 +793,18 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
 
     @jax.custom_vjp
     def fused(p, x_in):
-      weights = _gather(p, rest)  # gather FIRST (program-order before attention) -> forward overlap
-      hidden_states, intermediate_inputs = _attn(p, x_in, seg0, pos0, rest)
-      return _moe(p, hidden_states, intermediate_inputs, weights, rest)
+      weights = _gather(p, rest_other)  # gather FIRST (program-order before attention) -> fwd overlap
+      hidden_states, intermediate_inputs = _attn(p, x_in, seg0, pos0, rest_other)
+      return _moe(p, hidden_states, intermediate_inputs, weights, rest_other)
 
     def fused_fwd(p, x_in):
-      weights = _gather(p, rest)
-      hidden_states, intermediate_inputs = _attn(p, x_in, seg0, pos0, rest)
-      out = _moe(p, hidden_states, intermediate_inputs, weights, rest)
-      # Residuals: sharded params + decoder_layer_input + (seg, pos, rest). seg/pos closed over in the
-      # primal/fwd and read from residuals in the bwd (no tracer leak). NO gathered weights /
-      # activations / routing-bits saved (a body-computed value saved as a residual escapes nn.scan).
-      return out, (p, x_in, seg0, pos0, rest)
+      weights = _gather(p, rest_other)
+      hidden_states, intermediate_inputs = _attn(p, x_in, seg0, pos0, rest_other)
+      out = _moe(p, hidden_states, intermediate_inputs, weights, rest_other)
+      # Residuals: sharded params + decoder_layer_input + (seg, pos, rest_other). seg/pos closed over
+      # in the primal/fwd and read from residuals in the bwd (no tracer leak). NO gathered weights /
+      # activations / routing-bits / rng saved (a body-computed value saved as a residual escapes).
+      return out, (p, x_in, seg0, pos0, rest_other)
 
     def fused_bwd(res, cotangents):
       p, x_in, seg, pos, rest_ = res
