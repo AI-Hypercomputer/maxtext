@@ -1240,7 +1240,6 @@ class RoutedMoE(nnx.Module):
       wo_bias,
       input_ids=None,
       weights_pregathered=False,
-      routing_base_key=None,
   ):
     """Perform sparse matrix multiplication of inputs and Experts.
 
@@ -1248,15 +1247,19 @@ class RoutedMoE(nnx.Module):
     (done earlier, in the attention phase, by `gather_weights`) so the in-line
     `_wag_sched` gather is skipped to avoid a double gather.
 
-    When `routing_base_key` is not None (deepseek `moe_handwritten_bwd`), random routing uses
-    fold_in(routing_base_key, chunk_idx) per chunk instead of the stateful `self.rngs.params()`,
-    so the MoE forward can be recomputed in the hand-written layer backward without mutating an
-    nnx RngCount across trace levels. Bit-identical (rngs.params() == fold_in(key, count==chunk)).
+    When `config.moe_handwritten_bwd` is set (deepseek hand-written layer backward), random routing
+    READS this block's own `self.rngs` 'params' key and uses fold_in(key, chunk_idx) per chunk
+    instead of the stateful `self.rngs.params()`, so the MoE forward can be recomputed in the
+    backward without mutating an nnx RngCount across trace levels. The key is read at the same place
+    the reference consumes self.rngs (inside this method), which avoids leaking the bridge-created
+    key across the nn.scan boundary. Bit-identical: rngs.params() == fold_in(key, count==chunk).
     """
     # The shard_map always receives a valid key array; a static flag selects the explicit-routing
     # path so the default path keeps using rngs.params() (unchanged behavior / numerics).
-    use_explicit_routing_key = routing_base_key is not None
-    if not use_explicit_routing_key:
+    use_explicit_routing_key = self.config.moe_handwritten_bwd and self.config.use_random_routing
+    if use_explicit_routing_key:
+      routing_base_key = self.rngs.params.key[...]  # read (no consume); folded per chunk below
+    else:
       routing_base_key = jax.random.key(0)  # dummy; ignored when use_explicit_routing_key is False
 
     def jax_ragged_dot_gmm(inputs, kernel, tiling, group_sizes, expert_assignments, padding_amount):
@@ -2780,7 +2783,6 @@ class RoutedMoE(nnx.Module):
       gate_inputs: jax.Array | None = None,
       out_sharding: NamedSharding | None = None,
       pregathered_weights: tuple | None = None,
-      routing_base_key: jax.Array | None = None,
   ) -> tuple[jax.Array, Optional[jax.Array], Optional[jax.Array]]:
     """Executes the routed MoE block.
 
@@ -2859,7 +2861,6 @@ class RoutedMoE(nnx.Module):
       output, lb_loss, bias_updates = self.sparse_matmul(
           inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias, input_ids,
           weights_pregathered=pregathered_weights is not None,
-          routing_base_key=routing_base_key,
       )
     else:
       output, lb_loss, bias_updates = self.dense_matmul(
@@ -2959,7 +2960,6 @@ class RoutedAndSharedMoE(nnx.Module):
       out_sharding: NamedSharding | None = None,
       input_ids: jax.Array | None = None,
       pregathered_weights: tuple | None = None,
-      routing_base_key: jax.Array | None = None,
   ) -> tuple[jax.Array, Optional[jax.Array], Optional[jax.Array]]:
     """Executes both the routed experts and the shared expert block.
 
@@ -2978,7 +2978,7 @@ class RoutedAndSharedMoE(nnx.Module):
     """
     routed_experts, load_balance_loss, moe_bias_updates = self.routed_moe(
         inputs, gate_inputs=gate_inputs, out_sharding=out_sharding, input_ids=input_ids,
-        pregathered_weights=pregathered_weights, routing_base_key=routing_base_key,
+        pregathered_weights=pregathered_weights,
     )
     shared_experts = self.shared_experts(inputs, intermediate_sharding=intermediate_sharding, out_sharding=out_sharding)
     return routed_experts + shared_experts, load_balance_loss, moe_bias_updates

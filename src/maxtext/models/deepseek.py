@@ -725,16 +725,13 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       return m.self_attention_with_norm_op(x_in, seg, pos, det)  # (hidden_states, intermediate_inputs)
 
     def _moe(p, hidden_states, intermediate_inputs, weights, rest_):
+      # The MoE reads its own routed-expert rng key inside sparse_matmul (gated by
+      # config.moe_handwritten_bwd) and uses fold_in(key, chunk_idx) instead of the stateful
+      # rngs.params() -- nnx forbids mutating an RngCount across trace levels, so the routing must be
+      # rng-key-driven to recompute in the bwd. Reading the key at the same place the reference reads
+      # self.rngs avoids leaking the bridge-created key across the scan boundary.
       m = nnx.merge(graphdef, p, rest_)
-      # Read (do NOT consume) the routed-expert 'params' rng key from the merged (threaded) state so
-      # the MoE uses fold_in(key, chunk_idx) instead of the stateful rngs.params() -- nnx forbids
-      # mutating an RngCount across trace levels, so the routing must be rng-key-driven to recompute
-      # in the bwd. Bit-identical: rngs.params() == fold_in(key, count==chunk). Reading from the
-      # merged module (not a separately-threaded copy) avoids leaking the bridge-created key.
-      rkey = m.DeepSeekMoeBlock_0.rngs.params.key[...]
-      mlp_lnx, load_balance_loss, moe_bias_updates = m.mlp_op(
-          hidden_states, det, pregathered_weights=weights, routing_base_key=rkey
-      )
+      mlp_lnx, load_balance_loss, moe_bias_updates = m.mlp_op(hidden_states, det, pregathered_weights=weights)
       layer_output = m.dropout_op(mlp_lnx + intermediate_inputs, deterministic=det)
       return layer_output, load_balance_loss, moe_bias_updates
 
@@ -778,13 +775,12 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
     fused.defvjp(fused_fwd, fused_bwd)
     return fused(params, x)
 
-  def mlp_op(self, x, deterministic, *args, pregathered_weights=None, routing_base_key=None, **kwargs):
+  def mlp_op(self, x, deterministic, *args, pregathered_weights=None, **kwargs):
     mlp_lnx, load_balance_loss, moe_bias_updates = self.DeepSeekMoeBlock_0(
         x,
         intermediate_sharding=self.mlp_intermediate_sharding,
         out_sharding=self.out_sharding,
         pregathered_weights=pregathered_weights,
-        routing_base_key=routing_base_key,
     )
     return self.with_logical_constraint(mlp_lnx), load_balance_loss, moe_bias_updates
 
