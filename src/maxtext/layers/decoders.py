@@ -801,6 +801,7 @@ class Decoder(nn.Module):
       kv_caches: list[jax.Array] | None = None,
       attention_metadata=None,
       deepstack_visual_embeds: None | list[jnp.ndarray] = None,
+      routing_rng_key=None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -887,6 +888,10 @@ class Decoder(nn.Module):
           layer_call_kwargs = {
               "previous_chunk": previous_chunk,
               "slot": slot,
+              # Random-routing key as a model INPUT (pure-jax key, not the nnx Rngs) so the
+              # hand-written MoE backward can recompute routing rng-free. None on non-handwritten /
+              # non-random paths -> the layer falls back to rngs.params().
+              "routing_rng_key": routing_rng_key,
           }
           dense_layer = RemattedBlockLayers[0]
           moe_layer = RemattedBlockLayers[1]

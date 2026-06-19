@@ -391,6 +391,7 @@ class DeepSeekDenseLayer(DeepSeekGenericLayer):
       kv_cache=None,
       attention_metadata=None,
       decoder_input_tokens=None,
+      routing_rng_key=None,
   ):
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
     if isinstance(inputs, tuple):
@@ -473,6 +474,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       kv_cache=None,
       attention_metadata=None,
       decoder_input_tokens=None,
+      routing_rng_key=None,
   ):
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
     if isinstance(inputs, tuple):
@@ -615,6 +617,18 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       engram_output = self.engram_op(x, decoder_input_tokens)
       x = x + engram_output
 
+    # Random-routing key from a model INPUT (not the stateful nnx Rngs): each MoE chunk routes with
+    # wrap_key_data(key_data(fold_in(routing_rng_key, chunk))) -- a pure-jax key. This keeps random
+    # routing's balanced, data-independent load while removing the nnx Rngs from the routing path, so
+    # the hand-written backward can recompute the routing rng-free (and the autodiff reference matches
+    # when fed the same key). None on non-deepseek/non-random paths -> falls back to rngs.params().
+    routing_key_bits = None
+    if routing_rng_key is not None and self.config.use_random_routing and self.config.moe_routing_key_as_input:
+      n_route_chunks = max(1, self.config.moe_n_chunks) if self.config.use_ring_of_experts else 1
+      routing_key_bits = jnp.stack(
+          [jax.random.key_data(jax.random.fold_in(routing_rng_key, c)) for c in range(n_route_chunks)]
+      )
+
     # Hand-written layer backward (flag: moe_handwritten_bwd): wrap gather + attention + MoE in a
     # jax.custom_vjp so WE own the backward schedule (place the annotated weight re-gather adjacent
     # to the recomputed attention forward) and there is no auto-remat to cycle against. Restricted
@@ -627,9 +641,12 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
         and not self.is_engram_enabled
         and not self.config.moe_wag_splash_group
         and not self.config.moe_wag_attn_group
+        # Random routing must come from a model-input key (routing_key_bits); the bwd recompute
+        # cannot draw the (dummied) nnx Rngs. Deterministic routing draws no rng, so None is fine.
+        and (not self.config.use_random_routing or routing_key_bits is not None)
     ):
       layer_output, load_balance_loss, moe_bias_updates = self._handwritten_moe_layer(
-          x, decoder_segment_ids, decoder_positions, deterministic
+          x, decoder_segment_ids, decoder_positions, deterministic, routing_key_bits
       )
       return self.post_process(layer_output, load_balance_loss, moe_bias_updates, kv_cache)
 
@@ -686,37 +703,56 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       moe_bias_updates = metadata["moe_bias_updates"]
     else:
       mlp_lnx, load_balance_loss, moe_bias_updates = self.mlp_op(
-          hidden_states, deterministic, pregathered_weights=pregathered_weights
+          hidden_states, deterministic, pregathered_weights=pregathered_weights, routing_key_bits=routing_key_bits
       )
       layer_output = mlp_lnx + intermediate_inputs
     layer_output = self.dropout_op(layer_output, deterministic=deterministic)
 
     return self.post_process(layer_output, load_balance_loss, moe_bias_updates, kv_cache)
 
-  def _handwritten_moe_layer(self, x, decoder_segment_ids, decoder_positions, deterministic):
+  def _handwritten_moe_layer(self, x, decoder_segment_ids, decoder_positions, deterministic, routing_key_bits):
     """Layer custom_vjp with a hand-written backward (flag: moe_handwritten_bwd).
 
     Wraps gather + attention + MoE so WE own the backward schedule. The forward runs the existing
     forward (gather emitted in program order BEFORE attention -> keeps the structural fwd overlap)
-    and saves only {decoder_layer_input x, sharded params} as residuals -- no gathered weights are
-    held (no OOM) and there is no auto-remat decision to cycle against. The backward replays the
-    three pure pieces, emitting the annotated weight RE-gather adjacent to the recomputed attention
-    forward (SC regather || TC splash-fwd remat), then MoE-bwd -> gather-bwd (psum_scatter ->
-    FSDP-sharded weight grads, via the existing _make_cv_gather custom_vjp) -> attn-bwd (splash dkv).
+    and saves only {decoder_layer_input x, sharded params, routing key bits} as residuals -- no
+    gathered weights are held (no OOM) and there is no auto-remat decision to cycle against. The
+    backward replays the three pure pieces, emitting the annotated weight RE-gather adjacent to the
+    recomputed attention forward (SC regather || TC splash-fwd remat), then MoE-bwd -> gather-bwd
+    (psum_scatter -> FSDP-sharded weight grads, via _make_cv_gather) -> attn-bwd (splash dkv).
 
-    Numerics are identical to the autodiff path: the pieces compose to the same forward and each VJP
-    is the kernel's own; the per-piece param cotangents (disjoint usage) sum to the full gradient.
-    seg/pos are closed over in the primal/fwd (same trace, legal) and read from residuals in the bwd
-    (avoids a tracer leak). Preconditions are enforced by the caller's gate (plain ring path).
+    RNG: random routing's key comes from `routing_key_bits` (derived from a model-INPUT key, pure
+    jax), threaded through residuals like seg/pos, used identically in fwd and bwd -> no nnx Rngs in
+    the routing path. Separately, the nnx Rngs the bridge attaches (shared by the unused dropout) is
+    SPLIT OUT and replaced with a fresh DUMMY before threading: drawing/reading the bridge key leaks
+    a key<urbg> across nn.scan, and re-consuming it hits nnx's cross-trace-level RngCount guard; the
+    dummy is never drawn (routing is key-driven, dropout is off), so numerics are unchanged.
+
+    Numerics are identical to the autodiff path (given the same routing key): the pieces compose to
+    the same forward and each VJP is the kernel's own; the per-piece param cotangents (disjoint usage)
+    sum to the full gradient. seg/pos/routing-bits are closed over in the primal/fwd and read from
+    residuals in the bwd (no tracer leak). Preconditions enforced by the caller's gate.
     """
-    graphdef, params, rest = nnx.split(self, nnx.Param, ...)
     det = deterministic  # static python bool
     seg0, pos0 = decoder_segment_ids, decoder_positions
-    n_route_chunks = max(1, self.config.moe_n_chunks) if self.config.use_ring_of_experts else 1
+    rkey_bits = routing_key_bits  # closed over in primal/fwd; read from residuals in bwd
 
-    # `rest` (non-Param nnx state, incl. the routed-expert rng) holds forward-trace tracers, so it
-    # must be THREADED through residuals -- never closed over in the bwd -- or it leaks across the
-    # nn.scan boundary ("No constant handler for DynamicJaxprTracer"). graphdef/det are static.
+    # Split the bridge nnx Rngs OUT and thread a fresh DUMMY in its place, so no bridge key<urbg> is
+    # carried in `rest` (which would escape nn.scan in the recompute). The dummy is never drawn.
+    graphdef, params, rngstate, rest_other = nnx.split(self, nnx.Param, nnx.RngState, ...)
+
+    def _dummy_rng(v):
+      if isinstance(v, nnx.RngKey):
+        return nnx.RngKey(jax.random.key(0), **v.get_metadata())
+      if isinstance(v, nnx.RngCount):
+        return nnx.RngCount(jnp.zeros_like(v[...]), **v.get_metadata())
+      return v
+
+    dummy_rngstate = jax.tree.map(_dummy_rng, rngstate, is_leaf=lambda n: isinstance(n, nnx.Variable))
+    rest = nnx.merge_state(dummy_rngstate, rest_other)  # clean state: dummy rng + other; NO bridge key
+
+    # `rest` holds forward-trace tracers, so it must be THREADED through residuals -- never closed over
+    # in the bwd -- or it leaks across the nn.scan boundary. graphdef/det are static.
     def _gather(p, rest_):
       m = nnx.merge(graphdef, p, rest_)
       return m.DeepSeekMoeBlock_0.gather_routed_weights()  # (w0, w1, wo); annotated custom_vjp gather
@@ -725,15 +761,10 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       m = nnx.merge(graphdef, p, rest_)
       return m.self_attention_with_norm_op(x_in, seg, pos, det)  # (hidden_states, intermediate_inputs)
 
-    def _moe(p, hidden_states, intermediate_inputs, weights, rest_, rkey_bits):
-      # rkey_bits=None on the FORWARD -> sparse_matmul consumes rngs.params() exactly like the
-      # reference (the bridge-blessed op, no scan leak). On the BWD recompute rkey_bits carries the
-      # explicit per-chunk routing keys derived BY THE BWD from rest_ (read + fold), so the routing is
-      # recomputed without re-consuming the nnx Rngs (which nnx forbids across trace levels) and
-      # without threading any consume-derived value out of the forward (which escapes the scan).
+    def _moe(p, hidden_states, intermediate_inputs, weights, rest_, bits):
       m = nnx.merge(graphdef, p, rest_)
       mlp_lnx, load_balance_loss, moe_bias_updates = m.mlp_op(
-          hidden_states, det, pregathered_weights=weights, routing_key_bits=rkey_bits
+          hidden_states, det, pregathered_weights=weights, routing_key_bits=bits
       )
       layer_output = m.dropout_op(mlp_lnx + intermediate_inputs, deterministic=det)
       return layer_output, load_balance_loss, moe_bias_updates
@@ -742,19 +773,19 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
     def fused(p, x_in):
       weights = _gather(p, rest)  # gather FIRST (program-order before attention) -> forward overlap
       hidden_states, intermediate_inputs = _attn(p, x_in, seg0, pos0, rest)
-      return _moe(p, hidden_states, intermediate_inputs, weights, rest, None)  # fwd: consume rngs
+      return _moe(p, hidden_states, intermediate_inputs, weights, rest, rkey_bits)
 
     def fused_fwd(p, x_in):
       weights = _gather(p, rest)
       hidden_states, intermediate_inputs = _attn(p, x_in, seg0, pos0, rest)
-      out = _moe(p, hidden_states, intermediate_inputs, weights, rest, None)  # fwd: consume rngs
-      # Residuals: sharded params + decoder_layer_input + (seg, pos, rest). seg/pos closed over in
-      # the primal/fwd and read from residuals in the bwd (no tracer leak). NO gathered weights /
-      # activations / rng-derived values saved (the latter would escape the forward scan body).
-      return out, (p, x_in, seg0, pos0, rest)
+      out = _moe(p, hidden_states, intermediate_inputs, weights, rest, rkey_bits)
+      # Residuals: sharded params + decoder_layer_input + (seg, pos, rest, routing-bits). All closed
+      # over in the primal/fwd and read from residuals in the bwd (no tracer leak). NO gathered
+      # weights / activations saved.
+      return out, (p, x_in, seg0, pos0, rest, rkey_bits)
 
     def fused_bwd(res, cotangents):
-      p, x_in, seg, pos, rest_ = res
+      p, x_in, seg, pos, rest_, bits = res
       # Re-tracing the bridged layer methods happens OUTSIDE the linen forward, so detach the
       # linen module stack to avoid the qwix-fixup None.path crash (see helper docstring).
       with _detached_linen_module_stack():
@@ -764,19 +795,9 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
         )
         # 2) OUR placed annotated weight re-gather + its VJP (bwd = tiled psum_scatter -> sharded grads)
         weights, vjp_gather = jax.vjp(lambda pp: _gather(pp, rest_), p)
-        # Random routing only: derive the per-chunk routing keys HERE in the bwd by reading (not
-        # consuming) the rng key from the threaded rest_ and folding it -- bit-identical to the
-        # forward's rngs.params() per chunk (== fold_in(key, count==chunk)). Deterministic top-k
-        # routing (use_random_routing=False, the batchsplit/production path) touches no rng at all,
-        # so we read nothing -- reading the bridge key leaks across the scan even in the bwd.
-        if self.config.use_random_routing:
-          bwd_key = nnx.merge(graphdef, p, rest_).DeepSeekMoeBlock_0.MoeBlock_0.rngs.params.key[...]
-          rkey_bits = jnp.stack([jax.random.key_data(jax.random.fold_in(bwd_key, c)) for c in range(n_route_chunks)])
-        else:
-          rkey_bits = None
-        # 3) recompute MoE forward (explicit routing keys -> no nnx rng mutation) + build its VJP
+        # 3) recompute MoE forward (routing from the threaded key bits -> no nnx Rngs) + build its VJP
         _out, vjp_moe = jax.vjp(
-            lambda pp, hh, ii, ww: _moe(pp, hh, ii, ww, rest_, rkey_bits), p, hidden_states, intermediate_inputs, weights
+            lambda pp, hh, ii, ww: _moe(pp, hh, ii, ww, rest_, bits), p, hidden_states, intermediate_inputs, weights
         )
         dp_moe, d_hidden, d_inter, d_weights = vjp_moe(cotangents)
         (dp_gather,) = vjp_gather(d_weights)

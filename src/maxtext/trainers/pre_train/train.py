@@ -124,8 +124,13 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
     # inputs, targets, segments, positions = apply_args
     if dropout_rng is not None:
       rng1, aqt_rng = jax.random.split(dropout_rng)
+      # Per-step random-routing key passed as a model INPUT (pure jax), used only when
+      # moe_routing_key_as_input is set (DeepSeek). Keeps random routing's balanced load while
+      # removing the nnx Rngs from the routing path so the hand-written MoE backward can recompute it.
+      routing_rng_key = jax.random.fold_in(dropout_rng, 0x520)
     else:
       rng1, aqt_rng = None, None
+      routing_rng_key = None
 
     # Flax Linen model
     if sparsity_enabled:
@@ -146,6 +151,7 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
         mutable=mutable_collections,
         decoder_target_tokens=data["targets"],
         decoder_target_mask=data["targets_segmentation"],
+        routing_rng_key=routing_rng_key,
     )
 
     if (config.use_indexer and not config.indexer_sparse_training) and is_train:

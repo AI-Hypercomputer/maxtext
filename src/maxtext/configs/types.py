@@ -810,6 +810,18 @@ class MoEGeneral(BaseModel):
           "so collapsing the gather ids does not re-merge them. Default False."
       ),
   )
+  moe_routing_key_as_input: bool = Field(
+      False,
+      description=(
+          "DeepSeek random-routing only. When True, the random-routing key is derived from a model "
+          "INPUT key (threaded train_step -> model.apply -> Decoder -> MoE, pure jax) instead of the "
+          "stateful nnx Rngs (rngs.params()). Same balanced/data-independent load, but the routing has "
+          "no nnx Rngs -- required so the hand-written MoE backward (moe_handwritten_bwd) can recompute "
+          "routing rng-free. Routing values differ from the rngs.params() default (random-routing loss "
+          "is a meaningless fingerprint anyway). Set on BOTH the hand-written run and its autodiff "
+          "reference for an apples-to-apples comparison. Default False = unchanged rngs.params() path."
+      ),
+  )
   moe_handwritten_bwd: bool = Field(
       False,
       description=(

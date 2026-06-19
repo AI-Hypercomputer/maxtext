@@ -140,6 +140,7 @@ class TransformerLinenPure(nn.Module):
       nnx_method=None,
       kv_caches: list[jax.Array] | None = None,
       attention_metadata: dict[str, Any] | None = None,
+      routing_rng_key=None,
   ):
     """Applies Transformer decoder-branch on encoded-input and target.
 
@@ -212,6 +213,7 @@ class TransformerLinenPure(nn.Module):
         kv_caches=kv_caches,
         attention_metadata=attention_metadata,
         deepstack_visual_embeds=deepstack_visual_embeds,
+        routing_rng_key=routing_rng_key,
     )  # pytype: disable=wrong-keyword-args
 
     # If we are initializing the model AND MTP is enabled, we must create
