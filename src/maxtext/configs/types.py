@@ -826,6 +826,18 @@ class MoEGeneral(BaseModel):
   moe_random_routing_seed: int = Field(
       0, description="Seed for the constant random-routing key when moe_routing_key_as_input is True."
   )
+  moe_handwritten_splash_group: bool = Field(
+      False,
+      description=(
+          "With moe_handwritten_bwd + moe_weight_ag_scheduling_group: tag the splash attention kernel "
+          "with _scheduling_group_id=1 (same as w0's expert weight all-gather) so XLA's latency "
+          "scheduler overlaps the hoisted, data-independent w0 FSDP gather with the (idle-SparseCore) "
+          "splash Pallas kernel. Unlike moe_wag_splash_group this does NOT turn w1 into a wag_cell "
+          "closure (the hand-written forward keeps the inline 3-gather path) -- splash tag only. The "
+          "auto-remat cycle that blocked moe_wag_splash_group does not apply (hand-written bwd owns the "
+          "remat). Scheduling-only; numerics unchanged. Default False."
+      ),
+  )
   moe_handwritten_bwd: bool = Field(
       False,
       description=(

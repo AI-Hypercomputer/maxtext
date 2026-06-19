@@ -1524,9 +1524,12 @@ class AttentionOp(nnx.Module):
     # _scheduling_group_id (1) used by the MoE expert weight all-gather (w0) in moe.py, so the
     # XLA scheduler is told to overlap the (data-independent, hoisted) expert FSDP weight gather
     # with the splash Pallas kernel. Scheduling-only annotation; no math change.
-    _wag_splash_group = getattr(self.config, "moe_wag_splash_group", False) and getattr(
-        self.config, "moe_weight_ag_scheduling_group", False
-    ) and not getattr(self.config, "moe_wag_no_annotation", False)
+    _wag_splash_group = (
+        getattr(self.config, "moe_wag_splash_group", False)
+        or getattr(self.config, "moe_handwritten_splash_group", False)
+    ) and getattr(self.config, "moe_weight_ag_scheduling_group", False) and not getattr(
+        self.config, "moe_wag_no_annotation", False
+    )
     _splash_group_ctx = (
         xla_metadata.set_xla_metadata(_scheduling_group_id=1) if _wag_splash_group else contextlib.nullcontext()
     )
