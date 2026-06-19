@@ -2667,7 +2667,10 @@ class RoutedMoE(nnx.Module):
 
       def _g_fwd(w):  # FORWARD under diff: annotated gather (overlaps splash)
         def _fn(x):
-          with _scheduling_group(sched_group):
+          # ablation: moe_wag_no_annotation drops the _scheduling_group_id tag but keeps the
+          # custom_vjp/distinct-op/hoist/no-barrier structure -> isolates the tag's contribution.
+          ctx = contextlib.nullcontext() if self.config.moe_wag_no_annotation else _scheduling_group(sched_group)
+          with ctx:
             return jax.lax.all_gather(x, "fsdp", axis=gather_axis, tiled=True)
         w_full = jax.shard_map(_fn, mesh=self.mesh, in_specs=(in_pspec,), out_specs=out_pspec, check_vma=False)(w)
         return w_full, None  # no big residual saved (sharded w is recomputed cheaply / not needed)

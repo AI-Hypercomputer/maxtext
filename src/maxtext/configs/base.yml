@@ -225,6 +225,7 @@ use_ragged_sort: false # whether to use the Pallas ragged-sort kernels in the Mo
 use_gather_mosaic_kernel: false # whether to use a custom mosaic kernel for token gather ops
 moe_combine_kernel: "auto" # MoE combine (unpermute) kernel: auto(follow use_ragged_sort)|sc(SparseCore)|tc(TensorCore). Decouples combine from gather.
 moe_weight_ag_scheduling_group: false # ring-of-experts: make FSDP weight AG explicit in-body + tag same _scheduling_group_id as dispatch sort so scheduler overlaps weight-AG with the SC sort
+moe_wag_no_annotation: false # ablation: drop the _scheduling_group_id tag on the weight gathers (keep hoist/distinct-ops/no-barrier) to test if the annotation is load-bearing
 # tunable tiling dimensions used for mlp gmm
 # megablox/jax ragged dot - supports forward pass only (6 configs: `wi_tile_fwd...` and `wo_tile_fwd_...`)
 # tokamax ragged dot - supports all 18 configs
