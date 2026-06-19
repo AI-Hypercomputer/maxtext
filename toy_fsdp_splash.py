@@ -154,17 +154,21 @@ def main():
   print(f"Profiling to {trace_dir}")
 
   # Run with profiling
-  with jax.profiler.start_trace(trace_dir):
-    print("Running with profiling...")
-    # Run a few steps to get a good average and trace
-    steps = 10
-    start_time = time.time()
-    for _ in range(steps):
-      out = run_forward(q, k, v, w_proj)
-      jax.block_until_ready(out)
-    end_time = time.time()
-    avg_time = (end_time - start_time) / steps * 1000
-    print(f"Average time: {avg_time:.3f} ms")
+  print("Running with profiling...")
+  jax.profiler.start_trace(trace_dir)
+  
+  # Run a few steps to get a good average and trace
+  steps = 10
+  start_time = time.time()
+  for _ in range(steps):
+    out = run_forward(q, k, v, w_proj)
+    jax.block_until_ready(out)
+  end_time = time.time()
+  
+  jax.profiler.stop_trace()
+  
+  avg_time = (end_time - start_time) / steps * 1000
+  print(f"Average time: {avg_time:.3f} ms")
 
   print(f"Output shape: {out.shape}")
   print(f"Output sharding: {out.sharding}")
