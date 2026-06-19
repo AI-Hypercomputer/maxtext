@@ -7,6 +7,7 @@ import jax.experimental.pallas as pl
 import functools
 import time
 import numpy as np
+import sys
 
 # Import Tokamax Splash Attention
 try:
@@ -26,6 +27,14 @@ except ImportError as e:
     CausalMask = None
 
 def main():
+  cost_mult = 1.0
+  if len(sys.argv) > 1:
+    try:
+      cost_mult = float(sys.argv[1])
+      print(f"Using cost multiplier: {cost_mult}")
+    except ValueError:
+      print(f"Invalid cost multiplier '{sys.argv[1]}', using 1.0")
+
   # Initialize JAX distributed
   try:
     jax.distributed.initialize()
@@ -70,9 +79,9 @@ def main():
   # Local FLOPs per device: 2 * B_local * H * S^2 * D = 2 * 2 * 16 * 2048^2 * 128 = 68.7 GFLOPs
   # Local Bytes accessed: (3 * B_local * H * S * D + 1 * B_local * H * S * D) * 2 bytes = 67 MB
   cost_est = pl.CostEstimate(
-      flops=68_000_000_000,
+      flops=int(68_000_000_000 * cost_mult),
       transcendentals=0,
-      bytes_accessed=67_000_000,
+      bytes_accessed=int(67_000_000 * cost_mult),
   )
 
   # Setup Splash Attention Config
