@@ -34,6 +34,8 @@ from maxtext.utils import exceptions
 from maxtext.utils import max_logging
 from maxtext.utils import gcs_utils
 from maxtext.utils import elastic_utils
+from maxtext.checkpoint_conversion.utils.load_dynamic import load_safetensors_dynamic_state
+
 import numpy as np
 import orbax.checkpoint as ocp
 from orbax.checkpoint import v1 as ocp_v1
@@ -773,6 +775,7 @@ def load_state_if_possible(
     checkpoint_conversion_fn=None,
     source_checkpoint_layout="orbax",
     expansion_factor_real_data: int = -1,
+    maxtext_config: Any | None = None,
 ):
   """Loads TrainState as possible from the inputs.
 
@@ -838,9 +841,7 @@ def load_state_if_possible(
           (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager),
       ):
         checkpoint_path = str(checkpoint_manager.directory / str(step) / "items")
-        with handle_checkpoint_mismatch(
-            "restore NNX checkpoint", checkpoint_path
-        ):
+        with handle_checkpoint_mismatch("restore NNX checkpoint", checkpoint_path):
           restored_nnx = _load_linen_checkpoint_into_nnx(
               checkpoint_path,
               abstract_unboxed_pre_state,
@@ -876,9 +877,7 @@ def load_state_if_possible(
                   EmergencyReplicatorCheckpointManager,
               ),
           ):
-            restored = checkpoint_manager.restore(
-                step, args=Composite(state=checkpoint_args)
-            ).state
+            restored = checkpoint_manager.restore(step, args=Composite(state=checkpoint_args)).state
             _assert_no_shaped_dtype_struct(restored)
             return (
                 restored,
@@ -906,21 +905,22 @@ def load_state_if_possible(
           # Case 3: Default/Fallback case.
           # This case acts as a wildcard ('_') and matches if none of the preceding cases were met.
           case _:
-            restored = checkpoint_manager.restore(
-                step, args=Composite(items=checkpoint_args)
-            )
+            restored = checkpoint_manager.restore(step, args=Composite(items=checkpoint_args))
             _assert_no_shaped_dtype_struct(restored)
             return (restored, None)
 
-  if load_parameters_from_path != "":
+  if source_checkpoint_layout == "safetensors_dynamic":
+    path = load_parameters_from_path or load_full_state_from_path
+    max_logging.log(f"Dynamic On-the-Fly Formatting: Loading SafeTensors from {path}")
+
+    return load_safetensors_dynamic_state(path, abstract_unboxed_pre_state, maxtext_config)
+  elif load_parameters_from_path != "":
     if isinstance(abstract_unboxed_pre_state, nnx.State):
       _, params, _ = nnx.split(abstract_unboxed_pre_state.model, nnx.Param, ...)
     else:
       params = abstract_unboxed_pre_state.params
 
-    with handle_checkpoint_mismatch(
-        "load parameters", load_parameters_from_path
-    ):
+    with handle_checkpoint_mismatch("load parameters", load_parameters_from_path):
       restored_params = load_params_from_path(
           load_parameters_from_path,
           params,
@@ -932,9 +932,7 @@ def load_state_if_possible(
     return None, restored_params
   elif load_full_state_from_path != "":
     max_logging.log(f"Loading full state from path: {load_full_state_from_path}")
-    with handle_checkpoint_mismatch(
-        "load full state", load_full_state_from_path
-    ):
+    with handle_checkpoint_mismatch("load full state", load_full_state_from_path):
       restored_state = _load_full_state_from_path(
           path=load_full_state_from_path,
           abstract_unboxed_pre_state=abstract_unboxed_pre_state,
@@ -972,13 +970,18 @@ def setup_checkpoint_logger(config) -> Any | None:  # pytype: disable=attribute-
 
 
 def load_params_from_path(
-    load_parameters_from_path, abstract_unboxed_params, checkpoint_storage_concurrent_gb, use_ocdbt=True, use_zarr3=True
+    load_parameters_from_path,
+    abstract_unboxed_params,
+    checkpoint_storage_concurrent_gb,
+    use_ocdbt=True,
+    use_zarr3=True,
 ):
   """Load decode params from checkpoint at specified path."""
   assert load_parameters_from_path, "load_parameters_from_path is not defined."
   max_logging.log(f"restoring params from {load_parameters_from_path}")
 
-  # NNX target: the on-disk checkpoint is in Linen layout; reshape it into the NNX params state.
+  # NNX target: the on-disk checkpoint is in Linen layout; reshape it into the
+  # NNX params state.
   if isinstance(abstract_unboxed_params, nnx.State):
     return _load_linen_params_into_nnx(
         load_parameters_from_path,
