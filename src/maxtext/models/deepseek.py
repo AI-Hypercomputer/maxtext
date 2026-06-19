@@ -840,12 +840,18 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       # Re-tracing the bridged layer methods happens OUTSIDE the linen forward, so detach the
       # linen module stack to avoid the qwix-fixup None.path crash (see helper docstring).
       with _detached_linen_module_stack():
-        # 1) recompute attention forward + build its VJP (the splash-fwd remat; weight-independent)
+        # 1) HOIST the weight re-gather to the attention INPUT (emit it BEFORE the attention recompute),
+        # mirroring the forward's structural hoist that overlaps the gather with the QKV matmuls. The
+        # re-gather depends only on p (independent of attention), so emitting it first lets its async
+        # all-gather float over the recomputed QKV matmuls instead of being launched after them (where
+        # its only same-layer cover is the splash kernel, which does NOT hide collectives -> ~3.8ms
+        # exposed past the splash). Structural placement, NOT a scheduling-group annotation (those are
+        # vestigial here). bwd of the gather = tiled psum_scatter -> sharded weight grads.
+        weights, vjp_gather = jax.vjp(lambda pp: _gather(pp, rest_), p)
+        # 2) recompute attention forward + build its VJP (the splash-fwd remat; weight-independent)
         (hidden_states, intermediate_inputs), vjp_attn = jax.vjp(
             lambda pp, xx: _attn(pp, xx, seg, pos, rest_), p, x_in
         )
-        # 2) OUR placed annotated weight re-gather + its VJP (bwd = tiled psum_scatter -> sharded grads)
-        weights, vjp_gather = jax.vjp(lambda pp: _gather(pp, rest_), p)
         # 3) recompute MoE forward (routing bits recomputed in-scope, no nnx Rngs) + build its VJP
         _out, vjp_moe = jax.vjp(
             lambda pp, hh, ii, ww: _moe(pp, hh, ii, ww, rest_), p, hidden_states, intermediate_inputs, weights
