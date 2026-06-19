@@ -241,17 +241,23 @@ def setup_train_loop(config, recorder, devices=None):
     data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
     rampup_manager = create_rampup_manager(config, checkpoint_manager)
     # Validate context parallelism with packing configuration
+    context_parallel_strategy = config.context_parallel_strategy.lower()
     if config.context_parallel_size > 1 and config.packing:
       if config.dataset_type == "synthetic":
         raise ValueError(
             "Context parallelism with sequence packing is not supported with synthetic data. "
             "Please disable sequence packing (set packing=False)."
         )
-      if config.context_parallel_strategy != "ring":
+      if context_parallel_strategy not in ("all_gather", "ring"):
         raise ValueError(
-            "Context parallelism with 'all_gather' strategy cannot be used with sequence packing. "
-            "Please use 'ring' strategy instead."
+            "Context parallelism with sequence packing supports context_parallel_strategy='all_gather' or 'ring'."
         )
+      if (
+          config.hardware in ("gpu", "gpu_multiprocess")
+          and config.attention == "cudnn_flash_te"
+          and not (context_parallel_strategy == "ring" and config.context_parallel_load_balance)
+      ):
+        raise ValueError("Packing is only supported for load balanced ring attention with context parallelism for GPU.")
 
     # Apply reordering wrapper to data iterators if context parallelism is enabled
     with jax.set_mesh(mesh):
@@ -259,7 +265,11 @@ def setup_train_loop(config, recorder, devices=None):
 
         # Determine load balancing reorder strategy based on whether packing is enabled
         if config.context_parallel_reorder_strategy == ReorderStrategy.AUTO:
-          reorder_strategy = ReorderStrategy.STRIPED if config.packing else ReorderStrategy.DUAL_CHUNK_SWAP
+          reorder_strategy = (
+              ReorderStrategy.STRIPED
+              if config.packing and context_parallel_strategy == "ring"
+              else ReorderStrategy.DUAL_CHUNK_SWAP
+          )
         else:
           reorder_strategy = config.context_parallel_reorder_strategy
 
