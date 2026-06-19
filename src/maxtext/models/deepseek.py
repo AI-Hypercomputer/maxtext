@@ -711,45 +711,53 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
     """
     graphdef, params, rest = nnx.split(self, nnx.Param, ...)
     det = deterministic  # static python bool
+    seg0, pos0 = decoder_segment_ids, decoder_positions
 
-    def _gather(p):
-      m = nnx.merge(graphdef, p, rest)
+    # `rest` (non-Param nnx state, e.g. RNG keys) holds forward-trace tracers, so it must be
+    # THREADED through residuals -- never closed over in the bwd -- or it leaks across the
+    # nn.scan boundary ("No constant handler for DynamicJaxprTracer"). graphdef/det are static.
+    def _gather(p, rest_):
+      m = nnx.merge(graphdef, p, rest_)
       return m.DeepSeekMoeBlock_0.gather_routed_weights()  # (w0, w1, wo); annotated custom_vjp gather
 
-    def _attn(p, x_in, seg, pos):
-      m = nnx.merge(graphdef, p, rest)
+    def _attn(p, x_in, seg, pos, rest_):
+      m = nnx.merge(graphdef, p, rest_)
       return m.self_attention_with_norm_op(x_in, seg, pos, det)  # (hidden_states, intermediate_inputs)
 
-    def _moe(p, hidden_states, intermediate_inputs, weights):
-      m = nnx.merge(graphdef, p, rest)
+    def _moe(p, hidden_states, intermediate_inputs, weights, rest_):
+      m = nnx.merge(graphdef, p, rest_)
       mlp_lnx, load_balance_loss, moe_bias_updates = m.mlp_op(hidden_states, det, pregathered_weights=weights)
       layer_output = m.dropout_op(mlp_lnx + intermediate_inputs, deterministic=det)
       return layer_output, load_balance_loss, moe_bias_updates
 
     @jax.custom_vjp
     def fused(p, x_in):
-      weights = _gather(p)  # gather FIRST (program-order before attention) -> forward overlap
-      hidden_states, intermediate_inputs = _attn(p, x_in, decoder_segment_ids, decoder_positions)
-      return _moe(p, hidden_states, intermediate_inputs, weights)
+      weights = _gather(p, rest)  # gather FIRST (program-order before attention) -> forward overlap
+      hidden_states, intermediate_inputs = _attn(p, x_in, seg0, pos0, rest)
+      return _moe(p, hidden_states, intermediate_inputs, weights, rest)
 
     def fused_fwd(p, x_in):
-      weights = _gather(p)
-      hidden_states, intermediate_inputs = _attn(p, x_in, decoder_segment_ids, decoder_positions)
-      out = _moe(p, hidden_states, intermediate_inputs, weights)
-      # Residuals: sharded params + decoder_layer_input + (seg, pos). NO gathered weights / activations.
-      return out, (p, x_in, decoder_segment_ids, decoder_positions)
+      weights = _gather(p, rest)
+      hidden_states, intermediate_inputs = _attn(p, x_in, seg0, pos0, rest)
+      out = _moe(p, hidden_states, intermediate_inputs, weights, rest)
+      # Residuals: sharded params + decoder_layer_input + (seg, pos, rest). NO gathered weights / activations.
+      return out, (p, x_in, seg0, pos0, rest)
 
     def fused_bwd(res, cotangents):
-      p, x_in, seg, pos = res
+      p, x_in, seg, pos, rest_ = res
       # Re-tracing the bridged layer methods happens OUTSIDE the linen forward, so detach the
       # linen module stack to avoid the qwix-fixup None.path crash (see helper docstring).
       with _detached_linen_module_stack():
         # 1) recompute attention forward + build its VJP (the splash-fwd remat; weight-independent)
-        (hidden_states, intermediate_inputs), vjp_attn = jax.vjp(lambda pp, xx: _attn(pp, xx, seg, pos), p, x_in)
+        (hidden_states, intermediate_inputs), vjp_attn = jax.vjp(
+            lambda pp, xx: _attn(pp, xx, seg, pos, rest_), p, x_in
+        )
         # 2) OUR placed annotated weight re-gather + its VJP (bwd = tiled psum_scatter -> sharded grads)
-        weights, vjp_gather = jax.vjp(_gather, p)
+        weights, vjp_gather = jax.vjp(lambda pp: _gather(pp, rest_), p)
         # 3) recompute MoE forward + build its VJP
-        _out, vjp_moe = jax.vjp(_moe, p, hidden_states, intermediate_inputs, weights)
+        _out, vjp_moe = jax.vjp(
+            lambda pp, hh, ii, ww: _moe(pp, hh, ii, ww, rest_), p, hidden_states, intermediate_inputs, weights
+        )
         dp_moe, d_hidden, d_inter, d_weights = vjp_moe(cotangents)
         (dp_gather,) = vjp_gather(d_weights)
         dp_attn, dx = vjp_attn((d_hidden, d_inter))
