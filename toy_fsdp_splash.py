@@ -50,7 +50,8 @@ def main():
   mesh = Mesh(devices, ('fsdp',))
 
   # Shapes
-  B = 16
+  B = 2 * num_devices
+  print(f"Using dynamic batch size B = {B} (B_local = 2)")
   H = 16
   S = 2048
   D = 128
@@ -68,12 +69,19 @@ def main():
   k1, k2, k3, k4, k5 = jax.random.split(key, 5)
 
   print("Initializing arrays...")
-  q = jax.device_put(jax.random.normal(k1, (B, H, S, D), dtype=jnp.bfloat16), act_sharding)
-  k = jax.device_put(jax.random.normal(k2, (B, H, S, D), dtype=jnp.bfloat16), act_sharding)
-  v = jax.device_put(jax.random.normal(k3, (B, H, S, D), dtype=jnp.bfloat16), act_sharding)
   
-  # W_proj: [H_in, H_out] sharded along H_in
-  w_proj = jax.device_put(jax.random.normal(k4, (H_in, H_out), dtype=jnp.bfloat16), w_sharding)
+  @functools.partial(jax.jit, out_shardings=act_sharding)
+  def generate_act(key):
+    return jax.random.normal(key, (B, H, S, D), dtype=jnp.bfloat16)
+
+  @functools.partial(jax.jit, out_shardings=w_sharding)
+  def generate_weight(key):
+    return jax.random.normal(key, (H_in, H_out), dtype=jnp.bfloat16)
+
+  q = generate_act(k1)
+  k = generate_act(k2)
+  v = generate_act(k3)
+  w_proj = generate_weight(k4)
 
   # Define Cost Estimate for Splash Attention
   # Local FLOPs per device: 2 * B_local * H * S^2 * D = 2 * 2 * 16 * 2048^2 * 128 = 68.7 GFLOPs
