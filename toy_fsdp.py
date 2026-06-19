@@ -21,13 +21,13 @@ def main():
   # Create 1D mesh for FSDP
   mesh = Mesh(devices, ('fsdp',))
 
-  # Shapes
-  B = 32 * 1024  # Increased batch size
-  H1 = 1024
-  H2 = 2048
-  H3 = 4096
-  H4 = 8192
-  H5 = 16384
+  # Shapes (roughly 8k, incremented by 256)
+  B = 32 * 1024
+  H1 = 8192
+  H2 = 8192 + 256       # 8448
+  H3 = 8192 + 2 * 256   # 8704
+  H4 = 8192 + 3 * 256   # 8960
+  H5 = 8192 + 4 * 256   # 9216
 
   # Shardings
   x_sharding = NamedSharding(mesh, P('fsdp', None))
@@ -47,7 +47,18 @@ def main():
   w3 = jax.device_put(jax.random.normal(k4, (H3, H4), dtype=jnp.bfloat16), w3_sharding)
   w4 = jax.device_put(jax.random.normal(k5, (H4, H5), dtype=jnp.bfloat16), w4_sharding)
 
-  # Define the computation using shard_map
+  # Helper function for overlapped compute and gather
+  def compute_and_gather(y_current, w_current_gathered, w_next_local):
+    # Compute current layer: depends on y_current and w_current_gathered
+    y_next = jnp.matmul(y_current, w_current_gathered)
+    
+    # Gather next layer's weight: depends ONLY on w_next_local
+    w_next_gathered = jax.lax.all_gather(w_next_local, axis_name='fsdp', axis=0)
+    w_next_gathered = w_next_gathered.reshape(-1, w_next_gathered.shape[-1])
+    
+    return y_next, w_next_gathered
+
+  # Define the computation using shard_map with overlap
   @functools.partial(
       shard_map,
       mesh=mesh,
@@ -55,24 +66,20 @@ def main():
       out_specs=P('fsdp', None),
   )
   def forward_shard_map(x_local, w1_local, w2_local, w3_local, w4_local):
-    # Layer 1: All-gather W1, then matmul
+    # 1. Start: Gather W1 (no prior compute)
     w1_gathered = jax.lax.all_gather(w1_local, axis_name='fsdp', axis=0)
     w1_gathered = w1_gathered.reshape(-1, w1_gathered.shape[-1])
-    y1_local = jnp.matmul(x_local, w1_gathered)
 
-    # Layer 2: All-gather W2, then matmul
-    w2_gathered = jax.lax.all_gather(w2_local, axis_name='fsdp', axis=0)
-    w2_gathered = w2_gathered.reshape(-1, w2_gathered.shape[-1])
-    y2_local = jnp.matmul(y1_local, w2_gathered)
+    # 2. Step 1: Compute Layer 1 AND Gather W2
+    y1_local, w2_gathered = compute_and_gather(x_local, w1_gathered, w2_local)
 
-    # Layer 3: All-gather W3, then matmul
-    w3_gathered = jax.lax.all_gather(w3_local, axis_name='fsdp', axis=0)
-    w3_gathered = w3_gathered.reshape(-1, w3_gathered.shape[-1])
-    y3_local = jnp.matmul(y2_local, w3_gathered)
+    # 3. Step 2: Compute Layer 2 AND Gather W3
+    y2_local, w3_gathered = compute_and_gather(y1_local, w2_gathered, w3_local)
 
-    # Layer 4: All-gather W4, then matmul
-    w4_gathered = jax.lax.all_gather(w4_local, axis_name='fsdp', axis=0)
-    w4_gathered = w4_gathered.reshape(-1, w4_gathered.shape[-1])
+    # 4. Step 3: Compute Layer 3 AND Gather W4
+    y3_local, w4_gathered = compute_and_gather(y2_local, w3_gathered, w4_local)
+
+    # 5. End: Compute Layer 4 (no more gathers)
     y4_local = jnp.matmul(y3_local, w4_gathered)
 
     return y4_local
