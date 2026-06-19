@@ -107,7 +107,7 @@ def main():
     attn_fn = jax.vmap(lambda q, k, v: splash_kernel(q, k, v), in_axes=(0, 0, 0))
 
     # Use scheduling group to force overlap of Splash Attention and All-Gather
-    with xla_metadata.set_xla_metadata(_scheduling_group_id="overlap_group"):
+    with xla_metadata.set_xla_metadata(_scheduling_group_id=1234):
       # Gather W_proj
       w_proj_gathered = jax.lax.all_gather(w_proj_local, axis_name='fsdp', axis=0)
       w_proj_gathered = w_proj_gathered.reshape(-1, w_proj_gathered.shape[-1])
