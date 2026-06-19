@@ -885,6 +885,7 @@ class Attention(nnx.Module):
             cast_as_fprop_dtype=True,
             fprop_dtype=self.dtype,
             shard_mode=self.config.shard_mode,
+            rope_attention_scaling=self.config.rope_attention_scaling_factor,
             rngs=self.rngs,
         )
     else:
@@ -905,9 +906,11 @@ class Attention(nnx.Module):
           embedding_dims=rope_embedding_dims,
           fprop_dtype=self.dtype,
           rope_linear_scaling_factor=rope_linear_scaling_factor,
+          rope_attention_scaling=self.config.rope_attention_scaling_factor,
           shard_mode=self.config.shard_mode,
           rngs=self.rngs,
       )
+
     return rotary_embedding
 
   def apply_rotary_embedding(

@@ -647,6 +647,37 @@ llama31_8b_config = transformers.LlamaConfig(
     use_cache=True,
 )
 
+phi4_config = transformers.Phi3Config(
+    vocab_size=200064,
+    hidden_size=3072,
+    intermediate_size=8192,
+    num_hidden_layers=32,
+    num_attention_heads=24,
+    num_key_value_heads=8,
+    max_position_embeddings=131072,
+    original_max_position_embeddings=4096,
+    rms_norm_eps=1e-5,
+    hidden_act="silu",
+    tie_word_embeddings=True,
+    rope_parameters={
+        "rope_type": "longrope",
+        "rope_theta": 10000.0,
+        "partial_rotary_factor": 0.75,
+        "original_max_position_embeddings": 4096,
+        "short_factor": [1.0]*48,
+        "long_factor": [
+            1, 1.118320672, 1.250641126, 1.398617824, 1.564103225, 1.74916897, 1.956131817,
+            2.187582649, 2.446418898, 2.735880826, 3.059592084, 3.421605075, 3.826451687,
+            4.279200023, 4.785517845, 5.351743533, 5.984965424, 6.693110555, 7.485043894,
+            8.370679318, 9.36110372, 10.4687158, 11.70738129, 13.09260651, 14.64173252,
+            16.37415215, 18.31155283, 20.47818807, 22.90118105, 25.61086418, 28.64115884,
+            32.03, 32.1, 32.13, 32.23, 32.6, 32.61, 32.64, 32.66, 32.7, 32.71, 32.93,
+            32.97, 33.28, 33.49, 33.5, 44.16, 47.77
+        ]
+    }
+)
+
+
 llama31_70b_config = transformers.LlamaConfig(
     vocab_size=128256,
     hidden_size=8192,
@@ -1614,6 +1645,8 @@ HF_MODEL_CONFIGS = {
     "qwen3-32b": qwen3_32b_config,
     "llama3.1-8b": llama31_8b_config,
     "llama3.1-8b-Instruct": llama31_8b_config,
+    "phi4": phi4_config,
+
     "llama3.1-70b": llama31_70b_config,
     "llama3.1-405b": llama31_405b_config,
     "qwen3-30b-a3b": qwen3_30b_a3b_thinking_2507_config,

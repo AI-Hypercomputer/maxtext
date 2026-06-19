@@ -3576,6 +3576,189 @@ def OLMO3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False)
   return mapping
 
 
+def PHI4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
+  """Generates parameter mapping from MaxText to Hugging Face for Phi4."""
+  n_layers = config["num_hidden_layers"]
+
+  # Base mappings (Embeddings, norms, head)
+  mapping = {
+      "params-token_embedder-embedding": "model.embed_tokens.weight",
+      "params-decoder-decoder_norm-scale": "model.norm.weight",
+      "params-decoder-logits_dense-kernel": "lm_head.weight",
+  }
+
+  if scan_layers:
+    mapping["params-decoder-layers-pre_self_attention_layer_norm-scale"] = [
+        f"model.layers.{i}.input_layernorm.weight" for i in range(n_layers)
+    ]
+    mapping["params-decoder-layers-post_self_attention_layer_norm-scale"] = [
+        f"model.layers.{i}.post_attention_layernorm.weight" for i in range(n_layers)
+    ]
+    mapping["params-decoder-layers-self_attention-out-kernel"] = [
+        f"model.layers.{i}.self_attn.o_proj.weight" for i in range(n_layers)
+    ]
+    mapping["params-decoder-layers-mlp-wo-kernel"] = [
+        f"model.layers.{i}.mlp.down_proj.weight" for i in range(n_layers)
+    ]
+    mapping[(
+        "params-decoder-layers-mlp-wi_0-kernel",
+        "params-decoder-layers-mlp-wi_1-kernel"
+    )] = [
+        f"model.layers.{i}.mlp.gate_up_proj.weight" for i in range(n_layers)
+    ]
+    # Map Q, K, V separately!
+    mapping["params-decoder-layers-self_attention-query-kernel"] = [
+        f"model.layers.{i}.self_attn.qkv_proj.weight" for i in range(n_layers)
+    ]
+    mapping["params-decoder-layers-self_attention-key-kernel"] = [
+        f"model.layers.{i}.self_attn.qkv_proj.weight" for i in range(n_layers)
+    ]
+    mapping["params-decoder-layers-self_attention-value-kernel"] = [
+        f"model.layers.{i}.self_attn.qkv_proj.weight" for i in range(n_layers)
+    ]
+  else:
+    for i in range(n_layers):
+      prefix = f"params-decoder-layers_{i}"
+      hf_prefix = f"model.layers.{i}"
+
+      # Standard norms
+      mapping[f"{prefix}-pre_self_attention_layer_norm-scale"] = f"{hf_prefix}.input_layernorm.weight"
+      mapping[f"{prefix}-post_self_attention_layer_norm-scale"] = f"{hf_prefix}.post_attention_layernorm.weight"
+
+      # Output projections
+      mapping[f"{prefix}-self_attention-out-kernel"] = f"{hf_prefix}.self_attn.o_proj.weight"
+      mapping[f"{prefix}-mlp-wo-kernel"] = f"{hf_prefix}.mlp.down_proj.weight"
+
+      # Fused projections (MaxText separate <-> HF fused)
+      # 1. MLP (gate_up_proj)
+      mapping[(f"{prefix}-mlp-wi_0-kernel", f"{prefix}-mlp-wi_1-kernel")] = f"{hf_prefix}.mlp.gate_up_proj.weight"
+
+      # 2. Attention (qkv_proj) - Map Q, K, V separately!
+      mapping[f"{prefix}-self_attention-query-kernel"] = f"{hf_prefix}.self_attn.qkv_proj.weight"
+      mapping[f"{prefix}-self_attention-key-kernel"] = f"{hf_prefix}.self_attn.qkv_proj.weight"
+      mapping[f"{prefix}-self_attention-value-kernel"] = f"{hf_prefix}.self_attn.qkv_proj.weight"
+
+  return mapping
+
+
+def PHI4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Creates parameter transformation functions for Phi4."""
+  hidden_size = config["hidden_size"]
+  intermediate_size = config["intermediate_size"]
+  head_dim = config.get("head_dim", config["hidden_size"] // config["num_attention_heads"])
+  num_attention_heads = config["num_attention_heads"]
+  num_key_value_heads = config["num_key_value_heads"]
+
+  # Standard Transpose for Kernels (HF: [Out, In] <-> MaxText: [In, Out])
+  def reshape_kernel(input_tensor, target_shape):
+    if saving_to_hf:
+      flipped_target_shape = np.flip(np.array(target_shape))
+      return input_tensor.reshape(flipped_target_shape).T
+    else:
+      return input_tensor.T.reshape(target_shape)
+
+  def scale_rmsnorm_layer(input_tensor, target_shape):
+    return input_tensor.reshape(target_shape)
+
+  # 1. Attention hooks
+  def process_q(input_tensor, target_shape=None):
+    query_pos = num_attention_heads * head_dim
+    q_weight = input_tensor[:query_pos, :]
+    q_weight = q_weight.T.reshape(hidden_size, num_attention_heads, head_dim) / np.sqrt(head_dim)
+    return q_weight
+
+  def process_k(input_tensor, target_shape=None):
+    query_pos = num_attention_heads * head_dim
+    kv_states_dim = num_key_value_heads * head_dim
+    k_weight = input_tensor[query_pos:query_pos + kv_states_dim, :]
+    k_weight = k_weight.T.reshape(hidden_size, num_key_value_heads, head_dim)
+    return k_weight
+
+  def process_v(input_tensor, target_shape=None):
+    query_pos = num_attention_heads * head_dim
+    kv_states_dim = num_key_value_heads * head_dim
+    v_weight = input_tensor[query_pos + kv_states_dim:, :]
+    v_weight = v_weight.T.reshape(hidden_size, num_key_value_heads, head_dim)
+    return v_weight
+
+  def process_qkv(input_tensor, target_shape=None):
+    # MaxText -> HF: Fuse Q, K, V
+    query, key, value = input_tensor
+    query_unscaled = query * np.sqrt(head_dim)
+    qkv = np.concatenate([query_unscaled, key, value], axis=-1)
+    return qkv.swapaxes(-1, -2)
+
+  # 2. MLP gate_up_proj Projection Hook
+  def process_gate_up(input_tensor, target_shape=None):
+    if saving_to_hf:
+      # MaxText -> HF: Fuse wi_0, wi_1
+      wi_0, wi_1 = input_tensor
+      gate_up = np.concatenate([wi_0, wi_1], axis=-1)
+      return gate_up.swapaxes(-1, -2)
+    else:
+      # HF -> MaxText: Split gate_up_proj
+      gate, up = np.split(input_tensor, 2, axis=-2)
+      gate = gate.swapaxes(-1, -2)
+      up = up.swapaxes(-1, -2)
+      return np.stack([gate, up], axis=-1)
+
+  hooks = {}
+  n_layers = config["num_hidden_layers"]
+
+  # Embeddings and final norms
+  hooks["params-token_embedder-embedding"] = scale_rmsnorm_layer
+  hooks["params-decoder-decoder_norm-scale"] = scale_rmsnorm_layer
+  hooks["params-decoder-logits_dense-kernel"] = reshape_kernel
+
+  if scan_layers:
+    hooks["params-decoder-layers-pre_self_attention_layer_norm-scale"] = scale_rmsnorm_layer
+    hooks["params-decoder-layers-post_self_attention_layer_norm-scale"] = scale_rmsnorm_layer
+    hooks["params-decoder-layers-self_attention-out-kernel"] = reshape_kernel
+    hooks["params-decoder-layers-mlp-wo-kernel"] = reshape_kernel
+    hooks[(
+        "params-decoder-layers-mlp-wi_0-kernel",
+        "params-decoder-layers-mlp-wi_1-kernel"
+    )] = process_gate_up
+
+    if saving_to_hf:
+      hooks[(
+          "params-decoder-layers-self_attention-query-kernel",
+          "params-decoder-layers-self_attention-key-kernel",
+          "params-decoder-layers-self_attention-value-kernel"
+      )] = process_qkv
+    else:
+      hooks["params-decoder-layers-self_attention-query-kernel"] = process_q
+      hooks["params-decoder-layers-self_attention-key-kernel"] = process_k
+      hooks["params-decoder-layers-self_attention-value-kernel"] = process_v
+  else:
+    for i in range(n_layers):
+      prefix = f"params-decoder-layers_{i}"
+
+      # Layer norms
+      hooks[f"{prefix}-pre_self_attention_layer_norm-scale"] = scale_rmsnorm_layer
+      hooks[f"{prefix}-post_self_attention_layer_norm-scale"] = scale_rmsnorm_layer
+
+      # Output projections
+      hooks[f"{prefix}-self_attention-out-kernel"] = reshape_kernel
+      hooks[f"{prefix}-mlp-wo-kernel"] = reshape_kernel
+
+      # Fused projections hooks
+      hooks[(f"{prefix}-mlp-wi_0-kernel", f"{prefix}-mlp-wi_1-kernel")] = process_gate_up
+
+      if saving_to_hf:
+        hooks[(
+            f"{prefix}-self_attention-query-kernel",
+            f"{prefix}-self_attention-key-kernel",
+            f"{prefix}-self_attention-value-kernel"
+        )] = process_qkv
+      else:
+        hooks[f"{prefix}-self_attention-query-kernel"] = process_q
+        hooks[f"{prefix}-self_attention-key-kernel"] = process_k
+        hooks[f"{prefix}-self_attention-value-kernel"] = process_v
+
+  return hooks
+
+
 def OLMO3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
   """Creates parameter transformation functions for Olmo3."""
 
@@ -3691,6 +3874,7 @@ PARAM_MAPPING = {
     "qwen3-32b": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
     "llama3.1-8b": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
     "llama3.1-8b-Instruct": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "phi4": PHI4_MAXTEXT_TO_HF_PARAM_MAPPING,
     "llama3.1-70b": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
     "llama3.1-405b": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-30b-a3b": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -3741,6 +3925,7 @@ HOOK_FNS = {
     "qwen3-32b": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "llama3.1-8b": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "llama3.1-8b-Instruct": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "phi4": PHI4_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "llama3.1-70b": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "llama3.1-405b": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-30b-a3b": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,

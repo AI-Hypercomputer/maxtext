@@ -55,6 +55,8 @@ from maxtext.models import (
     mistral,
     mixtral,
     olmo3,
+    phi4,
+
     qwen2,
     qwen3,
     qwen3_custom,
@@ -503,6 +505,9 @@ class Decoder(nn.Module):
         return [llama4.Llama4ScannableBlockToLinen] if self.config.scan_layers else [llama4.Llama4DecoderLayerToLinen]
       case DecoderBlockType.OLMO3:
         return [olmo3.Olmo3ScannableBlockToLinen] if self.config.scan_layers else [olmo3.Olmo3DecoderLayerToLinen]
+      case DecoderBlockType.PHI4:
+        return [phi4.Phi4DecoderLayerToLinen]
+
 
       case _:
         # Default case to handle any unknown decoder block types.
@@ -646,7 +651,9 @@ class Decoder(nn.Module):
         DecoderBlockType.SIMPLE_MLP,
         DecoderBlockType.LLAMA4,
         DecoderBlockType.OLMO3,
+        DecoderBlockType.PHI4,
     ):
+
       return functools.partial(rms_norm, num_features=num_features, shard_mode=self.config.shard_mode)
     elif self.config.decoder_block == DecoderBlockType.GPT3:
       return functools.partial(gpt3.gpt3_layer_norm, num_features=num_features, reductions_in_fp32=False, use_bias=True)
