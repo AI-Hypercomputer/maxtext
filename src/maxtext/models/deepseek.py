@@ -791,16 +791,28 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       layer_output = m.dropout_op(mlp_lnx + intermediate_inputs, deterministic=det)
       return layer_output, load_balance_loss, moe_bias_updates
 
+    def _forward_once(p, x_in, rest_):
+      # SINGLE merged module for the whole forward (gather + attention + MoE), like the autodiff
+      # best-run structure: the gather and attention read the SAME module so XLA keeps hiding the
+      # weight all-gather behind the QKV/GMM compute. (The backward still takes 3 separate jax.vjp
+      # pieces for the manual cotangent routing -- merge is just structuring, so numerics are
+      # identical and the gradient is unchanged.) gather is emitted FIRST (program-order before
+      # attention) to preserve the hoist.
+      m = _merge(p, rest_)
+      weights = m.DeepSeekMoeBlock_0.gather_routed_weights()
+      hidden_states, intermediate_inputs = m.self_attention_with_norm_op(x_in, seg0, pos0, det)
+      mlp_lnx, load_balance_loss, moe_bias_updates = m.mlp_op(
+          hidden_states, det, pregathered_weights=weights, routing_key_bits=_routing_bits()
+      )
+      layer_output = m.dropout_op(mlp_lnx + intermediate_inputs, deterministic=det)
+      return layer_output, load_balance_loss, moe_bias_updates
+
     @jax.custom_vjp
     def fused(p, x_in):
-      weights = _gather(p, rest_other)  # gather FIRST (program-order before attention) -> fwd overlap
-      hidden_states, intermediate_inputs = _attn(p, x_in, seg0, pos0, rest_other)
-      return _moe(p, hidden_states, intermediate_inputs, weights, rest_other)
+      return _forward_once(p, x_in, rest_other)
 
     def fused_fwd(p, x_in):
-      weights = _gather(p, rest_other)
-      hidden_states, intermediate_inputs = _attn(p, x_in, seg0, pos0, rest_other)
-      out = _moe(p, hidden_states, intermediate_inputs, weights, rest_other)
+      out = _forward_once(p, x_in, rest_other)
       # Residuals: sharded params + decoder_layer_input + (seg, pos, rest_other). seg/pos closed over
       # in the primal/fwd and read from residuals in the bwd (no tracer leak). NO gathered weights /
       # activations / routing-bits / rng saved (a body-computed value saved as a residual escapes).
