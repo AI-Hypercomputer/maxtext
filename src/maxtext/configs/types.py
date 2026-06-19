@@ -780,6 +780,16 @@ class MoEGeneral(BaseModel):
           "purely structural (hoist + no-barrier). Default False = keep the annotation."
       ),
   )
+  moe_wag_fwd_barrier: bool = Field(
+      False,
+      description=(
+          "When True (with moe_weight_ag_scheduling_group=True), apply a FORWARD-ONLY common "
+          "optimization_barrier on the three gathered weights so they must all complete before the "
+          "MoE (within the attention phase), forcing the scheduler to use the idle splash window "
+          "instead of hiding wo behind the first GMM. The custom_vjp backward is identity, so the "
+          "backward weight-grad reduce-scatter stays compact (no 1.9GB regression) and loss is exact."
+      ),
+  )
   use_random_routing: bool = Field(False, description="Whether to use random routing for debugging.")
   interleave_moe_layer_step: int = Field(1, description="Frequency of MoE layers, e.g., 2 means every 2nd layer is MoE.")
   moe_fsdp_use_two_stage_all_gather: bool = Field(

@@ -2695,6 +2695,24 @@ class RoutedMoE(nnx.Module):
     w0 = _make_cv_gather(wi_in, w0_out, 1, _WEIGHT_AG_SCHED_GROUP)(w0)
     w1 = _make_cv_gather(wi_in, w0_out, 1, _WEIGHT_AG_SCHED_GROUP + 1)(w1)
     wo = _make_cv_gather(wo_in, wo_out, 2, _WEIGHT_AG_SCHED_GROUP + 2)(wo)
+    if self.config.moe_wag_fwd_barrier:
+      # FORWARD-ONLY common barrier: force all three gathers to finish before the MoE (i.e. within
+      # the attention phase), so the scheduler must use the idle splash window instead of letting wo
+      # hide behind the first GMM. The custom_vjp's backward is IDENTITY -> the barrier never reaches
+      # the backward, so the weight-grad reduce-scatter stays compact (no 1.9GB regression). The true
+      # grad of optimization_barrier IS identity, so loss is bit-exact.
+      @jax.custom_vjp
+      def _fwd_bar(a, b, c):
+        return jax.lax.optimization_barrier((a, b, c))
+
+      def _fwd_bar_fwd(a, b, c):
+        return jax.lax.optimization_barrier((a, b, c)), None
+
+      def _fwd_bar_bwd(_res, g):
+        return g  # identity: no barrier in the backward
+
+      _fwd_bar.defvjp(_fwd_bar_fwd, _fwd_bar_bwd)
+      w0, w1, wo = _fwd_bar(w0, w1, wo)
     return (w0, w1, wo)
 
   def __call__(
