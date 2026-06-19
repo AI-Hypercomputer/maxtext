@@ -2,6 +2,8 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, PartitionSpec as P, NamedSharding
 from jax.experimental import mesh_utils
+from jax.experimental.shard_map import shard_map
+import functools
 import time
 
 def main():
@@ -20,7 +22,7 @@ def main():
   mesh = Mesh(devices, ('fsdp',))
 
   # Shapes
-  B = 8192
+  B = 32 * 1024  # Increased batch size
   H1 = 1024
   H2 = 2048
   H3 = 4096
@@ -45,18 +47,40 @@ def main():
   w3 = jax.device_put(jax.random.normal(k4, (H3, H4), dtype=jnp.bfloat16), w3_sharding)
   w4 = jax.device_put(jax.random.normal(k5, (H4, H5), dtype=jnp.bfloat16), w4_sharding)
 
-  # Define the computation
+  # Define the computation using shard_map
+  @functools.partial(
+      shard_map,
+      mesh=mesh,
+      in_specs=(P('fsdp', None), P('fsdp', None), P('fsdp', None), P('fsdp', None), P('fsdp', None)),
+      out_specs=P('fsdp', None),
+      check_vmap=False
+  )
+  def forward_shard_map(x_local, w1_local, w2_local, w3_local, w4_local):
+    # Layer 1: All-gather W1, then matmul
+    w1_gathered = jax.lax.all_gather(w1_local, axis_name='fsdp', axis=0)
+    y1_local = jnp.matmul(x_local, w1_gathered)
+
+    # Layer 2: All-gather W2, then matmul
+    w2_gathered = jax.lax.all_gather(w2_local, axis_name='fsdp', axis=0)
+    y2_local = jnp.matmul(y1_local, w2_gathered)
+
+    # Layer 3: All-gather W3, then matmul
+    w3_gathered = jax.lax.all_gather(w3_local, axis_name='fsdp', axis=0)
+    y3_local = jnp.matmul(y2_local, w3_gathered)
+
+    # Layer 4: All-gather W4, then matmul
+    w4_gathered = jax.lax.all_gather(w4_local, axis_name='fsdp', axis=0)
+    y4_local = jnp.matmul(y3_local, w4_gathered)
+
+    return y4_local
+
   @jax.jit
-  def forward(x, w1, w2, w3, w4):
-    y1 = jnp.matmul(x, w1)
-    y2 = jnp.matmul(y1, w2)
-    y3 = jnp.matmul(y2, w3)
-    y4 = jnp.matmul(y3, w4)
-    return y4
+  def run_forward(x, w1, w2, w3, w4):
+    return forward_shard_map(x, w1, w2, w3, w4)
 
   # Warmup
   print("Warming up...")
-  out = forward(x, w1, w2, w3, w4)
+  out = run_forward(x, w1, w2, w3, w4)
   jax.block_until_ready(out)
   print("Warmup done.")
 
@@ -71,7 +95,7 @@ def main():
   t0 = time.time()
   steps = 10
   for _ in range(steps):
-    out = forward(x, w1, w2, w3, w4)
+    out = run_forward(x, w1, w2, w3, w4)
   jax.block_until_ready(out)
   t1 = time.time()
   
