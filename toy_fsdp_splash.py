@@ -89,7 +89,6 @@ def main():
   else:
     splash_kernel = None
 
-  # Define the computation using shard_map with overlap
   @functools.partial(
       shard_map,
       mesh=mesh,
@@ -100,6 +99,7 @@ def main():
           P('fsdp', None),             # w_proj
       ),
       out_specs=P('fsdp', None),       # output y: sharded along batch
+      check_vma=False,
   )
   def forward_shard_map(q_local, k_local, v_local, w_proj_local):
     # 1. Start Async Gather of W_proj
