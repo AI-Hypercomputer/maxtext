@@ -20,6 +20,7 @@ import contextlib
 import functools
 from typing import Optional
 
+from flax import linen as flax_linen
 from flax import nnx
 import jax
 from jax.ad_checkpoint import checkpoint_name
@@ -50,6 +51,32 @@ import transformers
 # -----------------------------------------
 # The Decoder Layer for DeepSeek v3
 # -----------------------------------------
+
+
+@contextlib.contextmanager
+def _detached_linen_module_stack():
+  """Temporarily clear flax's linen module stack so linen↔nnx bridge wrappers take
+  their no-context passthrough branch.
+
+  The to_linen bridge installs a qwix-quantization fixup on every nnx submodule's
+  __call__ that reads ``linen.module._context.module_stack[-1].path``. The stack's
+  resting value is ``[None]`` (a sentinel base), and a valid linen module is only on
+  it while ``ToLinen.__call__`` is executing the forward. The hand-written layer
+  backward (``_handwritten_moe_layer``) re-traces the bridged layer methods OUTSIDE
+  that forward (during the custom_vjp transpose), where ``module_stack[-1]`` is the
+  ``None`` sentinel -> ``None.path`` AttributeError. Clearing the stack to ``[]`` makes
+  the fixup short-circuit to ``call_fn(...)``. This only drops qwix path tracking
+  (a no-op when qwix quantization is off, which the hand-written path requires); the
+  traced computation is identical, so numerics are unchanged.
+  """
+  ctx = flax_linen.module._context  # pylint: disable=protected-access
+  saved = list(ctx.module_stack)
+  ctx.module_stack.clear()
+  try:
+    yield
+  finally:
+    ctx.module_stack.clear()
+    ctx.module_stack.extend(saved)
 
 
 class DeepSeekGenericLayer(nnx.Module):
@@ -714,15 +741,18 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
 
     def fused_bwd(res, cotangents):
       p, x_in, seg, pos = res
-      # 1) recompute attention forward + build its VJP (the splash-fwd remat; weight-independent)
-      (hidden_states, intermediate_inputs), vjp_attn = jax.vjp(lambda pp, xx: _attn(pp, xx, seg, pos), p, x_in)
-      # 2) OUR placed annotated weight re-gather + its VJP (bwd = tiled psum_scatter -> sharded grads)
-      weights, vjp_gather = jax.vjp(_gather, p)
-      # 3) recompute MoE forward + build its VJP
-      _out, vjp_moe = jax.vjp(_moe, p, hidden_states, intermediate_inputs, weights)
-      dp_moe, d_hidden, d_inter, d_weights = vjp_moe(cotangents)
-      (dp_gather,) = vjp_gather(d_weights)
-      dp_attn, dx = vjp_attn((d_hidden, d_inter))
+      # Re-tracing the bridged layer methods happens OUTSIDE the linen forward, so detach the
+      # linen module stack to avoid the qwix-fixup None.path crash (see helper docstring).
+      with _detached_linen_module_stack():
+        # 1) recompute attention forward + build its VJP (the splash-fwd remat; weight-independent)
+        (hidden_states, intermediate_inputs), vjp_attn = jax.vjp(lambda pp, xx: _attn(pp, xx, seg, pos), p, x_in)
+        # 2) OUR placed annotated weight re-gather + its VJP (bwd = tiled psum_scatter -> sharded grads)
+        weights, vjp_gather = jax.vjp(_gather, p)
+        # 3) recompute MoE forward + build its VJP
+        _out, vjp_moe = jax.vjp(_moe, p, hidden_states, intermediate_inputs, weights)
+        dp_moe, d_hidden, d_inter, d_weights = vjp_moe(cotangents)
+        (dp_gather,) = vjp_gather(d_weights)
+        dp_attn, dx = vjp_attn((d_hidden, d_inter))
       # disjoint per-piece param cotangents (zeros elsewhere) -> sum reconstructs the full gradient
       dp = jax.tree.map(lambda a, b, c: a + b + c, dp_attn, dp_moe, dp_gather)
       return dp, dx
