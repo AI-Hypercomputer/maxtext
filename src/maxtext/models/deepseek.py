@@ -617,16 +617,18 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       engram_output = self.engram_op(x, decoder_input_tokens)
       x = x + engram_output
 
-    # Random-routing key from a model INPUT (not the stateful nnx Rngs): each MoE chunk routes with
-    # wrap_key_data(key_data(fold_in(routing_rng_key, chunk))) -- a pure-jax key. This keeps random
-    # routing's balanced, data-independent load while removing the nnx Rngs from the routing path, so
-    # the hand-written backward can recompute the routing rng-free (and the autodiff reference matches
-    # when fed the same key). None on non-deepseek/non-random paths -> falls back to rngs.params().
+    # Random-routing key from a CONSTANT seed (not the stateful nnx Rngs): each MoE chunk routes with
+    # wrap_key_data(key_data(fold_in(key(seed), chunk))) -- a pure-jax compile-time constant. This
+    # keeps random routing's balanced, data-independent load while removing the nnx Rngs from the
+    # routing path, so the hand-written backward can recompute routing rng-free AND thread the key
+    # bits through residuals without escaping nn.scan (a constant is rematerialized, not a scan-body
+    # tracer). Off -> None -> the MoE falls back to rngs.params() (unchanged behavior).
     routing_key_bits = None
-    if routing_rng_key is not None and self.config.use_random_routing and self.config.moe_routing_key_as_input:
+    if self.config.use_random_routing and self.config.moe_routing_key_as_input:
       n_route_chunks = max(1, self.config.moe_n_chunks) if self.config.use_ring_of_experts else 1
+      _base_key = jax.random.key(self.config.moe_random_routing_seed)
       routing_key_bits = jnp.stack(
-          [jax.random.key_data(jax.random.fold_in(routing_rng_key, c)) for c in range(n_route_chunks)]
+          [jax.random.key_data(jax.random.fold_in(_base_key, c)) for c in range(n_route_chunks)]
       )
 
     # Hand-written layer backward (flag: moe_handwritten_bwd): wrap gather + attention + MoE in a

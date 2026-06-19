@@ -888,10 +888,6 @@ class Decoder(nn.Module):
           layer_call_kwargs = {
               "previous_chunk": previous_chunk,
               "slot": slot,
-              # Random-routing key as a model INPUT (pure-jax key, not the nnx Rngs) so the
-              # hand-written MoE backward can recompute routing rng-free. None on non-handwritten /
-              # non-random paths -> the layer falls back to rngs.params().
-              "routing_rng_key": routing_rng_key,
           }
           dense_layer = RemattedBlockLayers[0]
           moe_layer = RemattedBlockLayers[1]
