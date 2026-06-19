@@ -212,6 +212,7 @@ class DeepSeekGenericLayer(nnx.Module):
       deterministic,
       previous_chunk=None,
       slot: None | int = None,
+      wag_cell=None,
   ):
     """Executes the attention layer."""
     # Splash attention is NOT tagged. The weight-AG scheduling group must contain ONLY
@@ -233,6 +234,7 @@ class DeepSeekGenericLayer(nnx.Module):
           out_sharding=self.out_sharding,
           previous_chunk=previous_chunk,
           slot=slot,
+          wag_cell=wag_cell,
       )
     return self.with_logical_constraint(attention_result)
 
@@ -280,6 +282,7 @@ class DeepSeekGenericLayer(nnx.Module):
       deterministic,
       previous_chunk=None,
       slot: None | int = None,
+      wag_cell=None,
   ):
     """self-attention with normalization"""
     if self.is_mhc_enabled:
@@ -305,6 +308,7 @@ class DeepSeekGenericLayer(nnx.Module):
           deterministic,
           previous_chunk,
           slot,
+          wag_cell=wag_cell,
       )
       intermediate_inputs = inputs + attention_lnx
     # Normalization
@@ -591,8 +595,15 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
     # Returns None unless the plain bf16 ring path holds, in which case the MoE falls
     # back to its in-block gather.
     pregathered_weights = None
+    wag_cell = None
     if self.config.moe_weight_ag_scheduling_group:
       pregathered_weights = self.DeepSeekMoeBlock_0.gather_routed_weights()
+      # w1-in-splash (moe_wag_splash_group): gather_weights returns a zero-arg CLOSURE in the w1 slot
+      # instead of the gathered weight. Thread it into the attention via wag_cell; tpu_flash_attention
+      # invokes it adjacent to the splash kernel (same _scheduling_group -> contiguous -> overlap) and
+      # writes the gathered w1 back into the cell, which we splice into pregathered_weights below.
+      if pregathered_weights is not None and callable(pregathered_weights[1]):
+        wag_cell = {"gather_w1": pregathered_weights[1]}
 
     # moe_wag_attn_group: tag the ENTIRE attention forward with the same _scheduling_group_id as the
     # expert weight gathers, so {gathers + attention} forms ONE contiguous scheduling region and the
@@ -612,7 +623,12 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
           deterministic,
           previous_chunk,
           slot,
+          wag_cell=wag_cell,
       )
+
+    if wag_cell is not None and "w1_gathered" in wag_cell:
+      _w0, _w1c, _wo = pregathered_weights
+      pregathered_weights = (_w0, wag_cell["w1_gathered"], _wo)
 
     if self.is_mhc_enabled:
       layer_output, metadata = self.mhc_mlp(

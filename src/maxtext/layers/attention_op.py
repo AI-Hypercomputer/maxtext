@@ -919,6 +919,7 @@ class AttentionOp(nnx.Module):
       *,
       qk_product_einsum: Callable[..., Array],
       wv_product_einsum: Callable[..., Array],
+      wag_cell=None,
   ):
     """Apply attention"""
     self.check_attention_inputs(query, key, value)
@@ -986,6 +987,7 @@ class AttentionOp(nnx.Module):
             self.attn_logits_soft_cap,
             sinks,
             record_max_logits=record_max_logits,
+            wag_cell=wag_cell,
         )
         if max_logits is not None:
           self.max_logits = nnx.Intermediate(max_logits)
@@ -1167,6 +1169,7 @@ class AttentionOp(nnx.Module):
       sinks: Array | None = None,
       indexer_mask: Array | None = None,
       record_max_logits: bool = False,
+      wag_cell=None,
   ) -> tuple[Array, Array]:
     """TPU Flash Attention."""
 
@@ -1528,6 +1531,14 @@ class AttentionOp(nnx.Module):
         xla_metadata.set_xla_metadata(_scheduling_group_id=1) if _wag_splash_group else contextlib.nullcontext()
     )
     with _splash_group_ctx:
+      if wag_cell is not None and "gather_w1" in wag_cell:
+        # w1-in-splash: gather the expert weight w1 ADJACENT to the splash kernel, inside the SAME
+        # _scheduling_group -> the gather (group 1) and the splash kernel (group 1) form a contiguous
+        # region (no ungrouped QKV between them -> no annotation gap) so the scheduler overlaps w1's
+        # FSDP all-gather with splash. The closure runs the same custom_vjp gather (fwd annotated /
+        # bwd psum_scatter) as the inline path -> numerics unchanged. Result spliced into the MoE's
+        # pregathered_weights back in deepseek.py.
+        wag_cell["w1_gathered"] = wag_cell["gather_w1"]()
       ret = wrap_flash_attention(
           query,
           key,
@@ -2092,6 +2103,7 @@ class AttentionOp(nnx.Module):
       compressed_mask: Optional[Array] = None,
       slot: Optional[int] = None,
       record_max_logits: bool = False,
+      wag_cell=None,
   ):
     if cached_values is None:
       prefill_kv_cache, ar_kv_cache = None, None
@@ -2126,6 +2138,7 @@ class AttentionOp(nnx.Module):
         record_max_logits=record_max_logits,
         qk_product_einsum=self.AqtEinsum_0,
         wv_product_einsum=self.AqtEinsum_1,
+        wag_cell=wag_cell,
     )
 
     # Return the "prefill" cache if it actually the combined prefill+ar kv cache

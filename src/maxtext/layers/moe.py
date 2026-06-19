@@ -2702,8 +2702,17 @@ class RoutedMoE(nnx.Module):
     _g1 = _WEIGHT_AG_SCHED_GROUP if self.config.moe_wag_attn_group else _WEIGHT_AG_SCHED_GROUP + 1
     _g2 = _WEIGHT_AG_SCHED_GROUP if self.config.moe_wag_attn_group else _WEIGHT_AG_SCHED_GROUP + 2
     w0 = _make_cv_gather(wi_in, w0_out, 1, _g0)(w0)
-    w1 = _make_cv_gather(wi_in, w0_out, 1, _g1)(w1)
     wo = _make_cv_gather(wo_in, wo_out, 2, _g2)(wo)
+    if self.config.moe_wag_splash_group:
+      # w1-in-splash: instead of gathering w1 here (hoisted, before attention -> exposed because the
+      # only pre-up-GMM window it can use besides pre-splash compute is splash, which XLA leaves idle),
+      # return a zero-arg CLOSURE. deepseek threads it into tpu_flash_attention and invokes it ADJACENT
+      # to the splash kernel inside the same _scheduling_group -> contiguous (no gap) -> the scheduler
+      # overlaps w1's gather with splash. custom_vjp keeps the fwd annotated / bwd psum_scatter exactly
+      # as the inline path, so numerics are unchanged.
+      w1 = lambda _w=w1: _make_cv_gather(wi_in, w0_out, 1, _WEIGHT_AG_SCHED_GROUP)(_w)
+    else:
+      w1 = _make_cv_gather(wi_in, w0_out, 1, _g1)(w1)
     if self.config.moe_wag_fwd_barrier:
       # FORWARD-ONLY common barrier: force all three gathers to finish before the MoE (i.e. within
       # the attention phase), so the scheduler must use the idle splash window instead of letting wo
