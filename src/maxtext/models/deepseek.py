@@ -764,12 +764,16 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
         )
         # 2) OUR placed annotated weight re-gather + its VJP (bwd = tiled psum_scatter -> sharded grads)
         weights, vjp_gather = jax.vjp(lambda pp: _gather(pp, rest_), p)
-        # Derive the per-chunk routing keys HERE in the bwd by reading (not consuming) the rng key
-        # from the threaded rest_ and folding it -- bit-identical to the forward's rngs.params() per
-        # chunk (== fold_in(key, count==chunk)). This stays inside the bwd (never threaded out of the
-        # forward scan), so it neither leaks nor mutates an nnx RngCount.
-        bwd_key = nnx.merge(graphdef, p, rest_).DeepSeekMoeBlock_0.MoeBlock_0.rngs.params.key[...]
-        rkey_bits = jnp.stack([jax.random.key_data(jax.random.fold_in(bwd_key, c)) for c in range(n_route_chunks)])
+        # Random routing only: derive the per-chunk routing keys HERE in the bwd by reading (not
+        # consuming) the rng key from the threaded rest_ and folding it -- bit-identical to the
+        # forward's rngs.params() per chunk (== fold_in(key, count==chunk)). Deterministic top-k
+        # routing (use_random_routing=False, the batchsplit/production path) touches no rng at all,
+        # so we read nothing -- reading the bridge key leaks across the scan even in the bwd.
+        if self.config.use_random_routing:
+          bwd_key = nnx.merge(graphdef, p, rest_).DeepSeekMoeBlock_0.MoeBlock_0.rngs.params.key[...]
+          rkey_bits = jnp.stack([jax.random.key_data(jax.random.fold_in(bwd_key, c)) for c in range(n_route_chunks)])
+        else:
+          rkey_bits = None
         # 3) recompute MoE forward (explicit routing keys -> no nnx rng mutation) + build its VJP
         _out, vjp_moe = jax.vjp(
             lambda pp, hh, ii, ww: _moe(pp, hh, ii, ww, rest_, rkey_bits), p, hidden_states, intermediate_inputs, weights
