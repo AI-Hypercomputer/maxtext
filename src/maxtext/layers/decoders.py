@@ -502,6 +502,13 @@ class Decoder(nn.Module):
     """Set remat policy"""
     RemattedBlockLayers = []
     for block_layer in block_layers:
+      if self.config.moe_handwritten_bwd and block_layer is deepseek.DeepSeekMoELayerToLinen:
+        # The MoE layer owns its backward via jax.custom_vjp (hand-written remat): it saves only
+        # decoder_layer_input + sharded params and recomputes attention/gather/MoE itself. Wrapping
+        # it in nn.remat would re-introduce the auto-remat that cycles against the gather||splash
+        # annotation. Leave it un-rematted; the Dense layer still gets the normal remat policy.
+        RemattedBlockLayers.append(block_layer)
+        continue
       if self.config.parameter_memory_host_offload:
         # Define parameter movement with mesh-based sharding
         def move_to_device(variables):

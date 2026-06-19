@@ -588,6 +588,24 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       engram_output = self.engram_op(x, decoder_input_tokens)
       x = x + engram_output
 
+    # Hand-written layer backward (flag: moe_handwritten_bwd): wrap gather + attention + MoE in a
+    # jax.custom_vjp so WE own the backward schedule (place the annotated weight re-gather adjacent
+    # to the recomputed attention forward) and there is no auto-remat to cycle against. Restricted
+    # to the plain ring path (no mhc/engram, no splash/attn over-grouping) where gather_routed_weights
+    # returns a real (w0, w1, wo) tuple. Bit-exact to the autodiff path below.
+    if (
+        self.config.moe_handwritten_bwd
+        and self.config.moe_weight_ag_scheduling_group
+        and not self.is_mhc_enabled
+        and not self.is_engram_enabled
+        and not self.config.moe_wag_splash_group
+        and not self.config.moe_wag_attn_group
+    ):
+      layer_output, load_balance_loss, moe_bias_updates = self._handwritten_moe_layer(
+          x, decoder_segment_ids, decoder_positions, deterministic
+      )
+      return self.post_process(layer_output, load_balance_loss, moe_bias_updates, kv_cache)
+
     # Pre-gather the routed MoE FSDP weights HERE, before the splash attention, so
     # the (SC-offloaded) weight all-gather is emitted in program order during the
     # attention phase where the SparseCore is idle -> the scheduler overlaps it with
@@ -647,6 +665,70 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
     layer_output = self.dropout_op(layer_output, deterministic=deterministic)
 
     return self.post_process(layer_output, load_balance_loss, moe_bias_updates, kv_cache)
+
+  def _handwritten_moe_layer(self, x, decoder_segment_ids, decoder_positions, deterministic):
+    """Layer custom_vjp with a hand-written backward (flag: moe_handwritten_bwd).
+
+    Wraps gather + attention + MoE so WE own the backward schedule. The forward runs the existing
+    forward (gather emitted in program order BEFORE attention -> keeps the structural fwd overlap)
+    and saves only {decoder_layer_input x, sharded params} as residuals -- no gathered weights are
+    held (no OOM) and there is no auto-remat decision to cycle against. The backward replays the
+    three pure pieces, emitting the annotated weight RE-gather adjacent to the recomputed attention
+    forward (SC regather || TC splash-fwd remat), then MoE-bwd -> gather-bwd (psum_scatter ->
+    FSDP-sharded weight grads, via the existing _make_cv_gather custom_vjp) -> attn-bwd (splash dkv).
+
+    Numerics are identical to the autodiff path: the pieces compose to the same forward and each VJP
+    is the kernel's own; the per-piece param cotangents (disjoint usage) sum to the full gradient.
+    seg/pos are closed over in the primal/fwd (same trace, legal) and read from residuals in the bwd
+    (avoids a tracer leak). Preconditions are enforced by the caller's gate (plain ring path).
+    """
+    graphdef, params, rest = nnx.split(self, nnx.Param, ...)
+    det = deterministic  # static python bool
+
+    def _gather(p):
+      m = nnx.merge(graphdef, p, rest)
+      return m.DeepSeekMoeBlock_0.gather_routed_weights()  # (w0, w1, wo); annotated custom_vjp gather
+
+    def _attn(p, x_in, seg, pos):
+      m = nnx.merge(graphdef, p, rest)
+      return m.self_attention_with_norm_op(x_in, seg, pos, det)  # (hidden_states, intermediate_inputs)
+
+    def _moe(p, hidden_states, intermediate_inputs, weights):
+      m = nnx.merge(graphdef, p, rest)
+      mlp_lnx, load_balance_loss, moe_bias_updates = m.mlp_op(hidden_states, det, pregathered_weights=weights)
+      layer_output = m.dropout_op(mlp_lnx + intermediate_inputs, deterministic=det)
+      return layer_output, load_balance_loss, moe_bias_updates
+
+    @jax.custom_vjp
+    def fused(p, x_in):
+      weights = _gather(p)  # gather FIRST (program-order before attention) -> forward overlap
+      hidden_states, intermediate_inputs = _attn(p, x_in, decoder_segment_ids, decoder_positions)
+      return _moe(p, hidden_states, intermediate_inputs, weights)
+
+    def fused_fwd(p, x_in):
+      weights = _gather(p)
+      hidden_states, intermediate_inputs = _attn(p, x_in, decoder_segment_ids, decoder_positions)
+      out = _moe(p, hidden_states, intermediate_inputs, weights)
+      # Residuals: sharded params + decoder_layer_input + (seg, pos). NO gathered weights / activations.
+      return out, (p, x_in, decoder_segment_ids, decoder_positions)
+
+    def fused_bwd(res, cotangents):
+      p, x_in, seg, pos = res
+      # 1) recompute attention forward + build its VJP (the splash-fwd remat; weight-independent)
+      (hidden_states, intermediate_inputs), vjp_attn = jax.vjp(lambda pp, xx: _attn(pp, xx, seg, pos), p, x_in)
+      # 2) OUR placed annotated weight re-gather + its VJP (bwd = tiled psum_scatter -> sharded grads)
+      weights, vjp_gather = jax.vjp(_gather, p)
+      # 3) recompute MoE forward + build its VJP
+      _out, vjp_moe = jax.vjp(_moe, p, hidden_states, intermediate_inputs, weights)
+      dp_moe, d_hidden, d_inter, d_weights = vjp_moe(cotangents)
+      (dp_gather,) = vjp_gather(d_weights)
+      dp_attn, dx = vjp_attn((d_hidden, d_inter))
+      # disjoint per-piece param cotangents (zeros elsewhere) -> sum reconstructs the full gradient
+      dp = jax.tree.map(lambda a, b, c: a + b + c, dp_attn, dp_moe, dp_gather)
+      return dp, dx
+
+    fused.defvjp(fused_fwd, fused_bwd)
+    return fused(params, x)
 
   def mlp_op(self, x, deterministic, *args, pregathered_weights=None, **kwargs):
     mlp_lnx, load_balance_loss, moe_bias_updates = self.DeepSeekMoeBlock_0(

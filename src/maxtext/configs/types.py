@@ -810,6 +810,21 @@ class MoEGeneral(BaseModel):
           "so collapsing the gather ids does not re-merge them. Default False."
       ),
   )
+  moe_handwritten_bwd: bool = Field(
+      False,
+      description=(
+          "DeepSeek MoE ring-of-experts only. When True (requires moe_weight_ag_scheduling_group=True, "
+          "no mhc/engram, no moe_wag_splash_group/attn_group), wrap the whole DeepSeek MoE decoder layer "
+          "(hoisted weight gather + attention + MoE) in a jax.custom_vjp INSIDE nn.scan with a "
+          "hand-written backward. The bwd replays the attention forward (splash-fwd-remat) and emits the "
+          "annotated weight RE-gather adjacent to it (SC regather || TC splash-fwd), then MoE-bwd -> "
+          "gather-bwd (psum_scatter -> FSDP-sharded weight grads, reusing _make_cv_gather) -> attn-bwd "
+          "(splash dkv). Residuals = decoder_layer_input + sharded params only (no gathered weights "
+          "saved). We own the remat, so the gather||splash annotation cannot cycle against auto-remat. "
+          "Numerically identical to autodiff (same pieces, kernels' own VJPs). The MoE layer is NOT "
+          "nn.remat-wrapped when this is on. Default False = autodiff + auto-remat (reference)."
+      ),
+  )
   use_random_routing: bool = Field(False, description="Whether to use random routing for debugging.")
   interleave_moe_layer_step: int = Field(1, description="Frequency of MoE layers, e.g., 2 means every 2nd layer is MoE.")
   moe_fsdp_use_two_stage_all_gather: bool = Field(
