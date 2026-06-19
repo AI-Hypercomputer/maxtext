@@ -28,16 +28,13 @@ def main():
   H5 = 16384
 
   # Shardings
-  # X is sharded along batch dimension
   x_sharding = NamedSharding(mesh, P('fsdp', None))
-  
-  # Weights are sharded along the first dimension (FSDP style)
   w1_sharding = NamedSharding(mesh, P('fsdp', None))
   w2_sharding = NamedSharding(mesh, P('fsdp', None))
   w3_sharding = NamedSharding(mesh, P('fsdp', None))
   w4_sharding = NamedSharding(mesh, P('fsdp', None))
 
-  # Initialize inputs and weights with specific shardings
+  # Initialize inputs and weights
   key = jax.random.PRNGKey(0)
   k1, k2, k3, k4, k5 = jax.random.split(key, 5)
 
@@ -63,14 +60,23 @@ def main():
   jax.block_until_ready(out)
   print("Warmup done.")
 
-  # Time it
-  print("Running...")
+  # Profiling setup
+  trace_dir = f"gs://mattdavidow-maxtext-br/jetski/profile_{int(time.time())}"
+  print(f"Profiling to {trace_dir}")
+
+  # Time and Profile
+  print("Running with profiling...")
+  jax.profiler.start_trace(trace_dir)
+  
   t0 = time.time()
   steps = 10
   for _ in range(steps):
     out = forward(x, w1, w2, w3, w4)
   jax.block_until_ready(out)
   t1 = time.time()
+  
+  jax.profiler.stop_trace()
+  print("Profiling stopped.")
   print(f"Average time: {(t1-t0)/steps * 1000:.3f} ms")
 
   # Print output shape and sharding to verify
