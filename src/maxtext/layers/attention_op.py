@@ -14,6 +14,7 @@
 #  pytype: disable=module-attr
 """Attentions Ops Layers."""
 
+import contextlib
 import dataclasses
 import functools
 from functools import partial
@@ -27,6 +28,7 @@ import jax
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
 from jax.experimental import pallas as pl
+from jax.experimental import xla_metadata
 from jax.experimental.pallas.ops.gpu import attention as gpu_pallas_attention
 from jax.experimental.pallas.ops.gpu import decode_attention as gpu_pallas_decode_attention
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
@@ -1515,19 +1517,30 @@ class AttentionOp(nnx.Module):
     sinks = self._maybe_shard_with_pspec(sinks, sink_axis_names)
     indexer_mask = self._maybe_shard_with_pspec(indexer_mask, indexer_mask_axis_names)
 
-    ret = wrap_flash_attention(
-        query,
-        key,
-        value,
-        decoder_segment_ids_q,
-        decoder_segment_ids_kv,
-        sa_config,
-        None if self.config.use_jax_splash else splash_kernel,
-        cp_size,
-        load_balanced_context_parallel,
-        sinks,
-        indexer_mask,
+    # When moe_wag_splash_group is set, tag the splash kernel execution with the SAME
+    # _scheduling_group_id (1) used by the MoE expert weight all-gather (w0) in moe.py, so the
+    # XLA scheduler is told to overlap the (data-independent, hoisted) expert FSDP weight gather
+    # with the splash Pallas kernel. Scheduling-only annotation; no math change.
+    _wag_splash_group = getattr(self.config, "moe_wag_splash_group", False) and getattr(
+        self.config, "moe_weight_ag_scheduling_group", False
+    ) and not getattr(self.config, "moe_wag_no_annotation", False)
+    _splash_group_ctx = (
+        xla_metadata.set_xla_metadata(_scheduling_group_id=1) if _wag_splash_group else contextlib.nullcontext()
     )
+    with _splash_group_ctx:
+      ret = wrap_flash_attention(
+          query,
+          key,
+          value,
+          decoder_segment_ids_q,
+          decoder_segment_ids_kv,
+          sa_config,
+          None if self.config.use_jax_splash else splash_kernel,
+          cp_size,
+          load_balanced_context_parallel,
+          sinks,
+          indexer_mask,
+      )
 
     x, max_logits = ret
     x = jnp.transpose(x, axes=(0, 2, 1, 3))

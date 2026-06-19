@@ -790,6 +790,16 @@ class MoEGeneral(BaseModel):
           "backward weight-grad reduce-scatter stays compact (no 1.9GB regression) and loss is exact."
       ),
   )
+  moe_wag_splash_group: bool = Field(
+      False,
+      description=(
+          "When True (with moe_weight_ag_scheduling_group=True and not moe_wag_no_annotation), tag the "
+          "splash attention kernel execution with _scheduling_group_id=1 -- the same group as the MoE "
+          "expert weight all-gather (w0) -- so the XLA scheduler is told to overlap the hoisted, "
+          "data-independent expert FSDP weight gather with the splash Pallas kernel (the otherwise idle "
+          "splash window). Scheduling-only; loss is bit-exact. Default False."
+      ),
+  )
   use_random_routing: bool = Field(False, description="Whether to use random routing for debugging.")
   interleave_moe_layer_step: int = Field(1, description="Frequency of MoE layers, e.g., 2 means every 2nd layer is MoE.")
   moe_fsdp_use_two_stage_all_gather: bool = Field(
