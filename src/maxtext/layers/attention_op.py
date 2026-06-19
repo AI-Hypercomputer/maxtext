@@ -1416,19 +1416,6 @@ class AttentionOp(nnx.Module):
         sinks,
         indexer_mask,
     ):
-      # NARROW splash scheduling-group tag: wrap ONLY the splash kernel custom-call (below), NOT the
-      # whole wrap_flash_attention. Tagging the whole function tags ~200 ops (q/k/v prep + reshapes +
-      # splash + output) -> a sprawling group-1 region with ungrouped q/k/v wedged in its dependency
-      # tree -> "annotation groups with gaps" UNIMPLEMENTED. Tagging just the splash op keeps group 1
-      # to {splash, w0 gather, w1 gather} -- a handful of INDEPENDENT ops (no operand-tree chain) so
-      # there is no gap, and the scheduler can still overlap the SC gathers with the TC splash kernel.
-      _wag_splash = (
-          getattr(self.config, "moe_wag_splash_group", False)
-          or getattr(self.config, "moe_handwritten_splash_group", False)
-      ) and getattr(self.config, "moe_weight_ag_scheduling_group", False) and not getattr(
-          self.config, "moe_wag_no_annotation", False
-      )
-      _splash_tag = xla_metadata.set_xla_metadata(_scheduling_group_id=1) if _wag_splash else contextlib.nullcontext()
       # If load_balanced_context_parallel is enabled, reorder the key and value tensors
       # to ensure that they are contiguous in memory.
       # This is necessary for the splash attention kernel to work correctly because it expects
@@ -1476,12 +1463,10 @@ class AttentionOp(nnx.Module):
           indexer_mask = jnp.isclose(indexer_mask, 0.0)
 
           if record_max_logits:
-            with _splash_tag:
-              attention_output, max_logits = attn_fn(query, key, value, decoder_segment_ids_tuple, sinks, indexer_mask)
+            attention_output, max_logits = attn_fn(query, key, value, decoder_segment_ids_tuple, sinks, indexer_mask)
             return attention_output, max_logits
           else:
-            with _splash_tag:
-              attention_output, _ = attn_fn(query, key, value, decoder_segment_ids_tuple, sinks, indexer_mask)
+            attention_output, _ = attn_fn(query, key, value, decoder_segment_ids_tuple, sinks, indexer_mask)
             return attention_output, None
         else:
           kernel = partial(splash_kernel, max_logit_value=max_logit_value)
@@ -1493,16 +1478,14 @@ class AttentionOp(nnx.Module):
               out, stats = kernel(q, k, v, d, sinks=s, save_residuals=True)
               return out, stats["max_logits"]
 
-            with _splash_tag:
-              attention_output, max_logits = jax.vmap(kernel_fn, in_axes=(0, 0, 0, 0, None))(
-                  query, key, value, decoder_segment_ids_tuple, sinks
-              )
+            attention_output, max_logits = jax.vmap(kernel_fn, in_axes=(0, 0, 0, 0, None))(
+                query, key, value, decoder_segment_ids_tuple, sinks
+            )
             return attention_output, max_logits
           else:
-            with _splash_tag:
-              attention_output = jax.vmap(lambda q, k, v, d, s: kernel(q, k, v, d, sinks=s), in_axes=(0, 0, 0, 0, None))(
-                  query, key, value, decoder_segment_ids_tuple, sinks
-              )
+            attention_output = jax.vmap(lambda q, k, v, d, s: kernel(q, k, v, d, sinks=s), in_axes=(0, 0, 0, 0, None))(
+                query, key, value, decoder_segment_ids_tuple, sinks
+            )
             return attention_output, None
       elif self.config.use_jax_splash:
         materialized_mask = jnp.asarray(mask[:, :])
@@ -1521,10 +1504,9 @@ class AttentionOp(nnx.Module):
           # (e.g., max_logits) required for QK-Clip. Use tokamax splash attention if max logit recording is needed.
           raise NotImplementedError("record_max_logits not supported for jax_splash")
       else:
-        with _splash_tag:
-          attention_output = jax.vmap(splash_kernel, in_axes=(0, 0, 0, 0, None))(
-              query, key, value, decoder_segment_ids_tuple, sinks
-          )
+        attention_output = jax.vmap(splash_kernel, in_axes=(0, 0, 0, 0, None))(
+            query, key, value, decoder_segment_ids_tuple, sinks
+        )
         if record_max_logits:
           raise NotImplementedError("record_max_logits not supported for legacy splash")
 
@@ -1532,20 +1514,31 @@ class AttentionOp(nnx.Module):
 
     query = self._maybe_shard_with_pspec(query, axis_names_q)
     key = self._maybe_shard_with_pspec(key, axis_names_kv)
-    value = self._maybe_shard_with_pspec(value, axis_names_kv)
+    # INPUT-ANCHOR for the weight-gather || splash overlap: tag ONE simple splash INPUT (value's shard
+    # op) with _scheduling_group_id=1 -- the SAME id the expert-weight all-gathers self-tag (via
+    # _make_cv_gather). The splash KERNEL is a ~196-op tokamax subgraph that cannot be tagged into a
+    # contiguous group (always "annotation groups with gaps"); instead we group the gathers with a
+    # single CLEAN op that FEEDS the splash. group 1 = {w0 ag, w1 ag, value-op}: independent ops, no
+    # operand-tree chain -> no gap, yet value-op sits right where the splash consumes it, so the
+    # scheduler can keep the SC gathers in flight across the TC splash kernel. Scheduling-only.
+    _wag_splash = (
+        getattr(self.config, "moe_wag_splash_group", False)
+        or getattr(self.config, "moe_handwritten_splash_group", False)
+    ) and getattr(self.config, "moe_weight_ag_scheduling_group", False) and not getattr(
+        self.config, "moe_wag_no_annotation", False
+    )
+    with xla_metadata.set_xla_metadata(_scheduling_group_id=1) if _wag_splash else contextlib.nullcontext():
+      value = self._maybe_shard_with_pspec(value, axis_names_kv)
     decoder_segment_ids_q = self._maybe_shard_with_pspec(decoder_segment_ids, segment_axis_names_q)
     decoder_segment_ids_kv = self._maybe_shard_with_pspec(decoder_segment_ids, segment_axis_names_kv)
     sinks = self._maybe_shard_with_pspec(sinks, sink_axis_names)
     indexer_mask = self._maybe_shard_with_pspec(indexer_mask, indexer_mask_axis_names)
 
-    # w0/w1-in-splash: invoke the expert-weight gather closures HERE (right before the attention).
-    # Each closure self-tags its all-gather with _scheduling_group_id=1 (via _make_cv_gather), and the
-    # splash kernel inside wrap_flash_attention is tagged with the SAME id (the NARROW _splash_tag),
-    # so {w0 gather, w1 gather, splash} share group 1 -- a small set of INDEPENDENT ops the scheduler
-    # can overlap (SC gathers vs TC splash) without a "groups with gaps" error. NO broad context here:
-    # tagging the whole attention region was the bug (it swept ~200 connected ops into group 1 with
-    # ungrouped q/k/v in the dependency tree). Results spliced into the MoE's pregathered_weights back
-    # in deepseek.py. (moe_handwritten_splash_group threads both w0 and w1; moe_wag_splash_group w1.)
+    # Invoke the expert-weight gather closures HERE (right before the attention). Each closure
+    # self-tags its all-gather with _scheduling_group_id=1 (via _make_cv_gather), joining the
+    # value-op anchor above in group 1 so the scheduler floats them over the splash. Results spliced
+    # into the MoE's pregathered_weights back in deepseek.py. (moe_handwritten_splash_group threads
+    # both w0 and w1; moe_wag_splash_group w1.)
     if wag_cell is not None and "gather_w0" in wag_cell:
       wag_cell["w0_gathered"] = wag_cell["gather_w0"]()
     if wag_cell is not None and "gather_w1" in wag_cell:
