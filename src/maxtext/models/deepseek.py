@@ -594,14 +594,25 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
     if self.config.moe_weight_ag_scheduling_group:
       pregathered_weights = self.DeepSeekMoeBlock_0.gather_routed_weights()
 
-    hidden_states, intermediate_inputs = self.self_attention_with_norm_op(
-        x,
-        decoder_segment_ids,
-        decoder_positions,
-        deterministic,
-        previous_chunk,
-        slot,
+    # moe_wag_attn_group: tag the ENTIRE attention forward with the same _scheduling_group_id as the
+    # expert weight gathers, so {gathers + attention} forms ONE contiguous scheduling region and the
+    # scheduler can overlap the gathers across the whole attention phase (incl. the splash kernel),
+    # not only behind the QKV matmuls. Wrapping the whole call (not just the splash kernel) keeps the
+    # region gap-free (no ungrouped QKV/norm wedged inside the group).
+    _attn_grp_ctx = (
+        moe._scheduling_group(moe._WEIGHT_AG_SCHED_GROUP)
+        if (self.config.moe_weight_ag_scheduling_group and self.config.moe_wag_attn_group)
+        else contextlib.nullcontext()
     )
+    with _attn_grp_ctx:
+      hidden_states, intermediate_inputs = self.self_attention_with_norm_op(
+          x,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          previous_chunk,
+          slot,
+      )
 
     if self.is_mhc_enabled:
       layer_output, metadata = self.mhc_mlp(

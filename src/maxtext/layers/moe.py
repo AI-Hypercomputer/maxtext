@@ -2692,9 +2692,18 @@ class RoutedMoE(nnx.Module):
     # The distinct group ids already prevent the all-gather-combiner fusion, so the
     # barriers were redundant in the forward and harmful in the backward. Dropping
     # them lets the scheduler float the backward RS over the backward GMM matmuls.
-    w0 = _make_cv_gather(wi_in, w0_out, 1, _WEIGHT_AG_SCHED_GROUP)(w0)
-    w1 = _make_cv_gather(wi_in, w0_out, 1, _WEIGHT_AG_SCHED_GROUP + 1)(w1)
-    wo = _make_cv_gather(wo_in, wo_out, 2, _WEIGHT_AG_SCHED_GROUP + 2)(wo)
+    # moe_wag_attn_group: put ALL three gathers in ONE group (= _WEIGHT_AG_SCHED_GROUP) so the
+    # whole {gathers + attention} span (attention is tagged with the same id in deepseek.py) is a
+    # single CONTIGUOUS scheduling region -> no annotation gap, and the scheduler can overlap the
+    # gathers across the entire attention phase (incl. the splash Pallas kernel). Safe to collapse
+    # the ids: all-gather async fusion is off (xla_tpu_enable_async_collective_fusion_fuse_all_gather
+    # =false), so same-id gathers do NOT re-merge into a monolith. Otherwise keep distinct ids (1/2/3).
+    _g0 = _WEIGHT_AG_SCHED_GROUP
+    _g1 = _WEIGHT_AG_SCHED_GROUP if self.config.moe_wag_attn_group else _WEIGHT_AG_SCHED_GROUP + 1
+    _g2 = _WEIGHT_AG_SCHED_GROUP if self.config.moe_wag_attn_group else _WEIGHT_AG_SCHED_GROUP + 2
+    w0 = _make_cv_gather(wi_in, w0_out, 1, _g0)(w0)
+    w1 = _make_cv_gather(wi_in, w0_out, 1, _g1)(w1)
+    wo = _make_cv_gather(wo_in, wo_out, 2, _g2)(wo)
     if self.config.moe_wag_fwd_barrier:
       # FORWARD-ONLY common barrier: force all three gathers to finish before the MoE (i.e. within
       # the attention phase), so the scheduler must use the idle splash window instead of letting wo

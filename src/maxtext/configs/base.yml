@@ -228,6 +228,7 @@ moe_weight_ag_scheduling_group: false # ring-of-experts: make FSDP weight AG exp
 moe_wag_no_annotation: false # ablation: drop the _scheduling_group_id tag on the weight gathers (keep hoist/distinct-ops/no-barrier) to test if the annotation is load-bearing
 moe_wag_fwd_barrier: false # forward-only common barrier on the 3 gathered weights -> force all before the MoE (attention phase) to use the idle splash window; backward identity (no RS regression)
 moe_wag_splash_group: false # tag the splash kernel with _scheduling_group_id=1 (same group as w0 expert gather) so XLA overlaps the same-layer expert weight gather with the splash Pallas kernel
+moe_wag_attn_group: false # over-group: all 3 gathers + the whole attention forward share ONE scheduling-group id -> contiguous region (no gap), scheduler overlaps gathers across QKV+splash
 # tunable tiling dimensions used for mlp gmm
 # megablox/jax ragged dot - supports forward pass only (6 configs: `wi_tile_fwd...` and `wo_tile_fwd_...`)
 # tokamax ragged dot - supports all 18 configs

@@ -800,6 +800,16 @@ class MoEGeneral(BaseModel):
           "splash window). Scheduling-only; loss is bit-exact. Default False."
       ),
   )
+  moe_wag_attn_group: bool = Field(
+      False,
+      description=(
+          "When True (with moe_weight_ag_scheduling_group=True), put all three expert weight gathers AND "
+          "the entire attention forward in ONE _scheduling_group_id, so {gathers+attention} is a single "
+          "contiguous region (no annotation gap) and XLA can overlap the gathers across the whole "
+          "attention phase incl. the splash Pallas kernel. Safe because all-gather async fusion is off, "
+          "so collapsing the gather ids does not re-merge them. Default False."
+      ),
+  )
   use_random_routing: bool = Field(False, description="Whether to use random routing for debugging.")
   interleave_moe_layer_step: int = Field(1, description="Frequency of MoE layers, e.g., 2 means every 2nd layer is MoE.")
   moe_fsdp_use_two_stage_all_gather: bool = Field(
