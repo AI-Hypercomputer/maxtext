@@ -552,26 +552,34 @@ class RoutedMoE(nnx.Module):
           if self.config.padded_base_moe_mlp_dim is not None
           else self.intermediate_dim
       )
-      self.wi_0 = nnx.Param(
-          self.kernel_init(
-              self.rngs.params(),
-              (num_experts, self.moe_expert_input_dim, moe_intermediate_dim),
-              weight_dtype,
-              kernel_in_axis,
-              kernel_out_axis,
-          ),
-          out_sharding=self.wi_kernel_axes,
-      )
-      self.wi_1 = nnx.Param(
-          self.kernel_init(
-              self.rngs.params(),
-              (num_experts, self.moe_expert_input_dim, moe_intermediate_dim),
-              weight_dtype,
-              kernel_in_axis,
-              kernel_out_axis,
-          ),
-          out_sharding=self.wi_kernel_axes,
-      )
+      if self.config.moe_xlayer_prefetch:
+        # Cross-layer prefetch (Path A) — LIFT: do not create wi_0/wi_1 as nnx.Params here; the Decoder
+        # owns the stacked [L,E,embed,mlp] param and feeds each layer its slice. Placeholder zeros keep
+        # the read sites (self.wi_0[...]) working for the make-or-break bridge AOT; the real slice is
+        # threaded in via pregathered_weights once the lift compiles.
+        self.wi_0 = jnp.zeros((num_experts, self.moe_expert_input_dim, moe_intermediate_dim), weight_dtype)
+        self.wi_1 = jnp.zeros((num_experts, self.moe_expert_input_dim, moe_intermediate_dim), weight_dtype)
+      else:
+        self.wi_0 = nnx.Param(
+            self.kernel_init(
+                self.rngs.params(),
+                (num_experts, self.moe_expert_input_dim, moe_intermediate_dim),
+                weight_dtype,
+                kernel_in_axis,
+                kernel_out_axis,
+            ),
+            out_sharding=self.wi_kernel_axes,
+        )
+        self.wi_1 = nnx.Param(
+            self.kernel_init(
+                self.rngs.params(),
+                (num_experts, self.moe_expert_input_dim, moe_intermediate_dim),
+                weight_dtype,
+                kernel_in_axis,
+                kernel_out_axis,
+            ),
+            out_sharding=self.wi_kernel_axes,
+        )
       self.wo = nnx.Param(
           self.kernel_init(
               self.rngs.params(),
