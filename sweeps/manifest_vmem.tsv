@@ -1,0 +1,6 @@
+# Scoped-VMEM-down + scavenging (baseline image, n=1 monolithic, isolate effect on 16.24). very-high.
+ds-sv48	gcr.io/cloud-tpu-multipod-dev/integrate_v2:gmmv2_bf16_log27	flags_sv48.txt	-	very-high
+ds-sv40	gcr.io/cloud-tpu-multipod-dev/integrate_v2:gmmv2_bf16_log27	flags_sv40.txt	-	very-high
+ds-scav	gcr.io/cloud-tpu-multipod-dev/integrate_v2:gmmv2_bf16_log27	flags_scav.txt	-	very-high
+ds-sv48scav	gcr.io/cloud-tpu-multipod-dev/integrate_v2:gmmv2_bf16_log27	flags_sv48scav.txt	-	very-high
+ds-sv48scavmsa	gcr.io/cloud-tpu-multipod-dev/integrate_v2:gmmv2_bf16_log27	flags_sv48scavmsa.txt	-	very-high

@@ -1,0 +1,147 @@
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: perf-8746
+  labels:
+    kueue.x-k8s.io/queue-name: multislice-queue  # Name of the LocalQueue
+    xpk.google.com/workload: perf-8746
+  annotations:
+    
+spec:
+  ttlSecondsAfterFinished: 43200
+  failurePolicy:
+    rules:
+      - action: FailJobSet
+        onJobFailureReasons:
+        - PodFailurePolicy
+    maxRestarts: 0
+  replicatedJobs:
+    - name: slice-job
+      replicas: 1
+      template:
+        spec:
+          parallelism: 64    # Equal to the number of VMs per slice (or sub-slice).
+          completions: 64    # Same as the above.
+          backoffLimit: 0   # When any pod fails, the job is failed
+          
+          podFailurePolicy:
+            rules:
+          
+            - action: FailJob
+              onPodConditions: []
+              onExitCodes:
+                containerName: jax-tpu-1
+                operator: NotIn
+                values: [42,127,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,160,161,162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,192,193,194,195,196,197,198,199,200,201,202,203,204,205,206,207,208,209,210,211,212,213,214,215,216,217,218,219,220,221,222,223,224,225,226,227,228,229,230,231,232,233,234,235,236,237,238,239,240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255]
+            - action: FailJob
+              onPodConditions: []
+              onExitCodes:
+                containerName: jax-tpu-2
+                operator: NotIn
+                values: [42,127,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,160,161,162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,192,193,194,195,196,197,198,199,200,201,202,203,204,205,206,207,208,209,210,211,212,213,214,215,216,217,218,219,220,221,222,223,224,225,226,227,228,229,230,231,232,233,234,235,236,237,238,239,240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255]
+          template:
+            metadata:
+              labels:
+                xpk.google.com/workload: perf-8746
+              annotations:
+                
+                
+                cloud.google.com/gke-tpu-slice-topology: 4x8x8
+            spec:
+              schedulerName: default-scheduler
+              imagePullSecrets:
+              - name: None
+              restartPolicy: Never
+              
+              nodeSelector:
+                cloud.google.com/gke-tpu-accelerator: tpu7x
+                
+                
+                
+              priorityClassName: high
+              hostNetwork: true
+              dnsPolicy: ClusterFirstWithHostNet
+              terminationGracePeriodSeconds: 30
+              containers:
+              
+              - name: jax-tpu-1
+                image: gcr.io/cloud-tpu-multipod-dev/sivaibhav_google_com-runner:vbhh-2026-03-25-00-32-59
+                
+                env: 
+                securityContext:
+                  privileged: true
+                command:
+                - bash
+                - -c
+                - |
+                  echo XPK Start: $(date);
+                  _sigterm() (kill -SIGTERM $! 2>/dev/null;);
+                  trap _sigterm SIGTERM;
+                  
+                  (export TPU_STDERR_LOG_LEVEL=0 && export TPU_MIN_LOG_LEVEL=0 && export TF_CPP_MIN_LOG_LEVEL=0 && export TPU_VMODULE=real_program_continuator=1 && export LIBTPU_INIT_ARGS='--xla_tpu_dvfs_p_state=7   --xla_tpu_scoped_vmem_limit_kib=65536   --xla_tpu_num_sparse_cores_for_gather_offloading=1   --xla_tpu_bf16_emission_mode=NATIVE_EMISSION   --xla_tpu_enable_sparse_core_reduce_scatter_v2=true   --xla_tpu_enable_sparse_core_collective_offload_all_gather=true   --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true   --xla_tpu_enable_all_gather_offload_tracing=false   --xla_tpu_use_tc_device_shape_on_sc=True   --xla_sc_disable_megacore_partitioning=True   --xla_tpu_enable_async_collective_fusion_fuse_all_gather=false   --xla_enable_async_all_gather=true   --xla_tpu_prefer_async_allgather_to_allreduce=true   --xla_tpu_enable_sparse_core_collective_offload_all_reduce=true   --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true   --xla_tpu_enable_sparse_core_collective_offload_3d_all_gather=true   --xla_tpu_use_single_sparse_core_for_all_gather_offload=true   --xla_tpu_enable_concurrent_sparse_core_offloading=true   --xla_tpu_enable_offloading_gather_to_sparsecore=true   --xla_tpu_sparse_core_all_gather_latency_multiplier=1   --xla_tpu_sparse_core_reduce_scatter_latency_multiplier=3   --xla_tpu_enable_sparse_core_collective_aggregator=true   --xla_tpu_enable_latency_hiding_layer_scheduler=true   --xla_tpu_scheduler_percent_shared_memory_limit=150   --xla_tpu_enable_layer_scheduler_for_dependent_collectives=true   --xla_tpu_pcie_bandwidth_multiplier=0.03   --xla_tpu_enable_multi_compute_overlap_in_layer_scheduler=true   --xla_tpu_enable_sparse_core_collective_offload_nd_reduce_scatter=true   --xla_tpu_enable_3d_reduce_scatter_decomposer=false   --xla_tpu_enable_data_parallel_all_reduce_opt=true   --xla_tpu_enable_all_reduce_offload_tracing=false   --xla_max_concurrent_async_all_gathers=2   --xla_max_concurrent_async_reduce_scatters=2   --xla_tpu_enable_ici_ag_pipelining=true   --xla_tpu_enable_ici_rs_pipelining=true   --xla_tpu_aggregate_data_dependent_sc_ops=false   --xla_tpu_rerun_latency_hiding_scheduler_post_sc_assignment=true '         && export ENABLE_PATHWAYS_PERSISTENCE=1 && export JAX_PLATFORMS=tpu,cpu && export ENABLE_PJRT_COMPATIBILITY=true && export MAXTEXT_ASSETS_ROOT=/deps/src/MaxText/assets MAXTEXT_PKG_DIR=/app/src/maxtext &&         cd /app && pip install --no-deps -e . &&         python3 -m src.maxtext.trainers.pre_train.train maxtext/configs/base.yml merge_gating_gmm=true skip_jax_distributed_system=false per_device_batch_size=1 max_target_length=4096 use_2d_fsdp_sharding=false shard_exp_on_fsdp=false use_batch_split_schedule=true dcn_data_parallelism=1 ici_data_parallelism=1 ici_fsdp_transpose_parallelism=1 ici_fsdp_parallelism=128 ici_expert_parallelism=4 batch_split_factor=1 remat_policy=custom decoder_layer_input=offload mlpwi_0=device   mlpwi_1=device   context=device mla_q=offload mla_kv=offload gcs_metrics=True use_iota_embed=True use_custom_sort_vjp=True dataset_path=gs://max-datasets-rogue dataset_type=synthetic dataset_name='c4/en:3.0.7' eval_dataset_name='c4/en:3.0.9' train_split=train2 reuse_example_batch=0 tokenizer_path=src/maxtext/assets/tokenizers/tokenizer_llama3.tiktoken enable_checkpointing=false checkpoint_period=10000 checkpoint_storage_concurrent_gb=900 learning_rate=1e-4 warmup_steps_fraction=0.00267 learning_rate_schedule_steps=12000 eval_per_device_batch_size=1 eval_interval=20 eval_steps=1 data_shuffle_seed=100 skip_first_n_steps_for_profiler=5 profiler_steps=1 profiler=xplane steps=10 attention=flash megablox=True sparse_matmul=True use_tokamax_gmm=true use_tokamax_splash=true use_max_logit_estimate=-1 cost_estimate_flops_fwd=5000000000000 cost_estimate_flops_bwd=5000000000000  sa_use_fused_bwd_kernel=True sa_block_q=2048 sa_block_kv=2048 sa_block_kv_compute=512 sa_block_q_dkv=2048 sa_block_kv_dkv=2048 sa_block_kv_dkv_compute=2048 sa_block_kv_dq=2048 sa_block_q_dq=2048 wi_tile_fwd_batch_seq=512 wi_tile_fwd_embed_dim=7168 wi_tile_fwd_mlp_dim=512 wi_tile_dlhs_batch_seq=512 wi_tile_dlhs_embed_dim=512 wi_tile_dlhs_mlp_dim=7168 wi_tile_drhs_batch_seq=512 wi_tile_drhs_embed_dim=7168 wi_tile_drhs_mlp_dim=512 wo_tile_fwd_batch_seq=512 wo_tile_fwd_embed_dim=512 wo_tile_fwd_mlp_dim=7168 wo_tile_dlhs_batch_seq=512 wo_tile_dlhs_embed_dim=7168 wo_tile_dlhs_mlp_dim=512 wo_tile_drhs_batch_seq=512 wo_tile_drhs_embed_dim=512 wo_tile_drhs_mlp_dim=7168 opt_type=adamw mu_dtype=bfloat16 grad_dtype=bfloat16 dtype=bfloat16 load_balance_loss_weight=1e-4 routed_bias_update_rate=0.001 target_eval_loss=2.7 model_name=deepseek3-671b-2dfsdp base_output_directory=gs://maxtext-experiments-tpem/sivaibhav/perf/pdbs${PDBS} use_vertex_tensorboard=false run_name=perf-8746 ; ) & PID=$!;
+                  while kill -0 $PID 2>/dev/null;
+                      do sleep 5;
+                  done;
+                  wait $PID;
+                  EXIT_CODE=$?;
+                  
+                  echo XPK End: $(date);
+                  echo EXIT_CODE=$EXIT_CODE;
+                  
+                  
+                  exit $EXIT_CODE
+                resources:
+                  limits:
+                    google.com/tpu: 2
+
+                volumeMounts:
+                - mountPath: /dev/shm
+                  name: dshm-2
+                
+
+              - name: jax-tpu-2
+                image: gcr.io/cloud-tpu-multipod-dev/sivaibhav_google_com-runner:vbhh-2026-03-25-00-32-59
+                
+                env: 
+                securityContext:
+                  privileged: true
+                command:
+                - bash
+                - -c
+                - |
+                  echo XPK Start: $(date);
+                  _sigterm() (kill -SIGTERM $! 2>/dev/null;);
+                  trap _sigterm SIGTERM;
+                  
+                  (export TPU_STDERR_LOG_LEVEL=0 && export TPU_MIN_LOG_LEVEL=0 && export TF_CPP_MIN_LOG_LEVEL=0 && export TPU_VMODULE=real_program_continuator=1 && export LIBTPU_INIT_ARGS='--xla_tpu_dvfs_p_state=7   --xla_tpu_scoped_vmem_limit_kib=65536   --xla_tpu_num_sparse_cores_for_gather_offloading=1   --xla_tpu_bf16_emission_mode=NATIVE_EMISSION   --xla_tpu_enable_sparse_core_reduce_scatter_v2=true   --xla_tpu_enable_sparse_core_collective_offload_all_gather=true   --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true   --xla_tpu_enable_all_gather_offload_tracing=false   --xla_tpu_use_tc_device_shape_on_sc=True   --xla_sc_disable_megacore_partitioning=True   --xla_tpu_enable_async_collective_fusion_fuse_all_gather=false   --xla_enable_async_all_gather=true   --xla_tpu_prefer_async_allgather_to_allreduce=true   --xla_tpu_enable_sparse_core_collective_offload_all_reduce=true   --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true   --xla_tpu_enable_sparse_core_collective_offload_3d_all_gather=true   --xla_tpu_use_single_sparse_core_for_all_gather_offload=true   --xla_tpu_enable_concurrent_sparse_core_offloading=true   --xla_tpu_enable_offloading_gather_to_sparsecore=true   --xla_tpu_sparse_core_all_gather_latency_multiplier=1   --xla_tpu_sparse_core_reduce_scatter_latency_multiplier=3   --xla_tpu_enable_sparse_core_collective_aggregator=true   --xla_tpu_enable_latency_hiding_layer_scheduler=true   --xla_tpu_scheduler_percent_shared_memory_limit=150   --xla_tpu_enable_layer_scheduler_for_dependent_collectives=true   --xla_tpu_pcie_bandwidth_multiplier=0.03   --xla_tpu_enable_multi_compute_overlap_in_layer_scheduler=true   --xla_tpu_enable_sparse_core_collective_offload_nd_reduce_scatter=true   --xla_tpu_enable_3d_reduce_scatter_decomposer=false   --xla_tpu_enable_data_parallel_all_reduce_opt=true   --xla_tpu_enable_all_reduce_offload_tracing=false   --xla_max_concurrent_async_all_gathers=2   --xla_max_concurrent_async_reduce_scatters=2   --xla_tpu_enable_ici_ag_pipelining=true   --xla_tpu_enable_ici_rs_pipelining=true   --xla_tpu_aggregate_data_dependent_sc_ops=false   --xla_tpu_rerun_latency_hiding_scheduler_post_sc_assignment=true '         && export ENABLE_PATHWAYS_PERSISTENCE=1 && export JAX_PLATFORMS=tpu,cpu && export ENABLE_PJRT_COMPATIBILITY=true && export MAXTEXT_ASSETS_ROOT=/deps/src/MaxText/assets MAXTEXT_PKG_DIR=/app/src/maxtext &&         cd /app && pip install --no-deps -e . &&         python3 -m src.maxtext.trainers.pre_train.train maxtext/configs/base.yml merge_gating_gmm=true skip_jax_distributed_system=false per_device_batch_size=1 max_target_length=4096 use_2d_fsdp_sharding=false shard_exp_on_fsdp=false use_batch_split_schedule=true dcn_data_parallelism=1 ici_data_parallelism=1 ici_fsdp_transpose_parallelism=1 ici_fsdp_parallelism=128 ici_expert_parallelism=4 batch_split_factor=1 remat_policy=custom decoder_layer_input=offload mlpwi_0=device   mlpwi_1=device   context=device mla_q=offload mla_kv=offload gcs_metrics=True use_iota_embed=True use_custom_sort_vjp=True dataset_path=gs://max-datasets-rogue dataset_type=synthetic dataset_name='c4/en:3.0.7' eval_dataset_name='c4/en:3.0.9' train_split=train2 reuse_example_batch=0 tokenizer_path=src/maxtext/assets/tokenizers/tokenizer_llama3.tiktoken enable_checkpointing=false checkpoint_period=10000 checkpoint_storage_concurrent_gb=900 learning_rate=1e-4 warmup_steps_fraction=0.00267 learning_rate_schedule_steps=12000 eval_per_device_batch_size=1 eval_interval=20 eval_steps=1 data_shuffle_seed=100 skip_first_n_steps_for_profiler=5 profiler_steps=1 profiler=xplane steps=10 attention=flash megablox=True sparse_matmul=True use_tokamax_gmm=true use_tokamax_splash=true use_max_logit_estimate=-1 cost_estimate_flops_fwd=5000000000000 cost_estimate_flops_bwd=5000000000000  sa_use_fused_bwd_kernel=True sa_block_q=2048 sa_block_kv=2048 sa_block_kv_compute=512 sa_block_q_dkv=2048 sa_block_kv_dkv=2048 sa_block_kv_dkv_compute=2048 sa_block_kv_dq=2048 sa_block_q_dq=2048 wi_tile_fwd_batch_seq=512 wi_tile_fwd_embed_dim=7168 wi_tile_fwd_mlp_dim=512 wi_tile_dlhs_batch_seq=512 wi_tile_dlhs_embed_dim=512 wi_tile_dlhs_mlp_dim=7168 wi_tile_drhs_batch_seq=512 wi_tile_drhs_embed_dim=7168 wi_tile_drhs_mlp_dim=512 wo_tile_fwd_batch_seq=512 wo_tile_fwd_embed_dim=512 wo_tile_fwd_mlp_dim=7168 wo_tile_dlhs_batch_seq=512 wo_tile_dlhs_embed_dim=7168 wo_tile_dlhs_mlp_dim=512 wo_tile_drhs_batch_seq=512 wo_tile_drhs_embed_dim=512 wo_tile_drhs_mlp_dim=7168 opt_type=adamw mu_dtype=bfloat16 grad_dtype=bfloat16 dtype=bfloat16 load_balance_loss_weight=1e-4 routed_bias_update_rate=0.001 target_eval_loss=2.7 model_name=deepseek3-671b-2dfsdp base_output_directory=gs://maxtext-experiments-tpem/sivaibhav/perf/pdbs${PDBS} use_vertex_tensorboard=false run_name=perf-8746 ; ) & PID=$!;
+                  while kill -0 $PID 2>/dev/null;
+                      do sleep 5;
+                  done;
+                  wait $PID;
+                  EXIT_CODE=$?;
+                  
+                  echo XPK End: $(date);
+                  echo EXIT_CODE=$EXIT_CODE;
+                  
+                  
+                  exit $EXIT_CODE
+                resources:
+                  limits:
+                    google.com/tpu: 2
+
+                volumeMounts:
+                - mountPath: /dev/shm
+                  name: dshm-2
+                
+
+              serviceAccountName: 
+              tolerations:
+              
+              - operator: "Exists"
+                key: google.com/tpu
+        
+              volumes:
+              - emptyDir:
+                  medium: Memory
+                name: dshm-2
+              

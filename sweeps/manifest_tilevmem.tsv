@@ -1,0 +1,8 @@
+# VMEM-aware GMM-tile redo: bigger tile_m/tile_n + split-K (tk reduced) to fit 64MB. very-high.
+ds-tn2-m512k3584	gcr.io/cloud-tpu-multipod-dev/integrate_v2:chunked-0617	flags_A.txt	moe_n_chunks=2 wi_tile_fwd_batch_seq=512 wi_tile_fwd_embed_dim=3584	very-high
+ds-tn2-m1024k1792	gcr.io/cloud-tpu-multipod-dev/integrate_v2:chunked-0617	flags_A.txt	moe_n_chunks=2 wi_tile_fwd_batch_seq=1024 wi_tile_fwd_embed_dim=1792	very-high
+ds-tn2-n2048k3584	gcr.io/cloud-tpu-multipod-dev/integrate_v2:chunked-0617	flags_A.txt	moe_n_chunks=2 wi_tile_fwd_mlp_dim=2048 wi_tile_fwd_embed_dim=3584	very-high
+ds-tn2-m512n2048k1792	gcr.io/cloud-tpu-multipod-dev/integrate_v2:chunked-0617	flags_A.txt	moe_n_chunks=2 wi_tile_fwd_batch_seq=512 wi_tile_fwd_mlp_dim=2048 wi_tile_fwd_embed_dim=1792	very-high
+ds-tn4-m512k3584	gcr.io/cloud-tpu-multipod-dev/integrate_v2:chunked-0617	flags_A.txt	moe_n_chunks=4 wi_tile_fwd_batch_seq=512 wi_tile_fwd_embed_dim=3584	very-high
+ds-tn4-m1024k1792	gcr.io/cloud-tpu-multipod-dev/integrate_v2:chunked-0617	flags_A.txt	moe_n_chunks=4 wi_tile_fwd_batch_seq=1024 wi_tile_fwd_embed_dim=1792	very-high
+ds-tn2-m512-vmem128	gcr.io/cloud-tpu-multipod-dev/integrate_v2:chunked-0617	flags_vmem128.txt	moe_n_chunks=2 wi_tile_fwd_batch_seq=512	very-high

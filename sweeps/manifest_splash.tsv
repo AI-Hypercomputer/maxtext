@@ -1,0 +1,4 @@
+# Splash tile search (baseline image+flags, blocks shrink vmem -> no OOM). very-high.
+ds-sp-q1024kv1024	gcr.io/cloud-tpu-multipod-dev/integrate_v2:gmmv2_bf16_log27	flags_A.txt	sa_block_q=1024 sa_block_kv=1024 sa_block_kv_compute=1024	very-high
+ds-sp-q1024kv512	gcr.io/cloud-tpu-multipod-dev/integrate_v2:gmmv2_bf16_log27	flags_A.txt	sa_block_q=1024 sa_block_kv=512 sa_block_kv_compute=512	very-high
+ds-sp-dkv1024	gcr.io/cloud-tpu-multipod-dev/integrate_v2:gmmv2_bf16_log27	flags_A.txt	sa_block_q_dkv=1024 sa_block_kv_dkv=1024 sa_block_kv_dkv_compute=1024	very-high

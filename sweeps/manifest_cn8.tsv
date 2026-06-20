@@ -1,0 +1,3 @@
+# default-tile n=8/16 (fill the v7x gap vs doc's v5p N=8 sweet spot). very-high.
+ds-cn8-0617	gcr.io/cloud-tpu-multipod-dev/integrate_v2:chunked-0617	flags_A.txt	moe_n_chunks=8	very-high
+ds-cn16-0617	gcr.io/cloud-tpu-multipod-dev/integrate_v2:chunked-0617	flags_A.txt	moe_n_chunks=16	very-high

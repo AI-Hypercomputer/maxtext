@@ -1,0 +1,24 @@
+# C-crash bisect (fail-fast ~2min; baseline image, flags only). EXTRA='-' means none.
+ds-cbisect-nomult	gcr.io/cloud-tpu-multipod-dev/integrate_v2:gmmv2_bf16_log27	flags_C1.txt	-	high
+ds-cbisect-nomult-noag	gcr.io/cloud-tpu-multipod-dev/integrate_v2:gmmv2_bf16_log27	flags_C2.txt	-	high
+ds-cbisect-noovlp	gcr.io/cloud-tpu-multipod-dev/integrate_v2:gmmv2_bf16_log27	flags_C3.txt	-	high
+# Chunked-pipeline N sweep (chunked image, baseline flags). Expect U-shape; sweet spot ~N=8 per TILED_COMBINE_HANDOFF.
+ds-chunk4-0617	gcr.io/cloud-tpu-multipod-dev/integrate_v2:chunked-0617	flags_A.txt	moe_n_chunks=4	medium
+ds-chunk8-0617	gcr.io/cloud-tpu-multipod-dev/integrate_v2:chunked-0617	flags_A.txt	moe_n_chunks=8	medium
+ds-chunk16-0617	gcr.io/cloud-tpu-multipod-dev/integrate_v2:chunked-0617	flags_A.txt	moe_n_chunks=16	medium
+# TILING sweep (higher leverage: TC-bound, GMM-dominant). baseline image+flags, arg-only.
+ds-til-wim512	gcr.io/cloud-tpu-multipod-dev/integrate_v2:gmmv2_bf16_log27	flags_A.txt	wi_tile_fwd_batch_seq=512	medium
+ds-til-wim1024	gcr.io/cloud-tpu-multipod-dev/integrate_v2:gmmv2_bf16_log27	flags_A.txt	wi_tile_fwd_batch_seq=1024	medium
+ds-til-win2048	gcr.io/cloud-tpu-multipod-dev/integrate_v2:gmmv2_bf16_log27	flags_A.txt	wi_tile_fwd_mlp_dim=2048	medium
+ds-til-wim512n2048	gcr.io/cloud-tpu-multipod-dev/integrate_v2:gmmv2_bf16_log27	flags_A.txt	wi_tile_fwd_batch_seq=512 wi_tile_fwd_mlp_dim=2048	medium
+ds-til-wik3584m512	gcr.io/cloud-tpu-multipod-dev/integrate_v2:gmmv2_bf16_log27	flags_A.txt	wi_tile_fwd_embed_dim=3584 wi_tile_fwd_batch_seq=512	low
+ds-til-wom1024	gcr.io/cloud-tpu-multipod-dev/integrate_v2:gmmv2_bf16_log27	flags_A.txt	wo_tile_fwd_batch_seq=1024	low
+ds-til-won7168	gcr.io/cloud-tpu-multipod-dev/integrate_v2:gmmv2_bf16_log27	flags_A.txt	wo_tile_fwd_embed_dim=7168	low
+ds-til-spq1024kv1024	gcr.io/cloud-tpu-multipod-dev/integrate_v2:gmmv2_bf16_log27	flags_A.txt	sa_block_q=1024 sa_block_kv=1024 sa_block_kv_compute=1024	medium
+ds-til-spq1024kv512	gcr.io/cloud-tpu-multipod-dev/integrate_v2:gmmv2_bf16_log27	flags_A.txt	sa_block_q=1024 sa_block_kv=512 sa_block_kv_compute=512	low
+# COST-ESTIMATE probes (low leverage: attention-only ~3-5% of compute). Minimal 3.
+ds-cost-default	gcr.io/cloud-tpu-multipod-dev/integrate_v2:gmmv2_bf16_log27	flags_A.txt	cost_estimate_flops_fwd=-1 cost_estimate_flops_bwd=-1	low
+ds-cost-2x	gcr.io/cloud-tpu-multipod-dev/integrate_v2:gmmv2_bf16_log27	flags_A.txt	cost_estimate_flops_fwd=10000000000000 cost_estimate_flops_bwd=10000000000000	low
+ds-cost-realistic	gcr.io/cloud-tpu-multipod-dev/integrate_v2:gmmv2_bf16_log27	flags_A.txt	cost_estimate_flops_fwd=687000000000 cost_estimate_flops_bwd=1787000000000	low
+# Splash BACKWARD dKV tiling (bwd is 6.4% @ 1.04e6 GFLOP/s -- the inefficient half).
+ds-til-spdkv1024	gcr.io/cloud-tpu-multipod-dev/integrate_v2:gmmv2_bf16_log27	flags_A.txt	sa_block_q_dkv=1024 sa_block_kv_dkv=1024 sa_block_kv_dkv_compute=1024	low

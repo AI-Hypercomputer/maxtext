@@ -867,6 +867,18 @@ class MoEGeneral(BaseModel):
           "Default False."
       ),
   )
+  moe_xlayer_prefetch: bool = Field(
+      False,
+      description=(
+          "Cross-layer w0/w1 weight prefetch (Tier B, forward-only): lift wi_0/wi_1 to a stacked "
+          "parent param and software-pipeline the scan so layer i+1's up-projection gather is emitted "
+          "during layer i's QKV matmuls (the matmul hider), carried forward and consumed as the next "
+          "layer's pregathered_weights. wo stays in-layer (hides behind the up-GMM). ~4 GB HBM bump "
+          "(w0/w1 only). Needed because the scheduler won't relax the HBM-pressure schedule voluntarily "
+          "(flag-sweep null) -- the explicit xs+carry pipeline forces XLA's hand. See "
+          "CROSS_LAYER_IMPLEMENTATION_PLAN.md. Default False (model structure unchanged)."
+      ),
+  )
   moe_handwritten_bwd: bool = Field(
       False,
       description=(

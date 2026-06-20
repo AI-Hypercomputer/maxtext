@@ -5,8 +5,17 @@
 `ds-hw-c1` (hand-written, no pipeline) **16.32** → **+0.08s worse**. The barrier-staggered head-split
 did not deliver a net win — either the gathers didn't overlap the stages, or the 2× Pallas/wrapper
 overhead ate the gain. Compiled clean (after fixing the shard_map-nesting bug via call-site loop).
-`sc` diagnostic pending to determine which (did the fwd weight-AG exposed time actually drop?).
 Implementation lives behind `splash_head_pipeline_stages` (default 1=off), so it's inert by default.
+
+**`sc` diagnostic → DEAD END (fundamental).** fwd weight-AG exposed = **996ms** vs **980ms** no-pipeline
+(unchanged), still `covered-by gmm_v2` (the GMM), never the splash. The barrier-stagger forced the
+splashes sequential but did NOT overlap the gathers. **Why head-split can't work like batchsplit:**
+batchsplit splits the **batch** → each micro-batch has its own attention *and* its own MoE gather, so
+mb1's gather overlaps mb0's splash. Head-split only splits the attention **heads** — the MoE/experts
+are **shared** (not per-head), so there is still ONE gather whose consumer (the MoE GMM) sits after
+*all* head-stages; its deadline is unchanged, XLA still late-starts it, and it spills past the splash
+exactly as before. **The thing we need to overlap (the MoE gather) is not head-splittable.** To get
+batchsplit's win you must split the batch (independent attention+MoE), not the heads. Tip 2 abandoned.
 
 ---
 

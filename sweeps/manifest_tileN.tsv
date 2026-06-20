@@ -1,0 +1,9 @@
+# GMM tile sweep at n=2/n=4 (lowercase tags, very-high=prio1000).
+ds-tn2-wim512	gcr.io/cloud-tpu-multipod-dev/integrate_v2:chunked-0617	flags_A.txt	moe_n_chunks=2 wi_tile_fwd_batch_seq=512	very-high
+ds-tn2-wim1024	gcr.io/cloud-tpu-multipod-dev/integrate_v2:chunked-0617	flags_A.txt	moe_n_chunks=2 wi_tile_fwd_batch_seq=1024	very-high
+ds-tn2-win2048	gcr.io/cloud-tpu-multipod-dev/integrate_v2:chunked-0617	flags_A.txt	moe_n_chunks=2 wi_tile_fwd_mlp_dim=2048	very-high
+ds-tn2-wim512n2048	gcr.io/cloud-tpu-multipod-dev/integrate_v2:chunked-0617	flags_A.txt	moe_n_chunks=2 wi_tile_fwd_batch_seq=512 wi_tile_fwd_mlp_dim=2048	very-high
+ds-tn4-wim512	gcr.io/cloud-tpu-multipod-dev/integrate_v2:chunked-0617	flags_A.txt	moe_n_chunks=4 wi_tile_fwd_batch_seq=512	very-high
+ds-tn4-wim1024	gcr.io/cloud-tpu-multipod-dev/integrate_v2:chunked-0617	flags_A.txt	moe_n_chunks=4 wi_tile_fwd_batch_seq=1024	very-high
+ds-tn4-win2048	gcr.io/cloud-tpu-multipod-dev/integrate_v2:chunked-0617	flags_A.txt	moe_n_chunks=4 wi_tile_fwd_mlp_dim=2048	very-high
+ds-tn4-wim512n2048	gcr.io/cloud-tpu-multipod-dev/integrate_v2:chunked-0617	flags_A.txt	moe_n_chunks=4 wi_tile_fwd_batch_seq=512 wi_tile_fwd_mlp_dim=2048	very-high

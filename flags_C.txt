@@ -1,0 +1,41 @@
+# Variant C: jax-gpt v338 "noag-aroverlap" regime, verbatim from
+# k8s/dsv3/dsv3-train-4x8x8-v338-noag-aroverlap.yaml, + dvfs_p_state=7 (clock).
+# Drops the latency-hiding LAYER scheduler in favor of async_collective_fusion +
+# overlap_compute_collective_tc, with higher async concurrency (8) and 2 SCs for
+# gather offload. This is the regime where the owner saw weight comms best hidden.
+--xla_tpu_dvfs_p_state=7
+--xla_tpu_scoped_vmem_limit_kib=65536
+--xla_tpu_bf16_emission_mode=NATIVE_EMISSION
+--xla_tpu_enable_async_collective_fusion=true
+--xla_tpu_enable_async_collective_fusion_fuse_all_reduce=true
+--xla_tpu_enable_async_collective_fusion_fuse_all_gather=true
+--xla_tpu_enable_async_collective_fusion_fuse_reduce_scatter=true
+--xla_tpu_enable_async_collective_fusion_multiple_steps=true
+--xla_tpu_overlap_compute_collective_tc=true
+--xla_enable_async_all_gather=true
+--xla_enable_async_all_reduce=true
+--xla_enable_async_reduce_scatter_fusion=true
+--xla_tpu_prefer_async_allgather_to_allreduce=true
+--xla_tpu_enable_data_parallel_all_reduce_opt=true
+--xla_tpu_enable_ag_backward_pipelining=true
+--xla_tpu_enable_ici_ag_pipelining=true
+--xla_tpu_enable_ici_rs_pipelining=true
+--xla_max_concurrent_async_all_gathers=8
+--xla_max_concurrent_async_reduce_scatters=8
+--xla_tpu_num_sparse_cores_for_gather_offloading=2
+--xla_tpu_enable_sparse_core_collective_offload_all_gather=true
+--xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true
+--xla_tpu_enable_sparse_core_collective_offload_3d_all_gather=true
+--xla_tpu_enable_sparse_core_collective_offload_all_reduce=true
+--xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true
+--xla_tpu_enable_sparse_core_collective_offload_nd_reduce_scatter=true
+--xla_tpu_enable_sparse_core_reduce_scatter_v2=true
+--xla_tpu_use_single_sparse_core_for_all_gather_offload=false
+--xla_tpu_enable_concurrent_sparse_core_offloading=true
+--xla_tpu_enable_offloading_gather_to_sparsecore=true
+--xla_tpu_use_tc_device_shape_on_sc=True
+--xla_sc_disable_megacore_partitioning=True
+--xla_tpu_enable_sparse_core_collective_aggregator=true
+--xla_tpu_pcie_bandwidth_multiplier=0.03
+--xla_tpu_aggregate_data_dependent_sc_ops=false
+--xla_tpu_scheduling_annotation_deannotate_unsupported_groups=true
