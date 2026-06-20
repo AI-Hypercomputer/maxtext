@@ -1442,6 +1442,17 @@ class MaxEngine(_BaseEngine):
       if batch_idx < 0:
         raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
 
+      if path_key in [
+        "entry_count",
+        "accumulator_index",
+        "leftover_buffer_kv",
+        "leftover_buffer_gate",
+        "overlap_kv",
+        "overlap_gate"
+      ]:
+        # Copy these states by explicitly overwriting the target slot matching current request id
+        return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
+      
       for slot in slots:
         if path_key == "cache_ar_segment_id":
           ### goal: zero this out in case there is existing data
@@ -1556,6 +1567,17 @@ class MaxEngine(_BaseEngine):
 
       if batch_idx < 0:
         raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
+      
+      if path_key in [
+        "entry_count",
+        "accumulator_index",
+        "leftover_buffer_kv",
+        "leftover_buffer_gate",
+        "overlap_kv",
+        "overlap_gate"
+      ]:
+        # Copy these states by explicitly overwriting the target slot matching current request id
+        return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
 
       if path_key == "cache_ar_segment_id":
         s = list(full_cache.shape)
@@ -1690,6 +1712,17 @@ class MaxEngine(_BaseEngine):
 
       if batch_idx < 0:
         raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
+      
+      if path_key in [
+        "entry_count",
+        "accumulator_index",
+        "leftover_buffer_kv",
+        "leftover_buffer_gate",
+        "overlap_kv",
+        "overlap_gate"
+      ]:
+        # Direct batch slot index overwrite for fixed-size metadata trackers
+        return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
 
       if path_key == "cache_ar_segment_id":
         ### goal: zero this out in case there is existing data
