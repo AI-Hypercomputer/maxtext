@@ -279,7 +279,7 @@ class DeepSeekGenericLayer(nnx.Module):
     axis_names = ["activation_batch", length_name, "activation_mlp"]
     return axis_names
 
-  def post_process(self, layer_output, load_balance_loss, moe_bias_updates, kv_cache=None):
+  def post_process(self, layer_output, load_balance_loss, moe_bias_updates, kv_cache=None, xlayer_carry=None):
     """postprocessing."""
 
     if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
@@ -298,6 +298,9 @@ class DeepSeekGenericLayer(nnx.Module):
       )
 
     if self.config.scan_layers:
+      if xlayer_carry is not None:
+        # Cross-layer prefetch: tuple scan carry (hidden, prefetched_w01) threaded to the next layer.
+        return (layer_output, xlayer_carry), None
       return layer_output, None
     return layer_output, kv_cache
 
@@ -483,8 +486,14 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
     # xlayer_w01 (moe_xlayer_prefetch): scan-sliced lifted (wi_0, wi_1) for the MoE layer, passed by
     # the Decoder as a scanned input when the cross-layer prefetch is on; None for dense / when off.
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
+    # Cross-layer prefetch threads a TUPLE scan carry (hidden, prefetched_w01); capture the prefetched
+    # gather and re-emit it (updated) as the new carry in post_process. Otherwise unpack (hidden, kv).
+    _xl_g_carry = None
     if isinstance(inputs, tuple):
-      inputs = inputs[0]
+      if self.config.moe_xlayer_prefetch:
+        inputs, _xl_g_carry = inputs
+      else:
+        inputs = inputs[0]
 
     # This code should only be traced during initialization when using
     # batch-split schedule. It is never run during model execution, since
@@ -656,7 +665,11 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       layer_output, load_balance_loss, moe_bias_updates = self._handwritten_moe_layer(
           x, decoder_segment_ids, decoder_positions, deterministic, xlayer_w01
       )
-      return self.post_process(layer_output, load_balance_loss, moe_bias_updates, kv_cache)
+      # STEP 0 probe: thread the prefetch carry through unchanged (validates nn.scan tolerates a tuple
+      # carry around the custom_vjp layer). STEP 1 will replace _xl_g_carry with the prefetch gather.
+      return self.post_process(
+          layer_output, load_balance_loss, moe_bias_updates, kv_cache, xlayer_carry=_xl_g_carry
+      )
 
     # Pre-gather the routed MoE FSDP weights HERE, before the splash attention, so
     # the (SC-offloaded) weight all-gather is emitted in program order during the

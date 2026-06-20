@@ -991,7 +991,7 @@ class Decoder(nn.Module):
                 _xl_w1 = self.param("xlayer_wi_1", _xl_init, (num_moe_layers, _E, _embed, _mlp), cfg.weight_dtype)
                 _xl_args = ((_xl_w0, _xl_w1),)
                 _xl_axes = (0,)
-              y, _ = self.scan_decoder_layers(
+              _moe_scan = self.scan_decoder_layers(
                   cfg,
                   moe_layer,
                   num_moe_layers,
@@ -999,7 +999,15 @@ class Decoder(nn.Module):
                   mesh,
                   in_axes_tuple=(nn.broadcast,) * len(broadcast_args) + _xl_axes,
                   model_mode=model_mode,
-              )(y, *broadcast_args, *_xl_args)
+              )
+              if cfg.moe_xlayer_prefetch:
+                # STEP 0 probe: thread a TUPLE scan carry (hidden, prefetch_g) through the custom_vjp
+                # MoE layer (mirrors the stacked_kv_cache tuple-carry precedent). STEP 1 replaces the
+                # dummy g0 with the prologue gather of xlayer_w01[0] and gathers W01_shifted per layer.
+                _g0 = jnp.zeros((1,), y.dtype)
+                (y, _gfin), _ = _moe_scan((y, _g0), *broadcast_args, *_xl_args)
+              else:
+                y, _ = _moe_scan(y, *broadcast_args, *_xl_args)
         elif cfg.decoder_block == DecoderBlockType.GEMMA3:
           bidirectional_mask_value = multimodal_input.bidirectional_mask if multimodal_input is not None else None
           y = self._apply_gemma3_scanned_blocks(
