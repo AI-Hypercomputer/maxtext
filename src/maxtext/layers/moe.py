@@ -554,11 +554,14 @@ class RoutedMoE(nnx.Module):
       )
       if self.config.moe_xlayer_prefetch:
         # Cross-layer prefetch (Path A) — LIFT: do not create wi_0/wi_1 as nnx.Params here; the Decoder
-        # owns the stacked [L,E,embed,mlp] param and feeds each layer its slice. Placeholder zeros keep
-        # the read sites (self.wi_0[...]) working for the make-or-break bridge AOT; the real slice is
-        # threaded in via pregathered_weights once the lift compiles.
-        self.wi_0 = jnp.zeros((num_experts, self.moe_expert_input_dim, moe_intermediate_dim), weight_dtype)
-        self.wi_1 = jnp.zeros((num_experts, self.moe_expert_input_dim, moe_intermediate_dim), weight_dtype)
+        # owns the stacked [L,E,embed,mlp] param and feeds each layer its slice (threaded in as
+        # `xlayer_w01` / `pregathered_weights`). They MUST be None, not jnp.zeros: __init__ runs inside
+        # the nn.scan body trace, so a jnp.zeros placeholder is a constant tracer stored on the module
+        # that escapes the scan (UnexpectedTracerError: float32[E,embed,mlp] leaked). The read sites
+        # (gather_weights / sparse_matmul) take the xlayer_w01 / pregathered branch in this config, so
+        # self.wi_0/wi_1 are never read.
+        self.wi_0 = None
+        self.wi_1 = None
       else:
         self.wi_0 = nnx.Param(
             self.kernel_init(
