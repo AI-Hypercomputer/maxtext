@@ -974,15 +974,32 @@ class Decoder(nn.Module):
                     num_layers=num_moe_layers,
                 )
             else:
+              _xl_args, _xl_axes = (), ()
+              if cfg.moe_xlayer_prefetch:
+                # Cross-layer prefetch: wi_0/wi_1 are lifted to Decoder-owned stacked [L,...] params,
+                # passed per-layer as a SCANNED INPUT (in_axes=0) -> single management (NOT
+                # variable_axes), avoiding the gradient double-count. The MoE layer reads the slice at
+                # __call__ index 5 (xlayer_w01). bit-exact init not required (param moved to parent).
+                _E = cfg.num_experts
+                _embed = cfg.emb_dim if cfg.moe_expert_input_dim <= 0 else cfg.moe_expert_input_dim
+                _mlp = cfg.padded_base_moe_mlp_dim if cfg.padded_base_moe_mlp_dim is not None else cfg.moe_mlp_dim
+                _xl_init = nn.with_logical_partitioning(
+                    nn.initializers.truncated_normal(stddev=0.02),
+                    (None, "exp", "embed_moe", "mlp_moe"),
+                )
+                _xl_w0 = self.param("xlayer_wi_0", _xl_init, (num_moe_layers, _E, _embed, _mlp), cfg.weight_dtype)
+                _xl_w1 = self.param("xlayer_wi_1", _xl_init, (num_moe_layers, _E, _embed, _mlp), cfg.weight_dtype)
+                _xl_args = ((_xl_w0, _xl_w1),)
+                _xl_axes = (0,)
               y, _ = self.scan_decoder_layers(
                   cfg,
                   moe_layer,
                   num_moe_layers,
                   "moe_layers",
                   mesh,
-                  in_axes_tuple=(nn.broadcast,) * len(broadcast_args),
+                  in_axes_tuple=(nn.broadcast,) * len(broadcast_args) + _xl_axes,
                   model_mode=model_mode,
-              )(y, *broadcast_args)
+              )(y, *broadcast_args, *_xl_args)
         elif cfg.decoder_block == DecoderBlockType.GEMMA3:
           bidirectional_mask_value = multimodal_input.bidirectional_mask if multimodal_input is not None else None
           y = self._apply_gemma3_scanned_blocks(
