@@ -1526,16 +1526,29 @@ class RoutedMoE(nnx.Module):
         # expert shards, and then routes within each shard.
 
         # Duplicate inputs to all expert shards.
-        # Tag this EP token all-gather into the WEIGHT-AG scheduling group when _wag_sched is on, so
-        # the (in-block) FSDP weight all-gather co-schedules with THIS collective rather than the
-        # splash. Both are SC-offload collectives on independent ICI axes (expert token vs fsdp
-        # weight) -> XLA can run them concurrently on the 2 SparseCores (no SC-compute contention,
-        # unlike the sort/permute which occupies both SCs). Scheduling-only; numerics unchanged.
-        with _wag_scheduling_group():
-          x, logits, pre_bias_logits = tuple(
-              jax.lax.all_gather(z, axis_name=self._expert_parallelism_name, tiled=True)
-              for z in (x, logits, pre_bias_logits)
-          )
+        # FORWARD-ONLY-tagged EP token all-gather: tag the FORWARD all-gather into the weight-AG
+        # scheduling group (so the in-block FSDP weight all-gather co-schedules with THIS collective
+        # rather than the splash -- two SC-offload collectives on independent ICI axes, expert token
+        # vs fsdp weight, run concurrently on the 2 SparseCores). The custom_vjp keeps the BACKWARD
+        # transpose (a reduce-scatter) OUT of the group: a plain tagged all-gather would let its
+        # reduce-scatter inherit the tag, and a forward all-gather + its backward RS in the same group
+        # closes a scheduling cycle. Mirrors `_make_cv_gather`. Scheduling-only; numerics unchanged.
+        ep_axis = self._expert_parallelism_name
+
+        @jax.custom_vjp
+        def _ep_g(z):  # PRIMAL: plain all-gather (what the backward recompute re-traces)
+          return jax.lax.all_gather(z, axis_name=ep_axis, tiled=True)
+
+        def _ep_g_fwd(z):  # FORWARD under diff: tagged all-gather
+          with _wag_scheduling_group():
+            out = jax.lax.all_gather(z, axis_name=ep_axis, tiled=True)
+          return out, None  # no residual
+
+        def _ep_g_bwd(_res, ct):  # transpose of a tiled all-gather (concat on axis 0) = reduce-scatter, UNtagged
+          return (jax.lax.psum_scatter(ct, axis_name=ep_axis, scatter_dimension=0, tiled=True),)
+
+        _ep_g.defvjp(_ep_g_fwd, _ep_g_bwd)
+        x, logits, pre_bias_logits = tuple(_ep_g(z) for z in (x, logits, pre_bias_logits))
 
         # "Route" tokens within each shard.
         num_experts_per_shard = self.config.num_experts // num_ep
@@ -1979,22 +1992,40 @@ class RoutedMoE(nnx.Module):
       # (annotated in nnx_decoders) and is fenced with optimization_barrier, so the
       # scheduler can overlap the (otherwise exposed) weight-AG with splash attention
       # earlier in the same decoder layer. Mirrors deepseek_batchsplit.gather_weights.
-      def _sched_gather(w, in_pspec, out_pspec, gather_axis):
-        def _fn(x):
-          # Default (no to="reduced"): the transpose of a tiled all-gather is a
-          # reduce-scatter, so FSDP weight gradients remain correct.
-          return jax.lax.all_gather(x, "fsdp", axis=gather_axis, tiled=True)
-        gathered = jax.shard_map(
-            _fn, mesh=self.mesh, in_specs=(in_pspec,), out_specs=out_pspec, check_vma=False
-        )(w)
-        return jax.lax.optimization_barrier(gathered)
+      # FORWARD-ONLY-tagged FSDP weight all-gather (mirrors `_make_cv_gather`): the FORWARD all-gather
+      # carries the _scheduling_group_id; the BACKWARD transpose (a tiled psum_scatter) is a SEPARATE,
+      # UNtagged op. A plain tagged all-gather would let its reduce-scatter inherit the tag, and a
+      # forward AG + its backward RS in the same group closes a scheduling cycle. NO optimization_barrier:
+      # it is self-dual, so a barrier on the gathered weight fences the weight-grad feeding the backward
+      # psum_scatter -> pins the RS exposed.
+      def _make_sched_cv_gather(in_pspec, out_pspec, gather_axis):
+        @jax.custom_vjp
+        def _g(w):  # PRIMAL: plain gather (recomputed in the backward)
+          return jax.shard_map(
+              lambda x: jax.lax.all_gather(x, "fsdp", axis=gather_axis, tiled=True),
+              mesh=self.mesh, in_specs=(in_pspec,), out_specs=out_pspec, check_vma=False)(w)
+
+        def _g_fwd(w):  # FORWARD under diff: tagged gather
+          def _fn(x):
+            with _wag_scheduling_group():
+              return jax.lax.all_gather(x, "fsdp", axis=gather_axis, tiled=True)
+          w_full = jax.shard_map(_fn, mesh=self.mesh, in_specs=(in_pspec,), out_specs=out_pspec, check_vma=False)(w)
+          return w_full, None  # no residual
+
+        def _g_bwd(_res, ct):  # transpose of tiled all-gather over fsdp = tiled psum_scatter, UNtagged
+          g_sharded = jax.shard_map(
+              lambda gg: jax.lax.psum_scatter(gg, "fsdp", scatter_dimension=gather_axis, tiled=True),
+              mesh=self.mesh, in_specs=(out_pspec,), out_specs=in_pspec, check_vma=False)(ct)
+          return (g_sharded,)
+
+        _g.defvjp(_g_fwd, _g_bwd)
+        return _g
 
       wi_in_pspec = self._logical_to_mesh_axes(self.wi_kernel_axes)
       wo_in_pspec = self._logical_to_mesh_axes(self.wo_kernel_axes)
-      with _wag_scheduling_group():
-        w0_kernel = _sched_gather(w0_kernel, wi_in_pspec, w0_pspec, 1)
-        w1_kernel = _sched_gather(w1_kernel, wi_in_pspec, w1_pspec, 1)
-        wo_kernel = _sched_gather(wo_kernel, wo_in_pspec, wo_pspec, 2)
+      w0_kernel = _make_sched_cv_gather(wi_in_pspec, w0_pspec, 1)(w0_kernel)
+      w1_kernel = _make_sched_cv_gather(wi_in_pspec, w1_pspec, 1)(w1_kernel)
+      wo_kernel = _make_sched_cv_gather(wo_in_pspec, wo_pspec, 2)(wo_kernel)
     else:
       w0_kernel = self._maybe_shard_with_pspec(w0_kernel, w0_pspec)
       w1_kernel = self._maybe_shard_with_pspec(w1_kernel, w1_pspec)
