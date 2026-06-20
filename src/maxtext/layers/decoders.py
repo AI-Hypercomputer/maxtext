@@ -989,8 +989,12 @@ class Decoder(nn.Module):
                 )
                 _xl_w0 = self.param("xlayer_wi_0", _xl_init, (num_moe_layers, _E, _embed, _mlp), cfg.weight_dtype)
                 _xl_w1 = self.param("xlayer_wi_1", _xl_init, (num_moe_layers, _E, _embed, _mlp), cfg.weight_dtype)
-                _xl_args = ((_xl_w0, _xl_w1),)
-                _xl_axes = (0,)
+                # SHIFTED (next-layer) slices for the prefetch: layer i sees W01_shifted[i] = w01[i+1].
+                # PAD the last (never lax.cond) -> the final iteration prefetches a dummy that's discarded.
+                _xl_w0_sh = jnp.concatenate([_xl_w0[1:], _xl_w0[-1:]], axis=0)
+                _xl_w1_sh = jnp.concatenate([_xl_w1[1:], _xl_w1[-1:]], axis=0)
+                _xl_args = ((_xl_w0, _xl_w1), (_xl_w0_sh, _xl_w1_sh))
+                _xl_axes = (0, 0)
               _moe_scan = self.scan_decoder_layers(
                   cfg,
                   moe_layer,
@@ -1001,10 +1005,29 @@ class Decoder(nn.Module):
                   model_mode=model_mode,
               )
               if cfg.moe_xlayer_prefetch:
-                # STEP 0 probe: thread a TUPLE scan carry (hidden, prefetch_g) through the custom_vjp
-                # MoE layer (mirrors the stacked_kv_cache tuple-carry precedent). STEP 1 replaces the
-                # dummy g0 with the prologue gather of xlayer_w01[0] and gathers W01_shifted per layer.
-                _g0 = jnp.zeros((1,), y.dtype)
+                # PROLOGUE (pipeline fill): FSDP-all-gather layer 0's w0/w1 -> the INITIAL tuple carry.
+                # Mirrors moe.gather_weights (wi_in -> w0_out layout, all-gather over fsdp, axis=1).
+                # stop_gradient: forward-only scheduling, the bwd re-gathers in-layer. The scan threads
+                # the tuple carry (hidden, gathered_w01); each layer consumes its carry as pregathered
+                # w0/w1 and gathers W01_shifted[i] (next layer) for the next carry.
+                def _xl_gather0(_w):
+                  # Match the per-layer gather's dtype cast (jnp.asarray(w, self.dtype) = cfg.dtype/bf16)
+                  # so the prologue carry dtype equals the per-layer carry-out dtype (scan requires it).
+                  _w = _w.astype(cfg.dtype)
+                  _in = nn.logical_to_mesh_axes(("exp", "embed_moe", "mlp_moe"))
+                  _out = nn.logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
+                  return jax.shard_map(
+                      lambda z: jax.lax.all_gather(z, "fsdp", axis=1, tiled=True),
+                      mesh=mesh,
+                      in_specs=(_in,),
+                      out_specs=_out,
+                      check_vma=False,
+                  )(_w)
+
+                _g0 = (
+                    jax.lax.stop_gradient(_xl_gather0(_xl_w0[0])),
+                    jax.lax.stop_gradient(_xl_gather0(_xl_w1[0])),
+                )
                 (y, _gfin), _ = _moe_scan((y, _g0), *broadcast_args, *_xl_args)
               else:
                 y, _ = _moe_scan(y, *broadcast_args, *_xl_args)

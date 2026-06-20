@@ -2663,7 +2663,7 @@ class RoutedMoE(nnx.Module):
     wo_kernel = max_utils.unbox_logicallypartioned(wo_kernel)
     return w0_kernel, w1_kernel, wo_kernel
 
-  def gather_weights(self, xlayer_w01=None):
+  def gather_weights(self, xlayer_w01=None, prefetched_w01=None, w01_only=False):
     """FSDP-all-gather the routed expert weights (wi_0/wi_1/wo) early, so the
     all-gather can be emitted in the ATTENTION phase (program-order before the
     splash kernel) and overlap it (the SparseCore is idle during splash).
@@ -2760,6 +2760,18 @@ class RoutedMoE(nnx.Module):
     _g0 = _WEIGHT_AG_SCHED_GROUP
     _g1 = _WEIGHT_AG_SCHED_GROUP if self.config.moe_wag_attn_group else _WEIGHT_AG_SCHED_GROUP + 1
     _g2 = _WEIGHT_AG_SCHED_GROUP if self.config.moe_wag_attn_group else _WEIGHT_AG_SCHED_GROUP + 2
+    if prefetched_w01 is not None:
+      # Cross-layer prefetch (forward): w0/w1 were gathered one layer EARLY (carried in the scan), in
+      # the w0_out layout already -> use them directly, gather ONLY wo here (it hides behind the up-GMM).
+      _w0g, _w1g = prefetched_w01
+      wo = _make_cv_gather(wo_in, wo_out, 2, _g2)(wo)
+      return (jnp.asarray(_w0g, self.dtype), jnp.asarray(_w1g, self.dtype), wo)
+    if w01_only:
+      # Cross-layer PREFETCH gather of the NEXT layer's w0/w1 only (no wo). Caller stop_gradients the
+      # result so this is pure forward scheduling; the backward re-gathers xlayer_w01[i] (the sole grad).
+      w0 = _make_cv_gather(wi_in, w0_out, 1, _g0)(w0)
+      w1 = _make_cv_gather(wi_in, w0_out, 1, _g1)(w1)
+      return (w0, w1)
     wo = _make_cv_gather(wo_in, wo_out, 2, _g2)(wo)
     if self.config.moe_handwritten_splash_group:
       # hand-written path: gather BOTH w0 and w1 ADJACENT to the splash kernel, inside the splash's
@@ -2976,11 +2988,15 @@ class RoutedAndSharedMoE(nnx.Module):
   def routed_moe(self):
     return self.MoeBlock_0
 
-  def gather_routed_weights(self, xlayer_w01=None):
+  def gather_routed_weights(self, xlayer_w01=None, prefetched_w01=None, w01_only=False):
     """Pre-gather the routed experts' FSDP weights (see RoutedMoE.gather_weights).
     Call this in the attention phase; pass the result back as pregathered_weights.
-    xlayer_w01 (moe_xlayer_prefetch): the lifted (wi_0, wi_1) slice for this layer."""
-    return self.MoeBlock_0.gather_weights(xlayer_w01=xlayer_w01)
+    xlayer_w01 (moe_xlayer_prefetch): the lifted (wi_0, wi_1) slice for this layer.
+    prefetched_w01: cross-layer prefetch -- w0/w1 already gathered (carried); gather only wo.
+    w01_only: prefetch the NEXT layer's w0/w1 only (returns (w0, w1))."""
+    return self.MoeBlock_0.gather_weights(
+        xlayer_w01=xlayer_w01, prefetched_w01=prefetched_w01, w01_only=w01_only
+    )
 
   def __call__(
       self,
