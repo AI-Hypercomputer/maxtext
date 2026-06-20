@@ -506,6 +506,7 @@ def ragged_gather_reduce(
           _OUT_KW: jax.ShapeDtypeStruct(
               (padded_input_size // reduce_group_size, aligned_hidden_size),
               jnp.float32,
+              manual_axis_type=jax.sharding.ManualAxisType(varying={"data", "fsdp", "expert"}),
           ),
           _SCRATCH_KW: dict(  # pylint: disable=use-dict-literal
               num_rows_per_row_partition_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
