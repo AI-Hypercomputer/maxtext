@@ -660,7 +660,9 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
     # back to its in-block gather.
     pregathered_weights = None
     wag_cell = None
-    if self.config.moe_weight_ag_scheduling_group:
+    # moe_wag_in_sort: skip the attention-phase hoist so the MoE's in-block `_wag_sched` gathers the
+    # weights and co-schedules them with the EP token all-gather (not the splash). pregathered stays None.
+    if self.config.moe_weight_ag_scheduling_group and not self.config.moe_wag_in_sort:
       pregathered_weights = self.DeepSeekMoeBlock_0.gather_routed_weights()
       # w1-in-splash (moe_wag_splash_group): gather_weights returns a zero-arg CLOSURE in the w1 slot
       # instead of the gathered weight. Thread it into the attention via wag_cell; tpu_flash_attention

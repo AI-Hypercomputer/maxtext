@@ -770,6 +770,18 @@ class MoEGeneral(BaseModel):
           "independent). Default False = implicit boundary gather (unchanged behavior)."
       ),
   )
+  moe_wag_in_sort: bool = Field(
+      False,
+      description=(
+          "Token-all-gather coschedule: SKIP the attention-phase weight hoist (pregathered_weights) so "
+          "the in-MoE `_wag_sched` path fires, and retarget its scheduling group from the splash (which "
+          "XLA won't overlap a collective with) to the EP TOKEN ALL-GATHER (route's all_gather over the "
+          "expert axis). Two independent SC-offload collectives on different ICI axes (fsdp weight vs "
+          "expert token) -> XLA can run them concurrently on the 2 SparseCores (no SC-compute "
+          "contention, unlike the sort). Requires moe_weight_ag_scheduling_group + use_ring_of_experts. "
+          "Default False."
+      ),
+  )
   moe_wag_no_annotation: bool = Field(
       False,
       description=(

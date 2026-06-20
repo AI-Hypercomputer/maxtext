@@ -1526,10 +1526,16 @@ class RoutedMoE(nnx.Module):
         # expert shards, and then routes within each shard.
 
         # Duplicate inputs to all expert shards.
-        x, logits, pre_bias_logits = tuple(
-            jax.lax.all_gather(z, axis_name=self._expert_parallelism_name, tiled=True)
-            for z in (x, logits, pre_bias_logits)
-        )
+        # Tag this EP token all-gather into the WEIGHT-AG scheduling group when _wag_sched is on, so
+        # the (in-block) FSDP weight all-gather co-schedules with THIS collective rather than the
+        # splash. Both are SC-offload collectives on independent ICI axes (expert token vs fsdp
+        # weight) -> XLA can run them concurrently on the 2 SparseCores (no SC-compute contention,
+        # unlike the sort/permute which occupies both SCs). Scheduling-only; numerics unchanged.
+        with _wag_scheduling_group():
+          x, logits, pre_bias_logits = tuple(
+              jax.lax.all_gather(z, axis_name=self._expert_parallelism_name, tiled=True)
+              for z in (x, logits, pre_bias_logits)
+          )
 
         # "Route" tokens within each shard.
         num_experts_per_shard = self.config.num_experts // num_ep
