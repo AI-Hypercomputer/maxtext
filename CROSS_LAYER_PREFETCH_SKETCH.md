@@ -80,6 +80,33 @@ Mitigations: prefetch **only w0** (or w0+w1), ~2–4 GB instead of 6; or free HB
 
 ---
 
+## Reviewer implementation gotchas (2026-06-20) — bake these in
+
+1. **Checkpoint / PyTree structure (important).** Lifting `W01_sharded` out of the per-layer
+   `DeepSeekMoELayerToLinen` blocks into a stacked parent array (`[num_layers, ...]`, so we can take
+   `[0]` for the prologue and `[1:]` for the shifted `xs`) **changes the param PyTree**. A loader that
+   expects `params['layers']['0']['moe']['w0']` will break. **Mitigation:** a one-time restore shim
+   that zips/stacks the per-layer weights into the single `W01_sharded` array before loading.
+2. **SC queue — don't hand-sequence `wo_i` vs `g01_next`.** Neither depends on the attention output,
+   so XLA makes BOTH eligible on the SC during the attention TC window. If both fit in the ~11ms
+   window, everything hides; if not, the scheduler prioritizes `wo_i` (consumer is downstream this
+   iteration) and lets `g01_next` spill into the w0/w1 matmul window. **Let the SC queue them — no
+   manual ordering.**
+3. **Epilogue — pad, do NOT `lax.cond`.** A `lax.cond`/dynamic mask to skip the last iteration's
+   prefetch injects control flow that wrecks XLA fusion/scheduling. **Mitigation:** build the shifted
+   input by duplicating the last layer:
+   ```python
+   W01_shifted = jnp.concatenate([W01_sharded[1:], W01_sharded[-1:]], axis=0)
+   ```
+   The final iteration gathers dummy weights concurrently with the last layer's matmuls and we just
+   discard the final carry. A "wasted" gather that blocks nothing.
+
+**Verdict (reviewer):** Tier B is bulletproof — scoping the carry to w0/w1 (~4 GB) and deferring the
+backward de-risks it. If the flag-sweep shows the HBM wall is pliable, build this exact `nn.scan`
+structure; if the memory heuristic is stubborn, the explicit `xs`+carry software pipeline is the only
+way to force XLA's hand. (Note: flag-sweep came back NULL — `multi_compute_overlap` regressed — so the
+scheduler will NOT relax voluntarily; the explicit pipeline is required, which is what this is.)
+
 ## Open questions — RESOLVED (review, 2026-06-20)
 
 1. **HBM headroom.** Bounded by Q2: prefetch holds **only w0/w1 ≈ ~4 GB** (not ~6 GB). Still near the

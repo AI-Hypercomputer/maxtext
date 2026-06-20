@@ -1,5 +1,16 @@
 # Splash head-pipelining — design sketch (Tip 2)
 
+## RESULT (2026-06-20, image hwbwd-0620c, chunk=1): NULL / slightly negative
+`ds-hw-hp` (n_stages=2, threaded carry token) = **16.396s** (steps 3/4), loss bit-exact, vs
+`ds-hw-c1` (hand-written, no pipeline) **16.32** → **+0.08s worse**. The barrier-staggered head-split
+did not deliver a net win — either the gathers didn't overlap the stages, or the 2× Pallas/wrapper
+overhead ate the gain. Compiled clean (after fixing the shard_map-nesting bug via call-site loop).
+`sc` diagnostic pending to determine which (did the fwd weight-AG exposed time actually drop?).
+Implementation lives behind `splash_head_pipeline_stages` (default 1=off), so it's inert by default.
+
+---
+
+
 **Goal.** Break the single monolithic splash kernel (one ~11ms `pallas_call` over all 128 heads,
 opaque to the scheduler) into a few **head-slice stages**, and stagger them with
 `optimization_barrier` so a concurrent SC collective (the MoE weight all-gather, or KV AGs) runs on
