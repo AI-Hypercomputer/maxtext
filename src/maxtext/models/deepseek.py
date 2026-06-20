@@ -807,7 +807,9 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       # identical and the gradient is unchanged.) gather is emitted FIRST (program-order before
       # attention) to preserve the hoist.
       m = _merge(p, rest_)
-      weights = m.DeepSeekMoeBlock_0.gather_routed_weights()
+      # moe_wag_in_sort: skip the hoist so mlp_op's in-block `_wag_sched` gathers the weights and
+      # co-schedules them with the EP token all-gather (pregathered=None -> in-MoE path).
+      weights = None if self.config.moe_wag_in_sort else m.DeepSeekMoeBlock_0.gather_routed_weights()
       # moe_handwritten_splash_group: w0/w1 come back as zero-arg CLOSURES. Thread them into the
       # attention via wag_cell so tpu_flash_attention invokes them ADJACENT to the splash kernel
       # (inside the splash's _scheduling_group -> contiguous group 1 -> w0/w1 gathers overlap the
@@ -852,6 +854,21 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       # Re-tracing the bridged layer methods happens OUTSIDE the linen forward, so detach the
       # linen module stack to avoid the qwix-fixup None.path crash (see helper docstring).
       with _detached_linen_module_stack():
+        if self.config.moe_wag_in_sort:
+          # In-MoE weight gather (no separate _gather hoist): _moe gathers the weights via `_wag_sched`
+          # and the weight gradient flows through vjp_moe (its reduce-scatter). The custom_vjp OWNS the
+          # backward, so the EP-all-gather scheduling group does NOT close the autodiff-jvp cycle that
+          # the cycle appears on -- the manual backward dodges it, same as it cleared the auto-remat
+          # splash cycle.
+          (hidden_states, intermediate_inputs), vjp_attn = jax.vjp(
+              lambda pp, xx: _attn(pp, xx, seg, pos, rest_), p, x_in
+          )
+          _out, vjp_moe = jax.vjp(
+              lambda pp, hh, ii: _moe(pp, hh, ii, None, rest_), p, hidden_states, intermediate_inputs
+          )
+          dp_moe, d_hidden, d_inter = vjp_moe(cotangents)
+          dp_attn, dx = vjp_attn((d_hidden, d_inter))
+          return jax.tree.map(lambda a, b: a + b, dp_attn, dp_moe), dx
         # 1) HOIST the weight re-gather to the attention INPUT (emit it BEFORE the attention recompute),
         # mirroring the forward's structural hoist that overlaps the gather with the QKV matmuls. The
         # re-gather depends only on p (independent of attention), so emitting it first lets its async
