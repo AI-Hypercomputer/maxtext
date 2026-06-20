@@ -55,6 +55,8 @@ from maxtext.models import (
     mistral,
     mixtral,
     olmo3,
+    phi4,
+
     qwen2,
     qwen3,
     qwen3_custom,
@@ -485,6 +487,8 @@ class Decoder(nn.Module):
         return [gpt_oss.GptOssScannableBlockToLinen] if self.config.scan_layers else [gpt_oss.GptOssDecoderLayerToLinen]
       case DecoderBlockType.QWEN2:
         return [qwen2.Qwen2DecoderLayerToLinen]
+      case DecoderBlockType.QWEN2_MOE:
+        return [qwen2.Qwen2MoeDecoderLayerToLinen]
       case DecoderBlockType.QWEN3:
         return [qwen3.Qwen3DecoderLayerToLinen]
       case DecoderBlockType.QWEN3_MOE:
@@ -503,6 +507,9 @@ class Decoder(nn.Module):
         return [llama4.Llama4ScannableBlockToLinen] if self.config.scan_layers else [llama4.Llama4DecoderLayerToLinen]
       case DecoderBlockType.OLMO3:
         return [olmo3.Olmo3ScannableBlockToLinen] if self.config.scan_layers else [olmo3.Olmo3DecoderLayerToLinen]
+      case DecoderBlockType.PHI4:
+        return [phi4.Phi4DecoderLayerToLinen]
+
 
       case _:
         # Default case to handle any unknown decoder block types.
@@ -638,6 +645,7 @@ class Decoder(nn.Module):
         DecoderBlockType.GEMMA4,
         DecoderBlockType.GEMMA4_SMALL,
         DecoderBlockType.QWEN2,
+        DecoderBlockType.QWEN2_MOE,
         DecoderBlockType.QWEN3,
         DecoderBlockType.QWEN3_MOE,
         DecoderBlockType.QWEN3_CUSTOM_MOE,
@@ -646,7 +654,9 @@ class Decoder(nn.Module):
         DecoderBlockType.SIMPLE_MLP,
         DecoderBlockType.LLAMA4,
         DecoderBlockType.OLMO3,
+        DecoderBlockType.PHI4,
     ):
+
       return functools.partial(rms_norm, num_features=num_features, shard_mode=self.config.shard_mode)
     elif self.config.decoder_block == DecoderBlockType.GPT3:
       return functools.partial(gpt3.gpt3_layer_norm, num_features=num_features, reductions_in_fp32=False, use_bias=True)
