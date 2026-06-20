@@ -90,6 +90,11 @@ class RouteOutput:
   bias_updates: Optional[jax.Array]
   # Shape [local experts], tracks number of local tokens routed to every local expert.
   local_group_sizes: Optional[jax.Array] = None
+  mismatch_rate: Optional[jax.Array] = None
+
+
+class RoutingMismatchRate(nnx.Intermediate):
+  """Variable type for storing routing mismatch rate."""
 
 
 def _sort_activations(
@@ -600,6 +605,29 @@ class RoutedMoE(nnx.Module):
     ):
       self.wo.value = self.wo.value * self.per_expert_scale.value[:, None, None]
 
+  def _calculate_mismatch(self, top_k_indices_model, forced_experts):
+    """Calculates the mismatch rate between model routing and forced routing."""
+    # Mask out padding tokens (where forced routing is -1)
+    valid_mask = forced_experts[:, :, 0] != -1
+    # Count matching experts for each token.
+    # top_k_indices_model: [B, L, K]
+    # forced_experts: [B, L, K]
+    # We want to check if the set of experts matches, regardless of order.
+    # Since K is small (usually 1 or 2), we can do an all-to-all comparison.
+    # [B, L, K, 1] == [B, L, 1, K] -> [B, L, K, K] -> any over last axis -> [B, L, K] -> sum over K -> matches
+    matches = jnp.any(
+        jnp.expand_dims(top_k_indices_model, -1) == jnp.expand_dims(forced_experts, -2),
+        axis=-1,
+    )
+    # Sum matches for each token and normalize by K to get fraction of correct experts
+    token_match_fraction = jnp.sum(matches, axis=-1) / self.num_experts_per_tok
+    # Mismatch rate per token
+    token_mismatch = 1.0 - token_match_fraction
+    # Average mismatch over valid tokens
+    total_valid = jnp.sum(valid_mask)
+    mismatch_rate = jnp.sum(token_mismatch * valid_mask) / (total_valid + 1e-8)
+    return mismatch_rate
+
   def _maybe_shard_with_logical(self, inputs, logical_name):
     return maybe_shard_with_logical(
         inputs,
@@ -791,6 +819,7 @@ class RoutedMoE(nnx.Module):
       rngs=None,
       roll_to_expert_id=None,
       input_ids=None,
+      forced_experts: jax.Array | None = None,
   ):
     """Permute tokens to group by expert to fit gmm call."""
     # reshape inputs (batch, sequence, emb) to (batch * sequence, emb)
@@ -798,6 +827,9 @@ class RoutedMoE(nnx.Module):
     bsz_times_seq_len = inputs_shape[0] * inputs_shape[1]
     inputs_2d = jnp.reshape(inputs, (bsz_times_seq_len, inputs_shape[2]))
     weights, selected_experts = self.get_topk(gate_logits, pre_bias_logits, rngs, input_ids)
+    mismatch_rate = None
+    if forced_experts is not None:
+      mismatch_rate = self._calculate_mismatch(selected_experts, forced_experts)
     lb_loss = None
     if self.config.load_balance_loss_weight > 0.0 and not self.is_hash_routing:
       softmax_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
@@ -900,6 +932,7 @@ class RoutedMoE(nnx.Module):
         lb_loss,
         bias_updates,
         local_group_size,
+        mismatch_rate,
     )
 
   def unpermute(
@@ -1200,6 +1233,7 @@ class RoutedMoE(nnx.Module):
       w1_bias,
       wo_bias,
       input_ids=None,
+      forced_routed_experts: jax.Array | None = None,
   ):
     """Perform sparse matrix multiplication of inputs and Experts."""
 
@@ -1452,7 +1486,7 @@ class RoutedMoE(nnx.Module):
     ) = get_routed_moe_shardings(is_batch_sharded_by_expert, input_ids is not None)
     w0_pspec, w1_pspec, wo_pspec = maybe_aqt_partition(w0_kernel, w0_pspec, w1_kernel, w1_pspec, wo_kernel, wo_pspec)
 
-    def route(x, logits, pre_bias_logits, rngs, input_ids=None):
+    def route(x, logits, pre_bias_logits, rngs, input_ids=None, forced_experts=None):
       """Performs both across device and within device token routing/sorting"""
       num_ep = self.get_expert_parallelism_size()
       expert_shard_id = jax.lax.axis_index(self._expert_parallelism_name) if num_ep > 1 else 0
@@ -1482,6 +1516,7 @@ class RoutedMoE(nnx.Module):
             lb_loss,
             bias_updates,
             local_group_sizes,
+            mismatch_rate,
         ) = self.permute(
             x,
             logits,
@@ -1490,6 +1525,7 @@ class RoutedMoE(nnx.Module):
             roll_to_expert_id=num_experts_per_shard * expert_shard_id,
             rngs=rngs,
             input_ids=input_ids,
+            forced_experts=forced_experts,
         )
 
       else:
@@ -1502,7 +1538,16 @@ class RoutedMoE(nnx.Module):
             lb_loss,
             bias_updates,
             local_group_sizes,
-        ) = self.permute(x, logits, pre_bias_logits, self.config.use_custom_sort_vjp, rngs, input_ids=input_ids)
+            mismatch_rate,
+        ) = self.permute(
+            x,
+            logits,
+            pre_bias_logits,
+            self.config.use_custom_sort_vjp,
+            rngs,
+            input_ids=input_ids,
+            forced_experts=forced_experts,
+        )
 
         if num_ep > 1:
           batch_axis = self._expert_parallelism_name if is_batch_sharded_by_expert else "data"
@@ -1568,6 +1613,7 @@ class RoutedMoE(nnx.Module):
               lb_loss=lb_loss,
               bias_updates=bias_updates,
               local_group_sizes=local_group_sizes,
+              mismatch_rate=mismatch_rate,
           ),
           RouteMetadata(
               expert_shard_id=expert_shard_id,
@@ -1658,17 +1704,39 @@ class RoutedMoE(nnx.Module):
             wo_bias_pspec,
             decoder_tokens_pspec,
             P(),  # Replicate the input key
+            gate_logits_pspec if forced_routed_experts is not None else None,
         ),
         out_specs=(
             self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", "activation_embed")),
             P(),  # Handle None or replicate the output
             P(),  # Handle None or replicate the output
+            P(),  # mismatch_rate
         ),
         check_vma=self.config.check_vma,
     )
-    def wrapper(x, logits, pre_bias_logits, w0, w1, wo, w0_bias, w1_bias, wo_bias, sharded_input_ids, rngs):
+    def wrapper(
+        x,
+        logits,
+        pre_bias_logits,
+        w0,
+        w1,
+        wo,
+        w0_bias,
+        w1_bias,
+        wo_bias,
+        sharded_input_ids,
+        rngs,
+        forced_experts,
+    ):
       batch_size, sequence_length, _ = x.shape
-      x, routing, route_metadata = route(x, logits, pre_bias_logits, rngs, input_ids=sharded_input_ids)
+      x, routing, route_metadata = route(
+          x,
+          logits,
+          pre_bias_logits,
+          rngs,
+          input_ids=sharded_input_ids,
+          forced_experts=forced_experts,
+      )
 
       if self.config.mlp_bias:
         w0_bias, w1_bias, wo_bias = self.transform_bias(routing.selected_experts, w0_bias, w1_bias, wo_bias)
@@ -1807,7 +1875,7 @@ class RoutedMoE(nnx.Module):
             group_sizes=routing.group_sizes,
         )
 
-      return output, routing.lb_loss, routing.bias_updates
+      return output, routing.lb_loss, routing.bias_updates, routing.mismatch_rate
 
     if self.config.moe_fsdp_use_two_stage_all_gather:
       # Unshard on fsdp axis
@@ -1844,6 +1912,12 @@ class RoutedMoE(nnx.Module):
     gate_logits = self._maybe_shard_with_logical(gate_logits, gate_logits_axes)
     pre_bias_logits = self._maybe_shard_with_logical(pre_bias_logits, pre_bias_logits_axes)
 
+    forced_experts = (
+        self._maybe_shard_with_logical(forced_routed_experts, gate_logits_axes)
+        if forced_routed_experts is not None
+        else None
+    )
+
     w0_kernel = self._maybe_shard_with_pspec(w0_kernel, w0_pspec)
     w1_kernel = self._maybe_shard_with_pspec(w1_kernel, w1_pspec)
     wo_kernel = self._maybe_shard_with_pspec(wo_kernel, wo_pspec)
@@ -1866,6 +1940,7 @@ class RoutedMoE(nnx.Module):
         wo_bias,
         input_ids,
         self.rngs,
+        forced_experts,
     )
 
   def reshape_and_update_weights(self, weights, indices):
@@ -2126,7 +2201,8 @@ class RoutedMoE(nnx.Module):
       w1_bias,
       wo_bias,
       input_ids=None,
-  ) -> tuple[jax.Array, Optional[jax.Array], Optional[jax.Array]]:
+      forced_routed_experts: jax.Array | None = None,
+  ) -> tuple[jax.Array, Optional[jax.Array], Optional[jax.Array], Optional[jax.Array]]:
     """Dense matrix multiplication."""
     # gate_logits: batch, length, expert
     gate_logits = self._maybe_shard_with_logical(gate_logits, ("activation_batch_moe", "activation_length_moe", None))
@@ -2136,7 +2212,17 @@ class RoutedMoE(nnx.Module):
       pre_bias_logits = self._maybe_shard_with_logical(
           pre_bias_logits, ("activation_batch_moe", "activation_length_moe", None)
       )
+    forced_experts = None
+    if forced_routed_experts is not None:
+      forced_experts = self._maybe_shard_with_logical(
+          forced_routed_experts,
+          ("activation_batch_moe", "activation_length_moe", None),
+      )
     top_k_weights, top_k_indices = self.get_topk(gate_logits, pre_bias_logits, self.rngs, input_ids=input_ids)
+    mismatch_rate = None
+    if forced_routed_experts is not None:
+      mismatch_rate = self._calculate_mismatch(top_k_indices, forced_experts)
+
     is_llama4_decoder_layer = self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4
     if is_llama4_decoder_layer:
       router_scores = jax.nn.sigmoid(top_k_weights.astype(jnp.float32)).astype(self.dtype)
@@ -2363,7 +2449,7 @@ class RoutedMoE(nnx.Module):
                   output.shape[3],
               ),
           )
-      return output, lb_loss, bias_updates
+      return output, lb_loss, bias_updates, mismatch_rate
     else:
       inputs = self._maybe_shard_with_logical(
           inputs, ("activation_batch_moe", "activation_norm_length_moe", "activation_embed_moe")
@@ -2413,7 +2499,7 @@ class RoutedMoE(nnx.Module):
             weights,
             precision=matmul_precision,
         ).astype(self.dtype)
-      return output, lb_loss, bias_updates
+      return output, lb_loss, bias_updates, mismatch_rate
 
   def fused_moe_matmul(
       self,
@@ -2423,7 +2509,7 @@ class RoutedMoE(nnx.Module):
       w0_kernel=None,
       w1_kernel=None,
       fused_kernel=None,
-  ) -> tuple[jax.Array, None, None]:
+  ) -> tuple[jax.Array, None, None, None]:
     """Fused MoE via tpu_inference fused_moe_func (vllm_rpa path only).
 
     fused_moe_func handles routing, GMM, and weighted combination internally.
@@ -2477,7 +2563,7 @@ class RoutedMoE(nnx.Module):
 
     # Reshape output 2D [T, D] -> 3D [B, S, D]
     output = jnp.reshape(output_2d, (batch_size, seq_len, emb_dim))
-    return output, None, None
+    return output, None, None, None
 
   def retrieve_quantized_weight(
       self,
@@ -2514,6 +2600,7 @@ class RoutedMoE(nnx.Module):
       input_ids: jax.Array | None = None,
       gate_inputs: jax.Array | None = None,
       out_sharding: NamedSharding | None = None,
+      forced_routed_experts: jax.Array | None = None,
   ) -> tuple[jax.Array, Optional[jax.Array], Optional[jax.Array]]:
     """Executes the routed MoE block.
 
@@ -2523,6 +2610,7 @@ class RoutedMoE(nnx.Module):
         in DeepSeek V4's early MoE layers. If None, routing relies purely on `gate_inputs` or `inputs`.
       gate_inputs: Optional alternate inputs to feed into the routing gate.
       out_sharding: Optional sharding specification for the output.
+      forced_routing_config: Optional configuration for forced routing and mismatch measurement.
 
     Returns:
       A tuple containing the MoE output, the load balance loss (if applicable),
@@ -2565,7 +2653,7 @@ class RoutedMoE(nnx.Module):
     # weights. Hash routed layers bypass this kernel and fall back
     # to the sparse matmul implementation.
     if cfg.attention == "vllm_rpa" and not self.is_hash_routing:
-      output, lb_loss, bias_updates = self.fused_moe_matmul(
+      output, lb_loss, bias_updates, mismatch_rate = self.fused_moe_matmul(
           inputs, gate_logits, wo_kernel, w0_kernel=w0_kernel, w1_kernel=w1_kernel, fused_kernel=fused_kernel
       )
     elif cfg.sparse_matmul:
@@ -2581,13 +2669,37 @@ class RoutedMoE(nnx.Module):
             w1_bias,
             wo_bias,
         )
-      output, lb_loss, bias_updates = self.sparse_matmul(
-          inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias, input_ids
+      output, lb_loss, bias_updates, mismatch_rate = self.sparse_matmul(
+          inputs,
+          gate_logits,
+          pre_bias_logits,
+          w0_kernel,
+          w1_kernel,
+          wo_kernel,
+          w0_bias,
+          w1_bias,
+          wo_bias,
+          input_ids=input_ids,
+          forced_routed_experts=forced_routed_experts,
       )
     else:
-      output, lb_loss, bias_updates = self.dense_matmul(
-          inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias, input_ids
+      output, lb_loss, bias_updates, mismatch_rate = self.dense_matmul(
+          inputs,
+          gate_logits,
+          pre_bias_logits,
+          w0_kernel,
+          w1_kernel,
+          wo_kernel,
+          w0_bias,
+          w1_bias,
+          wo_bias,
+          input_ids=input_ids,
+          forced_routed_experts=forced_routed_experts,
       )
+    if mismatch_rate is not None:
+      self.mismatch_rate = RoutingMismatchRate(mismatch_rate)
+    else:
+      self.mismatch_rate = None
     return output, lb_loss, bias_updates
 
 
@@ -2676,6 +2788,7 @@ class RoutedAndSharedMoE(nnx.Module):
       intermediate_sharding: NamedSharding | None = None,
       out_sharding: NamedSharding | None = None,
       input_ids: jax.Array | None = None,
+      forced_routed_experts: jax.Array | None = None,
   ) -> tuple[jax.Array, Optional[jax.Array], Optional[jax.Array]]:
     """Executes both the routed experts and the shared expert block.
 
@@ -2687,13 +2800,18 @@ class RoutedAndSharedMoE(nnx.Module):
       out_sharding: Optional sharding spec for the final combined output.
       input_ids: Optional token IDs corresponding to the inputs, used strictly for Hash Routing
         in DeepSeek V4's early MoE layers.
+      forced_routing_config: Optional configuration for forced routing and mismatch measurement.
 
     Returns:
       A tuple containing the combined MoE output (routed + shared),
       the load balance loss, and any routed bias updates.
     """
     routed_experts, load_balance_loss, moe_bias_updates = self.routed_moe(
-        inputs, gate_inputs=gate_inputs, out_sharding=out_sharding, input_ids=input_ids
+        inputs,
+        gate_inputs=gate_inputs,
+        out_sharding=out_sharding,
+        input_ids=input_ids,
+        forced_routed_experts=forced_routed_experts,
     )
     shared_experts = self.shared_experts(inputs, intermediate_sharding=intermediate_sharding, out_sharding=out_sharding)
     return routed_experts + shared_experts, load_balance_loss, moe_bias_updates

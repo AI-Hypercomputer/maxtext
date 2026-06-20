@@ -856,6 +856,7 @@ class Decoder(nn.Module):
       kv_caches: list[jax.Array] | None = None,
       attention_metadata=None,
       deepstack_visual_embeds: None | list[jnp.ndarray] = None,
+      forced_routed_experts: jax.Array | None = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -877,6 +878,11 @@ class Decoder(nn.Module):
       y = mhc_expand(y)
 
     policy = self.get_remat_policy()
+    supports_forced_routing = cfg.decoder_block in (
+        DecoderBlockType.QWEN3_MOE,
+        DecoderBlockType.QWEN3_NEXT,
+        DecoderBlockType.QWEN3_5,
+    )
     RemattedBlockLayers = self.set_remat_policy(self.decoder_layer, policy)
     # scan does not support kwargs in layer call, passing broadcast_args as positional arg
     broadcast_args = (
@@ -1075,6 +1081,17 @@ class Decoder(nn.Module):
           current_broadcast_args = list(broadcast_args)
           current_in_axes_tuple = list(in_axes_tuple)
 
+          if supports_forced_routing and forced_routed_experts is not None:
+            # Transpose [B, L, N, E] -> [N, B, L, E] for scan
+            forced_experts_t = jnp.transpose(forced_routed_experts, (2, 0, 1, 3))
+            cycle_interval = cfg.inhomogeneous_layer_cycle_interval
+            forced_routed_experts_t = jnp.reshape(
+                forced_experts_t,
+                (scan_length, cycle_interval) + forced_experts_t.shape[1:],
+            )
+          else:
+            forced_routed_experts_t = None
+
           if kv_caches is not None:
             # Stack kv_caches for scan: [num_layers, ...]
             stacked_kv_cache = jnp.stack(kv_caches, axis=0)
@@ -1087,6 +1104,14 @@ class Decoder(nn.Module):
             # Pass None for previous_chunk, slot, kv_cache to align with __call__ signature
             current_broadcast_args.extend([None, None, None, attention_metadata])
             current_in_axes_tuple.extend([nn.broadcast] * 4)
+
+            if supports_forced_routing:
+              if forced_routed_experts_t is not None:
+                current_broadcast_args.append(forced_routed_experts_t)
+                current_in_axes_tuple.append(0)
+              else:
+                current_broadcast_args.append(None)
+                current_in_axes_tuple.append(nn.broadcast)
 
             max_logging.info(f"DEBUG: len(current_broadcast_args)={len(current_broadcast_args)}")
             max_logging.info(f"DEBUG: current_broadcast_args={[type(a) for a in current_broadcast_args]}")
@@ -1109,8 +1134,19 @@ class Decoder(nn.Module):
               kv_caches[i] = returned_kv_cache[i]
           else:
             # Fallback to old behavior if kv_caches is None (not vLLM RPA)
-            current_broadcast_args.append(None)
-            current_in_axes_tuple.append(nn.broadcast)
+            if supports_forced_routing:
+              current_broadcast_args.extend([None, None, None, None])
+              current_in_axes_tuple.extend([nn.broadcast] * 4)
+
+              if forced_routed_experts_t is not None:
+                current_broadcast_args.append(forced_routed_experts_t)
+                current_in_axes_tuple.append(0)
+              else:
+                current_broadcast_args.append(None)
+                current_in_axes_tuple.append(nn.broadcast)
+            else:
+              current_broadcast_args.append(None)
+              current_in_axes_tuple.append(nn.broadcast)
 
             y, _ = self.scan_decoder_layers(
                 cfg,
@@ -1139,6 +1175,11 @@ class Decoder(nn.Module):
               global_layer_idx = global_layer_idx_offset + index
               kv_cache = kv_caches[index] if kv_caches is not None else None
               input_tokens = decoder_input_tokens if cfg.engram_layers else None
+              extra_kwargs = {}
+              if layer_prefix == "moe_layers" and forced_routed_experts is not None:
+                forced_experts = forced_routed_experts[:, :, index, :]
+                extra_kwargs["forced_routed_experts"] = forced_experts
+
               y, kv_cache = layer(
                   config=cfg,
                   mesh=mesh,
@@ -1157,6 +1198,7 @@ class Decoder(nn.Module):
                   kv_cache=kv_cache,
                   attention_metadata=attention_metadata,
                   decoder_input_tokens=input_tokens,
+                  **extra_kwargs,
               )
               if kv_caches is not None and kv_cache is not None:
                 kv_caches[index] = kv_cache
@@ -1176,6 +1218,7 @@ class Decoder(nn.Module):
               slot=slot,
           )
         else:
+          moe_lyr_idx = 0
           for lyr in range(cfg.num_decoder_layers):
             RemattedBlockLayer = RemattedBlockLayers[0]
             layer_kwargs = {}
@@ -1212,6 +1255,17 @@ class Decoder(nn.Module):
             layer = RemattedBlockLayer(
                 config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant, model_mode=self.model_mode, **layer_kwargs
             )
+            current_forced_routed_experts = None
+            if supports_forced_routing and forced_routed_experts is not None:
+              current_forced_routed_experts = forced_routed_experts[:, :, moe_lyr_idx, :]
+              moe_lyr_idx += 1
+            elif supports_forced_routing:
+              moe_lyr_idx += 1
+
+            extra_kwargs = {}
+            if supports_forced_routing and current_forced_routed_experts is not None:
+              extra_kwargs["forced_routed_experts"] = current_forced_routed_experts
+
             y, returned_cache = layer(
                 y,
                 decoder_segment_ids,
@@ -1222,6 +1276,7 @@ class Decoder(nn.Module):
                 slot=slot,
                 kv_cache=kv_cache,
                 attention_metadata=attention_metadata,
+                **extra_kwargs,
                 **layer_call_kwargs,
             )
             if kv_caches is not None and returned_cache is not None:

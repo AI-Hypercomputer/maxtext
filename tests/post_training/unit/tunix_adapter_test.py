@@ -40,10 +40,18 @@ class _CallableStubBase:
     self.config = SimpleNamespace(model_name=_STUB_MODEL_NAME)
     self.captured = {}
 
-  def __call__(self, *, decoder_input_tokens, decoder_positions, decoder_segment_ids):
+  def __call__(
+      self,
+      *,
+      decoder_input_tokens,
+      decoder_positions,
+      decoder_segment_ids,
+      forced_routed_experts=None,
+  ):
     self.captured["decoder_input_tokens"] = decoder_input_tokens
     self.captured["decoder_positions"] = decoder_positions
     self.captured["decoder_segment_ids"] = decoder_segment_ids
+    self.captured["forced_routed_experts"] = forced_routed_experts
     # Return dummy logits shaped [B, L, V=2] so the adapter has something to forward.
     b, l = decoder_input_tokens.shape
     return jnp.zeros((b, l, 2), dtype=jnp.float32)
@@ -116,7 +124,10 @@ class TunixAdapterSegmentIdsTest(unittest.TestCase):
 
     adapter(input_tokens, positions, None, None, decoder_segment_ids=explicit_seg)
 
-    np.testing.assert_array_equal(np.asarray(self.base.captured["decoder_segment_ids"]), np.asarray(explicit_seg))
+    np.testing.assert_array_equal(
+        np.asarray(self.base.captured["decoder_segment_ids"]),
+        np.asarray(explicit_seg),
+    )
 
   @pytest.mark.cpu_only
   def test_returns_logits_and_none_tuple(self):
@@ -134,6 +145,28 @@ class TunixAdapterSegmentIdsTest(unittest.TestCase):
     logits, second = result
     self.assertIsNone(second)
     self.assertEqual(logits.shape, (1, 5, 2))
+
+  @pytest.mark.cpu_only
+  def test_passes_forced_routed_experts(self):
+    """Caller passes forced_routed_experts -> adapter passes it directly to base."""
+    adapter = TunixMaxTextAdapter(base_model=self.base, pad_id=99)
+
+    input_tokens = jnp.array([[10, 11, 12, 99, 99]], dtype=jnp.int32)
+    positions = jnp.arange(5, dtype=jnp.int32)[None, :]
+    forced_experts = jnp.array([[[0, 1], [2, 3]]])
+
+    adapter(
+        input_tokens,
+        positions,
+        None,
+        None,
+        decoder_segment_ids=None,
+        forced_routed_experts=forced_experts,
+    )
+
+    captured_experts = self.base.captured["forced_routed_experts"]
+    self.assertIsNotNone(captured_experts)
+    np.testing.assert_array_equal(np.asarray(captured_experts), np.asarray(forced_experts))
 
 
 if __name__ == "__main__":
