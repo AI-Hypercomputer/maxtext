@@ -386,6 +386,7 @@ class DeepSeekDenseLayer(DeepSeekGenericLayer):
       decoder_positions,
       deterministic,
       model_mode,
+      xlayer_w01=None,
       previous_chunk=None,
       slot: None | int = None,
       kv_cache=None,
@@ -393,6 +394,8 @@ class DeepSeekDenseLayer(DeepSeekGenericLayer):
       decoder_input_tokens=None,
       routing_rng_key=None,
   ):
+    # xlayer_w01 (moe_xlayer_prefetch): scan-sliced lifted (wi_0, wi_1) for the MoE layer, passed by
+    # the Decoder as a scanned input when the cross-layer prefetch is on; None for dense / when off.
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
     if isinstance(inputs, tuple):
       inputs = inputs[0]
@@ -469,6 +472,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       decoder_positions,
       deterministic,
       model_mode,
+      xlayer_w01=None,
       previous_chunk=None,
       slot: None | int = None,
       kv_cache=None,
@@ -476,6 +480,8 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       decoder_input_tokens=None,
       routing_rng_key=None,
   ):
+    # xlayer_w01 (moe_xlayer_prefetch): scan-sliced lifted (wi_0, wi_1) for the MoE layer, passed by
+    # the Decoder as a scanned input when the cross-layer prefetch is on; None for dense / when off.
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
     if isinstance(inputs, tuple):
       inputs = inputs[0]
@@ -648,7 +654,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
         and (not self.config.use_random_routing or routing_key_bits is not None)
     ):
       layer_output, load_balance_loss, moe_bias_updates = self._handwritten_moe_layer(
-          x, decoder_segment_ids, decoder_positions, deterministic
+          x, decoder_segment_ids, decoder_positions, deterministic, xlayer_w01
       )
       return self.post_process(layer_output, load_balance_loss, moe_bias_updates, kv_cache)
 
@@ -712,7 +718,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
 
     return self.post_process(layer_output, load_balance_loss, moe_bias_updates, kv_cache)
 
-  def _handwritten_moe_layer(self, x, decoder_segment_ids, decoder_positions, deterministic):
+  def _handwritten_moe_layer(self, x, decoder_segment_ids, decoder_positions, deterministic, xlayer_w01=None):
     """Layer custom_vjp with a hand-written backward (flag: moe_handwritten_bwd).
 
     Wraps gather + attention + MoE so WE own the backward schedule. The forward runs the existing
@@ -777,11 +783,12 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
 
     # `rest_other` holds forward-trace tracers, so it must be THREADED through residuals -- never
     # closed over in the bwd -- or it leaks across the nn.scan boundary. graphdef/det are static.
-    def _gather(p, rest_):
+    def _gather(p, xlayer_w01, rest_):
       # annotated custom_vjp gather. Under moe_handwritten_splash_group the w0/w1 slots come back as
       # zero-arg CLOSURES (deferred so the forward can emit them adjacent to the splash); the backward
       # MATERIALIZES them here (placement = scheduler default, gather math identical -> bit-exact).
-      w = _merge(p, rest_).DeepSeekMoeBlock_0.gather_routed_weights()
+      # xlayer_w01 (moe_xlayer_prefetch): the lifted (wi_0,wi_1) slice for THIS layer; None when off.
+      w = _merge(p, rest_).DeepSeekMoeBlock_0.gather_routed_weights(xlayer_w01)
       if w is None:
         return w
       return tuple(wi() if callable(wi) else wi for wi in w)
@@ -797,7 +804,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       layer_output = m.dropout_op(mlp_lnx + intermediate_inputs, deterministic=det)
       return layer_output, load_balance_loss, moe_bias_updates
 
-    def _forward_once(p, x_in, rest_):
+    def _forward_once(p, x_in, xlayer_w01, rest_):
       # SINGLE merged module for the whole forward (gather + attention + MoE), like the autodiff
       # best-run structure: the gather and attention read the SAME module so XLA keeps hiding the
       # weight all-gather behind the QKV/GMM compute. (The backward still takes 3 separate jax.vjp
@@ -805,7 +812,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       # identical and the gradient is unchanged.) gather is emitted FIRST (program-order before
       # attention) to preserve the hoist.
       m = _merge(p, rest_)
-      weights = m.DeepSeekMoeBlock_0.gather_routed_weights()
+      weights = m.DeepSeekMoeBlock_0.gather_routed_weights(xlayer_w01)
       # moe_handwritten_splash_group: w0/w1 come back as zero-arg CLOSURES. Thread them into the
       # attention via wag_cell so tpu_flash_attention invokes them ADJACENT to the splash kernel
       # (inside the splash's _scheduling_group -> contiguous group 1 -> w0/w1 gathers overlap the
@@ -835,18 +842,19 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       return layer_output, load_balance_loss, moe_bias_updates
 
     @jax.custom_vjp
-    def fused(p, x_in):
-      return _forward_once(p, x_in, rest_other)
+    def fused(p, x_in, xlayer_w01):
+      return _forward_once(p, x_in, xlayer_w01, rest_other)
 
-    def fused_fwd(p, x_in):
-      out = _forward_once(p, x_in, rest_other)
-      # Residuals: sharded params + decoder_layer_input + (seg, pos, rest_other). seg/pos closed over
-      # in the primal/fwd and read from residuals in the bwd (no tracer leak). NO gathered weights /
-      # activations / routing-bits / rng saved (a body-computed value saved as a residual escapes).
-      return out, (p, x_in, seg0, pos0, rest_other)
+    def fused_fwd(p, x_in, xlayer_w01):
+      out = _forward_once(p, x_in, xlayer_w01, rest_other)
+      # Residuals: sharded params + decoder_layer_input + (seg, pos, rest_other) + xlayer_w01. seg/pos
+      # closed over in the primal/fwd and read from residuals in the bwd (no tracer leak). xlayer_w01
+      # is a scan-INPUT-class value (like seg/pos) -> SAFE to carry through residuals (not the
+      # rng/routing escape case). NO gathered weights / activations / routing-bits / rng saved.
+      return out, (p, x_in, seg0, pos0, rest_other, xlayer_w01)
 
     def fused_bwd(res, cotangents):
-      p, x_in, seg, pos, rest_ = res
+      p, x_in, seg, pos, rest_, xlayer_w01 = res
       # Re-tracing the bridged layer methods happens OUTSIDE the linen forward, so detach the
       # linen module stack to avoid the qwix-fixup None.path crash (see helper docstring).
       with _detached_linen_module_stack():
@@ -857,7 +865,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
         # its only same-layer cover is the splash kernel, which does NOT hide collectives -> ~3.8ms
         # exposed past the splash). Structural placement, NOT a scheduling-group annotation (those are
         # vestigial here). bwd of the gather = tiled psum_scatter -> sharded weight grads.
-        weights, vjp_gather = jax.vjp(lambda pp: _gather(pp, rest_), p)
+        weights, vjp_gather = jax.vjp(lambda pp, ww: _gather(pp, ww, rest_), p, xlayer_w01)
         # 2) recompute attention forward + build its VJP (the splash-fwd remat; weight-independent)
         (hidden_states, intermediate_inputs), vjp_attn = jax.vjp(
             lambda pp, xx: _attn(pp, xx, seg, pos, rest_), p, x_in
@@ -867,14 +875,16 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
             lambda pp, hh, ii, ww: _moe(pp, hh, ii, ww, rest_), p, hidden_states, intermediate_inputs, weights
         )
         dp_moe, d_hidden, d_inter, d_weights = vjp_moe(cotangents)
-        (dp_gather,) = vjp_gather(d_weights)
+        (dp_gather, d_xlayer_w01) = vjp_gather(d_weights)
         dp_attn, dx = vjp_attn((d_hidden, d_inter))
-      # disjoint per-piece param cotangents (zeros elsewhere) -> sum reconstructs the full gradient
+      # disjoint per-piece param cotangents (zeros elsewhere) -> sum reconstructs the full gradient.
+      # The lifted up-proj weights' gradient exits via d_xlayer_w01 (the custom_vjp input cotangent),
+      # NOT folded into dp -- it flows back through the scan to the Decoder-owned stacked W01 param.
       dp = jax.tree.map(lambda a, b, c: a + b + c, dp_attn, dp_moe, dp_gather)
-      return dp, dx
+      return dp, dx, d_xlayer_w01
 
     fused.defvjp(fused_fwd, fused_bwd)
-    return fused(params, x)
+    return fused(params, x, xlayer_w01)
 
   def mlp_op(self, x, deterministic, *args, pregathered_weights=None, routing_key_bits=None, **kwargs):
     mlp_lnx, load_balance_loss, moe_bias_updates = self.DeepSeekMoeBlock_0(

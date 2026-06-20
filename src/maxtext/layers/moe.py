@@ -2663,7 +2663,7 @@ class RoutedMoE(nnx.Module):
     wo_kernel = max_utils.unbox_logicallypartioned(wo_kernel)
     return w0_kernel, w1_kernel, wo_kernel
 
-  def gather_weights(self):
+  def gather_weights(self, xlayer_w01=None):
     """FSDP-all-gather the routed expert weights (wi_0/wi_1/wo) early, so the
     all-gather can be emitted in the ATTENTION phase (program-order before the
     splash kernel) and overlap it (the SparseCore is idle during splash).
@@ -2688,8 +2688,15 @@ class RoutedMoE(nnx.Module):
     ):
       return None
 
-    w0 = jnp.asarray(self.wi_0[...], self.dtype)
-    w1 = jnp.asarray(self.wi_1[...], self.dtype)
+    # Cross-layer prefetch (moe_xlayer_prefetch): wi_0/wi_1 are lifted to a Decoder-owned stacked
+    # param and threaded in per-layer as `xlayer_w01` (the scan-sliced slice), since self.wi_0/wi_1
+    # are now jnp.zeros placeholders. wo still lives on this module's params.
+    if xlayer_w01 is not None:
+      w0 = jnp.asarray(xlayer_w01[0], self.dtype)
+      w1 = jnp.asarray(xlayer_w01[1], self.dtype)
+    else:
+      w0 = jnp.asarray(self.wi_0[...], self.dtype)
+      w1 = jnp.asarray(self.wi_1[...], self.dtype)
     wo = jnp.asarray(self.wo[...], self.dtype)
     # in = fsdp-sharded-on-embed kernel layout; out = the gathered (mlp_no_fsdp /
     # embed_tensor_transpose) layout sparse_matmul expects (default ring branch).
@@ -2969,10 +2976,11 @@ class RoutedAndSharedMoE(nnx.Module):
   def routed_moe(self):
     return self.MoeBlock_0
 
-  def gather_routed_weights(self):
+  def gather_routed_weights(self, xlayer_w01=None):
     """Pre-gather the routed experts' FSDP weights (see RoutedMoE.gather_weights).
-    Call this in the attention phase; pass the result back as pregathered_weights."""
-    return self.MoeBlock_0.gather_weights()
+    Call this in the attention phase; pass the result back as pregathered_weights.
+    xlayer_w01 (moe_xlayer_prefetch): the lifted (wi_0, wi_1) slice for this layer."""
+    return self.MoeBlock_0.gather_weights(xlayer_w01=xlayer_w01)
 
   def __call__(
       self,
