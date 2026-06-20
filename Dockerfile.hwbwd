@@ -1,0 +1,2 @@
+FROM gcr.io/cloud-tpu-multipod-dev/integrate_v2:wag-attn-0618j
+COPY src/maxtext/ /deps/src/maxtext/

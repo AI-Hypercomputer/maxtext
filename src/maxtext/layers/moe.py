@@ -1496,7 +1496,11 @@ class RoutedMoE(nnx.Module):
     )
 
     def _wag_scheduling_group():
-      return _scheduling_group(_WEIGHT_AG_SCHED_GROUP) if _wag_sched else contextlib.nullcontext()
+      # moe_wag_no_annotation ablation: keep the co-located in-MoE gather + EP all-gather but DROP the
+      # _scheduling_group_id tag -> tests whether XLA parallelizes the two collectives on the 2 SCs on
+      # its own, without any annotation (and sidesteps the autodiff backward-RS cycle the tag triggers).
+      _tag = _wag_sched and not self.config.moe_wag_no_annotation
+      return _scheduling_group(_WEIGHT_AG_SCHED_GROUP) if _tag else contextlib.nullcontext()
     (
         batch_logical_axis,
         input_partition_pspec,
