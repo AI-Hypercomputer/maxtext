@@ -838,6 +838,20 @@ class MoEGeneral(BaseModel):
           "remat). Scheduling-only; numerics unchanged. Default False."
       ),
   )
+  splash_head_pipeline_stages: int = Field(
+      1,
+      description=(
+          "Splash head-pipelining (Tip 2): split the forward splash kernel over the head axis into N "
+          "stages and stagger them with a THREADED optimization_barrier carry token (stage i+1's inputs "
+          "fenced by stage i's (out, gather) outputs) so each stage's expert-weight all-gather (SC) "
+          "overlaps that stage's splash (TC) -- batchsplit's two-stream pipeline on the head axis, "
+          "HBM-neutral and local to attention_op. N=2 is the golden ratio (11ms splash -> two ~5.5ms "
+          "stages; w0 hides in stage 0, w1 in stage 1; wo hides behind the up-GMM). Requires "
+          "moe_handwritten_splash_group=True (provides the w0/w1 gather closures via wag_cell). 1 = off. "
+          "The threaded token is load-bearing: without it XLA unrolls the N independent barriers and "
+          "recombines the slices into one TC block, sinking the gathers (collapses to single stream)."
+      ),
+  )
   moe_splash_barrier: bool = Field(
       False,
       description=(

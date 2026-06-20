@@ -1483,9 +1483,35 @@ class AttentionOp(nnx.Module):
             )
             return attention_output, max_logits
           else:
-            attention_output = jax.vmap(lambda q, k, v, d, s: kernel(q, k, v, d, sinks=s), in_axes=(0, 0, 0, 0, None))(
-                query, key, value, decoder_segment_ids_tuple, sinks
-            )
+            def _splash(q, k, v):
+              return jax.vmap(lambda qq, kk, vv, dd, ss: kernel(qq, kk, vv, dd, sinks=ss), in_axes=(0, 0, 0, 0, None))(
+                  q, k, v, decoder_segment_ids_tuple, sinks
+              )
+            n_stages = getattr(self.config, "splash_head_pipeline_stages", 1)
+            if n_stages > 1 and wag_cell is not None and "gather_w0" in wag_cell:
+              # HEAD-PIPELINE (Tip 2): split splash over the head axis (axis 1, HEAD_DIM_MINOR layout)
+              # into n_stages, threading an optimization_barrier carry token so stage i+1's inputs are
+              # fenced by stage i's (out, gather) -> a hard sequential pipeline (batchsplit's mechanism
+              # on heads). Each stage fires one expert-weight gather (stage0->w0, stage1->w1) on the SC
+              # while its splash runs on the TC. The threaded token is load-bearing: without it XLA
+              # recombines the slices into one TC block and sinks the gathers (single stream).
+              _H = query.shape[1]
+              _step = _H // n_stages
+              _closures = [wag_cell.get("gather_w0"), wag_cell.get("gather_w1")]
+              _outs = []
+              _token = jnp.zeros((1,), query.dtype)
+              for _i in range(n_stages):
+                _sl = slice(_i * _step, (_i + 1) * _step)
+                _qi, _ki, _vi = query[:, _sl], key[:, _sl], value[:, _sl]
+                _qi, _ki, _vi, _token = jax.lax.optimization_barrier((_qi, _ki, _vi, _token))
+                if _i < len(_closures) and _closures[_i] is not None:
+                  wag_cell[f"w{_i}_gathered"] = _closures[_i]()  # SC gather, overlaps this TC stage
+                _oi = _splash(_qi, _ki, _vi)
+                _token = (_oi, wag_cell.get(f"w{_i}_gathered"))  # tie outputs -> next stage's barrier
+                _outs.append(_oi)
+              attention_output = jnp.concatenate(_outs, axis=1)  # reassemble full heads (~0.05ms kCopy)
+            else:
+              attention_output = _splash(query, key, value)
             return attention_output, None
       elif self.config.use_jax_splash:
         materialized_mask = jnp.asarray(mask[:, :])
@@ -1540,15 +1566,16 @@ class AttentionOp(nnx.Module):
     sinks = self._maybe_shard_with_pspec(sinks, sink_axis_names)
     indexer_mask = self._maybe_shard_with_pspec(indexer_mask, indexer_mask_axis_names)
 
-    # Invoke the expert-weight gather closures HERE (right before the attention). Each closure
-    # self-tags its all-gather with _scheduling_group_id=1 (via _make_cv_gather), joining the
-    # value-op anchor above in group 1 so the scheduler floats them over the splash. Results spliced
-    # into the MoE's pregathered_weights back in deepseek.py. (moe_handwritten_splash_group threads
-    # both w0 and w1; moe_wag_splash_group w1.)
-    if wag_cell is not None and "gather_w0" in wag_cell:
-      wag_cell["w0_gathered"] = wag_cell["gather_w0"]()
-    if wag_cell is not None and "gather_w1" in wag_cell:
-      wag_cell["w1_gathered"] = wag_cell["gather_w1"]()
+    # Invoke the expert-weight gather closures HERE (right before the attention) -- UNLESS the splash
+    # head-pipeline is on, in which case wrap_flash_attention fires them per-stage (one gather per head
+    # stage) so each overlaps a splash stage; invoking here too would double-gather. Results spliced
+    # into the MoE's pregathered_weights back in deepseek.py.
+    _hp = getattr(self.config, "splash_head_pipeline_stages", 1) > 1
+    if not _hp:
+      if wag_cell is not None and "gather_w0" in wag_cell:
+        wag_cell["w0_gathered"] = wag_cell["gather_w0"]()
+      if wag_cell is not None and "gather_w1" in wag_cell:
+        wag_cell["w1_gathered"] = wag_cell["gather_w1"]()
     ret = wrap_flash_attention(
         query,
         key,

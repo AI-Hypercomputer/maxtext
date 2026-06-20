@@ -200,8 +200,16 @@ wo_g = wo_gather()                                        # released after -> hi
 mlp = mlp_op(hidden, pregathered_weights=(w1g, w2g, wo_g))
 ```
 
-**Expected:** forward exposed-collective drops as w1/w2 move into the splash window; wo continues to hide
-behind the up-GMM (unchanged).
+**RESULT (`moe_splash_barrier=True`, chunk=1, image hwbwd-0620a): NULL.** Step 16.306 / 16.301 vs the
+16.32 no-barrier baseline, loss bit-exact. **Trace confirms the mechanism did not fire:** the forward
+splash window is unchanged (6.6→17.6 ms), the weight all-gathers still `async-done` *after* it (21.3 /
+26.2 ms), and the forward weight gather's exposed stall is **5.15 ms — identical to the no-barrier
+~5.19 ms**. XLA did **not** honor the deadline by moving the `async-start` earlier; it kept the
+HBM-minimal (late-start) schedule. Per the reviewer's decision rule, "remains late" → the single-stream
+scheduler lacks the expressiveness, and **the splash window requires the multi-stream (batchsplit)
+approach.** This was the last untried *structural single-stream* lever.
+
+**Expected (did not materialize):** forward exposed-collective drops as w1/w2 move into the splash window.
 
 **Risks / unknowns to flag for review:**
 1. A barrier sets a *deadline*, it does not *force concurrency* — XLA may satisfy "done by 16.5 ms" by
@@ -216,8 +224,20 @@ behind the up-GMM (unchanged).
 
 ## 7. Decision for review
 
-- **Single-stream splash overlap** has failed 7 ways (cycle → gap → null); §6 is the one untried
-  *structural* lever left for the single stream.
-- If §6 is also null, the conclusion is firm: **the splash window is only reachable via a second
-  independent stream** (batchsplit's split+stagger), and the choice is (a) adopt that schedule on the
-  generic path, or (b) bank only the matmul-window overlaps and treat ~15.9 s as the single-stream floor.
+**Single-stream splash overlap has failed 8 ways** — annotation (cycle → gap → gap → vestigial), input
+anchor (null), backward reorder (null), and now the splash-output deadline barrier (§6, null). Every
+mechanism that does not introduce a second independent stream has been exhausted.
+
+**Conclusion (firm):** on a single batch, XLA will not run a weight all-gather against the splash kernel.
+The splash window (~11 ms fwd / ~19 ms dkv per layer) is **only reachable via a second independent
+stream** — exactly what batchsplit's `split` + `staggered_call(optimization_barrier)` provides.
+
+**The fork:**
+- **(a) Adopt the batch-split / stagger schedule on the generic path** — manufacture the second stream so
+  the splash window becomes usable. This is where batchsplit's time actually comes from; it is a real
+  restructure (split the batch; stagger attention and MoE across micro-batches with `optimization_barrier`),
+  not a flag.
+- **(b) Bank only the matmul-window overlaps** (the forward already gets ~2/3 there) and treat ~15.9 s as
+  the single-stream floor; stop chasing the splash window.
+
+The matmul-window overlaps are independent of this decision and remain available either way.
