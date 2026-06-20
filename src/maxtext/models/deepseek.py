@@ -818,6 +818,16 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       )
       if wag_cell is not None:
         weights = (wag_cell["w0_gathered"], wag_cell["w1_gathered"], weights[2])
+      if self.config.moe_splash_barrier and weights is not None and not callable(weights[0]):
+        # Fence the up-projection gathers (w0,w1) across the splash OUTPUT: deadline = splash-end, so
+        # XLA must finish the async all-gathers by here -> it starts them earlier, INTO the idle-SC
+        # splash window, instead of just-in-time for the MoE GMM (where they spill past the splash,
+        # exposed; trace: async-start ~15.1ms of a 5.7->16.5ms splash). wo (weights[2]) flows free and
+        # hides behind the up-GMM. optimization_barrier is identity -> bit-exact. This lives in
+        # _forward_once so it is FORWARD-ONLY (the bwd recompute uses _attn/_gather/_moe) -> the barrier
+        # never reaches the weight-grad reduce-scatter. Batchsplit-style ordering lever, not annotation.
+        hidden_states, _w0g, _w1g = jax.lax.optimization_barrier((hidden_states, weights[0], weights[1]))
+        weights = (_w0g, _w1g, weights[2])
       mlp_lnx, load_balance_loss, moe_bias_updates = m.mlp_op(
           hidden_states, det, pregathered_weights=weights, routing_key_bits=_routing_bits()
       )

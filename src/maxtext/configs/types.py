@@ -838,6 +838,21 @@ class MoEGeneral(BaseModel):
           "remat). Scheduling-only; numerics unchanged. Default False."
       ),
   )
+  moe_splash_barrier: bool = Field(
+      False,
+      description=(
+          "With moe_handwritten_bwd: fence the up-projection weight gathers (w0,w1) across the splash "
+          "OUTPUT via jax.lax.optimization_barrier((hidden_states, w0, w1)) in the forward. This sets "
+          "their scheduling DEADLINE = splash-end (not splash-start, which the input-anchor wrongly "
+          "did), forcing XLA to start the async all-gathers earlier -- into the idle-SparseCore splash "
+          "window -- instead of just-in-time for the MoE GMM (where they spill past the splash, "
+          "exposed). wo flows free (hides behind the up-GMM). Same structural use of optimization_barrier "
+          "as batchsplit's staggered_call (ordering/pipeline), NOT a scheduling-group annotation. "
+          "optimization_barrier is identity -> bit-exact; placed in _forward_once so it is forward-only "
+          "(the bwd recompute uses _attn/_gather/_moe, not _forward_once) -> no weight-grad-RS fence. "
+          "Default False."
+      ),
+  )
   moe_handwritten_bwd: bool = Field(
       False,
       description=(

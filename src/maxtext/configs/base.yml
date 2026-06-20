@@ -231,6 +231,7 @@ moe_wag_splash_group: false # tag the splash kernel with _scheduling_group_id=1 
 moe_wag_attn_group: false # over-group: all 3 gathers + the whole attention forward share ONE scheduling-group id -> contiguous region (no gap), scheduler overlaps gathers across QKV+splash
 moe_routing_key_as_input: false # DeepSeek random routing: derive the routing key from a CONSTANT seed (pure jax) instead of nnx rngs.params(); rng-free routing so the hand-written MoE bwd can recompute it. Set on both the hand-written run and its autodiff reference.
 moe_random_routing_seed: 0 # seed for the constant random-routing key when moe_routing_key_as_input is True
+moe_splash_barrier: false # hand-written fwd: fence up-proj gathers (w0,w1) across the splash OUTPUT via optimization_barrier so their deadline=splash-end -> XLA starts them inside the idle-SC splash window (batchsplit-style ordering lever, not annotation); identity -> bit-exact; forward-only
 moe_handwritten_splash_group: false # hand-written path: tag the splash kernel with _scheduling_group_id=1 (same as w0 gather) so XLA overlaps the hoisted w0 FSDP gather with the idle-SC splash kernel; splash-tag only (no w1 wag_cell closure); no auto-remat cycle (hand-written bwd owns remat)
 moe_handwritten_bwd: false # DeepSeek MoE: wrap layer (gather+attn+MoE) in jax.custom_vjp inside nn.scan; hand-written bwd places annotated weight re-gather adjacent to splash-fwd-remat; we own remat (no cycle); residuals = layer input + sharded params only; bit-exact to autodiff
 # tunable tiling dimensions used for mlp gmm
