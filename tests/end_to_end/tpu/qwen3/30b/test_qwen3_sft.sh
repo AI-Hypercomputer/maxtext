@@ -34,20 +34,21 @@ python3 -m maxtext.inference.vllm_decode \
     use_chat_template=True scan_layers=false enable_single_controller=${use_pathways} \
     ici_tensor_parallelism=4
 
-python3 -m maxtext.trainers.post_train.sft.train_sft_native \
+python3 -m maxtext.trainers.post_train.sft.train_sft \
+    "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"/post_train/sft.yml \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/sft \
-    load_parameters_path=${SCANNED_CKPT_PATH} \
+    load_parameters_path=${UNSCANNED_CKPT_PATH} \
     per_device_batch_size=0.125 run_name=${run_id} \
-    steps=5 scan_layers=true \
+    steps=5 scan_layers=false \
     model_name=${MODEL_NAME} enable_single_controller=${use_pathways} \
     checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False \
-    remat_policy=full \
-    ici_tensor_parallelism=4 ici_fsdp_parallelism=1 ici_expert_parallelism=2 max_target_length=64 weight_dtype=bfloat16 dtype=bfloat16 opt_type=sgd optimizer_memory_host_offload=true
+    remat_policy=full use_tunix_gradient_accumulation=False \
+    ici_tensor_parallelism=1 ici_fsdp_parallelism=1 ici_expert_parallelism=8 max_target_length=16 weight_dtype=bfloat16 dtype=bfloat16 opt_type=sgd
 
 python3 -m maxtext.inference.vllm_decode \
     model_name=${MODEL_NAME} \
     load_parameters_path=${BASE_OUTPUT_DIRECTORY}/sft/${run_id}/checkpoints/5/model_params \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
     hbm_utilization_vllm=0.85 \
-    use_chat_template=True scan_layers=true enable_single_controller=${use_pathways} \
+    use_chat_template=True scan_layers=false enable_single_controller=${use_pathways} \
     ici_tensor_parallelism=4
