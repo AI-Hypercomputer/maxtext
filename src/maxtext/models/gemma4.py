@@ -509,14 +509,13 @@ class Gemma4ScannableBlock(nnx.Module):
 
     final_carry = y
     scanned_state_parts = []
-    with xla_metadata.set_xla_metadata(**{"skip-simplify-while-loops_trip-count-one": "true"}):
-      for i in range(self.num_local):
-        p_i = jax.tree.map(lambda x: jnp.expand_dims(x[i], 0), params)
-        s_i = jax.tree.map(lambda x: jnp.expand_dims(x[i], 0), state)
-        final_carry, state_i = jax.lax.scan(scan_body, final_carry, (p_i, s_i))
-        scanned_state_parts.append(state_i)
-        
-    scanned_state = jax.tree.map(lambda *x: jnp.concatenate(x, axis=0), *scanned_state_parts)
+    for i in range(self.num_local):
+      p_i = jax.tree.map(lambda x: x[i], params)
+      s_i = jax.tree.map(lambda x: x[i], state)
+      final_carry, state_i = scan_body(final_carry, (p_i, s_i))
+      scanned_state_parts.append(state_i)
+      
+    scanned_state = jax.tree.map(lambda *x: jnp.stack(x, axis=0), *scanned_state_parts)
 
     if scan_axis != 0:
       scanned_params, scanned_other = scanned_state.split(nnx.Param, ...)
