@@ -64,4 +64,5 @@ docker run --rm \
   use_tokamax_splash=true \
   use_random_routing=true \
   use_ring_of_experts=true \
-  use_ragged_sort=true
+  use_ragged_sort=true \
+  debug_sharding=True

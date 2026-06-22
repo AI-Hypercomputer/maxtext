@@ -591,21 +591,42 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       w1_local = jnp.asarray(routed_moe.wi_1[...], self.config.dtype)
       wo_local = jnp.asarray(routed_moe.wo[...], self.config.dtype)
 
+      # Use pure NNX direct attribute access to read the active parameter tracers
+      print(f"DEBUG NNX PHYSICAL SHARDING (Layer {self.layer_idx}):")
+      
+      # In NNX, accessing self.DeepSeekMoeBlock_0.MoeBlock_0.wi_0.value directly returns the raw JAX array/tracer
+      w0_local = self.DeepSeekMoeBlock_0.MoeBlock_0.wi_0.value
+      w1_local = self.DeepSeekMoeBlock_0.MoeBlock_0.wi_1.value
+      wo_local = self.DeepSeekMoeBlock_0.MoeBlock_0.wo.value
+      
+      print(f"  w0_local type: {type(w0_local)}")
+      if hasattr(w0_local, "aval") and hasattr(w0_local.aval, "sharding"):
+        print(f"  w0_local physical sharding: {w0_local.aval.sharding}")
+      elif hasattr(w0_local, "sharding"):
+        print(f"  w0_local physical sharding: {w0_local.sharding}")
+        
+      print(f"  w0_pspec (target PartitionSpec): {w0_pspec}")
+
       # Trigger MoE All-Gathers in scheduling group 0
       with set_xla_metadata(_scheduling_group_id=0):
-        w0_gathered = routed_moe._maybe_shard_with_pspec(w0_local, w0_pspec)
-        w1_gathered = routed_moe._maybe_shard_with_pspec(w1_local, w1_pspec)
-        wo_gathered = routed_moe._maybe_shard_with_pspec(wo_local, wo_pspec)
+        w0_gathered = self.DeepSeekMoeBlock_0.MoeBlock_0._maybe_shard_with_pspec(w0_local, w0_pspec)
+        w1_gathered = self.DeepSeekMoeBlock_0.MoeBlock_0._maybe_shard_with_pspec(w1_local, w1_pspec)
+        wo_gathered = self.DeepSeekMoeBlock_0.MoeBlock_0._maybe_shard_with_pspec(wo_local, wo_pspec)
         pre_gathered_weights = (w0_gathered, w1_gathered, wo_gathered)
+        
+        if hasattr(w0_gathered, "aval") and hasattr(w0_gathered.aval, "sharding"):
+          print(f"  w0_gathered physical sharding: {w0_gathered.aval.sharding}")
+        elif hasattr(w0_gathered, "sharding"):
+          print(f"  w0_gathered physical sharding: {w0_gathered.sharding}")
 
-      hidden_states, intermediate_inputs = self.self_attention_with_norm_op(
-          x,
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic,
-          previous_chunk,
-          slot,
-      )
+        hidden_states, intermediate_inputs = self.self_attention_with_norm_op(
+            x,
+            decoder_segment_ids,
+            decoder_positions,
+            deterministic,
+            previous_chunk,
+            slot,
+        )
     else:
       # Standard execution path (fallback or batch-split path which has its own schedule)
       hidden_states, intermediate_inputs = self.self_attention_with_norm_op(

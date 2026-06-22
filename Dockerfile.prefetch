@@ -1,0 +1,3 @@
+FROM gcr.io/tpu-prod-env-one-vm/chengnuojin_google_com_ragged_sort@sha256:5a5014a362f453f29c8b89902d024ee2c89c53000b74904504ae3b01d3567a54
+WORKDIR /deps
+COPY src/ /deps/src/
