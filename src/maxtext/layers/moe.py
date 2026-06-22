@@ -1452,6 +1452,21 @@ class RoutedMoE(nnx.Module):
     ) = get_routed_moe_shardings(is_batch_sharded_by_expert, input_ids is not None)
     w0_pspec, w1_pspec, wo_pspec = maybe_aqt_partition(w0_kernel, w0_pspec, w1_kernel, w1_pspec, wo_kernel, wo_pspec)
 
+    # Determine if we want to run explicit All-Gather inside the shard_map (DeepSeek-V3 on GKE)
+    use_in_shard_map_ag = (
+        self.config.model_name.startswith(("deepseek3", "deepseek4"))
+        and self.config.shard_exp_on_fsdp
+    )
+
+    if use_in_shard_map_ag:
+      w0_in_spec = self._logical_to_mesh_axes(self.wi_kernel_axes)
+      w1_in_spec = self._logical_to_mesh_axes(self.wi_kernel_axes)
+      wo_in_spec = self._logical_to_mesh_axes(self.wo_kernel_axes)
+    else:
+      w0_in_spec = w0_pspec
+      w1_in_spec = w1_pspec
+      wo_in_spec = wo_pspec
+
     def route(x, logits, pre_bias_logits, rngs, input_ids=None):
       """Performs both across device and within device token routing/sorting"""
       num_ep = self.get_expert_parallelism_size()
@@ -1650,9 +1665,9 @@ class RoutedMoE(nnx.Module):
             input_partition_pspec,
             gate_logits_pspec,
             pre_bias_logits_pspec,
-            w0_pspec,
-            w1_pspec,
-            wo_pspec,
+            w0_in_spec,
+            w1_in_spec,
+            wo_in_spec,
             w0_bias_pspec,
             w1_bias_pspec,
             wo_bias_pspec,
@@ -1668,6 +1683,12 @@ class RoutedMoE(nnx.Module):
     )
     def wrapper(x, logits, pre_bias_logits, w0, w1, wo, w0_bias, w1_bias, wo_bias, sharded_input_ids, rngs):
       batch_size, sequence_length, _ = x.shape
+      
+      if use_in_shard_map_ag:
+        # Explicitly gather the weights inside the shard_map (rebind to local names)
+        w0 = jax.lax.all_gather(w0, axis_name="fsdp", axis=1)
+        w1 = jax.lax.all_gather(w1, axis_name="fsdp", axis=1)
+        wo = jax.lax.all_gather(wo, axis_name="fsdp", axis=2)
       x, routing, route_metadata = route(x, logits, pre_bias_logits, rngs, input_ids=sharded_input_ids)
 
       if self.config.mlp_bias:
@@ -1844,9 +1865,13 @@ class RoutedMoE(nnx.Module):
     gate_logits = self._maybe_shard_with_logical(gate_logits, gate_logits_axes)
     pre_bias_logits = self._maybe_shard_with_logical(pre_bias_logits, pre_bias_logits_axes)
 
-    w0_kernel = self._maybe_shard_with_pspec(w0_kernel, w0_pspec)
-    w1_kernel = self._maybe_shard_with_pspec(w1_kernel, w1_pspec)
-    wo_kernel = self._maybe_shard_with_pspec(wo_kernel, wo_pspec)
+    if use_in_shard_map_ag:
+      # Bypass outside All-Gather; they will be executed inside the shard_map!
+      pass
+    else:
+      w0_kernel = self._maybe_shard_with_pspec(w0_kernel, w0_pspec)
+      w1_kernel = self._maybe_shard_with_pspec(w1_kernel, w1_pspec)
+      wo_kernel = self._maybe_shard_with_pspec(wo_kernel, wo_pspec)
     if w0_bias is not None:
       w0_bias = self._maybe_shard_with_pspec(w0_bias, w0_bias_pspec)
     if w1_bias is not None:
