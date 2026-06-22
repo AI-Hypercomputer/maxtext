@@ -21,6 +21,7 @@ from typing import Optional
 
 from flax import nnx
 import jax
+from jax.experimental.xla_metadata import set_xla_metadata
 from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 from jax.sharding import Mesh
@@ -573,14 +574,48 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       engram_output = self.engram_op(x, decoder_input_tokens)
       x = x + engram_output
 
-    hidden_states, intermediate_inputs = self.self_attention_with_norm_op(
-        x,
-        decoder_segment_ids,
-        decoder_positions,
-        deterministic,
-        previous_chunk,
-        slot,
-    )
+    # Prefetch MoE weights (All-Gather) to overlap with Attention (Splash)
+    pre_gathered_weights = None
+    routed_moe = self.DeepSeekMoeBlock_0.routed_moe
+    # Safeguard to ensure we are in a mode that has wi_0 initialized (standard training)
+    if not self.config.use_batch_split_schedule and hasattr(routed_moe, "wi_0") and routed_moe.wi_0 is not None:
+      is_batch_sharded_by_expert = routed_moe.is_batch_sharded_by_ep(x)
+      has_input_ids = decoder_input_tokens is not None
+      (
+          _, _, _, _,
+          w0_pspec, w1_pspec, wo_pspec,
+          _, _, _, _
+      ) = routed_moe.get_routed_moe_shardings(is_batch_sharded_by_expert, has_input_ids)
+
+      w0_local = jnp.asarray(routed_moe.wi_0[...], self.config.dtype)
+      w1_local = jnp.asarray(routed_moe.wi_1[...], self.config.dtype)
+      wo_local = jnp.asarray(routed_moe.wo[...], self.config.dtype)
+
+      # Trigger both All-Gathers and Attention in the SAME scheduling group (group 0)
+      with set_xla_metadata(_scheduling_group_id=0):
+        w0_gathered = routed_moe._maybe_shard_with_pspec(w0_local, w0_pspec)
+        w1_gathered = routed_moe._maybe_shard_with_pspec(w1_local, w1_pspec)
+        wo_gathered = routed_moe._maybe_shard_with_pspec(wo_local, wo_pspec)
+        pre_gathered_weights = (w0_gathered, w1_gathered, wo_gathered)
+
+        hidden_states, intermediate_inputs = self.self_attention_with_norm_op(
+            x,
+            decoder_segment_ids,
+            decoder_positions,
+            deterministic,
+            previous_chunk,
+            slot,
+        )
+    else:
+      # Standard execution path (fallback or batch-split path which has its own schedule)
+      hidden_states, intermediate_inputs = self.self_attention_with_norm_op(
+          x,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          previous_chunk,
+          slot,
+      )
 
     if self.is_mhc_enabled:
       layer_output, metadata = self.mhc_mlp(
@@ -592,15 +627,21 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       load_balance_loss = metadata["load_balance_loss"]
       moe_bias_updates = metadata["moe_bias_updates"]
     else:
-      mlp_lnx, load_balance_loss, moe_bias_updates = self.mlp_op(hidden_states, deterministic)
+      # Pass the pre-gathered weights to mlp_op!
+      mlp_lnx, load_balance_loss, moe_bias_updates = self.mlp_op(
+          hidden_states, deterministic, pre_gathered_weights=pre_gathered_weights
+      )
       layer_output = mlp_lnx + intermediate_inputs
     layer_output = self.dropout_op(layer_output, deterministic=deterministic)
 
     return self.post_process(layer_output, load_balance_loss, moe_bias_updates, kv_cache)
 
-  def mlp_op(self, x, deterministic, *args, **kwargs):
+  def mlp_op(self, x, deterministic, pre_gathered_weights=None, *args, **kwargs):
     mlp_lnx, load_balance_loss, moe_bias_updates = self.DeepSeekMoeBlock_0(
-        x, intermediate_sharding=self.mlp_intermediate_sharding, out_sharding=self.out_sharding
+        x,
+        intermediate_sharding=self.mlp_intermediate_sharding,
+        out_sharding=self.out_sharding,
+        pre_gathered_weights=pre_gathered_weights,
     )
     return self.with_logical_constraint(mlp_lnx), load_balance_loss, moe_bias_updates
 
