@@ -263,6 +263,7 @@ def make_tgmm_configs(
       tiles=tiles,
       lhs_cfgs=lhs_cfgs,
       rhs_cfgs=rhs_cfgs,
+      has_partial_sum=False,  # This should always be False until partial sum support is added in bwd pass.
       out_dtype=jnp.dtype(out_dtype),
       acc_dtype=jnp.dtype(acc_dtype),
       # GMM's 'zero_init' zeros unvisited m-rows via DMA, which doesn't apply to
