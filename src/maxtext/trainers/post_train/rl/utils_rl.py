@@ -535,15 +535,25 @@ def check_correctness(extracted_response: str, acceptable_answers: list[str], tm
 def get_optimizer(tmvp_config: Any, max_train_steps: int) -> optax.GradientTransformation:
   """Function to obtain an optax optimizer, currently we use adamw.
 
-  Schedule shape is controlled by `learning_rate_schedule_steps` when set
-  (>0); this decouples warmup/decay shape from training length so the same
-  schedule can be applied across runs of different num_batches. Default
-  (-1) falls back to `max_train_steps` for backward compatibility — matches
-  the documented behavior of base.yml's `learning_rate_schedule_steps: -1`
-  ("By default the length of the schedule is set to the number of steps").
+  The LR schedule length defaults to the actual RL run length
+  (`max_train_steps` = num_batches * num_iterations * train_fraction *
+  num_epoch). RL does not use the top-level `steps` (a pretraining concept) for
+  its run length, so the schedule must track `max_train_steps`, not `steps`.
+
+  `learning_rate_schedule_steps` may be set to decouple the schedule shape from
+  the run length (e.g. to match a fixed schedule across runs with different
+  num_batches). It is honored only as a deliberate override: the config
+  validator (`MaxTextConfig.set_derived_and_validate_values`) rewrites
+  `learning_rate_schedule_steps == -1` to `steps` before this runs, so a value
+  equal to `steps` means "unset" and falls back to `max_train_steps`; only a
+  value that differs from `steps` is treated as an explicit schedule length.
   """
-  schedule_steps = getattr(tmvp_config, "learning_rate_schedule_steps", -1)
-  if schedule_steps is None or schedule_steps <= 0:
+  lr_schedule_steps = getattr(tmvp_config, "learning_rate_schedule_steps", -1)
+  config_steps = getattr(tmvp_config, "steps", -1)
+  if lr_schedule_steps is not None and lr_schedule_steps > 0 and lr_schedule_steps != config_steps:
+    # Deliberate decoupling of the schedule length from the run length.
+    schedule_steps = lr_schedule_steps
+  else:
     schedule_steps = max_train_steps
   schedule = optax.schedules.warmup_cosine_decay_schedule(
       init_value=0.0,
