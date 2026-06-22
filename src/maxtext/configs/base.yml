@@ -222,6 +222,10 @@ use_ragged_sort: false # whether to use the Pallas ragged-sort kernels in the Mo
                        # without `use_ring_of_experts` (with EP > 1). When `use_ring_of_experts=True` the kernels run
                        # inside `permute`/`unpermute`; otherwise they run inside `local_permute`/local-unpermute.
 use_gather_mosaic_kernel: false # whether to use a custom mosaic kernel for token gather ops
+ragged_gather_fallback: false # when true, unconditionally use the JAX reference implementation instead of the
+                              # ragged gather SparseCore kernel. When false (default), use the SparseCore kernel.
+ragged_gather_reduce_fallback: false # when true, unconditionally use the JAX reference implementation instead of the
+                                     # ragged gather reduce SparseCore kernel. When false (default), use the SparseCore kernel.
 # tunable tiling dimensions used for mlp gmm
 # megablox/jax ragged dot - supports forward pass only (6 configs: `wi_tile_fwd...` and `wo_tile_fwd_...`)
 # tokamax ragged dot - supports all 18 configs

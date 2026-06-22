@@ -28,6 +28,8 @@ def ring_ragged_sort(
     ep_name,
     ep_size,
     buffer_size=None,
+    enforce_gather_fallback=False,
+    enforce_gather_reduce_fallback=False,
 ):
   """Ragged-gather variant for AG-RS Expert Parallelism token routing.
 
@@ -102,6 +104,7 @@ def ring_ragged_sort(
           token_indices_sorted,
           shard_output_start[None],
           shard_output_end[None],
+          enforce_fallback=enforce_gather_fallback,
       )
     else:
       local_buffer_size = buffer_size
@@ -122,6 +125,7 @@ def ring_ragged_sort(
           sliced_indices,
           jnp.int32(0)[None],
           gather_end[None],
+          enforce_fallback=enforce_gather_fallback,
       )
 
     out = (x, group_sizes_local, topk_argsort_revert_indices)
@@ -173,6 +177,7 @@ def ring_ragged_sort(
           topk_weights=jnp.ones((n,), dtype=jnp.float32),
           valid_rows_mask=valid_rows_mask,
           reduce_group_size=topk,
+          enforce_fallback=enforce_gather_reduce_fallback,
       )
     else:
       # Buffering: g_x has size `local_buffer_size` (packed).
@@ -195,6 +200,7 @@ def ring_ragged_sort(
           topk_weights=jnp.ones((n,), dtype=jnp.float32),
           valid_rows_mask=valid_rows_mask,
           reduce_group_size=topk,
+          enforce_fallback=enforce_gather_reduce_fallback,
       )
     return grad_hidden_states, None
 
@@ -211,6 +217,8 @@ def ring_ragged_unsort(
     local_num_experts,
     ep_name,
     topk_weights,
+    enforce_gather_fallback=False,
+    enforce_gather_reduce_fallback=False,
 ):
   """Dual of :func:`ring_ragged_sort`.
 
@@ -282,6 +290,7 @@ def ring_ragged_unsort(
           topk_weights=topk_weights_flat,
           valid_rows_mask=valid_rows_mask,
           reduce_group_size=topk,
+          enforce_fallback=enforce_gather_reduce_fallback,
       )
     else:
       # Shift indices so they map to the packed local buffer [0, local_num_tokens).
@@ -297,6 +306,7 @@ def ring_ragged_unsort(
           topk_weights=topk_weights_flat,
           valid_rows_mask=valid_rows_mask,
           reduce_group_size=topk,
+          enforce_fallback=enforce_gather_reduce_fallback,
       )
 
     res = (
@@ -352,6 +362,7 @@ def ring_ragged_unsort(
           shard_output_end[None],
           weights=weight_for_sorted,
           has_weights=True,
+          enforce_fallback=enforce_gather_fallback,
       )
     else:
       # Slice the inverse permutation to match the packed local buffer.
@@ -368,6 +379,7 @@ def ring_ragged_unsort(
           gather_end[None],
           weights=sliced_weights,
           has_weights=True,
+          enforce_fallback=enforce_gather_fallback,
       )
     return grad_sorted_tokens, None, None, None
 
@@ -379,7 +391,7 @@ def ring_ragged_unsort(
   return _ring_ragged_unsort(sorted_tokens_local, group_sizes_local, topk_argsort_revert_indices, topk_weights_flat)
 
 
-def a2a_ragged_sort(inputs, sort_indices, valid_end):
+def a2a_ragged_sort(inputs, sort_indices, valid_end, enforce_gather_fallback=False, enforce_gather_reduce_fallback=False):
   """Ragged-gather variant for ``local_permute``.
 
   Unlike :func:`ring_ragged_sort`, the rows valid for this shard live in
@@ -442,6 +454,7 @@ def a2a_ragged_sort(inputs, sort_indices, valid_end):
         topk_weights=jnp.ones((n,), dtype=jnp.float32),
         valid_rows_mask=valid_rows_mask[idx_inv],
         reduce_group_size=1,
+        enforce_fallback=enforce_gather_reduce_fallback,
     )
     # custom_vjp must return one gradient per primal arg; valid_end is integer
     # and non-differentiable, so we return None for it.
@@ -451,7 +464,9 @@ def a2a_ragged_sort(inputs, sort_indices, valid_end):
   return _a2a_ragged_sort(inputs, sort_indices, valid_end)
 
 
-def a2a_ragged_unsort(sorted_tokens, revert_indices, valid_end):
+def a2a_ragged_unsort(
+    sorted_tokens, revert_indices, valid_end, enforce_gather_fallback=False, enforce_gather_reduce_fallback=False
+):
   """Dual of :func:`a2a_ragged_sort`.
 
   Forward:
@@ -492,6 +507,7 @@ def a2a_ragged_unsort(sorted_tokens, revert_indices, valid_end):
         topk_weights=jnp.ones((n,), dtype=jnp.float32),
         valid_rows_mask=valid_rows_mask,
         reduce_group_size=1,
+        enforce_fallback=enforce_gather_reduce_fallback,
     )
     res = (revert_indices, end, sorted_tokens.shape, start)
     return out, res

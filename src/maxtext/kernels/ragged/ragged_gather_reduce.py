@@ -24,6 +24,7 @@ from jax.experimental.pallas import tpu_sc as plsc
 import jax.numpy as jnp
 from packaging.version import Version
 
+
 # JAX <= 0.10.0 used `out_shape`/`scratch_shapes` kwargs for `pl.kernel`; later
 # versions renamed them to `out_type`/`scratch_types`.
 if Version(jax.__version__) <= Version("0.10.0"):
@@ -329,7 +330,7 @@ def _preprocess(
     reduce_group_size: int,
     num_row_partitions: int,
     num_simd_lanes: int,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
   """Preprocesses indices for ragged gather reduce."""
   assert indices.ndim == 1, "Ragged scatter only supports 1d indices."
 
@@ -360,26 +361,23 @@ def _preprocess(
       num_src_rows_per_row_partition.astype(jnp.int32),
       (0, num_simd_lanes - num_row_partitions),
   )
-  # If there is no valid source row in a reduce group, we set the mask to
-  # False, so that the output for that group is set to zero.
-  mask = jnp.any(valid_rows_mask.reshape(-1, reduce_group_size), axis=-1)
 
   return (
       src_indices,
       dst_indices,
       topk_weights,
       num_src_rows_per_row_partition,
-      mask,
   )
 
 
-@functools.partial(jax.jit, static_argnames=("reduce_group_size",))
+@functools.partial(jax.jit, static_argnames=("reduce_group_size", "enforce_fallback"))
 def ragged_gather_reduce(
     x: jax.Array,
     indices: jax.Array,
     topk_weights: jax.Array,
     valid_rows_mask: jax.Array,
     reduce_group_size: int,
+    enforce_fallback: bool = False,
 ) -> jax.Array:
   """Gathers `x` according to `indices`, applies weights and masks, and reduces.
 
@@ -402,6 +400,9 @@ def ragged_gather_reduce(
       valid, with shape `(input_size,)`.
     reduce_group_size: An integer representing the number of consecutive rows to
       reduce (sum) together.
+    enforce_fallback: Static bool flag. When ``True``, unconditionally use the
+      JAX reference implementation instead of the SparseCore kernel.
+      When ``False`` (default), use the SparseCore kernel and raise any error.
 
   Returns:
     A 2D JAX array of reduced data with shape
@@ -414,7 +415,8 @@ def ragged_gather_reduce(
   assert valid_rows_mask.ndim == 1, "ragged_gather_reduce only supports 1d valid_rows_mask."
 
   sc_info = pltpu.get_tpu_info().sparse_core
-  if sc_info is None:
+  if sc_info is None or enforce_fallback:
+    # Sparse core is not available or fallback is enforced. Use JAX reference.
     return _fallback_implementation(x, indices, topk_weights, valid_rows_mask, reduce_group_size)
 
   # Heuristic threshold on whether to fallback for small inputs.
@@ -431,19 +433,20 @@ def ragged_gather_reduce(
   num_simd_lanes = sc_info.num_lanes
   num_cores = sc_info.num_cores * sc_info.num_subcores
 
-  # This kernel partitions the output's columns into `num_column_partitions` and
-  # partition the output's rows into `num_row_partitions` and run each
+  # This kernel partitions the output's columns into `num_column_partitions`
+  # and partition the output's rows into `num_row_partitions` and run each
   # {row_partition} x {column_partition} combination on a separate SC subcore
-  # for parallelism. With such work partitioning, we guarantee that there won't
-  # be write collision (from different subcores) to the any output row X column.
+  # for parallelism. With such work partitioning, we guarantee that there
+  # won't be write collision (from different subcores) to any output row X
+  # column.
   #
   # Each column partition should be multiple of 128 (number of lanes) due to
   # DMA requirements. Unless requiring padding on the column dimension, larger
   # column partitions (thus smaller row partitions given fixed num_cores) is
   # more preferable because large row partition may lead to imbalanced load
   # (valid_rows_mask may have more rows in some partitions than others).
-  # Most LLM's hidden size is multiple of 1024, `num_column_partitions=8` should
-  # work well in practice without requiring padding on the column size.
+  # Most LLM's hidden size is multiple of 1024, `num_column_partitions=8`
+  # should work well in practice without requiring padding on the column size.
   num_column_partitions = 8
   assert num_cores % num_column_partitions == 0
   num_rows_partitions = num_cores // num_column_partitions
@@ -471,7 +474,6 @@ def ragged_gather_reduce(
       dst_indices,
       topk_weights,
       num_src_rows_per_row_partition,
-      mask,
   ) = _preprocess(
       indices,
       topk_weights,
@@ -487,8 +489,8 @@ def ragged_gather_reduce(
       core_axis_name="core",
       subcore_axis_name="subcore",
   )
-  # Each output row from `main_kernel` will be of type float32, and then casted
-  # to the input dtype when doing the filter operation.
+  # Each output row from `main_kernel` will be of type float32, and then
+  # casted to the input dtype when doing the filter operation.
   out = pl.kernel(  # pytype: disable=wrong-keyword-args
       functools.partial(
           main_kernel,
@@ -519,10 +521,4 @@ def ragged_gather_reduce(
       },
   )(num_src_rows_per_row_partition, x, src_indices, dst_indices, topk_weights)
 
-  # If there is no valid source row in a reduce group, set that group's output
-  # to zero.
-  return jnp.where(
-      mask[:, None],
-      out.astype(x.dtype),
-      jnp.zeros_like(out, dtype=x.dtype),
-  )[: (input_size // reduce_group_size), :hidden_size]
+  return out.astype(x.dtype)
