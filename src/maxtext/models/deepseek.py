@@ -578,7 +578,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
     pre_gathered_weights = None
     routed_moe = self.DeepSeekMoeBlock_0.routed_moe
     # Safeguard to ensure we are in a mode that has wi_0 initialized (standard training)
-    if not self.config.use_batch_split_schedule and hasattr(routed_moe, "wi_0") and routed_moe.wi_0 is not None:
+    if False and not self.config.use_batch_split_schedule and hasattr(routed_moe, "wi_0") and routed_moe.wi_0 is not None:
       is_batch_sharded_by_expert = routed_moe.is_batch_sharded_by_ep(x)
       has_input_ids = decoder_input_tokens is not None
       (

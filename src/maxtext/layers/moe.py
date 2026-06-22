@@ -1455,6 +1455,22 @@ class RoutedMoE(nnx.Module):
     ) = self.get_routed_moe_shardings(is_batch_sharded_by_expert, input_ids is not None)
     w0_pspec, w1_pspec, wo_pspec = self.maybe_aqt_partition(w0_kernel, w0_pspec, w1_kernel, w1_pspec, wo_kernel, wo_pspec)
 
+    # Determine if we want to pipeline the MoE overlap (DeepSeek-V3 on GKE)
+    pipeline_moe_overlap = (
+        self.config.model_name.startswith(("deepseek3", "deepseek4"))
+        and self.config.shard_exp_on_fsdp
+        and pre_gathered_weights is None
+    )
+
+    if pipeline_moe_overlap:
+      w0_in_spec = self._logical_to_mesh_axes(self.wi_kernel_axes)
+      w1_in_spec = self._logical_to_mesh_axes(self.wi_kernel_axes)
+      wo_in_spec = self._logical_to_mesh_axes(self.wo_kernel_axes)
+    else:
+      w0_in_spec = w0_pspec
+      w1_in_spec = w1_pspec
+      wo_in_spec = wo_pspec
+
     def route(x, logits, pre_bias_logits, rngs, input_ids=None):
       """Performs both across device and within device token routing/sorting"""
       num_ep = self.get_expert_parallelism_size()
@@ -1628,23 +1644,46 @@ class RoutedMoE(nnx.Module):
       )
       return wo_gather_axes, wo_tile_size
 
-    def gmm_up(x, w0, w1, w0_bias, w1_bias, gmm_fn, weight_gather):
+    def gmm_up(x, w0_gathered, w1_sharded, wo_sharded, w0_bias, w1_bias, gmm_fn, weight_gather):
       """Run the two up-projections (gate + up) and apply the FFN activation."""
       wi_gather_axes, wi_tile_size = get_wi_gmm_params()
-      layer_w0 = gmm_fn(x, w0, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes)
-      if self.get_tensor_transpose_parallelism_size() > 1:
-        layer_w0 = jax.lax.psum(layer_w0, "tensor_transpose")
+      
+      if pipeline_moe_overlap:
+        with set_xla_metadata(_scheduling_group_id=1):
+          layer_w0 = gmm_fn(x, w0_gathered, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes)
+          if self.get_tensor_transpose_parallelism_size() > 1:
+            layer_w0 = jax.lax.psum(layer_w0, "tensor_transpose")
+          # Overlap w0 GMM with w1 All-Gather
+          w1_gathered = jax.lax.all_gather(w1_sharded, axis_name="fsdp", axis=1)
+      else:
+        layer_w0 = gmm_fn(x, w0_gathered, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes)
+        if self.get_tensor_transpose_parallelism_size() > 1:
+          layer_w0 = jax.lax.psum(layer_w0, "tensor_transpose")
+        w1_gathered = w1_sharded
+
       if self.config.mlp_bias:
         layer_w0 = layer_w0 + w0_bias
       layer_w0 = adc.checkpoint_name(adc.checkpoint_name(layer_w0, "mlpwi_0"), "moe_mlpwi_0")
 
-      layer_w1 = gmm_fn(x, w1, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes)
-      if self.get_tensor_transpose_parallelism_size() > 1:
-        layer_w1 = jax.lax.psum(layer_w1, "tensor_transpose")
+      if pipeline_moe_overlap:
+        with set_xla_metadata(_scheduling_group_id=2):
+          layer_w1 = gmm_fn(x, w1_gathered, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes)
+          if self.get_tensor_transpose_parallelism_size() > 1:
+            layer_w1 = jax.lax.psum(layer_w1, "tensor_transpose")
+          # Overlap w1 GMM with wo All-Gather
+          wo_gathered = jax.lax.all_gather(wo_sharded, axis_name="fsdp", axis=2)
+      else:
+        layer_w1 = gmm_fn(x, w1_gathered, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes)
+        if self.get_tensor_transpose_parallelism_size() > 1:
+          layer_w1 = jax.lax.psum(layer_w1, "tensor_transpose")
+        wo_gathered = wo_sharded
+
       if self.config.mlp_bias:
         layer_w1 = layer_w1 + w1_bias
       layer_w1 = adc.checkpoint_name(layer_w1, "moe_mlpwi_1")
-      return self.apply_ffn_activation(layer_w0, layer_w1)
+      
+      activated = self.apply_ffn_activation(layer_w0, layer_w1)
+      return activated, wo_gathered
 
     @functools.partial(
         jax.shard_map,
@@ -1653,9 +1692,9 @@ class RoutedMoE(nnx.Module):
             input_partition_pspec,
             gate_logits_pspec,
             pre_bias_logits_pspec,
-            w0_pspec,
-            w1_pspec,
-            wo_pspec,
+            w0_in_spec,
+            w1_in_spec,
+            wo_in_spec,
             w0_bias_pspec,
             w1_bias_pspec,
             wo_bias_pspec,
@@ -1671,7 +1710,14 @@ class RoutedMoE(nnx.Module):
     )
     def wrapper(x, logits, pre_bias_logits, w0, w1, wo, w0_bias, w1_bias, wo_bias, sharded_input_ids, rngs):
       batch_size, sequence_length, _ = x.shape
-      x, routing, route_metadata = route(x, logits, pre_bias_logits, rngs, input_ids=sharded_input_ids)
+      if pipeline_moe_overlap:
+        with set_xla_metadata(_scheduling_group_id=0):
+          x, routing, route_metadata = route(x, logits, pre_bias_logits, rngs, input_ids=sharded_input_ids)
+          # Overlap Dispatch with w0 All-Gather
+          w0_gathered = jax.lax.all_gather(w0, axis_name="fsdp", axis=1)
+      else:
+        x, routing, route_metadata = route(x, logits, pre_bias_logits, rngs, input_ids=sharded_input_ids)
+        w0_gathered = w0
 
       if self.config.mlp_bias:
         w0_bias, w1_bias, wo_bias = self.transform_bias(routing.selected_experts, w0_bias, w1_bias, wo_bias)
@@ -1699,12 +1745,12 @@ class RoutedMoE(nnx.Module):
             expert_assignments=routing.selected_experts,
             group_offset=experts_start,
         )
-      intermediate_layer = gmm_up(x, w0, w1, w0_bias, w1_bias, gmm_fn, weight_gather)
+      intermediate_layer, wo_gathered = gmm_up(x, w0_gathered, w1, wo, w0_bias, w1_bias, gmm_fn, weight_gather)
 
       wo_gather_axes, wo_tile_size = get_wo_gmm_params()
       intermediate_output = gmm_fn(
           intermediate_layer,
-          wo,
+          wo_gathered,
           tiling=wo_tile_size,
           weight_gather_axes=wo_gather_axes,
       )
@@ -1849,6 +1895,9 @@ class RoutedMoE(nnx.Module):
 
     if pre_gathered_weights is not None:
       w0_kernel, w1_kernel, wo_kernel = pre_gathered_weights
+    elif pipeline_moe_overlap:
+      # Bypass outside All-Gather; they will be executed inside the shard_map!
+      pass
     else:
       w0_kernel = self._maybe_shard_with_pspec(w0_kernel, w0_pspec)
       w1_kernel = self._maybe_shard_with_pspec(w1_kernel, w1_pspec)
