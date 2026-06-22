@@ -751,6 +751,7 @@ class NNXDecoder(nnx.Module):
     ``_create_and_register_layer``.
     """
     cfg = self.config
+    self.layers = nnx.List([])
     # Only register the PLE submodule when it exists (mirrors the optional position_embedder
     # pattern); assigning None first would make nnx treat the attribute as static.
     if cfg.hidden_size_per_layer_input > 0 and cfg.vocab_size_per_layer_input > 0:
@@ -768,6 +769,7 @@ class NNXDecoder(nnx.Module):
           rngs=rngs,
       )
       setattr(self, f"layers_{lyr}", layer)
+      self.layers.append(layer)
 
   def _get_pipeline_stage_module(self, decoder_blocks, rngs):
     """Retrieves the wrapper module formatted for single pipeline stage execution."""
@@ -1350,11 +1352,7 @@ class NNXDecoder(nnx.Module):
           raise ValueError(f"Unsupported model_name for multimodal: {cfg.model_name}")
 
       if video_embeddings is not None and cfg.use_multimodal:
-        if cfg.model_name in {
-            "qwen3-omni-30b-a3b",
-            "qwen3.5-35b-a3b",
-            "qwen3.5-397b-a17b",
-        }:
+        if cfg.model_name in {"qwen3-omni-30b-a3b", "qwen3.5-35b-a3b", "qwen3.5-397b-a17b"}:
           y = mm_utils.merge_mm_embeddings(
               text_embeddings=y,
               multimodal_embeddings=video_embeddings,
@@ -1839,10 +1837,7 @@ class NNXDecoder(nnx.Module):
         for lyr, layer in enumerate(self.layers):
           graphdef, state = nnx.split(layer)
           if kv_caches is not None:
-            if cfg.decoder_block in (
-                DecoderBlockType.QWEN3_NEXT,
-                DecoderBlockType.QWEN3_5,
-            ):
+            if cfg.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
               if (lyr + 1) % cfg.inhomogeneous_layer_cycle_interval == 0:
                 kv_cache = (
                     kv_caches["key_cache"][lyr],
@@ -1863,10 +1858,7 @@ class NNXDecoder(nnx.Module):
           nnx.update(layer, new_state)
 
           if kv_caches is not None and kv_cache is not None:
-            if cfg.decoder_block in (
-                DecoderBlockType.QWEN3_NEXT,
-                DecoderBlockType.QWEN3_5,
-            ):
+            if cfg.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
               if (lyr + 1) % cfg.inhomogeneous_layer_cycle_interval == 0:
                 kv_caches["key_cache"][lyr] = kv_cache[0]
                 kv_caches["value_cache"][lyr] = kv_cache[1]
@@ -1980,11 +1972,7 @@ class NNXDecoder(nnx.Module):
     scan_length = cfg.num_decoder_layers // attention_pattern_length
 
     layer_args = (decoder_segment_ids, decoder_positions, deterministic, model_mode)
-    layer_kwargs = {
-        "bidirectional_mask": bidirectional_mask,
-        "slot": slot,
-        "previous_chunk": previous_chunk,
-    }
+    layer_kwargs = {"bidirectional_mask": bidirectional_mask, "slot": slot, "previous_chunk": previous_chunk}
 
     # Apply the main scan over the full blocks
     if scan_length > 0:
@@ -2042,7 +2030,7 @@ class NNXDecoder(nnx.Module):
     cache_index_of = gemma4_small.kv_cache_slot_map(layer_types, num_kv_shared)
 
     for lyr in range(cfg.num_decoder_layers):
-      layer = getattr(self, f"layers_{lyr}")
+      layer = self.layers[lyr]
       donor_idx = gemma4_small.kv_donor_layer_idx(lyr, layer_types, num_kv_shared)
       is_donor = gemma4_small.is_kv_donor_layer(lyr, layer_types, num_kv_shared)
 
