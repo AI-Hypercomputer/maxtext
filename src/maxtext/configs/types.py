@@ -227,7 +227,7 @@ ModelName = Literal[
     "deepseek3-test",
     "deepseek3-tiny",
     "deepseek3.2-671b",
-    "deepseek4",
+    "deepseek4-284b",
     "deepseek-custom",
     "kimi-k2-1t",
     "gemma-7b",
@@ -553,7 +553,7 @@ class Attention(BaseModel):
       "autoselected",
       description="The attention algorithm to use (dot_product, flash, etc).",
   )
-  attention_type: Literal["global", "local_sliding", "chunk", "mla", "full"] = Field(
+  attention_type: Literal["global", "local_sliding", "chunk", "mla", "full", "compressed"] = Field(
       "global", description="The variant of attention to use."
   )
   share_kv_projections: bool = Field(
@@ -2936,6 +2936,8 @@ class MaxTextConfig(
         raise ValueError("`local_checkpoint_period` must be > 0 for emergency checkpointing.")
     if self.moba and self.attention not in ("dot_product"):
       raise ValueError("MoBA is only supported with dot_product attention.")
+    if self.decoder_block == DecoderBlockType.DEEPSEEK4 and self.attention != "dot_product":
+      raise ValueError("DeepSeek4 decoder block currently only supports dot_product attention.")
     if self.use_indexer:
       if self.q_lora_rank == 0:
         raise NotImplementedError("Sparse indexer has not implemented for q_lora_rank = 0.")
