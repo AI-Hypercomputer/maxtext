@@ -161,6 +161,7 @@ def reference_tgmm(
     # group_offset is obtained from
     # jnp.arange(0, num_experts, num_experts_per_shard)
     group_offset=None,
+    partial_sum=None,
 ):  # [num_groups, k, n]
   """Computes reference transposed grouped matrix multiplication."""
   # Compute lhs[:, sizes[i-1]:sizes[i]] @ rhs[sizes[i-1]:sizes[i], :]
@@ -178,7 +179,10 @@ def reference_tgmm(
     group = global_group - group_offset[0]
     end = start + group_size
     if 0 <= group < num_actual_groups:
-      out.append(lhs[:, start:end] @ rhs[start:end, :])
+      res = lhs[:, start:end].astype(jnp.float32) @ rhs[start:end, :].astype(jnp.float32)
+      if partial_sum is not None:
+        res = res + partial_sum[group].astype(jnp.float32)
+      out.append(res.astype(lhs.dtype))
     start = end
   return jnp.stack(out)
 
@@ -257,12 +261,13 @@ class GmmTest(parameterized.TestCase):
       in_size=[512, 1024],
       out_size=[512, 1024],
       num_groups=[5, 16, 32],
+      has_partial_sum=[True, False],
       group_offset=[0, 2, 3],
   )
-  def test_tgmm_basic(self, batch_size, in_size, out_size, num_groups, group_offset):
+  def test_tgmm_basic(self, batch_size, in_size, out_size, num_groups, has_partial_sum, group_offset):
     num_local_groups = num_groups - group_offset
     key = jax.random.key(0)
-    key1, key2 = jax.random.split(key, 2)
+    key1, key2, key3 = jax.random.split(key, 3)
     lhs = jax.random.normal(key1, (batch_size, in_size), dtype=jnp.bfloat16)  # [m, k]
     grad = jax.random.normal(key2, (batch_size, out_size), dtype=jnp.bfloat16)  # [m, n]
     group_sizes = get_group_sizes(batch_size, num_groups)
@@ -270,13 +275,18 @@ class GmmTest(parameterized.TestCase):
     # group_sizes=Array([14, 14, ..., 7]).
     group_offset = jnp.array(group_offset, dtype=jnp.int32)
 
+    ps = None
+    if has_partial_sum:
+      ps = jax.random.normal(key3, (num_local_groups, in_size, out_size), dtype=jnp.bfloat16)
+
     lhs_t = lhs.swapaxes(0, 1)  # [k, m]
-    expected = reference_tgmm(lhs_t, grad, group_sizes, num_local_groups, group_offset=group_offset)
+    expected = reference_tgmm(lhs_t, grad, group_sizes, num_local_groups, group_offset=group_offset, partial_sum=ps)
     actual = tgmm_backend.tgmm_v2(
         lhs,
         grad,
         group_sizes,
         num_local_groups,
+        partial_sum=ps,
         group_offset=group_offset,
         preferred_element_type=jnp.bfloat16,
     )
