@@ -172,6 +172,28 @@ def get_shaped_batch(config, batch_sharding=None):
     )
     shaped_batch["images"] = jax.ShapeDtypeStruct(image_shape, jnp.int32, sharding=batch_sharding)
     shaped_batch["image_masks"] = jax.ShapeDtypeStruct(image_shape[:2], jnp.int32, sharding=batch_sharding)
+    video_shape = mm_processor.get_dummy_video_shape_for_init(
+        config.model_name, batch_size=config.micro_batch_size_to_train_on, config=config
+    )
+    if video_shape:
+      shaped_batch["videos"] = jax.ShapeDtypeStruct(video_shape, jnp.float32, sharding=batch_sharding)
+      
+      from maxtext.multimodal.processor_qwen3_omni import VIDEO_MAX_GRID_T, VIDEO_MAX_GRID_H, VIDEO_MAX_GRID_W
+      merge_size = getattr(config, "spatial_merge_size_for_vit", 2)
+      video_mask_len = VIDEO_MAX_GRID_T * (VIDEO_MAX_GRID_H // merge_size) * (VIDEO_MAX_GRID_W // merge_size)
+      video_mask_shape = (config.micro_batch_size_to_train_on, video_mask_len)
+      shaped_batch["video_masks"] = jax.ShapeDtypeStruct(video_mask_shape, jnp.int32, sharding=batch_sharding)
+
+    audio_sft_shape = mm_processor.get_dummy_audio_shape_for_sft(
+        config.model_name, batch_size=config.micro_batch_size_to_train_on, config=config
+    )
+    if audio_sft_shape:
+      shaped_batch["audios"] = jax.ShapeDtypeStruct(audio_sft_shape, jnp.float32, sharding=batch_sharding)
+      
+      from maxtext.multimodal.processor_qwen3_omni import AUDIO_MAX_TIME, _get_feat_extract_output_lengths
+      max_audio_tokens = _get_feat_extract_output_lengths(AUDIO_MAX_TIME)
+      audio_mask_shape = (config.micro_batch_size_to_train_on, max_audio_tokens)
+      shaped_batch["audio_token_masks"] = jax.ShapeDtypeStruct(audio_mask_shape, jnp.int32, sharding=batch_sharding)
   if config.use_audio:
     audio_shape = mm_processor.get_dummy_audio_shape_for_init(config)
     shaped_batch["audios"] = jax.ShapeDtypeStruct(audio_shape, jnp.float32, sharding=batch_sharding)

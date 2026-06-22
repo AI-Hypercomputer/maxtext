@@ -130,6 +130,7 @@ class TransformerLinenPure(nn.Module):
       encoder_videos: None | jnp.ndarray = None,
       encoder_video_masks: None | jnp.ndarray = None,
       encoder_audios: None | jnp.ndarray = None,
+      encoder_audio_token_masks: None | jnp.ndarray = None,
       enable_dropout=True,
       model_mode=MODEL_MODE_TRAIN,
       previous_chunk=None,
@@ -195,6 +196,7 @@ class TransformerLinenPure(nn.Module):
           video_masks=encoder_video_masks,
           audio_embeddings=audio_embeddings,
           audio_masks=audio_masks,
+          audio_token_masks=encoder_audio_token_masks,
           bidirectional_mask=bidirectional_mask_image,
           bidirectional_mask_video=bidirectional_mask_video,
       )
@@ -443,6 +445,7 @@ class Transformer(nnx.Module):
       encoder_videos: jax.Array | None = None,
       encoder_video_masks: jax.Array | None = None,
       encoder_audios: jax.Array | None = None,
+      encoder_audio_token_masks: jax.Array | None = None,
       enable_dropout=True,
       model_mode=MODEL_MODE_TRAIN,
       previous_chunk=None,
@@ -522,6 +525,7 @@ class Transformer(nnx.Module):
           video_masks=encoder_video_masks,
           audio_embeddings=audio_embeddings,
           audio_masks=audio_masks,
+          audio_token_masks=encoder_audio_token_masks,
           bidirectional_mask=bidirectional_mask_image,
           bidirectional_mask_video=bidirectional_mask_video,
       )

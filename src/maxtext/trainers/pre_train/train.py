@@ -104,10 +104,12 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   # decimate proportion of data when per_device_batch_size<1
   if is_train:
     for k, v in data.items():
-      data[k] = v[: config.micro_batch_size_to_train_on, :]
+      if v is not None:
+        data[k] = v[: config.micro_batch_size_to_train_on, :]
   else:
     for k, v in data.items():
-      data[k] = v[: config.micro_batch_size_to_eval_on, :]
+      if v is not None:
+        data[k] = v[: config.micro_batch_size_to_eval_on, :]
   mutable_collections = ["intermediates"]
   if config.mtp_num_layers > 0 and is_train:
     # The single model.apply call now triggers the entire chain if MTP is enabled:
@@ -142,6 +144,10 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
         decoder_segment_ids=data["inputs_segmentation"],
         encoder_images=data["images"] if config.use_multimodal else None,
         encoder_image_masks=data["image_masks"] if config.use_multimodal and "image_masks" in data else None,
+        encoder_videos=data["videos"] if config.use_multimodal and "videos" in data else None,
+        encoder_video_masks=data["video_masks"] if config.use_multimodal and "video_masks" in data else None,
+        encoder_audios=data["audios"] if "audios" in data else None,
+        encoder_audio_token_masks=data["audio_token_masks"] if "audio_token_masks" in data else None,
         enable_dropout=config.enable_dropout if is_train else False,
         rngs={"dropout": rng1, "params": aqt_rng},
         mutable=mutable_collections,
@@ -191,6 +197,10 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
         decoder_segment_ids=data["inputs_segmentation"],
         encoder_images=data["images"] if config.use_multimodal else None,
         encoder_image_masks=data["image_masks"] if config.use_multimodal and "image_masks" in data else None,
+        encoder_videos=data["videos"] if config.use_multimodal and "videos" in data else None,
+        encoder_video_masks=data["video_masks"] if config.use_multimodal and "video_masks" in data else None,
+        encoder_audios=data["audios"] if "audios" in data else None,
+        encoder_audio_token_masks=data["audio_token_masks"] if "audio_token_masks" in data else None,
         enable_dropout=config.enable_dropout if is_train else False,
         decoder_target_tokens=data["targets"],
         decoder_target_mask=data["targets_segmentation"],

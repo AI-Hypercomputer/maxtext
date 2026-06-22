@@ -94,6 +94,13 @@ class VisionEncoder(nnx.Module):
     else:
       embeddings = encoder_output
 
+    if self.config.model_name in ["qwen3-omni-30b-a3b"]:
+      jax.debug.print(
+          "[SFT_DEBUG] VisionEncoder: Input Shape: {x}, Encoder Output Shape: {y}",
+          x=input_images.shape,
+          y=embeddings.shape
+      )
+
     if self.config.freeze_vision_encoder_params:
       embeddings = jax.lax.stop_gradient(embeddings)
       if deep_feats is not None:
@@ -102,6 +109,12 @@ class VisionEncoder(nnx.Module):
     # vision embedder / projection layer, not frozen in most cases, trained / finetuned together with main model
     projector = getattr(self, self.projector_name)
     embeddings = projector(embeddings)
+
+    if self.config.model_name in ["qwen3-omni-30b-a3b"]:
+      jax.debug.print(
+          "[SFT_DEBUG] VisionEncoder: Projector Output Shape: {x}",
+          x=embeddings.shape
+      )
 
     return embeddings, deep_feats
 

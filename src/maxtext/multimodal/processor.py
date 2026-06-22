@@ -69,9 +69,13 @@ def preprocess_image_for_training(image, config):
 
     return preprocess_mm_data_llama4(image)
   elif config.model_name in ["qwen3-omni-30b-a3b", "qwen3.5-35b-a3b", "qwen3.5-397b-a17b"]:
-    from maxtext.multimodal.processor_qwen3_omni import preprocess_mm_data_qwen3_omni_for_training  # pylint: disable=import-outside-toplevel
+    from maxtext.multimodal.processor_qwen3_omni import preprocess_mm_data_qwen3_omni_for_training, preprocess_mm_data_qwen3_omni_for_training_video  # pylint: disable=import-outside-toplevel
 
-    return preprocess_mm_data_qwen3_omni_for_training(image, config)
+    if isinstance(image, str):
+      use_audio_in_video = getattr(config, "use_audio_in_video", False)
+      return preprocess_mm_data_qwen3_omni_for_training_video(image, config)
+    else:
+      return preprocess_mm_data_qwen3_omni_for_training(image, config)
   else:
     raise ValueError(f"Model {config.model_name} not supported for image preprocessing.")
 
@@ -186,6 +190,24 @@ def get_dummy_image_shape_for_init(model_name, batch_size=1, num_image_per_seque
 
     image_shape = get_dummy_image_shape_for_init_qwen3_omni(batch_size)
   return image_shape
+
+
+def get_dummy_video_shape_for_init(model_name, batch_size=1, config=None):
+  """Return the fixed padded shape for video batch tensors used in SFT training."""
+  if model_name in ["qwen3-omni-30b-a3b", "qwen3.5-35b-a3b", "qwen3.5-397b-a17b"]:
+    from maxtext.multimodal.processor_qwen3_omni import get_dummy_video_shape_for_init_qwen3_omni  # pylint: disable=import-outside-toplevel
+
+    return get_dummy_video_shape_for_init_qwen3_omni(batch_size, config)
+  return ()
+
+
+def get_dummy_audio_shape_for_sft(model_name, batch_size=1, config=None):
+  """Return the fixed padded shape for audio batch tensors used in SFT training."""
+  if model_name in ["qwen3-omni-30b-a3b"]:
+    from maxtext.multimodal.processor_qwen3_omni import get_dummy_audio_shape_for_init_qwen3_omni_sft  # pylint: disable=import-outside-toplevel
+
+    return get_dummy_audio_shape_for_init_qwen3_omni_sft(batch_size, config)
+  return ()
 
 
 def get_dummy_audio_shape_for_init(config):

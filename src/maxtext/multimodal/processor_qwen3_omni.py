@@ -19,6 +19,7 @@ Original implementation from HuggingFace: Qwen/Qwen3-Omni-30B-A3B-Instruct.
 
 import math
 import os
+import logging
 from dataclasses import dataclass
 
 import numpy as np
@@ -58,7 +59,18 @@ HOP_LENGTH = 160  # Number of samples between successive frames.
 DITHER = 0.0  # Amount of dithering to apply to audio signal.
 
 QWEN3_TEMPORAL_PATCH_SIZE = 2
-QWEN3_OMNI_IMAGE_SIZE = 768
+QWEN3_OMNI_IMAGE_SIZE = 512
+
+# Max grid sizes for fixed-shape video batching (used for padding before grain.Batch).
+# These bound the T, H, W patch dimensions. Derived from VIDEO_TOTAL_PIXELS / typical FPS:
+#   max_grid_t = 32  (64 frames / temporal_patch_size=2)
+#   max_grid_h = 32  (392 pixels; h*w ≤ VIDEO_MAX_PIXELS/patch_size² = 768 patches)
+#   max_grid_w = 32  (392 pixels)
+VIDEO_MAX_GRID_T = 32
+VIDEO_MAX_GRID_H = 32
+VIDEO_MAX_GRID_W = 32
+# Max audio time steps for fixed-shape audio batching (30 s @ 16 kHz / hop 160 ≈ 3000).
+AUDIO_MAX_TIME = 3000
 
 
 QWEN_SPECIAL_TOKEN_CONFIGS = {
@@ -129,11 +141,13 @@ class Qwen3OmniPreprocessorOutput(mm_utils.PreprocessorOutput):
   video_values: None | np.ndarray = None
   video_grid_thw: None | np.ndarray = None
   video_second_per_grid: None | np.ndarray = None
+  video_mask: None | np.ndarray = None
   # Audio attributes.
   num_audios: int = 0
   audio_values: None | np.ndarray = None
   audio_mask: None | np.ndarray = None
   audio_lengths: None | np.ndarray = None
+  audio_token_mask: None | np.ndarray = None
 
 
 def smart_resize(
@@ -344,6 +358,36 @@ def smart_nframes(
   return nframes
 
 
+def _read_video_opencv(video_path, idx) -> np.ndarray:
+  """Robust fallback video reader using OpenCV."""
+  import cv2
+  cap = cv2.VideoCapture(video_path)
+  if not cap.isOpened():
+    raise RuntimeError(f"OpenCV failed to open video file: {video_path}")
+    
+  frames = []
+  while True:
+    ret, frame = cap.read()
+    if not ret:
+      break
+    # OpenCV reads in BGR format, convert to RGB
+    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    frames.append(frame)
+  cap.release()
+  
+  if len(frames) == 0:
+    raise RuntimeError(f"OpenCV decoded zero frames from video: {video_path}")
+    
+  selected_frames = []
+  for i in idx:
+    clamped_i = min(i, len(frames) - 1)
+    selected_frames.append(frames[clamped_i])
+    
+  video = np.stack(selected_frames, axis=0)
+  video = np.transpose(video, (0, 3, 1, 2))
+  return video
+
+
 def _read_video_decord(video_path, video_start=0.0, video_end=None) -> tuple[np.ndarray, float]:
   """Read video using decord.VideoReader (torch-free version)
 
@@ -370,24 +414,45 @@ def _read_video_decord(video_path, video_start=0.0, video_end=None) -> tuple[np.
   }
   try:
     vr = decord.VideoReader(video_path)
-  except Exception as e:
-    raise RuntimeError(f"Failed to read video from {video_path}: {e}") from e
-  total_frames, video_fps = len(vr), vr.get_avg_fps()
-  start_frame, end_frame, total_frames = calculate_video_frame_range(
-      video_config,
-      total_frames,
-      video_fps,
-  )
-  nframes = smart_nframes(video_config, total_frames=total_frames, video_fps=video_fps)
+    total_frames, video_fps = len(vr), vr.get_avg_fps()
+    start_frame, end_frame, total_frames = calculate_video_frame_range(
+        video_config,
+        total_frames,
+        video_fps,
+    )
+    nframes = smart_nframes(video_config, total_frames=total_frames, video_fps=video_fps)
+    idx = np.linspace(start_frame, end_frame, nframes).round().astype(int).tolist()
+    video = vr.get_batch(idx).asnumpy()
+    video = np.transpose(video, (0, 3, 1, 2))
+    sample_fps = nframes / max(total_frames, 1e-6) * video_fps
+  except Exception as decord_error:
+    logging.warning(
+        f"Decord failed to load/decode video {video_path} due to: {decord_error}. "
+        "Falling back to OpenCV video reader."
+    )
+    try:
+      import cv2
+      cap = cv2.VideoCapture(video_path)
+      video_fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+      total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 100
+      cap.release()
+      
+      start_frame, end_frame, total_frames = calculate_video_frame_range(
+          video_config,
+          total_frames,
+          video_fps,
+      )
+      nframes = smart_nframes(video_config, total_frames=total_frames, video_fps=video_fps)
+      idx = np.linspace(start_frame, end_frame, nframes).round().astype(int).tolist()
+      
+      video = _read_video_opencv(video_path, idx)
+      sample_fps = nframes / max(total_frames, 1e-6) * video_fps
+    except Exception as cv2_error:
+      raise RuntimeError(
+          f"Both Decord and OpenCV failed to decode video. "
+          f"Decord error: {decord_error}. OpenCV error: {cv2_error}"
+      ) from decord_error
 
-  # Use numpy linspace instead of torch.linspace
-  idx = np.linspace(start_frame, end_frame, nframes).round().astype(int).tolist()
-
-  video = vr.get_batch(idx).asnumpy()
-  # Convert from THWC to TCHW format using numpy
-  video = np.transpose(video, (0, 3, 1, 2))
-
-  sample_fps = nframes / max(total_frames, 1e-6) * video_fps
   return video, sample_fps
 
 
@@ -554,6 +619,107 @@ def preprocess_mm_data_qwen3_omni_for_training(images, config):
   )
 
 
+def preprocess_mm_data_qwen3_omni_for_training_video(video_path, config):
+  """Preprocesses video (and audio) for Qwen3-Omni SFT training."""
+
+  import os
+
+  if not os.path.exists(video_path):
+    raise FileNotFoundError(
+        f"Video file not found at local path: '{video_path}'. "
+        "Please make sure you have fully downloaded the dataset using the "
+        "download utility before running SFT training."
+    )
+
+  try:
+    video_array, _ = _read_video_decord(video_path)
+    video_processed, video_grid_thw = preprocess_video(video_array, config)
+    orig_t, orig_h, orig_w = video_grid_thw[0]
+    video_values = np.reshape(
+        video_processed,
+        (
+            1,
+            config.num_channels_for_vit,
+            config.temporal_patch_size_for_vit * orig_t,
+            config.patch_size_for_vit * orig_h,
+            config.patch_size_for_vit * orig_w,
+        ),
+    )
+    
+    # Clip grid to maximum limits to prevent TPU compilation OOMs and ensure static shapes
+    clip_t = min(orig_t, VIDEO_MAX_GRID_T)
+    clip_h = min(orig_h, VIDEO_MAX_GRID_H)
+    clip_w = min(orig_w, VIDEO_MAX_GRID_W)
+    
+    # Crop video_values to the clipped dimensions
+    t_px = config.temporal_patch_size_for_vit * clip_t
+    h_px = config.patch_size_for_vit * clip_h
+    w_px = config.patch_size_for_vit * clip_w
+    video_values = video_values[:, :, :t_px, :h_px, :w_px]
+    
+    # Update video_grid_thw
+    video_grid_thw = np.array([[clip_t, clip_h, clip_w]], dtype=np.int32)
+    print(
+        f"[SFT_DEBUG] Preprocessing Video: Raw path: {video_path}, Raw size: {video_array.shape}. "
+        f"Original Grid (THW): [{orig_t}, {orig_h}, {orig_w}], Clipped Grid (THW): {video_grid_thw[0]}, "
+        f"Cropped Pixel Shape: {video_values.shape}"
+    )
+  except Exception as e:
+    logging.warning(
+        "\n" + "="*80 + "\n"
+        f"[DATASET CORRUPTION WARNING] BOTH DECORD AND OPENCV FAILED TO DECODE VIDEO:\n"
+        f"Path: {video_path}\n"
+        f"Error: {e}\n"
+        "Substituting dummy zero-video to prevent SFT training crash!\n"
+        "Please check if this video file is completely corrupted or empty.\n"
+        + "="*80 + "\n"
+    )
+    grid_t = 1
+    grid_h = 16
+    grid_w = 16
+    video_grid_thw = np.array([[grid_t, grid_h, grid_w]], dtype=np.int32)
+    fallback_t = config.temporal_patch_size_for_vit * grid_t
+    fallback_h = config.patch_size_for_vit * grid_h
+    fallback_w = config.patch_size_for_vit * grid_w
+    video_values = np.zeros(
+        (1, config.num_channels_for_vit, fallback_t, fallback_h, fallback_w),
+        dtype=np.float32
+    )
+
+  processor_outputs = Qwen3OmniPreprocessorOutput(
+      num_videos=1,
+      video_values=video_values,
+      video_grid_thw=video_grid_thw,
+      video_second_per_grid=np.asarray([config.temporal_patch_size_for_vit], dtype=np.float32),
+  )
+
+  use_audio_in_video = getattr(config, "use_audio_in_video", False)
+  if use_audio_in_video:
+    try:
+      mt_audio = mm_utils.load_audio(video_path, sample_rate=SAMPLE_RATE)
+      mt_audio, mt_audio_mask = pre_process_audio_qwen3_omni(mt_audio)
+      processor_outputs.audio_values = mt_audio
+      processor_outputs.audio_mask = mt_audio_mask
+      audio_mask_sum = np.sum(mt_audio_mask, axis=-1)
+      audio_lengths = _get_feat_extract_output_lengths(audio_mask_sum)
+      processor_outputs.audio_lengths = np.array(audio_lengths, dtype=np.int32)
+      print(
+          f"[SFT_DEBUG] Preprocessing Audio: Audio shape: {mt_audio.shape}, Audio lengths (tokens): {processor_outputs.audio_lengths}"
+      )
+    except Exception as e:
+      logging.warning(f"Audio extraction failed for {video_path}: {e}. Using dummy audio.")
+      dummy_audio = np.zeros((1, 128, 3000), dtype=np.float32)
+      dummy_mask = np.zeros((1, 3000), dtype=np.int32)
+      processor_outputs.audio_values = dummy_audio
+      processor_outputs.audio_mask = dummy_mask
+      processor_outputs.audio_lengths = np.array([0], dtype=np.int32)
+      print(
+          f"[SFT_DEBUG] Preprocessing Audio (fallback): Audio shape: {dummy_audio.shape}, Audio lengths (tokens): {processor_outputs.audio_lengths}"
+      )
+
+  return processor_outputs
+
+
 def preprocess_mm_data_qwen3_omni(config):
   """Placeholder for multimodal data preprocessing."""
   processor_outputs = Qwen3OmniPreprocessorOutput()
@@ -579,17 +745,39 @@ def preprocess_mm_data_qwen3_omni(config):
   if config.video_path:
     video_array, _ = _read_video_decord(config.video_path)
     video_processed, video_grid_thw = preprocess_video(video_array, config)
+    orig_t, orig_h, orig_w = video_grid_thw[0]
     video_values = np.reshape(
         video_processed,
         (
             1,
             config.num_channels_for_vit,
-            config.temporal_patch_size_for_vit * video_grid_thw[0, 0],
-            config.patch_size_for_vit * video_grid_thw[0, 1],
-            config.patch_size_for_vit * video_grid_thw[0, 2],
+            config.temporal_patch_size_for_vit * orig_t,
+            config.patch_size_for_vit * orig_h,
+            config.patch_size_for_vit * orig_w,
         ),
     )
+    
+    # Clip grid to maximum limits to prevent TPU compilation OOMs and ensure static shapes
+    clip_t = min(orig_t, VIDEO_MAX_GRID_T)
+    clip_h = min(orig_h, VIDEO_MAX_GRID_H)
+    clip_w = min(orig_w, VIDEO_MAX_GRID_W)
+    
+    # Crop video_values to the clipped dimensions
+    t_px = config.temporal_patch_size_for_vit * clip_t
+    h_px = config.patch_size_for_vit * clip_h
+    w_px = config.patch_size_for_vit * clip_w
+    video_values = video_values[:, :, :t_px, :h_px, :w_px]
+    
+    # Update video_grid_thw
+    video_grid_thw = np.array([[clip_t, clip_h, clip_w]], dtype=np.int32)
+    
     processor_outputs.video_values = video_values
+    processor_outputs.video_grid_thw = video_grid_thw
+    print(
+        f"[SFT_DEBUG] Preprocessing Video (inference): Raw path: {config.video_path}, Raw size: {video_array.shape}. "
+        f"Original Grid (THW): [{orig_t}, {orig_h}, {orig_w}], Clipped Grid (THW): {video_grid_thw[0]}, "
+        f"Cropped Pixel Shape: {video_values.shape}"
+    )
     processor_outputs.video_grid_thw = video_grid_thw
     processor_outputs.video_second_per_grid = np.asarray([config.temporal_patch_size_for_vit], dtype=np.float32)
     processor_outputs.num_videos = 1  # Only one video for now.
@@ -755,6 +943,33 @@ def get_dummy_image_shape_for_init_qwen3_omni(batch_size):
       QWEN3_OMNI_IMAGE_SIZE,  # video_num_frames
   )
   return image_shape
+
+
+def get_dummy_video_shape_for_init_qwen3_omni(batch_size, config):
+  """Return the fixed padded shape for a video batch element for Qwen3-Omni.
+
+  All video_values tensors are zero-padded to this shape in PadOrTrimToMaxLength
+  so that grain.Batch can stack them into a uniform batch.
+  Shape: (batch, C, max_T_pixels, max_H_pixels, max_W_pixels)
+  """
+  tps = config.temporal_patch_size_for_vit
+  ps = config.patch_size_for_vit
+  return (
+      batch_size,
+      mm_utils.NUM_IMAGE_CHANNELS,
+      VIDEO_MAX_GRID_T * tps,
+      VIDEO_MAX_GRID_H * ps,
+      VIDEO_MAX_GRID_W * ps,
+  )
+
+
+def get_dummy_audio_shape_for_init_qwen3_omni_sft(batch_size, config):
+  """Return the fixed padded shape for an audio batch element for Qwen3-Omni SFT.
+
+  All audio_values tensors are zero-padded to this shape so that grain.Batch
+  can stack them.  Shape: (batch, num_mel_bins, AUDIO_MAX_TIME)
+  """
+  return (batch_size, config.num_mel_bins_for_audio, AUDIO_MAX_TIME)
 
 
 def get_dummy_audio_shape_for_init_qwen3_omni(config):

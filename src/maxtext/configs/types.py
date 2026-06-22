@@ -1879,6 +1879,7 @@ class MultimodalGeneral(BaseModel):
       description="Maximum number of images per example for training with image lists. -1 means no limit.",
   )
   video_path: PathStr = Field("", description="Path to a video for decoding.")
+  video_directory: PathStr = Field("", description="Local directory path containing video files for SFT.")
   audio_path: PathStr = Field("", description="Path to an audio file for decoding.")
   video_placeholder: str = Field("<|video|>", description="Placeholder string for video in text prompts.")
   audio_placeholder: str = Field("<|audio|>", description="Placeholder string for audio in text prompts.")
@@ -1886,6 +1887,10 @@ class MultimodalGeneral(BaseModel):
   use_mrope: bool = Field(False, description="Enable Multi-dimensional RoPE for Qwen3-Omni models.")
   mrope_section: list[int] = Field([24, 20, 20], description="Dimensions for temporal, height, width in MRoPE.")
   position_id_per_seconds: int = Field(25, description="Temporal granularity for MRoPE (tokens per second).")
+  filter_sft_sequences_by_length: bool = Field(
+      False,
+      description="Filter out multimodal SFT sequences that exceed max_prefill_predict_length or max_target_length.",
+  )
 
 
 class VisionTower(BaseModel):
