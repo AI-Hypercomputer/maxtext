@@ -51,7 +51,7 @@ from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from maxtext.layers import quantizations
 from maxtext.models import models
 from maxtext.utils import max_logging
-from maxtext.utils import max_utils, maxtext_utils, maxtext_utils_nnx
+from maxtext.utils import max_utils, maxtext_utils, maxtext_utils_nnx, sharding
 import numpy as np
 from orbax import checkpoint as ocp
 
@@ -112,13 +112,13 @@ def _zero_pad_axis(arr, axis, extra):
   if extra == 0:
     return arr
 
-  sharding = getattr(arr, "sharding", None)
+  arr_sharding = getattr(arr, "sharding", None)
   pad_width = [(0, 0)] * arr.ndim
 
-  if isinstance(sharding, jax.sharding.NamedSharding):
-    spec = sharding.spec
+  if isinstance(arr_sharding, jax.sharding.NamedSharding):
+    spec = arr_sharding.spec
     partition = spec[axis] if axis < len(spec) else None
-    shards_along_axis = _partition_size(partition, sharding.mesh)
+    shards_along_axis = _partition_size(partition, arr_sharding.mesh)
     if shards_along_axis > 1:
       if extra % shards_along_axis != 0:
         raise ValueError(
@@ -131,7 +131,7 @@ def _zero_pad_axis(arr, axis, extra):
       def _pad_local(x):
         return jnp.pad(x, pad_width)
 
-      return jax.shard_map(_pad_local, mesh=sharding.mesh, in_specs=spec, out_specs=spec, check_vma=False)(arr)
+      return jax.shard_map(_pad_local, mesh=arr_sharding.mesh, in_specs=spec, out_specs=spec, check_vma=False)(arr)
 
   pad_width[axis] = (0, extra)
   return jnp.pad(arr, pad_width)
@@ -257,11 +257,11 @@ def _fuse_moe_weights(ckpt_tree, model_arrays_tree):
 
     # Determine the number of shards (TP degree) along the concatenated axis
     n_shards = 1
-    sharding = getattr(wi_model, "sharding", None)
-    if isinstance(sharding, jax.sharding.NamedSharding):
-      spec = sharding.spec
+    wi_sharding = getattr(wi_model, "sharding", None)
+    if isinstance(wi_sharding, jax.sharding.NamedSharding):
+      spec = wi_sharding.spec
       partition = spec[axis] if axis < len(spec) else None
-      n_shards = _partition_size(partition, sharding.mesh)
+      n_shards = _partition_size(partition, wi_sharding.mesh)
 
     # Target size for a single half (wi_0 or wi_1) AFTER padding
     target_half_dim = wi_model.shape[-1] // 2
@@ -325,13 +325,13 @@ def _stored_shape_evenly_shardable(restore_arg, stored_shape):
   (each device receives only its local slice), avoiding the multi-GB replicated
   fanout that fully-replicated loading produces for large MoE weights.
   """
-  sharding = restore_arg.sharding
-  if not isinstance(sharding, jax.sharding.NamedSharding):
+  restore_sharding = restore_arg.sharding
+  if not isinstance(restore_sharding, jax.sharding.NamedSharding):
     return False
-  spec = sharding.spec
+  spec = restore_sharding.spec
   for axis_idx, dim in enumerate(stored_shape):
     partition = spec[axis_idx] if axis_idx < len(spec) else None
-    if dim % _partition_size(partition, sharding.mesh) != 0:
+    if dim % _partition_size(partition, restore_sharding.mesh) != 0:
       return False
   return True
 
@@ -581,7 +581,7 @@ def create_nnx_abstract_model(
     # wrap is unnecessary here.
     abs_model = nnx.eval_shape(_create_model)
     graphdef, abs_var_state = nnx.split(abs_model)
-    named_sharding_state = maxtext_utils.get_nnx_named_sharding_with_scan_axis(abs_var_state, mesh)
+    named_sharding_state = sharding.nnx_construct_named_sharding(abs_var_state, mesh)
     abstract_state = jax.tree.map(
         lambda a, s: jax.ShapeDtypeStruct(a.shape, a.dtype, sharding=s),
         abs_var_state,

@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" Utils for MaxText NNX. """
+"""Utils for MaxText NNX."""
 
 from functools import partial
 from typing import Callable
@@ -51,14 +51,17 @@ def create_nnx_rngs(
   return nnx.Rngs(params=rng_key)  # disable dropout RNG and aqt for inference
 
 
-def get_named_sharding_nnx(abstract_state: nnx.State) -> nnx.State:
+def nnx_extract_named_sharding(abstract_state: nnx.State) -> nnx.State:
   """Get named sharding from NNX abstract state.
 
   Args:
     abstract_state: NNX model abstract state created from nnx.get_abstract_model.
 
   Returns:
-    named sharding structure
+    A tree of raw NamedSharding objects (stripping out any nnx.Variable / Param
+    wrappers). This clean structure is expected by JAX compiler APIs (like JIT
+    out_shardings). Contrast with sharding.nnx_construct_named_sharding, which
+    retains wrappers for abstract tree zipping compatibility.
   """
   # Don't use nnx.get_named_sharding() because it constructs new shardings. Instead, we
   # get the existing sharding from the abstract_state.
@@ -156,7 +159,7 @@ def create_nnx_sharded_model(
   if named_sharding is None:
     # The state leaf is of type jax.ShapeDtypeStruct(shape, dtype, sharding)
     # we get the sharding directly from it.
-    named_sharding = get_named_sharding_nnx(abstract_state)
+    named_sharding = nnx_extract_named_sharding(abstract_state)
 
   if mesh is None:
     mesh = abstract_model.mesh
