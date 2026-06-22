@@ -84,6 +84,7 @@ class MultimodalInput:
   video_masks: Array | None = None
   audio_embeddings: Array | None = None
   audio_masks: Array | None = None
+  audio_token_masks: Array | None = None
   bidirectional_mask: Array | None = None
   bidirectional_mask_video: Array | None = None
 

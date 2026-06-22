@@ -752,7 +752,7 @@ class Decoder(nn.Module):
               text_embeddings=y,
               multimodal_embeddings=audio_embeddings,
               mask=audio_masks,
-              token_masks=None,
+              token_masks=getattr(multimodal_input, "audio_token_masks", None),
           )
         else:
           raise ValueError(f"Unsupported model_name for audio: {cfg.model_name}")

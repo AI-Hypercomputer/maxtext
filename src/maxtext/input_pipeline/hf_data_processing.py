@@ -55,6 +55,25 @@ def vision_sft_preprocessing_pipeline(
   """pipeline for multimodal SFT with HF dataset"""
 
   assert len(text_columns) == 2, f"Need two text_columns for query and response, received {text_columns=}"
+
+  # Format conversations if columns are missing
+  features_keys = list(dataset.features.keys()) if dataset.features else []
+  if "conversations" in features_keys and not all(col in features_keys for col in text_columns):
+    def format_llava_video_dataset(example):
+      conversations = example["conversations"]
+      query = ""
+      label = ""
+      for turn in conversations:
+        if turn["from"] == "human" and not query:
+          query = turn["value"]
+        elif turn["from"] == "gpt" and not label:
+          label = turn["value"]
+      example[text_columns[0]] = query
+      example[text_columns[1]] = label
+      return example
+
+    dataset = dataset.map(format_llava_video_dataset)
+
   # Tunix GA requires per-micro-batch slicing at the data level,
   # whereas Native GA processes the full batch and splits it internally.
   if config.elastic_enabled:
@@ -136,6 +155,18 @@ def vision_sft_preprocessing_pipeline(
       input_pipeline_utils.prepare_text_for_image_fusion,
       fn_kwargs={"column_name": text_columns[0], "config": config},
   )
+
+  # Filter out sequences exceeding max_prefill_predict_length or max_target_length
+  if getattr(config, "filter_sft_sequences_by_length", False):
+    max_prefill = getattr(config, "max_prefill_predict_length", 8192)
+    max_target = getattr(config, "max_target_length", 8192 + 512)
+
+    def filter_by_length(example):
+      prefill_len = len(example[text_columns[0]])
+      response_len = len(example[text_columns[1]])
+      return (prefill_len <= max_prefill) and (prefill_len + response_len <= max_target)
+
+    dataset = dataset.filter(filter_by_length)
 
   dataset = input_pipeline_utils.HFDataSource(
       dataset=dataset,

@@ -92,17 +92,25 @@ def TokenizeOp(tokenizer_model, features: Features, data_keys: Iterable[str] = (
 
 def reformat_prompt(example, column, image_placeholder, model_name):
   """reformat prompt for multimodal SFT"""
-  if isinstance(example["images"], list):
-    num_images = len(example["images"])
+  if isinstance(example["images"], str):
+    example[column] = mm_processor.reformat_prompt(
+        example[column], image_placeholder, model_name, num_images=0, video_placeholder=image_placeholder, num_videos=1
+    )
   else:
-    num_images = 1
-  example[column] = mm_processor.reformat_prompt(example[column], image_placeholder, model_name, num_images)
+    if isinstance(example["images"], list):
+      num_images = len(example["images"])
+    else:
+      num_images = 1
+    example[column] = mm_processor.reformat_prompt(example[column], image_placeholder, model_name, num_images)
   return example
 
 
 def reformat_response(example, column, model_name):
   """reformat response for multimodal SFT"""
-  example[column] = mm_processor.reformat_response(example[column][0], model_name)
+  val = example[column]
+  if isinstance(val, (list, tuple)) and len(val) > 0:
+    val = val[0]
+  example[column] = mm_processor.reformat_response(val, model_name)
   return example
 
 
@@ -120,9 +128,17 @@ def merge_image_columns(example, image_columns, max_num_images_per_example):
 
 
 def pre_process_image_sft(example, image_column, config):
-  """pre-process image for multimodal SFT"""
+  """pre-process image or video for multimodal SFT"""
 
   def _process_image_fn(image):
+    if isinstance(image, str):
+      import os
+
+      video_directory = getattr(config, "video_directory", "")
+      if video_directory:
+        image = os.path.join(video_directory, image)
+      return mm_processor.preprocess_image_for_training(image, config)
+
     if isinstance(image, list):
       image = [np.array(mm_utils.convert_to_RGB(img)) for img in image]
     else:
@@ -131,7 +147,7 @@ def pre_process_image_sft(example, image_column, config):
     image = mm_processor.preprocess_image_for_training(image, config)
     return image
 
-  example[image_column] = _process_image_fn(example[image_column])
+  example[image_column] = _process_image_fn(example[image_column]) if example.get(image_column) is not None else None
   return example
 
 
@@ -702,11 +718,79 @@ class PadOrTrimToMaxLength(grain.MapTransform):
     if not isinstance(preprocessed_image, mm_utils.PreprocessorOutput):
       raise TypeError(f"Input must be multimodal_utils.PreprocessorOutput, but got {type(preprocessed_image)}")
 
+    if self.config.model_name and self.config.model_name.startswith("qwen3-omni"):
+      # Pad video_values and audio_values to fixed shapes so grain.Batch can stack them.
+      video_values = getattr(preprocessed_image, "video_values", None)
+      video_grid_thw = getattr(preprocessed_image, "video_grid_thw", None)
+      if video_values is not None:
+        target_shape = mm_processor.get_dummy_video_shape_for_init(
+            self.config.model_name, batch_size=1, config=self.config
+        )
+        # target_shape = (1, C, max_T_px, max_H_px, max_W_px)
+        padded = np.zeros(target_shape[1:], dtype=video_values.dtype)  # (C, max_T, max_H, max_W)
+        _, c, t, h, w = video_values.shape
+        max_t_px, max_h_px, max_w_px = target_shape[2], target_shape[3], target_shape[4]
+        t_clip = min(t, max_t_px)
+        h_clip = min(h, max_h_px)
+        w_clip = min(w, max_w_px)
+        padded[:, :t_clip, :h_clip, :w_clip] = video_values[0, :, :t_clip, :h_clip, :w_clip]
+        preprocessed_image.video_values = padded
+
+        if video_grid_thw is not None:
+          from maxtext.multimodal.processor_qwen3_omni import VIDEO_MAX_GRID_T, VIDEO_MAX_GRID_H, VIDEO_MAX_GRID_W
+          merge_size = getattr(self.config, "spatial_merge_size_for_vit", 2)
+          max_t = VIDEO_MAX_GRID_T
+          max_h_merged = VIDEO_MAX_GRID_H // merge_size
+          max_w_merged = VIDEO_MAX_GRID_W // merge_size
+          
+          actual_t, actual_h, actual_w = video_grid_thw[0]
+          actual_t = min(actual_t, VIDEO_MAX_GRID_T)
+          actual_h = min(actual_h, VIDEO_MAX_GRID_H)
+          actual_w = min(actual_w, VIDEO_MAX_GRID_W)
+          
+          actual_h_merged = actual_h // merge_size
+          actual_w_merged = actual_w // merge_size
+          
+          mask_3d = np.zeros((max_t, max_h_merged, max_w_merged), dtype=np.int32)
+          mask_3d[:actual_t, :actual_h_merged, :actual_w_merged] = 1
+          preprocessed_image.video_mask = mask_3d.flatten()
+          
+          print(
+              f"[SFT_DEBUG] Padding Video: Original Pixel Shape: {video_values.shape}, Padded Pixel Shape: {padded.shape}. "
+              f"Original Grid (THW): {video_grid_thw[0]}, Clipped Grid: [{actual_t}, {actual_h}, {actual_w}]. "
+              f"Video Mask Shape (flattened): {preprocessed_image.video_mask.shape}, Valid tokens count: {np.sum(preprocessed_image.video_mask)}"
+          )
+
+      audio_values = getattr(preprocessed_image, "audio_values", None)
+      audio_lengths = getattr(preprocessed_image, "audio_lengths", None)
+      if audio_values is not None:
+        target_audio = mm_processor.get_dummy_audio_shape_for_sft(
+            self.config.model_name, batch_size=1, config=self.config
+        )
+        # target_audio = (1, num_mel_bins, AUDIO_MAX_TIME)
+        _, mel, t_audio = audio_values.shape
+        padded_audio = np.zeros(target_audio[1:], dtype=audio_values.dtype)  # (mel, max_time)
+        padded_audio[:, :t_audio] = audio_values[0]
+        preprocessed_image.audio_values = padded_audio
+
+        if audio_lengths is not None:
+          from maxtext.multimodal.processor_qwen3_omni import AUDIO_MAX_TIME, _get_feat_extract_output_lengths
+          max_audio_tokens = _get_feat_extract_output_lengths(AUDIO_MAX_TIME)
+          actual_audio_tokens = audio_lengths[0]
+          
+          audio_token_mask = np.zeros(max_audio_tokens, dtype=np.int32)
+          audio_token_mask[:actual_audio_tokens] = 1
+          preprocessed_image.audio_token_mask = audio_token_mask
+          
+          print(
+              f"[SFT_DEBUG] Padding Audio: Original Mel Shape: {audio_values.shape}, Padded Mel Shape: {padded_audio.shape}. "
+              f"Audio Mask Shape: {preprocessed_image.audio_token_mask.shape}, Valid audio tokens count: {np.sum(preprocessed_image.audio_token_mask)}"
+          )
+
+      return preprocessed_image
+
     if preprocessed_image.pixel_values is None:
       raise ValueError("Input preprocessed_image must have pixel_values to pad images.")
-
-    if self.config.model_name and self.config.model_name.startswith("qwen3-omni"):
-      return preprocessed_image
 
     # Determine the maximum number of images/masks allowed.
     image_offsets = mm_processor.get_image_offsets(self.config, preprocessed_image)
@@ -811,6 +895,27 @@ class ExtractImagesAndMasks(grain.MapTransform):
     output["images"] = preprocessed_image.pixel_values
     if preprocessed_image.pixel_mask is not None:
       output["image_masks"] = preprocessed_image.pixel_mask
+
+    # Extract video and audio tensors from Qwen3OmniPreprocessorOutput.
+    video_values = getattr(preprocessed_image, "video_values", None)
+    if video_values is not None:
+      output["videos"] = video_values
+    video_grid_thw = getattr(preprocessed_image, "video_grid_thw", None)
+    if video_grid_thw is not None:
+      output["video_grid_thw"] = video_grid_thw
+    video_mask = getattr(preprocessed_image, "video_mask", None)
+    if video_mask is not None:
+      output["video_masks"] = video_mask
+
+    audio_values = getattr(preprocessed_image, "audio_values", None)
+    if audio_values is not None:
+      output["audios"] = audio_values
+    audio_lengths = getattr(preprocessed_image, "audio_lengths", None)
+    if audio_lengths is not None:
+      output["audio_lengths"] = audio_lengths
+    audio_token_mask = getattr(preprocessed_image, "audio_token_mask", None)
+    if audio_token_mask is not None:
+      output["audio_token_masks"] = audio_token_mask
 
     return output
 

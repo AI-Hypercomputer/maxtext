@@ -148,22 +148,36 @@ def merge_mm_embeddings(
   # Process Optional Token Masks
   flat_token_masks_processed = None
   if token_masks is not None:
-    # Handle the tiled case where token_masks batch dimension is (B * N)
-    if token_masks.shape[0] != batch_size:
-      if token_masks.shape[0] % batch_size != 0:
-        raise ValueError(
-            "Batch dimension of token_masks must be a multiple of the text"
-            f" batch size. Got {token_masks.shape[0]} and {batch_size}."
-        )
-      # Reshape from (B * N, T) to (B, N * T)
-      flat_tile_masks = token_masks.reshape(batch_size, -1)
+    if multimodal_embeddings.ndim == 3:
+      # Already flat, no need to repeat (e.g. Qwen3-Omni video/audio)
+      flat_token_masks_processed = token_masks.reshape(batch_size, -1)
     else:
-      # This handles cases where token_masks is already (B, ...)
-      flat_tile_masks = token_masks.reshape(batch_size, -1)
+      # Handle the tiled case where token_masks batch dimension is (B * N)
+      if token_masks.shape[0] != batch_size:
+        if token_masks.shape[0] % batch_size != 0:
+          raise ValueError(
+              "Batch dimension of token_masks must be a multiple of the text"
+              f" batch size. Got {token_masks.shape[0]} and {batch_size}."
+          )
+        # Reshape from (B * N, T) to (B, N * T)
+        flat_tile_masks = token_masks.reshape(batch_size, -1)
+      else:
+        # This handles cases where token_masks is already (B, ...)
+        flat_tile_masks = token_masks.reshape(batch_size, -1)
 
-    # Expand the tile-level mask to a token-level mask to match the embeddings.
-    # A mask of shape (B, N*T) becomes (B, N*T*K) by repeating each element K times.
-    flat_token_masks_processed = jnp.repeat(flat_tile_masks, repeats=num_toks_per_token, axis=1)
+      # Expand the tile-level mask to a token-level mask to match the embeddings.
+      # A mask of shape (B, N*T) becomes (B, N*T*K) by repeating each element K times.
+      flat_token_masks_processed = jnp.repeat(flat_tile_masks, repeats=num_toks_per_token, axis=1)
+
+  if flat_token_masks_processed is not None:
+    valid_counts = jnp.sum(flat_token_masks_processed, axis=1)
+    jax.debug.print(
+        "[SFT_DEBUG] merge_mm_embeddings: Input shape: {x}, Token Mask shape: {m}, "
+        "Valid tokens per batch element: {counts}",
+        x=flat_multimodal_embeddings.shape,
+        m=flat_token_masks_processed.shape,
+        counts=valid_counts
+    )
 
   # Vmap the inner merge function over the batch dimension
   return jax.vmap(
@@ -767,25 +781,52 @@ def window_function(
 
 
 def load_audio(data_path: str, sample_rate: int = 16000) -> np.ndarray:
-  """Load audio from a file path.
-
-  Args:
-      data_path (str): The path to the audio file or video file.
-      sample_rate (int): The target sample rate in Hz. Default is 16000.
-
-  Returns:
-      np.ndarray: The loaded audio waveform.
-
-  Raises:
-      FileNotFoundError: If the audio file does not exist.
-      RuntimeError: If the audio file cannot be loaded.
-  """
+  """Load audio from a file path (supporting both audio and video files)."""
   if not os.path.isfile(data_path):
-    raise FileNotFoundError(f"Audio file not found at path {data_path}. Please specify a valid audio file path")
-  if librosa is None:
-    raise ImportError("librosa is required for audio processing but not installed.")
-  try:
-    audio = librosa.load(data_path, sr=sample_rate)[0]
-    return audio
-  except Exception as e:
-    raise RuntimeError(f"Failed to load audio from {data_path}: {e}") from e
+    raise FileNotFoundError(f"Audio file not found at path {data_path}.")
+
+  import soundfile as sf
+  import subprocess
+  import tempfile
+
+  is_video = data_path.lower().endswith((".mp4", ".mkv", ".avi", ".mov", ".flv", ".webm"))
+
+  if is_video:
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_wav:
+      temp_wav_path = temp_wav.name
+
+    try:
+      cmd = [
+          "ffmpeg",
+          "-y",
+          "-i",
+          data_path,
+          "-vn",
+          "-acodec",
+          "pcm_s16le",
+          "-ar",
+          str(sample_rate),
+          "-ac",
+          "1",
+          temp_wav_path,
+      ]
+      subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+      audio, sr = sf.read(temp_wav_path)
+      assert sr == sample_rate, f"Sample rate mismatch: expected {sample_rate}, got {sr}"
+      return audio
+    except Exception as e:
+      raise RuntimeError(f"Failed to extract and load audio from video {data_path}: {e}")
+    finally:
+      if os.path.exists(temp_wav_path):
+        os.remove(temp_wav_path)
+  else:
+    try:
+      audio, sr = sf.read(data_path)
+      if sr != sample_rate:
+        if librosa is not None:
+          audio = librosa.resample(audio, orig_sr=sr, target_sr=sample_rate)
+        else:
+          raise RuntimeError(f"Audio sample rate {sr} does not match target {sample_rate} and librosa is not installed.")
+      return audio
+    except Exception as e:
+      raise RuntimeError(f"Failed to load audio from {data_path}: {e}")

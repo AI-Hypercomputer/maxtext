@@ -1906,7 +1906,7 @@ class Qwen3OmniMoeVisionAttention(nnx.Module):
         num_kv_heads=self.config.num_attention_heads_for_vit,
         head_dim=head_dim,
         max_target_length=self.config.num_position_embeddings_for_vit,
-        attention_kernel="dot_product",
+        attention_kernel="autoselected",
         inputs_q_shape=(1, 1, self.config.hidden_size_for_vit),
         inputs_kv_shape=(1, 1, self.config.hidden_size_for_vit),
         float32_qk_product=self.config.float32_qk_product,
