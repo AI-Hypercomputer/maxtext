@@ -69,6 +69,13 @@ TEST_CASES = [
         "2d-fsdp",
         ("ici_fsdp_parallelism=-1", "ici_fsdp_transpose_parallelism=2"),
     ),
+    (
+        "deepseek2-16b",
+        "tpu7x-16",
+        1,
+        "ep-as-dp",
+        ("ici_fsdp_parallelism=-1", "ici_expert_parallelism=2", "use_ring_of_experts=true"),
+    ),
     ("qwen3-0.6b", "tpu7x-16", 1, "", ()),
     ("gpt-oss-20b", "tpu7x-16", 1, "", ()),
     ("gpt-oss-20b", "tpu7x-16", 1, "", ("ici_fsdp_parallelism=-1", "ici_expert_parallelism=2")),
