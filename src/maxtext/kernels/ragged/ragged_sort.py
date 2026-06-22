@@ -343,16 +343,16 @@ def ring_ragged_unsort(
     if buffer_size >= n:
       # ragged_gather fans out g_hidden_states_local by reading the same row
       # multiple times when idx_inv // topk maps multiple positions to it.
-      # Per-slot routing weights are applied inside the kernel.
+      # Apply weights outside the kernel to avoid a compilation issue with
+      # tpu.bitcast in the has_weights=True path on SparseCore.
       weight_for_sorted = topk_weights_flat[idx_inv]
       grad_sorted_tokens = ragged_gather(
           g_hidden_states_local,
           idx_inv // topk,
           shard_output_start[None],
           shard_output_end[None],
-          weights=weight_for_sorted,
-          has_weights=True,
       )
+      grad_sorted_tokens = grad_sorted_tokens * weight_for_sorted[:, None]
     else:
       # Slice the inverse permutation to match the packed local buffer.
       padded_idx_inv = jnp.pad(idx_inv, (0, buffer_size))
@@ -361,14 +361,15 @@ def ring_ragged_unsort(
       # Slice the per-slot routing weights to match the packed local buffer.
       padded_weights = jnp.pad(topk_weights_flat[idx_inv], (0, buffer_size))
       sliced_weights = jax.lax.dynamic_slice_in_dim(padded_weights, shard_output_start, buffer_size, axis=0)
+      # Apply weights outside the kernel to avoid a compilation issue with
+      # tpu.bitcast in the has_weights=True path on SparseCore.
       grad_sorted_tokens = ragged_gather(
           g_hidden_states_local,
           sliced_idx_inv // topk,
           jnp.int32(0)[None],
           gather_end[None],
-          weights=sliced_weights,
-          has_weights=True,
       )
+      grad_sorted_tokens = grad_sorted_tokens * sliced_weights[:, None]
     return grad_sorted_tokens, None, None, None
 
   _ring_ragged_unsort.defvjp(_ring_ragged_unsort_fwd, _ring_ragged_unsort_bwd)
