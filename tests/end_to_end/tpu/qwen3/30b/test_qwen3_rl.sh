@@ -45,7 +45,7 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
     vllm_additional_config='{"maxtext_config": {"model_name": "'${MODEL_NAME}'", "allow_split_physical_axes": true, "scan_layers": false}}' \
     remat_policy=full hbm_utilization_vllm=0.75 use_pathways=false \
-    ici_tensor_parallelism=1 ici_fsdp_parallelism=8 ici_expert_parallelism=1 max_target_length=1024 weight_dtype=bfloat16 dtype=bfloat16 opt_type=sgd \
+    ici_tensor_parallelism=1 ici_fsdp_parallelism=8 ici_expert_parallelism=1 max_target_length=16 weight_dtype=bfloat16 dtype=bfloat16 opt_type=sgd \
     enable_tunix_perf_metrics=True rl.use_agentic_rollout=True chips_per_vm=8
 
 python3 -m maxtext.inference.vllm_decode \
