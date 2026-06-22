@@ -864,6 +864,10 @@ class RoutedMoE(nnx.Module):
           buffer_size=buffer_size,
           enforce_gather_fallback=self.config.ragged_gather_fallback,
           enforce_gather_reduce_fallback=self.config.ragged_gather_reduce_fallback,
+          gather_flops_override=self.config.ragged_gather_cost_estimate_flops,
+          gather_reduce_flops_override=self.config.ragged_gather_reduce_cost_estimate_flops,
+          gather_bytes_accessed_override=self.config.ragged_gather_cost_estimate_bytes_accessed,
+          gather_reduce_bytes_accessed_override=self.config.ragged_gather_reduce_cost_estimate_bytes_accessed,
       )
     else:
       flatten_selected_experts = jnp.ravel(selected_experts)
@@ -945,6 +949,10 @@ class RoutedMoE(nnx.Module):
           topk_weights=flat_weights,
           enforce_gather_fallback=self.config.ragged_gather_fallback,
           enforce_gather_reduce_fallback=self.config.ragged_gather_reduce_fallback,
+          gather_flops_override=self.config.ragged_gather_cost_estimate_flops,
+          gather_reduce_flops_override=self.config.ragged_gather_reduce_cost_estimate_flops,
+          gather_bytes_accessed_override=self.config.ragged_gather_cost_estimate_bytes_accessed,
+          gather_reduce_bytes_accessed_override=self.config.ragged_gather_reduce_cost_estimate_bytes_accessed,
       )
     else:
       unsort_intermediate = _sort_activations(

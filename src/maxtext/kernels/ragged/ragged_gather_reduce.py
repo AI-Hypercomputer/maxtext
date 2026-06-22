@@ -49,6 +49,61 @@ def _align_to(a, b):
   return ((a + b - 1) // b) * b
 
 
+def get_cost_estimate(
+    padded_input_size: int,
+    aligned_hidden_size: int,
+    reduce_group_size: int,
+    input_dtype_bytes: int,
+    bytes_accessed_override: int = -1,
+    flops_override: int = -1,
+) -> pl.CostEstimate:
+  """Returns a cost estimate for the ragged gather-reduce kernel.
+
+  The kernel gathers rows, multiplies each by a scalar weight, and reduces
+  (sums) every ``reduce_group_size`` rows into one output row.
+
+  Args:
+    padded_input_size: Total number of source rows (after padding).
+    aligned_hidden_size: Number of columns (after alignment).
+    reduce_group_size: Number of source rows reduced into each output row.
+    input_dtype_bytes: Size of one input element in bytes.
+    bytes_accessed_override: If > 0, use this value as bytes_accessed instead
+      of auto-computing.  -1 (default) means auto-compute.
+    flops_override: If > 0, use this value as the flop count instead of
+      auto-computing.  -1 (default) means auto-compute.
+
+  Returns:
+    A ``pl.CostEstimate`` suitable for XLA scheduling.
+  """
+  # Flops:
+  #   - one multiply per element for weighting: padded_input_size * aligned_hidden_size
+  #   - one add per element for reduction:       padded_input_size * aligned_hidden_size
+  if flops_override > 0:
+    flops = flops_override
+  else:
+    flops = 2 * padded_input_size * aligned_hidden_size
+
+  if bytes_accessed_override > 0:
+    bytes_accessed = bytes_accessed_override
+  else:
+    # Bytes accessed:
+    #   read  – input rows + src_indices (int32) + dst_indices (int32) + topk_weights (f32)
+    #   write – output rows (float32)
+    bytes_in = padded_input_size * aligned_hidden_size * input_dtype_bytes  # input rows
+    bytes_in += padded_input_size * 4  # src_indices (int32)
+    bytes_in += padded_input_size * 4  # dst_indices (int32)
+    bytes_in += padded_input_size * 4  # topk_weights (float32)
+    output_rows = padded_input_size // reduce_group_size
+    bytes_out = output_rows * aligned_hidden_size * 4  # output rows (float32)
+    bytes_accessed = bytes_in + bytes_out
+
+  return pl.CostEstimate(
+      flops=flops,
+      bytes_accessed=bytes_accessed,
+      transcendentals=0,
+  )
+
+
 def _fallback_implementation(
     x: jax.Array,
     indices: jax.Array,
@@ -370,7 +425,9 @@ def _preprocess(
   )
 
 
-@functools.partial(jax.jit, static_argnames=("reduce_group_size", "enforce_fallback"))
+@functools.partial(
+    jax.jit, static_argnames=("reduce_group_size", "enforce_fallback", "flops_override", "bytes_accessed_override")
+)
 def ragged_gather_reduce(
     x: jax.Array,
     indices: jax.Array,
@@ -378,6 +435,8 @@ def ragged_gather_reduce(
     valid_rows_mask: jax.Array,
     reduce_group_size: int,
     enforce_fallback: bool = False,
+    flops_override: int = -1,
+    bytes_accessed_override: int = -1,
 ) -> jax.Array:
   """Gathers `x` according to `indices`, applies weights and masks, and reduces.
 
@@ -501,6 +560,14 @@ def ragged_gather_reduce(
       ),
       compiler_params=pltpu.CompilerParams(  # pytype: disable=wrong-keyword-args
           **_COMPILER_PARAMS,
+      ),
+      cost_estimate=get_cost_estimate(
+          padded_input_size=padded_input_size,
+          aligned_hidden_size=aligned_hidden_size,
+          reduce_group_size=reduce_group_size,
+          input_dtype_bytes=dtype_bytes,
+          flops_override=flops_override,
+          bytes_accessed_override=bytes_accessed_override,
       ),
       mesh=vector_mesh,
       name="sc_ragged_gather_reduce",
