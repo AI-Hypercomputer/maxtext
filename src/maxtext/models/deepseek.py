@@ -591,21 +591,21 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       w1_local = jnp.asarray(routed_moe.wi_1[...], self.config.dtype)
       wo_local = jnp.asarray(routed_moe.wo[...], self.config.dtype)
 
-      # Trigger both All-Gathers and Attention in the SAME scheduling group (group 0)
+      # Trigger MoE All-Gathers in scheduling group 0
       with set_xla_metadata(_scheduling_group_id=0):
         w0_gathered = routed_moe._maybe_shard_with_pspec(w0_local, w0_pspec)
         w1_gathered = routed_moe._maybe_shard_with_pspec(w1_local, w1_pspec)
         wo_gathered = routed_moe._maybe_shard_with_pspec(wo_local, wo_pspec)
         pre_gathered_weights = (w0_gathered, w1_gathered, wo_gathered)
 
-        hidden_states, intermediate_inputs = self.self_attention_with_norm_op(
-            x,
-            decoder_segment_ids,
-            decoder_positions,
-            deterministic,
-            previous_chunk,
-            slot,
-        )
+      hidden_states, intermediate_inputs = self.self_attention_with_norm_op(
+          x,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          previous_chunk,
+          slot,
+      )
     else:
       # Standard execution path (fallback or batch-split path which has its own schedule)
       hidden_states, intermediate_inputs = self.self_attention_with_norm_op(

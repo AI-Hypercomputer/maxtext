@@ -21,6 +21,7 @@ import copy
 import jax
 from jax.ad_checkpoint import checkpoint_name
 from jax.experimental import layout
+from jax.experimental.xla_metadata import set_xla_metadata
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 
@@ -1176,17 +1177,18 @@ class MLA(Attention):
     # Check if we need QK Clip stats
     use_qk_clip = self.model_mode == MODEL_MODE_TRAIN and self.config.use_qk_clip
 
-    out = self.attention_op(
-        query,
-        key,
-        value,
-        decoder_segment_ids,
-        inputs_positions,
-        model_mode,
-        cached_values,
-        indexer_mask=indexer_mask,
-        record_max_logits=use_qk_clip,
-    )
+    with set_xla_metadata(_scheduling_group_id=0):
+      out = self.attention_op(
+          query,
+          key,
+          value,
+          decoder_segment_ids,
+          inputs_positions,
+          model_mode,
+          cached_values,
+          indexer_mask=indexer_mask,
+          record_max_logits=use_qk_clip,
+      )
 
     out = self._maybe_shard_with_logical(out, self.out_axis_names)
     out = jax.ad_checkpoint.checkpoint_name(out, "attention_out")
