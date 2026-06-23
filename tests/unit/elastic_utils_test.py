@@ -406,6 +406,28 @@ class ElasticUtilsTest(unittest.TestCase):
     elastic_utils.ensure_elastic_manager_initialized(config)
     self.assertEqual(elastic_utils.elastic_manager, self.fake_manager)
 
+  def test_is_scale_up_event_with_set(self):
+    config = FakeConfig()
+    config.elastic_enabled = True
+    elastic_utils.elastic_manager = self.fake_manager
+
+    # Scenario 1: available_inactive_slices is present and not empty
+    self.fake_manager.available_inactive_slices = {1, 2}
+    self.assertTrue(elastic_utils.is_scale_up_event(config))
+
+    # Scenario 2: available_inactive_slices is present and empty
+    self.fake_manager.available_inactive_slices = set()
+    self.assertFalse(elastic_utils.is_scale_up_event(config))
+
+    # Scenario 3: available_inactive_slices is missing (fallback to event)
+    if hasattr(self.fake_manager, "available_inactive_slices"):
+      delattr(self.fake_manager, "available_inactive_slices")
+    self.fake_manager.new_slice_event.is_set.return_value = True
+    self.assertTrue(elastic_utils.is_scale_up_event(config))
+
+    self.fake_manager.new_slice_event.is_set.return_value = False
+    self.assertFalse(elastic_utils.is_scale_up_event(config))
+
 
 if __name__ == "__main__":
   unittest.main()
