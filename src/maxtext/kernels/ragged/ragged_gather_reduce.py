@@ -409,7 +409,7 @@ def main_kernel(
           
           if is_bf16:
             # We write 128 columns of packed uint32 (representing 256 columns of bf16) in a single aligned DMA write!
-            write_col_hbm_start = col_hbm_start // 2
+            write_col_hbm_start = pl.multiple_of(col_hbm_start // 2, 128)
             pltpu.make_async_copy(
                 temp_packed_vmem.at[src_row_vmem, :128],
                 out_32b_hbm_ref.at[dst_row_hbm, pl.ds(write_col_hbm_start, 128)],
