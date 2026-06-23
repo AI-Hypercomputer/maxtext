@@ -31,14 +31,14 @@ if Version(jax.__version__) <= Version("0.10.0"):
   _OUT_KW = "out_shape"
   _SCRATCH_KW = "scratch_shapes"
   _COMPILER_PARAMS = {
-      "use_tc_tiling_on_sc": False,
+      "use_tc_tiling_on_sc": True,
       "disable_bounds_checks": True,
   }
 else:
   _OUT_KW = "out_type"
   _SCRATCH_KW = "scratch_types"
   _COMPILER_PARAMS = {
-      "use_tc_tiling_on_sc": False,
+      "use_tc_tiling_on_sc": True,
       "disable_bounds_checks": True,
       "needs_layout_passes": False,
   }
@@ -349,7 +349,11 @@ def main_kernel(
         src_row_idx_in_vmem.reverse()
         row_valid_vec.reverse()
 
-        # Pack the active 128 columns of out_vmem_ref into temp_packed_vmem on the fly
+        is_even_iter = (col_vmem_start // 128) % 2 == 0
+        dest_col_offset = jnp.where(is_even_iter, 0, 64)
+
+        # Pack the active 128 columns of out_vmem_ref into temp_packed_vmem on the fly.
+        # If even iter, we pack into the first 64 columns. If odd iter, into the next 64.
         if is_bf16:
           for r in range(num_simd_lanes):
             for c_offset in range(0, 128, 16):
@@ -369,7 +373,7 @@ def main_kernel(
                   jnp.bitwise_or(jnp.bitwise_right_shift(val_B[4], 16), jnp.bitwise_and(val_B[5], -65536)),
                   jnp.bitwise_or(jnp.bitwise_right_shift(val_B[6], 16), jnp.bitwise_and(val_B[7], -65536)),
               ])
-              temp_packed_vmem[r, pl.ds(c_packed, 8)] = packed_vec
+              temp_packed_vmem[r, pl.ds(dest_col_offset + c_packed, 8)] = packed_vec
 
         # There must be at least one valid row to write in the current row_tile.
         # When num valid writes is not a multiple of row_tile_size, we repeat
@@ -381,19 +385,25 @@ def main_kernel(
           src_row_vmem = jnp.where(row_valid, src_row_idx_in_vmem, last_valid_src_row_vmem)
           dst_row_hbm = jnp.where(row_valid, dst_indices[i], last_valid_dst_row_hbm)
           
-          if is_bf16:
-            col_hbm_start_packed = pl.multiple_of(col_hbm_start // 2, 8)
-            pltpu.make_async_copy(
-                temp_packed_vmem.at[src_row_vmem, :64],
-                out_32b_hbm_ref.at[dst_row_hbm, pl.ds(col_hbm_start_packed, 64)],
-                send_sem,
-            ).start()
-          else:
-            pltpu.make_async_copy(
-                out_vmem_ref.at[src_row_vmem, pl.ds(col_vmem_start, num_lanes)],
-                out_32b_hbm_ref.at[dst_row_hbm, pl.ds(col_hbm_start, num_lanes)],
-                send_sem,
-            ).start()
+          # For bf16, we only write on odd iterations (after accumulating 128 columns).
+          # For f32, we write on every iteration (128 columns).
+          should_write = jnp.logical_or(jnp.logical_not(is_bf16), jnp.logical_not(is_even_iter))
+          
+          @pl.when(should_write)
+          def _do_write():
+            if is_bf16:
+              write_col_hbm_start = col_hbm_start // 2 - 64
+              pltpu.make_async_copy(
+                  temp_packed_vmem.at[src_row_vmem, :128],
+                  out_32b_hbm_ref.at[dst_row_hbm, pl.ds(write_col_hbm_start, 128)],
+                  send_sem,
+              ).start()
+            else:
+              pltpu.make_async_copy(
+                  out_vmem_ref.at[src_row_vmem, pl.ds(col_vmem_start, num_lanes)],
+                  out_32b_hbm_ref.at[dst_row_hbm, pl.ds(col_hbm_start, num_lanes)],
+                  send_sem,
+              ).start()
             
           last_valid_src_row_vmem = src_row_vmem
           last_valid_dst_row_hbm = dst_row_hbm
@@ -544,8 +554,11 @@ def ragged_gather_reduce(
   assert num_cores % num_column_partitions == 0
   num_rows_partitions = num_cores // num_column_partitions
 
-  aligned_hidden_size = _align_to(hidden_size, 128 * num_column_partitions)
+  # Align hidden_size to 2 * num_lanes * num_column_partitions to guarantee
+  # col_size is a multiple of 256 (required for 256-to-128 bf16 column packing).
+  aligned_hidden_size = _align_to(hidden_size, 2 * 128 * num_column_partitions)
   col_size = aligned_hidden_size // num_column_partitions
+  assert col_size % 256 == 0
   row_tile_size = num_simd_lanes
   padded_input_size = _align_to(
       input_size,
@@ -620,7 +633,7 @@ def ragged_gather_reduce(
           _SCRATCH_KW: dict(  # pylint: disable=use-dict-literal
               num_rows_per_row_partition_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
               out_vmem_ref=pltpu.VMEM((num_simd_lanes, col_size), jnp.uint32),
-              temp_packed_vmem=pltpu.VMEM((num_simd_lanes, 64), jnp.uint32),
+              temp_packed_vmem=pltpu.VMEM((num_simd_lanes, 128), jnp.uint32),
               prev_iter_last_row_vmem_ref=pltpu.VMEM((1, col_size), jnp.uint32),
               src_indices_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
               dst_indices_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
