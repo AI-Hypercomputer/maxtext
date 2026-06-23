@@ -12,14 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Tests for kernels """
+"""Tests for kernels"""
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 import numpy as np
 from maxtext.utils.max_utils import permute_to_match_maxtext_rope, unpermute_from_match_maxtext_rope
 from maxtext.checkpoint_conversion import to_huggingface as to_hf
 from maxtext.checkpoint_conversion.to_huggingface import (
+    _apply_yarn_rope_config,
     _get_lora_delta,
     _transform_weights_to_adapter,
     _transform_weights_to_full_model,
@@ -60,6 +62,37 @@ class HFCheckpointConversionTest(unittest.TestCase):
 
     if not np.array_equal(wq2, wq4):
       print("Test failed: wq2 does not match wq4")
+
+  def test_apply_yarn_rope_config_preserves_existing_hf_fields(self):
+    hf_config = SimpleNamespace(
+        rope_theta=10_000,
+        rope_scaling={
+            "beta_fast": 32.0,
+            "beta_slow": 1.0,
+            "factor": 40.0,
+            "mscale": 0.707,
+            "mscale_all_dim": 0.707,
+            "original_max_position_embeddings": 4096,
+            "rope_theta": 10_000,
+            "type": "yarn",
+        },
+    )
+    max_config = SimpleNamespace(
+        beta_fast=32,
+        beta_slow=1,
+        rope_factor=40,
+        original_max_position_embeddings=4096,
+        rope_max_timescale=10_000,
+        rope_truncate=True,
+    )
+
+    _apply_yarn_rope_config(hf_config, max_config)
+
+    self.assertEqual(hf_config.rope_theta, 10_000)
+    self.assertEqual(hf_config.rope_scaling["type"], "yarn")
+    self.assertEqual(hf_config.rope_scaling["mscale"], 0.707)
+    self.assertEqual(hf_config.rope_scaling["mscale_all_dim"], 0.707)
+    self.assertTrue(hf_config.rope_scaling["truncate"])
 
 
 class MaxTextToHFLoRAConversionTest(unittest.TestCase):

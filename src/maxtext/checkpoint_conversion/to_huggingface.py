@@ -275,6 +275,32 @@ def _validate_or_update_architecture(hf_config, max_config, override: bool):
     raise ValueError(error_msg)
 
 
+def _apply_yarn_rope_config(hf_config, max_config) -> None:
+  """Apply MaxText YaRN RoPE values without dropping HF model-specific fields."""
+  rope_scaling = getattr(hf_config, "rope_scaling", None)
+  if isinstance(rope_scaling, dict):
+    rope_scaling = dict(rope_scaling)
+  else:
+    rope_scaling = {}
+
+  rope_type_key = "type" if "type" in rope_scaling and "rope_type" not in rope_scaling else "rope_type"
+  rope_scaling.update(
+      {
+          "beta_fast": float(getattr(max_config, "beta_fast", 32.0)),
+          "beta_slow": float(getattr(max_config, "beta_slow", 1.0)),
+          "factor": float(getattr(max_config, "rope_factor", 32.0)),
+          "original_max_position_embeddings": getattr(max_config, "original_max_position_embeddings", 4096),
+          "rope_theta": getattr(max_config, "rope_max_timescale"),
+          rope_type_key: "yarn",
+          "truncate": getattr(max_config, "rope_truncate", False),
+      }
+  )
+
+  hf_config.rope_theta = getattr(max_config, "rope_max_timescale")
+  hf_config.rope_scaling = rope_scaling
+  hf_config.rope_parameters = rope_scaling
+
+
 def _transform_weights_to_adapter(param_map, state_dict):
   """Extracts standalone PEFT weights from MaxText state dict."""
   processed_params_list = []
@@ -403,6 +429,10 @@ def main(argv: Sequence[str]) -> None:
 
   # Validate architecture consistency (raising ValueError on mismatch) or override HF config if specified.
   _validate_or_update_architecture(hf_config_obj, config, override=FLAGS.override_model_architecture)
+
+  # Ensure YaRN rope params are preserved if specified in the maxtext config
+  if getattr(config, "rope_type", None) == "yarn":
+    _apply_yarn_rope_config(hf_config_obj, config)
 
   # 2. Load Tokenizer
   if model_key not in HF_IDS:

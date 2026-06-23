@@ -123,6 +123,9 @@ def run_harness(cfg: dict, hf_token: str | None = None) -> dict:
   num_fewshot = cfg.get("num_fewshot", 0)
   num_samples = cfg.get("num_samples")
   gcs_results_path = cfg.get("gcs_results_path")
+  apply_chat_template = cfg.get("apply_chat_template", False)
+  fewshot_as_multiturn = cfg.get("fewshot_as_multiturn", False)
+  gen_kwargs = cfg.get("gen_kwargs")
   token = resolve_token(cfg, hf_token)
 
   lm_model_type = "local-chat-completions" if backend == "evalchemy" else "local-completions"
@@ -156,7 +159,7 @@ def run_harness(cfg: dict, hf_token: str | None = None) -> dict:
           lm_model_type,
           server.base_url,
       )
-      raw_results = lm_eval_lib.simple_evaluate(
+      simple_eval_kwargs: dict = dict(
           model=lm_model_type,
           model_args=model_args,
           tasks=tasks,
@@ -164,6 +167,13 @@ def run_harness(cfg: dict, hf_token: str | None = None) -> dict:
           limit=num_samples,
           log_samples=False,
       )
+      if apply_chat_template:
+        simple_eval_kwargs["apply_chat_template"] = True
+      if fewshot_as_multiturn:
+        simple_eval_kwargs["fewshot_as_multiturn"] = True
+      if gen_kwargs:
+        simple_eval_kwargs["gen_kwargs"] = gen_kwargs
+      raw_results = lm_eval_lib.simple_evaluate(**simple_eval_kwargs)
 
     # All ranks block here until rank-0 finishes evaluation. Non-rank-0 hosts
     # keep their in-process LLM alive so rank-0's llm.generate() calls can
@@ -221,6 +231,39 @@ def _build_arg_parser() -> argparse.ArgumentParser:
   )
   parser.add_argument("--num_fewshot", type=int, default=0, help="Few-shot examples per task.")
   parser.add_argument("--num_samples", type=int, help="Limit samples per task (None = full dataset).")
+  parser.add_argument(
+      "--apply_chat_template",
+      action="store_true",
+      default=False,
+      help=(
+          "Wrap each prompt in the tokenizer's chat template before evaluation. "
+          "Required for instruction-tuned / chat models (e.g. GPT-OSS harmony format). "
+          "Without this, MMLU/GSM8K prompts arrive as bare text the model was never "
+          "trained on -> near-random scores."
+      ),
+  )
+  parser.add_argument(
+      "--fewshot_as_multiturn",
+      action="store_true",
+      default=False,
+      help=(
+          "When --apply_chat_template and --num_fewshot > 0: format each few-shot "
+          "example as a separate user/assistant chat turn instead of one big context. "
+          "Recommended for chat models with few-shot MMLU."
+      ),
+  )
+  parser.add_argument(
+      "--gen_kwargs",
+      type=str,
+      default=None,
+      help=(
+          "Comma-separated key=value overrides for generation tasks (generate_until). "
+          "Passed directly to lm-eval simple_evaluate(gen_kwargs=...). "
+          "No effect on loglikelihood tasks (e.g. MMLU). "
+          "Example for GPT-OSS GSM8K CoT: 'until=[],max_gen_toks=1024' "
+          "(clears default stop sequences and raises the token budget)."
+      ),
+  )
   return parser
 
 

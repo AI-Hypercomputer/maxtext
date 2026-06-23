@@ -94,5 +94,52 @@ class TestMapResults(unittest.TestCase):
     self.assertEqual(scores, {})
 
 
+_REQUIRED_ARGS = [
+    "--model_name",
+    "llama3.1-8b",
+    "--hf_path",
+    "meta-llama/Llama-3.1-8B",
+    "--base_output_directory",
+    "gs://bucket/",
+    "--run_name",
+    "test_run",
+    "--max_model_len",
+    "4096",
+]
+
+
+class TestArgParser(unittest.TestCase):
+  """Tests for _build_arg_parser — new flags added in the vllm_eval commits."""
+
+  def setUp(self):
+    from maxtext.eval.runner.harness_runner import _build_arg_parser  # pylint: disable=import-outside-toplevel
+
+    self.parser = _build_arg_parser()
+
+  def test_apply_chat_template_default_false(self):
+    args = self.parser.parse_args(_REQUIRED_ARGS)
+    self.assertFalse(args.apply_chat_template)
+
+  def test_apply_chat_template_flag_sets_true(self):
+    args = self.parser.parse_args(_REQUIRED_ARGS + ["--apply_chat_template"])
+    self.assertTrue(args.apply_chat_template)
+
+  def test_fewshot_as_multiturn_default_false(self):
+    args = self.parser.parse_args(_REQUIRED_ARGS)
+    self.assertFalse(args.fewshot_as_multiturn)
+
+  def test_fewshot_as_multiturn_flag_sets_true(self):
+    args = self.parser.parse_args(_REQUIRED_ARGS + ["--fewshot_as_multiturn"])
+    self.assertTrue(args.fewshot_as_multiturn)
+
+  def test_gen_kwargs_default_none(self):
+    args = self.parser.parse_args(_REQUIRED_ARGS)
+    self.assertIsNone(args.gen_kwargs)
+
+  def test_gen_kwargs_passthrough(self):
+    args = self.parser.parse_args(_REQUIRED_ARGS + ["--gen_kwargs", "until=[],max_gen_toks=1024"])
+    self.assertEqual(args.gen_kwargs, "until=[],max_gen_toks=1024")
+
+
 if __name__ == "__main__":
   unittest.main()
