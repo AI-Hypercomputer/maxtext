@@ -260,15 +260,7 @@ def main_kernel(
             if row_src == num_simd_lanes - 1:
               prev_iter_last_row_vmem_ref[0, col_slice] = data_to_write
 
-        # Start dma write.
-        # When there are multiple sources rows in the current row_tile that
-        # contribute to the same destination row, the accumulated data is
-        # stored in the last row's idx in `out_vmem_ref`.
-        # Logically, we could skip all the source rows that are not the last
-        # for each destination row, but we want to avoid using `pl.when` for
-        # efficiency. We just repeat the write of latest accumulated data
-        # multiple times.
-        # `src_row_idx_in_vmem` tracks the right idx in vmem for each hbm write.
+        # Calculate src_row_idx_in_vmem and row_valid_vec
         src_row_idx_in_vmem = []
         row_valid_vec = []
         for row_vmem_idx in reversed(range(num_simd_lanes)):
@@ -291,22 +283,74 @@ def main_kernel(
         src_row_idx_in_vmem.reverse()
         row_valid_vec.reverse()
 
-        # There must be at least one valid row to write in the current row_tile.
-        # When num valid writes is not a multiple of row_tile_size, we repeat
-        # the last valid write to avoid valid data in hbm being overwritten
-        # (and to avoid using `pl.when`).
-        last_valid_src_row_vmem = -1
-        last_valid_dst_row_hbm = -1
-        for i, (src_row_idx_in_vmem, row_valid) in enumerate(zip(src_row_idx_in_vmem, row_valid_vec, strict=True)):
-          src_row_vmem = jnp.where(row_valid, src_row_idx_in_vmem, last_valid_src_row_vmem)
-          dst_row_hbm = jnp.where(row_valid, dst_indices[i], last_valid_dst_row_hbm)
-          pltpu.make_async_copy(
-              out_vmem_ref.at[src_row_vmem, pl.ds(col_vmem_start, num_lanes)],
-              out_32b_hbm_ref.at[dst_row_hbm, pl.ds(col_hbm_start, num_lanes)],
-              send_sem,
-          ).start()
-          last_valid_src_row_vmem = src_row_vmem
-          last_valid_dst_row_hbm = dst_row_hbm
+        # If output is bf16, pack the accumulated float32 results into bf16 (packed as uint32)
+        if in_dtype == jnp.bfloat16:
+          base_packed_row = dst_indices[0] // 2
+          for col_compute_offset in range(0, num_lanes, num_simd_lanes):
+            col_slice = pl.ds(col_vmem_start + col_compute_offset, num_simd_lanes)
+            
+            packed_out = jnp.zeros((9, 16), dtype=jnp.uint32)
+            for i in range(num_simd_lanes):
+              vmem_lane = src_row_idx_in_vmem[i]
+              dst_row = dst_indices[i]
+              
+              # Load accumulated float32 data
+              data_u32 = out_vmem_ref[vmem_lane, col_slice]
+              data_f32 = jax.lax.bitcast_convert_type(data_u32, jnp.float32)
+              
+              # Convert to bf16 and cast to uint32 (lower 16 bits)
+              data_bf16_u32 = jax.lax.bitcast_convert_type(data_f32.astype(jnp.bfloat16), jnp.uint32)
+              data_bf16_u32 = jnp.bitwise_and(data_bf16_u32, 0xffff)
+              
+              # Shift: even -> lower 16, odd -> upper 16
+              shift = jnp.where(dst_row % 2 == 0, 0, 16)
+              shifted_data = jnp.bitwise_left_shift(data_bf16_u32, shift)
+              
+              # Local packed row index
+              local_packed_row = (dst_row // 2) - base_packed_row
+              
+              packed_out = packed_out.at[local_packed_row].or_(shifted_data)
+              
+            # Write packed rows back to the first 9 rows of out_vmem_ref
+            for p in range(9):
+              out_vmem_ref[p, col_slice] = packed_out[p]
+
+        # Trigger DMA writes
+        if in_dtype == jnp.bfloat16:
+          last_valid_local_row = -1
+          last_valid_dst_row_packed = -1
+          base_packed_row = dst_indices[0] // 2
+          
+          for i, row_valid in enumerate(row_valid_vec):
+            dst_row = dst_indices[i]
+            local_packed_row = (dst_row // 2) - base_packed_row
+            dst_row_packed = dst_row // 2
+            
+            src_row_vmem = jnp.where(row_valid, local_packed_row, last_valid_local_row)
+            dst_row_hbm = jnp.where(row_valid, dst_row_packed, last_valid_dst_row_packed)
+            
+            pltpu.make_async_copy(
+                out_vmem_ref.at[src_row_vmem, pl.ds(col_vmem_start, num_lanes)],
+                out_32b_hbm_ref.at[dst_row_hbm, pl.ds(col_hbm_start, num_lanes)],
+                send_sem,
+            ).start()
+            
+            last_valid_local_row = jnp.where(row_valid, local_packed_row, last_valid_local_row)
+            last_valid_dst_row_packed = jnp.where(row_valid, dst_row_packed, last_valid_dst_row_packed)
+        else:
+          # Original unpacked DMA write loop (same as clean code)
+          last_valid_src_row_vmem = -1
+          last_valid_dst_row_hbm = -1
+          for i, (src_row_idx, row_valid) in enumerate(zip(src_row_idx_in_vmem, row_valid_vec, strict=True)):
+            src_row_vmem = jnp.where(row_valid, src_row_idx, last_valid_src_row_vmem)
+            dst_row_hbm = jnp.where(row_valid, dst_indices[i], last_valid_dst_row_hbm)
+            pltpu.make_async_copy(
+                out_vmem_ref.at[src_row_vmem, pl.ds(col_vmem_start, num_lanes)],
+                out_32b_hbm_ref.at[dst_row_hbm, pl.ds(col_hbm_start, num_lanes)],
+                send_sem,
+            ).start()
+            last_valid_src_row_vmem = src_row_vmem
+            last_valid_dst_row_hbm = dst_row_hbm
 
         return carry
 
@@ -505,7 +549,7 @@ def ragged_gather_reduce(
       **{
           _OUT_KW: jax.ShapeDtypeStruct(
               (padded_input_size // reduce_group_size, aligned_hidden_size),
-              jnp.float32,
+              x.dtype,
           ),
           _SCRATCH_KW: dict(  # pylint: disable=use-dict-literal
               num_rows_per_row_partition_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
