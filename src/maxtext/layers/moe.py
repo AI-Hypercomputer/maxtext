@@ -43,7 +43,7 @@ from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils.sharding import create_sharding, maybe_shard_with_logical, maybe_shard_with_pspec
-from maxtext.utils.sharding import logical_to_mesh_axes
+from maxtext.utils.sharding import logical_to_mesh_axes, remove_expert_from_partition_spec
 import numpy as np
 import qwix
 from qwix.contrib.sparsity import sparsity_module
@@ -630,6 +630,18 @@ class RoutedMoE(nnx.Module):
         debug_sharding=self.config.debug_sharding,
         extra_stack_level=1,
     )
+
+  def _maybe_shard_moe_dispatch(self, inputs, logical_axis, peel_expert):
+    """Shard a MoE dispatch/MLP activation. When `peel_expert` is set, drop the 'expert'
+    mesh axis from the batch dim (index 1) so the GEMM stays expert-parallel (AllToAll)
+    instead of double-mapping E and B onto 'expert'. Each logical dim is resolved
+    independently so the shared 'expert' axis is not deduped off the expert dim before
+    the peel."""
+    if not peel_expert:
+      return self._maybe_shard_with_logical(inputs, logical_axis)
+    spec = [None if name is None else self._logical_to_mesh_axes((name,))[0] for name in logical_axis]
+    pspec = remove_expert_from_partition_spec(jax.sharding.PartitionSpec(*spec), dims_to_peel=(1,))
+    return self._maybe_shard_with_pspec(inputs, pspec)
 
   def get_expert_parallelism_size(self):
     # When expert parallelism has more than one physical axes, take product of their shapes
@@ -2203,12 +2215,18 @@ class RoutedMoE(nnx.Module):
 
     if self.config.capacity_factor > 0:
       # token dropping if needed
+      moe_peel_expert = False  # only the training dispatch/MLP path peels 'expert' from the batch dim
       if self.config.model_call_mode != "inference":
         # TODO(b/425930949): remove this pylint by refactoring the logic here.
         dispatch_mask, combine_mask = self.generate_masks(
             top_k_indices, weights  # pylint: disable=undefined-variable,possibly-used-before-assignment
         )
         mask_axes = ("activation_batch_moe", "activation_norm_length_moe", None, None)
+        # Dispatch/MLP are already expert-sharded via "activation_exp". With
+        # moe_dispatch_no_expert_sharding we peel 'expert' off the batch dim of these specs
+        # (see _maybe_shard_moe_dispatch) so the GEMM stays expert-parallel (AllToAll) instead
+        # of double-mapping E and B onto 'expert' (FSDP-style fallback).
+        moe_peel_expert = self.config.moe_dispatch_no_expert_sharding
         dispatch_axis = (
             "activation_exp",
             "activation_batch_moe",
@@ -2313,10 +2331,7 @@ class RoutedMoE(nnx.Module):
                   "activation_embed_moe",
               ),
           )
-        dispatch = self._maybe_shard_with_logical(
-            dispatch,
-            dispatch_axis,
-        )
+        dispatch = self._maybe_shard_moe_dispatch(dispatch, dispatch_axis, moe_peel_expert)
       with jax.named_scope("wi_0"):
         w0_kernel_axes = ("exp", None, "mlp")
         w0_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w0_kernel, w0_kernel_axes)
@@ -2329,10 +2344,7 @@ class RoutedMoE(nnx.Module):
 
         if self.config.activations_in_float32:
           layer_w0 = layer_w0.astype(jnp.float32)
-        layer_w0 = self._maybe_shard_with_logical(
-            layer_w0,
-            mlp_axis,
-        )
+        layer_w0 = self._maybe_shard_moe_dispatch(layer_w0, mlp_axis, moe_peel_expert)
         layer_w0 = adc.checkpoint_name(adc.checkpoint_name(layer_w0, "mlpwi_0"), "moe_mlpwi_0")
       with jax.named_scope("wi_1"):
         w1_kernel_axes = ("exp", None, "mlp")
@@ -2345,10 +2357,7 @@ class RoutedMoE(nnx.Module):
           layer_w1 = layer_w1 + w1_bias
         if self.config.activations_in_float32:
           layer_w1 = layer_w1.astype(jnp.float32)
-        layer_w1 = self._maybe_shard_with_logical(
-            layer_w1,
-            mlp_axis,
-        )
+        layer_w1 = self._maybe_shard_moe_dispatch(layer_w1, mlp_axis, moe_peel_expert)
         layer_w1 = adc.checkpoint_name(adc.checkpoint_name(layer_w1, "mlpwi_1"), "moe_mlpwi_1")
       layer_multiply = self.apply_ffn_activation(layer_w0, layer_w1)
       with jax.named_scope("wo"):
