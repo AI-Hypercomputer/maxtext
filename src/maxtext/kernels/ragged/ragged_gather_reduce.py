@@ -61,7 +61,8 @@ def main_kernel(
     out_hbm_ref: jax.Ref,
     # Scratch.
     num_rows_per_row_partition_vmem_ref: jax.Ref,
-    out_vmem_ref: jax.Ref,
+    in_vmem_ref: jax.Ref,      # Dedicated 2D input tile buffer (prevents layout casts!)
+    out_vmem_ref: jax.Ref,     # Dedicated 1D output buffer (prevents layout casts!)
     prev_iter_last_row_vmem_ref: jax.Ref,
     src_indices_vmem_ref: jax.Ref,
     dst_indices_vmem_ref: jax.Ref,
@@ -80,7 +81,8 @@ def main_kernel(
   assert sc_info is not None
   num_simd_lanes = sc_info.num_lanes
   num_lanes = tpu_info.num_lanes
-  col_size = out_vmem_ref.shape[-1]
+  col_size = in_vmem_ref.shape[-1] # col_size is the size of the 128-lane input buffer (128!)
+  out_col_size = prev_iter_last_row_vmem_ref.shape[-1] # out_col_size is the partitioned column size!
   num_cores = jax.lax.axis_size((core_axis_name, subcore_axis_name))
 
   recv_sem = sem_ref.at[0]
@@ -93,7 +95,6 @@ def main_kernel(
       dimension_semantics=(pltpu.PARALLEL,),
   )
   def inner_kernel():
-    # Inside the emit_pipeline execution block, the grid context is active!
     core_id = pl.program_id(0)
     row_partition_size = in_hbm_ref.shape[0] // num_row_partitions
     row_partition_id = core_id // num_column_partitions
@@ -119,7 +120,7 @@ def main_kernel(
     row_tile_size = num_simd_lanes
     num_row_tiles = pl.cdiv(num_rows_current_row_partition, row_tile_size)
     row_start = row_partition_id * row_partition_size
-    col_start = col_partition_id * col_size
+    col_start = col_partition_id * out_col_size
 
     @pl.loop(0, num_row_tiles)
     def row_loop(row_block_id):
@@ -157,48 +158,46 @@ def main_kernel(
       in_32b_hbm_ref = in_hbm_ref
       out_32b_hbm_ref = out_hbm_ref.bitcast(jnp.uint32)
 
-      # DMA input from HBM to VMEM (shared buffer out_vmem_ref).
-      # Since we packed columns in the wrapper, in_hbm_ref is already uint32,
-      # and we read it directly without dividing row index by 2!
-      for col_vmem_start in range(0, col_size, num_lanes):
-        col_hbm_start = col_start + col_vmem_start
-        for row_vmem in range(num_simd_lanes):
-          row_hbm = src_indices[row_vmem]
-          pltpu.make_async_copy(
-              in_32b_hbm_ref.at[row_hbm, pl.ds(col_hbm_start, num_lanes)],
-              out_vmem_ref.at[row_vmem, pl.ds(col_vmem_start, num_lanes)],
-              recv_sem,
-          ).start()
-
       # Sequential column loop using double buffering logic.
-      @pl.loop(0, col_size, step=num_lanes, init_carry=(prev_dst_row_hbm,))
+      @pl.loop(0, out_col_size, step=num_lanes, init_carry=(prev_dst_row_hbm,))
       @jax.named_scope("dma_write_loop")
       def dma_write_loop(col_vmem_start, carry):
         col_hbm_start = col_start + col_vmem_start
 
+        # DMA input from HBM directly to the dedicated 2D in_vmem_ref buffer!
+        # This has a perfect (8, 128) layout matching the DMA engine,
+        # completely preventing any reinterpret layout casts!
+        for row_vmem in range(num_simd_lanes):
+          row_hbm = src_indices[row_vmem]
+          pltpu.make_async_copy(
+              in_32b_hbm_ref.at[row_hbm, pl.ds(col_hbm_start, num_lanes)],
+              in_vmem_ref.at[row_vmem, pl.ds(0, num_lanes)],
+              recv_sem,
+          ).start()
+
         # Wait for the input DMA of the current column block to complete.
         for _ in range(num_simd_lanes):
           pltpu.make_async_copy(
-              out_vmem_ref.at[0, :num_lanes],
-              out_32b_hbm_ref.at[0, :num_lanes],
+              in_vmem_ref.at[0, :num_lanes],
+              in_32b_hbm_ref.at[0, :num_lanes],
               recv_sem,
           ).wait()
 
         # Compute over SIMD tiles of size 8.
         for col_compute_offset in range(0, num_lanes, num_simd_lanes):
-          col_slice = pl.ds(col_vmem_start + col_compute_offset, num_simd_lanes)
+          col_slice_local = pl.ds(col_compute_offset, num_simd_lanes)
+          col_slice_global = pl.ds(col_vmem_start + col_compute_offset, num_simd_lanes)
 
           previous_accumulated_even = None
           previous_accumulated_odd = None
           previous_accumulated_f32 = None
 
           for row_src in range(num_simd_lanes):
-            data = out_vmem_ref[row_src, col_slice]
+            # Read from the dedicated 2D input buffer!
+            data = in_vmem_ref[row_src, col_slice_local]
 
             if is_bf16:
               # Column-Wise Unpacking Recipe:
-              # Extract even (lower 16 bits) and odd (upper 16 bits) columns
-              # and bitwise shift/cast them to independent float32 accumulators!
               even_u16 = jnp.bitwise_and(data, 65535).astype(jnp.uint16)
               odd_u16 = jnp.bitwise_right_shift(data, 16).astype(jnp.uint16)
               even_f32 = jax.lax.bitcast_convert_type(jnp.bitwise_left_shift(even_u16.astype(jnp.uint32), 16), jnp.float32)
@@ -215,7 +214,7 @@ def main_kernel(
             if row_src == 0:
               prev_row_hbm = carry[0]
               if is_bf16:
-                carry_packed = prev_iter_last_row_vmem_ref[0, col_slice]
+                carry_packed = prev_iter_last_row_vmem_ref[0, col_slice_global]
                 carry_even_u16 = jnp.bitwise_and(carry_packed, 65535).astype(jnp.uint16)
                 carry_odd_u16 = jnp.bitwise_right_shift(carry_packed, 16).astype(jnp.uint16)
                 previous_accumulated_even = jax.lax.bitcast_convert_type(
@@ -226,7 +225,7 @@ def main_kernel(
                 )
               else:
                 previous_accumulated_f32 = jax.lax.bitcast_convert_type(
-                    prev_iter_last_row_vmem_ref[0, col_slice], jnp.float32
+                    prev_iter_last_row_vmem_ref[0, col_slice_global], jnp.float32
                 )
             else:
               prev_row_hbm = dst_indices[row_src - 1]
@@ -251,8 +250,6 @@ def main_kernel(
               previous_accumulated_odd = accumulated_odd
 
               # Column-Wise Packing Recipe:
-              # Cast accumulated float32 values back to bfloat16, bitcast to uint16,
-              # and bitwise OR them back into a single uint32 carrier element!
               even_bf16 = accumulated_even.astype(jnp.bfloat16)
               odd_bf16 = accumulated_odd.astype(jnp.bfloat16)
               even_u16_out = jax.lax.bitcast_convert_type(even_bf16, jnp.uint16)
@@ -270,12 +267,15 @@ def main_kernel(
               previous_accumulated_f32 = accumulated_f32
               data_to_write = jax.lax.bitcast_convert_type(accumulated_f32, jnp.uint32)
 
-            out_vmem_ref[row_src, col_slice] = data_to_write
+            # Write the output to the dedicated 1D flat out_vmem_ref buffer!
+            # Flat slice writing is 100% layout-safe and has zero layout casts!
+            flat_write_slice = pl.ds(row_src * out_col_size + col_vmem_start + col_compute_offset, num_simd_lanes)
+            out_vmem_ref[0, flat_write_slice] = data_to_write
 
             if row_src == num_simd_lanes - 1:
-              prev_iter_last_row_vmem_ref[0, col_slice] = data_to_write
+              prev_iter_last_row_vmem_ref[0, col_slice_global] = data_to_write
 
-        # Write the output back to HBM.
+        # Write the output back to HBM from the flat 1D out_vmem_ref buffer!
         src_row_idx_in_vmem = []
         row_valid_vec = []
         for row_vmem_idx in reversed(range(num_simd_lanes)):
@@ -303,8 +303,11 @@ def main_kernel(
         for i, (src_row_idx_in, row_valid) in enumerate(zip(src_row_idx_in_vmem, row_valid_vec, strict=True)):
           src_row_vmem = jnp.where(row_valid, src_row_idx_in, last_valid_src_row_vmem)
           dst_row_hbm = jnp.where(row_valid, dst_indices[i], last_valid_dst_row_hbm)
+          
+          # Read from the flat 1D out_vmem_ref!
+          flat_col_vmem_start = src_row_vmem * out_col_size + col_vmem_start
           pltpu.make_async_copy(
-              out_vmem_ref.at[src_row_vmem, pl.ds(col_vmem_start, num_lanes)],
+              out_vmem_ref.at[0, pl.ds(flat_col_vmem_start, num_lanes)],
               out_32b_hbm_ref.at[dst_row_hbm, pl.ds(col_hbm_start, num_lanes)],
               send_sem,
           ).start()
@@ -314,7 +317,7 @@ def main_kernel(
         return carry
 
       # Wait for DMA writes to complete.
-      for _ in range(0, col_size, num_lanes):
+      for _ in range(0, out_col_size, num_lanes):
         for _ in range(num_simd_lanes):
           pltpu.make_async_copy(
               out_vmem_ref.at[0, :num_lanes],
@@ -445,8 +448,6 @@ def ragged_gather_reduce(
 
   if is_bf16:
     # Outer Column-Wise Input Packing:
-    # Bitcast bfloat16 to uint16 (supported!), split into even/odd columns,
-    # and bitwise OR them into a uint32 carrier tensor to prevent element-size-changing casts!
     x_u16 = jax.lax.bitcast_convert_type(x, jnp.uint16)
     even_u32 = x_u16[:, 0::2].astype(jnp.uint32)
     odd_u32 = x_u16[:, 1::2].astype(jnp.uint32)
@@ -460,8 +461,6 @@ def ragged_gather_reduce(
   col_size = aligned_hidden_size // num_column_partitions
 
   # Output shape is (R, aligned_hidden_size) of float32 carrier.
-  # For bf16, aligned_hidden_size is already halved (e.g. 2048), representing
-  # 4096 columns of packed bf16.
   out_shape = (
       padded_input_size // reduce_group_size,
       aligned_hidden_size,
@@ -504,7 +503,9 @@ def ragged_gather_reduce(
           ),
           _SCRATCH_KW: dict(  # pylint: disable=use-dict-literal
               num_rows_per_row_partition_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
-              out_vmem_ref=pltpu.VMEM((num_simd_lanes, col_size), jnp.uint32),
+              # Separate input and output buffers to completely eliminate MLIR reinterpret_cast layout crashes!
+              in_vmem_ref=pltpu.VMEM((num_simd_lanes, 128), jnp.uint32),  # 2D input tile buffer (8, 128) - 100% layout-compatible!
+              out_vmem_ref=pltpu.VMEM((1, num_simd_lanes * col_size), jnp.uint32),  # 1D flat output buffer - 100% layout-compatible!
               prev_iter_last_row_vmem_ref=pltpu.VMEM((1, col_size), jnp.uint32),
               src_indices_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
               dst_indices_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
@@ -522,8 +523,6 @@ def ragged_gather_reduce(
 
   if is_bf16:
     # Outer Column-Wise Output Unpacking:
-    # Bitcast output carrier to uint32, extract lower/upper 16 bits, cast to uint16,
-    # convert to bfloat16, and interleave them back into the original shape!
     out_u32 = jax.lax.bitcast_convert_type(out, jnp.uint32)
     even_u16 = jnp.bitwise_and(out_u32, 65535).astype(jnp.uint16)
     odd_u16 = jnp.bitwise_right_shift(out_u32, 16).astype(jnp.uint16)
