@@ -264,6 +264,10 @@ def main_kernel(
               recv_sem,
           ).wait()
 
+        # We accumulate the packed row data in Python lists of JAX tracers on the fly.
+        # This completely avoids any post-compute VMEM reads, eliminating layout conflicts!
+        packed_rows_registers = [[] for _ in range(num_simd_lanes)]
+
         for col_compute_offset in range(0, loop_step, num_simd_lanes):
           col_slice = pl.ds(col_vmem_start + col_compute_offset, num_simd_lanes)
 
@@ -314,6 +318,19 @@ def main_kernel(
             data_to_write = jax.lax.bitcast_convert_type(accumulated_data, jnp.uint32)
             out_vmem_ref[row_src, col_slice] = data_to_write
 
+            # On-the-fly packing: Pack the 8 float32 accumulated elements into 4 uint32 elements
+            # directly in register space!
+            if is_bf16:
+              data_bf16 = accumulated_data.astype(jnp.bfloat16)
+              data_u16 = jax.lax.bitcast_convert_type(data_bf16, jnp.uint16)
+              packed_val = [
+                  jnp.bitwise_or(jnp.bitwise_left_shift(data_u16[1].astype(jnp.uint32), 16), data_u16[0].astype(jnp.uint32)),
+                  jnp.bitwise_or(jnp.bitwise_left_shift(data_u16[3].astype(jnp.uint32), 16), data_u16[2].astype(jnp.uint32)),
+                  jnp.bitwise_or(jnp.bitwise_left_shift(data_u16[5].astype(jnp.uint32), 16), data_u16[4].astype(jnp.uint32)),
+                  jnp.bitwise_or(jnp.bitwise_left_shift(data_u16[7].astype(jnp.uint32), 16), data_u16[6].astype(jnp.uint32)),
+              ]
+              packed_rows_registers[row_src].extend(packed_val)
+
             # We write the last row (within a row tile)'s accumulated data to
             # the prev_iter_last_row_vmem_ref. If the first src row in the next
             # row_tile contributes to the same destination row as the last src
@@ -353,34 +370,12 @@ def main_kernel(
         src_row_idx_in_vmem.reverse()
         row_valid_vec.reverse()
 
-        # Pack the active columns of out_vmem_ref into temp_packed_vmem on the fly.
+        # Write the accumulated packed register rows to temp_packed_vmem in a single
+        # perfectly tile-aligned 128-column write per row!
         if is_bf16:
           for r in range(num_simd_lanes):
-            # Load 256 columns of out_vmem_ref in two perfectly tile-aligned 128-column reads.
-            # This completely avoids any sub-tile (size 8) reads from VMEM, satisfying the tiled layout.
-            val_row_0 = out_vmem_ref[r, pl.ds(col_vmem_start, 128)][...]
-            val_row_1 = out_vmem_ref[r, pl.ds(col_vmem_start + 128, 128)][...]
-            
-            # Pack the 256 elements into 128 elements in register space using fast register indexing.
-            # This is completely free of any VMEM layout constraints!
-            packed_list = []
-            for i in range(0, 128, 2):
-              val_A = val_row_0[i]
-              val_B = val_row_0[i+1]
-              packed_val = jnp.bitwise_or(jnp.bitwise_right_shift(val_A, 16), jnp.bitwise_and(val_B, -65536))
-              packed_list.append(packed_val)
-              
-            for i in range(0, 128, 2):
-              val_A = val_row_1[i]
-              val_B = val_row_1[i+1]
-              packed_val = jnp.bitwise_or(jnp.bitwise_right_shift(val_A, 16), jnp.bitwise_and(val_B, -65536))
-              packed_list.append(packed_val)
-              
-            packed_row = jnp.array(packed_list)
-            
-            # Write the packed 128 elements to temp_packed_vmem in a single tile-aligned 128-column write!
-            write_col_vmem_start = pl.multiple_of(col_vmem_start // 2, 128)
-            temp_packed_vmem[r, pl.ds(write_col_vmem_start, 128)] = packed_row
+            packed_row = jnp.array(packed_rows_registers[r]) # shape (128,)
+            temp_packed_vmem[r, :] = packed_row
 
         # There must be at least one valid row to write in the current row_tile.
         # When num valid writes is not a multiple of row_tile_size, we repeat
@@ -394,10 +389,10 @@ def main_kernel(
           
           if is_bf16:
             # We write 128 columns of packed uint32 (representing 256 columns of bf16) in a single aligned DMA write!
+            # Since temp_packed_vmem has shape (8, 128) and is read as a whole row, there is no column slicing!
             write_col_hbm_start = pl.multiple_of(col_hbm_start // 2, 128)
-            write_col_vmem_start = pl.multiple_of(col_vmem_start // 2, 128)
             pltpu.make_async_copy(
-                temp_packed_vmem.at[src_row_vmem, pl.ds(write_col_vmem_start, 128)],
+                temp_packed_vmem.at[src_row_vmem, :],
                 out_32b_hbm_ref.at[dst_row_hbm, pl.ds(write_col_hbm_start, 128)],
                 send_sem,
             ).start()
@@ -637,7 +632,7 @@ def ragged_gather_reduce(
           _SCRATCH_KW: dict(  # pylint: disable=use-dict-literal
               num_rows_per_row_partition_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
               out_vmem_ref=pltpu.VMEM((num_simd_lanes, col_size), jnp.uint32),
-              temp_packed_vmem=pltpu.VMEM((num_simd_lanes, col_size // 2), jnp.uint32),
+              temp_packed_vmem=pltpu.VMEM((num_simd_lanes, 128), jnp.uint32),
               prev_iter_last_row_vmem_ref=pltpu.VMEM((1, col_size), jnp.uint32),
               src_indices_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
               dst_indices_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
