@@ -18,14 +18,15 @@ import os.path
 import tempfile
 import unittest
 
+from absl.testing import parameterized
 from maxtext.configs import pyconfig
-from maxtext.configs.pyconfig import resolve_config_path, _CONFIG_FILE_MAPPING, _module_from_path
+from maxtext.configs.pyconfig import _CONFIG_FILE_MAPPING, _module_from_path, resolve_config_path
 from maxtext.input_pipeline import data_processing_utils
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_PKG_DIR
-from tests.utils.test_helpers import get_test_config_path, get_post_train_test_config_path
+from tests.utils.test_helpers import get_post_train_test_config_path, get_test_config_path
 
 
-class PyconfigTest(unittest.TestCase):
+class PyconfigTest(parameterized.TestCase):
   """Tests for 'pyconfig.py'."""
 
   def test_empty_string_parse_as_empty_string(self):
@@ -316,6 +317,59 @@ class PyconfigTest(unittest.TestCase):
     self.assertEqual(config.local_sa_k_layout, "SEQ_MINOR")
     self.assertEqual(config.local_sa_v_layout, "SEQ_MINOR")
     self.assertFalse(config.local_use_splash_scheduler)
+
+  @parameterized.named_parameters(
+      ("colocated_disabled_single_controller_disabled", False, False, True),
+      ("colocated_enabled_single_controller_enabled", True, True, True),
+      ("colocated_enabled_single_controller_disabled", True, False, False),
+  )
+  def test_colocated_python_data_input_validation(self, colocated, single_controller, expect_success):
+    if expect_success:
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          colocated_python_data_input=colocated,
+          enable_single_controller=single_controller,
+      )
+    else:
+      msg = "Colocated python data input is only supported with Pathways"
+      with self.assertRaisesRegex(ValueError, msg):
+        pyconfig.initialize(
+            [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+            skip_jax_distributed_system=True,
+            colocated_python_data_input=colocated,
+            enable_single_controller=single_controller,
+        )
+
+  @parameterized.named_parameters(
+      ("elastic_disabled_emergency_disabled", False, False, False, True),
+      ("elastic_enabled_emergency_disabled", True, False, False, True),
+      ("elastic_enabled_multi_tier_enabled", True, True, False, False),
+      ("elastic_enabled_emergency_enabled", True, False, True, False),
+      ("elastic_enabled_both_enabled", True, True, True, False),
+  )
+  def test_elastic_checkpointing_validation(self, elastic_enabled, enable_multi_tier, enable_emergency, expect_success):
+    single_controller = True if elastic_enabled else False
+    if expect_success:
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          elastic_enabled=elastic_enabled,
+          enable_single_controller=single_controller,
+          enable_multi_tier_checkpointing=enable_multi_tier,
+          enable_emergency_checkpoint=enable_emergency,
+      )
+    else:
+      msg = "Elastic training does not support emergency checkpointing"
+      with self.assertRaisesRegex(ValueError, msg):
+        pyconfig.initialize(
+            [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+            skip_jax_distributed_system=True,
+            elastic_enabled=elastic_enabled,
+            enable_single_controller=single_controller,
+            enable_multi_tier_checkpointing=enable_multi_tier,
+            enable_emergency_checkpoint=enable_emergency,
+        )
 
 
 if __name__ == "__main__":

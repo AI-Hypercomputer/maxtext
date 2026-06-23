@@ -419,7 +419,7 @@ def get_num_slices(raw_keys, config=None):
   else:
     try:
       return len(elastic_utils.live_slice_indices(config))
-    except (ValueError, AttributeError):
+    except (ValueError, AttributeError, RuntimeError):
       return 1
 
 
