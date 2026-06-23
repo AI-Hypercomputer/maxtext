@@ -105,8 +105,6 @@ def main_kernel(
     col_partition_id = core_id % num_column_partitions
 
     # Load the unbreakable dynamic zero from HBM to VMEM!
-    # Because this value is loaded from HBM at runtime, the compiler has absolutely
-    # zero knowledge of its value, completely blocking all constant folding and store-load forwarding!
     dma_zero = pltpu.make_async_copy(
         dynamic_zero_hbm_ref.at[pl.ds(0, num_simd_lanes)],
         dynamic_zero_vmem_ref,
@@ -114,7 +112,6 @@ def main_kernel(
     )
     dma_zero.start()
     dma_zero.wait()
-    # Load the vector from VMEM first, then extract the 0-th element in register space!
     dynamic_zero_vec = dynamic_zero_vmem_ref[...]
     d_zero = dynamic_zero_vec[0]
 
@@ -222,23 +219,30 @@ def main_kernel(
             flat_read_slice = pl.ds(row_src * col_size + col_vmem_start + col_compute_offset, num_simd_lanes)
             data = in_vmem_ref[0, flat_read_slice]
 
+            # Construct symbolically different but runtime-identical indices!
+            # Since d_zero is loaded from HBM, it is always 0 at runtime.
+            # Thus, write_idx and read_idx both evaluate to 0 at runtime (matching perfectly!).
+            # But symbolically, one is 'd_zero' and the other is 'd_zero & 1'.
+            # Because the compiler cannot statically prove that 'x == (x & 1)' for all integers,
+            # it is completely blocked from performing symbolic store-load forwarding,
+            # forcing 100% physical materialization of registers in VMEM!
+            write_idx = d_zero
+            read_idx = jnp.bitwise_and(d_zero, 1).astype(jnp.int32)
+
             if is_bf16:
-              # Pure 32-Bit Unpacking with Unbreakable Dynamic VMEM Spilling:
-              # We write the shifted expressions to VMEM using the HBM-loaded dynamic zero index.
-              # Because the compiler cannot statically analyze the HBM value, it is forced to
-              # physically materialize the registers, guaranteeing a 100% successful bitcast!
+              # Pure 32-Bit Unpacking with Symbolically Differentiated VMEM Spilling:
               even_u32 = jnp.bitwise_and(data, 65535).astype(jnp.uint32)
               odd_u32 = jnp.bitwise_right_shift(data, 16).astype(jnp.uint32)
               
-              # Write shifted expressions to temp VMEM using the unbreakable HBM dynamic zero!
-              temp_u32_vmem_ref[d_zero, :] = jnp.bitwise_left_shift(even_u32, 16).astype(jnp.uint32)
-              temp_u32_vmem_ref[d_zero + 1, :] = jnp.bitwise_left_shift(odd_u32, 16).astype(jnp.uint32)
+              # Write shifted expressions using write_idx.
+              temp_u32_vmem_ref[write_idx, :] = jnp.bitwise_left_shift(even_u32, 16).astype(jnp.uint32)
+              temp_u32_vmem_ref[write_idx + 1, :] = jnp.bitwise_left_shift(odd_u32, 16).astype(jnp.uint32)
               
-              # Read back to force physical register materialization.
-              even_materialized = temp_u32_vmem_ref[d_zero, :]
-              odd_materialized = temp_u32_vmem_ref[d_zero + 1, :]
+              # Read back using read_idx to force physical materialization.
+              even_materialized = temp_u32_vmem_ref[read_idx, :]
+              odd_materialized = temp_u32_vmem_ref[read_idx + 1, :]
               
-              # Bitcast now compiles flawlessly on materialized registers!
+              # Bitcast now compiles flawlessly on physically materialized registers!
               even_f32 = jax.lax.bitcast_convert_type(even_materialized, jnp.float32)
               odd_f32 = jax.lax.bitcast_convert_type(odd_materialized, jnp.float32)
 
@@ -258,11 +262,14 @@ def main_kernel(
                 carry_odd_u32 = jnp.bitwise_right_shift(carry_packed, 16).astype(jnp.uint32)
                 
                 # Materialize carry reads dynamically.
-                temp_u32_vmem_ref[d_zero, :] = jnp.bitwise_left_shift(carry_even_u32, 16).astype(jnp.uint32)
-                temp_u32_vmem_ref[d_zero + 1, :] = jnp.bitwise_left_shift(carry_odd_u32, 16).astype(jnp.uint32)
+                temp_u32_vmem_ref[write_idx, :] = jnp.bitwise_left_shift(carry_even_u32, 16).astype(jnp.uint32)
+                temp_u32_vmem_ref[write_idx + 1, :] = jnp.bitwise_left_shift(carry_odd_u32, 16).astype(jnp.uint32)
                 
-                previous_accumulated_even = jax.lax.bitcast_convert_type(temp_u32_vmem_ref[d_zero, :], jnp.float32)
-                previous_accumulated_odd = jax.lax.bitcast_convert_type(temp_u32_vmem_ref[d_zero + 1, :], jnp.float32)
+                carry_even_materialized = temp_u32_vmem_ref[read_idx, :]
+                carry_odd_materialized = temp_u32_vmem_ref[read_idx + 1, :]
+                
+                previous_accumulated_even = jax.lax.bitcast_convert_type(carry_even_materialized, jnp.float32)
+                previous_accumulated_odd = jax.lax.bitcast_convert_type(carry_odd_materialized, jnp.float32)
               else:
                 previous_accumulated_f32 = jax.lax.bitcast_convert_type(
                     prev_iter_last_row_vmem_ref[0, col_slice_global], jnp.float32
@@ -289,12 +296,12 @@ def main_kernel(
               previous_accumulated_even = accumulated_even
               previous_accumulated_odd = accumulated_odd
 
-              # Pure 32-Bit Packing with Unbreakable Dynamic VMEM Spilling:
-              temp_f32_vmem_ref[d_zero, :] = accumulated_even.astype(jnp.bfloat16).astype(jnp.float32)
-              temp_f32_vmem_ref[d_zero + 1, :] = accumulated_odd.astype(jnp.bfloat16).astype(jnp.float32)
+              # Pure 32-Bit Packing with Symbolically Differentiated VMEM Spilling:
+              temp_f32_vmem_ref[write_idx, :] = accumulated_even.astype(jnp.bfloat16).astype(jnp.float32)
+              temp_f32_vmem_ref[write_idx + 1, :] = accumulated_odd.astype(jnp.bfloat16).astype(jnp.float32)
               
-              even_rounded_materialized = temp_f32_vmem_ref[d_zero, :]
-              odd_rounded_materialized = temp_f32_vmem_ref[d_zero + 1, :]
+              even_rounded_materialized = temp_f32_vmem_ref[read_idx, :]
+              odd_rounded_materialized = temp_f32_vmem_ref[read_idx + 1, :]
 
               even_u32_out = jax.lax.bitcast_convert_type(even_rounded_materialized, jnp.uint32)
               odd_u32_out = jax.lax.bitcast_convert_type(odd_rounded_materialized, jnp.uint32)
@@ -519,7 +526,6 @@ def ragged_gather_reduce(
   )
 
   # Allocate an unbreakable dynamic zero in HBM, initialized to 0.
-  # We allocate 8 elements to align with SparseCore SIMD vector registers.
   dynamic_zero_hbm = jnp.zeros((8,), dtype=jnp.int32)
 
   out = pl.kernel(  # pytype: disable=wrong-keyword-args
