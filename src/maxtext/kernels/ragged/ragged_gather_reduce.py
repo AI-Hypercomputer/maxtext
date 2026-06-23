@@ -319,7 +319,8 @@ def main_kernel(
             )
             previous_accumulated_data = accumulated_data
             data_to_write = jax.lax.bitcast_convert_type(accumulated_data, jnp.uint32)
-            out_vmem_ref[row_src, col_slice] = data_to_write
+            if not is_bf16:
+              out_vmem_ref[row_src, col_slice] = data_to_write
 
             # On-the-fly packing: Pack the 8 float32 accumulated elements into 4 uint32 elements
             # directly in register space!
