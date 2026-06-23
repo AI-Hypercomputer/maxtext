@@ -210,6 +210,9 @@ def is_scale_up_event(config) -> bool:
   if elastic_enabled(config):
     ensure_elastic_manager_initialized(config)
     assert elastic_manager is not None
+    available_inactive = getattr(elastic_manager, "available_inactive_slices", None)
+    if available_inactive is not None:
+      return bool(available_inactive)
     return elastic_manager.new_slice_event.is_set()
 
   return False
