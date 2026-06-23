@@ -205,17 +205,18 @@ def main_kernel(
             data = in_vmem_ref[0, flat_read_slice]
 
             if is_bf16:
-              # Pure 32-Bit Column-Wise Unpacking Recipe:
-              # We perform all bitwise operations on 32-bit uint32 directly, completely
-              # avoiding any 16-bit integer types and widening casts (which are unsupported
-              # on the SparseCore backend!).
-              even_u32 = jnp.bitwise_and(data, 65535)
-              odd_u32 = jnp.bitwise_right_shift(data, 16)
+              # Pure 32-Bit Column-Wise Unpacking Recipe (with explicit uint32 casts):
+              # We explicitly cast all intermediate bitwise results back to uint32 using
+              # .astype(jnp.uint32) to prevent JAX from promoting them to signed i32,
+              # which completely bypasses backend lowering bugs on 'tpu.bitcast'!
+              even_u32 = jnp.bitwise_and(data, 65535).astype(jnp.uint32)
+              odd_u32 = jnp.bitwise_right_shift(data, 16).astype(jnp.uint32)
               
-              # Shift left by 16 bits to place the bf16 bits in the upper 16 bits of the uint32,
-              # then bitcast to float32. This is perfectly size-preserving and hardware-supported!
-              even_f32 = jax.lax.bitcast_convert_type(jnp.bitwise_left_shift(even_u32, 16), jnp.float32)
-              odd_f32 = jax.lax.bitcast_convert_type(jnp.bitwise_left_shift(odd_u32, 16), jnp.float32)
+              even_shifted = jnp.bitwise_left_shift(even_u32, 16).astype(jnp.uint32)
+              odd_shifted = jnp.bitwise_left_shift(odd_u32, 16).astype(jnp.uint32)
+              
+              even_f32 = jax.lax.bitcast_convert_type(even_shifted, jnp.float32)
+              odd_f32 = jax.lax.bitcast_convert_type(odd_shifted, jnp.float32)
 
               even_scaled = even_f32 * topk_weights[row_src]
               odd_scaled = odd_f32 * topk_weights[row_src]
@@ -229,14 +230,14 @@ def main_kernel(
               prev_row_hbm = carry[0]
               if is_bf16:
                 carry_packed = prev_iter_last_row_vmem_ref[0, col_slice_global]
-                carry_even_u32 = jnp.bitwise_and(carry_packed, 65535)
-                carry_odd_u32 = jnp.bitwise_right_shift(carry_packed, 16)
-                previous_accumulated_even = jax.lax.bitcast_convert_type(
-                    jnp.bitwise_left_shift(carry_even_u32, 16), jnp.float32
-                )
-                previous_accumulated_odd = jax.lax.bitcast_convert_type(
-                    jnp.bitwise_left_shift(carry_odd_u32, 16), jnp.float32
-                )
+                carry_even_u32 = jnp.bitwise_and(carry_packed, 65535).astype(jnp.uint32)
+                carry_odd_u32 = jnp.bitwise_right_shift(carry_packed, 16).astype(jnp.uint32)
+                
+                carry_even_shifted = jnp.bitwise_left_shift(carry_even_u32, 16).astype(jnp.uint32)
+                carry_odd_shifted = jnp.bitwise_left_shift(carry_odd_u32, 16).astype(jnp.uint32)
+                
+                previous_accumulated_even = jax.lax.bitcast_convert_type(carry_even_shifted, jnp.float32)
+                previous_accumulated_odd = jax.lax.bitcast_convert_type(carry_odd_shifted, jnp.float32)
               else:
                 previous_accumulated_f32 = jax.lax.bitcast_convert_type(
                     prev_iter_last_row_vmem_ref[0, col_slice_global], jnp.float32
@@ -263,25 +264,18 @@ def main_kernel(
               previous_accumulated_even = accumulated_even
               previous_accumulated_odd = accumulated_odd
 
-              # Pure 32-Bit Column-Wise Packing Recipe:
-              # 1. Round accumulated float32 values to bf16 precision by converting to bf16
-              # and back to float32. This guarantees the lower 16 bits of the float32 are zero!
+              # Pure 32-Bit Column-Wise Packing Recipe (with explicit uint32 casts):
               even_rounded_f32 = accumulated_even.astype(jnp.bfloat16).astype(jnp.float32)
               odd_rounded_f32 = accumulated_odd.astype(jnp.bfloat16).astype(jnp.float32)
 
-              # 2. Bitcast directly to uint32.
               even_u32_out = jax.lax.bitcast_convert_type(even_rounded_f32, jnp.uint32)
               odd_u32_out = jax.lax.bitcast_convert_type(odd_rounded_f32, jnp.uint32)
 
-              # 3. Extract the bf16 bits from the upper 16 bits of the uint32 using right shift.
-              even_bf16_bits = jnp.bitwise_right_shift(even_u32_out, 16)
-              odd_bf16_bits = jnp.bitwise_right_shift(odd_u32_out, 16)
+              even_bf16_bits = jnp.bitwise_right_shift(even_u32_out, 16).astype(jnp.uint32)
+              odd_bf16_bits = jnp.bitwise_right_shift(odd_u32_out, 16).astype(jnp.uint32)
 
-              # 4. Pack them into a single 32-bit uint32.
-              data_to_write = jnp.bitwise_or(
-                  jnp.bitwise_left_shift(odd_bf16_bits, 16),
-                  even_bf16_bits,
-              )
+              odd_bf16_shifted = jnp.bitwise_left_shift(odd_bf16_bits, 16).astype(jnp.uint32)
+              data_to_write = jnp.bitwise_or(odd_bf16_shifted, even_bf16_bits).astype(jnp.uint32)
             else:
               accumulated_f32 = jnp.where(
                   dst_row_hbm == prev_row_hbm,
