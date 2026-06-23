@@ -31,14 +31,14 @@ if Version(jax.__version__) <= Version("0.10.0"):
   _OUT_KW = "out_shape"
   _SCRATCH_KW = "scratch_shapes"
   _COMPILER_PARAMS = {
-      "use_tc_tiling_on_sc": True,
+      "use_tc_tiling_on_sc": False,
       "disable_bounds_checks": True,
   }
 else:
   _OUT_KW = "out_type"
   _SCRATCH_KW = "scratch_types"
   _COMPILER_PARAMS = {
-      "use_tc_tiling_on_sc": True,
+      "use_tc_tiling_on_sc": False,
       "disable_bounds_checks": True,
       "needs_layout_passes": False,
   }
