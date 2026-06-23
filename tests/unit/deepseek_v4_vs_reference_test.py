@@ -885,7 +885,7 @@ class DeepSeekV4CompressedAttentionTest(unittest.TestCase):
       print(f"top_k_indices mismatches: {num_mismatches}")
 
     # 6. Execute MaxText
-    mt_out = mt_attn(x_mt, x_mt, segs_mt, pos_mt, deterministic=True, model_mode=MODEL_MODE_TRAIN)
+    mt_out, _ = mt_attn(x_mt, x_mt, segs_mt, pos_mt, deterministic=True, model_mode=MODEL_MODE_TRAIN)
 
     # 7. Asserts
     if not is_packed:

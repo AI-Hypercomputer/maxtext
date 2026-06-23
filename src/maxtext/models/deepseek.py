@@ -138,37 +138,59 @@ class DeepSeekGenericLayer(nnx.Module):
       self.engram_layer_norm = None
       self.engram = None
 
-    self.self_attention = attention_mla.MLA(
-        config=self.config,
-        num_query_heads=self.config.num_query_heads,
-        num_kv_heads=self.config.num_kv_heads,
-        head_dim=self.config.head_dim,
-        max_target_length=self.config.max_target_length,
-        max_prefill_predict_length=self.config.max_prefill_predict_length,
-        attention_kernel=self.config.attention,
-        attention_type=self.config.attention_type,
-        inputs_q_shape=self.dummy_inputs_shape,
-        inputs_kv_shape=self.dummy_inputs_shape,
-        mesh=mesh,
-        dtype=self.config.dtype,
-        weight_dtype=self.config.weight_dtype,
-        dropout_rate=self.config.dropout_rate,
-        name="self_attention",
-        quant=quant,
-        kv_quant=quantizations.configure_kv_quant(config),
-        q_lora_rank=self.config.q_lora_rank,
-        kv_lora_rank=self.config.kv_lora_rank,
-        qk_nope_head_dim=self.config.qk_nope_head_dim,
-        qk_rope_head_dim=self.config.qk_rope_head_dim,
-        v_head_dim=self.config.v_head_dim,
-        max_position_embeddings=self.config.max_position_embeddings,
-        original_max_position_embeddings=self.config.original_max_position_embeddings,
-        mscale=self.config.mscale,
-        rope_factor=self.config.rope_factor,
-        model_mode=model_mode,
-        rngs=rngs,
-        attn_logits_soft_cap=self.config.attn_logits_soft_cap,
-    )
+    if self.config.attention_type == AttentionType.COMPRESSED.value:
+      compress_ratio = (
+          self.config.compress_ratios[self.layer_idx]
+          if hasattr(self.config, "compress_ratios") and len(self.config.compress_ratios) > self.layer_idx
+          else 0
+      )
+      self.self_attention = CompressedAttention(
+          config=self.config,
+          compress_ratio=compress_ratio,
+          num_query_heads=self.config.num_query_heads,
+          num_kv_heads=self.config.num_kv_heads,
+          head_dim=self.config.head_dim,
+          max_target_length=self.config.max_target_length,
+          mesh=mesh,
+          attention_kernel=self.config.attention,
+          inputs_q_shape=self.dummy_inputs_shape,
+          inputs_kv_shape=self.dummy_inputs_shape,
+          q_lora_rank=self.config.q_lora_rank,
+          sliding_window_size=self.config.sliding_window,
+          rngs=rngs,
+      )
+    else:
+      self.self_attention = attention_mla.MLA(
+          config=self.config,
+          num_query_heads=self.config.num_query_heads,
+          num_kv_heads=self.config.num_kv_heads,
+          head_dim=self.config.head_dim,
+          max_target_length=self.config.max_target_length,
+          max_prefill_predict_length=self.config.max_prefill_predict_length,
+          attention_kernel=self.config.attention,
+          attention_type=self.config.attention_type,
+          inputs_q_shape=self.dummy_inputs_shape,
+          inputs_kv_shape=self.dummy_inputs_shape,
+          mesh=mesh,
+          dtype=self.config.dtype,
+          weight_dtype=self.config.weight_dtype,
+          dropout_rate=self.config.dropout_rate,
+          name="self_attention",
+          quant=quant,
+          kv_quant=quantizations.configure_kv_quant(config),
+          q_lora_rank=self.config.q_lora_rank,
+          kv_lora_rank=self.config.kv_lora_rank,
+          qk_nope_head_dim=self.config.qk_nope_head_dim,
+          qk_rope_head_dim=self.config.qk_rope_head_dim,
+          v_head_dim=self.config.v_head_dim,
+          max_position_embeddings=self.config.max_position_embeddings,
+          original_max_position_embeddings=self.config.original_max_position_embeddings,
+          mscale=self.config.mscale,
+          rope_factor=self.config.rope_factor,
+          model_mode=model_mode,
+          rngs=rngs,
+          attn_logits_soft_cap=self.config.attn_logits_soft_cap,
+      )
 
     self.dropout = Dropout(rate=self.config.dropout_rate, broadcast_dims=(-2,), rngs=self.rngs)
     if self.is_mhc_enabled:

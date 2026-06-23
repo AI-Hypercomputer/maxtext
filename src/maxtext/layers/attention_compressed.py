@@ -775,4 +775,4 @@ class CompressedAttention(nnx.Module):
     grouped_flat = grouped.reshape((batch_size, seq_len, self.o_groups * self.o_lora_rank))
     output = self.o_b_proj(grouped_flat)
 
-    return output
+    return output, None
