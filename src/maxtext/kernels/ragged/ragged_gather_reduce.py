@@ -254,7 +254,12 @@ def main_kernel(
                 data,
             )
             previous_accumulated_data = accumulated_data
-            data_to_write = jax.lax.bitcast_convert_type(accumulated_data, jnp.uint32)
+            if in_dtype == jnp.bfloat16:
+              data_bf16 = accumulated_data.astype(jnp.bfloat16)
+              data_u16 = jax.lax.bitcast_convert_type(data_bf16, jnp.uint16)
+              data_to_write = data_u16.astype(jnp.uint32)
+            else:
+              data_to_write = jax.lax.bitcast_convert_type(accumulated_data, jnp.uint32)
             out_vmem_ref[row_src, col_slice] = data_to_write
 
             # We write the last row (within a row tile)'s accumulated data to
@@ -288,69 +293,19 @@ def main_kernel(
         src_row_idx_in_vmem.reverse()
         row_valid_vec.reverse()
 
-        # If output is bf16, pack the accumulated float32 results into bf16 (packed as uint32)
-        if in_dtype == jnp.bfloat16:
-          base_packed_row = dst_indices[0] // 2
-          num_packed_rows = num_simd_lanes // 2 + 1
-          for col_compute_offset in range(0, num_lanes, num_simd_lanes):
-            col_slice = pl.ds(col_vmem_start + col_compute_offset, num_simd_lanes)
-            
-            # 1. Read all accumulated data into a Python list of Tracers to avoid hazards and JAX scatter/dynamic_slice
-            accum_data = [None] * num_simd_lanes
-            for i in range(num_simd_lanes):
-              vmem_lane = src_row_idx_in_vmem[i]
-              accum_data[i] = out_vmem_ref[vmem_lane, col_slice]
-              
-            # 2. Initialize the packed rows in out_vmem_ref to 0 (since we will OR into them)
-            for p in range(num_packed_rows):
-              out_vmem_ref[p, col_slice] = jnp.zeros((num_simd_lanes,), dtype=jnp.uint32)
-              
-            # 3. Pack and accumulate into out_vmem_ref (dynamic indexing on VMEM Ref is allowed)
-            for i in range(num_simd_lanes):
-              dst_row = dst_indices[i]
-              
-              data_u32 = accum_data[i]
-              data_f32 = jax.lax.bitcast_convert_type(data_u32, jnp.float32)
-              
-              data_bf16 = data_f32.astype(jnp.bfloat16)
-              data_u16 = jax.lax.bitcast_convert_type(data_bf16, jnp.uint16)
-              data_bf16_u32 = data_u16.astype(jnp.uint32)
-              data_bf16_u32 = jnp.bitwise_and(data_bf16_u32, 0xffff)
-              
-              shift = jnp.where(dst_row % 2 == 0, 0, 16)
-              shifted_data = jnp.bitwise_left_shift(data_bf16_u32, shift)
-              
-              local_packed_row = (dst_row // 2) - base_packed_row
-              
-              current_packed = out_vmem_ref[local_packed_row, col_slice]
-              out_vmem_ref[local_packed_row, col_slice] = jnp.bitwise_or(current_packed, shifted_data)
-
-        # Trigger DMA writes
-        if in_dtype == jnp.bfloat16:
-          base_packed_row = dst_indices[0] // 2
-          num_packed_rows = num_simd_lanes // 2 + 1
-          
-          for p in range(num_packed_rows):
-            dst_row_hbm = base_packed_row + p
-            pltpu.make_async_copy(
-                out_vmem_ref.at[p, pl.ds(col_vmem_start, num_lanes)],
-                out_32b_hbm_ref.at[dst_row_hbm, pl.ds(col_hbm_start, num_lanes)],
-                send_sem,
-            ).start()
-        else:
-          # Original unpacked DMA write loop (same as clean code)
-          last_valid_src_row_vmem = -1
-          last_valid_dst_row_hbm = -1
-          for i, (src_row_idx, row_valid) in enumerate(zip(src_row_idx_in_vmem, row_valid_vec, strict=True)):
-            src_row_vmem = jnp.where(row_valid, src_row_idx, last_valid_src_row_vmem)
-            dst_row_hbm = jnp.where(row_valid, dst_indices[i], last_valid_dst_row_hbm)
-            pltpu.make_async_copy(
-                out_vmem_ref.at[src_row_vmem, pl.ds(col_vmem_start, num_lanes)],
-                out_32b_hbm_ref.at[dst_row_hbm, pl.ds(col_hbm_start, num_lanes)],
-                send_sem,
-            ).start()
-            last_valid_src_row_vmem = src_row_vmem
-            last_valid_dst_row_hbm = dst_row_hbm
+        # Trigger DMA writes (original unpacked DMA loop)
+        last_valid_src_row_vmem = -1
+        last_valid_dst_row_hbm = -1
+        for i, (src_row_idx, row_valid) in enumerate(zip(src_row_idx_in_vmem, row_valid_vec, strict=True)):
+          src_row_vmem = jnp.where(row_valid, src_row_idx, last_valid_src_row_vmem)
+          dst_row_hbm = jnp.where(row_valid, dst_indices[i], last_valid_dst_row_hbm)
+          pltpu.make_async_copy(
+              out_vmem_ref.at[src_row_vmem, pl.ds(col_vmem_start, num_lanes)],
+              out_32b_hbm_ref.at[dst_row_hbm, pl.ds(col_hbm_start, num_lanes)],
+              send_sem,
+          ).start()
+          last_valid_src_row_vmem = src_row_vmem
+          last_valid_dst_row_hbm = dst_row_hbm
 
         return carry
 
@@ -497,10 +452,10 @@ def ragged_gather_reduce(
   row_tile_size = num_simd_lanes
   
   is_bf16 = x.dtype == jnp.bfloat16
-  alignment_lcm = math.lcm(num_rows_partitions * row_tile_size, reduce_group_size)
-  if is_bf16:
-    alignment_lcm = math.lcm(num_rows_partitions * row_tile_size, reduce_group_size * 2)
-  padded_input_size = _align_to(input_size, alignment_lcm)
+  padded_input_size = _align_to(
+      input_size,
+      math.lcm(num_rows_partitions * row_tile_size, reduce_group_size),
+  )
   pad_input_size = padded_input_size - input_size
 
   x = jnp.pad(
@@ -536,7 +491,7 @@ def ragged_gather_reduce(
   
   if is_bf16:
     x_input = jax.lax.bitcast_convert_type(x.reshape(-1, 2), jnp.uint32).reshape(padded_input_size // 2, aligned_hidden_size)
-    out_shape = (padded_input_size // reduce_group_size // 2, aligned_hidden_size)
+    out_shape = (padded_input_size // reduce_group_size, aligned_hidden_size)
     out_dtype = jnp.uint32
   else:
     x_input = x
@@ -574,7 +529,7 @@ def ragged_gather_reduce(
   )(num_src_rows_per_row_partition, x_input, src_indices, dst_indices, topk_weights)
 
   if is_bf16:
-    out = jax.lax.bitcast_convert_type(out.reshape(-1), jnp.bfloat16).reshape(padded_input_size // reduce_group_size, aligned_hidden_size)
+    out = jax.lax.bitcast_convert_type(out.reshape(-1), jnp.bfloat16)[..., 0].reshape(padded_input_size // reduce_group_size, aligned_hidden_size)
 
   # If there is no valid source row in a reduce group, set that group's output
   # to zero.
