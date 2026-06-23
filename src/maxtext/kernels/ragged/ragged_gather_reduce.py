@@ -390,8 +390,7 @@ def _preprocess(
 
 @functools.partial(
     jax.jit,
-    static_argnums=(4,), # reduce_group_size
-    static_argnames=("flops_override", "bytes_accessed_override", "enforce_fallback"),
+    static_argnames=("reduce_group_size", "flops_override", "bytes_accessed_override", "enforce_fallback"),
 )
 def ragged_gather_reduce(
     x: jnp.ndarray,
