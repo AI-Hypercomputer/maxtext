@@ -388,7 +388,7 @@ def ragged_gather_reduce(
     enforce_fallback: bool = False,
 ) -> jnp.ndarray:
   """Wrapper for the ragged gather reduce SparseCore kernel."""
-  sc_info = plsc.get_subcore_info()
+  sc_info = plsc.get_sparse_core_info()
   
   # Calculate padded_input_size locally based on the shape of indices!
   padded_input_size = indices.shape[0]
