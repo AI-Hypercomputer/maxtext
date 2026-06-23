@@ -698,6 +698,25 @@ class SplashAttention(BaseModel):
   sa_q_layout: str = Field("HEAD_DIM_MINOR", description="Layout for Q in splash attention.")
   sa_k_layout: str = Field("HEAD_DIM_MINOR", description="Layout for K in splash attention.")
   sa_v_layout: str = Field("HEAD_DIM_MINOR", description="Layout for V in splash attention.")
+  use_splash_scheduler: bool = Field(False, description="Use experimental splash attention scheduler.")
+  # If None, each local_sa_* flag inherits from the corresponding sa_* flag.
+  local_sa_block_q: int | None = Field(None, description="Block size for Q in local splash attention.")
+  local_sa_block_kv: int | None = Field(None, description="Block size for KV in local splash attention.")
+  local_sa_block_kv_compute: int | None = Field(None, description="Block size for KV compute in local splash attention.")
+  local_sa_block_q_dkv: int | None = Field(None, description="Block size for Q_dkv in local splash attention.")
+  local_sa_block_kv_dkv: int | None = Field(None, description="Block size for KV_dkv in local splash attention.")
+  local_sa_block_kv_dkv_compute: int | None = Field(
+      None, description="Block size for KV_dkv compute in local splash attention."
+  )
+  local_sa_block_q_dq: int | None = Field(None, description="Block size for Q_dq in local splash attention.")
+  local_sa_block_kv_dq: int | None = Field(None, description="Block size for KV_dq in local splash attention.")
+  local_sa_use_fused_bwd_kernel: bool | None = Field(
+      None, description="Use fused backward kernel in local splash attention."
+  )
+  local_sa_q_layout: str | None = Field(None, description="Layout for Q in local splash attention.")
+  local_sa_k_layout: str | None = Field(None, description="Layout for K in local splash attention.")
+  local_sa_v_layout: str | None = Field(None, description="Layout for V in local splash attention.")
+  local_use_splash_scheduler: bool | None = Field(None, description="Use experimental local splash attention scheduler.")
   use_max_logit_estimate: int = Field(
       -1,
       description="-1 means no estimate, any > 0 value will be used as max logit estimate",
@@ -716,7 +735,6 @@ class SplashAttention(BaseModel):
       0,
       description="the number of reduction steps. For now, only 3 or all the kv steps are supported.",
   )
-  use_splash_scheduler: bool = Field(False, description="Use experimental splash attention scheduler.")
 
 
 class MoEGeneral(BaseModel):
@@ -2934,7 +2952,35 @@ class MaxTextConfig(
       ):
         self.logical_axis_rules.append(["aqt_amax_history", ("stage",)])
 
-    # H. RUN ALL CROSS-FIELD VALIDATIONS
+    # H. RESOLVE local_sa_* FLAGS: inherit from global sa_* if not explicitly set.
+    if self.local_sa_block_q is None:
+      self.local_sa_block_q = self.sa_block_q
+    if self.local_sa_block_kv is None:
+      self.local_sa_block_kv = self.sa_block_kv
+    if self.local_sa_block_kv_compute is None:
+      self.local_sa_block_kv_compute = self.sa_block_kv_compute
+    if self.local_sa_block_q_dkv is None:
+      self.local_sa_block_q_dkv = self.sa_block_q_dkv
+    if self.local_sa_block_kv_dkv is None:
+      self.local_sa_block_kv_dkv = self.sa_block_kv_dkv
+    if self.local_sa_block_kv_dkv_compute is None:
+      self.local_sa_block_kv_dkv_compute = self.sa_block_kv_dkv_compute
+    if self.local_sa_block_q_dq is None:
+      self.local_sa_block_q_dq = self.sa_block_q_dq
+    if self.local_sa_block_kv_dq is None:
+      self.local_sa_block_kv_dq = self.sa_block_kv_dq
+    if self.local_sa_use_fused_bwd_kernel is None:
+      self.local_sa_use_fused_bwd_kernel = self.sa_use_fused_bwd_kernel
+    if self.local_sa_q_layout is None:
+      self.local_sa_q_layout = self.sa_q_layout
+    if self.local_sa_k_layout is None:
+      self.local_sa_k_layout = self.sa_k_layout
+    if self.local_sa_v_layout is None:
+      self.local_sa_v_layout = self.sa_v_layout
+    if self.local_use_splash_scheduler is None:
+      self.local_use_splash_scheduler = self.use_splash_scheduler
+
+    # I. RUN ALL CROSS-FIELD VALIDATIONS
     if self.load_parameters_path and self.load_full_state_path:
       raise ValueError("At most one of `load_parameters_path` or `load_full_state_path` should be set.")
     if self.elastic_enabled and not self.enable_single_controller:

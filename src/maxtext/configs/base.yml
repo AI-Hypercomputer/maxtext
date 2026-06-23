@@ -1098,11 +1098,26 @@ sa_use_fused_bwd_kernel: false
 sa_q_layout: "HEAD_DIM_MINOR"
 sa_k_layout: "HEAD_DIM_MINOR"
 sa_v_layout: "HEAD_DIM_MINOR"
+use_splash_scheduler: false # to use tokamax splash attention scheduler.
+# local_sa_* variants apply to local (sliding window) attention layers;
+# if None, each inherits from the corresponding global sa_* flag.
+local_sa_block_q: None  # inherits from sa_block_q if None
+local_sa_block_kv: None  # inherits from sa_block_kv if None
+local_sa_block_kv_compute: None  # inherits from sa_block_kv_compute if None
+local_sa_block_q_dkv: None  # inherits from sa_block_q_dkv if None
+local_sa_block_kv_dkv: None  # inherits from sa_block_kv_dkv if None
+local_sa_block_kv_dkv_compute: None  # inherits from sa_block_kv_dkv_compute if None
+local_sa_block_q_dq: None  # inherits from sa_block_q_dq if None
+local_sa_block_kv_dq: None  # inherits from sa_block_kv_dq if None
+local_sa_use_fused_bwd_kernel: None  # inherits from sa_use_fused_bwd_kernel if None
+local_sa_q_layout: None  # inherits from sa_q_layout if None
+local_sa_k_layout: None  # inherits from sa_k_layout if None
+local_sa_v_layout: None  # inherits from sa_v_layout if None
+local_use_splash_scheduler: None  # inherits from use_splash_scheduler if None
 use_max_logit_estimate: -1 # -1 means no estimate, any > 0 value will be used as max logit estimate
 cost_estimate_flops_fwd: -1 # -1 means using splash default cost estmiation, any >= 0 value will be used as cost estmiation for splash to overlap for communication (forward)
 cost_estimate_flops_bwd: -1 # -1 means using splash default cost estmiation, any >= 0 value will be used as cost estmiation for splash to overlap for communication (backward)
 dq_reduction_steps: 0 #the number of reduction steps. For now, only 3 or all the kv steps are supported.
-use_splash_scheduler: false # to use tokamax splash attention scheduler.
 ### Determine if we want to use load balance for context parallelism
 context_parallel_load_balance: true
 context_parallel_strategy: "all_gather" # "all_gather" or "ring"
