@@ -348,8 +348,11 @@ class GateLogit(nnx.Module):
       pre_bias_logits = output
 
     if self.use_bias:
+      # Architectural Note:  Bias is an nnx.Param rather than nnx.Variable due to Linen/NNX state
+      # management transitions otherwise we will have to manage the overhead. We use jax.lax.stop_gradient
+      # here to mathematically enforce the Auxiliary-Loss-Free constraint, isolating it from sequence-wise loss leaks.
       bias = jnp.asarray(self.bias[...], self.dtype)
-      output += bias
+      output += jax.lax.stop_gradient(bias)
     return output, pre_bias_logits
 
 
@@ -2203,7 +2206,6 @@ class RoutedMoE(nnx.Module):
       lb_loss = (
           self.load_balance_loss(top_k_indices, softmax_probs) if self.config.load_balance_loss_weight > 0.0 else None
       )
-      # TODO(dipakg-lang, b/521990776): Add sequence-wise balance loss * 0.0001
     else:
       lb_loss = None
 
