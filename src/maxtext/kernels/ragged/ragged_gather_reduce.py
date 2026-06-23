@@ -232,24 +232,35 @@ def main_kernel(
       in_32b_hbm_ref = in_hbm_ref.bitcast(jnp.uint32)
       out_32b_hbm_ref = out_hbm_ref.bitcast(jnp.uint32)
 
-      for col_vmem_start in range(0, col_size, num_lanes):
-        col_hbm_start = col_start + col_vmem_start
-        for row_vmem in range(num_simd_lanes):
-          row_hbm = src_indices[row_vmem] // input_packing
-          # Since we have changed layout from (8, 128) to (1, 128), continuous
-          # memory address does not yield desired values anymore. Therefore,
-          # we break up a dmas into multiple num_lanes sized requests.
-          pltpu.make_async_copy(
-              in_32b_hbm_ref.at[row_hbm, pl.ds(col_hbm_start, num_lanes)],
-              out_vmem_ref.at[row_vmem, pl.ds(col_vmem_start, num_lanes)],
-              recv_sem,
-          ).start()
-
       # VMEM to HBM transfer.
       # Use dynamic loop to minimize register spills.
       # For bf16, we pack 256 columns into 128 columns, so we step by 2 * num_lanes (256).
       # For f32, we write 128 columns directly, so we step by num_lanes (128).
       loop_step = num_lanes if not is_bf16 else 2 * num_lanes
+
+      for col_vmem_start in range(0, col_size, loop_step):
+        col_hbm_start = col_start + col_vmem_start
+        for row_vmem in range(num_simd_lanes):
+          row_hbm = src_indices[row_vmem] // input_packing
+          if is_bf16:
+            # Load 256 columns using two separate 128-column DMA reads.
+            # This perfectly matches the 256-column block structure of the compute loop!
+            pltpu.make_async_copy(
+                in_32b_hbm_ref.at[row_hbm, pl.ds(col_hbm_start, 128)],
+                out_vmem_ref.at[row_vmem, pl.ds(col_vmem_start, 128)],
+                recv_sem,
+            ).start()
+            pltpu.make_async_copy(
+                in_32b_hbm_ref.at[row_hbm, pl.ds(col_hbm_start + 128, 128)],
+                out_vmem_ref.at[row_vmem, pl.ds(col_vmem_start + 128, 128)],
+                recv_sem,
+            ).start()
+          else:
+            pltpu.make_async_copy(
+                in_32b_hbm_ref.at[row_hbm, pl.ds(col_hbm_start, 128)],
+                out_vmem_ref.at[row_vmem, pl.ds(col_vmem_start, 128)],
+                recv_sem,
+            ).start()
 
       @pl.loop(0, col_size, step=loop_step, init_carry=(prev_dst_row_hbm,))
       @jax.named_scope("dma_write_loop")
