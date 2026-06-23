@@ -344,8 +344,14 @@ def get_cost_estimate(
 
 
 
-_OUT_KW = "out"
-_SCRATCH_KW = "scratch"
+# JAX <= 0.10.0 used `out_shape`/`scratch_shapes` kwargs for `pl.kernel`; later
+# versions renamed them to `out_type`/`scratch_types`.
+if jax.version.__version_info__ <= (0, 10, 0):
+  _OUT_KW = "out_shape"
+  _SCRATCH_KW = "scratch_shapes"
+else:
+  _OUT_KW = "out_type"
+  _SCRATCH_KW = "scratch_types"
 
 
 def _preprocess(
