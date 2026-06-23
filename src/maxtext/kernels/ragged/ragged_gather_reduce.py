@@ -184,7 +184,9 @@ def main_kernel(
           row_partition_id == i,
           num_rows_per_row_partition[i],
           num_rows_current_row_partition,
-         row_tile_size = num_simd_lanes
+      )
+
+    row_tile_size = num_simd_lanes
     num_row_tiles = pl.cdiv(num_rows_current_row_partition, row_tile_size)
     row_start = row_partition_id * row_partition_size
     col_start = col_partition_id * col_size
