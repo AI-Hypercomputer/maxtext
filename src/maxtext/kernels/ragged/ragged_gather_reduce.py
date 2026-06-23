@@ -417,12 +417,14 @@ def ragged_gather_reduce(
   )
 
   if is_bf16:
-    # Outer Input Bitcast: flatten, bitcast, and reshape to 32-bit (uint32)!
+    # Outer Input Bitcast: convert bfloat16 to uint16 (same width, supported!),
+    # and then perform bitwise packing to uint32 in JAX space!
     # This transforms the input into a pure 32-bit HBM tensor, completely bypassing
     # all boundary element-size-changing layout cast crashes!
-    x_flat = x.reshape(-1)
-    x_input_flat = jax.lax.bitcast_convert_type(x_flat, jnp.uint32)
-    x_input = x_input_flat.reshape(input_size, hidden_size // 2)
+    x_u16 = jax.lax.bitcast_convert_type(x, jnp.uint16)
+    even_u32 = x_u16[:, 0::2].astype(jnp.uint32)
+    odd_u32 = x_u16[:, 1::2].astype(jnp.uint32)
+    x_input = jnp.bitwise_or(jnp.bitwise_left_shift(odd_u32, 16), even_u32)
     dtype_bytes = 2
   else:
     x_input = x
@@ -508,11 +510,17 @@ def ragged_gather_reduce(
   )
 
   if is_bf16:
-    # out has shape (R, C // 2) of f32!
-    # Bitcast to bf16 -> shape (R, C // 2, 2)
-    out_paired = jax.lax.bitcast_convert_type(out, jnp.bfloat16)
-    # Reshape to (R, C) of bf16
-    out = out_paired.reshape(padded_input_size // reduce_group_size, hidden_size)
+    # Outer Output Unpacking: bitcast to uint32, extract bits, cast to uint16,
+    # bitcast to bf16, and interleave via stacking and reshaping!
+    out_u32 = jax.lax.bitcast_convert_type(out, jnp.uint32)
+    even_u16 = jnp.bitwise_and(out_u32, 65535).astype(jnp.uint16)
+    odd_u16 = jnp.bitwise_right_shift(out_u32, 16).astype(jnp.uint16)
+    even_bf16 = jax.lax.bitcast_convert_type(even_u16, jnp.bfloat16)
+    odd_bf16 = jax.lax.bitcast_convert_type(odd_u16, jnp.bfloat16)
+    
+    # Interleave even and odd columns!
+    stacked = jnp.stack([even_bf16, odd_bf16], axis=-1)
+    out = stacked.reshape(padded_input_size // reduce_group_size, hidden_size)
   else:
     out = out.astype(x.dtype)
 
