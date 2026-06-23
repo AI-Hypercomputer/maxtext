@@ -289,10 +289,18 @@ def main_kernel(
 
           previous_accumulated_data = None
           for row_src in range(num_simd_lanes):
-            # Construct flat slice directly to avoid Slice + int TypeError!
-            flat_slice = pl.ds(row_src * col_size + col_vmem_start + col_compute_offset, num_simd_lanes)
-            # Load data from flat bfloat16/float32 VMEM directly! No bitwise extraction math!
-            data = in_vmem_ref[0, flat_slice]
+            # Load and cast data.
+            # SparseCore hardware strictly requires 16-element aligned loads for 16-bit data (bf16).
+            # We perform aligned 16-element reads and slice to 8 elements in register space.
+            if is_bf16:
+              is_aligned = (col_compute_offset % 16) == 0
+              read_offset = col_compute_offset if is_aligned else col_compute_offset - 8
+              flat_slice_16 = pl.ds(row_src * col_size + col_vmem_start + read_offset, 16)
+              data_16 = in_vmem_ref[0, flat_slice_16]
+              data = data_16[:8] if is_aligned else data_16[8:]
+            else:
+              flat_slice_8 = pl.ds(row_src * col_size + col_vmem_start + col_compute_offset, num_simd_lanes)
+              data = in_vmem_ref[0, flat_slice_8]
             # Convert to float32 precision for accumulation
             data = data.astype(jnp.float32)
             # Accumulate at float32 precision
