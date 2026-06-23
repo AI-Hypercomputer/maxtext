@@ -385,7 +385,7 @@ else:
   _COMPILER_PARAMS = {
       "use_tc_tiling_on_sc": True,
       "disable_bounds_checks": True,
-      "needs_layout_passes": False,
+      "needs_layout_passes": True,
   }
 
 
