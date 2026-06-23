@@ -52,6 +52,7 @@ def _ragged_gather_reduce_fallback(
 
 def main_kernel(
     # Inputs.
+    spill_limit_hbm_ref: jax.Ref, # HBM-loaded dynamic loop limit!
     num_rows_per_row_partition_ref: jax.Ref,
     in_hbm_ref: jax.Ref,
     src_indices_hbm_ref: jax.Ref,
@@ -60,6 +61,7 @@ def main_kernel(
     # Outputs.
     out_hbm_ref: jax.Ref,      # Passed as uint32 directly!
     # Scratch.
+    spill_limit_vmem_ref: jax.Ref,
     num_rows_per_row_partition_vmem_ref: jax.Ref,
     in_vmem_ref: jax.Ref,      # Dedicated 1D flat input buffer of shape (1, 8 * col_size)
     out_vmem_ref: jax.Ref,     # Dedicated 1D flat output buffer of shape (1, 8 * col_size)
@@ -101,6 +103,19 @@ def main_kernel(
     row_partition_size = in_hbm_ref.shape[0] // num_row_partitions
     row_partition_id = core_id // num_column_partitions
     col_partition_id = core_id % num_column_partitions
+
+    # Load the unbreakable dynamic loop limit from HBM to VMEM!
+    # Because this value is loaded from HBM at runtime, the compiler has absolutely
+    # zero knowledge of its value, completely blocking all loop unrolling optimizations!
+    dma_limit = pltpu.make_async_copy(
+        spill_limit_hbm_ref.at[pl.ds(0, num_simd_lanes)],
+        spill_limit_vmem_ref,
+        recv_sem,
+    )
+    dma_limit.start()
+    dma_limit.wait()
+    limit_vec = spill_limit_vmem_ref[...]
+    limit = limit_vec[0]
 
     # Read total number of valid source rows for the current row partition.
     dma = pltpu.make_async_copy(
@@ -197,24 +212,23 @@ def main_kernel(
         for col_compute_offset in range(0, num_lanes, num_simd_lanes):
           col_slice_global = pl.ds(col_vmem_start + col_compute_offset, num_simd_lanes)
 
-          # UNBREAKABLE DYNAMIC LOOP BARRIER RECIPES:
-          # These helper functions run a 1-iteration loop with a dynamic, unprovable limit.
-          # Because the loop limit depends on a dynamic runtime input (src_indices), and the
-          # write index is the loop induction variable, the compiler's static store-load forwarding
-          # and copy propagation passes are completely and absolutely blocked!
-          # This forces physical materialization in VMEM with zero compiler bypass risk.
+          # THE UNBREAKABLE SYNERGISTIC DYNAMIC LOOP BARRIER:
+          # This helper function runs a 1-iteration loop with an HBM-loaded dynamic limit.
+          # Because the limit is loaded from memory at runtime, the compiler has absolutely
+          # zero knowledge of its value, completely blocking loop unrolling!
+          # And because the write is inside a loop, and the write index is the loop induction variable,
+          # the compiler's dependency-tracking passes are completely blocked at the loop boundary,
+          # making store-load forwarding mathematically impossible!
+          # At runtime, since the limit is physically 1, it runs exactly 1 iteration, ensuring
+          # maximum performance with absolute codegen stability!
           def spill_u32(val, temp_ref):
-            cond = src_indices[0] >= 0
-            dynamic_one = jnp.where(cond, 1, 2).astype(jnp.int32)
-            @pl.loop(0, dynamic_one)
+            @pl.loop(0, limit)
             def spill_inner(i):
               temp_ref[i, :] = val
             return temp_ref[0, :]
 
           def spill_f32(val, temp_ref):
-            cond = src_indices[0] >= 0
-            dynamic_one = jnp.where(cond, 1, 2).astype(jnp.int32)
-            @pl.loop(0, dynamic_one)
+            @pl.loop(0, limit)
             def spill_inner(i):
               temp_ref[i, :] = val
             return temp_ref[0, :]
@@ -514,6 +528,10 @@ def ragged_gather_reduce(
       subcore_axis_name="subcore",
   )
 
+  # Allocate an unbreakable spill limit tensor in HBM, initialized to 1.
+  # We allocate 8 elements to align with SparseCore SIMD vector registers.
+  spill_limit_hbm = jnp.ones((8,), dtype=jnp.int32)
+
   out = pl.kernel(  # pytype: disable=wrong-keyword-args
       functools.partial(
           main_kernel,
@@ -542,6 +560,7 @@ def ragged_gather_reduce(
               out_dtype,
           ),
           _SCRATCH_KW: dict(  # pylint: disable=use-dict-literal
+              spill_limit_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
               num_rows_per_row_partition_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
               in_vmem_ref=pltpu.VMEM((1, num_simd_lanes * col_size), jnp.uint32),
               out_vmem_ref=pltpu.VMEM((1, num_simd_lanes * col_size), jnp.uint32),
@@ -555,6 +574,7 @@ def ragged_gather_reduce(
           ),
       },
   )(
+      spill_limit_hbm,       # Passed as the first input to the kernel!
       num_src_rows_per_row_partition,
       x,                     # Passed as bf16 directly, bitcasted inside the kernel (safe read-only!)
       src_indices,
