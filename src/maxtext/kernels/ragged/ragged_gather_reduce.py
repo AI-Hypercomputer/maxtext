@@ -79,6 +79,14 @@ def main_kernel(
     is_bf16: bool,
 ):
   """SparseCore kernel for ragged gather reduce."""
+  # Local flat core/subcore index from the Pallas parallel grid.
+  # Safe to call at the top level of main_kernel because main_kernel IS the device function!
+  core_id = pl.program_id(0)
+
+  # Decode the flat index into row and column partition IDs!
+  row_partition_id = core_id // num_column_partitions
+  col_partition_id = core_id % num_column_partitions
+
   # Dimension sizes.
   shape = in_hbm_ref.shape
   col_size = shape[-1] // num_column_partitions
@@ -88,218 +96,207 @@ def main_kernel(
   
   # Strides.
   row_partition_size = num_rows_per_row_partition_ref.shape[0] // (num_row_partitions)
-  # The maximum number of source rows this subcore can process.
-  num_rows_current_row_partition = row_partition_size
 
   # Semaphores.
   recv_sem = sem_ref[0]
   send_sem = sem_ref[1]
 
-  def inner_kernel_corrected():
-    # Local flat core/subcore index from the Pallas parallel grid.
-    core_id = pl.program_id(0)
+  # Compute row partition bounds.
+  num_rows_current_row_partition = jnp.array(0, jnp.int32)
+  num_rows_per_row_partition = num_rows_per_row_partition_vmem_ref[...]
+  for i in range(num_row_partitions):
+    num_rows_current_row_partition = jnp.where(
+        row_partition_id == i,
+        num_rows_per_row_partition[i],
+        num_rows_current_row_partition,
+    )
 
-    # Decode the flat index into row and column partition IDs!
-    row_partition_id = core_id // num_column_partitions
-    col_partition_id = core_id % num_column_partitions
+  row_tile_size = num_simd_lanes
+  num_row_tiles = pl.cdiv(num_rows_current_row_partition, row_tile_size)
+  row_start = row_partition_id * row_partition_size
+  col_start = col_partition_id * col_size
 
-    num_rows_current_row_partition = jnp.array(0, jnp.int32)
-    num_rows_per_row_partition = num_rows_per_row_partition_vmem_ref[...]
-    for i in range(num_row_partitions):
-      num_rows_current_row_partition = jnp.where(
-          row_partition_id == i,
-          num_rows_per_row_partition[i],
-          num_rows_current_row_partition,
-      )
+  @pl.loop(0, num_row_tiles)
+  def row_loop(row_block_id):
+    row_tile_start = row_start + row_block_id * num_simd_lanes
+    prev_dst_row_hbm = jnp.where(row_block_id == 0, -1, dst_indices_vmem_ref[...][num_simd_lanes - 1])
+    dma_list = []
+    dma_list.append(
+        pltpu.make_async_copy(
+            src_indices_div_hbm_ref.at[pl.ds(row_tile_start, num_simd_lanes)],
+            src_indices_div_vmem_ref,
+            recv_sem,
+        )
+    )
+    dma_list.append(
+        pltpu.make_async_copy(
+            src_indices_mod_hbm_ref.at[pl.ds(row_tile_start, num_simd_lanes)],
+            src_indices_mod_vmem_ref,
+            recv_sem,
+        )
+    )
+    dma_list.append(
+        pltpu.make_async_copy(
+            dst_indices_hbm_ref.at[pl.ds(row_tile_start, num_simd_lanes)],
+            dst_indices_vmem_ref,
+            recv_sem,
+        )
+    )
+    dma_list.append(
+        pltpu.make_async_copy(
+            topk_weights_hbm_ref.at[pl.ds(row_tile_start, num_simd_lanes)],
+            topk_weights_vmem_ref,
+            recv_sem,
+        )
+    )
+    jax.tree.map(lambda x: x.start(), dma_list)
+    jax.tree.map(lambda x: x.wait(), dma_list)
 
-    row_tile_size = num_simd_lanes
-    num_row_tiles = pl.cdiv(num_rows_current_row_partition, row_tile_size)
-    row_start = row_partition_id * row_partition_size
-    col_start = col_partition_id * col_size
+    src_indices_div = src_indices_div_vmem_ref[...]
+    src_indices_mod = src_indices_mod_vmem_ref[...]
+    dst_indices = dst_indices_vmem_ref[...]
+    topk_weights = topk_weights_vmem_ref[...]
 
-    @pl.loop(0, num_row_tiles)
-    def row_loop(row_block_id):
-      row_tile_start = row_start + row_block_id * num_simd_lanes
-      prev_dst_row_hbm = jnp.where(row_block_id == 0, -1, dst_indices_vmem_ref[...][num_simd_lanes - 1])
-      dma_list = []
-      dma_list.append(
-          pltpu.make_async_copy(
-              src_indices_div_hbm_ref.at[pl.ds(row_tile_start, num_simd_lanes)],
-              src_indices_div_vmem_ref,
-              recv_sem,
-          )
-      )
-      dma_list.append(
-          pltpu.make_async_copy(
-              src_indices_mod_hbm_ref.at[pl.ds(row_tile_start, num_simd_lanes)],
-              src_indices_mod_vmem_ref,
-              recv_sem,
-          )
-      )
-      dma_list.append(
-          pltpu.make_async_copy(
-              dst_indices_hbm_ref.at[pl.ds(row_tile_start, num_simd_lanes)],
-              dst_indices_vmem_ref,
-              recv_sem,
-          )
-      )
-      dma_list.append(
-          pltpu.make_async_copy(
-              topk_weights_hbm_ref.at[pl.ds(row_tile_start, num_simd_lanes)],
-              topk_weights_vmem_ref,
-              recv_sem,
-          )
-      )
-      jax.tree.map(lambda x: x.start(), dma_list)
-      jax.tree.map(lambda x: x.wait(), dma_list)
+    in_32b_hbm_ref = in_hbm_ref
+    out_32b_hbm_ref = out_hbm_ref.bitcast(jnp.uint32)
 
-      src_indices_div = src_indices_div_vmem_ref[...]
-      src_indices_mod = src_indices_mod_vmem_ref[...]
-      dst_indices = dst_indices_vmem_ref[...]
-      topk_weights = topk_weights_vmem_ref[...]
+    loop_step = num_lanes
 
-      in_32b_hbm_ref = in_hbm_ref
-      out_32b_hbm_ref = out_hbm_ref.bitcast(jnp.uint32)
+    for col_vmem_start in range(0, col_size, loop_step):
+      col_hbm_start = col_start + col_vmem_start
+      for row_vmem in range(num_simd_lanes):
+        row_hbm = src_indices_div[row_vmem]
+        pltpu.make_async_copy(
+            in_32b_hbm_ref.at[row_hbm, pl.ds(col_hbm_start, 128)],
+            in_vmem_ref.at[row_vmem, pl.ds(0, 128)],
+            recv_sem,
+        ).start()
 
-      loop_step = num_lanes
+    for col_vmem_start in range(0, col_size, loop_step):
+      col_hbm_start = col_start + col_vmem_start
+      packed_rows_registers = [[] for _ in range(num_simd_lanes)]
 
-      for col_vmem_start in range(0, col_size, loop_step):
-        col_hbm_start = col_start + col_vmem_start
-        for row_vmem in range(num_simd_lanes):
-          row_hbm = src_indices_div[row_vmem]
-          pltpu.make_async_copy(
-              in_32b_hbm_ref.at[row_hbm, pl.ds(col_hbm_start, 128)],
-              in_vmem_ref.at[row_vmem, pl.ds(0, 128)],
-              recv_sem,
-          ).start()
-
-      for col_vmem_start in range(0, col_size, loop_step):
-        col_hbm_start = col_start + col_vmem_start
-        packed_rows_registers = [[] for _ in range(num_simd_lanes)]
-
-        for col_compute_offset in range(0, loop_step, num_simd_lanes):
-          col_slice = pl.ds(col_vmem_start + col_compute_offset, num_simd_lanes)
-          previous_accumulated_data = None
-          for row_src in range(num_simd_lanes):
-            if is_bf16:
-              is_aligned = (col_compute_offset % 16) == 0
-              read_offset = col_compute_offset if is_aligned else col_compute_offset - 8
-              data_16 = in_vmem_ref[row_src, pl.ds(read_offset, 16)]
-              data = data_16[:8] if is_aligned else data_16[8:]
-            else:
-              data = in_vmem_ref[row_src, pl.ds(col_compute_offset, num_simd_lanes)]
-
-            if is_bf16:
-              row_src_pack = src_indices_mod[row_src]
-              data = jnp.bitwise_left_shift(data, jnp.where(row_src_pack == 0, 16, 0))
-              data = jnp.bitwise_and(data, -65536)
-              data = jax.lax.bitcast_convert_type(data, jnp.float32)
-            else:
-              data = jax.lax.bitcast_convert_type(data, jnp.float32)
-
-            data = data * topk_weights[row_src]
-            dst_row_hbm = dst_indices[row_src]
-            if row_src == 0:
-              prev_row_hbm = prev_dst_row_hbm
-              previous_accumulated_data = jax.lax.bitcast_convert_type(
-                  prev_iter_last_row_vmem_ref[0, col_slice], jnp.float32
-              )
-            else:
-              prev_row_hbm = dst_indices[row_src - 1]
-              assert previous_accumulated_data is not None
-
-            accumulated_data = jnp.where(
-                dst_row_hbm == prev_row_hbm,
-                previous_accumulated_data + data,
-                data,
-            )
-            previous_accumulated_data = accumulated_data
-            data_to_write = jax.lax.bitcast_convert_type(accumulated_data, jnp.uint32)
-            if not is_bf16:
-              flat_slice = pl.ds(row_src * col_size + col_vmem_start + col_compute_offset, num_simd_lanes)
-              out_vmem_ref[0, flat_slice] = data_to_write
-
-            if is_bf16:
-              data_bf16 = accumulated_data.astype(jnp.bfloat16)
-              data_u16 = jax.lax.bitcast_convert_type(data_bf16, jnp.uint16)
-              data_u32 = data_u16.astype(jnp.uint32)
-              packed_val = [
-                  jnp.bitwise_or(jnp.bitwise_left_shift(data_u32[1], 16), data_u32[0]),
-                  jnp.bitwise_or(jnp.bitwise_left_shift(data_u32[3], 16), data_u32[2]),
-                  jnp.bitwise_or(jnp.bitwise_left_shift(data_u32[5], 16), data_u32[4]),
-                  jnp.bitwise_or(jnp.bitwise_left_shift(data_u32[7], 16), data_u32[6]),
-              ]
-              packed_rows_registers[row_src].extend(packed_val)
-
-            if row_src == num_simd_lanes - 1:
-              prev_iter_last_row_vmem_ref[0, col_slice] = data_to_write
-
-        src_row_idx_in_vmem = []
-        row_valid_vec = []
-        for row_vmem_idx in reversed(range(num_simd_lanes)):
-          row_valid = row_block_id * num_simd_lanes + row_vmem_idx < num_rows_current_row_partition
-          row_valid_vec.append(row_valid)
-          if row_vmem_idx == num_simd_lanes - 1:
-            src_row_idx_in_vmem.append(row_vmem_idx)
-          else:
-            next_row_valid = row_valid_vec[-2]
-            src_row_idx_in_vmem.append(
-                jnp.where(
-                    jnp.logical_and(
-                        next_row_valid,
-                        (dst_indices[row_vmem_idx] == dst_indices[row_vmem_idx + 1]),
-                    ),
-                    src_row_idx_in_vmem[-1],
-                    row_vmem_idx,
-                )
-            )
-        src_row_idx_in_vmem.reverse()
-        row_valid_vec.reverse()
-
-        if is_bf16:
-          for r in range(num_simd_lanes):
-            packed_row = jnp.array(packed_rows_registers[r])
-            write_col_vmem_start = pl.multiple_of(col_vmem_start // 2, 64)
-            for c in range(0, 64, 8):
-              out_vmem_ref[0, pl.ds(r * (col_size // 2) + write_col_vmem_start + c, 8)] = packed_row[c : c + 8]
-            for c in range(64, 128, 8):
-              out_vmem_ref[0, pl.ds(r * (col_size // 2) + write_col_vmem_start + c, 8)] = jnp.zeros((8,), jnp.uint32)
-
-        last_valid_src_row_vmem = -1
-        last_valid_dst_row_hbm = -1
-        for i, (src_row_idx_in_vmem_val, row_valid) in enumerate(zip(src_row_idx_in_vmem, row_valid_vec, strict=True)):
-          src_row_vmem = jnp.where(row_valid, src_row_idx_in_vmem_val, last_valid_src_row_vmem)
-          dst_row_hbm = jnp.where(row_valid, dst_indices[i], last_valid_dst_row_hbm)
-          
+      for col_compute_offset in range(0, loop_step, num_simd_lanes):
+        col_slice = pl.ds(col_vmem_start + col_compute_offset, num_simd_lanes)
+        previous_accumulated_data = None
+        for row_src in range(num_simd_lanes):
           if is_bf16:
-            write_col_hbm_start = pl.multiple_of(col_partition_id * (col_size // 2) + (col_vmem_start // 2), 64)
-            write_col_vmem_start = pl.multiple_of(col_vmem_start // 2, 64)
-            flat_col_vmem_start_1 = pl.multiple_of(src_row_vmem * (col_size // 2) + write_col_vmem_start, 64)
-            pltpu.make_async_copy(
-                out_vmem_ref.at[0, pl.ds(flat_col_vmem_start_1, 64)],
-                out_32b_hbm_ref.at[dst_row_hbm, pl.ds(write_col_hbm_start, 64)],
-                send_sem,
-            ).start()
+            is_aligned = (col_compute_offset % 16) == 0
+            read_offset = col_compute_offset if is_aligned else col_compute_offset - 8
+            data_16 = in_vmem_ref[row_src, pl.ds(read_offset, 16)]
+            data = data_16[:8] if is_aligned else data_16[8:]
           else:
-            flat_col_vmem_start = pl.multiple_of(src_row_vmem * col_size + col_vmem_start, 128)
-            pltpu.make_async_copy(
-                out_vmem_ref.at[0, pl.ds(flat_col_vmem_start, 128)],
-                out_32b_hbm_ref.at[dst_row_hbm, pl.ds(col_hbm_start, 128)],
-                send_sem,
-            ).start()
-            
-          last_valid_src_row_vmem = src_row_vmem
-          last_valid_dst_row_hbm = dst_row_hbm
+            data = in_vmem_ref[row_src, pl.ds(col_compute_offset, num_simd_lanes)]
 
-      for _ in range(0, col_size, num_lanes):
-        for _ in range(num_simd_lanes):
+          if is_bf16:
+            row_src_pack = src_indices_mod[row_src]
+            data = jnp.bitwise_left_shift(data, jnp.where(row_src_pack == 0, 16, 0))
+            data = jnp.bitwise_and(data, -65536)
+            data = jax.lax.bitcast_convert_type(data, jnp.float32)
+          else:
+            data = jax.lax.bitcast_convert_type(data, jnp.float32)
+
+          data = data * topk_weights[row_src]
+          dst_row_hbm = dst_indices[row_src]
+          if row_src == 0:
+            prev_row_hbm = prev_dst_row_hbm
+            previous_accumulated_data = jax.lax.bitcast_convert_type(
+                prev_iter_last_row_vmem_ref[0, col_slice], jnp.float32
+            )
+          else:
+            prev_row_hbm = dst_indices[row_src - 1]
+            assert previous_accumulated_data is not None
+
+          accumulated_data = jnp.where(
+              dst_row_hbm == prev_row_hbm,
+              previous_accumulated_data + data,
+              data,
+          )
+          previous_accumulated_data = accumulated_data
+          data_to_write = jax.lax.bitcast_convert_type(accumulated_data, jnp.uint32)
+          if not is_bf16:
+            flat_slice = pl.ds(row_src * col_size + col_vmem_start + col_compute_offset, num_simd_lanes)
+            out_vmem_ref[0, flat_slice] = data_to_write
+
+          if is_bf16:
+            data_bf16 = accumulated_data.astype(jnp.bfloat16)
+            data_u16 = jax.lax.bitcast_convert_type(data_bf16, jnp.uint16)
+            data_u32 = data_u16.astype(jnp.uint32)
+            packed_val = [
+                jnp.bitwise_or(jnp.bitwise_left_shift(data_u32[1], 16), data_u32[0]),
+                jnp.bitwise_or(jnp.bitwise_left_shift(data_u32[3], 16), data_u32[2]),
+                jnp.bitwise_or(jnp.bitwise_left_shift(data_u32[5], 16), data_u32[4]),
+                jnp.bitwise_or(jnp.bitwise_left_shift(data_u32[7], 16), data_u32[6]),
+            ]
+            packed_rows_registers[row_src].extend(packed_val)
+
+          if row_src == num_simd_lanes - 1:
+            prev_iter_last_row_vmem_ref[0, col_slice] = data_to_write
+
+      src_row_idx_in_vmem = []
+      row_valid_vec = []
+      for row_vmem_idx in reversed(range(num_simd_lanes)):
+        row_valid = row_block_id * num_simd_lanes + row_vmem_idx < num_rows_current_row_partition
+        row_valid_vec.append(row_valid)
+        if row_vmem_idx == num_simd_lanes - 1:
+          src_row_idx_in_vmem.append(row_vmem_idx)
+        else:
+          next_row_valid = row_valid_vec[-2]
+          src_row_idx_in_vmem.append(
+              jnp.where(
+                  jnp.logical_and(
+                      next_row_valid,
+                      (dst_indices[row_vmem_idx] == dst_indices[row_vmem_idx + 1]),
+                  ),
+                  src_row_idx_in_vmem[-1],
+                  row_vmem_idx,
+              )
+          )
+      src_row_idx_in_vmem.reverse()
+      row_valid_vec.reverse()
+
+      if is_bf16:
+        for r in range(num_simd_lanes):
+          packed_row = jnp.array(packed_rows_registers[r])
+          write_col_vmem_start = pl.multiple_of(col_vmem_start // 2, 64)
+          for c in range(0, 64, 8):
+            out_vmem_ref[0, pl.ds(r * (col_size // 2) + write_col_vmem_start + c, 8)] = packed_row[c : c + 8]
+          for c in range(64, 128, 8):
+            out_vmem_ref[0, pl.ds(r * (col_size // 2) + write_col_vmem_start + c, 8)] = jnp.zeros((8,), jnp.uint32)
+
+      last_valid_src_row_vmem = -1
+      last_valid_dst_row_hbm = -1
+      for i, (src_row_idx_in_vmem_val, row_valid) in enumerate(zip(src_row_idx_in_vmem, row_valid_vec, strict=True)):
+        src_row_vmem = jnp.where(row_valid, src_row_idx_in_vmem_val, last_valid_src_row_vmem)
+        dst_row_hbm = jnp.where(row_valid, dst_indices[i], last_valid_dst_row_hbm)
+        
+        if is_bf16:
+          write_col_hbm_start = pl.multiple_of(col_partition_id * (col_size // 2) + (col_vmem_start // 2), 64)
+          write_col_vmem_start = pl.multiple_of(col_vmem_start // 2, 64)
+          flat_col_vmem_start_1 = pl.multiple_of(src_row_vmem * (col_size // 2) + write_col_vmem_start, 64)
           pltpu.make_async_copy(
-              out_vmem_ref.at[0, :num_lanes],
-              out_32b_hbm_ref.at[0, :num_lanes],
+              out_vmem_ref.at[0, pl.ds(flat_col_vmem_start_1, 64)],
+              out_32b_hbm_ref.at[dst_row_hbm, pl.ds(write_col_hbm_start, 64)],
               send_sem,
-          ).wait()
+          ).start()
+        else:
+          flat_col_vmem_start = pl.multiple_of(src_row_vmem * col_size + col_vmem_start, 128)
+          pltpu.make_async_copy(
+              out_vmem_ref.at[0, pl.ds(flat_col_vmem_start, 128)],
+              out_32b_hbm_ref.at[dst_row_hbm, pl.ds(col_hbm_start, 128)],
+              send_sem,
+          ).start()
+          
+        last_valid_src_row_vmem = src_row_vmem
+        last_valid_dst_row_hbm = dst_row_hbm
 
-  inner_kernel_corrected()
+    for _ in range(0, col_size, num_lanes):
+      for _ in range(num_simd_lanes):
+        pltpu.make_async_copy(
+            out_vmem_ref.at[0, :num_lanes],
+            out_32b_hbm_ref.at[0, :num_lanes],
+            send_sem,
+        ).wait()
 
 
 def get_cost_estimate(
@@ -337,8 +334,6 @@ def get_cost_estimate(
       bytes_accessed=int(bytes_accessed),
       transcendentals=0,
   )
-
-
 
 
 # JAX <= 0.10.0 used `out_shape`/`scratch_shapes` kwargs for `pl.kernel`; later
