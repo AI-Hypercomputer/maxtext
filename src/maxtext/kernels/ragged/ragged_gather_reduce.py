@@ -314,6 +314,15 @@ def get_cost_estimate(
     bytes_accessed_override: int | None = None,
 ) -> pl.CostEstimate:
   """Get cost estimate for the ragged gather reduce kernel."""
+  # If any of the inputs is a JAX tracer (e.g. during jax.eval_shape),
+  # return a dummy CostEstimate to avoid crashing JAX tracing!
+  if (
+      isinstance(padded_input_size, jax.core.Tracer)
+      or isinstance(aligned_hidden_size, jax.core.Tracer)
+      or isinstance(reduce_group_size, jax.core.Tracer)
+  ):
+    return pl.CostEstimate(flops=0, bytes_accessed=0, transcendentals=0)
+
   if flops_override is not None or bytes_accessed_override is not None:
     return pl.CostEstimate(
         flops=flops_override or 0,
@@ -326,7 +335,11 @@ def get_cost_estimate(
       padded_input_size * aligned_hidden_size * input_dtype_bytes
       + num_rows * aligned_hidden_size * 4
   )
-  return pl.CostEstimate(flops=flops, bytes_accessed=bytes_accessed, transcendentals=0)
+  return pl.CostEstimate(
+      flops=int(flops),
+      bytes_accessed=int(bytes_accessed),
+      transcendentals=0,
+  )
 
 
 
