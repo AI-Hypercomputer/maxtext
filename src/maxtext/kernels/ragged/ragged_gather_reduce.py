@@ -286,59 +286,52 @@ def main_kernel(
         # If output is bf16, pack the accumulated float32 results into bf16 (packed as uint32)
         if in_dtype == jnp.bfloat16:
           base_packed_row = dst_indices[0] // 2
+          num_packed_rows = num_simd_lanes // 2 + 1
           for col_compute_offset in range(0, num_lanes, num_simd_lanes):
             col_slice = pl.ds(col_vmem_start + col_compute_offset, num_simd_lanes)
             
-            packed_out = jnp.zeros((9, num_simd_lanes), dtype=jnp.uint32)
+            # 1. Read all accumulated data into a local static buffer to avoid hazards
+            accum_data = jnp.zeros((num_simd_lanes, num_simd_lanes), dtype=jnp.uint32)
             for i in range(num_simd_lanes):
               vmem_lane = src_row_idx_in_vmem[i]
+              accum_data = accum_data.at[i].set(out_vmem_ref[vmem_lane, col_slice])
+              
+            # 2. Initialize the packed rows in out_vmem_ref to 0 (since we will OR into them)
+            for p in range(num_packed_rows):
+              out_vmem_ref[p, col_slice] = jnp.zeros((num_simd_lanes,), dtype=jnp.uint32)
+              
+            # 3. Pack and accumulate into out_vmem_ref (dynamic indexing on VMEM Ref is allowed)
+            for i in range(num_simd_lanes):
               dst_row = dst_indices[i]
               
-              # Load accumulated float32 data
-              data_u32 = out_vmem_ref[vmem_lane, col_slice]
+              data_u32 = accum_data[i]
               data_f32 = jax.lax.bitcast_convert_type(data_u32, jnp.float32)
               
-              # Convert to bf16 and cast to uint32 (lower 16 bits)
               data_bf16 = data_f32.astype(jnp.bfloat16)
               data_u16 = jax.lax.bitcast_convert_type(data_bf16, jnp.uint16)
               data_bf16_u32 = data_u16.astype(jnp.uint32)
               data_bf16_u32 = jnp.bitwise_and(data_bf16_u32, 0xffff)
               
-              # Shift: even -> lower 16, odd -> upper 16
               shift = jnp.where(dst_row % 2 == 0, 0, 16)
               shifted_data = jnp.bitwise_left_shift(data_bf16_u32, shift)
               
-              # Local packed row index
               local_packed_row = (dst_row // 2) - base_packed_row
               
-              packed_out = packed_out.at[local_packed_row].set(jnp.bitwise_or(packed_out[local_packed_row], shifted_data))
-              
-            # Write packed rows back to the first 9 rows of out_vmem_ref
-            for p in range(9):
-              out_vmem_ref[p, col_slice] = packed_out[p]
+              current_packed = out_vmem_ref[local_packed_row, col_slice]
+              out_vmem_ref[local_packed_row, col_slice] = jnp.bitwise_or(current_packed, shifted_data)
 
         # Trigger DMA writes
         if in_dtype == jnp.bfloat16:
-          last_valid_local_row = -1
-          last_valid_dst_row_packed = -1
           base_packed_row = dst_indices[0] // 2
+          num_packed_rows = num_simd_lanes // 2 + 1
           
-          for i, row_valid in enumerate(row_valid_vec):
-            dst_row = dst_indices[i]
-            local_packed_row = (dst_row // 2) - base_packed_row
-            dst_row_packed = dst_row // 2
-            
-            src_row_vmem = jnp.where(row_valid, local_packed_row, last_valid_local_row)
-            dst_row_hbm = jnp.where(row_valid, dst_row_packed, last_valid_dst_row_packed)
-            
+          for p in range(num_packed_rows):
+            dst_row_hbm = base_packed_row + p
             pltpu.make_async_copy(
-                out_vmem_ref.at[src_row_vmem, pl.ds(col_vmem_start, num_lanes)],
+                out_vmem_ref.at[p, pl.ds(col_vmem_start, num_lanes)],
                 out_32b_hbm_ref.at[dst_row_hbm, pl.ds(col_hbm_start, num_lanes)],
                 send_sem,
             ).start()
-            
-            last_valid_local_row = jnp.where(row_valid, local_packed_row, last_valid_local_row)
-            last_valid_dst_row_packed = jnp.where(row_valid, dst_row_packed, last_valid_dst_row_packed)
         else:
           # Original unpacked DMA write loop (same as clean code)
           last_valid_src_row_vmem = -1
