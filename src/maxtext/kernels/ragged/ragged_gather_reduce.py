@@ -365,9 +365,18 @@ def get_cost_estimate(
 if jax.version.__version_info__ <= (0, 10, 0):
   _OUT_KW = "out_shape"
   _SCRATCH_KW = "scratch_shapes"
+  _COMPILER_PARAMS = {
+      "use_tc_tiling_on_sc": True,
+      "disable_bounds_checks": True,
+  }
 else:
   _OUT_KW = "out_type"
   _SCRATCH_KW = "scratch_types"
+  _COMPILER_PARAMS = {
+      "use_tc_tiling_on_sc": True,
+      "disable_bounds_checks": True,
+      "needs_layout_passes": False,
+  }
 
 
 def _preprocess(
@@ -476,11 +485,7 @@ def ragged_gather_reduce(
           is_bf16=is_bf16,
       ),
       compiler_params=pltpu.CompilerParams(
-          flags={
-              "num_sc_buffers": 2,
-              "ring_buffer_size": 1,
-              "unroll_factor": 1,
-          }
+          **_COMPILER_PARAMS,
       ),
       cost_estimate=get_cost_estimate(
           padded_input_size=padded_input_size,
