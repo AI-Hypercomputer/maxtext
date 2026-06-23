@@ -311,7 +311,7 @@ def main_kernel(
               # Local packed row index
               local_packed_row = (dst_row // 2) - base_packed_row
               
-              packed_out = packed_out.at[local_packed_row].apply(lambda val: jnp.bitwise_or(val, shifted_data))
+              packed_out = packed_out.at[local_packed_row].set(jnp.bitwise_or(packed_out[local_packed_row], shifted_data))
               
             # Write packed rows back to the first 9 rows of out_vmem_ref
             for p in range(9):
