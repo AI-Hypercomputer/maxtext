@@ -25,6 +25,7 @@ import numpy as np
 import tensorflow as tf
 import jax
 
+from flax import nnx
 from flax.linen import partitioning as nn_partitioning
 
 from maxtext.configs import pyconfig
@@ -75,14 +76,25 @@ def train_loop(config, recorder, state=None):
 
   params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
 
+  # NNX jits over the GraphDef + a flat nnx.State, so split the TrainStateNNX
+  # here (mirrors trainers/pre_train/train.py). Linen jits over the module.
+  if config.pure_nnx:
+    jit_model, state = nnx.split(state)
+  else:
+    jit_model = model
+
   p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
-      config, model, mesh, state, state_mesh_shardings, train_step, eval_step, eval_data_iterator, params_shardings
+      config, jit_model, mesh, state, state_mesh_shardings, train_step, eval_step, eval_data_iterator, params_shardings
   )
+
+  # Only the Linen step takes a dropout rng; pass it only there so the args
+  # match the jitted in_shardings (see get_functional_train_with_signature).
+  rng_args = () if config.pure_nnx else (init_rng,)
 
   with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
     data_sharding = sharding.get_input_data_sharding(config, mesh)
     shaped_batch = maxtext_utils.get_shaped_batch(config, batch_sharding=data_sharding)
-    compiled = p_train_step.lower(state, shaped_batch, init_rng).compile()
+    compiled = p_train_step.lower(state, shaped_batch, *rng_args).compile()
     compiled_stats = compiled.memory_analysis()
     max_utils.print_compiled_memory_stats(compiled_stats)
 
@@ -92,7 +104,11 @@ def train_loop(config, recorder, state=None):
   metric_logger = MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
 
   # Write train config params, num model params, and XLA flags to tensorboard
-  metric_logger.write_setup_info_to_tensorboard(state.params)
+  if config.pure_nnx:
+    _, setup_params, _ = nnx.split(state.model, nnx.Param, ...)
+  else:
+    setup_params = state.params
+  metric_logger.write_setup_info_to_tensorboard(setup_params)
 
   _job_completed_gracefully = False
   try:
@@ -104,9 +120,10 @@ def train_loop(config, recorder, state=None):
         example_batch = data_loader.load_next_batch()
         # pylint: disable=not-callable
         nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
+        step_rng_args = () if config.pure_nnx else (nextrng,)
         with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
           with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
-            state, metrics = p_train_step(state, example_batch, nextrng)
+            state, metrics = p_train_step(state, example_batch, *step_rng_args)
 
       step_time_delta = datetime.datetime.now() - last_step_completion
 
@@ -135,7 +152,7 @@ def train_loop(config, recorder, state=None):
           if config.eval_steps > 0 and eval_step_count >= config.eval_steps:
             break
           with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
-            eval_metrics = p_eval_step(state, eval_batch, nextrng)
+            eval_metrics = p_eval_step(state, eval_batch, *step_rng_args)
           eval_step_time_delta = datetime.datetime.now() - last_eval_step_completion
           last_eval_step_completion = datetime.datetime.now()
           metric_logger.buffer_and_write_metrics(
