@@ -157,16 +157,11 @@ def main_kernel(
       in_32b_hbm_ref = in_hbm_ref
       out_32b_hbm_ref = out_hbm_ref.bitcast(jnp.uint32)
 
-      # Sequential column loop using double buffering logic.
-      @pl.loop(0, col_size, step=num_lanes, init_carry=(prev_dst_row_hbm,))
-      @jax.named_scope("dma_write_loop")
-      def dma_write_loop(col_vmem_start, carry):
+      # DMA input from HBM to the dedicated 2D in_vmem_ref buffer of shape (8, col_size)
+      # OUTSIDE the loop. This matches the baseline pipelining structure and prevents
+      # MLIR layout cast boundary conflicts!
+      for col_vmem_start in range(0, col_size, num_lanes):
         col_hbm_start = col_start + col_vmem_start
-
-        # DMA input from HBM to the dedicated 2D in_vmem_ref buffer of shape (8, col_size).
-        # By making in_vmem_ref have the exact same shape as out_vmem_ref,
-        # it gets the exact same Tensor Core tiling layout, completely preventing
-        # any reinterpret layout casts!
         for row_vmem in range(num_simd_lanes):
           row_hbm = src_indices[row_vmem]
           pltpu.make_async_copy(
@@ -174,6 +169,12 @@ def main_kernel(
               in_vmem_ref.at[row_vmem, pl.ds(col_vmem_start, num_lanes)],
               recv_sem,
           ).start()
+
+      # Sequential column loop using double buffering logic.
+      @pl.loop(0, col_size, step=num_lanes, init_carry=(prev_dst_row_hbm,))
+      @jax.named_scope("dma_write_loop")
+      def dma_write_loop(col_vmem_start, carry):
+        col_hbm_start = col_start + col_vmem_start
 
         # Wait for the input DMA of the current column block to complete.
         for _ in range(num_simd_lanes):
