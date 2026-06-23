@@ -239,6 +239,13 @@ def main_kernel(
       # For f32, we write 128 columns directly, so we step by num_lanes (128).
       loop_step = num_lanes if not is_bf16 else 2 * num_lanes
 
+      print(f"=== DEBUG TRACING ===")
+      print(f"col_size: {col_size}")
+      print(f"loop_step: {loop_step}")
+      print(f"num_simd_lanes: {num_simd_lanes}")
+      print(f"is_bf16: {is_bf16}")
+      print(f"flat buffer size: {num_simd_lanes * col_size}")
+
       for col_vmem_start in range(0, col_size, loop_step):
         col_hbm_start = col_start + col_vmem_start
         for row_vmem in range(num_simd_lanes):
@@ -246,20 +253,25 @@ def main_kernel(
           if is_bf16:
             # Load 256 columns using two separate 128-column DMA reads into flat VMEM.
             # Flat offset: row_vmem * col_size + col_vmem_start.
+            offset1 = row_vmem * col_size + col_vmem_start
+            offset2 = row_vmem * col_size + col_vmem_start + 128
+            print(f"  [bf16] col_vmem_start: {col_vmem_start}, row_vmem: {row_vmem} -> offset1: {offset1}, offset2: {offset2}")
             pltpu.make_async_copy(
                 in_32b_hbm_ref.at[row_hbm, pl.ds(col_hbm_start, 128)],
-                out_vmem_ref.at[0, pl.ds(row_vmem * col_size + col_vmem_start, 128)],
+                out_vmem_ref.at[0, pl.ds(offset1, 128)],
                 recv_sem,
             ).start()
             pltpu.make_async_copy(
                 in_32b_hbm_ref.at[row_hbm, pl.ds(col_hbm_start + 128, 128)],
-                out_vmem_ref.at[0, pl.ds(row_vmem * col_size + col_vmem_start + 128, 128)],
+                out_vmem_ref.at[0, pl.ds(offset2, 128)],
                 recv_sem,
             ).start()
           else:
+            offset1 = row_vmem * col_size + col_vmem_start
+            print(f"  [f32] col_vmem_start: {col_vmem_start}, row_vmem: {row_vmem} -> offset1: {offset1}")
             pltpu.make_async_copy(
                 in_32b_hbm_ref.at[row_hbm, pl.ds(col_hbm_start, 128)],
-                out_vmem_ref.at[0, pl.ds(row_vmem * col_size + col_vmem_start, 128)],
+                out_vmem_ref.at[0, pl.ds(offset1, 128)],
                 recv_sem,
             ).start()
 
