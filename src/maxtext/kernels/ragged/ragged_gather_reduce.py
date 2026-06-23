@@ -411,24 +411,15 @@ def main_kernel(
           dst_row_hbm = jnp.where(row_valid, dst_indices[i], last_valid_dst_row_hbm)
           
           if is_bf16:
-            # We write 256 columns in total using two separate 128-column DMA writes.
-            # VMEM source is flat out_vmem_ref. Offset must be proven 128-aligned!
+            # We write exactly one 128-column block of packed data to HBM.
+            # This perfectly matches the baseline's single-DMA-write pattern!
             write_col_hbm_start = pl.multiple_of(col_hbm_start // 2, 128)
             write_col_vmem_start = pl.multiple_of(col_vmem_start, 128)
-            write_col_hbm_start_2 = pl.multiple_of(col_hbm_start // 2 + col_size // 2, 128) # Disjoint second half HBM offset!
-            write_col_vmem_start_2 = pl.multiple_of(col_vmem_start + 128, 128)
-            
             flat_col_vmem_start_1 = pl.multiple_of(src_row_vmem * col_size + write_col_vmem_start, 128)
-            flat_col_vmem_start_2 = pl.multiple_of(src_row_vmem * col_size + write_col_vmem_start_2, 128)
             
             pltpu.make_async_copy(
                 out_vmem_ref.at[0, pl.ds(flat_col_vmem_start_1, 128)],
                 out_32b_hbm_ref.at[dst_row_hbm, pl.ds(write_col_hbm_start, 128)],
-                send_sem,
-            ).start()
-            pltpu.make_async_copy(
-                out_vmem_ref.at[0, pl.ds(flat_col_vmem_start_2, 128)],
-                out_32b_hbm_ref.at[dst_row_hbm, pl.ds(write_col_hbm_start_2, 128)],
                 send_sem,
             ).start()
           else:
