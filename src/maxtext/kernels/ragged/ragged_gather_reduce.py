@@ -411,10 +411,12 @@ def main_kernel(
         return carry
 
       # Wait for dma write to finish.
+      # We use prev_iter_last_row_vmem_ref instead of out_vmem_ref to completely
+      # avoid any layout conflicts on out_vmem_ref from the static wait loop slice!
       for _ in range(0, col_size, num_lanes):
         for _ in range(num_simd_lanes):
           pltpu.make_async_copy(
-              out_vmem_ref.at[0, :num_lanes],
+              prev_iter_last_row_vmem_ref.at[0, :num_lanes],
               out_32b_hbm_ref.at[0, :num_lanes],
               send_sem,
           ).wait()
@@ -594,6 +596,8 @@ def ragged_gather_reduce(
   # to force the compiler to use the exact same tiled layout as the baseline (row tile size = 1).
   # This completely bypasses the row alignment check. For bf16, we pack the data in the kernel
   # and write it to the first C // 2 columns, and unpack it outside the kernel.
+  # We use float32 as the carrier type to match the baseline's type signature,
+  # which completely avoids compiler layout conflicts on the output buffer!
   out_shape = (padded_input_size // reduce_group_size, aligned_hidden_size)
   out_dtype = jnp.float32
 
