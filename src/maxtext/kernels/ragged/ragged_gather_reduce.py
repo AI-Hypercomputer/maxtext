@@ -355,47 +355,32 @@ def main_kernel(
 
         # Pack the active columns of out_vmem_ref into temp_packed_vmem on the fly.
         if is_bf16:
-          # Pack first 128 columns
           for r in range(num_simd_lanes):
-            for c_offset in range(0, 128, 16):
-              c_unpacked = col_vmem_start + c_offset
-              c_packed = col_vmem_start // 2 + c_offset // 2
+            # Load 256 columns of out_vmem_ref in two perfectly tile-aligned 128-column reads.
+            # This completely avoids any sub-tile (size 8) reads from VMEM, satisfying the tiled layout.
+            val_row_0 = out_vmem_ref[r, pl.ds(col_vmem_start, 128)][...]
+            val_row_1 = out_vmem_ref[r, pl.ds(col_vmem_start + 128, 128)][...]
+            
+            # Pack the 256 elements into 128 elements in register space using fast register indexing.
+            # This is completely free of any VMEM layout constraints!
+            packed_list = []
+            for i in range(0, 128, 2):
+              val_A = val_row_0[i]
+              val_B = val_row_0[i+1]
+              packed_val = jnp.bitwise_or(jnp.bitwise_right_shift(val_A, 16), jnp.bitwise_and(val_B, -65536))
+              packed_list.append(packed_val)
               
-              val_A = out_vmem_ref[r, pl.ds(c_unpacked, 8)][...]
-              val_B = out_vmem_ref[r, pl.ds(c_unpacked + 8, 8)][...]
+            for i in range(0, 128, 2):
+              val_A = val_row_1[i]
+              val_B = val_row_1[i+1]
+              packed_val = jnp.bitwise_or(jnp.bitwise_right_shift(val_A, 16), jnp.bitwise_and(val_B, -65536))
+              packed_list.append(packed_val)
               
-              packed_vec = jnp.array([
-                  jnp.bitwise_or(jnp.bitwise_right_shift(val_A[0], 16), jnp.bitwise_and(val_A[1], -65536)),
-                  jnp.bitwise_or(jnp.bitwise_right_shift(val_A[2], 16), jnp.bitwise_and(val_A[3], -65536)),
-                  jnp.bitwise_or(jnp.bitwise_right_shift(val_A[4], 16), jnp.bitwise_and(val_A[5], -65536)),
-                  jnp.bitwise_or(jnp.bitwise_right_shift(val_A[6], 16), jnp.bitwise_and(val_A[7], -65536)),
-                  jnp.bitwise_or(jnp.bitwise_right_shift(val_B[0], 16), jnp.bitwise_and(val_B[1], -65536)),
-                  jnp.bitwise_or(jnp.bitwise_right_shift(val_B[2], 16), jnp.bitwise_and(val_B[3], -65536)),
-                  jnp.bitwise_or(jnp.bitwise_right_shift(val_B[4], 16), jnp.bitwise_and(val_B[5], -65536)),
-                  jnp.bitwise_or(jnp.bitwise_right_shift(val_B[6], 16), jnp.bitwise_and(val_B[7], -65536)),
-              ])
-              temp_packed_vmem[r, pl.ds(c_packed, 8)] = packed_vec
-
-          # Pack second 128 columns
-          for r in range(num_simd_lanes):
-            for c_offset in range(0, 128, 16):
-              c_unpacked = col_vmem_start + 128 + c_offset
-              c_packed = col_vmem_start // 2 + 64 + c_offset // 2
-              
-              val_A = out_vmem_ref[r, pl.ds(c_unpacked, 8)][...]
-              val_B = out_vmem_ref[r, pl.ds(c_unpacked + 8, 8)][...]
-              
-              packed_vec = jnp.array([
-                  jnp.bitwise_or(jnp.bitwise_right_shift(val_A[0], 16), jnp.bitwise_and(val_A[1], -65536)),
-                  jnp.bitwise_or(jnp.bitwise_right_shift(val_A[2], 16), jnp.bitwise_and(val_A[3], -65536)),
-                  jnp.bitwise_or(jnp.bitwise_right_shift(val_A[4], 16), jnp.bitwise_and(val_A[5], -65536)),
-                  jnp.bitwise_or(jnp.bitwise_right_shift(val_A[6], 16), jnp.bitwise_and(val_A[7], -65536)),
-                  jnp.bitwise_or(jnp.bitwise_right_shift(val_B[0], 16), jnp.bitwise_and(val_B[1], -65536)),
-                  jnp.bitwise_or(jnp.bitwise_right_shift(val_B[2], 16), jnp.bitwise_and(val_B[3], -65536)),
-                  jnp.bitwise_or(jnp.bitwise_right_shift(val_B[4], 16), jnp.bitwise_and(val_B[5], -65536)),
-                  jnp.bitwise_or(jnp.bitwise_right_shift(val_B[6], 16), jnp.bitwise_and(val_B[7], -65536)),
-              ])
-              temp_packed_vmem[r, pl.ds(c_packed, 8)] = packed_vec
+            packed_row = jnp.array(packed_list)
+            
+            # Write the packed 128 elements to temp_packed_vmem in a single tile-aligned 128-column write!
+            write_col_vmem_start = pl.multiple_of(col_vmem_start // 2, 128)
+            temp_packed_vmem[r, pl.ds(write_col_vmem_start, 128)] = packed_row
 
         # There must be at least one valid row to write in the current row_tile.
         # When num valid writes is not a multiple of row_tile_size, we repeat
