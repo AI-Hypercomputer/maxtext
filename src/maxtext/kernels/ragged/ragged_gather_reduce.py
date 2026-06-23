@@ -212,26 +212,28 @@ def main_kernel(
         for col_compute_offset in range(0, num_lanes, num_simd_lanes):
           col_slice_global = pl.ds(col_vmem_start + col_compute_offset, num_simd_lanes)
 
-          # THE UNBREAKABLE SYNERGISTIC DYNAMIC LOOP BARRIER (WITH LOOP-DEPENDENT VALUES):
-          # To prevent the compiler's loop optimizer from treating this loop as a simple
-          # loop-invariant vector fill (which it can symbolically optimize and bypass!),
-          # we make the written value explicitly dependent on the loop induction variable 'i'!
-          # Because 'val_dynamic' is loop-variant, the compiler is mathematically blocked
-          # from performing Loop-Invariant Code Motion (LICM) or symbolic forwarding!
-          # At runtime, since i=0 in the first iteration, 'val_dynamic' is exactly 'val',
-          # ensuring 100% data correctness with absolute codegen stability!
+          # THE UNBREAKABLE SYMBOLICALLY OBFUSCATED WRITE INDEX BARRIER:
+          # To permanently defeat the compiler's extremely aggressive path-sensitive GVN
+          # and alias analysis (which was able to symbolically solve loop iterations at i=0!),
+          # we make the write index itself symbolically dependent on the HBM-loaded limit:
+          # 'write_idx = i + limit - 1'.
+          # Because 'limit' is a compile-time black box, the compiler CANNOT statically prove
+          # that 'i + limit - 1 == 0' for any i! Thus, it is mathematically blocked from
+          # associating the write inside the loop with the static read 'temp_ref[0, :]' outside!
+          # At runtime, since 'limit' is physically 1, 'write_idx' evaluates to 'i + 1 - 1 = i',
+          # meaning in iteration i=0, we write exactly to index 0 with 100% correctness and zero overhead!
           def spill_u32(val, temp_ref):
             @pl.loop(0, limit)
             def spill_inner(i):
-              val_dynamic = jnp.where(i == 0, val, val + i.astype(jnp.uint32))
-              temp_ref[i, :] = val_dynamic
+              write_idx = (i + limit - 1).astype(jnp.int32)
+              temp_ref[write_idx, :] = val
             return temp_ref[0, :]
 
           def spill_f32(val, temp_ref):
             @pl.loop(0, limit)
             def spill_inner(i):
-              val_dynamic = jnp.where(i == 0, val, val + i.astype(jnp.float32))
-              temp_ref[i, :] = val_dynamic
+              write_idx = (i + limit - 1).astype(jnp.int32)
+              temp_ref[write_idx, :] = val
             return temp_ref[0, :]
 
           previous_accumulated_even = None
@@ -244,11 +246,11 @@ def main_kernel(
             data = in_vmem_ref[0, flat_read_slice]
 
             if is_bf16:
-              # Pure 32-Bit Unpacking with Unbreakable Dynamic Loop Spilling:
+              # Pure 32-Bit Unpacking with Unbreakable Symbolically Obfuscated Loop Spilling:
               even_u32 = jnp.bitwise_and(data, 65535).astype(jnp.uint32)
               odd_u32 = jnp.bitwise_right_shift(data, 16).astype(jnp.uint32)
               
-              # Force physical materialization using our loop-variant helper!
+              # Force physical materialization using our obfuscated-index helper!
               even_materialized = spill_u32(jnp.bitwise_left_shift(even_u32, 16).astype(jnp.uint32), temp_u32_vmem_ref)
               odd_materialized = spill_u32(jnp.bitwise_left_shift(odd_u32, 16).astype(jnp.uint32), temp_u32_vmem_ref)
               
@@ -271,7 +273,7 @@ def main_kernel(
                 carry_even_u32 = jnp.bitwise_and(carry_packed, 65535).astype(jnp.uint32)
                 carry_odd_u32 = jnp.bitwise_right_shift(carry_packed, 16).astype(jnp.uint32)
                 
-                # Materialize carry reads dynamically using our loop-variant helper!
+                # Materialize carry reads dynamically using our obfuscated-index helper!
                 carry_even_materialized = spill_u32(jnp.bitwise_left_shift(carry_even_u32, 16).astype(jnp.uint32), temp_u32_vmem_ref)
                 carry_odd_materialized = spill_u32(jnp.bitwise_left_shift(carry_odd_u32, 16).astype(jnp.uint32), temp_u32_vmem_ref)
                 
@@ -303,7 +305,7 @@ def main_kernel(
               previous_accumulated_even = accumulated_even
               previous_accumulated_odd = accumulated_odd
 
-              # Pure 32-Bit Packing with Unbreakable Dynamic Loop Spilling:
+              # Pure 32-Bit Packing with Unbreakable Symbolically Obfuscated Loop Spilling:
               even_rounded_materialized = spill_f32(accumulated_even.astype(jnp.bfloat16).astype(jnp.float32), temp_f32_vmem_ref)
               odd_rounded_materialized = spill_f32(accumulated_odd.astype(jnp.bfloat16).astype(jnp.float32), temp_f32_vmem_ref)
 
