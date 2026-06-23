@@ -131,7 +131,6 @@ def main_kernel(
     # Scratch.
     num_rows_per_row_partition_vmem_ref: jax.Ref,
     out_vmem_ref: jax.Ref,
-    temp_packed_vmem: jax.Ref,
     prev_iter_last_row_vmem_ref: jax.Ref,
     src_indices_vmem_ref: jax.Ref,
     dst_indices_vmem_ref: jax.Ref,
