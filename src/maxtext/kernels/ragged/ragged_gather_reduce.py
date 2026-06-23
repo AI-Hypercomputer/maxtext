@@ -254,12 +254,11 @@ def main_kernel(
                 data,
             )
             previous_accumulated_data = accumulated_data
+            data_u32 = jax.lax.bitcast_convert_type(accumulated_data, jnp.uint32)
             if in_dtype == jnp.bfloat16:
-              data_bf16 = accumulated_data.astype(jnp.bfloat16)
-              data_u16 = jax.lax.bitcast_convert_type(data_bf16, jnp.uint16)
-              data_to_write = data_u16.astype(jnp.uint32)
+              data_to_write = jnp.bitwise_right_shift(data_u32, 16)
             else:
-              data_to_write = jax.lax.bitcast_convert_type(accumulated_data, jnp.uint32)
+              data_to_write = data_u32
             out_vmem_ref[row_src, col_slice] = data_to_write
 
             # We write the last row (within a row tile)'s accumulated data to
