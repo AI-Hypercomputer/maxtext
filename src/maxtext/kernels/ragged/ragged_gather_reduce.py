@@ -289,7 +289,7 @@ def main_kernel(
           for col_compute_offset in range(0, num_lanes, num_simd_lanes):
             col_slice = pl.ds(col_vmem_start + col_compute_offset, num_simd_lanes)
             
-            packed_out = jnp.zeros((9, 16), dtype=jnp.uint32)
+            packed_out = jnp.zeros((9, num_simd_lanes), dtype=jnp.uint32)
             for i in range(num_simd_lanes):
               vmem_lane = src_row_idx_in_vmem[i]
               dst_row = dst_indices[i]
