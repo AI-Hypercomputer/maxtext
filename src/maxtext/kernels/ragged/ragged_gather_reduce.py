@@ -19,16 +19,17 @@ import jax
 from jax.experimental import pallas as pl
 from jax.experimental import shard_map
 from jax.experimental.pallas import tpu as pltpu
+from jax.experimental.pallas import tpu_sc as plsc
 import jax.numpy as np
 import jax.numpy as jnp
-from jax.experimental.pallas import tpu_sc as plsc
+from maxtext import max_logging
 
 
 def _ragged_gather_reduce_fallback(
     x: jnp.ndarray,
-    src_indices: jnp.ndarray,
-    dst_indices: jnp.ndarray,
+    indices: jnp.ndarray,
     topk_weights: jnp.ndarray,
+    valid_rows_mask: jnp.ndarray,
     reduce_group_size: int,
     padded_input_size: int,
 ) -> jnp.ndarray:
@@ -38,9 +39,13 @@ def _ragged_gather_reduce_fallback(
   out = jnp.zeros((num_rows, hidden_size), dtype=x.dtype)
 
   # Collect the gathered tokens.
-  gathered_tokens = x[src_indices]
-  # Scale by topk weights.
-  scaled_tokens = gathered_tokens * topk_weights[:, jnp.newaxis]
+  gathered_tokens = x[indices]
+  # Scale by topk weights and mask out invalid tokens!
+  scaled_tokens = gathered_tokens * topk_weights[:, jnp.newaxis] * valid_rows_mask[:, jnp.newaxis]
+
+  # Calculate dst_indices (original token i contributes to row i // reduce_group_size)
+  token_indices = jnp.arange(indices.shape[0])
+  dst_indices = token_indices // reduce_group_size
 
   # Segment sum.
   out = out.at[dst_indices].add(scaled_tokens)
@@ -62,7 +67,8 @@ def main_kernel(
     in_vmem_ref: jax.Ref,
     out_vmem_ref: jax.Ref,
     prev_iter_last_row_vmem_ref: jax.Ref,
-    src_indices_vmem_ref: jax.Ref,
+    src_indices_div_vmem_ref: jax.Ref,
+    src_indices_mod_vmem_ref: jax.Ref,
     dst_indices_vmem_ref: jax.Ref,
     topk_weights_vmem_ref: jax.Ref,
     sem_ref: jax.Ref,
@@ -85,8 +91,6 @@ def main_kernel(
   col_partition_id = core_id % num_column_partitions
 
   # Dimension sizes.
-  # For bf16, in_hbm_ref is physically bitcasted to uint32 outside the kernel,
-  # so it has shape (R, C // 2). col_size is the column size of the 32-bit reference!
   shape = in_hbm_ref.shape
   col_size = shape[-1] // num_column_partitions
   
@@ -102,324 +106,6 @@ def main_kernel(
   recv_sem = sem_ref[0]
   send_sem = sem_ref[1]
 
-  def inner_kernel():
-    num_rows_current_row_partition = jnp.array(0, jnp.int32)
-    num_rows_per_row_partition = num_rows_per_row_partition_vmem_ref[...]
-    for i in range(num_row_partitions):
-      num_rows_current_row_partition = jnp.where(
-          row_partition_id == i,
-          num_rows_per_row_partition[i],
-          num_rows_current_row_partition,
-      )
-
-    row_tile_size = num_simd_lanes
-    num_row_tiles = pl.cdiv(num_rows_current_row_partition, row_tile_size)
-    row_start = row_partition_id * row_partition_size
-    col_start = col_partition_id * col_size
-
-    @pl.loop(0, num_row_tiles)
-    def row_loop(row_block_id):
-      row_tile_start = row_start + row_block_id * num_simd_lanes
-      # The destination row from the last source row in the previous row tile,
-      # retrieve it before DMA the new data into `dst_indices_vmem_ref`.
-      prev_dst_row_hbm = jnp.where(row_block_id == 0, -1, dst_indices_vmem_ref[...][num_simd_lanes - 1])
-      dma_list = []
-      dma_list.append(
-          pltpu.make_async_copy(
-              src_indices_div_hbm_ref.at[pl.ds(row_tile_start, num_simd_lanes)],
-              src_indices_vmem_ref,
-              recv_sem,
-          )
-      )
-      dma_list.append(
-          pltpu.make_async_copy(
-              dst_indices_hbm_ref.at[pl.ds(row_tile_start, num_simd_lanes)],
-              dst_indices_vmem_ref,
-              recv_sem,
-          )
-      )
-      dma_list.append(
-          pltpu.make_async_copy(
-              topk_weights_hbm_ref.at[pl.ds(row_tile_start, num_simd_lanes)],
-              topk_weights_vmem_ref,
-              recv_sem,
-          )
-      )
-      jax.tree.map(lambda x: x.start(), dma_list)
-      jax.tree.map(lambda x: x.wait(), dma_list)
-
-      # HBM to VMEM transfer.
-      src_indices_div = src_indices_vmem_ref[...]
-      dst_indices = dst_indices_vmem_ref[...]
-      topk_weights = topk_weights_vmem_ref[...]
-
-      in_32b_hbm_ref = in_hbm_ref # Already bitcasted to uint32 outside the kernel!
-      out_32b_hbm_ref = out_hbm_ref.bitcast(jnp.uint32)
-
-      # VMEM to HBM transfer.
-      # We permanently set loop_step = 128 (num_lanes) for both paths!
-      # This forces the input VMEM buffer to have shape (8, 128), fitting inside a single tile
-      # and completely bypassing all multi-tile compiler slicing bugs!
-      loop_step = num_lanes
-
-      print(f"=== DEBUG TRACING ===")
-      print(f"col_size: {col_size}")
-      print(f"loop_step: {loop_step}")
-      print(f"num_simd_lanes: {num_simd_lanes}")
-      print(f"is_bf16: {is_bf16}")
-      print(f"flat buffer size: {num_simd_lanes * col_size}")
-
-      for col_vmem_start in range(0, col_size, loop_step):
-        col_hbm_start = col_start + col_vmem_start
-        for row_vmem in range(num_simd_lanes):
-          row_hbm = src_indices_div[row_vmem] # No division! Pre-divided in wrapper!
-          # Stream 128 columns of input directly into the local (8, 128) VMEM buffer at offset 0!
-          print(f"  col_vmem_start: {col_vmem_start}, row_vmem: {row_vmem} -> local_offset: 0")
-          pltpu.make_async_copy(
-              in_32b_hbm_ref.at[row_hbm, pl.ds(col_hbm_start, 128)],
-              in_vmem_ref.at[row_vmem, pl.ds(0, 128)], # Always local offset 0!
-              recv_sem,
-          ).start()
-
-      for col_vmem_start in range(0, col_size, loop_step):
-        col_hbm_start = col_start + col_vmem_start
-
-        # We accumulate the packed row data in Python lists of JAX tracers on the fly.
-        # This completely avoids any post-compute VMEM reads, eliminating layout conflicts!
-        packed_rows_registers = [[] for _ in range(num_simd_lanes)]
-
-        for col_compute_offset in range(0, loop_step, num_simd_lanes):
-          col_slice = pl.ds(col_vmem_start + col_compute_offset, num_simd_lanes)
-
-          previous_accumulated_data = None
-          for row_src in range(num_simd_lanes):
-            # Load and cast data from the local streamed VMEM buffer.
-            # Because the buffer fits in a single tile, squeezing is 100% supported!
-            if is_bf16:
-              is_aligned = (col_compute_offset % 16) == 0
-              read_offset = col_compute_offset if is_aligned else col_compute_offset - 8
-              data_16 = in_vmem_ref[row_src, pl.ds(read_offset, 16)] # 2D read yielding (16,) from local buffer!
-              data = data_16[:8] if is_aligned else data_16[8:] # Register slice to (8,)
-            else:
-              data = in_vmem_ref[row_src, pl.ds(col_compute_offset, num_simd_lanes)] # 2D read yielding (8,) from local buffer!
-
-            # Extract data and cast to float32.
-            if is_bf16:
-              # We pre-calculate src_indices_mod = src_indices % 2 in the wrapper to completely
-              # avoid any modulo arithmetic on tracers inside the kernel!
-              # Wait, we need the modulo value for each row_src in the current tile!
-              # Since src_indices_mod is loaded to VMEM, we can read it:
-              # Wait! In this row_loop iteration, we didn't load src_indices_mod to VMEM!
-              # Ah! We must load src_indices_mod to VMEM in row_loop!
-              # Yes, we need to add src_indices_mod to the DMA list in row_loop!
-              # Let's check: in row_loop DMA, we only loaded src_indices_div!
-              # Yes, we must load src_indices_mod too!
-              # I will add it back to the DMA list!
-              pass
-            
-            # Wait, let's look at the extraction logic!
-            # Since we pre-calculate src_indices_mod = src_indices % 2 in the wrapper.
-            # We can load it into a scratch VMEM buffer in row_loop.
-            # Let's allocate src_indices_mod_vmem_ref in _SCRATCH_KW!
-            # Yes! I will do that!
-            # And then we can read it:
-            # row_src_pack = src_indices_mod_vmem_ref[row_src]
-            # And perform the bitwise extraction:
-            # data = jnp.bitwise_left_shift(data, jnp.where(row_src_pack == 0, 16, 0))
-            # data = jnp.bitwise_and(data, -65536)
-            # data = jax.lax.bitcast_convert_type(data, jnp.float32)
-            # This is 100% correct and works!
-            
-            # Let's write the extraction logic!
-            if is_bf16:
-              # Load the modulo index from VMEM (no modulo math on tracers!)
-              # Wait, we need to declare src_indices_mod_vmem_ref in the signature and scratch!
-              # Yes, they are already in the signature of main_kernel!
-              # We just need to load it in row_loop!
-              # Let's check: in row_loop, did we load it?
-              # Ah, in my new draft of main_kernel signature:
-              # I wrote: src_indices_div_hbm_ref, src_indices_mod_hbm_ref...
-              # And in row_loop DMA: I only wrote src_indices_div!
-              # I must add src_indices_mod to the DMA list!
-              # Yes! I will do that!
-              pass
-            
-            # Let's assume src_indices_mod is loaded and available as `src_indices_mod_vmem_ref[...]`!
-            # Wait! We need to read it into a register in each iteration:
-            # row_src_pack = src_indices_mod_vmem_ref[row_src]
-            # Since row_src is a static loop index, this is a static read!
-            # Let's write the code:
-            if is_bf16:
-              row_src_pack = src_indices_mod_vmem_ref[row_src]
-              data = jnp.bitwise_left_shift(data, jnp.where(row_src_pack == 0, 16, 0))
-              data = jnp.bitwise_and(data, -65536)
-              data = jax.lax.bitcast_convert_type(data, jnp.float32)
-            else:
-              data = jax.lax.bitcast_convert_type(data, jnp.float32)
-
-            # Accumulate at float32 precision
-            data = data * topk_weights[row_src]
-
-            dst_row_hbm = dst_indices[row_src]
-            if row_src == 0:
-              # We use the outer prev_dst_row_hbm directly since the loop is unrolled!
-              prev_row_hbm = prev_dst_row_hbm
-              previous_accumulated_data = jax.lax.bitcast_convert_type(
-                  prev_iter_last_row_vmem_ref[0, col_slice], jnp.float32
-              )
-            else:
-              prev_row_hbm = dst_indices[row_src - 1]
-              assert previous_accumulated_data is not None
-
-            # We guarantee source rows that contribute to the same destination
-            # row are adjacent to each other in the order of being processed.
-            # If the current src row contributes to the same destination row as
-            # the previous src row, we accumulate the data with the previously
-            # accumulated data.
-            accumulated_data = jnp.where(
-                dst_row_hbm == prev_row_hbm,
-                previous_accumulated_data + data,
-                data,
-            )
-            previous_accumulated_data = accumulated_data
-            data_to_write = jax.lax.bitcast_convert_type(accumulated_data, jnp.uint32)
-            if not is_bf16:
-              flat_slice = pl.ds(row_src * col_size + col_vmem_start + col_compute_offset, num_simd_lanes)
-              out_vmem_ref[0, flat_slice] = data_to_write
-
-            # On-the-fly packing: Pack the 8 float32 accumulated elements into 4 uint32 elements
-            # directly in register space!
-            if is_bf16:
-              data_bf16 = accumulated_data.astype(jnp.bfloat16)
-              data_u16 = jax.lax.bitcast_convert_type(data_bf16, jnp.uint16)
-              data_u32 = data_u16.astype(jnp.uint32)
-              packed_val = [
-                  jnp.bitwise_or(jnp.bitwise_left_shift(data_u32[1], 16), data_u32[0]),
-                  jnp.bitwise_or(jnp.bitwise_left_shift(data_u32[3], 16), data_u32[2]),
-                  jnp.bitwise_or(jnp.bitwise_left_shift(data_u32[5], 16), data_u32[4]),
-                  jnp.bitwise_or(jnp.bitwise_left_shift(data_u32[7], 16), data_u32[6]),
-              ]
-              packed_rows_registers[row_src].extend(packed_val)
-
-            # We write the last row (within a row tile)'s accumulated data to
-            # the prev_iter_last_row_vmem_ref. If the first src row in the next
-            # row_tile contributes to the same destination row as the last src
-            # row in the current row_tile, the latest accumulated data in
-            # prev_iter_last_row_vmem_ref will get used.
-            if row_src == num_simd_lanes - 1:
-              prev_iter_last_row_vmem_ref[0, col_slice] = data_to_write
-
-        # Start dma write.
-        # When there are multiple sources rows in the current row_tile that
-        # contribute to the same destination row, the accumulated data is
-        # stored in the last row's idx in `out_vmem_ref`.
-        # Logically, we could skip all the source rows that are not the last
-        # for each destination row, but we want to avoid using `pl.when` for
-        # efficiency. We just repeat the write of latest accumulated data
-        # multiple times.
-        src_row_idx_in_vmem = []
-        row_valid_vec = []
-        for row_vmem_idx in reversed(range(num_simd_lanes)):
-          row_valid = row_block_id * num_simd_lanes + row_vmem_idx < num_rows_current_row_partition
-          row_valid_vec.append(row_valid)
-          if row_vmem_idx == num_simd_lanes - 1:
-            src_row_idx_in_vmem.append(row_vmem_idx)
-          else:
-            next_row_valid = row_valid_vec[-2]
-            src_row_idx_in_vmem.append(
-                jnp.where(
-                    jnp.logical_and(
-                        next_row_valid,
-                        (dst_indices[row_vmem_idx] == dst_indices[row_vmem_idx + 1]),
-                    ),
-                    src_row_idx_in_vmem[-1],
-                    row_vmem_idx,
-                )
-            )
-        src_row_idx_in_vmem.reverse()
-        row_valid_vec.reverse()
-
-        # Write the accumulated packed register rows back to flat out_vmem_ref in chunks of 8.
-        if is_bf16:
-          for r in range(num_simd_lanes):
-            packed_row = jnp.array(packed_rows_registers[r]) # shape (64,)
-            write_col_vmem_start = pl.multiple_of(col_vmem_start // 2, 64) # Packed offset!
-            for c in range(0, 64, 8):
-              out_vmem_ref[0, pl.ds(r * (col_size // 2) + write_col_vmem_start + c, 8)] = packed_row[c : c + 8]
-            for c in range(64, 128, 8):
-              out_vmem_ref[0, pl.ds(r * (col_size // 2) + write_col_vmem_start + c, 8)] = jnp.zeros((8,), jnp.uint32)
-
-        # There must be at least one valid row to write in the current row_tile.
-        # When num valid writes is not a multiple of row_tile_size, we repeat
-        # the last valid write to avoid valid data in hbm being overwritten
-        # (and to avoid using `pl.when`).
-        last_valid_src_row_vmem = -1
-        last_valid_dst_row_hbm = -1
-        for i, (src_row_idx_in_vmem_val, row_valid) in enumerate(zip(src_row_idx_in_vmem, row_valid_vec, strict=True)):
-          src_row_vmem = jnp.where(row_valid, src_row_idx_in_vmem_val, last_valid_src_row_vmem)
-          dst_row_hbm = jnp.where(row_valid, dst_indices[i], last_valid_dst_row_hbm)
-          
-          if is_bf16:
-            # Write 64 columns (256 bytes) of packed carrier data to HBM!
-            write_col_hbm_start = pl.multiple_of(col_partition_id * (col_size // 2) + (col_vmem_start // 2), 64)
-            write_col_vmem_start = pl.multiple_of(col_vmem_start // 2, 64)
-            flat_col_vmem_start_1 = pl.multiple_of(src_row_vmem * (col_size // 2) + write_col_vmem_start, 64)
-            
-            pltpu.make_async_copy(
-                out_vmem_ref.at[0, pl.ds(flat_col_vmem_start_1, 64)], # Write 64 columns!
-                out_32b_hbm_ref.at[dst_row_hbm, pl.ds(write_col_hbm_start, 64)],
-                send_sem,
-            ).start()
-          else:
-            # f32 path: write 128 columns from flat VMEM
-            flat_col_vmem_start = pl.multiple_of(src_row_vmem * col_size + col_vmem_start, 128)
-            pltpu.make_async_copy(
-                out_vmem_ref.at[0, pl.ds(flat_col_vmem_start, 128)],
-                out_32b_hbm_ref.at[dst_row_hbm, pl.ds(col_hbm_start, 128)],
-                send_sem,
-            ).start()
-            
-          last_valid_src_row_vmem = src_row_vmem
-          last_valid_dst_row_hbm = dst_row_hbm
-
-      # Wait for dma write to finish.
-      for _ in range(0, col_size, num_lanes):
-        for _ in range(num_simd_lanes):
-          pltpu.make_async_copy(
-              out_vmem_ref.at[0, :num_lanes],
-              out_32b_hbm_ref.at[0, :num_lanes],
-              send_sem,
-          ).wait()
-
-    # Wait, in row_loop, we must add src_indices_mod to the DMA list!
-    # Let's rewrite row_loop to include src_indices_mod DMA load!
-    # I will do this by modifying the row_loop definition inside inner_kernel:
-    # (Since this is a full rewrite, I can just write it correctly here!)
-    
-    # Let's check the row_loop code above!
-    # Yes! In the row_loop code I wrote:
-    #   dma_list.append(pltpu.make_async_copy(src_indices_div_hbm_ref..., src_indices_vmem_ref...))
-    # Wait! I only loaded src_indices_div!
-    # I must load BOTH src_indices_div and src_indices_mod!
-    # But wait!
-    # `src_indices_vmem_ref` is the scratch buffer for `src_indices_div`.
-    # We need a separate scratch buffer for `src_indices_mod`!
-    # In the main_kernel signature:
-    # We have `src_indices_div_vmem_ref` and `src_indices_mod_vmem_ref`!
-    # So we must use them!
-    # Let's correct the row_loop DMA loads:
-    
-    # Inside row_loop:
-    #   dma_list.append(pltpu.make_async_copy(src_indices_div_hbm_ref.at[pl.ds(row_tile_start, num_simd_lanes)], src_indices_div_vmem_ref, recv_sem))
-    #   dma_list.append(pltpu.make_async_copy(src_indices_mod_hbm_ref.at[pl.ds(row_tile_start, num_simd_lanes)], src_indices_mod_vmem_ref, recv_sem))
-    # This is 100% correct! I will write it this way!
-    
-    # And we must update the HBM-to-VMEM transfer reads:
-    #   src_indices_div = src_indices_div_vmem_ref[...]
-    #   src_indices_mod = src_indices_mod_vmem_ref[...]
-    # This is also 100% correct!
-
-  # Let's write the corrected inner_kernel with the correct DMA loads!
   def inner_kernel_corrected():
     num_rows_current_row_partition = jnp.array(0, jnp.int32)
     num_rows_per_row_partition = num_rows_per_row_partition_vmem_ref[...]
@@ -653,11 +339,45 @@ _OUT_KW = "out"
 _SCRATCH_KW = "scratch"
 
 
+def _preprocess(
+    indices: jnp.ndarray,
+    topk_weights: jnp.ndarray,
+    valid_rows_mask: jnp.ndarray,
+    reduce_group_size: int,
+    num_row_partitions: int,
+):
+  """Preprocess indices to group valid tokens at the beginning of each partition."""
+  # Reshape valid_rows_mask to (num_row_partitions, partition_size)
+  valid_rows_mask_2d = valid_rows_mask.reshape(num_row_partitions, -1)
+  partition_size = valid_rows_mask_2d.shape[-1]
+  
+  # Stable sort so that valid tokens (True) come first, invalid (False) come last.
+  # argsort(~mask) places True (invalid) last, so False (valid) comes first!
+  sorted_by_validity = jnp.argsort(~valid_rows_mask_2d, descending=False, stable=True, axis=-1)
+  
+  # Convert partition-local sorted indices to global indices
+  partition_offsets = jnp.arange(num_row_partitions)[:, jnp.newaxis] * partition_size
+  sorted_by_validity += partition_offsets
+  sorted_by_validity_flat = sorted_by_validity.reshape(-1)
+  
+  # Gather sorted indices and weights
+  src_indices = indices[sorted_by_validity_flat]
+  topk_weights_sorted = topk_weights[sorted_by_validity_flat]
+  
+  # Calculate dst_indices based on the original token IDs
+  dst_indices = sorted_by_validity_flat // reduce_group_size
+  
+  # Calculate count of valid tokens per partition
+  num_src_rows_per_row_partition = jnp.sum(valid_rows_mask_2d, axis=-1)
+  
+  return src_indices, dst_indices, topk_weights_sorted, num_src_rows_per_row_partition
+
+
 def ragged_gather_reduce(
     x: jnp.ndarray,
-    src_indices: jnp.ndarray,
-    dst_indices: jnp.ndarray,
+    indices: jnp.ndarray,
     topk_weights: jnp.ndarray,
+    valid_rows_mask: jnp.ndarray,
     reduce_group_size: int,
     padded_input_size: int,
     vector_mesh: jax.sharding.Mesh,
@@ -667,7 +387,25 @@ def ragged_gather_reduce(
   """Wrapper for the ragged gather reduce SparseCore kernel."""
   input_size, hidden_size = x.shape
   is_bf16 = x.dtype == jnp.bfloat16
+
+  # If fallback is enforced, run the JAX fallback directly.
+  # (Since we don't have config here, we assume standard flow. The caller handles fallback overrides).
   
+  num_simd_lanes = 8
+  num_rows_partitions = vector_mesh.shape["core"] * 2 # 2 subcores per core
+  num_column_partitions = vector_mesh.shape["core"]
+
+  # Preprocess indices using the valid_rows_mask.
+  # This sorts the tokens so all valid ones come first, and calculates the exact
+  # valid token count per partition, allowing the kernel to skip invalid tokens!
+  src_indices, dst_indices, topk_weights_sorted, num_src_rows_per_row_partition = _preprocess(
+      indices,
+      topk_weights,
+      valid_rows_mask,
+      reduce_group_size,
+      num_rows_partitions,
+  )
+
   if is_bf16:
     # Outer Input Bitcast: convert bfloat16 to uint32 in JAX before calling pl.kernel!
     # This transforms the input into a pure 32-bit HBM tensor, completely bypassing
@@ -678,13 +416,8 @@ def ragged_gather_reduce(
     x_input = x
     dtype_bytes = 4
 
-  num_simd_lanes = 8
   dtype = x_input.dtype
 
-  num_rows_partitions = vector_mesh.shape["core"] * 2 # 2 subcores per core
-  num_column_partitions = vector_mesh.shape["core"]
-
-  # Strides.
   # col_size is the column size of the 32-bit reference!
   # For bf16, hidden_size is 4096, but x_input has 2048 columns!
   # So col_size = 2048 / num_column_partitions = 256.
@@ -706,25 +439,19 @@ def ragged_gather_reduce(
   )
   out_dtype = jnp.float32
 
-  sc_info = plsc.get_subcore_info()
-  vector_mesh = plsc.VectorSubcoreMesh(
-      num_cores=sc_info.num_cores,
-      num_subcores=sc_info.num_subcores,
+  # Wrap the sharding mesh
+  vector_mesh_wrapped = plsc.VectorSubcoreMesh(
+      num_cores=vector_mesh.shape["core"],
+      num_subcores=2,
       core_axis_name="core",
       subcore_axis_name="subcore",
-  )
-
-  # Dynamic row partition sizes.
-  num_src_rows = src_indices.shape[0]
-  num_src_rows_per_row_partition = jnp.ones((num_rows_partitions,), jnp.int32) * (
-      num_src_rows // num_rows_partitions
   )
 
   out = pl.kernel(  # pytype: disable=wrong-keyword-args
       functools.partial(
           main_kernel,
-          core_axis_name=vector_mesh.core_axis_name,
-          subcore_axis_name=vector_mesh.subcore_axis_name,
+          core_axis_name=vector_mesh_wrapped.core_axis_name,
+          subcore_axis_name=vector_mesh_wrapped.subcore_axis_name,
           num_row_partitions=num_rows_partitions,
           num_column_partitions=num_column_partitions,
           is_bf16=is_bf16,
@@ -740,7 +467,7 @@ def ragged_gather_reduce(
           flops_override=flops_override,
           bytes_accessed_override=bytes_accessed_override,
       ),
-      mesh=vector_mesh,
+      mesh=vector_mesh_wrapped,
       name="sc_ragged_gather_reduce",
       **{
           _OUT_KW: jax.ShapeDtypeStruct(
@@ -765,7 +492,7 @@ def ragged_gather_reduce(
       src_indices_div,
       src_indices_mod,
       dst_indices,
-      topk_weights,
+      topk_weights_sorted,
   )
 
   if is_bf16:
