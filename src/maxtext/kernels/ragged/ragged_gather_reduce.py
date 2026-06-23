@@ -85,6 +85,7 @@ def main_kernel(
     subcore_axis_name: str,
     num_row_partitions: int,
     num_column_partitions: int,
+    is_bf16: bool,
 ):
   """Main Pallas kernel for ragged gather and reduction on SparseCore."""
   tpu_info = pltpu.get_tpu_info()
@@ -168,12 +169,16 @@ def main_kernel(
       dst_indices = dst_indices_vmem_ref[...]
       topk_weights = topk_weights_vmem_ref[...]
 
-      in_dtype = in_hbm_ref.dtype
+      in_dtype = jnp.bfloat16 if is_bf16 else jnp.float32
       input_dtype_bits = jax.dtypes.itemsize_bits(in_dtype)
       input_packing = 32 // input_dtype_bits
 
-      in_32b_hbm_ref = in_hbm_ref.bitcast(jnp.uint32)
-      out_32b_hbm_ref = out_hbm_ref.bitcast(jnp.uint32)
+      if is_bf16:
+        in_32b_hbm_ref = in_hbm_ref
+        out_32b_hbm_ref = out_hbm_ref
+      else:
+        in_32b_hbm_ref = in_hbm_ref.bitcast(jnp.uint32)
+        out_32b_hbm_ref = out_hbm_ref.bitcast(jnp.uint32)
 
       for col_vmem_start in range(0, col_size, num_lanes):
         col_hbm_start = col_start + col_vmem_start
@@ -490,10 +495,12 @@ def ragged_gather_reduce(
   aligned_hidden_size = _align_to(hidden_size, 128 * num_column_partitions)
   col_size = aligned_hidden_size // num_column_partitions
   row_tile_size = num_simd_lanes
-  padded_input_size = _align_to(
-      input_size,
-      math.lcm(num_rows_partitions * row_tile_size, reduce_group_size),
-  )
+  
+  is_bf16 = x.dtype == jnp.bfloat16
+  alignment_lcm = math.lcm(num_rows_partitions * row_tile_size, reduce_group_size)
+  if is_bf16:
+    alignment_lcm = math.lcm(num_rows_partitions * row_tile_size, reduce_group_size * 2)
+  padded_input_size = _align_to(input_size, alignment_lcm)
   pad_input_size = padded_input_size - input_size
 
   x = jnp.pad(
@@ -526,6 +533,16 @@ def ragged_gather_reduce(
       core_axis_name="core",
       subcore_axis_name="subcore",
   )
+  
+  if is_bf16:
+    x_input = jax.lax.bitcast_convert_type(x.reshape(-1), jnp.uint32).reshape(padded_input_size // 2, aligned_hidden_size)
+    out_shape = (padded_input_size // reduce_group_size // 2, aligned_hidden_size)
+    out_dtype = jnp.uint32
+  else:
+    x_input = x
+    out_shape = (padded_input_size // reduce_group_size, aligned_hidden_size)
+    out_dtype = x.dtype
+
   # Each output row from `main_kernel` will be of type float32, and then casted
   # to the input dtype when doing the filter operation.
   out = pl.kernel(  # pytype: disable=wrong-keyword-args
@@ -535,6 +552,7 @@ def ragged_gather_reduce(
           subcore_axis_name=vector_mesh.subcore_axis_name,
           num_row_partitions=num_rows_partitions,
           num_column_partitions=num_column_partitions,
+          is_bf16=is_bf16,
       ),
       compiler_params=pltpu.CompilerParams(  # pytype: disable=wrong-keyword-args
           **_COMPILER_PARAMS,
@@ -542,10 +560,7 @@ def ragged_gather_reduce(
       mesh=vector_mesh,
       name="sc_ragged_gather_reduce",
       **{
-          _OUT_KW: jax.ShapeDtypeStruct(
-              (padded_input_size // reduce_group_size, aligned_hidden_size),
-              x.dtype,
-          ),
+          _OUT_KW: jax.ShapeDtypeStruct(out_shape, out_dtype),
           _SCRATCH_KW: dict(  # pylint: disable=use-dict-literal
               num_rows_per_row_partition_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
               out_vmem_ref=pltpu.VMEM((num_simd_lanes, col_size), jnp.uint32),
@@ -556,7 +571,10 @@ def ragged_gather_reduce(
               sem_ref=pltpu.SemaphoreType.DMA((2,)),
           ),
       },
-  )(num_src_rows_per_row_partition, x, src_indices, dst_indices, topk_weights)
+  )(num_src_rows_per_row_partition, x_input, src_indices, dst_indices, topk_weights)
+
+  if is_bf16:
+    out = jax.lax.bitcast_convert_type(out.reshape(-1), jnp.bfloat16).reshape(padded_input_size // reduce_group_size, aligned_hidden_size)
 
   # If there is no valid source row in a reduce group, set that group's output
   # to zero.
