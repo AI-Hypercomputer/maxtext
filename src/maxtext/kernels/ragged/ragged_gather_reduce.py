@@ -372,6 +372,11 @@ def _preprocess(
   return src_indices, dst_indices, topk_weights_sorted, num_src_rows_per_row_partition
 
 
+@functools.partial(
+    jax.jit,
+    static_argnums=(4, 5), # reduce_group_size, padded_input_size
+    static_argnames=("flops_override", "bytes_accessed_override", "enforce_fallback"),
+)
 def ragged_gather_reduce(
     x: jnp.ndarray,
     indices: jnp.ndarray,
@@ -382,13 +387,17 @@ def ragged_gather_reduce(
     vector_mesh: jax.sharding.Mesh,
     flops_override: int | None = None,
     bytes_accessed_override: int | None = None,
+    enforce_fallback: bool = False,
 ) -> jnp.ndarray:
   """Wrapper for the ragged gather reduce SparseCore kernel."""
+  sc_info = plsc.get_subcore_info()
+  if sc_info is None or enforce_fallback:
+    return _ragged_gather_reduce_fallback(
+        x, indices, topk_weights, valid_rows_mask, reduce_group_size, padded_input_size
+    )
+
   input_size, hidden_size = x.shape
   is_bf16 = x.dtype == jnp.bfloat16
-
-  # If fallback is enforced, run the JAX fallback directly.
-  # (Since we don't have config here, we assume standard flow. The caller handles fallback overrides).
   
   num_simd_lanes = 8
   num_rows_partitions = vector_mesh.shape["core"] * 2 # 2 subcores per core
