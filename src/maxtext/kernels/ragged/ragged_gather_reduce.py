@@ -289,8 +289,10 @@ def main_kernel(
           for row_src in range(num_simd_lanes):
             row_src_pack = src_indices[row_src] % input_packing
 
+            # Construct flat slice directly to avoid Slice + int TypeError!
+            flat_slice = pl.ds(row_src * col_size + col_vmem_start + col_compute_offset, num_simd_lanes)
             # Load data from flat vmem using 1D indexing.
-            data = out_vmem_ref[0, row_src * col_size + col_slice]
+            data = out_vmem_ref[0, flat_slice]
 
             # Extract data and cast to float32.
             if in_dtype == jnp.bfloat16:
@@ -331,7 +333,8 @@ def main_kernel(
             previous_accumulated_data = accumulated_data
             data_to_write = jax.lax.bitcast_convert_type(accumulated_data, jnp.uint32)
             if not is_bf16:
-              out_vmem_ref[0, row_src * col_size + col_slice] = data_to_write
+              flat_slice = pl.ds(row_src * col_size + col_vmem_start + col_compute_offset, num_simd_lanes)
+              out_vmem_ref[0, flat_slice] = data_to_write
 
             # On-the-fly packing: Pack the 8 float32 accumulated elements into 4 uint32 elements
             # directly in register space!
