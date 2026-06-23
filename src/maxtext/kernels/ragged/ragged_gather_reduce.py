@@ -618,13 +618,13 @@ def ragged_gather_reduce(
   )
 
   is_bf16 = x.dtype == jnp.bfloat16
-  # We ALWAYS declare the Pallas kernel output as float32 of shape (R, C)
-  # to force the compiler to use the exact same tiled layout as the baseline (row tile size = 1).
-  # This completely bypasses the row alignment check. For bf16, we pack the data in the kernel
-  # and write it to the first C // 2 columns, and unpack it outside the kernel.
-  # We use float32 as the carrier type to match the baseline's type signature,
-  # which completely avoids compiler layout conflicts on the output buffer!
-  out_shape = (padded_input_size // reduce_group_size, aligned_hidden_size)
+  # We declare the Pallas kernel output shape to be (R, C // 2) for bf16, and (R, C) for f32.
+  # This matches the packed data footprint perfectly and completely eliminates the need
+  # for any HBM slicing outside pl.kernel, bypassing the boundary layout fusion bug!
+  out_shape = (
+      padded_input_size // reduce_group_size,
+      aligned_hidden_size // 2 if is_bf16 else aligned_hidden_size,
+  )
   out_dtype = jnp.float32
 
   vector_mesh = plsc.VectorSubcoreMesh(
@@ -673,10 +673,9 @@ def ragged_gather_reduce(
   )(num_src_rows_per_row_partition, x, src_indices, dst_indices, topk_weights)
 
   if is_bf16:
-    # out has shape (R, C) of f32. The packed bf16 data is in the first C // 2 columns.
-    out_packed = out[:, : aligned_hidden_size // 2]
+    # out already has shape (R, C // 2) of f32!
     # Bitcast to bf16 -> shape (R, C // 2, 2)
-    out_paired = jax.lax.bitcast_convert_type(out_packed, jnp.bfloat16)
+    out_paired = jax.lax.bitcast_convert_type(out, jnp.bfloat16)
     # Reshape to (R, C) of bf16
     out = out_paired.reshape(padded_input_size // reduce_group_size, aligned_hidden_size)
   else:
