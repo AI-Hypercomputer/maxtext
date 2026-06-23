@@ -468,7 +468,7 @@ def create_rl_components(
           rollout_vllm_tpu_backend_type="jax",
           rollout_vllm_hf_config_path=trainer_config.vllm_hf_config_path,
           rollout_vllm_additional_config=rollout_additional_config,
-          rollout_vllm_init_with_random_weights=True,
+          rollout_vllm_init_with_random_weights=trainer_config.rollout_vllm_init_with_random_weights,
           rollout_vllm_enable_dp_attention=trainer_config.enable_dp_attention,
           rollout_vllm_max_num_batched_tokens=trainer_config.max_num_batched_tokens,
           rollout_vllm_max_num_seqs=trainer_config.max_num_seqs,
@@ -481,6 +481,7 @@ def create_rl_components(
               "enable_prefix_caching": True,  # Enable prefix caching to speed up generation for long prompts
               # Ensures vLLM model initializes with correct dtype (not float32 default)
               "dtype": trainer_config.weight_dtype,
+              "enable_chunked_prefill": False,
           },
           rollout_vllm_sampling_kwargs={
               "stop": trainer_config.stop_strings,
@@ -603,6 +604,59 @@ def rl_train(argv: Sequence[str], kwargs: dict):
     trainer_devices: JAX devices for the trainer.
     sampler_devices: JAX devices for the sampler.
   """
+  try:
+    # pylint: disable=import-outside-toplevel
+    import tpu_inference.models.common.pathways_dummy_loader as pdl
+    import tpu_inference.models.jax.utils.weight_utils as wu
+
+    jax.clear_caches = lambda: None
+    max_logging.log("Permanently patched jax.clear_caches to lambda: None to prevent cache thrashing.")
+
+    def optimized_create_dummy_weights_on_tpu(
+        sharding,
+        weight_shape,
+        weight_dtype,
+    ):
+      key = jax.random.PRNGKey(1234)
+      raw_array = jax.random.uniform(
+          key,
+          shape=weight_shape,
+          dtype=weight_dtype,
+          minval=-1e-3,
+          maxval=1e-3,
+      )
+      return jax.device_put(raw_array, sharding)
+
+    def optimized_assign_and_shard_param(
+        jax_param,
+        jax_weight,
+        param_name="Unknown",
+        mesh=None,
+    ):
+      spec = jax_param.get_metadata().get("sharding", ())
+      if isinstance(spec, jax.sharding.NamedSharding):
+        spec = spec.spec
+      elif isinstance(spec, jax.sharding.SingleDeviceSharding):
+        spec = ()
+      param_mesh = jax_param.get_metadata().get("mesh") or mesh
+      try:
+        jax_param.value = wu.shard_put(jax_weight, spec, mesh=param_mesh)
+        jax_param.set_metadata("_is_loaded", True)
+        del jax_weight
+      except Exception as e:
+        raise RuntimeError(
+            f"Failed to load weight '{param_name}' with shape {jax_weight.shape} "
+            f"into param with shape {jax_param.value.shape}"
+        ) from e
+
+    pdl.create_dummy_weights_on_tpu = optimized_create_dummy_weights_on_tpu
+    wu.assign_and_shard_param = optimized_assign_and_shard_param
+    max_logging.log(
+        "Successfully monkey-patched Pathways dummy weight loader and assigner to bypass sequential JIT compilations."
+    )
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    max_logging.log(f"Failed to monkey-patch Pathways dummy weight loader/assigner: {e}")
+
   with _tpu_inference_compat_patches():
     _rl_train_impl(argv, kwargs)
 
@@ -628,6 +682,17 @@ def _rl_train_impl(argv: Sequence[str], kwargs: dict):
   trainer_config, sampler_config, trainer_devices, sampler_devices = model_creation_utils.setup_configs_and_devices(
       argv, kwargs
   )
+  print(f"[AGY_DEBUG] Total global devices: {jax.devices()}")
+  print(f"[AGY_DEBUG] Trainer devices count: {len(trainer_devices)}")
+  trainer_details = [
+      (d.id, d.device_kind, getattr(d, "host_id", None), getattr(d, "process_index", None)) for d in trainer_devices
+  ]
+  print(f"[AGY_DEBUG] Trainer devices details: {trainer_details}")
+  print(f"[AGY_DEBUG] Sampler devices count: {len(sampler_devices)}")
+  sampler_details = [
+      (d.id, d.device_kind, getattr(d, "host_id", None), getattr(d, "process_index", None)) for d in sampler_devices
+  ]
+  print(f"[AGY_DEBUG] Sampler devices details: {sampler_details}")
   validate_config(trainer_config)
 
   # Create model tokenizer first so we can plumb its pad_id into the model

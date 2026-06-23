@@ -1965,6 +1965,10 @@ class VLLM(BaseModel):
 
   kv_cache_buffer: int = Field(256, description="Buffer for KV cache.")
   hbm_utilization_vllm: float = Field(0.72, description="Target HBM utilization for vLLM.")
+  rollout_vllm_init_with_random_weights: bool = Field(
+      True,
+      description="Init the vllm model with random weights instead of loading from the given path.",
+  )
   swap_space_vllm_gb: int = Field(2, description="Swap space in GB for vLLM.")
   enable_dp_attention: bool = Field(False, description="Enable the attn_dp mesh axis in vLLM.")
   enable_expert_parallel: bool = Field(False, description="Enable expert parallelism in vLLM.")

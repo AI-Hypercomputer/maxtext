@@ -16,8 +16,8 @@ fi
 export PROJECT_ID="${PROJECT_ID:-cloud-tpu-multipod-dev}" # GCP project ID where the Ironwood cluster is deployed
 export CLUSTER_NAME="${CLUSTER_NAME:-bodaborg-super-xpk-x8p}" # Name of your Ironwood cluster
 export ZONE="${ZONE:-us-central1-ai1a}" # Zone where your Ironwood cluster is deployed
-export BASE_OUTPUT_DIRECTORY="${BASE_OUTPUT_DIRECTORY:-gs://runner-maxtext-logs/}" # GCS bucket path for outputs
-export DOCKER_IMAGE="${DOCKER_IMAGE:-gcr.io/cloud-tpu-multipod-dev/mohitkhatwani-runner:vxpq-2026-06-13-02-49-03}" # Full path to the Docker image you pushed (e.g., gcr.io/my-project/my-image:tag)
+export BASE_OUTPUT_DIRECTORY="${BASE_OUTPUT_DIRECTORY:-gs://runner-maxtext-logs}" # GCS bucket path for outputs
+export DOCKER_IMAGE="${DOCKER_IMAGE:-gcr.io/tpu-prod-env-multipod/maxtext_post_training_nightly:2026-06-12}" # Full path to the Docker image you pushed (e.g., gcr.io/my-project/my-image:tag)
 export MAXTEXT_CKPT_PATH="${MAXTEXT_CKPT_PATH:-gs://mohitkhatwani_multipods/qwen3-0.6b/pathways-compat/0/items}" # GCS path of the MaxText checkpoint to fine-tune from
 export TPU_TYPE="tpu7x-128"
 export WORKLOAD_NAME="rl-qwen3-$RANDOM"
@@ -98,7 +98,7 @@ model_name=qwen3-0.6b \
 tokenizer_path=Qwen/Qwen3-0.6B \
 run_name=$WORKLOAD_NAME \
 checkpoint_storage_use_ocdbt=False \
-async_scheduling=False \
+async_scheduling=True \
 base_output_directory=$BASE_OUTPUT_DIRECTORY \
 chips_per_vm=8 \
 num_batches=20 \
@@ -132,14 +132,16 @@ checkpoint_period=20 \
 max_num_checkpoints_to_keep=1000 \
 enable_checkpointing=true \
 load_parameters_path=$MAXTEXT_CKPT_PATH \
+convert_checkpoint_if_possible=False \
 rollout_vllm_init_with_random_weights=True \
 profiler=xplane \
 skip_first_n_steps_for_profiler=5 \
-profiler_steps=2"
-# vllm_hf_overrides='{architectures: [\"MaxTextForCausalLM\"]}' \
-# vllm_additional_config='{\"maxtext_config\": {\"model_name\": \"qwen3-0.6b\", \"model_call_mode\": \"inference\", \"enable_dp_attention\": false, \"allow_split_physical_axes\": true, \"log_config\": false, \"weight_dtype\": \"bfloat16\", \"prefuse_moe_weights\": true}}'"
+profiler_steps=2 \
+--undefok=pathways_pipe_unreachable_timeout,temporary_flags_for_debugging \
+--temporary_flags_for_debugging=temporary_flag_for_debugging_pipe_unreachable_timeout=10m \
+--pathways_pipe_unreachable_timeout=10m"
 
-# Workload Creation (dry-run to generate manifest with built image)
+# Workload Creation (Dry-run to generate manifest)
 /usr/local/google/home/mohitkhatwani/max_venv/bin/xpk workload create-pathways \
   --cluster=$CLUSTER_NAME \
   --project=$PROJECT_ID \
@@ -148,13 +150,13 @@ profiler_steps=2"
   --max-restarts=0 \
   --tpu-type=$TPU_TYPE \
   --num-slices=1 \
-  --docker-image="${DOCKER_IMAGE}" \
+  --base-docker-image="gcr.io/tpu-prod-env-multipod/maxtext_post_training_nightly:2026-06-12" \
   --server-image="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260608-jax_0.10.1" \
   --proxy-server-image="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:20260608-jax_0.10.1" \
   --workload="${WORKLOAD_NAME}" \
-  --custom-pathways-proxy-server-args="${XLA_FLAGS}" \
-  --custom-pathways-server-args="" \
-  --command="cd /app; python3 scripts/patch_vllm_sampler.py; pip install -e . --no-deps; ${MAXTEXT_COMMAND}" \
+  --custom-pathways-proxy-server-args="${XLA_FLAGS} --temporary_flags_for_debugging=temporary_flag_for_debugging_pipe_unreachable_timeout=10m" \
+  --custom-pathways-server-args="--temporary_flags_for_debugging=temporary_flag_for_debugging_pipe_unreachable_timeout=10m" \
+  --command="cd /app; pip install -e . --no-deps; ${MAXTEXT_COMMAND}" \
   --dry-run \
   --output-manifest-file=generated_manifest.yaml
 
@@ -162,5 +164,6 @@ echo "Applying Warden webhook bypass patch to generated_manifest.yaml..."
 python3 scripts/patch_manifest.py generated_manifest.yaml
 
 echo "Deploying the patched workload manifest..."
-/usr/bin/kubectl apply -f generated_manifest.yaml
+kubectl apply -f generated_manifest.yaml
+
 

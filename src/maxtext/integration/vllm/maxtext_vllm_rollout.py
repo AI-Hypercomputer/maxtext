@@ -65,6 +65,20 @@ class MaxTextVllmSampler(VllmSampler):
   ):
     super().__init__(tokenizer=tokenizer, config=config)
     self._converter = converter
+    if self.llm is not None:
+      original_generate = self.llm.generate
+
+      def custom_generate(prompts, sampling_params, *args, **kwargs):
+        if sampling_params is not None:
+          sampling_params.prompt_logprobs = None
+        return original_generate(prompts, sampling_params, *args, **kwargs)
+
+      self.llm.generate = custom_generate
+
+  def _generate_server_mode(self, prompts, sampling_params):
+    if sampling_params is not None:
+      sampling_params.prompt_logprobs = None
+    return super()._generate_server_mode(prompts, sampling_params)
 
   def update_params(
       self,
@@ -202,6 +216,8 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
                 # Async scheduling causes KeyError in dp_scheduler on slow models
                 # (30B+) where inference latency exceeds the scheduler's window.
                 "async_scheduling": rollout_config.rollout_vllm_async_scheduling,
+                "max_num_seqs": rollout_config.rollout_vllm_max_num_seqs,
+                "max_num_batched_tokens": rollout_config.rollout_vllm_max_num_batched_tokens,
             },
         ),
         converter=converter,

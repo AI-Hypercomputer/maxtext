@@ -16,8 +16,8 @@ fi
 export PROJECT_ID="${PROJECT_ID:-cloud-tpu-multipod-dev}" # GCP project ID where the Ironwood cluster is deployed
 export CLUSTER_NAME="${CLUSTER_NAME:-bodaborg-super-xpk-x8p}" # Name of your Ironwood cluster
 export ZONE="${ZONE:-us-central1-ai1a}" # Zone where your Ironwood cluster is deployed
-export BASE_OUTPUT_DIRECTORY="${BASE_OUTPUT_DIRECTORY:-gs://runner-maxtext-logs/}" # GCS bucket path for outputs
-export DOCKER_IMAGE="${DOCKER_IMAGE:-gcr.io/cloud-tpu-multipod-dev/mohitkhatwani-runner:vxpq-2026-06-13-02-49-03}" # Full path to the Docker image you pushed (e.g., gcr.io/my-project/my-image:tag)
+export BASE_OUTPUT_DIRECTORY="${BASE_OUTPUT_DIRECTORY:-gs://runner-maxtext-logs}" # GCS bucket path for outputs
+export DOCKER_IMAGE="${DOCKER_IMAGE:-gcr.io/tpu-prod-env-multipod/maxtext_post_training_nightly:2026-06-12}" # Full path to the Docker image you pushed (e.g., gcr.io/my-project/my-image:tag)
 export MAXTEXT_CKPT_PATH="${MAXTEXT_CKPT_PATH:-gs://mohitkhatwani_multipods/qwen3-0.6b/pathways-compat/0/items}" # GCS path of the MaxText checkpoint to fine-tune from
 export TPU_TYPE="tpu7x-128"
 export WORKLOAD_NAME="rl-qwen3-$RANDOM"
@@ -80,28 +80,31 @@ XLA_FLAGS="--xla_tpu_dvfs_p_state=7 \
 --xla_tpu_enable_multi_compute_overlap_in_layer_scheduler=false \
 --xla_tpu_enable_3d_reduce_scatter_decomposer=false"
 
-# VLLM_ENABLE_V1_MULTIPROCESSING=0 \
 # MaxText command
 MAXTEXT_COMMAND="JAX_RANDOM_WEIGHTS=1 \
-SKIP_JAX_PRECOMPILE=1 \
+SKIP_JAX_PRECOMPILE=0 \
+TPU_MULTIPROCESS_DP=0 \
 NEW_MODEL_DESIGN=1 \
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
+VLLM_ENABLE_V1_MULTIPROCESSING=0 \
+TPU_BACKEND_TYPE=jax \
 TPU_MIN_LOG_LEVEL=0 \
 TF_CPP_MIN_LOG_LEVEL=0 \
 TPU_STDERR_LOG_LEVEL=0 \
 JAX_PLATFORMS=proxy,cpu \
-NUM_PRECOMPILE_WORKERS=1 \
+NUM_PRECOMPILE_WORKERS=4 \
 JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 \
 ENABLE_PATHWAYS_PERSISTENCE=1 \
 PYTHONPATH=/app/src \
 python3 -m maxtext.trainers.post_train.rl.train_rl \
 model_name=qwen3-0.6b \
 tokenizer_path=Qwen/Qwen3-0.6B \
-run_name=$WORKLOAD_NAME \
+run_name=$WORKLOAD_NAME-run \
 checkpoint_storage_use_ocdbt=False \
-async_scheduling=False \
+async_scheduling=True \
 base_output_directory=$BASE_OUTPUT_DIRECTORY \
 chips_per_vm=8 \
-num_batches=20 \
+num_batches=4 \
 num_test_batches=0 \
 rl.num_generations=8 \
 rl.grpo_beta=0.05 \
@@ -113,33 +116,63 @@ decode_sampling_nucleus_p=0.95 \
 dataset_name=nvidia/OpenMathInstruct-2 \
 hf_train_files=hf://datasets/nvidia/OpenMathInstruct-2/data/train_1M-*.parquet \
 train_split=train_1M \
-max_target_length=16384 \
-max_prefill_predict_length=8192 \
+max_target_length=24576 \
+max_prefill_predict_length=16384 \
 learning_rate=1e-6 \
 batch_size=480 \
-train_micro_batch_size=8 \
+train_micro_batch_size=4 \
 rollout_micro_batch_size=480 \
-rollout_data_parallelism=8 \
-rollout_tensor_parallelism=8 \
+rollout_data_parallelism=16 \
+rollout_tensor_parallelism=4 \
 enable_dp_attention=false \
-hbm_utilization_vllm=0.22 \
-max_num_seqs=4096 \
-max_num_batched_tokens=32768 \
+hbm_utilization_vllm=0.4 \
+max_num_seqs=256 \
+max_num_batched_tokens=24832 \
 scan_layers=True \
 allow_split_physical_axes=True \
 enable_tunix_perf_metrics=True \
-checkpoint_period=20 \
+checkpoint_period=200 \
 max_num_checkpoints_to_keep=1000 \
 enable_checkpointing=true \
+load_checkpoint_only_once=True \
 load_parameters_path=$MAXTEXT_CKPT_PATH \
-rollout_vllm_init_with_random_weights=True \
-profiler=xplane \
-skip_first_n_steps_for_profiler=5 \
-profiler_steps=2"
-# vllm_hf_overrides='{architectures: [\"MaxTextForCausalLM\"]}' \
-# vllm_additional_config='{\"maxtext_config\": {\"model_name\": \"qwen3-0.6b\", \"model_call_mode\": \"inference\", \"enable_dp_attention\": false, \"allow_split_physical_axes\": true, \"log_config\": false, \"weight_dtype\": \"bfloat16\", \"prefuse_moe_weights\": true}}'"
+vllm_hf_overrides='{architectures: [\"MaxTextForCausalLM\"]}' \
+vllm_additional_config='{\"maxtext_config\": {\"model_name\": \"qwen3-0.6b\", \"log_config\": \"false\"}}' \
+convert_checkpoint_if_possible=False"
 
-# Workload Creation (dry-run to generate manifest with built image)
+# 1. Run xpk build/upload command (without --dry-run) to build and upload the patched container image
+echo "Building and uploading Docker container image..."
+UPLOAD_LOG=$(/usr/local/google/home/mohitkhatwani/max_venv/bin/xpk workload create-pathways \
+  --cluster=$CLUSTER_NAME \
+  --project=$PROJECT_ID \
+  --zone=$ZONE \
+  --priority=very-high \
+  --max-restarts=0 \
+  --tpu-type=$TPU_TYPE \
+  --num-slices=1 \
+  --base-docker-image="gcr.io/tpu-prod-env-multipod/mohitkhatwani-rl:0717" \
+  --server-image="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260608-jax_0.10.1" \
+  --proxy-server-image="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:20260608-jax_0.10.1" \
+  --workload="${WORKLOAD_NAME}" \
+  --custom-pathways-proxy-server-args="${XLA_FLAGS} --temporary_flags_for_debugging=temporary_flag_for_debugging_pipe_unreachable_timeout=30m" \
+  --custom-pathways-server-args="${XLA_FLAGS} --temporary_flags_for_debugging=temporary_flag_for_debugging_pipe_unreachable_timeout=30m" \
+  --command="${MAXTEXT_COMMAND}" 2>&1 || true)
+
+# 2. Extract the uploaded image tag from the log
+UPLOADED_TAG=$(echo "$UPLOAD_LOG" | grep -oE "gcr.io/cloud-tpu-multipod-dev/mohitkhatwani-runner:[a-zA-Z0-9_-]+" | head -n 1)
+
+if [ -z "$UPLOADED_TAG" ]; then
+    echo "Failed to extract uploaded image tag from xpk output! Logs:"
+    echo "$UPLOAD_LOG"
+    exit 1
+fi
+echo "Successfully built and uploaded image: $UPLOADED_TAG"
+
+# Clean up conflicting JobSet resource created during upload phase
+kubectl delete jobset $WORKLOAD_NAME --ignore-not-found=true --wait=true
+
+# 3. Run xpk create-pathways with --dry-run to generate the manifest
+echo "Generating dry-run manifest..."
 /usr/local/google/home/mohitkhatwani/max_venv/bin/xpk workload create-pathways \
   --cluster=$CLUSTER_NAME \
   --project=$PROJECT_ID \
@@ -148,19 +181,26 @@ profiler_steps=2"
   --max-restarts=0 \
   --tpu-type=$TPU_TYPE \
   --num-slices=1 \
-  --docker-image="${DOCKER_IMAGE}" \
+  --base-docker-image="gcr.io/tpu-prod-env-multipod/mohitkhatwani-rl:0717" \
   --server-image="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260608-jax_0.10.1" \
   --proxy-server-image="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:20260608-jax_0.10.1" \
   --workload="${WORKLOAD_NAME}" \
-  --custom-pathways-proxy-server-args="${XLA_FLAGS}" \
-  --custom-pathways-server-args="" \
-  --command="cd /app; python3 scripts/patch_vllm_sampler.py; pip install -e . --no-deps; ${MAXTEXT_COMMAND}" \
+  --custom-pathways-proxy-server-args="${XLA_FLAGS} --temporary_flags_for_debugging=temporary_flag_for_debugging_pipe_unreachable_timeout=30m" \
+  --custom-pathways-server-args="--temporary_flags_for_debugging=temporary_flag_for_debugging_pipe_unreachable_timeout=30m" \
+  --command="${MAXTEXT_COMMAND}" \
   --dry-run \
   --output-manifest-file=generated_manifest.yaml
 
+# 4. Replace dry-run image placeholder tag with the uploaded tag in the manifest
+echo "Replacing dry-run image placeholder in generated_manifest.yaml with $UPLOADED_TAG..."
+sed -i "s|image: gcr.io/cloud-tpu-multipod-dev/dry-run-runner:prefix-current|image: $UPLOADED_TAG|g" generated_manifest.yaml
+
+# 5. Apply GKE Warden bypass patches to generated_manifest.yaml
 echo "Applying Warden webhook bypass patch to generated_manifest.yaml..."
 python3 scripts/patch_manifest.py generated_manifest.yaml
 
+# 6. Deploy the patched workload manifest
 echo "Deploying the patched workload manifest..."
-/usr/bin/kubectl apply -f generated_manifest.yaml
+kubectl apply -f generated_manifest.yaml
+
 
