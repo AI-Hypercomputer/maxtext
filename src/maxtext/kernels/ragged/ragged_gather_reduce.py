@@ -627,10 +627,10 @@ def get_cost_estimate(
     input_dtype_bytes: int,
     flops_override: int | None = None,
     bytes_accessed_override: int | None = None,
-) -> pltpu.CostEstimate:
+) -> pl.CostEstimate:
   """Get cost estimate for the ragged gather reduce kernel."""
   if flops_override is not None or bytes_accessed_override is not None:
-    return pltpu.CostEstimate(
+    return pl.CostEstimate(
         flops=flops_override or 0,
         bytes_accessed=bytes_accessed_override or 0,
     )
@@ -640,7 +640,7 @@ def get_cost_estimate(
       padded_input_size * aligned_hidden_size * input_dtype_bytes
       + num_rows * aligned_hidden_size * 4
   )
-  return pltpu.CostEstimate(flops=flops, bytes_accessed=bytes_accessed)
+  return pl.CostEstimate(flops=flops, bytes_accessed=bytes_accessed)
 
 
 _COMPILER_PARAMS = {
