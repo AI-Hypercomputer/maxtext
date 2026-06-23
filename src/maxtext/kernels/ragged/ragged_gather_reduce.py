@@ -248,7 +248,11 @@ def main_kernel(
 
       # VMEM to HBM transfer.
       # Use dynamic loop to minimize register spills.
-      @pl.loop(0, col_size, step=num_lanes, init_carry=(prev_dst_row_hbm,))
+      # For bf16, we pack 256 columns into 128 columns, so we step by 2 * num_lanes (256).
+      # For f32, we write 128 columns directly, so we step by num_lanes (128).
+      loop_step = num_lanes if not is_bf16 else 2 * num_lanes
+
+      @pl.loop(0, col_size, step=loop_step, init_carry=(prev_dst_row_hbm,))
       @jax.named_scope("dma_write_loop")
       def dma_write_loop(col_vmem_start, carry):
         col_hbm_start = col_start + col_vmem_start
@@ -260,7 +264,7 @@ def main_kernel(
               recv_sem,
           ).wait()
 
-        for col_compute_offset in range(0, num_lanes, num_simd_lanes):
+        for col_compute_offset in range(0, loop_step, num_simd_lanes):
           col_slice = pl.ds(col_vmem_start + col_compute_offset, num_simd_lanes)
 
           previous_accumulated_data = None
@@ -349,12 +353,9 @@ def main_kernel(
         src_row_idx_in_vmem.reverse()
         row_valid_vec.reverse()
 
-        is_even_iter = (col_vmem_start // 128) % 2 == 0
-        dest_col_offset = jnp.where(is_even_iter, 0, 64)
-
-        # Pack the active 128 columns of out_vmem_ref into temp_packed_vmem on the fly.
-        # If even iter, we pack into the first 64 columns. If odd iter, into the next 64.
+        # Pack the active columns of out_vmem_ref into temp_packed_vmem on the fly.
         if is_bf16:
+          # Pack first 128 columns
           for r in range(num_simd_lanes):
             for c_offset in range(0, 128, 16):
               c_unpacked = col_vmem_start + c_offset
@@ -373,7 +374,28 @@ def main_kernel(
                   jnp.bitwise_or(jnp.bitwise_right_shift(val_B[4], 16), jnp.bitwise_and(val_B[5], -65536)),
                   jnp.bitwise_or(jnp.bitwise_right_shift(val_B[6], 16), jnp.bitwise_and(val_B[7], -65536)),
               ])
-              temp_packed_vmem[r, pl.ds(dest_col_offset + c_packed, 8)] = packed_vec
+              temp_packed_vmem[r, pl.ds(c_packed, 8)] = packed_vec
+
+          # Pack second 128 columns
+          for r in range(num_simd_lanes):
+            for c_offset in range(0, 128, 16):
+              c_unpacked = col_vmem_start + 128 + c_offset
+              c_packed = 64 + c_offset // 2
+              
+              val_A = out_vmem_ref[r, pl.ds(c_unpacked, 8)][...]
+              val_B = out_vmem_ref[r, pl.ds(c_unpacked + 8, 8)][...]
+              
+              packed_vec = jnp.array([
+                  jnp.bitwise_or(jnp.bitwise_right_shift(val_A[0], 16), jnp.bitwise_and(val_A[1], -65536)),
+                  jnp.bitwise_or(jnp.bitwise_right_shift(val_A[2], 16), jnp.bitwise_and(val_A[3], -65536)),
+                  jnp.bitwise_or(jnp.bitwise_right_shift(val_A[4], 16), jnp.bitwise_and(val_A[5], -65536)),
+                  jnp.bitwise_or(jnp.bitwise_right_shift(val_A[6], 16), jnp.bitwise_and(val_A[7], -65536)),
+                  jnp.bitwise_or(jnp.bitwise_right_shift(val_B[0], 16), jnp.bitwise_and(val_B[1], -65536)),
+                  jnp.bitwise_or(jnp.bitwise_right_shift(val_B[2], 16), jnp.bitwise_and(val_B[3], -65536)),
+                  jnp.bitwise_or(jnp.bitwise_right_shift(val_B[4], 16), jnp.bitwise_and(val_B[5], -65536)),
+                  jnp.bitwise_or(jnp.bitwise_right_shift(val_B[6], 16), jnp.bitwise_and(val_B[7], -65536)),
+              ])
+              temp_packed_vmem[r, pl.ds(c_packed, 8)] = packed_vec
 
         # There must be at least one valid row to write in the current row_tile.
         # When num valid writes is not a multiple of row_tile_size, we repeat
@@ -385,25 +407,21 @@ def main_kernel(
           src_row_vmem = jnp.where(row_valid, src_row_idx_in_vmem, last_valid_src_row_vmem)
           dst_row_hbm = jnp.where(row_valid, dst_indices[i], last_valid_dst_row_hbm)
           
-          # For bf16, we only write on odd iterations (after accumulating 128 columns).
-          # For f32, we write on every iteration (128 columns).
-          should_write = jnp.logical_or(jnp.logical_not(is_bf16), jnp.logical_not(is_even_iter))
-          
-          @pl.when(should_write)
-          def _do_write():
-            if is_bf16:
-              write_col_hbm_start = col_hbm_start // 2 - 64
-              pltpu.make_async_copy(
-                  temp_packed_vmem.at[src_row_vmem, :128],
-                  out_32b_hbm_ref.at[dst_row_hbm, pl.ds(write_col_hbm_start, 128)],
-                  send_sem,
-              ).start()
-            else:
-              pltpu.make_async_copy(
-                  out_vmem_ref.at[src_row_vmem, pl.ds(col_vmem_start, num_lanes)],
-                  out_32b_hbm_ref.at[dst_row_hbm, pl.ds(col_hbm_start, num_lanes)],
-                  send_sem,
-              ).start()
+          if is_bf16:
+            # We write 128 columns of packed uint32 (representing 256 columns of bf16) in a single aligned DMA write!
+            write_col_hbm_start = col_hbm_start // 2
+            pltpu.make_async_copy(
+                temp_packed_vmem.at[src_row_vmem, :128],
+                out_32b_hbm_ref.at[dst_row_hbm, pl.ds(write_col_hbm_start, 128)],
+                send_sem,
+            ).start()
+          else:
+            # We write 128 columns of float32 directly (identical to baseline)
+            pltpu.make_async_copy(
+                out_vmem_ref.at[src_row_vmem, pl.ds(col_vmem_start, num_lanes)],
+                out_32b_hbm_ref.at[dst_row_hbm, pl.ds(col_hbm_start, num_lanes)],
+                send_sem,
+            ).start()
             
           last_valid_src_row_vmem = src_row_vmem
           last_valid_dst_row_hbm = dst_row_hbm
