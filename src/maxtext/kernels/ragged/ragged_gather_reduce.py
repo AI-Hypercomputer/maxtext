@@ -323,11 +323,13 @@ def main_kernel(
             if is_bf16:
               data_bf16 = accumulated_data.astype(jnp.bfloat16)
               data_u16 = jax.lax.bitcast_convert_type(data_bf16, jnp.uint16)
+              # Cast to uint32 before indexing to avoid squeezing non-32bit scalars!
+              data_u32 = data_u16.astype(jnp.uint32)
               packed_val = [
-                  jnp.bitwise_or(jnp.bitwise_left_shift(data_u16[1].astype(jnp.uint32), 16), data_u16[0].astype(jnp.uint32)),
-                  jnp.bitwise_or(jnp.bitwise_left_shift(data_u16[3].astype(jnp.uint32), 16), data_u16[2].astype(jnp.uint32)),
-                  jnp.bitwise_or(jnp.bitwise_left_shift(data_u16[5].astype(jnp.uint32), 16), data_u16[4].astype(jnp.uint32)),
-                  jnp.bitwise_or(jnp.bitwise_left_shift(data_u16[7].astype(jnp.uint32), 16), data_u16[6].astype(jnp.uint32)),
+                  jnp.bitwise_or(jnp.bitwise_left_shift(data_u32[1], 16), data_u32[0]),
+                  jnp.bitwise_or(jnp.bitwise_left_shift(data_u32[3], 16), data_u32[2]),
+                  jnp.bitwise_or(jnp.bitwise_left_shift(data_u32[5], 16), data_u32[4]),
+                  jnp.bitwise_or(jnp.bitwise_left_shift(data_u32[7], 16), data_u32[6]),
               ]
               packed_rows_registers[row_src].extend(packed_val)
 
