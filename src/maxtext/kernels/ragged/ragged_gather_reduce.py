@@ -157,8 +157,13 @@ def main_kernel(
 
       # Input is passed as bf16 and bitcasted inside the kernel (read-only, 100% layout-safe!)
       in_32b_hbm_ref = in_hbm_ref.bitcast(jnp.uint32)
-      # Output is passed as uint32 directly in the signature, preventing any layout size mismatches!
-      out_32b_hbm_ref = out_hbm_ref
+      # Output is passed as uint32 directly in the signature when is_bf16 is True,
+      # preventing any layout size mismatches. When is_bf16 is False (like during
+      # generic tracing), we bitcast the float32 output to uint32 to match the write type.
+      if is_bf16:
+        out_32b_hbm_ref = out_hbm_ref
+      else:
+        out_32b_hbm_ref = out_hbm_ref.bitcast(jnp.uint32)
 
       # DMA input from HBM to the dedicated 1D flat in_vmem_ref buffer OUTSIDE the loop.
       for col_vmem_start in range(0, col_size, num_lanes):
