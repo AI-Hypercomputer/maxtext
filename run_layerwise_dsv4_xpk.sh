@@ -15,12 +15,12 @@ echo "2. Creating workload via xpk (this builds & uploads container image)..."
   --cluster="${CLUSTER_NAME}" \
   --project="${PROJECT}" \
   --zone="${ZONE}" \
-  --tpu-type="v5p-256" \
+  --tpu-type="v5p-64" \
   --num-slices=1 \
   --priority=very-high \
   --workload="${WORKLOAD_NAME}" \
   --base-docker-image="gcr.io/tpu-prod-env-multipod/maxtext_jax_nightly:latest" \
-  --command="python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu && PYTHONPATH=src:\$PYTHONPATH python3 -m tests.utils.forward_pass_logit_checker src/maxtext/configs/base.yml run_name=dsv4-layer-checker base_output_directory=gs://pb-maxtext-logs/ load_parameters_path=gs://snehalv-data/deepseek_v4-flash/scanned/deepseek4-284b_2026-06-17-18-16/checkpoints/0/items per_device_batch_size=1 max_target_length=2048 model_name=deepseek4-284b tokenizer_type=huggingface tokenizer_path=deepseek-ai/DeepSeek-V4-Flash ici_fsdp_parallelism=-1 attention=dot_product --compare_layerwise_hidden_states --golden_logits_path=skip --output_logits_path=/tmp/maxtext_layerwise_logits.jsonl" \
+  --command="gsutil cp gs://snehalv-data/golden-logits/deepseek-ai/DeepSeek-V4-Flash/golden_dsv4_flash.jsonl /tmp/golden.jsonl && python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu && PYTHONPATH=src:\$PYTHONPATH python3 -m tests.utils.forward_pass_logit_checker src/maxtext/configs/base.yml run_name=dsv4-layer-checker base_output_directory=gs://pb-maxtext-logs/ load_parameters_path=gs://snehalv-data/deepseek_v4-flash/scanned/deepseek4-284b_2026-06-17-18-16/checkpoints/0/items per_device_batch_size=1 max_target_length=2048 model_name=deepseek4-284b weight_dtype=bfloat16 tokenizer_type=huggingface tokenizer_path=deepseek-ai/DeepSeek-V4-Flash ici_fsdp_parallelism=1 ici_expert_parallelism=-1 attention=dot_product checkpoint_storage_concurrent_gb=256 --compare_layerwise_hidden_states --golden_logits_path=/tmp/golden.jsonl --atol=0.02 --output_logits_path=/tmp/maxtext_layerwise_logits.jsonl" \
   --output-manifest-file=workload_manifest.yaml
 
 echo "3. Deleting un-schedulable base workload from cluster..."
