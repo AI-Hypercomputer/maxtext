@@ -131,7 +131,7 @@ def main_kernel(
     # Scratch.
     num_rows_per_row_partition_vmem_ref: jax.Ref,
     out_vmem_ref: jax.Ref,
-    packed_out_vmem_ref: jax.Ref,
+    temp_packed_vmem: jax.Ref,
     prev_iter_last_row_vmem_ref: jax.Ref,
     src_indices_vmem_ref: jax.Ref,
     dst_indices_vmem_ref: jax.Ref,
@@ -318,18 +318,6 @@ def main_kernel(
             if row_src == num_simd_lanes - 1:
               prev_iter_last_row_vmem_ref[0, col_slice] = data_to_write
 
-        # Packing step (only for bf16)
-        if is_bf16:
-          # Pack the accumulated float32 outputs in out_vmem_ref into bf16 pairs in packed_out_vmem_ref
-          for c in range(0, col_size, 2):
-            val_even = out_vmem_ref[:, pl.ds(c, 1)][...]
-            val_odd = out_vmem_ref[:, pl.ds(c + 1, 1)][...]
-            packed_val = jnp.bitwise_or(
-                jnp.bitwise_right_shift(val_even, 16),
-                jnp.bitwise_and(val_odd, -65536)
-            )
-            packed_out_vmem_ref[:, pl.ds(c // 2, 1)] = packed_val
-
         # Start dma write.
         # When there are multiple sources rows in the current row_tile that
         # contribute to the same destination row, the accumulated data is
@@ -361,6 +349,18 @@ def main_kernel(
         src_row_idx_in_vmem.reverse()
         row_valid_vec.reverse()
 
+        # Pack the active 128 columns of out_vmem_ref into temp_packed_vmem on the fly
+        if is_bf16:
+          for r in range(num_simd_lanes):
+            for i in range(64):
+              even_val = out_vmem_ref[r, col_vmem_start + 2 * i]
+              odd_val = out_vmem_ref[r, col_vmem_start + 2 * i + 1]
+              packed = jnp.bitwise_or(
+                  jnp.bitwise_right_shift(even_val, 16),
+                  jnp.bitwise_and(odd_val, -65536)
+              )
+              temp_packed_vmem[r, i] = packed
+
         # There must be at least one valid row to write in the current row_tile.
         # When num valid writes is not a multiple of row_tile_size, we repeat
         # the last valid write to avoid valid data in hbm being overwritten
@@ -373,8 +373,8 @@ def main_kernel(
           
           if is_bf16:
             pltpu.make_async_copy(
-                packed_out_vmem_ref.at[src_row_vmem, pl.ds(col_vmem_start // 2, num_lanes // 2)],
-                out_32b_hbm_ref.at[dst_row_hbm, pl.ds(col_hbm_start // 2, num_lanes // 2)],
+                temp_packed_vmem.at[src_row_vmem, :64],
+                out_32b_hbm_ref.at[dst_row_hbm, pl.ds(col_hbm_start // 2, 64)],
                 send_sem,
             ).start()
           else:
@@ -603,7 +603,7 @@ def ragged_gather_reduce(
           _SCRATCH_KW: dict(  # pylint: disable=use-dict-literal
               num_rows_per_row_partition_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
               out_vmem_ref=pltpu.VMEM((num_simd_lanes, col_size), jnp.uint32),
-              packed_out_vmem_ref=pltpu.VMEM((num_simd_lanes, col_size // 2), jnp.uint32),
+              temp_packed_vmem=pltpu.VMEM((num_simd_lanes, 64), jnp.uint32),
               prev_iter_last_row_vmem_ref=pltpu.VMEM((1, col_size), jnp.uint32),
               src_indices_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
               dst_indices_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
