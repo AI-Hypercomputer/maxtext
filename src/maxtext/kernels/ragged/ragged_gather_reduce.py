@@ -361,7 +361,7 @@ def main_kernel(
                   jnp.bitwise_right_shift(even_val, 16),
                   jnp.bitwise_and(odd_val, -65536)
               )
-              temp_packed_vmem[r, pl.ds(i, 1)] = packed
+              temp_packed_vmem[r, pl.ds(i, 1)] = jnp.expand_dims(packed, 0)
 
         # There must be at least one valid row to write in the current row_tile.
         # When num valid writes is not a multiple of row_tile_size, we repeat
