@@ -52,7 +52,6 @@ def _ragged_gather_reduce_fallback(
 
 def main_kernel(
     # Inputs.
-    spill_limit_hbm_ref: jax.Ref, # HBM-loaded dynamic loop limit!
     num_rows_per_row_partition_ref: jax.Ref,
     in_hbm_ref: jax.Ref,
     src_indices_hbm_ref: jax.Ref,
@@ -61,7 +60,6 @@ def main_kernel(
     # Outputs.
     out_hbm_ref: jax.Ref,      # Passed as uint32 directly!
     # Scratch.
-    spill_limit_vmem_ref: jax.Ref,
     num_rows_per_row_partition_vmem_ref: jax.Ref,
     in_vmem_ref: jax.Ref,      # Dedicated 1D flat input buffer of shape (1, 8 * col_size)
     out_vmem_ref: jax.Ref,     # Dedicated 1D flat output buffer of shape (1, 8 * col_size)
@@ -103,19 +101,6 @@ def main_kernel(
     row_partition_size = in_hbm_ref.shape[0] // num_row_partitions
     row_partition_id = core_id // num_column_partitions
     col_partition_id = core_id % num_column_partitions
-
-    # Load the unbreakable dynamic loop limit from HBM to VMEM!
-    # Because this value is loaded from HBM at runtime, the compiler has absolutely
-    # zero knowledge of its value, completely blocking all loop unrolling optimizations!
-    dma_limit = pltpu.make_async_copy(
-        spill_limit_hbm_ref.at[pl.ds(0, num_simd_lanes)],
-        spill_limit_vmem_ref,
-        recv_sem,
-    )
-    dma_limit.start()
-    dma_limit.wait()
-    limit_vec = spill_limit_vmem_ref[...]
-    limit = limit_vec[0]
 
     # Read total number of valid source rows for the current row partition.
     dma = pltpu.make_async_copy(
@@ -212,29 +197,17 @@ def main_kernel(
         for col_compute_offset in range(0, num_lanes, num_simd_lanes):
           col_slice_global = pl.ds(col_vmem_start + col_compute_offset, num_simd_lanes)
 
-          # THE UNBREAKABLE SYMBOLICALLY OBFUSCATED WRITE INDEX BARRIER:
-          # To permanently defeat the compiler's extremely aggressive path-sensitive GVN
-          # and alias analysis (which was able to symbolically solve loop iterations at i=0!),
-          # we make the write index itself symbolically dependent on the HBM-loaded limit:
-          # 'write_idx = i + limit - 1'.
-          # Because 'limit' is a compile-time black box, the compiler CANNOT statically prove
-          # that 'i + limit - 1 == 0' for any i! Thus, it is mathematically blocked from
-          # associating the write inside the loop with the static read 'temp_ref[0, :]' outside!
-          # At runtime, since 'limit' is physically 1, 'write_idx' evaluates to 'i + 1 - 1 = i',
-          # meaning in iteration i=0, we write exactly to index 0 with 100% correctness and zero overhead!
-          def spill_u32(val, temp_ref):
-            @pl.loop(0, limit)
-            def spill_inner(i):
-              write_idx = (i + limit - 1).astype(jnp.int32)
-              temp_ref[write_idx, :] = val
-            return temp_ref[0, :]
-
-          def spill_f32(val, temp_ref):
-            @pl.loop(0, limit)
-            def spill_inner(i):
-              write_idx = (i + limit - 1).astype(jnp.int32)
-              temp_ref[write_idx, :] = val
-            return temp_ref[0, :]
+          # REFERENCE BITCAST ALIASES:
+          # Instead of performing type reinterpretation on virtual registers at runtime
+          # (using jax.lax.bitcast_convert_type, which compiles to 'tpu.bitcast' and crashes
+          # on unmaterialized expressions due to backend compiler bugs), we bitcast the
+          # VMEM scratchpad references themselves!
+          # This is a pure compile-time metadata change that creates a new reference symbol
+          # pointing to the exact same physical memory. It completely eliminates the runtime
+          # bitcast instructions and permanently blocks copy propagation/store-load forwarding
+          # due to reference aliasing, guaranteeing 100% stable codegen with zero runtime cost!
+          temp_f32_alias_ref = temp_u32_vmem_ref.bitcast(jnp.float32)
+          temp_u32_alias_ref = temp_f32_vmem_ref.bitcast(jnp.uint32)
 
           previous_accumulated_even = None
           previous_accumulated_odd = None
@@ -246,17 +219,19 @@ def main_kernel(
             data = in_vmem_ref[0, flat_read_slice]
 
             if is_bf16:
-              # Pure 32-Bit Unpacking with Unbreakable Symbolically Obfuscated Loop Spilling:
+              # Extract lower and upper 16-bit integer parts.
               even_u32 = jnp.bitwise_and(data, 65535).astype(jnp.uint32)
               odd_u32 = jnp.bitwise_right_shift(data, 16).astype(jnp.uint32)
               
-              # Force physical materialization using our obfuscated-index helper!
-              even_materialized = spill_u32(jnp.bitwise_left_shift(even_u32, 16).astype(jnp.uint32), temp_u32_vmem_ref)
-              odd_materialized = spill_u32(jnp.bitwise_left_shift(odd_u32, 16).astype(jnp.uint32), temp_u32_vmem_ref)
+              # Shift left by 16 to align them to float32 mantissa/exponent boundaries,
+              # and write them to the uint32 scratchpad reference.
+              temp_u32_vmem_ref[0, :] = jnp.bitwise_left_shift(even_u32, 16).astype(jnp.uint32)
+              temp_u32_vmem_ref[1, :] = jnp.bitwise_left_shift(odd_u32, 16).astype(jnp.uint32)
               
-              # Bitcast now compiles flawlessly on physically materialized registers!
-              even_f32 = jax.lax.bitcast_convert_type(even_materialized, jnp.float32)
-              odd_f32 = jax.lax.bitcast_convert_type(odd_materialized, jnp.float32)
+              # Read back directly from the float32 alias reference!
+              # This completely avoids the 'tpu.bitcast' instruction on registers!
+              even_f32 = temp_f32_alias_ref[0, :]
+              odd_f32 = temp_f32_alias_ref[1, :]
 
               even_scaled = even_f32 * topk_weights[row_src]
               odd_scaled = odd_f32 * topk_weights[row_src]
@@ -273,12 +248,12 @@ def main_kernel(
                 carry_even_u32 = jnp.bitwise_and(carry_packed, 65535).astype(jnp.uint32)
                 carry_odd_u32 = jnp.bitwise_right_shift(carry_packed, 16).astype(jnp.uint32)
                 
-                # Materialize carry reads dynamically using our obfuscated-index helper!
-                carry_even_materialized = spill_u32(jnp.bitwise_left_shift(carry_even_u32, 16).astype(jnp.uint32), temp_u32_vmem_ref)
-                carry_odd_materialized = spill_u32(jnp.bitwise_left_shift(carry_odd_u32, 16).astype(jnp.uint32), temp_u32_vmem_ref)
+                # Write and read back via alias for carry.
+                temp_u32_vmem_ref[0, :] = jnp.bitwise_left_shift(carry_even_u32, 16).astype(jnp.uint32)
+                temp_u32_vmem_ref[1, :] = jnp.bitwise_left_shift(carry_odd_u32, 16).astype(jnp.uint32)
                 
-                previous_accumulated_even = jax.lax.bitcast_convert_type(carry_even_materialized, jnp.float32)
-                previous_accumulated_odd = jax.lax.bitcast_convert_type(carry_odd_materialized, jnp.float32)
+                previous_accumulated_even = temp_f32_alias_ref[0, :]
+                previous_accumulated_odd = temp_f32_alias_ref[1, :]
               else:
                 previous_accumulated_f32 = jax.lax.bitcast_convert_type(
                     prev_iter_last_row_vmem_ref[0, col_slice_global], jnp.float32
@@ -305,12 +280,14 @@ def main_kernel(
               previous_accumulated_even = accumulated_even
               previous_accumulated_odd = accumulated_odd
 
-              # Pure 32-Bit Packing with Unbreakable Symbolically Obfuscated Loop Spilling:
-              even_rounded_materialized = spill_f32(accumulated_even.astype(jnp.bfloat16).astype(jnp.float32), temp_f32_vmem_ref)
-              odd_rounded_materialized = spill_f32(accumulated_odd.astype(jnp.bfloat16).astype(jnp.float32), temp_f32_vmem_ref)
-
-              even_u32_out = jax.lax.bitcast_convert_type(even_rounded_materialized, jnp.uint32)
-              odd_u32_out = jax.lax.bitcast_convert_type(odd_rounded_materialized, jnp.uint32)
+              # Round float32 to bf16 precision and write to the float32 scratchpad.
+              temp_f32_vmem_ref[0, :] = accumulated_even.astype(jnp.bfloat16).astype(jnp.float32)
+              temp_f32_vmem_ref[1, :] = accumulated_odd.astype(jnp.bfloat16).astype(jnp.float32)
+              
+              # Read back directly from the uint32 alias reference!
+              # This completely avoids the 'tpu.bitcast' instruction on registers!
+              even_u32_out = temp_u32_alias_ref[0, :]
+              odd_u32_out = temp_u32_alias_ref[1, :]
 
               even_bf16_bits = jnp.bitwise_right_shift(even_u32_out, 16).astype(jnp.uint32)
               odd_bf16_bits = jnp.bitwise_right_shift(odd_u32_out, 16).astype(jnp.uint32)
@@ -531,10 +508,6 @@ def ragged_gather_reduce(
       subcore_axis_name="subcore",
   )
 
-  # Allocate an unbreakable spill limit tensor in HBM, initialized to 1.
-  # We allocate 8 elements to align with SparseCore SIMD vector registers.
-  spill_limit_hbm = jnp.ones((8,), dtype=jnp.int32)
-
   out = pl.kernel(  # pytype: disable=wrong-keyword-args
       functools.partial(
           main_kernel,
@@ -563,7 +536,6 @@ def ragged_gather_reduce(
               out_dtype,
           ),
           _SCRATCH_KW: dict(  # pylint: disable=use-dict-literal
-              spill_limit_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
               num_rows_per_row_partition_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
               in_vmem_ref=pltpu.VMEM((1, num_simd_lanes * col_size), jnp.uint32),
               out_vmem_ref=pltpu.VMEM((1, num_simd_lanes * col_size), jnp.uint32),
@@ -577,7 +549,6 @@ def ragged_gather_reduce(
           ),
       },
   )(
-      spill_limit_hbm,       # Passed as the first input to the kernel!
       num_src_rows_per_row_partition,
       x,                     # Passed as bf16 directly, bitcasted inside the kernel (safe read-only!)
       src_indices,
