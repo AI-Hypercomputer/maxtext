@@ -411,9 +411,11 @@ def main_kernel(
           dst_row_hbm = jnp.where(row_valid, dst_indices[i], last_valid_dst_row_hbm)
           
           if is_bf16:
-            # We write exactly one 128-column block of packed data to HBM.
-            # This perfectly matches the baseline's single-DMA-write pattern!
-            write_col_hbm_start = pl.multiple_of(col_hbm_start // 2, 128)
+            # Eliminate tracer division by distributing the division statically in Python!
+            # col_hbm_start // 2 = col_partition_id * (col_size // 2) + (col_vmem_start // 2).
+            # This completely removes the division operator from the JAX tracer graph,
+            # allowing the compiler's layout engine to easily prove linearity and compile successfully!
+            write_col_hbm_start = pl.multiple_of(col_partition_id * (col_size // 2) + (col_vmem_start // 2), 128)
             write_col_vmem_start = pl.multiple_of(col_vmem_start, 128)
             flat_col_vmem_start_1 = pl.multiple_of(src_row_vmem * col_size + write_col_vmem_start, 128)
             
