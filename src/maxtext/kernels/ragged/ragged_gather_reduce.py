@@ -149,7 +149,7 @@ def main_kernel(
   assert sc_info is not None
   num_simd_lanes = sc_info.num_lanes
   num_lanes = tpu_info.num_lanes
-  col_size = out_vmem_ref.shape[-1]
+  col_size = out_vmem_ref.shape[-1] // num_simd_lanes
   num_cores = jax.lax.axis_size((core_axis_name, subcore_axis_name))
 
   recv_sem = sem_ref.at[0]
