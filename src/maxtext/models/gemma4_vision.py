@@ -472,7 +472,7 @@ class Gemma4EncoderBlock(nnx.Module):
         head_dim=config.hidden_size_for_vit // config.num_attention_heads_for_vit,
         max_target_length=seq_len,
         mesh=mesh,
-        attention_kernel="dot_product",
+        attention_kernel=config.attention_for_vit,
         inputs_q_shape=dummy_shape,
         inputs_kv_shape=dummy_shape,
         dtype=config.dtype_mm,

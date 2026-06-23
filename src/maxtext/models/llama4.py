@@ -642,7 +642,7 @@ class Llama4VisionEncoderLayer(nnx.Module):
         num_kv_heads=self.config.num_attention_heads_for_vit,
         head_dim=self.config.hidden_size_for_vit // self.config.num_attention_heads_for_vit,
         max_target_length=(self.config.image_size_for_vit // self.config.patch_size_for_vit) ** 2 + 1,
-        attention_kernel="dot_product",
+        attention_kernel=self.config.attention_for_vit,
         inputs_q_shape=self.hidden_states_shape,
         inputs_kv_shape=self.hidden_states_shape,
         float32_qk_product=self.config.float32_qk_product,
