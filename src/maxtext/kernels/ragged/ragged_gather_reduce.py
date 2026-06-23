@@ -409,7 +409,6 @@ def ragged_gather_reduce(
           subcore_axis_name=vector_mesh_wrapped.subcore_axis_name,
           num_row_partitions=num_rows_partitions,
           num_column_partitions=num_column_partitions,
-          is_bf16=True,
       ),
       compiler_params=pltpu.CompilerParams(
           **_COMPILER_PARAMS,
