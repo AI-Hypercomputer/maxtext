@@ -607,6 +607,10 @@ def train_loop(config, recorder, state=None):
       state,
   ) = train_utils.setup_train_loop(config, recorder)
 
+  # Throttling is applied only if configured (dcn_bandwidth_limit is set).
+  # The default flag value is empty, meaning no throttling is applied by default.
+  train_utils.maybe_apply_dcn_throttling(config)
+
   start_step = get_first_step(model, state)  # this is the start_step for training
   train_utils.validate_completed_steps(start_step, config.steps)
 
@@ -739,6 +743,7 @@ def train_loop(config, recorder, state=None):
     if _job_completed_gracefully:
       record_goodput(recorder, RECORD_JOB_END_TIME)
     metric_logger_instance.flush_metrics_and_cleanup()
+    train_utils.maybe_cleanup_dcn_throttling(config)
 
   return state
 

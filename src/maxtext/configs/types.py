@@ -1445,6 +1445,14 @@ class DilocoParams(BaseModel):
   diloco_sync_period: int = Field(36, description="Diloco sync period.")
   diloco_outer_lr: float = Field(0.3, description="learning rate for outer optimizer.")
   diloco_outer_momentum: float = Field(0.9, description="momentum for outer optimizer.")
+  dcn_bandwidth_limit: str = Field(
+      "", description="Programmatic DCN egress bandwidth limit per VM (e.g., '28gbit'). Empty means no limit."
+  )
+  dcn_bandwidth_burst: str = Field("10mb", description="Burst size for Token Bucket Filter (TBF) traffic shaping.")
+  dcn_bandwidth_latency: str = Field(
+      "50ms", description="Latency threshold for Token Bucket Filter (TBF) traffic shaping."
+  )
+  dcn_bandwidth_interface: str = Field("eth0", description="Network interface to apply bandwidth limits on.")
 
 
 class Optimizer(BaseModel):

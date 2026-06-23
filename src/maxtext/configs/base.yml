@@ -872,6 +872,15 @@ enable_diloco: false
 diloco_sync_period: 36
 diloco_outer_lr: 0.3
 diloco_outer_momentum: 0.9
+# DCN bandwidth throttling parameters (used for simulating slow networks).
+# If dcn_bandwidth_limit is empty, no throttling is applied. This is per VM limit
+dcn_bandwidth_limit: ""
+# The burst size parameter for the traffic control (tc) token bucket filter.
+dcn_bandwidth_burst: "10mb"
+# The latency parameter for the traffic control (tc) token bucket filter.
+dcn_bandwidth_latency: "50ms"
+# The network interface to apply throttling rules to.
+dcn_bandwidth_interface: "eth0"
 
 # You may disable clipping by setting gradient_clipping_threshold to zero.
 gradient_clipping_threshold: 1.0
