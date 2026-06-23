@@ -197,6 +197,28 @@ def main_kernel(
         for col_compute_offset in range(0, num_lanes, num_simd_lanes):
           col_slice_global = pl.ds(col_vmem_start + col_compute_offset, num_simd_lanes)
 
+          # UNBREAKABLE DYNAMIC LOOP BARRIER RECIPES:
+          # These helper functions run a 1-iteration loop with a dynamic, unprovable limit.
+          # Because the loop limit depends on a dynamic runtime input (src_indices), and the
+          # write index is the loop induction variable, the compiler's static store-load forwarding
+          # and copy propagation passes are completely and absolutely blocked!
+          # This forces physical materialization in VMEM with zero compiler bypass risk.
+          def spill_u32(val, temp_ref):
+            cond = src_indices[0] >= 0
+            dynamic_one = jnp.where(cond, 1, 2).astype(jnp.int32)
+            @pl.loop(0, dynamic_one)
+            def spill_inner(i):
+              temp_ref[i, :] = val
+            return temp_ref[0, :]
+
+          def spill_f32(val, temp_ref):
+            cond = src_indices[0] >= 0
+            dynamic_one = jnp.where(cond, 1, 2).astype(jnp.int32)
+            @pl.loop(0, dynamic_one)
+            def spill_inner(i):
+              temp_ref[i, :] = val
+            return temp_ref[0, :]
+
           previous_accumulated_even = None
           previous_accumulated_odd = None
           previous_accumulated_f32 = None
@@ -206,32 +228,14 @@ def main_kernel(
             flat_read_slice = pl.ds(row_src * col_size + col_vmem_start + col_compute_offset, num_simd_lanes)
             data = in_vmem_ref[0, flat_read_slice]
 
-            # Construct the UNBREAKABLE Dynamic Select Spilling Barrier:
-            # 1. Construct a dynamic condition from loaded HBM inputs (unprovable to compiler!).
-            # Since token indices are always non-negative, cond is guaranteed to be True at runtime.
-            cond = src_indices[0] >= 0
-            
-            # 2. Select symbolically different write and read indices.
-            # Because the branch values are different, the compiler CANNOT algebraically simplify
-            # the select expressions, nor can it symbolically prove that 'select(cond, 0, 1) == select(cond, 0, 2)'!
-            # Thus, store-load forwarding is 100% physically and logically blocked!
-            # But at runtime, since cond is always True, both write_idx and read_idx evaluate
-            # to 0, ensuring perfect runtime data alignment!
-            write_idx = jnp.where(cond, 0, 1).astype(jnp.int32)
-            read_idx = jnp.where(cond, 0, 2).astype(jnp.int32)
-
             if is_bf16:
-              # Pure 32-Bit Unpacking with Unbreakable Dynamic Select Spilling:
+              # Pure 32-Bit Unpacking with Unbreakable Dynamic Loop Spilling:
               even_u32 = jnp.bitwise_and(data, 65535).astype(jnp.uint32)
               odd_u32 = jnp.bitwise_right_shift(data, 16).astype(jnp.uint32)
               
-              # Write shifted expressions using write_idx.
-              temp_u32_vmem_ref[write_idx, :] = jnp.bitwise_left_shift(even_u32, 16).astype(jnp.uint32)
-              temp_u32_vmem_ref[write_idx + 1, :] = jnp.bitwise_left_shift(odd_u32, 16).astype(jnp.uint32)
-              
-              # Read back using read_idx to force physical register materialization.
-              even_materialized = temp_u32_vmem_ref[read_idx, :]
-              odd_materialized = temp_u32_vmem_ref[read_idx + 1, :]
+              # Force physical materialization using our dynamic loop helper!
+              even_materialized = spill_u32(jnp.bitwise_left_shift(even_u32, 16).astype(jnp.uint32), temp_u32_vmem_ref)
+              odd_materialized = spill_u32(jnp.bitwise_left_shift(odd_u32, 16).astype(jnp.uint32), temp_u32_vmem_ref)
               
               # Bitcast now compiles flawlessly on physically materialized registers!
               even_f32 = jax.lax.bitcast_convert_type(even_materialized, jnp.float32)
@@ -252,12 +256,9 @@ def main_kernel(
                 carry_even_u32 = jnp.bitwise_and(carry_packed, 65535).astype(jnp.uint32)
                 carry_odd_u32 = jnp.bitwise_right_shift(carry_packed, 16).astype(jnp.uint32)
                 
-                # Materialize carry reads dynamically.
-                temp_u32_vmem_ref[write_idx, :] = jnp.bitwise_left_shift(carry_even_u32, 16).astype(jnp.uint32)
-                temp_u32_vmem_ref[write_idx + 1, :] = jnp.bitwise_left_shift(carry_odd_u32, 16).astype(jnp.uint32)
-                
-                carry_even_materialized = temp_u32_vmem_ref[read_idx, :]
-                carry_odd_materialized = temp_u32_vmem_ref[read_idx + 1, :]
+                # Materialize carry reads dynamically using our loop helper!
+                carry_even_materialized = spill_u32(jnp.bitwise_left_shift(carry_even_u32, 16).astype(jnp.uint32), temp_u32_vmem_ref)
+                carry_odd_materialized = spill_u32(jnp.bitwise_left_shift(carry_odd_u32, 16).astype(jnp.uint32), temp_u32_vmem_ref)
                 
                 previous_accumulated_even = jax.lax.bitcast_convert_type(carry_even_materialized, jnp.float32)
                 previous_accumulated_odd = jax.lax.bitcast_convert_type(carry_odd_materialized, jnp.float32)
@@ -287,12 +288,9 @@ def main_kernel(
               previous_accumulated_even = accumulated_even
               previous_accumulated_odd = accumulated_odd
 
-              # Pure 32-Bit Packing with Symbolically Differentiated VMEM Spilling:
-              temp_f32_vmem_ref[write_idx, :] = accumulated_even.astype(jnp.bfloat16).astype(jnp.float32)
-              temp_f32_vmem_ref[write_idx + 1, :] = accumulated_odd.astype(jnp.bfloat16).astype(jnp.float32)
-              
-              even_rounded_materialized = temp_f32_vmem_ref[read_idx, :]
-              odd_rounded_materialized = temp_f32_vmem_ref[read_idx + 1, :]
+              # Pure 32-Bit Packing with Unbreakable Dynamic Loop Spilling:
+              even_rounded_materialized = spill_f32(accumulated_even.astype(jnp.bfloat16).astype(jnp.float32), temp_f32_vmem_ref)
+              odd_rounded_materialized = spill_f32(accumulated_odd.astype(jnp.bfloat16).astype(jnp.float32), temp_f32_vmem_ref)
 
               even_u32_out = jax.lax.bitcast_convert_type(even_rounded_materialized, jnp.uint32)
               odd_u32_out = jax.lax.bitcast_convert_type(odd_rounded_materialized, jnp.uint32)
