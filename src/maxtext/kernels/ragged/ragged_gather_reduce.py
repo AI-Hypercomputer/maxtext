@@ -257,13 +257,6 @@ def main_kernel(
       def dma_write_loop(col_vmem_start, carry):
         col_hbm_start = col_start + col_vmem_start
 
-        for _ in range(num_simd_lanes):
-          pltpu.make_async_copy(
-              in_32b_hbm_ref.at[0, :num_lanes],
-              out_vmem_ref.at[0, :num_lanes],
-              recv_sem,
-          ).wait()
-
         # We accumulate the packed row data in Python lists of JAX tracers on the fly.
         # This completely avoids any post-compute VMEM reads, eliminating layout conflicts!
         packed_rows_registers = [[] for _ in range(num_simd_lanes)]
