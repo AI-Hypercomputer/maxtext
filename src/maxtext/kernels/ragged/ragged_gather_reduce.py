@@ -382,9 +382,10 @@ def main_kernel(
           dst_row_hbm = jnp.where(row_valid, dst_indices[i], last_valid_dst_row_hbm)
           
           if is_bf16:
+            col_hbm_start_packed = pl.multiple_of(col_hbm_start // 2, 8)
             pltpu.make_async_copy(
                 temp_packed_vmem.at[src_row_vmem, :64],
-                out_32b_hbm_ref.at[dst_row_hbm, pl.ds(col_hbm_start // 2, 64)],
+                out_32b_hbm_ref.at[dst_row_hbm, pl.ds(col_hbm_start_packed, 64)],
                 send_sem,
             ).start()
           else:
