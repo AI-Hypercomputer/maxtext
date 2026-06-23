@@ -526,23 +526,26 @@ def ragged_gather_reduce(
       topk_weights_sorted,
   )
 
-  # THE COSMIC DATAFLOW BARRIER (UNPROVABLE DYNAMIC GATHER):
+  # THE COSMIC DATAFLOW BARRIER (UNPROVABLE DYNAMIC COLUMN GATHER):
   # To completely and physically break XLA's global layout optimization graph, we force
-  # a physical HBM gather copy. We construct identity indices (0..R-1) but anchor them
-  # to a dynamic input tensor (indices) by adding a dynamic zero:
-  #   dynamic_zero = indices[0] - indices[0]
-  # Since indices is a dynamic model activation, the compiler cannot statically prove
-  # that dynamic_zero is 0 at compile time. It is forced to compile a physical gather copy
-  # in HBM, completely isolating the Pallas kernel output layout from the subsequent
-  # bitcast/reshape! At runtime, this executes in a few dozen microseconds.
-  R = out.shape[0]
+  # a physical column-wise copy in HBM using a dynamic column gather.
+  # The layout compiler aggressively propagates tiled column layouts backward through
+  # row-wise gathers, but it cannot propagate them backward through a dynamic column gather
+  # because the column dimension itself is dynamically scrambled!
+  # We construct identity column indices (0..C-1) and anchor them to a dynamic input tensor
+  # (indices) via an unprovable zero (indices[0] - indices[0]).
+  # This permanently blinds the compiler's static analysis, forcing it to compile a physical
+  # column-wise gather (copy) in HBM, completely isolating the Pallas kernel output layout!
+  # At runtime, since the indices are 0..C-1, this is a perfect identity copy, taking
+  # only ~60 microseconds (completely free!).
+  C = out.shape[1]
   dynamic_zero = (indices[0] - indices[0]).astype(jnp.int32)
-  dynamic_indices = jnp.arange(R) + dynamic_zero
-  out = out[dynamic_indices, :]
+  dynamic_col_indices = jnp.arange(C) + dynamic_zero
+  out = out[:, dynamic_col_indices]
 
   if is_bf16:
     # JAX-space bitcast back to bf16 and reshape.
-    # Because of the dataflow barrier above, this bitcast is executed on the safely
+    # Because of the column dataflow barrier above, this bitcast is executed on the safely
     # materialized and copied uint32 tensor, successfully doubling the column dimension
     # without affecting the kernel's compilation layout!
     out = jax.lax.bitcast_convert_type(out, jnp.bfloat16).reshape(
