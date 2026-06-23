@@ -1802,6 +1802,61 @@ class MLATest(attention_test_util.MLATestBase):
 
     np.testing.assert_allclose(loss, 0.0, atol=1e-5)
 
+  def test_indexer_with_approx_top_k(self):
+    """Verify indexer runs with approx_max_k enabled."""
+    mla_config_args = self.config_arguments.copy()
+    mla_config_args["use_indexer"] = True
+    mla_config_args["use_approx_top_k"] = True
+    mla_config_args["attention"] = "dot_product"
+
+    cfg, mla = self.init_mla(mla_config_args, rope_type="default")
+
+    bsz, seqlen = 2, 8
+    lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg, cfg.dtype)
+
+    # Run forward pass which triggers indexer
+    out, _ = mla(
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+    self.assertIsNotNone(out)
+
+  def test_approx_top_k_recall(self):
+    """Verify that approx_max_k meets the specified recall target compared to exact top_k."""
+    jax_rng = jax.random.PRNGKey(0)
+
+    # We need a large enough N to make the approximation meaningful.
+    # Use shape [batch=4, queries=16, N=1024]
+    batch, queries, N = 4, 16, 1024
+    K = 64
+    recall_target = 0.95
+
+    # Generate random scores
+    scores = jax.random.normal(jax_rng, (batch, queries, N))
+
+    # 1. Run exact Top-K
+    _, true_indices = jax.lax.top_k(scores, k=K)  # [batch, queries, K]
+
+    # 2. Run approx Top-K
+    _, approx_indices = jax.lax.approx_max_k(scores, k=K, recall_target=recall_target)  # [batch, queries, K]
+
+    # 3. Calculate Recall
+    # Broadcast compare true_indices [B, Q, K, 1] and approx_indices [B, Q, 1, K]
+    matches = (true_indices[..., None] == approx_indices[..., None, :]).any(axis=-1)  # [B, Q, K]
+    num_matches = matches.sum(axis=-1)  # [B, Q]
+    actual_recalls = num_matches / K  # [B, Q]
+    mean_recall = jnp.mean(actual_recalls)
+
+    print(f"\nApprox Top-K Recall Target: {recall_target}, Actual Mean Recall: {mean_recall:.4f}")
+
+    # Assert that the actual recall is close to or exceeds the target.
+    # We allow a small margin (e.g., 0.05) due to the approximate nature and sample size.
+    self.assertGreaterEqual(mean_recall, recall_target - 0.05)
+
   def test_indexer_gradients(self):
     # Test that gradients do NOT flow back to inputs
     bsz, seqlen = 2, 8

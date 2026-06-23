@@ -397,6 +397,8 @@ use_indexer: false
 indexer_head_dim: 128
 indexer_n_heads: 64
 indexer_topk: 2048
+use_approx_top_k: false
+approx_top_k_recall: 0.95
 # Determines the training strategy for the indexer:
 # - false (Dense Warm-up): Computes indexer loss over all tokens. Used with `trainable_parameters_mask` to freeze other model parameters.
 # - true (Sparse Training): Computes indexer loss over top-k tokens only and detaches the indexer input for independent optimization.
