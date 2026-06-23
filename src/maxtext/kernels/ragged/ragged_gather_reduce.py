@@ -417,10 +417,12 @@ def ragged_gather_reduce(
   )
 
   if is_bf16:
-    # Outer Input Bitcast: convert bfloat16 to uint32 in JAX before calling pl.kernel!
+    # Outer Input Bitcast: flatten, bitcast, and reshape to 32-bit (uint32)!
     # This transforms the input into a pure 32-bit HBM tensor, completely bypassing
     # all boundary element-size-changing layout cast crashes!
-    x_input = jax.lax.bitcast_convert_type(x, jnp.uint32)
+    x_flat = x.reshape(-1)
+    x_input_flat = jax.lax.bitcast_convert_type(x_flat, jnp.uint32)
+    x_input = x_input_flat.reshape(input_size, hidden_size // 2)
     dtype_bytes = 2
   else:
     x_input = x
