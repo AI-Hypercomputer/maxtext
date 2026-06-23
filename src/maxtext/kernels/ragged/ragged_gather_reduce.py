@@ -526,19 +526,18 @@ def ragged_gather_reduce(
       topk_weights_sorted,
   )
 
-  # THE OMNIPOTENT DATAFLOW BARRIER (DYNAMIC GATHER):
-  # To completely prevent XLA's global layout optimization pass from back-propagating
-  # the layout of the subsequent JAX-space bitcast/reshape into the Pallas kernel output
-  # buffer (which triggers the fatal HBM write layout crash), we force a dynamic memory
-  # copy in HBM using a dynamic gather.
-  # Since dynamic_indices is a dynamic tracer (jnp.arange(R)), the compiler cannot prove
-  # at JIT time that it is a sequential range, forcing a physical gather copy in HBM.
-  # This breaks the compiler's layout dataflow graph completely! The kernel output buffer
-  # is compiled with its natural layout (R, C // 2) uint32.
-  # At runtime, since the indices are 0..R-1, this is a perfect identity copy, taking
-  # only ~60 microseconds (completely free compared to the 2000 microsecond casting overhead!).
+  # THE COSMIC DATAFLOW BARRIER (UNPROVABLE DYNAMIC GATHER):
+  # To completely and physically break XLA's global layout optimization graph, we force
+  # a physical HBM gather copy. We construct identity indices (0..R-1) but anchor them
+  # to a dynamic input tensor (indices) by adding a dynamic zero:
+  #   dynamic_zero = indices[0] - indices[0]
+  # Since indices is a dynamic model activation, the compiler cannot statically prove
+  # that dynamic_zero is 0 at compile time. It is forced to compile a physical gather copy
+  # in HBM, completely isolating the Pallas kernel output layout from the subsequent
+  # bitcast/reshape! At runtime, this executes in a few dozen microseconds.
   R = out.shape[0]
-  dynamic_indices = jnp.arange(R)
+  dynamic_zero = (indices[0] - indices[0]).astype(jnp.int32)
+  dynamic_indices = jnp.arange(R) + dynamic_zero
   out = out[dynamic_indices, :]
 
   if is_bf16:
