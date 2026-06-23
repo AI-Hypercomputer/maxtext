@@ -79,14 +79,11 @@ def main_kernel(
     is_bf16: bool,
 ):
   """SparseCore kernel for ragged gather reduce."""
-  # Local subcore indices.
-  core_id = shard_map.current_device_index(core_axis_name)
-  subcore_id = shard_map.current_device_index(subcore_axis_name)
-  num_subcores = 2 # TPU v6e has 2 subcores per core.
+  # Local flat core/subcore index from the Pallas parallel grid.
+  core_id = pl.program_id(0)
 
-  # Row partition is mapped to subcores.
-  row_partition_id = core_id * num_subcores + subcore_id
-  # Column partition is mapped to vector mesh.
+  # Decode the flat index into row and column partition IDs!
+  row_partition_id = core_id // num_column_partitions
   col_partition_id = core_id % num_column_partitions
 
   # Dimension sizes.
