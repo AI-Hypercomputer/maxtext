@@ -299,7 +299,9 @@ def main_kernel(
               data_f32 = jax.lax.bitcast_convert_type(data_u32, jnp.float32)
               
               # Convert to bf16 and cast to uint32 (lower 16 bits)
-              data_bf16_u32 = jax.lax.bitcast_convert_type(data_f32.astype(jnp.bfloat16), jnp.uint32)
+              data_bf16 = data_f32.astype(jnp.bfloat16)
+              data_u16 = jax.lax.bitcast_convert_type(data_bf16, jnp.uint16)
+              data_bf16_u32 = data_u16.astype(jnp.uint32)
               data_bf16_u32 = jnp.bitwise_and(data_bf16_u32, 0xffff)
               
               # Shift: even -> lower 16, odd -> upper 16
