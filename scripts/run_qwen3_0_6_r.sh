@@ -20,7 +20,7 @@ export BASE_OUTPUT_DIRECTORY="${BASE_OUTPUT_DIRECTORY:-gs://runner-maxtext-logs/
 export DOCKER_IMAGE="${DOCKER_IMAGE:-gcr.io/cloud-tpu-multipod-dev/mohitkhatwani-runner:vxpq-2026-06-13-02-49-03}" # Full path to the Docker image you pushed (e.g., gcr.io/my-project/my-image:tag)
 export MAXTEXT_CKPT_PATH="${MAXTEXT_CKPT_PATH:-gs://mohitkhatwani_multipods/qwen3-0.6b/pathways-compat/0/items}" # GCS path of the MaxText checkpoint to fine-tune from
 export TPU_TYPE="tpu7x-128"
-export WORKLOAD_NAME="rl-qwen3-$RANDOM"
+export WORKLOAD_NAME="mohit-rl-qwen3-$RANDOM"
 
 # --- Variable Validation ---
 if [ -z "$PROJECT_ID" ]; then
@@ -113,18 +113,18 @@ decode_sampling_nucleus_p=0.95 \
 dataset_name=nvidia/OpenMathInstruct-2 \
 hf_train_files=hf://datasets/nvidia/OpenMathInstruct-2/data/train_1M-*.parquet \
 train_split=train_1M \
-max_target_length=16384 \
+max_target_length=8198 \
 max_prefill_predict_length=8192 \
 learning_rate=1e-6 \
 batch_size=480 \
 train_micro_batch_size=8 \
 rollout_micro_batch_size=480 \
-rollout_data_parallelism=8 \
-rollout_tensor_parallelism=8 \
+rollout_data_parallelism=16 \
+rollout_tensor_parallelism=4 \
 enable_dp_attention=false \
 hbm_utilization_vllm=0.22 \
 max_num_seqs=4096 \
-max_num_batched_tokens=32768 \
+max_num_batched_tokens=8198 \
 scan_layers=True \
 allow_split_physical_axes=True \
 enable_tunix_perf_metrics=True \
@@ -134,8 +134,8 @@ enable_checkpointing=true \
 load_parameters_path=$MAXTEXT_CKPT_PATH \
 rollout_vllm_init_with_random_weights=True \
 profiler=xplane \
-skip_first_n_steps_for_profiler=5 \
-profiler_steps=2"
+skip_first_n_steps_for_profiler=1 \
+profiler_steps=1"
 # vllm_hf_overrides='{architectures: [\"MaxTextForCausalLM\"]}' \
 # vllm_additional_config='{\"maxtext_config\": {\"model_name\": \"qwen3-0.6b\", \"model_call_mode\": \"inference\", \"enable_dp_attention\": false, \"allow_split_physical_axes\": true, \"log_config\": false, \"weight_dtype\": \"bfloat16\", \"prefuse_moe_weights\": true}}'"
 

@@ -609,8 +609,15 @@ def rl_train(argv: Sequence[str], kwargs: dict):
     import tpu_inference.models.common.pathways_dummy_loader as pdl
     import tpu_inference.models.jax.utils.weight_utils as wu
 
-    jax.clear_caches = lambda: None
-    max_logging.log("Permanently patched jax.clear_caches to lambda: None to prevent cache thrashing.")
+    class JaxWrapper:
+
+      def __getattr__(self, name):
+        if name == "clear_caches":
+          return lambda: None
+        return getattr(jax, name)
+
+    wu.jax = JaxWrapper()
+    max_logging.log("Monkey-patched weight_utils.jax to override clear_caches.")
 
     def optimized_create_dummy_weights_on_tpu(
         sharding,
