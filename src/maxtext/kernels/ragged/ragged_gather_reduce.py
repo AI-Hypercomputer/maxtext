@@ -123,7 +123,8 @@ def main_kernel(
     # Inputs.
     num_rows_per_row_partition_ref: jax.Ref,
     in_hbm_ref: jax.Ref,
-    src_indices_hbm_ref: jax.Ref,
+    src_indices_div_hbm_ref: jax.Ref,
+    src_indices_mod_hbm_ref: jax.Ref,
     dst_indices_hbm_ref: jax.Ref,
     topk_weights_hbm_ref: jax.Ref,
     # Outputs.
@@ -132,7 +133,8 @@ def main_kernel(
     num_rows_per_row_partition_vmem_ref: jax.Ref,
     out_vmem_ref: jax.Ref,
     prev_iter_last_row_vmem_ref: jax.Ref,
-    src_indices_vmem_ref: jax.Ref,
+    src_indices_div_vmem_ref: jax.Ref,
+    src_indices_mod_vmem_ref: jax.Ref,
     dst_indices_vmem_ref: jax.Ref,
     topk_weights_vmem_ref: jax.Ref,
     sem_ref: jax.Ref,
@@ -182,13 +184,11 @@ def main_kernel(
           row_partition_id == i,
           num_rows_per_row_partition[i],
           num_rows_current_row_partition,
-      )
-
-    row_tile_size = num_simd_lanes
+         row_tile_size = num_simd_lanes
     num_row_tiles = pl.cdiv(num_rows_current_row_partition, row_tile_size)
     row_start = row_partition_id * row_partition_size
     col_start = col_partition_id * col_size
-
+ 
     @pl.loop(0, num_row_tiles)
     def row_loop(row_block_id):
       row_tile_start = row_start + row_block_id * num_simd_lanes
@@ -198,8 +198,15 @@ def main_kernel(
       dma_list = []
       dma_list.append(
           pltpu.make_async_copy(
-              src_indices_hbm_ref.at[pl.ds(row_tile_start, num_simd_lanes)],
-              src_indices_vmem_ref,
+              src_indices_div_hbm_ref.at[pl.ds(row_tile_start, num_simd_lanes)],
+              src_indices_div_vmem_ref,
+              recv_sem,
+          )
+      )
+      dma_list.append(
+          pltpu.make_async_copy(
+              src_indices_mod_hbm_ref.at[pl.ds(row_tile_start, num_simd_lanes)],
+              src_indices_mod_vmem_ref,
               recv_sem,
           )
       )
@@ -221,7 +228,8 @@ def main_kernel(
       jax.tree.map(lambda x: x.wait(), dma_list)
 
       # HBM to VMEM transfer.
-      src_indices = src_indices_vmem_ref[...]
+      src_indices_div = src_indices_div_vmem_ref[...]
+      src_indices_mod = src_indices_mod_vmem_ref[...]
       dst_indices = dst_indices_vmem_ref[...]
       topk_weights = topk_weights_vmem_ref[...]
 
@@ -249,7 +257,7 @@ def main_kernel(
       for col_vmem_start in range(0, col_size, loop_step):
         col_hbm_start = col_start + col_vmem_start
         for row_vmem in range(num_simd_lanes):
-          row_hbm = src_indices[row_vmem] // input_packing
+          row_hbm = src_indices_div[row_vmem] # No division! Pre-divided in wrapper!
           if is_bf16:
             # Load 256 columns using two separate 128-column DMA reads into flat VMEM.
             # Flat offset: row_vmem * col_size + col_vmem_start.
@@ -287,7 +295,7 @@ def main_kernel(
 
           previous_accumulated_data = None
           for row_src in range(num_simd_lanes):
-            row_src_pack = src_indices[row_src] % input_packing
+            row_src_pack = src_indices_mod[row_src] # No modulo! Pre-calculated in wrapper!
 
             # Construct flat slice directly to avoid Slice + int TypeError!
             flat_slice = pl.ds(row_src * col_size + col_vmem_start + col_compute_offset, num_simd_lanes)
@@ -633,6 +641,12 @@ def ragged_gather_reduce(
       core_axis_name="core",
       subcore_axis_name="subcore",
   )
+  # Pre-calculate divided and modulo indices in the wrapper to completely
+  # eliminate tracer division and modulo operators inside the kernel!
+  input_packing = 32 // jax.dtypes.itemsize_bits(x.dtype)
+  src_indices_div = src_indices // input_packing
+  src_indices_mod = src_indices % input_packing
+
   out = pl.kernel(  # pytype: disable=wrong-keyword-args
       functools.partial(
           main_kernel,
@@ -664,13 +678,14 @@ def ragged_gather_reduce(
               num_rows_per_row_partition_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
               out_vmem_ref=pltpu.VMEM((1, num_simd_lanes * col_size), jnp.uint32),
               prev_iter_last_row_vmem_ref=pltpu.VMEM((1, col_size), jnp.uint32),
-              src_indices_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
+              src_indices_div_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
+              src_indices_mod_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
               dst_indices_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
               topk_weights_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.float32),
               sem_ref=pltpu.SemaphoreType.DMA((2,)),
           ),
       },
-  )(num_src_rows_per_row_partition, x, src_indices, dst_indices, topk_weights)
+  )(num_src_rows_per_row_partition, x, src_indices_div, src_indices_mod, dst_indices, topk_weights)
 
   if is_bf16:
     # out already has shape (R, C // 2) of f32!
