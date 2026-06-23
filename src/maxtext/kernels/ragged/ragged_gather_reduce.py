@@ -415,7 +415,7 @@ def main_kernel(
             # VMEM source is flat out_vmem_ref. Offset must be proven 128-aligned!
             write_col_hbm_start = pl.multiple_of(col_hbm_start // 2, 128)
             write_col_vmem_start = pl.multiple_of(col_vmem_start, 128)
-            write_col_hbm_start_2 = pl.multiple_of(col_hbm_start // 2 + 128, 128)
+            write_col_hbm_start_2 = pl.multiple_of(col_hbm_start // 2 + col_size // 2, 128) # Disjoint second half HBM offset!
             write_col_vmem_start_2 = pl.multiple_of(col_vmem_start + 128, 128)
             
             flat_col_vmem_start_1 = pl.multiple_of(src_row_vmem * col_size + write_col_vmem_start, 128)
