@@ -290,11 +290,11 @@ def main_kernel(
           for col_compute_offset in range(0, num_lanes, num_simd_lanes):
             col_slice = pl.ds(col_vmem_start + col_compute_offset, num_simd_lanes)
             
-            # 1. Read all accumulated data into a local static buffer to avoid hazards
-            accum_data = jnp.zeros((num_simd_lanes, num_simd_lanes), dtype=jnp.uint32)
+            # 1. Read all accumulated data into a Python list of Tracers to avoid hazards and JAX scatter/dynamic_slice
+            accum_data = [None] * num_simd_lanes
             for i in range(num_simd_lanes):
               vmem_lane = src_row_idx_in_vmem[i]
-              accum_data = accum_data.at[i].set(out_vmem_ref[vmem_lane, col_slice])
+              accum_data[i] = out_vmem_ref[vmem_lane, col_slice]
               
             # 2. Initialize the packed rows in out_vmem_ref to 0 (since we will OR into them)
             for p in range(num_packed_rows):
