@@ -621,6 +621,7 @@ def ragged_gather_reduce(
       num_subcores=sc_info.num_subcores,
       core_axis_name="core",
       subcore_axis_name="subcore",
+  )
   out = pl.kernel(  # pytype: disable=wrong-keyword-args
       functools.partial(
           main_kernel,
