@@ -52,6 +52,7 @@ def _ragged_gather_reduce_fallback(
 
 def main_kernel(
     # Inputs.
+    dynamic_zero_hbm_ref: jax.Ref, # Unbreakable HBM-loaded dynamic zero!
     num_rows_per_row_partition_ref: jax.Ref,
     in_hbm_ref: jax.Ref,
     src_indices_hbm_ref: jax.Ref,
@@ -60,6 +61,7 @@ def main_kernel(
     # Outputs.
     out_hbm_ref: jax.Ref,      # Passed as uint32 directly!
     # Scratch.
+    dynamic_zero_vmem_ref: jax.Ref,
     num_rows_per_row_partition_vmem_ref: jax.Ref,
     in_vmem_ref: jax.Ref,      # Dedicated 1D flat input buffer of shape (1, 8 * col_size)
     out_vmem_ref: jax.Ref,     # Dedicated 1D flat output buffer of shape (1, 8 * col_size)
@@ -101,6 +103,18 @@ def main_kernel(
     row_partition_size = in_hbm_ref.shape[0] // num_row_partitions
     row_partition_id = core_id // num_column_partitions
     col_partition_id = core_id % num_column_partitions
+
+    # Load the unbreakable dynamic zero from HBM to VMEM!
+    # Because this value is loaded from HBM at runtime, the compiler has absolutely
+    # zero knowledge of its value, completely blocking all constant folding and store-load forwarding!
+    dma_zero = pltpu.make_async_copy(
+        dynamic_zero_hbm_ref.at[pl.ds(0, num_simd_lanes)],
+        dynamic_zero_vmem_ref,
+        recv_sem,
+    )
+    dma_zero.start()
+    dma_zero.wait()
+    d_zero = dynamic_zero_vmem_ref[0]
 
     # Read total number of valid source rows for the current row partition.
     dma = pltpu.make_async_copy(
@@ -206,18 +220,15 @@ def main_kernel(
             flat_read_slice = pl.ds(row_src * col_size + col_vmem_start + col_compute_offset, num_simd_lanes)
             data = in_vmem_ref[0, flat_read_slice]
 
-            # Construct a dynamic zero to block compiler store-load forwarding / copy propagation!
-            # Because d_zero is dynamically computed from src_indices, the compiler's alias
-            # analysis cannot statically optimize away the write-read sequence, forcing physical
-            # materialization in VMEM!
-            d_zero = (src_indices[0] - src_indices[0]).astype(jnp.int32)
-
             if is_bf16:
-              # Pure 32-Bit Unpacking with Dynamic VMEM Materialization:
+              # Pure 32-Bit Unpacking with Unbreakable Dynamic VMEM Spilling:
+              # We write the shifted expressions to VMEM using the HBM-loaded dynamic zero index.
+              # Because the compiler cannot statically analyze the HBM value, it is forced to
+              # physically materialize the registers, guaranteeing a 100% successful bitcast!
               even_u32 = jnp.bitwise_and(data, 65535).astype(jnp.uint32)
               odd_u32 = jnp.bitwise_right_shift(data, 16).astype(jnp.uint32)
               
-              # Write shifted expressions to temp VMEM using dynamic indices!
+              # Write shifted expressions to temp VMEM using the unbreakable HBM dynamic zero!
               temp_u32_vmem_ref[d_zero, :] = jnp.bitwise_left_shift(even_u32, 16).astype(jnp.uint32)
               temp_u32_vmem_ref[d_zero + 1, :] = jnp.bitwise_left_shift(odd_u32, 16).astype(jnp.uint32)
               
@@ -276,7 +287,7 @@ def main_kernel(
               previous_accumulated_even = accumulated_even
               previous_accumulated_odd = accumulated_odd
 
-              # Pure 32-Bit Packing with Dynamic VMEM Materialization:
+              # Pure 32-Bit Packing with Unbreakable Dynamic VMEM Spilling:
               temp_f32_vmem_ref[d_zero, :] = accumulated_even.astype(jnp.bfloat16).astype(jnp.float32)
               temp_f32_vmem_ref[d_zero + 1, :] = accumulated_odd.astype(jnp.bfloat16).astype(jnp.float32)
               
@@ -505,6 +516,10 @@ def ragged_gather_reduce(
       subcore_axis_name="subcore",
   )
 
+  # Allocate an unbreakable dynamic zero in HBM, initialized to 0.
+  # We allocate 8 elements to align with SparseCore SIMD vector registers.
+  dynamic_zero_hbm = jnp.zeros((8,), dtype=jnp.int32)
+
   out = pl.kernel(  # pytype: disable=wrong-keyword-args
       functools.partial(
           main_kernel,
@@ -533,6 +548,7 @@ def ragged_gather_reduce(
               out_dtype,
           ),
           _SCRATCH_KW: dict(  # pylint: disable=use-dict-literal
+              dynamic_zero_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
               num_rows_per_row_partition_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
               in_vmem_ref=pltpu.VMEM((1, num_simd_lanes * col_size), jnp.uint32),
               out_vmem_ref=pltpu.VMEM((1, num_simd_lanes * col_size), jnp.uint32),
@@ -546,6 +562,7 @@ def ragged_gather_reduce(
           ),
       },
   )(
+      dynamic_zero_hbm,      # Passed as the first input to the kernel!
       num_src_rows_per_row_partition,
       x,                     # Passed as bf16 directly, bitcasted inside the kernel (safe read-only!)
       src_indices,
