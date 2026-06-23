@@ -372,12 +372,13 @@ def main_kernel(
         src_row_idx_in_vmem.reverse()
         row_valid_vec.reverse()
 
-        # Write the accumulated packed register rows to temp_packed_vmem in a single
-        # perfectly tile-aligned 128-column write per row!
+        # Write the accumulated packed register rows to temp_packed_vmem in chunks of 8.
+        # SparseCore VMEM stores (Swap) strictly only support shape (8,) in register compute!
         if is_bf16:
           for r in range(num_simd_lanes):
             packed_row = jnp.array(packed_rows_registers[r]) # shape (128,)
-            temp_packed_vmem[r, :] = packed_row
+            for c in range(0, 128, 8):
+              temp_packed_vmem[r, pl.ds(c, 8)] = packed_row[c : c + 8]
 
         # There must be at least one valid row to write in the current row_tile.
         # When num valid writes is not a multiple of row_tile_size, we repeat
