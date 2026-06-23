@@ -252,28 +252,28 @@ def main_kernel(
         for row_vmem in range(num_simd_lanes):
           row_hbm = src_indices[row_vmem] # No division! Normal undivided row index!
           if is_bf16:
-            # Load 256 columns of bfloat16 directly into flat bfloat16 VMEM (in_vmem_ref)!
-            # This perfectly matches the unpacked bfloat16 input shape!
-            offset1 = row_vmem * col_size + col_vmem_start
-            offset2 = row_vmem * col_size + col_vmem_start + 128
+            # Load 256 columns of bfloat16 directly into 2D bfloat16 VMEM (in_vmem_ref)!
+            # Destination is row row_vmem, columns col_vmem_start to col_vmem_start + 256.
+            offset1 = col_vmem_start
+            offset2 = col_vmem_start + 128
             print(f"  [bf16] col_vmem_start: {col_vmem_start}, row_vmem: {row_vmem} -> offset1: {offset1}, offset2: {offset2}")
             pltpu.make_async_copy(
                 in_hbm_ref.at[row_hbm, pl.ds(col_hbm_start, 128)],
-                in_vmem_ref.at[0, pl.ds(offset1, 128)],
+                in_vmem_ref.at[row_vmem, pl.ds(offset1, 128)], # 2D row-sliced destination!
                 recv_sem,
             ).start()
             pltpu.make_async_copy(
                 in_hbm_ref.at[row_hbm, pl.ds(col_hbm_start + 128, 128)],
-                in_vmem_ref.at[0, pl.ds(offset2, 128)],
+                in_vmem_ref.at[row_vmem, pl.ds(offset2, 128)], # 2D row-sliced destination!
                 recv_sem,
             ).start()
           else:
-            # f32 path: load 128 columns of float32 directly into flat in_vmem_ref
-            offset1 = row_vmem * col_size + col_vmem_start
+            # f32 path: load 128 columns of float32 directly into 2D VMEM
+            offset1 = col_vmem_start
             print(f"  [f32] col_vmem_start: {col_vmem_start}, row_vmem: {row_vmem} -> offset1: {offset1}")
             pltpu.make_async_copy(
                 in_hbm_ref.at[row_hbm, pl.ds(col_hbm_start, 128)],
-                in_vmem_ref.at[0, pl.ds(offset1, 128)],
+                in_vmem_ref.at[row_vmem, pl.ds(offset1, 128)], # 2D row-sliced destination!
                 recv_sem,
             ).start()
 
@@ -291,21 +291,20 @@ def main_kernel(
           for row_src in range(num_simd_lanes):
             # Load and cast data.
             # SparseCore hardware strictly requires 16-element aligned loads for 16-bit data (bf16).
-            # We perform aligned 16-element reads and slice to 8 elements in register space.
+            # Because the row dimension is not tiled in VMEM, squeezing it (in_vmem_ref[row_src, ...])
+            # is 100% supported, allowing us to load a physical (16,) shape to satisfy the Get constraint!
             if is_bf16:
               is_aligned = (col_compute_offset % 16) == 0
               read_offset = col_compute_offset if is_aligned else col_compute_offset - 8
-              flat_slice_16 = pl.ds(row_src * col_size + col_vmem_start + read_offset, 16)
-              data_16 = in_vmem_ref[0:1, flat_slice_16]
-              data = data_16[:, :8] if is_aligned else data_16[:, 8:]
+              data_16 = in_vmem_ref[row_src, pl.ds(col_vmem_start + read_offset, 16)] # 2D read yielding (16,)!
+              data = data_16[:8] if is_aligned else data_16[8:] # Register slice to (8,)
             else:
-              flat_slice_8 = pl.ds(row_src * col_size + col_vmem_start + col_compute_offset, num_simd_lanes)
-              data = in_vmem_ref[0:1, flat_slice_8]
+              data = in_vmem_ref[row_src, pl.ds(col_vmem_start + col_compute_offset, num_simd_lanes)] # 2D read yielding (8,)!
             # Convert to float32 precision for accumulation
             data = data.astype(jnp.float32)
             # Accumulate at float32 precision
             data = data * topk_weights[row_src]
-
+ 
             dst_row_hbm = dst_indices[row_src]
             if row_src == 0:
               # We use the outer prev_dst_row_hbm directly since the loop is unrolled!
@@ -341,10 +340,10 @@ def main_kernel(
               # Cast to uint32 before indexing to avoid squeezing non-32bit scalars!
               data_u32 = data_u16.astype(jnp.uint32)
               packed_val = [
-                  jnp.bitwise_or(jnp.bitwise_left_shift(data_u32[0, 1], 16), data_u32[0, 0]),
-                  jnp.bitwise_or(jnp.bitwise_left_shift(data_u32[0, 3], 16), data_u32[0, 2]),
-                  jnp.bitwise_or(jnp.bitwise_left_shift(data_u32[0, 5], 16), data_u32[0, 4]),
-                  jnp.bitwise_or(jnp.bitwise_left_shift(data_u32[0, 7], 16), data_u32[0, 6]),
+                  jnp.bitwise_or(jnp.bitwise_left_shift(data_u32[1], 16), data_u32[0]),
+                  jnp.bitwise_or(jnp.bitwise_left_shift(data_u32[3], 16), data_u32[2]),
+                  jnp.bitwise_or(jnp.bitwise_left_shift(data_u32[5], 16), data_u32[4]),
+                  jnp.bitwise_or(jnp.bitwise_left_shift(data_u32[7], 16), data_u32[6]),
               ]
               packed_rows_registers[row_src].extend(packed_val)
 
@@ -393,9 +392,9 @@ def main_kernel(
             packed_row = jnp.array(packed_rows_registers[r]) # shape (128,)
             write_col_vmem_start = pl.multiple_of(col_vmem_start, 128)
             for c in range(0, 128, 8):
-              out_vmem_ref[0:1, pl.ds(r * col_size + write_col_vmem_start + c, 8)] = packed_row[c : c + 8][None, :]
+              out_vmem_ref[0:1, pl.ds(r * col_size + write_col_vmem_start + c, 8)] = packed_row[c : c + 8]
             for c in range(128, 256, 8):
-              out_vmem_ref[0:1, pl.ds(r * col_size + write_col_vmem_start + c, 8)] = jnp.zeros((1, 8), jnp.uint32)
+              out_vmem_ref[0:1, pl.ds(r * col_size + write_col_vmem_start + c, 8)] = jnp.zeros((8,), jnp.uint32)
 
         # There must be at least one valid row to write in the current row_tile.
         # When num valid writes is not a multiple of row_tile_size, we repeat
@@ -659,7 +658,7 @@ def ragged_gather_reduce(
           ),
           _SCRATCH_KW: dict(  # pylint: disable=use-dict-literal
               num_rows_per_row_partition_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
-              in_vmem_ref=pltpu.VMEM((1, num_simd_lanes * col_size), x.dtype),
+              in_vmem_ref=pltpu.VMEM((num_simd_lanes, col_size), x.dtype), # 2D buffer of shape (8, col_size)!
               out_vmem_ref=pltpu.VMEM((1, num_simd_lanes * (col_size // 2 if is_bf16 else col_size)), jnp.uint32),
               prev_iter_last_row_vmem_ref=pltpu.VMEM((1, col_size), jnp.uint32),
               src_indices_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
