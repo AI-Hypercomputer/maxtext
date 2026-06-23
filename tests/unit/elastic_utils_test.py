@@ -16,6 +16,7 @@
 
 import unittest
 from unittest.mock import create_autospec, Mock
+from absl.testing import parameterized
 
 
 from maxtext.utils import elastic_utils
@@ -46,7 +47,7 @@ class FakeConfig:
     self.elastic_min_slice_count = 1
 
 
-class ElasticUtilsTest(unittest.TestCase):
+class ElasticUtilsTest(parameterized.TestCase):
   """Unit tests for Elastic Training utility functions."""
 
   def setUp(self):
@@ -67,6 +68,7 @@ class ElasticUtilsTest(unittest.TestCase):
     self.fake_jax = create_autospec(self.original_jax)
     self.fake_manager = create_autospec(self.original_manager_class, instance=True)
     self.fake_manager.new_slice_event = Mock()
+    self.fake_manager.available_inactive_slices = set()
 
     # Configure default behaviors if needed
     self.fake_pathwaysutils.is_pathways_backend_used.return_value = True
@@ -273,7 +275,7 @@ class ElasticUtilsTest(unittest.TestCase):
     cm = FakeCheckpointManager()
 
     elastic_utils.elastic_manager = self.fake_manager
-    self.fake_manager.new_slice_event.is_set.return_value = True
+    self.fake_manager.available_inactive_slices = {1}
 
     with self.assertRaises(ScaleUpSignalError):
       elastic_utils.maybe_elastic_scale_up(config, cm)
@@ -318,7 +320,7 @@ class ElasticUtilsTest(unittest.TestCase):
   def test_record_elastic_event_start(self):
     """Tests recording an elastic slice down start."""
     elastic_utils.elastic_manager = self.fake_manager
-    self.fake_manager.new_slice_event.is_set.return_value = False
+    self.fake_manager.available_inactive_slices = set()
     fake_recorder = Mock()
     config = FakeConfig()
 
@@ -332,7 +334,7 @@ class ElasticUtilsTest(unittest.TestCase):
   def test_record_elastic_event_start_scale_up(self):
     """Tests recording an elastic slice scale up start."""
     elastic_utils.elastic_manager = self.fake_manager
-    self.fake_manager.new_slice_event.is_set.return_value = True
+    self.fake_manager.available_inactive_slices = {1}
     fake_recorder = Mock()
     config = FakeConfig()
 
@@ -405,6 +407,26 @@ class ElasticUtilsTest(unittest.TestCase):
     # Should not raise ValueError
     elastic_utils.ensure_elastic_manager_initialized(config)
     self.assertEqual(elastic_utils.elastic_manager, self.fake_manager)
+
+  @parameterized.parameters(
+      # Positive cases
+      ({1}, True),
+      ({0}, True),
+      ({1, 2}, True),
+      ({0, 3, 6}, True),
+      ({10, 25}, True),
+      # Negative cases
+      (set(), False),
+  )
+  def test_is_scale_up_event_with_set(self, available_inactive_slices, expected):
+    config = FakeConfig()
+    config.elastic_enabled = True
+    elastic_utils.elastic_manager = self.fake_manager
+
+    self.fake_manager.available_inactive_slices = available_inactive_slices
+    self.assertEqual(elastic_utils.is_scale_up_event(config), expected)
+
+
 
 
 if __name__ == "__main__":
