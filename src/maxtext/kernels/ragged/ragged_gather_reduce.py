@@ -353,13 +353,15 @@ def main_kernel(
         if is_bf16:
           for r in range(num_simd_lanes):
             for i in range(64):
-              even_val = out_vmem_ref[r, col_vmem_start + 2 * i]
-              odd_val = out_vmem_ref[r, col_vmem_start + 2 * i + 1]
+              v_even = out_vmem_ref[r, pl.ds(col_vmem_start + 2 * i, 1)][...]
+              v_odd = out_vmem_ref[r, pl.ds(col_vmem_start + 2 * i + 1, 1)][...]
+              even_val = v_even[0]
+              odd_val = v_odd[0]
               packed = jnp.bitwise_or(
                   jnp.bitwise_right_shift(even_val, 16),
                   jnp.bitwise_and(odd_val, -65536)
               )
-              temp_packed_vmem[r, i] = packed
+              temp_packed_vmem[r, pl.ds(i, 1)] = packed
 
         # There must be at least one valid row to write in the current row_tile.
         # When num valid writes is not a multiple of row_tile_size, we repeat
