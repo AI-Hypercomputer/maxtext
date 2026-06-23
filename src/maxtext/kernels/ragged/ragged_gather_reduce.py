@@ -114,7 +114,9 @@ def main_kernel(
     )
     dma_zero.start()
     dma_zero.wait()
-    d_zero = dynamic_zero_vmem_ref[0]
+    # Load the vector from VMEM first, then extract the 0-th element in register space!
+    dynamic_zero_vec = dynamic_zero_vmem_ref[...]
+    d_zero = dynamic_zero_vec[0]
 
     # Read total number of valid source rows for the current row partition.
     dma = pltpu.make_async_copy(
