@@ -492,6 +492,7 @@ def ragged_gather_reduce(
           flops_override=flops_override,
           bytes_accessed_override=bytes_accessed_override,
       ),
+      grid=(num_rows_partitions,),
       mesh=vector_mesh_wrapped,
       name="sc_ragged_gather_reduce",
       **{
