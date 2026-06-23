@@ -328,11 +328,7 @@ def get_cost_estimate(
   return pl.CostEstimate(flops=flops, bytes_accessed=bytes_accessed)
 
 
-_COMPILER_PARAMS = {
-    "num_sc_buffers": 2,
-    "ring_buffer_size": 1,
-    "unroll_factor": 1,
-}
+
 
 _OUT_KW = "out"
 _SCRATCH_KW = "scratch"
@@ -470,8 +466,12 @@ def ragged_gather_reduce(
           num_column_partitions=num_column_partitions,
           is_bf16=is_bf16,
       ),
-      compiler_params=pltpu.CompilerParams(  # pytype: disable=wrong-keyword-args
-          **_COMPILER_PARAMS,
+      compiler_params=pltpu.CompilerParams(
+          flags={
+              "num_sc_buffers": 2,
+              "ring_buffer_size": 1,
+              "unroll_factor": 1,
+          }
       ),
       cost_estimate=get_cost_estimate(
           padded_input_size=padded_input_size,
