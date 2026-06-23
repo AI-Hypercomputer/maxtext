@@ -352,16 +352,24 @@ def main_kernel(
         # Pack the active 128 columns of out_vmem_ref into temp_packed_vmem on the fly
         if is_bf16:
           for r in range(num_simd_lanes):
-            for i in range(64):
-              v_even = out_vmem_ref[r, pl.ds(col_vmem_start + 2 * i, 1)][...]
-              v_odd = out_vmem_ref[r, pl.ds(col_vmem_start + 2 * i + 1, 1)][...]
-              even_val = v_even[0]
-              odd_val = v_odd[0]
-              packed = jnp.bitwise_or(
-                  jnp.bitwise_right_shift(even_val, 16),
-                  jnp.bitwise_and(odd_val, -65536)
-              )
-              temp_packed_vmem[r, pl.ds(i, 1)] = jnp.expand_dims(packed, 0)
+            for c_offset in range(0, 128, 16):
+              c_unpacked = col_vmem_start + c_offset
+              c_packed = c_offset // 2
+              
+              val_A = out_vmem_ref[r, pl.ds(c_unpacked, 8)][...]
+              val_B = out_vmem_ref[r, pl.ds(c_unpacked + 8, 8)][...]
+              
+              packed_vec = jnp.array([
+                  jnp.bitwise_or(jnp.bitwise_right_shift(val_A[0], 16), jnp.bitwise_and(val_A[1], -65536)),
+                  jnp.bitwise_or(jnp.bitwise_right_shift(val_A[2], 16), jnp.bitwise_and(val_A[3], -65536)),
+                  jnp.bitwise_or(jnp.bitwise_right_shift(val_A[4], 16), jnp.bitwise_and(val_A[5], -65536)),
+                  jnp.bitwise_or(jnp.bitwise_right_shift(val_A[6], 16), jnp.bitwise_and(val_A[7], -65536)),
+                  jnp.bitwise_or(jnp.bitwise_right_shift(val_B[0], 16), jnp.bitwise_and(val_B[1], -65536)),
+                  jnp.bitwise_or(jnp.bitwise_right_shift(val_B[2], 16), jnp.bitwise_and(val_B[3], -65536)),
+                  jnp.bitwise_or(jnp.bitwise_right_shift(val_B[4], 16), jnp.bitwise_and(val_B[5], -65536)),
+                  jnp.bitwise_or(jnp.bitwise_right_shift(val_B[6], 16), jnp.bitwise_and(val_B[7], -65536)),
+              ])
+              temp_packed_vmem[r, pl.ds(c_packed, 8)] = packed_vec
 
         # There must be at least one valid row to write in the current row_tile.
         # When num valid writes is not a multiple of row_tile_size, we repeat
