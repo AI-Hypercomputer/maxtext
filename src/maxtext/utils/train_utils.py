@@ -37,6 +37,7 @@ from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
 from maxtext.utils import sharding
 from maxtext.utils.rampup_batch import create_rampup_manager
+from maxtext.utils import elastic_utils
 
 
 def create_training_optimizer(config, model):
@@ -202,7 +203,7 @@ def jit_train_and_eval_step(
   return p_train_step, p_eval_step
 
 
-def setup_train_loop(config, recorder, devices=None):
+def setup_train_loop(config, recorder, devices=None, restore_checkpoint=True):
   """Set up prerequisites for the training loop -
 
       checkpoint_manager, PRNG keys, Mesh, Model and optimizer.
@@ -227,9 +228,13 @@ def setup_train_loop(config, recorder, devices=None):
 
   with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
     is_training = True
-    init_rng = jax.random.PRNGKey(config.init_weights_seed)
     mesh = maxtext_utils.get_mesh_from_config(config, devices)
     context_parallel_size = mesh.shape.get(config.context_sharding, 1)
+    with jax.set_mesh(mesh):
+      init_rng = jax.random.PRNGKey(config.init_weights_seed)
+      init_rng = jax.device_put(
+          init_rng, jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+      )
     if config.pure_nnx:
       # Create abstract NNX model.
       _create_model_partial, model = model_creation_utils.create_nnx_abstract_model(config, mesh, devices)
@@ -254,6 +259,9 @@ def setup_train_loop(config, recorder, devices=None):
         validate_completed_steps(checkpoint_step + 1, config.steps)
 
   with maybe_record_goodput(recorder, GoodputEvent.TRAINING_PREPARATION):
+    elastic_manager = elastic_utils.elastic_manager
+    if elastic_manager and elastic_manager.available_inactive_slices:
+      raise elastic_utils.manager.ScaleUpSignalError("Scale up during setup (before data iterator)")
     data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
     rampup_manager = create_rampup_manager(config, checkpoint_manager)
     # Validate context parallelism with packing configuration
@@ -299,8 +307,16 @@ def setup_train_loop(config, recorder, devices=None):
     # Create data_loader AFTER reordering wrapper is applied
     data_loader = create_dataloader(config, mesh, data_iterator, recorder, rampup_manager)
 
-    state, _, state_mesh_shardings, data_iterator, _ = maxtext_utils.setup_training_state(
-        data_iterator, config, mesh, checkpoint_manager, init_state_fn
+    if elastic_manager and elastic_manager.available_inactive_slices:
+      raise elastic_utils.manager.ScaleUpSignalError("Scale up during setup (before state restore)")
+    state, _, state_mesh_shardings, data_iterator, _ = (
+        maxtext_utils.setup_training_state(
+            data_iterator,
+            config,
+            mesh,
+            checkpoint_manager if restore_checkpoint else None,
+            init_state_fn,
+        )
     )
     if config.pure_nnx:
       with nn_partitioning.axis_rules(config.logical_axis_rules):
