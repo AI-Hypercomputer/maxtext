@@ -365,15 +365,16 @@ def main_kernel(
         src_row_idx_in_vmem.reverse()
         row_valid_vec.reverse()
 
-        # Write the accumulated packed register rows to temp_packed_vmem in chunks of 8.
-        # SparseCore VMEM stores (Swap) strictly only support shape (8,) in register compute!
-        # We write to the correct, non-overlapping columns in temp_packed_vmem starting at col_vmem_start // 2.
+        # Write the accumulated packed register rows back to out_vmem_ref in chunks of 8.
+        # This restores the critical 'sink' constraint on out_vmem_ref, forcing the compiler
+        # to keep the compact tiled layout and avoiding the unsupported layout cast!
+        # We write to the first half of out_vmem_ref (starting at col_vmem_start // 2) which is safe to overwrite.
         if is_bf16:
           for r in range(num_simd_lanes):
             packed_row = jnp.array(packed_rows_registers[r]) # shape (128,)
             write_col_vmem_start = pl.multiple_of(col_vmem_start // 2, 128)
             for c in range(0, 128, 8):
-              temp_packed_vmem[r, pl.ds(write_col_vmem_start + c, 8)] = packed_row[c : c + 8]
+              out_vmem_ref[r, pl.ds(write_col_vmem_start + c, 8)] = packed_row[c : c + 8]
 
         # There must be at least one valid row to write in the current row_tile.
         # When num valid writes is not a multiple of row_tile_size, we repeat
@@ -387,11 +388,11 @@ def main_kernel(
           
           if is_bf16:
             # We write 128 columns of packed uint32 (representing 256 columns of bf16) in a single aligned DMA write!
-            # We slice temp_packed_vmem using pl.ds to match the multi-tile layout, avoiding any layout casts!
+            # We read from out_vmem_ref, which has the correct tiled layout and acts as the sink.
             write_col_hbm_start = pl.multiple_of(col_hbm_start // 2, 128)
             write_col_vmem_start = pl.multiple_of(col_vmem_start // 2, 128)
             pltpu.make_async_copy(
-                temp_packed_vmem.at[src_row_vmem, pl.ds(write_col_vmem_start, 128)],
+                out_vmem_ref.at[src_row_vmem, pl.ds(write_col_vmem_start, 128)],
                 out_32b_hbm_ref.at[dst_row_hbm, pl.ds(write_col_hbm_start, 128)],
                 send_sem,
             ).start()
@@ -631,7 +632,6 @@ def ragged_gather_reduce(
           _SCRATCH_KW: dict(  # pylint: disable=use-dict-literal
               num_rows_per_row_partition_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
               out_vmem_ref=pltpu.VMEM((num_simd_lanes, col_size), jnp.uint32),
-              temp_packed_vmem=pltpu.VMEM((num_simd_lanes, col_size // 2), jnp.uint32),
               prev_iter_last_row_vmem_ref=pltpu.VMEM((1, col_size), jnp.uint32),
               src_indices_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
               dst_indices_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
