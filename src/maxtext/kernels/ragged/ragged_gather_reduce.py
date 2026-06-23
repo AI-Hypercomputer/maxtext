@@ -21,7 +21,6 @@ from jax.experimental import shard_map
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as np
 import jax.numpy as jnp
-from maxtext import max_logging
 from maxtext.kernels.ragged import pallas_subcore as plsc
 
 
