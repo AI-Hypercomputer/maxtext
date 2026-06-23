@@ -318,6 +318,7 @@ def get_cost_estimate(
     return pl.CostEstimate(
         flops=flops_override or 0,
         bytes_accessed=bytes_accessed_override or 0,
+        transcendentals=0,
     )
   num_rows = padded_input_size // reduce_group_size
   flops = padded_input_size * aligned_hidden_size * 2
@@ -325,7 +326,7 @@ def get_cost_estimate(
       padded_input_size * aligned_hidden_size * input_dtype_bytes
       + num_rows * aligned_hidden_size * 4
   )
-  return pl.CostEstimate(flops=flops, bytes_accessed=bytes_accessed)
+  return pl.CostEstimate(flops=flops, bytes_accessed=bytes_accessed, transcendentals=0)
 
 
 
