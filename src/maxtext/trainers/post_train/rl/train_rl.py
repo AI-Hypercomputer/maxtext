@@ -619,20 +619,6 @@ def rl_train(argv: Sequence[str], kwargs: dict):
     wu.jax = JaxWrapper()
     max_logging.log("Monkey-patched weight_utils.jax to override clear_caches.")
 
-    # Monkey patch pathwaysutils start_trace to profile all hosts/processes
-    import inspect
-
-    original_start_trace = jax.profiler.start_trace
-
-    def patched_start_trace(*args, **kwargs):
-      sig = inspect.signature(original_start_trace)
-      if "max_num_hosts" in sig.parameters:
-        kwargs["max_num_hosts"] = jax.process_count()
-      return original_start_trace(*args, **kwargs)
-
-    jax.profiler.start_trace = patched_start_trace
-    max_logging.log("Defensively monkey-patched jax.profiler.start_trace to profile all hosts.")
-
     def optimized_create_dummy_weights_on_tpu(
         sharding,
         weight_shape,

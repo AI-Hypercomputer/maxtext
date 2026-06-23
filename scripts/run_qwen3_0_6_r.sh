@@ -17,7 +17,7 @@ export PROJECT_ID="${PROJECT_ID:-cloud-tpu-multipod-dev}" # GCP project ID where
 export CLUSTER_NAME="${CLUSTER_NAME:-bodaborg-super-xpk-x8p}" # Name of your Ironwood cluster
 export ZONE="${ZONE:-us-central1-ai1a}" # Zone where your Ironwood cluster is deployed
 export BASE_OUTPUT_DIRECTORY="${BASE_OUTPUT_DIRECTORY:-gs://runner-maxtext-logs/}" # GCS bucket path for outputs
-export DOCKER_IMAGE="${DOCKER_IMAGE:-gcr.io/cloud-tpu-multipod-dev/mohitkhatwani-runner:vxpq-2026-06-13-02-49-03}" # Full path to the Docker image you pushed (e.g., gcr.io/my-project/my-image:tag)
+export DOCKER_IMAGE="${DOCKER_IMAGE:-gcr.io/cloud-tpu-multipod-dev/mohitkhatwani-runner:post-training-2026-06-23}" # Full path to the Docker image you pushed (e.g., gcr.io/my-project/my-image:tag)
 export MAXTEXT_CKPT_PATH="${MAXTEXT_CKPT_PATH:-gs://mohitkhatwani_multipods/qwen3-0.6b/pathways-compat/0/items}" # GCS path of the MaxText checkpoint to fine-tune from
 export TPU_TYPE="tpu7x-128"
 export WORKLOAD_NAME="mohit-rl-qwen3-$RANDOM"
@@ -124,7 +124,7 @@ rollout_tensor_parallelism=4 \
 enable_dp_attention=false \
 hbm_utilization_vllm=0.22 \
 max_num_seqs=4096 \
-max_num_batched_tokens=8198 \
+max_num_batched_tokens=8454 \
 scan_layers=True \
 allow_split_physical_axes=True \
 enable_tunix_perf_metrics=True \
@@ -135,7 +135,7 @@ load_parameters_path=$MAXTEXT_CKPT_PATH \
 rollout_vllm_init_with_random_weights=True \
 profiler=xplane \
 skip_first_n_steps_for_profiler=1 \
-profiler_steps=1"
+profiler_steps=3"
 # vllm_hf_overrides='{architectures: [\"MaxTextForCausalLM\"]}' \
 # vllm_additional_config='{\"maxtext_config\": {\"model_name\": \"qwen3-0.6b\", \"model_call_mode\": \"inference\", \"enable_dp_attention\": false, \"allow_split_physical_axes\": true, \"log_config\": false, \"weight_dtype\": \"bfloat16\", \"prefuse_moe_weights\": true}}'"
 
@@ -154,7 +154,7 @@ profiler_steps=1"
   --workload="${WORKLOAD_NAME}" \
   --custom-pathways-proxy-server-args="${XLA_FLAGS}" \
   --custom-pathways-server-args="" \
-  --command="cd /app; python3 scripts/patch_vllm_sampler.py; pip install -e . --no-deps; ${MAXTEXT_COMMAND}" \
+  --command="cd /app; python3 scripts/patch_vllm_sampler.py; pip install -e /app/pathways-utils --no-deps; pip install -e . --no-deps; ${MAXTEXT_COMMAND}" \
   --dry-run \
   --output-manifest-file=generated_manifest.yaml
 

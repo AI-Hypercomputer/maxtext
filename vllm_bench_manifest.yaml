@@ -3,8 +3,8 @@ kind: JobSet
 metadata:
   labels:
     kueue.x-k8s.io/queue-name: multislice-queue
-    xpk.google.com/workload: mohitkhatwani-vb-qw3
-  name: mohitkhatwani-vb-qw3
+    xpk.google.com/workload: mohitkhatwani-vb-qw12
+  name: mohitkhatwani-vb-qw12
 spec:
   coordinator:
     replicatedJob: head
@@ -30,7 +30,7 @@ spec:
               cloud.google.com/gke-tpu-slice-topology: 4x4x4
               cloud.google.com/skip-tpu-webhook-check: 'true'
             labels:
-              xpk.google.com/workload: mohitkhatwani-vb-qw3
+              xpk.google.com/workload: mohitkhatwani-vb-qw12
           spec:
             containers:
             - args:
@@ -131,7 +131,7 @@ spec:
                 trap _sigterm SIGTERM;
 
                 # 1. Start the vLLM server in the background
-                VLLM_ENABLE_V1_MULTIPROCESSING=0 MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax JAX_PLATFORMS=proxy,cpu JAX_BACKEND_TARGET=grpc://$(PATHWAYS_HEAD):29000 vllm serve Qwen/Qwen3-0.6B \
+                PHASED_PROFILING_DIR=gs://runner-maxtext-logs/mohitkhatwani-vb-qw12/vllm-profile/ PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR=10 VLLM_ENABLE_V1_MULTIPROCESSING=0 MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax JAX_PLATFORMS=proxy,cpu JAX_BACKEND_TARGET=grpc://$(PATHWAYS_HEAD):29000 vllm serve Qwen/Qwen3-0.6B \
                   --port 8000 \
                   --data-parallel-size 16 \
                   --tensor-parallel-size 4 \
@@ -140,23 +140,29 @@ spec:
                   --max-num-seqs 480 \
                   --gpu-memory-utilization 0.4 \
                   --no-enable-prefix-caching \
-                  --trust-remote-code > /tmp/vllm_serve.log 2>&1 &
+                  --trust-remote-code &
                 SERVER_PID=$!
 
                 # 2. Wait for the server to be healthy
                 echo "Waiting for server to become healthy..."
-                for i in $(seq 1 60); do
+                SERVER_HEALTHY=false
+                for i in $(seq 1 120); do
                   if curl -sf http://localhost:8000/health > /dev/null 2>&1; then
                     echo "Server is healthy!"
+                    SERVER_HEALTHY=true
                     break
                   fi
                   if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
-                    echo "Server process died. Logs:"
-                    cat /tmp/vllm_serve.log
+                    echo "Server process died."
                     exit 1
                   fi
                   sleep 10
                 done
+
+                if [ "$SERVER_HEALTHY" = "false" ]; then
+                  echo "Server failed to become healthy within timeout."
+                  exit 1
+                fi
 
                 # 3. Run the benchmark client
                 vllm bench serve \
@@ -166,9 +172,10 @@ spec:
                   --dataset-name random \
                   --random-input-len 16384 \
                   --random-output-len 8192 \
-                  --num-prompts 480 \
+                  --num-prompts 2 \
                   --request-rate inf \
                   --ignore-eos \
+                  --profile \
                   --trust-remote-code
                 EXIT_CODE=$?
 
@@ -190,6 +197,8 @@ spec:
                 value: grpc://$(PATHWAYS_HEAD):29000
               - name: HF_TOKEN
                 value: ""
+              - name: VLLM_ENGINE_READY_TIMEOUT_S
+                value: "1800"
               image: gcr.io/cloud-tpu-multipod-dev/mohitkhatwani-runner:post-training-2026-06-23
               imagePullPolicy: Always
               name: jax-tpu
