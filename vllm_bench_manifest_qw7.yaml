@@ -3,11 +3,11 @@ kind: JobSet
 metadata:
   labels:
     kueue.x-k8s.io/queue-name: multislice-queue
-    xpk.google.com/workload: mohit-rl-qwen3-4002
-  name: mohit-rl-qwen3-4002
+    xpk.google.com/workload: mohitkhatwani-vb-qw7
+  name: mohitkhatwani-vb-qw7
 spec:
   coordinator:
-    replicatedJob: pathways-head
+    replicatedJob: head
   failurePolicy:
     restartStrategy: Recreate
   network:
@@ -30,7 +30,7 @@ spec:
               cloud.google.com/gke-tpu-slice-topology: 4x4x4
               cloud.google.com/skip-tpu-webhook-check: 'true'
             labels:
-              xpk.google.com/workload: mohit-rl-qwen3-4002
+              xpk.google.com/workload: mohitkhatwani-vb-qw7
           spec:
             containers:
             - args:
@@ -94,18 +94,21 @@ spec:
             nodeSelector:
               cloud.google.com/gke-tpu-accelerator: tpu7x
               cloud.google.com/placement-policy-name: tpu7x-128-4x4x4-ss-placement-policy
-            priorityClassName: very-high
+            priorityClassName: medium
             restartPolicy: OnFailure
             terminationGracePeriodSeconds: 30
             tolerations:
             - key: google.com/tpu
               operator: Exists
+            - key: node.kubernetes.io/disk-pressure
+              operator: Exists
+              effect: NoSchedule
             volumes:
             - hostPath:
                 path: /tmp
                 type: DirectoryOrCreate
               name: shared-tmp
-  - name: pathways-head
+  - name: head
     replicas: 1
     template:
       metadata:
@@ -122,29 +125,66 @@ spec:
             - command:
               - bash
               - -c
-              - "echo XPK Start: $(date);\n_sigterm() (kill -SIGTERM $! 2>/dev/null;);\n\
-                trap _sigterm SIGTERM;\n\n(cd /app; python3 scripts/patch_vllm_sampler.py;\
-                \ pip install -e . --no-deps; JAX_RANDOM_WEIGHTS=1 SKIP_JAX_PRECOMPILE=1\
-                \ NEW_MODEL_DESIGN=1 TPU_MIN_LOG_LEVEL=0 TF_CPP_MIN_LOG_LEVEL=0 TPU_STDERR_LOG_LEVEL=0\
-                \ JAX_PLATFORMS=proxy,cpu NUM_PRECOMPILE_WORKERS=1 JAX_BACKEND_TARGET=grpc://127.0.0.1:29000\
-                \ ENABLE_PATHWAYS_PERSISTENCE=1 PYTHONPATH=/app/src python3 -m maxtext.trainers.post_train.rl.train_rl\
-                \ model_name=qwen3-0.6b tokenizer_path=Qwen/Qwen3-0.6B run_name=mohit-rl-qwen3-4002\
-                \ checkpoint_storage_use_ocdbt=False async_scheduling=False base_output_directory=gs://runner-maxtext-logs/\
-                \ chips_per_vm=8 num_batches=20 num_test_batches=0 rl.num_generations=8\
-                \ rl.grpo_beta=0.05 rl.grpo_epsilon=0.2 gradient_clipping_threshold=1.0\
-                \ decode_sampling_temperature=0.8 decode_sampling_top_k=50 decode_sampling_nucleus_p=0.95\
-                \ dataset_name=nvidia/OpenMathInstruct-2 hf_train_files=hf://datasets/nvidia/OpenMathInstruct-2/data/train_1M-*.parquet\
-                \ train_split=train_1M max_target_length=8198 max_prefill_predict_length=8192\
-                \ learning_rate=1e-6 batch_size=480 train_micro_batch_size=8 rollout_micro_batch_size=480\
-                \ rollout_data_parallelism=16 rollout_tensor_parallelism=4 enable_dp_attention=false\
-                \ hbm_utilization_vllm=0.22 max_num_seqs=4096 max_num_batched_tokens=24576\
-                \ scan_layers=True allow_split_physical_axes=True enable_tunix_perf_metrics=True\
-                \ checkpoint_period=20 max_num_checkpoints_to_keep=1000 enable_checkpointing=true\
-                \ load_parameters_path=gs://mohitkhatwani_multipods/qwen3-0.6b/pathways-compat/0/items\
-                \ rollout_vllm_init_with_random_weights=True profiler=xplane skip_first_n_steps_for_profiler=1\
-                \ profiler_steps=1) & PID=$!;\nwhile kill -0 $PID 2>/dev/null;\n \
-                \   do sleep 5;\ndone;\nwait $PID;\nEXIT_CODE=$?;\n\necho XPK End:\
-                \ $(date);\necho EXIT_CODE=$EXIT_CODE;\n\n\nexit $EXIT_CODE\n"
+              - |
+                echo XPK Start: $(date);
+                _sigterm() (kill -SIGTERM $! 2>/dev/null;);
+                trap _sigterm SIGTERM;
+
+                # 1. Start the vLLM server in the background
+                VLLM_ENABLE_V1_MULTIPROCESSING=0 MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax JAX_PLATFORMS=proxy,cpu JAX_BACKEND_TARGET=grpc://$(PATHWAYS_HEAD):29000 vllm serve Qwen/Qwen3-0.6B \
+                  --port 8000 \
+                  --data-parallel-size 16 \
+                  --tensor-parallel-size 4 \
+                  --max-model-len 24576 \
+                  --max-num-batched-tokens 24576 \
+                  --max-num-seqs 480 \
+                  --gpu-memory-utilization 0.4 \
+                  --no-enable-prefix-caching \
+                  --trust-remote-code \
+                  --profiler-config '{"profiler": "torch", "torch_profiler_dir": "gs://runner-maxtext-logs/mohitkhatwani-vb-qw7/vllm-profile/"}' &
+                SERVER_PID=$!
+
+                # 2. Wait for the server to be healthy
+                echo "Waiting for server to become healthy..."
+                SERVER_HEALTHY=false
+                for i in $(seq 1 120); do
+                  if curl -sf http://localhost:8000/health > /dev/null 2>&1; then
+                    echo "Server is healthy!"
+                    SERVER_HEALTHY=true
+                    break
+                  fi
+                  if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
+                    echo "Server process died."
+                    exit 1
+                  fi
+                  sleep 10
+                done
+
+                if [ "$SERVER_HEALTHY" = "false" ]; then
+                  echo "Server failed to become healthy within timeout."
+                  exit 1
+                fi
+
+                # 3. Run the benchmark client
+                vllm bench serve \
+                  --model Qwen/Qwen3-0.6B \
+                  --host localhost \
+                  --port 8000 \
+                  --dataset-name random \
+                  --random-input-len 16384 \
+                  --random-output-len 8192 \
+                  --num-prompts 2 \
+                  --request-rate inf \
+                  --ignore-eos \
+                  --profile \
+                  --trust-remote-code
+                EXIT_CODE=$?
+
+                # 4. Clean up
+                kill "${SERVER_PID}" || true
+                echo XPK End: $(date);
+                echo EXIT_CODE=$EXIT_CODE;
+                exit $EXIT_CODE
               env:
               - name: PATHWAYS_HEAD
                 valueFrom:
@@ -156,6 +196,10 @@ spec:
                 value: GCP
               - name: JAX_BACKEND_TARGET
                 value: grpc://$(PATHWAYS_HEAD):29000
+              - name: HF_TOKEN
+                value: ""
+              - name: VLLM_ENGINE_READY_TIMEOUT_S
+                value: "1800"
               image: gcr.io/cloud-tpu-multipod-dev/mohitkhatwani-runner:post-training-2026-06-23
               imagePullPolicy: Always
               name: jax-tpu
@@ -204,6 +248,7 @@ spec:
               - --xla_tpu_enable_sparse_core_offload_queuing_in_lhs=true
               - --xla_tpu_enable_multi_compute_overlap_in_layer_scheduler=false
               - --xla_tpu_enable_3d_reduce_scatter_decomposer=false
+              - --temporary_flags_for_debugging=temporary_flag_for_debugging_pipe_unreachable_timeout=30m
               env:
               - name: PATHWAYS_HEAD
                 valueFrom:
@@ -226,6 +271,7 @@ spec:
               - --node_type=resource_manager
               - --instance_count=1
               - --instance_type=tpu7x:4x4x4
+              - --temporary_flags_for_debugging=temporary_flag_for_debugging_pipe_unreachable_timeout=30m
               env:
               - name: REPLICATED_JOB_NAME
                 valueFrom:
@@ -267,5 +313,5 @@ spec:
   successPolicy:
     operator: All
     targetReplicatedJobs:
-    - pathways-head
+    - head
   suspend: false
