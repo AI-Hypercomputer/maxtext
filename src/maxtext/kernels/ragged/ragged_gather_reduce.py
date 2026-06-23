@@ -322,13 +322,13 @@ def main_kernel(
         if is_bf16:
           # Pack the accumulated float32 outputs in out_vmem_ref into bf16 pairs in packed_out_vmem_ref
           for c in range(0, col_size, 2):
-            val_even = out_vmem_ref[:, c]
-            val_odd = out_vmem_ref[:, c + 1]
+            val_even = out_vmem_ref[:, pl.ds(c, 1)][...]
+            val_odd = out_vmem_ref[:, pl.ds(c + 1, 1)][...]
             packed_val = jnp.bitwise_or(
                 jnp.bitwise_right_shift(val_even, 16),
                 jnp.bitwise_and(val_odd, -65536)
             )
-            packed_out_vmem_ref[:, c // 2] = packed_val
+            packed_out_vmem_ref[:, pl.ds(c // 2, 1)] = packed_val
 
         # Start dma write.
         # When there are multiple sources rows in the current row_tile that
