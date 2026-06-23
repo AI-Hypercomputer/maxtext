@@ -58,7 +58,7 @@ def main_kernel(
     dst_indices_hbm_ref: jax.Ref,
     topk_weights_hbm_ref: jax.Ref,
     # Outputs.
-    out_hbm_ref: jax.Ref,
+    out_hbm_ref: jax.Ref,      # Passed as uint32 directly!
     # Scratch.
     num_rows_per_row_partition_vmem_ref: jax.Ref,
     in_vmem_ref: jax.Ref,      # Dedicated 1D flat input buffer of shape (1, 8 * col_size)
@@ -155,11 +155,10 @@ def main_kernel(
       dst_indices = dst_indices_vmem_ref[...]
       topk_weights = topk_weights_vmem_ref[...]
 
-      # Leverage compiler's bitcast layout lowering engine!
-      # Bitcasting the signatures directly inside the kernel is 100% verified to be compatible
-      # with row slicing, completely preventing any HBM reinterpret layout casts!
+      # Input is passed as bf16 and bitcasted inside the kernel (read-only, 100% layout-safe!)
       in_32b_hbm_ref = in_hbm_ref.bitcast(jnp.uint32)
-      out_32b_hbm_ref = out_hbm_ref.bitcast(jnp.uint32)
+      # Output is passed as uint32 directly in the signature, preventing any layout size mismatches!
+      out_32b_hbm_ref = out_hbm_ref
 
       # DMA input from HBM to the dedicated 1D flat in_vmem_ref buffer OUTSIDE the loop.
       for col_vmem_start in range(0, col_size, num_lanes):
@@ -449,26 +448,25 @@ def ragged_gather_reduce(
       num_rows_partitions,
   )
 
-  # PASS BOTH INPUT AND OUTPUT IN THEIR NATURAL DTYPES DIRECTLY!
-  # No JAX-space column packing or unpacking is needed in the wrapper anymore!
-  # Inside the kernel, we bitcast them to uint32, leveraging the compiler's bitcast
-  # layout lowering engine which is 100% verified to be compatible with row slicing!
   if is_bf16:
     dtype_bytes = 2
     # For bf16, the column dimension of the 32-bit carrier is halved.
     aligned_hidden_size = hidden_size // 2
+    # Declare output as uint32 in JAX space, with halved column shape!
+    # This matches the kernel signature 100% and completely avoids layout casts!
+    out_dtype = jnp.uint32
   else:
     dtype_bytes = 4
     aligned_hidden_size = hidden_size
+    out_dtype = x.dtype
 
   col_size = aligned_hidden_size // num_column_partitions
 
-  # Output shape is (R, hidden_size) of natural dtype (e.g. bf16!).
+  # Output shape is (R, aligned_hidden_size) in HBM.
   out_shape = (
       padded_input_size // reduce_group_size,
-      hidden_size,
+      aligned_hidden_size,
   )
-  out_dtype = x.dtype
 
   vector_mesh_wrapped = plsc.VectorSubcoreMesh(
       num_cores=sc_info.num_cores,
@@ -517,10 +515,18 @@ def ragged_gather_reduce(
       },
   )(
       num_src_rows_per_row_partition,
-      x,
+      x,                     # Passed as bf16 directly, bitcasted inside the kernel (safe read-only!)
       src_indices,
       dst_indices,
       topk_weights_sorted,
   )
+
+  if is_bf16:
+    # JAX-space bitcast back to bf16 and reshape.
+    # This is a pure metadata operation (zero runtime overhead!) that perfectly
+    # restores the natural output shape and type!
+    out = jax.lax.bitcast_convert_type(out, jnp.bfloat16).reshape(
+        padded_input_size // reduce_group_size, hidden_size
+    )
 
   return out[: (input_size // reduce_group_size), :hidden_size]
