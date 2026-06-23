@@ -231,7 +231,7 @@ def main_kernel(
       input_packing = 32 // input_dtype_bits
 
       in_32b_hbm_ref = in_hbm_ref.bitcast(jnp.uint32)
-      out_32b_hbm_ref = out_hbm_ref.bitcast(jnp.uint32)
+      out_32b_hbm_ref = out_hbm_ref.bitcast(jnp.uint32) if out_hbm_ref.dtype != jnp.uint32 else out_hbm_ref
 
       for col_vmem_start in range(0, col_size, num_lanes):
         col_hbm_start = col_start + col_vmem_start
@@ -576,6 +576,12 @@ def ragged_gather_reduce(
   )
 
   is_bf16 = x.dtype == jnp.bfloat16
+  if is_bf16:
+    out_shape = (padded_input_size // reduce_group_size, aligned_hidden_size // 2)
+    out_dtype = jnp.uint32
+  else:
+    out_shape = (padded_input_size // reduce_group_size, aligned_hidden_size)
+    out_dtype = jnp.float32
 
   vector_mesh = plsc.VectorSubcoreMesh(
       num_cores=sc_info.num_cores,
@@ -607,8 +613,8 @@ def ragged_gather_reduce(
       name="sc_ragged_gather_reduce",
       **{
           _OUT_KW: jax.ShapeDtypeStruct(
-              (padded_input_size // reduce_group_size, aligned_hidden_size),
-              x.dtype,
+              out_shape,
+              out_dtype,
           ),
           _SCRATCH_KW: dict(  # pylint: disable=use-dict-literal
               num_rows_per_row_partition_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
@@ -623,4 +629,10 @@ def ragged_gather_reduce(
       },
   )(num_src_rows_per_row_partition, x, src_indices, dst_indices, topk_weights)
 
-  return out
+  if is_bf16:
+    out = jax.lax.bitcast_convert_type(out, jnp.bfloat16)
+    out = out.reshape(padded_input_size // reduce_group_size, aligned_hidden_size)
+  else:
+    out = out.astype(x.dtype)
+
+  return out[: (input_size // reduce_group_size), :hidden_size]
