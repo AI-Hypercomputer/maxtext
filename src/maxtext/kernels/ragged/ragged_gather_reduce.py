@@ -369,12 +369,16 @@ def main_kernel(
         # to keep the compact tiled layout and avoiding the unsupported layout cast!
         # Crucially, we write back to the EXACT SAME column offset (col_vmem_start) as the compute
         # loop, completely avoiding the dual-offset layout conflict!
+        # For bf16, we write the packed data to the first 128 columns, and dummy zeros to the
+        # second 128 columns to ensure the entire 256-column block is written, matching f32 footprint!
         if is_bf16:
           for r in range(num_simd_lanes):
             packed_row = jnp.array(packed_rows_registers[r]) # shape (128,)
             write_col_vmem_start = pl.multiple_of(col_vmem_start, 128)
             for c in range(0, 128, 8):
               out_vmem_ref[r, pl.ds(write_col_vmem_start + c, 8)] = packed_row[c : c + 8]
+            for c in range(128, 256, 8):
+              out_vmem_ref[r, pl.ds(write_col_vmem_start + c, 8)] = jnp.zeros((8,), jnp.uint32)
 
         # There must be at least one valid row to write in the current row_tile.
         # When num valid writes is not a multiple of row_tile_size, we repeat
@@ -387,14 +391,20 @@ def main_kernel(
           dst_row_hbm = jnp.where(row_valid, dst_indices[i], last_valid_dst_row_hbm)
           
           if is_bf16:
-            # We write 128 columns of packed uint32 (representing 256 columns of bf16) in a single aligned DMA write!
-            # VMEM source is out_vmem_ref at col_vmem_start (same offset, no layout conflict!).
-            # HBM destination is out_32b_hbm_ref at col_hbm_start // 2 (half-size output offset!).
+            # We write 256 columns in total using two separate 128-column DMA writes.
+            # The first write copies the packed data to col_hbm_start // 2.
+            # The second write copies the dummy zeros to col_hbm_start // 2 + 128.
+            # This ensures all DMA writes are size-128 and perfectly aligned, matching baseline!
             write_col_hbm_start = pl.multiple_of(col_hbm_start // 2, 128)
             write_col_vmem_start = pl.multiple_of(col_vmem_start, 128)
             pltpu.make_async_copy(
                 out_vmem_ref.at[src_row_vmem, pl.ds(write_col_vmem_start, 128)],
                 out_32b_hbm_ref.at[dst_row_hbm, pl.ds(write_col_hbm_start, 128)],
+                send_sem,
+            ).start()
+            pltpu.make_async_copy(
+                out_vmem_ref.at[src_row_vmem, pl.ds(write_col_vmem_start + 128, 128)],
+                out_32b_hbm_ref.at[dst_row_hbm, pl.ds(write_col_hbm_start + 128, 128)],
                 send_sem,
             ).start()
           else:
@@ -411,12 +421,12 @@ def main_kernel(
         return carry
 
       # Wait for dma write to finish.
-      # We use prev_iter_last_row_vmem_ref instead of out_vmem_ref to completely
-      # avoid any layout conflicts on out_vmem_ref from the static wait loop slice!
+      # We revert back to out_vmem_ref since our full-size shape erasure has completely
+      # eliminated all layout conflicts on out_vmem_ref, matching baseline exactly!
       for _ in range(0, col_size, num_lanes):
         for _ in range(num_simd_lanes):
           pltpu.make_async_copy(
-              prev_iter_last_row_vmem_ref.at[0, :num_lanes],
+              out_vmem_ref.at[0, :num_lanes],
               out_32b_hbm_ref.at[0, :num_lanes],
               send_sem,
           ).wait()
