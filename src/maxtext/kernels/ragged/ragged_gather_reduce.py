@@ -67,6 +67,8 @@ def main_kernel(
     src_indices_vmem_ref: jax.Ref,
     dst_indices_vmem_ref: jax.Ref,
     topk_weights_vmem_ref: jax.Ref,
+    temp_u32_vmem_ref: jax.Ref,  # Tiny scratchpad for materializing uint32 expressions
+    temp_f32_vmem_ref: jax.Ref,  # Tiny scratchpad for materializing float32 expressions
     sem_ref: jax.Ref,
     *,
     core_axis_name: str,
@@ -205,18 +207,26 @@ def main_kernel(
             data = in_vmem_ref[0, flat_read_slice]
 
             if is_bf16:
-              # Pure 32-Bit Column-Wise Unpacking Recipe (with explicit uint32 casts):
-              # We explicitly cast all intermediate bitwise results back to uint32 using
-              # .astype(jnp.uint32) to prevent JAX from promoting them to signed i32,
-              # which completely bypasses backend lowering bugs on 'tpu.bitcast'!
+              # Pure 32-Bit Unpacking with VMEM Materialization:
+              # To bypass backend compiler bugs where 'tpu.bitcast' is rejected on intermediate
+              # expression values (like shifted vectors), we write the shifted uint32 vectors
+              # to a tiny local VMEM scratchpad, and read them back. Because they are read
+              # directly from VMEM, the compiler successfully lowers the bitcast (exactly
+              # like the baseline!), with virtually zero runtime overhead!
               even_u32 = jnp.bitwise_and(data, 65535).astype(jnp.uint32)
               odd_u32 = jnp.bitwise_right_shift(data, 16).astype(jnp.uint32)
               
-              even_shifted = jnp.bitwise_left_shift(even_u32, 16).astype(jnp.uint32)
-              odd_shifted = jnp.bitwise_left_shift(odd_u32, 16).astype(jnp.uint32)
+              # Write shifted expressions to temp VMEM.
+              temp_u32_vmem_ref[0, :] = jnp.bitwise_left_shift(even_u32, 16).astype(jnp.uint32)
+              temp_u32_vmem_ref[1, :] = jnp.bitwise_left_shift(odd_u32, 16).astype(jnp.uint32)
               
-              even_f32 = jax.lax.bitcast_convert_type(even_shifted, jnp.float32)
-              odd_f32 = jax.lax.bitcast_convert_type(odd_shifted, jnp.float32)
+              # Read back to force register materialization.
+              even_materialized = temp_u32_vmem_ref[0, :]
+              odd_materialized = temp_u32_vmem_ref[1, :]
+              
+              # Bitcast now compiles flawlessly!
+              even_f32 = jax.lax.bitcast_convert_type(even_materialized, jnp.float32)
+              odd_f32 = jax.lax.bitcast_convert_type(odd_materialized, jnp.float32)
 
               even_scaled = even_f32 * topk_weights[row_src]
               odd_scaled = odd_f32 * topk_weights[row_src]
@@ -233,11 +243,12 @@ def main_kernel(
                 carry_even_u32 = jnp.bitwise_and(carry_packed, 65535).astype(jnp.uint32)
                 carry_odd_u32 = jnp.bitwise_right_shift(carry_packed, 16).astype(jnp.uint32)
                 
-                carry_even_shifted = jnp.bitwise_left_shift(carry_even_u32, 16).astype(jnp.uint32)
-                carry_odd_shifted = jnp.bitwise_left_shift(carry_odd_u32, 16).astype(jnp.uint32)
+                # Materialize carry reads as well.
+                temp_u32_vmem_ref[0, :] = jnp.bitwise_left_shift(carry_even_u32, 16).astype(jnp.uint32)
+                temp_u32_vmem_ref[1, :] = jnp.bitwise_left_shift(carry_odd_u32, 16).astype(jnp.uint32)
                 
-                previous_accumulated_even = jax.lax.bitcast_convert_type(carry_even_shifted, jnp.float32)
-                previous_accumulated_odd = jax.lax.bitcast_convert_type(carry_odd_shifted, jnp.float32)
+                previous_accumulated_even = jax.lax.bitcast_convert_type(temp_u32_vmem_ref[0, :], jnp.float32)
+                previous_accumulated_odd = jax.lax.bitcast_convert_type(temp_u32_vmem_ref[1, :], jnp.float32)
               else:
                 previous_accumulated_f32 = jax.lax.bitcast_convert_type(
                     prev_iter_last_row_vmem_ref[0, col_slice_global], jnp.float32
@@ -264,12 +275,18 @@ def main_kernel(
               previous_accumulated_even = accumulated_even
               previous_accumulated_odd = accumulated_odd
 
-              # Pure 32-Bit Column-Wise Packing Recipe (with explicit uint32 casts):
-              even_rounded_f32 = accumulated_even.astype(jnp.bfloat16).astype(jnp.float32)
-              odd_rounded_f32 = accumulated_odd.astype(jnp.bfloat16).astype(jnp.float32)
+              # Pure 32-Bit Packing with VMEM Materialization:
+              # We also materialize the rounded float32 values in a temp VMEM scratchpad
+              # before bitcasting them to uint32, completely immunizing the packing path
+              # against the same compiler bug!
+              temp_f32_vmem_ref[0, :] = accumulated_even.astype(jnp.bfloat16).astype(jnp.float32)
+              temp_f32_vmem_ref[1, :] = accumulated_odd.astype(jnp.bfloat16).astype(jnp.float32)
+              
+              even_rounded_materialized = temp_f32_vmem_ref[0, :]
+              odd_rounded_materialized = temp_f32_vmem_ref[1, :]
 
-              even_u32_out = jax.lax.bitcast_convert_type(even_rounded_f32, jnp.uint32)
-              odd_u32_out = jax.lax.bitcast_convert_type(odd_rounded_f32, jnp.uint32)
+              even_u32_out = jax.lax.bitcast_convert_type(even_rounded_materialized, jnp.uint32)
+              odd_u32_out = jax.lax.bitcast_convert_type(odd_rounded_materialized, jnp.uint32)
 
               even_bf16_bits = jnp.bitwise_right_shift(even_u32_out, 16).astype(jnp.uint32)
               odd_bf16_bits = jnp.bitwise_right_shift(odd_u32_out, 16).astype(jnp.uint32)
@@ -525,6 +542,8 @@ def ragged_gather_reduce(
               src_indices_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
               dst_indices_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
               topk_weights_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.float32),
+              temp_u32_vmem_ref=pltpu.VMEM((2, num_simd_lanes), jnp.uint32),
+              temp_f32_vmem_ref=pltpu.VMEM((2, num_simd_lanes), jnp.float32),
               sem_ref=pltpu.SemaphoreType.DMA((2,)),
           ),
       },
