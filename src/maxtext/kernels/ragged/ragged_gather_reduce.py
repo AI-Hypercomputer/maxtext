@@ -231,7 +231,7 @@ def main_kernel(
       input_packing = 32 // input_dtype_bits
 
       in_32b_hbm_ref = in_hbm_ref.bitcast(jnp.uint32)
-      out_32b_hbm_ref = out_hbm_ref.bitcast(jnp.uint32) if out_hbm_ref.dtype != jnp.uint32 else out_hbm_ref
+      out_32b_hbm_ref = out_hbm_ref.bitcast(jnp.uint32)
 
       for col_vmem_start in range(0, col_size, num_lanes):
         col_hbm_start = col_start + col_vmem_start
@@ -590,12 +590,12 @@ def ragged_gather_reduce(
   )
 
   is_bf16 = x.dtype == jnp.bfloat16
-  if is_bf16:
-    out_shape = (padded_input_size // reduce_group_size, aligned_hidden_size // 2)
-    out_dtype = jnp.uint32
-  else:
-    out_shape = (padded_input_size // reduce_group_size, aligned_hidden_size)
-    out_dtype = jnp.float32
+  # We ALWAYS declare the Pallas kernel output as float32 of shape (R, C)
+  # to force the compiler to use the exact same tiled layout as the baseline (row tile size = 1).
+  # This completely bypasses the row alignment check. For bf16, we pack the data in the kernel
+  # and write it to the first C // 2 columns, and unpack it outside the kernel.
+  out_shape = (padded_input_size // reduce_group_size, aligned_hidden_size)
+  out_dtype = jnp.float32
 
   vector_mesh = plsc.VectorSubcoreMesh(
       num_cores=sc_info.num_cores,
@@ -644,8 +644,12 @@ def ragged_gather_reduce(
   )(num_src_rows_per_row_partition, x, src_indices, dst_indices, topk_weights)
 
   if is_bf16:
-    out = jax.lax.bitcast_convert_type(out, jnp.bfloat16)
-    out = out.reshape(padded_input_size // reduce_group_size, aligned_hidden_size)
+    # out has shape (R, C) of f32. The packed bf16 data is in the first C // 2 columns.
+    out_packed = out[:, : aligned_hidden_size // 2]
+    # Bitcast to bf16 -> shape (R, C // 2, 2)
+    out_paired = jax.lax.bitcast_convert_type(out_packed, jnp.bfloat16)
+    # Reshape to (R, C) of bf16
+    out = out_paired.reshape(padded_input_size // reduce_group_size, aligned_hidden_size)
   else:
     out = out.astype(x.dtype)
 
