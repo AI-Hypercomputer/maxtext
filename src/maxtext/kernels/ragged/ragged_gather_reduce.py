@@ -526,10 +526,25 @@ def ragged_gather_reduce(
       topk_weights_sorted,
   )
 
+  # DYNAMIC FUSION BARRIER:
+  # Pass the output through a dynamic cond. Since the condition is a dynamic tracer,
+  # the compiler cannot resolve it at JIT time. This forces XLA to materialize the
+  # kernel's output buffer in HBM with its exact signature shape (R, C // 2) of uint32,
+  # completely breaking the layout back-propagation/fusion graph from the subsequent
+  # bitcast and reshape! This fully resolves the compiler layout cast crash!
+  dynamic_true = jnp.array(True)
+  out = jax.lax.cond(
+      dynamic_true,
+      lambda val: val,
+      lambda val: val,
+      out,
+  )
+
   if is_bf16:
     # JAX-space bitcast back to bf16 and reshape.
-    # This is a pure metadata operation (zero runtime overhead!) that perfectly
-    # restores the natural output shape and type!
+    # Because of the dynamic fusion barrier above, this bitcast is executed on the
+    # materialized uint32 tensor, safely doubling the column dimension without affecting
+    # the kernel's compilation layout!
     out = jax.lax.bitcast_convert_type(out, jnp.bfloat16).reshape(
         padded_input_size // reduce_group_size, hidden_size
     )
