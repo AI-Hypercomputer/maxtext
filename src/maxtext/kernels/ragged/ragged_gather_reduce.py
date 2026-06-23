@@ -58,12 +58,12 @@ def main_kernel(
     dst_indices_hbm_ref: jax.Ref,
     topk_weights_hbm_ref: jax.Ref,
     # Outputs.
-    out_hbm_ref: jax.Ref,      # Passed as uint32 directly!
+    out_hbm_ref: jax.Ref,      # Passed as bf16 directly!
     # Scratch.
     num_rows_per_row_partition_vmem_ref: jax.Ref,
-    in_vmem_ref: jax.Ref,      # Dedicated 1D flat input buffer of shape (1, 8 * col_size)
-    out_vmem_ref: jax.Ref,     # Dedicated 1D flat output buffer of shape (1, 8 * col_size)
-    prev_iter_last_row_vmem_ref: jax.Ref,
+    in_vmem_ref: jax.Ref,      # Dedicated 1D flat input buffer of shape (1, 8 * col_size) of bf16
+    out_vmem_ref: jax.Ref,     # Dedicated 1D flat output buffer of shape (1, 8 * col_size) of bf16
+    prev_iter_last_row_vmem_ref: jax.Ref, # of bf16
     src_indices_vmem_ref: jax.Ref,
     dst_indices_vmem_ref: jax.Ref,
     topk_weights_vmem_ref: jax.Ref,
@@ -73,7 +73,6 @@ def main_kernel(
     subcore_axis_name: str,
     num_row_partitions: int,
     num_column_partitions: int,
-    is_bf16: bool,
 ):
   """SparseCore kernel for ragged gather reduce using emit_pipeline."""
   tpu_info = pltpu.get_tpu_info()
@@ -155,24 +154,15 @@ def main_kernel(
       dst_indices = dst_indices_vmem_ref[...]
       topk_weights = topk_weights_vmem_ref[...]
 
-      # Input is passed as bf16 and bitcasted inside the kernel (read-only, 100% layout-safe!)
-      in_32b_hbm_ref = in_hbm_ref.bitcast(jnp.uint32)
-      # Output is passed as uint32 directly in the signature when is_bf16 is True,
-      # preventing any layout size mismatches. When is_bf16 is False (like during
-      # generic tracing), we bitcast the float32 output to uint32 to match the write type.
-      if is_bf16:
-        out_32b_hbm_ref = out_hbm_ref
-      else:
-        out_32b_hbm_ref = out_hbm_ref.bitcast(jnp.uint32)
-
       # DMA input from HBM to the dedicated 1D flat in_vmem_ref buffer OUTSIDE the loop.
+      # Note: We DMA bf16 directly from HBM to VMEM!
       for col_vmem_start in range(0, col_size, num_lanes):
         col_hbm_start = col_start + col_vmem_start
         for row_vmem in range(num_simd_lanes):
           row_hbm = src_indices[row_vmem]
           flat_in_vmem_start = row_vmem * col_size + col_vmem_start
           pltpu.make_async_copy(
-              in_32b_hbm_ref.at[row_hbm, pl.ds(col_hbm_start, num_lanes)],
+              in_hbm_ref.at[row_hbm, pl.ds(col_hbm_start, num_lanes)],
               in_vmem_ref.at[0, pl.ds(flat_in_vmem_start, num_lanes)],
               recv_sem,
           ).start()
@@ -187,7 +177,7 @@ def main_kernel(
         for _ in range(num_simd_lanes):
           pltpu.make_async_copy(
               in_vmem_ref.at[0, :num_lanes],
-              in_32b_hbm_ref.at[0, :num_lanes],
+              in_hbm_ref.at[0, :num_lanes],
               recv_sem,
           ).wait()
 
@@ -195,94 +185,38 @@ def main_kernel(
         for col_compute_offset in range(0, num_lanes, num_simd_lanes):
           col_slice_global = pl.ds(col_vmem_start + col_compute_offset, num_simd_lanes)
 
-          previous_accumulated_even = None
-          previous_accumulated_odd = None
           previous_accumulated_f32 = None
 
           for row_src in range(num_simd_lanes):
             # Read from the dedicated 1D flat input buffer using flat indexing!
             flat_read_slice = pl.ds(row_src * col_size + col_vmem_start + col_compute_offset, num_simd_lanes)
-            data = in_vmem_ref[0, flat_read_slice]
-
-            if is_bf16:
-              # Column-Wise Unpacking Recipe:
-              even_u16 = jnp.bitwise_and(data, 65535).astype(jnp.uint16)
-              odd_u16 = jnp.bitwise_right_shift(data, 16).astype(jnp.uint16)
-              even_f32 = jax.lax.bitcast_convert_type(jnp.bitwise_left_shift(even_u16.astype(jnp.uint32), 16), jnp.float32)
-              odd_f32 = jax.lax.bitcast_convert_type(jnp.bitwise_left_shift(odd_u16.astype(jnp.uint32), 16), jnp.float32)
-
-              even_scaled = even_f32 * topk_weights[row_src]
-              odd_scaled = odd_f32 * topk_weights[row_src]
-            else:
-              # Standard float32 extraction.
-              data_f32 = jax.lax.bitcast_convert_type(data, jnp.float32)
-              scaled_f32 = data_f32 * topk_weights[row_src]
+            # Read bf16 and convert to float32 for high-precision accumulation.
+            data_f32 = in_vmem_ref[0, flat_read_slice].astype(jnp.float32)
+            scaled_f32 = data_f32 * topk_weights[row_src]
 
             dst_row_hbm = dst_indices[row_src]
             if row_src == 0:
               prev_row_hbm = carry[0]
-              if is_bf16:
-                carry_packed = prev_iter_last_row_vmem_ref[0, col_slice_global]
-                carry_even_u16 = jnp.bitwise_and(carry_packed, 65535).astype(jnp.uint16)
-                carry_odd_u16 = jnp.bitwise_right_shift(carry_packed, 16).astype(jnp.uint16)
-                previous_accumulated_even = jax.lax.bitcast_convert_type(
-                    jnp.bitwise_left_shift(carry_even_u16.astype(jnp.uint32), 16), jnp.float32
-                )
-                previous_accumulated_odd = jax.lax.bitcast_convert_type(
-                    jnp.bitwise_left_shift(carry_odd_u16.astype(jnp.uint32), 16), jnp.float32
-                )
-              else:
-                previous_accumulated_f32 = jax.lax.bitcast_convert_type(
-                    prev_iter_last_row_vmem_ref[0, col_slice_global], jnp.float32
-                )
+              previous_accumulated_f32 = prev_iter_last_row_vmem_ref[0, col_slice_global].astype(jnp.float32)
             else:
               prev_row_hbm = dst_indices[row_src - 1]
-              if is_bf16:
-                assert previous_accumulated_even is not None
-                assert previous_accumulated_odd is not None
-              else:
-                assert previous_accumulated_f32 is not None
+              assert previous_accumulated_f32 is not None
 
-            if is_bf16:
-              accumulated_even = jnp.where(
-                  dst_row_hbm == prev_row_hbm,
-                  previous_accumulated_even + even_scaled,
-                  even_scaled,
-              )
-              accumulated_odd = jnp.where(
-                  dst_row_hbm == prev_row_hbm,
-                  previous_accumulated_odd + odd_scaled,
-                  odd_scaled,
-              )
-              previous_accumulated_even = accumulated_even
-              previous_accumulated_odd = accumulated_odd
+            accumulated_f32 = jnp.where(
+                dst_row_hbm == prev_row_hbm,
+                previous_accumulated_f32 + scaled_f32,
+                scaled_f32,
+            )
+            previous_accumulated_f32 = accumulated_f32
 
-              # Column-Wise Packing Recipe:
-              even_bf16 = accumulated_even.astype(jnp.bfloat16)
-              odd_bf16 = accumulated_odd.astype(jnp.bfloat16)
-              even_u16_out = jax.lax.bitcast_convert_type(even_bf16, jnp.uint16)
-              odd_u16_out = jax.lax.bitcast_convert_type(odd_bf16, jnp.uint16)
-              data_to_write = jnp.bitwise_or(
-                  jnp.bitwise_left_shift(odd_u16_out.astype(jnp.uint32), 16),
-                  even_u16_out.astype(jnp.uint32),
-              )
-            else:
-              accumulated_f32 = jnp.where(
-                  dst_row_hbm == prev_row_hbm,
-                  previous_accumulated_f32 + scaled_f32,
-                  scaled_f32,
-              )
-              previous_accumulated_f32 = accumulated_f32
-              data_to_write = jax.lax.bitcast_convert_type(accumulated_f32, jnp.uint32)
-
-            # Write the output to the dedicated 1D flat out_vmem_ref buffer!
-            flat_write_slice = pl.ds(row_src * col_size + col_vmem_start + col_compute_offset, num_simd_lanes)
-            out_vmem_ref[0, flat_write_slice] = data_to_write
+            # Convert back to bf16 and write to the dedicated 1D flat out_vmem_ref buffer!
+            out_vmem_ref[0, flat_read_slice] = accumulated_f32.astype(jnp.bfloat16)
 
             if row_src == num_simd_lanes - 1:
-              prev_iter_last_row_vmem_ref[0, col_slice_global] = data_to_write
+              prev_iter_last_row_vmem_ref[0, col_slice_global] = accumulated_f32.astype(jnp.bfloat16)
 
         # Write the output back to HBM from the flat 1D out_vmem_ref buffer!
+        # Note: We DMA bf16 directly from VMEM to HBM!
         src_row_idx_in_vmem = []
         row_valid_vec = []
         for row_vmem_idx in reversed(range(num_simd_lanes)):
@@ -315,7 +249,7 @@ def main_kernel(
           flat_col_vmem_start = src_row_vmem * col_size + col_vmem_start
           pltpu.make_async_copy(
               out_vmem_ref.at[0, pl.ds(flat_col_vmem_start, num_lanes)],
-              out_32b_hbm_ref.at[dst_row_hbm, pl.ds(col_hbm_start, num_lanes)],
+              out_hbm_ref.at[dst_row_hbm, pl.ds(col_hbm_start, num_lanes)],
               send_sem,
           ).start()
           last_valid_src_row_vmem = src_row_vmem
@@ -328,7 +262,7 @@ def main_kernel(
         for _ in range(num_simd_lanes):
           pltpu.make_async_copy(
               out_vmem_ref.at[0, :num_lanes],
-              out_32b_hbm_ref.at[0, :num_lanes],
+              out_hbm_ref.at[0, :num_lanes],
               send_sem,
           ).wait()
 
@@ -361,7 +295,7 @@ def get_cost_estimate(
   flops = padded_input_size * aligned_hidden_size * 2
   bytes_accessed = (
       padded_input_size * aligned_hidden_size * input_dtype_bytes
-      + num_rows * aligned_hidden_size * 4
+      + num_rows * aligned_hidden_size * input_dtype_bytes
   )
   return pl.CostEstimate(
       flops=int(flops),
@@ -438,7 +372,7 @@ def ragged_gather_reduce(
     )
 
   input_size, hidden_size = x.shape
-  is_bf16 = x.dtype == jnp.bfloat16
+  assert x.dtype == jnp.bfloat16, "This optimized kernel only supports bfloat16 inputs."
 
   num_simd_lanes = 8
   num_rows_partitions = sc_info.num_cores * 2 # 2 subcores per core
@@ -453,24 +387,12 @@ def ragged_gather_reduce(
       num_rows_partitions,
   )
 
-  if is_bf16:
-    dtype_bytes = 2
-    # For bf16, the column dimension of the 32-bit carrier is halved.
-    aligned_hidden_size = hidden_size // 2
-    # Declare output as uint32 in JAX space, with halved column shape!
-    # This matches the kernel signature 100% and completely avoids layout casts!
-    out_dtype = jnp.uint32
-  else:
-    dtype_bytes = 4
-    aligned_hidden_size = hidden_size
-    out_dtype = x.dtype
+  col_size = hidden_size // num_column_partitions
 
-  col_size = aligned_hidden_size // num_column_partitions
-
-  # Output shape is (R, aligned_hidden_size) in HBM.
+  # Output shape is (R, hidden_size) in HBM of bfloat16.
   out_shape = (
       padded_input_size // reduce_group_size,
-      aligned_hidden_size,
+      hidden_size,
   )
 
   vector_mesh_wrapped = plsc.VectorSubcoreMesh(
@@ -487,16 +409,16 @@ def ragged_gather_reduce(
           subcore_axis_name=vector_mesh_wrapped.subcore_axis_name,
           num_row_partitions=num_rows_partitions,
           num_column_partitions=num_column_partitions,
-          is_bf16=is_bf16,
+          is_bf16=True,
       ),
       compiler_params=pltpu.CompilerParams(
           **_COMPILER_PARAMS,
       ),
       cost_estimate=get_cost_estimate(
           padded_input_size=padded_input_size,
-          aligned_hidden_size=aligned_hidden_size,
+          aligned_hidden_size=hidden_size,
           reduce_group_size=reduce_group_size,
-          input_dtype_bytes=dtype_bytes,
+          input_dtype_bytes=2, # bfloat16 is 2 bytes
           flops_override=flops_override,
           bytes_accessed_override=bytes_accessed_override,
       ),
@@ -505,13 +427,13 @@ def ragged_gather_reduce(
       **{
           _OUT_KW: jax.ShapeDtypeStruct(
               out_shape,
-              out_dtype,
+              jnp.bfloat16,
           ),
           _SCRATCH_KW: dict(  # pylint: disable=use-dict-literal
               num_rows_per_row_partition_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
-              in_vmem_ref=pltpu.VMEM((1, num_simd_lanes * col_size), jnp.uint32),
-              out_vmem_ref=pltpu.VMEM((1, num_simd_lanes * col_size), jnp.uint32),
-              prev_iter_last_row_vmem_ref=pltpu.VMEM((1, col_size), jnp.uint32),
+              in_vmem_ref=pltpu.VMEM((1, num_simd_lanes * col_size), jnp.bfloat16),
+              out_vmem_ref=pltpu.VMEM((1, num_simd_lanes * col_size), jnp.bfloat16),
+              prev_iter_last_row_vmem_ref=pltpu.VMEM((1, col_size), jnp.bfloat16),
               src_indices_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
               dst_indices_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
               topk_weights_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.float32),
@@ -520,40 +442,10 @@ def ragged_gather_reduce(
       },
   )(
       num_src_rows_per_row_partition,
-      x,                     # Passed as bf16 directly, bitcasted inside the kernel (safe read-only!)
+      x,                     # Passed as bf16 directly!
       src_indices,
       dst_indices,
       topk_weights_sorted,
   )
-
-  if is_bf16:
-    # 1. Zero-overhead bitcast and reshape to (8192, 4096) of bf16.
-    out = jax.lax.bitcast_convert_type(out, jnp.bfloat16).reshape(
-        padded_input_size // reduce_group_size, hidden_size
-    )
-
-    # 2. THE ULTIMATE LAYOUT BARRIER (BLOCKED DYNAMIC IDENTITY MATMUL):
-    # To completely block the layout compiler from back-propagating the final tiled column
-    # layout into the Pallas output buffer, we must perform an operation that destroys
-    # the dimensional mapping in the compiler's eyes. A matmul is a hard layout barrier
-    # because it contracts dimensions, making layout propagation impossible!
-    # To minimize compute overhead, we split the 4096 columns into 8 independent blocks
-    # of 512 columns, perform a dynamic identity matmul on each block, and concatenate them.
-    # This reduces the matmul overhead to only ~170 microseconds (practically free!),
-    # while guaranteeing 100% stable, crash-free compilation!
-    num_blocks = 8
-    block_size = hidden_size // num_blocks # 512
-    
-    # Construct a dynamic zero to make the matmul unprovable to static analysis.
-    dynamic_zero = (indices[0] - indices[0]).astype(jnp.bfloat16)
-    identity_block = jnp.eye(block_size, dtype=jnp.bfloat16) + dynamic_zero
-    
-    blocks = jnp.split(out, num_blocks, axis=1)
-    barrier_blocks = []
-    for block in blocks:
-      barrier_block = jnp.matmul(block, identity_block)
-      barrier_blocks.append(barrier_block)
-      
-    out = jnp.concatenate(barrier_blocks, axis=1)
 
   return out[: (input_size // reduce_group_size), :hidden_size]
