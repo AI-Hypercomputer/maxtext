@@ -359,7 +359,7 @@ def main_kernel(
           for r in range(num_simd_lanes):
             for c_offset in range(0, 128, 16):
               c_unpacked = col_vmem_start + c_offset
-              c_packed = c_offset // 2
+              c_packed = col_vmem_start // 2 + c_offset // 2
               
               val_A = out_vmem_ref[r, pl.ds(c_unpacked, 8)][...]
               val_B = out_vmem_ref[r, pl.ds(c_unpacked + 8, 8)][...]
@@ -380,7 +380,7 @@ def main_kernel(
           for r in range(num_simd_lanes):
             for c_offset in range(0, 128, 16):
               c_unpacked = col_vmem_start + 128 + c_offset
-              c_packed = 64 + c_offset // 2
+              c_packed = col_vmem_start // 2 + 64 + c_offset // 2
               
               val_A = out_vmem_ref[r, pl.ds(c_unpacked, 8)][...]
               val_B = out_vmem_ref[r, pl.ds(c_unpacked + 8, 8)][...]
@@ -411,7 +411,7 @@ def main_kernel(
             # We write 128 columns of packed uint32 (representing 256 columns of bf16) in a single aligned DMA write!
             write_col_hbm_start = pl.multiple_of(col_hbm_start // 2, 128)
             pltpu.make_async_copy(
-                temp_packed_vmem.at[src_row_vmem, :],
+                temp_packed_vmem.at[src_row_vmem, pl.ds(col_vmem_start // 2, 128)],
                 out_32b_hbm_ref.at[dst_row_hbm, pl.ds(write_col_hbm_start, 128)],
                 send_sem,
             ).start()
@@ -651,7 +651,7 @@ def ragged_gather_reduce(
           _SCRATCH_KW: dict(  # pylint: disable=use-dict-literal
               num_rows_per_row_partition_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
               out_vmem_ref=pltpu.VMEM((num_simd_lanes, col_size), jnp.uint32),
-              temp_packed_vmem=pltpu.VMEM((num_simd_lanes, 128), jnp.uint32),
+              temp_packed_vmem=pltpu.VMEM((num_simd_lanes, col_size // 2), jnp.uint32),
               prev_iter_last_row_vmem_ref=pltpu.VMEM((1, col_size), jnp.uint32),
               src_indices_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
               dst_indices_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
