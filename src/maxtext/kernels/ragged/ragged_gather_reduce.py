@@ -535,7 +535,7 @@ def ragged_gather_reduce(
   )
   
   if is_bf16:
-    x_input = jax.lax.bitcast_convert_type(x.reshape(-1), jnp.uint32).reshape(padded_input_size // 2, aligned_hidden_size)
+    x_input = jax.lax.bitcast_convert_type(x.reshape(-1, 2), jnp.uint32).reshape(padded_input_size // 2, aligned_hidden_size)
     out_shape = (padded_input_size // reduce_group_size // 2, aligned_hidden_size)
     out_dtype = jnp.uint32
   else:
