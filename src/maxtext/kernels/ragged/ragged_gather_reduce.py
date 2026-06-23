@@ -252,28 +252,25 @@ def main_kernel(
         for row_vmem in range(num_simd_lanes):
           row_hbm = src_indices[row_vmem] # No division! Normal undivided row index!
           if is_bf16:
-            # Load 256 columns of bfloat16 directly into 2D bfloat16 VMEM (in_vmem_ref)!
-            # Destination is row row_vmem, columns col_vmem_start to col_vmem_start + 256.
-            offset1 = col_vmem_start
-            offset2 = col_vmem_start + 128
-            print(f"  [bf16] col_vmem_start: {col_vmem_start}, row_vmem: {row_vmem} -> offset1: {offset1}, offset2: {offset2}")
+            # Stream 256 columns of bfloat16 directly into the local (8, 256) VMEM buffer!
+            # We always load into local column offset 0 (0:128 and 128:256) in each iteration.
+            print(f"  [bf16] col_vmem_start: {col_vmem_start}, row_vmem: {row_vmem} -> local_offset1: 0, local_offset2: 128")
             pltpu.make_async_copy(
                 in_hbm_ref.at[row_hbm, pl.ds(col_hbm_start, 128)],
-                in_vmem_ref.at[row_vmem, pl.ds(offset1, 128)], # 2D row-sliced destination!
+                in_vmem_ref.at[row_vmem, pl.ds(0, 128)], # Always local offset 0!
                 recv_sem,
             ).start()
             pltpu.make_async_copy(
                 in_hbm_ref.at[row_hbm, pl.ds(col_hbm_start + 128, 128)],
-                in_vmem_ref.at[row_vmem, pl.ds(offset2, 128)], # 2D row-sliced destination!
+                in_vmem_ref.at[row_vmem, pl.ds(128, 128)], # Always local offset 128!
                 recv_sem,
             ).start()
           else:
-            # f32 path: load 128 columns of float32 directly into 2D VMEM
-            offset1 = col_vmem_start
-            print(f"  [f32] col_vmem_start: {col_vmem_start}, row_vmem: {row_vmem} -> offset1: {offset1}")
+            # f32 path: stream 128 columns of float32 directly into the local (8, 128) VMEM buffer at offset 0
+            print(f"  [f32] col_vmem_start: {col_vmem_start}, row_vmem: {row_vmem} -> local_offset: 0")
             pltpu.make_async_copy(
                 in_hbm_ref.at[row_hbm, pl.ds(col_hbm_start, 128)],
-                in_vmem_ref.at[row_vmem, pl.ds(offset1, 128)], # 2D row-sliced destination!
+                in_vmem_ref.at[row_vmem, pl.ds(0, 128)], # Always local offset 0!
                 recv_sem,
             ).start()
 
@@ -289,17 +286,15 @@ def main_kernel(
 
           previous_accumulated_data = None
           for row_src in range(num_simd_lanes):
-            # Load and cast data.
-            # SparseCore hardware strictly requires 16-element aligned loads for 16-bit data (bf16).
-            # Because the row dimension is not tiled in VMEM, squeezing it (in_vmem_ref[row_src, ...])
-            # is 100% supported, allowing us to load a physical (16,) shape to satisfy the Get constraint!
+            # Load and cast data from the local streamed VMEM buffer.
+            # Because the buffer fits in a single tile, squeezing is 100% supported!
             if is_bf16:
               is_aligned = (col_compute_offset % 16) == 0
               read_offset = col_compute_offset if is_aligned else col_compute_offset - 8
-              data_16 = in_vmem_ref[row_src, pl.ds(col_vmem_start + read_offset, 16)] # 2D read yielding (16,)!
+              data_16 = in_vmem_ref[row_src, pl.ds(read_offset, 16)] # 2D read yielding (16,) from local buffer!
               data = data_16[:8] if is_aligned else data_16[8:] # Register slice to (8,)
             else:
-              data = in_vmem_ref[row_src, pl.ds(col_vmem_start + col_compute_offset, num_simd_lanes)] # 2D read yielding (8,)!
+              data = in_vmem_ref[row_src, pl.ds(col_compute_offset, num_simd_lanes)] # 2D read yielding (8,) from local buffer!
             # Convert to float32 precision for accumulation
             data = data.astype(jnp.float32)
             # Accumulate at float32 precision
@@ -658,7 +653,7 @@ def ragged_gather_reduce(
           ),
           _SCRATCH_KW: dict(  # pylint: disable=use-dict-literal
               num_rows_per_row_partition_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
-              in_vmem_ref=pltpu.VMEM((num_simd_lanes, col_size), x.dtype), # 2D buffer of shape (8, col_size)!
+              in_vmem_ref=pltpu.VMEM((num_simd_lanes, 256 if is_bf16 else 128), x.dtype), # Local streaming 2D buffer (fits in 1 tile)!
               out_vmem_ref=pltpu.VMEM((1, num_simd_lanes * (col_size // 2 if is_bf16 else col_size)), jnp.uint32),
               prev_iter_last_row_vmem_ref=pltpu.VMEM((1, col_size), jnp.uint32),
               src_indices_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
