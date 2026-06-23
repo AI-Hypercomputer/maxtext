@@ -79,13 +79,6 @@ def main_kernel(
     is_bf16: bool,
 ):
   """SparseCore kernel for ragged gather reduce."""
-  # Local flat core/subcore index from the Pallas parallel grid.
-  core_id = pl.program_id(0)
-
-  # Decode the flat index into row and column partition IDs!
-  row_partition_id = core_id // num_column_partitions
-  col_partition_id = core_id % num_column_partitions
-
   # Dimension sizes.
   shape = in_hbm_ref.shape
   col_size = shape[-1] // num_column_partitions
@@ -103,6 +96,13 @@ def main_kernel(
   send_sem = sem_ref[1]
 
   def inner_kernel_corrected():
+    # Local flat core/subcore index from the Pallas parallel grid.
+    core_id = pl.program_id(0)
+
+    # Decode the flat index into row and column partition IDs!
+    row_partition_id = core_id // num_column_partitions
+    col_partition_id = core_id % num_column_partitions
+
     num_rows_current_row_partition = jnp.array(0, jnp.int32)
     num_rows_per_row_partition = num_rows_per_row_partition_vmem_ref[...]
     for i in range(num_row_partitions):
