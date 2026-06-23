@@ -22,7 +22,6 @@ from jax.experimental.pallas import tpu as pltpu
 from jax.experimental.pallas import tpu_sc as plsc
 import jax.numpy as np
 import jax.numpy as jnp
-from maxtext import max_logging
 
 
 def _ragged_gather_reduce_fallback(
