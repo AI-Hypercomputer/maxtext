@@ -232,47 +232,29 @@ def main_kernel(
 
       in_32b_hbm_ref = in_hbm_ref.bitcast(jnp.uint32)
       out_32b_hbm_ref = out_hbm_ref.bitcast(jnp.uint32)
-
-      # VMEM to HBM transfer.
-      # Use Python loop to fully unroll the column blocks, completely bypassing
-      # the compiler's loop-tiling layout propagation bugs!
-      # For bf16, we pack 256 columns into 128 columns, so we step by 2 * num_lanes (256).
-      # For f32, we write 128 columns directly, so we step by num_lanes (128).
-      loop_step = num_lanes if not is_bf16 else 2 * num_lanes
-
+      # We permanently set loop_step = 128 (num_lanes) for both paths!
+      # This forces the input VMEM buffer to have shape (8, 128), fitting inside a single tile
+      # and completely bypassing all multi-tile compiler slicing bugs!
+      loop_step = num_lanes
+ 
       print(f"=== DEBUG TRACING ===")
       print(f"col_size: {col_size}")
       print(f"loop_step: {loop_step}")
       print(f"num_simd_lanes: {num_simd_lanes}")
       print(f"is_bf16: {is_bf16}")
       print(f"flat buffer size: {num_simd_lanes * col_size}")
-
+ 
       for col_vmem_start in range(0, col_size, loop_step):
         col_hbm_start = col_start + col_vmem_start
         for row_vmem in range(num_simd_lanes):
           row_hbm = src_indices[row_vmem] # No division! Normal undivided row index!
-          if is_bf16:
-            # Stream 256 columns of bfloat16 directly into the local (8, 256) VMEM buffer!
-            # We always load into local column offset 0 (0:128 and 128:256) in each iteration.
-            print(f"  [bf16] col_vmem_start: {col_vmem_start}, row_vmem: {row_vmem} -> local_offset1: 0, local_offset2: 128")
-            pltpu.make_async_copy(
-                in_hbm_ref.at[row_hbm, pl.ds(col_hbm_start, 128)],
-                in_vmem_ref.at[row_vmem, pl.ds(0, 128)], # Always local offset 0!
-                recv_sem,
-            ).start()
-            pltpu.make_async_copy(
-                in_hbm_ref.at[row_hbm, pl.ds(col_hbm_start + 128, 128)],
-                in_vmem_ref.at[row_vmem, pl.ds(128, 128)], # Always local offset 128!
-                recv_sem,
-            ).start()
-          else:
-            # f32 path: stream 128 columns of float32 directly into the local (8, 128) VMEM buffer at offset 0
-            print(f"  [f32] col_vmem_start: {col_vmem_start}, row_vmem: {row_vmem} -> local_offset: 0")
-            pltpu.make_async_copy(
-                in_hbm_ref.at[row_hbm, pl.ds(col_hbm_start, 128)],
-                in_vmem_ref.at[row_vmem, pl.ds(0, 128)], # Always local offset 0!
-                recv_sem,
-            ).start()
+          # Stream 128 columns of input directly into the local (8, 128) VMEM buffer at offset 0!
+          print(f"  col_vmem_start: {col_vmem_start}, row_vmem: {row_vmem} -> local_offset: 0")
+          pltpu.make_async_copy(
+              in_hbm_ref.at[row_hbm, pl.ds(col_hbm_start, 128)],
+              in_vmem_ref.at[row_vmem, pl.ds(0, 128)], # Always local offset 0!
+              recv_sem,
+          ).start()
 
       for col_vmem_start in range(0, col_size, loop_step):
         col_hbm_start = col_start + col_vmem_start
@@ -384,12 +366,12 @@ def main_kernel(
         # Write the accumulated packed register rows back to flat out_vmem_ref in chunks of 8.
         if is_bf16:
           for r in range(num_simd_lanes):
-            packed_row = jnp.array(packed_rows_registers[r]) # shape (128,)
-            write_col_vmem_start = pl.multiple_of(col_vmem_start, 128)
-            for c in range(0, 128, 8):
-              out_vmem_ref[0, pl.ds(r * col_size + write_col_vmem_start + c, 8)] = packed_row[c : c + 8]
-            for c in range(128, 256, 8):
-              out_vmem_ref[0, pl.ds(r * col_size + write_col_vmem_start + c, 8)] = jnp.zeros((8,), jnp.uint32)
+            packed_row = jnp.array(packed_rows_registers[r]) # shape (64,)
+            write_col_vmem_start = pl.multiple_of(col_vmem_start // 2, 64) # Packed offset!
+            for c in range(0, 64, 8):
+              out_vmem_ref[0, pl.ds(r * (col_size // 2) + write_col_vmem_start + c, 8)] = packed_row[c : c + 8]
+            for c in range(64, 128, 8):
+              out_vmem_ref[0, pl.ds(r * (col_size // 2) + write_col_vmem_start + c, 8)] = jnp.zeros((8,), jnp.uint32)
 
         # There must be at least one valid row to write in the current row_tile.
         # When num valid writes is not a multiple of row_tile_size, we repeat
@@ -402,17 +384,14 @@ def main_kernel(
           dst_row_hbm = jnp.where(row_valid, dst_indices[i], last_valid_dst_row_hbm)
           
           if is_bf16:
-            # Eliminate tracer division by distributing the division statically in Python!
-            # col_hbm_start // 2 = col_partition_id * (col_size // 2) + (col_vmem_start // 2).
-            # This completely removes the division operator from the JAX tracer graph,
-            # allowing the compiler's layout engine to easily prove linearity and compile successfully!
-            write_col_hbm_start = pl.multiple_of(col_partition_id * (col_size // 2) + (col_vmem_start // 2), 128)
-            write_col_vmem_start = pl.multiple_of(col_vmem_start, 128)
-            flat_col_vmem_start_1 = pl.multiple_of(src_row_vmem * col_size + write_col_vmem_start, 128)
+            # Write 64 columns (256 bytes) of packed carrier data to HBM!
+            write_col_hbm_start = pl.multiple_of(col_partition_id * (col_size // 2) + (col_vmem_start // 2), 64)
+            write_col_vmem_start = pl.multiple_of(col_vmem_start // 2, 64)
+            flat_col_vmem_start_1 = pl.multiple_of(src_row_vmem * (col_size // 2) + write_col_vmem_start, 64)
             
             pltpu.make_async_copy(
-                out_vmem_ref.at[0, pl.ds(flat_col_vmem_start_1, 128)],
-                out_32b_hbm_ref.at[dst_row_hbm, pl.ds(write_col_hbm_start, 128)],
+                out_vmem_ref.at[0, pl.ds(flat_col_vmem_start_1, 64)], # Write 64 columns!
+                out_32b_hbm_ref.at[dst_row_hbm, pl.ds(write_col_hbm_start, 64)],
                 send_sem,
             ).start()
           else:
@@ -653,7 +632,7 @@ def ragged_gather_reduce(
           ),
           _SCRATCH_KW: dict(  # pylint: disable=use-dict-literal
               num_rows_per_row_partition_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
-              in_vmem_ref=pltpu.VMEM((num_simd_lanes, 256 if is_bf16 else 128), x.dtype), # Local streaming 2D buffer (fits in 1 tile)!
+              in_vmem_ref=pltpu.VMEM((num_simd_lanes, 128), x.dtype), # Pure single-tile 2D buffer of shape (8, 128)!
               out_vmem_ref=pltpu.VMEM((1, num_simd_lanes * (col_size // 2 if is_bf16 else col_size)), jnp.uint32),
               prev_iter_last_row_vmem_ref=pltpu.VMEM((1, col_size), jnp.uint32),
               src_indices_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
