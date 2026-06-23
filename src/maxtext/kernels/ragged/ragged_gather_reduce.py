@@ -233,7 +233,8 @@ def main_kernel(
       out_32b_hbm_ref = out_hbm_ref.bitcast(jnp.uint32)
 
       # VMEM to HBM transfer.
-      # Use dynamic loop to minimize register spills.
+      # Use Python loop to fully unroll the column blocks, completely bypassing
+      # the compiler's loop-tiling layout propagation bugs!
       # For bf16, we pack 256 columns into 128 columns, so we step by 2 * num_lanes (256).
       # For f32, we write 128 columns directly, so we step by num_lanes (128).
       loop_step = num_lanes if not is_bf16 else 2 * num_lanes
@@ -262,9 +263,7 @@ def main_kernel(
                 recv_sem,
             ).start()
 
-      @pl.loop(0, col_size, step=loop_step, init_carry=(prev_dst_row_hbm,))
-      @jax.named_scope("dma_write_loop")
-      def dma_write_loop(col_vmem_start, carry):
+      for col_vmem_start in range(0, col_size, loop_step):
         col_hbm_start = col_start + col_vmem_start
 
         # We accumulate the packed row data in Python lists of JAX tracers on the fly.
@@ -298,8 +297,8 @@ def main_kernel(
 
             dst_row_hbm = dst_indices[row_src]
             if row_src == 0:
-              # carry[0] is the last dst_row_hbm from the previous row_tile.
-              prev_row_hbm = carry[0]
+              # We use the outer prev_dst_row_hbm directly since the loop is unrolled!
+              prev_row_hbm = prev_dst_row_hbm
               previous_accumulated_data = jax.lax.bitcast_convert_type(
                   prev_iter_last_row_vmem_ref[0, col_slice], jnp.float32
               )
@@ -431,8 +430,6 @@ def main_kernel(
             
           last_valid_src_row_vmem = src_row_vmem
           last_valid_dst_row_hbm = dst_row_hbm
-
-        return carry
 
       # Wait for dma write to finish.
       # We revert back to out_vmem_ref since our full-size shape erasure has completely
