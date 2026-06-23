@@ -310,7 +310,7 @@ def main_kernel(
               # We use the outer prev_dst_row_hbm directly since the loop is unrolled!
               prev_row_hbm = prev_dst_row_hbm
               previous_accumulated_data = jax.lax.bitcast_convert_type(
-                  prev_iter_last_row_vmem_ref[0:1, col_slice], jnp.float32
+                  prev_iter_last_row_vmem_ref[0, col_slice], jnp.float32
               )
             else:
               prev_row_hbm = dst_indices[row_src - 1]
@@ -330,7 +330,7 @@ def main_kernel(
             data_to_write = jax.lax.bitcast_convert_type(accumulated_data, jnp.uint32)
             if not is_bf16:
               flat_slice = pl.ds(row_src * col_size + col_vmem_start + col_compute_offset, num_simd_lanes)
-              out_vmem_ref[0:1, flat_slice] = data_to_write
+              out_vmem_ref[0, flat_slice] = data_to_write
 
             # On-the-fly packing: Pack the 8 float32 accumulated elements into 4 uint32 elements
             # directly in register space!
@@ -353,7 +353,7 @@ def main_kernel(
             # row in the current row_tile, the latest accumulated data in
             # prev_iter_last_row_vmem_ref will get used.
             if row_src == num_simd_lanes - 1:
-              prev_iter_last_row_vmem_ref[0:1, col_slice] = data_to_write
+              prev_iter_last_row_vmem_ref[0, col_slice] = data_to_write
 
         # Start dma write.
         # When there are multiple sources rows in the current row_tile that
@@ -392,9 +392,9 @@ def main_kernel(
             packed_row = jnp.array(packed_rows_registers[r]) # shape (128,)
             write_col_vmem_start = pl.multiple_of(col_vmem_start, 128)
             for c in range(0, 128, 8):
-              out_vmem_ref[0:1, pl.ds(r * col_size + write_col_vmem_start + c, 8)] = packed_row[c : c + 8]
+              out_vmem_ref[0, pl.ds(r * col_size + write_col_vmem_start + c, 8)] = packed_row[c : c + 8]
             for c in range(128, 256, 8):
-              out_vmem_ref[0:1, pl.ds(r * col_size + write_col_vmem_start + c, 8)] = jnp.zeros((8,), jnp.uint32)
+              out_vmem_ref[0, pl.ds(r * col_size + write_col_vmem_start + c, 8)] = jnp.zeros((8,), jnp.uint32)
 
         # There must be at least one valid row to write in the current row_tile.
         # When num valid writes is not a multiple of row_tile_size, we repeat
@@ -416,7 +416,7 @@ def main_kernel(
             flat_col_vmem_start_1 = pl.multiple_of(src_row_vmem * col_size + write_col_vmem_start, 128)
             
             pltpu.make_async_copy(
-                out_vmem_ref.at[0:1, pl.ds(flat_col_vmem_start_1, 128)],
+                out_vmem_ref.at[0, pl.ds(flat_col_vmem_start_1, 128)],
                 out_32b_hbm_ref.at[dst_row_hbm, pl.ds(write_col_hbm_start, 128)],
                 send_sem,
             ).start()
@@ -424,7 +424,7 @@ def main_kernel(
             # f32 path: write 128 columns from flat VMEM
             flat_col_vmem_start = pl.multiple_of(src_row_vmem * col_size + col_vmem_start, 128)
             pltpu.make_async_copy(
-                out_vmem_ref.at[0:1, pl.ds(flat_col_vmem_start, 128)],
+                out_vmem_ref.at[0, pl.ds(flat_col_vmem_start, 128)],
                 out_32b_hbm_ref.at[dst_row_hbm, pl.ds(col_hbm_start, 128)],
                 send_sem,
             ).start()
@@ -438,7 +438,7 @@ def main_kernel(
       for _ in range(0, col_size, num_lanes):
         for _ in range(num_simd_lanes):
           pltpu.make_async_copy(
-              out_vmem_ref.at[0:1, :num_lanes],
+              out_vmem_ref.at[0, :num_lanes],
               out_32b_hbm_ref.at[0, :num_lanes],
               send_sem,
           ).wait()
