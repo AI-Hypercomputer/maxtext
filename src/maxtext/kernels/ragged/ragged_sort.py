@@ -30,6 +30,10 @@ def ring_ragged_sort(
     buffer_size=None,
     enforce_gather_fallback=False,
     enforce_gather_reduce_fallback=False,
+    gather_flops_override=-1,
+    gather_reduce_flops_override=-1,
+    gather_bytes_accessed_override=-1,
+    gather_reduce_bytes_accessed_override=-1,
 ):
   """Ragged-gather variant for AG-RS Expert Parallelism token routing.
 
@@ -105,6 +109,8 @@ def ring_ragged_sort(
           shard_output_start[None],
           shard_output_end[None],
           enforce_fallback=enforce_gather_fallback,
+          flops_override=gather_flops_override,
+          bytes_accessed_override=gather_bytes_accessed_override,
       )
     else:
       local_buffer_size = buffer_size
@@ -126,6 +132,8 @@ def ring_ragged_sort(
           jnp.int32(0)[None],
           gather_end[None],
           enforce_fallback=enforce_gather_fallback,
+          flops_override=gather_flops_override,
+          bytes_accessed_override=gather_bytes_accessed_override,
       )
 
     out = (x, group_sizes_local, topk_argsort_revert_indices)
@@ -219,6 +227,10 @@ def ring_ragged_unsort(
     topk_weights,
     enforce_gather_fallback=False,
     enforce_gather_reduce_fallback=False,
+    gather_flops_override=-1,
+    gather_reduce_flops_override=-1,
+    gather_bytes_accessed_override=-1,
+    gather_reduce_bytes_accessed_override=-1,
 ):
   """Dual of :func:`ring_ragged_sort`.
 

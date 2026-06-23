@@ -271,6 +271,59 @@ def main_kernel(
   inner_kernel()
 
 
+def get_cost_estimate(
+    out_size: int,
+    hidden_size: int,
+    dtype_bytes: int,
+    has_weights: bool,
+    flops_override: int = -1,
+    bytes_accessed_override: int = -1,
+) -> pl.CostEstimate:
+  """Returns a cost estimate for the ragged gather kernel.
+
+  The ragged gather is primarily a data-movement kernel: it gathers rows from
+  an input table according to an index array.  When ``has_weights`` is True an
+  additional element-wise multiply is performed.
+
+  Args:
+    out_size: Number of output rows (after padding).
+    hidden_size: Number of columns in the input / output.
+    dtype_bytes: Size of one element in bytes (e.g. 2 for bf16, 4 for f32).
+    has_weights: Whether per-row weighting is applied.
+    flops_override: If > 0, use this value as the flop count instead of
+      auto-computing.  -1 (default) means auto-compute.
+    bytes_accessed_override: If > 0, use this value as bytes_accessed instead
+      of auto-computing.  -1 (default) means auto-compute.
+
+  Returns:
+    A ``pl.CostEstimate`` suitable for XLA scheduling.
+  """
+  # Flops: one multiply per element when weighting is enabled.
+  if flops_override > 0:
+    flops = flops_override
+  else:
+    flops = out_size * hidden_size if has_weights else 0
+
+  if bytes_accessed_override > 0:
+    bytes_accessed = bytes_accessed_override
+  else:
+    # Bytes accessed:
+    #   read  – gathered input rows + indices (int32) + optional weights (f32)
+    #   write – output rows
+    bytes_in = out_size * hidden_size * dtype_bytes  # input rows read
+    bytes_in += out_size * 4  # indices (int32)
+    if has_weights:
+      bytes_in += out_size * 4  # weights (float32)
+    bytes_out = out_size * hidden_size * dtype_bytes  # output rows written
+    bytes_accessed = bytes_in + bytes_out
+
+  return pl.CostEstimate(
+      flops=flops,
+      bytes_accessed=bytes_accessed,
+      transcendentals=0,
+  )
+
+
 def _fallback_implementation(
     x: jax.Array,
     indices: jax.Array,
@@ -308,7 +361,9 @@ def calculate_col_size(hidden_size: int) -> int:
   return pl.cdiv(hidden_size, (num_cols * num_lanes)) * num_lanes
 
 
-@functools.partial(jax.jit, static_argnames=("has_weights", "enforce_fallback"))
+@functools.partial(
+    jax.jit, static_argnames=("has_weights", "enforce_fallback", "flops_override", "bytes_accessed_override")
+)
 def ragged_gather(
     x: jax.Array,
     indices: jax.Array,
@@ -317,6 +372,8 @@ def ragged_gather(
     weights: jax.Array | None = None,
     has_weights: bool = False,
     enforce_fallback: bool = False,
+    flops_override: int = -1,
+    bytes_accessed_override: int = -1,
 ) -> jax.Array:
   """Perform gather on indices within dynamic array start and end.
 
@@ -333,6 +390,10 @@ def ragged_gather(
     enforce_fallback: Static bool flag. When ``True``, unconditionally use the
       JAX reference implementation instead of the SparseCore kernel.
       When ``False`` (default), use the SparseCore kernel and raise any error.
+    flops_override: If > 0, use this value as the flop count instead of
+      auto-computing.  -1 (default) means auto-compute.
+    bytes_accessed_override: If > 0, use this value as bytes_accessed instead
+      of auto-computing.  -1 (default) means auto-compute.
 
   Returns:
     Gathered output of shape ``(indices_size, hidden_size)``.
@@ -394,6 +455,14 @@ def ragged_gather(
       ),
       compiler_params=pltpu.CompilerParams(  # pytype: disable=wrong-keyword-args
           **_COMPILER_PARAMS,
+      ),
+      cost_estimate=get_cost_estimate(
+          out_size=out_size + out_pad_size,
+          hidden_size=aligned_hidden_size,
+          dtype_bytes=jax.dtypes.itemsize_bits(dtype) // 8,
+          has_weights=has_weights,
+          flops_override=flops_override,
+          bytes_accessed_override=bytes_accessed_override,
       ),
       mesh=vector_mesh,
       name="sc_ragged_gather",
