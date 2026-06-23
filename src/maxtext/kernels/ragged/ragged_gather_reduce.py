@@ -374,7 +374,7 @@ def _preprocess(
 
 @functools.partial(
     jax.jit,
-    static_argnums=(4, 5), # reduce_group_size, padded_input_size
+    static_argnums=(4,), # reduce_group_size
     static_argnames=("flops_override", "bytes_accessed_override", "enforce_fallback"),
 )
 def ragged_gather_reduce(
@@ -383,14 +383,16 @@ def ragged_gather_reduce(
     topk_weights: jnp.ndarray,
     valid_rows_mask: jnp.ndarray,
     reduce_group_size: int,
-    padded_input_size: int,
-    vector_mesh: jax.sharding.Mesh,
     flops_override: int | None = None,
     bytes_accessed_override: int | None = None,
     enforce_fallback: bool = False,
 ) -> jnp.ndarray:
   """Wrapper for the ragged gather reduce SparseCore kernel."""
   sc_info = plsc.get_subcore_info()
+  
+  # Calculate padded_input_size locally based on the shape of indices!
+  padded_input_size = indices.shape[0]
+
   if sc_info is None or enforce_fallback:
     return _ragged_gather_reduce_fallback(
         x, indices, topk_weights, valid_rows_mask, reduce_group_size, padded_input_size
@@ -398,10 +400,10 @@ def ragged_gather_reduce(
 
   input_size, hidden_size = x.shape
   is_bf16 = x.dtype == jnp.bfloat16
-  
+
   num_simd_lanes = 8
-  num_rows_partitions = vector_mesh.shape["core"] * 2 # 2 subcores per core
-  num_column_partitions = vector_mesh.shape["core"]
+  num_rows_partitions = sc_info.num_cores * 2 # 2 subcores per core
+  num_column_partitions = sc_info.num_cores
 
   # Preprocess indices using the valid_rows_mask.
   # This sorts the tokens so all valid ones come first, and calculates the exact
@@ -447,9 +449,9 @@ def ragged_gather_reduce(
   )
   out_dtype = jnp.float32
 
-  # Wrap the sharding mesh
+  # Wrap the sharding mesh locally using sc_info (completely self-contained!)
   vector_mesh_wrapped = plsc.VectorSubcoreMesh(
-      num_cores=vector_mesh.shape["core"],
+      num_cores=sc_info.num_cores,
       num_subcores=2,
       core_axis_name="core",
       subcore_axis_name="subcore",
