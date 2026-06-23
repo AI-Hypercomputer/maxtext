@@ -131,6 +131,7 @@ def main_kernel(
     # Scratch.
     num_rows_per_row_partition_vmem_ref: jax.Ref,
     out_vmem_ref: jax.Ref,
+    packed_out_vmem_ref: jax.Ref,
     prev_iter_last_row_vmem_ref: jax.Ref,
     src_indices_vmem_ref: jax.Ref,
     dst_indices_vmem_ref: jax.Ref,
@@ -141,6 +142,7 @@ def main_kernel(
     subcore_axis_name: str,
     num_row_partitions: int,
     num_column_partitions: int,
+    is_bf16: bool,
 ):
   """Main Pallas kernel for ragged gather and reduction on SparseCore."""
   tpu_info = pltpu.get_tpu_info()
@@ -316,6 +318,18 @@ def main_kernel(
             if row_src == num_simd_lanes - 1:
               prev_iter_last_row_vmem_ref[0, col_slice] = data_to_write
 
+        # Packing step (only for bf16)
+        if is_bf16:
+          # Pack the accumulated float32 outputs in out_vmem_ref into bf16 pairs in packed_out_vmem_ref
+          for c in range(0, col_size, 2):
+            val_even = out_vmem_ref[:, c]
+            val_odd = out_vmem_ref[:, c + 1]
+            packed_val = jnp.bitwise_or(
+                jnp.bitwise_right_shift(val_even, 16),
+                jnp.bitwise_and(val_odd, -65536)
+            )
+            packed_out_vmem_ref[:, c // 2] = packed_val
+
         # Start dma write.
         # When there are multiple sources rows in the current row_tile that
         # contribute to the same destination row, the accumulated data is
@@ -356,11 +370,20 @@ def main_kernel(
         for i, (src_row_idx_in_vmem, row_valid) in enumerate(zip(src_row_idx_in_vmem, row_valid_vec, strict=True)):
           src_row_vmem = jnp.where(row_valid, src_row_idx_in_vmem, last_valid_src_row_vmem)
           dst_row_hbm = jnp.where(row_valid, dst_indices[i], last_valid_dst_row_hbm)
-          pltpu.make_async_copy(
-              out_vmem_ref.at[src_row_vmem, pl.ds(col_vmem_start, num_lanes)],
-              out_32b_hbm_ref.at[dst_row_hbm, pl.ds(col_hbm_start, num_lanes)],
-              send_sem,
-          ).start()
+          
+          if is_bf16:
+            pltpu.make_async_copy(
+                packed_out_vmem_ref.at[src_row_vmem, pl.ds(col_vmem_start // 2, num_lanes // 2)],
+                out_32b_hbm_ref.at[dst_row_hbm, pl.ds(col_hbm_start // 2, num_lanes // 2)],
+                send_sem,
+            ).start()
+          else:
+            pltpu.make_async_copy(
+                out_vmem_ref.at[src_row_vmem, pl.ds(col_vmem_start, num_lanes)],
+                out_32b_hbm_ref.at[dst_row_hbm, pl.ds(col_hbm_start, num_lanes)],
+                send_sem,
+            ).start()
+            
           last_valid_src_row_vmem = src_row_vmem
           last_valid_dst_row_hbm = dst_row_hbm
 
@@ -542,14 +565,14 @@ def ragged_gather_reduce(
       num_simd_lanes,
   )
 
+  is_bf16 = x.dtype == jnp.bfloat16
+
   vector_mesh = plsc.VectorSubcoreMesh(
       num_cores=sc_info.num_cores,
       num_subcores=sc_info.num_subcores,
       core_axis_name="core",
       subcore_axis_name="subcore",
   )
-  # Each output row from `main_kernel` will be of type float32, and then
-  # casted to the input dtype when doing the filter operation.
   out = pl.kernel(  # pytype: disable=wrong-keyword-args
       functools.partial(
           main_kernel,
@@ -557,6 +580,7 @@ def ragged_gather_reduce(
           subcore_axis_name=vector_mesh.subcore_axis_name,
           num_row_partitions=num_rows_partitions,
           num_column_partitions=num_column_partitions,
+          is_bf16=is_bf16,
       ),
       compiler_params=pltpu.CompilerParams(  # pytype: disable=wrong-keyword-args
           **_COMPILER_PARAMS,
@@ -574,11 +598,12 @@ def ragged_gather_reduce(
       **{
           _OUT_KW: jax.ShapeDtypeStruct(
               (padded_input_size // reduce_group_size, aligned_hidden_size),
-              jnp.float32,
+              x.dtype,
           ),
           _SCRATCH_KW: dict(  # pylint: disable=use-dict-literal
               num_rows_per_row_partition_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
               out_vmem_ref=pltpu.VMEM((num_simd_lanes, col_size), jnp.uint32),
+              packed_out_vmem_ref=pltpu.VMEM((num_simd_lanes, col_size // 2), jnp.uint32),
               prev_iter_last_row_vmem_ref=pltpu.VMEM((1, col_size), jnp.uint32),
               src_indices_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
               dst_indices_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
@@ -588,4 +613,4 @@ def ragged_gather_reduce(
       },
   )(num_src_rows_per_row_partition, x, src_indices, dst_indices, topk_weights)
 
-  return out.astype(x.dtype)
+  return out
