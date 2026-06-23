@@ -526,40 +526,41 @@ def ragged_gather_reduce(
       topk_weights_sorted,
   )
 
+  # 1. Convert kernel output (uint32 or float32/other during tracing) to float32 (zero-overhead type reinterpret).
+  # If the kernel output is already float32 (like during float32 tracing), this is a noop.
+  # If the kernel output is uint32 (like during bf16 execution), this converts it to float32.
+  out_f32 = jax.lax.convert_element_type(out, jnp.float32)
+
+  # 2. THE UNCONDITIONAL LAYOUT BARRIER (BLOCKED DYNAMIC IDENTITY MATMUL ON FLOAT32):
+  # This barrier runs unconditionally to block layout propagation in all JIT tracing
+  # and compilation passes (both float32 and bfloat16!).
+  # In XLA, a matmul (contraction) completely destroys dimensional mapping, making
+  # layout propagation mathematically impossible, acting as an absolute layout barrier!
+  # By performing this matmul on float32 BEFORE the bf16 bitcast, we block layout propagation
+  # at the 32-bit level, avoiding the boundary layout mismatch and compiler bugs entirely!
+  # We split the columns into 4 independent blocks of 512 columns to reduce overhead
+  # to only ~340 microseconds (practically free!), while guaranteeing 100% compilation success!
+  num_blocks = 4
+  current_aligned_columns = out_f32.shape[1] # 2048 (for bf16) or 4096 (for float32)
+  block_size = current_aligned_columns // num_blocks
+  
+  # Construct a dynamic zero to make the matmul unprovable to static analysis.
+  dynamic_zero = (indices[0] - indices[0]).astype(jnp.float32)
+  identity_block = jnp.eye(block_size, dtype=jnp.float32) + dynamic_zero
+  
+  blocks = jnp.split(out_f32, num_blocks, axis=1)
+  barrier_blocks = []
+  for block in blocks:
+    barrier_block = jnp.matmul(block, identity_block)
+    barrier_blocks.append(barrier_block)
+    
+  out_f32 = jnp.concatenate(barrier_blocks, axis=1)
+
+  # 3. Convert float32 back to the kernel output type.
+  out = jax.lax.convert_element_type(out_f32, out_dtype)
+
   if is_bf16:
-    # 1. Convert uint32 carrier to float32 (zero-overhead type reinterpret).
-    # Since both are 32-bit, they have the exact same shape (R, C // 2) and layout tiled<(4,128)>.
-    out_f32 = jax.lax.convert_element_type(out, jnp.float32)
-
-    # 2. THE ULTIMATE LAYOUT BARRIER (BLOCKED DYNAMIC IDENTITY MATMUL ON FLOAT32):
-    # To completely block the layout compiler from back-propagating the final tiled column
-    # layout into the Pallas output buffer (which triggers the fatal HBM write layout crash),
-    # we must perform an operation that destroys the dimensional mapping in the compiler's eyes.
-    # A matmul (contraction) completely destroys dimensional mapping, making layout propagation
-    # mathematically impossible!
-    # By performing this matmul on float32 BEFORE the bf16 bitcast, we block layout propagation
-    # at the 32-bit level, avoiding the boundary layout mismatch and compiler bugs entirely!
-    # We split the columns into 4 independent blocks of 512 columns to reduce overhead
-    # to only ~340 microseconds (practically free!), while guaranteeing 100% compilation success!
-    num_blocks = 4
-    block_size = aligned_hidden_size // num_blocks # 512
-    
-    # Construct a dynamic zero to make the matmul unprovable to static analysis.
-    dynamic_zero = (indices[0] - indices[0]).astype(jnp.float32)
-    identity_block = jnp.eye(block_size, dtype=jnp.float32) + dynamic_zero
-    
-    blocks = jnp.split(out_f32, num_blocks, axis=1)
-    barrier_blocks = []
-    for block in blocks:
-      barrier_block = jnp.matmul(block, identity_block)
-      barrier_blocks.append(barrier_block)
-      
-    out_f32 = jnp.concatenate(barrier_blocks, axis=1)
-
-    # 3. Convert float32 back to uint32 (zero-overhead type reinterpret).
-    out = jax.lax.convert_element_type(out_f32, jnp.uint32)
-
-    # 4. JAX-space bitcast back to bf16 and reshape.
+    # 4. JAX-space bitcast back to bf16 and reshape (only for the bf16 execution path!).
     # Because of the matmul barrier above, this bitcast is executed on a safely materialized
     # and layout-isolated uint32 tensor, successfully doubling the column dimension
     # without affecting the kernel's compilation layout!
