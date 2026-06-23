@@ -19,7 +19,6 @@
 # See github.com/google/maxtext/issues/20 for more
 
 from typing import Any, Sequence
-import datetime
 import functools
 import os
 
@@ -677,7 +676,6 @@ def train_loop(config, recorder, state=None):
 
   _job_completed_gracefully = False
   try:
-    last_step_completion = datetime.datetime.now()
     for step in np.arange(start_step, config.steps):
       prof.maybe_activate_profiler(step, state)
 
@@ -694,7 +692,7 @@ def train_loop(config, recorder, state=None):
               state = sharding.maybe_shard_with_name(state, state_mesh_shardings, config.shard_mode)
             state, metrics = p_train_step(state, example_batch, *step_rng_args)
 
-        step_time_delta = datetime.datetime.now() - last_step_completion
+        metric_logger_instance.buffer_and_write_metrics(metrics, step)
 
         checkpointing.maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step)
 
@@ -717,7 +715,6 @@ def train_loop(config, recorder, state=None):
           max_logging.log(f"Starting eval after train step {step}")
 
           eval_step_count = 0
-          last_eval_step_completion = datetime.datetime.now()
           # pylint: disable=not-callable
           for eval_batch in eval_data_iterator:
             # Shard input eval data
@@ -726,20 +723,13 @@ def train_loop(config, recorder, state=None):
               break
             with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
               eval_metrics = p_eval_step(state, eval_batch, *step_rng_args)
-            eval_step_time_delta = datetime.datetime.now() - last_eval_step_completion
-            last_eval_step_completion = datetime.datetime.now()
-            metric_logger_instance.buffer_and_write_metrics(
-                eval_metrics, eval_step_count, step_time_delta=eval_step_time_delta, is_training=False
-            )
+            metric_logger_instance.buffer_and_write_metrics(eval_metrics, eval_step_count, is_training=False)
             eval_step_count += 1
 
         prof.maybe_deactivate_profiler(step, state)
 
         if step == start_step:
           max_utils.print_mem_stats("After params initialized")
-
-        last_step_completion = datetime.datetime.now()
-        metric_logger_instance.buffer_and_write_metrics(metrics, step, step_time_delta)
 
     if config.save_checkpoint_on_completion:
       checkpointing.maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator)

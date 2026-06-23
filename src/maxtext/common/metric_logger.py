@@ -16,6 +16,7 @@
 # pytype: disable=attribute-error
 """Logger that saves metrics to a local file, GCS and TensorBoard."""
 
+import datetime
 import json
 import os
 import sys
@@ -111,10 +112,14 @@ class MetricLogger:
     if self.config.managed_mldiagnostics:
       ManagedMLDiagnostics(config)  # Initialize the MLRun instance.
 
+    self.last_flush_time = datetime.datetime.now()
+    self.last_eval_flush_time = datetime.datetime.now()
+
   def reset_eval_metrics(self):
     """Resets the cumulative metrics dictionary for a new evaluation run."""
     self.cumulative_eval_metrics = {"scalar": defaultdict(float)}
     self._pending_eval_step_count = 0
+    self.last_eval_flush_time = datetime.datetime.now()
 
   def write_metrics(self, metrics, step, metric_type="train"):
     """Entry point for all metrics writing. metric_type is one of 'train', 'eval', 'running_eval'."""
@@ -383,24 +388,36 @@ class MetricLogger:
     if self.buffered_metrics:
       self._flush_one_buffered_entry(self.buffered_metrics.pop(0))
     if is_training:
-      self.record_train_metrics(metrics, step, step_time_delta.total_seconds())
-      self.buffered_metrics.append(("train", step, metrics, step_time_delta))
+      self.buffered_metrics.append(("train", step, metrics))
       if self._pending_eval_step_count > 0:
         self._finalize_eval_metrics(step)
     else:
       self._pending_eval_step_count += 1
-      self.buffered_metrics.append(("eval", step, metrics, step_time_delta))
+      self.buffered_metrics.append(("eval", step, metrics))
 
   def _flush_one_buffered_entry(self, entry):
     """Dispatches a single buffered entry to the writer."""
     kind = entry[0]
     if kind == "train":
-      _, step, metrics, _ = entry
+      _, step, metrics = entry
+      # Synchronize the loss before recording step time.
+      _ = float(metrics["scalar"]["learning/loss"])
+
+      current_time = datetime.datetime.now()
+      real_step_time = (current_time - self.last_flush_time).total_seconds()
+      self.last_flush_time = current_time
+
+      self.record_train_metrics(metrics, step, real_step_time)
       self.write_metrics(metrics, step)
     elif kind == "eval":
-      _, eval_step, raw_metrics, step_time_delta = entry
+      _, eval_step, raw_metrics = entry
       # _accumulate_eval_metrics calls float() that materialize the metrics, deferred to here
       self._accumulate_eval_metrics(raw_metrics)
+
+      current_time = datetime.datetime.now()
+      real_eval_step_time = (current_time - self.last_eval_flush_time).total_seconds()
+      self.last_eval_flush_time = current_time
+
       running_count = eval_step + 1  # eval_step is 0-indexed
       cumulative = self.cumulative_eval_metrics["scalar"]
       running_avg_loss = cumulative["eval/total_loss"] / (cumulative["eval/total_weights"] + EPS)
@@ -411,7 +428,7 @@ class MetricLogger:
               "eval/total_weights": cumulative["eval/total_weights"],
               "eval/avg_mtp_loss": cumulative["eval/mtp_loss"] / running_count,
               "eval/avg_mtp_acceptance_rate_percent": (cumulative["eval/mtp_acceptance_rate_percent"] / running_count),
-              "eval/step_time_seconds": step_time_delta.total_seconds(),
+              "eval/step_time_seconds": real_eval_step_time,
           }
       }
       self.write_metrics(snapshot, eval_step, metric_type="running_eval")
