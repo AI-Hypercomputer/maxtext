@@ -188,8 +188,8 @@ def main_kernel(
         # Wait for the input DMA of the current column block to complete.
         for _ in range(num_simd_lanes):
           pltpu.make_async_copy(
-              in_vmem_ref.at[0, :num_lanes],
               in_32b_hbm_ref.at[0, :num_lanes],
+              in_vmem_ref.at[0, :num_lanes],
               recv_sem,
           ).wait()
 
