@@ -267,8 +267,10 @@ def main_kernel(
               odd_rounded = odd_u32_val + 32768
 
               # Extract upper 16 bits of even (shift right by 16) and odd (mask out lower 16).
+              # Note: we use -65536 to represent the mask 0xFFFF0000 in signed two's complement,
+              # which perfectly avoids JAX/Python signed parser integer overflow errors!
               even_bf16_bits = jnp.bitwise_right_shift(even_rounded, 16)
-              odd_bf16_shifted = jnp.bitwise_and(odd_rounded, 4294901760) # 4294901760 is 0xFFFF0000 in uint32
+              odd_bf16_shifted = jnp.bitwise_and(odd_rounded, -65536)
 
               # Pack them into a single uint32 word.
               data_to_write = jnp.bitwise_or(odd_bf16_shifted, even_bf16_bits)
