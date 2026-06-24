@@ -1802,6 +1802,32 @@ class MLATest(attention_test_util.MLATestBase):
 
     np.testing.assert_allclose(loss, 0.0, atol=1e-5)
 
+  def test_generate_mask_equivalence(self):
+    """Test that the optimized scatter-based mask generation is equivalent to the old broadcast-based one."""
+    mla_config_args = self.config_arguments.copy()
+    mla_config_args["use_indexer"] = True
+    mla_config_args["attention"] = "dot_product"
+    _, mla = self.init_mla(mla_config_args, rope_type="default")
+
+    # Use a small shape that won't OOM the old method but is representative
+    b, t, k, s = 2, 128, 64, 1024
+
+    key = jax.random.PRNGKey(0)
+    topk_indices = jax.random.randint(key, (b, t, k), 0, s)
+
+    # Old implementation (broadcast-based) reconstructed for comparison
+    def generate_mask_old(topk_indices, s):
+      is_topk = (jnp.arange(s) == topk_indices[..., None]).any(axis=-2)
+      val_true = jnp.array(0.0, dtype=mla.indexer.dtype)
+      val_false = jnp.array(DEFAULT_MASK_VALUE, dtype=mla.indexer.dtype)
+      return jnp.where(is_topk, val_true, val_false)
+
+    mask_old = generate_mask_old(topk_indices, s)
+    mask_new = mla.indexer.generate_mask(topk_indices, s)
+
+    # Assert exact mathematical equivalence
+    np.testing.assert_allclose(mask_new, mask_old, atol=1e-5)
+
   def test_indexer_gradients(self):
     # Test that gradients do NOT flow back to inputs
     bsz, seqlen = 2, 8
