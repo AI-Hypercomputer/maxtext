@@ -513,7 +513,6 @@ def _train_step_nnx(model_graphdef, config, state_mesh_shardings, state, data):
     def accumulate_gradient(carry, microbatch):
       (_, (aux, new_rest)), cur_grad = grad_func(curr_params, carry["rest"], ref_state, config, microbatch)
       carry["loss"] += aux.total_loss
-      carry["moe_lb_loss"] += aux.moe_lb_loss
       carry["grad"] = jax.tree_util.tree_map(lambda x, y: x * aux.total_weights + y, cur_grad, carry["grad"])
       carry["total_weights"] += aux.total_weights
       carry["rest"] = new_rest
@@ -523,11 +522,12 @@ def _train_step_nnx(model_graphdef, config, state_mesh_shardings, state, data):
         "loss": 0.0,
         "grad": jax.tree_util.tree_map(jnp.zeros_like, curr_params),
         "total_weights": 0.0,
-        "moe_lb_loss": 0.0,
         "rest": rest,
     }
     carry, aux = jax.lax.scan(accumulate_gradient, init_carry, ga_data, length=config.gradient_accumulation_steps)
-    loss = carry["loss"] / carry["total_weights"] + carry["moe_lb_loss"] / config.gradient_accumulation_steps
+    # total_loss is already a per-batch mean (and includes moe_lb), so the full-batch
+    # loss is the mean across the equal-sized microbatches.
+    loss = carry["loss"] / config.gradient_accumulation_steps
     raw_grads = jax.tree_util.tree_map(lambda arr: arr / carry["total_weights"], carry["grad"])
     aux = jax.tree.map(lambda x: jnp.sum(x, axis=0), aux)
     new_rest = carry["rest"]

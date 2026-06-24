@@ -23,8 +23,10 @@ import flax.linen as nn
 import jax
 import jax.numpy as jnp
 import numpy as np
+import optax
 from flax import nnx
 
+from maxtext.common import train_state_nnx
 from maxtext.experimental.rl import grpo_trainer
 from maxtext.experimental.rl import grpo_utils
 
@@ -160,6 +162,51 @@ class TestComputeLogProbsNnx(unittest.TestCase):
     )
     # Inputs are [B, S] and log_probs are [B, S - 1].
     self.assertEqual(log_probs.shape, (data["prompt_completions"].shape[0], data["prompt_completions"].shape[1] - 1))
+
+
+class TestGrpoTrainStepNnxGradAccum(unittest.TestCase):
+  """Gradient accumulation on the NNX GRPO step must match a single full-batch step."""
+
+  def _step(self, ga_steps):
+    """Run one `_train_step_nnx` from a fixed init; return (loss, updated policy params)."""
+    policy = _MockTransformer(vocab_size=8, embed_dim=4, rngs=nnx.Rngs(0))
+    # Different seed from the policy so KL(policy||reference) != 0 and the step
+    # produces a real (non-zero) gradient — otherwise the equivalence check is vacuous.
+    reference = _MockTransformer(vocab_size=8, embed_dim=4, rngs=nnx.Rngs(1))
+    optimizer = nnx.Optimizer(policy, optax.sgd(0.1), wrt=nnx.Param)
+    state = train_state_nnx.TrainStateNNX(policy, optimizer)
+    state.reference_model = reference
+    graphdef, flat_state = nnx.split(state)
+    config = _make_grpo_config(
+        gradient_accumulation_steps=ga_steps,
+        gradient_clipping_threshold=0.0,
+        optimizer_memory_host_offload=False,
+    )
+    # B=2, G=2 -> 4 rows; GA=2 splits into 2 microbatches that each hold one
+    # complete generation-group, so per-group advantages are unchanged and the
+    # accumulated gradient must equal the full-batch gradient.
+    data = _make_grpo_batch(B=2, G=2, S=6)
+    new_flat, metrics = grpo_trainer._train_step_nnx(graphdef, config, None, flat_state, data)
+    updated = nnx.merge(graphdef, new_flat)
+    params = jax.tree_util.tree_leaves(nnx.to_pure_dict(nnx.state(updated.model, nnx.Param)))
+    return float(metrics["scalar"]["learning/loss"]), params
+
+  def test_gradient_accumulation_matches_single_shot(self):
+    loss_full, params_full = self._step(ga_steps=1)
+    loss_ga, params_ga = self._step(ga_steps=2)
+
+    # Guard against a trivial pass: the step must actually move the params.
+    init = jax.tree_util.tree_leaves(
+        nnx.to_pure_dict(nnx.state(_MockTransformer(vocab_size=8, embed_dim=4, rngs=nnx.Rngs(0)), nnx.Param))
+    )
+    moved = any(not np.allclose(np.asarray(p), np.asarray(i)) for p, i in zip(params_full, init))
+    self.assertTrue(moved, "params did not change — test would be trivially true")
+
+    # GA=2 must reproduce the full-batch step's loss and resulting parameters.
+    np.testing.assert_allclose(loss_ga, loss_full, rtol=1e-5, atol=1e-5)
+    self.assertEqual(len(params_full), len(params_ga))
+    for pf, pg in zip(params_full, params_ga):
+      np.testing.assert_allclose(np.asarray(pg), np.asarray(pf), rtol=1e-4, atol=1e-6)
 
 
 # ---------------------------------------------------------------------------
