@@ -43,7 +43,7 @@ from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils.sharding import create_sharding, maybe_shard_with_logical, maybe_shard_with_pspec
-from maxtext.utils.sharding import logical_to_mesh_axes
+from maxtext.utils.sharding import logical_to_mesh_axes, remove_expert_from_partition_spec
 import numpy as np
 import qwix
 from qwix.contrib.sparsity import sparsity_module
@@ -206,6 +206,10 @@ def calculate_load_balance_updates(top_k_indices, num_experts, rate):
   direction = jnp.sign(average_load - expert_counts)
   output = direction * rate
   return output
+
+
+class Tid2EidVar(nnx.Variable):
+  """Custom variable to hold tid2eid without trainable param overhead."""
 
 
 class GateLogit(nnx.Module):
@@ -399,8 +403,11 @@ class RoutedMoE(nnx.Module):
     # DeepSeek V4 Hash Routing
     if self.is_hash_routing:
       # Token-ID to Expert-ID lookup table for static routing
-      self.tid2eid = nnx.Variable(
-          jnp.zeros((self.config.vocab_size, self.num_experts_per_tok), dtype=jnp.int32),
+      # Must be stored as float32 because MaxText passes the entire variable tree
+      # through jax.value_and_grad, which strictly requires all leaves to be inexact types
+      # (even if they receive no gradients). We cast to int32 dynamically during routing.
+      self.tid2eid = Tid2EidVar(
+          jnp.zeros((self.config.vocab_size, self.num_experts_per_tok), dtype=jnp.float32),
           out_sharding=None,  # Replicated across shards for local lookup
       )
     else:
@@ -624,6 +631,18 @@ class RoutedMoE(nnx.Module):
         extra_stack_level=1,
     )
 
+  def _maybe_shard_moe_dispatch(self, inputs, logical_axis, peel_expert):
+    """Shard a MoE dispatch/MLP activation. When `peel_expert` is set, drop the 'expert'
+    mesh axis from the batch dim (index 1) so the GEMM stays expert-parallel (AllToAll)
+    instead of double-mapping E and B onto 'expert'. Each logical dim is resolved
+    independently so the shared 'expert' axis is not deduped off the expert dim before
+    the peel."""
+    if not peel_expert:
+      return self._maybe_shard_with_logical(inputs, logical_axis)
+    spec = [None if name is None else self._logical_to_mesh_axes((name,))[0] for name in logical_axis]
+    pspec = remove_expert_from_partition_spec(jax.sharding.PartitionSpec(*spec), dims_to_peel=(1,))
+    return self._maybe_shard_with_pspec(inputs, pspec)
+
   def get_expert_parallelism_size(self):
     # When expert parallelism has more than one physical axes, take product of their shapes
     if isinstance(self._expert_parallelism_name, tuple):
@@ -665,7 +684,13 @@ class RoutedMoE(nnx.Module):
       return top_k_weights, top_k_indices
 
     if self.is_hash_routing:
-      top_k_indices = self.tid2eid[input_ids]
+      if input_ids is None:
+        raise ValueError("input_ids cannot be None when is_hash_routing is True")
+      # Access the static routing table
+      tid2eid_int = self.tid2eid.value
+      # Cast the float32 array to int32 (JAX automatically assigns 0.0 gradients to integer casts)
+      tid2eid_int = tid2eid_int.astype(jnp.int32)
+      top_k_indices = tid2eid_int[input_ids]
       top_k_weights = jnp.take_along_axis(pre_bias_logits, top_k_indices, axis=-1)
     # NOTE: deepseek2 has a different pattern
     elif self.config.model_name.startswith(("deepseek3", "deepseek4")):
@@ -849,6 +874,12 @@ class RoutedMoE(nnx.Module):
           self._expert_parallelism_name,
           num_expert_parallelism,
           buffer_size=buffer_size,
+          enforce_gather_fallback=self.config.ragged_gather_fallback,
+          enforce_gather_reduce_fallback=self.config.ragged_gather_reduce_fallback,
+          gather_flops_override=self.config.ragged_gather_cost_estimate_flops,
+          gather_reduce_flops_override=self.config.ragged_gather_reduce_cost_estimate_flops,
+          gather_bytes_accessed_override=self.config.ragged_gather_cost_estimate_bytes_accessed,
+          gather_reduce_bytes_accessed_override=self.config.ragged_gather_reduce_cost_estimate_bytes_accessed,
       )
     else:
       flatten_selected_experts = jnp.ravel(selected_experts)
@@ -928,6 +959,12 @@ class RoutedMoE(nnx.Module):
           local_num_experts,
           self._expert_parallelism_name,
           topk_weights=flat_weights,
+          enforce_gather_fallback=self.config.ragged_gather_fallback,
+          enforce_gather_reduce_fallback=self.config.ragged_gather_reduce_fallback,
+          gather_flops_override=self.config.ragged_gather_cost_estimate_flops,
+          gather_reduce_flops_override=self.config.ragged_gather_reduce_cost_estimate_flops,
+          gather_bytes_accessed_override=self.config.ragged_gather_cost_estimate_bytes_accessed,
+          gather_reduce_bytes_accessed_override=self.config.ragged_gather_reduce_cost_estimate_bytes_accessed,
       )
     else:
       unsort_intermediate = _sort_activations(
@@ -1643,6 +1680,84 @@ class RoutedMoE(nnx.Module):
       layer_w1 = adc.checkpoint_name(layer_w1, "moe_mlpwi_1")
       return self.apply_ffn_activation(layer_w0, layer_w1)
 
+    def get_gmm_for_local_experts(x, routing, route_metadata):
+      """Return a partial GMM function with preconfigured routing params."""
+      num_ep = self.get_expert_parallelism_size()
+      num_experts_per_shard = self.config.num_experts // num_ep
+      if self.config.use_ring_of_experts and x.shape[0] < routing.sorted_selected_experts.shape[0]:
+        local_group_sizes = routing.local_group_sizes
+        return functools.partial(
+            gmm,
+            group_sizes=local_group_sizes,
+            expert_assignments=routing.selected_experts,
+            group_offset=0,
+        )
+      if self.config.use_ragged_sort and self.config.use_ring_of_experts:
+        experts_start = route_metadata.expert_shard_id * num_experts_per_shard
+      else:
+        experts_start = 0
+      return functools.partial(
+          gmm,
+          group_sizes=routing.group_sizes,
+          expert_assignments=routing.selected_experts,
+          group_offset=experts_start,
+      )
+
+    def unsort_output_and_ra2a(intermediate_output, routing, route_metadata, output_shape, is_batch_sharded_by_expert):
+      """Unsort tokens and return them to original shards using ragged all-to-all."""
+      if is_batch_sharded_by_expert:
+        # locally unpermute back to the original order
+        if self.config.use_ragged_sort:
+          # Mirror the ragged-prefix gather used in `local_permute`. The
+          # un-permute can use the same valid-prefix length because the
+          # routed token count is identical for forward and backward.
+          valid_end = jnp.sum(routing.group_sizes).astype(jnp.int32)
+          local_output = a2a_ragged_unsort(
+              intermediate_output,
+              jnp.argsort(route_metadata.local_sorted_indices),  # pylint: disable=undefined-variable
+              valid_end,
+          )
+        else:
+          local_output = _sort_activations(
+              intermediate_output,
+              jnp.argsort(route_metadata.local_sorted_indices),
+              self.config.use_custom_sort_vjp,
+          )
+
+        input_offsets, send_sizes, output_offsets, recv_sizes = RoutedMoE.get_all_to_all_params(
+            jnp.transpose(route_metadata.all_shards_group_sizes),
+            route_metadata.expert_shard_id,
+            self.get_expert_parallelism_size(),
+        )
+        return jax.lax.ragged_all_to_all(
+            local_output,
+            output_shape,
+            input_offsets,
+            send_sizes,
+            output_offsets,
+            recv_sizes,
+            axis_name=self._expert_parallelism_name,
+        )
+
+      # If batch is replicated across EP shards then each shard should send
+      # 0..local_shard_size data to the other shards and receive the
+      # local_shard data from all of the other shards using ragged_all_to_all.
+      input_offsets, send_sizes, output_offsets, recv_sizes = RoutedMoE.get_all_to_all_params(
+          route_metadata.reshaped_group_sizes,
+          route_metadata.expert_shard_id,
+          self.get_expert_parallelism_size(),
+          is_batch_sharded=False,
+      )
+      return jax.lax.ragged_all_to_all(
+          intermediate_output,
+          output_shape,
+          input_offsets,
+          send_sizes,
+          output_offsets,
+          recv_sizes,
+          axis_name=self._expert_parallelism_name,
+      )
+
     @functools.partial(
         jax.shard_map,
         mesh=self.mesh,
@@ -1666,36 +1781,16 @@ class RoutedMoE(nnx.Module):
         ),
         check_vma=self.config.check_vma,
     )
-    def wrapper(x, logits, pre_bias_logits, w0, w1, wo, w0_bias, w1_bias, wo_bias, sharded_input_ids, rngs):
+    def sparse_matmul_route_and_compute(
+        x, logits, pre_bias_logits, w0, w1, wo, w0_bias, w1_bias, wo_bias, sharded_input_ids, rngs
+    ):
       batch_size, sequence_length, _ = x.shape
       x, routing, route_metadata = route(x, logits, pre_bias_logits, rngs, input_ids=sharded_input_ids)
 
       if self.config.mlp_bias:
         w0_bias, w1_bias, wo_bias = self.transform_bias(routing.selected_experts, w0_bias, w1_bias, wo_bias)
 
-      num_ep = self.get_expert_parallelism_size()
-      num_experts_per_shard = self.config.num_experts // num_ep
-
-      use_truncated_buffer = self.config.use_ring_of_experts and x.shape[0] < routing.sorted_selected_experts.shape[0]
-      if use_truncated_buffer:
-        local_group_sizes = routing.local_group_sizes
-        gmm_fn = functools.partial(
-            gmm,
-            group_sizes=local_group_sizes,
-            expert_assignments=routing.selected_experts,
-            group_offset=0,
-        )
-      else:
-        if self.config.use_ragged_sort and self.config.use_ring_of_experts:
-          experts_start = route_metadata.expert_shard_id * num_experts_per_shard
-        else:
-          experts_start = 0
-        gmm_fn = functools.partial(
-            gmm,
-            group_sizes=routing.group_sizes,
-            expert_assignments=routing.selected_experts,
-            group_offset=experts_start,
-        )
+      gmm_fn = get_gmm_for_local_experts(x, routing, route_metadata)
       intermediate_layer = gmm_up(x, w0, w1, w0_bias, w1_bias, gmm_fn, weight_gather)
 
       wo_gather_axes, wo_tile_size = get_wo_gmm_params()
@@ -1730,82 +1825,37 @@ class RoutedMoE(nnx.Module):
             output, (-1, sequence_length, self.moe_expert_input_dim // self.get_tensor_parallelism_size())
         )
         output = jax.lax.psum_scatter(output, self._expert_parallelism_name, scatter_dimension=0, tiled=True)
+        return output, routing.lb_loss, routing.bias_updates
 
-      else:
-        if self.get_expert_parallelism_size() > 1:
-          original_inputs_first_dim = batch_size * sequence_length * self.config.num_experts_per_tok
-          if routing.sorted_selected_experts.shape[0] != original_inputs_first_dim:
-            raise ValueError("original_inputs_first_dim does not match the original tensor" " shape!")
-          output_shape = jax.lax.empty(
-              (
-                  original_inputs_first_dim,
-                  self.moe_expert_input_dim // self.get_tensor_parallelism_size(),
-              ),
-              dtype=intermediate_output.dtype,
-          )
-
-          if is_batch_sharded_by_expert:
-            # locally unpermute back to the original order
-            if self.config.use_ragged_sort:
-              # Mirror the ragged-prefix gather used in `local_permute`. The
-              # un-permute can use the same valid-prefix length because the
-              # routed token count is identical for forward and backward.
-              valid_end = jnp.sum(routing.group_sizes).astype(jnp.int32)
-              local_output = a2a_ragged_unsort(
-                  intermediate_output,
-                  jnp.argsort(route_metadata.local_sorted_indices),  # pylint: disable=undefined-variable
-                  valid_end,
-              )
-            else:
-              local_output = _sort_activations(
-                  intermediate_output,
-                  jnp.argsort(route_metadata.local_sorted_indices),
-                  self.config.use_custom_sort_vjp,
-              )
-
-            input_offsets, send_sizes, output_offsets, recv_sizes = RoutedMoE.get_all_to_all_params(
-                jnp.transpose(route_metadata.all_shards_group_sizes),
-                route_metadata.expert_shard_id,
-                self.get_expert_parallelism_size(),
-            )
-            intermediate_output = jax.lax.ragged_all_to_all(
-                local_output,
-                output_shape,
-                input_offsets,
-                send_sizes,
-                output_offsets,
-                recv_sizes,
-                axis_name=self._expert_parallelism_name,
-            )
-          else:
-            # If batch is replicated across EP shards then each shard should send
-            # 0..local_shard_size data to the other shards and receive the
-            # local_shard data from all of the other shards using ragged_all_to_all.
-            input_offsets, send_sizes, output_offsets, recv_sizes = RoutedMoE.get_all_to_all_params(
-                route_metadata.reshaped_group_sizes,
-                route_metadata.expert_shard_id,
-                self.get_expert_parallelism_size(),
-                is_batch_sharded=False,
-            )
-            intermediate_output = jax.lax.ragged_all_to_all(
-                intermediate_output,
-                output_shape,
-                input_offsets,
-                send_sizes,
-                output_offsets,
-                recv_sizes,
-                axis_name=self._expert_parallelism_name,
-            )
-
-        output = self.unpermute(
-            intermediate_output,
-            routing.sorted_selected_experts,
-            routing.weights,
-            batch_size=batch_size,
-            sequence_length=sequence_length,
-            use_custom_sort_vjp=self.config.use_custom_sort_vjp,
-            group_sizes=routing.group_sizes,
+      if self.get_expert_parallelism_size() > 1:
+        original_inputs_first_dim = batch_size * sequence_length * self.config.num_experts_per_tok
+        if routing.sorted_selected_experts.shape[0] != original_inputs_first_dim:
+          raise ValueError("original_inputs_first_dim does not match the original tensor" " shape!")
+        output_shape = jax.lax.empty(
+            (
+                original_inputs_first_dim,
+                self.moe_expert_input_dim // self.get_tensor_parallelism_size(),
+            ),
+            dtype=intermediate_output.dtype,
         )
+
+        intermediate_output = unsort_output_and_ra2a(
+            intermediate_output,
+            routing,
+            route_metadata,
+            output_shape,
+            is_batch_sharded_by_expert,
+        )
+
+      output = self.unpermute(
+          intermediate_output,
+          routing.sorted_selected_experts,
+          routing.weights,
+          batch_size=batch_size,
+          sequence_length=sequence_length,
+          use_custom_sort_vjp=self.config.use_custom_sort_vjp,
+          group_sizes=routing.group_sizes,
+      )
 
       return output, routing.lb_loss, routing.bias_updates
 
@@ -1854,7 +1904,7 @@ class RoutedMoE(nnx.Module):
     if wo_bias is not None:
       wo_bias = self._maybe_shard_with_pspec(wo_bias, wo_bias_pspec)
 
-    return wrapper(
+    return sparse_matmul_route_and_compute(
         inputs,
         gate_logits,
         pre_bias_logits,
@@ -2173,12 +2223,18 @@ class RoutedMoE(nnx.Module):
 
     if self.config.capacity_factor > 0:
       # token dropping if needed
+      moe_peel_expert = False  # only the training dispatch/MLP path peels 'expert' from the batch dim
       if self.config.model_call_mode != "inference":
         # TODO(b/425930949): remove this pylint by refactoring the logic here.
         dispatch_mask, combine_mask = self.generate_masks(
             top_k_indices, weights  # pylint: disable=undefined-variable,possibly-used-before-assignment
         )
         mask_axes = ("activation_batch_moe", "activation_norm_length_moe", None, None)
+        # Dispatch/MLP are already expert-sharded via "activation_exp". With
+        # moe_dispatch_no_expert_sharding we peel 'expert' off the batch dim of these specs
+        # (see _maybe_shard_moe_dispatch) so the GEMM stays expert-parallel (AllToAll) instead
+        # of double-mapping E and B onto 'expert' (FSDP-style fallback).
+        moe_peel_expert = self.config.moe_dispatch_no_expert_sharding
         dispatch_axis = (
             "activation_exp",
             "activation_batch_moe",
@@ -2283,10 +2339,7 @@ class RoutedMoE(nnx.Module):
                   "activation_embed_moe",
               ),
           )
-        dispatch = self._maybe_shard_with_logical(
-            dispatch,
-            dispatch_axis,
-        )
+        dispatch = self._maybe_shard_moe_dispatch(dispatch, dispatch_axis, moe_peel_expert)
       with jax.named_scope("wi_0"):
         w0_kernel_axes = ("exp", None, "mlp")
         w0_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w0_kernel, w0_kernel_axes)
@@ -2299,10 +2352,7 @@ class RoutedMoE(nnx.Module):
 
         if self.config.activations_in_float32:
           layer_w0 = layer_w0.astype(jnp.float32)
-        layer_w0 = self._maybe_shard_with_logical(
-            layer_w0,
-            mlp_axis,
-        )
+        layer_w0 = self._maybe_shard_moe_dispatch(layer_w0, mlp_axis, moe_peel_expert)
         layer_w0 = adc.checkpoint_name(adc.checkpoint_name(layer_w0, "mlpwi_0"), "moe_mlpwi_0")
       with jax.named_scope("wi_1"):
         w1_kernel_axes = ("exp", None, "mlp")
@@ -2315,10 +2365,7 @@ class RoutedMoE(nnx.Module):
           layer_w1 = layer_w1 + w1_bias
         if self.config.activations_in_float32:
           layer_w1 = layer_w1.astype(jnp.float32)
-        layer_w1 = self._maybe_shard_with_logical(
-            layer_w1,
-            mlp_axis,
-        )
+        layer_w1 = self._maybe_shard_moe_dispatch(layer_w1, mlp_axis, moe_peel_expert)
         layer_w1 = adc.checkpoint_name(adc.checkpoint_name(layer_w1, "mlpwi_1"), "moe_mlpwi_1")
       layer_multiply = self.apply_ffn_activation(layer_w0, layer_w1)
       with jax.named_scope("wo"):

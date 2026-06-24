@@ -732,6 +732,32 @@ def remove_fsdp_sharding(sharding_tree):
   return jax.tree.map(_remove_fsdp_from_partition_spec, sharding_tree)
 
 
+def remove_expert_from_partition_spec(pspec, dims_to_peel):
+  """Return `pspec` with the 'expert' mesh axis removed from the given dim indices.
+
+  Used by the MoE dispatch/MLP sharding: the expert dim is already sharded over the
+  'expert' mesh axis via the `activation_exp` rule, so the batch dim must not also map
+  to 'expert' (that double-maps two tensor dims onto one mesh axis and makes GSPMD fall
+  back to FSDP-style AllGather+ReduceScatter instead of expert-parallel AllToAll). Only
+  the dims listed in `dims_to_peel` (the batch dim) are modified; the expert dim is left
+  untouched. Avoids needing a separate `activation_batch_no_exp` logical rule that every
+  `custom_mesh_and_rule` set would have to redefine.
+  """
+  new_spec = list(pspec)
+  for i in dims_to_peel:
+    axis = new_spec[i]
+    if axis is None:
+      continue
+    if isinstance(axis, str):
+      new_spec[i] = None if axis == "expert" else axis
+    elif isinstance(axis, (list, tuple)):
+      filtered = tuple(a for a in axis if a != "expert")
+      new_spec[i] = filtered or None
+    else:
+      raise ValueError(f"Unsupported axis type: {type(axis)}")
+  return jax.sharding.PartitionSpec(*new_spec)
+
+
 def get_physical_spec_no_fsdp(full_logical, mesh, logical_axis_rules):
   """
   Generates a physical sharding spec for fully replicated weights.

@@ -51,6 +51,10 @@ This rule utilizes the `data`, `stage`, `fsdp`, and `expert` axes. Its defining 
 
 Similar in philosophy to `ep-as-cp.yml`, this configuration explicitly includes the `context` axis in the mesh layout alongside `data`, `stage`, `fsdp`, and `expert`. While context sharding is mapped to the `context` axis globally, within MoE components, this `context` axis dynamically shifts to perform expert parallelism instead of FSDP. This custom rule supports using CP and EP together.
 
+### `ep-as-dp.yml`
+
+Different with the rule in `base.yml`, this rule configures expert physical axis to function as data parallelism rather than FSDP. This removes the constraint where FSDPxEP is limited by specific model dimensions, particularly for small tensors such as attention projections. Ultimately, this change benefits large-scale training.
+
 ### `pipeline-large-moe.yml`
 
 Designed specifically to optimize pipeline parallelism for extremely large-scale MoE jobs (such as DeepSeek models). It defines the physical axes: `data`, `stage`, `fsdp`, `tensor`, `context`, and `expert`. To prevent dimension limit errors, it intentionally disables expert weight sharding on the (typically small) `q_lora` dimension. Furthermore, tensor and expert parallelism are strictly preserved to support advanced pipelining features like `pipeline_fsdp_ag_one` and `pipeline_fsdp_ag_per_repeat`.

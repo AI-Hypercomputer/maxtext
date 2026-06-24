@@ -227,7 +227,7 @@ ModelName = Literal[
     "deepseek3-test",
     "deepseek3-tiny",
     "deepseek3.2-671b",
-    "deepseek4",
+    "deepseek4-284b",
     "deepseek-custom",
     "kimi-k2-1t",
     "gemma-7b",
@@ -553,7 +553,7 @@ class Attention(BaseModel):
       "autoselected",
       description="The attention algorithm to use (dot_product, flash, etc).",
   )
-  attention_type: Literal["global", "local_sliding", "chunk", "mla", "full"] = Field(
+  attention_type: Literal["global", "local_sliding", "chunk", "mla", "full", "compressed"] = Field(
       "global", description="The variant of attention to use."
   )
   share_kv_projections: bool = Field(
@@ -743,12 +743,49 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to use Ring of Experts for sparse matmul expert parallelism.",
   )
+  moe_dispatch_no_expert_sharding: bool = Field(
+      False,
+      description=(
+          "If true, shard the MoE dispatch/MLP batch dim without 'expert' so the expert GEMM "
+          "stays expert-parallel (AllToAll); false keeps 'expert' on it (activation_batch_moe)."
+      ),
+  )
   use_ragged_sort: bool = Field(
       False, description="Whether to use ragged kernel for sorting, improve performance when EP is enabled."
   )
   use_gather_mosaic_kernel: bool = Field(
       False,
       description="Whether to use a custom mosaic kernel for token gather ops.",
+  )
+  ragged_gather_fallback: bool = Field(
+      False,
+      description="When true, unconditionally use the JAX reference implementation instead of the ragged gather "
+      "SparseCore kernel. When false (default), use the SparseCore kernel.",
+  )
+  ragged_gather_reduce_fallback: bool = Field(
+      False,
+      description="When true, unconditionally use the JAX reference implementation instead of the ragged gather "
+      "reduce SparseCore kernel. When false (default), use the SparseCore kernel.",
+  )
+  ragged_gather_cost_estimate_flops: int = Field(
+      -1,
+      description="Flop cost estimate override for the ragged gather kernel. "
+      "-1 means auto-compute, any > 0 value overrides the flop cost estimate.",
+  )
+  ragged_gather_reduce_cost_estimate_flops: int = Field(
+      -1,
+      description="Flop cost estimate override for the ragged gather reduce kernel. "
+      "-1 means auto-compute, any > 0 value overrides the flop cost estimate.",
+  )
+  ragged_gather_cost_estimate_bytes_accessed: int = Field(
+      -1,
+      description="Bytes-accessed cost estimate override for the ragged gather kernel. "
+      "-1 means auto-compute, any > 0 value overrides the bytes_accessed cost estimate.",
+  )
+  ragged_gather_reduce_cost_estimate_bytes_accessed: int = Field(
+      -1,
+      description="Bytes-accessed cost estimate override for the ragged gather reduce kernel. "
+      "-1 means auto-compute, any > 0 value overrides the bytes_accessed cost estimate.",
   )
   use_random_routing: bool = Field(False, description="Whether to use random routing for debugging.")
   interleave_moe_layer_step: int = Field(1, description="Frequency of MoE layers, e.g., 2 means every 2nd layer is MoE.")
@@ -1867,6 +1904,7 @@ class MultimodalGeneral(BaseModel):
   """General configuration for Multimodal models."""
 
   use_multimodal: bool = Field(False, description="Enable multimodal capabilities.")
+  attention_for_vit: str = Field("dot_product", description="The attention algorithm to use for vision encoder.")
   freeze_vision_encoder_params: bool = Field(True, description="Freeze the parameters of the vision encoder.")
   freeze_audio_encoder_params: bool = Field(True, description="Freeze the parameters of the audio encoder.")
   use_audio: bool = Field(False, description="Enable audio encoder for multimodal models.")
@@ -2893,6 +2931,11 @@ class MaxTextConfig(
       raise ValueError("At most one of `load_parameters_path` or `load_full_state_path` should be set.")
     if self.elastic_enabled and not self.enable_single_controller:
       raise ValueError("Elastic training is only supported with Pathways (`enable_single_controller=True`).")
+    if self.colocated_python_data_input and not self.enable_single_controller:
+      raise ValueError(
+          "Colocated python data input is only supported with Pathways (single"
+          " controller) enabled (`enable_single_controller=True`)."
+      )
     if self.grain_use_elastic_iterator and self.grain_file_type != "arrayrecord":
       raise ValueError(
           "`grain_use_elastic_iterator=True` only supports `grain_file_type=arrayrecord`. "
@@ -2936,6 +2979,8 @@ class MaxTextConfig(
         raise ValueError("`local_checkpoint_period` must be > 0 for emergency checkpointing.")
     if self.moba and self.attention not in ("dot_product"):
       raise ValueError("MoBA is only supported with dot_product attention.")
+    if self.decoder_block == DecoderBlockType.DEEPSEEK4 and self.attention != "dot_product":
+      raise ValueError("DeepSeek4 decoder block currently only supports dot_product attention.")
     if self.use_indexer:
       if self.q_lora_rank == 0:
         raise NotImplementedError("Sparse indexer has not implemented for q_lora_rank = 0.")

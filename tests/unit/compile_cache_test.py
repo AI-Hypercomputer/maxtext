@@ -108,12 +108,13 @@ def test_train_step_cache_hit():
         "cache was not writeable or the JAX cache configuration was ignored."
     )
 
+    train_step_cache_files = [f for f in cache_files if f.startswith("jit_train_step")]
     assert len(train_step_cache_files) == 1, (
-        f"Expected exactly 1 jit_train_step JAX compilation cache file, but found "
-        f"{len(train_step_cache_files)}: {train_step_cache_files}. "
-        f"All cache files: {cache_files}. "
-        "This indicates a cache miss where AOT compilation and runtime execution generated "
-        "different keys, causing train_step to be compiled twice (double-compilation regression)."
+        f"Expected exactly 1 JAX compilation cache file for 'jit_train_step', "
+        f"but found {len(train_step_cache_files)}: {train_step_cache_files} "
+        f"(all cache files: {cache_files}). "
+        "This indicates a cache miss where AOT compilation and runtime execution generated different keys, "
+        "causing train_step to be compiled twice (double-compilation regression)."
     )
 
     assert "Persistent compilation cache hit for 'jit_train_step'" in captured_logs, (
