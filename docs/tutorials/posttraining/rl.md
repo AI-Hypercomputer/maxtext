@@ -63,7 +63,7 @@ placeholders with your actual values.
 ```bash
 # -- Model configuration --
 # The MaxText model name. See `src/maxtext/configs/types.py` for `ModelName` for a
-# full list of supported models.
+# full list of supported models. This value is case-sensitive.
 export MODEL=<MODEL_NAME> # e.g. 'llama3.1-8b-Instruct'
 
 # -- MaxText configuration --
@@ -78,14 +78,13 @@ export BASE_OUTPUT_DIRECTORY=<GCS_BUCKET> # e.g., gs://my-bucket/maxtext-runs
 # Note: Kubernetes requires workload names to be valid DNS labels (lowercase, no underscores or periods).
 export RUN_NAME=<RUN_NAME>
 
-# Number of accelerator chips per VM.
-# - TPU v5e (single host): 8
-# - TPU v5p (single host): 4
-# - TPU v6e (single host): 8
+# Number of accelerator chips per VM. For example, use 8 for a v5p-8 VM.
 export CHIPS_PER_VM=<CHIPS_PER_VM>
 ```
 
 ## Get your model checkpoint
+
+This section explains how to prepare your model checkpoint for use with MaxText. It sets `MAXTEXT_CKPT_PATH`, which is passed to `load_parameters_path` in the training command below.
 
 ### Option 1: Using an existing MaxText checkpoint
 
@@ -98,7 +97,7 @@ export MAXTEXT_CKPT_PATH=<CKPT_PATH> # e.g., gs://my-bucket/my-model-checkpoint/
 
 ### Option 2: Converting from a Hugging Face checkpoint
 
-Refer the steps in [Hugging Face to MaxText](hf-to-maxtext) to convert a hugging face checkpoint to MaxText. Make sure you have correct checkpoint files converted and saved. Similar to Option 1, set the following environment variable and move on to the next section.
+Refer to [Hugging Face to MaxText](hf-to-maxtext) to convert a Hugging Face checkpoint to MaxText format. After conversion finishes, set `MAXTEXT_CKPT_PATH` to the converted MaxText checkpoint path.
 
 ```bash
 export MAXTEXT_CKPT_PATH=<CKPT_PATH> # e.g., gs://my-bucket/my-model-checkpoint/0/items
