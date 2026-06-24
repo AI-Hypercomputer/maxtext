@@ -60,7 +60,6 @@ export DATASET_NAME=<DATASET_NAME> # e.g., openai/gsm8k
 export TRAIN_SPLIT=<TRAIN_SPLIT> # e.g., train
 export HF_DATA_DIR=<DATASET_PATH> # e.g., main
 export TRAIN_DATA_COLUMNS=<DATA_COLUMNS> # e.g., ['question','answer']
-export CHAT_TEMPLATE_PATH=<TEMPLATE_PATH> # e.g., maxtext/examples/chat_templates/math_qa.json
 
 # -- LoRA Conversion configuration (Optional) --
 export HF_LORA_ADAPTER_PATH=<HF_LORA_ADAPTER_PATH> # e.g., 'username/adapter-name'
@@ -118,7 +117,6 @@ python3 -m maxtext.trainers.post_train.sft.train_sft \
     per_device_batch_size="${PER_DEVICE_BATCH_SIZE?}" \
     max_target_length="${MAX_TARGET_LENGTH?}" \
     learning_rate="${LEARNING_RATE?}" \
-    chat_template_path="${CHAT_TEMPLATE_PATH?}" \
     enable_nnx=True \
     pure_nnx_decoder=True \
     lora.enable_lora=True \
@@ -176,7 +174,6 @@ python3 -m maxtext.trainers.post_train.sft.train_sft \
     per_device_batch_size="${PER_DEVICE_BATCH_SIZE?}" \
     max_target_length="${MAX_TARGET_LENGTH?}" \
     learning_rate="${LEARNING_RATE?}" \
-    chat_template_path="${CHAT_TEMPLATE_PATH?}" \
     enable_nnx=True \
     pure_nnx_decoder=True \
     lora.enable_lora=True \
