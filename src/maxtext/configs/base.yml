@@ -1150,6 +1150,9 @@ image_placeholder: "<|image|>"
 video_placeholder: "<|video|>"
 audio_placeholder: "<|audio|>"
 use_audio_in_video: false
+video_max_grid_t: null
+video_max_grid_h: null
+video_max_grid_w: null
 posemb_type_for_vit: "learn"
 # max_num_images_per_example only applies for training when your image column is a list of images.
 # -1 means no limit, and will pad to the max possible number of images determined by sequence length.

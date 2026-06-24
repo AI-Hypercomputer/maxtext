@@ -1866,19 +1866,29 @@ class Qwen3OmniMoeVisionPatchEmbed(nnx.Module):
         rngs=rngs,
     )
 
-  def __call__(self, hidden_states: Array) -> Array:
+  def __call__(self, hidden_states: Array, video_mask: Array | None = None) -> tuple[Array, Array | None]:
     """
     Args:
         hidden_states: Input tensor of shape (batch, in_channels, temporal*patch_size, height*patch_size, width*patch_size)
+        video_mask: Optional pixel-level mask with shape
+          (batch, 1, temporal*patch_size, height*patch_size, width*patch_size).
     Returns:
-        Output tensor of shape (batch, T*H*W, embed_dim) where T, H, W are the number of patches
+        Tuple of:
+        - Output tensor of shape (batch, T*H*W, embed_dim) where T, H, W are the number of patches
+        - Attention mask of shape (batch, T*H*W), or None when video_mask is not provided
     """
     hidden_states = jnp.transpose(hidden_states, (0, 2, 3, 4, 1))
     hidden_states = self.proj(hidden_states)
     batch_size = hidden_states.shape[0]
     seq_len = hidden_states.shape[1] * hidden_states.shape[2] * hidden_states.shape[3]
     hidden_states = hidden_states.reshape(batch_size, seq_len, self.embed_dim)
-    return hidden_states
+
+    attention_mask = None
+    if video_mask is not None:
+      patch_mask = video_mask[:, 0, :: self.temporal_patch_size, :: self.patch_size, :: self.patch_size]
+      attention_mask = patch_mask.reshape(video_mask.shape[0], -1).astype(jnp.int32)
+
+    return hidden_states, attention_mask
 
 
 class Qwen3OmniMoeVisionAttention(nnx.Module):
@@ -2102,7 +2112,7 @@ class Qwen3OmniMoeVisionEncoder(nnx.Module):
         self.config.patch_size_for_vit,
     )
 
-    x = self.patch_embed(hidden_states)
+    x, _ = self.patch_embed(hidden_states)
     x = x.reshape(batch_size, -1, self.config.hidden_size_for_vit)
     pos = self.pos_embed_interpolate(num_frames, height, width)
 

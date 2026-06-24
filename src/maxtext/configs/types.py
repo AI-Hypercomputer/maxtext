@@ -1932,6 +1932,25 @@ class MultimodalGeneral(BaseModel):
   use_mrope: bool = Field(False, description="Enable Multi-dimensional RoPE for Qwen3-Omni models.")
   mrope_section: list[int] = Field([24, 20, 20], description="Dimensions for temporal, height, width in MRoPE.")
   position_id_per_seconds: int = Field(25, description="Temporal granularity for MRoPE (tokens per second).")
+  video_max_grid_t: Optional[int] = Field(
+      None,
+      description="Maximum Qwen3-Omni/3.5 video grid size in temporal patches, before spatial merge.",
+  )
+  video_max_grid_h: Optional[int] = Field(
+      None,
+      description="Maximum Qwen3-Omni/3.5 video grid size in height patches, before spatial merge.",
+  )
+  video_max_grid_w: Optional[int] = Field(
+      None,
+      description="Maximum Qwen3-Omni/3.5 video grid size in width patches, before spatial merge.",
+  )
+
+  @model_validator(mode="after")
+  def validate_video_max_grid(self) -> "MultimodalGeneral":
+    max_grid = (self.video_max_grid_t, self.video_max_grid_h, self.video_max_grid_w)
+    if any(dim is None for dim in max_grid) and not all(dim is None for dim in max_grid):
+      raise ValueError("video_max_grid_t, video_max_grid_h, and video_max_grid_w must be set together.")
+    return self
 
 
 class VisionTower(BaseModel):
