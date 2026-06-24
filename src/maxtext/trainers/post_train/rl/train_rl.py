@@ -66,6 +66,7 @@ from pprint import pprint
 from transformers import AutoTokenizer
 import functools
 from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl import rl_learner
 from tunix.rl.rollout import base_rollout
 from tunix.rl.grpo.grpo_learner import GrpoConfig, GrpoLearner
 from tunix.sft import metrics_logger, profiler
@@ -91,6 +92,7 @@ def _tpu_inference_compat_patches():
   """
   orig_wsc = jax.lax.with_sharding_constraint
   orig_apply_dtype_cast = tunix_utils._apply_dtype_cast  # pylint: disable=protected-access
+  orig_run_all_micro_batch_steps = rl_learner.RLLearner._run_all_micro_batch_steps  # pylint: disable=protected-access
 
   def _compat_wsc(x, shardings):
     try:
@@ -103,13 +105,58 @@ def _tpu_inference_compat_patches():
       return val
     return orig_apply_dtype_cast(val, tgt_dtype, src_key)
 
+  def _patched_run_all_micro_batch_steps(self, initial_steps, *args, **kwargs):
+    # pylint: disable=protected-access
+    if hasattr(self.rl_cluster, "actor_trainer") and hasattr(self.rl_cluster.actor_trainer, "_prof"):
+      self.rl_cluster.actor_trainer._prof._do_not_profile = True
+
+    current_global_step = self.rl_cluster.global_steps
+    start_step = 999999
+    profiler_steps = 0
+    if self._training_config.profiler_options:
+      start_step = self._training_config.profiler_options.skip_first_n_steps
+      profiler_steps = self._training_config.profiler_options.profiler_steps
+    end_step = start_step + profiler_steps
+
+    should_profile = (start_step <= current_global_step < end_step) and (
+        jax.process_index() == 0
+        or (self._training_config.profiler_options and self._training_config.profiler_options.set_profile_options)
+    )
+
+    if should_profile:
+      log_dir = os.path.join(
+          self._training_config.profiler_options.log_dir,
+          f"global_step_{current_global_step}",
+      )
+      logging.info(
+          "Starting JAX profiler at global step %d to %s",
+          current_global_step,
+          log_dir,
+      )
+      if self._training_config.profiler_options.set_profile_options:
+        profile_options = jax.profiler.ProfileOptions()
+        profile_options.host_tracer_level = self._training_config.profiler_options.host_tracer_level
+        profile_options.python_tracer_level = self._training_config.profiler_options.python_tracer_level
+        jax.profiler.start_trace(log_dir=log_dir, profiler_options=profile_options)
+      else:
+        jax.profiler.start_trace(log_dir=log_dir)
+
+    try:
+      orig_run_all_micro_batch_steps(self, initial_steps, *args, **kwargs)
+    finally:
+      if should_profile:
+        logging.info("Stopping JAX profiler at global step %d.", current_global_step)
+        jax.profiler.stop_trace()
+
   jax.lax.with_sharding_constraint = _compat_wsc
   tunix_utils._apply_dtype_cast = _no_bf16_to_f32_cast  # pylint: disable=protected-access
+  rl_learner.RLLearner._run_all_micro_batch_steps = _patched_run_all_micro_batch_steps  # pylint: disable=protected-access
   try:
     yield
   finally:
     jax.lax.with_sharding_constraint = orig_wsc
     tunix_utils._apply_dtype_cast = orig_apply_dtype_cast  # pylint: disable=protected-access
+    rl_learner.RLLearner._run_all_micro_batch_steps = orig_run_all_micro_batch_steps  # pylint: disable=protected-access
 
 
 os.environ["TOKENIZERS_PARALLELISM"] = "0"

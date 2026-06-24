@@ -134,8 +134,8 @@ enable_checkpointing=true \
 load_parameters_path=$MAXTEXT_CKPT_PATH \
 rollout_vllm_init_with_random_weights=True \
 profiler=xplane \
-skip_first_n_steps_for_profiler=1 \
-profiler_steps=3"
+skip_first_n_steps_for_profiler=0 \
+profiler_steps=1"
 # vllm_hf_overrides='{architectures: [\"MaxTextForCausalLM\"]}' \
 # vllm_additional_config='{\"maxtext_config\": {\"model_name\": \"qwen3-0.6b\", \"model_call_mode\": \"inference\", \"enable_dp_attention\": false, \"allow_split_physical_axes\": true, \"log_config\": false, \"weight_dtype\": \"bfloat16\", \"prefuse_moe_weights\": true}}'"
 
