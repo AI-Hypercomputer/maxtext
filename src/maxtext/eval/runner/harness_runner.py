@@ -159,14 +159,14 @@ def run_harness(cfg: dict, hf_token: str | None = None) -> dict:
           lm_model_type,
           server.base_url,
       )
-      simple_eval_kwargs: dict = dict(
-          model=lm_model_type,
-          model_args=model_args,
-          tasks=tasks,
-          num_fewshot=num_fewshot,
-          limit=num_samples,
-          log_samples=False,
-      )
+      simple_eval_kwargs: dict = {
+          "model": lm_model_type,
+          "model_args": model_args,
+          "tasks": tasks,
+          "num_fewshot": num_fewshot,
+          "limit": num_samples,
+          "log_samples": False,
+      }
       if apply_chat_template:
         simple_eval_kwargs["apply_chat_template"] = True
       if fewshot_as_multiturn:

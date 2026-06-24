@@ -242,8 +242,6 @@ class TestBuildApp(unittest.TestCase):
 
   def test_completions_top_logprobs_populated(self):
     """When logprobs is requested, top_logprobs entries must be non-None dicts."""
-    from types import SimpleNamespace  # pylint: disable=import-outside-toplevel
-
     mock_output = _make_mock_output(generated_text="hi", prompt_token_ids=[1], generated_token_ids=[4, 5])
     mock_output.outputs[0].logprobs = [
         {4: SimpleNamespace(logprob=-0.5), 6: SimpleNamespace(logprob=-1.0)},
