@@ -466,8 +466,6 @@ def ragged_gather_reduce(
     # INPUT path, we must block all layout propagation from the input bitcast backward!
     # By performing a column contraction (matmul with identity) on the bfloat16 input 'x'
     # BEFORE we bitcast it to uint32, we completely destroy the layout propagation path!
-    # The bitcast is performed on a clean, layout-isolated tensor, ensuring the kernel's
-    # HBM input buffer is allocated and read with perfect, default layouts!
     # =========================================================================
     dynamic_zero_in = (indices[0] - indices[0]).astype(jnp.bfloat16)
     
@@ -483,11 +481,13 @@ def ragged_gather_reduce(
 
     x_clean = apply_input_barrier(x)
 
-    # Bitcast the clean input to uint32 in JAX space!
-    # Because of the input barrier, this bitcast is 100% layout-safe and compiler-stable!
-    x_u32 = jax.lax.bitcast_convert_type(x_clean, jnp.uint32).reshape(
-        input_size, aligned_hidden_size
-    )
+    # Bitcast the clean input to uint32 in JAX space using the 1D flattening pattern!
+    # Because JAX's bitcast_convert_type between different bit-width types requires a constant
+    # flat bit size, we must flatten the 2D array to 1D, perform the bitcast, and then reshape it
+    # back to the target 2D shape. This completely satisfies all JAX shape constraints!
+    x_flat = x_clean.reshape(-1)
+    x_flat_u32 = jax.lax.bitcast_convert_type(x_flat, jnp.uint32)
+    x_u32 = x_flat_u32.reshape(input_size, aligned_hidden_size)
   else:
     dtype_bytes = 4
     aligned_hidden_size = hidden_size
