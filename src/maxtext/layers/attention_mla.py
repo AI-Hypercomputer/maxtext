@@ -232,15 +232,16 @@ class Indexer(nnx.Module):
     Returns:
         mask: [b, t, s] - `0.0` at topk_indices, `DEFAULT_MASK_VALUE` (large negative) elsewhere.
     """
-    # 1. Create a range [0, 1, ..., s-1]
-    # 2. Broadcast compare against [b, t, k] to get [b, t, k, s]
-    # 3. Use .any() to see if a s-index is present in any of the k slots
-    is_topk = (jnp.arange(s) == topk_indices[..., None]).any(axis=-2)
-    # 4. Use where to select between 0.0 and the mask value
-    # cast values to dtype
+    b, t, _ = topk_indices.shape
+    batch_indices = jnp.arange(b)[:, None, None]
+    time_indices = jnp.arange(t)[None, :, None]
+
     val_true = jnp.array(0.0, dtype=self.dtype)
     val_false = jnp.array(DEFAULT_MASK_VALUE, dtype=self.dtype)
-    return jnp.where(is_topk, val_true, val_false)
+
+    mask = jnp.full((b, t, s), val_false, dtype=self.dtype)
+    mask = mask.at[batch_indices, time_indices, topk_indices].set(val_true)
+    return mask
 
   def __call__(
       self,
