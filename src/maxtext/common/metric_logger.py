@@ -65,6 +65,24 @@ def _prepare_metrics_for_json(metrics, step, run_name):
 def record_activation_metrics(output_metrics, intermediate_outputs, config):
   """Adds the activation metrics to the metrics dict"""
 
+  # NNX intermediates are model-rooted (no "intermediates" collection prefix) and
+  # use different layer-container names, so the hardcoded Linen paths below don't
+  # apply. Collect each metric by suffix instead — this yields one flat per-layer
+  # array for both scanned (stacked) and unscanned (one leaf per layer) layouts.
+  if "intermediates" not in intermediate_outputs:
+    for label, key in (
+        ("activ_fraction_zero", "activation_fraction_zero"),
+        ("activ_mean", "activation_mean"),
+        ("activ_stdev", "activation_stdev"),
+    ):
+      vals = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, key)
+      if not vals:
+        continue
+      per_layer = jax.numpy.concatenate(vals)
+      for layer_num in range(config.num_decoder_layers):
+        output_metrics["scalar"][f"{label}/layer_{layer_num:03d}"] = per_layer[layer_num]
+    return
+
   if config.scan_layers:
     metrics_dict = intermediate_outputs["intermediates"]["decoder"]["decoder"]
 

@@ -2047,11 +2047,18 @@ def set_engine_vars_from_base_engine(
   """Set internal vars from base_engine, which has already loaded the checkpoint and has sharding,
   mesh, and kv cache related vars set.
   """
-  if base_engine.model.quant:
+  if not engine.config.pure_nnx and base_engine.model.quant:
+    # NNX bakes the quant mode in at construction (via _nnx_quant_mode_str) rather
+    # than mutating model.quant.quant_mode, so there's nothing to copy on that path.
     engine.model.quant.quant_mode = base_engine.model.quant.quant_mode
   engine.state_mesh_annotations = base_engine.state_mesh_annotations
   engine.abstract_params = base_engine.abstract_params
-  engine.kv_cache_annotations = maxtext_utils.get_kv_cache_annotations(engine.model, engine.config, rng, engine.mesh)  # pylint: disable=protected-access
+  if engine.config.pure_nnx:
+    # Linen's get_kv_cache_annotations calls model.init(); NNX modules have no
+    # .init, so use the abstract-model variant (mirrors _load_params_nnx).
+    engine.kv_cache_annotations = maxtext_utils.get_kv_cache_annotations_nnx(engine.model_ar, engine.config, engine.mesh)
+  else:
+    engine.kv_cache_annotations = maxtext_utils.get_kv_cache_annotations(engine.model, engine.config, rng, engine.mesh)  # pylint: disable=protected-access
   engine.kv_cache_shardings = jax.tree_util.tree_map(
       lambda x: jax.sharding.NamedSharding(engine.mesh, x),
       engine.kv_cache_annotations,  # pylint: disable=protected-access
