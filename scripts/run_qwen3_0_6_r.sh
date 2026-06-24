@@ -132,10 +132,7 @@ checkpoint_period=20 \
 max_num_checkpoints_to_keep=1000 \
 enable_checkpointing=true \
 load_parameters_path=$MAXTEXT_CKPT_PATH \
-rollout_vllm_init_with_random_weights=True \
-profiler=xplane \
-skip_first_n_steps_for_profiler=0 \
-profiler_steps=1"
+rollout_vllm_init_with_random_weights=True"
 # vllm_hf_overrides='{architectures: [\"MaxTextForCausalLM\"]}' \
 # vllm_additional_config='{\"maxtext_config\": {\"model_name\": \"qwen3-0.6b\", \"model_call_mode\": \"inference\", \"enable_dp_attention\": false, \"allow_split_physical_axes\": true, \"log_config\": false, \"weight_dtype\": \"bfloat16\", \"prefuse_moe_weights\": true}}'"
 
@@ -154,6 +151,8 @@ profiler_steps=1"
   --workload="${WORKLOAD_NAME}" \
   --custom-pathways-proxy-server-args="${XLA_FLAGS}" \
   --custom-pathways-server-args="" \
+  --env PHASED_PROFILING_DIR="${BASE_OUTPUT_DIRECTORY}${WORKLOAD_NAME}/tensorboard" \
+  --env PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR=5 \
   --command="cd /app; python3 scripts/patch_vllm_sampler.py; pip install -e /app/pathways-utils --no-deps; pip install -e . --no-deps; ${MAXTEXT_COMMAND}" \
   --dry-run \
   --output-manifest-file=generated_manifest.yaml

@@ -3,8 +3,8 @@ kind: JobSet
 metadata:
   labels:
     kueue.x-k8s.io/queue-name: multislice-queue
-    xpk.google.com/workload: mohit-rl-qwen3-22550
-  name: mohit-rl-qwen3-22550
+    xpk.google.com/workload: mohit-rl-qwen3-1691
+  name: mohit-rl-qwen3-1691
 spec:
   coordinator:
     replicatedJob: pathways-head
@@ -30,7 +30,7 @@ spec:
               cloud.google.com/gke-tpu-slice-topology: 4x4x4
               cloud.google.com/skip-tpu-webhook-check: 'true'
             labels:
-              xpk.google.com/workload: mohit-rl-qwen3-22550
+              xpk.google.com/workload: mohit-rl-qwen3-1691
           spec:
             containers:
             - args:
@@ -71,6 +71,10 @@ spec:
                 valueFrom:
                   fieldRef:
                     fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              - name: PHASED_PROFILING_DIR
+                value: gs://runner-maxtext-logs/mohit-rl-qwen3-1691/tensorboard
+              - name: PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR
+                value: '5'
               image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260608-jax_0.10.1
               imagePullPolicy: Always
               name: pathways-worker
@@ -123,13 +127,93 @@ spec:
               - bash
               - -c
               - "echo XPK Start: $(date);\n_sigterm() (kill -SIGTERM $! 2>/dev/null;);\n\
-                trap _sigterm SIGTERM;\n\n(cd /app; python3 scripts/patch_vllm_sampler.py;\
-                \ pip install -e /app/pathways-utils --no-deps; pip install -e . --no-deps;\
-                \ JAX_RANDOM_WEIGHTS=1 SKIP_JAX_PRECOMPILE=1 NEW_MODEL_DESIGN=1 TPU_MIN_LOG_LEVEL=0\
-                \ TF_CPP_MIN_LOG_LEVEL=0 TPU_STDERR_LOG_LEVEL=0 JAX_PLATFORMS=proxy,cpu\
-                \ NUM_PRECOMPILE_WORKERS=1 JAX_BACKEND_TARGET=grpc://127.0.0.1:29000\
+                trap _sigterm SIGTERM;\n\n(cd /app; cat << 'EOF' > scripts/patch_vllm_sampler.py\n\
+                \"\"\"Hotfix to disable prompt_logprobs in tunix vLLM Sampler and\
+                \ bypass vLLM V1 scheduler AssertionError.\"\"\"\n\nimport os\nimport\
+                \ sys\n\n# --- Patch 1: tunix vllm_sampler.py ---\nprint(\"Applying\
+                \ hotfix to tunix/generate/vllm_sampler.py...\")\np = \"/usr/local/lib/python3.12/site-packages/tunix/generate/vllm_sampler.py\"\
+                \nif not os.path.exists(p):\n  try:\n    import tunix.generate.vllm_sampler\
+                \ as vs\n\n    p = vs.__file__\n  except ImportError:\n    print(\"\
+                Error: tunix not found.\")\n    sys.exit(1)\n\nprint(f\"Target file:\
+                \ {p}\")\nwith open(p, \"r\", encoding=\"utf-8\") as f:\n  c = f.read()\n\
+                target = (\n    \"      if self.config.return_logprobs:\\n\"\n   \
+                \ \"        sampling_params.logprobs = 1  # b/428730696\\n\"\n   \
+                \ \"        sampling_params.prompt_logprobs = 1  # b/428730696\"\n\
+                )\nreplacement = (\n    \"      if self.config.return_logprobs:\\\
+                n\"\n    \"        sampling_params.logprobs = 1  # b/428730696\\n\"\
+                \n    \"        sampling_params.prompt_logprobs = 0\"\n)\n\nif target\
+                \ in c:\n  c = c.replace(target, replacement)\n  with open(p, \"w\"\
+                , encoding=\"utf-8\") as f:\n    f.write(c)\n  print(\"Hotfix successfully\
+                \ applied to tunix/generate/vllm_sampler.py.\")\nelse:\n  if \"sampling_params.prompt_logprobs\
+                \ = 0\" in c:\n    print(\"Hotfix already applied.\")\n  else:\n \
+                \   print(\"Warning: target string not found.\")\n\n# --- Patch 2:\
+                \ vllm scheduler.py ---\nprint(\"Applying hotfix to vllm/v1/core/sched/scheduler.py...\"\
+                )\np2 = \"/usr/local/lib/python3.12/site-packages/vllm/v1/core/sched/scheduler.py\"\
+                \nif os.path.exists(p2):\n  with open(p2, \"r\", encoding=\"utf-8\"\
+                ) as f:\n    c2 = f.read()\n  target2 = (\n      \"              \
+                \  # Invariant: EngineCore returns no partial prefill\"\n      \"\
+                \ outputs.\\n                assert not prompt_logprobs_tensors\"\n\
+                \  )\n  replacement2 = \"                # Invariant: EngineCore returns\
+                \ no partial prefill\" \" outputs.\\n                pass\"\n  if\
+                \ target2 in c2:\n    c2 = c2.replace(target2, replacement2)\n   \
+                \ with open(p2, \"w\", encoding=\"utf-8\") as f:\n      f.write(c2)\n\
+                \    print(\"Hotfix successfully applied to vllm/v1/core/sched/scheduler.py.\"\
+                )\n  else:\n    # Check if the target is slightly different (e.g.\
+                \ fewer spaces or different lines)\n    # We can also do a simpler\
+                \ string replacement\n    target2_alt = \"assert not prompt_logprobs_tensors\"\
+                \n    if target2_alt in c2:\n      c2 = c2.replace(target2_alt, \"\
+                pass\")\n      with open(p2, \"w\", encoding=\"utf-8\") as f:\n  \
+                \      f.write(c2)\n      print(\"Hotfix successfully applied to vllm/v1/core/sched/scheduler.py\
+                \ (alt match).\")\n    else:\n      print(\"Warning: target string\
+                \ not found in scheduler.py.\")\nelse:\n  print(\"Warning: scheduler.py\
+                \ path not found.\")\n\n# --- Patch 3: tpu_inference utils.py ---\n\
+                print(\"Applying hotfix to tpu_inference/runner/utils.py...\")\np3\
+                \ = \"/usr/local/lib/python3.12/site-packages/tpu_inference/runner/utils.py\"\
+                \nif os.path.exists(p3):\n  with open(p3, \"r\", encoding=\"utf-8\"\
+                ) as f:\n    c3 = f.read()\n\n  # Replace the ints with strings in\
+                \ advanced_configuration dicts\n  targets_and_replacements = [\n \
+                \     (\n          '            \"tpu_num_sparse_cores_to_trace\"\
+                : 1,\\n' '            \"tpu_num_sparse_core_tiles_to_trace\": 1,',\n\
+                \          '            \"tpu_num_sparse_cores_to_trace\": \"1\",\\\
+                n' '            \"tpu_num_sparse_core_tiles_to_trace\": \"1\",',\n\
+                \      ),\n      (\n          '                \"tpu_num_chips_to_profile_per_task\"\
+                : 1,\\n'\n          '                \"tpu_num_sparse_cores_to_trace\"\
+                : 1,\\n'\n          '                \"tpu_num_sparse_core_tiles_to_trace\"\
+                : 1,',\n          '                \"tpu_num_chips_to_profile_per_task\"\
+                : \"1\",\\n'\n          '                \"tpu_num_sparse_cores_to_trace\"\
+                : \"1\",\\n'\n          '                \"tpu_num_sparse_core_tiles_to_trace\"\
+                : \"1\",',\n      ),\n  ]\n\n  modified = False\n  for target3, replacement3\
+                \ in targets_and_replacements:\n    if target3 in c3:\n      c3 =\
+                \ c3.replace(target3, replacement3)\n      modified = True\n\n  if\
+                \ modified:\n    with open(p3, \"w\", encoding=\"utf-8\") as f:\n\
+                \      f.write(c3)\n    print(\"Hotfix successfully applied to tpu_inference/runner/utils.py.\"\
+                )\n  else:\n    print(\"Warning: target strings not found or already\
+                \ patched in tpu_inference/runner/utils.py.\")\nelse:\n  print(\"\
+                Warning: tpu_inference/runner/utils.py path not found.\")\n\n# ---\
+                \ Patch 4: pathwaysutils profiling.py ---\nprint(\"Applying hotfix\
+                \ to pathwaysutils/profiling.py...\")\np4 = \"/usr/local/lib/python3.12/site-packages/pathwaysutils/profiling.py\"\
+                \nif os.path.exists(p4):\n  with open(p4, \"r\", encoding=\"utf-8\"\
+                ) as f:\n    c4 = f.read()\n  \n  target4 = \"      _, result_future\
+                \ = _profile_state.executable.call()\"\n  replacement4 = (\n     \
+                \ \"      import jax\\n\"\n      \"      import jax.numpy as jnp\\\
+                n\"\n      \"      out_avals = [jax.core.ShapedArray((1,), jnp.object_)]\\\
+                n\"\n      \"      out_shardings = [\\n\"\n      \"          getattr(\\\
+                n\"\n      \"              jax.sharding,\\n\"\n      \"          \
+                \    'make_single_device_sharding',\\n\"\n      \"              jax.sharding.SingleDeviceSharding,\\\
+                n\"\n      \"          )(jax.devices()[0])\\n\"\n      \"      ]\\\
+                n\"\n      \"      _, result_future = _profile_state.executable.call(\\\
+                n\"\n      \"          out_avals=out_avals, out_shardings=out_shardings\\\
+                n\"\n      \"      )\"\n  )\n  \n  if target4 in c4:\n    c4 = c4.replace(target4,\
+                \ replacement4)\n    with open(p4, \"w\", encoding=\"utf-8\") as f:\n\
+                \      f.write(c4)\n    print(\"Hotfix successfully applied to pathwaysutils/profiling.py.\"\
+                )\n  else:\n    print(\"Warning: target string not found in pathwaysutils/profiling.py.\"\
+                )\nelse:\n  print(\"Warning: pathwaysutils/profiling.py path not found.\"\
+                )\n\nEOF\npython3 scripts/patch_vllm_sampler.py; pip install -e /app/pathways-utils\
+                \ --no-deps; pip install -e . --no-deps; JAX_RANDOM_WEIGHTS=1 SKIP_JAX_PRECOMPILE=1\
+                \ NEW_MODEL_DESIGN=1 TPU_MIN_LOG_LEVEL=0 TF_CPP_MIN_LOG_LEVEL=0 TPU_STDERR_LOG_LEVEL=0\
+                \ JAX_PLATFORMS=proxy,cpu NUM_PRECOMPILE_WORKERS=1 JAX_BACKEND_TARGET=grpc://127.0.0.1:29000\
                 \ ENABLE_PATHWAYS_PERSISTENCE=1 PYTHONPATH=/app/src python3 -m maxtext.trainers.post_train.rl.train_rl\
-                \ model_name=qwen3-0.6b tokenizer_path=Qwen/Qwen3-0.6B run_name=mohit-rl-qwen3-22550\
+                \ model_name=qwen3-0.6b tokenizer_path=Qwen/Qwen3-0.6B run_name=mohit-rl-qwen3-1691\
                 \ checkpoint_storage_use_ocdbt=False async_scheduling=False base_output_directory=gs://runner-maxtext-logs/\
                 \ chips_per_vm=8 num_batches=20 num_test_batches=0 rl.num_generations=8\
                 \ rl.grpo_beta=0.05 rl.grpo_epsilon=0.2 gradient_clipping_threshold=1.0\
@@ -142,10 +226,9 @@ spec:
                 \ scan_layers=True allow_split_physical_axes=True enable_tunix_perf_metrics=True\
                 \ checkpoint_period=20 max_num_checkpoints_to_keep=1000 enable_checkpointing=true\
                 \ load_parameters_path=gs://mohitkhatwani_multipods/qwen3-0.6b/pathways-compat/0/items\
-                \ rollout_vllm_init_with_random_weights=True profiler=xplane skip_first_n_steps_for_profiler=0\
-                \ profiler_steps=1) & PID=$!;\nwhile kill -0 $PID 2>/dev/null;\n \
-                \   do sleep 5;\ndone;\nwait $PID;\nEXIT_CODE=$?;\n\necho XPK End:\
-                \ $(date);\necho EXIT_CODE=$EXIT_CODE;\n\n\nexit $EXIT_CODE\n"
+                \ rollout_vllm_init_with_random_weights=True) & PID=$!;\nwhile kill\
+                \ -0 $PID 2>/dev/null;\n    do sleep 5;\ndone;\nwait $PID;\nEXIT_CODE=$?;\n\
+                \necho XPK End: $(date);\necho EXIT_CODE=$EXIT_CODE;\n\n\nexit $EXIT_CODE\n"
               env:
               - name: PATHWAYS_HEAD
                 valueFrom:
@@ -157,6 +240,10 @@ spec:
                 value: GCP
               - name: JAX_BACKEND_TARGET
                 value: grpc://$(PATHWAYS_HEAD):29000
+              - name: PHASED_PROFILING_DIR
+                value: gs://runner-maxtext-logs/mohit-rl-qwen3-1691/tensorboard
+              - name: PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR
+                value: '5'
               image: gcr.io/cloud-tpu-multipod-dev/mohitkhatwani-runner:post-training-2026-06-23
               imagePullPolicy: Always
               name: jax-tpu
@@ -210,6 +297,10 @@ spec:
                 valueFrom:
                   fieldRef:
                     fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              - name: PHASED_PROFILING_DIR
+                value: gs://runner-maxtext-logs/mohit-rl-qwen3-1691/tensorboard
+              - name: PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR
+                value: '5'
               image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:20260608-jax_0.10.1
               imagePullPolicy: Always
               name: pathways-proxy
@@ -242,6 +333,10 @@ spec:
                     fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
               - name: TPU_SKIP_MDS_QUERY
                 value: 'true'
+              - name: PHASED_PROFILING_DIR
+                value: gs://runner-maxtext-logs/mohit-rl-qwen3-1691/tensorboard
+              - name: PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR
+                value: '5'
               image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260608-jax_0.10.1
               imagePullPolicy: Always
               name: pathways-rm

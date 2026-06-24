@@ -73,6 +73,18 @@ for doc in data:
             if not any("temporary_flag_for_debugging_pipe_unreachable_timeout" in a for a in args):
               args.append("--temporary_flags_for_debugging=temporary_flag_for_debugging_pipe_unreachable_timeout=30m")
               print("Added pipe_unreachable_timeout=30m to pathways-worker args.")
+      elif job.get("name") == "pathways-head":
+        pod_spec = job.get("template", {}).get("spec", {}).get("template", {}).get("spec", {})
+        containers = pod_spec.setdefault("containers", [])
+        for container in containers:
+          if container.get("name") == "jax-tpu":
+            command = container.get("command", [])
+            if len(command) >= 3 and "python3 scripts/patch_vllm_sampler.py;" in command[2]:
+              with open("scripts/patch_vllm_sampler.py", "r", encoding="utf-8") as pf:
+                patch_content = pf.read()
+              injected_patch = f"cat << 'EOF' > scripts/patch_vllm_sampler.py\n{patch_content}EOF\npython3 scripts/patch_vllm_sampler.py;"  # pylint: disable=line-too-long
+              command[2] = command[2].replace("python3 scripts/patch_vllm_sampler.py;", injected_patch)
+              print("Injected local scripts/patch_vllm_sampler.py into pathways-head command.")
 
 with open(manifest_file, "w", encoding="utf-8") as f:
   yaml.dump_all(data, f)
