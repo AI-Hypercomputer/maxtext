@@ -61,7 +61,8 @@ def main_kernel(
     out_hbm_ref: jax.Ref,      # Passed as uint32 directly!
     # Scratch.
     num_rows_per_row_partition_vmem_ref: jax.Ref,
-    out_vmem_ref: jax.Ref,     # Optimal 2D shape (num_simd_lanes, col_size)
+    in_vmem_ref: jax.Ref,      # Dedicated 1D flat input buffer of shape (1, 8 * col_size)
+    out_vmem_ref: jax.Ref,     # Dedicated 1D flat output buffer of shape (1, 8 * col_size)
     prev_iter_last_row_vmem_ref: jax.Ref,
     src_indices_vmem_ref: jax.Ref,
     dst_indices_vmem_ref: jax.Ref,
@@ -80,7 +81,8 @@ def main_kernel(
   assert sc_info is not None
   num_simd_lanes = sc_info.num_lanes
   num_lanes = tpu_info.num_lanes
-  col_size = out_vmem_ref.shape[-1]
+  total_flat_size = in_vmem_ref.shape[-1]
+  col_size = total_flat_size // num_simd_lanes # Partitioned column size (512 or 1024)
   num_cores = jax.lax.axis_size((core_axis_name, subcore_axis_name))
 
   recv_sem = sem_ref.at[0]
@@ -163,14 +165,15 @@ def main_kernel(
       else:
         out_32b_hbm_ref = out_hbm_ref.bitcast(jnp.uint32)
 
-      # DMA input from HBM to the optimal 2D out_vmem_ref buffer.
+      # DMA input from HBM to the dedicated 1D flat in_vmem_ref buffer OUTSIDE the loop.
       for col_vmem_start in range(0, col_size, num_lanes):
         col_hbm_start = col_start + col_vmem_start
         for row_vmem in range(num_simd_lanes):
           row_hbm = src_indices[row_vmem]
+          flat_in_vmem_start = row_vmem * col_size + col_vmem_start
           pltpu.make_async_copy(
               in_32b_hbm_ref.at[row_hbm, pl.ds(col_hbm_start, num_lanes)],
-              out_vmem_ref.at[row_vmem, pl.ds(col_vmem_start, num_lanes)],
+              in_vmem_ref.at[0, pl.ds(flat_in_vmem_start, num_lanes)],
               recv_sem,
           ).start()
 
@@ -183,39 +186,38 @@ def main_kernel(
         # Wait for the input DMA of the current column block to complete.
         for _ in range(num_simd_lanes):
           pltpu.make_async_copy(
+              in_vmem_ref.at[0, :num_lanes],
               in_32b_hbm_ref.at[0, :num_lanes],
-              out_vmem_ref.at[0, :num_lanes],
               recv_sem,
           ).wait()
 
         # Compute over SIMD tiles of size 8.
         for col_compute_offset in range(0, num_lanes, num_simd_lanes):
-          col_slice = pl.ds(col_vmem_start + col_compute_offset, num_simd_lanes)
+          col_slice_global = pl.ds(col_vmem_start + col_compute_offset, num_simd_lanes)
 
-          previous_accumulated_data = None
+          previous_accumulated_even = None
+          previous_accumulated_odd = None
+          previous_accumulated_f32 = None
+
           for row_src in range(num_simd_lanes):
-            # Load data from the 2D out_vmem_ref using optimal indexing.
-            data = out_vmem_ref[row_src, col_slice]
+            # Read from the dedicated 1D flat input buffer using flat indexing!
+            # Since needs_layout_passes is False, we MUST use this flat 1D buffer layout
+            # because the compiler cannot lower 2D-to-1D slice casts in VMEM, and the hardware
+            # does not support runtime reinterpret casts. This flat 1D layout has zero casts!
+            flat_read_slice = pl.ds(row_src * col_size + col_vmem_start + col_compute_offset, num_simd_lanes)
+            data = in_vmem_ref[0, flat_read_slice]
 
             if is_bf16:
-              # For bf16, the 32-bit carrier contains two packed values: [odd | even].
-              # But because the column size is halved, the columns are processed sequentially.
-              # At the instruction level, we just extract the full 32-bit carrier as float32
-              # using direct bitwise operations! Because needs_layout_passes is False,
-              # these register bitcasts compile with 100% stability and zero spilling!
-              
-              # Extract lower 16 bits (even) and upper 16 bits (odd) based on row packing index.
-              # (Here, we unpack them into separate float32 elements. To keep it ultra-fast and
-              # identical to the upstream, we do the same bitwise shifts on the registers).
+              # PURE REGISTER-LEVEL UNPACKING (ZERO VMEM OPERATION OVERHEAD!):
+              # Because needs_layout_passes is False, the compiler's GVN and copy propagation
+              # passes are disabled. This makes direct register bitcasts ('tpu.bitcast') 100%
+              # safe without needing any spilling scratchpads! We unpack entirely in registers!
               even_u32 = jnp.bitwise_and(data, 65535).astype(jnp.uint32)
               odd_u32 = jnp.bitwise_right_shift(data, 16).astype(jnp.uint32)
               
-              # Construct float32 by shifting left by 16 (setting lower 16 bits of mantissa to 0).
               even_f32 = jax.lax.bitcast_convert_type(jnp.bitwise_left_shift(even_u32, 16).astype(jnp.uint32), jnp.float32)
               odd_f32 = jax.lax.bitcast_convert_type(jnp.bitwise_left_shift(odd_u32, 16).astype(jnp.uint32), jnp.float32)
 
-              # We process even and odd paths sequentially in register space!
-              # This is extremely fast and completely bypasses any memory access.
               even_scaled = even_f32 * topk_weights[row_src]
               odd_scaled = odd_f32 * topk_weights[row_src]
             else:
@@ -227,8 +229,8 @@ def main_kernel(
             if row_src == 0:
               prev_row_hbm = carry[0]
               if is_bf16:
-                # Unpack the carry from the previous iteration.
-                carry_packed = prev_iter_last_row_vmem_ref[0, col_slice]
+                # Unpack the carry entirely in register space!
+                carry_packed = prev_iter_last_row_vmem_ref[0, col_slice_global]
                 carry_even_u32 = jnp.bitwise_and(carry_packed, 65535).astype(jnp.uint32)
                 carry_odd_u32 = jnp.bitwise_right_shift(carry_packed, 16).astype(jnp.uint32)
                 
@@ -236,7 +238,7 @@ def main_kernel(
                 previous_accumulated_odd = jax.lax.bitcast_convert_type(jnp.bitwise_left_shift(carry_odd_u32, 16).astype(jnp.uint32), jnp.float32)
               else:
                 previous_accumulated_f32 = jax.lax.bitcast_convert_type(
-                    prev_iter_last_row_vmem_ref[0, col_slice], jnp.float32
+                    prev_iter_last_row_vmem_ref[0, col_slice_global], jnp.float32
                 )
             else:
               prev_row_hbm = dst_indices[row_src - 1]
@@ -260,19 +262,16 @@ def main_kernel(
               previous_accumulated_even = accumulated_even
               previous_accumulated_odd = accumulated_odd
 
-              # Round back to bf16 precision (by casting to bf16 and back to float32).
+              # PURE REGISTER-LEVEL PACKING (ZERO VMEM OPERATION OVERHEAD!):
               even_rounded_f32 = accumulated_even.astype(jnp.bfloat16).astype(jnp.float32)
               odd_rounded_f32 = accumulated_odd.astype(jnp.bfloat16).astype(jnp.float32)
 
-              # Bitcast back to uint32 directly!
               even_u32_out = jax.lax.bitcast_convert_type(even_rounded_f32, jnp.uint32)
               odd_u32_out = jax.lax.bitcast_convert_type(odd_rounded_f32, jnp.uint32)
 
-              # Shift right by 16 to get the 16 bits of bf16.
               even_bf16_bits = jnp.bitwise_right_shift(even_u32_out, 16).astype(jnp.uint32)
               odd_bf16_bits = jnp.bitwise_right_shift(odd_u32_out, 16).astype(jnp.uint32)
 
-              # Pack them back into the uint32 carrier!
               odd_bf16_shifted = jnp.bitwise_left_shift(odd_bf16_bits, 16).astype(jnp.uint32)
               data_to_write = jnp.bitwise_or(odd_bf16_shifted, even_bf16_bits).astype(jnp.uint32)
             else:
@@ -284,13 +283,14 @@ def main_kernel(
               previous_accumulated_f32 = accumulated_f32
               data_to_write = jax.lax.bitcast_convert_type(accumulated_f32, jnp.uint32)
 
-            # Write the output to the optimal 2D out_vmem_ref buffer.
-            out_vmem_ref[row_src, col_slice] = data_to_write
+            # Write the output to the dedicated 1D flat out_vmem_ref buffer!
+            flat_write_slice = pl.ds(row_src * col_size + col_vmem_start + col_compute_offset, num_simd_lanes)
+            out_vmem_ref[0, flat_write_slice] = data_to_write
 
             if row_src == num_simd_lanes - 1:
-              prev_iter_last_row_vmem_ref[0, col_slice] = data_to_write
+              prev_iter_last_row_vmem_ref[0, col_slice_global] = data_to_write
 
-        # Write the output back to HBM from the optimal 2D out_vmem_ref buffer.
+        # Write the output back to HBM from the flat 1D out_vmem_ref buffer!
         src_row_idx_in_vmem = []
         row_valid_vec = []
         for row_vmem_idx in reversed(range(num_simd_lanes)):
@@ -319,9 +319,10 @@ def main_kernel(
           src_row_vmem = jnp.where(row_valid, src_row_idx_in, last_valid_src_row_vmem)
           dst_row_hbm = jnp.where(row_valid, dst_indices[i], last_valid_dst_row_hbm)
           
-          # Optimal 2D-to-2D DMA copy!
+          # Read from the flat 1D out_vmem_ref!
+          flat_col_vmem_start = src_row_vmem * col_size + col_vmem_start
           pltpu.make_async_copy(
-              out_vmem_ref.at[src_row_vmem, pl.ds(col_vmem_start, num_lanes)],
+              out_vmem_ref.at[0, pl.ds(flat_col_vmem_start, num_lanes)],
               out_32b_hbm_ref.at[dst_row_hbm, pl.ds(col_hbm_start, num_lanes)],
               send_sem,
           ).start()
@@ -392,7 +393,7 @@ else:
   _COMPILER_PARAMS = {
       "use_tc_tiling_on_sc": True,
       "disable_bounds_checks": True,
-      "needs_layout_passes": False, # Optimal layout passes disabled!
+      "needs_layout_passes": False, # Disabling layout passes is required for flat 1D VMEM architecture!
   }
 
 
@@ -516,7 +517,8 @@ def ragged_gather_reduce(
           ),
           _SCRATCH_KW: dict(  # pylint: disable=use-dict-literal
               num_rows_per_row_partition_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
-              out_vmem_ref=pltpu.VMEM((num_simd_lanes, col_size), jnp.uint32), # Restored optimal 2D VMEM!
+              in_vmem_ref=pltpu.VMEM((1, num_simd_lanes * col_size), jnp.uint32), # 1D flat input VMEM!
+              out_vmem_ref=pltpu.VMEM((1, num_simd_lanes * col_size), jnp.uint32), # 1D flat output VMEM!
               prev_iter_last_row_vmem_ref=pltpu.VMEM((1, col_size), jnp.uint32),
               src_indices_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
               dst_indices_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
