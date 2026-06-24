@@ -83,7 +83,6 @@ XLA_FLAGS="--xla_tpu_dvfs_p_state=7 \
 # VLLM_ENABLE_V1_MULTIPROCESSING=0 \
 # MaxText command
 MAXTEXT_COMMAND="JAX_RANDOM_WEIGHTS=1 \
-SKIP_JAX_PRECOMPILE=1 \
 NEW_MODEL_DESIGN=1 \
 TPU_MIN_LOG_LEVEL=0 \
 TF_CPP_MIN_LOG_LEVEL=0 \
@@ -113,8 +112,8 @@ decode_sampling_nucleus_p=0.95 \
 dataset_name=nvidia/OpenMathInstruct-2 \
 hf_train_files=hf://datasets/nvidia/OpenMathInstruct-2/data/train_1M-*.parquet \
 train_split=train_1M \
-max_target_length=8198 \
-max_prefill_predict_length=8192 \
+max_target_length=24576 \
+max_prefill_predict_length=16384 \
 learning_rate=1e-6 \
 batch_size=480 \
 train_micro_batch_size=8 \
@@ -122,13 +121,13 @@ rollout_micro_batch_size=480 \
 rollout_data_parallelism=16 \
 rollout_tensor_parallelism=4 \
 enable_dp_attention=false \
-hbm_utilization_vllm=0.22 \
-max_num_seqs=4096 \
-max_num_batched_tokens=8454 \
+hbm_utilization_vllm=0.7 \
+max_num_seqs=480 \
+max_num_batched_tokens=24576 \
 scan_layers=True \
 allow_split_physical_axes=True \
 enable_tunix_perf_metrics=True \
-checkpoint_period=20 \
+checkpoint_period=100 \
 max_num_checkpoints_to_keep=1000 \
 enable_checkpointing=true \
 load_parameters_path=$MAXTEXT_CKPT_PATH \
@@ -152,7 +151,7 @@ rollout_vllm_init_with_random_weights=True"
   --custom-pathways-proxy-server-args="${XLA_FLAGS}" \
   --custom-pathways-server-args="" \
   --env PHASED_PROFILING_DIR="${BASE_OUTPUT_DIRECTORY}${WORKLOAD_NAME}/tensorboard" \
-  --env PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR=5 \
+  --env PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR=100 \
   --command="cd /app; python3 scripts/patch_vllm_sampler.py; pip install -e /app/pathways-utils --no-deps; pip install -e . --no-deps; ${MAXTEXT_COMMAND}" \
   --dry-run \
   --output-manifest-file=generated_manifest.yaml
