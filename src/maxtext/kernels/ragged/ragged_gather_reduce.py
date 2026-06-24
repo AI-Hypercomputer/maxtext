@@ -548,10 +548,31 @@ def ragged_gather_reduce(
     odd_f32 = jax.lax.bitcast_convert_type(odd_f32_bits, jnp.float32)
     odd_bf16 = odd_f32.astype(jnp.bfloat16)
 
-    # 3. Interleave Even and Odd Columns to reconstruct the final (R, hidden_size) tensor.
+    # 3. APPLY MATMUL BARRIERS TO BOTH TENSORS TO BLOCK LAYOUT BACK-PROPAGATION!
+    # To completely block the layout optimizer from propagating the final interleaved (R, 4096)
+    # layout backward into the shape-changing 'astype' (float32 -> bfloat16) nodes, we place
+    # separate, independent matmul barriers on the even and odd bfloat16 tensors of shape (R, 2048)!
+    # By contracting the column dimension (2048) of each block, we completely destroy the layout
+    # propagation path along the columns, forcing the 'astype' nodes to use clean, default,
+    # non-conflicting layouts, completely bypassing the compiler's size-doubling layout bug!
+    dynamic_zero = (indices[0] - indices[0]).astype(jnp.bfloat16)
+    
+    def apply_barrier(tensor_2048):
+      blocks = []
+      block_size = 512
+      num_blocks = 2048 // block_size
+      for i in range(num_blocks):
+        block = tensor_2048[:, i * block_size : (i + 1) * block_size]
+        identity = jnp.eye(block_size, dtype=jnp.bfloat16) + dynamic_zero
+        blocks.append(jnp.matmul(block, identity))
+      return jnp.concatenate(blocks, axis=1)
+
+    even_bf16_clean = apply_barrier(even_bf16)
+    odd_bf16_clean = apply_barrier(odd_bf16)
+
+    # 4. Interleave Even and Odd Columns to reconstruct the final (R, hidden_size) tensor.
     # We use jnp.stack along a new dimension and reshape to interleave them with zero overhead!
-    # Since there are NO shape-changing bitcasts, this compiles with 100% absolute stability!
-    out_final = jnp.stack([even_bf16, odd_bf16], axis=-1).reshape(
+    out_final = jnp.stack([even_bf16_clean, odd_bf16_clean], axis=-1).reshape(
         padded_input_size // reduce_group_size, hidden_size
     )
   else:
