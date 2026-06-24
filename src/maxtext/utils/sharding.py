@@ -13,25 +13,22 @@
 # limitations under the License.
 
 # pylint: disable=line-too-long, disable=bare-except, consider-using-generator
-""" Utils that are only interesting to MaxText and sharding related. """
-
-from flax import linen as nn, nnx
+"""Utils that are only interesting to MaxText and sharding related."""
 
 from collections.abc import Iterable
-
-import jax
-from jax.core import Tracer
-from jax.sharding import PartitionSpec as P, NamedSharding, reshard
-
-import optax
-
-from maxtext.configs import pyconfig
-from maxtext.common.common_types import ShardMode
-from maxtext.utils import max_logging
-from maxtext.utils import max_utils
-
 import inspect  # for debugging only
 from pathlib import Path
+
+from flax import linen as nn, nnx
+from flax.core.spmd import get_logical_axis_rules
+import jax
+from jax.core import Tracer
+from jax.sharding import NamedSharding, PartitionSpec as P, reshard
+from maxtext.common.common_types import ShardMode
+from maxtext.configs import pyconfig
+from maxtext.utils import max_logging
+from maxtext.utils import max_utils
+import optax
 
 _LOGGED_ACTIVATION_SHARDINGS = set()
 _ACTIVATION_SHARDINGS_DUMP = []
@@ -177,6 +174,90 @@ def remove_size_one_mesh_axis(spec, mesh):
     else:
       new_spec.append(None if mesh.shape.get(s, 1) == 1 else s)  # type: ignore
   return P(*new_spec, unreduced=spec.unreduced, reduced=spec.reduced)
+
+
+def get_nnx_var_named_sharding_with_scan_axis(
+    v: nnx.Variable, mesh
+) -> nnx.Variable:
+  """Compute NamedSharding for an NNX variable, correctly handling the scan axis."""
+  val = v.get_value()
+  if not hasattr(val, "shape"):
+    # `val` is either truly leafless (e.g. optax MaskedNode) or a composite
+    # pytree of tensors (e.g. AQT QTensor on serve-mode quantized variables).
+    # Replicated sharding is a safe default.
+    if jax.tree_util.tree_leaves(val):
+      replicated = NamedSharding(mesh, P())
+      return v.replace(jax.tree.map(lambda _: replicated, val))
+    return v
+  metadata = v.get_metadata()
+  out_sharding = (
+      metadata.get("out_sharding")
+      or metadata.get("sharding_names")
+      or metadata.get("sharding")
+  )
+  if not out_sharding:
+    pspec = P()
+  else:
+    # Insert the scan axis for parameters created by _create_scanned_layers.
+    if nnx.PARTITION_NAME in metadata:
+      partition_name = metadata[nnx.PARTITION_NAME]
+      scan_axis = metadata.get("param_scan_axis", 0)
+      out_sharding = (
+          [out_sharding]
+          if isinstance(out_sharding, str)
+          else list(out_sharding)
+      )
+      if partition_name not in out_sharding:
+        out_sharding.insert(scan_axis, partition_name)
+      out_sharding = tuple(out_sharding)
+    # Convert logical axis names to physical mesh axes using current context rules.
+    context_rules = get_logical_axis_rules()
+    local_rules = metadata.get("sharding_rules", ())
+    if context_rules or local_rules:
+      local_rules_list = list(local_rules) if local_rules is not None else []
+      context_rules_list = (
+          list(context_rules) if context_rules is not None else []
+      )
+      rules = local_rules_list + context_rules_list
+      pspec = logical_to_mesh_axes(out_sharding, mesh, rules=rules)
+    else:
+      pspec = P(*out_sharding)
+      if mesh is not None:
+        pspec = remove_size_one_mesh_axis(pspec, mesh)
+  return v.replace(NamedSharding(mesh, pspec))
+
+
+def nnx_construct_named_sharding(abs_var_state: nnx.State, mesh) -> nnx.State:
+  """Compute NamedSharding for each NNX variable, correctly handling the scan (stacked layers) axis.
+
+  Unlike flax.nnx.spmd.get_var_pspec (used inside nnx.get_abstract_model), this
+  function also
+  inserts the partition_name axis at the correct scan_axis position for
+  parameters created by
+  _create_scanned_layers. Without this, scanned parameters get a 2D partition
+  spec applied to a
+  3D tensor, placing sharding on the stacked-layers dimension instead of the
+  embedding dimension.
+
+  Args:
+    abs_var_state: NNX abstract variable state from
+      nnx.split(nnx.eval_shape(...)).
+    mesh: JAX physical mesh.
+
+  Returns:
+    Same tree structure as abs_var_state with leaf values replaced with
+    NamedSharding.
+    Note that it preserves the original nnx.Variable / Param wrapper nodes to
+    maintain
+    type structure matching abs_var_state (necessary for multi-tree maps). Use
+    maxtext_utils_nnx.nnx_extract_named_sharding to retrieve clean raw
+    NamedShardings.
+  """
+  return jax.tree.map(
+      lambda x: get_nnx_var_named_sharding_with_scan_axis(x, mesh),
+      abs_var_state,
+      is_leaf=lambda x: isinstance(x, nnx.Variable),
+  )
 
 
 def logical_to_mesh_axes(logical_names, mesh, rules=None):
