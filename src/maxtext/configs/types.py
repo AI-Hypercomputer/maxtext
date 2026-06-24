@@ -261,6 +261,7 @@ ModelName = Literal[
     "qwen3-30b-a3b",
     "qwen3-30b-a3b-base",
     "qwen3-480b-a35b",
+    "qwen3-vl-4b",
     "qwen3-next-80b-a3b",
     "qwen3-omni-30b-a3b",
     "qwen3-custom-30b-a3b",
@@ -3163,6 +3164,7 @@ class MaxTextConfig(
           "llama4-17b-16e",
           "llama4-17b-128e",
           "qwen3-omni-30b-a3b",
+          "qwen3-vl-4b",
           "qwen3.5-35b-a3b",
           "qwen3.5-397b-a17b",
       )
