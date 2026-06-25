@@ -263,6 +263,8 @@ norm_topk_prob: false # boolean to enable the top-k probability normalization. q
 
 # when moe weight matrices are sharded on both fsdp and fsdp-transpose axes, use two separate all-gather calls
 moe_fsdp_use_two_stage_all_gather: false
+# when dense MLP weight matrices are sharded on both fsdp and fsdp-transpose axes, use two separate all-gather calls
+dense_fsdp_use_two_stage_all_gather: false
 # Shard the expert dimension of the MLP weights on the FSDP axis.
 # This configuration is recommended only when num_experts is a multiple of fsdp_parallelism
 shard_exp_on_fsdp: false
@@ -604,6 +606,9 @@ logical_axis_rules: [
                       ['mlp_no_fsdp', ['tensor', 'tensor_sequence', 'autoregressive']],
                       ['embed_tensor_transpose', ['tensor_transpose']],
                       ['exp_with_fsdp', 'fsdp'],
+                      # Helper rules for dense_fsdp_use_two_stage_all_gather (two-stage MLP-weight all-gather).
+                      ['embed_fsdp', ['fsdp']],
+                      ['embed_no_fsdp', []],
                   ]
 # Axes used for DCN must be earlier in this list than ICI, see (b/339009148) for details
 data_sharding: [['data', 'stage', 'fsdp', 'fsdp_transpose', 'context', 'context_autoregressive', 'tensor', 'tensor_transpose', 'tensor_sequence', 'expert', 'autoregressive']]

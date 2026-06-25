@@ -812,6 +812,10 @@ class MoEGeneral(BaseModel):
       False,
       description="Use two separate All-Gather calls for MoE weights sharded on both FSDP and FSDP-transpose.",
   )
+  dense_fsdp_use_two_stage_all_gather: bool = Field(
+      False,
+      description="Use two separate All-Gather calls for dense MLP weights sharded on both FSDP and FSDP-transpose.",
+  )
   shard_exp_on_fsdp: bool = Field(
       False,
       description="Shard the expert dimension of the MLP weights on the FSDP axis, "
