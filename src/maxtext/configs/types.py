@@ -700,6 +700,8 @@ class SplashAttention(BaseModel):
   sa_k_layout: str = Field("HEAD_DIM_MINOR", description="Layout for K in splash attention.")
   sa_v_layout: str = Field("HEAD_DIM_MINOR", description="Layout for V in splash attention.")
   use_splash_scheduler: bool = Field(False, description="Use experimental splash attention scheduler.")
+  sa_fuse_reciprocal: bool = Field(True, description="Maps to fuse_reciprocal in SplashConfig.")
+  sa_use_base2_exp: bool = Field(True, description="Maps to use_base2_exp in SplashConfig.")
   # If None, each local_sa_* flag inherits from the corresponding sa_* flag.
   local_sa_block_q: int | None = Field(None, description="Block size for Q in local splash attention.")
   local_sa_block_kv: int | None = Field(None, description="Block size for KV in local splash attention.")
@@ -718,6 +720,8 @@ class SplashAttention(BaseModel):
   local_sa_k_layout: str | None = Field(None, description="Layout for K in local splash attention.")
   local_sa_v_layout: str | None = Field(None, description="Layout for V in local splash attention.")
   local_use_splash_scheduler: bool | None = Field(None, description="Use experimental local splash attention scheduler.")
+  local_sa_fuse_reciprocal: bool | None = Field(None, description="Maps to local fuse_reciprocal in SplashConfig.")
+  local_sa_use_base2_exp: bool | None = Field(None, description="Maps to local use_base2_exp in SplashConfig.")
   use_max_logit_estimate: int = Field(
       -1,
       description="-1 means no estimate, any > 0 value will be used as max logit estimate",
@@ -3013,6 +3017,10 @@ class MaxTextConfig(
       self.local_sa_v_layout = self.sa_v_layout
     if self.local_use_splash_scheduler is None:
       self.local_use_splash_scheduler = self.use_splash_scheduler
+    if self.local_sa_fuse_reciprocal is None:
+      self.local_sa_fuse_reciprocal = self.sa_fuse_reciprocal
+    if self.local_sa_use_base2_exp is None:
+      self.local_sa_use_base2_exp = self.sa_use_base2_exp
 
     # I. RUN ALL CROSS-FIELD VALIDATIONS
     if self.load_parameters_path and self.load_full_state_path:
