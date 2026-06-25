@@ -62,7 +62,10 @@ _yaml_types_to_parser = {str: str, int: int, float: float, bool: string_to_bool}
 def validate_compute_axis_order(s: str) -> None:
   valid_compute_axis_order = ("0,1,2,3", "0,2,1,3")
   if s not in valid_compute_axis_order:  # currently supported compute_axis_order
-    raise ValueError("Invalid compute_axis_order was passed. Valid options are ", valid_compute_axis_order)
+    raise ValueError(
+        "Invalid compute_axis_order was passed. Valid options are ",
+        valid_compute_axis_order,
+    )
 
 
 def validate_shard_mode(
@@ -108,7 +111,10 @@ def validate_attention_kernel(s: str) -> None:
       "vllm_rpa",
   )
   if s not in valid_attention_kernels:  # currently supported attention
-    raise ValueError("Invalid attention kernel was passed. Valid options ", valid_attention_kernels)
+    raise ValueError(
+        "Invalid attention kernel was passed. Valid options ",
+        valid_attention_kernels,
+    )
 
 
 def validate_attention_type(s: str) -> None:
@@ -118,7 +124,12 @@ def validate_attention_type(s: str) -> None:
 
 
 def validate_moba_attention(moba, attention) -> None:
-  if moba and attention in ("autoselected", "flash", "cudnn_flash_te", "cudnn_flash_jax"):
+  if moba and attention in (
+      "autoselected",
+      "flash",
+      "cudnn_flash_te",
+      "cudnn_flash_jax",
+  ):
     raise ValueError("MoBA is only supported dot_product attention")
 
 
@@ -193,7 +204,12 @@ def validate_expert_shard_attention_option(expert_shard_attention_option: str) -
     )
 
 
-def validate_vocab_tiling(num_vocab_tiling: int, per_device_batch_size: int, max_target_length: int, enable_nnx: bool):
+def validate_vocab_tiling(
+    num_vocab_tiling: int,
+    per_device_batch_size: int,
+    max_target_length: int,
+    enable_nnx: bool,
+):
   del enable_nnx  # NNX vocab tiling supported via vocab_tiling_nnx_loss in vocabulary_tiling.py
   if (per_device_batch_size * max_target_length) % num_vocab_tiling != 0:
     raise ValueError("Per device batch size times sequence length should be divisible by the number of vocab tiles.")
@@ -228,7 +244,9 @@ def validate_keys(keys):
   validate_attention_type(keys["attention_type"])
   validate_moba_attention(keys["moba"], keys["attention"])
   validate_attention_window_params(
-      keys["attention_type"], keys.get("chunk_attn_window_size"), keys.get("sliding_window_size")
+      keys["attention_type"],
+      keys.get("chunk_attn_window_size"),
+      keys.get("sliding_window_size"),
   )
   validate_profiler_type(keys["profiler"])
   validate_periodic_profiler(keys["profiler"], keys["profile_periodically_period"], keys["profiler_steps"])
@@ -239,7 +257,10 @@ def validate_keys(keys):
   validate_prefill_and_target_lengths(keys["max_prefill_predict_length"], keys["max_target_length"])
   validate_rope_type(keys["rope_type"])
   validate_vocab_tiling(
-      keys["num_vocab_tiling"], keys["per_device_batch_size"], keys["max_target_length"], keys["enable_nnx"]
+      keys["num_vocab_tiling"],
+      keys["per_device_batch_size"],
+      keys["max_target_length"],
+      keys["enable_nnx"],
   )
   if keys["enable_rampup_batch_size"]:
     validate_rampup_batch_size(
@@ -254,7 +275,9 @@ def validate_keys(keys):
     raise ValueError("Currently load-balanced context parallelism is not supported for chunk attention.")
 
   validate_context_parallel_strategy_ring(
-      keys["context_parallel_size"], keys["context_parallel_strategy"], keys["hardware"]
+      keys["context_parallel_size"],
+      keys["context_parallel_strategy"],
+      keys["hardware"],
   )
 
   if keys["mtp_eval_target_module"] < 0:
@@ -523,6 +546,7 @@ def validate_and_assign_remat_tensors(keys):
       "query_proj",
       "key_proj",
       "value_proj",
+      "kv_proj",
       "query_wa_proj",
       "kv_wa_proj",
       "out_proj",
@@ -1116,7 +1140,8 @@ def set_and_validate_pipeline_config(raw_keys):
 
     if raw_keys["num_pipeline_repeats"] == -1:
       num_pipeline_repeats, remainder = divmod(
-          raw_keys["pipeline_parallel_layers"], num_stages * raw_keys["num_layers_per_pipeline_stage"]
+          raw_keys["pipeline_parallel_layers"],
+          num_stages * raw_keys["num_layers_per_pipeline_stage"],
       )
       assert (
           not remainder
@@ -1313,7 +1338,10 @@ def get_individual_scales(scale):
 
 
 def calculate_global_batch_sizes(
-    per_device_batch_size, expansion_factor_real_data, num_devices, gradient_accumulation_steps
+    per_device_batch_size,
+    expansion_factor_real_data,
+    num_devices,
+    gradient_accumulation_steps,
 ):
   """Calculates target global batch size from target devices and per_device_batch"""
   if per_device_batch_size < 1.0:
@@ -1331,7 +1359,11 @@ def calculate_global_batch_sizes(
   micro_batch_size_to_train_on = int(num_devices * per_device_batch_size)
   global_batch_size_to_load = int(micro_batch_size_to_load * gradient_accumulation_steps)
   global_batch_size_to_train_on = int(micro_batch_size_to_train_on * gradient_accumulation_steps)
-  return global_batch_size_to_load, global_batch_size_to_train_on, micro_batch_size_to_train_on
+  return (
+      global_batch_size_to_load,
+      global_batch_size_to_train_on,
+      micro_batch_size_to_train_on,
+  )
 
 
 def calculate_rampup_samples_and_steps(
