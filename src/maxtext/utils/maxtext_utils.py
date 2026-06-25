@@ -1276,10 +1276,39 @@ def collect_intermediates_by_suffix(intermediate_outputs, *suffix_keys: str) -> 
   return values
 
 
-def get_intermediate_value(model, nested_key, default=None, clear=False):
+def _find_and_remove_intermediates(state, suffix, clear=False):
+  """Recursively finds intermediate values matching suffix.
+
+  If clear=True, removes them from the state.
+  Returns a list of (path, variable) tuples.
   """
-  Retrieves an intermediate value from an NNX model. This functions has context about
-  where the intermediate value is located.
+  results = []
+
+  def _traverse(current_state, current_path):
+    keys_to_delete = []
+    for k, v in list(current_state.items()):
+      new_path = current_path + (k,)
+      if isinstance(v, nnx.Intermediate):
+        if len(new_path) >= len(suffix) and new_path[-len(suffix) :] == suffix:
+          results.append((new_path, v))
+          if clear:
+            keys_to_delete.append(k)
+      elif isinstance(v, (nnx.State, dict)):
+        _traverse(v, new_path)
+        if clear and not v:
+          keys_to_delete.append(k)
+
+    for k in keys_to_delete:
+      del current_state[k]
+
+  _traverse(state, ())
+  return results
+
+
+def get_intermediate_value(model, nested_key, default=None, clear=False):
+  """Retrieves an intermediate value from an NNX model.
+
+  This functions has context about where the intermediate value is located.
 
   Args:
     model: The NNX model.
@@ -1290,18 +1319,53 @@ def get_intermediate_value(model, nested_key, default=None, clear=False):
   Returns:
     The value associated with the nested key, or the default value if not found.
   """
-  intermediate_value = default
   match nested_key:
     case "out_projection_activations":
-      if nested_key in model.decoder.layers["self_attention"]:
-        intermediate_value = model.decoder.layers["self_attention"][nested_key].get_value()[-1]
-        if clear:
-          del model.decoder.layers["self_attention"][nested_key]
+      suffixes = [
+          ("self_attention", "out_projection_activations"),
+          ("GptOssAttention", "out_projection_activations"),
+      ]
     case _:
-      # Default case to handle any unknown nested keys
       raise ValueError(f"Incorrect nested_key: {nested_key}")
 
-  return intermediate_value
+  # Pop all intermediates to safely inspect and potentially clear them
+  intermediates = nnx.pop(model, nnx.Intermediate)
+
+  found = []
+  for suffix in suffixes:
+    found = _find_and_remove_intermediates(intermediates, suffix, clear=clear)
+    if found:
+      break
+
+  # Put back the remaining intermediates
+  nnx.update(model, intermediates)
+
+  if not found:
+    return default
+
+  # Helper key function to sort paths numerically if indices are present
+  def path_sort_key(item):
+    path = item[0]
+
+    def _to_int_if_possible(val):
+      if isinstance(val, int):
+        return val
+      if isinstance(val, str) and val.isdigit():
+        return int(val)
+      return val
+
+    return tuple(_to_int_if_possible(x) for x in path)
+
+  found.sort(key=path_sort_key)
+
+  values = [var.get_value()[-1] for path, var in found]
+
+  if len(values) > 1:
+    # Multiple layers (sequential), stack them
+    return jnp.stack(values, axis=0)
+  else:
+    # Single layer (scanned or just 1 layer), return directly
+    return values[0]
 
 
 def update_state_param(state, target_path, value):
@@ -1648,18 +1712,14 @@ def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=Tru
     # ourselves via nnx_construct_named_sharding, so auto-assignment is not needed here.
     abs_model = nnx.eval_shape(nnx_init_trainstate_fn)
     _, abs_var_state = nnx.split(abs_model)
-    named_sharding_state = sharding.nnx_construct_named_sharding(
-        abs_var_state, mesh
-    )
+    named_sharding_state = sharding.nnx_construct_named_sharding(abs_var_state, mesh)
     abstract_state = jax.tree.map(
         lambda a, s: jax.ShapeDtypeStruct(a.shape, a.dtype, sharding=s),
         abs_var_state,
         named_sharding_state,
     )
 
-  state_mesh_shardings = maxtext_utils_nnx.nnx_extract_named_sharding(
-      abstract_state
-  )
+  state_mesh_shardings = maxtext_utils_nnx.nnx_extract_named_sharding(abstract_state)
 
   if is_training and config.shard_optimizer_over_data:
     # Add data to sharding for optimizer state

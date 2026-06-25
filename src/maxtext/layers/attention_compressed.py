@@ -38,7 +38,7 @@ from maxtext.layers.embeddings import DeepSeekV4RotaryEmbedding
 from maxtext.layers.initializers import nd_dense_init, NdInitializer, variable_to_logically_partitioned
 from maxtext.layers.linears import DenseGeneral, DeepSeekV4GroupedLinear
 from maxtext.layers.normalizations import RMSNorm
-from maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.layers.quantizations import Quantization as Quant
 from maxtext.inference.kvcache import KVQuant
 
 

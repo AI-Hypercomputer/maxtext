@@ -28,7 +28,7 @@ from maxtext.common.common_types import Config, Array
 from maxtext.layers import initializers as max_initializers
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.normalizations import Qwen3NextRMSNorm
-from maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.layers.quantizations import Quantization as Quant
 from maxtext.utils import max_utils
 
 from maxtext.models.qwen3 import (

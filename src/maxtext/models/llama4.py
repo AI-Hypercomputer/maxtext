@@ -35,7 +35,7 @@ from maxtext.layers.linears import Dropout
 from maxtext.layers.linears import MlpBlock
 from maxtext.layers.moe import RoutedAndSharedMoE
 from maxtext.layers.normalizations import RMSNorm
-from maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.layers.quantizations import Quantization as Quant
 from maxtext.utils import max_utils
 
 #### Multi modal model implementation

@@ -29,7 +29,7 @@ from maxtext.layers import initializers
 from maxtext.layers.attentions import Attention
 from maxtext.layers.linears import DenseGeneral, MlpBlock, Dropout
 from maxtext.layers.normalizations import RMSNorm
-from maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.layers.quantizations import Quantization as Quant
 from maxtext.layers.initializers import variable_to_logically_partitioned
 from maxtext.utils import max_utils
 

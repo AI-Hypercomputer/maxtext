@@ -44,28 +44,14 @@ if not _absl_flags.FLAGS.is_parsed():
 import jax
 import os
 import importlib.util
+# Prevent TensorFlow (which might be imported by qwix or other libraries during test collection)
+# from grabbing the GPU context and causing JAX NCCL communicator creation to fail.
+try:
+  import tensorflow as tf
 
-# Force early JAX initialization on GPU to prevent CUDA context conflicts with TensorFlow/PyTorch.
-# If JAX initialization is deferred, TensorFlow/PyTorch (imported during test collection)
-# might initialize CUDA first, causing JAX's subsequent NCCL communicator creation to fail
-# with 'corrupted comm object detected'.
-# Detect GPU environment using standard JAX env vars, GHA runner device types,
-# and nvidia-docker visible device markers.
-_jax_platforms = os.getenv("JAX_PLATFORMS", "").lower()
-_device_type = os.getenv("INPUTS_DEVICE_TYPE", "").lower()
-_has_gpu = (
-    "cuda" in _jax_platforms
-    or "gpu" in _jax_platforms
-    or "cuda" in _device_type
-    or "gpu" in _device_type
-    or os.getenv("CUDA_VISIBLE_DEVICES") is not None
-    or os.getenv("NVIDIA_VISIBLE_DEVICES") is not None
-)
-if _has_gpu:
-  try:
-    _ = jax.devices()
-  except Exception:  # pylint: disable=broad-exception-caught
-    pass
+  tf.config.set_visible_devices([], "GPU")
+except Exception:  # pylint: disable=broad-exception-caught
+  pass
 
 # --- Monkeypatch for absl.testing.parameterized ---
 # Context: Decorating a test method with @parameterized.named_parameters returns a custom

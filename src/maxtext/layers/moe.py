@@ -13,6 +13,8 @@
 # limitations under the License.
 
 
+# pylint: disable=assignment-from-none
+
 """MoE related Layers."""
 
 import enum
@@ -21,7 +23,7 @@ import math
 import random
 from typing import Iterable, Optional, Tuple, Union
 
-from aqt.jax.v2 import aqt_tensor as aqt
+
 from flax import nnx
 from flax import struct
 import jax
@@ -229,7 +231,7 @@ class GateLogit(nnx.Module):
       kernel_axes: Tuple[Optional[str], ...] = (),
       use_bias: bool = False,
       score_func: str = "",
-      quant: Optional[quantizations.AqtQuantization] = None,
+      quant: Optional[quantizations.Quantization] = None,
       shard_mode: ShardMode = ShardMode.AUTO,
       matmul_precision: str = "default",
   ):
@@ -272,17 +274,16 @@ class GateLogit(nnx.Module):
     kernel_in_axis = np.arange(len(self.axis))
     kernel_out_axis = np.arange(len(self.axis), len(self.axis) + len(self.out_features_shape))
 
-    if not quantizations.in_serve_mode(self.quant):
-      self.kernel = nnx.Param(
-          self.kernel_init(
-              rngs.params(),
-              kernel_shape,
-              self.weight_dtype,
-              kernel_in_axis,
-              kernel_out_axis,
-          ),
-          out_sharding=self.kernel_axes,
-      )
+    self.kernel = nnx.Param(
+        self.kernel_init(
+            rngs.params(),
+            kernel_shape,
+            self.weight_dtype,
+            kernel_in_axis,
+            kernel_out_axis,
+        ),
+        out_sharding=self.kernel_axes,
+    )
 
     if self.use_bias:
       bias_axes = self.kernel_axes[-len(self.out_features_shape) :]
@@ -315,11 +316,7 @@ class GateLogit(nnx.Module):
     inputs = jnp.asarray(inputs, self.dtype)
     norm_axis = linears.normalize_axes(self.axis, inputs.ndim)
 
-    if quantizations.in_serve_mode(self.quant):
-      kernel_shape = self.in_features_shape + self.out_features_shape
-      kernel = jnp.zeros(kernel_shape, dtype=self.dtype)
-    else:
-      kernel = self.kernel[...]
+    kernel = self.kernel[...]
     kernel = jnp.asarray(kernel, self.dtype)
 
     contract_ind = tuple(range(0, len(norm_axis)))
@@ -368,7 +365,7 @@ class RoutedMoE(nnx.Module):
       intermediate_dim: int = 2048,
       weight_dtype: ctypes.DType = jnp.float32,
       dtype: ctypes.DType = jnp.float32,
-      quant: Optional[quantizations.AqtQuantization] = None,
+      quant: Optional[quantizations.Quantization] = None,
       is_hash_routing: bool = False,
   ):
     """Initializes the RoutedMoE module.
@@ -500,14 +497,7 @@ class RoutedMoE(nnx.Module):
     kernel_in_axis = np.arange(1)
     kernel_out_axis = np.arange(1, 2)
 
-    if quantizations.in_serve_mode(self.quant):
-      # During aqt convert state we delete kernel weight from params to save
-      # memory. Instead they are retrieved from the tensors stored in the 'aqt'
-      # collection.
-      self.wi_0 = jnp.zeros((num_experts, self.moe_expert_input_dim, intermediate_dim))
-      self.wi_1 = jnp.zeros((num_experts, self.moe_expert_input_dim, intermediate_dim))
-      self.wo = jnp.zeros((num_experts, intermediate_dim, self.moe_expert_input_dim))
-    elif self.config.prefuse_moe_weights and self.config.attention == "vllm_rpa":
+    if self.config.prefuse_moe_weights and self.config.attention == "vllm_rpa":
       # Pad model dimension in Fused MoE weight kernels for GMM_v2 execution.
       moe_intermediate_dim = (
           self.config.padded_base_moe_mlp_dim
@@ -522,7 +512,7 @@ class RoutedMoE(nnx.Module):
               kernel_in_axis,
               kernel_out_axis,
           ),
-          out_sharding=self.wi_kernel_axes,
+          sharding=self.wi_kernel_axes,
       )
       self.wo = nnx.Param(
           self.kernel_init(
@@ -532,7 +522,7 @@ class RoutedMoE(nnx.Module):
               kernel_in_axis,
               kernel_out_axis,
           ),
-          out_sharding=self.wo_kernel_axes,
+          sharding=self.wo_kernel_axes,
       )
     else:
       # Pad model dimension in Unfused MoE weight kernels for GMM_v2 execution.
@@ -549,7 +539,7 @@ class RoutedMoE(nnx.Module):
               kernel_in_axis,
               kernel_out_axis,
           ),
-          out_sharding=self.wi_kernel_axes,
+          sharding=self.wi_kernel_axes,
       )
       self.wi_1 = nnx.Param(
           self.kernel_init(
@@ -559,7 +549,7 @@ class RoutedMoE(nnx.Module):
               kernel_in_axis,
               kernel_out_axis,
           ),
-          out_sharding=self.wi_kernel_axes,
+          sharding=self.wi_kernel_axes,
       )
       self.wo = nnx.Param(
           self.kernel_init(
@@ -569,7 +559,7 @@ class RoutedMoE(nnx.Module):
               kernel_in_axis,
               kernel_out_axis,
           ),
-          out_sharding=self.wo_kernel_axes,
+          sharding=self.wo_kernel_axes,
       )
 
     if self.config.mlp_bias:
@@ -579,15 +569,15 @@ class RoutedMoE(nnx.Module):
       wo_bias_shape = (self.num_experts, self.moe_expert_input_dim)
       self.wi_0_bias = nnx.Param(
           default_bias_init(self.rngs.params(), wi_bias_shape, self.weight_dtype),
-          out_sharding=wi_bias_axes,
+          sharding=wi_bias_axes,
       )
       self.wi_1_bias = nnx.Param(
           default_bias_init(self.rngs.params(), wi_bias_shape, self.weight_dtype),
-          out_sharding=wi_bias_axes,
+          sharding=wi_bias_axes,
       )
       self.wo_bias = nnx.Param(
           default_bias_init(self.rngs.params(), wo_bias_shape, self.weight_dtype),
-          out_sharding=wo_bias_axes,
+          sharding=wo_bias_axes,
       )
     else:
       self.wi_0_bias = None
@@ -597,7 +587,7 @@ class RoutedMoE(nnx.Module):
     if self.config.decoder_block == ctypes.DecoderBlockType.GEMMA4:
       self.per_expert_scale = nnx.Param(
           jnp.ones((self.num_experts,), dtype=self.weight_dtype),
-          out_sharding=("exp",),
+          sharding=("exp",),
       )
     else:
       self.per_expert_scale = None
@@ -1252,11 +1242,7 @@ class RoutedMoE(nnx.Module):
           min(tiling[2], n),
       )
       rhs_inputs = kernel
-      if isinstance(kernel, aqt.QTensor):
-        if kernel.bias or kernel.sparsity_mask or len(kernel.scale) > 1:
-          raise ValueError("Unsupported usecase for ragged_dot with quantized kernel.")
-        rhs_inputs = kernel.qvalue
-      if self.config.use_qwix_quantization:
+      if self.config.use_qwix_quantization and self.config.quantization:
         # Use full contraction for QWIX quantization to allow quantization
         # fusion (max reduce over contracting dimension).
         tiling = (tiling[0], k, tiling[2])
@@ -1274,21 +1260,11 @@ class RoutedMoE(nnx.Module):
             group_sizes=group_sizes,
             preferred_element_type=self.dtype,
         )
-      if isinstance(kernel, aqt.QTensor):
-        # Multiply outputs by the kernely scale
-        scales = jnp.take(kernel.scale[0].squeeze(), indices=expert_assignments, axis=0)
-        if padding_amount > 0:
-          scales = jax.lax.pad(
-              scales,
-              jnp.array(0.0, dtype=scales.dtype),
-              [(0, padding_amount, 0), (0, 0, 0)],
-          )
-        output *= scales
       return output
 
     def get_tokamax_group_sizes(group_sizes, inputs, kernel):
       # TODO (b/491979205) pipeline fsdp ag per repeat fails tokamax gmm
-      if self.config.use_qwix_quantization or (
+      if (self.config.use_qwix_quantization and self.config.quantization) or (
           self.config.using_pipeline_parallelism and self.config.pipeline_fsdp_ag_per_repeat
       ):
         return group_sizes
@@ -1401,15 +1377,6 @@ class RoutedMoE(nnx.Module):
           return True
       return False
 
-    def maybe_aqt_partition(w0_kernel, w0_pspec, w1_kernel, w1_pspec, wo_kernel, wo_pspec):
-      if isinstance(w0_kernel, aqt.QTensor):
-        w0_pspec = aqt.partition_spec(w0_pspec, (1,), w0_kernel.dtype, use_bias=False)
-      if isinstance(w1_kernel, aqt.QTensor):
-        w1_pspec = aqt.partition_spec(w1_pspec, (1,), w1_kernel.dtype, use_bias=False)
-      if isinstance(wo_kernel, aqt.QTensor):
-        wo_pspec = aqt.partition_spec(wo_pspec, (1,), wo_kernel.dtype, use_bias=False)
-      return w0_pspec, w1_pspec, wo_pspec
-
     def get_routed_moe_shardings(is_batch_sharded_by_expert, has_input_ids):
       if is_batch_sharded_by_expert:
         batch_logical_axis = "activation_batch"
@@ -1494,7 +1461,6 @@ class RoutedMoE(nnx.Module):
         wo_bias_pspec,
         decoder_tokens_pspec,
     ) = get_routed_moe_shardings(is_batch_sharded_by_expert, input_ids is not None)
-    w0_pspec, w1_pspec, wo_pspec = maybe_aqt_partition(w0_kernel, w0_pspec, w1_kernel, w1_pspec, wo_kernel, wo_pspec)
 
     def route(x, logits, pre_bias_logits, rngs, input_ids=None):
       """Performs both across device and within device token routing/sorting"""
@@ -2146,14 +2112,11 @@ class RoutedMoE(nnx.Module):
 
     if self.quant:
 
-      def aqt_einsum(*args, **kwargs):  # pylint: disable=unused-argument
-        # simply skip kwargs, since aqt einsum doesn't support any kwargs
-        # like precision
-        is_aqt = not isinstance(self.quant, quantizations.Fp8Quantization)
-        kw = {"mesh_axes": rhs_mesh_axes} if is_aqt else {"dtype": self.dtype}
-        return self.quant.einsum(**kw)(*args)  # pytype: disable=attribute-error
+      def quant_einsum(*args, **kwargs):
+        kw = {"dtype": self.dtype}
+        return self.quant.einsum(**kw)(*args, **kwargs)  # pytype: disable=attribute-error
 
-      einsum_op = aqt_einsum
+      einsum_op = quant_einsum
     else:
       einsum_op = jnp.einsum
     return einsum_op
@@ -2533,35 +2496,6 @@ class RoutedMoE(nnx.Module):
     output = jnp.reshape(output_2d, (batch_size, seq_len, emb_dim))
     return output, None, None
 
-  def retrieve_quantized_weight(
-      self,
-      inputs,
-      gate_logits,
-      pre_bias_logits,
-      w0_kernel,
-      w1_kernel,
-      wo_kernel,
-      w0_bias,
-      w1_bias,
-      wo_bias,
-  ) -> tuple[aqt.QTensor, aqt.QTensor, aqt.QTensor]:
-    """Retrieve quantized weights."""
-    # This is called only during tracing. This is to invoke creation of
-    # quantized tensor inside AqtEinsum.  After jit, this will become no-op and
-    # will not affect performance.
-    _ = self.dense_matmul(
-        inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias
-    )
-
-    w0_kernel = self.variables["aqt"]["AqtEinsum_0"]["AqtDotGeneral_0"]["qrhs"]["frozen"]
-    w1_kernel = self.variables["aqt"]["AqtEinsum_1"]["AqtDotGeneral_0"]["qrhs"]["frozen"]
-    wo_kernel = self.variables["aqt"]["AqtEinsum_2"]["AqtDotGeneral_0"]["qrhs"]["frozen"]
-
-    w0_kernel = max_utils.unbox_logicallypartioned(w0_kernel)
-    w1_kernel = max_utils.unbox_logicallypartioned(w1_kernel)
-    wo_kernel = max_utils.unbox_logicallypartioned(wo_kernel)
-    return w0_kernel, w1_kernel, wo_kernel
-
   def __call__(
       self,
       inputs: jax.Array,
@@ -2623,18 +2557,6 @@ class RoutedMoE(nnx.Module):
           inputs, gate_logits, wo_kernel, w0_kernel=w0_kernel, w1_kernel=w1_kernel, fused_kernel=fused_kernel
       )
     elif cfg.sparse_matmul:
-      if quantizations.in_serve_mode(self.quant):
-        w0_kernel, w1_kernel, wo_kernel = self.retrieve_quantized_weight(
-            inputs,
-            gate_logits,
-            pre_bias_logits,
-            w0_kernel,
-            w1_kernel,
-            wo_kernel,
-            w0_bias,
-            w1_bias,
-            wo_bias,
-        )
       output, lb_loss, bias_updates = self.sparse_matmul(
           inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias, input_ids
       )
@@ -2657,7 +2579,7 @@ class RoutedAndSharedMoE(nnx.Module):
       rngs: nnx.Rngs,
       weight_dtype: ctypes.DType = jnp.float32,
       dtype: ctypes.DType = jnp.float32,
-      quant: Optional[quantizations.AqtQuantization] = None,
+      quant: Optional[quantizations.Quantization] = None,
       is_hash_routing: bool = False,
   ):
     """Initializes the RoutedAndSharedMoE module.
@@ -2764,7 +2686,7 @@ def get_gate_logit(
     kernel_axes: Tuple[Optional[str], ...] = (),
     use_bias: bool = False,
     score_func: str = "",
-    quant: Optional[quantizations.AqtQuantization] = None,
+    quant: Optional[quantizations.Quantization] = None,
     matmul_precision: str = "default",
     name: Optional[str] = None,
 ):
@@ -2804,7 +2726,7 @@ def get_routed_moe(
     intermediate_dim: int = 2048,
     weight_dtype: ctypes.DType = jnp.float32,
     dtype: ctypes.DType = jnp.float32,
-    quant: Optional[quantizations.AqtQuantization] = None,
+    quant: Optional[quantizations.Quantization] = None,
     name: Optional[str] = None,
 ):
   """Creates a RoutedMoE Linen module."""
@@ -2835,7 +2757,7 @@ def get_routed_and_shared_moe(
     kernel_axes: Tuple[Optional[str], ...],
     weight_dtype: ctypes.DType = jnp.float32,
     dtype: ctypes.DType = jnp.float32,
-    quant: Optional[quantizations.AqtQuantization] = None,
+    quant: Optional[quantizations.Quantization] = None,
     name: Optional[str] = None,
     is_hash_routing: bool = False,
 ):

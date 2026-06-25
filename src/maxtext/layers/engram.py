@@ -30,7 +30,7 @@ from maxtext.layers.embeddings import Embed
 from maxtext.layers.initializers import NdInitializer, nd_dense_init
 from maxtext.layers.linears import DenseGeneral
 from maxtext.layers.normalizations import RMSNorm
-from maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.layers.quantizations import Quantization as Quant
 import numpy as np
 import sympy
 import tokenizers

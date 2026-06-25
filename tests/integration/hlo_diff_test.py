@@ -59,7 +59,7 @@ def filter_line(line):
     not os.environ.get("GITHUB_ACTIONS"),
     reason="Skipping HLO diff test because it is not running in GitHub Actions",
 )
-@pytest.mark.tpu_backend
+@pytest.mark.tpu_only
 class TestHloDiff:
   """Tests for HLO Graph Diff Verification."""
 

@@ -19,7 +19,7 @@ from collections.abc import Callable
 from typing import Any, Sequence
 import unittest
 import pytest
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import MagicMock, patch
 from dataclasses import dataclass, field
 import numpy as np
 import optax
@@ -96,44 +96,139 @@ class TestGradientClipping(unittest.TestCase):
       )
 
 
+class MockAttention(nnx.Module):
+  """Mock attention module for testing intermediate extraction."""
+
+  def __init__(self, rngs):
+    pass
+
+  def __call__(self, x, sow_val=None):
+    if sow_val is not None:
+      self.sow(nnx.Intermediate, "out_projection_activations", sow_val)
+    return x
+
+
+class MockDecoderLayer(nnx.Module):
+  """Mock decoder layer for testing intermediate extraction."""
+
+  def __init__(self, rngs, attention_name="self_attention"):
+    if attention_name == "self_attention":
+      self.self_attention = MockAttention(rngs)
+    elif attention_name == "GptOssAttention":
+      self.GptOssAttention = MockAttention(rngs)
+    self.attention_name = attention_name
+
+  def __call__(self, x, sow_val=None):
+    attention = getattr(self, self.attention_name)
+    return attention(x, sow_val)
+
+
+class MockDecoderSequential(nnx.Module):
+  """Mock decoder sequential block for testing intermediate extraction."""
+
+  def __init__(self, rngs, attention_name="self_attention"):
+    self.layers = nnx.List(
+        [
+            MockDecoderLayer(rngs, attention_name),
+            MockDecoderLayer(rngs, attention_name),
+        ]
+    )
+
+  def __call__(self, x, sow_vals=None):
+    if sow_vals is None:
+      sow_vals = [None, None]
+    out = x
+    for layer, val in zip(self.layers, sow_vals):
+      out = layer(out, val)
+    return out
+
+
+class MockDecoderScanned(nnx.Module):
+  """Mock decoder scanned block for testing intermediate extraction."""
+
+  def __init__(self, rngs, attention_name="self_attention"):
+    self.layers = MockDecoderLayer(rngs, attention_name)
+    self.attention_name = attention_name
+
+  def __call__(self, x, sow_val=None):
+    if sow_val is not None:
+      attention = getattr(self.layers, self.attention_name)
+      attention.sow(nnx.Intermediate, "out_projection_activations", sow_val)
+    return x
+
+
+class MockTransformer(nnx.Module):
+  """Mock transformer for testing intermediate extraction."""
+
+  def __init__(self, decoder_type, rngs, attention_name="self_attention"):
+    if decoder_type == "sequential":
+      self.decoder = MockDecoderSequential(rngs, attention_name)
+    elif decoder_type == "scanned":
+      self.decoder = MockDecoderScanned(rngs, attention_name)
+
+  def __call__(self, x, sow_vals=None):
+    return self.decoder(x, sow_vals)
+
+
 class TestIntermediateValueRetrieval(unittest.TestCase):
   """test class for IntermediateValueRetrieval"""
 
-  def setUp(self):
-    self.mock_model = MagicMock(name="Transformer")
+  def test_valid_intermediate_key_sequential(self):
+    rngs = nnx.Rngs(0)
+    model = MockTransformer("sequential", rngs)
+    x = jnp.ones((1, 2))
+    sow_vals = [jnp.array([0.1]), jnp.array([0.5])]
+    model(x, sow_vals)
 
-    # 2. Create the Decoder Mock
-    self.mock_decoder = MagicMock(name="Decoder")
-    self.mock_model.decoder = self.mock_decoder
-    self.mock_layers = {}
-    self.mock_model.decoder.layers = self.mock_layers
-    self.self_attention = {}
-    self.mock_layers["self_attention"] = self.self_attention
+    result = maxtext_utils.get_intermediate_value(model, "out_projection_activations")
+    expected = jnp.stack(sow_vals, axis=0)
+    self.assertTrue(jnp.allclose(result, expected))
 
-  def test_valid_intermediate_key(self):
-    expected_sowed_data = [0.1, 0.5, 0.9]
-    mock_sowed_variable = Mock(name="out_projection_activations")
-    mock_sowed_variable.get_value.return_value = (expected_sowed_data,)
+  def test_valid_intermediate_key_scanned(self):
+    rngs = nnx.Rngs(0)
+    model = MockTransformer("scanned", rngs)
+    x = jnp.ones((1, 2))
+    sow_val = jnp.array([[0.1], [0.5]])
+    model(x, sow_val)
 
-    self.mock_decoder.layers["self_attention"]["out_projection_activations"] = mock_sowed_variable
+    result = maxtext_utils.get_intermediate_value(model, "out_projection_activations")
+    self.assertTrue(jnp.allclose(result, sow_val))
 
-    result = maxtext_utils.get_intermediate_value(self.mock_model, "out_projection_activations")
+  def test_valid_intermediate_key_sequential_gpt_oss(self):
+    rngs = nnx.Rngs(0)
+    model = MockTransformer("sequential", rngs, attention_name="GptOssAttention")
+    x = jnp.ones((1, 2))
+    sow_vals = [jnp.array([0.1]), jnp.array([0.5])]
+    model(x, sow_vals)
 
-    self.assertEqual(result, expected_sowed_data)
+    result = maxtext_utils.get_intermediate_value(model, "out_projection_activations")
+    expected = jnp.stack(sow_vals, axis=0)
+    self.assertTrue(jnp.allclose(result, expected))
+
+  def test_valid_intermediate_key_scanned_gpt_oss(self):
+    rngs = nnx.Rngs(0)
+    model = MockTransformer("scanned", rngs, attention_name="GptOssAttention")
+    x = jnp.ones((1, 2))
+    sow_val = jnp.array([[0.1], [0.5]])
+    model(x, sow_val)
+
+    result = maxtext_utils.get_intermediate_value(model, "out_projection_activations")
+    self.assertTrue(jnp.allclose(result, sow_val))
 
   def test_returns_default_if_sow_did_not_happen(self):
-    """
-    Simulate a scenario where the model ran, but this specific key
-    was NOT sowed (or the layer was skipped).
-    """
+    rngs = nnx.Rngs(0)
+    model = MockTransformer("sequential", rngs)
+    x = jnp.ones((1, 2))
+    model(x, None)
 
-    result = maxtext_utils.get_intermediate_value(self.mock_model, "out_projection_activations", default="MyDefault")
-
+    result = maxtext_utils.get_intermediate_value(model, "out_projection_activations", default="MyDefault")
     self.assertEqual(result, "MyDefault")
 
   def test_unknown_key_raises_value_error(self):
+    rngs = nnx.Rngs(0)
+    model = MockTransformer("sequential", rngs)
     with self.assertRaises(ValueError) as cm:
-      maxtext_utils.get_intermediate_value(self.mock_model, "some_random_layer_name")
+      maxtext_utils.get_intermediate_value(model, "some_random_layer_name")
 
     self.assertEqual(str(cm.exception), "Incorrect nested_key: some_random_layer_name")
 
@@ -1523,9 +1618,7 @@ class TestNNXAbstractState(unittest.TestCase):
     optimizer_memory_host_offload: bool = False
     parameter_memory_host_offload: bool = False
     param_scan_axis: int = 0
-    logical_axis_rules: list = field(
-        default_factory=lambda: [["data", ["data"]], ["model", ["model"]]]
-    )
+    logical_axis_rules: list = field(default_factory=lambda: [["data", ["data"]], ["model", ["model"]]])
 
   class MockTrainState(nnx.Module):
     """Simulates a TrainState with params and optimizer state."""

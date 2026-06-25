@@ -17,6 +17,9 @@
 name: Code Quality
 
 on:
+  push:
+    branches:
+      - deprecate-aqt-keep-deps
   pull_request:
 
 concurrency:
@@ -56,7 +59,9 @@ jobs:
 
     - name: Run pre-commit checks on just the files that have changed
       run: |
-        git fetch origin "$GITHUB_BASE_REF":"$GITHUB_BASE_REF"
-        git branch "$GITHUB_HEAD_REF"
+        BASE_REF="${GITHUB_BASE_REF:-main}"
+        HEAD_REF="${GITHUB_HEAD_REF:-$GITHUB_SHA}"
+        git fetch origin "$BASE_REF":"$BASE_REF"
+        git branch "$HEAD_REF" || true
         . "$GITHUB_WORKSPACE"/venv/bin/activate
-        pre-commit run --from-ref "$GITHUB_BASE_REF" --to-ref "$GITHUB_HEAD_REF" --show-diff-on-failure
+        pre-commit run --from-ref "$BASE_REF" --to-ref "$HEAD_REF" --show-diff-on-failure

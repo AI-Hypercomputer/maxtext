@@ -268,6 +268,75 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
         "Gradients do not match for vocab tiling when z-loss is enabled.",
     )
 
+  def test_vocab_tiling_gradient_with_z_loss_nnx(self):
+    """
+    Tests loss and gradient correctness when z-loss is enabled, comparing
+    standard computation vs. vocabulary tiling computation with NNX enabled.
+    """
+    cfg_non_tiling = pyconfig.initialize(
+        self.base_config,
+        run_name="grad_test_z_loss_no_tiling_nnx",
+        enable_checkpointing=False,
+        enable_dropout=False,
+        max_target_length=self.seq_len,
+        per_device_batch_size=self.batch_size,
+        logits_via_embedding=False,
+        base_num_decoder_layers=0,
+        dtype="float32",
+        matmul_precision="high",
+        num_vocab_tiling=1,
+        z_loss_multiplier=1e-4,  # Enable z-loss
+        enable_nnx=True,
+    )
+    quant_non_tiling = quantizations.configure_quantization(cfg_non_tiling)
+    devices_array_non_tiling = maxtext_utils.create_device_mesh(cfg_non_tiling)
+    mesh_non_tiling = Mesh(devices_array_non_tiling, cfg_non_tiling.mesh_axes)
+    model_non_tiling = models.transformer_as_linen(
+        cfg_non_tiling, mesh=mesh_non_tiling, quant=quant_non_tiling, model_mode=MODEL_MODE_TRAIN
+    )
+
+    rng_model, rng_targets = jax.random.split(self.rng)
+
+    params = model_non_tiling.init(
+        {"params": rng_model, "dropout": rng_model},
+        self.dummy_inputs,
+        self.dummy_inputs,
+    )
+
+    data = {
+        "targets": jax.random.randint(rng_targets, (self.batch_size, self.seq_len), 0, cfg_non_tiling.vocab_size),
+        "targets_segmentation": jnp.ones((self.batch_size, self.seq_len)),
+    }
+
+    loss_non_tiling, grads_non_tiling = self.get_grads(cfg_non_tiling, params, data)
+
+    cfg_tiling = pyconfig.initialize(
+        self.base_config,
+        run_name="grad_test_z_loss_with_tiling_nnx",
+        enable_checkpointing=False,
+        enable_dropout=False,
+        max_target_length=self.seq_len,
+        per_device_batch_size=self.batch_size,
+        logits_via_embedding=False,
+        base_num_decoder_layers=0,
+        dtype="float32",
+        matmul_precision="high",
+        num_vocab_tiling=4,
+        z_loss_multiplier=1e-4,  # Enable z-loss
+        enable_nnx=True,
+    )
+    loss_tiling, grads_tiling = self.get_grads(cfg_tiling, params, data)
+
+    # Loss correctness test
+    assert jnp.allclose(loss_non_tiling, loss_tiling, rtol=self.rtol), "Losses do not match when z-loss is enabled (NNX)."
+
+    # Gradient correctness test
+    self.assert_pytrees_all_close(
+        grads_non_tiling,
+        grads_tiling,
+        "Gradients do not match for vocab tiling when z-loss is enabled (NNX).",
+    )
+
   @pytest.mark.tpu_only
   def test_vocab_tiling_nnx_loss(self):
     """

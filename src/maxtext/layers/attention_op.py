@@ -70,7 +70,7 @@ from maxtext.kernels.attention.ragged_attention import ragged_gqa
 from maxtext.kernels.attention.ragged_attention import ragged_mha
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.initializers import variable_to_logically_partitioned
-from maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.layers.quantizations import Quantization as Quant
 from maxtext.utils import max_utils
 from maxtext.utils.sharding import logical_to_mesh_axes, maybe_shard_with_pspec
 import numpy as np
@@ -130,7 +130,7 @@ def validate_gpu_flash_attention(sinks: Array | None, record_max_logits: bool) -
 
 
 # TODO(agagik): change splash_attention_mask._ComputableMask to be non protected
-class ChunkedCausalMask(splash_attention_mask._ComputableMask):  # pylint: disable=protected-access
+class ChunkedCausalMask(splash_attention_mask._ComputableMask):  # pylint: disable=protected-access,abstract-method
   """Lazy chunked causal mask.
 
   Attention is causal within each chunk (0, K), (K, 2K), (2K, 3K), ... tokens
@@ -2158,7 +2158,7 @@ class AttentionOp(nnx.Module):
 
 
 # pylint: disable=protected-access
-class LoadBalancedCausalMask(splash_attention_mask._ComputableMask):
+class LoadBalancedCausalMask(splash_attention_mask._ComputableMask):  # pylint: disable=abstract-method
   """Lazy causal mask, prevents the model from attending to future tokens.
 
   Attributes:

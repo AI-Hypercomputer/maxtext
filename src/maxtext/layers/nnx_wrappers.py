@@ -14,6 +14,7 @@
 
 """NNX <> Linen interoperability."""
 
+import types
 from functools import partial
 import typing as tp
 from typing import Any
@@ -554,9 +555,11 @@ class ToLinen(linen.Module):
       return self.kwargs[name]
     maybe_method = getattr(self.nnx_class, name, None)
     if callable(maybe_method):
-      method = partial(self.__call__, nnx_method=maybe_method)
-      method.__self__ = self
-      return method
+
+      def unbound_func(instance, *args, **kwargs):
+        return instance.__call__(*args, nnx_method=maybe_method, **kwargs)
+
+      return types.MethodType(unbound_func, self)
     return super().__getattribute__(name)
 
   def _update_variables(self, module):
