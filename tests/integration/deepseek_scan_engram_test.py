@@ -127,6 +127,9 @@ class TestDeepSeekScanEngram(unittest.TestCase):
         ]
     )
 
+    if base_num_decoder_layers >= 4 and jax.device_count() <= 8 and any("TPU7x" in d.device_kind for d in jax.devices()):
+      pytest.skip("Compiling 4+ DeepSeek MoE/Engram scanned layers requires >= 8" " physical TPU chips on TPU7x")
+
     devices_array = maxtext_utils.create_device_mesh(config)
     mesh = Mesh(devices_array, config.mesh_axes)
 
