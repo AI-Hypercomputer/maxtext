@@ -134,6 +134,10 @@ Please ensure all items on the following checklist are completed before finalizi
 
 - [ ] Create a user guide and post an announcement in the MaxText repo.
 
+5. (Optional) LoRA Support
+
+- [ ] Integrate LoRA support for the newly onboarded model by following the [LoRA Model Bringup Guide](lora_model_bringup.md).
+
 ## Community Q&A (FAQ)
 
 **Q: How do I debug code inside a JAX JIT function?**
