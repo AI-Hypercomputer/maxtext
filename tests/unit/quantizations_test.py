@@ -22,6 +22,7 @@ from jax.sharding import Mesh
 from maxtext.configs import pyconfig
 from maxtext.common.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR
 from flax import nnx
+from flax.nnx import traversals
 from maxtext.layers import moe
 from maxtext.layers import linears
 from maxtext.layers import quantizations
