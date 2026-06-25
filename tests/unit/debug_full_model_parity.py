@@ -30,6 +30,8 @@ sys.path.insert(0, os.path.join(transformers_repo_path, "src"))
 
 from transformers.models.deepseek_v4.configuration_deepseek_v4 import DeepseekV4Config
 from transformers.models.deepseek_v4.modeling_deepseek_v4 import DeepseekV4ForCausalLM
+from transformers.models.deepseek_v4.modeling_deepseek_v4 import DeepseekV4RotaryEmbedding as PTRope
+from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask
 
 from maxtext.models.models import Transformer
 from maxtext.configs import pyconfig
@@ -347,30 +349,74 @@ def test_full_model_parity():
   pos_mt = jnp.array(pos_np)
   segs_mt = jnp.ones_like(pos_mt, dtype=jnp.int32)
 
-  # 5. Forward passes
-  print("\n=== RUNNING MODELS FORWARD PASS ===")
-  # PyTorch
+  # 5. Forward passes (Step-by-step sequential layers verification)
+  print("\n=== RUNNING MODELS FORWARD PASS (STEP-BY-STEP LAYERS) ===")
+
   with torch.no_grad():
-    pt_output = ref_model(input_ids=input_ids_pt, position_ids=pos_pt)
-    pt_logits = pt_output.logits
+    # Embeddings
+    x_pt = ref_model.model.embed_tokens(input_ids_pt)
 
-  # JAX
-  mt_output = mt_model(
-      input_ids_mt,
-      segs_mt,
-      pos_mt,
-      deterministic=True,
-      model_mode=MODEL_MODE_TRAIN,
-  )
-  mt_logits = mt_output[0]
+  x_mt = mt_model.token_embedder(input_ids_mt)
 
-  # 6. Compare logits
-  compare_arrays("Full 43-Layer Model Logits", pt_logits, mt_logits)
+  compare_arrays("Embedding output", x_pt, x_mt)
+
+  # Setup RoPE and Mask for PyTorch Layer
+  rope_main = PTRope(pt_config)
+  rope_compress = PTRope(pt_config)
+  dummy_x_main = torch.zeros(batch_size, seq_len, 1)
+  with torch.no_grad():
+    cos_main, sin_main = rope_main(dummy_x_main, pos_pt, "main")
+    cos_comp, sin_comp = rope_compress(dummy_x_main, pos_pt, "compress")
+  pt_positions = {"main": (cos_main, sin_main), "compress": (cos_comp, sin_comp)}
+
+  # Run Layer loop
+  for i in range(num_hidden_layers):
+    print(f"\n--- Layer {i} Parity ---")
+    mt_layer = getattr(mt_model.decoder.decoder_layer, f"layers_{i}")
+    ref_layer = ref_model.model.layers[i]
+
+    # Run PyTorch layer block
+    pt_mask = _prepare_4d_causal_attention_mask(None, (batch_size, seq_len), x_pt, 0, 2048)
+    with torch.no_grad():
+      pt_layer_out = ref_layer(
+          x_pt,
+          position_embeddings=pt_positions,
+          position_ids=pos_pt,
+          attention_mask=pt_mask,
+          input_ids=input_ids_pt,
+      )[0]
+
+    # Run JAX layer block
+    mt_layer_out = mt_layer(
+        mt_layer.with_logical_constraint(x_mt),
+        segs_mt,
+        pos_mt,
+        model_mode=MODEL_MODE_TRAIN,
+        decoder_input_tokens=input_ids_mt,
+    )
+
+    # Verify outputs match
+    compare_arrays(f"Layer {i} output", pt_layer_out, mt_layer_out[0])
+
+    # Update inputs for next layer
+    x_pt = pt_layer_out
+    x_mt = mt_layer_out[0]
+
+  # Finally run decoder norm & head projection
+  print("\n--- Final norm & logits parity ---")
+  with torch.no_grad():
+    pt_norm_out = ref_model.model.norm(x_pt)
+    pt_logits = ref_model.lm_head(pt_norm_out)
+
+  mt_norm_out = mt_model.decoder.decoder_norm(x_mt)
+  mt_logits = mt_model.logits_dense(mt_norm_out)
+
+  compare_arrays("Final logits", pt_logits, mt_logits)
 
   global GLOBAL_FAILURES
   failures_copy = list(GLOBAL_FAILURES)
   GLOBAL_FAILURES.clear()
-  assert len(failures_copy) == 0, f"Full Model Parity checks failed:\n" + "\n".join(failures_copy)
+  assert len(failures_copy) == 0, f"Full Model step-by-step checks failed:\n" + "\n".join(failures_copy)
 
 
 if __name__ == "__main__":
