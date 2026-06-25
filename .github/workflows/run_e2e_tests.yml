@@ -21,9 +21,8 @@ on:
     inputs:
       mode:
         description: 'Build mode: stable or nightly'
-        required: false
+        required: true
         type: string
-        default: 'stable'
       run_id:
         description: 'GitHub workflow run_id to be passed to the Airflow DAG run.'
         required: true
