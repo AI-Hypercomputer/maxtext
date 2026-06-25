@@ -33,7 +33,7 @@ on:
       publish:
         description: 'Set to true to publish to PyPI.'
         required: false
-        default: 'false'
+        default: false
         type: boolean
 
 permissions:
@@ -83,7 +83,8 @@ jobs:
     needs: handle_result
     if: |
       always() &&
-      (needs.handle_result.result == 'success' || needs.handle_result.result == 'skipped')
+      (needs.handle_result.result == 'success' || needs.handle_result.result == 'skipped') &&
+      (github.event_name == 'repository_dispatch' || inputs.publish)
     # "release" environment is configured in MaxText repository settings.
     # This environment requires manual approval before proceeding to the next job.
     environment: release
@@ -93,7 +94,9 @@ jobs:
 
   build_maxtext_package:
     needs: release_approval
-    if: needs.release_approval.result == 'success'
+    if: |
+      always() &&
+      (needs.release_approval.result == 'success' || needs.release_approval.result == 'skipped')
     uses: ./.github/workflows/build_package.yml
     with:
       device_type: tpu
@@ -104,14 +107,15 @@ jobs:
 
   publish_maxtext_to_pypi:
     name: Publish MaxText to PyPI
-    needs: release_approval
+    needs: [release_approval, build_maxtext_package]
     runs-on: ubuntu-latest
     environment: release
-    if: github.event_name == 'repository_dispatch' || github.event.inputs.publish == 'true'
+    if: needs.build_maxtext_package.result == 'success' && (github.event_name == 'repository_dispatch' || inputs.publish)
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce
         with:
           name: maxtext-wheel
+          path: dist/
       - name: Publish MaxText wheel to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
@@ -156,7 +160,7 @@ jobs:
         shell: bash
         run: |
           SOURCE_IMAGE="gcr.io/${{ vars.PROJECT_NAME }}/${{ matrix.image_name }}"
-          GITHUB_RUN_ID="${{ github.event.client_payload.github_run_id }}"
+          GITHUB_RUN_ID="${{ github.event_name == 'workflow_dispatch' && inputs.run_id || github.event.client_payload.github_run_id }}"
           gcloud container images add-tag \
             "${SOURCE_IMAGE}:${GITHUB_RUN_ID}" \
             "${SOURCE_IMAGE}:${{ needs.get_latest_maxtext_pypi_version.outputs.latest_pypi_version }}" \
