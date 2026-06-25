@@ -1101,6 +1101,8 @@ sa_q_layout: "HEAD_DIM_MINOR"
 sa_k_layout: "HEAD_DIM_MINOR"
 sa_v_layout: "HEAD_DIM_MINOR"
 use_splash_scheduler: false # to use tokamax splash attention scheduler.
+sa_fuse_reciprocal: true # defaults to true in Tokamax
+sa_use_base2_exp: true # defaults to true in Tokamax
 # local_sa_* variants apply to local (sliding window) attention layers;
 # if None, each inherits from the corresponding global sa_* flag.
 local_sa_block_q: None  # inherits from sa_block_q if None
@@ -1116,6 +1118,8 @@ local_sa_q_layout: None  # inherits from sa_q_layout if None
 local_sa_k_layout: None  # inherits from sa_k_layout if None
 local_sa_v_layout: None  # inherits from sa_v_layout if None
 local_use_splash_scheduler: None  # inherits from use_splash_scheduler if None
+local_sa_fuse_reciprocal: None  # inherits from sa_fuse_reciprocal if None
+local_sa_use_base2_exp: None  # inherits from sa_use_base2_exp if None
 use_max_logit_estimate: -1 # -1 means no estimate, any > 0 value will be used as max logit estimate
 cost_estimate_flops_fwd: -1 # -1 means using splash default cost estmiation, any >= 0 value will be used as cost estmiation for splash to overlap for communication (forward)
 cost_estimate_flops_bwd: -1 # -1 means using splash default cost estmiation, any >= 0 value will be used as cost estmiation for splash to overlap for communication (backward)
