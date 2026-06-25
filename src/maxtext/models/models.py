@@ -533,6 +533,8 @@ class Transformer(nnx.Module):
       mutable_collections.append("intermediates")
     if self.config.load_balance_loss_weight > 0.0 and "intermediates" not in mutable_collections:
       mutable_collections.append("intermediates")
+    if self.config.num_vocab_tiling > 1 and "intermediates" not in mutable_collections:
+      mutable_collections.append("intermediates")
 
     if self.config.pure_nnx_decoder:
       logits, hidden_state, kv_caches = self.decoder(
