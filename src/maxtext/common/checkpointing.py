@@ -1023,6 +1023,26 @@ def save_params_to_path(checkpoint_dir, params, use_ocdbt=True, use_zarr3=True):
   print(f"Quantized params checkpoint saved at: {checkpoint_dir}")
 
 
+def load_checkpoint_metadata(checkpoint_dir_path: str) -> dict[str, Any]:
+  """Loads custom metadata from an Orbax checkpoint.
+
+  Args:
+    checkpoint_dir_path: Path to the checkpoint directory.
+
+  Returns:
+    A dictionary containing custom metadata, or an empty dictionary if none is
+    present or loading fails.
+  """
+  checkpoint_dir = epath.Path(checkpoint_dir_path)
+  try:
+    ckptr = ocp.StandardCheckpointer()
+    metadata = ckptr.metadata(checkpoint_dir)
+    return metadata.custom_metadata or {}
+  except Exception as e:  # pylint: disable=broad-except
+    max_logging.log(f"Warning: Failed to load checkpoint metadata: {e}")
+    return {}
+
+
 def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step=None):
   """Save checkpoint if checkpointing is enabled."""
   if checkpoint_manager is None:
@@ -1142,6 +1162,12 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
         grain_iters_to_save.append((data_iter.local_iterator, process_index, process_count_total))
       save_args_composite["iter"] = GrainCheckpointSave(item=grain_iters_to_save)
 
+  custom_metadata = None
+  if config and hasattr(config, "lora") and config.lora:
+    lora_rank = getattr(config.lora, "lora_rank", 0)
+    if lora_rank > 0 and hasattr(config.lora, "model_dump"):
+      custom_metadata = {"lora": config.lora.model_dump()}
+
   match (checkpoint_manager, config, data_iterator):
     case (checkpoint_manager, _, _) if isinstance(
         checkpoint_manager, (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager)
@@ -1149,4 +1175,6 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
       replicator_error_handler(config)
       return checkpoint_manager.save(step, args=Composite(state=checkpoint_args), force=force)
     case _:
-      return checkpoint_manager.save(step, args=Composite(**save_args_composite), force=force)
+      return checkpoint_manager.save(
+          step, args=Composite(**save_args_composite), force=force, custom_metadata=custom_metadata
+      )
