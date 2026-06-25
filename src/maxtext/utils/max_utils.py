@@ -859,47 +859,46 @@ def reorder_sequence(tensor, cp_size: int, seq_dim: int = 1, to_contiguous: bool
   if seq_len % (cp_size * 2) != 0:
     raise ValueError(f"{tensor.shape=} is not a multiple of {cp_size*2=}")
 
-  # [B, S, H, D]: [B, 2*cp_size, S/2*cp_size, H, D] -> [B, 2, S/2*cp_size, H, D]
-  # [S, B, H, D]: [2*cp_size, S/2*cp_size, B, H, D] -> [2, S/2*cp_size, B, H, D]
   ori_tensor_shape = tensor.shape
-  reshaped = tensor.reshape(
-      *ori_tensor_shape[:seq_dim],
-      2 * cp_size,
-      group_size,
-      *ori_tensor_shape[seq_dim + 1 :],
-  )
 
   if not to_contiguous:
-    # Create first and second halves
-    first_half = jnp.arange(cp_size)
-    second_half = jnp.arange(2 * cp_size - 1, cp_size - 1, -1)
-
-    # Stack and reshape to interleave
-    src_indices = jnp.stack([first_half, second_half], axis=1).reshape(-1)
+    reshaped = tensor.reshape(
+        *ori_tensor_shape[:seq_dim],
+        2 * cp_size,
+        group_size,
+        *ori_tensor_shape[seq_dim + 1 :],
+    )
+    # Split the 2*cp_size dimension into two halves along seq_dim
+    first_half, second_half = jnp.split(reshaped, 2, axis=seq_dim)
+    # Reverse the second half along the cp_size dimension
+    second_half_reversed = jnp.flip(second_half, axis=seq_dim)
+    # Stack them along a new axis at seq_dim. New shape has '2' at seq_dim, 'cp_size' at seq_dim+1
+    stacked = jnp.stack([first_half, second_half_reversed], axis=seq_dim)
+    # Swap the '2' and 'cp_size' axes to prepare for interleaving
+    swapped = jnp.swapaxes(stacked, seq_dim, seq_dim + 1)
+    # Flatten and restore to original shape
+    return swapped.reshape(ori_tensor_shape)
 
   else:
-
-    half = cp_size // 2
-
-    # Build the 1st and 2nd groups of contiguous‑pair indices:
-    first_pair = [4 * r for r in range(half)]  # [0, 4, 8, …]
-    second_pair = [4 * r + 2 for r in range(half)]  # [2, 6, 10, …]
-    third_pair = [2 * cp_size - 1 - 4 * r for r in range(half)]  # [2*cp_size-1, 2*cp_size-5, …]
-    fourth_pair = [i - 2 for i in third_pair]  # [2*cp_size-3, 2*cp_size-7, …]
-
-    # Concatenate so each rank’s two indices sit next to each other:
-    # e.g. [0,2, 4,6, …, (2cp‑1),(2cp‑3), …]
-    first_block = first_pair + third_pair
-    second_block = second_pair + fourth_pair
-
-    # Stack into shape (2*cp_size//2, 2) → then flatten → length=2*cp_size
-    src_indices = jnp.stack([jnp.array(first_block), jnp.array(second_block)], axis=1).reshape(-1)
-
-  # One gather and one reshape
-  reordered = jnp.take(reshaped, src_indices, axis=seq_dim)
-
-  # Reshape back to original dimensions
-  return reordered.reshape(ori_tensor_shape)
+    # Reshape to group contiguous pairs: (..., cp_size, 2, group_size, ...)
+    grid = tensor.reshape(
+        *ori_tensor_shape[:seq_dim],
+        cp_size,
+        2,
+        group_size,
+        *ori_tensor_shape[seq_dim + 1 :],
+    )
+    # Split along the '2' dimension (which is at seq_dim + 1)
+    first_half_stacked, second_half_reversed_stacked = jnp.split(grid, 2, axis=seq_dim + 1)
+    # Squeeze the split dimension
+    first_half = jnp.squeeze(first_half_stacked, axis=seq_dim + 1)
+    second_half_reversed = jnp.squeeze(second_half_reversed_stacked, axis=seq_dim + 1)
+    # Reverse the second half along the cp_size dimension (at seq_dim)
+    second_half = jnp.flip(second_half_reversed, axis=seq_dim)
+    # Concatenate them back along seq_dim
+    restored = jnp.concatenate([first_half, second_half], axis=seq_dim)
+    # Restore to original shape
+    return restored.reshape(ori_tensor_shape)
 
 
 @partial(jax.jit, static_argnums=(1, 2, 3))
@@ -1217,5 +1216,9 @@ def maybe_pad(inputs, tile_size):
   padding_amount = 0
   if inputs_dim % tile_size:
     padding_amount = tile_size - inputs_dim % tile_size
-    inputs = jax.lax.pad(inputs, jnp.array(0.0, dtype=inputs.dtype), [(0, padding_amount, 0), (0, 0, 0)])
+    inputs = jax.lax.pad(
+        inputs,
+        jnp.array(0.0, dtype=inputs.dtype),
+        [(0, padding_amount, 0), (0, 0, 0)],
+    )
   return inputs, padding_amount
