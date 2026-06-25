@@ -365,7 +365,7 @@ class Gemma4DecoderLayer(nnx.Module):
     if getattr(self.config, "num_experts", 1) > 1:
       mlp_lnx, load_balance_loss, _ = self.mlp(attn_output, original_inputs=attention_lnx)
       if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
-        self.sow("intermediates", "moe_lb_loss", load_balance_loss)
+        self.sow(nnx.Intermediate, "moe_lb_loss", load_balance_loss)
     else:
       mlp_lnx = self.mlp(attn_output, deterministic=deterministic)
 
@@ -381,10 +381,10 @@ class Gemma4DecoderLayer(nnx.Module):
     layer_output = nn.with_logical_constraint(layer_output, self.activation_axis_names)
 
     if cfg.record_internal_nn_metrics:
-      self.sow("intermediates", "activation_mean", jnp.mean(layer_output))
-      self.sow("intermediates", "activation_stdev", jnp.std(layer_output))
+      self.sow(nnx.Intermediate, "activation_mean", jnp.mean(layer_output))
+      self.sow(nnx.Intermediate, "activation_stdev", jnp.std(layer_output))
       self.sow(
-          "intermediates",
+          nnx.Intermediate,
           "activation_fraction_zero",
           jnp.sum(layer_output == 0) / jnp.size(layer_output),
       )
