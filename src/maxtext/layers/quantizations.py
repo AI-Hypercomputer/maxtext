@@ -1012,19 +1012,30 @@ class TransformerEngineQuantization(Quantization):
     """
 
     import transformer_engine.jax  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
+    from transformer_engine.common import recipe  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
 
-    fp8_recipe = self._recipe
+    default_recipe = self._recipe
 
     class TEWrapper(transformer_engine.jax.flax.module.TransformerEngineBase):
       """Wrapper module for TransformerEngine quantization."""
 
-      def generate_quantizer_set(self, postfix: str = ""):
+      def generate_quantizer_set(
+          self,
+          postfix: str = "",
+          variable_collection: str | None = None,
+          quantization_checkpoint_name: str | None = None,
+          fp8_recipe: recipe.Recipe | None = default_recipe,
+          n_groups: int | None = None,
+      ):
+        """Generates a set of quantizers for TransformerEngine."""
+
         OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
         return super().generate_quantizer_set(  # pytype: disable=wrong-keyword-args
             postfix=postfix,
             variable_collection=OVERWRITE_WITH_GRADIENT,
             quantization_checkpoint_name="quantization",
             fp8_recipe=fp8_recipe,
+            n_groups=n_groups,
         )
 
       @nn.compact

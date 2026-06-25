@@ -113,6 +113,7 @@ class DecoderBlockType(enum.Enum):
   SIMPLE_MLP = "simple_mlp"
   LLAMA4 = "llama4"
   OLMO3 = "olmo3"
+  DEEPSEEK4 = "deepseek4"
 
 
 class AttentionType(enum.Enum):
@@ -152,3 +153,4 @@ class CustomRule(enum.Enum):
   EP_AS_CP = "ep-as-cp"  # Support EP only
   PIPELINE_LARGE_MOE = "pipeline-large-moe"
   FSDP_2D = "2d-fsdp"
+  EP_AS_DP = "ep-as-dp"

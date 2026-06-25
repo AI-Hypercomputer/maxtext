@@ -20,6 +20,10 @@ on:
   pull_request:
     types: [opened, synchronize]
   workflow_call:
+    inputs:
+      maxtext_sha:
+        required: true
+        type: string
   workflow_dispatch:
 
 permissions:
@@ -34,10 +38,18 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+          ref: ${{ inputs.maxtext_sha }}
 
       - name: Check if only documentation changed
         id: check
         run: |
+          # Force build_docs=true for non-pull-request events
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "Not a pull request, enabling docs build."
+            echo "build_docs=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
           git fetch origin ${GITHUB_BASE_REF}
           CHANGED_FILES=$(git diff --name-only origin/${GITHUB_BASE_REF}...HEAD)
 

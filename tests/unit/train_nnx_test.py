@@ -23,6 +23,7 @@ from dataclasses import dataclass
 import unittest
 
 from flax import nnx
+import jax
 import jax.numpy as jnp
 from maxtext.common import train_state_nnx
 from maxtext.trainers.pre_train import train as pre_train
@@ -59,6 +60,7 @@ class _Cfg:
   record_internal_nn_metrics: bool = False
   skip_step_on_spikes: bool = False
   shard_mode: int = 0  # ShardMode.AUTO
+  debug_sharding: bool = False
   weight_sparsity_n: int = 0
   weight_sparsity_m: int = 0
 
@@ -73,6 +75,8 @@ class _TinyDecoder(nnx.Module):
   def __init__(self, vocab_size: int, hidden: int, rngs: nnx.Rngs):
     self.embed = nnx.Embed(vocab_size, hidden, rngs=rngs)
     self.proj = nnx.Linear(hidden, vocab_size, rngs=rngs)
+    # loss_fn shards activations against model.mesh, so the stub needs one.
+    self.mesh = jax.make_mesh((1, 1, 1, 1), ("data", "fsdp", "expert", "context"))
 
   def __call__(
       self,

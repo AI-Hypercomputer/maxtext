@@ -37,6 +37,7 @@ from maxtext.layers.embeddings import (
 )
 from maxtext.layers.decoders import deepstack_process
 from maxtext.layers.encoders import AudioEncoder
+from maxtext.multimodal.processor_qwen3_omni import maybe_pad_video_values_to_max_grid
 from maxtext.models.qwen3 import (
     Qwen3OmniAudioEncoder,
     Qwen3OmniAudioEncoderLayer,
@@ -360,12 +361,79 @@ class TestQwen3OmniMoeVisionPatchEmbed(BaseVisionTestCase):
     )
 
     torch_output = self.torch_model(torch_hidden_states)
-    jax_output = self.jax_model(jax_hidden_states)
+    jax_output, attention_mask = self.jax_model(jax_hidden_states)
+    self.assertIsNone(attention_mask)
 
     torch_output_squeezed = torch_output.squeeze(1)
     jax_output_squeezed = jax_output.squeeze(1)
 
     assert_all_close_jax_torch(jax_output_squeezed, torch_output_squeezed, rtol=1e-3, atol=5e-3)
+
+  def test_patch_embed_padded_video_valid_outputs_match_unpadded(self):
+    """Test that valid padded video patches match embeddings from unpadded input."""
+    config_video_pad = pyconfig.initialize(
+        ["", base_config_path],
+        model_name="qwen3-omni-30b-a3b",
+        attention="dot_product",
+        attention_type="full",
+        matmul_precision="highest",
+        dropout_rate=0.0,
+        dtype="float32",
+        dtype_mm="float32",
+        weight_dtype="float32",
+        float32_logits=True,
+        float32_qk_product=True,
+        video_max_grid_t=3,
+        video_max_grid_h=4,
+        video_max_grid_w=4,
+    )
+    batch_size = 1
+    raw_grid = (2, 2, 3)  # Padding to (3, 4, 4)
+    max_grid = (
+        config_video_pad.video_max_grid_t,
+        config_video_pad.video_max_grid_h,
+        config_video_pad.video_max_grid_w,
+    )
+    temporal_patch_size = self.config.temporal_patch_size_for_vit
+    patch_size = self.config.patch_size_for_vit
+    in_channels = self.config.num_channels_for_vit
+
+    raw_shape = (
+        batch_size,
+        in_channels,
+        raw_grid[0] * temporal_patch_size,
+        raw_grid[1] * patch_size,
+        raw_grid[2] * patch_size,
+    )
+    raw_hidden_states, _ = create_random_jax_torch(*raw_shape)
+    raw_grid_thw = np.asarray([raw_grid], dtype=np.int32)
+
+    padded_hidden_states, padded_grid_thw, video_mask = maybe_pad_video_values_to_max_grid(
+        np.asarray(raw_hidden_states),
+        raw_grid_thw,
+        config_video_pad,
+    )
+
+    raw_output, raw_attention_mask = self.jax_model(raw_hidden_states)
+    padded_output, attention_mask = self.jax_model(
+        jnp.asarray(padded_hidden_states),
+        video_mask=jnp.asarray(video_mask),
+    )
+
+    self.assertIsNone(raw_attention_mask)
+    np.testing.assert_array_equal(padded_grid_thw, raw_grid_thw)
+    self.assertEqual(raw_output.shape, (batch_size, math.prod(raw_grid), self.config.hidden_size_for_vit))
+    self.assertEqual(padded_output.shape, (batch_size, math.prod(max_grid), self.config.hidden_size_for_vit))
+    self.assertEqual(attention_mask.shape, (batch_size, math.prod(max_grid)))
+    self.assertEqual(int(jnp.sum(attention_mask)), math.prod(raw_grid))
+
+    padded_valid_output = np.array(padded_output)[np.array(attention_mask, dtype=bool)]
+    np.testing.assert_allclose(
+        np.array(raw_output).reshape(-1, self.config.hidden_size_for_vit),
+        padded_valid_output,
+        rtol=1e-3,
+        atol=5e-3,
+    )
 
   def test_patch_embed_is_jittable(self):
     """Test that patch embed is JIT-compilable."""

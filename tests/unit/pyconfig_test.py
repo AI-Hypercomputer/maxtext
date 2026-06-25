@@ -238,6 +238,85 @@ class PyconfigTest(unittest.TestCase):
     # Verify that passing this coerced list to the SFT column validator passes without error (Scenario A)
     data_processing_utils.validate_and_configure_sft_columns(config.train_data_columns, None)
 
+  def test_local_sa_flags_inherit_from_global_when_unset(self):
+    """local_sa_* flags default to None and should inherit the corresponding sa_* value."""
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        sa_block_q=64,
+        sa_block_kv=128,
+        sa_block_kv_compute=192,
+        sa_block_q_dkv=64,
+        sa_block_kv_dkv=128,
+        sa_block_kv_dkv_compute=192,
+        sa_block_q_dq=64,
+        sa_block_kv_dq=128,
+        sa_use_fused_bwd_kernel=True,
+        sa_q_layout="HEAD_DIM_MINOR",
+        sa_k_layout="HEAD_DIM_MINOR",
+        sa_v_layout="HEAD_DIM_MINOR",
+        use_splash_scheduler=True,
+    )
+    self.assertEqual(config.local_sa_block_q, 64)
+    self.assertEqual(config.local_sa_block_kv, 128)
+    self.assertEqual(config.local_sa_block_kv_compute, 192)
+    self.assertEqual(config.local_sa_block_q_dkv, 64)
+    self.assertEqual(config.local_sa_block_kv_dkv, 128)
+    self.assertEqual(config.local_sa_block_kv_dkv_compute, 192)
+    self.assertEqual(config.local_sa_block_q_dq, 64)
+    self.assertEqual(config.local_sa_block_kv_dq, 128)
+    self.assertTrue(config.local_sa_use_fused_bwd_kernel)
+    self.assertEqual(config.local_sa_q_layout, "HEAD_DIM_MINOR")
+    self.assertEqual(config.local_sa_k_layout, "HEAD_DIM_MINOR")
+    self.assertEqual(config.local_sa_v_layout, "HEAD_DIM_MINOR")
+    self.assertTrue(config.local_use_splash_scheduler)
+
+  def test_local_sa_flags_explicit_override(self):
+    """Explicitly set local_sa_* flags should not be overridden by the global sa_* value."""
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        sa_block_q=512,
+        local_sa_block_q=64,
+        sa_block_kv=512,
+        local_sa_block_kv=128,
+        sa_block_kv_compute=512,
+        local_sa_block_kv_compute=192,
+        sa_block_q_dkv=512,
+        local_sa_block_q_dkv=64,
+        sa_block_kv_dkv=512,
+        local_sa_block_kv_dkv=128,
+        sa_block_kv_dkv_compute=512,
+        local_sa_block_kv_dkv_compute=192,
+        sa_block_q_dq=512,
+        local_sa_block_q_dq=64,
+        sa_block_kv_dq=512,
+        local_sa_block_kv_dq=128,
+        sa_use_fused_bwd_kernel=False,
+        local_sa_use_fused_bwd_kernel=True,
+        sa_q_layout="HEAD_DIM_MINOR",
+        local_sa_q_layout="SEQ_MINOR",
+        sa_k_layout="HEAD_DIM_MINOR",
+        local_sa_k_layout="SEQ_MINOR",
+        sa_v_layout="HEAD_DIM_MINOR",
+        local_sa_v_layout="SEQ_MINOR",
+        use_splash_scheduler=True,
+        local_use_splash_scheduler=False,
+    )
+    self.assertEqual(config.local_sa_block_q, 64)
+    self.assertEqual(config.local_sa_block_kv, 128)
+    self.assertEqual(config.local_sa_block_kv_compute, 192)
+    self.assertEqual(config.local_sa_block_q_dkv, 64)
+    self.assertEqual(config.local_sa_block_kv_dkv, 128)
+    self.assertEqual(config.local_sa_block_kv_dkv_compute, 192)
+    self.assertEqual(config.local_sa_block_q_dq, 64)
+    self.assertEqual(config.local_sa_block_kv_dq, 128)
+    self.assertTrue(config.local_sa_use_fused_bwd_kernel)
+    self.assertEqual(config.local_sa_q_layout, "SEQ_MINOR")
+    self.assertEqual(config.local_sa_k_layout, "SEQ_MINOR")
+    self.assertEqual(config.local_sa_v_layout, "SEQ_MINOR")
+    self.assertFalse(config.local_use_splash_scheduler)
+
 
 if __name__ == "__main__":
   unittest.main()

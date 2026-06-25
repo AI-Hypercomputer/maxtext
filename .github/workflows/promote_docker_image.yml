@@ -28,7 +28,7 @@ permissions:
 
 jobs:
   handle_result:
-    name: Handle Airflow DAG Result - ${{ github.event.client_payload.dag_id }}
+    name: Handle Airflow DAG Result
     runs-on: ubuntu-latest
     steps:
       - name: Report DAG result
@@ -37,12 +37,14 @@ jobs:
           DAG_ID="${{ github.event.client_payload.dag_id }}"
           DAG_RUN_ID="${{ github.event.client_payload.dag_run_id }}"
           SHA="${{ github.event.client_payload.sha }}"
+          GITHUB_RUN_ID="${{ github.event.client_payload.github_run_id }}"
 
           echo "================================"
-          echo "DAG ID:      ${DAG_ID}"
-          echo "DAG Run ID:  ${DAG_RUN_ID}"
-          echo "Commit SHA:  ${SHA}"
-          echo "State:       ${STATE}"
+          echo "Github Run ID: ${GITHUB_RUN_ID}"
+          echo "DAG ID:        ${DAG_ID}"
+          echo "DAG Run ID:    ${DAG_RUN_ID}"
+          echo "Commit SHA:    ${SHA}"
+          echo "State:         ${STATE}"
           echo "================================"
 
           case "$STATE" in
@@ -74,9 +76,8 @@ jobs:
           GITHUB_RUN_ID="${{ github.event.client_payload.github_run_id }}"
 
           # Add the traceability tag to confirm it passed validation suite
-          SHORT_DAG_RUN_ID=$(echo "${{ github.event.client_payload.dag_run_id }}" | cut -c1-7)
           gcloud container images add-tag "${SOURCE_IMAGE}:${GITHUB_RUN_ID}" \
-            "${SOURCE_IMAGE}:verified-${SHORT_DAG_RUN_ID}" --quiet
+            "${SOURCE_IMAGE}:verified-${GITHUB_RUN_ID}" --quiet
 
           # Add "latest" tag
           gcloud container images add-tag "${SOURCE_IMAGE}:${GITHUB_RUN_ID}" "${SOURCE_IMAGE}:latest" --quiet

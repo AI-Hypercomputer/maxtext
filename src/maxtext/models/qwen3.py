@@ -1866,19 +1866,29 @@ class Qwen3OmniMoeVisionPatchEmbed(nnx.Module):
         rngs=rngs,
     )
 
-  def __call__(self, hidden_states: Array) -> Array:
+  def __call__(self, hidden_states: Array, video_mask: Array | None = None) -> tuple[Array, Array | None]:
     """
     Args:
         hidden_states: Input tensor of shape (batch, in_channels, temporal*patch_size, height*patch_size, width*patch_size)
+        video_mask: Optional pixel-level mask with shape
+          (batch, 1, temporal*patch_size, height*patch_size, width*patch_size).
     Returns:
-        Output tensor of shape (batch, T*H*W, embed_dim) where T, H, W are the number of patches
+        Tuple of:
+        - Output tensor of shape (batch, T*H*W, embed_dim) where T, H, W are the number of patches
+        - Attention mask of shape (batch, T*H*W), or None when video_mask is not provided
     """
     hidden_states = jnp.transpose(hidden_states, (0, 2, 3, 4, 1))
     hidden_states = self.proj(hidden_states)
     batch_size = hidden_states.shape[0]
     seq_len = hidden_states.shape[1] * hidden_states.shape[2] * hidden_states.shape[3]
     hidden_states = hidden_states.reshape(batch_size, seq_len, self.embed_dim)
-    return hidden_states
+
+    attention_mask = None
+    if video_mask is not None:
+      patch_mask = video_mask[:, 0, :: self.temporal_patch_size, :: self.patch_size, :: self.patch_size]
+      attention_mask = patch_mask.reshape(video_mask.shape[0], -1).astype(jnp.int32)
+
+    return hidden_states, attention_mask
 
 
 class Qwen3OmniMoeVisionAttention(nnx.Module):
@@ -1906,7 +1916,7 @@ class Qwen3OmniMoeVisionAttention(nnx.Module):
         num_kv_heads=self.config.num_attention_heads_for_vit,
         head_dim=head_dim,
         max_target_length=self.config.num_position_embeddings_for_vit,
-        attention_kernel="dot_product",
+        attention_kernel=self.config.attention_for_vit,
         inputs_q_shape=(1, 1, self.config.hidden_size_for_vit),
         inputs_kv_shape=(1, 1, self.config.hidden_size_for_vit),
         float32_qk_product=self.config.float32_qk_product,
@@ -2102,7 +2112,7 @@ class Qwen3OmniMoeVisionEncoder(nnx.Module):
         self.config.patch_size_for_vit,
     )
 
-    x = self.patch_embed(hidden_states)
+    x, _ = self.patch_embed(hidden_states)
     x = x.reshape(batch_size, -1, self.config.hidden_size_for_vit)
     pos = self.pos_embed_interpolate(num_frames, height, width)
 

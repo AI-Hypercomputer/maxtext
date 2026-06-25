@@ -30,6 +30,7 @@ from maxtext.layers import nnx_wrappers
 from maxtext.layers.initializers import NdInitializer, nd_dense_init, variable_to_logically_partitioned
 from maxtext.layers.quantizations import Fp8Quantization
 from maxtext.utils import maxtext_utils
+from maxtext.utils.sharding import remove_expert_from_partition_spec
 from tests.utils.test_helpers import get_test_config_path
 import pytest
 
@@ -600,7 +601,13 @@ class RoutedMoeTest(unittest.TestCase):
       actual_output, _, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
       self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
 
-  def _run_ragged_sort_loss_and_grad(self, use_ring_of_experts: bool, ragged_buffer_factor: float = -1.0):
+  def _run_ragged_sort_loss_and_grad(
+      self,
+      use_ring_of_experts: bool,
+      ragged_buffer_factor: float = -1.0,
+      ragged_gather_fallback: bool = False,
+      ragged_gather_reduce_fallback: bool = False,
+  ):
     """Loss and gradient correctness for the use_ragged_sort flag.
 
     Compares an EP run with use_ragged_sort=True against the same
@@ -630,6 +637,8 @@ class RoutedMoeTest(unittest.TestCase):
           max_target_length=128,
           use_ragged_sort=use_ragged_sort,
           ragged_buffer_factor=effective_buffer_factor,
+          ragged_gather_fallback=ragged_gather_fallback,
+          ragged_gather_reduce_fallback=ragged_gather_reduce_fallback,
       )
 
     def _build_model(cfg, mesh):
@@ -725,6 +734,13 @@ class RoutedMoeTest(unittest.TestCase):
 
   @pytest.mark.tpu_only
   @pytest.mark.skip_on_tpu7x
+  def test_ragged_sort_loss_and_grad_ring_of_experts_fallback(self):
+    self._run_ragged_sort_loss_and_grad(
+        use_ring_of_experts=True, ragged_gather_fallback=True, ragged_gather_reduce_fallback=True
+    )
+
+  @pytest.mark.tpu_only
+  @pytest.mark.skip_on_tpu7x
   def test_ragged_sort_loss_and_grad_no_ring_of_experts(self):
     self._run_ragged_sort_loss_and_grad(use_ring_of_experts=False)
 
@@ -732,6 +748,13 @@ class RoutedMoeTest(unittest.TestCase):
   @pytest.mark.skip_on_tpu7x
   def test_ragged_sort_loss_and_grad_no_ring_of_experts_ragged_buffer(self):
     self._run_ragged_sort_loss_and_grad(use_ring_of_experts=False, ragged_buffer_factor=1.5)
+
+  @pytest.mark.tpu_only
+  @pytest.mark.skip_on_tpu7x
+  def test_ragged_sort_loss_and_grad_no_ring_of_experts_fallback(self):
+    self._run_ragged_sort_loss_and_grad(
+        use_ring_of_experts=False, ragged_gather_fallback=True, ragged_gather_reduce_fallback=True
+    )
 
   @pytest.mark.tpu_only
   def test_moe_fsdp_two_stage_parallelism_tpu_only(self):
@@ -1532,6 +1555,92 @@ class FusedMoeTPUTest(unittest.TestCase):
     )
     self.assertIsNone(lb_loss)
     self.assertIsNone(bias_updates)
+
+
+@pytest.mark.parametrize(
+    "model_name,flag",
+    [
+        ("mixtral-8x7b", True),  # flag on: expert stays on E, peeled off the batch dim
+        ("mixtral-8x22b", True),  # flag on
+        ("mixtral-8x7b", False),  # flag off (default): batch dim keeps 'expert'
+    ],
+)
+def test_moe_dispatch_keeps_expert_on_expert_dim(model_name, flag):
+  """Regression guard for the MoE dispatch/MLP expert-parallel sharding.
+
+  The expert (E) dim is always sharded by the 'expert' mesh axis (via activation_exp).
+  With moe_dispatch_no_expert_sharding the batch (B) dim must NOT also take 'expert'
+  (which would double-map two tensor dims onto one mesh axis and force an FSDP-style
+  fallback instead of expert-parallel AllToAll); with the flag off, the default keeps
+  'expert' on the batch dim. Mirrors dense_matmul's axis selection.
+  """
+  cfg = pyconfig.initialize(
+      [None, get_test_config_path()],
+      run_name=f"moe_shard_{model_name}_{flag}",
+      enable_checkpointing=False,
+      model_name=model_name,
+      moe_dispatch_no_expert_sharding=flag,
+  )
+  rules = cfg.logical_axis_rules
+
+  def _as_set(entry):
+    if entry is None:
+      return set()
+    return {entry} if isinstance(entry, str) else set(entry)
+
+  # Mirror _maybe_shard_moe_dispatch: resolve E and batch dims independently (so the shared
+  # 'expert' axis isn't deduped off E), then peel 'expert' from the batch dim when the flag is set.
+  e_spec = nn_partitioning.logical_to_mesh_axes(("activation_exp",), rules=rules)
+  b_spec = nn_partitioning.logical_to_mesh_axes(("activation_batch_moe",), rules=rules)
+  if cfg.moe_dispatch_no_expert_sharding:
+    b_spec = remove_expert_from_partition_spec(b_spec, dims_to_peel=(0,))
+
+  e_axes, b_axes = _as_set(e_spec[0]), _as_set(b_spec[0])
+  assert "expert" in e_axes, "expert dim must be sharded by the 'expert' mesh axis"
+  if cfg.moe_dispatch_no_expert_sharding:
+    assert "expert" not in b_axes, "flag on: the batch dim must not take 'expert'"
+  else:
+    assert "expert" in b_axes, "flag off (default): the batch dim keeps 'expert' (activation_batch_moe)"
+
+
+def test_remove_expert_from_partition_spec():
+  """remove_expert_from_partition_spec peels 'expert' only from the requested dims."""
+  spec = jax.sharding.PartitionSpec
+  assert remove_expert_from_partition_spec(spec("expert", ("data", "fsdp", "expert"), None), dims_to_peel=(1,)) == spec(
+      "expert", ("data", "fsdp"), None
+  )
+  assert remove_expert_from_partition_spec(spec("expert", "expert", None), dims_to_peel=(1,)) == spec(
+      "expert", None, None
+  )
+  assert remove_expert_from_partition_spec(spec(("expert",), None), dims_to_peel=(0, 1)) == spec(None, None)
+
+
+def test_moe_dispatch_no_expert_sharding_dense_forward():
+  """The moe_dispatch_no_expert_sharding peel path runs in dense_matmul (capacity_factor>0)."""
+  cfg = pyconfig.initialize(
+      [None, get_test_config_path()],
+      run_name="moe_dense_no_exp_fwd",
+      enable_checkpointing=False,
+      model_name="mixtral-8x7b",
+      dtype="bfloat16",
+      megablox=False,
+      sparse_matmul=False,
+      capacity_factor=1.0,
+      moe_dispatch_no_expert_sharding=True,
+      per_device_batch_size=1,
+      max_target_length=16,
+  )
+  devices = maxtext_utils.create_device_mesh(cfg)
+  mesh = Mesh(devices, cfg.mesh_axes)
+  model = make_moe(cfg, mesh)
+  inputs = jax.random.normal(
+      jax.random.PRNGKey(0),
+      (int(cfg.per_device_batch_size) * jax.device_count(), cfg.max_target_length, cfg.base_emb_dim),
+      dtype=jnp.bfloat16,
+  )
+  with mesh:
+    out, _, _ = model(inputs)
+  assert out.shape == inputs.shape
 
 
 if __name__ == "__main__":

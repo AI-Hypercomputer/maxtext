@@ -179,7 +179,6 @@ def _colocated_cpu_mesh(mesh: Mesh) -> Mesh:
   return colocated_python.colocated_cpu_devices(mesh)
 
 
-@colocated_python.colocated_python_class
 class RemoteIterator:
   "iterator class for using colocated python class"
 
@@ -264,8 +263,7 @@ class RemoteIteratorWrapper:
   """Wrapper for RemoteIterator that handles device placement."""
 
   def __init__(self, get_ds_fn, preprocessing_fn, global_mesh, global_shape, checkpoint_path="", elastic=False):
-    self.cpu_devices = _colocated_cpu_devices(jax.local_devices())
-    self.tpu_devices = jax.local_devices()
+    self.cpu_devices = _colocated_cpu_devices(tuple(global_mesh.devices.flat))
     self.cpu_mesh = _colocated_cpu_mesh(global_mesh)
     self.tpu_sharding = jax.sharding.NamedSharding(global_mesh, PartitionSpec(global_mesh.axis_names))
     self.cpu_sharding = jax.sharding.NamedSharding(self.cpu_mesh, PartitionSpec(self.cpu_mesh.axis_names))
@@ -273,7 +271,14 @@ class RemoteIteratorWrapper:
     self.dummy_array = jax.device_put(self.dummy_array, self.cpu_sharding)
     # This is a proxy to a RemoteIterator running in a colocated process,
     # named "local_iterator" to match MultiHostDataLoadIterator's interface.
-    self.local_iterator = RemoteIterator(get_ds_fn, preprocessing_fn, global_shape, checkpoint_path, elastic=elastic)
+    remote_iterator_cls = colocated_python.colocated_python_class(RemoteIterator)
+    self.local_iterator = remote_iterator_cls(
+        get_ds_fn,
+        preprocessing_fn,
+        global_shape,
+        checkpoint_path,
+        elastic=elastic,
+    )
     max_logging.log("RemoteIteratorWrapper initiated")
 
   def __iter__(self):
@@ -288,11 +293,13 @@ class RemoteIteratorWrapper:
     return jax.device_put(out, self.tpu_sharding)
 
   def save_state(self, step):
-    step_array = jnp.full(self.dummy_array.shape, step, dtype=jnp.int32)
-    step_array = jax.device_put(step_array, self.cpu_sharding)
+    replicated_cpu_sharding = NamedSharding(self.cpu_mesh, PartitionSpec())
+    step_array = jnp.array(step, dtype=jnp.int32)
+    step_array = jax.device_put(step_array, replicated_cpu_sharding)
     self.local_iterator.save_state(step_array)
 
   def restore_state(self, step):
-    step_array = jnp.full(self.dummy_array.shape, step, dtype=jnp.int32)
-    step_array = jax.device_put(step_array, self.cpu_sharding)
+    replicated_cpu_sharding = NamedSharding(self.cpu_mesh, PartitionSpec())
+    step_array = jnp.array(step, dtype=jnp.int32)
+    step_array = jax.device_put(step_array, replicated_cpu_sharding)
     self.local_iterator.restore_state(step_array)

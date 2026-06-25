@@ -21,6 +21,10 @@ on:
     # Run every Monday at 9:00 AM UTC
     - cron: '0 9 * * 1'
   workflow_call:
+    inputs:
+      maxtext_sha:
+        required: true
+        type: string
   workflow_dispatch: # Allow manual triggering
 
 permissions:
@@ -37,6 +41,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+          ref: ${{ inputs.maxtext_sha }}
 
       - name: Install uv and set the Python version
         uses: astral-sh/setup-uv@eb1897b8dc4b5d5bfe39a428a8f2304605e0983c  # v7.0.0

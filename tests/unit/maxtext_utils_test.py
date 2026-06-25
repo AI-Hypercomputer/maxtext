@@ -1523,7 +1523,9 @@ class TestNNXAbstractState(unittest.TestCase):
     optimizer_memory_host_offload: bool = False
     parameter_memory_host_offload: bool = False
     param_scan_axis: int = 0
-    logical_axis_rules: list = field(default_factory=lambda: [["data", ["data"]]])
+    logical_axis_rules: list = field(
+        default_factory=lambda: [["data", ["data"]], ["model", ["model"]]]
+    )
 
   class MockTrainState(nnx.Module):
     """Simulates a TrainState with params and optimizer state."""
@@ -1542,6 +1544,13 @@ class TestNNXAbstractState(unittest.TestCase):
     devices = jax.local_devices()
     self.mesh = Mesh(mesh_utils.create_device_mesh((len(devices), 1)), axis_names=("model", "data"))
     self.config = self.MockConfig()
+    # Stub remove_size_one_mesh_axis so that resolved specs are returned unreduced,
+    # allowing verification of naming resolution without being stripped by size-one mesh dims.
+    self._old_remove_size_one_mesh_axis = sharding.remove_size_one_mesh_axis
+    sharding.remove_size_one_mesh_axis = lambda spec, mesh: spec
+
+  def tearDown(self):
+    sharding.remove_size_one_mesh_axis = self._old_remove_size_one_mesh_axis
 
   def nnx_init_trainstate_wrapper(self):
     """Wrapper to initialize the mock NNX model."""
@@ -1611,84 +1620,6 @@ class TestNNXAbstractState(unittest.TestCase):
     """Ensures function raises error if no init function is provided."""
     with self.assertRaises(AssertionError):
       maxtext_utils.get_abstract_state_nnx(self.config, self.mesh, None)
-
-
-class TestGetNnxNamedShardingWithScanAxis(unittest.TestCase):
-  """Unit tests for get_nnx_named_sharding_with_scan_axis covering every branch.
-
-  The helper resolves a NamedSharding for each NNX Variable and — unlike
-  flax.nnx.spmd.get_var_pspec — also inserts the `nnx.PARTITION_NAME` axis at
-  `param_scan_axis` when scanned-layers metadata is present.
-  """
-
-  def setUp(self):
-    # Mesh needs to contain every axis name the tests reference in partition specs.
-    self.mesh = Mesh(np.array(jax.local_devices()[:1]).reshape(1, 1), ("fsdp", "layers"))
-
-  def _build_state(self, **variables):
-    """Wrap a dict of {key: nnx.Variable} in an nnx.State for tree traversal."""
-    return nnx.State(variables)
-
-  def _run(self, state):
-    return maxtext_utils.get_nnx_named_sharding_with_scan_axis(state, self.mesh)
-
-  def test_scan_axis_inserted_at_param_scan_axis(self):
-    """When PARTITION_NAME is present, the partition name is inserted at `param_scan_axis`."""
-    with jax.set_mesh(self.mesh):
-      v = nnx.Param(
-          jnp.zeros((3, 4, 8)),
-          out_sharding=(None, "fsdp"),
-          **{nnx.PARTITION_NAME: "layers", "param_scan_axis": 1},
-      )
-    out = self._run(self._build_state(w=v))
-    result_sharding = out["w"].get_value()
-    self.assertIsInstance(result_sharding, NamedSharding)
-    # 'layers' must be inserted at position 1 (param_scan_axis=1).
-    self.assertEqual(result_sharding.spec, PartitionSpec(None, "layers", "fsdp"))
-
-  def test_scan_axis_not_inserted_when_already_present(self):
-    """Guard against double-insertion when partition_name is already in out_sharding."""
-    with jax.set_mesh(self.mesh):
-      v = nnx.Param(
-          jnp.zeros((2, 2, 2)),
-          out_sharding=("layers", None, "fsdp"),
-          **{nnx.PARTITION_NAME: "layers", "param_scan_axis": 0},
-      )
-    out = self._run(self._build_state(w=v))
-    result_sharding = out["w"].get_value()
-    # 'layers' must appear exactly once — the same PartitionSpec we started with.
-    self.assertEqual(result_sharding.spec, PartitionSpec("layers", None, "fsdp"))
-
-  def test_masked_node_preserved_as_is(self):
-    """Values without a .shape attribute (e.g., optax.MaskedNode) are returned unchanged."""
-    masked = nnx.Variable(optax.MaskedNode())
-    state = self._build_state(masked=masked)
-    out = self._run(state)
-    # The leaf must be the original Variable, not a NamedSharding wrapper.
-    self.assertIs(out["masked"], masked)
-
-  def test_empty_out_sharding_yields_empty_pspec(self):
-    """A Variable without any sharding metadata should resolve to PartitionSpec()."""
-    with jax.set_mesh(self.mesh):
-      # No out_sharding/sharding_names/sharding metadata → falsy → PartitionSpec()
-      v = nnx.Param(jnp.zeros((4,)))
-    out = self._run(self._build_state(w=v))
-    result_sharding = out["w"].get_value()
-    self.assertIsInstance(result_sharding, NamedSharding)
-    self.assertEqual(result_sharding.spec, PartitionSpec())
-
-  def test_string_out_sharding_is_wrapped_into_tuple(self):
-    """A single-string out_sharding value should still produce a valid PartitionSpec."""
-    with jax.set_mesh(self.mesh):
-      v = nnx.Param(
-          jnp.zeros((4,)),
-          out_sharding="fsdp",
-          **{nnx.PARTITION_NAME: "layers", "param_scan_axis": 0},
-      )
-    out = self._run(self._build_state(w=v))
-    result_sharding = out["w"].get_value()
-    # The single string 'fsdp' is turned into a list, and 'layers' is prepended.
-    self.assertEqual(result_sharding.spec, PartitionSpec("layers", "fsdp"))
 
 
 if __name__ == "__main__":

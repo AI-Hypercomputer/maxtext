@@ -16,7 +16,6 @@
 # Source from https://github.com/vllm-project/tpu-inference/blob/main/tpu_inference/kernels/sparse_core/ragged_gather.py
 
 import functools
-
 import jax
 import jax.numpy as jnp
 from jax.experimental import pallas as pl
@@ -24,15 +23,23 @@ from jax.experimental.pallas import tpu as pltpu
 from jax.experimental.pallas import tpu_sc as plsc
 from packaging.version import Version
 
-
 # JAX <= 0.10.0 used `out_shape`/`scratch_shapes` kwargs for `pl.kernel`; later
 # versions renamed them to `out_type`/`scratch_types`.
 if Version(jax.__version__) <= Version("0.10.0"):
   _OUT_KW = "out_shape"
   _SCRATCH_KW = "scratch_shapes"
+  _COMPILER_PARAMS = {
+      "use_tc_tiling_on_sc": True,
+      "disable_bounds_checks": True,
+  }
 else:
   _OUT_KW = "out_type"
   _SCRATCH_KW = "scratch_types"
+  _COMPILER_PARAMS = {
+      "use_tc_tiling_on_sc": True,
+      "disable_bounds_checks": True,
+      "needs_layout_passes": False,
+  }
 
 
 def main_kernel(
@@ -264,6 +271,72 @@ def main_kernel(
   inner_kernel()
 
 
+def get_cost_estimate(
+    out_size: int,
+    hidden_size: int,
+    dtype_bytes: int,
+    has_weights: bool,
+    flops_override: int = -1,
+    bytes_accessed_override: int = -1,
+) -> pl.CostEstimate:
+  """Returns a cost estimate for the ragged gather kernel.
+
+  The ragged gather is primarily a data-movement kernel: it gathers rows from
+  an input table according to an index array.  When ``has_weights`` is True an
+  additional element-wise multiply is performed.
+
+  Args:
+    out_size: Number of output rows (after padding).
+    hidden_size: Number of columns in the input / output.
+    dtype_bytes: Size of one element in bytes (e.g. 2 for bf16, 4 for f32).
+    has_weights: Whether per-row weighting is applied.
+    flops_override: If > 0, use this value as the flop count instead of
+      auto-computing.  -1 (default) means auto-compute.
+    bytes_accessed_override: If > 0, use this value as bytes_accessed instead
+      of auto-computing.  -1 (default) means auto-compute.
+
+  Returns:
+    A ``pl.CostEstimate`` suitable for XLA scheduling.
+  """
+  # Flops: one multiply per element when weighting is enabled.
+  if flops_override > 0:
+    flops = flops_override
+  else:
+    flops = out_size * hidden_size if has_weights else 0
+
+  if bytes_accessed_override > 0:
+    bytes_accessed = bytes_accessed_override
+  else:
+    # Bytes accessed:
+    #   read  – gathered input rows + indices (int32) + optional weights (f32)
+    #   write – output rows
+    bytes_in = out_size * hidden_size * dtype_bytes  # input rows read
+    bytes_in += out_size * 4  # indices (int32)
+    if has_weights:
+      bytes_in += out_size * 4  # weights (float32)
+    bytes_out = out_size * hidden_size * dtype_bytes  # output rows written
+    bytes_accessed = bytes_in + bytes_out
+
+  return pl.CostEstimate(
+      flops=flops,
+      bytes_accessed=bytes_accessed,
+      transcendentals=0,
+  )
+
+
+def _fallback_implementation(
+    x: jax.Array,
+    indices: jax.Array,
+    weights: jax.Array | None = None,
+    has_weights: bool = False,
+) -> jax.Array:
+  """Fallback to (non-ragged) JAX implementation for ragged gather."""
+  out = x[indices]
+  if has_weights:
+    out = out * weights[:, None]
+  return out
+
+
 def calculate_col_size(hidden_size: int) -> int:
   """Calculate col size for ragged gather kernel."""
   tpu_info = pltpu.get_tpu_info()
@@ -288,7 +361,9 @@ def calculate_col_size(hidden_size: int) -> int:
   return pl.cdiv(hidden_size, (num_cols * num_lanes)) * num_lanes
 
 
-@functools.partial(jax.jit, static_argnames=("has_weights",))
+@functools.partial(
+    jax.jit, static_argnames=("has_weights", "enforce_fallback", "flops_override", "bytes_accessed_override")
+)
 def ragged_gather(
     x: jax.Array,
     indices: jax.Array,
@@ -296,6 +371,9 @@ def ragged_gather(
     end: jax.Array,
     weights: jax.Array | None = None,
     has_weights: bool = False,
+    enforce_fallback: bool = False,
+    flops_override: int = -1,
+    bytes_accessed_override: int = -1,
 ) -> jax.Array:
   """Perform gather on indices within dynamic array start and end.
 
@@ -309,6 +387,13 @@ def ragged_gather(
       kernel, avoiding an extra HBM read-write pass.
     has_weights: Static bool flag indicating whether ``weights`` should be
       applied. Must be ``True`` when ``weights`` is not ``None``.
+    enforce_fallback: Static bool flag. When ``True``, unconditionally use the
+      JAX reference implementation instead of the SparseCore kernel.
+      When ``False`` (default), use the SparseCore kernel and raise any error.
+    flops_override: If > 0, use this value as the flop count instead of
+      auto-computing.  -1 (default) means auto-compute.
+    bytes_accessed_override: If > 0, use this value as bytes_accessed instead
+      of auto-computing.  -1 (default) means auto-compute.
 
   Returns:
     Gathered output of shape ``(indices_size, hidden_size)``.
@@ -331,12 +416,9 @@ def ragged_gather(
   dtype = x.dtype
 
   sc_info = pltpu.get_tpu_info().sparse_core
-  if sc_info is None:
-    # Sparse core is not available. Fallback to regular gather.
-    out = x[indices]
-    if has_weights:
-      out = out * weights[:, None]
-    return out
+  if sc_info is None or enforce_fallback:
+    # Sparse core is not available or fallback is enforced. Use JAX reference.
+    return _fallback_implementation(x, indices, weights, has_weights)
 
   hidden_size = x.shape[-1]
   out_size = indices.size
@@ -371,9 +453,16 @@ def ragged_gather(
           subcore_axis_name=vector_mesh.subcore_axis_name,
           has_weights=has_weights,
       ),
-      compiler_params=pltpu.CompilerParams(
-          use_tc_tiling_on_sc=True,
-          disable_bounds_checks=True,
+      compiler_params=pltpu.CompilerParams(  # pytype: disable=wrong-keyword-args
+          **_COMPILER_PARAMS,
+      ),
+      cost_estimate=get_cost_estimate(
+          out_size=out_size + out_pad_size,
+          hidden_size=aligned_hidden_size,
+          dtype_bytes=jax.dtypes.itemsize_bits(dtype) // 8,
+          has_weights=has_weights,
+          flops_override=flops_override,
+          bytes_accessed_override=bytes_accessed_override,
       ),
       mesh=vector_mesh,
       name="sc_ragged_gather",

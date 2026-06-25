@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Tests for the common MaxText NNX utilities """
+"""Tests for the common MaxText NNX utilities"""
+
 import unittest
 from dataclasses import dataclass
 from typing import Any
@@ -104,7 +105,9 @@ class TestMaxTextUtilsNNX(unittest.TestCase):
     _, abstract_state = nnx.get_abstract_model(self.tiny_model_init_fn, self.mesh)
 
     # 2. Test extraction
-    extracted_shardings = maxtext_utils_nnx.get_named_sharding_nnx(abstract_state)
+    extracted_shardings = maxtext_utils_nnx.nnx_extract_named_sharding(
+        abstract_state
+    )
 
     # Verify kernel and bias match the P("data") annotations from TinyModel
     self.assertEqual(extracted_shardings.linear.kernel.get_value().spec, P("data", None))
@@ -136,7 +139,9 @@ class TestMaxTextUtilsNNX(unittest.TestCase):
     # 4. Verify named sharding is preserved after NNX merge (update) and split (state)
     model = self.tiny_model_init_fn()
     nnx.update(model, updated_abstract)
-    re_extracted_shardings = maxtext_utils_nnx.get_named_sharding_nnx(nnx.state(model))
+    re_extracted_shardings = maxtext_utils_nnx.nnx_extract_named_sharding(
+        nnx.state(model)
+    )
 
     # Verify kernel and bias have expected sharding
     self.assertEqual(re_extracted_shardings.linear.kernel.get_value().spec, new_kernel_spec)
@@ -148,7 +153,9 @@ class TestMaxTextUtilsNNX(unittest.TestCase):
     abstract_model = nnx.merge(graphdef, abstract_state)
 
     # 2. Modify shardings to trigger host offloading
-    extracted_shardings = maxtext_utils_nnx.get_named_sharding_nnx(abstract_state)
+    extracted_shardings = maxtext_utils_nnx.nnx_extract_named_sharding(
+        abstract_state
+    )
     new_shardings = jax.tree_util.tree_map_with_path(maxtext_utils_nnx.move_memory_to_host, extracted_shardings)
 
     # 3. Run the sharded creation
@@ -165,7 +172,9 @@ class TestMaxTextUtilsNNX(unittest.TestCase):
     """Verifies extraction of PartitionSpecs from NamedShardings."""
     # 1. Create abstract state and get sharding
     _, abstract_state = nnx.get_abstract_model(self.tiny_model_init_fn, self.mesh)
-    extracted_shardings = maxtext_utils_nnx.get_named_sharding_nnx(abstract_state)
+    extracted_shardings = maxtext_utils_nnx.nnx_extract_named_sharding(
+        abstract_state
+    )
 
     # 2. Execute extraction
     spec = maxtext_utils_nnx.get_partition_spec_nnx(extracted_shardings)

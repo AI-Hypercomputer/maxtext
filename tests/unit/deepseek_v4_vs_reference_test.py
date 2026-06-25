@@ -57,13 +57,13 @@ from maxtext.layers import initializers
 # Tests
 # ==============================================================================
 
-# HuggingFace reference: https://huggingface.co/deepseek-ai/DeepSeek-V4/blob/main/modeling_deepseek_v4.py
+# HuggingFace reference: https://github.com/huggingface/transformers/blob/main/src/transformers/models/deepseek_v4/modeling_deepseek_v4.py  # pylint: disable=line-too-long
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.configs import pyconfig
 from maxtext.layers.attention_compressed import CompressedAttention
-from maxtext.layers.embeddings import DeepSeekV4RotaryEmbedding as MTRope
+
 from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask
 from transformers.models.deepseek_v4.modeling_deepseek_v4 import DeepseekV4Attention
 from transformers.models.deepseek_v4.modeling_deepseek_v4 import DeepseekV4RotaryEmbedding as PTRope
@@ -75,7 +75,7 @@ class DeepSeekV4RotaryEmbeddingTest(unittest.TestCase):
 
   def setUp(self):
     self.batch_size = 2
-    self.seq_len = 16
+    self.seq_len = 4096
     self.head_dim = 128
     self.num_heads = 4
     self.main_rope_theta = 10000.0
@@ -408,6 +408,8 @@ class DeepSeekV4CompressedAttentionTest(unittest.TestCase):
     self.q_lora_rank = 32
     self.o_groups = 2
     self.o_lora_rank = 64
+    self.qk_rope_head_dim = 64
+    self.partial_rotary_factor = self.qk_rope_head_dim / self.head_dim
 
     self.rngs = nnx.Rngs(0)
 
@@ -431,8 +433,12 @@ class DeepSeekV4CompressedAttentionTest(unittest.TestCase):
         layer_types=["sliding_attention"],
         num_hidden_layers=1,
         rope_parameters={
-            "main": {"rope_type": "default", "rope_theta": 10000.0, "partial_rotary_factor": 1.0},
-            "compress": {"rope_type": "default", "rope_theta": 160000.0, "partial_rotary_factor": 1.0},
+            "main": {"rope_type": "default", "rope_theta": 10000.0, "partial_rotary_factor": self.partial_rotary_factor},
+            "compress": {
+                "rope_type": "default",
+                "rope_theta": 160000.0,
+                "partial_rotary_factor": self.partial_rotary_factor,
+            },
         },
         sliding_window=2048,
         attention_dropout=0.0,
@@ -524,9 +530,13 @@ class DeepSeekV4CompressedAttentionTest(unittest.TestCase):
         "compressed_sparse_attention": self.pt_config.compress_rates["compressed_sparse_attention"],
         "heavily_compressed_attention": self.pt_config.compress_rates["heavily_compressed_attention"],
     }
+    compress_ratio = compress_ratio_map[layer_type]
+    layer_attention_type = AttentionType.LOCAL_SLIDING if compress_ratio == 0 else AttentionType.COMPRESSED
+
     mt_attn = CompressedAttention(
         config=mt_config,
-        compress_ratio=compress_ratio_map[layer_type],
+        compress_ratio=compress_ratio,
+        attention_type=layer_attention_type,
         num_query_heads=self.num_heads,
         num_kv_heads=1,
         head_dim=self.head_dim,
@@ -540,14 +550,6 @@ class DeepSeekV4CompressedAttentionTest(unittest.TestCase):
         rngs=self.rngs,
     )
     self.mt_attn = mt_attn
-    if layer_type == "sliding_attention":
-      rope_factor = self.pt_config.rope_parameters["main"]["partial_rotary_factor"]
-      mt_rope = MTRope(head_dim=self.head_dim, partial_rotary_factor=rope_factor, rope_theta=10000.0)
-    else:
-      rope_factor = self.pt_config.rope_parameters["compress"]["partial_rotary_factor"]
-      mt_rope = MTRope(head_dim=self.head_dim, partial_rotary_factor=rope_factor, rope_theta=160000.0)
-
-    mt_attn.rotary_embedding = mt_rope
 
     # 3. Copy Weights
     self._copy_linear(mt_attn.wq_a, ref_attn.q_a_proj)
@@ -652,8 +654,7 @@ class DeepSeekV4CompressedAttentionTest(unittest.TestCase):
       print(f"top_k_indices mismatches: {num_mismatches}")
 
     # 6. Execute MaxText
-
-    mt_out = mt_attn(x_mt, x_mt, segs_mt, pos_mt, deterministic=True, model_mode=MODEL_MODE_TRAIN)
+    mt_out, _ = mt_attn(x_mt, x_mt, segs_mt, pos_mt, deterministic=True, model_mode=MODEL_MODE_TRAIN)
 
     # 7. Asserts
     if not is_packed:
@@ -771,7 +772,7 @@ class DeepSeekV4MoERouterTest(unittest.TestCase):
         "vocab_size": self.vocab_size,
         "first_num_hash_layers": 3,
         "decoder_block": "deepseek",
-        "model_name": "deepseek4",
+        "model_name": "deepseek4-284b",
         "attention": "dot_product",
         "base_mlp_dim": 256,
         "base_moe_mlp_dim": 256,
@@ -809,7 +810,7 @@ class DeepSeekV4MoERouterTest(unittest.TestCase):
     )
 
     # Sync weights
-    mx_moe.tid2eid.value = jnp.array(pt_router.tid2eid.numpy())
+    mx_moe.tid2eid.value = jnp.array(pt_router.tid2eid.numpy(), dtype=jnp.float32)
     mx_moe.gate.kernel.value = jnp.array(pt_router.weight.detach().numpy()).T
 
     hidden_states = torch.randn(self.batch_size, self.seq_len, self.hidden_dim)
@@ -910,7 +911,7 @@ class DeepSeekV4SwiGLUClampTest(unittest.TestCase):
         "topk_routing_group": 1,
         "mlp_activations_limit": limit,
         "decoder_block": "deepseek",
-        "model_name": "deepseek4",
+        "model_name": "deepseek4-284b",
         "attention": "dot_product",
         "base_mlp_dim": 256,
         "base_moe_mlp_dim": 256,
