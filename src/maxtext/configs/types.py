@@ -2077,6 +2077,16 @@ class RLHardware(BaseModel):
       description="Tensor parallelism per replica for rollout. If not specified, it will be auto-determined.",
   )
   rollout_expert_parallelism: int = Field(1, description="Expert parallelism per replica for rollout")
+  inference_replicas: int = Field(1, description="Legacy experimental GRPO: number of inference (sampler) replicas.")
+  inference_devices_per_replica: int = Field(
+      4, description="Legacy experimental GRPO: devices per inference replica (single-controller device split)."
+  )
+  inference_rollouts: int = Field(
+      1, description="Legacy experimental GRPO: refresh rollouts every N steps (step % inference_rollouts)."
+  )
+  use_pathways_reshard: bool = Field(
+      True, description="Legacy experimental GRPO: use Pathways resharding to move policy params to the sampler."
+  )
 
 
 class VLLM(BaseModel):
@@ -2699,6 +2709,14 @@ class MaxTextConfig(
         raise ValueError("a value of self.distill_beta > 0.0 requires self.scan_layers = True")
       if not self.enable_nnx:
         raise ValueError("a value of self.distill_beta > 0.0 requires self.enable_nnx = True")
+
+    if self.pure_nnx and not self.pure_nnx_decoder and self.use_qwix_quantization and not self.use_batch_split_schedule:
+      if self.quantization:
+        raise ValueError(
+            f"quantization='{self.quantization}' with use_qwix_quantization=True under pure_nnx=True requires "
+            "pure_nnx_decoder=True. The bridged Linen decoder (pure_nnx_decoder=False) is invisible to Qwix, "
+            "so quantization (and weight sparsity) would silently have no effect. Set pure_nnx_decoder=True."
+        )
 
     # Validate distillation schedule parameters
     if self.distill_alpha_end is not None and not 0.0 <= self.distill_alpha_end <= 1.0:
