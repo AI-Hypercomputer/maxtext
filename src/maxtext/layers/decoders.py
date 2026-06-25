@@ -328,6 +328,7 @@ class Decoder(nn.Module):
         "query_proj",
         "value_proj",
         "key_proj",
+        "kv_proj",
         "qkv_proj",
         "out_proj",
         "mlpwi_0",
@@ -378,6 +379,7 @@ class Decoder(nn.Module):
             "query_proj",
             "value_proj",
             "key_proj",
+            "kv_proj",
             "qkv_proj",
             "context",
             "out_proj",
@@ -387,6 +389,7 @@ class Decoder(nn.Module):
             "query_proj",
             "value_proj",
             "key_proj",
+            "kv_proj",
             "qkv_proj",
             "out_proj",
             "mlpwo",
@@ -396,6 +399,7 @@ class Decoder(nn.Module):
             "query_proj",
             "value_proj",
             "key_proj",
+            "kv_proj",
             "qkv_proj",
             "out_proj",
         )
@@ -404,12 +408,13 @@ class Decoder(nn.Module):
             "query_proj",
             "value_proj",
             "key_proj",
+            "kv_proj",
             "qkv_proj",
         )
       elif cfg.remat_policy == "qkv_proj_offloaded":
         policy = jax.checkpoint_policies.save_and_offload_only_these_names(
             names_which_can_be_saved=[],
-            names_which_can_be_offloaded=["query_proj", "value_proj", "key_proj"],
+            names_which_can_be_offloaded=["query_proj", "value_proj", "key_proj", "kv_proj"],
             offload_src="device",
             offload_dst="pinned_host",
         )
@@ -421,6 +426,7 @@ class Decoder(nn.Module):
                 "query_proj",
                 "value_proj",
                 "key_proj",
+                "kv_proj",
                 "qkv_proj",
                 "out_proj",
                 "mlpwi_0",

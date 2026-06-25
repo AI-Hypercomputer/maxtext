@@ -19,6 +19,7 @@ from typing import Any, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
+from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
 
 from flax import nnx
@@ -107,10 +108,18 @@ def csa_overlap_pooling(
 
   # Shift Ca forward by one window to align with the next Cb
   a_kv_shifted = jnp.concatenate(
-      [jnp.zeros((batch_size, 1, compress_rate, head_dim), dtype=a_kv.dtype), a_kv[:, :-1]], axis=1
+      [
+          jnp.zeros((batch_size, 1, compress_rate, head_dim), dtype=a_kv.dtype),
+          a_kv[:, :-1],
+      ],
+      axis=1,
   )
   a_gate_shifted = jnp.concatenate(
-      [jnp.full((batch_size, 1, compress_rate, head_dim), -jnp.inf, dtype=a_gate.dtype), a_gate[:, :-1]], axis=1
+      [
+          jnp.full((batch_size, 1, compress_rate, head_dim), -jnp.inf, dtype=a_gate.dtype),
+          a_gate[:, :-1],
+      ],
+      axis=1,
   )
 
   # Concatenate shifted Ca and unshifted Cb to form the final overlapping window
@@ -239,7 +248,16 @@ class DeepseekV4HCACompressor(BaseDeepseekCompressor):
       model_mode: The operational mode (e.g., "train", "prefill").
       rngs: An optional Rngs instance for stochastic initializations or dropout.
     """
-    super().__init__(config, compress_ratio, rotary_embedding, 1, kernel_init, quant, model_mode, rngs)
+    super().__init__(
+        config,
+        compress_ratio,
+        rotary_embedding,
+        1,
+        kernel_init,
+        quant,
+        model_mode,
+        rngs,
+    )
 
   def __call__(
       self,
@@ -459,13 +477,19 @@ class DeepseekV4Indexer(nnx.Module):
       compressed = self.rotary_emb(compressed, positions, unsqueeze_dim=None)
     else:
       # Return empty top-k selections when sequence is too short to form any windows
-      return jnp.zeros((batch_size, seq_len, min(self.index_topk, compressed_len)), dtype=jnp.int32)
+      return jnp.zeros(
+          (batch_size, seq_len, min(self.index_topk, compressed_len)),
+          dtype=jnp.int32,
+      )
 
     # Broadcast the compressed KV representations across all indexer heads
     # -> [batch, 1, n_windows, index_head_dim]
     compressed_kv = jnp.expand_dims(compressed, axis=1)
     # -> [batch, index_n_heads, n_windows, index_head_dim]
-    compressed_kv = jnp.broadcast_to(compressed_kv, (batch_size, self.index_n_heads, compressed_len, self.index_head_dim))
+    compressed_kv = jnp.broadcast_to(
+        compressed_kv,
+        (batch_size, self.index_n_heads, compressed_len, self.index_head_dim),
+    )
 
     # Project the latent query to match the Indexer's dimensions
     # [batch, seq_len, index_n_heads * index_head_dim] -> [batch, seq_len, index_n_heads, index_head_dim]
@@ -551,7 +575,16 @@ class DeepseekV4CSACompressor(BaseDeepseekCompressor):
       model_mode: The operational mode (e.g., "train", "prefill").
       rngs: An optional Rngs instance for stochastic initializations or dropout.
     """
-    super().__init__(config, compress_ratio, rotary_embedding, 2, kernel_init, quant, model_mode, rngs)
+    super().__init__(
+        config,
+        compress_ratio,
+        rotary_embedding,
+        2,
+        kernel_init,
+        quant,
+        model_mode,
+        rngs,
+    )
 
     self.indexer = DeepseekV4Indexer(
         config=config,
@@ -631,7 +664,11 @@ class DeepseekV4CSACompressor(BaseDeepseekCompressor):
 
       compressed_mask = jnp.where(is_selected, 0.0, DEFAULT_MASK_VALUE).astype(self.dtype)
     else:
-      compressed_mask = jnp.full((batch_size, 1, seq_len, compressed_len), DEFAULT_MASK_VALUE, dtype=self.dtype)
+      compressed_mask = jnp.full(
+          (batch_size, 1, seq_len, compressed_len),
+          DEFAULT_MASK_VALUE,
+          dtype=self.dtype,
+      )
 
     return compressed_kv, compressed_mask
 
@@ -736,7 +773,12 @@ class CompressedAttention(Attention):
     # DeepSeek-V4 uses a mathematical attention sink (a learnable scalar per-head added to the
     # attention logits prior to softmax, rather than a physical key/value token). We unconditionally
     # initialize it here, overriding the base Attention class which disables it by default.
-    self.sinks = nnx.data(nnx.Param(jnp.zeros((self.num_query_heads,), dtype=self.weight_dtype), sharding=(None,)))
+    self.sinks = nnx.data(
+        nnx.Param(
+            jnp.zeros((self.num_query_heads,), dtype=self.weight_dtype),
+            sharding=(None,),
+        )
+    )
 
   def _init_projections(self, inputs_q_shape: Tuple, inputs_kv_shape: Tuple) -> None:
     """Initializes the compressed projections and Unweighted RMSNorms."""
@@ -980,7 +1022,8 @@ class CompressedAttention(Attention):
       6. Flatten & Dense (o_b_proj): -> `[batch, q_length, emb_dim]`.
     """
     q, q_normed = self.compressed_query_projection(inputs_q, inputs_positions, model_mode)
-    k, v = self.compressed_kv_projection(inputs_kv, inputs_positions, model_mode)
+    q = checkpoint_name(q, "query_proj")
+    kv, _ = self.compressed_kv_projection(inputs_kv, inputs_positions, model_mode)
 
     # Generate compressed representations based on the configured layer type
     compressed_kv = None
@@ -1011,8 +1054,9 @@ class CompressedAttention(Attention):
 
     # Extend local KV tensors with the compressed blocks
     if compressed_kv is not None:
-      k = jnp.concatenate([k, compressed_kv], axis=1)
-      v = jnp.concatenate([v, compressed_kv], axis=1)
+      kv = jnp.concatenate([kv, compressed_kv], axis=1)
+
+    kv = checkpoint_name(kv, "kv_proj")
 
     # Prepare the mask shape for the underlying AttentionOp
     if compressed_mask is not None:
@@ -1026,8 +1070,8 @@ class CompressedAttention(Attention):
     # -> [batch, q_length, num_query_heads, head_dim]
     attn_out = self.attention_op(
         q,
-        k,
-        v,
+        kv,
+        kv,
         decoder_segment_ids,
         inputs_positions,
         model_mode,
@@ -1037,6 +1081,8 @@ class CompressedAttention(Attention):
 
     # Reverse RoPE on Values
     attn_out = self.rotary_embedding(attn_out, inputs_positions, unsqueeze_dim=-2, reverse=True)
+
+    attn_out = checkpoint_name(attn_out, "attention_out")
 
     # Project outputs through Grouped Linear layers
     b, s, h, d = attn_out.shape
@@ -1051,6 +1097,7 @@ class CompressedAttention(Attention):
 
     # -> [batch, q_length, emb_dim]
     final_out = self.o_b_proj(grouped_flat)
+    final_out = checkpoint_name(final_out, "out_proj")
 
     return final_out, None
 

@@ -79,7 +79,7 @@ def print_structure(data_dict, output_file=""):
   """Utility to format and print sorted keys and shapes from a flattened dictionary."""
   if output_file:
     # Save command
-    save_lines = [f"# {" ".join(sys.orig_argv)}", ""]
+    save_lines = [f"# {' '.join(sys.orig_argv)}", ""]
 
   for key in sorted(data_dict.keys(), key=natural_sort_key):
     line = f"key: {key} | {data_dict[key]}"

@@ -354,6 +354,7 @@ moe_mlpwo: 'remat'
 query_proj: 'remat'
 key_proj: 'remat'
 value_proj: 'remat'
+kv_proj: 'remat'
 qkv_proj: 'remat'
 out_proj: 'remat'
 query_wa_proj: 'remat'
@@ -1135,7 +1136,7 @@ enable_prefix_caching: false
 prefix_caching_hbm_byte: 10_000_000_000 # 10 GB
 prefix_caching_dram_byte: 100_000_000_000 # 100 GB
 
-# This is a temporary flag that will be removed soon after the fix lands in TE
+# This is a temporary flag that will be removed soon after the fix lands in Transformer Engine
 enable_padding_causal_mask: true
 
 # Llama4-specific

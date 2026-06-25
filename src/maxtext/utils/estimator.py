@@ -53,7 +53,12 @@ class Action(IntEnum):
 class RematPolicy:
   """RematPolicy representing different remat policy combinations"""
 
-  def __init__(self, tensor_names: list[str], tensors: dict | None = None, initial_level: Action = Action.REMAT):
+  def __init__(
+      self,
+      tensor_names: list[str],
+      tensors: dict | None = None,
+      initial_level: Action = Action.REMAT,
+  ):
     self.tensors = {name: initial_level for name in tensor_names} if tensors is None else tensors
     self.tensor_order = tensor_names
 
@@ -114,10 +119,30 @@ def generate_priority_list(config, provided_tensor_names):
   keys = {
       (True, 1): ["context", "qkv_proj", "mlpwi", "mlpwo", "out_proj"],
       (True, 2): ["context", "qkv_proj", "mlpwi_0", "mlpwi_1", "mlpwo", "out_proj"],
-      (False, 1): ["context", "query_proj", "key_proj", "value_proj", "mlpwi", "mlpwo", "out_proj"],
-      (False, 2): ["context", "query_proj", "key_proj", "value_proj", "mlpwi_0", "mlpwi_1", "mlpwo", "out_proj"],
+      (False, 1): [
+          "context",
+          "query_proj",
+          "key_proj",
+          "value_proj",
+          "mlpwi",
+          "mlpwo",
+          "out_proj",
+      ],
+      (False, 2): [
+          "context",
+          "query_proj",
+          "key_proj",
+          "value_proj",
+          "mlpwi_0",
+          "mlpwi_1",
+          "mlpwo",
+          "out_proj",
+      ],
   }
-  sort_tensor_names = sorted(keys[config.fused_mlp, len(config.mlp_activations)], key=lambda x: tensor_score(x, config))
+  sort_tensor_names = sorted(
+      keys[config.fused_mlp, len(config.mlp_activations)],
+      key=lambda x: tensor_score(x, config),
+  )
   return [key for key in sort_tensor_names if key not in provided_tensor_names]
 
 
@@ -150,6 +175,7 @@ def tensor_score(tensor_name: str, config) -> tuple:
           -config.num_query_heads * config.head_dim,
       ),
       "key_proj": (-config.emb_dim, -config.num_kv_heads * config.head_dim),
+      "kv_proj": (-config.emb_dim, -config.num_kv_heads * config.head_dim),
       "value_proj": (
           -config.emb_dim,
           -config.num_kv_heads * config.head_dim,
@@ -235,7 +261,11 @@ def largest_batch_size(base_argv, policy, min_pdb=None, max_pdb=32.0, pdb_scalar
     print(f"No OOM at maximum batch size {max_pdb}.")
     return max_pdb
 
-  low, high, result = int(min_pdb * pdb_scalar), int(max_pdb * pdb_scalar), int(min_pdb * pdb_scalar)
+  low, high, result = (
+      int(min_pdb * pdb_scalar),
+      int(max_pdb * pdb_scalar),
+      int(min_pdb * pdb_scalar),
+  )
   while low <= high:
     mid = (low + high) // 2
     if mid < min_pdb:
@@ -475,6 +505,7 @@ def find_remat_policy_tensor_names(base_argv):
       "context",
       "query_proj",
       "key_proj",
+      "kv_proj",
       "value_proj",
       "mlpwi_0",
       "mlpwi_1",
@@ -533,7 +564,12 @@ def main(argv_list: Sequence[str]) -> None:
     # MODE 2: No batch size. Search for both batch size and policy.
     print("No batch size provided. Searching for max batch size and policies...")
     # First, find the absolute max batch size that fits *even with full remat*
-    max_pdb = largest_batch_size(base_argv, full_remat_policy, min_pdb=1.0 / pdb_scalar, pdb_scalar=pdb_scalar)
+    max_pdb = largest_batch_size(
+        base_argv,
+        full_remat_policy,
+        min_pdb=1.0 / pdb_scalar,
+        pdb_scalar=pdb_scalar,
+    )
 
     # Now, search for combinations, starting from full-remat up to min_pdb
     suggested_list.extend(
