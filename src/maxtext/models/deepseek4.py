@@ -56,7 +56,7 @@ class DeepSeek4DecoderLayer(deepseek.DeepSeekGenericLayer):
       model_mode: str,
       mesh: Mesh,
       rngs: nnx.Rngs,
-      quant: Optional[quantizations.AqtQuantization] = None,
+      quant: Optional[quantizations.Quantization] = None,
       layer_idx: int = -1,
       compress_ratio: Optional[int] = None,
       is_hash_routing: Optional[bool] = None,
@@ -184,7 +184,7 @@ class DeepSeek4ScannableBlock(nnx.Module):
       mesh: Mesh,
       model_mode: str,
       rngs: nnx.Rngs,
-      quant: None | quantizations.AqtQuantization = None,
+      quant: None | quantizations.Quantization = None,
   ):
     self.config = config
     self.mesh = mesh
