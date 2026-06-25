@@ -711,15 +711,15 @@ class RoutedMoE(nnx.Module):
     if self.config.norm_topk_prob:
       top_k_weights /= top_k_weights.sum(axis=-1, keepdims=True)
 
-    jax.debug.print("\n[JAX DEBUG] MoE gate logits mean: {x}, std: {y}", x=jnp.mean(gate_logits), y=jnp.std(gate_logits))
-    jax.debug.print("[JAX DEBUG] MoE gate logits slice (first token): \n{x}", x=gate_logits[0, 0, :10])
+    # jax.debug.print("\n[JAX DEBUG] MoE gate logits mean: {x}, std: {y}", x=jnp.mean(gate_logits), y=jnp.std(gate_logits))
+    # jax.debug.print("[JAX DEBUG] MoE gate logits slice (first token): \n{x}", x=gate_logits[0, 0, :10])
 
-    jax.debug.print("\n[JAX DEBUG] MoE top_k_indices mean: {x}", x=jnp.mean(top_k_indices.astype(jnp.float32)))
-    jax.debug.print(
-        "[JAX DEBUG] MoE top_k_weights mean: {x}, std: {y}", x=jnp.mean(top_k_weights), y=jnp.std(top_k_weights)
-    )
-    jax.debug.print("[JAX DEBUG] MoE top_k_indices slice (first 5 tokens): \n{x}", x=top_k_indices[0, :5])
-    jax.debug.print("[JAX DEBUG] MoE top_k_weights slice (first 5 tokens): \n{x}", x=top_k_weights[0, :5])
+    # jax.debug.print("\n[JAX DEBUG] MoE top_k_indices mean: {x}", x=jnp.mean(top_k_indices.astype(jnp.float32)))
+    # jax.debug.print(
+    #     "[JAX DEBUG] MoE top_k_weights mean: {x}, std: {y}", x=jnp.mean(top_k_weights), y=jnp.std(top_k_weights)
+    # )
+    # jax.debug.print("[JAX DEBUG] MoE top_k_indices slice (first 5 tokens): \n{x}", x=top_k_indices[0, :5])
+    # jax.debug.print("[JAX DEBUG] MoE top_k_weights slice (first 5 tokens): \n{x}", x=top_k_weights[0, :5])
 
     return top_k_weights, top_k_indices
 

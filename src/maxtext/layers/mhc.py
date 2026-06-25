@@ -259,12 +259,12 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     # x shape: [batch, seq, expansion_rate, emb]
     b, s, k, d = x.shape
 
-    jax.debug.print("\n[JAX DEBUG] MHC Type: {mhc_type_str}", mhc_type_str=str(mhc_type))
-    jax.debug.print("[JAX DEBUG] MHC input x mean: {mean}, std: {std}", mean=jnp.mean(x), std=jnp.std(x))
+    # jax.debug.print("\n[JAX DEBUG] MHC Type: {mhc_type_str}", mhc_type_str=str(mhc_type))
+    # jax.debug.print("[JAX DEBUG] MHC input x mean: {mean}, std: {std}", mean=jnp.mean(x), std=jnp.std(x))
 
     # 1. Flatten the tensor, and RMS normalization
     norm_x = self.mhc_norm(jnp.reshape(x, (b, s, k * d)))
-    jax.debug.print("[JAX DEBUG] MHC norm_x mean: {mean}, std: {std}", mean=jnp.mean(norm_x), std=jnp.std(norm_x))
+    # jax.debug.print("[JAX DEBUG] MHC norm_x mean: {mean}, std: {std}", mean=jnp.mean(norm_x), std=jnp.std(norm_x))
 
     # 2. Pre mapping
     pre_mapping = self.mapping(
@@ -274,24 +274,24 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
         self.pre_beta[...],
         1.0,
     )
-    jax.debug.print(
-        "[JAX DEBUG] MHC pre_mapping mean: {mean}, std: {std}", mean=jnp.mean(pre_mapping), std=jnp.std(pre_mapping)
-    )
+    # jax.debug.print(
+    #     "[JAX DEBUG] MHC pre_mapping mean: {mean}, std: {std}", mean=jnp.mean(pre_mapping), std=jnp.std(pre_mapping)
+    # )
 
     layer_input = jnp.einsum("bskd,bsk -> bsd", x, pre_mapping, precision=self.matmul_precision)
-    jax.debug.print(
-        "[JAX DEBUG] MHC contracted layer_input mean: {mean}, std: {std}",
-        mean=jnp.mean(layer_input),
-        std=jnp.std(layer_input),
-    )
+    # jax.debug.print(
+    #     "[JAX DEBUG] MHC contracted layer_input mean: {mean}, std: {std}",
+    #     mean=jnp.mean(layer_input),
+    #     std=jnp.std(layer_input),
+    # )
 
     # 3. Pre-norm
     layer_input = norm_fn(layer_input)
-    jax.debug.print(
-        "[JAX DEBUG] MHC normalized layer_input mean: {mean}, std: {std}",
-        mean=jnp.mean(layer_input),
-        std=jnp.std(layer_input),
-    )
+    # jax.debug.print(
+    #     "[JAX DEBUG] MHC normalized layer_input mean: {mean}, std: {std}",
+    #     mean=jnp.mean(layer_input),
+    #     std=jnp.std(layer_input),
+    # )
 
     # 4. Attention or MLP
     metadata = {}
@@ -306,9 +306,9 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     else:
       raise ValueError(f"Unsupported type: {mhc_type}")
 
-    jax.debug.print(
-        "[JAX DEBUG] MHC layer_out mean: {mean}, std: {std}", mean=jnp.mean(layer_out), std=jnp.std(layer_out)
-    )
+    # jax.debug.print(
+    #     "[JAX DEBUG] MHC layer_out mean: {mean}, std: {std}", mean=jnp.mean(layer_out), std=jnp.std(layer_out)
+    # )
 
     # 5. Post mapping
     post_mapping = self.mapping(
@@ -318,9 +318,9 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
         self.post_beta[...],
         2.0,
     )
-    jax.debug.print(
-        "[JAX DEBUG] MHC post_mapping mean: {mean}, std: {std}", mean=jnp.mean(post_mapping), std=jnp.std(post_mapping)
-    )
+    # jax.debug.print(
+    #     "[JAX DEBUG] MHC post_mapping mean: {mean}, std: {std}", mean=jnp.mean(post_mapping), std=jnp.std(post_mapping)
+    # )
 
     post_out = jnp.einsum(
         "bsd,bsk -> bskd",
@@ -328,19 +328,19 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
         post_mapping,
         precision=self.matmul_precision,
     )
-    jax.debug.print("[JAX DEBUG] MHC post_out mean: {mean}, std: {std}", mean=jnp.mean(post_out), std=jnp.std(post_out))
+    # jax.debug.print("[JAX DEBUG] MHC post_out mean: {mean}, std: {std}", mean=jnp.mean(post_out), std=jnp.std(post_out))
 
     # 6. Residual mapping, res_out shape as [batch, seq, expansion_rate, emb]
     res_mapping = self.res_mapping(norm_x)
-    jax.debug.print(
-        "[JAX DEBUG] MHC res_mapping mean: {mean}, std: {std}", mean=jnp.mean(res_mapping), std=jnp.std(res_mapping)
-    )
+    # jax.debug.print(
+    #     "[JAX DEBUG] MHC res_mapping mean: {mean}, std: {std}", mean=jnp.mean(res_mapping), std=jnp.std(res_mapping)
+    # )
 
     res_out = jnp.einsum("bskd,bskm -> bsmd", x, res_mapping, precision=self.matmul_precision)
-    jax.debug.print("[JAX DEBUG] MHC res_out mean: {mean}, std: {std}", mean=jnp.mean(res_out), std=jnp.std(res_out))
+    # jax.debug.print("[JAX DEBUG] MHC res_out mean: {mean}, std: {std}", mean=jnp.mean(res_out), std=jnp.std(res_out))
 
     final_out = res_out + post_out
-    jax.debug.print(
-        "[JAX DEBUG] MHC final_out mean: {mean}, std: {std}", mean=jnp.mean(final_out), std=jnp.std(final_out)
-    )
+    # jax.debug.print(
+    #     "[JAX DEBUG] MHC final_out mean: {mean}, std: {std}", mean=jnp.mean(final_out), std=jnp.std(final_out)
+    # )
     return final_out, metadata
