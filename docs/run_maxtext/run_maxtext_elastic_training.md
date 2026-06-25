@@ -14,8 +14,6 @@
  limitations under the License.
 -->
 
-(run-elastic-training)=
-
 # Elastic training with Pathways
 
 This guide shows how to run **elastic training** on a multi-slice TPU cluster: training that survives a slice failure *in-process*, without restarting the job. You launch a Qwen3 0.6B run across several TPU slices with Pathways, lose a slice mid-run, and watch training recover from the last checkpoint on the same controller.
