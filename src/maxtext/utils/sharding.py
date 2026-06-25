@@ -44,10 +44,16 @@ def get_input_data_sharding(config, mesh):
   """Get the input data sharding for the model"""
   if config.enable_diloco:
     data_sharding = create_sharding(
-        mesh, ["diloco"] + config.input_data_sharding_logical_axes, rules=config.logical_axis_rules
+        mesh,
+        ["diloco"] + config.input_data_sharding_logical_axes,
+        rules=config.logical_axis_rules,
     )
   else:
-    data_sharding = create_sharding(mesh, config.input_data_sharding_logical_axes, rules=config.logical_axis_rules)
+    data_sharding = create_sharding(
+        mesh,
+        config.input_data_sharding_logical_axes,
+        rules=config.logical_axis_rules,
+    )
   return data_sharding
 
 
@@ -71,7 +77,13 @@ def _get_sharding_desc(inputs, extra_stack_level):
 
 
 def maybe_shard_with_name(
-    inputs, named_sharding, shard_mode, debug_sharding=False, extra_stack_level=0, sharding_desc="", logical_axes=None
+    inputs,
+    named_sharding,
+    shard_mode,
+    debug_sharding=False,
+    extra_stack_level=0,
+    sharding_desc="",
+    logical_axes=None,
 ):
   """
   In auto shardmode, this function hints inputs follow given named_sharding.
@@ -93,10 +105,21 @@ def maybe_shard_with_name(
       logical_axes = tuple(logical_axes)
 
     pspec = remove_size_one_mesh_axis(getattr(named_sharding, "spec"), getattr(named_sharding, "mesh"))
-    log_key = (sharding_desc, str(jax.typeof(inputs)), tuple(pspec), extra_stack_level)
+    log_key = (
+        sharding_desc,
+        str(jax.typeof(inputs)),
+        tuple(pspec),
+        extra_stack_level,
+    )
     if log_key not in _LOGGED_ACTIVATION_SHARDINGS:
-      max_logging.info(f"{sharding_desc} Logical: {log_key[1]:.<60} {logical_axes}.", stacklevel=3 + extra_stack_level)
-      max_logging.info(f"{sharding_desc} Physical: {log_key[1]:.<60} {log_key[2]}.", stacklevel=3 + extra_stack_level)
+      max_logging.info(
+          f"{sharding_desc} Logical: {log_key[1]:.<60} {logical_axes}.",
+          stacklevel=3 + extra_stack_level,
+      )
+      max_logging.info(
+          f"{sharding_desc} Physical: {log_key[1]:.<60} {log_key[2]}.",
+          stacklevel=3 + extra_stack_level,
+      )
       _LOGGED_ACTIVATION_SHARDINGS.add(log_key)
 
       _ACTIVATION_SHARDINGS_DUMP.append(
@@ -114,8 +137,14 @@ def maybe_shard_with_name(
 
 
 def maybe_shard_with_pspec(
-    inputs, pspec: jax.sharding.PartitionSpec | None, mesh, shard_mode, debug_sharding=False, extra_stack_level=0
+    inputs,
+    pspec: jax.sharding.PartitionSpec | None,
+    mesh,
+    shard_mode,
+    debug_sharding=False,
+    extra_stack_level=0,
 ):
+  """Shard inputs using a PartitionSpec, delegating to maybe_shard_with_name."""
   if pspec is None:
     return None
   sharding = NamedSharding(mesh, pspec)
@@ -187,9 +216,7 @@ def remove_size_one_mesh_axis(spec, mesh):
   return P(*new_spec, unreduced=spec.unreduced, reduced=spec.reduced)
 
 
-def get_nnx_var_named_sharding_with_scan_axis(
-    v: nnx.Variable, mesh
-) -> nnx.Variable:
+def get_nnx_var_named_sharding_with_scan_axis(v: nnx.Variable, mesh) -> nnx.Variable:
   """Compute NamedSharding for an NNX variable, correctly handling the scan axis."""
   val = v.get_value()
   if not hasattr(val, "shape"):
@@ -201,11 +228,7 @@ def get_nnx_var_named_sharding_with_scan_axis(
       return v.replace(jax.tree.map(lambda _: replicated, val))
     return v
   metadata = v.get_metadata()
-  out_sharding = (
-      metadata.get("out_sharding")
-      or metadata.get("sharding_names")
-      or metadata.get("sharding")
-  )
+  out_sharding = metadata.get("out_sharding") or metadata.get("sharding_names") or metadata.get("sharding")
   if not out_sharding:
     pspec = P()
   else:
@@ -213,11 +236,7 @@ def get_nnx_var_named_sharding_with_scan_axis(
     if nnx.PARTITION_NAME in metadata:
       partition_name = metadata[nnx.PARTITION_NAME]
       scan_axis = metadata.get("param_scan_axis", 0)
-      out_sharding = (
-          [out_sharding]
-          if isinstance(out_sharding, str)
-          else list(out_sharding)
-      )
+      out_sharding = [out_sharding] if isinstance(out_sharding, str) else list(out_sharding)
       if partition_name not in out_sharding:
         out_sharding.insert(scan_axis, partition_name)
       out_sharding = tuple(out_sharding)
@@ -226,9 +245,7 @@ def get_nnx_var_named_sharding_with_scan_axis(
     local_rules = metadata.get("sharding_rules", ())
     if context_rules or local_rules:
       local_rules_list = list(local_rules) if local_rules is not None else []
-      context_rules_list = (
-          list(context_rules) if context_rules is not None else []
-      )
+      context_rules_list = list(context_rules) if context_rules is not None else []
       rules = local_rules_list + context_rules_list
       pspec = logical_to_mesh_axes(out_sharding, mesh, rules=rules)
     else:
@@ -508,7 +525,10 @@ def assert_params_sufficiently_sharded(params, mesh, tolerance):
   # Check if the amount of unsharded parameters is within the tolerance and
   # raise an exception if it is not.
   _raise_if_unsharded_exceeds_tolerance(
-      unsharded_params_total_size, total_num_params, tolerance, problematic_tensors_details
+      unsharded_params_total_size,
+      total_num_params,
+      tolerance,
+      problematic_tensors_details,
   )
 
 
@@ -697,7 +717,9 @@ def maybe_update_params_sharding_with_opt_nnx(
     return var
 
   new_model_shardings = jax.tree_util.tree_map_with_path(
-      _update_model_var, model_shardings, is_leaf=lambda x: isinstance(x, nnx.Variable)
+      _update_model_var,
+      model_shardings,
+      is_leaf=lambda x: isinstance(x, nnx.Variable),
   )
   # Use jax.tree_util.tree_map (identity) to create a new nnx.State via JAX's unflatten
   # mechanism (not the nnx.State constructor). This is critical because:
