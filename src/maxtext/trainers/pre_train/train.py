@@ -38,6 +38,7 @@ from jax.sharding import NamedSharding
 
 from flax import linen as nn, nnx
 from flax.linen import partitioning as nn_partitioning
+from flax.nnx import variablelib
 
 from maxtext.configs import pyconfig
 from maxtext.utils.globals import EPS
@@ -220,8 +221,20 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
       xent, z_loss = max_utils.cross_entropy_with_logits(logits, one_hot_targets, z_loss=config.z_loss_multiplier)
 
-      xent = nn.with_logical_constraint(xent, ("activation_embed_and_logits_batch", "activation_length"))
-      z_loss = nn.with_logical_constraint(z_loss, ("activation_embed_and_logits_batch", "activation_length"))
+      xent = sharding.maybe_shard_with_logical(
+          xent,
+          ("activation_embed_and_logits_batch", "activation_length"),
+          model.mesh,
+          config.shard_mode,
+          debug_sharding=config.debug_sharding,
+      )
+      z_loss = sharding.maybe_shard_with_logical(
+          z_loss,
+          ("activation_embed_and_logits_batch", "activation_length"),
+          model.mesh,
+          config.shard_mode,
+          debug_sharding=config.debug_sharding,
+      )
 
       # Mask out paddings at the end of each example.
       xent = xent * (data["targets_segmentation"] != 0)
@@ -359,7 +372,9 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
           is_train=True,
       )
     else:
-      model_graphdef, curr_params, rest = nnx.split(state.model, nnx.Param, ...)
+      owg_type = variablelib.variable_type_from_name("_overwrite_with_gradient", allow_register=True)
+      custom_param_filter = nnx.Any(owg_type)
+      model_graphdef, curr_params, custom_params, rest = nnx.split(state.model, nnx.Param, custom_param_filter, ...)
       if config.parameter_memory_host_offload:
         # Params are kept on host (pinned_host) in in_shardings. Move only Param
         # variables to device before the forward/backward pass so that all dot_general
@@ -381,15 +396,15 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
         )
         nnx.update(state.model, curr_params)
 
-      def diff_wrapper(param, rest, config, data):
-        local_model = nnx.merge(model_graphdef, param, rest, copy=True)
+      def diff_wrapper(curr_params, custom_params, rest, config, data):
+        local_model = nnx.merge(model_graphdef, curr_params, custom_params, rest, copy=True)
         loss, aux = loss_fn(local_model, config, data, None, None, is_train=True)
-        _, _, new_rest = nnx.split(local_model, nnx.Param, ...)
+        _, _, _, new_rest = nnx.split(local_model, nnx.Param, custom_param_filter, ...)
         return loss, (aux, new_rest)
 
-      grad_func = jax.value_and_grad(diff_wrapper, argnums=0, has_aux=True)
-      (loss, (aux, new_rest)), raw_grads = grad_func(curr_params, rest, config, data)
-      nnx.update(state.model, new_rest)
+      grad_func = jax.value_and_grad(diff_wrapper, argnums=(0, 1), has_aux=True)
+      (loss, (aux, new_rest)), (raw_grads, custom_grads) = grad_func(curr_params, custom_params, rest, config, data)
+      nnx.update(state.model, nnx.State.merge(custom_grads, new_rest))
 
   raw_grads = jax.tree_util.tree_map(
       lambda x: x.astype(config.grad_dtype) if x.dtype == jnp.float32 else x,
@@ -604,6 +619,10 @@ def train_loop(config, recorder, state=None):
       state,
   ) = train_utils.setup_train_loop(config, recorder)
 
+  # Throttling is applied only if configured (dcn_bandwidth_limit is set).
+  # The default flag value is empty, meaning no throttling is applied by default.
+  train_utils.maybe_apply_dcn_throttling(config)
+
   start_step = get_first_step(model, state)  # this is the start_step for training
   train_utils.validate_completed_steps(start_step, config.steps)
 
@@ -627,7 +646,8 @@ def train_loop(config, recorder, state=None):
   )
 
   with jax.set_mesh(mesh), mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-    shaped_batch = maxtext_utils.get_shaped_batch(config)
+    data_sharding = sharding.get_input_data_sharding(config, mesh)
+    shaped_batch = maxtext_utils.get_shaped_batch(config, batch_sharding=data_sharding)
     if config.shard_optimizer_over_data and isinstance(model, nn.Module):
       state = sharding.maybe_shard_with_name(state, state_mesh_shardings, config.shard_mode)
     elif config.shard_optimizer_over_data:
@@ -735,6 +755,7 @@ def train_loop(config, recorder, state=None):
     if _job_completed_gracefully:
       record_goodput(recorder, RECORD_JOB_END_TIME)
     metric_logger_instance.flush_metrics_and_cleanup()
+    train_utils.maybe_cleanup_dcn_throttling(config)
 
   return state
 

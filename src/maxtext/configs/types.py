@@ -222,11 +222,12 @@ ModelName = Literal[
     "deepseek2-16b",
     "deepseek2-236b",
     "deepseek3-671b",
+    "deepseek3-671b-2dfsdp",
     "deepseek3-671b-batchsplit",
     "deepseek3-test",
     "deepseek3-tiny",
     "deepseek3.2-671b",
-    "deepseek4",
+    "deepseek4-284b",
     "deepseek-custom",
     "kimi-k2-1t",
     "gemma-7b",
@@ -547,7 +548,7 @@ class Attention(BaseModel):
       "autoselected",
       description="The attention algorithm to use (dot_product, flash, etc).",
   )
-  attention_type: Literal["global", "local_sliding", "chunk", "mla", "full"] = Field(
+  attention_type: Literal["global", "local_sliding", "chunk", "mla", "full", "compressed"] = Field(
       "global", description="The variant of attention to use."
   )
   share_kv_projections: bool = Field(
@@ -603,6 +604,13 @@ class Attention(BaseModel):
   use_tokamax_gmm: bool = Field(
       False,
       description="Whether to use the Tokamax library for GMM kernel implementation.",
+  )
+  use_gmm_v2: bool = Field(
+      False,
+      description=(
+          "Whether to use GMM v2 (with bf16 activations and weights) for MoE."
+          " Requires use_tokamax_gmm: true. Currently incompatible with quantization."
+      ),
   )
   ragged_block_size: int = Field(256, description="Block size for ragged attention.")
   enable_padding_causal_mask: bool = Field(True, description="Temporary flag for TE padding.")
@@ -685,6 +693,25 @@ class SplashAttention(BaseModel):
   sa_q_layout: str = Field("HEAD_DIM_MINOR", description="Layout for Q in splash attention.")
   sa_k_layout: str = Field("HEAD_DIM_MINOR", description="Layout for K in splash attention.")
   sa_v_layout: str = Field("HEAD_DIM_MINOR", description="Layout for V in splash attention.")
+  use_splash_scheduler: bool = Field(False, description="Use experimental splash attention scheduler.")
+  # If None, each local_sa_* flag inherits from the corresponding sa_* flag.
+  local_sa_block_q: int | None = Field(None, description="Block size for Q in local splash attention.")
+  local_sa_block_kv: int | None = Field(None, description="Block size for KV in local splash attention.")
+  local_sa_block_kv_compute: int | None = Field(None, description="Block size for KV compute in local splash attention.")
+  local_sa_block_q_dkv: int | None = Field(None, description="Block size for Q_dkv in local splash attention.")
+  local_sa_block_kv_dkv: int | None = Field(None, description="Block size for KV_dkv in local splash attention.")
+  local_sa_block_kv_dkv_compute: int | None = Field(
+      None, description="Block size for KV_dkv compute in local splash attention."
+  )
+  local_sa_block_q_dq: int | None = Field(None, description="Block size for Q_dq in local splash attention.")
+  local_sa_block_kv_dq: int | None = Field(None, description="Block size for KV_dq in local splash attention.")
+  local_sa_use_fused_bwd_kernel: bool | None = Field(
+      None, description="Use fused backward kernel in local splash attention."
+  )
+  local_sa_q_layout: str | None = Field(None, description="Layout for Q in local splash attention.")
+  local_sa_k_layout: str | None = Field(None, description="Layout for K in local splash attention.")
+  local_sa_v_layout: str | None = Field(None, description="Layout for V in local splash attention.")
+  local_use_splash_scheduler: bool | None = Field(None, description="Use experimental local splash attention scheduler.")
   use_max_logit_estimate: int = Field(
       -1,
       description="-1 means no estimate, any > 0 value will be used as max logit estimate",
@@ -703,7 +730,6 @@ class SplashAttention(BaseModel):
       0,
       description="the number of reduction steps. For now, only 3 or all the kv steps are supported.",
   )
-  use_splash_scheduler: bool = Field(False, description="Use experimental splash attention scheduler.")
 
 
 class MoEGeneral(BaseModel):
@@ -730,12 +756,49 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to use Ring of Experts for sparse matmul expert parallelism.",
   )
+  moe_dispatch_no_expert_sharding: bool = Field(
+      False,
+      description=(
+          "If true, shard the MoE dispatch/MLP batch dim without 'expert' so the expert GEMM "
+          "stays expert-parallel (AllToAll); false keeps 'expert' on it (activation_batch_moe)."
+      ),
+  )
   use_ragged_sort: bool = Field(
       False, description="Whether to use ragged kernel for sorting, improve performance when EP is enabled."
   )
   use_gather_mosaic_kernel: bool = Field(
       False,
       description="Whether to use a custom mosaic kernel for token gather ops.",
+  )
+  ragged_gather_fallback: bool = Field(
+      False,
+      description="When true, unconditionally use the JAX reference implementation instead of the ragged gather "
+      "SparseCore kernel. When false (default), use the SparseCore kernel.",
+  )
+  ragged_gather_reduce_fallback: bool = Field(
+      False,
+      description="When true, unconditionally use the JAX reference implementation instead of the ragged gather "
+      "reduce SparseCore kernel. When false (default), use the SparseCore kernel.",
+  )
+  ragged_gather_cost_estimate_flops: int = Field(
+      -1,
+      description="Flop cost estimate override for the ragged gather kernel. "
+      "-1 means auto-compute, any > 0 value overrides the flop cost estimate.",
+  )
+  ragged_gather_reduce_cost_estimate_flops: int = Field(
+      -1,
+      description="Flop cost estimate override for the ragged gather reduce kernel. "
+      "-1 means auto-compute, any > 0 value overrides the flop cost estimate.",
+  )
+  ragged_gather_cost_estimate_bytes_accessed: int = Field(
+      -1,
+      description="Bytes-accessed cost estimate override for the ragged gather kernel. "
+      "-1 means auto-compute, any > 0 value overrides the bytes_accessed cost estimate.",
+  )
+  ragged_gather_reduce_cost_estimate_bytes_accessed: int = Field(
+      -1,
+      description="Bytes-accessed cost estimate override for the ragged gather reduce kernel. "
+      "-1 means auto-compute, any > 0 value overrides the bytes_accessed cost estimate.",
   )
   use_random_routing: bool = Field(False, description="Whether to use random routing for debugging.")
   interleave_moe_layer_step: int = Field(1, description="Frequency of MoE layers, e.g., 2 means every 2nd layer is MoE.")
@@ -747,6 +810,10 @@ class MoEGeneral(BaseModel):
       False,
       description="Shard the expert dimension of the MLP weights on the FSDP axis, "
       "and recommended only when num_experts is a multiple of fsdp_parallelism",
+  )
+  use_2d_fsdp_sharding: bool = Field(
+      False,
+      description="Use `fsdp` and `fsdp_transpose` axes for 2D FSDP sharding.",
   )
   norm_topk_prob: bool = Field(
       False,
@@ -1096,6 +1163,10 @@ class Tokenizer(BaseModel):
       "",
       description="Chat template to use with HF tokenizers. It should be a valid Jinja2-formatted template.",
   )
+  data_template_path: str = Field(
+      "",
+      description="Path to a chat template file to be used when tokenizing the dataset.",
+  )
   tokenize_train_data: bool = Field(True, description="If False, assumes the training dataset is pre-tokenized.")
   tokenize_eval_data: bool = Field(True, description="If False, assumes the evaluation dataset is pre-tokenized.")
   add_bos: bool = Field(True, description="Whether to add a beginning-of-sentence token.")
@@ -1428,6 +1499,14 @@ class DilocoParams(BaseModel):
   diloco_sync_period: int = Field(36, description="Diloco sync period.")
   diloco_outer_lr: float = Field(0.3, description="learning rate for outer optimizer.")
   diloco_outer_momentum: float = Field(0.9, description="momentum for outer optimizer.")
+  dcn_bandwidth_limit: str = Field(
+      "", description="Programmatic DCN egress bandwidth limit (e.g., '28gbit'). Empty means no limit."
+  )
+  dcn_bandwidth_burst: str = Field("10mb", description="Burst size for Token Bucket Filter (TBF) traffic shaping.")
+  dcn_bandwidth_latency: str = Field(
+      "50ms", description="Latency threshold for Token Bucket Filter (TBF) traffic shaping."
+  )
+  dcn_bandwidth_interface: str = Field("eth0", description="Network interface to apply bandwidth limits on.")
 
 
 class Optimizer(BaseModel):
@@ -1668,6 +1747,7 @@ class AOT(BaseModel):
   compiled_trainstep_file: PathStr = Field("", description="Name of saved serialized compiled train_step.")
   compile_topology: str = Field("", description="Target hardware version, e.g. 'v5e-256'.")
   compile_topology_num_slices: int = Field(-1, description="Number of target slices.")
+  write_estimator_result: bool = Field(False, description="Write estimator.py results in a separate file.")
 
 
 class DevelopmentAndDebugging(BaseModel):
@@ -1849,6 +1929,7 @@ class MultimodalGeneral(BaseModel):
   """General configuration for Multimodal models."""
 
   use_multimodal: bool = Field(False, description="Enable multimodal capabilities.")
+  attention_for_vit: str = Field("dot_product", description="The attention algorithm to use for vision encoder.")
   freeze_vision_encoder_params: bool = Field(True, description="Freeze the parameters of the vision encoder.")
   freeze_audio_encoder_params: bool = Field(True, description="Freeze the parameters of the audio encoder.")
   use_audio: bool = Field(False, description="Enable audio encoder for multimodal models.")
@@ -1868,6 +1949,25 @@ class MultimodalGeneral(BaseModel):
   use_mrope: bool = Field(False, description="Enable Multi-dimensional RoPE for Qwen3-Omni models.")
   mrope_section: list[int] = Field([24, 20, 20], description="Dimensions for temporal, height, width in MRoPE.")
   position_id_per_seconds: int = Field(25, description="Temporal granularity for MRoPE (tokens per second).")
+  video_max_grid_t: Optional[int] = Field(
+      None,
+      description="Maximum Qwen3-Omni/3.5 video grid size in temporal patches, before spatial merge.",
+  )
+  video_max_grid_h: Optional[int] = Field(
+      None,
+      description="Maximum Qwen3-Omni/3.5 video grid size in height patches, before spatial merge.",
+  )
+  video_max_grid_w: Optional[int] = Field(
+      None,
+      description="Maximum Qwen3-Omni/3.5 video grid size in width patches, before spatial merge.",
+  )
+
+  @model_validator(mode="after")
+  def validate_video_max_grid(self) -> "MultimodalGeneral":
+    max_grid = (self.video_max_grid_t, self.video_max_grid_h, self.video_max_grid_w)
+    if any(dim is None for dim in max_grid) and not all(dim is None for dim in max_grid):
+      raise ValueError("video_max_grid_t, video_max_grid_h, and video_max_grid_w must be set together.")
+    return self
 
 
 class VisionTower(BaseModel):
@@ -2868,11 +2968,44 @@ class MaxTextConfig(
         self.data_sharding[0].remove("stage")
         self.data_sharding[0].insert(0, "stage")
 
-    # H. RUN ALL CROSS-FIELD VALIDATIONS
+    # H. RESOLVE local_sa_* FLAGS: inherit from global sa_* if not explicitly set.
+    if self.local_sa_block_q is None:
+      self.local_sa_block_q = self.sa_block_q
+    if self.local_sa_block_kv is None:
+      self.local_sa_block_kv = self.sa_block_kv
+    if self.local_sa_block_kv_compute is None:
+      self.local_sa_block_kv_compute = self.sa_block_kv_compute
+    if self.local_sa_block_q_dkv is None:
+      self.local_sa_block_q_dkv = self.sa_block_q_dkv
+    if self.local_sa_block_kv_dkv is None:
+      self.local_sa_block_kv_dkv = self.sa_block_kv_dkv
+    if self.local_sa_block_kv_dkv_compute is None:
+      self.local_sa_block_kv_dkv_compute = self.sa_block_kv_dkv_compute
+    if self.local_sa_block_q_dq is None:
+      self.local_sa_block_q_dq = self.sa_block_q_dq
+    if self.local_sa_block_kv_dq is None:
+      self.local_sa_block_kv_dq = self.sa_block_kv_dq
+    if self.local_sa_use_fused_bwd_kernel is None:
+      self.local_sa_use_fused_bwd_kernel = self.sa_use_fused_bwd_kernel
+    if self.local_sa_q_layout is None:
+      self.local_sa_q_layout = self.sa_q_layout
+    if self.local_sa_k_layout is None:
+      self.local_sa_k_layout = self.sa_k_layout
+    if self.local_sa_v_layout is None:
+      self.local_sa_v_layout = self.sa_v_layout
+    if self.local_use_splash_scheduler is None:
+      self.local_use_splash_scheduler = self.use_splash_scheduler
+
+    # I. RUN ALL CROSS-FIELD VALIDATIONS
     if self.load_parameters_path and self.load_full_state_path:
       raise ValueError("At most one of `load_parameters_path` or `load_full_state_path` should be set.")
     if self.elastic_enabled and not self.enable_single_controller:
       raise ValueError("Elastic training is only supported with Pathways (`enable_single_controller=True`).")
+    if self.colocated_python_data_input and not self.enable_single_controller:
+      raise ValueError(
+          "Colocated python data input is only supported with Pathways (single"
+          " controller) enabled (`enable_single_controller=True`)."
+      )
     if self.grain_use_elastic_iterator and self.grain_file_type != "arrayrecord":
       raise ValueError(
           "`grain_use_elastic_iterator=True` only supports `grain_file_type=arrayrecord`. "
@@ -2916,6 +3049,8 @@ class MaxTextConfig(
         raise ValueError("`local_checkpoint_period` must be > 0 for emergency checkpointing.")
     if self.moba and self.attention not in ("dot_product"):
       raise ValueError("MoBA is only supported with dot_product attention.")
+    if self.decoder_block == DecoderBlockType.DEEPSEEK4 and self.attention != "dot_product":
+      raise ValueError("DeepSeek4 decoder block currently only supports dot_product attention.")
     if self.use_indexer:
       if self.q_lora_rank == 0:
         raise NotImplementedError("Sparse indexer has not implemented for q_lora_rank = 0.")
@@ -3180,6 +3315,11 @@ class MaxTextConfig(
     if self.share_kv_projections and self.attention_type == "mla":
       raise ValueError("`share_kv_projections` is not compatible with `attention_type='mla'`.")
 
+    if self.use_gmm_v2 and (self.quantization or self.use_qwix_quantization):
+      raise ValueError("Quantization with GMM v2 is not supported yet.")
+    if self.use_gmm_v2 and not self.use_tokamax_gmm:
+      raise ValueError("GMM v2 requires `use_tokamax_gmm=true`.")
+
     for val in self.compress_ratios:
       if val != 0 and val < 4:
         raise ValueError(f"compress_ratio must be 0 (disabled) or >= 4, got {val}")
@@ -3203,9 +3343,13 @@ class MaxTextConfig(
         "tensor": self.ici_tensor_parallelism,
         "tensor_transpose": self.ici_tensor_transpose_parallelism,
         "tensor_sequence": self.ici_tensor_sequence_parallelism,
+        "model": self.ici_tensor_parallelism,
         "expert": self.ici_expert_parallelism,
         "autoregressive": self.ici_autoregressive_parallelism,
+        "attn_dp": (1),  # initialized to 1, vLLM will auto calculate this value based on TP and num_kv_heads
+        "attn_dp_expert": (1),  # initialized to 1, vLLM will auto calculate this value based on EP
     }
+    self.ici_parallelism = [ici_map[axis] for axis in self.mesh_axes]
 
     dcn_map = {
         "diloco": self.dcn_diloco_parallelism,
@@ -3219,37 +3363,12 @@ class MaxTextConfig(
         "tensor": self.dcn_tensor_parallelism,
         "tensor_transpose": self.dcn_tensor_transpose_parallelism,
         "tensor_sequence": self.dcn_tensor_sequence_parallelism,
+        "model": self.dcn_tensor_parallelism,
         "expert": self.dcn_expert_parallelism,
         "autoregressive": self.dcn_autoregressive_parallelism,
+        "attn_dp": (1),  # initialized to 1, vLLM will auto calculate this value based on TP and num_kv_heads
+        "attn_dp_expert": (1),  # initialized to 1, vLLM will auto calculate this value based on EP
     }
-
-    # Conditionally include vLLM RPA specific axes
-    if self.attention == "vllm_rpa":
-      ici_map.update(
-          {
-              "model": self.ici_tensor_parallelism,
-              "attn_dp": 1,
-              "attn_dp_expert": 1,
-          }
-      )
-      dcn_map.update(
-          {
-              "model": self.dcn_tensor_parallelism,
-              "attn_dp": 1,
-              "attn_dp_expert": 1,
-          }
-      )
-
-    # Validate that any axis with configured parallelism > 1 is present in mesh_axes
-    for axis, ici_size in ici_map.items():
-      if axis not in self.mesh_axes:
-        if ici_size > 1 or dcn_map[axis] > 1:
-          raise ValueError(
-              f"Mesh axis '{axis}' has configured parallelism > 1 "
-              f"(ici: {ici_size}, dcn: {dcn_map[axis]}) "
-              f"but is not included in self.mesh_axes: {self.mesh_axes}"
-          )
-    self.ici_parallelism = [ici_map[axis] for axis in self.mesh_axes]
     self.dcn_parallelism = [dcn_map[axis] for axis in self.mesh_axes]
 
     # Diloco params

@@ -22,6 +22,7 @@
 * LLama4 Maverick (17B-128E)
 * Llama4 Maverick (17B-128E-Instruct)
 
+For multimodal functionality, see the [Multimodal Support guide](../../../../docs/tutorials/posttraining/multimodal.md).
 
 ## Checkpoint conversion
 Currently, we support converting both [PyTorch](https://www.llama.com/) and [HuggingFace](https://huggingface.co/collections/meta-llama/llama-4-67f0c30d9fe03840bc9d0164) checkpoints.  Note that we recommend using the `huggingface-cli download` command with environment variable

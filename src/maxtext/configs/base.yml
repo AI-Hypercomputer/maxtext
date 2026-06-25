@@ -213,10 +213,22 @@ load_balance_loss_weight: 0.0 # weight for the load balance loss
 use_random_routing: false # whether to use random routing for debug/test purpose
 use_custom_sort_vjp: true # whether to use a custom VJP sort for efficient backward pass processing in sparse matmul
 use_ring_of_experts: false # whether to use ring of experts for sparse matmul expert parallelism
+# If true, peel the 'expert' mesh axis off the MoE dispatch/MLP batch dim so the expert GEMM
+# stays expert-parallel (AllToAll); false keeps 'expert' on the batch dim (activation_batch_moe).
+# Only affects the dense (dense_matmul) MoE path; the sparse (shard_map) path is unaffected.
+moe_dispatch_no_expert_sharding: false
 use_ragged_sort: false # whether to use the Pallas ragged-sort kernels in the MoE permute path; valid both with and
                        # without `use_ring_of_experts` (with EP > 1). When `use_ring_of_experts=True` the kernels run
                        # inside `permute`/`unpermute`; otherwise they run inside `local_permute`/local-unpermute.
 use_gather_mosaic_kernel: false # whether to use a custom mosaic kernel for token gather ops
+ragged_gather_fallback: false # when true, unconditionally use the JAX reference implementation instead of the
+                              # ragged gather SparseCore kernel. When false (default), use the SparseCore kernel.
+ragged_gather_reduce_fallback: false # when true, unconditionally use the JAX reference implementation instead of the
+                                     # ragged gather reduce SparseCore kernel. When false (default), use the SparseCore kernel.
+ragged_gather_cost_estimate_flops: -1 # -1 means auto-compute, any > 0 value overrides the flop cost estimate for the ragged gather kernel
+ragged_gather_reduce_cost_estimate_flops: -1 # -1 means auto-compute, any > 0 value overrides the flop cost estimate for the ragged gather reduce kernel
+ragged_gather_cost_estimate_bytes_accessed: -1 # -1 means auto-compute, any > 0 value overrides the bytes_accessed cost estimate for the ragged gather kernel
+ragged_gather_reduce_cost_estimate_bytes_accessed: -1 # -1 means auto-compute, any > 0 value overrides the bytes_accessed cost estimate for the ragged gather reduce kernel
 # tunable tiling dimensions used for mlp gmm
 # megablox/jax ragged dot - supports forward pass only (6 configs: `wi_tile_fwd...` and `wo_tile_fwd_...`)
 # tokamax ragged dot - supports all 18 configs
@@ -249,6 +261,8 @@ moe_fsdp_use_two_stage_all_gather: false
 # Shard the expert dimension of the MLP weights on the FSDP axis.
 # This configuration is recommended only when num_experts is a multiple of fsdp_parallelism
 shard_exp_on_fsdp: false
+# use fsdp and fsdp_transpose axes for sharding the moe weights
+use_2d_fsdp_sharding: false
 
 # deepseek moe
 first_num_dense_layers: 0 # number of initial dense layers in the model
@@ -653,6 +667,7 @@ tokenizer_path: ""
 tokenizer_type: "sentencepiece" # Currently supporting: "tiktoken", "sentencepiece", "huggingface"
 use_chat_template: false
 chat_template_path: "" # path to chat template json file
+chat_template: "" # Chat template to use with HF tokenizers. It should be a valid Jinja2-formatted template.
 tokenize_train_data: true  # false if the dataset is pre-tokenized
 tokenize_eval_data: true  # false if the dataset is pre-tokenized
 add_bos: true
@@ -866,6 +881,15 @@ enable_diloco: false
 diloco_sync_period: 36
 diloco_outer_lr: 0.3
 diloco_outer_momentum: 0.9
+# DCN bandwidth throttling parameters (used for simulating slow networks).
+# If dcn_bandwidth_limit is empty, no throttling is applied.
+dcn_bandwidth_limit: ""
+# The burst size parameter for the traffic control (tc) token bucket filter.
+dcn_bandwidth_burst: "10mb"
+# The latency parameter for the traffic control (tc) token bucket filter.
+dcn_bandwidth_latency: "50ms"
+# The network interface to apply throttling rules to.
+dcn_bandwidth_interface: "eth0"
 
 # You may disable clipping by setting gradient_clipping_threshold to zero.
 gradient_clipping_threshold: 1.0
@@ -942,6 +966,9 @@ rope_attention_scaling: false # Scale the rotary embedding output
 compiled_trainstep_file: "" # Name of saved serialized compiled train_step, e.g. compiled_train_v5e-256.pickle
 compile_topology: '' # Target hardware version, e.g. 'v5e-256'
 compile_topology_num_slices: -1 # Number of target slices, set to a positive integer.
+
+# MaxText Estimator configs
+write_estimator_result: False
 
 decode_sampling_strategy: "greedy" # decode_sampling_strategy should be one of greedy, weighted, nucleus, topk, or composite(top_k -> top_p -> weighted temperature)
 decode_sampling_nucleus_p: -1 # set if you're doing nucleus / top-p
@@ -1068,11 +1095,26 @@ sa_use_fused_bwd_kernel: false
 sa_q_layout: "HEAD_DIM_MINOR"
 sa_k_layout: "HEAD_DIM_MINOR"
 sa_v_layout: "HEAD_DIM_MINOR"
+use_splash_scheduler: false # to use tokamax splash attention scheduler.
+# local_sa_* variants apply to local (sliding window) attention layers;
+# if None, each inherits from the corresponding global sa_* flag.
+local_sa_block_q: None  # inherits from sa_block_q if None
+local_sa_block_kv: None  # inherits from sa_block_kv if None
+local_sa_block_kv_compute: None  # inherits from sa_block_kv_compute if None
+local_sa_block_q_dkv: None  # inherits from sa_block_q_dkv if None
+local_sa_block_kv_dkv: None  # inherits from sa_block_kv_dkv if None
+local_sa_block_kv_dkv_compute: None  # inherits from sa_block_kv_dkv_compute if None
+local_sa_block_q_dq: None  # inherits from sa_block_q_dq if None
+local_sa_block_kv_dq: None  # inherits from sa_block_kv_dq if None
+local_sa_use_fused_bwd_kernel: None  # inherits from sa_use_fused_bwd_kernel if None
+local_sa_q_layout: None  # inherits from sa_q_layout if None
+local_sa_k_layout: None  # inherits from sa_k_layout if None
+local_sa_v_layout: None  # inherits from sa_v_layout if None
+local_use_splash_scheduler: None  # inherits from use_splash_scheduler if None
 use_max_logit_estimate: -1 # -1 means no estimate, any > 0 value will be used as max logit estimate
 cost_estimate_flops_fwd: -1 # -1 means using splash default cost estmiation, any >= 0 value will be used as cost estmiation for splash to overlap for communication (forward)
 cost_estimate_flops_bwd: -1 # -1 means using splash default cost estmiation, any >= 0 value will be used as cost estmiation for splash to overlap for communication (backward)
 dq_reduction_steps: 0 #the number of reduction steps. For now, only 3 or all the kv steps are supported.
-use_splash_scheduler: false # to use tokamax splash attention scheduler.
 ### Determine if we want to use load balance for context parallelism
 context_parallel_load_balance: true
 context_parallel_strategy: "all_gather" # "all_gather" or "ring"
@@ -1120,6 +1162,9 @@ image_placeholder: "<|image|>"
 video_placeholder: "<|video|>"
 audio_placeholder: "<|audio|>"
 use_audio_in_video: false
+video_max_grid_t: null
+video_max_grid_h: null
+video_max_grid_w: null
 posemb_type_for_vit: "learn"
 # max_num_images_per_example only applies for training when your image column is a list of images.
 # -1 means no limit, and will pad to the max possible number of images determined by sequence length.
@@ -1203,6 +1248,9 @@ partial_rotary_factor: 1.0
 
 # Use tokamax library for gmm kernel implementation
 use_tokamax_gmm: false
+# Whether to use GMM v2 for MoE.
+# Requires use_tokamax_gmm: true. Currently incompatible with quantization.
+use_gmm_v2: false
 use_tokamax_splash: false
 # Setting this flag will use a non-pallas implementation.
 use_jax_splash: false

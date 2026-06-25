@@ -67,7 +67,9 @@ from maxtext.common import train_state_nnx
 
 import transformers
 
-from ml_goodput_measurement.src.goodput import GoodputRecorder
+from maxtext.common.goodput import goodput as _goodput_module
+
+GoodputRecorder = _goodput_module.GoodputRecorder
 
 import maxtext as mt
 from maxtext.configs import pyconfig
@@ -87,7 +89,7 @@ from maxtext.common.goodput import (
 from maxtext.experimental.rl import grpo_input_pipeline
 from maxtext.experimental.rl import grpo_utils
 from maxtext.common.metric_logger import MetricLogger
-from maxtext.common.vertex_tensorboard import VertexTensorboardManager
+from maxtext.common.gcloud_stub import vertex_tensorboard_modules
 from maxtext.utils import exceptions
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
@@ -97,6 +99,8 @@ from maxtext.utils import model_creation_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import sharding
 from maxtext.utils import train_utils
+
+VertexTensorboardManager, _vertex_tb_is_stub = vertex_tensorboard_modules()
 
 # pylint: disable=too-many-positional-arguments
 

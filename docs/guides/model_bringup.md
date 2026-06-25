@@ -20,15 +20,15 @@ This documentation acts as the primary resource for efficiently integrating new 
 
 ## 1. Architecture Analysis
 
-The first phase involves determining how the new model's architecture aligns with MaxText's existing capabilities. To facilitate this assessment, refer to the [MaxText architecture overview](../reference/architecture/architecture_overview.md) and [list of supported models](../reference/models/supported_models_and_architectures.md).
+The first phase involves determining how the new model's architecture aligns with MaxText's existing capabilities. To facilitate this assessment, refer to the [MaxText architecture overview](architecture-overview) and [list of supported models](supported-models).
 
-**Input Data Pipeline**: MaxText supports HuggingFace, Grain, and TFDS pipelines ([details](data_input_pipeline.md)). While synthetic data is typically used for initial performance benchmarks, the framework supports multiple modalities including text and image (audio and video - work in progress).
+**Input Data Pipeline**: MaxText supports HuggingFace, Grain, and TFDS pipelines ([details](data-input-pipeline)). While synthetic data is typically used for initial performance benchmarks, the framework supports multiple modalities including text and image (audio and video - work in progress).
 
 **Tokenizer**: Supported [tokenizer options](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/input_pipeline/tokenizer.py) include `TikTokenTokenizer`, `SentencePieceTokenizer`, and `HFTokenizer`.
 
 **Self-Attention & RoPE**: Available mechanisms include optimized [Flash Attention](https://github.com/AI-Hypercomputer/maxtext/blob/62ee818144eb037ad3fe85ab8e789cd074776f46/src/maxtext/layers/attention_op.py#L1184) (supporting MHA, GQA, and MQA), Multi-head Latent Attention ([MLA](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/layers/attention_mla.py)), and [Gated Delta Network](https://github.com/AI-Hypercomputer/maxtext/blob/62ee818144eb037ad3fe85ab8e789cd074776f46/src/maxtext/models/qwen3.py#L358). MaxText also supports [Regular](https://github.com/AI-Hypercomputer/maxtext/blob/88d2ffd34c0ace76f836c7ea9c2fe4cd2d271088/MaxText/layers/embeddings.py#L108), [Llama](https://github.com/AI-Hypercomputer/maxtext/blob/88d2ffd34c0ace76f836c7ea9c2fe4cd2d271088/MaxText/layers/embeddings.py#L178), and [YaRN](https://github.com/AI-Hypercomputer/maxtext/blob/88d2ffd34c0ace76f836c7ea9c2fe4cd2d271088/MaxText/layers/embeddings.py#L282) variations of Rotary Positional Embeddings (RoPE).
 
-**Multi-Layer Perceptron (MLP)**: The framework supports both traditional dense models and Mixture of Experts (MoE) architectures, including [configurations](../reference/core_concepts/moe_configuration.md) for routed and shared experts.
+**Multi-Layer Perceptron (MLP)**: The framework supports both traditional dense models and Mixture of Experts (MoE) architectures, including [configurations](moe-configuration) for routed and shared experts.
 
 **Normalization**: We support different [normalization strategies](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/layers/normalizations.py), including RMSNorm and Gated RMSNorm. These can be configured before or after attention/MLP layers.
 
@@ -42,23 +42,40 @@ This step can be bypassed if the current MaxText codebase already supports all c
 
 ## 3. Checkpoint Conversion
 
-While most open-source models are distributed in Safetensors or PyTorch formats, MaxText requires conversion to the [Orbax](https://orbax.readthedocs.io/en/latest/) format.
+While most open-source models are distributed in Safetensors or PyTorch formats, MaxText requires conversion to the [Orbax](https://orbax.readthedocs.io/en/latest) format.
 
-There are [two primary formats](../reference/core_concepts/checkpoints.md) for Orbax checkpoints within MaxText, and while both are technically compatible with training and inference, we recommend following these performance-optimized guidelines:
+There are [two primary formats](checkpoints) for Orbax checkpoints within MaxText, and while both are technically compatible with training and inference, we recommend following these performance-optimized guidelines:
 
 - **Scanned Format**: Recommended for **training** as it stacks layers for efficient processing via `jax.lax.scan`. To enable this, set `scan_layers=True`.
 - **Unscanned Format**: Recommended for **inference** to simplify loading individual layer parameters. To enable this, set `scan_layers=False`.
 
 ### 3.1 Create Mapping
 
-Success starts with a clear map. You must align the parameter names from your source checkpoints (Safetensors/PyTorch) with the corresponding MaxText internal names.
+To successfully convert a model, you must define the exact mapping between the parameter names in your source checkpoints (Safetensors/PyTorch) and the corresponding MaxText internal names.
 
-- You can print out the keys and shapes of your original `.safetensors` or `.pth` files.
-- To see the target structure, you can initiate a pre-training run to save a randomly initialized checkpoint for inspection.
+We provide a unified utility [`inspect_checkpoint.py`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/inspect_checkpoint.py) to help you view and compare these structures.
+
+(1) **HF Inspector**. To see the HuggingFace checkpoint structure, you can print out the keys and shapes of your original `.safetensors` or `.pth` files.
+
+```
+python -m maxtext.checkpoint_conversion.inspect_checkpoint hf --path <local_hf_path> --format <safetensors | pth>
+```
+
+(2) **MaxText Inspector**. View the expected parameter structure of the target MaxText model:
+
+```
+python -m maxtext.checkpoint_conversion.inspect_checkpoint maxtext model_name=<maxtext_model_name> scan_layers=<True | False>
+```
+
+(3) **Orbax Inspector** (Optional). If you have already saved an Orbax checkpoint during pretraining, you can inspect its structure directly:
+
+```
+python -m maxtext.checkpoint_conversion.inspect_checkpoint orbax --path <local_orbax_path | gcs_orbax_path>
+```
 
 ### 3.2 Write Script
 
-Use existing model scripts within the repository as templates to tailor the conversion logic for your specific architecture. We strongly recommended to use the [checkpoint conversion utility](checkpointing_solutions/convert_checkpoint.md) rather than [standalone scripts](https://github.com/AI-Hypercomputer/maxtext/tree/main/src/maxtext/checkpoint_conversion/standalone_scripts).
+Use existing model scripts within the repository as templates to tailor the conversion logic for your specific architecture. We strongly recommend using the [checkpoint conversion utility](checkpoint-conversion) rather than [standalone scripts](https://github.com/AI-Hypercomputer/maxtext/tree/main/src/maxtext/checkpoint_conversion/standalone_scripts).
 
 ### 3.3 Verify Compatibility
 
@@ -132,7 +149,7 @@ If you run the `forward_pass_logit_checker.py` to compare reference logits with 
 
 **Q: How to compile models for a target hardware without physical access?**
 
-**A:** If you need to compile your training run ahead of time, use the train_compile.py tool. This utility allows you to compile the primary train_step for specific target hardware without needing the actual devices on hand. It’s particularly useful for verifying your implementation's functionality on a local Cloud VM or a standard CPU. Please refer [here](monitoring_and_debugging/features_and_diagnostics.md#ahead-of-time-compilation-aot) for more examples.
+**A:** If you need to compile your training run ahead of time, use the `train_compile.py` tool. This utility allows you to compile the primary `train_step` for specific target hardware without needing the actual devices on hand. It’s particularly useful for verifying your implementation's functionality on a local Cloud VM or a standard CPU. Please refer [here](aot-compilation) for more examples.
 
 **Q: My model is too large for my development machine. What should I do?**
 

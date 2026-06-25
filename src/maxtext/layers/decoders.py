@@ -33,6 +33,7 @@ from maxtext.layers import linears
 from maxtext.layers import mhc
 from maxtext.layers import normalizations
 from maxtext.layers import pipeline
+from maxtext.layers.nnx_decoders import NNXDecoderLayer, NNXSequentialPipelineStage, NNXScannedPipelineStage
 from maxtext.layers import quantizations
 from maxtext.layers.attentions import attention_as_linen
 from maxtext.layers.embeddings import attend_on_embedding, embed_as_linen, positional_embedding_as_linen
@@ -40,6 +41,7 @@ from maxtext.layers.normalizations import rms_norm
 from maxtext.layers.quantizations import Quantization as Quant
 from maxtext.models import (
     deepseek,
+    deepseek4,
     deepseek_batchsplit,
     deepseek_batchsplit_fp8,
     gemma,
@@ -260,7 +262,7 @@ class SequentialBlockDecoderLayers(nn.Module):
           slot=slot,
       )
       if self.config.scan_layers:
-        inputs = inputs[0]  #  When scan_layers is True the decoder layers return (outputs, None).
+        inputs = inputs[0]  # When scan_layers is True the decoder layers return (outputs, None).
     if self.config.scan_layers:
       return inputs, None  # pytype: disable=bad-return-type
     else:
@@ -305,10 +307,19 @@ class Decoder(nn.Module):
     self.decoder_layer = self.get_decoder_layers()
     self.norm_layer = self.get_norm_layer(num_features=self.config.emb_dim)
     if self.config.using_pipeline_parallelism:
-      pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer)
       remat_policy = self.get_remat_policy()
+      nnx_blocks = self._get_nnx_decoder_block_classes()
+
+      # Per-stage builder handed to create_pipeline: the pipeline transform invokes it
+      # once per pipeline stage, passing that stage's rngs, to construct the stage's
+      # decoder block(s). nnx_blocks (the selected decoder block classes) is captured from
+      # this setup scope; remat_policy is applied separately by create_pipeline.
+      def build_pipeline_stage_layers(rngs):
+        """Builds one pipeline stage module from the selected NNX decoder block classes."""
+        return self._build_nnx_pipeline_stage(nnx_blocks, rngs)
+
       self.pipeline_module = pipeline.create_pipeline(
-          config=self.config, mesh=self.mesh, layers=pipeline_stage_module, remat_policy=remat_policy
+          config=self.config, layers=build_pipeline_stage_layers, mesh=self.mesh, remat_policy=remat_policy
       )
 
   def minimal_policy(self, with_context=False, with_quantization=False):
@@ -457,6 +468,10 @@ class Decoder(nn.Module):
             deepseek.DeepSeekDenseLayerToLinen,
             deepseek.DeepSeekMoELayerToLinen,
         ]
+      case DecoderBlockType.DEEPSEEK4:
+        return (
+            [deepseek4.DeepSeek4ScannableBlockToLinen] if self.config.scan_layers else [deepseek4.DeepSeek4LayerToLinen]
+        )
       case DecoderBlockType.GEMMA:
         return [gemma.GemmaDecoderLayerToLinen]
       case DecoderBlockType.GEMMA2:
@@ -498,6 +513,42 @@ class Decoder(nn.Module):
         # Default case to handle any unknown decoder block types.
         raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
 
+  def _get_nnx_decoder_block_classes(self):
+    """Returns NNX decoder block classes for pipeline stage creation."""
+    cfg = self.config
+
+    def get_scannable(normal_cls, scannable_cls):
+      return [scannable_cls] if cfg.scan_layers else [normal_cls]
+
+    layer_map = {
+        DecoderBlockType.DEFAULT: [NNXDecoderLayer],
+        DecoderBlockType.LLAMA2: [llama2.LlamaDecoderLayer],
+        DecoderBlockType.MISTRAL: [mistral.MistralDecoderLayer],
+        DecoderBlockType.MIXTRAL: [mixtral.MixtralDecoderLayer],
+        DecoderBlockType.GEMMA: [gemma.GemmaDecoderLayer],
+        DecoderBlockType.GEMMA2: [gemma2.Gemma2DecoderLayer],
+        DecoderBlockType.GEMMA3: [gemma3.Gemma3DecoderLayer],
+        DecoderBlockType.GEMMA4: get_scannable(gemma4.Gemma4DecoderLayer, gemma4.Gemma4ScannableBlock),
+        DecoderBlockType.GEMMA4_SMALL: [gemma4_small.Gemma4SmallDecoderLayer],
+        DecoderBlockType.GPT3: [gpt3.Gpt3DecoderLayer],
+        DecoderBlockType.GPT_OSS: get_scannable(gpt_oss.GptOssDecoderLayer, gpt_oss.GptOssScannableBlock),
+        DecoderBlockType.QWEN2: [qwen2.Qwen2DecoderLayer],
+        DecoderBlockType.QWEN3: [qwen3.Qwen3DecoderLayer],
+        DecoderBlockType.QWEN3_MOE: [qwen3.Qwen3MoeDecoderLayer],
+        DecoderBlockType.QWEN3_CUSTOM_MOE: [qwen3_custom.Qwen3CustomMoeDecoderLayer],
+        DecoderBlockType.QWEN3_5: get_scannable(qwen3_5.Qwen3_5DecoderLayer, qwen3_5.Qwen3_5ScannableBlock),
+        DecoderBlockType.QWEN3_NEXT: get_scannable(qwen3.Qwen3NextDecoderLayer, qwen3.Qwen3NextScannableBlock),
+        DecoderBlockType.SIMPLE: [simple_layer.SimpleDecoderLayer],
+        DecoderBlockType.SIMPLE_MLP: [simple_layer.SimpleMlpDecoderLayer],
+        DecoderBlockType.DEEPSEEK: [deepseek.DeepSeekDenseLayer, deepseek.DeepSeekMoELayer],
+        DecoderBlockType.LLAMA4: get_scannable(llama4.Llama4DecoderLayer, llama4.Llama4ScannableBlock),
+        DecoderBlockType.OLMO3: get_scannable(olmo3.Olmo3DecoderLayer, olmo3.Olmo3ScannableBlock),
+    }
+
+    if cfg.decoder_block not in layer_map:
+      raise ValueError(f"Incorrect decoder_block name {cfg.decoder_block.value=}")
+    return layer_map[cfg.decoder_block]
+
   def set_remat_policy(self, block_layers, policy):
     """Set remat policy"""
     RemattedBlockLayers = []
@@ -526,6 +577,58 @@ class Decoder(nn.Module):
       RemattedBlockLayers.append(layer)
     return RemattedBlockLayers
 
+  def _build_nnx_pipeline_stage(self, decoder_blocks, rngs):
+    """Creates a single NNX pipeline stage module."""
+    cfg = self.config
+    base_stage_cls = decoder_blocks[1] if cfg.decoder_block == DecoderBlockType.DEEPSEEK else decoder_blocks[0]
+
+    if cfg.num_layers_per_pipeline_stage == 1:
+      return base_stage_cls(config=cfg, mesh=self.mesh, quant=self.quant, model_mode=self.model_mode, rngs=rngs)
+    elif cfg.scan_layers_per_stage:
+      return NNXScannedPipelineStage(
+          base_stage_cls, cfg.num_layers_per_pipeline_stage, cfg, self.mesh, self.quant, self.model_mode, rngs=rngs
+      )
+    return NNXSequentialPipelineStage(
+        base_stage_cls, cfg.num_layers_per_pipeline_stage, cfg, self.mesh, self.quant, self.model_mode, rngs=rngs
+    )
+
+  def get_pipeline_stage_module(self, decoder_blocks):
+    """get pipeline stage module"""
+
+    def get_layer_to_pipeline(blocks, cfg):
+      if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
+        return blocks[1]  # return the sparse block
+      else:
+        return blocks[0]
+
+    cfg = self.config
+    base_stage = get_layer_to_pipeline(decoder_blocks, cfg)
+    if cfg.set_remat_policy_on_layers_per_stage:
+      policy = self.get_remat_policy()
+      base_stage = self.set_remat_policy([base_stage], policy)[0]
+    if cfg.num_layers_per_pipeline_stage == 1:
+      stage_module = base_stage(config=cfg, mesh=self.mesh, quant=self.quant, model_mode=self.model_mode)
+    elif cfg.scan_layers_per_stage:
+      stage_module = self.scan_decoder_layers(
+          cfg,
+          base_stage,
+          cfg.num_layers_per_pipeline_stage,
+          "layers_per_stage",
+          self.mesh,
+          in_axes_tuple=(nn.broadcast,) * 4,
+          model_mode=self.model_mode,
+      )
+    else:
+      stage_module = SequentialBlockDecoderLayers(
+          decoder_layer=base_stage,
+          num_decoder_layers=cfg.num_layers_per_pipeline_stage,
+          config=cfg,
+          mesh=self.mesh,
+          quant=self.quant,
+          model_mode=self.model_mode,
+      )
+    return stage_module
+
   def get_norm_layer(self, num_features: int):
     """get normalization layer (return type inherits from nn.Module)"""
     if self.config.decoder_block in (
@@ -534,6 +637,7 @@ class Decoder(nn.Module):
         DecoderBlockType.MISTRAL,
         DecoderBlockType.MIXTRAL,
         DecoderBlockType.DEEPSEEK,
+        DecoderBlockType.DEEPSEEK4,
         DecoderBlockType.GEMMA,
         DecoderBlockType.GEMMA2,
         DecoderBlockType.GEMMA3,
@@ -585,42 +689,6 @@ class Decoder(nn.Module):
     return scan_fn(
         config=cfg, mesh=mesh, name=metadata_axis_name, quant=self.quant, **kwargs  # pytype: disable=wrong-keyword-args
     )
-
-  def get_pipeline_stage_module(self, decoder_blocks):
-    """get pipeline stage module"""
-
-    def get_layer_to_pipeline(blocks, cfg):
-      if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
-        return blocks[1]  # return the sparse block
-      else:
-        return blocks[0]
-
-    cfg = self.config
-    base_stage = get_layer_to_pipeline(decoder_blocks, cfg)
-    if cfg.set_remat_policy_on_layers_per_stage:
-      policy = self.get_remat_policy()
-      base_stage = self.set_remat_policy([base_stage], policy)[0]
-    if cfg.num_layers_per_pipeline_stage == 1:
-      stage_module = base_stage(config=cfg, mesh=self.mesh, quant=self.quant, model_mode=self.model_mode)
-    elif cfg.scan_layers_per_stage:
-      stage_module = self.scan_decoder_layers(
-          cfg,
-          base_stage,
-          cfg.num_layers_per_pipeline_stage,
-          "layers_per_stage",
-          self.mesh,
-          in_axes_tuple=(nn.broadcast,) * 4,
-      )
-    else:
-      stage_module = SequentialBlockDecoderLayers(
-          decoder_layer=base_stage,
-          num_decoder_layers=cfg.num_layers_per_pipeline_stage,
-          config=cfg,
-          mesh=self.mesh,
-          quant=self.quant,
-          model_mode=self.model_mode,
-      )
-    return stage_module
 
   @nn.compact
   def _apply_embedding(
@@ -999,6 +1067,17 @@ class Decoder(nn.Module):
               previous_chunk,
               slot,
           )
+        elif cfg.decoder_block == DecoderBlockType.DEEPSEEK4:
+          y = self._apply_deepseek4_scanned_blocks(
+              y,
+              decoder_segment_ids,
+              decoder_positions,
+              deterministic,
+              model_mode,
+              previous_chunk,
+              slot,
+              decoder_input_tokens,
+          )
         else:
           RemattedBlockLayer = RemattedBlockLayers[0]
           scan_length = int(cfg.num_decoder_layers / cfg.inhomogeneous_layer_cycle_interval)
@@ -1133,8 +1212,10 @@ class Decoder(nn.Module):
                   "is_nope_layer": llama4.determine_is_nope_layer(lyr, self.config.nope_layer_interval),
                   "is_moe_layer": llama4.determine_is_moe_layer(lyr, self.config.interleave_moe_layer_step),
               }
-            if cfg.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
+            if cfg.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5, DecoderBlockType.DEEPSEEK4):
               layer_kwargs = {"layer_idx": lyr}
+            if cfg.decoder_block == DecoderBlockType.DEEPSEEK4:
+              layer_call_kwargs["decoder_input_tokens"] = decoder_input_tokens
             kv_cache = None
             if kv_caches is not None:
               # For all decoder blocks (including QWEN3_NEXT/QWEN3_5 with vLLM flat-list
@@ -1301,10 +1382,16 @@ class Decoder(nn.Module):
         decoder_positions,
         deterministic,
         model_mode,
-        slot,
-        previous_chunk,
-        bidirectional_mask,
     )
+
+    # Pass slot/previous_chunk/bidirectional_mask by keyword only (via layer_call_kwargs),
+    # never positionally in broadcast_args: Gemma4DecoderLayer and Gemma4ScannableBlock
+    # declare slot and previous_chunk in swapped order, so positional passing misroutes them.
+    layer_call_kwargs = {
+        "slot": slot,
+        "previous_chunk": previous_chunk,
+        "bidirectional_mask": bidirectional_mask,
+    }
 
     if num_full_blocks > 0:
       ScannableBlockToLinen = gemma4.Gemma4ScannableBlockToLinen
@@ -1335,7 +1422,7 @@ class Decoder(nn.Module):
           num_of_layers=block_pattern_len,
           name="scanned_blocks",
       )(
-          y, *broadcast_args
+          y, *broadcast_args, **layer_call_kwargs
       )
 
     # Process any remaining layers that don't fit into a full scanned block
@@ -1349,9 +1436,105 @@ class Decoder(nn.Module):
           attention_type=attention_type,
           layer_idx=layer_id,
       )
-      y = layer(y, *broadcast_args)
+      y = layer(y, *broadcast_args, **layer_call_kwargs)
       if cfg.scan_layers:
         y = y[0]
+
+    return y
+
+  def _apply_deepseek4_scanned_blocks(
+      self,
+      y,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      previous_chunk,
+      slot,
+      decoder_input_tokens,
+  ):
+    """Applies DeepSeek V4 scanned decoder blocks.
+
+    DeepSeek V4 has some number of prefix layers (defined by `first_num_hash_layers`)
+    that use static Hash Routing. The remaining layers alternate `compress_ratio=128` (HCA)
+    and `compress_ratio=4` (CSA) and are evaluated in a single `nn.scan` block.
+
+    For DeepSeek4-Flash (43 hidden layers total):
+    - 3 Prefix layers (Indices 0, 1, 2)
+    - 40 Scanned layers: 20 perfectly repeating chunks of [128, 4]
+    """
+
+    cfg = self.config
+    mesh = self.mesh
+
+    broadcast_args = (
+        decoder_segment_ids,
+        decoder_positions,
+        deterministic,
+        model_mode,
+        slot,
+        previous_chunk,
+    )
+
+    layer_call_kwargs = {
+        "previous_chunk": previous_chunk,
+        "slot": slot,
+        "decoder_input_tokens": decoder_input_tokens,
+    }
+
+    # 1. Prefix Unrolling
+    # Prefix layers are unrolled (unscanned) for two architectural reasons:
+    #   1. Heterogeneous Attention: JAX nn.scan requires identical computation graphs, but the first few layers
+    #      use different attention configurations (e.g., DeepSeek-V4 uses compress_ratios [0, 0, 4] for layers 0, 1, 2).
+    #   2. Static Hash Routing: The first `first_num_hash_layers` (which is 3 for DeepSeek-V4) use deterministic
+    #      token-to-expert Hash Routing instead of learned top-k routing.
+    # Therefore, these prefix layers are instantiated individually before we scan the remaining uniform blocks.
+    num_hash_layers = cfg.first_num_hash_layers
+    for layer_idx in range(num_hash_layers):
+      prefix_layer = deepseek4.DeepSeek4LayerToLinen(
+          config=cfg,
+          mesh=mesh,
+          name=f"layers_{layer_idx}",
+          quant=self.quant,
+          model_mode=self.model_mode,
+          layer_idx=layer_idx,
+      )
+      y, _ = prefix_layer(
+          y,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+          **layer_call_kwargs,
+      )
+
+    # 2. Chunked Scanning
+    # The remaining layers perfectly alternate HCA (128) and CSA (4).
+    num_remaining_layers = cfg.num_decoder_layers - num_hash_layers
+    num_full_blocks = num_remaining_layers // 2
+
+    if num_full_blocks > 0:
+      ScannableBlockToLinen = deepseek4.DeepSeek4ScannableBlockToLinen
+      policy = self.get_remat_policy()
+      RemattedDeepSeek4Block = self.set_remat_policy([ScannableBlockToLinen], policy)[0]
+
+      y, _ = nn.scan(
+          RemattedDeepSeek4Block,
+          variable_axes={
+              "params": cfg.param_scan_axis,
+              "cache": 0,
+              "intermediates": 0,
+              "aqt": 0,
+              "_overwrite_with_gradient": 0,
+          },
+          split_rngs={"params": True, "dropout": cfg.enable_dropout},
+          in_axes=(nn.broadcast,) * len(broadcast_args),
+          length=num_full_blocks,
+          metadata_params={
+              nn.PARTITION_NAME: "layers",
+              "abstract_init": False,
+          },
+      )(config=cfg, mesh=mesh, quant=self.quant, model_mode=model_mode, name="scanned_blocks",)(y, *broadcast_args)
 
     return y
 

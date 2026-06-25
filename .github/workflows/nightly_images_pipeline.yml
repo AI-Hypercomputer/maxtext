@@ -13,9 +13,9 @@
 # limitations under the License.
 
 # This workflow builds and pushes MaxText images for both TPU and GPU devices.
-# It runs automatically daily at 12am UTC, on Pull Requests, or manually via Workflow Dispatch.
+# It runs automatically daily at 12am UTC, or manually via Workflow Dispatch.
 
-name: Build Images
+name: Build Nightly Docker Images
 
 on:
   schedule:
@@ -42,41 +42,47 @@ permissions:
   contents: read
 
 jobs:
-  build_and_upload_maxtext_package:
+  build_maxtext_package:
+    name: Build MaxText Package
     uses: ./.github/workflows/build_package.yml
     with:
       device_type: tpu
       device_name: v4-8
       cloud_runner: linux-x86-n2-16-buildkit
 
-  build-and-push:
-    name: ${{ matrix.image_name }}
-    needs: build_and_upload_maxtext_package
+  build_and_push_docker_image:
+    name: Build ${{ matrix.name }} Docker Image
+    needs: build_maxtext_package
     strategy:
       fail-fast: false
       matrix:
         include:
-          - device: tpu
+          - name: "TPU Pre-Training Stable"
+            device: tpu
             build_mode: stable
             workflow: pre-training
             image_name: maxtext_jax_stable
             dockerfile: maxtext_tpu_dependencies.Dockerfile
-          - device: tpu
+          - name: "TPU Pre-Training Nightly"
+            device: tpu
             build_mode: nightly
             workflow: pre-training
             image_name: maxtext_jax_nightly
             dockerfile: maxtext_tpu_dependencies.Dockerfile
-          - device: tpu
+          - name: "TPU Post-Training Nightly"
+            device: tpu
             build_mode: nightly
             workflow: post-training
             image_name: maxtext_post_training_nightly
             dockerfile: maxtext_tpu_dependencies.Dockerfile
-          - device: gpu
+          - name: "GPU Pre-Training Stable"
+            device: gpu
             build_mode: stable
             workflow: pre-training
             image_name: maxtext_gpu_jax_stable
             dockerfile: maxtext_gpu_dependencies.Dockerfile
-          - device: gpu
+          - name: "GPU Pre-Training Nightly"
+            device: gpu
             build_mode: nightly
             workflow: pre-training
             image_name: maxtext_gpu_jax_nightly
@@ -93,9 +99,19 @@ jobs:
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
+  run_e2e_tests:
+    name: Run E2E tests
+    needs: build_and_push_docker_image
+    uses: ./.github/workflows/run_e2e_tests.yml
+    with:
+      mode: ${{ inputs.image_suffix != '' && format('{0}_{1}', 'nightly', inputs.image_suffix) || 'nightly' }}
+      run_id: ${{ github.run_id }}
+      maxtext_sha: ${{ github.sha }}
+    secrets: inherit
+
   notify_failure:
     name: Notify failed build
-    needs: [build-and-push]
+    needs: [build_and_push_docker_image, run_e2e_tests]
     if: ${{ failure() && inputs.image_suffix == '' }}
     runs-on: ubuntu-latest
     permissions:

@@ -286,14 +286,18 @@ class ToNNX(Module):
       # Get `mutable` from top level bridge.Module context if any
       if mutable is not None:
         pass
-      elif (m := bdg_module.current_module()) is not None:
+      elif getattr(bdg_module.MODULE_CONTEXT, "module_stack", None) and (m := bdg_module.current_module()) is not None:
         assert m.scope is not None
         mutable = m.scope.mutable
       elif (m := current_linen_module()) is not None:
         assert m.scope is not None
         mutable = m.scope.mutable
       else:
-        mutable = False
+        # Safe fallback mutability: when running functionally isolated inside standard JAX transforms,
+        # we determine which collections (such as "stats" or "amax_history") are present and mark them mutable.
+        mutable = [k for k in variables.keys() if k != "params"]
+        if not mutable:
+          mutable = False
 
       out = self.to_nnx__module.apply(variables, *args, rngs=_rngs, method=method, mutable=mutable, **kwargs)
 
@@ -510,7 +514,31 @@ class ToLinen(linen.Module):
       for path, _ in unknown_state_flat.items():
         paths_str += f"\n  - {'/'.join(map(str, path))}"
 
-      warnings.warn(f"Found unknown module paths in incoming state:{paths_str}")
+        # Dynamically reconstruct the unknown variables
+        curr = module
+        for p in path[:-1]:
+          if isinstance(curr, dict):
+            if p not in curr:
+              curr[p] = nnx.Module()
+            curr = curr[p]
+          elif isinstance(curr, list):
+            if not isinstance(p, int):
+              raise TypeError(f"Expected int index for list, got {type(p)}: {p}")
+            while len(curr) <= p:
+              curr.append(nnx.Module())
+            curr = curr[p]
+          elif isinstance(curr, tuple):
+            raise ValueError(f"Cannot dynamically reconstruct elements within a tuple at path {path}.")
+          else:
+            if not isinstance(p, str):
+              p = str(p)
+            if not hasattr(curr, p):
+              setattr(curr, p, nnx.Module())
+            curr = getattr(curr, p)
+
+      warnings.warn(
+          f"Found unknown module paths in incoming state:{paths_str}. Intermediate modules have been reconstructed."
+      )
 
     _fix_for_qwix_quantization(module)
     nnx.update(module, new_state)

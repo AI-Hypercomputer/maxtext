@@ -18,16 +18,18 @@ import os
 import unittest
 
 from datasets import load_dataset
+from flax import nnx
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.configs import pyconfig
 from maxtext.common.common_types import MODEL_MODE_TRAIN
-from maxtext.experimental.rl.grpo_trainer import _merge_grpo_state, grpo_loss_fn
-from maxtext.experimental.rl.grpo_utils import compute_log_probs
+from maxtext.experimental.rl.grpo_trainer import _merge_grpo_state, grpo_loss_fn, grpo_loss_fn_nnx
+from maxtext.experimental.rl.grpo_utils import compute_log_probs, compute_log_probs_nnx
 from maxtext.utils.globals import MAXTEXT_PKG_DIR
 from maxtext.models import models
 from maxtext.utils import maxtext_utils
+from maxtext.utils import model_creation_utils
 import numpy as np
 import pytest
 import torch
@@ -62,12 +64,16 @@ class GRPOTest(unittest.TestCase):
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
     mesh = Mesh(devices_array, self.cfg.mesh_axes)
     if self.cfg.pure_nnx:
-      # NNX has a different function to init the training state.
-      raise NotImplementedError("Pure NNX support has not been implemented yet.")
+      # NNX: from_pretrained loads the checkpoint (or inits) into the model, which
+      # carries its own params. The frozen reference is a clone of the policy.
+      self.model = model_creation_utils.from_pretrained(self.cfg, mesh=mesh, rng_key=self.rng)
+      self.reference_model = nnx.clone(self.model)
+      self.state = None
     else:
       self.model = models.transformer_as_linen(config=self.cfg, mesh=mesh, quant=None, model_mode=MODEL_MODE_TRAIN)
       init_state_fn = functools.partial(maxtext_utils.init_initial_state, self.model, None, self.cfg, False, self.rng)
-    self.state, _ = maxtext_utils.setup_decode_state(self.cfg, mesh, None, init_state_fn)
+      self.reference_model = None
+      self.state, _ = maxtext_utils.setup_decode_state(self.cfg, mesh, None, init_state_fn)
     self.tokenizer_model = transformers.AutoTokenizer.from_pretrained(
         "meta-llama/Llama-3.1-8B",
         add_bos_token=False,
@@ -140,15 +146,15 @@ class GRPOTest(unittest.TestCase):
     logits_to_keep = tokenized_inputs["input_ids"].size()[1]
     return input_ids, attention_mask, logits_to_keep
 
-  def test_logits(self):
-    def _prepare_inputs():
-      input_ids = jnp.tile(jnp.array(self.tokenizer_model.encode(self.input_str)), (4, 1))
-      input_segmentation = (input_ids > 0).astype(jnp.int32)
-      input_position = jnp.tile(jnp.arange(input_ids.shape[1]), (4, 1))
-
-      return input_ids, input_segmentation, input_position
-
-    inputs, inputs_segmentation, inputs_position = _prepare_inputs()
+  def _maxtext_logits(self, inputs, inputs_position, inputs_segmentation):
+    """Forward pass logits, dispatching between the NNX and Linen models."""
+    if self.cfg.pure_nnx:
+      return self.model(
+          decoder_input_tokens=inputs,
+          decoder_positions=inputs_position,
+          decoder_segment_ids=inputs_segmentation,
+          enable_dropout=False,
+      )
     logits, _ = self.model.apply(
         self.state.params,
         inputs,
@@ -158,6 +164,64 @@ class GRPOTest(unittest.TestCase):
         rngs=self.rng,
         mutable="intermediates",
     )
+    return logits
+
+  def _policy_logps(self, input_ids, input_position, input_segmentation, completion_segmentation):
+    """Policy per-token log-probs, dispatching between NNX and Linen."""
+    if self.cfg.pure_nnx:
+      return compute_log_probs_nnx(
+          self.model, input_ids, input_position, input_segmentation, completion_segmentation, self.cfg, is_train=False
+      )
+    return compute_log_probs(
+        self.model,
+        self.state.params,
+        input_ids,
+        input_position,
+        input_segmentation,
+        completion_segmentation,
+        self.cfg,
+        is_train=False,
+    )
+
+  def _reference_logps(self, input_ids, input_position, input_segmentation, completion_segmentation, reference_params):
+    """Reference per-token log-probs. NNX uses the cloned reference model; Linen uses the saved params."""
+    if self.cfg.pure_nnx:
+      return compute_log_probs_nnx(
+          self.reference_model,
+          input_ids,
+          input_position,
+          input_segmentation,
+          completion_segmentation,
+          self.cfg,
+          is_train=False,
+      )
+    return compute_log_probs(
+        self.model,
+        {"params": reference_params},
+        input_ids,
+        input_position,
+        input_segmentation,
+        completion_segmentation,
+        self.cfg,
+        is_train=False,
+    )
+
+  def _grpo_loss(self, data, reference_params):
+    """GRPO loss, dispatching between NNX (reference model) and Linen (reference params)."""
+    if self.cfg.pure_nnx:
+      return grpo_loss_fn_nnx(self.model, self.cfg, data, self.rng, None, self.reference_model)
+    return grpo_loss_fn(self.model, self.cfg, data, self.rng, self.state.params, reference_params)
+
+  def test_logits(self):
+    def _prepare_inputs():
+      input_ids = jnp.tile(jnp.array(self.tokenizer_model.encode(self.input_str)), (4, 1))
+      input_segmentation = (input_ids > 0).astype(jnp.int32)
+      input_position = jnp.tile(jnp.arange(input_ids.shape[1]), (4, 1))
+
+      return input_ids, input_segmentation, input_position
+
+    inputs, inputs_segmentation, inputs_position = _prepare_inputs()
+    logits = self._maxtext_logits(inputs, inputs_position, inputs_segmentation)
 
     hf_logits = (
         self.hf_model(
@@ -173,15 +237,8 @@ class GRPOTest(unittest.TestCase):
   def test_logps(self):
 
     input_ids, input_segmentation, input_position, completion_segmentation = self._prepare_maxtext_inputs()
-    maxtext_per_token_logps, _ = compute_log_probs(
-        self.model,
-        self.state.params,
-        input_ids,
-        input_position,
-        input_segmentation,
-        completion_segmentation,
-        self.cfg,
-        is_train=False,
+    maxtext_per_token_logps, _ = self._policy_logps(
+        input_ids, input_position, input_segmentation, completion_segmentation
     )
     hf_input_ids, attention_mask, logits_to_keep = self._prepare_trl_inputs()
     with torch.no_grad():
@@ -245,57 +302,33 @@ class GRPOTest(unittest.TestCase):
     self.trainer._get_per_token_logps(self.hf_model, hf_input_ids, attention_mask, logits_to_keep)  # pylint: disable=protected-access
 
     input_ids, input_segmentation, input_position, completion_segmentation = self._prepare_maxtext_inputs()
-    maxtext_per_token_logps, _ = compute_log_probs(
-        self.model,
-        self.state.params,
-        input_ids,
-        input_position,
-        input_segmentation,
-        completion_segmentation,
-        self.cfg,
-        is_train=False,
+    maxtext_per_token_logps, _ = self._policy_logps(
+        input_ids, input_position, input_segmentation, completion_segmentation
     )
 
-    reference_params = jax.tree.map(jnp.copy, self.state.params["params"])
-    self.state = _merge_grpo_state(self.state, reference_params)
+    # The reference is a frozen copy of the step-0 policy. NNX holds it as a cloned
+    # model (built in setUp); Linen snapshots the params and merges them into the state.
+    reference_params = None
+    if not self.cfg.pure_nnx:
+      reference_params = jax.tree.map(jnp.copy, self.state.params["params"])
+      self.state = _merge_grpo_state(self.state, reference_params)
     data = {
         "prompt_completions": input_ids,
         "prompt_completions_position": input_position,
         "prompt_completions_segmentation": input_segmentation,
         "ar_completions_segmentation": completion_segmentation,
     }
-    maxtext_loss, aux = grpo_loss_fn(
-        self.model,
-        self.cfg,
-        data,
-        self.rng,
-        self.state.params,
-        reference_params,
-    )
+    maxtext_loss, aux = self._grpo_loss(data, reference_params)
     self.assertEqual(self.trainer._metrics["train"]["kl"][0], aux.avg_kl.tolist())  # pylint: disable=protected-access
     self.assertEqual(hf_loss.item(), maxtext_loss.tolist())
     # since this is on-policy
     self.assertEqual(aux.avg_advantage.tolist(), 0.0)
     # since we are at step 0
-    maxtext_per_token_logps, _ = compute_log_probs(
-        self.model,
-        self.state.params,
-        input_ids,
-        input_position,
-        input_segmentation,
-        completion_segmentation,
-        self.cfg,
-        is_train=False,
+    maxtext_per_token_logps, _ = self._policy_logps(
+        input_ids, input_position, input_segmentation, completion_segmentation
     )
-    maxtext_per_token_logps_ref, _ = compute_log_probs(
-        self.model,
-        {"params": reference_params},
-        input_ids,
-        input_position,
-        input_segmentation,
-        completion_segmentation,
-        self.cfg,
-        is_train=False,
+    maxtext_per_token_logps_ref, _ = self._reference_logps(
+        input_ids, input_position, input_segmentation, completion_segmentation, reference_params
     )
     self.assertTrue(
         jax.numpy.allclose(

@@ -850,6 +850,7 @@ class Attention(nnx.Module):
           shard_mode=self.config.shard_mode,
           rngs=self.rngs,
       )
+
     elif self.is_qwen3_hybrid:
       rotary_embedding = PartialRotaryEmbedding(
           min_timescale=self.config.rope_min_timescale,

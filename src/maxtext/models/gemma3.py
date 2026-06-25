@@ -449,7 +449,7 @@ class Encoder1DBlock(nnx.Module):
         dtype=self.config.dtype_mm,
         weight_dtype=self.config.weight_dtype,
         mesh=self.mesh,
-        attention_kernel="dot_product",
+        attention_kernel=self.config.attention_for_vit,
         inputs_q_shape=(self.config.per_device_batch_size, self.seq_len, self.config.hidden_size_for_vit),
         inputs_kv_shape=(self.config.per_device_batch_size, self.seq_len, self.config.hidden_size_for_vit),
         dropout_rate=0,

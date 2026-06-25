@@ -57,7 +57,7 @@ Example Usage:
   To merge a LoRA adapter into a base model and save as a full HF model:
 
   export HF_AUTH_TOKEN="hf_YOUR_TOKEN"
-  python src/maxtext/checkpoint_conversion/to_huggingface.py \
+  python -m maxtext.checkpoint_conversion.to_huggingface \
     src/maxtext/configs/base.yml \
     model_name="gemma3-4b" \
     load_parameters_path="/path/to/base/checkpoint/" \

@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2023-2026 Google LLC
 
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# This file defines a module for building and uploading a maxtext pacakge
+# This workflow builds and uploads MaxText package
 # based on the pyproject.toml at the current github workspace.
 
 name: Build and Upload MaxText Package
@@ -27,6 +27,9 @@ on:
         required: true
         type: string
       cloud_runner:
+        required: false
+        type: string
+      maxtext_sha:
         required: false
         type: string
     outputs:
@@ -45,12 +48,15 @@ jobs:
     steps:
       - name: Checkout MaxText
         uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.maxtext_sha || github.sha }}
       - name: Get metadata
         id: vars
         shell: bash
         run: |
           # MaxText SHA used to build the package
-          echo "maxtext_sha=${GITHUB_SHA}" >> $GITHUB_OUTPUT
+          MAXTEXT_SHA="${{ inputs.maxtext_sha || github.sha }}"
+          echo "maxtext_sha=${MAXTEXT_SHA}" >> $GITHUB_OUTPUT
       - name: Install build tools
         run: |
           python -m pip install --upgrade pip build uv

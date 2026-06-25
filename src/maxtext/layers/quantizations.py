@@ -30,6 +30,14 @@ import jax.numpy as jnp
 from flax.linen import fp8_ops
 from flax.linen import initializers as flax_initializers
 import flax.linen as nn
+from flax import nnx
+# Support different packaging structures across environments even within
+# the same Qwix version identifier (imports from _src.utils vs _src).
+try:
+  from qwix._src.utils import flax_util
+except ImportError:
+  from qwix._src import flax_util  # pytype: disable=import-error
+from maxtext.layers import nnx_wrappers
 
 from maxtext.common.common_types import DType, Config
 
@@ -282,6 +290,32 @@ def configure_kv_quant(config):
     )
 
 
+def _apply_linen_module_in_nnx(linen_module_cls, op_id, *args, **kwargs):
+  """Applies a Linen module within an NNX context."""
+  try:
+    parent = flax_util.get_current_module()
+    is_nnx = isinstance(parent, nnx.Module)
+  except ValueError:
+    is_nnx = False
+
+  if is_nnx:
+    attr_name = f"_qwix_fp8_gpu_{op_id}"
+    if not hasattr(parent, attr_name):
+      rngs = getattr(parent, "qwix_rngs", None)
+      if rngs is None:
+        parent_rngs = getattr(parent, "rngs", None)
+        if parent_rngs is not None and hasattr(parent_rngs, "fork"):
+          rngs = parent_rngs.fork()
+        else:
+          rngs = nnx.Rngs(0)
+      wrapper = nnx_wrappers.ToNNX(linen_module_cls(name=op_id), rngs=rngs)
+      wrapper.lazy_init(*args, **kwargs)
+      setattr(parent, attr_name, wrapper)
+    return getattr(parent, attr_name)(*args, mutable=["_overwrite_with_gradient"], **kwargs)
+  else:
+    return linen_module_cls(name=op_id)(*args, **kwargs)
+
+
 class NvidaFp8Provider(qwix.QtProvider):
   """Wraps nn.Fp8DirectDotGeneralOp with Qwix's provider interface."""
 
@@ -290,13 +324,13 @@ class NvidaFp8Provider(qwix.QtProvider):
     rule, op_id = self._get_current_rule_and_op_id("dot_general")
     if rule is None:
       return jax.lax.dot_general(*args, **kwargs)
-    return nn.Fp8DirectDotGeneralOp(name=op_id)(*args, **kwargs)
+    return _apply_linen_module_in_nnx(nn.Fp8DirectDotGeneralOp, op_id, *args, **kwargs)
 
   def einsum(self, *args, **kwargs):
     rule, op_id = self._get_current_rule_and_op_id("einsum")
     if rule is None:
       return jnp.einsum(*args, **kwargs)
-    return nn.Fp8Einsum(name=op_id)(*args, **kwargs)
+    return _apply_linen_module_in_nnx(nn.Fp8Einsum, op_id, *args, **kwargs)
 
 
 class NANOOFp8Provider(qwix.QtProvider):
@@ -306,7 +340,7 @@ class NANOOFp8Provider(qwix.QtProvider):
     rule, op_id = self._get_current_rule_and_op_id("dot_general")
     if rule is None:
       return jax.lax.dot_general(*args, **kwargs)
-    return nn.NANOOFp8DotGeneralOp(name=op_id)(*args, **kwargs)
+    return _apply_linen_module_in_nnx(nn.NANOOFp8DotGeneralOp, op_id, *args, **kwargs)
 
 
 def get_fp8_full_qwix_rule_w_sparsity(config: Config):
@@ -387,7 +421,21 @@ def maybe_quantize_model(model, config):
   if config.use_qwix_quantization and not config.use_batch_split_schedule and not config.pure_nnx:
     quantization_provider = get_qt_provider(config)
     if quantization_provider:
-      model = qwix.quantize_model(model, quantization_provider)
+      if config.pure_nnx:
+        input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
+        dummy_tokens = jnp.ones(input_shape, dtype=jnp.int32)
+        dummy_positions = jnp.ones(input_shape, dtype=jnp.int32)
+        dummy_segment_ids = jnp.ones(input_shape, dtype=jnp.int32)
+        model = qwix.quantize_model(
+            model,
+            quantization_provider,
+            dummy_tokens,
+            dummy_positions,
+            dummy_segment_ids,
+            enable_dropout=False,
+        )
+      else:
+        model = qwix.quantize_model(model, quantization_provider)
   return model
 
 
@@ -536,19 +584,30 @@ class TransformerEngineQuantization(Quantization):
     """
 
     import transformer_engine.jax  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
+    from transformer_engine.common import recipe  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
 
-    fp8_recipe = self._recipe
+    default_recipe = self._recipe
 
     class TEWrapper(transformer_engine.jax.flax.module.TransformerEngineBase):
       """Wrapper module for TransformerEngine quantization."""
 
-      def generate_quantizer_set(self, postfix: str = ""):
+      def generate_quantizer_set(
+          self,
+          postfix: str = "",
+          variable_collection: str | None = None,
+          quantization_checkpoint_name: str | None = None,
+          fp8_recipe: recipe.Recipe | None = default_recipe,
+          n_groups: int | None = None,
+      ):
+        """Generates a set of quantizers for TransformerEngine."""
+
         OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
         return super().generate_quantizer_set(  # pytype: disable=wrong-keyword-args
             postfix=postfix,
             variable_collection=OVERWRITE_WITH_GRADIENT,
             quantization_checkpoint_name="quantization",
             fp8_recipe=fp8_recipe,
+            n_groups=n_groups,
         )
 
       @nn.compact
