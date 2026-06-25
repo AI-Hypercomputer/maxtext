@@ -1891,12 +1891,12 @@ class NNXDecoder(nnx.Module):
     # for efficiency, as the main model is frozen and the LM loss is not needed.
     elif (
         cfg.use_indexer and cfg.indexer_loss_scaling_factor > 0.0 and not cfg.indexer_sparse_training
-    ) and self.model_mode == MODEL_MODE_TRAIN:
+    ) and model_mode == MODEL_MODE_TRAIN:
       logits = None
 
     # When vocab tiling is enabled in training mode, full logits won't generate to reduce memory
     # Instead, we keep track on the hidden states, which has smaller size compared to full logits
-    elif cfg.num_vocab_tiling > 1 and self.model_mode == MODEL_MODE_TRAIN:
+    elif cfg.num_vocab_tiling > 1 and model_mode == MODEL_MODE_TRAIN:
       logits = None
       self.sow(nnx.Intermediate, "hidden_states", hidden_state)
 

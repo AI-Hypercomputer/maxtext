@@ -399,9 +399,7 @@ class MaxEngine(_BaseEngine):
       # axis metadata but no physical .sharding. Resolve logical to physical here so
       # device_put actually reshards instead of being a no-op.
       with nn_partitioning.axis_rules(self.config.logical_axis_rules):
-        target_shardings = sharding.nnx_construct_named_sharding(
-            params_abs, self._mesh
-        )
+        target_shardings = sharding.nnx_construct_named_sharding(params_abs, self._mesh)
       params_state = jax.device_put(params, target_shardings)
       # We only need a concrete `rest` (RNG vars) for nnx.merge. create_nnx_sharded_model
       # builds the model with a jitted out_shardings so params are produced already
@@ -409,9 +407,7 @@ class MaxEngine(_BaseEngine):
       # large models). self.model is abstract with no .sharding, so pass an explicit one.
       _, full_abs = nnx.split(self.model)
       with nn_partitioning.axis_rules(self.config.logical_axis_rules):
-        full_sharding = sharding.nnx_construct_named_sharding(
-            full_abs, self._mesh
-        )
+        full_sharding = sharding.nnx_construct_named_sharding(full_abs, self._mesh)
       concrete_model = maxtext_utils_nnx.create_nnx_sharded_model(
           self.model, self._create_model_fn, mesh=self._mesh, named_sharding=full_sharding
       )
@@ -2047,11 +2043,18 @@ def set_engine_vars_from_base_engine(
   """Set internal vars from base_engine, which has already loaded the checkpoint and has sharding,
   mesh, and kv cache related vars set.
   """
-  if base_engine.model.quant:
+  if not engine.config.pure_nnx and base_engine.model.quant:
+    # NNX bakes the quant mode in at construction (via _nnx_quant_mode_str) rather
+    # than mutating model.quant.quant_mode, so there's nothing to copy on that path.
     engine.model.quant.quant_mode = base_engine.model.quant.quant_mode
   engine.state_mesh_annotations = base_engine.state_mesh_annotations
   engine.abstract_params = base_engine.abstract_params
-  engine.kv_cache_annotations = maxtext_utils.get_kv_cache_annotations(engine.model, engine.config, rng, engine.mesh)  # pylint: disable=protected-access
+  if engine.config.pure_nnx:
+    # Linen's get_kv_cache_annotations calls model.init(); NNX modules have no
+    # .init, so use the abstract-model variant (mirrors _load_params_nnx).
+    engine.kv_cache_annotations = maxtext_utils.get_kv_cache_annotations_nnx(engine.model_ar, engine.config, engine.mesh)
+  else:
+    engine.kv_cache_annotations = maxtext_utils.get_kv_cache_annotations(engine.model, engine.config, rng, engine.mesh)  # pylint: disable=protected-access
   engine.kv_cache_shardings = jax.tree_util.tree_map(
       lambda x: jax.sharding.NamedSharding(engine.mesh, x),
       engine.kv_cache_annotations,  # pylint: disable=protected-access

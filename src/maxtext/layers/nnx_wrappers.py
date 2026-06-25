@@ -126,11 +126,14 @@ def nnx_attrs_to_linen_vars(nnx_attrs: dict) -> dict:
   """Convert a dict of NNX variables (or variable states) to Linen-style variables."""
   linen_structured = {}
   for kp, v in nnx.traversals.flatten_mapping(nnx_attrs).items():
-    if isinstance(v, variablelib.Variable):
-      col_name = variablelib.variable_name_from_type(v.type)
-      v = to_linen_var(v)
-    else:
-      raise ValueError(f"Cannot infer collection name from value: {v}")
+    if not isinstance(v, variablelib.Variable):
+      # Plain (non-Variable) attributes aren't Linen collections, so they have no
+      # place in the variables dict passed to the wrapped module's apply(). Qwix
+      # attaches bookkeeping attrs like qwix_path/qwix_rngs/disable_quant_stats_update
+      # to the module during interception; leave them on the module and skip them here.
+      continue
+    col_name = variablelib.variable_name_from_type(v.type)
+    v = to_linen_var(v)
     linen_structured[(col_name, *kp)] = v
   variables = nnx.traversals.unflatten_mapping(linen_structured)
   return variables
