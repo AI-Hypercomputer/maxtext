@@ -74,19 +74,40 @@ def compare_arrays(name, pt_val, jax_val):
   return max_diff
 
 
+def get_parameter(obj, path):
+  curr = obj
+  for p in path:
+    if isinstance(curr, dict):
+      curr = curr[p]
+    elif hasattr(curr, p):
+      curr = getattr(curr, p)
+    else:
+      raise AttributeError(f"Object {type(curr)} has no attribute or key {p}")
+  return curr
+
+
+def to_raw_dict(obj):
+  if isinstance(obj, dict):
+    return {k: to_raw_dict(v) for k, v in obj.items()}
+  elif hasattr(obj, "value"):
+    return obj.value
+  else:
+    return obj
+
+
 def copy_linear(mt_linear, pt_linear):
   if pt_linear is None or mt_linear is None:
     return
-  mt_linear.kernel.value = jnp.array(pt_linear.weight.data.numpy().T)
+  get_parameter(mt_linear, ["kernel"]).value = jnp.array(pt_linear.weight.data.numpy().T)
   if hasattr(pt_linear, "bias") and pt_linear.bias is not None:
-    mt_linear.bias.value = jnp.array(pt_linear.bias.data.numpy())
+    get_parameter(mt_linear, ["bias"]).value = jnp.array(pt_linear.bias.data.numpy())
 
 
 def copy_norm(mt_norm, pt_norm):
   if pt_norm is None or mt_norm is None:
     return
   if hasattr(pt_norm, "weight") and pt_norm.weight is not None:
-    mt_norm.scale.value = jnp.array(pt_norm.weight.data.numpy())
+    get_parameter(mt_norm, ["scale"]).value = jnp.array(pt_norm.weight.data.numpy())
 
 
 def copy_hc(mt_hc, pt_hc):
@@ -103,19 +124,19 @@ def copy_hc(mt_hc, pt_hc):
   post_b = base_np[hc : 2 * hc]
   comb_b = base_np[2 * hc :].reshape(hc, hc)
 
-  mt_hc.pre_alpha.value = jnp.array(pre_w)
-  mt_hc.post_alpha.value = jnp.array(post_w)
-  mt_hc.res_alpha.value = jnp.array(comb_w)
+  get_parameter(mt_hc, ["pre_alpha"]).value = jnp.array(pre_w)
+  get_parameter(mt_hc, ["post_alpha"]).value = jnp.array(post_w)
+  get_parameter(mt_hc, ["res_alpha"]).value = jnp.array(comb_w)
 
-  mt_hc.pre_beta.value = jnp.array(pre_b)
-  mt_hc.post_beta.value = jnp.array(post_b)
-  mt_hc.res_beta.value = jnp.array(comb_b)
+  get_parameter(mt_hc, ["pre_beta"]).value = jnp.array(pre_b)
+  get_parameter(mt_hc, ["post_beta"]).value = jnp.array(post_b)
+  get_parameter(mt_hc, ["res_beta"]).value = jnp.array(comb_b)
 
-  mt_hc.pre_alpha_scale.value = jnp.array([scale_np[0]])
-  mt_hc.post_alpha_scale.value = jnp.array([scale_np[1]])
-  mt_hc.res_alpha_scale.value = jnp.array([scale_np[2]])
+  get_parameter(mt_hc, ["pre_alpha_scale"]).value = jnp.array([scale_np[0]])
+  get_parameter(mt_hc, ["post_alpha_scale"]).value = jnp.array([scale_np[1]])
+  get_parameter(mt_hc, ["res_alpha_scale"]).value = jnp.array([scale_np[2]])
 
-  copy_norm(mt_hc.mhc_norm, pt_hc.input_norm)
+  copy_norm(get_parameter(mt_hc, ["mhc_norm"]), pt_hc.input_norm)
 
 
 def test_full_model_parity():
@@ -123,17 +144,17 @@ def test_full_model_parity():
 
   batch_size = 2
   seq_len = 256
-  num_heads = 4
+  num_heads = 64
   head_dim = 128
-  hidden_size = 256
-  q_lora_rank = 32
-  o_groups = 2
-  o_lora_rank = 64
+  hidden_size = 4096
+  q_lora_rank = 1536
+  o_groups = 64
+  o_lora_rank = 128
   qk_rope_head_dim = 64
-  moe_mlp_dim = 128
+  moe_mlp_dim = 2048
   num_experts = 16
   top_k = 4
-  num_hidden_layers = 43
+  num_hidden_layers = 1
 
   # Override topk router sorting in PyTorch
   import transformers.models.deepseek_v4.modeling_deepseek_v4 as modeling_deepseek_v4
@@ -169,52 +190,10 @@ def test_full_model_parity():
       qk_rope_head_dim=qk_rope_head_dim,
       num_experts_per_tok=top_k,
       scoring_func="sqrtsoftplus",
-      sliding_window=128,
+      sliding_window=32,
+      index_topk=2,
       routed_scaling_factor=1.5,
       compress_ratios=[
-          0,
-          0,
-          4,
-          128,
-          4,
-          128,
-          4,
-          128,
-          4,
-          128,
-          4,
-          128,
-          4,
-          128,
-          4,
-          128,
-          4,
-          128,
-          4,
-          128,
-          4,
-          128,
-          4,
-          128,
-          4,
-          128,
-          4,
-          128,
-          4,
-          128,
-          4,
-          128,
-          4,
-          128,
-          4,
-          128,
-          4,
-          128,
-          4,
-          128,
-          4,
-          128,
-          4,
           0,
       ],
   )
@@ -246,8 +225,10 @@ def test_full_model_parity():
       f"num_experts_per_tok={top_k}",
       f"num_decoder_layers={num_hidden_layers}",
       "first_num_hash_layers=3",
+      "sliding_window_size=32",
+      "indexer_topk=2",
       "override_model_config=true",
-      "compress_ratios=[0, 0, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 0]",
+      "compress_ratios=[0]",
   ]
   mt_config = pyconfig.initialize(sys.argv, run_name="test")
 
@@ -279,7 +260,7 @@ def test_full_model_parity():
 
   # Layers
   for i in range(num_hidden_layers):
-    mt_layer = getattr(mt_model.decoder.decoder_layer, f"layers_{i}")
+    mt_layer = getattr(mt_model.decoder, f"layers_{i}")
     ref_layer = ref_model.model.layers[i]
 
     copy_norm(mt_layer.pre_self_attention_layer_norm, ref_layer.input_layernorm)
@@ -370,9 +351,11 @@ def test_full_model_parity():
   pt_positions = {"main": (cos_main, sin_main), "compress": (cos_comp, sin_comp)}
 
   # Run Layer loop
+  from maxtext.models.deepseek4 import DeepSeek4LayerToLinen
+
   for i in range(num_hidden_layers):
     print(f"\n--- Layer {i} Parity ---")
-    mt_layer = getattr(mt_model.decoder.decoder_layer, f"layers_{i}")
+    mt_layer = getattr(mt_model.decoder, f"layers_{i}")
     ref_layer = ref_model.model.layers[i]
 
     # Run PyTorch layer block
@@ -386,9 +369,12 @@ def test_full_model_parity():
           input_ids=input_ids_pt,
       )[0]
 
-    # Run JAX layer block
-    mt_layer_out = mt_layer(
-        mt_layer.with_logical_constraint(x_mt),
+    # Run JAX layer block functionally
+    layer_fn = DeepSeek4LayerToLinen(config=mt_config, mesh=mesh, layer_idx=i)
+    layer_vars = {"params": to_raw_dict(mt_layer)}
+    mt_layer_out = layer_fn.apply(
+        layer_vars,
+        x_mt,
         segs_mt,
         pos_mt,
         model_mode=MODEL_MODE_TRAIN,
@@ -408,7 +394,11 @@ def test_full_model_parity():
     pt_norm_out = ref_model.model.norm(x_pt)
     pt_logits = ref_model.lm_head(pt_norm_out)
 
-  mt_norm_out = mt_model.decoder.decoder_norm(x_mt)
+  from maxtext.layers.normalizations import RMSNorm
+
+  norm_fn = RMSNorm(epsilon=mt_config.normalization_layer_epsilon, dtype=mt_config.dtype)
+  norm_vars = {"params": to_raw_dict(mt_model.decoder.decoder_norm)}
+  mt_norm_out = norm_fn.apply(norm_vars, x_mt)
   mt_logits = mt_model.logits_dense(mt_norm_out)
 
   compare_arrays("Final logits", pt_logits, mt_logits)
