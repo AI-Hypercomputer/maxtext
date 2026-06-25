@@ -199,12 +199,31 @@ jobs:
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
       maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
 
+  setup-pathways-parameters:
+    name: Setup Pathways Parameters
+    runs-on: ubuntu-latest
+    outputs:
+      total_workers: ${{ steps.set-params.outputs.total_workers }}
+      worker_groups: ${{ steps.set-params.outputs.worker_groups }}
+    steps:
+      - id: set-params
+        name: Set Pathways Worker Parameters
+        run: |
+          # TPU worker constants
+          TPU_UNIT_TOTAL_WORKERS=2
+          TPU_UNIT_WORKER_GROUPS='[1, 2]'
+
+          echo "total_workers=${TPU_UNIT_TOTAL_WORKERS}" >> "$GITHUB_OUTPUT"
+          echo "worker_groups=${TPU_UNIT_WORKER_GROUPS}" >> "$GITHUB_OUTPUT"
+
   maxtext_tpu_pathways_unit_tests:
-    needs: build_and_upload_maxtext_package
+    needs: [build_and_upload_maxtext_package, setup-pathways-parameters]
     if: needs.analyze_code_changes.outputs.run_tests == 'true'
     uses: ./.github/workflows/run_pathways_tests.yml
     strategy:
         fail-fast: false
+        matrix:
+          group: ${{ fromJSON(needs.setup-pathways-parameters.outputs.worker_groups) }}
     with:
       device_type: tpu
       device_name: v6e-4
@@ -217,6 +236,8 @@ jobs:
       container_resource_option: "--privileged"
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
       maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
+      total_workers: ${{ needs.setup-pathways-parameters.outputs.total_workers }}
+      worker_group: ${{ matrix.group }}
 
   maxtext_tpu_pathways_integration_tests:
     needs: build_and_upload_maxtext_package
