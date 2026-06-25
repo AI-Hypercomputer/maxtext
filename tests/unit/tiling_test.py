@@ -337,7 +337,6 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
         "Gradients do not match for vocab tiling when z-loss is enabled (NNX).",
     )
 
-
   @pytest.mark.tpu_only
   def test_vocab_tiling_nnx_loss(self):
     """

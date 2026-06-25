@@ -555,8 +555,10 @@ class ToLinen(linen.Module):
       return self.kwargs[name]
     maybe_method = getattr(self.nnx_class, name, None)
     if callable(maybe_method):
+
       def unbound_func(instance, *args, **kwargs):
         return instance.__call__(*args, nnx_method=maybe_method, **kwargs)
+
       return types.MethodType(unbound_func, self)
     return super().__getattribute__(name)
 
@@ -573,7 +575,6 @@ class ToLinen(linen.Module):
       if collection not in collection_flat_state:
         collection_flat_state[collection] = []
       collection_flat_state[collection].append((path, leaf))
-
 
     # update linen variables
     for collection, flat_state in collection_flat_state.items():

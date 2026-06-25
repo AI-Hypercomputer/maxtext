@@ -1289,7 +1289,7 @@ def _find_and_remove_intermediates(state, suffix, clear=False):
     for k, v in list(current_state.items()):
       new_path = current_path + (k,)
       if isinstance(v, nnx.Intermediate):
-        if len(new_path) >= len(suffix) and new_path[-len(suffix):] == suffix:
+        if len(new_path) >= len(suffix) and new_path[-len(suffix) :] == suffix:
           results.append((new_path, v))
           if clear:
             keys_to_delete.append(k)
@@ -1346,12 +1346,14 @@ def get_intermediate_value(model, nested_key, default=None, clear=False):
   # Helper key function to sort paths numerically if indices are present
   def path_sort_key(item):
     path = item[0]
+
     def _to_int_if_possible(val):
       if isinstance(val, int):
         return val
       if isinstance(val, str) and val.isdigit():
         return int(val)
       return val
+
     return tuple(_to_int_if_possible(x) for x in path)
 
   found.sort(key=path_sort_key)
@@ -1710,18 +1712,14 @@ def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=Tru
     # ourselves via nnx_construct_named_sharding, so auto-assignment is not needed here.
     abs_model = nnx.eval_shape(nnx_init_trainstate_fn)
     _, abs_var_state = nnx.split(abs_model)
-    named_sharding_state = sharding.nnx_construct_named_sharding(
-        abs_var_state, mesh
-    )
+    named_sharding_state = sharding.nnx_construct_named_sharding(abs_var_state, mesh)
     abstract_state = jax.tree.map(
         lambda a, s: jax.ShapeDtypeStruct(a.shape, a.dtype, sharding=s),
         abs_var_state,
         named_sharding_state,
     )
 
-  state_mesh_shardings = maxtext_utils_nnx.nnx_extract_named_sharding(
-      abstract_state
-  )
+  state_mesh_shardings = maxtext_utils_nnx.nnx_extract_named_sharding(abstract_state)
 
   if is_training and config.shard_optimizer_over_data:
     # Add data to sharding for optimizer state

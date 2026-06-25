@@ -19,7 +19,7 @@ from collections.abc import Callable
 from typing import Any, Sequence
 import unittest
 import pytest
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import MagicMock, patch
 from dataclasses import dataclass, field
 import numpy as np
 import optax
@@ -95,15 +95,22 @@ class TestGradientClipping(unittest.TestCase):
           )
       )
 
+
 class MockAttention(nnx.Module):
+  """Mock attention module for testing intermediate extraction."""
+
   def __init__(self, rngs):
     pass
+
   def __call__(self, x, sow_val=None):
     if sow_val is not None:
       self.sow(nnx.Intermediate, "out_projection_activations", sow_val)
     return x
 
+
 class MockDecoderLayer(nnx.Module):
+  """Mock decoder layer for testing intermediate extraction."""
+
   def __init__(self, rngs, attention_name="self_attention"):
     if attention_name == "self_attention":
       self.self_attention = MockAttention(rngs)
@@ -115,12 +122,17 @@ class MockDecoderLayer(nnx.Module):
     attention = getattr(self, self.attention_name)
     return attention(x, sow_val)
 
+
 class MockDecoderSequential(nnx.Module):
+  """Mock decoder sequential block for testing intermediate extraction."""
+
   def __init__(self, rngs, attention_name="self_attention"):
-    self.layers = nnx.List([
-        MockDecoderLayer(rngs, attention_name),
-        MockDecoderLayer(rngs, attention_name),
-    ])
+    self.layers = nnx.List(
+        [
+            MockDecoderLayer(rngs, attention_name),
+            MockDecoderLayer(rngs, attention_name),
+        ]
+    )
 
   def __call__(self, x, sow_vals=None):
     if sow_vals is None:
@@ -130,7 +142,10 @@ class MockDecoderSequential(nnx.Module):
       out = layer(out, val)
     return out
 
+
 class MockDecoderScanned(nnx.Module):
+  """Mock decoder scanned block for testing intermediate extraction."""
+
   def __init__(self, rngs, attention_name="self_attention"):
     self.layers = MockDecoderLayer(rngs, attention_name)
     self.attention_name = attention_name
@@ -141,7 +156,10 @@ class MockDecoderScanned(nnx.Module):
       attention.sow(nnx.Intermediate, "out_projection_activations", sow_val)
     return x
 
+
 class MockTransformer(nnx.Module):
+  """Mock transformer for testing intermediate extraction."""
+
   def __init__(self, decoder_type, rngs, attention_name="self_attention"):
     if decoder_type == "sequential":
       self.decoder = MockDecoderSequential(rngs, attention_name)
@@ -1600,9 +1618,7 @@ class TestNNXAbstractState(unittest.TestCase):
     optimizer_memory_host_offload: bool = False
     parameter_memory_host_offload: bool = False
     param_scan_axis: int = 0
-    logical_axis_rules: list = field(
-        default_factory=lambda: [["data", ["data"]], ["model", ["model"]]]
-    )
+    logical_axis_rules: list = field(default_factory=lambda: [["data", ["data"]], ["model", ["model"]]])
 
   class MockTrainState(nnx.Module):
     """Simulates a TrainState with params and optimizer state."""
