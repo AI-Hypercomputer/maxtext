@@ -652,5 +652,68 @@ def test_gmm_kernel(group_sizes, k, n, tiling, dtype):
   assert jnp.abs(quant_out - base_out).mean() / jnp.abs(base_out).mean() < 2e-1
 
 
+class MaybeQuantizeModelTest(unittest.TestCase):
+
+  def test_maybe_quantize_model_pops_intermediates(self):
+    config = pyconfig.initialize(
+        [None, get_test_config_path()],
+        enable_checkpointing=False,
+        quantization="int8",
+        use_qwix_quantization=True,
+        use_batch_split_schedule=False,
+        pure_nnx=True,
+        micro_batch_size_to_train_on=1,
+        max_target_length=2,
+    )
+
+    class DummyModel(nnx.Module):
+
+      def __init__(self):
+        self.param = nnx.Param(jnp.ones((2, 2)))
+
+      def __call__(self, tokens, positions, segment_ids, enable_dropout=False):
+        self.sow(nnx.Intermediate, "some_metric", jnp.mean(self.param.get_value()))
+        return tokens.astype(jnp.float32) @ self.param.get_value()
+
+    model = DummyModel()
+
+    # Verify that before quantizing, there are no intermediates sowed yet
+    _, state = nnx.split(model)
+    self.assertNotIn("intermediates", state.to_pure_dict())
+
+    # 1. Run maybe_quantize_model (which runs Qwix tracing and then pops intermediates in-place)
+    quantized_model = quantizations.maybe_quantize_model(model, config)
+
+    # 2. Extract state to check if intermediates exist
+    _, state = nnx.split(quantized_model)
+    state_dict = state.to_pure_dict()
+
+    # Assert that intermediates collection does not exist in the state
+    self.assertNotIn("intermediates", state_dict)
+
+  def test_nnx_abstract_state_has_no_intermediates(self):
+    # Initialize a configuration with Qwix quantization enabled
+    config = pyconfig.initialize(
+        [None, get_test_config_path()],
+        enable_checkpointing=False,
+        model_name="deepseek3-tiny",
+        attention="dot_product",
+        pure_nnx=True,
+        use_qwix_quantization=True,
+        use_qk_clip=True,  # This sows QK clip intermediates during the forward pass
+    )
+
+    # Create the abstract model
+    mesh = jax.make_mesh((1, 1, 1, 1), ("data", "fsdp", "expert", "context"))
+    _, abstract_model = model_creation_utils.create_nnx_abstract_model(config, mesh)
+
+    # Split model to extract its state dict
+    _, state = nnx.split(abstract_model)
+    state_dict = state.to_pure_dict()
+
+    # Assert that intermediates collection is NOT present in the abstract state
+    self.assertNotIn("intermediates", state_dict)
+
+
 if __name__ == "__main__":
   unittest.main()

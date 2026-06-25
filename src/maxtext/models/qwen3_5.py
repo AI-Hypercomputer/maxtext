@@ -232,7 +232,7 @@ class Qwen3_5DecoderLayer(nnx.Module):
     # We sow the load balancing loss so it can be collected and added to the total loss
     # during training.
     if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
-      self.sow("intermediates", "moe_lb_loss", load_balance_loss)
+      self.sow(nnx.Intermediate, "moe_lb_loss", load_balance_loss)
 
     # Final residual connection (after the MoE block)
     layer_output = residual + mlp_output

@@ -591,7 +591,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   # Drop Intermediates (e.g. sowed max_logits for QK-Clip) and the MTP sown
   # vars (mtp_losses/mtp_acceptance) before returning. They're absent from
   # state_mesh_shardings and would cause a leaf-count / structure mismatch.
-  return nnx.state(new_state, nnx.Not(nnx.Any(nnx.Intermediate, mtp_losses, mtp_acceptance))), metrics
+  return nnx.state(new_state, nnx.Not(nnx.Intermediate)), metrics
 
 
 def eval_step(model, config, state, data, dropout_rng=None):

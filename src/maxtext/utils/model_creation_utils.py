@@ -574,9 +574,6 @@ def create_nnx_abstract_model(
 
   with nn.logical_axis_rules(config.logical_axis_rules):
     _create_model = get_nnx_create_model_fn(config, mesh, devices, model_mode, rng_key, quant_mode_str=quant_mode_str)
-    if mesh is None:
-      _tmp = nnx.eval_shape(_create_model)
-      mesh = _tmp.mesh
     # Use nnx.eval_shape + our scan-axis-aware sharding helper instead of
     # nnx.get_abstract_model, which uses get_var_pspec internally and ignores
     # param_scan_axis / nnx.PARTITION_NAME metadata set by _create_scanned_layers,
@@ -586,10 +583,10 @@ def create_nnx_abstract_model(
     # AbstractMesh). Sharding is resolved afterwards via the helper, so the
     # wrap is unnecessary here.
     abs_model = nnx.eval_shape(_create_model)
+    if mesh is None:
+      mesh = abs_model.mesh
     graphdef, abs_var_state = nnx.split(abs_model)
-    named_sharding_state = sharding.nnx_construct_named_sharding(
-        abs_var_state, mesh
-    )
+    named_sharding_state = sharding.nnx_construct_named_sharding(abs_var_state, mesh)
     abstract_state = jax.tree.map(
         lambda a, s: jax.ShapeDtypeStruct(a.shape, a.dtype, sharding=s),
         abs_var_state,
