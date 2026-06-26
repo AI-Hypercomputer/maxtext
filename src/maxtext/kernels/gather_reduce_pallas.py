@@ -157,7 +157,7 @@ def sc_gather_reduce(
         def _(col_base):
           accs = []
           for reduce_group in range(out_rows_per_step):
-            acc = jnp.zeros((unpack_col_chunk,), dtype=jnp.float32)
+            row_datas = []
             for row_in_group in range(reduce_group_size):
               row = reduce_group * reduce_group_size + row_in_group
               row_data = gather_ref[pl.ds(row * packing, packing), pl.ds(col_base, unpack_col_chunk)].astype(jnp.float32)
@@ -165,12 +165,8 @@ def sc_gather_reduce(
                 row_data = row_data[0]
               else:
                 assert packing == 2
-                # For dtypes narrower than 32-bit, we end up gathering multiple
-                # rows (since we had to bitcast to int32 before the gather).
-                # This uses the remainder of the packing to choose the only row
-                # we actually care about.
                 row_data = jnp.where(
-                    lax.rem(subchunk_idxs[row], 2) == 0,
+                    lax.bitwise_and(subchunk_idxs[row], 1) == 0,
                     row_data[0],
                     row_data[1],
                 )
@@ -178,8 +174,18 @@ def sc_gather_reduce(
                 row_data *= weights[row]
                 if topk_wgt_zero_nan:
                   row_data = jnp.where(weights[row] == 0.0, jnp.zeros_like(row_data), row_data)
-              acc += row_data
-            accs.append(acc)
+              row_datas.append(row_data)
+
+            # Tree reduction to reduce critical path and stalls
+            while len(row_datas) > 1:
+              next_level = []
+              for i in range(0, len(row_datas), 2):
+                if i + 1 < len(row_datas):
+                  next_level.append(row_datas[i] + row_datas[i + 1])
+                else:
+                  next_level.append(row_datas[i])
+              row_datas = next_level
+            accs.append(row_datas[0])
           out = jnp.stack(accs, axis=0).astype(op.dtype)
           out_ref[:, pl.ds(col_base, unpack_col_chunk)] = out
 
