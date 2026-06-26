@@ -190,8 +190,6 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
   # Each iteration executes layers_0 (HCA, ratio 128) then layers_1 (CSA, ratio 4).
   # This implicitly skips MTP nodes which are completely ignored by this scan.
   for block_idx in range(2):  # 0 for layers_0 (Odd HF layers), 1 for layers_1 (Even HF layers)
-    scanned_layer = jax_weights["decoder"]["scanned_blocks"][f"layers_{block_idx}"]
-
     # Accumulators for stacking along the scan dimension
     collected_layers = []
 
@@ -329,17 +327,19 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
       collected_layers.append(layer_dict)
 
     # Helper to recursively stack lists of dicts
-    def recursive_stack(list_of_dicts):
+    def recursive_stack(list_of_dicts, path=""):
       if not list_of_dicts:
         return {}
       stacked = {}
       for k in list_of_dicts[0].keys():
+        current_path = f"{path}/{k}" if path else k
         if isinstance(list_of_dicts[0][k], dict):
-          stacked[k] = recursive_stack([d[k] for d in list_of_dicts if k in d])
+          stacked[k] = recursive_stack([d[k] for d in list_of_dicts if k in d], current_path)
         elif isinstance(list_of_dicts[0][k], np.ndarray):
           # In MaxText nn.scan, the scan dimension depends on the variable definition.
           # Bias and 1D items generally prepend the scan axis (axis=0),
           # while kernels append it after input dim (usually axis=1).
+          logging.info(f"Stacking array for block {block_idx}: {current_path} ...")
           if k in ["sinks", "bias"]:
             stacked[k] = np.stack([d[k] for d in list_of_dicts], axis=0)
           else:
