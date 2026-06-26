@@ -6,7 +6,7 @@ import numpy as np
 from tqdm import tqdm
 from absl import logging
 
-import maxtext.max_logging as max_logging
+from maxtext.utils import max_logging
 from maxtext.checkpoint_conversion.utils.utils import save_weights_to_checkpoint, get_state_dict_from_model
 from maxtext.checkpoint_conversion.utils.hf_model_configs import MODEL_PARAMS_DICT
 
