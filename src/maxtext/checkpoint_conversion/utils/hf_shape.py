@@ -1105,6 +1105,62 @@ def MIXTRAL_HF_WEIGHTS_TO_SHAPE(config):
   return shapes
 
 
+def QWEN3_VL_HF_WEIGHTS_TO_SHAPE(config):
+  """Returns mapping between HuggingFace Qwen3-VL weights path and weights shape."""
+  text_shapes = QWEN_HF_WEIGHTS_TO_SHAPE(config["text_config"])
+  vl_shapes = {}
+  for k, v in text_shapes.items():
+    if k.startswith("model."):
+      new_k = k.replace("model.", "model.language_model.")
+      vl_shapes[new_k] = v
+    else:
+      vl_shapes[k] = v
+
+  vision_config = config["vision_config"]
+  v_depth = vision_config["depth"]
+  v_hidden_size = vision_config["hidden_size"]
+  v_intermediate_size = vision_config["intermediate_size"]
+  v_out_hidden_size = vision_config["out_hidden_size"]
+
+  vl_shapes["model.visual.patch_embed.proj.weight"] = [v_hidden_size, 3, 2, 16, 16]
+  vl_shapes["model.visual.patch_embed.proj.bias"] = [v_hidden_size]
+  vl_shapes["model.visual.pos_embed.weight"] = [vision_config["num_position_embeddings"], v_hidden_size]
+
+  for i in range(v_depth):
+    prefix = f"model.visual.blocks.{i}"
+    vl_shapes[f"{prefix}.norm1.weight"] = [v_hidden_size]
+    vl_shapes[f"{prefix}.norm1.bias"] = [v_hidden_size]
+    vl_shapes[f"{prefix}.norm2.weight"] = [v_hidden_size]
+    vl_shapes[f"{prefix}.norm2.bias"] = [v_hidden_size]
+    vl_shapes[f"{prefix}.attn.qkv.weight"] = [3 * v_hidden_size, v_hidden_size]
+    vl_shapes[f"{prefix}.attn.qkv.bias"] = [3 * v_hidden_size]
+    vl_shapes[f"{prefix}.attn.proj.weight"] = [v_hidden_size, v_hidden_size]
+    vl_shapes[f"{prefix}.attn.proj.bias"] = [v_hidden_size]
+    vl_shapes[f"{prefix}.mlp.linear_fc1.weight"] = [v_intermediate_size, v_hidden_size]
+    vl_shapes[f"{prefix}.mlp.linear_fc1.bias"] = [v_intermediate_size]
+    vl_shapes[f"{prefix}.mlp.linear_fc2.weight"] = [v_hidden_size, v_intermediate_size]
+    vl_shapes[f"{prefix}.mlp.linear_fc2.bias"] = [v_hidden_size]
+
+  deepstack_indexes = vision_config.get("deepstack_visual_indexes", [5, 11, 17])
+  for merger_idx, _ in enumerate(deepstack_indexes):
+    prefix = f"model.visual.deepstack_merger_list.{merger_idx}"
+    vl_shapes[f"{prefix}.norm.weight"] = [v_intermediate_size]
+    vl_shapes[f"{prefix}.norm.bias"] = [v_intermediate_size]
+    vl_shapes[f"{prefix}.linear_fc1.weight"] = [v_intermediate_size, v_intermediate_size]
+    vl_shapes[f"{prefix}.linear_fc1.bias"] = [v_intermediate_size]
+    vl_shapes[f"{prefix}.linear_fc2.weight"] = [v_out_hidden_size, v_intermediate_size]
+    vl_shapes[f"{prefix}.linear_fc2.bias"] = [v_out_hidden_size]
+
+  vl_shapes["model.visual.merger.norm.weight"] = [v_hidden_size]
+  vl_shapes["model.visual.merger.norm.bias"] = [v_hidden_size]
+  vl_shapes["model.visual.merger.linear_fc1.weight"] = [v_intermediate_size, v_intermediate_size]
+  vl_shapes["model.visual.merger.linear_fc1.bias"] = [v_intermediate_size]
+  vl_shapes["model.visual.merger.linear_fc2.weight"] = [v_out_hidden_size, v_intermediate_size]
+  vl_shapes["model.visual.merger.linear_fc2.bias"] = [v_out_hidden_size]
+
+  return vl_shapes
+
+
 # {maxtext model name: {hf weight name: hf shape}}
 HF_SHAPE = {
     "gemma2-2b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
@@ -1126,6 +1182,7 @@ HF_SHAPE = {
     "qwen3-8b": QWEN_HF_WEIGHTS_TO_SHAPE,
     "qwen3-14b": QWEN_HF_WEIGHTS_TO_SHAPE,
     "qwen3-32b": QWEN_HF_WEIGHTS_TO_SHAPE,
+    "qwen3-vl-4b": QWEN3_VL_HF_WEIGHTS_TO_SHAPE,
     "llama3.1-8b": LLAMA31_HF_WEIGHTS_TO_SHAPE,
     "llama3.1-8b-Instruct": LLAMA31_HF_WEIGHTS_TO_SHAPE,
     "llama3.1-70b": LLAMA31_HF_WEIGHTS_TO_SHAPE,

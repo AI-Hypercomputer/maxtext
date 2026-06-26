@@ -372,7 +372,8 @@ def save_config_file(
 ):
   """Saves the model configuration file(config.json)."""
   if jax.process_index() == 0:
-    config.architectures = [MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]]
+    if config.model_type in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES:
+      config.architectures = [MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]]
     if output_dir_final.startswith("hf://"):
       max_logging.log(f"  Serializing {file_name} to memory for Hugging Face Hub upload...")
       json_string = config.to_json_string()
