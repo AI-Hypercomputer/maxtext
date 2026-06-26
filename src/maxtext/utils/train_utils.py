@@ -239,9 +239,17 @@ def setup_train_loop(config, recorder, devices=None):
 
     if config.pure_nnx:
       # For NNX, the train state is wrapped in the TrainStateNNX module.
+      # pylint: disable=import-outside-toplevel
+      from maxtext.utils import lora_utils
+
       def create_train_state_fn():
         model = _create_model_partial()
-        optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
+        lora_enabled = config.lora.enable_lora if hasattr(config, "lora") else False
+        if lora_enabled:
+          model = lora_utils.apply_lora_to_model(model, mesh, config)
+          optimizer = nnx.Optimizer(model, tx, wrt=nnx.LoRAParam)
+        else:
+          optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
         return train_state_nnx.TrainStateNNX(model, optimizer)
 
       init_state_fn = create_train_state_fn
@@ -350,6 +358,16 @@ def setup_train_loop(config, recorder, devices=None):
   if config.pure_nnx:
     train_state = nnx.merge(state_graphdef, state)
     model = train_state.model
+    lora_enabled = config.lora.enable_lora if hasattr(config, "lora") else False
+    lora_restore_path = config.lora.lora_restore_path if lora_enabled else None
+    if lora_enabled and lora_restore_path:
+      # pylint: disable=import-outside-toplevel
+      from maxtext.utils import lora_utils
+
+      step = int(train_state.optimizer.step.get_value())
+      if step == 0:
+        train_state = lora_utils.restore_lora_from_path(train_state, config)
+        model = train_state.model
   else:
     train_state = state
 

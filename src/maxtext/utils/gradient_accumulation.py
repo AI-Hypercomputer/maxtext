@@ -85,7 +85,12 @@ def gradient_accumulation_loss_and_grad(
     ga_params_shardings = grad_shardings = params_shardings
 
   if is_nnx:
-    graphdef, params, rest = nnx.split(model, nnx.Param, ...)
+    lora_enabled = config.lora.enable_lora if hasattr(config, "lora") else False
+    if lora_enabled:
+      graphdef, params, base_params, rest = nnx.split(model, nnx.LoRAParam, nnx.Param, ...)
+    else:
+      graphdef, params, rest = nnx.split(model, nnx.Param, ...)
+      base_params = None
 
   # When using Zero-1 optimizer sharding, cast params to lower precision and apply sharding constraints
   # so that all-gather is done once in the lower precision before the gradient accumulation loop
@@ -102,7 +107,8 @@ def gradient_accumulation_loss_and_grad(
 
   ga_params = jax.tree.map(_maybe_shard_with_name, ga_params, ga_params_shardings)
   if is_nnx:
-    grad_func = nnx.value_and_grad(_loss_fn, argnums=0, has_aux=True)
+    param_filter = nnx.LoRAParam if lora_enabled else nnx.Param
+    grad_func = nnx.value_and_grad(_loss_fn, argnums=0, has_aux=True, wrt=param_filter)
   else:
     grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
 
@@ -111,9 +117,15 @@ def gradient_accumulation_loss_and_grad(
     if is_nnx:
       # Reconstruct the model using the fixed parameters (ga_params)
       # and the advancing non-parameter state (RNGs) from the carry.
-      local_model = nnx.merge(graphdef, ga_params, acc_grad_and_loss["rest_state"], copy=True)
+      if lora_enabled:
+        local_model = nnx.merge(graphdef, ga_params, base_params, acc_grad_and_loss["rest_state"], copy=True)
+      else:
+        local_model = nnx.merge(graphdef, ga_params, acc_grad_and_loss["rest_state"], copy=True)
       (_, aux), cur_batch_gradient = grad_func(local_model, config, data, None, None, is_train=True)
-      _, _, next_rest_state = nnx.split(local_model, nnx.Param, ...)
+      if lora_enabled:
+        _, _, _, next_rest_state = nnx.split(local_model, nnx.LoRAParam, nnx.Param, ...)
+      else:
+        _, _, next_rest_state = nnx.split(local_model, nnx.Param, ...)
       acc_grad_and_loss["rest_state"] = next_rest_state
     else:
       rng = (
