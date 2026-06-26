@@ -97,11 +97,14 @@ model_name=qwen3-0.6b \
 tokenizer_path=Qwen/Qwen3-0.6B \
 run_name=$WORKLOAD_NAME \
 checkpoint_storage_use_ocdbt=False \
-async_scheduling=False \
+async_scheduling=True \
 base_output_directory=$BASE_OUTPUT_DIRECTORY \
 chips_per_vm=8 \
 num_batches=20 \
 num_test_batches=0 \
+profiler=xplane \
+skip_first_n_steps_for_profiler=10 \
+profiler_steps=1 \
 rl.num_generations=8 \
 rl.grpo_beta=0.05 \
 rl.grpo_epsilon=0.2 \
@@ -123,7 +126,7 @@ rollout_tensor_parallelism=4 \
 enable_dp_attention=false \
 hbm_utilization_vllm=0.7 \
 max_num_seqs=480 \
-max_num_batched_tokens=24576 \
+max_num_batched_tokens=24832 \
 scan_layers=True \
 allow_split_physical_axes=True \
 enable_tunix_perf_metrics=True \
@@ -152,9 +155,14 @@ rollout_vllm_init_with_random_weights=True"
   --custom-pathways-server-args="" \
   --env PHASED_PROFILING_DIR="${BASE_OUTPUT_DIRECTORY}${WORKLOAD_NAME}/tensorboard" \
   --env PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR=100 \
+  --env PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP=10000 \
+  --env PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD=5000 \
+  --env RPA_D_BLOCK_SIZES="1,4096,1,4096" \
+  --env TUNIX_PROFILE_ROLLOUT_STEP="10" \
   --command="cd /app; python3 scripts/patch_vllm_sampler.py; pip install -e /app/pathways-utils --no-deps; pip install -e . --no-deps; ${MAXTEXT_COMMAND}" \
   --dry-run \
   --output-manifest-file=generated_manifest.yaml
+
 
 echo "Applying Warden webhook bypass patch to generated_manifest.yaml..."
 python3 scripts/patch_manifest.py generated_manifest.yaml

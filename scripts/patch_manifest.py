@@ -4,6 +4,8 @@ import yaml
 import sys
 
 manifest_file = sys.argv[1]
+built_image = sys.argv[2] if (len(sys.argv) > 2 and sys.argv[2] != "") else None
+kube_dns_ip = sys.argv[3] if len(sys.argv) > 3 else "34.118.224.10"
 
 with open(manifest_file, "r", encoding="utf-8") as f:
   data = list(yaml.load_all(f, Loader=yaml.FullLoader))
@@ -46,7 +48,6 @@ for doc in data:
               f"Moved cloud.google.com/gke-tpu-topology={topology} "
               "to annotations as cloud.google.com/gke-tpu-slice-topology."
           )
-          del node_selector["cloud.google.com/gke-tpu-topology"]
 
         # 3. Patch placement-policy-name if it has mismatched suffix due to XPK version differences
         if "cloud.google.com/placement-policy-name" in node_selector:
@@ -57,13 +58,9 @@ for doc in data:
             )
             print(f"Patched placement-policy-name to {node_selector['cloud.google.com/placement-policy-name']}")
 
-        # 4. Remove exclusive-topology annotation from replicatedJob metadata
-        job_template = job.get("template", {})
-        job_metadata = job_template.setdefault("metadata", {})
-        job_annotations = job_metadata.setdefault("annotations", {})
-        if "alpha.jobset.sigs.k8s.io/exclusive-topology" in job_annotations:
-          del job_annotations["alpha.jobset.sigs.k8s.io/exclusive-topology"]
-          print("Removed alpha.jobset.sigs.k8s.io/exclusive-topology annotation.")
+        # 3.5 Inject dnsConfig to resolve internal pods DNS and external googleapis.com DNS over hostNetwork
+        pod_spec["dnsConfig"] = {"nameservers": [kube_dns_ip, "8.8.8.8"]}
+        print(f"Injected dnsConfig nameservers: [{kube_dns_ip}, 8.8.8.8] to worker pod spec.")
 
         # 5. Add connection handshake timeout to pathways-worker container
         containers = pod_spec.setdefault("containers", [])
@@ -78,6 +75,9 @@ for doc in data:
         containers = pod_spec.setdefault("containers", [])
         for container in containers:
           if container.get("name") == "jax-tpu":
+            if built_image:
+              container["image"] = built_image
+              print(f"Replaced placeholder image with built image: {built_image}")
             command = container.get("command", [])
             if len(command) >= 3 and "python3 scripts/patch_vllm_sampler.py;" in command[2]:
               with open("scripts/patch_vllm_sampler.py", "r", encoding="utf-8") as pf:
@@ -85,6 +85,12 @@ for doc in data:
               injected_patch = f"cat << 'EOF' > scripts/patch_vllm_sampler.py\n{patch_content}EOF\npython3 scripts/patch_vllm_sampler.py;"  # pylint: disable=line-too-long
               command[2] = command[2].replace("python3 scripts/patch_vllm_sampler.py;", injected_patch)
               print("Injected local scripts/patch_vllm_sampler.py into pathways-head command.")
+            elif len(command) >= 3 and "bash scripts/run_all.sh" in command[2]:
+              with open("scripts/run_all.sh", "r", encoding="utf-8") as rf:
+                run_all_content = rf.read()
+              injected_script = f"mkdir -p scripts && cat << 'EOF' > scripts/run_all.sh\n{run_all_content}EOF\nchmod +x scripts/run_all.sh;"  # pylint: disable=line-too-long
+              command[2] = command[2].replace("bash scripts/run_all.sh", f"{injected_script} bash scripts/run_all.sh")
+              print("Injected local scripts/run_all.sh into pathways-head command.")
 
 with open(manifest_file, "w", encoding="utf-8") as f:
   yaml.dump_all(data, f)

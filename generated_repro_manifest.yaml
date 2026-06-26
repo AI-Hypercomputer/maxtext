@@ -1,0 +1,317 @@
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  labels:
+    kueue.x-k8s.io/queue-name: multislice-queue
+    xpk.google.com/workload: mohit-v5p-repro-13573
+  name: mohit-v5p-repro-13573
+spec:
+  coordinator:
+    replicatedJob: pathways-head
+  failurePolicy:
+    restartStrategy: Recreate
+  network:
+    enableDNSHostnames: true
+    publishNotReadyAddresses: true
+  replicatedJobs:
+  - name: worker
+    replicas: 1
+    template:
+      metadata:
+        annotations:
+          alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
+      spec:
+        backoffLimit: 32
+        completionMode: Indexed
+        completions: 8
+        parallelism: 8
+        template:
+          metadata:
+            annotations:
+              cloud.google.com/gke-tpu-slice-topology: 2x4x4
+              cloud.google.com/skip-tpu-webhook-check: 'true'
+            labels:
+              xpk.google.com/workload: mohit-v5p-repro-13573
+          spec:
+            containers:
+            - args:
+              - --server_port=29005
+              - --resource_manager_address=$(PATHWAYS_HEAD):29001
+              - --gcs_scratch_location=gs://cloud-pathways-staging/tmp
+              - --temporary_flags_for_debugging=temporary_flag_for_debugging_pipe_unreachable_timeout=30m
+              env:
+              - name: TPU_MIN_LOG_LEVEL
+                value: '0'
+              - name: TF_CPP_MIN_LOG_LEVEL
+                value: '0'
+              - name: XCLOUD_ENVIRONMENT
+                value: GCP
+              - name: MEGASCALE_GRPC_ENABLE_XOR_TRACER
+                value: 'false'
+              - name: MEGASCALE_NUM_SLICES
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/replicatedjob-replicas']
+              - name: JOBSET_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['jobset.sigs.k8s.io/jobset-name']
+              - name: REPLICATED_JOB_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['jobset.sigs.k8s.io/replicatedjob-name']
+              - name: MEGASCALE_SLICE_ID
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/job-index']
+              - name: PATHWAYS_HEAD
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              - name: MEGASCALE_COORDINATOR_ADDRESS
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              - name: PHASED_PROFILING_DIR
+                value: gs://runner-maxtext-logs/mohit-v5p-repro-13573/tensorboard
+              - name: PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR
+                value: '50'
+              - name: PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP
+                value: '10'
+              - name: PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD
+                value: '2000'
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260608-jax_0.10.1
+              imagePullPolicy: Always
+              name: pathways-worker
+              ports:
+              - containerPort: 29005
+                protocol: TCP
+              - containerPort: 29006
+                protocol: TCP
+              - containerPort: 8471
+                protocol: TCP
+              - containerPort: 8080
+                protocol: TCP
+              resources:
+                limits:
+                  google.com/tpu: '4'
+              volumeMounts:
+              - mountPath: /tmp
+                name: shared-tmp
+            dnsConfig:
+              nameservers:
+              - 34.118.224.10
+              - 8.8.8.8
+            dnsPolicy: ClusterFirstWithHostNet
+            hostNetwork: true
+            nodeSelector:
+              cloud.google.com/gke-tpu-accelerator: tpu-v5p-slice
+              cloud.google.com/gke-tpu-topology: 2x4x4
+            priorityClassName: very-high
+            restartPolicy: OnFailure
+            terminationGracePeriodSeconds: 30
+            tolerations:
+            - key: google.com/tpu
+              operator: Exists
+            volumes:
+            - hostPath:
+                path: /tmp
+                type: DirectoryOrCreate
+              name: shared-tmp
+  - name: pathways-head
+    replicas: 1
+    template:
+      metadata:
+        annotations:
+          alpha.jobset.sigs.k8s.io/exclusive-topology: kubernetes.io/hostname
+      spec:
+        backoffLimit: 0
+        completionMode: Indexed
+        completions: 1
+        parallelism: 1
+        template:
+          spec:
+            containers:
+            - command:
+              - bash
+              - -c
+              - "echo XPK Start: $(date);\n_sigterm() (kill -SIGTERM $! 2>/dev/null;);\n\
+                trap _sigterm SIGTERM;\n\n(cd /app; pip install -e . --no-deps; mkdir\
+                \ -p scripts && cat << 'EOF' > scripts/run_all.sh\n#!/bin/bash\nexport\
+                \ VLLM_ENGINE_READY_TIMEOUT_S=1800\n\n# Configure tpu-inference automatic\
+                \ phased profiling\nexport PHASED_PROFILING_DIR=${PHASED_PROFILING_DIR:=\"\
+                gs://runner-maxtext-logs/${WORKLOAD_NAME:-mohit-v5p-bench-repro}/tensorboard\"\
+                }\nexport PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR=${PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR:=50}\n\
+                export PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP=${PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP:=10}\n\
+                export PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD=${PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD:=1000}\n\
+                \nVLLM_ENABLE_V1_MULTIPROCESSING=0 MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax\
+                \ JAX_PLATFORMS=proxy,cpu JAX_BACKEND_TARGET=grpc://127.0.0.1:29000\
+                \ vllm serve Qwen/Qwen3-0.6B \\\n  --port 8000 \\\n  --data-parallel-size\
+                \ 4 \\\n  --tensor-parallel-size 4 \\\n  --max-model-len 24576 \\\n\
+                \  --max-num-batched-tokens 24576 \\\n  --max-num-seqs 64 \\\n  --gpu-memory-utilization\
+                \ 0.4 \\\n  --no-enable-prefix-caching \\\n  --trust-remote-code &\n\
+                SERVER_PID=$!\n\n\n# 2. Wait for the server to be healthy\necho \"\
+                Waiting for server to become healthy...\"\nSERVER_HEALTHY=false\n\
+                for i in $(seq 1 240); do\n  if curl -sf http://localhost:8000/health\
+                \ > /dev/null 2>&1; then\n    echo \"Server is healthy!\"\n    SERVER_HEALTHY=true\n\
+                \    break\n  fi\n  if ! kill -0 \"${SERVER_PID}\" 2>/dev/null; then\n\
+                \    echo \"Server process died.\"\n    exit 1\n  fi\n  sleep 10\n\
+                done\n\nif [ \"$SERVER_HEALTHY\" = \"false\" ]; then\n  echo \"Server\
+                \ failed to become healthy within timeout.\"\n  exit 1\nfi\n\n# 3.\
+                \ Run the benchmark client\nvllm bench serve \\\n  --model Qwen/Qwen3-0.6B\
+                \ \\\n  --host localhost \\\n  --port 8000 \\\n  --dataset-name random\
+                \ \\\n  --random-input-len 16384 \\\n  --random-output-len 8192 \\\
+                \n  --num-prompts 480 \\\n  --request-rate inf \\\n  --ignore-eos\
+                \ \\\n  --profile \\\n  --trust-remote-code\nEXIT_CODE=$?\nEOF\nchmod\
+                \ +x scripts/run_all.sh; bash scripts/run_all.sh) & PID=$!;\nwhile\
+                \ kill -0 $PID 2>/dev/null;\n    do sleep 5;\ndone;\nwait $PID;\n\
+                EXIT_CODE=$?;\n\necho XPK End: $(date);\necho EXIT_CODE=$EXIT_CODE;\n\
+                \n\nexit $EXIT_CODE\n"
+              env:
+              - name: PATHWAYS_HEAD
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              - name: JAX_PLATFORMS
+                value: proxy
+              - name: XCLOUD_ENVIRONMENT
+                value: GCP
+              - name: JAX_BACKEND_TARGET
+                value: grpc://$(PATHWAYS_HEAD):29000
+              - name: PHASED_PROFILING_DIR
+                value: gs://runner-maxtext-logs/mohit-v5p-repro-13573/tensorboard
+              - name: PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR
+                value: '50'
+              - name: PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP
+                value: '10'
+              - name: PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD
+                value: '2000'
+              image: gcr.io/cloud-tpu-multipod-dev/mohitkhatwani-runner:trkw-2026-06-25-22-36-41
+              imagePullPolicy: Always
+              name: jax-tpu
+              resources:
+                limits:
+                  cpu: '24'
+                  memory: 100G
+              securityContext:
+                privileged: true
+              volumeMounts:
+              - mountPath: /tmp
+                name: shared-tmp
+            dnsPolicy: ClusterFirstWithHostNet
+            hostNetwork: true
+            initContainers:
+            - args:
+              - --server_port=29000
+              - --resource_manager_address=$(PATHWAYS_HEAD):29001
+              - --gcs_scratch_location=gs://cloud-pathways-staging/tmp
+              - --xla_tpu_dvfs_p_state=7
+              - --xla_tpu_scoped_vmem_limit_kib=65536
+              - --xla_tpu_num_sparse_cores_for_gather_offloading=1
+              - --xla_tpu_bf16_emission_mode=NATIVE_EMISSION
+              - --xla_tpu_enable_sparse_core_reduce_scatter_v2=true
+              - --xla_tpu_enable_sparse_core_collective_offload_all_gather=true
+              - --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true
+              - --xla_tpu_use_tc_device_shape_on_sc=True
+              - --xla_sc_disable_megacore_partitioning=True
+              - --xla_tpu_enable_async_collective_fusion_fuse_all_gather=false
+              - --xla_enable_async_all_gather=true
+              - --xla_tpu_prefer_async_allgather_to_allreduce=true
+              - --xla_tpu_enable_sparse_core_collective_offload_all_reduce=true
+              - --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true
+              - --xla_tpu_enable_sparse_core_collective_offload_3d_all_gather=true
+              - --xla_tpu_use_single_sparse_core_for_all_gather_offload=true
+              - --xla_tpu_enable_concurrent_sparse_core_offloading=true
+              - --xla_tpu_enable_offloading_gather_to_sparsecore=true
+              - --xla_tpu_sparse_core_all_gather_latency_multiplier=1
+              - --xla_tpu_sparse_core_reduce_scatter_latency_multiplier=3
+              - --xla_tpu_enable_sparse_core_collective_aggregator=true
+              - --xla_tpu_enable_latency_hiding_layer_scheduler=true
+              - --xla_tpu_scheduler_percent_shared_memory_limit=150
+              - --xla_tpu_enable_layer_scheduler_for_dependent_collectives=true
+              - --xla_tpu_enable_sparse_core_collective_offload_nd_reduce_scatter=true
+              - --xla_tpu_pcie_bandwidth_multiplier=0.03
+              - --xla_tpu_enable_sparse_core_offload_queuing_in_lhs=true
+              - --xla_tpu_enable_multi_compute_overlap_in_layer_scheduler=false
+              - --xla_tpu_enable_3d_reduce_scatter_decomposer=false
+              env:
+              - name: PATHWAYS_HEAD
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              - name: PHASED_PROFILING_DIR
+                value: gs://runner-maxtext-logs/mohit-v5p-repro-13573/tensorboard
+              - name: PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR
+                value: '50'
+              - name: PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP
+                value: '10'
+              - name: PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD
+                value: '2000'
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:20260608-jax_0.10.1
+              imagePullPolicy: Always
+              name: pathways-proxy
+              ports:
+              - containerPort: 29000
+                protocol: TCP
+              resources:
+                limits:
+                  cpu: '16'
+                  memory: 100G
+              restartPolicy: Always
+            - args:
+              - --server_port=29001
+              - --gcs_scratch_location=gs://cloud-pathways-staging/tmp
+              - --node_type=resource_manager
+              - --instance_count=1
+              - --instance_type=tpuv5:2x4x4
+              env:
+              - name: REPLICATED_JOB_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['jobset.sigs.k8s.io/replicatedjob-name']
+              - name: JOBSET_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['jobset.sigs.k8s.io/jobset-name']
+              - name: HOST_ADDRESS
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              - name: TPU_SKIP_MDS_QUERY
+                value: 'true'
+              - name: PHASED_PROFILING_DIR
+                value: gs://runner-maxtext-logs/mohit-v5p-repro-13573/tensorboard
+              - name: PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR
+                value: '50'
+              - name: PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP
+                value: '10'
+              - name: PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD
+                value: '2000'
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260608-jax_0.10.1
+              imagePullPolicy: Always
+              name: pathways-rm
+              ports:
+              - containerPort: 29001
+                protocol: TCP
+              - containerPort: 29002
+                protocol: TCP
+              resources:
+                limits:
+                  cpu: '8'
+                  memory: 32G
+              restartPolicy: Always
+            nodeSelector:
+              cloud.google.com/gke-nodepool: cpu-np
+            restartPolicy: Never
+            volumes:
+            - hostPath:
+                path: /tmp
+                type: DirectoryOrCreate
+              name: shared-tmp
+  startupPolicy:
+    startupPolicyOrder: InOrder
+  successPolicy:
+    operator: All
+    targetReplicatedJobs:
+    - pathways-head
+  suspend: false
