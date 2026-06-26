@@ -11,6 +11,8 @@ from maxtext.checkpoint_conversion.utils.utils import save_weights_to_checkpoint
 from safetensors import safe_open
 import pathlib
 
+absl.logging.set_verbosity(absl.logging.INFO)  # for max_logging.log
+
 def get_state_dict_from_model(base_model_path):
   ckpt_paths = sorted(pathlib.Path(base_model_path).glob("[!.]*.safetensors"))
   chkpt_vars = {}
