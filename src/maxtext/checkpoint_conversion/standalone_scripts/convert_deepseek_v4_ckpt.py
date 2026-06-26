@@ -340,7 +340,7 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
           # Bias and 1D items generally prepend the scan axis (axis=0),
           # while kernels append it after input dim (usually axis=1).
           logging.info(f"Stacking array for block {block_idx}: {current_path} ...")
-          if k in ["sinks", "bias"]:
+          if k in ["sinks"]:
             stacked[k] = np.stack([d[k] for d in list_of_dicts], axis=0)
           else:
             stacked[k] = np.stack([d[k] for d in list_of_dicts], axis=1)
