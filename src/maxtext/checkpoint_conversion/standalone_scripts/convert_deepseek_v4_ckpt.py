@@ -20,7 +20,7 @@ def get_state_dict_from_model(base_model_path):
       for raw_key in f.keys():
         chkpt_vars[raw_key] = f.get_tensor(raw_key)
   return chkpt_vars
-from maxtext.checkpoint_conversion.utils.hf_model_configs import MODEL_PARAMS_DICT
+
 
 def _get_expert_stack(chkpt_vars, hf_prefix, num_experts, weight_name):
   stacked_weights = []
