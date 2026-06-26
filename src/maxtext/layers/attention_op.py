@@ -1189,7 +1189,7 @@ class AttentionOp(nnx.Module):
   ) -> tuple[Array, Array]:
     """TPU Flash Attention."""
 
-    cp_size = self.config.context_parallel_size
+    cp_size = self.mesh.shape.get(self.config.context_sharding, 1)
     load_balanced_context_parallel = self.config.context_parallel_load_balance
 
     # Transpose to ('batch', 'heads', 'length', 'kv')

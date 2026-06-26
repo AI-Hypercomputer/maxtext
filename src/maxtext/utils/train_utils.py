@@ -216,6 +216,7 @@ def setup_train_loop(config, recorder, devices=None):
     is_training = True
     init_rng = jax.random.PRNGKey(config.init_weights_seed)
     mesh = maxtext_utils.get_mesh_from_config(config, devices)
+    context_parallel_size = mesh.shape.get(config.context_sharding, 1)
     if config.pure_nnx:
       # Create abstract NNX model.
       _create_model_partial, model = model_creation_utils.create_nnx_abstract_model(config, mesh, devices)
@@ -244,7 +245,7 @@ def setup_train_loop(config, recorder, devices=None):
     rampup_manager = create_rampup_manager(config, checkpoint_manager)
     # Validate context parallelism with packing configuration
     context_parallel_strategy = config.context_parallel_strategy.lower()
-    if config.context_parallel_size > 1 and config.packing:
+    if context_parallel_size > 1 and config.packing:
       if config.dataset_type == "synthetic":
         raise ValueError(
             "Context parallelism with sequence packing is not supported with synthetic data. "
@@ -263,7 +264,7 @@ def setup_train_loop(config, recorder, devices=None):
 
     # Apply reordering wrapper to data iterators if context parallelism is enabled
     with jax.set_mesh(mesh):
-      if config.context_parallel_size > 1 and config.context_parallel_load_balance:
+      if context_parallel_size > 1 and config.context_parallel_load_balance:
 
         # Determine load balancing reorder strategy based on whether packing is enabled
         if config.context_parallel_reorder_strategy == ReorderStrategy.AUTO:
@@ -276,7 +277,7 @@ def setup_train_loop(config, recorder, devices=None):
           reorder_strategy = config.context_parallel_reorder_strategy
 
         reorder_fn = maxtext_utils.get_reorder_callable(
-            config.context_parallel_size, config.shard_mode, reorder_strategy, config.hardware
+            context_parallel_size, config.shard_mode, reorder_strategy, config.hardware
         )
         data_iterator = map(reorder_fn, data_iterator)
         if eval_data_iterator:

@@ -2293,11 +2293,6 @@ class DerivedValues(BaseModel):
       description="Boolean flag indicating if pipeline parallelism is active across ICI or DCN.",
   )
 
-  context_parallel_size: None | int = Field(
-      None,
-      description="The total size of context parallelism, derived from ICI and DCN values.",
-  )
-
   num_target_devices: None | int = Field(
       None,
       description="The number of devices computed from topology in train_compile or jax.devices() in train",
@@ -2891,9 +2886,6 @@ class MaxTextConfig(
       self.tensors_on_device = [t for t in tensors if getattr(self, t) == "device"]
       self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
 
-    self.context_parallel_size = getattr(self, f"ici_{self.context_sharding}_parallelism", 1) * getattr(
-        self, f"dcn_{self.context_sharding}_parallelism", 1
-    )
     if self.pipeline_parallel_layers == -1:
       if self.decoder_block == DecoderBlockType.DEEPSEEK:
         moe_layers = self.num_decoder_layers - self.first_num_dense_layers
@@ -3199,7 +3191,10 @@ class MaxTextConfig(
         and (self.per_device_batch_size * self.max_target_length) % self.num_vocab_tiling != 0
     ):
       raise ValueError("Per device batch size times sequence length should be divisible by the number of vocab tiles.")
-    if self.context_parallel_size > 1 and self.context_parallel_strategy.lower() == "ring":
+    context_parallel_size = getattr(self, f"ici_{self.context_sharding}_parallelism", 1) * getattr(
+        self, f"dcn_{self.context_sharding}_parallelism", 1
+    )
+    if context_parallel_size > 1 and self.context_parallel_strategy.lower() == "ring":
       if "gpu" not in self.hardware:
         raise ValueError(
             "Ring context parallelism strategy (context_parallel_strategy='ring') is only supported on GPUs."
@@ -3209,7 +3204,7 @@ class MaxTextConfig(
     # because test code paths may load the same config but use a different reorder path.
     # Training's runtime path in max_utils.reorder_causal_load_balanced enforces this.
     if (
-        self.context_parallel_size > 1
+        context_parallel_size > 1
         and "gpu" not in self.hardware
         and self.context_parallel_load_balance
         and self.context_parallel_reorder_strategy == ReorderStrategy.STRIPED
