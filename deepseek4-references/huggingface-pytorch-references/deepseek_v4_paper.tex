@@ -1,0 +1,463 @@
+\title{\centering \dsviv{}: \\ Towards Highly Efficient Million-Token Context Intelligence}
+
+\author[*]{
+\vspace{-0.8cm}
+DeepSeek-AI
+\\
+\small
+\vspace{-0.3cm}
+\texttt{research@deepseek.com}
+\vspace{-0.9cm}
+}
+
+\input{commands.tex}
+
+\newcommand{\fix}{\marginpar{FIX}}
+\newcommand{\new}{\marginpar{NEW}}
+
+\newcommand{\zdaxie}[1]{\textcolor[rgb]{0.545,0,0.071}{#1}}
+
+\begin{abstract}
+\vspace{-0.5cm}
+
+We present a preview version of \dsviv{} series, including two strong Mixture-of-Experts~(MoE) language models --- \dsvivp{} with \dsvivptp{} parameters (\dsvivpap{} activated) and \dsvivf{} with \dsvivftp{} parameters (\dsvivfap{} activated) --- both supporting a context length of one million tokens.
+\dsviv{} series incorporate several key upgrades in architecture and optimization: 
+(1) a hybrid attention architecture that combines \csafull{}~(\csa{}) and \hcafull{}~(\hca{}) to improve long-context efficiency; 
+(2) \mhcfull{} (\mhc{}) that enhance conventional residual connections;
+(3) and the Muon optimizer for faster convergence and greater training stability.
+We pre-train both models on more than 32T diverse and high-quality tokens, followed by a comprehensive post-training pipeline that unlocks and further enhances their capabilities.
+\dsvivpm{}, the maximum reasoning effort mode of \dsvivp{}, redefines the state-of-the-art for open models, outperforming its predecessors in core tasks.
+Meanwhile, \dsviv{} series are highly efficient in long-context scenarios. 
+In the one-million-token context setting, \dsvivp{} requires only 27\% of single-token inference FLOPs and 10\% of KV cache compared with \dsviiiII{}. 
+This enables us to routinely support one-million-token contexts, thereby making long-horizon tasks and further test-time scaling more feasible.
+The model checkpoints are available at \url{https://huggingface.co/collections/deepseek-ai/deepseek-v4}. 
+
+\end{abstract}
+
+\begin{document}
+\begin{CJK*}{UTF8}{gbsn}
+
+\maketitle
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=1.0\textwidth]{figures/dsv4_performance.pdf}
+\caption{
+    \textbf{Left}: benchmark performance of \dsvivpm{} and its counterparts.
+    \textbf{Right}: inference FLOPs and KV cache size of \dsviv{} series and \dsviiiII. 
+}
+\label{fig:dsv4_performance_and_cost}
+\end{figure}
+
+\newpage
+
+\begin{spacing}{0.9}
+\tableofcontents
+\end{spacing}
+
+\newpage
+
+\section{Introduction}
+
+% background
+The emergence of reasoning models~\citep{o1,dsr1} has established a new paradigm of test-time scaling, driving substantial performance gains for Large Language Models~(LLMs). 
+However, this scaling paradigm is fundamentally constrained by the quadratic computational complexity of the vanilla attention mechanism~\citep{transformer}, which creates a prohibitive bottleneck for ultra-long contexts and reasoning processes. 
+Concurrently, the emergence of long-horizon scenarios and tasks --- from complex agentic workflows to massive cross-document analysis --- has also made efficient support for ultra-long contexts critical for future progress. 
+While recent open-source efforts~\citep{dsv3,qwen3,minimax_m2,kimi_k2} have advanced general capabilities, this core architectural inefficiency in handling ultra-long sequences remains a key impediment, limiting further gains from test-time scaling and hindering further exploration into long-horizon scenarios and tasks.
+
+% brief intro to dsv4
+In order to break the efficiency barrier in ultra-long contexts, we develop the \dsviv{} series, including the preview versions of \dsvivp{} with \dsvivptp{} parameters (\dsvivpap{} activated) and \dsvivf{} with \dsvivftp{} parameters (\dsvivfap{} activated). 
+Through architectural innovations, \dsviv{} series achieve a dramatic leap in computational efficiency for processing ultra-long sequences. 
+This breakthrough enables efficient support for a context length of one million tokens, ushering in a new era of million-length contexts for next-generation LLMs.
+We believe our capability to efficiently handle ultra-long sequences unlocks the next frontier of test-time scaling, paves the way for deeper research into long-horizon tasks, and establishes a necessary foundation for exploring future paradigms like online learning.
+
+% brief intro to arch
+Compared with the \dsviii{} architecture~\citep{dsv3}, \dsviv{} series retain the DeepSeekMoE framework~\citep{deepseekmoe} and Multi-Token Prediction (MTP) strategy, while introducing several key innovations in architecture and optimization.  
+To enhance long-context efficiency, we design a hybrid attention mechanism combining \csafull{}~(\csa{}) and \hcafull{}~(\hca{}). 
+\csa{} compresses the KV caches along the sequence dimension and then performs DeepSeek Sparse Attention (DSA)~\citep{dsv32}, whereas \hca{} applies more aggressive compression to the KV caches but keeps dense attention.
+To strengthen modeling capability, we incorporate \mhcfull{} (\mhc{})~\citep{mhc} that upgrade conventional residual connections.  
+Additionally, we introduce the Muon~\citep{muon,muon_kimi} optimizer to the training of \dsviv{} series, leading to faster convergence and improved training stability.
+
+% brief intro to infra
+To enable efficient training and inference for \dsviv{} series as well as productive development, we introduce several infrastructure optimizations.
+First, we design and implement a single fused kernel for MoE modules that fully overlaps computation, communication, and memory access. 
+Second, we employ TileLang~\citep{wangtilelang}, a Domain-Specific Language (DSL) to balance development productivity and runtime efficiency. 
+Third, we provide efficient batch-invariant and deterministic kernel libraries to ensure bitwise reproducibility across training and inference. 
+Fourth, for the training framework, we extend the autograd framework with tensor-level checkpointing for fine-grained recomputation control; and we enhance training efficiency with a hybrid ZeRO strategy for the Muon optimizer, cost-effective \mhc{} implementations via recomputation and fused kernels, and two-stage contextual parallelism to manage compressed attention.
+Fifth, for the inference framework, we design a heterogeneous KV cache structure with on-disk storage strategies to enable efficient shared-prefix reuse.
+In addition, during the post-training stage, we incorporate FP4 quantization-aware training for MoE expert weights and the indexer QK path to reduce memory and computation. 
+
+% efficiency and cost
+By employing hybrid \csa{} and \hca{}, along with precision optimizations on computation and storage, \dsviv{} series achieve significantly lower inference FLOPs and a substantially reduced KV cache size compared with \dsviiiII{}, especially in long-context settings. 
+The right part of Figure~\ref{fig:dsv4_performance_and_cost} demonstrates the estimated single-token inference FLOPs and accumulated KV cache size of \dsviiiII{} and \dsviv{} series.
+In the scenario of 1M-token context, even \dsvivp{}, which has a larger number of activated parameters, attains only 27\% of the single-token FLOPs (measured in equivalent FP8 FLOPs) and 10\% of the KV cache size relative to \dsviiiII{}. 
+Furthermore, \dsvivf{}, with its smaller number of activated parameters, pushes efficiency even further: in the 1M-token context setting, it achieves only 10\% of the single-token FLOPs and 7\% of the KV cache size compared with \dsviiiII{}. 
+Additionally, for \dsviv{} series, the routed expert parameters utilize FP4 precision. 
+While the peak FLOPs for FP4 $\times$ FP8 operations are currently the same as FP8 $\times$ FP8 on existing hardware, they can theoretically be implemented to be $1/3$ more efficient on future hardware, which will further enhance the efficiency of \dsviv{} series.
+
+% brief intro to pre-training
+During pre-training, we train \dsvivf{} on \dsvivftoken{} tokens and \dsvivp{} on \dsvivptoken{} tokens, respectively. 
+After pre-training, these two models can natively and efficiently support 1M-length contexts. 
+In our internal evaluations, \dsvivf{}-Base already surpasses \dsviiiII{}-Base across a majority of benchmarks with its more parameter-efficient design. 
+\dsvivp{}-Base further extends this advantage to set a new performance standard among DeepSeek foundation models, achieving comprehensive superiority across reasoning, coding, long-context, and world knowledge tasks.
+
+% brief intro to post-training
+The post-training pipeline of \dsviv{} series features a two-stage paradigm: the independent cultivation of domain-specific experts, followed by unified model consolidation via on-policy distillation~\citep{lu2025onpolicydistillation,minillm}. 
+Initially, for each target domain --- such as mathematics, coding, agent, and instruction following --- a separate expert model is trained independently. 
+The base model first undergoes Supervised Fine-Tuning (SFT) on high-quality, domain-specific data to establish foundational capabilities. 
+Subsequently, Reinforcement Learning (RL) is applied using Group Relative Policy Optimization (GRPO)~\citep{dsr1}, which further optimizes the model for domain-aligned behaviors guided by reward models tailored to specific success criteria. 
+This phase yields a diverse set of specialized experts, each excelling in its respective field. 
+Finally, to integrate these distinct proficiencies, a single unified model is trained through on-policy distillation, wherein the unified model acts as the student learning to optimize the reverse KL loss with teacher models.
+
+\noindent
+\textbf{Summary of Core Evaluation Results}
+\begin{itemize}[topsep=0pt]
+    \item \textbf{Knowledge}:
+    In assessments of broad world knowledge, \dsvivpm{}, the maximum reasoning effort mode of \dsvivp{}, significantly outperforms leading open-source models on the SimpleQA~\citep{simpleqa} and Chinese-SimpleQA~\citep{csimpleqa} benchmarks. 
+    Regarding educational knowledge --- evaluated via MMLU-Pro~\citep{mmlu_pro}, HLE~\citep{hle}, and GPQA~\citep{gpqa} --- \dsvivpm{} shows a marginal lead over its open-source counterparts. 
+    \dsvivpm{} has significantly closed the gap with the leading proprietary model, Gemini-3.1-Pro, despite still trailing it in these knowledge-based evaluations.
+    
+    \item \textbf{Reasoning}: 
+    Through the expansion of reasoning tokens, \dsvivpm{} demonstrates superior performance relative to GPT-5.2 and Gemini-3.0-Pro on standard reasoning benchmarks. 
+    Nevertheless, its performance falls marginally short of GPT-5.4 and Gemini-3.1-Pro, suggesting a developmental trajectory that trails state-of-the-art frontier models by approximately 3 to 6 months.
+    Furthermore, \dsvivfm{} achieves comparable performance to GPT-5.2 and Gemini-3.0-Pro, establishing itself as a highly cost-effective architecture for complex reasoning tasks.
+
+    \item \textbf{Agent}: 
+    On public benchmarks, \dsvivpm{} is on par with leading open-source models, such as Kimi-K2.6 and GLM-5.1, but slightly worse than frontier closed models. 
+    In our internal evaluation, \dsvivpm{} outperforms Claude Sonnet 4.5 and approaches the level of Opus 4.5. 
+
+    \item \textbf{Long-Context}: \dsvivpm{} delivers strong results on synthetic and real use cases with a 1-million-token context window, surpassing even Gemini-3.1-Pro on academic benchmarks.
+
+    \item \textbf{\dsvivp{} v.s. \dsvivf{}}: 
+    \dsvivfm{} exhibits lower performance in knowledge evaluations due to its smaller parameter scale. 
+    However, it achieves comparable results on reasoning tasks when allocated a larger thinking budget. 
+    In agent evaluations, while \dsvivfm{} matches the performance of \dsvivpm{} on several benchmarks, it still trails its larger counterpart on more complex, high-difficulty tasks.
+
+\end{itemize}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.6\linewidth]{figures/basic_arch.pdf}
+\caption{
+    Overall architecture of \dsviv{} series. 
+    We use hybrid \csa{} (\csafull{}) and \hca{} (\hcafull{}) for attention layers, DeepSeekMoE for feed-forward layers, and strengthen conventional residual connections with \mhc{}.
+}
+\label{fig:dsv4_arch}
+\end{figure}
+
+\section{Architecture}
+\label{sec:arch}
+
+Overall, \dsviv{} series retain the Transformer~\citep{transformer} architecture and Multi-Token Prediction (MTP) modules~\citep{meta_mtp,dsv3}, while introducing several key upgrades over \dsviii{}:
+(1) firstly, we introduce the \mhcfull{} (\mhc{})~\citep{mhc} to strengthen conventional residual connections; 
+(2) secondly, we design a hybrid attention architecture, which greatly improves long-context efficiency through \csafull{} and \hcafull{}. 
+(3) thirdly, we employ Muon~\citep{muon,muon_kimi} as the optimizer.
+For the Mixture-of-Experts~(MoE) components, we still adopt the \dsmoe{}~\citep{deepseekmoe} architecture, with only minor adjustments from \dsviii{}.
+The Multi-Token Prediction (MTP)~\citep{ms_mtp,meta_mtp,eagle,dsv3} configuration remains identical to that of \dsviii{}. 
+All other unspecified details follow the settings established in \dsviii{}~\citep{dsv3}. 
+Figure~\ref{fig:dsv4_arch} illustrates the overall architecture of \dsviv{}, and the details are described below.
+
+\subsection{Designs Inherited from \dsviii{}}
+
+\paragraph{Mixture-of-Experts.}
+
+As previous DeepSeek-series models~\citep{dsvii,dsv3}, \dsviv{} series also adopt the \dsmoe{} paradigm~\citep{deepseekmoe} for Feed-Forward Networks~(FFNs), which sets fine-grained routed experts and shared experts.
+Different from \dsviii{}, we change the activation function that computes the affinity scores from $\operatorname{Sigmoid}(\cdot)$ into $\operatorname{Sqrt}(\operatorname{Softplus}(\cdot))$.
+For load balancing, we also employ the auxiliary-loss-free strategy~\citep{noaux_tc,dsv3}, augmented by a slight sequence-wise balance loss that prevents extreme imbalance within individual sequences.
+For \dsviv{}, we remove the constraint on the number of routing target nodes, and carefully redesign the parallelism strategy to maintain training efficiency.
+Furthermore, compared with \dsviii{}, we replace the dense FFN layers in the initial several Transformer blocks with MoE layers that employ Hash routing~\citep{hash_layer}. 
+The Hash routing strategy determines the target experts of each token according to a predefined hash function with regard to the input token ID.
+
+\paragraph{Multi-Token Prediction.}
+
+As \dsviii{}, \dsviv{} series also set MTP modules and objectives. 
+Given that the MTP strategy has been validated in \dsviii{}, we adopt the same strategy for \dsviv{} series without modification.
+
+\subsection{\mhcfull{}}
+
+As shown in Figure~\ref{fig:dsv4_arch}, \dsviv{} series incorporate \mhcfull{} (\mhc{})~\citep{mhc} to strengthen the conventional residual connections between adjacent Transformer blocks. 
+Compared with naive Hyper-Connections (HC)~\citep{hc}, the core idea of \mhc{} is to constrain the residual mapping onto a specific manifold, and thus enhance the stability of signal propagation across layers while preserving model expressivity.
+This subsection briefly introduces the standard HC and describes how we design \mhc{} for stable training. 
+
+\paragraph{Standard Hyper-Connections.}
+The standard HC expands the width of the residual stream by a factor of $n_{\text{hc}}$. 
+Specifically, the shape of the residual stream is expanded from $\mathbb{R}^{d}$ to $\mathbb{R}^{n_{\text{hc}} \times d}$, where $d$ is the hidden size of the actual layer input. 
+Let $X_l = [\mathbf{x}_{l,1}; \ldots; \mathbf{x}_{l,n_{\text{hc}}}]^T \in \mathbb{R}^{n_{\text{hc}} \times d}$ be the residual state before the $l$-th layer. 
+HC introduces three linear mappings: an input mapping $A_{l} \in \mathbb{R}^{1 \times n_{\text{hc}}}$, a residual transformation $B_{l} \in \mathbb{R}^{n_{\text{hc}} \times n_{\text{hc}}}$, and an output mapping $C_{l} \in \mathbb{R}^{n_{\text{hc}} \times 1}$. 
+The update of the residual state is then formulated as:
+\begin{equation}
+    X_{l+1} = B_{l} X_l + C_{l} \mathcal{F}_{l}(A_{l} X_l),
+\end{equation}
+where $\mathcal{F}_{l}$ denotes the $l$-th layer (e.g., an MoE layer), whose input and output shapes are both $\mathbb{R}^{d}$.
+Note that the actual layer input $A_{l} X_l \in \mathbb{R}^{d}$ is also $d$-dimensional, so the expanded residual width does not influence the design of the inner layers. 
+HC decouples the residual width from the actual hidden size, offering a complementary scaling axis with minimal computational overhead, as $n_{\text{hc}}$ is typically much smaller than the hidden size $d$.
+However, even though HC has demonstrated potential in improving model performance, we find that the training will frequently exhibit numerical instability when stacking multiple layers, which hinders the scaling of HC.
+
+\paragraph{Manifold-Constrained Residual Mapping.}
+The core innovation of \mhc{} is to constrain the residual mapping matrix $B_l$ to the manifold of doubly stochastic matrices (the Birkhoff polytope) $\mathcal{M}$, and thus enhance the stability of signal propagation across layers:
+\begin{equation}
+    B_l \in \mathcal{M} \coloneq \{ M \in \mathbb{R}^{n \times n} \mid M\mathbf{1}_n = \mathbf{1}_n, \; \mathbf{1}_n^T M = \mathbf{1}_n^T, \; M \geq 0 \}.
+\end{equation}
+This constraint ensures that the spectral norm of the mapping matrix $\|B_l\|_2$ is bounded by 1, so the residual transformation is non-expansive, which increases the numerical stability during both the forward pass and backpropagation.
+Besides, the set $\mathcal{M}$ is closed under multiplication, which guarantees stability in the scenarios of deep stacks of \mhc{}. 
+In addition, the input transformation $A_l$ and output transformation $C_l$ are also constrained to be non-negative and bounded via a Sigmoid function to avoid the risk of signal cancellation.
+
+\paragraph{Dynamic Parameterization.}
+The parameters of three linear mappings are dynamically generated, which are decomposed into a dynamic (input-dependent) component and a static (input-independent) component. 
+Given the input $X_l \in \mathbb{R}^{n_{\text{hc}} \times d}$, it is first flattened and normalized: $\hat{X}_l = \operatorname{RMSNorm}(\operatorname{vec}(X_l)) \in \mathbb{R}^{1 \times n_{\text{hc}}d}$. 
+Then, we follow the conventional HC to generate the unconstrained raw parameters $\tilde{A}_l \in \mathbb{R}^{1 \times n_{\text{hc}}}$, $\tilde{B}_l \in \mathbb{R}^{n_{\text{hc}} \times n_{\text{hc}}}$, and $\tilde{C}_l \in \mathbb{R}^{n_{\text{hc}} \times 1}$:
+\begin{align}
+    \tilde{A}_l &= \alpha_l^\mathrm{pre} \cdot (\hat{X}_l W^\mathrm{pre}_l) + S_l^\mathrm{pre}, \\
+    \tilde{B}_l &= \alpha_l^\mathrm{res} \cdot \operatorname{Mat}(\hat{X}_l W^\mathrm{res}_l) + S_l^\mathrm{res}, \\
+    \tilde{C}_l &= \alpha_l^\mathrm{post} \cdot (\hat{X}_l W^\mathrm{post}_l)^T + S_l^\mathrm{post},
+\end{align}
+where $W^\mathrm{pre}_l, W^\mathrm{post}_l \in \mathbb{R}^{n_{\text{hc}}d \times n_{\text{hc}}}$ and $W^\mathrm{res}_l \in \mathbb{R}^{n_{\text{hc}}d \times n_{\text{hc}}^2}$ are learnable parameters for generating the dynamic components;
+$\operatorname{Mat}(\cdot)$ reshapes a vector of size $1 \times n_{\text{hc}}^2$ into a matrix of size $n_{\text{hc}} \times n_{\text{hc}}$; 
+$S_l^\mathrm{pre} \in \mathbb{R}^{1 \times n_{\text{hc}}}$, $S_l^\mathrm{post} \in \mathbb{R}^{n_{\text{hc}}\times 1}$, and $S_l^\mathrm{res} \in \mathbb{R}^{n_{\text{hc}} \times n_{\text{hc}}}$ are learnable static biases; 
+and $\alpha_l^\mathrm{pre}$, $\alpha_l^\mathrm{res}$, $\alpha_l^\mathrm{post} \in \mathbb{R}$ are learnable gating factors initialized to small values. 
+
+\paragraph{Applying Parameter Constraints.}
+After obtaining the unconstrained raw parameters $\tilde{A}_l, \tilde{B}_l, \tilde{C}_l$, we then apply constraints described earlier to them to enhance the numerical stability. 
+To be specific, for the input and output mappings, we employ a Sigmoid function $\sigma(\cdot)$ to ensure their non-negativity and boundedness:
+\begin{align}
+    A_l &= \sigma(\tilde{A}_l), \\
+    C_l &= 2\sigma(\tilde{C}_l).
+\end{align}
+As for the residual mapping $\tilde{B}_l$, we project it onto the manifold of doubly stochastic matrices $\mathcal{M}$. 
+This is achieved by the Sinkhorn-Knopp algorithm, which first applies an exponential function to $\tilde{B}_l$ to ensure positivity, getting $M^{(0)} = \exp(\tilde{B}_l)$, and then iteratively performs column and row normalization:
+\begin{equation}
+    M^{(t)} = \mathcal{T}_r(\mathcal{T}_c(M^{(t-1)})),
+\end{equation}
+where $\mathcal{T}_r$ and $\mathcal{T}_c$ denote row and column normalization, respectively. 
+This iteration converges to a constrained doubly stochastic matrix $B_l = M^{(t_{\text{max}})}$. 
+We choose $t_{\text{max}} = 20$ as a practical value.
+
+\subsection{Hybrid Attention with \csa{} and \hca{}}
+
+As the context length reaches extreme scales, the attention mechanism emerges as the dominant computational bottleneck in a model.
+For \dsviv{}, we design two efficient attention architectures --- \csafull{}~(\csa{}) and \hcafull{}~(\hca{}) --- and employ their interleaved hybrid configuration, which substantially reduces the computational cost of attention in long-text scenarios. 
+\csa{} integrates both compression and sparse attention strategies: it first compresses the Key-Value~(KV) cache of every $m$ tokens into one entry, and then applies \dsafull{} (\dsa{})~\citep{dsv32} where each query token attends to only $k$ compressed KV entries.
+\hca{} aims for extreme compression by consolidating the KV cache of every $m^{\prime}$ ($\gg m$) tokens into a single entry. 
+The hybrid architecture of \csa{} and \hca{} remarkably improves the long-context efficiency of \dsviv{} series, making one-million-token context feasible in practice. 
+This subsection describes the core techniques of our hybrid attention architecture, and we also provide an open-source implementation\footnote{\url{https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/tree/main/inference}} to specify more details unambiguously. 
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.99\linewidth]{figures/CSA.pdf}
+\caption{
+    Core architectures of \csa{}. 
+    It compresses the number of KV entries to $\frac{1}{m}$ times, and then applies \dsafull{} for further acceleration. 
+    Additionally, a small set of sliding window KV entries is combined with the selected compressed KV entries to enhance local fine-grained dependencies. 
+}
+\label{fig:csa}
+\end{figure}
+
+\subsubsection{\csafull{}}
+
+The core architecture of \csa{} is illustrated in Figure~\ref{fig:csa}, which first compresses the KV cache of each $m$ tokens into one entry, and then applies \dsafull{} for further acceleration. 
+
+\paragraph{Compressed Key-Value Entries.}
+Let $H \in \mathbb{R}^{n \times d}$ be a sequence of input hidden states, where $n$ is the sequence length and $d$ is the hidden size. 
+\csa{} first computes two series of KV entries $C^{a}, C^{b} \in \mathbb{R}^{n \times c}$ and their corresponding compression weights $Z^{a}, Z^{b} \in \mathbb{R}^{n \times c}$, where $c$ is the head dimension:
+\begin{align}
+    C^{a} &= H \cdot W^{aKV}, \quad C^{b} = H \cdot W^{bKV}, \\
+    Z^{a} &= H \cdot W^{aZ}, \quad~~ Z^{b} = H \cdot W^{bZ},
+\end{align}
+where $W^{aKV}, W^{bKV}, W^{aZ}, W^{bZ} \in \mathbb{R}^{d \times c}$ are trainable parameters.
+Next, each $m$ KV entries in $C^{a}$ and $C^{b}$ will be compressed into one entry according to their compression weights and learnable positional biases $B^a,B^b \in \mathbb{R}^{m \times c}$, producing $C^{\text{Comp}} \in \mathbb{R}^{\frac{n}{m} \times c}$. 
+Each compressed entry $C^{\text{Comp}}_{i} \in \mathbb{R}^{c}$ is computed by
+\begin{align}
+     [S^a_{mi:m(i+1)-1};S^b_{m(i-1):mi-1}] &=  \operatorname{Softmax}_{\text{row}}([Z^{a}_{mi:m(i+1)-1} + B^a;Z^{b}_{m(i-1):mi-1} + B^b]), \\
+    C^{\text{Comp}}_{i} &= \sum_{j=mi}^{m(i+1)-1} S^a_j \odot C^{a}_{j} + \sum_{j=m(i-1)}^{mi-1} S^b_j \odot C^{b}_{j},
+\end{align}
+where $\odot$ denotes the Hadamard product; 
+$\operatorname{Softmax}_{\text{row}}(\cdot)$ denotes the softmax operation along the row dimension, which performs normalization across the total of $2m$ elements from both $Z^a$ and $Z^b$. 
+When $i=0$, $Z^b_{m(i-1):mi-1}$ is padded with negative infinity and $C^b_{m(i-1):mi-1}$ is padded with zeros.
+Note that each $C^{\text{Comp}}_{i}$ is derived from $2m$ KV entries, but the indexes of $C^b$ used for $C^{\text{Comp}}_{i}$ and the indexes of $C^a$ used for $C^{\text{Comp}}_{i-1}$ are overlapped.
+Therefore, \csa{} in fact compresses the sequence length to $\frac{1}{m}$ times. 
+
+\paragraph{Lightning Indexer for Sparse Selection.}
+After obtaining the compressed KV entries $C^{\text{Comp}}$, \csa{} applies the \dsa{} strategy to select top-k compressed KV entries for core attention. 
+First, \csa{} performs the same compression operation used for $C^{\text{Comp}}$ to get compressed indexer keys $K^{\text{IComp}} \in \mathbb{R}^{\frac{n}{m} \times c^I}$, where $c^I$ is the indexer head dimension. 
+Then, for a query token $t$, we produce the indexer queries $\{\mathbf{q}_{t, 1}^{I};\mathbf{q}_{t, 2}^{I};...;\mathbf{q}_{t, n_{h}^{I}}^{I}\}$ in a low-rank manner:
+\begin{align}
+    \mathbf{c}_{t}^{Q} &= \mathbf{h}_{t} \cdot W^{DQ}, \\
+    [\mathbf{q}_{t, 1}^{I};\mathbf{q}_{t, 2}^{I};...;\mathbf{q}_{t, n_{h}^{I}}^{I}] = \mathbf{q}_{t}^{I} &= \mathbf{c}_{t}^{Q} \cdot W^{IUQ},
+\end{align}
+where $\mathbf{h}_{t} \in \mathbb{R}^{d}$ is the input hidden state of the query token $t$; $\mathbf{c}_{t}^{Q} \in \mathbb{R}^{d_c}$ is the compressed latent vector for queries; $d_c$ denotes the query compression dimension; $n_{h}^{I}$ denotes the number of indexer query heads; $W^{DQ} \in \mathbb{R}^{d \times d_c}$ and $W^{IUQ} \in \mathbb{R}^{d_c \times c^I n_h^I}$ are the down-projection and up-projection matrices for indexer queries, respectively.
+Next, the index score $I_{t, s} \in \mathbb{R}$ between the query token $t$ and a preceding compressed block $s$ ($s$ < $\operatorname{Floor}(\frac{t}{m})$) is computed by
+\begin{align}
+    [w_{t, 1}^I; w_{t, 2}^I; ...; w_{t, n_{h}^{I}}^I] = \mathbf{w}_t^I & = \mathbf{h}_{t} \cdot W^w, \\
+    I_{t, s} & = \sum_{h=1}^{n_h^I} w_{t, h}^I \cdot \text{ReLU}\left(\mathbf{q}^{I}_{t, h} \cdot K^{\text{IComp}}_{s}\right),
+\end{align}
+where $W^w \in \mathbb{R}^{d \times n_{h}^{I}}$ is a learnable matrix; $w_{t, h}^I \in \mathbb{R}$ is the weight of the $h$-th indexer head.
+For a query token $t$, given its index scores $I_{t, :}$, we employ a top-k selector to selectively retain a subset of compressed KV entries $\mathcal{C}^{\text{SprsComp}}_t$ for subsequent core attention:
+\begin{equation}
+    \mathcal{C}^{\text{SprsComp}}_t = \left\{ C^{\text{Comp}}_{s} ~\Big|~ I_{t, s} \in \operatorname{Top-k} (I_{t, :}) \right\}.
+\end{equation}
+
+\paragraph{Shared Key-Value MQA.}
+After selecting the sparse KV entries, \csa{} then performs core attention in a Multi-Query Attention~(MQA)~\citep{mqa} manner, where each compressed KV entry in $\mathcal{C}^{\text{SprsComp}}_t$ serves as both attention key and value. 
+To be specific, for a query token $t$, we first produce attention queries $\{\mathbf{q}_{t, 1};\mathbf{q}_{t, 2};...;\mathbf{q}_{t, n_{h}}\}$ from the compressed latent vector $\mathbf{c}_{t}^{Q}$:
+\begin{equation}
+    [\mathbf{q}_{t, 1};\mathbf{q}_{t, 2};...;\mathbf{q}_{t, n_{h}}] = \mathbf{q}_{t} = \mathbf{c}_{t}^{Q} \cdot W^{UQ},
+\end{equation}
+where $n_{h}$ denotes the number of query heads; $W^{UQ} \in \mathbb{R}^{d_c \times c n_h}$ is the up-projection matrices for queries.
+Note that the latent query vector $\mathbf{c}_{t}^{Q}$ is shared with that used for the indexer queries. 
+Next, we perform MQA on $\{\mathbf{q}_{t, i}\}$ and $\mathcal{C}^{\text{SprsComp}}_t$: 
+\begin{equation}
+    \mathbf{o}_{t,i} = \operatorname{CoreAttn}\left( \texttt{query=}\mathbf{q}_{t,i}, \texttt{key=}\mathcal{C}^{\text{SprsComp}}_t, \texttt{value=}\mathcal{C}^{\text{SprsComp}}_t \right),
+\end{equation}
+where $\mathbf{o}_{t,i} \in \mathbb{R}^{c}$ is the core attention output of the $i$-th head at the $t$-th token; $\operatorname{CoreAttn}(\cdot)$ denotes the core attention operation. 
+
+\paragraph{Grouped Output Projection.}
+In the configuration of \dsviv{}, $c n_h$ is quite large.
+Therefore, directly projecting the outputs of the core attention operation $[\mathbf{o}_{t,1}; \mathbf{o}_{t,2}; ...; \mathbf{o}_{t,n_h}]=\mathbf{o}_{t} \in \mathbb{R}^{c n_h}$ to a $d$-dimensional hidden state will impose a substantial computational burden. 
+To mitigate this cost, we design a grouped output projection strategy.
+To be specific, we first split $n_h$ outputs into $g$ groups, and then for each group of output $\mathbf{o}^G_{t, i} \in \mathbb{R}^{c \frac{n_h}{g}}$, we project it to a $d_g$-dimensional intermediate output $\mathbf{o}^{G'}_{t, i} \in \mathbb{R}^{d_g}$, where $d_g < c \frac{n_h}{g}$. 
+Finally, we project the intermediate output $[\mathbf{o}^{G'}_{t, 1}; \mathbf{o}^{G'}_{t, 2}; ...; \mathbf{o}^{G'}_{t, g}] \in \mathbb{R}^{d_gg}$ to the final attention output $\mathbf{\hat{o}}_{t} \in \mathbb{R}^{d}$. 
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.6\linewidth]{figures/HCA.pdf}
+\caption{
+    Core architectures of \hca{}.
+    It performs heavier compression, where the KV entries of $m^{\prime}$ ($\gg m$) tokens will be consolidated into one. 
+    Also, we additionally introduce a small set of sliding window KV entries to enhance local fine-grained dependencies. 
+}
+\label{fig:hca}
+\end{figure}
+
+\subsubsection{\hcafull{}}
+
+The core architecture of \hca{} is illustrated in Figure~\ref{fig:hca}, which compresses the KV cache in a heavier manner, but does not employ sparse attention. 
+
+\paragraph{Compressed Key-Value Entries.}
+By and large, the compression strategy of \hca{} is similar to that of \csa{}, but employs a larger compression rate $m^{\prime} $ ($\gg m$) and does not perform overlapped compression. 
+Let $H \in \mathbb{R}^{n \times d}$ be a sequence of input hidden states, \hca{} first computes the original KV entries $C \in \mathbb{R}^{n \times c}$ and their corresponding compression weights $Z \in \mathbb{R}^{n \times c}$:
+\begin{align}
+    C &= H \cdot W^{KV}, \\
+    Z &= H \cdot W^{Z},
+\end{align}
+where $W^{KV}, W^{Z} \in \mathbb{R}^{d \times c}$ are trainable parameters.
+Next, each $m^{\prime}$ KV entries in $C$ will be compressed into one according to the compression weights and learnable positional biases $B \in \mathbb{R}^{m^{\prime} \times c}$, producing $C^{\text{Comp}} \in \mathbb{R}^{\frac{n}{m^{\prime}} \times c}$. 
+Each compressed entry $C^{\text{Comp}}_{i} \in \mathbb{R}^{c}$ is computed by
+\begin{align}
+     S_{m^{\prime}i:m^{\prime}(i+1)-1} &=  \operatorname{Softmax}_{\text{row}}(Z_{m^{\prime}i:m^{\prime}(i+1)-1} + B), \\
+    C^{\text{Comp}}_{i} &= \sum_{j=m^{\prime}i}^{m^{\prime}(i+1)-1} S_j \odot C_{j}.
+\end{align}
+Through this compression operation, \hca{} compresses the sequence length to $\frac{1}{m^{\prime}}$ times. 
+
+\paragraph{Shared Key-Value MQA and Grouped Output Projection.}
+\hca{} also employs the shared KV MQA and grouped output projection strategies as \csa{} does. 
+After the KV compression, for a query token $t$, \hca{} first produces attention queries $\{\mathbf{q}_{t, 1};\mathbf{q}_{t, 2};...;\mathbf{q}_{t, n_{h}}\}$ in a low-rank manner: 
+\begin{align}
+    \mathbf{c}_{t}^{Q} &= \mathbf{h}_{t} \cdot W^{DQ}, \\
+    [\mathbf{q}_{t, 1};\mathbf{q}_{t, 2};...;\mathbf{q}_{t, n_{h}}] = \mathbf{q}_{t} &= \mathbf{c}_{t}^{Q} \cdot W^{UQ},
+\end{align}
+where $\mathbf{h}_{t} \in \mathbb{R}^{d}$ is the input hidden state of the query token $t$; $n_{h}$ denotes the number of query heads; $W^{DQ} \in \mathbb{R}^{d \times d_c}$ and $W^{UQ} \in \mathbb{R}^{d_c \times c n_h}$ are the down-projection and up-projection matrices for queries, respectively. 
+Next, we perform MQA on $\{\mathbf{q}_{t, i}\}$ and $C^{\text{Comp}}$: 
+\begin{equation}
+    \mathbf{o}_{t,i} = \operatorname{CoreAttn}\left( \texttt{query=}\mathbf{q}_{t,i}, \texttt{key=}C^{\text{Comp}}, \texttt{value=}C^{\text{Comp}} \right),
+\end{equation}
+where $\mathbf{o}_{t,i} \in \mathbb{R}^{c}$ is the core attention output of the $i$-th head at the $t$-th token. 
+Next, as \csa{} does, \hca{} splits $n_h$ outputs into $g$ groups, and for each group of output $\mathbf{o}^G_{t, i} \in \mathbb{R}^{c \frac{n_h}{g}}$, \hca{} projects it to a $d_g$-dimensional intermediate output $\mathbf{o}^{G'}_{t, i} \in \mathbb{R}^{d_g}$, where $d_g < c \frac{n_h}{g}$. 
+Finally, \hca{} projects the intermediate output $[\mathbf{o}^{G'}_{t, 1}; \mathbf{o}^{G'}_{t, 2}; ...; \mathbf{o}^{G'}_{t, g}] \in \mathbb{R}^{d_gg}$ to the final attention output $\mathbf{\hat{o}}_{t} \in \mathbb{R}^{d}$. 
+
+\subsubsection{Other Details}
+
+In addition to the core architectures of \csa{} and \hca{} described above, our hybrid attention incorporates several other techniques. 
+For writing clarity, we omit these additional techniques from the above introduction and will briefly describe them in this subsection.
+Also, this subsection focuses only on the core ideas of them and may omit some tiny details for simplicity. 
+We encourage the readers to refer to our open-source implementation for unambiguous details.
+
+\paragraph{Query and Key-Value Entry Normalization.}
+For both \csa{} and \hca{}, we perform an additional RMSNorm operation on each head of the queries and the only head of the compressed KV entries, just before the core attention operation. 
+This normalization avoids exploding attention logits and may improve training stability. 
+
+\paragraph{Partial Rotary Positional Embedding.}
+For both \csa{} and \hca{}, we partially employ the Rotary Positional Embedding (RoPE)~\citep{su2024roformer} to the attention queries, KV entries, and the core attention outputs. 
+To be specific, for each query vector and KV entry vector used in \csa{} and \hca{}, we apply RoPE to its last 64 dimensions. 
+Since the KV entries serve as both attention keys and values, the naive core attention outputs $\{\mathbf{o}_{t,i}\}$ will carry absolute position embeddings, derived from the weighted sum of KV entries. 
+As a countermeasure, we also apply RoPE with position $-i$ on the last 64 dimensions of each $\mathbf{o}_{t,i}$. 
+In this way, the output of the core attention will also carry relative position embeddings --- the contribution of each KV entry to the core attention outputs will also be related to the distance between the query and the KV entry.
+
+\paragraph{Additional Branch of Sliding Window Attention.}
+In order to strictly preserve causality in \csa{} and \hca{}, each query attends to only preceding compressed KV blocks. 
+Consequently, a query cannot access information from other tokens within its own compressed block.
+Meanwhile, recent tokens usually possess greater relevance to the query token in language modeling.
+For these reasons, we introduce a supplementary attention branch to both \csa{} and \hca{} in a sliding window manner, for better modeling of local dependencies.
+To be specific, for each query token, we additionally produce $n_{\text{win}}$ uncompressed KV entries corresponding to the recent $n_{\text{win}}$ tokens. 
+In the core attention of \csa{} and \hca{}, these KV entries in the sliding window will be used along with the compressed KV entries. 
+
+\paragraph{Attention Sink.}
+In the core attention of \csa{} and \hca{}, we employ the trick of attention sink~\citep{attn_sink,gpt_oss}. 
+To be specific, we set a series of learnable sink logits $\{z^{\prime}_1, z^{\prime}_2, ..., z^{\prime}_{n_h}\}$. 
+For the $h$-th attention head, $\operatorname{Exp}(z^{\prime}_h)$ will be added to the denominator of the attention score:
+\begin{equation}
+    s_{h, i, j} = \frac{\operatorname{Exp}(z_{h, i, j})}{\sum_k \operatorname{Exp}(z_{h, i, k}) + \operatorname{Exp}(z^{\prime}_h)},
+\end{equation}
+where $s_{h, i, j}, z_{h, i, j} \in \mathbb{R}$ denote the attention score and attention logit of the $h$-th attention head between the $i$-th query token and the $j$-th preceding token or compressed block.
+This technique allows each query head to adjust its total attention scores to be not equal to 1, and even to be near 0.
+
+\subsubsection{Efficiency Discussion}
+
+Due to the employment of hybrid \csa{} and \hca{}, together with low-precision computation and storage, the attention module of \dsviv{} series achieves remarkable efficiency in both attention FLOPs and KV cache size, especially in long-context scenarios. 
+First, we adopt a mixed storage format for KV entries: BF16 precision is used for the rotary positional embedding (RoPE) dimensions, while FP8 precision is applied to the remaining dimensions. 
+This hybrid representation reduces the KV cache size by nearly half compared with pure BF16 storage. 
+Second, attention computation within the lightning indexer is performed in FP4 precision, which accelerates the attention operation under extremely long contexts. 
+Third, relative to \dsviiiII{}, a smaller attention top-k is chosen in \dsviv{} series, thereby improving model efficiency on short- and medium-length texts. 
+Finally, and most importantly, compressed attention and hybrid attention techniques substantially reduce both the KV cache size and the computational FLOPs. 
+
+Taking BF16 GQA8~\citep{ainslie2023gqa} with a head dimension of 128 as the baseline --- one of the common configurations of LLM attention --- the KV cache size of \dsviv{} series can be dramatically reduced to approximately $2\%$ times of that baseline in the 1M-context setting.
+Moreover, even when compared with \dsviiiII{}~\citep{dsv32} --- already an efficient baseline --- \dsviv{} series still exhibits substantial advantages in efficiency. 
+A comparison of their inference FLOPs and KV cache size is provided in the right part of Figure~\ref{fig:dsv4_performance_and_cost}.
+
+\begin{algorithm}[t]
+\caption{Muon Optimizer for \dsviv{}}
+\label{alg:muon}
+\begin{algorithmic}[1]
+\Require{Learning rate $\eta$, momentum $\mu$, weight decay $\lambda$, update rescaling factor $\gamma$}
+\For{each training step $t$}
+    \For{each logically independent weight $W \in \mathbb{R}^{n \times m}$}
+        \State $G_t = \nabla_{W} \mathcal{L}_t(W_{t-1})$ 
+        \Comment{Compute gradients}
+        \State $M_t = \mu M_{t-1} + G_t$ 
+        \Comment{Accumulate momentum buffer}
+        \State $O^{\prime}_t = \operatorname{HybridNewtonSchulz}(\mu M_t + G_t)$ 
+        \Comment{Nesterov trick and hybrid Newton-Schulz}
+        \State $O_t = O^{\prime}_t \cdot \sqrt{\max(n, m)} \cdot \gamma$ 
+        \Comment{Rescale the update RMS}
+        \State $W_t = W_{t-1} \cdot \left( 1 - \eta \lambda \right) - \eta O_t$ 
+        \Comment{Perform weight decay and update}
+    \EndFor
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Muon Optimizer}
+
+We employ the Muon~\citep{muon,muon_kimi} optimizer for the majority of modules in \dsviv{} series due to its faster convergence and improved training stability.
+The full algorithm of our Muon optimization is summarized in Algorithm~\ref{alg:muon}.
+
+\paragraph{Basic Configurations.}
+We maintain the AdamW~\citep{adamW} optimizer for the embedding module, the prediction head module, the static biases and gating factors of \mhc{} modules, and the weights of all RMSNorm modules. 
+All other modules are updated with Muon.
+Following \citet{muon_kimi}, we also apply weight decay to Muon parameters, use the Nesterov~\citep{nesterov,muon} trick, and rescale the Root Mean Square (RMS) of the update matrix for reutilization of our AdamW hyper-parameters.
+Different from them, we use hybrid Newton-Schulz iterations for orthogonalization.
+
+\paragraph{Hybrid Newton-Schulz Iterations.}
+For a given matrix $M$, let its Singular Value Decomposition (SVD) be $M = U \Sigma V^T$. 
+The Newton-Schulz iterations aim to approximately orthogonalize $M$ to be $UV^T$.
+Usually, $M$ will be first normalized as $M_0=M / ||M||_F$ to ensure its maximum singular value does not exceed 1. 
+Then, each Newton-Schulz iteration performs the following operation:
+\begin{equation}
+    M_k = a M_{k-1} + b (M_{k-1} M_{k-1}^T) M_{k-1} + c (M_{k-1} M_{k-1}^T)^2 M_{k-1}.
+\end{equation}
+Our hybrid Newton-Schulz performs 10 iterations over two distinct stages. 
+During the first 8 steps, we use coefficients $(a, b, c) = (3.4445, -4.7750, 2.0315)$ to drive rapid convergence, bringing the singular values close to 1. 
+In the final 2 steps, we switch to coefficients $(a, b, c) = (2, -1.5, 0.5)$, which stabilize the singular values precisely at 1.
+
+\paragraph{Avoiding Exploding Attention Logits.}
+The attention architecture of \dsviv{} series allows us to directly apply RMSNorm on the attention queries and KV entries, which effectively prevents attention logits from exploding. 
+Consequently, we do not employ the QK-Clip technique~\citep{muon_kimi} in our Muon optimizer. 
