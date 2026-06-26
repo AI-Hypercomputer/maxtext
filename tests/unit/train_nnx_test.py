@@ -170,6 +170,19 @@ class TestLossFnNNX(unittest.TestCase):
     self.assertEqual(float(aux["xent_sum"]), 0.0)
     self.assertEqual(float(loss), 0.0)
 
+  def test_indexer_warmup_precedes_vocab_tiling(self):
+    # The indexer dense warm-up branch must be checked before the num_vocab_tiling>1
+    # branch. With the order reversed, a warm-up step with tiling on ran the
+    # vocab-tiling loss instead of skipping xent. With both on, xent must still be 0.
+    cfg, ts = _build_state()
+    cfg.use_indexer = True
+    cfg.indexer_sparse_training = False
+    cfg.num_vocab_tiling = 2
+    data = _make_data(batch=cfg.micro_batch_size_to_train_on, vocab=cfg.vocab_size)
+    loss, aux = pre_train.loss_fn(ts.model, cfg, data, None, None, is_train=True)
+    self.assertEqual(float(aux["xent_sum"]), 0.0)
+    self.assertEqual(float(loss), 0.0)
+
 
 class TestTrainStepNNX(unittest.TestCase):
   """Cover the NNX branch of train_step (the diff_wrapper / nnx.update path)."""
@@ -308,8 +321,8 @@ class TestRecordActivationMetricsParity(unittest.TestCase):
     m_linen = self._metrics(linen, scan_layers=True, num_layers=num_layers)
     m_nnx = self._metrics(nnx_shaped, scan_layers=True, num_layers=num_layers)
     self.assertEqual(set(m_linen), set(m_nnx))
-    for k in m_linen:
-      np.testing.assert_allclose(np.asarray(m_nnx[k]), np.asarray(m_linen[k]))
+    for key, expected in m_linen.items():
+      np.testing.assert_allclose(np.asarray(m_nnx[key]), np.asarray(expected))
     np.testing.assert_allclose(np.asarray(m_nnx["activ_mean/layer_001"]), 0.2)
 
   def test_unscanned_layout_linen_matches_nnx(self):
@@ -332,8 +345,8 @@ class TestRecordActivationMetricsParity(unittest.TestCase):
     m_linen = self._metrics(linen, scan_layers=False, num_layers=num_layers)
     m_nnx = self._metrics(nnx_shaped, scan_layers=False, num_layers=num_layers)
     self.assertEqual(set(m_linen), set(m_nnx))
-    for k in m_linen:
-      np.testing.assert_allclose(np.asarray(m_nnx[k]), np.asarray(m_linen[k]))
+    for key, expected in m_linen.items():
+      np.testing.assert_allclose(np.asarray(m_nnx[key]), np.asarray(expected))
     np.testing.assert_allclose(np.asarray(m_nnx["activ_stdev/layer_002"]), 1.2)
 
 

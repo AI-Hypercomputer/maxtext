@@ -223,6 +223,57 @@ class TestBuildApp(unittest.TestCase):
     passed_messages = call_args[0][0] if call_args[0] else call_args[1].get("conversation")
     self.assertIsNotNone(passed_messages)
 
+  def test_completions_token_id_prompt_normalised_as_single(self):
+    """A list-of-ints prompt must be treated as one token-ID prompt, not a batch of ints."""
+    mock_output = _make_mock_output(generated_text="out", prompt_token_ids=[1, 2, 3], generated_token_ids=[7])
+    self.mock_llm.generate.return_value = [mock_output]
+
+    resp = self.client.post(
+        "/v1/completions",
+        json={"model": "m", "prompt": [1, 2, 3], "max_tokens": 5},
+    )
+    self.assertEqual(resp.status_code, 200)
+    data = resp.json()
+    self.assertEqual(len(data["choices"]), 1)
+    self.assertEqual(data["choices"][0]["text"], "out")
+    # generate() must be called with a single-element list containing the token-ID list
+    call_prompts = self.mock_llm.generate.call_args[0][0]
+    self.assertEqual(call_prompts, [[1, 2, 3]])
+
+  def test_completions_top_logprobs_populated(self):
+    """When logprobs is requested, top_logprobs entries must be non-None dicts."""
+    mock_output = _make_mock_output(generated_text="hi", prompt_token_ids=[1], generated_token_ids=[4, 5])
+    mock_output.outputs[0].logprobs = [
+        {4: SimpleNamespace(logprob=-0.5), 6: SimpleNamespace(logprob=-1.0)},
+        {5: SimpleNamespace(logprob=-0.8)},
+    ]
+    self.mock_llm.generate.return_value = [mock_output]
+
+    resp = self.client.post(
+        "/v1/completions",
+        json={"model": "m", "prompt": "x", "max_tokens": 5, "logprobs": 2},
+    )
+    self.assertEqual(resp.status_code, 200)
+    lp = resp.json()["choices"][0]["logprobs"]
+    self.assertIsNotNone(lp)
+    self.assertIsInstance(lp["top_logprobs"][0], dict)
+    self.assertGreater(len(lp["top_logprobs"][0]), 0)
+
+  def test_completions_echo_with_token_id_prompt(self):
+    """echo=True with a token-ID prompt must decode the prompt and prepend it to text."""
+    mock_output = _make_mock_output(generated_text=" world", prompt_token_ids=[1, 2, 3], generated_token_ids=[4])
+    self.mock_llm.generate.return_value = [mock_output]
+
+    resp = self.client.post(
+        "/v1/completions",
+        json={"model": "m", "prompt": [1, 2, 3], "max_tokens": 5, "echo": True},
+    )
+    self.assertEqual(resp.status_code, 200)
+    text = resp.json()["choices"][0]["text"]
+    # tokenizer.decode([1, 2, 3]) → "tok1tok2tok3" (see _make_mock_llm side_effect)
+    self.assertTrue(text.startswith("tok1tok2tok3"), f"Expected decoded prompt prefix, got: {text!r}")
+    self.assertIn(" world", text)
+
 
 if __name__ == "__main__":
   unittest.main()

@@ -18,8 +18,11 @@ import sys
 import unittest
 
 import jax
+import pytest
 
 from maxtext.configs import pyconfig
+
+pytest.importorskip("jetstream", reason="jetstream not installed")
 from maxtext.inference.maxengine import maxengine
 from tests.utils.test_helpers import get_test_config_path
 
@@ -28,6 +31,7 @@ class SetEngineVarsNNXTest(unittest.TestCase):
   """set_engine_vars_from_base_engine must work on the NNX path."""
 
   def _nnx_config(self, **kwargs):
+    """Tiny pure-NNX config from base.yml with the given overrides."""
     init_kwargs = {
         "base_emb_dim": 32,
         "base_num_query_heads": 2,

@@ -27,7 +27,14 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+
 _HEALTH_ENDPOINT = "/health"
+
+
+def _top_logprobs_dict(tokenizer: Any, lp_dict: dict | None) -> "dict[str, float] | None":
+  if not lp_dict:
+    return None
+  return {tokenizer.decode([tid]): lp.logprob for tid, lp in lp_dict.items()}
 
 
 def _build_app(llm: Any) -> Any:
@@ -48,9 +55,12 @@ def _build_app(llm: Any) -> Any:
     body = await request.json()
 
     raw_prompt = body.get("prompt", "")
-    prompts = raw_prompt if isinstance(raw_prompt, list) else [raw_prompt]
+    if isinstance(raw_prompt, list) and raw_prompt and isinstance(raw_prompt[0], int):
+      prompts = [raw_prompt]
+    else:
+      prompts = raw_prompt if isinstance(raw_prompt, list) else [raw_prompt]
     model_name = body.get("model", "")
-    max_tokens = int(body.get("max_tokens") or 256)
+    max_tokens = int(body["max_tokens"]) if body.get("max_tokens") is not None else 256
     temperature = float(body.get("temperature") or 0.0)
     logprobs_n = body.get("logprobs")  # int | None
     echo = bool(body.get("echo", False))
@@ -80,6 +90,7 @@ def _build_app(llm: Any) -> Any:
       if logprobs_n is not None:
         tok_strings: list[str] = []
         tok_lps: list[float | None] = []
+        tok_tops: list[dict[str, float] | None] = []
         tok_offsets: list[int] = []
         running_offset = 0
 
@@ -93,6 +104,7 @@ def _build_app(llm: Any) -> Any:
             lp_dict = prompt_lps[pos] if pos < len(prompt_lps) else None
             lp_val = lp_dict[tok_id].logprob if (lp_dict and tok_id in lp_dict) else None
             tok_lps.append(lp_val)
+            tok_tops.append(_top_logprobs_dict(tokenizer, lp_dict))
 
         gen_lps = gen.logprobs or []
         for pos, tok_id in enumerate(gen.token_ids):
@@ -103,15 +115,20 @@ def _build_app(llm: Any) -> Any:
           lp_dict = gen_lps[pos] if pos < len(gen_lps) else None
           lp_val = lp_dict[tok_id].logprob if (lp_dict and tok_id in lp_dict) else None
           tok_lps.append(lp_val)
+          tok_tops.append(_top_logprobs_dict(tokenizer, lp_dict))
 
         logprobs_payload = {
             "tokens": tok_strings,
             "token_logprobs": tok_lps,
-            "top_logprobs": None,
+            "top_logprobs": tok_tops,
             "text_offset": tok_offsets,
         }
 
-      text_out = (prompts[idx] + gen.text) if echo else gen.text
+      if echo:
+        p = prompts[idx]
+        text_out = (tokenizer.decode(p) if isinstance(p, list) else p) + gen.text
+      else:
+        text_out = gen.text
       choices.append(
           {
               "text": text_out,
@@ -143,7 +160,7 @@ def _build_app(llm: Any) -> Any:
     body = await request.json()
     messages = body.get("messages", [])
     model_name = body.get("model", "")
-    max_tokens = int(body.get("max_tokens") or 256)
+    max_tokens = int(body["max_tokens"]) if body.get("max_tokens") is not None else 256
     temperature = float(body.get("temperature") or 0.0)
     stop = body.get("stop")
 
