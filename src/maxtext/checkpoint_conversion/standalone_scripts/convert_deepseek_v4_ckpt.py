@@ -336,11 +336,22 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
         if isinstance(list_of_dicts[0][k], dict):
           stacked[k] = recursive_stack([d[k] for d in list_of_dicts if k in d], current_path)
         elif isinstance(list_of_dicts[0][k], np.ndarray):
-          # In MaxText nn.scan, the scan dimension depends on the variable definition.
-          # Bias and 1D items generally prepend the scan axis (axis=0),
-          # while kernels append it after input dim (usually axis=1).
           logging.info(f"Stacking array for block {block_idx}: {current_path} ...")
-          stacked[k] = np.stack([d[k] for d in list_of_dicts], axis=1)
+          # Follow the old script convention perfectly:
+          # 1. Pre-allocate np.zeros with the layer dimension at axis 0
+          sample_shape = list_of_dicts[0][k].shape
+          stack_shape = (len(list_of_dicts),) + sample_shape
+          arr = np.zeros(stack_shape, dtype=list_of_dicts[0][k].dtype)
+          
+          # 2. Assign layer by layer
+          for layer_idx, d in enumerate(list_of_dicts):
+            arr[layer_idx, ...] = d[k]
+            
+          # 3. Explicitly transpose axis 0 (layer) to axis 1
+          # This identically matches np.transpose(..., axes=(1, 0, 2)) from the legacy scripts
+          axes = list(range(len(stack_shape)))
+          axes[0], axes[1] = axes[1], axes[0]
+          stacked[k] = np.transpose(arr, axes=tuple(axes))
       return stacked
 
     if collected_layers:
