@@ -63,6 +63,7 @@ HF_IDS = {
     "qwen3-8b": "Qwen/Qwen3-8B",
     "qwen3-14b": "Qwen/Qwen3-14B",
     "qwen3-32b": "Qwen/Qwen3-32B",
+    "qwen3-vl-4b": "Qwen/Qwen3-VL-4B-Instruct",
     "llama3.1-8b": "meta-llama/Llama-3.1-8B",
     "llama3.1-8b-Instruct": "meta-llama/Llama-3.1-8B-Instruct",
     "llama3.1-70b-Instruct": "meta-llama/Llama-3.1-70B-Instruct",

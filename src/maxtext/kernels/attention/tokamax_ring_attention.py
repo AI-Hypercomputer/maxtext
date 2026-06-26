@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#       https://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -98,8 +98,6 @@ def validate_dkv_sharding(
     dkv_dim_kv: int,
 ) -> None:
   """Validates that the head-dim/D_KV dimension stays local for ring attention."""
-  if len(axis_names_q) <= dkv_dim_q or len(axis_names_kv) <= dkv_dim_kv:
-    raise ValueError("TPU Tokamax ring attention expects Q/K/V tensors with a D_KV dimension.")
   q_dkv_axes = _mesh_axes_for_dim(axis_names_q[dkv_dim_q])
   kv_dkv_axes = _mesh_axes_for_dim(axis_names_kv[dkv_dim_kv])
   if q_dkv_axes or kv_dkv_axes:
@@ -154,10 +152,6 @@ def validate_ring_mesh_axis(
   if ring_axis not in mesh.shape:
     raise ValueError(f"TPU Tokamax ring attention requires mesh axis {ring_axis!r} to exist.")
 
-  if sequence_dim_q < 0 or sequence_dim_kv < 0:
-    raise ValueError("TPU Tokamax ring attention expects non-negative sequence sharding dimensions.")
-  if len(axis_names_q) <= sequence_dim_q or len(axis_names_kv) <= sequence_dim_kv:
-    raise ValueError("TPU Tokamax ring attention expects Q/K/V tensors with a sequence sharding dimension.")
   _validate_ring_axis_only_on_sequence(
       axis_names_q,
       tensor_name="Q",
@@ -196,11 +190,6 @@ def validate_head_sharding(
     head_dim_kv: int,
 ) -> None:
   """Validates that local head layout preserves GQA/MQA head mapping."""
-  if len(axis_names_q) <= head_dim_q or len(axis_names_kv) <= head_dim_kv:
-    raise ValueError("TPU Tokamax ring attention expects Q/K/V tensors with a head sharding dimension.")
-  if num_query_heads <= 0 or num_kv_heads <= 0:
-    raise ValueError("TPU Tokamax ring attention requires positive Q and KV head counts.")
-
   q_head_axes = _mesh_axes_for_dim(axis_names_q[head_dim_q])
   kv_head_axes = _mesh_axes_for_dim(axis_names_kv[head_dim_kv])
   q_head_shards = _mesh_axes_size(mesh, q_head_axes)
@@ -349,15 +338,6 @@ def call_ring_attention(
     raise ValueError("decoder_segment_ids_q and decoder_segment_ids_kv must both be set or both be None.")
   if decoder_segment_ids_q is None:
     return jax.vmap(lambda q, k, v: ring_kernel(q, k, v, None), in_axes=(0, 0, 0))(query, key, value)
-
-  if decoder_segment_ids_q.ndim != 2 or decoder_segment_ids_kv.ndim != 2:
-    raise ValueError("decoder_segment_ids_q and decoder_segment_ids_kv must have shape [batch, sequence].")
-  if decoder_segment_ids_q.shape[0] != query.shape[0] or decoder_segment_ids_kv.shape[0] != key.shape[0]:
-    raise ValueError("decoder_segment_ids batch dimension must match query/key batch dimension.")
-  if decoder_segment_ids_q.shape[1] != query.shape[2]:
-    raise ValueError("decoder_segment_ids_q sequence dimension must match query sequence dimension.")
-  if decoder_segment_ids_kv.shape[1] != key.shape[2]:
-    raise ValueError("decoder_segment_ids_kv sequence dimension must match key sequence dimension.")
 
   def call_one(q, k, v, q_segment_ids, kv_segment_ids):
     segment_ids = ring_attention_kernel.SegmentIds(q_segment_ids, kv_segment_ids)

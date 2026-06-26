@@ -496,6 +496,8 @@ class AttentionOp(nnx.Module):
         self.k_layout = self.config.local_sa_k_layout
         self.v_layout = self.config.local_sa_v_layout
         self.use_splash_scheduler = self.config.local_use_splash_scheduler
+        self.fuse_reciprocal = self.config.local_sa_fuse_reciprocal
+        self.use_base2_exp = self.config.local_sa_use_base2_exp
       else:
         self.block_q = self.config.sa_block_q
         self.block_kv = self.config.sa_block_kv
@@ -510,6 +512,8 @@ class AttentionOp(nnx.Module):
         self.k_layout = self.config.sa_k_layout
         self.v_layout = self.config.sa_v_layout
         self.use_splash_scheduler = self.config.use_splash_scheduler
+        self.fuse_reciprocal = self.config.sa_fuse_reciprocal
+        self.use_base2_exp = self.config.sa_use_base2_exp
     self.attn_logits_soft_cap = attn_logits_soft_cap
     self.sliding_window_size = sliding_window_size
     self.chunk_attn_window_size = chunk_attn_window_size
@@ -1235,9 +1239,7 @@ class AttentionOp(nnx.Module):
     """TPU Flash Attention."""
 
     use_tokamax_ring = tokamax_ring_attention.is_context_parallel_ring_requested(self.config)
-    cp_size = self.config.context_parallel_size
-    if use_tokamax_ring:
-      cp_size = self.mesh.shape[self.config.context_sharding]
+    cp_size = self.mesh.shape.get(self.config.context_sharding, 1)
     load_balanced_context_parallel = self.config.context_parallel_load_balance
     if use_tokamax_ring:
       self._validate_tpu_tokamax_ring_runtime(
@@ -1328,6 +1330,8 @@ class AttentionOp(nnx.Module):
             k_layout=tokamax_splash_kernel.QKVLayout[self.k_layout],
             v_layout=tokamax_splash_kernel.QKVLayout[self.v_layout],
             attn_logits_soft_cap=attn_logits_soft_cap,
+            fuse_reciprocal=self.fuse_reciprocal,
+            use_base2_exp=self.use_base2_exp,
             residual_checkpoint_name="context",
             fwd_cost_estimate=pl.CostEstimate(
                 flops=config.cost_estimate_flops_fwd,

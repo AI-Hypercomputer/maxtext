@@ -372,7 +372,8 @@ def save_config_file(
 ):
   """Saves the model configuration file(config.json)."""
   if jax.process_index() == 0:
-    config.architectures = [MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]]
+    if config.model_type in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES:
+      config.architectures = [MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]]
     if output_dir_final.startswith("hf://"):
       max_logging.log(f"  Serializing {file_name} to memory for Hugging Face Hub upload...")
       json_string = config.to_json_string()
@@ -817,6 +818,16 @@ class MemoryMonitorTqdm(tqdm):
     return super().format_meter(n=n, total=total, elapsed=elapsed, postfix=postfix, **extra_kwargs)
 
 
+def _recursive_update(d: dict, u: dict) -> dict:
+  """Recursively updates dictionary d with dictionary u in place."""
+  for k, v in u.items():
+    if isinstance(v, dict) and isinstance(d.get(k), dict):
+      _recursive_update(d[k], v)
+    else:
+      d[k] = v
+  return d
+
+
 def load_orbax_checkpoint(config) -> dict:
   """Loads Orbax checkpoints from Base and/or LoRA paths in config.
 
@@ -852,7 +863,7 @@ def load_orbax_checkpoint(config) -> dict:
   paths = [p for p in [config.load_parameters_path, lora_path] if p]
 
   merged_dict = {}
-  for path in paths:
+  for i, path in enumerate(paths):
     checkpoint_path = epath.Path(path)
     metadata = ckptr.metadata(checkpoint_path)
     restore_args = jax.tree_util.tree_map(
@@ -860,7 +871,13 @@ def load_orbax_checkpoint(config) -> dict:
         metadata.item_metadata.tree,
         is_leaf=lambda x: hasattr(x, "shape"),
     )
-    merged_dict.update(ckptr.restore(checkpoint_path, restore_args=restore_args))
+    restored = ckptr.restore(checkpoint_path, restore_args=restore_args)
+
+    if i == 0:
+      merged_dict = restored
+    else:
+      # Recursively update base checkpoint with LoRA adapter checkpoint keys to avoid overwriting
+      _recursive_update(merged_dict, restored)
 
   return merged_dict
 

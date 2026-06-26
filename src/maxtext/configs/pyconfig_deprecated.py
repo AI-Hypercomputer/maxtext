@@ -217,22 +217,23 @@ def validate_rampup_batch_size(batch_size_start, batch_size_end, batch_size_incr
 def validate_context_parallel_strategy_ring(keys) -> None:
   if keys["context_parallel_strategy"].lower() != "ring":
     return
+  context_parallel_size = get_context_parallel_size(keys)
   if "gpu" in keys["hardware"]:
     return
   if "tpu" not in keys["hardware"]:
-    if keys["context_parallel_size"] <= 1:
+    if context_parallel_size <= 1:
       return
     raise ValueError(
         "Ring context parallelism strategy (context_parallel_strategy='ring') is only supported on GPUs "
         "or TPU with attention=flash and use_tokamax_splash=True."
     )
-  if keys["context_parallel_size"] <= 1:
+  if context_parallel_size <= 1:
     raise ValueError("TPU Tokamax ring attention requires context_parallel_size > 1.")
   if keys["context_sharding"] != "context":
     raise ValueError("TPU Tokamax ring attention requires context_sharding='context'.")
   if keys["dq_reduction_steps"] not in (0, 3):
     raise ValueError("TPU Tokamax ring attention requires dq_reduction_steps to be 0 or 3.")
-  if keys["max_target_length"] % (keys["context_parallel_size"] * keys["context_parallel_size"]) != 0:
+  if keys["max_target_length"] % (context_parallel_size * context_parallel_size) != 0:
     raise ValueError(
         "TPU Tokamax ring attention requires max_target_length to be divisible by context_parallel_size squared."
     )
@@ -292,8 +293,9 @@ def validate_keys(keys):
         keys["global_rampup_samples"],
     )
 
+  context_parallel_size = get_context_parallel_size(keys)
   # TODO remove after b/435512699 resolved
-  if keys["context_parallel_size"] > 1 and keys["context_parallel_load_balance"] and keys["attention_type"] == "chunk":
+  if context_parallel_size > 1 and keys["context_parallel_load_balance"] and keys["attention_type"] == "chunk":
     raise ValueError("Currently load-balanced context parallelism is not supported for chunk attention.")
 
   validate_context_parallel_strategy_ring(keys)
@@ -858,7 +860,6 @@ class _HyperParameters:
 
     raw_keys["num_slices"] = max_utils.get_num_slices(raw_keys)
     raw_keys["quantization_local_shard_count"] = get_quantization_local_shard_count(raw_keys)
-    raw_keys["context_parallel_size"] = get_context_parallel_size(raw_keys)
     raw_keys = create_parallelisms_list(raw_keys)
     raw_keys = set_and_validate_pipeline_config(raw_keys)
 

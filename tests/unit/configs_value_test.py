@@ -118,7 +118,7 @@ class ConfigTest(unittest.TestCase):
       config = pyconfig.initialize(argv)
 
     self.assertEqual(config.context_parallel_strategy, "ring")
-    self.assertEqual(config.context_parallel_size, 2)
+    self.assertEqual(config.ici_context_parallelism, 2)
     self.assertEqual(config.attention, "flash")
     self.assertTrue(config.use_tokamax_splash)
 

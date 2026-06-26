@@ -261,6 +261,7 @@ ModelName = Literal[
     "qwen3-30b-a3b",
     "qwen3-30b-a3b-base",
     "qwen3-480b-a35b",
+    "qwen3-vl-4b",
     "qwen3-next-80b-a3b",
     "qwen3-omni-30b-a3b",
     "qwen3-custom-30b-a3b",
@@ -700,6 +701,8 @@ class SplashAttention(BaseModel):
   sa_k_layout: str = Field("HEAD_DIM_MINOR", description="Layout for K in splash attention.")
   sa_v_layout: str = Field("HEAD_DIM_MINOR", description="Layout for V in splash attention.")
   use_splash_scheduler: bool = Field(False, description="Use experimental splash attention scheduler.")
+  sa_fuse_reciprocal: bool = Field(True, description="Maps to fuse_reciprocal in SplashConfig.")
+  sa_use_base2_exp: bool = Field(True, description="Maps to use_base2_exp in SplashConfig.")
   # If None, each local_sa_* flag inherits from the corresponding sa_* flag.
   local_sa_block_q: int | None = Field(None, description="Block size for Q in local splash attention.")
   local_sa_block_kv: int | None = Field(None, description="Block size for KV in local splash attention.")
@@ -718,6 +721,8 @@ class SplashAttention(BaseModel):
   local_sa_k_layout: str | None = Field(None, description="Layout for K in local splash attention.")
   local_sa_v_layout: str | None = Field(None, description="Layout for V in local splash attention.")
   local_use_splash_scheduler: bool | None = Field(None, description="Use experimental local splash attention scheduler.")
+  local_sa_fuse_reciprocal: bool | None = Field(None, description="Maps to local fuse_reciprocal in SplashConfig.")
+  local_sa_use_base2_exp: bool | None = Field(None, description="Maps to local use_base2_exp in SplashConfig.")
   use_max_logit_estimate: int = Field(
       -1,
       description="-1 means no estimate, any > 0 value will be used as max logit estimate",
@@ -1361,8 +1366,18 @@ class LoRA(BaseModel):
   lora_module_path: str = Field(
       "",
       description=(
-          "Regex identifying target modules for LoRA, e.g." " '.*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj'."
+          "Regex identifying target NNX modules for LoRA. "
+          "Example for standard models: 'decoder/layers/.*(self_attention/(query|out)|mlp/(wi_0|wo))'. "
+          "Example for MoE: 'decoder/scanned_blocks/layers.*/.*(MoeBlock_0|shared_experts)/(wi_0|wo)'."
       ),
+  )
+  lora_weight_qtype: str | None = Field(
+      None,
+      description=("Optional quantization type for QLoRA (e.g., 'nf4'). If set, QLoRA is applied."),
+  )
+  lora_tile_size: NonNegativeInt | None = Field(
+      None,
+      description=("Tile size for block-wise quantization. Typically 32 or 64."),
   )
   lora_restore_path: PathStr = Field(
       "",
@@ -2279,11 +2294,6 @@ class DerivedValues(BaseModel):
       description="Boolean flag indicating if pipeline parallelism is active across ICI or DCN.",
   )
 
-  context_parallel_size: None | int = Field(
-      None,
-      description="The total size of context parallelism, derived from ICI and DCN values.",
-  )
-
   num_target_devices: None | int = Field(
       None,
       description="The number of devices computed from topology in train_compile or jax.devices() in train",
@@ -2877,9 +2887,6 @@ class MaxTextConfig(
       self.tensors_on_device = [t for t in tensors if getattr(self, t) == "device"]
       self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
 
-    self.context_parallel_size = getattr(self, f"ici_{self.context_sharding}_parallelism", 1) * getattr(
-        self, f"dcn_{self.context_sharding}_parallelism", 1
-    )
     if self.pipeline_parallel_layers == -1:
       if self.decoder_block == DecoderBlockType.DEEPSEEK:
         moe_layers = self.num_decoder_layers - self.first_num_dense_layers
@@ -3003,6 +3010,10 @@ class MaxTextConfig(
       self.local_sa_v_layout = self.sa_v_layout
     if self.local_use_splash_scheduler is None:
       self.local_use_splash_scheduler = self.use_splash_scheduler
+    if self.local_sa_fuse_reciprocal is None:
+      self.local_sa_fuse_reciprocal = self.sa_fuse_reciprocal
+    if self.local_sa_use_base2_exp is None:
+      self.local_sa_use_base2_exp = self.sa_use_base2_exp
 
     # I. RUN ALL CROSS-FIELD VALIDATIONS
     if self.load_parameters_path and self.load_full_state_path:
@@ -3145,6 +3156,7 @@ class MaxTextConfig(
           "llama4-17b-16e",
           "llama4-17b-128e",
           "qwen3-omni-30b-a3b",
+          "qwen3-vl-4b",
           "qwen3.5-35b-a3b",
           "qwen3.5-397b-a17b",
       )
@@ -3181,25 +3193,28 @@ class MaxTextConfig(
         and (self.per_device_batch_size * self.max_target_length) % self.num_vocab_tiling != 0
     ):
       raise ValueError("Per device batch size times sequence length should be divisible by the number of vocab tiles.")
+    context_parallel_size = getattr(self, f"ici_{self.context_sharding}_parallelism", 1) * getattr(
+        self, f"dcn_{self.context_sharding}_parallelism", 1
+    )
     context_parallel_strategy = self.context_parallel_strategy.lower()
     if (
         context_parallel_strategy == "ring"
         and "gpu" not in self.hardware
         and "tpu" not in self.hardware
-        and self.context_parallel_size > 1
+        and context_parallel_size > 1
     ):
       raise ValueError(
           "Ring context parallelism strategy (context_parallel_strategy='ring') is only supported on GPUs "
           "or TPU with attention=flash and use_tokamax_splash=True."
       )
     if context_parallel_strategy == "ring" and "gpu" not in self.hardware and "tpu" in self.hardware:
-      if self.context_parallel_size <= 1:
+      if context_parallel_size <= 1:
         raise ValueError("TPU Tokamax ring attention requires context_parallel_size > 1.")
       if self.context_sharding != "context":
         raise ValueError("TPU Tokamax ring attention requires context_sharding='context'.")
       if self.dq_reduction_steps not in (0, 3):
         raise ValueError("TPU Tokamax ring attention requires dq_reduction_steps to be 0 or 3.")
-      if self.max_target_length % (self.context_parallel_size * self.context_parallel_size) != 0:
+      if self.max_target_length % (context_parallel_size * context_parallel_size) != 0:
         raise ValueError(
             "TPU Tokamax ring attention requires max_target_length to be divisible by context_parallel_size squared."
         )
@@ -3236,7 +3251,7 @@ class MaxTextConfig(
     # validated here because test code paths may load the same config but use a
     # different reorder path. Training's runtime path enforces this.
     if (
-        self.context_parallel_size > 1
+        context_parallel_size > 1
         and "gpu" not in self.hardware
         and self.context_parallel_load_balance
         and self.context_parallel_reorder_strategy == ReorderStrategy.STRIPED

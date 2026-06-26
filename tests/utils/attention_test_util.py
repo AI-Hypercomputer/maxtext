@@ -187,7 +187,7 @@ def forward_with_context_expert_parallelism(
   """Get logits from attention under context/expert parallelism."""
   # If load balanced cp, shuffle along seq dim for input
   # This corresponds to the pre-shuffle step in training
-  context_parallel_size = cfg_cp.context_parallel_size
+  context_parallel_size = mesh_cp.shape.get(cfg_cp.context_sharding, 1)
   # This helper is TPU-oriented and uses the TPU-compatible DUAL_CHUNK_SWAP reorder path.
   # It does not model GPU-specific packed/striped reorder behavior.
   if context_parallel_size > 1 and cfg_cp.context_parallel_load_balance:
