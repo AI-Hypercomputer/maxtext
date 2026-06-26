@@ -668,6 +668,10 @@ class AttentionIndexer(BaseModel):
       description="Determines the training strategy for the indexer: Dense Warm-up or Sparse Training stage.",
   )
   indexer_loss_scaling_factor: float = Field(0.0, description="Multiplier for the indexer KL divergence loss.")
+  indexer_use_approx_top_k: bool = Field(
+      False, description="Whether to use approximate top-k selection for the indexer on TPU."
+  )
+  indexer_approx_top_k_recall: float = Field(0.95, description="Recall target for approximate top-k selection.")
 
 
 class Llama4Attention(BaseModel):
