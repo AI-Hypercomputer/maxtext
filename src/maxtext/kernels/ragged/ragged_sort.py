@@ -186,6 +186,8 @@ def ring_ragged_sort(
           valid_rows_mask=valid_rows_mask,
           reduce_group_size=topk,
           enforce_fallback=enforce_gather_reduce_fallback,
+          flops_override=gather_reduce_flops_override,
+          bytes_accessed_override=gather_reduce_bytes_accessed_override,
       )
     else:
       # Buffering: g_x has size `local_buffer_size` (packed).
@@ -209,6 +211,8 @@ def ring_ragged_sort(
           valid_rows_mask=valid_rows_mask,
           reduce_group_size=topk,
           enforce_fallback=enforce_gather_reduce_fallback,
+          flops_override=gather_reduce_flops_override,
+          bytes_accessed_override=gather_reduce_bytes_accessed_override,
       )
     return grad_hidden_states, None
 
