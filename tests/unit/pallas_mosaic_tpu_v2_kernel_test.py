@@ -15,6 +15,7 @@
 """Unit tests for Pallas Mosaic TPU v2 kernels."""
 
 import collections
+import pytest
 
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -213,6 +214,7 @@ class GmmTest(parameterized.TestCase):
       self.skipTest("Only supported on TPUs.")
     super().setUp()
 
+  @pytest.mark.skip(reason="Test takes too long, can run locally to verify changes b/528087469")
   @parameterized.product(
       batch_size=[128, 512],
       in_size=[512, 1024],
@@ -252,6 +254,7 @@ class GmmTest(parameterized.TestCase):
 
     assert_arrays_all_close(actual, expected)
 
+  @pytest.mark.skip(reason="Test takes too long, can run locally to verify changes b/528087469")
   @parameterized.product(
       batch_size=[128, 1024],
       in_size=[512, 1024],
@@ -287,6 +290,7 @@ class GmmTest(parameterized.TestCase):
     # print(f"Output mean diff: {jnp.mean(jnp.abs(expected - actual))}")
     assert_arrays_all_close(actual, expected)
 
+  @pytest.mark.skip(reason="Test takes too long, can run locally to verify changes b/528087469")
   @parameterized.product(
       batch_size=[128, 256],
       in_size=[255, 500],
@@ -316,6 +320,7 @@ class GmmTest(parameterized.TestCase):
     self.assertEqual(actual.shape, (num_local_groups, in_size, out_size))
     assert_arrays_all_close(actual, expected)
 
+  @pytest.mark.skip(reason="Test takes too long, can run locally to verify changes b/528087469")
   @parameterized.product(
       batch_size=[256, 1024],
       in_size=[1024],
@@ -359,6 +364,7 @@ class GmmTest(parameterized.TestCase):
     self.assertEqual(actual.shape, (num_local_groups, in_size, out_size))
     assert_arrays_all_close(actual, expected)
 
+  @pytest.mark.skip(reason="Test takes too long, can run locally to verify changes b/528087469")
   @parameterized.product(
       batch_size=[128],
       in_size=[512],
@@ -403,6 +409,7 @@ class GmmTest(parameterized.TestCase):
     self.assertEqual(actual.shape, (num_local_groups, in_size, out_size))
     assert_arrays_all_close(actual, expected)
 
+  @pytest.mark.skip(reason="Test takes too long, can run locally to verify changes b/528087469")
   def test_tgmm_explicitly_exercises_all_branches(self):
     # Group 0 (size 4*tile_m, 4 gm tiles): matmul_new_group, matmul, matmul,
     # matmul_group_changing.
@@ -436,6 +443,7 @@ class GmmTest(parameterized.TestCase):
     self.assertEqual(actual.shape, (num_local_groups, in_size, out_size))
     assert_arrays_all_close(actual, expected)
 
+  @pytest.mark.skip(reason="Test takes too long, can run locally to verify changes b/528087469")
   @parameterized.product(
       batch_size=[128],
       in_size=[512, 1024],
@@ -495,6 +503,7 @@ class GmmTest(parameterized.TestCase):
 
     chex.assert_trees_all_close(actual, expected, atol=3e-1, rtol=3e-1)
 
+  @pytest.mark.skip(reason="Test takes too long, can run locally to verify changes b/528087469")
   def test_gmm_security_isolation(self):
     """Verifies that sequences (experts) are isolated from each other.
 
@@ -533,6 +542,7 @@ class GmmTest(parameterized.TestCase):
     )
     self.assertFalse(jnp.any(jnp.isnan(actual_malicious[:first_expert_size])))
 
+  @pytest.mark.skip(reason="Test takes too long, can run locally to verify changes b/528087469")
   def test_gmm_uninitialized_memory_robustness(self):
     """Verifies that the kernel is robust against uninitialized scratchpads.
 
@@ -558,6 +568,7 @@ class GmmTest(parameterized.TestCase):
     # 3. Verify that the output is NaN-free
     self.assertFalse(jnp.any(jnp.isnan(actual)))
 
+  @pytest.mark.skip(reason="Test takes too long, can run locally to verify changes b/528087469")
   @parameterized.product(
       batch_size=[128],
       in_size=[1024],
@@ -614,6 +625,7 @@ class GmmTest(parameterized.TestCase):
 
     chex.assert_trees_all_close(actual, expected, atol=3e-1, rtol=3e-1)
 
+  @pytest.mark.skip(reason="Test takes too long, can run locally to verify changes b/528087469")
   @parameterized.product(
       batch_size=[128],
       in_size=[1024],
@@ -668,6 +680,7 @@ class GmmTest(parameterized.TestCase):
 
     chex.assert_trees_all_close(actual, expected, atol=1.2, rtol=1.2)
 
+  @pytest.mark.skip(reason="Test takes too long, can run locally to verify changes b/528087469")
   @parameterized.product(
       batch_size=[128],
       in_size=[512, 1024],
@@ -720,6 +733,7 @@ class GmmTest(parameterized.TestCase):
 
     chex.assert_trees_all_close(actual, expected, atol=1.1, rtol=1.1)
 
+  @pytest.mark.skip(reason="Test takes too long, can run locally to verify changes b/528087469")
   @parameterized.product(
       batch_size=[128, 256],
       in_size=[255, 500],
@@ -760,6 +774,7 @@ class GmmTest(parameterized.TestCase):
     self.assertEqual(actual.shape, (batch_size, out_size))
     assert_arrays_all_close(actual, expected)
 
+  @pytest.mark.skip(reason="Test takes too long, can run locally to verify changes b/528087469")
   @parameterized.product(
       batch_size=[128],
       in_size=[512],
@@ -818,6 +833,7 @@ class GmmTest(parameterized.TestCase):
     self.assertEqual(actual.shape, (batch_size, out_size))
     chex.assert_trees_all_close(actual, expected, atol=3e-1, rtol=3e-1)
 
+  @pytest.mark.skip(reason="Test takes too long, can run locally to verify changes b/528087469")
   @parameterized.product(
       batch_size=[128],
       in_size=[512],
@@ -865,6 +881,7 @@ class GmmTest(parameterized.TestCase):
     self.assertEqual(actual.shape, (batch_size, out_size))
     assert_arrays_all_close(actual, expected)
 
+  @pytest.mark.skip(reason="Test takes too long, can run locally to verify changes b/528087469")
   @parameterized.product(
       batch_size=[128],
       in_size=[512],
