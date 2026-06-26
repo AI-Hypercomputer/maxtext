@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Tests for Qwix LoRA utils in lora_utils.py"""
+import re
 import sys
 import unittest
 from unittest import mock
@@ -82,6 +83,14 @@ class LoraUtilsTest(unittest.TestCase):
     self.assertEqual(
         path,
         "decoder/layers/(?:[0-9]+/)?.*(self_attention/(query|key|value|out)|mlp/(wi_0|wi_1|wo))",
+    )
+
+    mock_config.model_name = "gemma4-9b"
+    path = lora_utils._get_lora_module_path(mock_config)
+    self.assertEqual(
+        path,
+        "decoder/((scanned_blocks|layers_remainder)/)?layers.*/.*"
+        "(self_attention/(query|key|value|out)|mlp/.*(wi_0|wi_1|wo|shared_experts/(wi_0|wi_1|wo)))",
     )
 
     mock_config.model_name = "unknown_model"
@@ -261,6 +270,66 @@ class LoraUtilsTest(unittest.TestCase):
         elif "args" in kwargs and hasattr(kwargs["args"], "partial_restore"):
           self.assertTrue(kwargs["args"].partial_restore)
         mock_update.assert_called_once()
+
+  def test_gemma4_lora_path_matching(self):
+    """Test that the Gemma4 LoRA regex correctly matches all expected parameter paths."""
+    mock_config = mock.MagicMock(spec=pyconfig.HyperParameters)
+    mock_config.lora = mock.MagicMock()
+    mock_config.lora.lora_module_path = ""
+    mock_config.model_name = "gemma4-9b"
+
+    path_regex = lora_utils._get_lora_module_path(mock_config)
+    compiled = re.compile(path_regex)
+
+    # Expected matching paths:
+    matching_paths = [
+        # Scan layers = True, Dense/MoE attention
+        "decoder/scanned_blocks/layers/self_attention/query/kernel",
+        "decoder/scanned_blocks/layers/self_attention/key/kernel",
+        "decoder/scanned_blocks/layers/self_attention/value/kernel",
+        "decoder/scanned_blocks/layers/self_attention/out/kernel",
+        # Scan layers = True, Dense MLP
+        "decoder/scanned_blocks/layers/mlp/wi_0/kernel",
+        "decoder/scanned_blocks/layers/mlp/wi_1/kernel",
+        "decoder/scanned_blocks/layers/mlp/wo/kernel",
+        # Scan layers = True, MoE MLP
+        "decoder/scanned_blocks/layers/mlp/shared_experts/wi_0/kernel",
+        "decoder/scanned_blocks/layers/mlp/shared_experts/wi_1/kernel",
+        "decoder/scanned_blocks/layers/mlp/shared_experts/wo/kernel",
+        # Scan layers = False, Dense/MoE attention
+        "decoder/layers_remainder/layers/0/self_attention/query/kernel",
+        "decoder/layers_remainder/layers/0/self_attention/key/kernel",
+        "decoder/layers_remainder/layers/0/self_attention/value/kernel",
+        "decoder/layers_remainder/layers/0/self_attention/out/kernel",
+        # Scan layers = False, Dense MLP
+        "decoder/layers_remainder/layers/0/mlp/wi_0/kernel",
+        "decoder/layers_remainder/layers/0/mlp/wi_1/kernel",
+        "decoder/layers_remainder/layers/0/mlp/wo/kernel",
+        # Scan layers = False, MoE MLP
+        "decoder/layers_remainder/layers/0/mlp/shared_experts/wi_0/kernel",
+        "decoder/layers_remainder/layers/0/mlp/shared_experts/wi_1/kernel",
+        "decoder/layers_remainder/layers/0/mlp/shared_experts/wo/kernel",
+        # No scanned_blocks/layers_remainder prefix (e.g. fallback or direct structure)
+        "decoder/layers/0/self_attention/query/kernel",
+        "decoder/layers/0/mlp/wi_0/kernel",
+        "decoder/layers/layers/0/mlp/shared_experts/wi_0/kernel",
+    ]
+
+    for path in matching_paths:
+      self.assertTrue(compiled.search(path), f"Failed to match valid path: {path}")
+
+    # Expected non-matching paths (e.g. layernorm, embedding):
+    non_matching_paths = [
+        "decoder/scanned_blocks/layers/pre_self_attention_norm/scale",
+        "decoder/scanned_blocks/layers/post_self_attention_norm/scale",
+        "decoder/layers_remainder/layers/0/pre_self_attention_norm/scale",
+        "decoder/layers_remainder/layers/0/post_self_attention_norm/scale",
+        "decoder/final_norm/scale",
+        "token_embedder/embedding",
+    ]
+
+    for path in non_matching_paths:
+      self.assertFalse(compiled.search(path), f"Incorrectly matched invalid path: {path}")
 
 
 if __name__ == "__main__":
