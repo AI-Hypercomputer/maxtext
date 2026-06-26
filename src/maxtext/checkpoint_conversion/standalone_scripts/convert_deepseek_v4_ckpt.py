@@ -7,7 +7,19 @@ from tqdm import tqdm
 from absl import logging
 
 from maxtext.utils import max_logging
-from maxtext.checkpoint_conversion.utils.utils import save_weights_to_checkpoint, get_state_dict_from_model
+from maxtext.checkpoint_conversion.utils.utils import save_weights_to_checkpoint
+from safetensors import safe_open
+import pathlib
+
+def get_state_dict_from_model(base_model_path):
+  ckpt_paths = sorted(pathlib.Path(base_model_path).glob("[!.]*.safetensors"))
+  chkpt_vars = {}
+  for i, ckpt_path in enumerate(ckpt_paths):
+    logging.info(f"Loading checkpoint {i+1} of {len(ckpt_paths)} ...")
+    with safe_open(ckpt_path, framework="pt", device="cpu") as f:
+      for raw_key in f.keys():
+        chkpt_vars[raw_key] = f.get_tensor(raw_key)
+  return chkpt_vars
 from maxtext.checkpoint_conversion.utils.hf_model_configs import MODEL_PARAMS_DICT
 
 def _get_expert_stack(chkpt_vars, hf_prefix, num_experts, weight_name):
