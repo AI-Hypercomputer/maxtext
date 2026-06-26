@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch, mock_open, MagicMock
 import json
-from src.maxtext.experimental.agent.checkpoint_validation_agent.main import validate_checkpoint
+from src.maxtext.experimental.agent.checkpoint_validation_agent.main import (validate_checkpoint,)
 
 class TestCheckpointValidationAgent(unittest.TestCase):
     @patch("os.path.exists", return_value=True)
@@ -30,7 +30,7 @@ class TestCheckpointValidationAgent(unittest.TestCase):
         """test that the script correctly parses valid JSON into the right MaxText command."""
         valid_json = {
             "run_name": "success-test",
-            "checkpoint_gcs_path": "gs://fake/0/items",
+            "checkpoint_gcs_path": "gs://path/to/checkpoint",
             "maxtext_model_name": "qwen3-4b",
             "maxtext_overrides": {
                 "tokenizer_path": "Qwen/Qwen3-4B",
@@ -59,3 +59,4 @@ class TestCheckpointValidationAgent(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+    

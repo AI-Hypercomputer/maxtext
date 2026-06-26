@@ -4,11 +4,12 @@ import os
 import argparse
 
 def validate_checkpoint(json_config_path):
+    """Validate MaxText checkpoint using JSON configuration file."""
     # load data while enforcing json requirement
     if not os.path.exists(json_config_path):
         raise FileNotFoundError(f"Config file not found at: {json_config_path}")
         
-    with open(json_config_path, 'r') as f:
+    with open(json_config_path, 'r', encoding='utf-8') as f:
         user_config = json.load(f)
 
     # check json for mandatory fields
@@ -71,7 +72,7 @@ def validate_checkpoint(json_config_path):
     os.makedirs(report_dir, exist_ok=True)
     output_path = os.path.join(report_dir, f"report_{run_name}.json")
     
-    with open(output_path, "w") as f:
+    with open(output_path, "w", encoding='utf-8') as f:
         json.dump(report, f, indent=4)
     print(f"Report saved to {output_path}")
 
@@ -82,5 +83,6 @@ if __name__ == "__main__":
 
     try:
         validate_checkpoint(args.config)
-    except Exception as e:
+    except (KeyError, ValueError, FileNotFoundError) as e:
         print(f"FAILED: {e}")
+        
