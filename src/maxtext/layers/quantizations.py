@@ -862,6 +862,10 @@ def maybe_quantize_model(model, config):
             dummy_segment_ids,
             enable_dropout=False,
         )
+        # Qwix quantization runs a forward pass during tracing, which sows transient nnx.Intermediate variables
+        # (e.g. max_logits from QK-Clip, MTP losses) into the model. Popping them here prevents structural mismatches
+        # between the initial setup GraphDef/state_mesh_shardings and the stripped states during train steps.
+        nnx.pop(model, nnx.Intermediate)
       else:
         model = qwix.quantize_model(model, quantization_provider)
   return model
@@ -1027,8 +1031,7 @@ class TransformerEngineQuantization(Quantization):
           fp8_recipe: recipe.Recipe | None = default_recipe,
           n_groups: int | None = None,
       ):
-        """Generates a set of quantizers for TransformerEngine."""
-
+        """Route quantizer-set generation through the OVERWRITE_WITH_GRADIENT collection."""
         OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
         return super().generate_quantizer_set(  # pytype: disable=wrong-keyword-args
             postfix=postfix,

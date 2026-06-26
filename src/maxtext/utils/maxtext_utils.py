@@ -1648,18 +1648,14 @@ def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=Tru
     # ourselves via nnx_construct_named_sharding, so auto-assignment is not needed here.
     abs_model = nnx.eval_shape(nnx_init_trainstate_fn)
     _, abs_var_state = nnx.split(abs_model)
-    named_sharding_state = sharding.nnx_construct_named_sharding(
-        abs_var_state, mesh
-    )
+    named_sharding_state = sharding.nnx_construct_named_sharding(abs_var_state, mesh)
     abstract_state = jax.tree.map(
         lambda a, s: jax.ShapeDtypeStruct(a.shape, a.dtype, sharding=s),
         abs_var_state,
         named_sharding_state,
     )
 
-  state_mesh_shardings = maxtext_utils_nnx.nnx_extract_named_sharding(
-      abstract_state
-  )
+  state_mesh_shardings = maxtext_utils_nnx.nnx_extract_named_sharding(abstract_state)
 
   if is_training and config.shard_optimizer_over_data:
     # Add data to sharding for optimizer state

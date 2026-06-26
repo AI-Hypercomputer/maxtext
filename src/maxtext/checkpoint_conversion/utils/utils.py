@@ -967,7 +967,7 @@ def extract_nnx_weights(weights_dict: dict) -> dict[str, np.ndarray]:
   for path_tuple, leaf_value in leaves_with_paths:
     path_keys = param_key_parts_from_path(path_tuple)
     # Skip NNX RNG state variables (not model weights)
-    if "to_nnx__rngs" in path_keys or any(k.endswith("_rngs") for k in path_keys):
+    if "to_nnx__rngs" in path_keys or any(k == "rngs" or k.endswith("_rngs") for k in path_keys):
       continue
     maxtext_param_key = "params-" + "-".join(path_keys)
     if not isinstance(leaf_value, (jax.Array, np.ndarray)):

@@ -78,6 +78,8 @@ VertexTensorboardManager, _vertex_tb_is_stub = vertex_tensorboard_modules()
 def get_first_step(model, state):
   if isinstance(model, nn.Module):
     return int(state.step)
+  if hasattr(state, "inner_state"):  # DiLoCoTrainState (NNX DiLoCo): step is the optimizer step var
+    return int(state.step.get_value())
   return int(state.optimizer.step.get_value())
 
 
@@ -208,15 +210,15 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       intermediate_outputs["mtp_losses"] = nnx.pop(model, mtp_losses).to_pure_dict()
       intermediate_outputs["mtp_acceptance"] = nnx.pop(model, mtp_acceptance).to_pure_dict()
 
-    if config.num_vocab_tiling > 1:
-      hidden_state_key = ("decoder", "hidden_states")
-      hidden_states = maxtext_utils.get_nested_value(intermediate_outputs, hidden_state_key)[0]
-      xent_sum, total_z_loss = vocab_tiling_nnx_loss(model, hidden_states, data, config, is_train)
-    elif (config.use_indexer and not config.indexer_sparse_training) and is_train:
+    if (config.use_indexer and not config.indexer_sparse_training) and is_train:
       # In Dense Warm-up stage, we skip main model loss calculation for efficiency.
       # The main model parameters are frozen and only the indexer is trained via KL divergence.
       xent_sum = 0.0
       total_z_loss = 0.0
+    elif config.num_vocab_tiling > 1:
+      hidden_state_key = ("decoder", "hidden_states")
+      hidden_states = maxtext_utils.get_nested_value(intermediate_outputs, hidden_state_key)[0]
+      xent_sum, total_z_loss = vocab_tiling_nnx_loss(model, hidden_states, data, config, is_train)
     else:
       one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
       xent, z_loss = max_utils.cross_entropy_with_logits(logits, one_hot_targets, z_loss=config.z_loss_multiplier)
@@ -293,8 +295,25 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   # get MoE routed bias term updates
   moe_bias_updates = None
   if config.routed_bias and config.routed_bias_update_rate > 0.0:
-    nested_key = ("intermediates", "decoder", "moe_layers", "moe_bias_updates")
-    moe_bias_updates = maxtext_utils.get_nested_value(intermediate_outputs, nested_key, None)
+    if isinstance(model, nn.Module):
+      nested_key = ("intermediates", "decoder", "moe_layers", "moe_bias_updates")
+      moe_bias_updates = maxtext_utils.get_nested_value(intermediate_outputs, nested_key, None)
+    else:
+      # NNX intermediates are model-rooted (no "intermediates" prefix), so match by
+      # suffix instead. Unlike collect_intermediates_by_suffix we must not ravel:
+      # the update is a 2-D matrix that's transposed at the apply site below.
+      moe_bias_updates = next(
+          (
+              val
+              for path, val in jax.tree_util.tree_leaves_with_path(intermediate_outputs)
+              if tuple(k.key for k in path if hasattr(k, "key"))[-1:] == ("moe_bias_updates",)
+          ),
+          None,
+      )
+      if moe_bias_updates is not None:
+        # The Linen path returns the sow tuple and indexes [0] downstream; tree_leaves
+        # already descended that tuple, so wrap it back so the apply site is uniform.
+        moe_bias_updates = (moe_bias_updates,)
 
   # Add the model's primary output to the intermediates dict so it can be used
   # by the acceptance rate calculation in eval_step.
@@ -504,7 +523,14 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       opt_state = nnx.state(state.optimizer)
       new_opt_state = jax.device_put(opt_state, device_opt_shardings)
       nnx.update(state.optimizer, new_opt_state)
-    state.apply_gradients(grads)
+    if config.skip_step_on_spikes:
+      # The skip-step optimizer is a GradientTransformationExtraArgs that reads
+      # loss/grad_norm to decide whether to zero the update on a spike. nnx
+      # Optimizer.update forwards these kwargs to tx.update.
+      grad_norm = max_utils.l2norm_pytree(grads)
+      state.apply_gradients(grads, loss=loss, grad_norm=grad_norm)
+    else:
+      state.apply_gradients(grads)
     new_state = state
 
     # Apply updates for Auxiliary-Loss-Free load balancing for DeepSeek family
@@ -542,10 +568,15 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       model_params = nnx.state(new_state.model, nnx.Param)
       scalar_metrics["learning/param_norm"] = max_utils.l2norm_pytree(model_params)
 
-  # Surface skip-step rejections as a TB metric. Linen path only — the NNX
-  # branch doesn't apply skip-step, so new_opt_state stays None.
+  # Surface skip-step rejections as a TB metric. The skip-step optimizer stores
+  # is_skipped in its opt_state: the Linen path gets it from the tx.update return,
+  # the NNX path reads it back off the optimizer it just updated in place.
   if config.skip_step_on_spikes:
-    is_skipped = new_opt_state.get("is_skipped") if isinstance(new_opt_state, dict) else None
+    if isinstance(model, nn.Module):
+      is_skipped = new_opt_state.get("is_skipped") if isinstance(new_opt_state, dict) else None
+    else:
+      opt_state = nnx.to_pure_dict(nnx.state(new_state.optimizer)).get("opt_state", {})
+      is_skipped = opt_state.get("is_skipped") if isinstance(opt_state, dict) else None
     if is_skipped is not None:
       scalar_metrics["optim/step_skipped"] = is_skipped.astype(jnp.float32)
   metrics = {
@@ -560,7 +591,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   # Drop Intermediates (e.g. sowed max_logits for QK-Clip) and the MTP sown
   # vars (mtp_losses/mtp_acceptance) before returning. They're absent from
   # state_mesh_shardings and would cause a leaf-count / structure mismatch.
-  return nnx.state(new_state, nnx.Not(nnx.Any(nnx.Intermediate, mtp_losses, mtp_acceptance))), metrics
+  return nnx.state(new_state, nnx.Not(nnx.Intermediate)), metrics
 
 
 def eval_step(model, config, state, data, dropout_rng=None):
@@ -628,10 +659,18 @@ def train_loop(config, recorder, state=None):
 
   if isinstance(model, nn.Module):
     jit_model = model
+  elif config.enable_diloco:
+    # state is the DiLoCoTrainState; `model` is already the TrainStateNNX graphdef the inner step needs.
+    jit_model = model
   else:
     jit_model, state = nnx.split(state)
 
-  params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
+  if config.pure_nnx and config.enable_diloco:
+    # DiLoCoTrainState.params already holds the param shardings the inner step needs;
+    # the Zero-1 opt overlay doesn't apply through the diloco wrapper.
+    params_shardings = state_mesh_shardings.params
+  else:
+    params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
 
   p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
       config,
@@ -653,7 +692,8 @@ def train_loop(config, recorder, state=None):
     elif config.shard_optimizer_over_data:
       # NNX: reshard state so params match the data-sharded in_shardings (Zero-1 layout)
       state = jax.device_put(state, state_mesh_shardings)
-    if isinstance(model, nn.Module):
+    if isinstance(model, nn.Module) or config.enable_diloco:
+      # The DiLoCo train step takes (state, batch, rng), like the Linen step.
       lower_args = (state, shaped_batch, init_rng)
     else:
       lower_args = (state, shaped_batch)
@@ -669,6 +709,8 @@ def train_loop(config, recorder, state=None):
   # Write train config params, num model params, and XLA flags to tensorboard
   if isinstance(model, nn.Module):
     setup_params = state.params
+  elif config.enable_diloco:
+    setup_params = state.params  # DiLoCoTrainState.params: the outer (global) params
   else:
     _, setup_params, _ = nnx.split(state.model, nnx.Param, ...)
   metric_logger_instance.write_setup_info_to_tensorboard(setup_params)
@@ -683,7 +725,7 @@ def train_loop(config, recorder, state=None):
 
       with jax.profiler.StepTraceAnnotation("train", step_num=step):
         example_batch = data_loader.load_next_batch(rampup_manager=rampup_manager)
-        if isinstance(model, nn.Module):
+        if isinstance(model, nn.Module) or config.enable_diloco:
           # pylint: disable=not-callable
           step_rng_args = (jax.jit(jax.random.fold_in)(init_rng, step),)
         else:
