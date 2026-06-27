@@ -65,13 +65,17 @@ class DeepSeekGenericLayer(nnx.Module):
       rngs: nnx.Rngs,
       quant: Optional[quantizations.AqtQuantization] = None,
       layer_idx: int = -1,
+      is_mhc_enabled: Optional[bool] = None,
   ) -> None:
     self.config = config
     self.model_mode = model_mode
     self.mesh = mesh
     self.quant = quant
     self.rngs = rngs
-    self.is_mhc_enabled = config.mhc_expansion_rate > 1
+    if is_mhc_enabled is None:
+      self.is_mhc_enabled = config.mhc_expansion_rate > 1 and layer_idx > 0
+    else:
+      self.is_mhc_enabled = is_mhc_enabled
     self.layer_idx = layer_idx
     self.is_engram_enabled = config.engram_layers and layer_idx in config.engram_layers
 

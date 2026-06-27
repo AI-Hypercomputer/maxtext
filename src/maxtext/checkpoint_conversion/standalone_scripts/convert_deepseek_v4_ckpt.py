@@ -11,7 +11,8 @@ from maxtext.checkpoint_conversion.utils.utils import save_weights_to_checkpoint
 from safetensors import safe_open
 import pathlib
 
-absl.logging.set_verbosity(absl.logging.INFO)  # for max_logging.log
+logging.set_verbosity(logging.INFO)  # for max_logging.log
+
 
 def get_state_dict_from_model(base_model_path):
   ckpt_paths = sorted(pathlib.Path(base_model_path).glob("[!.]*.safetensors"))
@@ -34,33 +35,36 @@ def _get_expert_stack(chkpt_vars, hf_prefix, num_experts, weight_name):
     stacked_weights.append(pt_tensor.to(torch.float16).numpy().transpose())
   return np.stack(stacked_weights)
 
+
 def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info) -> dict:
   max_logging.log("Starting conversion to JAX weights")
-  
-  jax_weights = {
-      "decoder": {
-          "pre_layers": {},
-          "scanned_blocks": {"layers_0": {}, "layers_1": {}}
-      }
-  }
+
+  jax_weights = {"decoder": {"pre_layers": {}, "scanned_blocks": {"layers_0": {}, "layers_1": {}}}}
 
   chkpt_vars = get_state_dict_from_model(base_model_path)
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
   # 1. Embeddings and LM Head
   max_logging.log("Processing embeddings and LM head")
-  if "embed_tokens.weight" in chkpt_vars:
-    jax_weights["token_embedder"] = {
-        "embedding": chkpt_vars["embed_tokens.weight"].to(torch.float16).numpy()
-    }
-  if "norm.weight" in chkpt_vars:
-    jax_weights["decoder"]["decoder_norm"] = {
-        "scale": chkpt_vars["norm.weight"].to(torch.float16).numpy()
-    }
-  if "lm_head.weight" in chkpt_vars:
-    jax_weights["decoder"]["logits_dense"] = {
-        "kernel": chkpt_vars["lm_head.weight"].to(torch.float16).numpy().transpose()
-    }
+  embed_key = "embed_tokens.weight"
+  for k in ["model.embed_tokens.weight", "tok_embeddings.weight"]:
+    if k in chkpt_vars:
+      embed_key = k
+
+  if embed_key in chkpt_vars:
+    jax_weights["token_embedder"] = {"embedding": chkpt_vars[embed_key].to(torch.float16).numpy()}
+
+  norm_key = "model.norm.weight" if "model.norm.weight" in chkpt_vars else "norm.weight"
+  if norm_key in chkpt_vars:
+    jax_weights["decoder"]["decoder_norm"] = {"scale": chkpt_vars[norm_key].to(torch.float16).numpy()}
+
+  lm_head_key = "lm_head.weight"
+  for k in ["output.weight"]:
+    if k in chkpt_vars:
+      lm_head_key = k
+
+  if lm_head_key in chkpt_vars:
+    jax_weights["decoder"]["logits_dense"] = {"kernel": chkpt_vars[lm_head_key].to(torch.float16).numpy().transpose()}
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
   # DeepSeek V4 splits layers into pre_layers (0,1,2) and scanned layers (3 to N)
@@ -69,21 +73,18 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
   layers_per_block = model_params["layers_per_block"]
   num_experts = model_params["num_experts"]
 
-  layers_config = {
-      "pre_layers": num_pre_layers,
-      "layers_0": layers_per_block,
-      "layers_1": layers_per_block
-  }
+  layers_config = {"pre_layers": num_pre_layers, "layers_0": layers_per_block, "layers_1": layers_per_block}
 
   def t(arr):
-    if arr is None: return arr
+    if arr is None:
+      return arr
     axes = list(range(len(arr.shape)))
     axes[0], axes[1] = axes[1], axes[0]
     return np.transpose(arr, axes=tuple(axes))
 
   for layer_key, layer_value in layers_config.items():
     max_logging.log(f"Processing {layer_key}")
-    
+
     self_attention = {
         "q_norm": {"scale": None},
         "kv_norm": {"scale": None},
@@ -91,39 +92,40 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
         "wq_b": {"kernel": None},
         "wkv": {"kernel": None},
         "o_a_proj": {"kernel": None},
-        "o_b_proj": {"kernel": None}
+        "o_b_proj": {"kernel": None},
     }
     # V4 specific attention properties
     if layer_key != "pre_layers":
       self_attention["sinks"] = None
       if layer_key == "layers_0":
         self_attention["hca_compressor"] = {
-            "position_bias": None, "kv_norm": {"scale": None}, 
-            "gate_proj": {"kernel": None}, "kv_proj": {"kernel": None}
+            "position_bias": None,
+            "kv_norm": {"scale": None},
+            "gate_proj": {"kernel": None},
+            "kv_proj": {"kernel": None},
         }
       elif layer_key == "layers_1":
         self_attention["csa_compressor"] = {
-            "position_bias": None, "kv_norm": {"scale": None}, 
-            "gate_proj": {"kernel": None}, "kv_proj": {"kernel": None},
+            "position_bias": None,
+            "kv_norm": {"scale": None},
+            "gate_proj": {"kernel": None},
+            "kv_proj": {"kernel": None},
             "indexer": {
-                "position_bias": None, "kv_norm": {"scale": None},
-                "gate_proj": {"kernel": None}, "kv_proj": {"kernel": None},
-                "weights_proj": {"kernel": None}, "q_proj": {"kernel": None}
-            }
+                "position_bias": None,
+                "kv_norm": {"scale": None},
+                "gate_proj": {"kernel": None},
+                "kv_proj": {"kernel": None},
+                "weights_proj": {"kernel": None},
+                "q_proj": {"kernel": None},
+            },
         }
-    
+
     pre_self_attention_layer_norm = {"scale": None}
     post_self_attention_layer_norm = {"scale": None}
-    
+
     moe = {
-        "MoeBlock_0": {
-            "gate": {"kernel": None, "bias": None},
-            "wi_0": None, "wo": None, "wi_1": None,
-            "tid2eid": None
-        },
-        "shared_experts": {
-            "wi_0": {"kernel": None}, "wo": {"kernel": None}, "wi_1": {"kernel": None}
-        }
+        "MoeBlock_0": {"gate": {"kernel": None, "bias": None}, "wi_0": None, "wo": None, "wi_1": None, "tid2eid": None},
+        "shared_experts": {"wi_0": {"kernel": None}, "wo": {"kernel": None}, "wi_1": {"kernel": None}},
     }
 
     for layer_idx in tqdm(range(layer_value), desc=layer_key, leave=False):
@@ -135,10 +137,10 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
         hf_layer_idx = num_pre_layers + 2 * layer_idx + 1
 
       hf_prefix = f"layers.{hf_layer_idx}"
-      
+
       if f"{hf_prefix}.attn.q_norm.weight" not in chkpt_vars:
         continue
-      
+
       # Extract vars
       q_norm = chkpt_vars[f"{hf_prefix}.attn.q_norm.weight"].to(torch.float16).numpy()
       kv_norm = chkpt_vars[f"{hf_prefix}.attn.kv_norm.weight"].to(torch.float16).numpy()
@@ -168,30 +170,49 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
                 "MoeBlock_0": {
                     "gate": {
                         "kernel": chkpt_vars[f"{hf_prefix}.ffn.gate.weight"].to(torch.float16).numpy().transpose(),
-                        "bias": chkpt_vars[f"{hf_prefix}.ffn.gate.bias"].to(torch.float16).numpy() if f"{hf_prefix}.ffn.gate.bias" in chkpt_vars else None,
+                        "bias": chkpt_vars[f"{hf_prefix}.ffn.gate.bias"].to(torch.float16).numpy()
+                        if f"{hf_prefix}.ffn.gate.bias" in chkpt_vars
+                        else None,
                     },
-                    "tid2eid": chkpt_vars[f"{hf_prefix}.ffn.gate.tid2eid"].to(torch.float16).numpy() if f"{hf_prefix}.ffn.gate.tid2eid" in chkpt_vars else None,
+                    "tid2eid": chkpt_vars[f"{hf_prefix}.ffn.gate.tid2eid"].to(torch.float16).numpy()
+                    if f"{hf_prefix}.ffn.gate.tid2eid" in chkpt_vars
+                    else None,
                     "wi_0": _get_expert_stack(chkpt_vars, hf_prefix, num_experts, "w1"),
                     "wo": _get_expert_stack(chkpt_vars, hf_prefix, num_experts, "w2"),
-                    "wi_1": _get_expert_stack(chkpt_vars, hf_prefix, num_experts, "w3")
+                    "wi_1": _get_expert_stack(chkpt_vars, hf_prefix, num_experts, "w3"),
                 },
                 "shared_experts": {
-                    "wi_0": {"kernel": chkpt_vars[f"{hf_prefix}.ffn.shared_experts.w1.weight"].to(torch.float16).numpy().transpose()},
-                    "wo": {"kernel": chkpt_vars[f"{hf_prefix}.ffn.shared_experts.w2.weight"].to(torch.float16).numpy().transpose()},
-                    "wi_1": {"kernel": chkpt_vars[f"{hf_prefix}.ffn.shared_experts.w3.weight"].to(torch.float16).numpy().transpose()}
-                }
-            }
+                    "wi_0": {
+                        "kernel": chkpt_vars[f"{hf_prefix}.ffn.shared_experts.w1.weight"]
+                        .to(torch.float16)
+                        .numpy()
+                        .transpose()
+                    },
+                    "wo": {
+                        "kernel": chkpt_vars[f"{hf_prefix}.ffn.shared_experts.w2.weight"]
+                        .to(torch.float16)
+                        .numpy()
+                        .transpose()
+                    },
+                    "wi_1": {
+                        "kernel": chkpt_vars[f"{hf_prefix}.ffn.shared_experts.w3.weight"]
+                        .to(torch.float16)
+                        .numpy()
+                        .transpose()
+                    },
+                },
+            },
         }
         # cleanup nulls
         if jax_weights["decoder"]["pre_layers"][f"layers_{layer_idx}"]["mlp"]["MoeBlock_0"]["gate"]["bias"] is None:
-            del jax_weights["decoder"]["pre_layers"][f"layers_{layer_idx}"]["mlp"]["MoeBlock_0"]["gate"]["bias"]
+          del jax_weights["decoder"]["pre_layers"][f"layers_{layer_idx}"]["mlp"]["MoeBlock_0"]["gate"]["bias"]
         if jax_weights["decoder"]["pre_layers"][f"layers_{layer_idx}"]["mlp"]["MoeBlock_0"]["tid2eid"] is None:
-            del jax_weights["decoder"]["pre_layers"][f"layers_{layer_idx}"]["mlp"]["MoeBlock_0"]["tid2eid"]
+          del jax_weights["decoder"]["pre_layers"][f"layers_{layer_idx}"]["mlp"]["MoeBlock_0"]["tid2eid"]
         continue
 
       # For scanned layers: allocate if first time
       sinks = chkpt_vars[f"{hf_prefix}.attn.attn_sink"].to(torch.float16).numpy()
-      
+
       if self_attention["q_norm"]["scale"] is None:
         stack_shape = (layer_value,)
         self_attention["sinks"] = np.zeros(stack_shape + sinks.shape, dtype=np.float16)
@@ -222,7 +243,7 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
           c_norm = chkpt_vars[f"{hf_prefix}.attn.compressor.norm.weight"].to(torch.float16).numpy()
           c_gate = chkpt_vars[f"{hf_prefix}.attn.compressor.wgate.weight"].to(torch.float16).numpy().transpose()
           c_kv = chkpt_vars[f"{hf_prefix}.attn.compressor.wkv.weight"].to(torch.float16).numpy().transpose()
-          
+
           hca = self_attention["hca_compressor"]
           if hca["position_bias"] is None:
             stack_shape = (layer_value,)
@@ -230,7 +251,7 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
             hca["kv_norm"]["scale"] = np.zeros(stack_shape + c_norm.shape, dtype=np.float16)
             hca["gate_proj"]["kernel"] = np.zeros(stack_shape + c_gate.shape, dtype=np.float16)
             hca["kv_proj"]["kernel"] = np.zeros(stack_shape + c_kv.shape, dtype=np.float16)
-          
+
           hca["position_bias"][layer_idx, ...] = pos_bias
           hca["kv_norm"]["scale"][layer_idx, ...] = c_norm
           hca["gate_proj"]["kernel"][layer_idx, ...] = c_gate
@@ -242,7 +263,7 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
           c_norm = chkpt_vars[f"{hf_prefix}.attn.compressor.norm.weight"].to(torch.float16).numpy()
           c_gate = chkpt_vars[f"{hf_prefix}.attn.compressor.wgate.weight"].to(torch.float16).numpy().transpose()
           c_kv = chkpt_vars[f"{hf_prefix}.attn.compressor.wkv.weight"].to(torch.float16).numpy().transpose()
-          
+
           csa = self_attention["csa_compressor"]
           if csa["position_bias"] is None:
             stack_shape = (layer_value,)
@@ -250,7 +271,7 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
             csa["kv_norm"]["scale"] = np.zeros(stack_shape + c_norm.shape, dtype=np.float16)
             csa["gate_proj"]["kernel"] = np.zeros(stack_shape + c_gate.shape, dtype=np.float16)
             csa["kv_proj"]["kernel"] = np.zeros(stack_shape + c_kv.shape, dtype=np.float16)
-          
+
           csa["position_bias"][layer_idx, ...] = pos_bias
           csa["kv_norm"]["scale"][layer_idx, ...] = c_norm
           csa["gate_proj"]["kernel"][layer_idx, ...] = c_gate
@@ -272,7 +293,7 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
               idxr["kv_proj"]["kernel"] = np.zeros(stack_shape + i_kv.shape, dtype=np.float16)
               idxr["weights_proj"]["kernel"] = np.zeros(stack_shape + i_wproj.shape, dtype=np.float16)
               idxr["q_proj"]["kernel"] = np.zeros(stack_shape + i_qproj.shape, dtype=np.float16)
-              
+
             idxr["position_bias"][layer_idx, ...] = i_pos_bias
             idxr["kv_norm"]["scale"][layer_idx, ...] = i_norm
             idxr["gate_proj"]["kernel"][layer_idx, ...] = i_gate
@@ -283,8 +304,12 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
       # --- MoE ---
       if f"{hf_prefix}.ffn.gate.weight" in chkpt_vars:
         gate_w = chkpt_vars[f"{hf_prefix}.ffn.gate.weight"].to(torch.float16).numpy().transpose()
-        gate_b = chkpt_vars[f"{hf_prefix}.ffn.gate.bias"].to(torch.float16).numpy() if f"{hf_prefix}.ffn.gate.bias" in chkpt_vars else None
-        
+        gate_b = (
+            chkpt_vars[f"{hf_prefix}.ffn.gate.bias"].to(torch.float16).numpy()
+            if f"{hf_prefix}.ffn.gate.bias" in chkpt_vars
+            else None
+        )
+
         w1 = _get_expert_stack(chkpt_vars, hf_prefix, num_experts, "w1")
         w2 = _get_expert_stack(chkpt_vars, hf_prefix, num_experts, "w2")
         w3 = _get_expert_stack(chkpt_vars, hf_prefix, num_experts, "w3")
@@ -298,11 +323,11 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
           moe["MoeBlock_0"]["gate"]["kernel"] = np.zeros(stack_shape + gate_w.shape, dtype=np.float16)
           if gate_b is not None:
             moe["MoeBlock_0"]["gate"]["bias"] = np.zeros(stack_shape + gate_b.shape, dtype=np.float16)
-          
+
           moe["MoeBlock_0"]["wi_0"] = np.zeros(stack_shape + w1.shape, dtype=np.float16)
           moe["MoeBlock_0"]["wo"] = np.zeros(stack_shape + w2.shape, dtype=np.float16)
           moe["MoeBlock_0"]["wi_1"] = np.zeros(stack_shape + w3.shape, dtype=np.float16)
-          
+
           moe["shared_experts"]["wi_0"]["kernel"] = np.zeros(stack_shape + sw1.shape, dtype=np.float16)
           moe["shared_experts"]["wo"]["kernel"] = np.zeros(stack_shape + sw2.shape, dtype=np.float16)
           moe["shared_experts"]["wi_1"]["kernel"] = np.zeros(stack_shape + sw3.shape, dtype=np.float16)
@@ -313,11 +338,10 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
         moe["MoeBlock_0"]["wi_0"][layer_idx, ...] = w1
         moe["MoeBlock_0"]["wo"][layer_idx, ...] = w2
         moe["MoeBlock_0"]["wi_1"][layer_idx, ...] = w3
-        
+
         moe["shared_experts"]["wi_0"]["kernel"][layer_idx, ...] = sw1
         moe["shared_experts"]["wo"]["kernel"][layer_idx, ...] = sw2
         moe["shared_experts"]["wi_1"]["kernel"][layer_idx, ...] = sw3
-
 
     if layer_key != "pre_layers":
       # RE-ORDER manually (transpose)
@@ -344,7 +368,7 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
         csa["kv_norm"]["scale"] = t(csa["kv_norm"]["scale"])
         csa["gate_proj"]["kernel"] = t(csa["gate_proj"]["kernel"])
         csa["kv_proj"]["kernel"] = t(csa["kv_proj"]["kernel"])
-        
+
         idxr = csa["indexer"]
         idxr["position_bias"] = t(idxr["position_bias"])
         idxr["kv_norm"]["scale"] = t(idxr["kv_norm"]["scale"])
@@ -352,17 +376,17 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
         idxr["kv_proj"]["kernel"] = t(idxr["kv_proj"]["kernel"])
         idxr["weights_proj"]["kernel"] = t(idxr["weights_proj"]["kernel"])
         idxr["q_proj"]["kernel"] = t(idxr["q_proj"]["kernel"])
-        
+
       moe["MoeBlock_0"]["gate"]["kernel"] = t(moe["MoeBlock_0"]["gate"]["kernel"])
       moe["MoeBlock_0"]["gate"]["bias"] = t(moe["MoeBlock_0"]["gate"]["bias"])
       # Remove tid2eid from scanned layers since it's unused
       if "tid2eid" in moe["MoeBlock_0"]:
         del moe["MoeBlock_0"]["tid2eid"]
-      
+
       moe["MoeBlock_0"]["wi_0"] = t(moe["MoeBlock_0"]["wi_0"])
       moe["MoeBlock_0"]["wo"] = t(moe["MoeBlock_0"]["wo"])
       moe["MoeBlock_0"]["wi_1"] = t(moe["MoeBlock_0"]["wi_1"])
-      
+
       moe["shared_experts"]["wi_0"]["kernel"] = t(moe["shared_experts"]["wi_0"]["kernel"])
       moe["shared_experts"]["wo"]["kernel"] = t(moe["shared_experts"]["wo"]["kernel"])
       moe["shared_experts"]["wi_1"]["kernel"] = t(moe["shared_experts"]["wi_1"]["kernel"])
@@ -371,13 +395,14 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
           "self_attention": self_attention,
           "pre_self_attention_layer_norm": pre_self_attention_layer_norm,
           "post_self_attention_layer_norm": post_self_attention_layer_norm,
-          "mlp": moe
+          "mlp": moe,
       }
 
   del chkpt_vars
   gc.collect()
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
   return jax_weights
+
 
 def _convert_to_jax_weights(base_model_path, model_size, mem_info) -> dict:
   model_params = {
@@ -386,6 +411,7 @@ def _convert_to_jax_weights(base_model_path, model_size, mem_info) -> dict:
       "num_experts": 256,
   }
   return _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
+
 
 def main() -> None:
   parser = argparse.ArgumentParser(description="Convert DeepSeek V4 model weights.")
@@ -400,7 +426,7 @@ def main() -> None:
 
   if args.dry_run:
     max_logging.log("Dry run mode: weights mapped successfully in memory.")
-    
+
     def print_shapes(d, indent=""):
       for k, v in d.items():
         if isinstance(v, dict):
@@ -408,7 +434,7 @@ def main() -> None:
           print_shapes(v, indent + "  ")
         elif isinstance(v, np.ndarray):
           print(f"{indent}{k}: {v.shape}")
-          
+
     print("\n--- MaxText PyTree Shapes ---")
     print("decoder/pre_layers/layers_0:")
     if "layers_0" in jax_weights["decoder"]["pre_layers"]:
@@ -419,6 +445,7 @@ def main() -> None:
     return
 
   save_weights_to_checkpoint(args.maxtext_model_path, jax_weights, 16, True, True)
+
 
 if __name__ == "__main__":
   main()

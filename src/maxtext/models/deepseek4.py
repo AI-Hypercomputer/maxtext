@@ -60,6 +60,7 @@ class DeepSeek4DecoderLayer(deepseek.DeepSeekGenericLayer):
       layer_idx: int = -1,
       compress_ratio: Optional[int] = None,
       is_hash_routing: Optional[bool] = None,
+      is_mhc_enabled: Optional[bool] = None,
   ) -> None:
     super().__init__(
         config=config,
@@ -68,6 +69,7 @@ class DeepSeek4DecoderLayer(deepseek.DeepSeekGenericLayer):
         rngs=rngs,
         quant=quant,
         layer_idx=layer_idx,
+        is_mhc_enabled=is_mhc_enabled,
     )
 
     # DeepSeek V4 applies Hash Routing to the first `config.first_num_hash_layers` layers.
@@ -155,14 +157,28 @@ class DeepSeek4DecoderLayer(deepseek.DeepSeekGenericLayer):
         slot,
     )
 
-    layer_output, metadata = self.mhc_mlp(
-        self.post_attention_norm_op,
-        self.mlp_op,
-        x=intermediate_inputs,
-        mhc_type=HyperConnectionType.MLP_MOE,
-        deterministic=deterministic,
-        input_ids=decoder_input_tokens,
-    )
+    if self.is_mhc_enabled:
+      layer_output, metadata = self.mhc_mlp(
+          self.post_attention_norm_op,
+          self.mlp_op,
+          x=intermediate_inputs,
+          mhc_type=HyperConnectionType.MLP_MOE,
+          deterministic=deterministic,
+          input_ids=decoder_input_tokens,
+      )
+    else:
+      lnx = self.post_attention_norm_op(intermediate_inputs)
+      mlp_lnx, load_balance_loss, moe_bias_updates = self.mlp_op(
+          lnx,
+          deterministic=deterministic,
+          input_ids=decoder_input_tokens,
+      )
+      layer_output = intermediate_inputs + mlp_lnx
+      metadata = {
+          "load_balance_loss": load_balance_loss,
+          "moe_bias_updates": moe_bias_updates,
+      }
+
     load_balance_loss = metadata.get("load_balance_loss", None)
     moe_bias_updates = metadata.get("moe_bias_updates", None)
 
@@ -201,6 +217,7 @@ class DeepSeek4ScannableBlock(nnx.Module):
         quant=self.quant,
         compress_ratio=128,
         is_hash_routing=False,
+        is_mhc_enabled=True,
     )
 
     # Layer 1 in the block: CSA (compress_ratio=4) with Standard MoE (is_hash_routing=False)
@@ -212,6 +229,7 @@ class DeepSeek4ScannableBlock(nnx.Module):
         quant=self.quant,
         compress_ratio=4,
         is_hash_routing=False,
+        is_mhc_enabled=True,
     )
 
   def __call__(
