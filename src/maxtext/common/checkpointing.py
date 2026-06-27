@@ -25,6 +25,7 @@ from flax import nnx
 from flax.training import train_state
 import jax
 import jax.numpy as jnp
+from maxtext.checkpoint_conversion.utils import load_dynamic
 from maxtext.utils.globals import DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
 from maxtext.input_pipeline.multihost_dataloading import MultiHostDataLoadIterator
 from maxtext.input_pipeline.multihost_dataloading import RemoteIteratorWrapper
@@ -764,6 +765,7 @@ def load_state_if_possible(
     checkpoint_conversion_fn=None,
     source_checkpoint_layout="orbax",
     expansion_factor_real_data: int = -1,
+    config: Any | None = None,
 ):
   """Loads TrainState as possible from the inputs.
 
@@ -897,7 +899,14 @@ def load_state_if_possible(
             _assert_no_shaped_dtype_struct(restored)
             return (restored, None)
 
-  if load_parameters_from_path != "":
+  if source_checkpoint_layout == "safetensors_dynamic":
+    path = load_parameters_from_path or load_full_state_from_path
+    max_logging.log(f"Dynamic On-the-Fly Formatting: Loading SafeTensors from {path}")
+    
+    return load_dynamic.load_safetensors_dynamic_state(
+        path, abstract_unboxed_pre_state, config
+    )
+  elif load_parameters_from_path != "":
     if isinstance(abstract_unboxed_pre_state, nnx.State):
       _, params, _ = nnx.split(abstract_unboxed_pre_state.model, nnx.Param, ...)
     else:
@@ -910,6 +919,9 @@ def load_state_if_possible(
           checkpoint_storage_concurrent_gb,
           use_ocdbt=use_ocdbt,
           use_zarr3=use_zarr3,
+          enable_orbax_v1=enable_orbax_v1,
+          source_checkpoint_layout=source_checkpoint_layout,
+          checkpoint_conversion_fn=checkpoint_conversion_fn,
       )
       _assert_no_shaped_dtype_struct(restored_params)
     return None, restored_params
@@ -953,7 +965,14 @@ def setup_checkpoint_logger(config) -> Any | None:  # pytype: disable=attribute-
 
 
 def load_params_from_path(
-    load_parameters_from_path, abstract_unboxed_params, checkpoint_storage_concurrent_gb, use_ocdbt=True, use_zarr3=True
+    load_parameters_from_path,
+    abstract_unboxed_params,
+    checkpoint_storage_concurrent_gb,
+    use_ocdbt=True,
+    use_zarr3=True,
+    enable_orbax_v1=False,
+    source_checkpoint_layout="orbax",
+    checkpoint_conversion_fn=None,
 ):
   """Load decode params from checkpoint at specified path."""
   assert load_parameters_from_path, "load_parameters_from_path is not defined."

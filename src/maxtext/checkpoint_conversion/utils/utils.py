@@ -47,6 +47,7 @@ from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_N
 from transformers import AutoModelForCausalLM
 
 from flax.training import train_state
+from maxtext.checkpoint_conversion.utils.tensor_handling import apply_hook_fns
 from maxtext.common import checkpointing
 from maxtext.common.gcloud_stub import gcs_storage
 from maxtext.utils import max_logging
@@ -135,19 +136,6 @@ def validate_and_filter_param_map_keys(param_map_keys, maxtext_state_keys):
     ):
       filtered_map_keys.append(key)
   return filtered_map_keys
-
-
-def apply_hook_fns(weight, target_shape, hook_fns):
-  """Apply hook functions, essential for to_maxtext and to_huggingface"""
-  # If hook is unsepecified, use identity
-  if hook_fns is None:
-    return weight
-  if not isinstance(hook_fns, list):
-    hook_fns = [hook_fns]
-  # Apply a list of hooks, be careful of order
-  for hook_fn in hook_fns:
-    weight = hook_fn(weight, target_shape)
-  return weight
 
 
 def convert_jax_weight_to_numpy(weight: "jax.Array", dtype_str: None | str = None) -> np.ndarray:
