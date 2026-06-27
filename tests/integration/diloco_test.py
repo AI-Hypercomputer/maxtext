@@ -320,3 +320,31 @@ class DiLoCoTest(unittest.TestCase):
             "head_dim=4",
         )
     )
+
+  @pytest.mark.cpu_only
+  @pytest.mark.tpu_backend
+  def test_streaming_diloco_two_slices(self):
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_compiled_streaming_diloco.pickle")
+    train_compile_main(
+        (
+            None,
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=tpu7x-8",
+            "compile_topology_num_slices=2",
+            "ici_fsdp_parallelism=-1",
+            "dcn_diloco_parallelism=2",
+            "enable_diloco=true",
+            "enable_streaming_diloco=true",
+            "num_diloco_fragments=2",
+            "model_name=gemma2-2b",
+            "override_model_config=True",
+            "base_emb_dim=32",
+            "base_num_decoder_layers=2",
+            "base_mlp_dim=64",
+            "base_num_query_heads=1",
+            "base_num_kv_heads=1",
+            "head_dim=4",
+        )
+    )

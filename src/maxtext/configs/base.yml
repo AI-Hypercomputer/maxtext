@@ -896,6 +896,14 @@ dcn_bandwidth_latency: "50ms"
 # The network interface to apply throttling rules to.
 dcn_bandwidth_interface: "eth0"
 
+# Streaming DiLoCo params
+enable_streaming_diloco: false
+num_diloco_fragments: 16
+use_sequential_layers: false
+num_communication_overlapping_steps: 0
+communication_overlapping_alpha: 0.0
+
+
 # You may disable clipping by setting gradient_clipping_threshold to zero.
 gradient_clipping_threshold: 1.0
 
