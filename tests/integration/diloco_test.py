@@ -28,6 +28,7 @@ import jax.sharding
 from maxtext.common.train_state_nnx import TrainStateNNX
 from maxtext.configs.pyconfig import initialize_pydantic
 from maxtext.trainers.diloco import diloco
+from maxtext.trainers.diloco import utils as diloco_utils
 from maxtext.trainers.pre_train.train_compile import main as train_compile_main
 from tests.utils.test_helpers import get_test_config_path
 import numpy as np
@@ -392,3 +393,107 @@ class DiLoCoTest(unittest.TestCase):
             "head_dim=4",
         )
     )
+
+  @pytest.mark.cpu_only
+  @pytest.mark.tpu_backend
+  def test_streaming_diloco_two_slices(self):
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_compiled_streaming_diloco.pickle")
+    train_compile_main(
+        (
+            None,
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=tpu7x-8",
+            "compile_topology_num_slices=2",
+            "ici_fsdp_parallelism=-1",
+            "dcn_diloco_parallelism=2",
+            "enable_diloco=true",
+            "enable_streaming_diloco=true",
+            "num_diloco_fragments=2",
+            "model_name=gemma2-2b",
+            "override_model_config=True",
+            "base_emb_dim=32",
+            "base_num_decoder_layers=2",
+            "base_mlp_dim=64",
+            "base_num_query_heads=1",
+            "base_num_kv_heads=1",
+            "head_dim=4",
+        )
+    )
+
+  def test_fragmented_tree_manipulator_scanned_filter(self):
+    """Tests that parameters matching regex but lacking leading layer dim are NOT marked scanned."""
+    num_layers = 4
+    config = initialize_pydantic(
+        [
+            "",
+            get_test_config_path(),
+            "enable_diloco=true",
+            "enable_streaming_diloco=true",
+            "num_diloco_fragments=3",
+            f"base_num_decoder_layers={num_layers}",
+        ]
+    )
+    # Scanned param has leading dim = num_layers; non-scanned param matches regex name but lacks leading layer dim
+    params_tree = {
+        "decoder": {
+            "layers": jnp.ones((num_layers, 16, 16)),
+            "layers_outside_pipeline": jnp.ones((16, 16)),  # Lacks leading layer dim = 4
+        }
+    }
+    manipulator = diloco_utils.FragmentedTreeManipulator.create(params_tree, config)
+    # Check that layers_outside_pipeline is NOT treated as scanned
+    scanned_map = manipulator.keypath_to_is_scanned
+    for keystr, is_scanned in scanned_map.items():
+      if "layers_outside_pipeline" in keystr:
+        self.assertFalse(is_scanned)
+      elif "decoder/layers" in keystr:
+        self.assertTrue(is_scanned)
+
+  def test_streaming_diloco_requires_scan_layers(self):
+    """Tests that enable_streaming_diloco=True raises ValueError if scan_layers=False."""
+    with self.assertRaises(ValueError) as ctx:
+      initialize_pydantic(
+          [
+              "",
+              get_test_config_path(),
+              "enable_diloco=true",
+              "enable_streaming_diloco=true",
+              "num_diloco_fragments=2",
+              "scan_layers=false",
+          ]
+      )
+    self.assertIn("enable_streaming_diloco=True requires scan_layers=True", str(ctx.exception))
+
+  def test_apply_flat_fragment_shapedtypestruct(self):
+    """Tests that FragmentedTreeManipulator handles ShapeDtypeStruct leaves during abstract tracing."""
+    num_layers = 2
+    config = initialize_pydantic(
+        [
+            "",
+            get_test_config_path(),
+            "enable_diloco=true",
+            "enable_streaming_diloco=true",
+            "num_diloco_fragments=2",
+            f"base_num_decoder_layers={num_layers}",
+        ]
+    )
+    abstract_tree = {"decoder": {"layers": jax.ShapeDtypeStruct((num_layers, 8), jnp.float32)}}
+    manipulator = diloco_utils.FragmentedTreeManipulator.create(abstract_tree, config)
+    frag = manipulator.get_flat_fragment(abstract_tree, fragment_idx=1)
+    res = manipulator.apply_flat_fragment(abstract_tree, fragment_idx=1, flat_fragment=frag)
+    self.assertIsInstance(res["decoder"]["layers"], jax.ShapeDtypeStruct)
+
+  def test_diloco_requires_pure_nnx(self):
+    """Tests that enable_diloco=True raises ValueError if pure_nnx=False."""
+    with self.assertRaises(ValueError) as ctx:
+      initialize_pydantic(
+          [
+              "",
+              get_test_config_path(),
+              "enable_diloco=true",
+              "pure_nnx=false",
+          ]
+      )
+    self.assertIn("enable_diloco=True requires pure_nnx=True", str(ctx.exception))

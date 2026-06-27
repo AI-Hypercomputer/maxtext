@@ -24,6 +24,7 @@ from typing import Any
 
 from etils import epath
 from flax import nnx
+from flax import struct
 
 
 from flax.training import train_state
@@ -36,6 +37,7 @@ from maxtext.common import train_state_nnx
 from maxtext.input_pipeline.multihost_dataloading import MultiHostDataLoadIterator
 from maxtext.input_pipeline.multihost_dataloading import RemoteIteratorWrapper
 from maxtext.input_pipeline.synthetic_data_processing import PlaceHolderDataIterator
+from maxtext.trainers.diloco.utils.spmd import checkpoint_utils as diloco_checkpoint_utils
 from maxtext.utils import elastic_utils
 from maxtext.utils import exceptions
 from maxtext.utils import gcs_utils
@@ -186,6 +188,16 @@ def _load_linen_checkpoint_into_nnx(
   present, else keep their fresh init value. A genuinely-missing weight raises.
   """
   max_logging.log(f"Restoring Linen-layout checkpoint into NNX state at {path}")
+  if config and getattr(config, "enable_diloco", False):
+    return diloco_checkpoint_utils.restore_diloco_checkpoint(
+        path,
+        abstract_nnx_state,
+        checkpoint_storage_concurrent_gb,
+        use_ocdbt=use_ocdbt,
+        use_zarr3=use_zarr3,
+        config=config,
+    )
+
   linen_abstract = train_state_nnx.to_checkpoint_dict(abstract_nnx_state)
   if config and getattr(getattr(config, "lora", None), "enable_lora", False):
     linen_abstract = _filter_lora_trainable_state(linen_abstract)
@@ -848,7 +860,9 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
     _handle_post_checkpoint_preemption(checkpoint_manager, actual_step, force_ckpt_save)
     return
 
-  if latest_step(checkpoint_manager) == actual_step:
+  # Skip if step directory already exists (e.g. step 0 or prior checkpoints in all_steps())
+  # to prevent Orbax OCDBT UUID collisions during auto-resume / continuation runs for DiLoCo.
+  if latest_step(checkpoint_manager) == actual_step or actual_step in checkpoint_manager.all_steps():
     max_logging.log(f"Checkpoint for step {actual_step} already exists, skipping save.")
     return
 
@@ -903,18 +917,18 @@ def _filter_lora_trainable_state(state):
 
 def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=None, force=False):
   """Wrapper for saving checkpoint."""
-  if not isinstance(state, (dict, nnx.State, train_state.TrainState)):
+  # Allow struct.PyTreeNode so Flax dataclass states (e.g. DiLoCoTrainState) aren't cleared to empty dicts ({})
+  if not isinstance(state, (dict, nnx.State, train_state.TrainState, struct.PyTreeNode)):
     if isinstance(state, train_state_nnx.TrainStateNNX):
       state = nnx.state(state)
     elif not isinstance(state, (dict, nnx.State)):
       state = {}
 
-  if config and getattr(config, "pure_nnx", False) and isinstance(state, nnx.State):
+  if config and getattr(config, "enable_diloco", False):
+    state = diloco_checkpoint_utils.to_diloco_checkpoint_dict(state, config)
+  elif config and getattr(config, "pure_nnx", False):
     # Save in the Linen on-disk layout so pure_nnx and Linen checkpoints are interchangeable.
-    if getattr(config, "enable_diloco", False):
-      step_value = state.step.get_value() if hasattr(state.step, "get_value") else state.step
-      state = train_state_nnx.to_linen_checkpoint_dict({"model": state.params, "optimizer": {"step": step_value}})
-    else:
+    if isinstance(state, nnx.State):
       state = train_state_nnx.to_checkpoint_dict(state)
 
   if config and getattr(config, "enable_checkpointing", False):

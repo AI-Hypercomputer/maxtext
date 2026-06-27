@@ -82,8 +82,9 @@ VertexTensorboardManager, _vertex_tb_is_stub = vertex_tensorboard_modules()
 def get_first_step(model, state):
   if isinstance(model, nn.Module):
     return int(state.step)
-  if hasattr(state, "inner_state"):  # DiLoCoTrainState (NNX DiLoCo): step is the optimizer step var
-    return int(state.step.get_value())
+  if hasattr(state, "inner_state"):  # DiLoCoTrainState (NNX DiLoCo)
+    step_val = state.step.get_value() if hasattr(state.step, "get_value") else state.step
+    return int(step_val)
   return int(state.optimizer.step.get_value())
 
 
