@@ -662,6 +662,7 @@ class MaybeQuantizeModelTest(unittest.TestCase):
         use_qwix_quantization=True,
         use_batch_split_schedule=False,
         pure_nnx=True,
+        pure_nnx_decoder=True,
         micro_batch_size_to_train_on=1,
         max_target_length=2,
     )

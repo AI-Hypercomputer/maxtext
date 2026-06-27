@@ -20,12 +20,16 @@ production loss_fn uses (decoder_input_tokens, decoder_positions, ...).
 """
 
 from dataclasses import dataclass
+import types as pytypes
 import unittest
 
 from flax import nnx
 import jax
 import jax.numpy as jnp
+import numpy as np
 from maxtext.common import train_state_nnx
+from maxtext.common.metric_logger import record_activation_metrics
+from maxtext.optimizers import optimizers
 from maxtext.trainers.pre_train import train as pre_train
 import optax
 
@@ -95,6 +99,16 @@ class _TinyDecoder(nnx.Module):
     return self.proj(h)
 
 
+class _TinyDecoderMoEBias(_TinyDecoder):
+  """`_TinyDecoder` that also sows a `moe_bias_updates` intermediate (DeepSeek routed-bias)."""
+
+  def __call__(self, decoder_input_tokens, decoder_positions, **kwargs):
+    out = super().__call__(decoder_input_tokens, decoder_positions, **kwargs)
+    # 2-D so the downstream `[0].transpose()` in train_step is shape-valid.
+    self.sow(nnx.Intermediate, "moe_bias_updates", jnp.ones((2, 3)))
+    return out
+
+
 def _make_data(batch=2, seq=4, vocab=8):
   return {
       "inputs": jnp.zeros((batch, seq), dtype=jnp.int32),
@@ -153,6 +167,19 @@ class TestLossFnNNX(unittest.TestCase):
     data = _make_data(batch=cfg.micro_batch_size_to_train_on, vocab=cfg.vocab_size)
     loss, aux = pre_train.loss_fn(ts.model, cfg, data, None, None, is_train=True)
     # When dense warm-up is active the loss_fn skips the main loss entirely.
+    self.assertEqual(float(aux["xent_sum"]), 0.0)
+    self.assertEqual(float(loss), 0.0)
+
+  def test_indexer_warmup_precedes_vocab_tiling(self):
+    # The indexer dense warm-up branch must be checked before the num_vocab_tiling>1
+    # branch. With the order reversed, a warm-up step with tiling on ran the
+    # vocab-tiling loss instead of skipping xent. With both on, xent must still be 0.
+    cfg, ts = _build_state()
+    cfg.use_indexer = True
+    cfg.indexer_sparse_training = False
+    cfg.num_vocab_tiling = 2
+    data = _make_data(batch=cfg.micro_batch_size_to_train_on, vocab=cfg.vocab_size)
+    loss, aux = pre_train.loss_fn(ts.model, cfg, data, None, None, is_train=True)
     self.assertEqual(float(aux["xent_sum"]), 0.0)
     self.assertEqual(float(loss), 0.0)
 
@@ -216,6 +243,111 @@ class TestEvalStepNNX(unittest.TestCase):
     ):
       self.assertIn(key, metrics["scalar"])
     self.assertTrue(jnp.isfinite(metrics["scalar"]["evaluation/loss"]))
+
+
+class TestSkipStepOnSpikesNNX(unittest.TestCase):
+  """The NNX optimizer must actually skip a loss/grad spike — i.e. apply_gradients forwards
+  loss/grad_norm to the GradientTransformationExtraArgs, and a skipped step freezes params."""
+
+  def _is_skipped(self, optimizer):
+    return bool(nnx.to_pure_dict(nnx.state(optimizer))["opt_state"]["is_skipped"])
+
+  def test_spike_is_skipped_and_params_frozen(self):
+    model = _TinyDecoder(8, hidden=4, rngs=nnx.Rngs(0))
+    tx = optimizers.skip_step_on_spikes(optax.sgd(0.1), interval=4, scaling_factor=6.0)
+    optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
+    state = train_state_nnx.TrainStateNNX(model, optimizer)
+    grads = jax.tree.map(jnp.ones_like, nnx.state(model, nnx.Param))
+
+    # Prime a stable baseline (mean≈1, std≈0); these are applied, not skipped.
+    for _ in range(3):
+      state.apply_gradients(grads, loss=jnp.float32(1.0), grad_norm=jnp.float32(1.0))
+    self.assertFalse(self._is_skipped(optimizer))
+
+    before = [np.asarray(x) for x in jax.tree_util.tree_leaves(nnx.to_pure_dict(nnx.state(model, nnx.Param)))]
+    # A large spike must be skipped (params unchanged). If apply_gradients did NOT forward
+    # loss/grad_norm, the optimizer would never skip and this would fail.
+    state.apply_gradients(grads, loss=jnp.float32(1e3), grad_norm=jnp.float32(1e3))
+    self.assertTrue(self._is_skipped(optimizer))
+    after = [np.asarray(x) for x in jax.tree_util.tree_leaves(nnx.to_pure_dict(nnx.state(model, nnx.Param)))]
+    for b, a in zip(before, after):
+      np.testing.assert_allclose(a, b)
+
+
+class TestRoutedBiasReadNNX(unittest.TestCase):
+  """loss_fn must find the DeepSeek `moe_bias_updates` intermediate on the NNX (model-rooted) shape."""
+
+  def test_routed_bias_update_found_by_suffix(self):
+    cfg = _Cfg()
+    cfg.routed_bias = True
+    cfg.routed_bias_update_rate = 0.001
+    model = _TinyDecoderMoEBias(cfg.vocab_size, hidden=4, rngs=nnx.Rngs(0))
+    data = _make_data(batch=cfg.micro_batch_size_to_train_on, vocab=cfg.vocab_size)
+    _, aux = pre_train.loss_fn(model, cfg, data, None, None, is_train=True)
+    self.assertIsNotNone(aux["moe_bias_updates"])
+    np.testing.assert_allclose(np.asarray(aux["moe_bias_updates"][0]), np.ones((2, 3)))
+
+  def test_routed_bias_disabled_returns_none(self):
+    cfg = _Cfg()  # routed_bias=False
+    model = _TinyDecoderMoEBias(cfg.vocab_size, hidden=4, rngs=nnx.Rngs(0))
+    data = _make_data(batch=cfg.micro_batch_size_to_train_on, vocab=cfg.vocab_size)
+    _, aux = pre_train.loss_fn(model, cfg, data, None, None, is_train=True)
+    self.assertIsNone(aux["moe_bias_updates"])
+
+
+class TestRecordActivationMetricsParity(unittest.TestCase):
+  """record_activation_metrics must yield identical metrics for Linen- and NNX-shaped intermediates.
+
+  Linen sows into the "intermediates" collection; NNX's `nnx.pop(...).to_pure_dict()` is
+  model-rooted with no "intermediates" prefix. The fix routes the NNX shape through a
+  suffix collector — this test pins that both shapes produce the same per-layer numbers.
+  """
+
+  def _metrics(self, intermediates, scan_layers, num_layers):
+    cfg = pytypes.SimpleNamespace(scan_layers=scan_layers, num_decoder_layers=num_layers)
+    out = {"scalar": {}}
+    record_activation_metrics(out, intermediates, cfg)
+    return out["scalar"]
+
+  def test_scanned_layout_linen_matches_nnx(self):
+    num_layers = 3
+    mean, std, fz = jnp.array([0.1, 0.2, 0.3]), jnp.array([1.0, 1.1, 1.2]), jnp.array([0.5, 0.4, 0.3])
+    triples = {"activation_mean": (mean,), "activation_stdev": (std,), "activation_fraction_zero": (fz,)}
+    # Linen scanned: intermediates/decoder/decoder/<key>[0][layer]
+    linen = {"intermediates": {"decoder": {"decoder": triples}}}
+    # NNX scanned: model-rooted, one stacked array per key (no "intermediates" prefix)
+    nnx_shaped = {"decoder": {"layers": triples}}
+
+    m_linen = self._metrics(linen, scan_layers=True, num_layers=num_layers)
+    m_nnx = self._metrics(nnx_shaped, scan_layers=True, num_layers=num_layers)
+    self.assertEqual(set(m_linen), set(m_nnx))
+    for key, expected in m_linen.items():
+      np.testing.assert_allclose(np.asarray(m_nnx[key]), np.asarray(expected))
+    np.testing.assert_allclose(np.asarray(m_nnx["activ_mean/layer_001"]), 0.2)
+
+  def test_unscanned_layout_linen_matches_nnx(self):
+    num_layers = 3
+    means, stds, fzs = [0.1, 0.2, 0.3], [1.0, 1.1, 1.2], [0.5, 0.4, 0.3]
+
+    def per_layer(d, n):
+      return {
+          "activation_mean": (jnp.array(d[0][n]),),
+          "activation_stdev": (jnp.array(d[1][n]),),
+          "activation_fraction_zero": (jnp.array(d[2][n]),),
+      }
+
+    data = (means, stds, fzs)
+    # Linen unscanned: intermediates/decoder/layers_<n>/<key>[0]
+    linen = {"intermediates": {"decoder": {f"layers_{n}": per_layer(data, n) for n in range(num_layers)}}}
+    # NNX unscanned: model-rooted per-layer entries (one leaf per layer, matched by suffix)
+    nnx_shaped = {"decoder": {f"layers_{n}": per_layer(data, n) for n in range(num_layers)}}
+
+    m_linen = self._metrics(linen, scan_layers=False, num_layers=num_layers)
+    m_nnx = self._metrics(nnx_shaped, scan_layers=False, num_layers=num_layers)
+    self.assertEqual(set(m_linen), set(m_nnx))
+    for key, expected in m_linen.items():
+      np.testing.assert_allclose(np.asarray(m_nnx[key]), np.asarray(expected))
+    np.testing.assert_allclose(np.asarray(m_nnx["activ_stdev/layer_002"]), 1.2)
 
 
 if __name__ == "__main__":
