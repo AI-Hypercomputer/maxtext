@@ -245,3 +245,26 @@ def to_checkpoint_dict(state: nnx.State | nnx.Module):
   if aux:
     linen_dict["nnx_aux"] = aux
   return linen_dict
+
+
+def linen_items_to_nnx(restored_linen: dict[str, Any], abstract_nnx_state: nnx.State | TrainStateNNX) -> nnx.State:
+  """Reshapes a restored Linen-layout `items` dict into an NNX state.
+
+  The inverse of `to_checkpoint_dict`, over the same `split_for_checkpoint` partition. The Linen
+  weights + optimizer fill `linen_state`; the `nnx_aux` state (rngs/dropout, batch stats, custom
+  variables) fills `aux`; the two are recombined with `nnx.merge_state`. The split copies, so the
+  caller's abstract is untouched. Leaves the checkpoint didn't carry -- including the caches it
+  never stores -- stay unmaterialized `ShapeDtypeStruct`s; the caller fills them from a fresh init.
+  """
+  linen_state, aux_state, ephemeral = split_for_checkpoint(abstract_nnx_state)
+  weights = from_linen_checkpoint_dict(restored_linen)
+  if "model" in weights:
+    nnx.replace_by_pure_dict(linen_state, {"model": weights["model"]})
+  if "optimizer" in weights:
+    nnx.replace_by_pure_dict(linen_state, {"optimizer": weights["optimizer"]})
+
+  nnx_aux = restored_linen.get("nnx_aux")
+  if nnx_aux:
+    nnx.replace_by_pure_dict(aux_state, nnx_aux)
+
+  return nnx.merge_state(linen_state, aux_state, ephemeral)

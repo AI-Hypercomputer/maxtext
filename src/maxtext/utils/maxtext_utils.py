@@ -39,6 +39,7 @@ from maxtext.common.common_types import (
 from maxtext.configs import pyconfig
 from maxtext.configs import types
 from maxtext.multimodal import processor as mm_processor
+from maxtext.trainers.diloco import utils as diloco_utils
 from maxtext.utils import elastic_utils
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
@@ -1690,6 +1691,8 @@ def setup_initial_state(
       config, mesh, init_state_fn, is_training
   )
 
+  abstract_restore_state = unboxed_abstract_state
+
   # Initialization
   with nn_partitioning.axis_rules(config.logical_axis_rules):
     restored, raw_params = checkpointing.load_state_if_possible(
@@ -1698,7 +1701,7 @@ def setup_initial_state(
         config.load_parameters_path,
         config.load_full_state_path,
         config.checkpoint_storage_concurrent_gb,
-        unboxed_abstract_state,
+        abstract_restore_state,
         config.enable_single_replica_ckpt_restoring,
         config.dataset_type,
         use_ocdbt=config.checkpoint_storage_use_ocdbt,
@@ -1814,21 +1817,33 @@ def setup_initial_state(
         )()
         if raw_params:  # If we loaded a partial state, we need to merge it.
           sparsity_enabled = config.weight_sparsity_n and config.weight_sparsity_m
+          target_params = raw_params
           if sparsity_enabled:
-            # Sparsity-init keeps freshly initialized params for any leaf still
-            # represented as an abstract ShapeDtypeStruct in raw_params (i.e. not
-            # actually restored), and uses the restored value otherwise.
+
             def _merge_params(p_raw, p_init):
               if isinstance(p_raw, jax.ShapeDtypeStruct):
                 return p_init
               return p_raw
 
-            merged_params = jax.tree_util.tree_map(_merge_params, raw_params, state.params)
-            state = state.replace(params=merged_params)
-          else:
-            state = state.replace(params=raw_params)
+            target_params = jax.tree_util.tree_map(_merge_params, raw_params, state.params)
+
+          if hasattr(state, "keys") and "model" in state:
+            nnx.update(state["model"], target_params)
+          elif hasattr(state, "model"):
+            nnx.update(state.model, target_params)
+          elif hasattr(state, "replace"):
+            state = state.replace(params=target_params)
+
   if not config.pure_nnx:
     state = max_utils.unbox_logicallypartioned(state)
+  if config.enable_diloco:
+    state = diloco_utils.setup_diloco_initial_state(
+        state=state,
+        config=config,
+        mesh=mesh,
+        state_mesh_shardings=state_mesh_shardings,
+        restored=restored,
+    )
   return state, state_mesh_annotations, state_mesh_shardings, data_iterator, was_restored
 
 

@@ -25,6 +25,7 @@ import jax.numpy as jnp
 
 from maxtext.input_pipeline import multihost_dataloading
 from maxtext.configs import pyconfig
+from maxtext.trainers.diloco import utils as diloco_utils
 from maxtext.utils import sharding
 
 
@@ -78,6 +79,8 @@ class SyntheticDataIterator:
     output["targets"] = tokens[:, 1:]
     output["targets_position"] = positions[:, 1:]
     output["targets_segmentation"] = segmentation
+    if config.enable_diloco:
+      output = diloco_utils.reshape_first_axis_with_diloco(config.num_diloco_replicas, output)
     return output
 
 

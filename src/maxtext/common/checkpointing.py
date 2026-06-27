@@ -24,6 +24,7 @@ from typing import Any
 
 from etils import epath
 from flax import nnx
+from flax import struct
 
 
 from flax.training import train_state
@@ -36,6 +37,7 @@ from maxtext.common import train_state_nnx
 from maxtext.input_pipeline.multihost_dataloading import MultiHostDataLoadIterator
 from maxtext.input_pipeline.multihost_dataloading import RemoteIteratorWrapper
 from maxtext.input_pipeline.synthetic_data_processing import PlaceHolderDataIterator
+from maxtext.trainers.diloco.utils.spmd import checkpoint_utils as diloco_checkpoint_utils
 from maxtext.utils import elastic_utils
 from maxtext.utils import exceptions
 from maxtext.utils import gcs_utils
@@ -149,26 +151,8 @@ def _raise_on_weight_mismatch(want, have, config=None):
 
 
 def _linen_items_to_nnx(restored_linen, abstract_nnx_state):
-  """Reshapes a restored Linen-layout `items` dict into an NNX state.
-
-  The inverse of `to_checkpoint_dict`, over the same `split_for_checkpoint` partition. The Linen
-  weights + optimizer fill `linen_state`; the `nnx_aux` state (rngs/dropout, batch stats, custom
-  variables) fills `aux`; the two are recombined with `nnx.merge_state`. The split copies, so the
-  caller's abstract is untouched. Leaves the checkpoint didn't carry -- including the caches it
-  never stores -- stay unmaterialized `ShapeDtypeStruct`s; the caller fills them from a fresh init.
-  """
-  linen_state, aux_state, ephemeral = train_state_nnx.split_for_checkpoint(abstract_nnx_state)
-  weights = train_state_nnx.from_linen_checkpoint_dict(restored_linen)
-  if "model" in weights:
-    nnx.replace_by_pure_dict(linen_state, {"model": weights["model"]})
-  if "optimizer" in weights:
-    nnx.replace_by_pure_dict(linen_state, {"optimizer": weights["optimizer"]})
-
-  nnx_aux = restored_linen.get("nnx_aux")
-  if nnx_aux:
-    nnx.replace_by_pure_dict(aux_state, nnx_aux)
-
-  return nnx.merge_state(linen_state, aux_state, ephemeral)
+  """Reshapes a restored Linen-layout `items` dict into an NNX state."""
+  return train_state_nnx.linen_items_to_nnx(restored_linen, abstract_nnx_state)
 
 
 def _load_linen_checkpoint_into_nnx(
@@ -185,7 +169,25 @@ def _load_linen_checkpoint_into_nnx(
   `_linen_items_to_nnx`. rngs/dropout/batch stats come from `items/nnx_aux` when
   present, else keep their fresh init value. A genuinely-missing weight raises.
   """
-  max_logging.log(f"Restoring Linen-layout checkpoint into NNX state at {path}")
+  p = epath.Path(path)
+  if (p / "items").exists():
+    p = p / "items"
+  max_logging.log(f"Restoring Linen-layout checkpoint into NNX state at {p}")
+  if config and getattr(config, "enable_diloco", False):
+    diloco_abstract = diloco_checkpoint_utils.to_diloco_checkpoint_dict(abstract_nnx_state, config=config)
+    ckptr = ocp.Checkpointer(
+        ocp.PyTreeCheckpointHandler(
+            restore_concurrent_gb=checkpoint_storage_concurrent_gb,
+            save_concurrent_gb=checkpoint_storage_concurrent_gb,
+            use_ocdbt=use_ocdbt,
+            use_zarr3=use_zarr3,
+        )
+    )
+    restore_args = ocp.checkpoint_utils.construct_restore_args(diloco_abstract)
+    restored = ocp.args.PyTreeRestore(item=diloco_abstract, restore_args=restore_args, partial_restore=True)
+    restored = ckptr.restore(p, args=restored)
+    return diloco_checkpoint_utils.from_diloco_checkpoint_dict(restored, abstract_nnx_state, config=config)
+
   linen_abstract = train_state_nnx.to_checkpoint_dict(abstract_nnx_state)
   if config and getattr(getattr(config, "lora", None), "enable_lora", False):
     linen_abstract = _filter_lora_trainable_state(linen_abstract)
@@ -199,7 +201,7 @@ def _load_linen_checkpoint_into_nnx(
   )
   restore_args = ocp.checkpoint_utils.construct_restore_args(linen_abstract)
   restored = ocp.args.PyTreeRestore(item=linen_abstract, restore_args=restore_args, partial_restore=True)
-  restored = ckptr.restore(epath.Path(path), args=restored)
+  restored = ckptr.restore(p, args=restored)
   return _restored_linen_to_nnx(restored, abstract_nnx_state, config=config)
 
 
@@ -288,7 +290,7 @@ def _load_full_state_from_path(
   if enable_orbax_v1:
     if source_checkpoint_layout == "orbax":
       # pure_nnx saves in the Linen on-disk layout; reshape it back into the NNX state.
-      if isinstance(abstract_unboxed_pre_state, nnx.State):
+      if isinstance(abstract_unboxed_pre_state, (nnx.State, train_state_nnx.TrainStateNNX)):
         return _load_linen_checkpoint_into_nnx(
             path,
             abstract_unboxed_pre_state,
@@ -317,14 +319,16 @@ def _load_full_state_from_path(
       state = conversion_fn(pre_transformed_state)
       # The conversion fn returns MaxText's on-disk (Linen) layout, which is what pure_nnx reads,
       # so NNX needs the same reshape as every other restore. An NNX state passes through.
-      if isinstance(abstract_unboxed_pre_state, nnx.State) and not isinstance(state, nnx.State):
+      if isinstance(abstract_unboxed_pre_state, (nnx.State, train_state_nnx.TrainStateNNX)) and not isinstance(
+          state, nnx.State
+      ):
         state = _restored_linen_to_nnx(state, abstract_unboxed_pre_state, config=maxtext_config)
       return state
     else:
       raise ocp_v1.errors.InvalidLayoutError(f"Unknown checkpoint layout: {source_checkpoint_layout}")
   else:
     # pure_nnx saves in the Linen on-disk layout; reshape it back into the NNX state.
-    if isinstance(abstract_unboxed_pre_state, nnx.State):
+    if isinstance(abstract_unboxed_pre_state, (nnx.State, train_state_nnx.TrainStateNNX)):
       return _load_linen_checkpoint_into_nnx(
           path,
           abstract_unboxed_pre_state,
@@ -672,7 +676,10 @@ def load_params_from_path(
 ):
   """Load decode params from checkpoint at specified path."""
   assert load_parameters_from_path, "load_parameters_from_path is not defined."
-  max_logging.log(f"restoring params from {load_parameters_from_path}")
+  p = epath.Path(load_parameters_from_path)
+  if (p / "items").exists():
+    p = p / "items"
+  max_logging.log(f"restoring params from {p}")
 
   # On disk the weights live at `params/params/...`: an outer key naming the item, and Flax's
   # `params` collection inside it. A Linen TrainState.params is that collection; an NNX params
@@ -681,7 +688,7 @@ def load_params_from_path(
   want = abstract_unboxed_params.to_pure_dict() if is_nnx else abstract_unboxed_params
 
   # Determine the restore key based on the leaf directory name to support native and custom SFT
-  restore_key = os.path.basename(load_parameters_from_path)
+  restore_key = os.path.basename(str(p))
   if restore_key not in ("model_params", "model"):
     restore_key = "params"
 
@@ -705,12 +712,11 @@ def load_params_from_path(
   # Rather than pass the entire abstract state, which could unnecessarily restore opt_state and such and waste
   # memory, we instead specify here that we are just restoring the params field of the checkpoint
   # (which itself may be a dictionary containing a key named 'params' or 'model').
-  restore_args = ocp.checkpoint_utils.construct_restore_args(params_collection)
+  restore_target = {restore_key: params_collection}
+  restore_args = ocp.checkpoint_utils.construct_restore_args(restore_target)
   restored = ckptr.restore(
-      epath.Path(load_parameters_from_path),
-      item={restore_key: params_collection},
-      transforms={},
-      restore_args={restore_key: restore_args},
+      p,
+      args=ocp.args.PyTreeRestore(item=restore_target, restore_args=restore_args, partial_restore=True),
   )
   restored_collection = restored[restore_key]
 
@@ -848,7 +854,9 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
     _handle_post_checkpoint_preemption(checkpoint_manager, actual_step, force_ckpt_save)
     return
 
-  if latest_step(checkpoint_manager) == actual_step:
+  # Skip if step directory already exists (e.g. step 0 or prior checkpoints in all_steps())
+  # to prevent Orbax OCDBT UUID collisions during auto-resume / continuation runs for DiLoCo.
+  if latest_step(checkpoint_manager) == actual_step or actual_step in checkpoint_manager.all_steps():
     max_logging.log(f"Checkpoint for step {actual_step} already exists, skipping save.")
     return
 
@@ -903,18 +911,18 @@ def _filter_lora_trainable_state(state):
 
 def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=None, force=False):
   """Wrapper for saving checkpoint."""
-  if not isinstance(state, (dict, nnx.State, train_state.TrainState)):
+  # Allow struct.PyTreeNode so Flax dataclass states (e.g. DiLoCoTrainState) aren't cleared to empty dicts ({})
+  if not isinstance(state, (dict, nnx.State, train_state.TrainState, struct.PyTreeNode)):
     if isinstance(state, train_state_nnx.TrainStateNNX):
       state = nnx.state(state)
     elif not isinstance(state, (dict, nnx.State)):
       state = {}
 
-  if config and getattr(config, "pure_nnx", False) and isinstance(state, nnx.State):
+  if config and getattr(config, "enable_diloco", False):
+    state = diloco_checkpoint_utils.to_diloco_checkpoint_dict(state, config)
+  elif config and getattr(config, "pure_nnx", False):
     # Save in the Linen on-disk layout so pure_nnx and Linen checkpoints are interchangeable.
-    if getattr(config, "enable_diloco", False):
-      step_value = state.step.get_value() if hasattr(state.step, "get_value") else state.step
-      state = train_state_nnx.to_linen_checkpoint_dict({"model": state.params, "optimizer": {"step": step_value}})
-    else:
+    if isinstance(state, nnx.State):
       state = train_state_nnx.to_checkpoint_dict(state)
 
   if config and getattr(config, "enable_checkpointing", False):
