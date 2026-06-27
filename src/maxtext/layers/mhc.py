@@ -61,21 +61,18 @@ def sinkhorn(t, iters=20):
   # Use float32 precision for numerical stability during normalization
   initial_dtype = t.dtype
   t = t.astype(jnp.float32)
+  eps = 1e-5
 
-  # Column-wise normalization (axis=-2) - positive and sum up to 1 across columns
-  # Equivalent to t = exp(t) / jnp.sum(jnp.exp(t), axis=-2)
-  t = jax.nn.softmax(t, axis=-2)
+  t = jax.nn.softmax(t, axis=-1) + eps
+  t = t / (jnp.sum(t, axis=-2, keepdims=True) + eps)
 
   def body_fun(i, val):
-    # L1 Normalization: val / sum(val) with clipping of denominator
-    # Normalize rows (axis -1)
-    val = val / jnp.clip(jnp.sum(val, axis=-1, keepdims=True), min=1e-12)
-    # Normalize columns (axis -2)
-    val = val / jnp.clip(jnp.sum(val, axis=-2, keepdims=True), min=1e-12)
+    val = val / (jnp.sum(val, axis=-1, keepdims=True) + eps)
+    val = val / (jnp.sum(val, axis=-2, keepdims=True) + eps)
     return val
 
   # Use lax.fori_loop for an efficient, JIT-friendly loop
-  t = jax.lax.fori_loop(0, iters, body_fun, t)
+  t = jax.lax.fori_loop(0, iters - 1, body_fun, t)
   return t.astype(initial_dtype)
 
 
@@ -224,7 +221,7 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
       output = sinkhorn(intermediate, self.sinkhorn_iterations)
       return output
 
-  def mapping(self, x: Array, alpha_scale: Array, alpha: Array, beta: Array, scale: int):
+  def mapping(self, x: Array, alpha_scale: Array, alpha: Array, beta: Array, scale: float, eps: float = 0.0):
     """Helper function for both pre and post mappings."""
     # In MaxText, we match weight precision to activations before Matmul
     alpha = jnp.asarray(alpha, self.dtype)
@@ -233,7 +230,7 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     # Apply projection: (b, s, k*d) @ (k*d, k) -> (b, s, k)
     h = jnp.einsum("bsm,mk -> bsk", x, alpha, precision=self.matmul_precision)
     intermediate = alpha_scale * h + beta[None, None, :]
-    output = scale * jax.nn.sigmoid(intermediate)
+    output = scale * jax.nn.sigmoid(intermediate) + eps
     return output
 
   def __call__(
@@ -269,6 +266,7 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
         self.pre_alpha[...],
         self.pre_beta[...],
         1.0,
+        eps=1e-5,
     )
     layer_input = jnp.einsum("bskd,bsk -> bsd", x, pre_mapping, precision=self.matmul_precision)
 

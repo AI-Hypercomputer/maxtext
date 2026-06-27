@@ -64,9 +64,9 @@ for l in range(7):
     PARAM_MAPPING[f"params.params.decoder.layers_{l}.mlp.shared_experts.wo.kernel"] = (f"model.layers.{l}.mlp.shared_experts.down_proj.weight", "transpose")
 
     # Stacked Experts
-    PARAM_MAPPING[f"params.params.decoder.layers_{l}.mlp.MoeBlock_0.wi_0"] = ([f"model.layers.{l}.mlp.experts.{e}.w1.weight" for e in range(8)], "stack_transpose")
-    PARAM_MAPPING[f"params.params.decoder.layers_{l}.mlp.MoeBlock_0.wi_1"] = ([f"model.layers.{l}.mlp.experts.{e}.w3.weight" for e in range(8)], "stack_transpose")
-    PARAM_MAPPING[f"params.params.decoder.layers_{l}.mlp.MoeBlock_0.wo"] = ([f"model.layers.{l}.mlp.experts.{e}.w2.weight" for e in range(8)], "stack_transpose")
+    PARAM_MAPPING[f"params.params.decoder.layers_{l}.mlp.MoeBlock_0.wi_0"] = ([f"model.layers.{l}.mlp.experts..{e}.w1.weight" for e in range(8)], "stack_transpose")
+    PARAM_MAPPING[f"params.params.decoder.layers_{l}.mlp.MoeBlock_0.wi_1"] = ([f"model.layers.{l}.mlp.experts..{e}.w3.weight" for e in range(8)], "stack_transpose")
+    PARAM_MAPPING[f"params.params.decoder.layers_{l}.mlp.MoeBlock_0.wo"] = ([f"model.layers.{l}.mlp.experts..{e}.w2.weight" for e in range(8)], "stack_transpose")
 
     # Attention
     PARAM_MAPPING[f"params.params.decoder.layers_{l}.self_attention.wq_a.kernel"] = (f"model.layers.{l}.self_attn.q_a_proj.weight", "transpose")

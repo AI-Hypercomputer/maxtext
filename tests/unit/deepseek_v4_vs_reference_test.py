@@ -295,7 +295,7 @@ class DeepSeekV4AttentionMaskingTest(unittest.TestCase):
   """
 
   def setUp(self):
-    self.config = pyconfig.initialize([sys.argv[0], "src/maxtext/configs/base.yml"], run_name="test")
+    self.config = pyconfig.initialize([sys.argv[0], "src/maxtext/configs/base.yml", "enable_checkpointing=False"], run_name="test")
 
   def test_generate_attention_mask_local_sliding(self):
     """Verifies AttentionType.LOCAL_SLIDING enforces both causal and sliding window constraints."""
@@ -493,6 +493,11 @@ class DeepSeekV4CompressedAttentionTest(unittest.TestCase):
 
     torch.manual_seed(42)
     ref_attn = DeepseekV4Attention(self.pt_config, layer_idx=0)
+    for p in ref_attn.parameters():
+        if p.dim() >= 1:
+            torch.nn.init.normal_(p.data, mean=0.0, std=0.02)
+        else:
+            torch.nn.init.constant_(p.data, 0.02)
     self.ref_attn = ref_attn
 
     # ==================================================================================================
@@ -587,7 +592,7 @@ class DeepSeekV4CompressedAttentionTest(unittest.TestCase):
       self._copy_linear(mt_attn.csa_compressor.indexer.q_proj, ref_attn.compressor.indexer.q_b_proj)
       self._copy_linear(mt_attn.csa_compressor.indexer.kv_proj, ref_attn.compressor.indexer.kv_proj)
       self._copy_linear(mt_attn.csa_compressor.indexer.gate_proj, ref_attn.compressor.indexer.gate_proj)
-      self._copy_linear(mt_attn.csa_compressor.indexer.weights_proj, ref_attn.compressor.indexer.weights_proj)
+      self._copy_linear(mt_attn.csa_compressor.indexer.weights_proj, ref_attn.compressor.indexer.scorer.weights_proj)
       mt_attn.csa_compressor.indexer.position_bias.value = jnp.array(
           ref_attn.compressor.indexer.position_bias.data.numpy()
       )
@@ -950,6 +955,304 @@ class DeepSeekV4SwiGLUClampTest(unittest.TestCase):
 
     # Validate that both clamped outputs match identically
     np.testing.assert_allclose(mx_out, pt_out.numpy(), rtol=1e-5, atol=1e-5)
+
+
+from transformers.models.deepseek_v4.modeling_deepseek_v4 import DeepseekV4DecoderLayer as DeepseekV4DecoderLayer_PT
+from maxtext.models.deepseek4 import DeepSeek4DecoderLayer
+
+class DeepSeekV4ConversionMappingTest(unittest.TestCase):
+  """Tests to validate weight conversion mappings from PARAM_MAPPING."""
+
+  def setUp(self):
+    self.batch_size = 2
+    self.seq_len = 32
+    self.hidden_dim = 64
+    self.num_heads = 2
+    self.head_dim = 32
+    self.q_lora_rank = 16
+    self.o_groups = 1
+    self.o_lora_rank = 32
+    self.qk_rope_head_dim = 16
+    self.partial_rotary_factor = self.qk_rope_head_dim / self.head_dim
+    self.vocab_size = 1000
+
+    self.pt_config = DeepseekV4Config(
+        hidden_size=self.hidden_dim,
+        num_attention_heads=self.num_heads,
+        num_key_value_heads=1,
+        head_dim=self.head_dim,
+        q_lora_rank=self.q_lora_rank,
+        kv_lora_rank=self.head_dim,
+        o_groups=self.o_groups,
+        o_lora_rank=self.o_lora_rank,
+        rope_theta=10000.0,
+        compress_rates={
+            "compressed_sparse_attention": 4,
+            "heavily_compressed_attention": 8,
+        },
+        index_n_heads=2,
+        index_head_dim=self.head_dim,
+        index_topk=2,
+        layer_types=["sliding_attention"] * 7,
+        num_hidden_layers=7,
+        rope_parameters={
+            "main": {"rope_type": "default", "rope_theta": 10000.0, "partial_rotary_factor": self.partial_rotary_factor},
+            "compress": {
+                "rope_type": "default",
+                "rope_theta": 160000.0,
+                "partial_rotary_factor": self.partial_rotary_factor,
+            },
+        },
+        sliding_window=2048,
+        attention_dropout=0.0,
+        num_local_experts=8,
+        num_experts_per_tok=2,
+        routed_scaling_factor=2.0,
+        scoring_func="sqrtsoftplus",
+        vocab_size=self.vocab_size,
+    )
+
+    config_arguments = {
+        "model_name": "deepseek4-tiny",
+        "override_model_config": True,
+        "attention": "dot_product",
+        "routed_bias": True,
+        "per_device_batch_size": 1.0,
+        "run_name": "test",
+        "enable_checkpointing": False,
+        "max_target_length": 128,
+        "base_emb_dim": self.hidden_dim,
+        "head_dim": self.head_dim,
+        "base_num_query_heads": self.num_heads,
+        "base_num_kv_heads": 1,
+        "q_lora_rank": self.q_lora_rank,
+        "o_groups": self.o_groups,
+        "o_lora_rank": self.o_lora_rank,
+        "indexer_n_heads": self.pt_config.index_n_heads,
+        "indexer_head_dim": self.pt_config.index_head_dim,
+        "indexer_topk": self.pt_config.index_topk,
+        "num_experts": self.pt_config.num_local_experts,
+        "num_experts_per_tok": self.pt_config.num_experts_per_tok,
+        "topk_routing_group": self.pt_config.num_experts_per_tok,
+        "vocab_size": self.vocab_size,
+        "compress_ratios": [0, 0, 4, 8, 4, 8, 4],
+        "sliding_window_size": self.pt_config.sliding_window,
+        "compressed_rope_max_timescale": self.pt_config.rope_parameters["compress"]["rope_theta"],
+        "normalization_layer_epsilon": self.pt_config.rms_norm_eps,
+        "override_model_config": True,
+        "qk_rope_head_dim": self.qk_rope_head_dim,
+        "megablox": False,
+        "sparse_matmul": False,
+    }
+    argv = [sys.argv[0], "src/maxtext/configs/base.yml"]
+    self.mx_config = pyconfig.initialize(argv, **config_arguments)
+
+    self.rngs = nnx.Rngs(0)
+    devices = np.array(jax.devices()[:1])
+    self.mesh = jax.sharding.Mesh(devices, ("tensor",))
+
+  def _apply_param_mapping(self, mt_layer, pt_layer, l):
+    import importlib.util
+    import os
+    mapping_path = os.path.join(os.path.dirname(__file__), "../../deepseek4-references/conversion_mapping.py")
+    spec = importlib.util.spec_from_file_location("conversion_mapping", mapping_path)
+    conversion_mapping = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(conversion_mapping)
+    PARAM_MAPPING = conversion_mapping.PARAM_MAPPING
+
+    def get_attr(obj, path):
+        if path is None: return None
+        if "mlp.experts.." in path:
+            parts = path.split("..")
+            expert_obj = obj.mlp.experts
+            idx_and_weight = parts[1].split(".")
+            idx = int(idx_and_weight[0])
+            w_name = idx_and_weight[1]
+            if w_name == "w1":
+                return expert_obj.gate_up_proj[idx, :expert_obj.intermediate_dim, :]
+            elif w_name == "w3":
+                return expert_obj.gate_up_proj[idx, expert_obj.intermediate_dim:, :]
+            elif w_name == "w2":
+                return expert_obj.down_proj[idx]
+        for part in path.split('.'):
+            if hasattr(obj, part): obj = getattr(obj, part)
+            elif isinstance(obj, list) or isinstance(obj, dict): obj = obj[int(part)] if isinstance(obj, list) else obj[part]
+            else: return None
+        return obj
+
+    mt_prefix = f"params.params.decoder.layers_{l}."
+    pt_prefix = f"model.layers.{l}."
+    for mt_key, (pt_key, rule) in PARAM_MAPPING.items():
+        if mt_key.startswith(mt_prefix) or f"params.Tid2EidVar.decoder.layers_{l}" in mt_key:
+            if "Tid2EidVar" in mt_key:
+                mt_path = mt_key.replace(f"params.Tid2EidVar.decoder.layers_{l}.", "") + ".value"
+            else:
+                mt_path = mt_key.replace(mt_prefix, "") + ".value"
+
+            if pt_key is None: pt_obj = None
+            elif type(pt_key) == list: pt_obj = pt_key
+            else: pt_obj = get_attr(pt_layer, pt_key.replace(pt_prefix, ""))
+
+            # Apply rule
+            val = None
+            if rule == "direct": val = jnp.array(pt_obj.detach().numpy())
+            elif rule == "transpose": val = jnp.array(pt_obj.detach().numpy().T)
+            elif rule == "stack_transpose":
+                try:
+                    tensors = [get_attr(pt_layer, path.replace(pt_prefix, "")) for path in pt_obj]
+                    val = jnp.array(torch.stack(tensors).detach().numpy()).transpose(0, 2, 1)
+                except Exception as e:
+                    print(f"FAILED stack_transpose: pt_obj={pt_obj}, tensors={['None' if t is None else 'Tensor' for t in tensors]}")
+                    raise e
+            elif rule == "expert_gate_proj":
+                val = pt_obj.detach().numpy()
+                intermediate_dim = val.shape[1] // 2
+                val = jnp.array(val[:, :intermediate_dim, :].transpose(0, 2, 1))
+            elif rule == "expert_up_proj":
+                val = pt_obj.detach().numpy()
+                intermediate_dim = val.shape[1] // 2
+                val = jnp.array(val[:, intermediate_dim:, :].transpose(0, 2, 1))
+            elif rule == "expert_down_proj":
+                val = pt_obj.detach().numpy()
+                val = jnp.array(val.transpose(0, 2, 1))
+            elif rule == "ones": pass
+            elif rule.startswith("mhc_fn_"):
+                hc = pt_layer.attn_hc.hc_mult
+                fn = pt_obj.detach().numpy()
+                if rule == "mhc_fn_pre": val = fn[:hc, :]
+                elif rule == "mhc_fn_post": val = fn[hc:2*hc, :]
+                elif rule == "mhc_fn_res": val = fn[2*hc:, :]
+                val = jnp.array(val.T)
+            elif rule.startswith("mhc_base_"):
+                hc = pt_layer.attn_hc.hc_mult
+                base = pt_obj.detach().numpy()
+                if rule == "mhc_base_pre": val = base[:hc]
+                elif rule == "mhc_base_post": val = base[hc:2*hc]
+                elif rule == "mhc_base_res": val = base[2*hc:].reshape(hc, hc)
+                val = jnp.array(val)
+            elif rule.startswith("mhc_scale_"):
+                scale = pt_obj.detach().numpy()
+                if rule == "mhc_scale_pre": val = scale[0]
+                elif rule == "mhc_scale_post": val = scale[1]
+                elif rule == "mhc_scale_res": val = scale[2]
+                val = jnp.array([val])
+            elif rule == "reshape_transpose_oa":
+                val = pt_obj.detach().numpy()
+                val = val.reshape(self.pt_config.o_groups, -1, val.shape[1]).transpose(0, 2, 1)
+                val = jnp.array(val)
+            elif rule == "transpose_reshape_q":
+                val = pt_obj.detach().numpy().T.reshape(self.pt_config.q_lora_rank, self.pt_config.num_attention_heads, self.pt_config.head_dim)
+                val = jnp.array(val)
+            elif rule == "transpose_reshape_kv":
+                val = pt_obj.detach().numpy().T.reshape(-1, self.pt_config.num_key_value_heads, self.pt_config.head_dim)
+                val = jnp.array(val)
+            
+            if val is not None or rule == "ones":
+                parts = mt_path.split('.')
+                obj = mt_layer
+                valid = True
+                for part in parts[:-1]:
+                    if hasattr(obj, part): obj = getattr(obj, part)
+                    else: valid = False; break
+                if valid:
+                    try:
+                        if rule == "ones": setattr(obj, parts[-1], jnp.ones_like(getattr(obj, parts[-1])))
+                        else: setattr(obj, parts[-1], val)
+                    except Exception as e:
+                        print(f"FAILED on mt_key={mt_key}, mt_path={mt_path}, pt_key={pt_key}, obj={obj}")
+                        raise e
+
+  def _run_layer_parity_test(self, layer_idx, layer_type):
+    self.pt_config.layer_types = ["sliding_attention"] * 7
+    self.pt_config.layer_types[layer_idx] = layer_type
+    compress_ratios = [0, 0, 4, 8, 4, 8, 4]
+
+    torch.manual_seed(42)
+    pt_layer = DeepseekV4DecoderLayer_PT(self.pt_config, layer_idx=layer_idx)
+    
+    # Explicitly initialize PyTorch weights with random values to prevent torch.empty
+    # from yielding zero/garbage values that could mask parity differences.
+    for p in pt_layer.parameters():
+        if p.dim() >= 1:
+            torch.nn.init.normal_(p.data, mean=0.0, std=0.02)
+        else:
+            torch.nn.init.constant_(p.data, 0.02)
+
+    if layer_idx < self.mx_config.first_num_hash_layers:
+        pt_tid2eid = torch.randint(0, self.pt_config.num_local_experts, (self.vocab_size, self.pt_config.num_experts_per_tok))
+        pt_layer.mlp.gate.tid2eid.copy_(pt_tid2eid)
+
+    if layer_type == "compressed_sparse_attention" and self.pt_config.index_topk == 2:
+        for p in pt_layer.self_attn.compressor.indexer.parameters():
+            p.data = torch.abs(p.data) + 0.1
+
+    mt_layer = DeepSeek4DecoderLayer(
+        config=self.mx_config,
+        model_mode="train",
+        mesh=self.mesh,
+        rngs=self.rngs,
+        layer_idx=layer_idx,
+        compress_ratio=compress_ratios[layer_idx],
+        is_hash_routing=(layer_idx < self.mx_config.first_num_hash_layers)
+    )
+
+    self._apply_param_mapping(mt_layer, pt_layer, layer_idx)
+
+    np.random.seed(42)
+    x_np = np.random.uniform(0.1, 1.0, size=(self.batch_size, self.seq_len, self.pt_config.hc_mult, self.hidden_dim)).astype(np.float32)
+    pos_np = np.arange(self.seq_len)[None, :].repeat(self.batch_size, axis=0)
+    input_ids_np = np.random.randint(0, self.vocab_size, size=(self.batch_size, self.seq_len))
+
+    x_pt = torch.tensor(x_np)
+    pos_pt = torch.tensor(pos_np, dtype=torch.long)
+    input_ids_pt = torch.tensor(input_ids_np, dtype=torch.long)
+
+    from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask
+    pt_mask = _prepare_4d_causal_attention_mask(None, (self.batch_size, self.seq_len), x_pt, 0, self.pt_config.sliding_window)
+
+    rope_main = PTRope(self.pt_config)
+    rope_compress = PTRope(self.pt_config)
+    dummy_x_main = torch.zeros(self.batch_size, self.seq_len, 1)
+    cos_main, sin_main = rope_main(dummy_x_main, pos_pt, "main")
+    cos_comp, sin_comp = rope_compress(dummy_x_main, pos_pt, "compress")
+    pt_positions = {"main": (cos_main, sin_main), "compress": (cos_comp, sin_comp)}
+
+    pt_out = pt_layer(
+        hidden_states=x_pt,
+        input_ids=input_ids_pt,
+        attention_mask=pt_mask,
+        position_ids=pos_pt,
+        position_embeddings=pt_positions
+    )
+
+    x_mt = jnp.array(x_np)
+    pos_mt = jnp.array(pos_np)
+    input_ids_mt = jnp.array(input_ids_np)
+    segs_mt = jnp.ones_like(pos_mt, dtype=jnp.int32)
+    
+    mt_out, _ = mt_layer(
+        inputs=x_mt,
+        decoder_segment_ids=segs_mt,
+        decoder_positions=pos_mt,
+        deterministic=True,
+        model_mode="train",
+        decoder_input_tokens=input_ids_mt,
+    )
+    
+    pt_out_tensor = pt_out[0] if isinstance(pt_out, tuple) else pt_out
+    np.testing.assert_allclose(np.array(mt_out), pt_out_tensor.detach().numpy(), rtol=3e-3, atol=3e-3)
+
+  def test_layer_0_sliding_hash(self):
+    self._run_layer_parity_test(0, "sliding_attention")
+
+  def test_layer_2_csa_hash(self):
+    self._run_layer_parity_test(2, "compressed_sparse_attention")
+
+  def test_layer_3_hca_standard(self):
+    self._run_layer_parity_test(3, "heavily_compressed_attention")
+
+  def test_layer_4_csa_standard(self):
+    self._run_layer_parity_test(4, "compressed_sparse_attention")
 
 
 if __name__ == "__main__":
