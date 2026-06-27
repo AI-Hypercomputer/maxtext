@@ -391,7 +391,15 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     else:
       owg_type = variablelib.variable_type_from_name("_overwrite_with_gradient", allow_register=True)
       custom_param_filter = nnx.Any(owg_type)
-      model_graphdef, curr_params, custom_params, rest = nnx.split(state.model, nnx.Param, custom_param_filter, ...)
+      lora_enabled = config.lora.enable_lora if hasattr(config, "lora") else False
+      if lora_enabled:
+        model_graphdef, curr_params, base_params, custom_params, rest = nnx.split(
+            state.model, nnx.LoRAParam, nnx.Param, custom_param_filter, ...
+        )
+      else:
+        model_graphdef, curr_params, custom_params, rest = nnx.split(state.model, nnx.Param, custom_param_filter, ...)
+        base_params = None
+
       if config.parameter_memory_host_offload:
         # Params are kept on host (pinned_host) in in_shardings. Move only Param
         # variables to device before the forward/backward pass so that all dot_general
@@ -405,6 +413,19 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
         )
         curr_params = jax.device_put(curr_params, device_param_shardings)
         nnx.update(state.model, curr_params)  # ensure state.model has device params for optimizer update
+
+        if lora_enabled:
+          _, _, base_shardings, _, _ = nnx.split(
+              state_mesh_shardings.model, nnx.LoRAParam, nnx.Param, custom_param_filter, ...
+          )
+          device_base_shardings = jax.tree_util.tree_map_with_path(
+              maxtext_utils_nnx.move_memory_to_device,
+              base_shardings,
+              is_leaf=lambda x: isinstance(x, NamedSharding),
+          )
+          base_params = jax.device_put(base_params, device_base_shardings)
+          nnx.update(state.model, base_params)
+
       if config.shard_optimizer_over_data:
         curr_params = jax.tree.map(
             functools.partial(sharding.maybe_shard_with_name, shard_mode=config.shard_mode),
@@ -414,9 +435,15 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
         nnx.update(state.model, curr_params)
 
       def diff_wrapper(curr_params, custom_params, rest, config, data):
-        local_model = nnx.merge(model_graphdef, curr_params, custom_params, rest, copy=True)
+        if lora_enabled:
+          local_model = nnx.merge(model_graphdef, curr_params, base_params, custom_params, rest, copy=True)
+        else:
+          local_model = nnx.merge(model_graphdef, curr_params, custom_params, rest, copy=True)
         loss, aux = loss_fn(local_model, config, data, None, None, is_train=True)
-        _, _, _, new_rest = nnx.split(local_model, nnx.Param, custom_param_filter, ...)
+        if lora_enabled:
+          _, _, _, _, new_rest = nnx.split(local_model, nnx.LoRAParam, nnx.Param, custom_param_filter, ...)
+        else:
+          _, _, _, new_rest = nnx.split(local_model, nnx.Param, custom_param_filter, ...)
         return loss, (aux, new_rest)
 
       grad_func = jax.value_and_grad(diff_wrapper, argnums=(0, 1), has_aux=True)
@@ -698,8 +725,25 @@ def train_loop(config, recorder, state=None):
   # Write train config params, num model params, and XLA flags to tensorboard
   if isinstance(model, nn.Module):
     setup_params = state.params
+    num_trainable_params = max_utils.calculate_num_params_from_pytree(setup_params)
+    max_logging.log(f"Trainable parameters: {num_trainable_params/1e9:.6f} billion")
   else:
-    _, setup_params, _ = nnx.split(state.model, nnx.Param, ...)
+    if hasattr(config, "lora") and config.lora.enable_lora:
+      _, lora_params, base_params, _ = nnx.split(state.model, nnx.LoRAParam, nnx.Param, ...)
+      num_lora_params = max_utils.calculate_num_params_from_pytree(lora_params)
+      num_base_params = max_utils.calculate_num_params_from_pytree(base_params)
+      total_params = num_lora_params + num_base_params
+      max_logging.log(f"Total parameters: {total_params/1e9:.6f} billion")
+      max_logging.log(
+          f"Trainable (LoRA) parameters: {num_lora_params/1e9:.6f} billion "
+          f"({(num_lora_params / total_params * 100):.4f}%)"
+      )
+      max_logging.log(f"Frozen (Base) parameters: {num_base_params/1e9:.6f} billion")
+      setup_params = nnx.split(state.model, nnx.Param, ...)[1]
+    else:
+      _, setup_params, _ = nnx.split(state.model, nnx.Param, ...)
+      num_trainable_params = max_utils.calculate_num_params_from_pytree(setup_params)
+      max_logging.log(f"Trainable parameters: {num_trainable_params/1e9:.6f} billion")
   metric_logger_instance.write_setup_info_to_tensorboard(setup_params)
 
   elastic_utils.record_elastic_reinit_end()

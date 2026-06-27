@@ -545,37 +545,48 @@ def apply_lora_to_model(
   )
 
   if mesh is not None:
-    with jax.set_mesh(mesh), nn_partitioning.axis_rules(mt_config.logical_axis_rules):
-      graph_def, state = nnx.split(lora_model)
+    graph_def, state = nnx.split(lora_model)
 
-      # We handle explicit replication for LoRA to ensure safety and efficiency.
-      state = jax.tree_util.tree_map(
-          lambda x: x.replace(sharding=jax.sharding.PartitionSpec(), out_sharding=None, sharding_names=None)
-          if isinstance(x, nnx.LoRAParam)
-          else x,
-          state,
-          is_leaf=lambda x: isinstance(x, nnx.Variable),
-      )
+    # We handle explicit replication for LoRA to ensure safety and efficiency.
+    # Set logical sharding annotations first (always safe and needed for tracing).
+    state = jax.tree_util.tree_map(
+        lambda x: x.replace(sharding=jax.sharding.PartitionSpec(), out_sharding=None, sharding_names=None)
+        if isinstance(x, nnx.LoRAParam)
+        else x,
+        state,
+        is_leaf=lambda x: isinstance(x, nnx.Variable),
+    )
+    lora_model = nnx.merge(graph_def, state)
 
-      # Use logical_to_mesh_sharding to correctly map logical axes like 'embed'
-      # to physical mesh axes.
-      dst_shardings = nn.logical_to_mesh_sharding(nnx.get_partition_spec(state), mesh, mt_config.logical_axis_rules)
+    # Try to reshard to physical mesh (only possible outside of JAX transformations).
+    try:
+      with jax.set_mesh(mesh), nn_partitioning.axis_rules(mt_config.logical_axis_rules):
+        graph_def, state = nnx.split(lora_model)
+        # Use logical_to_mesh_sharding to correctly map logical axes like 'embed'
+        # to physical mesh axes.
+        dst_shardings = nn.logical_to_mesh_sharding(nnx.get_partition_spec(state), mesh, mt_config.logical_axis_rules)
 
-      def _safe_reshard(var, sharding_spec):
-        if not isinstance(var, nnx.Variable) or not isinstance(sharding_spec, jax.sharding.Sharding):
-          return var
-        val = var.get_value()
-        if not isinstance(val, jax.Array):
-          return var
-        # make_array_from_callback natively constructs a globally sharded array
-        # from the local host arrays, bypassing backend-specific device_put issues
-        # on both Pathways and McJAX.
-        resharded_val = jax.make_array_from_callback(val.shape, sharding_spec, lambda idx: val[idx])
-        return var.replace(value=resharded_val)
+        def _safe_reshard(var, sharding_spec):
+          if not isinstance(var, nnx.Variable) or not isinstance(sharding_spec, jax.sharding.Sharding):
+            return var
+          val = var.get_value()
+          if not isinstance(val, jax.Array):
+            return var
+          # make_array_from_callback natively constructs a globally sharded array
+          # from the local host arrays, bypassing backend-specific device_put issues
+          # on both Pathways and McJAX.
+          resharded_val = jax.make_array_from_callback(val.shape, sharding_spec, lambda idx: val[idx])
+          return var.replace(value=resharded_val)
 
-      state = jax.tree_util.tree_map(_safe_reshard, state, dst_shardings, is_leaf=lambda x: isinstance(x, nnx.Variable))
-
-      lora_model = nnx.merge(graph_def, state)
+        state = jax.tree_util.tree_map(_safe_reshard, state, dst_shardings, is_leaf=lambda x: isinstance(x, nnx.Variable))
+        lora_model = nnx.merge(graph_def, state)
+    except ValueError as e:
+      if "set_mesh` can only be used outside of `jax.jit" in str(e):
+        # We are inside a JAX transformation (like eval_shape). Skip physical resharding.
+        # This is safe because the values are abstract and don't need real sharding yet.
+        pass
+      else:
+        raise e
 
   _verify_lora_parameters(lora_model, mt_config)
 

@@ -899,7 +899,11 @@ def load_state_if_possible(
 
   if load_parameters_from_path != "":
     if isinstance(abstract_unboxed_pre_state, nnx.State):
-      _, params, _ = nnx.split(abstract_unboxed_pre_state.model, nnx.Param, ...)
+      # We must exclude LoRAParam from the restore target when loading base parameters.
+      # LoRA parameters are not present in the base model checkpoint and will be
+      # initialized separately or loaded from a separate lora_restore_path.
+      _, _, base_params, _ = nnx.split(abstract_unboxed_pre_state.model, nnx.LoRAParam, nnx.Param, ...)
+      params = base_params
     else:
       params = abstract_unboxed_pre_state.params
 

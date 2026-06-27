@@ -176,9 +176,7 @@ def remove_size_one_mesh_axis(spec, mesh):
   return P(*new_spec, unreduced=spec.unreduced, reduced=spec.reduced)
 
 
-def get_nnx_var_named_sharding_with_scan_axis(
-    v: nnx.Variable, mesh
-) -> nnx.Variable:
+def get_nnx_var_named_sharding_with_scan_axis(v: nnx.Variable, mesh) -> nnx.Variable:
   """Compute NamedSharding for an NNX variable, correctly handling the scan axis."""
   val = v.get_value()
   if not hasattr(val, "shape"):
@@ -190,11 +188,7 @@ def get_nnx_var_named_sharding_with_scan_axis(
       return v.replace(jax.tree.map(lambda _: replicated, val))
     return v
   metadata = v.get_metadata()
-  out_sharding = (
-      metadata.get("out_sharding")
-      or metadata.get("sharding_names")
-      or metadata.get("sharding")
-  )
+  out_sharding = metadata.get("out_sharding") or metadata.get("sharding_names") or metadata.get("sharding")
   if not out_sharding:
     pspec = P()
   else:
@@ -202,11 +196,7 @@ def get_nnx_var_named_sharding_with_scan_axis(
     if nnx.PARTITION_NAME in metadata:
       partition_name = metadata[nnx.PARTITION_NAME]
       scan_axis = metadata.get("param_scan_axis", 0)
-      out_sharding = (
-          [out_sharding]
-          if isinstance(out_sharding, str)
-          else list(out_sharding)
-      )
+      out_sharding = [out_sharding] if isinstance(out_sharding, str) else list(out_sharding)
       if partition_name not in out_sharding:
         out_sharding.insert(scan_axis, partition_name)
       out_sharding = tuple(out_sharding)
@@ -215,9 +205,7 @@ def get_nnx_var_named_sharding_with_scan_axis(
     local_rules = metadata.get("sharding_rules", ())
     if context_rules or local_rules:
       local_rules_list = list(local_rules) if local_rules is not None else []
-      context_rules_list = (
-          list(context_rules) if context_rules is not None else []
-      )
+      context_rules_list = list(context_rules) if context_rules is not None else []
       rules = local_rules_list + context_rules_list
       pspec = logical_to_mesh_axes(out_sharding, mesh, rules=rules)
     else:
@@ -609,19 +597,22 @@ def maybe_update_params_sharding_with_opt_nnx(
   # In TrainStateNNX, parameters are under 'model'
   model_shardings = state_mesh_shardings.model
 
+  lora_enabled = config.lora.enable_lora if hasattr(config, "lora") else False
+  target_param_type = nnx.LoRAParam if lora_enabled else nnx.Param
+
   def _extract_param_only(state):
-    """Recursively extract nnx.Param variables from an nnx.State into a nested plain dict.
+    """Recursively extract target_param_type variables from an nnx.State into a nested plain dict.
 
     Constructs nnx.State({'key': nested_dict, ...}) which produces the same pytree
-    structure as nnx.split(model, nnx.Param, ...)[1], enabling jax.tree.map
+    structure as nnx.split(model, target_param_type, ...)[1], enabling jax.tree.map
     to work correctly between ga_params (Param-only) and params_shardings.
     """
     result = {}
     for k, v in state.items():
-      if isinstance(v, nnx.Param):
+      if isinstance(v, target_param_type):
         result[k] = v
       elif isinstance(v, nnx.Variable):
-        pass  # skip non-Param variables (RngKey, RngCount, OptVariable, etc.)
+        pass  # skip non-target variables (RngKey, RngCount, OptVariable, etc.)
       elif hasattr(v, "items"):
         sub = _extract_param_only(v)
         if sub:
@@ -629,7 +620,7 @@ def maybe_update_params_sharding_with_opt_nnx(
     return result
 
   # prev_params_shardings must match the pytree structure of ga_params from
-  # nnx.split(model, nnx.Param, ...) — Param variables only, no rngs.
+  # nnx.split(model, target_param_type, ...) — target variables only, no rngs.
   prev_params_shardings = nnx.State(_extract_param_only(model_shardings))
 
   if not config.shard_optimizer_over_data:
