@@ -39,6 +39,8 @@ from maxtext.common.common_types import (
 from maxtext.configs import pyconfig
 from maxtext.configs import types
 from maxtext.multimodal import processor as mm_processor
+from maxtext.trainers.diloco import diloco
+from maxtext.trainers.diloco import utils as diloco_utils
 from maxtext.utils import elastic_utils
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
@@ -1775,28 +1777,34 @@ def setup_initial_state(
             ),
         )
         overlay = restored if is_emergency else restored["items"]
-        overlay_pure_dict = overlay.to_pure_dict() if hasattr(overlay, "to_pure_dict") else overlay
+        if not (config.enable_diloco and isinstance(overlay, diloco.DiLoCoTrainState)):
+          # Standard Flax NNX branch: overlay weights into the initialized TrainStateNNX.
+          overlay_pure_dict = overlay.to_pure_dict() if hasattr(overlay, "to_pure_dict") else overlay
 
-        def _has_shape_dtype_struct(tree):
-          return any(isinstance(x, jax.ShapeDtypeStruct) for x in jax.tree_util.tree_leaves(tree))
+          def _has_shape_dtype_struct(tree):
+            return any(isinstance(x, jax.ShapeDtypeStruct) for x in jax.tree_util.tree_leaves(tree))
 
-        def _merge_restored_overlay(ckpt_node, init_node):
-          """Merges checkpoint overlay with initialized state, replacing ShapeDtypeStruct placeholders."""
-          if _has_shape_dtype_struct(ckpt_node):
-            if isinstance(ckpt_node, dict) and isinstance(init_node, dict):
-              res = {}
-              for k in init_node:
-                if k in ckpt_node:
-                  res[k] = _merge_restored_overlay(ckpt_node[k], init_node[k])
-                else:
-                  res[k] = init_node[k]
-              return res
-            else:
-              return init_node
-          return ckpt_node
+          def _merge_restored_overlay(ckpt_node, init_node):
+            """Merges checkpoint overlay with initialized state, replacing ShapeDtypeStruct placeholders."""
+            if _has_shape_dtype_struct(ckpt_node):
+              if isinstance(ckpt_node, dict) and isinstance(init_node, dict):
+                res = {}
+                for k in init_node:
+                  if k in ckpt_node:
+                    res[k] = _merge_restored_overlay(ckpt_node[k], init_node[k])
+                  else:
+                    res[k] = init_node[k]
+                return res
+              else:
+                return init_node
+            return ckpt_node
 
-        merged = _merge_restored_overlay(overlay_pure_dict, state.to_pure_dict())
-        nnx.replace_by_pure_dict(state, merged)
+          merged = _merge_restored_overlay(overlay_pure_dict, state.to_pure_dict())
+          nnx.replace_by_pure_dict(state, merged)
+        else:
+          # DiLoCo branch: The restored checkpoint for DiLoCo is already a complete DiLoCoTrainState
+          # (containing inner_state, outer_opt_state, params, step) rather than a bare parameter mapping.
+          state = overlay
     else:
       if restored:
         if isinstance(
@@ -1832,8 +1840,17 @@ def setup_initial_state(
             state = state.replace(params=merged_params)
           else:
             state = state.replace(params=raw_params)
+
   if not config.pure_nnx:
     state = max_utils.unbox_logicallypartioned(state)
+  if config.enable_diloco:
+    state = diloco_utils.setup_diloco_initial_state(
+        state=state,
+        config=config,
+        mesh=mesh,
+        state_mesh_shardings=state_mesh_shardings,
+        restored=restored,
+    )
   return state, state_mesh_annotations, state_mesh_shardings, data_iterator, was_restored
 
 
