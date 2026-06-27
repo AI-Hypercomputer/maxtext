@@ -57,7 +57,7 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
     checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False \
     rollout_tensor_parallelism=8 \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
-    vllm_additional_config='{"maxtext_config": {"model_name": "'${MODEL_NAME}'", "allow_split_physical_axes": true, "scan_layers": true, "prefuse_moe_weights": true}}' \
+    vllm_additional_config='{"maxtext_config": {"model_name": "'${MODEL_NAME}'", "allow_split_physical_axes": true, "scan_layers": false, "prefuse_moe_weights": true}}' \
     remat_policy=full hbm_utilization_vllm=0.75 use_pathways=${use_pathways} \
     ici_tensor_parallelism=1 ici_fsdp_parallelism=-1 ici_expert_parallelism=8 \
     max_target_length=512 weight_dtype=bfloat16 dtype=bfloat16 opt_type=sgd \
