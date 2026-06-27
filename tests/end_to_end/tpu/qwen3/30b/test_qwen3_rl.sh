@@ -52,7 +52,7 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/rl \
     load_parameters_path=${UNSCANNED_CKPT_PATH} \
     run_name=${run_id} rl.loss_algo='grpo' scan_layers=False \
-    num_batches=5 batch_size=1 num_test_batches=5 \
+    num_batches=5 batch_size=8 num_test_batches=5 \
     model_name=${MODEL_NAME} enable_single_controller=${use_pathways} \
     checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False \
     rollout_tensor_parallelism=8 \
