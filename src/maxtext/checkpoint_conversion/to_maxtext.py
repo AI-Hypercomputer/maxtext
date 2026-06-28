@@ -86,6 +86,66 @@ except ImportError:
 absl.logging.set_verbosity(absl.logging.INFO)  # for max_logging.log
 
 
+def get_key_mapper(model_name):
+  if model_name.startswith("deepseek4"):
+    def map_hf_key(hf_key):
+      # Rule 11: Global keys
+      if hf_key == "model.embed_tokens.weight":
+        return "embed.weight"
+      if hf_key == "model.norm.weight":
+        return "norm.weight"
+      if hf_key.startswith("model.hc_head.hc_"):
+        return hf_key.replace("model.hc_head.hc_", "hc_head_")
+      
+      k = hf_key
+      if k.startswith("model."):
+        k = k[6:]
+      
+      k = k.replace("experts..", "experts.")
+      k = k.replace(".self_attn.", ".attn.")
+      
+      k = k.replace(".attn_hc.fn", ".hc_attn_fn")
+      k = k.replace(".attn_hc.base", ".hc_attn_base")
+      k = k.replace(".attn_hc.scale", ".hc_attn_scale")
+      k = k.replace(".ffn_hc.fn", ".hc_ffn_fn")
+      k = k.replace(".ffn_hc.base", ".hc_ffn_base")
+      k = k.replace(".ffn_hc.scale", ".hc_ffn_scale")
+
+      k = k.replace(".input_layernorm.weight", ".attn_norm.weight")
+      k = k.replace(".post_attention_layernorm.weight", ".ffn_norm.weight")
+      k = k.replace(".mlp.", ".ffn.")
+      
+      k = k.replace(".shared_experts.gate_proj.weight", ".shared_experts.w1.weight")
+      k = k.replace(".shared_experts.up_proj.weight", ".shared_experts.w3.weight")
+      k = k.replace(".shared_experts.down_proj.weight", ".shared_experts.w2.weight")
+      
+      k = k.replace(".compressor.indexer.gate_proj.weight", ".indexer.compressor.wgate.weight")
+      k = k.replace(".compressor.indexer.kv_proj.weight", ".indexer.compressor.wkv.weight")
+      k = k.replace(".compressor.indexer.q_b_proj.weight", ".indexer.wq_b.weight")
+      k = k.replace(".compressor.indexer.scorer.weights_proj.weight", ".indexer.weights_proj.weight")
+      k = k.replace(".compressor.indexer.position_bias", ".indexer.compressor.ape")
+      k = k.replace(".compressor.indexer.kv_norm.weight", ".indexer.compressor.norm.weight")
+      
+      k = k.replace(".compressor.gate_proj.weight", ".compressor.wgate.weight")
+      k = k.replace(".compressor.kv_proj.weight", ".compressor.wkv.weight")
+      k = k.replace(".compressor.position_bias", ".compressor.ape")
+      k = k.replace(".compressor.kv_norm.weight", ".compressor.norm.weight")
+      
+      k = k.replace(".attn.q_a_proj.weight", ".attn.wq_a.weight")
+      k = k.replace(".attn.q_a_norm.weight", ".attn.q_norm.weight")
+      k = k.replace(".attn.q_b_proj.weight", ".attn.wq_b.weight")
+      k = k.replace(".attn.kv_proj.weight", ".attn.wkv.weight")
+      k = k.replace(".attn.sinks", ".attn.attn_sink")
+      k = k.replace(".attn.o_a_proj.weight", ".attn.wo_a.weight")
+      k = k.replace(".attn.o_b_proj.weight", ".attn.wo_b.weight")
+      
+      return k
+    return map_hf_key
+  else:
+    return lambda k: k
+
+
+
 class LazyHFLoader:
   """
   Loads Hugging Face weights on-demand to minimize RAM usage.
@@ -107,10 +167,11 @@ class LazyHFLoader:
   can still occur in parallel.
   """
 
-  def __init__(self, model_id, token, revision=None):
+  def __init__(self, model_id, token, revision=None, map_fn=None):
     self.model_id = model_id
     self.token = token
     self.revision = revision
+    self.map_fn = map_fn or (lambda k: k)
     # Whether loads from local directory
     self.is_local = os.path.isdir(self.model_id)
     self.shard_map = {}
@@ -177,13 +238,17 @@ class LazyHFLoader:
     and reads only the required tensor's data from disk.
     """
     # Handle single-file models (shard map key might be None or we just know the filename)
-    shard_name = self.shard_map.get(key)
+    mapped_key = self.map_fn(key)
+    shard_name = self.shard_map.get(mapped_key)
     if shard_name is None and None in self.shard_map:
       shard_name = self.shard_map[None]
     elif shard_name is None:
-      # Fallback: sometimes keys in index don't perfectly match requested keys if there are prefix mismatches.
-      # You might need advanced fuzzy matching here if you encounter errors.
-      raise ValueError(f"Key {key} not found in HF checkpoint index.")
+      # Fallback to unmapped key if mapped is not found
+      shard_name = self.shard_map.get(key)
+      if shard_name is not None:
+        mapped_key = key
+      else:
+        raise ValueError(f"Key {key} (mapped to {mapped_key}) not found in HF checkpoint index.")
 
     if shard_name in self._local_shard_paths:
       local_path = self._local_shard_paths[shard_name]
@@ -205,7 +270,7 @@ class LazyHFLoader:
     # This prevents multiple threads from simultaneously allocating large chunks of RAM.
     with self._ram_lock:
       with safe_open(local_path, framework="np", device="cpu") as f:
-        return f.get_tensor(key)
+        return f.get_tensor(mapped_key)
 
 
 class LazyTensor:
@@ -908,11 +973,13 @@ def main(
 
     hf_state_dict_numpy = None
     hf_loader = None
+    model_name_for_path = model_name_original or config.model_name
+    map_fn = get_key_mapper(model_name_for_path)
 
     # Define the appropriate tensor getter based on mode
     if lazy_load_tensors:
       max_logging.log(f"Lazy loading ENABLED. Initializing LazyHFLoader for: {model_id}...")
-      hf_loader = LazyHFLoader(model_id, hf_token, revision=revision)
+      hf_loader = LazyHFLoader(model_id, hf_token, revision=revision, map_fn=map_fn)
 
       print_ram_usage("After LazyLoader init")
       tensor_getter = hf_loader.get_tensor
@@ -972,9 +1039,13 @@ def main(
           }
 
       def _eager_getter(key):
-        if key not in hf_state_dict_numpy:
-          raise ValueError(f"HuggingFace key {key} not found in state_dict.")
-        v = hf_state_dict_numpy[key]
+        mapped_key = map_fn(key)
+        if mapped_key not in hf_state_dict_numpy:
+          if key in hf_state_dict_numpy:
+            mapped_key = key
+          else:
+            raise ValueError(f"HuggingFace key {key} (mapped to {mapped_key}) not found in state_dict.")
+        v = hf_state_dict_numpy[mapped_key]
         # target dtype is "float32"
         if save_dtype == DType.FLOAT32:
           return v.to(torch.float32).numpy()
