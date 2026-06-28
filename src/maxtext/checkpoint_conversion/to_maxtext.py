@@ -317,7 +317,7 @@ def get_maxtext_model_info(config):
   maxtext_model_flax = models.transformer_as_linen(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
 
   # Get abstract model structure (name, shape) without materializing the weights to save memory
-  abstract_params_tree = maxtext_utils.get_abstract_param(maxtext_model_flax, config)["params"]
+  abstract_params_tree = maxtext_utils.get_abstract_param(maxtext_model_flax, config)
 
   abstract_params_flat, _ = jax.tree_util.tree_flatten_with_path(abstract_params_tree)
   # Standardize abstract tree for later unflattening
@@ -333,7 +333,9 @@ def get_maxtext_model_info(config):
   # preprocess state
   maxtext_abstract_dict = {}
   for mt_target_idx, (path_tuple, abstract_leaf_value) in enumerate(abstract_params_flat):
-    mt_param_key = "params-" + "-".join(param_key_parts_from_path(path_tuple))
+    collection_entry = path_tuple[0]
+    collection_name = getattr(collection_entry, "key", getattr(collection_entry, "name", str(collection_entry)))
+    mt_param_key = collection_name + "-" + "-".join(param_key_parts_from_path(path_tuple[1:]))
     mt_target_shape = abstract_leaf_value.shape
     maxtext_abstract_dict[mt_param_key] = (mt_target_idx, mt_target_shape)
 
@@ -389,29 +391,34 @@ def _build_single_axis_stacked_tensor(
     hook_fns: Any,
     target_shape: tuple,
     config,
+    mt_param_name: str = "",
 ) -> np.ndarray:
-  """Builds a MaxText tensor by stacking HF weights along a single axis.
+  """Builds a MaxText tensor by stacking HF weights along one axis.
 
-  This function handles both standard scanned layers (e.g., attention) and
-  unscanned MoE layers (which are stacked along the expert axis).
+  This function handles two cases:
+  1. Stacking layers for standard scanned blocks (e.g. attention/norm layers).
+     In this case, axis_to_stack is config.param_scan_axis.
+  2. Stacking experts for unscanned MoeBlock layers.
+     In this case, axis_to_stack is 0.
 
   Args:
-      hf_source_keys: A 1D list of Hugging Face parameter names.
-      tensor_getter_fn: A callable that takes a HF key and returns the tensor (as numpy array).
+      hf_source_keys: A list of Hugging Face parameter names.
+      tensor_getter_fn: A callable that takes a HF key and returns the tensor.
       hook_fns: The hook function(s) to apply to each individual weight.
       target_shape: The final shape of the target MaxText tensor.
       config: The MaxText pyconfig object.
+      mt_param_name: The name of the MaxText parameter.
 
   Returns:
       The final, assembled NumPy array for the MaxText parameter.
   """
   tensors_to_stack = []
 
-  if config.scan_layers:
+  if config.scan_layers and "scanned_blocks" in mt_param_name:
     # If it's a standard scanned layer, we use the configured param_scan_axis.
     axis_to_stack = config.param_scan_axis
   else:
-    # Otherwise, if an unscanned MoE layer, and we stack along the expert axis (0).
+    # Otherwise, if an unscanned MoE layer (or scan_layers is False), we stack along the expert axis (0).
     axis_to_stack = 0
 
   # The hook function needs the shape of an individual slice, not the full stacked tensor.
@@ -432,7 +439,14 @@ def _build_single_axis_stacked_tensor(
   return np.stack(tensors_to_stack, axis=axis_to_stack)
 
 
-def _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_target_shape_or_shapes, config):
+def _get_hf_loading_function(
+    hf_source_keys_or_key,
+    tensor_getter,
+    hook_fn,
+    mt_target_shape_or_shapes,
+    config,
+    mt_param_name: str = "",
+):
   """Determine the loading function for HF keys.
 
   This function natively supports `composite_hf_key` mapping (where multiple HF keys
@@ -450,6 +464,8 @@ def _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_t
   if not isinstance(hf_source_keys_or_key, list):
     # Case 1: Single hf key (str)
     def _loader(getter, key, shape, hook):
+      if key is None:
+        return apply_hook_fns(None, shape, hook)
       if isinstance(key, (list, tuple)):
         tensors = tuple(getter(k) for k in key)
         return apply_hook_fns(tensors, shape, hook)
@@ -472,6 +488,7 @@ def _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_t
         hook_fn,
         mt_target_shape_or_shapes,
         config,
+        mt_param_name=mt_param_name,
     )
   else:
     # isinstance(hf_source_keys_or_key[0], list)
@@ -981,7 +998,7 @@ def main(
     model_key = config.model_name
     # load config
     hf_config_obj = HF_MODEL_CONFIGS[model_key]
-    hf_config_dict = hf_config_obj.to_dict()
+    hf_config_dict = hf_config_obj.to_dict() if hasattr(hf_config_obj, "to_dict") else hf_config_obj
     # example of param mapping (gemma2, maxtext:huggingface):
     # "params-decoder-layers_{maxtext_layer_idx}-pre_self_attention_norm_global-scale":
     #   f"model.layers.{global_layer_idx}.input_layernorm.weight",
@@ -1013,9 +1030,9 @@ def main(
       if not lazy_load_tensors:
         max_logging.log(f"maxtext param: {mt_param_key_or_keys}")
 
-      hf_source_keys_or_key = param_map_mt_to_hf.get(mt_param_key_or_keys)
-      if hf_source_keys_or_key is None:
+      if mt_param_key_or_keys not in param_map_mt_to_hf:
         raise ValueError(f"MaxText parameter {mt_param_key_or_keys} not found in mapping.")
+      hf_source_keys_or_key = param_map_mt_to_hf[mt_param_key_or_keys]
       hook_fn = hook_fn_map_mt.get(mt_param_key_or_keys)
 
       # Step 1: Resolves MaxText key(s) to target indices and shapes
@@ -1032,6 +1049,7 @@ def main(
           hook_fn,
           mt_target_shape_or_shapes,
           config,
+          mt_param_name=mt_param_key_or_keys,
       )
 
       # Step 3: Load hf keys and convert to maxtext keys
