@@ -116,14 +116,8 @@ for p4 in paths4:
     replacement4 = (
         "      import jax\n"
         "      import jax.numpy as jnp\n"
-        "      out_avals = [jax.core.ShapedArray((1,), jnp.object_)]\n"
-        "      out_shardings = [\n"
-        "          getattr(\n"
-        "              jax.sharding,\n"
-        "              'make_single_device_sharding',\n"
-        "              jax.sharding.SingleDeviceSharding,\n"
-        "          )(jax.devices()[0])\n"
-        "      ]\n"
+        "      out_avals = ()\n"
+        "      out_shardings = ()\n"
         "      _, result_future = _profile_state.executable.call(\n"
         "          out_avals=out_avals, out_shardings=out_shardings\n"
         "      )"
@@ -163,12 +157,7 @@ for p4 in paths4:
         "    max_num_hosts: int | None = None,\n"
         ") -> None:\n"
         "  if max_num_hosts is None:\n"
-        "    try:\n"
-        '      tpu_devices = [d for d in jax.devices() if d.platform == "tpu"]\n'
-        "      tpu_device_count = len(tpu_devices) if tpu_devices else jax.device_count()\n"
-        "      max_num_hosts = max(1, tpu_device_count // 8)\n"
-        "    except Exception:\n"
-        "      max_num_hosts = jax.process_count()"
+        "    max_num_hosts = 16"
     )
     if target4_start in c4:
       c4 = c4.replace(target4_start, replacement4_start)
@@ -236,75 +225,5 @@ else:
   print("Warning: tpu_runner.py path not found.")
 
 
-# --- Patch 6: tunix/rl/rl_cluster.py ---
-print("Applying hotfix to tunix/rl/rl_cluster.py...")
-p6 = "/usr/local/lib/python3.12/site-packages/tunix/rl/rl_cluster.py"
-if os.path.exists(p6):
-  with open(p6, "r", encoding="utf-8") as f:
-    c6 = f.read()
-
-  target6 = """      with self._perf.span("rollout", mesh.devices) as span, self._perf_v2.span(
-          perf_constants.ROLLOUT,
-          mesh.devices,
-          tags=perf_tags,
-      ) as span_v2:
-        outputs = [
-            self.rollout.generate(string_prompts[s], rollout_config)
-            for s in rl_utils.chunk_slices_by_size(
-                stop=len(string_prompts), step=micro_batch_size
-            )
-        ]
-        span.device_end([o.tokens for o in outputs])
-        span_v2.async_end([o.tokens for o in outputs])"""
-
-  replacement6 = """      # Start profiling sandwich if requested
-      profiler_options = getattr(self.cluster_config.training_config, "profiler_options", None)
-      should_profile = False
-      if profiler_options is not None:
-        profile_step_str = os.environ.get("TUNIX_PROFILE_ROLLOUT_STEP")
-        if profile_step_str is not None:
-          try:
-            should_profile = (self.global_steps == int(profile_step_str))
-          except ValueError:
-            pass
-
-      if should_profile:
-        import pathwaysutils.profiling as pathways_profiler
-        print(f"--- STARTING ROLLOUT PROFILING AT STEP {self.global_steps} ---", flush=True)
-        options = jax.profiler.ProfileOptions()
-        pathways_profiler.start_trace(
-            log_dir=profiler_options.log_dir,
-            profiler_options=options,
-            max_num_hosts=16,
-        )
-
-      with self._perf.span("rollout", mesh.devices) as span, self._perf_v2.span(
-          perf_constants.ROLLOUT,
-          mesh.devices,
-          tags=perf_tags,
-      ) as span_v2:
-        outputs = [
-            self.rollout.generate(string_prompts[s], rollout_config)
-            for s in rl_utils.chunk_slices_by_size(
-                stop=len(string_prompts), step=micro_batch_size
-            )
-        ]
-        span.device_end([o.tokens for o in outputs])
-        span_v2.async_end([o.tokens for o in outputs])
-
-      if should_profile:
-        print(f"--- STOPPING ROLLOUT PROFILING AT STEP {self.global_steps} ---", flush=True)
-        pathways_profiler.stop_trace()"""
-
-  if target6 in c6:
-    c6 = c6.replace(target6, replacement6)
-    with open(p6, "w", encoding="utf-8") as f:
-      f.write(c6)
-    print("Hotfix successfully applied to tunix/rl/rl_cluster.py.")
-  else:
-    if "should_profile = False" in c6:
-      print("Hotfix already applied to tunix/rl/rl_cluster.py.")
-    else:
-      print("Warning: target string not found in rl_cluster.py.")
-else:
-  print("Warning: rl_cluster.py path not found.")
+# --- Patch 6: tunix/rl/rl_cluster.py (DISABLED) ---
+print("Patch 6 (tunix/rl/rl_cluster.py) is disabled. We rely on Trainer's profiling to capture Sampler.")

@@ -52,10 +52,16 @@ import datasets
 import grain
 import jax
 import jax.numpy as jnp
+import jax.sharding as xs
 import json
 import logging
 import os
 import pathwaysutils
+
+try:
+  import pathwaysutils.profiling as pw_prof
+except ImportError:
+  pw_prof = None
 
 from absl import app
 from absl import logging as absl_logging
@@ -402,11 +408,13 @@ def create_rl_components(
 
   profiler_options = None
   if trainer_config.profiler == "xplane":
+    num_hosts = jax.device_count() // trainer_config.chips_per_vm
     profiler_options = profiler.ProfilerOptions(
         log_dir=trainer_config.tensorboard_dir,
         skip_first_n_steps=trainer_config.skip_first_n_steps_for_profiler,
         profiler_steps=trainer_config.profiler_steps,
         set_profile_options=False,
+        max_num_hosts=num_hosts,
     )
 
   # Parse vllm_additional_config
@@ -668,6 +676,72 @@ def rl_train(argv: Sequence[str], kwargs: dict):
     _rl_train_impl(argv, kwargs)
 
 
+def wrap_generate_with_profiling(rl_cluster):
+  """Wraps rl_cluster.generate to programmatically trigger Pathways profiling."""
+  original_generate = rl_cluster.generate
+
+  @wraps(original_generate)
+  def patched_generate(*args, **kwargs):
+    profiler_options = rl_cluster.cluster_config.training_config.profiler_options
+    mode = kwargs.get("mode", rl_cluster_lib.Mode.TRAIN)
+
+    should_profile = False
+    if profiler_options and mode == rl_cluster_lib.Mode.TRAIN:
+      start_step = profiler_options.skip_first_n_steps
+      end_step = start_step + profiler_options.profiler_steps
+      if start_step <= rl_cluster.global_steps < end_step:
+        should_profile = True
+
+    if should_profile:
+      sampler_mesh = rl_cluster.r2m[rl_cluster_lib.Role.ROLLOUT]
+      try:
+        unique_hosts = set(d.host_id for d in sampler_mesh.devices.flatten())
+        num_hosts = len(unique_hosts)
+      except AttributeError:
+        # Fallback to dev count / chips_per_vm if host_id is missing.
+        # On v5p (with Megacore enabled) and v7x, 1 JAX device maps to 1 chip.
+        chips_per_vm = rl_cluster.cluster_config.training_config.chips_per_vm
+        num_hosts = max(1, sampler_mesh.size // chips_per_vm)
+
+      logging.warning(
+          "[AGY_PROFILE] Starting sampler profile at step %d with max_num_hosts=%d (sampler mesh size: %d)",
+          rl_cluster.global_steps,
+          num_hosts,
+          sampler_mesh.size,
+      )
+      try:
+        chips_per_vm = rl_cluster.cluster_config.training_config.chips_per_vm
+        num_hosts_dynamic = jax.device_count() // chips_per_vm
+        if pw_prof is not None:
+          pw_prof.start_trace(log_dir=profiler_options.log_dir, max_num_hosts=num_hosts_dynamic)
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.warning("[AGY_PROFILE] Failed to start sampler trace: %s", e)
+
+    try:
+      return original_generate(*args, **kwargs)
+    finally:
+      if should_profile:
+        logging.warning(
+            "[AGY_PROFILE] Stopping sampler profile at step %d",
+            rl_cluster.global_steps,
+        )
+        try:
+          sharding = xs.NamedSharding(sampler_mesh, xs.PartitionSpec())
+          dummy = jax.device_put(jnp.zeros((1,)), sharding)
+          dummy.block_until_ready()
+          logging.warning("[AGY_PROFILE] Blocked on sampler mesh successfully.")
+        except Exception as e:  # pylint: disable=broad-exception-caught
+          logging.warning("[AGY_PROFILE] Failed to block on sampler mesh: %s", e)
+
+        try:
+          if pw_prof is not None:
+            pw_prof.stop_trace()
+        except Exception as e:  # pylint: disable=broad-exception-caught
+          logging.warning("[AGY_PROFILE] Failed to stop sampler trace: %s", e)
+
+  rl_cluster.generate = patched_generate
+
+
 def validate_config(config):
   """Validates the configuration parameters for RL training."""
   if config.optimizer_memory_host_offload:
@@ -770,6 +844,9 @@ def _rl_train_impl(argv: Sequence[str], kwargs: dict):
       model_tokenizer,
       max_train_steps,
   )
+
+  # Enable programmatic sampler profiling
+  wrap_generate_with_profiling(rl_cluster)
 
   # Run evaluation before training
   if trainer_config.num_test_batches > 0:

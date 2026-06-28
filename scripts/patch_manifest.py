@@ -6,6 +6,7 @@ import sys
 manifest_file = sys.argv[1]
 built_image = sys.argv[2] if (len(sys.argv) > 2 and sys.argv[2] != "") else None
 kube_dns_ip = sys.argv[3] if len(sys.argv) > 3 else "34.118.224.10"
+workload_name = sys.argv[4] if len(sys.argv) > 4 else "unknown"
 
 with open(manifest_file, "r", encoding="utf-8") as f:
   data = list(yaml.load_all(f, Loader=yaml.FullLoader))
@@ -32,6 +33,8 @@ for doc in data:
         pod_template = job.get("template", {}).get("spec", {}).get("template", {})
 
         metadata = pod_template.setdefault("metadata", {})
+        labels = metadata.setdefault("labels", {})
+        labels["kueue.x-k8s.io/podset"] = "worker"
         annotations = metadata.setdefault("annotations", {})
 
         # 1. Add skip-tpu-webhook-check annotation
@@ -62,7 +65,7 @@ for doc in data:
         pod_spec["dnsConfig"] = {"nameservers": [kube_dns_ip, "8.8.8.8"]}
         print(f"Injected dnsConfig nameservers: [{kube_dns_ip}, 8.8.8.8] to worker pod spec.")
 
-        # 5. Add connection handshake timeout to pathways-worker container
+        # 5. Add connection handshake timeout and VLLM_TORCH_PROFILER_DIR to pathways-worker container
         containers = pod_spec.setdefault("containers", [])
         for container in containers:
           if container.get("name") == "pathways-worker":
@@ -70,8 +73,23 @@ for doc in data:
             if not any("temporary_flag_for_debugging_pipe_unreachable_timeout" in a for a in args):
               args.append("--temporary_flags_for_debugging=temporary_flag_for_debugging_pipe_unreachable_timeout=30m")
               print("Added pipe_unreachable_timeout=30m to pathways-worker args.")
+
+            # Inject VLLM_TORCH_PROFILER_DIR env var
+            env = container.setdefault("env", [])
+            env.append(
+                {
+                    "name": "VLLM_TORCH_PROFILER_DIR",
+                    "value": f"gs://runner-maxtext-logs/{workload_name}/tensorboard/sampler_tpu_profile",
+                }
+            )
+            print(f"Injected VLLM_TORCH_PROFILER_DIR to pathways-worker container for workload {workload_name}")
       elif job.get("name") == "pathways-head":
-        pod_spec = job.get("template", {}).get("spec", {}).get("template", {}).get("spec", {})
+        pod_template = job.get("template", {}).get("spec", {}).get("template", {})
+        metadata = pod_template.setdefault("metadata", {})
+        labels = metadata.setdefault("labels", {})
+        labels["kueue.x-k8s.io/podset"] = "pathways-head"
+
+        pod_spec = pod_template.setdefault("spec", {})
         containers = pod_spec.setdefault("containers", [])
         for container in containers:
           if container.get("name") == "jax-tpu":

@@ -1,7 +1,9 @@
 #!/bin/bash
 
 # This script launches a Reinforcement Learning (RL) training workload for the
-# Qwen3-0.6B model on a GKE cluster using XPK.
+# Qwen3-0.6B model on a GKE cluster using XPK, configured for TPU v5p.
+# It dynamically builds the container image from local code changes and patches
+# the manifest with correct DNS settings for the cluster.
 
 set -e
 
@@ -13,34 +15,20 @@ if ! /usr/local/google/home/mohitkhatwani/max_venv/bin/pip show xpk &> /dev/null
 fi
 
 # --- Environment Variables ---
-export PROJECT_ID="${PROJECT_ID:-cloud-tpu-multipod-dev}" # GCP project ID where the Ironwood cluster is deployed
-export CLUSTER_NAME="${CLUSTER_NAME:-bodaborg-tpu7x-auto-nap2}" # Name of your Ironwood cluster
-export ZONE="${ZONE:-us-central1-c}" # Zone where your Ironwood cluster is deployed
+export PROJECT_ID="${PROJECT_ID:-cloud-tpu-multipod-dev}" # GCP project ID where the v5p cluster is deployed
+export CLUSTER_NAME="${CLUSTER_NAME:-v5p-128-bodaborg-europe-west4-b}" # Name of your v5p cluster
+export ZONE="${ZONE:-europe-west4}" # Zone where your v5p cluster is deployed
 export BASE_OUTPUT_DIRECTORY="${BASE_OUTPUT_DIRECTORY:-gs://runner-maxtext-logs/}" # GCS bucket path for outputs
-export DOCKER_IMAGE="${DOCKER_IMAGE:-gcr.io/cloud-tpu-multipod-dev/mohitkhatwani-runner:post-training-2026-06-23}" # Full path to the Docker image you pushed (e.g., gcr.io/my-project/my-image:tag)
+export BASE_DOCKER_IMAGE="${BASE_DOCKER_IMAGE:-gcr.io/cloud-tpu-multipod-dev/mohitkhatwani-runner:post-training-2026-06-23}" # Base Docker image
 export MAXTEXT_CKPT_PATH="${MAXTEXT_CKPT_PATH:-gs://mohitkhatwani_multipods/qwen3-0.6b/pathways-compat/0/items}" # GCS path of the MaxText checkpoint to fine-tune from
-export TPU_TYPE="tpu7x-128"
-export WORKLOAD_NAME="mohit-rl-qwen3-$RANDOM"
+
+# TPU v5p-128 has 128 JAX devices (cores) and 64 chips.
+export TPU_TYPE="v5p-128"
+export WORKLOAD_NAME="m-rl-q5p-$RANDOM"
 
 # --- Variable Validation ---
-if [ -z "$PROJECT_ID" ]; then
-    echo "Error: PROJECT_ID is not set. Please set it in the script or as an environment variable."
-    exit 1
-fi
-if [ -z "$CLUSTER_NAME" ]; then
-    echo "Error: CLUSTER_NAME is not set. Please set it in the script or as an environment variable."
-    exit 1
-fi
-if [ -z "$ZONE" ]; then
-    echo "Error: ZONE is not set. Please set it in the script or as an environment variable."
-    exit 1
-fi
-if [ -z "$BASE_OUTPUT_DIRECTORY" ]; then
-    echo "Error: BASE_OUTPUT_DIRECTORY is not set. Please set it in the script or as an environment variable."
-    exit 1
-fi
-if [ -z "$DOCKER_IMAGE" ]; then
-    echo "Error: DOCKER_IMAGE is not set. Please set it in the script or as an environment variable."
+if [ -z "$PROJECT_ID" ] || [ -z "$CLUSTER_NAME" ] || [ -z "$ZONE" ] || [ -z "$BASE_OUTPUT_DIRECTORY" ] || [ -z "$BASE_DOCKER_IMAGE" ]; then
+    echo "Error: Required environment variables are not set."
     exit 1
 fi
 
@@ -80,9 +68,35 @@ XLA_FLAGS="--xla_tpu_dvfs_p_state=7 \
 --xla_tpu_enable_multi_compute_overlap_in_layer_scheduler=false \
 --xla_tpu_enable_3d_reduce_scatter_decomposer=false"
 
-# VLLM_ENABLE_V1_MULTIPROCESSING=0 \
-# MaxText command
-MAXTEXT_COMMAND="JAX_RANDOM_WEIGHTS=1 \
+# 1. Run live submit to compile and upload the container image with local changes
+echo "Compiling and uploading container image via xpk..."
+/usr/local/google/home/mohitkhatwani/max_venv/bin/xpk workload create-pathways \
+  --cluster="${CLUSTER_NAME}" \
+  --project="${PROJECT_ID}" \
+  --tpu-type="${TPU_TYPE}" \
+  --zone="${ZONE}" \
+  --priority=very-high \
+  --num-slices=1 \
+  --base-docker-image="${BASE_DOCKER_IMAGE}" \
+  --server-image="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260623-jax_0.10.1" \
+  --proxy-server-image="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:20260623-jax_0.10.1" \
+  --workload="${WORKLOAD_NAME}-build" \
+  --custom-pathways-proxy-server-args="${XLA_FLAGS}" \
+  --custom-pathways-server-args="" \
+  --command="echo build-stage" 2>&1 | tee xpk_build.log
+
+# 2. Extract the dynamically built container tag
+BUILT_IMAGE=$(grep -o -E "gcr.io/cloud-tpu-multipod-dev/mohitkhatwani-runner:[a-zA-Z0-9._-]+" xpk_build.log | tail -n 1)
+echo "Successfully built and uploaded image: ${BUILT_IMAGE}"
+
+# 3. Immediately clean up the build workload in GKE
+echo "Cleaning up build workload..."
+kubectl delete jobset "${WORKLOAD_NAME}-build" || true
+rm -f xpk_build.log
+
+# MaxText command (using chips_per_vm=4 for v5p)
+MAXTEXT_COMMAND="SKIP_JAX_PRECOMPILE=1 \
+JAX_RANDOM_WEIGHTS=1 \
 NEW_MODEL_DESIGN=1 \
 TPU_MIN_LOG_LEVEL=0 \
 TF_CPP_MIN_LOG_LEVEL=0 \
@@ -99,11 +113,11 @@ run_name=$WORKLOAD_NAME \
 checkpoint_storage_use_ocdbt=False \
 async_scheduling=True \
 base_output_directory=$BASE_OUTPUT_DIRECTORY \
-chips_per_vm=8 \
+chips_per_vm=4 \
 num_batches=20 \
 num_test_batches=0 \
 profiler=xplane \
-skip_first_n_steps_for_profiler=10 \
+skip_first_n_steps_for_profiler=3 \
 profiler_steps=1 \
 rl.num_generations=8 \
 rl.grpo_beta=0.05 \
@@ -115,17 +129,17 @@ decode_sampling_nucleus_p=0.95 \
 dataset_name=nvidia/OpenMathInstruct-2 \
 hf_train_files=hf://datasets/nvidia/OpenMathInstruct-2/data/train_1M-*.parquet \
 train_split=train_1M \
-max_target_length=24576 \
+max_target_length=16512 \
 max_prefill_predict_length=16384 \
 learning_rate=1e-6 \
-batch_size=480 \
-train_micro_batch_size=8 \
-rollout_micro_batch_size=480 \
-rollout_data_parallelism=16 \
+batch_size=32 \
+train_micro_batch_size=4 \
+rollout_micro_batch_size=32 \
+rollout_data_parallelism=8 \
 rollout_tensor_parallelism=4 \
 enable_dp_attention=false \
 hbm_utilization_vllm=0.7 \
-max_num_seqs=480 \
+max_num_seqs=32 \
 max_num_batched_tokens=24832 \
 scan_layers=True \
 allow_split_physical_axes=True \
@@ -135,10 +149,9 @@ max_num_checkpoints_to_keep=1000 \
 enable_checkpointing=true \
 load_parameters_path=$MAXTEXT_CKPT_PATH \
 rollout_vllm_init_with_random_weights=True"
-# vllm_hf_overrides='{architectures: [\"MaxTextForCausalLM\"]}' \
-# vllm_additional_config='{\"maxtext_config\": {\"model_name\": \"qwen3-0.6b\", \"model_call_mode\": \"inference\", \"enable_dp_attention\": false, \"allow_split_physical_axes\": true, \"log_config\": false, \"weight_dtype\": \"bfloat16\", \"prefuse_moe_weights\": true}}'"
 
-# Workload Creation (dry-run to generate manifest with built image)
+# 4. Run dry-run using the built image to generate manifest
+echo "Generating workload manifest using built image..."
 /usr/local/google/home/mohitkhatwani/max_venv/bin/xpk workload create-pathways \
   --cluster=$CLUSTER_NAME \
   --project=$PROJECT_ID \
@@ -147,26 +160,27 @@ rollout_vllm_init_with_random_weights=True"
   --max-restarts=0 \
   --tpu-type=$TPU_TYPE \
   --num-slices=1 \
-  --docker-image="${DOCKER_IMAGE}" \
-  --server-image="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260608-jax_0.10.1" \
-  --proxy-server-image="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:20260608-jax_0.10.1" \
+  --docker-image="${BUILT_IMAGE}" \
+  --server-image="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260623-jax_0.10.1" \
+  --proxy-server-image="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:20260623-jax_0.10.1" \
   --workload="${WORKLOAD_NAME}" \
   --custom-pathways-proxy-server-args="${XLA_FLAGS}" \
   --custom-pathways-server-args="" \
-  --env PHASED_PROFILING_DIR="${BASE_OUTPUT_DIRECTORY}${WORKLOAD_NAME}/tensorboard" \
-  --env PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR=100 \
-  --env PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP=10000 \
-  --env PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD=5000 \
   --env RPA_D_BLOCK_SIZES="1,4096,1,4096" \
-  --env TUNIX_PROFILE_ROLLOUT_STEP="10" \
   --command="cd /app; python3 scripts/patch_vllm_sampler.py; pip install -e /app/pathways-utils --no-deps; pip install -e . --no-deps; ${MAXTEXT_COMMAND}" \
   --dry-run \
   --output-manifest-file=generated_manifest.yaml
 
+# 5. Get the GKE internal DNS service IP dynamically
+KUBE_DNS_IP=$(kubectl get service -n kube-system kube-dns -o jsonpath='{.spec.clusterIP}' 2>/dev/null || echo "34.118.224.10")
+echo "Using Kube-DNS ClusterIP: ${KUBE_DNS_IP}"
 
-echo "Applying Warden webhook bypass patch to generated_manifest.yaml..."
-python3 scripts/patch_manifest.py generated_manifest.yaml
+# 6. Apply Warden webhook bypass and DNS patches
+echo "Applying patch_manifest.py..."
+python3 scripts/patch_manifest.py generated_manifest.yaml "${BUILT_IMAGE}" "${KUBE_DNS_IP}"
 
+# 7. Deploy the patched workload manifest
 echo "Deploying the patched workload manifest..."
 /usr/bin/kubectl apply -f generated_manifest.yaml
 
+echo "Workload ${WORKLOAD_NAME} successfully submitted!"
