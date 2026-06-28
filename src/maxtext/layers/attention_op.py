@@ -1500,6 +1500,7 @@ class AttentionOp(nnx.Module):
             block_q=self.block_q,
             mask=materialized_mask,
             mask_value=DEFAULT_MASK_VALUE,
+            cap=attn_logits_soft_cap,
         )
         if record_max_logits:
           # The native JAX splash attention implementation does not currently expose the softmax statistics
