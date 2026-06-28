@@ -3858,6 +3858,196 @@ def QWEN3_VL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
 
 
 # {maxtext model name: {maxtext weight name: hf weight name}}
+
+def DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
+  n_layers = config["num_hidden_layers"]
+  num_experts = config.get("n_routed_experts", 8)
+  
+  mapping = {
+      "params-token_embedder-embedding": "model.embed_tokens.weight",
+      "params-decoder-decoder_norm-scale": "model.norm.weight",
+      "params-decoder-logits_dense-kernel": "lm_head.weight",
+  }
+  
+  if scan_layers:
+      raise NotImplementedError("Scanned layers not supported for DeepSeek-V4 parity test")
+      
+  for i in range(n_layers):
+      mapping.update({
+          f"params-decoder-layers_{i}-pre_self_attention_layer_norm-scale": f"model.layers.{i}.input_layernorm.weight",
+          f"params-decoder-layers_{i}-post_self_attention_layer_norm-scale": f"model.layers.{i}.post_attention_layernorm.weight",
+          
+          # Attention
+          f"params-decoder-layers_{i}-self_attention-wq_a-kernel": f"model.layers.{i}.self_attn.q_a_proj.weight",
+          f"params-decoder-layers_{i}-self_attention-q_norm-scale": f"model.layers.{i}.self_attn.q_a_norm.weight",
+          f"params-decoder-layers_{i}-self_attention-wq_b-kernel": f"model.layers.{i}.self_attn.q_b_proj.weight",
+          f"params-decoder-layers_{i}-self_attention-wkv-kernel": f"model.layers.{i}.self_attn.kv_proj.weight",
+          f"params-decoder-layers_{i}-self_attention-kv_norm-scale": f"model.layers.{i}.self_attn.kv_norm.weight",
+          f"params-decoder-layers_{i}-self_attention-sinks": f"model.layers.{i}.self_attn.sinks",
+          f"params-decoder-layers_{i}-self_attention-o_a_proj-kernel": f"model.layers.{i}.self_attn.o_a_proj.weight",
+          f"params-decoder-layers_{i}-self_attention-o_b_proj-kernel": f"model.layers.{i}.self_attn.o_b_proj.weight",
+          
+          # mHC Attention
+          f"params-decoder-layers_{i}-mhc_attention-mhc_norm-scale": None,
+          f"params-decoder-layers_{i}-mhc_attention-pre_alpha": f"model.layers.{i}.attn_hc.fn",
+          f"params-decoder-layers_{i}-mhc_attention-post_alpha": f"model.layers.{i}.attn_hc.fn",
+          f"params-decoder-layers_{i}-mhc_attention-res_alpha": f"model.layers.{i}.attn_hc.fn",
+          f"params-decoder-layers_{i}-mhc_attention-pre_beta": f"model.layers.{i}.attn_hc.base",
+          f"params-decoder-layers_{i}-mhc_attention-post_beta": f"model.layers.{i}.attn_hc.base",
+          f"params-decoder-layers_{i}-mhc_attention-res_beta": f"model.layers.{i}.attn_hc.base",
+          f"params-decoder-layers_{i}-mhc_attention-pre_alpha_scale": f"model.layers.{i}.attn_hc.scale",
+          f"params-decoder-layers_{i}-mhc_attention-post_alpha_scale": f"model.layers.{i}.attn_hc.scale",
+          f"params-decoder-layers_{i}-mhc_attention-res_alpha_scale": f"model.layers.{i}.attn_hc.scale",
+          
+          # mHC MLP
+          f"params-decoder-layers_{i}-mhc_mlp-mhc_norm-scale": None,
+          f"params-decoder-layers_{i}-mhc_mlp-pre_alpha": f"model.layers.{i}.ffn_hc.fn",
+          f"params-decoder-layers_{i}-mhc_mlp-post_alpha": f"model.layers.{i}.ffn_hc.fn",
+          f"params-decoder-layers_{i}-mhc_mlp-res_alpha": f"model.layers.{i}.ffn_hc.fn",
+          f"params-decoder-layers_{i}-mhc_mlp-pre_beta": f"model.layers.{i}.ffn_hc.base",
+          f"params-decoder-layers_{i}-mhc_mlp-post_beta": f"model.layers.{i}.ffn_hc.base",
+          f"params-decoder-layers_{i}-mhc_mlp-res_beta": f"model.layers.{i}.ffn_hc.base",
+          f"params-decoder-layers_{i}-mhc_mlp-pre_alpha_scale": f"model.layers.{i}.ffn_hc.scale",
+          f"params-decoder-layers_{i}-mhc_mlp-post_alpha_scale": f"model.layers.{i}.ffn_hc.scale",
+          f"params-decoder-layers_{i}-mhc_mlp-res_alpha_scale": f"model.layers.{i}.ffn_hc.scale",
+      })
+      
+      # MoE Block
+      if i < 3:
+          mapping[f"Tid2EidVar-decoder-layers_{i}-mlp-MoeBlock_0-tid2eid"] = f"model.layers.{i}.mlp.gate.tid2eid"
+      
+      mapping.update({
+          f"params-decoder-layers_{i}-mlp-MoeBlock_0-gate-kernel": f"model.layers.{i}.mlp.gate.weight",
+          
+          # Shared Experts
+          f"params-decoder-layers_{i}-mlp-shared_experts-wi_0-kernel": f"model.layers.{i}.mlp.shared_experts.gate_proj.weight",
+          f"params-decoder-layers_{i}-mlp-shared_experts-wi_1-kernel": f"model.layers.{i}.mlp.shared_experts.up_proj.weight",
+          f"params-decoder-layers_{i}-mlp-shared_experts-wo-kernel": f"model.layers.{i}.mlp.shared_experts.down_proj.weight",
+          
+          # Stacked Experts
+          f"params-decoder-layers_{i}-mlp-MoeBlock_0-wi_0": [f"model.layers.{i}.mlp.experts.{e}.gate_proj.weight" for e in range(num_experts)],
+          f"params-decoder-layers_{i}-mlp-MoeBlock_0-wi_1": [f"model.layers.{i}.mlp.experts.{e}.up_proj.weight" for e in range(num_experts)],
+          f"params-decoder-layers_{i}-mlp-MoeBlock_0-wo": [f"model.layers.{i}.mlp.experts.{e}.down_proj.weight" for e in range(num_experts)],
+      })
+      
+      if i >= 3:
+          mapping[f"params-decoder-layers_{i}-mlp-MoeBlock_0-gate-bias"] = f"model.layers.{i}.mlp.gate.e_score_correction_bias"
+          
+      # Attention Compressor
+      if i >= 2:
+          if i % 2 == 0 or i == 2:
+              # CSA
+              mapping.update({
+                  f"params-decoder-layers_{i}-self_attention-csa_compressor-kv_proj-kernel": f"model.layers.{i}.self_attn.compressor.kv_proj.weight",
+                  f"params-decoder-layers_{i}-self_attention-csa_compressor-gate_proj-kernel": f"model.layers.{i}.self_attn.compressor.gate_proj.weight",
+                  f"params-decoder-layers_{i}-self_attention-csa_compressor-position_bias": f"model.layers.{i}.self_attn.compressor.position_bias",
+                  f"params-decoder-layers_{i}-self_attention-csa_compressor-kv_norm-scale": f"model.layers.{i}.self_attn.compressor.kv_norm.weight",
+                  
+                  # CSA Indexer
+                  f"params-decoder-layers_{i}-self_attention-csa_compressor-indexer-gate_proj-kernel": f"model.layers.{i}.self_attn.compressor.indexer.gate_proj.weight",
+                  f"params-decoder-layers_{i}-self_attention-csa_compressor-indexer-kv_proj-kernel": f"model.layers.{i}.self_attn.compressor.indexer.kv_proj.weight",
+                  f"params-decoder-layers_{i}-self_attention-csa_compressor-indexer-q_proj-kernel": f"model.layers.{i}.self_attn.compressor.indexer.q_b_proj.weight",
+                  f"params-decoder-layers_{i}-self_attention-csa_compressor-indexer-weights_proj-kernel": f"model.layers.{i}.self_attn.compressor.indexer.scorer.weights_proj.weight",
+                  f"params-decoder-layers_{i}-self_attention-csa_compressor-indexer-position_bias": f"model.layers.{i}.self_attn.compressor.indexer.position_bias",
+                  f"params-decoder-layers_{i}-self_attention-csa_compressor-indexer-kv_norm-scale": f"model.layers.{i}.self_attn.compressor.indexer.kv_norm.weight",
+              })
+          else:
+              # HCA
+              mapping.update({
+                  f"params-decoder-layers_{i}-self_attention-hca_compressor-kv_proj-kernel": f"model.layers.{i}.self_attn.compressor.kv_proj.weight",
+                  f"params-decoder-layers_{i}-self_attention-hca_compressor-gate_proj-kernel": f"model.layers.{i}.self_attn.compressor.gate_proj.weight",
+                  f"params-decoder-layers_{i}-self_attention-hca_compressor-position_bias": f"model.layers.{i}.self_attn.compressor.position_bias",
+                  f"params-decoder-layers_{i}-self_attention-hca_compressor-kv_norm-scale": f"model.layers.{i}.self_attn.compressor.kv_norm.weight",
+              })
+              
+  return mapping
+
+def DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  def transpose(input_tensor, target_shape=None):
+    return np.transpose(input_tensor)
+
+  def transpose_stack(input_tensor, target_shape=None):
+    # input_tensor is a list of tensors
+    stacked = np.stack(input_tensor, axis=0) # [E, out, in]
+    return np.transpose(stacked, (0, 2, 1))  # [E, in, out]
+    
+  def ones_norm(input_tensor, target_shape=None):
+    return np.ones(target_shape, dtype=np.float32)
+
+  # Reshaping functions for wq_b, wkv, o_a_proj
+  def reshape_transpose_wq_b(input_tensor, target_shape=None):
+      # HF: [n_heads * q_head_dim, kv_lora_rank]
+      # MaxText: [kv_lora_rank, n_heads, q_head_dim]
+      tensor = np.transpose(input_tensor) # [kv_lora_rank, n_heads * q_head_dim]
+      n_heads = config["num_attention_heads"]
+      return tensor.reshape(target_shape)
+      
+  def reshape_transpose_wkv(input_tensor, target_shape=None):
+      # HF: [n_kv_heads * (q_head_dim + v_head_dim), kv_lora_rank]
+      # MaxText: [kv_lora_rank, n_kv_heads, q_head_dim + v_head_dim]
+      tensor = np.transpose(input_tensor)
+      return tensor.reshape(target_shape)
+      
+  def reshape_transpose_o_a(input_tensor, target_shape=None):
+      # HF: [kv_lora_rank, n_heads * v_head_dim]
+      # MaxText: [n_heads, v_head_dim, kv_lora_rank]
+      tensor = np.transpose(input_tensor) # [n_heads * v_head_dim, kv_lora_rank]
+      return tensor.reshape(target_shape)
+      
+  # Functions for mHC split
+  def mhc_split_fn_pre(input_tensor, target_shape=None):
+      # input_tensor: [n_heads, 3, lora_rank, dim]
+      return np.transpose(input_tensor[:, 0, :, :], (0, 2, 1))
+  def mhc_split_fn_post(input_tensor, target_shape=None):
+      return np.transpose(input_tensor[:, 1, :, :], (0, 2, 1))
+  def mhc_split_fn_res(input_tensor, target_shape=None):
+      return np.transpose(input_tensor[:, 2, :, :], (0, 2, 1))
+
+  def mhc_split_base_pre(input_tensor, target_shape=None):
+      # input_tensor: [n_heads, 3, lora_rank]
+      return input_tensor[:, 0, :]
+  def mhc_split_base_post(input_tensor, target_shape=None):
+      return input_tensor[:, 1, :]
+  def mhc_split_base_res(input_tensor, target_shape=None):
+      return input_tensor[:, 2, :]
+
+  def mhc_split_scale_pre(input_tensor, target_shape=None):
+      # input_tensor: [n_heads, 3, 1]
+      return input_tensor[:, 0, :]
+  def mhc_split_scale_post(input_tensor, target_shape=None):
+      return input_tensor[:, 1, :]
+  def mhc_split_scale_res(input_tensor, target_shape=None):
+      return input_tensor[:, 2, :]
+
+  mapping = {}
+  
+  # Base mapping logic from original file
+  for key, hf_key in DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers).items():
+      if hf_key is None:
+          mapping[key] = ones_norm
+      elif "-wkv-kernel" in key:
+          mapping[key] = reshape_transpose_wkv
+      elif "-wq_b-kernel" in key:
+          mapping[key] = reshape_transpose_wq_b
+      elif "-o_a_proj-kernel" in key:
+          mapping[key] = reshape_transpose_o_a
+      elif "mhc" in key:
+          if "pre_alpha" in key and "scale" not in key: mapping[key] = mhc_split_fn_pre
+          elif "post_alpha" in key and "scale" not in key: mapping[key] = mhc_split_fn_post
+          elif "res_alpha" in key and "scale" not in key: mapping[key] = mhc_split_fn_res
+          elif "pre_beta" in key: mapping[key] = mhc_split_base_pre
+          elif "post_beta" in key: mapping[key] = mhc_split_base_post
+          elif "res_beta" in key: mapping[key] = mhc_split_base_res
+          elif "pre_alpha_scale" in key: mapping[key] = mhc_split_scale_pre
+          elif "post_alpha_scale" in key: mapping[key] = mhc_split_scale_post
+          elif "res_alpha_scale" in key: mapping[key] = mhc_split_scale_res
+      elif type(hf_key) == list:
+          mapping[key] = transpose_stack
+      elif "-kernel" in key or "-embedding" in key or "-sinks" in key:
+          mapping[key] = transpose
+
+  return mapping
+
 PARAM_MAPPING = {
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,

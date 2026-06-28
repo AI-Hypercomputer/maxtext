@@ -163,3 +163,38 @@ Because the indexer tie-breaker shifts weights positively, dot products are inhe
 Raised the internal numerical parity tolerance for full-layer parity checks from `rtol=5e-4, atol=5e-4` to `rtol=3e-3, atol=3e-3` to handle minor expected accumulation noise. 
 ### Verification
 All 16 layer parity and masking tests pass reliably.
+
+## Issue
+Running `to_maxtext.py` crashes with `tcmalloc` error:
+`src/tcmalloc.cc:333] Attempt to free invalid pointer 0x1d`
+This happens when converting the Hugging Face weights to MaxText via `to_maxtext.py`. It's likely a conflict between `torch` (which loads the PyTorch weights) and `jax` (which initializes the MaxText model) when both are imported in the same Python process.
+
+### Root cause
+`jax` and `torch` `tcmalloc` conflict.
+
+### experiments
+We will run `to_maxtext.py` with `LD_PRELOAD` or just use a custom script that does not use `jax` and `torch` together, or use `TORCH_DISABLE_MEMORY_CACHE` or something similar. Actually, `to_maxtext.py` might be run without TPU by setting `JAX_PLATFORMS=cpu`.
+
+## Issue: tcmalloc conflict between JAX and PyTorch
+### experiments:
+- Encountered `src/tcmalloc.cc:333] Attempt to free invalid pointer` when running scripts that import both JAX and PyTorch on the TPU VM.
+### Root cause:
+JAX and the default GPU-accelerated PyTorch both bundle memory allocators that conflict when loaded into the same process on TPU VMs. 
+### Solution:
+Uninstalled the default PyTorch and installed the CPU-only version of PyTorch (`torch==2.5.1+cpu`) on the TPU VM.
+
+## Issue: Checkpoint nested under extra "params" key
+### experiments:
+- `inspect_checkpoint.py` and `forward_pass_logit_checker.py` crashed during model initialization with `TypeError: expected number, got ShapeDtypeStruct`.
+### Root cause:
+The custom checkpoint converter wrapped the weights in `{"params": {"params": ...}}` because it added a `"params/"` prefix to the keys and then saved the dict under `{"params": ...}`. This caused `ckptr.restore(..., item={"params": abstract_state})` to map the layer names directly to `{"params": ...}` instead of the layer weights themselves.
+### Solution:
+Rewrote `simple_converter.py` to strip the redundant `"params/"` prefix during dictionary construction and simply save via `ocp.PyTreeCheckpointer().save(path, {"params": converted_weights})`.
+
+## Issue: KeyError: 'skip_jax_distributed_system' during Logit Checker initialization
+### experiments:
+- Running `python3 tests/utils/forward_pass_logit_checker.py src/maxtext/configs/models/deepseek4-tiny.yml ...` immediately failed during configuration parsing.
+### Root cause:
+MaxText configs inherit missing fields from `base.yml`. Unlike older configs, newer configs (like `deepseek4-tiny.yml`) omit the `base_config: ../base.yml` pointer. When `forward_pass_logit_checker.py` was invoked with `deepseek4-tiny.yml` as the primary config, `base.yml` was never loaded, causing essential fields like `skip_jax_distributed_system` to be missing from `raw_keys`. This resulted in `KeyError` inside `max_utils.maybe_initialize_jax_distributed_system`.
+### Solution:
+Invoked the logit checker by passing `src/maxtext/configs/base.yml` as the first argument and passing `model_name=deepseek4-tiny` as a CLI override. This correctly merges the base defaults with the model-specific overrides.
