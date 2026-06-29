@@ -845,7 +845,7 @@ class MoEGeneral(BaseModel):
   prefuse_moe_weights: bool = Field(
       False,
       description="Whether to pre-fuse MoE weights (w0 and w1) during initialization. "
-      "This is useful for inference performance in vllm_rpa mode.",
+      "This enables a single FFN1 grouped GEMM in sparse MoE paths and passes fused weights directly in vllm_rpa mode.",
   )
   fuse_expert_scales: bool = Field(
       False,
