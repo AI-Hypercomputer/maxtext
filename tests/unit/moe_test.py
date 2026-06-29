@@ -630,6 +630,8 @@ class RoutedMoeTest(unittest.TestCase):
           base_moe_mlp_dim=256,
           dtype="bfloat16",
           megablox=True,
+          use_tokamax_gmm=True,
+          use_gmm_v2=True,
           sparse_matmul=True,
           per_device_batch_size=4,  # TODO(b/450900273): sharding error if pdbs=1
           ici_expert_parallelism=2,
@@ -696,18 +698,6 @@ class RoutedMoeTest(unittest.TestCase):
         msg=f"Loss mismatch: ragged={loss_rs} ref={loss_ref}",
     )
 
-    # Hidden-state gradient correctness. This is the cotangent that flows
-    # through `ring_ragged_sort`'s custom_vjp backward (the kernel under
-    # test). Without checking this, DCE removes the bwd entirely.
-    self.assertEqual(x_grad_ref.shape, x_grad_rs.shape, "Hidden-state grad shape mismatch")
-    self.assertTrue(
-        jnp.allclose(x_grad_rs.astype(jnp.float32), x_grad_ref.astype(jnp.float32), rtol=1e-2, atol=1e-2),
-        msg=(
-            "Hidden-state gradient mismatch: max abs diff="
-            f"{jnp.max(jnp.abs(x_grad_rs.astype(jnp.float32) - x_grad_ref.astype(jnp.float32)))}"
-        ),
-    )
-
     # Gradient correctness across the full pytree.
     leaves_ref, treedef_ref = jax.tree_util.tree_flatten(grads_ref)
     leaves_rs, treedef_rs = jax.tree_util.tree_flatten(grads_rs)
@@ -721,6 +711,18 @@ class RoutedMoeTest(unittest.TestCase):
               f"max abs diff={jnp.max(jnp.abs(g_rs.astype(jnp.float32) - g_ref.astype(jnp.float32)))}"
           ),
       )
+
+    # Hidden-state gradient correctness. This is the cotangent that flows
+    # through `ring_ragged_sort`'s custom_vjp backward (the kernel under
+    # test). Without checking this, DCE removes the bwd entirely.
+    self.assertEqual(x_grad_ref.shape, x_grad_rs.shape, "Hidden-state grad shape mismatch")
+    self.assertTrue(
+        jnp.allclose(x_grad_rs.astype(jnp.float32), x_grad_ref.astype(jnp.float32), rtol=1e-2, atol=1e-2),
+        msg=(
+            "Hidden-state gradient mismatch: max abs diff="
+            f"{jnp.max(jnp.abs(x_grad_rs.astype(jnp.float32) - x_grad_ref.astype(jnp.float32)))}"
+        ),
+    )
 
   @pytest.mark.tpu_only
   @pytest.mark.skip_on_tpu7x
