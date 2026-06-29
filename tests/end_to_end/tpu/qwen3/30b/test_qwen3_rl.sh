@@ -52,7 +52,7 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/rl \
     load_parameters_path=${UNSCANNED_CKPT_PATH} \
     run_name=${run_id} rl.loss_algo='grpo' scan_layers=False \
-    num_batches=5 batch_size=8 num_test_batches=5 \
+    num_batches=5 batch_size=8 train_micro_batch_size=8 num_test_batches=5 \
     model_name=${MODEL_NAME} enable_single_controller=${use_pathways} \
     checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False \
     rollout_tensor_parallelism=8 \
@@ -61,7 +61,7 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
     remat_policy=full hbm_utilization_vllm=0.75 use_pathways=${use_pathways} \
     ici_tensor_parallelism=1 ici_fsdp_parallelism=-1 ici_expert_parallelism=8 \
     max_target_length=512 weight_dtype=bfloat16 dtype=bfloat16 opt_type=sgd \
-    enable_tunix_perf_metrics=True rl.use_agentic_rollout=True
+    enable_tunix_perf_metrics=True rl.use_agentic_rollout=True rl.num_generations=16
 
 python3 -m maxtext.inference.vllm_decode \
     model_name=${MODEL_NAME} \
