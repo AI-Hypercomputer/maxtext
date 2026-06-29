@@ -28,6 +28,7 @@ export TPU_STDERR_LOG_LEVEL=0
 export JAX_PLATFORMS=proxy,cpu
 export JAX_BACKEND_TARGET=grpc://127.0.0.1:29000
 export ENABLE_PATHWAYS_PERSISTENCE=1
+export M_ASYNC_SCHEDULING=False
 
 run_id=${1:-$(date +%Y-%m-%d-%H-%M-%S)}
 use_pathways=${2:-True}
