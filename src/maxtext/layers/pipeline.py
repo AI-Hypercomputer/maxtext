@@ -891,32 +891,18 @@ class NNXPipeline(PipelineBase):
     # jax.tree.map to raise "Mismatch custom node data". Mirrors Linen
     # where all_gather_over_fsdp operates on
     # self.layers.variables (the params collection only).
-    _, layers_params, layers_metrics, layers_mutables = nnx.split(
-        layers_state, pipeline_utils.is_static_param, nnx.Intermediate, ...
-    )
-
-    # layers_mutables catch-all should contain ONLY RngState variables (RngKey/RngCount).
-    # If non_trainable state (e.g. BatchStat) appears here,
-    # it is being carried through scan instead of broadcast.
-    # NOTE: is_leaf stops jax.tree.leaves from traversing *into* Variable nodes,
-    # so we see actual Variable instances (not raw arrays).
-    assert all(
-        isinstance(v, nnx.RngState)
-        for v in jax.tree.leaves(layers_mutables, is_leaf=lambda x: isinstance(x, nnx.Variable))
-        if isinstance(v, nnx.Variable)
-    ), (
-        "Non-RngState variable found in layers_mutables catch-all partition. "
-        "Only RngState variables (RngKey/RngCount) should be present."
+    _, layers_params, layers_metrics, layers_rng, layers_non_trainable = nnx.split(
+        layers_state, pipeline_utils.is_static_param, nnx.Intermediate, nnx.RngState, ...
     )
 
     if self.config.pipeline_fsdp_ag_once:
       layers_params = self.all_gather_over_fsdp(layers_params, logical_partition_spec)
 
     def scan_body(carry, _):
-      current_loop_state, current_layer_mutables = carry
+      current_loop_state, current_layer_rng = carry
       iteration = current_loop_state["loop_iteration"]
-      advanced_mutables = pipeline_utils.advance_rng_state(current_layer_mutables, iteration)
-      current_layer_state = nnx.State.merge(layers_params, layers_metrics, advanced_mutables)
+      advanced_rng = pipeline_utils.advance_rng_state(current_layer_rng, iteration)
+      current_layer_state = nnx.State.merge(layers_params, layers_metrics, advanced_rng, layers_non_trainable)
 
       new_loop_state, new_layer_state = self.run_one_iteration(
           current_loop_state,
@@ -929,10 +915,12 @@ class NNXPipeline(PipelineBase):
           logical_partition_spec,
       )
 
-      _, _, new_layer_metrics, new_layer_mutables = nnx.split(
-          new_layer_state, pipeline_utils.is_static_param, nnx.Intermediate, ...
+      # Only RngState is carried; non_trainable is broadcast (loop-invariant) so the
+      # output copy is discarded.
+      _, _, new_layer_metrics, new_layer_rng, _ = nnx.split(
+          new_layer_state, pipeline_utils.is_static_param, nnx.Intermediate, nnx.RngState, ...
       )
-      return (new_loop_state, new_layer_mutables), new_layer_metrics
+      return (new_loop_state, new_layer_rng), new_layer_metrics
 
     if self.config.set_remat_policy_on_pipeline_iterations:
       scan_body = jax.checkpoint(
@@ -940,19 +928,19 @@ class NNXPipeline(PipelineBase):
       )
 
     if self.config.scan_pipeline_iterations:
-      (loop_state, final_layer_mutables), stacked_metrics = jax.lax.scan(
-          scan_body, (loop_state, layers_mutables), None, length=total_iterations
+      (loop_state, final_layer_rng), stacked_metrics = jax.lax.scan(
+          scan_body, (loop_state, layers_rng), None, length=total_iterations
       )
     else:
-      current_carry = (loop_state, layers_mutables)
+      current_carry = (loop_state, layers_rng)
       metrics_history = []
       for _ in range(total_iterations):
         current_carry, step_metrics = scan_body(current_carry, None)
         metrics_history.append(step_metrics)
-      loop_state, final_layer_mutables = current_carry
+      loop_state, final_layer_rng = current_carry
       stacked_metrics = jax.tree.map(lambda *xs: jnp.stack(xs), *metrics_history) if metrics_history else layers_metrics
 
-    final_layer_state = nnx.State.merge(layers_params, stacked_metrics, final_layer_mutables)
+    final_layer_state = nnx.State.merge(layers_params, stacked_metrics, final_layer_rng, layers_non_trainable)
     nnx.update(self.layers, final_layer_state)
 
     final_output = self.permute_output_micro_per_stage_dim(loop_state["state_io"])
@@ -1376,16 +1364,6 @@ class NNXCircularPipeline(PipelineBase):
         layers_state, pipeline_utils.is_static_param, nnx.Intermediate, ...
     )
 
-    # Validate: layers_mutables should contain ONLY RngState variables
-    assert all(
-        isinstance(v, nnx.RngState)
-        for v in jax.tree.leaves(layers_mutables, is_leaf=lambda x: isinstance(x, nnx.Variable))
-        if isinstance(v, nnx.Variable)
-    ), (
-        "Non-RngState variable found in layers_mutables catch-all partition. "
-        "Only RngState variables (RngKey/RngCount) should be present."
-    )
-
     # Pre-capture Python config values needed inside the stage function.
     scan_pipeline_iterations_enabled = self.config.scan_pipeline_iterations
 
@@ -1647,16 +1625,13 @@ class NNXCircularPipeline(PipelineBase):
       return (new_loop_state, w_next), inner_metrics
 
     # ---- Build lift.scan(lift.checkpoint(stage_fn)) over REPEATS ----
-    if self.config.set_remat_policy_on_pipeline_iterations:
-      checkpointed_stage = flax_lift.checkpoint(
-          _stage_fn_for_scope,
-          variables=True,
-          rngs=True,
-          prevent_cse=not self.config.scan_pipeline_iterations,
-          policy=remat_policy,
-      )
-    else:
-      checkpointed_stage = _stage_fn_for_scope
+    checkpointed_stage = flax_lift.checkpoint(
+        _stage_fn_for_scope,
+        variables=True,
+        rngs=True,
+        prevent_cse=not self.config.scan_pipeline_iterations,
+        policy=remat_policy,
+    )
 
     scanned_stage = flax_lift.scan(
         checkpointed_stage,

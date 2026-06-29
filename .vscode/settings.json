@@ -1,6 +1,6 @@
 {
     "python.testing.pytestArgs": [],
-    "python.testing.cwd": "${workspaceFolder}/MaxText",
+    "python.testing.cwd": "${workspaceFolder}",
     "python.testing.unittestEnabled": false,
     "python.testing.pytestEnabled": true
 }

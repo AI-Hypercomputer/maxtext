@@ -23,6 +23,7 @@ Tests cover:
 
 import sys
 import unittest
+
 import pytest
 
 import jax
@@ -30,6 +31,7 @@ import jax.numpy as jnp
 import numpy as np
 from flax import linen as nn
 from flax import nnx
+from flax.linen import partitioning as nn_partitioning
 from jax.sharding import Mesh
 
 from maxtext.common.common_types import (
@@ -43,7 +45,13 @@ from maxtext.configs import pyconfig
 from maxtext.layers import linears
 from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import Embed
-from maxtext.layers.nnx_decoders import NNXDecoder, NNXDecoderLayer, deepstack_process
+from maxtext.layers.nnx_decoders import (
+    NNXDecoder,
+    NNXDecoderLayer,
+    NNXScannedPipelineStage,
+    NNXSequentialPipelineStage,
+    deepstack_process,
+)
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.models import gemma4_small
 from maxtext.models.gpt3 import Gpt3LayerNorm
@@ -67,6 +75,7 @@ _BASE_CONFIG = {
     "base_mlp_dim": 512,
     "max_prefill_predict_length": 4,
     "scan_layers": False,
+    "activations_in_float32": True,
 }
 
 
@@ -798,6 +807,9 @@ class TestGemma4SmallNNXDecoder(unittest.TestCase):
             "weight_dtype=float32",
             "hidden_size_per_layer_input=128",
             "vocab_size_per_layer_input=256",
+            "per_device_batch_size=1.0",
+            "max_target_length=16",
+            "max_prefill_predict_length=4",
             "vocab_size=256",
         ],
         override_model_config=True,
@@ -871,6 +883,9 @@ class TestGemma4SmallNNXDecoder(unittest.TestCase):
             "weight_dtype=float32",
             "hidden_size_per_layer_input=128",
             "vocab_size_per_layer_input=256",
+            "per_device_batch_size=1.0",
+            "max_target_length=16",
+            "max_prefill_predict_length=4",
             "vocab_size=256",
         ],
         override_model_config=True,
@@ -951,3 +966,595 @@ class TestGemma4SmallNNXDecoder(unittest.TestCase):
               model_mode=MODEL_MODE_TRAIN,
               kv_caches=kv_caches,
           )
+
+
+def _assert_grad_parity(test_case, ref_leaves, other_leaves, *, what, rtol=5e-2):
+  """Assert two gradient leaf-lists agree within a relative tolerance.
+
+  Checks leaf count, finite values, and a nonzero backward on both paths, then bounds the aggregate
+  relative L2 error ``||g_other - g_ref|| / ||g_ref||`` by ``rtol``. A relative norm (not elementwise)
+  is used so the check holds on TPU, where the rematerialized backward bf16-rounds the matmuls
+  differently.
+  """
+  ref_leaves, other_leaves = list(ref_leaves), list(other_leaves)
+  test_case.assertEqual(len(ref_leaves), len(other_leaves), f"{what}: grad pytrees differ in leaf count")
+  test_case.assertGreater(len(ref_leaves), 0, f"{what}: no gradients")
+  for g_ref, g_other in zip(ref_leaves, other_leaves):
+    test_case.assertEqual(g_ref.shape, g_other.shape, f"{what}: gradient shape mismatch")
+  test_case.assertTrue(
+      all(bool(jnp.all(jnp.isfinite(g))) for g in ref_leaves + other_leaves), f"{what}: non-finite gradient"
+  )
+  test_case.assertTrue(any(bool(jnp.any(g != 0)) for g in ref_leaves), f"{what}: reference backward is all-zero")
+  test_case.assertTrue(any(bool(jnp.any(g != 0)) for g in other_leaves), f"{what}: backward produced all-zero grads")
+  ref = jnp.concatenate([g.astype(jnp.float32).ravel() for g in ref_leaves])
+  oth = jnp.concatenate([g.astype(jnp.float32).ravel() for g in other_leaves])
+  rel_l2 = float(jnp.linalg.norm(oth - ref) / (jnp.linalg.norm(ref) + 1e-12))
+
+  test_case.assertLess(rel_l2, rtol, f"{what}: relative L2 gradient error {rel_l2:.4%} exceeds rtol={rtol:.2%}")
+
+
+class TestNNXDecoderDeepseek4(unittest.TestCase):
+  """Parity tests for DeepSeek-V4 (deepseek4) decoder-level handling in NNXDecoder.
+
+  DeepSeek-V4 has ``first_num_hash_layers`` prefix layers (static hash routing,
+  heterogeneous attention) that are unrolled, followed by uniform alternating
+  HCA(compress_ratio=128)/CSA(compress_ratio=4) blocks. The Linen reference is
+  ``decoders.Decoder._apply_deepseek4_scanned_blocks``.
+  """
+
+  def _make_deepseek4_config(
+      self,
+      scan_layers=False,
+      num_decoder_layers=5,
+      first_num_hash_layers=3,
+      compress_ratios=(0, 0, 4, 128, 4),
+      remat_policy="full",
+  ):
+    return pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        override_model_config=True,
+        per_device_batch_size=1.0,
+        run_name="deepseek4_nnx_test",
+        enable_checkpointing=False,
+        model_name="deepseek4-284b",
+        attention="dot_product",
+        remat_policy=remat_policy,
+        # Dense MoE (sparse_matmul=False) so the forward runs on any backend;
+        # the megablox GMM path is a TPU-only Pallas kernel.
+        sparse_matmul=False,
+        megablox=False,
+        base_num_decoder_layers=num_decoder_layers,
+        base_emb_dim=256,
+        base_mlp_dim=512,
+        base_moe_mlp_dim=512,
+        base_num_query_heads=4,
+        base_num_kv_heads=1,
+        num_experts=8,
+        num_experts_per_tok=2,
+        shared_experts=1,
+        first_num_hash_layers=first_num_hash_layers,
+        compress_ratios=list(compress_ratios),
+        indexer_head_dim=64,
+        indexer_n_heads=4,
+        indexer_topk=8,
+        head_dim=64,
+        q_lora_rank=64,
+        o_lora_rank=64,
+        o_groups=2,
+        kv_lora_rank=64,
+        # seq_len must be >= the largest compress_ratio (128) so HCA layers produce >=1 compressed block.
+        max_target_length=256,
+        max_prefill_predict_length=64,
+        vocab_size=256,
+        scan_layers=scan_layers,
+        dtype="float32",
+        weight_dtype="float32",
+        activations_in_float32=True,
+        sliding_window_size=8,
+    )
+
+  def test_construct_non_scan_does_not_raise(self):
+    """NNXDecoder(deepseek4) must construct; get_norm_layer must support deepseek4 (RMSNorm)."""
+    cfg = self._make_deepseek4_config(scan_layers=False)
+    mesh = _make_mesh(cfg)
+    decoder = NNXDecoder(config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=0, dropout=1))
+    self.assertIsInstance(decoder.decoder_norm, RMSNorm)
+    self.assertTrue(decoder.is_deepseek4)
+
+  def test_get_decoder_layers_registers_deepseek4(self):
+    """Regression guard: NNXDecoder.get_decoder_layers layer_map MUST contain DEEPSEEK4."""
+    from maxtext.models import deepseek4  # pylint: disable=import-outside-toplevel
+
+    cfg = self._make_deepseek4_config(scan_layers=False)
+    dec = NNXDecoder(config=cfg, mesh=_make_mesh(cfg), model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=0, dropout=1))
+    self.assertEqual(dec.get_decoder_layers(), [deepseek4.DeepSeek4DecoderLayer])
+
+    cfg_s = self._make_deepseek4_config(scan_layers=True)
+    dec_s = NNXDecoder(
+        config=cfg_s, mesh=_make_mesh(cfg_s), model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=0, dropout=1)
+    )
+    self.assertEqual(dec_s.get_decoder_layers(), [deepseek4.DeepSeek4ScannableBlock])
+
+  def test_linen_pipeline_dispatch_includes_deepseek4(self):
+    """Linen Decoder._get_nnx_decoder_block_classes (pipeline path) must include DEEPSEEK4."""
+    from maxtext.layers import decoders  # pylint: disable=import-outside-toplevel
+    from maxtext.models import deepseek4  # pylint: disable=import-outside-toplevel
+
+    cfg = self._make_deepseek4_config(scan_layers=False)
+    mesh = _make_mesh(cfg)
+    dec = decoders.Decoder(config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN)
+    self.assertEqual(dec._get_nnx_decoder_block_classes(), [deepseek4.DeepSeek4DecoderLayer])  # pylint: disable=protected-access
+
+    cfg_s = self._make_deepseek4_config(scan_layers=True)
+    dec_s = decoders.Decoder(config=cfg_s, mesh=_make_mesh(cfg_s), model_mode=MODEL_MODE_TRAIN)
+    self.assertEqual(dec_s._get_nnx_decoder_block_classes(), [deepseek4.DeepSeek4ScannableBlock])  # pylint: disable=protected-access
+
+  def _build_and_run(self, cfg):
+    """Builds an NNXDecoder + shared embedding for ``cfg`` and runs one train-mode forward pass.
+
+    Returns (decoder, logits, expected_logits_shape, aot_logits) where ``aot_logits`` is the
+    ``jax.eval_shape`` (ahead-of-time, no XLA execution) abstract result of the same forward,
+    computed on the freshly-built pre-forward modules.
+    """
+    mesh = _make_mesh(cfg)
+    rngs = nnx.Rngs(params=0, dropout=1)
+    decoder = NNXDecoder(config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, rngs=rngs)
+    shared_embedding = Embed(
+        num_embeddings=cfg.vocab_size,
+        num_features=cfg.emb_dim,
+        dtype=cfg.dtype,
+        embedding_init=nn.initializers.normal(stddev=1.0),
+        config=cfg,
+        mesh=mesh,
+        rngs=rngs,
+    )
+    batch = cfg.global_batch_size_to_train_on
+    seq_len = cfg.max_target_length
+    ids = jax.random.randint(jax.random.PRNGKey(0), (batch, seq_len), 0, cfg.vocab_size)
+    segment_ids = jnp.full((batch, seq_len), DECODING_ACTIVE_SEQUENCE_INDICATOR)
+    positions = jnp.broadcast_to(jnp.arange(seq_len)[None], (batch, seq_len))
+
+    # AOT structural check of the forward graph -- traces the full prefix + HCA/CSA stack
+    # symbolically (no execution). Functionalize decoder+embedding via split/merge so eval_shape can
+    # trace the stateful NNX modules without a cross-trace RngCount mutation.
+    graphdef, state = nnx.split((decoder, shared_embedding))
+
+    def _forward_from_state(state_in, ids_in):
+      dec, emb = nnx.merge(graphdef, state_in)
+      out, _, _ = dec(
+          emb, ids_in, positions, decoder_segment_ids=segment_ids, deterministic=True, model_mode=MODEL_MODE_TRAIN
+      )
+      return out
+
+    aot_logits = jax.eval_shape(_forward_from_state, state, ids)
+
+    logits, _, _ = decoder(
+        shared_embedding,
+        ids,
+        positions,
+        decoder_segment_ids=segment_ids,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+    return decoder, logits, (batch, seq_len, cfg.vocab_size), aot_logits
+
+  def _assert_forward_is_real(self, logits, aot_logits, expected):
+    """Assertions that exercise the forward beyond finiteness (reviewer: isfinite is weak).
+
+    * The AOT (jax.eval_shape) result matches the expected logits shape AND dtype -- proves the
+      deepseek4 prefix + scanned HCA/CSA stack composes into well-formed logits symbolically.
+    * The executed logits are non-degenerate: real variance (std well above 0) and position-dependent
+      (a causal decoder MUST produce different logits at the first vs last position). A constant or
+      collapsed forward would satisfy isfinite + shape but fail these.
+    """
+    self.assertEqual(aot_logits.shape, expected)
+    self.assertEqual(aot_logits.dtype, jnp.float32)
+    self.assertEqual(logits.dtype, jnp.float32)
+    self.assertGreater(float(jnp.std(logits)), 1e-2)
+    self.assertFalse(
+        bool(jnp.allclose(logits[:, 0, :], logits[:, -1, :], rtol=1e-2, atol=1e-2)),
+        msg="deepseek4 logits are position-invariant -> forward is degenerate",
+    )
+
+  def _deepseek4_decoder_loss_and_grads(self, cfg):
+    """Build the DeepSeek-V4 decoder + shared embedding for cfg and return (loss, grads) for a
+    sum-of-squares loss differentiated (nnx.value_and_grad) wrt every decoder + embedding Param.
+    Fixed seed, so two builds differing only in remat_policy share the same params."""
+    mesh = _make_mesh(cfg)
+    rngs = nnx.Rngs(params=0, dropout=1)
+    decoder = NNXDecoder(config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, rngs=rngs)
+    shared_embedding = Embed(
+        num_embeddings=cfg.vocab_size,
+        num_features=cfg.emb_dim,
+        dtype=cfg.dtype,
+        embedding_init=nn.initializers.normal(stddev=1.0),
+        config=cfg,
+        mesh=mesh,
+        rngs=rngs,
+    )
+    batch = cfg.global_batch_size_to_train_on
+    seq_len = cfg.max_target_length
+    ids = jax.random.randint(jax.random.PRNGKey(0), (batch, seq_len), 0, cfg.vocab_size)
+    segment_ids = jnp.full((batch, seq_len), DECODING_ACTIVE_SEQUENCE_INDICATOR)
+    positions = jnp.broadcast_to(jnp.arange(seq_len)[None], (batch, seq_len))
+
+    def loss_fn(dec, emb):
+      out, _, _ = dec(
+          emb, ids, positions, decoder_segment_ids=segment_ids, deterministic=True, model_mode=MODEL_MODE_TRAIN
+      )
+      return jnp.sum(out.astype(jnp.float32) ** 2)
+
+    return nnx.value_and_grad(loss_fn, argnums=(0, 1))(decoder, shared_embedding)
+
+  def _assert_decoder_grad_parity(self, scan_layers):
+    """Run the full DeepSeek-V4 decoder under two remat policies ('full' vs 'minimal') and assert
+    matching loss and gradients. Gradients are compared by relative L2 error (see _assert_grad_parity,
+    tolerant of TPU bf16 rounding); loss at rtol=1e-2."""
+    loss_full, grads_full = self._deepseek4_decoder_loss_and_grads(
+        self._make_deepseek4_config(scan_layers=scan_layers, remat_policy="full")
+    )
+    loss_min, grads_min = self._deepseek4_decoder_loss_and_grads(
+        self._make_deepseek4_config(scan_layers=scan_layers, remat_policy="minimal")
+    )
+    np.testing.assert_allclose(np.array(loss_full), np.array(loss_min), rtol=1e-2, atol=1e-2)
+    _assert_grad_parity(
+        self, jax.tree.leaves(grads_full), jax.tree.leaves(grads_min), what="deepseek4 decoder full-vs-minimal remat"
+    )
+
+  def test_scan_init_builds_prefix_and_scanned_blocks(self):
+    """scan init builds first_num_hash_layers unrolled prefix layers + a scanned block stack."""
+    cfg = self._make_deepseek4_config(scan_layers=True)
+    mesh = _make_mesh(cfg)
+    decoder = NNXDecoder(config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=0, dropout=1))
+    self.assertEqual(decoder.num_prefix_layers, cfg.first_num_hash_layers)
+    for i in range(cfg.first_num_hash_layers):
+      self.assertTrue(hasattr(decoder, f"layers_{i}"))
+    # num_decoder_layers=5, first_num_hash_layers=3 -> (5-3)//2 = 1 scanned HCA/CSA block
+    self.assertIsNotNone(decoder.scanned_blocks)
+
+  def test_scan_init_odd_non_prefix_layers_raises(self):
+    """scan init with an ODD non-prefix layer count must raise AssertionError (no silent drop).
+
+    num_decoder_layers=6, first_num_hash_layers=3 -> (6-3)=3 is odd. The DeepSeek-V4 scanned body
+    pairs HCA/CSA layers via `// 2`, which would silently drop the trailing layer without the guard
+    in NNXDecoder._init_scanned_deepseek4.
+    """
+    cfg = self._make_deepseek4_config(scan_layers=True, num_decoder_layers=6, first_num_hash_layers=3)
+    mesh = _make_mesh(cfg)
+    with self.assertRaises(AssertionError):
+      NNXDecoder(config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=0, dropout=1))
+
+  def test_scan_init_even_non_prefix_layers_constructs(self):
+    """scan init with an EVEN non-prefix layer count still constructs (companion to the odd guard).
+
+    num_decoder_layers=5, first_num_hash_layers=3 -> (5-3)=2 is even -> the guard passes and one
+    scanned HCA/CSA block is built.
+    """
+    cfg = self._make_deepseek4_config(scan_layers=True, num_decoder_layers=5, first_num_hash_layers=3)
+    mesh = _make_mesh(cfg)
+    decoder = NNXDecoder(config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=0, dropout=1))
+    self.assertEqual(decoder.num_prefix_layers, 3)
+    self.assertIsNotNone(decoder.scanned_blocks)
+
+  def test_non_scan_init_builds_deepseek4_layers(self):
+    """non-scan init builds num_decoder_layers DeepSeek4DecoderLayer instances (with layer_idx)."""
+    from maxtext.models import deepseek4  # pylint: disable=import-outside-toplevel
+
+    cfg = self._make_deepseek4_config(scan_layers=False)
+    mesh = _make_mesh(cfg)
+    decoder = NNXDecoder(config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=0, dropout=1))
+    self.assertEqual(len(decoder.layers), cfg.num_decoder_layers)
+    for layer in decoder.layers:
+      self.assertIsInstance(layer, deepseek4.DeepSeek4DecoderLayer)
+
+  def test_forward_non_scan(self):
+    """deepseek4 non-scan forward returns correct logits shape and finite values.
+
+    End-to-end numeric forward (prefix hash-routing layers + per-layer DeepSeek4DecoderLayer with
+    global layer_idx + decoder_input_tokens). Uses dense MoE (sparse_matmul=False) so it runs on any backend.
+    """
+    cfg = self._make_deepseek4_config(scan_layers=False)
+    decoder, logits, expected, aot_logits = self._build_and_run(cfg)
+    self.assertEqual(logits.shape, expected)
+    self._assert_forward_is_real(logits, aot_logits, expected)
+    self.assertTrue(jnp.all(jnp.isfinite(logits)))  # secondary
+    self.assertTrue(hasattr(decoder, "layers_0"))
+    self._assert_decoder_grad_parity(scan_layers=cfg.scan_layers)
+
+  def test_forward_scan(self):
+    """deepseek4 scan forward (unrolled hash-routing prefix + scanned HCA/CSA blocks).
+
+    End-to-end numeric forward exercising _apply_deepseek4_scanned_blocks: the prefix layers run
+    unscanned, then the alternating HCA(128)/CSA(4) blocks run via _apply_layers_sequentially.
+    """
+    cfg = self._make_deepseek4_config(scan_layers=True)
+    _, logits, expected, aot_logits = self._build_and_run(cfg)
+    self.assertEqual(logits.shape, expected)
+    self._assert_forward_is_real(logits, aot_logits, expected)
+    self.assertTrue(jnp.all(jnp.isfinite(logits)))  # secondary
+    self._assert_decoder_grad_parity(scan_layers=cfg.scan_layers)
+
+
+class TestNNXPipelineStages(unittest.TestCase):
+  """Tests for the NNX pipeline-stage modules (NNXSequentialPipelineStage / NNXScannedPipelineStage),
+  including per-stage remat + params-only host-offload (set_remat_policy_on_layers_per_stage /
+  parameter_memory_host_offload) that the nnx-based-pipeline migration dropped.
+
+  Per-stage remat and host-offload are output-transparent: rematerialization only changes which
+  activations are saved vs recomputed, and host-offload only changes where params live. Neither
+  changes the forward result, so a stage built with them must produce numerically identical output
+  to the same stage (same params/rngs) without them.
+  """
+
+  def setUp(self):
+    super().setUp()
+    self.cfg = _make_config()
+    self.mesh = _make_mesh(self.cfg)
+
+  def _inputs(self, cfg):
+    batch = cfg.global_batch_size_to_train_on
+    seq = cfg.max_target_length
+    inputs = jax.random.normal(jax.random.PRNGKey(0), (batch, seq, cfg.emb_dim)).astype(cfg.dtype)
+    segment_ids = jnp.full((batch, seq), DECODING_ACTIVE_SEQUENCE_INDICATOR)
+    positions = jnp.broadcast_to(jnp.arange(seq)[None], (batch, seq))
+    return inputs, segment_ids, positions
+
+  def _run_stage(self, stage_cls, remat_policy, num_layers=2, config=None, use_mesh=False):
+    """Builds a pipeline stage of num_layers NNXDecoderLayers and runs one train-mode forward.
+
+    Fresh rngs with a fixed seed each call -> two stages built this way share identical params, so
+    any output difference would come solely from remat / host-offload (which must be transparent).
+
+    use_mesh: build + run inside the device mesh + logical axis_rules. Required for host-offload:
+    jax.device_put(params, Space.Device) pins the exact param sharding, so params must be sharded
+    consistently with the (mesh-placed) inputs -- exactly as a real pipeline forward runs. Without
+    a mesh the params land on a single device and clash with the multi-device inputs.
+    """
+    cfg = config if config is not None else self.cfg
+    mesh = _make_mesh(cfg) if config is not None else self.mesh
+
+    def _build_and_run():
+      stage = stage_cls(
+          NNXDecoderLayer,
+          num_layers,
+          cfg,
+          mesh,
+          None,
+          MODEL_MODE_TRAIN,
+          rngs=nnx.Rngs(params=0, dropout=1),
+          remat_policy=remat_policy,
+          apply_remat=remat_policy is not None,
+      )
+      inputs, segment_ids, positions = self._inputs(cfg)
+      out = stage(inputs, segment_ids, positions, True, MODEL_MODE_TRAIN)
+      return out[0] if isinstance(out, tuple) else out
+
+    if use_mesh:
+      with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
+        return _build_and_run()
+    return _build_and_run()
+
+  def test_sequential_stage_forward_shape(self):
+    """NNXSequentialPipelineStage forward returns [batch, seq, emb] and finite values."""
+    inputs, _, _ = self._inputs(self.cfg)
+    out = self._run_stage(NNXSequentialPipelineStage, None)
+    self.assertEqual(out.shape, inputs.shape)
+    self.assertTrue(jnp.all(jnp.isfinite(out)))
+
+  def test_scanned_stage_forward_shape(self):
+    """NNXScannedPipelineStage forward returns [batch, seq, emb] and finite values."""
+    inputs, _, _ = self._inputs(self.cfg)
+    out = self._run_stage(NNXScannedPipelineStage, None)
+    self.assertEqual(out.shape, inputs.shape)
+    self.assertTrue(jnp.all(jnp.isfinite(out)))
+
+  def test_sequential_stage_remat_is_output_transparent(self):
+    """Per-stage remat on a sequential stage must not change the forward output."""
+    out_no_remat = self._run_stage(NNXSequentialPipelineStage, None)
+    out_remat = self._run_stage(NNXSequentialPipelineStage, jax.checkpoint_policies.nothing_saveable)
+    np.testing.assert_allclose(np.array(out_no_remat), np.array(out_remat), rtol=1e-5, atol=1e-5)
+
+  def test_scanned_stage_remat_is_output_transparent(self):
+    """Per-stage remat on a scanned stage must not change the forward output."""
+    out_no_remat = self._run_stage(NNXScannedPipelineStage, None)
+    out_remat = self._run_stage(NNXScannedPipelineStage, jax.checkpoint_policies.nothing_saveable)
+    np.testing.assert_allclose(np.array(out_no_remat), np.array(out_remat), rtol=1e-5, atol=1e-5)
+
+  def _stage_value_and_grad(self, stage_cls, apply_remat, remat_policy, num_layers=2, config=None, use_mesh=False):
+    """Builds a pipeline stage (fixed seed) and returns (loss, input_grad, param_grads) for
+    ``loss = sum(stage(x)**2)``.
+
+    Differentiation uses ``nnx.value_and_grad`` over ``(inputs, stage)`` so the stateful stage
+    (rng/kv state) is threaded correctly and gradients flow to BOTH the inputs and every stage Param.
+    The fixed seed means the remat and no-remat builds share identical params, so the two paths are
+    differentiated on the same weights (their loss and gradients are compared by _assert_stage_grad_parity).
+
+    use_mesh builds + differentiates inside the device mesh + logical axis_rules -- required for
+    host-offload, where ``jax.device_put(params, Space.Device)`` pins the exact param sharding (see
+    _run_stage).
+    """
+    cfg = config if config is not None else self.cfg
+    mesh = _make_mesh(cfg) if config is not None else self.mesh
+
+    def _build_and_grad():
+      stage = stage_cls(
+          NNXDecoderLayer,
+          num_layers,
+          cfg,
+          mesh,
+          None,
+          MODEL_MODE_TRAIN,
+          rngs=nnx.Rngs(params=0, dropout=1),
+          remat_policy=remat_policy,
+          apply_remat=apply_remat,
+      )
+      inputs, segment_ids, positions = self._inputs(cfg)
+
+      def loss_fn(x, module):
+        out = module(x, segment_ids, positions, True, MODEL_MODE_TRAIN)
+        out = out[0] if isinstance(out, tuple) else out
+        return jnp.sum(out.astype(jnp.float32) ** 2)
+
+      loss, (input_grad, param_grads) = nnx.value_and_grad(loss_fn, argnums=(0, 1))(inputs, stage)
+      return loss, input_grad, param_grads
+
+    if use_mesh:
+      with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
+        return _build_and_grad()
+    return _build_and_grad()
+
+  def _assert_stage_grad_parity(self, stage_cls, num_layers=2):
+    """remat vs no-remat: matching loss + gradients (wrt inputs AND params), plus a real (nonzero)
+    backward. jax.checkpoint recomputes activations in the backward pass but is mathematically
+    transparent; gradients are compared by relative L2 error (see _assert_grad_parity), which tolerates
+    the bf16 rounding of the rematerialized backward on TPU. Loss parity holds everywhere."""
+    loss_ref, xgrad_ref, pgrad_ref = self._stage_value_and_grad(
+        stage_cls, apply_remat=False, remat_policy=None, num_layers=num_layers
+    )
+    loss_remat, xgrad_remat, pgrad_remat = self._stage_value_and_grad(
+        stage_cls, apply_remat=True, remat_policy=jax.checkpoint_policies.nothing_saveable, num_layers=num_layers
+    )
+    # Loss parity (reproducible on all platforms).
+    np.testing.assert_allclose(np.array(loss_remat), np.array(loss_ref), rtol=1e-2, atol=1e-2)
+    # Input-gradient parity.
+    _assert_grad_parity(self, [xgrad_ref], [xgrad_remat], what="stage remat input-grad")
+    # Per-Param gradient parity across the whole pytree.
+    _assert_grad_parity(
+        self,
+        jax.tree_util.tree_leaves(pgrad_ref),
+        jax.tree_util.tree_leaves(pgrad_remat),
+        what="stage remat param-grads",
+    )
+
+  def test_sequential_stage_remat_grad_parity(self):
+    """Backward parity: a sequential stage's per-stage remat must reproduce the no-remat loss and
+    gradients (wrt inputs AND params). jax.checkpoint recomputes activations in the backward pass but
+    is mathematically transparent, so value_and_grad must match."""
+    self._assert_stage_grad_parity(NNXSequentialPipelineStage)
+
+  def test_scanned_stage_remat_grad_parity(self):
+    """Backward parity for the scanned pipeline stage (remat inside the jax.lax.scan body): remat vs
+    no-remat must yield identical loss and gradients (wrt inputs AND params)."""
+    self._assert_stage_grad_parity(NNXScannedPipelineStage)
+
+  def test_single_layer_stage_remat_is_output_transparent(self):
+    """num_layers_per_pipeline_stage==1: a 1-layer stage with remat must match the no-remat output."""
+    out_no_remat = self._run_stage(NNXSequentialPipelineStage, None, num_layers=1)
+    out_remat = self._run_stage(NNXSequentialPipelineStage, jax.checkpoint_policies.nothing_saveable, num_layers=1)
+    np.testing.assert_allclose(np.array(out_no_remat), np.array(out_remat), rtol=1e-5, atol=1e-5)
+
+  def test_single_layer_stage_remat_grad_parity(self):
+    """num_layers_per_pipeline_stage==1: BACKWARD parity for the single-layer stage remat path (a
+    distinct builder branch). remat vs no-remat must yield identical loss + gradients."""
+    self._assert_stage_grad_parity(NNXSequentialPipelineStage, num_layers=1)
+
+  @pytest.mark.tpu_only
+  def test_remat_with_host_offload_is_output_transparent(self):
+    """Per-stage remat + params-only host-offload (parameter_memory_host_offload) must not change output.
+
+    tpu_only: host-offload uses jax.device_put(..., max_utils.device_space()) which targets TPU host
+    memory; on CPU fake-multi-device it pins params to a single device and breaks the input sharding.
+    The remat half is covered by the stage remat tests above; this adds the offload device_put (TPU only).
+    """
+    offload_cfg = _make_config(parameter_memory_host_offload=True)
+    # Both runs inside the mesh so params are sharded consistently with the inputs; the offloaded run
+    # additionally exercises jax.device_put(params, Space.Device) inside the per-stage remat.
+    plain = self._run_stage(NNXSequentialPipelineStage, None, config=offload_cfg, use_mesh=True)
+    offloaded = self._run_stage(
+        NNXSequentialPipelineStage, jax.checkpoint_policies.nothing_saveable, config=offload_cfg, use_mesh=True
+    )
+    np.testing.assert_allclose(np.array(plain), np.array(offloaded), rtol=1e-5, atol=1e-5)
+
+  @pytest.mark.tpu_only
+  def test_remat_with_host_offload_grad_is_transparent(self):
+    """BACKWARD parity for per-stage remat + params-only host-offload: the loss AND gradients (wrt
+    inputs and every Param) with parameter_memory_host_offload must match the no-offload/no-remat
+    path -- host-offload only moves where params live, it must not change the math.
+
+    tpu_only for the same reason as the forward host-offload test: jax.device_put(..., device_space())
+    targets TPU host memory; on CPU fake-multi-device it pins params to one device and breaks sharding.
+    """
+    offload_cfg = _make_config(parameter_memory_host_offload=True)
+    loss_ref, xgrad_ref, pgrad_ref = self._stage_value_and_grad(
+        NNXSequentialPipelineStage, apply_remat=False, remat_policy=None, config=offload_cfg, use_mesh=True
+    )
+    loss_off, xgrad_off, pgrad_off = self._stage_value_and_grad(
+        NNXSequentialPipelineStage,
+        apply_remat=True,
+        remat_policy=jax.checkpoint_policies.nothing_saveable,
+        config=offload_cfg,
+        use_mesh=True,
+    )
+    np.testing.assert_allclose(np.array(loss_off), np.array(loss_ref), rtol=1e-2, atol=1e-2)
+    # Gradients are compared by relative L2 error, which absorbs the bf16 rounding of the rematerialized
+    # backward on TPU. The offload path is additionally pinned output-transparent at 1e-5 by
+    # test_remat_with_host_offload_is_output_transparent.
+    _assert_grad_parity(self, [xgrad_ref], [xgrad_off], what="host-offload input-grad")
+    _assert_grad_parity(
+        self,
+        jax.tree_util.tree_leaves(pgrad_ref),
+        jax.tree_util.tree_leaves(pgrad_off),
+        what="host-offload param-grads",
+    )
+
+
+class TestNNXPerStageRematApplied(unittest.TestCase):
+  """Guards the per-stage remat parity bug: remat_policy='full' resolves to get_remat_policy()==None,
+  which is a VALID 'full rematerialization' policy (matching Linen nn.remat(policy=None)). Gating on
+  `remat_policy is not None` silently dropped remat for the default 'full' policy. The builder must
+  apply per-stage remat whenever set_remat_policy_on_layers_per_stage=True, regardless of policy value.
+  """
+
+  def _build_stage(self, remat_policy, num_layers_per_pipeline_stage=2, flag_on=True):
+    """Build a pipeline stage via the NNXDecoder builder for the given remat policy + flag."""
+    cfg = _make_config(
+        remat_policy=remat_policy,
+        set_remat_policy_on_layers_per_stage=flag_on,
+        num_layers_per_pipeline_stage=num_layers_per_pipeline_stage,
+        scan_layers_per_stage=False,
+        scan_layers=False,
+    )
+    mesh = _make_mesh(cfg)
+    dec = NNXDecoder(config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=0, dropout=1))
+    stage = dec._get_pipeline_stage_module(dec.get_decoder_layers(), nnx.Rngs(params=0, dropout=1))  # pylint: disable=protected-access
+    return cfg, stage
+
+  def _run_forward(self, cfg, stage):
+    seq = cfg.max_target_length
+    x = jax.random.normal(jax.random.PRNGKey(0), (1, seq, cfg.emb_dim)).astype(cfg.dtype)
+    seg = jnp.full((1, seq), DECODING_ACTIVE_SEQUENCE_INDICATOR)
+    pos = jnp.broadcast_to(jnp.arange(seq)[None], (1, seq))
+    out = stage(x, seg, pos, True, MODEL_MODE_TRAIN)
+    return out[0] if isinstance(out, tuple) else out
+
+  def test_full_policy_applies_remat(self):
+    """remat_policy='full' (get_remat_policy()==None) must STILL apply per-stage remat (the bug).
+
+    Before the fix the builder gated on `per_stage_remat is not None`, so 'full' (None policy)
+    silently produced a no-remat stage. Now apply_remat is True and the checkpoint(policy=None)
+    full-rematerialization path runs.
+    """
+    cfg, stage = self._build_stage("full")
+    self.assertTrue(stage.apply_remat, "per-stage remat dropped for remat_policy='full'")
+    self.assertIsNone(stage.remat_policy)  # 'full' -> None policy == full remat
+    out = self._run_forward(cfg, stage)
+    self.assertTrue(jnp.all(jnp.isfinite(out)))
+
+  def test_minimal_policy_applies_remat(self):
+    """Sanity: a non-None policy also applies remat and runs."""
+    cfg, stage = self._build_stage("minimal")
+    self.assertTrue(stage.apply_remat)
+    self.assertIsNotNone(stage.remat_policy)
+    out = self._run_forward(cfg, stage)
+    self.assertTrue(jnp.all(jnp.isfinite(out)))
+
+  def test_single_layer_stage_wraps_with_remat_for_full_policy(self):
+    """num_layers_per_pipeline_stage==1 + 'full': must return a remat-applying stage, not a bare layer."""
+    _, stage = self._build_stage("full", num_layers_per_pipeline_stage=1)
+    self.assertIsInstance(stage, NNXSequentialPipelineStage)
+    self.assertTrue(stage.apply_remat)
+
+  def test_flag_off_single_layer_returns_bare_layer(self):
+    """Flag off: num_layers==1 returns the bare layer (no stage wrapper) -- unchanged behavior."""
+    _, stage = self._build_stage("full", num_layers_per_pipeline_stage=1, flag_on=False)
+    self.assertNotIsInstance(stage, (NNXSequentialPipelineStage, NNXScannedPipelineStage))

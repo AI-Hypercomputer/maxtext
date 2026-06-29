@@ -541,6 +541,7 @@ class Decoder(nn.Module):
         DecoderBlockType.SIMPLE: [simple_layer.SimpleDecoderLayer],
         DecoderBlockType.SIMPLE_MLP: [simple_layer.SimpleMlpDecoderLayer],
         DecoderBlockType.DEEPSEEK: [deepseek.DeepSeekDenseLayer, deepseek.DeepSeekMoELayer],
+        DecoderBlockType.DEEPSEEK4: get_scannable(deepseek4.DeepSeek4DecoderLayer, deepseek4.DeepSeek4ScannableBlock),
         DecoderBlockType.LLAMA4: get_scannable(llama4.Llama4DecoderLayer, llama4.Llama4ScannableBlock),
         DecoderBlockType.OLMO3: get_scannable(olmo3.Olmo3DecoderLayer, olmo3.Olmo3ScannableBlock),
     }
@@ -582,52 +583,49 @@ class Decoder(nn.Module):
     cfg = self.config
     base_stage_cls = decoder_blocks[1] if cfg.decoder_block == DecoderBlockType.DEEPSEEK else decoder_blocks[0]
 
+    # Per-stage-layer remat (+ params-only host-offload inside the stage) when the flag is set.
+    # apply_per_stage_remat is the boolean decision; per_stage_remat is the policy value
+    # (None == full remat for remat_policy='full', matching Linen nn.remat(policy=None)).
+    apply_per_stage_remat = cfg.set_remat_policy_on_layers_per_stage
+    per_stage_remat = self.get_remat_policy() if apply_per_stage_remat else None
+
     if cfg.num_layers_per_pipeline_stage == 1:
+      if apply_per_stage_remat:
+        return NNXSequentialPipelineStage(
+            base_stage_cls,
+            1,
+            cfg,
+            self.mesh,
+            self.quant,
+            self.model_mode,
+            rngs=rngs,
+            remat_policy=per_stage_remat,
+            apply_remat=True,
+        )
       return base_stage_cls(config=cfg, mesh=self.mesh, quant=self.quant, model_mode=self.model_mode, rngs=rngs)
     elif cfg.scan_layers_per_stage:
       return NNXScannedPipelineStage(
-          base_stage_cls, cfg.num_layers_per_pipeline_stage, cfg, self.mesh, self.quant, self.model_mode, rngs=rngs
+          base_stage_cls,
+          cfg.num_layers_per_pipeline_stage,
+          cfg,
+          self.mesh,
+          self.quant,
+          self.model_mode,
+          rngs=rngs,
+          remat_policy=per_stage_remat,
+          apply_remat=apply_per_stage_remat,
       )
     return NNXSequentialPipelineStage(
-        base_stage_cls, cfg.num_layers_per_pipeline_stage, cfg, self.mesh, self.quant, self.model_mode, rngs=rngs
+        base_stage_cls,
+        cfg.num_layers_per_pipeline_stage,
+        cfg,
+        self.mesh,
+        self.quant,
+        self.model_mode,
+        rngs=rngs,
+        remat_policy=per_stage_remat,
+        apply_remat=apply_per_stage_remat,
     )
-
-  def get_pipeline_stage_module(self, decoder_blocks):
-    """get pipeline stage module"""
-
-    def get_layer_to_pipeline(blocks, cfg):
-      if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
-        return blocks[1]  # return the sparse block
-      else:
-        return blocks[0]
-
-    cfg = self.config
-    base_stage = get_layer_to_pipeline(decoder_blocks, cfg)
-    if cfg.set_remat_policy_on_layers_per_stage:
-      policy = self.get_remat_policy()
-      base_stage = self.set_remat_policy([base_stage], policy)[0]
-    if cfg.num_layers_per_pipeline_stage == 1:
-      stage_module = base_stage(config=cfg, mesh=self.mesh, quant=self.quant, model_mode=self.model_mode)
-    elif cfg.scan_layers_per_stage:
-      stage_module = self.scan_decoder_layers(
-          cfg,
-          base_stage,
-          cfg.num_layers_per_pipeline_stage,
-          "layers_per_stage",
-          self.mesh,
-          in_axes_tuple=(nn.broadcast,) * 4,
-          model_mode=self.model_mode,
-      )
-    else:
-      stage_module = SequentialBlockDecoderLayers(
-          decoder_layer=base_stage,
-          num_decoder_layers=cfg.num_layers_per_pipeline_stage,
-          config=cfg,
-          mesh=self.mesh,
-          quant=self.quant,
-          model_mode=self.model_mode,
-      )
-    return stage_module
 
   def get_norm_layer(self, num_features: int):
     """get normalization layer (return type inherits from nn.Module)"""
