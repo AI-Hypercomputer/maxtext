@@ -25,6 +25,7 @@ from absl.testing import parameterized
 from flax import nnx
 import jax
 import jax.numpy as jnp
+from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
 from jax.sharding import AxisType, Mesh
 from maxtext.utils import maxtext_utils
 from maxtext.common.gcloud_stub import is_decoupled
@@ -54,6 +55,24 @@ import pytest
 
 from tests.utils import attention_test_util
 from tests.utils.test_helpers import get_test_config_path
+
+
+class SplashLocalMaskTest(unittest.TestCase):
+  """Tests for Splash local masks."""
+
+  def test_local_window_matches_dense_mask(self):
+    seq_len = 8
+    window_size = 3
+    mask = splash_attention_mask.CausalMask((seq_len, seq_len)) & splash_attention_mask.LocalMask(
+        (seq_len, seq_len),
+        window_size=(window_size - 1, window_size),
+        offset=0,
+    )
+    q_sequence = np.arange(seq_len)[:, None]
+    kv_sequence = np.arange(seq_len)[None, :]
+    expected_mask = (kv_sequence <= q_sequence) & (kv_sequence > q_sequence - window_size)
+
+    np.testing.assert_array_equal(mask[:, :], expected_mask)
 
 
 class BidirectionalBlockMaskTest(unittest.TestCase):

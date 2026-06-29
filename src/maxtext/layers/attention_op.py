@@ -1286,7 +1286,7 @@ class AttentionOp(nnx.Module):
         raise ValueError("Sliding_window_size must be set if Local Sliding attention type")
       mask &= mask_module.LocalMask(
           shape=(query.shape[2], key.shape[2]),
-          window_size=(self.sliding_window_size, self.sliding_window_size),
+          window_size=(self.sliding_window_size - 1, self.sliding_window_size),
           offset=0,
       )
     elif self.attention_type == AttentionType.CHUNK:
