@@ -30,12 +30,12 @@ To enable LoRA support for a new model, follow these two simple steps:
 
 The target model architecture must already be implemented and supported as a base model in MaxText.
 
-- The JAX/NNX model definition should be located under `src/maxtext/models/` (e.g., \[gemma3.py\](../../src/maxtext/models/gemma3.py)).
+- The JAX/NNX model definition should be located under `src/maxtext/models/` (e.g., [gemma3.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/models/gemma3.py)).
 - The model configurations must be registered and runnable for baseline pre-training or full fine-tuning.
 
 ### Step 1.2: Define Trainable LoRA Target Modules
 
-Add a recommended target pattern for your model architecture prefix in \[src/maxtext/configs/post_train/lora_module_path.yml\](../../src/maxtext/configs/post_train/lora_module_path.yml):
+Add a recommended target pattern for your model architecture prefix in [src/maxtext/configs/post_train/lora_module_path.yml](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/configs/post_train/lora_module_path.yml):
 
 ```yaml
 your_model_prefix: "decoder/layers/.*(self_attention/(query|key|value|out)|mlp/(wi_0|wi_1|wo))"
@@ -69,7 +69,7 @@ If you want to perform decoding or run high-performance serving on your adapted 
 To add weight mapping for vLLM decode:
 
 1. **Create a Weight Mapping Config**:
-   Create a new file in \[src/maxtext/integration/tunix/weight_mapping/\](../../src/maxtext/integration/tunix/weight_mapping/) (e.g., `your_model.py`) defining a mapping dataclass. You can refer to \[gemma3.py\](../../src/maxtext/integration/tunix/weight_mapping/gemma3.py) or \[llama3.py\](../../src/maxtext/integration/tunix/weight_mapping/llama3.py) as templates.
+   Create a new file in [src/maxtext/integration/tunix/weight_mapping/](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/integration/tunix/weight_mapping/) (e.g., `your_model.py`) defining a mapping dataclass. You can refer to [llama3.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/integration/tunix/weight_mapping/llama3.py) as a template.
 
    Your class should specify:
 
@@ -78,7 +78,7 @@ To add weight mapping for vLLM decode:
    - `lora_to_hf_mappings()`: Custom mapping for LoRA weights if they require different handling.
 
 2. **Register the Mapping**:
-   Register your new class in \[src/maxtext/integration/tunix/weight_mapping/__init__.py\](../../src/maxtext/integration/tunix/weight_mapping/__init__.py) inside the `StandaloneVllmWeightMapping` class:
+   Register your new class in [src/maxtext/integration/tunix/weight_mapping/__init__.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/integration/tunix/weight_mapping/__init__.py) inside the `StandaloneVllmWeightMapping` class:
 
    ```python
    # Inside StandaloneVllmWeightMapping
