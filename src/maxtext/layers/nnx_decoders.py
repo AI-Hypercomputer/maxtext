@@ -265,10 +265,19 @@ class NNXSequentialPipelineStage(nnx.Module):
       model_mode: str,
       *,
       rngs: nnx.Rngs,
+      remat_policy: Any = None,
+      apply_remat: bool = False,
   ):
     self.config = config
     self.scan_layers = config.scan_layers
     self.num_layers = num_layers
+
+    # apply_remat is decoupled from remat_policy's value: remat_policy=None is a VALID
+    # policy meaning "full rematerialization" (save nothing), matching Linen nn.remat(policy=None).
+    # Gating on `remat_policy is not None` would silently skip remat for remat_policy='full'.
+    self.remat_policy = remat_policy
+    self.apply_remat = apply_remat
+    self.prevent_cse = maxtext_utils.should_prevent_cse_in_remat(config)
     # Dynamically assign layers with explicit string names to ensure correct PyTree paths (layers_0)
     for i in range(num_layers):
       layer = layer_cls(config=config, mesh=mesh, quant=quant, model_mode=model_mode, rngs=rngs)
@@ -285,15 +294,31 @@ class NNXSequentialPipelineStage(nnx.Module):
   ):
     for i in range(self.num_layers):
       layer = getattr(self, f"layers_{i}")
-      out = layer(
-          inputs,
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic,
-          model_mode,
-          **kwargs,
-      )
-      inputs = out[0] if isinstance(out, tuple) else out
+      if self.apply_remat:
+        # Split params out so host-offload is params-only (mirrors Linen nn.map_variables(["params"])).
+        graphdef, params, rest = nnx.split(layer, nnx.Param, ...)
+
+        def pure_fn(params_in, rest_in, x_in, _graphdef=graphdef):
+          if self.config.parameter_memory_host_offload:
+            params_in = jax.tree.map(lambda x: jax.device_put(x, max_utils.device_space()), params_in)
+          merged = nnx.merge(_graphdef, params_in, rest_in)
+          out_inner = merged(x_in, decoder_segment_ids, decoder_positions, deterministic, model_mode, **kwargs)
+          out_inner = out_inner[0] if isinstance(out_inner, tuple) else out_inner
+          return out_inner, nnx.state(merged)
+
+        checkpointed_fn = jax.checkpoint(pure_fn, policy=self.remat_policy, prevent_cse=self.prevent_cse)
+        inputs, new_state = checkpointed_fn(params, rest, inputs)
+        nnx.update(layer, new_state)
+      else:
+        out = layer(
+            inputs,
+            decoder_segment_ids,
+            decoder_positions,
+            deterministic,
+            model_mode,
+            **kwargs,
+        )
+        inputs = out[0] if isinstance(out, tuple) else out
     if self.scan_layers:
       return inputs, None
     return inputs
@@ -312,8 +337,14 @@ class NNXScannedPipelineStage(nnx.Module):
       model_mode: str,
       *,
       rngs: nnx.Rngs,
+      remat_policy: Any = None,
+      apply_remat: bool = False,
   ):
     self.config = config
+    # remat_policy=None is a valid "full remat" policy; gate on apply_remat, not on its value.
+    self.remat_policy = remat_policy
+    self.apply_remat = apply_remat
+    self.prevent_cse = maxtext_utils.should_prevent_cse_in_remat(config)
 
     def create_layer_fn(rng):
       return layer_cls(config=config, mesh=mesh, quant=quant, model_mode=model_mode, rngs=rng)
@@ -346,6 +377,19 @@ class NNXScannedPipelineStage(nnx.Module):
 
     def layer_fn(carry, scanned_vars):
       current_params, current_state = scanned_vars
+      if self.apply_remat:
+
+        def pure_fn(params_in, state_in, x_in):
+          if self.config.parameter_memory_host_offload:
+            params_in = jax.tree.map(lambda x: jax.device_put(x, max_utils.device_space()), params_in)
+          inner_layer = nnx.merge(graphdef, params_in, state_in)
+          out = inner_layer(x_in, decoder_segment_ids, decoder_positions, deterministic, model_mode, **kwargs)
+          out = out[0] if isinstance(out, tuple) else out
+          return out, nnx.state(inner_layer)
+
+        checkpointed_fn = jax.checkpoint(pure_fn, policy=self.remat_policy, prevent_cse=self.prevent_cse)
+        new_carry, new_state = checkpointed_fn(current_params, current_state, carry)
+        return new_carry, new_state
       layer = nnx.merge(graphdef, current_params, current_state)
       layer_out = layer(
           carry,
@@ -428,6 +472,7 @@ class NNXDecoder(nnx.Module):
 
     self.scanned_layers = None
     self.is_deepseek = self.config.decoder_block == DecoderBlockType.DEEPSEEK
+    self.is_deepseek4 = self.config.decoder_block == DecoderBlockType.DEEPSEEK4
     self.is_gemma3 = self.config.decoder_block == DecoderBlockType.GEMMA3
     self.is_gemma4 = self.config.decoder_block == DecoderBlockType.GEMMA4
     self.is_gemma4_small = self.config.decoder_block == DecoderBlockType.GEMMA4_SMALL
@@ -528,6 +573,8 @@ class NNXDecoder(nnx.Module):
     """Initializes decoder layers with scanning (non-pipeline)."""
     if self.is_deepseek:
       self._init_scanned_deepseek(decoder_block_classes, rngs)
+    elif self.is_deepseek4:
+      self._init_scanned_deepseek4(decoder_block_classes, rngs, mesh)
     elif self.is_gemma3:
       self._init_scanned_gemma3(decoder_block_classes, rngs, mesh)
     elif self.is_gemma4:
@@ -669,6 +716,34 @@ class NNXDecoder(nnx.Module):
         rngs=rngs,
     )
 
+  def _init_scanned_deepseek4(self, decoder_block_classes, rngs, mesh):
+    """Initializes DeepSeek-V4 scanned layers.
+
+    DeepSeek-V4 has ``first_num_hash_layers`` prefix layers (static hash routing and
+    heterogeneous attention) that cannot be scanned, followed by uniform alternating
+    HCA(compress_ratio=128)/CSA(compress_ratio=4) blocks. The prefix layers are built
+    individually (named ``layers_{i}`` to match the Linen reference) and the remaining
+    layers are paired into ``DeepSeek4ScannableBlock``s and scanned. Mirrors
+    ``decoders.Decoder._apply_deepseek4_scanned_blocks``.
+    """
+    config = self.config
+    scannable_cls = decoder_block_classes[0]
+
+    # 1. Prefix (hash-routing) layers: unrolled, heterogeneous attention per layer_idx.
+    self.num_prefix_layers = config.first_num_hash_layers
+    for layer_idx in range(self.num_prefix_layers):
+      self._create_and_register_named_layer(
+          deepseek4.DeepSeek4DecoderLayer, rngs, "layers", layer_idx, layer_idx=layer_idx
+      )
+
+    # 2. Scanned alternating HCA(128)/CSA(4) blocks.
+    num_full_blocks = (config.num_decoder_layers - self.num_prefix_layers) // 2
+    self.scanned_blocks = (
+        self._create_scanned_layers(scannable_cls, length=num_full_blocks, metadata_axis_name="layers", rngs=rngs)
+        if num_full_blocks > 0
+        else None
+    )
+
   def _init_scanned_generic(self, decoder_block_classes, rngs):
     """Initializes scanned generic decoder layers."""
     config = self.config
@@ -702,13 +777,19 @@ class NNXDecoder(nnx.Module):
       self._init_sequential_generic(decoder_block_classes, rngs)
 
   def _init_sequential_deepseek(self, decoder_block_classes, rngs):
-    """Initializes sequential DeepSeek dense and MoE layers."""
+    """Initializes sequential DeepSeek dense and MoE layers.
+
+    Each layer receives its GLOBAL ``layer_idx`` (dense layers 0..first_num_dense_layers-1,
+    MoE layers continue from first_num_dense_layers), matching the Linen reference
+    (decoders.py global_layer_idx). The index drives engram interleaving / hash routing
+    (deepseek.DeepSeekGenericLayer.is_engram_enabled).
+    """
     config = self.config
     dense_cls, moe_cls = decoder_block_classes
     for i in range(config.first_num_dense_layers):
-      self._create_and_register_layer(dense_cls, rngs, "dense_layer", i)
+      self._create_and_register_layer(dense_cls, rngs, "dense_layer", i, layer_idx=i)
     for i in range(config.num_decoder_layers - config.first_num_dense_layers):
-      self._create_and_register_layer(moe_cls, rngs, "moe_layer", i)
+      self._create_and_register_layer(moe_cls, rngs, "moe_layer", i, layer_idx=config.first_num_dense_layers + i)
 
   def _init_sequential_generic(self, decoder_block_classes, rngs):
     """Initializes sequential generic decoder layers with per-architecture layer_kwargs."""
@@ -729,6 +810,7 @@ class NNXDecoder(nnx.Module):
       elif config.decoder_block in {
           DecoderBlockType.QWEN3_NEXT,
           DecoderBlockType.QWEN3_5,
+          DecoderBlockType.DEEPSEEK4,
       }:
         layer_kwargs = {"layer_idx": lyr}
       elif config.decoder_block == DecoderBlockType.GPT_OSS:
@@ -774,7 +856,25 @@ class NNXDecoder(nnx.Module):
     cfg = self.config
     base_stage_cls = decoder_blocks[1] if self.is_deepseek else decoder_blocks[0]
 
+    # Per-stage-layer remat (+ params-only host-offload inside the stage) when the flag is set.
+    # apply_per_stage_remat is the boolean decision; per_stage_remat is the policy value
+    # (which may be None == full remat for remat_policy='full', matching Linen nn.remat).
+    apply_per_stage_remat = cfg.set_remat_policy_on_layers_per_stage
+    per_stage_remat = self.get_remat_policy() if apply_per_stage_remat else None
+
     if cfg.num_layers_per_pipeline_stage == 1:
+      if apply_per_stage_remat:
+        return NNXSequentialPipelineStage(
+            base_stage_cls,
+            1,
+            cfg,
+            self.mesh,
+            self.quant,
+            self.model_mode,
+            rngs=rngs,
+            remat_policy=per_stage_remat,
+            apply_remat=True,
+        )
       return self._create_single_layer(base_stage_cls, rngs)
     elif cfg.scan_layers_per_stage:
       return NNXScannedPipelineStage(
@@ -785,6 +885,8 @@ class NNXDecoder(nnx.Module):
           self.quant,
           self.model_mode,
           rngs=rngs,
+          remat_policy=per_stage_remat,
+          apply_remat=apply_per_stage_remat,
       )
     return NNXSequentialPipelineStage(
         base_stage_cls,
@@ -794,6 +896,8 @@ class NNXDecoder(nnx.Module):
         self.quant,
         self.model_mode,
         rngs=rngs,
+        remat_policy=per_stage_remat,
+        apply_remat=apply_per_stage_remat,
     )
 
   def _create_and_register_layer(self, layer_cls, rngs, base_name, i, **layer_kwargs):
@@ -1265,6 +1369,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.MISTRAL,
         DecoderBlockType.MIXTRAL,
         DecoderBlockType.DEEPSEEK,
+        DecoderBlockType.DEEPSEEK4,
         DecoderBlockType.GEMMA,
         DecoderBlockType.GEMMA2,
         DecoderBlockType.GEMMA3,
@@ -1813,6 +1918,17 @@ class NNXDecoder(nnx.Module):
               previous_chunk,
               slot,
           )
+        elif self.is_deepseek4:
+          y = self._apply_deepseek4_scanned_blocks(
+              y,
+              decoder_segment_ids,
+              decoder_positions,
+              deterministic,
+              model_mode,
+              previous_chunk,
+              slot,
+              decoder_input_tokens,
+          )
         else:
           scan_length = int(cfg.num_decoder_layers / cfg.inhomogeneous_layer_cycle_interval)
           if kv_caches is not None:
@@ -1870,7 +1986,7 @@ class NNXDecoder(nnx.Module):
           else:
             kv_cache = None
 
-          input_tokens = decoder_input_tokens if cfg.engram_layers else None
+          input_tokens = decoder_input_tokens if (cfg.engram_layers or self.is_deepseek4) else None
           if input_tokens is not None:
             layer_kwargs["decoder_input_tokens"] = input_tokens
 
@@ -1920,6 +2036,49 @@ class NNXDecoder(nnx.Module):
       logits = self.apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)
 
     return logits, hidden_state, kv_caches
+
+  def _apply_deepseek4_scanned_blocks(
+      self,
+      y,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      previous_chunk,
+      slot,
+      decoder_input_tokens,
+  ):
+    """Applies DeepSeek-V4 decoder layers: unrolled hash-routing prefix layers followed
+    by scanned alternating HCA(128)/CSA(4) blocks. Mirrors the Linen
+    ``decoders.Decoder._apply_deepseek4_scanned_blocks``.
+    """
+    layer_args = (decoder_segment_ids, decoder_positions, deterministic, model_mode)
+
+    # 1. Unrolled prefix (hash-routing) layers; each derives is_hash_routing/compress_ratio
+    #    from its static layer_idx and consumes decoder_input_tokens for hash routing.
+    for layer_idx in range(self.num_prefix_layers):
+      prefix_layer = getattr(self, f"layers_{layer_idx}")
+      y, _ = prefix_layer(
+          y,
+          *layer_args,
+          previous_chunk=previous_chunk,
+          slot=slot,
+          decoder_input_tokens=decoder_input_tokens,
+      )
+
+    # 2. Scanned alternating HCA/CSA blocks (no hash routing -> no decoder_input_tokens).
+    if self.scanned_blocks is not None:
+      num_full_blocks = (self.config.num_decoder_layers - self.num_prefix_layers) // 2
+      y, self.scanned_blocks, _ = self._apply_layers_sequentially(
+          self.scanned_blocks,
+          y,
+          *layer_args,
+          length=num_full_blocks,
+          previous_chunk=previous_chunk,
+          slot=slot,
+      )
+
+    return y
 
   def _apply_gemma3_scanned_blocks(
       self,
@@ -1971,6 +2130,9 @@ class NNXDecoder(nnx.Module):
         remainder_kv = tuple(kv_caches[start_idx : start_idx + num_remaining_layers])
 
       def pure_gemma_fn(graphdef, state_in, y_in, kv_in):
+        # the remainder block must also be host-offloaded when parameter_memory_host_offload is enabled.
+        if cfg.parameter_memory_host_offload:
+          state_in = jax.tree.map(lambda x: jax.device_put(x, max_utils.device_space()), state_in)
         merged_layer = nnx.merge(graphdef, state_in)
         call_kwargs = dict(layer_kwargs)
         if kv_in is not None:
@@ -2049,6 +2211,9 @@ class NNXDecoder(nnx.Module):
         remainder_kv = tuple(kv_caches[start_idx : start_idx + num_remaining_layers])
 
       def pure_gemma_fn(graphdef, state_in, y_in, kv_in):
+        # the remainder block must also be host-offloaded when parameter_memory_host_offload is enabled.
+        if cfg.parameter_memory_host_offload:
+          state_in = jax.tree.map(lambda x: jax.device_put(x, max_utils.device_space()), state_in)
         merged_layer = nnx.merge(graphdef, state_in)
         call_kwargs = dict(layer_kwargs)
         if kv_in is not None:
