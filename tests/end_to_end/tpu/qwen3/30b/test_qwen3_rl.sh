@@ -50,7 +50,7 @@ python3 -m maxtext.inference.vllm_decode \
     hbm_utilization_vllm=0.85 \
     prompt='Suggest some famous landmarks in London.' \
     max_target_length=256 max_num_batched_tokens=256 \
-    ici_tensor_parallelism=8 ici_data_parallelism=2 allow_split_physical_axes=True prefuse_moe_weights=True \
+    ici_tensor_parallelism=8 ici_data_parallelism=2 allow_split_physical_axes=True prefuse_moe_weights=False \
     use_chat_template=True scan_layers=False enable_single_controller=${use_pathways}
 
 python3 -m maxtext.trainers.post_train.rl.train_rl \
@@ -58,16 +58,17 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/rl \
     load_parameters_path=${UNSCANNED_CKPT_PATH} \
     run_name=${run_id} rl.loss_algo='grpo' scan_layers=False \
-    num_batches=5 batch_size=8 train_micro_batch_size=8 num_test_batches=5 \
+    num_batches=5 batch_size=4 train_micro_batch_size=1 num_test_batches=5 \
     model_name=${MODEL_NAME} enable_single_controller=${use_pathways} \
     checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False \
     rollout_tensor_parallelism=8 \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
-    vllm_additional_config='{"maxtext_config": {"model_name": "'${MODEL_NAME}'", "allow_split_physical_axes": true, "scan_layers": false, "prefuse_moe_weights": true}}' \
+    vllm_additional_config='{"maxtext_config": {"model_name": "'${MODEL_NAME}'", "allow_split_physical_axes": true, "scan_layers": false, "prefuse_moe_weights": false}}' \
     remat_policy=full hbm_utilization_vllm=0.55 use_pathways=${use_pathways} \
     ici_tensor_parallelism=1 ici_fsdp_parallelism=-1 ici_expert_parallelism=8 \
-    max_sequence_length=1024 max_target_length=512 weight_dtype=bfloat16 dtype=bfloat16 opt_type=sgd \
-    enable_tunix_perf_metrics=True rl.use_agentic_rollout=True rl.num_generations=16
+    max_target_length=512 weight_dtype=bfloat16 dtype=bfloat16 opt_type=sgd \
+    enable_tunix_perf_metrics=True rl.use_agentic_rollout=True rl.num_generations=16 \
+    debug.rl=False
 
 python3 -m maxtext.inference.vllm_decode \
     model_name=${MODEL_NAME} \
@@ -76,5 +77,5 @@ python3 -m maxtext.inference.vllm_decode \
     hbm_utilization_vllm=0.85 \
     prompt='Suggest some famous landmarks in London.' \
     max_target_length=256 max_num_batched_tokens=256 \
-    ici_tensor_parallelism=8 ici_data_parallelism=2 allow_split_physical_axes=True prefuse_moe_weights=True \
+    ici_tensor_parallelism=8 ici_data_parallelism=2 allow_split_physical_axes=True prefuse_moe_weights=False \
     use_chat_template=True scan_layers=False enable_single_controller=${use_pathways}
