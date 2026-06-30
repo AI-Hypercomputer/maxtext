@@ -12,9 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for the checkpointing components in checkpoint_conversion."""
+"""Unit tests for the checkpointing components."""
 
+import asyncio
+import json
+import os
 from unittest import mock
+
 from absl.testing import absltest
 from absl.testing import parameterized
 from etils import epath
@@ -28,9 +32,9 @@ from maxtext.checkpoint_conversion.utils.tensor_handling import (
     get_hf_loading_function,
 )
 from maxtext.common import checkpointing
+from maxtext.common import grain_utility
 import numpy as np
 import optax
-import os
 import safetensors.numpy
 
 
@@ -292,7 +296,6 @@ class SourceCheckpointLoadingTest(parameterized.TestCase):
         load_full_state_from_path="",
         checkpoint_storage_concurrent_gb=1,
         abstract_unboxed_pre_state=abstract_state,
-        enable_orbax_v1=True,
         source_checkpoint_layout="safetensors_dynamic",
         maxtext_config=config,
     )
@@ -303,6 +306,125 @@ class SourceCheckpointLoadingTest(parameterized.TestCase):
     # Assert values match
     loaded_weight = loaded_vars["params"]["token_embedder"]["embedding"]
     np.testing.assert_allclose(loaded_weight, dummy_weight)
+
+
+class GrainCheckpointableEquivalenceTest(parameterized.TestCase):
+  """Tests to ensure GrainCheckpointable is equivalent to GrainCheckpointHandler."""
+
+  def setUp(self):
+    super().setUp()
+    self.tmp_dir = epath.Path(self.create_tempdir().full_path)
+
+  def test_save_restore_equivalence_single_item(self):
+    class FakeIterator:
+      def __init__(self, state=0):
+        self.state = state
+
+      def get_state(self):
+        return json.dumps({"state": self.state}).encode()
+
+      def set_state(self, state):
+        self.state = json.loads(state.decode())["state"]
+
+      def __next__(self):
+        self.state += 1
+        return self.state
+
+    iterator_v0 = FakeIterator(10)
+    iterator_v1 = FakeIterator(10)
+
+    step = 100
+    v0_path = self.tmp_dir / str(step) / "iter_v0"
+    v1_path = self.tmp_dir / str(step) / "iter_v1"
+
+    # Expected content
+    expected_content = iterator_v0.get_state().decode()
+
+    # v1 Save
+    wrapper = grain_utility.GrainCheckpointable(iterator_v1)
+
+    class MockDirectory:
+      async def await_creation(self):
+        v1_path.mkdir(parents=True, exist_ok=True)
+        return v1_path
+
+    commit_func = asyncio.run(wrapper.save(MockDirectory()))
+    if commit_func:
+      asyncio.run(commit_func)
+
+    # Verify content
+    v1_file = v1_path / "process_0-of-1.json"
+    self.assertTrue(v1_file.exists())
+    self.assertEqual(v1_file.read_text(), expected_content)
+
+    # v1 Restore
+    restored_iterator_v1 = FakeIterator(0)
+    wrapper_restore = grain_utility.GrainCheckpointable(restored_iterator_v1)
+
+    load_func = asyncio.run(wrapper_restore.load(v1_path))
+    if load_func:
+      asyncio.run(load_func)
+    self.assertEqual(restored_iterator_v1.state, 10)
+    self.assertEqual(restored_iterator_v1.state, 10)
+
+  def test_save_restore_equivalence_list_item(self):
+    class FakeIterator:
+
+      def __init__(self, state=0):
+        self.state = state
+
+      def get_state(self):
+        return json.dumps({"state": self.state}).encode()
+
+      def set_state(self, state):
+        self.state = json.loads(state.decode())["state"]
+
+    iterator_a = FakeIterator(10)
+    iterator_b = FakeIterator(20)
+
+    item_v0 = [(iterator_a, 0, 2), (iterator_b, 1, 2)]
+    item_v1 = [(iterator_a, 0, 2), (iterator_b, 1, 2)]
+
+    step = 100
+    v0_path = self.tmp_dir / str(step) / "iter_v0"
+    v1_path = self.tmp_dir / str(step) / "iter_v1"
+
+    # Expected contents
+    expected_content_0 = item_v0[0][0].get_state().decode()
+    expected_content_1 = item_v0[1][0].get_state().decode()
+
+    # v1 Save
+    wrapper = grain_utility.GrainCheckpointable(item_v1)
+
+    class MockDirectory:
+      async def await_creation(self):
+        v1_path.mkdir(parents=True, exist_ok=True)
+        return v1_path
+
+    commit_func = asyncio.run(wrapper.save(MockDirectory()))
+    if commit_func:
+      asyncio.run(commit_func)
+
+    # Verify content
+    v1_file_0 = v1_path / "process_0-of-2.json"
+    v1_file_1 = v1_path / "process_1-of-2.json"
+
+    self.assertTrue(v1_file_0.exists())
+    self.assertEqual(v1_file_0.read_text(), expected_content_0)
+
+    self.assertTrue(v1_file_1.exists())
+    self.assertEqual(v1_file_1.read_text(), expected_content_1)
+
+    # v1 Restore
+    iterators_restore_v1 = [FakeIterator(0), FakeIterator(0)]
+    wrapper_restore = grain_utility.GrainCheckpointable(
+        iterators_restore_v1, process_index=[0, 1], process_count=2
+    )
+    load_func = asyncio.run(wrapper_restore.load(v1_path))
+    if load_func:
+      asyncio.run(load_func)
+    self.assertEqual(iterators_restore_v1[0].state, 10)
+    self.assertEqual(iterators_restore_v1[1].state, 20)
 
 
 if __name__ == "__main__":

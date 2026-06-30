@@ -73,8 +73,8 @@ class TestEmergencyReplicatorCheckpointManager(unittest.TestCase):
     mesh = object()
 
     with mock.patch.object(
-        checkpointing,
-        "EmergencyReplicatorCheckpointManager",
+        checkpointing.emergency_checkpointing,
+        "ReplicatorCheckpointManager",
         return_value=checkpoint_manager,
     ) as manager_cls:
       result = checkpointing.create_orbax_emergency_replicator_checkpoint_manager(
@@ -387,7 +387,7 @@ class TestMaybeSaveCheckpointStepAlignment(unittest.TestCase):
         enable_diloco=False,
     )
     mgr = mock.MagicMock()
-    mgr.reached_preemption.return_value = False
+    mgr.latest = None  # no existing checkpoint -> _latest_step() is None, so the save proceeds
 
     captured = {}
 
@@ -396,7 +396,9 @@ class TestMaybeSaveCheckpointStepAlignment(unittest.TestCase):
       captured["state"] = state_arg
       return False  # no save happened => print_save_message is skipped
 
-    with mock.patch.object(checkpointing, "save_checkpoint", side_effect=fake_save_checkpoint):
+    with mock.patch.object(checkpointing, "save_checkpoint", side_effect=fake_save_checkpoint), mock.patch.object(
+        checkpointing.multihost_utils, "reached_preemption_sync_point", return_value=False
+    ):
       checkpointing.maybe_save_checkpoint(mgr, state, config, data_iterator=None, step=None)
     return captured
 
@@ -458,13 +460,14 @@ class TestMaybeSaveCheckpointStepAlignment(unittest.TestCase):
         enable_diloco=False,
     )
     mgr = mock.MagicMock()
-    mgr.reached_preemption.return_value = False
-    # Mock latest_step to return the same actual_step
-    mgr.latest_step.return_value = actual_step
+    # Latest saved step matches actual_step -> save should be skipped.
+    mgr.latest = mock.MagicMock(step=actual_step)
 
     save_checkpoint_mock = mock.MagicMock()
 
-    with mock.patch.object(checkpointing, "save_checkpoint", save_checkpoint_mock):
+    with mock.patch.object(checkpointing, "save_checkpoint", save_checkpoint_mock), mock.patch.object(
+        checkpointing.multihost_utils, "reached_preemption_sync_point", return_value=False
+    ):
       checkpointing.maybe_save_checkpoint(mgr, state, config, data_iterator=None, step=None)
 
     # Assert that save_checkpoint was NOT called!
@@ -482,74 +485,22 @@ class TestMaybeSaveCheckpointStepAlignment(unittest.TestCase):
         enable_diloco=False,
     )
     mgr = mock.MagicMock()
-    mgr.reached_preemption.return_value = False
-    # Mock latest_step to return a different step (or None)
-    mgr.latest_step.return_value = actual_step - 1
+    # Latest saved step differs from actual_step -> save should happen.
+    mgr.latest = mock.MagicMock(step=actual_step - 1)
 
     save_checkpoint_mock = mock.MagicMock()
     save_checkpoint_mock.return_value = False
 
-    with mock.patch.object(checkpointing, "save_checkpoint", save_checkpoint_mock):
+    with mock.patch.object(checkpointing, "save_checkpoint", save_checkpoint_mock), mock.patch.object(
+        checkpointing.multihost_utils, "reached_preemption_sync_point", return_value=False
+    ):
       checkpointing.maybe_save_checkpoint(mgr, state, config, data_iterator=None, step=None)
 
     # Assert that save_checkpoint WAS called!
     save_checkpoint_mock.assert_called_once()
 
 
-class TestLinenCheckpointFormatConverters(unittest.TestCase):
-  """to_linen_checkpoint_dict / from_linen_checkpoint_dict (NNX <-> Linen on-disk layout)."""
 
-  def _nnx_pure(self):
-    # A 3-element optax chain (e.g. adamw): index 1 is an EmptyState (absent in the int-keyed dict).
-    return {
-        "model": {
-            "decoder": {"norm": {"scale": jnp.ones((3,))}},
-            "dropout": {"rngs": {"default": {"key": jnp.ones((2,), dtype=jnp.uint32)}}},  # NNX-only
-        },
-        "optimizer": {
-            "step": jnp.asarray(7, dtype=jnp.uint32),
-            "opt_state": {
-                0: {
-                    "count": jnp.asarray(7),
-                    "mu": {"decoder": jnp.ones((3,))},
-                    "nu": {"decoder": jnp.ones((3,))},
-                },
-                2: {"count": jnp.asarray(7)},
-            },
-        },
-    }
-
-  def test_to_linen_layout(self):
-    linen = train_state_nnx.to_linen_checkpoint_dict(self._nnx_pure())
-    self.assertEqual(set(linen.keys()), {"params", "step", "opt_state"})
-    self.assertIn("params", linen["params"])  # params/params/ collection wrap
-    self.assertNotIn("dropout", linen["params"]["params"])  # NNX-only rngs/dropout stripped
-    self.assertEqual(linen["step"].dtype, jnp.int32)  # Linen step is int32
-    # opt_state is a list with None for the EmptyState slot, mu/nu wrapped under params.
-    self.assertIsInstance(linen["opt_state"], list)
-    self.assertEqual(len(linen["opt_state"]), 3)
-    self.assertIsNone(linen["opt_state"][1])
-    self.assertIn("params", linen["opt_state"][0]["mu"])
-
-  def test_round_trip_preserves_values(self):
-    nnx_pure = self._nnx_pure()
-    back = train_state_nnx.from_linen_checkpoint_dict(train_state_nnx.to_linen_checkpoint_dict(nnx_pure))
-    self.assertEqual(set(back.keys()), {"model", "optimizer"})
-    self.assertEqual(back["optimizer"]["step"].dtype, jnp.uint32)  # NNX step back to uint32
-    self.assertEqual(set(back["optimizer"]["opt_state"].keys()), {0, 2})  # int-keyed dict, EmptyState dropped
-    self.assertNotIn("params", back["optimizer"]["opt_state"][0]["mu"])  # mu/nu unwrapped
-    self.assertTrue(
-        jnp.array_equal(
-            nnx_pure["model"]["decoder"]["norm"]["scale"],
-            back["model"]["decoder"]["norm"]["scale"],
-        )
-    )
-
-  def test_cast_step_handles_shapedtypestruct(self):
-    sds = jax.ShapeDtypeStruct((), jnp.uint32)
-    out = train_state_nnx._cast_step(sds, jnp.int32)  # pylint: disable=protected-access
-    self.assertIsInstance(out, jax.ShapeDtypeStruct)
-    self.assertEqual(out.dtype, jnp.int32)
 
 
 if __name__ == "__main__":

@@ -80,7 +80,6 @@ checkpoint_storage_use_zarr3: true
 checkpoint_storage_concurrent_gb: 96
 
 # Bool flag for enabling Orbax v1.
-enable_orbax_v1: false
 # function for processing loaded checkpoint dict into a format maxtext can understand. (for other formats, i.e. safetensors)
 checkpoint_conversion_fn: none
 # optional checkpoint context to use for loading. options: "orbax", "safetensors"

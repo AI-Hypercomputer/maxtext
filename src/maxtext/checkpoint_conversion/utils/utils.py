@@ -1244,7 +1244,7 @@ def save_weights_to_checkpoint(
   if checkpointing.save_checkpoint(checkpoint_manager, step_number_to_save_new_ckpt, state_new):
     max_logging.log(f"saved a checkpoint at step {step_number_to_save_new_ckpt}")
   # Upon preemption, exit when and only when all ongoing saves are complete.
-  checkpoint_manager.wait_until_finished()
+  checkpointing.wait_until_finished(checkpoint_manager)
 
   max_logging.log(f"Elapse for checkpoint save: {(time.time() - start) / 60:.2f} min")
 
