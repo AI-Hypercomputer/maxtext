@@ -550,9 +550,6 @@ def _initialize_pydantic(argv: list[str] | None = None, **kwargs) -> MaxTextConf
 
       compilation_cache.set_cache_dir(os.path.expanduser(pydantic_kwargs["jax_cache_dir"]))
 
-  if pydantic_kwargs["use_te_comm_gemm_overlap"]:
-    max_utils.bootstrap_transformer_engine_cgemm(pydantic_kwargs)
-
   pydantic_config = types.MaxTextConfig(**pydantic_kwargs)
   config = HyperParameters(pydantic_config)
 

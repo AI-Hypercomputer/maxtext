@@ -2558,6 +2558,26 @@ class MaxTextConfig(
           "  2. Ragged sort with ring of experts (use_ring_of_experts=True AND use_ragged_sort=True)"
       )
 
+  def _validate_use_te_comm_gemm_overlap(self):
+    """Validates that use_te_comm_gemm_overlap is used with supported settings."""
+    te_has_distributed_env = jax.local_device_count() == 1 and jax.distributed.is_initialized()
+
+    if self.hardware != "gpu_multiprocess" or not te_has_distributed_env:
+      raise ValueError(
+          "TE Collective GEMM operations are only supported for hardware=gpu_multiprocess with rank per GPU."
+      )
+
+    tsp_size = self.ici_tensor_sequence_parallelism * self.dcn_tensor_sequence_parallelism
+    tp_size = self.ici_tensor_parallelism * self.dcn_tensor_parallelism
+
+    if tsp_size == 1 or tp_size > 1:
+      raise ValueError("TE Collective GEMM operations are only supported for TSP size > 1 and TP size == 1.")
+
+    if not self.quantization.startswith("te_"):
+      raise ValueError(
+          "TE Collective GEMM operations are only supported for TE quantization recipes (i.e. starting with 'te_')."
+      )
+
   @model_validator(mode="after")
   def set_derived_and_validate_values(self) -> "MaxTextConfig":
     """
@@ -3455,6 +3475,8 @@ class MaxTextConfig(
       )
 
     self._validate_check_vma_is_supported()
+
+    self._validate_use_te_comm_gemm_overlap()
 
     # Final string-to-enum conversions if they haven't been coerced by pydantic yet.
     if isinstance(self.decoder_block, str):
