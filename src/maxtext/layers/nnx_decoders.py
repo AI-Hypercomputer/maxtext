@@ -1143,13 +1143,16 @@ class NNXDecoder(nnx.Module):
         nxt_params = _slice_params(params, (idx + 1) % length)
         w_next = jax.tree.map(_apply_sharding_hint, nxt_params)
 
-      layer = nnx.merge(graphdef, w, st_i)
+      bsw = checkpoint_name((w, w_next), "fsdp_bsw")
+      w_active, w_prefetched = bsw[0], bsw[1]
+
+      layer = nnx.merge(graphdef, w_active, st_i)
       layer_out = layer(y, *args, **valid_kwargs)
 
       y_out = layer_out[0] if isinstance(layer_out, tuple) else layer_out
       _, _, new_state_i = nnx.split(layer, nnx.Param, ...)
 
-      return y_out, w_next, new_state_i
+      return y_out, w_prefetched, new_state_i
 
     step_wrapped = jax.checkpoint(_step_fn, policy=policy, prevent_cse=prevent_cse)
 
