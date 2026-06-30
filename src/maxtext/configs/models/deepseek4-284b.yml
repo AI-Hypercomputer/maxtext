@@ -50,6 +50,9 @@ mlp_activations_limit: 10
 shared_experts: 1
 routed_score_func: "sqrtsoftplus"
 norm_topk_prob: true
+routed_bias: true
+routed_scaling_factor: 1.5
+
 
 # --- Attention configuration ---
 attention_type: 'compressed'
