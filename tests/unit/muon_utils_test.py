@@ -150,9 +150,9 @@ class TestGetMuonWeightDimensionNumbersNNX(unittest.TestCase):
     # NNX Variables are walked by jax.tree_util.tree_map_with_path, so the returned
     # tree replaces each Variable's value with transform_logic(path_strings).
     # 'scale' matches the exclusion branch → value is None.
-    self.assertIsNone(result["scale"].get_value())
+    self.assertIsNone(result["scale"])
     # 'w_standard' does not trigger any special rule → standard mdn.
-    self.assertEqual(result["w_standard"].get_value(), mdn((0,), (-1,)))
+    self.assertEqual(result["w_standard"], mdn((0,), (-1,)))
 
   def test_nnx_verbose_path_executes_print_debug(self):
     """verbose=True should also execute _print_structure_debug without raising."""

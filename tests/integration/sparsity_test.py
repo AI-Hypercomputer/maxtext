@@ -79,6 +79,8 @@ class Train(parameterized.TestCase):
         "enable_goodput_recording=False",
         "enable_checkpoint_cloud_logger=False",
         "monitor_goodput=False",
+        # Toy MoE dims don't divide evenly across fsdp; loosen the sharded-params assert.
+        "sharding_tolerance=0.08",
         f"metrics_file={os.path.join(outputs_dir, 'metrics.json')}",
     ]
     if use_sparsity:

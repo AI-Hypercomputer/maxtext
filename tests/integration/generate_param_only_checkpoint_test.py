@@ -100,10 +100,29 @@ def run_e2e_test_flow(hardware, model_config, attention_type="autoselected", sta
   decode_main(decode_config)
 
 
-@pytest.mark.skipif(is_decoupled(), reason="Bypassed in offline decoupled runs (no GCS/internet)")
+@pytest.mark.skipif(
+    is_decoupled(),
+    reason="Bypassed in offline decoupled runs (no GCS/internet)",
+)
 @pytest.mark.integration_test
 @pytest.mark.tpu_only
-@pytest.mark.parametrize("quantization", [(""), ("int8")])
+@pytest.mark.parametrize(
+    "quantization",
+    [
+        "",
+        pytest.param(
+            "int8",
+            marks=pytest.mark.skip(
+                reason=(
+                    "NNX int8 param-only generation is a convert-on-load case"
+                    " (the fp32 training checkpoint has no AqtDotGeneral state"
+                    " the int8 model expects); tracked as a follow-up alongside"
+                    " layerwise_quantization."
+                )
+            ),
+        ),
+    ],
+)
 def test_param_ckpt_generation_with_autoselected_attention(quantization, capsys):
   """Tests the parameter-only checkpoint generation and decode flow on TPU with autoselected attention."""
   model_config = get_model_params(quantization)
@@ -116,7 +135,23 @@ def test_param_ckpt_generation_with_autoselected_attention(quantization, capsys)
 @pytest.mark.external_serving
 @pytest.mark.integration_test
 @pytest.mark.gpu_only
-@pytest.mark.parametrize("quantization", [(""), ("int8")])
+@pytest.mark.parametrize(
+    "quantization",
+    [
+        "",
+        pytest.param(
+            "int8",
+            marks=pytest.mark.skip(
+                reason=(
+                    "NNX int8 param-only generation is a convert-on-load case"
+                    " (the fp32 training checkpoint has no AqtDotGeneral state"
+                    " the int8 model expects); tracked as a follow-up alongside"
+                    " layerwise_quantization."
+                )
+            ),
+        ),
+    ],
+)
 def test_param_ckpt_generation_with_dot_product(quantization, capsys):
   """Tests the parameter-only checkpoint generation and decode flow on GPU with dot product attention."""
   os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention

@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 """Create an Orbax CheckpointManager with specified (Async or not) Checkpointer."""
 
 import time
@@ -357,11 +358,19 @@ def _load_full_state_from_path(
         use_ocdbt=use_ocdbt,
         use_zarr3=use_zarr3,
     )
+    # NNX checkpoints are saved as pure dicts (see maybe_save_checkpoint); the
+    # restore target must match — a boxed nnx.State wouldn't.
+    restore_target = abstract_unboxed_pre_state
+    if isinstance(abstract_unboxed_pre_state, nnx.State):
+      restore_target = abstract_unboxed_pre_state.to_pure_dict()
     # Provide sharding info to ensure restoration returns JAX arrays (not NumPy arrays).
     restore_args = jax.tree_util.tree_map(
-        lambda x: ocp.type_handlers.ArrayRestoreArgs(sharding=x.sharding), abstract_unboxed_pre_state
+        lambda x: ocp.type_handlers.ArrayRestoreArgs(sharding=x.sharding),
+        restore_target,
     )
-    return ocp.Checkpointer(handler).restore(p, abstract_unboxed_pre_state, restore_args=restore_args)
+    return ocp.Checkpointer(handler).restore(
+        p, restore_target, restore_args=restore_args
+    )
 
 
 def create_orbax_checkpoint_manager(
@@ -1028,7 +1037,10 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
     actual_step = int(step)
   else:
     if config.pure_nnx:
-      actual_step = int(state.optimizer.step) - 1
+      # Under DiLoCo the step lives on the DiLoCoTrainState; otherwise on the optimizer.
+      actual_step = (
+          int(state.step if config.enable_diloco else state.optimizer.step) - 1
+      )
     else:
       # Linen TrainState has .step attribute
       actual_step = int(state.step) - 1
@@ -1039,7 +1051,19 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
 
   if config.pure_nnx:
     # Save in the Linen on-disk layout so pure_nnx and Linen checkpoints are interchangeable.
-    state = train_state_nnx.to_linen_checkpoint_dict(state.to_pure_dict())
+    if config.enable_diloco:
+      # DiLoCoTrainState: persist the synchronized global model (outer params).
+      # The per-replica inner optimizer / outer-momentum state is not checkpointed.
+      step_value = (
+          state.step.get_value()
+          if hasattr(state.step, "get_value")
+          else state.step
+      )
+      state = train_state_nnx.to_linen_checkpoint_dict(
+          {"model": state.params, "optimizer": {"step": step_value}}
+      )
+    else:
+      state = train_state_nnx.to_linen_checkpoint_dict(state.to_pure_dict())
 
   # Determine if a checkpoint save should be forced, overriding the usual `config.checkpoint_period` logic.
   # This occurs if this function was called:
