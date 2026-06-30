@@ -19,7 +19,6 @@
 # See github.com/google/maxtext/issues/20 for more
 
 import datetime
-from functools import partial
 import os
 from typing import Sequence
 
@@ -52,23 +51,17 @@ def checkpoint_loop(config, state=None):
   on the configured cadence. Works on both Linen and NNX state shapes.
   """
   init_rng = jax.random.PRNGKey(config.init_weights_seed)
-  if config.pure_nnx:
-    mesh = maxtext_utils.get_mesh_from_config(config)
-    rngs = maxtext_utils_nnx.create_nnx_rngs(config, rng_key=init_rng)
-    model = from_config(config, mesh=mesh, rngs=rngs)
-    _, tx = train_utils.create_training_optimizer(config, model)
-    _create_model_partial, _ = model_creation_utils.create_nnx_abstract_model(config, mesh)
+  mesh = maxtext_utils.get_mesh_from_config(config)
+  rngs = maxtext_utils_nnx.create_nnx_rngs(config, rng_key=init_rng)
+  model = from_config(config, mesh=mesh, rngs=rngs)
+  _, tx = train_utils.create_training_optimizer(config, model)
+  _create_model_partial, _ = model_creation_utils.create_nnx_abstract_model(config, mesh)
 
-    def init_state_fn():
-      nnx_model = _create_model_partial()
-      optimizer = nnx.Optimizer(nnx_model, tx, wrt=nnx.Param)
-      return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
+  def init_state_fn():
+    nnx_model = _create_model_partial()
+    optimizer = nnx.Optimizer(nnx_model, tx, wrt=nnx.Param)
+    return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
 
-  else:
-    model = from_config(config)
-    mesh = model.mesh
-    _, tx = train_utils.create_training_optimizer(config, model)
-    init_state_fn = partial(maxtext_utils.init_initial_state, model, tx, config, True, init_rng)
   checkpoint_manager = train_utils.create_checkpoint_manager(config, mesh, init_state_fn)
 
   unboxed_abstract_state, _, _ = maxtext_utils.get_abstract_state(config, mesh, init_state_fn, is_training=True)
@@ -125,8 +118,8 @@ def add_entropy_to_checkpoint(state):
     * Linen `TrainState`: `state.params` + `state.opt_state` (tuple).
     * NNX `TrainStateNNX` (Module): `state.model` is an `nnx.Module`; the
       optimizer's `opt_state` is the optax tuple of NamedTuples.
-    * NNX `nnx.State` (post-split, what `setup_training_state` returns under
-      `pure_nnx`): `state.model` and `state.optimizer.opt_state` are sub-States;
+    * NNX `nnx.State` (post-split, what `setup_training_state` returns):
+      `state.model` and `state.optimizer.opt_state` are sub-States;
       `opt_state[0].mu`/`nu` are themselves States that can be reassigned.
   """
   if hasattr(state, "model"):

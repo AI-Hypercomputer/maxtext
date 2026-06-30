@@ -394,149 +394,71 @@ class QuantTest(unittest.TestCase):
     cfg = self.init_pyconfig(quantization=quant, **kwargs)
     ids, decoder_segment_ids, decoder_positions = self.get_data()
 
-    if cfg.pure_nnx:
-      qt_model = model_creation_utils.create_model(cfg, self.mesh, rngs=nnx.Rngs(0))
-      if getattr(self.__class__, "_cached_base_results_nnx", None) is None:
-        base_cfg = self.init_pyconfig(quantization="", **kwargs)
-        base_model = model_creation_utils.create_model(base_cfg, self.mesh, rngs=nnx.Rngs(0))
+    qt_model = model_creation_utils.create_model(cfg, self.mesh, rngs=nnx.Rngs(0))
+    if getattr(self.__class__, "_cached_base_results_nnx", None) is None:
+      base_cfg = self.init_pyconfig(quantization="", **kwargs)
+      base_model = model_creation_utils.create_model(base_cfg, self.mesh, rngs=nnx.Rngs(0))
 
-        def loss_base(model):
-          logits = model(
-              decoder_input_tokens=ids,
-              decoder_positions=decoder_positions,
-              decoder_segment_ids=decoder_segment_ids,
-              enable_dropout=False,
-          )
-          return jnp.mean((logits) ** 2)
-
-        grads_base = nnx.grad(loss_base)(base_model)
-        logits_base = base_model(
+      def loss_base(model):
+        logits = model(
             decoder_input_tokens=ids,
             decoder_positions=decoder_positions,
             decoder_segment_ids=decoder_segment_ids,
             enable_dropout=False,
         )
-        self.__class__._cached_base_results_nnx = (grads_base, logits_base)
+        return jnp.mean((logits) ** 2)
 
-      grads_base, logits = self.__class__._cached_base_results_nnx
-
-      def loss_quant(model):
-        logits_q = model(
-            decoder_input_tokens=ids,
-            decoder_positions=decoder_positions,
-            decoder_segment_ids=decoder_segment_ids,
-            enable_dropout=False,
-        )
-        return jnp.mean((logits_q) ** 2)
-
-      grads_quant = nnx.grad(loss_quant)(qt_model)
-      quant_logits = qt_model(
+      grads_base = nnx.grad(loss_base)(base_model)
+      logits_base = base_model(
           decoder_input_tokens=ids,
           decoder_positions=decoder_positions,
           decoder_segment_ids=decoder_segment_ids,
           enable_dropout=False,
       )
+      self.__class__._cached_base_results_nnx = (grads_base, logits_base)
 
-      print("relative error in logits:" f" {jnp.abs(quant_logits - logits).mean() / jnp.abs(logits).mean()}")
-      assert jnp.abs(quant_logits - logits).mean() / jnp.abs(logits).mean() < logits_tolerance
+    grads_base, logits = self.__class__._cached_base_results_nnx
 
-      # nnx.grad returns a State object which is a mapping of paths to gradients.
-      # Flatten them to check for tolerance.
-      grads_base_flat = traversals.flatten_mapping(grads_base)
-      grads_quant_flat = traversals.flatten_mapping(grads_quant)
-
-      # Filter for param collections to compare only parameters and not stats/buffers if any
-      # Note: NNX grads structure might contain variables like 'kernel', 'bias'.
-      # For simplicity we compare all matching keys.
-      def flatten_and_filter(grads_flat):
-        return {k: v for k, v in grads_flat.items() if hasattr(v, "shape") and "quant_stats" not in str(k)}
-
-      gb_f = flatten_and_filter(grads_base_flat)
-      gq_f = flatten_and_filter(grads_quant_flat)
-
-      for k in gb_f:
-        if k in gq_f:
-          diff = jnp.abs(gb_f[k] - gq_f[k]).mean() / (jnp.abs(gb_f[k]).mean() + 1e-8)
-          if diff > grad_tolerance:
-            print(f"Gradient mismatch for {k}: rel_error = {diff}")
-            assert diff <= grad_tolerance
-    else:
-      qt_model = model_creation_utils.create_model(cfg, self.mesh)
-      if not hasattr(self.__class__, "_cached_base_results"):
-        model = model_creation_utils.create_model(self.cfg, self.mesh)
-        var = model.init(
-            {"params": self.rng, "aqt": self.rng, "dropout": self.rng},
-            ids,
-            decoder_positions,
-            decoder_segment_ids,
-            enable_dropout=False,
-            mutable=True,
-        )
-
-        def loss_base_linen(all_vars, inputs):
-          logits_b, _ = model.apply(
-              all_vars,
-              *inputs,
-              enable_dropout=False,
-              rngs={"params": self.rng},
-              mutable=True,
-          )
-          return jnp.mean((logits_b) ** 2)
-
-        grads_base_linen = jax.grad(loss_base_linen)(var, (ids, decoder_positions, decoder_segment_ids))
-        logits_b, _ = model.apply(
-            var,
-            ids,
-            decoder_positions,
-            decoder_segment_ids,
-            enable_dropout=False,
-            rngs={"params": self.rng},
-            mutable=True,
-        )
-        self.__class__._cached_base_results = (grads_base_linen, logits_b)
-
-      grads_base_linen, logits = self.__class__._cached_base_results
-
-      quantized_vars = qt_model.init(
-          {"params": self.rng, "aqt": self.rng, "dropout": self.rng},
-          ids,
-          decoder_positions,
-          decoder_segment_ids,
+    def loss_quant(model):
+      logits_q = model(
+          decoder_input_tokens=ids,
+          decoder_positions=decoder_positions,
+          decoder_segment_ids=decoder_segment_ids,
           enable_dropout=False,
-          mutable=True,
       )
+      return jnp.mean((logits_q) ** 2)
 
-      def loss_quant_linen(all_vars, inputs):
-        logits_q, _ = qt_model.apply(
-            all_vars,
-            *inputs,
-            enable_dropout=False,
-            rngs={"params": self.rng},
-            mutable=True,
-        )
-        return jnp.mean((logits_q) ** 2)
+    grads_quant = nnx.grad(loss_quant)(qt_model)
+    quant_logits = qt_model(
+        decoder_input_tokens=ids,
+        decoder_positions=decoder_positions,
+        decoder_segment_ids=decoder_segment_ids,
+        enable_dropout=False,
+    )
 
-      grads_quant_linen = jax.grad(loss_quant_linen)(quantized_vars, (ids, decoder_positions, decoder_segment_ids))
+    print("relative error in logits:" f" {jnp.abs(quant_logits - logits).mean() / jnp.abs(logits).mean()}")
+    assert jnp.abs(quant_logits - logits).mean() / jnp.abs(logits).mean() < logits_tolerance
 
-      quant_logits, _ = qt_model.apply(
-          quantized_vars,
-          ids,
-          decoder_positions,
-          decoder_segment_ids,
-          enable_dropout=False,
-          rngs={"params": self.rng},
-          mutable=True,
-      )
-      print("relative error in logits:" f" {jnp.abs(quant_logits - logits).mean() / jnp.abs(logits).mean()}")
-      assert jnp.abs(quant_logits - logits).mean() / jnp.abs(logits).mean() < logits_tolerance
-      self.print_grad_diff(grads_base_linen["params"], grads_quant_linen["params"])
-      self.assertTrue(
-          self.pytree_allclose(
-              grads_base_linen["params"],
-              grads_quant_linen["params"],
-              tolerance=grad_tolerance,
-          )
-      )
+    # nnx.grad returns a State object which is a mapping of paths to gradients.
+    # Flatten them to check for tolerance.
+    grads_base_flat = traversals.flatten_mapping(grads_base)
+    grads_quant_flat = traversals.flatten_mapping(grads_quant)
+
+    # Filter for param collections to compare only parameters and not stats/buffers if any
+    # Note: NNX grads structure might contain variables like 'kernel', 'bias'.
+    # For simplicity we compare all matching keys.
+    def flatten_and_filter(grads_flat):
+      return {k: v for k, v in grads_flat.items() if hasattr(v, "shape") and "quant_stats" not in str(k)}
+
+    gb_f = flatten_and_filter(grads_base_flat)
+    gq_f = flatten_and_filter(grads_quant_flat)
+
+    for k in gb_f:
+      if k in gq_f:
+        diff = jnp.abs(gb_f[k] - gq_f[k]).mean() / (jnp.abs(gb_f[k]).mean() + 1e-8)
+        if diff > grad_tolerance:
+          print(f"Gradient mismatch for {k}: rel_error = {diff}")
+          assert diff <= grad_tolerance
 
   @pytest.mark.tpu_only
   def test_int8_quantization(self):
@@ -544,7 +466,7 @@ class QuantTest(unittest.TestCase):
 
   @pytest.mark.tpu_only
   def test_int8_quantization_nnx(self):
-    self.quantization_config("int8", enable_nnx=True, pure_nnx_decoder=True, pure_nnx=True)
+    self.quantization_config("int8")
 
   @pytest.mark.tpu_only
   def test_fp8_quantization(self):
@@ -552,7 +474,7 @@ class QuantTest(unittest.TestCase):
 
   @pytest.mark.tpu_only
   def test_fp8_quantization_nnx(self):
-    self.quantization_config("fp8", enable_nnx=True, pure_nnx_decoder=True, pure_nnx=True)
+    self.quantization_config("fp8")
 
   @pytest.mark.tpu_only
   def test_fp8_full_quantization(self):
@@ -560,7 +482,7 @@ class QuantTest(unittest.TestCase):
 
   @pytest.mark.tpu_only
   def test_fp8_full_quantization_nnx(self):
-    self.quantization_config("fp8_full", enable_nnx=True, pure_nnx_decoder=True, pure_nnx=True)
+    self.quantization_config("fp8_full")
 
   @pytest.mark.gpu_only
   @pytest.mark.external_serving
@@ -570,7 +492,7 @@ class QuantTest(unittest.TestCase):
   @pytest.mark.gpu_only
   @pytest.mark.external_serving
   def test_fp8_gpu_quantization_nnx(self):
-    self.quantization_config("fp8_gpu", grad_tolerance=1.5, enable_nnx=True, pure_nnx_decoder=True, pure_nnx=True)
+    self.quantization_config("fp8_gpu", grad_tolerance=1.5)
 
   @pytest.mark.gpu_only
   @pytest.mark.external_serving
@@ -580,7 +502,7 @@ class QuantTest(unittest.TestCase):
   @pytest.mark.gpu_only
   @pytest.mark.external_serving
   def test_fp8_nanoo_quantization_nnx(self):
-    self.quantization_config("fp8_nanoo", grad_tolerance=1.5, enable_nnx=True, pure_nnx_decoder=True, pure_nnx=True)
+    self.quantization_config("fp8_nanoo", grad_tolerance=1.5)
 
   @pytest.mark.skip(reason="No runner with GPU arch >= 89 is available")
   @pytest.mark.gpu_only
@@ -661,8 +583,6 @@ class MaybeQuantizeModelTest(unittest.TestCase):
         quantization="int8",
         use_qwix_quantization=True,
         use_batch_split_schedule=False,
-        pure_nnx=True,
-        pure_nnx_decoder=True,
         micro_batch_size_to_train_on=1,
         max_target_length=2,
     )
@@ -699,7 +619,6 @@ class MaybeQuantizeModelTest(unittest.TestCase):
         enable_checkpointing=False,
         model_name="deepseek3-tiny",
         attention="dot_product",
-        pure_nnx=True,
         use_qwix_quantization=True,
         use_qk_clip=True,  # This sows QK clip intermediates during the forward pass
     )

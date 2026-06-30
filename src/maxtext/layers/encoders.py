@@ -19,8 +19,6 @@ from flax import nnx
 from jax.sharding import Mesh
 
 from maxtext.common.common_types import Config
-from maxtext.layers import nnx_wrappers
-from maxtext.layers import initializers
 
 
 class VisionEncoder(nnx.Module):
@@ -151,35 +149,3 @@ class AudioEncoder(nnx.Module):
     embeddings = projector(embeddings)
 
     return embeddings
-
-
-def vision_encoder_as_linen(
-    config: Config,
-    mesh: Mesh,
-):
-  """Creates a VisionEncoder module."""
-  module = nnx_wrappers.to_linen(
-      VisionEncoder,
-      config=config,
-      mesh=mesh,
-      name="vision_encoder",
-      abstract_init=False,
-      metadata_fn=initializers.variable_to_logically_partitioned,
-  )
-  return module
-
-
-def audio_encoder_as_linen(
-    config: Config,
-    mesh: Mesh,
-):
-  """Creates an AudioEncoder module."""
-  module = nnx_wrappers.to_linen(
-      AudioEncoder,
-      config=config,
-      mesh=mesh,
-      name="audio_encoder",
-      abstract_init=False,
-      metadata_fn=initializers.variable_to_logically_partitioned,
-  )
-  return module

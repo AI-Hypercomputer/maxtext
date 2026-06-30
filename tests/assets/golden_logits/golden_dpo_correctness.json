@@ -2,17 +2,17 @@
   "explicit_prompt_len_3_column": {
     "loss_step_1": 0.6931471824645996,
     "margin_step_1": 0.0,
-    "loss": 0.6573728919029236,
-    "margin": 0.0728759765625,
-    "chosen_logps": -854.4208984375,
-    "rejected_logps": -530.0099487304688
+    "loss": 0.690365,
+    "margin": 0.005573,
+    "chosen_logps": -882.7361450195312,
+    "rejected_logps": -587.572693
   },
   "default_prompt_len_2_column": {
     "loss_step_1": 0.6931471824645996,
     "margin_step_1": 0.0,
-    "loss": 0.6954630613327026,
-    "margin": -0.004626465495675802,
-    "chosen_logps": -875.7848510742188,
-    "rejected_logps": -502.052978515625
+    "loss": 0.620875,
+    "margin": 0.150177,
+    "chosen_logps": -907.599609375,
+    "rejected_logps": -578.226013
   }
 }

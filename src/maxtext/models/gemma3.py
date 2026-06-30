@@ -30,7 +30,6 @@ from maxtext.layers.attentions import Attention
 from maxtext.layers.linears import DenseGeneral, MlpBlock, Dropout
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
-from maxtext.layers.initializers import variable_to_logically_partitioned
 from maxtext.utils import max_utils
 
 
@@ -567,21 +566,6 @@ class VisionEmbedder(nnx.Module):
     return x
 
 
-def visionembedder_as_linen(
-    config: Config,
-    mesh: Mesh,
-):
-  """Creates a VisionEmbedder module."""
-  return nnx_wrappers.to_linen(
-      VisionEmbedder,
-      config,
-      mesh=mesh,
-      name="VisionEmbedder_0",
-      abstract_init=False,
-      metadata_fn=variable_to_logically_partitioned,
-  )
-
-
 class VisionExit(nnx.Module):
   """The vision exit layer.
 
@@ -612,11 +596,6 @@ class VisionExit(nnx.Module):
     x = nnx.avg_pool(x, window_shape=window_shape, strides=window_shape)
     batch_size, height, width, embed_dim = x.shape
     return jnp.reshape(x, (batch_size, height * width, embed_dim))
-
-
-def vision_exit_as_linen(x: jax.Array, output_length: int) -> jax.Array:
-  """A wrapper to use VisionExit as a function."""
-  return nnx.bridge.to_linen(VisionExit, output_length=output_length)(x)
 
 
 class Gemma3VisionEncoderLayer(nnx.Module):
@@ -705,19 +684,3 @@ class Gemma3VisionEncoderLayer(nnx.Module):
     bn, l, c = x.shape
     x = jnp.reshape(x, [b, n, l, c])
     return x
-
-
-def gemma3visionencoder_as_linen(
-    config: Config,
-    mesh: Mesh,
-):
-  """Creates a Gemma3VisionEncoder module."""
-  module = nnx_wrappers.to_linen(
-      Gemma3VisionEncoderLayer,
-      config=config,
-      mesh=mesh,
-      name="Gemma3VisionEncoderLayer_0",
-      abstract_init=False,
-      metadata_fn=variable_to_logically_partitioned,
-  )
-  return module

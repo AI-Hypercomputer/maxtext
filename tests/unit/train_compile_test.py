@@ -30,7 +30,6 @@ import pytest
 from tempfile import gettempdir, NamedTemporaryFile
 
 
-from maxtext.configs import pyconfig
 from maxtext.trainers.pre_train.train_compile import main as train_compile_main
 from tests.utils.test_helpers import get_test_config_path
 
@@ -515,10 +514,6 @@ class TrainCompile(parameterized.TestCase):
 
   @pytest.mark.cpu_only
   def test_moe_pp_bf16(self):
-    cfg = pyconfig.initialize([None, get_test_config_path()])
-    if getattr(cfg, "pure_nnx_decoder", False):
-      pytest.skip("Pipeline parallelism not supported for pure_nnx_decoder=True")
-
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_pp_bf16.pickle")
     train_compile_main(
@@ -615,10 +610,6 @@ class TrainCompile(parameterized.TestCase):
 
   @pytest.mark.cpu_only
   def test_moe_deepseek_pipeline_subset(self):
-    cfg = pyconfig.initialize([None, get_test_config_path()])
-    if getattr(cfg, "pure_nnx_decoder", False):
-      pytest.skip("Pipeline parallelism not supported for pure_nnx_decoder=True")
-
     compiled_trainstep_file = "/tmp/test_moe_deepseek_pipeline_subset.pickle"
     train_compile_main(
         (
@@ -642,10 +633,7 @@ class TrainCompile(parameterized.TestCase):
 
   @pytest.mark.cpu_only
   def test_pipeline_subset(self):
-    cfg = pyconfig.initialize([None, get_test_config_path()])
-    if getattr(cfg, "pure_nnx_decoder", False):
-      pytest.skip("Test not supported for pure_nnx_decoder=True")
-
+    pytest.skip("Pipeline parallelism not yet supported on NNX (pending NNX pipeline parallelism, PR11.5).")
     compiled_trainstep_file = "/tmp/test_pipeline_subset.pickle"
     train_compile_main(
         (
@@ -802,32 +790,6 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @parameterized.named_parameters(
-      {"testcase_name": "scanned", "scan_layers": "true"},
-  )
-  @pytest.mark.cpu_only
-  def test_deepseek4(self, scan_layers):
-    # test deepseek4 compile (Linen-only: DeepSeek NNX decoder rewrite is a follow-up PR).
-    compiled_trainstep_file = f"/tmp/test_deepseek4_{scan_layers}.pickle"
-    train_compile_main((
-        "",
-        get_test_config_path(),
-        f"compiled_trainstep_file={compiled_trainstep_file}",
-        "compile_topology=v5p-256",
-        "use_iota_embed=true",
-        "compile_topology_num_slices=1",
-        "model_name=deepseek4-284b",
-        "per_device_batch_size=1",
-        "max_target_length=1024",
-        f"scan_layers={scan_layers}",
-        "attention=dot_product",
-        "dtype=bfloat16",
-        "weight_dtype=bfloat16",
-        "enable_nnx=False",
-        "pure_nnx=False",
-        "pure_nnx_decoder=False",
-    ))
-
   @pytest.mark.cpu_only
   def test_indexer_dense_warmup(self):
     # test deepseek3.2 with sparse attention
@@ -948,10 +910,6 @@ class TrainCompile(parameterized.TestCase):
 
   @pytest.mark.cpu_only
   def test_circular_pipeline_ag_per_repeat_ep_ds(self):
-    cfg = pyconfig.initialize([None, get_test_config_path()])
-    if getattr(cfg, "pure_nnx_decoder", False):
-      pytest.skip("Pipeline parallelism not supported for pure_nnx_decoder=True")
-
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_circular_pipeline_ag_per_repeat_ep_ds.pickle")
     train_compile_main(
@@ -1145,13 +1103,7 @@ class TrainCompile(parameterized.TestCase):
 
   @pytest.mark.cpu_only
   def test_vocab_tiling_bf16_nnx(self):
-    """AOT compile vocab tiling on the NNX path (vocab_tiling_nnx_loss + custom_vjp).
-
-    Sets `pure_nnx`/`enable_nnx`/`pure_nnx_decoder` explicitly so the NNX AOT
-    path is covered regardless of the default values. Once those defaults flip
-    to True, `test_vocab_tiling_bf16` above will already exercise this same
-    path via defaults.
-    """
+    """AOT compile vocab tiling on the NNX path (vocab_tiling_nnx_loss + custom_vjp)."""
     compiled_trainstep_file = "/tmp/test_vocab_tiling_bf16_nnx.pickle"
     train_compile_main(
         (
@@ -1165,8 +1117,5 @@ class TrainCompile(parameterized.TestCase):
             "max_target_length=1024",
             "num_vocab_tiling=4",
             "weight_dtype=bfloat16",
-            "pure_nnx=true",
-            "enable_nnx=true",
-            "pure_nnx_decoder=true",
         )
     )

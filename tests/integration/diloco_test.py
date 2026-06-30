@@ -21,7 +21,6 @@ import unittest
 
 import chex
 from flax.experimental import nnx
-from flax.training import train_state
 import jax
 import jax.numpy as jnp
 import jax.sharding
@@ -83,78 +82,36 @@ class DiLoCoTest(unittest.TestCase):
       tx = optax.sgd(learning_rate=0.1)
       rngs = nnx.Rngs(params=jax.random.key(seed=42))
       model = SimpleNNXModel(rngs=rngs)
-      graphdef, params = nnx.split(model)
 
-      if test_config.pure_nnx:
-        optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
-        # diloco_test_state expects a TrainStateNNX instance when pure_nnx is True.
-        initial_test_state = TrainStateNNX(model, optimizer)
+      optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
+      # diloco_test_state expects a TrainStateNNX instance.
+      initial_test_state = TrainStateNNX(model, optimizer)
 
-        # For NNX, train_step needs to take the TrainStateNNX and mutate it
+      # train_step takes the TrainStateNNX and mutates it.
 
-        def _test_train_step(state, batch, prng_key: diloco.PRNGKey):
-          del prng_key
+      def _test_train_step(state, batch, prng_key: diloco.PRNGKey):
+        del prng_key
 
-          def loss_fn(model, batch):
-            inputs, labels = batch
-            logits = jax.vmap(model)(inputs)
-            residual = logits - labels
-            return jnp.mean(jnp.square(residual))
+        def loss_fn(model, batch):
+          inputs, labels = batch
+          logits = jax.vmap(model)(inputs)
+          residual = logits - labels
+          return jnp.mean(jnp.square(residual))
 
-          loss, grads = nnx.value_and_grad(loss_fn)(state.model, batch)
-          state.optimizer.update(state.model, grads)
-          return state, loss
-
-      else:
-
-        def nnx_apply_fn(params, inputs):
-          model_replica = nnx.merge(graphdef, params)
-          return model_replica(inputs)
-
-        # 2. Vmap this new wrapper function
-        vmapped_apply = jax.vmap(nnx_apply_fn, in_axes=(None, 0))
-
-        def _test_train_step(
-            state: train_state.TrainState, batch, prng_key: diloco.PRNGKey
-        ):
-          """A simple MSE loss train step to enable numerics testing."""
-          del prng_key
-
-          def loss_fn(params, batch):
-            inputs, labels = batch
-            logits = vmapped_apply(params, inputs)
-            residual = logits - labels
-            sq_residual = jnp.square(residual)
-            msq_residual = jnp.mean(sq_residual)
-            return msq_residual
-
-          loss, grad = jax.value_and_grad(loss_fn)(state.params, batch)
-          return state.apply_gradients(grads=grad), loss
-
-        initial_test_state = train_state.TrainState.create(
-            apply_fn=vmapped_apply,
-            params=params,
-            tx=tx,
-        )
+        loss, grads = nnx.value_and_grad(loss_fn)(state.model, batch)
+        state.optimizer.update(state.model, grads)
+        return state, loss
 
       diloco_test_state, _ = diloco.build_diloco_state(test_config, lambda: initial_test_state)
       chex.assert_equal(diloco_test_state.step, 0)
-      if test_config.pure_nnx:
-        _, params_pure, _ = nnx.split(initial_test_state.model, nnx.Param, ...)
+      _, params_pure, _ = nnx.split(initial_test_state.model, nnx.Param, ...)
 
-        # diloco_test_state.params might contain nnx.Variables instead of pure arrays.
-        # We need to unwrap them if they do.
-        diloco_params_pure = jax.tree_util.tree_map(
-            lambda x: x.value if hasattr(x, "value") else x,
-            diloco_test_state.params,
-        )
-        chex.assert_trees_all_equal(
-            diloco_params_pure, params_pure.to_pure_dict()
-        )
-      else:
-        chex.assert_trees_all_equal(
-            diloco_test_state.params, initial_test_state.params
-        )
+      # diloco_test_state.params might contain nnx.Variables instead of pure arrays.
+      # We need to unwrap them if they do.
+      diloco_params_pure = jax.tree_util.tree_map(
+          lambda x: x.value if hasattr(x, "value") else x, diloco_test_state.params
+      )
+      chex.assert_trees_all_equal(diloco_params_pure, params_pure.to_pure_dict())
 
       diloco_train_step = diloco.build_diloco_train_step(test_config, _test_train_step)
       inputs = jnp.array(
@@ -202,22 +159,14 @@ class DiLoCoTest(unittest.TestCase):
       chex.assert_equal(diloco_test_state.step, 1.0)
       chex.assert_equal(loss, 1.0)
       # Assert no updates to the global model yet (no synchronization)
-      if test_config.pure_nnx:
-        _, params_pure, _ = nnx.split(initial_test_state.model, nnx.Param, ...)
+      _, params_pure, _ = nnx.split(initial_test_state.model, nnx.Param, ...)
 
-        # diloco_test_state.params might contain nnx.Variables instead of pure arrays.
-        # We need to unwrap them if they do.
-        diloco_params_pure = jax.tree_util.tree_map(
-            lambda x: x.value if hasattr(x, "value") else x,
-            diloco_test_state.params,
-        )
-        chex.assert_trees_all_equal(
-            diloco_params_pure, params_pure.to_pure_dict()
-        )
-      else:
-        chex.assert_trees_all_equal(
-            diloco_test_state.params, initial_test_state.params
-        )
+      # diloco_test_state.params might contain nnx.Variables instead of pure arrays.
+      # We need to unwrap them if they do.
+      diloco_params_pure = jax.tree_util.tree_map(
+          lambda x: x.value if hasattr(x, "value") else x, diloco_test_state.params
+      )
+      chex.assert_trees_all_equal(diloco_params_pure, params_pure.to_pure_dict())
 
       # Run the second step (no synchronization).
       # Replica 0:
@@ -247,22 +196,14 @@ class DiLoCoTest(unittest.TestCase):
       chex.assert_equal(diloco_test_state.step, 2.0)
       chex.assert_trees_all_close(loss, 0.65)
       # Assert no updates to the global model yet (no synchronization)
-      if test_config.pure_nnx:
-        _, params_pure, _ = nnx.split(initial_test_state.model, nnx.Param, ...)
+      _, params_pure, _ = nnx.split(initial_test_state.model, nnx.Param, ...)
 
-        # diloco_test_state.params might contain nnx.Variables instead of pure arrays.
-        # We need to unwrap them if they do.
-        diloco_params_pure = jax.tree_util.tree_map(
-            lambda x: x.value if hasattr(x, "value") else x,
-            diloco_test_state.params,
-        )
-        chex.assert_trees_all_equal(
-            diloco_params_pure, params_pure.to_pure_dict()
-        )
-      else:
-        chex.assert_trees_all_equal(
-            diloco_test_state.params, initial_test_state.params
-        )
+      # diloco_test_state.params might contain nnx.Variables instead of pure arrays.
+      # We need to unwrap them if they do.
+      diloco_params_pure = jax.tree_util.tree_map(
+          lambda x: x.value if hasattr(x, "value") else x, diloco_test_state.params
+      )
+      chex.assert_trees_all_equal(diloco_params_pure, params_pure.to_pure_dict())
 
       # Run the third step, which synchronizes afterwards.
       # Replica 0:
@@ -297,39 +238,21 @@ class DiLoCoTest(unittest.TestCase):
       chex.assert_trees_all_close(loss, 0.4481)
       # Assert that inner and outer parameters are all equal now that
       # synchronization has happened.
-      if test_config.pure_nnx:
-        _, inner_params, _ = nnx.split(
-            diloco_test_state.inner_state.model, nnx.Param, ...
-        )
-        inner_params_pure = jax.tree_util.tree_map(
-            lambda x: x.value if hasattr(x, "value") else x,
-            inner_params.to_pure_dict(),
-        )
-        diloco_params_pure_3 = jax.tree_util.tree_map(
-            lambda x: x.value if hasattr(x, "value") else x,
-            diloco_test_state.params,
-        )
-        chex.assert_trees_all_equal(
-            diloco_params_pure_3,
-            jax.tree.map(lambda arr: arr[0, ...], inner_params_pure),
-        )
-        chex.assert_trees_all_equal(
-            diloco_params_pure_3,
-            jax.tree.map(lambda arr: arr[1, ...], inner_params_pure),
-        )
-      else:
-        chex.assert_trees_all_equal(
-            diloco_test_state.params,
-            jax.tree.map(
-                lambda arr: arr[0, ...], diloco_test_state.inner_state.params
-            ),
-        )
-        chex.assert_trees_all_equal(
-            diloco_test_state.params,
-            jax.tree.map(
-                lambda arr: arr[1, ...], diloco_test_state.inner_state.params
-            ),
-        )
+      _, inner_params, _ = nnx.split(diloco_test_state.inner_state.model, nnx.Param, ...)
+      inner_params_pure = jax.tree_util.tree_map(
+          lambda x: x.value if hasattr(x, "value") else x, inner_params.to_pure_dict()
+      )
+      diloco_params_pure_3 = jax.tree_util.tree_map(
+          lambda x: x.value if hasattr(x, "value") else x, diloco_test_state.params
+      )
+      chex.assert_trees_all_equal(
+          diloco_params_pure_3,
+          jax.tree.map(lambda arr: arr[0, ...], inner_params_pure),
+      )
+      chex.assert_trees_all_equal(
+          diloco_params_pure_3,
+          jax.tree.map(lambda arr: arr[1, ...], inner_params_pure),
+      )
 
       # Run the fourth step (no synchronization).
       # Replica 0:

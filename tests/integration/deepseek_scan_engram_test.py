@@ -14,21 +14,18 @@
 
 """Unit tests for DeepSeek Engram across scanned decoder layers."""
 
-import gc
-import os
 import unittest
 from unittest.mock import patch
 
-import jax
 import jax.numpy as jnp
-from jax.sharding import Mesh
 
-from maxtext.configs import pyconfig
-from maxtext.utils.globals import MAXTEXT_PKG_DIR
-from maxtext.common.common_types import MODEL_MODE_TRAIN
-from maxtext.layers.decoders import Decoder
-from maxtext.utils import maxtext_utils
 import pytest
+
+# The Linen Decoder this test exercised was removed in PR12 (Delete Linen).
+# NNX decoder coverage is in tests/unit/nnx_decoders_test.py.
+pytestmark = pytest.mark.skip(
+    reason="Linen Decoder removed in PR12 (Delete Linen); NNX decoder coverage is in tests/unit/nnx_decoders_test.py"
+)
 
 
 class DummyEmbedding:
@@ -91,84 +88,10 @@ class TestDeepSeekScanEngram(unittest.TestCase):
       base_num_decoder_layers=10,
   ):
     """Helper method to test different engram layer patterns."""
-
-    # Setup mock tokenizer
-    class MockTokenizer:
-      """Mock tokenizer for testing."""
-
-      pad_token_id = 0
-
-      def __len__(self):
-        return 128
-
-      def __call__(self, x):
-        return jnp.ones_like(x)
-
-      def convert_ids_to_tokens(self, *args, **kwargs):
-        return "a"
-
-      def decode(self, *args, **kwargs):
-        return "a"
-
-      def batch_decode(self, token_ids, *args, **kwargs):
-        return ["a" for _ in token_ids]
-
-    mock_from_pretrained.return_value = MockTokenizer()
-
-    config_path = os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")
-    config = pyconfig.initialize(
-        [None, config_path]
-        + self._COMMON_CONFIG
-        + [
-            f"engram_layers=[{engram_layers_str}]",
-            f"first_num_dense_layers={first_num_dense_layers}",
-            f"base_num_decoder_layers={base_num_decoder_layers}",
-            f"num_decoder_layers={base_num_decoder_layers}",
-        ]
-    )
-
-    if base_num_decoder_layers >= 4 and jax.device_count() <= 8 and any("TPU7x" in d.device_kind for d in jax.devices()):
-      pytest.skip("Compiling 4+ DeepSeek MoE/Engram scanned layers requires >= 8" " physical TPU chips on TPU7x")
-
-    devices_array = maxtext_utils.create_device_mesh(config)
-    mesh = Mesh(devices_array, config.mesh_axes)
-
-    decoder = Decoder(
-        config=config,
-        mesh=mesh,
-        model_mode=MODEL_MODE_TRAIN,
-    )
-
-    batch_size = config.global_batch_size_to_load
-    seq_len = config.max_target_length
-
-    decoder_input_tokens = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
-    decoder_positions = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
-    decoder_segment_ids = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
-
-    shared_embedding = DummyEmbedding(emb_dim=config.emb_dim)
-
-    with jax.set_mesh(mesh), jax.disable_jit():
-      variables = decoder.init(
-          {"params": jax.random.PRNGKey(0), "dropout": jax.random.PRNGKey(1), "aqt": jax.random.PRNGKey(2)},
-          shared_embedding=shared_embedding,
-          decoder_input_tokens=decoder_input_tokens,
-          decoder_positions=decoder_positions,
-          decoder_segment_ids=decoder_segment_ids,
-          deterministic=True,
-          model_mode=MODEL_MODE_TRAIN,
-      )
-
-    self.assertIn("params", variables)
-    params = variables["params"]
-    for key in expected_keys:
-      self.assertIn(key, params)
-
-    del variables
-    del params
-    del decoder
-    jax.clear_caches()
-    gc.collect()
+    # The Linen Decoder this exercised was removed in PR12 (Delete Linen);
+    # NNX decoder coverage lives in tests/unit/nnx_decoders_test.py.
+    del mock_from_pretrained, engram_layers_str, expected_keys, first_num_dense_layers, base_num_decoder_layers
+    raise unittest.SkipTest("Linen Decoder removed in PR12 (Delete Linen)")
 
   @pytest.mark.tpu_only
   @patch("transformers.AutoTokenizer.from_pretrained")
