@@ -16,36 +16,36 @@
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
+import contextlib
 import functools
 import inspect
-from typing import Any
 import warnings
+from typing import Any
 
+import jax
+import jax.numpy as jnp
 from flax import linen as nn
 from flax import nnx
-import jax
+from maxtext.layers import nnx_wrappers
 from jax.ad_checkpoint import checkpoint_name
-import jax.numpy as jnp
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
+
 from maxtext.common.common_types import (
-    Config,
-    DecoderBlockType,
     MODEL_MODE_AUTOREGRESSIVE,
     MODEL_MODE_PREFILL,
     MODEL_MODE_TRAIN,
+    Config,
+    DecoderBlockType,
     MultimodalInput,
     ShardMode,
 )
 from maxtext.layers import initializers, linears, mhc, normalizations, quantizations
-from maxtext.layers import nnx_wrappers
 from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import Embed, PositionalEmbedding, attend_on_embedding
 from maxtext.layers.normalizations import RMSNorm
-from maxtext.layers.pipeline import create_nnx_pipeline
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.models import (
     deepseek,
-    deepseek4,
     deepseek_batchsplit,
     deepseek_batchsplit_fp8,
     gemma,
@@ -69,6 +69,7 @@ from maxtext.models import (
 from maxtext.multimodal import utils as mm_utils
 from maxtext.utils import max_logging, max_utils, maxtext_utils, maxtext_utils_nnx, sharding
 from maxtext.utils.sharding import create_sharding
+from maxtext.layers.pipeline import create_nnx_pipeline
 
 # ------------------------------------------------------------------------------
 # The network: Decoder Definitions
@@ -1093,6 +1094,84 @@ class NNXDecoder(nnx.Module):
 
     return final_carry, out_layers, returned_kv_stacked if use_kv else None
 
+  def _apply_layers_sequentially_prefetch(self, layers, x_in, *args, length: int, **kwargs):
+    """Runs the layer stack using nnx.scan with 1-layer BSW prefetching."""
+    if length == 0:
+      return x_in, layers, None
+    policy = self.get_remat_policy()
+    prevent_cse = maxtext_utils.should_prevent_cse_in_remat(self.config)
+    graphdef, params, state = nnx.split(layers, nnx.Param, ...)
+
+    scan_axis = self.config.param_scan_axis
+    if scan_axis != 0:
+      params = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0), params)
+
+    layer_cls = layers.__class__
+    sig = inspect.signature(layer_cls.__call__)
+    valid_kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters or "kwargs" in sig.parameters}
+
+    loop_iterations = jnp.arange(length)
+
+    def scheduling_group(group_id) -> contextlib.AbstractContextManager[None]:
+      return jax.experimental.xla_metadata.set_xla_metadata(_scheduling_group_id=group_id)
+
+    def _slice_params(params_tree, idx):
+      return jax.tree.map(lambda x: x[idx], params_tree)
+
+    def _strip_fsdp_from_spec(spec):
+      if spec is None:
+        return None
+      return jax.sharding.PartitionSpec(
+          *(None if axis in ('fsdp', 'fsdp_transpose') else axis for axis in spec)
+      )
+
+    def _apply_sharding_hint(w):
+      w_sharding = getattr(jax.typeof(w), 'sharding', None) or getattr(w, 'sharding', None)
+      if isinstance(w_sharding, NamedSharding):
+        stripped_spec = _strip_fsdp_from_spec(w_sharding.spec)
+        w_sharding = NamedSharding(self.mesh, stripped_spec)
+      return sharding.maybe_shard_with_name(w, w_sharding, shard_mode=self.config.shard_mode)
+
+    # Bootstrap Layer 0 params for carry
+    with scheduling_group(group_id=40):
+      w_curr = _slice_params(params, 0)
+      w_curr = jax.tree.map(_apply_sharding_hint, w_curr)
+
+    def _step_fn(y, w, st_i, idx):
+      # --- Grouped Lookahead Prefetch of Layer idx + 1 ---
+      with scheduling_group(group_id=43):
+        nxt_params = _slice_params(params, (idx + 1) % length)
+        w_next = jax.tree.map(_apply_sharding_hint, nxt_params)
+
+      layer = nnx.merge(graphdef, w, st_i)
+      layer_out = layer(y, *args, **valid_kwargs)
+
+      y_out = layer_out[0] if isinstance(layer_out, tuple) else layer_out
+      _, _, new_state_i = nnx.split(layer, nnx.Param, ...)
+
+      return y_out, w_next, new_state_i
+
+    step_wrapped = jax.checkpoint(_step_fn, policy=policy, prevent_cse=prevent_cse)
+
+    y_curr = x_in
+    per_layer_states = []
+
+    for idx_i in range(length):
+      current_state_i = jax.tree.map(lambda x, i=idx_i: x[i], state)
+      y_curr, w_curr, new_state_i = step_wrapped(y_curr, w_curr, current_state_i, idx_i)
+      per_layer_states.append(new_state_i)
+
+    final_y = y_curr
+    scanned_state = jax.tree.map(lambda *xs: jnp.stack(list(xs)), *per_layer_states)
+
+    if scan_axis != 0:
+      new_params, new_rest = scanned_state.split(nnx.Param, ...)
+      new_params = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0), new_params)
+      scanned_state = nnx.merge_state(new_params, new_rest)
+
+    nnx.update(layers, scanned_state)
+    return final_y, layers, None
+
   def get_decoder_layers(self):
     """Retrieves decoder layer classes based on config using a dictionary lookup."""
     cfg = self.config
@@ -1111,38 +1190,21 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.GEMMA: [gemma.GemmaDecoderLayer],
         DecoderBlockType.GEMMA2: [gemma2.Gemma2DecoderLayer],
         DecoderBlockType.GEMMA3: [gemma3.Gemma3DecoderLayer],
-        DecoderBlockType.GEMMA4: get_scannable(
-            gemma4.Gemma4DecoderLayer, gemma4.Gemma4ScannableBlock
-        ),
+        DecoderBlockType.GEMMA4: get_scannable(gemma4.Gemma4DecoderLayer, gemma4.Gemma4ScannableBlock),
         DecoderBlockType.GEMMA4_SMALL: [gemma4_small.Gemma4SmallDecoderLayer],
         DecoderBlockType.GPT3: [gpt3.Gpt3DecoderLayer],
         DecoderBlockType.QWEN2: [qwen2.Qwen2DecoderLayer],
         DecoderBlockType.QWEN3: [qwen3.Qwen3DecoderLayer],
         DecoderBlockType.QWEN3_MOE: [qwen3.Qwen3MoeDecoderLayer],
-        DecoderBlockType.QWEN3_CUSTOM_MOE: [
-            qwen3_custom.Qwen3CustomMoeDecoderLayer
-        ],
+        DecoderBlockType.QWEN3_CUSTOM_MOE: [qwen3_custom.Qwen3CustomMoeDecoderLayer],
         DecoderBlockType.SIMPLE: [simple_layer.SimpleDecoderLayer],
         DecoderBlockType.SIMPLE_MLP: [simple_layer.SimpleMlpDecoderLayer],
         DecoderBlockType.DEEPSEEK: get_deepseek(),
-        DecoderBlockType.DEEPSEEK4: get_scannable(
-            deepseek4.DeepSeek4DecoderLayer, deepseek4.DeepSeek4ScannableBlock
-        ),
-        DecoderBlockType.GPT_OSS: get_scannable(
-            gpt_oss.GptOssDecoderLayer, gpt_oss.GptOssScannableBlock
-        ),
-        DecoderBlockType.QWEN3_NEXT: get_scannable(
-            qwen3.Qwen3NextDecoderLayer, qwen3.Qwen3NextScannableBlock
-        ),
-        DecoderBlockType.QWEN3_5: get_scannable(
-            qwen3_5.Qwen3_5DecoderLayer, qwen3_5.Qwen3_5ScannableBlock
-        ),
-        DecoderBlockType.LLAMA4: get_scannable(
-            llama4.Llama4DecoderLayer, llama4.Llama4ScannableBlock
-        ),
-        DecoderBlockType.OLMO3: get_scannable(
-            olmo3.Olmo3DecoderLayer, olmo3.Olmo3ScannableBlock
-        ),
+        DecoderBlockType.GPT_OSS: get_scannable(gpt_oss.GptOssDecoderLayer, gpt_oss.GptOssScannableBlock),
+        DecoderBlockType.QWEN3_NEXT: get_scannable(qwen3.Qwen3NextDecoderLayer, qwen3.Qwen3NextScannableBlock),
+        DecoderBlockType.QWEN3_5: get_scannable(qwen3_5.Qwen3_5DecoderLayer, qwen3_5.Qwen3_5ScannableBlock),
+        DecoderBlockType.LLAMA4: get_scannable(llama4.Llama4DecoderLayer, llama4.Llama4ScannableBlock),
+        DecoderBlockType.OLMO3: get_scannable(olmo3.Olmo3DecoderLayer, olmo3.Olmo3ScannableBlock),
     }
 
     if cfg.decoder_block not in layer_map:
@@ -1748,13 +1810,22 @@ class NNXDecoder(nnx.Module):
                 **common_kwargs,
             )
           else:
-            y, self.dense_layers, _ = self._apply_layers_sequentially(
-                self.dense_layers,
-                y,
-                *layer_args,
-                length=cfg.first_num_dense_layers,
-                **layer_kwargs,
-            )
+            if cfg.prefetch_fsdp_weights:
+              y, self.dense_layers, _ = self._apply_layers_sequentially_prefetch(
+                  self.dense_layers,
+                  y,
+                  *layer_args,
+                  length=cfg.first_num_dense_layers,
+                  **layer_kwargs,
+              )
+            else:
+              y, self.dense_layers, _ = self._apply_layers_sequentially(
+                  self.dense_layers,
+                  y,
+                  *layer_args,
+                  length=cfg.first_num_dense_layers,
+                  **layer_kwargs,
+              )
 
             num_moe = cfg.num_decoder_layers - cfg.first_num_dense_layers
 
@@ -1785,13 +1856,22 @@ class NNXDecoder(nnx.Module):
                     num_layers=num_moe,
                 )
             else:
-              y, self.moe_layers, _ = self._apply_layers_sequentially(
-                  self.moe_layers,
-                  y,
-                  *layer_args,
-                  length=num_moe,
-                  **layer_kwargs,
-              )
+              if cfg.prefetch_fsdp_weights:
+                y, self.moe_layers, _ = self._apply_layers_sequentially_prefetch(
+                    self.moe_layers,
+                    y,
+                    *layer_args,
+                    length=num_moe,
+                    **layer_kwargs,
+                )
+              else:
+                y, self.moe_layers, _ = self._apply_layers_sequentially(
+                    self.moe_layers,
+                    y,
+                    *layer_args,
+                    length=num_moe,
+                    **layer_kwargs,
+                )
         elif self.is_gemma3:
           y = self._apply_gemma3_scanned_blocks(
               y,
@@ -1830,13 +1910,22 @@ class NNXDecoder(nnx.Module):
             )
             # kv_caches list is updated in-place inside _apply_layers_sequentially
           else:
-            y, self.layers, _ = self._apply_layers_sequentially(
-                self.layers,
-                y,
-                *layer_args,
-                length=scan_length,
-                **layer_kwargs,
-            )
+            if cfg.prefetch_fsdp_weights:
+              y, self.layers, _ = self._apply_layers_sequentially_prefetch(
+                  self.layers,
+                  y,
+                  *layer_args,
+                  length=scan_length,
+                  **layer_kwargs,
+              )
+            else:
+              y, self.layers, _ = self._apply_layers_sequentially(
+                  self.layers,
+                  y,
+                  *layer_args,
+                  length=scan_length,
+                  **layer_kwargs,
+              )
       else:
         prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg)
 
