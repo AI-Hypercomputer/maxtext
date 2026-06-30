@@ -329,5 +329,6 @@ class CheckpointMetadataTest(parameterized.TestCase):
     mock_ckptr.metadata.assert_called_once()
 
 
+
 if __name__ == "__main__":
   absltest.main()

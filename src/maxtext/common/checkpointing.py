@@ -385,7 +385,8 @@ def _load_full_state_from_path(
       restore_target = abstract_unboxed_pre_state.to_pure_dict()
     # Provide sharding info to ensure restoration returns JAX arrays (not NumPy arrays).
     restore_args = jax.tree_util.tree_map(
-        lambda x: ocp.type_handlers.ArrayRestoreArgs(sharding=x.sharding), restore_target
+        lambda x: ocp.type_handlers.ArrayRestoreArgs(sharding=x.sharding),
+        restore_target,
     )
     return ocp.Checkpointer(handler).restore(p, restore_target, restore_args=restore_args)
 
