@@ -35,6 +35,8 @@ from maxtext.utils import exceptions
 from maxtext.utils import max_logging
 from maxtext.utils import gcs_utils
 from maxtext.utils import elastic_utils
+from maxtext.checkpoint_conversion.utils.load_dynamic import load_safetensors_dynamic_state
+
 import numpy as np
 import orbax.checkpoint as ocp
 from orbax.checkpoint import v1 as ocp_v1
@@ -366,9 +368,7 @@ def _load_full_state_from_path(
         lambda x: ocp.type_handlers.ArrayRestoreArgs(sharding=x.sharding),
         restore_target,
     )
-    return ocp.Checkpointer(handler).restore(
-        p, restore_target, restore_args=restore_args
-    )
+    return ocp.Checkpointer(handler).restore(p, restore_target, restore_args=restore_args)
 
 
 def create_orbax_checkpoint_manager(
@@ -773,6 +773,7 @@ def load_state_if_possible(
     checkpoint_conversion_fn=None,
     source_checkpoint_layout="orbax",
     expansion_factor_real_data: int = -1,
+    maxtext_config: Any | None = None,
 ):
   """Loads TrainState as possible from the inputs.
 
@@ -906,7 +907,12 @@ def load_state_if_possible(
             _assert_no_shaped_dtype_struct(restored)
             return (restored, None)
 
-  if load_parameters_from_path != "":
+  if source_checkpoint_layout == "safetensors_dynamic":
+    path = load_parameters_from_path or load_full_state_from_path
+    max_logging.log(f"Dynamic On-the-Fly Formatting: Loading SafeTensors from {path}")
+
+    return load_safetensors_dynamic_state(path, abstract_unboxed_pre_state, maxtext_config)
+  elif load_parameters_from_path != "":
     if isinstance(abstract_unboxed_pre_state, nnx.State):
       _, params, _ = nnx.split(abstract_unboxed_pre_state.model, nnx.Param, ...)
     else:
@@ -962,13 +968,18 @@ def setup_checkpoint_logger(config) -> Any | None:  # pytype: disable=attribute-
 
 
 def load_params_from_path(
-    load_parameters_from_path, abstract_unboxed_params, checkpoint_storage_concurrent_gb, use_ocdbt=True, use_zarr3=True
+    load_parameters_from_path,
+    abstract_unboxed_params,
+    checkpoint_storage_concurrent_gb,
+    use_ocdbt=True,
+    use_zarr3=True,
 ):
   """Load decode params from checkpoint at specified path."""
   assert load_parameters_from_path, "load_parameters_from_path is not defined."
   max_logging.log(f"restoring params from {load_parameters_from_path}")
 
-  # NNX target: the on-disk checkpoint is in Linen layout; reshape it into the NNX params state.
+  # NNX target: the on-disk checkpoint is in Linen layout; reshape it into the
+  # NNX params state.
   if isinstance(abstract_unboxed_params, nnx.State):
     return _load_linen_params_into_nnx(
         load_parameters_from_path,
@@ -1025,9 +1036,7 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
   else:
     if config.pure_nnx:
       # Under DiLoCo the step lives on the DiLoCoTrainState; otherwise on the optimizer.
-      actual_step = (
-          int(state.step if config.enable_diloco else state.optimizer.step) - 1
-      )
+      actual_step = int(state.step if config.enable_diloco else state.optimizer.step) - 1
     else:
       # Linen TrainState has .step attribute
       actual_step = int(state.step) - 1
@@ -1041,14 +1050,8 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
     if config.enable_diloco:
       # DiLoCoTrainState: persist the synchronized global model (outer params).
       # The per-replica inner optimizer / outer-momentum state is not checkpointed.
-      step_value = (
-          state.step.get_value()
-          if hasattr(state.step, "get_value")
-          else state.step
-      )
-      state = train_state_nnx.to_linen_checkpoint_dict(
-          {"model": state.params, "optimizer": {"step": step_value}}
-      )
+      step_value = state.step.get_value() if hasattr(state.step, "get_value") else state.step
+      state = train_state_nnx.to_linen_checkpoint_dict({"model": state.params, "optimizer": {"step": step_value}})
     else:
       state = train_state_nnx.to_linen_checkpoint_dict(state.to_pure_dict())
 
