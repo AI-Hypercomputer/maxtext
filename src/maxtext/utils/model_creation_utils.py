@@ -44,6 +44,7 @@ import flax.linen as nn
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
+from maxtext.common import checkpointing
 from maxtext.common.checkpointing import handle_checkpoint_mismatch
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN
 from maxtext.configs import pyconfig
@@ -864,6 +865,15 @@ def from_pretrained(
         }
     )
     config = pyconfig.HyperParameters(new_config)
+  # Proactive verification of scan_layers from checkpoint metadata
+  if config.load_parameters_path:
+    custom_metadata = checkpointing.load_checkpoint_metadata(config.load_parameters_path)
+    saved_scan_layers = custom_metadata.get("scan_layers")
+    if isinstance(saved_scan_layers, bool) and saved_scan_layers != config.scan_layers:
+      raise ValueError(
+          f"Configuration mismatch: Your run specifies scan_layers={config.scan_layers}, "
+          f"but the checkpoint was saved with scan_layers={saved_scan_layers}."
+      )
 
   if config.pure_nnx:
     _create_model, abstract_model = create_nnx_abstract_model(

@@ -389,7 +389,7 @@ class LoraUtilsTest(unittest.TestCase):
       mock_manager.save.assert_called_once()
       _, kwargs = mock_manager.save.call_args
       self.assertIn("custom_metadata", kwargs)
-      self.assertEqual(kwargs["custom_metadata"], {"lora": cfg.lora.model_dump()})
+      self.assertEqual(kwargs["custom_metadata"]["lora"], cfg.lora.model_dump())
 
   def test_save_and_restore_metadata_integration(self):
     """Integration test checking that Orbax CheckpointManager writes and reads custom LoRA metadata."""
