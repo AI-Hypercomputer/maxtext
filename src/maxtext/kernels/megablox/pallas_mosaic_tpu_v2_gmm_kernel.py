@@ -999,7 +999,9 @@ def validate_inputs(
   if rhs_bias is not None:
     assert rhs_bias.shape == (size_group, 1, size_n)
   if partial_sum is not None:
-    assert partial_sum.shape == (size_m, size_n)
+    assert partial_sum.shape[-1] == size_n
+    # lhs's m dimension can sometimes be padded to wi_tile_fwd_batch_seq
+    assert partial_sum.shape[0] <= size_m
   if rhs_scale is not None:
     num_quant_blocks = rhs_scale.shape[1]
     assert rhs_scale.shape == (size_group, num_quant_blocks, 1, size_n)

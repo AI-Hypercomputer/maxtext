@@ -566,6 +566,35 @@ class TrainCompile(parameterized.TestCase):
     )
 
   @pytest.mark.cpu_only
+  def test_moe_chunking(self):
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_moe_chunking.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-64",
+            "use_iota_embed=true",
+            "compile_topology_num_slices=1",
+            "model_name=deepseek3-test",
+            "sparse_matmul=True",
+            "megablox=False",
+            "use_tokamax_gmm=True",
+            "use_gmm_v2=True",
+            "chunk_ag_gmm=True",
+            "num_chunks=4",
+            "use_ring_of_experts=True",
+            "per_device_batch_size=2",
+            "max_target_length=1024",
+            "attention=flash",
+            "dtype=bfloat16",
+            "weight_dtype=bfloat16",
+            "scan_layers=True",
+        )
+    )
+
+  @pytest.mark.cpu_only
   def test_moe_deepseek_unscanned_bf16(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_deepseek_unscanned_bf16.pickle")
