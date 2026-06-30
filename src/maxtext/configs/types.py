@@ -2559,7 +2559,7 @@ class MaxTextConfig(
       )
 
   def _validate_use_te_comm_gemm_overlap(self):
-    """Validates that use_te_comm_gemm_overlap is used with supported settings."""
+    """Validates that use_te_comm_gemm_overlap is used with supported settings to enable TE Collective GEMM ops."""
     te_has_distributed_env = jax.local_device_count() == 1 and jax.distributed.is_initialized()
 
     if self.hardware != "gpu_multiprocess" or not te_has_distributed_env:
@@ -3476,7 +3476,8 @@ class MaxTextConfig(
 
     self._validate_check_vma_is_supported()
 
-    self._validate_use_te_comm_gemm_overlap()
+    if self.use_te_comm_gemm_overlap:
+      self._validate_use_te_comm_gemm_overlap()
 
     # Final string-to-enum conversions if they haven't been coerced by pydantic yet.
     if isinstance(self.decoder_block, str):
