@@ -411,6 +411,8 @@ use_indexer: false
 indexer_head_dim: 128
 indexer_n_heads: 64
 indexer_topk: 2048
+indexer_use_approx_top_k: false
+indexer_approx_top_k_recall: 0.95
 # Determines the training strategy for the indexer:
 # - false (Dense Warm-up): Computes indexer loss over all tokens. Used with `trainable_parameters_mask` to freeze other model parameters.
 # - true (Sparse Training): Computes indexer loss over top-k tokens only and detaches the indexer input for independent optimization.
@@ -492,6 +494,7 @@ shard_mode: "auto" # can be either auto or explicit
 custom_mesh_and_rule: "" # replace default mesh and logical rule by specifying yml name under config/mesh_and_rule/.
 mesh_axes: ['diloco', 'data', 'stage', 'fsdp', 'fsdp_transpose', 'context', 'context_autoregressive', 'tensor', 'tensor_transpose', 'tensor_sequence', 'expert', 'autoregressive']
 logical_axis_rules: [
+                      ['circular_repeats', []],
                       # ==========================================
                       # Vocabulary Embedding
                       # ==========================================
@@ -1233,9 +1236,9 @@ position_id_per_seconds: 25
 subslice_shape: ""
 
 # NNX
-enable_nnx: false
-pure_nnx_decoder: false
-pure_nnx: false
+enable_nnx: true
+pure_nnx_decoder: true
+pure_nnx: true
 
 ################################## Qwen3-Next Specific Configs ##################################
 # Kernel size for the 1D convolution in the Gated Delta Net

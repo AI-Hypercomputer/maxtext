@@ -499,6 +499,12 @@ class RoutedMoE(nnx.Module):
 
     kernel_in_axis = np.arange(1)
     kernel_out_axis = np.arange(1, 2)
+    # Pad the MoE input weight kernels for GMM_v2 execution when configured.
+    moe_intermediate_dim = (
+        self.config.padded_base_moe_mlp_dim
+        if self.config.padded_base_moe_mlp_dim is not None
+        else self.intermediate_dim
+    )
 
     if quantizations.in_serve_mode(self.quant):
       # During aqt convert state we delete kernel weight from params to save
@@ -507,13 +513,7 @@ class RoutedMoE(nnx.Module):
       self.wi_0 = jnp.zeros((num_experts, self.moe_expert_input_dim, intermediate_dim))
       self.wi_1 = jnp.zeros((num_experts, self.moe_expert_input_dim, intermediate_dim))
       self.wo = jnp.zeros((num_experts, intermediate_dim, self.moe_expert_input_dim))
-    elif self.config.prefuse_moe_weights and self.config.attention == "vllm_rpa":
-      # Pad model dimension in Fused MoE weight kernels for GMM_v2 execution.
-      moe_intermediate_dim = (
-          self.config.padded_base_moe_mlp_dim
-          if self.config.padded_base_moe_mlp_dim is not None
-          else self.intermediate_dim
-      )
+    elif self.config.prefuse_moe_weights:
       self.wi = nnx.Param(
           self.kernel_init(
               self.rngs.params(),
@@ -535,12 +535,6 @@ class RoutedMoE(nnx.Module):
           out_sharding=self.wo_kernel_axes,
       )
     else:
-      # Pad model dimension in Unfused MoE weight kernels for GMM_v2 execution.
-      moe_intermediate_dim = (
-          self.config.padded_base_moe_mlp_dim
-          if self.config.padded_base_moe_mlp_dim is not None
-          else self.intermediate_dim
-      )
       self.wi_0 = nnx.Param(
           self.kernel_init(
               self.rngs.params(),
@@ -1669,19 +1663,44 @@ class RoutedMoE(nnx.Module):
     def gmm_up(x, w0, w1, w0_bias, w1_bias, gmm_fn, weight_gather):
       """Run the two up-projections (gate + up) and apply the FFN activation."""
       wi_gather_axes, wi_tile_size = get_wi_gmm_params()
-      layer_w0 = gmm_fn(x, w0, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes)
-      if self.get_tensor_transpose_parallelism_size() > 1:
-        layer_w0 = jax.lax.psum(layer_w0, "tensor_transpose")
-      if self.config.mlp_bias:
-        layer_w0 = layer_w0 + w0_bias
-      layer_w0 = adc.checkpoint_name(adc.checkpoint_name(layer_w0, "mlpwi_0"), "moe_mlpwi_0")
+      if self.config.prefuse_moe_weights:
+        # Weights are stored as (G,K,2N); w0/w1 are adjacent slices so XLA elides this concat.
+        w_fused = jnp.concatenate([w0, w1], axis=-1)
+        out = gmm_fn(x, w_fused, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes)
+        n = out.shape[-1] // 2
+        layer_w0, layer_w1 = out[:, :n], out[:, n:]
+        if self.get_tensor_transpose_parallelism_size() > 1:
+          layer_w0 = jax.lax.psum(layer_w0, "tensor_transpose")
+          layer_w1 = jax.lax.psum(layer_w1, "tensor_transpose")
+        if self.config.mlp_bias:
+          layer_w0 = layer_w0 + w0_bias
+          layer_w1 = layer_w1 + w1_bias
+        layer_w0 = adc.checkpoint_name(adc.checkpoint_name(layer_w0, "mlpwi_0"), "moe_mlpwi_0")
+        layer_w1 = adc.checkpoint_name(layer_w1, "moe_mlpwi_1")
+      else:
+        layer_w0 = gmm_fn(
+            x,
+            w0,
+            tiling=wi_tile_size,
+            weight_gather_axes=wi_gather_axes,
+        )
+        if self.get_tensor_transpose_parallelism_size() > 1:
+          layer_w0 = jax.lax.psum(layer_w0, "tensor_transpose")
+        if self.config.mlp_bias:
+          layer_w0 = layer_w0 + w0_bias
+        layer_w0 = adc.checkpoint_name(adc.checkpoint_name(layer_w0, "mlpwi_0"), "moe_mlpwi_0")
 
-      layer_w1 = gmm_fn(x, w1, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes)
-      if self.get_tensor_transpose_parallelism_size() > 1:
-        layer_w1 = jax.lax.psum(layer_w1, "tensor_transpose")
-      if self.config.mlp_bias:
-        layer_w1 = layer_w1 + w1_bias
-      layer_w1 = adc.checkpoint_name(layer_w1, "moe_mlpwi_1")
+        layer_w1 = gmm_fn(
+            x,
+            w1,
+            tiling=wi_tile_size,
+            weight_gather_axes=wi_gather_axes,
+        )
+        if self.get_tensor_transpose_parallelism_size() > 1:
+          layer_w1 = jax.lax.psum(layer_w1, "tensor_transpose")
+        if self.config.mlp_bias:
+          layer_w1 = layer_w1 + w1_bias
+        layer_w1 = adc.checkpoint_name(layer_w1, "moe_mlpwi_1")
       return self.apply_ffn_activation(layer_w0, layer_w1)
 
     def get_gmm_for_local_experts(x, routing, route_metadata):
@@ -2592,6 +2611,11 @@ class RoutedMoE(nnx.Module):
     w1_kernel = None
     if cfg.prefuse_moe_weights and cfg.attention == "vllm_rpa" and not self.is_hash_routing:
       fused_kernel = jnp.asarray(self.wi[...], self.dtype)
+    elif cfg.prefuse_moe_weights:
+      wi = jnp.asarray(self.wi[...], self.dtype)
+      n = wi.shape[-1] // 2
+      w0_kernel = wi[..., :n]
+      w1_kernel = wi[..., n:]
     else:
       w0_kernel = jnp.asarray(self.wi_0[...], self.dtype)
       w1_kernel = jnp.asarray(self.wi_1[...], self.dtype)

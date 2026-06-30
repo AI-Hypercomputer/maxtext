@@ -1391,12 +1391,14 @@ class AttentionOp(nnx.Module):
       if cp_size > 1 and load_balanced_context_parallel:
         mask = LoadBalancedCausalMask(shape=mask_shape, cp_size=cp_size)
 
+      # TODO: figure out local_sliding attention + load_balancing, default is global
+      # Apply local masking if local sliding attention is enabled.
       if self.attention_type == AttentionType.LOCAL_SLIDING:
         if self.sliding_window_size is None:
           raise ValueError("Sliding_window_size must be set if Local Sliding attention type")
         mask &= mask_module.LocalMask(
             shape=(query.shape[2], key.shape[2]),
-            window_size=(self.sliding_window_size, self.sliding_window_size),
+            window_size=(self.sliding_window_size - 1, self.sliding_window_size),
             offset=0,
         )
       elif self.attention_type == AttentionType.CHUNK:

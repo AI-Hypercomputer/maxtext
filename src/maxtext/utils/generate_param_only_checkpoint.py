@@ -244,8 +244,20 @@ def _save_decode_checkpoint_nnx(config, state, checkpoint_manager):
   wrapper. This is the shape `from_pretrained` reads via its NNX-detection
   branch (see model_creation_utils._adjust_target_for_moe_fusion / "is_nnx_checkpoint").
   """
-  pure_model = state.model.to_pure_dict() if hasattr(state.model, "to_pure_dict") else dict(state.model)
+  # A decode checkpoint is params-only. state.model also holds rng state
+  # (PRNGKeyArray), which can't be cast to bf16, so keep only the nnx.Param leaves.
+  _, param_state, _ = nnx.split(state.model, nnx.Param, ...)
+  pure_model = param_state.to_pure_dict()
   bf16_model = jax.tree_util.tree_map(lambda x: x.astype(jnp.bfloat16), pure_model)
+
+  # Wrap each leaf as {"value": <array>} to match the shape from_pretrained reads
+  # back for NNX checkpoints. Same as layerwise_quantization._load_and_quantize_nnx.
+  def _wrap_value(node):
+    if isinstance(node, dict):
+      return {k: _wrap_value(v) for k, v in node.items()}
+    return {"value": node}
+
+  bf16_model = _wrap_value(bf16_model)
   if checkpoint_manager is not None:
     if checkpointing.save_checkpoint(checkpoint_manager, 0, bf16_model):
       max_logging.log(f"saved an NNX decode checkpoint at {config.checkpoint_dir}")
@@ -386,7 +398,15 @@ def generate_decode_checkpoint(config):
   # Read training state from config.load_paramaters_path
   max_logging.log(f"Read training checkpoint from: {config.load_full_state_path}")
   training_state, training_state_annotations = _read_train_checkpoint(config, checkpoint_manager, mesh)
-  assert training_state.opt_state != {}, "missing opt_state in training checkpoint"
+  if config.pure_nnx:
+    # NNX state is a flat nnx.State; opt_state lives under the optimizer sub-state.
+    assert (
+        training_state.optimizer.opt_state
+    ), "missing opt_state in training checkpoint"
+  else:
+    assert (
+        training_state.opt_state != {}
+    ), "missing opt_state in training checkpoint"
 
   _possibly_unroll_params(config, training_state, training_state_annotations, mesh)
 

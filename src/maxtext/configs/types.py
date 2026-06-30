@@ -261,6 +261,7 @@ ModelName = Literal[
     "qwen3-30b-a3b",
     "qwen3-30b-a3b-base",
     "qwen3-480b-a35b",
+    "qwen3-vl-2b",
     "qwen3-vl-4b",
     "qwen3-next-80b-a3b",
     "qwen3-omni-30b-a3b",
@@ -670,6 +671,10 @@ class AttentionIndexer(BaseModel):
       description="Determines the training strategy for the indexer: Dense Warm-up or Sparse Training stage.",
   )
   indexer_loss_scaling_factor: float = Field(0.0, description="Multiplier for the indexer KL divergence loss.")
+  indexer_use_approx_top_k: bool = Field(
+      False, description="Whether to use approximate top-k selection for the indexer on TPU."
+  )
+  indexer_approx_top_k_recall: float = Field(0.95, description="Recall target for approximate top-k selection.")
 
 
 class Llama4Attention(BaseModel):
@@ -841,7 +846,7 @@ class MoEGeneral(BaseModel):
   prefuse_moe_weights: bool = Field(
       False,
       description="Whether to pre-fuse MoE weights (w0 and w1) during initialization. "
-      "This is useful for inference performance in vllm_rpa mode.",
+      "This enables a single FFN1 grouped GEMM in sparse MoE paths and passes fused weights directly in vllm_rpa mode.",
   )
   fuse_expert_scales: bool = Field(
       False,
@@ -2078,6 +2083,16 @@ class RLHardware(BaseModel):
       description="Tensor parallelism per replica for rollout. If not specified, it will be auto-determined.",
   )
   rollout_expert_parallelism: int = Field(1, description="Expert parallelism per replica for rollout")
+  inference_replicas: int = Field(1, description="Legacy experimental GRPO: number of inference (sampler) replicas.")
+  inference_devices_per_replica: int = Field(
+      4, description="Legacy experimental GRPO: devices per inference replica (single-controller device split)."
+  )
+  inference_rollouts: int = Field(
+      1, description="Legacy experimental GRPO: refresh rollouts every N steps (step % inference_rollouts)."
+  )
+  use_pathways_reshard: bool = Field(
+      True, description="Legacy experimental GRPO: use Pathways resharding to move policy params to the sampler."
+  )
 
 
 class VLLM(BaseModel):
@@ -2696,6 +2711,14 @@ class MaxTextConfig(
       if not self.enable_nnx:
         raise ValueError("a value of self.distill_beta > 0.0 requires self.enable_nnx = True")
 
+    if self.pure_nnx and not self.pure_nnx_decoder and self.use_qwix_quantization and not self.use_batch_split_schedule:
+      if self.quantization:
+        raise ValueError(
+            f"quantization='{self.quantization}' with use_qwix_quantization=True under pure_nnx=True requires "
+            "pure_nnx_decoder=True. The bridged Linen decoder (pure_nnx_decoder=False) is invisible to Qwix, "
+            "so quantization (and weight sparsity) would silently have no effect. Set pure_nnx_decoder=True."
+        )
+
     # Validate distillation schedule parameters
     if self.distill_alpha_end is not None and not 0.0 <= self.distill_alpha_end <= 1.0:
       raise ValueError(f"distill_alpha_end must be in [0, 1], got {self.distill_alpha_end}")
@@ -3156,6 +3179,7 @@ class MaxTextConfig(
           "llama4-17b-16e",
           "llama4-17b-128e",
           "qwen3-omni-30b-a3b",
+          "qwen3-vl-2b",
           "qwen3-vl-4b",
           "qwen3.5-35b-a3b",
           "qwen3.5-397b-a17b",

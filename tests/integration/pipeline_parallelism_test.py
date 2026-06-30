@@ -345,6 +345,7 @@ class PipelineParallelismTest(unittest.TestCase):
         config, single_pipeline_stage_class=deepseek.DeepSeekMoELayerToLinen
     )
 
+  @pytest.mark.scheduled_only
   @pytest.mark.tpu_only
   def test_deepseek_ragged_a2a_ep_same_output_and_grad(self):
     config = pyconfig.initialize(

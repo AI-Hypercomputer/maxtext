@@ -28,10 +28,8 @@ import pickle
 from jax.experimental.compilation_cache import compilation_cache
 import pytest
 from tempfile import gettempdir, NamedTemporaryFile
-import transformers
 
 
-from maxtext.checkpoint_conversion.utils.hf_model_configs import DeepseekV32Config
 from maxtext.configs import pyconfig
 from maxtext.trainers.pre_train.train_compile import main as train_compile_main
 from tests.utils.test_helpers import get_test_config_path
@@ -809,25 +807,26 @@ class TrainCompile(parameterized.TestCase):
   )
   @pytest.mark.cpu_only
   def test_deepseek4(self, scan_layers):
-    # test deepseek4 compile
+    # test deepseek4 compile (Linen-only: DeepSeek NNX decoder rewrite is a follow-up PR).
     compiled_trainstep_file = f"/tmp/test_deepseek4_{scan_layers}.pickle"
-    train_compile_main(
-        (
-            "",
-            get_test_config_path(),
-            f"compiled_trainstep_file={compiled_trainstep_file}",
-            "compile_topology=v5p-256",
-            "use_iota_embed=true",
-            "compile_topology_num_slices=1",
-            "model_name=deepseek4-284b",
-            "per_device_batch_size=1",
-            "max_target_length=1024",
-            f"scan_layers={scan_layers}",
-            "attention=dot_product",
-            "dtype=bfloat16",
-            "weight_dtype=bfloat16",
-        )
-    )
+    train_compile_main((
+        "",
+        get_test_config_path(),
+        f"compiled_trainstep_file={compiled_trainstep_file}",
+        "compile_topology=v5p-256",
+        "use_iota_embed=true",
+        "compile_topology_num_slices=1",
+        "model_name=deepseek4-284b",
+        "per_device_batch_size=1",
+        "max_target_length=1024",
+        f"scan_layers={scan_layers}",
+        "attention=dot_product",
+        "dtype=bfloat16",
+        "weight_dtype=bfloat16",
+        "enable_nnx=False",
+        "pure_nnx=False",
+        "pure_nnx_decoder=False",
+    ))
 
   @pytest.mark.cpu_only
   def test_indexer_dense_warmup(self):
@@ -928,7 +927,6 @@ class TrainCompile(parameterized.TestCase):
   def test_engram_integration(self):
     """AOT test for Engram implementation"""
     compiled_trainstep_file = "/tmp/test_engram_integration"
-    transformers.AutoConfig.register("deepseek_v32", DeepseekV32Config)
     train_compile_main(
         (
             "",

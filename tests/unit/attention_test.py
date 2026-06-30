@@ -25,6 +25,7 @@ from absl.testing import parameterized
 from flax import nnx
 import jax
 import jax.numpy as jnp
+from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
 from jax.sharding import AxisType, Mesh
 from maxtext.utils import maxtext_utils
 from maxtext.common.gcloud_stub import is_decoupled
@@ -54,6 +55,24 @@ import pytest
 
 from tests.utils import attention_test_util
 from tests.utils.test_helpers import get_test_config_path
+
+
+class SplashLocalMaskTest(unittest.TestCase):
+  """Tests for Splash local masks."""
+
+  def test_local_window_matches_dense_mask(self):
+    seq_len = 8
+    window_size = 3
+    mask = splash_attention_mask.CausalMask((seq_len, seq_len)) & splash_attention_mask.LocalMask(
+        (seq_len, seq_len),
+        window_size=(window_size - 1, window_size),
+        offset=0,
+    )
+    q_sequence = np.arange(seq_len)[:, None]
+    kv_sequence = np.arange(seq_len)[None, :]
+    expected_mask = (kv_sequence <= q_sequence) & (kv_sequence > q_sequence - window_size)
+
+    np.testing.assert_array_equal(mask[:, :], expected_mask)
 
 
 class BidirectionalBlockMaskTest(unittest.TestCase):
@@ -1940,6 +1959,62 @@ class MLATest(attention_test_util.MLATestBase):
     )
 
     np.testing.assert_allclose(loss, 0.0, atol=1e-5)
+
+  def test_indexer_with_approx_top_k(self):
+    """Verify indexer runs with both approx and exact top-k."""
+    for use_approx in [False, True]:
+      with self.subTest(indexer_use_approx_top_k=use_approx):
+        mla_config_args = self.config_arguments.copy()
+        mla_config_args["use_indexer"] = True
+        mla_config_args["indexer_use_approx_top_k"] = use_approx
+        mla_config_args["indexer_topk"] = 4  # Force indexer to run instead of returning early
+        mla_config_args["attention"] = "dot_product"
+
+        cfg, mla = self.init_mla(mla_config_args, rope_type="default")
+
+        lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg, cfg.dtype)
+
+        # Run forward pass which triggers indexer
+        out, _ = mla(
+            lnx,
+            lnx,
+            decoder_segment_ids=decoder_segment_ids,
+            inputs_positions=decoder_positions,
+            deterministic=True,
+            model_mode=MODEL_MODE_TRAIN,
+        )
+        self.assertIsNotNone(out)
+
+  def test_approx_top_k_recall(self):
+    """Verify that approx_max_k meets the specified recall target compared to exact top_k."""
+    jax_rng = jax.random.PRNGKey(0)
+
+    # We need a large enough N to make the approximation meaningful.
+    # Use shape [batch=4, queries=16, N=1024]
+    batch, queries, N = 4, 16, 1024
+    K = 64
+    recall_target = 0.95
+
+    # Generate random scores
+    scores = jax.random.normal(jax_rng, (batch, queries, N))
+
+    # 1. Run exact Top-K
+    _, true_indices = jax.lax.top_k(scores, k=K)  # [batch, queries, K]
+
+    # 2. Run approx Top-K
+    _, approx_indices = jax.lax.approx_max_k(scores, k=K, recall_target=recall_target)  # [batch, queries, K]
+
+    # 3. Calculate Recall
+    # Broadcast compare true_indices [B, Q, K, 1] and approx_indices [B, Q, 1, K]
+    matches = (true_indices[..., None] == approx_indices[..., None, :]).any(axis=-1)  # [B, Q, K]
+    num_matches = matches.sum(axis=-1)  # [B, Q]
+    actual_recalls = num_matches / K  # [B, Q]
+    mean_recall = jnp.mean(actual_recalls)
+
+    print(f"\nApprox Top-K Recall Target: {recall_target}, Actual Mean Recall: {mean_recall:.4f}")
+
+    # Assert that the actual recall is equal or exceeds the target.
+    self.assertGreaterEqual(mean_recall, recall_target)
 
   def test_indexer_gradients(self):
     # Test that gradients do NOT flow back to inputs

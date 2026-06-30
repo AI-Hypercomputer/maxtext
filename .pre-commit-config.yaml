@@ -60,7 +60,7 @@ repos:
         args: ['--number']
         additional_dependencies: [mdformat-myst, mdformat-ruff]
         files: (docs/.)
-        exclude: docs/guides/checkpointing_solutions.md|docs/guides.md
+        exclude: docs/guides/checkpointing_solutions.md|docs/guides.md|docs/run_maxtext.md
 
   - repo: https://github.com/adrienverge/yamllint
     rev: v1.35.0

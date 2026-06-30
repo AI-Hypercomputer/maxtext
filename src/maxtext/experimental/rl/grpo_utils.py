@@ -244,8 +244,14 @@ def pathways_reshard_nnx(
 
   Splits the policy `nnx.Param` state out of the training-side TrainStateNNX
   model substate, reshards it onto the inference mesh, and pushes the
-  resharded params into the inference engine. Requires `scan_layers=True`;
-  the Linen `unscan_train_state_params` helper has no NNX equivalent yet.
+  resharded params into the inference engine.
+
+  Unlike Linen — where the policy is always scanned and must be unrolled via
+  `unscan_train_state_params` when the inference side is unscanned — the NNX
+  policy model is built per `config.scan_layers` (scanned: a single stacked
+  `decoder/layers` subtree; unscanned: per-layer `decoder/layers/{i}`). The
+  inference-side model is built from the same config, so both layouts already
+  match and `reshard_pytree` maps them directly without an explicit unscan.
 
   Args:
     config: Training configuration object.
@@ -255,10 +261,6 @@ def pathways_reshard_nnx(
       because the same shardings are already attached to the params.
     destination_shardings_model: Shardings for the inference-side model.
   """
-  if not config.scan_layers:
-    raise NotImplementedError(
-        "GRPO + pure_nnx + scan_layers=False not supported yet. " "Use scan_layers=True or pure_nnx=False."
-    )
   policy_params = nnx.state(policy_state_model, nnx.Param)
   source_param_shardings = nnx.state(source_shardings_model, nnx.Param)
   dest_param_shardings = nnx.state(destination_shardings_model, nnx.Param)

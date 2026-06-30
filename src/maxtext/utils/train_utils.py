@@ -18,6 +18,7 @@
 import subprocess
 import jax
 import functools
+import orbax.checkpoint.pathways as ocp_pathways
 from functools import partial
 
 from flax import nnx
@@ -55,6 +56,7 @@ def create_checkpoint_manager(config, mesh, init_state_fn):
         config.local_checkpoint_directory,
         config.local_checkpoint_period,
         mesh,
+        config.colocated_python_checkpointing,
     )
   elif config.enable_emergency_checkpoint:
     abstract_state, _, _ = maxtext_utils.get_abstract_state(config, mesh, init_state_fn, is_training=True)
@@ -95,6 +97,17 @@ def create_checkpoint_manager(config, mesh, init_state_fn):
         config.enable_autocheckpoint,
         config.checkpoint_todelete_subdir,
         config.checkpoint_todelete_full_path,
+    )
+
+  # Use Colocated Python checkpointing dispatchers optimization (Single Controller only).
+  if checkpoint_manager is not None and config.enable_single_controller and config.colocated_python_checkpointing:
+    max_logging.log("Registering colocated python array handler")
+    checkpointing_impl = ocp_pathways.CheckpointingImpl.from_options(
+        use_colocated_python=True,
+    )
+    ocp_pathways.register_type_handlers(
+        use_single_replica_array_handler=config.enable_single_replica_ckpt_restoring,
+        checkpointing_impl=checkpointing_impl,
     )
 
   return checkpoint_manager
@@ -308,12 +321,23 @@ def setup_train_loop(config, recorder, devices=None):
         state, outer_opt_state_sharding = diloco.build_diloco_state(config, lambda: state, mesh=mesh)
 
         # create state_mesh_shardings for the DilocoState
+        step_mesh = (
+            state_mesh_shardings.optimizer.step.mesh
+            if config.pure_nnx
+            else state_mesh_shardings.step.mesh
+        )
         inner_state_shardings = diloco.add_diloco_to_sharding(state_mesh_shardings)
         state_mesh_shardings = diloco.DiLoCoTrainState(
             inner_state_shardings,
-            state_mesh_shardings.params,
+            # Match the outer params' pure-dict structure (build_diloco_state stores
+            # outer_params via to_pure_dict), so the sharding tree matches the state tree.
+            state_mesh_shardings_params.to_pure_dict()
+            if config.pure_nnx
+            else state_mesh_shardings_params,
             outer_opt_state_sharding,
-            jax.sharding.NamedSharding(mesh=state_mesh_shardings.step.mesh, spec=jax.sharding.PartitionSpec()),
+            jax.sharding.NamedSharding(
+                mesh=step_mesh, spec=jax.sharding.PartitionSpec()
+            ),
         )
 
     # TODO(aireenmei, hengtaoguo): support sharding in vit for multimodal
@@ -335,8 +359,14 @@ def setup_train_loop(config, recorder, devices=None):
       maxtext_utils.print_shardings_params(state_params, state_mesh_shardings_params, mesh, logical_annotations_params)
 
   if config.pure_nnx:
-    train_state = nnx.merge(state_graphdef, state)
-    model = train_state.model
+    if config.enable_diloco:
+      # Don't merge the DiLoCoTrainState into the plain-model graphdef. The inner
+      # train step needs that graphdef as jit_model; the wrapper passes through as state.
+      train_state = state
+      model = state_graphdef
+    else:
+      train_state = nnx.merge(state_graphdef, state)
+      model = train_state.model
   else:
     train_state = state
 
