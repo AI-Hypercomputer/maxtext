@@ -231,7 +231,11 @@ def jit_and_compile(
 
 def save_compiled(compiled, save_name):
   """Serialize and save the compiled function."""
-  serialized, _, _ = serialize(compiled)
+  result = serialize(compiled)
+  # jax.experimental.serialize_executable.serialize() changed its return type:
+  # older JAX: (bytes, in_tree, out_tree)
+  # newer JAX: bytes
+  serialized = result[0] if isinstance(result, tuple) else result
   with open(save_name, "wb") as f:
     f.write(serialized)
 
