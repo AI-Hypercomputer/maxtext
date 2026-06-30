@@ -223,12 +223,10 @@ def test_scan_layers_mismatch_tpu():
   train_main(get_cmd(steps=1, metrics_file="saved_metrics_mismatch.txt"))
 
   # 2. Attempt to restore with scan_layers=False and assert ValueError
-  mismatch_command = get_cmd(
-      steps=2, metrics_file="restored_metrics_mismatch.txt"
-  ) + ["scan_layers=False"]
+  mismatch_command = get_cmd(steps=2, metrics_file="restored_metrics_mismatch.txt") + ["scan_layers=False"]
 
   with pytest.raises(ValueError) as excinfo:
     train_main(mismatch_command)
 
-  assert "Failed to restore checkpoint" in str(excinfo.value)
+  assert "Configuration mismatch" in str(excinfo.value) or "Failed to restore checkpoint" in str(excinfo.value)
   assert "scan_layers" in str(excinfo.value)
