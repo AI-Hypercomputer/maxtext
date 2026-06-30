@@ -265,6 +265,13 @@ norm_topk_prob: false # boolean to enable the top-k probability normalization. q
 moe_fsdp_use_two_stage_all_gather: false
 # when dense MLP weight matrices are sharded on both fsdp and fsdp-transpose axes, use two separate all-gather calls
 dense_fsdp_use_two_stage_all_gather: false
+# tag each in-block decoder layer's input with a distinct remat checkpoint name (decoder_layer_input_<layer_idx>)
+# instead of the shared 'decoder_layer_input', so a remat policy can save a SUBSET of a scanned block's layer
+# boundaries (lowers backward recompute peak). Currently wired for gemma4. See docs/gemma4_31b_intra_block_remat_plan.md
+distinct_layer_remat_names: false
+# in-block layer indices whose decoder_layer_input_<i> to keep on device under remat_policy=save_layer_boundaries
+# (requires distinct_layer_remat_names=true). e.g. [3] saves the mid-block boundary. empty = save none (~full).
+remat_save_layer_boundaries: []
 # Shard the expert dimension of the MLP weights on the FSDP axis.
 # This configuration is recommended only when num_experts is a multiple of fsdp_parallelism
 shard_exp_on_fsdp: false

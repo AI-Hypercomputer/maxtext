@@ -122,6 +122,7 @@ class RematPolicy(str, Enum):
   CUSTOM = "custom"
   MINIMAL_OFFLOADED = "minimal_offloaded"
   SAVE_OUT_PROJ = "save_out_proj"
+  SAVE_LAYER_BOUNDARIES = "save_layer_boundaries"
 
 
 class RematLocation(str, Enum):
@@ -815,6 +816,20 @@ class MoEGeneral(BaseModel):
   dense_fsdp_use_two_stage_all_gather: bool = Field(
       False,
       description="Use two separate All-Gather calls for dense MLP weights sharded on both FSDP and FSDP-transpose.",
+  )
+  distinct_layer_remat_names: bool = Field(
+      False,
+      description="Tag each in-block decoder layer's input with a distinct remat checkpoint name "
+      "(decoder_layer_input_<layer_idx>) instead of the shared 'decoder_layer_input'. Lets the "
+      "remat_policy=save_layer_boundaries policy save a SUBSET of a scanned block's layer boundaries "
+      "to lower the backward recompute peak. Currently wired for gemma4.",
+  )
+  remat_save_layer_boundaries: list[int] = Field(
+      default_factory=list,
+      description="In-block layer indices whose decoder_layer_input_<i> to keep on device under "
+      "remat_policy=save_layer_boundaries (requires distinct_layer_remat_names=true). E.g. [3] saves "
+      "the mid-block boundary, splitting a 6-layer block's backward recompute into two 3-layer "
+      "segments. Empty = save none (≈ full).",
   )
   shard_exp_on_fsdp: bool = Field(
       False,

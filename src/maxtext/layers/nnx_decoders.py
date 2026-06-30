@@ -1251,6 +1251,20 @@ class NNXDecoder(nnx.Module):
         )
       elif cfg.remat_policy == "save_out_proj":
         policy = jax.checkpoint_policies.save_only_these_names("out_proj")
+      elif cfg.remat_policy == "save_layer_boundaries":
+        # Save a subset of a scanned block's per-layer inputs on device, splitting the whole-block
+        # backward recompute into smaller segments (lowers the peak of co-resident recomputed
+        # activations). Requires distinct_layer_remat_names=true so decoder_layer_input_<i> names
+        # exist; otherwise the names are absent and nothing extra is saved (≈ full). The block-input
+        # boundary is always retained as the scan carry, so e.g. [3] yields two 3-layer segments.
+        # See docs/gemma4_31b_intra_block_remat_plan.md.
+        if not cfg.distinct_layer_remat_names:
+          max_logging.log(
+              "WARNING: remat_policy=save_layer_boundaries has no effect unless "
+              "distinct_layer_remat_names=true (the decoder_layer_input_<i> names won't exist)."
+          )
+        names = [f"decoder_layer_input_{i}" for i in cfg.remat_save_layer_boundaries]
+        policy = jax.checkpoint_policies.save_only_these_names(*names)
       else:
         assert cfg.remat_policy == "full", "Remat policy needs to be on list of remat policies"
         policy = None

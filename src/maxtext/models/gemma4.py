@@ -331,7 +331,16 @@ class Gemma4DecoderLayer(nnx.Module):
     elif isinstance(inputs, tuple):
       inputs = inputs[0]
     inputs = nn.with_logical_constraint(inputs, self.activation_axis_names)
-    inputs = checkpoint_name(inputs, "decoder_layer_input")
+    # When distinct_layer_remat_names is set, tag each in-block layer's input with a per-layer-index
+    # name so a remat policy (e.g. remat_policy=custom + tensors_on_device=["decoder_layer_input_3"])
+    # can save a SUBSET of the block's layer boundaries — splitting the whole-block recompute into
+    # smaller segments to lower the backward recompute peak. The shared name makes saving
+    # all-or-nothing. layer_idx is the 0..N-1 position within the scanned Gemma4ScannableBlock.
+    # See docs/gemma4_31b_intra_block_remat_plan.md.
+    if cfg.distinct_layer_remat_names:
+      inputs = checkpoint_name(inputs, f"decoder_layer_input_{self.layer_idx}")
+    else:
+      inputs = checkpoint_name(inputs, "decoder_layer_input")
 
     lnx = self.pre_self_attention_norm(inputs)
     lnx = nn.with_logical_constraint(lnx, self.activation_axis_names)
