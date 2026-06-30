@@ -1132,44 +1132,46 @@ class NNXDecoder(nnx.Module):
         w_sharding = NamedSharding(self.mesh, stripped_spec)
       return sharding.maybe_shard_with_name(w, w_sharding, shard_mode=self.config.shard_mode)
 
+    params = maxtext_utils_nnx.nnx_ensure_scan_leading_axis(params, length)
+    state = maxtext_utils_nnx.nnx_ensure_scan_leading_axis(state, length)
+
+    # Shift params by -1 along axis 0 so that nxt_params_seq[i] is params[(i + 1) % length]
+    nxt_params_seq = jax.tree.map(lambda x: jnp.roll(x, -1, axis=0), params)
+
     # Bootstrap Layer 0 params for carry
     with scheduling_group(group_id=40):
-      w_curr = _slice_params(params, 0)
-      w_curr = jax.tree.map(_apply_sharding_hint, w_curr)
+      w_0 = jax.tree.map(lambda x: x[0], params)
+      w_init = jax.tree.map(_apply_sharding_hint, w_0)
 
-    def _step_fn(y, w, st_i, idx):
+    def scan_step_fn(carry, xs):
+      y_curr, w_curr = carry
+      st_i, nxt_params_i, idx = xs
+
+
       # --- Grouped Lookahead Prefetch of Layer idx + 1 ---
       with scheduling_group(group_id=43):
-        nxt_params = _slice_params(params, (idx + 1) % length)
-        w_next = jax.tree.map(_apply_sharding_hint, nxt_params)
+        w_next = jax.tree.map(_apply_sharding_hint, nxt_params_i)
 
-      bsw = checkpoint_name((w, w_next), "fsdp_bsw")
+      bsw = checkpoint_name((w_curr, w_next), "fsdp_bsw")
       w_active, w_prefetched = bsw[0], bsw[1]
 
       layer = nnx.merge(graphdef, w_active, st_i)
-      layer_out = layer(y, *args, **valid_kwargs)
+      layer_out = layer(y_curr, *args, **valid_kwargs)
 
       y_out = layer_out[0] if isinstance(layer_out, tuple) else layer_out
       _, _, new_state_i = nnx.split(layer, nnx.Param, ...)
 
-      return y_out, w_prefetched, new_state_i
+      return (y_out, w_prefetched), new_state_i
 
-    step_wrapped = jax.checkpoint(_step_fn, policy=policy, prevent_cse=prevent_cse)
+    step_wrapped = jax.checkpoint(scan_step_fn, policy=policy, prevent_cse=prevent_cse)
 
-    y_curr = x_in
-    per_layer_states = []
+    (final_y, _), scanned_state = jax.lax.scan(step_wrapped, (x_in, w_init), (state, nxt_params_seq, jnp.arange(length)))
 
-    for idx_i in range(length):
-      current_state_i = jax.tree.map(lambda x, i=idx_i: x[i], state)
-      y_curr, w_curr, new_state_i = step_wrapped(y_curr, w_curr, current_state_i, idx_i)
-      per_layer_states.append(new_state_i)
-
-    final_y = y_curr
-    scanned_state = jax.tree.map(lambda *xs: jnp.stack(list(xs)), *per_layer_states)
+    scanned_state = maxtext_utils_nnx.nnx_add_scan_axis(scanned_state, "layers", 0)
 
     if scan_axis != 0:
       new_params, new_rest = scanned_state.split(nnx.Param, ...)
-      new_params = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0), new_params)
+      new_params = maxtext_utils_nnx.nnx_sync_moveaxis(new_params, 0, scan_axis)
       scanned_state = nnx.merge_state(new_params, new_rest)
 
     nnx.update(layers, scanned_state)
