@@ -25,11 +25,16 @@ export NEW_MODEL_DESIGN=1
 export TPU_MIN_LOG_LEVEL=0
 export TF_CPP_MIN_LOG_LEVEL=0
 export TPU_STDERR_LOG_LEVEL=0
-export JAX_PLATFORMS=proxy,cpu
-export JAX_BACKEND_TARGET=grpc://127.0.0.1:29000
-export ENABLE_PATHWAYS_PERSISTENCE=1
-export M_ASYNC_SCHEDULING=False
 
+# Force Python to use "spawn" instead of "fork" for multiprocessing to prevent gRPC socket corruption
+cat << 'EOF' > usercustomize.py
+import multiprocessing
+try:
+    multiprocessing.set_start_method("spawn", force=True)
+except Exception:
+    pass
+EOF
+export PYTHONPATH=${PYTHONPATH:-.}:$(pwd)
 run_id=${1:-$(date +%Y-%m-%d-%H-%M-%S)}
 use_pathways=${2:-True}
 MODEL_NAME='qwen3-30b-a3b-base'
@@ -59,9 +64,9 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
     rollout_tensor_parallelism=8 \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
     vllm_additional_config='{"maxtext_config": {"model_name": "'${MODEL_NAME}'", "allow_split_physical_axes": true, "scan_layers": false, "prefuse_moe_weights": true}}' \
-    remat_policy=full hbm_utilization_vllm=0.75 use_pathways=${use_pathways} \
+    remat_policy=full hbm_utilization_vllm=0.55 use_pathways=${use_pathways} \
     ici_tensor_parallelism=1 ici_fsdp_parallelism=-1 ici_expert_parallelism=8 \
-    max_target_length=512 weight_dtype=bfloat16 dtype=bfloat16 opt_type=sgd \
+    max_sequence_length=1024 max_target_length=512 weight_dtype=bfloat16 dtype=bfloat16 opt_type=sgd \
     enable_tunix_perf_metrics=True rl.use_agentic_rollout=True rl.num_generations=16
 
 python3 -m maxtext.inference.vllm_decode \

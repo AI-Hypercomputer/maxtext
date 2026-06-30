@@ -70,5 +70,5 @@ xpk workload create-pathways \
   --num-slices=1 \
   --base-docker-image="${BASE_DOCKER_IMAGE}" \
   --workload="${WORKLOAD_NAME}" \
-  --custom-pathways-proxy-server-args='${XLA_FLAGS}' \
+  --custom-pathways-proxy-server-args="${XLA_FLAGS}" \
   --command="echo ${MAXTEXT_COMMAND_B64} | base64 -d | bash -s -- ${RUN_ID} ${use_pathways}"
