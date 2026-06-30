@@ -740,6 +740,20 @@ class SplashAttention(BaseModel):
   local_use_splash_scheduler: bool | None = Field(None, description="Use experimental local splash attention scheduler.")
   local_sa_fuse_reciprocal: bool | None = Field(None, description="Maps to local fuse_reciprocal in SplashConfig.")
   local_sa_use_base2_exp: bool | None = Field(None, description="Maps to local use_base2_exp in SplashConfig.")
+  experimental_sa_quant_q_fp8: bool | None = Field(
+      None,
+      description=(
+          "Experimental flag: If enabled, the Q tensor in splash attention is"
+          " quantized to jnp.float8_e4m3fn, without scaling factors."
+      ),
+  )
+  experimental_sa_quant_k_fp8: bool | None = Field(
+      None,
+      description=(
+          "Experimental flag: If enabled, the K tensor in splash attention is"
+          " quantized to jnp.float8_e4m3fn, without scaling factors."
+      ),
+  )
   use_max_logit_estimate: int = Field(
       -1,
       description="-1 means no estimate, any > 0 value will be used as max logit estimate",
@@ -3456,6 +3470,16 @@ class MaxTextConfig(
           "Please disable attn_logits_soft_cap when using use_qk_clip."
       )
 
+    if self.experimental_sa_quant_q_fp8 and self.attention_type != "mla":
+      raise ValueError(
+          "Q quantization is currently only supported with"
+          f" attention_type='mla'. Found attention_type='{self.attention_type}'"
+      )
+    if self.experimental_sa_quant_k_fp8 and self.attention_type != "mla":
+      raise ValueError(
+          "K quantization is currently only supported with"
+          f" attention_type='mla'. Found attention_type='{self.attention_type}'"
+      )
     if self.share_kv_projections and self.fused_qkv:
       raise ValueError("`share_kv_projections` is not compatible with `fused_qkv`.")
     if self.share_kv_projections and self.attention_type == "mla":
