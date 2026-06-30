@@ -226,9 +226,9 @@ def math_verify_pool(
 
   cpu_count = multiprocessing.cpu_count()
   if num_procs is None:
-    num_procs = min(_DEFAULT_MAX_PROCS, len(items), cpu_count)
+    num_procs = min(_DEFAULT_MAX_PROCS, cpu_count)
   else:
-    num_procs = max(1, min(num_procs, len(items), cpu_count))
+    num_procs = max(1, min(num_procs, cpu_count))
 
   cnt = 0
   pool = _get_pool(num_procs)
