@@ -1,3 +1,5 @@
+"""Unit tests for the Checkpoint Validation Agent."""
+
 import unittest
 from unittest.mock import patch, mock_open, MagicMock
 import json
@@ -7,10 +9,12 @@ from src.maxtext.experimental.agent.checkpoint_validation_agent.main import (
 
 
 class TestCheckpointValidationAgent(unittest.TestCase):
+  """Test suite for the checkpoint validation agent."""
 
   @patch("os.path.exists", return_value=True)
   @patch("builtins.open", new_callable=mock_open, read_data='{"run_name": "test"}')
-  def test_missing_required_keys(self, mock_file, mock_exists):
+  # Add underscores to the unused mock arguments
+  def test_missing_required_keys(self, _mock_file, _mock_exists):
     """test that the script fails fast if the JSON is missing required keys."""
     with self.assertRaisesRegex(KeyError, "CRITICAL ERROR: JSON config is missing required key"):
       validate_checkpoint("fake_path.json")
@@ -28,7 +32,7 @@ class TestCheckpointValidationAgent(unittest.TestCase):
           }
       ),
   )
-  def test_missing_strict_architecture_flags(self, mock_file, mock_exists):
+  def test_missing_strict_architecture_flags(self, _mock_file, _mock_exists):
     """test that the script blocks execution if scan_layers or tokenizer is missing."""
     with self.assertRaisesRegex(ValueError, "REQUIRED: You must provide 'scan_layers'"):
       validate_checkpoint("fake_path.json")
@@ -36,7 +40,7 @@ class TestCheckpointValidationAgent(unittest.TestCase):
   @patch("os.path.exists", return_value=True)
   @patch("src.maxtext.experimental.agent.checkpoint_validation_agent.main.subprocess.run")
   @patch("os.makedirs")
-  def test_successful_command_generation(self, mock_makedirs, mock_subprocess, mock_exists):
+  def test_successful_command_generation(self, _mock_makedirs, mock_subprocess, _mock_exists):
     """test that the script correctly parses valid JSON into the right MaxText command."""
     valid_json = {
         "run_name": "success-test",

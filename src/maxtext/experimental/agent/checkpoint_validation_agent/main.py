@@ -1,7 +1,10 @@
+"""Automated Checkpoint Validation Agent for MaxText."""
+
 import subprocess
 import json
 import os
 import argparse
+# pylint: disable=no-name-in-module
 from maxtext import max_logging as logger
 
 
@@ -65,7 +68,7 @@ def validate_checkpoint(json_config_path):
       logger.info(f"  -> {flag_name}={flag_value}")
 
   # run subprocess
-  result = subprocess.run(command, text=True, capture_output=True)
+  result = subprocess.run(command, text=True, capture_output=True, check=False)
 
   # generate report
   report = {
