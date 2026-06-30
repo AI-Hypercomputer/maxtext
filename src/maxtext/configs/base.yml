@@ -887,7 +887,7 @@ diloco_sync_period: 36
 diloco_outer_lr: 0.3
 diloco_outer_momentum: 0.9
 # DCN bandwidth throttling parameters (used for simulating slow networks).
-# If dcn_bandwidth_limit is empty, no throttling is applied.
+# If dcn_bandwidth_limit is empty, no throttling is applied. **Per-VM** throughput limit. Example: 10gbit.
 dcn_bandwidth_limit: ""
 # The burst size parameter for the traffic control (tc) token bucket filter.
 dcn_bandwidth_burst: "10mb"
