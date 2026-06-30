@@ -52,7 +52,9 @@ def create_training_optimizer(config, model):
 def create_checkpoint_manager(config, mesh, init_state_fn):
   """Creates the init_rng, optimizer, learning rate schedule, and checkpoint manager."""
   # pass in model for muon
-  logger = checkpointing.setup_checkpoint_logger(config)
+  # `setup_checkpoint_logger` only emits a deprecation warning now (Orbax v1 logs
+  # internally) and always returns None; we still pass it through for API parity.
+  logger = checkpointing.setup_checkpoint_logger(config)  # pylint: disable=assignment-from-no-return
   if config.enable_multi_tier_checkpointing:
     checkpoint_manager = emergency_checkpointing.create_replicator_checkpoint_manager(
         config.local_checkpoint_directory,
@@ -96,6 +98,7 @@ def create_checkpoint_manager(config, mesh, init_state_fn):
         config.enable_autocheckpoint,
         config.checkpoint_todelete_subdir,
         config.checkpoint_todelete_full_path,
+        config.checkpoint_storage_target_data_file_size_bytes,
     )
 
   # Use Colocated Python checkpointing dispatchers optimization (Single Controller only).

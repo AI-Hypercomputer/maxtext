@@ -505,14 +505,14 @@ class ElasticUtilsTest(parameterized.TestCase):
     self.fake_pathwaysutils.is_pathways_backend_used.return_value = True
     self.fake_manager.available_inactive_slices = {1}  # Trigger scale-up
 
-    mock_checkpoint_manager = Mock(spec=["wait_until_finished"])
+    mock_checkpoint_manager = Mock(spec=checkpointing.ocp.training.Checkpointer)
 
     # Successful checkpoint save block raises ScaleUpSignalError to trigger restart
     with self.assertRaises(ScaleUpSignalError):
       with checkpointing.checkpoint_exception_guard(config, mock_checkpoint_manager):
         pass
 
-    mock_checkpoint_manager.wait_until_finished.assert_called_once()
+    mock_checkpoint_manager.wait.assert_called_once()
 
   def test_checkpoint_exception_guard_none_manager(self):
     """Checks that checkpoint_manager=None doesn't raise AttributeError on scale-up."""

@@ -326,7 +326,7 @@ class LoraUtilsTest(unittest.TestCase):
     mock_metadata = mock.MagicMock()
     mock_metadata.custom_metadata = {"lora": {"lora_rank": 32, "lora_alpha": 64.0}}
 
-    with mock.patch("orbax.checkpoint.StandardCheckpointer.metadata", return_value=mock_metadata):
+    with mock.patch.object(checkpointing.ocp, "checkpointables_metadata", return_value=mock_metadata):
       lora_utils.sync_lora_metadata(cfg)
       self.assertEqual(cfg.lora.lora_rank, 32)
       self.assertEqual(cfg.lora.lora_alpha, 64.0)
@@ -344,7 +344,7 @@ class LoraUtilsTest(unittest.TestCase):
     mock_metadata = mock.MagicMock()
     mock_metadata.custom_metadata = {"lora": {"lora_rank": 32, "lora_alpha": 64.0}}
 
-    with mock.patch("orbax.checkpoint.StandardCheckpointer.metadata", return_value=mock_metadata):
+    with mock.patch.object(checkpointing.ocp, "checkpointables_metadata", return_value=mock_metadata):
       # Should not raise ValueError
       lora_utils.sync_lora_metadata(cfg)
       self.assertEqual(cfg.lora.lora_rank, 32)
@@ -363,7 +363,7 @@ class LoraUtilsTest(unittest.TestCase):
     mock_metadata = mock.MagicMock()
     mock_metadata.custom_metadata = {"lora": {"lora_rank": 32, "lora_alpha": 64.0}}
 
-    with mock.patch("orbax.checkpoint.StandardCheckpointer.metadata", return_value=mock_metadata):
+    with mock.patch.object(checkpointing.ocp, "checkpointables_metadata", return_value=mock_metadata):
       with self.assertRaisesRegex(ValueError, "Configured lora_rank .* does not match"):
         lora_utils.sync_lora_metadata(cfg)
 
@@ -380,7 +380,7 @@ class LoraUtilsTest(unittest.TestCase):
     mock_metadata = mock.MagicMock()
     mock_metadata.custom_metadata = {"lora": {"lora_rank": 32, "lora_alpha": 64.0}}
 
-    with mock.patch("orbax.checkpoint.StandardCheckpointer.metadata", return_value=mock_metadata):
+    with mock.patch.object(checkpointing.ocp, "checkpointables_metadata", return_value=mock_metadata):
       with self.assertRaisesRegex(ValueError, "Configured lora_alpha .* does not match"):
         lora_utils.sync_lora_metadata(cfg)
 
@@ -392,11 +392,12 @@ class LoraUtilsTest(unittest.TestCase):
     )
     mock_manager = mock.MagicMock()
     mock_state = mock.MagicMock()
+    mock_manager.use_async = False
 
     with mock.patch("jax.block_until_ready"):
       checkpointing.save_checkpoint(mock_manager, step=10, state=mock_state, config=cfg)
-      mock_manager.save.assert_called_once()
-      _, kwargs = mock_manager.save.call_args
+      mock_manager.save_checkpointables.assert_called_once()
+      _, kwargs = mock_manager.save_checkpointables.call_args
       self.assertIn("custom_metadata", kwargs)
       self.assertEqual(kwargs["custom_metadata"]["lora"], cfg.lora.model_dump())
 
