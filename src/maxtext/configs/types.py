@@ -470,6 +470,9 @@ class Quantization(BaseModel):
       50,
       description=("The first number of steps before updating the sparsity masks."),
   )
+  use_te_comm_gemm_overlap: bool = Field(
+      False, description="If True, uses Transformer Engine's collective GEMM overlap algorithm."
+  )
 
 
 class ModelArchitecture(BaseModel):

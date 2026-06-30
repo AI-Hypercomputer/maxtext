@@ -1185,6 +1185,36 @@ def print_non_trivial_mesh_axis(mesh):
       print(f"{mesh_axis}: {axis_size}", flush=True)
 
 
+def bootstrap_transformer_engine_cgemm(raw_keys):
+  """Potentially initialize NCCL communicators for Collective GEMM operations if
+  the environment is distributed and has the appropriate config."""
+  import transformer_engine.jax.cpp_extensions as tex  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
+
+  te_has_distributed_env = jax.local_device_count() == 1 and jax.distributed.is_initialized()
+
+  if raw_keys["hardware"] != "gpu_multiprocess" or not te_has_distributed_env:
+    raise ValueError("TE Collective GEMM operations are only supported for hardware=gpu_multiprocess with rank per GPU.")
+
+  tpsp_size = raw_keys["ici_tensor_sequence_parallelism"] * raw_keys["dcn_tensor_sequence_parallelism"]
+  tp_size = raw_keys["ici_tensor_parallelism"] * raw_keys["dcn_tensor_parallelism"]
+
+  if tpsp_size == 1 or tp_size > 1:
+    raise ValueError("TE Collective GEMM operations are only supported for TPSP size > 1 and TP size == 1.")
+
+  if not raw_keys["quantization"].startswith("te_"):
+    raise ValueError(
+        "TE Collective GEMM operations are only supported for TE quantization recipes (i.e. starting with 'te_')."
+    )
+
+  # Setup NCCL buffers for GPU Collective GEMM operations
+  tex.collective_gemm_bootstrap(
+      jax.device_count(),
+      jax.local_device_count(),
+      jax.process_index(),
+      tpsp_size,
+  )
+
+
 @contextmanager
 def maybe_get_transformer_engine_context(config):
   """Runs a transformer engine context engine manager for GPUs only."""
@@ -1212,7 +1242,7 @@ def transformer_engine_context():
     mesh_resource = MeshResource(  # pytype: disable=wrong-arg-types
         dp_resource="data",
         tp_resource="tensor",
-        # tpsp_resource = "tensor_sequence", #TODO(Phuong): add this back when upstreaming CGEMM
+        tpsp_resource="tensor_sequence",
         fsdp_resource="fsdp",
         pp_resource=None,
         cp_resource="context",
