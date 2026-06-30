@@ -348,7 +348,7 @@ class Checkpointing(BaseModel):
   save_quantized_params_path: PathStr = Field("", description="Path to save params quantized on the fly.")
   enable_orbax_v1: bool = Field(False, description="Bool flag for enabling Orbax v1.")
   checkpoint_conversion_fn: None | str = Field(None, description="Function for processing loaded checkpoint dict.")
-  source_checkpoint_layout: Literal["orbax", "safetensors", "safetensors_dynamic"] = Field(
+  source_checkpoint_layout: Literal["orbax", "safetensors"] = Field(
       "orbax", description="The layout of the source checkpoint to load."
   )
   save_checkpoint_on_completion: bool = Field(
@@ -3041,11 +3041,6 @@ class MaxTextConfig(
     # I. RUN ALL CROSS-FIELD VALIDATIONS
     if self.load_parameters_path and self.load_full_state_path:
       raise ValueError("At most one of `load_parameters_path` or `load_full_state_path` should be set.")
-    if self.source_checkpoint_layout == "safetensors_dynamic" and self.enable_single_controller:
-      raise ValueError(
-          "`source_checkpoint_layout='safetensors_dynamic'` is not supported"
-          " on the Pathways backend (`enable_single_controller=True`)."
-      )
     if self.elastic_enabled and not self.enable_single_controller:
       raise ValueError("Elastic training is only supported with Pathways (`enable_single_controller=True`).")
     if self.colocated_python_data_input and not self.enable_single_controller:
