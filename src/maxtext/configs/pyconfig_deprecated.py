@@ -214,13 +214,57 @@ def validate_rampup_batch_size(batch_size_start, batch_size_end, batch_size_incr
   )
 
 
-def validate_context_parallel_strategy_ring(
-    context_parallel_size: int, context_parallel_strategy: str, hardware: str
-) -> None:
-  """Validates that ring context parallelism strategy is only used on GPU hardware."""
-  if context_parallel_size > 1 and context_parallel_strategy.lower() == "ring":
-    if "gpu" not in hardware:
-      raise ValueError("Ring context parallelism strategy (context_parallel_strategy='ring') is only supported on GPUs.")
+def validate_context_parallel_strategy_ring(keys) -> None:
+  if keys["context_parallel_strategy"].lower() != "ring":
+    return
+  context_parallel_size = get_context_parallel_size(keys)
+  if "gpu" in keys["hardware"]:
+    return
+  if "tpu" not in keys["hardware"]:
+    if context_parallel_size <= 1:
+      return
+    raise ValueError(
+        "Ring context parallelism strategy (context_parallel_strategy='ring') is only supported on GPUs "
+        "or TPU with attention=flash and use_tokamax_splash=True."
+    )
+  if context_parallel_size <= 1:
+    raise ValueError("TPU Tokamax ring attention requires context_parallel_size > 1.")
+  if keys["context_sharding"] != "context":
+    raise ValueError("TPU Tokamax ring attention requires context_sharding='context'.")
+  if keys["dq_reduction_steps"] not in (0, 3):
+    raise ValueError("TPU Tokamax ring attention requires dq_reduction_steps to be 0 or 3.")
+  if keys["max_target_length"] % (context_parallel_size * context_parallel_size) != 0:
+    raise ValueError(
+        "TPU Tokamax ring attention requires max_target_length to be divisible by context_parallel_size squared."
+    )
+  if keys["attention"] != "flash":
+    raise ValueError("TPU ring context parallelism requires attention=flash.")
+  if not keys["use_tokamax_splash"]:
+    raise ValueError("TPU ring context parallelism requires use_tokamax_splash=True.")
+  if keys["use_jax_splash"]:
+    raise ValueError("TPU ring context parallelism requires use_jax_splash=False.")
+  if keys["attention_type"] != "global":
+    raise ValueError("TPU Tokamax ring attention is initially supported only for global causal attention.")
+  if keys["packing"]:
+    raise ValueError("TPU Tokamax ring attention does not support packing yet.")
+  if keys["context_parallel_load_balance"]:
+    raise ValueError("TPU Tokamax ring attention does not support context_parallel_load_balance yet.")
+  if keys["use_ragged_attention"]:
+    raise ValueError("TPU Tokamax ring attention does not support ragged attention.")
+  if keys["attention_sink"]:
+    raise ValueError("TPU Tokamax ring attention does not support attention sinks.")
+  if keys["use_indexer"]:
+    raise ValueError("TPU Tokamax ring attention does not support sparse indexer masks.")
+  if keys["use_chunked_prefill"]:
+    raise ValueError("TPU Tokamax ring attention does not support chunked prefill yet.")
+  if keys["moba"]:
+    raise ValueError("TPU Tokamax ring attention does not support MoBA.")
+  if keys["use_multimodal"]:
+    raise ValueError("TPU Tokamax ring attention does not support multimodal attention.")
+  if keys["use_qk_clip"]:
+    raise ValueError("TPU Tokamax ring attention does not support QK-Clip statistics yet.")
+  if keys["enable_dropout"] and keys["dropout_rate"] > 0.0:
+    raise ValueError("TPU Tokamax ring attention does not support dropout yet.")
 
 
 def validate_keys(keys):
@@ -254,7 +298,7 @@ def validate_keys(keys):
   if context_parallel_size > 1 and keys["context_parallel_load_balance"] and keys["attention_type"] == "chunk":
     raise ValueError("Currently load-balanced context parallelism is not supported for chunk attention.")
 
-  validate_context_parallel_strategy_ring(context_parallel_size, keys["context_parallel_strategy"], keys["hardware"])
+  validate_context_parallel_strategy_ring(keys)
 
   if keys["mtp_eval_target_module"] < 0:
     raise ValueError("mtp_eval_target_module cannot be negative. Set to 0 to disable evaluation.")

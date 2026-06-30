@@ -98,6 +98,78 @@ class ConfigTest(unittest.TestCase):
     with self.assertRaises(pydantic.ValidationError):
       pyconfig.initialize(argv)
 
+  def test_tpu_tokamax_ring_config_validation_accepts_initial_config(self):
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "context_parallel_strategy=ring",
+        "context_parallel_load_balance=False",
+        "ici_context_parallelism=2",
+        "hardware=tpu",
+        "packing=False",
+        "dataset_type=synthetic",
+    ]
+    mock_devices = [MagicMock(slice_index=0) for _ in range(8)]
+    with patch("jax.devices", return_value=mock_devices):
+      config = pyconfig.initialize(argv)
+
+    self.assertEqual(config.context_parallel_strategy, "ring")
+    self.assertEqual(config.ici_context_parallelism, 2)
+    self.assertEqual(config.attention, "flash")
+    self.assertTrue(config.use_tokamax_splash)
+
+  def test_tpu_tokamax_ring_config_validation_rejects_unsupported_configs(self):
+    base_args = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "context_parallel_strategy=ring",
+        "context_parallel_load_balance=False",
+        "ici_context_parallelism=2",
+        "hardware=tpu",
+        "packing=False",
+        "dataset_type=synthetic",
+    ]
+    cases = [
+        (["ici_context_parallelism=1"], ["ici_context_parallelism=2"], "context_parallel_size > 1"),
+        (["context_sharding=expert", "ici_expert_parallelism=2"], [], "context_sharding"),
+        (["dq_reduction_steps=2"], [], "dq_reduction_steps"),
+        (["max_target_length=2050"], [], "context_parallel_size squared"),
+        (["attention=dot_product"], ["attention=flash"], "attention=flash"),
+        (["use_tokamax_splash=False"], ["use_tokamax_splash=True"], "use_tokamax_splash"),
+        (["use_jax_splash=True"], ["use_jax_splash=False"], "use_jax_splash"),
+        (["attention_type=full"], [], "global causal"),
+        (["packing=True"], ["packing=False"], "packing"),
+        (
+            ["context_parallel_load_balance=True"],
+            ["context_parallel_load_balance=False"],
+            "context_parallel_load_balance",
+        ),
+        (["use_ragged_attention=True"], [], "ragged attention"),
+        (["attention_sink=True"], [], "attention sinks"),
+        (["use_indexer=True", "q_lora_rank=1"], [], "sparse indexer"),
+        (["use_chunked_prefill=True"], [], "chunked prefill"),
+        (["moba=True"], [], "MoBA"),
+        (["use_multimodal=True"], [], "multimodal"),
+        (["use_qk_clip=True"], [], "QK-Clip"),
+        (["dropout_rate=0.1"], [], "dropout"),
+    ]
+    mock_devices = [MagicMock(slice_index=0) for _ in range(8)]
+    for bad_args, args_to_remove, expected_regex in cases:
+      with self.subTest(bad_args=bad_args):
+        argv = [arg for arg in base_args if arg not in args_to_remove]
+        argv.extend(bad_args)
+        with patch("jax.devices", return_value=mock_devices):
+          with self.assertRaisesRegex((ValueError, pydantic.ValidationError), expected_regex):
+            pyconfig.initialize(argv)
+
   @patch.dict(os.environ, {pyconfig.yaml_key_to_env_key("steps"): "123"})
   def test_env_override(self):
     """Tests that environment variables override YAML values."""

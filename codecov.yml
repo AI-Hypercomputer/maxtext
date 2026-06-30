@@ -37,6 +37,11 @@ ignore:
   - "src/maxtext/examples"
   - "src/maxtext/experimental"
   - "src/maxtext/inference"
+  - "src/maxtext/kernels/tokamax_splash_attention/base.py"
+  - "src/maxtext/kernels/tokamax_splash_attention/ring_attention_kernel.py"
+  - "src/maxtext/kernels/tokamax_splash_attention/splash_attention_kernel.py"
+  - "src/maxtext/kernels/tokamax_splash_attention/splash_attention_mask.py"
+  - "src/maxtext/kernels/tokamax_splash_attention/splash_attention_mask_info.py"
   - "src/maxtext/scratch_code"
 
 flags:
@@ -65,4 +70,3 @@ coverage:
         threshold: 10% # fail on 10+ percent degradation
         flags:
           - regular
-
