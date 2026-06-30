@@ -181,7 +181,7 @@ jobs:
               $PYTHON_EXE -m pip install --quiet pytest-xdist
               SPLIT_ARGS="--splits ${INPUTS_TOTAL_WORKERS} --group ${INPUTS_WORKER_GROUP} -n auto"
             else
-              SPLIT_ARGS="--splits ${INPUTS_TOTAL_WORKERS} --group ${INPUTS_WORKER_GROUP}"
+              SPLIT_ARGS="--splits ${INPUTS_TOTAL_WORKERS} --group ${INPUTS_WORKER_GROUP} --splitting-algorithm least_duration"
             fi
           else
             SPLIT_ARGS=""
