@@ -117,7 +117,7 @@ def main(argv: Sequence[str]) -> None:
     save_ckpt_path = os.path.join(save_ckpt_directory, str(step_number), "items")
     max_logging.log(f"Saved checkpoint: {save_ckpt_path}")
     # Upon preemption, exit when and only when all ongoing saves are complete.
-    checkpoint_manager.wait_until_finished()
+    checkpointing.wait_until_finished(checkpoint_manager)
 
   max_logging.log(f"Elapse for checkpoint save: {(time.time() - start) / 60:.2f} min")
   print_peak_memory()

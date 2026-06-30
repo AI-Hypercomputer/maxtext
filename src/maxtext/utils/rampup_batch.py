@@ -17,6 +17,8 @@
 
 import math
 
+from maxtext.common import checkpointing
+
 
 class RampupBatchManager:
   """
@@ -105,8 +107,6 @@ def create_rampup_manager(config, checkpoint_manager):
     return None
 
   # Current step default as -1 if no checkpoint exists
-  current_step = -1
-  if checkpoint_manager and checkpoint_manager.latest_step():
-    current_step = checkpoint_manager.latest_step()
+  current_step = -1 if checkpoint_manager is None else checkpointing.latest_step(checkpoint_manager)
 
   return RampupBatchManager(config, current_step)

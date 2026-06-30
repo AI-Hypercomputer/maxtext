@@ -891,7 +891,7 @@ def train_loop(config, recorder, state=None):
 
     if checkpoint_manager is not None:
       # in case the last checkpoint_period checkpoint is still in progress
-      checkpoint_manager.wait_until_finished()
+      checkpointing.wait_until_finished(checkpoint_manager)
     _job_completed_gracefully = True
   except exceptions.StopTraining as e:
     prof.deactivate()

@@ -175,8 +175,8 @@ def main(raw_args=None) -> None:
     if checkpointing.save_checkpoint(checkpoint_manager, 0, state_new):
       max_logging.log("saved a checkpoint at step 0")
     # Upon preemption, exit when and only when all ongoing saves are complete.
-    if checkpoint_manager.reached_preemption(0):
-      checkpoint_manager.wait_until_finished()
+    if checkpointing.reached_preemption(checkpoint_manager, 0):
+      checkpointing.wait_until_finished(checkpoint_manager)
       sys.exit()
 
 

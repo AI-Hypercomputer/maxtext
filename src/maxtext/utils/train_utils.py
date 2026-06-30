@@ -25,6 +25,7 @@ from flax import nnx
 from flax.linen import partitioning as nn_partitioning
 
 from maxtext.common import checkpointing
+from maxtext.common import emergency_checkpointing
 from maxtext.common import train_state_nnx
 from maxtext.common.common_types import ReorderStrategy
 from maxtext.common.data_loader import create_dataloader
@@ -50,9 +51,11 @@ def create_training_optimizer(config, model):
 def create_checkpoint_manager(config, mesh, init_state_fn):
   """Creates the init_rng, optimizer, learning rate schedule, and checkpoint manager."""
   # pass in model for muon
-  logger = checkpointing.setup_checkpoint_logger(config)
+  # `setup_checkpoint_logger` only emits a deprecation warning now (Orbax v1 logs
+  # internally) and always returns None; we still pass it through for API parity.
+  logger = checkpointing.setup_checkpoint_logger(config)  # pylint: disable=assignment-from-no-return
   if config.enable_multi_tier_checkpointing:
-    checkpoint_manager = checkpointing.create_orbax_emergency_replicator_checkpoint_manager(
+    checkpoint_manager = emergency_checkpointing.create_replicator_checkpoint_manager(
         config.local_checkpoint_directory,
         config.local_checkpoint_period,
         mesh,
@@ -60,7 +63,7 @@ def create_checkpoint_manager(config, mesh, init_state_fn):
     )
   elif config.enable_emergency_checkpoint:
     abstract_state, _, _ = maxtext_utils.get_abstract_state(config, mesh, init_state_fn, is_training=True)
-    checkpoint_manager = checkpointing.create_orbax_emergency_checkpoint_manager(
+    checkpoint_manager = emergency_checkpointing.create_emergency_checkpoint_manager(
         config.local_checkpoint_directory,
         config.checkpoint_dir,
         mesh,
@@ -97,6 +100,7 @@ def create_checkpoint_manager(config, mesh, init_state_fn):
         config.enable_autocheckpoint,
         config.checkpoint_todelete_subdir,
         config.checkpoint_todelete_full_path,
+        config.checkpoint_storage_target_data_file_size_bytes,
     )
 
   # Use Colocated Python checkpointing dispatchers optimization (Single Controller only).
@@ -249,7 +253,7 @@ def setup_train_loop(config, recorder, devices=None):
       init_state_fn = partial(maxtext_utils.init_initial_state, model, tx, config, is_training, init_rng)
     checkpoint_manager = create_checkpoint_manager(config, mesh, init_state_fn)
     if checkpoint_manager is not None:
-      checkpoint_step = checkpoint_manager.latest_step()
+      checkpoint_step = checkpointing.latest_step(checkpoint_manager)
       if checkpoint_step is not None:
         validate_completed_steps(checkpoint_step + 1, config.steps)
 

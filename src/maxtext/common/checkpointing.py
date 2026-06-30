@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,197 +15,42 @@
 
 """Create an Orbax CheckpointManager with specified (Async or not) Checkpointer."""
 
-import asyncio
 import time
-from typing import Any, Optional
+from typing import Any
 
-from absl import flags
-import datetime
 from etils import epath
 from flax import nnx
 from flax.training import train_state
 import jax
-from maxtext.utils.globals import DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
-from maxtext.input_pipeline.multihost_dataloading import MultiHostDataLoadIterator
-from maxtext.input_pipeline.multihost_dataloading import RemoteIteratorWrapper
-from maxtext.input_pipeline.synthetic_data_processing import PlaceHolderDataIterator
+from jax.experimental import multihost_utils
+from maxtext.checkpoint_conversion.utils import load_dynamic
+from maxtext.common import checkpoint_context
+from maxtext.common import emergency_checkpointing
+from maxtext.common import grain_utility
 from maxtext.common import train_state_nnx
-from maxtext.utils import exceptions
-from maxtext.utils import max_logging
-from maxtext.utils import gcs_utils
+from maxtext.input_pipeline import multihost_dataloading
+from maxtext.input_pipeline import synthetic_data_processing
 from maxtext.utils import elastic_utils
-from maxtext.checkpoint_conversion.utils.load_dynamic import load_safetensors_dynamic_state
-
-import numpy as np
-import orbax.checkpoint as ocp
-from orbax.checkpoint import v1 as ocp_v1
+from maxtext.utils import exceptions
+from maxtext.utils import gcs_utils
+from maxtext.utils import globals as maxtext_globals
+from maxtext.utils import max_logging
+from orbax.checkpoint import v1 as ocp
 from orbax.checkpoint._src.arrays import sharding as sharding_utils
-from orbax.checkpoint._src.checkpoint_managers import preservation_policy as preservation_policy_lib
-from orbax.checkpoint._src.checkpoint_managers import save_decision_policy as save_decision_policy_lib
-import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
-import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
-# pylint: disable=too-many-positional-arguments
-import dataclasses
-import json
 
-import grain
-from grain.python import PyGrainCheckpointHandler
-from grain.experimental import ElasticIterator
+load_safetensors_dynamic_state = load_dynamic.load_safetensors_dynamic_state
+PlaceHolderDataIterator = synthetic_data_processing.PlaceHolderDataIterator
+MultiHostDataLoadIterator = multihost_dataloading.MultiHostDataLoadIterator
+DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE = maxtext_globals.DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
 
-CheckpointManager = ocp.CheckpointManager
-CheckpointManagerOptions = ocp.CheckpointManagerOptions
-Composite = ocp.args.Composite
-PyTreeCheckpointHandler = ocp.PyTreeCheckpointHandler
-EmergencyCheckpointManager = emergency_checkpoint_manager.CheckpointManager
-LocalCheckpointOptions = emergency_checkpoint_manager.LocalCheckpointOptions
-PersistentCheckpointOptions = emergency_checkpoint_manager.PersistentCheckpointOptions
-EmergencyReplicatorCheckpointManager = emergency_replicator_checkpoint_manager.ReplicatorCheckpointManager
+# Backward compatibility aliases for v0 emergency managers.
+EmergencyCheckpointManager = emergency_checkpointing.CheckpointManager
+EmergencyReplicatorCheckpointManager = emergency_checkpointing.ReplicatorCheckpointManager
+create_orbax_emergency_checkpoint_manager = emergency_checkpointing.create_emergency_checkpoint_manager
+create_orbax_emergency_replicator_checkpoint_manager = emergency_checkpointing.create_replicator_checkpoint_manager
 
-
-class GrainCheckpointHandler(PyGrainCheckpointHandler, ocp.CheckpointHandler):
-  """A CheckpointHandler that allows specifying process_index and process_count."""
-
-  def save(
-      self,
-      directory: epath.Path,
-      # `item` is for backwards compatibility with older Orbax API, see
-      # https://orbax.readthedocs.io/en/latest/guides/checkpoint/api_refactor.html.
-      item: Optional[Any] = None,
-      args: Any = None,
-  ):
-    """Saves the given iterator to the checkpoint in `directory`."""
-    item = item or args.item  # pytype:disable=attribute-error
-
-    # RemoteIteratorWrapper handles checkpointing via colocated python
-    if isinstance(item, RemoteIteratorWrapper):
-      step = int(directory.parent.name)
-      item.save_state(step)
-      return
-
-    # ElasticIterator state is a single global scalar shared by all shards,
-    # so we write one fixed `process_0.json` from process 0 only. This file
-    # layout survives changes in `jax.process_count()`.
-    if isinstance(item, ElasticIterator):
-      if jax.process_index() == 0:
-        directory.mkdir(parents=True, exist_ok=True)
-        filename = directory / "process_0.json"
-        filename.write_text(json.dumps(item.get_state(), indent=4))
-      return
-
-    def save_single_process(item, process_index, process_count):
-      filename = directory / f"process_{process_index}-of-{process_count}.json"
-      if isinstance(item, grain.DatasetIterator):
-        state = json.dumps(item.get_state(), indent=4)
-      else:
-        state = item.get_state().decode()
-      filename.write_text(state)
-
-    if isinstance(item, list):
-      for local_iterator, process_index, process_count in item:
-        save_single_process(local_iterator, process_index, process_count)
-    else:
-      process_index, process_count = jax.process_index(), jax.process_count()
-      save_single_process(item, process_index, process_count)
-
-  def restore(
-      self,
-      directory: epath.Path,
-      item: Optional[Any] = None,
-      args: Any = None,
-  ) -> Any:
-    """Restores the given iterator from the checkpoint in `directory`."""
-    item = item or args.item
-    process_index = getattr(args, "process_index", None)
-    process_count = getattr(args, "process_count", None)
-
-    # In Pathways + colocated_python environment, RemoteIteratorWrapper handles checkpointing
-    if isinstance(item, RemoteIteratorWrapper):
-      step = int(directory.parent.name)
-      item.restore_state(step)
-      return item
-
-    # McJax and Pathways through controller cases
-    # ElasticIterator: every process reads the same shared `process_0.json`.
-    if isinstance(item, ElasticIterator):
-      filename = directory / "process_0.json"
-      if not filename.exists():
-        raise ValueError(f"File {filename} does not exist.")
-      item.set_state(json.loads(filename.read_text()))
-      return item
-
-    def restore_single_process(item, process_index, process_count):
-      filename = directory / f"process_{process_index}-of-{process_count}.json"
-      if not filename.exists():
-        raise ValueError(f"File {filename} does not exist.")
-      state = filename.read_text()
-      if isinstance(item, grain.DatasetIterator):
-        state = json.loads(state)
-      else:
-        state = state.encode()
-      item.set_state(state)
-      return item
-
-    if isinstance(item, list):
-      restored_items = []
-      for data_iter, process_idx in zip(item, process_index):  # pyrefly: ignore[bad-argument-type]
-        restored_items.append(restore_single_process(data_iter, process_idx, process_count))
-      return restored_items
-    else:
-      if process_index is None or process_count is None:
-        process_index, process_count = jax.process_index(), jax.process_count()
-      return restore_single_process(item, process_index, process_count)
-
-
-@ocp.args.register_with_handler(GrainCheckpointHandler, for_save=True)
-@dataclasses.dataclass
-class GrainCheckpointSave(ocp.args.CheckpointArgs):
-  item: Any
-
-
-@ocp.args.register_with_handler(GrainCheckpointHandler, for_restore=True)
-@dataclasses.dataclass
-class GrainCheckpointRestore(ocp.args.CheckpointArgs):
-  item: Any
-  process_index: Optional[int | list[int]] = None
-  process_count: Optional[int] = None
-
-
-class GrainCheckpointable(ocp_v1.StatefulCheckpointable):
-  """Adapts `GrainCheckpointHandler` to Orbax v1's `StatefulCheckpointable`."""
-
-  def __init__(
-      self,
-      *,
-      save_args: GrainCheckpointSave | None = None,
-      restore_args: GrainCheckpointRestore | None = None,
-  ):
-    self._handler = GrainCheckpointHandler()
-    self._save_args = save_args
-    self._restore_args = restore_args
-
-  async def save(self, directory):
-    """Saves the Grain iterator state to the given directory."""
-    # `GrainCheckpointHandler.save` snapshots iterator state (`get_state`) AND
-    # writes it; both must happen in this (blocking) save phase, NOT in the
-    # returned background coroutine.
-    path = await directory.await_creation()
-    self._handler.save(path, args=self._save_args)
-
-    async def _committed():  # nothing left for the background commit phase
-      return None
-
-    return _committed()
-
-  async def load(self, directory: epath.Path):
-    """Loads the Grain iterator state from the given directory."""
-    handler, args = self._handler, self._restore_args
-
-    # This will be ran to completion so asynchronous portion is just for
-    # compatibility with Orbax v1 API.
-    async def _background_load():
-      await asyncio.to_thread(handler.restore, directory, args=args)
-
-    return _background_load()
+# Union of v1 Checkpointer / the emergency factories return; used in type hints.
+CheckpointManager = ocp.training.Checkpointer | EmergencyCheckpointManager | EmergencyReplicatorCheckpointManager
 
 
 def _weight_mismatches(want, have, path=()):
@@ -240,6 +85,18 @@ def _expected_and_restored_params(abstract_nnx_state, restored_linen):
   return want, have
 
 
+def _raise_weight_problems(problems):
+  """Raises a ValueError naming each mismatched weight; returns if there are none."""
+  if not problems:
+    return
+  lines = "\n".join(f"  - '{p}': {why}" for p, why in problems)
+  raise ValueError(
+      "Checkpoint does not match the model:\n"
+      f"{lines}\n"
+      "Verify the checkpoint matches the model architecture (emb_dim, mlp_dim, num layers, scan_layers)."
+  )
+
+
 def _raise_on_weight_mismatch(want, have):
   """Raises if the restored weights (`have`) don't match what the model expects (`want`).
 
@@ -249,15 +106,30 @@ def _raise_on_weight_mismatch(want, have):
   untrained init value (a silent accuracy loss) or fails much later, deep in the first step,
   without naming the weight.
   """
-  problems = _weight_mismatches(want, have)
-  if not problems:
-    return
-  lines = "\n".join(f"  - '{p}': {why}" for p, why in problems)
-  raise ValueError(
-      "Checkpoint does not match the model:\n"
-      f"{lines}\n"
-      "Verify the checkpoint matches the model architecture (emb_dim, mlp_dim, num layers, scan_layers)."
-  )
+  _raise_weight_problems(_weight_mismatches(want, have))
+
+
+def _stored_shape_mismatches(want, stored, path=()):
+  """Returns `(path, problem)` for each weight whose stored shape disagrees with the model's.
+
+  `stored` is checkpoint *metadata* (shape/dtype leaves, no values), so unlike
+  `_weight_mismatches` a weight the checkpoint doesn't carry is not reported here:
+  partial loads return those as unmaterialized leaves and the post-load check names
+  them. This pre-load check exists because Orbax v1 fails a mid-load shape mismatch
+  itself, with an error that reports the shapes but not which weight.
+  """
+  if isinstance(want, dict):
+    out = []
+    for k, v in want.items():
+      nested = stored.get(k) if isinstance(stored, dict) else None
+      if nested is not None:
+        out.extend(_stored_shape_mismatches(v, nested, path + (k,)))
+    return out
+  want_shape, got_shape = getattr(want, "shape", None), getattr(stored, "shape", None)
+  if want_shape is not None and got_shape is not None and tuple(want_shape) != tuple(got_shape):
+    name = "/".join(str(p) for p in path)
+    return [(name, f"shape {tuple(got_shape)} but the model expects {tuple(want_shape)}")]
+  return []
 
 
 def _linen_items_to_nnx(restored_linen, abstract_nnx_state):
@@ -289,6 +161,7 @@ def _load_linen_checkpoint_into_nnx(
     checkpoint_storage_concurrent_gb,
     use_ocdbt,
     use_zarr3,
+    enable_single_replica_ckpt_restoring: bool = False,
 ):
   """Restores a Linen-layout checkpoint into an NNX state (pure_nnx resume).
 
@@ -298,17 +171,15 @@ def _load_linen_checkpoint_into_nnx(
   """
   max_logging.log(f"Restoring Linen-layout checkpoint into NNX state at {path}")
   linen_abstract = train_state_nnx.to_checkpoint_dict(abstract_nnx_state)
-  ckptr = ocp.Checkpointer(
-      ocp.PyTreeCheckpointHandler(
-          restore_concurrent_gb=checkpoint_storage_concurrent_gb,
-          save_concurrent_gb=checkpoint_storage_concurrent_gb,
-          use_ocdbt=use_ocdbt,
-          use_zarr3=use_zarr3,
-      )
+  context = checkpoint_context.build_context(
+      use_ocdbt=use_ocdbt,
+      use_zarr3=use_zarr3,
+      checkpoint_storage_concurrent_gb=checkpoint_storage_concurrent_gb,
+      partial_load=True,
+      enable_single_replica_ckpt_restoring=enable_single_replica_ckpt_restoring,
   )
-  restore_args = ocp.checkpoint_utils.construct_restore_args(linen_abstract)
-  restored = ocp.args.PyTreeRestore(item=linen_abstract, restore_args=restore_args, partial_restore=True)
-  restored = ckptr.restore(epath.Path(path), args=restored)
+  with context:
+    restored = ocp.load(epath.Path(path), linen_abstract)
   _raise_on_weight_mismatch(*_expected_and_restored_params(abstract_nnx_state, restored))
   return _linen_items_to_nnx(restored, abstract_nnx_state)
 
@@ -317,7 +188,6 @@ def _restore_emergency_linen_checkpoint_into_nnx(
     checkpoint_manager,
     step,
     abstract_nnx_state,
-    map_to_pspec,
 ):
   """Restores an emergency Linen-layout checkpoint into an NNX state.
 
@@ -327,13 +197,7 @@ def _restore_emergency_linen_checkpoint_into_nnx(
   """
   max_logging.log(f"Restoring emergency Linen-layout checkpoint into NNX state at step {step}")
   linen_abstract = train_state_nnx.to_checkpoint_dict(abstract_nnx_state)
-  restore_args = jax.tree_util.tree_map(map_to_pspec, linen_abstract)
-  checkpoint_args = ocp.args.PyTreeRestore(
-      item=linen_abstract,
-      restore_args=restore_args,
-      partial_restore=True,
-  )
-  restored = checkpoint_manager.restore(step, args=Composite(state=checkpoint_args)).state
+  restored = emergency_checkpointing.restore(checkpoint_manager, step, linen_abstract)
   _raise_on_weight_mismatch(*_expected_and_restored_params(abstract_nnx_state, restored))
   return _linen_items_to_nnx(restored, abstract_nnx_state)
 
@@ -341,12 +205,12 @@ def _restore_emergency_linen_checkpoint_into_nnx(
 def _load_full_state_from_path(
     path,
     abstract_unboxed_pre_state,
-    enable_orbax_v1,
     checkpoint_conversion_fn,
     source_checkpoint_layout,
     checkpoint_storage_concurrent_gb,
     use_ocdbt,
     use_zarr3,
+    enable_single_replica_ckpt_restoring: bool = False,
 ):
   """Load full state from checkpoint at specified path.
 
@@ -354,7 +218,6 @@ def _load_full_state_from_path(
     path: path to checkpoint
     abstract_unboxed_pre_state: an abstract state that Orbax matches type
       against.
-    enable_orbax_v1: whether to use orbax v1 or the previously supported v0.
     checkpoint_conversion_fn: user-provided function to convert checkpoint to
       maxtext-supported state.
     source_checkpoint_layout: String representation of the checkpoint layout of
@@ -362,64 +225,55 @@ def _load_full_state_from_path(
     checkpoint_storage_concurrent_gb: concurrent GB for checkpoint byte I/O.
     use_ocdbt: Whether to use OCDBT format.
     use_zarr3: Whether to use Zarr3 format.
+    enable_single_replica_ckpt_restoring: bool flag for restoring checkpoint
+      with load-and-broadcast (single replica).
 
   Returns:
     The loaded state.
   """
+  # pure_nnx checkpoints are stored in the Linen on-disk layout; reshape to NNX.
+  if isinstance(abstract_unboxed_pre_state, nnx.State):
+    return _load_linen_checkpoint_into_nnx(
+        path,
+        abstract_unboxed_pre_state,
+        checkpoint_storage_concurrent_gb,
+        use_ocdbt,
+        use_zarr3,
+        enable_single_replica_ckpt_restoring=enable_single_replica_ckpt_restoring,
+    )
 
-  if enable_orbax_v1:
-    if source_checkpoint_layout == "orbax":
-      # pure_nnx saves in the Linen on-disk layout; reshape it back into the NNX state.
-      if isinstance(abstract_unboxed_pre_state, nnx.State):
-        return _load_linen_checkpoint_into_nnx(
-            path, abstract_unboxed_pre_state, checkpoint_storage_concurrent_gb, use_ocdbt, use_zarr3
-        )
-      context = ocp_v1.Context(checkpoint_layout=ocp_v1.options.CheckpointLayout.ORBAX)
-      with context:
-        return ocp_v1.load_pytree(path, abstract_unboxed_pre_state)
-    elif source_checkpoint_layout == "safetensors":
-      context = ocp_v1.Context(checkpoint_layout=ocp_v1.options.CheckpointLayout.SAFETENSORS)
-      with context:
-        metadata = ocp_v1.pytree_metadata(path)
-        simple_abstract_state = metadata.metadata
-        shardings = sharding_utils.construct_maximal_shardings(simple_abstract_state)
-
-        def combine_sharding(sds, shardings):
-          return jax.ShapeDtypeStruct(shape=sds.shape, dtype=sds.dtype, sharding=shardings)
-
-        sharded_abstract_state = jax.tree.map(combine_sharding, simple_abstract_state, shardings)
-        pre_transformed_state = ocp_v1.load_pytree(path, sharded_abstract_state)
-      state = checkpoint_conversion_fn(pre_transformed_state)
-      return state
-    else:
-      raise ocp_v1.errors.InvalidLayoutError(f"Unknown checkpoint layout: {source_checkpoint_layout}")
-  else:
-    # pure_nnx saves in the Linen on-disk layout; reshape it back into the NNX state.
-    if isinstance(abstract_unboxed_pre_state, nnx.State):
-      return _load_linen_checkpoint_into_nnx(
-          path,
-          abstract_unboxed_pre_state,
-          checkpoint_storage_concurrent_gb,
-          use_ocdbt,
-          use_zarr3,
-      )
-
-    # Original v0 logic.
-    p = epath.Path(path)
-    handler = ocp.PyTreeCheckpointHandler(
-        restore_concurrent_gb=checkpoint_storage_concurrent_gb,
-        save_concurrent_gb=checkpoint_storage_concurrent_gb,
+  if source_checkpoint_layout == "orbax":
+    context = checkpoint_context.build_context(
         use_ocdbt=use_ocdbt,
         use_zarr3=use_zarr3,
+        checkpoint_storage_concurrent_gb=checkpoint_storage_concurrent_gb,
+        checkpoint_layout=ocp.options.CheckpointLayout.ORBAX,
+        enable_single_replica_ckpt_restoring=enable_single_replica_ckpt_restoring,
     )
-    # Only Linen TrainState reaches here; nnx.State returned above.
-    restore_target = abstract_unboxed_pre_state
-    # Provide sharding info to ensure restoration returns JAX arrays (not NumPy arrays).
-    restore_args = jax.tree_util.tree_map(
-        lambda x: ocp.type_handlers.ArrayRestoreArgs(sharding=x.sharding),
-        restore_target,
+    with context:
+      return ocp.load(path, abstract_unboxed_pre_state)
+
+  if source_checkpoint_layout == "safetensors":
+    context = checkpoint_context.build_context(
+        use_ocdbt=use_ocdbt,
+        use_zarr3=use_zarr3,
+        checkpoint_storage_concurrent_gb=checkpoint_storage_concurrent_gb,
+        checkpoint_layout=ocp.options.CheckpointLayout.SAFETENSORS,
+        enable_single_replica_ckpt_restoring=enable_single_replica_ckpt_restoring,
     )
-    return ocp.Checkpointer(handler).restore(p, restore_target, restore_args=restore_args)
+    with context:
+      metadata = ocp.metadata(path)
+      simple_abstract_state = metadata.metadata
+      shardings = sharding_utils.construct_maximal_shardings(simple_abstract_state)
+
+      def combine_sharding(sds, shardings):
+        return jax.ShapeDtypeStruct(shape=sds.shape, dtype=sds.dtype, sharding=shardings)
+
+      sharded_abstract_state = jax.tree.map(combine_sharding, simple_abstract_state, shardings)
+      pre_transformed_state = ocp.load(path, sharded_abstract_state)
+    return checkpoint_conversion_fn(pre_transformed_state)
+
+  raise ocp.errors.InvalidLayoutError(f"Unknown checkpoint layout: {source_checkpoint_layout}")
 
 
 def create_orbax_checkpoint_manager(
@@ -440,180 +294,64 @@ def create_orbax_checkpoint_manager(
     enable_autocheckpoint: bool = False,
     todelete_subdir: str | None = None,
     todelete_full_path: str | None = None,
+    ocdbt_target_data_file_size_bytes: int | None = None,
 ):
-  """Returns specified Orbax (async or not) CheckpointManager or None if checkpointing is disabled."""
+  """Returns an Orbax v1 training ``Checkpointer``, or None if checkpointing is disabled."""
   if not enable_checkpointing:
     max_logging.log("Checkpointing disabled, not creating checkpoint manager.")
     return None
 
-  max_logging.log(f"Creating checkpoint manager with ocdbt={use_ocdbt} and zarr3={use_zarr3}")
-
-  # Base configuration for all dataset types
-  item_names = ("items",)
-  # we need to use ocdbt and zarr3 to control max file size in the checkpoint
-  item_handlers = {
-      "items": PyTreeCheckpointHandler(
-          restore_concurrent_gb=checkpoint_storage_concurrent_gb,
-          save_concurrent_gb=checkpoint_storage_concurrent_gb,
-          use_ocdbt=use_ocdbt,
-          use_zarr3=use_zarr3,
-      )
-  }
-
-  if dataset_type is not None and dataset_type == "grain":
-    item_names += ("iter",)
-    item_handlers["iter"] = GrainCheckpointHandler()  # pyrefly: ignore[bad-assignment]
-
-  # local storage checkpoint needs parent directory created
-  p = gcs_utils.mkdir_and_check_permissions(checkpoint_dir)
-  if enable_continuous_checkpointing:
-    max_logging.log("Enabling policy for continuous checkpointing.")
-    save_decision_policy = save_decision_policy_lib.ContinuousCheckpointingPolicy()
-  elif enable_autocheckpoint:
-    max_logging.log("Enabling policy for autocheckpoint.")
-    save_decision_policy = save_decision_policy_lib.AnySavePolicy(
-        [
-            save_decision_policy_lib.PreemptionCheckpointingPolicy(),
-            save_decision_policy_lib.FixedIntervalPolicy(save_interval_steps),
-        ]
+  # TODO: b/529622681 - Remove deprecated settings.
+  if orbax_logger is not None:
+    max_logging.warning(
+        "Cloud logging (enable_checkpoint_cloud_logger) is disabled because"
+        " Orbax v1 now configures its own logger internally. This config"
+        " setting is ignored and will be removed."
     )
-  else:
-    max_logging.log("Enabling policy for fixed interval checkpointing.")
-    save_decision_policy = save_decision_policy_lib.FixedIntervalPolicy(interval=save_interval_steps)
-  preservation_policy = preservation_policy_lib.LatestN(max_num_checkpoints_to_keep)
-
-  async_options = None
-  if enable_continuous_checkpointing:
-    async_options = ocp.AsyncOptions(
-        timeout_secs=int(datetime.timedelta(minutes=60).total_seconds()),
+  if dataset_type is not None:
+    max_logging.warning(
+        "Specifying dataset_type upon checkpointer creation is deprecated and"
+        " will be removed soon, this is now handled dynamically by Orbax"
+        " Checkpointer."
     )
-  manager = CheckpointManager(
-      p,
-      item_names=item_names,
-      item_handlers=item_handlers,
-      options=CheckpointManagerOptions(
-          create=True,
-          enable_async_checkpointing=use_async,
-          save_decision_policy=save_decision_policy,
-          preservation_policy=preservation_policy,
-          async_options=async_options,
-          todelete_subdir=todelete_subdir,
-          todelete_full_path=todelete_full_path,
-      ),
-      logger=orbax_logger,
+
+  max_logging.log(f"Creating checkpointer with ocdbt={use_ocdbt} and zarr3={use_zarr3}")
+
+  validated_path = gcs_utils.mkdir_and_check_permissions(checkpoint_dir)
+
+  if ocdbt_target_data_file_size_bytes is None:
+    ocdbt_target_data_file_size_bytes = DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
+
+  context = checkpoint_context.build_context(
+      use_ocdbt=use_ocdbt,
+      use_zarr3=use_zarr3,
+      ocdbt_target_data_file_size_bytes=ocdbt_target_data_file_size_bytes,
+      checkpoint_storage_concurrent_gb=checkpoint_storage_concurrent_gb,
+      enable_continuous_checkpointing=enable_continuous_checkpointing,
+      todelete_full_path=todelete_full_path,
+      todelete_subdir=todelete_subdir,
+      enable_single_replica_ckpt_restoring=enable_single_replica_ckpt_restoring,
+      colocated_python_checkpointing=(enable_single_controller and colocated_python_checkpointing),
+      partial_load=True,
   )
+
+  manager = ocp.training.Checkpointer(
+      validated_path,
+      context=context,
+      save_decision_policy=checkpoint_context.build_save_decision_policy(
+          save_interval_steps=save_interval_steps,
+          enable_continuous_checkpointing=enable_continuous_checkpointing,
+          enable_autocheckpoint=enable_autocheckpoint,
+      ),
+      preservation_policy=checkpoint_context.build_preservation_policy(
+          max_to_keep=max_num_checkpoints_to_keep,
+      ),
+  )
+  # Necessary bridge to support v0 backward compatibility.
+  manager.use_async = use_async  # pyrefly: ignore[missing-attribute]
 
   max_logging.log("Checkpoint manager created!")
   return manager
-
-
-def create_orbax_emergency_checkpoint_manager(
-    local_checkpoint_dir: str,
-    persistent_checkpoint_dir: str,
-    global_mesh: jax.sharding.Mesh,
-    abstract_state: Any,
-    local_save_interval_steps: int,
-    persistent_save_interval_steps: int,
-    orbax_logger: Any = None,  # pytype: disable=attribute-error
-):
-  """Returns an emergency checkpoint manager."""
-  flags.FLAGS.experimental_orbax_use_distributed_process_id = True
-  max_logging.log("Creating emergency checkpoint manager...")
-
-  # Only create local directories if running on GPUs as the previous directory structure might be assumed by TPUs.
-  if global_mesh.devices.flatten()[0].platform == "gpu":
-    # pylint: disable=protected-access
-    local_checkpoint_dir = f"{local_checkpoint_dir}/{jax._src.distributed.global_state.process_id}"
-    local_p = epath.Path(local_checkpoint_dir)
-    local_p.mkdir(exist_ok=True, parents=True)
-
-  persistent_p = gcs_utils.mkdir_and_check_permissions(persistent_checkpoint_dir)
-
-  # pure_nnx saves via to_checkpoint_dict (Linen params/opt_state/step plus an nnx_aux
-  # subtree), but the emergency manager restores against the abstract it is built with.
-  # Convert it the same way so it matches what is on disk; restore reshapes back to NNX.
-  if isinstance(abstract_state, nnx.State):
-    abstract_state = train_state_nnx.to_checkpoint_dict(abstract_state)
-
-  manager = EmergencyCheckpointManager(
-      local_checkpoint_dir,
-      persistent_p,
-      global_mesh=global_mesh,
-      abstract_state=abstract_state,
-      options=emergency_checkpoint_manager.CheckpointManagerOptions(
-          local=LocalCheckpointOptions(save_interval_steps=local_save_interval_steps),
-          persistent=PersistentCheckpointOptions(save_interval_steps=persistent_save_interval_steps),
-      ),
-      logger=orbax_logger,
-  )
-
-  max_logging.log("Emergency checkpoint manager created!")
-  return manager
-
-
-def create_orbax_emergency_replicator_checkpoint_manager(
-    local_checkpoint_dir: str,
-    save_interval_steps: int,
-    global_mesh: jax.sharding.Mesh,
-    colocated_python_checkpointing: bool = False,
-):
-  """Returns an emergency replicator checkpoint manager."""
-  flags.FLAGS.experimental_orbax_use_distributed_process_id = True
-  max_logging.log("Creating emergency replicator checkpoint manager...")
-
-  manager = EmergencyReplicatorCheckpointManager(
-      epath.Path(local_checkpoint_dir),
-      options=emergency_replicator_checkpoint_manager.ReplicatorCheckpointManagerOptions(
-          save_interval_steps=save_interval_steps,
-          use_colocated_python=colocated_python_checkpointing,
-      ),
-      global_mesh=global_mesh,
-  )
-
-  max_logging.log("Emergency replicator checkpoint manager created!")
-  return manager
-
-
-def replicator_error_handler(config: Any):
-  """Replicator error handler to handle errors in replicator service."""
-  if config.enable_multi_tier_checkpointing:
-    local_dir = config.local_checkpoint_directory
-    replicator_errors_file = f"{local_dir}/replicator.errors"
-    replicator_failed_file = f"{local_dir}/replicator.failed"
-    process_replicator_error_file(replicator_errors_file)
-
-    # if the replicator.failed file exists, then we have a fatal error
-    is_fatal = process_replicator_error_file(replicator_failed_file)
-    if is_fatal:
-      raise ValueError("Replicator fatal error found in replicator.failed file.")
-
-
-def process_replicator_error_file(error_file: str) -> bool:
-  """Handles replicator errors by reading, logging, cleaning the error file."""
-  error_file_path_exists = epath.Path(error_file).exists()
-  if error_file_path_exists:
-    max_logging.log(f"replicator_error_handler: file found: {error_file}.")
-    read_replicator_error_file(error_file)
-    cleanup_replicator_error_file(error_file)
-
-  return error_file_path_exists
-
-
-def read_replicator_error_file(error_file: str):
-  """Read replicator errors file."""
-  try:
-    error_data = epath.Path(error_file).read_text()
-    max_logging.log(f"Contents of replicator error file:\n{error_data}")
-  except (OSError, ValueError) as e:
-    max_logging.log("replicator_error_handler: Failed to read contents of failed" f" file: {e}")
-
-
-def cleanup_replicator_error_file(error_file: str):
-  """Clean up replicator errors file."""
-  try:
-    epath.Path(error_file).unlink()
-  except (OSError, ValueError) as e:
-    max_logging.log("replicator_error_handler: Failed to remove replicator errors file:" f" {e}")
 
 
 def print_save_message(step, async_checkpointing):
@@ -623,135 +361,37 @@ def print_save_message(step, async_checkpointing):
     max_logging.log(f"Saved a checkpoint at step {step}.")
 
 
-def _find_idx(array: np.ndarray, replica_axis_idx: int):
-  """Returns the index along given dimension that the current host belongs to."""
-  idx = None
-  for idx, val in np.ndenumerate(array):
-    if val.process_index == jax.process_index():
-      break
-  return idx[replica_axis_idx]
-
-
-def _replica_devices(device_array: np.ndarray, replica_axis_idx: int):
-  """Returns the devices from the replica that current host belongs to.
-
-  Replicas are assumed to be restricted to the first axis.
-
-  Args:
-    device_array: devices of the mesh that can be obtained by mesh.devices()
-    replica_axis_idx: axis dimension along which replica is taken
-
-  Returns:
-    devices inside the replica that current host is in
-  """
-  idx = _find_idx(device_array, replica_axis_idx)
-  replica_result = np.take(device_array, idx, axis=replica_axis_idx)
-  return np.expand_dims(replica_result, axis=replica_axis_idx)
-
-
-def _prepare_scaled_down_grain_restore_args(
-    data_iterator: list, process_count_jax: int, process_count_stored: int, directory: epath.Path
-) -> GrainCheckpointRestore:
-  """
-  Prepares the restore arguments for a scaled-up (list) data iterator.
-
-  This is used when restoring a checkpoint saved with more processes than
-  the current run (e.g., 64 files onto 32 JAX processes).
-  """
-  # 1. Validation Assertions
-  assert isinstance(data_iterator, list), (
-      f"{process_count_stored} processes found in Grain checkpoint directory {directory}, but only "
-      f"{process_count_jax} jax processes in this run, please set expansion_factor_real_data accordingly."
-  )
-
-  scaling_factor = len(data_iterator)
-  expected_process_count = process_count_stored / process_count_jax
-  assert scaling_factor == expected_process_count, (
-      f"Found {process_count_stored} processes in checkpoint and {process_count_jax} "
-      f"JAX processes, implying a scaling factor of {expected_process_count}. "
-      f"However, the data_iterator list has {scaling_factor} items."
-  )
-
-  # 2. Prepare Arguments
-  local_iterator_list = [x.local_iterator for x in data_iterator]
-  # Each JAX process calculates the global indices it's responsible for.
-  # e.g., process 0 with scaling_factor=2 handles checkpoints from processes [0, 32]
-  # e.g., process 1 with scaling_factor=2 handles checkpoints from processes [1, 33]
-  process_index_list = [jax.process_index() + i * process_count_jax for i in range(scaling_factor)]
-
-  return GrainCheckpointRestore(local_iterator_list, process_index=process_index_list, process_count=process_count_stored)
-
-
-def _restore_grain_iterator(
-    checkpoint_manager,
-    step: int,
-    data_iterator,
-    checkpoint_args,
-    expansion_factor_real_data: int,  # This must be defined in the outer scope
-) -> tuple[Any, None]:
-  """
-  Handles the complex logic for restoring a Grain data iterator checkpoint.
-  This function dispatches to the correct restore strategy based on
-  the number of stored checkpoint files vs. current JAX processes.
-  """
-  if isinstance(data_iterator, RemoteIteratorWrapper):
-    grain_restore_args = GrainCheckpointRestore(item=data_iterator)
-    restored_state = checkpoint_manager.restore(step, args=Composite(items=checkpoint_args, iter=grain_restore_args))
-    return (restored_state, None)
-
-  # ElasticIterator: one shared `process_0.json` regardless of shard count.
-  if not isinstance(data_iterator, list) and isinstance(data_iterator.local_iterator, ElasticIterator):
-    grain_restore_args = GrainCheckpointRestore(item=data_iterator.local_iterator)
-    restored_state = checkpoint_manager.restore(step, args=Composite(items=checkpoint_args, iter=grain_restore_args))
-    return (restored_state, None)
-
-  directory = checkpoint_manager.directory / str(step) / "iter"
-  process_count_jax = jax.process_count()
-
-  # Count the number of checkpoint files
-  process_count_stored = len(list(directory.glob("process_*-of-*.json")))
-
-  grain_restore_args = None
-
-  if process_count_stored > process_count_jax:
-    # Scaling down from a larger number of hosts. (e.g., 128 files -> 64 processes)
-    # In this case, each host restores a list of data iterators.
-    grain_restore_args = _prepare_scaled_down_grain_restore_args(
-        data_iterator, process_count_jax, process_count_stored, directory
-    )
-
-  elif process_count_stored == process_count_jax:
-    # Normal case: number of hosts is the same. (e.g., 64 files -> 64 processes)
-    assert not isinstance(data_iterator, list), (
-        f"{process_count_stored} processes found in Grain checkpoint directory {directory}, matching the number of "
-        "jax process, please do not set expansion_factor_real_data."
-    )
-    grain_restore_args = GrainCheckpointRestore(data_iterator.local_iterator)
-
-  elif expansion_factor_real_data > 1 and process_count_stored == process_count_jax // expansion_factor_real_data:
-    # Scaling up to a larger number of hosts.(e.g., 32 files -> 64 processes)
-    # In this case, a subset of hosts restore the data iterator.
-    assert not isinstance(
-        data_iterator, list
-    ), "when expansion_factor_real_data > 1, the data iterator should not be a list."
-    grain_restore_args = GrainCheckpointRestore(
-        data_iterator.local_iterator, process_index=jax.process_index(), process_count=process_count_stored
-    )
-
+def latest_step(checkpoint_manager):
+  """Latest saved step or None, across the v0 emergency manager and the v1 Checkpointer."""
+  if isinstance(checkpoint_manager, (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager)):
+    return checkpoint_manager.latest_step()
   else:
-    # Case 4: Mismatch
-    raise ValueError(
-        f"Error restoring Grain checkpoint in {directory}: "
-        f"The number of stored checkpoint files ({process_count_stored}) "
-        f"is incompatible with the number of JAX processes ({process_count_jax}). "
-        "If you are resuming training with a different number of chips, see instructions in "
-        "https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/data_input_pipeline/"
-        "data_input_grain.md#using-grain"
-    )
+    latest = checkpoint_manager.latest
+    return latest.step if latest is not None else None
 
-  # Call restore once with the composed arguments
-  restored_state = checkpoint_manager.restore(step, args=Composite(items=checkpoint_args, iter=grain_restore_args))
-  return (restored_state, None)
+
+def wait_until_finished(checkpoint_manager):
+  """Blocks until pending saves finish, across the v0 emergency manager and the v1 Checkpointer."""
+  if isinstance(checkpoint_manager, (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager)):
+    checkpoint_manager.wait_until_finished()
+  else:
+    checkpoint_manager.wait()
+
+
+def reached_preemption(checkpoint_manager, step: int) -> bool:
+  """Whether a preemption sync point has been reached at ``step`` (manager-agnostic)."""
+  if isinstance(checkpoint_manager, (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager)):
+    return checkpoint_manager.reached_preemption(step)
+  else:
+    return multihost_utils.reached_preemption_sync_point(step)
+
+
+def _normalize_checkpoint_root(path_str):
+  """Lifts a v0-convention pytree path (".../<step>/items") to its checkpoint root."""
+  path = epath.Path(str(path_str).rstrip("/"))
+  if path.name == "items":
+    path = path.parent
+  return str(path)
 
 
 def load_state_if_possible(
@@ -789,7 +429,7 @@ def load_state_if_possible(
     enable_orbax_v1: bool flag for enabling Orbax v1.
     checkpoint_conversion_fn: function for converting checkpoint to Orbax v1.
     source_checkpoint_layout: Optional checkpoint context to use for loading,
-    provided in string format with the default being "orbax".
+      provided in string format with the default being "orbax".
 
   Returns:
     A tuple of (train_state, train_state_params) where full_train_state captures
@@ -798,132 +438,85 @@ def load_state_if_possible(
      set.
   """
 
+  # TODO: b/529622681 - Remove deprecated settings.
+  if enable_orbax_v1:
+    max_logging.warning(
+        "enable_orbax_v1 is deprecated and will be removed, as Orbax v1 is now the default checkpointing API."
+    )
+
+  if load_parameters_from_path:
+    load_parameters_from_path = _normalize_checkpoint_root(load_parameters_from_path)
+  if load_full_state_from_path:
+    load_full_state_from_path = _normalize_checkpoint_root(load_full_state_from_path)
+
   if checkpoint_manager is not None:
     max_logging.log("checkpoint manager exists so trying to load this run's existing checkpoint")
 
-    step = checkpoint_manager.latest_step() if step < 0 else step  # pyrefly: ignore[bad-assignment]
+    step = latest_step(checkpoint_manager) if step < 0 else step  # pyrefly: ignore[bad-assignment]
     if step is not None:
       max_logging.log(f"restoring from this run's directory step {step}")
 
-      def map_to_pspec(data):
-        if not enable_single_replica_ckpt_restoring:
-          return ocp.type_handlers.ArrayRestoreArgs(sharding=data.sharding)
-        pspec = data.sharding.spec
-        mesh = data.sharding.mesh
-        replica_axis_index = 0
-        replica_devices = _replica_devices(mesh.devices, replica_axis_index)
-        replica_mesh = jax.sharding.Mesh(replica_devices, mesh.axis_names)
-        single_replica_sharding = jax.sharding.NamedSharding(replica_mesh, pspec)
-
-        return ocp.type_handlers.SingleReplicaArrayRestoreArgs(
-            sharding=jax.sharding.NamedSharding(mesh, pspec),
-            single_replica_sharding=single_replica_sharding,
-            global_shape=data.shape,
-            dtype=data.dtype,
-        )
-
-      if enable_single_replica_ckpt_restoring:
-        array_handler = ocp.type_handlers.SingleReplicaArrayHandler(
-            replica_axis_index=0,
-            broadcast_memory_limit_bytes=1024 * 1024 * 1000,  # 1000 MB limit
-        )
-        ocp.type_handlers.register_type_handler(jax.Array, array_handler, override=True)
-
-      # pure_nnx saves in the Linen on-disk layout; restore that layout (weights +
-      # opt_state + step + nnx_aux), restoring the grain iterator in place when
+      # pure_nnx saves in the Linen on-disk layout (weights + opt_state + step +
+      # nnx_aux); restore that layout, restoring the grain iterator in place when
       # present, then reshape it back into the NNX state.
       # (Emergency managers use their own restore path below.)
       if isinstance(abstract_unboxed_pre_state, nnx.State) and not isinstance(
-          checkpoint_manager,
-          (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager),
+          checkpoint_manager, (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager)
       ):
+        assert isinstance(checkpoint_manager, ocp.training.Checkpointer)
         linen_abstract = train_state_nnx.to_checkpoint_dict(abstract_unboxed_pre_state)
-        restore_args = jax.tree_util.tree_map(map_to_pspec, linen_abstract)
-        checkpoint_args = ocp.args.PyTreeRestore(item=linen_abstract, restore_args=restore_args, partial_restore=True)
+        abstract_checkpointables = {"items": linen_abstract}
         if (
             dataset_type == "grain"
             and data_iterator
             and not isinstance(data_iterator, PlaceHolderDataIterator)
             and (checkpoint_manager.directory / str(step) / "iter").exists()
         ):
-          restored, _ = _restore_grain_iterator(
-              checkpoint_manager, step, data_iterator, checkpoint_args, expansion_factor_real_data
+          abstract_checkpointables["iter"] = grain_utility.for_restore(
+              checkpoint_manager, step, data_iterator, expansion_factor_real_data
           )
-        else:
-          restored = checkpoint_manager.restore(step, args=Composite(items=checkpoint_args))
+        restored = checkpoint_manager.load_checkpointables(step, abstract_checkpointables)
         _raise_on_weight_mismatch(*_expected_and_restored_params(abstract_unboxed_pre_state, restored["items"]))
         restored_nnx = _linen_items_to_nnx(restored["items"], abstract_unboxed_pre_state)
         return ({"items": restored_nnx}, None)
 
+      # Emergency + NNX: the on-disk layout is Linen; partially restore the Linen
+      # tree and reshape it back into the NNX state.
       if isinstance(abstract_unboxed_pre_state, nnx.State) and isinstance(
-          checkpoint_manager,
-          (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager),
+          checkpoint_manager, (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager)
       ):
-        restored = _restore_emergency_linen_checkpoint_into_nnx(
-            checkpoint_manager,
-            step,
-            abstract_unboxed_pre_state,
-            map_to_pspec,
-        )
+        restored_nnx = _restore_emergency_linen_checkpoint_into_nnx(checkpoint_manager, step, abstract_unboxed_pre_state)
+        return (restored_nnx, None)
+
+      # Case 1: emergency (non-NNX) managers restore via their own v0 path.
+      if isinstance(checkpoint_manager, (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager)):
         return (
-            restored,
+            emergency_checkpointing.restore(checkpoint_manager, step, abstract_unboxed_pre_state),
             None,
         )
 
-      # Only Linen TrainState reaches here; the NNX cases returned above.
-      restore_target = abstract_unboxed_pre_state
-      restore_args = jax.tree_util.tree_map(map_to_pspec, restore_target)
-      checkpoint_args = ocp.args.PyTreeRestore(
-          item=restore_target,
-          restore_args=restore_args,
-          partial_restore=True,
+      # Case 2: standard v1 Checkpointer (Linen), restoring the grain iterator when
+      # a "grain" dataset iterator was checkpointed alongside the state.
+      assert isinstance(checkpoint_manager, ocp.training.Checkpointer)
+      abstract_checkpointables = {"items": abstract_unboxed_pre_state}
+      if (
+          dataset_type == "grain"
+          and data_iterator
+          and not isinstance(data_iterator, PlaceHolderDataIterator)
+          and (checkpoint_manager.directory / str(step) / "iter").exists()
+      ):
+        abstract_checkpointables["iter"] = grain_utility.for_restore(
+            checkpoint_manager, step, data_iterator, expansion_factor_real_data
+        )
+      return (
+          checkpoint_manager.load_checkpointables(step, abstract_checkpointables),
+          None,
       )
-
-      match (checkpoint_manager, dataset_type, data_iterator):
-        # Case 1: Matches if 'checkpoint_manager' is an instance of either EmergencyCheckpointManager
-        # or EmergencyReplicatorCheckpointManager. The '_' indicates that 'dataset_type' and
-        # 'data_iterator' can be any value and aren't used in this pattern.
-        case (checkpoint_manager, _, _) if isinstance(
-            checkpoint_manager,
-            (
-                EmergencyCheckpointManager,
-                EmergencyReplicatorCheckpointManager,
-            ),
-        ):
-          restored = checkpoint_manager.restore(step, args=Composite(state=checkpoint_args)).state
-          return (
-              restored,
-              None,
-          )
-        # Case 2: Matches if dataset type is "grain" and the data iterator is not a
-        # PlaceHolderDataIterator and a specific checkpoint file exists for the iterator
-        case (
-            checkpoint_manager,
-            dataset_type,
-            data_iterator,
-        ) if (
-            dataset_type == "grain"
-            and data_iterator
-            and not isinstance(data_iterator, PlaceHolderDataIterator)
-            and (checkpoint_manager.directory / str(step) / "iter").exists()
-        ):
-          return _restore_grain_iterator(
-              checkpoint_manager,
-              step,
-              data_iterator,
-              checkpoint_args,
-              expansion_factor_real_data,
-          )
-        # Case 3: Default/Fallback case.
-        # This case acts as a wildcard ('_') and matches if none of the preceding cases were met.
-        case _:
-          restored = checkpoint_manager.restore(step, args=Composite(items=checkpoint_args))
-          return (restored, None)
 
   if source_checkpoint_layout == "safetensors_dynamic":
     path = load_parameters_from_path or load_full_state_from_path
     max_logging.log(f"Dynamic On-the-Fly Formatting: Loading SafeTensors from {path}")
-
+    # Delegate to custom MaxText dynamic conversion module
     return load_safetensors_dynamic_state(path, abstract_unboxed_pre_state, maxtext_config)
   elif load_parameters_from_path != "":
     if isinstance(abstract_unboxed_pre_state, nnx.State):
@@ -937,6 +530,7 @@ def load_state_if_possible(
         checkpoint_storage_concurrent_gb,
         use_ocdbt=use_ocdbt,
         use_zarr3=use_zarr3,
+        enable_single_replica_ckpt_restoring=bool(enable_single_replica_ckpt_restoring),
     )
     return None, restored_params
   elif load_full_state_from_path != "":
@@ -944,12 +538,12 @@ def load_state_if_possible(
     restored_state = _load_full_state_from_path(
         path=load_full_state_from_path,
         abstract_unboxed_pre_state=abstract_unboxed_pre_state,
-        enable_orbax_v1=enable_orbax_v1,
         checkpoint_conversion_fn=checkpoint_conversion_fn,
         source_checkpoint_layout=source_checkpoint_layout,
         checkpoint_storage_concurrent_gb=checkpoint_storage_concurrent_gb,
         use_ocdbt=use_ocdbt,
         use_zarr3=use_zarr3,
+        enable_single_replica_ckpt_restoring=bool(enable_single_replica_ckpt_restoring),
     )
     return {"items": restored_state}, None
   else:
@@ -958,22 +552,14 @@ def load_state_if_possible(
 
 
 def setup_checkpoint_logger(config) -> Any | None:  # pytype: disable=attribute-error
-  """Setup checkpoint logger.
-  Args:
-    config
-  Returns:
-    CloudLogger
-  """
-  orbax_cloud_logger = None
-  max_logging.log("Setting up checkpoint logger...")
+  """DEPRECATED: Setup checkpoint logger."""
+  # TODO: b/529622681 - Remove this config option entirely.
   if config.enable_checkpoint_cloud_logger:
-    logger_name = f"goodput_{config.run_name}"
-    orbax_cloud_logger = ocp.logging.CloudLogger(
-        options=ocp.logging.CloudLoggerOptions(job_name=config.run_name, logger_name=logger_name)
+    max_logging.warning(
+        "Cloud logging (enable_checkpoint_cloud_logger) is disabled because"
+        " Orbax v1 now configures its own logger internally. This config"
+        " setting is ignored and will be removed."
     )
-    max_logging.log("Successfully set up checkpoint cloud logger.")
-
-  return orbax_cloud_logger
 
 
 def load_params_from_path(
@@ -982,10 +568,15 @@ def load_params_from_path(
     checkpoint_storage_concurrent_gb,
     use_ocdbt=True,
     use_zarr3=True,
+    enable_single_replica_ckpt_restoring: bool = False,
 ):
   """Load decode params from checkpoint at specified path."""
   assert load_parameters_from_path, "load_parameters_from_path is not defined."
   max_logging.log(f"restoring params from {load_parameters_from_path}")
+
+  # Orbax v1 refuses to read an item subdirectory directly; normalize the documented
+  # ".../<step>/items" form to its checkpoint root and load it by name below.
+  path = epath.Path(_normalize_checkpoint_root(load_parameters_from_path))
 
   # On disk the weights live at `params/params/...`: an outer key naming the item, and Flax's
   # `params` collection inside it. A Linen TrainState.params is that collection; an NNX params
@@ -994,30 +585,38 @@ def load_params_from_path(
   want = abstract_unboxed_params.to_pure_dict() if is_nnx else abstract_unboxed_params
   params_collection = {"params": want} if is_nnx else want
 
-  # *_concurrent_gb should be set for large models, the default is 96.
-  max_logging.log(f"Creating checkpoint manager with ocdbt={use_ocdbt} and zarr3={use_zarr3}")
-  ckptr = ocp.Checkpointer(
-      ocp.PyTreeCheckpointHandler(
-          restore_concurrent_gb=checkpoint_storage_concurrent_gb,
-          save_concurrent_gb=checkpoint_storage_concurrent_gb,
-          use_ocdbt=use_ocdbt,
-          use_zarr3=use_zarr3,
-      )
+  # Memory optimization: restore only the "params" key (the checkpoint may also hold opt_state/step);
+  # partial_load drops the rest. The abstract carries shape/dtype/sharding directly.
+  context = checkpoint_context.build_context(
+      use_ocdbt=use_ocdbt,
+      use_zarr3=use_zarr3,
+      checkpoint_storage_concurrent_gb=checkpoint_storage_concurrent_gb,
+      partial_load=True,
+      enable_single_replica_ckpt_restoring=enable_single_replica_ckpt_restoring,
   )
-
-  # This is a memory optimization. We don't want to restore the entire checkpoint - only the params.
-  # Rather than pass the entire abstract state, which could unnecessarily restore opt_state and such and waste
-  # memory, we instead specify here that we are just restoring the params field of the checkpoint
-  # (which itself may be a dictionary containing a key named 'params').
-  restore_args = ocp.checkpoint_utils.construct_restore_args(params_collection)
-  restored = ckptr.restore(
-      epath.Path(load_parameters_from_path),
-      item={"params": params_collection},
-      transforms={},
-      restore_args={"params": restore_args},
-  )
-  restored_collection = restored["params"]
-  # `transforms={}` lets Orbax return an unmaterialized leaf for a weight the checkpoint lacks,
+  # Dispatch on the on-disk layout instead of assuming a step root: callers pass step roots,
+  # v0-style pytree dirs (normalized above), and v0 flat params-only checkpoints
+  # (save_params_to_path wrote the pytree directly at the directory).
+  with context:
+    checkpointable_name = "items" if (path / "items").exists() else None
+    # Orbax v1 fails a mid-load shape mismatch itself, with an error that reports the
+    # shapes but not which weight; compare the stored metadata first so the error names
+    # it. A metadata read failure falls through to the load (worst case: Orbax's error).
+    try:
+      stored = ocp.metadata(path, checkpointable_name=checkpointable_name).metadata
+    except Exception as e:  # pylint: disable=broad-except
+      max_logging.log(f"Skipping pre-load shape check, checkpoint metadata unreadable: {e}")
+      stored = None
+    if isinstance(stored, dict):
+      stored_collection = stored.get("params")
+      if is_nnx and isinstance(stored_collection, dict):
+        stored_collection = stored_collection.get("params")
+      _raise_weight_problems(_stored_shape_mismatches(want, stored_collection))
+    restored = ocp.load(
+        path, {"params": params_collection}, checkpointable_name=checkpointable_name
+    )  # pyrefly: ignore[bad-argument-type]
+  restored_collection = restored["params"]  # pyrefly: ignore[bad-index]
+  # partial_load lets Orbax return an unmaterialized leaf for a weight the checkpoint lacks,
   # and a stored array at its own shape rather than the target's. Either reaches the model and
   # fails much later without naming the weight, so check here -- the params-only load
   # (load_parameters_path, e.g. SFT) has no init state to fall back on.
@@ -1031,13 +630,16 @@ def load_params_from_path(
 def save_params_to_path(checkpoint_dir, params, use_ocdbt=True, use_zarr3=True):
   """Save decode params in checkpoint at specified path."""
   assert checkpoint_dir, "checkpoint_dir is not defined."
-  print(f"Saving quantized params checkpoint with use_ocdbt = {use_ocdbt} and use_zarr3 = {use_zarr3}")
-  orbax_checkpointer = ocp.PyTreeCheckpointer(use_ocdbt=use_ocdbt, use_zarr3=use_zarr3)
-  orbax_checkpointer.save(checkpoint_dir, {"params": params}, force=True)
-  print(f"Quantized params checkpoint saved at: {checkpoint_dir}")
+  max_logging.log(f"Saving params checkpoint with use_ocdbt={use_ocdbt} and" f" use_zarr3={use_zarr3}")
+  context = checkpoint_context.build_context(use_ocdbt=use_ocdbt, use_zarr3=use_zarr3)
+  with context:
+    ocp.save(
+        checkpoint_dir, {"params": params}, checkpointable_name="items", overwrite=True
+    )  # pyrefly: ignore[bad-argument-type]
+  max_logging.log(f"Params checkpoint saved at: {checkpoint_dir}")
 
 
-def load_checkpoint_metadata(checkpoint_dir_path: str) -> dict[str, Any]:
+def load_checkpoint_metadata(checkpoint_dir_path: str) -> Any:
   """Loads custom metadata from an Orbax checkpoint.
 
   Args:
@@ -1047,10 +649,9 @@ def load_checkpoint_metadata(checkpoint_dir_path: str) -> dict[str, Any]:
     A dictionary containing custom metadata, or an empty dictionary if none is
     present or loading fails.
   """
-  checkpoint_dir = epath.Path(checkpoint_dir_path)
+  checkpoint_dir = epath.Path(_normalize_checkpoint_root(checkpoint_dir_path))
   try:
-    ckptr = ocp.StandardCheckpointer()
-    metadata = ckptr.metadata(checkpoint_dir)
+    metadata = ocp.checkpointables_metadata(checkpoint_dir)
     return metadata.custom_metadata or {}
   except Exception as e:  # pylint: disable=broad-except
     max_logging.log(f"Warning: Failed to load checkpoint metadata: {e}")
@@ -1070,16 +671,18 @@ def _should_save_checkpoint_at_step(checkpoint_manager, step, config, force):
   else:
     base_checkpoint_due = step % config.checkpoint_period == 0
   local_checkpoint_due = _uses_local_checkpoint_period(config) and step % config.local_checkpoint_period == 0
-  autocheckpoint_due = config.enable_autocheckpoint and checkpoint_manager.reached_preemption(step)
+  autocheckpoint_due = config.enable_autocheckpoint and reached_preemption(checkpoint_manager, step)
   return base_checkpoint_due or local_checkpoint_due or autocheckpoint_due
 
 
 def _handle_post_checkpoint_preemption(checkpoint_manager, step, force_ckpt_save):
   """Waits on final/preemption saves and raises if preempted."""
-  reached_preemption = checkpoint_manager.reached_preemption(step)
-  if force_ckpt_save or reached_preemption:
-    checkpoint_manager.wait_until_finished()
-  if reached_preemption:
+  # Named is_preempted (not reached_preemption) so it doesn't shadow the module-level
+  # reached_preemption dispatcher we call below.
+  is_preempted = reached_preemption(checkpoint_manager, step)
+  if force_ckpt_save or is_preempted:
+    wait_until_finished(checkpoint_manager)
+  if is_preempted:
     raise exceptions.StopTraining("Job is preempted.")
 
 
@@ -1113,7 +716,7 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
     _handle_post_checkpoint_preemption(checkpoint_manager, actual_step, force_ckpt_save)
     return
 
-  if checkpoint_manager.latest_step() == actual_step:
+  if latest_step(checkpoint_manager) == actual_step:
     max_logging.log(f"Checkpoint for step {actual_step} already exists, skipping save.")
     return
 
@@ -1162,7 +765,7 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
         force
         or (step % config.checkpoint_period == 0 and not config.enable_continuous_checkpointing)
         or (_uses_local_checkpoint_period(config) and step % config.local_checkpoint_period == 0)
-        or (config.enable_autocheckpoint and checkpoint_manager.reached_preemption(step))
+        or (config.enable_autocheckpoint and reached_preemption(checkpoint_manager, step))
     ):
       blocking_until_ready_start = time.time()
       max_logging.log(f"Waiting for step {step} to finish before checkpoint...")
@@ -1174,43 +777,12 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
           f"{step} to finish before starting checkpointing."
       )
 
-  # specify chunk_byte_size to force orbax to control maximum file size in checkpoint
-  chunk_byte_size = (
-      config.checkpoint_storage_target_data_file_size_bytes if config else DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
-  )
+  # Emergency / replicator managers keep the v0 save path.
+  if isinstance(checkpoint_manager, (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager)):
+    return emergency_checkpointing.save(checkpoint_manager, step, state, config, force)
 
-  checkpoint_args = ocp.args.PyTreeSave(
-      item=state,
-      save_args=jax.tree.map(lambda _: ocp.SaveArgs(chunk_byte_size=chunk_byte_size), state),
-      ocdbt_target_data_file_size=chunk_byte_size,
-  )
-  save_args_composite = {"items": checkpoint_args}
-
-  if config and config.dataset_type == "grain" and not isinstance(data_iterator, PlaceHolderDataIterator):
-    if isinstance(data_iterator, RemoteIteratorWrapper):
-      # Pass the wrapper directly; GrainCheckpointHandler will call save_state with the step
-      save_args_composite["iter"] = GrainCheckpointSave(item=data_iterator)  # pyrefly: ignore[bad-assignment]
-    elif not isinstance(data_iterator, list) and isinstance(
-        data_iterator.local_iterator, ElasticIterator
-    ):  # pyrefly: ignore[missing-attribute]
-      # ElasticIterator checkpoints a single global scalar shared by all shards.
-      save_args_composite["iter"] = GrainCheckpointSave(
-          item=data_iterator.local_iterator
-      )  # pyrefly: ignore[bad-assignment]
-    else:
-      if not isinstance(data_iterator, list):
-        data_iterator = [data_iterator]
-      grain_iters_to_save = []
-      process_count_total = jax.process_count() * len(data_iterator)
-      if config.expansion_factor_real_data > 1:
-        process_count_total = process_count_total // config.expansion_factor_real_data
-      for i, data_iter in enumerate(data_iterator):
-        process_index = jax.process_index() + i * jax.process_count()
-        grain_iters_to_save.append(
-            (data_iter.local_iterator, process_index, process_count_total)
-        )  # pyrefly: ignore[missing-attribute]
-      save_args_composite["iter"] = GrainCheckpointSave(item=grain_iters_to_save)  # pyrefly: ignore[bad-assignment]
-
+  # Record config properties needed to validate compatibility at load time
+  # (e.g. proactive scan_layers verification, LoRA restore).
   custom_metadata = {}
   if config:
     if hasattr(config, "scan_layers"):
@@ -1218,13 +790,24 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
     if hasattr(config, "lora") and config.lora and getattr(config.lora, "lora_rank", 0) > 0:
       custom_metadata["lora"] = config.lora.model_dump()
 
-  match (checkpoint_manager, config, data_iterator):
-    case (checkpoint_manager, _, _) if isinstance(
-        checkpoint_manager, (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager)
-    ):
-      replicator_error_handler(config)
-      return checkpoint_manager.save(step, args=Composite(state=checkpoint_args), force=force)
-    case _:
-      return checkpoint_manager.save(
-          step, args=Composite(**save_args_composite), force=force, custom_metadata=custom_metadata
+  # Standard path: Orbax v1 Checkpointer. Storage/chunk options live on the manager's Context.
+  checkpointables = {"items": state}
+  if config and config.dataset_type == "grain" and not isinstance(data_iterator, PlaceHolderDataIterator):
+    checkpointables["iter"] = grain_utility.for_save(step, data_iterator, config.expansion_factor_real_data)
+  # The v1 Checkpointer raises for an already-existing step BEFORE consulting the
+  # save decision policy; v0 silently skipped such saves (should_save ran first).
+  # Preserve v0 semantics: e.g. resuming from a non-latest step into a directory
+  # that still holds later/off-interval checkpoints must not kill training.
+  try:
+    if getattr(checkpoint_manager, "use_async", False):
+      # Async save returns once the blocking device-to-host copy is done and writes in
+      # the background (v0 enable_async_checkpointing parity); a None response means the
+      # save decision policy declined. Background errors surface on the next save/wait.
+      response = checkpoint_manager.save_checkpointables_async(
+          step, checkpointables, force=force, custom_metadata=custom_metadata
       )
+      return response is not None
+    return checkpoint_manager.save_checkpointables(step, checkpointables, force=force, custom_metadata=custom_metadata)
+  except FileExistsError as e:  # ocp.training StepAlreadyExistsError subclasses FileExistsError
+    max_logging.log(f"Checkpoint for step {step} already exists, skipping save. ({e})")
+    return False

@@ -306,8 +306,8 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
   if checkpointing.save_checkpoint(checkpoint_manager, step_value, converted_state):
     max_logging.log(f"saved a checkpoint at step {step_value}")
   # Upon preemption, exit when and only when all ongoing saves are complete.
-  if checkpoint_manager.reached_preemption(step_value):
-    checkpoint_manager.wait_until_finished()
+  if checkpointing.reached_preemption(checkpoint_manager, step_value):
+    checkpointing.wait_until_finished(checkpoint_manager)
     sys.exit()
 
   max_logging.log(f"Peak cpu memory in a single process: {fmt_size(memory_metrics['max_cpu_bytes'])}")
