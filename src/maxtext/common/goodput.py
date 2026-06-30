@@ -66,18 +66,31 @@ def maybe_monitor_goodput(config):
         enable_gcp_goodput_metrics=config.enable_gcp_goodput_metrics,
         enable_gcp_step_deviation_metrics=config.enable_gcp_step_deviation_metrics,
     )
-    goodput_monitor = monitoring.GoodputMonitor(
-        job_name=config.run_name,
-        logger_name=f"goodput_{config.run_name}",
-        tensorboard_dir=config.tensorboard_dir,
-        upload_interval=config.goodput_upload_interval_seconds,
-        monitoring_enabled=True,
-        pathway_enabled=config.enable_pathways_goodput,
-        include_badput_breakdown=True,
-        include_step_deviation=config.monitor_step_time_deviation,
-        step_deviation_interval_seconds=config.step_deviation_interval_seconds,
-        gcp_options=gcp_options,
-    )
+    monitor_class = monitoring.GoodputMonitor
+
+    if config.elastic_enabled:
+      try:
+        from ml_goodput_measurement import monitoring_elastic  # pylint: disable=import-outside-toplevel
+
+        monitor_class = monitoring_elastic.ElasticGoodputMonitor
+      except ImportError:
+        max_logging.log("Elastic monitor failed!")
+
+    kwargs = {
+        "job_name": config.run_name,
+        "logger_name": f"goodput_{config.run_name}",
+        "tensorboard_dir": config.tensorboard_dir,
+        "upload_interval": config.goodput_upload_interval_seconds,
+        "monitoring_enabled": True,
+        "include_badput_breakdown": True,
+        "include_step_deviation": config.monitor_step_time_deviation,
+        "step_deviation_interval_seconds": config.step_deviation_interval_seconds,
+        "gcp_options": gcp_options,
+    }
+    if monitor_class == monitoring.GoodputMonitor:
+      kwargs["pathway_enabled"] = config.enable_pathways_goodput
+
+    goodput_monitor = monitor_class(**kwargs)
     goodput_monitor.start_goodput_uploader()
     max_logging.log("Started Goodput upload to Tensorboard & GCM in the background!")
     yield
@@ -121,8 +134,23 @@ def create_goodput_recorder(config):
     if config.enable_goodput_recording and jax.process_index() == 0:
       max_logging.log("[GOODPUT NO-OP] recorder skipped (decoupled stub).")
     return None
-  if config.enable_goodput_recording:
-    logger_name = f"goodput_{config.run_name}"
-    recorder = goodput.GoodputRecorder(config.run_name, logger_name, jax.process_index() == 0)
-    return recorder
-  return None
+
+  if not config.enable_goodput_recording:
+    return None
+
+  logger_name = f"goodput_{config.run_name}"
+
+  # Detect if we should use the elastic-aware recorder
+  if config.elastic_enabled:
+    try:
+      from ml_goodput_measurement import goodput_elastic  # pylint: disable=import-outside-toplevel
+      from maxtext.utils import elastic_utils  # pylint: disable=import-outside-toplevel
+
+      recorder = goodput_elastic.ElasticGoodputRecorder(config.run_name, logger_name, jax.process_index() == 0)
+      elastic_utils.record_slice_state(recorder)
+    except ImportError as e:
+      max_logging.log(f"Could not create elastic goodput recorder: {e}")
+    else:
+      return recorder
+
+  return goodput.GoodputRecorder(config.run_name, logger_name, jax.process_index() == 0)
