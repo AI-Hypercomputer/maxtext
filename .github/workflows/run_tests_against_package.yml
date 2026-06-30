@@ -176,8 +176,13 @@ jobs:
             fi
           fi
           if [ "${INPUTS_TOTAL_WORKERS}" -gt 1 ]; then
-            $PYTHON_EXE -m pip install --quiet pytest-split pytest-xdist
-            SPLIT_ARGS="--splits ${INPUTS_TOTAL_WORKERS} --group ${INPUTS_WORKER_GROUP} -n auto"
+            $PYTHON_EXE -m pip install --quiet pytest-split
+            if [ "${INPUTS_DEVICE_TYPE}" = "tpu" ]; then
+              SPLIT_ARGS="--splits ${INPUTS_TOTAL_WORKERS} --group ${INPUTS_WORKER_GROUP}"
+            else
+              $PYTHON_EXE -m pip install --quiet pytest-xdist
+              SPLIT_ARGS="--splits ${INPUTS_TOTAL_WORKERS} --group ${INPUTS_WORKER_GROUP} -n auto"
+            fi
           else
             SPLIT_ARGS=""
           fi

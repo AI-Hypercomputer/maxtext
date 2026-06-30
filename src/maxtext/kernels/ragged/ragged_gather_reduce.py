@@ -385,7 +385,7 @@ def _preprocess(
     reduce_group_size: int,
     num_row_partitions: int,
     num_simd_lanes: int,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
   """Preprocesses indices for ragged gather reduce."""
   assert indices.ndim == 1, "Ragged scatter only supports 1d indices."
 
@@ -416,12 +416,16 @@ def _preprocess(
       num_src_rows_per_row_partition.astype(jnp.int32),
       (0, num_simd_lanes - num_row_partitions),
   )
+  # If there is no valid source row in a reduce group, we set the mask to
+  # False, so that the output for that group is set to zero.
+  mask = jnp.any(valid_rows_mask.reshape(-1, reduce_group_size), axis=-1)
 
   return (
       src_indices,
       dst_indices,
       topk_weights,
       num_src_rows_per_row_partition,
+      mask,
   )
 
 
@@ -481,11 +485,6 @@ def ragged_gather_reduce(
   # Heuristic threshold on whether to fallback for small inputs.
   dtype = x.dtype
   dtype_bytes = jax.dtypes.itemsize_bits(dtype) // 8
-  if jnp.size(x) * dtype_bytes * 2 < pltpu.get_tpu_info().vmem_capacity_bytes * 0.6:
-    # For small {input + output}, it's likely that both can be put in TC VMEM,
-    # so it's likely faster to run TC-based implementation on it than going
-    # through SC, without data movement to/from HBM.
-    return _fallback_implementation(x, indices, topk_weights, valid_rows_mask, reduce_group_size)
 
   hidden_size = x.shape[-1]
   input_size = indices.size
@@ -533,6 +532,7 @@ def ragged_gather_reduce(
       dst_indices,
       topk_weights,
       num_src_rows_per_row_partition,
+      mask,
   ) = _preprocess(
       indices,
       topk_weights,
@@ -588,4 +588,10 @@ def ragged_gather_reduce(
       },
   )(num_src_rows_per_row_partition, x, src_indices, dst_indices, topk_weights)
 
-  return out.astype(x.dtype)
+  # If there is no valid source row in a reduce group, set that group's output
+  # to zero.
+  return jnp.where(
+      mask[:, None],
+      out.astype(x.dtype),
+      jnp.zeros_like(out, dtype=x.dtype),
+  )[: (input_size // reduce_group_size), :hidden_size]

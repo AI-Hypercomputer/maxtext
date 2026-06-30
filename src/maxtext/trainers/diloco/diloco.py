@@ -28,13 +28,12 @@ from typing import Any, Callable
 import drjax
 from flax import nnx
 from flax import struct
-from flax.training import train_state
 import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Int32, Key, PyTree, UInt32
-import optax
-
+from maxtext.common.train_state_nnx import TrainStateNNX
 from maxtext.configs import pyconfig
+import optax
 
 Batch = Any
 Params = PyTree
@@ -157,8 +156,12 @@ def build_abstract_diloco_state(
   # For NNX, model params (Param variables only) live under abstract_state.model;
   # for Linen under abstract_state.params.
   if config.pure_nnx:
-    model_params = abstract_state.model.filter(nnx.Param)
-    model_params_sharding = state_mesh_shardings.model.filter(nnx.Param)
+    _, model_params, _ = nnx.split(abstract_state.model, nnx.Param, ...)
+    model_params = model_params.to_pure_dict()
+    _, model_params_sharding, _ = nnx.split(
+        state_mesh_shardings.model, nnx.Param, ...
+    )
+    model_params_sharding = model_params_sharding.to_pure_dict()
   else:
     model_params = abstract_state.params
     model_params_sharding = state_mesh_shardings.params
@@ -216,7 +219,11 @@ def build_diloco_state(
     # Outer state retains a single copy of the model parameters and optimizer state.
     # For NNX, model params (Param variables only) live under state.model;
     # for Linen under state.params.
-    outer_params = state.model.filter(nnx.Param) if config.pure_nnx else state.params
+    if config.pure_nnx:
+      _, outer_params, _ = nnx.split(state.model, nnx.Param, ...)
+      outer_params = outer_params.to_pure_dict()
+    else:
+      outer_params = state.params
     outer_opt_state = outer_optimizer.init(outer_params)
     outer_opt_state_sharding = jax.tree_util.tree_map(lambda x: x.sharding, outer_opt_state)
     # For NNX, the step counter lives at state.optimizer.step; for Linen at state.step.
@@ -258,9 +265,13 @@ def build_diloco_train_step(
     # state (since last synchronization).
     broadcast_outer_params = drjax.broadcast(state.params, mesh=mesh)
     # For NNX, model Param vars live under inner_state.model; for Linen under inner_state.params.
-    inner_model_params = (
-        nnx.filter_state(state.inner_state.model, nnx.Param) if config.pure_nnx else state.inner_state.params
-    )
+    if config.pure_nnx:
+      _, inner_model_params, _ = nnx.split(
+          state.inner_state.model, nnx.Param, ...
+      )
+      inner_model_params = inner_model_params.to_pure_dict()
+    else:
+      inner_model_params = state.inner_state.params
     model_delta = jax.tree.map(lambda x, y: y - x, inner_model_params, broadcast_outer_params)
     # Treat the average delta as the outer optimizer's gradient and apply to
     # the global (outer) model params.
@@ -273,15 +284,40 @@ def build_diloco_train_step(
     if config.pure_nnx:
       # For NNX: merge new Param vars back with the non-Param model vars (e.g. RNG state).
       def replace_nnx_model_params(s, new_params):
-        non_param_model = nnx.filter_state(s.model, nnx.Not(nnx.Param))
-        new_model = nnx.merge_state(non_param_model, new_params)
-        # Assign via __setitem__ so nested States are stored as plain dicts (matching
-        # nnx.state()'s pytree structure). The dict-literal constructor keeps them as
-        # State objects, which makes jax.lax.cond see mismatched pytree structures.
-        result = type(s)({})
-        result["model"] = new_model
-        result["optimizer"] = s["optimizer"]
-        return result
+        s_model = s["model"] if hasattr(s, "keys") else s.model
+        s_opt = s["optimizer"] if hasattr(s, "keys") else s.optimizer
+
+        graphdef, _, non_param_state = nnx.split(s_model, nnx.Param, ...)
+        new_model = nnx.merge(graphdef, new_params, non_param_state)
+
+        if type(s_model).__name__ == "State":
+          new_model = nnx.state(new_model)
+        elif isinstance(s_model, dict):
+          new_model = nnx.to_pure_dict(new_model)
+
+        if hasattr(s, "keys"):
+          # Replace "model" leaves by path, keeping s's treedef. Picking by position
+          # (leaves[N:]) breaks if a key sorts before "model"; reconstructing via
+          # type(s)({...}) breaks the lax.cond match — nnx.State recursive-wraps.
+          leaves_with_paths, treedef = jax.tree_util.tree_flatten_with_path(s)
+          new_model_iter = iter(jax.tree_util.tree_leaves(new_model))
+
+          def _is_model_leaf(path):
+            if not path:
+              return False
+            k = path[0]
+            return (
+                getattr(k, "key", None) == "model"
+                or getattr(k, "name", None) == "model"
+            )
+
+          new_leaves = [
+              next(new_model_iter) if _is_model_leaf(p) else leaf
+              for p, leaf in leaves_with_paths
+          ]
+          return jax.tree_util.tree_unflatten(treedef, new_leaves)
+        else:
+          return TrainStateNNX(new_model, s_opt)
 
       new_inner_state = drjax.map_fn(
           lambda s: replace_nnx_model_params(s, new_outer_params),

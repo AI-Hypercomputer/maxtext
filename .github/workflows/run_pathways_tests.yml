@@ -53,6 +53,15 @@ on:
       maxtext_sha:
         required: true
         type: string
+      total_workers:
+        required: false
+        type: string
+        default: '1'
+      worker_group:
+        required: false
+        type: string
+        default: '1'
+
 
 permissions:
   contents: read
@@ -95,6 +104,12 @@ jobs:
         run : gcloud storage cp gs://maxtext-test-assets/* tests/assets
       - name: Run Tests
         run: |
+          if [ "${{ inputs.total_workers }}" -gt 1 ]; then
+            .venv/bin/python3 -m pip install --quiet pytest-split
+            SPLIT_ARGS="--splits ${{ inputs.total_workers }} --group ${{ inputs.worker_group }}"
+          else
+            SPLIT_ARGS=""
+          fi
           if [ "${{ inputs.is_scheduled_run }}" = "true" ]; then
             FINAL_PYTEST_MARKER="${{ inputs.pytest_marker }}"
           else
@@ -105,7 +120,7 @@ jobs:
           export MAXTEXT_TEST_ASSETS_ROOT=$(pwd)/tests/assets
           export MAXTEXT_PKG_DIR=$(pwd)/src/maxtext
           # TODO(b/454659463): Enable test_default_hlo_match after volume mount is supported.
-          .venv/bin/python3 -m pytest ${{ inputs.pytest_addopts }} -v -m "${FINAL_PYTEST_MARKER}" -k "not AotHloIdenticalTest and not CompileThenLoad" --durations=0
+          .venv/bin/python3 -m pytest ${{ inputs.pytest_addopts }} -v -m "${FINAL_PYTEST_MARKER}" -k "not AotHloIdenticalTest and not CompileThenLoad" --durations=0 ${SPLIT_ARGS}
         env:
           PYTHONPATH: "${{ github.workspace }}/src"
     services:

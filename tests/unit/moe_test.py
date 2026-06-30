@@ -1643,5 +1643,69 @@ def test_moe_dispatch_no_expert_sharding_dense_forward():
   assert out.shape == inputs.shape
 
 
+@pytest.mark.tpu_only
+class FusedMlpMoETest(unittest.TestCase):
+  """Tests that prefuse_moe_weights=True and prefuse_moe_weights=False produce identical outputs for MoE."""
+
+  def __init__(self, *args, **kwargs):
+    super().__init__(*args, **kwargs)
+    self._B = 1
+    self._S = 16
+
+  def setUp(self):
+    super().setUp()
+    self.rng = jax.random.PRNGKey(0)
+    self.ref_cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="fused_mlp_moe_ref",
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        dtype="bfloat16",
+        sparse_matmul=True,
+        megablox=True,
+        prefuse_moe_weights=False,
+        ici_expert_parallelism=jax.device_count(),
+        max_target_length=self._S,
+        per_device_batch_size=self._B,
+    )
+    ref_devices = maxtext_utils.create_device_mesh(self.ref_cfg)
+    self.ref_mesh = Mesh(ref_devices, self.ref_cfg.mesh_axes)
+    self.ref_model = make_moe(self.ref_cfg, self.ref_mesh)
+
+  def _inputs(self):
+    return jax.random.normal(self.rng, (self._B, self._S, self.ref_cfg.base_emb_dim), dtype=jnp.bfloat16)
+
+  def test_prefuse_moe_weights_matches_unfused(self):
+    """prefuse_moe_weights=True output matches prefuse_moe_weights=False with sparse_matmul (Megablox)."""
+    fused_cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="fused_mlp_moe_fused",
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        dtype="bfloat16",
+        sparse_matmul=True,
+        megablox=True,
+        prefuse_moe_weights=True,
+        ici_expert_parallelism=jax.device_count(),
+        max_target_length=self._S,
+        per_device_batch_size=self._B,
+    )
+    fused_devices = maxtext_utils.create_device_mesh(fused_cfg)
+    fused_mesh = Mesh(fused_devices, fused_cfg.mesh_axes)
+    fused_model = make_moe(fused_cfg, fused_mesh)
+    copy_weights_prefused(self.ref_model, fused_model)
+
+    inputs = self._inputs()
+    ref_out, _, _ = self.ref_model(inputs)
+    fused_out, _, _ = fused_model(inputs)
+
+    np.testing.assert_allclose(
+        np.array(ref_out, dtype=np.float32),
+        np.array(fused_out, dtype=np.float32),
+        rtol=1e-2,
+        atol=1e-2,
+    )
+
+
 if __name__ == "__main__":
   unittest.main()
