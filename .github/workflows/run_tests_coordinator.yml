@@ -76,8 +76,12 @@ jobs:
           CPU_UNIT_WORKER_GROUPS='[1, 2, 3, 4]'
 
           # TPU worker constants
-          TPU_UNIT_TOTAL_WORKERS=2
-          TPU_UNIT_WORKER_GROUPS='[1, 2]'
+          TPU_UNIT_TOTAL_WORKERS=3
+          TPU_UNIT_WORKER_GROUPS='[1, 2, 3]'
+
+          # GPU worker constants
+          GPU_UNIT_TOTAL_WORKERS=3
+          GPU_UNIT_WORKER_GROUPS='[1, 2, 3]'
 
           # Default fallback constants
           DEFAULT_TOTAL_WORKERS=1
@@ -91,6 +95,9 @@ jobs:
           elif [[ "$FLAVOR" == "tpu-unit" ]]; then
             echo "worker_groups=${TPU_UNIT_WORKER_GROUPS}" >> "$GITHUB_OUTPUT"
             echo "total_workers=${TPU_UNIT_TOTAL_WORKERS}" >> "$GITHUB_OUTPUT"
+          elif [[ "$FLAVOR" == "gpu-unit" ]]; then
+            echo "worker_groups=${GPU_UNIT_WORKER_GROUPS}" >> "$GITHUB_OUTPUT"
+            echo "total_workers=${GPU_UNIT_TOTAL_WORKERS}" >> "$GITHUB_OUTPUT"
           else
             echo "worker_groups=${DEFAULT_WORKER_GROUPS}" >> "$GITHUB_OUTPUT"
             echo "total_workers=${DEFAULT_TOTAL_WORKERS}" >> "$GITHUB_OUTPUT"
