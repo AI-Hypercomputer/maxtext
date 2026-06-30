@@ -48,6 +48,7 @@ from maxtext.layers.attention_op import (
 )
 from maxtext.layers.attentions import Attention
 from maxtext.layers import embeddings
+from maxtext.kernels.attention import jax_flash_attention
 from maxtext.configs import pyconfig
 from maxtext.models.qwen3 import Qwen3NextGatedDeltaNet
 import numpy as np
@@ -55,6 +56,41 @@ import pytest
 
 from tests.utils import attention_test_util
 from tests.utils.test_helpers import get_test_config_path
+
+
+class JaxFlashAttentionTest(unittest.TestCase):
+  """Tests for JAX flash attention."""
+
+  def test_flash_attention_block_masked_soft_cap(self):
+    cap = 1.0
+    mask_value = -1.0e9
+    query = jnp.array([[[[10.0], [10.0]]]], dtype=jnp.float32)
+    key = jnp.array([[[[10.0], [0.0]]]], dtype=jnp.float32)
+    value = jnp.array([[[[1.0], [3.0]]]], dtype=jnp.float32)
+    mask = jnp.array([[True, True], [True, False]])
+
+    output = jax_flash_attention.flash_attention_block_masked(
+        query,
+        key,
+        value,
+        segment_ids=None,
+        block_kv=2,
+        block_q=1,
+        mask=mask,
+        mask_value=mask_value,
+        cap=cap,
+    )
+
+    logits = jnp.einsum("bhqd,bhkd->bhqk", query, key)
+    logits = jnp.tanh(logits / cap) * cap
+    logits = jnp.where(mask[None, None, :, :], logits, mask_value)
+    expected = jnp.einsum("bhqk,bhkd->bhqd", jax.nn.softmax(logits, axis=-1), value)
+    np.testing.assert_allclose(
+        np.asarray(output),
+        np.asarray(expected),
+        rtol=1e-6,
+        atol=1e-6,
+    )
 
 
 class SplashLocalMaskTest(unittest.TestCase):
