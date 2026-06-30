@@ -1826,6 +1826,11 @@ class DeepSeekV4RotaryEmbedding(RotaryEmbedding):
       min_timescale: int = 10000,
       max_timescale: int = 10000,
       mesh: Any = None,
+      use_yarn: bool = False,
+      original_max_position_embeddings: int = 65536,
+      max_position_embeddings: int = 1048576,
+      beta_fast: float = 32.0,
+      beta_slow: float = 1.0,
       **kwargs,
   ):
     super().__init__(
@@ -1839,6 +1844,11 @@ class DeepSeekV4RotaryEmbedding(RotaryEmbedding):
     self.partial_rotary_factor = partial_rotary_factor
     self.rope_theta = rope_theta
     self.fprop_dtype = fprop_dtype
+    self.use_yarn = use_yarn
+    self.original_max_position_embeddings = original_max_position_embeddings
+    self.max_position_embeddings = max_position_embeddings
+    self.beta_fast = beta_fast
+    self.beta_slow = beta_slow
 
     # Compute the partial rotary dimension (rope_head_dim)
     self.dim = int(head_dim * partial_rotary_factor)
@@ -1848,7 +1858,36 @@ class DeepSeekV4RotaryEmbedding(RotaryEmbedding):
     # Compute base inverse frequencies for half of self.dim
     half_dim = self.dim // 2
     fraction = 2 * jnp.arange(0, half_dim, dtype=jnp.float32) / self.dim
-    return 1.0 / (self.rope_theta**fraction)
+    freqs = 1.0 / (self.rope_theta**fraction)
+
+    if self.use_yarn:
+      factor = self.max_position_embeddings / self.original_max_position_embeddings
+
+      def find_correction_dim(num_rotations):
+        return (
+            self.dim
+            * math.log(self.original_max_position_embeddings / (num_rotations * 2 * math.pi))
+            / (2 * math.log(self.rope_theta))
+        )
+
+      low = find_correction_dim(self.beta_fast)
+      high = find_correction_dim(self.beta_slow)
+
+      low = math.floor(low)
+      high = math.ceil(high)
+
+      low = max(low, 0)
+      high = min(high, self.dim - 1)
+
+      if low == high:
+        high += 0.001
+
+      linear_func = (jnp.arange(half_dim, dtype=jnp.float32) - low) / (high - low)
+      smooth = 1.0 - jnp.clip(linear_func, 0.0, 1.0)
+
+      freqs = (freqs / factor) * (1.0 - smooth) + freqs * smooth
+
+    return freqs
 
   def get_freqs(self, position_ids: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
     # position_ids: [B, S]
@@ -1858,6 +1897,12 @@ class DeepSeekV4RotaryEmbedding(RotaryEmbedding):
 
     cos = jnp.cos(freqs).astype(jnp.float32)  # [B, S, dim/2]
     sin = jnp.sin(freqs).astype(jnp.float32)  # [B, S, dim/2]
+
+    if self.use_yarn:
+      factor = self.max_position_embeddings / self.original_max_position_embeddings
+      attention_scaling = 1.0 if factor <= 1 else (0.1 * math.log(factor) + 1.0)
+      cos = cos * attention_scaling
+      sin = sin * attention_scaling
 
     return cos, sin
 

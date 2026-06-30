@@ -705,14 +705,15 @@ class RoutedMoE(nnx.Module):
     else:
       top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
 
-    if self.config.decoder_block == ctypes.DecoderBlockType.DEEPSEEK:
+    if self.config.decoder_block in (ctypes.DecoderBlockType.DEEPSEEK, ctypes.DecoderBlockType.DEEPSEEK4):
       top_k_weights = self.deepseek_scale_weights(top_k_weights)
-    elif self.config.decoder_block not in (ctypes.DecoderBlockType.LLAMA4, ctypes.DecoderBlockType.GEMMA4):
-      top_k_weights = jax.nn.softmax(top_k_weights.astype(jnp.float32), axis=-1).astype(self.dtype)
+    else:
+      if self.config.decoder_block not in (ctypes.DecoderBlockType.LLAMA4, ctypes.DecoderBlockType.GEMMA4):
+        top_k_weights = jax.nn.softmax(top_k_weights.astype(jnp.float32), axis=-1).astype(self.dtype)
 
-    # Normalization of router weights (e.g. used by Qwen3, Gemma4).
-    if self.config.norm_topk_prob:
-      top_k_weights /= top_k_weights.sum(axis=-1, keepdims=True)
+      # Normalization of router weights (e.g. used by Qwen3, Gemma4).
+      if self.config.norm_topk_prob:
+        top_k_weights /= top_k_weights.sum(axis=-1, keepdims=True)
 
     return top_k_weights, top_k_indices
 
