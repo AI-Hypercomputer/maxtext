@@ -428,7 +428,7 @@ def main(config, test_args):  # pylint: disable=W0621
     }
 
     # Default to bfloat16 if dtype is unrecognized
-    torch_dtype = dtype_mapping.get(config.dtype.name, torch.bfloat16)
+    torch_dtype = dtype_mapping.get(config.dtype.name.lower(), torch.bfloat16)
     max_logging.log(f"Loading HF model with dtype: {torch_dtype} (derived from config.dtype: {config.dtype})")
 
     hf_model = AutoModelForCausalLM.from_pretrained(
