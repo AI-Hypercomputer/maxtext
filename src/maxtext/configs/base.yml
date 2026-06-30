@@ -159,6 +159,8 @@ weight_sparsity_m: null
 weight_sparsity_update_step: 10
 # The first number of steps before updating the sparsity masks.
 weight_sparsity_start_step: 50
+# Whether to use Transformer Engine's collective GEMM overlap algorithm with quantization in MLP layers. Note: only valid with tensor-sequence parallelism.
+use_te_comm_gemm_overlap: false
 
 decoder_block: "llama2" # which style of decoderblock to use.
 # global parameter scale needs to be a power of 2. if you want finer grained control of the model sizes
