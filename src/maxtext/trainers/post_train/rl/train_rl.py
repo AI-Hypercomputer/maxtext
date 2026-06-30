@@ -339,7 +339,7 @@ def prepare_datasets(
   dataset_size = int(trainer_config.num_batches * trainer_config.batch_size * trainer_config.train_fraction)
   train_dataset = train_dataset[:dataset_size]
   train_dataset = train_dataset.repeat(trainer_config.num_epoch)
-  train_dataset = train_dataset.to_iter_dataset().batch(trainer_config.batch_size)
+  train_dataset = train_dataset.to_iter_dataset().batch(trainer_config.batch_size, drop_remainder=True)
 
   if trainer_config.num_test_batches > 0:
     # eval_batch_size = -1 (default) → use trainer_config.batch_size (legacy
@@ -358,7 +358,7 @@ def prepare_datasets(
     test_dataset = test_dataset[
         trainer_config.test_batch_start_index : trainer_config.num_test_batches * eval_batch_size_for_eval
     ]
-    test_dataset = test_dataset.to_iter_dataset().batch(eval_batch_size_for_eval)
+    test_dataset = test_dataset.to_iter_dataset().batch(eval_batch_size_for_eval, drop_remainder=True)
 
   return train_dataset, test_dataset
 
