@@ -330,6 +330,7 @@ def ring_ragged_unsort(
       )
 
     res = (
+        sorted_tokens_local,
         topk_argsort_revert_indices,
         topk_weights_flat,
         shard_output_start,
@@ -352,6 +353,7 @@ def ring_ragged_unsort(
     where j = revert[i] and j in [start, end).
     """
     (
+        sorted_tokens_local,
         topk_argsort_revert_indices,
         topk_weights_flat,
         shard_output_start,
@@ -386,6 +388,16 @@ def ring_ragged_unsort(
           flops_override=gather_flops_override,
           bytes_accessed_override=gather_bytes_accessed_override,
       )
+      t_idx = jnp.arange(n) // topk
+      j_idx = topk_argsort_revert_indices
+      valid_mask = (j_idx >= shard_output_start) & (j_idx < shard_output_end)
+      safe_j_idx = jnp.where(valid_mask, j_idx, 0)
+      g_out_flat = g_hidden_states_local[t_idx]  # Shape: [n, hidden]
+      sorted_flat = sorted_tokens_local[safe_j_idx]  # Shape: [n, hidden]
+
+      # Dot product across hidden dimension
+      grad_w_raw = jnp.sum(g_out_flat * sorted_flat, axis=-1)  # Shape: [n]
+      grad_topk_weights_flat = jnp.where(valid_mask, grad_w_raw, 0.0)
     else:
       # Slice the inverse permutation to match the packed local buffer.
       padded_idx_inv = jnp.pad(idx_inv, (0, buffer_size))
@@ -405,7 +417,19 @@ def ring_ragged_unsort(
           flops_override=gather_flops_override,
           bytes_accessed_override=gather_bytes_accessed_override,
       )
-    return grad_sorted_tokens, None, None, None
+      t_idx = jnp.arange(n) // topk
+      shifted_indices = topk_argsort_revert_indices - shard_output_start
+      local_num_tokens = shard_output_end - shard_output_start
+      limit = jnp.minimum(local_num_tokens, buffer_size)
+      valid_mask = (shifted_indices >= 0) & (shifted_indices < limit)
+      safe_indices = jnp.where(valid_mask, shifted_indices, 0)
+
+      g_out_flat = g_hidden_states_local[t_idx]  # Shape: [n, hidden]
+      sorted_flat = sorted_tokens_local[safe_indices]  # Shape: [n, hidden]
+
+      grad_w_raw = jnp.sum(g_out_flat * sorted_flat, axis=-1)  # Shape: [n]
+      grad_topk_weights_flat = jnp.where(valid_mask, grad_w_raw, 0.0)
+    return grad_sorted_tokens, None, None, grad_topk_weights_flat
 
   _ring_ragged_unsort.defvjp(_ring_ragged_unsort_fwd, _ring_ragged_unsort_bwd)
 
