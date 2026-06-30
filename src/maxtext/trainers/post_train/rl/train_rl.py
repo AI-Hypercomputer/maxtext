@@ -45,6 +45,7 @@ python3 -m maxtext.trainers.post_train.rl.train_rl src/maxtext/configs/post_trai
 
 from __future__ import annotations
 import contextlib
+import inspect
 from functools import wraps
 from typing import Any, Optional, Sequence
 
@@ -409,13 +410,16 @@ def create_rl_components(
   profiler_options = None
   if trainer_config.profiler == "xplane":
     num_hosts = jax.device_count() // trainer_config.chips_per_vm
-    profiler_options = profiler.ProfilerOptions(
-        log_dir=trainer_config.tensorboard_dir,
-        skip_first_n_steps=trainer_config.skip_first_n_steps_for_profiler,
-        profiler_steps=trainer_config.profiler_steps,
-        set_profile_options=False,
-        max_num_hosts=num_hosts,
-    )
+    sig = inspect.signature(profiler.ProfilerOptions)
+    profiler_kwargs = {
+        "log_dir": trainer_config.tensorboard_dir,
+        "skip_first_n_steps": trainer_config.skip_first_n_steps_for_profiler,
+        "profiler_steps": trainer_config.profiler_steps,
+        "set_profile_options": False,
+    }
+    if "max_num_hosts" in sig.parameters:
+      profiler_kwargs["max_num_hosts"] = num_hosts
+    profiler_options = profiler.ProfilerOptions(**profiler_kwargs)
 
   # Parse vllm_additional_config
   rollout_additional_config = None
@@ -676,7 +680,8 @@ def rl_train(argv: Sequence[str], kwargs: dict):
     _rl_train_impl(argv, kwargs)
 
 
-def wrap_generate_with_profiling(rl_cluster):
+def wrap_generate_with_profiling(rl_cluster, trainer_config):
+  # pylint: disable=protected-access
   """Wraps rl_cluster.generate to programmatically trigger Pathways profiling."""
   original_generate = rl_cluster.generate
 
@@ -693,15 +698,15 @@ def wrap_generate_with_profiling(rl_cluster):
         should_profile = True
 
     if should_profile:
+      if hasattr(rl_cluster.rollout, "_sampler"):
+        rl_cluster.rollout._sampler.limit_vllm_generation_length = True
+        logging.warning("[AGY_PROFILE] Enabled max_tokens limiting on sampler.")
       sampler_mesh = rl_cluster.r2m[rl_cluster_lib.Role.ROLLOUT]
-      try:
-        unique_hosts = set(d.host_id for d in sampler_mesh.devices.flatten())
-        num_hosts = len(unique_hosts)
-      except AttributeError:
-        # Fallback to dev count / chips_per_vm if host_id is missing.
-        # On v5p (with Megacore enabled) and v7x, 1 JAX device maps to 1 chip.
-        chips_per_vm = rl_cluster.cluster_config.training_config.chips_per_vm
-        num_hosts = max(1, sampler_mesh.size // chips_per_vm)
+      # Calculate num_hosts based on the total JAX devices and TPUs per pod.
+      # This ensures we capture all hosts in the JAX cluster.
+      total_chips = len(jax.devices())
+      tpus_per_pod = int(os.environ.get("TPUS_PER_POD", trainer_config.chips_per_vm))
+      num_hosts = max(1, total_chips // tpus_per_pod)
 
       logging.warning(
           "[AGY_PROFILE] Starting sampler profile at step %d with max_num_hosts=%d (sampler mesh size: %d)",
@@ -710,10 +715,8 @@ def wrap_generate_with_profiling(rl_cluster):
           sampler_mesh.size,
       )
       try:
-        chips_per_vm = rl_cluster.cluster_config.training_config.chips_per_vm
-        num_hosts_dynamic = jax.device_count() // chips_per_vm
         if pw_prof is not None:
-          pw_prof.start_trace(log_dir=profiler_options.log_dir, max_num_hosts=num_hosts_dynamic)
+          pw_prof.start_trace(log_dir=profiler_options.log_dir, max_num_hosts=num_hosts)
       except Exception as e:  # pylint: disable=broad-exception-caught
         logging.warning("[AGY_PROFILE] Failed to start sampler trace: %s", e)
 
@@ -721,6 +724,9 @@ def wrap_generate_with_profiling(rl_cluster):
       return original_generate(*args, **kwargs)
     finally:
       if should_profile:
+        if hasattr(rl_cluster.rollout, "_sampler"):
+          rl_cluster.rollout._sampler.limit_vllm_generation_length = False
+          logging.warning("[AGY_PROFILE] Disabled max_tokens limiting on sampler.")
         logging.warning(
             "[AGY_PROFILE] Stopping sampler profile at step %d",
             rl_cluster.global_steps,
@@ -846,7 +852,7 @@ def _rl_train_impl(argv: Sequence[str], kwargs: dict):
   )
 
   # Enable programmatic sampler profiling
-  wrap_generate_with_profiling(rl_cluster)
+  wrap_generate_with_profiling(rl_cluster, trainer_config)
 
   # Run evaluation before training
   if trainer_config.num_test_batches > 0:

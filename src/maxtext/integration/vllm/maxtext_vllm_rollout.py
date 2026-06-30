@@ -62,22 +62,33 @@ class MaxTextVllmSampler(VllmSampler):
       tokenizer: Any,
       config: VllmConfig,
       converter: Any = None,
+      maxtext_config: Any = None,
   ):
     super().__init__(tokenizer=tokenizer, config=config)
     self._converter = converter
-    if self.llm is not None:
-      original_generate = self.llm.generate
+    self.maxtext_config = maxtext_config
+    self.limit_vllm_generation_length = False
 
-      def custom_generate(prompts, sampling_params, *args, **kwargs):
-        if sampling_params is not None:
-          sampling_params.prompt_logprobs = None
-        return original_generate(prompts, sampling_params, *args, **kwargs)
-
-      self.llm.generate = custom_generate
+  def generate(self, prompts, sampling_params, *args, **kwargs):
+    if sampling_params is not None:
+      sampling_params.prompt_logprobs = None
+      if self.limit_vllm_generation_length:
+        logging.warning(
+            "[AGY_PROFILE] Overriding sampling_params.max_tokens from %s to 128 for profiling",
+            sampling_params.max_tokens,
+        )
+        sampling_params.max_tokens = 128
+    return super().generate(prompts, sampling_params, *args, **kwargs)
 
   def _generate_server_mode(self, prompts, sampling_params):
     if sampling_params is not None:
       sampling_params.prompt_logprobs = None
+      if self.limit_vllm_generation_length:
+        logging.warning(
+            "[AGY_PROFILE] Overriding server_mode sampling_params.max_tokens from %s to 128 for profiling",
+            sampling_params.max_tokens,
+        )
+        sampling_params.max_tokens = 128
     return super()._generate_server_mode(prompts, sampling_params)
 
   def update_params(
@@ -221,6 +232,7 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
             },
         ),
         converter=converter,
+        maxtext_config=maxtext_config,
     )
 
     # Initial weight sync: run the converter so vLLM starts with real weights.

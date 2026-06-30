@@ -5,8 +5,9 @@ import sys
 
 manifest_file = sys.argv[1]
 built_image = sys.argv[2] if (len(sys.argv) > 2 and sys.argv[2] != "") else None
-kube_dns_ip = sys.argv[3] if len(sys.argv) > 3 else "34.118.224.10"
-workload_name = sys.argv[4] if len(sys.argv) > 4 else "unknown"
+kube_dns_ip = sys.argv[3] if (len(sys.argv) > 3 and sys.argv[3] != "") else "34.118.224.10"
+workload_name = sys.argv[4] if (len(sys.argv) > 4 and sys.argv[4] != "") else "unknown"
+gke_nodepool = sys.argv[5] if (len(sys.argv) > 5 and sys.argv[5] != "") else None
 
 with open(manifest_file, "r", encoding="utf-8") as f:
   data = list(yaml.load_all(f, Loader=yaml.FullLoader))
@@ -52,18 +53,24 @@ for doc in data:
               "to annotations as cloud.google.com/gke-tpu-slice-topology."
           )
 
-        # 3. Patch placement-policy-name if it has mismatched suffix due to XPK version differences
         if "cloud.google.com/placement-policy-name" in node_selector:
-          val = node_selector["cloud.google.com/placement-policy-name"]
-          if "-placement-policy" in val and "-ss-" not in val:
-            node_selector["cloud.google.com/placement-policy-name"] = val.replace(
-                "-placement-policy", "-ss-placement-policy"
-            )
-            print(f"Patched placement-policy-name to {node_selector['cloud.google.com/placement-policy-name']}")
+          del node_selector["cloud.google.com/placement-policy-name"]
+          print("Removed cloud.google.com/placement-policy-name from nodeSelector.")
+
+        # Force using the specific reservation
+        node_selector["cloud.google.com/reservation-name"] = "cloudtpu-20260317203000-769538580"
+        print("Injected cloud.google.com/reservation-name=cloudtpu-20260317203000-769538580 into nodeSelector.")
+
+        # 3. Patch placement-policy-name if it has mismatched suffix due to XPK version differences (REMOVED)
 
         # 3.5 Inject dnsConfig to resolve internal pods DNS and external googleapis.com DNS over hostNetwork
         pod_spec["dnsConfig"] = {"nameservers": [kube_dns_ip, "8.8.8.8"]}
         print(f"Injected dnsConfig nameservers: [{kube_dns_ip}, 8.8.8.8] to worker pod spec.")
+
+        # 3.6 Inject gke-nodepool if provided
+        if gke_nodepool:
+          node_selector["cloud.google.com/gke-nodepool"] = gke_nodepool
+          print(f"Injected cloud.google.com/gke-nodepool={gke_nodepool} to worker nodeSelector.")
 
         # 5. Add connection handshake timeout and VLLM_TORCH_PROFILER_DIR to pathways-worker container
         containers = pod_spec.setdefault("containers", [])

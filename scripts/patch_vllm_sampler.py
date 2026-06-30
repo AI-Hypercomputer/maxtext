@@ -200,27 +200,21 @@ p5 = "/usr/local/lib/python3.12/site-packages/tpu_inference/runner/tpu_runner.py
 if os.path.exists(p5):
   with open(p5, "r", encoding="utf-8") as f:
     c5 = f.read()
-  target5 = (
-      "        with jax.set_mesh(self.mesh), jax.profiler.TraceAnnotation(\n"
-      '                f"execute_model: {reqs} reqs, {toks} toks", **req_id_kwargs):\n'
-      "            output = self._execute_model(scheduler_output,\n"
-      "                                         intermediate_tensors)"
-  )
-  replacement5 = (
-      "        with jax.set_mesh(self.mesh), jax.profiler.StepTraceAnnotation(\n"
-      '                "execute_model", step_num=self.batch_counter):\n'
-      "            with jax.profiler.TraceAnnotation(\n"
-      '                    f"execute_model: {reqs} reqs, {toks} toks", **req_id_kwargs):\n'
-      "                output = self._execute_model(scheduler_output,\n"
-      "                                             intermediate_tensors)"
-  )
+
+  # Simpler replacement to limit the size of req_id_kwargs to avoid nanobind limit
+  target5 = ", **req_id_kwargs):"
+  replacement5 = ", **dict(list(req_id_kwargs.items())[:100])):"
+
   if target5 in c5:
     c5 = c5.replace(target5, replacement5)
     with open(p5, "w", encoding="utf-8") as f:
       f.write(c5)
-    print("Hotfix successfully applied to tpu_inference/runner/tpu_runner.py.")
+    print("Hotfix successfully applied to tpu_inference/runner/tpu_runner.py (limited req_id_kwargs).")
   else:
-    print("Warning: target string not found in tpu_runner.py.")
+    if "dict(list(req_id_kwargs.items())" in c5:
+      print("Hotfix already applied to tpu_inference/runner/tpu_runner.py.")
+    else:
+      print("Warning: target string not found in tpu_runner.py.")
 else:
   print("Warning: tpu_runner.py path not found.")
 
