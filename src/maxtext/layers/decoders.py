@@ -864,6 +864,7 @@ class Decoder(nn.Module):
       kv_caches: list[jax.Array] | None = None,
       attention_metadata=None,
       deepstack_visual_embeds: None | list[jnp.ndarray] = None,
+      injected_attention_inputs: jax.Array | None = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -1128,8 +1129,14 @@ class Decoder(nn.Module):
               kv_caches[i] = returned_kv_cache[i]
           else:
             # Fallback to old behavior if kv_caches is None (not vLLM RPA)
-            current_broadcast_args.append(None)
-            current_in_axes_tuple.append(nn.broadcast)
+            if injected_attention_inputs is not None:
+              # ---- For Disillation pipeline only ----
+              # Append injected_attention_inputs as the 10th positional argument
+              current_broadcast_args.extend([None, None, None, None, injected_attention_inputs])
+              current_in_axes_tuple.extend([nn.broadcast] * 4 + [0])
+            else:
+              current_broadcast_args.append(None)  # previous_chunk decoder's call() argument
+              current_in_axes_tuple.append(nn.broadcast)
 
             y, _ = self.scan_decoder_layers(
                 cfg,

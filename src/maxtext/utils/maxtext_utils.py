@@ -1297,6 +1297,12 @@ def get_intermediate_value(model, nested_key, default=None, clear=False):
         intermediate_value = model.decoder.layers["self_attention"][nested_key].get_value()[-1]
         if clear:
           del model.decoder.layers["self_attention"][nested_key]
+    # TODO: unitfy with above AND make it compatible with non-scan mode
+    case "attention_inputs":  # for re-architectured distillaion
+      if nested_key in model.decoder.layers["self_attention"]:
+        intermediate_value = model.decoder.layers["self_attention"][nested_key].get_value()[-1]
+        if clear:
+          del model.decoder.layers["self_attention"][nested_key]
     case _:
       # Default case to handle any unknown nested keys
       raise ValueError(f"Incorrect nested_key: {nested_key}")

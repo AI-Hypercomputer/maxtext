@@ -1121,6 +1121,11 @@ class Attention(nnx.Module):
     else:
       input_axis_names = self.decode_input_axis_names
 
+    # ---- For Disillation pipeline only ----
+    # Sow the attention module inputs for the teacher forward pass
+    if self.config.blockwise_distill:
+      self.sow(nnx.Intermediate, "attention_inputs", inputs_q)
+
     inputs_q = self._maybe_shard_with_logical(inputs_q, input_axis_names)
     inputs_kv = self._maybe_shard_with_logical(inputs_kv, input_axis_names)
     qkv_sharding = create_sharding(self.mesh, input_axis_names)
