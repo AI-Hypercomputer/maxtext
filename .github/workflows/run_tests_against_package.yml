@@ -195,6 +195,7 @@ jobs:
               -v \
               -m "${FINAL_PYTEST_MARKER}" \
               --durations=0 \
+              --junitxml=test-results-${INPUTS_DEVICE_TYPE}-${INPUTS_WORKER_GROUP}.xml \
               $PYTEST_COV_ARGS \
               $SPLIT_ARGS \
               ${INPUTS_PYTEST_EXTRA_ARGS}
@@ -227,3 +228,10 @@ jobs:
           # If scheduled, upload to scheduled flag only. If PR, upload to regular flag only.
           flags: ${{ inputs.is_scheduled_run == 'true' && 'scheduled' || 'regular' }}
           verbose: true
+      - name: Upload Test Results XML
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ inputs.device_type }}-${{ inputs.worker_group }}
+          path: test-results-*.xml
+          if-no-files-found: ignore
