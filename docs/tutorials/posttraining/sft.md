@@ -22,26 +22,28 @@ This tutorial demonstrates step-by-step instructions for setting up the environm
 
 We use [Tunix](https://github.com/google/tunix), a JAX-based library designed for post-training tasks, to perform SFT.
 
-In this tutorial we use a single host TPU VM such as `v6e-8/v5p-8`. Let's get started!
+In this tutorial we run SFT on a GKE cluster using XPK. Let's get started!
 
-## Install MaxText and Post-Training dependencies
+## Environment Setup
 
-For instructions on installing MaxText with post-training dependencies on your VM, please refer to the [official documentation](../../install_maxtext.md) and use the `maxtext[tpu-post-train]` installation path to include all necessary post-training dependencies.
+Before you begin, ensure you have set up your GKE cluster and installed XPK. Refer to the [At scale with XPK](../../run_maxtext/run_maxtext_via_xpk.md) guide for prerequisites and environment setup.
 
-> **Note:** If you have previously installed MaxText with a different option (e.g., `maxtext[tpu]`), we strongly recommend using a fresh virtual environment for `maxtext[tpu-post-train]` to avoid potential library version conflicts.
+You also need to build and upload a MaxText Docker image with post-training dependencies. Refer to the [Build and upload MaxText Docker images](../build_maxtext.md) tutorial and specifically build the **TPU post-training Docker image**.
 
 ## Setup environment variables
 
-Login to Hugging Face. Provide your access token when prompted:
+Set up the following environment variables on your development machine to configure your training run. Replace placeholders with your actual values.
 
 ```bash
-hf auth login
-```
+# -- GKE & Docker configuration --
+export GKE_CLUSTER=<your-cluster-name>
+export ZONE=<your-cluster-zone> # e.g., us-central1-a
+export CLOUD_IMAGE_NAME=<your-uploaded-docker-image-path> # e.g., gcr.io/my-project/maxtext-post-train
 
-Set up the following environment variables to configure your training run. Replace
-placeholders with your actual values.
+# -- Hugging Face configuration --
+# Your Hugging Face personal access token with 'read' permissions.
+export HF_TOKEN=<your-huggingface-token>
 
-```bash
 # -- Model configuration --
 # The MaxText model name. See `src/maxtext/configs/types.py` for `ModelName` for a
 # full list of supported models.
@@ -50,12 +52,9 @@ export MODEL=<MODEL_NAME> # e.g., 'llama3.1-8b-Instruct'
 # -- MaxText configuration --
 # Use a GCS bucket you own to store logs and checkpoints. Ideally in the same
 # region as your TPUs to minimize latency and costs.
-# You can list your buckets and their locations in the
-# [Cloud Console](https://console.cloud.google.com/storage/browser).
 export BASE_OUTPUT_DIRECTORY=<GCS_BUCKET> # e.g., gs://my-bucket/maxtext-runs
 
 # An arbitrary string to identify this specific run.
-# We recommend to include the model, user, and timestamp.
 # Note: Kubernetes requires workload names to be valid DNS labels (lowercase, no underscores or periods).
 export RUN_NAME=<RUN_NAME>
 
@@ -98,23 +97,32 @@ export MAXTEXT_CKPT_PATH=<CKPT_PATH> # e.g., gs://my-bucket/my-model-checkpoint/
 
 ## Run SFT on Hugging Face Dataset
 
-Now you are ready to run SFT using the following command:
+Submit your SFT training job to the GKE cluster using XPK:
 
 ```sh
-python3 -m maxtext.trainers.post_train.sft.train_sft \
-    run_name=${RUN_NAME?} \
-    base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
-    model_name=${MODEL?} \
-    load_parameters_path=${MAXTEXT_CKPT_PATH?} \
-    per_device_batch_size=${PER_DEVICE_BATCH_SIZE?} \
-    steps=${STEPS?} \
-    hf_path=${DATASET_NAME?} \
-    train_split=${TRAIN_SPLIT?} \
-    train_data_columns=${TRAIN_DATA_COLUMNS?} \
-    profiler=xplane
+xpk workload create \
+    --cluster ${GKE_CLUSTER?} \
+    --workload ${RUN_NAME?} \
+    --docker-image ${CLOUD_IMAGE_NAME?} \
+    --tpu-type v5p-8 \
+    --num-slices 1 \
+    --command "export HF_TOKEN=${HF_TOKEN?} && \
+        python3 -m maxtext.trainers.post_train.sft.train_sft \
+        run_name=${RUN_NAME?} \
+        base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+        model_name=${MODEL?} \
+        load_parameters_path=${MAXTEXT_CKPT_PATH?} \
+        per_device_batch_size=${PER_DEVICE_BATCH_SIZE?} \
+        steps=${STEPS?} \
+        hf_path=${DATASET_NAME?} \
+        train_split=${TRAIN_SPLIT?} \
+        train_data_columns=${TRAIN_DATA_COLUMNS?} \
+        profiler=xplane"
 ```
 
-Your fine-tuned model checkpoints will be saved here: `$BASE_OUTPUT_DIRECTORY/$RUN_NAME/checkpoints`.
+*Note: Adjust `--tpu-type` and `--num-slices` as appropriate for your GKE cluster.*
+
+Your fine-tuned model checkpoints will be saved to your GCS bucket at: `$BASE_OUTPUT_DIRECTORY/$RUN_NAME/checkpoints`.
 
 ## Dataset Customization & Chat Templates
 
@@ -180,16 +188,18 @@ def format_sharegpt(example):
 
 #### 2. Configure MaxText to use your formatter
 
-When starting your SFT training, pass the following parameters:
+When starting your SFT training, append the following parameters to the python command inside your XPK `--command` flag:
 
 - `train_data_columns`: Point to the original column name in the raw dataset (`"['conversations']"`).
 - `formatting_func_path`: Point to the python import path of your formatting function (`"maxtext.input_pipeline.custom_formatters.format_sharegpt"`).
 
 ```sh
-python3 -m maxtext.trainers.post_train.sft.train_sft \
+xpk workload create \
     ... \
-    train_data_columns="['conversations']" \
-    formatting_func_path="maxtext.input_pipeline.custom_formatters.format_sharegpt"
+    --command "... && python3 -m maxtext.trainers.post_train.sft.train_sft \
+        ... \
+        train_data_columns=\"['conversations']\" \
+        formatting_func_path=\"maxtext.input_pipeline.custom_formatters.format_sharegpt\""
 ```
 
 ### Runnable Example in the Codebase
