@@ -245,6 +245,27 @@ def _load_linen_checkpoint_into_nnx(
   return _populate_pure_dict_from_partial(nnx_abstract_pure, partial_nnx)
 
 
+def _restore_emergency_linen_checkpoint_into_nnx(
+    checkpoint_manager,
+    step,
+    abstract_nnx_state,
+    map_to_pspec,
+):
+  """Restores an emergency Linen-layout checkpoint into an NNX state."""
+  max_logging.log(f"Restoring emergency Linen-layout checkpoint into NNX state at step {step}")
+  nnx_abstract_pure = abstract_nnx_state.to_pure_dict()
+  linen_abstract = train_state_nnx.to_linen_checkpoint_dict(nnx_abstract_pure)
+  restore_args = jax.tree_util.tree_map(map_to_pspec, linen_abstract)
+  checkpoint_args = ocp.args.PyTreeRestore(
+      item=linen_abstract,
+      restore_args=restore_args,
+      partial_restore=True,
+  )
+  restored = checkpoint_manager.restore(step, args=Composite(state=checkpoint_args)).state
+  partial_nnx = train_state_nnx.from_linen_checkpoint_dict(restored)
+  return _populate_pure_dict_from_partial(nnx_abstract_pure, partial_nnx)
+
+
 def _rebuild_nnx_with_values(abstract_nnx_state, concrete_weights):
   """Fills each Variable in `abstract_nnx_state` with the matching restored array."""
   leaves, treedef = jax.tree_util.tree_flatten(abstract_nnx_state, is_leaf=lambda x: isinstance(x, nnx.Variable))
@@ -849,6 +870,24 @@ def load_state_if_possible(
           )
           _assert_no_shaped_dtype_struct(restored_nnx)
         return ({"items": restored_nnx}, None)
+
+      if isinstance(abstract_unboxed_pre_state, nnx.State) and isinstance(
+          checkpoint_manager,
+          (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager),
+      ):
+        checkpoint_path = str(checkpoint_manager.directory / str(step))
+        with handle_checkpoint_mismatch("restore emergency NNX checkpoint", checkpoint_path):
+          restored = _restore_emergency_linen_checkpoint_into_nnx(
+              checkpoint_manager,
+              step,
+              abstract_unboxed_pre_state,
+              map_to_pspec,
+          )
+          _assert_no_shaped_dtype_struct(restored)
+        return (
+            restored,
+            None,
+        )
 
       # Convert nnx.State to pure dict to match how checkpoints are saved for NNX
       restore_target = abstract_unboxed_pre_state
