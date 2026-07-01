@@ -1487,7 +1487,6 @@ def setup_initial_state(
         config.dataset_type,
         use_ocdbt=config.checkpoint_storage_use_ocdbt,
         use_zarr3=config.checkpoint_storage_use_zarr3,
-        enable_orbax_v1=config.enable_orbax_v1,
         checkpoint_conversion_fn=config.checkpoint_conversion_fn,
         source_checkpoint_layout=config.source_checkpoint_layout,
         expansion_factor_real_data=config.expansion_factor_real_data,

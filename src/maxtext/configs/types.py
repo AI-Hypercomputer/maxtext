@@ -346,7 +346,6 @@ class Checkpointing(BaseModel):
       description="Set to True if reading from a saved AQT quantized checkpoint.",
   )
   save_quantized_params_path: PathStr = Field("", description="Path to save params quantized on the fly.")
-  enable_orbax_v1: bool = Field(False, description="Bool flag for enabling Orbax v1.")
   checkpoint_conversion_fn: None | str = Field(None, description="Function for processing loaded checkpoint dict.")
   source_checkpoint_layout: Literal["orbax", "safetensors", "safetensors_dynamic"] = Field(
       "orbax", description="The layout of the source checkpoint to load."

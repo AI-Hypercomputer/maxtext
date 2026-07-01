@@ -223,6 +223,8 @@ def maybe_elastic_scale_up(config, checkpoint_manager):
         " checkpoint to finish before interrupting."
     )
     if checkpoint_manager is not None:
+      # Elastic runs use the Orbax v1 Checkpointer (which exposes `.wait_until_finished()`); this module
+      # cannot import `checkpointing` (checkpointing imports elastic_utils).
       checkpoint_manager.wait_until_finished()
     max_logging.log("Checkpoint save completed. Interrupting")
     raise manager.ScaleUpSignalError()
