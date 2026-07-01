@@ -540,7 +540,7 @@ def add_data_to_sharding(mesh, path, aval, sharding):
       partition = (partition,)
 
     if size % mesh.shape["data"] == 0 and (partition is None or "tensor" not in partition):
-      added_component = ("data",) + partition
+      added_component = ("data",) + partition  # pyrefly: ignore[unsupported-operation]
       new_pspec = jax.sharding.PartitionSpec(*(pspec[:idx] + (added_component,) + pspec[idx + 1 :]))
       new_sharding = jax.sharding.NamedSharding(sharding.mesh, new_pspec)
       return new_sharding
@@ -581,7 +581,7 @@ def maybe_update_params_sharding_with_opt(config, state_mesh_shardings):
       # When quantization=fp8 is enabled the sharded_fp32_params
       # are not wrapped in `params`. Here we wrap them back.
       sharded_fp32_params = {"params": sharded_fp32_params}
-    state_mesh_shardings = state_mesh_shardings.replace(params=dict(prev_params_shardings, **sharded_fp32_params))
+    state_mesh_shardings = state_mesh_shardings.replace(params=dict(prev_params_shardings, **sharded_fp32_params))  # pyrefly: ignore[bad-unpacking]
   return prev_params_shardings, state_mesh_shardings
 
 

@@ -95,7 +95,7 @@ def get_functional_train_with_signature(
 ):
   """Get the shardings (both state and data) for `train_step`."""
   functional_train = functools.partial(train_step, model, config, state_mesh_shardings, params_shardings)
-  functional_train.__name__ = "train_step"
+  functional_train.__name__ = "train_step"  # pyrefly: ignore[missing-attribute]
   if config.pure_nnx:
     in_shardings = (state_mesh_shardings, data_sharding)  # State, batch
   else:
@@ -109,7 +109,7 @@ def get_functional_train_with_signature(
 def get_functional_eval_with_signature(eval_step, data_sharding, state_mesh_shardings, model, config):
   """Get the shardings (both state and data) for `eval_step`."""
   functional_eval = functools.partial(eval_step, model, config)
-  functional_eval.__name__ = "eval_step"
+  functional_eval.__name__ = "eval_step"  # pyrefly: ignore[missing-attribute]
   if config.pure_nnx:
     in_shardings = (state_mesh_shardings, data_sharding)  # State, batch (NNX: no rng)
   else:
@@ -1392,7 +1392,7 @@ def get_abstract_param(model, config):
       {"params": key, "dropout": key, "aqt": key},
       np.ones(input_shape, dtype=jnp.int32),
       np.ones(input_shape, dtype=jnp.int32),
-      encoder_images=np.ones(image_shape, dtype=jnp.int32) if config.use_multimodal else None,
+      encoder_images=np.ones(image_shape, dtype=jnp.int32) if config.use_multimodal else None,  # pyrefly: ignore[no-matching-overload]
       encoder_audios=np.ones(audio_shape, dtype=jnp.float32) if config.use_audio else None,
   )
   return abstract_vars
@@ -2022,7 +2022,7 @@ def maybe_dump_jaxpr(config, p_train_step, train_step_inputs):
   # Convert all input arguments recursively to purely local abstract ShapeDtypeStruct objects
   # to completely bypass remote Array objects and proxy tracing overhead.
   abstract_inputs = jax.tree.map(to_abstract, train_step_inputs)
-  p_train_jaxpr = jax.make_jaxpr(unwrapped_step)(*abstract_inputs)
+  p_train_jaxpr = jax.make_jaxpr(unwrapped_step)(*abstract_inputs)  # pyrefly: ignore[no-matching-overload]
 
   local_filename = "train_step.jaxpr"
   local_path = os.path.join(config.dump_jaxpr_local_dir, local_filename)

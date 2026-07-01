@@ -150,7 +150,7 @@ def gradient_accumulation_loss_and_grad(
       "ga_params": ga_params,
   }
   if is_nnx:
-    init_grad_and_loss["rest_state"] = rest
+    init_grad_and_loss["rest_state"] = rest  # pyrefly: ignore[unbound-name]
 
   grad_and_loss, aux = jax.lax.scan(
       accumulate_gradient, init_grad_and_loss, data, length=config.gradient_accumulation_steps
