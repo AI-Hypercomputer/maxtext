@@ -126,6 +126,18 @@ jobs:
             echo "run_notebooks=false" >> $GITHUB_OUTPUT
           fi
 
+  code_quality_check:
+    needs: analyze_code_changes
+    uses: ./.github/workflows/code_quality.yml
+    with:
+      maxtext_sha: ${{ inputs.maxtext_sha || github.sha }}
+
+  docs_build_check:
+    needs: analyze_code_changes
+    uses: ./.github/workflows/check_docs_build.yml
+    with:
+      maxtext_sha: ${{ inputs.maxtext_sha || github.sha }}
+
   build_and_upload_maxtext_package:
     needs: analyze_code_changes
     # Run if either tests or notebooks need to run
@@ -156,7 +168,7 @@ jobs:
 
   tpu-tests:
     name: ${{ matrix.flavor || 'TPU' }} tests
-    needs: [build_and_upload_maxtext_package]
+    needs: [build_and_upload_maxtext_package, code_quality_check, docs_build_check]
     if: needs.analyze_code_changes.outputs.run_tests == 'true'
     uses: ./.github/workflows/run_tests_coordinator.yml
     strategy:
@@ -171,7 +183,7 @@ jobs:
 
   gpu-tests:
     name: ${{ matrix.flavor || 'GPU' }} tests
-    needs: [build_and_upload_maxtext_package]
+    needs: [build_and_upload_maxtext_package, code_quality_check, docs_build_check]
     if: needs.analyze_code_changes.outputs.run_tests == 'true'
     strategy:
       fail-fast: false
@@ -186,7 +198,7 @@ jobs:
 
   cpu-tests:
     name: ${{ matrix.flavor || 'CPU' }} tests
-    needs: [build_and_upload_maxtext_package]
+    needs: [build_and_upload_maxtext_package, code_quality_check, docs_build_check]
     if: needs.analyze_code_changes.outputs.run_tests == 'true'
     uses: ./.github/workflows/run_tests_coordinator.yml
     strategy:
@@ -217,7 +229,7 @@ jobs:
           echo "worker_groups=${TPU_UNIT_WORKER_GROUPS}" >> "$GITHUB_OUTPUT"
 
   maxtext_tpu_pathways_unit_tests:
-    needs: [build_and_upload_maxtext_package, setup-pathways-parameters]
+    needs: [build_and_upload_maxtext_package, setup-pathways-parameters, code_quality_check, docs_build_check]
     if: needs.analyze_code_changes.outputs.run_tests == 'true'
     uses: ./.github/workflows/run_pathways_tests.yml
     strategy:
@@ -240,7 +252,7 @@ jobs:
       worker_group: ${{ matrix.group }}
 
   maxtext_tpu_pathways_integration_tests:
-    needs: build_and_upload_maxtext_package
+    needs: [build_and_upload_maxtext_package, code_quality_check, docs_build_check]
     uses: ./.github/workflows/run_pathways_tests.yml
     strategy:
         fail-fast: false
@@ -259,7 +271,7 @@ jobs:
 
   all_tests_passed:
     name: All Required Tests Passed
-    needs: [tpu-tests, gpu-tests, cpu-tests, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests]
+    needs: [tpu-tests, gpu-tests, cpu-tests, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -272,6 +284,8 @@ jobs:
 
           # Otherwise, check that build and all tests passed or were skipped
           echo "Build result: ${NEEDS_BUILD_AND_UPLOAD_MAXTEXT_PACKAGE_RESULT}"
+          echo "Code Quality result: ${NEEDS_CODE_QUALITY_CHECK_RESULT}"
+          echo "Docs Build result: ${NEEDS_DOCS_BUILD_CHECK_RESULT}"
           echo "TPU Tests (Matrix) result: ${NEEDS_TPU_TESTS_RESULT}"
           echo "GPU Tests (Matrix) result: ${NEEDS_GPU_TESTS_RESULT}"
           echo "CPU Tests (Matrix) result: ${NEEDS_CPU_TESTS_RESULT}"
@@ -288,6 +302,8 @@ jobs:
         env:
           NEEDS_ANALYZE_CODE_CHANGES_OUTPUTS_RUN_TESTS: ${{ needs.analyze_code_changes.outputs.run_tests }}
           NEEDS_BUILD_AND_UPLOAD_MAXTEXT_PACKAGE_RESULT: ${{ needs.build_and_upload_maxtext_package.result }}
+          NEEDS_CODE_QUALITY_CHECK_RESULT: ${{ needs.code_quality_check.result }}
+          NEEDS_DOCS_BUILD_CHECK_RESULT: ${{ needs.docs_build_check.result }}
           NEEDS_CPU_TESTS_RESULT: ${{ needs.cpu-tests.result }}
           NEEDS_TPU_TESTS_RESULT: ${{ needs.tpu-tests.result }}
           NEEDS_GPU_TESTS_RESULT: ${{ needs.gpu-tests.result }}

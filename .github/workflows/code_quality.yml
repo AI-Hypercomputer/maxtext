@@ -18,16 +18,12 @@ name: Code Quality
 
 on:
   pull_request:
-
-concurrency:
-  # Dedup pull requests (canceling previous runs of the same workflow for same PR), and scheduled runs but nothing else
-  group: >
-    ${{
-      github.event_name == 'pull_request' && format('{0}-pr-{1}', github.workflow, github.event.pull_request.number) ||
-      github.event_name == 'schedule' && format('{0}-schedule', github.workflow) ||
-      github.run_id
-    }}
-  cancel-in-progress: true
+  workflow_call:
+    inputs:
+      maxtext_sha:
+        description: 'The specific MaxText commit SHA.'
+        required: false
+        type: string
 
 jobs:
   qa:
@@ -35,6 +31,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v5
+      with:
+        fetch-depth: 0
+        ref: ${{ inputs.maxtext_sha || github.sha }}
 
     - name: Install uv and set the Python version
       uses: astral-sh/setup-uv@v7
