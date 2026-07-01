@@ -377,9 +377,18 @@ jobs:
 
       - name: Parse JUnit XML to Benchmark format
         run: |
+          mkdir -p ./cache
           python3 tests/utils/parse_junit_to_benchmark.py test-results benchmark-results.json
           echo "Parsed Benchmark Results:"
           cat benchmark-results.json
+
+      - name: Restore Benchmark Data
+        uses: actions/cache@v4
+        with:
+          path: ./cache
+          key: ${{ runner.os }}-benchmark-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-benchmark-
 
       - name: Track Test Durations (Main)
         if: github.ref == 'refs/heads/main'
@@ -388,8 +397,8 @@ jobs:
           name: MaxText Test Execution Times
           tool: 'customSmallerIsBetter'
           output-file-path: benchmark-results.json
+          external-data-json-path: ./cache/benchmark-data.json
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          auto-push: true
           alert-threshold: '150%'
           comment-on-alert: true
           fail-on-alert: false
@@ -401,8 +410,8 @@ jobs:
           name: MaxText Test Execution Times
           tool: 'customSmallerIsBetter'
           output-file-path: benchmark-results.json
+          external-data-json-path: ./cache/benchmark-data.json
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          auto-push: false
           alert-threshold: '150%'
           comment-on-alert: true
           fail-on-alert: true
