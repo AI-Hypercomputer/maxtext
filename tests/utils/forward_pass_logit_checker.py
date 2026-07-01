@@ -468,7 +468,7 @@ def main(config, test_args):  # pylint: disable=W0621
 
       if jax.process_index() == 0 and test_args.output_logits_path:
         data_to_save = {
-            "prompt": golden_data[golden_data_index]["prompt"],
+            "prompt": golden_data_point["prompt"],
             "tokens": ids[0, :seq_len].tolist(),
             "logits": full_train_logits[0].tolist(),
         }
@@ -517,7 +517,7 @@ def main(config, test_args):  # pylint: disable=W0621
     # Default to bfloat16 if dtype is unrecognized
     torch_dtype = dtype_mapping.get(config.dtype.name.lower(), torch.bfloat16)
     max_logging.log(f"Loading HF model with dtype: {torch_dtype} (derived from config.dtype: {config.dtype})")
-    
+
     if "qwen3-vl" in config.model_name.lower():
       from transformers import Qwen3VLForConditionalGeneration  # pylint: disable=import-outside-toplevel
       model_class = Qwen3VLForConditionalGeneration
