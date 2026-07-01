@@ -710,6 +710,15 @@ def training_loop_iteration(
         if shard_optimizer_over_data and isinstance(model, nn.Module):
           state = sharding.maybe_shard_with_name(state, state_mesh_shardings, shard_mode)
         state, metrics = p_train_step(state, example_batch, *step_rng_args)
+        replicated_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+        if "scalar" in metrics:
+          for k, v in metrics["scalar"].items():
+            if isinstance(v, jax.Array):
+              metrics["scalar"][k] = jax.device_put(v, replicated_sharding)
+        if "scalars" in metrics:
+          for k, v in metrics["scalars"].items():
+            if isinstance(v, jax.Array):
+              metrics["scalars"][k] = jax.device_put(v, replicated_sharding)
 
   step_time_delta = datetime.datetime.now() - last_step_completion
   last_step_completion = datetime.datetime.now()
@@ -769,6 +778,7 @@ def training_loop_iteration(
         "step": state.step,
         "params": state.params,
         "opt_state": state.opt_state,
+        "metrics": metrics,
     }
     snapshot_mgr.save_pytree(step, state_dict)
 
@@ -788,13 +798,6 @@ def recover(
   if config.pure_nnx:
     raise NotImplementedError("Elastic recovery is not supported for NNX.")
 
-  _logger.info("[*] Recovering JAX device state from host snapshot...")
-  elastic_manager = python_vars["elastic_manager"]
-  snapshot_mgr = python_vars["snapshot"]
-  recorder = python_vars["recorder"]
-
-  # Safe Metrics Extraction & Flushing
-  metric_logger_instance = python_vars.get("metric_logger_instance")
   if metric_logger_instance is not None:
     metric_logger_instance.recover_metrics()
 
@@ -982,6 +985,8 @@ def recover(
         params=restored_dict["params"],
         opt_state=restored_dict["opt_state"],
     )
+    if metric_logger_instance is not None:
+      metric_logger_instance.recover_metrics(restored_dict.get("metrics"))
 
   # Update jax_device_state with the newly built JAX objects
   jax_device_state["state"] = restored_state

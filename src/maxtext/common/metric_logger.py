@@ -404,30 +404,18 @@ class MetricLogger:
       self._pending_eval_step_count += 1
       self.buffered_metrics.append(("eval", step, metrics, step_time_delta))
 
-  def recover_metrics(self):
+  def recover_metrics(self, recovered_metrics=None):
     """Flushes and prints buffered metrics safely during recovery, then clears the buffer."""
-    train_entry = None
-    for entry in self.buffered_metrics:
-      if entry[0] == "train":
-        train_entry = entry
-        break
-    if train_entry is not None:
-      (_, step_to_write, metrics_to_write, _) = train_entry
+    if recovered_metrics is not None:
       try:
-        # Pull loss/perplexity to print safely
-        scalars = metrics_to_write["scalar"]
-        loss = float(scalars["learning/loss"])
+        scalars = recovered_metrics.get("scalar", {})
+        loss = float(scalars.get("learning/loss", 0.0))
         step_time = float(scalars.get("perf/step_time_seconds", 0.0))
         max_logging.log(
-            f"[METRIC RECOVERY] Successfully recovered metrics for step {step_to_write} | Loss: {loss:.3f} | Step Time: {step_time:.3f}s"
+            f"[METRIC RECOVERY] Successfully recovered metrics via Snapshotter | Loss: {loss:.3f} | Step Time: {step_time:.3f}s"
         )
-        # Try to write them to local/tensorboard if possible, but catch to avoid block
-        try:
-          self.write_metrics(metrics_to_write, step_to_write)
-        except Exception as e:
-          max_logging.log(f"[METRIC RECOVERY] Skipped standard flush: {e}")
       except Exception as e:
-        max_logging.log(f"[METRIC RECOVERY] Failed to read buffered metrics: {e}")
+        max_logging.log(f"[METRIC RECOVERY] Failed to read Snapshotter recovered metrics: {e}")
 
     # Cleanly clear the buffer to prevent dead device reference errors downstream
     self.buffered_metrics.clear()

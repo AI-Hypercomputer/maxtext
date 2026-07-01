@@ -58,11 +58,12 @@ class Snapshotter:
       _logger.warning("Snapshotter busy. Skipping snapshot for step %d", step)
       return
 
-    pinned_shardings = jax.tree.map(
-        lambda x: x.sharding.with_memory_kind("pinned_host"), state
-    )
+    def pin_leaf(x):
+      if isinstance(x, jax.Array):
+        return jax.device_put(x, x.sharding.with_memory_kind("pinned_host"))
+      return x
 
-    pinned_state = jax.device_put(state, pinned_shardings)
+    pinned_state = jax.tree.map(pin_leaf, state)
 
     self._queue.put((pinned_state, step))
 
@@ -101,6 +102,8 @@ class Snapshotter:
         return False
 
     def get_active_pytree(x):
+      if not isinstance(x, jax.Array) or not hasattr(x.sharding, "mesh"):
+        return x
       mesh_axis_name = x.sharding.mesh.axis_names[self.replica_axis_index]
       all_replicas = split_by_mesh_axis.split_by_mesh_axis(
           x,
@@ -123,22 +126,42 @@ class Snapshotter:
       return reconstructed_state
 
     _logger.info("Restoring from snapshot at step %d...", step)
-    pinned_state = jax.tree.map(get_active_pytree, pinned_state)
+    active_pinned_state = jax.tree.map(get_active_pytree, pinned_state)
+    metrics = active_pinned_state.pop("metrics", None)
 
     # Re-shard on host to the target device mesh
     host_target_shardings = jax.tree.map(
-        lambda x: x.sharding.with_memory_kind("pinned_host"), abstract_state
+        lambda x: x.sharding.with_memory_kind("pinned_host")
+        if isinstance(x, jax.Array) and hasattr(x.sharding, "with_memory_kind")
+        else None,
+        abstract_state,
     )
 
-    host_target_state = jax.device_put(
-        pinned_state, host_target_shardings
+    host_target_state = jax.tree.map(
+        lambda x, s: jax.device_put(x, s)
+        if isinstance(x, jax.Array) and s is not None
+        else x,
+        active_pinned_state,
+        host_target_shardings,
     )
 
     # Move from host back to device (TPU) memory.
-    restored_state = jax.device_put(
-        host_target_state, jax.tree.map(lambda x: x.sharding, abstract_state)
+    target_device_shardings = jax.tree.map(
+        lambda x: x.sharding if isinstance(x, jax.Array) else None,
+        abstract_state,
+    )
+
+    restored_state = jax.tree.map(
+        lambda x, s: jax.device_put(x, s)
+        if isinstance(x, jax.Array) and s is not None
+        else x,
+        host_target_state,
+        target_device_shardings,
     )
     jax.block_until_ready(restored_state)
+
+    if metrics is not None:
+      restored_state["metrics"] = metrics
 
     if reset_snapshot_state:
       with self._lock:
