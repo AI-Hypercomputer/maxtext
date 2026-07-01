@@ -1082,6 +1082,32 @@ def load_checkpoint_metadata(checkpoint_dir_path: str) -> dict[str, Any]:
     return {}
 
 
+def _uses_local_checkpoint_period(config):
+  return config.enable_emergency_checkpoint or config.enable_multi_tier_checkpointing
+
+
+def _should_save_checkpoint_at_step(checkpoint_manager, step, config, force):
+  """Returns whether MaxText should build and dispatch checkpoint args."""
+  if force:
+    return True
+  if config.enable_continuous_checkpointing:
+    base_checkpoint_due = bool(checkpoint_manager.should_save(step))
+  else:
+    base_checkpoint_due = step % config.checkpoint_period == 0
+  local_checkpoint_due = _uses_local_checkpoint_period(config) and step % config.local_checkpoint_period == 0
+  autocheckpoint_due = config.enable_autocheckpoint and checkpoint_manager.reached_preemption(step)
+  return base_checkpoint_due or local_checkpoint_due or autocheckpoint_due
+
+
+def _handle_post_checkpoint_preemption(checkpoint_manager, step, force_ckpt_save):
+  """Waits on final/preemption saves and raises if preempted."""
+  reached_preemption = checkpoint_manager.reached_preemption(step)
+  if force_ckpt_save or reached_preemption:
+    checkpoint_manager.wait_until_finished()
+  if reached_preemption:
+    raise exceptions.StopTraining("Job is preempted.")
+
+
 def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step=None):
   """Save checkpoint if checkpointing is enabled."""
   if checkpoint_manager is None:
@@ -1100,6 +1126,18 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
       # Linen TrainState has .step attribute
       actual_step = int(state.step) - 1
 
+  # Determine if a checkpoint save should be forced, overriding the usual
+  # `config.checkpoint_period` logic.
+  # This occurs if this function was called:
+  # without an explicit 'step' (implying it's a checkpoint save for final step),
+  # AND the 'actual_step' is a valid step,
+  # AND it's not a step that would normally trigger a checkpoint save.
+  force_ckpt_save = step is None and actual_step != -1 and (actual_step % config.checkpoint_period != 0)
+
+  if not _should_save_checkpoint_at_step(checkpoint_manager, actual_step, config, force_ckpt_save):
+    _handle_post_checkpoint_preemption(checkpoint_manager, actual_step, force_ckpt_save)
+    return
+
   if checkpoint_manager.latest_step() == actual_step:
     max_logging.log(f"Checkpoint for step {actual_step} already exists, skipping save.")
     return
@@ -1113,13 +1151,6 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
       state = train_state_nnx.to_linen_checkpoint_dict({"model": state.params, "optimizer": {"step": step_value}})
     else:
       state = train_state_nnx.to_linen_checkpoint_dict(state.to_pure_dict())
-
-  # Determine if a checkpoint save should be forced, overriding the usual `config.checkpoint_period` logic.
-  # This occurs if this function was called:
-  # without an explicit 'step' (implying it's a checkpoint save for final step),
-  # AND the 'actual_step' is a valid step,
-  # AND it's not a step that would normally trigger a checkpoint save.
-  force_ckpt_save = step is None and actual_step != -1 and (actual_step % config.checkpoint_period != 0)
 
   try:
     checkpoint_saved = save_checkpoint(checkpoint_manager, actual_step, state, config, data_iterator, force_ckpt_save)
@@ -1142,13 +1173,9 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
   except Exception as e:
     raise exceptions.StopTraining(f"Checkpointing failed. {str(e)}") from e
 
-  # Wait for any pending checkpoint save to finish during preemption or final step save
-  if force_ckpt_save or checkpoint_manager.reached_preemption(actual_step):
-    checkpoint_manager.wait_until_finished()
-
-  # Raise exception upon preemption
-  if checkpoint_manager.reached_preemption(actual_step):
-    raise exceptions.StopTraining("Job is preempted.")
+  # Wait for any pending checkpoint save to finish during preemption or final
+  # step save, then raise upon preemption.
+  _handle_post_checkpoint_preemption(checkpoint_manager, actual_step, force_ckpt_save)
 
 
 def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=None, force=False):
@@ -1157,7 +1184,7 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
     if (
         force
         or (step % config.checkpoint_period == 0 and not config.enable_continuous_checkpointing)
-        or (config.enable_emergency_checkpoint and step % config.local_checkpoint_period == 0)
+        or (_uses_local_checkpoint_period(config) and step % config.local_checkpoint_period == 0)
         or (config.enable_autocheckpoint and checkpoint_manager.reached_preemption(step))
     ):
       blocking_until_ready_start = time.time()
