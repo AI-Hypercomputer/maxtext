@@ -351,3 +351,58 @@ jobs:
     with:
       failed_run_id: '${{ github.run_id }}'
     secrets: inherit
+
+  track_performance:
+    name: Track Test Performance
+    needs: [tpu-tests, gpu-tests, cpu-tests]
+    if: ${{ always() && !cancelled() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download all test results
+        uses: actions/download-artifact@v4
+        with:
+          path: test-results
+          pattern: test-results-*
+          merge-multiple: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Parse JUnit XML to Benchmark format
+        run: |
+          python3 tests/utils/parse_junit_to_benchmark.py test-results benchmark-results.json
+          echo "Parsed Benchmark Results:"
+          cat benchmark-results.json
+
+      - name: Track Test Durations (Main)
+        if: github.ref == 'refs/heads/main'
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: MaxText Test Execution Times
+          tool: 'customSmallerIsBetter'
+          output-file-path: benchmark-results.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          alert-threshold: '150%'
+          comment-on-alert: true
+          fail-on-alert: false
+
+      - name: Verify Test Durations (PR)
+        if: github.ref != 'refs/heads/main'
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: MaxText Test Execution Times
+          tool: 'customSmallerIsBetter'
+          output-file-path: benchmark-results.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: false
+          alert-threshold: '150%'
+          comment-on-alert: true
+          fail-on-alert: true
