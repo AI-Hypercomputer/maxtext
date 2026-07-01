@@ -498,7 +498,12 @@ class TestMaybeSaveCheckpointStepAlignment(unittest.TestCase):
   def test_maybe_save_checkpoint_raises_on_preemption(self):
     """Verify maybe_save_checkpoint raises StopTraining on preemption."""
     state = self._build_nnx_state(self.N_STEPS)
-    config = SimpleNamespace(pure_nnx=True, checkpoint_period=1, async_checkpointing=False)
+    config = SimpleNamespace(
+        pure_nnx=True,
+        checkpoint_period=1,
+        async_checkpointing=False,
+        enable_diloco=False,
+    )
     mgr = mock.MagicMock()
     mgr.reached_preemption.return_value = True
     mgr.latest_step.return_value = None
@@ -515,7 +520,13 @@ class TestMaybeSaveCheckpointStepAlignment(unittest.TestCase):
   def test_maybe_save_checkpoint_propagates_jax_runtime_error_elastic_disabled(self):
     """Verify maybe_save_checkpoint propagates JaxRuntimeError when elastic is disabled."""
     state = self._build_nnx_state(self.N_STEPS)
-    config = SimpleNamespace(pure_nnx=True, checkpoint_period=1, async_checkpointing=False, elastic_enabled=False)
+    config = SimpleNamespace(
+        pure_nnx=True,
+        checkpoint_period=1,
+        async_checkpointing=False,
+        elastic_enabled=False,
+        enable_diloco=False,
+    )
     mgr = mock.MagicMock()
     mgr.reached_preemption.return_value = False
     mgr.latest_step.return_value = None
@@ -530,7 +541,13 @@ class TestMaybeSaveCheckpointStepAlignment(unittest.TestCase):
   def test_maybe_save_checkpoint_propagates_jax_runtime_error_elastic_enabled(self):
     """Verify maybe_save_checkpoint propagates JaxRuntimeError when elastic is enabled."""
     state = self._build_nnx_state(self.N_STEPS)
-    config = SimpleNamespace(pure_nnx=True, checkpoint_period=1, async_checkpointing=False, elastic_enabled=True)
+    config = SimpleNamespace(
+        pure_nnx=True,
+        checkpoint_period=1,
+        async_checkpointing=False,
+        elastic_enabled=True,
+        enable_diloco=False,
+    )
     mgr = mock.MagicMock()
     mgr.reached_preemption.return_value = False
     mgr.latest_step.return_value = None
