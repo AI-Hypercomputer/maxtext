@@ -988,11 +988,11 @@ class HardwareAndMesh(BaseModel):
       CustomRule.DEFAULT, description="Customized mesh and logical rules for granularity."
   )
   allow_split_physical_axes: bool = Field(False, description="Allow splitting physical axes for device mesh creation.")
-  enable_nnx: bool = Field(False, description="Whether to use NNX for model definition.")
+  enable_nnx: bool = Field(True, description="Whether to use NNX for model definition.")
   optimize_mesh_for_tpu_v6e: bool = Field(False, description="Apply transformations to the mesh for TPU v6e.")
   shardy: bool = Field(True, description="Whether to use shardy XLA backend.")
-  pure_nnx_decoder: bool = Field(False, description="Whether to enable pure NNX decoder.")
-  pure_nnx: bool = Field(False, description="Whether to enable pure NNX mode.")
+  pure_nnx_decoder: bool = Field(True, description="Whether to enable pure NNX decoder.")
+  pure_nnx: bool = Field(True, description="Whether to enable pure NNX mode.")
   remove_size_one_mesh_axis_from_type: bool = Field(
       True, description="Whether to remove size one mesh axis from type through jax.config."
   )
