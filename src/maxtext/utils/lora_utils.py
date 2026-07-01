@@ -515,6 +515,45 @@ def _verify_lora_parameters(lora_model: nnx.Module, mt_config: pyconfig.HyperPar
   )
 
 
+def sync_lora_metadata(config: pyconfig.HyperParameters) -> None:
+  """Syncs LoRA parameters (rank, alpha) from the checkpoint sidecar metadata if present.
+
+  If configuration values are set to non-default values (i.e. rank > 0 or alpha > 0.0)
+  and differ from the checkpoint metadata values, we raise a ValueError to fail the run.
+  If they are at default values, we sync them from the checkpoint.
+  """
+  lora_restore_path = config.lora.lora_restore_path
+  if not lora_restore_path:
+    return
+
+  custom_metadata = checkpointing.load_checkpoint_metadata(lora_restore_path)
+  lora_meta = custom_metadata.get("lora")
+
+  if lora_meta:
+    meta_rank = lora_meta.get("lora_rank", config.lora.lora_rank)
+    meta_alpha = lora_meta.get("lora_alpha", config.lora.lora_alpha)
+
+    # Check lora_rank
+    if config.lora.lora_rank not in (0, meta_rank):
+      raise ValueError(
+          f"Configured lora_rank ({config.lora.lora_rank}) does not match "
+          f"checkpoint metadata lora_rank ({meta_rank}) at {lora_restore_path}."
+      )
+    # Check lora_alpha
+    if config.lora.lora_alpha not in (0.0, meta_alpha):
+      raise ValueError(
+          f"Configured lora_alpha ({config.lora.lora_alpha}) does not match "
+          f"checkpoint metadata lora_alpha ({meta_alpha}) at {lora_restore_path}."
+      )
+
+    config.lora.lora_rank = meta_rank
+    config.lora.lora_alpha = meta_alpha
+    max_logging.log(
+        f"Synced LoRA parameters from Orbax metadata at {lora_restore_path}: "
+        f"rank={config.lora.lora_rank}, alpha={config.lora.lora_alpha}"
+    )
+
+
 def apply_lora_to_model(
     model: nnx.Module,
     mesh: Optional[jax.sharding.Mesh],
@@ -585,6 +624,8 @@ def apply_lora_to_model(
 def restore_lora_from_path(trainer: Any, mt_config: pyconfig.HyperParameters) -> Any:
   """Restores LoRA parameter weights from an external Orbax checkpoint for a fresh run."""
   lora_restore_path = mt_config.lora.lora_restore_path
+  if not lora_restore_path:
+    return trainer
 
   train_steps = getattr(trainer, "train_steps", 0)
   if train_steps > 0:
@@ -600,6 +641,8 @@ def restore_lora_from_path(trainer: Any, mt_config: pyconfig.HyperParameters) ->
           "lora_restore_path is set but LoRA is not enabled on the model. "
           f"Set lora.enable_lora=True and verify lora_module_path ('{lora_module_path}') matches model modules."
       )
+
+  sync_lora_metadata(mt_config)
 
   abstract_lora_params = nnx.state(trainer.model, nnx.LoRAParam)
 

@@ -97,6 +97,7 @@ from maxtext.checkpoint_conversion.utils.utils import (
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils.globals import HF_IDS
+from maxtext.utils.lora_utils import sync_lora_metadata
 
 
 flags.DEFINE_bool(
@@ -450,6 +451,9 @@ def main(argv: Sequence[str]) -> None:
 
   if not load_parameters_path and not lora_restore_path:
     raise ValueError("Either load_parameters_path or lora_restore_path must be specified.")
+
+  if lora_restore_path:
+    sync_lora_metadata(config)
 
   # Load Maxtext checkpoint using Orbax (now smart enough to load both if present)
   max_logging.log("\nLoading Orbax checkpoint(s)...")

@@ -367,6 +367,7 @@ class ParamKeyPartsFromPathTest(unittest.TestCase):
             "hidden_size_per_layer_input=128",
             "vocab_size_per_layer_input=256",
             "vocab_size=256",
+            "skip_jax_distributed_system=True",
         ],
         override_model_config=True,
     )
@@ -417,7 +418,7 @@ class CheckpointMergingTest(unittest.TestCase):
   @unittest.mock.patch("maxtext.checkpoint_conversion.utils.utils.ocp.Checkpointer")
   @unittest.mock.patch("maxtext.checkpoint_conversion.utils.utils.epath.Path")
   @unittest.mock.patch("maxtext.checkpoint_conversion.utils.utils.jax.devices")
-  def test_load_orbax_checkpoint_recursive_merge(self, mock_jax_devices, mock_path, mock_checkpointer_cls):
+  def test_load_orbax_checkpoint_recursive_merge(self, mock_jax_devices, _mock_path, mock_checkpointer_cls):
 
     # Mock jax devices
     mock_jax_devices.return_value = [MagicMock()]
