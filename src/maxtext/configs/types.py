@@ -2534,8 +2534,6 @@ class MaxTextConfig(
       raise ValueError("check_vma is not yet supported with tokamax gmm kernel.")
     if self.use_ragged_sort:
       raise ValueError("check_vma is not yet supported with ragged sort kernel.")
-    if self.use_ring_of_experts:
-      raise ValueError("check_vma is not yet supported with ring of experts.")
     _allowed = {"ici_expert_parallelism", "ici_fsdp_parallelism"}
     active = [name for name in IciParallelism.model_fields if name not in _allowed and getattr(self, name) != 1]
     if active:

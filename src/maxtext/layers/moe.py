@@ -1499,12 +1499,12 @@ class RoutedMoE(nnx.Module):
       if self.config.use_ring_of_experts:
         # The ring-of-experts strategy first duplicates the inputs to all
         # expert shards, and then routes within each shard.
-
-        # Duplicate inputs to all expert shards.
-        x, logits, pre_bias_logits = tuple(
-            jax.lax.all_gather(z, axis_name=self._expert_parallelism_name, tiled=True)
-            for z in (x, logits, pre_bias_logits)
-        )
+        if num_ep != 1:
+          # Duplicate inputs to all expert shards.
+          x, logits, pre_bias_logits = tuple(
+              jax.lax.all_gather(z, axis_name=self._expert_parallelism_name, tiled=True)
+              for z in (x, logits, pre_bias_logits)
+          )
 
         # "Route" tokens within each shard.
         num_experts_per_shard = self.config.num_experts // num_ep
