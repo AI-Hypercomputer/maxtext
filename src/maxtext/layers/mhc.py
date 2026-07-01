@@ -368,21 +368,24 @@ class HyperHead(nnx.Module):
     """Collapses the multi-stream residual back to a single stream."""
     b, s, k, d = x.shape
     
-    # Flatten and norm
-    flat = self.input_norm(jnp.reshape(x, (b, s, k * d)))
+    # 1. Cast x to float32 BEFORE the norm to match PyTorch
+    flat_f32 = jnp.reshape(x, (b, s, k * d)).astype(jnp.float32)
+    flat = self.input_norm(flat_f32) # Norm operates on float32
 
-    hc_fn = jnp.asarray(self.hc_fn[...], self.dtype)
-    hc_scale = jnp.asarray(self.hc_scale[...], self.dtype)
-    hc_base = jnp.asarray(self.hc_base[...], self.dtype)
+    # 2. Extract parameters in float32
+    hc_fn = jnp.asarray(self.hc_fn[...], jnp.float32)
+    hc_scale = jnp.asarray(self.hc_scale[...], jnp.float32)
+    hc_base = jnp.asarray(self.hc_base[...], jnp.float32)
 
-    # Linear projection: (b, s, k*d) @ (k*d, k) -> (b, s, k)
+    # 3. Linear projection and gate in float32
     mixes = jnp.einsum("bsm,mk -> bsk", flat, hc_fn, precision=self.matmul_precision)
-    
-    # Sigmoid gate
     pre = jax.nn.sigmoid(mixes * hc_scale + hc_base) + self.eps
 
-    # Collapse via weighted sum
-    collapsed = jnp.einsum("bskd,bsk -> bsd", x, pre, precision=self.matmul_precision)
+    # 4. Cast the gate back to the activation dtype for the final collapse
+    pre_dtype = pre.astype(self.dtype)
+
+    # 5. Collapse via weighted sum in native dtype (e.g., bfloat16)
+    collapsed = jnp.einsum("bskd,bsk -> bsd", x, pre_dtype, precision=self.matmul_precision)
     return collapsed
 
 # Wrap it for Linen so it can be used easily in decoders.py
