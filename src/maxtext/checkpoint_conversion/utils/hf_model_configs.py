@@ -1021,6 +1021,47 @@ class DeepseekV32Config(PTConfig):
 
 deepseek32_671b_config = DeepseekV32Config(**deepseek32_671b_dict)
 
+
+class DeepseekV4Config(PTConfig):
+  model_type = "deepseek_v4"
+
+  def __init__(self, **kwargs):
+    self.max_position_embeddings = kwargs.get("max_position_embeddings", 1048576)
+    super().__init__(**kwargs)
+
+
+deepseek_v4_flash_dict = {
+    "architectures": ["DeepseekV4ForCausalLM"],
+    "attention_bias": False,
+    "attention_dropout": 0.0,
+    "bos_token_id": 0,
+    "eos_token_id": 1,
+    "hidden_act": "silu",
+    "hidden_size": 4096,
+    "intermediate_size": 2048,
+    "moe_intermediate_size": 2048,
+    "num_hidden_layers": 43,
+    "num_experts": 256,
+    "shared_experts": 1,
+    "num_hash_layers": 3,
+    "q_lora_rank": 1024,
+    "kv_lora_rank": 512,
+    "qk_nope_head_dim": 128,
+    "qk_rope_head_dim": 64,
+    "v_head_dim": 128,
+    "index_head_dim": 128,
+    "index_n_heads": 64,
+    "o_groups": 8,
+    "o_lora_rank": 1024,
+    "sliding_window": 128,
+    "num_experts_per_tok": 6,
+    "max_position_embeddings": 1048576,
+    "model_type": "deepseek_v4",
+    "torch_dtype": "bfloat16",
+    "vocab_size": 129280,
+}
+deepseek_v4_flash_config = DeepseekV4Config(**deepseek_v4_flash_dict)
+
 # from https://huggingface.co/openai/gpt-oss-20b/blob/main/config.json
 # remove mxfp4 quantization_config, since we are using bf16
 gpt_oss_20b_dict = {
@@ -1738,6 +1779,7 @@ HF_MODEL_CONFIGS = {
     "deepseek2-16b": deepseek2_16b_config,
     "deepseek3-671b": deepseek3_671b_config,
     "deepseek3.2-671b": deepseek32_671b_config,
+    "deepseek_v4-flash": deepseek_v4_flash_config,
     "gpt-oss-20b": gpt_oss_20b_config,
     "gpt-oss-120b": gpt_oss_120b_config,
     "qwen3-omni-30b-a3b": qwen3_omni_30b_a3b_config,

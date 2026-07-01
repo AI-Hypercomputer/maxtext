@@ -722,13 +722,14 @@ class MLA(Attention):
     """Initializes the MLA-specific projections."""
     # Assert required configuration parameters for MLA attention.
     assert (
-        self.config.attention_type == AttentionType.MLA.value
-    ), f"MLA requires MLA attention type {AttentionType.MLA.value}"
+        self.config.attention_type in (AttentionType.MLA.value, AttentionType.COMPRESSED.value)
+    ), f"MLA requires MLA or COMPRESSED attention type"
     assert self.kv_lora_rank > 0, "KV LoRA rank must be > 0"
     assert self.qk_nope_head_dim > 0, "QK NoPe head dim must be > 0"
     assert self.qk_rope_head_dim > 0, "QK RoPE head dim must be > 0"
     assert self.v_head_dim > 0, "V head dim must be > 0"
-    assert self.num_query_heads == self.num_kv_heads, "MLA requires equal number of query and kv heads"
+    if self.config.attention_type != AttentionType.COMPRESSED.value:
+      assert self.num_query_heads == self.num_kv_heads, "MLA requires equal number of query and kv heads"
     assert not self.config.fused_qkv, "Fused QKV is not supported for MLA"
 
     if self.q_lora_rank == 0:

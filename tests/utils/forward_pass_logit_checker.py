@@ -246,6 +246,8 @@ def get_data(golden_data_point, config):
 
 def main(config, test_args):  # pylint: disable=W0621
   """Test the Whole Model of model_name"""
+  if test_args.compare_layerwise_hidden_states:
+    config.record_layerwise_hidden_states = True
   init_rng = jax.random.PRNGKey(config.init_weights_seed)
   init_rng, rng1 = jax.random.split(init_rng)
   devices_array = maxtext_utils.create_device_mesh(config)
@@ -277,20 +279,47 @@ def main(config, test_args):  # pylint: disable=W0621
       )
     else:
       input_golden_data_path = test_args.golden_logits_path
-    input_golden_data_path = Path(input_golden_data_path)
-    if input_golden_data_path.suffix == ".jsonl":
-      max_logging.log("loading hf goldens from jsonl file")
-      import jsonlines  # pylint: disable=import-outside-toplevel
 
-      with jsonlines.open(input_golden_data_path, "r") as f:
-        golden_data = list(f)
+    if test_args.golden_logits_path == "skip":
+      max_logging.log("Skipping golden logits loading (golden_logits_path='skip'). We will only generate maxtext logits.")
+      golden_data = []
     else:
-      raise ValueError("golden_logits_path must end with .jsonl")
-    max_logging.log(f"loaded {len(golden_data)} golden data points")
+      input_golden_data_path = Path(input_golden_data_path)
+      if input_golden_data_path.suffix == ".jsonl":
+        max_logging.log("loading hf goldens from jsonl file")
+        import jsonlines  # pylint: disable=import-outside-toplevel
+
+        with jsonlines.open(input_golden_data_path, "r") as f:
+          golden_data = list(f)
+      else:
+        raise ValueError("golden_logits_path must end with .jsonl")
+      max_logging.log(f"loaded {len(golden_data)} golden data points")
+
     all_data_to_save = []
-    for golden_data_index, golden_data_point in enumerate(golden_data):
-      max_logging.log(f"\n--- Comparing forward pass for golden data index: {golden_data_index} ---")
-      ids, decoder_segment_ids, decoder_positions, golden_logits, seq_len, images = get_data(golden_data_point, config)
+    all_failures = []
+    # If skipping goldens, we still need prompts to run. Let's use some default prompts.
+    prompts_to_run = golden_data if test_args.golden_logits_path != "skip" else [{"tokens": [1, 2, 3], "layer_hidden_states": []}] * 3
+    for golden_data_index, golden_data_point in enumerate(prompts_to_run):
+      max_logging.log(f"\n--- Comparing forward pass for data index: {golden_data_index} ---")
+      if test_args.golden_logits_path != "skip":
+        ids, decoder_segment_ids, decoder_positions, golden_logits, seq_len, images = get_data(golden_data_point, config)
+      else:
+        # Dummy data for skip
+        ids = jnp.zeros((config.global_batch_size_to_train_on, 3), dtype=jnp.int32)
+        decoder_segment_ids = jnp.ones((config.global_batch_size_to_train_on, 3), dtype=jnp.int32)
+        decoder_positions = jnp.tile(jnp.array([0, 1, 2], dtype=jnp.int32), (config.global_batch_size_to_train_on, 1))
+        golden_logits = None
+        seq_len = 3
+        images = None
+
+      if test_args.compare_layerwise_hidden_states:
+        if "layer_hidden_states" not in golden_data_point:
+          raise KeyError(
+              "golden data point is missing 'layer_hidden_states' key, but --compare_layerwise_hidden_states is enabled."
+          )
+        # golden_layer_hidden_states shape: list of [seq_len, ...]
+        golden_layer_hidden_states = [np.asarray(x, dtype=np.float32) for x in golden_data_point["layer_hidden_states"]]
+
       max_logging.log("maxtext forward pass")
       if state is None:
         full_train_logits = model(
@@ -301,15 +330,27 @@ def main(config, test_args):  # pylint: disable=W0621
             enable_dropout=False,
         )
       else:
-        full_train_logits = model.apply(
-            state.params,
-            ids,
-            decoder_positions,
-            decoder_segment_ids,
-            encoder_images=images,
-            enable_dropout=False,
-            rngs={"aqt": init_rng},
-        )
+        if test_args.compare_layerwise_hidden_states:
+          full_train_logits, intermediate_outputs = model.apply(
+              state.params,
+              ids,
+              decoder_positions,
+              decoder_segment_ids,
+              encoder_images=images,
+              enable_dropout=False,
+              rngs={"aqt": init_rng},
+              mutable=["intermediates"],
+          )
+        else:
+          full_train_logits = model.apply(
+              state.params,
+              ids,
+              decoder_positions,
+              decoder_segment_ids,
+              encoder_images=images,
+              enable_dropout=False,
+              rngs={"aqt": init_rng},
+          )
 
       full_train_logits = jax.experimental.multihost_utils.process_allgather(full_train_logits, tiled=True)
       # if full_train_logits shape is [num_hosts, batch_size, seq_len, vocab_size]
@@ -319,65 +360,198 @@ def main(config, test_args):  # pylint: disable=W0621
       full_train_logits = full_train_logits[:, :seq_len, :]
 
       token_size = int(test_args.token_size) if test_args.token_size else seq_len
-      if full_train_logits.shape[-1] != golden_logits.shape[-1]:
-        max_logging.log(
-            f"Vocab size mismatch: train logits vocab size {full_train_logits.shape[-1]}, "
-            f"golden logits vocab size {golden_logits.shape[-1]}. "
-            "Comparing up to the smaller vocab size."
-        )
-      min_vocab_size = min(full_train_logits.shape[-1], golden_logits.shape[-1])
-
       start_index = 1 if test_args.skip_first_token else 0
-      # shape [seq_len, vocab_size]
-      train_logits_slice = full_train_logits[0, start_index:token_size, :min_vocab_size]
-      golden_logits_slice = golden_logits[start_index:token_size, :min_vocab_size]
 
-      if train_logits_slice.shape[0] > 2:
-        max_logging.log(f"\n[logits: token {start_index + 2}]")
-        max_logging.log(f"{golden_logits_slice[2]=}")
-        max_logging.log(f"{train_logits_slice[2]=}")
+      def get_layer_index(path_keys, config):
+        for key in path_keys:
+          if not isinstance(key, str):
+            continue
+          if key.startswith("dense_layers_"):
+            idx = int(key.split("_")[-1])
+            return idx
+          elif key.startswith("moe_layers_"):
+            idx = int(key.split("_")[-1])
+            return config.first_num_dense_layers + idx
+          elif key.startswith("layers_"):
+            idx = int(key.split("_")[-1])
+            return idx
+          elif key == "dense_layers":
+            return 0
+          elif key == "moe_layers":
+            return config.first_num_dense_layers
+          elif key == "layers":
+            return 0
+        return 9999
 
-      # Calculate absolute and relative differences for detailed reporting
-      abs_diff = jnp.abs(train_logits_slice - golden_logits_slice)
+      def compare_and_assert(train_data, golden_data, name="final", is_logits=True):
+        if train_data.shape[-1] != golden_data.shape[-1]:
+          max_logging.log(
+              f"[{name}] Dimension mismatch: train {train_data.shape[-1]}, "
+              f"golden {golden_data.shape[-1]}. "
+              "Comparing up to the smaller size."
+          )
+        min_last_dim = min(train_data.shape[-1], golden_data.shape[-1])
 
-      # To avoid division by zero, add a small epsilon where golden_logits_slice is zero
-      safe_golden_logits = jnp.where(golden_logits_slice == 0, 1e-8, golden_logits_slice)
-      rel_diff = abs_diff / jnp.abs(safe_golden_logits)
+        # Dynamically build slice to handle arbitrary intermediate dimensions (e.g. hyper-connections)
+        # We slice batch index 0, token range, and the last dimension.
+        slice_obj = [0, slice(start_index, token_size)]
+        for _ in range(train_data.ndim - 3):
+          slice_obj.append(slice(None))
+        slice_obj.append(slice(None, min_last_dim))
+        slice_tuple = tuple(slice_obj)
 
-      max_abs_diff_idx = jnp.unravel_index(jnp.argmax(abs_diff), abs_diff.shape)
-      max_rel_diff_idx = jnp.unravel_index(jnp.argmax(rel_diff), rel_diff.shape)
+        golden_slice_obj = [slice(start_index, token_size)]
+        for _ in range(golden_data.ndim - 2):
+          golden_slice_obj.append(slice(None))
+        golden_slice_obj.append(slice(None, min_last_dim))
+        golden_slice_tuple = tuple(golden_slice_obj)
 
-      max_abs_diff_val = abs_diff[max_abs_diff_idx]
-      max_rel_diff_val = rel_diff[max_rel_diff_idx]
-      msg = (
-          "\n[numerical difference]\n"
-          f"Max absolute difference: {max_abs_diff_val:.4e} at index {max_abs_diff_idx}\n"
-          f"  (Train: {train_logits_slice[max_abs_diff_idx]:.4e}, Golden: {golden_logits_slice[max_abs_diff_idx]:.4e})\n"
-          f"Max relative difference: {max_rel_diff_val:.4e} at index {max_rel_diff_idx}\n"
-          f"  (Train: {train_logits_slice[max_rel_diff_idx]:.4e}, Golden: {golden_logits_slice[max_rel_diff_idx]:.4e})"
-      )
-      max_logging.log(msg)
+        train_data_slice = train_data[slice_tuple]
+        golden_data_slice = golden_data[golden_slice_tuple]
 
-      if test_args.clip_logits_epsilon is not None:
-        model_probabilities = jnp.clip(jax.nn.softmax(train_logits_slice, axis=-1), min=test_args.clip_logits_epsilon)
-        golden_probabilities = jnp.clip(jax.nn.softmax(golden_logits_slice, axis=-1), min=test_args.clip_logits_epsilon)
-      else:
-        model_probabilities = jax.nn.softmax(train_logits_slice, axis=-1)
-        golden_probabilities = jax.nn.softmax(golden_logits_slice, axis=-1)
+        if train_data_slice.shape[0] > 2:
+          max_logging.log(f"\n[{name} values: token {start_index + 2}]")
+          max_logging.log(f"{golden_data_slice[2]=}")
+          max_logging.log(f"{train_data_slice[2]=}")
 
-      if golden_probabilities.shape[0] > 1:
-        max_logging.log(f"\n[probability: token {start_index + 1}]")
-        max_logging.log(f"{golden_probabilities[1]=}")
-        max_logging.log(f"{model_probabilities[1]=}")
+        # Calculate absolute and relative differences for detailed reporting
+        if train_data_slice.ndim > golden_data_slice.ndim:
+            golden_data_expanded = jnp.expand_dims(golden_data_slice, axis=tuple(range(1, 1 + train_data_slice.ndim - golden_data_slice.ndim)))
+        else:
+            golden_data_expanded = golden_data_slice
+        abs_diff = jnp.abs(train_data_slice - golden_data_expanded)
 
-      kl_div = jax.numpy.sum(jax.scipy.special.kl_div(golden_probabilities, model_probabilities), axis=-1)
-      max_kl_div_val = jax.numpy.max(kl_div)
-      max_kl_div_idx = jax.numpy.argmax(kl_div)
-      max_logging.log(
-          f"\n[KL divergence]\n"
-          f"KL divergence = {kl_div}, max KL divergence = {max_kl_div_val} at index {max_kl_div_idx}, "
-          f"the corresponding token id is {ids[0, max_kl_div_idx + start_index]}"
-      )
+        # To avoid division by zero, add a small epsilon where golden_data_expanded is zero
+        safe_golden_data = jnp.where(golden_data_expanded == 0, 1e-8, golden_data_expanded)
+        rel_diff = abs_diff / jnp.abs(safe_golden_data)
+
+        max_abs_diff_idx = jnp.unravel_index(jnp.argmax(abs_diff), abs_diff.shape)
+        max_rel_diff_idx = jnp.unravel_index(jnp.argmax(rel_diff), rel_diff.shape)
+
+        max_abs_diff_val = float(abs_diff[max_abs_diff_idx])
+        max_rel_diff_val = float(rel_diff[max_rel_diff_idx])
+        msg = (
+            f"\n[{name} numerical difference]\n"
+            f"Max absolute difference: {max_abs_diff_val:.4e} at index {max_abs_diff_idx}\n"
+            f"  (Train: {float(train_data_slice[max_abs_diff_idx]):.4e}, Golden: {float(golden_data_expanded[max_abs_diff_idx]):.4e})\n"
+            f"Max relative difference: {max_rel_diff_val:.4e} at index {max_rel_diff_idx}\n"
+            f"  (Train: {float(train_data_slice[max_rel_diff_idx]):.4e}, Golden: {float(golden_data_expanded[max_rel_diff_idx]):.4e})"
+        )
+        max_logging.log(msg)
+
+        comparison_failed = False
+        failure_messages = []
+
+        if is_logits:
+          if test_args.clip_logits_epsilon is not None:
+            model_probabilities = jnp.clip(
+                jax.nn.softmax(train_data_slice, axis=-1), min=test_args.clip_logits_epsilon
+            )
+            golden_probabilities = jnp.clip(
+                jax.nn.softmax(golden_data_expanded, axis=-1), min=test_args.clip_logits_epsilon
+            )
+          else:
+            model_probabilities = jax.nn.softmax(train_data_slice, axis=-1)
+            golden_probabilities = jax.nn.softmax(golden_data_expanded, axis=-1)
+
+          if golden_probabilities.shape[0] > 1:
+            max_logging.log(f"\n[{name} probability: token {start_index + 1}]")
+            max_logging.log(f"{golden_probabilities[1]=}")
+            max_logging.log(f"{model_probabilities[1]=}")
+
+          kl_div = jax.numpy.sum(jax.scipy.special.kl_div(golden_probabilities, model_probabilities), axis=-1)
+          max_kl_div_val = jax.numpy.max(kl_div)
+          max_kl_div_idx = jax.numpy.argmax(kl_div)
+          max_logging.log(
+              f"\n[{name} KL divergence]\n"
+              f"KL divergence = {kl_div}, max KL divergence = {max_kl_div_val} at index {max_kl_div_idx}, "
+              f"the corresponding token id is {ids[0, max_kl_div_idx + start_index]}"
+          )
+
+        if test_args.atol is not None:
+          max_logging.log(f"\n[{name} test criteria]")
+          max_logging.log(
+              f"Checking Numerical Differences between train and golden against "
+              f"atol={test_args.atol} rtol={test_args.rtol}."
+          )
+          rtol_val = float(test_args.rtol)
+          atol_val = float(test_args.atol)
+          if not jax.numpy.allclose(
+              train_data_slice, golden_data_slice, rtol=rtol_val, atol=atol_val, equal_nan=False
+          ):
+            comparison_failed = True
+            failure_messages.append(
+                f"[{name}] Values do not match closely enough. Required rtol={test_args.rtol}, atol={test_args.atol}. "
+                f"Max absolute diff: {max_abs_diff_val:.4e}, max relative diff: {max_rel_diff_val:.4e}"
+            )
+
+        if is_logits and test_args.max_kl_div is not None:
+          max_logging.log(
+              f"Checking KL Divergence between train distribution and golden distribution against "
+              f"threshold {test_args.max_kl_div}."
+          )
+          if not jax.numpy.all(kl_div < test_args.max_kl_div):
+            comparison_failed = True
+            failure_messages.append(
+                f"[{name}] KL divergence values exceed the specified threshold of {test_args.max_kl_div}. "
+                f"Max divergence: {max_kl_div_val:.4e}"
+            )
+
+        return not comparison_failed, "\n".join(failure_messages)
+
+      if test_args.golden_logits_path != "skip":
+        success, msg = compare_and_assert(full_train_logits, golden_logits, "final")
+        if not success:
+          all_failures.append(msg)
+
+      all_layer_hidden_states_processed = []
+      if test_args.compare_layerwise_hidden_states and state is not None:
+        layer_activations_map = {}
+
+        for path, val in jax.tree_util.tree_leaves_with_path(intermediate_outputs):
+          path_keys = [k.key for k in path if hasattr(k, "key")]
+          if "layer_output" in path_keys:
+            idx = get_layer_index(path_keys, config)
+            is_scanned = "scanned_blocks" in path_keys
+
+            if is_scanned:
+              # val shape: (num_scanned_blocks, batch, seq, [hc_mult], d)
+              num_blocks = val.shape[0]
+              inner_layer_name = None
+              for pk in path_keys:
+                if pk in ["layers_0", "layers_1"]:
+                  inner_layer_name = pk
+                  break
+
+              if inner_layer_name is not None:
+                inner_idx = 0 if inner_layer_name == "layers_0" else 1
+                for block_idx in range(num_blocks):
+                  flat_layer_idx = config.first_num_hash_layers + block_idx * 2 + inner_idx
+                  layer_activations_map[flat_layer_idx] = val[block_idx]
+              else:
+                for block_idx in range(num_blocks):
+                  prefix_layers = getattr(config, "first_num_dense_layers", 0)
+                  flat_layer_idx = prefix_layers + block_idx
+                  layer_activations_map[flat_layer_idx] = val[block_idx]
+            else:
+              # Unscanned layer shape: (batch, seq, [hc_mult], d)
+              layer_activations_map[idx] = val
+
+        sorted_keys = sorted(layer_activations_map.keys())
+        all_layer_activations = [layer_activations_map[k] for k in sorted_keys]
+
+        for i, layer_act in enumerate(all_layer_activations):
+          # Gather activations from all hosts along batch dimension (axis 0)
+          layer_act = jax.experimental.multihost_utils.process_allgather(layer_act, tiled=True)
+          # Now shape is (num_hosts * batch, seq_len, [hc_mult], d)
+          # Slice sequence length along axis 1
+          layer_act = layer_act[:, :seq_len, ...]
+          all_layer_hidden_states_processed.append(layer_act)
+
+          if test_args.golden_logits_path != "skip":
+            success, msg = compare_and_assert(layer_act, golden_layer_hidden_states[i], f"layer_{i}", is_logits=False)
+            if not success:
+              all_failures.append(msg)
 
       if jax.process_index() == 0 and test_args.output_logits_path:
         data_to_save = {
@@ -385,31 +559,14 @@ def main(config, test_args):  # pylint: disable=W0621
             "tokens": ids[0, :seq_len].tolist(),
             "logits": full_train_logits[0].tolist(),
         }
+        if test_args.compare_layerwise_hidden_states:
+          data_to_save["layer_hidden_states"] = [x[0].tolist() for x in all_layer_hidden_states_processed]
         all_data_to_save.append(data_to_save)
 
-      if test_args.atol is not None:
-        max_logging.log("\n[test criteria]")
-        max_logging.log(
-            f"Checking Numerical Differences between train logits and golden logits against "
-            f"atol={test_args.atol} rtol={test_args.rtol}."
-        )
-        rtol_val = float(test_args.rtol)
-        atol_val = float(test_args.atol)
-        assert jax.numpy.allclose(
-            train_logits_slice, golden_logits_slice, rtol=rtol_val, atol=atol_val, equal_nan=False
-        ), f"Logits do not match closely enough. Required rtol={test_args.rtol}, atol={test_args.atol}."
-
-      if test_args.max_kl_div is not None:
-        max_logging.log(
-            f"Checking KL Divergence between train distribution and golden distribution against "
-            f"threshold {test_args.max_kl_div}."
-        )
-        assert jax.numpy.all(
-            kl_div < test_args.max_kl_div,
-        ), (
-            f"KL divergence values exceed the specified threshold of {test_args.max_kl_div}. "
-            f"Max divergence: {jax.numpy.max(kl_div)}"
-        )
+    if all_failures:
+      for f in all_failures:
+        max_logging.log(f"COMPARISON FAILURE: {f}")
+      raise AssertionError("Some comparisons failed.")
 
   else:
     """Comparing maxtext model with HF model on-the-fly"""
@@ -583,6 +740,13 @@ if __name__ == "__main__":
   parser.add_argument("--golden_logits_path", type=str, required=False, default="")
   parser.add_argument("--hf_model_path", type=str, required=False, default="")
   parser.add_argument("--run_hf_model", type=bool, required=False, default=False)
+  parser.add_argument(
+      "--compare_layerwise_hidden_states",
+      action="store_true",
+      required=False,
+      default=False,
+      help="Compare layer-by-layer intermediate hidden states against golden data.",
+  )
   parser.add_argument("--output_logits_path", type=str, required=False, default="")
   parser.add_argument("--gcs_output_logits_path", type=str, required=False, default="")
   parser.add_argument("--clip_logits_epsilon", type=float, required=False, default=None)
@@ -611,9 +775,10 @@ if __name__ == "__main__":
   model_args = [sys.argv[0]] + remaining_args
 
   cfg = pyconfig.initialize_pydantic(model_args)
-  assert (
-      test_args.atol is not None or test_args.max_kl_div is not None
-  ), "At least one of --atol or --max_kl_div must be specified to define the test criteria."
+  if test_args.golden_logits_path != "skip":
+    assert (
+        test_args.atol is not None or test_args.max_kl_div is not None
+    ), "At least one of --atol or --max_kl_div must be specified to define the test criteria."
 
   if test_args.run_hf_model and test_args.clip_logits_epsilon is not None:
     raise ValueError("--clip_logits_epsilon is not supported when running HF model on-the-fly (run_hf_model=True).")

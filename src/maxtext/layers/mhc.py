@@ -56,26 +56,26 @@ def get_functions(expansion_rate: int):
   return expand, reduce
 
 
-def sinkhorn(t, iters=20):
+def sinkhorn(t, iters=20, eps=1e-6):
   """Computes the Sinkhorn normalization of a matrix (rows and columns sum to 1)."""
   # Use float32 precision for numerical stability during normalization
   initial_dtype = t.dtype
   t = t.astype(jnp.float32)
 
-  # Column-wise normalization (axis=-2) - positive and sum up to 1 across columns
-  # Equivalent to t = exp(t) / jnp.sum(jnp.exp(t), axis=-2)
-  t = jax.nn.softmax(t, axis=-2)
+  # Softmax along rows (axis=-1)
+  t = jax.nn.softmax(t, axis=-1) + eps
+  # Normalize columns (axis=-2)
+  t = t / (jnp.sum(t, axis=-2, keepdims=True) + eps)
 
   def body_fun(i, val):
-    # L1 Normalization: val / sum(val) with clipping of denominator
     # Normalize rows (axis -1)
-    val = val / jnp.clip(jnp.sum(val, axis=-1, keepdims=True), min=1e-12)
+    val = val / (jnp.sum(val, axis=-1, keepdims=True) + eps)
     # Normalize columns (axis -2)
-    val = val / jnp.clip(jnp.sum(val, axis=-2, keepdims=True), min=1e-12)
+    val = val / (jnp.sum(val, axis=-2, keepdims=True) + eps)
     return val
 
   # Use lax.fori_loop for an efficient, JIT-friendly loop
-  t = jax.lax.fori_loop(0, iters, body_fun, t)
+  t = jax.lax.fori_loop(0, iters - 1, body_fun, t)
   return t.astype(initial_dtype)
 
 
@@ -222,7 +222,8 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
       h_res = jnp.reshape(h_res, (b, s, self.k, self.k))
       intermediate = res_alpha_scale * h_res + res_beta[None, None, :, :]
       output = sinkhorn(intermediate, self.sinkhorn_iterations)
-      return output
+      # Transpose to match JAX's expected [b, s, InCopy, OutCopy] layout
+      return jnp.transpose(output, (0, 1, 3, 2))
 
   def mapping(self, x: Array, alpha_scale: Array, alpha: Array, beta: Array, scale: int):
     """Helper function for both pre and post mappings."""
@@ -270,6 +271,7 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
         self.pre_beta[...],
         1.0,
     )
+    pre_mapping = pre_mapping + 1e-6
     layer_input = jnp.einsum("bskd,bsk -> bsd", x, pre_mapping, precision=self.matmul_precision)
 
     # 3. Pre-norm

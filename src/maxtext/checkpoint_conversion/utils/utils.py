@@ -285,10 +285,16 @@ def process_maxtext_param(
 
   if not isinstance(hf_target_paths[0], list):
     # Case 2 or 3: The source tensor is stacked on a single axis.
+    # i.e., hf_target_paths is an (un-nested) list
     if maxtext_config.scan_layers:
-      max_logging.log("\tscan")
-      # Case 2: Standard scanned layer. Stacked ONLY on the layer axis.
-      axis_to_slice = maxtext_config.param_scan_axis
+      weight_shape = maxtext_param_weight[0].shape if isinstance(maxtext_param_weight, list) else maxtext_param_weight.shape
+      if len(hf_target_paths) == weight_shape[0] and (len(weight_shape) < 4 or weight_shape[maxtext_config.param_scan_axis] != len(hf_target_paths)):
+        max_logging.log("\tunscan moe under scan_layers=True")
+        axis_to_slice = 0
+      else:
+        max_logging.log("\tscan")
+        # Case 2: Standard scanned layer. Stacked ONLY on the layer axis.
+        axis_to_slice = maxtext_config.param_scan_axis
     else:
       max_logging.log("\tunscan moe")
       # Case 3: Unscanned MoE layer. Stacked ONLY on the expert axis. Assuming expert is axis 0.
@@ -1190,6 +1196,7 @@ def save_weights_to_checkpoint(
     device_count: int,
     use_ocdbt: bool,
     use_zarr3: bool,
+    checkpoint_storage_concurrent_gb: int = 96,
 ):
   """Saves model weights to a MaxText-compatible checkpoint with optional sharding.
 
@@ -1232,12 +1239,18 @@ def save_weights_to_checkpoint(
       save_interval_steps,
       use_ocdbt=use_ocdbt,
       use_zarr3=use_zarr3,
+      checkpoint_storage_concurrent_gb=checkpoint_storage_concurrent_gb,
   )
   if checkpoint_manager is None:
     raise RuntimeError("Failed to create Orbax checkpoint manager.")
 
+  if "params" in jax_weights:
+    state_params = jax_weights
+  else:
+    state_params = {"params": jax_weights}
+
   state_new = train_state.TrainState(
-      step=step_number_to_save_new_ckpt, apply_fn=None, params={"params": jax_weights}, tx=None, opt_state={}  # type: ignore
+      step=step_number_to_save_new_ckpt, apply_fn=None, params=state_params, tx=None, opt_state={}  # type: ignore
   )
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))

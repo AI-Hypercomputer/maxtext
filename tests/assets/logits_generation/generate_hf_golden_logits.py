@@ -71,6 +71,7 @@ def save_golden_logits(
     trust_remote_code,
     image_paths,
     output_format,
+    record_layerwise_hidden_states=False,
 ):
   """save golden logits"""
   if hf_model_path is None:
@@ -142,10 +143,30 @@ def save_golden_logits(
       input_ids = tokenizer.encode(prompt_text, return_tensors="pt")
       inputs = {"input_ids": input_ids}
 
+    captured_hidden_states = []
+    def make_hook_fn(layer_idx):
+      def hook_fn(module, inputs, output):
+        tensor = output[0] if isinstance(output, tuple) else output
+        captured_hidden_states.append((layer_idx, tensor.detach().to(torch.float32).cpu()))
+      return hook_fn
+
+    hooks = []
+    if record_layerwise_hidden_states:
+      base_model = getattr(model, "model", model)
+      layers = getattr(base_model, "layers", None)
+      if layers is None:
+        raise ValueError(f"Could not find layers in model structure: {model}")
+      for idx, layer in enumerate(layers):
+        hooks.append(layer.register_forward_hook(make_hook_fn(idx)))
+
     # 2. Run inference
     with torch.no_grad():
       outputs = model(**inputs)
       logits = outputs.logits.cpu().to(torch.float32).numpy()
+
+    # Remove hooks
+    for hook in hooks:
+      hook.remove()
 
     # 3. Populate final data dictionary with tensors from inputs and logits
     for key, value in inputs.items():
@@ -153,6 +174,12 @@ def save_golden_logits(
       val_np = value.cpu().numpy()
       data_to_save[new_key] = val_np[0] if val_np.ndim > 0 else val_np
     data_to_save["logits"] = logits[0]
+
+    if record_layerwise_hidden_states:
+      # Sort by layer index to ensure sequential order
+      captured_hidden_states.sort(key=lambda x: x[0])
+      layer_hidden_states_list = [x[1].numpy()[0] for x in captured_hidden_states]
+      data_to_save["layer_hidden_states"] = layer_hidden_states_list
 
     print(f"Token length is {len(data_to_save['tokens'])} for prompt: {prompt_text}")
     print(f"raw ids: {data_to_save['tokens']}")
@@ -162,6 +189,8 @@ def save_golden_logits(
       for key, value in data_to_save.items():
         if isinstance(value, np.ndarray):
           data_to_save[key] = value.tolist()
+        elif key == "layer_hidden_states" and isinstance(value, list):
+          data_to_save[key] = [x.tolist() if isinstance(x, np.ndarray) else x for x in value]
 
     all_data_to_save.append(data_to_save)
 
@@ -220,6 +249,11 @@ def main(raw_args=None) -> None:
       default="json",
       help="The output format for the golden logits. (json, pickle)",
   )
+  parser.add_argument(
+      "--record-layerwise-hidden-states",
+      action="store_true",
+      help="Record layer-by-layer intermediate hidden states.",
+  )
   args = parser.parse_args(raw_args)
   prompts = args.prompts.split(";")
   image_paths = args.image_paths.split(";") if args.image_paths else []
@@ -240,6 +274,7 @@ def main(raw_args=None) -> None:
       args.trust_remote_code,
       image_paths,
       args.output_format,
+      args.record_layerwise_hidden_states,
   )
 
 

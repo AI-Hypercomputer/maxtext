@@ -228,6 +228,7 @@ ModelName = Literal[
     "deepseek3-test",
     "deepseek3-tiny",
     "deepseek3.2-671b",
+    "deepseek4",
     "deepseek4-284b",
     "deepseek-custom",
     "kimi-k2-1t",
@@ -1873,6 +1874,7 @@ class Metrics(BaseModel):
   gcs_metrics: bool = Field(False, description="If True, save metrics to GCS.")
   save_config_to_gcs: bool = Field(False, description="If True, save config to GCS.")
   record_internal_nn_metrics: int = Field(0, description="Record internal neural network metrics.")
+  record_layerwise_hidden_states: bool = Field(False, description="Record layer-by-layer hidden states.")
   prometheus_port: int = Field(0, description="Port for Prometheus metrics server. 0 disables it.")
   enable_checkpoint_cloud_logger: bool = Field(False, description="Enables structured logging for checkpointing.")
   enable_tunix_perf_metrics: bool = Field(
@@ -3096,8 +3098,6 @@ class MaxTextConfig(
         raise ValueError("`local_checkpoint_period` must be > 0 for emergency checkpointing.")
     if self.moba and self.attention not in ("dot_product"):
       raise ValueError("MoBA is only supported with dot_product attention.")
-    if self.decoder_block == DecoderBlockType.DEEPSEEK4 and self.attention != "dot_product":
-      raise ValueError("DeepSeek4 decoder block currently only supports dot_product attention.")
     if self.use_indexer:
       if self.q_lora_rank == 0:
         raise NotImplementedError("Sparse indexer has not implemented for q_lora_rank = 0.")

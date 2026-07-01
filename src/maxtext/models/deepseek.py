@@ -259,6 +259,9 @@ class DeepSeekGenericLayer(nnx.Module):
           jnp.sum(layer_output == 0) / jnp.size(layer_output),
       )
 
+    if self.config.record_layerwise_hidden_states:
+      self.sow(nnx.Intermediate, "layer_output", layer_output)
+
     if self.config.scan_layers:
       return layer_output, None
     return layer_output, kv_cache
@@ -335,7 +338,7 @@ class DeepSeekDenseLayer(DeepSeekGenericLayer):
         rngs=self.rngs,
     )
 
-  def mlp_op(self, x, deterministic, *args, **kwargs):
+  def mlp_op(self, x, deterministic):
     mlp = self.mlp(x, deterministic, intermediate_sharding=self.mlp_intermediate_sharding, out_sharding=self.out_sharding)
     return self.with_logical_constraint(mlp)
 
