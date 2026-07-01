@@ -78,11 +78,12 @@ class DeepSeekV4RotaryEmbeddingTest(unittest.TestCase):
   def setUp(self):
     self.batch_size = 2
     self.seq_len = 4096
-    self.head_dim = 128
-    self.num_heads = 4
+    self.head_dim = 512
+    self.num_heads = 64
     self.main_rope_theta = 10000.0
     self.compress_rope_theta = 160000.0
-    self.partial_rotary_factor = 64.0 / 128.0
+    self.qk_rope_head_dim = 64
+    self.partial_rotary_factor = self.qk_rope_head_dim / self.head_dim
 
     self.config = DeepseekV4Config(
         hidden_size=self.num_heads * self.head_dim,
@@ -244,10 +245,10 @@ class DeepSeekV4GroupedLinearTest(unittest.TestCase):
 
   def setUp(self):
     self.batch_size = 2
-    self.seq_len = 8
-    self.n_groups = 4
-    self.in_features_per_group = 128
-    self.out_features = 256  # 64 per group
+    self.seq_len = 32
+    self.n_groups = 8
+    self.in_features_per_group = 4096
+    self.out_features = 8192
 
     self.rngs = nnx.Rngs(0)
 
@@ -452,13 +453,13 @@ class DeepSeekV4CompressedAttentionTest(unittest.TestCase):
 
   def setUp(self):
     self.batch_size = 2
-    self.seq_len = 512
-    self.num_heads = 4
-    self.head_dim = 128
-    self.hidden_size = 256
-    self.q_lora_rank = 32
-    self.o_groups = 2
-    self.o_lora_rank = 64
+    self.seq_len = 32
+    self.num_heads = 64
+    self.head_dim = 512
+    self.hidden_size = 4096
+    self.q_lora_rank = 1024
+    self.o_groups = 8
+    self.o_lora_rank = 1024
     self.qk_rope_head_dim = 64
     self.partial_rotary_factor = self.qk_rope_head_dim / self.head_dim
 
@@ -579,6 +580,10 @@ class DeepSeekV4CompressedAttentionTest(unittest.TestCase):
     if layer_type == "compressed_sparse_attention" and self.pt_config.index_topk == 2:
       for p in ref_attn.parameters():
         p.data = torch.abs(p.data) + 0.1
+      with torch.no_grad():
+        for name, p in ref_attn.named_parameters():
+          if "compressor.indexer" in name and p.dim() >= 2:
+            p.data *= torch.linspace(0.5, 2.0, steps=p.shape[1]).unsqueeze(0)
 
     rope_main = PTRope(self.pt_config)
     rope_compress = PTRope(self.pt_config)
@@ -662,6 +667,7 @@ class DeepSeekV4CompressedAttentionTest(unittest.TestCase):
       # positive weights injected above. This guarantees that `Q @ K^T` is always > 0.0,
       # sidestepping the indexer ReLU tie-breaking behavior entirely.
       x_np = np.random.uniform(0.1, 1.0, size=(self.batch_size, self.seq_len, self.hidden_size)).astype(np.float32)
+      x_np = x_np * np.linspace(0.1, 10.0, num=self.seq_len, dtype=np.float32)[np.newaxis, :, np.newaxis]
     else:
       x_np = np.random.normal(size=(self.batch_size, self.seq_len, self.hidden_size)).astype(np.float32)
     pos_np = np.arange(self.seq_len)[None, :].repeat(self.batch_size, axis=0)
@@ -808,11 +814,11 @@ class DeepSeekV4MoERouterTest(unittest.TestCase):
 
   def setUp(self):
     self.batch_size = 2
-    self.seq_len = 8
-    self.hidden_dim = 128
-    self.num_experts = 16
-    self.num_experts_per_tok = 4
-    self.vocab_size = 1000
+    self.seq_len = 32
+    self.hidden_dim = 4096
+    self.num_experts = 8
+    self.num_experts_per_tok = 3
+    self.vocab_size = 129280
 
     self.pt_config = DeepseekV4Config(
         hidden_size=self.hidden_dim,
@@ -837,7 +843,7 @@ class DeepSeekV4MoERouterTest(unittest.TestCase):
         "vocab_size": self.vocab_size,
         "first_num_hash_layers": 3,
         "decoder_block": "deepseek4",
-        "model_name": "deepseek4-284b",
+        "model_name": "deepseek4-tiny",
         "attention": "dot_product",
         "base_mlp_dim": 256,
         "base_moe_mlp_dim": 256,
@@ -855,7 +861,7 @@ class DeepSeekV4MoERouterTest(unittest.TestCase):
     pt_router = DeepseekV4HashRouter_PT(self.pt_config)
     # Explicitly initialize PyTorch weights since torch.empty leaves garbage in memory,
     # which causes NaN/Inf drift between PyTorch and MaxText/XLA execution.
-    torch.nn.init.normal_(pt_router.weight)
+    torch.nn.init.normal_(pt_router.weight, std=0.02)
 
     # Hash Router operates deterministically based on input_ids via a frozen tid2eid lookup table.
     # In practice, this table is pre-computed (e.g. by K-Means on the dataset) and loaded statically.
@@ -908,8 +914,8 @@ class DeepSeekV4MoERouterTest(unittest.TestCase):
 
     # Explicitly initialize PyTorch weights since torch.empty leaves garbage in memory,
     # which causes NaN/Inf drift between PyTorch and MaxText/XLA execution.
-    torch.nn.init.normal_(pt_router.weight)
-    torch.nn.init.normal_(pt_router.e_score_correction_bias)
+    torch.nn.init.normal_(pt_router.weight, std=0.02)
+    torch.nn.init.normal_(pt_router.e_score_correction_bias, std=0.02)
 
     mx_moe = RoutedMoE(
         config=self.mx_config,
@@ -967,9 +973,9 @@ class DeepSeekV4SwiGLUClampTest(unittest.TestCase):
   def test_swiglu_clamp(self):
     limit = 10.0
     pt_config = DeepseekV4Config(
-        hidden_size=128,
-        num_local_experts=2,
-        num_experts_per_tok=1,
+        hidden_size=4096,
+        num_local_experts=8,
+        num_experts_per_tok=3,
         intermediate_size=256,
         swiglu_limit=limit,
     )
@@ -978,12 +984,12 @@ class DeepSeekV4SwiGLUClampTest(unittest.TestCase):
         "per_device_batch_size": 1.0,
         "run_name": "test",
         "enable_checkpointing": False,
-        "base_emb_dim": 128,
-        "num_experts": 2,
-        "topk_routing_group": 1,
+        "base_emb_dim": 4096,
+        "num_experts": 8,
+        "topk_routing_group": 3,
         "mlp_activations_limit": limit,
         "decoder_block": "deepseek4",
-        "model_name": "deepseek4-284b",
+        "model_name": "deepseek4-tiny",
         "attention": "dot_product",
         "base_mlp_dim": 256,
         "base_moe_mlp_dim": 256,

@@ -824,11 +824,11 @@ class CompressedAttention(Attention):
         partial_rotary_factor=self.config.qk_rope_head_dim / self.config.head_dim,
         rope_theta=rope_theta,
         fprop_dtype=self.dtype,
-        use_yarn=use_yarn,
-        original_max_position_embeddings=self.config.original_max_position_embeddings,
-        max_position_embeddings=self.config.max_position_embeddings,
-        beta_fast=self.config.beta_fast,
-        beta_slow=self.config.beta_slow,
+        use_yarn=False,
+        # original_max_position_embeddings=self.config.original_max_position_embeddings,
+        # max_position_embeddings=self.config.max_position_embeddings,
+        # beta_fast=self.config.beta_fast,
+        # beta_slow=self.config.beta_slow,
     )
 
     if self.compress_ratio > 4:
