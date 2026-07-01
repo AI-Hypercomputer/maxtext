@@ -101,7 +101,7 @@ class MaxEngineConfig:
 _BaseEngine = engine_api.Engine if (not is_decoupled() and hasattr(engine_api, "Engine")) else object
 
 
-class MaxEngine(_BaseEngine):
+class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
   """The computational core of the generative model server.
 
   Engine defines an API that models must adhere to as they plug into the
@@ -192,7 +192,7 @@ class MaxEngine(_BaseEngine):
     """Zero-filled pure-dict cache matching the abstract NNX model."""
     src = self._abstract_model_for_mode(mode)
     _, cache_state, _ = nnx.split(src, nnx.Cache, ...)
-    cache_dict = cache_state.to_pure_dict()
+    cache_dict = cache_state.to_pure_dict()  # pyrefly: ignore[missing-attribute]
     return jax.tree.map(lambda x: jnp.zeros(x.shape, x.dtype), cache_dict)
 
   def _nnx_run_model(
@@ -219,7 +219,7 @@ class MaxEngine(_BaseEngine):
     nnx.replace_by_pure_dict(cache_state, cache_dict)
     # copy=True avoids reusing Variable objects across traces (TraceContextError),
     # mirroring the workaround in train.py's diff_wrapper.
-    model = nnx.merge(self.graphdef, params, cache_state, self._nnx_rest_state, copy=True)
+    model = nnx.merge(self.graphdef, params, cache_state, self._nnx_rest_state, copy=True)  # pyrefly: ignore[no-matching-overload]
     logits = model(
         decoder_input_tokens,
         decoder_positions,
@@ -280,7 +280,7 @@ class MaxEngine(_BaseEngine):
       if x.format == l:
         return x
       # Somehow this can be None sometimes.
-      dll = (l.layout if jax.__version_info__ >= (0, 6, 3) else l.device_local_layout) if isinstance(l, Format) else l
+      dll = (l.layout if jax.__version_info__ >= (0, 6, 3) else l.device_local_layout) if isinstance(l, Format) else l  # pyrefly: ignore[missing-attribute]
       f = jax.jit(self._identity, out_shardings=Format(dll, s)).lower(x).compile(compiler_options=xla_flags)
       y = f(x)
       # Achieves donation of the input argument, but allows for different memory
@@ -409,7 +409,7 @@ class MaxEngine(_BaseEngine):
       with nn_partitioning.axis_rules(self.config.logical_axis_rules):
         full_sharding = sharding.nnx_construct_named_sharding(full_abs, self._mesh)
       concrete_model = maxtext_utils_nnx.create_nnx_sharded_model(
-          self.model, self._create_model_fn, mesh=self._mesh, named_sharding=full_sharding
+          self.model, self._create_model_fn, mesh=self._mesh, named_sharding=full_sharding  # pyrefly: ignore[bad-argument-type]
       )
       graphdef, _, _, rest_state = nnx.split(concrete_model, nnx.Param, nnx.Cache, ...)
       self.graphdef = graphdef
@@ -435,7 +435,7 @@ class MaxEngine(_BaseEngine):
       # PREFILL/AR attention ops have different cache variable shapes, and a
       # mismatch trips the `assert prefill_kv_cache` check inside attention_op.
       with nn_partitioning.axis_rules(self.config.logical_axis_rules):
-        concrete_model = self._create_model_fn()
+        concrete_model = self._create_model_fn()  # pyrefly: ignore[not-callable]
       graphdef, _, _, rest_state = nnx.split(concrete_model, nnx.Param, nnx.Cache, ...)
       # Overlay loaded non-Param/non-Cache leaves (e.g. AQT qrhs.frozen) onto
       # the PREFILL-mode rest_state. The PREFILL concrete_model already has
@@ -443,8 +443,8 @@ class MaxEngine(_BaseEngine):
       # values. Anything only in `loaded_rest_state` (e.g. AR-only RNG slots)
       # is ignored. We keep PREFILL rest_state as the base so RNG variables
       # match the PREFILL graphdef's expectations.
-      loaded_rest_dict = loaded_rest_state.to_pure_dict()
-      rest_dict = rest_state.to_pure_dict()
+      loaded_rest_dict = loaded_rest_state.to_pure_dict()  # pyrefly: ignore[missing-attribute]
+      rest_dict = rest_state.to_pure_dict()  # pyrefly: ignore[missing-attribute]
 
       def _overlay(dst, src):
         if isinstance(dst, dict) and isinstance(src, dict):
@@ -768,7 +768,7 @@ class MaxEngine(_BaseEngine):
     one_d_output = ones_to_keep * DECODING_ACTIVE_SEQUENCE_INDICATOR
     sequence_indicator = jnp.expand_dims(one_d_output, 0)
 
-    rng, new_rng = jax.random.split(rng)
+    rng, new_rng = jax.random.split(rng)  # pyrefly: ignore[bad-argument-type]
     if self.config.pure_nnx:
       # Prefill always operates on batch=1 (one padded prompt at a time).
       nnx_cache = (
@@ -1026,7 +1026,7 @@ class MaxEngine(_BaseEngine):
     one_d_output = ones_to_keep * DECODING_ACTIVE_SEQUENCE_INDICATOR
     sequence_indicator = jnp.expand_dims(one_d_output, 0)
 
-    rng, new_rng = jax.random.split(rng)
+    rng, new_rng = jax.random.split(rng)  # pyrefly: ignore[bad-argument-type]
     if self.config.pure_nnx:
       # Prefill is batch=1 (one prompt); multi-sampling only draws several first
       # tokens from the shared logits below. Mirror the _prefill_jit NNX branch.

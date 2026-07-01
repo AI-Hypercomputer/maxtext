@@ -103,22 +103,22 @@ def _rhs_axis_metadata_wrapper(
     if len(x.shape) == 1:
       return nn.with_logical_partitioning((lambda: x), tuple(None for _ in mesh_axes))()
 
-  mesh_axes = list(mesh_axes)
+  mesh_axes = list(mesh_axes)  # pyrefly: ignore[bad-assignment]
   if is_tiled:
     # tile_map is a mapping between original rank and a list of new, tiled rank.
     if len(mesh_axes) < len(tile_map):
-      mesh_axes = [None] * (len(tile_map) - len(mesh_axes)) + mesh_axes
+      mesh_axes = [None] * (len(tile_map) - len(mesh_axes)) + mesh_axes  # pyrefly: ignore[unsupported-operation]
     new_mesh_axes = [None] * len(x.shape)
     for orig_rank, new_rank in tile_map.items():
       assert new_rank
       assert len(new_rank) <= 2
       new_mesh_axes[new_rank[-1]] = mesh_axes[orig_rank]
-    mesh_axes = new_mesh_axes
+    mesh_axes = new_mesh_axes  # pyrefly: ignore[bad-assignment]
 
   if mesh_axes is not None and len(mesh_axes) > 0:
     for no_shard_idx in no_sharding_axis:
       if no_shard_idx < len(mesh_axes):
-        mesh_axes[no_shard_idx] = None
+        mesh_axes[no_shard_idx] = None  # pyrefly: ignore[unsupported-operation]
 
   return nn.with_logical_partitioning((lambda: x), mesh_axes)()
 
@@ -137,13 +137,13 @@ class AqtQuantization:
     is_tiled = False
     tiling_fn = None
     # pylint: disable=protected-access
-    module_path = "/".join(nn.module._context.module_stack[-1].path)
+    module_path = "/".join(nn.module._context.module_stack[-1].path)  # pyrefly: ignore[missing-attribute]
     tile_size = -1
-    for layer_name_re, layer_quant_dg in self.quant_dg.items():
+    for layer_name_re, layer_quant_dg in self.quant_dg.items():  # pyrefly: ignore[missing-attribute]
       if re.fullmatch(layer_name_re, module_path):
         quant_dg, tile_size = layer_quant_dg
     if quant_dg is None:
-      quant_dg, tile_size = self.quant_dg[DEFAULT]
+      quant_dg, tile_size = self.quant_dg[DEFAULT]  # pyrefly: ignore[bad-index]
     if tile_size != -1:
       is_tiled = True
       tiling_fn = functools.partial(_tiling_fn, tile_size=tile_size)
@@ -272,7 +272,7 @@ class QwixEinsum(nn.Module):
       out_sharding=None,
   ) -> jax.Array:
     def custom_dot_general(*args, **kwargs):
-      return dot_general_qt.dot_general_qt(*args[:3], self.config)
+      return dot_general_qt.dot_general_qt(*args[:3], self.config)  # pyrefly: ignore[bad-argument-count]
 
     with jax.disable_jit():
       return jnp.einsum(
@@ -392,7 +392,7 @@ def _get_int8_quant_config(config):
   if config.quantization_local_shard_count != 0:
     drhs_bits = 8
     drhs_accumulator_dtype = jnp.int32
-    drhs_local_aqt = aqt_config.LocalAqt(contraction_axis_shard_count=config.quantization_local_shard_count)
+    drhs_local_aqt = aqt_config.LocalAqt(contraction_axis_shard_count=config.quantization_local_shard_count)  # pyrefly: ignore[unexpected-keyword]
   return aqt_config.config_v3(
       fwd_bits=8,
       dlhs_bits=8,
@@ -430,30 +430,30 @@ def _build_const_scale_config(
     The AQT dot general config with constant scale config.
   """
   if cst_bound_config.fwd_lhs_bound is not None:
-    aqt_dg.fwd.dg_quantizer.lhs.calibration = functools.partial(
+    aqt_dg.fwd.dg_quantizer.lhs.calibration = functools.partial(  # pyrefly: ignore[missing-attribute]
         calibration.ConstantCalibration, bound=cst_bound_config.fwd_lhs_bound
     )
   if cst_bound_config.fwd_rhs_bound is not None:
-    aqt_dg.fwd.dg_quantizer.rhs.calibration = functools.partial(
+    aqt_dg.fwd.dg_quantizer.rhs.calibration = functools.partial(  # pyrefly: ignore[missing-attribute]
         calibration.ConstantCalibration, bound=cst_bound_config.fwd_rhs_bound
     )
   if cst_bound_config.dlhs_lhs_bound:
-    aqt_dg.dlhs.dg_quantizer.lhs.calibration = functools.partial(
+    aqt_dg.dlhs.dg_quantizer.lhs.calibration = functools.partial(  # pyrefly: ignore[missing-attribute]
         calibration.ConstantCalibration, bound=cst_bound_config.dlhs_lhs_bound
     )
 
   if cst_bound_config.dlhs_rhs_bound is not None:
-    aqt_dg.dlhs.dg_quantizer.rhs.calibration = functools.partial(
+    aqt_dg.dlhs.dg_quantizer.rhs.calibration = functools.partial(  # pyrefly: ignore[missing-attribute]
         calibration.ConstantCalibration, bound=cst_bound_config.dlhs_rhs_bound
     )
 
   if cst_bound_config.drhs_lhs_bound is not None:
-    aqt_dg.drhs.dg_quantizer.lhs.calibration = functools.partial(
+    aqt_dg.drhs.dg_quantizer.lhs.calibration = functools.partial(  # pyrefly: ignore[missing-attribute]
         calibration.ConstantCalibration, bound=cst_bound_config.drhs_lhs_bound
     )
 
   if cst_bound_config.drhs_rhs_bound is not None:
-    aqt_dg.drhs.dg_quantizer.rhs.calibration = functools.partial(
+    aqt_dg.drhs.dg_quantizer.rhs.calibration = functools.partial(  # pyrefly: ignore[missing-attribute]
         calibration.ConstantCalibration, bound=cst_bound_config.drhs_rhs_bound
     )
 
@@ -484,17 +484,17 @@ def _build_per_tensor_config(
     The AQT dot general config with per tensor config.
   """
   if per_tensor_scales.fwd_lhs:
-    aqt_dg.fwd.dg_quantizer.lhs.calib_shared_axes = "per_tensor"
+    aqt_dg.fwd.dg_quantizer.lhs.calib_shared_axes = "per_tensor"  # pyrefly: ignore[missing-attribute]
   if per_tensor_scales.fwd_rhs:
-    aqt_dg.fwd.dg_quantizer.rhs.calib_shared_axes = "per_tensor"
+    aqt_dg.fwd.dg_quantizer.rhs.calib_shared_axes = "per_tensor"  # pyrefly: ignore[missing-attribute]
   if per_tensor_scales.dlhs_lhs:
-    aqt_dg.dlhs.dg_quantizer.lhs.calib_shared_axes = "per_tensor"
+    aqt_dg.dlhs.dg_quantizer.lhs.calib_shared_axes = "per_tensor"  # pyrefly: ignore[missing-attribute]
   if per_tensor_scales.dlhs_rhs:
-    aqt_dg.dlhs.dg_quantizer.rhs.calib_shared_axes = "per_tensor"
+    aqt_dg.dlhs.dg_quantizer.rhs.calib_shared_axes = "per_tensor"  # pyrefly: ignore[missing-attribute]
   if per_tensor_scales.drhs_lhs:
-    aqt_dg.drhs.dg_quantizer.lhs.calib_shared_axes = "per_tensor"
+    aqt_dg.drhs.dg_quantizer.lhs.calib_shared_axes = "per_tensor"  # pyrefly: ignore[missing-attribute]
   if per_tensor_scales.drhs_rhs:
-    aqt_dg.drhs.dg_quantizer.rhs.calib_shared_axes = "per_tensor"
+    aqt_dg.drhs.dg_quantizer.rhs.calib_shared_axes = "per_tensor"  # pyrefly: ignore[missing-attribute]
   return aqt_dg
 
 
@@ -565,9 +565,9 @@ def _dot_general_make(quant_cfg):
   rhs_scale = quant_cfg[_W_SCALE]
   aqt_dg = aqt_config.dot_general_make(lhs_bits=lhs_bits, rhs_bits=rhs_bits)
   if lhs_scale < 1.0:
-    aqt_dg.fwd.dg_quantizer.lhs.calibration = functools.partial(calibration.AbsMaxCalibration, scale=lhs_scale)
+    aqt_dg.fwd.dg_quantizer.lhs.calibration = functools.partial(calibration.AbsMaxCalibration, scale=lhs_scale)  # pyrefly: ignore[missing-attribute]
   if rhs_scale < 1.0:
-    aqt_dg.fwd.dg_quantizer.rhs.calibration = functools.partial(calibration.AbsMaxCalibration, scale=rhs_scale)
+    aqt_dg.fwd.dg_quantizer.rhs.calibration = functools.partial(calibration.AbsMaxCalibration, scale=rhs_scale)  # pyrefly: ignore[missing-attribute]
   return aqt_dg
 
 
@@ -728,7 +728,7 @@ def _apply_linen_module_in_nnx(linen_module_cls, op_id, *args, **kwargs):
 
   if is_nnx:
     attr_name = f"_qwix_fp8_gpu_{op_id}"
-    if not hasattr(parent, attr_name):
+    if not hasattr(parent, attr_name):  # pyrefly: ignore[unbound-name]
       rngs = getattr(parent, "qwix_rngs", None)
       if rngs is None:
         parent_rngs = getattr(parent, "rngs", None)
@@ -1038,7 +1038,7 @@ class TransformerEngineQuantization(Quantization):
             variable_collection=OVERWRITE_WITH_GRADIENT,
             quantization_checkpoint_name="quantization",
             fp8_recipe=fp8_recipe,
-            n_groups=n_groups,
+            n_groups=n_groups,  # pyrefly: ignore[bad-argument-type]
         )
 
       @nn.compact

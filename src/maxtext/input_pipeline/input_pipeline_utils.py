@@ -172,7 +172,7 @@ def is_conversational(features, data_columns):
   for column in data_columns:
     messages = features[column]
     if isinstance(messages, datasets.Sequence):
-      if isinstance(messages.feature, dict) and "role" in messages.feature and "content" in messages.feature:
+      if isinstance(messages.feature, dict) and "role" in messages.feature and "content" in messages.feature:  # pyrefly: ignore[missing-attribute]
         return True
 
   return False
@@ -778,7 +778,7 @@ class PadOrTrimToMaxLength(grain.MapTransform):
     if preprocessed_image.pixel_values is None:
       raise ValueError("Input preprocessed_image must have pixel_values to pad images.")
 
-    if self.config.model_name and self.config.model_name.startswith("qwen3-omni"):
+    if self.config.model_name and self.config.model_name.startswith("qwen3-omni"):  # pyrefly: ignore[missing-attribute]
       return preprocessed_image
 
     # Determine the maximum number of images/masks allowed.
@@ -840,21 +840,21 @@ class PadOrTrimToMaxLength(grain.MapTransform):
         if isinstance(element[data_column], mm_utils.PreprocessorOutput):
           raise TypeError("Only 'images' column can be of type PreprocessorOutput.")
 
-        element[f"{data_column}_segmentation"] = element[data_column] != self.pad_id
-        element[f"{data_column}_segmentation"] = element[f"{data_column}_segmentation"].astype(np.int32)
-        element[f"{data_column}_position"] = np.arange(element[data_column].shape[0], dtype=np.int32)
+        element[f"{data_column}_segmentation"] = element[data_column] != self.pad_id  # pyrefly: ignore[unsupported-operation]
+        element[f"{data_column}_segmentation"] = element[f"{data_column}_segmentation"].astype(np.int32)  # pyrefly: ignore[missing-attribute]
+        element[f"{data_column}_position"] = np.arange(element[data_column].shape[0], dtype=np.int32)  # pyrefly: ignore[missing-attribute]
         if self.add_true_length:
-          element[f"{data_column}_true_length"] = np.array([element[data_column].shape[0]], dtype=np.int32)
+          element[f"{data_column}_true_length"] = np.array([element[data_column].shape[0]], dtype=np.int32)  # pyrefly: ignore[missing-attribute]
 
     for key, _ in element.items():
       if key == "images":
-        if self.config.model_name is None:
+        if self.config.model_name is None:  # pyrefly: ignore[missing-attribute]
           raise ValueError("model_name must be provided when padding images")
 
-        element["images"] = self._pad_image_and_mask(element["images"])
+        element["images"] = self._pad_image_and_mask(element["images"])  # pyrefly: ignore[bad-argument-type]
 
       elif "true_length" not in key:
-        element[key] = self._pad_text(element[key], self.max_length, self.pad_id)
+        element[key] = self._pad_text(element[key], self.max_length, self.pad_id)  # pyrefly: ignore[bad-argument-type]
     return element
 
 
@@ -881,7 +881,7 @@ class ExtractImagesAndMasks(grain.MapTransform):
       raise TypeError(f"'images' must be of type PreprocessorOutput, but got {type(preprocessed_image)}")
 
     output = element.copy()
-    output["images"] = preprocessed_image.pixel_values
+    output["images"] = preprocessed_image.pixel_values  # pyrefly: ignore[unsupported-operation]
     if preprocessed_image.pixel_mask is not None:
       output["image_masks"] = preprocessed_image.pixel_mask
 

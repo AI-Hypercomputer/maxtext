@@ -79,7 +79,7 @@ class ElasticUtilsTest(unittest.TestCase):
     elastic_utils.max_logging = self.fake_logging
 
     # Hook up pathwaysutils.elastic.manager.Manager to return our fake_manager
-    pathwaysutils.elastic.manager.Manager = lambda *args, **kwargs: self.fake_manager
+    pathwaysutils.elastic.manager.Manager = lambda *args, **kwargs: self.fake_manager  # pyrefly: ignore[bad-assignment]
     pathwaysutils.elastic.manager.ScaleUpSignalError = ScaleUpSignalError
 
     # Reset global state for testing is no longer needed
@@ -91,7 +91,7 @@ class ElasticUtilsTest(unittest.TestCase):
     elastic_utils.gcs_utils = self.original_gcs_utils
     elastic_utils.max_logging = self.original_max_logging
     pathwaysutils.elastic.manager.Manager = self.original_manager_class
-    pathwaysutils.elastic.manager.ScaleUpSignalError = self.original_scale_up_signal_error
+    pathwaysutils.elastic.manager.ScaleUpSignalError = self.original_scale_up_signal_error  # pyrefly: ignore[bad-assignment]
     elastic_utils.elastic_manager = None
     elastic_utils.pending_reinit_recorder = None
     elastic_utils.pending_elastic_event_type = None
@@ -355,7 +355,7 @@ class ElasticUtilsTest(unittest.TestCase):
 
   def test_record_elastic_wait_end_and_reinit_start(self):
     """Test recording end of slice down and start of reinit."""
-    elastic_utils.pending_elastic_event_type = "elastic_slice_down"
+    elastic_utils.pending_elastic_event_type = "elastic_slice_down"  # pyrefly: ignore[bad-assignment]
     fake_recorder = Mock()
 
     elastic_utils.record_elastic_wait_end_and_reinit_start(fake_recorder)

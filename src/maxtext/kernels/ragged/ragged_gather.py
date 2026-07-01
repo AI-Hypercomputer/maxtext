@@ -140,8 +140,8 @@ def main_kernel(
     # but for other bitwidths, this is not possible. Therefore, we bitcast data
     # into 32-bits first to fetch packing number of rows per dma and later
     # perform bitwise unpacking / packing to obtain desired results.
-    in_32b_hbm_ref = in_hbm_ref.bitcast(jnp.uint32)
-    out_32b_hbm_ref = out_hbm_ref.bitcast(jnp.uint32)
+    in_32b_hbm_ref = in_hbm_ref.bitcast(jnp.uint32)  # pyrefly: ignore[missing-attribute]
+    out_32b_hbm_ref = out_hbm_ref.bitcast(jnp.uint32)  # pyrefly: ignore[missing-attribute]
 
     for col_vmem_start in range(0, col_size, num_lanes):
       col_hbm_start = col_tile_start + col_vmem_start
@@ -333,7 +333,7 @@ def _fallback_implementation(
   """Fallback to (non-ragged) JAX implementation for ragged gather."""
   out = x[indices]
   if has_weights:
-    out = out * weights[:, None]
+    out = out * weights[:, None]  # pyrefly: ignore[unsupported-operation]
   return out
 
 
@@ -433,7 +433,7 @@ def ragged_gather(
   indices = jnp.pad(indices, ((0, out_pad_size)))
 
   if has_weights:
-    weights = jnp.pad(weights, ((0, out_pad_size)), constant_values=1.0)
+    weights = jnp.pad(weights, ((0, out_pad_size)), constant_values=1.0)  # pyrefly: ignore[bad-argument-type]
   else:
     # Provide a dummy weights array; the kernel won't use it.
     weights = jnp.ones((out_size + out_pad_size,), dtype=jnp.float32)
@@ -454,7 +454,7 @@ def ragged_gather(
           has_weights=has_weights,
       ),
       compiler_params=pltpu.CompilerParams(  # pytype: disable=wrong-keyword-args
-          **_COMPILER_PARAMS,
+          **_COMPILER_PARAMS,  # pyrefly: ignore[bad-argument-type]
       ),
       cost_estimate=get_cost_estimate(
           out_size=out_size + out_pad_size,
@@ -466,7 +466,7 @@ def ragged_gather(
       ),
       mesh=vector_mesh,
       name="sc_ragged_gather",
-      **{
+      **{  # pyrefly: ignore[bad-argument-type]
           _OUT_KW: jax.ShapeDtypeStruct((out_size + out_pad_size, aligned_hidden_size), dtype),
           _SCRATCH_KW: [
               pltpu.VMEM((num_simd_lanes,), jnp.int32),

@@ -228,8 +228,8 @@ def main_kernel(
       input_dtype_bits = jax.dtypes.itemsize_bits(in_dtype)
       input_packing = 32 // input_dtype_bits
 
-      in_32b_hbm_ref = in_hbm_ref.bitcast(jnp.uint32)
-      out_32b_hbm_ref = out_hbm_ref.bitcast(jnp.uint32)
+      in_32b_hbm_ref = in_hbm_ref.bitcast(jnp.uint32)  # pyrefly: ignore[missing-attribute]
+      out_32b_hbm_ref = out_hbm_ref.bitcast(jnp.uint32)  # pyrefly: ignore[missing-attribute]
 
       for col_vmem_start in range(0, col_size, num_lanes):
         col_hbm_start = col_start + col_vmem_start
@@ -559,7 +559,7 @@ def ragged_gather_reduce(
           num_column_partitions=num_column_partitions,
       ),
       compiler_params=pltpu.CompilerParams(  # pytype: disable=wrong-keyword-args
-          **_COMPILER_PARAMS,
+          **_COMPILER_PARAMS,  # pyrefly: ignore[bad-argument-type]
       ),
       cost_estimate=get_cost_estimate(
           padded_input_size=padded_input_size,
@@ -571,7 +571,7 @@ def ragged_gather_reduce(
       ),
       mesh=vector_mesh,
       name="sc_ragged_gather_reduce",
-      **{
+      **{  # pyrefly: ignore[bad-argument-type]
           _OUT_KW: jax.ShapeDtypeStruct(
               (padded_input_size // reduce_group_size, aligned_hidden_size),
               jnp.float32,

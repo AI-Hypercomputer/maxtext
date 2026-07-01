@@ -63,8 +63,8 @@ def gmm(
     existing_out: jnp.ndarray | None = None,
     transpose_rhs: bool = False,
     interpret: bool = False,
-    lhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,
-    rhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,
+    lhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,  # pyrefly: ignore[invalid-literal]
+    rhs_quantize_dtype: Literal[jnp.int4, jnp.int8] | None = None,  # pyrefly: ignore[invalid-literal]
     use_qwix_quantization: bool = False,
     use_tokamax_backend: bool = False,
     weight_gather_axes: List[Tuple[str, int]] | None = None,
@@ -154,15 +154,15 @@ def _gmm_fwd(
   """Forward function for GMM VJP."""
   if quantization_rule:
     if quantization_rule.act_qtype and not isinstance(lhs, qpl.QArray):
-      lhs = qpl.quantize(
+      lhs = qpl.quantize(  # pyrefly: ignore[bad-assignment]
           lhs,
           quantization_rule.act_qtype,
           channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [0],
-          calibration_method=quantization_rule.act_calibration_method,
+          calibration_method=quantization_rule.act_calibration_method,  # pyrefly: ignore[bad-argument-type]
       )
     if quantization_rule.weight_qtype and not isinstance(rhs, qpl.QArray):
       if not use_manual_quantization:
-        rhs = qpl.quantize(
+        rhs = qpl.quantize(  # pyrefly: ignore[bad-assignment]
             rhs,
             quantization_rule.weight_qtype,
             # If only considering the fwd pass, we could also enable channelwise
@@ -172,7 +172,7 @@ def _gmm_fwd(
             calibration_method=quantization_rule.weight_calibration_method,
         )
       else:
-        rhs = quantizations.manual_quantize(
+        rhs = quantizations.manual_quantize(  # pyrefly: ignore[bad-assignment]
             rhs,
             quantization_rule.weight_qtype,
             calibration_method=quantization_rule.weight_calibration_method,

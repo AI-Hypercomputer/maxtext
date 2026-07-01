@@ -37,7 +37,7 @@ class Train(parameterized.TestCase):
   def test_tiny_config(self, quantization: str):
     test_tmpdir = os.environ.get("TEST_TMPDIR", gettempdir())
     outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", test_tmpdir)
-    train_main([
+    train_main([  # pyrefly: ignore[bad-argument-type]
         None,
         get_test_config_path(),
         f"base_output_directory={test_tmpdir}",
