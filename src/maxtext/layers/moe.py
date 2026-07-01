@@ -501,9 +501,7 @@ class RoutedMoE(nnx.Module):
     kernel_out_axis = np.arange(1, 2)
     # Pad the MoE input weight kernels for GMM_v2 execution when configured.
     moe_intermediate_dim = (
-        self.config.padded_base_moe_mlp_dim
-        if self.config.padded_base_moe_mlp_dim is not None
-        else self.intermediate_dim
+        self.config.padded_base_moe_mlp_dim if self.config.padded_base_moe_mlp_dim is not None else self.intermediate_dim
     )
 
     if quantizations.in_serve_mode(self.quant):
@@ -639,6 +637,25 @@ class RoutedMoE(nnx.Module):
     spec = [None if name is None else self._logical_to_mesh_axes((name,))[0] for name in logical_axis]
     pspec = remove_expert_from_partition_spec(jax.sharding.PartitionSpec(*spec), dims_to_peel=(1,))
     return self._maybe_shard_with_pspec(inputs, pspec)
+
+  def _maybe_shard_routed_activations(self, x, in_specs):
+    """Explicitly reshard routed activations to LHS GMM sharding if sharding_axis is automated."""
+    shard_map_manual_axes = set()
+    for spec in in_specs:
+      if spec:
+        for entry in spec:
+          if isinstance(entry, str):
+            shard_map_manual_axes.add(entry)
+          elif isinstance(entry, (tuple, list)):
+            shard_map_manual_axes.update(entry)
+
+    sharding_axis = self._logical_to_mesh_axes(("embed_tensor_transpose",))[0]
+    if sharding_axis and sharding_axis not in shard_map_manual_axes:
+      try:
+        return jax.lax.with_sharding_constraint(x, jax.sharding.PartitionSpec(None, sharding_axis))
+      except ValueError:
+        pass
+    return x
 
   def get_expert_parallelism_size(self):
     # When expert parallelism has more than one physical axes, take product of their shapes
@@ -1809,6 +1826,13 @@ class RoutedMoE(nnx.Module):
     ):
       batch_size, sequence_length, _ = x.shape
       x, routing, route_metadata = route(x, logits, pre_bias_logits, rngs, input_ids=sharded_input_ids)
+
+      # Explicitly reshard routed activations before gmm_up to deduplicate SparseCore all-gather
+      # collectives and layout transposes across SwiGLU w0 and w1 projection scopes.
+      # Note: this constraint is only applied when sharding_axis is an automated (non-manual) mesh axis.
+      x = self._maybe_shard_routed_activations(
+          x, (input_partition_pspec, gate_logits_pspec, pre_bias_logits_pspec, w0_pspec, w1_pspec, wo_pspec)
+      )
 
       if self.config.mlp_bias:
         w0_bias, w1_bias, wo_bias = self.transform_bias(routing.selected_experts, w0_bias, w1_bias, wo_bias)
