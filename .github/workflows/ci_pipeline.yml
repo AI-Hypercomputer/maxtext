@@ -359,6 +359,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
       pull-requests: write
     steps:
       - uses: actions/checkout@v4
@@ -382,13 +383,19 @@ jobs:
           echo "Parsed Benchmark Results:"
           cat benchmark-results.json
 
-      - name: Restore Benchmark Data
-        uses: actions/cache@v4
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
         with:
-          path: ./cache
-          key: ${{ runner.os }}-benchmark-${{ github.run_id }}
-          restore-keys: |
-            ${{ runner.os }}-benchmark-
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.SERVICE_ACCOUNT_EMAIL }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Fetch Baseline Benchmark Data from GCS
+        run: |
+          mkdir -p ./cache
+          gcloud storage cp gs://maxtext-test-assets/benchmark-data.json ./cache/benchmark-data.json || true
 
       - name: Track Test Durations (Main)
         if: github.ref == 'refs/heads/main'
@@ -415,3 +422,8 @@ jobs:
           alert-threshold: '150%'
           comment-on-alert: true
           fail-on-alert: true
+
+      - name: Upload Updated Baseline to GCS
+        if: github.ref == 'refs/heads/main'
+        run: |
+          gcloud storage cp ./cache/benchmark-data.json gs://maxtext-test-assets/benchmark-data.json
