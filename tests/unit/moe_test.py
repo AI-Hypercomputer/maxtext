@@ -630,6 +630,8 @@ class RoutedMoeTest(unittest.TestCase):
           base_moe_mlp_dim=256,
           dtype="bfloat16",
           megablox=True,
+          use_tokamax_gmm=False,
+          use_gmm_v2=False,
           sparse_matmul=True,
           per_device_batch_size=4,  # TODO(b/450900273): sharding error if pdbs=1
           ici_expert_parallelism=2,
