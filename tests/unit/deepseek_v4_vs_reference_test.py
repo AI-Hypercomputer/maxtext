@@ -41,6 +41,7 @@ from transformers.models.deepseek_v4.modeling_deepseek_v4 import (
     DeepseekV4HashRouter as DeepseekV4HashRouter_PT,
     DeepseekV4TopKRouter as DeepseekV4TopKRouter_PT,
     DeepseekV4Experts as DeepseekV4Experts_PT,
+    DeepseekV4HyperHead as DeepseekV4HyperHead_PT,
     apply_rotary_pos_emb as ref_apply_rotary_pos_emb,
 )
 
@@ -48,6 +49,7 @@ from maxtext.layers.embeddings import DeepSeekV4RotaryEmbedding
 from maxtext.layers.linears import DeepSeekV4GroupedLinear
 from maxtext.layers.attention_op import AttentionOp
 from maxtext.common.common_types import AttentionType, DEFAULT_MASK_VALUE
+from maxtext.layers.mhc import DeepSeek4HyperHead
 
 from flax import nnx
 from maxtext.layers.moe import RoutedMoE
@@ -201,7 +203,13 @@ class DeepSeekV4RotaryEmbeddingTest(unittest.TestCase):
 
     # Verify that the calculated frequencies match.
     # Shape of cos/sin: [Batch=2, SeqLen=16, RotaryDim // 2 = 32]
+    cos_max_diff = np.max(np.abs(np.array(mt_cos) - ref_cos.numpy()))
+    cos_mean_diff = np.mean(np.abs(np.array(mt_cos) - ref_cos.numpy()))
+    print(f"Rotary Embedding test ({layer_type}) cos - MAX ABS DIFF: {cos_max_diff:.6e}, MEAN ABS DIFF: {cos_mean_diff:.6e}")
     np.testing.assert_allclose(np.array(mt_cos), ref_cos.numpy(), rtol=1e-2, atol=1e-2)
+    sin_max_diff = np.max(np.abs(np.array(mt_sin) - ref_sin.numpy()))
+    sin_mean_diff = np.mean(np.abs(np.array(mt_sin) - ref_sin.numpy()))
+    print(f"Rotary Embedding test ({layer_type}) sin - MAX ABS DIFF: {sin_max_diff:.6e}, MEAN ABS DIFF: {sin_mean_diff:.6e}")
     np.testing.assert_allclose(np.array(mt_sin), ref_sin.numpy(), rtol=1e-2, atol=1e-2)
 
     # --------------------------------------------------------------------------
@@ -225,8 +233,10 @@ class DeepSeekV4RotaryEmbeddingTest(unittest.TestCase):
     # 5. Final Validation
     # --------------------------------------------------------------------------
     # Validate the full mathematical rotation is perfectly equivalent.
+    max_diff = np.max(np.abs(mt_rotated_np - ref_rotated_np))
+    mean_diff = np.mean(np.abs(mt_rotated_np - ref_rotated_np))
+    print(f"Rotary Embedding test ({layer_type}) main - MAX ABS DIFF: {max_diff:.6e}, MEAN ABS DIFF: {mean_diff:.6e}")
     np.testing.assert_allclose(mt_rotated_np, ref_rotated_np, rtol=5e-2, atol=5e-2)
-    print(f"Rotary Embedding test ({layer_type}) passed successfully.")
 
 
 class DeepSeekV4GroupedLinearTest(unittest.TestCase):
@@ -317,8 +327,10 @@ class DeepSeekV4GroupedLinearTest(unittest.TestCase):
     # 6. Final Validation
     # --------------------------------------------------------------------------
     # Validate the full mathematical projection is perfectly equivalent.
+    max_diff = np.max(np.abs(np.array(mt_out) - ref_out.detach().numpy()))
+    mean_diff = np.mean(np.abs(np.array(mt_out) - ref_out.detach().numpy()))
+    print(f"GROUPED LINEAR PARITY - MAX ABS DIFF: {max_diff:.6e}, MEAN ABS DIFF: {mean_diff:.6e}")
     np.testing.assert_allclose(np.array(mt_out), ref_out.detach().numpy(), rtol=1e-5, atol=1e-5)
-    print("Grouped Linear test passed successfully.")
 
 
 # TODO(parambole): This test is duplicated here to maintain debugging continuity alongside the other reference tests.
@@ -768,6 +780,9 @@ class DeepSeekV4CompressedAttentionTest(unittest.TestCase):
         gate_error = np.max(np.abs(pt_comp.gate_proj(x_pt).detach().numpy() - np.array(mt_comp.gate_proj(x_mt))))
         print(f"csa gate_proj error: {gate_error}")
 
+      max_diff = np.max(np.abs(np.array(mt_out) - pt_out.detach().numpy()))
+      mean_diff = np.mean(np.abs(np.array(mt_out) - pt_out.detach().numpy()))
+      print(f"COMPRESSED ATTENTION PARITY layer_type={layer_type} - MAX ABS DIFF: {max_diff:.6e}, MEAN ABS DIFF: {mean_diff:.6e}")
       np.testing.assert_allclose(np.array(mt_out), pt_out.detach().numpy(), rtol=2e-2, atol=2e-2)
     else:
       # Since PyTorch leaks cross-document compressed blocks due to its bug (ignoring attention_mask
@@ -882,6 +897,9 @@ class DeepSeekV4MoERouterTest(unittest.TestCase):
     # We must explicitly reshape PyTorch outputs to match MaxText's nested sequence structure.
     pt_indices_reshaped = pt_indices.numpy().reshape(self.batch_size, self.seq_len, -1)
     pt_weights_reshaped = pt_weights.detach().numpy().reshape(self.batch_size, self.seq_len, -1)
+    weights_max_diff = np.max(np.abs(mx_weights - pt_weights_reshaped))
+    weights_mean_diff = np.mean(np.abs(mx_weights - pt_weights_reshaped))
+    print(f"MOE HASH ROUTER WEIGHTS PARITY - MAX ABS DIFF: {weights_max_diff:.6e}, MEAN ABS DIFF: {weights_mean_diff:.6e}")
     np.testing.assert_allclose(mx_indices, pt_indices_reshaped, rtol=1e-5, atol=1e-5)
     np.testing.assert_allclose(mx_weights, pt_weights_reshaped, rtol=1e-2, atol=1e-2)
 
@@ -937,6 +955,9 @@ class DeepSeekV4MoERouterTest(unittest.TestCase):
     pt_indices_sorted = np.take_along_axis(pt_indices_reshaped, pt_sort_idx, axis=-1)
     pt_weights_sorted = np.take_along_axis(pt_weights_reshaped, pt_sort_idx, axis=-1)
 
+    weights_max_diff = np.max(np.abs(mx_weights_sorted - pt_weights_sorted))
+    weights_mean_diff = np.mean(np.abs(mx_weights_sorted - pt_weights_sorted))
+    print(f"MOE TOPK ROUTER WEIGHTS PARITY - MAX ABS DIFF: {weights_max_diff:.6e}, MEAN ABS DIFF: {weights_mean_diff:.6e}")
     np.testing.assert_allclose(mx_indices_sorted, pt_indices_sorted, rtol=1e-5, atol=1e-5)
     np.testing.assert_allclose(mx_weights_sorted, pt_weights_sorted, rtol=1e-2, atol=1e-2)
 
@@ -1002,6 +1023,9 @@ class DeepSeekV4SwiGLUClampTest(unittest.TestCase):
     mx_out = mx_moe.apply_ffn_activation(jnp.array(gate.numpy()), jnp.array(up.numpy()))
 
     # Validate that both clamped outputs match identically
+    max_diff = np.max(np.abs(mx_out - pt_out.numpy()))
+    mean_diff = np.mean(np.abs(mx_out - pt_out.numpy()))
+    print(f"SWIGLU CLAMP PARITY - MAX ABS DIFF: {max_diff:.6e}, MEAN ABS DIFF: {mean_diff:.6e}")
     np.testing.assert_allclose(mx_out, pt_out.numpy(), rtol=1e-5, atol=1e-5)
 
 
@@ -1274,6 +1298,74 @@ class DeepSeekV4ConversionMappingTest(unittest.TestCase):
 
   def test_layer_4_csa_standard(self):
     self._run_layer_parity_test(4, "compressed_sparse_attention")
+
+class DeepSeekV4HyperHeadTest(unittest.TestCase):
+  """Tests to validate MaxText HyperHead implementation against PyTorch reference."""
+
+  def setUp(self):
+    self.batch_size = 2
+    self.seq_len = 16
+    self.hc_mult = 4
+    self.hidden_dim = 4096
+
+    self.config_pt = DeepseekV4Config(
+        hidden_size=self.hidden_dim,
+        hc_mult=self.hc_mult,
+        rms_norm_eps=1e-6,
+        hc_eps=1e-6,
+    )
+
+    # Initialize PyTorch module
+    torch.manual_seed(42)
+    self.pt_head = DeepseekV4HyperHead_PT(self.config_pt)
+    # Initialize weights with standard values
+    for p in self.pt_head.parameters():
+      torch.nn.init.normal_(p.data, mean=0.0, std=0.02)
+
+    # Create dummy mesh/rngs for MaxText
+    devices = mesh_utils.create_device_mesh((1,), devices=jax.local_devices()[:1])
+    self.mesh = Mesh(devices, ("x",))
+    self.rngs = nnx.Rngs(0)
+
+    # Build MaxText config dictionary
+    argv = ["", "src/maxtext/configs/base.yml", "model_name=deepseek4-284b"]
+    config_arguments = {
+        "attention": "dot_product",
+        "dtype": "float32",
+        "weight_dtype": "float32",
+        "mhc_expansion_rate": self.hc_mult,
+        "emb_dim": self.hidden_dim,
+        "normalization_layer_epsilon": 1e-6,
+        "skip_jax_distributed_system": True,
+    }
+    self.mx_config = pyconfig.initialize(argv, **config_arguments)
+
+  def test_hyper_head_parity(self):
+    mt_head = DeepSeek4HyperHead(
+        config=self.mx_config,
+        mesh=self.mesh,
+        rngs=self.rngs,
+    )
+
+    # Map parameters from PyTorch to MaxText
+    mt_head.hc_fn.value = jnp.array(self.pt_head.hc_fn.detach().numpy().T)
+    mt_head.hc_base.value = jnp.array(self.pt_head.hc_base.detach().numpy())
+    mt_head.hc_scale.value = jnp.array(self.pt_head.hc_scale.detach().numpy())
+
+    # Inputs
+    np.random.seed(42)
+    x_np = np.random.uniform(0.1, 1.0, size=(self.batch_size, self.seq_len, self.hc_mult, self.hidden_dim)).astype(np.float32)
+
+    x_pt = torch.tensor(x_np)
+    pt_out = self.pt_head(x_pt).detach().numpy()
+
+    x_mt = jnp.array(x_np)
+    mt_out = np.array(mt_head(x_mt))
+
+    max_diff = np.max(np.abs(mt_out - pt_out))
+    mean_diff = np.mean(np.abs(mt_out - pt_out))
+    print(f"HYPER HEAD PARITY - MAX ABS DIFF: {max_diff:.6e}, MEAN ABS DIFF: {mean_diff:.6e}")
+    np.testing.assert_allclose(mt_out, pt_out, rtol=5e-5, atol=5e-5)
 
 
 if __name__ == "__main__":

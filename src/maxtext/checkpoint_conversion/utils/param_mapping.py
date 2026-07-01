@@ -3867,6 +3867,9 @@ def DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=F
       "params-token_embedder-embedding": "model.embed_tokens.weight",
       "params-decoder-decoder_norm-scale": "model.norm.weight",
       "params-decoder-logits_dense-kernel": "head.weight",
+      "params-decoder-hc_head-hc_fn": "model.hc_head.hc_fn",
+      "params-decoder-hc_head-hc_base": "model.hc_head.hc_base",
+      "params-decoder-hc_head-hc_scale": "model.hc_head.hc_scale",
   }
   
   def add_layer_mapping(mt_layer_path, hf_layer_indices):
@@ -4069,6 +4072,10 @@ def DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=F
           elif "post_alpha_scale" in key: mapping[key] = mhc_split_scale_post
           elif "res_alpha_scale" in key: mapping[key] = mhc_split_scale_res
       elif "position_bias" in key:
+          mapping[key] = identity
+      elif "hc_head-hc_fn" in key:
+          mapping[key] = transpose
+      elif "hc_head-hc_base" in key or "hc_head-hc_scale" in key:
           mapping[key] = identity
       elif type(hf_key) == list:
           mapping[key] = transpose if not saving_to_hf else transpose_stack
