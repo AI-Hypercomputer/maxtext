@@ -38,6 +38,7 @@ import subprocess
 import sys
 from typing import Callable, overload
 from etils import epath
+from huggingface_hub import get_token
 from flax import nnx
 from flax.core.meta import Partitioned
 import flax.linen as nn
@@ -811,8 +812,12 @@ def from_pretrained(
   if config.convert_checkpoint_if_possible and not config.load_parameters_path:
     if not (epath.Path(config.base_output_directory) / "0" / "items").exists():
       # Try to convert checkpoint on the fly
-      if not config.hf_access_token:
-        raise ValueError("hf_access_token must be provided when not providing a pre-existing checkpoint")
+      hf_access_token = config.hf_access_token or get_token()
+      if not hf_access_token:
+        raise ValueError(
+            "hf_access_token must be provided (or authenticate via"
+            " huggingface-cli) when not providing a pre-existing checkpoint"
+        )
 
       # Only process 0 performs the conversion; other processes wait at the barrier below.
       # Otherwise every host would race to download from HF and concurrently write the same
@@ -830,8 +835,8 @@ def from_pretrained(
         conversion_env = os.environ.copy()
         conversion_env["JAX_PLATFORMS"] = "cpu"
         # conversion_env["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={simulated_cpu_devices_count}"
-        if config.hf_access_token:
-          conversion_env["HF_TOKEN"] = config.hf_access_token
+        if hf_access_token:
+          conversion_env["HF_TOKEN"] = hf_access_token
 
         to_maxtext_cmd = [
             sys.executable,
