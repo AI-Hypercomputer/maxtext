@@ -26,6 +26,8 @@ from maxtext.common.common_types import Array, Config
 from maxtext.common.common_types import HyperConnectionType
 from maxtext.layers.initializers import default_bias_init, default_scalar_init, nd_dense_init
 from maxtext.layers.normalizations import RMSNorm
+from maxtext.layers import nnx_wrappers
+from maxtext.layers.initializers import variable_to_logically_partitioned
 
 
 def get_permutation_matrices(k: int) -> Array:
@@ -306,3 +308,85 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     res_mapping = self.res_mapping(norm_x)
     res_out = jnp.einsum("bskd,bskm -> bsmd", x, res_mapping, precision=self.matmul_precision)
     return res_out + post_out, metadata
+  
+
+class HyperHead(nnx.Module):
+  """Final HC-stream collapse; used before the final shared RMSNorm and LM Head."""
+
+  def __init__(
+      self,
+      config: Config,
+      dim: int,
+      mesh: Mesh,
+      rngs: nnx.Rngs,
+  ):
+    self.config = config
+    self.k = config.mhc_expansion_rate
+    self.dim = dim
+    self.rngs = rngs
+    self.mesh = mesh
+    self.dtype = config.dtype
+    self.weight_dtype = config.weight_dtype
+    self.matmul_precision = jax.lax.Precision(config.matmul_precision)
+
+    # V4 uses an Unweighted RMSNorm here
+    self.input_norm = RMSNorm(
+        num_features=self.k * self.dim,
+        dtype=self.dtype,
+        weight_dtype=self.weight_dtype,
+        epsilon=self.config.normalization_layer_epsilon,
+        with_scale=False,
+        kernel_axes=("norm",),
+        rngs=self.rngs,
+    )
+
+    self.eps = 1e-6
+
+    self.hc_scale = nnx.Param(
+        default_scalar_init(self.rngs.params(), (1,), self.weight_dtype),
+        out_sharding=(None,),
+    )
+    
+    self.hc_base = nnx.Param(
+        default_bias_init(self.rngs.params(), (self.k,), self.weight_dtype),
+        out_sharding=(None,),
+    )
+
+    scale_init = nd_dense_init(1.0, "fan_in", "normal")
+    self.hc_fn = nnx.Param(
+        scale_init(
+            self.rngs.params(),
+            (self.k * self.dim, self.k),
+            self.weight_dtype,
+            in_axis=0,
+            out_axis=1,
+        ),
+        out_sharding=("activation_embed", None),
+    )
+
+  def __call__(self, x: Array) -> Array:
+    """Collapses the multi-stream residual back to a single stream."""
+    b, s, k, d = x.shape
+    
+    # Flatten and norm
+    flat = self.input_norm(jnp.reshape(x, (b, s, k * d)))
+
+    hc_fn = jnp.asarray(self.hc_fn[...], self.dtype)
+    hc_scale = jnp.asarray(self.hc_scale[...], self.dtype)
+    hc_base = jnp.asarray(self.hc_base[...], self.dtype)
+
+    # Linear projection: (b, s, k*d) @ (k*d, k) -> (b, s, k)
+    mixes = jnp.einsum("bsm,mk -> bsk", flat, hc_fn, precision=self.matmul_precision)
+    
+    # Sigmoid gate
+    pre = jax.nn.sigmoid(mixes * hc_scale + hc_base) + self.eps
+
+    # Collapse via weighted sum
+    collapsed = jnp.einsum("bskd,bsk -> bsd", x, pre, precision=self.matmul_precision)
+    return collapsed
+
+# Wrap it for Linen so it can be used easily in decoders.py
+HyperHeadToLinen = nnx_wrappers.to_linen_class(
+    HyperHead,
+    base_metadata_fn=variable_to_logically_partitioned,
+)
