@@ -136,7 +136,8 @@ checkpoint_period=100 \
 max_num_checkpoints_to_keep=1000 \
 enable_checkpointing=true \
 load_parameters_path=$MAXTEXT_CKPT_PATH \
-rollout_vllm_init_with_random_weights=True"
+rollout_vllm_init_with_random_weights=True \
+vllm_additional_config='{\"enable_continue_decode\": true}'"
 # vllm_hf_overrides='{architectures: [\"MaxTextForCausalLM\"]}' \
 # vllm_additional_config='{\"maxtext_config\": {\"model_name\": \"qwen3-0.6b\", \"model_call_mode\": \"inference\", \"enable_dp_attention\": false, \"allow_split_physical_axes\": true, \"log_config\": false, \"weight_dtype\": \"bfloat16\", \"prefuse_moe_weights\": true}}'"
 

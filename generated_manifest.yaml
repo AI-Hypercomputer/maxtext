@@ -2,9 +2,9 @@ apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
 metadata:
   labels:
-    kueue.x-k8s.io/queue-name: user-queue-4x4x4
-    xpk.google.com/workload: mohit-rl-qwen3-29194
-  name: mohit-rl-qwen3-29194
+    kueue.x-k8s.io/queue-name: multislice-queue
+    xpk.google.com/workload: mohit-rl-qwen3-9599
+  name: mohit-rl-qwen3-9599
 spec:
   coordinator:
     replicatedJob: pathways-head
@@ -32,7 +32,7 @@ spec:
               cloud.google.com/skip-tpu-webhook-check: 'true'
             labels:
               kueue.x-k8s.io/podset: worker
-              xpk.google.com/workload: mohit-rl-qwen3-29194
+              xpk.google.com/workload: mohit-rl-qwen3-9599
           spec:
             containers:
             - args:
@@ -75,11 +75,9 @@ spec:
                     fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
               - name: RPA_D_BLOCK_SIZES
                 value: 1,4096,1,4096
-              - name: TPUS_PER_POD
-                value: '4'
               - name: VLLM_TORCH_PROFILER_DIR
-                value: gs://runner-maxtext-logs/mohit-rl-qwen3-29194/tensorboard/sampler_tpu_profile
-              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260608-jax_0.10.1
+                value: gs://runner-maxtext-logs/mohit-rl-qwen3-9599/tensorboard/sampler_tpu_profile
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260623-jax_0.10.1
               imagePullPolicy: Always
               name: pathways-worker
               ports:
@@ -139,67 +137,76 @@ spec:
               - bash
               - -c
               - "echo XPK Start: $(date);\n_sigterm() (kill -SIGTERM $! 2>/dev/null;);\n\
-                trap _sigterm SIGTERM;\n\n(cd /app; cat << 'EOF' > scripts/patch_vllm_sampler.py\n\
-                \"\"\"Hotfix to disable prompt_logprobs in tunix vLLM Sampler and\
-                \ bypass vLLM V1 scheduler AssertionError.\"\"\"\n\nimport os\nimport\
-                \ sys\n\n# --- Patch 1: tunix vllm_sampler.py ---\nprint(\"Applying\
-                \ hotfix to tunix/generate/vllm_sampler.py...\")\np = \"/usr/local/lib/python3.12/site-packages/tunix/generate/vllm_sampler.py\"\
-                \nif not os.path.exists(p):\n  try:\n    import tunix.generate.vllm_sampler\
-                \ as vs\n\n    p = vs.__file__\n  except ImportError:\n    print(\"\
-                Error: tunix not found.\")\n    sys.exit(1)\n\nprint(f\"Target file:\
-                \ {p}\")\nwith open(p, \"r\", encoding=\"utf-8\") as f:\n  c = f.read()\n\
-                target = (\n    \"      if self.config.return_logprobs:\\n\"\n   \
-                \ \"        sampling_params.logprobs = 1  # b/428730696\\n\"\n   \
-                \ \"        sampling_params.prompt_logprobs = 1  # b/428730696\"\n\
-                )\nreplacement = (\n    \"      if self.config.return_logprobs:\\\
-                n\"\n    \"        sampling_params.logprobs = 1  # b/428730696\\n\"\
-                \n    \"        sampling_params.prompt_logprobs = 0\"\n)\n\nif target\
-                \ in c:\n  c = c.replace(target, replacement)\n  with open(p, \"w\"\
-                , encoding=\"utf-8\") as f:\n    f.write(c)\n  print(\"Hotfix successfully\
-                \ applied to tunix/generate/vllm_sampler.py.\")\nelse:\n  if \"sampling_params.prompt_logprobs\
-                \ = 0\" in c:\n    print(\"Hotfix already applied.\")\n  else:\n \
-                \   print(\"Warning: target string not found.\")\n\n# --- Patch 2:\
-                \ vllm scheduler.py ---\nprint(\"Applying hotfix to vllm/v1/core/sched/scheduler.py...\"\
-                )\np2 = \"/usr/local/lib/python3.12/site-packages/vllm/v1/core/sched/scheduler.py\"\
-                \nif os.path.exists(p2):\n  with open(p2, \"r\", encoding=\"utf-8\"\
-                ) as f:\n    c2 = f.read()\n  target2 = (\n      \"              \
-                \  # Invariant: EngineCore returns no partial prefill\"\n      \"\
-                \ outputs.\\n                assert not prompt_logprobs_tensors\"\n\
-                \  )\n  replacement2 = \"                # Invariant: EngineCore returns\
-                \ no partial prefill\" \" outputs.\\n                pass\"\n  if\
-                \ target2 in c2:\n    c2 = c2.replace(target2, replacement2)\n   \
-                \ with open(p2, \"w\", encoding=\"utf-8\") as f:\n      f.write(c2)\n\
-                \    print(\"Hotfix successfully applied to vllm/v1/core/sched/scheduler.py.\"\
-                )\n  else:\n    # Check if the target is slightly different (e.g.\
-                \ fewer spaces or different lines)\n    # We can also do a simpler\
-                \ string replacement\n    target2_alt = \"assert not prompt_logprobs_tensors\"\
-                \n    if target2_alt in c2:\n      c2 = c2.replace(target2_alt, \"\
-                pass\")\n      with open(p2, \"w\", encoding=\"utf-8\") as f:\n  \
-                \      f.write(c2)\n      print(\"Hotfix successfully applied to vllm/v1/core/sched/scheduler.py\
-                \ (alt match).\")\n    else:\n      print(\"Warning: target string\
-                \ not found in scheduler.py.\")\nelse:\n  print(\"Warning: scheduler.py\
-                \ path not found.\")\n\n# --- Patch 3: tpu_inference utils.py ---\n\
-                print(\"Applying hotfix to tpu_inference/runner/utils.py...\")\np3\
-                \ = \"/usr/local/lib/python3.12/site-packages/tpu_inference/runner/utils.py\"\
-                \nif os.path.exists(p3):\n  with open(p3, \"r\", encoding=\"utf-8\"\
-                ) as f:\n    c3 = f.read()\n  target3 = (\n      \"            self._canonical_dst_ts\
-                \ = self._resolve_canonical_dst_ts(phase_dir)\\n\\n\"\n      \"  \
-                \          self.profile_dir_with_phase_suffix = os.path.join(\\n\"\
-                \n      '                phase_dir, f\"dp_rank_{self.worker_rank}\"\
-                )'\n  )\n  replacement3 = (\n      \"            self._canonical_dst_ts\
-                \ = self._resolve_canonical_dst_ts(phase_dir)\\n\"\n      \"     \
-                \       self.default_profiling_options.session_id = self._canonical_dst_ts\\\
-                n\\n\"\n      \"            self.profile_dir_with_phase_suffix = os.path.join(\\\
-                n\"\n      '                phase_dir, f\"dp_rank_{self.worker_rank}\"\
-                )'\n  )\n  if target3 in c3:\n    c3 = c3.replace(target3, replacement3)\n\
-                \    with open(p3, \"w\", encoding=\"utf-8\") as f:\n      f.write(c3)\n\
-                \    print(\"Hotfix successfully applied to tpu_inference/runner/utils.py.\"\
-                )\n  else:\n    if \"self.default_profiling_options.session_id = self._canonical_dst_ts\"\
-                \ in c3:\n      print(\"Hotfix already applied to tpu_inference/runner/utils.py.\"\
-                )\n    else:\n      print(\"Warning: target string not found in utils.py.\"\
-                )\nelse:\n  print(\"Warning: tpu_inference utils.py path not found.\"\
-                )\n\n# --- Patch 4: pathwaysutils profiling.py ---\nprint(\"Applying\
-                \ hotfix to pathwaysutils/profiling.py...\")\npaths4 = [\n    \"/usr/local/lib/python3.12/site-packages/pathwaysutils/profiling.py\"\
+                trap _sigterm SIGTERM;\n\n(cd /app; pip install git+https://github.com/AI-Hypercomputer/pathways-utils.git\
+                \ --no-deps; cat << 'EOF' > scripts/patch_vllm_sampler.py\n\"\"\"\
+                Hotfix to disable prompt_logprobs in tunix vLLM Sampler and bypass\
+                \ vLLM V1 scheduler AssertionError.\"\"\"\n\nimport os\nimport re\n\
+                import sys\n\n# --- Patch 1: tunix vllm_sampler.py ---\n# print(\"\
+                Applying hotfix to tunix/generate/vllm_sampler.py...\")\n# p = \"\
+                /usr/local/lib/python3.12/site-packages/tunix/generate/vllm_sampler.py\"\
+                \n# if not os.path.exists(p):\n#   try:\n#     import tunix.generate.vllm_sampler\
+                \ as vs\n\n#     p = vs.__file__\n#   except ImportError:\n#     print(\"\
+                Error: tunix not found.\")\n#     sys.exit(1)\n\n# print(f\"Target\
+                \ file: {p}\")\n# with open(p, \"r\", encoding=\"utf-8\") as f:\n\
+                #   c = f.read()\n# target = (\n#     \"      if self.config.return_logprobs:\\\
+                n\"\n#     \"        sampling_params.logprobs = 1  # b/428730696\\\
+                n\"\n#     \"        sampling_params.prompt_logprobs = 1  # b/428730696\"\
+                \n# )\n# replacement = (\n#     \"      if self.config.return_logprobs:\\\
+                n\"\n#     \"        sampling_params.logprobs = 1  # b/428730696\\\
+                n\"\n#     \"        sampling_params.prompt_logprobs = 0\"\n# )\n\n\
+                # if target in c:\n#   c = c.replace(target, replacement)\n#   with\
+                \ open(p, \"w\", encoding=\"utf-8\") as f:\n#     f.write(c)\n#  \
+                \ print(\"Hotfix successfully applied to tunix/generate/vllm_sampler.py.\"\
+                )\n# else:\n#   if \"sampling_params.prompt_logprobs = 0\" in c:\n\
+                #     print(\"Hotfix already applied.\")\n#   else:\n#     print(\"\
+                Warning: target string not found.\")\n\n# call_pattern = r\"  def\
+                \ __call__\\([^)]+\\)\\s*(?:->[^:]+)?:\\n\"\n# call_match = re.search(call_pattern,\
+                \ c)\n# if call_match:\n#     print(\"Skipped max_generation_steps\
+                \ override.\")\n#     print(\"Hotfix (max_generation_steps override)\
+                \ already applied.\")\n# else:\n#   print(\"Warning: target __call__\
+                \ signature not found.\")\n\n# --- Patch 2: vllm scheduler.py ---\n\
+                # print(\"Applying hotfix to vllm/v1/core/sched/scheduler.py...\"\
+                )\n# p2 = \"/usr/local/lib/python3.12/site-packages/vllm/v1/core/sched/scheduler.py\"\
+                \n# if os.path.exists(p2):\n#   with open(p2, \"r\", encoding=\"utf-8\"\
+                ) as f:\n#     c2 = f.read()\n#   target2 = (\n#       \"        \
+                \        # Invariant: EngineCore returns no partial prefill\"\n# \
+                \      \" outputs.\\n                assert not prompt_logprobs_tensors\"\
+                \n#   )\n#   replacement2 = \"                # Invariant: EngineCore\
+                \ returns no partial prefill\" \" outputs.\\n                pass\"\
+                \n#   if target2 in c2:\n#     c2 = c2.replace(target2, replacement2)\n\
+                #     with open(p2, \"w\", encoding=\"utf-8\") as f:\n#       f.write(c2)\n\
+                #     print(\"Hotfix successfully applied to vllm/v1/core/sched/scheduler.py.\"\
+                )\n#   else:\n#     # Check if the target is slightly different (e.g.\
+                \ fewer spaces or different lines)\n#     # We can also do a simpler\
+                \ string replacement\n#     target2_alt = \"assert not prompt_logprobs_tensors\"\
+                \n#     if target2_alt in c2:\n#       c2 = c2.replace(target2_alt,\
+                \ \"pass\")\n#       with open(p2, \"w\", encoding=\"utf-8\") as f:\n\
+                #         f.write(c2)\n#       print(\"Hotfix successfully applied\
+                \ to vllm/v1/core/sched/scheduler.py (alt match).\")\n#     else:\n\
+                #       print(\"Warning: target string not found in scheduler.py.\"\
+                )\n# else:\n#   print(\"Warning: scheduler.py path not found.\")\n\
+                \n# --- Patch 3: tpu_inference utils.py ---\n# print(\"Applying hotfix\
+                \ to tpu_inference/runner/utils.py...\")\n# p3 = \"/usr/local/lib/python3.12/site-packages/tpu_inference/runner/utils.py\"\
+                \n# if os.path.exists(p3):\n#   with open(p3, \"r\", encoding=\"utf-8\"\
+                ) as f:\n#     c3 = f.read()\n#   target3 = (\n#       \"        \
+                \    self._canonical_dst_ts = self._resolve_canonical_dst_ts(phase_dir)\\\
+                n\\n\"\n#       \"            self.profile_dir_with_phase_suffix =\
+                \ os.path.join(\\n\"\n#       '                phase_dir, f\"dp_rank_{self.worker_rank}\"\
+                )'\n#   )\n#   replacement3 = (\n#       \"            self._canonical_dst_ts\
+                \ = self._resolve_canonical_dst_ts(phase_dir)\\n\"\n#       \"   \
+                \         self.default_profiling_options.session_id = self._canonical_dst_ts\\\
+                n\\n\"\n#       \"            self.profile_dir_with_phase_suffix =\
+                \ os.path.join(\\n\"\n#       '                phase_dir, f\"dp_rank_{self.worker_rank}\"\
+                )'\n#   )\n#   if target3 in c3:\n#     c3 = c3.replace(target3, replacement3)\n\
+                #     with open(p3, \"w\", encoding=\"utf-8\") as f:\n#       f.write(c3)\n\
+                #     print(\"Hotfix successfully applied to tpu_inference/runner/utils.py.\"\
+                )\n#   else:\n#     if \"self.default_profiling_options.session_id\
+                \ = self._canonical_dst_ts\" in c3:\n#       print(\"Hotfix already\
+                \ applied to tpu_inference/runner/utils.py.\")\n#     else:\n#   \
+                \    print(\"Warning: target string not found in utils.py.\")\n# else:\n\
+                #   print(\"Warning: tpu_inference utils.py path not found.\")\n\n\
+                # --- Patch 4: pathwaysutils profiling.py ---\nprint(\"Applying hotfix\
+                \ to pathwaysutils/profiling.py...\")\npaths4 = [\n    \"/usr/local/lib/python3.12/site-packages/pathwaysutils/profiling.py\"\
                 ,\n    \"/app/pathways-utils/pathwaysutils/profiling.py\",\n]\nfor\
                 \ p4 in paths4:\n  if os.path.exists(p4):\n    print(f\"Checking pathwaysutils\
                 \ file: {p4}\")\n    with open(p4, \"r\", encoding=\"utf-8\") as f:\n\
@@ -215,7 +222,7 @@ spec:
                 intValue\": v}'\n    replacement4_int = \"      elif isinstance(v,\
                 \ int):\\n\" '        advanced_config[k] = {\"int64Value\": v}'\n\
                 \    if target4_int in c4:\n      c4 = c4.replace(target4_int, replacement4_int)\n\
-                \      modified4 = True\n\n    # traceSessionName is enabled now,\
+                \      modified4 = True\n\n\n    # traceSessionName is enabled now,\
                 \ bypassing replacement:\n    print(\"Retaining traceSessionName configuration\
                 \ in pathwaysutils.\")\n\n    target4_start = (\n        \"def start_trace(\\\
                 n\"\n        \"    log_dir: os.PathLike[str] | str,\\n\"\n       \
@@ -253,41 +260,42 @@ spec:
                 \ 5: tpu_inference tpu_runner.py ---\nprint(\"Applying hotfix to tpu_inference/runner/tpu_runner.py...\"\
                 )\np5 = \"/usr/local/lib/python3.12/site-packages/tpu_inference/runner/tpu_runner.py\"\
                 \nif os.path.exists(p5):\n  with open(p5, \"r\", encoding=\"utf-8\"\
-                ) as f:\n    c5 = f.read()\n  \n  # Simpler replacement to limit the\
+                ) as f:\n    c5 = f.read()\n\n  # Simpler replacement to limit the\
                 \ size of req_id_kwargs to avoid nanobind limit\n  target5 = \", **req_id_kwargs):\"\
                 \n  replacement5 = \", **dict(list(req_id_kwargs.items())[:100])):\"\
-                \n  \n  if target5 in c5:\n    c5 = c5.replace(target5, replacement5)\n\
+                \n\n  if target5 in c5:\n    c5 = c5.replace(target5, replacement5)\n\
                 \    with open(p5, \"w\", encoding=\"utf-8\") as f:\n      f.write(c5)\n\
                 \    print(\"Hotfix successfully applied to tpu_inference/runner/tpu_runner.py\
                 \ (limited req_id_kwargs).\")\n  else:\n    if \"dict(list(req_id_kwargs.items())\"\
                 \ in c5:\n      print(\"Hotfix already applied to tpu_inference/runner/tpu_runner.py.\"\
                 )\n    else:\n      print(\"Warning: target string not found in tpu_runner.py.\"\
                 )\nelse:\n  print(\"Warning: tpu_runner.py path not found.\")\n\n\n\
-                # --- Patch 6: tunix/rl/rl_cluster.py (DISABLED) ---\nprint(\"Patch\
+                # --- Patch 6: tunix/rl/rl_cluster.py (DISABLED) ---\n# print(\"Patch\
                 \ 6 (tunix/rl/rl_cluster.py) is disabled. We rely on Trainer's profiling\
                 \ to capture Sampler.\")\nEOF\npython3 scripts/patch_vllm_sampler.py;\
-                \ pip install git+https://github.com/AI-Hypercomputer/pathways-utils.git\
-                \ --no-deps; pip install -e . --no-deps; SKIP_JAX_PRECOMPILE=1 JAX_RANDOM_WEIGHTS=1\
-                \ NEW_MODEL_DESIGN=1 TPU_MIN_LOG_LEVEL=0 TF_CPP_MIN_LOG_LEVEL=0 TPU_STDERR_LOG_LEVEL=0\
-                \ JAX_PLATFORMS=proxy,cpu NUM_PRECOMPILE_WORKERS=1 JAX_BACKEND_TARGET=grpc://127.0.0.1:29000\
+                \ pip install -e . --no-deps; HF_TOKEN='' \
+                \ SKIP_JAX_PRECOMPILE=1 JAX_RANDOM_WEIGHTS=1 NEW_MODEL_DESIGN=1 TPU_MIN_LOG_LEVEL=0\
+                \ TF_CPP_MIN_LOG_LEVEL=0 TPU_STDERR_LOG_LEVEL=0 JAX_PLATFORMS=proxy,cpu\
+                \ NUM_PRECOMPILE_WORKERS=1 JAX_BACKEND_TARGET=grpc://127.0.0.1:29000\
                 \ ENABLE_PATHWAYS_PERSISTENCE=1 PYTHONPATH=/app/src python3 -m maxtext.trainers.post_train.rl.train_rl\
-                \ model_name=qwen3-0.6b tokenizer_path=Qwen/Qwen3-0.6B run_name=mohit-rl-qwen3-29194\
+                \ model_name=qwen3-0.6b tokenizer_path=Qwen/Qwen3-0.6B run_name=mohit-rl-qwen3-9599\
                 \ checkpoint_storage_use_ocdbt=False async_scheduling=True base_output_directory=gs://runner-maxtext-logs/\
                 \ chips_per_vm=8 num_batches=20 num_test_batches=0 profiler=xplane\
-                \ skip_first_n_steps_for_profiler=3 profiler_steps=1 rl.num_generations=8\
+                \ skip_first_n_steps_for_profiler=1 profiler_steps=1 rl.num_generations=8\
                 \ rl.grpo_beta=0.05 rl.grpo_epsilon=0.2 gradient_clipping_threshold=1.0\
                 \ decode_sampling_temperature=0.8 decode_sampling_top_k=50 decode_sampling_nucleus_p=0.95\
                 \ dataset_name=nvidia/OpenMathInstruct-2 hf_train_files=hf://datasets/nvidia/OpenMathInstruct-2/data/train_1M-*.parquet\
                 \ train_split=train_1M max_target_length=24576 max_prefill_predict_length=16384\
                 \ learning_rate=1e-6 batch_size=480 train_micro_batch_size=8 rollout_micro_batch_size=480\
                 \ rollout_data_parallelism=16 rollout_tensor_parallelism=4 enable_dp_attention=false\
-                \ hbm_utilization_vllm=0.7 max_num_seqs=480 max_num_batched_tokens=24832\
+                \ hbm_utilization_vllm=0.6 max_num_seqs=480 max_num_batched_tokens=24832\
                 \ scan_layers=True allow_split_physical_axes=True enable_tunix_perf_metrics=True\
                 \ checkpoint_period=100 max_num_checkpoints_to_keep=1000 enable_checkpointing=true\
                 \ load_parameters_path=gs://mohitkhatwani_multipods/qwen3-0.6b/pathways-compat/0/items\
-                \ rollout_vllm_init_with_random_weights=True) & PID=$!;\nwhile kill\
-                \ -0 $PID 2>/dev/null;\n    do sleep 5;\ndone;\nwait $PID;\nEXIT_CODE=$?;\n\
-                \necho XPK End: $(date);\necho EXIT_CODE=$EXIT_CODE;\n\n\nexit $EXIT_CODE\n"
+                \ rollout_vllm_init_with_random_weights=True vllm_additional_config='{\"\
+                enable_continue_decode\": true}') & PID=$!;\nwhile kill -0 $PID 2>/dev/null;\n\
+                \    do sleep 5;\ndone;\nwait $PID;\nEXIT_CODE=$?;\n\necho XPK End:\
+                \ $(date);\necho EXIT_CODE=$EXIT_CODE;\n\n\nexit $EXIT_CODE\n"
               env:
               - name: PATHWAYS_HEAD
                 valueFrom:
@@ -301,9 +309,7 @@ spec:
                 value: grpc://$(PATHWAYS_HEAD):29000
               - name: RPA_D_BLOCK_SIZES
                 value: 1,4096,1,4096
-              - name: TPUS_PER_POD
-                value: '4'
-              image: gcr.io/cloud-tpu-multipod-dev/mohitkhatwani-runner:vzzk-2026-06-30-02-58-52
+              image: gcr.io/cloud-tpu-multipod-dev/mohitkhatwani-runner:qfzu-2026-07-01-07-09-58
               imagePullPolicy: Always
               name: jax-tpu
               resources:
@@ -362,9 +368,7 @@ spec:
                     fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
               - name: RPA_D_BLOCK_SIZES
                 value: 1,4096,1,4096
-              - name: TPUS_PER_POD
-                value: '4'
-              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:20260608-jax_0.10.1
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:20260623-jax_0.10.1
               imagePullPolicy: Always
               name: pathways-proxy
               ports:
@@ -398,9 +402,7 @@ spec:
                 value: 'true'
               - name: RPA_D_BLOCK_SIZES
                 value: 1,4096,1,4096
-              - name: TPUS_PER_POD
-                value: '4'
-              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260608-jax_0.10.1
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260623-jax_0.10.1
               imagePullPolicy: Always
               name: pathways-rm
               ports:

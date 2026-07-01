@@ -684,9 +684,11 @@ def wrap_generate_with_profiling(rl_cluster, trainer_config):
   # pylint: disable=protected-access
   """Wraps rl_cluster.generate to programmatically trigger Pathways profiling."""
   original_generate = rl_cluster.generate
+  profiled_steps = set()
 
   @wraps(original_generate)
   def patched_generate(*args, **kwargs):
+    nonlocal profiled_steps
     profiler_options = rl_cluster.cluster_config.training_config.profiler_options
     mode = kwargs.get("mode", rl_cluster_lib.Mode.TRAIN)
 
@@ -694,29 +696,39 @@ def wrap_generate_with_profiling(rl_cluster, trainer_config):
     if profiler_options and mode == rl_cluster_lib.Mode.TRAIN:
       start_step = profiler_options.skip_first_n_steps
       end_step = start_step + profiler_options.profiler_steps
-      if start_step <= rl_cluster.global_steps < end_step:
+      current_step = rl_cluster.global_steps
+      if start_step <= current_step < end_step and current_step not in profiled_steps:
         should_profile = True
+        profiled_steps.add(current_step)
 
     if should_profile:
-      if hasattr(rl_cluster.rollout, "_sampler"):
-        rl_cluster.rollout._sampler.limit_vllm_generation_length = True
-        logging.warning("[AGY_PROFILE] Enabled max_tokens limiting on sampler.")
       sampler_mesh = rl_cluster.r2m[rl_cluster_lib.Role.ROLLOUT]
       # Calculate num_hosts based on the total JAX devices and TPUs per pod.
       # This ensures we capture all hosts in the JAX cluster.
       total_chips = len(jax.devices())
-      tpus_per_pod = int(os.environ.get("TPUS_PER_POD", trainer_config.chips_per_vm))
+      tpus_per_pod = int(trainer_config.chips_per_vm)
       num_hosts = max(1, total_chips // tpus_per_pod)
 
       logging.warning(
-          "[AGY_PROFILE] Starting sampler profile at step %d with max_num_hosts=%d (sampler mesh size: %d)",
+          "[AGY_PROFILE] Starting sampler profile at step %d with max_num_hosts=%d (sampler mesh size: %d, total hosts: %d)",
           rl_cluster.global_steps,
           num_hosts,
           sampler_mesh.size,
+          num_hosts,
       )
+      kwargs["max_generation_steps"] = 16
+      logging.warning("[AGY_PROFILE] Overriding max_generation_steps to 16 for profiling")
       try:
         if pw_prof is not None:
-          pw_prof.start_trace(log_dir=profiler_options.log_dir, max_num_hosts=num_hosts)
+          options = jax.profiler.ProfileOptions()
+          options.host_tracer_level = profiler_options.host_tracer_level
+          options.python_tracer_level = profiler_options.python_tracer_level
+          options.duration_ms = 60000  # 60 seconds to cover compilation + execution
+          pw_prof.start_trace(
+              log_dir=profiler_options.log_dir,
+              profiler_options=options,
+              max_num_hosts=num_hosts,  # Profile all hosts as requested
+          )
       except Exception as e:  # pylint: disable=broad-exception-caught
         logging.warning("[AGY_PROFILE] Failed to start sampler trace: %s", e)
 
@@ -724,9 +736,6 @@ def wrap_generate_with_profiling(rl_cluster, trainer_config):
       return original_generate(*args, **kwargs)
     finally:
       if should_profile:
-        if hasattr(rl_cluster.rollout, "_sampler"):
-          rl_cluster.rollout._sampler.limit_vllm_generation_length = False
-          logging.warning("[AGY_PROFILE] Disabled max_tokens limiting on sampler.")
         logging.warning(
             "[AGY_PROFILE] Stopping sampler profile at step %d",
             rl_cluster.global_steps,

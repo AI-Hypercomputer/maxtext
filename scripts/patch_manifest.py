@@ -57,9 +57,13 @@ for doc in data:
           del node_selector["cloud.google.com/placement-policy-name"]
           print("Removed cloud.google.com/placement-policy-name from nodeSelector.")
 
-        # Force using the specific reservation
-        node_selector["cloud.google.com/reservation-name"] = "cloudtpu-20260317203000-769538580"
-        print("Injected cloud.google.com/reservation-name=cloudtpu-20260317203000-769538580 into nodeSelector.")
+        accelerator = node_selector.get("cloud.google.com/gke-tpu-accelerator")
+        if accelerator == "tpu7x":
+          node_selector["cloud.google.com/reservation-name"] = "cloudtpu-20260317203000-769538580"
+          print("Injected cloud.google.com/reservation-name=cloudtpu-20260317203000-769538580 into nodeSelector.")
+        elif accelerator == "tpu-v5p-slice":
+          node_selector["cloud.google.com/reservation-name"] = "cloudtpu-20240716121201-595617744"
+          print("Injected cloud.google.com/reservation-name=cloudtpu-20240716121201-595617744 into nodeSelector.")
 
         # 3. Patch placement-policy-name if it has mismatched suffix due to XPK version differences (REMOVED)
 

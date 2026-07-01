@@ -39,34 +39,34 @@ fi
 
 # XLA Flags
 XLA_FLAGS="--xla_tpu_dvfs_p_state=7 \
---xla_tpu_scoped_vmem_limit_kib=65536 \
---xla_tpu_num_sparse_cores_for_gather_offloading=1 \
---xla_tpu_bf16_emission_mode=NATIVE_EMISSION \
---xla_tpu_enable_sparse_core_reduce_scatter_v2=true \
---xla_tpu_enable_sparse_core_collective_offload_all_gather=true \
---xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true \
---xla_tpu_use_tc_device_shape_on_sc=True \
---xla_sc_disable_megacore_partitioning=True \
---xla_tpu_enable_async_collective_fusion_fuse_all_gather=false \
---xla_enable_async_all_gather=true \
---xla_tpu_prefer_async_allgather_to_allreduce=true \
---xla_tpu_enable_sparse_core_collective_offload_all_reduce=true \
---xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true \
---xla_tpu_enable_sparse_core_collective_offload_3d_all_gather=true \
---xla_tpu_use_single_sparse_core_for_all_gather_offload=true \
---xla_tpu_enable_concurrent_sparse_core_offloading=true \
---xla_tpu_enable_offloading_gather_to_sparsecore=true \
---xla_tpu_sparse_core_all_gather_latency_multiplier=1 \
---xla_tpu_sparse_core_reduce_scatter_latency_multiplier=3 \
---xla_tpu_enable_sparse_core_collective_aggregator=true \
---xla_tpu_enable_latency_hiding_layer_scheduler=true \
---xla_tpu_scheduler_percent_shared_memory_limit=150 \
---xla_tpu_enable_layer_scheduler_for_dependent_collectives=true \
---xla_tpu_enable_sparse_core_collective_offload_nd_reduce_scatter=true \
---xla_tpu_pcie_bandwidth_multiplier=0.03 \
---xla_tpu_enable_sparse_core_offload_queuing_in_lhs=true \
---xla_tpu_enable_multi_compute_overlap_in_layer_scheduler=false \
---xla_tpu_enable_3d_reduce_scatter_decomposer=false"
+--xla_tpu_scoped_vmem_limit_kib=65536"
+# --xla_tpu_num_sparse_cores_for_gather_offloading=1 \
+# --xla_tpu_bf16_emission_mode=NATIVE_EMISSION \
+# --xla_tpu_enable_sparse_core_reduce_scatter_v2=true \
+# --xla_tpu_enable_sparse_core_collective_offload_all_gather=true \
+# --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true \
+# --xla_tpu_use_tc_device_shape_on_sc=True \
+# --xla_sc_disable_megacore_partitioning=True \
+# --xla_tpu_enable_async_collective_fusion_fuse_all_gather=false \
+# --xla_enable_async_all_gather=true \
+# --xla_tpu_prefer_async_allgather_to_allreduce=true \
+# --xla_tpu_enable_sparse_core_collective_offload_all_reduce=true \
+# --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true \
+# --xla_tpu_enable_sparse_core_collective_offload_3d_all_gather=true \
+# --xla_tpu_use_single_sparse_core_for_all_gather_offload=true \
+# --xla_tpu_enable_concurrent_sparse_core_offloading=true \
+# --xla_tpu_enable_offloading_gather_to_sparsecore=true \
+# --xla_tpu_sparse_core_all_gather_latency_multiplier=1 \
+# --xla_tpu_sparse_core_reduce_scatter_latency_multiplier=3 \
+# --xla_tpu_enable_sparse_core_collective_aggregator=true \
+# --xla_tpu_enable_latency_hiding_layer_scheduler=true \
+# --xla_tpu_scheduler_percent_shared_memory_limit=150 \
+# --xla_tpu_enable_layer_scheduler_for_dependent_collectives=true \
+# --xla_tpu_enable_sparse_core_collective_offload_nd_reduce_scatter=true \
+# --xla_tpu_pcie_bandwidth_multiplier=0.03 \
+# --xla_tpu_enable_sparse_core_offload_queuing_in_lhs=true \
+# --xla_tpu_enable_multi_compute_overlap_in_layer_scheduler=false \
+# --xla_tpu_enable_3d_reduce_scatter_decomposer=false"
 
 # 1. Run live submit to compile and upload the container image with local changes
 echo "Compiling and uploading container image via xpk..."
@@ -117,7 +117,7 @@ chips_per_vm=4 \
 num_batches=20 \
 num_test_batches=0 \
 profiler=xplane \
-skip_first_n_steps_for_profiler=3 \
+skip_first_n_steps_for_profiler=1 \
 profiler_steps=1 \
 rl.num_generations=8 \
 rl.grpo_beta=0.05 \
@@ -148,7 +148,8 @@ checkpoint_period=100 \
 max_num_checkpoints_to_keep=1000 \
 enable_checkpointing=true \
 load_parameters_path=$MAXTEXT_CKPT_PATH \
-rollout_vllm_init_with_random_weights=True"
+rollout_vllm_init_with_random_weights=True \
+vllm_additional_config='{\"enable_continue_decode\": true}'"
 
 # 4. Run dry-run using the built image to generate manifest
 echo "Generating workload manifest using built image..."
@@ -167,7 +168,7 @@ echo "Generating workload manifest using built image..."
   --custom-pathways-proxy-server-args="${XLA_FLAGS}" \
   --custom-pathways-server-args="" \
   --env RPA_D_BLOCK_SIZES="1,4096,1,4096" \
-  --command="cd /app; python3 scripts/patch_vllm_sampler.py; pip install -e /app/pathways-utils --no-deps; pip install -e . --no-deps; ${MAXTEXT_COMMAND}" \
+  --command="cd /app; pip install git+https://github.com/AI-Hypercomputer/pathways-utils.git; python3 scripts/patch_vllm_sampler.py; pip install -e . --no-deps; ${MAXTEXT_COMMAND}" \
   --dry-run \
   --output-manifest-file=generated_manifest.yaml
 
@@ -177,7 +178,7 @@ echo "Using Kube-DNS ClusterIP: ${KUBE_DNS_IP}"
 
 # 6. Apply Warden webhook bypass and DNS patches
 echo "Applying patch_manifest.py..."
-python3 scripts/patch_manifest.py generated_manifest.yaml "${BUILT_IMAGE}" "${KUBE_DNS_IP}"
+python3 scripts/patch_manifest.py generated_manifest.yaml "${BUILT_IMAGE}" "${KUBE_DNS_IP}" "${WORKLOAD_NAME}" ""
 
 # 7. Deploy the patched workload manifest
 echo "Deploying the patched workload manifest..."
