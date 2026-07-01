@@ -434,9 +434,7 @@ class MaxEngine(_BaseEngine):
       # overwrite with the AR-mode graphdef from `from_pretrained` — the
       # PREFILL/AR attention ops have different cache variable shapes, and a
       # mismatch trips the `assert prefill_kv_cache` check inside attention_op.
-      with nn_partitioning.axis_rules(self.config.logical_axis_rules):
-        concrete_model = self._create_model_fn()
-      graphdef, _, _, rest_state = nnx.split(concrete_model, nnx.Param, nnx.Cache, ...)
+      graphdef, _, _, rest_state = nnx.split(self.model, nnx.Param, nnx.Cache, ...)
       # Overlay loaded non-Param/non-Cache leaves (e.g. AQT qrhs.frozen) onto
       # the PREFILL-mode rest_state. The PREFILL concrete_model already has
       # placeholder qrhs vars at the right paths; we just swap in the loaded
@@ -462,7 +460,7 @@ class MaxEngine(_BaseEngine):
       nnx.replace_by_pure_dict(rest_state, rest_dict)
       self.graphdef = graphdef
       self._nnx_rest_state = rest_state
-      del nnx_model, concrete_model
+      del nnx_model
 
     self.abstract_params = jax.tree.map(
         lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding)
