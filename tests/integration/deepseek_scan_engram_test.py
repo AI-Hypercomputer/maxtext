@@ -127,9 +127,6 @@ class TestDeepSeekScanEngram(unittest.TestCase):
         ]
     )
 
-    if base_num_decoder_layers >= 4 and jax.device_count() <= 8 and any("TPU7x" in d.device_kind for d in jax.devices()):
-      pytest.skip("Compiling 4+ DeepSeek MoE/Engram scanned layers requires >= 8" " physical TPU chips on TPU7x")
-
     devices_array = maxtext_utils.create_device_mesh(config)
     mesh = Mesh(devices_array, config.mesh_axes)
 
@@ -176,16 +173,14 @@ class TestDeepSeekScanEngram(unittest.TestCase):
     """Test engram layers at indices 2 and 8."""
     self._test_engram_pattern(
         mock_from_pretrained,
-        "1,4",
+        "1",
         [
             "dense_layers_0_0",
             "dense_layers_engram_1",
             "dense_layers_2_2",
-            "moe_layers_3_3",
-            "moe_layers_engram_4",
         ],
         first_num_dense_layers=3,
-        base_num_decoder_layers=5,
+        base_num_decoder_layers=3,
     )
 
   @pytest.mark.tpu_only
@@ -206,8 +201,8 @@ class TestDeepSeekScanEngram(unittest.TestCase):
     """Test engram layers at indices 4 and 9 - last engram layer of block."""
     self._test_engram_pattern(
         mock_from_pretrained,
-        "1,3",
-        ["dense_layers_0_0", "dense_layers_engram_1", "moe_layers_2_2", "moe_layers_engram_3"],
+        "1,2",
+        ["dense_layers_0_0", "dense_layers_engram_1", "moe_layers_engram_2"],
         first_num_dense_layers=2,
-        base_num_decoder_layers=4,
+        base_num_decoder_layers=3,
     )
