@@ -114,6 +114,7 @@ def get_key_mapper(model_name):
       k = k.replace(".input_layernorm.weight", ".attn_norm.weight")
       k = k.replace(".post_attention_layernorm.weight", ".ffn_norm.weight")
       k = k.replace(".mlp.", ".ffn.")
+      k = k.replace("e_score_correction_bias", "bias")
       
       k = k.replace(".shared_experts.gate_proj.weight", ".shared_experts.w1.weight")
       k = k.replace(".shared_experts.up_proj.weight", ".shared_experts.w3.weight")
