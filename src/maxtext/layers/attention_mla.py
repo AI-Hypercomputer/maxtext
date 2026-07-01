@@ -876,6 +876,10 @@ class MLA(Attention):
     # Query projection is scaled by self.softmax_scale to be consistent MaxText implementation.
     # DeepSeek v3 was doing it in attention score computation.
     query = jnp.concatenate([q_nope, q_pe], axis=-1) * self.softmax_scale
+
+    if self.config.experimental_sa_quant_q_fp8:
+      query = query.astype(jnp.float8_e4m3fn)
+
     query = self._maybe_shard_with_logical(query, query_logical_name)
     return query, low_rank_q
 
@@ -898,6 +902,9 @@ class MLA(Attention):
     key_rope = self._maybe_shard_with_logical(key_rope, key_logical_name)
 
     key = jnp.concatenate([key_nope, key_rope], axis=-1)
+
+    if self.config.experimental_sa_quant_k_fp8:
+      key = key.astype(jnp.float8_e4m3fn)
 
     key = self._maybe_shard_with_logical(key, key_logical_name)
     value = self._maybe_shard_with_logical(value, value_logical_name)
