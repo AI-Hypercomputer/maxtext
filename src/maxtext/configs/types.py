@@ -1873,6 +1873,7 @@ class Metrics(BaseModel):
   gcs_metrics: bool = Field(False, description="If True, save metrics to GCS.")
   save_config_to_gcs: bool = Field(False, description="If True, save config to GCS.")
   record_internal_nn_metrics: int = Field(0, description="Record internal neural network metrics.")
+  record_layerwise_hidden_states: bool = Field(False, description="Record layer-by-layer hidden states.")
   prometheus_port: int = Field(0, description="Port for Prometheus metrics server. 0 disables it.")
   enable_checkpoint_cloud_logger: bool = Field(False, description="Enables structured logging for checkpointing.")
   enable_tunix_perf_metrics: bool = Field(
