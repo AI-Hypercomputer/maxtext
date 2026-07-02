@@ -773,19 +773,16 @@ def training_loop_iteration(
 
   # Async Host Backup (Elastic Mode only)
   if snapshot_mgr is not None and step % config.elastic_snapshot_interval == 0:
-    if isinstance(state, train_state_nnx.TrainStateNNX):
-      model_state = nnx.state(state.model)
-      opt_state = nnx.state(state.optimizer)
-      state_dict = {
-          "model": nnx.to_pure_dict(model_state),
-          "optimizer": nnx.to_pure_dict(opt_state),
-          "metrics": metrics,
-      }
-    else:
+    if isinstance(model, nn.Module):
       state_dict = {
           "step": state.step,
           "params": state.params,
           "opt_state": state.opt_state,
+          "metrics": metrics,
+      }
+    else:
+      state_dict = {
+          "nnx_state": nnx.to_pure_dict(state),
           "metrics": metrics,
       }
     snapshot_mgr.save_pytree(step, state_dict)
@@ -963,27 +960,7 @@ def recover(
   # 4. Restore TrainState from host snapshot or active state
   if active_state is not None:
     _logger.info("[*] Resharding active state directly (device-to-device)...")
-    if isinstance(state, train_state_nnx.TrainStateNNX):
-      model_state = nnx.state(state.model)
-      opt_state = nnx.state(state.optimizer)
-      abstract_dict = {
-          "model": nnx.to_pure_dict(model_state),
-          "optimizer": nnx.to_pure_dict(opt_state),
-      }
-      act_model_state = nnx.state(active_state.model)
-      act_opt_state = nnx.state(active_state.optimizer)
-      active_dict = {
-          "model": nnx.to_pure_dict(act_model_state),
-          "optimizer": nnx.to_pure_dict(act_opt_state),
-      }
-      restored_dict = jax.device_put(
-          active_dict, jax.tree.map(lambda x: x.sharding, abstract_dict)
-      )
-      nnx.update(state.model, restored_dict["model"])
-      nnx.update(state.optimizer, restored_dict["optimizer"])
-      restored_step = int(state.optimizer.step.value)
-      restored_state = state
-    else:
+    if isinstance(model, nn.Module):
       abstract_dict = {
           "step": state.step,
           "params": state.params,
@@ -1003,6 +980,15 @@ def recover(
           opt_state=restored_dict["opt_state"],
       )
       restored_step = int(restored_state.step)
+    else:
+      abstract_dict = {"nnx_state": nnx.to_pure_dict(state)}
+      active_dict = {"nnx_state": nnx.to_pure_dict(active_state)}
+      restored_dict = jax.device_put(
+          active_dict, jax.tree.map(lambda x: x.sharding, abstract_dict)
+      )
+      nnx.update(state, restored_dict["nnx_state"])
+      restored_state = state
+      restored_step = int(restored_dict["nnx_state"]["optimizer"]["step"])
     _logger.info(
         "Resharding complete. Retrying. Slices used: %s",
         elastic_manager.active_slice_indices,
@@ -1011,19 +997,7 @@ def recover(
     if snapshot_mgr.latest is None:
       raise RuntimeError("No snapshots available to restore from. Cannot recover.")
     restored_step = snapshot_mgr.latest.step
-    if isinstance(state, train_state_nnx.TrainStateNNX):
-      model_state = nnx.state(state.model)
-      opt_state = nnx.state(state.optimizer)
-      abstract_dict = {
-          "model": nnx.to_pure_dict(model_state),
-          "optimizer": nnx.to_pure_dict(opt_state),
-      }
-      restored_dict = snapshot_mgr.load_pytree(abstract_dict)
-      nnx.update(state.model, restored_dict["model"])
-      nnx.update(state.optimizer, restored_dict["optimizer"])
-      restored_step = int(state.optimizer.step.value)
-      restored_state = state
-    else:
+    if isinstance(model, nn.Module):
       abstract_dict = {
           "step": state.step,
           "params": state.params,
@@ -1035,6 +1009,12 @@ def recover(
           params=restored_dict["params"],
           opt_state=restored_dict["opt_state"],
       )
+    else:
+      abstract_dict = {"nnx_state": nnx.to_pure_dict(state)}
+      restored_dict = snapshot_mgr.load_pytree(abstract_dict)
+      nnx.update(state, restored_dict["nnx_state"])
+      restored_state = state
+      restored_step = int(restored_dict["nnx_state"]["optimizer"]["step"])
     if metric_logger_instance is not None:
       metric_logger_instance.recover_metrics(restored_dict.get("metrics"))
 
@@ -1259,19 +1239,14 @@ def train_loop(config, recorder, state=None):
   if config.elastic_enabled:
     replica_axis_idx = config.mesh_axes.index("data")
     snapshot_mgr = Snapshotter(replica_axis_index=replica_axis_idx)
-    if isinstance(state, train_state_nnx.TrainStateNNX):
-      model_state = nnx.state(state.model)
-      opt_state = nnx.state(state.optimizer)
-      state_dict = {
-          "model": nnx.to_pure_dict(model_state),
-          "optimizer": nnx.to_pure_dict(opt_state),
-      }
-    else:
+    if isinstance(model, nn.Module):
       state_dict = {
           "step": state.step,
           "params": state.params,
           "opt_state": state.opt_state,
       }
+    else:
+      state_dict = {"nnx_state": nnx.to_pure_dict(state)}
     snapshot_mgr.save_pytree(start_step, state_dict)
     # Block on the first snapshot at startup to guarantee it is secured before training begins
     snapshot_mgr.join()
@@ -1345,19 +1320,14 @@ def train_loop(config, recorder, state=None):
             # Start snapshot save immediately on the new mesh
             snapshot_mgr = python_vars["snapshot"]
             state = jax_device_state["state"]
-            if isinstance(state, train_state_nnx.TrainStateNNX):
-              model_state = nnx.state(state.model)
-              opt_state = nnx.state(state.optimizer)
-              state_dict = {
-                  "model": nnx.to_pure_dict(model_state),
-                  "optimizer": nnx.to_pure_dict(opt_state),
-              }
-            else:
+            if isinstance(model, nn.Module):
               state_dict = {
                   "step": state.step,
                   "params": state.params,
                   "opt_state": state.opt_state,
               }
+            else:
+              state_dict = {"nnx_state": nnx.to_pure_dict(state)}
             snapshot_mgr.save_pytree(
                 python_vars["step"], state_dict
             )
