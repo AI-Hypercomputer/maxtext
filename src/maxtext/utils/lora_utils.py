@@ -140,9 +140,8 @@ def unapply_lora_from_base_params(base_params, lora_params, lora_scale_factor=1.
 def load_adapter(config, base_abstract_state_params, adapter_config_path, adapter_weights_path):
   """Load a LoRA adapter from disk and return its parameters.
 
-  When `config.pure_nnx` is True, `base_abstract_state_params` is the NNX
-  abstract param state (no outer `params` wrapper) and the returned
-  `lora_params` follows the same shape. Otherwise both use the Linen tree.
+  `base_abstract_state_params` is the NNX abstract param state (no outer
+  `params` wrapper) and the returned `lora_params` follows the same shape.
 
   Args:
     config: Top-level MaxText config.
