@@ -86,7 +86,7 @@ def checkpoint_loop(config, state=None):
       start_time = datetime.datetime.now()
       # A barrier to sync all hosts before starting to save checkpoint
       jax.experimental.multihost_utils.sync_global_devices("Barrier before save")
-      state_to_save = train_state_nnx.to_linen_checkpoint_dict(state.to_pure_dict()) if config.pure_nnx else state
+      state_to_save = train_state_nnx.to_linen_checkpoint_dict(state.to_pure_dict())
       if checkpointing.save_checkpoint(checkpoint_manager, int(step), state_to_save):
         checkpoint_manager.wait_until_finished()
         end_time = datetime.datetime.now()

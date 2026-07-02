@@ -232,7 +232,7 @@ def to_checkpoint_dict(state: nnx.State):
   """Reshapes an nnx.State into the on-disk checkpoint layout.
 
   Weights (nnx.Param) map to the Linen `params` collection and the optimizer to
-  opt_state/step, so pure_nnx and Linen checkpoints stay interchangeable. Everything else that
+  opt_state/step, so NNX and Linen checkpoints stay interchangeable. Everything else that
   must persist -- rngs/dropout, batch stats, and any custom variable -- goes under an `nnx_aux`
   subtree. Works on a concrete state (save) or an abstract state (restore target).
   """

@@ -217,7 +217,7 @@ def _load_full_state_from_path(
 
   if enable_orbax_v1:
     if source_checkpoint_layout == "orbax":
-      # pure_nnx saves in the Linen on-disk layout; reshape it back into the NNX state.
+      # NNX saves in the Linen on-disk layout; reshape it back into the NNX state.
       if isinstance(abstract_unboxed_pre_state, nnx.State):
         return _load_linen_checkpoint_into_nnx(
             path, abstract_unboxed_pre_state, checkpoint_storage_concurrent_gb, use_ocdbt, use_zarr3

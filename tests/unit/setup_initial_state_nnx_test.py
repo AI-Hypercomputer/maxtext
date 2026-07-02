@@ -87,9 +87,8 @@ def _init_fn(model_cls, seed):
 
 
 def _config():
-  """A config with every field setup_initial_state + load_state_if_possible + save read for pure_nnx."""
+  """A config with every field setup_initial_state + load_state_if_possible + save read for NNX."""
   return SimpleNamespace(
-      pure_nnx=True,
       enable_diloco=False,
       enable_checkpointing=True,
       enable_continuous_checkpointing=False,

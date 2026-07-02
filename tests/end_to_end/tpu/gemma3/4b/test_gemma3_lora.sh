@@ -49,8 +49,6 @@ python3 -m maxtext.trainers.post_train.sft.train_sft \
     lora.enable_lora=True \
     lora.lora_rank=16 \
     lora.lora_alpha=32.0 \
-    enable_nnx=True \
-    pure_nnx_decoder=True \
     enable_single_controller=True \
     checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False
 
@@ -68,8 +66,6 @@ python3 -m maxtext.inference.vllm_decode \
     hbm_utilization_vllm=0.6 \
     prompt="Suggest some famous landmarks in London." \
     use_chat_template=True \
-    enable_nnx=True \
-    pure_nnx_decoder=True \
     scan_layers=true
 
 # Step 5: Convert the checkpoint from MaxText format to Hugging Face format
@@ -78,6 +74,4 @@ python3 -m maxtext.checkpoint_conversion.to_huggingface \
     load_parameters_path=${SCANNED_CKPT_PATH} \
     lora.lora_restore_path=${BASE_OUTPUT_DIRECTORY}/lora/${run_id}/checkpoints/5/model_params \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/to_huggingface/unscanned/${run_id} \
-    scan_layers=true \
-    enable_nnx=True \
-    pure_nnx_decoder=True
+    scan_layers=true
