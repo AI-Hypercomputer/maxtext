@@ -552,5 +552,29 @@ class GrainTFRecordPreTokenizedProcessingTest(_GrainTFRecordSetup, GrainBaseProc
     )
 
 
+@pytest.mark.cpu_only
+class GrainFewerFilesThanHostsTest(_GrainTFRecordSetup, GrainBaseProcessingTest, unittest.TestCase):
+  """Tests data loading when file count < dataloading_host_count.
+
+  _GrainTFRecordSetup provides a single TFRecord file. Overriding process_indices
+  to [0, 1] makes make_grain_train_iterator use dataloading_host_count=2, simulating
+  the undersized scenario without a real multi-host runner. The inherited test_train_ds
+  then validates the full batch shape through this code path.
+  """
+
+  def setUp(self):
+    super().setUp()
+    # Simulate 2 dataloading hosts with only 1 file to trigger the
+    # fewer-files-than-hosts path in get_datasets via make_grain_train_iterator.
+    self.process_indices = [0, 1]
+
+  def test_raises_when_grain_worker_count_exceeds_files_per_host(self):
+    # 1 file, 2 hosts (via process_indices=[0,1]) → files_per_host=1;
+    # grain_worker_count=2 must raise.
+    config = self._make_config(grain_worker_count=2)
+    with self.assertRaises(ValueError):
+      grain_data_processing.make_grain_train_iterator(config, self.mesh, self.process_indices)
+
+
 if __name__ == "__main__":
   unittest.main()
