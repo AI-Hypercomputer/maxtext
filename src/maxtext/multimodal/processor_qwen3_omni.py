@@ -167,7 +167,7 @@ def maybe_pad_video_values_to_max_grid(
   if video_values.ndim != 5:
     raise ValueError(f"video_values must have shape (batch, channels, time, height, width), got {video_values.shape}.")
 
-  max_t, max_h, max_w = (int(dim) for dim in max_grid)
+  max_t, max_h, max_w = (int(dim) for dim in max_grid)  # pyrefly: ignore[bad-argument-type]
   actual_t, actual_h, actual_w = (int(dim) for dim in video_grid_thw[0])
   if actual_t > max_t or actual_h > max_h or actual_w > max_w:
     raise ValueError(
@@ -348,6 +348,7 @@ def calculate_video_frame_range(
   # Validate frame order
   if start_frame >= end_frame:
     raise ValueError(
+        # pyrefly: ignore[unbound-name]
         f"Invalid time range: Start frame {start_frame} (at {video_start_clamped if video_start is not None else 0}s) "
         f"exceeds end frame {end_frame} (at {video_end_clamped if video_end is not None else max_duration}s). "
         f"Video duration: {max_duration:.2f}s ({total_frames} frames @ {video_fps}fps)"
@@ -1112,7 +1113,7 @@ def get_rope_index(
       # Process modality-specific content
       # Audio Only
       if min_ed == ed_audio_start:
-        audio_len = _get_feat_extract_output_lengths(audio_lengths[audio_idx]).item()
+        audio_len = _get_feat_extract_output_lengths(audio_lengths[audio_idx]).item()  # pyrefly: ignore[unsupported-operation]
         audio_pos = np.arange(audio_len).reshape(1, -1).repeat(3, axis=0) + st_idx
         llm_pos_ids_list.append(audio_pos)
 
@@ -1122,45 +1123,45 @@ def get_rope_index(
 
       # Image Only
       elif min_ed == ed_vision_start and input_tokens[ed_vision_start + 1] == qwen_tokens.image_pad:
-        grid_t = image_grid_thw[image_idx, 0].item()
-        grid_hs = image_grid_thw[:, 1]
-        grid_ws = image_grid_thw[:, 2]
+        grid_t = image_grid_thw[image_idx, 0].item()  # pyrefly: ignore[unsupported-operation]
+        grid_hs = image_grid_thw[:, 1]  # pyrefly: ignore[unsupported-operation]
+        grid_ws = image_grid_thw[:, 2]  # pyrefly: ignore[unsupported-operation]
         t_index = np.arange(grid_t, dtype=np.float32) * 1 * position_id_per_seconds
 
-        image_pos = get_llm_pos_ids_for_vision(st_idx, image_idx, spatial_merge_size, t_index, grid_hs, grid_ws)
+        image_pos = get_llm_pos_ids_for_vision(st_idx, image_idx, spatial_merge_size, t_index, grid_hs, grid_ws)  # pyrefly: ignore[bad-argument-type]
         llm_pos_ids_list.append(image_pos)
 
-        image_len = int(np.prod(image_grid_thw[image_idx]).item() // (spatial_merge_size**2))
+        image_len = int(np.prod(image_grid_thw[image_idx]).item() // (spatial_merge_size**2))  # pyrefly: ignore[unsupported-operation]
         st += int(text_len + bos_len + image_len + eos_len)
         image_idx += 1
         remain_images -= 1
 
       # Video Only
       elif min_ed == ed_vision_start and input_tokens[ed_vision_start + 1] == qwen_tokens.video_pad:
-        grid_t = video_grid_thw[video_idx, 0].item()
-        grid_hs = video_grid_thw[:, 1]
-        grid_ws = video_grid_thw[:, 2]
-        t_index = np.arange(grid_t, dtype=np.float32) * second_per_grids[video_idx].item() * position_id_per_seconds
+        grid_t = video_grid_thw[video_idx, 0].item()  # pyrefly: ignore[unsupported-operation]
+        grid_hs = video_grid_thw[:, 1]  # pyrefly: ignore[unsupported-operation]
+        grid_ws = video_grid_thw[:, 2]  # pyrefly: ignore[unsupported-operation]
+        t_index = np.arange(grid_t, dtype=np.float32) * second_per_grids[video_idx].item() * position_id_per_seconds  # pyrefly: ignore[unsupported-operation]
 
-        video_pos = get_llm_pos_ids_for_vision(st_idx, video_idx, spatial_merge_size, t_index, grid_hs, grid_ws)
+        video_pos = get_llm_pos_ids_for_vision(st_idx, video_idx, spatial_merge_size, t_index, grid_hs, grid_ws)  # pyrefly: ignore[bad-argument-type]
         llm_pos_ids_list.append(video_pos)
 
-        video_len = int(np.prod(video_grid_thw[video_idx]).item() // (spatial_merge_size**2))
+        video_len = int(np.prod(video_grid_thw[video_idx]).item() // (spatial_merge_size**2))  # pyrefly: ignore[unsupported-operation]
         st += int(text_len + bos_len + video_len + eos_len)
         video_idx += 1
         remain_videos -= 1
 
       # Audio in Video (interleaved)
       elif min_ed == ed_vision_start and ed_vision_start + 1 == ed_audio_start:
-        audio_len = _get_feat_extract_output_lengths(audio_lengths[audio_idx]).item()
+        audio_len = _get_feat_extract_output_lengths(audio_lengths[audio_idx]).item()  # pyrefly: ignore[unsupported-operation]
         audio_llm_pos_ids = np.arange(audio_len).reshape(1, -1).repeat(3, axis=0) + st_idx
 
-        grid_t = video_grid_thw[video_idx, 0].item()
-        grid_hs = video_grid_thw[:, 1]
-        grid_ws = video_grid_thw[:, 2]
-        t_index = np.arange(grid_t, dtype=np.float32) * second_per_grids[video_idx].item() * position_id_per_seconds
+        grid_t = video_grid_thw[video_idx, 0].item()  # pyrefly: ignore[unsupported-operation]
+        grid_hs = video_grid_thw[:, 1]  # pyrefly: ignore[unsupported-operation]
+        grid_ws = video_grid_thw[:, 2]  # pyrefly: ignore[unsupported-operation]
+        t_index = np.arange(grid_t, dtype=np.float32) * second_per_grids[video_idx].item() * position_id_per_seconds  # pyrefly: ignore[unsupported-operation]
 
-        video_llm_pos_ids = get_llm_pos_ids_for_vision(st_idx, video_idx, spatial_merge_size, t_index, grid_hs, grid_ws)
+        video_llm_pos_ids = get_llm_pos_ids_for_vision(st_idx, video_idx, spatial_merge_size, t_index, grid_hs, grid_ws)  # pyrefly: ignore[bad-argument-type]
 
         # Interleave audio and video based on temporal ordering
         video_data_index = 0
@@ -1179,7 +1180,7 @@ def get_rope_index(
         if audio_data_index < audio_llm_pos_ids.shape[1]:
           llm_pos_ids_list.append(audio_llm_pos_ids[:, audio_data_index:])
 
-        video_len = int(np.prod(video_grid_thw[video_idx]).item() // (spatial_merge_size**2))
+        video_len = int(np.prod(video_grid_thw[video_idx]).item() // (spatial_merge_size**2))  # pyrefly: ignore[unsupported-operation]
         st += int(text_len + bos_len + audio_len + video_len + eos_len)
 
         audio_idx += 1

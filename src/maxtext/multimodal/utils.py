@@ -188,7 +188,7 @@ def _merge_mm_embeddings_inner(
 
   # Find positions in the text sequence to place the multimodal embeddings.
   # The `size` argument ensures a fixed shape for JIT compilation.
-  target_pos = jnp.nonzero(mask, size=multimodal_embeddings.shape[0])
+  target_pos = jnp.nonzero(mask, size=multimodal_embeddings.shape[0])  # pyrefly: ignore[bad-argument-type]
   target_pos = target_pos[0]  # jnp.nonzero returns a tuple of arrays
 
   # Save the embedding at the first position.
@@ -452,7 +452,7 @@ def spectrogram(
   # center pad the waveform
   if center:
     padding = [(int(frame_length // 2), int(frame_length // 2))]
-    waveform = np.pad(waveform, padding, mode=pad_mode)
+    waveform = np.pad(waveform, padding, mode=pad_mode)  # pyrefly: ignore[no-matching-overload]
 
   # promote to float64, since np.fft uses float64 internally
   waveform = waveform.astype(np.float64)
@@ -545,7 +545,7 @@ def hertz_to_mel(freq: Union[float, np.ndarray], mel_scale: str = "htk") -> Unio
 
   if isinstance(freq, np.ndarray):
     log_region = freq >= min_log_hertz
-    mels[log_region] = min_log_mel + np.log(freq[log_region] / min_log_hertz) * logstep
+    mels[log_region] = min_log_mel + np.log(freq[log_region] / min_log_hertz) * logstep  # pyrefly: ignore[unsupported-operation]
   elif freq >= min_log_hertz:
     mels = min_log_mel + np.log(freq / min_log_hertz) * logstep
 
@@ -603,7 +603,7 @@ def mel_to_hertz(mels: Union[float, np.ndarray], mel_scale: str = "htk") -> Unio
 
   if isinstance(mels, np.ndarray):
     log_region = mels >= min_log_mel
-    freq[log_region] = min_log_hertz * np.exp(logstep * (mels[log_region] - min_log_mel))
+    freq[log_region] = min_log_hertz * np.exp(logstep * (mels[log_region] - min_log_mel))  # pyrefly: ignore[unsupported-operation]
   elif mels >= min_log_mel:
     freq = min_log_hertz * np.exp(logstep * (mels - min_log_mel))
 
@@ -688,11 +688,11 @@ def mel_filter_bank(
     # frequencies of FFT bins in Hz
     fft_freqs = np.linspace(0, sampling_rate // 2, num_frequency_bins)
 
-  mel_filters = _create_triangular_filter_bank(fft_freqs, filter_freqs)
+  mel_filters = _create_triangular_filter_bank(fft_freqs, filter_freqs)  # pyrefly: ignore[bad-argument-type]
 
   if norm is not None and norm == "slaney":
     # Slaney-style mel is scaled to be approx constant energy per channel
-    enorm = 2.0 / (filter_freqs[2 : num_mel_filters + 2] - filter_freqs[:num_mel_filters])
+    enorm = 2.0 / (filter_freqs[2 : num_mel_filters + 2] - filter_freqs[:num_mel_filters])  # pyrefly: ignore[bad-index]
     mel_filters *= np.expand_dims(enorm, 0)
 
   if (mel_filters.max(axis=0) == 0.0).any():

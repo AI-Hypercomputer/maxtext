@@ -204,9 +204,9 @@ def get_datasets(
     dataset = dataset.repeat(num_epoch)
     dataset = dataset[file_slice]
     if data_file_type == "tfrecord":
-      dataset = dataset.map(input_pipeline_utils.make_tfrecord_iter_dataset)
+      dataset = dataset.map(input_pipeline_utils.make_tfrecord_iter_dataset)  # pyrefly: ignore[missing-attribute]
     else:
-      dataset = dataset.map(grain.experimental.ParquetIterDataset)
+      dataset = dataset.map(grain.experimental.ParquetIterDataset)  # pyrefly: ignore[missing-attribute]
     cycle_length = min(files_per_host, grain_num_threads)
     dataset = grain.experimental.InterleaveIterDataset(dataset, cycle_length=cycle_length)
     if row_shard is not None:
