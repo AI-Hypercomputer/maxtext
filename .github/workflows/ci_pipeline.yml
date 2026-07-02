@@ -395,6 +395,11 @@ jobs:
           gh-pages-branch: 'gh-pages'
           benchmark-data-dir-path: 'dev/bench'
 
+      - name: Extract Benchmark HTML for Inspection
+        if: always()
+        run: |
+          git checkout gh-pages -- dev/bench || echo "Could not find dev/bench in gh-pages"
+
       - name: Upload Benchmark HTML for Inspection
         if: always()
         uses: actions/upload-artifact@v4
