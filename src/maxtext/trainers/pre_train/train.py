@@ -801,8 +801,6 @@ def recover(
 ):
   """Rebuilds MaxText JAX device state and restores state from host snapshot."""
   config = immutable_data["config"]
-  if config.pure_nnx:
-    raise NotImplementedError("Elastic recovery is not supported for NNX.")
 
   metric_logger_instance = python_vars.get("metric_logger_instance")
   if metric_logger_instance is not None:
