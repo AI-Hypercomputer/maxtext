@@ -1263,8 +1263,15 @@ class Decoder(nn.Module):
 
     # After the final transformer layer, `y` holds the raw, un-normalized hidden state.
     if cfg.mhc_expansion_rate > 1:
-      # (batch, length, mhc_expansion_rate, emb_dim) --> (batch, length, emb_dim)
-      hidden_state = mhc_reduce(y)
+      if cfg.decoder_block == DecoderBlockType.DEEPSEEK4:
+        hidden_state = mhc.DeepSeek4HyperHeadToLinen(
+            config=cfg,
+            mesh=mesh,
+            name="hc_head",
+        )(y)
+      else:
+        # (batch, length, mhc_expansion_rate, emb_dim) --> (batch, length, emb_dim)
+        hidden_state = mhc_reduce(y)
     else:
       hidden_state = y
 

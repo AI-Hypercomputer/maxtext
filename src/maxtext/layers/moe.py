@@ -694,14 +694,15 @@ class RoutedMoE(nnx.Module):
     else:
       top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
 
-    if self.config.decoder_block == ctypes.DecoderBlockType.DEEPSEEK:
+    if self.config.decoder_block in (ctypes.DecoderBlockType.DEEPSEEK, ctypes.DecoderBlockType.DEEPSEEK4):
       top_k_weights = self.deepseek_scale_weights(top_k_weights)
-    elif self.config.decoder_block not in (ctypes.DecoderBlockType.LLAMA4, ctypes.DecoderBlockType.GEMMA4):
-      top_k_weights = jax.nn.softmax(top_k_weights.astype(jnp.float32), axis=-1).astype(self.dtype)
+    else:
+      if self.config.decoder_block not in (ctypes.DecoderBlockType.LLAMA4, ctypes.DecoderBlockType.GEMMA4):
+        top_k_weights = jax.nn.softmax(top_k_weights.astype(jnp.float32), axis=-1).astype(self.dtype)
 
-    # Normalization of router weights (e.g. used by Qwen3, Gemma4).
-    if self.config.norm_topk_prob:
-      top_k_weights /= top_k_weights.sum(axis=-1, keepdims=True)
+      # Normalization of router weights (e.g. used by Qwen3, Gemma4).
+      if self.config.norm_topk_prob:
+        top_k_weights /= top_k_weights.sum(axis=-1, keepdims=True)
 
     return top_k_weights, top_k_indices
 
@@ -788,7 +789,10 @@ class RoutedMoE(nnx.Module):
         layer_act = self.activation_fn(layer_w0 * 1.702)
         glu = jnp.multiply(layer_w0, layer_act)
         intermediate_layer = jnp.multiply(glu, (layer_w1 + 1))
-      elif self.config.decoder_block == ctypes.DecoderBlockType.DEEPSEEK and self.config.mlp_activations_limit > 0.0:
+      elif (
+          self.config.decoder_block in (ctypes.DecoderBlockType.DEEPSEEK, ctypes.DecoderBlockType.DEEPSEEK4)
+          and self.config.mlp_activations_limit > 0.0
+      ):
         # DeepSeek V4 uses bounds to clip the SwiGLU activations
         layer_w0 = jnp.clip(layer_w0, min=None, max=self.config.mlp_activations_limit)
         layer_w1 = jnp.clip(layer_w1, min=-self.config.mlp_activations_limit, max=self.config.mlp_activations_limit)
