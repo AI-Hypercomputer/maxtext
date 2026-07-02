@@ -723,6 +723,65 @@ class TestCreateNnxModel(unittest.TestCase):
     with self.assertRaises(RuntimeError):
       model_creation_utils.from_pretrained(cfg, self.mesh)
 
+  @patch("maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata")
+  def test_scan_layers_mismatch_raises_error(self, mock_load_meta):
+    """ValueError is raised if run specifies scan_layers=True but checkpoint specifies scan_layers=False."""
+    mock_load_meta.return_value = {"scan_layers": False}
+
+    cfg = _make_config(
+        enable_checkpointing=True, load_parameters_path="gs://fake/scan_layers_false_ckpt", scan_layers=True
+    )
+
+    with self.assertRaises(ValueError) as context:
+      model_creation_utils.from_pretrained(cfg, self.mesh)
+    self.assertIn(
+        "Configuration mismatch: Your run specifies scan_layers=True, "
+        "but the checkpoint was saved with scan_layers=False",
+        str(context.exception),
+    )
+
+  @patch("maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata")
+  @patch("maxtext.utils.model_creation_utils.ocp")
+  def test_scan_layers_match_no_error(self, mock_ocp, mock_load_meta):
+    """If the run specifies scan_layers=True and the checkpoint matches, it proceeds without error."""
+    mock_load_meta.return_value = {"scan_layers": True}
+
+    mock_ckptr = MagicMock()
+    mock_ckptr.metadata.return_value = self._make_linen_metadata_mock()
+    mock_ckptr.restore.side_effect = lambda path, item=None, **kw: item
+    mock_ocp.Checkpointer.return_value = mock_ckptr
+    mock_ocp.PyTreeCheckpointHandler.return_value = MagicMock()
+    mock_ocp.checkpoint_utils.construct_restore_args.return_value = {}
+    mock_ocp.ArrayRestoreArgs = ocp.ArrayRestoreArgs
+
+    cfg = _make_config(
+        enable_checkpointing=True, load_parameters_path="gs://fake/scan_layers_true_ckpt", scan_layers=True
+    )
+
+    model = model_creation_utils.from_pretrained(cfg, self.mesh)
+    self.assertIsInstance(model, models.Transformer)
+
+  @patch("maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata")
+  @patch("maxtext.utils.model_creation_utils.ocp")
+  def test_scan_layers_missing_metadata_no_error(self, mock_ocp, mock_load_meta):
+    """Skip verification and proceed if custom_metadata lacks 'scan_layers'."""
+    mock_load_meta.return_value = {}
+
+    mock_ckptr = MagicMock()
+    mock_ckptr.metadata.return_value = self._make_linen_metadata_mock()
+    mock_ckptr.restore.side_effect = lambda path, item=None, **kw: item
+    mock_ocp.Checkpointer.return_value = mock_ckptr
+    mock_ocp.PyTreeCheckpointHandler.return_value = MagicMock()
+    mock_ocp.checkpoint_utils.construct_restore_args.return_value = {}
+    mock_ocp.ArrayRestoreArgs = ocp.ArrayRestoreArgs
+
+    cfg = _make_config(
+        enable_checkpointing=True, load_parameters_path="gs://fake/scan_layers_missing_ckpt", scan_layers=True
+    )
+
+    model = model_creation_utils.from_pretrained(cfg, self.mesh)
+    self.assertIsInstance(model, models.Transformer)
+
 
 class TestSetupDecodeStateFromNnx(unittest.TestCase):
   """Tests for setup_decode_state_from_nnx()."""
