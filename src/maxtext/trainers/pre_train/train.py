@@ -1005,7 +1005,12 @@ def recover(
       if hasattr(state, "optimizer") and "optimizer" in restored_dict:
         nnx.update(state.optimizer, restored_dict["optimizer"])
       restored_state = state
-      restored_step = int(state.optimizer.step.value) if hasattr(state, "optimizer") and hasattr(state.optimizer, "step") else 0
+      try:
+        if hasattr(state, "optimizer") and hasattr(state.optimizer, "step"):
+          step_val = state.optimizer.step
+          restored_step = int(getattr(step_val, "value", step_val))
+      except Exception:
+        restored_step = 0
     _logger.info(
         "Resharding complete. Retrying. Slices used: %s",
         elastic_manager.active_slice_indices,
@@ -1038,7 +1043,12 @@ def recover(
       if hasattr(state, "optimizer") and "optimizer" in restored_dict:
         nnx.update(state.optimizer, restored_dict["optimizer"])
       restored_state = state
-      restored_step = int(state.optimizer.step.value) if hasattr(state, "optimizer") and hasattr(state.optimizer, "step") else restored_step
+      try:
+        if hasattr(state, "optimizer") and hasattr(state.optimizer, "step"):
+          step_val = state.optimizer.step
+          restored_step = int(getattr(step_val, "value", step_val))
+      except Exception:
+        pass
     if metric_logger_instance is not None:
       metric_logger_instance.recover_metrics(restored_dict.get("metrics"))
 
