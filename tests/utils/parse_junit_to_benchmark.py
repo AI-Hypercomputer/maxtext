@@ -32,12 +32,13 @@ def main():
             
         root = tree.getroot()
         
-        for testsuite in root.iter('testsuite'):
+        for i, testsuite in enumerate(root.iter('testsuite')):
             time_val = float(testsuite.get('time', 0.0))
-            suite_name = testsuite.get('name', basename)
             
             # Prefix with device to distinguish test times on different hardware
-            full_name = f"[{device.upper()}] Suite: {suite_name}"
+            # Using basename ensures uniqueness across different test shards
+            suffix = f" (Suite {i+1})" if i > 0 else ""
+            full_name = f"[{device.upper()}] File: {basename}{suffix}"
             
             benchmarks.append({
                 "name": full_name,
