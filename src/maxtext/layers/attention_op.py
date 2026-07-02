@@ -1275,20 +1275,28 @@ class AttentionOp(nnx.Module):
     else:
       mask = mask_module.CausalMask(shape=mask_shape)
 
-    # Create LoadBalancedCausalMask if cp and load_balancing
-    if cp_size > 1 and load_balanced_context_parallel:
+    use_load_balanced_cp = cp_size > 1 and load_balanced_context_parallel
+    if use_load_balanced_cp and self.attention_type != AttentionType.FULL:
       mask = LoadBalancedCausalMask(shape=mask_shape, cp_size=cp_size)
 
-    # TODO: figure out local_sliding attention + load_balancing, default is global
     # Apply local masking if local sliding attention is enabled.
     if self.attention_type == AttentionType.LOCAL_SLIDING:
       if self.sliding_window_size is None:
         raise ValueError("Sliding_window_size must be set if Local Sliding attention type")
-      mask &= mask_module.LocalMask(
-          shape=(query.shape[2], key.shape[2]),
-          window_size=(self.sliding_window_size - 1, self.sliding_window_size),
-          offset=0,
-      )
+      local_window_size = (self.sliding_window_size - 1, self.sliding_window_size)
+      if use_load_balanced_cp:
+        mask &= LoadBalancedLocalMask(
+            shape=(query.shape[2], key.shape[2]),
+            window_size=local_window_size,
+            offset=0,
+            cp_size=cp_size,
+        )
+      else:
+        mask &= mask_module.LocalMask(
+            shape=(query.shape[2], key.shape[2]),
+            window_size=local_window_size,
+            offset=0,
+        )
     elif self.attention_type == AttentionType.CHUNK:
       if self.chunk_attn_window_size is None:
         raise ValueError("chunk_attn_window_size must be set for chunk attention type")
@@ -2164,6 +2172,12 @@ class AttentionOp(nnx.Module):
       return prefill_unnormalized_output / prefill_exponentials_sum
 
 
+def _load_balanced_q_sequence(shape: tuple[int, int], cp_size: int):
+  """Reorders query positions the same way as load-balanced input tokens."""
+  arr = np.arange(shape[0])
+  return max_utils.reorder_mask_load_balancing(arr, cp_size, 0)
+
+
 # pylint: disable=protected-access
 class LoadBalancedCausalMask(splash_attention_mask._ComputableMask):
   """Lazy causal mask, prevents the model from attending to future tokens.
@@ -2194,12 +2208,6 @@ class LoadBalancedCausalMask(splash_attention_mask._ComputableMask):
       else:
         return q_ids + self.offset >= kv_ids
 
-    arr = np.arange(shape[0])
-    # we reorder the mask to be load balanced following the same approach as
-    # used to reorder the input tokens
-    out = max_utils.reorder_mask_load_balancing(arr[None, :, None, None], cp_size, 1)
-    q_sequence = out[0, :, 0, 0]
-
     mask_function = causal_mask_function
 
     super().__init__(
@@ -2207,7 +2215,7 @@ class LoadBalancedCausalMask(splash_attention_mask._ComputableMask):
         mask_function=mask_function,
         shard_count=shard_count,
     )
-    self.q_sequence = q_sequence
+    self.q_sequence = _load_balanced_q_sequence(shape, cp_size)
 
   def __eq__(self, other: object):
     if not isinstance(other, type(self)):
@@ -2224,3 +2232,25 @@ class LoadBalancedCausalMask(splash_attention_mask._ComputableMask):
             self.q_sequence.tobytes() if self.q_sequence is not None else None,
         )
     )
+
+
+class LoadBalancedLocalMask(splash_attention_mask.LocalMask):
+  """Lazy local mask with load-balanced query positions."""
+
+  def __init__(
+      self,
+      shape: tuple[int, int],
+      window_size: tuple[int | None, int | None],
+      offset: int,
+      shard_count: int = 1,
+      cp_size: int = -1,
+  ):
+    super().__init__(
+        shape=shape,
+        window_size=window_size,
+        offset=offset,
+        shard_count=shard_count,
+    )
+    # LocalMask uses shard_count for mask-shard validation. cp_size is the
+    # context-parallel size used for the load-balanced query order.
+    self.q_sequence = _load_balanced_q_sequence(shape, cp_size)

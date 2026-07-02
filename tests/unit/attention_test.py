@@ -328,6 +328,29 @@ class ChunkedCausalMaskTest(unittest.TestCase):
       _generate_chunk_attention_mask(mask_shape=(4, 4), chunk_size=0)
 
 
+class LoadBalancedMaskTest(unittest.TestCase):
+  """Tests for load-balanced Splash masks."""
+
+  def test_load_balanced_local_window(self):
+    seq_len = 8
+    window_size = 3
+    q_sequence = np.asarray([0, 1, 6, 7, 2, 3, 4, 5])
+    kv_sequence = np.arange(seq_len)
+    causal_mask = attention_op.LoadBalancedCausalMask(shape=(seq_len, seq_len), cp_size=2)
+    local_mask = attention_op.LoadBalancedLocalMask(
+        shape=(seq_len, seq_len),
+        window_size=(window_size - 1, window_size),
+        offset=0,
+        cp_size=2,
+    )
+
+    expected_mask = (kv_sequence[None, :] <= q_sequence[:, None]) & (
+        kv_sequence[None, :] > q_sequence[:, None] - window_size
+    )
+
+    np.testing.assert_array_equal((causal_mask & local_mask)[:, :], expected_mask)
+
+
 class CudnnTePackedSequenceDescriptorTest(unittest.TestCase):
   """Tests packed Transformer Engine attention metadata handling."""
 
