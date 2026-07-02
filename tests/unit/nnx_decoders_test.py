@@ -975,17 +975,23 @@ class TestNNXDecoderDeepseek4(unittest.TestCase):
   ``decoders.Decoder._apply_deepseek4_scanned_blocks``.
   """
 
-  def _make_ds4_config(
-      self, scan_layers=False, num_decoder_layers=5, first_num_hash_layers=3, compress_ratios=(0, 0, 4, 128, 4)
+  def _make_deepseek4_config(
+      self,
+      scan_layers=False,
+      num_decoder_layers=5,
+      first_num_hash_layers=3,
+      compress_ratios=(0, 0, 4, 128, 4),
+      remat_policy="full",
   ):
     return pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         override_model_config=True,
         per_device_batch_size=1.0,
-        run_name="ds4_nnx_test",
+        run_name="deepseek4_nnx_test",
         enable_checkpointing=False,
         model_name="deepseek4-284b",
         attention="dot_product",
+        remat_policy=remat_policy,
         # Dense MoE (sparse_matmul=False) so the forward runs on CPU; megablox GMM is a TPU Pallas kernel.
         sparse_matmul=False,
         megablox=False,
@@ -1020,7 +1026,7 @@ class TestNNXDecoderDeepseek4(unittest.TestCase):
 
   def test_construct_non_scan_does_not_raise(self):
     """NNXDecoder(deepseek4) must construct; get_norm_layer must support deepseek4 (RMSNorm)."""
-    cfg = self._make_ds4_config(scan_layers=False)
+    cfg = self._make_deepseek4_config(scan_layers=False)
     mesh = _make_mesh(cfg)
     decoder = NNXDecoder(config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=0, dropout=1))
     self.assertIsInstance(decoder.decoder_norm, RMSNorm)
@@ -1030,11 +1036,11 @@ class TestNNXDecoderDeepseek4(unittest.TestCase):
     """Regression guard: NNXDecoder.get_decoder_layers layer_map MUST contain DEEPSEEK4."""
     from maxtext.models import deepseek4  # pylint: disable=import-outside-toplevel
 
-    cfg = self._make_ds4_config(scan_layers=False)
+    cfg = self._make_deepseek4_config(scan_layers=False)
     dec = NNXDecoder(config=cfg, mesh=_make_mesh(cfg), model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=0, dropout=1))
     self.assertEqual(dec.get_decoder_layers(), [deepseek4.DeepSeek4DecoderLayer])
 
-    cfg_s = self._make_ds4_config(scan_layers=True)
+    cfg_s = self._make_deepseek4_config(scan_layers=True)
     dec_s = NNXDecoder(
         config=cfg_s, mesh=_make_mesh(cfg_s), model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=0, dropout=1)
     )
@@ -1045,12 +1051,12 @@ class TestNNXDecoderDeepseek4(unittest.TestCase):
     from maxtext.layers import decoders  # pylint: disable=import-outside-toplevel
     from maxtext.models import deepseek4  # pylint: disable=import-outside-toplevel
 
-    cfg = self._make_ds4_config(scan_layers=False)
+    cfg = self._make_deepseek4_config(scan_layers=False)
     mesh = _make_mesh(cfg)
     dec = decoders.Decoder(config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN)
     self.assertEqual(dec._get_nnx_decoder_block_classes(), [deepseek4.DeepSeek4DecoderLayer])  # pylint: disable=protected-access
 
-    cfg_s = self._make_ds4_config(scan_layers=True)
+    cfg_s = self._make_deepseek4_config(scan_layers=True)
     dec_s = decoders.Decoder(config=cfg_s, mesh=_make_mesh(cfg_s), model_mode=MODEL_MODE_TRAIN)
     self.assertEqual(dec_s._get_nnx_decoder_block_classes(), [deepseek4.DeepSeek4ScannableBlock])  # pylint: disable=protected-access
 
@@ -1121,11 +1127,10 @@ class TestNNXDecoderDeepseek4(unittest.TestCase):
         msg="deepseek4 logits are position-invariant -> forward is degenerate",
     )
 
-  def _assert_decoder_backward_is_real(self, cfg):
-    """Autodiff through the FULL DeepSeek-V4 decoder (prefix hash-routing + scanned HCA/CSA stack) +
-    shared embedding. Reviewer asked for a real backward pass, not just forward: the loss and every
-    parameter gradient must be finite, and at least one gradient must be nonzero (the cotangent
-    actually reached the deepseek4 weights, i.e. the backward was not DCE'd)."""
+  def _deepseek4_decoder_loss_and_grads(self, cfg):
+    """Build the DeepSeek-V4 decoder + shared embedding for cfg and return (loss, grads) for a
+    sum-of-squares loss differentiated (nnx.value_and_grad) wrt every decoder + embedding Param.
+    Fixed seed, so two configs differing only by a numerically-transparent flag yield matching grads."""
     mesh = _make_mesh(cfg)
     rngs = nnx.Rngs(params=0, dropout=1)
     decoder = NNXDecoder(config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, rngs=rngs)
@@ -1150,20 +1155,37 @@ class TestNNXDecoderDeepseek4(unittest.TestCase):
       )
       return jnp.sum(out.astype(jnp.float32) ** 2)
 
-    loss, grads = nnx.value_and_grad(loss_fn, argnums=(0, 1))(decoder, shared_embedding)
-    self.assertTrue(bool(jnp.isfinite(loss)))
-    grad_leaves = jax.tree.leaves(grads)
-    self.assertGreater(len(grad_leaves), 0)
+    return nnx.value_and_grad(loss_fn, argnums=(0, 1))(decoder, shared_embedding)
+
+  def _assert_decoder_grad_parity(self, scan_layers):
+    """Gradient COMPARISON through the FULL DeepSeek-V4 decoder: gradients must match with vs without
+    the selected (remat) code path. The decoder always rematerializes its scanned stack (jax.checkpoint
+    in _apply_layers_sequentially) and remat is numerically transparent, so two valid remat policies --
+    'full' (save nothing) vs 'minimal' -- must yield the SAME loss and gradients (wrt every decoder +
+    embedding Param). Also asserts a real (nonzero) backward."""
+    loss_full, grads_full = self._deepseek4_decoder_loss_and_grads(
+        self._make_deepseek4_config(scan_layers=scan_layers, remat_policy="full")
+    )
+    loss_min, grads_min = self._deepseek4_decoder_loss_and_grads(
+        self._make_deepseek4_config(scan_layers=scan_layers, remat_policy="minimal")
+    )
+    np.testing.assert_allclose(np.array(loss_full), np.array(loss_min), rtol=1e-2, atol=1e-2)
+    full_leaves = jax.tree.leaves(grads_full)
+    min_leaves = jax.tree.leaves(grads_min)
+    self.assertEqual(len(full_leaves), len(min_leaves), "grad pytrees differ in leaf count")
+    self.assertGreater(len(full_leaves), 0)
     self.assertTrue(
-        all(bool(jnp.all(jnp.isfinite(g))) for g in grad_leaves), "deepseek4 decoder gradient has non-finite entries"
+        all(bool(jnp.all(jnp.isfinite(g))) for g in full_leaves), "deepseek4 decoder gradient has non-finite entries"
     )
     self.assertTrue(
-        any(bool(jnp.any(g != 0)) for g in grad_leaves), "deepseek4 decoder backward produced all-zero gradients"
+        any(bool(jnp.any(g != 0)) for g in full_leaves), "deepseek4 decoder backward produced all-zero gradients"
     )
+    for g_full, g_min in zip(full_leaves, min_leaves):
+      np.testing.assert_allclose(np.array(g_full), np.array(g_min), rtol=1e-2, atol=1e-2)
 
   def test_scan_init_builds_prefix_and_scanned_blocks(self):
     """scan init builds first_num_hash_layers unrolled prefix layers + a scanned block stack."""
-    cfg = self._make_ds4_config(scan_layers=True)
+    cfg = self._make_deepseek4_config(scan_layers=True)
     mesh = _make_mesh(cfg)
     decoder = NNXDecoder(config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=0, dropout=1))
     self.assertEqual(decoder.num_prefix_layers, cfg.first_num_hash_layers)
@@ -1179,7 +1201,7 @@ class TestNNXDecoderDeepseek4(unittest.TestCase):
     pairs HCA/CSA layers via `// 2`, which would silently drop the trailing layer without the guard
     in NNXDecoder._init_scanned_deepseek4.
     """
-    cfg = self._make_ds4_config(scan_layers=True, num_decoder_layers=6, first_num_hash_layers=3)
+    cfg = self._make_deepseek4_config(scan_layers=True, num_decoder_layers=6, first_num_hash_layers=3)
     mesh = _make_mesh(cfg)
     with self.assertRaises(AssertionError):
       NNXDecoder(config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=0, dropout=1))
@@ -1190,7 +1212,7 @@ class TestNNXDecoderDeepseek4(unittest.TestCase):
     num_decoder_layers=5, first_num_hash_layers=3 -> (5-3)=2 is even -> the guard passes and one
     scanned HCA/CSA block is built.
     """
-    cfg = self._make_ds4_config(scan_layers=True, num_decoder_layers=5, first_num_hash_layers=3)
+    cfg = self._make_deepseek4_config(scan_layers=True, num_decoder_layers=5, first_num_hash_layers=3)
     mesh = _make_mesh(cfg)
     decoder = NNXDecoder(config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=0, dropout=1))
     self.assertEqual(decoder.num_prefix_layers, 3)
@@ -1200,7 +1222,7 @@ class TestNNXDecoderDeepseek4(unittest.TestCase):
     """non-scan init builds num_decoder_layers DeepSeek4DecoderLayer instances (with layer_idx)."""
     from maxtext.models import deepseek4  # pylint: disable=import-outside-toplevel
 
-    cfg = self._make_ds4_config(scan_layers=False)
+    cfg = self._make_deepseek4_config(scan_layers=False)
     mesh = _make_mesh(cfg)
     decoder = NNXDecoder(config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=0, dropout=1))
     self.assertEqual(len(decoder.layers), cfg.num_decoder_layers)
@@ -1213,13 +1235,13 @@ class TestNNXDecoderDeepseek4(unittest.TestCase):
     End-to-end numeric forward (prefix hash-routing layers + per-layer DeepSeek4DecoderLayer with
     global layer_idx + decoder_input_tokens). Runs on CPU with dense MoE (sparse_matmul=False).
     """
-    cfg = self._make_ds4_config(scan_layers=False)
+    cfg = self._make_deepseek4_config(scan_layers=False)
     decoder, logits, expected, aot_logits = self._build_and_run(cfg)
     self.assertEqual(logits.shape, expected)
     self._assert_forward_is_real(logits, aot_logits, expected)
     self.assertTrue(jnp.all(jnp.isfinite(logits)))  # secondary
     self.assertTrue(hasattr(decoder, "layers_0"))
-    self._assert_decoder_backward_is_real(cfg)
+    self._assert_decoder_grad_parity(scan_layers=cfg.scan_layers)
 
   def test_forward_scan(self):
     """deepseek4 scan forward (unrolled hash-routing prefix + scanned HCA/CSA blocks).
@@ -1227,12 +1249,12 @@ class TestNNXDecoderDeepseek4(unittest.TestCase):
     End-to-end numeric forward exercising _apply_deepseek4_scanned_blocks: the prefix layers run
     unscanned, then the alternating HCA(128)/CSA(4) blocks run via _apply_layers_sequentially.
     """
-    cfg = self._make_ds4_config(scan_layers=True)
+    cfg = self._make_deepseek4_config(scan_layers=True)
     _, logits, expected, aot_logits = self._build_and_run(cfg)
     self.assertEqual(logits.shape, expected)
     self._assert_forward_is_real(logits, aot_logits, expected)
     self.assertTrue(jnp.all(jnp.isfinite(logits)))  # secondary
-    self._assert_decoder_backward_is_real(cfg)
+    self._assert_decoder_grad_parity(scan_layers=cfg.scan_layers)
 
 
 class TestNNXPipelineStages(unittest.TestCase):
