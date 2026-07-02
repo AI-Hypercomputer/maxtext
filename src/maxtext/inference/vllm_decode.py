@@ -36,26 +36,25 @@ from absl import app
 from absl import flags
 from flax.linen import partitioning as nn_partitioning
 import jax
-import transformers
-
-from maxtext.utils import model_creation_utils
-from maxtext.utils import max_logging
-from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
-from maxtext.common.common_types import Config
 from maxtext.common import profiler
+from maxtext.common.common_types import Config
+from maxtext.configs import pyconfig
 from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
+import maxtext.integration.vllm.maxtext_vllm_adapter as adapter
+from maxtext.utils import lora_utils
+from maxtext.utils import max_logging
+from maxtext.utils import model_creation_utils
+from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
+import transformers
 from tunix.rl.rollout import base_rollout
 from tunix.rl.rollout.vllm_rollout import VllmRollout
 from vllm import LLM
-from vllm.sampling_params import SamplingParams
-from maxtext.configs import pyconfig
-import maxtext.integration.vllm.maxtext_vllm_adapter as adapter
-
 # Force uses_mrope to False to disable 3D multimodal position IDs in text-only runs.
 # TODO(b/520142315): Class-level monkey patching is required here because ModelConfig.uses_mrope
 # is evaluated during the internal initialization of the LLM engine, making instance-level
 # configuration impossible. Check if a cleaner configuration option can be added in upstream vLLM.
 from vllm.config import ModelConfig
+from vllm.sampling_params import SamplingParams
 
 ModelConfig.uses_mrope = property(lambda _: False)
 
@@ -94,11 +93,13 @@ def decode_with_vllm(config: Config) -> None:
       "additional_config": {
           "maxtext_config": {
               "model_name": config.model_name,
-              "weight_dtype": "bfloat16",
+              "weight_dtype": config.weight_dtype,
               "allow_split_physical_axes": True,
               "debug_sharding": config.debug_sharding,
               "prefuse_moe_weights": config.prefuse_moe_weights,
               "scan_layers": config.scan_layers,
+              "enable_nnx": config.enable_nnx,
+              "pure_nnx_decoder": config.pure_nnx_decoder,
           },
           "sharding": {
               "sharding_strategy": {
@@ -195,7 +196,20 @@ def decode_with_tunix(
     mesh: The JAX mesh for parallelism.
   """
   # Wrap the model for Tunix
-  tunix_model = TunixMaxTextAdapter(base_model=model)
+  use_no_op_mappings = False
+  if hasattr(config, "vllm_hf_overrides") and config.vllm_hf_overrides:
+    overrides = config.vllm_hf_overrides
+    if isinstance(overrides, str) and "MaxTextForCausalLM" in overrides:
+      use_no_op_mappings = True
+    elif isinstance(overrides, dict) and "MaxTextForCausalLM" in overrides.get(
+        "architectures", []
+    ):
+      use_no_op_mappings = True
+
+  tunix_model = TunixMaxTextAdapter(
+      base_model=model,
+      use_no_op_mappings=use_no_op_mappings,
+  )
 
   # Load the tokenizer
   tokenizer = transformers.AutoTokenizer.from_pretrained(
@@ -223,13 +237,62 @@ def decode_with_tunix(
         f"max_target_length ({config.max_target_length}) must be greater than max_prompt_length ({max_prompt_length})"
     )
 
+  # MaxText uses -1 to mean "disabled"; vLLM requires top_p in (0, 1].
+  top_p = (
+      config.decode_sampling_nucleus_p
+      if config.decode_sampling_nucleus_p > 0
+      else 1.0
+  )
+  top_k = (
+      config.decode_sampling_top_k if config.decode_sampling_top_k > 0 else -1
+  )
+
+  rollout_vllm_additional_config = {
+      "maxtext_config": {
+          "model_name": config.model_name,
+          "weight_dtype": config.weight_dtype,
+          "allow_split_physical_axes": True,
+          "debug_sharding": config.debug_sharding,
+          "prefuse_moe_weights": config.prefuse_moe_weights,
+          "scan_layers": config.scan_layers,
+          "enable_nnx": config.enable_nnx,
+          "pure_nnx_decoder": config.pure_nnx_decoder,
+      }
+  }
+
+  if config.lora.enable_lora:
+    rollout_vllm_additional_config["maxtext_config"]["lora"] = {
+        "enable_lora": config.lora.enable_lora,
+        "lora_restore_path": config.lora.lora_restore_path,
+        "lora_rank": config.lora.lora_rank,
+        "lora_alpha": config.lora.lora_alpha,
+        "lora_module_path": config.lora.lora_module_path,
+    }
+
   # Create vLLM rollout for inference
   rollout_config = base_rollout.RolloutConfig(
       max_tokens_to_generate=max_tokens_to_generate,
       max_prompt_length=max_prompt_length,
       temperature=config.decode_sampling_temperature,
-      top_p=config.decode_sampling_nucleus_p,
-      top_k=config.decode_sampling_top_k,
+      top_p=top_p,
+      top_k=top_k,
+      rollout_vllm_model_version=config.tokenizer_path,
+      rollout_vllm_hbm_utilization=config.hbm_utilization_vllm,
+      rollout_vllm_init_with_random_weights=True,
+      rollout_vllm_tpu_backend_type="jax",
+      tensor_parallel_size=(
+          config.ici_tensor_parallelism
+          if config.ici_tensor_parallelism > 0
+          else 1
+      ),
+      data_parallel_size=jax.device_count()
+      // (
+          config.ici_tensor_parallelism
+          if config.ici_tensor_parallelism > 0
+          else 1
+      ),
+      rollout_vllm_additional_config=rollout_vllm_additional_config,
+      rollout_vllm_kwargs={"hf_overrides": config.vllm_hf_overrides},
   )
   vllm_rollout = VllmRollout(
       model=tunix_model,
@@ -239,12 +302,7 @@ def decode_with_tunix(
       # other special formatting, which is not part of max_prompt_length.
       cache_config_or_size=max_prompt_length + max_tokens_to_generate + 256,
       mesh=mesh,
-      model_version=config.tokenizer_path,
-      hbm_utilization=0.8,
-      # Initialize vllm model with random weights to speed up bootstrap time.
-      # Actual model weights will be loaded later.
-      init_with_random_weights=True,
-      tpu_backend_type="jax",
+      rollout_config=rollout_config,
   )
 
   # Generate text
@@ -271,6 +329,12 @@ def main(argv: Sequence[str]) -> None:
 
   if FLAGS.use_tunix:
     maxtext_model, mesh = model_creation_utils.from_pretrained(config)
+    if config.lora.enable_lora:
+      maxtext_model = lora_utils.apply_lora_to_model(
+          maxtext_model, mesh, config
+      )
+      if config.lora.lora_restore_path:
+        lora_utils.restore_lora_from_path(maxtext_model, config)
     decode_with_tunix(config, model=maxtext_model, mesh=mesh)
   else:
     decode_with_vllm(config)
