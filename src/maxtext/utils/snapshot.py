@@ -104,29 +104,39 @@ class Snapshotter:
     def get_active_pytree(x):
       if not isinstance(x, jax.Array) or not hasattr(x.sharding, "mesh"):
         return x
-      if hasattr(x.sharding, "memory_kind") and x.sharding.memory_kind == "pinned_host":
-        dev_sharding = x.sharding.with_memory_kind("device")
-        x = jax.device_put(x, dev_sharding)
-      mesh_axis_name = x.sharding.mesh.axis_names[self.replica_axis_index]
-      all_replicas = split_by_mesh_axis.split_by_mesh_axis(
-          x,
-          mesh_axis_name,
-      )
-
-      active_replicas = [
-          replica for replica in all_replicas if is_replica_active(replica)
-      ]
-
-      if not active_replicas:
-        raise RuntimeError(
-            "No active replicas found."
+      try:
+        dev_x = x
+        if hasattr(x.sharding, "memory_kind") and x.sharding.memory_kind == "pinned_host":
+          dev_sharding = x.sharding.with_memory_kind("device")
+          dev_x = jax.device_put(x, dev_sharding)
+        mesh_axis_name = dev_x.sharding.mesh.axis_names[self.replica_axis_index]
+        all_replicas = split_by_mesh_axis.split_by_mesh_axis(
+            dev_x,
+            mesh_axis_name,
         )
 
-      reconstructed_state = concatenate_by_mesh_axis.concatenate_by_mesh_axis(
-          active_replicas,
-          mesh_axis_name,
-      )
-      return reconstructed_state
+        active_replicas = [
+            replica for replica in all_replicas if is_replica_active(replica)
+        ]
+
+        if active_replicas:
+          return concatenate_by_mesh_axis.concatenate_by_mesh_axis(
+              active_replicas,
+              mesh_axis_name,
+          )
+      except Exception as e:
+        _logger.warning("split_by_mesh_axis failed (%s). Extracting addressable shards from remaining worker hosts...", e)
+
+      live_shards = []
+      for shard in getattr(x, "addressable_shards", []):
+        try:
+          jax.block_until_ready(shard.data)
+          live_shards.append(shard.data)
+        except jax.errors.JaxRuntimeError:
+          pass
+      if live_shards:
+        return live_shards[0] if len(live_shards) == 1 else jax.device_put(live_shards[0])
+      return x
 
     _logger.info("Restoring from snapshot at step %d...", step)
     active_pinned_state = jax.tree.map(get_active_pytree, pinned_state)
