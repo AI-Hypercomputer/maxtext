@@ -63,9 +63,8 @@ from maxtext.common.common_types import (
     DEFAULT_MASK_VALUE,
 )
 
-from maxtext.layers import nnx_wrappers
 from maxtext.layers.attentions import Attention
-from maxtext.layers.initializers import nd_dense_init, NdInitializer, variable_to_logically_partitioned
+from maxtext.layers.initializers import nd_dense_init, NdInitializer
 from maxtext.layers.linears import DenseGeneral
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
@@ -405,141 +404,6 @@ class Indexer(nnx.Module):
       indexer_mask += internal_padding_mask[:, None, :]
 
     return indexer_mask, topk_indices, indexer_score
-
-
-def mla_as_linen(
-    *,
-    config: Config,
-    num_query_heads: int,
-    num_kv_heads: int,
-    head_dim: int,
-    max_target_length: int,
-    mesh: Mesh,
-    attention_kernel: str,
-    inputs_q_shape: Tuple,
-    inputs_kv_shape: Tuple,
-    dtype: DType = jnp.float32,
-    weight_dtype: DType = jnp.float32,
-    max_prefill_predict_length: int = -1,
-    dropout_rate: float = 0.0,
-    kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal"),
-    float32_qk_product: bool = False,  # computes logits in float32 for stability.
-    float32_logits: bool = False,  # cast logits in float32 for stability.
-    quant: Optional[Quant] = None,
-    kv_quant: Optional[KVQuant] = None,
-    attention_type: AttentionType = AttentionType.MLA,  # Default to MLA attention
-    attn_logits_soft_cap: float | None = None,
-    sliding_window_size: int | None = None,
-    use_ragged_attention: bool = False,
-    ragged_block_size: int = 256,
-    use_qk_norm: bool = False,
-    query_pre_attn_scalar: float | None = None,
-    use_bias_in_projections: bool = False,  # Set to True will enable bias in q, k, v, o projections
-    # Temperature tuning parameters used for Llama4
-    temperature_tuning: bool = False,
-    temperature_tuning_scale: float = 0.1,
-    temperature_tuning_floor_scale: float = 8192.0,
-    # Shard the query activation as the same as the key and value.
-    # TODO: Find a better sharding axis name.
-    # TODO: Further break down the Training and Inference axes for the q, k, v.
-    prefill_query_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
-    prefill_key_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
-    prefill_value_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
-    query_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM),
-    key_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM),
-    value_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM),
-    input_axis_names: AxisNames = (BATCH_ATTN, LENGTH, EMBED),
-    out_axis_names: AxisNames = (BATCH_ATTN, LENGTH, HEAD, D_KV),
-    prefill_input_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, EMBED),
-    decode_input_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, EMBED),
-    prefill_out_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, HEAD, D_KV),
-    decode_out_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV),
-    prefill_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
-    ar_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
-    compute_axis_order: AxisIdxes = (0, 1, 2, 3),
-    reshape_q: bool = False,
-    is_nope_layer: bool = False,
-    is_vision: bool = False,
-    model_mode: str = MODEL_MODE_TRAIN,
-    q_lora_rank: int = 0,
-    kv_lora_rank: int = 512,
-    qk_nope_head_dim: int = 128,
-    qk_rope_head_dim: int = 64,
-    v_head_dim: int = 128,
-    max_position_embeddings: int = 4096 * 4,
-    original_max_position_embeddings: int = 4096,
-    mscale: float = 1.0,  # scaling factor for softmax
-    rope_factor: float = 40.0,  # rotary embedding factor
-    name: str | None = None,
-):
-  """A factory function to create an MLA as a Linen module.
-
-  This function serves as a bridge to use the NNX-based `MLA` within a
-  Linen model.
-  """
-  return nnx_wrappers.to_linen(
-      MLA,
-      config=config,
-      num_query_heads=num_query_heads,
-      num_kv_heads=num_kv_heads,
-      head_dim=head_dim,
-      max_target_length=max_target_length,
-      mesh=mesh,
-      attention_kernel=attention_kernel,
-      inputs_q_shape=inputs_q_shape,
-      inputs_kv_shape=inputs_kv_shape,
-      dtype=dtype,
-      weight_dtype=weight_dtype,
-      max_prefill_predict_length=max_prefill_predict_length,
-      dropout_rate=dropout_rate,
-      kernel_init=kernel_init,
-      float32_qk_product=float32_qk_product,
-      float32_logits=float32_logits,
-      quant=quant,
-      kv_quant=kv_quant,
-      attention_type=attention_type,
-      attn_logits_soft_cap=attn_logits_soft_cap,
-      sliding_window_size=sliding_window_size,
-      use_ragged_attention=use_ragged_attention,
-      ragged_block_size=ragged_block_size,
-      use_qk_norm=use_qk_norm,
-      query_pre_attn_scalar=query_pre_attn_scalar,
-      use_bias_in_projections=use_bias_in_projections,
-      temperature_tuning=temperature_tuning,
-      temperature_tuning_scale=temperature_tuning_scale,
-      temperature_tuning_floor_scale=temperature_tuning_floor_scale,
-      prefill_query_axis_names=prefill_query_axis_names,
-      prefill_key_axis_names=prefill_key_axis_names,
-      prefill_value_axis_names=prefill_value_axis_names,
-      query_axis_names=query_axis_names,
-      key_axis_names=key_axis_names,
-      value_axis_names=value_axis_names,
-      input_axis_names=input_axis_names,
-      out_axis_names=out_axis_names,
-      prefill_input_axis_names=prefill_input_axis_names,
-      decode_input_axis_names=decode_input_axis_names,
-      prefill_out_axis_names=prefill_out_axis_names,
-      decode_out_axis_names=decode_out_axis_names,
-      prefill_cache_axis_order=prefill_cache_axis_order,
-      ar_cache_axis_order=ar_cache_axis_order,
-      compute_axis_order=compute_axis_order,
-      reshape_q=reshape_q,
-      is_nope_layer=is_nope_layer,
-      is_vision=is_vision,
-      model_mode=model_mode,
-      q_lora_rank=q_lora_rank,
-      kv_lora_rank=kv_lora_rank,
-      qk_nope_head_dim=qk_nope_head_dim,
-      qk_rope_head_dim=qk_rope_head_dim,
-      v_head_dim=v_head_dim,
-      max_position_embeddings=max_position_embeddings,
-      original_max_position_embeddings=original_max_position_embeddings,
-      mscale=mscale,
-      rope_factor=rope_factor,
-      name=name,
-      metadata_fn=variable_to_logically_partitioned,
-      abstract_init=False,
-  )
 
 
 class MLA(Attention):

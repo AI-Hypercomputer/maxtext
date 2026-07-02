@@ -26,8 +26,7 @@ from jax.sharding import Mesh, NamedSharding
 from flax import nnx
 
 from maxtext.common.common_types import ShardMode, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, Array, Config, DType
-from maxtext.layers import nnx_wrappers
-from maxtext.layers.initializers import Initializer, default_embed_init, variable_to_logically_partitioned
+from maxtext.layers.initializers import Initializer, default_embed_init
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils.sharding import logical_to_mesh_axes, create_sharding
@@ -41,52 +40,6 @@ def _maybe_move_embedding_to_device(embedding_table: Array, config: Config) -> A
     max_logging.log("embeddings.py: Moving embedding parameter to device")
     return jax.device_put(embedding_table, max_utils.device_space())
   return embedding_table
-
-
-def embed_as_linen(
-    *,
-    num_embeddings: int,
-    num_features: int,
-    config: Config,
-    mesh: Mesh,
-    cast_input_dtype: None | DType = None,
-    dtype: DType = jnp.float32,
-    attend_dtype: None | DType = None,
-    embedding_init: Initializer = default_embed_init,
-    name: str | None = None,
-):
-  """Initializes the Embed NNX module and returns it as a Linen module.
-
-  This function serves as a bridge to use the NNX-based `Embed` module within
-  a Linen model. It wraps the `Embed` module using `nnx.bridge.to_linen`,
-  making it compatible with the Linen API.
-
-  Args:
-    num_embeddings: The number of embeddings.
-    num_features: The number of feature dimensions for each embedding.
-    config: The model configuration.
-    cast_input_dtype: The dtype to cast the input to, if any.
-    dtype: The dtype of the embedding vectors.
-    attend_dtype: The dtype for the `attend` method.
-    embedding_init: The initializer for the embedding matrix.
-    name: The name of the Linen module.
-
-  Returns:
-    A Linen module that wraps the NNX `Embed` module.
-  """
-  return nnx_wrappers.to_linen(
-      Embed,
-      num_embeddings=num_embeddings,
-      num_features=num_features,
-      config=config,
-      mesh=mesh,
-      cast_input_dtype=cast_input_dtype,
-      dtype=dtype,
-      attend_dtype=attend_dtype,
-      embedding_init=embedding_init,
-      metadata_fn=variable_to_logically_partitioned,
-      name=name,
-  )
 
 
 class Embed(nnx.Module):
@@ -236,39 +189,6 @@ def attend_on_embedding(
   )
 
 
-def rotary_embedding_as_linen(
-    *,
-    min_timescale: int,
-    max_timescale: int,
-    embedding_dims: int = 0,
-    cast_as_fprop_dtype: bool = True,
-    fprop_dtype: DType = jnp.bfloat16,
-    name: str | None = None,
-):
-  """Initializes the RotaryEmbedding module and returns it as a Linen module.
-
-  Args:
-    min_timescale: Start of the geometric index. Determines the periodicity of
-      the added signal.
-    max_timescale: End of the geometric index. Determines the frequency of the
-      added signal.
-    embedding_dims: Dimension of the embedding to be generated.
-    cast_as_fprop_dtype: Whether to cast the output to the fprop dtype.
-    fprop_dtype: The dtype of the output.
-    name: Name of the Linen module.
-  """
-  return nnx_wrappers.to_linen(
-      RotaryEmbedding,
-      min_timescale=min_timescale,
-      max_timescale=max_timescale,
-      embedding_dims=embedding_dims,
-      cast_as_fprop_dtype=cast_as_fprop_dtype,
-      fprop_dtype=fprop_dtype,
-      metadata_fn=variable_to_logically_partitioned,
-      name=name,
-  )
-
-
 class RotaryEmbedding(nnx.Module):
   """Rotary Position Embedding."""
 
@@ -369,82 +289,6 @@ class RotaryEmbedding(nnx.Module):
     if self.cast_as_fprop_dtype:
       x_out = x_out.astype(self.fprop_dtype)
     return x_out
-
-
-def llama_rotary_embedding_as_linen(
-    *,
-    min_timescale: int,
-    max_timescale: int,
-    embedding_dims: int = 0,
-    cast_as_fprop_dtype: bool = True,
-    fprop_dtype: DType = jnp.bfloat16,
-    use_scale: bool = True,
-    name: str | None = None,
-):
-  """Initializes the LLaMARotaryEmbedding module and returns it as a Linen module.
-
-  Args:
-    min_timescale: Start of the geometric index. Determines the periodicity of
-      the added signal.
-    max_timescale: End of the geometric index. Determines the frequency of the
-      added signal.
-    embedding_dims: Dimension of the embedding to be generated.
-    cast_as_fprop_dtype: Whether to cast the output to the fprop dtype.
-    fprop_dtype: The dtype of the output.
-    use_scale: Whether to apply LLaMA3.1 scaling factor.
-    name: Name of the Linen module.
-  """
-  return nnx_wrappers.to_linen(
-      LLaMARotaryEmbedding,
-      min_timescale=min_timescale,
-      max_timescale=max_timescale,
-      embedding_dims=embedding_dims,
-      cast_as_fprop_dtype=cast_as_fprop_dtype,
-      fprop_dtype=fprop_dtype,
-      use_scale=use_scale,
-      metadata_fn=variable_to_logically_partitioned,
-      name=name,
-  )
-
-
-def partial_rotary_embedding_as_linen(
-    *,
-    min_timescale: int,
-    max_timescale: int,
-    mesh: Mesh,
-    embedding_dims: int = 0,
-    partial_rotary_factor: float = 0.25,
-    cast_as_fprop_dtype: bool = True,
-    fprop_dtype: DType = jnp.bfloat16,
-    shard_mode: ShardMode = ShardMode.AUTO,
-    name: str | None = None,
-):
-  """Initializes the PartialRotaryEmbedding module and returns it as a Linen module.
-
-  Args:
-    min_timescale: Start of the geometric index. Determines the periodicity of
-      the added signal.
-    max_timescale: End of the geometric index. Determines the frequency of the
-      added signal.
-    embedding_dims: Dimension of the embedding to be generated.
-    partial_rotary_factor: Ratio of dimensions to apply ROPE to.
-    cast_as_fprop_dtype: Whether to cast the output to the fprop dtype.
-    fprop_dtype: The dtype of the output.
-    name: Name of the Linen module.
-  """
-  return nnx_wrappers.to_linen(
-      PartialRotaryEmbedding,
-      min_timescale=min_timescale,
-      max_timescale=max_timescale,
-      mesh=mesh,
-      embedding_dims=embedding_dims,
-      partial_rotary_factor=partial_rotary_factor,
-      cast_as_fprop_dtype=cast_as_fprop_dtype,
-      fprop_dtype=fprop_dtype,
-      shard_mode=shard_mode,
-      metadata_fn=variable_to_logically_partitioned,
-      name=name,
-  )
 
 
 class PartialRotaryEmbedding(RotaryEmbedding):
@@ -723,59 +567,6 @@ class LLaMARotaryEmbedding(RotaryEmbedding):
     return outputs
 
 
-def yarn_rotary_embedding_as_linen(
-    *,
-    embedding_dims: int,
-    mesh: Mesh,
-    max_position_embeddings: int = 4096 * 4,
-    original_max_position_embeddings: int = 4096,
-    beta_fast: float = 32,
-    beta_slow: float = 1,
-    rope_theta: float = 10000.0,
-    rope_factor: float = 40,
-    cast_as_fprop_dtype: bool = True,
-    fprop_dtype: DType = jnp.bfloat16,
-    name: str | None = None,
-    interleave: bool = True,
-    truncate: bool = True,
-    attention_scaling: bool = False,
-    shard_mode: ShardMode = ShardMode.AUTO,
-):
-  """Initializes the YarnRotaryEmbedding module and returns it as a Linen module.
-
-  Args:
-    embedding_dims: The dimension of the embeddings.
-    max_position_embeddings: The maximum number of positions.
-    original_max_position_embeddings: The original maximum number of positions.
-    beta_fast: The fast beta parameter for YaRN.
-    beta_slow: The slow beta parameter for YaRN.
-    rope_theta: The base for the rotary frequencies.
-    rope_factor: The scaling factor for RoPE.
-    cast_as_fprop_dtype: Whether to cast the output to `fprop_dtype`.
-    fprop_dtype: The forward pass dtype.
-    name: The name of the module.
-  """
-  return nnx_wrappers.to_linen(
-      YarnRotaryEmbedding,
-      embedding_dims=embedding_dims,
-      max_position_embeddings=max_position_embeddings,
-      mesh=mesh,
-      original_max_position_embeddings=original_max_position_embeddings,
-      beta_fast=beta_fast,
-      beta_slow=beta_slow,
-      rope_theta=rope_theta,
-      rope_factor=rope_factor,
-      cast_as_fprop_dtype=cast_as_fprop_dtype,
-      fprop_dtype=fprop_dtype,
-      metadata_fn=variable_to_logically_partitioned,
-      name=name,
-      interleave=interleave,
-      truncate=truncate,
-      attention_scaling=attention_scaling,
-      shard_mode=shard_mode,
-  )
-
-
 class YarnRotaryEmbedding(nnx.Module):
   """Yarn rotary embedding.
 
@@ -998,31 +789,6 @@ class YarnRotaryEmbedding(nnx.Module):
     return output
 
 
-def positional_embedding_as_linen(
-    *,
-    embedding_dims: int,
-    max_wavelength: int = _MAX_WAVELENGTH,
-    cast_as_fprop_dtype: bool = False,
-    fprop_dtype: DType = jnp.bfloat16,
-):
-  """Initializes the PositionalEmbedding module and returns it as a Linen module.
-
-  Args:
-    embedding_dims: The dimension of the embeddings.
-    max_wavelength: The maximum wavelength for the sinusoidal positional embeddings.
-    cast_as_fprop_dtype: Whether to cast output to fprop_dtype.
-    fprop_dtype: The dtype of the output when cast_as_fprop_dtype is True.
-  """
-  return nnx_wrappers.to_linen(
-      PositionalEmbedding,
-      embedding_dims=embedding_dims,
-      max_wavelength=max_wavelength,
-      cast_as_fprop_dtype=cast_as_fprop_dtype,
-      fprop_dtype=fprop_dtype,
-      metadata_fn=variable_to_logically_partitioned,
-  )
-
-
 @dataclasses.dataclass(repr=False)
 class PositionalEmbedding(nnx.Module):
   """Sinusoidal positional embeddings supporting both uniform and per-batch positions.
@@ -1106,43 +872,6 @@ class PositionalEmbedding(nnx.Module):
       position = jnp.arange(seq_len, dtype=jnp.float32)
 
     return self._compute_embeddings(position)
-
-
-def llama_vision_rotary_embedding_as_linen(
-    *,
-    image_size: int,
-    patch_size: int,
-    hidden_size: int,
-    num_attention_heads: int,
-    rope_theta: float = 10000.0,
-    cast_as_fprop_dtype: bool = True,
-    fprop_dtype: DType = jnp.bfloat16,
-    name: str | None = None,
-):
-  """Initializes the LlamaVisionRotaryEmbedding module and returns it as a Linen module.
-
-  Args:
-    image_size: The size of the input image.
-    patch_size: The size of the image patches.
-    hidden_size: The size of the hidden dimension.
-    num_attention_heads: The number of attention heads.
-    rope_theta: The base theta value for the frequency computation.
-    cast_as_fprop_dtype: Whether to cast the output to the fprop dtype.
-    fprop_dtype: The dtype of the output.
-    name: The name of the Linen module.
-  """
-  return nnx_wrappers.to_linen(
-      LlamaVisionRotaryEmbedding,
-      image_size=image_size,
-      patch_size=patch_size,
-      hidden_size=hidden_size,
-      num_attention_heads=num_attention_heads,
-      rope_theta=rope_theta,
-      cast_as_fprop_dtype=cast_as_fprop_dtype,
-      fprop_dtype=fprop_dtype,
-      metadata_fn=variable_to_logically_partitioned,
-      name=name,
-  )
 
 
 @dataclasses.dataclass(repr=False)
@@ -1515,47 +1244,6 @@ def generate_block_coords(video_grid_thw: Array, max_patches: int, merge_size: i
   return row, col
 
 
-def qwen3omnimoe_vision_pos_embed_interpolate_as_linen(
-    *,
-    num_position_embeddings: int,
-    hidden_size: int,
-    spatial_merge_size: int,
-    dtype: DType = jnp.float32,
-    cast_as_fprop_dtype: bool = True,
-    fprop_dtype: DType = jnp.bfloat16,
-    name: str | None = None,
-):
-  """Initializes Qwen3OmniMoe bilinear position embedding interpolation as Linen module.
-
-  This implements fast bilinear interpolation of learned 2D positional embeddings
-  for dynamic input sizes. The embeddings are learned on a fixed grid and interpolated
-  to match the actual image/video dimensions.
-
-  Args:
-    num_position_embeddings: Number of position embeddings in the fixed grid (e.g., 1024 for 32x32)
-    hidden_size: Hidden dimension size
-    spatial_merge_size: Size of spatial merging blocks
-    dtype: Data type for embeddings
-    cast_as_fprop_dtype: Whether to cast the output to the fprop dtype
-    fprop_dtype: The dtype of the output
-    name: Module name
-
-  Returns:
-    A Linen module that wraps the NNX Qwen3OmniMoeVisionPosEmbedInterpolate module.
-  """
-  return nnx_wrappers.to_linen(
-      Qwen3OmniMoeVisionPosEmbedInterpolate,
-      num_position_embeddings=num_position_embeddings,
-      hidden_size=hidden_size,
-      spatial_merge_size=spatial_merge_size,
-      dtype=dtype,
-      cast_as_fprop_dtype=cast_as_fprop_dtype,
-      fprop_dtype=fprop_dtype,
-      metadata_fn=variable_to_logically_partitioned,
-      name=name,
-  )
-
-
 class Qwen3OmniMoeVisionPosEmbedInterpolate(nnx.Module):
   """Bilinear interpolation of learned 2D positional embeddings for Qwen3OmniMoe vision.
 
@@ -1901,40 +1589,6 @@ class Qwen3OmniMoeThinkerTextRotaryEmbedding(RotaryEmbedding):
       x_out = x_out.astype(self.fprop_dtype)
 
     return x_out
-
-
-def qwen3_omni_mrope_embedding_as_linen(
-    *,
-    min_timescale: int,
-    max_timescale: int,
-    embedding_dims: int = 0,
-    cast_as_fprop_dtype: bool = True,
-    fprop_dtype: DType = jnp.bfloat16,
-    mrope_section: tuple[int, int, int] | None = None,
-    name: str | None = None,
-):
-  """Initializes Qwen3OmniMoeThinkerTextRotaryEmbedding and returns it as a Linen module.
-
-  Args:
-    min_timescale: Start of the geometric index.
-    max_timescale: End of the geometric index (rope_theta).
-    embedding_dims: Dimension of the embedding (head_dim).
-    cast_as_fprop_dtype: Whether to cast output to fprop dtype.
-    fprop_dtype: The dtype of the output.
-    mrope_section: Tuple of (temporal_dim, height_dim, width_dim) for MRoPE.
-    name: Name of the Linen module.
-  """
-  return nnx_wrappers.to_linen(
-      Qwen3OmniMoeThinkerTextRotaryEmbedding,
-      min_timescale=min_timescale,
-      max_timescale=max_timescale,
-      embedding_dims=embedding_dims,
-      cast_as_fprop_dtype=cast_as_fprop_dtype,
-      fprop_dtype=fprop_dtype,
-      mrope_section=mrope_section,
-      metadata_fn=variable_to_logically_partitioned,
-      name=name,
-  )
 
 
 class DeepSeekV4RotaryEmbedding(RotaryEmbedding):
