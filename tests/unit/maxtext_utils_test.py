@@ -1443,7 +1443,12 @@ class TestGetLogicalAnnotations(unittest.TestCase):
       )
     else:
       init_state_fn = functools.partial(
-          maxtext_utils.init_initial_state, self.model, self.tx, self.config, True, self.rng
+          maxtext_utils.init_initial_state,
+          self.model,
+          self.tx,
+          self.config,
+          True,
+          self.rng,
       )
       annotations = maxtext_utils.get_logical_annotations(self.config, self.mesh, init_state_fn)
     # Result should be a pytree with PartitionSpec leaves
