@@ -171,7 +171,15 @@ class Snapshotter:
         host_target_state,
         target_device_shardings,
     )
-    jax.block_until_ready(restored_state)
+    def safe_block(x):
+      if isinstance(x, jax.Array):
+        try:
+          jax.block_until_ready(x)
+        except Exception as e:
+          _logger.warning("Ignoring block_until_ready error on leaf: %s", e)
+      return x
+
+    jax.tree.map(safe_block, restored_state)
 
     if metrics is not None:
       restored_state["metrics"] = metrics
