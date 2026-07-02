@@ -169,6 +169,21 @@ jobs:
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
       maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
 
+  tpu7x-tests:
+    name: ${{ matrix.flavor || 'TPU7X' }} tests
+    needs: [build_and_upload_maxtext_package]
+    if: needs.analyze_code_changes.outputs.run_tests == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    uses: ./.github/workflows/run_tests_coordinator.yml
+    strategy:
+      fail-fast: false
+      matrix:
+        flavor: [tpu7x-unit, tpu7x-integration, tpu7x-post-training-unit]
+    with:
+      flavor: ${{ matrix.flavor }}
+      base_image: maxtext-unit-test-tpu:py312
+      is_scheduled_run: ${{ github.event_name == 'schedule' }}
+      maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
+
   gpu-tests:
     name: ${{ matrix.flavor || 'GPU' }} tests
     needs: [build_and_upload_maxtext_package]
@@ -241,6 +256,7 @@ jobs:
 
   maxtext_tpu_pathways_integration_tests:
     needs: build_and_upload_maxtext_package
+    if: needs.analyze_code_changes.outputs.run_tests == 'true'
     uses: ./.github/workflows/run_pathways_tests.yml
     strategy:
         fail-fast: false
@@ -325,7 +341,7 @@ jobs:
 
   notify_failure:
     name: Notify failed build # creates an issue or modifies last open existing issue for failed build
-    needs: [tpu-tests, gpu-tests, cpu-tests, maxtext_jupyter_notebooks, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests]
+    needs: [tpu-tests, tpu7x-tests, gpu-tests, cpu-tests, maxtext_jupyter_notebooks, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     permissions:
@@ -339,7 +355,7 @@ jobs:
 
   investigate_failure:
     name: Investigate failed build # investigates failure of scheduled run and comments on tracking issue
-    needs: [tpu-tests, gpu-tests, cpu-tests, maxtext_jupyter_notebooks, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, notify_failure]
+    needs: [tpu-tests, tpu7x-tests, gpu-tests, cpu-tests, maxtext_jupyter_notebooks, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, notify_failure]
     if: ${{ always() && contains(needs.*.result, 'failure') && github.event_name == 'schedule' }}
     uses: ./.github/workflows/gemini_investigate.yml
     permissions:
