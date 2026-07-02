@@ -1501,32 +1501,56 @@ def setup_initial_state(
     # Partial or fully restored
     was_restored = bool(restored is not None or raw_params is not None)
 
-    if restored:
-      if isinstance(
-          checkpoint_manager,
-          (
-              emergency_checkpoint_manager.CheckpointManager,
-              emergency_replicator_checkpoint_manager.ReplicatorCheckpointManager,
-          ),
-      ):
-        state = restored
-      else:
-        # The update of data_iterator state happens in place, no need to assign explicitly
-        state = restored["items"]
+    init_state_partial = init_state_fn
+    init_state_partial.__name__ = "initialize_state"
 
-      # For NNX, convert the pure dict to nnx.State using the abstract state as template
-      if config.pure_nnx:
-        nnx.replace_by_pure_dict(unboxed_abstract_state, state)
-        state = unboxed_abstract_state
+    if config.pure_nnx:
+      # Always build the concrete init state, then overlay whatever we loaded. Anything the
+      # checkpoint didn't carry (or a params-only load didn't touch) keeps its real init
+      # value, so restore doesn't depend on knowing exactly what was saved.
+      state = jax.jit(
+          lambda: nnx.state(init_state_partial()),  # Get state only, mapping to out_sharding structure
+          in_shardings=None,
+          out_shardings=state_mesh_shardings,
+      )()
+      if restored:
+        is_emergency = isinstance(
+            checkpoint_manager,
+            (
+                emergency_checkpoint_manager.CheckpointManager,
+                emergency_replicator_checkpoint_manager.ReplicatorCheckpointManager,
+            ),
+        )
+        # data_iterator state is updated in place during restore.
+        overlay = restored if is_emergency else restored["items"]
+        # Overlay the checkpoint onto the abstract, then fill the leaves it didn't carry from the
+        # fresh init: a present leaf comes from the checkpoint, an absent one keeps its init value.
+        # The overlay was reshaped against this abstract's own layout, so it never carries a key the
+        # abstract lacks (which replace_by_pure_dict would reject).
+        nnx.replace_by_pure_dict(unboxed_abstract_state, overlay)
+        merged = jax.tree.map(
+            lambda ckpt, init: init if isinstance(ckpt, jax.ShapeDtypeStruct) else ckpt,
+            unboxed_abstract_state.to_pure_dict(),
+            state.to_pure_dict(),
+            is_leaf=lambda x: isinstance(x, jax.ShapeDtypeStruct),
+        )
+        nnx.replace_by_pure_dict(state, merged)
+      elif raw_params:
+        # params-only load: overlay the restored weights, keep init for everything else.
+        nnx.update(state.model, raw_params)
     else:
-      init_state_partial = init_state_fn
-      init_state_partial.__name__ = "initialize_state"
-      if config.pure_nnx:
-        state = jax.jit(
-            lambda: nnx.state(init_state_partial()),  # Get state only, mapping to out_sharding structure
-            in_shardings=None,
-            out_shardings=state_mesh_shardings,
-        )()
+      if restored:
+        if isinstance(
+            checkpoint_manager,
+            (
+                emergency_checkpoint_manager.CheckpointManager,
+                emergency_replicator_checkpoint_manager.ReplicatorCheckpointManager,
+            ),
+        ):
+          state = restored
+        else:
+          # The update of data_iterator state happens in place, no need to assign explicitly
+          state = restored["items"]
       else:
         # pylint: disable=not-callable
         state = jax.jit(
@@ -1534,11 +1558,7 @@ def setup_initial_state(
             in_shardings=None,
             out_shardings=state_mesh_shardings,
         )()
-      if raw_params:  # If we loaded a partial state, we need to merge it.
-        if config.pure_nnx:
-          # raw_params should have the same sharding info as in the model
-          nnx.update(state.model, raw_params)
-        else:
+        if raw_params:  # If we loaded a partial state, we need to merge it.
           sparsity_enabled = config.weight_sparsity_n and config.weight_sparsity_m
           if sparsity_enabled:
             # Sparsity-init keeps freshly initialized params for any leaf still

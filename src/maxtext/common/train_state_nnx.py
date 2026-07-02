@@ -66,7 +66,9 @@ class TrainStateNNX(nnx.Module):
 #   2. weights: model/... -> params/params/... (Linen `params` collection)
 #   3. opt_state: int-keyed dict (empty entries skipped) -> list with None for EmptyState,
 #      and mu/nu wrapped under the `params` collection
-# NNX-only rngs/dropout state is dropped (Linen never had it).
+# NNX-only state (rngs/dropout and batch stats), which Linen never has, is split
+# out by Variable type and stored under an `nnx_aux` subtree of `items` (see
+# `to_checkpoint_dict`), so it survives a resume instead of resetting.
 
 _NNX_RNG_STATE_KEYS = ("rngs", "dropout")
 
@@ -119,11 +121,10 @@ def _as_chain_index(key):
 
 
 def _opt_state_to_linen(opt_state):
-  """Reshapes the NNX optax-chain opt_state to Linen's list-with-None layout.
+  """Reshapes the NNX opt_state to Linen's on-disk layout.
 
-  NNX serializes the chain as an int-keyed dict, skipping empty entries; Linen
-  uses a list with `None` for each `EmptyState`. A single-element chain is
-  returned unwrapped to match Linen's un-chained optimizers (e.g. adam_pax).
+  A chain (optax.adamw) is an int-keyed dict -> list-with-None. An un-chained
+  optimizer (adam_pax) is flat (count/mu/nu) and stays a dict.
   """
   if not isinstance(opt_state, dict):
     return opt_state
@@ -133,7 +134,7 @@ def _opt_state_to_linen(opt_state):
   chain = [None] * (max(indices) + 1)
   for key, idx in zip(opt_state.keys(), indices):
     chain[idx] = _wrap_mu_nu_with_params(opt_state[key])
-  return chain[0] if len(chain) == 1 else chain
+  return chain
 
 
 def to_linen_checkpoint_dict(nnx_pure_dict):
@@ -163,12 +164,17 @@ def _strip_mu_nu_params(state):
 
 
 def _opt_state_from_linen(opt_state):
-  """Inverse of `_opt_state_to_linen`: Linen list-with-None -> NNX int-keyed dict."""
+  """Inverse of `_opt_state_to_linen`: Linen layout -> NNX opt_state.
+
+  A chain (optax.adamw) is a list -> int-keyed dict. An un-chained state (adam_pax:
+  `{count, mu, nu}`) stays flat -- re-wrapping it under a `0` index would not line
+  up with the model's opt_state.
+  """
   if isinstance(opt_state, list):
     return {i: _strip_mu_nu_params(e) for i, e in enumerate(opt_state) if isinstance(e, dict)}
   if not isinstance(opt_state, dict):
     return opt_state
-  return {0: _strip_mu_nu_params(opt_state)}
+  return _strip_mu_nu_params(opt_state)
 
 
 def from_linen_checkpoint_dict(linen_pure_dict):
@@ -193,3 +199,25 @@ def from_linen_checkpoint_dict(linen_pure_dict):
   if optimizer:
     result["optimizer"] = optimizer
   return result
+
+
+def to_checkpoint_dict(state):
+  """Reshapes an nnx.State into the on-disk checkpoint layout, splitting by Variable type.
+
+  Weights (nnx.Param) and the optimizer state map to the Linen
+  params/opt_state/step layout, so pure_nnx and Linen checkpoints stay
+  interchangeable. rngs/dropout (nnx.RngState) and batch stats (nnx.BatchStat) go
+  under an `nnx_aux` subtree so they survive a resume. Works on a concrete state
+  (save) or an abstract state (restore target).
+  """
+  params, rng_state, batch_stats, rest = nnx.split_state(state, nnx.Param, nnx.RngState, nnx.BatchStat, ...)
+  # `rest` holds the optimizer state (mu/nu/step aren't nnx.Param), which must be
+  # checkpointed; any other model variables it carries (caches, intermediates) are
+  # not, so only params + optimizer go to the Linen layout.
+  model = params.to_pure_dict().get("model", {})
+  optimizer = rest.to_pure_dict().get("optimizer", {})
+  linen = to_linen_checkpoint_dict({"model": model, "optimizer": optimizer})
+  aux = nnx.merge_state(rng_state, batch_stats).to_pure_dict()
+  if aux:
+    linen["nnx_aux"] = aux
+  return linen

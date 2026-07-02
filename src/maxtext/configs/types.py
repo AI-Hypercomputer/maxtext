@@ -328,6 +328,13 @@ class Checkpointing(BaseModel):
   load_checkpoint_only_once: bool = Field(False, description="If True, deep copy the reference model to the actor model.")
   async_checkpointing: bool = Field(True, description="If True, uses an asynchronous checkpointer for performance.")
   checkpoint_period: int = Field(10_000, description="The frequency (in steps) at which to save checkpoints.")
+  checkpoint_missing_param_policy: Literal["error", "warn"] = Field(
+      "warn",
+      description=(
+          "How to handle a weight present in the model but absent from the checkpoint on NNX restore. "
+          "'warn' (default) logs a warning and keeps the weight's init value; 'error' raises naming the parameter."
+      ),
+  )
   max_num_checkpoints_to_keep: int | None = Field(None, description="Maximum number of checkpoints to keep.")
   enable_single_replica_ckpt_restoring: bool = Field(
       False, description="One replica reads and broadcasts the checkpoint."

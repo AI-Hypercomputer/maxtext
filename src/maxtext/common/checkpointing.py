@@ -24,7 +24,6 @@ from etils import epath
 from flax import nnx
 from flax.training import train_state
 import jax
-import jax.numpy as jnp
 from maxtext.utils.globals import DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
 from maxtext.input_pipeline.multihost_dataloading import MultiHostDataLoadIterator
 from maxtext.input_pipeline.multihost_dataloading import RemoteIteratorWrapper
@@ -170,48 +169,85 @@ class GrainCheckpointRestore(ocp.args.CheckpointArgs):
   process_count: Optional[int] = None
 
 
-def _default_for_sds(sds):
-  """Returns a deterministic value matching `sds` shape/dtype/sharding.
+def _deep_merge(base, overlay):
+  """Recursively merges `overlay` into `base`, returning a new dict. Overlay wins on leaves."""
+  if not (isinstance(base, dict) and isinstance(overlay, dict)):
+    return overlay if overlay is not None else base
+  out = dict(base)
+  for k, v in overlay.items():
+    out[k] = _deep_merge(base.get(k), v) if k in base else v
+  return out
 
-  Used to fill NNX-only state (rngs/dropout) that the Linen on-disk layout never
-  carried. Materializes under jit with the target out_shardings so it works on
-  multi-host meshes (device_put can't place a global sharding whose devices
-  aren't
-  all addressable from this process).
+
+def _missing_param_policy(config):
+  """Reads how to handle weights present in the model but absent from the checkpoint."""
+  return getattr(config, "checkpoint_missing_param_policy", "warn") if config is not None else "warn"
+
+
+def _missing_weight_paths(want, have, path=()):
+  """Paths of abstract weights in `want` that `have` didn't materialize (absent or a ShapeDtypeStruct)."""
+  if isinstance(want, dict):
+    out = []
+    for k, v in want.items():
+      out.extend(_missing_weight_paths(v, have.get(k) if isinstance(have, dict) else None, path + (k,)))
+    return out
+  if have is None or isinstance(have, jax.ShapeDtypeStruct):
+    return [("/".join(str(p) for p in path), getattr(want, "shape", "?"), getattr(want, "dtype", "?"))]
+  return []
+
+
+def _expected_and_restored_params(abstract_nnx_state, restored_linen):
+  """The model's expected weights and the checkpoint's restored weights, as pure dicts.
+
+  Splits the abstract by Variable type (nnx.Param) so only real weights are compared --
+  rngs/dropout/batch stats live in `nnx_aux` and are restored separately.
   """
-  if not (hasattr(sds, "dtype") and hasattr(sds, "shape")):
-    return sds
-
-  def _make():
-    if "key" in str(sds.dtype):
-      base = jax.random.key(0)
-      return base if sds.shape == () else jax.random.split(base, int(np.prod(sds.shape))).reshape(sds.shape)
-    return jnp.zeros(sds.shape, dtype=sds.dtype)
-
-  sharding = getattr(sds, "sharding", None)
-  if sharding is None:
-    return _make()
-  return jax.jit(_make, out_shardings=sharding)()
+  want = nnx.split_state(abstract_nnx_state, nnx.Param, ...)[0].to_pure_dict().get("model", {})
+  have = restored_linen.get("params", {}).get("params", {})
+  return want, have
 
 
-def _populate_pure_dict_from_partial(abstract_pure, partial_concrete):
-  """Fills `abstract_pure` with values from `partial_concrete` (by path), defaulting the rest.
+def _enforce_missing_weight_policy(want, have, missing_param_policy="warn"):
+  """Flags leaves the model expects (`want`) that the restored values (`have`) didn't materialize.
 
-  Paths present in `partial_concrete` take the restored value; paths absent from
-  it
-  (NNX-only state the Linen checkpoint never had) get `_default_for_sds`.
+  `want` and `have` are pure dicts, so this works for any structure. A leaf the checkpoint
+  didn't provide (absent, or left by Orbax as an unmaterialized ShapeDtypeStruct) would keep
+  its fresh init value by the overlay. Under "error" that raises naming the path; under "warn"
+  it logs and lets the leaf keep its init value.
   """
-  if isinstance(abstract_pure, dict):
-    return {
-        k: _populate_pure_dict_from_partial(
-            v,
-            partial_concrete.get(k) if isinstance(partial_concrete, dict) else None,
-        )
-        for k, v in abstract_pure.items()
-    }
-  if partial_concrete is not None and not isinstance(partial_concrete, dict):
-    return partial_concrete
-  return _default_for_sds(abstract_pure)
+  missing = _missing_weight_paths(want, have)
+  if not missing:
+    return
+  lines = "\n".join(f"  - 'model/{p}' (model expects {s} {d})" for p, s, d in missing)
+  detail = (
+      "Checkpoint is missing model weights:\n"
+      f"{lines}\n"
+      "These would keep their fresh init value (untrained) instead of a restored weight -- a silent "
+      "accuracy loss. Verify the checkpoint matches the model architecture (emb_dim, mlp_dim, num "
+      "layers, scan_layers), or set checkpoint_missing_param_policy=warn to keep init and continue."
+  )
+  if missing_param_policy == "warn":
+    max_logging.log(f"WARNING: {detail}")
+  else:
+    raise ValueError(detail)
+
+
+def _linen_items_to_nnx(restored_linen):
+  """Reshapes a restored Linen-layout `items` dict into the NNX-layout overlay.
+
+  Combines the weights + optimizer (reshaped from the Linen layout) with the
+  rngs/dropout/batch stats from `items/nnx_aux`. Leaves the checkpoint didn't carry
+  come back as unmaterialized `ShapeDtypeStruct`; the caller overlays this onto the
+  abstract state and fills those leaves from a fresh init.
+  """
+  overlay = train_state_nnx.from_linen_checkpoint_dict(restored_linen)
+  aux = restored_linen.get("nnx_aux")
+  if aux:
+    # `overlay` (weights + optimizer) and `aux` (rngs/dropout/batch stats) are disjoint pieces of the
+    # same checkpoint, both under `model/` at different leaves. A recursive union is the simplest way
+    # to combine them -- a shallow update would drop the `model` weights for aux's rngs-only subtree.
+    overlay = _deep_merge(overlay, aux)
+  return overlay
 
 
 def _load_linen_checkpoint_into_nnx(
@@ -220,15 +256,17 @@ def _load_linen_checkpoint_into_nnx(
     checkpoint_storage_concurrent_gb,
     use_ocdbt,
     use_zarr3,
+    missing_param_policy="warn",
 ):
   """Restores a Linen-layout checkpoint into an NNX state (pure_nnx resume).
 
-  Restores against a Linen-shape abstract, reshapes back via
-  `from_linen_checkpoint_dict`, then fills NNX-only rngs/dropout with defaults.
+  Restores a Linen-shape target that includes `nnx_aux`, then reshapes back via
+  `_linen_items_to_nnx`. rngs/dropout/batch stats come from `items/nnx_aux` when
+  present, else fall back to defaults; a genuinely-missing weight is handled per
+  `missing_param_policy`.
   """
   max_logging.log(f"Restoring Linen-layout checkpoint into NNX state at {path}")
-  nnx_abstract_pure = abstract_nnx_state.to_pure_dict()
-  linen_abstract = train_state_nnx.to_linen_checkpoint_dict(nnx_abstract_pure)
+  linen_abstract = train_state_nnx.to_checkpoint_dict(abstract_nnx_state)
   ckptr = ocp.Checkpointer(
       ocp.PyTreeCheckpointHandler(
           restore_concurrent_gb=checkpoint_storage_concurrent_gb,
@@ -240,8 +278,8 @@ def _load_linen_checkpoint_into_nnx(
   restore_args = ocp.checkpoint_utils.construct_restore_args(linen_abstract)
   restored = ocp.args.PyTreeRestore(item=linen_abstract, restore_args=restore_args, partial_restore=True)
   restored = ckptr.restore(epath.Path(path), args=restored)
-  partial_nnx = train_state_nnx.from_linen_checkpoint_dict(restored)
-  return _populate_pure_dict_from_partial(nnx_abstract_pure, partial_nnx)
+  _enforce_missing_weight_policy(*_expected_and_restored_params(abstract_nnx_state, restored), missing_param_policy)
+  return _linen_items_to_nnx(restored)
 
 
 def _restore_emergency_linen_checkpoint_into_nnx(
@@ -249,11 +287,17 @@ def _restore_emergency_linen_checkpoint_into_nnx(
     step,
     abstract_nnx_state,
     map_to_pspec,
+    missing_param_policy="warn",
 ):
-  """Restores an emergency Linen-layout checkpoint into an NNX state."""
+  """Restores an emergency Linen-layout checkpoint into an NNX state.
+
+  The `nnx_aux` subtree is stored inside `items`, so an emergency checkpoint
+  carries it too; it's restored when present and otherwise filled with
+  deterministic defaults. A genuinely-missing weight is handled per
+  `missing_param_policy`.
+  """
   max_logging.log(f"Restoring emergency Linen-layout checkpoint into NNX state at step {step}")
-  nnx_abstract_pure = abstract_nnx_state.to_pure_dict()
-  linen_abstract = train_state_nnx.to_linen_checkpoint_dict(nnx_abstract_pure)
+  linen_abstract = train_state_nnx.to_checkpoint_dict(abstract_nnx_state)
   restore_args = jax.tree_util.tree_map(map_to_pspec, linen_abstract)
   checkpoint_args = ocp.args.PyTreeRestore(
       item=linen_abstract,
@@ -261,8 +305,8 @@ def _restore_emergency_linen_checkpoint_into_nnx(
       partial_restore=True,
   )
   restored = checkpoint_manager.restore(step, args=Composite(state=checkpoint_args)).state
-  partial_nnx = train_state_nnx.from_linen_checkpoint_dict(restored)
-  return _populate_pure_dict_from_partial(nnx_abstract_pure, partial_nnx)
+  _enforce_missing_weight_policy(*_expected_and_restored_params(abstract_nnx_state, restored), missing_param_policy)
+  return _linen_items_to_nnx(restored)
 
 
 def _rebuild_nnx_with_values(abstract_nnx_state, concrete_weights):
@@ -318,6 +362,7 @@ def _load_full_state_from_path(
     checkpoint_storage_concurrent_gb,
     use_ocdbt,
     use_zarr3,
+    missing_param_policy="warn",
 ):
   """Load full state from checkpoint at specified path.
 
@@ -340,6 +385,11 @@ def _load_full_state_from_path(
 
   if enable_orbax_v1:
     if source_checkpoint_layout == "orbax":
+      # pure_nnx saves in the Linen on-disk layout; reshape it back into the NNX state.
+      if isinstance(abstract_unboxed_pre_state, nnx.State):
+        return _load_linen_checkpoint_into_nnx(
+            path, abstract_unboxed_pre_state, checkpoint_storage_concurrent_gb, use_ocdbt, use_zarr3, missing_param_policy
+        )
       context = ocp_v1.Context(checkpoint_layout=ocp_v1.options.CheckpointLayout.ORBAX)
       with context:
         return ocp_v1.load_pytree(path, abstract_unboxed_pre_state)
@@ -368,6 +418,7 @@ def _load_full_state_from_path(
           checkpoint_storage_concurrent_gb,
           use_ocdbt,
           use_zarr3,
+          missing_param_policy,
       )
 
     # Original v0 logic.
@@ -378,11 +429,8 @@ def _load_full_state_from_path(
         use_ocdbt=use_ocdbt,
         use_zarr3=use_zarr3,
     )
-    # NNX checkpoints are saved as pure dicts (see maybe_save_checkpoint); the
-    # restore target must match — a boxed nnx.State wouldn't.
+    # Only Linen TrainState reaches here; nnx.State returned above.
     restore_target = abstract_unboxed_pre_state
-    if isinstance(abstract_unboxed_pre_state, nnx.State):
-      restore_target = abstract_unboxed_pre_state.to_pure_dict()
     # Provide sharding info to ensure restoration returns JAX arrays (not NumPy arrays).
     restore_args = jax.tree_util.tree_map(
         lambda x: ocp.type_handlers.ArrayRestoreArgs(sharding=x.sharding),
@@ -792,43 +840,53 @@ def load_state_if_possible(
         )
         ocp.type_handlers.register_type_handler(jax.Array, array_handler, override=True)
 
-      # pure_nnx saves in the Linen on-disk layout; reshape it back into the NNX state.
+      # pure_nnx saves in the Linen on-disk layout; restore that layout (weights +
+      # opt_state + step + nnx_aux), restoring the grain iterator in place when
+      # present, then reshape it back into the NNX state.
       # (Emergency managers use their own restore path below.)
       if isinstance(abstract_unboxed_pre_state, nnx.State) and not isinstance(
           checkpoint_manager,
           (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager),
       ):
-        checkpoint_path = str(checkpoint_manager.directory / str(step) / "items")
-        restored_nnx = _load_linen_checkpoint_into_nnx(
-            checkpoint_path,
-            abstract_unboxed_pre_state,
-            checkpoint_storage_concurrent_gb,
-            use_ocdbt,
-            use_zarr3,
+        linen_abstract = train_state_nnx.to_checkpoint_dict(abstract_unboxed_pre_state)
+        restore_args = jax.tree_util.tree_map(map_to_pspec, linen_abstract)
+        checkpoint_args = ocp.args.PyTreeRestore(item=linen_abstract, restore_args=restore_args, partial_restore=True)
+        if (
+            dataset_type == "grain"
+            and data_iterator
+            and not isinstance(data_iterator, PlaceHolderDataIterator)
+            and (checkpoint_manager.directory / str(step) / "iter").exists()
+        ):
+          restored, _ = _restore_grain_iterator(
+              checkpoint_manager, step, data_iterator, checkpoint_args, expansion_factor_real_data
+          )
+        else:
+          restored = checkpoint_manager.restore(step, args=Composite(items=checkpoint_args))
+        _enforce_missing_weight_policy(
+            *_expected_and_restored_params(abstract_unboxed_pre_state, restored["items"]),
+            _missing_param_policy(maxtext_config),
         )
+        restored_nnx = _linen_items_to_nnx(restored["items"])
         return ({"items": restored_nnx}, None)
 
       if isinstance(abstract_unboxed_pre_state, nnx.State) and isinstance(
           checkpoint_manager,
           (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager),
       ):
-        checkpoint_path = str(checkpoint_manager.directory / str(step))
         restored = _restore_emergency_linen_checkpoint_into_nnx(
             checkpoint_manager,
             step,
             abstract_unboxed_pre_state,
             map_to_pspec,
+            _missing_param_policy(maxtext_config),
         )
         return (
             restored,
             None,
         )
 
-      # Convert nnx.State to pure dict to match how checkpoints are saved for NNX
+      # Only Linen TrainState reaches here; the NNX cases returned above.
       restore_target = abstract_unboxed_pre_state
-      if isinstance(abstract_unboxed_pre_state, nnx.State):
-        restore_target = abstract_unboxed_pre_state.to_pure_dict()
-
       restore_args = jax.tree_util.tree_map(map_to_pspec, restore_target)
       checkpoint_args = ocp.args.PyTreeRestore(
           item=restore_target,
@@ -836,7 +894,6 @@ def load_state_if_possible(
           partial_restore=True,
       )
 
-      checkpoint_path = str(checkpoint_manager.directory / str(step))
       match (checkpoint_manager, dataset_type, data_iterator):
         # Case 1: Matches if 'checkpoint_manager' is an instance of either EmergencyCheckpointManager
         # or EmergencyReplicatorCheckpointManager. The '_' indicates that 'dataset_type' and
@@ -908,6 +965,7 @@ def load_state_if_possible(
         checkpoint_storage_concurrent_gb=checkpoint_storage_concurrent_gb,
         use_ocdbt=use_ocdbt,
         use_zarr3=use_zarr3,
+        missing_param_policy=_missing_param_policy(maxtext_config),
     )
     return {"items": restored_state}, None
   else:
@@ -1078,7 +1136,9 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
       step_value = state.step.get_value() if hasattr(state.step, "get_value") else state.step
       state = train_state_nnx.to_linen_checkpoint_dict({"model": state.params, "optimizer": {"step": step_value}})
     else:
-      state = train_state_nnx.to_linen_checkpoint_dict(state.to_pure_dict())
+      # rngs/dropout/batch-stats are packed under items/nnx_aux so the RNG/dropout
+      # stream continues across resumes instead of resetting to a base key.
+      state = train_state_nnx.to_checkpoint_dict(state)
 
   try:
     checkpoint_saved = save_checkpoint(checkpoint_manager, actual_step, state, config, data_iterator, force_ckpt_save)

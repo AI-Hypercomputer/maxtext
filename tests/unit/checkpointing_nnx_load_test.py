@@ -36,65 +36,70 @@ class _Model(nnx.Module):
     self.linear = nnx.Linear(2, 1, rngs=rngs)
 
 
+class _ModelDropout(nnx.Module):
+  """Linear + dropout, so the state carries rngs that split out into nnx_aux."""
+
+  def __init__(self, rngs: nnx.Rngs):
+    self.linear = nnx.Linear(2, 1, rngs=rngs)
+    self.dropout = nnx.Dropout(rate=0.5, rngs=rngs)
+
+  def __call__(self, x, deterministic=False):
+    return self.dropout(self.linear(x), deterministic=deterministic)
+
+
 def _abstract_nnx_state():
   """Build an nnx.State from a TrainStateNNX — same shape that pre_train passes in."""
   model = _Model(rngs=nnx.Rngs(0))
-  optimizer = nnx.Optimizer(model, optax.adam(1e-3), wrt=nnx.Param)
+  optimizer = nnx.Optimizer(model, optax.scale_by_adam(), wrt=nnx.Param)
   return nnx.state(train_state_nnx.TrainStateNNX(model, optimizer))
+
+
+def _dropout_state(seed):
+  """A concrete TrainStateNNX state for `_ModelDropout` with its dropout stream advanced."""
+  model = _ModelDropout(nnx.Rngs(seed))
+  state = train_state_nnx.TrainStateNNX(model, nnx.Optimizer(model, optax.scale_by_adam(), wrt=nnx.Param))
+  grads = nnx.grad(lambda m: jnp.mean(m(jnp.ones((4, 2)), deterministic=False) ** 2))(state.model)
+  state.apply_gradients(grads)  # advances step + dropout rng count off the base 0
+  return nnx.state(state)
+
+
+def _abstract_dropout_state():
+  def make():
+    model = _ModelDropout(nnx.Rngs(9))
+    return nnx.state(train_state_nnx.TrainStateNNX(model, nnx.Optimizer(model, optax.scale_by_adam(), wrt=nnx.Param)))
+
+  return nnx.eval_shape(make)
 
 
 class TestLoadStateIfPossibleNNX(unittest.TestCase):
   """Cover the NNX branches in load_state_if_possible."""
 
-  def test_emergency_linen_restore_converts_back_to_nnx(self):
-    kernel_abstract = jax.ShapeDtypeStruct((2, 1), jnp.float32)
-    step_abstract = jax.ShapeDtypeStruct((), jnp.uint32)
-    abstract_nnx_pure = {
-        "model": {
-            "linear": {"kernel": kernel_abstract},
-            "dropout": {"rngs": {"params": {"count": step_abstract}}},
-        },
-        "optimizer": {"step": step_abstract},
-    }
-    abstract_nnx_state = mock.Mock()
-    abstract_nnx_state.to_pure_dict.return_value = abstract_nnx_pure
-    restored_linen = {
-        "params": {"params": {"linear": {"kernel": jnp.ones((2, 1))}}},
-        "step": jnp.asarray(7, dtype=jnp.int32),
-    }
-    checkpoint_manager = mock.Mock()
-    checkpoint_manager.restore.return_value = mock.Mock(state=restored_linen)
+  def test_emergency_restore_recovers_nnx_aux(self):
+    """Emergency restore reshapes back to NNX and recovers rngs/dropout from items/nnx_aux."""
+    concrete = _dropout_state(0)
+    orig_count = int(concrete.to_pure_dict()["model"]["dropout"]["rngs"]["count"])
+    self.assertGreater(orig_count, 0)
+    # The single state tree an emergency manager writes (weights + opt_state + step + nnx_aux).
+    saved_linen = train_state_nnx.to_checkpoint_dict(concrete)
+    self.assertIn("nnx_aux", saved_linen)
 
+    checkpoint_manager = mock.Mock()
+    checkpoint_manager.restore.return_value = mock.Mock(state=saved_linen)
     restored = checkpointing._restore_emergency_linen_checkpoint_into_nnx(  # pylint: disable=protected-access
         checkpoint_manager,
         14,
-        abstract_nnx_state,
-        lambda leaf: ocp.type_handlers.ArrayRestoreArgs(
-            global_shape=leaf.shape,
-            dtype=leaf.dtype,
-        ),
+        _abstract_dropout_state(),
+        lambda leaf: ocp.type_handlers.ArrayRestoreArgs(global_shape=leaf.shape, dtype=leaf.dtype),
     )
 
-    checkpoint_manager.restore.assert_called_once()
-    restore_args = checkpoint_manager.restore.call_args.kwargs["args"].state
-    self.assertEqual(
-        set(restore_args.item.keys()),
-        {"params", "step"},
-    )
-    self.assertNotIn("model", restore_args.item)
-    self.assertNotIn("optimizer", restore_args.item)
-    self.assertTrue(restore_args.partial_restore)
+    # The restore target the manager was handed carries nnx_aux, so emergency checkpoints persist it.
+    restore_target = checkpoint_manager.restore.call_args.kwargs["args"].state.item
+    self.assertIn("nnx_aux", restore_target)
+    # Reshaped back to NNX, with the dropout stream recovered (not reset to 0).
     self.assertIn("model", restored)
     self.assertIn("optimizer", restored)
     self.assertNotIn("params", restored)
-    self.assertNotIn("opt_state", restored)
-    self.assertTrue(bool(jnp.array_equal(restored["model"]["linear"]["kernel"], jnp.ones((2, 1)))))
-    self.assertEqual(restored["optimizer"]["step"].dtype, jnp.uint32)
-    self.assertEqual(int(restored["optimizer"]["step"]), 7)
-    self.assertEqual(
-        restored["model"]["dropout"]["rngs"]["params"]["count"].shape,
-        (),
-    )
+    self.assertEqual(int(restored["model"]["dropout"]["rngs"]["count"]), orig_count)
 
   def test_load_parameters_from_path_splits_nnx_state_for_param_view(self):
     """When abstract_unboxed_pre_state is an nnx.State, the function must call
@@ -183,6 +188,199 @@ class TestLoadParamsIntoNNX(unittest.TestCase):
     pure = restored.to_pure_dict()
     self.assertTrue(jnp.array_equal(pure["linear"]["kernel"], weights["linear"]["kernel"]))
     self.assertTrue(jnp.array_equal(pure["linear"]["bias"], weights["linear"]["bias"]))
+
+
+class TestToCheckpointDict(unittest.TestCase):
+  """train_state_nnx.to_checkpoint_dict splits the NNX state by Variable type."""
+
+  def test_splits_params_optimizer_and_nnx_aux(self):
+    model = _ModelDropout(nnx.Rngs(0))
+    state = nnx.state(train_state_nnx.TrainStateNNX(model, nnx.Optimizer(model, optax.scale_by_adam(), wrt=nnx.Param)))
+    ckpt = train_state_nnx.to_checkpoint_dict(state)
+    # Learnable weights land in the Linen params collection; optimizer + step alongside.
+    self.assertEqual(set(ckpt["params"]["params"].keys()), {"linear"})
+    self.assertIn("opt_state", ckpt)
+    self.assertIn("step", ckpt)
+    # rngs/dropout land in nnx_aux, not in params.
+    self.assertIn("dropout", ckpt["nnx_aux"]["model"])
+    self.assertNotIn("dropout", ckpt["params"]["params"])
+
+  def test_batch_stats_split_out_from_weights(self):
+    """BatchNorm scale/bias are weights; its running mean/var are batch stats -> nnx_aux."""
+
+    class _BN(nnx.Module):
+
+      def __init__(self, rngs):
+        self.bn = nnx.BatchNorm(2, rngs=rngs)
+
+    state = nnx.state(train_state_nnx.TrainStateNNX(_BN(nnx.Rngs(0)), None))
+    ckpt = train_state_nnx.to_checkpoint_dict(state)
+    self.assertEqual(set(ckpt["params"]["params"]["bn"].keys()), {"scale", "bias"})
+    self.assertEqual(set(ckpt["nnx_aux"]["model"]["bn"].keys()), {"mean", "var"})
+
+  def test_flat_opt_state_round_trips_without_chain_wrapper(self):
+    """A flat (un-chained) opt_state survives to_linen -> from_linen unchanged.
+
+    Regression guard: from_linen used to re-wrap a flat opt_state under a `0` chain index,
+    which then failed to overlay onto the model's flat opt_state on resume.
+    """
+    model = _Model(nnx.Rngs(0))
+    pure = nnx.state(
+        train_state_nnx.TrainStateNNX(model, nnx.Optimizer(model, optax.scale_by_adam(), wrt=nnx.Param))
+    ).to_pure_dict()
+    linen = train_state_nnx.to_linen_checkpoint_dict(pure)
+    back = train_state_nnx.from_linen_checkpoint_dict(linen)
+    self.assertEqual(set(back["optimizer"]["opt_state"].keys()), set(pure["optimizer"]["opt_state"].keys()))
+    self.assertIn("count", back["optimizer"]["opt_state"])  # flat, not nested under a `0` index
+
+  def test_chained_opt_state_restores_onto_model(self):
+    """A chained optimizer's (optax.adamw) opt_state must round-trip back onto the state.
+
+    Regression guard: to_linen used to flatten a single-entry chain `{0: ...}`, so the overlay
+    didn't line up with the model's int-keyed opt_state and adamw restore crashed. Other tests use
+    scale_by_adam (flat), which never hits a chain.
+    """
+
+    def make():
+      model = _Model(nnx.Rngs(0))
+      return nnx.state(train_state_nnx.TrainStateNNX(model, nnx.Optimizer(model, optax.adamw(1e-3), wrt=nnx.Param)))
+
+    saved = make()
+    self.assertIn(0, saved.to_pure_dict()["optimizer"]["opt_state"])  # chained -> int-keyed, not flat
+    overlay = train_state_nnx.from_linen_checkpoint_dict(train_state_nnx.to_checkpoint_dict(saved))
+    nnx.replace_by_pure_dict(make(), overlay)  # raised before the fix
+
+  def test_cache_and_intermediates_excluded(self):
+    """Non-weight model variables (caches/intermediates) are not checkpointed."""
+
+    class _Cached(nnx.Module):
+
+      def __init__(self, rngs):
+        self.linear = nnx.Linear(2, 1, rngs=rngs)
+        self.cache = nnx.Cache(jnp.zeros((2,)))
+
+    state = nnx.state(train_state_nnx.TrainStateNNX(_Cached(nnx.Rngs(0)), None))
+    ckpt = train_state_nnx.to_checkpoint_dict(state)
+    self.assertEqual(set(ckpt["params"]["params"].keys()), {"linear"})  # cache dropped
+    self.assertNotIn("nnx_aux", ckpt)
+
+  def test_no_nnx_aux_when_state_has_none(self):
+    state = _abstract_nnx_state()  # plain linear, no rngs/batch stats
+    self.assertNotIn("nnx_aux", train_state_nnx.to_checkpoint_dict(state))
+
+
+class TestDeepMerge(unittest.TestCase):
+  """checkpointing._deep_merge overlays leaves onto a base dict."""
+
+  def test_overlay_wins_and_bases_survive(self):
+    base = {"model": {"linear": {"kernel": 1}, "rngs": {"count": 0}}}
+    overlay = {"model": {"rngs": {"count": 99}}}
+    merged = checkpointing._deep_merge(base, overlay)  # pylint: disable=protected-access
+    self.assertEqual(merged["model"]["linear"]["kernel"], 1)  # untouched
+    self.assertEqual(merged["model"]["rngs"]["count"], 99)  # overlaid
+
+  def test_does_not_mutate_inputs(self):
+    base = {"a": {"b": 1}}
+    checkpointing._deep_merge(base, {"a": {"c": 2}})  # pylint: disable=protected-access
+    self.assertEqual(base, {"a": {"b": 1}})
+
+  def test_non_dict_leaves_prefer_overlay(self):
+    """Leaf vs leaf: overlay wins, but a None overlay keeps the base."""
+    self.assertEqual(checkpointing._deep_merge(1, 2), 2)  # pylint: disable=protected-access
+    self.assertEqual(checkpointing._deep_merge(1, None), 1)  # pylint: disable=protected-access
+
+  def test_adds_keys_absent_from_base(self):
+    merged = checkpointing._deep_merge({"a": 1}, {"b": 2})  # pylint: disable=protected-access
+    self.assertEqual(merged, {"a": 1, "b": 2})
+
+
+class TestLinenItemsToNnx(unittest.TestCase):
+  """checkpointing._linen_items_to_nnx reshapes restored items into the NNX-layout overlay."""
+
+  def test_materialized_aux_is_kept(self):
+    restored = {
+        "params": {"params": {"linear": {"kernel": jnp.ones((2, 1))}}},
+        "step": jnp.asarray(3, jnp.int32),
+        "nnx_aux": {"model": {"dropout": {"rngs": {"count": jnp.asarray(42, jnp.uint32)}}}},
+    }
+    out = checkpointing._linen_items_to_nnx(restored)  # pylint: disable=protected-access
+    self.assertEqual(int(out["model"]["dropout"]["rngs"]["count"]), 42)  # from the checkpoint
+    self.assertTrue(jnp.array_equal(out["model"]["linear"]["kernel"], jnp.ones((2, 1))))
+
+  def test_unmaterialized_leaf_kept_as_placeholder(self):
+    """A leaf the checkpoint didn't carry stays a ShapeDtypeStruct; the caller fills it from init."""
+    restored = {
+        "params": {"params": {"linear": {"kernel": jnp.ones((2, 1))}}},
+        "step": jnp.asarray(3, jnp.int32),
+        "nnx_aux": {"model": {"dropout": {"rngs": {"count": jax.ShapeDtypeStruct((), jnp.uint32)}}}},
+    }
+    out = checkpointing._linen_items_to_nnx(restored)  # pylint: disable=protected-access
+    self.assertIsInstance(out["model"]["dropout"]["rngs"]["count"], jax.ShapeDtypeStruct)  # placeholder, not defaulted
+    self.assertTrue(jnp.array_equal(out["model"]["linear"]["kernel"], jnp.ones((2, 1))))
+
+  def test_no_aux_key_omits_rng(self):
+    """No nnx_aux on disk -> the overlay simply has no rng subtree (init supplies it later)."""
+    restored = {
+        "params": {"params": {"linear": {"kernel": jnp.ones((2, 1))}}},
+        "step": jnp.asarray(3, jnp.int32),
+    }
+    out = checkpointing._linen_items_to_nnx(restored)  # pylint: disable=protected-access
+    self.assertNotIn("dropout", out["model"])
+
+
+class TestMissingWeightPolicy(unittest.TestCase):
+  """The Param-type weight check errors/warns on weights the checkpoint didn't carry."""
+
+  def _want(self):
+    """The weights the model expects, as a pure dict (what `_expected_and_restored_params` returns)."""
+    return {
+        "linear": {"kernel": jax.ShapeDtypeStruct((2, 1), jnp.float32), "bias": jax.ShapeDtypeStruct((1,), jnp.float32)}
+    }
+
+  def _have(self, with_bias=True):
+    """The weights the checkpoint carried, as a pure dict; drop the bias to simulate a missing weight."""
+    have = {"linear": {"kernel": jnp.ones((2, 1))}}
+    if with_bias:
+      have["linear"]["bias"] = jnp.ones((1,))
+    return have
+
+  def test_all_weights_present_passes(self):
+    checkpointing._enforce_missing_weight_policy(self._want(), self._have(), "error")  # pylint: disable=protected-access
+
+  def test_missing_weight_raises_naming_path(self):
+    with self.assertRaises(ValueError) as ctx:
+      checkpointing._enforce_missing_weight_policy(self._want(), self._have(with_bias=False), "error")  # pylint: disable=protected-access
+    self.assertIn("model/linear/bias", str(ctx.exception))
+    self.assertIn("missing model weights", str(ctx.exception))
+
+  def test_surviving_shape_dtype_struct_counts_as_missing(self):
+    have = self._have()
+    have["linear"]["bias"] = jax.ShapeDtypeStruct((1,), jnp.float32)
+    with self.assertRaises(ValueError) as ctx:
+      checkpointing._enforce_missing_weight_policy(self._want(), have, "error")  # pylint: disable=protected-access
+    self.assertIn("model/linear/bias", str(ctx.exception))
+
+  def test_warn_logs_and_returns(self):
+    with mock.patch.object(checkpointing.max_logging, "log") as logmock:
+      checkpointing._enforce_missing_weight_policy(self._want(), self._have(with_bias=False), "warn")  # pylint: disable=protected-access
+    self.assertTrue(any("missing model weights" in str(c) for c in logmock.call_args_list))
+
+  def test_missing_weight_paths_finds_absent_and_sds(self):
+    want = {"a": {"k": jax.ShapeDtypeStruct((2,), jnp.float32), "b": jax.ShapeDtypeStruct((1,), jnp.float32)}}
+    have = {"a": {"k": jnp.ones((2,))}}  # b absent
+    missing = checkpointing._missing_weight_paths(want, have)  # pylint: disable=protected-access
+    self.assertEqual([p for p, _, _ in missing], ["a/b"])
+
+  def test_expected_and_restored_params_splits_by_param_type(self):
+    """Only nnx.Param weights land in `want`; rngs/dropout (nnx.RngState) are excluded from the check."""
+    model = _ModelDropout(nnx.Rngs(0))
+    abstract = nnx.state(train_state_nnx.TrainStateNNX(model, nnx.Optimizer(model, optax.adam(1e-3), wrt=nnx.Param)))
+    restored = {"params": {"params": {"linear": {"kernel": jnp.ones((2, 1)), "bias": jnp.ones((1,))}}}}
+    want, have = checkpointing._expected_and_restored_params(abstract, restored)  # pylint: disable=protected-access
+    self.assertEqual(set(want.keys()), {"linear"})  # only the Param weights, no dropout rng
+    self.assertNotIn("dropout", want)
+    self.assertEqual(have, restored["params"]["params"])
+    checkpointing._enforce_missing_weight_policy(want, have, "error")  # pylint: disable=protected-access
 
 
 if __name__ == "__main__":

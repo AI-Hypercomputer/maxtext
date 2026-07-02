@@ -56,6 +56,9 @@ enable_checkpointing: true
 save_checkpoint_on_completion: true
 async_checkpointing: true
 checkpoint_period: 10_000
+# On NNX restore, how to handle a weight present in the model but absent from the checkpoint:
+# "warn" (default) logs a warning and keeps the weight's init value; "error" raises naming the parameter.
+checkpoint_missing_param_policy: "warn"
 max_num_checkpoints_to_keep: None
 enable_continuous_checkpointing: false
 # enables one replica to read the ckpt then broadcast to the rest
