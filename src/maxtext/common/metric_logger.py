@@ -158,7 +158,15 @@ class MetricLogger:
     """Handles training-specific metric logging."""
     # Skip logging if in profiler activation/deactivation steps
     # TODO(b/456828037): Switch to subprocess profiling to avoid timing artifacts at boundary steps.
-    scalars = metrics["scalar"]
+    def _safe_get(val):
+      if isinstance(val, jax.Array):
+        try:
+          return jax.device_get(val)
+        except Exception:
+          return 0
+      return val
+
+    scalars = jax.tree.map(_safe_get, metrics["scalar"])
     loss = scalars["learning/loss"]
     is_rampup = step < self.config.rampup_end_step
     is_metric_hidden_step = self.config.hide_profiler_step_metric and self._is_profiler_boundary_step(step)
