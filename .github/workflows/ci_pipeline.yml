@@ -210,8 +210,8 @@ jobs:
         name: Set Pathways Worker Parameters
         run: |
           # TPU worker constants
-          TPU_UNIT_TOTAL_WORKERS=2
-          TPU_UNIT_WORKER_GROUPS='[1, 2]'
+          TPU_UNIT_TOTAL_WORKERS=3
+          TPU_UNIT_WORKER_GROUPS='[1, 2, 3]'
 
           echo "total_workers=${TPU_UNIT_TOTAL_WORKERS}" >> "$GITHUB_OUTPUT"
           echo "worker_groups=${TPU_UNIT_WORKER_GROUPS}" >> "$GITHUB_OUTPUT"
