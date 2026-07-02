@@ -356,8 +356,7 @@ jobs:
     name: Track Test Performance
     needs: [tpu-tests, gpu-tests, cpu-tests]
     if: ${{ always() && !cancelled() }}
-    runs-on: linux-x86-ct6e-180-4tpu
-    container: google/cloud-sdk:524.0.0
+    runs-on: ubuntu-latest
     permissions:
       contents: write
       id-token: write
@@ -382,38 +381,24 @@ jobs:
           echo "Parsed Benchmark Results:"
           cat benchmark-results.json
 
-      - name: Fetch Baseline Benchmark Data from GCS
-        run: |
-          mkdir -p ./cache
-          gcloud storage cp gs://maxtext-test-assets/benchmark-data.json ./cache/benchmark-data.json || true
-
-      - name: Track Test Durations (Main)
-        if: github.ref == 'refs/heads/main'
+      - name: Track Test Durations
         uses: benchmark-action/github-action-benchmark@v1
         with:
           name: MaxText Test Execution Times
           tool: 'customSmallerIsBetter'
           output-file-path: benchmark-results.json
-          external-data-json-path: ./cache/benchmark-data.json
           github-token: ${{ secrets.GITHUB_TOKEN }}
           alert-threshold: '150%'
           comment-on-alert: true
-          fail-on-alert: false
+          fail-on-alert: ${{ github.ref != 'refs/heads/main' }}
+          auto-push: ${{ github.ref == 'refs/heads/main' }}
+          gh-pages-branch: 'gh-pages'
+          benchmark-data-dir-path: 'dev/bench'
 
-      - name: Verify Test Durations (PR)
-        if: github.ref != 'refs/heads/main'
-        uses: benchmark-action/github-action-benchmark@v1
+      - name: Upload Benchmark HTML for Inspection
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          name: MaxText Test Execution Times
-          tool: 'customSmallerIsBetter'
-          output-file-path: benchmark-results.json
-          external-data-json-path: ./cache/benchmark-data.json
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          alert-threshold: '150%'
-          comment-on-alert: true
-          fail-on-alert: true
-
-      - name: Upload Updated Baseline to GCS
-        if: github.ref == 'refs/heads/main'
-        run: |
-          gcloud storage cp ./cache/benchmark-data.json gs://maxtext-test-assets/benchmark-data.json
+          name: benchmark-interactive-chart
+          path: dev/bench
+          if-no-files-found: ignore
