@@ -1038,6 +1038,8 @@ def recover(
       metric_logger_instance.recover_metrics(restored_dict.get("metrics"))
 
   # Update jax_device_state with the newly built JAX objects
+  if not isinstance(model, nn.Module) and isinstance(restored_state, train_state_nnx.TrainStateNNX):
+    _, restored_state = nnx.split(restored_state)
   jax_device_state["state"] = restored_state
   jax_device_state["init_rng"] = init_rng
   jax_device_state["mesh"] = mesh
