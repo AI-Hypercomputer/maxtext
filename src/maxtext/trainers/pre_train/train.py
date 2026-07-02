@@ -958,27 +958,7 @@ def recover(
   # 4. Restore TrainState from host snapshot or active state
   if active_state is not None:
     _logger.info("[*] Resharding active state directly (device-to-device)...")
-    if isinstance(state, train_state_nnx.TrainStateNNX):
-      model_state = nnx.state(state.model)
-      opt_state = nnx.state(state.optimizer)
-      abstract_dict = {
-          "model": nnx.to_pure_dict(model_state),
-          "optimizer": nnx.to_pure_dict(opt_state),
-      }
-      act_model_state = nnx.state(active_state.model)
-      act_opt_state = nnx.state(active_state.optimizer)
-      active_dict = {
-          "model": nnx.to_pure_dict(act_model_state),
-          "optimizer": nnx.to_pure_dict(act_opt_state),
-      }
-      restored_dict = jax.device_put(
-          active_dict, jax.tree.map(lambda x: x.sharding, abstract_dict)
-      )
-      nnx.update(state.model, restored_dict["model"])
-      nnx.update(state.optimizer, restored_dict["optimizer"])
-      restored_state = state
-      restored_step = int(state.optimizer.step.value)
-    elif isinstance(model, nn.Module):
+    if isinstance(model, nn.Module):
       abstract_dict = {
           "step": state.step,
           "params": state.params,
@@ -999,14 +979,27 @@ def recover(
       )
       restored_step = int(restored_state.step)
     else:
-      abstract_dict = {"nnx_state": nnx.to_pure_dict(state)}
-      active_dict = {"nnx_state": nnx.to_pure_dict(active_state)}
+      model_state = nnx.state(state.model) if hasattr(state, "model") else state
+      opt_state = nnx.state(state.optimizer) if hasattr(state, "optimizer") else None
+      abstract_dict = {"model": nnx.to_pure_dict(model_state)}
+      if opt_state is not None:
+        abstract_dict["optimizer"] = nnx.to_pure_dict(opt_state)
+
+      act_model_state = nnx.state(active_state.model) if hasattr(active_state, "model") else active_state
+      act_opt_state = nnx.state(active_state.optimizer) if hasattr(active_state, "optimizer") else None
+      active_dict = {"model": nnx.to_pure_dict(act_model_state)}
+      if act_opt_state is not None:
+        active_dict["optimizer"] = nnx.to_pure_dict(act_opt_state)
+
       restored_dict = jax.device_put(
           active_dict, jax.tree.map(lambda x: x.sharding, abstract_dict)
       )
-      nnx.update(state, restored_dict["nnx_state"])
+      if hasattr(state, "model") and "model" in restored_dict:
+        nnx.update(state.model, restored_dict["model"])
+      if hasattr(state, "optimizer") and "optimizer" in restored_dict:
+        nnx.update(state.optimizer, restored_dict["optimizer"])
       restored_state = state
-      restored_step = int(restored_dict["nnx_state"]["optimizer"]["step"])
+      restored_step = int(state.optimizer.step.value) if hasattr(state, "optimizer") and hasattr(state.optimizer, "step") else 0
     _logger.info(
         "Resharding complete. Retrying. Slices used: %s",
         elastic_manager.active_slice_indices,
@@ -1015,19 +1008,7 @@ def recover(
     if snapshot_mgr.latest is None:
       raise RuntimeError("No snapshots available to restore from. Cannot recover.")
     restored_step = snapshot_mgr.latest.step
-    if isinstance(state, train_state_nnx.TrainStateNNX):
-      model_state = nnx.state(state.model)
-      opt_state = nnx.state(state.optimizer)
-      abstract_dict = {
-          "model": nnx.to_pure_dict(model_state),
-          "optimizer": nnx.to_pure_dict(opt_state),
-      }
-      restored_dict = snapshot_mgr.load_pytree(abstract_dict)
-      nnx.update(state.model, restored_dict["model"])
-      nnx.update(state.optimizer, restored_dict["optimizer"])
-      restored_state = state
-      restored_step = int(state.optimizer.step.value)
-    elif isinstance(model, nn.Module):
+    if isinstance(model, nn.Module):
       abstract_dict = {
           "step": state.step,
           "params": state.params,
@@ -1040,11 +1021,18 @@ def recover(
           opt_state=restored_dict["opt_state"],
       )
     else:
-      abstract_dict = {"nnx_state": nnx.to_pure_dict(state)}
+      model_state = nnx.state(state.model) if hasattr(state, "model") else state
+      opt_state = nnx.state(state.optimizer) if hasattr(state, "optimizer") else None
+      abstract_dict = {"model": nnx.to_pure_dict(model_state)}
+      if opt_state is not None:
+        abstract_dict["optimizer"] = nnx.to_pure_dict(opt_state)
       restored_dict = snapshot_mgr.load_pytree(abstract_dict)
-      nnx.update(state, restored_dict["nnx_state"])
+      if hasattr(state, "model") and "model" in restored_dict:
+        nnx.update(state.model, restored_dict["model"])
+      if hasattr(state, "optimizer") and "optimizer" in restored_dict:
+        nnx.update(state.optimizer, restored_dict["optimizer"])
       restored_state = state
-      restored_step = int(restored_dict["nnx_state"]["optimizer"]["step"])
+      restored_step = int(state.optimizer.step.value) if hasattr(state, "optimizer") and hasattr(state.optimizer, "step") else restored_step
     if metric_logger_instance is not None:
       metric_logger_instance.recover_metrics(restored_dict.get("metrics"))
 
