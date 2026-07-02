@@ -455,7 +455,7 @@ def main(config, test_args):  # pylint: disable=W0621
           qwen_tokens.vision_start,
           qwen_tokens.vision_end,
           qwen_tokens.image_pad,
-          qwen_tokens.video_pad
+          qwen_tokens.video_pad,
         ]
 
       if ignore_token_ids:
