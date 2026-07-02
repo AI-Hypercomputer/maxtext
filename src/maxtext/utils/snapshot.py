@@ -104,6 +104,9 @@ class Snapshotter:
     def get_active_pytree(x):
       if not isinstance(x, jax.Array) or not hasattr(x.sharding, "mesh"):
         return x
+      if hasattr(x.sharding, "memory_kind") and x.sharding.memory_kind == "pinned_host":
+        dev_sharding = x.sharding.with_memory_kind("device")
+        x = jax.device_put(x, dev_sharding)
       mesh_axis_name = x.sharding.mesh.axis_names[self.replica_axis_index]
       all_replicas = split_by_mesh_axis.split_by_mesh_axis(
           x,
