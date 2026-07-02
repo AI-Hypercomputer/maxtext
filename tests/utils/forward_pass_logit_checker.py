@@ -293,6 +293,7 @@ def get_data(golden_data_point, config):
   # For Qwen3-VL model, compute RoPE embeddings to generate 3D position IDs
   if model_prefix in ["qwen3"] and config.use_mrope:
     from maxtext.multimodal import processor_qwen3_omni  # pylint: disable=import-outside-toplevel
+
     image_grid_thw = np.atleast_2d(golden_data_point["image_grid_thw"]) if "image_grid_thw" in golden_data_point else None
     video_grid_thw = np.atleast_2d(golden_data_point["video_grid_thw"]) if "video_grid_thw" in golden_data_point else None
 
@@ -448,8 +449,14 @@ def main(config, test_args):  # pylint: disable=W0621
       ignore_token_ids = []
       if "qwen3" in config.model_name.lower():
         from maxtext.multimodal.processor_qwen3_omni import QwenTokens  # pylint: disable=import-outside-toplevel
+
         qwen_tokens = QwenTokens(config)
-        ignore_token_ids = [qwen_tokens.vision_start, qwen_tokens.vision_end, qwen_tokens.image_pad, qwen_tokens.video_pad]
+        ignore_token_ids = [
+          qwen_tokens.vision_start, 
+          qwen_tokens.vision_end, 
+          qwen_tokens.image_pad, 
+          qwen_tokens.video_pad
+        ]
 
       if ignore_token_ids:
         slice_ids = ids[0, start_index:token_size]
@@ -520,6 +527,7 @@ def main(config, test_args):  # pylint: disable=W0621
 
     if "qwen3-vl" in config.model_name.lower():
       from transformers import Qwen3VLForConditionalGeneration  # pylint: disable=import-outside-toplevel
+
       model_class = Qwen3VLForConditionalGeneration
     else:
       model_class = AutoModelForCausalLM

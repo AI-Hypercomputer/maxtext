@@ -82,6 +82,7 @@ def save_golden_logits(
     model_class = Llama4ForConditionalGeneration
   elif "qwen3-vl" in model_id.lower():
     from transformers import Qwen3VLForConditionalGeneration  # pylint: disable=import-outside-toplevel
+
     model_class = Qwen3VLForConditionalGeneration
   else:
     from transformers import AutoModelForCausalLM  # pylint: disable=import-outside-toplevel
