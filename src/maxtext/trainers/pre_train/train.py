@@ -806,6 +806,7 @@ def recover(
   if metric_logger_instance is not None:
     metric_logger_instance.recover_metrics()
 
+  recorder = python_vars.get("recorder")
   elastic_manager = python_vars.get("elastic_manager")
   snapshot_mgr = python_vars.get("snapshot") or python_vars.get("snapshot_mgr") or python_vars.get("snapshot_manager")
   if snapshot_mgr is None and config.elastic_enabled:
