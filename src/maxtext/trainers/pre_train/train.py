@@ -709,6 +709,7 @@ def training_loop_iteration(
       with jax.set_mesh(mesh), nn_partitioning.axis_rules(logical_axis_rules):
         if shard_optimizer_over_data and isinstance(model, nn.Module):
           state = sharding.maybe_shard_with_name(state, state_mesh_shardings, shard_mode)
+        state, metrics = p_train_step(state, example_batch, *step_rng_args)
         replicated_sharding = jax.sharding.NamedSharding(
             mesh, jax.sharding.PartitionSpec()
         ).with_memory_kind("pinned_host")
