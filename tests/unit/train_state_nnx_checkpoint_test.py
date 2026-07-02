@@ -495,6 +495,70 @@ class TestMaybeSaveCheckpointStepAlignment(unittest.TestCase):
     # Assert that save_checkpoint WAS called!
     save_checkpoint_mock.assert_called_once()
 
+  def test_maybe_save_checkpoint_raises_on_preemption(self):
+    """Verify maybe_save_checkpoint raises StopTraining on preemption."""
+    state = self._build_nnx_state(self.N_STEPS)
+    config = SimpleNamespace(
+        pure_nnx=True,
+        checkpoint_period=1,
+        async_checkpointing=False,
+        enable_diloco=False,
+    )
+    mgr = mock.MagicMock()
+    mgr.reached_preemption.return_value = True
+    mgr.latest_step.return_value = None
+
+    save_checkpoint_mock = mock.MagicMock()
+    save_checkpoint_mock.return_value = False
+
+    with mock.patch.object(checkpointing, "save_checkpoint", save_checkpoint_mock):
+      with self.assertRaises(checkpointing.exceptions.StopTraining) as context:
+        checkpointing.maybe_save_checkpoint(mgr, state, config, data_iterator=None, step=None)
+
+      self.assertEqual(str(context.exception), "Job received termination signal (SIGTERM).")
+
+  def test_maybe_save_checkpoint_propagates_jax_runtime_error_elastic_disabled(self):
+    """Verify maybe_save_checkpoint propagates JaxRuntimeError when elastic is disabled."""
+    state = self._build_nnx_state(self.N_STEPS)
+    config = SimpleNamespace(
+        pure_nnx=True,
+        checkpoint_period=1,
+        async_checkpointing=False,
+        elastic_enabled=False,
+        enable_diloco=False,
+    )
+    mgr = mock.MagicMock()
+    mgr.reached_preemption.return_value = False
+    mgr.latest_step.return_value = None
+
+    save_checkpoint_mock = mock.MagicMock()
+    save_checkpoint_mock.side_effect = jax.errors.JaxRuntimeError("mock JAX error")
+
+    with mock.patch.object(checkpointing, "save_checkpoint", save_checkpoint_mock):
+      with self.assertRaises(jax.errors.JaxRuntimeError):
+        checkpointing.maybe_save_checkpoint(mgr, state, config, data_iterator=None, step=None)
+
+  def test_maybe_save_checkpoint_propagates_jax_runtime_error_elastic_enabled(self):
+    """Verify maybe_save_checkpoint propagates JaxRuntimeError when elastic is enabled."""
+    state = self._build_nnx_state(self.N_STEPS)
+    config = SimpleNamespace(
+        pure_nnx=True,
+        checkpoint_period=1,
+        async_checkpointing=False,
+        elastic_enabled=True,
+        enable_diloco=False,
+    )
+    mgr = mock.MagicMock()
+    mgr.reached_preemption.return_value = False
+    mgr.latest_step.return_value = None
+
+    save_checkpoint_mock = mock.MagicMock()
+    save_checkpoint_mock.side_effect = jax.errors.JaxRuntimeError("mock JAX error")
+
+    with mock.patch.object(checkpointing, "save_checkpoint", save_checkpoint_mock):
+      with self.assertRaises(jax.errors.JaxRuntimeError):
+        checkpointing.maybe_save_checkpoint(mgr, state, config, data_iterator=None, step=None)
+
 
 class TestLinenCheckpointFormatConverters(unittest.TestCase):
   """to_linen_checkpoint_dict / from_linen_checkpoint_dict (NNX <-> Linen on-disk layout)."""
