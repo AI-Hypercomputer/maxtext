@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for restoring pure_nnx emergency checkpoints.
+"""Tests for restoring NNX emergency checkpoints.
 
-pure_nnx saves in the on-disk checkpoint layout: Linen params/opt_state/step, plus an nnx_aux
+NNX saves in the on-disk checkpoint layout: Linen params/opt_state/step, plus an nnx_aux
 subtree for the rngs and batch stats Linen has no place for. The emergency manager, unlike the
 regular one, bakes in the abstract it is built with and restores against that, ignoring the
 restore-time item. So that abstract has to be in the on-disk layout already, or Orbax compares
@@ -74,9 +74,8 @@ _TRAIN_X = jnp.arange(8, dtype=jnp.float32).reshape(4, 2)
 
 
 def _config():
-  """Minimal config with the fields save/restore reads for a pure_nnx emergency run."""
+  """Minimal config with the fields save/restore reads for an NNX emergency run."""
   return SimpleNamespace(
-      pure_nnx=True,
       enable_diloco=False,
       enable_checkpointing=True,
       enable_continuous_checkpointing=False,

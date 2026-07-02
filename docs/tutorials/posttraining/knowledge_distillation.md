@@ -248,7 +248,7 @@ Key knobs (see the [Distillation guide](../../guides/distillation.md) for the fu
 ```yaml
 distill_alpha: 0.5             # weight on KL(teacher||student)
 distill_temperature: 1.0
-distill_beta: 0.0              # >0 enables feature distillation; requires scan_layers=True, enable_nnx=True
+distill_beta: 0.0              # >0 enables feature distillation; requires scan_layers=True
 distill_layer_indices: None
 ```
 
@@ -312,7 +312,7 @@ python3 -m maxtext.trainers.post_train.distillation.train_distill \
   distill_temperature=2.0 \
   distill_beta=1.0 distill_beta_end=0.1 distill_beta_schedule=cosine \
   distill_layer_indices=[2,5,8,11,14,17,20,23] \
-  scan_layers=True enable_nnx=True \
+  scan_layers=True \
   profiler=xplane
 ```
 

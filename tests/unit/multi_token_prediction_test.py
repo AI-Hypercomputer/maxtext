@@ -568,8 +568,6 @@ class MaybeQuantizeModelMTPTest(unittest.TestCase):
         head_dim=8,
         max_target_length=16,
         vocab_size=32,
-        pure_nnx=True,
-        pure_nnx_decoder=True,
         use_qwix_quantization=True,
         quantization="int8",
         enable_dropout=False,

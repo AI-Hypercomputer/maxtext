@@ -352,7 +352,6 @@ class TestMaybeSaveCheckpointStepAlignment(unittest.TestCase):
   def _config(self, **overrides):
     """Builds a minimal checkpoint config for maybe_save_checkpoint tests."""
     values = {
-        "pure_nnx": True,
         "checkpoint_period": 10,
         "async_checkpointing": False,
         "enable_diloco": False,
