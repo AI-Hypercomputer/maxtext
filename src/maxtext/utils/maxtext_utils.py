@@ -2067,3 +2067,43 @@ def get_mesh_from_config(
     axis_types = tuple([AxisType.Auto] * len(config.mesh_axes))
 
   return Mesh(devices_array, config.mesh_axes, axis_types=axis_types)
+
+
+def prepare_kv_caches_for_scan(kv_caches, scan_length, block_len, stack=False):
+  """Groups the flat list of KV caches into block-sized tuples and optionally stacks them."""
+  if kv_caches is None:
+    return None
+
+  if not isinstance(kv_caches, list):
+    raise TypeError(f"kv_caches must be a list, got {type(kv_caches)}")
+
+  grouped = [tuple(kv_caches[i * block_len : (i + 1) * block_len]) for i in range(scan_length)]
+
+  if stack:
+    # Stack the list of tuples into a tuple of stacked PyTrees along a new leading axis
+    return jax.tree_util.tree_map(lambda *args: jnp.stack(args, axis=0), *grouped)
+  else:
+    return grouped
+
+
+def update_kv_caches_after_scan(kv_caches, returned_kv_cache, scan_length, block_len, stacked=False):
+  """Updates the original flat list of KV caches from the scanned outputs."""
+  if kv_caches is None or returned_kv_cache is None:
+    return
+
+  if not isinstance(kv_caches, list):
+    raise TypeError(f"kv_caches must be a list, got {type(kv_caches)}")
+
+  if stacked:
+    # Unstack the returned tuple of stacked PyTrees back into a list of tuples
+    unstacked = [jax.tree_util.tree_map(lambda x, i=i: x[i], returned_kv_cache) for i in range(scan_length)]
+    for i in range(scan_length):
+      start_idx = i * block_len
+      for offset, updated_item in enumerate(unstacked[i]):
+        kv_caches[start_idx + offset] = updated_item
+  else:
+    # returned_kv_cache is already a list of tuples
+    for i in range(scan_length):
+      start_idx = i * block_len
+      for offset, updated_item in enumerate(returned_kv_cache[i]):
+        kv_caches[start_idx + offset] = updated_item

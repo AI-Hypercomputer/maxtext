@@ -352,9 +352,7 @@ class MaxUtilsInitTransformerState(unittest.TestCase):
     self.mesh = Mesh(devices_array, self.config.mesh_axes)
     quant = quantizations.configure_quantization(self.config)
     if self.config.pure_nnx:
-      self._create_model_partial, self.model = (
-          model_creation_utils.create_nnx_abstract_model(self.config, self.mesh)
-      )
+      self._create_model_partial, self.model = model_creation_utils.create_nnx_abstract_model(self.config, self.mesh)
     else:
       self.model = models.transformer_as_linen(self.config, mesh=self.mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
 
@@ -951,7 +949,21 @@ class TestMeshUtils(unittest.TestCase):
 
   def setUp(self):
     # Setup a dummy device array for the mock to return
-    self.devices_array = np.array(jax.devices())
+    devices = jax.devices()
+    if len(devices) < 2:
+      mock_devices = []
+      for i in range(2):
+        d = MagicMock(spec=jax.Device)
+        d.id = i
+        d.device_kind = "cpu"
+        d.platform = "cpu"
+        # make it hashable
+        d.__hash__ = lambda self, idx=i: idx
+        d.__eq__ = lambda self, other, idx=i: isinstance(other, MagicMock) and other.id == idx
+        mock_devices.append(d)
+      self.devices_array = np.array(mock_devices)
+    else:
+      self.devices_array = np.array(devices)
 
   @patch("maxtext.utils.maxtext_utils.create_device_mesh")
   def test_get_mesh_explicit_mode(self, mock_create_device_mesh):
@@ -1377,13 +1389,9 @@ class TestSetupTrainingState(unittest.TestCase):
     self.mesh = Mesh(devices_array, self.config.mesh_axes)
     quant = quantizations.configure_quantization(self.config)
     if self.config.pure_nnx:
-      self._create_model_partial, self.model = (
-          model_creation_utils.create_nnx_abstract_model(self.config, self.mesh)
-      )
+      self._create_model_partial, self.model = model_creation_utils.create_nnx_abstract_model(self.config, self.mesh)
     else:
-      self.model = Transformer(
-          self.config, mesh=self.mesh, quant=quant, model_mode=MODEL_MODE_TRAIN
-      )
+      self.model = Transformer(self.config, mesh=self.mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
 
   def test_setup_training_state_returns_train_state(self):
     rng = jax.random.PRNGKey(0)
@@ -1422,13 +1430,9 @@ class TestGetLogicalAnnotations(unittest.TestCase):
     self.mesh = Mesh(devices_array, self.config.mesh_axes)
     quant = quantizations.configure_quantization(self.config)
     if self.config.pure_nnx:
-      self._create_model_partial, self.model = (
-          model_creation_utils.create_nnx_abstract_model(self.config, self.mesh)
-      )
+      self._create_model_partial, self.model = model_creation_utils.create_nnx_abstract_model(self.config, self.mesh)
     else:
-      self.model = Transformer(
-          self.config, mesh=self.mesh, quant=quant, model_mode=MODEL_MODE_TRAIN
-      )
+      self.model = Transformer(self.config, mesh=self.mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
     self.rng = jax.random.PRNGKey(0)
     self.tx = optax.adam(learning_rate=0.001)
 
@@ -1442,9 +1446,7 @@ class TestGetLogicalAnnotations(unittest.TestCase):
 
       init_state_fn = create_train_state_fn
       annotations = maxtext_utils_nnx.get_partition_spec_nnx(
-          maxtext_utils.get_abstract_state(
-              self.config, self.mesh, init_state_fn, True
-          )[2]
+          maxtext_utils.get_abstract_state(self.config, self.mesh, init_state_fn, True)[2]
       )
     else:
       init_state_fn = functools.partial(
@@ -1455,9 +1457,7 @@ class TestGetLogicalAnnotations(unittest.TestCase):
           True,
           self.rng,
       )
-      annotations = maxtext_utils.get_logical_annotations(
-          self.config, self.mesh, init_state_fn
-      )
+      annotations = maxtext_utils.get_logical_annotations(self.config, self.mesh, init_state_fn)
     # Result should be a pytree with PartitionSpec leaves
     leaves = jax.tree_util.tree_leaves(annotations)
     self.assertGreater(len(leaves), 0)
@@ -1593,9 +1593,7 @@ class TestNNXAbstractState(unittest.TestCase):
     optimizer_memory_host_offload: bool = False
     parameter_memory_host_offload: bool = False
     param_scan_axis: int = 0
-    logical_axis_rules: list = field(
-        default_factory=lambda: [["data", ["data"]], ["model", ["model"]]]
-    )
+    logical_axis_rules: list = field(default_factory=lambda: [["data", ["data"]], ["model", ["model"]]])
 
   class MockTrainState(nnx.Module):
     """Simulates a TrainState with params and optimizer state."""
@@ -1690,6 +1688,44 @@ class TestNNXAbstractState(unittest.TestCase):
     """Ensures function raises error if no init function is provided."""
     with self.assertRaises(AssertionError):
       maxtext_utils.get_abstract_state_nnx(self.config, self.mesh, None)
+
+
+class TestKVCacheScanHelpers(unittest.TestCase):
+  """Tests for KV cache scan helper functions."""
+
+  def test_prepare_kv_caches_for_scan_valid(self):
+    kv_caches = [jnp.array([1.0]), jnp.array([2.0]), jnp.array([3.0]), jnp.array([4.0])]
+    # scan_length = 2, block_len = 2
+    grouped = maxtext_utils.prepare_kv_caches_for_scan(kv_caches, scan_length=2, block_len=2, stack=False)
+    self.assertEqual(len(grouped), 2)
+    self.assertEqual(grouped[0], (kv_caches[0], kv_caches[1]))
+    self.assertEqual(grouped[1], (kv_caches[2], kv_caches[3]))
+
+  def test_prepare_kv_caches_for_scan_invalid_type(self):
+    kv_caches_tuple = (jnp.array([1.0]), jnp.array([2.0]))
+    with self.assertRaises(TypeError):
+      maxtext_utils.prepare_kv_caches_for_scan(kv_caches_tuple, scan_length=1, block_len=2)
+
+    kv_caches_array = jnp.array([1.0, 2.0])
+    with self.assertRaises(TypeError):
+      maxtext_utils.prepare_kv_caches_for_scan(kv_caches_array, scan_length=1, block_len=2)
+
+  def test_update_kv_caches_after_scan_valid(self):
+    kv_caches = [jnp.array([1.0]), jnp.array([2.0]), jnp.array([3.0]), jnp.array([4.0])]
+    returned_kv_cache = [(jnp.array([10.0]), jnp.array([20.0])), (jnp.array([30.0]), jnp.array([40.0]))]
+
+    maxtext_utils.update_kv_caches_after_scan(kv_caches, returned_kv_cache, scan_length=2, block_len=2, stacked=False)
+
+    self.assertTrue(jnp.array_equal(kv_caches[0], jnp.array([10.0])))
+    self.assertTrue(jnp.array_equal(kv_caches[1], jnp.array([20.0])))
+    self.assertTrue(jnp.array_equal(kv_caches[2], jnp.array([30.0])))
+    self.assertTrue(jnp.array_equal(kv_caches[3], jnp.array([40.0])))
+
+  def test_update_kv_caches_after_scan_invalid_type(self):
+    kv_caches_tuple = (jnp.array([1.0]), jnp.array([2.0]))
+    returned_kv_cache = [(jnp.array([10.0]), jnp.array([20.0]))]
+    with self.assertRaises(TypeError):
+      maxtext_utils.update_kv_caches_after_scan(kv_caches_tuple, returned_kv_cache, scan_length=1, block_len=2)
 
 
 if __name__ == "__main__":
