@@ -2191,6 +2191,20 @@ class RLDataset(BaseModel):
           "When set, replaces the built-in dataset processor for custom datasets."
       ),
   )
+  reward_functions_path: str = Field(
+      "",
+      description=(
+          "Optional path to a user Python file containing custom reward functions. "
+          "Used with `reward_functions` to fully replace the built-in reward stack."
+      ),
+  )
+  reward_functions: str = Field(
+      "",
+      description=(
+          "Comma-separated names of reward functions to import from `reward_functions_path`. "
+          "Each function signature: (prompts, completions, tmvp_config, **kwargs) -> list[float]."
+      ),
+  )
 
 
 class RLEvaluation(BaseModel):
