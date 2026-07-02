@@ -1201,11 +1201,12 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
         grain_iters_to_save.append((data_iter.local_iterator, process_index, process_count_total))
       save_args_composite["iter"] = GrainCheckpointSave(item=grain_iters_to_save)
 
-  custom_metadata = None
-  if config and hasattr(config, "lora") and config.lora:
-    lora_rank = getattr(config.lora, "lora_rank", 0)
-    if lora_rank > 0 and hasattr(config.lora, "model_dump"):
-      custom_metadata = {"lora": config.lora.model_dump()}
+  custom_metadata = {}
+  if config:
+    if hasattr(config, "scan_layers"):
+      custom_metadata["scan_layers"] = config.scan_layers
+    if hasattr(config, "lora") and config.lora and getattr(config.lora, "lora_rank", 0) > 0:
+      custom_metadata["lora"] = config.lora.model_dump()
 
   match (checkpoint_manager, config, data_iterator):
     case (checkpoint_manager, _, _) if isinstance(
