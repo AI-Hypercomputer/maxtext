@@ -100,6 +100,7 @@ jobs:
         uses: actions/checkout@v5
         with:
           ref: ${{ inputs.maxtext_sha }}
+          fetch-depth: 0
       - name: Download the maxtext wheel
         if: ${{ !inputs.maxtext_installed }}
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
@@ -147,7 +148,11 @@ jobs:
           if [ "${INPUTS_IS_SCHEDULED_RUN}" == "true" ]; then
             FINAL_PYTEST_MARKER="${INPUTS_PYTEST_MARKER}"
           else
-            FINAL_PYTEST_MARKER="${INPUTS_PYTEST_MARKER} and not scheduled_only"
+            if [ -z "${INPUTS_PYTEST_MARKER}" ]; then
+              FINAL_PYTEST_MARKER="not scheduled_only or newly_added"
+            else
+              FINAL_PYTEST_MARKER="${INPUTS_PYTEST_MARKER} and (not scheduled_only or newly_added)"
+            fi
           fi
           # TODO: Use package data for testing and remove the env vars
           export MAXTEXT_REPO_ROOT=$(pwd)
