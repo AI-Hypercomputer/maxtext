@@ -200,9 +200,6 @@ def main(argv: Sequence[str]) -> None:
           "weight_dtype",
           "log_config",
           "debug_sharding",
-          "pure_nnx",
-          "enable_nnx",
-          "pure_nnx_decoder",
       ]:
         overrides.append(arg)
   if overrides:

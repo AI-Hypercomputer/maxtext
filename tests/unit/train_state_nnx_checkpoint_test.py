@@ -351,7 +351,6 @@ class TestMaybeSaveCheckpointStepAlignment(unittest.TestCase):
   def _config(self, **overrides):
     """Builds a minimal checkpoint config for maybe_save_checkpoint tests."""
     values = {
-        "pure_nnx": True,
         "checkpoint_period": 10,
         "async_checkpointing": False,
         "enable_diloco": False,
@@ -391,10 +390,10 @@ class TestMaybeSaveCheckpointStepAlignment(unittest.TestCase):
       state = state.apply_gradients(grads=grads)
     return state
 
-  def _invoke_maybe_save(self, state, pure_nnx):
+  def _invoke_maybe_save(self, state):
     """Call maybe_save_checkpoint with save_checkpoint patched, return {step, state} captured."""
     # checkpoint_period=1 keeps force_ckpt_save False regardless of actual_step.
-    config = self._config(pure_nnx=pure_nnx, checkpoint_period=1)
+    config = self._config(checkpoint_period=1)
     mgr = mock.MagicMock()
     mgr.latest = None  # no existing checkpoint -> _latest_step() is None, so the save proceeds
 
@@ -415,30 +414,15 @@ class TestMaybeSaveCheckpointStepAlignment(unittest.TestCase):
   def test_nnx_final_save_step_is_n_minus_1(self):
     state = self._build_nnx_state(self.N_STEPS)
     self.assertEqual(int(state.optimizer.step.value), self.N_STEPS)
-    captured = self._invoke_maybe_save(state, pure_nnx=True)
+    captured = self._invoke_maybe_save(state)
     self.assertEqual(captured["step"], self.N_STEPS - 1)
-
-  def test_linen_final_save_step_is_n_minus_1(self):
-    state = self._build_linen_state(self.N_STEPS)
-    self.assertEqual(int(state.step), self.N_STEPS)
-    captured = self._invoke_maybe_save(state, pure_nnx=False)
-    self.assertEqual(captured["step"], self.N_STEPS - 1)
-
-  def test_nnx_and_linen_agree_on_actual_step(self):
-    """TrainStateNNX and Linen TrainState must yield the same fallback actual_step."""
-    nnx_state = self._build_nnx_state(self.N_STEPS)
-    linen_state = self._build_linen_state(self.N_STEPS)
-    self.assertEqual(
-        self._invoke_maybe_save(nnx_state, pure_nnx=True)["step"],
-        self._invoke_maybe_save(linen_state, pure_nnx=False)["step"],
-    )
 
   def test_nnx_state_is_saved_in_linen_layout(self):
-    """For pure_nnx=True, save_checkpoint reshapes the NNX state to the Linen on-disk layout."""
+    """save_checkpoint reshapes the NNX state to the Linen on-disk layout."""
     state = self._build_nnx_state(self.N_STEPS)
     self.assertIsInstance(state, nnx.State)  # precondition: NNX train_step returns an nnx.State
 
-    config = self._config(pure_nnx=True, enable_checkpointing=True, checkpoint_period=1)
+    config = self._config(enable_checkpointing=True, checkpoint_period=1)
     mgr = mock.MagicMock()
 
     mgr.use_async = False
@@ -458,13 +442,6 @@ class TestMaybeSaveCheckpointStepAlignment(unittest.TestCase):
     self.assertNotIn("model", saved)
     self.assertNotIn("optimizer", saved)
     self.assertIn("params", saved["params"])
-
-  def test_linen_state_is_passed_through_unchanged(self):
-    """For pure_nnx=False, maybe_save_checkpoint must pass the original TrainState object through."""
-    state = self._build_linen_state(self.N_STEPS)
-    captured = self._invoke_maybe_save(state, pure_nnx=False)
-    # Linen path must not invoke to_pure_dict(); state is forwarded as-is.
-    self.assertIs(captured["state"], state)
 
   def test_maybe_save_checkpoint_skips_if_already_saved(self):
     """Verify maybe_save_checkpoint skips saving if latest_step matches actual_step."""

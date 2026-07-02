@@ -146,7 +146,6 @@ class TestOmniCheckpointStitcher(unittest.TestCase):
         override_model_config=True,
         skip_jax_distributed_system=True,
         log_config=False,
-        pure_nnx=False,
         attention="dot_product",
         dtype="float32",
         **yaml_overrides,
