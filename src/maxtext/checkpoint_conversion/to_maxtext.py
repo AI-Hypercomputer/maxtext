@@ -87,6 +87,67 @@ except ImportError:
 absl.logging.set_verbosity(absl.logging.INFO)  # for max_logging.log
 
 
+def get_key_mapper(model_name):
+  if model_name.startswith("deepseek4"):
+    def map_hf_key(hf_key):
+      # Rule 11: Global keys
+      if hf_key == "model.embed_tokens.weight":
+        return "embed.weight"
+      if hf_key == "model.norm.weight":
+        return "norm.weight"
+      if hf_key.startswith("model.hc_head.hc_"):
+        return hf_key.replace("model.hc_head.hc_", "hc_head_")
+      
+      k = hf_key
+      if k.startswith("model."):
+        k = k[6:]
+      
+      k = k.replace("experts..", "experts.")
+      k = k.replace(".self_attn.", ".attn.")
+      
+      k = k.replace(".attn_hc.fn", ".hc_attn_fn")
+      k = k.replace(".attn_hc.base", ".hc_attn_base")
+      k = k.replace(".attn_hc.scale", ".hc_attn_scale")
+      k = k.replace(".ffn_hc.fn", ".hc_ffn_fn")
+      k = k.replace(".ffn_hc.base", ".hc_ffn_base")
+      k = k.replace(".ffn_hc.scale", ".hc_ffn_scale")
+
+      k = k.replace(".input_layernorm.weight", ".attn_norm.weight")
+      k = k.replace(".post_attention_layernorm.weight", ".ffn_norm.weight")
+      k = k.replace(".mlp.", ".ffn.")
+      k = k.replace("e_score_correction_bias", "bias")
+      
+      k = k.replace(".shared_experts.gate_proj.weight", ".shared_experts.w1.weight")
+      k = k.replace(".shared_experts.up_proj.weight", ".shared_experts.w3.weight")
+      k = k.replace(".shared_experts.down_proj.weight", ".shared_experts.w2.weight")
+      
+      k = k.replace(".compressor.indexer.gate_proj.weight", ".indexer.compressor.wgate.weight")
+      k = k.replace(".compressor.indexer.kv_proj.weight", ".indexer.compressor.wkv.weight")
+      k = k.replace(".compressor.indexer.q_b_proj.weight", ".indexer.wq_b.weight")
+      k = k.replace(".compressor.indexer.scorer.weights_proj.weight", ".indexer.weights_proj.weight")
+      k = k.replace(".compressor.indexer.position_bias", ".indexer.compressor.ape")
+      k = k.replace(".compressor.indexer.kv_norm.weight", ".indexer.compressor.norm.weight")
+      
+      k = k.replace(".compressor.gate_proj.weight", ".compressor.wgate.weight")
+      k = k.replace(".compressor.kv_proj.weight", ".compressor.wkv.weight")
+      k = k.replace(".compressor.position_bias", ".compressor.ape")
+      k = k.replace(".compressor.kv_norm.weight", ".compressor.norm.weight")
+      
+      k = k.replace(".attn.q_a_proj.weight", ".attn.wq_a.weight")
+      k = k.replace(".attn.q_a_norm.weight", ".attn.q_norm.weight")
+      k = k.replace(".attn.q_b_proj.weight", ".attn.wq_b.weight")
+      k = k.replace(".attn.kv_proj.weight", ".attn.wkv.weight")
+      k = k.replace(".attn.sinks", ".attn.attn_sink")
+      k = k.replace(".attn.o_a_proj.weight", ".attn.wo_a.weight")
+      k = k.replace(".attn.o_b_proj.weight", ".attn.wo_b.weight")
+      
+      return k
+    return map_hf_key
+  else:
+    return lambda k: k
+
+
+
 class LazyHFLoader:
   """
   Loads Hugging Face weights on-demand to minimize RAM usage.
@@ -108,10 +169,11 @@ class LazyHFLoader:
   can still occur in parallel.
   """
 
-  def __init__(self, model_id, token, revision=None):
+  def __init__(self, model_id, token, revision=None, map_fn=None):
     self.model_id = model_id
     self.token = token
     self.revision = revision
+    self.map_fn = map_fn or (lambda k: k)
     # Whether loads from local directory
     self.is_local = os.path.isdir(self.model_id)
     self.shard_map = {}
@@ -178,13 +240,17 @@ class LazyHFLoader:
     and reads only the required tensor's data from disk.
     """
     # Handle single-file models (shard map key might be None or we just know the filename)
-    shard_name = self.shard_map.get(key)
+    mapped_key = self.map_fn(key)
+    shard_name = self.shard_map.get(mapped_key)
     if shard_name is None and None in self.shard_map:
       shard_name = self.shard_map[None]
     elif shard_name is None:
-      # Fallback: sometimes keys in index don't perfectly match requested keys if there are prefix mismatches.
-      # You might need advanced fuzzy matching here if you encounter errors.
-      raise ValueError(f"Key {key} not found in HF checkpoint index.")
+      # Fallback to unmapped key if mapped is not found
+      shard_name = self.shard_map.get(key)
+      if shard_name is not None:
+        mapped_key = key
+      else:
+        raise ValueError(f"Key {key} (mapped to {mapped_key}) not found in HF checkpoint index.")
 
     if shard_name in self._local_shard_paths:
       local_path = self._local_shard_paths[shard_name]
@@ -206,7 +272,7 @@ class LazyHFLoader:
     # This prevents multiple threads from simultaneously allocating large chunks of RAM.
     with self._ram_lock:
       with safe_open(local_path, framework="np", device="cpu") as f:
-        return f.get_tensor(key)
+        return f.get_tensor(mapped_key)
 
 
 class LazyTensor:
@@ -318,7 +384,7 @@ def get_maxtext_model_info(config):
   maxtext_model_flax = models.transformer_as_linen(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
 
   # Get abstract model structure (name, shape) without materializing the weights to save memory
-  abstract_params_tree = maxtext_utils.get_abstract_param(maxtext_model_flax, config)["params"]
+  abstract_params_tree = maxtext_utils.get_abstract_param(maxtext_model_flax, config)
 
   abstract_params_flat, abstract_params_treedef = jax.tree_util.tree_flatten_with_path(
       abstract_params_tree,
@@ -389,29 +455,34 @@ def _build_single_axis_stacked_tensor(
     hook_fns: Any,
     target_shape: tuple,
     config,
+    mt_param_name: str = "",
 ) -> np.ndarray:
-  """Builds a MaxText tensor by stacking HF weights along a single axis.
+  """Builds a MaxText tensor by stacking HF weights along one axis.
 
-  This function handles both standard scanned layers (e.g., attention) and
-  unscanned MoE layers (which are stacked along the expert axis).
+  This function handles two cases:
+  1. Stacking layers for standard scanned blocks (e.g. attention/norm layers).
+     In this case, axis_to_stack is config.param_scan_axis.
+  2. Stacking experts for unscanned MoeBlock layers.
+     In this case, axis_to_stack is 0.
 
   Args:
-      hf_source_keys: A 1D list of Hugging Face parameter names.
-      tensor_getter_fn: A callable that takes a HF key and returns the tensor (as numpy array).
+      hf_source_keys: A list of Hugging Face parameter names.
+      tensor_getter_fn: A callable that takes a HF key and returns the tensor.
       hook_fns: The hook function(s) to apply to each individual weight.
       target_shape: The final shape of the target MaxText tensor.
       config: The MaxText pyconfig object.
+      mt_param_name: The name of the MaxText parameter.
 
   Returns:
       The final, assembled NumPy array for the MaxText parameter.
   """
   tensors_to_stack = []
 
-  if config.scan_layers:
+  if config.scan_layers and "scanned_blocks" in mt_param_name:
     # If it's a standard scanned layer, we use the configured param_scan_axis.
     axis_to_stack = config.param_scan_axis
   else:
-    # Otherwise, if an unscanned MoE layer, and we stack along the expert axis (0).
+    # Otherwise, if an unscanned MoE layer (or scan_layers is False), we stack along the expert axis (0).
     axis_to_stack = 0
 
   # The hook function needs the shape of an individual slice, not the full stacked tensor.
@@ -432,7 +503,14 @@ def _build_single_axis_stacked_tensor(
   return np.stack(tensors_to_stack, axis=axis_to_stack)
 
 
-def _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_target_shape_or_shapes, config):
+def _get_hf_loading_function(
+    hf_source_keys_or_key,
+    tensor_getter,
+    hook_fn,
+    mt_target_shape_or_shapes,
+    config,
+    mt_param_name: str = "",
+):
   """Determine the loading function for HF keys.
 
   This function natively supports `composite_hf_key` mapping (where multiple HF keys
@@ -450,6 +528,8 @@ def _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_t
   if not isinstance(hf_source_keys_or_key, list):
     # Case 1: Single hf key (str)
     def _loader(getter, key, shape, hook):
+      if key is None:
+        return apply_hook_fns(None, shape, hook)
       if isinstance(key, (list, tuple)):
         tensors = tuple(getter(k) for k in key)
         return apply_hook_fns(tensors, shape, hook)
@@ -472,6 +552,7 @@ def _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_t
         hook_fn,
         mt_target_shape_or_shapes,
         config,
+        mt_param_name=mt_param_name,
     )
   else:
     # isinstance(hf_source_keys_or_key[0], list)
@@ -891,11 +972,13 @@ def main(
 
     hf_state_dict_numpy = None
     hf_loader = None
+    model_name_for_path = model_name_original or config.model_name
+    map_fn = get_key_mapper(model_name_for_path)
 
     # Define the appropriate tensor getter based on mode
     if lazy_load_tensors:
       max_logging.log(f"Lazy loading ENABLED. Initializing LazyHFLoader for: {model_id}...")
-      hf_loader = LazyHFLoader(model_id, hf_token, revision=revision)
+      hf_loader = LazyHFLoader(model_id, hf_token, revision=revision, map_fn=map_fn)
 
       print_ram_usage("After LazyLoader init")
       tensor_getter = hf_loader.get_tensor
@@ -955,9 +1038,13 @@ def main(
           }
 
       def _eager_getter(key):
-        if key not in hf_state_dict_numpy:
-          raise ValueError(f"HuggingFace key {key} not found in state_dict.")
-        v = hf_state_dict_numpy[key]
+        mapped_key = map_fn(key)
+        if mapped_key not in hf_state_dict_numpy:
+          if key in hf_state_dict_numpy:
+            mapped_key = key
+          else:
+            raise ValueError(f"HuggingFace key {key} (mapped to {mapped_key}) not found in state_dict.")
+        v = hf_state_dict_numpy[mapped_key]
         # target dtype is "float32"
         if save_dtype == DType.FLOAT32:
           return v.to(torch.float32).numpy()
@@ -981,7 +1068,7 @@ def main(
     model_key = config.model_name
     # load config
     hf_config_obj = HF_MODEL_CONFIGS[model_key]
-    hf_config_dict = hf_config_obj.to_dict()
+    hf_config_dict = hf_config_obj.to_dict() if hasattr(hf_config_obj, "to_dict") else hf_config_obj
     # example of param mapping (gemma2, maxtext:huggingface):
     # "params-decoder-layers_{maxtext_layer_idx}-pre_self_attention_norm_global-scale":
     #   f"model.layers.{global_layer_idx}.input_layernorm.weight",
@@ -1013,9 +1100,9 @@ def main(
       if not lazy_load_tensors:
         max_logging.log(f"maxtext param: {mt_param_key_or_keys}")
 
-      hf_source_keys_or_key = param_map_mt_to_hf.get(mt_param_key_or_keys)
-      if hf_source_keys_or_key is None:
+      if mt_param_key_or_keys not in param_map_mt_to_hf:
         raise ValueError(f"MaxText parameter {mt_param_key_or_keys} not found in mapping.")
+      hf_source_keys_or_key = param_map_mt_to_hf[mt_param_key_or_keys]
       hook_fn = hook_fn_map_mt.get(mt_param_key_or_keys)
 
       # Step 1: Resolves MaxText key(s) to target indices and shapes
@@ -1032,6 +1119,7 @@ def main(
           hook_fn,
           mt_target_shape_or_shapes,
           config,
+          mt_param_name=mt_param_key_or_keys,
       )
 
       # Step 3: Load hf keys and convert to maxtext keys
