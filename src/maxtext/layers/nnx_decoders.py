@@ -252,6 +252,45 @@ def deepstack_process(hidden_states, bidirectional_mask, visual_embeds):
   return hidden_states
 
 
+def _run_stage_layer_with_remat(
+    graphdef,
+    params,
+    state,
+    inputs,
+    run_fn,
+    *,
+    host_offload,
+    remat_policy,
+    prevent_cse,
+):
+  """Run one pipeline-stage layer under ``jax.checkpoint`` with params-only host-offload.
+
+  Shared by ``NNXSequentialPipelineStage`` and ``NNXScannedPipelineStage``, whose per-layer
+  remat bodies were byte-identical. The layer must already be split into ``(graphdef, params,
+  state)`` so the host-offload targets params only (mirrors Linen ``nn.map_variables(["params"])``).
+  Inside a single ``jax.checkpoint(policy=remat_policy, prevent_cse=prevent_cse)`` this:
+
+    1. optionally offloads params to host memory via ``jax.device_put(device_space())``,
+    2. re-merges the layer with ``nnx.merge(graphdef, params, state)``,
+    3. runs it through ``run_fn(merged_layer, inputs)`` -- ``run_fn`` captures the call site's
+       ``decoder_segment_ids`` / ``decoder_positions`` / ``deterministic`` / ``model_mode`` / kwargs,
+    4. unwraps a tuple layer output to its first element.
+
+  Returns ``(out, new_state)``; the caller round-trips ``new_state`` back via ``nnx.update``.
+  """
+
+  def pure_fn(params_in, state_in, x_in):
+    if host_offload:
+      params_in = jax.tree.map(lambda x: jax.device_put(x, max_utils.device_space()), params_in)
+    merged = nnx.merge(graphdef, params_in, state_in)
+    out_inner = run_fn(merged, x_in)
+    out_inner = out_inner[0] if isinstance(out_inner, tuple) else out_inner
+    return out_inner, nnx.state(merged)
+
+  checkpointed_fn = jax.checkpoint(pure_fn, policy=remat_policy, prevent_cse=prevent_cse)
+  return checkpointed_fn(params, state, inputs)
+
+
 class NNXSequentialPipelineStage(nnx.Module):
   """Sequential unscanned series of decoder layers formatted for a single pipeline stage."""
 
@@ -292,22 +331,24 @@ class NNXSequentialPipelineStage(nnx.Module):
       model_mode,
       **kwargs,
   ):
+    def run_fn(merged_layer, x_in):
+      return merged_layer(x_in, decoder_segment_ids, decoder_positions, deterministic, model_mode, **kwargs)
+
     for i in range(self.num_layers):
       layer = getattr(self, f"layers_{i}")
       if self.apply_remat:
         # Split params out so host-offload is params-only (mirrors Linen nn.map_variables(["params"])).
         graphdef, params, rest = nnx.split(layer, nnx.Param, ...)
-
-        def pure_fn(params_in, rest_in, x_in, _graphdef=graphdef):
-          if self.config.parameter_memory_host_offload:
-            params_in = jax.tree.map(lambda x: jax.device_put(x, max_utils.device_space()), params_in)
-          merged = nnx.merge(_graphdef, params_in, rest_in)
-          out_inner = merged(x_in, decoder_segment_ids, decoder_positions, deterministic, model_mode, **kwargs)
-          out_inner = out_inner[0] if isinstance(out_inner, tuple) else out_inner
-          return out_inner, nnx.state(merged)
-
-        checkpointed_fn = jax.checkpoint(pure_fn, policy=self.remat_policy, prevent_cse=self.prevent_cse)
-        inputs, new_state = checkpointed_fn(params, rest, inputs)
+        inputs, new_state = _run_stage_layer_with_remat(
+            graphdef,
+            params,
+            rest,
+            inputs,
+            run_fn,
+            host_offload=self.config.parameter_memory_host_offload,
+            remat_policy=self.remat_policy,
+            prevent_cse=self.prevent_cse,
+        )
         nnx.update(layer, new_state)
       else:
         out = layer(
@@ -375,20 +416,22 @@ class NNXScannedPipelineStage(nnx.Module):
     if scan_axis != 0:
       params = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0), params)
 
+    def run_fn(merged_layer, x_in):
+      return merged_layer(x_in, decoder_segment_ids, decoder_positions, deterministic, model_mode, **kwargs)
+
     def layer_fn(carry, scanned_vars):
       current_params, current_state = scanned_vars
       if self.apply_remat:
-
-        def pure_fn(params_in, state_in, x_in):
-          if self.config.parameter_memory_host_offload:
-            params_in = jax.tree.map(lambda x: jax.device_put(x, max_utils.device_space()), params_in)
-          inner_layer = nnx.merge(graphdef, params_in, state_in)
-          out = inner_layer(x_in, decoder_segment_ids, decoder_positions, deterministic, model_mode, **kwargs)
-          out = out[0] if isinstance(out, tuple) else out
-          return out, nnx.state(inner_layer)
-
-        checkpointed_fn = jax.checkpoint(pure_fn, policy=self.remat_policy, prevent_cse=self.prevent_cse)
-        new_carry, new_state = checkpointed_fn(current_params, current_state, carry)
+        new_carry, new_state = _run_stage_layer_with_remat(
+            graphdef,
+            current_params,
+            current_state,
+            carry,
+            run_fn,
+            host_offload=self.config.parameter_memory_host_offload,
+            remat_policy=self.remat_policy,
+            prevent_cse=self.prevent_cse,
+        )
         return new_carry, new_state
       layer = nnx.merge(graphdef, current_params, current_state)
       layer_out = layer(
@@ -737,7 +780,19 @@ class NNXDecoder(nnx.Module):
       )
 
     # 2. Scanned alternating HCA(128)/CSA(4) blocks.
-    num_full_blocks = (config.num_decoder_layers - self.num_prefix_layers) // 2
+    # The non-prefix layers are paired (HCA + CSA) into scannable blocks, so their count must be
+    # even; an odd count would make the `// 2` below silently drop the trailing layer. This is the
+    # single construction-time guard: _apply_deepseek4_scanned_blocks (which mirrors this `// 2`)
+    # runs only after this init -- both are gated on scan_layers + deepseek4 -- so one assert here
+    # covers the apply site too.
+    num_non_prefix_layers = config.num_decoder_layers - self.num_prefix_layers
+    assert num_non_prefix_layers % 2 == 0, (
+        "DeepSeek-V4 scanned body pairs non-prefix layers into HCA/CSA blocks: "
+        f"(num_decoder_layers={config.num_decoder_layers} - "
+        f"first_num_hash_layers={self.num_prefix_layers}) = {num_non_prefix_layers} must be even, "
+        "otherwise the last decoder layer would be silently dropped."
+    )
+    num_full_blocks = num_non_prefix_layers // 2
     self.scanned_blocks = (
         self._create_scanned_layers(scannable_cls, length=num_full_blocks, metadata_axis_name="layers", rngs=rngs)
         if num_full_blocks > 0

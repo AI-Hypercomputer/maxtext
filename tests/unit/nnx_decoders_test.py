@@ -975,7 +975,9 @@ class TestNNXDecoderDeepseek4(unittest.TestCase):
   ``decoders.Decoder._apply_deepseek4_scanned_blocks``.
   """
 
-  def _make_ds4_config(self, scan_layers=False, num_decoder_layers=5, compress_ratios=(0, 0, 4, 128, 4)):
+  def _make_ds4_config(
+      self, scan_layers=False, num_decoder_layers=5, first_num_hash_layers=3, compress_ratios=(0, 0, 4, 128, 4)
+  ):
     return pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         override_model_config=True,
@@ -996,7 +998,7 @@ class TestNNXDecoderDeepseek4(unittest.TestCase):
         num_experts=8,
         num_experts_per_tok=2,
         shared_experts=1,
-        first_num_hash_layers=3,
+        first_num_hash_layers=first_num_hash_layers,
         compress_ratios=list(compress_ratios),
         indexer_head_dim=64,
         indexer_n_heads=4,
@@ -1055,7 +1057,9 @@ class TestNNXDecoderDeepseek4(unittest.TestCase):
   def _build_and_run(self, cfg):
     """Builds an NNXDecoder + shared embedding for ``cfg`` and runs one train-mode forward pass.
 
-    Returns (decoder, logits, expected_logits_shape).
+    Returns (decoder, logits, expected_logits_shape, aot_logits) where ``aot_logits`` is the
+    ``jax.eval_shape`` (ahead-of-time, no XLA execution) abstract result of the same forward,
+    computed on the freshly-built pre-forward modules.
     """
     mesh = _make_mesh(cfg)
     rngs = nnx.Rngs(params=0, dropout=1)
@@ -1074,6 +1078,21 @@ class TestNNXDecoderDeepseek4(unittest.TestCase):
     ids = jax.random.randint(jax.random.PRNGKey(0), (batch, seq_len), 0, cfg.vocab_size)
     segment_ids = jnp.full((batch, seq_len), DECODING_ACTIVE_SEQUENCE_INDICATOR)
     positions = jnp.broadcast_to(jnp.arange(seq_len)[None], (batch, seq_len))
+
+    # AOT structural check of the forward graph -- traces the full prefix + HCA/CSA stack
+    # symbolically (no execution). Functionalize decoder+embedding via split/merge so eval_shape can
+    # trace the stateful NNX modules without a cross-trace RngCount mutation.
+    graphdef, state = nnx.split((decoder, shared_embedding))
+
+    def _forward_from_state(state_in, ids_in):
+      dec, emb = nnx.merge(graphdef, state_in)
+      out, _, _ = dec(
+          emb, ids_in, positions, decoder_segment_ids=segment_ids, deterministic=True, model_mode=MODEL_MODE_TRAIN
+      )
+      return out
+
+    aot_logits = jax.eval_shape(_forward_from_state, state, ids)
+
     logits, _, _ = decoder(
         shared_embedding,
         ids,
@@ -1082,7 +1101,65 @@ class TestNNXDecoderDeepseek4(unittest.TestCase):
         deterministic=True,
         model_mode=MODEL_MODE_TRAIN,
     )
-    return decoder, logits, (batch, seq_len, cfg.vocab_size)
+    return decoder, logits, (batch, seq_len, cfg.vocab_size), aot_logits
+
+  def _assert_forward_is_real(self, logits, aot_logits, expected):
+    """Assertions that exercise the forward beyond finiteness (reviewer: isfinite is weak).
+
+    * The AOT (jax.eval_shape) result matches the expected logits shape AND dtype -- proves the
+      deepseek4 prefix + scanned HCA/CSA stack composes into well-formed logits symbolically.
+    * The executed logits are non-degenerate: real variance (std well above 0) and position-dependent
+      (a causal decoder MUST produce different logits at the first vs last position). A constant or
+      collapsed forward would satisfy isfinite + shape but fail these.
+    """
+    self.assertEqual(aot_logits.shape, expected)
+    self.assertEqual(aot_logits.dtype, jnp.float32)
+    self.assertEqual(logits.dtype, jnp.float32)
+    self.assertGreater(float(jnp.std(logits)), 1e-2)
+    self.assertFalse(
+        bool(jnp.allclose(logits[:, 0, :], logits[:, -1, :], rtol=1e-2, atol=1e-2)),
+        msg="deepseek4 logits are position-invariant -> forward is degenerate",
+    )
+
+  def _assert_decoder_backward_is_real(self, cfg):
+    """Autodiff through the FULL DeepSeek-V4 decoder (prefix hash-routing + scanned HCA/CSA stack) +
+    shared embedding. Reviewer asked for a real backward pass, not just forward: the loss and every
+    parameter gradient must be finite, and at least one gradient must be nonzero (the cotangent
+    actually reached the deepseek4 weights, i.e. the backward was not DCE'd)."""
+    mesh = _make_mesh(cfg)
+    rngs = nnx.Rngs(params=0, dropout=1)
+    decoder = NNXDecoder(config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, rngs=rngs)
+    shared_embedding = Embed(
+        num_embeddings=cfg.vocab_size,
+        num_features=cfg.emb_dim,
+        dtype=cfg.dtype,
+        embedding_init=nn.initializers.normal(stddev=1.0),
+        config=cfg,
+        mesh=mesh,
+        rngs=rngs,
+    )
+    batch = cfg.global_batch_size_to_train_on
+    seq_len = cfg.max_target_length
+    ids = jax.random.randint(jax.random.PRNGKey(0), (batch, seq_len), 0, cfg.vocab_size)
+    segment_ids = jnp.full((batch, seq_len), DECODING_ACTIVE_SEQUENCE_INDICATOR)
+    positions = jnp.broadcast_to(jnp.arange(seq_len)[None], (batch, seq_len))
+
+    def loss_fn(dec, emb):
+      out, _, _ = dec(
+          emb, ids, positions, decoder_segment_ids=segment_ids, deterministic=True, model_mode=MODEL_MODE_TRAIN
+      )
+      return jnp.sum(out.astype(jnp.float32) ** 2)
+
+    loss, grads = nnx.value_and_grad(loss_fn, argnums=(0, 1))(decoder, shared_embedding)
+    self.assertTrue(bool(jnp.isfinite(loss)))
+    grad_leaves = jax.tree.leaves(grads)
+    self.assertGreater(len(grad_leaves), 0)
+    self.assertTrue(
+        all(bool(jnp.all(jnp.isfinite(g))) for g in grad_leaves), "deepseek4 decoder gradient has non-finite entries"
+    )
+    self.assertTrue(
+        any(bool(jnp.any(g != 0)) for g in grad_leaves), "deepseek4 decoder backward produced all-zero gradients"
+    )
 
   def test_scan_init_builds_prefix_and_scanned_blocks(self):
     """scan init builds first_num_hash_layers unrolled prefix layers + a scanned block stack."""
@@ -1093,6 +1170,30 @@ class TestNNXDecoderDeepseek4(unittest.TestCase):
     for i in range(cfg.first_num_hash_layers):
       self.assertTrue(hasattr(decoder, f"layers_{i}"))
     # num_decoder_layers=5, first_num_hash_layers=3 -> (5-3)//2 = 1 scanned HCA/CSA block
+    self.assertIsNotNone(decoder.scanned_blocks)
+
+  def test_scan_init_odd_non_prefix_layers_raises(self):
+    """scan init with an ODD non-prefix layer count must raise AssertionError (no silent drop).
+
+    num_decoder_layers=6, first_num_hash_layers=3 -> (6-3)=3 is odd. The DeepSeek-V4 scanned body
+    pairs HCA/CSA layers via `// 2`, which would silently drop the trailing layer without the guard
+    in NNXDecoder._init_scanned_deepseek4.
+    """
+    cfg = self._make_ds4_config(scan_layers=True, num_decoder_layers=6, first_num_hash_layers=3)
+    mesh = _make_mesh(cfg)
+    with self.assertRaises(AssertionError):
+      NNXDecoder(config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=0, dropout=1))
+
+  def test_scan_init_even_non_prefix_layers_constructs(self):
+    """scan init with an EVEN non-prefix layer count still constructs (companion to the odd guard).
+
+    num_decoder_layers=5, first_num_hash_layers=3 -> (5-3)=2 is even -> the guard passes and one
+    scanned HCA/CSA block is built.
+    """
+    cfg = self._make_ds4_config(scan_layers=True, num_decoder_layers=5, first_num_hash_layers=3)
+    mesh = _make_mesh(cfg)
+    decoder = NNXDecoder(config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=0, dropout=1))
+    self.assertEqual(decoder.num_prefix_layers, 3)
     self.assertIsNotNone(decoder.scanned_blocks)
 
   def test_non_scan_init_builds_deepseek4_layers(self):
@@ -1113,10 +1214,12 @@ class TestNNXDecoderDeepseek4(unittest.TestCase):
     global layer_idx + decoder_input_tokens). Runs on CPU with dense MoE (sparse_matmul=False).
     """
     cfg = self._make_ds4_config(scan_layers=False)
-    decoder, logits, expected = self._build_and_run(cfg)
+    decoder, logits, expected, aot_logits = self._build_and_run(cfg)
     self.assertEqual(logits.shape, expected)
-    self.assertTrue(jnp.all(jnp.isfinite(logits)))
+    self._assert_forward_is_real(logits, aot_logits, expected)
+    self.assertTrue(jnp.all(jnp.isfinite(logits)))  # secondary
     self.assertTrue(hasattr(decoder, "layers_0"))
+    self._assert_decoder_backward_is_real(cfg)
 
   def test_forward_scan(self):
     """deepseek4 scan forward (unrolled hash-routing prefix + scanned HCA/CSA blocks).
@@ -1125,9 +1228,11 @@ class TestNNXDecoderDeepseek4(unittest.TestCase):
     unscanned, then the alternating HCA(128)/CSA(4) blocks run via _apply_layers_sequentially.
     """
     cfg = self._make_ds4_config(scan_layers=True)
-    _, logits, expected = self._build_and_run(cfg)
+    _, logits, expected, aot_logits = self._build_and_run(cfg)
     self.assertEqual(logits.shape, expected)
-    self.assertTrue(jnp.all(jnp.isfinite(logits)))
+    self._assert_forward_is_real(logits, aot_logits, expected)
+    self.assertTrue(jnp.all(jnp.isfinite(logits)))  # secondary
+    self._assert_decoder_backward_is_real(cfg)
 
 
 class TestNNXPipelineStages(unittest.TestCase):
@@ -1215,11 +1320,95 @@ class TestNNXPipelineStages(unittest.TestCase):
     out_remat = self._run_stage(NNXScannedPipelineStage, jax.checkpoint_policies.nothing_saveable)
     np.testing.assert_allclose(np.array(out_no_remat), np.array(out_remat), rtol=1e-5, atol=1e-5)
 
+  def _stage_value_and_grad(self, stage_cls, apply_remat, remat_policy, num_layers=2, config=None, use_mesh=False):
+    """Builds a pipeline stage (fixed seed) and returns (loss, input_grad, param_grads) for
+    ``loss = sum(stage(x)**2)``.
+
+    Differentiation uses ``nnx.value_and_grad`` over ``(inputs, stage)`` so the stateful stage
+    (rng/kv state) is threaded correctly and gradients flow to BOTH the inputs and every stage Param.
+    The fixed seed means the remat and no-remat builds share identical params, so a real backward
+    through the per-stage ``jax.checkpoint`` must reproduce the no-remat loss AND gradients exactly:
+    remat only trades activation storage for recomputation, it never changes the math.
+
+    use_mesh builds + differentiates inside the device mesh + logical axis_rules -- required for
+    host-offload, where ``jax.device_put(params, Space.Device)`` pins the exact param sharding (see
+    _run_stage).
+    """
+    cfg = config if config is not None else self.cfg
+    mesh = _make_mesh(cfg) if config is not None else self.mesh
+
+    def _build_and_grad():
+      stage = stage_cls(
+          NNXDecoderLayer,
+          num_layers,
+          cfg,
+          mesh,
+          None,
+          MODEL_MODE_TRAIN,
+          rngs=nnx.Rngs(params=0, dropout=1),
+          remat_policy=remat_policy,
+          apply_remat=apply_remat,
+      )
+      inputs, segment_ids, positions = self._inputs(cfg)
+
+      def loss_fn(x, module):
+        out = module(x, segment_ids, positions, True, MODEL_MODE_TRAIN)
+        out = out[0] if isinstance(out, tuple) else out
+        return jnp.sum(out.astype(jnp.float32) ** 2)
+
+      loss, (input_grad, param_grads) = nnx.value_and_grad(loss_fn, argnums=(0, 1))(inputs, stage)
+      return loss, input_grad, param_grads
+
+    if use_mesh:
+      with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
+        return _build_and_grad()
+    return _build_and_grad()
+
+  def _assert_stage_grad_parity(self, stage_cls, num_layers=2):
+    """remat vs no-remat: identical loss + gradients (wrt inputs AND params), plus a real (nonzero)
+    backward. Compares value_and_grad between the remat and no-remat code paths."""
+    loss_ref, xgrad_ref, pgrad_ref = self._stage_value_and_grad(
+        stage_cls, apply_remat=False, remat_policy=None, num_layers=num_layers
+    )
+    loss_remat, xgrad_remat, pgrad_remat = self._stage_value_and_grad(
+        stage_cls, apply_remat=True, remat_policy=jax.checkpoint_policies.nothing_saveable, num_layers=num_layers
+    )
+    # Loss parity.
+    np.testing.assert_allclose(np.array(loss_remat), np.array(loss_ref), rtol=1e-2, atol=1e-2)
+    # Input-gradient parity + a real (nonzero) backward signal.
+    np.testing.assert_allclose(np.array(xgrad_remat), np.array(xgrad_ref), rtol=1e-2, atol=1e-2)
+    self.assertTrue(bool(jnp.any(xgrad_remat != 0)), "input gradient is all-zero -> backward did not run")
+    # Per-Param gradient parity across the whole pytree (structure + values + a nonzero signal).
+    ref_leaves = jax.tree_util.tree_leaves(pgrad_ref)
+    remat_leaves = jax.tree_util.tree_leaves(pgrad_remat)
+    self.assertGreater(len(ref_leaves), 0)
+    self.assertEqual(len(ref_leaves), len(remat_leaves), "param-grad pytrees differ in leaf count")
+    self.assertTrue(any(bool(jnp.any(g != 0)) for g in remat_leaves), "all param grads zero -> backward did not run")
+    for g_ref, g_remat in zip(ref_leaves, remat_leaves):
+      self.assertEqual(g_ref.shape, g_remat.shape)
+      np.testing.assert_allclose(np.array(g_ref), np.array(g_remat), rtol=1e-2, atol=1e-2)
+
+  def test_sequential_stage_remat_grad_parity(self):
+    """Backward parity: a sequential stage's per-stage remat must reproduce the no-remat loss and
+    gradients (wrt inputs AND params). jax.checkpoint recomputes activations in the backward pass but
+    is mathematically transparent, so value_and_grad must match."""
+    self._assert_stage_grad_parity(NNXSequentialPipelineStage)
+
+  def test_scanned_stage_remat_grad_parity(self):
+    """Backward parity for the scanned pipeline stage (remat inside the jax.lax.scan body): remat vs
+    no-remat must yield identical loss and gradients (wrt inputs AND params)."""
+    self._assert_stage_grad_parity(NNXScannedPipelineStage)
+
   def test_single_layer_stage_remat_is_output_transparent(self):
     """num_layers_per_pipeline_stage==1: a 1-layer stage with remat must match the no-remat output."""
     out_no_remat = self._run_stage(NNXSequentialPipelineStage, None, num_layers=1)
     out_remat = self._run_stage(NNXSequentialPipelineStage, jax.checkpoint_policies.nothing_saveable, num_layers=1)
     np.testing.assert_allclose(np.array(out_no_remat), np.array(out_remat), rtol=1e-5, atol=1e-5)
+
+  def test_single_layer_stage_remat_grad_parity(self):
+    """num_layers_per_pipeline_stage==1: BACKWARD parity for the single-layer stage remat path (a
+    distinct builder branch). remat vs no-remat must yield identical loss + gradients."""
+    self._assert_stage_grad_parity(NNXSequentialPipelineStage, num_layers=1)
 
   @pytest.mark.tpu_only
   def test_remat_with_host_offload_is_output_transparent(self):
@@ -1237,6 +1426,35 @@ class TestNNXPipelineStages(unittest.TestCase):
         NNXSequentialPipelineStage, jax.checkpoint_policies.nothing_saveable, config=offload_cfg, use_mesh=True
     )
     np.testing.assert_allclose(np.array(plain), np.array(offloaded), rtol=1e-5, atol=1e-5)
+
+  @pytest.mark.tpu_only
+  def test_remat_with_host_offload_grad_is_transparent(self):
+    """BACKWARD parity for per-stage remat + params-only host-offload: the loss AND gradients (wrt
+    inputs and every Param) with parameter_memory_host_offload must match the no-offload/no-remat
+    path -- host-offload only moves where params live, it must not change the math.
+
+    tpu_only for the same reason as the forward host-offload test: jax.device_put(..., device_space())
+    targets TPU host memory; on CPU fake-multi-device it pins params to one device and breaks sharding.
+    """
+    offload_cfg = _make_config(parameter_memory_host_offload=True)
+    loss_ref, xgrad_ref, pgrad_ref = self._stage_value_and_grad(
+        NNXSequentialPipelineStage, apply_remat=False, remat_policy=None, config=offload_cfg, use_mesh=True
+    )
+    loss_off, xgrad_off, pgrad_off = self._stage_value_and_grad(
+        NNXSequentialPipelineStage,
+        apply_remat=True,
+        remat_policy=jax.checkpoint_policies.nothing_saveable,
+        config=offload_cfg,
+        use_mesh=True,
+    )
+    np.testing.assert_allclose(np.array(loss_off), np.array(loss_ref), rtol=1e-2, atol=1e-2)
+    np.testing.assert_allclose(np.array(xgrad_off), np.array(xgrad_ref), rtol=1e-2, atol=1e-2)
+    ref_leaves = jax.tree_util.tree_leaves(pgrad_ref)
+    off_leaves = jax.tree_util.tree_leaves(pgrad_off)
+    self.assertEqual(len(ref_leaves), len(off_leaves), "param-grad pytrees differ in leaf count")
+    self.assertTrue(any(bool(jnp.any(g != 0)) for g in off_leaves), "all param grads zero -> backward did not run")
+    for g_ref, g_off in zip(ref_leaves, off_leaves):
+      np.testing.assert_allclose(np.array(g_ref), np.array(g_off), rtol=1e-2, atol=1e-2)
 
 
 class TestNNXPerStageRematApplied(unittest.TestCase):

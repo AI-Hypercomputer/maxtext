@@ -96,6 +96,23 @@ def _simple_factory(config, mesh):
   return factory
 
 
+def _pipeline_value_and_grad(config, mesh):
+  """Builds the pipeline (fixed init seed) and returns (loss, grads) for a sum-of-squares loss
+  differentiated wrt the pipeline params. Same seed across calls -> identical params, so two configs
+  that differ only by a numerically-transparent flag (e.g. remat) must yield matching loss + grads."""
+  inputs, seg, positions = _inputs(config)
+  my_pipeline = pipeline.create_pipeline(config=config, layers=_simple_factory(config, mesh), mesh=mesh)
+  with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
+    params = my_pipeline.init(jax.random.PRNGKey(0), inputs, seg, positions, True, MODEL_MODE_TRAIN)
+
+    def loss_fn(p):
+      out = my_pipeline.apply(p, inputs, seg, positions, True, MODEL_MODE_TRAIN)
+      return jnp.sum(out.astype(jnp.float32) ** 2)
+
+    loss, grads = jax.value_and_grad(loss_fn)(params)
+  return loss, grads
+
+
 # A non_trainable variable type: not Param, not Intermediate, not RngState -> lands in the
 # pipeline's catch-all partition (mirrors moe.Tid2EidVar, the DeepSeek-V4 hash-routing table).
 class _NonTrainableVar(nnx.Variable):
@@ -121,13 +138,36 @@ class TestNNXPipelineForward(unittest.TestCase):
     self._assert_ok(_make_pipeline_config(ag_per_repeat=True, num_layers=8, num_micro=8))
 
 
-class TestNonTrainablePartitioning(unittest.TestCase):
-  """Mechanism-level guards for the non_trainable migration fix (pipeline.py).
+@_NEEDS_4_DEVICES
+class TestNNXPipelineBackward(unittest.TestCase):
+  """Backward coverage: value_and_grad through the non-circular NNX pipeline on 4 fake CPU devices.
 
-  The prior code asserted the pipeline's catch-all partition was ONLY nnx.RngState, crashing any
-  model with a non_trainable variable (e.g. moe.Tid2EidVar). The fix relies on two invariants,
-  tested directly here (no device mesh needed). End-to-end non_trainable-through-pipeline requires a
-  real DeepSeek-V4 layer with sharding metadata and is exercised on TPU.
+  The forward-only smoke tests never exercised autodiff through the schedule. This locks that a real
+  backward runs end-to-end: the loss is finite, gradients are finite, and at least one gradient is
+  nonzero (the cotangent actually reached the stage parameters, i.e. the backward was not DCE'd)."""
+
+  def test_noncircular_pipeline_backward(self):
+    config = _make_pipeline_config(ag_per_repeat=False, num_layers=4, num_micro=4)
+    devices_array = maxtext_utils.create_device_mesh(config)
+    mesh = Mesh(devices_array, config.mesh_axes)
+    loss, grads = _pipeline_value_and_grad(config, mesh)
+
+    self.assertTrue(bool(jnp.isfinite(loss)))
+    grad_leaves = jax.tree_util.tree_leaves(grads)
+    self.assertGreater(len(grad_leaves), 0)
+    self.assertTrue(all(bool(jnp.all(jnp.isfinite(g))) for g in grad_leaves), "pipeline gradient has non-finite entries")
+    self.assertTrue(
+        any(bool(jnp.any(g != 0)) for g in grad_leaves), "all pipeline gradients are zero -> backward did not run"
+    )
+
+
+class TestNonTrainablePartitioning(unittest.TestCase):
+  """Unit guards for the two building blocks of the pipeline's non_trainable handling (pipeline.py),
+  tested directly without running a pipeline (no device mesh needed):
+    1. the 4-way state split routes a non_trainable var to the broadcast catch-all (non-circular path);
+    2. advance_rng_state leaves non-RngState leaves untouched (circular carry path).
+  Together these let a non_trainable collection (e.g. moe.Tid2EidVar, DeepSeek-V4 hash routing) flow
+  through the pipeline scan. End-to-end forward+backward is covered by TestNonTrainablePipelineBackward.
   """
 
   def test_advance_rng_state_preserves_non_rng_leaves(self):
@@ -173,6 +213,98 @@ class TestNNXCircularRepeatRemat(unittest.TestCase):
     out_on = _run_pipeline(cfg_on, _simple_factory(cfg_on, mesh))
     out_off = _run_pipeline(cfg_off, _simple_factory(cfg_off, mesh))
     np.testing.assert_allclose(np.array(out_on), np.array(out_off), rtol=1e-5, atol=1e-5)
+
+  def test_repeat_remat_grad_parity(self):
+    """Remat must be transparent in the BACKWARD pass too, not just the forward output: the
+    circular pipeline with repeat-level remat on vs off must produce matching loss AND gradients."""
+    cfg_on = _make_pipeline_config(
+        ag_per_repeat=True, num_layers=8, num_micro=8, set_remat_policy_on_pipeline_iterations=True
+    )
+    cfg_off = _make_pipeline_config(
+        ag_per_repeat=True, num_layers=8, num_micro=8, set_remat_policy_on_pipeline_iterations=False
+    )
+    devices_array = maxtext_utils.create_device_mesh(cfg_on)
+    mesh = Mesh(devices_array, cfg_on.mesh_axes)
+
+    loss_on, grads_on = _pipeline_value_and_grad(cfg_on, mesh)
+    loss_off, grads_off = _pipeline_value_and_grad(cfg_off, mesh)
+
+    np.testing.assert_allclose(np.array(loss_on), np.array(loss_off), rtol=1e-4, atol=1e-4)
+    on_leaves = jax.tree_util.tree_leaves(grads_on)
+    off_leaves = jax.tree_util.tree_leaves(grads_off)
+    self.assertEqual(len(on_leaves), len(off_leaves))
+    self.assertGreater(len(on_leaves), 0)
+    for g_on, g_off in zip(on_leaves, off_leaves):
+      np.testing.assert_allclose(np.array(g_on), np.array(g_off), rtol=1e-4, atol=1e-4)
+    # Guard against a vacuous pass (all-zero grads would trivially match).
+    self.assertTrue(any(bool(jnp.any(g != 0)) for g in on_leaves), "all gradients are zero -> backward did not run")
+
+
+class _StageWithNonTrainable(nnx.Module):
+  """A pipeline stage carrying a non_trainable variable (like moe.Tid2EidVar, DeepSeek-V4 hash
+  routing), added into the forward.
+
+  Must return the SAME structure as the wrapped layer: SimpleDecoderLayer returns an (output, kv)
+  tuple the pipeline loop-state relies on; collapsing it to a bare array trips the shard_map. So the
+  non_trainable is folded into tuple[0] and the rest is passed through."""
+
+  def __init__(self, config, mesh, value, *, rngs):
+    self.inner = simple_layer.SimpleDecoderLayer(config=config, mesh=mesh, model_mode=MODEL_MODE_TRAIN, rngs=rngs)
+    self.nt = _NonTrainableVar(jnp.asarray(value, dtype=jnp.float32))
+
+  def __call__(self, inputs, decoder_segment_ids, decoder_positions, deterministic, model_mode, **kwargs):
+    res = self.inner(inputs, decoder_segment_ids, decoder_positions, deterministic, model_mode, **kwargs)
+    if isinstance(res, tuple):
+      return (res[0] + self.nt[...],) + tuple(res[1:])
+    return res + self.nt[...]
+
+
+@_NEEDS_4_DEVICES
+class TestNonTrainablePipelineBackward(unittest.TestCase):
+  """A pipeline stage carrying a non_trainable variable must run forward AND backward, with finite,
+  nonzero param gradients: the non_trainable collection is broadcast (non-circular) / carried
+  (circular) through the iteration scan and must not break autodiff to the trainable params.
+
+  Runs on CPU: pipeline parallelism needs 1 device per stage (ici_pipeline_parallelism=4 -> 4), so a
+  single CPU is split into 4 simulated XLA devices via XLA_FLAGS=--xla_force_host_platform_device_count=4
+  (see the module header). @_NEEDS_4_DEVICES skips it when that flag is not set."""
+
+  def _assert_backward_ok(self, config):
+    """Init the pipeline (non_trainable stage), value_and_grad a sum-of-squares loss, assert loss +
+    param grads are finite and at least one is nonzero (backward ran with non_trainable present)."""
+    devices_array = maxtext_utils.create_device_mesh(config)
+    mesh = Mesh(devices_array, config.mesh_axes)
+    inputs, seg, positions = _inputs(config)
+
+    def factory(stage_rngs):
+      return _StageWithNonTrainable(config, mesh, 0.5, rngs=stage_rngs)
+
+    my_pipeline = pipeline.create_pipeline(config=config, layers=factory, mesh=mesh)
+    with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
+      params = my_pipeline.init(jax.random.PRNGKey(0), inputs, seg, positions, True, MODEL_MODE_TRAIN)
+
+      def loss_fn(p):
+        out = my_pipeline.apply(p, inputs, seg, positions, True, MODEL_MODE_TRAIN)
+        return jnp.sum(out.astype(jnp.float32) ** 2)
+
+      loss, grads = jax.value_and_grad(loss_fn)(params)
+
+    self.assertTrue(bool(jnp.isfinite(loss)))
+    grad_leaves = jax.tree_util.tree_leaves(grads)
+    self.assertGreater(len(grad_leaves), 0)
+    self.assertTrue(
+        all(bool(jnp.all(jnp.isfinite(g))) for g in grad_leaves), "non_trainable pipeline grad has non-finite entries"
+    )
+    self.assertTrue(
+        any(bool(jnp.any(g != 0)) for g in grad_leaves),
+        "all grads zero -> backward did not run with a non_trainable variable present",
+    )
+
+  def test_noncircular_nontrainable_backward(self):
+    self._assert_backward_ok(_make_pipeline_config(ag_per_repeat=False, num_layers=4, num_micro=4))
+
+  def test_circular_nontrainable_backward(self):
+    self._assert_backward_ok(_make_pipeline_config(ag_per_repeat=True, num_layers=8, num_micro=8))
 
 
 if __name__ == "__main__":
