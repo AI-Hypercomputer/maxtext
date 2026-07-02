@@ -814,9 +814,7 @@ def recover(
     python_vars["snapshot"] = snapshot_mgr
 
   # 1. Find currently active slices (wait if none are active)
-  min_slices = config.elastic_min_slice_count
-  if min_slices == -1:
-    min_slices = config.num_slices
+  min_slices = 1 if config.elastic_min_slice_count == -1 else config.elastic_min_slice_count
 
   _logger.info("Waiting for at least %d slices to be active for recovery...", min_slices)
   all_active_slices = elastic.wait_for_slices(
