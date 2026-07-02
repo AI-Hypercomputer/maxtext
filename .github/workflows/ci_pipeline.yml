@@ -414,5 +414,6 @@ jobs:
           fail-on-alert: true
 
       - name: Upload Updated Baseline to GCS
+        if: github.ref == 'refs/heads/main'
         run: |
           gcloud storage cp ./cache/benchmark-data.json gs://maxtext-test-assets/benchmark-data.json
