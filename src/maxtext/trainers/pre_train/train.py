@@ -958,7 +958,27 @@ def recover(
   # 4. Restore TrainState from host snapshot or active state
   if active_state is not None:
     _logger.info("[*] Resharding active state directly (device-to-device)...")
-    if isinstance(model, nn.Module):
+    if isinstance(state, train_state_nnx.TrainStateNNX):
+      model_state = nnx.state(state.model)
+      opt_state = nnx.state(state.optimizer)
+      abstract_dict = {
+          "model": nnx.to_pure_dict(model_state),
+          "optimizer": nnx.to_pure_dict(opt_state),
+      }
+      act_model_state = nnx.state(active_state.model)
+      act_opt_state = nnx.state(active_state.optimizer)
+      active_dict = {
+          "model": nnx.to_pure_dict(act_model_state),
+          "optimizer": nnx.to_pure_dict(act_opt_state),
+      }
+      restored_dict = jax.device_put(
+          active_dict, jax.tree.map(lambda x: x.sharding, abstract_dict)
+      )
+      nnx.update(state.model, restored_dict["model"])
+      nnx.update(state.optimizer, restored_dict["optimizer"])
+      restored_state = state
+      restored_step = int(state.optimizer.step.value)
+    elif isinstance(model, nn.Module):
       abstract_dict = {
           "step": state.step,
           "params": state.params,
@@ -995,7 +1015,19 @@ def recover(
     if snapshot_mgr.latest is None:
       raise RuntimeError("No snapshots available to restore from. Cannot recover.")
     restored_step = snapshot_mgr.latest.step
-    if isinstance(model, nn.Module):
+    if isinstance(state, train_state_nnx.TrainStateNNX):
+      model_state = nnx.state(state.model)
+      opt_state = nnx.state(state.optimizer)
+      abstract_dict = {
+          "model": nnx.to_pure_dict(model_state),
+          "optimizer": nnx.to_pure_dict(opt_state),
+      }
+      restored_dict = snapshot_mgr.load_pytree(abstract_dict)
+      nnx.update(state.model, restored_dict["model"])
+      nnx.update(state.optimizer, restored_dict["optimizer"])
+      restored_state = state
+      restored_step = int(state.optimizer.step.value)
+    elif isinstance(model, nn.Module):
       abstract_dict = {
           "step": state.step,
           "params": state.params,
