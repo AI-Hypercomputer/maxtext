@@ -185,5 +185,68 @@ class TestLoadParamsIntoNNX(unittest.TestCase):
     self.assertTrue(jnp.array_equal(pure["linear"]["bias"], weights["linear"]["bias"]))
 
 
+class TestMissingParamPolicy(unittest.TestCase):
+  """Absent weights must not silently zero-fill under the default policy."""
+
+  def setUp(self):
+    self.kernel = jax.ShapeDtypeStruct((2, 1), jnp.float32)
+    self.bias = jax.ShapeDtypeStruct((1,), jnp.float32)
+    self.count = jax.ShapeDtypeStruct((), jnp.uint32)
+
+  def _abstract(self):
+    return {
+        "model": {
+            "linear": {"kernel": self.kernel, "bias": self.bias},
+            "dropout": {"count": self.count},
+        }
+    }
+
+  def test_present_weights_pass_through(self):
+    abstract = self._abstract()
+    partial = {"model": {"linear": {"kernel": jnp.ones((2, 1)), "bias": jnp.full((1,), 5.0)}}}
+    out = checkpointing._populate_pure_dict_from_partial(abstract, partial)  # pylint: disable=protected-access
+    self.assertTrue(jnp.array_equal(out["model"]["linear"]["kernel"], jnp.ones((2, 1))))
+    self.assertTrue(jnp.array_equal(out["model"]["linear"]["bias"], jnp.full((1,), 5.0)))
+
+  def test_rng_dropout_absent_is_silently_defaulted(self):
+    """rngs/dropout are legitimately absent from a Linen checkpoint — default, don't error."""
+    abstract = self._abstract()
+    partial = {"model": {"linear": {"kernel": jnp.ones((2, 1)), "bias": jnp.full((1,), 5.0)}}}
+    # policy="error" but dropout absence must not raise, because it is NNX-only state.
+    out = checkpointing._populate_pure_dict_from_partial(  # pylint: disable=protected-access
+        abstract, partial, missing_param_policy="error"
+    )
+    self.assertEqual(out["model"]["dropout"]["count"].shape, ())
+
+  def test_missing_weight_raises_under_error_policy(self):
+    """A genuine missing weight (bias) must raise naming its path, not zero-fill."""
+    abstract = self._abstract()
+    partial = {"model": {"linear": {"kernel": jnp.ones((2, 1))}}}  # bias missing
+    with self.assertRaises(ValueError) as ctx:
+      checkpointing._populate_pure_dict_from_partial(  # pylint: disable=protected-access
+          abstract, partial, missing_param_policy="error"
+      )
+    self.assertIn("model/linear/bias", str(ctx.exception))
+    self.assertIn("(1,)", str(ctx.exception))  # the missing weight's expected shape
+    self.assertIn("missing parameter", str(ctx.exception))
+
+  def test_missing_weight_zero_fills_under_warn_policy(self):
+    abstract = self._abstract()
+    partial = {"model": {"linear": {"kernel": jnp.ones((2, 1))}}}  # bias missing
+    with mock.patch.object(checkpointing.max_logging, "log") as logmock:
+      out = checkpointing._populate_pure_dict_from_partial(  # pylint: disable=protected-access
+          abstract, partial, missing_param_policy="warn"
+      )
+    self.assertTrue(jnp.array_equal(out["model"]["linear"]["bias"], jnp.zeros((1,))))
+    self.assertTrue(any("missing parameter 'model/linear/bias'" in str(c) for c in logmock.call_args_list))
+
+  def test_default_policy_is_error(self):
+    """No explicit policy means error (the safe default)."""
+    abstract = self._abstract()
+    partial = {"model": {"linear": {"kernel": jnp.ones((2, 1))}}}  # bias missing
+    with self.assertRaises(ValueError):
+      checkpointing._populate_pure_dict_from_partial(abstract, partial)  # pylint: disable=protected-access
+
+
 if __name__ == "__main__":
   unittest.main()

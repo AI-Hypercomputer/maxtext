@@ -69,6 +69,7 @@ class TrainStateNNX(nnx.Module):
 # NNX-only rngs/dropout state is dropped (Linen never had it).
 
 _NNX_RNG_STATE_KEYS = ("rngs", "dropout")
+NNX_RNG_STATE_KEYS = _NNX_RNG_STATE_KEYS
 
 
 def _cast_step(step, dtype):

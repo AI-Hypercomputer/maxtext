@@ -194,23 +194,53 @@ def _default_for_sds(sds):
   return jax.jit(_make, out_shardings=sharding)()
 
 
-def _populate_pure_dict_from_partial(abstract_pure, partial_concrete):
-  """Fills `abstract_pure` with values from `partial_concrete` (by path), defaulting the rest.
+def _missing_param_policy(config):
+  """Reads how to handle weights present in the model but absent from the checkpoint."""
+  return getattr(config, "checkpoint_missing_param_policy", "error") if config is not None else "error"
 
-  Paths present in `partial_concrete` take the restored value; paths absent from
-  it
-  (NNX-only state the Linen checkpoint never had) get `_default_for_sds`.
+
+def _populate_pure_dict_from_partial(
+    abstract_pure, partial_concrete, missing_param_policy="error", path=(), in_rng=False
+):
+  """Fills `abstract_pure` with values from `partial_concrete` (by path), handling the rest by policy.
+
+  Paths present in `partial_concrete` take the restored value. Paths absent from
+  it fall into two cases:
+    - NNX-only rngs/dropout state the Linen checkpoint never carried: silently
+      filled with `_default_for_sds` (a deterministic base RNG / zeros).
+    - a genuinely missing weight (present in the model but not on disk): governed
+      by `missing_param_policy` -- "error" raises naming the path and shape,
+      "warn" logs a warning and zero-fills. Zero-filled weights are silent
+      accuracy loss, so "error" is the default.
   """
   if isinstance(abstract_pure, dict):
     return {
         k: _populate_pure_dict_from_partial(
             v,
             partial_concrete.get(k) if isinstance(partial_concrete, dict) else None,
+            missing_param_policy,
+            path + (k,),
+            in_rng or k in train_state_nnx.NNX_RNG_STATE_KEYS,
         )
         for k, v in abstract_pure.items()
     }
   if partial_concrete is not None and not isinstance(partial_concrete, dict):
     return partial_concrete
+
+  # Absent leaf. rngs/dropout are expected to be absent from a Linen-layout
+  # checkpoint; anything else is a real weight the checkpoint should have had.
+  if not in_rng:
+    key = "/".join(str(p) for p in path)
+    shape = getattr(abstract_pure, "shape", "?")
+    dtype = getattr(abstract_pure, "dtype", "?")
+    if missing_param_policy == "warn":
+      max_logging.log(f"WARNING: checkpoint missing parameter '{key}' ({shape} {dtype}); zero-filling.")
+    else:
+      raise ValueError(
+          f"Checkpoint is missing parameter '{key}' (model expects {shape} {dtype}).\n"
+          "This weight would otherwise be silently zero-filled. Verify the checkpoint matches "
+          "the model architecture, or set checkpoint_missing_param_policy=warn to zero-fill and continue."
+      )
   return _default_for_sds(abstract_pure)
 
 
@@ -220,11 +250,13 @@ def _load_linen_checkpoint_into_nnx(
     checkpoint_storage_concurrent_gb,
     use_ocdbt,
     use_zarr3,
+    missing_param_policy="error",
 ):
   """Restores a Linen-layout checkpoint into an NNX state (pure_nnx resume).
 
   Restores against a Linen-shape abstract, reshapes back via
-  `from_linen_checkpoint_dict`, then fills NNX-only rngs/dropout with defaults.
+  `from_linen_checkpoint_dict`, then fills NNX-only rngs/dropout with defaults and
+  handles any genuinely-missing weight per `missing_param_policy`.
   """
   max_logging.log(f"Restoring Linen-layout checkpoint into NNX state at {path}")
   nnx_abstract_pure = abstract_nnx_state.to_pure_dict()
@@ -241,7 +273,7 @@ def _load_linen_checkpoint_into_nnx(
   restored = ocp.args.PyTreeRestore(item=linen_abstract, restore_args=restore_args, partial_restore=True)
   restored = ckptr.restore(epath.Path(path), args=restored)
   partial_nnx = train_state_nnx.from_linen_checkpoint_dict(restored)
-  return _populate_pure_dict_from_partial(nnx_abstract_pure, partial_nnx)
+  return _populate_pure_dict_from_partial(nnx_abstract_pure, partial_nnx, missing_param_policy)
 
 
 def _restore_emergency_linen_checkpoint_into_nnx(
@@ -249,6 +281,7 @@ def _restore_emergency_linen_checkpoint_into_nnx(
     step,
     abstract_nnx_state,
     map_to_pspec,
+    missing_param_policy="error",
 ):
   """Restores an emergency Linen-layout checkpoint into an NNX state."""
   max_logging.log(f"Restoring emergency Linen-layout checkpoint into NNX state at step {step}")
@@ -262,7 +295,7 @@ def _restore_emergency_linen_checkpoint_into_nnx(
   )
   restored = checkpoint_manager.restore(step, args=Composite(state=checkpoint_args)).state
   partial_nnx = train_state_nnx.from_linen_checkpoint_dict(restored)
-  return _populate_pure_dict_from_partial(nnx_abstract_pure, partial_nnx)
+  return _populate_pure_dict_from_partial(nnx_abstract_pure, partial_nnx, missing_param_policy)
 
 
 def _rebuild_nnx_with_values(abstract_nnx_state, concrete_weights):
@@ -805,6 +838,7 @@ def load_state_if_possible(
             checkpoint_storage_concurrent_gb,
             use_ocdbt,
             use_zarr3,
+            _missing_param_policy(maxtext_config),
         )
         return ({"items": restored_nnx}, None)
 
@@ -818,6 +852,7 @@ def load_state_if_possible(
             step,
             abstract_unboxed_pre_state,
             map_to_pspec,
+            _missing_param_policy(maxtext_config),
         )
         return (
             restored,

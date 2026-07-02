@@ -56,6 +56,8 @@ enable_checkpointing: true
 save_checkpoint_on_completion: true
 async_checkpointing: true
 checkpoint_period: 10_000
+# How to handle a weight present in the model but missing from a restored checkpoint: "error" or "warn" (zero-fill).
+checkpoint_missing_param_policy: "error"
 max_num_checkpoints_to_keep: None
 enable_continuous_checkpointing: false
 # enables one replica to read the ckpt then broadcast to the rest
