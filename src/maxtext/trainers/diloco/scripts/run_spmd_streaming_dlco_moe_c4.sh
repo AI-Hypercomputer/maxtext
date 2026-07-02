@@ -124,7 +124,6 @@ CMD="export PYTHONPATH=/app/src:\$PYTHONPATH && unset XLA_FLAGS && export LIBTPU
              load_balance_loss_weight=${LOAD_BALANCE_LOSS_WEIGHT} \
              enable_diloco=true \
              enable_streaming_diloco=${ENABLE_STREAMING_DILOCO} \
-             pure_nnx=true \
              dcn_diloco_parallelism=${NUM_SLICES} \
              diloco_sync_period=${DILOCO_SYNC_PERIOD} \
              diloco_outer_lr=${DILOCO_OUTER_LR} \

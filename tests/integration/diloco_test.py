@@ -432,19 +432,6 @@ class DiLoCoTest(unittest.TestCase):
     res = manipulator.apply_flat_fragment(abstract_tree, fragment_idx=1, flat_fragment=frag)
     self.assertIsInstance(res["decoder"]["layers"], jax.ShapeDtypeStruct)
 
-  def test_diloco_requires_pure_nnx(self):
-    """Tests that enable_diloco=True raises ValueError if pure_nnx=False."""
-    with self.assertRaises(ValueError) as ctx:
-      initialize_pydantic(
-          [
-              "",
-              get_test_config_path(),
-              "enable_diloco=true",
-              "pure_nnx=false",
-          ]
-      )
-    self.assertIn("enable_diloco=True requires pure_nnx=True", str(ctx.exception))
-
   def test_diloco_checkpoint_saving_and_normal_resume(self):
     """Tests that DiLoCo checkpoints save outer params under params/params for direct normal pre-training resume."""
     temp_dir = tempfile.mkdtemp()

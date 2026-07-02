@@ -30,7 +30,6 @@ python3 -m maxtext.utils.layerwise_quantization  src/maxtext/configs/base.yml \
 
 """
 
-import functools
 import os
 from typing import Any, Sequence
 
@@ -43,14 +42,12 @@ import jax.numpy as jnp
 from maxtext.common import common_types
 from maxtext.common import checkpointing
 from maxtext.layers import quantizations
-from maxtext.models import deepseek, models
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import maxtext_utils_nnx
 from maxtext.utils import model_creation_utils
 import orbax.checkpoint as ocp
-from tqdm import tqdm
 from maxtext.configs import pyconfig
 
 IGNORE = ocp.PLACEHOLDER
@@ -166,123 +163,20 @@ class LayerwiseQuantization:
     self.config = config
     self.rng = rng
 
-    # The Linen path runs layer-by-layer (memory-efficient for big DeepSeek
-    # models) and is DeepSeek-specific because it relies on the per-layer
-    # `DeepSeek*ToLinen` wrappers. The NNX path runs whole-model convert
-    # forward and is model-agnostic — see `_load_and_quantize_nnx`.
-    if not config.pure_nnx:
-      assert config.decoder_block == common_types.DecoderBlockType.DEEPSEEK, (
-          f"Linen layerwise quantization only supports {common_types.DecoderBlockType.DEEPSEEK}, "
-          f"got {config.decoder_block}."
-      )
     # Mesh definition
     devices_array = maxtext_utils.create_device_mesh(config=config)
     self._mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
 
     self.quant = quantizations.configure_quantization(config)
-    if config.pure_nnx:
-      # NNX takes a separate code path that builds the model via from_pretrained;
-      # no Linen abstract-state bookkeeping is needed here.
-      self.unboxed_abstract_state = None
-      return
-    model = models.transformer_as_linen(
-        config, mesh=self._mesh, quant=self.quant, model_mode=common_types.MODEL_MODE_TRAIN
-    )
-    init_state_fn = functools.partial(maxtext_utils.init_initial_state, model, None, self.config, False, self.rng)
-
-    self.unboxed_abstract_state, _, _ = maxtext_utils.get_abstract_state(self.config, self._mesh, init_state_fn, False)
+    # NNX builds the model via from_pretrained; no Linen abstract-state
+    # bookkeeping is needed here.
+    self.unboxed_abstract_state = None
 
   def load_and_quantize(self) -> None:
     """
     Load parameters layer by layer and quantize them.
     """
-    if self.config.pure_nnx:
-      self._load_and_quantize_nnx()
-      return
-    quantized_params = {}
-    quantized_params["params"] = {"decoder": {}}
-    quantized_params["aqt"] = {"decoder": {}}
-    config = self.config
-    self.quant.quant_mode = quantizations.get_quant_mode("convert")
-    model_mode = common_types.MODEL_MODE_PREFILL
-    _, rng_quant_params = jax.random.split(self.rng)
-
-    layers = [
-        deepseek.DeepSeekDenseLayerToLinen(
-            config=config, mesh=self._mesh, quant=self.quant, model_mode=model_mode, rngs=nnx.Rngs(self.rng)
-        ),
-        deepseek.DeepSeekMoELayerToLinen(
-            config=config, mesh=self._mesh, quant=self.quant, model_mode=model_mode, rngs=nnx.Rngs(self.rng)
-        ),
-    ]
-    layer_prefixes = [
-        "dense_layers",
-        "moe_layers",
-    ]
-    num_moe_layers = config.num_decoder_layers - config.first_num_dense_layers
-    num_layers_list = [
-        config.first_num_dense_layers,
-        num_moe_layers,
-    ]
-
-    def model_apply(_p, _rng, layer):
-      return layer.apply(
-          _p | {"aqt": {}},
-          jnp.ones((1, self.config.max_prefill_predict_length, self.config.base_emb_dim), dtype=jnp.int32),
-          None,
-          jnp.zeros((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
-          True,
-          model_mode=model_mode,
-          rngs={"params": _rng},
-          mutable=True,
-      )
-
-    for layer, num_layers, layer_prefix in zip(layers, num_layers_list, layer_prefixes):
-      for index in tqdm(range(num_layers)):
-        layer_name = f"{layer_prefix}_{index}"
-        max_logging.log(f"Processing layer: {layer_name}")
-
-        params = self._load_layer(layer_name)
-        params["params"] = params["params"]["decoder"][layer_name]
-
-        _, new_vars = model_apply(params, rng_quant_params, layer)
-
-        if "aqt" not in new_vars:
-          max_logging.log(
-              f"Warning: 'aqt' not found in new_vars for {layer_name}. Skipping AQT processing for this layer."
-          )
-          quantized_params["params"]["decoder"][layer_name] = params["params"]  # Keep original params
-          continue
-
-        aqt_vars = new_vars["aqt"]
-
-        try:
-          removed_params = remove_quantized_params(params["params"], aqt_vars)
-          quantized_params["params"]["decoder"][layer_name] = removed_params
-        except Exception as e:
-          max_logging.log(f"ERROR: Failed to remove quantized params for {layer_name}: {e}")
-          max_logging.log(f"Dumping params['params'] keys for {layer_name}:")
-          jax.tree_util.tree_map_with_path(
-              lambda path, _: max_logging.log(f"  {jax.tree_util.keystr(path)}"), params["params"]
-          )
-          max_logging.log(f"Dumping new_vars['aqt'] keys for {layer_name}:")
-          jax.tree_util.tree_map_with_path(lambda path, _: max_logging.log(f"  {jax.tree_util.keystr(path)}"), aqt_vars)
-          raise
-
-        # Restructure the aqt_vars for this layer to match pure Linen format for saving
-        if layer_prefix == "moe_layers":
-          structured_aqt = insert_deepseekmoeblock_scope(aqt_vars)
-        else:
-          structured_aqt = aqt_vars
-        quantized_params["aqt"]["decoder"][layer_name] = structured_aqt
-
-    unquantized_layers = ["decoder_norm", "logits_dense"]
-    for unquantized_layer in unquantized_layers:
-      params = self._load_layer(unquantized_layer)
-      quantized_params["params"]["decoder"][unquantized_layer] = params["params"]["decoder"][unquantized_layer]
-    quantized_params["params"]["token_embedder"] = self._load_layer("token_embedder")["params"]["token_embedder"]
-
-    maxtext_utils.save_quantized_checkpoint_if_configured(self.config, quantized_params)
+    self._load_and_quantize_nnx()
 
   def _load_and_quantize_nnx(self) -> None:
     """Whole-model NNX convert: load full-precision via TRAIN-mode `from_pretrained`,

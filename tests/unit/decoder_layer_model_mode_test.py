@@ -80,7 +80,6 @@ _COMMON = {
     "weight_dtype": "float32",
     "enable_checkpointing": False,
     "skip_jax_distributed_system": True,
-    "pure_nnx": True,
 }
 
 _DEEPSEEK = {

@@ -168,13 +168,9 @@ def stitch_and_save_checkpoints(
   # 1. Generate full target model with initial random weights
   max_logging.log("Generating target omni model from config with initial random weights...")
   with jax.set_mesh(mesh):
-    if config.pure_nnx:
-      rngs = maxtext_utils_nnx.create_nnx_rngs(config, rng_key=init_rng)
-      model = model_creation_utils.from_config(config, mesh=mesh, rngs=rngs)
-      init_params = nnx.state(model, nnx.Param)
-    else:
-      model = model_creation_utils.from_config(config, jax.devices())
-      _, _, init_params = maxtext_utils.init_initial_state(model, None, config, is_training=False, key=init_rng)
+    rngs = maxtext_utils_nnx.create_nnx_rngs(config, rng_key=init_rng)
+    model = model_creation_utils.from_config(config, mesh=mesh, rngs=rngs)
+    init_params = nnx.state(model, nnx.Param)
 
   # Convert to pure pytree for easier processing
   is_nnx = isinstance(init_params, nnx.State)

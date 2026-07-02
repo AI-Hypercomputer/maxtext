@@ -130,7 +130,6 @@ CMD="export PYTHONPATH=/app/src:\$PYTHONPATH && unset XLA_FLAGS && export LIBTPU
              max_target_length=${MAX_TARGET_LENGTH} \
              enable_diloco=true \
              enable_streaming_diloco=true \
-             pure_nnx=true \
              num_diloco_fragments=${DILOCO_NUM_FRAGMENTS} \
              use_sequential_layers=${DILOCO_USE_SEQUENTIAL_LAYERS} \
              num_communication_overlapping_steps=${DILOCO_NUM_COMM_OVERLAP_STEPS} \

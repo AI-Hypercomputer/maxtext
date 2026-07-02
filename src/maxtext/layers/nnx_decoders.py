@@ -572,7 +572,7 @@ class NNXDecoder(nnx.Module):
         self.layers_outside_pipeline = self._create_scanned_layers(
             base_cls,
             length=remaining_layers,
-            metadata_axis_name="layers",
+            metadata_axis_name="layers_outside_pipeline",
             rngs=rngs,
         )
       else:
