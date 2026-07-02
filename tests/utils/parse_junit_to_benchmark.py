@@ -33,25 +33,23 @@ def main():
         root = tree.getroot()
         
         for testsuite in root.iter('testsuite'):
-            for testcase in testsuite.iter('testcase'):
-                name = testcase.get('name')
-                classname = testcase.get('classname')
-                time_val = float(testcase.get('time', 0.0))
-                
-                # Prefix with device to distinguish test times on different hardware
-                full_name = f"[{device.upper()}] {classname}::{name}"
-                
-                benchmarks.append({
-                    "name": full_name,
-                    "unit": "sec",
-                    "value": time_val
-                })
-                
-                total_times_by_device[device] = total_times_by_device.get(device, 0.0) + time_val
+            time_val = float(testsuite.get('time', 0.0))
+            suite_name = testsuite.get('name', basename)
+            
+            # Prefix with device to distinguish test times on different hardware
+            full_name = f"[{device.upper()}] Suite: {suite_name}"
+            
+            benchmarks.append({
+                "name": full_name,
+                "unit": "sec",
+                "value": time_val
+            })
+            
+            total_times_by_device[device] = total_times_by_device.get(device, 0.0) + time_val
 
     for device, total_time in total_times_by_device.items():
         benchmarks.append({
-            "name": f"Total {device.upper()} Test Suite Time",
+            "name": f"Total {device.upper()} Tests Duration",
             "unit": "sec",
             "value": total_time
         })
