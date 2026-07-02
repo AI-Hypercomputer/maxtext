@@ -66,8 +66,6 @@ rl:
   off_policy_steps: 0
   # System prompt injected into the agent at rollout time.
   system_prompt: ''
-  # If true, mask degenerate groups (all-zero advantages) from contributing to the loss.
-  degenerate_group_masking: true
   # Upper-bound clipping epsilon for GRPO loss; defaults to grpo_epsilon when null.
   epsilon_high: null
   # Number of model keys to chunk for resharding tensors between trainer and rollout devices.

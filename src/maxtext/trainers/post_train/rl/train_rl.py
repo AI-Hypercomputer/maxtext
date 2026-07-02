@@ -555,7 +555,6 @@ def create_rl_components(
         max_concurrency=trainer_config.rl.max_concurrency,
         off_policy_steps=trainer_config.rl.off_policy_steps,
         system_prompt=trainer_config.rl.system_prompt,
-        degenerate_group_masking=trainer_config.rl.degenerate_group_masking,
         epsilon_high=trainer_config.rl.epsilon_high,
     )
     # Instantiate the custom MaxText chat parser
