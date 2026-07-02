@@ -451,6 +451,67 @@ class CudnnTePackedSequenceDescriptorTest(unittest.TestCase):
     self.assertIs(output, descriptor_calls[1])
 
 
+class CudnnFlashJaxInferenceTest(unittest.TestCase):
+
+  def _make_attention_op(self):
+    config = types.SimpleNamespace(ici_context_autoregressive_parallelism=0)
+    mesh = types.SimpleNamespace()
+    return AttentionOp(
+        config=config,
+        mesh=mesh,
+        attention_kernel="cudnn_flash_jax",
+        max_target_length=128,
+        num_query_heads=2,
+        num_kv_heads=2,
+    )
+
+  def test_align_qkv_broadcasts_kv_batch(self):
+    attention = self._make_attention_op()
+    query = jnp.ones((8, 1, 2, 64))
+    key = jnp.ones((1, 4, 2, 64))
+    value = jnp.ones((1, 4, 2, 64))
+    with mock.patch("jax.lax.with_sharding_constraint", side_effect=lambda x, _: x):
+      _, aligned_key, aligned_value = attention._align_qkv_for_cudnn_flash(query, key, value)
+    self.assertEqual(aligned_key.shape[0], 8)
+    self.assertEqual(aligned_value.shape[0], 8)
+
+  def test_align_qkv_raises_on_invalid_batch(self):
+    attention = self._make_attention_op()
+    query = jnp.ones((8, 1, 2, 64))
+    key = jnp.ones((2, 4, 2, 64))
+    value = jnp.ones((2, 4, 2, 64))
+    with self.assertRaises(ValueError):
+      attention._align_qkv_for_cudnn_flash(query, key, value)
+
+  def test_cudnn_jax_flash_attention_broadcasts_ar_lengths(self):
+    attention = self._make_attention_op()
+    query = jnp.zeros((8, 1, 2, 64))
+    key = jnp.zeros((8, 4, 2, 64))
+    value = jnp.zeros((8, 4, 2, 64))
+    decoder_segment_ids = jnp.ones((1, 4))
+    mock_dot_product_attention = mock.Mock(
+        return_value=(jnp.zeros((8, 1, 2, 64)), jnp.zeros((8, 2)))
+    )
+    fused_attention_module = types.ModuleType("jax._src.cudnn.fused_attention_stablehlo")
+    fused_attention_module.dot_product_attention = mock_dot_product_attention
+    fused_attention_module.MaskType = types.SimpleNamespace(PADDING="padding", CAUSAL="causal")
+    with mock.patch.dict(
+        sys.modules,
+        {"jax._src.cudnn.fused_attention_stablehlo": fused_attention_module},
+    ):
+      attention.cudnn_jax_flash_attention(
+          query,
+          key,
+          value,
+          decoder_segment_ids,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
+      )
+    q_seqlen = mock_dot_product_attention.call_args.kwargs["q_seqlen"]
+    kv_seqlen = mock_dot_product_attention.call_args.kwargs["kv_seqlen"]
+    self.assertEqual(q_seqlen.shape, (8,))
+    self.assertEqual(kv_seqlen.shape, (8,))
+
+
 class AttentionTest(parameterized.TestCase):
   """Test for the Attention"""
 
