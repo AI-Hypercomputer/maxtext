@@ -782,10 +782,11 @@ def training_loop_iteration(
           "metrics": metrics,
       }
     else:
-      state_dict = {
-          "nnx_state": nnx.to_pure_dict(state),
-          "metrics": metrics,
-      }
+      model_state = nnx.state(state.model) if hasattr(state, "model") else state
+      opt_state = nnx.state(state.optimizer) if hasattr(state, "optimizer") else None
+      state_dict = {"model": nnx.to_pure_dict(model_state), "metrics": metrics}
+      if opt_state is not None:
+        state_dict["optimizer"] = nnx.to_pure_dict(opt_state)
     snapshot_mgr.save_pytree(step, state_dict)
 
   # Pack mutated state back to dicts
@@ -1264,7 +1265,11 @@ def train_loop(config, recorder, state=None):
           "opt_state": state.opt_state,
       }
     else:
-      state_dict = {"nnx_state": nnx.to_pure_dict(state)}
+      model_state = nnx.state(state.model) if hasattr(state, "model") else state
+      opt_state = nnx.state(state.optimizer) if hasattr(state, "optimizer") else None
+      state_dict = {"model": nnx.to_pure_dict(model_state)}
+      if opt_state is not None:
+        state_dict["optimizer"] = nnx.to_pure_dict(opt_state)
     snapshot_mgr.save_pytree(start_step, state_dict)
     # Block on the first snapshot at startup to guarantee it is secured before training begins
     snapshot_mgr.join()
@@ -1345,7 +1350,11 @@ def train_loop(config, recorder, state=None):
                   "opt_state": state.opt_state,
               }
             else:
-              state_dict = {"nnx_state": nnx.to_pure_dict(state)}
+              model_state = nnx.state(state.model) if hasattr(state, "model") else state
+              opt_state = nnx.state(state.optimizer) if hasattr(state, "optimizer") else None
+              state_dict = {"model": nnx.to_pure_dict(model_state)}
+              if opt_state is not None:
+                state_dict["optimizer"] = nnx.to_pure_dict(opt_state)
             snapshot_mgr.save_pytree(
                 python_vars["step"], state_dict
             )
