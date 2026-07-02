@@ -26,9 +26,6 @@ from aqt.jax.v2 import config as aqt_config
 from aqt.jax.v2.aqt_tensor import QTensor as KVTensor
 from aqt.jax.v2.flax import aqt_flax
 
-from maxtext.layers import nnx_wrappers
-from maxtext.layers.initializers import variable_to_logically_partitioned
-
 from maxtext.common.common_types import Array, AxisNames, AxisIdxes, Config, CACHE_BATCH_PREFILL, DType, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, MODEL_MODE_AUTOREGRESSIVE, CACHE_HEADS_NONE, DECODING_ACTIVE_SEQUENCE_INDICATOR
 from maxtext.common.common_types import CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV, CACHE_SCALE_BATCH, CACHE_SCALE_SEQUENCE, CACHE_SCALE_HEADS, CACHE_SCALE_KV
 
@@ -146,94 +143,6 @@ class KVQuant:
           rhs_dequant_mode=aqt_config.DequantMode.OTHER_INPUT,
           rhs_calibration_mode=aqt_config.CalibrationMode.REMAINING_AXIS,
       )
-
-
-def kv_cache_as_linen(
-    *,
-    max_prefill_length: int,
-    max_target_length: int,
-    batch: int,
-    key_seq_len: int,
-    value_seq_len: int,
-    key_heads: int,
-    value_heads: int,
-    key_head_size: int,
-    value_head_size: int,
-    dtype: DType,
-    kv_quant: None | KVQuant = None,
-    prefill_cache_logical_axis_names: AxisNames = (CACHE_BATCH_PREFILL, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV),
-    cache_logical_axis_names: AxisNames = (CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV),
-    cache_scale_logical_axis_names: AxisNames = (
-        CACHE_SCALE_BATCH,
-        CACHE_SCALE_SEQUENCE,
-        CACHE_SCALE_HEADS,
-        CACHE_SCALE_KV,
-    ),
-    prefill_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
-    ar_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
-    key_axis_order: AxisIdxes = (2, 0, 1, 3),
-    use_chunked_prefill: bool = False,
-    model_mode: str = MODEL_MODE_PREFILL,
-    is_gdn: bool = False,
-    conv_kernel_size: int = 0,
-    conv_dim: int = 0,
-    name: str | None = None,
-):
-  """Initializes the KVCache module and returns it as a Linen module.
-
-  Args:
-    max_prefill_length: The maximum prefill length.
-    max_target_length: The maximum target length.
-    batch: The batch size.
-    key_seq_len: The key sequence length.
-    value_seq_len: The value sequence length.
-    key_heads: The number of key heads.
-    value_heads: The number of value heads.
-    key_head_size: The key head size.
-    value_head_size: The value head size.
-    dtype: The data type.
-    kv_quant: The KVQuant configuration.
-    prefill_cache_logical_axis_names: The logical axis names for the prefill cache.
-    cache_logical_axis_names: The logical axis names for the cache.
-    cache_scale_logical_axis_names: The logical axis names for the cache scale.
-    prefill_cache_axis_order: The axis order for the prefill cache.
-    ar_cache_axis_order: The axis order for the autoregressive cache.
-    key_axis_order: The axis order for the key.
-    use_chunked_prefill: Whether to use chunked prefill.
-    model_mode: The model mode.
-    name: The name of the Linen module.
-
-  Returns:
-    A Linen module that wraps the NNX `KVCache` module.
-  """
-  return nnx_wrappers.to_linen(
-      KVCache,
-      max_prefill_length=max_prefill_length,
-      max_target_length=max_target_length,
-      batch=batch,
-      key_seq_len=key_seq_len,
-      value_seq_len=value_seq_len,
-      key_heads=key_heads,
-      value_heads=value_heads,
-      key_head_size=key_head_size,
-      value_head_size=value_head_size,
-      dtype=dtype,
-      kv_quant=kv_quant,
-      prefill_cache_logical_axis_names=prefill_cache_logical_axis_names,
-      cache_logical_axis_names=cache_logical_axis_names,
-      cache_scale_logical_axis_names=cache_scale_logical_axis_names,
-      prefill_cache_axis_order=prefill_cache_axis_order,
-      ar_cache_axis_order=ar_cache_axis_order,
-      key_axis_order=key_axis_order,
-      use_chunked_prefill=use_chunked_prefill,
-      model_mode=model_mode,
-      is_gdn=is_gdn,
-      conv_kernel_size=conv_kernel_size,
-      conv_dim=conv_dim,
-      metadata_fn=variable_to_logically_partitioned,
-      name=name,
-      abstract_init=False,
-  )
 
 
 class BaseCache(nnx.Module):
@@ -963,69 +872,49 @@ class KVCache(BaseCache):
       raise ValueError(f"Model Mode isn't supported! {model_mode=}")
 
 
-def mla_kv_cache_as_linen(
-    *,
-    max_prefill_length: int,
-    max_target_length: int,
-    batch: int,
-    key_seq_len: int,
-    value_seq_len: int,
-    key_head_size: int,
-    value_head_size: int,
-    dtype: DType,
-    key_heads: int = 1,
-    value_heads: int = 1,
-    kv_quant: None | KVQuant = None,
-    prefill_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
-    ar_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
-    use_chunked_prefill: bool = False,
-    model_mode: str = MODEL_MODE_PREFILL,
-    name: str | None = None,
-):
-  """Initializes the MlaKVCache module and returns it as a Linen module.
+class GatedDeltaNetCache(BaseCache):
+  """Cache for Linear Attention (Gated Delta Net).
 
-  Args:
-    max_prefill_length: The maximum prefill length.
-    max_target_length: The maximum target length.
-    batch: The batch size.
-    key_seq_len: The key sequence length.
-    value_seq_len: The value sequence length.
-    key_head_size: The key head size.
-    value_head_size: The value head size.
-    dtype: The data type.
-    key_heads: The number of key heads.
-    value_heads: The number of value heads.
-    kv_quant: The KVQuant configuration.
-    prefill_cache_axis_order: The axis order for the prefill cache.
-    ar_cache_axis_order: The axis order for the autoregressive cache.
-    use_chunked_prefill: Whether to use chunked prefill.
-    model_mode: The model mode.
-    name: The name of the Linen module.
-
-  Returns:
-    A Linen module that wraps the NNX `MlaKVCache` module.
+  Stores the fixed-size recurrent state and the sliding window state for convolution.
   """
-  return nnx_wrappers.to_linen(
-      MlaKVCache,
-      max_prefill_length=max_prefill_length,
-      max_target_length=max_target_length,
-      batch=batch,
-      key_seq_len=key_seq_len,
-      value_seq_len=value_seq_len,
-      key_head_size=key_head_size,
-      value_head_size=value_head_size,
-      dtype=dtype,
-      key_heads=key_heads,
-      value_heads=value_heads,
-      kv_quant=kv_quant,
-      prefill_cache_axis_order=prefill_cache_axis_order,
-      ar_cache_axis_order=ar_cache_axis_order,
-      use_chunked_prefill=use_chunked_prefill,
-      model_mode=model_mode,
-      metadata_fn=variable_to_logically_partitioned,
-      name=name,
-      abstract_init=False,
-  )
+
+  def __init__(
+      self,
+      batch: int,
+      num_heads: int,
+      k_head_dim: int,
+      v_head_dim: int,
+      conv_kernel_size: int,
+      conv_dim: int,
+      dtype: DType,
+      cache_batch_axis_name: str = CACHE_BATCH,
+      cache_heads_axis_name: str = CACHE_HEADS,
+  ):
+    super().__init__()
+    self.batch = batch
+    self.dtype = dtype
+
+    # 1. Recurrent State (S) for the Delta Rule
+    # Shape: [Batch, Heads, K_Dim, V_Dim]
+    # We maintain the running state matrix.
+    self.recurrent_state = nnx.Cache(
+        jnp.zeros((int(batch), num_heads, k_head_dim, v_head_dim), dtype=dtype),
+        # Sharding: Batch, Heads, None (K), None (V)
+        out_sharding=(cache_batch_axis_name, cache_heads_axis_name, None, None),
+    )
+
+    # 2. Convolution State for the 1D Conv
+    # Shape: [Batch, Kernel_Size - 1, Conv_Dim]
+    # We store the last (K-1) inputs to perform the sliding window conv during decoding.
+    self.conv_state = nnx.Cache(
+        jnp.zeros((int(batch), conv_kernel_size - 1, conv_dim), dtype=dtype),
+        # Sharding: Batch, None (Time), None (Dim)
+        out_sharding=(cache_batch_axis_name, None, None),
+    )
+
+  def __call__(self):
+    """Returns the cache variables for the layer to use."""
+    return self
 
 
 class MlaKVCache(KVCache):
