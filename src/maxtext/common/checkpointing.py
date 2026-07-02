@@ -138,7 +138,7 @@ def _load_linen_checkpoint_into_nnx(
     use_ocdbt,
     use_zarr3,
 ):
-  """Restores a Linen-layout checkpoint into an NNX state (pure_nnx resume).
+  """Restores a Linen-layout checkpoint into an NNX state.
 
   Restores a Linen-shape target that includes `nnx_aux`, then reshapes back via
   `_linen_items_to_nnx`. rngs/dropout/batch stats come from `items/nnx_aux` when
@@ -242,7 +242,7 @@ def _load_full_state_from_path(
     else:
       raise ocp_v1.errors.InvalidLayoutError(f"Unknown checkpoint layout: {source_checkpoint_layout}")
   else:
-    # pure_nnx saves in the Linen on-disk layout; reshape it back into the NNX state.
+    # Checkpoints use the Linen on-disk layout; reshape it back into the NNX state.
     if isinstance(abstract_unboxed_pre_state, nnx.State):
       return _load_linen_checkpoint_into_nnx(
           path,
@@ -437,7 +437,7 @@ def load_state_if_possible(
         )
         ocp.type_handlers.register_type_handler(jax.Array, array_handler, override=True)
 
-      # pure_nnx saves in the Linen on-disk layout; restore that layout (weights +
+      # Checkpoints use the Linen on-disk layout; restore that layout (weights +
       # opt_state + step + nnx_aux), restoring the grain iterator in place when
       # present, then reshape it back into the NNX state.
       # (Emergency managers use their own restore path below.)
@@ -702,12 +702,8 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
   if step is not None:
     actual_step = int(step)
   else:
-    if config.pure_nnx:
-      # Under DiLoCo the step lives on the DiLoCoTrainState; otherwise on the optimizer.
-      actual_step = int(state.step if config.enable_diloco else state.optimizer.step) - 1
-    else:
-      # Linen TrainState has .step attribute
-      actual_step = int(state.step) - 1
+    # Under DiLoCo the step lives on the DiLoCoTrainState; otherwise on the optimizer.
+    actual_step = int(state.step if config.enable_diloco else state.optimizer.step) - 1
 
   # Determine if a checkpoint save should be forced, overriding the usual
   # `config.checkpoint_period` logic.
@@ -725,17 +721,16 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
     max_logging.log(f"Checkpoint for step {actual_step} already exists, skipping save.")
     return
 
-  if config.pure_nnx:
-    # Save in the Linen on-disk layout so pure_nnx and Linen checkpoints are interchangeable.
-    if config.enable_diloco:
-      # DiLoCoTrainState: persist the synchronized global model (outer params).
-      # The per-replica inner optimizer / outer-momentum state is not checkpointed.
-      step_value = state.step.get_value() if hasattr(state.step, "get_value") else state.step
-      state = train_state_nnx.to_linen_checkpoint_dict({"model": state.params, "optimizer": {"step": step_value}})
-    else:
-      # rngs/dropout/batch-stats are packed under items/nnx_aux so the RNG/dropout
-      # stream continues across resumes instead of resetting to a base key.
-      state = train_state_nnx.to_checkpoint_dict(state)
+  # Save in the Linen on-disk layout so NNX and Linen checkpoints are interchangeable.
+  if config.enable_diloco:
+    # DiLoCoTrainState: persist the synchronized global model (outer params).
+    # The per-replica inner optimizer / outer-momentum state is not checkpointed.
+    step_value = state.step.get_value() if hasattr(state.step, "get_value") else state.step
+    state = train_state_nnx.to_linen_checkpoint_dict({"model": state.params, "optimizer": {"step": step_value}})
+  else:
+    # rngs/dropout/batch-stats are packed under items/nnx_aux so the RNG/dropout
+    # stream continues across resumes instead of resetting to a base key.
+    state = train_state_nnx.to_checkpoint_dict(state)
 
   try:
     checkpoint_saved = save_checkpoint(checkpoint_manager, actual_step, state, config, data_iterator, force_ckpt_save)

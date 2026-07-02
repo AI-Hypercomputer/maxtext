@@ -568,26 +568,7 @@ def maybe_update_params_sharding_with_opt(config, state_mesh_shardings):
       - updated_state_mesh_shardings: State mesh shardings with updated params field
         (unchanged if shard_optimizer_over_data is False)
   """
-  if config.pure_nnx:
-    return maybe_update_params_sharding_with_opt_nnx(config, state_mesh_shardings)
-  prev_params_shardings = state_mesh_shardings.params
-  if config.shard_optimizer_over_data:
-    if isinstance(state_mesh_shardings.opt_state, optax.ScaleByAdamState):
-      sharded_fp32_params = state_mesh_shardings.opt_state.mu
-    elif isinstance(state_mesh_shardings.opt_state, tuple) and isinstance(
-        state_mesh_shardings.opt_state[0], optax.ScaleByAdamState
-    ):
-      sharded_fp32_params = state_mesh_shardings.opt_state[0].mu
-    else:
-      raise NotImplementedError(f"Could not find optimizer state shardings from {type(state_mesh_shardings.opt_state)}")
-    if "params" not in sharded_fp32_params.keys():
-      # When quantization=fp8 is enabled the sharded_fp32_params
-      # are not wrapped in `params`. Here we wrap them back.
-      sharded_fp32_params = {"params": sharded_fp32_params}
-    state_mesh_shardings = state_mesh_shardings.replace(
-        params=dict(prev_params_shardings, **sharded_fp32_params)
-    )  # pyrefly: ignore[bad-unpacking]
-  return prev_params_shardings, state_mesh_shardings
+  return maybe_update_params_sharding_with_opt_nnx(config, state_mesh_shardings)
 
 
 def maybe_update_params_sharding_with_opt_nnx(
@@ -719,8 +700,6 @@ def build_zero1_input_state_mesh_shardings(config, state_mesh_shardings, params_
   """
   if not config.shard_optimizer_over_data:
     return state_mesh_shardings
-  if not config.pure_nnx:
-    return state_mesh_shardings.replace(params=params_shardings)
   # nnx.State has no .replace: shallow-copy via tree_map (preserves nested container
   # types) and overlay params_shardings under input_state.model.
   input_state = jax.tree_util.tree_map(
