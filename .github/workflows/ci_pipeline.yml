@@ -371,7 +371,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: test-results
-          pattern: test-results-*
+          pattern: test-results-*-${{ github.run_id }}
           merge-multiple: true
 
       - name: Parse JUnit XML to Benchmark format
