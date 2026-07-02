@@ -80,6 +80,10 @@ def save_golden_logits(
     from transformers import Llama4ForConditionalGeneration  # pylint: disable=import-outside-toplevel
 
     model_class = Llama4ForConditionalGeneration
+  elif "qwen3-vl" in model_id.lower():
+    from transformers import Qwen3VLForConditionalGeneration  # pylint: disable=import-outside-toplevel
+
+    model_class = Qwen3VLForConditionalGeneration
   else:
     from transformers import AutoModelForCausalLM  # pylint: disable=import-outside-toplevel
 
@@ -151,7 +155,10 @@ def save_golden_logits(
     for key, value in inputs.items():
       new_key = "tokens" if key == "input_ids" else key
       val_np = value.cpu().numpy()
-      data_to_save[new_key] = val_np[0] if val_np.ndim > 0 else val_np
+      if key == "pixel_values" and "qwen3-vl" in model_id.lower():
+        data_to_save[new_key] = val_np
+      else:
+        data_to_save[new_key] = val_np[0] if val_np.ndim > 0 else val_np
     data_to_save["logits"] = logits[0]
 
     print(f"Token length is {len(data_to_save['tokens'])} for prompt: {prompt_text}")
