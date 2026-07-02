@@ -943,10 +943,15 @@ def recover(
   params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
 
   # 3. Re-compile train and eval steps for the NEW mesh
+  if isinstance(model, nn.Module):
+    jit_model = model
+  else:
+    jit_model, _ = nnx.split(state)
+
   with jax.set_mesh(mesh), mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
         config,
-        model,
+        jit_model,
         mesh,
         state,
         state_mesh_shardings,
