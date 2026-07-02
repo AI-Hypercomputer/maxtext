@@ -10,6 +10,9 @@ This document maps the parameters of the MaxText model to the corresponding para
 | `params.token_embedder.embedding` | `N/A` | `model.embed_tokens.weight` | `[129280, 4096]` | Direct copy. |
 | `params.decoder.decoder_norm.scale` | `N/A` | `model.norm.weight` | `[4096]` | Direct copy. |
 | `params.decoder.logits_dense.kernel` | `N/A` | `head.weight` | `[129280, 4096]` | Transpose: `logits_dense.kernel` = `head.weight.T`. |
+| `params.decoder.hc_head.hc_base` | `(4,)` | `model.hc_head.hc_base` | `[4]` | Direct copy. |
+| `params.decoder.hc_head.hc_fn` | `(4, 16384)` | `model.hc_head.hc_fn` | `[4, 16384]` | Direct copy. |
+| `params.decoder.hc_head.hc_scale` | `(1,)` | `model.hc_head.hc_scale` | `[1]` | Direct copy. |
 | **Layer 0 (Type: 0)** | | | | |
 | `params.params.decoder.layers_0.pre_self_attention_layer_norm.scale` | `(4096,)` | `model.layers.0.input_layernorm.weight` | `[4096]` | Direct copy. |
 | `params.params.decoder.layers_0.post_self_attention_layer_norm.scale` | `(4096,)` | `model.layers.0.post_attention_layernorm.weight` | `[4096]` | Direct copy. |
@@ -145,7 +148,7 @@ This document maps the parameters of the MaxText model to the corresponding para
 | `params.params.decoder.layers_2.self_attention.csa_compressor.indexer.gate_proj.kernel` | `(4096, 256)` | `model.layers.2.self_attn.compressor.indexer.gate_proj.weight` | `[256, 4096]` | Transpose: `gate_proj.kernel` = `gate_proj.weight.T`. |
 | `params.params.decoder.layers_2.self_attention.csa_compressor.indexer.kv_proj.kernel` | `(4096, 256)` | `model.layers.2.self_attn.compressor.indexer.kv_proj.weight` | `[256, 4096]` | Transpose: `kv_proj.kernel` = `kv_proj.weight.T`. |
 | `params.params.decoder.layers_2.self_attention.csa_compressor.indexer.q_proj.kernel` | `(1024, 8192)` | `model.layers.2.self_attn.compressor.indexer.q_b_proj.weight` | `[8192, 1024]` | Transpose: `q_proj.kernel` = `q_b_proj.weight.T`. |
-| `params.params.decoder.layers_2.self_attention.csa_compressor.indexer.weights_proj.kernel` | `(4096, 64)` | `model.layers.2.self_attn.compressor.indexer.weights_proj.weight` | `N/A` | Transpose: `weights_proj.kernel` = `weights_proj.weight.T`. |
+| `params.params.decoder.layers_2.self_attention.csa_compressor.indexer.weights_proj.kernel` | `(4096, 64)` | `model.layers.2.self_attn.compressor.indexer.scorer.weights_proj.weight` | `N/A` | Transpose: `weights_proj.kernel` = `weights_proj.weight.T`. |
 | `params.params.decoder.layers_2.self_attention.csa_compressor.indexer.position_bias` | `(4, 256)` | `model.layers.2.self_attn.compressor.indexer.position_bias` | `[4, 256]` | Direct copy. |
 | `params.params.decoder.layers_2.self_attention.csa_compressor.indexer.kv_norm.scale` | `(128,)` | `model.layers.2.self_attn.compressor.indexer.kv_norm.weight` | `[128]` | Direct copy. |
 | **Layer 3 (Type: HCA)** | | | | |
@@ -246,7 +249,7 @@ This document maps the parameters of the MaxText model to the corresponding para
 | `params.params.decoder.layers_4.self_attention.csa_compressor.indexer.gate_proj.kernel` | `(4096, 256)` | `model.layers.4.self_attn.compressor.indexer.gate_proj.weight` | `[256, 4096]` | Transpose: `gate_proj.kernel` = `gate_proj.weight.T`. |
 | `params.params.decoder.layers_4.self_attention.csa_compressor.indexer.kv_proj.kernel` | `(4096, 256)` | `model.layers.4.self_attn.compressor.indexer.kv_proj.weight` | `[256, 4096]` | Transpose: `kv_proj.kernel` = `kv_proj.weight.T`. |
 | `params.params.decoder.layers_4.self_attention.csa_compressor.indexer.q_proj.kernel` | `(1024, 8192)` | `model.layers.4.self_attn.compressor.indexer.q_b_proj.weight` | `[8192, 1024]` | Transpose: `q_proj.kernel` = `q_b_proj.weight.T`. |
-| `params.params.decoder.layers_4.self_attention.csa_compressor.indexer.weights_proj.kernel` | `(4096, 64)` | `model.layers.4.self_attn.compressor.indexer.weights_proj.weight` | `N/A` | Transpose: `weights_proj.kernel` = `weights_proj.weight.T`. |
+| `params.params.decoder.layers_4.self_attention.csa_compressor.indexer.weights_proj.kernel` | `(4096, 64)` | `model.layers.4.self_attn.compressor.indexer.scorer.weights_proj.weight` | `N/A` | Transpose: `weights_proj.kernel` = `weights_proj.weight.T`. |
 | `params.params.decoder.layers_4.self_attention.csa_compressor.indexer.position_bias` | `(4, 256)` | `model.layers.4.self_attn.compressor.indexer.position_bias` | `[4, 256]` | Direct copy. |
 | `params.params.decoder.layers_4.self_attention.csa_compressor.indexer.kv_norm.scale` | `(128,)` | `model.layers.4.self_attn.compressor.indexer.kv_norm.weight` | `[128]` | Direct copy. |
 | **Layer 5 (Type: HCA)** | | | | |
@@ -347,6 +350,6 @@ This document maps the parameters of the MaxText model to the corresponding para
 | `params.params.decoder.layers_6.self_attention.csa_compressor.indexer.gate_proj.kernel` | `(4096, 256)` | `model.layers.6.self_attn.compressor.indexer.gate_proj.weight` | `[256, 4096]` | Transpose: `gate_proj.kernel` = `gate_proj.weight.T`. |
 | `params.params.decoder.layers_6.self_attention.csa_compressor.indexer.kv_proj.kernel` | `(4096, 256)` | `model.layers.6.self_attn.compressor.indexer.kv_proj.weight` | `[256, 4096]` | Transpose: `kv_proj.kernel` = `kv_proj.weight.T`. |
 | `params.params.decoder.layers_6.self_attention.csa_compressor.indexer.q_proj.kernel` | `(1024, 8192)` | `model.layers.6.self_attn.compressor.indexer.q_b_proj.weight` | `[8192, 1024]` | Transpose: `q_proj.kernel` = `q_b_proj.weight.T`. |
-| `params.params.decoder.layers_6.self_attention.csa_compressor.indexer.weights_proj.kernel` | `(4096, 64)` | `model.layers.6.self_attn.compressor.indexer.weights_proj.weight` | `N/A` | Transpose: `weights_proj.kernel` = `weights_proj.weight.T`. |
+| `params.params.decoder.layers_6.self_attention.csa_compressor.indexer.weights_proj.kernel` | `(4096, 64)` | `model.layers.6.self_attn.compressor.indexer.scorer.weights_proj.weight` | `N/A` | Transpose: `weights_proj.kernel` = `weights_proj.weight.T`. |
 | `params.params.decoder.layers_6.self_attention.csa_compressor.indexer.position_bias` | `(4, 256)` | `model.layers.6.self_attn.compressor.indexer.position_bias` | `[4, 256]` | Direct copy. |
 | `params.params.decoder.layers_6.self_attention.csa_compressor.indexer.kv_norm.scale` | `(128,)` | `model.layers.6.self_attn.compressor.indexer.kv_norm.weight` | `[128]` | Direct copy. |
