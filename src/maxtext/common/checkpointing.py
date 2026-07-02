@@ -194,6 +194,16 @@ def _default_for_sds(sds):
   return jax.jit(_make, out_shardings=sharding)()
 
 
+def _deep_merge(base, overlay):
+  """Recursively merges `overlay` into `base`, returning a new dict. Overlay wins on leaves."""
+  if not (isinstance(base, dict) and isinstance(overlay, dict)):
+    return overlay if overlay is not None else base
+  out = dict(base)
+  for k, v in overlay.items():
+    out[k] = _deep_merge(base.get(k), v) if k in base else v
+  return out
+
+
 def _populate_pure_dict_from_partial(abstract_pure, partial_concrete):
   """Fills `abstract_pure` with values from `partial_concrete` (by path), defaulting the rest.
 
@@ -214,6 +224,25 @@ def _populate_pure_dict_from_partial(abstract_pure, partial_concrete):
   return _default_for_sds(abstract_pure)
 
 
+def _all_materialized(tree):
+  """True if Orbax restored every leaf, i.e. none is left as a jax.ShapeDtypeStruct."""
+  return not any(isinstance(leaf, jax.ShapeDtypeStruct) for leaf in jax.tree_util.tree_leaves(tree))
+
+
+def _linen_items_to_nnx(restored_linen, nnx_abstract_pure):
+  """Reshapes a restored Linen-layout `items` dict back into the NNX pure-dict state.
+
+  Merges `nnx_aux` (rngs/dropout/batch stats) back onto the model when present and
+  fills anything absent with defaults. A checkpoint without `nnx_aux` (Linen-trained
+  or pre-persistence) leaves those leaves unmaterialized, so they get the defaults.
+  """
+  partial_nnx = train_state_nnx.from_linen_checkpoint_dict(restored_linen)
+  aux = restored_linen.get("nnx_aux")
+  if aux and _all_materialized(aux):
+    partial_nnx = _deep_merge(partial_nnx, aux)
+  return _populate_pure_dict_from_partial(nnx_abstract_pure, partial_nnx)
+
+
 def _load_linen_checkpoint_into_nnx(
     path,
     abstract_nnx_state,
@@ -223,12 +252,12 @@ def _load_linen_checkpoint_into_nnx(
 ):
   """Restores a Linen-layout checkpoint into an NNX state (pure_nnx resume).
 
-  Restores against a Linen-shape abstract, reshapes back via
-  `from_linen_checkpoint_dict`, then fills NNX-only rngs/dropout with defaults.
+  Restores a Linen-shape target that includes `nnx_aux`, then reshapes back via
+  `_linen_items_to_nnx`. rngs/dropout/batch stats come from `items/nnx_aux` when
+  present, else fall back to defaults.
   """
   max_logging.log(f"Restoring Linen-layout checkpoint into NNX state at {path}")
-  nnx_abstract_pure = abstract_nnx_state.to_pure_dict()
-  linen_abstract = train_state_nnx.to_linen_checkpoint_dict(nnx_abstract_pure)
+  linen_abstract = train_state_nnx.to_checkpoint_dict(abstract_nnx_state)
   ckptr = ocp.Checkpointer(
       ocp.PyTreeCheckpointHandler(
           restore_concurrent_gb=checkpoint_storage_concurrent_gb,
@@ -240,8 +269,7 @@ def _load_linen_checkpoint_into_nnx(
   restore_args = ocp.checkpoint_utils.construct_restore_args(linen_abstract)
   restored = ocp.args.PyTreeRestore(item=linen_abstract, restore_args=restore_args, partial_restore=True)
   restored = ckptr.restore(epath.Path(path), args=restored)
-  partial_nnx = train_state_nnx.from_linen_checkpoint_dict(restored)
-  return _populate_pure_dict_from_partial(nnx_abstract_pure, partial_nnx)
+  return _linen_items_to_nnx(restored, abstract_nnx_state.to_pure_dict())
 
 
 def _restore_emergency_linen_checkpoint_into_nnx(
@@ -250,10 +278,14 @@ def _restore_emergency_linen_checkpoint_into_nnx(
     abstract_nnx_state,
     map_to_pspec,
 ):
-  """Restores an emergency Linen-layout checkpoint into an NNX state."""
+  """Restores an emergency Linen-layout checkpoint into an NNX state.
+
+  The `nnx_aux` subtree is stored inside `items`, so an emergency checkpoint
+  carries it too; it's restored when present and otherwise filled with
+  deterministic defaults.
+  """
   max_logging.log(f"Restoring emergency Linen-layout checkpoint into NNX state at step {step}")
-  nnx_abstract_pure = abstract_nnx_state.to_pure_dict()
-  linen_abstract = train_state_nnx.to_linen_checkpoint_dict(nnx_abstract_pure)
+  linen_abstract = train_state_nnx.to_checkpoint_dict(abstract_nnx_state)
   restore_args = jax.tree_util.tree_map(map_to_pspec, linen_abstract)
   checkpoint_args = ocp.args.PyTreeRestore(
       item=linen_abstract,
@@ -261,8 +293,7 @@ def _restore_emergency_linen_checkpoint_into_nnx(
       partial_restore=True,
   )
   restored = checkpoint_manager.restore(step, args=Composite(state=checkpoint_args)).state
-  partial_nnx = train_state_nnx.from_linen_checkpoint_dict(restored)
-  return _populate_pure_dict_from_partial(nnx_abstract_pure, partial_nnx)
+  return _linen_items_to_nnx(restored, abstract_nnx_state.to_pure_dict())
 
 
 def _rebuild_nnx_with_values(abstract_nnx_state, concrete_weights):
@@ -340,6 +371,11 @@ def _load_full_state_from_path(
 
   if enable_orbax_v1:
     if source_checkpoint_layout == "orbax":
+      # pure_nnx saves in the Linen on-disk layout; reshape it back into the NNX state.
+      if isinstance(abstract_unboxed_pre_state, nnx.State):
+        return _load_linen_checkpoint_into_nnx(
+            path, abstract_unboxed_pre_state, checkpoint_storage_concurrent_gb, use_ocdbt, use_zarr3
+        )
       context = ocp_v1.Context(checkpoint_layout=ocp_v1.options.CheckpointLayout.ORBAX)
       with context:
         return ocp_v1.load_pytree(path, abstract_unboxed_pre_state)
@@ -378,11 +414,8 @@ def _load_full_state_from_path(
         use_ocdbt=use_ocdbt,
         use_zarr3=use_zarr3,
     )
-    # NNX checkpoints are saved as pure dicts (see maybe_save_checkpoint); the
-    # restore target must match — a boxed nnx.State wouldn't.
+    # Only Linen TrainState reaches here; nnx.State returned above.
     restore_target = abstract_unboxed_pre_state
-    if isinstance(abstract_unboxed_pre_state, nnx.State):
-      restore_target = abstract_unboxed_pre_state.to_pure_dict()
     # Provide sharding info to ensure restoration returns JAX arrays (not NumPy arrays).
     restore_args = jax.tree_util.tree_map(
         lambda x: ocp.type_handlers.ArrayRestoreArgs(sharding=x.sharding),
@@ -792,27 +825,35 @@ def load_state_if_possible(
         )
         ocp.type_handlers.register_type_handler(jax.Array, array_handler, override=True)
 
-      # pure_nnx saves in the Linen on-disk layout; reshape it back into the NNX state.
+      # pure_nnx saves in the Linen on-disk layout; restore that layout (weights +
+      # opt_state + step + nnx_aux), restoring the grain iterator in place when
+      # present, then reshape it back into the NNX state.
       # (Emergency managers use their own restore path below.)
       if isinstance(abstract_unboxed_pre_state, nnx.State) and not isinstance(
           checkpoint_manager,
           (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager),
       ):
-        checkpoint_path = str(checkpoint_manager.directory / str(step) / "items")
-        restored_nnx = _load_linen_checkpoint_into_nnx(
-            checkpoint_path,
-            abstract_unboxed_pre_state,
-            checkpoint_storage_concurrent_gb,
-            use_ocdbt,
-            use_zarr3,
-        )
+        linen_abstract = train_state_nnx.to_checkpoint_dict(abstract_unboxed_pre_state)
+        restore_args = jax.tree_util.tree_map(map_to_pspec, linen_abstract)
+        checkpoint_args = ocp.args.PyTreeRestore(item=linen_abstract, restore_args=restore_args, partial_restore=True)
+        if (
+            dataset_type == "grain"
+            and data_iterator
+            and not isinstance(data_iterator, PlaceHolderDataIterator)
+            and (checkpoint_manager.directory / str(step) / "iter").exists()
+        ):
+          restored, _ = _restore_grain_iterator(
+              checkpoint_manager, step, data_iterator, checkpoint_args, expansion_factor_real_data
+          )
+        else:
+          restored = checkpoint_manager.restore(step, args=Composite(items=checkpoint_args))
+        restored_nnx = _linen_items_to_nnx(restored["items"], abstract_unboxed_pre_state.to_pure_dict())
         return ({"items": restored_nnx}, None)
 
       if isinstance(abstract_unboxed_pre_state, nnx.State) and isinstance(
           checkpoint_manager,
           (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager),
       ):
-        checkpoint_path = str(checkpoint_manager.directory / str(step))
         restored = _restore_emergency_linen_checkpoint_into_nnx(
             checkpoint_manager,
             step,
@@ -824,11 +865,8 @@ def load_state_if_possible(
             None,
         )
 
-      # Convert nnx.State to pure dict to match how checkpoints are saved for NNX
+      # Only Linen TrainState reaches here; the NNX cases returned above.
       restore_target = abstract_unboxed_pre_state
-      if isinstance(abstract_unboxed_pre_state, nnx.State):
-        restore_target = abstract_unboxed_pre_state.to_pure_dict()
-
       restore_args = jax.tree_util.tree_map(map_to_pspec, restore_target)
       checkpoint_args = ocp.args.PyTreeRestore(
           item=restore_target,
@@ -836,7 +874,6 @@ def load_state_if_possible(
           partial_restore=True,
       )
 
-      checkpoint_path = str(checkpoint_manager.directory / str(step))
       match (checkpoint_manager, dataset_type, data_iterator):
         # Case 1: Matches if 'checkpoint_manager' is an instance of either EmergencyCheckpointManager
         # or EmergencyReplicatorCheckpointManager. The '_' indicates that 'dataset_type' and
@@ -1040,7 +1077,9 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
       step_value = state.step.get_value() if hasattr(state.step, "get_value") else state.step
       state = train_state_nnx.to_linen_checkpoint_dict({"model": state.params, "optimizer": {"step": step_value}})
     else:
-      state = train_state_nnx.to_linen_checkpoint_dict(state.to_pure_dict())
+      # rngs/dropout/batch-stats are packed under items/nnx_aux so the RNG/dropout
+      # stream continues across resumes instead of resetting to a base key.
+      state = train_state_nnx.to_checkpoint_dict(state)
 
   # Determine if a checkpoint save should be forced, overriding the usual `config.checkpoint_period` logic.
   # This occurs if this function was called:

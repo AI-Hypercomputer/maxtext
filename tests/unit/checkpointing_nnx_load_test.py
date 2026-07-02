@@ -36,6 +36,17 @@ class _Model(nnx.Module):
     self.linear = nnx.Linear(2, 1, rngs=rngs)
 
 
+class _ModelDropout(nnx.Module):
+  """Linear + dropout, so the state carries rngs that split out into nnx_aux."""
+
+  def __init__(self, rngs: nnx.Rngs):
+    self.linear = nnx.Linear(2, 1, rngs=rngs)
+    self.dropout = nnx.Dropout(rate=0.5, rngs=rngs)
+
+  def __call__(self, x, deterministic=False):
+    return self.dropout(self.linear(x), deterministic=deterministic)
+
+
 def _abstract_nnx_state():
   """Build an nnx.State from a TrainStateNNX — same shape that pre_train passes in."""
   model = _Model(rngs=nnx.Rngs(0))
@@ -43,58 +54,52 @@ def _abstract_nnx_state():
   return nnx.state(train_state_nnx.TrainStateNNX(model, optimizer))
 
 
+def _dropout_state(seed):
+  """A concrete TrainStateNNX state for `_ModelDropout` with its dropout stream advanced."""
+  model = _ModelDropout(nnx.Rngs(seed))
+  state = train_state_nnx.TrainStateNNX(model, nnx.Optimizer(model, optax.adam(1e-3), wrt=nnx.Param))
+  grads = nnx.grad(lambda m: jnp.mean(m(jnp.ones((4, 2)), deterministic=False) ** 2))(state.model)
+  state.apply_gradients(grads)  # advances step + dropout rng count off the base 0
+  return nnx.state(state)
+
+
+def _abstract_dropout_state():
+  def make():
+    model = _ModelDropout(nnx.Rngs(9))
+    return nnx.state(train_state_nnx.TrainStateNNX(model, nnx.Optimizer(model, optax.adam(1e-3), wrt=nnx.Param)))
+
+  return nnx.eval_shape(make)
+
+
 class TestLoadStateIfPossibleNNX(unittest.TestCase):
   """Cover the NNX branches in load_state_if_possible."""
 
-  def test_emergency_linen_restore_converts_back_to_nnx(self):
-    kernel_abstract = jax.ShapeDtypeStruct((2, 1), jnp.float32)
-    step_abstract = jax.ShapeDtypeStruct((), jnp.uint32)
-    abstract_nnx_pure = {
-        "model": {
-            "linear": {"kernel": kernel_abstract},
-            "dropout": {"rngs": {"params": {"count": step_abstract}}},
-        },
-        "optimizer": {"step": step_abstract},
-    }
-    abstract_nnx_state = mock.Mock()
-    abstract_nnx_state.to_pure_dict.return_value = abstract_nnx_pure
-    restored_linen = {
-        "params": {"params": {"linear": {"kernel": jnp.ones((2, 1))}}},
-        "step": jnp.asarray(7, dtype=jnp.int32),
-    }
-    checkpoint_manager = mock.Mock()
-    checkpoint_manager.restore.return_value = mock.Mock(state=restored_linen)
+  def test_emergency_restore_recovers_nnx_aux(self):
+    """Emergency restore reshapes back to NNX and recovers rngs/dropout from items/nnx_aux."""
+    concrete = _dropout_state(0)
+    orig_count = int(concrete.to_pure_dict()["model"]["dropout"]["rngs"]["count"])
+    self.assertGreater(orig_count, 0)
+    # The single state tree an emergency manager writes (weights + opt_state + step + nnx_aux).
+    saved_linen = train_state_nnx.to_checkpoint_dict(concrete)
+    self.assertIn("nnx_aux", saved_linen)
 
+    checkpoint_manager = mock.Mock()
+    checkpoint_manager.restore.return_value = mock.Mock(state=saved_linen)
     restored = checkpointing._restore_emergency_linen_checkpoint_into_nnx(  # pylint: disable=protected-access
         checkpoint_manager,
         14,
-        abstract_nnx_state,
-        lambda leaf: ocp.type_handlers.ArrayRestoreArgs(
-            global_shape=leaf.shape,
-            dtype=leaf.dtype,
-        ),
+        _abstract_dropout_state(),
+        lambda leaf: ocp.type_handlers.ArrayRestoreArgs(global_shape=leaf.shape, dtype=leaf.dtype),
     )
 
-    checkpoint_manager.restore.assert_called_once()
-    restore_args = checkpoint_manager.restore.call_args.kwargs["args"].state
-    self.assertEqual(
-        set(restore_args.item.keys()),
-        {"params", "step"},
-    )
-    self.assertNotIn("model", restore_args.item)
-    self.assertNotIn("optimizer", restore_args.item)
-    self.assertTrue(restore_args.partial_restore)
+    # The restore target the manager was handed carries nnx_aux, so emergency checkpoints persist it.
+    restore_target = checkpoint_manager.restore.call_args.kwargs["args"].state.item
+    self.assertIn("nnx_aux", restore_target)
+    # Reshaped back to NNX, with the dropout stream recovered (not reset to 0).
     self.assertIn("model", restored)
     self.assertIn("optimizer", restored)
     self.assertNotIn("params", restored)
-    self.assertNotIn("opt_state", restored)
-    self.assertTrue(bool(jnp.array_equal(restored["model"]["linear"]["kernel"], jnp.ones((2, 1)))))
-    self.assertEqual(restored["optimizer"]["step"].dtype, jnp.uint32)
-    self.assertEqual(int(restored["optimizer"]["step"]), 7)
-    self.assertEqual(
-        restored["model"]["dropout"]["rngs"]["params"]["count"].shape,
-        (),
-    )
+    self.assertEqual(int(restored["model"]["dropout"]["rngs"]["count"]), orig_count)
 
   def test_load_parameters_from_path_splits_nnx_state_for_param_view(self):
     """When abstract_unboxed_pre_state is an nnx.State, the function must call
@@ -183,6 +188,110 @@ class TestLoadParamsIntoNNX(unittest.TestCase):
     pure = restored.to_pure_dict()
     self.assertTrue(jnp.array_equal(pure["linear"]["kernel"], weights["linear"]["kernel"]))
     self.assertTrue(jnp.array_equal(pure["linear"]["bias"], weights["linear"]["bias"]))
+
+
+class TestToCheckpointDict(unittest.TestCase):
+  """train_state_nnx.to_checkpoint_dict splits the NNX state by Variable type."""
+
+  def test_splits_params_optimizer_and_nnx_aux(self):
+    model = _ModelDropout(nnx.Rngs(0))
+    state = nnx.state(train_state_nnx.TrainStateNNX(model, nnx.Optimizer(model, optax.adam(1e-3), wrt=nnx.Param)))
+    ckpt = train_state_nnx.to_checkpoint_dict(state)
+    # Learnable weights land in the Linen params collection; optimizer + step alongside.
+    self.assertEqual(set(ckpt["params"]["params"].keys()), {"linear"})
+    self.assertIn("opt_state", ckpt)
+    self.assertIn("step", ckpt)
+    # rngs/dropout land in nnx_aux, not in params.
+    self.assertIn("dropout", ckpt["nnx_aux"]["model"])
+    self.assertNotIn("dropout", ckpt["params"]["params"])
+
+  def test_batch_stats_split_out_from_weights(self):
+    """BatchNorm scale/bias are weights; its running mean/var are batch stats -> nnx_aux."""
+
+    class _BN(nnx.Module):
+
+      def __init__(self, rngs):
+        self.bn = nnx.BatchNorm(2, rngs=rngs)
+
+    state = nnx.state(train_state_nnx.TrainStateNNX(_BN(nnx.Rngs(0)), None))
+    ckpt = train_state_nnx.to_checkpoint_dict(state)
+    self.assertEqual(set(ckpt["params"]["params"]["bn"].keys()), {"scale", "bias"})
+    self.assertEqual(set(ckpt["nnx_aux"]["model"]["bn"].keys()), {"mean", "var"})
+
+  def test_no_nnx_aux_when_state_has_none(self):
+    state = _abstract_nnx_state()  # plain linear, no rngs/batch stats
+    self.assertNotIn("nnx_aux", train_state_nnx.to_checkpoint_dict(state))
+
+
+class TestDeepMerge(unittest.TestCase):
+  """checkpointing._deep_merge overlays leaves onto a base dict."""
+
+  def test_overlay_wins_and_bases_survive(self):
+    base = {"model": {"linear": {"kernel": 1}, "rngs": {"count": 0}}}
+    overlay = {"model": {"rngs": {"count": 99}}}
+    merged = checkpointing._deep_merge(base, overlay)  # pylint: disable=protected-access
+    self.assertEqual(merged["model"]["linear"]["kernel"], 1)  # untouched
+    self.assertEqual(merged["model"]["rngs"]["count"], 99)  # overlaid
+
+  def test_does_not_mutate_inputs(self):
+    base = {"a": {"b": 1}}
+    checkpointing._deep_merge(base, {"a": {"c": 2}})  # pylint: disable=protected-access
+    self.assertEqual(base, {"a": {"b": 1}})
+
+  def test_non_dict_leaves_prefer_overlay(self):
+    """Leaf vs leaf: overlay wins, but a None overlay keeps the base."""
+    self.assertEqual(checkpointing._deep_merge(1, 2), 2)  # pylint: disable=protected-access
+    self.assertEqual(checkpointing._deep_merge(1, None), 1)  # pylint: disable=protected-access
+
+  def test_adds_keys_absent_from_base(self):
+    merged = checkpointing._deep_merge({"a": 1}, {"b": 2})  # pylint: disable=protected-access
+    self.assertEqual(merged, {"a": 1, "b": 2})
+
+
+class TestLinenItemsToNnx(unittest.TestCase):
+  """checkpointing._linen_items_to_nnx reshapes restored items back to NNX, handling nnx_aux."""
+
+  def _abstract_pure(self):
+    return {
+        "model": {
+            "linear": {"kernel": jax.ShapeDtypeStruct((2, 1), jnp.float32)},
+            "dropout": {"rngs": {"count": jax.ShapeDtypeStruct((), jnp.uint32)}},
+        },
+        "optimizer": {"step": jax.ShapeDtypeStruct((), jnp.uint32)},
+    }
+
+  def test_all_materialized_detects_surviving_sds(self):
+    # pylint: disable=protected-access
+    self.assertTrue(checkpointing._all_materialized({"a": jnp.ones((2,))}))
+    self.assertFalse(checkpointing._all_materialized({"a": jax.ShapeDtypeStruct((2,), jnp.float32)}))
+
+  def test_materialized_aux_is_merged(self):
+    restored = {
+        "params": {"params": {"linear": {"kernel": jnp.ones((2, 1))}}},
+        "step": jnp.asarray(3, jnp.int32),
+        "nnx_aux": {"model": {"dropout": {"rngs": {"count": jnp.asarray(42, jnp.uint32)}}}},
+    }
+    out = checkpointing._linen_items_to_nnx(restored, self._abstract_pure())  # pylint: disable=protected-access
+    self.assertEqual(int(out["model"]["dropout"]["rngs"]["count"]), 42)  # restored, not defaulted
+    self.assertTrue(jnp.array_equal(out["model"]["linear"]["kernel"], jnp.ones((2, 1))))
+
+  def test_unmaterialized_aux_falls_back_to_default(self):
+    """An old checkpoint returns nnx_aux as ShapeDtypeStruct -> treated as absent -> default."""
+    restored = {
+        "params": {"params": {"linear": {"kernel": jnp.ones((2, 1))}}},
+        "step": jnp.asarray(3, jnp.int32),
+        "nnx_aux": {"model": {"dropout": {"rngs": {"count": jax.ShapeDtypeStruct((), jnp.uint32)}}}},
+    }
+    out = checkpointing._linen_items_to_nnx(restored, self._abstract_pure())  # pylint: disable=protected-access
+    self.assertEqual(int(out["model"]["dropout"]["rngs"]["count"]), 0)  # _default_for_sds
+
+  def test_no_aux_key_falls_back_to_default(self):
+    restored = {
+        "params": {"params": {"linear": {"kernel": jnp.ones((2, 1))}}},
+        "step": jnp.asarray(3, jnp.int32),
+    }
+    out = checkpointing._linen_items_to_nnx(restored, self._abstract_pure())  # pylint: disable=protected-access
+    self.assertEqual(int(out["model"]["dropout"]["rngs"]["count"]), 0)
 
 
 if __name__ == "__main__":

@@ -66,7 +66,9 @@ class TrainStateNNX(nnx.Module):
 #   2. weights: model/... -> params/params/... (Linen `params` collection)
 #   3. opt_state: int-keyed dict (empty entries skipped) -> list with None for EmptyState,
 #      and mu/nu wrapped under the `params` collection
-# NNX-only rngs/dropout state is dropped (Linen never had it).
+# NNX-only state Linen never had (rngs/dropout and batch stats) is split out by
+# Variable type and stored under an `nnx_aux` subtree of `items` (see
+# `to_checkpoint_dict`), so it survives a resume instead of resetting.
 
 _NNX_RNG_STATE_KEYS = ("rngs", "dropout")
 
@@ -193,3 +195,20 @@ def from_linen_checkpoint_dict(linen_pure_dict):
   if optimizer:
     result["optimizer"] = optimizer
   return result
+
+
+def to_checkpoint_dict(state):
+  """Reshapes an nnx.State into the on-disk checkpoint layout, splitting by Variable type.
+
+  Weights (nnx.Param) and the optimizer state map to the Linen
+  params/opt_state/step layout, so pure_nnx and Linen checkpoints stay
+  interchangeable. rngs/dropout (nnx.RngState) and batch stats (nnx.BatchStat) go
+  under an `nnx_aux` subtree so they survive a resume. Works on a concrete state
+  (save) or an abstract state (restore target).
+  """
+  params, rng_state, batch_stats, rest = nnx.split_state(state, nnx.Param, nnx.RngState, nnx.BatchStat, ...)
+  linen = to_linen_checkpoint_dict(nnx.merge_state(params, rest).to_pure_dict())
+  aux = nnx.merge_state(rng_state, batch_stats).to_pure_dict()
+  if aux:
+    linen["nnx_aux"] = aux
+  return linen
