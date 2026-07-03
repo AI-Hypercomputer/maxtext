@@ -249,12 +249,11 @@ def validate_keys(keys):
         keys["global_rampup_samples"],
     )
 
-  context_parallel_size = get_context_parallel_size(keys)
   # TODO remove after b/435512699 resolved
-  if context_parallel_size > 1 and keys["context_parallel_load_balance"] and keys["attention_type"] == "chunk":
-    raise ValueError("Currently load-balanced context parallelism is not supported for chunk attention.")
 
-  validate_context_parallel_strategy_ring(context_parallel_size, keys["context_parallel_strategy"], keys["hardware"])
+  validate_context_parallel_strategy_ring(
+      keys["context_parallel_size"], keys["context_parallel_strategy"], keys["hardware"]
+  )
 
   if keys["mtp_eval_target_module"] < 0:
     raise ValueError("mtp_eval_target_module cannot be negative. Set to 0 to disable evaluation.")
@@ -816,6 +815,7 @@ class _HyperParameters:
 
     raw_keys["num_slices"] = max_utils.get_num_slices(raw_keys)
     raw_keys["quantization_local_shard_count"] = get_quantization_local_shard_count(raw_keys)
+    raw_keys["context_parallel_size"] = get_context_parallel_size(raw_keys)
     raw_keys = create_parallelisms_list(raw_keys)
     raw_keys = set_and_validate_pipeline_config(raw_keys)
 
