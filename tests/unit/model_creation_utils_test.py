@@ -832,5 +832,93 @@ class TestSetupDecodeStateFromNnx(unittest.TestCase):
     self.assertIsNotNone(state_mesh_annotations)
 
 
+class TestVerifyAndSyncScanLayers(unittest.TestCase):
+  """Tests for verify_and_sync_scan_layers()."""
+
+  def setUp(self):
+    self.mesh = Mesh(np.array(jax.devices()[:1]), axis_names=("x",))
+
+  @patch("maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata")
+  def test_sync_to_false_when_implicit(self, mock_load_meta):
+    """If scan_layers is not explicit, sync scan_layers to False from checkpoint metadata."""
+    mock_load_meta.return_value = {"scan_layers": False}
+    # Create config without scan_layers in kwargs so it's not explicit
+    cfg = _make_config(enable_checkpointing=True, load_parameters_path="gs://fake/ckpt")
+
+    # Pre-assertions
+    pydantic_cfg = getattr(cfg, "_pydantic_config", cfg)
+    self.assertTrue(cfg.scan_layers)  # default is True
+    self.assertNotIn("scan_layers", pydantic_cfg.model_fields_set)
+
+    # Call verify_and_sync_scan_layers
+    synced_cfg = model_creation_utils.verify_and_sync_scan_layers(cfg)
+
+    # Post-assertions
+    self.assertFalse(synced_cfg.scan_layers)
+    synced_pydantic_cfg = getattr(synced_cfg, "_pydantic_config", synced_cfg)
+    self.assertFalse(synced_pydantic_cfg.scan_layers)
+
+  @patch("maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata")
+  def test_sync_to_true_when_implicit(self, mock_load_meta):
+    """If scan_layers is not explicit, sync scan_layers to True from checkpoint metadata."""
+    mock_load_meta.return_value = {"scan_layers": True}
+    cfg = _make_config(enable_checkpointing=True, load_parameters_path="gs://fake/ckpt")
+
+    synced_cfg = model_creation_utils.verify_and_sync_scan_layers(cfg)
+    self.assertTrue(synced_cfg.scan_layers)
+
+  @patch("maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata")
+  def test_explicit_match_raises_no_error(self, mock_load_meta):
+    """If scan_layers is explicit and matches checkpoint metadata, no error is raised."""
+    mock_load_meta.return_value = {"scan_layers": True}
+    cfg = _make_config(enable_checkpointing=True, load_parameters_path="gs://fake/ckpt", scan_layers=True)
+
+    # Pre-assertions
+    pydantic_cfg = getattr(cfg, "_pydantic_config", cfg)
+    self.assertTrue(cfg.scan_layers)
+    self.assertIn("scan_layers", pydantic_cfg.model_fields_set)
+
+    synced_cfg = model_creation_utils.verify_and_sync_scan_layers(cfg)
+    self.assertTrue(synced_cfg.scan_layers)
+
+  @patch("maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata")
+  def test_explicit_mismatch_raises_value_error(self, mock_load_meta):
+    """If scan_layers is explicit and mismatches checkpoint metadata, ValueError is raised."""
+    mock_load_meta.return_value = {"scan_layers": False}
+    cfg = _make_config(enable_checkpointing=True, load_parameters_path="gs://fake/ckpt", scan_layers=True)
+
+    # Pre-assertions
+    pydantic_cfg = getattr(cfg, "_pydantic_config", cfg)
+    self.assertTrue(cfg.scan_layers)
+    self.assertIn("scan_layers", pydantic_cfg.model_fields_set)
+
+    with self.assertRaises(ValueError) as context:
+      model_creation_utils.verify_and_sync_scan_layers(cfg)
+
+    self.assertIn("Configuration mismatch", str(context.exception))
+
+  @patch("maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata")
+  @patch("maxtext.utils.model_creation_utils.max_logging.log")
+  def test_sync_log_and_early_return(self, mock_log, mock_load_meta):
+    """Test that we log only when auto-resolution actually changes scan_layers, and early return otherwise."""
+    # Scenario A: saved_scan_layers == config.scan_layers (default True).
+    # Since they match, it should return early, and NO log should be printed.
+    mock_load_meta.return_value = {"scan_layers": True}
+    cfg = _make_config(enable_checkpointing=True, load_parameters_path="gs://fake/ckpt")
+
+    synced_cfg = model_creation_utils.verify_and_sync_scan_layers(cfg)
+    self.assertTrue(synced_cfg.scan_layers)
+    mock_log.assert_not_called()
+
+    # Scenario B: saved_scan_layers (False) != config.scan_layers (default True), and is not explicit (implicit).
+    # It should log the auto-resolution and update scan_layers to False.
+    mock_load_meta.return_value = {"scan_layers": False}
+    cfg2 = _make_config(enable_checkpointing=True, load_parameters_path="gs://fake/ckpt")
+
+    synced_cfg2 = model_creation_utils.verify_and_sync_scan_layers(cfg2)
+    self.assertFalse(synced_cfg2.scan_layers)
+    mock_log.assert_called_once_with("Setting scan_layers=False loaded from checkpoint metadata.")
+
+
 if __name__ == "__main__":
   unittest.main()

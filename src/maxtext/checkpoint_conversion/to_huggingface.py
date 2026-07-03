@@ -98,6 +98,7 @@ from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils.globals import HF_IDS
 from maxtext.utils.lora_utils import sync_lora_metadata
+from maxtext.utils.model_creation_utils import verify_and_sync_scan_layers
 
 
 flags.DEFINE_bool(
@@ -443,6 +444,14 @@ def main(argv: Sequence[str]) -> None:
   assert (
       config.load_full_state_path == ""
   ), "This script expects parameters, not a full state. Use generate_param_only_checkpoint first if needed."
+
+  if not config.load_parameters_path and config.lora.lora_restore_path:
+    # Standalone LoRA conversion uses lora_restore_path for metadata
+    temp_config = config.model_copy(update={"load_parameters_path": config.lora.lora_restore_path})
+    temp_config = verify_and_sync_scan_layers(temp_config)
+    config = config.model_copy(update={"scan_layers": temp_config.scan_layers})
+  else:
+    config = verify_and_sync_scan_layers(config)
   max_utils.print_system_information()
   overall_start = time.time()
 

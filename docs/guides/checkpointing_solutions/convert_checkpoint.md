@@ -78,7 +78,7 @@ You can find your converted checkpoint files under `${BASE_OUTPUT_DIRECTORY}/0/i
 ### Key Parameters
 
 - `model_name`: The specific model identifier. It must match a supported entry in the MaxText [globals.py](https://github.com/AI-Hypercomputer/maxtext/blob/16b684840db9b96b19e24e84ac49f06af7204ae3/src/maxtext/utils/globals.py#L46C1-L46C7).
-- `scan_layers`: Controls whether the output uses a scanned (`scan_layers=true`) or unscanned (`scan_layers=false`) checkpoint format. Refer [to the Checkpoints guide](checkpoints) for more information. **IMPORTANT:** This setting *must* match the `scan_layers` value used during model training or loading. A mismatch will cause PyTree loading errors (though MaxText will intercept these and raise a descriptive `ValueError` explaining the mismatch).
+- `scan_layers`: Controls whether the output uses a scanned (`scan_layers=true`) or unscanned (`scan_layers=false`) checkpoint format. Refer [to the Checkpoints guide](checkpoints) for more information. **Note:** When resuming or loading a checkpoint in MaxText, this setting will automatically be loaded from the checkpoint metadata, meaning you do not have to manually specify it during model execution. If you do explicitly specify a value for `scan_layers`, it must match the checkpoint's saved configuration, or a `ValueError` mismatch error will be raised.
 - `use_multimodal`: Indicates if multimodality is used, important for Gemma3.
 - `base_output_directory`: The path where the converted Orbax checkpoint will be stored; it can be Google Cloud Storage (GCS) or local.
 - `hardware=cpu`: The conversion script runs on a CPU machine.
@@ -298,9 +298,9 @@ Here is an example [PR to add support for gemma3 multi-modal model](https://gith
 
 - **Error:** `Type ShapeDtypeStruct is not a valid JAX type` or generic **PyTree structure/shape mismatches** (e.g., Orbax reporting `"X/Y paths matched"`, such as `143/145 paths`).
 
-  - **Cause: Configuration mismatch** (e.g., `scan_layers`) between the checkpoint conversion script (e.g., `to_maxtext.py` or `to_huggingface.py`) and the trainer/inference runner (e.g., `train.py`).
+  - **Cause: Configuration mismatch** (e.g., `scan_layers`) between the checkpoint conversion script (e.g., `to_maxtext.py` or `to_huggingface.py`) and the trainer/inference runner (e.g., `train.py`). (Note: Since MaxText automatically loads `scan_layers` from the checkpoint's saved metadata, you should only encounter this error if you explicitly set a mismatching value on the command line, which raises a `ValueError` mismatch error).
 
-  - **Solution:** Ensure the `scan_layers` flag is set to the exact same value (`True` or `False`) in both the conversion command and your training/execution command.
+  - **Solution:** Omit the `scan_layers` parameter from your training or execution command to allow MaxText to automatically resolve it from the checkpoint metadata, or ensure any explicitly specified `scan_layers` parameter matches the format of the loaded checkpoint.
 
 - **Error:** The converted checkpoint loads without errors but produces nonsensical output.
 

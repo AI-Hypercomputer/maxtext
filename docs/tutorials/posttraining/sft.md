@@ -89,11 +89,11 @@ export MAXTEXT_CKPT_PATH=<CKPT_PATH> # e.g., gs://my-bucket/my-model-checkpoint/
 ```
 
 > [!IMPORTANT]
-> **Matching the `scan_layers` Parameter:**
-> The `scan_layers` setting during your fine-tuning run **must match** the setting used when creating the checkpoint at `MAXTEXT_CKPT_PATH`.
+> **Automatic `scan_layers` Resolution:**
+> MaxText automatically loads `scan_layers` from the checkpoint's saved metadata when resuming (via `load_parameters_path`) if you do not explicitly specify it on the command-line.
 >
-> - If the checkpoint was converted or saved with `scan_layers=False` (which is common for Hugging Face conversions and inference-ready models), you **must also provide `scan_layers=False` in the MaxText command.**
-> - If `scan_layers` does not match, MaxText will raise a `ValueError`.
+> - You do not need to manually supply `scan_layers=False` (or `scan_layers=True`) when loading checkpoints; MaxText will configure this automatically.
+> - If you do explicitly provide a `scan_layers` argument, it must match the checkpoint's saved setting or a `ValueError` mismatch error will be raised.
 >   See the [Checkpoints concept guide](../../reference/core_concepts/checkpoints.md) for more details.
 
 ## Run SFT on Hugging Face Dataset
