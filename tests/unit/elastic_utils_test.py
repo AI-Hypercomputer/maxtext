@@ -245,6 +245,45 @@ class ElasticUtilsTest(unittest.TestCase):
     indices = elastic_utils.live_slice_indices(config)
     self.assertEqual(indices, {0, 1})
 
+  def _base_mtc_keys(self, **overrides):
+    keys = {
+        "elastic_enabled": True,
+        "mtc_data_parallelism": 1,
+        "num_slices": 2,
+    }
+    keys.update(overrides)
+    return keys
+
+  def test_single_controller_mtc_init_kwargs_uses_active_elastic_devices(self):
+    self.fake_pathwaysutils.is_pathways_backend_used.return_value = True
+    device0 = FakeDevice(slice_index=0)
+    device1 = FakeDevice(slice_index=1)
+    self.fake_jax.devices.return_value = [device0, device1]
+    self.fake_manager.active_slice_indices = {0}
+
+    kwargs = elastic_utils.single_controller_mtc_init_kwargs(self._base_mtc_keys(mtc_data_parallelism=0))
+
+    self.assertEqual(kwargs["devices"], (device0,))
+    self.assertEqual(kwargs["num_slices"], 1)
+    self.assertEqual(kwargs["data_parallelism"], 1)
+
+  def test_single_controller_mtc_init_kwargs_raises_if_empty(self):
+    self.fake_pathwaysutils.is_pathways_backend_used.return_value = True
+    device0 = FakeDevice(slice_index=0)
+    self.fake_jax.devices.return_value = [device0]
+    self.fake_manager.active_slice_indices = {1}
+
+    with self.assertRaisesRegex(ValueError, "Elastic single-controller MTC initialization found no active devices."):
+      elastic_utils.single_controller_mtc_init_kwargs(self._base_mtc_keys())
+
+  def test_single_controller_mtc_init_kwargs_non_elastic(self):
+    kwargs = elastic_utils.single_controller_mtc_init_kwargs(
+        self._base_mtc_keys(elastic_enabled=False, mtc_data_parallelism=3, num_slices=4)
+    )
+
+    self.assertEqual(kwargs, {"data_parallelism": 3, "num_slices": 4})
+    self.assertIsNone(elastic_utils.elastic_manager)
+
   def test_get_devices_per_host(self):
     device0 = FakeDevice(slice_index=0, process_index=0, task_id=0)
     device1 = FakeDevice(slice_index=0, process_index=0, task_id=0)
