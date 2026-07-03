@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1782987372615,
+  "lastUpdate": 1783046351971,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -139,6 +139,76 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total CUDA12 Tests Duration",
             "value": 1192.812,
+            "unit": "sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "AI-Hypercomputer",
+            "username": "AI-Hypercomputer"
+          },
+          "committer": {
+            "name": "AI-Hypercomputer",
+            "username": "AI-Hypercomputer"
+          },
+          "id": "fa4f50f0b6c03ae6588f5e084027436574aa79a8",
+          "message": "ci: add test duration tracking workflow",
+          "timestamp": "2026-07-02T19:25:17Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/pull/4290/commits/fa4f50f0b6c03ae6588f5e084027436574aa79a8"
+        },
+        "date": 1783046351374,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "[TPU] File: test-results-tpu-1.xml",
+            "value": 1348.38,
+            "unit": "sec"
+          },
+          {
+            "name": "[CPU] File: test-results-cpu-4.xml",
+            "value": 2523.7775,
+            "unit": "sec"
+          },
+          {
+            "name": "[TPU] File: test-results-tpu-2.xml",
+            "value": 243.064,
+            "unit": "sec"
+          },
+          {
+            "name": "[CUDA12] File: test-results-cuda12-1.xml",
+            "value": 1191.327,
+            "unit": "sec"
+          },
+          {
+            "name": "[CPU] File: test-results-cpu-3.xml",
+            "value": 585.0975,
+            "unit": "sec"
+          },
+          {
+            "name": "[CPU] File: test-results-cpu-2.xml",
+            "value": 366.72249999999997,
+            "unit": "sec"
+          },
+          {
+            "name": "[CPU] File: test-results-cpu-1.xml",
+            "value": 452.88,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU Tests Duration",
+            "value": 1591.4440000000002,
+            "unit": "sec"
+          },
+          {
+            "name": "Total CPU Tests Duration",
+            "value": 3928.4775,
+            "unit": "sec"
+          },
+          {
+            "name": "Total CUDA12 Tests Duration",
+            "value": 1191.327,
             "unit": "sec"
           }
         ]
