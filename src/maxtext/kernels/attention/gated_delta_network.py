@@ -507,8 +507,12 @@ def _invert_vjp_bwd(interpret, a, da):
   # d(L^{-1}) = -L^{-1} dL L^{-1}  =>  dL = -A^T dA A^T; L = I + s with s
   # strictly lower and a unit diagonal, so only the strict lower part flows.
   # The primal s is float32 (like a), so the cotangent dtype already matches.
+  # HIGHEST precision matches the forward ladder's bf16x3 dots: A has a large
+  # dynamic range, and TPU's default single-pass bf16 matmul would truncate
+  # the operands and leak ~2^-8 relative error into the k/beta/g gradients.
   a_t = a.swapaxes(-1, -2)
-  ds = -jnp.matmul(a_t, jnp.matmul(da, a_t))
+  hi = jax.lax.Precision.HIGHEST
+  ds = -jnp.matmul(a_t, jnp.matmul(da, a_t, precision=hi), precision=hi)
   c = a.shape[-1]
   rows = jax.lax.broadcasted_iota(jnp.int32, (c, c), 0)
   cols = jax.lax.broadcasted_iota(jnp.int32, (c, c), 1)
