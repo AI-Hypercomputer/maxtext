@@ -140,6 +140,16 @@ class TensorHandlingTest(parameterized.TestCase):
     np.testing.assert_allclose(result[1, 0], tensors["expert_1.layer_0.weight"])
     np.testing.assert_allclose(result[1, 1], tensors["expert_1.layer_1.weight"])
 
+  def test_reshard_to_target_single_device_sharding(self):
+    from maxtext.checkpoint_conversion.utils.tensor_handling import reshard_to_target
+    arr = jax.device_put(np.ones((4, 4), dtype=np.float32), jax.devices()[0])
+    # Target sharding
+    target_sharding = jax.sharding.NamedSharding(self.mesh, jax.sharding.PartitionSpec("x", None))
+    # Reshard to target
+    result = reshard_to_target(arr, target_sharding)
+    self.assertEqual(result.shape, (4, 4))
+    np.testing.assert_allclose(result, 1.0)
+
 
 class LoadDynamicTest(parameterized.TestCase):
   """Tests for cache downloads and dynamic loading of safetensors."""
@@ -235,7 +245,7 @@ class LoadDynamicTest(parameterized.TestCase):
     dummy_ret_val, loaded_vars = load_dynamic.load_safetensors_dynamic_state(path, abstract_state, config)
 
     self.assertIsNone(dummy_ret_val)
-    self.assertEqual(loaded_vars, {"params": {}})
+    self.assertEqual(loaded_vars, {})
     mock_hf_fs.assert_called_once_with(token="dummy_token")
     mock_sync.assert_called_once_with("dynamic_hf_download_complete")
 
@@ -301,7 +311,7 @@ class SourceCheckpointLoadingTest(parameterized.TestCase):
     self.assertIsNotNone(loaded_vars)
 
     # Assert values match
-    loaded_weight = loaded_vars["params"]["token_embedder"]["embedding"]
+    loaded_weight = loaded_vars["token_embedder"]["embedding"]
     np.testing.assert_allclose(loaded_weight, dummy_weight)
 
 
