@@ -23,6 +23,13 @@ from maxtext.checkpoint_conversion.utils import param_mapping
 
 class ParamMappingTest(unittest.TestCase):
 
+  def _apply_hooks(self, weight, target_shape, hooks):
+    if not isinstance(hooks, list):
+      hooks = [hooks]
+    for hook in hooks:
+      weight = hook(weight, target_shape)
+    return weight
+
   def test_gemma3_mapping_unscanned(self):
     config = {
         "text_config": {"num_hidden_layers": 2, "hidden_size": 256},
@@ -124,6 +131,66 @@ class ParamMappingTest(unittest.TestCase):
     maxtext_config = mock.Mock()
     mapping = param_mapping.DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=True)
     self.assertIn("params-decoder-dense_layers-self_attention-query-kernel", mapping)
+
+  def test_deepseek_non_mla_query_hook_scales_dense_layer(self):
+    config = {
+        "num_hidden_layers": 2,
+        "first_k_dense_replace": 1,
+        "n_routed_experts": 2,
+        "use_mla": False,
+        "head_dim": 3,
+    }
+    maxtext_config = mock.Mock()
+    hooks = param_mapping.DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(
+        config, maxtext_config, scan_layers=False, saving_to_hf=False
+    )
+    hook = hooks["params-decoder-dense_layer_0-self_attention-query-kernel"]
+
+    hf_q = np.arange(36, dtype=np.float32).reshape(6, 6)
+    target_shape = (6, 2, 3)
+    output = self._apply_hooks(hf_q, target_shape, hook)
+    expected = hf_q.T.reshape(target_shape) / np.sqrt(config["head_dim"])
+    np.testing.assert_allclose(output, expected)
+
+  def test_deepseek_non_mla_query_hook_scales_moe_layer(self):
+    config = {
+        "num_hidden_layers": 2,
+        "first_k_dense_replace": 1,
+        "n_routed_experts": 2,
+        "use_mla": False,
+        "head_dim": 3,
+    }
+    maxtext_config = mock.Mock()
+    hooks = param_mapping.DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(
+        config, maxtext_config, scan_layers=False, saving_to_hf=False
+    )
+    hook = hooks["params-decoder-layers_1-self_attention-query-kernel"]
+
+    hf_q = np.arange(36, dtype=np.float32).reshape(6, 6)
+    target_shape = (6, 2, 3)
+    output = self._apply_hooks(hf_q, target_shape, hook)
+    expected = hf_q.T.reshape(target_shape) / np.sqrt(config["head_dim"])
+    np.testing.assert_allclose(output, expected)
+
+  def test_deepseek_non_mla_key_hook_only_reshapes(self):
+    config = {
+        "num_hidden_layers": 2,
+        "first_k_dense_replace": 1,
+        "n_routed_experts": 2,
+        "use_mla": False,
+        "head_dim": 3,
+    }
+    maxtext_config = mock.Mock()
+    hooks = param_mapping.DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(
+        config, maxtext_config, scan_layers=False, saving_to_hf=False
+    )
+    hook = hooks["params-decoder-dense_layer_0-self_attention-key-kernel"]
+
+    hf_k = np.arange(36, dtype=np.float32).reshape(6, 6)
+    target_shape = (6, 2, 3)
+    output = self._apply_hooks(hf_k, target_shape, hook)
+    expected = hf_k.T.reshape(target_shape)
+    np.testing.assert_allclose(output, expected)
 
   def test_gpt_oss_mapping(self):
     config = {

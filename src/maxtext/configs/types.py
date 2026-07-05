@@ -228,6 +228,7 @@ ModelName = Literal[
     "deepseek3-test",
     "deepseek3-tiny",
     "deepseek3.2-671b",
+    "deepseek_ocr_2",
     "deepseek4-284b",
     "deepseek-custom",
     "kimi-k2-1t",
@@ -558,6 +559,10 @@ class Attention(BaseModel):
   )
   attention_type: Literal["global", "local_sliding", "chunk", "mla", "full", "compressed"] = Field(
       "global", description="The variant of attention to use."
+  )
+  use_mla: bool = Field(
+      True,
+      description="Whether to use Multi-Head Latent Attention (MLA) for DeepSeek.",
   )
   share_kv_projections: bool = Field(
       False,
@@ -1173,6 +1178,10 @@ class Tokenizer(BaseModel):
       description="Path to the tokenizer model file.",
   )
   tokenizer_type: TokenizerType = Field(TokenizerType.SENTENCEPIECE, description="The type of tokenizer.")
+  hf_trust_remote_code: bool = Field(
+      False,
+      description="Whether Hugging Face tokenizer/model loading may execute custom code from the referenced repo.",
+  )
   use_chat_template: bool = Field(False, description="Whether to use the chat template for tokenization.")
   chat_template_path: str = Field("", description="Path to chat template json file.")
   chat_template: str = Field(
@@ -2033,6 +2042,11 @@ class VisionProjector(BaseModel):
   projector_output_dim_for_vit: int = Field(4096, description="Output dimension for the vision projector.")
   pixel_shuffle_ratio_for_vit: float = Field(0.5, description="Pixel shuffle ratio for the Vision Transformer.")
   projector_dropout_for_vit: float = Field(0.0, description="Dropout rate for the vision projector.")
+  vision_connector_num_layers: int = Field(0, description="Number of layers in the vision connector.")
+  vision_connector_emb_dim: int = Field(0, description="Embedding dimension for the vision connector.")
+  vision_connector_num_query_heads: int = Field(0, description="Number of query heads in the vision connector.")
+  vision_connector_num_kv_heads: int = Field(0, description="Number of KV heads in the vision connector.")
+  vision_connector_mlp_dim: int = Field(0, description="MLP dimension for the vision connector.")
 
 
 class AudioEncoder(BaseModel):
@@ -3188,6 +3202,7 @@ class MaxTextConfig(
           "qwen3-vl-4b",
           "qwen3.5-35b-a3b",
           "qwen3.5-397b-a17b",
+          "deepseek_ocr_2",
       )
       if self.model_name not in valid_mm_models and self.model_name != "default":
         raise ValueError(f"Multimodal is only supported for {valid_mm_models}, not {self.model_name}")

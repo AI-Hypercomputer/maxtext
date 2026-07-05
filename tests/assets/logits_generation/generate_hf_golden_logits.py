@@ -81,9 +81,14 @@ def save_golden_logits(
 
     model_class = Llama4ForConditionalGeneration
   else:
-    from transformers import AutoModelForCausalLM  # pylint: disable=import-outside-toplevel
+    if model_id == "deepseek-ai/DeepSeek-OCR-2":
+      from transformers import AutoModel  # pylint: disable=import-outside-toplevel
 
-    model_class = AutoModelForCausalLM
+      model_class = AutoModel
+    else:
+      from transformers import AutoModelForCausalLM  # pylint: disable=import-outside-toplevel
+
+      model_class = AutoModelForCausalLM
 
   tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=trust_remote_code)
   print(f"loading model from {hf_model_path}")
@@ -100,8 +105,22 @@ def save_golden_logits(
   else:
     raise ValueError(f"unsupported --hf-load-dtype: {hf_load_dtype}")
 
+  from transformers import AutoConfig, LlamaConfig  # pylint: disable=import-outside-toplevel
+
+  config = AutoConfig.from_pretrained(hf_model_path, trust_remote_code=trust_remote_code)
+
+  # Fill in missing attributes with Llama defaults to satisfy LlamaAttention expectations
+  llama_default = LlamaConfig()
+  for k, v in llama_default.to_dict().items():
+    if not hasattr(config, k):
+      setattr(config, k, v)
+
+  if not hasattr(config, "pad_token_id") or config.pad_token_id is None:
+    config.pad_token_id = tokenizer.pad_token_id
+
   model = model_class.from_pretrained(
       hf_model_path,
+      config=config,
       dtype=torch_dtype,
       trust_remote_code=trust_remote_code,
   )

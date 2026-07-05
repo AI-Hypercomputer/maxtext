@@ -926,7 +926,13 @@ def main(
         max_logging.log("Eager load with Transformers backend, from_pretrained with auto dtype")
         # For auto mode, loaded dtype is the same as `dtype` specified in config.json (or `torch_dtype` for older version)
         # e.g., https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite/blob/main/config.json#L54
-        hf_state_dict_numpy = load_hf_dict_from_transformers(model_id, token=hf_token, revision=revision, dtype="auto")
+        hf_state_dict_numpy = load_hf_dict_from_transformers(
+            model_id,
+            token=hf_token,
+            revision=revision,
+            dtype="auto",
+            trust_remote_code=config.hf_trust_remote_code,
+        )
       elif eager_load_method == "safetensors":
         max_logging.log("Eager load with Safetensors backend, safe_open with pt framework")
         # For safe_open, loaded dtype is the same as original safetensor

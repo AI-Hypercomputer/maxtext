@@ -75,6 +75,7 @@ HF_IDS = {
     "qwen3-235b-a22b": "Qwen/Qwen3-235B-A22B-Thinking-2507",
     "qwen3-480b-a35b": "Qwen/Qwen3-Coder-480B-A35B-Instruct",
     "deepseek2-16b": "deepseek-ai/DeepSeek-V2-Lite",
+    "deepseek_ocr_2": "deepseek-ai/DeepSeek-OCR-2",
     "deepseek3-671b": "deepseek-ai/DeepSeek-V3",
     "deepseek3.2-671b": "deepseek-ai/DeepSeek-V3.2",
     "deepseek4-284b": "deepseek-ai/DeepSeek-V4-Flash",

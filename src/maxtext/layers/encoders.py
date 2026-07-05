@@ -90,6 +90,16 @@ class VisionEncoder(nnx.Module):
       )
       setattr(self, projector_name, qwen3_vl_vision.Qwen3VLVisionProjector(config=self.config, rngs=self.rngs))
       return encoder_name, projector_name
+    elif self.config.model_name in ["deepseek_ocr_2"]:
+      from maxtext.models import deepseek_ocr  # pylint: disable=import-outside-toplevel
+
+      encoder_name = "DeepseekOCR2VisionEncoder_0"
+      projector_name = "MlpProjector_0"
+      setattr(
+          self, encoder_name, deepseek_ocr.DeepseekOCR2VisionEncoder(config=self.config, mesh=self.mesh, rngs=self.rngs)
+      )
+      setattr(self, projector_name, deepseek_ocr.MlpProjector(config=self.config, mesh=self.mesh, rngs=self.rngs))
+      return encoder_name, projector_name
     else:
       raise ValueError(f"No VisionEncoder implemented for {self.config.model_name} yet")
 

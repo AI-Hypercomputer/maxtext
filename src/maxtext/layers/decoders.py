@@ -732,6 +732,7 @@ class Decoder(nn.Module):
             "qwen3-vl-4b",
             "qwen3.5-35b-a3b",
             "qwen3.5-397b-a17b",
+            "deepseek_ocr_2",
         ]:
           y = mm_utils.merge_mm_embeddings(
               text_embeddings=y,
