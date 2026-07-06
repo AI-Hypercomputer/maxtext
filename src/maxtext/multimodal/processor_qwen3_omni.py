@@ -199,7 +199,13 @@ def maybe_pad_video_values_to_max_grid(
 
 
 def smart_resize(
-    height: int, width: int, factor: int = 28, min_pixels: int = 56 * 56, max_pixels: int = 14 * 14 * 4 * 1280
+    height: int,
+    width: int,
+    factor: int = 28,
+    min_pixels: int = 56 * 56,
+    max_pixels: int = 14 * 14 * 4 * 1280,
+    max_h_pixels: int | None = None,
+    max_w_pixels: int | None = None,
 ):
   """Rescales the image so that the following conditions are met:
 
@@ -208,6 +214,10 @@ def smart_resize(
   2. The total number of pixels is within the range ['min_pixels', 'max_pixels'].
 
   3. The aspect ratio of the image is maintained as closely as possible.
+
+  4. (Optional) Neither dimension exceeds max_h_pixels / max_w_pixels. When either
+     cap is exceeded, both dimensions are scaled down proportionally and re-aligned
+     to 'factor'.
 
   """
   if max(height, width) / min(height, width) > MAX_RATIO:
@@ -224,6 +234,13 @@ def smart_resize(
     beta = math.sqrt(min_pixels / (height * width))
     h_bar = math.ceil(height * beta / factor) * factor
     w_bar = math.ceil(width * beta / factor) * factor
+  # Apply per-dimension pixel caps, scaling down proportionally if either is exceeded.
+  if (max_h_pixels is not None and h_bar > max_h_pixels) or (max_w_pixels is not None and w_bar > max_w_pixels):
+    cap_h = max_h_pixels if max_h_pixels is not None else h_bar
+    cap_w = max_w_pixels if max_w_pixels is not None else w_bar
+    scale = min(cap_h / h_bar, cap_w / w_bar)
+    h_bar = min(max(factor, round(h_bar * scale / factor) * factor), (cap_h // factor) * factor)
+    w_bar = min(max(factor, round(w_bar * scale / factor) * factor), (cap_w // factor) * factor)
   return h_bar, w_bar
 
 
@@ -461,6 +478,10 @@ def preprocess_video(video, config):
 
   nframes, channel, height, width = video.shape
   max_pixels = max(min(VIDEO_MAX_PIXELS, VIDEO_TOTAL_PIXELS / nframes * FRAME_FACTOR), int(VIDEO_MIN_PIXELS * 1.05))
+  max_grid_h = getattr(config, "video_max_grid_h", None)
+  max_grid_w = getattr(config, "video_max_grid_w", None)
+  max_h_pixels = int(max_grid_h) * patch_size if max_grid_h is not None else None
+  max_w_pixels = int(max_grid_w) * patch_size if max_grid_w is not None else None
   resized_height_1, resized_width_1 = smart_resize(
       height,
       width,
@@ -488,6 +509,8 @@ def preprocess_video(video, config):
       factor=patch_size * merge_size,
       min_pixels=VIDEO_MIN_PIXELS,
       max_pixels=VIDEO_MAX_PIXELS,
+      max_h_pixels=max_h_pixels,
+      max_w_pixels=max_w_pixels,
   )
 
   # Second resize - process each channel separately to preserve float values
@@ -780,7 +803,7 @@ def add_extra_tokens_for_qwen3_omni(tokens, config, processor_output):
         new_tokens.append(qwen_tokens.audio_pad)
         audio_data_idx += 1
 
-      new_tokens.append(qwen_tokens.audio_pad)
+      new_tokens.append(qwen_tokens.audio_end)
       new_tokens.append(qwen_tokens.vision_end)
 
       video_idx += 1

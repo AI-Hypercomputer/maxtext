@@ -37,7 +37,10 @@ from maxtext.layers.embeddings import (
 )
 from maxtext.layers.decoders import deepstack_process
 from maxtext.layers.encoders import AudioEncoder
-from maxtext.multimodal.processor_qwen3_omni import maybe_pad_video_values_to_max_grid
+from maxtext.multimodal.processor_qwen3_omni import (
+    maybe_pad_video_values_to_max_grid,
+    preprocess_video,
+)
 from maxtext.models.qwen3 import (
     Qwen3OmniAudioEncoder,
     Qwen3OmniAudioEncoderLayer,
@@ -434,6 +437,48 @@ class TestQwen3OmniMoeVisionPatchEmbed(BaseVisionTestCase):
         rtol=1e-3,
         atol=5e-3,
     )
+
+  def test_scale_to_fit_video_before_padding(self):
+    """Test that preprocess_video respects video_max_grid_h/w for wide/tall videos."""
+    cfg = pyconfig.initialize(
+        ["", base_config_path],
+        model_name="qwen3-omni-30b-a3b",
+        video_max_grid_t=2,
+        video_max_grid_h=32,
+        video_max_grid_w=32,
+        patch_size_for_vit=16,
+        num_channels_for_vit=3,
+        temporal_patch_size_for_vit=2,
+    )
+
+    # Wide video (2 frames, 3 channels, 220×896): grid_w >> max_grid_w.
+    dummy_video_wide = np.ones((2, 3, 220, 896), dtype=np.float32)
+    dummy_video_wide_ratio = dummy_video_wide.shape[3] / dummy_video_wide.shape[2]
+    video_processed, video_grid_thw = preprocess_video(dummy_video_wide, cfg)
+    self.assertLessEqual(video_grid_thw[0, 1], cfg.video_max_grid_h)
+    self.assertLessEqual(video_grid_thw[0, 2], cfg.video_max_grid_w)
+    # Check the aspect ratio is mostly preserved after smart_resize scaling to fit max grid.
+    self.assertAlmostEqual(video_grid_thw[0, 2] / video_grid_thw[0, 1], dummy_video_wide_ratio, delta=0.5)
+
+    # Verify maybe_pad_video_values_to_max_grid succeeds without ValueError.
+    video_values = np.reshape(
+        video_processed,
+        (
+            1,
+            cfg.num_channels_for_vit,
+            cfg.temporal_patch_size_for_vit * video_grid_thw[0, 0],
+            cfg.patch_size_for_vit * video_grid_thw[0, 1],
+            cfg.patch_size_for_vit * video_grid_thw[0, 2],
+        ),
+    )
+    padded_values, padded_grid, _ = maybe_pad_video_values_to_max_grid(
+        video_values,
+        video_grid_thw,
+        cfg,
+    )
+    self.assertEqual(padded_values.shape[3], cfg.video_max_grid_h * cfg.patch_size_for_vit)
+    self.assertEqual(padded_values.shape[4], cfg.video_max_grid_w * cfg.patch_size_for_vit)
+    np.testing.assert_array_equal(padded_grid, video_grid_thw)  # Grid should not change
 
   def test_patch_embed_is_jittable(self):
     """Test that patch embed is JIT-compilable."""
