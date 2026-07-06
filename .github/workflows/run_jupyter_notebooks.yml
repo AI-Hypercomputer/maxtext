@@ -107,7 +107,11 @@ jobs:
           $PYTHON_EXE -m ipykernel install --user --name maxtext_venv
 
           # Run Hugging Face authentication
-          hf auth login --token "$HF_TOKEN"
+          if [ -n "$HF_TOKEN" ]; then
+            hf auth login --token "$HF_TOKEN"
+          else
+            echo "Warning: HF_TOKEN is empty (likely because this is a PR from a fork). Skipping Hugging Face authentication."
+          fi
 
           for notebook in "$MAXTEXT_NOTEBOOKS_ROOT"/*.ipynb; do
             filename=$(basename "$notebook")
