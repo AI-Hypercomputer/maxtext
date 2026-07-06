@@ -235,7 +235,11 @@ class DiLoCoTest(unittest.TestCase):
       #   = 0.81
       diloco_test_state, loss = diloco_train_step(diloco_test_state, (inputs, labels), jax.random.key(seed=42))
       chex.assert_equal(diloco_test_state.step, 2.0)
+<<<<<<< HEAD
       chex.assert_trees_all_close(loss, 0.65, rtol=1e-2, atol=1e-2)
+=======
+      chex.assert_trees_all_close(loss, 0.49)
+>>>>>>> dac903a32 ([DiLoCo]Use split PRNG key and log losses separatedly on tb)
       # Assert no updates to the global model yet (no synchronization)
       if test_config.pure_nnx:
         _, params_pure, _ = nnx.split(initial_test_state.model, nnx.Param, ...)
@@ -280,7 +284,11 @@ class DiLoCoTest(unittest.TestCase):
       # based outer optimizer.
       diloco_test_state, loss = diloco_train_step(diloco_test_state, (inputs, labels), jax.random.key(seed=42))
       chex.assert_equal(diloco_test_state.step, 3.0)
+<<<<<<< HEAD
       chex.assert_trees_all_close(loss, 0.4481, rtol=1e-2, atol=1e-2)
+=======
+      chex.assert_trees_all_close(loss, 0.2401)
+>>>>>>> dac903a32 ([DiLoCo]Use split PRNG key and log losses separatedly on tb)
       # Assert that inner and outer parameters are all equal now that
       # synchronization has happened.
       if test_config.pure_nnx:
@@ -338,7 +346,11 @@ class DiLoCoTest(unittest.TestCase):
       step_three_outer_params = diloco_test_state.params
       diloco_test_state, loss = diloco_train_step(diloco_test_state, (inputs, labels), jax.random.key(seed=42))
       chex.assert_equal(diloco_test_state.step, 4.0)
+<<<<<<< HEAD
       chex.assert_trees_all_close(loss, 0.574244, rtol=1e-2, atol=1e-2)
+=======
+      chex.assert_trees_all_close(loss, 0.20754369)
+>>>>>>> dac903a32 ([DiLoCo]Use split PRNG key and log losses separatedly on tb)
       # Assert no updates to the global model since previous step (no
       # synchronization).
       chex.assert_trees_all_equal(diloco_test_state.params, step_three_outer_params)
