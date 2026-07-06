@@ -147,9 +147,9 @@ jobs:
         fail-fast: false
     with:
       device_type: tpu
-      device_name: v6e-8
+      device_name: v6e-4
       base_image: maxtext-unit-test-tpu:py312
-      cloud_runner: linux-x86-ct6e-180-8tpu
+      cloud_runner: linux-x86-ct6e-180-4tpu
       maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}

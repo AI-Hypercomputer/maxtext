@@ -107,11 +107,15 @@ jobs:
           $PYTHON_EXE -m ipykernel install --user --name maxtext_venv
 
           # Run Hugging Face authentication
-          hf auth login --token "$HF_TOKEN"
+          if [ -n "$HF_TOKEN" ]; then
+            hf auth login --token "$HF_TOKEN"
+          else
+            echo "Warning: HF_TOKEN is empty (likely because this is a PR from a fork). Skipping Hugging Face authentication."
+          fi
 
           for notebook in "$MAXTEXT_NOTEBOOKS_ROOT"/*.ipynb; do
             filename=$(basename "$notebook")
-            if [[ "$filename" == "sft_llama3_demo_gpu.ipynb" || "$filename" == "maxtext_with_gepa.ipynb" || "$filename" == "demo_decoding.ipynb" ]]; then
+            if [[ "$filename" == "sft_llama3_demo_gpu.ipynb" || "$filename" == "maxtext_with_gepa.ipynb" || "$filename" == "rl_llama3_demo.ipynb" || "$filename" == "demo_decoding.ipynb" ]]; then
               echo "Skipping $filename"
               continue
             fi
@@ -127,6 +131,16 @@ jobs:
             echo "Post-notebook disk cleanup for $filename ..."
             rm -rf "$MAXTEXT_PKG_DIR"/*_output
             rm -rf "$HOME/.cache/huggingface/hub"
+
+            # papermill's kernel teardown can time out on heavy notebooks (e.g.
+            # sft_multimodal_gemma3_demo), leaving the ipykernel process alive and
+            # still holding the TPU + /tmp/libtpu_lockfile. That breaks TPU init for
+            # the next notebook ("ABORTED: ... libtpu multi-process lockfile"). Reap
+            # any surviving kernel and clear the lock before the next iteration.
+            echo "Post-notebook TPU cleanup for $filename ..."
+            pkill -9 -f ipykernel_launcher 2>/dev/null || true
+            sleep 2
+            rm -f /tmp/libtpu_lockfile
           done
       - name: Upload Outputs
         if: always()
