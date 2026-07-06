@@ -132,15 +132,21 @@ jobs:
             rm -rf "$MAXTEXT_PKG_DIR"/*_output
             rm -rf "$HOME/.cache/huggingface/hub"
 
-            # papermill's kernel teardown can time out on heavy notebooks (e.g.
-            # sft_multimodal_gemma3_demo), leaving the ipykernel process alive and
-            # still holding the TPU + /tmp/libtpu_lockfile. That breaks TPU init for
-            # the next notebook ("ABORTED: ... libtpu multi-process lockfile"). Reap
-            # any surviving kernel and clear the lock before the next iteration.
+            # Kill EVERY process still holding a vfio/accel fd (by device, not by name),
+            # clear the lock, then wait for the device to actually be released before the next notebook.
             echo "Post-notebook TPU cleanup for $filename ..."
+            for pid in $(ls /proc 2>/dev/null | grep -E '^[0-9]+$'); do
+              if ls -l /proc/"$pid"/fd 2>/dev/null | grep -qE '/dev/(vfio|accel)'; then
+                echo "  killing pid $pid ($(cat /proc/"$pid"/comm 2>/dev/null)) holding TPU"
+                kill -9 "$pid" 2>/dev/null || true
+              fi
+            done
             pkill -9 -f ipykernel_launcher 2>/dev/null || true
-            sleep 2
             rm -f /tmp/libtpu_lockfile
+            for _ in $(seq 1 30); do
+              ls -l /proc/*/fd 2>/dev/null | grep -qE '/dev/(vfio|accel)' || break
+              sleep 2
+            done
           done
       - name: Upload Outputs
         if: always()
