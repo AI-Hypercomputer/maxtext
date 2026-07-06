@@ -195,7 +195,7 @@ jobs:
             "tpu-integration": "--ignore=tests/post_training",
             "tpu-post-training-unit": "",
             "tpu-post-training-integration": "",
-            "tpu7x-unit": "--ignore=tests/post_training --ignore=tests/inference/kvcache_test.py",
+            "tpu7x-unit": "--ignore=tests/post_training",
             "tpu7x-integration": "--ignore=tests/post_training",
             "tpu7x-post-training-unit": "",
             "tpu7x-post-training-integration": "",

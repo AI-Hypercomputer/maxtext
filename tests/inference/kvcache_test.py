@@ -29,7 +29,7 @@ class MlaKVCacheTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     self.rng = jax.random.PRNGKey(42)
-    self.batchsize = 8
+    self.batchsize = 4
     self.prefill_len = 100
     self.target_len = 196
     self.dtype = jnp.bfloat16
