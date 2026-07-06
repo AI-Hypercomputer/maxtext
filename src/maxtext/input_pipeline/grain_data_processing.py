@@ -191,12 +191,11 @@ def get_datasets(
           f"Each shard will be read by at most {math.ceil(dataloading_host_count / len(data_files))} hosts. "
           f"Concurrent reading by multiple hosts may cause slow down."
       )
-    min_files_per_host = len(data_files) // dataloading_host_count
-    if grain_worker_count > min_files_per_host:
+    if grain_worker_count > files_per_host:
       raise ValueError(
-          f"grain_worker_count ({grain_worker_count}) exceeds the minimum number of {data_file_type} files "
-          f"per host ({min_files_per_host} = {len(data_files)} files / {dataloading_host_count} hosts). "
-          f"Lower grain_worker_count to at most {min_files_per_host}."
+          f"grain_worker_count ({grain_worker_count}) exceeds the number of {data_file_type} files "
+          f"per host ({files_per_host}). "
+          f"Lower grain_worker_count to at most {files_per_host}."
       )
     dataset = grain.MapDataset.source(data_files)
     if shuffle:
