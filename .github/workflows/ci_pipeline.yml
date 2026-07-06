@@ -149,7 +149,7 @@ jobs:
       device_type: tpu
       device_name: v6e-8
       base_image: maxtext-unit-test-tpu:py312
-      cloud_runner: linux-x86-ct6e-180-8tpu
+
       maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
