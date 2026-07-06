@@ -170,7 +170,7 @@ jobs:
       maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
 
   tpu7x-tests:
-    name: ${{ matrix.flavor || 'TPU7X' }} tests
+    name: TPU7X tests
     needs: [build_and_upload_maxtext_package]
     if: needs.analyze_code_changes.outputs.run_tests == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     uses: ./.github/workflows/run_tests_coordinator.yml
