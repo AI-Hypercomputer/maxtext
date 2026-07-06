@@ -323,6 +323,17 @@ def build_diloco_state(
   return init_diloco_state()
 
 
+def extract_replica_0(metrics):
+  def select_first_replica(x):
+    if not hasattr(x, "shape") or len(x.shape) == 0:
+      return x
+    R = x.shape[0]
+    mask = (jnp.arange(R) == 0).reshape((R,) + (1,) * (x.ndim - 1))
+    return drjax.reduce_sum(x * mask)
+
+  return jax.tree.map(select_first_replica, metrics)
+
+
 def build_diloco_train_step(
     config: pyconfig.HyperParameters,
     train_step: Callable[[Any, Batch, PRNGKey], tuple[Any, Metrics]],
@@ -390,17 +401,21 @@ def build_diloco_train_step(
         inner_state=new_inner_state,
     )
 
-  def typed_reduce_mean(in_tree):
-    total = drjax.reduce_sum(in_tree)
-    avg = jax.tree.map(lambda x: (x / config.num_diloco_replicas).astype(x.dtype), total)
-    return avg
-
   @drjax.program(placements={"diloco": config.num_diloco_replicas})
   def diloco_train_step(state, batch, prng):
-    # Broadcast the RNG across replicas.
-    broadcast_rng = drjax.broadcast(prng, mesh=mesh)
-    inner_state, metrics = drjax.map_fn(train_step, (state.inner_state, batch, broadcast_rng), mesh=mesh)
-    avg_metrics = typed_reduce_mean(metrics)
+    # Split the RNG key across replicas.
+    keys = jax.random.split(prng, config.num_diloco_replicas)
+    inner_state, metrics = drjax.map_fn(train_step, (state.inner_state, batch, keys), mesh=mesh)
+    default_metrics = extract_replica_0(metrics)
+    # TODO Remove this all-reduce in the future to avoid cross-DCN comm completely
+    # TODO require to modify the metric_logger.py, as we need separate loggers for separate islands.
+    # not critical in streaming diloco as the communication happens almost everystep so
+    # this will not cause additional stall
+    if isinstance(metrics, dict) and "scalar" in metrics and "learning/loss" in metrics["scalar"]:
+      for i in range(config.num_diloco_replicas):
+        mask_i = jnp.arange(config.num_diloco_replicas) == i
+        loss_i = drjax.reduce_sum(metrics["scalar"]["learning/loss"] * mask_i)
+        default_metrics["scalar"][f"learning/loss_island_{i}"] = loss_i
     # For NNX, the step counter lives at inner_state.optimizer.step; for Linen at inner_state.step.
     new_step = inner_state.optimizer.step[0] if config.pure_nnx else inner_state.step[0]
     state = state.replace(
@@ -528,6 +543,6 @@ def build_diloco_train_step(
           lambda x: x,  # no-op
           state,
       )
-    return state, avg_metrics
+    return state, default_metrics
 
   return diloco_train_step

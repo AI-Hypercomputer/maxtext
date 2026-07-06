@@ -191,7 +191,7 @@ class DiLoCoTest(unittest.TestCase):
       #   = 0.81
       diloco_test_state, loss = diloco_train_step(diloco_test_state, (inputs, labels), jax.random.key(seed=42))
       chex.assert_equal(diloco_test_state.step, 2.0)
-      chex.assert_trees_all_close(loss, 0.65)
+      chex.assert_trees_all_close(loss, 0.49)
       # Assert no updates to the global model yet (no synchronization)
       chex.assert_trees_all_equal(diloco_test_state.params, initial_test_state.params)
 
@@ -225,7 +225,7 @@ class DiLoCoTest(unittest.TestCase):
       # based outer optimizer.
       diloco_test_state, loss = diloco_train_step(diloco_test_state, (inputs, labels), jax.random.key(seed=42))
       chex.assert_equal(diloco_test_state.step, 3.0)
-      chex.assert_trees_all_close(loss, 0.4481)
+      chex.assert_trees_all_close(loss, 0.2401)
       # Assert that inner and outer parameters are all equal now that
       # synchronization has happened.
       chex.assert_trees_all_equal(
@@ -264,7 +264,7 @@ class DiLoCoTest(unittest.TestCase):
       step_three_outer_params = diloco_test_state.params
       diloco_test_state, loss = diloco_train_step(diloco_test_state, (inputs, labels), jax.random.key(seed=42))
       chex.assert_equal(diloco_test_state.step, 4.0)
-      chex.assert_trees_all_close(loss, 0.574244)
+      chex.assert_trees_all_close(loss, 0.20754369)
       # Assert no updates to the global model since previous step (no
       # synchronization).
       chex.assert_trees_all_equal(diloco_test_state.params, step_three_outer_params)
