@@ -176,9 +176,7 @@ def remove_size_one_mesh_axis(spec, mesh):
   return P(*new_spec, unreduced=spec.unreduced, reduced=spec.reduced)
 
 
-def get_nnx_var_named_sharding_with_scan_axis(
-    v: nnx.Variable, mesh
-) -> nnx.Variable:
+def get_nnx_var_named_sharding_with_scan_axis(v: nnx.Variable, mesh) -> nnx.Variable:
   """Compute NamedSharding for an NNX variable, correctly handling the scan axis."""
   val = v.get_value()
   if not hasattr(val, "shape"):
@@ -190,11 +188,7 @@ def get_nnx_var_named_sharding_with_scan_axis(
       return v.replace(jax.tree.map(lambda _: replicated, val))
     return v
   metadata = v.get_metadata()
-  out_sharding = (
-      metadata.get("out_sharding")
-      or metadata.get("sharding_names")
-      or metadata.get("sharding")
-  )
+  out_sharding = metadata.get("out_sharding") or metadata.get("sharding_names") or metadata.get("sharding")
   if not out_sharding:
     pspec = P()
   else:
@@ -202,11 +196,7 @@ def get_nnx_var_named_sharding_with_scan_axis(
     if nnx.PARTITION_NAME in metadata:
       partition_name = metadata[nnx.PARTITION_NAME]
       scan_axis = metadata.get("param_scan_axis", 0)
-      out_sharding = (
-          [out_sharding]
-          if isinstance(out_sharding, str)
-          else list(out_sharding)
-      )
+      out_sharding = [out_sharding] if isinstance(out_sharding, str) else list(out_sharding)
       if partition_name not in out_sharding:
         out_sharding.insert(scan_axis, partition_name)
       out_sharding = tuple(out_sharding)
@@ -215,9 +205,7 @@ def get_nnx_var_named_sharding_with_scan_axis(
     local_rules = metadata.get("sharding_rules", ())
     if context_rules or local_rules:
       local_rules_list = list(local_rules) if local_rules is not None else []
-      context_rules_list = (
-          list(context_rules) if context_rules is not None else []
-      )
+      context_rules_list = list(context_rules) if context_rules is not None else []
       rules = local_rules_list + context_rules_list
       pspec = logical_to_mesh_axes(out_sharding, mesh, rules=rules)
     else:
@@ -344,7 +332,6 @@ def _get_nontrival_mesh_axes(mesh):
       "context",
       "context_autoregressive",
       "tensor",
-      "tensor_transpose",
       "tensor_sequence",
       "stage",
       "expert",
@@ -701,9 +688,7 @@ def maybe_update_params_sharding_with_opt_nnx(
   return prev_params_shardings, updated_state
 
 
-def build_zero1_input_state_mesh_shardings(
-    config, state_mesh_shardings, params_shardings
-):
+def build_zero1_input_state_mesh_shardings(config, state_mesh_shardings, params_shardings):
   """Build the train-step input shardings under shard_optimizer_over_data (Zero-1).
 
   Model params on input use the original pre-Zero-1 sharding (params_shardings),

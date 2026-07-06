@@ -501,9 +501,7 @@ class RoutedMoE(nnx.Module):
     kernel_out_axis = np.arange(1, 2)
     # Pad the MoE input weight kernels for GMM_v2 execution when configured.
     moe_intermediate_dim = (
-        self.config.padded_base_moe_mlp_dim
-        if self.config.padded_base_moe_mlp_dim is not None
-        else self.intermediate_dim
+        self.config.padded_base_moe_mlp_dim if self.config.padded_base_moe_mlp_dim is not None else self.intermediate_dim
     )
 
     if quantizations.in_serve_mode(self.quant):
@@ -653,9 +651,6 @@ class RoutedMoE(nnx.Module):
         size *= self.mesh.shape.get(axis, 1)
       return size
     return self.mesh.shape.get(self._tensor_parallelism_name, 1)
-
-  def get_tensor_transpose_parallelism_size(self):
-    return self.mesh.shape.get("tensor_transpose", 1)
 
   def get_context_autoregressive_parallelism_size(self):
     return self.mesh.shape.get("context_autoregressive", 1)
@@ -1407,18 +1402,10 @@ class RoutedMoE(nnx.Module):
       else:
         batch_logical_axis = "decode_batch_moe"
 
-      if self.get_tensor_transpose_parallelism_size() > 1:
-        input_partition_pspec = self._logical_to_mesh_axes(
-            (batch_logical_axis, "activation_norm_length", "activation_embed")
-        )
-        w0_bias_pspec = self._logical_to_mesh_axes(("exp", None))
-        w1_bias_pspec = self._logical_to_mesh_axes(("exp", None))
-        wo_bias_pspec = self._logical_to_mesh_axes(("exp", "activation_embed"))
-      else:
-        input_partition_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
-        w0_bias_pspec = self._logical_to_mesh_axes(("exp", "activation_mlp"))
-        w1_bias_pspec = self._logical_to_mesh_axes(("exp", "activation_mlp"))
-        wo_bias_pspec = self._logical_to_mesh_axes(("exp", "activation_embed"))
+      input_partition_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
+      w0_bias_pspec = self._logical_to_mesh_axes(("exp", "activation_mlp"))
+      w1_bias_pspec = self._logical_to_mesh_axes(("exp", "activation_mlp"))
+      wo_bias_pspec = self._logical_to_mesh_axes(("exp", "activation_embed"))
 
       gate_logits_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
       # NOTE: deepseek2 has a different pattern
@@ -1444,18 +1431,18 @@ class RoutedMoE(nnx.Module):
           wo_pspec = self._logical_to_mesh_axes(self.wo_kernel_axes)
         else:
           # special sharding for dsv3 to remove overhead between gmm/AG
-          w0_pspec = self._logical_to_mesh_axes(("embed_tensor_transpose", None, "mlp_no_fsdp"))
-          w1_pspec = self._logical_to_mesh_axes(("embed_tensor_transpose", None, "mlp_no_fsdp"))
-          wo_pspec = self._logical_to_mesh_axes(("embed_tensor_transpose", "mlp_no_fsdp", None))
+          w0_pspec = self._logical_to_mesh_axes((None, None, "mlp_no_fsdp"))
+          w1_pspec = self._logical_to_mesh_axes((None, None, "mlp_no_fsdp"))
+          wo_pspec = self._logical_to_mesh_axes((None, "mlp_no_fsdp", None))
       elif self.config.use_2d_fsdp_sharding:
-        w0_pspec = self._logical_to_mesh_axes(("embed_tensor_transpose", "mlp_no_fsdp", None))
-        w1_pspec = self._logical_to_mesh_axes(("embed_tensor_transpose", "mlp_no_fsdp", None))
-        wo_pspec = self._logical_to_mesh_axes(("embed_tensor_transpose", "mlp_no_fsdp", None))
+        w0_pspec = self._logical_to_mesh_axes((None, "mlp_no_fsdp", None))
+        w1_pspec = self._logical_to_mesh_axes((None, "mlp_no_fsdp", None))
+        wo_pspec = self._logical_to_mesh_axes((None, "mlp_no_fsdp", None))
       else:
         # These are the main shardings used by default - they use funky rules to AG over FSDP.
-        w0_pspec = self._logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
-        w1_pspec = self._logical_to_mesh_axes(("exp", "embed_tensor_transpose", "mlp_no_fsdp"))
-        wo_pspec = self._logical_to_mesh_axes(("exp", "mlp_no_fsdp", "embed_tensor_transpose"))
+        w0_pspec = self._logical_to_mesh_axes(("exp", None, "mlp_no_fsdp"))
+        w1_pspec = self._logical_to_mesh_axes(("exp", None, "mlp_no_fsdp"))
+        wo_pspec = self._logical_to_mesh_axes(("exp", "mlp_no_fsdp", None))
       return (
           batch_logical_axis,
           input_partition_pspec,
@@ -1669,9 +1656,6 @@ class RoutedMoE(nnx.Module):
         out = gmm_fn(x, w_fused, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes)
         n = out.shape[-1] // 2
         layer_w0, layer_w1 = out[:, :n], out[:, n:]
-        if self.get_tensor_transpose_parallelism_size() > 1:
-          layer_w0 = jax.lax.psum(layer_w0, "tensor_transpose")
-          layer_w1 = jax.lax.psum(layer_w1, "tensor_transpose")
         if self.config.mlp_bias:
           layer_w0 = layer_w0 + w0_bias
           layer_w1 = layer_w1 + w1_bias
@@ -1684,8 +1668,6 @@ class RoutedMoE(nnx.Module):
             tiling=wi_tile_size,
             weight_gather_axes=wi_gather_axes,
         )
-        if self.get_tensor_transpose_parallelism_size() > 1:
-          layer_w0 = jax.lax.psum(layer_w0, "tensor_transpose")
         if self.config.mlp_bias:
           layer_w0 = layer_w0 + w0_bias
         layer_w0 = adc.checkpoint_name(adc.checkpoint_name(layer_w0, "mlpwi_0"), "moe_mlpwi_0")
@@ -1696,8 +1678,6 @@ class RoutedMoE(nnx.Module):
             tiling=wi_tile_size,
             weight_gather_axes=wi_gather_axes,
         )
-        if self.get_tensor_transpose_parallelism_size() > 1:
-          layer_w1 = jax.lax.psum(layer_w1, "tensor_transpose")
         if self.config.mlp_bias:
           layer_w1 = layer_w1 + w1_bias
         layer_w1 = adc.checkpoint_name(layer_w1, "moe_mlpwi_1")
@@ -1884,11 +1864,11 @@ class RoutedMoE(nnx.Module):
 
     if self.config.moe_fsdp_use_two_stage_all_gather:
       # Unshard on fsdp axis
-      w0_kernel = self._maybe_shard_with_logical(w0_kernel, ("exp_with_fsdp", "embed_tensor_transpose", "mlp"))
-      w1_kernel = self._maybe_shard_with_logical(w1_kernel, ("exp_with_fsdp", "embed_tensor_transpose", "mlp"))
+      w0_kernel = self._maybe_shard_with_logical(w0_kernel, ("exp_with_fsdp", None, "mlp"))
+      w1_kernel = self._maybe_shard_with_logical(w1_kernel, ("exp_with_fsdp", None, "mlp"))
 
       # Unshard on fsdp_transpose axis
-      wo_kernel = self._maybe_shard_with_logical(wo_kernel, ("exp_with_fsdp", "mlp", "embed_tensor_transpose"))
+      wo_kernel = self._maybe_shard_with_logical(wo_kernel, ("exp_with_fsdp", "mlp", None))
 
       # Make sure XLA does not optimize by combining above All-Gather to unshard
       # on FSDP axis and the subsequent unshard on fsdp_transpose axis
@@ -1897,14 +1877,11 @@ class RoutedMoE(nnx.Module):
       wo_kernel = jax.lax.optimization_barrier(wo_kernel)
 
       # Unshard on both fsdp and fsdp_transpose transpose
-      w0_kernel = self._maybe_shard_with_logical(w0_kernel, ("exp_with_fsdp", "embed_tensor_transpose", "mlp_no_fsdp"))
-      w1_kernel = self._maybe_shard_with_logical(w1_kernel, ("exp_with_fsdp", "embed_tensor_transpose", "mlp_no_fsdp"))
-      wo_kernel = self._maybe_shard_with_logical(wo_kernel, ("exp_with_fsdp", "mlp_no_fsdp", "embed_tensor_transpose"))
+      w0_kernel = self._maybe_shard_with_logical(w0_kernel, ("exp_with_fsdp", None, "mlp_no_fsdp"))
+      w1_kernel = self._maybe_shard_with_logical(w1_kernel, ("exp_with_fsdp", None, "mlp_no_fsdp"))
+      wo_kernel = self._maybe_shard_with_logical(wo_kernel, ("exp_with_fsdp", "mlp_no_fsdp", None))
 
-    if self.get_tensor_transpose_parallelism_size() > 1:
-      input_axes = (batch_logical_axis, "activation_norm_length", "activation_embed")
-    else:
-      input_axes = (batch_logical_axis, "activation_norm_length", None)
+    input_axes = (batch_logical_axis, "activation_norm_length", None)
 
     gate_logits_axes = (batch_logical_axis, "activation_norm_length", None)
     # NOTE: deepseek2 has a different pattern
