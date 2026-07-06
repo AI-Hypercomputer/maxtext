@@ -111,7 +111,7 @@ jobs:
 
           for notebook in "$MAXTEXT_NOTEBOOKS_ROOT"/*.ipynb; do
             filename=$(basename "$notebook")
-            if [[ "$filename" == "sft_llama3_demo_gpu.ipynb" || "$filename" == "maxtext_with_gepa.ipynb" || "$filename" == "demo_decoding.ipynb" ]]; then
+            if [[ "$filename" == "sft_llama3_demo_gpu.ipynb" || "$filename" == "maxtext_with_gepa.ipynb" || "$filename" == "rl_llama3_demo.ipynb" || "$filename" == "demo_decoding.ipynb" ]]; then
               echo "Skipping $filename"
               continue
             fi
