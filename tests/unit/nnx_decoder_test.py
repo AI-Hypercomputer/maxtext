@@ -57,9 +57,6 @@ class DecoderLogitsGuardModelModeTest(unittest.TestCase):
         enable_checkpointing=False,
         scan_layers=False,
         num_vocab_tiling=2,
-        pure_nnx=True,
-        enable_nnx=True,
-        pure_nnx_decoder=True,
     )
     model = model_creation_utils.from_config(cfg, devices=jax.devices(), model_mode=MODEL_MODE_PREFILL, rngs=nnx.Rngs(0))
     return cfg, model

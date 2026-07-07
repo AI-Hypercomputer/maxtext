@@ -19,7 +19,6 @@ import subprocess
 import jax
 import functools
 import orbax.checkpoint.pathways as ocp_pathways
-from functools import partial
 
 from flax import nnx
 from flax.linen import partitioning as nn_partitioning
@@ -226,27 +225,20 @@ def setup_train_loop(config, recorder, devices=None):
   from maxtext.input_pipeline.input_pipeline_interface import create_data_iterator
 
   with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
-    is_training = True
     init_rng = jax.random.PRNGKey(config.init_weights_seed)
     mesh = maxtext_utils.get_mesh_from_config(config, devices)
     context_parallel_size = mesh.shape.get(config.context_sharding, 1)
-    if config.pure_nnx:
-      # Create abstract NNX model.
-      _create_model_partial, model = model_creation_utils.create_nnx_abstract_model(config, mesh, devices)
-    else:
-      model = model_creation_utils.from_config(config, devices)
+    # Create abstract NNX model.
+    _create_model_partial, model = model_creation_utils.create_nnx_abstract_model(config, mesh, devices)
     learning_rate_schedule, tx = create_training_optimizer(config, model)
 
-    if config.pure_nnx:
-      # For NNX, the train state is wrapped in the TrainStateNNX module.
-      def create_train_state_fn():
-        model = _create_model_partial()
-        optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
-        return train_state_nnx.TrainStateNNX(model, optimizer)
+    # The train state is wrapped in the TrainStateNNX module.
+    def create_train_state_fn():
+      model = _create_model_partial()
+      optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
+      return train_state_nnx.TrainStateNNX(model, optimizer)
 
-      init_state_fn = create_train_state_fn
-    else:
-      init_state_fn = partial(maxtext_utils.init_initial_state, model, tx, config, is_training, init_rng)
+    init_state_fn = create_train_state_fn
     checkpoint_manager = create_checkpoint_manager(config, mesh, init_state_fn)
     if checkpoint_manager is not None:
       checkpoint_step = checkpoint_manager.latest_step()
@@ -302,42 +294,30 @@ def setup_train_loop(config, recorder, devices=None):
     state, _, state_mesh_shardings, data_iterator = maxtext_utils.setup_training_state(
         data_iterator, config, mesh, checkpoint_manager, init_state_fn
     )
-    if config.pure_nnx:
-      with nn_partitioning.axis_rules(config.logical_axis_rules):
-        # We only need the graphdef here; it's merged with state below. Avoid
-        # nnx.get_abstract_model: it eagerly builds a NamedSharding for every variable
-        # under jax.set_mesh(mesh) and rejects any logical name missing from
-        # logical_axis_rules (e.g. concat_embed on the MTP kernel). Tracing shapes
-        # without a mesh skips sharding resolution, so it avoids the crash.
-        state_graphdef = nnx.graphdef(nnx.eval_shape(init_state_fn))
-        _, state_params, _ = nnx.split(state.model, nnx.Param, ...)
-        _, state_mesh_shardings_params, _ = nnx.split(state_mesh_shardings.model, nnx.Param, ...)
-    else:
-      state_params = state.params
-      state_mesh_shardings_params = state_mesh_shardings.params
+    with nn_partitioning.axis_rules(config.logical_axis_rules):
+      # We only need the graphdef here; it's merged with state below. Avoid
+      # nnx.get_abstract_model: it eagerly builds a NamedSharding for every variable
+      # under jax.set_mesh(mesh) and rejects any logical name missing from
+      # logical_axis_rules (e.g. concat_embed on the MTP kernel). Tracing shapes
+      # without a mesh skips sharding resolution, so it avoids the crash.
+      state_graphdef = nnx.graphdef(nnx.eval_shape(init_state_fn))
+      _, state_params, _ = nnx.split(state.model, nnx.Param, ...)
+      _, state_mesh_shardings_params, _ = nnx.split(state_mesh_shardings.model, nnx.Param, ...)
 
     if config.enable_diloco:
       with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
         state, outer_opt_state_sharding = diloco.build_diloco_state(config, lambda: state, mesh=mesh)
 
         # create state_mesh_shardings for the DilocoState
-        step_mesh = (
-            state_mesh_shardings.optimizer.step.mesh
-            if config.pure_nnx
-            else state_mesh_shardings.step.mesh
-        )
+        step_mesh = state_mesh_shardings.optimizer.step.mesh
         inner_state_shardings = diloco.add_diloco_to_sharding(state_mesh_shardings)
         state_mesh_shardings = diloco.DiLoCoTrainState(
             inner_state_shardings,
             # Match the outer params' pure-dict structure (build_diloco_state stores
             # outer_params via to_pure_dict), so the sharding tree matches the state tree.
-            state_mesh_shardings_params.to_pure_dict()
-            if config.pure_nnx
-            else state_mesh_shardings_params,
+            state_mesh_shardings_params.to_pure_dict(),
             outer_opt_state_sharding,
-            jax.sharding.NamedSharding(
-                mesh=step_mesh, spec=jax.sharding.PartitionSpec()
-            ),
+            jax.sharding.NamedSharding(mesh=step_mesh, spec=jax.sharding.PartitionSpec()),
         )
 
     # TODO(aireenmei, hengtaoguo): support sharding in vit for multimodal
@@ -347,28 +327,21 @@ def setup_train_loop(config, recorder, devices=None):
 
     # print weights sharding info under debug sharding mode
     if config.debug_sharding:
-      if config.pure_nnx:
-        # TODO: Study how to get logical annotations of NNX module. Because of eager sharding, we
-        # probably already lost the logical partition info at this moment.
-        logical_annotations_params = None
-      else:
-        logical_annotations = maxtext_utils.get_logical_annotations(config, mesh, init_state_fn)
-        logical_annotations_params = logical_annotations.params
+      # TODO: Study how to get logical annotations of NNX module. Because of eager sharding, we
+      # probably already lost the logical partition info at this moment.
+      logical_annotations_params = None
 
       max_utils.print_non_trivial_mesh_axis(model.mesh)
       maxtext_utils.print_shardings_params(state_params, state_mesh_shardings_params, mesh, logical_annotations_params)
 
-  if config.pure_nnx:
-    if config.enable_diloco:
-      # Don't merge the DiLoCoTrainState into the plain-model graphdef. The inner
-      # train step needs that graphdef as jit_model; the wrapper passes through as state.
-      train_state = state
-      model = state_graphdef
-    else:
-      train_state = nnx.merge(state_graphdef, state)
-      model = train_state.model
-  else:
+  if config.enable_diloco:
+    # Don't merge the DiLoCoTrainState into the plain-model graphdef. The inner
+    # train step needs that graphdef as jit_model; the wrapper passes through as state.
     train_state = state
+    model = state_graphdef
+  else:
+    train_state = nnx.merge(state_graphdef, state)
+    model = train_state.model
 
   return (
       init_rng,
