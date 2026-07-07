@@ -43,10 +43,7 @@ class BinaryChunkedStackTest(parameterized.TestCase):
     for shape in shapes:
       for num_tensors in [1, 2, 3, 5, 8, 12]:
         key = jax.random.PRNGKey(0)
-        tensors = [
-            jax.random.normal(jax.random.fold_in(key, i), shape)
-            for i in range(num_tensors)
-        ]
+        tensors = [jax.random.normal(jax.random.fold_in(key, i), shape) for i in range(num_tensors)]
 
         # Test along various axes
         for axis in range(-len(shape) - 1, len(shape) + 1):
@@ -61,9 +58,7 @@ class TensorHandlingTest(parameterized.TestCase):
   def setUp(self):
     super().setUp()
     self.mesh = Mesh(np.array(jax.devices()[:1]), axis_names=("x",))
-    self.sharding_rank4 = NamedSharding(
-        self.mesh, PartitionSpec("x", None, None, None)
-    )
+    self.sharding_rank4 = NamedSharding(self.mesh, PartitionSpec("x", None, None, None))
     self.sharding_rank3 = NamedSharding(self.mesh, PartitionSpec("x", None, None))
 
   def test_get_hf_loading_function_case_2_3_single_axis(self):
@@ -94,9 +89,7 @@ class TensorHandlingTest(parameterized.TestCase):
 
     hook_fn = None
 
-    loader_fn = get_hf_loading_function(
-        hf_keys, getter_fn, hook_fn, target_leaf, config
-    )
+    loader_fn = get_hf_loading_function(hf_keys, getter_fn, hook_fn, target_leaf, config)
 
     result = loader_fn()
 
@@ -137,9 +130,7 @@ class TensorHandlingTest(parameterized.TestCase):
 
     hook_fn = None
 
-    loader_fn = get_hf_loading_function(
-        hf_keys, getter_fn, hook_fn, target_leaf, config
-    )
+    loader_fn = get_hf_loading_function(hf_keys, getter_fn, hook_fn, target_leaf, config)
 
     result = loader_fn()
 
@@ -161,17 +152,13 @@ class LoadDynamicTest(parameterized.TestCase):
     mock_blob = mock_bucket.blob.return_value
     mock_blob.exists.return_value = True
 
-    load_dynamic.build_gcs_cache_worker(
-        "some_repo/model.safetensors", "gs://my-bucket/cache", "token"
-    )
+    load_dynamic.build_gcs_cache_worker("some_repo/model.safetensors", "gs://my-bucket/cache", "token")
     mock_blob.exists.assert_called_once()
     mock_blob.upload_from_file.assert_not_called()
 
   @mock.patch("huggingface_hub.HfFileSystem")
   @mock.patch("google.cloud.storage.Client")
-  def test_build_gcs_cache_worker_cache_miss_success(
-      self, mock_storage_client, mock_hf_fs
-  ):
+  def test_build_gcs_cache_worker_cache_miss_success(self, mock_storage_client, mock_hf_fs):
     mock_fs_instance = mock_hf_fs.return_value
     mock_remote_file = mock.MagicMock()
     mock_fs_instance.open.return_value.__enter__.return_value = mock_remote_file
@@ -181,19 +168,13 @@ class LoadDynamicTest(parameterized.TestCase):
     mock_blob = mock_bucket.blob.return_value
     mock_blob.exists.return_value = False
 
-    load_dynamic.build_gcs_cache_worker(
-        "some_repo/model.safetensors", "gs://my-bucket/cache", "token"
-    )
+    load_dynamic.build_gcs_cache_worker("some_repo/model.safetensors", "gs://my-bucket/cache", "token")
     mock_blob.exists.assert_called_once()
-    mock_blob.upload_from_file.assert_called_once_with(
-        mock_remote_file, client=mock_client_instance
-    )
+    mock_blob.upload_from_file.assert_called_once_with(mock_remote_file, client=mock_client_instance)
 
   @mock.patch("huggingface_hub.HfFileSystem")
   @mock.patch("google.cloud.storage.Client")
-  def test_build_gcs_cache_worker_retry_and_fail(
-      self, mock_storage_client, mock_hf_fs
-  ):
+  def test_build_gcs_cache_worker_retry_and_fail(self, mock_storage_client, mock_hf_fs):
     mock_fs_instance = mock_hf_fs.return_value
     mock_fs_instance.open.side_effect = Exception("Download failed")
 
@@ -204,9 +185,7 @@ class LoadDynamicTest(parameterized.TestCase):
 
     with mock.patch("time.sleep"):
       with self.assertRaises(Exception):
-        load_dynamic.build_gcs_cache_worker(
-            "some_repo/model.safetensors", "gs://my-bucket/cache", "token"
-        )
+        load_dynamic.build_gcs_cache_worker("some_repo/model.safetensors", "gs://my-bucket/cache", "token")
 
   @mock.patch.object(load_dynamic.huggingface_hub, "HfFileSystem")
   @mock.patch.object(load_dynamic.storage, "Client")
@@ -253,9 +232,7 @@ class LoadDynamicTest(parameterized.TestCase):
     abstract_state = DummyAbstractState()
 
     path = "repo/meta-llama"
-    dummy_ret_val, loaded_vars = load_dynamic.load_safetensors_dynamic_state(
-        path, abstract_state, config
-    )
+    dummy_ret_val, loaded_vars = load_dynamic.load_safetensors_dynamic_state(path, abstract_state, config)
 
     self.assertIsNone(dummy_ret_val)
     self.assertEqual(loaded_vars, {"params": {}})
@@ -281,9 +258,7 @@ class SourceCheckpointLoadingTest(parameterized.TestCase):
       self.skipTest("SafetensorsLayout is not supported on Pathways backend.")
     # Save a single key (embedding weight) to a safetensors file
     dummy_weight = np.arange(1024, dtype=np.float32).reshape(256, 4)
-    safetensors.numpy.save_file(
-        {"model.embed_tokens.weight": dummy_weight}, str(self.safetensors_ckpt_path)
-    )
+    safetensors.numpy.save_file({"model.embed_tokens.weight": dummy_weight}, str(self.safetensors_ckpt_path))
 
     # Setup mock config
     class MockConfig:
@@ -301,9 +276,7 @@ class SourceCheckpointLoadingTest(parameterized.TestCase):
     target_state = {
         "params": {
             "token_embedder": {
-                "embedding": jax.ShapeDtypeStruct(
-                    shape=(256, 4), dtype=np.float32, sharding=self.sharding
-                )
+                "embedding": jax.ShapeDtypeStruct(shape=(256, 4), dtype=np.float32, sharding=self.sharding)
             }
         }
     }
