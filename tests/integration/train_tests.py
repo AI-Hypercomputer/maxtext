@@ -96,18 +96,6 @@ class TrainTests(unittest.TestCase):
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
       + _small_model_overrides,
-      "tp_transpose": [  # tests base config with ici_tensor_transpose_parallelism=4
-          None,
-          get_test_config_path(),
-          f"base_output_directory={_base_output_directory}",
-          "run_name=runner_test",
-          "dataset_type=synthetic",  # use synthetic dataset_type to decrease training time
-          "steps=2",
-          "ici_tensor_transpose_parallelism=4",
-          "enable_goodput_recording=False",
-          rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
-      ]
-      + _small_model_overrides,
       "int8": [  # tests base config with int8
           None,
           get_test_config_path(),

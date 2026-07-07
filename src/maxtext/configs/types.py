@@ -963,7 +963,6 @@ class HardwareAndMesh(BaseModel):
           "context",
           "context_autoregressive",
           "tensor",
-          "tensor_transpose",
           "tensor_sequence",
           "expert",
           "autoregressive",
@@ -1036,7 +1035,6 @@ class DcnParallelism(BaseModel):
   dcn_context_parallelism: int = Field(1, description="DCN axis for context parallelism.")
   dcn_context_autoregressive_parallelism: int = Field(1, description="DCN axis for context autoregressive parallelism.")
   dcn_tensor_parallelism: int = Field(1, description="DCN axis for tensor parallelism (not recommended).")
-  dcn_tensor_transpose_parallelism: int = Field(1, description="DCN axis for tensor transpose parallelism.")
   dcn_tensor_sequence_parallelism: int = Field(
       1, description="DCN axis for tensor sequence parallelism (not recommended)."
   )
@@ -1056,7 +1054,6 @@ class IciParallelism(BaseModel):
   ici_context_parallelism: int = Field(1, description="ICI axis for context parallelism.")
   ici_context_autoregressive_parallelism: int = Field(1, description="ICI axis for context autoregressive parallelism.")
   ici_tensor_parallelism: int = Field(1, description="ICI axis for tensor parallelism.")
-  ici_tensor_transpose_parallelism: int = Field(1, description="ICI axis for tensor transpose parallelism.")
   ici_tensor_sequence_parallelism: int = Field(1, description="ICI axis for tensor sequence parallelism.")
   ici_autoregressive_parallelism: int = Field(1, description="ICI axis for autoregressive parallelism.")
   ici_pipeline_parallelism: int = Field(1, description="ICI axis for pipeline parallelism.")
@@ -3407,7 +3404,6 @@ class MaxTextConfig(
         "context": self.ici_context_parallelism,
         "context_autoregressive": self.ici_context_autoregressive_parallelism,
         "tensor": self.ici_tensor_parallelism,
-        "tensor_transpose": self.ici_tensor_transpose_parallelism,
         "tensor_sequence": self.ici_tensor_sequence_parallelism,
         "model": self.ici_tensor_parallelism,
         "expert": self.ici_expert_parallelism,
@@ -3427,7 +3423,6 @@ class MaxTextConfig(
         "context": self.dcn_context_parallelism,
         "context_autoregressive": self.dcn_context_autoregressive_parallelism,
         "tensor": self.dcn_tensor_parallelism,
-        "tensor_transpose": self.dcn_tensor_transpose_parallelism,
         "tensor_sequence": self.dcn_tensor_sequence_parallelism,
         "model": self.dcn_tensor_parallelism,
         "expert": self.dcn_expert_parallelism,

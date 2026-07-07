@@ -50,7 +50,6 @@ DEFAULT_DATA_SHARDING = [
     "context",
     "context_autoregressive",
     "tensor",
-    "tensor_transpose",
     "tensor_sequence",
     "expert",
     "autoregressive",

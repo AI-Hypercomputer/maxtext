@@ -918,7 +918,6 @@ def create_parallelisms_list(raw_keys):
       raw_keys["ici_context_parallelism"],
       raw_keys["ici_context_autoregressive_parallelism"],
       raw_keys["ici_tensor_parallelism"],
-      raw_keys["ici_tensor_transpose_parallelism"],
       raw_keys["ici_tensor_sequence_parallelism"],
       raw_keys["ici_expert_parallelism"],
       raw_keys["ici_autoregressive_parallelism"],
@@ -932,7 +931,6 @@ def create_parallelisms_list(raw_keys):
       raw_keys["dcn_context_parallelism"],
       raw_keys["dcn_context_autoregressive_parallelism"],
       raw_keys["dcn_tensor_parallelism"],
-      raw_keys["dcn_tensor_transpose_parallelism"],
       raw_keys["dcn_tensor_sequence_parallelism"],
       raw_keys["dcn_expert_parallelism"],
       raw_keys["dcn_autoregressive_parallelism"],
@@ -1029,7 +1027,6 @@ def set_and_validate_pipeline_config(raw_keys):
           raw_keys["ici_context_parallelism"],
           raw_keys["ici_context_autoregressive_parallelism"],
           raw_keys["ici_tensor_parallelism"],
-          raw_keys["ici_tensor_transpose_parallelism"],
           raw_keys["ici_tensor_sequence_parallelism"],
           raw_keys["ici_expert_parallelism"],
           raw_keys["ici_autoregressive_parallelism"],
@@ -1043,7 +1040,6 @@ def set_and_validate_pipeline_config(raw_keys):
           raw_keys["dcn_context_parallelism"],
           raw_keys["dcn_context_autoregressive_parallelism"],
           raw_keys["dcn_tensor_parallelism"],
-          raw_keys["dcn_tensor_transpose_parallelism"],
           raw_keys["dcn_tensor_sequence_parallelism"],
           raw_keys["dcn_expert_parallelism"],
           raw_keys["dcn_autoregressive_parallelism"],
@@ -1057,7 +1053,6 @@ def set_and_validate_pipeline_config(raw_keys):
           "context",
           "context_autoregressive",
           "tensor",
-          "tensor_transpose",
           "tensor_sequence",
           "expert",
           "autoregressive",
@@ -1072,7 +1067,6 @@ def set_and_validate_pipeline_config(raw_keys):
               "context",
               "context_autoregressive",
               "tensor",
-              "tensor_transpose",
               "tensor_sequence",
               "expert",
               "autoregressive",
@@ -1217,9 +1211,7 @@ def validate_shard_expert_on_fsdp(raw_keys):
   if raw_keys["shard_exp_on_fsdp"] and raw_keys["num_experts"] % raw_keys["ici_fsdp_parallelism"] != 0:
     raise ValueError("shard_exp_on_fsdp requires num_experts is divisiable by ici_fsdp_parallelism.")
   if raw_keys["shard_exp_on_fsdp"] and (using_tensor_parallelism(raw_keys) or using_expert_parallelism(raw_keys)):
-    raise ValueError(
-        "shard_exp_on_fsdp requires ici_expert_parallelism = 1 and ici_tensor_parallelism/ici_tensor_transpose_parallelism = 1."
-    )
+    raise ValueError("shard_exp_on_fsdp requires ici_expert_parallelism = 1 and ici_tensor_parallelism = 1.")
 
 
 def validate_ragged_dot(raw_keys):
