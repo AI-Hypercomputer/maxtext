@@ -199,6 +199,17 @@ jobs:
       is_scheduled_run: ${{ github.event_name == 'schedule' }}
       maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
 
+  maxtext_cpu_torch_reference_tests:
+    name: cpu-torch-reference tests
+    needs: [build_and_upload_maxtext_package]
+    if: needs.analyze_code_changes.outputs.run_tests == 'true'
+    uses: ./.github/workflows/run_tests_coordinator.yml
+    with:
+      flavor: cpu-torch-reference
+      base_image: maxtext-unit-test-tpu:py312
+      is_scheduled_run: ${{ github.event_name == 'schedule' }}
+      maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
+
   tpu7x-tests:
     name: TPU7X tests
     needs: [build_and_upload_maxtext_package, gate_test_run]
@@ -284,7 +295,7 @@ jobs:
 
   all_tests_passed:
     name: All Required Tests Passed
-    needs: [build_and_upload_maxtext_package, gate_test_run, tpu-tests, tpu7x-tests, gpu-tests, cpu-tests, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check]
+    needs: [build_and_upload_maxtext_package, gate_test_run, tpu-tests, tpu7x-tests, gpu-tests, cpu-tests, maxtext_cpu_torch_reference_tests, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -297,6 +308,7 @@ jobs:
           echo "Gate result: ${NEEDS_GATE_TEST_RUN_RESULT}"
           echo "TPU Tests (Matrix) result: ${NEEDS_TPU_TESTS_RESULT}"
           echo "TPU7X Tests (Matrix) result: ${NEEDS_TPU7X_TESTS_RESULT}"
+          echo "CPU torch reference tests result: ${NEEDS_MAXTEXT_CPU_TORCH_REFERENCE_TESTS_RESULT}"
           echo "GPU Tests (Matrix) result: ${NEEDS_GPU_TESTS_RESULT}"
           echo "CPU Tests (Matrix) result: ${NEEDS_CPU_TESTS_RESULT}"
           echo "Pathways Unit result: ${NEEDS_MAXTEXT_TPU_PATHWAYS_UNIT_TESTS_RESULT}"
@@ -317,6 +329,7 @@ jobs:
           NEEDS_CPU_TESTS_RESULT: ${{ needs.cpu-tests.result }}
           NEEDS_TPU_TESTS_RESULT: ${{ needs.tpu-tests.result }}
           NEEDS_TPU7X_TESTS_RESULT: ${{ needs.tpu7x-tests.result }}
+          NEEDS_MAXTEXT_CPU_TORCH_REFERENCE_TESTS_RESULT: ${{ needs.maxtext_cpu_torch_reference_tests.result }}
           NEEDS_GPU_TESTS_RESULT: ${{ needs.gpu-tests.result }}
           NEEDS_MAXTEXT_TPU_PATHWAYS_UNIT_TESTS_RESULT: ${{ needs.maxtext_tpu_pathways_unit_tests.result }}
           NEEDS_MAXTEXT_TPU_PATHWAYS_INTEGRATION_TESTS_RESULT: ${{ needs.maxtext_tpu_pathways_integration_tests.result }}
@@ -352,7 +365,7 @@ jobs:
 
   notify_failure:
     name: Notify failed build # creates an issue or modifies last open existing issue for failed build
-    needs: [gate_test_run, tpu-tests, tpu7x-tests, gpu-tests, cpu-tests, maxtext_jupyter_notebooks, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check]
+    needs: [gate_test_run, tpu-tests, tpu7x-tests, gpu-tests, cpu-tests, maxtext_jupyter_notebooks, maxtext_cpu_torch_reference_tests, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     permissions:
@@ -366,7 +379,7 @@ jobs:
 
   investigate_failure:
     name: Investigate failed build # investigates failure of scheduled run and comments on tracking issue
-    needs: [gate_test_run, tpu-tests, tpu7x-tests, gpu-tests, cpu-tests, maxtext_jupyter_notebooks, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check, notify_failure]
+    needs: [gate_test_run, tpu-tests, tpu7x-tests, gpu-tests, cpu-tests, maxtext_jupyter_notebooks, maxtext_cpu_torch_reference_tests, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check, notify_failure]
     if: ${{ always() && contains(needs.*.result, 'failure') && github.event_name == 'schedule' }}
     uses: ./.github/workflows/gemini_investigate.yml
     permissions:
