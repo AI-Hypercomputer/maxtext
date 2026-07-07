@@ -41,11 +41,9 @@ import torch.nn.functional as F
 # Note: Some function/class names might be slightly adapted (e.g., _PT suffix) to avoid collisions.
 # ----------------------------------------------------------------------
 def create_causal_mask_PT(q_seq_len: int, kv_seq_len: int, dtype=torch.float32):
-    mask = torch.triu(torch.ones(q_seq_len, kv_seq_len, dtype=torch.bool), diagonal=1)
-    masked_fill_value = -torch.finfo(dtype).max / 2
-    return torch.zeros(q_seq_len, kv_seq_len, dtype=dtype).masked_fill(
-        mask, masked_fill_value
-    )
+  mask = torch.triu(torch.ones(q_seq_len, kv_seq_len, dtype=torch.bool), diagonal=1)
+  masked_fill_value = -torch.finfo(dtype).max / 2
+  return torch.zeros(q_seq_len, kv_seq_len, dtype=dtype).masked_fill(mask, masked_fill_value)
 
 
 def eager_attention_forward(
@@ -57,25 +55,21 @@ def eager_attention_forward(
     scaling: float,
     dropout: float = 0.0,
 ):
-    """Pytorch implementation of default self-attention operation"""
-    key_states = repeat_kv(key, module.num_key_value_groups)
-    value_states = repeat_kv(value, module.num_key_value_groups)
+  """Pytorch implementation of default self-attention operation"""
+  key_states = repeat_kv(key, module.num_key_value_groups)
+  value_states = repeat_kv(value, module.num_key_value_groups)
 
-    attn_weights = torch.matmul(query, key_states.transpose(2, 3)) * scaling
-    if attention_mask is not None:
-        causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
-        attn_weights = attn_weights + causal_mask
+  attn_weights = torch.matmul(query, key_states.transpose(2, 3)) * scaling
+  if attention_mask is not None:
+    causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+    attn_weights = attn_weights + causal_mask
 
-    attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(
-        query.dtype
-    )
-    attn_weights = nn.functional.dropout(
-        attn_weights, p=dropout, training=module.training
-    )
-    attn_output = torch.matmul(attn_weights, value_states)
-    attn_output = attn_output.transpose(1, 2).contiguous()
+  attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
+  attn_weights = nn.functional.dropout(attn_weights, p=dropout, training=module.training)
+  attn_output = torch.matmul(attn_weights, value_states)
+  attn_output = attn_output.transpose(1, 2).contiguous()
 
-    return attn_output
+  return attn_output
 
 
 def rotate_half(x):

@@ -333,30 +333,28 @@ class SourceCheckpointLoadingTest(parameterized.TestCase):
 
 
 class CheckpointMetadataTest(parameterized.TestCase):
-    """Tests for loading checkpoint custom metadata."""
+  """Tests for loading checkpoint custom metadata."""
 
-    @mock.patch.object(checkpointing.ocp, "StandardCheckpointer")
-    def test_load_checkpoint_metadata(self, mock_checkpointer_cls):
-        mock_ckptr = mock_checkpointer_cls.return_value
-        mock_metadata = mock.MagicMock()
-        mock_metadata.custom_metadata = {"lora": {"lora_rank": 8, "lora_alpha": 16.0}}
-        mock_ckptr.metadata.return_value = mock_metadata
+  @mock.patch.object(checkpointing.ocp, "StandardCheckpointer")
+  def test_load_checkpoint_metadata(self, mock_checkpointer_cls):
+    mock_ckptr = mock_checkpointer_cls.return_value
+    mock_metadata = mock.MagicMock()
+    mock_metadata.custom_metadata = {"lora": {"lora_rank": 8, "lora_alpha": 16.0}}
+    mock_ckptr.metadata.return_value = mock_metadata
 
-        loaded_metadata = checkpointing.load_checkpoint_metadata("dummy/path")
-        self.assertEqual(
-            loaded_metadata.get("lora"), {"lora_rank": 8, "lora_alpha": 16.0}
-        )
-        mock_ckptr.metadata.assert_called_once()
+    loaded_metadata = checkpointing.load_checkpoint_metadata("dummy/path")
+    self.assertEqual(loaded_metadata.get("lora"), {"lora_rank": 8, "lora_alpha": 16.0})
+    mock_ckptr.metadata.assert_called_once()
 
-    @mock.patch.object(checkpointing.ocp, "StandardCheckpointer")
-    def test_load_checkpoint_metadata_handles_exceptions(self, mock_checkpointer_cls):
-        mock_ckptr = mock_checkpointer_cls.return_value
-        mock_ckptr.metadata.side_effect = Exception("Checkpoint read error")
+  @mock.patch.object(checkpointing.ocp, "StandardCheckpointer")
+  def test_load_checkpoint_metadata_handles_exceptions(self, mock_checkpointer_cls):
+    mock_ckptr = mock_checkpointer_cls.return_value
+    mock_ckptr.metadata.side_effect = Exception("Checkpoint read error")
 
-        loaded_metadata = checkpointing.load_checkpoint_metadata("corrupt/path")
-        self.assertEqual(loaded_metadata, {})
-        mock_ckptr.metadata.assert_called_once()
+    loaded_metadata = checkpointing.load_checkpoint_metadata("corrupt/path")
+    self.assertEqual(loaded_metadata, {})
+    mock_ckptr.metadata.assert_called_once()
 
 
 if __name__ == "__main__":
-    absltest.main()
+  absltest.main()
