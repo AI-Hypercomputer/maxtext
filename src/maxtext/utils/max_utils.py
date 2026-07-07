@@ -1185,6 +1185,22 @@ def print_non_trivial_mesh_axis(mesh):
       print(f"{mesh_axis}: {axis_size}", flush=True)
 
 
+def bootstrap_transformer_engine_cgemm(config):
+  """Potentially initialize NCCL communicators for Collective GEMM operations if
+  the environment is distributed and has the appropriate config."""
+  import transformer_engine.jax.cpp_extensions as tex  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
+
+  tsp_size = config.ici_tensor_sequence_parallelism * config.dcn_tensor_sequence_parallelism
+
+  # Setup NCCL buffers for GPU Collective GEMM operations
+  tex.collective_gemm_bootstrap(
+      jax.device_count(),
+      jax.local_device_count(),
+      jax.process_index(),
+      tsp_size,
+  )
+
+
 @contextmanager
 def maybe_get_transformer_engine_context(config):
   """Runs a transformer engine context engine manager for GPUs only."""
@@ -1212,7 +1228,7 @@ def transformer_engine_context():
     mesh_resource = MeshResource(  # pytype: disable=wrong-arg-types
         dp_resource="data",
         tp_resource="tensor",
-        # tpsp_resource = "tensor_sequence", #TODO(Phuong): add this back when upstreaming CGEMM
+        tpsp_resource="tensor_sequence",
         fsdp_resource="fsdp",
         pp_resource=None,
         cp_resource="context",

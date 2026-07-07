@@ -282,6 +282,22 @@ class TrainTests(unittest.TestCase):
   @pytest.mark.skip(reason="No runner with GPU arch >= 89 is available")
   @pytest.mark.integration_test
   @pytest.mark.gpu_only
+  def test_gpu_te_fp8_delayedscaling_tsp_cgemm(self):
+    if jax.process_count() <= 1:
+      pytest.skip("Requires rank-per-GPU launch (JAX_PROCESS_COUNT > 1)")
+    if jax.local_device_count() != 1:
+      pytest.skip(f"Requires rank-per-GPU launch (local_device_count==1), " f"got {jax.local_device_count()}")
+    if not jax.distributed.is_initialized():
+      pytest.skip("Requires jax.distributed.initialize() (hardware=gpu_multiprocess)")
+
+    train_main(
+        TrainTests.CONFIGS["te_fp8_delayedscaling"]
+        + ["attention=dot_product", "ici_tensor_sequence_parallelism=2", "use_te_comm_gemm_overlap=true"]
+    )
+
+  @pytest.mark.skip(reason="No runner with GPU arch >= 89 is available")
+  @pytest.mark.integration_test
+  @pytest.mark.gpu_only
   def test_gpu_te_fp8_currentscaling(self):
     train_main(TrainTests.CONFIGS["te_fp8_currentscaling"] + ["attention=dot_product"])
 

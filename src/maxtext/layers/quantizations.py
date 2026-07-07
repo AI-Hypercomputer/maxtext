@@ -951,6 +951,8 @@ class TransformerEngineQuantization(Quantization):
 
     self._recipe = TransformerEngineQuantization._get_recipe(config.quantization)
 
+    self._perform_collective_gemm = config.use_te_comm_gemm_overlap
+
   def __hash__(self):
     return hash((self.quant_mode, self._recipe))
 
@@ -1001,11 +1003,13 @@ class TransformerEngineQuantization(Quantization):
     2. Wraps the given function in a Flax linen module. This module does not store any Flax
     parameters but can store Flax variables for quantizers if required by the recipe.
 
-    3. When the wrapper is called, it provides an additional argument to the given function `f`,
-    'generate_quantizer_set' as the first argument. 'generate_quantizer_set' is a function that
-    can be called to generate a TransformerEngine/JAX quantizer set object used in
-    TransformerEngine/JAX APIs. 'generate_quantizer_set' will generate quantizers based on the
-    recipe of this TransformerEngineQuantizer object.
+    3. When the wrapper is called, it provides two additional arguments to the given function `f`,
+    'generate_quantizer_set' as the first argument and 'generate_collective_op_set' as the second argument.
+    'generate_quantizer_set' is a function that can be called to generate a TransformerEngine/JAX quantizer
+    set object used in TransformerEngine/JAX APIs based on the recipe of this TransformerEngineQuantizer
+    object. Similarly, 'generate_collective_op_set' is a function that can be called to generate a
+    TransformerEngine/JAX collective operation set object used in TransformerEngine/JAX APIs based
+    the kernel's mesh axes.
 
     Args:
       f: The function to wrap. The first argument must be 'generate_quantizer_set'.
@@ -1016,6 +1020,7 @@ class TransformerEngineQuantization(Quantization):
     """
 
     import transformer_engine.jax  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
+    import transformer_engine.jax.cpp_extensions as tex  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
     from transformer_engine.common import recipe  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
 
     default_recipe = self._recipe
@@ -1041,9 +1046,20 @@ class TransformerEngineQuantization(Quantization):
             n_groups=n_groups,
         )
 
+      def generate_collective_op_set(self, mesh_axes: Tuple[str, ...] = ()):
+        """Inspect the kernel's mesh axes to determine the type of collective operation to use for collective GEMM."""
+
+        if len(mesh_axes) >= 1:
+          if mesh_axes[0] == "embed" and mesh_axes[-1] == "mlp":
+            return tex.CollectiveOpSet.create(tex.CollectiveOp.ALL_GATHER)
+          elif mesh_axes[0] == "mlp" and mesh_axes[-1] == "embed":
+            return tex.CollectiveOpSet.create(tex.CollectiveOp.REDUCE_SCATTER)
+
+        return tex.noop_collective_op_set
+
       @nn.compact
       def __call__(self, *args, **kwargs):
-        return f(self.generate_quantizer_set, *args, **kwargs)
+        return f(self.generate_quantizer_set, self.generate_collective_op_set, *args, **kwargs)
 
     TEWrapper.__name__ = f"TEWrapper_{name if name else f.__name__}"
 
@@ -1052,17 +1068,22 @@ class TransformerEngineQuantization(Quantization):
   def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
     """Placeholder for dot_general implementation in subclasses."""
     import transformer_engine.jax  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
+    import transformer_engine.jax.cpp_extensions as tex  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
 
-    def te_dot_general(generate_quantizer_set, x, kernel, dims, **kwargs):
+    def te_dot_general(generate_quantizer_set, generate_collective_op_set, x, kernel, dims, **kwargs):
       contracting_dims, batch_dims = dims
       assert batch_dims == ((), ()), "Batch dimensions must be empty for TransformerEngine dot."
 
       quantizer_set = generate_quantizer_set()
+      collective_op_set = (
+          generate_collective_op_set(mesh_axes) if self._perform_collective_gemm else tex.noop_collective_op_set
+      )
       return transformer_engine.jax.dense.dense(
           x,
           kernel,
           contracting_dims=contracting_dims,
           quantizer_set=quantizer_set,
+          collective_op_set=collective_op_set,
       )
 
     return self._wrap(te_dot_general, "dot_general")
