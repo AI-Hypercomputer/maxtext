@@ -2156,10 +2156,6 @@ class RL(BaseModel):
       "",
       description="System prompt injected into the agent at rollout time (agentic only).",
   )
-  degenerate_group_masking: bool = Field(
-      True,
-      description="Mask degenerate groups (all-zero advantages) from contributing to loss (agentic only).",
-  )
   epsilon_high: Optional[float] = Field(
       None,
       description="Upper-bound clipping epsilon for GRPO loss. Defaults to epsilon when None (agentic only).",
