@@ -208,8 +208,9 @@ def _populate_pure_dict_from_partial(abstract_pure, partial_concrete):
   """Fills `abstract_pure` with values from `partial_concrete` (by path), defaulting the rest.
 
   Paths present in `partial_concrete` take the restored value; paths absent from
-  it
-  (NNX-only state the Linen checkpoint never had) get `_default_for_sds`.
+  it, or ones Orbax left as an unmaterialized ShapeDtypeStruct (NNX-only state the
+  Linen checkpoint never had, or a weight the missing-param policy chose to
+  zero-fill), get `_default_for_sds`.
   """
   if isinstance(abstract_pure, dict):
     return {
@@ -219,7 +220,7 @@ def _populate_pure_dict_from_partial(abstract_pure, partial_concrete):
         )
         for k, v in abstract_pure.items()
     }
-  if partial_concrete is not None and not isinstance(partial_concrete, dict):
+  if partial_concrete is not None and not isinstance(partial_concrete, (dict, jax.ShapeDtypeStruct)):
     return partial_concrete
   return _default_for_sds(abstract_pure)
 
@@ -229,12 +230,59 @@ def _all_materialized(tree):
   return not any(isinstance(leaf, jax.ShapeDtypeStruct) for leaf in jax.tree_util.tree_leaves(tree))
 
 
+def _missing_param_policy(config):
+  """Reads how to handle weights present in the model but absent from the checkpoint."""
+  return getattr(config, "checkpoint_missing_param_policy", "error") if config is not None else "error"
+
+
+def _missing_weight_paths(want, have, path=()):
+  """Paths of abstract weights in `want` that `have` didn't materialize (absent or a ShapeDtypeStruct)."""
+  if isinstance(want, dict):
+    out = []
+    for k, v in want.items():
+      out.extend(_missing_weight_paths(v, have.get(k) if isinstance(have, dict) else None, path + (k,)))
+    return out
+  if have is None or isinstance(have, jax.ShapeDtypeStruct):
+    return [("/".join(str(p) for p in path), getattr(want, "shape", "?"), getattr(want, "dtype", "?"))]
+  return []
+
+
+def _enforce_missing_weight_policy(abstract_nnx_state, restored_linen, missing_param_policy="error"):
+  """Every nnx.Param the model expects must be materialized from the checkpoint.
+
+  Filters weights by Variable type (nnx.Param) rather than key name, so only real
+  weights are checked -- rngs/dropout/batch stats live in `nnx_aux` and are restored
+  separately. A weight the checkpoint didn't provide (absent, or left by Orbax as an
+  unmaterialized ShapeDtypeStruct) is reported by path under "error", or zero-filled
+  with a warning under "warn".
+  """
+  want = nnx.split_state(abstract_nnx_state, nnx.Param, ...)[0].to_pure_dict().get("model", {})
+  have = restored_linen.get("params", {}).get("params", {})
+  missing = _missing_weight_paths(want, have)
+  if not missing:
+    return
+  lines = "\n".join(f"  - 'model/{p}' (model expects {s} {d})" for p, s, d in missing)
+  detail = (
+      "Checkpoint is missing model weights:\n"
+      f"{lines}\n"
+      "These would be silently zero-filled or left unmaterialized (a cryptic compile failure in the "
+      "first train_step). Verify the checkpoint matches the model architecture (emb_dim, mlp_dim, num "
+      "layers, scan_layers), or set checkpoint_missing_param_policy=warn to zero-fill and continue."
+  )
+  if missing_param_policy == "warn":
+    max_logging.log(f"WARNING: {detail}")
+  else:
+    raise ValueError(detail)
+
+
 def _linen_items_to_nnx(restored_linen, nnx_abstract_pure):
   """Reshapes a restored Linen-layout `items` dict back into the NNX pure-dict state.
 
   Merges `nnx_aux` (rngs/dropout/batch stats) back onto the model when present and
   fills anything absent with defaults. A checkpoint without `nnx_aux` (Linen-trained
   or pre-persistence) leaves those leaves unmaterialized, so they get the defaults.
+  Callers run `_enforce_missing_weight_policy` first, so a genuinely-missing weight
+  has already errored (or been chosen for zero-fill) before this fills defaults.
   """
   partial_nnx = train_state_nnx.from_linen_checkpoint_dict(restored_linen)
   aux = restored_linen.get("nnx_aux")
@@ -249,12 +297,14 @@ def _load_linen_checkpoint_into_nnx(
     checkpoint_storage_concurrent_gb,
     use_ocdbt,
     use_zarr3,
+    missing_param_policy="error",
 ):
   """Restores a Linen-layout checkpoint into an NNX state (pure_nnx resume).
 
   Restores a Linen-shape target that includes `nnx_aux`, then reshapes back via
   `_linen_items_to_nnx`. rngs/dropout/batch stats come from `items/nnx_aux` when
-  present, else fall back to defaults.
+  present, else fall back to defaults; a genuinely-missing weight is handled per
+  `missing_param_policy`.
   """
   max_logging.log(f"Restoring Linen-layout checkpoint into NNX state at {path}")
   linen_abstract = train_state_nnx.to_checkpoint_dict(abstract_nnx_state)
@@ -269,6 +319,7 @@ def _load_linen_checkpoint_into_nnx(
   restore_args = ocp.checkpoint_utils.construct_restore_args(linen_abstract)
   restored = ocp.args.PyTreeRestore(item=linen_abstract, restore_args=restore_args, partial_restore=True)
   restored = ckptr.restore(epath.Path(path), args=restored)
+  _enforce_missing_weight_policy(abstract_nnx_state, restored, missing_param_policy)
   return _linen_items_to_nnx(restored, abstract_nnx_state.to_pure_dict())
 
 
@@ -277,12 +328,14 @@ def _restore_emergency_linen_checkpoint_into_nnx(
     step,
     abstract_nnx_state,
     map_to_pspec,
+    missing_param_policy="error",
 ):
   """Restores an emergency Linen-layout checkpoint into an NNX state.
 
   The `nnx_aux` subtree is stored inside `items`, so an emergency checkpoint
   carries it too; it's restored when present and otherwise filled with
-  deterministic defaults.
+  deterministic defaults. A genuinely-missing weight is handled per
+  `missing_param_policy`.
   """
   max_logging.log(f"Restoring emergency Linen-layout checkpoint into NNX state at step {step}")
   linen_abstract = train_state_nnx.to_checkpoint_dict(abstract_nnx_state)
@@ -293,6 +346,7 @@ def _restore_emergency_linen_checkpoint_into_nnx(
       partial_restore=True,
   )
   restored = checkpoint_manager.restore(step, args=Composite(state=checkpoint_args)).state
+  _enforce_missing_weight_policy(abstract_nnx_state, restored, missing_param_policy)
   return _linen_items_to_nnx(restored, abstract_nnx_state.to_pure_dict())
 
 
@@ -349,6 +403,7 @@ def _load_full_state_from_path(
     checkpoint_storage_concurrent_gb,
     use_ocdbt,
     use_zarr3,
+    missing_param_policy="error",
 ):
   """Load full state from checkpoint at specified path.
 
@@ -374,7 +429,7 @@ def _load_full_state_from_path(
       # pure_nnx saves in the Linen on-disk layout; reshape it back into the NNX state.
       if isinstance(abstract_unboxed_pre_state, nnx.State):
         return _load_linen_checkpoint_into_nnx(
-            path, abstract_unboxed_pre_state, checkpoint_storage_concurrent_gb, use_ocdbt, use_zarr3
+            path, abstract_unboxed_pre_state, checkpoint_storage_concurrent_gb, use_ocdbt, use_zarr3, missing_param_policy
         )
       context = ocp_v1.Context(checkpoint_layout=ocp_v1.options.CheckpointLayout.ORBAX)
       with context:
@@ -404,6 +459,7 @@ def _load_full_state_from_path(
           checkpoint_storage_concurrent_gb,
           use_ocdbt,
           use_zarr3,
+          missing_param_policy,
       )
 
     # Original v0 logic.
@@ -847,6 +903,9 @@ def load_state_if_possible(
           )
         else:
           restored = checkpoint_manager.restore(step, args=Composite(items=checkpoint_args))
+        _enforce_missing_weight_policy(
+            abstract_unboxed_pre_state, restored["items"], _missing_param_policy(maxtext_config)
+        )
         restored_nnx = _linen_items_to_nnx(restored["items"], abstract_unboxed_pre_state.to_pure_dict())
         return ({"items": restored_nnx}, None)
 
@@ -859,6 +918,7 @@ def load_state_if_possible(
             step,
             abstract_unboxed_pre_state,
             map_to_pspec,
+            _missing_param_policy(maxtext_config),
         )
         return (
             restored,
@@ -945,6 +1005,7 @@ def load_state_if_possible(
         checkpoint_storage_concurrent_gb=checkpoint_storage_concurrent_gb,
         use_ocdbt=use_ocdbt,
         use_zarr3=use_zarr3,
+        missing_param_policy=_missing_param_policy(maxtext_config),
     )
     return {"items": restored_state}, None
   else:

@@ -294,5 +294,56 @@ class TestLinenItemsToNnx(unittest.TestCase):
     self.assertEqual(int(out["model"]["dropout"]["rngs"]["count"]), 0)
 
 
+class TestMissingWeightPolicy(unittest.TestCase):
+  """The Param-type weight check errors/warns on weights the checkpoint didn't materialize."""
+
+  def _abstract(self):
+    """A typed nnx.State (linear weights + dropout rng) so nnx.split_state(_, nnx.Param) works."""
+    model = _ModelDropout(nnx.Rngs(0))
+    return nnx.state(train_state_nnx.TrainStateNNX(model, nnx.Optimizer(model, optax.adam(1e-3), wrt=nnx.Param)))
+
+  def _restored(self, with_bias=True):
+    """A restored Linen-layout `items` dict; drop the bias to simulate a missing weight."""
+    params = {"linear": {"kernel": jnp.ones((2, 1))}}
+    if with_bias:
+      params["linear"]["bias"] = jnp.ones((1,))
+    return {"params": {"params": params}}
+
+  def test_all_weights_present_passes(self):
+    checkpointing._enforce_missing_weight_policy(self._abstract(), self._restored(), "error")  # pylint: disable=protected-access
+
+  def test_missing_weight_raises_naming_path(self):
+    with self.assertRaises(ValueError) as ctx:
+      checkpointing._enforce_missing_weight_policy(  # pylint: disable=protected-access
+          self._abstract(), self._restored(with_bias=False), "error"
+      )
+    self.assertIn("model/linear/bias", str(ctx.exception))
+    self.assertIn("missing model weights", str(ctx.exception))
+
+  def test_surviving_shape_dtype_struct_counts_as_missing(self):
+    restored = self._restored()
+    restored["params"]["params"]["linear"]["bias"] = jax.ShapeDtypeStruct((1,), jnp.float32)
+    with self.assertRaises(ValueError) as ctx:
+      checkpointing._enforce_missing_weight_policy(self._abstract(), restored, "error")  # pylint: disable=protected-access
+    self.assertIn("model/linear/bias", str(ctx.exception))
+
+  def test_warn_logs_and_returns(self):
+    with mock.patch.object(checkpointing.max_logging, "log") as logmock:
+      checkpointing._enforce_missing_weight_policy(  # pylint: disable=protected-access
+          self._abstract(), self._restored(with_bias=False), "warn"
+      )
+    self.assertTrue(any("missing model weights" in str(c) for c in logmock.call_args_list))
+
+  def test_rng_state_is_never_flagged(self):
+    """rngs/dropout are nnx.RngState, not nnx.Param, so their absence from params never trips the check."""
+    checkpointing._enforce_missing_weight_policy(self._abstract(), self._restored(), "error")  # pylint: disable=protected-access
+
+  def test_missing_weight_paths_finds_absent_and_sds(self):
+    want = {"a": {"k": jax.ShapeDtypeStruct((2,), jnp.float32), "b": jax.ShapeDtypeStruct((1,), jnp.float32)}}
+    have = {"a": {"k": jnp.ones((2,))}}  # b absent
+    missing = checkpointing._missing_weight_paths(want, have)  # pylint: disable=protected-access
+    self.assertEqual([p for p, _, _ in missing], ["a/b"])
+
+
 if __name__ == "__main__":
   unittest.main()
