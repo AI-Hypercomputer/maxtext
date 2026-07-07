@@ -15,6 +15,7 @@
 """Tests validating DeepSeek-V4 MaxText components against PyTorch references."""
 
 import os
+os.environ["JAX_PALLAS_INTERPRET"] = "true"
 import sys
 import unittest
 
@@ -23,6 +24,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import torch
+from flax import linen as nn
+from flax.linen import scan
+from flax.linen.spmd import LogicallyPartitioned
+from jax.experimental.pallas import tpu as pltpu
 
 # To ensure 1:1 parity and avoid outdated or error-prone copy-pasting of reference code,
 # this test directly imports the PyTorch reference implementation from a local clone of
@@ -1178,7 +1183,8 @@ class DeepSeekV4SwiGLUClampTest(unittest.TestCase):
 
 
 from transformers.models.deepseek_v4.modeling_deepseek_v4 import DeepseekV4DecoderLayer as DeepseekV4DecoderLayer_PT
-from maxtext.models.deepseek4 import DeepSeek4DecoderLayer
+from transformers.models.deepseek_v4.modeling_deepseek_v4 import DeepseekV4Model as DeepseekV4Model_PT
+from maxtext.models.deepseek4 import DeepSeek4DecoderLayer, DeepSeek4ScannableBlockToLinen
 from maxtext.layers.mhc import DeepSeek4HyperHead
 
 class DeepSeekV4ConversionMappingTest(unittest.TestCase):
@@ -1307,6 +1313,7 @@ class DeepSeekV4ConversionMappingTest(unittest.TestCase):
             if not valid:
                 continue
 
+            print(f"MAPPING KEY: {mt_key} -> {hf_key}")
             target_shape = obj.value.shape
             hook_fn = HOOK_FNS.get(mt_key, lambda x, target_shape=None: x)
 
@@ -1420,6 +1427,217 @@ class DeepSeekV4ConversionMappingTest(unittest.TestCase):
 
   def test_layer_4_csa_standard(self):
     self._run_layer_parity_test(4, "compressed_sparse_attention")
+
+  def test_scanned_block_parity(self):
+    # Setup custom configs to enable scan_layers and override model config
+    config_arguments = {
+        "model_name": "deepseek4-tiny",
+        "override_model_config": True,
+        "per_device_batch_size": self.batch_size,
+        "matmul_precision": "highest",
+        "megablox": False,
+        "sparse_matmul": False,
+        "dtype": "float32",
+        "weight_dtype": "float32",
+        "skip_jax_distributed_system": True,
+        "scan_layers": True,
+    }
+    mx_config = pyconfig.initialize([sys.argv[0], "src/maxtext/configs/base.yml"], **config_arguments)
+
+    # 1. Instantiate PT Model & Initialize randomly
+    torch.manual_seed(42)
+    pt_model = DeepseekV4Model_PT(self.pt_config)
+    for p in pt_model.parameters():
+      if p.dim() >= 1:
+        torch.nn.init.normal_(p.data, mean=0.0, std=0.02)
+      else:
+        torch.nn.init.constant_(p.data, 0.02)
+
+    # Set static Hash Router tables for first 3 layers (though we only execute layers 3-6)
+    for l in range(3):
+      pt_tid2eid = torch.randint(0, self.pt_config.num_local_experts, (self.vocab_size, self.pt_config.num_experts_per_tok))
+      pt_model.layers[l].mlp.gate.tid2eid.copy_(pt_tid2eid)
+
+    # 2. Instantiate MaxText Scanned Block
+    ScannedBlockClass = scan(
+        DeepSeek4ScannableBlockToLinen,
+        variable_axes={
+            "params": mx_config.param_scan_axis,
+            "cache": 0,
+        },
+        split_rngs={"params": True},
+        in_axes=(nn.broadcast,) * 9,
+        length=2,
+        metadata_params={
+            nn.PARTITION_NAME: "layers",
+            "abstract_init": False,
+        },
+    )
+    block = ScannedBlockClass(
+        config=mx_config,
+        mesh=self.mesh,
+        quant=None,
+        model_mode="train",
+    )
+
+    # 3. Generate inputs
+    np.random.seed(42)
+    x_np = np.random.uniform(0.1, 1.0, size=(self.batch_size, self.seq_len, self.pt_config.hc_mult, self.hidden_dim)).astype(np.float32)
+    pos_np = np.arange(self.seq_len)[None, :].repeat(self.batch_size, axis=0)
+    input_ids_np = np.random.randint(0, self.vocab_size, size=(self.batch_size, self.seq_len))
+
+    x_pt = torch.tensor(x_np)
+    pos_pt = torch.tensor(pos_np, dtype=torch.long)
+    input_ids_pt = torch.tensor(input_ids_np, dtype=torch.long)
+
+    # Init variables
+    rng_key = jax.random.PRNGKey(0)
+    with pltpu.force_tpu_interpret_mode():
+      variables = block.init(
+          rng_key,
+          jnp.array(x_np),
+          jnp.array(pos_np),  # placeholder segs (matching position ids)
+          jnp.array(pos_np),  # positions
+          True,  # deterministic
+          "train",  # model_mode
+          None, None, None, None, None,
+      )
+
+    # 4. Load parameters using conversion mapping
+    pt_config_dict = self.pt_config.to_dict()
+    from maxtext.checkpoint_conversion.utils.param_mapping import (
+        DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_MAPPING,
+        DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    )
+    PARAM_MAPPING = DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_MAPPING(pt_config_dict, mx_config, scan_layers=True)
+    HOOK_FNS = DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN(pt_config_dict, mx_config, scan_layers=True, saving_to_hf=False)
+
+    def get_attr(obj, path):
+      if path is None: return None
+      if "mlp.experts." in path:
+        parts = path.split('.')
+        idx_exp = parts.index('experts')
+        expert_idx = int(parts[idx_exp + 1])
+        w_name = parts[idx_exp + 2]
+
+        experts_obj = obj
+        for p in parts[:idx_exp + 1]:
+          experts_obj = getattr(experts_obj, p)
+
+        if w_name == "w1":
+          intermediate_dim = experts_obj.intermediate_dim
+          return experts_obj.gate_up_proj[expert_idx, :intermediate_dim, :]
+        elif w_name == "w3":
+          intermediate_dim = experts_obj.intermediate_dim
+          return experts_obj.gate_up_proj[expert_idx, intermediate_dim:, :]
+        elif w_name == "w2":
+          return experts_obj.down_proj[expert_idx]
+        else:
+          raise ValueError(f"Unknown weight name {w_name} in experts: {path}")
+
+      for part in path.split('.'):
+        if part.isdigit():
+          obj = obj[int(part)]
+        elif hasattr(obj, part):
+          obj = getattr(obj, part)
+        elif isinstance(obj, dict):
+          obj = obj[part]
+        else:
+          return None
+      return obj
+
+    prefix = "params-decoder-scanned_blocks-"
+    for mt_key, hf_key in PARAM_MAPPING.items():
+      if mt_key.startswith(prefix):
+        nnx_subpath = mt_key.replace(prefix, "").replace("-", ".")
+        parts = nnx_subpath.split(".")
+        obj_dict = variables["params"]
+        for part in parts[:-1]:
+          obj_dict = obj_dict[part]
+
+        val_obj = obj_dict[parts[-1]]
+        print(f"SCANNED MAPPING KEY: {mt_key} -> {hf_key}")
+        if isinstance(val_obj, LogicallyPartitioned):
+          target_shape = val_obj.value.shape
+        else:
+          target_shape = val_obj.shape
+
+        hook_fn = HOOK_FNS.get(mt_key, lambda x, target_shape=None: x)
+
+        if hf_key is None:
+          pt_val = None
+          val = hook_fn(pt_val, target_shape=target_shape)
+        elif isinstance(hf_key, list):
+          if isinstance(hf_key[0], list):
+            all_expert_vals = []
+            slice_shape = target_shape[2:]
+            for expert_keys in hf_key:
+              layer_vals = [get_attr(pt_model, k.replace("model.", "")).detach().numpy() for k in expert_keys]
+              processed_vals = [hook_fn(v, target_shape=slice_shape) for v in layer_vals]
+              all_expert_vals.append(np.stack(processed_vals, axis=0))
+            val = np.stack(all_expert_vals, axis=0)
+          else:
+            pt_vals = [get_attr(pt_model, k.replace("model.", "")).detach().numpy() for k in hf_key]
+            axis_to_stack = mx_config.param_scan_axis
+            mt_slice_shape_list = list(target_shape)
+            del mt_slice_shape_list[axis_to_stack]
+            slice_shape = tuple(mt_slice_shape_list)
+            processed_vals = [hook_fn(v, target_shape=slice_shape) for v in pt_vals]
+            val = np.stack(processed_vals, axis=axis_to_stack)
+        else:
+          pt_val = get_attr(pt_model, hf_key.replace("model.", "")).detach().numpy()
+          val = hook_fn(pt_val, target_shape=target_shape)
+
+        if isinstance(val_obj, LogicallyPartitioned):
+          obj_dict[parts[-1]] = LogicallyPartitioned(
+              value=jnp.array(val),
+              names=val_obj.names,
+              mesh=val_obj.mesh,
+              rules=val_obj.rules,
+          )
+        else:
+          obj_dict[parts[-1]] = jnp.array(val)
+
+    # 5. Execute forward pass PyTorch (Layers 3, 4, 5, 6)
+    pt_mask = _prepare_4d_causal_attention_mask(None, (self.batch_size, self.seq_len), x_pt, 0, self.pt_config.sliding_window)
+
+    rope_main = PTRope(self.pt_config)
+    rope_compress = PTRope(self.pt_config)
+    dummy_x_main = torch.zeros(self.batch_size, self.seq_len, 1)
+    cos_main, sin_main = rope_main(dummy_x_main, pos_pt, "main")
+    cos_comp, sin_comp = rope_compress(dummy_x_main, pos_pt, "compress")
+    pt_positions = {"main": (cos_main, sin_main), "compress": (cos_comp, sin_comp)}
+
+    y_pt = x_pt
+    for l in [3, 4, 5, 6]:
+      y_pt = pt_model.layers[l](
+          y_pt,
+          attention_mask=pt_mask,
+          position_ids=pos_pt,
+          position_embeddings=pt_positions,
+      )
+      if isinstance(y_pt, tuple):
+        y_pt = y_pt[0]
+
+    # 6. Execute forward pass MaxText (Scanned block with length 2)
+    with pltpu.force_tpu_interpret_mode():
+      y_mt, _ = block.apply(
+          variables,
+          jnp.array(x_np),
+          jnp.array(pos_np),  # segs
+          jnp.array(pos_np),  # positions
+          True,  # deterministic
+          "train",  # model_mode
+          None, None, None, None, None,
+      )
+
+    # 7. Assert parity
+    pt_out_np = y_pt.detach().numpy()
+    mt_out_np = np.array(y_mt)
+    max_diff = np.max(np.abs(mt_out_np - pt_out_np))
+    mean_diff = np.mean(np.abs(mt_out_np - pt_out_np))
+    print(f"SCANNED BLOCK PARITY - MAX ABS DIFF: {max_diff:.6e}, MEAN ABS DIFF: {mean_diff:.6e}")
+    np.testing.assert_allclose(mt_out_np, pt_out_np, rtol=2e-1, atol=2e-1)
 
 class DeepSeekV4HyperHeadTest(unittest.TestCase):
   """Tests to validate MaxText HyperHead implementation against PyTorch reference."""

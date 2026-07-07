@@ -3958,7 +3958,7 @@ def DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=F
                   f"{mt_layer_path}-self_attention-csa_compressor-indexer-gate_proj-kernel": get_hf_key("self_attn.compressor.indexer.gate_proj.weight"),
                   f"{mt_layer_path}-self_attention-csa_compressor-indexer-kv_proj-kernel": get_hf_key("self_attn.compressor.indexer.kv_proj.weight"),
                   f"{mt_layer_path}-self_attention-csa_compressor-indexer-q_proj-kernel": get_hf_key("self_attn.compressor.indexer.q_b_proj.weight"),
-                  f"{mt_layer_path}-self_attention-csa_compressor-indexer-weights_proj-kernel": get_hf_key("self_attn.compressor.indexer.scorer.weights_proj.weight"),
+                  f"{mt_layer_path}-self_attention-csa_compressor-indexer-weights_proj-kernel": get_hf_key("self_attn.compressor.indexer.weights_proj.weight"),
                   f"{mt_layer_path}-self_attention-csa_compressor-indexer-position_bias": get_hf_key("self_attn.compressor.indexer.position_bias"),
                   f"{mt_layer_path}-self_attention-csa_compressor-indexer-kv_norm-scale": get_hf_key("self_attn.compressor.indexer.kv_norm.weight"),
               })
@@ -3978,8 +3978,8 @@ def DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=F
   else:
       for i in range(3):
           add_layer_mapping(f"params-decoder-layers_{i}", i)
-      add_layer_mapping("params-decoder-scanned_blocks-layers_0", [3, 5])
-      add_layer_mapping("params-decoder-scanned_blocks-layers_1", [4, 6])
+      add_layer_mapping("params-decoder-scanned_blocks-layers_0", list(range(3, n_layers, 2)))
+      add_layer_mapping("params-decoder-scanned_blocks-layers_1", list(range(4, n_layers, 2)))
       
   for i in range(3):
       mapping[f"Tid2EidVar-decoder-layers_{i}-mlp-MoeBlock_0-tid2eid"] = f"model.layers.{i}.mlp.gate.tid2eid"
@@ -4109,7 +4109,6 @@ PARAM_MAPPING = {
     "qwen3-14b": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-14b-base": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-32b": QWEN_MAXTEXT_TO_HF_PARAM_MAPPING,
-    "qwen3-vl-2b": QWEN3_VL_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-vl-4b": QWEN3_VL_MAXTEXT_TO_HF_PARAM_MAPPING,
     "llama3.1-8b": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
     "llama3.1-8b-Instruct": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -4163,7 +4162,6 @@ HOOK_FNS = {
     "qwen3-14b": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-14b-base": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-32b": QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN,
-    "qwen3-vl-2b": QWEN3_VL_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-vl-4b": QWEN3_VL_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "llama3.1-8b": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "llama3.1-8b-Instruct": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
