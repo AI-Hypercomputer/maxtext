@@ -834,3 +834,100 @@ class TestSetupDecodeStateFromNnx(unittest.TestCase):
 
 if __name__ == "__main__":
   unittest.main()
+
+
+class TestFromPretrainedAuth(unittest.TestCase):
+  """Tests for Hugging Face authentication in from_pretrained."""
+
+  def _make_nnx_metadata_mock(self):
+    meta = MagicMock()
+    meta.item_metadata.tree.keys.return_value = ["decoder"]
+    meta.item_metadata.tree.get.return_value = {}
+    return meta
+
+  @patch("maxtext.utils.model_creation_utils.ocp")
+  @patch("maxtext.utils.model_creation_utils.subprocess.run")
+  @patch("maxtext.utils.model_creation_utils.get_token")
+  @patch("maxtext.utils.model_creation_utils.epath.Path")
+  def test_auth_success_with_config_token(self, mock_path, mock_get_token, mock_run, mock_ocp):
+    config = _make_config(
+        convert_checkpoint_if_possible=True,
+        base_output_directory="gs://fake_bucket/fake_run",
+        hf_access_token="config_token",
+    )
+    mesh = _make_mesh(config)
+
+    mock_ckpt_path = MagicMock()
+    mock_ckpt_path.exists.return_value = False
+    mock_path.return_value.__truediv__.return_value.__truediv__.return_value = mock_ckpt_path
+
+    mock_ckptr = MagicMock()
+    mock_ckptr.metadata.return_value = self._make_nnx_metadata_mock()
+    mock_ckptr.restore.side_effect = lambda path, item=None, **kw: item
+    mock_ocp.Checkpointer.return_value = mock_ckptr
+    mock_ocp.checkpoint_utils.construct_restore_args.return_value = {}
+    mock_ocp.ArrayRestoreArgs = ocp.ArrayRestoreArgs
+
+    model = model_creation_utils.from_pretrained(config, mesh)
+    self.assertIsInstance(model, models.Transformer)
+
+    mock_run.assert_called_once()
+    called_env = mock_run.call_args[1].get("env", {})
+    self.assertEqual(called_env.get("HF_TOKEN"), "config_token")
+    mock_get_token.assert_not_called()
+
+  @patch("maxtext.utils.model_creation_utils.ocp")
+  @patch("maxtext.utils.model_creation_utils.subprocess.run")
+  @patch("maxtext.utils.model_creation_utils.get_token")
+  @patch("maxtext.utils.model_creation_utils.epath.Path")
+  def test_auth_success_with_cached_token(self, mock_path, mock_get_token, mock_run, mock_ocp):
+    config = _make_config(
+        convert_checkpoint_if_possible=True,
+        base_output_directory="gs://fake_bucket/fake_run",
+        hf_access_token="",
+    )
+    mesh = _make_mesh(config)
+
+    mock_ckpt_path = MagicMock()
+    mock_ckpt_path.exists.return_value = False
+    mock_path.return_value.__truediv__.return_value.__truediv__.return_value = mock_ckpt_path
+
+    mock_get_token.return_value = "cached_token"
+
+    mock_ckptr = MagicMock()
+    mock_ckptr.metadata.return_value = self._make_nnx_metadata_mock()
+    mock_ckptr.restore.side_effect = lambda path, item=None, **kw: item
+    mock_ocp.Checkpointer.return_value = mock_ckptr
+    mock_ocp.checkpoint_utils.construct_restore_args.return_value = {}
+    mock_ocp.ArrayRestoreArgs = ocp.ArrayRestoreArgs
+
+    model = model_creation_utils.from_pretrained(config, mesh)
+    self.assertIsInstance(model, models.Transformer)
+
+    mock_get_token.assert_called_once()
+    mock_run.assert_called_once()
+    called_env = mock_run.call_args[1].get("env", {})
+    self.assertEqual(called_env.get("HF_TOKEN"), "cached_token")
+
+  @patch("maxtext.utils.model_creation_utils.ocp")
+  @patch("maxtext.utils.model_creation_utils.subprocess.run")
+  @patch("maxtext.utils.model_creation_utils.get_token")
+  @patch("maxtext.utils.model_creation_utils.epath.Path")
+  def test_auth_failure_no_token(self, mock_path, mock_get_token, mock_run, mock_ocp):
+    config = _make_config(
+        convert_checkpoint_if_possible=True,
+        base_output_directory="gs://fake_bucket/fake_run",
+        hf_access_token="",
+    )
+    mesh = _make_mesh(config)
+
+    mock_ckpt_path = MagicMock()
+    mock_ckpt_path.exists.return_value = False
+    mock_path.return_value.__truediv__.return_value.__truediv__.return_value = mock_ckpt_path
+
+    mock_get_token.return_value = None
+
+    with self.assertRaisesRegex(ValueError, "hf_access_token must be provided"):
+      model_creation_utils.from_pretrained(config, mesh)
+
+    mock_run.assert_not_called()
