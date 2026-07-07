@@ -25,6 +25,9 @@ global_head_dim: 512
 global_num_kv_heads: 4
 vocab_size: 262144
 decoder_block: "gemma4"
+# Gemma4 repeats a block of 5 local + 1 global layers; the outer block scan is
+# unrolled by base_num_decoder_layers / inhomogeneous_layer_cycle_interval.
+inhomogeneous_layer_cycle_interval: 6
 normalization_layer_epsilon: 1e-6
 logits_via_embedding: true
 use_post_attn_norm: true
